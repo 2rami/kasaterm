@@ -2969,6 +2969,62 @@ impl App {
             }
         }
     }
+    /// Headless **다른 방 pane 을 쪼개기** repro: `KASATERM_AUTOFOREIGNSPLIT_MS`.
+    ///
+    /// 소켓 split(`kasaterm-cli split`)이 거치는 길을 그대로 탄다 — `ws.active_pane`
+    /// 을 대상 pane 으로 갈아끼우고 `split_pane_auto`. 거노 실사고: 오케스트레이터가
+    /// 자기 자리를 쪼개려는데 거노가 다른 방을 보고 있어서 "pane %5 이 활성
+    /// window(1) 트리에 없다" 로 통째 실패했다. 스폰은 배경 작업이라 **거노가 어느
+    /// 방을 보고 있는지와 무관해야** 한다.
+    ///
+    /// `KASATERM_AUTOSTUDENT_ROOM` 이 방을 여럿 만들어 두므로 여기 오는 대상 pane 은
+    /// 비활성 window 에 있다 — 그게 이 하네스의 유일한 관문이다.
+    pub(crate) fn run_pending_autoforeignsplit(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFOREIGNSPLIT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // 활성이 **아닌** window 의 leaf 하나를 고른다 — 활성 window 를 쪼개는 건
+        // 옛 코드로도 통과해 회귀를 못 잡는다.
+        let Some((win, target)) = (0..self.windows.len())
+            .filter(|w| *w != self.active_window)
+            .find_map(|w| self.window_leaves(w).into_iter().next().map(|l| (w, l)))
+        else {
+            eprintln!(
+                "[autoforeignsplit] FAIL — 비활성 window 가 없다(window {}개). {AUX_STUDENT_HINT}",
+                self.windows.len()
+            );
+            return;
+        };
+        let before = self.window_leaves(win).len();
+        let prev = self.ws.lock().unwrap().active_pane.clone();
+        self.ws.lock().unwrap().active_pane = Some(target.clone());
+        let outcome = self.split_pane_auto(None);
+        // 소켓 split 은 기본 no-focus 라 부른 뒤 되돌린다(handler.rs SocketSplit).
+        if let Some(prev) = prev {
+            self.ws.lock().unwrap().active_pane = Some(prev);
+        }
+        let after = self.window_leaves(win).len();
+        match outcome {
+            Ok(new_id) => eprintln!(
+                "[autoforeignsplit] {}: window {win}(활성={}) {target} → {new_id}, leaf {before}→{after}",
+                if after == before + 1 { "PASS" } else { "FAIL(트리에 안 꽂힘)" },
+                win == self.active_window
+            ),
+            Err(e) => eprintln!("[autoforeignsplit] FAIL — split 거부: {e:#}"),
+        }
+    }
     /// Headless 방 별도창 split repro: `KASATERM_AUTOROOMSPLIT_MS`(+`_DIR=v|h`,
     /// `_CAP`). `KASATERM_AUTOSTUDENT_ROOM` 이 꺼내 둔 방 창을 쪼갠다.
     ///

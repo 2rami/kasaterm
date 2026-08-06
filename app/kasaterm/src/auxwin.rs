@@ -3223,38 +3223,29 @@ impl App {
         else {
             return;
         };
-        let new_id = match self.spawn_split_session(&target) {
+        // 트리 선택·롤백은 `split_active_pane` 이 이미 한다 — 사본을 두면 한쪽만
+        // 고쳐진다. 그쪽이 `ws.active_pane` 을 기준으로 잡으므로 잠깐 갈아끼운다
+        // (소켓 split 과 같은 관례).
+        let prev = self.ws.lock().unwrap().active_pane.clone();
+        self.ws.lock().unwrap().active_pane = Some(target);
+        let new_id = match self.split_active_pane(dir) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("[kasaterm] room split failed: {e}");
+                eprintln!("[kasaterm] room split failed: {e:#}");
+                self.ws.lock().unwrap().active_pane = prev;
                 return;
             }
         };
-        let layout = if window == self.active_window {
-            self.pty_layout.as_mut()
-        } else {
-            self.windows.get_mut(window).and_then(|s| s.as_mut())
-        };
-        let placed = layout.is_some_and(|l| l.split_leaf(&target, dir, new_id.clone()));
-        if !placed {
-            self.pty.remove(&new_id);
-            self.next_pane_id -= 1;
-            return;
+        // 비활성 방을 쪼갠 거면 메인 창의 포커스는 원래 자리로 — 안 보이는 방의
+        // pane 이 활성이 되면 키 입력이 화면 밖으로 샌다.
+        if window != self.active_window {
+            self.ws.lock().unwrap().active_pane = prev;
         }
         // 새 pane 으로 포커스를 옮긴다 — 메인 창 split 과 같은 관례(방금 만든 곳에
-        // 바로 친다). 활성 window 를 쪼갠 거면 메인 그리드도 같이 다시 그려야 한다.
+        // 바로 친다).
         if let Some(a) = self.aux_windows.get_mut(idx) {
             if let AuxWindowKind::Room { focus, .. } = &mut a.kind {
-                *focus = Some(new_id.clone());
-            }
-        }
-        if window == self.active_window {
-            self.ws.lock().unwrap().active_pane = Some(new_id);
-            let (c, r) = self.window_cells();
-            self.resize_backend(c, r);
-            self.publish_pty_layout();
-            if let Some(w) = &self.window {
-                w.request_redraw();
+                *focus = Some(new_id);
             }
         }
         self.aux_room_resize_pty(idx);

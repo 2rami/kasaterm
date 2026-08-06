@@ -5168,6 +5168,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autostudent(event_loop);
         self.run_pending_autoboxlabel();
         self.run_pending_autoroomsplit();
+        self.run_pending_autoforeignsplit();
         self.run_pending_autofacehover(event_loop);
         self.run_pending_autotreeclick(event_loop);
         self.drain_aux_captures();
