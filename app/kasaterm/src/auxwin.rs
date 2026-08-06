@@ -179,6 +179,82 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
     }
 }
 
+/// 마크다운 편집기 별도창 맨 위의 `Rendered | Raw` 띠. 메인 그리드 헤더의 알약과
+/// **같은 두 칸**이다(render.rs 의 `is_markdown` 분기) — 별도창엔 이게 없어 새 창으로
+/// 연 문서는 읽기 전용이나 마찬가지였다(거노).
+///
+/// 이 창은 자체 헤더가 없어(OS 타이틀바를 쓴다) 본문 위에 띠를 하나 얹고 그만큼
+/// 원점을 민다. 히트 rect 는 `header_btns` 에 넣는다 — 그린 프레임이 곧 클릭 판정이라는
+/// 이 파일의 규약을 그대로 따른다.
+fn draw_aux_md_bar(a: &mut AuxWindow, w: f32, bar_h: f32) {
+    let Some(m) = a.editor() else { return };
+    let raw_now = m.raw_mode;
+    let modified = m.modified;
+    a.header_btns
+        .retain(|(k, _)| !matches!(k, AuxHeaderBtn::MdRender | AuxHeaderBtn::MdRaw));
+    a.gpu.rect(0.0, 0.0, w, bar_h, crate::theme::surface());
+    a.gpu.rect(0.0, bar_h - 1.0, w, 1.0, crate::theme::border());
+    let f = 11.0_f32;
+    let pad = 8.0_f32;
+    let seg_h = bar_h - 8.0;
+    let seg_y = (bar_h - seg_h) / 2.0;
+    let wr = a.gpu.measure_chrome_text("Rendered", f, false);
+    let wraw = a.gpu.measure_chrome_text("Raw", f, false);
+    let total = wr + wraw + pad * 4.0;
+    let sx0 = (w - total - 10.0).max(10.0);
+    // 저장 안 된 편집이 있으면 왼쪽에 점 하나 — Raw 에서 친 것은 Rendered 로 돌아갈
+    // 때 디스크에 쓰이므로, 안 돌아가면 안 쓰인다는 걸 알아야 한다.
+    if modified {
+        a.gpu.draw_text(
+            10.0,
+            seg_y + (seg_h - f) / 2.0 - 1.0,
+            "● 저장 안 됨",
+            crate::gpu::DrawOpts {
+                font_size: f,
+                color: crate::theme::text_dim(),
+                bold: false,
+                italic: false,
+            },
+        );
+    }
+    crate::round_rect(
+        &mut a.gpu, sx0, seg_y, total, seg_h,
+        crate::theme::radius_sm(), crate::theme::panel_bg(),
+    );
+    let (mx, my) = a.cursor_px;
+    let mut sx = sx0;
+    for (label, lw, raw) in [("Rendered", wr, false), ("Raw", wraw, true)] {
+        let cell_w = lw + pad * 2.0;
+        let active = raw_now == raw;
+        let hov = mx >= sx && mx <= sx + cell_w && my >= seg_y && my <= seg_y + seg_h;
+        if active {
+            crate::round_rect(
+                &mut a.gpu, sx, seg_y, cell_w, seg_h,
+                crate::theme::radius_sm(), crate::theme::surface_hover(),
+            );
+        } else if hov {
+            crate::round_rect(
+                &mut a.gpu, sx, seg_y, cell_w, seg_h,
+                crate::theme::radius_sm(), crate::theme::surface_active(),
+            );
+        }
+        a.gpu.draw_text(
+            sx + pad,
+            seg_y + (seg_h - f) / 2.0 - 1.0,
+            label,
+            crate::gpu::DrawOpts {
+                font_size: f,
+                color: if active { crate::theme::text() } else { crate::theme::text_dim() },
+                bold: false,
+                italic: false,
+            },
+        );
+        let kind = if raw { AuxHeaderBtn::MdRaw } else { AuxHeaderBtn::MdRender };
+        a.header_btns.push((kind, (sx, seg_y, cell_w, seg_h)));
+        sx += cell_w;
+    }
+}
+
 /// 커서가 statusline 프사 위면 큰 bust 를 팝업. 메인 창과 같은 그리기 함수를 쓰고,
 /// 창 경계 클램프의 위쪽 한계만 이 창의 헤더(`AUX_HEADER_H`)로 준다.
 fn paint_aux_face_hover(a: &mut AuxWindow, slots: &crate::render::StudentOverlays, w: f32) {
@@ -296,6 +372,11 @@ fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
 /// `TITLE_HEIGHT` 와 같아야 두 창이 같은 앱으로 읽힌다. 그 외 플랫폼은 OS
 /// 타이틀바가 따로 있고 이 띠는 그 아래라, 더 얇게 둔다.
 #[cfg(target_os = "macos")]
+/// 마크다운 편집기 창의 `Rendered | Raw` 띠 높이. 자체 헤더가 없는 창이라(OS
+/// 타이틀바를 쓴다) 본문 위에 이 띠를 얹고 그만큼 원점을 민다 — 별도창엔 토글이
+/// 아예 없어 새 창으로 연 문서를 고칠 수가 없었다(거노).
+const AUX_MD_BAR_H: f32 = 28.0;
+
 const AUX_HEADER_H: f32 = TITLE_HEIGHT;
 #[cfg(not(target_os = "macos"))]
 const AUX_HEADER_H: f32 = 30.0;
@@ -395,6 +476,12 @@ pub(crate) enum AuxHeaderBtn {
     /// 이 창 왼쪽에 파일트리 패널을 연다/닫는다. 창마다 따로 기억한다 — 전역
     /// 설정으로 두면 pane 하나를 크게 보려고 꺼낸 창까지 같이 좁아진다.
     FileTree,
+    /// 마크다운을 **렌더 뷰**로 본다. 메인 그리드 헤더의 `Rendered | Raw` 알약과
+    /// 같은 것이다 — 별도창엔 이게 없어 새 창으로 연 문서는 고칠 수가 없었다(거노).
+    MdRender,
+    /// 마크다운을 **원문 편집기**로 연다. 여기서 친 것은 Rendered 로 돌아갈 때
+    /// 디스크에 쓰인다(pane 판과 같은 규칙 — `switch_md_mode` 한 벌을 공유한다).
+    MdRaw,
     /// 이 창을 다른 앱 위에 고정한다(always-on-top). 별도창을 꺼내는 이유가 대개
     /// "다른 걸 보면서 이걸 곁눈질"이라, 클릭할 때마다 앞으로 끌어올리는 대신
     /// 아예 위에 붙여 둔다. 창마다 따로 기억한다.
@@ -478,6 +565,18 @@ impl AuxWindow {
             .any(|r| at.0 >= r.0 && at.0 <= r.0 + r.2 && at.1 >= r.1 && at.1 <= r.1 + r.3)
     }
 
+    /// 마크다운 편집기 창 위에 얹히는 `Rendered | Raw` 띠의 높이. md 문서가 아니면 0.
+    ///
+    /// **본문 좌표는 전부 이 하나를 지나야 한다** — 그리는 곳(렌더 뷰·raw 뷰)과
+    /// 클릭을 줄로 되돌리는 곳(`raw_editor_caret_at`)이 같은 값을 안 쓰면, 화면은
+    /// 멀쩡한데 클릭만 한 줄씩 어긋난다(이 레포가 반복해 데인 자리라 게이트를 하나로 둔다).
+    pub(crate) fn md_bar_h(&self) -> f32 {
+        match self.editor() {
+            Some(m) if m.is_md_doc => AUX_MD_BAR_H,
+            _ => 0.0,
+        }
+    }
+
     /// 파일트리가 먹는 폭(logical px). 닫혀 있으면 0.
     fn tree_w(&self) -> f32 {
         if self.tree_open { AUX_TREE_W } else { 0.0 }
@@ -550,6 +649,11 @@ impl AuxWindow {
         // letterbox 없이 한 판. (clear 색과 겹쳐도 무해.)
         self.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
         let pe = self.preedit.clone();
+        // 본문 원점을 미는 값 — 아래 두 갈래와 클릭 판정이 **같은 값**을 써야 한다.
+        let bar = self.md_bar_h();
+        if bar > 0.0 {
+            draw_aux_md_bar(self, w, bar);
+        }
         match &self.kind {
             // 렌더 뷰 — pane 과 같은 `raw_mode` 분기다. 별도창이 늘 raw 였던 건
             // 이 갈래가 없어서지 의도가 아니었다(거노: "별도창으로 보면 렌더뷰가
@@ -558,7 +662,7 @@ impl AuxWindow {
                 let blocks = m.doc.blocks.clone();
                 let gen = m.doc.gen;
                 let scroll = m.scroll;
-                let ch = self.gpu.draw_markdown(&blocks, gen, 0.0, 0.0, w, h, scroll, None);
+                let ch = self.gpu.draw_markdown(&blocks, gen, 0.0, bar, w, h - bar, scroll, None);
                 self.md_content_h = ch;
             }
             AuxWindowKind::Editor(m) => {
@@ -570,9 +674,9 @@ impl AuxWindow {
                     (m.cur_line, m.cur_col),
                     sel,
                     0.0,
-                    0.0,
+                    bar,
                     w,
-                    h,
+                    h - bar,
                     m.scroll,
                     m.h_scroll,
                     lang,
@@ -664,7 +768,11 @@ impl App {
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(760.0, 560.0));
+            .with_inner_size(LogicalSize::new(760.0, 560.0))
+            // 배경 실행(헤드리스 검증)이면 뜨면서 키 포커스를 안 가져간다 — 메인 창은
+            // 이미 그렇게 하는데 별도창만 빠져 있어, 검증 한 번에 작업하던 창을
+            // 통째로 빼앗겼다(거노).
+            .with_active(!crate::background_launch());
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
@@ -1327,9 +1435,10 @@ impl App {
             )
         };
         let (lines, scroll, h_scroll, cx, cy) = snap;
+        let bar = self.aux_windows.get(idx).map_or(0.0, |a| a.md_bar_h());
         let Some(a) = self.aux_windows.get_mut(idx) else { return (0, 0) };
         a.gpu
-            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy, &[], 0)
+            .raw_editor_caret_at(&lines, 0.0, bar, scroll, h_scroll, cx, cy, &[], 0)
     }
 
     fn aux_mouse_press(&mut self, idx: usize) {
@@ -2463,6 +2572,16 @@ impl App {
                 self.toggle_aux_tree(idx);
                 true
             }
+            // 두 칸이 각자 자기 모드를 **지정**한다(뒤집기가 아니라) — 메인 그리드
+            // 알약과 같은 규약이라, 이미 그 모드면 아무 일도 안 일어난다.
+            Some(AuxHeaderBtn::MdRender) => {
+                self.aux_set_md_mode(idx, false);
+                true
+            }
+            Some(AuxHeaderBtn::MdRaw) => {
+                self.aux_set_md_mode(idx, true);
+                true
+            }
             Some(AuxHeaderBtn::Pin) => {
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     a.pinned = !a.pinned;
@@ -2638,7 +2757,7 @@ impl App {
     }
 
     /// 휠 → PTY 스크롤백(alacritty display_offset). 위로(y>0)=과거로.
-    fn aux_terminal_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {
+    pub(crate) fn aux_terminal_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {
         let pane_id = match self.aux_windows.get(idx).and_then(|a| a.term_pane_id()) {
             Some(p) => p.to_string(),
             None => return,
@@ -3267,7 +3386,11 @@ impl App {
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(1000.0, 660.0));
+            .with_inner_size(LogicalSize::new(1000.0, 660.0))
+            // 배경 실행(헤드리스 검증)이면 뜨면서 키 포커스를 안 가져간다 — 메인 창은
+            // 이미 그렇게 하는데 별도창만 빠져 있어, 검증 한 번에 작업하던 창을
+            // 통째로 빼앗겼다(거노).
+            .with_active(!crate::background_launch());
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }

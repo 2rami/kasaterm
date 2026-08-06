@@ -30,6 +30,15 @@ fn auto_merge_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
     AUTO_MERGE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// `KASATERM_AUTOUNDOCK_SCROLL` 예약 슬롯 — (발사 시각, pane, 줄수).
+static AUTO_UNDOCK_SCROLL: std::sync::OnceLock<
+    std::sync::Mutex<Option<(Instant, String, f32)>>,
+> = std::sync::OnceLock::new();
+
+fn auto_undock_scroll_slot() -> &'static std::sync::Mutex<Option<(Instant, String, f32)>> {
+    AUTO_UNDOCK_SCROLL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub(crate) fn mdscript_pending() -> bool {
     MDSCRIPT_LEFT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -1898,12 +1907,25 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
+        // `_SCROLL=<줄수>` 면 창이 **자리를 잡은 뒤**(+1500ms) 실제 휠 경로로 그만큼
+        // 위로(과거로) 굴린다. 사람이 하는 순서가 그렇고, 그 순서여야만 재현된다 —
+        // undock 직후엔 aux 창 크기에 맞춘 PTY resize 가 아직 안 끝나 스냅샷이 계속
+        // 갈아엎이므로, 그때 재면 「셀은 멀쩡한데 화면만 빈다」로 잘못 읽힌다.
+        // `pty.scroll` 을 직접 부르지 않는 이유는 휠 라우팅(트리 가로채기·pane_id
+        // 해석)까지 태우기 위해서다 — 거기서 새고 있어도 통과해 버리면 안 된다.
+        if let Some(lines) = std::env::var("KASATERM_AUTOUNDOCK_SCROLL")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            *auto_undock_scroll_slot().lock().unwrap() =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), pid.clone(), lines));
+        }
         if let Some(a) = self.aux_windows.iter_mut().find(|a| {
             matches!(&a.kind,
                 crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
         }) {
             a.pending_capture =
-                Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+                Some((Instant::now() + std::time::Duration::from_millis(1900), cap));
         }
         // `_HIDE=1` 이면 이어서 접기→되살리기까지 본다. 접기는 창만 없애는 것이라
         // **PTY 가 살아 있는지**가 판정의 전부다 — 창 수만 세면 "접었다"와 "죽였다"가
@@ -1933,6 +1955,140 @@ impl App {
         eprintln!(
             "[autoundock] 기대: 접으면 aux=0·예약=40·PTY생존=true / 되살리면 aux=1·예약=0·PTY생존=true"
         );
+    }
+    /// 예약된 별도창 휠을 발사한다(위 `run_pending_autoundock` 이 심는다). 굴린 직후
+    /// **렌더가 실제로 읽는 셀**(`ws.panes[pid].term()`)까지 찍는다 — PTY 가 굴렀는지와
+    /// 화면에 보이는지는 별개라, 둘을 같이 안 보면 어느 쪽이 범인인지 못 가른다.
+    pub(crate) fn run_pending_autoundock_scroll(&mut self) {
+        let due = {
+            let g = auto_undock_scroll_slot().lock().unwrap();
+            match g.as_ref() {
+                Some((at, _, _)) if Instant::now() >= *at => true,
+                _ => false,
+            }
+        };
+        if !due {
+            return;
+        }
+        let Some((_, pid, lines)) = auto_undock_scroll_slot().lock().unwrap().take() else {
+            return;
+        };
+        let Some(i) = self.aux_windows.iter().position(|a| {
+            matches!(&a.kind,
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
+        }) else {
+            eprintln!("[autoundock] 휠 대상 aux 창이 없다 — pane {pid}");
+            return;
+        };
+        let before = self.pty.get(&pid).map(|p| p.scroll(0));
+        self.aux_terminal_wheel(i, MouseScrollDelta::LineDelta(0.0, lines));
+        let after = self.pty.get(&pid).map(|p| p.scroll(0));
+        let seen = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(&pid).and_then(|p| p.term()).map(|t| {
+                let nonblank = t
+                    .cells
+                    .iter()
+                    .filter(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')))
+                    .count();
+                let idx = t
+                    .cells
+                    .iter()
+                    .position(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')));
+                let first: String = idx
+                    .map(|i| t.cells[i].iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+                    .unwrap_or_default();
+                let last = t
+                    .cells
+                    .iter()
+                    .rposition(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')));
+                (t.cols, t.rows, t.cells.len(), nonblank, idx, last, first)
+            })
+        };
+        let aux_cells = self
+            .aux_windows
+            .get(i)
+            .map(|a| (a.gpu.cell_w, a.gpu.cell_h));
+        eprintln!("[autoundock] 휠 {lines}줄 → display_offset {before:?} → {after:?}");
+        eprintln!("[autoundock] 렌더가 읽는 셀: {seen:?}");
+        eprintln!("[autoundock] aux 창(cell_w, cell_h): {aux_cells:?}");
+    }
+    /// Headless 마크다운 별도창 repro: `KASATERM_AUTOAUXMD="<파일>"`(+`_MS`) 로 그
+    /// 파일을 별도창 편집기로 띄우고 +1500ms 에 캡처(`KASATERM_AUTOAUXMD_CAP`).
+    /// `_RAW=1` 이면 캡처 전에 헤더의 `Raw` 칸을 **실제 클릭 좌표로** 눌러 본다 —
+    /// 알약을 그렸다는 것과 눌러서 모드가 바뀐다는 것은 별개라, 그린 rect 를 그대로
+    /// 히트 테스트에 태워야 배선까지 확인된다(header_btns 규약).
+    pub(crate) fn run_pending_autoauxmd(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let path = std::env::var("KASATERM_AUTOAUXMD").ok()?;
+            let ms = std::env::var("KASATERM_AUTOAUXMD_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(4000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), path))
+        });
+        let Some((at, path)) = due.clone() else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < at {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // 사람이 여는 그 경로(팝아웃)를 그대로 탄다 — 여기서 MarkdownPane 을 손으로
+        // 만들면 `is_md_doc`·초기 뷰 모드 결정이 사본이 돼, 정작 그 결정이 틀려도 통과한다.
+        self.popout_file_window(std::path::PathBuf::from(&path), event_loop);
+        let Some(idx) = self.aux_windows.iter().position(|a| a.editor().is_some()) else {
+            eprintln!("[autoauxmd] 별도창이 안 떴다: {path}");
+            return;
+        };
+        self.aux_render(idx);
+        let pills: Vec<_> = self
+            .aux_windows
+            .get(idx)
+            .map(|a| {
+                a.header_btns
+                    .iter()
+                    .filter(|(k, _)| {
+                        matches!(k, crate::auxwin::AuxHeaderBtn::MdRender | crate::auxwin::AuxHeaderBtn::MdRaw)
+                    })
+                    .map(|(k, r)| ((*k == crate::auxwin::AuxHeaderBtn::MdRaw).then_some("Raw").unwrap_or("Rendered"), *r))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        eprintln!("[autoauxmd] 알약 rect: {pills:?}");
+        if std::env::var("KASATERM_AUTOAUXMD_RAW").is_ok() {
+            let hit = self.aux_windows.get(idx).and_then(|a| {
+                a.header_btns
+                    .iter()
+                    .find(|(k, _)| *k == crate::auxwin::AuxHeaderBtn::MdRaw)
+                    .map(|(_, r)| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0))
+            });
+            match hit {
+                Some((cx, cy)) => {
+                    // 클릭 판정이 커서 위치를 보므로 커서부터 옮긴다(실제 경로와 동일).
+                    if let Some(a) = self.aux_windows.get_mut(idx) {
+                        a.cursor_px = (cx, cy);
+                    }
+                    let handled = self.aux_header_click(idx);
+                    let raw = self
+                        .aux_windows
+                        .get(idx)
+                        .and_then(|a| a.editor())
+                        .map(|m| m.raw_mode);
+                    eprintln!("[autoauxmd] Raw 클릭({cx:.0},{cy:.0}) handled={handled} raw_mode={raw:?}");
+                }
+                None => eprintln!("[autoauxmd] Raw 칸이 안 그려졌다"),
+            }
+        }
+        let cap = std::env::var("KASATERM_AUTOAUXMD_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir().join("auxmd.png").to_string_lossy().into_owned()
+        });
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+        }
     }
     /// Headless 드래그-tear repro: `KASATERM_AUTOTEARDRAG_MS` 뒤에 활성 pane 의 탭
     /// 드래그를 세우고 커서를 창 **밖으로** 옮긴다 — 마우스를 놓지 않은 채 별도창이

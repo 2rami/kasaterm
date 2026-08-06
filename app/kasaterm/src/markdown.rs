@@ -3436,67 +3436,48 @@ impl App {
         let anchor = self.md_anchor_line(id);
         let raw_metrics = self.gpu.as_mut().map(|g| g.raw_editor_metrics());
         let old_ys = self.md_block_ys.get(id).cloned();
-        let mut pending: Option<usize> = None;
         let mut ws = self.ws.lock().unwrap();
         let Some(pane) = ws.panes.get_mut(id) else { return };
-        let is_raw = pane.markdown().map_or(false, |m| m.raw_mode);
-        if is_raw == want_raw {
+        let Some(m) = pane.markdown_mut() else { return };
+        let changed = switch_md_mode(m, want_raw, anchor, raw_metrics, old_ys.as_deref());
+        if !changed {
             return;
         }
         pane.dirty = true;
-        if is_raw {
-            // Raw → Render: persist the edits first, then re-parse.
-            let save = pane
-                .markdown()
-                .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()));
-            if let Some((text, path)) = save {
-                // 저장이 실패했는데 modified 를 내리면 dirty 표시도 닫기 확인도
-                // 사라져 편집분이 조용히 증발한다 — 실패하면 dirty 인 채로 둔다.
-                let saved = match write_atomic(&path, &text) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!("[editor] 저장 실패 {path}: {e}");
-                        false
-                    }
-                };
-                let doc = build_markdown_doc(std::path::Path::new(&path), &text);
-                // 새 레이아웃의 블록 y 는 아직 없다 — 그려봐야 나온다. 옛 y 로
-                // 일단 근사해 한 프레임짜리 튐을 줄이고, 정확한 위치는 렌더가
-                // y 를 채운 뒤 pending 앵커가 바로잡는다.
-                let guess = anchor.zip(old_ys.as_ref()).and_then(|(line, ys)| {
-                    let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
-                    ys.get(i).copied()
-                });
-                if let Some(m) = pane.markdown_mut() {
-                    m.doc = Arc::new(doc);
-                    m.raw_mode = false;
-                    if saved {
-                        m.mark_saved();
-                    } else {
-                        m.touch();
-                    }
-                    m.scroll = guess.unwrap_or(0.0).max(0.0);
-                }
-                pending = anchor;
-            }
-        } else if let Some(m) = pane.markdown_mut() {
-            // Render → Raw: seed the edit buffer from the source.
-            m.edit_lines = Arc::new(m.doc.raw.split('\n').map(String::from).collect());
-            if m.edit_lines.is_empty() {
-                m.lines_mut().push(String::new());
-            }
-            let line = anchor.unwrap_or(0).min(m.edit_lines.len().saturating_sub(1));
-            // 커서도 보던 줄에 둔다 — 여기서 0 으로 되돌리면 "고치려고" 연 raw
-            // 모드가 매번 파일 맨 위에서 시작한다.
-            m.cur_line = line;
-            m.cur_col = 0;
-            m.scroll = raw_metrics.map_or(0.0, |(pad, lh)| pad + line as f32 * lh);
-            m.raw_mode = true;
-        }
         drop(ws);
-        if let Some(line) = pending {
+        // Raw → Render 로 넘어온 경우에만 앵커가 남는다 — 새 레이아웃의 블록 y 는
+        // 그려 봐야 나오므로, 렌더가 y 를 채운 뒤 이 값이 위치를 바로잡는다.
+        if want_raw {
+            return;
+        }
+        if let Some(line) = anchor {
             self.md_scroll_anchor.insert(id.to_string(), line);
         }
+    }
+
+    /// 별도창(aux) 마크다운의 Rendered ↔ Raw 전환. pane 판(`set_md_mode`)과 **같은
+    /// 본체**(`switch_md_mode`)를 쓴다 — 별도창에만 토글이 없어 "새 창으로 열면
+    /// 고칠 수가 없다"였는데(거노), 여기서 사본을 뜨면 저장 실패 처리·커서 이월
+    /// 같은 미묘한 규칙이 두 곳에서 갈린다.
+    ///
+    /// pane 과 다른 것 하나: 별도창은 블록 y 표(`md_block_ys`)를 안 들고 다녀
+    /// Rendered → Raw 의 줄 앵커를 **스크롤 비율로 근사**한다. 정확하진 않아도
+    /// 늘 맨 위로 되돌아가는 것보다 낫다 — 고치려고 여는 모드라 위치가 곧 용건이다.
+    pub(crate) fn aux_set_md_mode(&mut self, idx: usize, want_raw: bool) {
+        let raw_metrics = self.gpu.as_mut().map(|g| g.raw_editor_metrics());
+        let Some(a) = self.aux_windows.get_mut(idx) else { return };
+        let content_h = a.md_content_h;
+        let Some(m) = a.editor_mut() else { return };
+        let anchor = (!m.raw_mode && content_h > 1.0).then(|| {
+            let frac = (m.scroll / content_h).clamp(0.0, 1.0);
+            let lines = m.doc.raw.split('\n').count();
+            ((frac * lines as f32).floor() as usize).min(lines.saturating_sub(1))
+        });
+        if !switch_md_mode(m, want_raw, anchor, raw_metrics, None) {
+            return;
+        }
+        a.dirty = true;
+        a.window.request_redraw();
     }
 
     /// Directory of the active markdown pane's source file, for resolving
@@ -4800,4 +4781,66 @@ mod tests {
         assert_eq!(wiki_target_in(&dir, "없는이름"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// 마크다운 뷰 모드 전환의 **본체** — 메인 그리드 pane(`set_md_mode`)과 별도창
+/// (`aux_set_md_mode`)이 이 한 벌을 같이 쓴다. 이 파일이 이미 겪은 함정 셋이 전부
+/// 여기 들어 있어, 사본을 뜨면 한쪽만 고쳐진 채 남는다:
+///
+/// - **저장 실패인데 modified 를 내리면 안 된다.** 내리는 순간 dirty 표시도 닫기
+///   확인도 사라져 편집분이 조용히 증발한다.
+/// - **읽던 자리를 이월한다.** 맨 위로 되돌아가는 게 이 편집기에서 가장 거슬리는
+///   동작이었다 — 오타 하나 고치러 갈 때마다 제자리를 잃었다.
+/// - **커서도 같이 옮긴다.** 스크롤만 옮기고 커서를 0 에 두면 타이핑하는 순간
+///   화면이 파일 맨 위로 튄다.
+///
+/// `old_ys` 는 렌더 뷰의 블록 y 표(있으면 Raw → Render 의 스크롤을 근사한다).
+/// 실제로 모드가 바뀌었으면 `true`.
+pub(crate) fn switch_md_mode(
+    m: &mut MarkdownPane,
+    want_raw: bool,
+    anchor: Option<usize>,
+    raw_metrics: Option<(f32, f32)>,
+    old_ys: Option<&[f32]>,
+) -> bool {
+    if m.raw_mode == want_raw {
+        return false;
+    }
+    if m.raw_mode {
+        // Raw → Render: 먼저 디스크에 쓰고 다시 파싱한다.
+        let text = m.edit_lines.join("\n");
+        let path = m.doc.path.clone();
+        let saved = match write_atomic(&path, &text) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[editor] 저장 실패 {path}: {e}");
+                false
+            }
+        };
+        let doc = build_markdown_doc(std::path::Path::new(&path), &text);
+        let guess = anchor.zip(old_ys).and_then(|(line, ys)| {
+            let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
+            ys.get(i).copied()
+        });
+        m.doc = Arc::new(doc);
+        m.raw_mode = false;
+        if saved {
+            m.mark_saved();
+        } else {
+            m.touch();
+        }
+        m.scroll = guess.unwrap_or(0.0).max(0.0);
+    } else {
+        // Render → Raw: 원문에서 편집 버퍼를 채운다.
+        m.edit_lines = Arc::new(m.doc.raw.split('\n').map(String::from).collect());
+        if m.edit_lines.is_empty() {
+            m.lines_mut().push(String::new());
+        }
+        let line = anchor.unwrap_or(0).min(m.edit_lines.len().saturating_sub(1));
+        m.cur_line = line;
+        m.cur_col = 0;
+        m.scroll = raw_metrics.map_or(0.0, |(pad, lh)| pad + line as f32 * lh);
+        m.raw_mode = true;
+    }
+    true
 }
