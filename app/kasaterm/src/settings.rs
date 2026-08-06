@@ -2211,6 +2211,9 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
             let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()));
+            if let Some(email) = v.as_ref().map(|p| p.email.as_str()).filter(|e| !e.is_empty()) {
+                remember_account_email(&key, email);
+            }
             m.insert(key, (Instant::now(), v));
         }
     });
@@ -2261,6 +2264,23 @@ pub(crate) fn account_display(id: &str, label: &str, fallback: &str) -> String {
         Some(p) if !p.email.is_empty() => p.email,
         _ => fallback.to_string(),
     }
+}
+
+/// 슬롯 이메일을 `settings.json` 에 남긴다 — **statusline 이 읽을 유일한 경로**다.
+///
+/// 그 스크립트는 claude 가 초당 한 번 부르는 파이썬이라 슬롯 신원을 직접 물을 수
+/// 없다(로그인 셸 + HTTP 두 번). 여기서 이미 알아낸 값을 흘려 두면 공짜로 읽는다.
+/// 안 남기면 이름 없는 슬롯의 statusline 이 `acct-1` 같은 내부 id 를 그린다.
+fn remember_account_email(id: &str, email: &str) {
+    let mut m = match socket::read_settings().get("claude_account_emails") {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if m.get(id).and_then(|v| v.as_str()) == Some(email) {
+        return; // 값이 그대로면 쓰지 않는다 — 20초마다 파일을 다시 쓸 이유가 없다
+    }
+    m.insert(id.to_string(), serde_json::Value::String(email.to_string()));
+    socket::write_setting("claude_account_emails", serde_json::Value::Object(m));
 }
 
 /// 우리가 붙인 이름인가. 빈 라벨과 옛 기본값 `계정 N` 을 자동으로 본다 — 후자는
