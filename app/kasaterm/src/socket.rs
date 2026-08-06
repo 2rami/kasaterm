@@ -951,6 +951,26 @@ impl Backend for PtyBackend {
         })
     }
 
+    /// 셰임(`teammate_case_arms`/`install_claude_hook_shim`)이 조립하는 것과 **같은
+    /// 규칙**으로 이름을 미리 짓는다: `<학생 슬러그>-p<pane 번호>` + cwd 기준 팀.
+    /// 규칙이 갈리면 부른 쪽이 닿지 않는 인박스에 브리프를 넣고도 성공으로 읽으므로,
+    /// 셰임 쪽을 고칠 땐 여기도 같이 고쳐야 한다.
+    fn pane_agent(&self, surface_id: &str) -> Option<(String, String)> {
+        let name = self.ws.lock().unwrap().pane_character.get(surface_id).cloned()?;
+        let slug = crate::theme::agent_slug(&name);
+        let cwd = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(p, _)| p == surface_id)
+            .and_then(|(_, pid)| self.pane_cwd_live(pid))?;
+        let team = kasa_mcp::team::team_name_for(&kasa_mcp::character::mode_slug(&cwd));
+        // 셰임은 팀명이 비면 트리플을 통째로 생략한다 — 그때는 이름도 안 생긴다.
+        if team.is_empty() {
+            return None;
+        }
+        Some((format!("{slug}-p{}", surface_id.trim_start_matches('%')), team))
+    }
+
     /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
     /// 보여야 하는데, 이게 미구현이라 `kasaterm-cli windows` 가 늘 "(윈도우 없음)"을
     /// 냈다 — 이동 기능을 붙여 놓고 목적지를 못 찾는 상태였다.

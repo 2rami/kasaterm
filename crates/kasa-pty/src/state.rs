@@ -922,12 +922,25 @@ const SCROLLBACK_BYTES_PER_CELL: usize = 24;
 const SCROLLBACK_MIN_LINES: usize = 1_000;
 const SCROLLBACK_MAX_LINES: usize = 100_000;
 
+/// 기본 예산. **줄 상한(`SCROLLBACK_MAX_LINES`)이 실질 기준이 되도록** 크게 잡는다 —
+/// 1024MB 면 폭 1170칸까지 10만 줄을 다 받는다.
+///
+/// 크게 잡아도 되는 이유는 **캡이 예약이 아니라 상한이라서**다(실측 2026-08-06,
+/// 363칸 pane): 캡 10만 줄에 1,964줄만 실으면 RSS 39MB, 61,624줄을 실제로 채우면
+/// 742MB. 즉 안 쓰면 안 먹는다. 옛 기본값 16MB 는 **폭에 반비례**해서, 넓게 쓰는
+/// pane 이 1,925줄밖에 못 남겼다 — 거노: "히스토리가 왜 다 안 남지, 보려고 위로
+/// 올리면 없어져 있어". claude 한 세션이 몇 분이면 미는 양이다.
+///
+/// 대가는 **진짜로 10만 줄을 채운 pane** 이 1GB 를 쥔다는 것. RAM 이 아쉬우면
+/// `KASATERM_SCROLLBACK_MB` 로 내린다.
+const SCROLLBACK_DEFAULT_MB: usize = 1024;
+
 fn scrollback_budget_bytes() -> usize {
     std::env::var("KASATERM_SCROLLBACK_MB")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|mb| *mb > 0)
-        .unwrap_or(16)
+        .unwrap_or(SCROLLBACK_DEFAULT_MB)
         * 1024
         * 1024
 }
@@ -2677,5 +2690,45 @@ mod agent_kind_tests {
             (402, 401, "/opt/homebrew/bin/codex".into()),
         ];
         assert_eq!(agent_in_table(&t, 400), Some(AgentKind::Codex));
+    }
+}
+
+#[cfg(test)]
+mod scrollback_probe {
+    use super::*;
+
+    /// 실 PTY 로 스크롤백 **보존 줄수와 그 대가(RSS)** 를 잰다 — 거노: "히스토리가 왜
+    /// 다 안 남지, 보려고 위로 올리면 없어져 있어". 캡은 폭에서 나오므로(예산 ÷ 폭)
+    /// 넓은 pane 일수록 짧아진다. `KASATERM_SCROLLBACK_MB` 와 `PROBE_COLS` 로 조합을
+    /// 바꿔 가며 돌린다. 무시(ignore)인 이유는 셸을 띄우고 몇십 초 기다려서다.
+    #[test]
+    #[ignore]
+    fn how_many_lines_survive() {
+        let cols: u16 = std::env::var("PROBE_COLS").ok().and_then(|s| s.parse().ok()).unwrap_or(363);
+        let rss = || -> u64 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output().ok();
+            out.and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+                .unwrap_or(0) / 1024
+        };
+        let before = rss();
+        let s = PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()),
+            cols, rows: 40, pane_id: "%probe".into(),
+            ..Default::default()
+        }).unwrap();
+        s.send_bytes(format!("for i in $(seq 1 {}); do echo line-$i; done\n", std::env::var("PROBE_LINES").unwrap_or_else(|_| "200000".into())).as_bytes()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(
+            std::env::var("PROBE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(40),
+        ));
+        // 양수 = 오래된 쪽(위).
+        let up = s.scroll(1_000_000);
+        eprintln!(
+            "예산={}MB cols={cols} 캡={}줄 실제보존={up}줄 RSS {}→{}MB",
+            scrollback_budget_bytes() / 1024 / 1024,
+            history_lines_for_cols(cols),
+            before, rss()
+        );
     }
 }

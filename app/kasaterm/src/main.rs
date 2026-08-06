@@ -5635,9 +5635,7 @@ fn teammate_case_arms() -> String {
         if name.chars().any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c)) {
             continue;
         }
-        let slug = theme::character_slug(&name)
-            .map(String::from)
-            .unwrap_or_else(|| kasa_mcp::team::ascii_ident(&name));
+        let slug = theme::agent_slug(&name);
         let color = kasa_mcp::character::claude_color_for(&chars, &name)
             .map(|c| kasa_mcp::team::normalize_agent_color(&c).to_string())
             .unwrap_or_default();
