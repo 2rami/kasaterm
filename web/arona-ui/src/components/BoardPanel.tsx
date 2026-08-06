@@ -9,6 +9,14 @@ import { PaneToolTimeline } from './PaneToolTimeline';
 
 const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2 : 1);
 
+// 한 pane 줄에 완료 태스크를 몇 개까지 보일지. 저장소는 **방 단위로 공유**돼서 바쁜
+// 방은 하루 이틀 만에 완료가 수십 개 쌓인다(실측 2026-08-06: 34개 중 29개 완료,
+// 전부 어제·오늘 것) — 거노: "아루 태스크는 왜 저렇게 돼 있어". 그 줄에서 봐야 할 건
+// **지금 뭘 하는가**지 오늘 끝낸 것 전부가 아니라, 열린 것은 다 보이고 완료는 최근
+// 몇 개만 남긴 뒤 나머지는 개수로 접는다. 오래된 파일 자체는 앱이 부팅 때 지운다
+// (main.rs `prune_finished_tasks`) — 그건 어제 것을 못 지우니 이 상한이 따로 필요하다.
+const DONE_SHOWN = 3;
+
 // 확인 대기 알림 종 — 이모지 금지 SVG.
 function BellGlyph() {
   return (
@@ -132,18 +140,36 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
               {/* claude TaskCreate 태스크 — 진행중(◉) 먼저. */}
               {!!paneTasks[a.id]?.length && (
                 <div style={{ marginLeft: 16, marginTop: 5, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {[...paneTasks[a.id]]
-                    .sort((x, y) => taskRank(x.status) - taskRank(y.status))
-                    .map((t) => {
-                      const done = t.status === 'completed';
-                      const active = t.status === 'in_progress';
-                      return (
-                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
-                          <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
-                        </div>
-                      );
-                    })}
+                  {(() => {
+                    const all = [...paneTasks[a.id]].sort((x, y) => taskRank(x.status) - taskRank(y.status));
+                    // 정렬이 완료를 뒤로 몰아 두므로 앞에서 자르면 열린 것은 하나도 안 잘린다.
+                    const open = all.filter((t) => t.status !== 'completed');
+                    const doneAll = all.filter((t) => t.status === 'completed');
+                    const shown = [...open, ...doneAll.slice(0, DONE_SHOWN)];
+                    const folded = doneAll.length - Math.min(doneAll.length, DONE_SHOWN);
+                    return (
+                      <>
+                        {shown.map((t) => {
+                          const done = t.status === 'completed';
+                          const active = t.status === 'in_progress';
+                          return (
+                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
+                              <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
+                            </div>
+                          );
+                        })}
+                        {folded > 0 && (
+                          <div
+                            title={doneAll.slice(DONE_SHOWN).map((t) => t.subject).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            완료 {folded}개 더
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
               {/* 백그라운드/서브에이전트 이름 + 완료 흔적 */}

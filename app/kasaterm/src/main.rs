@@ -5266,6 +5266,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !sweep_dead_kasaterm_sockets() {
         cleanup_stale_collab_markers();
     }
+    prune_finished_tasks();
     // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
     // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
@@ -5642,6 +5643,86 @@ fn teammate_case_arms() -> String {
         arms.push_str(&format!("      {name}) AGENT={slug}; ACOLOR={color} ;;\n"));
     }
     arms
+}
+
+/// 끝난 태스크를 며칠 뒤에 지울지. `KASATERM_TASK_KEEP_DAYS` 로 조절.
+const TASK_KEEP_DAYS: u64 = 3;
+
+/// **열린 채로** 방치된 태스크를 며칠 뒤에 지울지. 끝난 것보다 훨씬 길게 잡는다 —
+/// 어제 안 끝낸 일은 밀린 일이지만, 2주를 손 안 댄 일은 버려진 일이다.
+/// (실측 2026-08-06 sionic 방: 07-24 slack-sentry 미완료 4건이 방이 다른 주제로
+/// 옮겨 간 뒤에도 목록 맨 위를 차지하고 있었다 — 열린 것이 먼저 그려지기 때문.)
+const TASK_OPEN_KEEP_DAYS: u64 = 14;
+
+/// 다 끝난 태스크 파일을 치운다 — **태스크 저장소가 쌓이기만 하고 아무도 안 비웠다.**
+///
+/// 저장소는 `~/.claude/tasks/<팀>/` 이고 팀 = 방(cwd) 이라, 한 방에서 2주를 일하면
+/// 그 방의 모든 pane 이 2주치 완료 목록을 달고 다닌다(실측 2026-08-06 sionic 방:
+/// 34개 중 29개 완료, 가장 오래된 것이 7월 24일). board 가 그걸 거르지 않고 다 그려서
+/// 「지금 뭘 하는지」가 안 보였다 — 거노: "아루 태스크는 왜 저렇게 돼 있어".
+///
+/// 문턱은 둘이다: 끝난 것 `TASK_KEEP_DAYS`(3일), **열린 채 방치된 것**
+/// `TASK_OPEN_KEEP_DAYS`(14일). 어제 안 끝낸 일은 밀린 일이라 살려 두고, 2주를 손 안
+/// 댄 일만 버려진 것으로 본다.
+///
+/// 되돌릴 수 없는 삭제라 판정을 좁게 잡는다: 파일이 파싱되고 status 를 읽을 수 있을
+/// 때만 손댄다(깨진 파일·모르는 형식은 그대로 둔다).
+fn prune_finished_tasks() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let days = |k: &str, d: u64| {
+        std::time::Duration::from_secs(
+            std::env::var(k).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(d) * 86_400,
+        )
+    };
+    let cutoff = (
+        days("KASATERM_TASK_KEEP_DAYS", TASK_KEEP_DAYS),
+        days("KASATERM_TASK_OPEN_KEEP_DAYS", TASK_OPEN_KEEP_DAYS),
+    );
+    let Ok(teams) = std::fs::read_dir(home.join(".claude/tasks")) else {
+        return;
+    };
+    let mut gone = 0usize;
+    for team in teams.flatten() {
+        let Ok(files) = std::fs::read_dir(team.path()) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            if !task_file_is_stale(&p, cutoff) {
+                continue;
+            }
+            if std::fs::remove_file(&p).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    if gone > 0 {
+        eprintln!("[tasks] 오래된 태스크 {gone}개 정리");
+    }
+}
+
+/// 지워도 되는 태스크 파일인가. `cutoff` = (끝난 것 기준, 열린 것 기준).
+/// 판정을 파일시스템 순회에서 갈라 두면 규칙을 테스트로 고정할 수 있다.
+fn task_file_is_stale(
+    path: &std::path::Path,
+    cutoff: (std::time::Duration, std::time::Duration),
+) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
+    let limit = match v.get("status").and_then(|s| s.as_str()) {
+        Some("completed") | Some("deleted") => cutoff.0,
+        // 열린 것도 지우긴 하지만 훨씬 뒤에. 상태를 못 읽는 파일은 손대지 않는다.
+        Some("pending") | Some("in_progress") => cutoff.1,
+        _ => return false,
+    };
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age > limit)
 }
 
 /// 우리가 쓴 파일인지 알아보는 표식. 이게 없으면 사용자가 손수 쓴 것으로 보고
@@ -7114,6 +7195,37 @@ mod tests {
         assert!(lines.windows(2).all(|w| w[0] <= w[1]), "줄 번호가 역행한다: {lines:?}");
         assert_eq!(lines[0], 0, "첫 블록은 0줄");
         assert_eq!(*lines.last().unwrap(), 20, "마지막 문단의 줄");
+    }
+
+    #[test]
+    fn task_prune_spares_open_tasks_however_old() {
+        let dir = std::env::temp_dir().join(format!("kt-task-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, status: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("{{\"id\":\"1\",\"status\":\"{status}\"}}")).unwrap();
+            p
+        };
+        let zero = std::time::Duration::from_secs(0);
+        let long = std::time::Duration::from_secs(86_400);
+        // 끝난 것은 지나고 열린 것은 아직 — 이 조합이 두 문턱이 갈려 있음을 고정한다.
+        // (하나로 합치면 어제 안 끝낸 일이 완료분과 같이 쓸려 나간다.)
+        assert!(task_file_is_stale(&write("done.json", "completed"), (zero, long)));
+        assert!(task_file_is_stale(&write("gone.json", "deleted"), (zero, long)));
+        assert!(!task_file_is_stale(&write("open.json", "pending"), (zero, long)));
+        assert!(!task_file_is_stale(&write("busy.json", "in_progress"), (zero, long)));
+        // 열린 문턱까지 지나면 그건 밀린 일이 아니라 버려진 일이다.
+        assert!(task_file_is_stale(&write("dead.json", "pending"), (zero, zero)));
+        // 아직 안 지난 완료분은 남는다.
+        assert!(!task_file_is_stale(&write("fresh.json", "completed"), (long, long)));
+        // 깨진 파일·없는 파일·모르는 status 는 건드리지 않는다(삭제는 못 되돌린다).
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "not json").unwrap();
+        assert!(!task_file_is_stale(&broken, (zero, zero)));
+        assert!(!task_file_is_stale(&write("weird.json", "쩜쩜"), (zero, zero)));
+        assert!(!task_file_is_stale(&dir.join("nope.json"), (zero, zero)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
