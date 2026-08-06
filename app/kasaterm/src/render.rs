@@ -6065,10 +6065,21 @@ impl App {
                 // 표기·색은 **Info 탭 사용량 pill 과 같은 규칙**을 쓴다(info.rs
                 // draw_info_actions): `7d 62%`, stale 이면 `~` 를 앞에. 같은 숫자가
                 // 두 자리에서 다르게 보이면 어느 쪽을 믿을지가 문제가 된다.
+                // 퍼센트 뒤에 **언제 풀리는지**를 붙인다 — 90% 라도 12분 뒤면 기다리면
+                // 되고, 3시간 뒤면 지금 옮겨야 한다(거노 2026-08-07).
                 let usage_text = |b: &Option<crate::UsageBadge>| -> String {
                     match b {
-                        Some(b) if b.stale => format!("~{} {:.0}%", b.label, b.pct),
-                        Some(b) => format!("{} {:.0}%", b.label, b.pct),
+                        Some(b) => {
+                            let head = if b.stale {
+                                format!("~{} {:.0}%", b.label, b.pct)
+                            } else {
+                                format!("{} {:.0}%", b.label, b.pct)
+                            };
+                            match crate::resets_in_label(b.resets_at) {
+                                Some(l) => format!("{head} · {l}"),
+                                None => head,
+                            }
+                        }
                         None => "—".to_string(),
                     }
                 };

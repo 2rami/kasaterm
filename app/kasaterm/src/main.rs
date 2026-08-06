@@ -3563,6 +3563,30 @@ pub(crate) struct UsageBadge {
     /// 이 숫자가 어느 계정 저장소의 것인가(`""` = 기본 로그인). 계정을 바꾼 직후
     /// 옛 계정 값을 새 계정 것으로 그리지 않기 위한 표식.
     pub(crate) account_dir: String,
+    /// 그 창이 풀리는 시각(epoch 초). 화면은 이걸 **남은 시간**으로 바꿔 그린다 —
+    /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(거노 2026-08-07).
+    pub(crate) resets_at: Option<u64>,
+}
+
+/// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).
+///
+/// 분까지만 쓴다 — 초는 매 프레임 바뀌어 눈이 그리로 끌리는데, 이 숫자로 하는 판단은
+/// "지금 계정을 옮길까"라 분 단위면 충분하다.
+pub(crate) fn resets_in_label(resets_at: Option<u64>) -> Option<String> {
+    let at = resets_at?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let left = at.saturating_sub(now);
+    if left == 0 {
+        return None; // 이미 지났다 — 다음 조회가 0% 를 실어 온다
+    }
+    let (h, m) = (left / 3600, (left % 3600) / 60);
+    Some(match (h, m) {
+        (0, 0) => "곧".to_string(),
+        (0, m) => format!("{m}m"),
+        (h, m) => format!("{h}h{m}m"),
+    })
 }
 
 /// Parsed `git status` snapshot for the right-hand git column. The background
