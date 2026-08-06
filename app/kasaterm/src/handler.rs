@@ -793,10 +793,20 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(LogicalSize::new(init_w, init_h))
             // 배경 실행(검증 캡처)일 땐 뜨면서 키 포커스를 가져가지 않는다.
             .with_active(!crate::background_launch());
-        let attrs = match restore_pos {
+        // `KASATERM_WINDOW_POS="x,y"` — 저장된 위치를 무시하고 거기 띄운다. 헤드리스
+        // 검증용이다: 그냥 두면 테스트 인스턴스가 **저장된 자리**(=쓰던 모니터의
+        // 그 자리)에 떠서 작업 화면을 덮는다. `KASATERM_NO_FOCUS` 가 키 포커스는
+        // 막아 주지만 가리는 것까지는 못 막는다(거노: "포커스 안 뺏어가게 맥북에
+        // 띄워서 해봐"). 기본 디스플레이 좌표가 (0,0) 이라 `100,100` 이면 맥북 화면이다.
+        let forced_pos = std::env::var("KASATERM_WINDOW_POS").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+        });
+        let attrs = match forced_pos.or(restore_pos) {
             Some((px, py)) => attrs.with_position(winit::dpi::PhysicalPosition::new(px, py)),
             None => attrs,
         };
+        let restore_pos = forced_pos.or(restore_pos);
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
         // native buttons. OS still owns the traffic lights themselves
@@ -5150,6 +5160,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
+        self.run_pending_autoauxmd(event_loop);
+        self.run_pending_autoundock_scroll();
         self.run_pending_autoauxtree();
         self.run_pending_autoteardrag(event_loop);
         self.run_pending_autotearroom(event_loop);
