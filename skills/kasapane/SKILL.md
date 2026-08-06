@@ -306,33 +306,42 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 
 ```bash
 # split 은 **부른 pane** 을 쪼갠다(2026-08-04) — 거노가 보고 있는 창이 아니라 내 자리 옆에 뜬다.
-S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
+# 응답에 pane id 와 **그 pane 이 claude 로 뜨면 쓸 agent 이름**이 같이 온다.
+eval "$(kasaterm-cli split right | python3 -c 'import sys,json
+r=json.load(sys.stdin)["result"]
+print(f"S={r[\"surface\"][\"id\"]}; A={r.get(\"agent\",\"\")}")')"
 kasaterm-cli rename "$S" "<작업명>"
 kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
-# 트리플(--agent-id/--agent-name/--team-name)은 **붙이지 마라** — shim 이 자동으로 붙인다(2026-08-04 복원).
-# 직접 주면 자동 부착이 통째로 꺼진다. 이름은 <캐릭터 슬러그>-p<pane번호>, 팀은 방(cwd) 단위.
-# 브리프를 **먼저** 파일에 쓰고, 부팅 커맨드에 경로를 인자로 실어 한 번에 보낸다.
-cat > /tmp/brief-$S.md <<'BRIEF'
-<배경·파일 포인터·검증 기준·커밋은 자기 브랜치에>
-BRIEF
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh "/tmp/brief-'"$S"$'.md 읽고 수행"\n'
-# 부팅을 기다리지 않는다 — 입력이 큐에 쌓였다가 뜨자마자 처리된다(오케스트레이터 0.8s, 학생 첫 응답 6.9s 실측 2026-08-05).
-# 뒤이어 할 말이 생기면 그때는 SendMessage({to: "<슬러그>-p<번호>", ...}) — to: 는 pane 번호에서 바로 온다.
+# 트리플(--agent-id/--agent-name/--team-name)·--model 은 **붙이지 마라** — shim 이 자동으로 붙인다.
+# 직접 주면 자동 부착이 통째로 꺼진다.
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude\n'
+# 브리프는 **SendMessage 로**. 파일에 쓰지도, 부팅 커맨드에 싣지도 마라.
+#   SendMessage({to: "<split 응답의 agent>", message: "<배경·파일 포인터·검증 기준·커밋은 자기 브랜치에>"})
+# 기다릴 필요 없다: 인박스 파일은 shim 이 `[ -f ] ||` 로 만들어 **먼저 넣어 둔 것을 안 덮으므로**,
+# claude 가 뜨자마자 읽는다(거노: "claude 켜면 바로 켜지는데 바로 SendMessage 하면 되는데").
 ```
+
+**`split` 응답이 그 pane 의 `agent`·`team` 을 준다** — 학생은 pane 이 생기는 순간 배정되고 shim 은 그
+슬러그에 `-p<번호>` 를 붙일 뿐이라, **부팅 전에 이름이 이미 정해져 있다**. 그러니 board 를 되짚지도,
+`<슬러그>-p<번호>` 를 손으로 짐작하지도 마라 — 짐작은 어긋나도 오류가 안 나고 브리프가 조용히 사라진다.
+`--count N` 이면 `agents` 배열로 같이 온다. (팀은 pane cwd 로 계산하므로 학생을 **다른 레포로 `cd` 시켜**
+띄우면 그 값이 틀린다 — 그 경우만 board 가 정본이다.)
 
 ⚠️ **부팅 커맨드는 갓 만든 빈 pane 에만.** 이미 claude 가 도는 pane 에 `... && claude ...` 를 보내면 셸이 아니라 **그 claude 의 입력창**이 받아 지시로 읽고, 하네스식 스폰 절차(인박스 선주입 → pane 부팅)를 그대로 쓰면 아무도 뜨지 않은 이름의 인박스가 하나 생겨 브리프가 조용히 사라진다(`inboxes/` 의 고아 파일들이 그 잔해다). 2026-08-04부터 **서버가 거부한다** — `surface.send_text` 가 board(=claude 가 도는 pane 목록)를 보고 부팅 커맨드면 막고 대신 쓸 `to:` 이름을 알려준다. 도는 pane 에 할 말은 SendMessage 뿐이다.
 
-⚠️ **send 를 두 번 연달아 보내지 마라 — 둘째가 첫 명령줄 안으로 빨려 들어간다.** 부팅 커맨드를 보낸 직후 브리프를 또 보내면, 셸이 아직 `claude` 를 exec 하기 전이라 둘째 텍스트를 **같은 명령줄의 일부로** 읽는다(실측 2026-08-05: 모델명이 `claude-opus-5[1m]지금[1m]` 이 되어 부팅 실패, 프롬프트엔 「몇」 한 글자만 남음). 그래서 브리프는 **파일에 먼저 쓰고 경로를 claude 인자로** 한 번에 넘긴다. 이게 `sleep 9` 를 없애면서도 안전한 유일한 조합이다.
+⚠️ **send 를 두 번 연달아 보내지 마라 — 둘째가 첫 명령줄 안으로 빨려 들어간다.** 부팅 커맨드를 보낸 직후 브리프를 또 보내면, 셸이 아직 `claude` 를 exec 하기 전이라 둘째 텍스트를 **같은 명령줄의 일부로** 읽는다(실측 2026-08-05: 모델명이 `claude-opus-5[1m]지금[1m]` 이 되어 부팅 실패, 프롬프트엔 「몇」 한 글자만 남음). 그래서 부팅은 **한 번의 send 로 끝내고**, 할 말은 전부 SendMessage 로 한다 — 인박스는 셸 명령줄과 무관한 경로라 이 함정 자체가 없다.
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
-- **가벼운 작업은 GLM 학생으로**(사내 OpenGateway, 키 `~/.config/opengateway.key`) — 정찰·검색·스샷 촬영·기계적 반복처럼 판단보다 손이 많은 일. 부팅 커맨드만 바꾸면 된다:
+- **가벼운 작업의 기본은 glm·kimi 학생**(사내 OpenGateway, 키 `~/.config/opengateway.key`) — 정찰·검색·스샷 촬영·기계적 반복처럼 판단보다 손이 많은 일. Claude 로 띄울지부터 고민하지 말고 그냥 여기로 보낸다. 부팅 커맨드만 바꾸면 된다:
   ```bash
-  kasaterm-cli send --surface "$S" $'cd /path/to/repo && glm claude --dangerously-skip-permissions "/tmp/brief-'"$S"$'.md 읽고 수행"\n'
+  kasaterm-cli send --surface "$S" $'cd /path/to/repo && glm claude --dangerously-skip-permissions\n'
   ```
+  `glm` 자리에 `kimi` 를 쓰면 Kimi 다(`moonshotai/kimi-k3-ultrafast`). 둘 다 zshrc 의 `_opengateway_run` 하나를 공유하고 모델명만 다르다.
+  **왜 기본값이어야 하나 — 컨텍스트 때문이다.** 손이 많고 판단이 적은 일에 오푸스를 붙이면 검색 결과와 파일 덩어리가 창을 금세 채워 compact 가 돌고, 압축될 때마다 앞의 맥락이 깎인다(거노가 지금 겪고 있는 문제). 값싼 창을 태워야 할 일에 비싼 창을 태우지 말 것.
   실측(2026-08-05): 모델 `z-ai/glm-5.2-ultrafast`, 응답 6.0s, `agent_name`·캐릭터·페르소나 전부 정상 부착 → **SendMessage 로 닿는다**(board 확인: `hoshino-p17` / team `kt-tmp-5ee1`). `glm` 은 `command claude` 라 shim 을 그대로 타고, shim 이 앞에 붙이는 `--model claude-opus-5[1m]` 은 glm 이 뒤에 주는 `--model z-ai/...` 에 덮인다.
-  - ⚠️ **`--dangerously-skip-permissions` 를 직접 줘야 한다.** `glm` 이 `command claude` 로 호출해 zshrc 의 `claude()` 함수(그 플래그를 자동으로 붙여 주던)를 건너뛰기 때문. 빠뜨리면 학생이 첫 도구 호출에서 권한 프롬프트에 걸려 멈춘다.
-  - ⚠️ **컨텍스트 200k — Claude `[1m]` 의 1/5.** 긴 파일 통독·장시간 작업엔 부적합하다. 본작업은 Claude 로.
+  - ⚠️ **`--dangerously-skip-permissions` 를 직접 줘야 한다.** `glm`·`kimi` 가 `command claude` 로 호출해 zshrc 의 `claude()` 함수(그 플래그를 자동으로 붙여 주던)를 건너뛰기 때문. 빠뜨리면 학생이 첫 도구 호출에서 권한 프롬프트에 걸려 멈춘다.
+  - ⚠️ **컨텍스트 200k — Claude `[1m]` 의 1/5.** 긴 파일 통독·장시간 작업엔 부적합하다. 짧고 손 많은 일에만 보내는 것이 이 둘을 쓰는 법이고, 본작업은 Claude 로.
 - **학생 모델 = 반드시 풀네임 + `[1m]`(1M 컨텍스트) 변형**: 가벼운 잡·정찰=`'claude-sonnet-5[1m]'`, 구현·생성 본작업=`'claude-opus-5[1m]'`(유효 실측 2026-07-26). ⚠️ **`opus`·`sonnet` 짧은 alias 를 쓰지 마라** — alias 는 아직 이전 세대(`opus`→Opus 4.8)를 가리켜 오푸스 5 로 안 뜬다(거노 실사고 2026-07-26: 학생이 전부 4.8 로 소환됨). 세대가 바뀌면 alias 가 늦게 따라오므로 풀네임이 정본이다. 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model claude-opus-5[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
 - **agent-name은 학생 캐릭터명이 아니라 목표 작업명으로**(거노 확정, 예: `native-wiring-backend`) — 캐릭터는 kasaterm이 pane에 자동 배정하니 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그 유일성도 자연 해결.
 - **표시 매핑(실제 팀모드 스크린샷 실측, 2026-07-13)**: `--agent-color`는 배지(`@이름`)뿐 아니라 teammate TUI 전체 톤을 그 색으로 테마한다. tmux pane 제목 = 에이전트 이름, TUI 상단 `✳ 헤더` = 역할(`--agent-type`, 예: Explore). → kasaterm 스폰도 `rename`을 agent-name(작업명)과 일치시키고, `--agent-color`는 배정 학생 accent에 가장 가까운 8색으로 골라 pane 테두리색과 TUI 색을 맞춘다.
