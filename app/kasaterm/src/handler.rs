@@ -568,14 +568,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(until) = *cooldown_until {
                     socket::write_account_cooldown(&self.set_claude_account, until);
                 }
+                // 어느 계정으로 갈아탔는지가 이 토스트의 전부다 — 이름을 안 붙인
+                // 슬롯이면 이메일로 부른다("계정 3 으로 전환" 은 아무 말도 아니다).
                 let label = |id: &str| -> String {
-                    if id.is_empty() {
-                        "기본 계정".to_string()
-                    } else {
-                        self.set_claude_accounts
-                            .iter()
-                            .find(|a| a.id == id)
-                            .map_or_else(|| id.to_string(), |a| a.label.clone())
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본 계정"),
                     }
                 };
                 let (from_label, to_label) = (label(&self.set_claude_account), label(to));
@@ -1264,7 +1266,11 @@ impl ApplicationHandler<UserEvent> for App {
         // spawned is the "새로 시작" fallback that stays if the user declines;
         // 복원 tears it down and rebuilds. Tmux backend manages its own restore,
         // so only the direct-PTY path prompts.
-        if !want_tmux {
+        // 검증 실행은 거노의 저장 세션을 안 읽는다 — 복원 대화상자가 캡처를 통째로
+        // 덮어서 정작 봐야 할 화면이 안 보였고(실측 2026-08-06 좁은 창 촬영), 실수로
+        // "복원"이 눌리면 그 인스턴스가 14 pane 을 열어 셸을 무더기로 띄운다.
+        // 저장하지 않는 실행이 읽지도 않는 것이 짝이 맞다(`save_window_frame` 가드).
+        if !want_tmux && !crate::verification_run() {
             if let Some(state) = crate::socket::read_session_state() {
                 // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
                 // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).

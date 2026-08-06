@@ -5267,6 +5267,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         cleanup_stale_collab_markers();
     }
     prune_finished_tasks();
+    prune_empty_inboxes();
     // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
     // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
@@ -5645,6 +5646,50 @@ fn teammate_case_arms() -> String {
     arms
 }
 
+/// 이 실행이 **하네스가 띄운 검증 인스턴스**인가.
+///
+/// 판정 근거는 창 기하를 env 로 강제했다는 것 하나다 — 사람이 쓰는 창은 저장된 자리에
+/// 뜨지 강제되지 않는다. 이게 참이면 그 인스턴스는 거노의 설정을 **읽지도 쓰지도**
+/// 않는다: 창 크기를 저장하지 않고(`save_window_frame`), 저장 세션 복원도 묻지 않는다.
+/// 설정 파일이 인스턴스 사이에 공유되기 때문이고, 실제로 한쪽만 막았다가 나머지에
+/// 당했다(430x700 검증 실행이 `window.json` 을 덮었고, 복원 대화상자가 캡처를 가렸다).
+pub(crate) fn verification_run() -> bool {
+    std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
+        || std::env::var_os("KASATERM_WINDOW_POS").is_some()
+}
+
+/// teammate 이름 꼬리 — **이 앱 부팅 동안 고정**인 3자 토큰(`-k7q`).
+///
+/// 없을 때 무슨 일이 났나: 이름이 `<슬러그>-p<pane번호>` 뿐이라 인박스 파일명이
+/// `midori-p3.json` 이었고, pane 번호는 앱을 껐다 켜면 낮은 수부터 다시 쓰인다.
+/// 그래서 **새 학생이 죽은 학생의 인박스를 물려받았다** — 실측 2026-08-06: `koharu-p7`
+/// 에 08-04 "영문 데모 쇼케이스 브리프", `momoi-p1` 에 "폴더 정리 제외 요청" 이 배달
+/// 안 된 채 남아 있었고, 그 번호에 새 학생이 뜨면 이틀 전 지시를 자기 것으로 읽는다.
+/// 같은 이유로 같은 레포에 인스턴스를 둘 띄우면 두 학생이 한 파일을 나눠 먹는다.
+///
+/// 부팅마다 달라지면 되고 **예측 가능할 필요는 없다** — 부른 쪽은 `split` 응답이
+/// 알려 주는 이름을 그대로 쓴다(`Backend::pane_agent`). 셰임과 GUI 가 같은 값을 봐야
+/// 하므로 pane env(`KASATERM_AGENT_SUFFIX`)로 건네고, 슬러그와 독립이라 `--resume` 이
+/// 캐릭터를 바꿔 달아도 어긋나지 않는다.
+pub(crate) fn agent_name_suffix() -> String {
+    static TOK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOK.get_or_init(|| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // 초 단위 base36 뒤 3자 — 46656초(약 13시간) 주기라 재시작 간 충돌이 사실상 없다.
+        let mut n = secs % 46_656;
+        let d: Vec<u8> = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        let mut s = [0u8; 3];
+        for i in (0..3).rev() {
+            s[i] = d[(n % 36) as usize];
+            n /= 36;
+        }
+        format!("-{}", String::from_utf8_lossy(&s))
+    })
+    .clone()
+}
+
 /// 끝난 태스크를 며칠 뒤에 지울지. `KASATERM_TASK_KEEP_DAYS` 로 조절.
 const TASK_KEEP_DAYS: u64 = 3;
 
@@ -5701,6 +5746,46 @@ fn prune_finished_tasks() {
     }
     if gone > 0 {
         eprintln!("[tasks] 오래된 태스크 {gone}개 정리");
+    }
+}
+
+/// **다 읽은** 인박스 파일을 치운다. 이름에 부팅 꼬리가 붙은 뒤로 pane 마다 새 파일이
+/// 생기므로(`agent_name_suffix`) 안 지우면 팀 디렉터리가 무한히 자란다 — 꼬리를 넣기
+/// 전에 이미 74개가 쌓여 있었다.
+///
+/// **비어 있는 것만** 지운다. 내용이 남아 있으면 아직 아무도 안 읽은 지시일 수 있고,
+/// 그건 지울 게 아니라 사람이 봐야 할 것이다(실측: 08-04 브리프 4건이 그렇게 남아
+/// 있었다). 하루가 지나야 손대는 것도 같은 이유 — 방금 만들어진 빈 파일은 지금 막 뜬
+/// 학생의 것이다.
+fn prune_empty_inboxes() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(86_400);
+    let Ok(teams) = std::fs::read_dir(home.join(".claude/teams")) else {
+        return;
+    };
+    let mut gone = 0usize;
+    for team in teams.flatten() {
+        let Ok(files) = std::fs::read_dir(team.path().join("inboxes")) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            let empty = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .is_some_and(|v| v.as_array().is_some_and(|a| a.is_empty()));
+            let old = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > day);
+            if empty && old && std::fs::remove_file(&p).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    if gone > 0 {
+        eprintln!("[inbox] 다 읽은 빈 인박스 {gone}개 정리");
     }
 }
 
@@ -6020,7 +6105,7 @@ fi\n\
 if [ -n \"$AGENT\" ]; then\n\
   TEAM=$(curl -s --max-time 2 --get --data-urlencode \"cwd=$PWD\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/teamname\" 2>/dev/null)\n\
   if [ -n \"$TEAM\" ]; then\n\
-    AGENT=\"$AGENT-p${{KASATERM_PANE_ID#%}}\"\n\
+    AGENT=\"$AGENT-p${{KASATERM_PANE_ID#%}}${{KASATERM_AGENT_SUFFIX}}\"\n\
     IB=\"$HOME/.claude/teams/$TEAM/inboxes/$AGENT.json\"\n\
     mkdir -p \"${{IB%/*}}\" 2>/dev/null\n\
     [ -f \"$IB\" ] || printf '[]' > \"$IB\"\n\

@@ -968,7 +968,14 @@ impl Backend for PtyBackend {
         if team.is_empty() {
             return None;
         }
-        Some((format!("{slug}-p{}", surface_id.trim_start_matches('%')), team))
+        Some((
+            format!(
+                "{slug}-p{}{}",
+                surface_id.trim_start_matches('%'),
+                crate::agent_name_suffix()
+            ),
+            team,
+        ))
     }
 
     /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
@@ -2466,20 +2473,6 @@ pub struct ClaudeAccount {
     pub id: String,
     #[serde(default)]
     pub label: String,
-}
-
-impl ClaudeAccount {
-    /// 목록·칩에 보일 이름. 라벨은 설정 화면에서 통째로 지울 수 있는 자유
-    /// 텍스트라 빈 문자열이 되는데, 그대로 그리면 **글자가 하나도 없는 행**이
-    /// 남아 슬롯이 깨진 것처럼 보인다. 비면 추가할 때와 같은 규칙으로 자리를
-    /// 메운다 — `idx` 는 이 목록에서의 위치고, 목록 밖 "기본"이 1번이라 +2.
-    pub fn display_label(&self, idx: usize) -> String {
-        if self.label.trim().is_empty() {
-            format!("계정 {}", idx + 2)
-        } else {
-            self.label.clone()
-        }
-    }
 }
 
 /// Configured extra logins, in display order. The default login (whatever

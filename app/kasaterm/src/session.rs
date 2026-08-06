@@ -314,6 +314,8 @@ impl App {
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
             ("KASATERM_SESSION_ID".to_string(), sid.clone()),
+            // teammate 이름 꼬리 — 셰임이 `<슬러그>-p<번호>` 뒤에 그대로 붙인다.
+            ("KASATERM_AGENT_SUFFIX".to_string(), crate::agent_name_suffix()),
         ];
         if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
             env.push(("KASATERM_PERSONA".to_string(), p));
