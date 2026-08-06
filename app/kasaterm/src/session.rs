@@ -258,9 +258,17 @@ impl App {
         // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
         let taken: std::collections::HashSet<String> = {
             let ws = self.ws.lock().unwrap();
+            // **`ws.panes` 로만 돌면 안 된다** — split 로 생긴 leaf 는 보조탭이 생기기
+            // 전까지 `PaneState` 가 없다(희소, main.rs `pane_font_scales` 주석). 그래서
+            // 예전엔 방금 쪼갠 pane 들이 taken 에 안 잡혀 **연달아 쪼개면 같은 학생이
+            // 둘 나왔다**(실측 2026-08-06 `split --count`: 모모이 둘·프라나 둘. 거노가
+            // 전에 신고한 "미도리 둘"과 같은 증상, 원인만 다른 갈래).
+            // 마커(`assigned_global`)도 못 메운다 — 그건 claude 가 뜰 때 쓰이므로 갓
+            // 만든 pane 엔 아직 없다. 배정의 정본은 `pane_character` 다.
             let mut t: std::collections::HashSet<String> = ws
                 .panes
                 .keys()
+                .chain(ws.pane_character.keys())
                 .filter(|p| p.as_str() != id)
                 .filter_map(|p| {
                     ws.pane_character
