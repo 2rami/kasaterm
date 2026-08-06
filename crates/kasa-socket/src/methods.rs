@@ -626,6 +626,10 @@ fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str
         .ok()?
         .into_iter()
         .find(|r| r.surface_id == target)?;
+    // 줄이 있다는 것만으론 부족하다 — **셸만 있는 pane 도 줄을 갖는다**. 탭이 board 에
+    // 들어온 뒤로는 갓 만든 빈 탭이 여기 걸려, 정작 학생을 띄우려는 부팅이 막혔다.
+    // 막을 근거는 「이 pane 에 하네스가 실제로 잡혔다」 하나뿐이다.
+    row.harness.as_deref()?;
     // codex 는 인박스가 없어 agent_name 이 영영 비므로, 하네스를 알 때는 그걸 먼저
     // 본다 — 안 그러면 닿지도 않는 SendMessage 를 답으로 알려주게 된다.
     let how = match (row.harness.as_deref(), &row.agent_name, &row.team) {

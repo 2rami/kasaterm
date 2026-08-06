@@ -345,11 +345,19 @@ impl App {
         // the completion-toast path takes no further workspace lock. The same
         // pass also looks for a pending approval prompt (munder BLOCK_HINTS):
         // only meaningful when the spinner is gone, so busy panes skip it.
-        let busy_now: Vec<(String, bool, Option<ApprovalPrompt>)> = {
+        // `bg_tab_busy` = **안 보이는 탭**에서 클로드가 도는 pane. 스캔이 활성 탭만
+        // 보던 동안 뒤 탭 학생은 화면에 아무 흔적이 없었다 — busy 바도 완료 펄스도.
+        // 그렇다고 스윕바를 띄우면 노는 화면 위에서 "이 화면이 일한다"는 거짓말이
+        // 되므로, 있는 언어를 쓴다: 보이는 것은 busy, 안 보이는 것은 bg 펄스.
+        let (busy_now, bg_tab_busy): (
+            Vec<(String, bool, Option<ApprovalPrompt>)>,
+            std::collections::HashSet<String>,
+        ) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
-                .iter()
-                .map(|(id, pane)| match pane.term() {
+            let mut rows = Vec::with_capacity(ws.panes.len());
+            let mut bg = std::collections::HashSet::new();
+            for (id, pane) in ws.panes.iter() {
+                match pane.term() {
                     Some(t) => {
                         let busy = term_is_working(t);
                         let prompt = if busy {
@@ -357,11 +365,21 @@ impl App {
                         } else {
                             rows_show_approval_prompt(&t.cells)
                         };
-                        (id.clone(), busy, prompt)
+                        rows.push((id.clone(), busy, prompt));
                     }
-                    None => (id.clone(), false, None),
-                })
-                .collect()
+                    None => rows.push((id.clone(), false, None)),
+                }
+                let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
+                if pane
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| i != active && t.term().is_some_and(term_is_working))
+                {
+                    bg.insert(id.clone());
+                }
+            }
+            (rows, bg)
         };
 
         // The claude spinner blanks/scrolls between frames, so the raw glyph
@@ -393,7 +411,8 @@ impl App {
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
-            let bg_active = if busy { false } else { self.pane_bg_active(id) };
+            let bg_active =
+                if busy { false } else { bg_tab_busy.contains(id) || self.pane_bg_active(id) };
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
