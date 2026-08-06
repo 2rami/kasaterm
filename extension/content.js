@@ -6,7 +6,10 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '14'
+  const OVERLAY_V = '15'
+
+  // 칩이 화면 가장자리에 남기는 최소 여백. 끌어서 밖으로 밀어낼 수 없게 하는 값이기도 하다.
+  const CHIP_EDGE = 12
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -216,10 +219,7 @@ if (!window.__ccInjected) {
       <style>
         :host { all: initial; }
         /* 표시 설정 — 꺼둔 것은 아예 그리지 않는다. display:none 이면 러너 애니메이션도 함께 멎어
-           보이지 않는 것을 계속 돌리지 않는다.
-           ⚠️"칩을 눌러서 치우기" 는 만들지 말 것 — 칩에 pointer-events 를 주는 순간 CDP 승격
-           경로가 쏘는 좌표 클릭을 칩이 가로채 그 자리의 조작이 조용히 실패한다. 치우는 길은
-           설정과 단축키뿐이어야 한다. */
+           보이지 않는 것을 계속 돌리지 않는다. */
         :host([data-off="1"]) { display: none; }
         :host([data-frame="0"]) .frame { display: none; }
         :host([data-chip="0"]) .chip { display: none; }
@@ -302,7 +302,7 @@ if (!window.__ccInjected) {
         }
         /* /brand-skip */
         .chip {
-          position: fixed; top: 12px; right: 12px; display: flex; align-items: center; gap: 8px;
+          position: fixed; top: var(--dy, 12px); right: var(--dx, 12px); display: flex; align-items: center; gap: 8px;
           padding: 5px 12px 5px 5px; border-radius: 999px;
           background: rgba(20,22,26,.88); color: #fff;
           font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
@@ -310,13 +310,26 @@ if (!window.__ccInjected) {
           white-space: nowrap;
           transform-origin: 100% 0;
           transition: opacity .3s ease, transform .3s ease, box-shadow .3s ease;
+          /* 끌어서 옮기려면 마우스를 받아야 한다. 아래 active 규칙과 반드시 한 쌍으로 읽을 것. */
+          pointer-events: auto; cursor: grab;
+          user-select: none; -webkit-user-select: none;
         }
+        /* ⚠️조작 중에는 칩이 마우스를 받으면 안 된다. CDP 승격 경로가 쏘는 좌표 클릭을 칩이
+           가로채면 그 자리의 조작이 조용히 실패한다 — 오류도 안 난다, 칩을 눌렀을 뿐이니까.
+           이 규칙이 성립하는 근거는 순서다: background 는 조작 **전에** markBusy → paintTab 을
+           await 로 끝내 active 를 확정한 뒤에야 CDP 를 쏜다. 좌표 클릭이 날아다니는 동안 칩은
+           늘 투명하다는 뜻이다. markBusy 를 await 없이 부르거나 조작 뒤로 옮기면 이 보장이
+           통째로 깨진다(background.js 의 call 처리 순서를 함께 볼 것). */
+        :host([data-mode="active"]) .chip { pointer-events: none; }
+        .chip.drag { cursor: grabbing; }
         /* 칩 자리. 기본은 우상단이지만 계정 메뉴·닫기 버튼이 거기 있는 사이트에서는 그걸 가린다.
+           모서리는 넷 중 하나를 고르고, 그 모서리로부터 얼마나 떨어질지는 --dx/--dy 가 정한다 —
+           끌어서 옮긴 자리를 절대 좌표로 두면 창 크기가 바뀔 때 칩이 화면 밖으로 밀려난다.
            transform-origin 을 함께 옮겨야 대기 상태의 축소(scale .9)가 모서리 안쪽으로 모인다 —
            안 옮기면 좌하단 칩이 축소될 때 오른쪽 위로 밀려 자리가 어긋난다. */
-        :host([data-pos="tl"]) .chip { right: auto; left: 12px; transform-origin: 0 0; }
-        :host([data-pos="bl"]) .chip { top: auto; bottom: 12px; right: auto; left: 12px; transform-origin: 0 100%; }
-        :host([data-pos="br"]) .chip { top: auto; bottom: 12px; transform-origin: 100% 100%; }
+        :host([data-pos="tl"]) .chip { right: auto; left: var(--dx, 12px); transform-origin: 0 0; }
+        :host([data-pos="bl"]) .chip { top: auto; bottom: var(--dy, 12px); right: auto; left: var(--dx, 12px); transform-origin: 0 100%; }
+        :host([data-pos="br"]) .chip { top: auto; bottom: var(--dy, 12px); transform-origin: 100% 100%; }
         /* brand-skip — 칩 둘레를 도는 픽셀 러너. offset-path: border-box 가 칩의 pill 모양을 그대로
            경로로 쓰므로 글자 길이가 바뀌어도 따로 계산할 게 없다. steps() 로 칸칸이 끊어 옮겨야
            픽셀처럼 보인다 — 부드럽게 미끄러지면 그냥 도는 점이다. */
@@ -398,7 +411,78 @@ if (!window.__ccInjected) {
     for (let i = 0; i < 5; i++) fr.appendChild(document.createElement('i'))
     /* /brand-skip */
     document.documentElement.appendChild(host)
+    wireChipDrag(root)
     return root
+  }
+
+  // 칩 자리를 화면에 반영한다. 모서리는 dataset 으로, 그 모서리에서 떨어진 거리는 변수로 준다.
+  function applyPos(host, d = {}) {
+    host.dataset.pos = d.pos || 'tr'
+    host.style.setProperty('--dx', `${Number.isFinite(d.dx) ? d.dx : CHIP_EDGE}px`)
+    host.style.setProperty('--dy', `${Number.isFinite(d.dy) ? d.dy : CHIP_EDGE}px`)
+  }
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+
+  // 칩을 끌어서 옮긴다. 자리는 브라우저 전역 설정이라 background 를 거쳐 저장되고, 그 김에
+  // 열려 있는 다른 탭의 칩도 함께 옮겨진다(repaintAll).
+  function wireChipDrag(root) {
+    const chip = root.querySelector('.chip')
+    const st = chip.style
+    let drag = null
+
+    const onMove = (e) => {
+      if (!drag) return
+      drag.moved = true
+      drag.x = clamp(e.clientX - drag.gx, CHIP_EDGE, innerWidth - drag.w - CHIP_EDGE)
+      drag.y = clamp(e.clientY - drag.gy, CHIP_EDGE, innerHeight - drag.h - CHIP_EDGE)
+      // ⚠️인라인으로 써야 한다. :host([data-pos=...]) .chip 이 클래스 규칙보다 특이성이 높아
+      // 스타일시트로는 left/top 이 right/bottom 을 못 이긴다.
+      st.left = `${drag.x}px`
+      st.top = `${drag.y}px`
+      st.right = 'auto'
+      st.bottom = 'auto'
+    }
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove, true)
+      window.removeEventListener('mouseup', onUp, true)
+      if (!drag) return
+      const d = drag
+      drag = null
+      chip.classList.remove('drag')
+      if (d.moved) {
+        // 놓은 자리에서 가장 가까운 모서리를 고르고, 거기서 떨어진 거리만 남긴다.
+        const right = d.x + d.w / 2 > innerWidth / 2
+        const bottom = d.y + d.h / 2 > innerHeight / 2
+        const patch = {
+          pos: (bottom ? 'b' : 't') + (right ? 'r' : 'l'),
+          dx: Math.round(right ? innerWidth - (d.x + d.w) : d.x),
+          dy: Math.round(bottom ? innerHeight - (d.y + d.h) : d.y),
+        }
+        // 저장 응답이 돌아와 다시 칠할 때까지 기다리면 그 사이 칩이 옛 자리로 한 번 튄다.
+        // 화면부터 맞추고 알리는 순서로 둔다.
+        applyPos(root.host, patch)
+        chrome.runtime.sendMessage({ __ccPopup: true, op: 'setDisplay', patch }).catch(() => {})
+      }
+      st.left = st.top = st.right = st.bottom = st.transform = st.transition = ''
+    }
+
+    chip.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return
+      chip.classList.add('drag')
+      // 대기 중 축소(scale .9)가 걸린 채로는 잡은 지점과 그려지는 자리가 어긋난다. 먼저 끄고
+      // **그 뒤에** 크기를 잰다 — 순서를 바꾸면 축소된 치수로 계산해 칩이 손에서 미끄러진다.
+      st.transform = 'none'
+      st.transition = 'none'
+      const r = chip.getBoundingClientRect()
+      drag = { gx: e.clientX - r.left, gy: e.clientY - r.top, w: r.width, h: r.height, moved: false, x: r.left, y: r.top }
+      window.addEventListener('mousemove', onMove, true)
+      window.addEventListener('mouseup', onUp, true)
+      // 칩 아래 페이지가 같은 누름을 함께 받으면 링크가 열리거나 텍스트 선택이 시작된다.
+      e.preventDefault()
+      e.stopPropagation()
+    })
   }
 
   const ops = {
@@ -515,7 +599,7 @@ if (!window.__ccInjected) {
       root.host.dataset.frame = d.frame === false ? '0' : '1'
       root.host.dataset.chip = d.chip === false ? '0' : '1'
       root.host.dataset.cursor = d.cursor === false ? '0' : '1'
-      root.host.dataset.pos = d.pos || 'tr'
+      applyPos(root.host, d)
       clearTimeout(window.__ccOverlayTimer)
       root.host.style.opacity = '1'
 

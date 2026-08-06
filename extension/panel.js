@@ -65,7 +65,9 @@ function groupButton(s) {
 
 const PARTS = [['frame', '테두리'], ['chip', '칩'], ['cursor', '커서']]
 const POS = [['tl', '좌상'], ['tr', '우상'], ['bl', '좌하'], ['br', '우하']]
-const DISPLAY_FALLBACK = { off: false, frame: true, chip: true, cursor: true, pos: 'tr' }
+const DISPLAY_FALLBACK = { off: false, frame: true, chip: true, cursor: true, pos: 'tr', dx: 12, dy: 12 }
+// 모서리 버튼은 자리 되돌리기를 겸한다 — 칩을 끌어 옮긴 뒤 원래 자리로 보내는 유일한 길이다.
+const EDGE = 12
 
 async function apply(patch) {
   await ask('setDisplay', { patch })
@@ -96,11 +98,11 @@ function displayBar(d) {
   for (const [v, label] of POS) {
     const b = el('button', d.pos === v ? 'pos on' : 'pos')
     b.dataset.v = v
-    b.title = `칩 위치 — ${label}`
+    b.title = `칩 위치 — ${label} (끌어 옮긴 자리는 여기로 되돌아갑니다)`
     b.setAttribute('aria-label', `칩 위치 ${label}`)
     // 칩을 꺼둔 채 위치를 고르는 건 아무 일도 일어나지 않는 조작이다
     b.disabled = d.off || !d.chip
-    b.addEventListener('click', () => apply({ pos: v }))
+    b.addEventListener('click', () => apply({ pos: v, dx: EDGE, dy: EDGE }))
     poss.appendChild(b)
   }
 

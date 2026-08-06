@@ -1,8 +1,13 @@
 // 오버레이를 어디에 어떻게 보일지. 신원별이 아니라 브라우저 전역 한 벌이다 —
 // 가리는 건 학생이 아니라 "이 자리"라서, 학생이 바뀔 때마다 다시 치우게 만들면 설정이 아니다.
 // service worker 가 유휴 30초에 죽으면서 메모리를 잃으므로 저장소가 정본이고 캐시는 그 사본이다.
-const DEFAULTS = { off: false, frame: true, chip: true, cursor: true, pos: 'tr' }
+// dx·dy 는 고른 모서리에서 칩이 떨어진 거리(px)다. 사람이 칩을 끌어 옮기면 여기가 바뀐다 —
+// 절대 좌표로 두지 않는 이유는 창 크기가 바뀔 때 칩이 화면 밖으로 밀려나기 때문이다.
+// 기본값 12 는 content.js 의 CHIP_EDGE 와 같은 값이다(모듈을 공유하지 않아 각자 둔다).
+const DEFAULTS = { off: false, frame: true, chip: true, cursor: true, pos: 'tr', dx: 12, dy: 12 }
 const POSITIONS = new Set(['tl', 'tr', 'bl', 'br'])
+// 창을 줄였다 키우는 사이 칩이 아득히 밖으로 나가 있지 않게 하는 상한.
+const MAX_OFFSET = 4000
 
 let cache = null
 
@@ -12,6 +17,7 @@ export async function getDisplay() {
   try { saved = (await chrome.storage.local.get('display')).display } catch { /* 기본값으로 간다 */ }
   cache = { ...DEFAULTS, ...(saved || {}) }
   if (!POSITIONS.has(cache.pos)) cache.pos = DEFAULTS.pos
+  for (const k of ['dx', 'dy']) if (!Number.isFinite(cache[k])) cache[k] = DEFAULTS[k]
   return cache
 }
 
@@ -20,6 +26,12 @@ async function commit(patch) {
   const next = { ...cur }
   for (const k of ['off', 'frame', 'chip', 'cursor']) if (k in patch) next[k] = !!patch[k]
   if (patch.pos && POSITIONS.has(patch.pos)) next.pos = patch.pos
+  // 값은 페이지 안에서 도는 content script 가 보낸다 — 숫자가 아니면 버린다.
+  for (const k of ['dx', 'dy']) {
+    if (!(k in patch)) continue
+    const n = Number(patch[k])
+    if (Number.isFinite(n)) next[k] = Math.max(0, Math.min(MAX_OFFSET, Math.round(n)))
+  }
   cache = next
   try {
     await chrome.storage.local.set({ display: next })
