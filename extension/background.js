@@ -22,8 +22,12 @@ function describe(tool, args = {}, result = {}) {
     case 'press_key': return `키 — ${args.key}`
     case 'navigate': return `이동 — ${hostOf(args.url)}`
     case 'new_tab': return `새 탭 — ${hostOf(result?.url || args.url)}`
+    case 'new_window': return `새 창 — ${hostOf(result?.url || args.url)}`
     case 'close_tab': return '탭 닫기'
+    case 'close_window': return '창 닫기'
     case 'activate_tab': return '탭 전환'
+    // reason 은 사람에게 보이라고 쓰는 짧은 사유라 그대로 남긴다(set_task 의 작업명과 같은 성격).
+    case 'ask_human': return args.reason ? `도움 요청 — ${args.reason}` : '도움 요청'
     case 'screenshot': return '화면 확인'
     case 'read_page': case 'get_text': return '페이지 읽기'
     case 'find': return `요소 찾기 — ${args.query}`
@@ -142,6 +146,8 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 // 확장 아이콘 팝업이 상태를 물어온다. 팝업이 열렸다는 건 service worker 가 막 깨어났을 수도 있다는
 // 뜻이라 여기서 브리지 연결도 한 번 확인한다(세션은 확장이 붙는 즉시 브리지가 다시 알려준다).
+// setDisplay 는 페이지의 content script 도 보낸다 — 사람이 칩을 끌어 옮겼을 때다. 웹페이지는
+// externally_connectable 이 없으면 여기로 메시지를 못 보내지만, 값 검증은 display.js 가 따로 한다.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.__ccPopup !== true) return
   if (msg.op === 'state') {

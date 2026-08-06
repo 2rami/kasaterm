@@ -12,7 +12,9 @@ const clientPane = new Map() // clientKey -> paneKey
 // ★한 탭에 여럿이 붙을 수 있다. 브라우저는 하나뿐이고 pane 은 여럿이라 같은 페이지를 둘이 보는 일이
 // 실제로 생긴다 — 예전엔 나중에 만진 쪽이 앞사람을 조용히 밀어내서, 둘이 붙어 있는데 화면에는 한
 // 명만 보이고 밀려난 쪽 탭 목록에서도 그 탭이 사라졌다.
-const tabOwner = new Map() // tabId -> Set<paneKey>, 먼저 잡은 순서
+// tabId -> Map<paneKey, 마지막으로 만진 시각>. 순서는 먼저 잡은 순(Map 이 삽입 순을 지킨다).
+// 시각까지 담는 이유는 칩에 누구를 남길지 정하기 위해서다 — occupantsOf 를 함께 볼 것.
+const tabOwner = new Map()
 const iconCache = new Map() // `${slug}:${state}:${size}` -> {imageData, dataUrl}
 const offTimers = new Map() // tabId -> timeout
 let lastActive = null
@@ -150,18 +152,21 @@ export function identityOf(client) {
 
 // 이미 다른 세션이 잡고 있어도 뺏지 않고 함께 잡는다. 둘 다 조작할 수 있는 게 사실이므로
 // 표시도 그래야 한다 — 뺏는 쪽으로 만들면 화면이 사실과 다른 말을 한다.
-function claimTab(tabId, key) {
-  let set = tabOwner.get(tabId)
-  if (!set) tabOwner.set(tabId, (set = new Set()))
-  set.add(key)
+function claimTab(tabId, key, at) {
+  let owners = tabOwner.get(tabId)
+  if (!owners) tabOwner.set(tabId, (owners = new Map()))
+  // at 없이 부르는 쪽은 저장소에서 되살린 경우다. 자리만 잡고 시각은 0 으로 둔다 — 언제 만졌는지
+  // 모르는 것을 방금 만진 것으로 적으면 칩에 남길 사람을 그 값으로 잘못 고른다.
+  if (at != null) owners.set(key, at)
+  else if (!owners.has(key)) owners.set(key, 0)
 }
 
 export function forgetTab(tabId) {
-  const keys = tabOwner.get(tabId)
+  const owners = tabOwner.get(tabId)
   tabOwner.delete(tabId)
   clearTimeout(offTimers.get(tabId))
   offTimers.delete(tabId)
-  for (const key of keys || []) {
+  for (const key of owners?.keys() || []) {
     const s = sessions.get(key)
     if (s) { s.tabs.delete(tabId); s.busy.delete(tabId) }
   }
@@ -177,10 +182,21 @@ function anyBusy() {
 // 이 탭에 붙어 있는 사람들. 순서는 먼저 잡은 쪽이 앞이다 — 화면에 뜨는 순서가 호출 순서에 따라
 // 뒤바뀌면 사람이 매번 다시 읽어야 한다.
 async function occupantsOf(tabId) {
+  const owners = tabOwner.get(tabId)
+  if (!owners) return []
+  const live = [...owners].filter(([key]) => sessions.has(key))
+  if (!live.length) return []
+  // ★한 번 만진 탭은 세션이 끝날 때까지 주인으로 남는다(대기 중에도 담당이 보이게 하려던 것이다).
+  // 그런데 pane 이 반나절씩 살아서, 아침에 스샷 한 장 찍고 딴 일 하는 학생까지 계속 쌓였다 —
+  // 화면이 「지금 보고 있다」가 아니라 「이 세션 동안 한 번 만졌다」를 말하게 된 것이다. 그래서
+  // 칩에는 **조작 중인 사람들과 가장 최근에 만진 한 명**만 남긴다. 주인 자리에서 빼는 게 아니라
+  // 보여주지 않을 뿐이므로 그 학생이 다시 만지면 즉시 돌아오고, 팝업의 탭 목록도 그대로다.
+  const last = live.reduce((a, b) => (b[1] > a[1] ? b : a))[0]
   const out = []
-  for (const key of tabOwner.get(tabId) || []) {
+  for (const [key] of live) {
     const s = sessions.get(key)
-    if (!s) continue
+    const busy = s.busy.has(tabId)
+    if (!busy && key !== last) continue
     let avatar = null
     try { avatar = (await compose(s.identity, 'plain', 64)).dataUrl } catch (e) { note('overlay-avatar', e) }
     out.push({
@@ -188,7 +204,7 @@ async function occupantsOf(tabId) {
       color: s.identity.headerColor || '#6BCF7F',
       avatar,
       task: s.task || null,
-      busy: s.busy.has(tabId),
+      busy,
     })
   }
   return out
@@ -259,8 +275,11 @@ export async function markBusy(client, tabId) {
   if (tabId) {
     // 조작한 탭도 세션이 맡은 탭이다. 여기서 등록해야 세션이 끝날 때 칩을 걷어내고,
     // 그 전까지는 대기 중에도 누가 이 탭을 잡고 있는지 계속 보인다.
-    const fresh = !s.tabs.has(tabId) || tabOwner.get(tabId) !== key
-    claimTab(tabId, key)
+    // 만진 시각을 여기서 남긴다 — 칩에 누구를 보일지가 이 값으로 갈린다(occupantsOf).
+    // ⚠️`tabOwner.get(tabId) !== key` 라는 조건이 있었는데 컬렉션과 문자열을 견주는 것이라 늘 참이었다.
+    // fresh 가 항상 참이 되어 호출마다 저장소에 썼다. 판정은 탭이 새로 들어왔는지 하나면 된다.
+    const fresh = !s.tabs.has(tabId)
+    claimTab(tabId, key, Date.now())
     s.tabs.add(tabId)
     if (fresh) persist(key)
     s.busy.add(tabId)
@@ -477,17 +496,88 @@ export async function groupOwnTab(client, tabId) {
   }
 }
 
-// 이 세션이 이미 쓰고 있는 창. 확인을 반복할 때마다 창을 새로 열면 사람 화면에 창이 쌓이고,
-// 그때마다 창별로 그룹이 하나씩 더 생긴다(그룹은 창을 넘나들지 못한다).
-export async function ownWindowOf(client) {
-  const s = sessionOf(client)
-  if (!s) return null
-  for (const gid of [...s.groups]) {
-    const g = await chrome.tabGroups.get(gid).catch(() => null)
-    if (!g) { s.groups.delete(gid); continue }
-    return g.windowId
+// --- 에이전트 창 ----------------------------------------------------------
+
+// 우리가 new_window 로 **만든** 창. ⚠️「우리 그룹이 있는 창」으로 판정하면 안 된다 — 사람 창에도
+// 우리가 백그라운드로 연 탭과 그 그룹이 섞이므로(실측: 사람 창 하나에 우리 그룹이 하나 있었다)
+// 사람 창을 에이전트 창으로 읽고, 그러면 new_window 가 사람이 보던 탭을 갈아치운다.
+// storage.session 을 쓰는 이유 둘: 워커가 죽어도 남고, 브라우저를 껐다 켜면 저절로 비워진다
+// (창 id 는 재사용되므로 남아 있으면 남의 창을 우리 창이라고 가리킨다).
+const AGENT_WINDOWS_KEY = 'agentWindows'
+let agentWindows = null
+
+async function agentWindowSet() {
+  if (agentWindows) return agentWindows
+  try {
+    const v = await chrome.storage.session.get(AGENT_WINDOWS_KEY)
+    agentWindows = new Set(v[AGENT_WINDOWS_KEY] || [])
+  } catch { agentWindows = new Set() }
+  return agentWindows
+}
+
+function saveAgentWindows() {
+  chrome.storage.session.set({ [AGENT_WINDOWS_KEY]: [...(agentWindows || [])] }).catch(() => {})
+}
+
+export async function rememberAgentWindow(windowId) {
+  const set = await agentWindowSet()
+  set.add(Number(windowId))
+  saveAgentWindows()
+}
+
+export async function forgetAgentWindow(windowId) {
+  const set = await agentWindowSet()
+  if (set.delete(Number(windowId))) saveAgentWindows()
+}
+
+// 지금 쓸 수 있는 에이전트 창. ★세션별이 아니라 브라우저에 하나다 — 예전엔 세션마다 자기 창을
+// 찾아서, pane 넷이 각자 확인을 돌리면 사람 화면에 창이 넷 떴다(실측). 창은 화면을 통째로 가리는
+// 공유 자원이라 나눠 쓰는 게 맞고, 탭은 여전히 세션별 그룹으로 갈리니 누구 것인지는 그대로 보인다.
+export async function agentWindowOf() {
+  const set = await agentWindowSet()
+  let found = null
+  for (const id of [...set]) {
+    const win = await chrome.windows.get(id).catch(() => null)
+    if (win) { if (found == null) found = id; continue }
+    set.delete(id) // 사람이 닫은 창
   }
-  return null
+  saveAgentWindows()
+  return found
+}
+
+// 에이전트 창을 그룹으로 되짚는다. rememberAgentWindow 기록은 이 버전부터 쌓이므로 그 전에 열린
+// 창은 거기 없다 — 이미 흩어져 있는 창을 정리하려면 다른 잣대가 필요하다.
+// 판정: 창의 탭이 **전부** 그룹에 들어 있고 그중 하나라도 우리 것이면 에이전트 창. 사람 창에는
+// 그룹에 안 든 탭이 반드시 섞인다(주소창으로 연 탭은 아무 그룹에도 안 든다). 세션이 끝난 학생의
+// 그룹은 우리 것으로 안 잡히지만, 그 창에 사람 탭이 없다는 사실이 대신 받아 준다.
+export async function agentWindowsByGroups() {
+  const ours = new Set()
+  for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
+  const wins = await chrome.windows.getAll({ populate: true }).catch(() => [])
+  const out = []
+  for (const w of wins) {
+    const tabs = w.tabs || []
+    if (!tabs.length) continue
+    if (tabs.some((t) => t.groupId == null || t.groupId === -1)) continue
+    if (!tabs.some((t) => ours.has(t.groupId))) continue
+    out.push({ windowId: w.id, tabs: tabs.length })
+  }
+  return out
+}
+
+// 이 탭들에 붙어 있는 **다른** 세션의 이름. 창을 나눠 쓰게 되면서 생긴 위험을 막는다 — 내 확인이
+// 끝났다고 창을 닫으면 같은 창에서 일하던 다른 학생의 탭까지 함께 사라진다.
+export function otherOwners(client, tabIds) {
+  const mine = clientPane.get(client)
+  const names = new Set()
+  for (const tabId of tabIds) {
+    for (const key of tabOwner.get(tabId)?.keys() || []) {
+      if (key === mine) continue
+      const s = sessions.get(key)
+      if (s) names.add(s.identity?.name || key)
+    }
+  }
+  return [...names]
 }
 
 // 탭 그룹 현황. 껍데기만 남은 그룹이 몇 개인지는 눈으로 세는 수밖에 없어서 여기서 세어 준다.

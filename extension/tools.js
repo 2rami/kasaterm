@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownWindowOf, listGroups } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -190,20 +190,22 @@ const handlers = {
     return { tabId: fresh.id, url: fresh.url, title: fresh.title, active: fresh.active, ...(groupId ? { groupId } : {}) }
   },
 
-  // 별도 창은 선생님 탭바를 아예 건드리지 않는다 — 에이전트가 자기 창에서 놀면 열어둔 탭의 순서도
-  // 개수도 그대로다. 특정 크기가 필요한 확인(반응형·좁은 폭)도 창째로 잡는 편이 정확하다.
+  // ⚠️창은 마지막 수단이다 — 사람 화면을 통째로 가리는 자원이라, 확인은 대부분 new_tab 의 백그라운드
+  // 탭으로 끝난다. 여기까지 오는 건 특정 폭·높이가 필요할 때나 사람이 창을 달라고 했을 때뿐이다.
   // tabId 를 주면 이미 있는 탭을 그 창으로 떼어낸다.
   // ⚠️focused 기본값은 false 다. 새 창이 앞으로 튀어나오면 선생님이 보던 앱을 가린다 — 탭을
   // 백그라운드로 여는 것과 같은 이유이고, 여기서는 되돌릴 방법이 없으니 기본값이 더 중요하다.
   async new_window({ url, tabId, focused = false, width, height, incognito, reuse = true } = {}, ctx = {}) {
-    // ★내 창이 이미 있으면 거기에 연다. 확인을 반복할 때마다 창을 새로 열면 사람 화면에 창이 쌓이고
-    // 창마다 그룹이 하나씩 더 생긴다(2026-08-05: 실험을 돌리는 동안 탭바가 그룹으로 가득 찼다).
+    // ★에이전트 창이 이미 있으면 — 그게 누가 연 것이든 — 거기에 연다. 세션마다 자기 창을 찾던 예전
+    // 방식은 pane 이 넷이면 창을 넷 만들었다(실측: 사람 창 1 + 에이전트 창 3). 창은 나눠 쓰고 탭은
+    // 세션별 그룹으로 갈리니 누구 것인지는 그대로 보인다.
     // 탭을 떼어내는 호출과 시크릿 창은 재사용할 수 없다 — 목적 자체가 별도 창이다.
     if (reuse && !tabId && !incognito) {
-      const windowId = await ownWindowOf(ctx.client)
+      const windowId = await agentWindowOf()
       if (windowId != null) {
         if (width && height) await chrome.windows.update(windowId, { width: Number(width), height: Number(height) }).catch(() => {})
-        const made = await handlers.new_tab({ url, active: true, windowId }, ctx)
+        // ⚠️active:false 다. 창을 나눠 쓰므로 여기서 활성화하면 같은 창을 보던 다른 학생의 탭이 밀린다.
+        const made = await handlers.new_tab({ url, active: false, windowId }, ctx)
         const win = await chrome.windows.get(windowId).catch(() => null)
         return {
           ...made, windowId, reused: true,
@@ -220,6 +222,9 @@ const handlers = {
     const win = await chrome.windows.create(opts)
     const tab = win.tabs?.[0]
     if (!tab) throw new Error('WINDOW_HAS_NO_TAB: 창은 열렸지만 탭을 찾지 못했습니다.')
+    // 다음 호출이 이 창을 찾아 쓰도록 기록한다. tabId 로 떼어낸 창은 빼는데, 그건 사람이 따로 보려고
+    // 뜯어낸 탭일 수 있어서다 — 거기에 나중 확인용 탭이 쌓이면 사람이 뗀 이유가 무색해진다.
+    if (!tabId) await rememberAgentWindow(win.id)
     if (url && !tabId) await waitForLoad(tab.id)
     const fresh = await chrome.tabs.get(tab.id)
     // ⚠️크롬은 창 폭에 하한이 있어 그보다 좁게 달라고 하면 조용히 넓혀 준다(390 을 요청하면 500 이
@@ -236,12 +241,64 @@ const handlers = {
     }
   },
 
-  async close_window({ windowId }) {
+  async close_window({ windowId, force = false } = {}, ctx = {}) {
     const tabs = await tabsQuery({ windowId: Number(windowId) })
+    // ⚠️창은 이제 학생들이 나눠 쓴다. 내 확인이 끝났다고 창째 닫으면 같은 창에서 일하던 사람의 탭까지
+    // 함께 사라지므로, 남의 탭이 보이면 멈추고 누구 것인지 알린다.
+    const others = otherOwners(ctx.client, tabs.map((t) => t.id))
+    if (others.length && !force) {
+      throw new Error(`WINDOW_SHARED: 이 창에는 ${others.join(', ')} 의 탭도 있습니다. 내 탭만 close_tab 으로 닫거나, 정말 창째 닫아야 하면 force:true 로 부르세요.`)
+    }
     await ungroupBeforeClose(tabs.map((t) => t.id))
     for (const t of tabs) { await cdp.detach(t.id).catch(() => {}); forgetTab(t.id) }
     await chrome.windows.remove(Number(windowId))
-    return { closed: Number(windowId), tabs: tabs.length }
+    await forgetAgentWindow(windowId)
+    return { closed: Number(windowId), tabs: tabs.length, ...(others.length ? { alsoClosed: others } : {}) }
+  },
+
+  // ★흩어진 에이전트 창을 하나로 모은다. 탭을 **옮기는** 것이지 닫는 게 아니다 — 폰뷰 override·
+  // 스크롤 위치·입력하던 값은 전부 탭에 붙어 있어 그대로 살아 따라온다. 그래서 다른 학생이 일하는
+  // 중에 돌려도 그 사람 작업이 깨지지 않는다(닫았다 다시 여는 것과 다른 점이 정확히 이것이다).
+  async tidy_windows({ dryRun = false } = {}) {
+    const wins = await agentWindowsByGroups()
+    if (wins.length < 2) return { windows: wins.length, movedGroups: 0, note: '합칠 에이전트 창이 없습니다.' }
+    // 탭이 가장 많은 창으로 모은다 — 옮기는 탭이 가장 적으니 어긋날 여지도 가장 작다.
+    const target = wins.reduce((a, b) => (b.tabs > a.tabs ? b : a))
+    const sources = wins.filter((w) => w.windowId !== target.windowId)
+    if (dryRun) {
+      return { into: target.windowId, from: sources.map((w) => w.windowId), tabs: sources.reduce((n, w) => n + w.tabs, 0) }
+    }
+
+    let movedGroups = 0
+    const failed = []
+    for (const w of sources) {
+      for (const g of await chrome.tabGroups.query({ windowId: w.windowId }).catch(() => [])) {
+        // ⚠️그룹째 옮긴다. 탭만 옮기면 원래 그룹이 빈 껍데기로 탭바에 눌러앉는다 — 크롬이 그룹을
+        // 자동 저장하는데 삭제 API 가 없어서 사람이 우클릭으로 지우는 수밖에 없다.
+        await chrome.tabGroups.move(g.id, { windowId: target.windowId, index: -1 })
+          .then(() => { movedGroups++ })
+          .catch((e) => failed.push(`${g.title || g.id}: ${e.message}`))
+      }
+    }
+
+    // 그룹은 창마다 따로 만들어지므로 모으고 나면 같은 이름이 여럿 나란히 선다. 제목이 같은 것끼리
+    // 합쳐야 탭바가 실제로 정리된다 — 안 그러면 창만 줄고 눈에 보이는 어지러움은 그대로다.
+    const after = await chrome.tabGroups.query({ windowId: target.windowId }).catch(() => [])
+    const keepByTitle = new Map()
+    for (const g of after) {
+      const keep = keepByTitle.get(g.title)
+      if (keep == null) { keepByTitle.set(g.title, g.id); continue }
+      const tabs = await tabsQuery({ groupId: g.id })
+      if (tabs.length) await chrome.tabs.group({ tabIds: tabs.map((t) => t.id), groupId: keep }).catch(() => {})
+    }
+
+    // 다음 new_window 가 이 창을 찾아 쓰도록 기록해 둔다. 안 그러면 정리하자마자 또 갈라진다.
+    await rememberAgentWindow(target.windowId)
+    return {
+      into: target.windowId, movedGroups,
+      windowsBefore: wins.length, windowsAfter: (await agentWindowsByGroups()).length,
+      ...(failed.length ? { failed } : {}),
+    }
   },
 
   async close_tab({ tabId }) {
@@ -323,10 +380,30 @@ const handlers = {
 
   // 창은 앞으로 끌어오지 않는다 — 사람이 다른 앱을 보고 있을 때 크롬이 튀어나오면 작업을 방해한다.
   // 크롬 창 안에서 탭만 바꾸므로 rAF·미디어는 정상적으로 돈다(그게 이 툴의 목적).
+  // 사람이 직접 쳐야 하는 자리라 화면을 정말 넘겨야 한다면 ask_human 을 쓴다.
   async activate_tab({ tabId }) {
     const id = await resolveTabId(tabId)
     const tab = await chrome.tabs.update(id, { active: true })
     return { tabId: id, url: tab.url, windowFocused: false }
+  },
+
+  // ★화면을 뺏는 유일한 툴이고, 그래서 조건이 하나다 — **사람 손이 있어야 다음 줄로 못 가는 자리**.
+  // 로그인·2단계 인증·캡차·결제 확인처럼 에이전트가 대신 칠 수 없는(그리고 쳐서도 안 되는) 것들이다.
+  // 확인·검증·스크린샷은 전부 뒤에서 조용히 돈다: 잘 됐는지 보겠다고 화면을 가져오면 사람은 자기
+  // 일을 못 한다. 그 경계를 파라미터가 아니라 툴 이름으로 나눈 이유가 이것이다 — focus:true 같은
+  // 플래그는 아무 데나 붙지만, 이름이 「사람에게 묻는다」면 아무 데나 부르지 않는다.
+  async ask_human({ tabId, reason } = {}, ctx = {}) {
+    const id = await resolveTabId(tabId)
+    const tab = await chrome.tabs.update(id, { active: true })
+    // drawAttention 은 창이 이미 앞이면 무시되고, focused 는 뒤에 있을 때만 의미가 있다. 어느
+    // 쪽이든 눈에 띄도록 둘 다 준다.
+    await chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {})
+    // 왜 불렀는지를 칩에 남긴다. 창만 튀어나오면 사람은 화면을 되찾고도 무슨 일인지 모른다.
+    if (reason) setTask(ctx.client, `입력 필요 — ${reason}`)
+    return {
+      tabId: id, windowId: tab.windowId, url: tab.url, focused: true, reason: reason || null,
+      note: '창을 앞으로 올렸습니다. 사람이 처리할 때까지 기다렸다가 이어서 진행하세요.',
+    }
   },
 
   async navigate({ tabId, url }) {
