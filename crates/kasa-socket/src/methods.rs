@@ -48,6 +48,16 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
+        // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
+        // 한 왕복에 두는 것은 인덱스가 아니라 pane id 로 지목하기 때문이다(목록이 그
+        // 사이 바뀌어도 엉뚱한 학생을 죽이지 않는다).
+        "surface.closed" => {
+            let want = req.params.get("pane").and_then(|v| v.as_str());
+            match backend.closed_panes(want) {
+                Ok(v) => Response::success(id, v),
+                Err(e) => backend_err(id, e),
+            }
+        }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
         "surface.send_raw" => surface_send_raw(backend, id, &req.params),
@@ -202,6 +212,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.list",
                 "surface.focus",
                 "surface.split",
+                "surface.closed",
                 "surface.send_text",
                 "surface.send_key",
                 "surface.send_raw",

@@ -955,6 +955,19 @@ impl Backend for PtyBackend {
     /// 규칙**으로 이름을 미리 짓는다: `<학생 슬러그>-p<pane 번호>` + cwd 기준 팀.
     /// 규칙이 갈리면 부른 쪽이 닿지 않는 인박스에 브리프를 넣고도 성공으로 읽으므로,
     /// 셰임 쪽을 고칠 땐 여기도 같이 고쳐야 한다.
+    fn closed_panes(&self, discard: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        // `closed_panes` 는 App 필드라 이 스레드에서 직접 못 읽는다 — split 과 같은
+        // 회신 채널 패턴으로 GUI 스레드에 물어본다.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketClosedPanes(discard.map(str::to_string), tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(why)) => anyhow::bail!("{why}"),
+            Err(_) => anyhow::bail!("되살리기 목록 응답 없음(10초) — GUI 스레드가 막혀 있다"),
+        }
+    }
     fn pane_agent(&self, surface_id: &str) -> Option<(String, String)> {
         let name = self.ws.lock().unwrap().pane_character.get(surface_id).cloned()?;
         let slug = crate::theme::agent_slug(&name);

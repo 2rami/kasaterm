@@ -3327,6 +3327,20 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// 되살리기 목록(`closed_panes`)을 읽거나 그중 하나를 **진짜 끈다**.
+    ///
+    /// 왜 소켓에 뚫는가: 닫은 pane 은 **죽지 않는다**(`alive`). 프로세스를 그대로 물고
+    /// 되살리기 목록에 앉아 있어서, 오케스트레이터가 `dismiss` 로 학생을 정리해도 그
+    /// claude 들은 계속 살아 있다 — 그런데 그 목록은 App 필드라 CLI 에서 보이지도, 끄지도
+    /// 못했다(거노 2026-08-06: "너도 보여? 너도 진짜 끄게 할 수 있는지").
+    ///
+    /// `Some(pane_id)` 면 그 항목을 버린다(살아 있으면 프로세스까지). `None` 이면 조회만.
+    /// pane id 로 지목하는 이유: 인덱스는 목록이 바뀌면 다른 항목을 가리킨다 —
+    /// 조회와 종료 사이에 pane 하나만 더 닫혀도 **엉뚱한 학생을 죽인다**.
+    SocketClosedPanes(
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
     /// 부른 pane **안에 새 탭**을 연다(쪼개지 않는다). 첫 필드가 없으면 포커스된
     /// pane. 회신은 새 탭의 pane id — 부른 쪽이 거기에 명령을 실어야 한다.
     ///
