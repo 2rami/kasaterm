@@ -4573,13 +4573,15 @@ impl App {
                 );
                 // 계정을 하나라도 추가했을 때만 이름을 붙인다.
                 let acct_label = (!self.set_claude_accounts.is_empty()).then(|| {
-                    self.set_claude_accounts
-                        .iter()
-                        .position(|a| a.id == self.set_claude_account)
-                        .map_or_else(
-                            || "기본".to_string(),
-                            |i| self.set_claude_accounts[i].display_label(i),
-                        )
+                    let id = self.set_claude_account.as_str();
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본"),
+                    }
                 });
                 let (body_top, acct_rect) = info::draw_info_actions(
                     g,
@@ -6032,10 +6034,19 @@ impl App {
                 let pad_x = 10.0_f32;
                 // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
                 // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
-                let mut rows: Vec<(AccountMenuItem, String)> =
-                    vec![(AccountMenuItem::Select(String::new()), "기본".to_string())];
+                let mut rows: Vec<(AccountMenuItem, String)> = vec![(
+                    AccountMenuItem::Select(String::new()),
+                    crate::settings::account_display("", "", "기본"),
+                )];
                 rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
-                    (AccountMenuItem::Select(a.id.clone()), a.display_label(i))
+                    (
+                        AccountMenuItem::Select(a.id.clone()),
+                        crate::settings::account_display(
+                            &a.id,
+                            &a.label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                    )
                 }));
                 rows.push((
                     AccountMenuItem::AddInSettings,

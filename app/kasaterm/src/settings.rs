@@ -318,8 +318,11 @@ impl App {
             self.set_toast(format!("계정 폴더 생성 실패: {e}"));
             return;
         }
-        let label = format!("계정 {}", self.set_claude_accounts.len() + 2);
-        self.set_claude_accounts.push(socket::ClaudeAccount { id: id.clone(), label });
+        // 라벨은 비워 둔다 — 이름을 안 붙인 슬롯은 `account_display` 가 그 슬롯의
+        // 진짜 이메일로 부른다. "계정 3" 을 미리 박아 두면 거노가 직접 친 별명과
+        // 구별이 안 돼 이메일로 대체할 수가 없다.
+        self.set_claude_accounts
+            .push(socket::ClaudeAccount { id: id.clone(), label: String::new() });
         self.settings_save();
 
         // env 를 명령 앞에 붙여 그 claude 프로세스에만 새 저장소를 물린다. shim 의
@@ -2243,6 +2246,32 @@ fn slot_identity(dir: Option<&std::path::Path>) -> (String, String) {
         .unwrap_or_default()
 }
 
+/// 계정 슬롯을 부를 이름. 거노가 별명을 직접 붙였으면 그것, 아니면 그 슬롯의
+/// **진짜 이메일**.
+///
+/// "기본"·"계정 2" 같은 자동 이름은 슬롯을 하나도 구별해 주지 않는다 — 계정
+/// 행에도 드롭다운에도 전환 토스트에도 그 이름이 떠서, 정작 어느 계정으로
+/// 갈아탔는지는 아무 데도 안 적혀 있었다(거노 요청 2026-08-06). 이메일은
+/// `auth_probe` 캐시에서 오므로 첫 프레임엔 아직 없다 — 그동안만 `fallback`.
+pub(crate) fn account_display(id: &str, label: &str, fallback: &str) -> String {
+    if !label_is_auto(label) {
+        return label.trim().to_string();
+    }
+    match auth_probe(id) {
+        Some(p) if !p.email.is_empty() => p.email,
+        _ => fallback.to_string(),
+    }
+}
+
+/// 우리가 붙인 이름인가. 빈 라벨과 옛 기본값 `계정 N` 을 자동으로 본다 — 후자는
+/// 예전 버전이 추가할 때 파일에 박아 둔 것이라 거노가 친 별명이 아니다.
+fn label_is_auto(label: &str) -> bool {
+    let t = label.trim();
+    t.is_empty()
+        || t.strip_prefix("계정 ")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// 화면에 띄울 조직명 — 팀 조직일 때만 Some. 개인 조직은 이름이 `<이메일>'s
 /// Organization` 이라 이메일을 한 번 더 읽는 것과 다름없어 노이즈만 된다.
 fn team_org(email: &str, org: &str) -> Option<String> {
@@ -2485,6 +2514,23 @@ fn text_field(
     // 쳤는지 읽을 수가 없다.
     if focused && (caret_on || !preedit.is_empty()) {
         g.rect(cx, r.1 + 7.0, 1.5, r.3 - 14.0, theme::text());
+    }
+}
+
+#[cfg(test)]
+mod account_label_tests {
+    use super::label_is_auto;
+
+    #[test]
+    fn auto_labels_yield_to_email() {
+        // 우리가 붙인 것 — 이메일로 대체돼야 한다
+        for l in ["", "  ", "계정 2", "계정 10"] {
+            assert!(label_is_auto(l), "자동으로 안 봤다: {l:?}");
+        }
+        // 거노가 친 별명 — 이메일이 있어도 이게 이긴다
+        for l in ["개인계정", "사이오닉팀플랜", "계정", "계정 팀", "계정 2호"] {
+            assert!(!label_is_auto(l), "별명을 자동으로 봤다: {l:?}");
+        }
     }
 }
 

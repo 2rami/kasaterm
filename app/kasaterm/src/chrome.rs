@@ -991,9 +991,7 @@ impl App {
         // 사이에 공유돼서 그 값이 그대로 거노 앱의 다음 크기가 된다(실사고 2026-08-06:
         // 좁은 화면 재현으로 430x700 를 띄웠더니 `window.json` 이 그 값으로 덮여,
         // 재시작하면 앱이 구석에 손바닥만 하게 뜰 뻔했다).
-        if std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
-            || std::env::var_os("KASATERM_WINDOW_POS").is_some()
-        {
+        if crate::verification_run() {
             return;
         }
         let Some(win) = self.window.as_ref() else { return };
