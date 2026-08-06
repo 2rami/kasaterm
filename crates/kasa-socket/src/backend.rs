@@ -413,6 +413,20 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
+    /// 그 pane 이 claude 를 띄우면 **쓰게 될** teammate 이름과 팀 — `(agent, team)`.
+    ///
+    /// 예측이 가능한 이유: 학생은 pane 이 생길 때 배정되고(`assign_character_env`),
+    /// 셰임은 그 학생 슬러그에 `-p<번호>` 를 붙일 뿐이다. 그래서 **부팅을 기다리지
+    /// 않고** split 응답에 실어 보낼 수 있고, 부른 쪽은 곧바로 SendMessage 로 브리프를
+    /// 보낼 수 있다(인박스 파일은 셰임이 `[ -f ] ||` 로 만들어 먼저 쓴 걸 안 덮는다).
+    /// 이게 없으면 오케스트레이터가 board 를 되짚거나 이름을 짐작하는데, 짐작은
+    /// 어긋나도 오류가 안 나고 지시가 조용히 사라진다.
+    ///
+    /// 팀은 pane 의 cwd 로 계산한다 — 학생을 **다른 레포로 `cd` 시켜** 띄우면 그
+    /// 학생의 실제 팀은 달라지므로 이 값이 틀린다. 그 경우는 board 가 정본이다.
+    fn pane_agent(&self, _surface_id: &str) -> Option<(String, String)> {
+        None
+    }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).

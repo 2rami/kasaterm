@@ -81,6 +81,10 @@ fn run() -> Result<Option<Response>> {
             args.retain(|a| *a != n);
             let socket_path = resolve_socket_path()?;
             let mut made: Vec<String> = Vec::new();
+            // pane 별로 「claude 로 뜨면 쓸 이름」도 모은다 — N 명을 띄우고 나면
+            // 그 다음 할 일이 N 통의 SendMessage 라, 이름이 여기 같이 나와야 board 를
+            // 되짚는 왕복이 안 생긴다. 모르는 pane 은 null.
+            let mut agents: Vec<Value> = Vec::new();
             let mut failed: Option<String> = None;
             for i in 0..count {
                 let mut a = args.clone();
@@ -99,7 +103,16 @@ fn run() -> Result<Option<Response>> {
                         .and_then(|v| v.get("id"))
                         .and_then(|v| v.as_str())
                     {
-                        Some(id) => made.push(id.to_string()),
+                        Some(id) => {
+                            made.push(id.to_string());
+                            agents.push(
+                                r.result
+                                    .as_ref()
+                                    .and_then(|v| v.get("agent"))
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                            );
+                        }
                         None => {
                             failed = Some("응답에 surface.id 가 없다".into());
                             break;
@@ -124,7 +137,7 @@ fn run() -> Result<Option<Response>> {
                 "{}",
                 json!({
                     "ok": ok,
-                    "result": { "surfaces": made, "requested": count },
+                    "result": { "surfaces": made, "agents": agents, "requested": count },
                     "error": failed,
                 })
             );

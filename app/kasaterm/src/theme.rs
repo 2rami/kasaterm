@@ -1023,6 +1023,18 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
         .map(|(_, s)| *s)
 }
 
+/// 캐릭터명 → **teammate agent 이름에 쓰는** 슬러그. 로스터에 없는 커스텀 캐릭터는
+/// 해시 축약으로 떨어진다(inbox 파일명이 이 슬러그라 한글은 "---" 로 붕괴한다).
+///
+/// 셰임이 굽는 case 분기(`teammate_case_arms`)와 split 이 미리 알려 주는 이름
+/// (`PtyBackend::pane_agent`)이 **이 하나를** 쓴다. 두 벌이 되면 부른 쪽이 닿지 않는
+/// 인박스에 브리프를 넣고도 성공으로 읽는다 — 어긋나도 오류가 안 나는 종류의 버그다.
+pub fn agent_slug(name: &str) -> String {
+    character_slug(name)
+        .map(String::from)
+        .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
+}
+
 /// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸
 /// 학생을 역추적할 때 쓴다(접힌 팀메시지 줄 학생색).
 pub fn slug_character(slug: &str) -> Option<&'static str> {
