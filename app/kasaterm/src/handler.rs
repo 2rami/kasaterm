@@ -762,8 +762,17 @@ impl ApplicationHandler<UserEvent> for App {
             Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
         ));
         // Restore the last window size; fall back to the default on first run.
-        let (init_w, init_h) =
-            crate::socket::read_window_size().unwrap_or((1100.0, 860.0));
+        // `KASATERM_WINDOW_SIZE="w,h"` — 저장된 크기를 무시한다. 폭에 딸린 버그
+        // (학생 테마가 좁은 pane 에서 안 붙는 것 같은)는 **그 폭으로 띄워야만** 재현되는데,
+        // 검증 인스턴스는 저장된 크기를 물려받아 늘 넓게 떴다. `KASATERM_WINDOW_POS` 와 같은
+        // 목적·같은 형식.
+        let forced_size = std::env::var("KASATERM_WINDOW_SIZE").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+        });
+        let (init_w, init_h) = forced_size
+            .or_else(crate::socket::read_window_size)
+            .unwrap_or((1100.0, 860.0));
         // 저장된 자리가 아직 살아 있는 화면이면 **창을 만들 때부터** 그 자리에
         // 띄운다. 만든 뒤에 옮기면 세 가지를 잃는다: ① 저장된 크기가 만들어진
         // 화면에 맞춰 깎이고(큰 모니터용 3840 이 내장에서 1512 로 잘렸다) ②
