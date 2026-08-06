@@ -986,6 +986,16 @@ impl App {
     /// Called from `exiting` and from the Moved/Resized debounce in
     /// `about_to_wait` — the debounce keeps the frame safe across a crash.
     pub(crate) fn save_window_frame(&self) {
+        // **검증 실행은 저장하지 않는다.** 위치·크기를 env 로 강제했다는 건 그 창이
+        // 사람이 쓰던 창이 아니라 하네스가 띄운 창이라는 뜻인데, 설정 파일은 인스턴스
+        // 사이에 공유돼서 그 값이 그대로 거노 앱의 다음 크기가 된다(실사고 2026-08-06:
+        // 좁은 화면 재현으로 430x700 를 띄웠더니 `window.json` 이 그 값으로 덮여,
+        // 재시작하면 앱이 구석에 손바닥만 하게 뜰 뻔했다).
+        if std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
+            || std::env::var_os("KASATERM_WINDOW_POS").is_some()
+        {
+            return;
+        }
         let Some(win) = self.window.as_ref() else { return };
         let scale = win.scale_factor().max(0.5);
         let sz = win.inner_size();
