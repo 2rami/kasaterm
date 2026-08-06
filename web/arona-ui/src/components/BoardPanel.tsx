@@ -141,7 +141,13 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
               {!!paneTasks[a.id]?.length && (
                 <div style={{ marginLeft: 16, marginTop: 5, display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {(() => {
-                    const all = [...paneTasks[a.id]].sort((x, y) => taskRank(x.status) - taskRank(y.status));
+                    // 목록은 방 하나를 여럿이 나눠 쓴다 — 그대로 그리면 같은 방 pane 카드마다
+                    // **같은 태스크 뭉치가 통째로 반복**된다(거노 2026-08-06: "각자 태스크가
+                    // 있으면 좋겠네"). 남이 주인인 것은 그 사람 카드에만 두고, 여기선 개수로만
+                    // 알린다. 주인 없는 것은 아무도 안 잡은 일이라 모든 카드에 남긴다.
+                    const room = [...paneTasks[a.id]].sort((x, y) => taskRank(x.status) - taskRank(y.status));
+                    const all = room.filter((t) => t.mine !== false);
+                    const others = room.length - all.length;
                     // 정렬이 완료를 뒤로 몰아 두므로 앞에서 자르면 열린 것은 하나도 안 잘린다.
                     const open = all.filter((t) => t.status !== 'completed');
                     const doneAll = all.filter((t) => t.status === 'completed');
@@ -165,6 +171,14 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                             style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
                           >
                             완료 {folded}개 더
+                          </div>
+                        )}
+                        {others > 0 && (
+                          <div
+                            title={room.filter((t) => t.mine === false).map((t) => `${t.owner} · ${t.subject}`).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            같은 방 다른 학생 {others}개
                           </div>
                         )}
                       </>

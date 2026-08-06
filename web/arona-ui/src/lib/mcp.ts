@@ -740,7 +740,9 @@ export async function fetchSentImages(surfaceId: string, n = 12, since?: number)
 
 /** GET /pane-tasks — claude TaskCreate 태스크(~/.claude/tasks/<session>/<n>.json)를
  *  pane 별로. surface 주면 그 pane 만. arona 업무 탭이 학생별 진행을 보여준다. fail-soft. */
-export interface PaneTask { pane: string; id: string; subject: string; status: string }
+/** `mine` = 이 pane 이 주인이거나 주인이 없는(방 공용) 태스크. 서버가 판정한다 — 웹뷰는
+ *  pane 이 어떤 에이전트 이름으로 떠 있는지 모른다. */
+export interface PaneTask { pane: string; id: string; subject: string; status: string; owner?: string; mine?: boolean }
 export async function fetchPaneTasks(surface?: string): Promise<PaneTask[]> {
   try {
     const q = surface ? `?surface=${encodeURIComponent(surface)}` : '';

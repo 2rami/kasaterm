@@ -537,9 +537,13 @@ async fn sent_images_handler(
     (cors, Json(serde_json::json!({ "ok": true, "images": imgs })))
 }
 
-/// task 디렉토리에서 `[(id, subject, status)]` 파싱. id(숫자) 오름차순. 비-json 제외.
-fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String)> {
-    let mut tasks: Vec<(u64, String, String, String)> = Vec::new();
+/// task 디렉토리에서 `[(id, subject, status, owner)]` 파싱. id(숫자) 오름차순. 비-json 제외.
+///
+/// `owner` 를 같이 싣는 이유: 같은 방 pane 들이 **한 목록을 공유하는 건 설계**라, 주인이
+/// 없으면 화면에서 「내 것」과 「방 전체」를 가를 근거가 아무것도 없다(거노 2026-08-06).
+/// 비어 있는 owner 는 주인 없는 방 공용 태스크다 — 그것도 정보다.
+fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String, String)> {
+    let mut tasks: Vec<(u64, String, String, String, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let path = e.path();
@@ -554,16 +558,17 @@ fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String)> {
             if subject.is_empty() {
                 continue;
             }
+            let owner = v.get("owner").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let ord = id.parse::<u64>().unwrap_or(u64::MAX);
-            tasks.push((ord, id, subject, status));
+            tasks.push((ord, id, subject, status, owner));
         }
     }
     tasks.sort_by_key(|t| t.0);
-    tasks.into_iter().map(|(_, id, s, st)| (id, s, st)).collect()
+    tasks.into_iter().map(|(_, id, s, st, o)| (id, s, st, o)).collect()
 }
 
 /// session_id → task. 신형 `session-<8hex>` 우선·구형 full-uuid 폴백(solo claude 용).
-fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
+fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> {
     if session_id.is_empty() {
         return Vec::new();
     }
@@ -707,9 +712,17 @@ async fn pane_tasks_handler(
             "team_dir": team.as_ref().map(|p| p.to_string_lossy().into_owned()),
             "n": tasks.len(),
         }));
-        for (id, subject, status) in tasks {
+        // 주인 판정은 **여기서** 한다 — 웹뷰는 pane 의 surface_id 만 알고 그 pane 이 어떤
+        // 에이전트 이름으로 떠 있는지는 모른다. 이름 비교를 UI 로 넘기면 board 타입에
+        // agent_name 을 실어 나르는 배관이 하나 더 생긴다.
+        let me = row.agent_name.as_deref().unwrap_or("");
+        for (id, subject, status, owner) in tasks {
             out.push(serde_json::json!({
-                "pane": row.surface_id, "id": id, "subject": subject, "status": status,
+                "pane": row.surface_id, "id": id, "subject": subject,
+                "status": status, "owner": owner,
+                // 주인 없는 태스크(`owner: ""`)는 방 공용이라 **모든 pane 에서 내 것**이다.
+                // 그래야 아무도 안 잡은 일이 어느 화면에서도 안 보이는 일이 없다.
+                "mine": owner.is_empty() || (!me.is_empty() && owner == me),
             }));
         }
     }
