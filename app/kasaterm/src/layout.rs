@@ -571,23 +571,33 @@ impl App {
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("활성 pane 이 없다");
         };
+        // **그 pane 을 가진 트리**에 꽂는다 — 활성 window 트리가 아니라.
+        // 예전엔 `pty_layout` 만 봐서, 거노가 다른 방을 보고 있으면 pane 이 자기
+        // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
+        // 스폰은 오케스트레이터가 배경에서 하는 일이라 **거노가 어느 방을 보고 있는지와
+        // 무관해야** 한다. 방 별도창이 같은 이유로 이미 이렇게 하고 있다
+        // (`split_room_pane`) — 그 두 벌을 여기 한 벌로 모은다.
+        let owner = self.window_of_pane(&active);
         let new_id = self.spawn_split_session(&active)?;
         let (win_cols, win_rows) = self.window_cells();
-        let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
-        if !layout.split_leaf(&active, dir, new_id.clone()) {
-            // 쪼갤 pane 이 **활성 window 트리에 없다** — 포커스가 다른 창으로
-            // 넘어가 있으면 실제로 일어난다. 샌 세션을 되감고 사유를 올린다.
+        let foreign = owner.filter(|w| *w != self.active_window);
+        let layout = match foreign {
+            Some(w) => self.windows.get_mut(w).and_then(|s| s.as_mut()),
+            None => self.pty_layout.as_mut(),
+        };
+        if !layout.is_some_and(|l| l.split_leaf(&active, dir, new_id.clone())) {
+            // 샌 세션을 되감고 사유를 올린다.
             self.pty.remove(&new_id);
             self.next_pane_id -= 1;
-            let win = self.window_of_pane(&active);
             anyhow::bail!(
-                "pane {active} 이 활성 window({}) 트리에 없다{}",
-                self.active_window,
-                match win {
-                    Some(w) => format!(" — window {w} 에 있다"),
-                    None => " — 어느 window 에도 없다".into(),
-                }
+                "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
             );
+        }
+        if foreign.is_some() {
+            // 안 보이는 방을 쪼갠 것이라 포커스도 메인 그리드도 건드리지 않는다.
+            // 그 방의 PTY 치수는 그 창을 앞으로 가져올 때(`aux_room_resize_pty`
+            // ·window 전환) 어차피 다시 맞춰진다.
+            return Ok(new_id);
         }
         self.ws.lock().unwrap().active_pane = Some(new_id.clone());
         self.resize_backend(win_cols, win_rows);
