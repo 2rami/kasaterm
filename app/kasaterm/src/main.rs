@@ -27,6 +27,7 @@ mod layout;
 mod markdown;
 mod auxwin;
 mod input;
+mod lineedit;
 mod settings;
 mod syntax;
 mod lsp;
@@ -3188,6 +3189,8 @@ struct RoomRename {
     last_click: Option<(usize, std::time::Instant)>,
     /// 편집 중인 방과 입력 버퍼. None = 편집 아님.
     editing: Option<(usize, String)>,
+    /// 버퍼 안 커서(문자 단위). 편집을 열 때 이름 끝에 둔다.
+    cursor: usize,
 }
 
 struct Workspace {

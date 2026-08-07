@@ -1397,13 +1397,7 @@ impl App {
     /// Insert text at the commit-message cursor (committed Hangul or a typed
     /// char). Char-indexed; advances the cursor by the inserted char count.
     pub(crate) fn git_commit_insert(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let col = self.git.commit_cursor.min(self.git.commit_msg.chars().count());
-        let b = char_byte(&self.git.commit_msg, col);
-        self.git.commit_msg.insert_str(b, text);
-        self.git.commit_cursor = col + text.chars().count();
+        crate::lineedit::insert(&mut self.git.commit_msg, &mut self.git.commit_cursor, text);
     }
     /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
     ///
@@ -1495,63 +1489,29 @@ impl App {
         self.in_preedit = false;
         self.git_commit_key(event);
     }
-    /// Single-line editing for the commit field: char insert, backspace/delete,
-    /// left/right/home/end. Enter submits the commit, Escape blurs. Hangul is
-    /// composed in `git_commit_input` before this runs.
+    /// Single-line editing for the commit field. 조작은 `lineedit` 한 벌을 쓴다 —
+    /// 칸마다 커서 산수를 다시 짜면 한글 경계에서 하나씩 어긋난다. Enter 는 커밋을
+    /// 실행하고 Esc 는 포커스를 뗀다(그 둘만 이 칸의 몫). 한글 조합은 이 함수 앞의
+    /// `git_commit_input` 이 이미 흘려보냈다.
     pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
-        use winit::keyboard::{Key, NamedKey};
-        let len = self.git.commit_msg.chars().count();
-        let mut col = self.git.commit_cursor.min(len);
-        match &event.logical_key {
-            Key::Named(NamedKey::Backspace) => {
-                if col > 0 {
-                    let b0 = char_byte(&self.git.commit_msg, col - 1);
-                    let b1 = char_byte(&self.git.commit_msg, col);
-                    self.git.commit_msg.replace_range(b0..b1, "");
-                    col -= 1;
-                }
-            }
-            Key::Named(NamedKey::Delete) => {
-                if col < len {
-                    let b0 = char_byte(&self.git.commit_msg, col);
-                    let b1 = char_byte(&self.git.commit_msg, col + 1);
-                    self.git.commit_msg.replace_range(b0..b1, "");
-                }
-            }
-            Key::Named(NamedKey::ArrowLeft) => col = col.saturating_sub(1),
-            Key::Named(NamedKey::ArrowRight) => {
-                if col < len {
-                    col += 1;
-                }
-            }
-            Key::Named(NamedKey::Home) => col = 0,
-            Key::Named(NamedKey::End) => col = len,
-            Key::Named(NamedKey::Enter) => {
-                self.git.commit_cursor = col;
+        let act = crate::lineedit::key(
+            &mut self.git.commit_msg,
+            &mut self.git.commit_cursor,
+            &event.logical_key,
+        );
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 self.run_git_col_action(GitColBtn::Commit);
                 return;
             }
-            Key::Named(NamedKey::Escape) => {
+            crate::lineedit::LineEditAction::Cancel => {
                 self.git.commit_focused = false;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Space) => {
-                let b = char_byte(&self.git.commit_msg, col);
-                self.git.commit_msg.insert(b, ' ');
-                col += 1;
-            }
-            Key::Character(txt) => {
-                let b = char_byte(&self.git.commit_msg, col);
-                self.git.commit_msg.insert_str(b, txt);
-                col += txt.chars().count();
             }
             _ => {}
         }
-        self.git.commit_cursor = col;
         self.chrome_dirty = true;
     }
     /// Type-to-search for the open path dropdown. Append-only (no mid-string
