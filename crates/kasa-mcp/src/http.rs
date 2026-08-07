@@ -669,6 +669,24 @@ fn team_task_dir_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// 이 태스크가 그 pane 것인가. `shared` = 방 저장소에서 읽었는지.
+///
+/// **방 저장소에서는 주인이 찍혀 있어야 내 것이다.** 전에는 `owner: ""` 를 「방 공용이라
+/// 모두의 것」으로 쳤는데, 방 저장소는 그 cwd 에서 돌았던 *모든 옛 세션*이 쌓이는 곳이라
+/// 아무도 안 잡고 죽은 태스크가 새 학생 카드마다 통째로 붙었다(실측 2026-08-07 sionic 방:
+/// 59개 중 55개가 주인 없음 — 7/24 slack-sentry, 8/5 recall-gui·larva, 8/6 ref2va. 모모이
+/// 본인 것은 3개인데 카드엔 58행). 주인 없는 것도 사라지진 않고 UI 가 「미배정 N개」로 접는다.
+///
+/// 세션 저장소는 반대다 — 그 pane 혼자 쓰는 목록이라 주인 없는 것도 제 것이고, 여기까지
+/// 엄격하게 굴면 혼자 도는 pane 은 카드가 통째로 빈다.
+fn task_is_mine(owner: &str, me: &str, shared: bool) -> bool {
+    if shared {
+        !owner.is_empty() && !me.is_empty() && owner == me
+    } else {
+        owner.is_empty() || (!me.is_empty() && owner == me)
+    }
+}
+
 /// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
 /// `pane_session_ids`(bound transcript stem) → 없으면 board cwd 로 팀 task 디렉토리 폴백.
 async fn pane_tasks_handler(
@@ -694,6 +712,9 @@ async fn pane_tasks_handler(
         // 1) bound transcript session(solo claude — session==task), 2) 팀(cwd) 폴백.
         let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
         let mut tasks = read_claude_tasks(&reported_sid);
+        // 세션 저장소는 그 pane 혼자 쓰고, 방 저장소는 여럿이 나눠 쓴다 — 주인 판정이
+        // 갈리는 지점이라 어느 쪽에서 읽었는지를 들고 간다.
+        let mut shared = false;
         // 팀 이름이 정본 — 없을 때만(트리플 없이 뜬 pane·옛 TeamCreate 팀) cwd 로 더듬는다.
         let team = row
             .team
@@ -704,6 +725,7 @@ async fn pane_tasks_handler(
             if let Some(dir) = &team {
                 if claimed_team.insert(dir.clone()) {
                     tasks = read_tasks_in_dir(dir);
+                    shared = true;
                 }
             }
         }
@@ -720,9 +742,7 @@ async fn pane_tasks_handler(
             out.push(serde_json::json!({
                 "pane": row.surface_id, "id": id, "subject": subject,
                 "status": status, "owner": owner,
-                // 주인 없는 태스크(`owner: ""`)는 방 공용이라 **모든 pane 에서 내 것**이다.
-                // 그래야 아무도 안 잡은 일이 어느 화면에서도 안 보이는 일이 없다.
-                "mine": owner.is_empty() || (!me.is_empty() && owner == me),
+                "mine": task_is_mine(&owner, me, shared),
             }));
         }
     }
@@ -3570,4 +3590,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn shared_room_tasks_need_an_owner() {
+        // 방 저장소: 주인 없는 것은 아무의 것도 아니다(옛 세션 유령이 카드마다 붙던 원인).
+        assert!(!task_is_mine("", "모모이", true));
+        assert!(task_is_mine("모모이", "모모이", true));
+        assert!(!task_is_mine("히마리", "모모이", true));
+        // 이름 없는 pane 은 방 목록에서 아무것도 가져가지 않는다.
+        assert!(!task_is_mine("", "", true));
+
+        // 세션 저장소: 그 pane 혼자 쓰므로 주인 없는 것도 제 것.
+        assert!(task_is_mine("", "모모이", false));
+        assert!(task_is_mine("", "", false));
+        assert!(!task_is_mine("히마리", "모모이", false));
+    }
 }
