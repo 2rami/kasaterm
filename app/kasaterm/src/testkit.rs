@@ -652,8 +652,15 @@ impl App {
         self.refresh_window_labels();
         let after = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
         eprintln!("[autoroomrename] 한 글자 넣은 뒤 라벨={after:?}");
+        // 커서를 앞으로 옮겨 가운데에 넣는다 — 캐럿이 늘 끝에 붙던 시절엔 여기서
+        // 글자와 캐럿 자리가 갈렸다.
+        self.room_rename.cursor = 0;
+        self.room_rename_insert("A");
+        self.refresh_window_labels();
+        let mid = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        eprintln!("[autoroomrename] 맨 앞에 넣은 뒤 라벨={mid:?} 커서={}", self.room_rename.cursor);
         eprintln!(
-            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 라벨 끝이 'X▌' / 캐시 fresh 여도 즉시 반영"
+            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 'X▌' / 맨 앞 삽입은 'A▌' 뒤에 원래 이름"
         );
         self.render_frame();
     }

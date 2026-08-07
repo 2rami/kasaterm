@@ -1066,7 +1066,10 @@ impl App {
             Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
             _ => "",
         };
-        let text = format!("{buf}{composing}\u{258c}");
+        // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안 커서가 어디 있는지
+        // 화면이 거짓말을 한다. 조합 중인 글자는 커서 바로 앞에 온다.
+        let (before, after) = crate::lineedit::split(buf, self.room_rename.cursor);
+        let text = format!("{before}{composing}\u{258c}{after}");
         if let Some(slot) = self.window_labels.get_mut(*idx) {
             slot.0 = text;
         }

@@ -1152,6 +1152,7 @@ impl App {
                     .cloned()
                     .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
                     .unwrap_or_default();
+                self.room_rename.cursor = cur.chars().count();
                 self.room_rename.editing = Some((idx, cur));
                 self.room_rename.last_click = None;
                 let _ = self.hangul.flush();
@@ -1339,10 +1340,11 @@ impl App {
         self.in_preedit = false;
     }
 
-    /// 조합이 끝난 글자를 편집 버퍼에 붙인다(`ime_retarget` 도 여기로 흘린다).
+    /// 조합이 끝난 글자를 커서 자리에 넣는다(`ime_retarget` 도 여기로 흘린다).
     pub(crate) fn room_rename_insert(&mut self, text: &str) {
+        let cursor = &mut self.room_rename.cursor;
         if let Some((_, buf)) = self.room_rename.editing.as_mut() {
-            buf.push_str(text);
+            crate::lineedit::insert(buf, cursor, text);
             self.chrome_dirty = true;
         }
     }
@@ -1393,18 +1395,14 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Enter) => self.commit_room_rename(),
-            Key::Named(NamedKey::Escape) => self.cancel_room_rename(),
-            Key::Named(NamedKey::Backspace) => {
-                if let Some((_, buf)) = self.room_rename.editing.as_mut() {
-                    buf.pop();
-                }
-            }
-            Key::Character(c) => {
-                let c = c.clone();
-                self.room_rename_insert(&c);
-            }
+        let cursor = &mut self.room_rename.cursor;
+        let act = match self.room_rename.editing.as_mut() {
+            Some((_, buf)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            None => crate::lineedit::LineEditAction::Ignored,
+        };
+        match act {
+            crate::lineedit::LineEditAction::Submit => self.commit_room_rename(),
+            crate::lineedit::LineEditAction::Cancel => self.cancel_room_rename(),
             _ => {}
         }
         self.mark_room_label_dirty();
