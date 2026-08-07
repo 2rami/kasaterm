@@ -1143,10 +1143,19 @@ impl App {
             // 전환보다 먼저 본다 — 전환은 같은 방이면 어차피 무동작이다.
             let now = std::time::Instant::now();
             if starts_room_rename(self.room_rename.last_click, idx, self.active_window, now) {
-                let cur = self.window_name_override.get(&idx).cloned().unwrap_or_default();
+                // 손으로 붙인 이름이 없으면 **지금 화면에 보이는 라벨**로 시작한다.
+                // 빈칸으로 열면 cwd 에서 파생된 이름이 눈앞에서 사라져, 고치려던
+                // 사람이 이름을 통째로 다시 쳐야 한다(Finder 는 현 이름을 채워 준다).
+                let cur = self
+                    .window_name_override
+                    .get(&idx)
+                    .cloned()
+                    .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
+                    .unwrap_or_default();
                 self.room_rename.editing = Some((idx, cur));
                 self.room_rename.last_click = None;
-                self.chrome_dirty = true;
+                let _ = self.hangul.flush();
+                self.mark_room_label_dirty();
                 return true;
             }
             self.room_rename.last_click = Some((idx, now));
@@ -1293,42 +1302,124 @@ impl App {
     /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
     /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
     pub(crate) fn commit_room_rename(&mut self) {
-        let Some((idx, buf)) = self.room_rename.editing.take() else { return };
+        let Some((idx, mut buf)) = self.room_rename.editing.take() else { return };
+        // 조합 중이던 마지막 글자도 이름의 일부다 — 안 흘리면 "가나다" 를 치고
+        // Enter 를 눌렀을 때 "가나" 만 남는다.
+        if let Some(tail) = self.hangul.flush() {
+            buf.push_str(&tail);
+        }
+        self.end_room_rename_ime();
         let name = buf.trim().to_string();
         if name.is_empty() {
             self.window_name_override.remove(&idx);
         } else {
             self.window_name_override.insert(idx, name);
         }
-        self.chrome_dirty = true;
+        self.window_labels_at = None;
+        self.mark_room_label_dirty();
     }
 
     /// 편집을 버린다(Esc).
     pub(crate) fn cancel_room_rename(&mut self) {
         if self.room_rename.editing.take().is_some() {
+            let _ = self.hangul.flush();
+            self.end_room_rename_ime();
+            self.window_labels_at = None;
+            self.mark_room_label_dirty();
+        }
+    }
+
+    /// 편집이 끝났으니 조합 상태를 걷는다. `ime_focus` 를 비워 두지 않으면 다음에
+    /// pane 으로 치는 한글이 `ime_retarget` 에서 사라진 편집칸으로 흘러간다.
+    fn end_room_rename_ime(&mut self) {
+        if matches!(self.ime_focus, Some(crate::ImeFocus::RoomRename(_))) {
+            self.ime_focus = None;
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+    }
+
+    /// 조합이 끝난 글자를 편집 버퍼에 붙인다(`ime_retarget` 도 여기로 흘린다).
+    pub(crate) fn room_rename_insert(&mut self, text: &str) {
+        if let Some((_, buf)) = self.room_rename.editing.as_mut() {
+            buf.push_str(text);
             self.chrome_dirty = true;
         }
     }
 
     /// 편집 중인 방에 키를 넣는다. 처리했으면 true — 호출부가 그 키를 pane 으로
     /// 흘리지 않게 한다(편집 중 타이핑이 셸에 새면 안 된다).
-    pub(crate) fn room_rename_key(&mut self, key: &winit::keyboard::Key) -> bool {
+    ///
+    /// **한글은 자체 조합기(`self.hangul`)를 태운다.** macOS 는 OS IME 를 꺼 두고
+    /// (`set_ime_allowed(false)`) 자모를 `KeyboardInput.text` 로 직접 받으므로, 여기서
+    /// 조합하지 않으면 "안녕"이 "ㅇㅏㄴㄴㅕㅇ"으로 박힌다 — 거노: "이름 바꾸는 거
+    /// 이상한데". git 커밋 칸(`git_commit_input`)이 같은 이유로 같은 경로를 탄다.
+    pub(crate) fn room_rename_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let Some((_, buf)) = self.room_rename.editing.as_mut() else { return false };
-        match key {
+        let Some(idx) = self.room_rename.editing.as_ref().map(|(i, _)| *i) else { return false };
+        if crate::input::is_modifier_key(event) {
+            return true;
+        }
+        // Cmd/Ctrl 조합은 삼키되 버퍼엔 안 넣는다. 앞단에서 안 잡힌 조합(Cmd+C 등)이
+        // 여기 오면 글자만 박히고, 흘려보내면 편집 중인데 셸이 그 키를 먹는다.
+        if self.modifiers.super_key() || self.modifiers.control_key() {
+            return true;
+        }
+        self.ime_retarget(crate::ImeFocus::RoomRename(idx));
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
+                if (0x3130..=0x318F).contains(&(c as u32)) {
+                    if let Some(done) = self.hangul.feed(c) {
+                        self.room_rename_insert(&done);
+                    }
+                    self.preedit = self.hangul.preedit().unwrap_or_default();
+                    self.in_preedit = !self.preedit.is_empty();
+                    self.mark_room_label_dirty();
+                    return true;
+                }
+            }
+        }
+        // 조합 중이던 자모를 지우는 백스페이스가 먼저다 — 완성 글자를 지우기 전에
+        // 조합기 안의 것부터 물린다.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.mark_room_label_dirty();
+            return true;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.room_rename_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        match &event.logical_key {
             Key::Named(NamedKey::Enter) => self.commit_room_rename(),
             Key::Named(NamedKey::Escape) => self.cancel_room_rename(),
             Key::Named(NamedKey::Backspace) => {
-                buf.pop();
-                self.chrome_dirty = true;
+                if let Some((_, buf)) = self.room_rename.editing.as_mut() {
+                    buf.pop();
+                }
             }
             Key::Character(c) => {
-                buf.push_str(c);
-                self.chrome_dirty = true;
+                let c = c.clone();
+                self.room_rename_insert(&c);
             }
-            _ => return false,
+            _ => {}
         }
+        self.mark_room_label_dirty();
         true
+    }
+
+    /// 방 라벨을 이번 프레임에 다시 짓게 한다. `refresh_window_labels` 는 1초 캐시라
+    /// 이걸 안 깨면 **타이핑이 1초씩 뭉쳐 나온다**(거노: "버벅여"). 편집 중인 방의
+    /// 라벨은 캐시 밖에서 버퍼로 덮으므로 재계산 자체는 안 돌지만, 편집을 끝낸 뒤
+    /// 원래 이름으로 돌아가려면 캐시를 한 번 비워야 한다.
+    fn mark_room_label_dirty(&mut self) {
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 
     pub(crate) fn toggle_sidebar(&mut self) {
@@ -2572,6 +2663,10 @@ mod toast_tests {
 }
 
 
+/// 이 간격 안에 다시 누르면 더블클릭이지 이름 편집이 아니다. 헤드리스 하네스도
+/// 이 값을 봐야 하므로(문턱을 두 벌로 두면 하네스가 조용히 어긋난다) 밖에 둔다.
+pub(crate) const ROOM_RENAME_DOUBLE_CLICK_MS: u128 = 500;
+
 /// 「느린 더블클릭」인가 — **이미 열려 있는 방**의 줄을, **더블클릭 문턱보다 늦게**
 /// 다시 누른 경우.
 ///
@@ -2584,13 +2679,12 @@ pub(crate) fn starts_room_rename(
     active: usize,
     now: std::time::Instant,
 ) -> bool {
-    const DOUBLE_CLICK_MS: u128 = 500;
     // 너무 오래 지난 클릭은 "다시 누른 것"이 아니라 새 클릭이다 — 몇 분 전 클릭이
     // 편집을 열면 사용자는 이유를 못 찾는다.
     const STALE_MS: u128 = 5_000;
     let Some((prev_idx, at)) = last else { return false };
     let ms = now.duration_since(at).as_millis();
-    prev_idx == idx && idx == active && ms > DOUBLE_CLICK_MS && ms <= STALE_MS
+    prev_idx == idx && idx == active && ms > ROOM_RENAME_DOUBLE_CLICK_MS && ms <= STALE_MS
 }
 
 #[cfg(test)]

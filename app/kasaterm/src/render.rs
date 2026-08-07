@@ -32,12 +32,16 @@ impl App {
     /// already cell-space — the renderer-side helper applies cell
     /// metric multiplication.
     fn gpu_overlay_snapshot(&self) -> GpuOverlay {
-        // 터미널 오버레이도 조합기 주인일 때만 그린다. 편집기가 조합 중인데
+        // 터미널 오버레이는 조합기 주인이 터미널일 때만 그린다. 편집기가 조합 중인데
         // 포커스만 터미널로 옮겨진 순간(클릭 직후, 아직 아무 키도 안 친 상태)
         // 남의 조합 글자를 터미널 커서에 그리게 된다.
+        //
+        // **화이트리스트로 둔다.** 크롬 쪽 입력칸(git 커밋·파일트리·방 이름·경로 검색)은
+        // 전부 자기 자리에 프리에딧을 그리므로, 빠뜨린 갈래가 하나라도 있으면 같은 글자가
+        // 그 칸과 터미널 커서에 이중으로 뜬다. 목록에 없는 새 필드가 생겨도 안 새게.
         let preedit_text = match &self.ime_focus {
-            Some(crate::ImeFocus::Editor(_)) | Some(crate::ImeFocus::AuxEditor(_)) => String::new(),
-            _ => self.preedit.clone(),
+            None | Some(crate::ImeFocus::Pane(_)) => self.preedit.clone(),
+            _ => String::new(),
         };
         let commit_overlay = self.commit_overlay.clone();
         // Active pane's font multiplier — the overlay anchors to this same
