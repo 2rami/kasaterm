@@ -2260,7 +2260,16 @@ pub(crate) fn account_display(id: &str, label: &str, fallback: &str) -> String {
     if !label_is_auto(label) {
         return label.trim().to_string();
     }
+    // 이름 없는 슬롯은 **어느 한도를 쓰는지**로 부른다. 한 이메일에 팀 조직과 개인
+    // 조직이 둘 다 달려 있으면 이메일만으로는 두 슬롯이 똑같아 보이는데, 정작 한도는
+    // 따로 돈다 — 실제로 슬롯 셋이 전부 `2rami@sionic.ai` 로 보이면서 그중 아무도
+    // 팀플랜 한도를 안 쓰고 있었다(거노 2026-08-07: "3개가 모두 같을리가없는데").
+    //
+    // 개인 조직은 이름이 `<이메일>'s Organization` 이라 조직명으로 부르면 이메일을
+    // 두 번 쓰는 꼴이 된다 — 그래서 **이메일을 품지 않은 조직명**(=진짜 팀)만 조직으로
+    // 부르고 나머지는 이메일로 둔다.
     match auth_probe(id) {
+        Some(p) if !p.org.is_empty() && !p.org.contains(&p.email) => p.org,
         Some(p) if !p.email.is_empty() => p.email,
         _ => fallback.to_string(),
     }
