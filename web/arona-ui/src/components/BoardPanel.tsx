@@ -144,10 +144,15 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                     // 목록은 방 하나를 여럿이 나눠 쓴다 — 그대로 그리면 같은 방 pane 카드마다
                     // **같은 태스크 뭉치가 통째로 반복**된다(거노 2026-08-06: "각자 태스크가
                     // 있으면 좋겠네"). 남이 주인인 것은 그 사람 카드에만 두고, 여기선 개수로만
-                    // 알린다. 주인 없는 것은 아무도 안 잡은 일이라 모든 카드에 남긴다.
+                    // 알린다. 주인 없는 것도 마찬가지 — 방 저장소엔 그 cwd 에서 돌았던 옛
+                    // 세션이 전부 쌓여 있어서(실측 59개 중 55개가 주인 없는 유령) 그걸 카드에
+                    // 풀면 지금 뭘 하는지가 통째로 묻힌다. 개수로만 알리고 툴팁에 담는다.
                     const room = [...paneTasks[a.id]].sort((x, y) => taskRank(x.status) - taskRank(y.status));
                     const all = room.filter((t) => t.mine !== false);
-                    const others = room.length - all.length;
+                    // 미배정은 아무도 안 잡은 일 — 끝난 것까지 셀 이유는 없다(주인 없이 끝난
+                    // 건 이미 지나간 일이고, 여기서 봐야 할 건 「누가 집어 가야 하나」다).
+                    const idle = room.filter((t) => t.mine === false && !t.owner && t.status !== 'completed');
+                    const others = room.filter((t) => t.mine === false && !!t.owner).length;
                     // 정렬이 완료를 뒤로 몰아 두므로 앞에서 자르면 열린 것은 하나도 안 잘린다.
                     const open = all.filter((t) => t.status !== 'completed');
                     const doneAll = all.filter((t) => t.status === 'completed');
@@ -173,9 +178,17 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                             완료 {folded}개 더
                           </div>
                         )}
+                        {idle.length > 0 && (
+                          <div
+                            title={idle.map((t) => t.subject).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            미배정 {idle.length}개
+                          </div>
+                        )}
                         {others > 0 && (
                           <div
-                            title={room.filter((t) => t.mine === false).map((t) => `${t.owner} · ${t.subject}`).join('\n')}
+                            title={room.filter((t) => t.mine === false && !!t.owner).map((t) => `${t.owner} · ${t.subject}`).join('\n')}
                             style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
                           >
                             같은 방 다른 학생 {others}개
