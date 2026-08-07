@@ -687,6 +687,108 @@ impl App {
         self.render_frame();
     }
 
+    /// Headless 파일트리 이름변경 repro: `KASATERM_AUTOFTRENAME_MS` 뒤에 트리를 켜고
+    /// 첫 파일의 인라인 이름변경을 열어, 커서가 어디에 서는지와 가운데 삽입이 그
+    /// 자리에 들어가는지를 찍는다.
+    ///
+    /// 봐야 할 건 둘이다. ①편집을 연 순간의 커서 — 0 이면 이름 맨 앞에 서서, 확장자
+    /// 하나 고치려는 사람이 커서를 끝까지 몰고 가야 한다. ②커서를 옮긴 뒤의 삽입
+    /// 자리 — 끝에만 붙던 시절엔 여기서 글자가 엉뚱한 데로 갔다. 캐럿이 그 자리에
+    /// 그려지는지는 같은 프레임의 캡처로 눈으로 본다.
+    /// (한글 조합은 OS 키 경로라 여기서 재현 못 한다 — 사람이 직접 쳐야 한다.)
+    pub(crate) fn run_pending_autoftrename(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFTRENAME_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.file_tree.visible {
+            self.toggle_file_tree();
+        }
+        self.refresh_file_tree();
+        self.render_frame();
+        // 같은 칼럼의 검색칸도 한 화면에 담아 둔다 — 커서를 옮겨 넣은 글자가
+        // 제자리에 그려지는지 본다(이 칸의 캐럿은 rename 이 열리며 꺼진다).
+        self.file_tree_search_insert("sc");
+        self.file_tree.search_cursor = 0;
+        self.file_tree_search_insert("A");
+        eprintln!(
+            "[autoftrename] 검색칸={:?} 커서={} (기대: \"Asc\" / 1)",
+            self.file_tree.search_query, self.file_tree.search_cursor
+        );
+        let Some(target) = self.file_tree.nodes.iter().find(|n| !n.is_dir).map(|n| n.path.clone())
+        else {
+            eprintln!("[autoftrename] 트리에 파일이 없다 — cwd 를 확인할 것");
+            return;
+        };
+        self.file_tree.selected = Some(target.clone());
+        self.run_ft_menu_action(crate::FtMenuAction::Rename);
+        let opened = self.file_tree.rename.clone();
+        eprintln!("[autoftrename] 대상={target:?} 편집진입={opened:?} 커서={}", self.file_tree.edit_cursor);
+        // 커서를 이름 한가운데로 옮겨 넣어 본다 — 끝에만 붙던 시절의 회귀 감시.
+        let mid = self.file_tree.rename.as_ref().map_or(0, |(_, n)| n.chars().count() / 2);
+        self.file_tree.edit_cursor = mid;
+        self.ft_edit_insert("Z");
+        eprintln!(
+            "[autoftrename] {mid} 번째에 넣은 뒤 버퍼={:?} 커서={}",
+            self.file_tree.rename.as_ref().map(|(_, n)| n.clone()),
+            self.file_tree.edit_cursor
+        );
+        eprintln!("[autoftrename] 기대: 진입 커서 = 이름 길이 / 'Z' 가 이름 한가운데 / 캐럿이 그 뒤");
+        self.render_frame();
+    }
+
+    /// Headless 경로 검색칸 repro: `KASATERM_AUTOPATHSEARCH_MS` 뒤에 활성 pane 의 경로
+    /// 드롭다운을 열고, 검색어를 친 뒤 커서를 앞으로 옮겨 한 글자를 더 넣는다.
+    ///
+    /// 이 칸엔 원래 캐럿이 없었다 — 끝에만 붙는 칸이었기 때문이다. 그래서 여기서는
+    /// 커서가 가운데 있을 때 **캐럿이 그 자리에 서는지**를 캡처로 본다.
+    pub(crate) fn run_pending_autopathsearch(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOPATHSEARCH_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let Some(id) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autopathsearch] 활성 pane 이 없다");
+            return;
+        };
+        // 드롭다운은 footer 의 경로 칩에 앵커링된다 — 바를 안 켜면 칩 rect 가 없어
+        // 메뉴가 통째로 안 그려진다(첫 시도에서 빈 화면만 찍혔다).
+        self.set_footer_default = true;
+        self.render_frame();
+        self.open_statusbar_menu(&id, crate::StatusbarMenu::Path);
+        self.statusbar_search_insert("sc");
+        // 커서를 맨 앞으로 몰고 한 글자 — 끝에만 붙던 시절엔 "sc" 뒤에 붙었다.
+        self.statusbar.menu_search_cursor = 0;
+        self.statusbar_search_insert("A");
+        eprintln!(
+            "[autopathsearch] 검색어={:?} 커서={} (기대: \"Asc\" / 1, 캐럿은 A 뒤)",
+            self.statusbar.menu_search, self.statusbar.menu_search_cursor
+        );
+        self.render_frame();
+    }
+
     /// Headless 닫기→되살리기 repro: `KASATERM_AUTOCLOSEREOPEN_MS` 뒤에 pane 을 쪼갠 뒤
     /// 하나를 닫고, 되살리기 스택에 남았는지 찍고, 다시 되살린다.
     ///

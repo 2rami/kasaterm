@@ -1439,13 +1439,9 @@ impl App {
             crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
-            crate::ImeFocus::PathSearch => self.statusbar.menu_search.push_str(&text),
-            crate::ImeFocus::TreeSearch => self.file_tree.search_query.push_str(&text),
-            crate::ImeFocus::TreeNew => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push_str(&text);
-                }
-            }
+            crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
+            crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
+            crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
             crate::ImeFocus::Settings => self.settings_insert_text(&text),
         }
     }
@@ -1514,10 +1510,21 @@ impl App {
         }
         self.chrome_dirty = true;
     }
-    /// Type-to-search for the open path dropdown. Append-only (no mid-string
-    /// cursor — a search box doesn't need one), with the shared Hangul composer
-    /// so Korean filters compose. Esc closes, Enter opens the first match,
-    /// Backspace deletes a jamo then a char. Every edit resets the scroll.
+    /// 커서 자리에 글자를 넣는다 — 조합이 끝난 한글도, 포커스가 떠나며 확정된
+    /// 음절(`ime_retarget`)도 여기로 온다.
+    pub(crate) fn statusbar_search_insert(&mut self, text: &str) {
+        crate::lineedit::insert(
+            &mut self.statusbar.menu_search,
+            &mut self.statusbar.menu_search_cursor,
+            text,
+        );
+        self.statusbar.menu_scroll = 0.0;
+    }
+    /// Type-to-search for the open path dropdown, with the shared Hangul
+    /// composer so Korean filters compose. 조작은 `lineedit` 한 벌 — 검색칸도
+    /// 가운데를 고칠 수 있어야 한다. Esc 는 드롭다운을 닫고 Enter 는 첫 후보를
+    /// 연다(그 둘만 이 칸의 몫). 목록이 실제로 달라졌을 때만 스크롤을 되감는다 —
+    /// 커서만 옮겼는데 스크롤이 튀면 보던 자리를 잃는다.
     pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
         if is_modifier_key(event) {
             return;
@@ -1530,63 +1537,65 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.statusbar.menu_search.push_str(&commit);
+                            self.statusbar_search_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.statusbar.menu_scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.statusbar.menu = None;
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Enter) => {
-                let _ = self.hangul.flush();
-                self.preedit.clear();
-                self.in_preedit = false;
+        // 조합 중이던 자모를 지우는 백스페이스가 먼저다 — 완성 글자를 지우기 전에
+        // 조합기 안의 것부터 물린다.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.statusbar_search_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let before = self.statusbar.menu_search.len();
+        let act = crate::lineedit::key(
+            &mut self.statusbar.menu_search,
+            &mut self.statusbar.menu_search_cursor,
+            &event.logical_key,
+        );
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 self.statusbar_menu_activate_first();
                 self.chrome_dirty = true;
                 return;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else {
-                    self.statusbar.menu_search.pop();
-                }
-                self.statusbar.menu_scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
+            crate::lineedit::LineEditAction::Cancel => {
+                self.statusbar.menu = None;
             }
             _ => {}
         }
-        if let Some(flushed) = self.hangul.flush() {
-            self.statusbar.menu_search.push_str(&flushed);
+        if self.statusbar.menu_search.len() != before {
+            self.statusbar.menu_scroll = 0.0;
         }
-        self.preedit.clear();
-        self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.statusbar.menu_search.push(' '),
-            Key::Character(txt) => self.statusbar.menu_search.push_str(txt),
-            _ => {}
-        }
-        self.statusbar.menu_scroll = 0.0;
         self.chrome_dirty = true;
     }
-    /// Same append-only search entry for the file-tree column's search box.
-    /// Esc closes the box, Backspace deletes a jamo then a char. The filtered
-    /// node list is recomputed by `rebuild_file_tree_nodes` on each edit.
+    /// 트리 검색칸의 커서 자리에 글자를 넣고 걸린 노드를 다시 모은다.
+    pub(crate) fn file_tree_search_insert(&mut self, text: &str) {
+        crate::lineedit::insert(
+            &mut self.file_tree.search_query,
+            &mut self.file_tree.search_cursor,
+            text,
+        );
+        self.file_tree_search_collect();
+        self.file_tree.scroll = 0.0;
+    }
+    /// Same search entry for the file-tree column's search box, on the shared
+    /// `lineedit` 조작. Esc closes the box; the filtered node list is recomputed
+    /// by `file_tree_search_collect` on each edit — 쿼리가 그대로인 커서 이동엔
+    /// 안 돌린다(트리를 다시 훑을 이유가 없고 스크롤도 안 튄다).
     pub(crate) fn file_tree_search_key(&mut self, event: &KeyEvent) {
         if is_modifier_key(event) {
             return;
@@ -1599,56 +1608,42 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.file_tree.search_query.push_str(&commit);
-                            self.file_tree_search_collect();
+                            self.file_tree_search_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.file_tree.scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.file_tree.search_active = false;
-                self.file_tree.search_query.clear();
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.file_tree_search_collect(); // empty query → restore tree
-                self.file_tree.scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else {
-                    self.file_tree.search_query.pop();
-                }
-                self.file_tree_search_collect();
-                self.file_tree.scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
-            }
-            _ => {}
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
         }
         if let Some(flushed) = self.hangul.flush() {
-            self.file_tree.search_query.push_str(&flushed);
+            self.file_tree_search_insert(&flushed);
         }
         self.preedit.clear();
         self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.file_tree.search_query.push(' '),
-            Key::Character(txt) => self.file_tree.search_query.push_str(txt),
-            _ => {}
+        let before = self.file_tree.search_query.len();
+        let act = crate::lineedit::key(
+            &mut self.file_tree.search_query,
+            &mut self.file_tree.search_cursor,
+            &event.logical_key,
+        );
+        if act == crate::lineedit::LineEditAction::Cancel {
+            self.file_tree.search_active = false;
+            self.file_tree.search_query.clear();
+            self.file_tree.search_cursor = 0;
         }
-        self.file_tree_search_collect();
-        self.file_tree.scroll = 0.0;
+        if self.file_tree.search_query.len() != before {
+            self.file_tree_search_collect(); // 빈 쿼리 → 트리 복원
+            self.file_tree.scroll = 0.0;
+        }
         self.chrome_dirty = true;
     }
     /// Name entry for the inline new-file/folder row. Enter creates the entry,
@@ -1668,9 +1663,7 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            if let Some(buf) = self.ft_edit_buf() {
-                                buf.push_str(&commit);
-                            }
+                            self.ft_edit_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
@@ -1680,77 +1673,56 @@ impl App {
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.file_tree.new = None;
-                self.file_tree.new_parent = None;
-                self.file_tree.rename = None;
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Enter) => {
-                if let Some(f) = self.hangul.flush() {
-                    if let Some(buf) = self.ft_edit_buf() {
-                        buf.push_str(&f);
-                    }
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.ft_edit_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let act = match self.ft_edit() {
+            Some((buf, cursor)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            None => crate::lineedit::LineEditAction::Ignored,
+        };
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 if self.file_tree.rename.is_some() {
                     self.commit_rename();
                 } else {
                     self.commit_new_entry();
                 }
-                self.chrome_dirty = true;
-                return;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else if let Some(buf) = self.ft_edit_buf() {
-                    buf.pop();
-                }
-                self.chrome_dirty = true;
-                return;
-            }
-            _ => {}
-        }
-        if let Some(flushed) = self.hangul.flush() {
-            if let Some(buf) = self.ft_edit_buf() {
-                buf.push_str(&flushed);
-            }
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push(' ');
-                }
-            }
-            Key::Character(txt) => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push_str(txt);
-                }
+            crate::lineedit::LineEditAction::Cancel => {
+                self.file_tree.new = None;
+                self.file_tree.new_parent = None;
+                self.file_tree.rename = None;
+                self.file_tree.edit_cursor = 0;
             }
             _ => {}
         }
         self.chrome_dirty = true;
     }
-    /// 인라인 입력행의 편집 버퍼 — rename 우선, 없으면 new. 둘 다 마지막 필드가
-    /// 편집 중 텍스트라 키 입력을 한 곳에서 받는다.
-    fn ft_edit_buf(&mut self) -> Option<&mut String> {
-        if let Some((_, b)) = self.file_tree.rename.as_mut() {
-            return Some(b);
+    /// 인라인 입력행의 편집 버퍼와 그 커서 — rename 우선, 없으면 new. 둘은 서로
+    /// 배타라 커서(`edit_cursor`)를 한 벌만 두고 열린 쪽에 붙인다.
+    fn ft_edit(&mut self) -> Option<(&mut String, &mut usize)> {
+        let ft = &mut self.file_tree;
+        let buf = match (ft.rename.as_mut(), ft.new.as_mut()) {
+            (Some((_, b)), _) => b,
+            (None, Some((_, b))) => b,
+            (None, None) => return None,
+        };
+        Some((buf, &mut ft.edit_cursor))
+    }
+    /// 커서 자리에 글자를 넣는다 — 조합이 끝난 한글도, 포커스가 떠나며 확정된
+    /// 음절(`ime_retarget`)도 여기로 온다.
+    pub(crate) fn ft_edit_insert(&mut self, text: &str) {
+        if let Some((buf, cursor)) = self.ft_edit() {
+            crate::lineedit::insert(buf, cursor, text);
         }
-        if let Some((_, b)) = self.file_tree.new.as_mut() {
-            return Some(b);
-        }
-        None
     }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {

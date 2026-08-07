@@ -590,6 +590,9 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    // 이름을 싣고 여는 유일한 칸이라 커서를 여기서 끝에 찍는다 —
+                    // 0 으로 두면 고치려던 확장자 앞이 아니라 이름 맨 앞에 선다.
+                    self.file_tree.edit_cursor = name.chars().count();
                     self.file_tree.rename = Some((p, name));
                     self.file_tree.new = None;
                     self.file_tree.search_active = false;

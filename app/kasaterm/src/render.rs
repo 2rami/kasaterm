@@ -3483,11 +3483,17 @@ impl App {
                     round_rect(g, row_x + 1.0, sbx_y + 1.0, search_w - 2.0, search_box_h - 2.0, theme::radius_sm() - 1.0, fill);
                     let ic = if active { theme::text() } else { theme::text_dim() };
                     g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
-                    let mut shown = self.file_tree.search_query.clone();
+                    // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안
+                    // 화면이 거짓말을 한다. 커서 앞뒤로 갈라 「앞 → 조합 중 글자
+                    // → 뒤」로 붙여 그리고, 캐럿은 그 앞부분 폭에 세운다.
+                    let (head, tail) =
+                        crate::lineedit::split(&self.file_tree.search_query, self.file_tree.search_cursor);
+                    let mut head = head;
                     if active && self.in_preedit {
-                        shown.push_str(&self.preedit);
+                        head.push_str(&self.preedit);
                     }
-                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
+                    let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                    let shown = format!("{head}{tail}");
                     let (txt, col) = if shown.is_empty() {
                         ("검색…".to_string(), theme::text_mute())
                     } else {
@@ -3524,11 +3530,12 @@ impl App {
                     round_rect(g, row_x, iy, row_w, item_h, theme::radius_sm(), theme::surface_active());
                     g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::accent());
                     g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::text());
-                    let mut shown = buf.clone();
+                    let (mut head, tail) = crate::lineedit::split(&buf, self.file_tree.edit_cursor);
                     if self.in_preedit {
-                        shown.push_str(&self.preedit);
+                        head.push_str(&self.preedit);
                     }
-                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
+                    let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                    let shown = format!("{head}{tail}");
                     let (txt, col) = if shown.is_empty() {
                         ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::text_mute())
                     } else {
@@ -3738,11 +3745,13 @@ impl App {
                         .filter(|(p, _)| p == &node.path)
                         .map(|(_, n)| n.clone());
                     if let Some(name) = editing {
-                        let mut shown = name;
+                        let (mut head, tail) =
+                            crate::lineedit::split(&name, self.file_tree.edit_cursor);
                         if self.in_preedit {
-                            shown.push_str(&self.preedit);
+                            head.push_str(&self.preedit);
                         }
-                        let caret_w = g.measure_chrome_text(&shown, font, false);
+                        let caret_w = g.measure_chrome_text(&head, font, false);
+                        let shown = format!("{head}{tail}");
                         let (txt, tcol) = if shown.is_empty() {
                             ("이름…".to_string(), theme::text_mute())
                         } else {
@@ -5630,10 +5639,15 @@ impl App {
                         let fh = search_h - 8.0;
                         round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::radius_sm(), theme::bg());
                         g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::text_dim());
-                        let mut shown = self.statusbar.menu_search.clone();
+                        let (mut head, tail) = crate::lineedit::split(
+                            &self.statusbar.menu_search,
+                            self.statusbar.menu_search_cursor,
+                        );
                         if self.in_preedit {
-                            shown.push_str(&self.preedit);
+                            head.push_str(&self.preedit);
                         }
+                        let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                        let shown = format!("{head}{tail}");
                         let (txt, col) = if shown.is_empty() {
                             ("디렉터리 검색…".to_string(), theme::text_mute())
                         } else {
@@ -5641,6 +5655,12 @@ impl App {
                         };
                         g.draw_text(menu_x + 38.0, fy + (fh - 13.0) / 2.0, &txt,
                             gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                        // 이 칸엔 캐럿이 없었다 — 끝에만 붙는 칸이라 커서가 어딘지
+                        // 물을 일이 없었기 때문이다. 이제 가운데를 고칠 수 있으니
+                        // 자리를 보여 줘야 한다.
+                        if commit_caret_on {
+                            g.rect(menu_x + 38.0 + caret_w, fy + (fh - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                        }
                     }
                     if total == 0 {
                         g.draw_text(menu_x + 16.0, rows_top + 4.0, "(없음)",

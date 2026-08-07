@@ -33,6 +33,11 @@ pub(crate) struct StatusbarState {
     pub(crate) menu_scroll: f32,
     pub(crate) menu_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) menu_search: String,
+    /// `menu_search` 안 커서(문자 단위). 검색칸도 가운데를 고칠 수 있어야 한다 —
+    /// 끝에서만 지워지면 오타 하나에 뒤를 다 날려야 했다. 드롭다운을 닫을 때
+    /// 따로 되돌리지 않는다: 버퍼가 비면 `lineedit` 이 다음 조작에서 0 으로
+    /// 클램프하므로 남은 값이 화면에 나올 일이 없다.
+    pub(crate) menu_search_cursor: usize,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
@@ -303,11 +308,18 @@ pub(crate) struct FileTreeState {
     pub(crate) ctx_menu_rects: Vec<(FtMenuAction, (f32, f32, f32, f32))>,
     /// 인라인 이름변경 — (대상 경로, 편집 중 텍스트). `new` 와 상호배타.
     pub(crate) rename: Option<(std::path::PathBuf, String)>,
+    /// 인라인 입력행(`new`/`rename` 중 열린 쪽) 안 커서(문자 단위). 두 모드가
+    /// 동시에 열리지 않으므로 커서도 한 벌이면 된다. `new` 는 늘 빈 버퍼로
+    /// 열려 다음 조작에서 0 으로 클램프되지만, `rename` 은 기존 이름을 싣고
+    /// 열리므로 그 자리에서 이름 끝을 찍어 준다(`run_ft_menu_action`).
+    pub(crate) edit_cursor: usize,
     pub(crate) rename_row_rect: (f32, f32, f32, f32),
     /// 새 항목 생성 부모(우클릭한 폴더). None 이면 트리 root.
     pub(crate) new_parent: Option<std::path::PathBuf>,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
+    /// `search_query` 안 커서(문자 단위).
+    pub(crate) search_cursor: usize,
     pub(crate) search_rect: (f32, f32, f32, f32),
     /// 트리 본문의 실제 geometry: (x, start_y, w, visible_h). start_y 는 검색박스
     /// + 빠른파일 섹션(항목 수만큼 동적) 아래로 밀린 트리 첫 행 y. visible_h 는
