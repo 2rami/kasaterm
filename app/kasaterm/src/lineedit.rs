@@ -15,10 +15,17 @@
 use winit::keyboard::{Key, NamedKey};
 
 /// 키 하나를 넣은 결과.
+///
+/// `Edited` 와 `Moved` 를 가르는 이유: 버퍼가 실제로 바뀌었을 때만 해야 하는 일이 있다
+/// (검색칸은 트리를 다시 훑고 스크롤을 0 으로 되돌린다). 커서만 옮겼는데 그걸 돌리면
+/// ←→ 를 누를 때마다 화면이 튄다. 부르는 쪽이 길이를 앞뒤로 재서 짐작하는 건 같은
+/// 길이로 바뀌는 편집이 생기는 순간 조용히 틀린다.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum LineEditAction {
-    /// 버퍼/커서가 처리했다.
-    Handled,
+    /// 버퍼 내용이 바뀌었다.
+    Edited,
+    /// 커서만 움직였다 — 내용은 그대로.
+    Moved,
     /// Enter — 칸이 확정 동작을 해야 한다.
     Submit,
     /// Esc — 칸이 취소 동작을 해야 한다.
@@ -64,24 +71,42 @@ pub(crate) fn key(text: &mut String, cursor: &mut usize, k: &Key) -> LineEditAct
         Key::Named(NamedKey::Enter) => return LineEditAction::Submit,
         Key::Named(NamedKey::Escape) => return LineEditAction::Cancel,
         Key::Named(NamedKey::Backspace) => {
-            backspace(text, cursor);
+            // 맨 앞에서 누른 백스페이스는 아무것도 안 바꾼다.
+            return if backspace(text, cursor) {
+                LineEditAction::Edited
+            } else {
+                LineEditAction::Moved
+            };
         }
         Key::Named(NamedKey::Delete) => {
-            if col < len {
-                let b0 = crate::char_byte(text, col);
-                let b1 = crate::char_byte(text, col + 1);
-                text.replace_range(b0..b1, "");
+            if col >= len {
+                return LineEditAction::Moved;
             }
+            let b0 = crate::char_byte(text, col);
+            let b1 = crate::char_byte(text, col + 1);
+            text.replace_range(b0..b1, "");
         }
-        Key::Named(NamedKey::ArrowLeft) => *cursor = col.saturating_sub(1),
-        Key::Named(NamedKey::ArrowRight) => *cursor = (col + 1).min(len),
-        Key::Named(NamedKey::Home) => *cursor = 0,
-        Key::Named(NamedKey::End) => *cursor = len,
+        Key::Named(NamedKey::ArrowLeft) => {
+            *cursor = col.saturating_sub(1);
+            return LineEditAction::Moved;
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            *cursor = (col + 1).min(len);
+            return LineEditAction::Moved;
+        }
+        Key::Named(NamedKey::Home) => {
+            *cursor = 0;
+            return LineEditAction::Moved;
+        }
+        Key::Named(NamedKey::End) => {
+            *cursor = len;
+            return LineEditAction::Moved;
+        }
         Key::Named(NamedKey::Space) => insert(text, cursor, " "),
         Key::Character(c) => insert(text, cursor, c),
         _ => return LineEditAction::Ignored,
     }
-    LineEditAction::Handled
+    LineEditAction::Edited
 }
 
 /// 커서 앞/뒤로 가른 조각. 렌더가 「앞 → (조합 중 글자) → 뒤」 순으로 그리고 앞의
@@ -117,7 +142,7 @@ mod tests {
     #[test]
     fn delete_eats_forward_and_leaves_the_cursor() {
         let (mut t, mut c) = ("abc".to_string(), 1);
-        assert_eq!(key(&mut t, &mut c, &Key::Named(NamedKey::Delete)), LineEditAction::Handled);
+        assert_eq!(key(&mut t, &mut c, &Key::Named(NamedKey::Delete)), LineEditAction::Edited);
         assert_eq!((t.as_str(), c), ("ac", 1));
     }
 
@@ -132,6 +157,26 @@ mod tests {
         assert_eq!(c, 3);
         key(&mut t, &mut c, &Key::Named(NamedKey::Home));
         assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn moves_are_not_edits() {
+        // 부르는 쪽이 「바뀌었나」로 무거운 일(트리 재수집·스크롤 리셋)을 건다.
+        // 커서만 옮긴 키가 Edited 로 새면 ←→ 를 누를 때마다 화면이 튄다.
+        let (mut t, mut c) = ("가나".to_string(), 1);
+        for k in [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::Home, NamedKey::End] {
+            assert_eq!(key(&mut t, &mut c, &Key::Named(k)), LineEditAction::Moved, "{k:?}");
+        }
+        // 경계에서 아무것도 못 지운 것도 편집이 아니다.
+        c = 0;
+        assert_eq!(key(&mut t, &mut c, &Key::Named(NamedKey::Backspace)), LineEditAction::Moved);
+        c = 2;
+        assert_eq!(key(&mut t, &mut c, &Key::Named(NamedKey::Delete)), LineEditAction::Moved);
+        assert_eq!(t, "가나");
+        // 실제로 지운 것은 편집이다.
+        assert_eq!(key(&mut t, &mut c, &Key::Named(NamedKey::Backspace)), LineEditAction::Edited);
+        assert_eq!(key(&mut t, &mut c, &Key::Character("z".into())), LineEditAction::Edited);
+        assert_eq!(t, "가z");
     }
 
     #[test]
