@@ -5209,6 +5209,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowinclose();
         self.run_pending_autolastclose();
         self.run_pending_autowinreorder();
+        self.run_pending_autoroomrename();
         self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
         self.run_pending_autoinfo();

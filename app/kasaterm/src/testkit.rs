@@ -601,6 +601,63 @@ impl App {
             "[autowinreorder] 기대: A,C,B / 잡은 B 가 활성인 채 맨 뒤 / alert 는 C 를 따라 1번 / 모든 leaves>0"
         );
     }
+    /// Headless 방 이름 편집 repro: `KASATERM_AUTOROOMRENAME_MS` 뒤에 방 탭을 **실제
+    /// hit-test 경로**(`window_strip_click`)로 두 번 눌러 편집에 들어가고, 글자를 넣은
+    /// 직후의 라벨을 찍는다.
+    ///
+    /// 여기서 봐야 할 건 두 가지다. ①편집에 들어간 순간의 버퍼 — 빈칸이면 사람이
+    /// 이름을 통째로 다시 쳐야 한다. ②글자를 넣은 **그 프레임**의 라벨 — 라벨은
+    /// `refresh_window_labels` 의 1초 캐시를 타므로, 합성이 캐시 안에 있으면 타이핑이
+    /// 1초씩 뭉쳐 나온다. 그래서 캐시를 일부러 fresh 로 만들어 둔 채 확인한다.
+    /// (한글 조합은 OS 키 경로라 여기서 재현 못 한다 — 사람이 직접 쳐야 한다.)
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoroomrename(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOROOMRENAME_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        self.render_frame();
+        let Some((_, r)) = self.window_tab_rects.first().copied() else {
+            eprintln!("[autoroomrename] 탭 rect 없음 — 사이드바 창 탭이 안 그려졌다");
+            return;
+        };
+        let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        let before = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        // 첫 클릭은 전환·장전만. 두 번째가 편집을 연다(Finder 의 느린 재클릭).
+        self.window_strip_click(cx, cy);
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::chrome::ROOM_RENAME_DOUBLE_CLICK_MS as u64 + 60,
+        ));
+        self.window_strip_click(cx, cy);
+        let opened = self.room_rename.editing.clone();
+        eprintln!("[autoroomrename] 라벨={before:?} 편집진입={opened:?}");
+        // 라벨 캐시를 일부러 갓 만든 상태로 둔다 — 캐시가 살아 있는데도 방금 넣은
+        // 글자가 라벨에 보여야 통과다.
+        self.refresh_window_labels();
+        self.room_rename_insert("X");
+        self.refresh_window_labels();
+        let after = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        eprintln!("[autoroomrename] 한 글자 넣은 뒤 라벨={after:?}");
+        eprintln!(
+            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 라벨 끝이 'X▌' / 캐시 fresh 여도 즉시 반영"
+        );
+        self.render_frame();
+    }
+
     /// Headless 닫기→되살리기 repro: `KASATERM_AUTOCLOSEREOPEN_MS` 뒤에 pane 을 쪼갠 뒤
     /// 하나를 닫고, 되살리기 스택에 남았는지 찍고, 다시 되살린다.
     ///

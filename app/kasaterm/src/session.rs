@@ -978,6 +978,7 @@ impl App {
                 .window_labels_at
                 .is_some_and(|t| now.duration_since(t).as_millis() < 1000);
         if fresh {
+            self.overlay_room_rename_label();
             return;
         }
         let n = self.windows.len();
@@ -1017,14 +1018,9 @@ impl App {
             // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
             // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
-                // 편집 중인 방은 버퍼를 그대로 보여준다(캐럿 포함) — 별도 입력칸을
-                // 띄우지 않고 라벨 자리를 그대로 쓴다. Finder 와 같은 자리 편집.
-                .room_rename
-                .editing
-                .as_ref()
-                .filter(|(idx, _)| *idx == i)
-                .map(|(_, buf)| format!("{buf}\u{258c}"))
-                .or_else(|| self.window_name_override.get(&i).cloned())
+                .window_name_override
+                .get(&i)
+                .cloned()
                 .or_else(|| {
                     home.as_ref()
                         .and_then(|p| p.file_name())
@@ -1055,6 +1051,25 @@ impl App {
         drop(ws);
         self.window_labels = out;
         self.window_labels_at = Some(now);
+        self.overlay_room_rename_label();
+    }
+
+    /// 편집 중인 방의 라벨을 버퍼(+조합 중인 글자+캐럿)로 덮는다. 별도 입력칸을
+    /// 띄우지 않고 라벨 자리를 그대로 쓰는 Finder 식 편집이다.
+    ///
+    /// **재계산 안이 아니라 밖에서 덮는 게 핵심이다.** 위 캐시는 1초짜리고 cwd 를
+    /// `lsof` 로 캐느라 비싸서 매 키마다 깰 수가 없는데, 합성을 그 안에 두면 타이핑이
+    /// 1초씩 뭉쳐 나온다(거노: "이름 바꾸는 게 버벅여").
+    fn overlay_room_rename_label(&mut self) {
+        let Some((idx, buf)) = self.room_rename.editing.as_ref() else { return };
+        let composing = match self.ime_focus {
+            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
+            _ => "",
+        };
+        let text = format!("{buf}{composing}\u{258c}");
+        if let Some(slot) = self.window_labels.get_mut(*idx) {
+            slot.0 = text;
+        }
     }
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
     /// runs past `max` chars so the meaningful (deepest) part stays visible.

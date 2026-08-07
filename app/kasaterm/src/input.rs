@@ -1444,6 +1444,7 @@ impl App {
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
+            crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
             crate::ImeFocus::PathSearch => self.statusbar.menu_search.push_str(&text),
             crate::ImeFocus::TreeSearch => self.file_tree.search_query.push_str(&text),
             crate::ImeFocus::TreeNew => {
@@ -1797,7 +1798,7 @@ impl App {
         }
         // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
         // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
-        if self.room_rename_key(&event.logical_key) {
+        if self.room_rename_key(event) {
             return;
         }
         // Touch the input timer so the cursor stays solid for a beat and

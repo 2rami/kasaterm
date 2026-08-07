@@ -3682,6 +3682,8 @@ pub(crate) enum ImeFocus {
     /// 별도창 raw 편집기(aux 인덱스).
     AuxEditor(usize),
     GitCommit,
+    /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
+    RoomRename(usize),
     PathSearch,
     TreeSearch,
     TreeNew,
