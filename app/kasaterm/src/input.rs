@@ -1560,7 +1560,6 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
-        let before = self.statusbar.menu_search.len();
         let act = crate::lineedit::key(
             &mut self.statusbar.menu_search,
             &mut self.statusbar.menu_search_cursor,
@@ -1575,10 +1574,10 @@ impl App {
             crate::lineedit::LineEditAction::Cancel => {
                 self.statusbar.menu = None;
             }
+            // 걸러지는 목록이 바뀐 키에만 맨 위로. 커서 이동에 되돌리면 ←→ 마다
+            // 스크롤이 튄다.
+            crate::lineedit::LineEditAction::Edited => self.statusbar.menu_scroll = 0.0,
             _ => {}
-        }
-        if self.statusbar.menu_search.len() != before {
-            self.statusbar.menu_scroll = 0.0;
         }
         self.chrome_dirty = true;
     }
@@ -1629,18 +1628,20 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
-        let before = self.file_tree.search_query.len();
         let act = crate::lineedit::key(
             &mut self.file_tree.search_query,
             &mut self.file_tree.search_cursor,
             &event.logical_key,
         );
-        if act == crate::lineedit::LineEditAction::Cancel {
+        let cancelled = act == crate::lineedit::LineEditAction::Cancel;
+        if cancelled {
             self.file_tree.search_active = false;
             self.file_tree.search_query.clear();
             self.file_tree.search_cursor = 0;
         }
-        if self.file_tree.search_query.len() != before {
+        // 쿼리가 실제로 바뀐 키에만 다시 훑는다 — 커서 이동에도 돌리면 ←→ 를
+        // 누를 때마다 트리를 재수집하고 스크롤이 맨 위로 튄다.
+        if cancelled || act == crate::lineedit::LineEditAction::Edited {
             self.file_tree_search_collect(); // 빈 쿼리 → 트리 복원
             self.file_tree.scroll = 0.0;
         }
