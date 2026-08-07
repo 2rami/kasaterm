@@ -343,6 +343,28 @@ impl App {
                 }
             }
             "modal" => self.open_commit_modal(),
+            // 커밋 메시지 칸의 **커서 산수**를 화면으로 확인한다. 조작을 `lineedit`
+            // 한 벌로 합친 뒤(2026-08-07) 캐럿이 한글 경계에서 어긋나지 않는지가
+            // 눈으로 보여야 한다 — 단위테스트는 문자열만 보고 캐럿 픽셀은 못 본다.
+            // 키는 `logical_key` 만 있으면 되므로 KeyEvent 를 짓지 않는다.
+            "commitedit" => {
+                use winit::keyboard::{Key, NamedKey};
+                self.open_commit_modal();
+                self.git.commit_focused = true;
+                self.git.commit_msg.clear();
+                self.git.commit_cursor = 0;
+                self.git_commit_insert("한글커밋메시지");
+                let (msg, cur) = (&mut self.git.commit_msg, &mut self.git.commit_cursor);
+                // 맨 앞으로 갔다가 두 칸 오른쪽 → "한글" 뒤에 캐럿.
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::Home));
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
+                crate::lineedit::key(msg, cur, &Key::Character("X".into()));
+                eprintln!(
+                    "[autogit] commitedit msg={:?} cursor={} (기대: '한글X커밋메시지' / 3)",
+                    self.git.commit_msg, self.git.commit_cursor
+                );
+            }
             "menu" => self.git.commit_menu_open = true,
             "spin" => self.git.op = Some("Pushing"),
             "hover" => {
