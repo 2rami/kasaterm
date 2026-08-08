@@ -41,6 +41,22 @@ impl App {
             })
     }
 
+    /// pane 에 **학생색을 입힐지**의 정본. 이름(`display_pane_char`)과 달리
+    /// 「지금 에이전트가 도는가」 관문을 지난다 — 순수 셸 pane 에 남의 학생색이
+    /// 둘리면 「저기 누가 있다」로 잘못 읽히기 때문이고, 메인 그리드의 pane 테두리가
+    /// 이미 그 규칙이다(`render.rs` 의 `claude_panes` 필터).
+    ///
+    /// 별도창(터미널·방)이 이걸 안 쓰고 `ws.pane_character` 를 날로 읽던 동안,
+    /// 같은 pane 이 창마다 다른 대접을 받았다 — 셸 pane 이 별도창에선 학생색·이름을
+    /// 달고 메인에선 무채색이라, 되돌리면 「학생 테마가 깨졌다」로 보였다(거노).
+    /// 관문은 이름과 같은 키(**탭 pid**)로 본다 — 탭에서 도는 학생을 놓치지 않게.
+    pub(crate) fn pane_accent(&self, ws: &Workspace, id: &str) -> Option<[u8; 4]> {
+        let tab = ws.active_tab_pid(id);
+        self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
+        let name = self.display_pane_char(ws, id)?;
+        crate::theme::character_accent_n(&name, crate::theme::character_ordinal(&ws.pane_character, id))
+    }
+
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
     /// `UserEvent::Notify`). Flash the pane's header and, unless the user is
     /// already looking at that exact pane (our window focused + it's the

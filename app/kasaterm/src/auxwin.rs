@@ -1748,14 +1748,16 @@ impl App {
     // 창 크기를 셀수로 환산해 `pty.resize`.
 
     /// `pane_id` 터미널 pane 을 별도창으로 띄운다. `near` Some 이면 그 물리좌표에
-    /// (tear-off), None 이면 OS 기본 위치. 새 창 인덱스 반환. 진입점(undock)은 이미
-    /// 레이아웃 트리에서 leaf 를 빼고 pty·ws.panes 를 유지한 상태로 호출한다.
+    /// (tear-off), None 이면 OS 기본 위치. `want_cells` Some 이면 그 칸수가 들어가는
+    /// 크기로 연다(그리드에서 쓰던 폭·높이 유지). 새 창 인덱스 반환. 진입점(undock)은
+    /// 이미 레이아웃 트리에서 leaf 를 빼고 pty·ws.panes 를 유지한 상태로 호출한다.
     pub(crate) fn spawn_aux_terminal(
         &mut self,
         pane_id: String,
         home_window: usize,
         event_loop: &ActiveEventLoop,
         near: Option<winit::dpi::PhysicalPosition<i32>>,
+        want_cells: Option<(u16, u16)>,
     ) -> Option<usize> {
         let title = pane_id.clone();
         let mut attrs = WindowAttributes::default()
@@ -1782,13 +1784,38 @@ impl App {
         window.set_ime_allowed(false);
         #[cfg(not(target_os = "macos"))]
         window.set_ime_allowed(true);
-        let gpu = match gpu::GpuRenderer::new(window.clone(), FONT_SIZE) {
+        let mut gpu = match gpu::GpuRenderer::new(window.clone(), FONT_SIZE) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("[auxwin] terminal gpu init failed: {e}");
                 return None;
             }
         };
+        // 그리드에서 쓰던 칸수를 그대로 담을 크기로 창을 다시 잰다. 800×520 고정이면
+        // 넓게 쓰던 pane 이 꺼내는 순간 좁아져 오른쪽·아래가 통째로 사라진다 —
+        // 셸은 SIGWINCH 로 리플로우하니 "지워진" 게 아니라 "잘린" 것으로 보인다(거노).
+        // gpu 를 만든 뒤라야 이 창의 셀 크기를 알고, 그래야 칸수→px 환산이 맞는다.
+        if let Some((wc, hc)) = want_cells {
+            let (cw, ch) = (gpu.cell_w, gpu.cell_h);
+            if cw > 0.0 && ch > 0.0 {
+                // 모니터 밖으로 나가는 창은 잘림을 옮겨 놓을 뿐이다 — 작업영역에 맞춘다.
+                let (max_w, max_h) = window
+                    .current_monitor()
+                    .map(|m| {
+                        let s = m.scale_factor() as f32;
+                        (m.size().width as f32 / s * 0.94, m.size().height as f32 / s * 0.88)
+                    })
+                    .unwrap_or((1600.0, 1000.0));
+                let want_w = (PANE_INNER_X * 2.0 + wc as f32 * cw).clamp(420.0, max_w);
+                let want_h =
+                    (AUX_CELL_TOP + PANE_INNER_Y + hc as f32 * ch).clamp(260.0, max_h);
+                if let Some(got) =
+                    window.request_inner_size(LogicalSize::new(want_w, want_h))
+                {
+                    gpu.resize(got.width, got.height);
+                }
+            }
+        }
         let aux = AuxWindow {
             gpu,
             kind: AuxWindowKind::Terminal { pane_id: pane_id.clone(), window: home_window },
@@ -1810,7 +1837,10 @@ impl App {
         };
         self.aux_windows.push(aux);
         let idx = self.aux_windows.len() - 1;
-        eprintln!("[auxwin] opened terminal window #{idx} for {pane_id}");
+        eprintln!(
+            "[auxwin] opened terminal window #{idx} for {pane_id} 요청칸={want_cells:?} 창={:?}",
+            self.aux_windows[idx].logical_size()
+        );
         // 창 client 크기에 맞춰 PTY 를 즉시 resize — 셸이 SIGWINCH 로 새 셀수에 리플로우.
         self.aux_terminal_resize_pty(idx);
         self.aux_redraw(idx);
@@ -1853,30 +1883,26 @@ impl App {
             (pid.to_string(), a.gpu.scale(), w, h, a.focused, home)
         };
         // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷. 배정 학생도 같이 —
-        // 꺼낸 pane 도 메인 그리드에 있을 때와 같은 학생색·이름을 달아야 한다
-        // (거노: 별도창이 완전 다른 앱 같다). ordinal 은 동명이인 구분용이라
-        // 전체 pane 맵이 필요하다.
-        let (snap, student) = {
+        // 꺼낸 pane 도 메인 그리드에 있을 때와 **같은 답**을 내야 한다(거노: 별도창이
+        // 완전 다른 앱 같다). 그래서 이름은 `display_pane_char`, 색은 `pane_accent`
+        // 로 메인과 같은 함수를 지난다. 여기서 `ws.pane_character` 를 날로 읽던 동안
+        // 셸만 도는 pane 이 이 창에선 학생, 메인 그리드에선 남이었다 — 되돌리면
+        // 「학생 테마가 깨졌다」로 보이던 것의 정체다.
+        let (snap, student, student_col) = {
             let ws = self.ws.lock().unwrap();
             let cells = ws.panes.get(&pane_id).and_then(|p| {
                 p.term()
                     .map(|t| (t.cells.clone(), t.cursor_row, t.cursor_col, t.cursor_visible))
             });
-            let who = ws.pane_character.get(&pane_id).cloned().map(|name| {
-                let ord = crate::theme::character_ordinal(&ws.pane_character, &pane_id);
-                let col = crate::theme::character_accent_n(&name, ord);
-                (name, col)
-            });
-            (cells, who)
+            let name = self.display_pane_char(&ws, &pane_id);
+            let col = self.pane_accent(&ws, &pane_id);
+            (cells, name, col)
         };
         let working = self
             .pane_activity
             .get(&pane_id)
             .is_some_and(|a| a.status == "working");
-        let accent = student
-            .as_ref()
-            .and_then(|(_, c)| *c)
-            .unwrap_or_else(|| crate::theme::accent());
+        let accent = student_col.unwrap_or_else(crate::theme::accent);
         // 트리는 `self.file_tree` 를 읽는데 아래에서 `self.aux_windows` 를 가변으로
         // 잡으므로 먼저 떠 둔다. 닫혀 있으면 아예 안 뜬다 — 매 프레임 노드를 통째로
         // clone 하는 값은 트리를 보고 있을 때만 치른다.
@@ -1935,15 +1961,17 @@ impl App {
         // 「아루 · %3 · 2번 방」, 오른쪽에 되돌리기. 창 이동·리사이즈는 OS 몫이다.
         {
             // 학생이 있으면 그 이름을 앞에 세우고 학생색으로 — 메인 그리드에서
-            // 테두리·헤더가 하던 "이 창에 누가 있나"를 여기서도 한눈에.
+            // 테두리·헤더가 하던 "이 창에 누가 있나"를 여기서도 한눈에. 이름은
+            // 배정만으로 뜨고(메인 pane 헤더와 같은 규칙) 색은 실제로 도는 pane 만
+            // (메인 pane 테두리와 같은 규칙) — 두 규칙이 원래 다르다.
             let label = match &student {
-                Some((name, _)) => format!("{name} · {pane_id} · {}번 방", home_window + 1),
+                Some(name) => format!("{name} · {pane_id} · {}번 방", home_window + 1),
                 None => format!("{pane_id} · {}번 방", home_window + 1),
             };
             // 배경은 창 배경 그대로 둔다 — 투명 타이틀바 위에 판을 하나 더 깔면
             // 없애려던 두 겹이 색만 바뀐 채 돌아온다. 아래 hairline 만 남긴다.
             a.gpu.rect(0.0, AUX_HEADER_H - 1.0, w, 1.0, crate::theme::border());
-            let label_col = if student.is_some() { accent } else { crate::theme::text_mute() };
+            let label_col = if student_col.is_some() { accent } else { crate::theme::text_mute() };
             a.gpu.draw_text(
                 AUX_HEADER_X,
                 (AUX_HEADER_H - 12.0) / 2.0,
@@ -2013,7 +2041,7 @@ impl App {
         // 경계가 통째로 사라진다(거노). 포커스가 없을 땐 흐리게.
         {
             const T: f32 = 1.5;
-            let base = if student.is_some() { accent } else { crate::theme::border() };
+            let base = if student_col.is_some() { accent } else { crate::theme::border() };
             let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
             // 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
             // 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그
@@ -2106,21 +2134,15 @@ impl App {
         // 띠에서도 준다(터미널 별도창이 이미 그렇게 한다).
         let label_col = focus.as_deref().and_then(|pid| {
             let ws = self.ws.lock().unwrap();
-            let name = ws.pane_character.get(pid)?;
-            let ord = crate::theme::character_ordinal(&ws.pane_character, pid);
-            crate::theme::character_accent_n(name, ord)
+            self.pane_accent(&ws, pid)
         });
-        // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 같은 색으로 읽혀야 한다.
-        // ordinal 은 동명이인 구분이라 전체 맵을 넘긴다(메인과 같은 규칙).
+        // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 **같은 함수**로 정해야 같은
+        // 색이 나온다(`pane_accent`: 이름 + 도는 에이전트 관문 + 동명이인 순번).
         let pane_cols: HashMap<String, [u8; 4]> = {
             let ws = self.ws.lock().unwrap();
             rects
                 .iter()
-                .filter_map(|(pid, ..)| {
-                    let name = ws.pane_character.get(pid)?;
-                    let ord = crate::theme::character_ordinal(&ws.pane_character, pid);
-                    Some((pid.clone(), crate::theme::character_accent_n(name, ord)?))
-                })
+                .filter_map(|(pid, ..)| Some((pid.clone(), self.pane_accent(&ws, pid)?)))
                 .collect()
         };
         // working pane 집합도 미리 — 아래에서 창(`a`)을 가변 차용하고 나면 self 를
@@ -2742,7 +2764,8 @@ impl App {
         match h.what {
             crate::HiddenAuxKind::Terminal { pane_id, home_window } => {
                 if self.pty.contains_key(&pane_id) {
-                    self.spawn_aux_terminal(pane_id, home_window, event_loop, h.pos);
+                    // 접었다 되살리는 창은 트리에 leaf 가 없다 — 잴 칸수가 없으므로 기본 크기.
+                    self.spawn_aux_terminal(pane_id, home_window, event_loop, h.pos, None);
                 }
             }
             crate::HiddenAuxKind::Room { window } => {
@@ -3022,6 +3045,18 @@ impl App {
         if !leaves.iter().any(|l| l == pane_id) {
             return;
         }
+        // 지금 이 pane 이 차지한 칸수 — **leaf 를 빼기 전에** 재야 한다. 빼고 나면
+        // 트리에 없어 rect 를 못 구하고, 그러면 창이 고정 크기로 열려 보던 화면이
+        // 잘린다.
+        let want_cells = {
+            let (cols, rows) = self.window_cells();
+            self.pty_layout.as_ref().and_then(|t| {
+                t.leaf_rects(cols, rows)
+                    .into_iter()
+                    .find(|(id, ..)| id == pane_id)
+                    .map(|(_, _, _, w, h)| (w, h))
+            })
+        };
         let was_active =
             self.ws.lock().unwrap().active_pane.as_deref() == Some(pane_id);
         // 제거 pane 이 active 였으면 형제 leaf 로 포커스 이동(remove_pane 과 동일 규칙).
@@ -3059,14 +3094,14 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        self.spawn_aux_terminal(pane_id.to_string(), home_window, event_loop, near);
+        self.spawn_aux_terminal(pane_id.to_string(), home_window, event_loop, near, want_cells);
     }
 
     /// 터미널 별도창을 닫으며 그 pane 을 메인 레이아웃으로 되돌린다(dock). 창을 먼저
     /// 제거하고(idx 확보 후), 살아있는 세션이면 활성 pane 오른쪽(Horizontal)에
     /// `split_leaf` 로 기존 pane_id 를 재삽입한다 — 새 세션을 만드는 split_active_pane
     /// 과 달리 기존 PtySession 을 그대로 얹으므로 셸이 안 끊긴다.
-    fn dock_pane_terminal(&mut self, idx: usize) {
+    pub(crate) fn dock_pane_terminal(&mut self, idx: usize) {
         let pane_id = match self.aux_windows.get(idx).and_then(|a| a.term_pane_id()) {
             Some(p) => p.to_string(),
             None => {
