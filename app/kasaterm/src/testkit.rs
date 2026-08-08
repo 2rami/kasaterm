@@ -39,6 +39,14 @@ fn auto_undock_scroll_slot() -> &'static std::sync::Mutex<Option<(Instant, Strin
     AUTO_UNDOCK_SCROLL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// `KASATERM_AUTOUNDOCK_DOCK_MS` 예약 슬롯 — (발사 시각, pane).
+static AUTO_UNDOCK_DOCK: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
+    std::sync::OnceLock::new();
+
+fn auto_undock_dock_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
+    AUTO_UNDOCK_DOCK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub(crate) fn mdscript_pending() -> bool {
     MDSCRIPT_LEFT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -2115,6 +2123,17 @@ impl App {
             a.pending_capture =
                 Some((Instant::now() + std::time::Duration::from_millis(1900), cap));
         }
+        // `_DOCK_MS=<ms>` 면 그만큼 뒤에 되돌린다(dock). 꺼낼 때와 되돌릴 때의 학생
+        // 판정 재료를 나란히 찍어야 어느 칸이 비는지 보인다 — 창 수만 세면 "돌아왔다"와
+        // "돌아왔는데 남이 됐다"가 똑같아 보인다.
+        if let Some(ms) = std::env::var("KASATERM_AUTOUNDOCK_DOCK_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            self.dump_undock_theme("undock직후", &pid);
+            *auto_undock_dock_slot().lock().unwrap() =
+                Some((Instant::now() + std::time::Duration::from_millis(ms), pid.clone()));
+        }
         // `_HIDE=1` 이면 이어서 접기→되살리기까지 본다. 접기는 창만 없애는 것이라
         // **PTY 가 살아 있는지**가 판정의 전부다 — 창 수만 세면 "접었다"와 "죽였다"가
         // 똑같아 보인다.
@@ -2144,6 +2163,69 @@ impl App {
             "[autoundock] 기대: 접으면 aux=0·예약=40·PTY생존=true / 되살리면 aux=1·예약=0·PTY생존=true"
         );
     }
+    /// 학생 테마가 서는 재료를 한 줄로 찍는다. 렌더가 실제로 보는 순서 그대로 —
+    /// `active_tab_pid` 로 접고, 그 pid 로 `active_agent`(=runs_claude)를 묻고,
+    /// `display_pane_char` 로 이름을 얻는다. 셋 중 하나만 비어도 보더색·프사·이름이
+    /// 통째로 사라지므로, 하나씩 갈라 찍지 않으면 범인을 못 가른다.
+    fn dump_undock_theme(&self, when: &str, pid: &str) {
+        let ws = self.ws.lock().unwrap();
+        let tab_pid = ws.active_tab_pid(pid);
+        let runs = self
+            .pty
+            .get(tab_pid.as_str())
+            .and_then(|p| p.active_agent())
+            .map(|a| format!("{a:?}"));
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        eprintln!(
+            "[undock/{when}] pane={pid} tab_pid={tab_pid} agent={runs:?} \
+             char={:?} display={:?} sid={:?} room={:?} 트리leaf={leaves:?} 활성={:?}",
+            ws.pane_character.get(pid),
+            self.display_pane_char(&ws, pid),
+            self.pane_claude_sid.get(pid),
+            ws.pane_room.get(pid),
+            ws.active_pane,
+        );
+    }
+
+    /// 예약된 dock 복귀를 발사한다(위 `run_pending_autoundock` 이 심는다). 되돌린
+    /// 뒤 메인 창을 찍어, 보더색·헤더 이름이 꺼내기 전과 같은지 눈으로 본다.
+    pub(crate) fn run_pending_autoundock_dock(&mut self) {
+        let due = {
+            let g = auto_undock_dock_slot().lock().unwrap();
+            matches!(g.as_ref(), Some((at, _)) if Instant::now() >= *at)
+        };
+        if !due {
+            return;
+        }
+        let Some((_, pid)) = auto_undock_dock_slot().lock().unwrap().take() else {
+            return;
+        };
+        let Some(i) = self.aux_windows.iter().position(|a| {
+            matches!(&a.kind,
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
+        }) else {
+            eprintln!("[undock/dock] 되돌릴 별도창이 없다 — pane {pid}");
+            return;
+        };
+        self.dock_pane_terminal(i);
+        self.render_frame();
+        self.dump_undock_theme("dock후", &pid);
+        let cap = std::env::var("KASATERM_AUTOUNDOCK_DOCK_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("undock-dock.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        // 되돌린 직후가 아니라 한 박자 뒤에 찍는다 — dock 은 `resize_backend` 로 PTY 를
+        // 다시 재고, 셸이 SIGWINCH 로 리플로우한 결과가 도착해야 화면이 자리를 잡는다.
+        self.pending_capture
+            .push((Instant::now() + std::time::Duration::from_millis(1200), cap));
+    }
+
     /// 예약된 별도창 휠을 발사한다(위 `run_pending_autoundock` 이 심는다). 굴린 직후
     /// **렌더가 실제로 읽는 셀**(`ws.panes[pid].term()`)까지 찍는다 — PTY 가 굴렀는지와
     /// 화면에 보이는지는 별개라, 둘을 같이 안 보면 어느 쪽이 범인인지 못 가른다.

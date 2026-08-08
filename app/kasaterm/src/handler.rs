@@ -5243,6 +5243,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock(event_loop);
         self.run_pending_autoauxmd(event_loop);
         self.run_pending_autoundock_scroll();
+        self.run_pending_autoundock_dock();
         self.run_pending_autoauxtree();
         self.run_pending_autoteardrag(event_loop);
         self.run_pending_autotearroom(event_loop);
