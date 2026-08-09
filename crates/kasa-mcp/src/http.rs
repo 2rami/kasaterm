@@ -2975,15 +2975,23 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
     // (레지스트리 키 충돌) — 웹 전용 접두사를 붙인다.
     let (sess, mirrored) = if pane.is_empty() {
+        let id = format!("web-{}", uuid::Uuid::new_v4());
         let opts = kasa_pty::PtyOptions {
             cwd: cwd.or_else(|| std::env::var("HOME").ok()),
             cols: 80,
             rows: 24,
-            pane_id: format!("web-{}", uuid::Uuid::new_v4()),
+            pane_id: id.clone(),
             ..Default::default()
         };
         match kasa_pty::PtySession::start(opts) {
-            Ok(s) => (std::sync::Arc::new(s), false),
+            Ok(s) => {
+                let sess = std::sync::Arc::new(s);
+                // 목록(`/term/panes`)에 띄우고, 연결이 끊겨도 살려 둔다. 이게 없으면
+                // 탭을 닫는 순간 셸이 죽어서 폰을 덮었다 열면 처음부터다.
+                kasa_pty::register_session(&id, &sess);
+                kasa_pty::keep_session(&id, sess.clone());
+                (sess, false)
+            }
             Err(e) => {
                 eprintln!("[term-ws] 셸을 못 띄웠습니다: {e}");
                 return;
@@ -3072,7 +3080,9 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             }
         }
     });
-    // 한쪽이 끝나면 다른 쪽도 접는다. 새 셸이면 여기서 Arc 가 떨어져 셸이 종료된다.
+    // 한쪽이 끝나면 다른 쪽도 접는다. **셸은 여기서 안 죽는다** — `keep_session` 이
+    // 붙들고 있어서, 다시 붙으면 하던 작업이 그대로 있다(셸이 exit 하면 EOF 를 보고
+    // 스스로 빠진다).
     tokio::select! {
         _ = &mut to_browser => to_shell.abort(),
         _ = &mut to_shell => to_browser.abort(),
