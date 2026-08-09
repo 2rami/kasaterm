@@ -5475,7 +5475,7 @@ fn install_pane_shims() {
     install_student_shims(&shim_dir);
     // 내장 `/rename` 을 가리는 대체 커맨드. 셰임이 아니라 `~/.claude/commands` 라
     // shim_dir 을 안 받는다.
-    install_rename_command();
+    remove_rename_command();
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -5886,55 +5886,33 @@ fn task_file_is_stale(
 /// 건드리지 않는다 — `~/.claude/commands` 는 거노 개인 설정이지 우리 것이 아니다.
 const RENAME_CMD_MARK: &str = "<!-- kasaterm-managed -->";
 
-/// 내장 `/rename` 대체 커맨드 본문. 커스텀 슬래시커맨드가 내장을 가린다(실측).
+/// 예전에 심어 둔 `~/.claude/commands/rename.md` 를 **지운다**.
 ///
-/// `!` 로 셸을 돌려 결과를 문맥에 실으므로 **모델이 도구를 고를 여지가 없다** —
-/// "rename 해줘"로 풀어 쓰면 그 판단이 매번 달라진다.
-const RENAME_CMD_BODY: &str = "---\n\
-description: 이 pane 의 세션 이름 바꾸기 — 팀원 세션에서 막히는 내장 /rename 을 대신한다\n\
-allowed-tools: Bash(kasaterm-cli rename:*)\n\
----\n\
-\n\
-<!-- kasaterm-managed -->\n\
-\n\
-!`kasaterm-cli rename \"$ARGUMENTS\"`\n\
-\n\
-위 출력이 결과다. 한 줄로 확인만 해 주고 다른 일은 하지 마라.\n";
-
-/// `~/.claude/commands/rename.md` 를 심는다 — **매 부팅 확인이 핵심**이다.
+/// 내장 `/rename` 이 거부되던 건("Teammate names are set by the team leader") 셰임이
+/// 트리플을 붙여 pane 의 claude 가 전부 팀원이었기 때문이다. 이제 트리플을 걷어냈으니
+/// 내장이 다시 돈다 — 2026-08-09 실측: `Session renamed to: RENAMED-OK` 이 뜨고 그
+/// 이름이 입력박스 상단 보더(칩이 덮던 그 자리)에 표시됐다. 그러면 커스텀 커맨드는
+/// 이득 없이 내장을 가리기만 한다(커스텀이 내장을 이긴다).
 ///
-/// 내장 `/rename` 은 kasaterm pane 안에서 무조건 거부된다("Teammate names are set
-/// by the team leader"): 셰임이 트리플을 자동으로 붙여 pane 의 claude 가 전부
-/// 팀원이고, 트리플은 협업의 근간이라 뺄 수 없다. 그래서 커스텀 커맨드로 가린다.
-///
-/// 전에 이 파일을 손으로 한 번 깔았다가 **조용히 사라졌고**(거노: "해결한 거 아니었나
-/// 왜 안 되지"), 사라진 것을 아무도 못 봤다 — 레포 밖 파일이라 git 이 안 지킨다.
-/// 그래서 소스를 여기 상수로 두고 부팅마다 없으면 다시 쓴다. 사용자가 직접 고친
-/// 파일(표식 없음)은 그대로 둔다 — 자동 복구가 남의 편집을 덮으면 그게 더 나쁘다.
-fn install_rename_command() {
+/// 레포 밖 파일이라 심는 코드를 지우는 것만으론 이미 깔린 파일이 안 없어진다. 그래서
+/// 부팅마다 우리 표식이 붙은 것만 골라 지운다. 표식 없는 파일 = 사용자가 쓴 것이라
+/// 그대로 둔다 — 자동 정리가 남의 편집을 지우면 그게 더 나쁘다.
+fn remove_rename_command() {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return;
     };
-    let dir = home.join(".claude/commands");
-    let path = dir.join("rename.md");
-    if !rename_cmd_needs_write(std::fs::read_to_string(&path).ok().as_deref()) {
+    let path = home.join(".claude/commands/rename.md");
+    if !rename_cmd_is_ours(std::fs::read_to_string(&path).ok().as_deref()) {
         return;
     }
-    if let Err(e) =
-        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, RENAME_CMD_BODY))
-    {
-        eprintln!("[shim] /rename 대체 커맨드 설치 실패 {path:?}: {e}");
+    if let Err(e) = std::fs::remove_file(&path) {
+        eprintln!("[shim] /rename 대체 커맨드 제거 실패 {path:?}: {e}");
     }
 }
 
-/// 덮어쓸지 판정만 — 파일시스템을 안 타야 테스트가 `$HOME` 을 흔들지 않는다.
-fn rename_cmd_needs_write(existing: Option<&str>) -> bool {
-    match existing {
-        None => true,
-        Some(cur) if cur == RENAME_CMD_BODY => false,
-        // 표식 없는 파일 = 사용자가 쓴 것. 건드리지 않는다.
-        Some(cur) => cur.contains(RENAME_CMD_MARK),
-    }
+/// 지울지 판정만 — 파일시스템을 안 타야 테스트가 `$HOME` 을 흔들지 않는다.
+fn rename_cmd_is_ours(existing: Option<&str>) -> bool {
+    existing.is_some_and(|cur| cur.contains(RENAME_CMD_MARK))
 }
 
 pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
@@ -7407,23 +7385,21 @@ mod tests {
     }
 
     #[test]
-    fn rename_command_self_heals_but_spares_a_hand_written_one() {
-        // 없으면 쓴다 — 이 갈래가 이번 회귀의 본체다(파일이 사라진 걸 아무도 못 봄).
-        assert!(rename_cmd_needs_write(None));
-        // 우리가 쓴 것과 같으면 매 부팅 무쓰기.
-        assert!(!rename_cmd_needs_write(Some(RENAME_CMD_BODY)));
-        // 표식이 있으면 우리 것 — 내용이 낡았으면 갱신한다.
-        assert!(rename_cmd_needs_write(Some(&format!(
+    fn rename_command_removed_only_when_it_is_ours() {
+        // 트리플을 걷어내 내장 /rename 이 다시 도니, 우리가 심었던 대체 커맨드는 지운다.
+        assert!(rename_cmd_is_ours(Some(&format!(
             "---\ndescription: 옛 버전\n---\n{RENAME_CMD_MARK}\n"
         ))));
-        // 표식 없는 파일은 사용자 것 — 자동 복구가 남의 편집을 덮으면 더 나쁘다.
-        assert!(!rename_cmd_needs_write(Some(
+        // 표식 없는 파일은 사용자 것 — 자동 정리가 남의 편집을 지우면 더 나쁘다.
+        assert!(!rename_cmd_is_ours(Some(
             "---\ndescription: 내가 쓴 rename\n---\n직접 만든 커맨드\n"
         )));
+        // 애초에 없으면 지울 것도 없다.
+        assert!(!rename_cmd_is_ours(None));
     }
 
     #[test]
-    fn claude_wrapper_is_valid_sh_without_auto_teammate_triple() {
+    fn claude_wrapper_is_valid_sh_and_free_of_teammate_triple() {
         // 실제 생성물(팀모드 블록 포함)이 POSIX sh 로 파싱되는지 — 문자열 조립이라
         // 이스케이프 하나로 전체 pane claude 부팅이 깨질 수 있는 지점의 안전망.
         let dir = std::env::temp_dir().join(format!("kt-shim-syntax-{}", std::process::id()));
@@ -7442,12 +7418,23 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "generated claude wrapper failed sh -n");
-        // 자동 teammate 트리플은 2026-08-04 복원됐다(이 가드는 07-24 제거 시절의 것이라
-        // 복원 때 같이 안 뒤집혀 빨간 채로 남아 있었다). 제거 사유였던 "재시작마다 인박스
-        // 고아화"는 꼬리를 세션 id 에서 pane 번호로 바꿔 사라졌다 — pane 은 생애 동안 번호가
-        // 안 변해 몇 번을 resume 해도 같은 인박스다. 이게 빠지면 pane 간 SendMessage 와
-        // board 의 agent_name/team(도는 학생에게 인박스로 말 걸기)이 통째로 죽는다.
-        assert!(body.contains("--agent-id team-lead"), "auto teammate triple went missing");
+        // 자동 트리플은 2026-08-09 에 걷어냈다 — `--agent-id` 가 붙은 세션은 claude 가
+        // cross-session 명부에서 통째로 제외해(등록 함수 첫 줄 `if(W4()!=null) return false`)
+        // 방(cwd)이 다른 pane 끼리 서로 찾지도 못하고 메시지도 안 간다. 발신·수신 양쪽이
+        // 다 죽으므로, 트리플이 되살아나면 그 순간 pane 간 협업이 조용히 끊긴다.
+        assert!(
+            !body.contains("set -- --agent-id"),
+            "teammate triple came back — cross-session 명부 등록이 거부된다"
+        );
+        // 트리플 대신 이름만 넘기고, 명부 등록 게이트를 env 로 연다.
+        assert!(
+            body.contains("CLAUDE_CODE_SESSION_NAME"),
+            "session name went missing — 상대가 이름으로 못 부른다"
+        );
+        assert!(
+            body.contains("CLAUDE_CODE_HARBOR_KITE=1"),
+            "harbor kite env went missing — 명부에 안 오른다"
+        );
         assert!(body.contains("KASATERM_AGENT="), "board 가 읽는 AGENT env 가 사라졌다");
         let _ = std::fs::remove_dir_all(&dir);
     }
