@@ -46,11 +46,21 @@ pub struct SurfaceInfo {
     pub title: Option<String>,
 }
 
+/// serde 기본값용 — 옛 기록(하네스 필드가 없던 시절)은 전부 claude 였다.
+fn harness_claude() -> String {
+    "claude".to_string()
+}
+
 /// A past Claude session discoverable for `claude --resume`, built from the
 /// transcript jsonl files under `~/.claude/projects/<encoded-cwd>/`. The
 /// arona-ui lists these so the user can pick one to continue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentSession {
+    /// 어느 하네스의 세션인가 — `"claude"` | `"codex"` | `"agy"`. 이어가는 명령이
+    /// 셋 다 달라서(`claude --resume` / `codex resume` / `agy --conversation`)
+    /// 목록을 합칠 때 이 값이 없으면 무엇으로 여는지 알 수가 없다.
+    #[serde(default = "harness_claude")]
+    pub harness: String,
     /// Claude session uuid (the jsonl file stem) — pass to `claude --resume`.
     pub id: String,
     /// Human-readable label: the session's aiTitle, else its first user
