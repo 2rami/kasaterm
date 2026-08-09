@@ -2882,7 +2882,9 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             }
         }
     };
-    let rx = sess.tap_bytes();
+    // 구독과 화면 스냅샷을 한 번에 받는다 — 둘로 나누면 그 사이 출력이 유실되거나
+    // 두 번 그려진다(`tap_bytes_with_snapshot` 주석 참고).
+    let (rx, screen) = sess.tap_bytes_with_snapshot();
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
@@ -2892,6 +2894,11 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             format!(r#"{{"t":"size","cols":{c},"rows":{r},"mirror":{mirrored}}}"#).into(),
         ))
         .await;
+    // 이어서 현재 화면. 크기를 먼저 알린 뒤라야 클라가 격자를 맞춘 상태에서 그린다.
+    // 바이너리로 나가므로 클라는 PTY 바이트와 구분 없이 그대로 `term.write` 한다 —
+    // 받는 쪽에 필요한 코드가 0줄이다. 이게 없으면 이미 떠 있는 pane 에 붙었을 때
+    // 다음 출력이 날 때까지 화면이 빈 채로 남는다.
+    let _ = ws_tx.send(Message::Binary(screen.into())).await;
 
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
