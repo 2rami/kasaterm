@@ -174,16 +174,19 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
     std::fs::rename(&tmp, &path)
 }
 
-/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
-/// `board-watch` 를 Monitor 에 걸어 자동 재개. 예전엔 `wake-watch` 를 권했는데
-/// 동료가 끝났는데도 완료를 못 잡고 40분 타임아웃으로 죽는 걸 실측했다(2026-07-30).
+/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다리는 기본은 **그냥 기다리는
+/// 것**이다. 학생 보고(SendMessage)가 알아서 도착하므로 완료 감시는 중복이고,
+/// board-watch 는 모든 pane 을 보므로 `idle` 을 넣으면 남의 턴 종료마다 깨운다
+/// (거노 2026-08-10: "어차피 끝나면 보고하는데 필요없지 않나"). 그래서 Monitor 는
+/// **보고가 올 수 없는 상태**(승인 막힘·죽음·경로 끊김)에만 남겼다.
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
-동료 pane 의 작업이 끝나길 기다려야 할 때는 tell 로 깨우거나 board 를 반복 확인하지 말고, **Monitor 도구**에 아래를 걸어라(persistent: true):\n\
-  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|idle|attention)|\\[done:'\n\
-동료가 턴을 끝내면(idle) 또는 입력·승인에 막히면(waiting/attention) 그 줄이 알림으로 온다 — 한 명이 아니라 **모든 pane 을 한 번에** 본다. 깨어나면 먼저 `kasaterm-cli board` 의 done 보고(완료의 정본 — idle 은 「쉬는 중」일 뿐이다)를 보고, 없으면 `peek`·`transcript` 로 확인하고 이어서 진행해라.\n\
+**기본은 그냥 기다리는 것이다.** 학생에게 「끝나면 알려라」고 시켰으면 SendMessage 가 알아서 도착한다 — 상대가 유휴로 떠 있어도 읽는다. 거기에 감시를 겹치면 같은 완료를 두 번 받고, board-watch 는 **모든 pane** 을 보므로 내가 안 기다리는 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
+**Monitor 는 보고가 올 수 없을 때만 건다** — 승인 프롬프트에 막혔거나, 죽었거나, 보고 경로가 끊긴 것. 그 셋은 상대가 스스로 알릴 수가 없다(persistent: true):\n\
+  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|\\[done:'\n\
+⚠️ **`idle` 은 넣지 마라.** 「쉬는 중」일 뿐 완료가 아니고, 그 한 단어가 남의 턴마다 깨우는 원인이다. 완료의 정본은 `[done:` 이며 그것도 보고를 안 시킨 일감에만 필요하다.\n\
 ⚠️ 필터는 **필수**다. 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄(분당 40줄)이 되고, Monitor 가 알림 폭주로 자동 중지된다(실측).\n\
-⚠️ `kasaterm-cli wake-watch <surface_id>` 도 있지만 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 한 명만 볼 때의 폴백으로만 쓰고 기본은 위 Monitor 로 해라.\n\
-⚠️ 기다릴 일이 있을 때만 걸어라. 아무도 안 기다리는데 걸어 두면 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
+⚠️ **침묵을 성공으로 읽지 마라.** `SendMessage` 의 success 는 도달 증명이 아니고(죽은 상대에게도 「Message sent」가 온다), 이름이 어긋나면 오류 없이 사라진다. 끝났는지는 상대가 남긴 것(커밋·파일·`peek`·`transcript`)으로 확인해라.\n\
+⚠️ `kasaterm-cli wake-watch <surface_id>` 는 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 쓰지 마라.\n\
 \n\
 [협업 — 학생 채팅]\n\
 **SendMessage 가 기본이고, 방(cwd)이 달라도 닿는다.** pane claude 는 트리플 없이 세션 이름만 갖고 뜨므로 전부 cross-session 명부(`~/.claude/sessions/`)에 오른다 — 다른 레포에 띄운 학생에게도 그냥 간다. 유휴로 프롬프트만 떠 있어도 읽는다. 도구 한 번이면 끝이고 상대 화면을 어지럽히지 않는다.\n\\
