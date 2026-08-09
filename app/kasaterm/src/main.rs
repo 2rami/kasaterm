@@ -5989,6 +5989,11 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
                 { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] },
                 { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] }
             ],
+            // ultracode 는 effort 와 별개 상태인데 claude 가 statusline 에 안 실어 준다
+            // (payload 스펙의 effort 는 low|medium|high|xhigh|max 뿐). 여러 에이전트를
+            // 푸는 턴인지가 화면에 안 보이므로, 프롬프트를 보고 마커를 남겨 statusline 이
+            // 읽게 한다. 턴 단위 opt-in 이라 마커도 프롬프트마다 다시 쓰고 지운다.
+            "UserPromptSubmit": [{ "hooks": [cmd("ultracode-mark.py", 3000)] }],
             "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
         },
