@@ -6203,6 +6203,12 @@ if [ -z \"$REAL\" ]; then\n\
   echo \"kasaterm claude shim: real claude not found on PATH\" >&2\n\
   exit 127\n\
 fi\n\
+# `claude kimi` ≡ `kimi claude` — 첫 인자가 모델 이름이면 런처로 넘긴다. 런처는\n\
+# 게이트웨이 env 를 얹고 다시 PATH 의 claude(=이 shim)를 부르므로, 그때는 첫 인자가\n\
+# --model 이라 여기 안 걸리고 훅·페르소나 주입이 정상으로 걸린다.\n\
+case \"$1\" in\n\
+  kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
+esac\n\
 {ablk}\
 # 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 기능 게이트가 서버 플래그\n\
 # tengu_harbor_kite 뒤에 있고 우리 계정엔 아직 안 켜져 있어 env 로 연다. 이게 있어야\n\
@@ -6451,10 +6457,17 @@ if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
     --data-urlencode \"character={name_sq}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
 fi\n\
-# 하네스 선택 — `{name}` 는 claude(기본), `{name} codex` 는 codex 로 뜬다. 첫 인자가\n\
-# 하네스 이름일 때만 소비하므로 `{name} \"버그 고쳐\"` 같은 프롬프트 전달은 그대로다.\n\
+# 하네스·모델 선택 — `{name}` 는 claude(기본), `{name} codex` 는 codex 로 뜬다.\n\
+# `{name} kimi` 는 kimi 모델로 claude 를, `{name} kimi codex` 는 kimi 로 codex 를 띄운다.\n\
+# 모델 이름은 ~/.local/bin/kasa-ai 심링크(kimi·glm)로 PATH 에 있어 exec 이 닿는다.\n\
+# 아는 이름일 때만 소비하므로 `{name} \"버그 고쳐\"` 같은 프롬프트 전달은 그대로다.\n\
 H=claude\n\
-case \"$1\" in claude|codex) H=$1; shift ;; esac\n\
+M=\n\
+case \"$1\" in\n\
+  claude|codex|agy) H=$1; shift ;;\n\
+  kimi|glm) M=$1; shift; case \"$1\" in claude|codex|agy) H=$1; shift ;; esac ;;\n\
+esac\n\
+[ -n \"$M\" ] && exec \"$M\" \"$H\" \"$@\"\n\
 exec \"$H\" \"$@\"\n",
             name_sq = sq(&name),
             persona_sq = sq(&persona),
