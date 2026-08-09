@@ -6188,9 +6188,12 @@ case \"$1\" in\n\
   kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
 esac\n\
 {ablk}\
-# 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 기능 게이트가 서버 플래그\n\
-# tengu_harbor_kite 뒤에 있고 우리 계정엔 아직 안 켜져 있어 env 로 연다. 이게 있어야\n\
-# 세션이 ~/.claude/sessions/<pid>.json 에 등록되고 /tmp/cc-socks/<pid>.sock 로 오간다.\n\
+# 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
+# tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
+# — 그러니 이 줄은 지금 당장 필요한 것이 아니라 플래그가 회수돼도 pane 통신이 안 끊기게\n\
+# 하는 잠금장치다. 켜지면 세션이 ~/.claude/sessions/<pid>.json 에 등록되고\n\
+# /tmp/cc-socks/<pid>.sock 로 오간다. (아침에 ListAgents 가 비었던 건 플래그가 아니라\n\
+# 트리플 때문이었다 — 명부 등록이 --agent-id 있는 세션을 거부한다.)\n\
 export CLAUDE_CODE_HARBOR_KITE=1\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
