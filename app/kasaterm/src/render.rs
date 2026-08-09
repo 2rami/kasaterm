@@ -1180,6 +1180,12 @@ impl App {
                         let msg = msg_path
                             .as_deref()
                             .and_then(|p| latest_teammate_msg(p, &sender));
+                        // 화면에 `@peer` 로 떴어도 태그에서 진짜 발신자를 찾았으면 그것으로
+                        // 그린다 — 이름이 바뀌어야 아래 색·프사·전개가 전부 걸린다.
+                        let sender = msg
+                            .as_ref()
+                            .and_then(|m| m.sender.clone())
+                            .unwrap_or(sender);
                         let accent = teammate_sender_accent(
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
@@ -1297,20 +1303,6 @@ impl App {
                 if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
-                    // 더 부르면 같은 일이 두 벌이 되고, 그 사본이 각자 다른 관문을
-                    // 갖는 순간 한쪽만 고쳐 놓치게 된다(2026-08-05 실사고).
-                    // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
-                    // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
-                    // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
-                    // Stop hook(title-sync)이 턴마다 custom-title 을 최신
-                    // 프롬프트로 갱신해 "지금 하는 작업"이 이 자리에 흐른다.
-                    let jsonl = self.pane_claude_sid.get(id.as_str()).and_then(|sid| {
-                        let cwd = self
-                            .pane_view_cwd
-                            .get(id.as_str())
-                            .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
-                        crate::socket::project_jsonl(cwd, sid)
-                    });
                 }
                 slots.push(PaneSlot {
                     rows: composed,
@@ -7561,6 +7553,27 @@ fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
 struct TeammateMsg {
     body: String,
     color: Option<String>,
+    /// 화면에 뜬 이름이 쓸모없을 때(`@peer`) 태그에서 되찾은 진짜 발신자.
+    /// 이게 있어야 학생색·프사·본문 조회가 이름으로 걸린다.
+    sender: Option<String>,
+}
+
+/// `uds:/tmp/cc-socks/27516.sock` → 그 세션이 명부에 등록한 이름.
+///
+/// claude 는 cross-session 메시지를 `@peer` 라는 고정 라벨로 그린다(발신자 이름이
+/// 명부에 멀쩡히 있어도 그렇다 — 2026-08-09 실측). 그 이름으로는 학생색도 프사도
+/// 본문도 못 찾으므로, 태그가 실어 준 소켓 경로의 pid 로 명부를 되짚는다.
+/// `from-name` 을 안 쓰는 이유는 그게 세션 이름이라 자동 제목에 덮이기 때문이다.
+fn peer_name_from_socket(from: &str) -> Option<String> {
+    let pid = from.rsplit('/').next()?.strip_suffix(".sock")?;
+    if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let path = home.join(".claude/sessions").join(format!("{pid}.json"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let name = v.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// pane 에 도착한 남의 메시지 본문. 두 형식을 다 받는다.
@@ -7585,6 +7598,10 @@ fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
         })
 }
 
+/// claude 가 cross-session 발신자를 부르는 고정 라벨. 이 이름으로는 아무것도 못 찾으므로
+/// 태그를 이름 대조 없이 잡고 소켓 pid 로 진짜 발신자를 되찾는 신호로 쓴다.
+const PEER_LABEL: &str = "peer";
+
 /// 한 태그 형식에 대한 파싱 — 속성은 key="value" 나열(순서 무관).
 fn extract_tagged_msg(
     text: &str,
@@ -7606,11 +7623,20 @@ fn extract_tagged_msg(
             let e = attrs[a..].find('"')?;
             Some(attrs[a..a + e].to_string())
         };
-        if attr(id_attr).as_deref() == Some(sender) {
+        // `@peer` 로 뜬 줄은 이름 대조가 무의미하다 — 그 라벨은 발신자와 무관한
+        // 고정값이라 어떤 태그와도 안 맞는다. 그래서 대조를 건너뛰고 최근 것을 잡되,
+        // 소켓 pid 로 진짜 이름을 되찾아 함께 돌려준다(못 찾으면 라벨 그대로).
+        let peer_probe = sender == PEER_LABEL && id_attr == "from-name";
+        if peer_probe || attr(id_attr).as_deref() == Some(sender) {
             let end = tail.find(close_tag).unwrap_or(tail.len());
             return Some(TeammateMsg {
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
+                sender: if peer_probe {
+                    attr("from").as_deref().and_then(peer_name_from_socket)
+                } else {
+                    None
+                },
             });
         }
         rest = tail;
@@ -10440,31 +10466,3 @@ mod prompt_box_tests {
     }
 }
 
-#[cfg(test)]
-mod teammate_chip_tests {
-    use super::*;
-
-    fn row_from(s: &str) -> Vec<GridCell> {
-        s.chars()
-            .map(|c| {
-                let mut cell = GridCell::blank();
-                cell.ch = c;
-                cell
-            })
-            .collect()
-    }
-    fn text(row: &[GridCell]) -> String {
-        row.iter().map(|c| c.ch).collect()
-    }
-    fn rule(n: usize) -> String {
-        "─".repeat(n)
-    }
-
-    /// 칩 행을 상단 보더로 둔 최소 입력박스. `strip_agent_chip` 은 행을 직접 받지
-    /// 않고 `prompt_box_rows` 로 찾으므로(관문 한 벌), `❯` 마커 행과 하단 보더가
-    /// 함께 있어야 실제 렌더와 같은 조건이 된다.
-    fn boxed(top: Vec<GridCell>) -> Vec<Vec<GridCell>> {
-        vec![top, row_from("❯ hello"), row_from(&rule(30))]
-    }
-
-}
