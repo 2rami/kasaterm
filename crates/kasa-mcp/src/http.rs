@@ -3029,9 +3029,22 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
 
     let sess_in = sess.clone();
     let mut to_browser = tokio::spawn(async move {
-        while let Some(chunk) = brx.recv().await {
-            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
-                break;
+        loop {
+            // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
+            // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
+            // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), brx.recv()).await {
+                Ok(Some(chunk)) => {
+                    if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break, // tap 스레드가 끝났다(PTY 종료)
+                Err(_) => {
+                    if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
