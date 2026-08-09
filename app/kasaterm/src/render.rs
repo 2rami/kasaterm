@@ -7563,13 +7563,40 @@ struct TeammateMsg {
     color: Option<String>,
 }
 
-/// `<teammate-message …>본문</teammate-message>` 파싱 — teammate_id 가 sender 와
-/// 일치하는 첫 태그. 속성은 key="value" 나열(순서 무관).
+/// pane 에 도착한 남의 메시지 본문. 두 형식을 다 받는다.
+///
+/// 트리플을 걷어내기 전에는 팀 인박스만 있어 `<teammate-message teammate_id=… color=…>`
+/// 하나였는데, cross-session 으로 옮기면서 `<cross-session-message from=… from-name=…>`
+/// 이 새로 생겼다. 후자를 모르면 남의 메시지가 학생 테마 없이 claude 기본 표시
+/// (`Message from @peer`)로만 뜬다 — 2026-08-09 회귀.
+///
+/// ⚠️ cross-session 태그엔 **`color` 가 없다.** 발신자 학생색은 여기서 못 얻으므로
+/// 색 없이 돌려주고, 표시층이 이름으로 찾거나 기본색을 쓴다.
 fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
+    extract_tagged_msg(text, sender, "<teammate-message", "teammate_id", "</teammate-message>")
+        .or_else(|| {
+            extract_tagged_msg(
+                text,
+                sender,
+                "<cross-session-message",
+                "from-name",
+                "</cross-session-message>",
+            )
+        })
+}
+
+/// 한 태그 형식에 대한 파싱 — 속성은 key="value" 나열(순서 무관).
+fn extract_tagged_msg(
+    text: &str,
+    sender: &str,
+    open: &str,
+    id_attr: &str,
+    close_tag: &str,
+) -> Option<TeammateMsg> {
     let mut rest = text;
     loop {
-        let s = rest.find("<teammate-message")?;
-        let after = &rest[s + "<teammate-message".len()..];
+        let s = rest.find(open)?;
+        let after = &rest[s + open.len()..];
         let close = after.find('>')?;
         let attrs = &after[..close];
         let tail = &after[close + 1..];
@@ -7579,8 +7606,8 @@ fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
             let e = attrs[a..].find('"')?;
             Some(attrs[a..a + e].to_string())
         };
-        if attr("teammate_id").as_deref() == Some(sender) {
-            let end = tail.find("</teammate-message>").unwrap_or(tail.len());
+        if attr(id_attr).as_deref() == Some(sender) {
+            let end = tail.find(close_tag).unwrap_or(tail.len());
             return Some(TeammateMsg {
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
