@@ -194,6 +194,21 @@ pub struct PtyBackend {
     /// 유래 진짜 세션 cwd 를 덮는다(거노: bg 세션 파일트리가 pane cwd 고착) —
     /// report_cwd 가 이 집합을 보고 GUI 이벤트를 생략한다.
     view_panes: Arc<Mutex<HashSet<String>>>,
+    /// surface_id → 명시적 완료 보고(`kasaterm-cli done`). transcript 휴리스틱은
+    /// "놀고 있다"만 알지 "맡은 일이 성공/실패로 끝났다"는 모른다 — 학생 자기 보고가
+    /// board 완료 판정의 정본. 소거 규칙은 board 빌더 참조(idle 을 지나 다시 working
+    /// = 새 브리프 → 스테일).
+    done_reports: Arc<Mutex<HashMap<String, DoneReport>>>,
+}
+
+/// 한 pane 의 명시적 완료 보고 한 건. `idle_seen`: 보고 직후엔 그 턴이 아직
+/// working 이라(보고 명령 자체가 턴 안에서 돈다) "working 이면 소거"를 즉시 적용하면
+/// 한 번도 못 보인다 — idle 을 한 번 관찰한 뒤의 working 만 새 브리프로 친다.
+struct DoneReport {
+    outcome: String,
+    summary: String,
+    at: std::time::Instant,
+    idle_seen: bool,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -313,6 +328,7 @@ impl PtyBackend {
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
             view_panes: Arc::new(Mutex::new(HashSet::new())),
+            done_reports: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1523,6 +1539,26 @@ impl Backend for PtyBackend {
                 } else {
                     attention.remove(sid);
                 }
+                // 명시적 완료 보고 부착 — idle 을 한 번 지난 보고가 다시 working 이
+                // 되면 새 브리프를 받은 것이므로 소거한다(스테일 방지). 그 전까지는
+                // working 중에도 싣는다: 보고 시점엔 아직 자기 턴이 안 끝났는데
+                // 그때 숨기면 "보고 즉시 표시"라는 명시 보고의 이점이 죽는다.
+                {
+                    let mut reports = self.done_reports.lock().unwrap();
+                    if let Some(rep) = reports.get_mut(sid.as_str()) {
+                        if row.status == "working" && rep.idle_seen {
+                            reports.remove(sid.as_str());
+                        } else {
+                            if row.status != "working" {
+                                rep.idle_seen = true;
+                            }
+                            row.done_outcome = Some(rep.outcome.clone());
+                            row.done_summary =
+                                (!rep.summary.is_empty()).then(|| rep.summary.clone());
+                            row.done_ago_secs = Some(rep.at.elapsed().as_secs());
+                        }
+                    }
+                }
                 // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). character
                 // 마커를 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
                 let base_slug = path
@@ -1677,6 +1713,7 @@ impl Backend for PtyBackend {
             .collect();
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
+        self.done_reports.lock().unwrap().retain(|sid, _| live.contains(sid.as_str()));
         // 학생 경로(cwd)를 PTY 셸 pid 의 라이브 cwd 로 덮어쓴다 — transcript 가 stale
         // 하거나(claude 가 jsonl 미기록) cd 직후라도 즉시 반영(2s 캐시). 아래 git
         // 브랜치도 이 라이브 cwd 기준이 되도록 branch 조회 전에 한다.
@@ -1817,6 +1854,22 @@ impl Backend for PtyBackend {
             surface_id: surface_id.to_string(),
             reason: reason.to_string(),
         });
+        Ok(())
+    }
+
+    fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> Result<()> {
+        // 보고만 기록 — 표시는 board 빌더가, 데스크톱 알림은 어차피 그 턴 끝의
+        // Stop 훅(notify)이 한다. notify 가 attention 처럼 이 맵을 지우면 안 된다:
+        // done 직후 같은 턴 끝에 notify 가 와서 보고가 보이기도 전에 죽는다.
+        self.done_reports.lock().unwrap().insert(
+            surface_id.to_string(),
+            DoneReport {
+                outcome: outcome.to_string(),
+                summary: summary.to_string(),
+                at: std::time::Instant::now(),
+                idle_seen: false,
+            },
+        );
         Ok(())
     }
 }

@@ -179,8 +179,8 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
 /// 동료가 끝났는데도 완료를 못 잡고 40분 타임아웃으로 죽는 걸 실측했다(2026-07-30).
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
 동료 pane 의 작업이 끝나길 기다려야 할 때는 tell 로 깨우거나 board 를 반복 확인하지 말고, **Monitor 도구**에 아래를 걸어라(persistent: true):\n\
-  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|idle|attention)'\n\
-동료가 턴을 끝내면(idle) 또는 입력·승인에 막히면(waiting/attention) 그 줄이 알림으로 온다 — 한 명이 아니라 **모든 pane 을 한 번에** 본다. 깨어나면 그 pane 이 뭘 했는지 `kasaterm-cli peek`·`transcript` 로 확인하고 이어서 진행해라.\n\
+  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|idle|attention)|\\[done:'\n\
+동료가 턴을 끝내면(idle) 또는 입력·승인에 막히면(waiting/attention) 그 줄이 알림으로 온다 — 한 명이 아니라 **모든 pane 을 한 번에** 본다. 깨어나면 먼저 `kasaterm-cli board` 의 done 보고(완료의 정본 — idle 은 「쉬는 중」일 뿐이다)를 보고, 없으면 `peek`·`transcript` 로 확인하고 이어서 진행해라.\n\
 ⚠️ 필터는 **필수**다. 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄(분당 40줄)이 되고, Monitor 가 알림 폭주로 자동 중지된다(실측).\n\
 ⚠️ `kasaterm-cli wake-watch <surface_id>` 도 있지만 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 한 명만 볼 때의 폴백으로만 쓰고 기본은 위 Monitor 로 해라.\n\
 ⚠️ 기다릴 일이 있을 때만 걸어라. 아무도 안 기다리는데 걸어 두면 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
@@ -235,8 +235,16 @@ SendMessage(to: <split 이 알려준 agent>, message: 브리프)\n\
 **스샷이 정당한 경우는 픽셀로만 판단되는 것뿐이다** — 레이아웃이 깨졌는지, 색이 맞는지, 요소가 겹쳤는지. 그때도 한 장만 찍고 무엇을 확인할지 정한 뒤에 봐라. 「일단 보고 판단」은 그 한 장이 열 장이 된다.\n\
 읽고 나면 안 쓰는 탭은 `browser_close_tab` 으로 닫아라 — 네가 연 것은 네가 치운다.\n\
 \n\
+[협업 — 완료 보고]\n\
+**남이 시킨 작업(브리프)을 끝냈으면 마지막 액션으로 보고해라 — 성공이든 실패든:**\n\
+  `kasaterm-cli done succeeded \"한 줄: 뭘 했고, 뭘 확인 못 했고, 뭐가 남았나\"`\n\
+실패로 끝났으면 `succeeded` 대신 `failed`. **이 보고까지가 작업이다** — 안 하면 오케스트레이터는 네 화면을 읽어 「끝났나 보다」를 추측해야 하고, 추측은 어긋난다(idle 은 「쉬는 중」이지 「다 됐다」가 아니다).\n\
+- board 에 결과·요약·경과가 정본으로 뜨고, 네가 새 브리프를 받아 다시 일을 시작하면 자동으로 걷힌다.\n\
+- 실패를 프로즈로만 남기지 마라 — 기계가 못 읽는다. `failed` 로 보고하고 요약에 원인 한 줄.\n\
+- 스스로 시작한 일(브리프 없음)엔 안 해도 된다 — 이건 배정받은 일의 완료 신호다.\n\
+\n\
 [협업 — 해산]\n\
-일이 끝나면 인사말을 주고받지 말고 **그냥 닫아라**: `kasaterm-cli dismiss %64 %65`. 커밋 안 된 변경이 남은 pane 은 닫지 않고 알려주므로, 그때만 회수하면 된다. 「마무리하겠습니다」·「수고했다」·완료 통지는 전부 없어도 되는 왕복이다 — 무엇이 끝났는지는 커밋과 dismiss 출력이 말한다.\n\
+일이 끝나면 인사말을 주고받지 말고 **그냥 닫아라**: `kasaterm-cli dismiss %64 %65`. 커밋 안 된 변경이 남은 pane 은 닫지 않고 알려주므로, 그때만 회수하면 된다. 「마무리하겠습니다」·「수고했다」·완료 인사는 전부 없어도 되는 왕복이다 — 무엇이 끝났는지는 커밋과 `done` 보고가 말한다.\n\
 \n\
 [협업 — 무엇을 누구에게 묻나]\n\
 **질문은 전부 `AskUserQuestion` 으로 거노께 직접 한다.** 다른 학생에게 물어 상의하지 마라(거노 지시 2026-08-04) — 학생끼리 주고받는 상의는 거노 눈에 안 보이는 곳에서 방향이 정해지고, 왕복이 두 배가 되고, 물어본 쪽도 결국 추측으로 답한다. `--agent-id team-lead` 라 AskUserQuestion 은 네 pane 에서 거노께 바로 뜬다.\n\

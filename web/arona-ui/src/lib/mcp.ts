@@ -111,6 +111,10 @@ interface BoardRow {
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
+  /** 명시적 완료 보고(kasaterm-cli done) — "succeeded"|"failed" + 한 줄 요약 + 경과 초. */
+  done_outcome?: string;
+  done_summary?: string;
+  done_ago_secs?: number;
 }
 
 function toStatus(s?: string): StatusKind {
@@ -175,7 +179,10 @@ function toAgent(r: BoardRow): Agent {
     contextLimit: r.context_limit,
     contextPct: r.context_pct,
     branch: r.branch,
-    windowIdx: r.window_idx ?? 0
+    windowIdx: r.window_idx ?? 0,
+    doneOutcome: r.done_outcome,
+    doneSummary: r.done_summary,
+    doneAgoSecs: r.done_ago_secs
   };
 }
 

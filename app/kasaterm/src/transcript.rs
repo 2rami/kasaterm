@@ -317,6 +317,10 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         rate_window_minutes: rate.map(|(_, w, _)| w),
         rate_resets_at: rate.map(|(_, _, r)| r),
         plan_type,
+        // 완료 보고는 transcript 소관이 아니다 — collab_board(done_reports)가 채운다.
+        done_outcome: None,
+        done_summary: None,
+        done_ago_secs: None,
     }
 }
 
@@ -609,6 +613,10 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         rate_window_minutes: None,
         rate_resets_at: None,
         plan_type: None,
+        // 완료 보고는 transcript 소관이 아니다 — collab_board(done_reports)가 채운다.
+        done_outcome: None,
+        done_summary: None,
+        done_ago_secs: None,
     }
 }
 

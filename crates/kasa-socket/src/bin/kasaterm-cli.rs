@@ -284,9 +284,22 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                     let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
                     let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
                     let waiting = e.get("waiting_for").and_then(|v| v.as_str());
-                    let line = match waiting {
-                        Some(w) => format!("{status} (waiting: {w}) — {intent}"),
-                        None => format!("{status} — {intent}"),
+                    // 명시적 완료 보고 — 상태 줄에 실어 diff 가 잡게 한다: 보고가
+                    // 도착하는 순간(아직 working 이어도) 한 줄이 흐르고, Monitor 의
+                    // done 필터가 idle 전에 깨어난다.
+                    let done = e.get("done_outcome").and_then(|v| v.as_str());
+                    let line = match (done, waiting) {
+                        (Some(d), _) => {
+                            let sum =
+                                e.get("done_summary").and_then(|v| v.as_str()).unwrap_or("");
+                            if sum.is_empty() {
+                                format!("{status} [done:{d}] — {intent}")
+                            } else {
+                                format!("{status} [done:{d}] {sum} — {intent}")
+                            }
+                        }
+                        (None, Some(w)) => format!("{status} (waiting: {w}) — {intent}"),
+                        (None, None) => format!("{status} — {intent}"),
                     };
                     cur.insert(id, line);
                 }
@@ -735,6 +748,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
+    eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(학생색·학생명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");
@@ -1093,6 +1107,40 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.attention",
                 json!({ "surface_id": surface, "reason": reason }),
+            )
+        }
+        "done" => {
+            // done [--surface <id>] <succeeded|failed> [요약...] — 브리프를 마친
+            // 학생의 명시적 완료 보고. 오케스트레이터가 board 에서 완료를 추정하지
+            // 않고 읽게 한다. --surface 기본값은 자기 pane($KASATERM_PANE_ID).
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("done needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let outcome = match rest.first().map(String::as_str) {
+                // 흔한 이형 표기는 여기서 정규형으로 — 서버는 두 값만 받는다.
+                Some("succeeded" | "success" | "ok") => "succeeded",
+                Some("failed" | "fail") => "failed",
+                Some(other) => {
+                    return Err(anyhow!(
+                        "done outcome must be succeeded|failed, got \"{other}\""
+                    ))
+                }
+                None => return Err(anyhow!("done needs <succeeded|failed> [한 줄 요약]")),
+            };
+            let summary = rest.get(1..).unwrap_or(&[]).join(" ");
+            (
+                "surface.done",
+                json!({ "surface_id": surface, "outcome": outcome, "summary": summary }),
             )
         }
         "layout" => ("window.layout", json!({})),
