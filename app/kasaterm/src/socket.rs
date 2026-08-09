@@ -168,6 +168,11 @@ pub struct PtyBackend {
     /// surface_id → statusLine 이 보고한 "현재 보는 경로"(report_cwd). claude 내부 cd 는
     /// lsof(cwd_cache)로 안 보여, statusline.py 가 매 렌더 직접 push 한다.
     reported_cwd: Arc<Mutex<HashMap<String, String>>>,
+    /// surface_id → statusLine 이 보고한 (컨텍스트 창, 사용 토큰). 하네스가 훅 stdin 으로
+    /// 준 값이라 ctx% 분모의 정본이다 — transcript 의 model 엔 `[1m]` 이 안 실려(API 응답
+    /// 이 `claude-opus-5`) 모델명 추정으로는 1M 세션이 200k 로 잡혔다(18만 토큰이 92%로
+    /// 보이던 원인). 미보고(구버전 statusline·창 미상)면 없음 → 추정 폴백.
+    reported_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
     /// surface_id → 마지막 유효 (context_tokens, context_limit). transcript usage 가 tail
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
     /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
@@ -302,6 +307,7 @@ impl PtyBackend {
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
+            reported_ctx: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
             bg_agents,
@@ -881,11 +887,27 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn report_cwd(&self, surface_id: &str, cwd: &str, session_id: &str) -> Result<()> {
+    fn report_cwd(
+        &self,
+        surface_id: &str,
+        cwd: &str,
+        session_id: &str,
+        ctx_window: u64,
+        ctx_tokens: u64,
+    ) -> Result<()> {
         self.reported_cwd
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        // 창을 아는 보고만 채택 — 0 은 "미보고"라 옛 정답을 덮지 않는다. 뷰 pane 도
+        // 저장한다: cwd 와 달리 컨텍스트는 뷰어 자신의 것이 맞고, 그 pane 의 ctx% 는
+        // 뷰어 세션 기준으로 보여야 한다.
+        if ctx_window > 0 {
+            self.reported_ctx
+                .lock()
+                .unwrap()
+                .insert(surface_id.to_string(), (ctx_window, ctx_tokens));
+        }
         // agents/attach 뷰 pane: 이 보고는 뷰어 claude 프로세스 자신의 cwd(pane
         // 스폰 경로)지 표시 중인 세션의 프로젝트가 아니다 — GUI 로 흘리면
         // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(거노:
@@ -1705,9 +1727,25 @@ impl Backend for PtyBackend {
                     row.model = m;
                 }
             }
-            // 1M 보정 — 상태바 모델이 "1M context" 면 한도를 1M 로 확정. transcript 모델엔 [1m]
-            // 태그가 안 실려 토큰<200k 인 1M 세션이 200k 한도로 잘못 잡히던 걸 교정.
-            if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000 {
+            // 컨텍스트 창 — statusLine 이 보고한 하네스 정본이 최우선. transcript 의 model
+            // 엔 `[1m]` 이 안 실리고(API 응답이 `claude-opus-5`) 상태바 모델명도 좁은 pane
+            // 대비로 "(1M context)" 괄호가 잘려 나가, 추정 3종이 모두 빗나가면 1M 세션이
+            // 200k 로 잡혔다 — 18만 토큰이 92%(빨강)로 보이다 200k 를 넘는 순간 20% 로
+            // 떨어지는 역주행의 원인. 보고가 없을 때만 종전 상태바 폴백을 쓴다.
+            let reported = self
+                .reported_ctx
+                .lock()
+                .unwrap()
+                .get(&row.surface_id)
+                .copied();
+            if let Some((win, tok)) = reported {
+                row.context_limit = win;
+                // transcript usage 가 tail 윈도 밖이라 0 이면 보고된 토큰으로 메운다.
+                if row.context_tokens == 0 {
+                    row.context_tokens = tok;
+                }
+            } else if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000
+            {
                 row.context_limit = 1_000_000;
             }
             // 정확 소스(transcript usage)가 tail 윈도에 없어 0 이면 직전 유효값을 유지 — 컨텍스트량·

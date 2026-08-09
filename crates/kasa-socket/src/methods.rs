@@ -431,7 +431,11 @@ fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Respo
         None => return param_err(id, "surface.report_cwd requires `cwd` (string)"),
     };
     let session_id = params.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-    match backend.report_cwd(surface_id, cwd, session_id) {
+    // 컨텍스트 창·사용 토큰은 선택 — 구버전 statusline 은 안 보내고, 그때는 0(미상)이라
+    // GUI 가 종전 추정 폴백으로 떨어진다.
+    let ctx_window = params.get("ctx_window").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ctx_tokens = params.get("ctx_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    match backend.report_cwd(surface_id, cwd, session_id, ctx_window, ctx_tokens) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

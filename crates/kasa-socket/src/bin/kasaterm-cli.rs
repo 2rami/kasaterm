@@ -814,16 +814,27 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "report-cwd" => {
-            // statusline.py 가 매 렌더 호출: report-cwd <surface_id> <cwd> [session_id].
-            // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출.
+            // statusline.py 가 매 렌더 호출:
+            //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens]
+            // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출하고, 컨텍스트 창·사용
+            // 토큰을 함께 실어 board 의 ctx% 분모를 확정한다(추정 대신 하네스 정본).
+            // 뒤 둘은 선택 — 구버전 statusline 이나 창 미상이면 생략되고 GUI 가 폴백한다.
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
             let cwd = args.get(1).ok_or_else(|| anyhow!("report-cwd needs a cwd"))?;
             let session_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let ctx_window: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let ctx_tokens: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
             (
                 "surface.report_cwd",
-                json!({ "surface_id": surface, "cwd": cwd, "session_id": session_id }),
+                json!({
+                    "surface_id": surface,
+                    "cwd": cwd,
+                    "session_id": session_id,
+                    "ctx_window": ctx_window,
+                    "ctx_tokens": ctx_tokens,
+                }),
             )
         }
         "split" => {
@@ -1538,6 +1549,31 @@ fn sl_read_json(path: &std::path::Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
+/// 훅 stdin → (창 크기, 사용률%, 사용 토큰). 화면 표시와 GUI 보고가 같은 값을 쓰도록 한
+/// 곳에서만 계산한다. 모델명으로 창을 추정하지 않는다 — 하네스가 준 값이 정본이다.
+/// 예외는 Fable 5 뿐: 실제 1M 창인데 Claude Code(2.1.207)가 200k 로 잘못 보고해(#63015
+/// 계열, 31만 토큰 요청이 실제 성공함을 확인) 알려진 진짜 창으로 재계산한다. 더 큰 쪽만
+/// 취하는 보정이라 하네스 메타데이터가 고쳐지면 자동으로 무해해진다.
+fn sl_context(d: &Value) -> (u64, f64, u64) {
+    let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
+    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tot = ctx.get("total_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mid_owned = d
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mid = mid_owned.split('[').next().unwrap_or("");
+    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
+    if known > win {
+        win = known;
+        pct = (tot as f64 / win as f64 * 100.0).min(100.0);
+    }
+    (win, pct, tot)
+}
+
 fn sl_git_branch(cwd: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -1581,13 +1617,17 @@ fn run_statusline() {
         .unwrap_or_default();
     let session_id = d.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
 
-    // claude 내부 cd 를 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행(비동기,
-    // statusline 출력을 지연시키지 않는다). pane 밖에선 무동작.
+    // claude 내부 cd 와 컨텍스트 창을 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행
+    // (비동기, statusline 출력을 지연시키지 않는다). pane 밖에선 무동작. 창을 함께
+    // 보내는 이유는 transcript 의 model 에 `[1m]` 이 안 실려 GUI 가 1M 세션을 200k 로
+    // 오판하기 때문 — 하네스가 준 이 값만이 정본이다.
     if let Some(pane) = sl_env("KASATERM_PANE_ID") {
         if !cwd.is_empty() {
             if let Ok(me) = std::env::current_exe() {
+                let (ctx_win, _, ctx_tot) = sl_context(&d);
+                let (win_s, tot_s) = (ctx_win.to_string(), ctx_tot.to_string());
                 let _ = std::process::Command::new(me)
-                    .args(["report-cwd", &pane, &cwd, session_id])
+                    .args(["report-cwd", &pane, &cwd, session_id, &win_s, &tot_s])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn();
@@ -1666,23 +1706,7 @@ fn run_statusline() {
         .unwrap_or_default();
     parts.push(format!("{}{} {dir_name}{SL_RESET}", ansi_fg(SL_C_DIR), ic.folder));
 
-    // ctx% — Fable 5 창 오보고(200k) 보정: 알려진 진짜 창(1M)이 더 크면 재계산.
-    let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
-    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let mid_owned = d
-        .get("model")
-        .and_then(|m| m.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mid = mid_owned.split('[').next().unwrap_or("");
-    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
-    if known > win {
-        win = known;
-        let tot = ctx.get("total_input_tokens").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        pct = (tot / win as f64 * 100.0).min(100.0);
-    }
+    let (win, pct, _) = sl_context(&d);
     let win_s = if win >= 1_000_000 {
         format!("·{}M", win / 1_000_000)
     } else if win > 0 {

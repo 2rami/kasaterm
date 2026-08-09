@@ -612,10 +612,15 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     }
 }
 
-/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). fable/mythos 계열은 API 기본이 1M(최대=기본)
-/// 이라 모델명만으로 확정 — [1m] 태그·관측치 추정에 기대면 토큰<200k 인 세션이 200k 로 잘못
-/// 잡힌다(실측: fable-5 pane 이 200000 표시). 그 외 모델은 transcript 가 1M 베타 플래그를
-/// 기록 안 하고 model 도 보통 `[1m]` 태그 없이 와서(예 "claude-opus-4-8") 두 신호로 추정:
+/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). **폴백 전용이다** — 정본은 statusLine 이
+/// report_cwd 로 보고하는 하네스 창(socket.rs `reported_ctx`)이고, 이 함수는 그 보고가
+/// 아직 없는 프레임에만 쓰인다.
+///
+/// 추정이 폴백으로 밀려난 이유: transcript 는 1M 베타 플래그를 기록하지 않고 model 에도
+/// `[1m]` 이 안 실려(shim 이 `--model 'claude-opus-5[1m]'` 로 줘도 API 응답은
+/// `claude-opus-5`), 토큰<200k 인 1M 세션이 통째로 200k 로 잡혔다(실측: 18만 토큰이
+/// 92% 빨강 → 200k 를 넘는 순간 20% 로 역주행). fable/mythos 계열만 API 기본이 1M
+/// (최대=기본)이라 모델명으로 확정할 수 있고, 나머지는 두 신호로 추정한다:
 /// ① model 에 `[1m]` 포함 ② 관측 컨텍스트가 200k 초과(200k 한도면 그 전에 compact 됨).
 /// 둘 다 아니면 200k. model 미상 + 관측 0 이면 0(미상).
 fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {

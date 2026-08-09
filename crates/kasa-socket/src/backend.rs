@@ -504,10 +504,21 @@ pub trait Backend: Send + Sync {
     fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
         anyhow::bail!("set_color unsupported by this backend")
     }
-    /// statusLine 이 매 렌더 보고하는 "현재 보는 경로". claude 가 셸 위에서 cd 해도
-    /// lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가 직접 push 한다. board 의
-    /// `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로"). 기본: 무동작(저장 안 함).
-    fn report_cwd(&self, _surface_id: &str, _cwd: &str, _session_id: &str) -> Result<()> {
+    /// statusLine 이 매 렌더 보고하는 "현재 보는 경로" + 컨텍스트 창/사용 토큰.
+    /// claude 가 셸 위에서 cd 해도 lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가
+    /// 직접 push 한다. board 의 `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로").
+    ///
+    /// `ctx_window`/`ctx_tokens` 는 훅 stdin 의 하네스 정본이다(0 = 미보고). transcript
+    /// 의 model 엔 `[1m]` 태그가 안 실려(API 응답이 `claude-opus-5`) 모델명으로는 1M
+    /// 세션을 가려낼 수 없어, 이 값이 ctx% 분모의 유일한 확정 소스다. 기본: 무동작.
+    fn report_cwd(
+        &self,
+        _surface_id: &str,
+        _cwd: &str,
+        _session_id: &str,
+        _ctx_window: u64,
+        _ctx_tokens: u64,
+    ) -> Result<()> {
         Ok(())
     }
     /// Swap two surfaces' positions in the layout. Default: unsupported.
