@@ -7564,11 +7564,13 @@ struct TeammateMsg {
 /// 명부에 멀쩡히 있어도 그렇다 — 2026-08-09 실측). 그 이름으로는 학생색도 프사도
 /// 본문도 못 찾으므로, 태그가 실어 준 소켓 경로의 pid 로 명부를 되짚는다.
 /// `from-name` 을 안 쓰는 이유는 그게 세션 이름이라 자동 제목에 덮이기 때문이다.
-fn peer_name_from_socket(from: &str) -> Option<String> {
+fn socket_pid(from: &str) -> Option<&str> {
     let pid = from.rsplit('/').next()?.strip_suffix(".sock")?;
-    if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
+    (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(pid)
+}
+
+fn peer_name_from_socket(from: &str) -> Option<String> {
+    let pid = socket_pid(from)?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
     let path = home.join(".claude/sessions").join(format!("{pid}.json"));
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
@@ -10466,3 +10468,44 @@ mod prompt_box_tests {
     }
 }
 
+#[cfg(test)]
+mod cross_session_msg_tests {
+    use super::*;
+
+    /// 실제 transcript 에 박히는 원문 그대로(2026-08-09 채집).
+    const REAL: &str = "Another Claude session sent a message:\n\
+<cross-session-message from=\"uds:/tmp/cc-socks/27516.sock\" from-name=\"타이틀 생성 푸시\" from-mode=\"bypass\">\n\
+ROUNDTRIP-OK\n\
+</cross-session-message>\n\
+This came from another Claude session";
+
+    #[test]
+    fn peer_label_picks_up_cross_session_body() {
+        // 화면엔 `@peer` 로 뜨므로 sender 는 그 라벨이다 — 이름 대조로는 절대 안 걸린다.
+        let m = extract_teammate_msg(REAL, PEER_LABEL).expect("본문을 못 뽑았다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
+        // color 는 cross-session 태그에 아예 없다.
+        assert!(m.color.is_none());
+    }
+
+    #[test]
+    fn real_sender_comes_from_socket_pid_not_from_name() {
+        // from-name 은 세션 이름이라 자동 제목에 덮인다 — 이 검체가 그 실물이다
+        // (진짜 발신자는 aru-p107-a2x 인데 「타이틀 생성 푸시」로 실려 왔다).
+        // 그래서 되찾기는 소켓 경로의 pid 로만 한다.
+        assert_eq!(socket_pid("uds:/tmp/cc-socks/27516.sock"), Some("27516"));
+        assert_eq!(socket_pid("uds:/tmp/cc-socks/abc.sock"), None);
+        assert_eq!(socket_pid("bridge:whatever"), None);
+    }
+
+    #[test]
+    fn teammate_tag_still_matches_by_name() {
+        // 옛 형식은 이름 대조 그대로 — 쌓인 transcript 를 거슬러 읽을 때 만난다.
+        let t = "<teammate-message teammate_id=\"momoi\" color=\"red\">안녕</teammate-message>";
+        let m = extract_teammate_msg(t, "momoi").expect("옛 형식이 깨졌다");
+        assert_eq!(m.body, "안녕");
+        assert_eq!(m.color.as_deref(), Some("red"));
+        assert!(m.sender.is_none());
+        assert!(extract_teammate_msg(t, "다른사람").is_none());
+    }
+}
