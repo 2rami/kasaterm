@@ -5995,6 +5995,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
         // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
         "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
+        // 다른 방 pane 이 보낸 메시지를 승인 대기로 잡지 않는다. 기본값은 권한 프롬프트를
+        // 건너뛰는 세션의 인바운드를 붙잡는데, pane claude 는 전부 그 모드라 기본값이면
+        // 학생을 굴리는 흐름이 매 메시지 사용자 클릭에서 끊긴다(08-09: accept 로 도달 확인).
+        "crossSessionInbound": "accept",
     });
     if cfg!(windows) {
         // conflict-guard 는 python3 의존 — 기본 Windows 엔 python3 가 없어 훅이 매
@@ -6178,12 +6182,12 @@ if [ -n \"$AGENT\" ]; then\n\
   TEAM=$(curl -s --max-time 2 --get --data-urlencode \"cwd=$PWD\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/teamname\" 2>/dev/null)\n\
   if [ -n \"$TEAM\" ]; then\n\
     AGENT=\"$AGENT-p${{KASATERM_PANE_ID#%}}${{KASATERM_AGENT_SUFFIX}}\"\n\
-    IB=\"$HOME/.claude/teams/$TEAM/inboxes/$AGENT.json\"\n\
-    mkdir -p \"${{IB%/*}}\" 2>/dev/null\n\
-    [ -f \"$IB\" ] || printf '[]' > \"$IB\"\n\
     export KASATERM_TEAM=\"$TEAM\" KASATERM_AGENT=\"$AGENT\"\n\
-    set -- --agent-id team-lead --agent-name \"$AGENT\" --team-name \"$TEAM\" \"$@\"\n\
-    [ -n \"$ACOLOR\" ] && set -- --agent-color \"$ACOLOR\" \"$@\"\n\
+    # 트리플(--agent-id/--agent-name/--team-name) 대신 세션 이름만 준다. 트리플을 붙이면\n\
+    # claude 가 이 세션을 cross-session 명부에서 통째로 제외해(등록 함수 첫 줄이\n\
+    # `if(W4()!=null) return false`, W4()=--agent-id) 다른 방 pane 과 서로 못 찾는다.\n\
+    # 이름만 주면 방(cwd) 경계 없이 ListAgents→SendMessage 가 닿는다(08-09 실측).\n\
+    export CLAUDE_CODE_SESSION_NAME=\"$AGENT\"\n\
   fi\n\
 fi\n"
     );
@@ -6200,9 +6204,10 @@ if [ -z \"$REAL\" ]; then\n\
   exit 127\n\
 fi\n\
 {ablk}\
-# cross-session(ListAgents 로 다른 방 pane 찾기)을 여기서 켜려 한 적이 있다 — 안 된다.\n\
-# CLAUDE_CODE_HARBOR_KITE=1 로 게이트는 열리지만, 명부 등록이 --agent-id 있는 세션을\n\
-# 통째로 거부해(2.1.226 `if(W4()!=null) return false`) 트리플 붙는 pane 은 하나도 안 오른다.\n\
+# 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 기능 게이트가 서버 플래그\n\
+# tengu_harbor_kite 뒤에 있고 우리 계정엔 아직 안 켜져 있어 env 로 연다. 이게 있어야\n\
+# 세션이 ~/.claude/sessions/<pid>.json 에 등록되고 /tmp/cc-socks/<pid>.sock 로 오간다.\n\
+export CLAUDE_CODE_HARBOR_KITE=1\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
 # per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
