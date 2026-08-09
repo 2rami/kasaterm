@@ -153,21 +153,49 @@ def get_git_branch(cwd):
     return None
 
 
-def report_cwd_to_kasaterm(cwd, session_id):
-    """kasaterm pane 안에서만 — claude 내부 cd 를 GUI(파일트리/footer)에 보고.
+def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0):
+    """kasaterm pane 안에서만 — claude 내부 cd 와 컨텍스트 창을 GUI 에 보고.
     claude 는 셸 위에서 돌아 lsof(최상위 셸 cwd)로는 내부 cd 가 안 보여, statusLine 이
     매 렌더 현재 cwd 를 직접 보고한다. pane 밖(KASATERM_PANE_ID 없음)에선 무동작.
-    백그라운드(Popen)로 statusline 출력을 지연시키지 않는다."""
+    백그라운드(Popen)로 statusline 출력을 지연시키지 않는다.
+
+    창 크기를 같이 보내는 이유: transcript 의 model 엔 `[1m]` 태그가 안 실려(API 응답이
+    `claude-opus-5`) GUI 가 1M 세션을 200k 로 오판했다 — 18만 토큰이 92%(200k) vs
+    19%(1M). 하네스가 훅 stdin 으로 주는 창 크기가 유일한 정본이라 그걸 그대로 넘긴다."""
     pane = os.environ.get("KASATERM_PANE_ID")
     if not pane or not cwd:
         return
+    argv = ["kasaterm-cli", "report-cwd", pane, str(cwd), session_id or ""]
+    # 창을 모를 때(0)만 생략 — 그때 GUI 는 종전 추정 폴백으로 떨어진다.
+    if ctx_window:
+        argv += [str(int(ctx_window)), str(int(ctx_tokens))]
     try:
         subprocess.Popen(
-            ["kasaterm-cli", "report-cwd", pane, str(cwd), session_id or ""],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:
         pass
+
+
+# Fable 5 는 실제 1M 창인데 Claude Code(2.1.207)가 200k 로 잘못 보고하는 버그가 있어
+# (#63015 계열 — 31만 토큰 요청이 실제로 성공함을 확인) 알려진 진짜 창으로 재계산한다.
+# max() 보정이라 메타데이터가 고쳐지면 자동으로 무해해진다.
+KNOWN_WINDOW = {"claude-fable-5": 1_000_000}
+
+
+def resolve_context(d):
+    """훅 stdin → (창 크기, 사용률%, 사용 토큰). 표시와 GUI 보고가 같은 값을 쓰도록
+    한 곳에서만 계산한다. 모델명으로 창을 추정하지 않는다 — 하네스가 준 값이 정본."""
+    ctx = d.get("context_window") or {}
+    win = ctx.get("context_window_size") or 0
+    pct = ctx.get("used_percentage") or 0
+    tot = ctx.get("total_input_tokens") or 0
+    mid = (d.get("model") or {}).get("id", "").split("[")[0]
+    known = KNOWN_WINDOW.get(mid, 0)
+    if known > win:
+        win = known
+        pct = min(100.0, tot / win * 100) if win else 0
+    return win, pct, tot
 
 
 def main():
@@ -183,7 +211,8 @@ def main():
 
     cwd = d.get("cwd") or os.getcwd()
     session_id = d.get("session_id", "")
-    report_cwd_to_kasaterm(cwd, session_id)
+    ctx_win, ctx_pct, ctx_tot = resolve_context(d)
+    report_cwd_to_kasaterm(cwd, session_id, ctx_win, ctx_tot)
 
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "
     parts = []
@@ -249,19 +278,7 @@ def main():
 
     # ctx% 는 "현재 모델 창" 기준이라 모델 전환 시 점프한다(Opus[1m]=1M vs Fable=200k
     # — 같은 31만 토큰이 31% ↔ 100%). 창 크기를 함께 표시해 분모 차이를 자명하게.
-    # Fable 5 는 실제 1M 창인데 Claude Code(2.1.207)가 200k 로 잘못 보고하는 버그가
-    # 있어(#63015 계열 — 31만 토큰 요청이 실제로 성공함을 확인) 알려진 진짜 창으로
-    # % 를 재계산한다. max() 보정이라 메타데이터가 고쳐지면 자동으로 무해해진다.
-    KNOWN_WINDOW = {"claude-fable-5": 1_000_000}
-    ctx = d.get("context_window") or {}
-    pct = ctx.get("used_percentage") or 0
-    win = ctx.get("context_window_size") or 0
-    mid = (d.get("model") or {}).get("id", "").split("[")[0]
-    known = KNOWN_WINDOW.get(mid, 0)
-    if known > win:
-        win = known
-        tot = ctx.get("total_input_tokens") or 0
-        pct = min(100.0, tot / win * 100)
+    win, pct = ctx_win, ctx_pct
     win_s = f"·{win // 1000000}M" if win >= 1000000 else (f"·{win // 1000}k" if win else "")
     c_ctx = ansi("f7768e") if pct >= 90 else ansi(C_CTX)
     parts.append(f"{c_ctx}{pct:.0f}%{DIM}{win_s}{RESET}")
