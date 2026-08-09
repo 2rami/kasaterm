@@ -72,7 +72,11 @@ pane 을 볼 수 없다(`/term/panes` 가 `[]`). **미러는 kasaterm 자체 서
 기본은 여전히 loopback 이다. **여는 것은 명시적 선택**이어야 한다:
 
 ```sh
-KASATERM_BIND=0.0.0.0 …          # 기본값 127.0.0.1
+# ① 열기 — 둘 중 하나. GUI 앱은 env 를 물려받지 않으므로 앱에서는 파일 쪽을 쓴다.
+echo '{ "bind": "0.0.0.0" }' > ~/.config/kasaterm/remote.json
+KASATERM_BIND=0.0.0.0 ./target/debug/kasa-serve-web --port 8799   # CLI 는 env 도 됨
+
+# ② 폰에서 한 번 열면 그 뒤로는 쿠키로 다닌다
 open "http://<이 기기 주소>:8765/term?t=$(cat ~/.config/kasaterm/remote-token)"
 ```
 
@@ -113,8 +117,19 @@ cloudflared tunnel --url http://127.0.0.1:8765
    에서도 같은 게 나오는데 폰트 차이로 덜 띄었을 뿐이다. 굳이 지우려면 셸 쪽
    `unsetopt PROMPT_SP` 지 터미널이 할 일이 아니다.
 
-4. **세션 지속성.** 지금은 탭을 닫으면 셸이 죽는다. 재접속으로 이어 붙이려면
-   레지스트리에 Arc 를 보관하고 TTL 을 둬야 한다(닫힌 pane 복구와 같은 문제).
+4. ~~세션 지속성~~ → **웹 전용 셸은 해결.** `keep_session` 이 강한 Arc 를 붙들어
+   연결과 수명을 갈랐다. 탭을 닫아도 살아 있고, 셸이 `exit` 하면 EOF 를 보고 스스로
+   빠진다. TTL 은 안 뒀다 — 「덮었다 다시 여는」 용도라 시간으로 끊으면 그 목적이
+   사라진다.
+
+   ⚠️ **아직 안 된 것: kasaterm GUI pane 의 지속.** PTY 소유권이 `App.pty`
+   (`main.rs`)에 있어서 앱이 죽으면 그 pane 들은 함께 죽는다. 프로세스 전역
+   레지스트리는 `Weak` 라 **접근만 분리하고 수명은 분리하지 못한다.** 살리려면 PTY 를
+   GUI 밖 프로세스가 소유해야 하고(`kasa-serve-web` 이 그 자리다), GUI 가 거기에
+   붙는 경로를 새로 내야 한다 — 렌더 경로까지 건드리는 별도 작업이다.
+   ⚠️ 그때도 **layout·session·docked 는 GUI 가 계속 소유**해야 한다. 2026-06 에
+   걷어낸 데몬이 죽은 이유가 layout 권한 이중화(부활·증식·drag먹통·덮어쓰기)였고,
+   PTY 수명만 밖으로 내면 그 실패 메커니즘은 구조적으로 재현되지 않는다.
 
 5. ~~pane 목록 UI~~ → **해결.** 하단 바의 드롭다운이 `/term/panes` 를 채운다.
    여러 탭 열기는 아직 없다(주소를 따로 열면 된다).

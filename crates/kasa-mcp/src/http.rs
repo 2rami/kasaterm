@@ -2769,13 +2769,37 @@ fn has_token(h: &HeaderMap) -> bool {
         .is_some_and(|t| t == session_token())
 }
 
-/// 서버가 붙을 주소. 기본은 loopback이고, 여는 것은 **명시적 선택**이어야 한다
-/// (`KASATERM_BIND=0.0.0.0`). 이 서버에는 셸에 바이트를 꽂는 창구가 있다.
+/// 서버가 붙을 주소. 기본은 loopback이고, 여는 것은 **명시적 선택**이어야 한다.
+/// 이 서버에는 셸에 바이트를 꽂는 창구가 있다.
+///
+/// env 다음에 파일을 본다 — **GUI 앱은 env 를 물려받지 않는다**(`open` 이 안
+/// 넘기고, Finder 로 띄우면 셸 환경 자체가 없다). 파일이 없으면 앱에서는 원격을
+/// 켤 방법이 사실상 `launchctl setenv` 뿐인데 그건 로그인 세션 전역이라 거칠다.
+///
+/// ```json
+/// // ~/.config/kasaterm/remote.json
+/// { "bind": "0.0.0.0" }
+/// ```
 fn bind_addr() -> String {
-    std::env::var("KASATERM_BIND")
+    if let Some(v) = std::env::var("KASATERM_BIND")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
+    {
+        return v;
+    }
+    remote_conf_bind().unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn remote_conf_bind() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home).join(".config/kasaterm/remote.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("bind")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn remote_token_path() -> Option<std::path::PathBuf> {
