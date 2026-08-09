@@ -1986,6 +1986,11 @@ fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
 /// (a running `claude`/`vim`/build), else the shell itself at a bare prompt. One
 /// `ps` scan (Windows has no `ps` → None, degrades to "not a shell"). Lets
 /// `room_cd` send raw `cd` only at a shell, never into a live claude (거노).
+/// ⚠️ 이쪽은 런처(node·npx)를 지나 내려가지 **않는다**. 여기 쓰임은 "셸이냐
+/// 아니냐" 하나뿐이라 이름이 `node` 로 나와도 목적을 이루기 때문이다. 사용자에게
+/// 보여줄 정확한 프로그램 이름이 필요하면 kasa-pty 의 `active_process_name`
+/// (런처를 만나면 자식으로 내려간다)을 써라 — 같은 일을 하는 코드가 둘이라는
+/// 사실 자체가 함정이므로, 고칠 일이 생기면 양쪽을 같이 볼 것.
 pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
     let out = crate::proc::command("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])

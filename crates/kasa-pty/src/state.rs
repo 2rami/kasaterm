@@ -442,6 +442,7 @@ impl PtySession {
                 best_child = Some((*row_pid, name.clone()));
             }
         }
+        let best_child = descend_launchers(&table, best_child);
         let resolved = best_child.map(|(_, n)| n).or(shell_comm).map(strip_exe_suffix);
         // Git bash 는 스크립트 실행 시 중간 프로세스가 죽어 부모 사슬이 영구
         // 단절된다(bash → [dead] → sh.exe → claude.exe, VM 실측) — ppid 하강
@@ -2288,6 +2289,47 @@ fn is_agent_launcher(comm: &str) -> bool {
     )
 }
 
+/// 자기 이름으로는 아무것도 말해 주지 않는, 남을 띄우기만 하는 것들.
+/// 진짜 프로그램은 이들의 자식으로 뜨므로 이름 해석은 여기서 멈추면 안 된다.
+/// python 류는 넣지 않았다 — `python train.py` 처럼 자기가 곧 작업인 경우가
+/// 흔해서, 내려갔다가 엉뚱한 자식 이름을 집을 수 있다.
+fn is_launcher_name(name: &str) -> bool {
+    matches!(
+        strip_exe_suffix(name.to_string()).as_str(),
+        "node" | "npx" | "npm" | "bun" | "deno"
+    )
+}
+
+/// 런처를 만나면 그 아래 최신 자식으로 계속 내려간다.
+///
+/// 여기서 멈추면 pane 을 닫을 때 "node 실행 중"이라고 물어 무엇을 닫는 건지 알
+/// 수가 없다 — codex 는 npm shim 을 거쳐 진짜 바이너리가 손자로 뜨고, agy 를
+/// 게이트웨이 모델(kimi·glm)로 돌릴 때도 free-antigravity-cli(node)를 지난다.
+/// 사슬이 길어질 수 있으니 몇 걸음만 내려가고, 더 못 내려가면 그 자리를 답으로 쓴다.
+fn descend_launchers(
+    table: &[(u32, u32, String)],
+    start: Option<(u32, String)>,
+) -> Option<(u32, String)> {
+    let mut cur = start;
+    for _ in 0..3 {
+        let (cpid, cname) = cur.clone()?;
+        if !is_launcher_name(&cname) {
+            break;
+        }
+        let mut grandchild: Option<(u32, String)> = None;
+        for (row_pid, row_ppid, name) in table.iter() {
+            if *row_ppid == cpid && grandchild.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                grandchild = Some((*row_pid, name.clone()));
+            }
+        }
+        match grandchild {
+            Some(g) => cur = Some(g),
+            None => break,
+        }
+    }
+    cur
+}
+
 fn strip_exe_suffix(name: String) -> String {
     #[cfg(not(windows))]
     {
@@ -2730,5 +2772,66 @@ mod scrollback_probe {
             history_lines_for_cols(cols),
             before, rss()
         );
+    }
+}
+
+#[cfg(test)]
+mod launcher_descend_tests {
+    use super::descend_launchers;
+
+    fn row(pid: u32, ppid: u32, name: &str) -> (u32, u32, String) {
+        (pid, ppid, name.to_string())
+    }
+
+    #[test]
+    fn stops_at_a_real_program() {
+        let t = vec![row(100, 1, "zsh"), row(200, 100, "vim")];
+        let got = descend_launchers(&t, Some((200, "vim".into())));
+        assert_eq!(got.unwrap().1, "vim");
+    }
+
+    #[test]
+    fn descends_past_node_to_the_real_binary() {
+        // 실측 트리: 셸 → node(free-antigravity-cli) → agy
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "node"),
+            row(300, 200, "agy"),
+        ];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "agy", "node 에서 멈추면 pane 닫기가 'node' 라고 묻는다");
+    }
+
+    #[test]
+    fn descends_two_hops_for_npm_shim() {
+        // codex 처럼 npm shim 을 한 번 더 지나는 경우
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "npm"),
+            row(300, 200, "node"),
+            row(400, 300, "codex"),
+        ];
+        let got = descend_launchers(&t, Some((200, "npm".into())));
+        assert_eq!(got.unwrap().1, "codex");
+    }
+
+    #[test]
+    fn keeps_launcher_when_it_has_no_child() {
+        // `node` 를 맨손으로 띄운 REPL — 내려갈 곳이 없으면 그대로 둔다
+        let t = vec![row(100, 1, "zsh"), row(200, 100, "node")];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "node");
+    }
+
+    #[test]
+    fn picks_the_newest_child() {
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "node"),
+            row(300, 200, "old"),
+            row(400, 200, "new"),
+        ];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "new");
     }
 }
