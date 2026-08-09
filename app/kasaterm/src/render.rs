@@ -396,9 +396,6 @@ impl App {
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
-        // 세션 제목 타이프라이터 진행 중인 pane 이 하나라도 있나 — 프레임 끝에
-        // TITLE_TYPE_ANIMATING 으로 발행해 펌프 스레드가 33ms Redraw 를 돌린다.
-        let mut title_typing = false;
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
@@ -1649,7 +1646,6 @@ impl App {
             }
             (slots, headers, footer_slots, agents_view_panes)
         };
-        TITLE_TYPE_ANIMATING.store(title_typing, std::sync::atomic::Ordering::Relaxed);
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
@@ -7151,21 +7147,8 @@ pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 세션 제목 타이프라이터 진행 중 — 같은 펌프 스레드가 OR 로 보고 33ms Redraw.
-/// 매 프레임 render 가 실측으로 재발행(타이핑 끝나면 저절로 false).
-pub(crate) static TITLE_TYPE_ANIMATING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
-/// 글자당 드러나는 간격(ms) — 사람 타자 체감. 너무 빠르면 효과가 안 보인다.
 
-thread_local! {
-    /// pane별 (전체 제목, 타이핑 시작 시각). 제목이 처음 뜨거나 바뀌면 리셋해
-    /// 한 글자씩 드러난다. struct App 무접촉(병렬 작업 규칙) — GUI 단일 스레드라
-    /// thread_local 로 충분. 닫힌 pane 의 잔존 엔트리는 무해(수 개 수준).
-    static TITLE_TYPEWRITER: std::cell::RefCell<
-        std::collections::HashMap<String, (String, std::time::Instant)>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
 
 /// 에이전트 TUI 의 입력 영역. 하네스마다 **모양이 다르다** — claude 는 `─` 보더
 /// 두 줄이 입력행을 감싸고, codex 는 보더가 없는 대신 입력행 전체가 배경색으로
