@@ -68,7 +68,13 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 .unwrap_or(0);
             let label = parse_session_label(&path, true)
                 .unwrap_or_else(|| id.chars().take(8).collect());
-            Some(RecentSession { id, label, mtime: mtime_secs, cwd: cwd_str.clone() })
+            Some(RecentSession {
+                harness: "claude".into(),
+                id,
+                label,
+                mtime: mtime_secs,
+                cwd: cwd_str.clone(),
+            })
         })
         .collect()
 }
@@ -458,4 +464,236 @@ mod tests {
         assert_eq!(session_summary_for(&p), None);
         let _ = std::fs::remove_file(&p);
     }
+}
+
+// ---------------------------------------------------------- 하네스 통합 --
+//
+// claude 말고도 codex·agy 가 각자 다른 곳에 다른 모양으로 대화를 쌓는다.
+// 셋을 한 목록으로 보려면 저장 방식의 차이를 여기서 흡수해야 한다:
+//
+//   claude  ~/.claude/projects/<cwd-slug>/<uuid>.jsonl   cwd 별로 디렉터리가 갈린다
+//   codex   ~/.codex/sessions/rollout-<날짜>-<uuid>.jsonl 한 디렉터리에 평평하게
+//   agy     ~/.gemini/antigravity-cli/conversation_summaries.db (SQLite)
+//
+// agy 가 오히려 제일 싸다 — 제목·미리보기·시각·워크스페이스가 한 테이블에 이미
+// 정리돼 있어 쿼리 한 번이면 끝난다. 대화 본문(`conversations/<uuid>.db`)은
+// protobuf BLOB 이라 여기서 건드리지 않는다.
+
+/// 공백을 한 칸으로 합치고 `n` **문자**까지 자른다.
+/// `String::truncate` 를 쓰면 안 된다 — 그쪽은 바이트 오프셋이라 한글 한 글자
+/// 가운데를 끊는 순간 panic 한다(실측: 라벨에 한글이 있으면 바로 터졌다).
+trait TakeChars {
+    fn take_chars(self, n: usize) -> String;
+}
+impl TakeChars for Vec<&str> {
+    fn take_chars(self, n: usize) -> String {
+        self.join(" ").chars().take(n).collect()
+    }
+}
+
+/// mtime(초)으로 환산. 못 읽으면 0 — 정렬에서 맨 뒤로 밀린다.
+fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// jsonl 앞부분에서 `cwd` 를 찾는다. claude 는 세션 초반(대략 3번째 줄)에 한 번
+/// 적어 두므로 앞 40줄만 본다 — 디렉터리 이름(slug)에서 되돌리는 방법은 경로에
+/// 원래 있던 `-` 와 구분자 `-` 를 못 갈라 실패한다.
+fn jsonl_cwd(path: &Path, max_lines: usize) -> Option<String> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(f).lines().take(max_lines).map_while(Result::ok) {
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+/// 모든 프로젝트를 가로지르는 최근 claude 세션. `recent_sessions_for` 는 한 cwd
+/// 안만 보므로 "이 프로젝트" 목록에 맞고, 통합 피커에는 이쪽이 필요하다.
+pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let root = PathBuf::from(home).join(".claude/projects");
+    let Ok(projects) = std::fs::read_dir(&root) else { return Vec::new() };
+
+    let mut files: Vec<(u64, PathBuf)> = Vec::new();
+    for proj in projects.flatten() {
+        let Ok(entries) = std::fs::read_dir(proj.path()) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = e.metadata() else { continue };
+            files.push((mtime_secs(&meta), p));
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        // 걸러낼 것(title-gen·라벨 없는 빈 세션)이 있어 넉넉히 걷는다.
+        .take(limit.saturating_mul(4))
+        .filter_map(|(mtime, path)| {
+            let id = path.file_stem()?.to_str()?.to_string();
+            if !is_uuid(&id) {
+                return None;
+            }
+            // 라벨이 없으면 통째로 뺀다. `recent_sessions_for` 는 한 cwd 안만 보므로
+            // uuid 폴백이 무해했지만, 전체를 훑는 이쪽은 claude 가 제목 생성용으로
+            // 스폰하는 title-gen 세션까지 만난다 — parse_session_label 이 그걸
+            // None 으로 돌려주는데 폴백을 걸면 목록 상단이 uuid 로 오염된다.
+            let label = parse_session_label(&path, true)?;
+            let cwd = jsonl_cwd(&path, 40).unwrap_or_default();
+            Some(RecentSession { harness: "claude".into(), id, label, mtime, cwd })
+        })
+        .take(limit)
+        .collect()
+}
+
+/// 최근 codex 세션. rollout jsonl 은 첫 줄이 `{id, timestamp, …}` 이고 그 뒤로
+/// `{type:"message", role, content:[{text}]}` 가 이어진다. 라벨은 첫 user 메시지.
+pub fn recent_codex_sessions(limit: usize) -> Vec<RecentSession> {
+    use std::io::BufRead;
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let dir = PathBuf::from(home).join(".codex/sessions");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+
+    let mut files: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                return None;
+            }
+            Some((mtime_secs(&e.metadata().ok()?), p))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+
+    files
+        .into_iter()
+        // 빈 세션을 뒤에서 거르므로 넉넉히 걷는다 — limit 만큼만 열면 그중
+        // 빈 것을 뺀 나머지가 limit 에 못 미친다.
+        .take(limit.saturating_mul(4))
+        .filter_map(|(mtime, path)| {
+            let f = std::fs::File::open(&path).ok()?;
+            let mut id = String::new();
+            let mut label = String::new();
+            // 앞 200줄이면 헤더와 첫 사용자 발화를 지나친다. 도구 호출이 길게
+            // 이어지는 세션도 user 메시지는 대개 맨 앞에 있다.
+            for line in std::io::BufReader::new(f).lines().take(200).map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if id.is_empty() {
+                    if let Some(x) = v.get("id").and_then(|x| x.as_str()) {
+                        id = x.to_string();
+                    }
+                }
+                if label.is_empty()
+                    && v.get("type").and_then(|t| t.as_str()) == Some("message")
+                    && v.get("role").and_then(|r| r.as_str()) == Some("user")
+                {
+                    let text = v
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    // chars() 로 자른다 — String::truncate 는 바이트 오프셋이라
+                    // 한글 중간을 끊으면 그 자리에서 panic 한다(실측).
+                    label = text.split_whitespace().collect::<Vec<_>>().take_chars(120);
+                }
+                if !id.is_empty() && !label.is_empty() {
+                    break;
+                }
+            }
+            // 파일명(rollout-<날짜>-<uuid>)에서라도 id 를 건진다.
+            if id.is_empty() {
+                id = path.file_stem()?.to_str()?.rsplit_once('-').map(|(_, u)| u.to_string())?;
+            }
+            // 사용자 발화가 하나도 없는 세션은 뺀다 — codex 는 띄우기만 하고 아무
+            // 말도 안 한 세션도 rollout 파일을 남기는데(헤더 한 줄뿐), 이어갈 게
+            // 없는 항목이 목록 상단을 uuid 로 채워 진짜 대화를 밀어낸다.
+            if label.is_empty() {
+                return None;
+            }
+            Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd: String::new() })
+        })
+        .take(limit)
+        .collect()
+}
+
+/// 최근 agy 대화. 요약 테이블 한 번만 읽는다 — 본문 DB 들은 protobuf 라 안 연다.
+///
+/// SQLite 를 `sqlite3` 프로세스로 읽는 이유: 이 crate 에 SQLite 의존성을 들이면
+/// 빌드가 무거워지는데, 얻는 건 쿼리 하나다. macOS 는 `sqlite3` 를 기본 탑재한다.
+/// ⚠️Windows 엔 없으므로 그때는 rusqlite 로 옮겨야 한다(지금은 빈 목록).
+pub fn recent_agy_sessions(limit: usize) -> Vec<RecentSession> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let db = PathBuf::from(home).join(".gemini/antigravity-cli/conversation_summaries.db");
+    if !db.is_file() {
+        return Vec::new();
+    }
+    // 시각은 SQL 에서 unix 초로 바꿔 받는다 — datetime 문자열 형식을 Rust 쪽에서
+    // 또 추측하지 않으려는 것이다.
+    let sql = format!(
+        "SELECT json_group_array(json_object('id',conversation_id,'title',title,\
+         'preview',preview,'ts',CAST(strftime('%s',last_modified_time) AS INTEGER),\
+         'ws',workspace_uris)) FROM (SELECT * FROM conversation_summaries \
+         ORDER BY last_modified_time DESC LIMIT {limit});"
+    );
+    let Ok(out) = std::process::Command::new("sqlite3").arg(&db).arg(&sql).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(text.trim()).unwrap_or_default();
+    rows.iter()
+        .filter_map(|r| {
+            let id = r.get("id")?.as_str()?.to_string();
+            let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let preview = r.get("preview").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let mut label = if title.is_empty() { preview.to_string() } else { title.to_string() };
+            if label.is_empty() {
+                label = id.chars().take(8).collect();
+            }
+            label = label.split_whitespace().collect::<Vec<_>>().take_chars(120);
+            let mtime = r.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
+            // workspace_uris 는 `file:///path` 목록(JSON 배열 문자열)이다.
+            let cwd = r
+                .get("ws")
+                .and_then(|x| x.as_str())
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .and_then(|v| v.into_iter().next())
+                .map(|u| u.strip_prefix("file://").unwrap_or(&u).to_string())
+                .unwrap_or_default();
+            Some(RecentSession { harness: "agy".into(), id, label, mtime, cwd })
+        })
+        .collect()
+}
+
+/// 세 하네스를 합쳐 최신순으로. 통합 피커의 단일 진입점.
+/// 각 하네스에서 `limit` 개씩 걷은 뒤 합쳐서 다시 상위 `limit` 만 남긴다 —
+/// 한쪽이 최근 것을 독차지해도 다른 쪽 최신 항목을 놓치지 않는다.
+pub fn recent_all_sessions(limit: usize) -> Vec<RecentSession> {
+    let mut all = recent_claude_sessions_all(limit);
+    all.extend(recent_codex_sessions(limit));
+    all.extend(recent_agy_sessions(limit));
+    all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    all.truncate(limit);
+    all
 }
