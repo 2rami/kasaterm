@@ -937,9 +937,7 @@ impl ApplicationHandler<UserEvent> for App {
                     crate::render::STUDENT_ANIM_FRAME_MS,
                 ));
                 let animating = crate::render::STUDENT_SPRITE_ANIMATING
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    || crate::render::TITLE_TYPE_ANIMATING
-                        .load(std::sync::atomic::Ordering::Relaxed);
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if animating && anim_proxy.send_event(UserEvent::Redraw).is_err() {
                     break;
                 }
