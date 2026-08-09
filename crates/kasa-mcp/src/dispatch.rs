@@ -777,6 +777,15 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
         ));
     }
 
+    // 완료의 정본 보고 — board 가 idle 추정(transcript 휴리스틱) 대신 이 보고를 싣는다.
+    // report_to(tell)와 별개다: tell 은 사람/오케스트레이터에게 가는 통보고, done 은
+    // board 상태를 뒤집는 기록이다. 실패를 프로즈에만 적으면 기계가 못 읽는다.
+    ctx.push(
+        "일을 마치면 마지막에 `kasaterm-cli done succeeded \"<한 줄: 뭘 했고 뭐가 남았나>\"` 를 \
+         실행해라. 실패로 끝났으면 succeeded 대신 failed 로 — 성공이든 실패든 이 보고까지가 작업이다"
+            .to_string(),
+    );
+
     if !ctx.is_empty() {
         out.push_str("\n\n[맥락] ");
         out.push_str(&ctx.join("\n[맥락] "));

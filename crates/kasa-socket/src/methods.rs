@@ -132,6 +132,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "surface.notify" => surface_notify(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
+        "surface.done" => surface_done(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -235,6 +236,7 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.transcript",
                 "surface.notify",
                 "surface.attention",
+                "surface.done",
             ],
         }),
     )
@@ -309,6 +311,30 @@ fn surface_attention(backend: &dyn Backend, id: Value, params: &Value) -> Respon
     };
     let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
     match backend.attention(surface_id, reason) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.done requires `surface_id` (string)"),
+    };
+    // outcome 두 값 강제 — board status 칸에서 겪은 "free text 라더니 소비부는 정확
+    // 일치" 함정을 서버 입구에서 막는다. 실패도 정식 보고다(프로즈에만 실으면 못 읽음).
+    let outcome = match params.get("outcome").and_then(|v| v.as_str()) {
+        Some(o @ ("succeeded" | "failed")) => o,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.done `outcome` must be \"succeeded\" or \"failed\", got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
+    };
+    let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.pane_done(surface_id, outcome, summary) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -818,6 +844,8 @@ mod tests {
         cwd: Option<std::path::PathBuf>,
         // claude 가 도는 pane 들 — 부팅 커맨드 가드가 이걸 보고 판정한다.
         board: Vec<crate::backend::PaneActivity>,
+        // 완료 보고 기록 — surface.done 이 outcome 검증을 통과했을 때만 쌓인다.
+        done: Mutex<Vec<(String, String, String)>>,
     }
 
     impl Backend for FakeBackend {
@@ -877,6 +905,14 @@ mod tests {
         }
         fn resize_divider(&self, path: &[u8], ratio: f32) -> anyhow::Result<()> {
             self.resized.lock().unwrap().push((path.to_vec(), ratio));
+            Ok(())
+        }
+        fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> anyhow::Result<()> {
+            self.done.lock().unwrap().push((
+                surface_id.to_string(),
+                outcome.to_string(),
+                summary.to_string(),
+            ));
             Ok(())
         }
     }
@@ -1090,6 +1126,36 @@ mod tests {
         assert!(!msg.contains("SendMessage"), "codex 엔 인박스가 없다: {msg}");
         assert!(msg.contains("codex"), "무엇이 돌고 있는지 밝혀야 한다: {msg}");
         assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    /// done 의 outcome 은 두 값뿐 — status 칸에서 겪은 "free text 라더니 소비부는
+    /// 정확 일치" 함정을 서버 입구에서 막는다. 통과한 보고만 backend 에 닿는다.
+    #[test]
+    fn surface_done_gates_outcome_to_two_values() {
+        let backend = FakeBackend::default();
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.done",
+                json!({"surface_id": "surf-1", "outcome": "거의 다 됨", "summary": "x"}),
+            ),
+        );
+        assert!(!r.ok);
+        assert!(r.error.unwrap().message.contains("succeeded"), "고칠 값을 알려줘야 한다");
+        assert!(backend.done.lock().unwrap().is_empty(), "거부했으면 기록하지 않는다");
+
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.done",
+                json!({"surface_id": "surf-1", "outcome": "failed", "summary": "빌드 깨짐"}),
+            ),
+        );
+        assert!(r.ok);
+        assert_eq!(
+            backend.done.lock().unwrap().as_slice(),
+            &[("surf-1".to_string(), "failed".to_string(), "빌드 깨짐".to_string())]
+        );
     }
 
     #[test]

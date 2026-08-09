@@ -285,6 +285,18 @@ pub struct PaneActivity {
     /// 구독 플랜 이름(실측 "plus"). 같은 사용률도 플랜에 따라 뜻이 달라 함께 싣는다.
     #[serde(default)]
     pub plan_type: Option<String>,
+    /// 명시적 완료 보고(`pane_done`) — "succeeded" | "failed". None=보고 없음.
+    /// 새 브리프를 받아 다시 working 이 되면 board 빌더가 지운다(스테일 방지).
+    /// status 칸과 별개인 이유: status 는 "지금 뭘 하나"(순간), 이건 "맡은 일이
+    /// 어떻게 끝났나"(결과)라 겹쳐 쓰면 정확 일치 소비부가 죽는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_outcome: Option<String>,
+    /// 완료 보고 한 줄 요약 — 뭘 했고 뭐가 남았는지. done_outcome 없이는 안 실린다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_summary: Option<String>,
+    /// 보고 후 경과 초 — UI 가 "3분 전 완료" 상대 표시를 하도록 절대시각 대신 나이.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_ago_secs: Option<u64>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).
@@ -601,6 +613,14 @@ pub trait Backend: Send + Sync {
     /// "permission" / the prompt text); empty is fine. Default unsupported.
     fn attention(&self, _surface_id: &str, _reason: &str) -> Result<()> {
         anyhow::bail!("attention unsupported by this backend")
+    }
+    /// 학생의 명시적 완료 보고 — 브리프를 마친 pane 이 `kasaterm-cli done` 으로
+    /// 부른다. board 의 완료 판정을 idle 추정에서 자기 보고 정본으로 바꾸는 자리:
+    /// transcript 휴리스틱은 "놀고 있음"만 알지 "성공/실패로 끝났음"은 모른다.
+    /// `outcome` 은 "succeeded" | "failed" 둘뿐(자유 텍스트 금지 — status 칸과 같은
+    /// 정확 일치 소비 함정을 처음부터 막는다). Default unsupported.
+    fn pane_done(&self, _surface_id: &str, _outcome: &str, _summary: &str) -> Result<()> {
+        anyhow::bail!("pane_done unsupported by this backend")
     }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just

@@ -27,6 +27,14 @@ function BellGlyph() {
   );
 }
 
+// 완료 보고 경과 — 절대 시각은 읽는 사람이 매번 뺄셈해야 한다(거노: 상대 시간으로).
+const agoLabel = (secs?: number) => {
+  if (secs == null) return '';
+  if (secs < 60) return '방금';
+  if (secs < 3600) return `${Math.floor(secs / 60)}분 전`;
+  return `${Math.floor(secs / 3600)}시간 전`;
+};
+
 const SectionLabel = ({ children }: { children: string }) => (
   <div style={{
     fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
@@ -125,6 +133,21 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                   title="대화 저장 — background daemon 으로 보내 터미널이 꺼져도 유지(←← detach)"
                   style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', background: 'transparent', border: '1px solid var(--cth-cream-200)', borderRadius: 6, padding: '2px 7px', cursor: 'pointer' }}
                 >저장</button>
+                {/* 명시적 완료 보고 — idle 추정이 아니라 학생이 직접 선언한 결과.
+                    요약·경과는 툴팁에(칩은 한 눈에 성패만). */}
+                {a.doneOutcome && (
+                  <span
+                    title={[a.doneSummary, agoLabel(a.doneAgoSecs)].filter(Boolean).join(' — ')}
+                    style={{
+                      flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800,
+                      color: a.doneOutcome === 'succeeded' ? 'var(--cth-status-success)' : 'var(--cth-coral)',
+                      background: a.doneOutcome === 'succeeded'
+                        ? 'color-mix(in srgb, var(--cth-status-success) 13%, #fff)'
+                        : 'color-mix(in srgb, var(--cth-coral) 13%, #fff)',
+                      padding: '2px 7px', borderRadius: 6,
+                    }}
+                  >{a.doneOutcome === 'succeeded' ? '✓ 완료 보고' : '✗ 실패 보고'}</span>
+                )}
                 {building ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
                 ) : a.currentTool ? (
