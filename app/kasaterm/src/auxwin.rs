@@ -1928,7 +1928,6 @@ impl App {
                 .and_then(|p| p.active_agent())
                 .is_some();
             if runs_claude {
-                crate::render::strip_agent_chip(cells);
                 crate::render::style_prompt_box(cells, accent);
             }
         }
@@ -2189,7 +2188,6 @@ impl App {
             if !runs_claude {
                 continue;
             }
-            crate::render::strip_agent_chip(cells);
             if let Some(col) = pane_cols.get(pid) {
                 crate::render::style_prompt_box(cells, *col);
             }
