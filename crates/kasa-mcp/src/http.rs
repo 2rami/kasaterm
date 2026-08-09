@@ -2689,11 +2689,31 @@ async fn schale_state_handler() -> impl IntoResponse {
 
 // xterm.js 는 vendored 다(assets/term, MIT). CDN 을 쓰면 오프라인에서 죽고
 // 사내망 정책에도 걸린다 — 바이너리에 박아 넣으면 서버 하나로 자족한다.
-async fn term_page_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../assets/term/index.html"),
-    )
+/// `?t=<토큰>` 으로 들어온 원격 접속에 쿠키를 심어 준다.
+///
+/// WebSocket 은 커스텀 헤더를 못 붙이므로, 한 번 붙은 뒤 `/term/ws` 와 정적 자산이
+/// 인증을 통과하는 경로는 쿠키뿐이다. 폰은 주소를 한 번만 열면 그 다음부터 쿠키로
+/// 다닌다.
+async fn term_page_handler(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let html = include_str!("../assets/term/index.html");
+    let content_type = (header::CONTENT_TYPE, "text/html; charset=utf-8");
+    // HttpOnly — 페이지 스크립트가 토큰을 읽을 이유가 없다.
+    // SameSite=Strict — 남의 사이트에서 건너온 요청에는 안 실린다.
+    let cookie = remote_token()
+        .filter(|want| q.get("t").map(String::as_str) == Some(*want))
+        .map(|want| {
+            format!("kasa_token={want}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+        });
+    match &cookie {
+        Some(c) => (
+            [content_type, (header::SET_COOKIE, c.as_str())],
+            html,
+        )
+            .into_response(),
+        None => ([content_type], html).into_response(),
+    }
 }
 
 async fn term_asset_js() -> impl IntoResponse {
@@ -2749,6 +2769,78 @@ fn has_token(h: &HeaderMap) -> bool {
         .is_some_and(|t| t == session_token())
 }
 
+/// 서버가 붙을 주소. 기본은 loopback이고, 여는 것은 **명시적 선택**이어야 한다
+/// (`KASATERM_BIND=0.0.0.0`). 이 서버에는 셸에 바이트를 꽂는 창구가 있다.
+fn bind_addr() -> String {
+    std::env::var("KASATERM_BIND")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn remote_token_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/remote-token"))
+}
+
+/// 원격 접속용 토큰. `session_token` 과 달리 **디스크에 남는다** — 프로세스마다
+/// 새로 만들면 폰 북마크가 앱을 껐다 켤 때마다 깨져서 쓸 수가 없다.
+///
+/// 이 토큰 하나면 셸에 임의 입력을 꽂을 수 있으므로 파일은 0600 으로 만든다.
+pub fn remote_token() -> Option<&'static str> {
+    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let path = remote_token_path()?;
+        if let Some(existing) = std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(existing);
+        }
+        let fresh = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, &fresh).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Some(fresh)
+    })
+    .as_deref()
+}
+
+/// loopback 밖에서 온 연결인가. `ConnectInfo` 가 없으면(=연결 정보를 안 붙인
+/// 경로) 원격이 아닌 것으로 본다 — 바인딩이 loopback 이면 원격 자체가 불가능하다.
+fn is_remote_peer(req: &axum::extract::Request) -> bool {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|ci| !ci.0.ip().is_loopback())
+}
+
+/// 요청에 실려온 원격 토큰이 맞는가. 헤더 → 쿠키 → 쿼리 순으로 본다.
+///
+/// 셋이 다 필요하다: WebSocket 은 커스텀 헤더를 못 붙이니 **쿠키**가 실제 경로이고,
+/// **쿼리**는 폰이 처음 붙을 때(북마크·QR) 쓰는 입구이며, **헤더**는 CLI 용이다.
+fn has_remote_token(h: &HeaderMap, query: Option<&str>) -> bool {
+    let Some(want) = remote_token() else {
+        return false;
+    };
+    if h.get("x-kasa-token").and_then(|v| v.to_str().ok()) == Some(want) {
+        return true;
+    }
+    if let Some(cookies) = h.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        if cookies
+            .split(';')
+            .any(|kv| kv.trim().strip_prefix("kasa_token=") == Some(want))
+        {
+            return true;
+        }
+    }
+    query.is_some_and(|q| q.split('&').any(|kv| kv.strip_prefix("t=") == Some(want)))
+}
+
 /// 남의 사이트에서 건너온 요청인가.
 ///
 /// ⚠️ **Origin 검사만으로는 GET 을 못 막는다.** `location = "…/open-markdown?…"`
@@ -2780,6 +2872,26 @@ async fn origin_guard_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // 원격(loopback 밖)은 **토큰이 유일한 관문**이다. 아래 로컬 규칙을 그대로
+    // 물려주면 안 된다 — 「Origin 이 없으면 로컬 CLI 라 통과」의 근거가 "이미 같은
+    // 사용자 권한으로 도는 프로세스"인데 원격에는 그게 성립하지 않는다. 그대로 두면
+    // 바인딩을 여는 순간 Origin 없는 요청(curl 한 줄)이 전부 무인증으로 셸에 닿는다.
+    if is_remote_peer(&req) {
+        let h = req.headers();
+        if cross_site_request(h) || !has_remote_token(h, req.uri().query()) {
+            eprintln!(
+                "[http] 원격 요청을 거부했습니다: {} {}",
+                req.method(),
+                req.uri().path()
+            );
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                "remote access requires a valid token",
+            )
+                .into_response();
+        }
+        return next.run(req).await;
+    }
     let h = req.headers();
     // ① 메서드를 가리지 않는다 — GET 에도 창을 띄우거나 대화를 내주는 창구가 있고,
     //    navigation 은 Origin 을 안 보내 ②만으로는 못 잡는다.
@@ -2826,10 +2938,14 @@ fn ws_origin_ok(h: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let o = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
-    // 호스트명을 정확히 대조한다 — starts_with 로 봤다면 `127.0.0.1.evil.com`
-    // 이 통과한다.
-    let hostname = host.rsplit_once(':').map(|(n, _)| n).unwrap_or(host);
-    !host.is_empty() && o == host && (hostname == "127.0.0.1" || hostname == "localhost")
+    // Origin 은 우리 Host 와 **정확히** 같아야 한다. 부분 일치로 봤다면
+    // `127.0.0.1.evil.com` 이 통과한다.
+    //
+    // 호스트명을 127.0.0.1/localhost 로 못박지는 않는다 — 폰이 LAN IP 나 터널
+    // 주소로 붙으면 Host 가 그 주소이고, 그때도 우리 페이지에서 온 요청은
+    // 통과해야 한다. 브라우저는 Host 를 조작할 수 없고(실제 연결 대상으로
+    // 채워진다), 원격 연결은 `origin_guard_mw` 가 토큰으로 이미 걸러 낸 뒤다.
+    !host.is_empty() && o == host
 }
 
 async fn term_ws_handler(
@@ -2971,10 +3087,21 @@ pub fn spawn_http_server_opts(
 ) -> std::io::Result<u16> {
     // Bind synchronously so we can learn (and return) the real port before
     // handing the socket to tokio.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", preferred_port))
-        .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))?;
+    let addr = bind_addr();
+    let listener = std::net::TcpListener::bind((addr.as_str(), preferred_port))
+        .or_else(|_| std::net::TcpListener::bind((addr.as_str(), 0)))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    if !matches!(addr.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        // 여는 순간 토큰이 유일한 방어다. 어디서 얻는지를 로그에 남겨 두지 않으면
+        // 「왜 403 이냐」로 헤매다 결국 토큰을 끄는 쪽으로 가게 된다.
+        eprintln!(
+            "[kasaspace-mcp] {addr}:{port} 로 열었습니다 — 원격 접속에는 토큰이 필요합니다.\n\
+             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term?t=$(cat ~/.config/kasaterm/remote-token)"
+        );
+        // 파일을 미리 만들어 둔다 — 첫 원격 요청 때 만들면 그 요청이 먼저 튕긴다.
+        let _ = remote_token();
+    }
 
     std::thread::Builder::new()
         .name("kasaspace-mcp-http".into())
@@ -3463,7 +3590,15 @@ pub fn spawn_http_server_opts(
                     // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
                     // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.
                     .layer(axum::middleware::from_fn(origin_guard_mw));
-                if let Err(e) = axum::serve(tokio_listener, app).await {
+                // ConnectInfo 를 붙여야 `origin_guard_mw` 가 peer 주소를 보고
+                // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
+                // 토큰 없이 통과한다.
+                if let Err(e) = axum::serve(
+                    tokio_listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                {
                     eprintln!("[kasaspace-mcp] serve error: {e}");
                 }
             });
