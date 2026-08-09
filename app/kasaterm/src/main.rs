@@ -5995,10 +5995,6 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
         // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
         "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
-        // 방(cwd)이 다른 pane 에서 온 SendMessage 를 승인 대기로 잡지 않는다. 기본값 "hold" 는
-        // 받는 쪽이 권한 프롬프트를 건너뛰는 세션일 때 인바운드를 붙잡는데, pane claude 는 전부
-        // 그 모드라 기본값이면 학생을 굴리는 흐름이 매 메시지 사용자 클릭에서 끊긴다.
-        "crossSessionInbound": "accept",
     });
     if cfg!(windows) {
         // conflict-guard 는 python3 의존 — 기본 Windows 엔 python3 가 없어 훅이 매
@@ -6204,11 +6200,9 @@ if [ -z \"$REAL\" ]; then\n\
   exit 127\n\
 fi\n\
 {ablk}\
-# 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). claude 2.1.224 의 cross-session 은\n\
-# 서버 플래그 tengu_harbor_kite 뒤에 있고 아직 우리 계정엔 안 켜져 있어, 이 env 로 강제한다.\n\
-# 켜야 하는 이유: 팀은 cwd 로 갈려 다른 레포 pane 엔 SendMessage 가 조용히 사라진다(08-04 실사고).\n\
-# 켜면 세션이 ~/.claude/sessions/<pid>.json 에 등록되고 /tmp/cc-socks/<pid>.sock 로 오간다.\n\
-export CLAUDE_CODE_HARBOR_KITE=1\n\
+# cross-session(ListAgents 로 다른 방 pane 찾기)을 여기서 켜려 한 적이 있다 — 안 된다.\n\
+# CLAUDE_CODE_HARBOR_KITE=1 로 게이트는 열리지만, 명부 등록이 --agent-id 있는 세션을\n\
+# 통째로 거부해(2.1.226 `if(W4()!=null) return false`) 트리플 붙는 pane 은 하나도 안 오른다.\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
 # per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
