@@ -775,6 +775,9 @@ impl App {
             neighbor,
             window,
             alive,
+            // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
+            // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
+            idle_since: None,
         });
         // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
         // 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
@@ -786,6 +789,63 @@ impl App {
             }
         }
         self.chrome_dirty = true;
+    }
+
+    /// 닫아 둔 pane 중 **잊힌 것**을 놓는다 — 내리 노는 상태가 `CLOSED_PANE_IDLE_REAP`
+    /// 를 넘으면 프로세스를 끈다.
+    ///
+    /// 닫아도 안 죽이는 건 의도다(`hide_pane`): 그 안의 claude 가 하던 일을 계속하고,
+    /// 되살리기가 재부착이 된다. 문제는 놓는 계기가 개수 상한뿐이었다는 것 — 그건
+    /// **다음 닫기가 있어야** 도니, 몇 개 닫고 손 떼면 그 셸들이 무기한 남았다.
+    ///
+    /// 그래서 일하는 것과 잊힌 것을 가른다. 일하는 중이면 타이머가 매번 풀리므로
+    /// 닫아 두고 계속 돌리는 용법은 그대로 산다.
+    pub(crate) fn reap_idle_closed_panes(&mut self) {
+        if self.closed_panes.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        // ws 락과 `closed_panes` 를 동시에 빌릴 수 없어 판정을 먼저 걷어 온다.
+        let working: Vec<bool> = {
+            let ws = self.ws.lock().unwrap();
+            self.closed_panes
+                .iter()
+                .map(|c| {
+                    ws.panes
+                        .get(&c.pane_id)
+                        .and_then(|p| p.term())
+                        .is_some_and(crate::input::term_is_working)
+                })
+                .collect()
+        };
+        let limit = crate::closed_pane_idle_reap();
+        let mut doomed: Vec<usize> = Vec::new();
+        for (i, c) in self.closed_panes.iter_mut().enumerate() {
+            // 이미 죽은 pane 은 레코드로만 되살아나므로 셀 것이 없다.
+            if !c.alive {
+                continue;
+            }
+            if working[i] {
+                c.idle_since = None;
+                continue;
+            }
+            let since = *c.idle_since.get_or_insert(now);
+            if now.duration_since(since) >= limit {
+                doomed.push(i);
+            }
+        }
+        if doomed.is_empty() {
+            return;
+        }
+        // 뒤에서부터 — 앞을 지우면 뒤 인덱스가 밀린다.
+        for i in doomed.into_iter().rev() {
+            let c = self.closed_panes.remove(i);
+            self.kill_hidden_pane(&c.pane_id);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// 인포의 × — 되살리기 목록에서 지우고, 아직 돌고 있으면 프로세스까지 끈다.

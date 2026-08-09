@@ -340,6 +340,9 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
+        // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
+        self.reap_idle_closed_panes();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same
@@ -2534,7 +2537,7 @@ impl App {
 /// this line the moment it goes idle, so the absence of a marker is a reliable
 /// idle signal. Only the last ~10 rows are scanned (the live status sits at the
 /// bottom); scrollback above is ignored.
-fn term_is_working(t: &TerminalPane) -> bool {
+pub(crate) fn term_is_working(t: &TerminalPane) -> bool {
     rows_show_working(&t.cells)
 }
 
