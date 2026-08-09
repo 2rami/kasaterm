@@ -640,6 +640,26 @@ impl PtySession {
         self.byte_taps.lock().unwrap().push(tx);
         rx
     }
+
+    /// 구독하면서 "지금 화면"을 ANSI 로 함께 받는다. 돌려준 바이트를 tap 스트림
+    /// 보다 **먼저** 보내면 붙는 즉시 화면이 찬다.
+    ///
+    /// `tap_bytes` 만으로는 붙은 뒤의 출력만 오므로, 조용한 pane 에 미러로 붙으면
+    /// 다음 출력이 날 때까지 화면이 빈 채였다(사용자가 Enter 를 쳐야 프롬프트가
+    /// 보였다).
+    ///
+    /// ⚠️ 스냅샷 채취와 구독 등록은 `term` 락 하나 안에서 끝나야 한다. 둘로 나누면
+    /// 그 사이의 출력이 스냅샷에도 tap 에도 없이 사라지거나(유실), 양쪽에 다 담겨
+    /// 두 번 그려진다(중복 — `abc` 뒤에 `c` 가 또 찍히는 식). reader 도 같은 락
+    /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
+    pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        let snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        self.byte_taps.lock().unwrap().push(tx);
+        (rx, snap.to_ansi())
+    }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         // Kernel-side PTY first (child sees SIGWINCH).
         {
@@ -1105,21 +1125,6 @@ fn spawn_reader_thread(
                     return;
                 }
             };
-            // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
-            // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
-            //
-            // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
-            // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
-            // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
-            // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
-            // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
-            // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
-            {
-                let mut taps = byte_taps.lock().unwrap();
-                if !taps.is_empty() {
-                    taps.retain(|t| t.try_send(buf[..n].to_vec()).is_ok());
-                }
-            }
             // Append raw bytes (hex + escaped-printable preview) to the
             // KASATERM_PTY_LOG file so claude-code escape sequences can
             // be diffed against ghostty's `script` capture.
@@ -1218,6 +1223,27 @@ fn spawn_reader_thread(
 
             let update = {
                 let mut t = term.lock().unwrap();
+                // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
+                // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
+                //
+                // ⚠️ term 락을 **든 채로** 뿌려야 한다. 밖에서 뿌리면 뿌리기와
+                // 파싱 사이에 락이 풀린 틈이 생기고, 하필 그 틈에 붙은 미러는 이
+                // 청크를 tap 으로도(구독 전이라) 스냅샷으로도(파싱 전이라) 못 받아
+                // 그만큼 화면이 어긋난다. `tap_bytes_with_snapshot` 의 원자성이
+                // 이 순서에 기대고 있다.
+                //
+                // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
+                // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
+                // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
+                // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
+                // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
+                // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
+                {
+                    let mut taps = byte_taps.lock().unwrap();
+                    if !taps.is_empty() {
+                        taps.retain(|sub| sub.try_send(buf[..n].to_vec()).is_ok());
+                    }
+                }
                 processor.advance(&mut *t, processed_bytes);
                 // alacritty buffers DECSET 2026 synchronized output internally:
                 // while its sync buffer is non-empty the Term grid still holds
@@ -2833,5 +2859,157 @@ mod launcher_descend_tests {
         ];
         let got = descend_launchers(&t, Some((200, "node".into())));
         assert_eq!(got.unwrap().1, "new");
+    }
+}
+
+/// 살아 있는 PTY 로 스냅샷 재생을 검증한다. 순수 변환(`to_ansi`) 쪽 테스트는
+/// kasa-bridge 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
+/// **구독-스냅샷 원자성**을 본다.
+#[cfg(test)]
+mod snapshot_tap_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn sh(pane_id: &str) -> PtySession {
+        PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()),
+            cols: 40,
+            rows: 10,
+            pane_id: pane_id.into(),
+            ..Default::default()
+        })
+        .expect("PTY 를 못 띄웠다")
+    }
+
+    fn wait_on_screen(sess: &PtySession, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let (_rx, ansi) = sess.tap_bytes_with_snapshot();
+            if String::from_utf8_lossy(&ansi).contains(needle) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("{needle} 이 10초 안에 화면에 안 나타났다");
+    }
+
+    #[test]
+    fn snapshot_carries_what_is_already_on_screen() {
+        let sess = sh("test-snap");
+        sess.send_bytes(b"printf 'HELLO-SNAP\\n'\n").unwrap();
+        wait_on_screen(&sess, "HELLO-SNAP");
+    }
+
+    /// 붙는 순간 이미 화면에 있던 출력은 스냅샷으로만, 그 뒤의 출력은 tap 으로만
+    /// 와야 한다. 하나라도 양쪽에 걸치면 그만큼 두 번 그려진다.
+    #[test]
+    fn subscription_and_snapshot_do_not_overlap() {
+        let sess = sh("test-atomic");
+        sess.send_bytes(b"printf 'BEFORE-TAP\\n'\n").unwrap();
+        wait_on_screen(&sess, "BEFORE-TAP");
+
+        let (rx, ansi) = sess.tap_bytes_with_snapshot();
+        assert!(String::from_utf8_lossy(&ansi).contains("BEFORE-TAP"));
+
+        sess.send_bytes(b"printf 'AFTER-TAP\\n'\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut streamed = String::new();
+        while Instant::now() < deadline && !streamed.contains("AFTER-TAP") {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                streamed.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
+        assert!(
+            streamed.contains("AFTER-TAP"),
+            "구독 뒤의 출력이 tap 으로 안 왔다"
+        );
+        assert!(
+            !streamed.contains("BEFORE-TAP"),
+            "스냅샷에 이미 담긴 출력이 tap 으로 또 왔다 — 두 번 그려진다: {streamed:?}"
+        );
+    }
+
+    fn nums(s: &str) -> Vec<u32> {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::new(), 0);
+        while i < b.len() {
+            if b[i] == b'L' {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    if let Ok(n) = s[start..j].parse::<u32>() {
+                        out.push(n);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// 조용한 pane 에서만 맞는 건 원자성이 아니다. 출력이 쏟아지는 한가운데서
+    /// 구독해도 한 줄도 빠지거나 겹치지 않아야 한다.
+    ///
+    /// 경쟁 창은 마이크로초라 한 번 붙어서는 절대 안 걸린다 — 폭주 내내 반복해서
+    /// 붙어야 한다(옛 락 순서에서 이 테스트가 실패하는 것으로 유효성을 확인했다).
+    #[test]
+    fn no_gap_or_overlap_while_output_streams() {
+        const TOTAL: u32 = 40_000;
+        let sess = sh("test-race");
+        sess.send_bytes(
+            format!(
+                "i=0; while [ $i -lt {TOTAL} ]; do i=$((i+1)); echo L$i; \
+                 for j in 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5; do :; done; done\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut checked = 0u32;
+        while Instant::now() < deadline && checked < 300 {
+            let (rx, ansi) = sess.tap_bytes_with_snapshot();
+            let Some(&drawn) = nums(&String::from_utf8_lossy(&ansi)).last() else {
+                continue;
+            };
+
+            let mut streamed = String::new();
+            let until = Instant::now() + Duration::from_millis(60);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(30)) {
+                    Ok(c) => streamed.push_str(&String::from_utf8_lossy(&c)),
+                    Err(_) => break,
+                }
+            }
+            drop(rx);
+
+            let got = nums(&streamed);
+            let (Some(&lo), Some(&hi)) = (got.iter().min(), got.iter().max()) else {
+                continue;
+            };
+            if hi <= drawn {
+                continue; // 폭주가 멎었다 — 이번 회차는 경쟁이 아니다
+            }
+            assert!(
+                lo >= drawn,
+                "L{lo} 이 스냅샷(≤L{drawn})과 tap 양쪽에 있다 — 두 번 그려진다 (시도 {checked})"
+            );
+            assert!(
+                lo <= drawn + 2,
+                "L{}~L{} 가 스냅샷에도 tap 에도 없다 — 유실 (시도 {checked})",
+                drawn + 1,
+                lo - 1
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 12,
+            "경쟁 상태를 충분히 못 만들었다 ({checked}회) — 검증이 무의미하다"
+        );
     }
 }

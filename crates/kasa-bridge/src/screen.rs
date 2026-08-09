@@ -100,11 +100,224 @@ pub struct ScreenUpdate {
     pub notify: Option<(String, String)>,
 }
 
+impl Color {
+    /// SGR 파라미터. `Default` 는 `None` — 호출부가 매 스타일 변경마다 `0`(reset)
+    /// 을 먼저 쓰므로 기본색을 명시할 이유가 없다.
+    fn sgr(&self, foreground: bool) -> Option<String> {
+        let (base, bright, ext) = if foreground { (30, 90, 38) } else { (40, 100, 48) };
+        match self {
+            Color::Default => None,
+            Color::Idx(i) if *i < 8 => Some((base + *i as u16).to_string()),
+            Color::Idx(i) if *i < 16 => Some((bright + (*i as u16 - 8)).to_string()),
+            Color::Idx(i) => Some(format!("{ext};5;{i}")),
+            Color::Rgb(r, g, b) => Some(format!("{ext};2;{r};{g};{b}")),
+        }
+    }
+}
+
+impl Cell {
+    /// 이 셀을 그리기 위한 완전한 SGR 시퀀스(항상 reset 으로 시작).
+    ///
+    /// 차분 갱신(이전 속성에서 바뀐 것만 끄고 켜기)이 더 짧지만, 끄는 코드를
+    /// 하나라도 빠뜨리면 그 속성이 화면 끝까지 번진다. 스냅샷은 접속당 한 번만
+    /// 나가므로 길이보다 정확성을 산다.
+    fn sgr(&self) -> String {
+        let mut p = vec!["0".to_string()];
+        if self.bold {
+            p.push("1".into());
+        }
+        if self.dim {
+            p.push("2".into());
+        }
+        if self.italic {
+            p.push("3".into());
+        }
+        if self.underline {
+            p.push("4".into());
+        }
+        if self.inverse {
+            p.push("7".into());
+        }
+        if self.hidden {
+            p.push("8".into());
+        }
+        if let Some(c) = self.fg.sgr(true) {
+            p.push(c);
+        }
+        if let Some(c) = self.bg.sgr(false) {
+            p.push(c);
+        }
+        format!("\x1b[{}m", p.join(";"))
+    }
+
+    /// 행 끝에서 잘라내도 화면이 같은가. 배경색·밑줄·반전이 걸린 칸은 눈에
+    /// 보이므로 남긴다.
+    fn is_trailing_blank(&self) -> bool {
+        (self.ch == ' ' || self.ch == '\0')
+            && self.bg == Color::Default
+            && !self.underline
+            && !self.inverse
+    }
+}
+
+impl ScreenUpdate {
+    /// 이 스냅샷을 xterm 이 그대로 먹는 ANSI 바이트로 굽는다.
+    ///
+    /// 원격 미러가 붙는 순간 화면을 채우는 용도다. 받는 쪽은 자기 VT 파서를 가진
+    /// 소비자(브라우저 xterm.js)라, 셀을 JSON 으로 실어 보내고 렌더러를 새로 짜는
+    /// 대신 터미널이 이미 아는 언어로 말한다 — 그래서 클라이언트가 이걸 받는 데
+    /// 필요한 코드가 0줄이다.
+    ///
+    /// `dirty` 에 담긴 행만 그리므로, 화면 전체를 원하면 `force_full` 로 뜬
+    /// 스냅샷을 넘겨야 한다.
+    pub fn to_ansi(&self) -> Vec<u8> {
+        let mut out = String::new();
+        // 앱이 대체 화면에 있으면 미러도 거기서 시작해야 한다. 안 그러면 앱이
+        // 빠져나갈 때 보내는 `?1049l` 이 미러에선 짝이 없는 복귀가 된다.
+        if self.alt_screen {
+            out.push_str("\x1b[?1049h");
+        }
+        out.push_str("\x1b[H\x1b[2J");
+
+        for (row, cells) in &self.dirty {
+            let end = cells
+                .iter()
+                .rposition(|c| !c.is_trailing_blank())
+                .map_or(0, |i| i + 1);
+            if end == 0 {
+                continue;
+            }
+            out.push_str(&format!("\x1b[{};1H", row + 1));
+            let mut style: Option<String> = None;
+            for cell in &cells[..end] {
+                // '\0' = 와이드 글자가 차지한 뒷칸. 앞 글자가 이미 두 칸을
+                // 먹었으므로 여기서 또 쓰면 한 칸씩 밀린다.
+                if cell.ch == '\0' {
+                    continue;
+                }
+                let sgr = cell.sgr();
+                if style.as_deref() != Some(sgr.as_str()) {
+                    out.push_str(&sgr);
+                    style = Some(sgr);
+                }
+                out.push(cell.ch);
+            }
+            out.push_str("\x1b[0m");
+        }
+
+        out.push_str(&format!(
+            "\x1b[{};{}H",
+            self.cursor_row + 1,
+            self.cursor_col + 1
+        ));
+        out.push_str(if self.cursor_visible {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        });
+        out.into_bytes()
+    }
+}
+
 pub(crate) fn vt_color(c: vt100::Color) -> Color {
     match c {
         vt100::Color::Default => Color::Default,
         vt100::Color::Idx(i) => Color::Idx(i),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    fn cell(ch: char) -> Cell {
+        Cell { ch, ..Cell::blank() }
+    }
+
+    fn upd(dirty: Vec<(u16, Row)>) -> ScreenUpdate {
+        ScreenUpdate {
+            dirty,
+            cursor_visible: true,
+            ..Default::default()
+        }
+    }
+
+    fn ansi(s: &ScreenUpdate) -> String {
+        String::from_utf8(s.to_ansi()).unwrap()
+    }
+
+    #[test]
+    fn clears_then_draws_each_row_at_an_absolute_position() {
+        let a = ansi(&upd(vec![
+            (0, vec![cell('h'), cell('i')]),
+            (2, vec![cell('x')]),
+        ]));
+        assert!(a.starts_with("\x1b[H\x1b[2J"));
+        assert!(a.contains("\x1b[1;1Hi") || a.contains("\x1b[1;1H\x1b[0mhi"));
+        // 3번째 행은 1-based 로 3 — 중간 행을 건너뛰어도 자리가 밀리면 안 된다.
+        assert!(a.contains("\x1b[3;1H"));
+    }
+
+    #[test]
+    fn trims_trailing_blanks_but_keeps_visible_ones() {
+        let a = ansi(&upd(vec![(0, vec![cell('h'), cell(' '), cell(' ')])]));
+        assert!(a.contains('h') && !a.contains("h  "));
+
+        // 배경색이 깔린 칸은 눈에 보이므로 살아남아야 한다.
+        let painted = Cell {
+            bg: Color::Idx(4),
+            ..Cell::blank()
+        };
+        let a = ansi(&upd(vec![(0, vec![cell('h'), painted])]));
+        assert!(a.contains("44"), "배경색 칸이 잘려나갔다: {a:?}");
+    }
+
+    #[test]
+    fn skips_the_wide_char_spacer() {
+        // '한' 이 두 칸을 먹고 뒷칸은 '\0' 이다. 그걸 또 그리면 한 칸씩 밀린다.
+        let a = ansi(&upd(vec![(0, vec![cell('한'), cell('\0'), cell('x')])]));
+        assert!(a.contains("한x"));
+    }
+
+    #[test]
+    fn emits_one_sgr_per_run_not_per_cell() {
+        let a = ansi(&upd(vec![(0, vec![cell('a'), cell('b'), cell('c')])]));
+        // 같은 스타일 3칸 → 스타일 1회 + 행 끝 리셋 1회.
+        assert_eq!(a.matches("\x1b[0m").count(), 2);
+    }
+
+    #[test]
+    fn switches_style_mid_row() {
+        let bold = Cell {
+            ch: 'B',
+            bold: true,
+            ..Cell::blank()
+        };
+        let a = ansi(&upd(vec![(0, vec![cell('a'), bold])]));
+        assert!(a.contains("\x1b[0;1mB"));
+    }
+
+    #[test]
+    fn enters_alt_screen_when_the_app_is_there() {
+        let mut s = upd(vec![(0, vec![cell('x')])]);
+        s.alt_screen = true;
+        assert!(ansi(&s).starts_with("\x1b[?1049h"));
+        // 대체 화면이 아니면 붙이지 않는다 — 짝 없는 복귀를 만들면 안 된다.
+        assert!(!ansi(&upd(vec![])).contains("1049"));
+    }
+
+    #[test]
+    fn restores_cursor_position_and_visibility_last() {
+        let mut s = upd(vec![(0, vec![cell('x')])]);
+        s.cursor_row = 4;
+        s.cursor_col = 9;
+        let a = ansi(&s);
+        assert!(a.contains("\x1b[5;10H"), "커서가 1-based 로 안 나왔다: {a:?}");
+        assert!(a.ends_with("\x1b[?25h"));
+
+        s.cursor_visible = false;
+        assert!(ansi(&s).ends_with("\x1b[?25l"));
     }
 }
 
