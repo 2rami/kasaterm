@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '15'
+  const OVERLAY_V = '16'
 
   // 칩이 화면 가장자리에 남기는 최소 여백. 끌어서 밖으로 밀어낼 수 없게 하는 값이기도 하다.
   const CHIP_EDGE = 12
@@ -221,6 +221,9 @@ if (!window.__ccInjected) {
         /* 표시 설정 — 꺼둔 것은 아예 그리지 않는다. display:none 이면 러너 애니메이션도 함께 멎어
            보이지 않는 것을 계속 돌리지 않는다. */
         :host([data-off="1"]) { display: none; }
+        /* 스크린샷 한 장 동안만 걷는다. 사람이 꺼둔 설정(data-off)과 채널을 나눠 두는 이유는
+           촬영이 끝나고 되돌릴 때 사람이 끈 것을 켜버리지 않기 위해서다. */
+        :host([data-shot="1"]) { display: none; }
         :host([data-frame="0"]) .frame { display: none; }
         :host([data-chip="0"]) .chip { display: none; }
         :host([data-cursor="0"]) .cursor { display: none; }
@@ -663,6 +666,30 @@ if (!window.__ccInjected) {
         cursor.classList.add('tap')
       }
       return { applied: true }
+    },
+
+    // 스크린샷 한 장 동안 우리 표시를 걷는다. ⚠️여기서 ensureOverlay 를 부르면 안 된다 — 오버레이가
+    // 없는 페이지에 빈 호스트만 남긴다. 이미 그려져 있을 때만 손댄다.
+    shot: async (a) => {
+      const host = document.getElementById('__cc_overlay')
+      if (!host) return { applied: false }
+      clearTimeout(window.__ccShotTimer)
+      if (!a.hide) {
+        host.dataset.shot = '0'
+        return { applied: true, hidden: false }
+      }
+      host.dataset.shot = '1'
+      // ★스스로 되돌린다. 되돌리라는 지시가 못 오는 길이 여럿 있다 — 캡처가 던지거나, 그 사이
+      // service worker 가 잠들거나, 탭이 이동하거나. 그 한 번에 오버레이가 영구히 사라지면
+      // "누가 이 탭을 잡고 있다"는 신호가 조용히 죽는다.
+      window.__ccShotTimer = setTimeout(() => { host.dataset.shot = '0' }, a.timeoutMs ?? 5000)
+      // display:none 이 실제로 그려진 프레임을 기다린다. 안 기다리면 captureVisibleTab 이 직전
+      // 프레임을 가져와 칩이 그대로 찍힌다. ⚠️숨은 탭은 rAF 가 멈추므로 타임아웃이 대신 받는다.
+      await Promise.race([
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+        new Promise((r) => setTimeout(r, 60)),
+      ])
+      return { applied: true, hidden: true }
     },
 
     file_input_ref: (a) => {

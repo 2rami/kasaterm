@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -433,18 +433,29 @@ const handlers = {
     return await page(id, 'find', { query })
   },
 
-  async screenshot({ tabId, fullPage = false, format = 'png', quality }) {
+  // ★찍는 동안 우리 표시(칩·테두리·커서)를 걷는다. 그림은 대개 사람에게 보여주거나 문서에 넣으려고
+  // 찍는 것이라, 에이전트가 페이지 위에 얹은 것이 함께 박히면 그 그림은 쓸 수 없다 — 촬영을
+  // 에이전트가 하는 이상 치우는 것도 에이전트 몫이고, 사람이 미리 껐다 켤 일이 아니다.
+  // overlay:true 로 남길 수 있다. 오버레이 자체가 잘 그려지는지 확인할 때가 그 경우다.
+  async screenshot({ tabId, fullPage = false, format = 'png', quality, overlay = false }) {
     const id = await resolveTabId(tabId)
     const tab = await chrome.tabs.get(id)
-    // captureVisibleTab 은 배너가 안 뜨지만 활성 탭의 보이는 영역만 찍는다. 나머지는 CDP 가 필요하다.
-    if (!fullPage && tab.active) {
-      try {
-        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, ...(quality ? { quality } : {}) })
-        return { data: dataUrl.split(',')[1], format, via: 'captureVisibleTab' }
-      } catch { /* 권한·타이밍 문제면 CDP 로 내려간다 */ }
+    const hidden = overlay ? false : await hideForShot(id)
+    try {
+      // captureVisibleTab 은 배너가 안 뜨지만 활성 탭의 보이는 영역만 찍는다. 나머지는 CDP 가 필요하다.
+      if (!fullPage && tab.active) {
+        try {
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, ...(quality ? { quality } : {}) })
+          return { data: dataUrl.split(',')[1], format, via: 'captureVisibleTab', overlayHidden: hidden }
+        } catch { /* 권한·타이밍 문제면 CDP 로 내려간다 */ }
+      }
+      const data = await cdp.screenshot(id, { fullPage, format, quality })
+      return { data, format, via: 'cdp', overlayHidden: hidden }
+    } finally {
+      // ⚠️반드시 되돌린다. 던지고 나가는 길에 그냥 두면 그 탭은 담당 표시가 없는 채로 남는다.
+      // content 쪽에도 자동 복구 타이머가 있지만 그건 이 줄이 못 돌았을 때의 안전망이다.
+      if (hidden) await showAfterShot(id)
     }
-    const data = await cdp.screenshot(id, { fullPage, format, quality })
-    return { data, format, via: 'cdp' }
   },
 
   async click({ tabId, ...rest }, ctx = {}) {

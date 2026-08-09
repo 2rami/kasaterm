@@ -267,6 +267,20 @@ export async function showCursor(client, tabId, x, y, click = false) {
   await page(tabId, 'cursor', { x, y, click, ...(who || {}) }).catch(() => {})
 }
 
+// ★스크린샷에 우리 표시가 함께 찍히지 않게 한 장 동안만 걷는다. 사람에게 보여줄 그림, 하물며
+// 공개 경로에 올라가는 그림에 칩("미도리 · 릴리스 컷 촬영")과 조작 테두리가 박혀 통째로 다시
+// 찍어야 했다(2026-08-10). 촬영은 에이전트가 알아서 하는 일이니 치우는 것도 에이전트 몫이다.
+// tabOwner 가드: 오버레이는 담당이 있는 탭에만 그려져 있으므로 그 밖에서는 왕복이 낭비다.
+export async function hideForShot(tabId) {
+  if (!tabOwner.has(tabId)) return false
+  const r = await page(tabId, 'shot', { hide: true }).catch(() => null)
+  return !!r?.hidden
+}
+
+export async function showAfterShot(tabId) {
+  await page(tabId, 'shot', { hide: false }).catch(() => {})
+}
+
 export async function markBusy(client, tabId) {
   const s = sessionOf(client)
   if (!s) return
@@ -580,7 +594,10 @@ export function otherOwners(client, tabIds) {
   return [...names]
 }
 
-// 탭 그룹 현황. 껍데기만 남은 그룹이 몇 개인지는 눈으로 세는 수밖에 없어서 여기서 세어 준다.
+// 탭 그룹 현황. ⚠️**닫힌 그룹은 여기 안 나온다** — 크롬이 저장해 탭바에 이름만 남긴 그룹은
+// tabGroups.query 가 통째로 빼고 준다(2026-08-10 실측: 그룹을 만들고 마지막 탭을 닫으니 목록에서
+// 사라졌고, 그 groupId 로 탭을 넣어 되살리려 하면 `No group with id` 로 거부됐다). 그러니 아래
+// `empty` 가 0 이어도 탭바가 깨끗하다는 뜻이 아니다 — 확장이 볼 수 있는 범위에 없다는 뜻뿐이다.
 export async function listGroups() {
   const ours = new Set()
   for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
@@ -595,14 +612,20 @@ export async function listGroups() {
     empty: out.filter((g) => g.tabs === 0).length,
     // 확장 API 에 그룹 삭제가 생겼는지 — 없으면 껍데기는 사람이 우클릭으로 지우는 수밖에 없다.
     canRemove: typeof chrome.tabGroups?.remove === 'function',
+    // 「안 보이는 것은 없는 것」이 아니라는 사실을 응답에 실어 둔다. 이 한 줄이 없으면 empty:0 을
+    // 보고 「껍데기 없음」으로 보고하게 된다.
+    note: '닫힌(저장된) 그룹은 확장 API 로 열거나 지울 수 없고 이 목록에도 안 잡힙니다. 탭바에 남은 것은 사람이 우클릭으로 지워야 합니다.',
   }
 }
 
-// ★크롬은 탭 그룹을 자동으로 저장한다. 그룹에 든 채로 마지막 탭이 닫히면 그룹이 사라지는 게 아니라
+// ★크롬이 탭 그룹을 저장해 두면, 그룹에 든 채로 마지막 탭이 닫혔을 때 그룹이 사라지는 게 아니라
 // **이름만 남은 껍데기가 탭바에 계속 붙어 있다**(2026-08-05: 학생 넷이 만든 그룹 10개가 그렇게 쌓여
-// 탭바를 채웠다). 확장에는 그룹 삭제 API 가 없으므로 사후 정리도 불가능하다 — 닫기 전에 빼내는 것이
-// 유일한 방법이다. 우리가 만든 그룹만 건드린다. 사람 그룹의 탭을 빼면 그 사람이 저장해 둔 그룹이
-// 대신 사라진다.
+// 탭바를 채웠다). ⚠️저장은 크롬 설정·버전에 달렸다 — 2026-08-10 같은 실험에서는 그룹이 그냥 소멸해
+// 껍데기가 안 남았다. 그래서 "이 크롬에서는 안 남는다"를 믿고 이 예방을 걷어내면 안 된다.
+// 사후 정리는 어느 쪽이든 불가능하다: 확장에 그룹 삭제 API 가 없고(canRemove), 닫힌 그룹은
+// tabGroups.query 에도 안 잡히며, groupId 로 탭을 넣어 되살리는 것조차 거부된다(실측). 즉 닫기 전에
+// 빼내는 것이 정말로 유일한 방법이다. 우리가 만든 그룹만 건드린다 — 사람 그룹의 탭을 빼면 그 사람이
+// 저장해 둔 그룹이 대신 사라진다.
 export async function ungroupBeforeClose(tabIds) {
   const ours = new Set()
   for (const s of sessions.values()) for (const g of s.groups) ours.add(g)

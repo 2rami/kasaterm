@@ -155,11 +155,14 @@ tool('browser_get_text', 'Plain innerText of the page. Cheaper than read_page wh
 tool('browser_find', 'Find elements by role/name/placeholder text and get their refs plus viewport coordinates.', { tabId, query: z.string() },
   async (a) => text(await call('find', a)))
 
-tool('browser_screenshot', 'Screenshot a tab. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
+tool('browser_screenshot', 'Screenshot a tab. The agent overlay — presence chip, operating border, avatar cursor — is taken down for the shot and put back after, so the image is the page alone and is safe to hand to a human or drop into a doc; pass overlay:true only when the overlay itself is what you are checking. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
   tabId, fullPage: z.boolean().optional(), format: z.enum(['png', 'jpeg']).optional(), quality: z.number().int().optional(),
+  overlay: z.boolean().optional().describe('Keep the agent overlay in the picture. Default false — it is hidden for the shot.'),
 }, async (a) => {
   const r = await call('screenshot', a, 45000)
-  return { content: [{ type: 'image', data: r.data, mimeType: r.format === 'jpeg' ? 'image/jpeg' : 'image/png' }] }
+  const img = { type: 'image', data: r.data, mimeType: r.format === 'jpeg' ? 'image/jpeg' : 'image/png' }
+  // 걷고 찍었다는 사실을 밝힌다. 안 그러면 오버레이를 확인하려고 찍은 사람이 "왜 칩이 없지" 로 헛돈다.
+  return { content: r.overlayHidden ? [{ type: 'text', text: 'Agent overlay (chip, border, cursor) was hidden for this shot — pass overlay:true to keep it.' }, img] : [img] }
 })
 
 tool('browser_click', 'Click an element by ref (or raw coordinate). Tries a synthetic click first; if nothing on the page changed it automatically retries as a real trusted input event. Set trusted:true to skip straight to the real event.', {
@@ -250,7 +253,7 @@ tool('browser_group_tabs', 'Put the given tabs into a Chrome tab group, naming a
   collapsed: z.boolean().optional(),
 }, async (a) => text(await call('group_tabs', a, 15000)))
 
-tool('browser_list_groups', 'List every Chrome tab group with its title, color, window, tab count, and whether this session created it. `empty` counts the groups that have no tabs left: Chrome auto-saves tab groups, so a group whose last tab was closed while still inside it stays pinned to the tab strip as a name-only shell, and no extension API can delete it — only the human can, by right-clicking it. Use this to see how many have piled up before asking them to clear it.', {},
+tool('browser_list_groups', 'List every OPEN Chrome tab group with its title, color, window, tab count, and whether this session created it. What it cannot show: a group Chrome saved and then closed — the name-only shell pinned to the tab strip — is absent from `tabGroups.query` entirely, cannot be reopened by id, and has no delete API, so `empty: 0` means "nothing in reach", not "the tab strip is clean". Only the human can clear those, by right-clicking the shell. Prevention is the whole game: tabs this extension opens are pulled out of their group before closing so no shell is left behind.', {},
   async () => text(await call('list_groups', {}, 15000)))
 
 tool('browser_ungroup_tabs', 'Pull tabs out of their tab groups. Omit tabIds to ungroup every grouped tab. A group disappears once its last tab leaves — there is no delete-group API.', {
