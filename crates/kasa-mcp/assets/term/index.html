@@ -2,34 +2,77 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>kasaterm</title>
 <link rel="stylesheet" href="/term/xterm.css">
 <style>
   html, body { margin: 0; height: 100%; background: #12161c; }
-  #term { position: absolute; inset: 8px; }
+  /* 데이터(터미널)가 0px 에서 시작한다 — 조작부는 전부 아래로 내렸다.
+     100dvh: 주소창이 접힐 때 100vh 는 화면을 넘는다. */
+  #term {
+    position: absolute;
+    inset: 8px 8px calc(var(--bar) + env(safe-area-inset-bottom, 0px)) 8px;
+  }
+  :root { --bar: 8px; }
+  body.has-bar { --bar: 52px; }
+
   /* xterm 기본 스크롤바는 밝은 톤이라 어두운 터미널 위에서 흰 띠로 튄다. */
   .xterm-viewport::-webkit-scrollbar { width: 10px; }
   .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-  .xterm-viewport::-webkit-scrollbar-thumb {
-    background: #2c3543; border-radius: 5px;
-  }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: #2c3543; border-radius: 5px; }
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
+
   #status {
-    position: absolute; right: 12px; bottom: 8px; z-index: 5;
+    position: absolute; right: 12px; top: 8px; z-index: 5;
     font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #6b7683; pointer-events: none;
   }
+
+  /* 하단 바 — 소프트 키보드가 올라오면 visualViewport 로 그 위에 얹는다.
+     transform 으로만 움직인다(§④): position 을 바꾸면 터미널이 뛴다. */
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: none; gap: 6px; align-items: center;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)) 8px;
+    background: #171c24; border-top: 1px solid #232b36;
+    will-change: transform;
+  }
+  body.has-bar #bar { display: flex; }
+  #bar select, #bar button {
+    min-height: 44px;                    /* iOS HIG 터치 타깃 */
+    font: 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;  /* 16px 미만이면 iOS 가 확대한다 */
+    color: #c8d0d9; background: #222a35;
+    border: 1px solid #2f3846; border-radius: 8px;
+  }
+  #bar select { flex: 1 1 auto; min-width: 0; padding: 0 6px; }
+  #bar button { flex: 0 0 auto; min-width: 44px; padding: 0 6px; }
+  #bar button:active { background: #2c3543; }
 </style>
 </head>
 <body>
 <div id="term"></div>
 <div id="status"></div>
+<div id="bar">
+  <select id="panes" aria-label="pane 고르기"><option value="">새 셸</option></select>
+  <button data-seq="\x1b" aria-label="Esc">esc</button>
+  <button data-seq="\t" aria-label="Tab">⇥</button>
+  <button data-seq="\x03" aria-label="Ctrl-C">^C</button>
+  <button data-seq="\x1b[A" aria-label="위">↑</button>
+  <button data-seq="\x1b[B" aria-label="아래">↓</button>
+</div>
 <script src="/term/xterm.js"></script>
 <script>
 (() => {
   const q = new URLSearchParams(location.search);
   const statusEl = document.getElementById('status');
+  const bar = document.getElementById('bar');
+  const panesEl = document.getElementById('panes');
+
+  // 물리 키보드가 있으면 esc/tab 버튼은 자리만 먹는다. pane 선택은 양쪽 다 쓰므로
+  // 바 자체는 터치 기기에서만 띄우고, 데스크톱은 예전처럼 터미널만 남긴다.
+  const touch = matchMedia('(hover: none)').matches;
+  if (touch) document.body.classList.add('has-bar');
+
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
     fontSize: 13,
@@ -48,6 +91,19 @@
   // 미러 모드에서는 PTY 크기를 우리가 바꾸면 안 된다 — 같은 PTY 를 보고 있는
   // kasaterm pane 의 화면이 같이 깨진다. 서버가 알려준 크기에 우리를 맞춘다.
   let mirror = false;
+  let cols = 0;
+
+  // 미러는 격자를 못 줄이므로, 대신 우리 글자를 줄여 그 격자를 화면 안에 넣는다.
+  // 안 그러면 80열이 폰 폭을 넘어 가로 스크롤이 생긴다(§⑤ 실패).
+  const fitFontToCols = () => {
+    if (!mirror || !cols) return;
+    const avail = document.getElementById('term').clientWidth;
+    const size = Math.max(5, Math.min(13, Math.floor(avail / (cols * 0.62))));
+    if (size !== term.options.fontSize) {
+      term.options.fontSize = size;
+      term.resize(cols, term.rows);
+    }
+  };
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/term/ws?${q.toString()}`);
@@ -59,8 +115,10 @@
       const m = JSON.parse(e.data);
       if (m.t === 'size') {
         mirror = !!m.mirror;
+        cols = m.cols;
         term.resize(m.cols, m.rows);
-        statusEl.textContent = mirror ? `mirror ${q.get('pane') || ''}` : '';
+        fitFontToCols();
+        statusEl.textContent = mirror ? (q.get('pane') || '') : '';
       }
       return;
     }
@@ -68,15 +126,52 @@
   };
 
   const enc = new TextEncoder();
-  term.onData((d) => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+  const send = (s) => { if (ws.readyState === 1) ws.send(enc.encode(s)); };
+  term.onData(send);
+
+  for (const b of bar.querySelectorAll('button[data-seq]')) {
+    // 눌러도 터미널이 포커스를 잃지 않아야 소프트 키보드가 안 내려간다.
+    b.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      send(JSON.parse(`"${b.dataset.seq}"`));
+    });
+  }
+
+  fetch('/term/panes').then((r) => r.json()).then((list) => {
+    const here = q.get('pane') || '';
+    for (const id of list) {
+      const o = document.createElement('option');
+      o.value = id; o.textContent = id;
+      if (id === here) o.selected = true;
+      panesEl.append(o);
+    }
+  }).catch(() => {});
+  panesEl.addEventListener('change', () => {
+    // 토큰은 쿠키에 있으므로 주소에 다시 실을 필요가 없다.
+    location.search = panesEl.value ? `?pane=${encodeURIComponent(panesEl.value)}` : '';
+  });
 
   const syncSize = () => {
-    if (mirror || ws.readyState !== 1) return;
+    if (mirror) { fitFontToCols(); return; }
+    if (ws.readyState !== 1) return;
     fit.fit();
     ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
   };
   ws.onopen = () => { term.focus(); setTimeout(syncSize, 0); };
   window.addEventListener('resize', syncSize);
+
+  // 소프트 키보드가 올라오면 fixed 바가 그 아래로 숨는다. visualViewport 가
+  // 실제로 보이는 영역을 알려 주므로 그만큼 바를 위로 얹는다.
+  const vv = window.visualViewport;
+  if (vv) {
+    const lift = () => {
+      const hidden = Math.max(0, innerHeight - vv.height - vv.offsetTop);
+      bar.style.transform = `translateY(${-hidden}px)`;
+    };
+    vv.addEventListener('resize', lift);
+    vv.addEventListener('scroll', lift);
+    lift();
+  }
 
   ws.onclose = () => {
     statusEl.textContent = '';
