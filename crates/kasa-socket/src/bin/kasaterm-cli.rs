@@ -1187,17 +1187,39 @@ fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
 // ---------------------------------------------------------------- sessions --
 
 /// 터미널 세션 피커 본체. `interactive=false`(sessions)면 목록만, `true`(resume)면
-/// 번호 입력을 받아 그 세션을 `claude --resume` 으로 이어간다. 목록은
-/// `recent_sessions_for`(jsonl 직스캔)라 claude /resume 의 teamName 필터를 안 탄다.
+/// 번호 입력을 받아 그 세션을 이어간다. 목록은 jsonl·SQLite 직스캔이라 claude
+/// /resume 의 teamName 필터를 안 탄다.
+///
+/// 기본은 **세 하네스 전체**(claude·codex·agy)를 가로지른다 — 하네스가 셋이 된
+/// 뒤로 "어디서 뭘 하다 말았나"를 한 자리에서 봐야 하기 때문이다. `--here` 는
+/// 예전처럼 지금 cwd 의 claude 세션만 본다(그 프로젝트 것만 훑을 때).
 fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     let limit = args
         .iter()
         .find_map(|s| s.parse::<usize>().ok())
         .unwrap_or(20);
+    let here = args.iter().any(|a| a == "--here");
+    // 하네스를 대놓고 고를 수 있어야 한다. 합친 목록은 최신순이라 요즘 안 쓰는
+    // 쪽(예: codex)이 통째로 뒤로 밀리는데, 그걸 찾자고 limit 를 키우면 화면이
+    // 다른 하네스로 덮인다.
+    let only = args
+        .iter()
+        .find(|a| matches!(a.as_str(), "claude" | "codex" | "agy"))
+        .cloned();
     let cwd = std::env::current_dir().context("cwd")?;
-    let list = kasa_socket::sessions::recent_sessions_for(&cwd, limit);
+    let list = match only.as_deref() {
+        Some("claude") => kasa_socket::sessions::recent_claude_sessions_all(limit),
+        Some("codex") => kasa_socket::sessions::recent_codex_sessions(limit),
+        Some("agy") => kasa_socket::sessions::recent_agy_sessions(limit),
+        _ if here => kasa_socket::sessions::recent_sessions_for(&cwd, limit),
+        _ => kasa_socket::sessions::recent_all_sessions(limit),
+    };
     if list.is_empty() {
-        println!("최근 세션 없음 ({})", cwd.display());
+        if here {
+            println!("최근 세션 없음 ({})", cwd.display());
+        } else {
+            println!("최근 세션 없음");
+        }
         return Ok(());
     }
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1212,13 +1234,27 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         let color = colors.get(&student).map(|h| ansi_fg(h)).unwrap_or_default();
         let dot = if student.is_empty() { format!("{DIM}·{RESET}") } else { format!("{color}●{RESET}") };
         let name_cell = pad_display(&student, 8);
-        let label_cell = pad_display(&clip_display(&s.label, 44), 44);
-        let live_mark = if live.contains(&s.id) { " \x1b[31m[실행중]\x1b[0m" } else { "" };
+        let label_cell = pad_display(&clip_display(&s.label, 38), 38);
+        // 실행 중 표시는 claude 세션 id 로만 판정된다(live_session_ids). 다른
+        // 하네스에 그 잣대를 대면 늘 "아님"이라 거짓 안심을 준다 — 아예 안 붙인다.
+        let live_mark = if s.harness == "claude" && live.contains(&s.id) {
+            " \x1b[31m[실행중]\x1b[0m"
+        } else {
+            ""
+        };
+        // 위치는 프로젝트 이름이 제일 쓸모 있다. cwd 를 모르는 하네스(codex 등)는
+        // short id 로 대신한다 — 목록에서 같은 제목을 가릴 최소한의 단서.
+        let where_cell = std::path::Path::new(&s.cwd)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| s.id.chars().take(8).collect());
         println!(
-            "{:>3}  {dot} {color}{name_cell}{RESET} {label_cell} {DIM}{:>7} · {}{RESET}{live_mark}",
+            "{:>3}  {dot} {color}{name_cell}{RESET} {label_cell} {DIM}{:<6} {:>7} · {}{RESET}{live_mark}",
             i + 1,
+            s.harness,
             rel_time(s.mtime),
-            &s.id[..8.min(s.id.len())],
+            clip_display(&where_cell, 18),
         );
     }
     if !interactive {
@@ -1235,34 +1271,49 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     let Some(sel) = n.checked_sub(1).and_then(|i| list.get(i)) else {
         return Err(anyhow!("{n}번 세션이 없어요 (1..{})", list.len()));
     };
-    if live.contains(&sel.id) {
+    if sel.harness == "claude" && live.contains(&sel.id) {
         return Err(anyhow!(
             "이미 실행 중인 세션이에요 ({}) — 그 pane 을 쓰거나 `claude agents` 로 attach 하세요. \
              중복 --resume 은 프로세스가 갈라져요.",
             &sel.id[..8]
         ));
     }
+    let run = resume_command(&sel.harness, &sel.id, &sel.cwd);
     // 사용자 셸(-i)로 실행 — zshrc 의 claude() 래퍼(권한 플래그 등)와 pane PATH 의
     // kasaterm shim(트리플·페르소나)을 사람이 직접 친 것과 똑같이 태운다.
-    // id 는 recent_sessions_for 가 uuid 검증을 마친 값이라 인터폴레이션 안전.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let err = std::process::Command::new(shell)
-            .arg("-ic")
-            .arg(format!("claude --resume {}", sel.id))
-            .exec();
-        Err(anyhow!("claude 실행 실패: {err}"))
+        let err = std::process::Command::new(shell).arg("-ic").arg(&run).exec();
+        Err(anyhow!("{} 실행 실패: {err}", sel.harness))
     }
     #[cfg(not(unix))]
     {
         let status = std::process::Command::new("cmd")
-            .args(["/C", &format!("claude --resume {}", sel.id)])
+            .args(["/C", &run])
             .status()
-            .context("claude 실행")?;
-        if status.success() { Ok(()) } else { Err(anyhow!("claude exit {status}")) }
+            .context("하네스 실행")?;
+        if status.success() { Ok(()) } else { Err(anyhow!("exit {status}")) }
     }
+}
+
+/// 하네스별 "이어가기" 셸 한 줄. 세 CLI 가 서로 다른 플래그를 쓴다.
+///
+/// cwd 로 먼저 옮기는 게 중요하다 — claude 는 세션을 cwd 별 디렉터리에 나눠 두어
+/// 다른 자리에서 `--resume` 하면 그 세션을 아예 못 찾는다. cwd 를 모르는 하네스
+/// (codex 는 rollout 에 안 남긴다)는 지금 자리에서 연다.
+///
+/// 값은 전부 작은따옴표로 감싼다. id 는 uuid 라 위험할 게 없지만 cwd 는 사람이
+/// 만든 경로라 공백·괄호가 흔하다 — 따옴표가 없으면 `cd` 가 거기서 끊긴다.
+fn resume_command(harness: &str, id: &str, cwd: &str) -> String {
+    let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let cmd = match harness {
+        "codex" => format!("codex resume {}", q(id)),
+        "agy" => format!("agy --conversation {}", q(id)),
+        _ => format!("claude --resume {}", q(id)),
+    };
+    if cwd.is_empty() { cmd } else { format!("cd {} && {cmd}", q(cwd)) }
 }
 
 /// 세션 제목 변경 본체 — `rename [sid|sid8] <이름...>`. sid 생략 시 이 pane 의
@@ -1732,4 +1783,41 @@ fn run_statusline() {
     }
 
     println!("{}{sid_marker}", parts.join(&sep));
+}
+
+#[cfg(test)]
+mod resume_command_tests {
+    use super::resume_command;
+
+    #[test]
+    fn claude_moves_to_the_session_cwd_first() {
+        // claude 는 세션을 cwd 별 디렉터리에 나눠 둔다 — 다른 자리에서 --resume
+        // 하면 그 세션을 못 찾으므로 cd 가 앞에 붙어야 한다.
+        let got = resume_command("claude", "abc-123", "/Users/kasa/proj");
+        assert_eq!(got, "cd '/Users/kasa/proj' && claude --resume 'abc-123'");
+    }
+
+    #[test]
+    fn codex_and_agy_use_their_own_flags() {
+        assert_eq!(resume_command("codex", "id1", ""), "codex resume 'id1'");
+        assert_eq!(resume_command("agy", "id2", ""), "agy --conversation 'id2'");
+    }
+
+    #[test]
+    fn unknown_harness_falls_back_to_claude() {
+        assert_eq!(resume_command("", "id3", ""), "claude --resume 'id3'");
+    }
+
+    #[test]
+    fn quotes_paths_with_spaces() {
+        // 사람이 만든 경로엔 공백·괄호가 흔하다. 따옴표가 없으면 cd 가 거기서 끊긴다.
+        let got = resume_command("claude", "id", "/Users/kasa/My Projects (old)");
+        assert_eq!(got, "cd '/Users/kasa/My Projects (old)' && claude --resume 'id'");
+    }
+
+    #[test]
+    fn escapes_a_single_quote_in_the_path() {
+        let got = resume_command("claude", "id", "/tmp/it's");
+        assert_eq!(got, r#"cd '/tmp/it'\''s' && claude --resume 'id'"#);
+    }
 }
