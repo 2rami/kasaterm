@@ -332,6 +332,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         return codex_snapshot(surface_id, tail, idle);
     }
     let mut title = String::new();
+    let mut custom_title = String::new();
     let mut last_prompt = String::new();
     let mut last_reply = String::new();
     let mut intent = String::new();
@@ -388,6 +389,13 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
             Some("ai-title") if title.is_empty() => {
                 if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
                     title = clip(t, 60);
+                }
+            }
+            // `/rename` 은 사람이 직접 붙인 이름이라 자동 생성 제목을 이긴다. 역순
+            // 파싱이므로 먼저 만나는 것이 가장 최근 rename 이다(여러 번 바꾸면 마지막).
+            Some("custom-title") if custom_title.is_empty() => {
+                if let Some(t) = v.get("customTitle").and_then(|x| x.as_str()) {
+                    custom_title = clip(t, 60);
                 }
             }
             Some("last-prompt") if last_prompt.is_empty() => {
@@ -559,7 +567,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
 
     PaneActivity {
         surface_id: surface_id.to_string(),
-        title,
+        title: if custom_title.is_empty() { title } else { custom_title },
         last_prompt,
         last_reply,
         intent: if intent.is_empty() { "active".into() } else { intent },
