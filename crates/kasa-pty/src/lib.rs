@@ -16,7 +16,8 @@ mod state;
 pub use crossbeam_channel::Receiver as ScreenReceiver;
 pub use layout::{Divider, PtyLayout, SplitDir};
 pub use state::{
-    agent_for_shell, live_sessions, lookup_session, process_cmdline, process_env_var,
+    agent_for_shell, keep_session, kept_sessions, live_sessions, lookup_session, process_cmdline,
+    process_env_var, release_session,
     process_env_vars, process_table, process_table_shared,
     register_session, set_host_colors, AgentKind, CommandBlock, PtyOptions, PtySession,
 };
