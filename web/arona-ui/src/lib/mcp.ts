@@ -375,14 +375,45 @@ export async function swapCharacter(surface: string, character: string): Promise
 
 /** `character` = 세션→학생 영속 바인딩(백엔드가 session_characters.json 에서 얹음).
  *  미바인딩 세션은 undefined — 피커가 실루엣/무색 폴백. */
-export interface RecentSession { id: string; label: string; mtime: number; cwd: string; character?: string; }
+/** 세션을 만든 코딩 프로그램. 이어가는 명령이 셋 다 달라서(`claude --resume` /
+ *  `codex resume` / `agy --conversation`) 목록을 합칠 때 이 값이 없으면 무엇으로
+ *  여는지 알 수가 없다. 옛 기록엔 없어서 서버가 `"claude"` 를 기본으로 채운다. */
+export type Harness = 'claude' | 'codex' | 'agy';
 
-/** GET /recent-sessions?cwd=<abs> — 최근 claude 세션 목록(이어가기 후보, 최신순).
- *  cwd 생략 시 active 방 cwd. fail-soft 빈 배열. */
-export async function fetchRecentSessions(cwd?: string): Promise<RecentSession[]> {
+export interface RecentSession {
+  harness?: Harness;
+  id: string;
+  label: string;
+  mtime: number;
+  cwd: string;
+  character?: string;
+  /** 마지막 대화 한 줄. 서버가 아직 안 보내므로 대개 비어 있다 — 생기면 행에 자동으로 붙는다. */
+  preview?: string;
+}
+
+/** 그 세션을 이어가는 셸 명령. 하네스마다 다르므로 한 곳에서만 만든다 —
+ *  목록에 세 프로그램이 섞이는 순간, claude 명령을 하드코딩해 두면 codex 세션을
+ *  골라도 claude 로 열려 그냥 실패한다. */
+export function resumeCommand(id: string, harness?: Harness): string {
+  switch (harness) {
+    case 'codex': return `codex resume ${id}`;
+    case 'agy': return `agy --conversation ${id}`;
+    default: return `claude --resume ${id}`;
+  }
+}
+
+/** GET /recent-sessions?cwd=<abs>[&scope=all] — 최근 세션 목록(이어가기 후보, 최신순).
+ *  cwd 생략 시 active 방 cwd. `scope='all'` 이면 cwd 를 넘어 전체.
+ *  fail-soft 빈 배열. */
+export async function fetchRecentSessions(cwd?: string, scope?: 'cwd' | 'all'): Promise<RecentSession[]> {
   try {
-    const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
-    const r = await fetch(`${BASE}/recent-sessions${q}`);
+    const q = new URLSearchParams();
+    if (cwd) q.set('cwd', cwd);
+    // 서버가 아직 scope 를 모를 수 있다. 모르는 쿼리는 무시될 뿐이라 먼저 붙여도
+    // 안전하다 — 그동안은 cwd 범위 결과가 그대로 온다.
+    if (scope === 'all') q.set('scope', 'all');
+    const qs = q.toString();
+    const r = await fetch(`${BASE}/recent-sessions${qs ? `?${qs}` : ''}`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { sessions?: RecentSession[] };
     return Array.isArray(d?.sessions) ? d.sessions : [];
@@ -441,15 +472,25 @@ export async function killBackgroundAgent(pid: number): Promise<boolean> {
   }
 }
 
-/** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
- *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
-export async function resumeSession(id: string, cwd?: string, newroom = false, attach = false): Promise<boolean> {
+/** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>[&harness=<h>] — 새 pane 을
+ *  열고 셸 프롬프트가 뜨면 이어가기 명령을 주입한다. newroom=true 면 새 방.
+ *
+ *  `harness` 는 무엇으로 여는지를 정한다(`claude --resume` / `codex resume` /
+ *  `agy --conversation`). 안 주면 서버가 claude 로 친다 — 옛 호출부가 그대로 돌게. */
+export async function resumeSession(
+  id: string,
+  cwd?: string,
+  newroom = false,
+  attach = false,
+  harness?: Harness,
+): Promise<boolean> {
   if (!id) return false;
   try {
     const q = new URLSearchParams({ id });
     if (cwd) q.set('cwd', cwd);
     if (newroom) q.set('newroom', '1');
     if (attach) q.set('attach', '1');
+    if (harness && harness !== 'claude') q.set('harness', harness);
     const r = await fetch(`${BASE}/session-resume?${q}`, { method: 'POST' });
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };

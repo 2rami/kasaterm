@@ -1,5 +1,5 @@
 import { Fragment, type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscriptChunk, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, fetchMessages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, revealTerminal, closeAgent, swapCharacter, type Turn, type MessageEntry } from '@/lib/mcp';
+import { fetchConversation, fetchTranscriptChunk, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, fetchMessages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, resumeCommand, revealTerminal, closeAgent, swapCharacter, type Harness, type Turn, type MessageEntry } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { CharacterPicker } from './CharacterPicker';
 import { Markdown } from './Markdown';
@@ -808,7 +808,7 @@ export interface TerminalPeekPanelProps {
   /** 오프라인(과거) 세션 읽기 전용 미리보기 — 라이브 pane 없이 uuid+cwd 로 jsonl 을 1회
    *  읽어 대화만 렌더. 입력창·라이브 폴링·학생 액션은 끄고, 하단에 '현재 터미널에 입력'
    *  이어가기 액션바를 띄운다. 있으면 surfaceId 는 빈 값('')으로 들어온다. */
-  session?: { id: string; cwd: string; label: string; transferred?: boolean; daemonShort?: string };
+  session?: { id: string; cwd: string; label: string; transferred?: boolean; daemonShort?: string; harness?: Harness };
   /** 서브에이전트 드릴인 — 부모 pane(parentSurface)이 소환한 서브에이전트(agentId)의
    *  대화를 따로 보는 모드. 읽기 전용(입력 없음). 있으면 surfaceId 는 빈 값('')으로 들어온다. */
   subagent?: { parentSurface: string; agentId: string; agentType: string; label: string };
@@ -2382,12 +2382,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               flex: 1, fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-700)',
               background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', borderRadius: 8,
               padding: '7px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}>{session!.daemonShort ? 'claude agents' : `claude --resume ${session!.id}`}</code>
+            }}>{session!.daemonShort ? 'claude agents' : resumeCommand(session!.id, session!.harness)}</code>
             <button
               onClick={async () => {
                 // background(claude agents) 세션: `attach` 서브커맨드는 없다. `claude agents`
-                // 로 목록 TUI 를 열고(enter to open) 그 세션을 골라 이어간다. 과거 세션만 --resume.
-                const cmd = session!.daemonShort ? 'claude agents' : `claude --resume ${session!.id}`;
+                // 로 목록 TUI 를 열고(enter to open) 그 세션을 골라 이어간다. 과거 세션만 resume.
+                // 명령은 하네스마다 다르므로 resumeCommand 가 정한다 — 여기 claude 를
+                // 하드코딩해 두면 codex 세션을 골라도 claude 로 열려 그냥 실패한다.
+                const cmd = session!.daemonShort ? 'claude agents' : resumeCommand(session!.id, session!.harness);
                 const ok = await pasteToActiveTerminal(cmd, false);
                 if (ok) { void revealTerminal(1); setFlash('ok'); } else { setFlash('err'); }
                 setTimeout(() => setFlash(null), 2200);
