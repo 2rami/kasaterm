@@ -256,7 +256,15 @@ impl App {
         // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
         // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
         // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
-        let taken: std::collections::HashSet<String> = {
+        // 이 방 live 만 따로 들고 있는다 — 전 방 마커까지 합친 taken 이 학생 총원을
+        // 넘기면 고를 것이 하나도 안 남는데, 그때 members 전체로 되돌아가면 **같은 방
+        // 안에서도** 겹친다. 실측 2026-08-09: 마커 17개 > 총원 12명이라 배정 풀이
+        // 통째로 말라 아루가 셋이 됐다. 마커는 pane 을 정상적으로 닫을 때만 지워지므로
+        // 앱을 재시작하면 옛 마커가 그대로 남아 이 고갈이 시간이 갈수록 잦아진다.
+        let (taken, taken_local): (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ) = {
             let ws = self.ws.lock().unwrap();
             // **`ws.panes` 로만 돌면 안 된다** — split 로 생긴 leaf 는 보조탭이 생기기
             // 전까지 `PaneState` 가 없다(희소, main.rs `pane_font_scales` 주석). 그래서
@@ -277,8 +285,9 @@ impl App {
                         .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
                 })
                 .collect();
+            let local = t.clone();
             t.extend(kasa_mcp::character::assigned_global());
-            t
+            (t, local)
         };
         // pending(사용자 지정 캐릭터)은 중복이어도 존중 — 같은 학생 허용, 색은
         // character_ordinal 변주로 구분(거노). 랜덤 배정만 taken 을 피한다.
@@ -287,7 +296,16 @@ impl App {
             None => {
                 let free: Vec<String> =
                     members.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
+                // 고갈되면 곧장 전체로 되돌아가지 않고 **이 방 live 만** 피해 한 번 더
+                // 고른다. 다른 방과 겹치는 것은 이름에 pane 번호가 붙어 구분되지만,
+                // 같은 방에서 겹치면 화면에 같은 얼굴이 나란히 서서 누가 누군지 사라진다.
+                let free_local: Vec<String> = members
+                    .iter()
+                    .filter(|n| !taken_local.contains(n.as_str()))
+                    .cloned()
+                    .collect();
                 let pick = kasa_mcp::character::pick_random(&free, id)
+                    .or_else(|| kasa_mcp::character::pick_random(&free_local, id))
                     .or_else(|| kasa_mcp::character::pick_random(&members, id));
                 match pick {
                     Some(n) => n,
