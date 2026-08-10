@@ -152,6 +152,22 @@ pub struct PaneActivity {
     /// `surface.peek` per pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// 이 pane 에 **어떻게 말을 걸 수 있나** — `"message"`(cross-session
+    /// SendMessage 로 닿는다) · `"tell"`(명부에 없어 입력창 주입뿐) ·
+    /// `"stale"`(명부엔 있는데 소켓이나 프로세스가 없다).
+    ///
+    /// 이 칸이 있는 이유: `SendMessage` 의 성공 응답은 **도달 증명이 아니다**.
+    /// 죽은 상대에게 보내도 "Message sent" 가 오고, 이름이 어긋나면 오류 없이
+    /// 사라진다. 그래서 보내기 전에 볼 자리가 필요하다 — 2026-08-10 새벽에
+    /// 같은 캐릭터 pane 이 둘이라 엉뚱한 쪽에 브리프를 보냈고, 정작 상대는
+    /// 명부에 없어 애초에 닿지도 않았다.
+    #[serde(default)]
+    pub reach: String,
+    /// 명부에 등록된 **그 세션의 실제 이름** — `SendMessage` 의 `to` 에 그대로
+    /// 넣을 값이다. `agent_name` 과 다를 수 있다(`/rename` 하면 명부 쪽만 바뀐다).
+    /// 이름을 규칙으로 짐작하면 어긋나므로 실측값만 싣는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
     /// 이 pane 에 배정된 캐릭터명(아로나 모드 테마) — assign-character 가 박은
     /// `/tmp/kasaterm-collab/<slug>/character-<N>` 마커 내용. arona-ui 가 교실
     /// 도트칩 이름표에 쓴다(title 은 작업 제목이라 캐릭터명이 아니다). 캐릭터

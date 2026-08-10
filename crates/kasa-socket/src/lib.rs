@@ -23,6 +23,7 @@
 
 pub mod backend;
 pub mod methods;
+pub mod peers;
 pub mod protocol;
 pub mod server;
 pub mod sessions;

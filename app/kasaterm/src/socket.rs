@@ -1446,6 +1446,12 @@ impl Backend for PtyBackend {
         // 인박스를 폴링하므로, 말을 걸 때 입력창이 아니라 인박스를 써야 한다.
         // pane 당 ps 한 번 — 키마다 부르면 폴링마다 pane×키 개의 ps 가 뜬다.
         let ptable = kasa_pty::process_table_shared();
+        // cross-session 명부 — 이 pane 에 SendMessage 가 닿는지 판정한다. 보내 보고
+        // 아는 수밖에 없던 자리인데, 그 성공 응답이 도달을 증명하지 않아 늘 추측이었다.
+        // 살아있는 pid 는 위 ptable 을 그대로 쓴다(명부에 소켓 파일이 남아 있어도
+        // 프로세스가 죽었으면 안 닿는다 — 파일만 보면 그걸 못 가른다).
+        let peers = kasa_socket::peers::by_session_id();
+        let live_pids: HashSet<u32> = ptable.iter().map(|(pid, _, _)| *pid).collect();
         let pane_env: HashMap<String, HashMap<String, String>> = pane_shell_pid
             .iter()
             .filter_map(|(sid, &shell)| {
@@ -1488,11 +1494,16 @@ impl Backend for PtyBackend {
                 // mtime heuristic above is only a fallback for sessions claude
                 // doesn't list. `effectively_idle` then drives the attention
                 // (permission-prompt) override below.
-                let official = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|stem| agents.get(stem))
-                    .map(|s| s.as_str());
+                let stem = path.file_stem().and_then(|s| s.to_str());
+                let official = stem.and_then(|s| agents.get(s)).map(|s| s.as_str());
+                // 같은 stem(=sessionId)으로 명부를 조회한다. **이름으로 잇지 않는 게
+                // 핵심이다** — 명부의 name 은 /rename 으로 바뀌고(pane 은
+                // arisu-p116 인데 명부엔 "agy code") 같은 캐릭터가 여러 pane 에 뜨면
+                // 겹친다. sessionId 만 안 흔들린다.
+                let peer = stem.and_then(|s| peers.get(s));
+                let peer_alive = peer.map(|p| live_pids.contains(&p.pid)).unwrap_or(false);
+                row.reach = kasa_socket::peers::reach_of(peer, peer_alive).as_str().to_string();
+                row.peer_name = peer.map(|p| p.name.clone()).filter(|n| !n.is_empty());
                 let effectively_idle = match official {
                     Some("busy") => {
                         row.status = "working".into();
