@@ -103,6 +103,13 @@ pub(crate) struct PortRow {
     /// 무엇이 떠 있는지 — 프로젝트 폴더명, 알려진 서비스명, 또는 응답한 HTML 의
     /// `<title>`. 포트 번호만으로는 며칠 전 띄워둔 서버의 정체를 알 수 없다.
     pub(crate) site: String,
+    /// 띄운 pane 이 **이미 없다**. 이때만 "꺼도 되나" 에 답할 수 있다.
+    ///
+    /// `orphan` 과 다르다 — 그건 "셸 자손이 아니다"(재부모화됐다)일 뿐이고, 주인이
+    /// 살아 있어도 참이다. 이 값은 주인 자체가 사라졌다는 뜻이라 끄는 판단의 근거가
+    /// 된다. 가릴 수 있게 된 것은 귀속을 작업 폴더가 아니라 프로세스 env 로 하기
+    /// 때문이다(`panes_of`).
+    pub(crate) owner_dead: bool,
 }
 
 /// 한 pane 과 그 셸 아래 프로세스들. pane 을 묶음으로 두는 건 목록이 전 pane
@@ -227,6 +234,9 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // cwd 는 소유 여부와 무관하게 전부 받는다 — 귀속 판정에도, "무슨 사이트인지"
     // 라벨에도 같은 값을 쓰므로 lsof 를 두 번 부를 이유가 없다.
     let cwds = cwds_of(&port_pids);
+    // 포트를 쥔 프로세스가 어느 pane 에서 났는지는 env 로만 정확히 알 수 있다 —
+    // 부모 체인은 서버가 launchd 밑으로 넘어가는 순간 끊긴다(위 주석의 그 실측).
+    let env_panes = panes_of(&port_pids);
     let roots: Vec<(String, std::path::PathBuf)> = targets
         .iter()
         .filter_map(|t| {
@@ -240,16 +250,27 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     let mut ports: Vec<PortRow> = all
         .into_iter()
         .filter_map(|(port, pid)| {
-            let (pane, orphan) = match owner.get(&pid) {
-                Some(p) => (Some(p.clone()), false),
-                None => {
-                    let cwd = cwds.get(&pid)?;
-                    let pane = roots
-                        .iter()
-                        .find(|(_, r)| cwd.starts_with(r))
-                        .map(|(id, _)| id.clone())?;
-                    (Some(pane), true)
-                }
+            let (pane, orphan, owner_dead) = match owner.get(&pid) {
+                Some(p) => (Some(p.clone()), false, false),
+                // env 는 재부모화돼도 남으므로 **띄운 pane 을 정확히 가리킨다**. 작업
+                // 폴더 추정보다 먼저 보는 이유는, 폴더로는 같은 레포에 pane 이 여럿일
+                // 때 못 가르고 **죽은 pane 이 띄운 서버가 살아 있는 pane 것으로 붙기**
+                // 때문이다 — 아래 폴백이 `roots`(살아 있는 pane 의 레포)에서 찾으므로
+                // 주인이 죽었다는 사실 자체가 사라진다.
+                None => match env_panes.get(&pid) {
+                    Some(p) => {
+                        let alive = targets.iter().any(|t| &t.id == p);
+                        (Some(p.clone()), true, !alive)
+                    }
+                    None => {
+                        let cwd = cwds.get(&pid)?;
+                        let pane = roots
+                            .iter()
+                            .find(|(_, r)| cwd.starts_with(r))
+                            .map(|(id, _)| id.clone())?;
+                        (Some(pane), true, false)
+                    }
+                },
             };
             Some(PortRow {
                 port,
@@ -266,6 +287,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     .unwrap_or_default(),
                 pane,
                 site: site_label(port, cwds.get(&pid).map(|p| p.as_path()), sites),
+                owner_dead,
             })
         })
         .collect();
@@ -848,6 +870,40 @@ fn listening_ports() -> Vec<(u16, u32)> {
 
 /// pid → 작업 폴더. 셸 트리 밖의 포트를 "이 레포 것"으로 인정할지 가르는 유일한
 /// 근거다. 포트를 쥔 프로세스만 물으므로 한 번의 fork 로 끝난다(실측 32ms).
+/// pid → 그 프로세스가 물려받은 `KASATERM_PANE_ID`.
+///
+/// `ps eww` 는 환경변수까지 붙여 주므로, 셸이 죽어 부모 체인이 끊긴 뒤에도 **어느
+/// pane 에서 났는지**가 남는다. 작업 폴더 추정과 달리 같은 레포의 pane 여럿을 가른다.
+#[cfg(unix)]
+fn panes_of(pids: &[u32]) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(o) = proc::command("ps").args(["eww", "-o", "pid=,command=", "-p", &list]).output()
+    else {
+        return out;
+    };
+    const KEY: &str = "KASATERM_PANE_ID=";
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid_s, rest)) = line.split_once(' ') else { continue };
+        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        let Some(i) = rest.find(KEY) else { continue };
+        let v = rest[i + KEY.len()..].split_whitespace().next().unwrap_or("");
+        if !v.is_empty() {
+            out.insert(pid, v.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn panes_of(_pids: &[u32]) -> HashMap<u32, String> {
+    HashMap::new()
+}
+
 #[cfg(unix)]
 fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
     let mut out = HashMap::new();
@@ -2472,9 +2528,20 @@ fn draw_port_row(
     if hov {
         g.rect(x, y, w, PORT_H, theme::surface_hover());
     }
-    // 어느 pane 도 돌리고 있지 않으면(띄운 셸이 죽어 launchd 로 넘어간 서버) 점을
-    // 흐리게 — pane 을 닫아도 안 죽는다는 사실이 목록에서 바로 보여야 한다.
-    let dot = if p.orphan { theme::text_dim() } else { theme::accent() };
+    // 점 색이 곧 "이걸 꺼도 되나" 에 대한 답이다. 세 갈래인 것이 요점 —
+    //   파랑  = 지금 이 pane 이 돌리고 있다(셸 자손). 끄려면 그 pane 을 보라.
+    //   흐림  = 띄운 셸이 죽어 launchd 로 넘어갔지만 **주인 pane 은 살아 있다**.
+    //           pane 을 닫아도 안 죽으니 여기서 꺼야 한다.
+    //   빨강  = 띄운 pane 자체가 없다. 아무도 안 쓰는 것이므로 꺼도 된다.
+    // 예전엔 뒤의 둘이 같은 흐림이라, 주인이 사라진 서버와 학생이 방금 띄운 서버가
+    // 구별되지 않았다(거노: "죽은 학생이 생성해서 꺼도 되는지 모르겠다").
+    let dot = if p.owner_dead {
+        theme::danger()
+    } else if p.orphan {
+        theme::text_dim()
+    } else {
+        theme::accent()
+    };
     circle_rect(g, x0, y + 7.0, 6.0, dot);
     let port_s = p.port.to_string();
     g.draw_text(
