@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { characterPool, fetchCharacters, fetchRecentSessions, type Harness, type RecentSession, type SessionsInfo } from '@/lib/mcp';
 import type { Agent } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
@@ -56,6 +56,22 @@ function relativeTime(secs: number): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
   return `${Math.floor(diff / 86400)}일 전`;
 }
+// 묶음 키 = 작업폴더의 마지막 조각(= 프로젝트 이름). 전체 범위로 보면 프로젝트가
+// 섞여 평평하게 흐르는데, 실제로 찾을 때 사람이 먼저 좁히는 축이 프로젝트다.
+function projectKey(cwd?: string): string {
+  const segs = (cwd ?? '').split('/').filter(Boolean);
+  return segs[segs.length - 1] || '(그 외)';
+}
+const COLLAPSE_KEY = 'schale-recent-collapsed';
+function loadCollapsed(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_KEY);
+    const d: unknown = raw ? JSON.parse(raw) : null;
+    return d && typeof d === 'object' ? (d as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
 
 export interface RoomMapProps {
   sessions: SessionsInfo;
@@ -106,6 +122,19 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
   // 기본은 이 방 폴더 것만. 켜면 폴더를 넘어 전체를 훑는다 — 어제 다른 레포에서
   // 하던 대화로 돌아갈 때 폴더를 먼저 옮길 필요가 없어진다.
   const [scopeAll, setScopeAll] = useState(false);
+  // 검색은 클라이언트 필터다 — 목록은 이미 손에 있고, 서버 왕복을 한 번 더 도는 대신
+  // 타이핑에 즉시 반응하는 편이 찾는 느낌에 맞다.
+  const [query, setQuery] = useState('');
+  // 접힘은 localStorage 에 남긴다. 패널을 닫았다 열 때마다 다시 펼쳐지면 「접어 둔다」가
+  // 아무 의미가 없다.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
+  const toggleGroup = (k: string) => {
+    setCollapsed((prev) => {
+      const next = { ...prev, [k]: !prev[k] };
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch { /* 사파리 프라이빗 등 — 접힘만 안 남고 동작은 그대로 */ }
+      return next;
+    });
+  };
   // 학생 이름 → header_color(학생색). 최근 세션 행의 색 바에 쓴다 — 어느 학생의
   // 세션인지 이름 읽기 전에 색으로 먼저 구분(거노). 펼칠 때 1회 로드.
   const [charColor, setCharColor] = useState<Record<string, string>>({});
@@ -116,7 +145,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     if (!showRecent) return;
     let alive = true;
     const load = () => {
-      void fetchRecentSessions(undefined, scopeAll ? 'all' : 'cwd').then((s) => { if (alive) setRecent(s); });
+      void fetchRecentSessions(undefined, scopeAll ? 'all' : 'here').then((s) => { if (alive) setRecent(s); });
     };
     load();
     void fetchCharacters().then((c) => {
@@ -135,6 +164,74 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     onOpenSession?.(s);
     setShowRecent(false);
   };
+
+  // 검색: label·cwd·harness(+preview 가 오면 그것도) 대소문자 무시 부분일치.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return recent;
+    return recent.filter((s) => {
+      const hay = [s.label, s.cwd, s.harness ?? 'claude', s.preview, s.character];
+      return hay.some((v) => v && v.toLowerCase().includes(q));
+    });
+  }, [recent, query]);
+
+  // 프로젝트별 묶음. 순서는 그 묶음의 **가장 최근 세션** 기준 — 목록 자체가 최신순이라
+  // 첫 등장 순서를 그대로 쓰면 된다(Map 은 삽입 순서를 지킨다).
+  const groups = useMemo(() => {
+    const m = new Map<string, RecentSession[]>();
+    for (const s of filtered) {
+      const k = projectKey(s.cwd);
+      const list = m.get(k);
+      if (list) list.push(s);
+      else m.set(k, [s]);
+    }
+    return [...m.entries()];
+  }, [filtered]);
+
+  // 세션 한 줄. 학생색 좌측 바 + 이름 뒤 프사 — 어느 학생의 세션인지 즉시 구분(거노).
+  // 미바인딩 세션은 색 바 없이(투명) 이름만.
+  const renderRow = (s: RecentSession) => (
+    <button key={s.id} onClick={() => onPick(s)} title={`${s.label}${s.character ? `\n${s.character}` : ''}\n${s.harness ?? 'claude'} · ${s.cwd}`} style={{
+      display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 7, border: 'none',
+      borderLeft: `3px solid ${(s.character && charColor[s.character]) || 'transparent'}`,
+      cursor: 'pointer', textAlign: 'left',
+      background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
+    }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+        <span style={{ flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {s.label}
+        </span>
+        {s.character && (
+          <span style={{ width: 18, height: 18, borderRadius: 5, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-50)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+            <SpritePortrait character={s.character} scale={0.9} bust />
+          </span>
+        )}
+      </span>
+      {/* 마지막 대화 한 줄. 화자 접두("나: "/"에이전트: ")는 서버가 이미 붙여 보낸다 —
+          내가 시켜 놓고 끊긴 세션과 답을 받고 끝난 세션이 그걸로 갈리므로 여기서 또 붙이지 않는다.
+          못 뽑은 세션은 필드 자체가 안 온다. */}
+      {s.preview && (
+        <span style={{
+          fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-500)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{s.preview}</span>
+      )}
+      {/* 메타 한 줄: [하네스] · 시각 · 프로젝트. 셋을 따로 쌓으면 행이 길어져
+          한 화면에 담기는 세션 수가 줄어든다. 폭이 모자라면 경로부터 줄인다. */}
+      <span style={{
+        display: 'flex', alignItems: 'center', gap: 4, minWidth: 0,
+        fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-300)',
+      }}>
+        <HarnessBadge harness={s.harness} />
+        <span style={{ flexShrink: 0 }}>{relativeTime(s.mtime)}</span>
+        {s.cwd && (
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            · {shortPath(s.cwd)}
+          </span>
+        )}
+      </span>
+    </button>
+  );
 
   if (n < 1) return null;
   return (
@@ -260,51 +357,59 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
               );
             })}
           </div>
-          {recent.length === 0 ? (
-            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', padding: '4px 6px' }}>최근 세션 없음</div>
+          {/* 검색 — 옛 세션은 최신순 목록만으론 사실상 못 찾는다. 제목·경로·하네스
+              (그리고 서버가 보내면 마지막말)를 한꺼번에 훑는 클라이언트 필터. */}
+          <div style={{ position: 'relative', padding: '0 2px 3px' }}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="세션 검색"
+              style={{
+                width: '100%', boxSizing: 'border-box', padding: '4px 20px 4px 7px', borderRadius: 6,
+                border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+                color: 'var(--cth-ink-700)', fontFamily: 'var(--cth-font-ui)', fontSize: 10, outline: 'none',
+              }}
+            />
+            {query && (
+              <button onClick={() => setQuery('')} title="검색어 지우기" style={{
+                position: 'absolute', right: 5, top: 2, width: 15, height: 15, borderRadius: 4, border: 'none',
+                cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-300)',
+                fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 800, lineHeight: 1, padding: 0,
+              }}>×</button>
+            )}
+          </div>
+          {filtered.length === 0 ? (
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', padding: '4px 6px' }}>
+              {recent.length === 0 ? '최근 세션 없음' : `'${query}' 에 맞는 세션 없음`}
+            </div>
+          ) : groups.length < 2 ? (
+            // 묶음이 하나면 헤더가 정보를 안 준다 — 그냥 평평하게(이 폴더 범위의 보통 경우).
+            filtered.map(renderRow)
           ) : (
-            recent.map((s) => (
-              // 학생색 좌측 바 + 세션 이름 뒤 프사 — 어느 학생의 세션인지 즉시 구분
-              // (거노). 미바인딩 세션은 색 바 없이(투명) 이름만.
-              <button key={s.id} onClick={() => onPick(s)} title={`${s.label}${s.character ? `\n${s.character}` : ''}\n${s.harness ?? 'claude'} · ${s.cwd}`} style={{
-                display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 7, border: 'none',
-                borderLeft: `3px solid ${(s.character && charColor[s.character]) || 'transparent'}`,
-                cursor: 'pointer', textAlign: 'left',
-                background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
-              }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                  <span style={{ flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {s.label}
-                  </span>
-                  {s.character && (
-                    <span style={{ width: 18, height: 18, borderRadius: 5, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-50)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={s.character} scale={0.9} bust />
-                    </span>
-                  )}
-                </span>
-                {/* 마지막 대화 한 줄. 서버가 아직 안 보내므로 대개 없다 — 생기면 여기 붙는다. */}
-                {s.preview && (
-                  <span style={{
-                    fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-500)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>{s.preview}</span>
-                )}
-                {/* 메타 한 줄: [하네스] · 시각 · 프로젝트. 셋을 따로 쌓으면 행이 길어져
-                    한 화면에 담기는 세션 수가 줄어든다. 폭이 모자라면 경로부터 줄인다. */}
-                <span style={{
-                  display: 'flex', alignItems: 'center', gap: 4, minWidth: 0,
-                  fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-300)',
-                }}>
-                  <HarnessBadge harness={s.harness} />
-                  <span style={{ flexShrink: 0 }}>{relativeTime(s.mtime)}</span>
-                  {s.cwd && (
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      · {shortPath(s.cwd)}
-                    </span>
-                  )}
-                </span>
-              </button>
-            ))
+            groups.map(([name, list]) => {
+              // 검색 중엔 접힘을 무시하고 전부 편다 — 걸린 항목이 접힌 묶음 안에 숨으면
+              // 검색이 「없다」고 거짓말하는 꼴이 된다.
+              const shut = !query && collapsed[name];
+              return (
+                <div key={name} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <button onClick={() => toggleGroup(name)} style={{
+                    display: 'flex', alignItems: 'center', gap: 4, padding: '3px 4px', borderRadius: 5,
+                    border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-500)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, textAlign: 'left',
+                  }}>
+                    <svg width="9" height="9" viewBox="0 0 16 16" style={{ flexShrink: 0, transform: shut ? 'none' : 'rotate(90deg)', transition: 'transform .12s' }}>
+                      <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                    <span style={{
+                      flexShrink: 0, padding: '0 4px', borderRadius: 999, background: 'var(--cth-cream-200)',
+                      color: 'var(--cth-ink-500)', fontSize: 9, fontWeight: 800, lineHeight: '13px',
+                    }}>{list.length}</span>
+                  </button>
+                  {!shut && list.map(renderRow)}
+                </div>
+              );
+            })
           )}
         </div>
       )}

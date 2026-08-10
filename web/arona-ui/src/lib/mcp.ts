@@ -402,16 +402,16 @@ export function resumeCommand(id: string, harness?: Harness): string {
   }
 }
 
-/** GET /recent-sessions?cwd=<abs>[&scope=all] — 최근 세션 목록(이어가기 후보, 최신순).
+/** GET /recent-sessions?cwd=<abs>[&scope=here|all] — 최근 세션 목록(이어가기 후보, 최신순).
  *  cwd 생략 시 active 방 cwd. `scope='all'` 이면 cwd 를 넘어 전체.
  *  fail-soft 빈 배열. */
-export async function fetchRecentSessions(cwd?: string, scope?: 'cwd' | 'all'): Promise<RecentSession[]> {
+export async function fetchRecentSessions(cwd?: string, scope?: 'here' | 'all'): Promise<RecentSession[]> {
   try {
     const q = new URLSearchParams();
     if (cwd) q.set('cwd', cwd);
-    // 서버가 아직 scope 를 모를 수 있다. 모르는 쿼리는 무시될 뿐이라 먼저 붙여도
-    // 안전하다 — 그동안은 cwd 범위 결과가 그대로 온다.
-    if (scope === 'all') q.set('scope', 'all');
+    // 서버가 아는 값은 `here|all` 이다. 지금은 `all` 만 보고 나머지를 else 로 떨어뜨려
+    // 안 보내도 같지만, 세 번째 값이 생기면 조용히 어긋난다 — 그래서 명시해 보낸다.
+    if (scope) q.set('scope', scope);
     const qs = q.toString();
     const r = await fetch(`${BASE}/recent-sessions${qs ? `?${qs}` : ''}`);
     if (!r.ok) return [];
