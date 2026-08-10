@@ -10,7 +10,7 @@ use kasa_socket::backend::{
     Backend, PaneActivity, PaneBlock, PaneRect, RecentSession, SessionsInfo, SplitDirection,
     SubagentInfo, SurfaceInfo, TranscriptChunk, WorkspaceInfo,
 };
-use kasa_socket::sessions::{is_uuid, recent_sessions_for, session_jsonl_path};
+use kasa_socket::sessions::{is_uuid, recent_sessions_here, session_jsonl_path};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -856,7 +856,10 @@ impl Backend for PtyBackend {
             .map(std::path::PathBuf::from)
             .or_else(|| self.active_cwd())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        Ok(recent_sessions_for(&base, 20))
+        // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
+        // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
+        // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
+        Ok(recent_sessions_here(&base, 60))
     }
 
     fn resume_session(

@@ -1497,8 +1497,10 @@ fn with_bound_characters(sessions: &[kasa_socket::backend::RecentSession]) -> se
 /// arona-ui resume picker. Newest first:
 /// `{ ok, sessions: [{harness, id, label, mtime, cwd, character?}] }`.
 ///
-/// `scope=here`(기본) 는 `cwd`(생략 시 활성 pane 의 cwd) 아래의 claude 세션만 — 지금
-/// 동작 그대로다. `scope=all` 은 cwd 를 무시하고 **하네스 전부**(claude·codex·agy)를
+/// `scope=here`(기본) 는 `cwd`(생략 시 활성 pane 의 cwd) 아래의 세션만. 이쪽도
+/// 하네스를 가로지른다 — 같은 폴더에서 codex 로 일한 기록이 프로젝트 목록에
+/// 없으면 "여기서 뭘 하다 말았지"에 답이 안 된다. `scope=all` 은 cwd 를 무시하고
+/// **하네스 전부**(claude·codex·agy)를
 /// 섞어 돌려준다. 목표는 오르카의 「Agent 세션 기록」 처럼 어느 코딩 프로그램의
 /// 세션이든 한 목록에서 골라 잇는 것이고, 각 항목의 `harness` 를
 /// `/session-resume?harness=` 로 되돌리면 그 프로그램의 이어가기 명령이 나간다.
