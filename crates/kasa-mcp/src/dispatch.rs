@@ -1172,9 +1172,16 @@ mod tests {
 
     #[test]
     fn brief_stays_bare_when_there_is_no_context() {
-        // 혼자 도는 첫 작업 — 붙일 사실이 없으면 원래 지시 그대로 둔다(잡음 금지).
+        // 혼자 도는 첫 작업 — 붙일 사실이 없으면 원래 지시에 아무 맥락도 얹지 않는다
+        // (잡음 금지). 완료 보고 안내만은 예외로 늘 붙는다(ae4161c): 그건 맥락이 아니라
+        // 작업의 일부라, 형제도 선행도 없는 첫 작업일수록 오히려 빠뜨리면 안 된다.
         let q = vec![task("t1", "pending", &["a.rs"], &[])];
-        assert_eq!(compose_brief(0, &q, &[]), "일");
+        let brief = compose_brief(0, &q, &[]);
+        assert!(brief.starts_with("일"), "원래 지시가 앞에 온다: {brief}");
+        assert!(brief.contains("kasaterm-cli done"), "완료 보고 안내: {brief}");
+        for noise in ["진행", "남이 잡은", "물려받", "tell %"] {
+            assert!(!brief.contains(noise), "붙일 사실이 없는데 {noise} 가 붙었다: {brief}");
+        }
     }
 
     #[test]

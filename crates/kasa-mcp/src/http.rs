@@ -2134,10 +2134,10 @@ fn find_collab_dir(room_cwd: Option<&std::path::Path>) -> Option<std::path::Path
 /// `%N` → character 마커에서 이름 읽기. 마커 없으면 pane id 그대로.
 fn char_from_pane(pane: &str, collab_dir: &std::path::Path) -> String {
     let n = pane.trim_start_matches('%');
-    if let Ok(name) = std::fs::read_to_string(collab_dir.join(format!("character-{n}"))) {
-        let name = name.trim().to_string();
-        if !name.is_empty() {
-            return name;
+    // 마커 둘째 줄은 주인 pid(sweep 용)라 이름은 첫 줄까지다.
+    if let Ok(body) = std::fs::read_to_string(collab_dir.join(format!("character-{n}"))) {
+        if let Some(name) = body.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+            return name.to_string();
         }
     }
     pane.to_string()
