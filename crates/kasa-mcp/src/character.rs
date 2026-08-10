@@ -288,6 +288,20 @@ pub fn character_marker(rslug: &str, surface_id: &str) -> PathBuf {
     collab_dir(rslug).join(format!("character-{}", surface_id.trim_start_matches('%')))
 }
 
+/// 마커 파일 이름인가 — `character-<N>`. `write_marker` 의 원자 교체가 잠깐 남기는
+/// `character-<N>.tmp` 는 뺀다(같은 접두사로 시작해 그냥 두면 유령 배정으로 잡힌다).
+fn is_marker_file(name: &str) -> bool {
+    name.starts_with("character-") && !name.ends_with(".tmp")
+}
+
+/// 마커 본문에서 캐릭터 이름만. 형식은 `<이름>\n<쓴 kasaterm pid>` 이고 pid 줄은
+/// sweep 전용이라 이름을 읽는 모든 경로가 첫 줄만 본다. pid 가 없는 옛 마커도 그대로
+/// 읽힌다(한 줄뿐이라 첫 줄 = 전부).
+fn marker_name(body: &str) -> Option<String> {
+    let s = body.lines().next()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// 한 collab 디렉토리의 character-* 마커 내용들.
 fn assigned_in(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -295,14 +309,12 @@ fn assigned_in(dir: &Path) -> Vec<String> {
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(n) = name.to_str() else { continue };
-            if !n.starts_with("character-") {
+            if !is_marker_file(n) {
                 continue;
             }
-            if let Ok(s) = std::fs::read_to_string(e.path()) {
-                let s = s.trim().to_string();
-                if !s.is_empty() {
-                    out.push(s);
-                }
+            if let Some(s) = std::fs::read_to_string(e.path()).ok().as_deref().and_then(marker_name)
+            {
+                out.push(s);
             }
         }
     }
@@ -332,10 +344,57 @@ pub fn assigned_global() -> Vec<String> {
 /// resume 복원처럼 ws.pane_character 엔 없지만 마커엔 있는 캐릭터를 중복 배정에서
 /// 피하려 쓴다(assign_character_env).
 pub fn read_marker(rslug: &str, surface_id: &str) -> Option<String> {
-    std::fs::read_to_string(character_marker(rslug, surface_id))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    std::fs::read_to_string(character_marker(rslug, surface_id)).ok().as_deref().and_then(marker_name)
+}
+
+/// 죽은 kasaterm 이 남긴 character-* 마커를 지운다. `live` 는 「이 pid 가 지금 도는
+/// kasaterm 인가」.
+///
+/// **왜 필요한가.** 마커는 pane 을 *정상적으로 닫을 때만* 지워진다
+/// (`cleanup_collab_markers`). 그래서 앱이 죽거나 그냥 재시작되면 옛 마커가 전부 남고,
+/// 배정은 그것들을 taken 으로 세므로 쓸 수 있는 학생이 재시작마다 줄어든다. 실측
+/// 2026-08-09 에 마커 17개 > 총원 12명이 되어 풀이 통째로 말랐고, 그때 폴백이
+/// members 전체로 되돌아가 **아루가 셋**이 됐다. 지금은 그 폴백이 이 방 live 만 피하는
+/// 단계를 거치지만, 그건 피해를 줄일 뿐 마르는 것 자체를 못 막는다.
+///
+/// 살았는지를 pane 번호로는 못 판단한다 — 번호는 방 간에도 창 간에도 재사용된다.
+/// 그래서 마커를 쓸 때 **쓴 프로세스의 pid** 를 함께 적고 여기서 그 pid 를 본다.
+/// pid 줄이 없는 마커는 이 코드가 나오기 전 것이므로 지운다 — 지금 도는 kasaterm 이
+/// 쓴 것이라면 반드시 pid 가 있다.
+///
+/// 지워도 살아있는 pane 은 안 다친다. 배정의 정본은 `ws.pane_character` 이고 마커는
+/// 그 사본이라, 잘못 지워봐야 **다른 인스턴스가 그 캐릭터를 겹쳐 쓸 수 있다**가 전부다.
+/// 반대로 안 지우면 풀이 마른다.
+pub fn sweep_stale_markers(live: impl Fn(u32) -> bool) -> usize {
+    sweep_stale_markers_in(&kasa_socket::collab_root(), live)
+}
+
+/// [`sweep_stale_markers`] 의 본체 — 루트를 받는 건 테스트 때문이다. 이 함수는 **모든
+/// 방**을 훑으므로 실제 `/tmp/kasaterm-collab` 에 대고 테스트하면 돌고 있는 pane 의
+/// 마커를 지운다.
+fn sweep_stale_markers_in(root: &Path, live: impl Fn(u32) -> bool) -> usize {
+    let mut n = 0;
+    let Ok(rooms) = std::fs::read_dir(root) else { return 0 };
+    for room in rooms.flatten() {
+        let Ok(rd) = std::fs::read_dir(room.path()) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(f) = name.to_str() else { continue };
+            if !is_marker_file(f) {
+                continue;
+            }
+            let owner = std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|s| s.lines().nth(1)?.trim().parse::<u32>().ok());
+            if owner.is_some_and(&live) {
+                continue;
+            }
+            if std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
@@ -357,13 +416,17 @@ pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
 }
 
 /// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.
+///
+/// 둘째 줄에 이 프로세스 pid 를 남긴다 — 마커가 죽은 뒤에도 남는 문제를
+/// [`sweep_stale_markers`] 가 풀 때 「누가 쓴 것인가」의 유일한 단서다. 이름을 읽는
+/// 경로는 전부 첫 줄만 보므로 board·배정에는 아무 변화가 없다.
 pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Result<()> {
     let path = character_marker(rslug, surface_id);
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, name)?;
+    std::fs::write(&tmp, format!("{name}\n{}", std::process::id()))?;
     std::fs::rename(&tmp, &path)
 }
 
@@ -520,5 +583,41 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(session_character_in(&path, "sid-x"), None);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 마커의 둘째 줄(주인 pid)이 배정 풀 고갈을 막는 유일한 단서다. 살아있는 주인 것은
+    /// 남기고, 죽은 주인 것과 주인을 모르는 옛 형식은 지운다.
+    #[test]
+    fn sweep_keeps_live_owner_only() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kasaterm-sweep-{}-{n}", std::process::id()));
+        let room = root.join("-tmp-room-a");
+        let other = root.join("-tmp-room-b");
+        std::fs::create_dir_all(&room).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(room.join("character-1"), "아루\n111").unwrap();
+        std::fs::write(room.join("character-2"), "미도리\n222").unwrap();
+        std::fs::write(other.join("character-1"), "유즈\n111").unwrap();
+        // 이 코드가 나오기 전 형식 — 주인을 알 수 없으니 지운다.
+        std::fs::write(other.join("character-9"), "프라나").unwrap();
+        // 원자 교체가 남긴 조각은 마커가 아니다.
+        std::fs::write(other.join("character-9.tmp"), "노아\n111").unwrap();
+
+        assert_eq!(sweep_stale_markers_in(&root, |pid| pid == 111), 2);
+        assert!(room.join("character-1").exists(), "살아있는 주인의 마커는 남는다");
+        assert!(!room.join("character-2").exists(), "죽은 주인의 마커는 지운다");
+        assert!(other.join("character-1").exists(), "다른 방도 주인 기준으로 남긴다");
+        assert!(!other.join("character-9").exists(), "pid 없는 옛 마커는 지운다");
+        assert!(other.join("character-9.tmp").exists(), ".tmp 는 건드리지 않는다");
+
+        // 이름을 읽는 쪽은 pid 줄을 못 본다 — 배정·board 가 "아루\n111" 로 굳으면 안 된다.
+        let mut names = assigned_in(&room);
+        names.sort();
+        assert_eq!(names, vec!["아루".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

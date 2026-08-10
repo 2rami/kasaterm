@@ -5356,10 +5356,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     install_pane_shims();
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
-    // 다른 인스턴스가 하나도 없으면 collab 캐릭터 마커도 전부 stale — 같이 청소.
+    // 그렇게 얻은 live pid 목록으로 죽은 인스턴스의 캐릭터 마커도 지운다 — 예전엔
+    // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
+    // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
+    // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
     #[cfg(unix)]
-    if !sweep_dead_kasaterm_sockets() {
-        cleanup_stale_collab_markers();
+    {
+        let live = live_kasaterm_pids();
+        kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
     }
     prune_finished_tasks();
     prune_empty_inboxes();
@@ -6754,49 +6758,37 @@ fn mcp_panel_port() -> String {
 /// 살아있는 인스턴스 소켓은 절대 건드리지 않으므로 멀티 인스턴스에서도 안전.
 /// 자기 PID 소켓은 아직 bind 전이라 connect 가 실패할 수 있으니 제외한다.
 #[cfg(unix)]
-/// 죽은 인스턴스의 소켓 잔재를 지우고, *살아있는 다른 인스턴스*가 있는지 돌려준다
-/// (connect 성공 = 살아있는 리스너). 반환값은 stale collab 마커 청소의 게이트.
-fn sweep_dead_kasaterm_sockets() -> bool {
+/// 죽은 인스턴스의 소켓 잔재를 지우고, **지금 살아있는 kasaterm pid 들**을 돌려준다
+/// (connect 성공 = 살아있는 리스너). 소켓 이름이 `kasaterm-<pid>.sock` 이라 여기서
+/// 인스턴스 명부가 공짜로 나온다 — collab 마커 청소가 그걸로 주인을 가린다.
+/// 자기 pid 는 아직 bind 전이라 connect 로는 안 잡히므로 직접 넣는다.
+fn live_kasaterm_pids() -> std::collections::HashSet<u32> {
+    let mut live = std::collections::HashSet::from([std::process::id()]);
     let own = format!("kasaterm-{}.sock", std::process::id());
-    let mut other_alive = false;
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return other_alive;
+        return live;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("kasaterm-") || !name.ends_with(".sock") || name == own {
+        let Some(pid) = name
+            .strip_prefix("kasaterm-")
+            .and_then(|s| s.strip_suffix(".sock"))
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if name == own {
             continue;
         }
         let path = entry.path();
         if std::os::unix::net::UnixStream::connect(&path).is_err() {
             let _ = std::fs::remove_file(&path);
         } else {
-            other_alive = true;
+            live.insert(pid);
         }
     }
-    other_alive
-}
-
-/// 부팅 시 collab 캐릭터 마커 전면 청소 — 마커는 live pane 추적용인데 강제종료·크래시가
-/// 남긴 stale 이 assigned_global 의 유령 taken 을 만들어 랜덤 배정 풀을 쪼그라뜨린다
-/// (거노: 새 학생이 안 나옴). 우리 pane 은 아직 스폰 전이고(restore 가 마커를 다시 쓴다)
-/// 다른 인스턴스가 살아 있으면 그쪽 live 마커를 구분할 수 없어 통째로 건너뛴다(보수적).
-#[cfg(unix)]
-fn cleanup_stale_collab_markers() {
-    let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") else {
-        return;
-    };
-    for room in rooms.flatten() {
-        let Ok(files) = std::fs::read_dir(room.path()) else {
-            continue;
-        };
-        for f in files.flatten() {
-            if f.file_name().to_string_lossy().starts_with("character-") {
-                let _ = std::fs::remove_file(f.path());
-            }
-        }
-    }
+    live
 }
 
 fn resolve_kasaterm_socket_path() -> String {
