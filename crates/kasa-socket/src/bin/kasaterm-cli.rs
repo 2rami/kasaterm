@@ -1290,10 +1290,14 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         .cloned();
     let cwd = std::env::current_dir().context("cwd")?;
     let list = match only.as_deref() {
+        Some("claude") if here => kasa_socket::sessions::recent_sessions_for(&cwd, limit),
         Some("claude") => kasa_socket::sessions::recent_claude_sessions_all(limit),
+        Some("codex") if here => kasa_socket::sessions::recent_codex_sessions_for(&cwd, limit),
         Some("codex") => kasa_socket::sessions::recent_codex_sessions(limit),
         Some("agy") => kasa_socket::sessions::recent_agy_sessions(limit),
-        _ if here => kasa_socket::sessions::recent_sessions_for(&cwd, limit),
+        // 하네스를 안 고른 `--here` 는 세 하네스를 가로지른다 — 예전엔 claude 만
+        // 봐서, 이 폴더에서 codex 로 일한 기록이 목록에 없는 것이 됐다.
+        _ if here => kasa_socket::sessions::recent_sessions_here(&cwd, limit),
         _ => kasa_socket::sessions::recent_all_sessions(limit),
     };
     if list.is_empty() {

@@ -559,80 +559,341 @@ pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
         .collect()
 }
 
-/// 최근 codex 세션. rollout jsonl 은 첫 줄이 `{id, timestamp, …}` 이고 그 뒤로
-/// `{type:"message", role, content:[{text}]}` 가 이어진다. 라벨은 첫 user 메시지.
-pub fn recent_codex_sessions(limit: usize) -> Vec<RecentSession> {
-    use std::io::BufRead;
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let dir = PathBuf::from(home).join(".codex/sessions");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+/// 폴더를 재귀하며 jsonl 을 모은다. 심링크는 따라가지 않는다(`file_type` 은
+/// 링크를 디렉터리로 보지 않는다) — 그래서 순환이 원천봉쇄되고, `depth` 는 그
+/// 위에 얹은 값싼 보험이지 구조를 뜻하는 수가 아니다.
+fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(u64, PathBuf)>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let p = e.path();
+        if ft.is_dir() {
+            collect_jsonl(&p, depth - 1, out);
+        } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            if let Ok(meta) = e.metadata() {
+                out.push((mtime_secs(&meta), p));
+            }
+        }
+    }
+}
 
-    let mut files: Vec<(u64, PathBuf)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+/// rollout 첫 줄에서 `(id, cwd, exec 인가)`.
+///
+/// 새 포맷은 모든 필드가 `payload` 아래에 있고 옛 포맷은 최상위에 평면으로 있다.
+/// `payload` 가 있으면 그쪽을, 없으면 자기 자신을 보는 것으로 둘을 한 벌로 읽는다.
+fn codex_head(v: &serde_json::Value) -> (String, String, bool) {
+    let p = v.get("payload").unwrap_or(v);
+    let s = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let id = {
+        let sid = s("session_id");
+        if sid.is_empty() { s("id") } else { sid }
+    };
+    // `codex_exec` 는 스크립트 일회성 실행이다. `codex-tui`(대화형)와 갈라야 한다.
+    let exec = p.get("originator").and_then(|x| x.as_str()).is_some_and(|o| o.contains("exec"))
+        || p.get("source").and_then(|x| x.as_str()) == Some("exec");
+    (id, s("cwd"), exec)
+}
+
+/// user 롤로 들어왔지만 사람이 한 말이 아닌 것.
+///
+/// codex 는 프로젝트 지시(AGENTS.md)·플러그인 목록·환경 정보를 **user 메시지로**
+/// 밀어 넣는다. 첫 user 발화를 그냥 쓰면 **모든 행의 제목이 같아져** 목록에서
+/// 세션을 고를 수가 없다 — 실측에서 대화형 세션 전부가
+/// `# AGENTS.md instructions` 로 시작했다.
+fn codex_injected(text: &str) -> bool {
+    const MARKS: [&str; 6] = [
+        "# AGENTS.md instructions",
+        "<user_instructions>",
+        "<environment_context>",
+        "<recommended_plugins>",
+        "<skills_instructions>",
+        "<INSTRUCTIONS>",
+    ];
+    let t = text.trim_start();
+    MARKS.iter().any(|m| t.starts_with(m))
+}
+
+/// 한 rollout 파일 → 목록 한 줄. 읽을 게 없으면 `None`.
+fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(path).ok()?;
+    let mut id = String::new();
+    let mut cwd = String::new();
+    let mut label = String::new();
+    // 앞 200줄이면 헤더와 첫 사람 발화를 지나친다. 주입 맥락이 서너 줄 앞에
+    // 끼므로 옛 코드보다 더 걸어야 하지만, 그래도 파일 앞머리다.
+    for line in std::io::BufReader::new(f).lines().take(200).map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if id.is_empty() {
+            let (i, c, exec) = codex_head(&v);
+            // 이어갈 대화가 아니다. 임시폴더에서 돌고 끝나는데 수가 압도적이라
+            // (2026-08 실측 최근 120개 중 113개) 진짜 대화를 목록 밖으로 민다.
+            if exec {
                 return None;
             }
-            Some((mtime_secs(&e.metadata().ok()?), p))
-        })
-        .collect();
+            id = i;
+            cwd = c;
+        }
+        let p = v.get("payload").unwrap_or(&v);
+        if label.is_empty()
+            && p.get("type").and_then(|t| t.as_str()) == Some("message")
+            && p.get("role").and_then(|r| r.as_str()) == Some("user")
+        {
+            let text = p
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            if !codex_injected(&text) {
+                // chars() 로 자른다 — String::truncate 는 바이트 오프셋이라
+                // 한글 중간을 끊으면 그 자리에서 panic 한다(실측).
+                label = text.split_whitespace().collect::<Vec<_>>().take_chars(120);
+            }
+        }
+        if !id.is_empty() && !label.is_empty() {
+            break;
+        }
+    }
+    // 파일명(rollout-<날짜>-<uuid>)에서라도 id 를 건진다.
+    if id.is_empty() {
+        id = path.file_stem()?.to_str()?.rsplit_once('-').map(|(_, u)| u.to_string())?;
+    }
+    // 사람이 한 말이 하나도 없는 세션은 뺀다 — codex 는 띄우기만 하고 아무 말도
+    // 안 한 세션도 rollout 파일을 남기는데, 이어갈 게 없는 항목이 목록 상단을
+    // uuid 로 채워 진짜 대화를 밀어낸다.
+    if label.is_empty() {
+        return None;
+    }
+    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd })
+}
+
+/// 최근 codex 세션. 조심할 것이 셋이다.
+///
+/// **① 파일이 날짜 폴더에 있다.** codex 는 이제 `~/.codex/sessions/YYYY/MM/DD/` 에
+/// 쌓고 옛 파일만 최상위에 평면으로 남는다. 최상위만 훑던 옛 코드는 2026-08 실측
+/// 에서 **681개 중 8개**만 봤고 그 8개가 전부 1년 전 것이라, 화면에는 "codex 를
+/// 안 쓴 사람"처럼 보였다.
+///
+/// **② rollout 포맷이 바뀌었다.** 예전엔 `{id, type:"message", role, content}` 가
+/// 최상위에 평면으로 있었는데 지금은 전부 `payload` 아래다. 옛 파일이 그대로
+/// 남아 있으니 **두 형태를 다 읽는다** — 새 포맷만 보면 옛 세션이 사라진다.
+///
+/// **③ `cwd` 는 있다.** `payload.cwd` 에 적힌다. 없다고 적혀 있던 옛 주석 탓에
+/// 목록의 프로젝트 칸이 비어 uuid 조각이 대신 떴다.
+///
+/// exec 인지는 파일을 열어야 알 수 있고(첫 줄에만 적힌다) 그 비율이 압도적이라,
+/// **`limit` 에 비례하는 스캔 상한은 쓰지 않는다** — 실측에서 `limit=8` 이 7개만
+/// 돌려줬다. 최신 320개가 거의 다 exec 이라 상한에 먼저 걸렸고, 그 아래 있던
+/// 진짜 대화는 조용히 잘렸다(같은 디스크에서 `limit=20` 은 20개를 다 채웠다).
+/// 전수 스캔은 681개에 0.14초(debug)라 그 값을 살 이유가 없다. 남긴 상한은
+/// 폭주 방어일 뿐이고, 걸리면 조용히 자르는 게 아니라 애초에 도달하지 않는 수다.
+pub fn recent_codex_sessions(limit: usize) -> Vec<RecentSession> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    recent_codex_sessions_in(&PathBuf::from(home).join(".codex/sessions"), limit)
+}
+
+/// 한 프로젝트 안의 codex 세션만. rollout 이 `payload.cwd` 를 남기므로 가능하다.
+pub fn recent_codex_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let root = PathBuf::from(home).join(".codex/sessions");
+    codex_sessions(&root, limit, Some(&cwd.to_string_lossy()))
+}
+
+/// 루트를 받는 본체. 테스트가 가짜 rollout 을 심어 돌릴 수 있게 갈라 둔다.
+pub fn recent_codex_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
+    codex_sessions(root, limit, None)
+}
+
+fn codex_sessions(root: &Path, limit: usize, only_cwd: Option<&str>) -> Vec<RecentSession> {
+    /// 폭주 방어. 사람의 codex 기록이 이만큼 쌓이는 일은 없다 — 실측 681개.
+    const MAX_SCAN: usize = 20_000;
+
+    let mut files: Vec<(u64, PathBuf)> = Vec::new();
+    collect_jsonl(root, 8, &mut files);
     files.sort_by(|a, b| b.0.cmp(&a.0));
 
-    files
-        .into_iter()
-        // 빈 세션을 뒤에서 거르므로 넉넉히 걷는다 — limit 만큼만 열면 그중
-        // 빈 것을 뺀 나머지가 limit 에 못 미친다.
-        .take(limit.saturating_mul(4))
-        .filter_map(|(mtime, path)| {
-            let f = std::fs::File::open(&path).ok()?;
-            let mut id = String::new();
-            let mut label = String::new();
-            // 앞 200줄이면 헤더와 첫 사용자 발화를 지나친다. 도구 호출이 길게
-            // 이어지는 세션도 user 메시지는 대개 맨 앞에 있다.
-            for line in std::io::BufReader::new(f).lines().take(200).map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-                if id.is_empty() {
-                    if let Some(x) = v.get("id").and_then(|x| x.as_str()) {
-                        id = x.to_string();
-                    }
-                }
-                if label.is_empty()
-                    && v.get("type").and_then(|t| t.as_str()) == Some("message")
-                    && v.get("role").and_then(|r| r.as_str()) == Some("user")
-                {
-                    let text = v
-                        .get("content")
-                        .and_then(|c| c.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .unwrap_or_default();
-                    // chars() 로 자른다 — String::truncate 는 바이트 오프셋이라
-                    // 한글 중간을 끊으면 그 자리에서 panic 한다(실측).
-                    label = text.split_whitespace().collect::<Vec<_>>().take_chars(120);
-                }
-                if !id.is_empty() && !label.is_empty() {
-                    break;
-                }
-            }
-            // 파일명(rollout-<날짜>-<uuid>)에서라도 id 를 건진다.
-            if id.is_empty() {
-                id = path.file_stem()?.to_str()?.rsplit_once('-').map(|(_, u)| u.to_string())?;
-            }
-            // 사용자 발화가 하나도 없는 세션은 뺀다 — codex 는 띄우기만 하고 아무
-            // 말도 안 한 세션도 rollout 파일을 남기는데(헤더 한 줄뿐), 이어갈 게
-            // 없는 항목이 목록 상단을 uuid 로 채워 진짜 대화를 밀어낸다.
-            if label.is_empty() {
-                return None;
-            }
-            Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd: String::new() })
-        })
-        .take(limit)
-        .collect()
+    let mut out = Vec::with_capacity(limit);
+    for (mtime, path) in files.into_iter().take(MAX_SCAN) {
+        let Some(s) = codex_session_of(&path, mtime) else { continue };
+        if only_cwd.is_some_and(|c| s.cwd != c) {
+            continue;
+        }
+        out.push(s);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+/// 이 프로젝트의 최근 세션 — 세 하네스를 가로질러. 오르카의 「프로젝트」 탭에
+/// 해당한다.
+///
+/// `recent_sessions_for` 만 쓰면 claude 만 보인다. 같은 폴더에서 codex 로 일한
+/// 기록이 있어도 프로젝트 목록에는 없는 것이 되는데, 그게 "여기서 뭘 하다
+/// 말았지"를 물을 때 제일 아쉬운 자리다.
+pub fn recent_sessions_here(cwd: &Path, limit: usize) -> Vec<RecentSession> {
+    let want = cwd.to_string_lossy().into_owned();
+    let mut all = recent_sessions_for(cwd, limit);
+    all.extend(recent_codex_sessions_for(cwd, limit));
+    // agy 는 요약 테이블을 한 번 읽는 게 전부라, 넉넉히 걷고 걸러도 싸다.
+    all.extend(recent_agy_sessions(limit.saturating_mul(4)).into_iter().filter(|s| s.cwd == want));
+    all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    all.truncate(limit);
+    all
+}
+
+#[cfg(test)]
+mod codex_listing_tests {
+    use super::{codex_injected, recent_codex_sessions_in};
+    use std::path::PathBuf;
+
+    /// 테스트마다 자기 폴더를 쓴다 — 같은 루트를 나눠 쓰면 한 테스트가 심은
+    /// 파일이 다른 테스트의 목록에 섞여, 실패가 남의 탓처럼 보인다.
+    fn root(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kasaterm-codex-test-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(root: &std::path::Path, rel: &str, lines: &[&str]) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+    }
+
+    /// 새 포맷: 모든 것이 `payload` 아래. 그리고 날짜 폴더 세 단 아래에 있다.
+    fn new_format(cwd: &str, origin: &str, msgs: &[&str]) -> Vec<String> {
+        let mut v = vec![format!(
+            r#"{{"type":"session_meta","payload":{{"session_id":"sid-新","cwd":"{cwd}","originator":"{origin}"}}}}"#
+        )];
+        for m in msgs {
+            v.push(format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{m}"}}]}}}}"#
+            ));
+        }
+        v
+    }
+
+    #[test]
+    fn finds_sessions_under_date_folders() {
+        // 최상위만 훑던 옛 코드가 실측에서 681개 중 8개만 봤다. 이 한 줄이 그 회귀다.
+        let r = root("nested");
+        let lines = new_format("/proj", "codex-tui", &["안녕 코덱스"]);
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write(&r, "2026/08/09/rollout-2026-08-09T22-06-20-aaa.jsonl", &refs);
+
+        let got = recent_codex_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1, "날짜 폴더 아래를 못 봤다");
+        assert_eq!(got[0].label, "안녕 코덱스");
+        assert_eq!(got[0].cwd, "/proj", "payload.cwd 를 안 읽었다");
+        assert_eq!(got[0].harness, "codex");
+    }
+
+    #[test]
+    fn old_flat_format_still_reads() {
+        // 옛 파일이 디스크에 그대로 남아 있다 — 새 포맷만 보면 그게 통째로 사라진다.
+        let r = root("oldflat");
+        write(
+            &r,
+            "rollout-2025-07-15T19-42-06-7dc830cd.jsonl",
+            &[
+                r#"{"id":"old-sid","timestamp":"2025-07-15T19:42:06Z"}"#,
+                r#"{"type":"message","role":"user","content":[{"text":"cd desktop"}]}"#,
+            ],
+        );
+        let got = recent_codex_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "old-sid");
+        assert_eq!(got[0].label, "cd desktop");
+    }
+
+    #[test]
+    fn exec_runs_are_left_out() {
+        // 스크립트 일회성 실행. 임시폴더에서 돌고 이어갈 대화가 없는데 수가
+        // 압도적이라(실측 120개 중 113개) 진짜 대화를 목록 밖으로 민다.
+        let r = root("exec");
+        let ex = new_format("/tmp/ppcodex-1", "codex_exec", &["그림 그려"]);
+        let tui = new_format("/proj", "codex-tui", &["진짜 대화"]);
+        write(&r, "2026/08/09/a.jsonl", &ex.iter().map(String::as_str).collect::<Vec<_>>());
+        write(&r, "2026/08/09/b.jsonl", &tui.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let got = recent_codex_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1, "exec 실행이 목록에 남았다");
+        assert_eq!(got[0].label, "진짜 대화");
+    }
+
+    #[test]
+    fn injected_context_is_not_a_title() {
+        // codex 는 AGENTS.md 를 user 롤로 밀어 넣는다. 그대로 쓰면 모든 행의
+        // 제목이 같아져 목록에서 세션을 고를 수가 없다.
+        let r = root("injected");
+        let lines = new_format(
+            "/proj",
+            "codex-tui",
+            &["# AGENTS.md instructions 개발을 처음배우는", "실제로 물어본 것"],
+        );
+        write(&r, "2026/08/09/c.jsonl", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let got = recent_codex_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].label, "실제로 물어본 것");
+    }
+
+    #[test]
+    fn injected_markers_cover_the_shapes_seen_on_disk() {
+        for m in [
+            "# AGENTS.md instructions\n...",
+            "<user_instructions>\n...",
+            "<environment_context>",
+            "<recommended_plugins>\nHere is a list",
+            "<skills_instructions>",
+            "  <INSTRUCTIONS>",
+        ] {
+            assert!(codex_injected(m), "{m:?} 를 사람 발화로 봤다");
+        }
+        // 사람이 꺾쇠로 시작하는 말을 할 수도 있다 — 아는 것만 걸러야 한다.
+        assert!(!codex_injected("<div> 태그가 왜 안 먹지"));
+        assert!(!codex_injected("안녕"));
+    }
+
+    /// exec 실행이 잔뜩 쌓인 사이에 파묻힌 대화도 작은 limit 으로 찾아야 한다.
+    /// `limit` 에 비례하는 스캔 상한을 두면 여기서 0개가 나온다 — 실제로 그렇게
+    /// 짜여 있었고, 디스크에 71개가 있는데 `limit=8` 이 7개만 돌려줬다.
+    #[test]
+    fn a_conversation_buried_under_exec_runs_is_still_found() {
+        let r = root("buried");
+        let ex = new_format("/tmp/x", "codex_exec", &["스크립트"]);
+        let refs: Vec<&str> = ex.iter().map(String::as_str).collect();
+        for i in 0..300 {
+            write(&r, &format!("2026/08/09/e{i:03}.jsonl"), &refs);
+        }
+        let tui = new_format("/proj", "codex-tui", &["묻힌 대화"]);
+        write(&r, "2026/08/08/real.jsonl", &tui.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let got = recent_codex_sessions_in(&r, 1);
+        assert_eq!(got.len(), 1, "exec 더미에 막혀 대화를 못 찾았다");
+        assert_eq!(got[0].label, "묻힌 대화");
+    }
+
+    #[test]
+    fn sessions_without_a_human_turn_are_dropped() {
+        // 띄우기만 하고 아무 말도 안 한 세션. 이어갈 게 없는데 목록 상단을
+        // 차지하면 진짜 대화가 밀린다.
+        let r = root("empty");
+        let lines = new_format("/proj", "codex-tui", &[]);
+        write(&r, "2026/08/09/d.jsonl", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(recent_codex_sessions_in(&r, 10).is_empty());
+    }
 }
 
 /// 최근 agy 대화. 요약 테이블 한 번만 읽는다 — 본문 DB 들은 protobuf 라 안 연다.
