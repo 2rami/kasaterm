@@ -278,6 +278,10 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         0
     };
     PaneActivity {
+        // 도달성은 transcript 로는 알 수 없다 — 명부·프로세스를 봐야 하므로
+        // board 조립부(socket.rs)가 채운다. 여기선 비워 둔다.
+        reach: String::new(),
+        peer_name: None,
         surface_id: surface_id.to_string(),
         title: String::new(),
         last_prompt,
@@ -570,6 +574,10 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     };
 
     PaneActivity {
+        // 도달성은 transcript 로는 알 수 없다 — 명부·프로세스를 봐야 하므로
+        // board 조립부(socket.rs)가 채운다. 여기선 비워 둔다.
+        reach: String::new(),
+        peer_name: None,
         surface_id: surface_id.to_string(),
         title: if custom_title.is_empty() { title } else { custom_title },
         last_prompt,
