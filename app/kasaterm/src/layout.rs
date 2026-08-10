@@ -474,10 +474,10 @@ impl App {
     /// split 이 얹을 새 셸을 띄우고 `self.pty` 에 등록한다 — **레이아웃은 안 건드린다**.
     /// 트리에 꽂는 일과 갈라 둔 건 방 별도창 때문이다: 그 창의 pane 은 비활성 window
     /// 트리에 살아 `pty_layout` 에 없고, 리사이즈도 메인 그리드가 아니라 그 창이 한다.
-    /// 실패 시 pane id 카운터를 되돌리는 책임은 호출부에 있다(트리에 못 꽂았을 때).
+    /// 트리에 못 꽂았으면 호출부가 `self.pty` 에서 지운다 — 번호는 거기 등록된 것으로만
+    /// 판정하므로(`alloc_pane_id`) 그것으로 자동 회수된다.
     pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_id = self.alloc_pane_id();
 
         // Spawn the new session at a placeholder size — the resize
         // pass right after `split_leaf` puts every leaf at its real
@@ -596,7 +596,6 @@ impl App {
         if !layout.is_some_and(|l| l.split_leaf(&active, dir, new_id.clone())) {
             // 샌 세션을 되감고 사유를 올린다.
             self.pty.remove(&new_id);
-            self.next_pane_id -= 1;
             anyhow::bail!(
                 "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
             );
@@ -633,8 +632,7 @@ impl App {
         // sane initial size keeps the welcome banner from wrapping weird.
         let (cols, rows) = self.pane_cells(outer).unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(outer));
-        let new_pid = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_pid = self.alloc_pane_id();
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
         // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
         // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(거노 2026-08-07:
@@ -809,8 +807,7 @@ impl App {
         }
         let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(source));
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_id = self.alloc_pane_id();
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
@@ -842,7 +839,6 @@ impl App {
         if !inserted {
             // Source vanished mid-drag — bail and clean up the spawned shell.
             self.pty.remove(&new_id);
-            self.next_pane_id -= 1;
             return Ok(());
         }
         let (win_cols, win_rows) = self.window_cells();
@@ -888,8 +884,7 @@ impl App {
         //    pty ids decoupled from stage-3 onward, so this avoids any
         //    clash with the moved tab's pid (which may have been the old
         //    source's outer id).
-        let new_outer = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_outer = self.alloc_pane_id();
         let (dir, before) = match zone {
             DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
             DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),

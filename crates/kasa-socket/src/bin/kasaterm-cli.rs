@@ -743,7 +743,9 @@ fn print_help() {
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
     eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
-    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
+    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
+  kasaterm-cli capture [surface_id] [path] [--max-width N]
+                                            # screenshot ONE pane to PNG (peek's picture twin)");
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
@@ -1174,6 +1176,38 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["lines"] = json!(lines);
             }
             ("surface.peek", params)
+        }
+        "capture" => {
+            // peek 의 그림 짝. 텍스트로는 안 보이는 것(색·정렬·겹침)을 판정하려면
+            // 화면 자체가 필요하다 — 결과 경로를 Read 로 열면 된다.
+            //   capture [surface_id] [path] [--max-width N]
+            let mut positional: Vec<String> = Vec::new();
+            let mut max_width: Option<u64> = None;
+            let mut it = args.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--max-width" | "-w" => {
+                        max_width = it.next().and_then(|s| s.parse().ok());
+                    }
+                    s if s.starts_with("--max-width=") => {
+                        max_width = s.split_once('=').and_then(|(_, v)| v.parse().ok());
+                    }
+                    s => positional.push(s.to_string()),
+                }
+            }
+            let surface = positional
+                .first()
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
+                .ok_or_else(|| anyhow!("capture needs a surface_id (or $KASATERM_PANE_ID)"))?;
+            let mut params = json!({ "surface_id": surface });
+            if let Some(p) = positional.get(1) {
+                params["path"] = json!(p);
+            }
+            if let Some(w) = max_width {
+                params["max_width"] = json!(w);
+            }
+            ("surface.capture", params)
         }
         "transcript" => {
             // Structured dialogue of a sibling pane's claude: the last N turns

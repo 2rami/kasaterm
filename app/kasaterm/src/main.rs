@@ -3472,6 +3472,19 @@ enum UserEvent {
     /// 들어오자마자 바뀌게). PTY 1행 지글(줄였다 원복)로 SIGWINCH 재레이아웃을 유도.
     /// 발동 게이트·rate-limit 은 backend(rebind_agents_panes)가 진다.
     NudgePaneResize(String),
+    /// `surface.capture` 위임 — pane 한 칸만 잘라 PNG 로 굽는다.
+    ///
+    /// 소켓 스레드가 직접 못 하는 이유는 둘이다: pane 의 픽셀 사각형은 레이아웃 트리와
+    /// 셀 치수를 알아야 나오고(GUI 만 쥐고 있다), 프레임버퍼 리드백은 wgpu Surface 를
+    /// 만져야 한다. 그래서 좌표 계산과 무장을 GUI 스레드에서 하고, **저장이 끝난 뒤**
+    /// 회신한다 — 무장하자마자 회신하면 받는 쪽이 아직 없는 파일을 열게 된다.
+    /// `(pane, 저장경로 None=임시, 가로상한 0=원본, 회신)`.
+    SocketCapture(
+        String,
+        Option<String>,
+        u32,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
@@ -3996,8 +4009,6 @@ struct App {
     /// the tmux daemon owns the layout there and ships it via
     /// `%layout-change` instead.
     pty_layout: Option<kasa_pty::PtyLayout>,
-    /// Monotonic counter for the next "%N" pane id when splitting.
-    next_pane_id: u32,
     /// Queued `claude --resume …\n` injections for restored panes, one per
     /// claude pane, fired once each pane's shell prompt is up. Holds the
     /// PtySession Arc directly so it works for panes in any session (active or
@@ -4014,6 +4025,13 @@ struct App {
     /// `about_to_wait` arms `gpu.capture_next` once a deadline passes so the
     /// next render reads the frame back to a PNG — no screen-record permission.
     pending_capture: Vec<(std::time::Instant, String)>,
+    /// `surface.capture` 회신 대기 `(png 경로, 회신 채널)`.
+    ///
+    /// GPU 리드백은 렌더 안에서 동기로 끝나므로(`device.poll(Wait)`), 무장한 프레임을
+    /// 그린 직후 파일이 이미 있다. 그래서 렌더 뒤에 이 큐를 훑어 파일을 확인하고
+    /// 회신한다 — 무장 시점에 미리 답하면 받는 쪽이 없는 파일을 Read 하게 된다.
+    pending_capture_reply:
+        Vec<(String, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>)>,
     /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
     /// "diff" expands the first changed file's inline diff, "modal" opens the
     /// commit modal, so those states can be self-captured without clicking.
@@ -4810,11 +4828,11 @@ impl App {
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,
-            next_pane_id: 1, // %0 is the initial pane created in start_pty
             pending_restores: Vec::new(),
             pending_unjiggle: Vec::new(),
             autoquit_at: None,
             pending_capture: Vec::new(),
+            pending_capture_reply: Vec::new(),
             pending_autogit: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,

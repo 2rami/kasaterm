@@ -48,6 +48,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
+        "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
         // 한 왕복에 두는 것은 인덱스가 아니라 pane id 로 지목하기 때문이다(목록이 그
         // 사이 바뀌어도 엉뚱한 학생을 죽이지 않는다).
@@ -221,6 +222,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.scroll",
                 "surface.peek",
                 "surface.open_preview",
+                "surface.capture",
                 "surface.dock",
                 "surface.undock",
                 "surface.move",
@@ -365,6 +367,25 @@ fn surface_focus(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     match backend.focus_surface(surface_id) {
         Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// pane 한 칸을 PNG 로 찍는다. `path` 를 안 주면 백엔드가 임시 경로를 만든다.
+/// `max_width` 미지정 시 1200 — 큰 이미지는 받는 쪽 컨텍스트를 크게 태우므로
+/// 기본값부터 작게 잡는다.
+fn surface_capture(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.capture requires `surface_id` (string)"),
+    };
+    let path = params.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let max_width = params
+        .get("max_width")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1200) as u32;
+    match backend.capture_surface(surface_id, path, max_width) {
+        Ok(v) => Response::success(id, v),
         Err(e) => backend_err(id, e),
     }
 }

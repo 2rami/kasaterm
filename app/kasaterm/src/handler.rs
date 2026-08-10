@@ -510,6 +510,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketCapture(pane, path, max_w, reply) => {
+                self.arm_pane_capture(pane, path.clone(), *max_w, reply.clone());
+                // 무장만으로는 부족하다 — 여기서 한 프레임을 직접 그려야 리드백이
+                // 돌고 회신이 나간다. request_redraw 만 걸면 창이 가려져 있을 때
+                // OS 가 그 그리기를 미뤄, 부른 쪽이 타임아웃까지 매달린다.
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketPasteImage(surface, bytes) => {
                 // 아로나 프롬프트 입력창 이미지 드롭(webview) → 그 pane claude 에 첨부.
                 // 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16) — claude 가
