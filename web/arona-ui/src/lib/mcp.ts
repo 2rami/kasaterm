@@ -7,17 +7,20 @@ import { parseJsonlSync } from './jsonl';
 // munder 는 electron IPC(window.cth.*)로 hive 와 통신했지만, 우리는 kasaterm 의
 // kasaspace MCP HTTP 를 fetch 로 폴링한다. dist 는 MCP 가 /arona-ui/ 로 정적
 // 서빙하므로 페이지·API 가 **same-origin** → BASE='' (relative). 8765 가 점유돼
-// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차). vite dev 로 띄울 때만 절대주소
-// (개발 서버는 5173, API 는 별도 포트라 same-origin 이 아님). 기본 8765 지만
-// `VITE_MCP_PORT` 로 덮어쓸 수 있다 — 8765 점유돼 폴백 포트로 뜬 인스턴스에 붙어
-// 검증할 때 쓴다.
-const MCP_PORT = import.meta.env.VITE_MCP_PORT || '8765';
+// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차).
+//
+// dev(vite)도 상대경로를 쓴다 — vite.config 의 proxy 가 API 경로를 실서버로 넘긴다.
+// 전에는 여기서 절대주소(`http://127.0.0.1:8765`)를 썼는데, 그 포트엔 CORS 헤더가
+// 없어 **모든 요청이 막히고 화면이 통째로 빈다**. 빈 화면은 원인이 백 가지라 이걸로
+// 반나절이 날아갔다(2026-08-10). `VITE_MCP_PORT` 를 **명시했을 때만** 옛 절대주소로
+// 간다 — 다른 포트로 뜬 인스턴스에 붙어 볼 때 쓰던 길이라 남겨 둔다(그 경우엔 CORS 가
+// 되는 서버여야 한다). 헤드리스에 붙일 땐 그쪽 말고 `VITE_MCP_TARGET` 을 써라.
+const DEV_PORT = import.meta.env.VITE_MCP_PORT;
 // 웹뷰 백엔드 후보. 프로덕션은 same-origin(페이지를 서빙한 kasaterm 8765) 우선, 그게
 // 죽으면 standalone serve-web(8766)으로 폴백 — 터미널이 꺼져도 daemon 세션을 계속 본다.
-// dev(vite 5173)는 kasaterm 8765 절대주소만(cross-origin, 폴백 없음).
 const FALLBACK_PORT = import.meta.env.VITE_MCP_FALLBACK_PORT || '8766';
 const CANDIDATES: string[] = import.meta.env.DEV
-  ? [`http://127.0.0.1:${MCP_PORT}`]
+  ? (DEV_PORT ? [`http://127.0.0.1:${DEV_PORT}`] : [''])
   : ['', `http://127.0.0.1:${FALLBACK_PORT}`];
 // 호출부(약 50곳)가 전부 `${BASE}` 를 호출 시점 lazy read 하므로, let 재대입 하나로 전
 // 사이트에 폴백이 전파된다(호출부 수정 0).
