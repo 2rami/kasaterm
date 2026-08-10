@@ -70,6 +70,12 @@ pub struct RecentSession {
     pub mtime: u64,
     /// Absolute cwd the session ran in.
     pub cwd: String,
+    /// 마지막으로 오간 말 한 줄(`나: …` / `에이전트: …`). 제목은 세션이 무엇으로
+    /// **시작했나**를 말할 뿐이라, 목록을 훑을 때 "어디서 멈췄지"가 안 보인다 —
+    /// 그 칸을 채우는 값이다. 못 뽑으면 빈 문자열이고 그때는 아예 안 실어 보낸다
+    /// (웹뷰가 `preview?: string` 으로 받아 없으면 그 줄을 안 그린다).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preview: String,
 }
 
 /// Multi-session (tmux-style tab) state for the session panel. `count`

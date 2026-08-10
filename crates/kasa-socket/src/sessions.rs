@@ -70,6 +70,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 .unwrap_or_else(|| id.chars().take(8).collect());
             Some(RecentSession {
                 harness: "claude".into(),
+                preview: last_exchange(&path, "claude"),
                 id,
                 label,
                 mtime: mtime_secs,
@@ -518,6 +519,88 @@ fn jsonl_cwd(path: &Path, max_lines: usize) -> Option<String> {
     None
 }
 
+/// 파일 **끝** 일부만 읽어 줄로 쪼갠다.
+///
+/// transcript 는 수십 MB 까지 자라고 목록은 한 번에 수십 개를 그린다 — 통째로
+/// 읽으면 목록 한 번에 수백 MB 를 훑는다. 그래서 끝에서만 잘라 온다.
+///
+/// 잘린 첫 줄을 세어 버리지 않는다. JSON 으로 안 풀리면 호출부가 어차피
+/// 건너뛰므로, "몇 바이트가 잘렸나"를 계산하는 자리를 아예 없애는 편이 안전하다
+/// — 그 계산은 멀티바이트 문자 경계에서 조용히 틀리는 종류의 것이다.
+fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let Ok(meta) = f.metadata() else { return Vec::new() };
+    if f.seek(SeekFrom::Start(meta.len().saturating_sub(max_bytes))).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&buf).lines().map(str::to_string).collect()
+}
+
+/// 목록 한 줄에 붙일 "마지막으로 오간 말". 누가 한 말인지까지 담는다 — 내가
+/// 뭔가 시켜 놓고 끊긴 세션과 답을 받고 끝난 세션은 이어갈 때 하는 일이 다르다.
+///
+/// 끝에서 128KB 만 본다. 그 안이 통째로 큰 도구 결과 한 줄이면 못 뽑는데,
+/// 그때는 빈 값이 나가고 목록은 그 줄을 안 그린다 — 없는 걸 있는 척하는 것보다 낫다.
+fn last_exchange(path: &Path, harness: &str) -> String {
+    const TAIL: u64 = 128 * 1024;
+    const MAX_CHARS: usize = 200;
+
+    let say = |who: &str, text: &str| {
+        let t = text.split_whitespace().collect::<Vec<_>>().take_chars(MAX_CHARS);
+        if t.is_empty() { String::new() } else { format!("{who}: {t}") }
+    };
+
+    for line in tail_lines(path, TAIL).iter().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let got = if harness == "codex" {
+            let p = v.get("payload").unwrap_or(&v);
+            if p.get("type").and_then(|t| t.as_str()) != Some("message") {
+                continue;
+            }
+            let text = p
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            // 주입된 맥락은 사람이 한 말이 아니다 — 라벨에서 걸러낸 것과 같은 이유다.
+            if codex_injected(&text) {
+                continue;
+            }
+            match p.get("role").and_then(|r| r.as_str()) {
+                Some("user") => say("나", &text),
+                Some("assistant") => say("에이전트", &text),
+                _ => continue,
+            }
+        } else {
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("assistant") => assistant_message_text(&v).map(|t| say("에이전트", &t)),
+                Some("user") => {
+                    if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    user_message_text(&v).filter(|t| !is_meta_user_text(t.trim())).map(|t| say("나", &t))
+                }
+                _ => continue,
+            }
+            .unwrap_or_default()
+        };
+        if !got.is_empty() {
+            return got;
+        }
+    }
+    String::new()
+}
+
 /// 모든 프로젝트를 가로지르는 최근 claude 세션. `recent_sessions_for` 는 한 cwd
 /// 안만 보므로 "이 프로젝트" 목록에 맞고, 통합 피커에는 이쪽이 필요하다.
 pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
@@ -553,9 +636,18 @@ pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
             // None 으로 돌려주는데 폴백을 걸면 목록 상단이 uuid 로 오염된다.
             let label = parse_session_label(&path, true)?;
             let cwd = jsonl_cwd(&path, 40).unwrap_or_default();
-            Some(RecentSession { harness: "claude".into(), id, label, mtime, cwd })
+            let s =
+                RecentSession { harness: "claude".into(), id, label, mtime, cwd, preview: String::new() };
+            Some((s, path))
         })
         .take(limit)
+        // preview 는 **살아남은 행에만** 붙인다. 위에서 limit 의 네 배를 걷으므로
+        // 여기서 붙이지 않고 filter_map 안에서 뽑으면 버려질 행까지 파일 끝을
+        // 읽는다 — 네 배를 읽고 네 개 중 셋을 버리는 꼴이다.
+        .map(|(mut s, path)| {
+            s.preview = last_exchange(&path, "claude");
+            s
+        })
         .collect()
 }
 
@@ -626,6 +718,13 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
     // 앞 200줄이면 헤더와 첫 사람 발화를 지나친다. 주입 맥락이 서너 줄 앞에
     // 끼므로 옛 코드보다 더 걸어야 하지만, 그래도 파일 앞머리다.
     for line in std::io::BufReader::new(f).lines().take(200).map_while(Result::ok) {
+        // 첫 줄에 시스템 프롬프트가 통째로 박혀 있어 50KB 를 넘는다. exec 은 열에
+        // 아홉이고 그 판정 하나에 그만큼을 매번 JSON 으로 푸는 게 codex 목록의
+        // 제일 큰 비용이었다 — 문자열로 먼저 걸러 그 파싱을 아예 건너뛴다.
+        // 표기가 바뀌면 이 빠른 길만 안 걸리고 아래 정식 판정이 그대로 잡는다.
+        if id.is_empty() && line.contains(r#""originator":"codex_exec""#) {
+            return None;
+        }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
         if id.is_empty() {
             let (i, c, exec) = codex_head(&v);
@@ -672,7 +771,8 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
     if label.is_empty() {
         return None;
     }
-    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd })
+    let preview = last_exchange(path, "codex");
+    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd, preview })
 }
 
 /// 최근 codex 세션. 조심할 것이 셋이다.
@@ -749,6 +849,99 @@ pub fn recent_sessions_here(cwd: &Path, limit: usize) -> Vec<RecentSession> {
     all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     all.truncate(limit);
     all
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::last_exchange;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str, body: &str) -> PathBuf {
+        let d = std::env::temp_dir().join("kasaterm-preview-test");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join(format!("{name}.jsonl"));
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn claude_takes_the_last_thing_said() {
+        let p = tmp(
+            "claude-last",
+            &[
+                r#"{"type":"user","message":{"content":"처음 시킨 것"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"했습니다"}]}}"#,
+                r#"{"type":"user","message":{"content":"그럼 이건?"}}"#,
+            ]
+            .join("\n"),
+        );
+        assert_eq!(last_exchange(&p, "claude"), "나: 그럼 이건?");
+    }
+
+    #[test]
+    fn who_said_it_is_part_of_the_line() {
+        // 내가 시켜 놓고 끊긴 세션과 답을 받고 끝난 세션은 이어갈 때 하는 일이
+        // 다르다. 화자가 없으면 목록에서 그 둘을 못 가른다.
+        let p = tmp(
+            "claude-who",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"다 됐습니다"}]}}"#,
+        );
+        assert_eq!(last_exchange(&p, "claude"), "에이전트: 다 됐습니다");
+    }
+
+    #[test]
+    fn machine_chatter_is_not_the_last_word() {
+        // system-reminder·명령 에코는 사람이 한 말이 아니다. 그대로 쓰면 목록의
+        // 모든 행이 같은 시스템 문구로 끝난 것처럼 보인다.
+        let p = tmp(
+            "claude-meta",
+            &[
+                r#"{"type":"user","message":{"content":"진짜 마지막 말"}}"#,
+                r#"{"type":"user","message":{"content":"<system-reminder>어쩌구</system-reminder>"}}"#,
+                r#"{"type":"user","isMeta":true,"message":{"content":"메타"}}"#,
+            ]
+            .join("\n"),
+        );
+        assert_eq!(last_exchange(&p, "claude"), "나: 진짜 마지막 말");
+    }
+
+    #[test]
+    fn codex_reads_the_payload_shape() {
+        let p = tmp(
+            "codex-last",
+            &[
+                r#"{"payload":{"type":"message","role":"user","content":[{"text":"코덱스야"}]}}"#,
+                r#"{"payload":{"type":"message","role":"assistant","content":[{"text":"넵"}]}}"#,
+            ]
+            .join("\n"),
+        );
+        assert_eq!(last_exchange(&p, "codex"), "에이전트: 넵");
+    }
+
+    /// 128KB 를 넘는 파일에서도 끝을 읽어야 하고, 그때 잘려 들어온 첫 줄이
+    /// 결과를 오염시키면 안 된다. 자른 바이트 수를 세지 않고 "안 풀리면 건너뛴다"
+    /// 로 처리하는 것이 이 테스트가 지키는 규칙이다.
+    #[test]
+    fn a_huge_file_still_yields_its_tail() {
+        let filler = "x".repeat(4000);
+        let mut body = String::new();
+        for i in 0..60 {
+            body.push_str(&format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{i} {filler}"}}]}}}}"#
+            ));
+            body.push('\n');
+        }
+        body.push_str(r#"{"type":"user","message":{"content":"끝에 남긴 말"}}"#);
+        let p = tmp("huge", &body);
+        assert!(std::fs::metadata(&p).unwrap().len() > 128 * 1024, "테스트 파일이 128KB 를 못 넘었다");
+        assert_eq!(last_exchange(&p, "claude"), "나: 끝에 남긴 말");
+    }
+
+    #[test]
+    fn nothing_readable_means_empty_not_a_guess() {
+        let p = tmp("junk", "not json\n{\"type\":\"summary\"}\n");
+        assert_eq!(last_exchange(&p, "claude"), "");
+    }
 }
 
 #[cfg(test)]
@@ -942,7 +1135,11 @@ pub fn recent_agy_sessions(limit: usize) -> Vec<RecentSession> {
                 .and_then(|v| v.into_iter().next())
                 .map(|u| u.strip_prefix("file://").unwrap_or(&u).to_string())
                 .unwrap_or_default();
-            Some(RecentSession { harness: "agy".into(), id, label, mtime, cwd })
+            // agy 만 요약을 DB 가 들고 있다. 화자는 안 적히므로 `나:`/`에이전트:`
+            // 를 붙이지 않는다 — 모르는 것을 지어내느니 없는 채로 둔다.
+            // 제목으로 이미 쓴 문장이면 같은 줄을 두 번 그리게 되니 비운다.
+            let preview = if label == preview { String::new() } else { preview.to_string() };
+            Some(RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview })
         })
         .collect()
 }
