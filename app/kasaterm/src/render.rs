@@ -86,14 +86,15 @@ impl App {
                     // spaces the PTY echoes), so trust it directly.
                     // Image/markdown panes have no PTY cursor — their terminal
                     // block cursor stays hidden (the Raw editor draws its own).
-                    let (cur_row, cur_col, cur_vis, cols) = match pane.term() {
+                    let (cur_row, cur_col, cur_vis, cols, cur_w) = match pane.term() {
                         Some(t) => (
                             t.cursor_row,
                             t.cursor_col,
                             t.cursor_visible,
                             t.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                            cursor_cell_width(&t.cells, t.cursor_row, t.cursor_col),
                         ),
-                        None => (0, 0, false, 80),
+                        None => (0, 0, false, 80, 1),
                     };
                     let (base_row, base_col) = (cur_row, cur_col);
                     // Until the committed syllable's echo lands (cursor
@@ -117,6 +118,7 @@ impl App {
                         cur_col,
                         cur_vis,
                         cols,
+                        cur_w,
                         prow,
                         pcol,
                         display,
@@ -132,13 +134,14 @@ impl App {
             cursor_col,
             cursor_visible,
             cols,
+            cursor_w,
             preedit_row,
             preedit_col,
             preedit,
             pane_x,
             pane_y,
             header_shift,
-        ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0, 0.0));
+        ) = snap.unwrap_or((0, 0, false, 80, 1, 0, 0, preedit_text.clone(), 0, 0, 0.0));
         // When split OR any pane is multi-tab, every pane body is pushed
         // down by its header band. The cursor / preedit / selection
         // overlays anchor off the same origin as the cells, so they must
@@ -154,6 +157,7 @@ impl App {
             pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h + header_shift + PANE_INNER_Y,
             cursor_row,
             cursor_col,
+            cursor_w,
             cursor_visible,
             cols,
             blink_on: self.cursor_blink_on(Instant::now()),
@@ -182,7 +186,7 @@ impl App {
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
             let mut c = cells::iterm_cursor();
             c[3] = 140; // ~0.55 alpha
-            g.rect(cx, cy, cw, ch, c);
+            g.rect(cx, cy, cw * ov.cursor_w as f32, ch, c);
         }
         // Inline autosuggestion ghost text — dim, on the same baseline as
         // committed cells, starting at the cursor and clipped to the row's

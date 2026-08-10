@@ -113,6 +113,23 @@ fn shell_quote_path(p: &str) -> String {
     }
 }
 
+/// 커서가 놓인 칸의 글자가 몇 칸짜리인지. 한글·CJK·이모지는 두 칸이다.
+///
+/// 전각 글자는 그리드에서 두 칸을 먹고 뒤 칸엔 스페이서(`'\0'`)가 들어간다. 커서를
+/// 항상 한 칸으로 칠하면 글자의 왼쪽 절반만 덮여, 커서가 글자를 가리키는 게 아니라
+/// 반쯤 깨진 것처럼 보인다. 커서가 스페이서 쪽에 놓이는 경우는 앞 칸을 보지 않는다 —
+/// vt100 은 전각 글자의 첫 칸에 커서를 세우고, 안 겪은 경우를 위한 코드는 검증할 수
+/// 없는 채로 남는다.
+fn cursor_cell_width(cells: &[kasa_bridge::screen::Row], row: u16, col: u16) -> u16 {
+    use unicode_width::UnicodeWidthChar;
+    cells
+        .get(row as usize)
+        .and_then(|r| r.get(col as usize))
+        .and_then(|c| c.ch.width())
+        .unwrap_or(1)
+        .clamp(1, 2) as u16
+}
+
 fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
     // Single anti-aliased implementation lives on the renderer so the chrome
     // and the markdown code-block chips round identically.
@@ -1264,6 +1281,10 @@ struct GpuOverlay {
     pad_y: f32,
     cursor_row: u16,
     cursor_col: u16,
+    /// 커서가 덮는 칸 수. 한글·CJK 는 두 칸을 차지하는데 한 칸만 칠하면 커서가
+    /// 글자의 왼쪽 절반에만 걸려, 그 자리에 뭐가 있는지가 아니라 커서가 깨진 것처럼
+    /// 보인다. 나머지는 전부 1 이다.
+    cursor_w: u16,
     cursor_visible: bool,
     cols: u16,
     blink_on: bool,
@@ -7019,6 +7040,36 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn cursor_covers_the_whole_glyph_it_sits_on() {
+        use kasa_bridge::screen::Cell;
+        let row: Vec<Cell> = "가A 나"
+            .chars()
+            .flat_map(|ch| {
+                // 전각 뒤엔 그리드가 스페이서를 하나 둔다 — 실제 화면과 같은 모양으로.
+                let mut c = Cell::blank();
+                c.ch = ch;
+                let wide = matches!(ch, '가' | '나');
+                let mut out = vec![c];
+                if wide {
+                    let mut sp = Cell::blank();
+                    sp.ch = '\0';
+                    out.push(sp);
+                }
+                out
+            })
+            .collect();
+        let cells = vec![row];
+        assert_eq!(cursor_cell_width(&cells, 0, 0), 2, "한글은 두 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 2), 1, "ASCII 는 한 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 3), 1, "공백도 한 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 4), 2, "한글은 두 칸");
+        // 스페이서와 그리드 밖은 폭을 모른다 — 0 칸짜리 커서는 안 보이므로 1 로 눕힌다.
+        assert_eq!(cursor_cell_width(&cells, 0, 1), 1, "스페이서");
+        assert_eq!(cursor_cell_width(&cells, 0, 99), 1, "행 밖");
+        assert_eq!(cursor_cell_width(&cells, 9, 0), 1, "화면 밖");
     }
 
     #[test]
