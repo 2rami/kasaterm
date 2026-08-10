@@ -21,7 +21,7 @@ use kasa_socket::backend::{
     Backend, PaneActivity, RecentSession, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
 use kasa_socket::sessions::{
-    is_uuid, recent_sessions_for, session_board_meta, session_jsonl_path, transcript_tail_text,
+    is_uuid, recent_sessions_here, session_board_meta, session_jsonl_path, transcript_tail_text,
 };
 
 pub struct StandaloneBackend {
@@ -140,7 +140,10 @@ impl Backend for StandaloneBackend {
 
     fn recent_sessions(&self, cwd: Option<&str>) -> Result<Vec<RecentSession>> {
         let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
-        Ok(recent_sessions_for(&base, 20))
+        // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
+        // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
+        // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
+        Ok(recent_sessions_here(&base, 60))
     }
 
     fn session_transcript_raw(&self, id: &str, cwd: Option<&str>) -> Result<String> {
