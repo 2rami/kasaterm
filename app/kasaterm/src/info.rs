@@ -1440,7 +1440,11 @@ pub(crate) fn draw_side_tabs(
     git.col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
     info.tab_rects.clear();
     let mut tx = x + 14.0;
-    for (tab, label) in [(state::SideTab::Git, "Git"), (state::SideTab::Info, "Info")] {
+    for (tab, label) in [
+        (state::SideTab::Git, "Git"),
+        (state::SideTab::Info, "Info"),
+        (state::SideTab::Sessions, "세션"),
+    ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
         let hot = (tx - 4.0, y - 4.0, tw + 8.0, 21.0);
@@ -2764,7 +2768,13 @@ fn wrap_path(g: &mut gpu::GpuRenderer, s: &str, avail: f32, max_lines: usize) ->
 /// 그 자체가 글자마다 아틀라스를 뒤지므로 그 방식은 길이의 제곱으로 붇고,
 /// claude·MCP 처럼 argv 가 긴 행이 목록에 깔리면 프레임 예산을 통째로 먹는다.
 /// 글자 폭은 서로 독립이라 한 번 훑으며 누적하면 같은 답이 한 바퀴에 나온다.
-fn fit_text(g: &mut gpu::GpuRenderer, s: &str, avail: f32, size: f32, bold: bool) -> String {
+pub(crate) fn fit_text(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    avail: f32,
+    size: f32,
+    bold: bool,
+) -> String {
     if avail <= 0.0 {
         return String::new();
     }

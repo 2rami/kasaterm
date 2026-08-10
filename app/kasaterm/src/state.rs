@@ -93,13 +93,66 @@ pub(crate) struct GitState {
     pub(crate) branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
 }
 
-/// 우측 칼럼의 활성 탭. 칼럼은 원래 git 전용이었고 Info 가 나중에 붙었다 —
-/// 둘은 폭·스크롤·닫기 버튼을 공유하고 본문만 갈린다.
+/// 우측 칼럼의 활성 탭. 칼럼은 원래 git 전용이었고 Info·Sessions 가 나중에
+/// 붙었다 — 셋은 폭·스크롤·닫기 버튼을 공유하고 본문만 갈린다.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SideTab {
     #[default]
     Git,
     Info,
+    /// 과거 세션 기록(claude·codex·agy)을 골라 그 자리에서 잇는다.
+    Sessions,
+}
+
+/// 우측 칼럼의 「세션 기록」 탭 — 과거 대화를 골라 잇는 레일.
+///
+/// 살아 있는 tmux 세션 목록(`/sessions` 패널)과 다르다. 이쪽은 각 하네스가
+/// 디스크에 남긴 기록이라 목록을 만들려면 저장소를 통째로 stat 해야 하고,
+/// 그래서 `snap` 을 워커 스레드가 채운다(Info 탭이 `ps`/`lsof` 를 GUI 스레드
+/// 밖으로 뺀 것과 같은 이유). 렌더는 `rev` 가 올라갔을 때만 `view` 로 옮겨
+/// 담는다 — 매 프레임 Vec<String> 을 clone 하면 목록 길이만큼 할당이 돈다.
+pub(crate) struct SessionsColState {
+    pub(crate) snap: std::sync::Arc<std::sync::Mutex<Vec<kasa_socket::backend::RecentSession>>>,
+    pub(crate) view: Vec<kasa_socket::backend::RecentSession>,
+    pub(crate) rev: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) seen_rev: u64,
+    pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) last_refresh: Option<std::time::Instant>,
+    /// `false` = 이 방(활성 pane 의 cwd) 세션만, `true` = 하네스 전부.
+    /// 기본이 방인 건 목록을 여는 대부분의 이유가 "방금 하던 그거"라서다.
+    pub(crate) scope_all: bool,
+    /// 지금 목록이 어느 cwd 의 것인지 — pane 을 옮겨 cwd 가 달라지면 재수집을
+    /// 트리거한다(`scope_all` 일 땐 무의미하므로 비교에서 뺀다).
+    pub(crate) cwd: Option<std::path::PathBuf>,
+    pub(crate) scroll: f32,
+    /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
+    pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    pub(crate) scope_rects: Vec<(bool, (f32, f32, f32, f32))>,
+    pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
+    /// 직전 프레임의 본문 영역 — 스크롤 clamp 가 실제 그려진 높이를 알아야 한다.
+    pub(crate) body_rect: (f32, f32, f32, f32),
+    pub(crate) content_h: f32,
+}
+
+impl Default for SessionsColState {
+    fn default() -> Self {
+        Self {
+            snap: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            view: Vec::new(),
+            rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seen_rev: 0,
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_refresh: None,
+            scope_all: false,
+            cwd: None,
+            scroll: 0.0,
+            row_rects: Vec::new(),
+            scope_rects: Vec::new(),
+            refresh_rect: None,
+            body_rect: (0.0, 0.0, 0.0, 0.0),
+            content_h: 0.0,
+        }
+    }
 }
 
 /// Info 패널의 접히는 섹션. 접힘 상태는 pane 을 옮겨도 유지된다 — 포트만 보려고
