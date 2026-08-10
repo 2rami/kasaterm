@@ -1,6 +1,7 @@
 //! GUI-agnostic screen snapshot types produced from a vt100 parser.
 
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Color {
@@ -189,9 +190,20 @@ impl ScreenUpdate {
             }
             out.push_str(&format!("\x1b[{};1H", row + 1));
             let mut style: Option<String> = None;
+            // 와이드 글자가 먹은 뒷칸을 건너뛰기 위한 표시.
+            let mut spacer = false;
             for cell in &cells[..end] {
-                // '\0' = 와이드 글자가 차지한 뒷칸. 앞 글자가 이미 두 칸을
-                // 먹었으므로 여기서 또 쓰면 한 칸씩 밀린다.
+                // 와이드 글자(한글·CJK)는 두 칸을 차지하고 뒷칸은 스페이서다. 그 칸을
+                // 또 쓰면 글자마다 한 칸씩 밀려 자간이 벌어진다.
+                //
+                // ⚠️ 스페이서를 **문자로는 못 가려낸다** — `convert_cell` 이 alacritty 의
+                // `'\0'` 을 공백으로 바꿔 넘기기 때문에 진짜 공백과 똑같이 생겼다. 대신
+                // 앞 글자의 폭으로 판정한다: 그리드에서 와이드 글자 다음 칸은 반드시
+                // 스페이서이므로(터미널 그리드의 불변식) 이 추론은 항상 맞다.
+                if spacer {
+                    spacer = false;
+                    continue;
+                }
                 if cell.ch == '\0' {
                     continue;
                 }
@@ -201,6 +213,7 @@ impl ScreenUpdate {
                     style = Some(sgr);
                 }
                 out.push(cell.ch);
+                spacer = UnicodeWidthChar::width(cell.ch).unwrap_or(1) > 1;
             }
             out.push_str("\x1b[0m");
         }
@@ -274,8 +287,18 @@ mod ansi_tests {
     }
 
     #[test]
-    fn skips_the_wide_char_spacer() {
-        // '한' 이 두 칸을 먹고 뒷칸은 '\0' 이다. 그걸 또 그리면 한 칸씩 밀린다.
+    fn skips_the_cell_a_wide_char_already_took() {
+        // ⚠️ 실제 그리드는 스페이서를 **공백으로** 넘긴다(`convert_cell` 이 alacritty 의
+        // '\0' 을 ' ' 로 바꾼다). 그래서 문자로는 진짜 공백과 구분이 안 되고, 앞 글자의
+        // 폭으로만 판정할 수 있다. 이걸 놓치면 한글마다 한 칸씩 밀려 자간이 벌어진다.
+        let a = ansi(&upd(vec![(0, vec![cell('한'), cell(' '), cell('글')])]));
+        assert!(a.contains("한글"), "자간이 벌어졌다: {a:?}");
+
+        // 좁은 글자 뒤의 공백은 진짜 공백이라 남아야 한다.
+        let a = ansi(&upd(vec![(0, vec![cell('a'), cell(' '), cell('b')])]));
+        assert!(a.contains("a b"), "진짜 공백이 먹혔다: {a:?}");
+
+        // vt100 브리지 경로가 넘기는 옛 '\0' 형태도 계속 건너뛴다.
         let a = ansi(&upd(vec![(0, vec![cell('한'), cell('\0'), cell('x')])]));
         assert!(a.contains("한x"));
     }
