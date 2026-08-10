@@ -118,6 +118,24 @@ cloudflared tunnel --url http://127.0.0.1:8765
 틀린다: 브라우저도 우리 코드도 그 헤더를 안 보내니 로컬은 그대로고, 로컬에서 위조해
 붙여도 토큰을 더 요구받을 뿐이다. **다른 터널을 쓸 거면 그게 이 헤더를 붙이는지 먼저
 확인해라** — 안 붙이는 터널은 이 관문을 그대로 통과한다.
+실측으로 **cloudflared 와 ngrok 은 둘 다 붙인다**(양쪽 다 무토큰 403·토큰 200 확인).
+
+**고정 주소 (named tunnel, 2026-08-10 구축).** quick tunnel 은 주소가 매번 바뀌어
+폰 북마크가 깨진다. 이름 붙은 터널이 그걸 없앤다 — 설정은 `~/.cloudflared/config.yml`
+에 있고, 주소는 **`https://kasaterm.debimarlene.com`** 이다.
+
+```sh
+cloudflared tunnel run kasaterm     # 켜기. 끄면 그 주소는 530 이 된다
+```
+
+- 만드는 절차는 한 번만 하면 된다: `tunnel login`(브라우저에서 도메인 선택 — **사람이
+  해야 하는 유일한 단계**) → `tunnel create <이름>` → `tunnel route dns <이름> <호스트>`
+  → config 작성. 도메인이 Cloudflare 에 등록돼 있어야 한다.
+- **껐다 켜도 같은 주소**임을 확인했다(내리면 530, 올리면 같은 주소로 200).
+- 부팅 자동 시작(`cloudflared service install`)은 **일부러 안 걸었다.** 상시 노출은
+  그때그때 켜는 것과 위험의 성격이 다르다 — 켤지는 그때 정한다.
+- ⚠️ ngrok 무료 플랜은 고정 도메인이 유료 전용이다(`ERR_NGROK_313`). 도메인 없이
+  고정 주소가 필요하면 Tailscale 쪽이 답이고, 그건 아예 공개 노출이 없다.
 
 ⚠️ 무료 플랜은 **유휴 WebSocket 을 ~100초에 끊는다.** 터미널은 조용한 시간이 길어
 반드시 걸리므로 서버가 30초마다 ping 을 끼운다(`term_ws_run`).
