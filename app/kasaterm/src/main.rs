@@ -3520,17 +3520,20 @@ enum UserEvent {
     /// pane header. Used by the rename override.
     SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
-    /// `POST /session-resume` from arona-ui — open a pane and queue
-    /// `claude --resume <id>` once its shell prompt is up. `newroom` opens a
-    /// fresh window; otherwise it splits the active one. `cwd` (when set) is the
-    /// session's project dir so resume lands in the right place.
+    /// `POST /session-resume` from arona-ui — open a pane and queue the resume
+    /// command once its shell prompt is up. `newroom` opens a fresh window;
+    /// otherwise it splits the active one. `cwd` (when set) is the session's
+    /// project dir so resume lands in the right place.
     ResumeSession {
         id: String,
         cwd: Option<String>,
         newroom: bool,
         /// true → `claude attach <id>`(daemon background 세션 연결, 세션 background 유지).
-        /// false → `claude --resume <id>`(jsonl 새 프로세스, 과거 세션 이어가기).
+        /// false → 하네스별 이어가기 명령(jsonl 새 프로세스, 과거 세션 이어가기).
         attach: bool,
+        /// 그 세션을 만든 코딩 프로그램 — `claude`/`codex`/`agy`. 빈 값이면 claude.
+        /// `attach` 는 claude 의 daemon 개념이라 이 값과 무관하게 claude 로 간다.
+        harness: String,
     },
     /// "대화 저장하기" — surface pane 의 foreground claude 를 ←←(agents view = bg-detach)
     /// 주입으로 background daemon 으로 detach. surface 없으면 active pane. 터미널이 꺼져도

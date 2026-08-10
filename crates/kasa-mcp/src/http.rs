@@ -1476,9 +1476,33 @@ async fn session_rename_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `GET /recent-sessions?cwd=<abs>` — recent Claude sessions under `cwd` (or
-/// the active pane's cwd when omitted) for the arona-ui resume picker. Newest
-/// first: `{ ok, sessions: [{id, label, mtime, cwd, character?}] }`.
+/// 세션 목록에 학생(캐릭터)을 얹는다. `scope` 두 갈래가 같은 모양을 내도록 공통.
+fn with_bound_characters(sessions: &[kasa_socket::backend::RecentSession]) -> serde_json::Value {
+    let mut arr = serde_json::to_value(sessions).unwrap_or_default();
+    if let Some(list) = arr.as_array_mut() {
+        for s in list.iter_mut() {
+            let bound = s
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(crate::character::session_character);
+            if let (Some(ch), Some(obj)) = (bound, s.as_object_mut()) {
+                obj.insert("character".into(), serde_json::json!(ch));
+            }
+        }
+    }
+    arr
+}
+
+/// `GET /recent-sessions?cwd=<abs>&scope=here|all` — recent sessions for the
+/// arona-ui resume picker. Newest first:
+/// `{ ok, sessions: [{harness, id, label, mtime, cwd, character?}] }`.
+///
+/// `scope=here`(기본) 는 `cwd`(생략 시 활성 pane 의 cwd) 아래의 claude 세션만 — 지금
+/// 동작 그대로다. `scope=all` 은 cwd 를 무시하고 **하네스 전부**(claude·codex·agy)를
+/// 섞어 돌려준다. 목표는 오르카의 「Agent 세션 기록」 처럼 어느 코딩 프로그램의
+/// 세션이든 한 목록에서 골라 잇는 것이고, 각 항목의 `harness` 를
+/// `/session-resume?harness=` 로 되돌리면 그 프로그램의 이어가기 명령이 나간다.
+///
 /// `character` 는 세션→학생 영속 바인딩(session_characters.json) — teamName 기록
 /// 세션이 claude 자체 /resume 에서 숨겨지는 탓에 이 피커가 사실상 유일한 복원
 /// 입구라, 어느 학생의 세션인지 프사·학생색으로 즉시 구분하게 얹는다(거노).
@@ -1487,32 +1511,35 @@ async fn recent_sessions_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // 하네스별로 이만큼씩 모아 시각순으로 자른다. 기본 20 은 `scope=here` 이 예전부터
+    // 쓰던 값이고, 상한을 두는 건 각 하네스 저장소를 그만큼 훑기 때문이다.
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map_or(20, |n| n.clamp(1, 200));
+    if params.get("scope").is_some_and(|s| s == "all") {
+        let sessions = kasa_socket::sessions::recent_all_sessions(limit);
+        let body = serde_json::json!({ "ok": true, "sessions": with_bound_characters(&sessions) });
+        return ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body));
+    }
     let cwd = params.get("cwd").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let body = match backend.recent_sessions(cwd) {
         Ok(sessions) => {
-            let mut arr = serde_json::to_value(&sessions).unwrap_or_default();
-            if let Some(list) = arr.as_array_mut() {
-                for s in list.iter_mut() {
-                    let bound = s
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .and_then(crate::character::session_character);
-                    if let (Some(ch), Some(obj)) = (bound, s.as_object_mut()) {
-                        obj.insert("character".into(), serde_json::json!(ch));
-                    }
-                }
-            }
-            serde_json::json!({ "ok": true, "sessions": arr })
+            serde_json::json!({ "ok": true, "sessions": with_bound_characters(&sessions) })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>` — open a pane and
-/// inject `claude --resume <id>` once its shell prompt is up. `newroom=true`
-/// opens a fresh window; otherwise it splits the active one. Query params for
-/// the same no-preflight reason as session-switch.
+/// `POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>&harness=<name>` —
+/// open a pane and inject that session's resume command once its shell prompt is
+/// up. `newroom=true` opens a fresh window; otherwise it splits the active one.
+/// Query params for the same no-preflight reason as session-switch.
+///
+/// `harness` 는 `/recent-sessions` 가 각 항목에 실어 주는 값을 그대로 되돌려 주면
+/// 된다(`claude`/`codex`/`agy`). 없으면 claude — 이 파라미터가 없던 시절의 호출도
+/// 그대로 동작한다.
 async fn session_resume_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -1527,10 +1554,15 @@ async fn session_resume_handler(
         .get("attach")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
+    let harness = params
+        .get("harness")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
     let body = if id.is_empty() {
         serde_json::json!({ "ok": false, "error": "missing id" })
     } else {
-        match backend.resume_session(&id, cwd.as_deref(), newroom, attach) {
+        match backend.resume_session(&id, cwd.as_deref(), newroom, attach, harness) {
             Ok(()) => serde_json::json!({ "ok": true, "id": id }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }

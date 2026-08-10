@@ -617,7 +617,9 @@ fn session_resume(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let newroom = params.get("newroom").and_then(|v| v.as_bool()).unwrap_or(false);
     let attach = params.get("attach").and_then(|v| v.as_bool()).unwrap_or(false);
-    simple(id, backend.resume_session(sid, cwd, newroom, attach))
+    // 하네스 미지정은 claude — 이 파라미터가 없던 시절의 호출을 그대로 받는다.
+    let harness = params.get("harness").and_then(|v| v.as_str()).unwrap_or("claude");
+    simple(id, backend.resume_session(sid, cwd, newroom, attach, harness))
 }
 
 fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response {
@@ -1186,6 +1188,9 @@ mod tests {
                 surface_id: "surf-1".into(),
                 agent_name: Some("prana-p5".into()),
                 team: Some("kt-x".into()),
+                // 막는 근거는 「이 pane 에 하네스가 실제로 잡혔다」 하나다(a9acb69) —
+                // 줄이 있다는 것만으론 셸뿐인 빈 탭까지 막혀 정작 학생을 못 띄웠다.
+                harness: Some("claude".into()),
                 ..Default::default()
             }],
             ..Default::default()
