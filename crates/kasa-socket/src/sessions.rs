@@ -697,3 +697,62 @@ pub fn recent_all_sessions(limit: usize) -> Vec<RecentSession> {
     all.truncate(limit);
     all
 }
+
+/// 하네스별 "이어가기" 셸 한 줄. 세 CLI 가 서로 다른 플래그를 쓴다.
+///
+/// CLI 피커와 GUI(handler.rs 가 새 pane 에 주입)가 **같은 한 벌을 쓴다** — 예전엔
+/// 두 군데가 각자 `claude --resume` 을 조립하고 있었고, 그런 쌍은 한쪽만 고쳐진다.
+/// PTY 주입용 개행(`\r`)은 붙이지 않는다. 필요한 쪽이 붙인다.
+///
+/// cwd 로 먼저 옮기는 게 중요하다 — claude 는 세션을 cwd 별 디렉터리에 나눠 두어
+/// 다른 자리에서 `--resume` 하면 그 세션을 아예 못 찾는다. cwd 를 모르는 하네스
+/// (codex 는 rollout 에 안 남긴다)는 지금 자리에서 연다.
+///
+/// 값은 전부 작은따옴표로 감싼다. id 는 uuid 라 위험할 게 없지만 cwd 는 사람이
+/// 만든 경로라 공백·괄호가 흔하다 — 따옴표가 없으면 `cd` 가 거기서 끊긴다.
+pub fn resume_command(harness: &str, id: &str, cwd: &str) -> String {
+    let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let cmd = match harness {
+        "codex" => format!("codex resume {}", q(id)),
+        "agy" => format!("agy --conversation {}", q(id)),
+        _ => format!("claude --resume {}", q(id)),
+    };
+    if cwd.is_empty() { cmd } else { format!("cd {} && {cmd}", q(cwd)) }
+}
+
+#[cfg(test)]
+mod resume_command_tests {
+    use super::resume_command;
+
+    #[test]
+    fn claude_moves_to_the_session_cwd_first() {
+        // claude 는 세션을 cwd 별 디렉터리에 나눠 둔다 — 다른 자리에서 --resume
+        // 하면 그 세션을 못 찾으므로 cd 가 앞에 붙어야 한다.
+        let got = resume_command("claude", "abc-123", "/Users/kasa/proj");
+        assert_eq!(got, "cd '/Users/kasa/proj' && claude --resume 'abc-123'");
+    }
+
+    #[test]
+    fn codex_and_agy_use_their_own_flags() {
+        assert_eq!(resume_command("codex", "id1", ""), "codex resume 'id1'");
+        assert_eq!(resume_command("agy", "id2", ""), "agy --conversation 'id2'");
+    }
+
+    #[test]
+    fn unknown_harness_falls_back_to_claude() {
+        assert_eq!(resume_command("", "id3", ""), "claude --resume 'id3'");
+    }
+
+    #[test]
+    fn quotes_paths_with_spaces() {
+        // 사람이 만든 경로엔 공백·괄호가 흔하다. 따옴표가 없으면 cd 가 거기서 끊긴다.
+        let got = resume_command("claude", "id", "/Users/kasa/My Projects (old)");
+        assert_eq!(got, "cd '/Users/kasa/My Projects (old)' && claude --resume 'id'");
+    }
+
+    #[test]
+    fn escapes_a_single_quote_in_the_path() {
+        let got = resume_command("claude", "id", "/tmp/it's");
+        assert_eq!(got, r#"cd '/tmp/it'\''s' && claude --resume 'id'"#);
+    }
+}
