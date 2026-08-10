@@ -3117,12 +3117,18 @@ async fn term_ws_run(
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
                         continue;
                     };
-                    if v.get("t").and_then(|x| x.as_str()) == Some("resize") && !mirrored {
-                        // ⚠️ 미러일 땐 무시한다. 같은 PTY 를 보고 있는 kasaterm
-                        // pane 의 화면이 같이 깨진다.
-                        let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
-                        let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
-                        let _ = sess_in.resize(c.max(20), r.max(5));
+                    if v.get("t").and_then(|x| x.as_str()) == Some("resize") {
+                        // ⚠️ 미러일 땐 창 크기를 따라 자동으로 바꾸지 않는다 — 같은 PTY 를
+                        // 보고 있는 kasaterm pane 의 화면이 같이 깨진다. 폰에서는 넓은
+                        // pane(193열)이 축소로도 안 들어가서 이 규칙을 깨야만 읽을 수
+                        // 있는데, 그건 **사용자가 누른 순간에만** 허용한다(`force`).
+                        // 자동이면 폰으로 훔쳐본 것만으로 남의 화면이 줄어든다.
+                        let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+                        if !mirrored || force {
+                            let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+                            let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                            let _ = sess_in.resize(c.max(20), r.max(5));
+                        }
                     }
                 }
                 Message::Close(_) => break,
