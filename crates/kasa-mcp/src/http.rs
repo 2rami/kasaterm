@@ -2972,10 +2972,24 @@ fn ws_origin_ok(h: &HeaderMap) -> bool {
     !host.is_empty() && o == host
 }
 
+/// pane id 를 **디코딩하지 않은 원문**으로 꺼낸다.
+///
+/// pane id 는 `%1` 처럼 `%` 로 시작한다. 그래서 주소창에 `?pane=%116` 을 그대로 치면
+/// 퍼센트 인코딩으로 해석돼 `%11`(제어문자) + `6` 이 되고, 조회가 조용히 실패한다 —
+/// 화면에는 아무것도 안 뜨고 연결만 끊겨서 원인을 짐작하기 어렵다. 사람이 흔히
+/// 밟는 함정이라, 디코딩된 값으로 못 찾으면 이 원문으로 한 번 더 본다.
+fn raw_pane_param(raw: Option<&str>) -> Option<String> {
+    raw?.split('&')
+        .find_map(|kv| kv.strip_prefix("pane="))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 async fn term_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> axum::response::Response {
     if !ws_origin_ok(&headers) {
         eprintln!(
@@ -2989,12 +3003,18 @@ async fn term_ws_handler(
             .into_response();
     }
     let pane = q.get("pane").cloned().unwrap_or_default();
+    let pane_raw = raw_pane_param(raw.as_deref());
     let cwd = q.get("cwd").cloned();
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, cwd))
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd))
         .into_response()
 }
 
-async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
+async fn term_ws_run(
+    socket: WebSocket,
+    pane: String,
+    pane_raw: Option<String>,
+    cwd: Option<String>,
+) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
     // (레지스트리 키 충돌) — 웹 전용 접두사를 붙인다.
@@ -3022,7 +3042,13 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             }
         }
     } else {
-        match kasa_pty::lookup_session(&pane) {
+        // 디코딩된 값 → 원문 순으로 본다(`raw_pane_param` 주석 참고).
+        match kasa_pty::lookup_session(&pane).or_else(|| {
+            pane_raw
+                .as_deref()
+                .filter(|r| *r != pane)
+                .and_then(kasa_pty::lookup_session)
+        }) {
             Some(s) => (s, true),
             None => {
                 eprintln!("[term-ws] 그런 pane 이 없습니다: {pane}");
@@ -3792,5 +3818,28 @@ mod tests {
         assert!(task_is_mine("", "모모이", false));
         assert!(task_is_mine("", "", false));
         assert!(!task_is_mine("히마리", "모모이", false));
+    }
+}
+
+#[cfg(test)]
+mod raw_pane_tests {
+    use super::raw_pane_param;
+
+    #[test]
+    fn keeps_the_percent_that_query_decoding_would_eat() {
+        // pane id 는 `%1` 처럼 % 로 시작한다. 디코딩된 값은 제어문자가 되어
+        // 조회에 실패하므로, 원문을 그대로 들고 있어야 한다.
+        assert_eq!(raw_pane_param(Some("pane=%116")).as_deref(), Some("%116"));
+        assert_eq!(
+            raw_pane_param(Some("t=abc&pane=%25116")).as_deref(),
+            Some("%25116")
+        );
+    }
+
+    #[test]
+    fn none_when_absent_or_empty() {
+        assert_eq!(raw_pane_param(Some("pane=")), None);
+        assert_eq!(raw_pane_param(Some("cwd=/tmp")), None);
+        assert_eq!(raw_pane_param(None), None);
     }
 }
