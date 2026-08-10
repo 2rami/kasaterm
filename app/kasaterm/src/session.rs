@@ -341,14 +341,39 @@ impl App {
         env
     }
 
+    /// 지금 어딘가에 등록돼 있는 pane 번호 전부.
+    ///
+    /// pane 을 담는 곳이 셋이라 셋을 다 봐야 한다. `self.pty` 만 보면 PTY 없이
+    /// `ws.panes` 에만 사는 미리보기·마크다운 pane 을 덮어쓰고, `ws.panes` 만 보면
+    /// split 직후 아직 `PaneState` 가 없는 leaf 를 덮어쓴다(희소 저장이라 보조탭이
+    /// 생기기 전까지 없다). 레이아웃 트리는 비활성 창(방 별도창)까지 훑는다.
+    pub(crate) fn used_pane_ids(&self) -> std::collections::HashSet<String> {
+        let mut used: std::collections::HashSet<String> = self.pty.keys().cloned().collect();
+        used.extend(self.ws.lock().unwrap().panes.keys().cloned());
+        for l in self.windows.iter().flatten().chain(self.pty_layout.as_ref()) {
+            used.extend(l.leaves().into_iter().map(str::to_string));
+        }
+        used
+    }
+    /// 지금 안 쓰는 **가장 작은** pane 번호. 예전엔 단조 증가 카운터라 열고 닫기를
+    /// 반복한 하루치가 `%116` 같은 번호로 쌓였다 — 학생 이름(`아루-p116`)에도 붙고
+    /// `tell`·`dismiss` 로 부를 때마다 그걸 봐야 했다(거노: "pane 번호는 계속 늘어난다").
+    ///
+    /// 번호 재사용이 위험했던 자리는 collab 마커다: 닫힌 pane 의 `kasaterm-bound-_N` 이
+    /// 남은 채 같은 번호가 다시 나면 죽은 세션이 산 것처럼 붙는다. 그래서 닫을 때
+    /// [`Self::cleanup_collab_markers`] 가 지우고, 앱이 죽어 그 경로를 못 탄 잔재는
+    /// 부팅 sweep(`character::sweep_stale_markers`)이 걷는다.
+    pub(crate) fn alloc_pane_id(&mut self) -> String {
+        next_free_pane_id(&self.used_pane_ids())
+    }
+
     /// Spawn the first shell pane for the *current* (already-cleared) session.
     /// Mirrors start_pty's pane bring-up with a fresh pane id and no socket
     /// (re)init — used by new_session.
     pub(crate) fn spawn_session_pane(&mut self) -> Result<()> {
         let (cols, rows) = self.window_cells();
         let cwd = resolve_initial_cwd();
-        let id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let id = self.alloc_pane_id();
         // 방별 분리(거노): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
         // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
         let mut env = crate::proxy_env(&id);
@@ -1529,7 +1554,7 @@ impl App {
             return;
         }
 
-        let new_id = format!("%{}", self.next_pane_id);
+        let new_id = self.alloc_pane_id();
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -1593,7 +1618,6 @@ impl App {
         let Some(active) = active else {
             return;
         };
-        self.next_pane_id += 1;
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -1657,9 +1681,9 @@ impl App {
 
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, kasa_pty::SplitDir::Horizontal, new_id.clone()) {
-            // Active pane isn't in the tree — undo the orphan insert.
+            // Active pane isn't in the tree — undo the orphan insert. 번호는 따로
+            // 되돌릴 게 없다: 등록을 지우면 alloc_pane_id 가 다시 빈 번호로 본다.
             self.ws.lock().unwrap().panes.remove(&new_id);
-            self.next_pane_id -= 1;
             return;
         }
         self.ws.lock().unwrap().active_pane = Some(new_id);
@@ -1710,8 +1734,7 @@ impl App {
                 return;
             }
         };
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_id = self.alloc_pane_id();
         let doc = Arc::new(build_markdown_doc(&path, &raw));
         let title = path
             .file_name()
@@ -2583,8 +2606,11 @@ impl App {
         rows: u16,
     ) -> Option<String> {
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
-        let taken = |s: &str| self.pty.contains_key(s);
-        let id = pick_restore_id(saved, taken, &mut self.next_pane_id);
+        // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
+        // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.
+        let used = self.used_pane_ids();
+        let id = pick_restore_id(saved, |s| used.contains(s))
+            .unwrap_or_else(|| next_free_pane_id(&used));
         let cwd = rec
             .get("cwd")
             .and_then(|c| c.as_str())
@@ -3015,18 +3041,17 @@ pub(crate) fn restore_agent_command(
     }
 }
 
-fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool, next: &mut u32) -> String {
-    if let Some(s) = saved {
-        if let Some(n) = s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok()) {
-            if !taken(s) {
-                *next = (*next).max(n + 1);
-                return s.to_string();
-            }
-        }
-    }
-    let s = format!("%{next}");
-    *next += 1;
-    s
+/// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
+fn next_free_pane_id(used: &std::collections::HashSet<String>) -> String {
+    (0u32..).map(|n| format!("%{n}")).find(|id| !used.contains(id)).unwrap_or_default()
+}
+
+/// 저장본의 pane 번호를 그대로 되살릴 수 있으면 그것. 없거나(옛 저장본) 형식이
+/// 깨졌거나 이미 살아 있으면 `None` — 그때는 호출부가 `alloc_pane_id` 로 새로 받는다.
+fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<String> {
+    let s = saved?;
+    s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok())?;
+    (!taken(s)).then(|| s.to_string())
 }
 
 /// 편집기 명령과 파일 경로로 셸에 칠 한 줄을 만든다. `{}` 가 있으면 그 자리에,
@@ -3044,7 +3069,19 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_command_line, git_repo_root, pick_restore_id};
+    use super::{editor_command_line, git_repo_root, next_free_pane_id, pick_restore_id};
+
+    /// 닫힌 번호를 되쓰는 것이 요점이다 — 안 그러면 하루 쓰면 `%116` 이 된다.
+    #[test]
+    fn pane_ids_fill_the_holes_left_by_closed_panes() {
+        let used = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        assert_eq!(next_free_pane_id(&used(&[])), "%0", "첫 pane 은 %0");
+        assert_eq!(next_free_pane_id(&used(&["%0", "%1", "%2"])), "%3");
+        // %1 이 닫혔으면 다음 pane 이 그 자리를 채운다(옛 카운터는 %3 을 줬다).
+        assert_eq!(next_free_pane_id(&used(&["%0", "%2"])), "%1");
+        // 번호는 정수 순서로 센다 — 사전순이면 %10 뒤에 %2 가 아니라 %9 를 놓친다.
+        assert_eq!(next_free_pane_id(&used(&["%0", "%1", "%10", "%2"])), "%3");
+    }
 
     #[test]
     fn editor_line_quotes_the_path_and_honors_the_placeholder() {
@@ -3063,32 +3100,17 @@ mod tests {
 
     #[test]
     fn restore_keeps_the_saved_pane_id() {
-        let mut next = 1;
-        assert_eq!(pick_restore_id(Some("%9"), |_| false, &mut next), "%9");
-        // 되살린 번호 위로 카운터가 밀려야 다음 split 이 %9 를 다시 안 준다.
-        assert_eq!(next, 10);
+        assert_eq!(pick_restore_id(Some("%9"), |_| false).as_deref(), Some("%9"));
     }
 
     #[test]
     fn restore_falls_back_when_the_id_is_missing_or_taken() {
-        // 옛 저장본엔 pane_id 가 없다.
-        let mut next = 3;
-        assert_eq!(pick_restore_id(None, |_| false, &mut next), "%3");
-        assert_eq!(next, 4);
+        // 옛 저장본엔 pane_id 가 없다 → 호출부가 새 번호를 받는다.
+        assert_eq!(pick_restore_id(None, |_| false), None);
         // 이미 살아 있는 번호는 뺏지 않는다.
-        let mut next = 3;
-        assert_eq!(pick_restore_id(Some("%1"), |s| s == "%1", &mut next), "%3");
-        assert_eq!(next, 4);
+        assert_eq!(pick_restore_id(Some("%1"), |s| s == "%1"), None);
         // `%` 없는 쓰레기 값도 폴백.
-        let mut next = 5;
-        assert_eq!(pick_restore_id(Some("garbage"), |_| false, &mut next), "%5");
-    }
-
-    #[test]
-    fn restore_never_lowers_the_counter() {
-        let mut next = 20;
-        assert_eq!(pick_restore_id(Some("%2"), |_| false, &mut next), "%2");
-        assert_eq!(next, 20);
+        assert_eq!(pick_restore_id(Some("garbage"), |_| false), None);
     }
 
     #[test]

@@ -559,6 +559,26 @@ pub trait Backend: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+    /// Render one pane to a PNG and return the file path.
+    ///
+    /// `peek` 는 텍스트만 준다 — 에이전트가 제 화면이 실제로 어떻게 보이는지는
+    /// 못 본다(2026-08-10 지시). 이 메서드가 그 구멍을 메운다: pane 영역만 잘라
+    /// 저장하고, 받는 쪽은 경로를 Read 로 연다.
+    ///
+    /// GPU 프레임버퍼 리드백이라 **창이 다른 창에 가려져 있어도 찍힌다** —
+    /// `screencapture` 와 달리 화면이 아니라 방금 그린 프레임을 읽기 때문이다.
+    /// 다만 창이 최소화되면 OS 가 렌더를 멈추므로 그때는 갱신이 서 있다.
+    ///
+    /// `max_width` = 0 이면 원본 크기. 그 외에는 가로가 그 값을 넘을 때만 비율을
+    /// 지켜 줄인다(읽는 쪽 컨텍스트 절약). 기본: 미지원.
+    fn capture_surface(
+        &self,
+        _surface_id: &str,
+        _path: Option<&str>,
+        _max_width: u32,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("capture_surface unsupported by this backend")
+    }
     /// Swap two surfaces' positions in the layout. Default: unsupported.
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
         anyhow::bail!("swap_surfaces unsupported by this backend")

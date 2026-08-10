@@ -231,6 +231,89 @@ impl App {
         }
     }
 
+    /// `surface.capture` — pane 한 칸만 잘라 다음 프레임에 PNG 로 굽도록 무장한다.
+    ///
+    /// 좌표는 렌더가 셀을 놓는 식 그대로다(`render_frame_gpu` 의 pad_x/pad_y 와 같은
+    /// 원점, 안쪽 여백 PANE_INNER 만 빼고 pane 상자 전체). 헤더 띠는 폐기돼(ghostty식,
+    /// `layout.rs` 히트테스트 참조) 세로 보정이 없다. 프레임버퍼는 물리 픽셀이라
+    /// 마지막에 scale 을 곱한다 — 안 곱하면 HiDPI 에서 좌상단 1/4 만 잘린다.
+    pub(crate) fn arm_pane_capture(
+        &mut self,
+        pane: &str,
+        path: Option<String>,
+        max_w: u32,
+        reply: std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ) {
+        if self.gpu.is_none() {
+            let _ = reply.send(Err("capture needs the gpu renderer".into()));
+            return;
+        }
+        // 프레임당 한 장만 읽는다. 헤드리스 autocapture 와 겹치면 그쪽이 먼저다 —
+        // 덮어쓰면 그 검증이 엉뚱한 pane 을 찍고 조용히 통과한다.
+        if self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some()) {
+            let _ = reply.send(Err("another capture is already armed; retry".into()));
+            return;
+        }
+        let (gcols, grows) = self.window_cells();
+        let Some((_, cx, cy, cw, ch)) = self
+            .effective_leaf_rects(gcols, grows)
+            .into_iter()
+            .find(|(id, ..)| id == pane)
+        else {
+            // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
+            // 답해야 부른 쪽이 줌을 풀 생각을 한다.
+            let zoomed = self.zoomed_pane.is_some();
+            let _ = reply.send(Err(if zoomed {
+                format!("{pane} is hidden behind a zoomed pane")
+            } else {
+                format!("no such pane: {pane}")
+            }));
+            return;
+        };
+        let s = self.effective_scale();
+        let px = (WINDOW_PADDING + self.effective_sidebar_w() + cx as f32 * self.cell.w) * s;
+        let py = (TITLE_HEIGHT + cy as f32 * self.cell.h) * s;
+        let pw = (cw as f32 * self.cell.w * s).round().max(1.0) as u32;
+        let ph = (ch as f32 * self.cell.h * s).round().max(1.0) as u32;
+        let path = path.unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(format!("kasaterm-capture-{}.png", pane.trim_start_matches('%')))
+                .to_string_lossy()
+                .into_owned()
+        });
+        if let Some(g) = self.gpu.as_mut() {
+            g.capture_crop = Some((px.max(0.0) as u32, py.max(0.0) as u32, pw, ph));
+            g.capture_max_w = max_w;
+            g.capture_next = Some(path.clone());
+        }
+        self.pending_capture_reply.push((path, reply));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// 무장한 캡처가 실제로 파일로 떨어졌는지 확인하고 회신한다(렌더 직후 호출).
+    pub(crate) fn settle_pane_captures(&mut self) {
+        if self.pending_capture_reply.is_empty() {
+            return;
+        }
+        // 아직 안 그려진 요청이 남아 있으면 이번엔 건너뛴다 — 무장이 그대로면
+        // 렌더가 소비하지 않은 것이다.
+        if self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some()) {
+            return;
+        }
+        for (path, reply) in std::mem::take(&mut self.pending_capture_reply) {
+            let msg = match std::fs::metadata(&path) {
+                Ok(m) if m.len() > 0 => Ok(serde_json::json!({
+                    "path": path,
+                    "bytes": m.len(),
+                })),
+                Ok(_) => Err(format!("capture wrote an empty file: {path}")),
+                Err(e) => Err(format!("capture produced no file ({path}): {e}")),
+            };
+            let _ = reply.send(msg);
+        }
+    }
+
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
         // Glyph-atlas repack, if one is pending. This is the only safe point
         // for it: from here on the frame emits quads whose UVs index the
@@ -7103,6 +7186,10 @@ impl App {
             // render_frame_gpu로 cells를 다시 그려 echo가 stale되지 않게.
             let _ = rebuild;
             self.render_frame_gpu(scale, time_secs);
+            // 리드백은 render_frame_gpu 안에서 device.poll(Wait) 로 끝나므로 여기선
+            // 파일이 이미 디스크에 있다. 회신을 여기 두는 이유가 그것 — 무장 시점에
+            // 답하면 받는 쪽이 아직 없는 파일을 Read 한다.
+            self.settle_pane_captures();
             if trace {
                 eprintln!(
                     "[render-gpu] {}us since_input={}ms",

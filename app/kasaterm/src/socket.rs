@@ -1151,6 +1151,31 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn capture_surface(
+        &self,
+        surface_id: &str,
+        path: Option<&str>,
+        max_width: u32,
+    ) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketCapture(
+                surface_id.to_string(),
+                path.map(|s| s.to_string()),
+                max_width,
+                tx,
+            ))
+            .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
+        // GUI 가 이벤트를 받아 한 프레임을 그리고 리드백까지 마쳐야 답이 온다. 창이
+        // 다른 창 뒤에 있거나 리사이즈 중이면 그 프레임이 늦으므로 넉넉히 준다 —
+        // 무한 대기는 안 된다(소켓 워커가 물려 다른 명령까지 멈춘다).
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Err(_) => anyhow::bail!("capture timed out (window may be minimized)"),
+        }
+    }
+
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
         // 대상 surface 가 지정됐는데 현재 없는 pane 이면 거부 — 재시작·종료로 사라진 학생에게
         // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(거노). 보낸 쪽이 ok:false

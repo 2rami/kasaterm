@@ -92,6 +92,12 @@ pub struct GpuRenderer {
     /// When set, the next `render` reads the presented frame back into a PNG at
     /// this path — permission-free self-capture for headless verification.
     pub capture_next: Option<String>,
+    /// 물리픽셀 크롭 `(x, y, w, h)`. `capture_next` 와 함께 소비된다. None = 창 전체.
+    /// `surface.capture` 가 pane 한 칸만 잘라 내는 데 쓴다.
+    pub capture_crop: Option<(u32, u32, u32, u32)>,
+    /// 저장 전 가로 상한(0 = 원본). 넘을 때만 비율을 지켜 줄인다 — 캡처를 읽는
+    /// 쪽은 보통 에이전트라, 원본 해상도 그대로면 컨텍스트를 크게 태운다.
+    pub capture_max_w: u32,
     pipeline: Pipeline,
     atlas: Atlas,
     shaper: Shaper,
@@ -629,6 +635,8 @@ impl GpuRenderer {
             device,
             queue,
             capture_next: None,
+            capture_crop: None,
+            capture_max_w: 0,
             config,
             pipeline,
             atlas,
@@ -4458,12 +4466,25 @@ impl GpuRenderer {
                 self.config.format,
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
             );
+            // 크롭은 GPU 가 아니라 여기서 한다. copy_texture_to_buffer 의 origin 을
+            // 옮기면 bytes_per_row 256 정렬을 잘린 폭 기준으로 다시 맞춰야 하는데,
+            // 캡처는 드문 연산이라 전체를 읽고 잘라 내는 편이 훨씬 단순하다.
+            let (cx, cy, cw, chh) = match self.capture_crop.take() {
+                Some((x, y, cw, ch)) => (
+                    x.min(w.saturating_sub(1)),
+                    y.min(h.saturating_sub(1)),
+                    cw.min(w.saturating_sub(x)).max(1),
+                    ch.min(h.saturating_sub(y)).max(1),
+                ),
+                None => (0, 0, w, h),
+            };
+            let max_w = std::mem::take(&mut self.capture_max_w);
             {
                 let data = buf.slice(..).get_mapped_range();
-                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                for row in 0..h {
-                    let s = (row * bpr) as usize;
-                    let line = &data[s..s + (w * 4) as usize];
+                let mut rgba = Vec::with_capacity((cw * chh * 4) as usize);
+                for row in cy..cy + chh {
+                    let s = (row * bpr + cx * 4) as usize;
+                    let line = &data[s..s + (cw * 4) as usize];
                     for px in line.chunks_exact(4) {
                         if bgra {
                             rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
@@ -4472,9 +4493,26 @@ impl GpuRenderer {
                         }
                     }
                 }
-                match save_rgba_png(&path, &rgba, w, h) {
-                    Ok(()) => eprintln!("[autocapture] gpu readback → {path} ({w}x{h})"),
-                    Err(e) => eprintln!("[autocapture] gpu png failed: {e}"),
+                let saved = if max_w > 0 && cw > max_w {
+                    let nh = ((chh as u64 * max_w as u64) / cw as u64).max(1) as u32;
+                    match image::RgbaImage::from_raw(cw, chh, rgba.clone()) {
+                        Some(img) => {
+                            let small = image::imageops::resize(
+                                &img,
+                                max_w,
+                                nh,
+                                image::imageops::FilterType::Lanczos3,
+                            );
+                            save_rgba_png(&path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
+                        }
+                        None => save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh)),
+                    }
+                } else {
+                    save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh))
+                };
+                match saved {
+                    Ok((ow, oh)) => eprintln!("[capture] gpu readback → {path} ({ow}x{oh})"),
+                    Err(e) => eprintln!("[capture] gpu png failed: {e}"),
                 }
             }
             buf.unmap();
