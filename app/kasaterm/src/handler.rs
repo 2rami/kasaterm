@@ -3235,8 +3235,8 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 칼럼 탭(Git / Info). 닫기·확장보다 먼저 봐야 한다 —
-                        // 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
+                        // 칼럼 탭(Git / Info / 세션). 닫기·확장보다 먼저 봐야
+                        // 한다 — 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
                         if let Some((tab, _)) = self
                             .info
                             .tab_rects
@@ -3253,6 +3253,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
                                 self.info.ctx_menu = None;
                             }
+                            window.request_redraw();
+                            return;
+                        }
+                        // 세션 기록 행 / 범위 칩 / 새로고침. Info 와 같은 이유로
+                        // 탭을 먼저 확인한다 — 다른 탭에선 낡은 좌표가 남는다.
+                        if self.info.tab == state::SideTab::Sessions
+                            && self.sessions_col_click(cx, cy)
+                        {
+                            self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }

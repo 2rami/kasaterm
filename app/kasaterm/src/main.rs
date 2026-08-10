@@ -34,6 +34,7 @@ mod lsp;
 mod links;
 mod proc;
 mod info;
+mod sesscol;
 mod state;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
@@ -4578,6 +4579,9 @@ struct App {
     /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
     /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
     info: state::InfoState,
+    /// 우측 칼럼의 Sessions 탭 — 과거 세션 기록(claude·codex·agy)을 골라 잇는다.
+    /// `git`/`info` 와 칼럼 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
+    sessions_col: state::SessionsColState,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -5001,9 +5005,18 @@ impl App {
                 // 가 사이드바를 강제로 여는 것과 같은 이유).
                 tab: if std::env::var("KASATERM_TEST_INFO").is_ok() {
                     state::SideTab::Info
+                } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
+                    state::SideTab::Sessions
                 } else {
                     state::SideTab::Git
                 },
+                ..Default::default()
+            },
+            sessions_col: state::SessionsColState {
+                // 헤드리스 검증에서 방 하나에 기록이 없으면 빈 목록만 찍힌다 —
+                // 전체 범위로 열어야 목록이 실제로 그려진 프레임을 캡처할 수 있다.
+                scope_all: std::env::var("KASATERM_TEST_SESSIONS")
+                    .is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
             statusbar: Default::default(),

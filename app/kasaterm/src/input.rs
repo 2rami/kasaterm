@@ -1263,6 +1263,23 @@ impl App {
             }
             return;
         }
+        // 세션 기록 탭: 목록 스크롤. Info 와 같은 이유로 상한은 렌더가 잡는다
+        // (행 수가 워커 스레드에서 바뀌어 입력 시점의 최대치는 낡았을 수 있다).
+        if self.git.col_visible
+            && self.info.tab == state::SideTab::Sessions
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.git_col_x()
+        {
+            let next = (self.sessions_col.scroll - lines as f32 * 22.0).max(0.0);
+            if (next - self.sessions_col.scroll).abs() > 0.01 {
+                self.sessions_col.scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         // Git column: scroll the change list when the pointer is over it. Same
         // clamp idea as the file tree; the visible height is the band between
         // the header and the bottom button zone.

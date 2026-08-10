@@ -334,6 +334,7 @@ impl App {
         self.publish_git_col_cwd();
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
         self.pump_info();
+        self.pump_sessions_col();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -4644,6 +4645,33 @@ impl App {
                     self.cursor_px,
                     &mut self.info,
                     &self.closed_panes,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
+            }
+            // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
+            // 본문만 다르다.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Sessions {
+                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - dock_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                sesscol::draw_sessions_col(
+                    g,
+                    self.cursor_px,
+                    &mut self.sessions_col,
                     git_col_x,
                     git_col_w,
                     body_top,
