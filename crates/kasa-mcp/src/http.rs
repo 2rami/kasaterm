@@ -2837,7 +2837,21 @@ pub fn remote_token() -> Option<&'static str> {
 
 /// loopback 밖에서 온 연결인가. `ConnectInfo` 가 없으면(=연결 정보를 안 붙인
 /// 경로) 원격이 아닌 것으로 본다 — 바인딩이 loopback 이면 원격 자체가 불가능하다.
+///
+/// ⚠️ **peer 주소만으로는 터널을 못 가른다.** `cloudflared` 같은 터널과 리버스
+/// 프록시는 **같은 머신에서 loopback 으로** 붙는다. 그래서 밖에서 들어온 요청이
+/// peer 로는 로컬로 보이고, 아래 토큰 관문을 통째로 건너뛴다 — 바인딩이
+/// `127.0.0.1` 그대로인데도 **터널 주소를 아는 사람이 무인증으로 셸에 닿는다.**
+/// 그러니 프록시가 붙이는 원-클라이언트 헤더가 있으면 그것만으로 원격으로 본다.
+///
+/// 이 판정은 한쪽으로만 틀릴 수 있다: 우리 코드도 브라우저도 이 헤더를 보내지
+/// 않으니 로컬 경로는 그대로고, 로컬에서 굳이 위조해 붙여도 **토큰을 더 요구받을
+/// 뿐**이라 느슨해지는 방향이 없다.
 fn is_remote_peer(req: &axum::extract::Request) -> bool {
+    let h = req.headers();
+    if h.contains_key("cf-connecting-ip") || h.contains_key("x-forwarded-for") {
+        return true;
+    }
     req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .is_some_and(|ci| !ci.0.ip().is_loopback())
@@ -3847,5 +3861,48 @@ mod raw_pane_tests {
         assert_eq!(raw_pane_param(Some("pane=")), None);
         assert_eq!(raw_pane_param(Some("cwd=/tmp")), None);
         assert_eq!(raw_pane_param(None), None);
+    }
+}
+
+#[cfg(test)]
+mod remote_peer_tests {
+    use super::is_remote_peer;
+
+    fn req(headers: &[(&str, &str)], peer: Option<&str>) -> axum::extract::Request {
+        let mut b = axum::http::Request::builder().uri("/term/ws");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let mut r = b.body(axum::body::Body::empty()).unwrap();
+        if let Some(p) = peer {
+            r.extensions_mut().insert(axum::extract::ConnectInfo(
+                p.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+        }
+        r
+    }
+
+    #[test]
+    fn plain_loopback_stays_local() {
+        assert!(!is_remote_peer(&req(&[], Some("127.0.0.1:51234"))));
+        assert!(!is_remote_peer(&req(&[], Some("[::1]:51234"))));
+        assert!(!is_remote_peer(&req(&[], None)));
+    }
+
+    #[test]
+    fn another_machine_is_remote() {
+        assert!(is_remote_peer(&req(&[], Some("192.168.0.7:51234"))));
+    }
+
+    /// 터널은 같은 머신에서 loopback 으로 붙는다. peer 만 보면 로컬로 보여
+    /// 토큰 관문을 건너뛰므로, 프록시 헤더 하나로도 원격이어야 한다.
+    #[test]
+    fn tunnel_arriving_over_loopback_is_remote() {
+        for h in ["cf-connecting-ip", "x-forwarded-for"] {
+            assert!(
+                is_remote_peer(&req(&[(h, "203.0.113.9")], Some("127.0.0.1:51234"))),
+                "{h} 가 붙었는데도 로컬로 봤다"
+            );
+        }
     }
 }
