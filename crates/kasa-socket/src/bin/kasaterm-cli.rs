@@ -1342,6 +1342,12 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
             rel_time(s.mtime),
             clip_display(&where_cell, 18),
         );
+        // 제목은 세션이 무엇으로 시작했나일 뿐이다. 어디서 멈췄는지는 이 줄에만
+        // 있고, 그게 스무 개 중 하나를 고르는 근거가 된다. 없으면 안 그린다 —
+        // 빈 들여쓰기 줄이 목록 높이만 두 배로 만든다.
+        if !s.preview.is_empty() {
+            println!("     {DIM}{}{RESET}", clip_display(&s.preview, term_cols().saturating_sub(6)));
+        }
     }
     if !interactive {
         return Ok(());
@@ -1563,6 +1569,26 @@ fn display_width(s: &str) -> usize {
 }
 
 /// 표시폭 기준으로 자르기(넘치면 … 붙임).
+/// 터미널 가로 칸 수. 못 알아내면 80 으로 본다.
+///
+/// 접히면 목록이 통째로 망가진다 — 한 항목이 두 줄이 되면서 번호와 내용이
+/// 어긋나 무엇을 고르는지 알 수 없게 된다. 그래서 넘치게 두느니 자른다.
+fn term_cols() -> usize {
+    // TIOCGWINSZ 를 직접 쓰지 않는다 — 상수도 구조체도 플랫폼마다 달라서, 손으로
+    // 적으면 한 OS 에서만 맞는 값이 박힌다. `COLUMNS` 도 못 믿는다: 셸이 export
+    // 해야만 있고 파이프 너머로는 안 온다. 그래서 libc 에 맡기고, 그마저 실패하면
+    // (파이프·리다이렉트) 80 으로 본다.
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 20
+        {
+            return ws.ws_col as usize;
+        }
+    }
+    std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 20).unwrap_or(80)
+}
+
 fn clip_display(s: &str, max: usize) -> String {
     let flat: String = s
         .chars()
