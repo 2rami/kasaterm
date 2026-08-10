@@ -422,11 +422,23 @@ pub trait Backend: Send + Sync {
     fn recent_sessions(&self, _cwd: Option<&str>) -> Result<Vec<RecentSession>> {
         Ok(Vec::new())
     }
-    /// Open a pane and resume the Claude session `id` in it: `newroom=true`
-    /// opens a fresh window, otherwise it splits the active one; the pane is
-    /// spawned in `cwd` when given. The actual `claude --resume <id>` is
-    /// injected once the new pane's shell prompt is up. Default: unsupported.
-    fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool, _attach: bool) -> Result<()> {
+    /// Open a pane and resume session `id` in it: `newroom=true` opens a fresh
+    /// window, otherwise it splits the active one; the pane is spawned in `cwd`
+    /// when given. The resume command is injected once the new pane's shell
+    /// prompt is up. Default: unsupported.
+    ///
+    /// `harness` 는 그 세션을 만든 코딩 프로그램(`claude`/`codex`/`agy`). 빈 문자열이면
+    /// claude 로 본다. 주입 문자열은 [`crate::sessions::resume_command`] 한 곳에서만
+    /// 만든다 — 예전에 CLI 와 GUI 가 각자 `claude --resume` 을 조립하다 한쪽만 고쳐진
+    /// 적이 있어 일부러 한 벌로 합쳤다.
+    fn resume_session(
+        &self,
+        _id: &str,
+        _cwd: Option<&str>,
+        _newroom: bool,
+        _attach: bool,
+        _harness: &str,
+    ) -> Result<()> {
         anyhow::bail!("resume_session unsupported by this backend")
     }
     /// "대화 저장하기" — foreground claude 를 ←← 주입으로 background daemon 으로 detach.

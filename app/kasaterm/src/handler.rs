@@ -367,7 +367,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::ResumeSession { id, cwd, newroom, attach } => {
+            UserEvent::ResumeSession { id, cwd, newroom, attach, harness } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
@@ -459,15 +459,17 @@ impl ApplicationHandler<UserEvent> for App {
                         let cmd = if *attach {
                             // daemon background 세션 연결(claude attach) — 세션은 background
                             // 유지, detach 해도 안 죽음. id 로 daemon 직접이라 cwd 불필요.
+                            // claude 의 daemon 개념이라 harness 와 무관하게 claude 다.
                             format!("claude attach {id}\r")
                         } else {
-                            match cwd {
-                                Some(c) if !c.is_empty() => {
-                                    let q = c.replace('\'', "'\\''");
-                                    format!("cd '{q}' && claude --resume {id}\r")
-                                }
-                                _ => format!("claude --resume {id}\r"),
-                            }
+                            // 하네스별 조립은 sessions::resume_command 한 곳에만 둔다 —
+                            // 예전에 CLI 와 GUI 가 각자 만들다 한쪽만 고쳐진 적이 있다.
+                            let line = kasa_socket::sessions::resume_command(
+                                harness,
+                                id,
+                                cwd.as_deref().unwrap_or(""),
+                            );
+                            format!("{line}\r")
                         };
                         let at = std::time::Instant::now()
                             + std::time::Duration::from_millis(900);
