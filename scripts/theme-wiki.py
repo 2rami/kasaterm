@@ -55,6 +55,24 @@ def roster():
     return [m for m in d["members"] if m.get("slug")]
 
 
+def claim(index, key, title, kr, variant):
+    """한 이름을 여럿이 노릴 때 **기본 문서**가 이긴다.
+
+    수영복·대체 의상 문서도 같은 `name_kr` 을 달고 있어서, 그냥 대입하면 나중에 온
+    쪽이 기본 문서를 덮는다. 그래도 오류가 안 나고 수집물이 그럴듯해서 **스프라이트를
+    다 굽고 눈으로 볼 때까지 모른다** — 칸나는 수영복, 시로코는 Terror 로 잡혀 있었다
+    (2026-08-11).
+
+    ⚠️제목만 봐서는 못 가른다. 수영복은 `(Swimsuit ver.)` 가 붙지만 「Shiroko Terror」
+    는 괄호도 없고 name_kr 도 기본과 **글자까지 같다**. 정본은 위키의 `Variant`
+    카테고리다 — 제목 규칙은 그 카테고리가 없을 때 쓰는 보조 순위일 뿐이다.
+    """
+    rank = (0 if variant else 1, 0 if "(" in title else 1, len(kr.split()))
+    prev = index.get(key)
+    if prev is None or rank > prev[1]:
+        index[key] = (title, rank)
+
+
 def build_index(category="Category:Students"):
     """위키 전체를 훑어 한글 이름 → 문서 제목 표를 만든다."""
     members = api(
@@ -69,13 +87,17 @@ def build_index(category="Category:Students"):
         d = api(
             action="query",
             titles="|".join(batch),
-            prop="revisions",
+            prop="revisions|categories",
             rvprop="content",
             rvslots="main",
+            cllimit="max",
         )
         for p in d.get("query", {}).get("pages", []):
             if "revisions" not in p:
                 continue
+            variant = any(
+                c["title"] == "Category:Variant" for c in p.get("categories", [])
+            )
             text = p["revisions"][0]["slots"]["main"]["content"]
             m = re.search(r"\|\s*name_kr\s*=\s*([^\n|]+)", text)
             if not m:
@@ -84,14 +106,14 @@ def build_index(category="Category:Students"):
             if not kr:
                 continue
             # 「텐도 케이」와 「케이」 둘 다 키로 넣는다 — 로스터는 이름만 쓴다.
-            # 성만 겹치는 남을 덮지 않도록, 짧은 키는 비어 있을 때만 채운다.
-            index[kr] = p["title"]
+            claim(index, kr, p["title"], kr, variant)
             parts = kr.split()
             if len(parts) > 1:
-                index.setdefault(parts[-1], p["title"])
+                claim(index, parts[-1], p["title"], kr, variant)
         print(f"  {min(i + 20, len(titles))}/{len(titles)}")
         time.sleep(0.3)
 
+    index = {k: v[0] for k, v in index.items()}
     os.makedirs(OUT, exist_ok=True)
     json.dump(index, open(INDEX, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print(f"인덱스 {len(index)}개 → {INDEX}")
@@ -138,6 +160,29 @@ def portrait_url(title):
         if best is None or ii["width"] * ii["height"] > best[1]:
             best = (ii["url"], ii["width"] * ii["height"], p["title"])
     return best
+
+
+def fetch_portrait(url, dst, force=False):
+    """참조 이미지를 내려받는다 — URL 만 적어 두면 아무도 못 쓴다.
+
+    `theme-sprites.py gen --ref` 는 `theme-src/<slug>/ref.png` 를 찾고, 없으면
+    「theme-wiki.py 로 포트레이트를 먼저 받아라」로 멈춘다. 그런데 그 받는 코드가
+    여기 없어서 지금까지 손으로 받아 왔다 — 그래서 시로코는 참조 없이, 칸나는 묘사만으로
+    구워졌다(2026-08-11).
+
+    ⚠️저작물이라 레포에 넣지 않는다. `.gitignore` 가 `theme-src/*/ref.png` 를 막는다.
+    """
+    if os.path.exists(dst) and not force:
+        return
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            data = r.read()
+    except Exception as e:
+        print(f"    포트레이트 실패: {e}", file=sys.stderr)
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    open(dst, "wb").write(data)
 
 
 def collect(names=None, force=False):
@@ -187,6 +232,7 @@ def collect(names=None, force=False):
         p = portrait_url(title)
         if p:
             rec["portrait"] = {"url": p[0], "file": p[2]}
+            fetch_portrait(p[0], os.path.join(OUT, m["slug"], "ref.png"), force)
 
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         json.dump(rec, open(dst, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
