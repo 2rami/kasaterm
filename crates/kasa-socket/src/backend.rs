@@ -578,6 +578,12 @@ pub trait Backend: Send + Sync {
     /// `ctx_window`/`ctx_tokens` 는 훅 stdin 의 하네스 정본이다(0 = 미보고). transcript
     /// 의 model 엔 `[1m]` 태그가 안 실려(API 응답이 `claude-opus-5`) 모델명으로는 1M
     /// 세션을 가려낼 수 없어, 이 값이 ctx% 분모의 유일한 확정 소스다. 기본: 무동작.
+    ///
+    /// `model`/`effort` 도 같은 훅 stdin 에서 온다(빈 문자열 = 미보고). 앱을 재시작해
+    /// pane 을 복원할 때 **끄기 직전 쓰던 것으로** 되살리는 데 쓴다. ★`model` 은
+    /// `model.id` 원본(`claude-opus-5[1m]`)이라 CLI 에 그대로 되먹일 수 있다 — board 에
+    /// 뜨는 모델명은 API 응답 표기라 `[1m]` 이 없고, 그걸 되먹이면 1M 세션이 200k 로
+    /// 강등된다. 그래서 board 쪽 값과 **의도적으로 다른 경로**를 쓴다.
     fn report_cwd(
         &self,
         _surface_id: &str,
@@ -585,6 +591,8 @@ pub trait Backend: Send + Sync {
         _session_id: &str,
         _ctx_window: u64,
         _ctx_tokens: u64,
+        _model: &str,
+        _effort: &str,
     ) -> Result<()> {
         Ok(())
     }

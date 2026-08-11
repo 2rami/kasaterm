@@ -185,7 +185,14 @@ pub struct PtyBackend {
     /// (`turn_context`)이 파일 **앞** 87~122KB 에 있어 tail 창에 영영 안 걸린다 —
     /// 그래서 머리를 한 번만 읽어 여기 기억한다. surface_id 가 아니라 **경로**가
     /// 키다: 세션을 갈아타면 경로가 바뀌어 저절로 다시 읽는다.
-    codex_model: Arc<Mutex<HashMap<String, String>>>,
+    codex_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// surface_id → statusline 이 보고한 (model.id, effort.level). 재시작 뒤 그 pane 을
+    /// **끄기 직전 쓰던 모델·effort 로** 되살리는 데 쓴다(세션 저장에 실린다).
+    ///
+    /// ★ board 의 `model` 과 **일부러 다른 값**이다. 그쪽은 API 응답 표기(`claude-opus-5`)
+    /// 나 화면 표시명이라 사람이 읽기엔 낫지만 `[1m]` 이 없어, 복원 명령에 되먹이면 1M
+    /// 세션이 200k 로 강등된다. 여기 담기는 `model.id` 만이 CLI 에 그대로 돌려줄 수 있다.
+    reported_agent_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
     /// surface_id → {cwd, git badge}, filled by the GUI each frame (shared Arc).
     /// `window_layout` reads it to stamp cwd/branch/diff onto each `PaneRect` so
     /// the BA GUI can draw a Warp-style bar without this thread shelling out to
@@ -333,7 +340,8 @@ impl PtyBackend {
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             reported_ctx: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
-            codex_model: Arc::new(Mutex::new(HashMap::new())),
+            codex_cfg: Arc::new(Mutex::new(HashMap::new())),
+            reported_agent_cfg: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
@@ -943,11 +951,25 @@ impl Backend for PtyBackend {
         session_id: &str,
         ctx_window: u64,
         ctx_tokens: u64,
+        model: &str,
+        effort: &str,
     ) -> Result<()> {
         self.reported_cwd
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        // 둘 중 **하나라도** 실려 오면 채택한다. 빈 값은 "미보고"라 종전 값을 안 덮는다 —
+        // effort 는 아예 안 정한 세션이 흔해서, 빈 effort 때문에 model 까지 버리면 안 된다.
+        if !model.is_empty() || !effort.is_empty() {
+            let mut cfg = self.reported_agent_cfg.lock().unwrap();
+            let e = cfg.entry(surface_id.to_string()).or_default();
+            if !model.is_empty() {
+                e.0 = model.to_string();
+            }
+            if !effort.is_empty() {
+                e.1 = effort.to_string();
+            }
+        }
         // 창을 아는 보고만 채택 — 0 은 "미보고"라 옛 정답을 덮지 않는다. 뷰 pane 도
         // 저장한다: cwd 와 달리 컨텍스트는 뷰어 자신의 것이 맞고, 그 pane 의 ctx% 는
         // 뷰어 세션 기준으로 보여야 한다.
@@ -1577,23 +1599,27 @@ impl Backend for PtyBackend {
                 if row.model.is_empty() && codex_sid_from_rollout(path).is_some() {
                     const HEAD: u64 = 384 * 1024;
                     let key = path.to_string_lossy().into_owned();
-                    let hit = self.codex_model.lock().unwrap().get(&key).cloned();
-                    match hit {
-                        Some(m) => row.model = m,
+                    let hit = self.codex_cfg.lock().unwrap().get(&key).cloned();
+                    let cfg = match hit {
+                        Some(c) => c,
                         None => {
                             let head = read_head(path, HEAD);
-                            let m = crate::transcript::codex_model_from_head(&head);
-                            if !m.is_empty() {
-                                self.codex_model.lock().unwrap().insert(key, m.clone());
-                                row.model = m;
-                            } else if head.len() as u64 >= HEAD {
-                                // 머리를 꽉 읽고도 없다 = 지시문이 우리 창보다 크다.
-                                // 폴링마다 384KB 를 다시 읽어도 같은 답이라 굳힌다.
-                                self.codex_model.lock().unwrap().insert(key, String::new());
+                            let c = crate::transcript::codex_cfg_from_head(&head);
+                            // 찾았거나, 머리를 꽉 읽고도 없을 때만 굳힌다. 후자는
+                            // 지시문이 우리 창보다 크다는 뜻이라 다시 읽어도 같은 답이다.
+                            // 더 짧게 읽혔으면 파일을 통째로 본 것 — 아직 첫 턴을 안
+                            // 썼을 뿐이라 굳히지 않고 다음 폴링에 다시 본다.
+                            if !c.0.is_empty() || head.len() as u64 >= HEAD {
+                                self.codex_cfg.lock().unwrap().insert(key, c.clone());
                             }
-                            // 더 짧으면 파일을 통째로 본 것 — 아직 첫 턴을 안 썼을
-                            // 뿐이라 굳히지 않고 다음 폴링에 다시 본다.
+                            c
                         }
+                    };
+                    row.model.clone_from(&cfg.0);
+                    // 저장 경로가 맵 하나만 보게 여기서 합류시킨다 — claude 는
+                    // statusline 이, codex 는 이 자리가 같은 맵을 채운다.
+                    if !cfg.0.is_empty() || !cfg.1.is_empty() {
+                        self.reported_agent_cfg.lock().unwrap().insert(sid.clone(), cfg);
                     }
                 }
                 // Prefer claude's official status when it reports this session

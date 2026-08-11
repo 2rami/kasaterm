@@ -117,24 +117,33 @@ fn looks_like_codex(tail: &str) -> bool {
     })
 }
 
-/// codex 롤아웃의 **머리**에서 model 을 집는다 — 앞에서부터 첫 `turn_context`.
+/// codex 롤아웃의 **머리**에서 `(model, effort)` 를 집는다 — 앞에서부터 첫
+/// `turn_context`. 둘이 같은 줄에 실려 오므로 한 번에 뽑는다.
 ///
 /// board 는 꼬리만 읽는데 codex 의 model 은 `turn_context` 에만 실리고, 그게 파일
 /// 앞 **87~122KB** 지점에 있다(실측 2026-08-11, 세션 4개). 그 앞을 채우는 건 지시문
 /// 뭉치다. 꼬리를 키워도 소용없다 — 한 턴이 exec 출력째 실려 512KB 를 넘으므로
 /// 마지막 `turn_context` 는 끝에서 1MB 넘게 떨어져 있다(같은 날 실측).
 ///
+/// effort 는 재시작 뒤 되살릴 때 쓴다(`-c model_reasoning_effort=…`). model 과 달리
+/// 없는 세션이 흔하니 빈 문자열이 정상이고, 그때는 플래그를 아예 안 붙인다.
+///
 /// 세션 도중 모델을 갈면 첫 값이 낡는다. 그래도 빈칸보다는 낫다 — board 에서 model
 /// 은 "무엇이 돌고 있나"를 가르는 칸이라 비면 행 자체가 읽히지 않는다.
-pub(crate) fn codex_model_from_head(head: &str) -> String {
+pub(crate) fn codex_cfg_from_head(head: &str) -> (String, String) {
     head.lines()
         .find_map(|l| {
             let v: serde_json::Value = serde_json::from_str(l).ok()?;
             if v.get("type")?.as_str()? != "turn_context" {
                 return None;
             }
-            let m = v.get("payload")?.get("model")?.as_str()?;
-            (!m.is_empty()).then(|| m.to_string())
+            let p = v.get("payload")?;
+            let get = |k: &str| {
+                p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+            };
+            let m = get("model");
+            // model 이 빈 `turn_context` 는 우리가 찾는 줄이 아니다 — 계속 훑는다.
+            (!m.is_empty()).then(|| (m, get("effort")))
         })
         .unwrap_or_default()
 }
@@ -1131,11 +1140,11 @@ mod codex_tests {
         assert_eq!(a.last_reply, "연동을 붙였어요");
     }
 
-    /// model 은 꼬리가 아니라 **머리**에서 온다(실측 87~122KB 지점). 세션 도중
-    /// 모델을 갈아도 **첫** 것을 쓴다 — 뒤엣것은 우리 머리 창에 없을 수도 있어,
-    /// 있다 없다 하는 값보다 한 번 정해진 값이 board 에서 덜 헷갈린다.
+    /// model·effort 는 꼬리가 아니라 **머리**에서, 그것도 같은 줄에서 온다(실측
+    /// 87~122KB 지점). 세션 도중 갈아도 **첫** 것을 쓴다 — 뒤엣것은 우리 머리 창에
+    /// 없을 수도 있어, 있다 없다 하는 값보다 한 번 정해진 값이 board 에서 덜 헷갈린다.
     #[test]
-    fn model_은_머리의_첫_turn_context_다() {
+    fn model_과_effort_는_머리의_첫_turn_context_다() {
         let head = [
             r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#,
             r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user"}}"#,
@@ -1143,11 +1152,15 @@ mod codex_tests {
             r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것"}}"#,
         ]
         .join("\n");
-        assert_eq!(codex_model_from_head(&head), "gpt-5.5");
+        assert_eq!(codex_cfg_from_head(&head), ("gpt-5.5".into(), "high".into()));
         // 아직 첫 턴을 안 쓴 세션 — 빈 문자열이어야 호출부가 "다음에 다시" 로 읽는다.
         let only_meta = r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#;
-        assert_eq!(codex_model_from_head(only_meta), "");
-        assert_eq!(codex_model_from_head("깨진 줄\n{}"), "");
+        assert_eq!(codex_cfg_from_head(only_meta), (String::new(), String::new()));
+        assert_eq!(codex_cfg_from_head("깨진 줄\n{}"), (String::new(), String::new()));
+        // effort 없는 세션이 흔하다 — model 만 있어도 채택해야 한다(빈 effort 때문에
+        // model 까지 버리면 복원이 통째로 기본값으로 떨어진다).
+        let no_effort = r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#;
+        assert_eq!(codex_cfg_from_head(no_effort), ("gpt-5.5".into(), String::new()));
     }
 
     /// codex 의 답변은 변경 목록째 실려 와 길다 — board 한 줄에 들어가려면 잘려야 한다.

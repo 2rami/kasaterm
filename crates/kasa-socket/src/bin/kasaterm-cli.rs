@@ -855,10 +855,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         "report-cwd" => {
             // statusline.py 가 매 렌더 호출:
-            //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens]
+            //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens] [model] [effort]
             // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출하고, 컨텍스트 창·사용
             // 토큰을 함께 실어 board 의 ctx% 분모를 확정한다(추정 대신 하네스 정본).
-            // 뒤 둘은 선택 — 구버전 statusline 이나 창 미상이면 생략되고 GUI 가 폴백한다.
+            // 뒤 넷은 선택 — 구버전 statusline 은 안 보내고, 그때는 0/빈값이라 GUI 가 폴백한다.
+            //
+            // model 은 훅 stdin 의 `model.id` **원본**이다(`claude-opus-5[1m]`). 재시작 뒤
+            // 같은 모델로 되살리는 데 쓰므로 `[1m]` 이 붙은 채로 와야 한다 — board 에 뜨는
+            // 쪽은 API 응답 표기라 그걸 되먹이면 1M 세션이 200k 로 강등된다.
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
@@ -866,6 +870,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let session_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let ctx_window: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             let ctx_tokens: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let model = args.get(5).map(|s| s.as_str()).unwrap_or("");
+            let effort = args.get(6).map(|s| s.as_str()).unwrap_or("");
             (
                 "surface.report_cwd",
                 json!({
@@ -874,6 +880,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "session_id": session_id,
                     "ctx_window": ctx_window,
                     "ctx_tokens": ctx_tokens,
+                    "model": model,
+                    "effort": effort,
                 }),
             )
         }
@@ -1798,8 +1806,14 @@ fn run_statusline() {
             if let Ok(me) = std::env::current_exe() {
                 let (ctx_win, _, ctx_tot) = sl_context(&d);
                 let (win_s, tot_s) = (ctx_win.to_string(), ctx_tot.to_string());
+                // 재시작 뒤 같은 모델·effort 로 되살리려고 함께 싣는다. `id` 는 **가공
+                // 없이** — `[1m]` 을 떼면 되먹였을 때 1M 세션이 200k 로 강등된다.
+                let model = d.pointer("/model/id").and_then(|v| v.as_str()).unwrap_or("");
+                let effort = d.pointer("/effort/level").and_then(|v| v.as_str()).unwrap_or("");
                 let _ = std::process::Command::new(me)
-                    .args(["report-cwd", &pane, &cwd, session_id, &win_s, &tot_s])
+                    .args([
+                        "report-cwd", &pane, &cwd, session_id, &win_s, &tot_s, model, effort,
+                    ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn();
