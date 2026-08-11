@@ -5239,6 +5239,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
         self.run_pending_autostash();
+        self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
         self.run_pending_autoexpandclick();
