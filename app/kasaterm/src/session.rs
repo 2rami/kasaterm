@@ -3004,7 +3004,7 @@ pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBu
 /// 않게 한다.
 /// 저장된 leaf 가 어떤 하네스로 돌던 pane 인지 — 없으면 순수 셸.
 ///
-/// 정본 키는 `was_agent`("claude"|"codex"). 그 전 포맷은 `was_claude: true` 뿐이라
+/// 정본 키는 `was_agent`("claude"|"codex"|"agy"). 그 전 포맷은 `was_claude: true` 뿐이라
 /// **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던 학생
 /// pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
 /// 언젠가 갈린다).
@@ -3012,6 +3012,7 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
     match rec.get("was_agent").and_then(|v| v.as_str()) {
         Some("codex") => return Some("codex"),
         Some("claude") => return Some("claude"),
+        Some("agy") => return Some("agy"),
         _ => {}
     }
     rec.get("was_claude")
@@ -3020,9 +3021,13 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
         .then_some("claude")
 }
 
-/// 복원된 pane 에 넣을 명령. 네 갈래(codex 이어가기/새로 · claude 이어가기/새로)라 순수
-/// 함수로 뺐다 — `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를
-/// 테스트할 방법이 사라진다.
+/// 복원된 pane 에 넣을 명령. 하네스 셋 × (이어가기/새로)라 순수 함수로 뺐다 —
+/// `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를 테스트할 방법이
+/// 사라진다.
+///
+/// ⚠️ **마지막 갈래가 claude 라는 게 함정이다.** 새 하네스를 여기 안 적으면 오류
+/// 없이 claude 로 되살아나고, 이어가기까지 걸리면 남의 하네스 세션 id 로
+/// `claude --resume` 을 친다. agy 를 붙일 때 실제로 그 상태였다(2026-08-11).
 ///
 /// codex 도 이어간다. 셋을 실측으로 확인했다(2026-08-05):
 /// - `codex resume <uuid>` 는 **pane 홈이 사라져도** 대화를 되살린다. shim 이 세운
@@ -3041,6 +3046,11 @@ pub(crate) fn restore_agent_command(
     match (agent, session_id) {
         (Some("codex"), Some(sid)) if resumable => format!("codex resume {sid}\r"),
         (Some("codex"), _) => "codex\r".to_string(),
+        // agy 는 아직 세션 id 가 안 들어온다 — bind-transcript 훅이 claude·codex
+        // shim 에만 걸려 있어서다. 그래도 하네스는 맞춰 띄운다: 여기 없으면 agy
+        // pane 이 claude 로 되살아난다.
+        (Some("agy"), Some(sid)) if resumable => format!("agy --conversation {sid}\r"),
+        (Some("agy"), _) => "agy\r".to_string(),
         (_, Some(sid)) if resumable => format!("claude --resume {sid}\r"),
         _ => "claude\r".to_string(),
     }
@@ -3132,5 +3142,41 @@ mod tests {
     fn returns_none_outside_any_repo() {
         // /tmp 는 레포가 아니고 홈 아래도 아니라 위로 훑어도 `.git` 이 없다.
         assert_eq!(git_repo_root(std::path::Path::new("/tmp")), None);
+    }
+}
+
+#[cfg(test)]
+mod agy_restore_tests {
+    use super::{restore_agent_command, saved_agent};
+
+    /// 복원 명령의 마지막 갈래가 claude 라, 하네스를 여기 안 적으면 **오류 없이**
+    /// claude 로 되살아난다. agy 를 붙이며 실제로 그 상태였다 — 하네스가 하나 더
+    /// 늘 때 같은 함정에 다시 빠지지 않게 셋을 다 건다.
+    #[test]
+    fn every_harness_restores_as_itself() {
+        for (agent, fresh) in [("claude", "claude\r"), ("codex", "codex\r"), ("agy", "agy\r")] {
+            assert_eq!(restore_agent_command(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
+        }
+        assert_eq!(restore_agent_command(Some("claude"), Some("s1"), true), "claude --resume s1\r");
+        assert_eq!(restore_agent_command(Some("codex"), Some("s2"), true), "codex resume s2\r");
+        assert_eq!(restore_agent_command(Some("agy"), Some("s3"), true), "agy --conversation s3\r");
+    }
+
+    /// 이어갈 수 없는 세션(파일이 사라짐)은 **id 를 버리고** 새로 띄워야 한다 —
+    /// 남의 하네스 id 를 넘기면 그 CLI 가 엉뚱한 대화를 물어온다.
+    #[test]
+    fn unresumable_drops_the_id() {
+        assert_eq!(restore_agent_command(Some("agy"), Some("s3"), false), "agy\r");
+        assert_eq!(restore_agent_command(Some("codex"), Some("s2"), false), "codex\r");
+    }
+
+    #[test]
+    fn saved_agent_reads_agy_and_keeps_the_legacy_key() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(saved_agent(&j(r#"{"was_agent":"agy"}"#)), Some("agy"));
+        assert_eq!(saved_agent(&j(r#"{"was_agent":"codex"}"#)), Some("codex"));
+        // 옛 저장본 — 이게 깨지면 판올림 한 번에 학생 pane 이 전부 셸이 된다.
+        assert_eq!(saved_agent(&j(r#"{"was_claude":true}"#)), Some("claude"));
+        assert_eq!(saved_agent(&j(r#"{}"#)), None);
     }
 }

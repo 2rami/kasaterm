@@ -2334,6 +2334,7 @@ fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
 pub enum AgentKind {
     Claude,
     Codex,
+    Agy,
 }
 
 impl AgentKind {
@@ -2343,6 +2344,7 @@ impl AgentKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agy => "agy",
         }
     }
 
@@ -2354,6 +2356,9 @@ impl AgentKind {
         match base.as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            // shim 래퍼도 `agy` 라는 이름의 sh 스크립트지만 마지막에 `exec` 로
+            // 진짜 바이너리가 그 자리를 차지하므로, 여기 걸리는 건 늘 진짜다.
+            "agy" => Some(Self::Agy),
             _ => None,
         }
     }
