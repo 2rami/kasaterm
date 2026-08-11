@@ -784,7 +784,14 @@ impl App {
             return;
         }
         for id in ids {
-            if !self.pty.contains_key(&id) {
+            // PTY 를 놓는 것과 트리에서 leaf 를 걷는 것은 경로가 갈려 있다 —
+            // `swap_character` 는 PTY 를 **먼저** 놓고 같은 pane id 로 새로 띄우는데,
+            // 그 spawn 이 실패하면 PTY 없이 leaf 만 남는다. 옛 PTY 의 EOF 는 그
+            // 뒤에 도착하므로, pty 맵만 보고 건너뛰면 그 자리가 **빈 pane 으로
+            // 영구히 남았다**(화면엔 빈 칸, board 엔 안 잡히고, 저장 때
+            // `layout_to_json` 이 `{"leaf": null}` 을 흘린다 — 2026-08-11 실측).
+            // 트리에 아직 leaf 가 있다는 건 정리가 안 끝났다는 뜻이므로 진행한다.
+            if !self.pty.contains_key(&id) && !self.leaf_lingers_anywhere(&id) {
                 continue;
             }
             self.remove_pane(&id);
@@ -1138,6 +1145,36 @@ for p in glob.glob(os.path.join(d, '*.json')):
             *slot = None;
         }
         true
+    }
+
+    /// `remove_stashed_leaf` 의 읽기 전용 짝 — 이 슬롯이 그 leaf 를 담고 있는지.
+    fn stashed_leaf_exists(slot: &Option<kasa_pty::PtyLayout>, target: &str) -> bool {
+        slot.as_ref()
+            .map(|t| t.leaves().iter().any(|l| *l == target))
+            .unwrap_or(false)
+    }
+
+    /// PTY 가 이미 없는 pane 이 아직 어느 트리엔가 leaf 로 남아 있는지 — 남아 있으면
+    /// 그 자리는 그릴 것이 없는 유령 pane 이다. 활성 창만 봐서는 안 된다: 다른
+    /// 윈도우로 전환해 둔 pane 은 stash 슬롯에 있고, 백그라운드 세션은 자기 트리를
+    /// 따로 쥔다. 실제로 빈 칸이 남은 자리가 활성 창이 아니라 **다른 윈도우**였다.
+    fn leaf_lingers_anywhere(&self, target: &str) -> bool {
+        if Self::stashed_leaf_exists(&self.pty_layout, target) {
+            return true;
+        }
+        if self
+            .windows
+            .iter()
+            .any(|w| Self::stashed_leaf_exists(w, target))
+        {
+            return true;
+        }
+        self.sessions.iter().flatten().any(|s| {
+            Self::stashed_leaf_exists(&s.pty_layout, target)
+                || s.windows
+                    .iter()
+                    .any(|w| Self::stashed_leaf_exists(w, target))
+        })
     }
 
     /// active 트리 밖(현재 세션의 stash 윈도우 + 백그라운드 세션들)에서 pane 을
@@ -2114,4 +2151,38 @@ mod drop_zone_tests {
         assert_eq!(drop_zone_for_offsets(-0.5, -0.8), DropZone::Up);
     }
 
+    #[test]
+    fn stashed_leaf_lookup_pairs_with_removal() {
+        // reap 이 "유령 leaf 가 있다"고 판정하는 눈(`stashed_leaf_exists`)과 실제로
+        // 걷어내는 손(`remove_stashed_leaf`)이 어긋나면, PTY 없는 자리가 빈 pane 으로
+        // 화면에 그대로 남는다 — 2026-08-11 실측 버그. 이 짝을 못박는다.
+        let leaf = |id: &str| kasa_pty::PtyLayout::Leaf {
+            pane_id: id.to_string(),
+        };
+        let mut slot = Some(kasa_pty::PtyLayout::Split {
+            dir: kasa_pty::SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(leaf("%1")),
+            b: Box::new(kasa_pty::PtyLayout::Split {
+                dir: kasa_pty::SplitDir::Vertical,
+                ratio: 0.5,
+                a: Box::new(leaf("%2")),
+                b: Box::new(leaf("%3")),
+            }),
+        });
+        // 중첩 깊이와 무관하게 찾는다 — 실제로 빈 칸이 남았던 자리가 깊이 2였다.
+        assert!(App::stashed_leaf_exists(&slot, "%3"));
+        assert!(!App::stashed_leaf_exists(&slot, "%9"));
+        // 찾았다면 반드시 걷어낼 수 있어야 한다. 어긋나면 reap 이 매 틱 같은 id 를
+        // 유령으로 판정하고도 못 지운다.
+        assert!(App::remove_stashed_leaf(&mut slot, "%3"));
+        assert!(!App::stashed_leaf_exists(&slot, "%3"));
+        assert!(App::stashed_leaf_exists(&slot, "%2"));
+        // 마지막 leaf 까지 걷으면 슬롯째 비고, 빈 슬롯·없는 대상 조회도 안전하다.
+        assert!(App::remove_stashed_leaf(&mut slot, "%1"));
+        assert!(App::remove_stashed_leaf(&mut slot, "%2"));
+        assert!(slot.is_none());
+        assert!(!App::stashed_leaf_exists(&slot, "%1"));
+        assert!(!App::remove_stashed_leaf(&mut slot, "%1"));
+    }
 }
