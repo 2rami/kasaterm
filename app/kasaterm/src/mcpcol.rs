@@ -503,6 +503,67 @@ fn remove_claude_mcp(name: &str, scope: &str) -> anyhow::Result<String> {
     Ok(format!("{name} 지웠다 — claude {scope}"))
 }
 
+/// 더하기 전에 이름과 주소를 본다. 통과하면 정리된 (이름, 주소)를 준다.
+///
+/// 설정 파일에 그대로 적히는 값이라, 여기서 막지 않으면 하네스가 뜰 때 파싱이 깨지거나
+/// (이름에 점·따옴표) 조용히 아무 데도 못 붙는다(스킴 없는 주소).
+fn validate_add(name: &str, url: &str) -> Result<(String, String), String> {
+    let name = name.trim();
+    let url = url.trim();
+    if name.is_empty() {
+        return Err("이름이 비었다".into());
+    }
+    // codex 는 이름이 toml 테이블 키가 된다 — 점이 들어가면 중첩 테이블로 읽힌다.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("이름은 영문·숫자·-·_ 만".into());
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("주소는 http:// 나 https:// 로".into());
+    }
+    Ok((name.to_string(), url.to_string()))
+}
+
+/// codex 에 URL 서버를 더한다 — `[mcp_servers.<이름>]` 에 `url` 한 줄.
+fn add_codex_mcp(home: &std::path::Path, name: &str, url: &str) -> anyhow::Result<String> {
+    let path = home.join(".codex/config.toml");
+    let text = std::fs::read_to_string(&path)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>()?;
+    if doc.get("mcp_servers").is_none() {
+        doc["mcp_servers"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let servers = doc["mcp_servers"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcp_servers 가 테이블이 아니다"))?;
+    // 덮어쓰면 원래 있던 서버의 설정이 말없이 사라진다.
+    if servers.get(name).is_some() {
+        return Err(anyhow::anyhow!("{name} 은 이미 있다"));
+    }
+    let mut t = toml_edit::Table::new();
+    t["url"] = toml_edit::value(url);
+    servers.insert(name, toml_edit::Item::Table(t));
+    write_config_atomic(&path, &doc.to_string())?;
+    Ok(format!("{name} 더했다 — codex"))
+}
+
+/// claude 에 URL 서버를 더한다. 지우기와 같은 이유로 CLI 에 맡긴다 —
+/// `~/.claude.json` 은 도는 세션들이 함께 쓴다.
+fn add_claude_mcp(name: &str, url: &str) -> anyhow::Result<String> {
+    let out = std::process::Command::new("claude")
+        .args([
+            "mcp", "add", "--transport", "http", name, url, "-s", "user",
+        ])
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim().lines().next().unwrap_or("이유 미상");
+        return Err(anyhow::anyhow!("{err}"));
+    }
+    Ok(format!("{name} 더했다 — claude 전역"))
+}
+
 /// 여기서 껐다 켤 수 있는 조합인가. 넷 중 둘뿐이다:
 ///
 /// - claude MCP — 전역으로 끄는 설정이 없다. 프로젝트별 `disabledMcpServers` 는 있지만
@@ -590,6 +651,155 @@ impl App {
         });
     }
 
+    /// 추가 칸에 글자를 넣는다 — 조합이 끝난 한글도 여기로 온다. 커서 산수는
+    /// `lineedit` 한 벌을 쓴다(칸마다 다시 짜면 한글 경계에서 하나씩 어긋난다).
+    pub(crate) fn mcp_add_insert(&mut self, text: &str) {
+        let Some(f) = self.mcp_col.add.as_mut() else {
+            return;
+        };
+        let (s, c) = if f.on_url {
+            (&mut f.url, &mut f.url_cursor)
+        } else {
+            (&mut f.name, &mut f.name_cursor)
+        };
+        crate::lineedit::insert(s, c, text);
+        f.err = None;
+        self.chrome_dirty = true;
+    }
+
+    /// 추가 칸의 키 입력 — 한글 조합을 포함한다. `git_commit_input` 과 같은 얼개다:
+    /// macOS 는 자모를 `event.text` 로 넘기므로 공용 조합기에 먹이고, 완성된 음절만
+    /// 칸에 넣는다. 조합 중인 것은 `self.preedit` 로 오버레이가 그린다.
+    pub(crate) fn mcp_add_input(&mut self, event: &winit::event::KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
+        self.ime_retarget(crate::ImeFocus::McpAdd);
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            self.mcp_add_insert(&commit);
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.mcp_add_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.mcp_add_key(event);
+    }
+
+    /// 추가 칸의 키. Tab 은 칸을 옮기고, Enter 는 더하고, Esc 는 닫는다.
+    pub(crate) fn mcp_add_key(&mut self, event: &winit::event::KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        if matches!(&event.logical_key, Key::Named(NamedKey::Tab)) {
+            if let Some(f) = self.mcp_col.add.as_mut() {
+                f.on_url = !f.on_url;
+                self.chrome_dirty = true;
+            }
+            return;
+        }
+        let Some(f) = self.mcp_col.add.as_mut() else {
+            return;
+        };
+        let (s, c) = if f.on_url {
+            (&mut f.url, &mut f.url_cursor)
+        } else {
+            (&mut f.name, &mut f.name_cursor)
+        };
+        match crate::lineedit::key(s, c, &event.logical_key) {
+            crate::lineedit::LineEditAction::Submit => self.mcp_add_submit(),
+            crate::lineedit::LineEditAction::Cancel => {
+                self.mcp_col.add = None;
+                self.preedit.clear();
+                self.in_preedit = false;
+                let _ = self.hangul.flush();
+            }
+            _ => {
+                f.err = None;
+            }
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// 칸의 내용을 설정에 더한다. 실패하면 칸을 닫지 않는다 — 닫으면 방금 친 주소를
+    /// 다시 쳐야 한다.
+    pub(crate) fn mcp_add_submit(&mut self) {
+        let Some(f) = self.mcp_col.add.as_ref() else {
+            return;
+        };
+        let (harness, name, url) = match validate_add(&f.name, &f.url) {
+            Ok((n, u)) => (f.harness, n, u),
+            Err(e) => {
+                if let Some(f) = self.mcp_col.add.as_mut() {
+                    f.err = Some(e);
+                }
+                return;
+            }
+        };
+        // claude 는 CLI 라 프로세스를 띄운다 — 워커로.
+        if harness == "claude" {
+            let (notice, snap, rev, busy, cwd) = (
+                self.mcp_col.notice.clone(),
+                self.mcp_col.snap.clone(),
+                self.mcp_col.rev.clone(),
+                self.mcp_col.busy.clone(),
+                self.mcp_col.cwd.clone(),
+            );
+            self.mcp_col.add = None;
+            self.set_toast(format!("{name} 더하는 중…"));
+            self.mcp_col.busy.store(true, Relaxed);
+            std::thread::spawn(move || {
+                let msg = match add_claude_mcp(&name, &url) {
+                    Ok(m) => m,
+                    Err(e) => format!("⚠ {name} 못 더했다: {e}"),
+                };
+                if let Ok(mut g) = notice.lock() {
+                    *g = Some(msg);
+                }
+                if let Ok(mut g) = snap.lock() {
+                    *g = collect(cwd.as_deref());
+                }
+                rev.fetch_add(1, Relaxed);
+                busy.store(false, Relaxed);
+            });
+            return;
+        }
+        let res = kasa_socket::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("홈 디렉터리를 못 찾았다"))
+            .and_then(|h| add_codex_mcp(&h, &name, &url));
+        match res {
+            Ok(m) => {
+                self.mcp_col.add = None;
+                self.set_toast(m);
+                self.mcp_col.stale = true;
+            }
+            // 이미 있는 이름처럼 고쳐 쓸 수 있는 실패는 칸 안에 남긴다.
+            Err(e) => {
+                if let Some(f) = self.mcp_col.add.as_mut() {
+                    f.err = Some(e.to_string());
+                }
+            }
+        }
+    }
+
     /// 지우기 — 한 번은 확인, 두 번째에 실행. 되돌릴 수 없는 일이라 두 번 누르게
     /// 한다. 다이얼로그를 띄우지 않는 건 그 순간 목록에서 눈이 떠나기 때문이다.
     fn mcp_col_delete(&mut self, i: usize) {
@@ -658,6 +868,46 @@ impl App {
                 self.chrome_dirty = true;
                 return true;
             }
+        }
+        let inside = |r: &(f32, f32, f32, f32)| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3;
+        // 추가 칸이 열려 있으면 그 안이 먼저다 — 칸이 목록 위를 덮고 있다.
+        if let Some(f) = self.mcp_col.add.as_mut() {
+            if f.name_rect.is_some_and(|r| inside(&r)) {
+                f.on_url = false;
+                self.chrome_dirty = true;
+                return true;
+            }
+            if f.url_rect.is_some_and(|r| inside(&r)) {
+                f.on_url = true;
+                self.chrome_dirty = true;
+                return true;
+            }
+            if f.cancel_rect.is_some_and(|r| inside(&r)) {
+                self.mcp_col.add = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            if f.ok_rect.is_some_and(|r| inside(&r)) {
+                self.mcp_add_submit();
+                self.chrome_dirty = true;
+                return true;
+            }
+        }
+        if let Some(h) = self
+            .mcp_col
+            .add_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(h, _)| *h)
+        {
+            // 같은 + 를 다시 누르면 닫는다.
+            let open = self.mcp_col.add.as_ref().is_some_and(|f| f.harness == h);
+            self.mcp_col.add = (!open).then(|| state::McpAddForm {
+                harness: h,
+                ..Default::default()
+            });
+            self.chrome_dirty = true;
+            return true;
         }
         // 지우기는 행 위에 겹쳐 있어 먼저 본다.
         if let Some(i) = self
@@ -731,6 +981,7 @@ pub(crate) fn draw_mcp_col(
     mc.row_rects.clear();
     mc.del_rects.clear();
     mc.refresh_rect = None;
+    let mut add_rects: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
     // 확인 대기는 스스로 풀린다 — 무장한 줄이 화면에 남아 있으면 한참 뒤의 클릭이
     // 지우기가 된다.
     if mc
@@ -777,12 +1028,133 @@ pub(crate) fn draw_mcp_col(
         mc.refresh_rect = Some(r);
     }
 
-    let body_top = top + 30.0;
+    // ── 추가 칸 (열려 있을 때만, 스크롤 밖 고정) ──
+    // 목록 안에 끼워 넣지 않는 건 스크롤 때문이다 — 칸이 흘러 화면 밖으로 나가면
+    // 타이핑하는 자리가 안 보인다.
+    let mut form_h = 0.0;
+    if let Some(f) = mc.add.as_mut() {
+        let fy = top + 30.0;
+        form_h = if f.err.is_some() { 110.0 } else { 96.0 };
+        g.rect(x + 1.0, fy, w - 1.0, form_h, theme::surface_hover());
+        // 어느 하네스의 + 를 눌렀는지는 폼이 뜬 뒤엔 화면에 안 남는다 — 두 하네스가
+        // 같은 자리에 같은 폼을 띄우므로 여기 적지 않으면 어디로 가는지 알 수 없다.
+        g.draw_text(
+            x0,
+            fy + 6.0,
+            &format!("{} 에 URL 서버 추가", f.harness),
+            gpu::DrawOpts {
+                font_size: 10.0,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
+        );
+        let field = |g: &mut gpu::GpuRenderer,
+                     yy: f32,
+                     label: &str,
+                     val: &str,
+                     focused: bool,
+                     ph: &str|
+         -> (f32, f32, f32, f32) {
+            let r = (x0, yy, right - x0, 22.0);
+            round_rect(
+                g,
+                r.0,
+                r.1,
+                r.2,
+                r.3,
+                theme::radius_sm(),
+                if focused {
+                    theme::surface()
+                } else {
+                    theme::panel_bg()
+                },
+            );
+            g.draw_text(
+                r.0 + 6.0,
+                yy + 5.0,
+                label,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::text_dim(),
+                    bold: false,
+                    italic: false,
+                },
+            );
+            let lw = g.measure_chrome_text(label, 10.0, false);
+            let show = if val.is_empty() { ph } else { val };
+            g.draw_text(
+                r.0 + 12.0 + lw,
+                yy + 4.0,
+                show,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: if val.is_empty() {
+                        theme::text_dim()
+                    } else {
+                        theme::text()
+                    },
+                    bold: false,
+                    italic: false,
+                },
+            );
+            r
+        };
+        f.name_rect = Some(field(g, fy + 24.0, "이름", &f.name, !f.on_url, "my-server"));
+        f.url_rect = Some(field(
+            g,
+            fy + 50.0,
+            "주소",
+            &f.url,
+            f.on_url,
+            "https://example.com/mcp",
+        ));
+        if let Some(e) = &f.err {
+            g.draw_text(
+                x0,
+                fy + 76.0,
+                e,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: crate::render::DIFF_RED,
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+        let by = fy + form_h - 20.0;
+        let ok = (right - 46.0, by, 46.0, 16.0);
+        let cancel = (right - 100.0, by, 40.0, 16.0);
+        for (r, label, strong) in [(ok, "더하기", true), (cancel, "취소", false)] {
+            let h = hit(&r);
+            g.hover_pointer |= h;
+            g.draw_text(
+                r.0,
+                r.1,
+                label,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: if strong || h {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    },
+                    bold: strong,
+                    italic: false,
+                },
+            );
+        }
+        f.ok_rect = Some(ok);
+        f.cancel_rect = Some(cancel);
+    }
+
+    let body_top = top + 30.0 + form_h;
     let vis_h = (bottom - body_top).max(0.0);
     mc.body_rect = (x, body_top, w, vis_h);
 
     if mc.view.is_empty() {
         mc.content_h = EMPTY_H;
+        mc.add_rects = add_rects;
         g.draw_text(
             x0,
             body_top + 12.0,
@@ -828,6 +1200,19 @@ pub(crate) fn draw_mcp_col(
                         italic: false,
                     },
                 );
+                // 더하기는 섹션 머리에 둔다 — 어느 하네스에 붙일지가 누르는 자리로
+                // 정해져야, 폼 안에서 하네스를 또 고르지 않아도 된다.
+                let r = (right - 18.0, y + 5.0, 18.0, 18.0);
+                let ah = hit(&r);
+                g.hover_pointer |= ah;
+                g.queue_icon(
+                    "plus",
+                    r.0,
+                    r.1,
+                    15.0,
+                    if ah { theme::text() } else { theme::text_dim() },
+                );
+                add_rects.push((row.harness, r));
             }
             y += SECTION_H;
         }
@@ -953,6 +1338,7 @@ pub(crate) fn draw_mcp_col(
         }
         y += ROW_H;
     }
+    mc.add_rects = add_rects;
 }
 
 /// 섹션·그룹 머리를 포함한 목록 전체 높이. 스크롤 상한이 이 값에 걸린다.
@@ -1250,6 +1636,61 @@ enabled = false
         assert_eq!(bare.len(), 2, "전역만: {bare:?}");
         assert!(bare.iter().all(|r| r.enabled && r.scope == "전역"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 이 값들은 설정 파일에 그대로 적힌다. 여기서 안 막으면 하네스가 뜰 때 파싱이
+    /// 깨지거나(이름의 점), 조용히 아무 데도 안 붙는다(스킴 없는 주소).
+    #[test]
+    fn add_form_rejects_what_would_break_the_config() {
+        assert!(validate_add("", "https://a").is_err(), "이름이 비면 안 된다");
+        // codex 는 이름이 toml 테이블 키가 된다 — 점이 들어가면 중첩 테이블로 읽힌다.
+        assert!(validate_add("my.server", "https://a").is_err());
+        assert!(validate_add("my server", "https://a").is_err());
+        assert!(validate_add("a\"b", "https://a").is_err());
+        assert!(validate_add("ok", "example.com/mcp").is_err(), "스킴이 있어야");
+        assert!(validate_add("ok", "").is_err());
+        assert_eq!(
+            validate_add("  my-server_2 ", " https://x.dev/mcp ").unwrap(),
+            ("my-server_2".into(), "https://x.dev/mcp".into()),
+            "앞뒤 공백은 털어 넣는다 — 붙여 넣으면 딸려 온다"
+        );
+    }
+
+    /// 더할 때 이미 있는 이름을 덮으면 원래 서버의 설정이 말없이 사라진다.
+    #[test]
+    fn codex_add_writes_url_and_refuses_to_overwrite() {
+        let home = tmp_home("cx-add");
+        let cx = home.join(".codex");
+        std::fs::create_dir_all(&cx).unwrap();
+        std::fs::write(cx.join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+
+        add_codex_mcp(&home, "figma", "https://mcp.figma.com/mcp").unwrap();
+        let rows = codex_mcp(&home);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "figma");
+        assert_eq!(rows[0].detail, "https://mcp.figma.com/mcp");
+        assert!(rows[0].enabled, "더한 것은 켜진 채로 시작한다");
+        assert!(
+            std::fs::read_to_string(cx.join("config.toml"))
+                .unwrap()
+                .contains("model = \"gpt-5.5\""),
+            "원래 설정이 살아 있어야 한다"
+        );
+
+        assert!(
+            add_codex_mcp(&home, "figma", "https://other").is_err(),
+            "같은 이름을 덮으면 원래 서버가 말없이 사라진다"
+        );
+        assert_eq!(codex_mcp(&home)[0].detail, "https://mcp.figma.com/mcp");
+
+        // mcp_servers 테이블이 아예 없던 설정에도 더할 수 있어야 한다.
+        let fresh = tmp_home("cx-add2");
+        std::fs::create_dir_all(fresh.join(".codex")).unwrap();
+        std::fs::write(fresh.join(".codex/config.toml"), "").unwrap();
+        add_codex_mcp(&fresh, "first", "https://a.dev/mcp").unwrap();
+        assert_eq!(codex_mcp(&fresh).len(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 
     /// 지우기는 설정에서 그 항목만 빠지고 나머지·주석은 그대로여야 한다.

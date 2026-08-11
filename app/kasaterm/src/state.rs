@@ -106,6 +106,26 @@ pub(crate) enum SideTab {
     Mcp,
 }
 
+/// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.
+#[derive(Default)]
+pub(crate) struct McpAddForm {
+    /// 어느 하네스에 더하나 — `"claude"` | `"codex"`. 누른 섹션이 정한다.
+    pub(crate) harness: &'static str,
+    pub(crate) name: String,
+    pub(crate) name_cursor: usize,
+    pub(crate) url: String,
+    pub(crate) url_cursor: usize,
+    /// 참이면 주소 칸에 커서가 있다. Tab 으로 오간다.
+    pub(crate) on_url: bool,
+    /// 마지막 시도가 남긴 한 줄. 칸 아래에 그대로 뜬다 — 토스트로 띄우면 칸을
+    /// 보고 있는 눈에서 멀어지고, 다음 토스트에 밀려 사라진다.
+    pub(crate) err: Option<String>,
+    pub(crate) name_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) url_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) ok_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) cancel_rect: Option<(f32, f32, f32, f32)>,
+}
+
 /// 우측 칼럼의 「MCP·Skill」 탭 상태.
 ///
 /// 설정 두 벌(`~/.claude.json` json · `~/.codex/config.toml` toml)을 파싱하고 스킬
@@ -129,11 +149,19 @@ pub(crate) struct McpColState {
     /// 이 창이 보고 있는 폴더. claude 쪽은 꺼짐도 `.mcp.json` 도 폴더마다 달라서,
     /// 여기가 바뀌면 주기를 기다리지 않고 다시 읽는다.
     pub(crate) cwd: Option<std::path::PathBuf>,
+    /// URL 서버를 더하는 칸. 열려 있으면 키가 PTY 대신 이리로 온다.
+    ///
+    /// URL 만 받는 이유는 stdio 서버가 커맨드·인자·환경변수를 다 받아야 해서다. 그
+    /// 환경변수 자리엔 대개 API 키가 들어가는데, 그걸 여기서 받으면 우리가 토큰을
+    /// 평문으로 설정 파일에 적는 셈이 된다 — 2026-08-11 확정("URL 서버 추가까지").
+    pub(crate) add: Option<McpAddForm>,
     pub(crate) scroll: f32,
     /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
     pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 행별 지우기 버튼. 행 hit 보다 먼저 본다 — 겹쳐 있다.
     pub(crate) del_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 섹션 머리의 더하기 버튼과 그게 여는 하네스.
+    pub(crate) add_rects: Vec<(&'static str, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) content_h: f32,
@@ -152,9 +180,11 @@ impl Default for McpColState {
             notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
             confirm_delete: None,
             cwd: None,
+            add: None,
             scroll: 0.0,
             row_rects: Vec::new(),
             del_rects: Vec::new(),
+            add_rects: Vec::new(),
             refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
             content_h: 0.0,

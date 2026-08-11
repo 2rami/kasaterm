@@ -1492,6 +1492,7 @@ impl App {
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
+            crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
             crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
@@ -1800,6 +1801,14 @@ impl App {
         // (Click elsewhere blurs it — see the column's mouse handler.)
         if self.git.commit_focused {
             self.git_commit_input(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // MCP 탭의 추가 칸도 같은 자리에서 가른다 — 열려 있으면 키가 PTY 로 안 간다.
+        if self.mcp_col.add.is_some() {
+            self.mcp_add_input(event);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
