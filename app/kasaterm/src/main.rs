@@ -15,7 +15,6 @@ mod gpu;
 mod render;
 mod handler;
 mod socket;
-#[cfg(unix)]
 mod bridge;
 mod stream;
 mod theme;
@@ -5013,17 +5012,22 @@ fn arm_self_install() {
 /// spawn 쪽이 아니라 여기서 지우는 건, 새는 통로가 pane 만이 아니어서다 — 훅·MCP
 /// 서버·계정 갱신 프로브도 같은 env 를 물려받는다. 입구를 한 번 막는 게 출구를
 /// 전부 세는 것보다 낫다. 앱은 이 값들을 하나도 읽지 않으므로 지워서 잃을 게 없다.
+/// "이 프로세스는 claude 안에서 태어났다"를 뜻하는 env 마커 전부. 물려받으면
+/// 자식 claude 가 중첩으로 오인해 transcript 저장을 끄거나 attach 대신 새 세션
+/// TUI 로 폴백한다 — 부팅 스크럽(아래)과 bridge 의 attach 스폰이 같은 목록을 쓴다.
+pub(crate) const CLAUDE_MARKER_ENV: [&str; 8] = [
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_TEAMMATE_MODE",
+    "CLAUDE_CODE_FORK_SUBAGENT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDECODE",
+];
+
 fn scrub_inherited_claude_markers() {
-    for k in [
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_TEAMMATE_MODE",
-        "CLAUDE_CODE_FORK_SUBAGENT",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_EXECPATH",
-        "CLAUDE_PID",
-        "CLAUDECODE",
-    ] {
+    for k in CLAUDE_MARKER_ENV {
         std::env::remove_var(k);
     }
 }
