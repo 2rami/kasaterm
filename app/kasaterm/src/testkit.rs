@@ -1096,6 +1096,95 @@ impl App {
         }
     }
 
+    /// Headless 뷰 전환 검증: `KASATERM_AUTOVIEW_MS` 뒤에 방을 쪼개 펼치고, 카드 머리의
+    /// 전환 배지를 **실제 좌표 판정으로** 눌러 배치도↔목록을 왕복한다.
+    ///
+    /// 세는 건 `sidebar_row_rects` 가 아니다 — 거기엔 칸과 줄이 한 벡터에 섞여 있어
+    /// 넷이 넷으로 바뀌면 아무것도 안 바뀐 것과 구별이 안 된다. 레이아웃을 직접 불러
+    /// 줄과 칸을 갈라 센다. 통과 모양은 `칸4/줄0` ↔ `칸0/줄4` 다.
+    /// `_HOLD=1` 이면 목록 모드에서 멈춘다(캡처로 눈으로 보려는 자리).
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoview(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOVIEW_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let wi0 = self.active_window;
+        if !self.expanded_windows.contains(&wi0) {
+            self.toggle_window_expand(wi0);
+        }
+        // ★ **다 펴질 때까지** 기다린다 — rect 가 생기자마자 세면 안 된다. 목록은
+        // 카드가 자라는 동안 아래에서 한 줄씩 드러나는 설계라, 애니메이션 중간에
+        // 세면 마지막 줄이 아직 카드 밖이어서 「줄이 하나 모자란다」로 읽힌다
+        // (실측: h=139 일 때 4번째 줄이 잘렸고, 다 펴진 150 에서는 들어온다).
+        for _ in 0..40 {
+            self.render_frame();
+            if self.expand_progress(wi0) >= 1.0 && !self.sidebar_row_rects.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let counts = |app: &App| -> (usize, usize) {
+            let win_h = app
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as f32 / app.effective_scale())
+                .unwrap_or(800.0);
+            let (_, _, _, rows, mini) = app.sidebar_layout(win_h);
+            (mini.len(), rows.len())
+        };
+        let wi = self.active_window;
+        let press = |app: &mut App| -> bool {
+            let Some(tab) = app.window_tab_rects.iter().find(|(i, _)| *i == wi).map(|(_, r)| *r)
+            else {
+                return false;
+            };
+            let Some(vr) = app.window_view_rect(wi, tab) else { return false };
+            let hit = app.window_strip_click(vr.0 + vr.2 / 2.0, vr.1 + vr.3 / 2.0);
+            app.render_frame();
+            hit
+        };
+        let n_leaf = self.window_leaves(wi).len();
+        let before = counts(self);
+        let hit1 = press(self);
+        let after = counts(self);
+        eprintln!(
+            "[autoview] leaf={n_leaf} · 배치도(칸{}/줄{}) --누름{}--> 목록(칸{}/줄{})",
+            before.0, before.1, if hit1 { "" } else { "실패" }, after.0, after.1
+        );
+        if std::env::var("KASATERM_AUTOVIEW_HOLD").is_ok() {
+            eprintln!("[autoview] hold — 목록 모드에서 멈춤");
+            return;
+        }
+        let hit2 = press(self);
+        let back = counts(self);
+        eprintln!(
+            "[autoview] --누름{}--> 배치도(칸{}/줄{}) 왕복복귀={}",
+            if hit2 { "" } else { "실패" },
+            back.0,
+            back.1,
+            back == before
+        );
+        eprintln!("[autoview] 기대: 칸N/줄0 ↔ 칸0/줄N (한쪽이 늘 0 이 아니면 두 뷰가 같이 떠 있는 것)");
+    }
+
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
     /// 하나를 pane 셋짜리로 쪼갠 다음, 그 방을 통째로 별도 창으로 꺼낸다.
     ///

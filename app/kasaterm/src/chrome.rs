@@ -1183,6 +1183,30 @@ impl App {
         self.chrome_dirty = true;
     }
 
+    /// 펼친 카드의 뷰를 배치도↔목록으로 갈아 끼운다.
+    pub(crate) fn toggle_window_list_view(&mut self, idx: usize) {
+        if !self.list_view_windows.remove(&idx) {
+            self.list_view_windows.insert(idx);
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// 카드 머리의 **뷰 전환 버튼** — 펼치기 배지 바로 왼쪽. `tab` 은 그 방 카드의 사각.
+    ///
+    /// 접힌 방에는 없다. 안 보이는 뷰를 미리 고르는 버튼은 누를 이유가 없고, 카드
+    /// 머리는 이미 이름·cwd·⌘번호·×·배지가 다투는 자리다.
+    pub(crate) fn window_view_rect(
+        &self,
+        idx: usize,
+        tab: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32, f32, f32)> {
+        if self.expand_progress(idx) <= 0.0 {
+            return None;
+        }
+        let er = self.window_expand_rect(idx, tab)?;
+        Some((er.0 - 4.0 - 22.0, er.1, 22.0, er.3))
+    }
+
     /// 방 탭 카드 안 **펼치기 버튼**의 사각 — 상태 점 왼쪽의 삼각형 자리.
     /// `tab` 은 그 방 카드의 사각.
     ///
@@ -1267,8 +1291,14 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
-            // 펼치기 버튼만 전환의 예외다 — 그 삼각형 하나 크기.
+            // 펼치기·뷰 전환 버튼만 전환의 예외다 — 그 배지 두 개 크기.
             let tab = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r);
+            if let Some(r) = tab.and_then(|t| self.window_view_rect(idx, t)) {
+                if inside(&r) {
+                    self.toggle_window_list_view(idx);
+                    return true;
+                }
+            }
             if let Some(r) = tab.and_then(|t| self.window_expand_rect(idx, t)) {
                 if inside(&r) {
                     self.toggle_window_expand(idx);
