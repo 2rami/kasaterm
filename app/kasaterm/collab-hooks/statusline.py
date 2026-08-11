@@ -9,10 +9,13 @@
 """
 Claude Code Statusline — kasaterm 미니멀.
 
-    <학생얼굴> ┃ <model> Opus ┃ <git> main ┃ <dir> tmuxify ┃ 8% ┃ <bolt> xhigh
+    <model> Opus 5 1M ┃ <git> main ┃ <dir> tmuxify ┃ 8% ┃ <bolt> xhigh
 
-- 학생: kasaterm 안에선 U+FFFC 자리표시자를 내보내 kasaterm 이 그 자리에 배정 학생
-  프로필 얼굴 이미지(아로나 웹뷰 프사)를 얹는다. 밖(일반 터미널)에선 ●+이름 폴백.
+- 학생: kasaterm 안에선 U+FFFC 표식 한 칸만 내보낸다(프사는 pane 헤더가 이미 보여준다).
+  kasaterm 이 그 칸을 blank 로 지우므로 화면엔 왼쪽 공백 한 칸으로 남고, 구분자를 안
+  붙여 그 뒤로 바로 첫 세그먼트가 온다. 밖(일반 터미널)에선 ●+이름 폴백.
+- 창 크기는 모델 옆에 붙인다 — 200k 인지 1M 인지가 모델의 성질이고, 뒤 퍼센트는
+  그 분모로 계산된 값이라 숫자 하나만 있으면 된다(거노 2026-08-11).
 - effort: stdin `effort.level`(/effort 시 실시간 갱신), 레벨별 색.
 - permission 모드는 표시 안 함 — 하단 기본 힌트 줄(bypass permissions on)과 중복.
 """
@@ -31,7 +34,6 @@ except ImportError:
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
-ITALIC = "\033[3m"
 DIM = "\033[2m"
 
 # 학생명 → accent hex (kasaterm theme.rs character_accent 와 동일 값)
@@ -50,9 +52,6 @@ EFFORT_HEX = {
 C_MODEL, C_GIT, C_DIR, C_CTX, C_SEP, C_FALLBACK = (
     "7aa2f7", "73daca", "bb9af7", "ff9e64", "565f89", "a0a6b0",
 )
-# 로그인 계정 세그먼트 — 흰색+이탤릭(거노: 색 세그먼트들 사이에서 계정만 구분되게.
-# 터미널 셀은 폰트 패밀리 교체가 불가라 "폰트 다르게"는 italic 스타일로 대응)
-C_ACCT = "ffffff"
 
 ICON_SETS = {
     "nerd-font": {"model": "", "git": "", "folder": "", "effort": ""},
@@ -87,60 +86,9 @@ def load_config():
     return {}
 
 
-def active_account_label():
-    """kasaterm 설정의 **활성 계정** 라벨 — 거노가 붙인 이름("개인계정"·
-    "사이오닉팀플랜"). 활성 계정이 비었으면(기본 로그인) None → 호출측이 공유 캐시
-    폴백으로 간다.
-
-    왜 공유 캐시(`~/.claude.json` 의 `oauthAccount`)를 안 쓰나: 그 필드는 **슬롯별이
-    아니다**. 마지막으로 로그인한 계정으로 덮이므로 어느 슬롯으로 돌든 같은 이름이
-    뜬다(거노: "계정추가하면 1도 그거로 바뀌어"). 2026-08-05 실측 — 이 pane 은
-    `acct-2`(사이오닉팀플랜)로 도는데 statusline 은 `개인계정`을 보여주고 있었다.
-
-    **설정 값을 보는 것은 거노 선택이다**(2026-08-05): Info 에서 계정을 바꾸면 모든
-    pane 의 statusline 이 즉시 새 계정을 말한다. 대가는 알고 고른 것이다 — 이미 도는
-    claude 는 부팅 때 토큰을 물어 **실제로는 옛 계정으로 계속 돈다**. 그 pane 이 진짜
-    쓰는 슬롯을 알아야 하면 `CLAUDE_SECURESTORAGE_CONFIG_DIR` 을 봐라(env 는 pane
-    생애 동안 고정이다). 새 계정은 다음에 띄우는 pane 부터 실제로 적용된다.
-
-    갱신 시점은 claude 가 statusline 을 다시 그릴 때 = 그 pane 의 다음 턴이다.
-    유휴 pane 은 다음 입력까지 옛 이름을 들고 있다 — 이 스크립트를 부르는 건
-    kasaterm 이 아니라 claude 라서 우리가 앞당길 수 없다."""
-    try:
-        cfg = Path.home() / ".config" / "kasaterm" / "settings.json"
-        with open(cfg, encoding="utf-8") as f:
-            d = json.load(f)
-    except Exception:
-        return None
-    cur = (d.get("claude_account") or "").strip()
-    if not cur:
-        return None
-    # 이름을 안 붙인 슬롯은 그 슬롯의 **이메일**로 부른다 — `acct-1` 같은 내부 id 는
-    # 어느 계정인지 하나도 말해 주지 않는다(거노 2026-08-06). 이메일은 kasaterm 이
-    # 슬롯 신원을 조회할 때마다 설정에 흘려 둔 것이라 여기선 공짜로 읽는다.
-    email = (d.get("claude_account_emails") or {}).get(cur) or ""
-    for a in d.get("claude_accounts") or []:
-        if a.get("id") == cur:
-            return (a.get("label") or "").strip() or email.strip() or cur
-    # 설정 목록에 없는 id(손으로 지운 계정 등)는 그대로 — 빈칸보다 낫다.
-    return email.strip() or cur
-
-
-def load_account():
-    """로그인한 Claude 계정 — top-level .claude.json 의 oauthAccount dict.
-    CLAUDE_CONFIG_DIR 있으면 그 아래, 없으면 ~/.claude.json. 파일 없음/파싱 실패/
-    키 없음은 None 반환해 세그먼트만 생략 — statusline 을 절대 죽이지 않는다.
-
-    ⚠️ 이 dict 의 email·orgId·orgName 은 **슬롯별이 아니라 공유 캐시**다. 기본
-    로그인으로 도는 pane 에서만 참이므로, 슬롯을 쓰는 pane 은
-    `slot_account_label()` 이 먼저 답한다."""
-    cfgdir = os.environ.get("CLAUDE_CONFIG_DIR")
-    path = (Path(cfgdir) if cfgdir else Path.home()) / ".claude.json"
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f).get("oauthAccount")
-    except Exception:
-        return None
+# 계정 세그먼트는 걷었다(거노 2026-08-11: "계정없애고"). 슬롯 라벨을 읽던
+# `active_account_label`·`load_account` 도 함께 지웠다 — 계정을 어느 pane 이 쓰는지는
+# Info 패널이 답하고, 상태줄은 매 턴 눈에 들어오는 자리라 안 바뀌는 값을 둘 곳이 아니다.
 
 
 def get_git_branch(cwd):
@@ -236,6 +184,11 @@ def main():
 
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "
     parts = []
+    # pane 안에서 왼쪽 끝에 놓는 표식. `parts` 에 안 넣는 이유는 구분자다 — 넣으면
+    # `￼ ┃ ` 로 네 칸이 비고, 프사를 걷어낸 뒤로 그 자리가 그냥 구멍이 된다
+    # (거노 2026-08-11: "학생프사 없어진 자리 비어이쓴는데 왼쪽으로 밀착해").
+    # kasaterm 이 이 한 칸을 blank 로 지우므로 실제로는 공백 한 칸만 남는다.
+    prefix = ""
 
     name = os.environ.get("KASATERM_CHARACTER")
     # 포크/attach 로 세션 id 가 env anchor(KASATERM_SESSION_ID)와 갈라진 백그라운드
@@ -253,33 +206,12 @@ def main():
         if os.environ.get("KASATERM_PANE_ID"):
             # pane 안에서는 학생을 여기 안 쓴다(거노 2026-08-11) — 이름도 프사도
             # pane 헤더가 이미 보여주므로 상태줄에 또 있으면 같은 정보가 두 번이다.
-            # 표식만 남긴다(아래 SPRITE 주석: 이게 없으면 kasaterm 쪽 판정 셋이 죽는다).
-            parts.append(SPRITE)
+            # 표식만 남긴다(위 SPRITE 주석: 이게 없으면 kasaterm 쪽 판정 셋이 죽는다).
+            prefix = SPRITE
         else:
             # 일반 터미널에는 pane 헤더가 없다 — 거기서는 누구인지 여기서만 알 수 있다.
             c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
-
-    # 계정 — 프사 바로 오른쪽. kasaterm 설정의 **활성 계정** 라벨이 1순위다(거노가
-    # 붙인 이름). 활성 계정이 없으면 기본 로그인이고 그때만 공유 캐시가 참이라 종전
-    # 규칙으로 간다: team/enterprise 는 조직명, 그 외는 사용자 이름(displayName).
-    # 개인계정 organizationName 은 "<이름>'s Organization" 이라 무의미해 "개인" 대신
-    # 실제 이름을 쓰고(거노), displayName 없으면 이메일 로컬파트, 그마저 없으면
-    # "개인" 폴백.
-    label = active_account_label()
-    if not label:
-        acct = load_account()
-        if acct:
-            otype = (acct.get("organizationType") or "").lower()
-            org = (acct.get("organizationName") or "").strip()
-            if "team" in otype or "enterprise" in otype:
-                label = org or "팀"
-            else:
-                label = ((acct.get("displayName") or "").strip()
-                         or (acct.get("emailAddress") or "").split("@")[0]
-                         or "개인")
-    if label:
-        parts.append(f"{ansi(C_ACCT)}{ITALIC}{label[:14]}{RESET}")
 
     # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
     # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을
@@ -287,12 +219,18 @@ def main():
     # --resume 복원 경로에선 여전히 오판했다. pane→세션 바인딩이 복원까지 정확해진
     # 뒤에 정밀 재도입할 것. forked_view 는 위 프사 이름 교정에만 쓴다.
 
+    # 창 크기는 모델의 성질이라 모델 옆에 붙인다(거노 2026-08-11: "컨텍스트량 1m은
+    # 모델로 옮기고 200k인지 그건지"). 같은 Opus 라도 `[1m]` 으로 띄웠는지에 따라
+    # 분모가 다섯 배 갈리는데, 그 사실이 퍼센트 옆에 있으면 "왜 갑자기 뛰었지"를
+    # 모델과 못 잇는다. `display_name` 의 "(1M context)" 꼬리는 안 쓴다 — 200k 일 땐
+    # 아무 말도 안 해서, 둘을 구분하려면 우리가 창 크기로 직접 적어야 한다.
     model = (d.get("model") or {}).get("display_name")
     if model:
-        # "(1M context)" 등 괄호 꼬리는 뒤 ctx% 의 "·1M" 과 중복 — 떼서 좁은 pane
-        # statusLine truncate 를 막는다(거노: 오른쪽 좁은 pane 깨짐).
         model = model.split(" (")[0]
-        parts.append(f"{ansi(C_MODEL)}{BOLD}{ic['model']} {model}{RESET}")
+        win_s = (f"1M" if ctx_win >= 1_000_000
+                 else (f"{ctx_win // 1000}k" if ctx_win else ""))
+        tail = f"{DIM} {win_s}{RESET}" if win_s else ""
+        parts.append(f"{ansi(C_MODEL)}{BOLD}{ic['model']} {model}{RESET}{tail}")
 
     branch = get_git_branch(cwd)
     if branch:
@@ -300,12 +238,9 @@ def main():
 
     parts.append(f"{ansi(C_DIR)}{ic['folder']} {Path(cwd).name}{RESET}")
 
-    # ctx% 는 "현재 모델 창" 기준이라 모델 전환 시 점프한다(Opus[1m]=1M vs Fable=200k
-    # — 같은 31만 토큰이 31% ↔ 100%). 창 크기를 함께 표시해 분모 차이를 자명하게.
-    win, pct = ctx_win, ctx_pct
-    win_s = f"·{win // 1000000}M" if win >= 1000000 else (f"·{win // 1000}k" if win else "")
-    c_ctx = ansi("f7768e") if pct >= 90 else ansi(C_CTX)
-    parts.append(f"{c_ctx}{pct:.0f}%{DIM}{win_s}{RESET}")
+    # 퍼센트 하나만. 분모는 위 모델 옆에 적혀 있으므로 여기서 또 말할 필요가 없다.
+    c_ctx = ansi("f7768e") if ctx_pct >= 90 else ansi(C_CTX)
+    parts.append(f"{c_ctx}{ctx_pct:.0f}%{RESET}")
 
     lvl = (d.get("effort") or {}).get("level")
     if lvl:
@@ -317,8 +252,7 @@ def main():
     # **입력박스 테두리**를 보라색으로 물들인다 — 타이핑하는 자리라 놓칠 수 없다.
     # `ultracode-mark.py`(UserPromptSubmit)가 마커를 쓰는 쪽은 그대로다.
 
-    # 마커는 세그먼트 뒤 끝자락 — 좁은 pane 에서 잘리면 폴백(argv·타이틀·3s 폴)이 줍는다.
-    print(sep.join(parts))
+    print(prefix + sep.join(parts))
 
 
 if __name__ == "__main__":
