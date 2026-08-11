@@ -25,6 +25,15 @@ def main() -> None:
         d = json.load(sys.stdin)
     except Exception:
         return
+    # title-sync 가 제목을 지으려고 띄우는 claude(-p, cwd=$TMPDIR/kasaterm-title-gen)는
+    # **대화 전문**을 프롬프트로 받는다. 그 안에 "ultracode" 글자가 한 번이라도 있으면
+    # 남의 턴을 자기 세션 마커로 찍고, 그 세션은 다음 턴이 없어 지울 기회조차 없다 —
+    # /tmp 에 영영 쌓인다(2026-08-11 실측: 남아 있던 마커 8개가 전부 이것이었다).
+    # 같은 가드를 kasaterm-bind-transcript.sh·sessions.rs 가 이미 갖고 있다.
+    junk = str(d.get("transcript_path") or "") + str(d.get("cwd") or "") + os.getcwd()
+    if "kasaterm-title-gen" in junk:
+        return
+
     sid = d.get("session_id")
     if not isinstance(sid, str) or not sid:
         return
