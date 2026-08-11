@@ -1238,7 +1238,18 @@ impl App {
             .pty
             .iter()
             .filter_map(|(id, s)| {
-                let window = ws.pane_window.get(id).copied().unwrap_or(self.active_window);
+                // 숨긴 pane 은 어느 트리에도 없어 `pane_window` 에 안 잡히는데, 폴백이
+                // **활성 방**이라 치워 둔 pane 이 지금 보고 있는 방에 붙어 버린다(실측:
+                // 방 1 에서 숨긴 %4 가 방 2 밑에 섰다). 치운 자리를 기억하는 곳이
+                // `closed_panes.window` 이므로 그걸 먼저 본다.
+                let window = ws
+                    .pane_window
+                    .get(id)
+                    .copied()
+                    .or_else(|| {
+                        self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
+                    })
+                    .unwrap_or(self.active_window);
                 Some(PaneTarget {
                     // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
                     // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
