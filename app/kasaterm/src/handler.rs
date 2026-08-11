@@ -175,6 +175,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::NotifyFocus { pane, sid } => {
+                // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
+                // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
+                // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.
+                let same = match sid.as_deref() {
+                    Some(s) => self.pane_claude_sid.get(pane).is_some_and(|c| c == s),
+                    // 세션을 못 실은 알림(순정 셸 pane)은 존재 확인까지만.
+                    None => self.ws.lock().unwrap().panes.contains_key(pane),
+                };
+                if !same {
+                    return;
+                }
+                // 배너를 눌렀는데 창이 뒤에 남아 있으면 누른 뜻이 없다. 방 전환은
+                // `SocketFocus` 가 하므로 여기서는 창만 앞으로 올리고 넘긴다.
+                if let Some(w) = self.window.as_ref() {
+                    w.focus_window();
+                }
+                let _ = self.proxy.send_event(UserEvent::SocketFocus(pane.clone()));
+                return;
+            }
             UserEvent::SocketFocus(id) => {
                 // GUI(SCHALE OS)에서 다른 방(=다른 윈도우)의 학생을 포커스하면 그
                 // 윈도우를 앞으로 가져와야 한다. active_pane 만 바꾸면 보이지 않는
@@ -742,6 +762,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Ask for desktop-notification permission up front so the prompt
         // appears at launch rather than mid-work on the first completion.
         crate::chrome::ensure_notification_authorization();
+        // 배너 클릭을 받을 delegate. **알림이 배달되기 전에** 걸려야 한다 — delegate 가
+        // 없는 동안 눌린 알림은 앱만 깨우고 어디로 갈지 없이 사라진다.
+        #[cfg(target_os = "macos")]
+        crate::macos_notify::install_notification_click_handler(self.proxy.clone());
         // Windows 자동 업데이트 시작 — WinSparkle.dll 이 있을 때만(없으면 no-op).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
