@@ -564,23 +564,97 @@ fn add_claude_mcp(name: &str, url: &str) -> anyhow::Result<String> {
     Ok(format!("{name} 더했다 — claude 전역"))
 }
 
-/// 여기서 껐다 켤 수 있는 조합인가. 넷 중 둘뿐이다:
+/// claude MCP 서버를 **이 폴더에서만** 껐다 켠다.
 ///
-/// - claude MCP — 전역으로 끄는 설정이 없다. 프로젝트별 `disabledMcpServers` 는 있지만
-///   그건 "이 폴더에서만"이라, 전역 목록에 전역인 척 체크박스를 다는 것이 거짓이 된다.
-/// - codex 스킬 — 폴더(대개 심볼릭 링크)가 곧 목록이라 끄기가 삭제와 같아진다.
+/// 꺼짐이 적히는 자리가 스코프에 따라 갈린다: `.mcp.json` 서버(스코프 「레포」)는
+/// `disabledMcpjsonServers`, 나머지는 `disabledMcpServers`. 두 배열은 서로를 안 본다 —
+/// 틀린 쪽에 적으면 아무 일도 안 일어난 것처럼 보인다.
+///
+/// **이 파일만 다르게 다뤄야 한다.** `~/.claude.json` 은 지금 도는 claude 세션 전부가
+/// 함께 쓰는 파일이고(세션 기록·프로젝트 상태가 다 여기 있다), 우리가 읽고-고쳐-쓰는
+/// 사이에 다른 세션이 자기 기록을 쓰면 우리 쓰기가 그것을 통째로 지운다. 그래서 읽은
+/// 시각을 들고 있다가 쓰기 직전에 다시 재고, 그 사이 누가 건드렸으면 포기한다 —
+/// 덮어쓰는 것보다 "다시 눌러라"가 낫다. 재고 쓰는 사이의 틈은 여전히 남지만(밀리초),
+/// 파일 잠금 없이 줄일 수 있는 데까지는 줄인 것이다.
+fn set_claude_mcp_enabled(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    name: &str,
+    scope: &str,
+    on: bool,
+) -> anyhow::Result<()> {
+    let path = home.join(".claude.json");
+    let before = std::fs::metadata(&path)?.modified()?;
+    write_claude_disabled(&path, before, cwd, name, scope, on)
+}
+
+/// 위의 몸통. 읽은 시각을 인자로 받는 건 테스트 때문이다 — 스스로 재게 두면 "그
+/// 사이에 남이 고쳤다"를 시간 경합으로만 만들 수 있어, 검사가 도는 날과 안 도는 날이
+/// 생긴다.
+fn write_claude_disabled(
+    path: &std::path::Path,
+    before: std::time::SystemTime,
+    cwd: &std::path::Path,
+    name: &str,
+    scope: &str,
+    on: bool,
+) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut v: serde_json::Value = serde_json::from_str(&text)?;
+    let key = if scope == "레포" {
+        "disabledMcpjsonServers"
+    } else {
+        "disabledMcpServers"
+    };
+    let cwd_s = cwd
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("폴더 경로가 이상하다"))?
+        .to_string();
+    fn obj(
+        val: &mut serde_json::Value,
+    ) -> anyhow::Result<&mut serde_json::Map<String, serde_json::Value>> {
+        val.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!(".claude.json 의 모양이 예상과 다르다"))
+    }
+    let projects = obj(&mut v)?
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}));
+    let proj = obj(projects)?
+        .entry(cwd_s)
+        .or_insert_with(|| serde_json::json!({}));
+    let arr = obj(proj)?
+        .entry(key)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("{key} 가 배열이 아니다"))?;
+    if on {
+        arr.retain(|x| x.as_str() != Some(name));
+    } else if !arr.iter().any(|x| x.as_str() == Some(name)) {
+        arr.push(serde_json::json!(name));
+    }
+    let body = format!("{}\n", serde_json::to_string_pretty(&v)?);
+    if std::fs::metadata(path)?.modified()? != before {
+        return Err(anyhow::anyhow!("다른 세션이 방금 설정을 고쳤다 — 다시 눌러라"));
+    }
+    write_config_atomic(path, &body)?;
+    Ok(())
+}
+
+/// 여기서 껐다 켤 수 있는 조합인가. 넷 중 셋이다 — codex 스킬만 빠진다: 폴더(대개
+/// 심볼릭 링크)가 곧 목록이라 끄기가 삭제와 같아진다.
+///
+/// claude MCP 는 **이 폴더에서만** 꺼진다(전역으로 끄는 설정이 자체가 없다). 스코프
+/// 배지가 붙기 전이라면 전역 줄에 전역인 척 체크박스를 다는 셈이라 거짓이었지만, 이제
+/// 「전역」이 화면에 적혀 있고 끈 결과도 그 폴더에서만 반영돼 보인다.
 ///
 /// 목록의 표시와 쓰기 게이트가 이 한 함수를 같이 본다 — 갈라지면 눌리는데 안 써지거나
 /// 그 반대가 된다.
 fn is_toggleable(harness: &str, kind: RowKind) -> bool {
-    matches!(
-        (harness, kind),
-        ("codex", RowKind::Mcp) | ("claude", RowKind::Skill)
-    )
+    !matches!((harness, kind), ("codex", RowKind::Skill))
 }
 
 /// 한 줄을 뒤집는다. 어느 파일을 고칠지는 (하네스, 종류)가 정한다.
-fn toggle_row(row: &McpRow) -> anyhow::Result<()> {
+fn toggle_row(row: &McpRow, cwd: Option<&std::path::Path>) -> anyhow::Result<()> {
     if !is_toggleable(row.harness, row.kind) {
         return Err(anyhow::anyhow!("여기선 못 끈다"));
     }
@@ -589,6 +663,11 @@ fn toggle_row(row: &McpRow) -> anyhow::Result<()> {
     match (row.harness, row.kind) {
         ("codex", RowKind::Mcp) => set_codex_mcp_enabled(&home, &row.name, on),
         ("claude", RowKind::Skill) => set_claude_skill_enabled(&home, &row.name, on),
+        ("claude", RowKind::Mcp) => {
+            // 꺼짐이 폴더에 적히므로 폴더를 모르면 끌 자리가 없다.
+            let cwd = cwd.ok_or_else(|| anyhow::anyhow!("이 pane 의 폴더를 몰라 못 끈다"))?;
+            set_claude_mcp_enabled(&home, cwd, &row.name, row.scope, on)
+        }
         _ => Err(anyhow::anyhow!("여기선 못 끈다")),
     }
 }
@@ -934,13 +1013,11 @@ impl App {
             return false;
         };
         if !row.toggleable {
-            self.set_toast(match (row.harness, row.kind) {
-                ("claude", RowKind::Mcp) => "claude 는 서버를 끄는 설정이 없다 — 지우는 것뿐".into(),
-                _ => format!("{} 스킬은 폴더가 곧 목록이라 못 끈다", row.harness),
-            });
+            self.set_toast(format!("{} 스킬은 폴더가 곧 목록이라 못 끈다", row.harness));
             return true;
         }
-        match toggle_row(&row) {
+        let cwd = self.active_pane_cwd();
+        match toggle_row(&row, cwd.as_deref()) {
             Ok(()) => {
                 // 낙관적으로 먼저 뒤집는다 — 재수집은 워커라 한 박자 늦게 오는데,
                 // 그 사이 화면이 안 변하면 눌린 건지 아닌지를 알 수 없다.
@@ -951,9 +1028,14 @@ impl App {
                     "{} {} — {}",
                     row.name,
                     if row.enabled { "껐다" } else { "켰다" },
-                    // 이미 도는 하네스는 설정을 부팅 때 읽는다. 그 사실을 안 알리면
-                    // "껐는데 왜 아직 뜨지"를 여기서 또 파게 된다.
-                    "다음 실행부터"
+                    // claude MCP 의 꺼짐은 폴더에 적힌다. 「전역」 배지가 붙은 줄을 껐을 때
+                    // 전역이 꺼진 것으로 읽히면 다른 폴더에서 왜 아직 뜨는지를 또 파게 된다.
+                    // 나머지는 부팅 때 설정을 읽는다는 사실이 같은 자리에서 할 말이다.
+                    if row.harness == "claude" && row.kind == RowKind::Mcp {
+                        "이 폴더에서만, 다음 실행부터"
+                    } else {
+                        "다음 실행부터"
+                    }
                 ));
             }
             Err(e) => self.set_toast(format!("⚠ {} 실패: {e}", row.name)),
@@ -1768,16 +1850,100 @@ enabled = false
     /// 못 끄는 줄에 토글이 걸리면 눌러도 아무 일이 없어 고장으로 읽힌다. 반대로
     /// 끌 수 있는 줄이 못 끄는 것으로 표시되면 안내만 뜨고 설정은 그대로다.
     #[test]
-    fn only_the_two_writable_kinds_are_toggleable() {
+    fn only_codex_skills_are_not_toggleable() {
         assert!(is_toggleable("codex", RowKind::Mcp));
         assert!(is_toggleable("claude", RowKind::Skill));
-        // claude 는 서버를 끄는 전역 설정이 없고(프로젝트별 `disabledMcpServers` 뿐),
+        assert!(is_toggleable("claude", RowKind::Mcp));
         // codex 스킬은 폴더가 곧 목록이라 끄기가 삭제와 같아진다.
-        assert!(!is_toggleable("claude", RowKind::Mcp));
         assert!(!is_toggleable("codex", RowKind::Skill));
         // 목록이 만든 행의 표시와 실제 쓰기 게이트가 같은 함수를 봐야 어긋나지 않는다.
-        let mut r = row("claude", RowKind::Mcp, "exa");
-        r.toggleable = false;
-        assert!(toggle_row(&r).is_err(), "표시가 거짓이면 쓰기도 막혀야 한다");
+        let mut r = row("codex", RowKind::Skill, "orchestration");
+        r.toggleable = true;
+        assert!(
+            toggle_row(&r, None).is_err(),
+            "표시가 거짓이면 쓰기도 막혀야 한다"
+        );
+        // 폴더를 모르면 claude MCP 는 끌 자리가 없다 — 조용히 성공하면 안 된다.
+        assert!(toggle_row(&row("claude", RowKind::Mcp, "exa"), None).is_err());
+    }
+
+    /// 스코프가 어느 배열로 가는지가 이 기능의 전부다. 틀린 쪽에 적으면 파일은
+    /// 바뀌는데 하네스는 그대로 서버를 띄운다 — 화면만 꺼진 것처럼 보인다.
+    #[test]
+    fn claude_mcp_off_goes_to_the_array_its_scope_belongs_to() {
+        let home = tmp_home("claude-mcp-off");
+        let cwd = home.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{
+  "numStartups": 7,
+  "mcpServers": { "exa": { "command": "npx" } },
+  "projects": { "keep-me": { "history": [1, 2] } }
+}"#,
+        )
+        .unwrap();
+
+        set_claude_mcp_enabled(&home, &cwd, "exa", "전역", false).unwrap();
+        set_claude_mcp_enabled(&home, &cwd, "teamonly", "레포", false).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap())
+                .unwrap();
+        let p = &v["projects"][cwd.to_str().unwrap()];
+        assert_eq!(p["disabledMcpServers"], serde_json::json!(["exa"]));
+        assert_eq!(p["disabledMcpjsonServers"], serde_json::json!(["teamonly"]));
+        // 남의 기록은 그대로여야 한다 — 이 파일은 우리 것이 아니다.
+        assert_eq!(v["projects"]["keep-me"]["history"], serde_json::json!([1, 2]));
+        assert_eq!(v["numStartups"], 7);
+        // 키 순서까지 지켜야 4000줄짜리 남의 파일이 통째로 흔들리지 않는다.
+        let body = std::fs::read_to_string(home.join(".claude.json")).unwrap();
+        assert!(
+            body.find("numStartups").unwrap() < body.find("mcpServers").unwrap(),
+            "원본 키 순서가 뒤집혔다: {}",
+            &body[..80]
+        );
+
+        // 다시 켜면 배열에서 빠진다. 두 번 켜도 탈이 없어야 한다(중복 제거 아님).
+        set_claude_mcp_enabled(&home, &cwd, "exa", "전역", true).unwrap();
+        set_claude_mcp_enabled(&home, &cwd, "exa", "전역", true).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            v["projects"][cwd.to_str().unwrap()]["disabledMcpServers"],
+            serde_json::json!([])
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 이 파일은 도는 세션들이 함께 쓴다. 우리가 읽은 뒤 남이 고쳤으면 우리 쓰기가
+    /// 그 기록을 지우므로, 포기하고 다시 누르게 하는 것이 맞다.
+    #[test]
+    fn claude_json_write_backs_off_when_someone_else_touched_it() {
+        let home = tmp_home("claude-mcp-race");
+        let cwd = home.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path = home.join(".claude.json");
+        let body = r#"{"mcpServers":{"exa":{"command":"npx"}}}"#;
+        std::fs::write(&path, body).unwrap();
+
+        // 읽은 시각이 파일의 현재 mtime 과 다르다 = 그 사이 누가 썼다.
+        let stale = std::time::SystemTime::UNIX_EPOCH;
+        let err = write_claude_disabled(&path, stale, &cwd, "exa", "전역", false).unwrap_err();
+        assert!(
+            err.to_string().contains("다시 눌러라"),
+            "다른 세션의 수정을 알려야 한다: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            body,
+            "포기했으면 파일은 그대로여야 한다"
+        );
+
+        // 같은 시각이면 통과한다 — 가드가 늘 막기만 하면 기능이 죽은 것과 같다.
+        let now = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write_claude_disabled(&path, now, &cwd, "exa", "전역", false).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("exa"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
