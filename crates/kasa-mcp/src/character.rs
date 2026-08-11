@@ -206,11 +206,35 @@ SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--tea
 그리고 **갈림길에서 막히면 멈추지 말고 가장 그럴듯한 쪽으로 진행한 뒤 무엇을 왜 골랐는지 보고에 적어라.** 「A 로 갔다, 이유는 B, 아니면 되돌리기 쉽다」가 멈춰 서서 묻는 것보다 언제나 낫다.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
+///
+/// Windows 네이티브 경로는 먼저 Git bash 형태(`C:\Users\x` → `/c/Users/x`)로 정규화한다.
+/// 이유가 둘이다. ① 훅(`kasaterm-steer-hook.sh` 의 `pwd | sed 's#[/.]#-#g'`)은 Git bash
+/// 안에서 도니 언제나 그 형태를 만든다 — 정규화 없이는 훅과 앱이 서로 다른 방을 보고
+/// 영영 안 만난다. ② 정규화 전 슬러그는 `C:\...` 라 **절대경로**고, `collab_root().join()`
+/// 에 절대경로를 주면 base 가 통째로 버려져 마커가 collab 루트가 아니라 **프로젝트 폴더
+/// 안에** 쓰인다(실측). unix 경로는 이 단계를 그대로 통과하므로 동작이 바뀌지 않는다.
 pub fn mode_slug(cwd: &Path) -> String {
-    cwd.to_string_lossy()
+    posix_style(&cwd.to_string_lossy())
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect()
+}
+
+/// `C:\Users\x` → `/c/Users/x`. 이미 posix 형태거나 드라이브 문자가 없으면 구분자만 바꾼다.
+/// UNC 확장 접두사(`\\?\`)는 `canonicalize` 가 붙여 주는 것이라 먼저 떼야 한다.
+fn posix_style(raw: &str) -> String {
+    let raw = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    let mut chars = raw.chars();
+    let drive = chars.next().filter(|c| c.is_ascii_alphabetic());
+    let has_colon = chars.next() == Some(':');
+    match (drive, has_colon) {
+        (Some(d), true) => {
+            let rest = raw[2..].replace('\\', "/");
+            let rest = rest.strip_prefix('/').unwrap_or(&rest);
+            format!("/{}/{}", d.to_ascii_lowercase(), rest)
+        }
+        _ => raw.replace('\\', "/"),
+    }
 }
 
 /// 방별 collab slug — socket.rs board 읽기와 동일(base + 방이면 `__room_<id>`).
@@ -463,5 +487,36 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(session_character_in(&path, "sid-x"), None);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 훅이 만드는 슬러그와 같은 자리로 접히는지. 어긋나면 앱과 훅이 서로 다른
+    /// collab 방을 보고, 슬러그가 절대경로로 남으면 `collab_root().join()` 이 base 를
+    /// 버려 마커가 collab 루트가 아니라 프로젝트 폴더 안에 쓰인다.
+    #[test]
+    fn mode_slug_folds_windows_paths_like_git_bash() {
+        // Git bash 의 `pwd` 는 `/c/Users/...` 를 주고 훅은 거기에 s#[/.]#-#g 를 건다.
+        let from_hook: String = "/c/Users/kshkj/desktop/kasaterm"
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        assert_eq!(mode_slug(Path::new(r"C:\Users\kshkj\desktop\kasaterm")), from_hook);
+        // canonicalize 가 붙이는 확장 접두사도 같은 자리로.
+        assert_eq!(
+            mode_slug(Path::new(r"\\?\C:\Users\kshkj\desktop\kasaterm")),
+            from_hook,
+        );
+        // 슬러그는 반드시 상대경로 — 절대경로면 join 이 base 를 통째로 버린다.
+        assert!(!Path::new(&mode_slug(Path::new(r"C:\Users\x"))).is_absolute());
+    }
+
+    /// unix 경로는 정규화를 그대로 통과해야 한다(기존 방 이름이 바뀌면 안 된다).
+    #[test]
+    fn mode_slug_leaves_unix_paths_alone() {
+        assert_eq!(
+            mode_slug(Path::new("/Users/kasa/dev/kasaterm")),
+            "-Users-kasa-dev-kasaterm"
+        );
+        assert_eq!(mode_slug(Path::new("/tmp/room/mine")), "-tmp-room-mine");
+        assert_eq!(mode_slug(Path::new("/a/b.c")), "-a-b-c");
     }
 }

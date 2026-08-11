@@ -15,11 +15,20 @@ exts = ('.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.tif')
 # 방 모드(KASATERM_ROOM)면 slug 에 __room_<r> 접미 — 서버 sent_images_handler 의
 # 읽기 경로(backend.active_room())와 일치시켜야 GET /sent-images 가 찾는다.
 pane = os.environ.get('KASATERM_PANE_ID', '')
-slug = os.getcwd().replace('/', '-').replace('.', '-')
+# 이 훅은 Git bash 가 부르지만 python3 은 네이티브라 cwd 가 'C:\\...', '/tmp' 가
+# 'C:\\tmp' 로 잡힌다. 방 이름·루트를 sh 훅 형식(정본)으로 맞춰야 Rust 쪽
+# (kasa_socket::collab_root / character::mode_slug)과 같은 폴더에서 만난다.
+# chr(92) = 역슬래시 — 이 스크립트가 셸 큰따옴표 안이라 리터럴을 못 쓴다.
+cwd = os.getcwd()
+if len(cwd) >= 2 and cwd[0].isalpha() and cwd[1] == ':':
+    cwd = '/' + cwd[0].lower() + '/' + cwd[2:].replace(chr(92), '/').lstrip('/')
+slug = cwd.replace(chr(92), '/').replace('/', '-').replace('.', '-')
 room = os.environ.get('KASATERM_ROOM', '')
 if room:
     slug = slug + '__room_' + room
-collab = os.path.join('/tmp/kasaterm-collab', slug)
+import tempfile
+tmp_root = tempfile.gettempdir() if os.name == 'nt' else '/tmp'
+collab = os.path.join(tmp_root, 'kasaterm-collab', slug)
 for p in paths:
     if not isinstance(p, str): continue
     if not p.lower().endswith(exts): continue

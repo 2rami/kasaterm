@@ -603,13 +603,7 @@ impl App {
             .get(&id)
             .and_then(|p| p.shell_pid())
             .and_then(socket::pid_cwd)
-            .map(|p| {
-                let s = p.to_string_lossy().into_owned();
-                match std::env::var("HOME").ok() {
-                    Some(home) if s.starts_with(&home) => s.replacen(&home, "~", 1),
-                    _ => s,
-                }
-            })
+            .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
             .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, &id, None));
         // Claude Code response indicator. Priority:
         //   1. Lift Claude Code's own status line straight from the
@@ -647,13 +641,7 @@ impl App {
         }
         std::env::current_dir()
             .ok()
-            .map(|p| {
-                let s = p.to_string_lossy().into_owned();
-                match std::env::var("HOME").ok() {
-                    Some(home) if s.starts_with(&home) => s.replacen(&home, "~", 1),
-                    _ => s,
-                }
-            })
+            .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
             .unwrap_or_else(|| "shell".to_string())
     }
     /// pane 의 현재 스크롤(logical px). 없는 pane 이면 0.

@@ -3696,17 +3696,10 @@ impl App {
                 // ── Row 1: ~path : branch  ····  N · +ins -del
                 // Path click → repo picker, branch click → switcher (rects below).
                 {
-                    let home = std::env::var("HOME").ok();
                     let path_disp = git_view
                         .cwd
                         .as_ref()
-                        .map(|p| {
-                            let s = p.to_string_lossy().into_owned();
-                            match &home {
-                                Some(h) if s.starts_with(h.as_str()) => format!("~{}", &s[h.len()..]),
-                                _ => s,
-                            }
-                        })
+                        .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
                         .unwrap_or_else(|| "—".to_string());
                     let pcol = if self.git.col_pinned_cwd.is_some() { theme::accent() } else { theme::text_dim() };
                     let px = g.draw_text(gcx0, y, &path_disp, gpu::DrawOpts { font_size: 12.0, color: pcol, bold: false, italic: false });
@@ -5033,7 +5026,6 @@ impl App {
             self.statusbar.toggle_rects.clear();
             self.statusbar.diff_rects.clear();
             let (sb_mx, sb_my) = self.cursor_px;
-            let sb_home = std::env::var("HOME").ok();
             for (fid, fx, fy, fw, fbox_h) in &footer_slots {
                 let fvis = self.statusbar.shown.contains(fid)
                     || (!self.statusbar.hidden.contains(fid) && self.set_footer_default);
@@ -5068,14 +5060,7 @@ impl App {
                 // Home-relative cwd (~/…), matching the screenshot's breadcrumb.
                 let disp = cwd
                     .as_ref()
-                    .map(|p| {
-                        let s = p.to_string_lossy().into_owned();
-                        let s = match &sb_home {
-                            Some(h) if s.starts_with(h.as_str()) => format!("~{}", &s[h.len()..]),
-                            _ => s,
-                        };
-                        nfc_hangul(&s)
-                    })
+                    .map(|p| nfc_hangul(&crate::session::tilde_home(&p.to_string_lossy())))
                     .unwrap_or_else(|| "—".to_string());
                 // cwd pill — folder icon + path.
                 {
