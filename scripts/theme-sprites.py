@@ -112,7 +112,15 @@ def installed(slug):
     return os.path.exists(os.path.join(DST, f"{slug}-profile.png"))
 
 
-def generate(slug, force=False):
+def generate(slug, force=False, use_ref=False):
+    """`use_ref` 면 공식 포트레이트를 정체성 참조로 넘긴다.
+
+    묘사만으로도 대개 맞게 나오지만 **색이 어긋나는 일이 있다** — 케이는 desc 에
+    `white hair` 라고 썼는데도 문장 안의 pink(헤일로·안감)에 끌려 분홍 머리로 나왔다.
+    픽셀 검수는 이걸 못 잡는다(그림 자체는 멀쩡하다). 참조 이미지를 주면 고정되지만
+    생성이 4배 느려서(204초 vs 45초) 기본값으로 두지 않는다 — 묘사로 전부 만든 뒤
+    눈으로 보고 어긋난 애만 이걸로 다시 굽는 게 싸다.
+    """
     if generated(slug) and not force:
         return slug, "skip", ""
     desc = desc_of(slug)
@@ -126,6 +134,11 @@ def generate(slug, force=False):
         "-states", ",".join(s[0] for s in STATES),
         "-out", out,
     ]
+    if use_ref:
+        ref = os.path.join(SRC, slug, "ref.png")
+        if not os.path.exists(ref):
+            return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
+        cmd[3:3] = ["-ref", ref]
     why = ""
     for attempt in range(ATTEMPTS):
         shutil.rmtree(out, ignore_errors=True)
@@ -207,10 +220,10 @@ def make_profile(src, dst):
       .save(dst)
 
 
-def run(fn, targets, jobs, force):
+def run(fn, targets, jobs, force, **kw):
     counts = {}
     with ThreadPoolExecutor(max_workers=jobs) as ex:
-        for slug, st, msg in ex.map(lambda s: fn(s, force), targets):
+        for slug, st, msg in ex.map(lambda s: fn(s, force, **kw), targets):
             counts[st] = counts.get(st, 0) + 1
             if st not in ("ok", "skip"):
                 print(f"  {slug:10} {st} {msg}")
@@ -226,6 +239,8 @@ def main():
     ap.add_argument("slugs", nargs="*")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--ref", action="store_true",
+                    help="공식 포트레이트를 정체성 참조로 넘긴다(느리지만 색이 안 어긋난다)")
     a = ap.parse_args()
 
     targets = a.slugs or slugs()
@@ -245,7 +260,7 @@ def main():
         if not os.path.exists(PPGEN):
             print(f"ppgen 이 없다: {PPGEN} (PPGEN 환경변수로 지정)", file=sys.stderr)
             return 2
-        return run(generate, targets, a.jobs, a.force)
+        return run(generate, targets, a.jobs, a.force, use_ref=a.ref)
     return run(install, targets, a.jobs, a.force)
 
 
