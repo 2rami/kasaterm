@@ -906,35 +906,51 @@ impl App {
                     let sch = self.cell.h * fs;
                     // 그림이 없는 학생은 배너를 건드리지 않는다 — 지운 뒤 못
                     // 그리면 원래 있던 Clawd 배너까지 사라진다.
-                    for (br, bc) in find_clawd_banners(&composed)
-                        .into_iter()
-                        .filter(|_| student_has_sprite(slug, "idle"))
-                    {
+                    // claude 의 Clawd 아트와 agy 의 Antigravity 로고는 모양도 크기도
+                    // 다르다. 어느 하네스로 떴는지 따지지 않고 둘 다 훑는다 — 화면에
+                    // 실제로 그려진 로고가 정본이고, 한 pane 에 둘이 함께 뜰 일은 없다.
+                    let logos: Vec<(isize, usize, usize, usize, &[char])> =
+                        find_clawd_banners(&composed)
+                            .into_iter()
+                            .map(|(br, bc)| (br, bc, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE))
+                            .chain(find_agy_banners(&composed).into_iter().map(
+                                |(br, bc)| (br, bc, AGY_COLS, AGY_ROWS, AGY_TITLE),
+                            ))
+                            .filter(|_| student_has_sprite(slug, "idle"))
+                            .collect();
+                    for (br, bc, lcols, lrows, title) in logos {
                         // br 은 스크롤로 위가 잘리면 음수, 아래가 잘리면 박스가
                         // 그리드 밖까지 이어진다 — 스프라이트는 pane 세로 범위로
                         // 클립해 셀 스크롤과 함께 자연스럽게 잘려 나가게 한다.
+                        // 로고 칸이 Clawd 보다 크면 도트를 늘리지 말고 비율을 지켜
+                        // 안에 맞춘 뒤 바닥에 세운다(발이 로고 밑선에 닿는다).
+                        let (bw, bh) = fit_sprite_box(lcols, lrows, scw, sch);
                         banner_slots.push((
                             slug,
                             (
-                                body_left + bc as f32 * scw,
-                                body_top + br as f32 * sch,
-                                CLAWD_COLS as f32 * scw,
-                                CLAWD_ROWS as f32 * sch,
+                                body_left
+                                    + bc as f32 * scw
+                                    + (lcols as f32 * scw - bw) * 0.5,
+                                body_top + br as f32 * sch + (lrows as f32 * sch - bh),
+                                bw,
+                                bh,
                             ),
                             (body_top, body_top + composed.len() as f32 * sch),
                         ));
                         let r0 = br.max(0) as usize;
-                        let r1 = (br + CLAWD_ROWS as isize)
+                        let r1 = (br + lrows as isize)
                             .clamp(0, composed.len() as isize)
                             as usize;
                         for row in composed[r0..r1].iter_mut() {
-                            for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
+                            for cell in row.iter_mut().skip(bc).take(lcols) {
                                 *cell = GridCell::blank();
                             }
                         }
-                        // 배너 타이틀 "Claude Code" 도 학생 이름으로 — 도트만
-                        // 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
-                        replace_banner_title(&mut composed, br, bc, name, accent);
+                        // 배너 타이틀("Claude Code"·"Antigravity CLI")도 학생 이름으로 —
+                        // 도트만 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
+                        replace_banner_title(
+                            &mut composed, br, bc, lcols, lrows, title, name, accent,
+                        );
                         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
                         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
                         replace_welcome_greeting(&mut composed, br, name, accent);
@@ -2086,6 +2102,16 @@ impl App {
                     .iter()
                     .find(|(ti, _)| *ti == i)
                     .and_then(|(_, r)| self.window_expand_rect(i, *r))
+            })
+            .collect();
+        // 뷰 전환 배지도 같은 이유로 미리 늘어놓는다. `(사각, 목록모드인가)`.
+        let sb_view: Vec<Option<((f32, f32, f32, f32), bool)>> = (0..sb_labels.len())
+            .map(|i| {
+                sb_tabs
+                    .iter()
+                    .find(|(ti, _)| *ti == i)
+                    .and_then(|(_, r)| self.window_view_rect(i, *r))
+                    .map(|r| (r, self.list_view_windows.contains(&i)))
             })
             .collect();
         // 펼친 방의 pane 한 줄씩 — 이름·색을 여기서 뽑아 둔다. `pane_character_if_known`
@@ -3270,6 +3296,35 @@ impl App {
                             er.1 + 5.0,
                             &n,
                             gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
+                        );
+                    }
+                    // 뷰 전환 — 펼치기 배지와 같은 칩으로 그려 "여기도 버튼"이 한눈에
+                    // 읽히게 한다. 아이콘은 **누르면 갈 곳**이다(지금 모드가 아니라):
+                    // 지금 뭘 보고 있는지는 바로 아래 카드 본문이 이미 말하고 있어,
+                    // 버튼까지 그걸 되풀이하면 정작 무엇이 일어날지는 아무도 안 말한다.
+                    if let Some((vr, list_view)) = sb_view.get(*i).copied().flatten() {
+                        let hov = sb_cursor.0 >= vr.0
+                            && sb_cursor.0 <= vr.0 + vr.2
+                            && sb_cursor.1 >= vr.1
+                            && sb_cursor.1 <= vr.1 + vr.3;
+                        g.hover_pointer |= hov;
+                        let base = if is_active {
+                            theme::surface_active()
+                        } else if is_hover {
+                            theme::surface_hover()
+                        } else {
+                            theme::panel_bg()
+                        };
+                        round_rect(g, vr.0 - 1.0, vr.1 - 1.0, vr.2 + 2.0, vr.3 + 2.0,
+                            theme::radius_sm(), theme::border());
+                        round_rect(g, vr.0, vr.1, vr.2, vr.3, theme::radius_sm(),
+                            theme::raised_on(base, hov));
+                        g.queue_icon(
+                            if list_view { "columns-2" } else { "rows-2" },
+                            vr.0 + (vr.2 - 12.0) / 2.0,
+                            vr.1 + (vr.3 - 12.0) / 2.0,
+                            12.0,
+                            if hov { theme::text() } else { theme::text_dim() },
                         );
                     }
                     // × close — only on the active or hovered tab (where the
@@ -7429,6 +7484,13 @@ pub(crate) const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
 
 pub(crate) const CLAWD_COLS: usize = 9;
 pub(crate) const CLAWD_ROWS: usize = 3;
+/// agy(Antigravity CLI) 시작 로고 — Clawd 와 아트도 크기도 달라 따로 잰다(실측 5행 12칸).
+pub(crate) const AGY_COLS: usize = 12;
+pub(crate) const AGY_ROWS: usize = 5;
+/// 로고 옆 제품명 — 도트만 학생으로 바뀌면 남의 이름표를 달고 선 꼴이라 함께 바꾼다.
+const CLAWD_TITLE: &[char] = &['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
+const AGY_TITLE: &[char] =
+    &['A', 'n', 't', 'i', 'g', 'r', 'a', 'v', 'i', 't', 'y', ' ', 'C', 'L', 'I'];
 
 /// 학생 도트 애니메이션 — idle(배너)·walk(로딩바) 모션별 프레임 수·주기.
 const STUDENT_IDLE_FRAMES: usize = 4;
@@ -9071,6 +9133,53 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
     None
 }
 
+/// agy 시작 로고 자리(왼쪽 위 칸, 스크롤로 잘렸으면 top 이 음수).
+///
+/// 아래로 갈수록 한 칸씩 넓어지는 5행 아트라, 가장 넓고 특징적인 **맨 아랫줄**로
+/// 자리를 잡고 위 네 줄은 화면에 남아 있는 것만 대조한다 — Clawd 쪽과 같은 규약이다.
+pub(crate) fn find_agy_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
+    // (맨 아랫줄 기준 들여쓰기, 글리프). 배열 순서는 로고 위→아래.
+    const SHAPE: [(usize, &str); AGY_ROWS] = [
+        (4, "▄▀▀▄"),
+        (3, "▀▀▀▀▀▀"),
+        (2, "▀▀▀▀▀▀▀▀"),
+        (1, "▄▀▀    ▀▀▄"),
+        (0, "▄▀▀      ▀▀▄"),
+    ];
+    let hit = |row: &[GridCell], at: usize, pat: &str| {
+        at + pat.chars().count() <= row.len()
+            && pat.chars().enumerate().all(|(i, p)| row[at + i].ch == p)
+    };
+    let mut out = Vec::new();
+    for r in 0..rows.len() {
+        let mut c = 0usize;
+        while c + AGY_COLS <= rows[r].len() {
+            if hit(&rows[r], c, SHAPE[AGY_ROWS - 1].1) {
+                let top = r as isize - (AGY_ROWS as isize - 1);
+                let ok = SHAPE[..AGY_ROWS - 1].iter().enumerate().all(|(i, &(ind, pat))| {
+                    let gr = top + i as isize;
+                    gr < 0 || hit(&rows[gr as usize], c + ind, pat)
+                });
+                if ok {
+                    out.push((top, c));
+                    c += AGY_COLS;
+                    continue;
+                }
+            }
+            c += 1;
+        }
+    }
+    out
+}
+
+/// 로고 칸에 **Clawd 칸 비율(9x3)을 유지한 채** 최대로 맞춘 도트 상자.
+/// Clawd 자신에겐 항등이라 기존 배치는 한 픽셀도 안 움직인다.
+fn fit_sprite_box(cols: usize, rows: usize, cw: f32, ch: f32) -> (f32, f32) {
+    let (aw, ah) = (CLAWD_COLS as f32 * cw, CLAWD_ROWS as f32 * ch);
+    let s = ((cols as f32 * cw) / aw).min((rows as f32 * ch) / ah);
+    (aw * s, ah * s)
+}
+
 pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
     const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
@@ -9145,23 +9254,26 @@ pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> 
 /// 갈아끼우고, 뒤따르는 버전 텍스트를 이름 바로 뒤로 당긴다. 당겨서 남는 칸은
 /// blank — 연속 공백 2칸 너머는 박스형 웰컴 변형의 오른쪽 테두리 영역이라
 /// 건드리지 않는다(테두리 열이 밀리면 박스가 깨진다).
+#[allow(clippy::too_many_arguments)]
 fn replace_banner_title(
     rows: &mut [Vec<GridCell>],
     br: isize,
     bc: usize,
+    lcols: usize,
+    lrows: usize,
+    title: &[char],
     name: &str,
     accent: Option<[u8; 4]>,
 ) {
-    const TITLE: [char; 11] = ['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
     let r0 = br.max(0) as usize;
-    let r1 = (br + CLAWD_ROWS as isize).clamp(0, rows.len() as isize) as usize;
+    let r1 = (br + lrows as isize).clamp(0, rows.len() as isize) as usize;
     for row in rows[r0..r1].iter_mut() {
-        let start = bc + CLAWD_COLS;
+        let start = bc + lcols;
         if start >= row.len() {
             continue;
         }
-        let Some(tc) = (start..row.len().saturating_sub(TITLE.len() - 1))
-            .find(|&c| TITLE.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
+        let Some(tc) = (start..row.len().saturating_sub(title.len() - 1))
+            .find(|&c| title.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
         else {
             continue;
         };
@@ -9171,7 +9283,7 @@ fn replace_banner_title(
         if let Some([r, g, b, _]) = accent {
             style.fg = kasa_bridge::screen::Color::Rgb(r, g, b);
         }
-        let mut repl: Vec<GridCell> = Vec::with_capacity(TITLE.len());
+        let mut repl: Vec<GridCell> = Vec::with_capacity(title.len());
         for ch in name.chars() {
             let mut cell = style.clone();
             cell.ch = ch;
@@ -9181,10 +9293,10 @@ fn replace_banner_title(
             sp.ch = ' ';
             repl.push(sp);
         }
-        if repl.len() > TITLE.len() {
+        if repl.len() > title.len() {
             return; // 로스터 이름은 최대 3자(6칸) — 넘치면 원문 유지
         }
-        let mut end = tc + TITLE.len();
+        let mut end = tc + title.len();
         let mut probe = end;
         while probe < row.len() {
             if matches!(row[probe].ch, ' ' | '\0') {
@@ -9196,7 +9308,7 @@ fn replace_banner_title(
             }
             probe += 1;
         }
-        let tail: Vec<GridCell> = row[tc + TITLE.len()..end].to_vec();
+        let tail: Vec<GridCell> = row[tc + title.len()..end].to_vec();
         let mut w = tc;
         for cell in repl.into_iter().chain(tail) {
             row[w] = cell;
@@ -9862,6 +9974,66 @@ mod clawd_banner_tests {
     const BODY: &str = "▝▜█████▛▘ Fable 5 · ~/Desktop";
     const FEET: &str = "  ▘▘ ▝▝   0 awaiting input";
 
+    // 실측 agy 로고(Antigravity CLI 1.1.12) — 아래로 갈수록 한 칸씩 넓어진다.
+    const AGY: [&str; 5] = [
+        "      ▄▀▀▄        Antigravity CLI 1.1.12",
+        "     ▀▀▀▀▀▀       goenho0613@example.com (Google AI Pro)",
+        "    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)",
+        "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/tmuxify",
+        "  ▄▀▀      ▀▀▄",
+    ];
+
+    #[test]
+    fn agy_logo_detected() {
+        let rows: Vec<_> = AGY.iter().map(|s| row_from(s)).collect();
+        assert_eq!(find_agy_banners(&rows), vec![(0, 2)]);
+    }
+
+    /// 스크롤로 위 세 줄이 잘려도 남은 두 줄로 잡아야 한다 — 못 잡으면 원본
+    /// 로고가 그대로 노출돼 학생이 사라진다(Clawd 쪽에서 이미 겪은 회귀).
+    #[test]
+    fn agy_logo_cropped_from_top_is_still_detected() {
+        let rows: Vec<_> = AGY[3..].iter().map(|s| row_from(s)).collect();
+        assert_eq!(find_agy_banners(&rows), vec![(-3, 2)]);
+    }
+
+    #[test]
+    fn agy_detector_ignores_ordinary_text() {
+        let rows: Vec<_> = ["사과는 무슨 색인가", "▀▀▀ 짧은 괘선 ▀▀▀", ""]
+            .iter()
+            .map(|s| row_from(s))
+            .collect();
+        assert!(find_agy_banners(&rows).is_empty());
+    }
+
+    /// Clawd 칸에 대해서는 **항등**이어야 한다 — 이 커밋이 기존 배치를 건드리지
+    /// 않았다는 증명이고, 어긋나면 claude 배너 도트가 통째로 밀린다.
+    #[test]
+    fn clawd_sprite_box_is_unchanged() {
+        let (w, h) = fit_sprite_box(CLAWD_COLS, CLAWD_ROWS, 8.0, 17.0);
+        assert_eq!((w, h), (CLAWD_COLS as f32 * 8.0, CLAWD_ROWS as f32 * 17.0));
+    }
+
+    /// 넓은 agy 칸에서는 늘리지 않고 비율을 지킨 채 채운다(12x5 칸 → 12x4 도트).
+    #[test]
+    fn agy_sprite_box_keeps_the_clawd_aspect() {
+        let (w, h) = fit_sprite_box(AGY_COLS, AGY_ROWS, 8.0, 17.0);
+        assert_eq!((w, h), (12.0 * 8.0, 4.0 * 17.0));
+        assert!(h <= AGY_ROWS as f32 * 17.0, "칸 밖으로 넘쳤다");
+    }
+
+    #[test]
+    fn agy_title_becomes_the_student_name() {
+        let mut rows: Vec<_> = AGY.iter().map(|s| row_from(s)).collect();
+        replace_banner_title(&mut rows, 0, 2, AGY_COLS, AGY_ROWS, AGY_TITLE, "시로코", None);
+        let line: String = rows[0].iter().map(|c| c.ch).collect();
+        // 와이드 글자는 뒷칸에 스페이서가 붙어 `시 로 코` 로 읽힌다 — 글자만 본다.
+        let packed = line.replace(' ', "");
+        assert!(packed.contains("시로코"), "학생 이름이 안 들어갔다: {line:?}");
+        assert!(line.contains("1.1.12"), "버전이 사라졌다: {line:?}");
+        assert!(!line.contains("Antigravity"), "제품명이 남았다: {line:?}");
+    }
+
     #[test]
     fn full_banner_detected() {
         let rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
@@ -9965,7 +10137,10 @@ mod clawd_banner_tests {
     #[test]
     fn banner_title_replaced_with_student_name() {
         let mut rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
-        replace_banner_title(&mut rows, 1, 0, "아루", Some([255, 128, 0, 255]));
+        replace_banner_title(
+            &mut rows, 1, 0, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "아루",
+            Some([255, 128, 0, 255]),
+        );
         // HEAD 에서 "Claude Code" 는 col 10 부터 — 이름이 그 자리에 앉는다.
         assert_eq!(rows[1][10].ch, '아');
         assert_eq!(rows[1][11].ch, ' '); // 와이드 스페이서
@@ -9988,7 +10163,9 @@ mod clawd_banner_tests {
         let head_box = "│  ▐▛███▜▌  Claude Code v2.1.212    │";
         let mut rows = vec![row_from(""), row_from(head_box), row_from(""), row_from("")];
         let border = head_box.chars().count() - 1;
-        replace_banner_title(&mut rows, 1, 1, "시로코", None);
+        replace_banner_title(
+            &mut rows, 1, 1, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "시로코", None,
+        );
         assert_eq!(rows[1][border].ch, '│');
         assert_eq!(rows[1][12].ch, '시');
         // accent 없으면 원 타이틀 fg(blank 기본 = Default) 유지.
@@ -10000,7 +10177,9 @@ mod clawd_banner_tests {
     fn cropped_banner_leaves_rows_unchanged() {
         let mut rows = vec![row_from(BODY), row_from(FEET), row_from("")];
         let before = rows.clone();
-        replace_banner_title(&mut rows, -1, 0, "아루", None);
+        replace_banner_title(
+            &mut rows, -1, 0, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "아루", None,
+        );
         assert_eq!(rows, before);
     }
 
