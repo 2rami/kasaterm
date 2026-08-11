@@ -2359,7 +2359,12 @@ impl App {
         let rows = cells.len();
         // Clawd 배너 → 학생 도트. 스크롤로 위아래가 잘리면 셀과 함께 잘리도록
         // pane 세로 범위로 클립한다.
-        for (br, bc) in crate::render::find_clawd_banners(cells) {
+        // 그림이 없는 학생은 배너를 건드리지 않는다 — 지운 뒤 못 그리면 원래 있던
+        // Clawd 배너까지 사라진다(메인 창과 같은 규칙).
+        for (br, bc) in crate::render::find_clawd_banners(cells)
+            .into_iter()
+            .filter(|_| crate::render::student_has_sprite(slug, "idle"))
+        {
             out.banner.push((
                 slug,
                 (
@@ -2383,19 +2388,22 @@ impl App {
         let mut busy = false;
         if let Some((sr, sc)) = crate::render::find_claude_spinner(cells) {
             busy = true;
-            let top_r = sr.saturating_sub(1);
-            out.spinner.push((
-                slug,
-                (
-                    ox + sc as f32 * cw,
-                    oy + top_r as f32 * ch,
-                    2.0 * cw,
-                    (sr - top_r + 1) as f32 * ch,
-                ),
-            ));
-            if let Some(row) = cells.get_mut(sr) {
-                if let Some(cell) = row.get_mut(sc) {
-                    *cell = GridCell::blank();
+            // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수 있을 때만.
+            if crate::render::student_has_sprite(slug, "walk") {
+                let top_r = sr.saturating_sub(1);
+                out.spinner.push((
+                    slug,
+                    (
+                        ox + sc as f32 * cw,
+                        oy + top_r as f32 * ch,
+                        2.0 * cw,
+                        (sr - top_r + 1) as f32 * ch,
+                    ),
+                ));
+                if let Some(row) = cells.get_mut(sr) {
+                    if let Some(cell) = row.get_mut(sc) {
+                        *cell = GridCell::blank();
+                    }
                 }
             }
         }
@@ -2426,16 +2434,18 @@ impl App {
                     } else {
                         "idle"
                     };
-                    out.standing.push((
-                        slug,
-                        motion,
-                        (
-                            ox + left_c * cw,
-                            (oy + (anchor + 1) as f32 * ch - h).max(oy),
-                            crate::render::STAND_CELLS * cw,
-                            h,
-                        ),
-                    ));
+                    if crate::render::student_has_sprite(slug, motion) {
+                        out.standing.push((
+                            slug,
+                            motion,
+                            (
+                                ox + left_c * cw,
+                                (oy + (anchor + 1) as f32 * ch - h).max(oy),
+                                crate::render::STAND_CELLS * cw,
+                                h,
+                            ),
+                        ));
+                    }
                 }
             }
         }

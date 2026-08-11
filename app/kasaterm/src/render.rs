@@ -885,7 +885,12 @@ impl App {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
-                    for (br, bc) in find_clawd_banners(&composed) {
+                    // 그림이 없는 학생은 배너를 건드리지 않는다 — 지운 뒤 못
+                    // 그리면 원래 있던 Clawd 배너까지 사라진다.
+                    for (br, bc) in find_clawd_banners(&composed)
+                        .into_iter()
+                        .filter(|_| student_has_sprite(slug, "idle"))
+                    {
                         // br 은 스크롤로 위가 잘리면 음수, 아래가 잘리면 박스가
                         // 그리드 밖까지 이어진다 — 스프라이트는 pane 세로 범위로
                         // 클립해 셀 스크롤과 함께 자연스럽게 잘려 나가게 한다.
@@ -976,17 +981,21 @@ impl App {
                                 cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
                             }
                         }
-                        composed[sr][sc] = GridCell::blank();
-                        let top_r = sr.saturating_sub(1);
-                        spinner_slots.push((
-                            slug,
-                            (
-                                body_left + sc as f32 * scw,
-                                body_top + top_r as f32 * sch,
-                                2.0 * scw,
-                                (sr - top_r + 1) as f32 * sch,
-                            ),
-                        ));
+                        // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수
+                        // 있을 때만. 못 세우면 도는 표시가 통째로 없어진다.
+                        if student_has_sprite(slug, "walk") {
+                            composed[sr][sc] = GridCell::blank();
+                            let top_r = sr.saturating_sub(1);
+                            spinner_slots.push((
+                                slug,
+                                (
+                                    body_left + sc as f32 * scw,
+                                    body_top + top_r as f32 * sch,
+                                    2.0 * scw,
+                                    (sr - top_r + 1) as f32 * sch,
+                                ),
+                            ));
+                        }
                     } else if !crate::input::rows_show_working(&composed)
                         && crate::input::rows_show_approval_prompt(&composed).is_some()
                     {
@@ -996,7 +1005,9 @@ impl App {
                             let x = (body_left + (ac + 2) as f32 * scw)
                                 .min(body_left + cols_now as f32 * scw - DOT);
                             let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
-                            waiting_slots.push((slug, (x, y, DOT, DOT)));
+                            if student_has_sprite(slug, "wave") {
+                                waiting_slots.push((slug, (x, y, DOT, DOT)));
+                            }
                         }
                     }
                     // 입력창 위 standing 앵커. claude 는 statusline 표식(U+FFFC)에서
@@ -1086,17 +1097,19 @@ impl App {
                                     } else {
                                         "idle"
                                     };
-                                    standing_slots.push((
-                                        slug,
-                                        motion,
-                                        (
-                                            body_left + left_c * scw,
-                                            (body_top + (anchor + 1) as f32 * sch - h)
-                                                .max(body_top),
-                                            STAND_CELLS * scw,
-                                            h,
-                                        ),
-                                    ));
+                                    if student_has_sprite(slug, motion) {
+                                        standing_slots.push((
+                                            slug,
+                                            motion,
+                                            (
+                                                body_left + left_c * scw,
+                                                (body_top + (anchor + 1) as f32 * sch - h)
+                                                    .max(body_top),
+                                                STAND_CELLS * scw,
+                                                h,
+                                            ),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -8140,6 +8153,28 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
     })
 }
 
+/// 이 학생 그림이 있나 — **슬롯을 세우기 전에** 물어야 한다.
+///
+/// ⚠️그리기 직전에 물으면 늦다. 호출부는 스프라이트를 얹을 자리(Clawd 배너·스피너
+/// 글리프)를 **먼저 `GridCell::blank()` 으로 지우고** 나서 슬롯을 세운다. 그림이
+/// 없으면 `paint_student_overlays` 가 조용히 아무것도 안 올리고 없는 키로 그리기를
+/// 부르는데, 그건 에러도 안 나고 아무것도 안 그린다 — 결과는 「폴백」이 아니라
+/// **원래 있던 것까지 지워진 빈 구멍**이다. 로스터가 12→79명이 되자 그림 없는
+/// 67명에게서 배너와 스피너가 통째로 사라졌다(2026-08-11).
+///
+/// 싸다: 번들은 `include_bytes` 매치라 디코딩이 없고, override 는 첫 프레임 파일
+/// 존재만 본다. 디코딩까지 되는지는 안 본다 — 그건 번들 테스트가 잡는 문제고,
+/// 여기서 매 프레임 디코딩할 수는 없다.
+pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
+    if student_sprite_png(slug, motion).is_some() {
+        return true;
+    }
+    let Some(dir) = crate::socket::students_dir() else { return false };
+    let first =
+        if motion == "idle" { format!("{slug}-0.png") } else { format!("{slug}-{motion}-0.png") };
+    dir.join(first).is_file()
+}
+
 /// 모션 프레임들을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 전 프레임
 /// **합집합** 알파 bbox 하나로 — 프레임별 bbox로 자르면 애니의 미세한
 /// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
@@ -10318,7 +10353,15 @@ mod student_asset_tests {
     #[test]
     fn bundled_sprite_frames_decode_for_every_student_and_motion() {
         let mut checked = 0;
+        let mut with_art = 0;
+        // 그림은 **선택**이다 — 로스터는 79명인데 번들 아트는 12명분이다(2026-08-11).
+        // 그림이 있는 학생만 건다. 없는 학생은 `student_has_sprite` 가 걸러서 슬롯
+        // 자체가 안 서고, 그게 옳은 동작이라 여기서 실패로 볼 일이 아니다.
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
+            if student_sprite_png(slug, "idle").is_none() {
+                continue;
+            }
+            with_art += 1;
             for motion in ["idle", "wave", "cheer", "walk"] {
                 let frames = student_sprite_frames(slug, motion)
                     .unwrap_or_else(|| panic!("{slug}/{motion}: 프레임이 None — 애니가 통째로 안 그려진다"));
@@ -10340,6 +10383,25 @@ mod student_asset_tests {
             }
         }
         assert!(checked >= 4, "모션을 하나도 못 셌다 — 로스터가 비었나");
+        // 아트가 통째로 사라지면 위 루프는 조용히 0바퀴 돈다. 실측 12명을 하한으로
+        // 박아 그 침묵을 막는다.
+        assert!(with_art >= 12, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
+    }
+
+    /// 그림 유무를 **슬롯 세우기 전에** 가르는 계약.
+    ///
+    /// 이게 무너지면 화면에 구멍이 난다: 호출부가 Clawd 배너·스피너 글리프를 먼저
+    /// blank 로 지우고 나서 슬롯을 세우므로, 그림이 없는데 세우면 원래 있던 것까지
+    /// 지워진 채 아무것도 안 그려진다. 로스터가 12→79명이 되며 실제로 그랬다.
+    #[test]
+    fn students_without_art_are_filtered_before_the_glyph_is_erased() {
+        for motion in ["idle", "wave", "cheer", "walk"] {
+            assert!(student_has_sprite("arisu", motion), "아리스/{motion}");
+        }
+        // 로스터엔 있고 그림은 없는 학생(2026-08-11 기준 67명 중 하나).
+        assert!(crate::theme::slug_character("kei").is_some(), "케이가 로스터에서 빠졌나");
+        assert!(!student_has_sprite("kei", "idle"), "그림 없는 학생을 있다고 하면 배너가 지워진다");
+        assert!(!student_has_sprite("존재하지않는슬러그", "walk"));
     }
 
     // 사용자 override 파일이 없으면 None → 호출측이 번들 include_bytes 로 폴백.
