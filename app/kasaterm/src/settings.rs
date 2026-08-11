@@ -2091,7 +2091,7 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
         // pane 과 같은 PATH 를 보려면 로그인 셸을 거쳐야 한다 — Finder 로 뜬 .app 의
         // PATH 에는 claude 가 없어서 직접 spawn 하면 항상 실패한다.
         let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
-        let mut c = std::process::Command::new(shell);
+        let mut c = crate::proc::command(shell);
         c.arg("-lc").arg("claude auth status");
         if let Some(d) = dir.as_deref() {
             c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
@@ -2127,7 +2127,7 @@ fn slot_identity(dir: Option<&std::path::Path>) -> String {
     let port = crate::mcp_panel_port();
     let d = dir.map(|p| p.display().to_string()).unwrap_or_default();
     // -G + --data-urlencode: 경로에 공백이나 한글이 섞여도 쿼리로 안전하게 실린다.
-    let Ok(out) = std::process::Command::new("curl")
+    let Ok(out) = crate::proc::command("curl")
         .args(["-s", "--max-time", "12", "-G", "--data-urlencode", &format!("dir={d}")])
         .arg(format!("http://127.0.0.1:{port}/claude-identity"))
         .output()

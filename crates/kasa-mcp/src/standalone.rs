@@ -158,7 +158,7 @@ impl Backend for StandaloneBackend {
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         // board = claude agents(background/interactive) 세션 현황. 각 세션 transcript 에서
         // title/last_prompt 를 파싱 → kasaterm 꺼져도 세션들이 서로의 작업을 board 로 본다.
-        let out = std::process::Command::new(crate::http::claude_bin())
+        let out = crate::no_window_command(crate::http::claude_bin())
             .args(["agents", "--json", "--all"])
             .output()?;
         if !out.status.success() {

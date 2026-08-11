@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -327,7 +327,7 @@ impl LspClient {
         // 기본은 버린다 — rust-analyzer 는 인덱싱 로그를 쉼 없이 쏟는다.
         let debug = std::env::var_os("KASATERM_LSP_DEBUG").is_some();
         let err = if debug { Stdio::inherit() } else { Stdio::null() };
-        let spawned = Command::new("rust-analyzer")
+        let spawned = crate::proc::command("rust-analyzer")
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -924,7 +924,7 @@ async fn run_planner(model: &str, prompt: &str) -> Result<String> {
 /// 이름이 아니라 절대경로로 부른다 — `.app` 의 PATH 에는 claude 가 없어 이름 호출은
 /// 조용히 실패한다(과거에 이 함정을 밟았다).
 fn run_planner_blocking(model: &str, prompt: &str) -> Result<String> {
-    let mut cmd = std::process::Command::new(claude_bin());
+    let mut cmd = crate::no_window_command(claude_bin());
     cmd.arg("-p").arg(prompt);
     if !model.is_empty() {
         cmd.arg("--model").arg(model);
