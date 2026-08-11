@@ -27,11 +27,54 @@ const EMPTY_H: f32 = 44.0;
 /// 직접 고친 직후에는 [`state::McpColState::stale`] 로 즉시 다시 읽는다.
 const REFRESH_MS: u64 = 6000;
 
-/// 한 줄이 무엇인가.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// 한 줄이 무엇인가. 순서가 곧 화면 순서다 — 자주 보는 것부터.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RowKind {
     Mcp,
     Skill,
+    /// claude 플러그인. 스킬·MCP·에이전트·커맨드를 한 덩어리로 얹는다.
+    Plugin,
+    Agent,
+    Command,
+    Hook,
+}
+
+impl RowKind {
+    /// 그룹 머리에 적히는 이름.
+    fn label(self) -> &'static str {
+        match self {
+            RowKind::Mcp => "MCP",
+            RowKind::Skill => "스킬",
+            RowKind::Plugin => "플러그인",
+            RowKind::Agent => "에이전트",
+            RowKind::Command => "커맨드",
+            RowKind::Hook => "훅",
+        }
+    }
+    /// 화면에 나오는 차례. 선언 순서를 그대로 쓰되 숫자로 못 박는다 — 변형을 사이에
+    /// 끼워 넣었을 때 화면 순서가 조용히 바뀌지 않도록.
+    fn order(self) -> u8 {
+        match self {
+            RowKind::Mcp => 0,
+            RowKind::Skill => 1,
+            RowKind::Plugin => 2,
+            RowKind::Agent => 3,
+            RowKind::Command => 4,
+            RowKind::Hook => 5,
+        }
+    }
+    /// 접힘 상태를 저장할 때 쓰는 안정된 키. `Debug` 를 쓰면 변형 이름을 바꾸는
+    /// 순간 남이 접어 둔 것이 조용히 풀린다.
+    fn key(self) -> &'static str {
+        match self {
+            RowKind::Mcp => "mcp",
+            RowKind::Skill => "skill",
+            RowKind::Plugin => "plugin",
+            RowKind::Agent => "agent",
+            RowKind::Command => "command",
+            RowKind::Hook => "hook",
+        }
+    }
 }
 
 /// 목록의 한 줄. 설정 파일에서 읽은 그대로이고, 살았는지(실제 연결)까지는 보지
@@ -55,6 +98,24 @@ pub(crate) struct McpRow {
     /// 여기서 껐다 켤 수 있나. codex 스킬만 거짓이다 — 그쪽은 폴더(대개 심볼릭
     /// 링크)가 곧 목록이라, 끄려면 지우는 수밖에 없어 토글과 삭제가 같아진다.
     pub(crate) toggleable: bool,
+}
+
+impl McpRow {
+    /// 여기서 지울 수 있나. 아니면 `×` 를 아예 안 그린다 — 눌러 봐야 안 된다는 걸
+    /// 아는 버튼은 없느니만 못하다.
+    ///
+    /// 플러그인이 준 것은 전부 제외한다. 파일이 플러그인 캐시 안에 있어 지워도
+    /// 다음 갱신에 돌아오고, 그 폴더는 우리 것이 아니다 — 끄려면 플러그인 줄을
+    /// 끄는 것이 맞는 자리다. 플러그인 자신도 제외한다: 지우기는 마켓 재설치가
+    /// 걸린 일이라 끄기로 충분하다. 훅은 설정 파일 안의 항목이라 파일 단위로
+    /// 지울 것이 없다.
+    fn deletable(&self) -> bool {
+        self.scope != "플러그인"
+            && matches!(
+                self.kind,
+                RowKind::Mcp | RowKind::Skill | RowKind::Agent | RowKind::Command
+            )
+    }
 }
 
 /// claude 의 MCP 서버는 세 곳에 나뉘어 적힌다. 전부 읽어야 목록이 실상과 맞는다.
@@ -105,7 +166,7 @@ fn claude_mcp(home: &std::path::Path, cwd: Option<&std::path::Path>) -> Vec<McpR
                 enabled: !off.contains(name),
                 name: name.clone(),
                 detail: server_detail(cfg),
-                toggleable: is_toggleable("claude", RowKind::Mcp),
+                toggleable: is_toggleable("claude", RowKind::Mcp, scope),
             });
         }
     };
@@ -221,7 +282,7 @@ fn codex_mcp(home: &std::path::Path) -> Vec<McpRow> {
                     .get("enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true),
-                toggleable: is_toggleable("codex", RowKind::Mcp),
+                toggleable: is_toggleable("codex", RowKind::Mcp, ""),
             }
         })
         .collect();
@@ -302,9 +363,299 @@ fn skills_in(
     out
 }
 
-/// 두 하네스의 MCP·스킬을 한 벌로. 워커 스레드에서 부른다.
+/// 설치된 claude 플러그인 하나.
+struct Plugin {
+    /// 마켓을 뗀 이름(`vercel`). 이 플러그인이 주는 것들의 이름 앞에 붙는다 —
+    /// `vercel:nextjs`, MCP 는 `plugin:vercel:vercel`.
+    name: String,
+    /// 어느 마켓에서 왔나. 상세 줄에 적는다.
+    market: String,
+    /// 실체가 풀린 자리. 여기 아래의 `skills/`·`agents/`·`commands/`·`.mcp.json` 이
+    /// 이 플러그인이 주는 전부다.
+    path: std::path::PathBuf,
+    on: bool,
+}
+
+/// 설치된 플러그인 목록. `installed_plugins.json` 이 실체 경로의 정본이다.
+///
+/// 폴더를 훑으면 안 되는 이유가 있다 — `plugins/cache/` 에는 같은 플러그인의 옛
+/// 버전·커밋 폴더가 함께 쌓인다(실측: chrome-devtools-mcp 가 네 벌). 어느 것이 지금
+/// 로드되는지는 그 json 의 `installPath` 만 안다.
+///
+/// 켜짐은 `settings.json` 의 `enabledPlugins` 다. 끈 플러그인도 설치는 남아 있어
+/// 키가 `false` 로 적히므로, 키가 없으면 꺼진 것으로 본다.
+fn claude_plugins(home: &std::path::Path) -> Vec<Plugin> {
+    let read = |p: std::path::PathBuf| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    };
+    let Some(inst) = read(home.join(".claude/plugins/installed_plugins.json")) else {
+        return Vec::new();
+    };
+    let on = read(home.join(".claude/settings.json"))
+        .and_then(|v| v.get("enabledPlugins").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut out: Vec<Plugin> = inst
+        .get("plugins")
+        .and_then(|p| p.as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, entries)| {
+            // 키가 `<이름>@<마켓>` 이다.
+            let (name, market) = key.split_once('@').unwrap_or((key.as_str(), ""));
+            let path = entries
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("installPath"))
+                .and_then(|p| p.as_str())?;
+            Some(Plugin {
+                name: name.to_string(),
+                market: market.to_string(),
+                path: path.into(),
+                on: on.get(key).and_then(|b| b.as_bool()).unwrap_or(false),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 폴더 안의 `*.md` 하나가 곧 한 줄인 것들 — 에이전트·커맨드. 스킬과 달리 폴더가
+/// 아니라 파일이다.
+///
+/// 거르는 둘은 실측에서 나왔다: `*.md.tmpl` 템플릿이 같은 폴더에 함께 있어 그냥 세면
+/// 개수가 두 배가 되고(vercel 에이전트 3개가 6개로), `_conventions.md` 같은 밑줄
+/// 시작 파일은 등록되지 않는 부속 문서다.
+fn md_entries_in(
+    dir: &std::path::Path,
+    harness: &'static str,
+    kind: RowKind,
+    prefix: &str,
+    scope: &'static str,
+    enabled: bool,
+) -> Vec<McpRow> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<McpRow> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("md") {
+                return None;
+            }
+            let stem = p.file_stem().and_then(|s| s.to_str())?;
+            if stem.starts_with('_') || stem.starts_with('.') {
+                return None;
+            }
+            let detail = std::fs::read_to_string(&p)
+                .map(|s| skill_description(&s))
+                .unwrap_or_default();
+            Some(McpRow {
+                harness,
+                kind,
+                scope,
+                enabled,
+                name: format!("{prefix}{stem}"),
+                detail,
+                toggleable: false,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 플러그인이 주는 MCP 서버. `<실체>/.mcp.json` 인데 **스키마가 두 가지**다 —
+/// `{"mcpServers":{…}}` 로 감싼 것(vercel·kasapane)과 감싸지 않은 평면 맵(context7).
+/// 둘 다 실제로 로드되므로 양쪽을 받는다.
+fn plugin_mcp(p: &Plugin, off: &std::collections::HashSet<String>) -> Vec<McpRow> {
+    let Some(v) = std::fs::read_to_string(p.path.join(".mcp.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let map = v
+        .get("mcpServers")
+        .and_then(|m| m.as_object())
+        .or_else(|| v.as_object());
+    let mut out: Vec<McpRow> = map
+        .into_iter()
+        .flatten()
+        // 감싸지 않은 평면 맵을 읽을 때 값이 객체가 아닌 키(스키마 필드 등)가 섞일 수
+        // 있다 — 서버 정의만 남긴다.
+        .filter(|(_, cfg)| cfg.is_object())
+        .map(|(key, cfg)| {
+            let id = format!("plugin:{}:{key}", p.name);
+            McpRow {
+                harness: "claude",
+                kind: RowKind::Mcp,
+                scope: "플러그인",
+                // 플러그인이 꺼져 있으면 그 서버는 안 붙는다 — 따로 켜 둔 것과 무관하다.
+                enabled: p.on && !off.contains(&id),
+                detail: server_detail(cfg),
+                // 켜진 플러그인의 서버만 여기서 끈다. 꺼진 플러그인 밑에서 끄면 화면은
+                // 뒤집히는데 실제로는 아무것도 안 달라져, 플러그인 줄이 진짜 스위치다.
+                toggleable: p.on,
+                name: id,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 플러그인 자신과 그것이 주는 것 전부.
+///
+/// 꺼진 플러그인의 제공물도 싣는다 — 회색으로 눕지만 「켜면 무엇이 들어오나」가
+/// 보여야 켤지 말지를 정할 수 있다(2026-08-11 지시 "다 뜨게하고").
+fn claude_plugin_rows(
+    home: &std::path::Path,
+    off: &std::collections::HashSet<String>,
+) -> Vec<McpRow> {
+    let mut rows = Vec::new();
+    let mut provided = Vec::new();
+    for p in claude_plugins(home) {
+        let skills = skills_in(&p.path.join("skills"), "claude", &Default::default(), false)
+            .into_iter()
+            .map(|r| McpRow {
+                scope: "플러그인",
+                enabled: p.on,
+                name: format!("{}:{}", p.name, r.name),
+                ..r
+            });
+        let agents = md_entries_in(
+            &p.path.join("agents"),
+            "claude",
+            RowKind::Agent,
+            &format!("{}:", p.name),
+            "플러그인",
+            p.on,
+        );
+        let commands = md_entries_in(
+            &p.path.join("commands"),
+            "claude",
+            RowKind::Command,
+            &format!("{}:", p.name),
+            "플러그인",
+            p.on,
+        );
+        let mcps = plugin_mcp(&p, off);
+        // 무엇을 주는 플러그인인지가 이름만으론 안 보인다 — 개수를 상세 줄에 적는다.
+        let counts = [
+            (skills.len(), "스킬"),
+            (mcps.len(), "MCP"),
+            (agents.len(), "에이전트"),
+            (commands.len(), "커맨드"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, l)| format!("{l} {n}"))
+        .collect::<Vec<_>>();
+        let detail = if counts.is_empty() {
+            // 폴더가 비어 보이는 플러그인이 실제로 있다 — rust-analyzer-lsp 는 실체가
+            // 마켓 매니페스트에 인라인으로 적혀 있어 설치 폴더엔 문서뿐이다.
+            p.market.clone()
+        } else {
+            format!("{} · {}", p.market, counts.join(" · "))
+        };
+        rows.push(McpRow {
+            harness: "claude",
+            kind: RowKind::Plugin,
+            scope: "",
+            enabled: p.on,
+            name: p.name.clone(),
+            detail,
+            toggleable: true,
+        });
+        provided.extend(skills);
+        provided.extend(mcps);
+        provided.extend(agents);
+        provided.extend(commands);
+    }
+    rows.extend(provided);
+    rows
+}
+
+/// `settings.json` 의 훅. 무엇이 내 입력·도구 호출에 끼어드는지가 여기 말고는 안 보인다.
+///
+/// 이벤트 이름을 상세 줄 앞에 적는 건 스코프 배지를 못 쓰기 때문이다(배지는 고정
+/// 문자열만 받는데 이벤트 이름은 설정에서 온다). 끄는 키는 없다 — 지우는 것뿐이다.
+fn claude_hooks(home: &std::path::Path) -> Vec<McpRow> {
+    let Some(v) = std::fs::read_to_string(home.join(".claude/settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (event, groups) in v.get("hooks").and_then(|h| h.as_object()).into_iter().flatten() {
+        for g in groups.as_array().into_iter().flatten() {
+            let matcher = g.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+            for h in g.get("hooks").and_then(|h| h.as_array()).into_iter().flatten() {
+                let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                // 커맨드가 스크립트 한 줄이면 파일 이름이, 인라인 셸이면 앞머리가
+                // 그 훅을 알아보는 단서다.
+                let short = cmd
+                    .split_whitespace()
+                    .find(|t| t.contains('/') || t.ends_with(".sh") || t.ends_with(".py"))
+                    .and_then(|t| t.rsplit('/').next())
+                    .unwrap_or(cmd);
+                out.push(McpRow {
+                    harness: "claude",
+                    kind: RowKind::Hook,
+                    scope: "",
+                    enabled: true,
+                    name: short.to_string(),
+                    detail: if matcher.is_empty() {
+                        event.clone()
+                    } else {
+                        format!("{event}({matcher})")
+                    },
+                    toggleable: false,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.detail.cmp(&b.detail).then(a.name.cmp(&b.name)));
+    out
+}
+
+/// `~/.claude.json` 의 이 폴더 몫 `disabledMcpServers`. 플러그인 서버도 같은 배열에
+/// `plugin:<플러그인>:<서버>` 이름으로 들어간다(실측: `plugin:vercel:vercel`).
+fn claude_mcp_off(
+    home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(home.join(".claude.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .zip(cwd.and_then(|c| c.to_str()).map(str::to_string))
+        .and_then(|(v, c)| {
+            v.get("projects")?
+                .get(c)?
+                .get("disabledMcpServers")?
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// 두 하네스가 로드하는 것 전부를 한 벌로. 워커 스레드에서 부른다.
 ///
 /// `cwd` 는 이 창이 보고 있는 폴더 — claude 쪽 꺼짐과 `.mcp.json` 이 폴더마다 다르다.
+///
+/// 마지막 정렬이 곧 화면 구조다. 그리기와 높이 계산이 **앞줄과 달라졌나**만 보고
+/// 섹션·그룹 머리를 내므로, 같은 (하네스, 종류)가 목록에서 흩어져 있으면 머리가 두 번
+/// 그려진다. 모으는 순서에 기대지 않고 여기서 한 번 못 박는다.
 pub(crate) fn collect(cwd: Option<&std::path::Path>) -> Vec<McpRow> {
     let Some(home) = kasa_socket::home_dir() else {
         return Vec::new();
@@ -316,15 +667,50 @@ pub(crate) fn collect(cwd: Option<&std::path::Path>) -> Vec<McpRow> {
         &home.join(".claude/skills"),
         "claude",
         &off,
-        is_toggleable("claude", RowKind::Skill),
+        is_toggleable("claude", RowKind::Skill, ""),
     ));
+    rows.extend(md_entries_in(
+        &home.join(".claude/agents"),
+        "claude",
+        RowKind::Agent,
+        "",
+        "",
+        true,
+    ));
+    rows.extend(md_entries_in(
+        &home.join(".claude/commands"),
+        "claude",
+        RowKind::Command,
+        "",
+        "",
+        true,
+    ));
+    rows.extend(claude_plugin_rows(&home, &claude_mcp_off(&home, cwd)));
+    rows.extend(claude_hooks(&home));
     rows.extend(codex_mcp(&home));
     rows.extend(skills_in(
         &home.join(".codex/skills"),
         "codex",
         &Default::default(),
-        is_toggleable("codex", RowKind::Skill),
+        is_toggleable("codex", RowKind::Skill, ""),
     ));
+    // claude 를 먼저, 그다음 종류 선언 순서.
+    //
+    // 한 칸 안에서는 **내 것을 먼저, 플러그인이 준 것을 뒤에** 놓는다. 이름순으로만
+    // 두면 플러그인 스킬(실측 64개 중 40개)이 앞자리를 차지해, 내가 쓴 스킬을 보려면
+    // 늘 스크롤해야 한다. 그 뒤는 이름순이고 스코프는 마지막이다 — 같은 이름이 두
+    // 스코프에 있을 때 두 줄이 붙어 있어야 어느 쪽이 겹친 건지 눈으로 잇는다.
+    rows.sort_by(|a, b| {
+        let h = |x: &str| u8::from(x != "claude");
+        let plug = |x: &str| u8::from(x == "플러그인");
+        h(a.harness)
+            .cmp(&h(b.harness))
+            .then(a.harness.cmp(b.harness))
+            .then(a.kind.order().cmp(&b.kind.order()))
+            .then(plug(a.scope).cmp(&plug(b.scope)))
+            .then(a.name.cmp(&b.name))
+            .then(a.scope.cmp(b.scope))
+    });
     rows
 }
 
@@ -457,6 +843,22 @@ fn remove_skill(home: &std::path::Path, harness: &str, name: &str) -> anyhow::Re
         return Err(anyhow::anyhow!("그 자리에 없다: {}", dir.display()));
     }
     let dest = trash(home, &dir)?;
+    Ok(format!(
+        "{name} 휴지통으로 ({})",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    ))
+}
+
+/// 에이전트·커맨드 `.md` 하나를 휴지통으로. 스킬과 달리 파일이라 폴더가 아니다.
+fn trash_md(home: &std::path::Path, dir: &str, name: &str) -> anyhow::Result<String> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(anyhow::anyhow!("이름이 이상하다: {name}"));
+    }
+    let path = home.join(dir).join(format!("{name}.md"));
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Err(anyhow::anyhow!("그 자리에 없다: {}", path.display()));
+    }
+    let dest = trash(home, &path)?;
     Ok(format!(
         "{name} 휴지통으로 ({})",
         dest.file_name().and_then(|n| n.to_str()).unwrap_or("")
@@ -649,13 +1051,65 @@ fn write_claude_disabled(
 ///
 /// 목록의 표시와 쓰기 게이트가 이 한 함수를 같이 본다 — 갈라지면 눌리는데 안 써지거나
 /// 그 반대가 된다.
-fn is_toggleable(harness: &str, kind: RowKind) -> bool {
-    !matches!((harness, kind), ("codex", RowKind::Skill))
+fn is_toggleable(harness: &str, kind: RowKind, scope: &str) -> bool {
+    match kind {
+        // 끄는 키가 **없다**. 추측이 아니라 부재 확인이다 — settings.json 과 157KB
+        // 짜리 `.claude.json` 양쪽에서 agentOverrides·disabledCommands·disabledHooks
+        // 계열을 정규식으로 훑어 매치가 0건이었다(2026-08-11). 지우는 것뿐이다.
+        RowKind::Agent | RowKind::Command | RowKind::Hook => false,
+        // codex 스킬은 폴더(대개 심볼릭 링크)가 곧 목록이라 끄기가 삭제와 같아진다.
+        RowKind::Skill if harness == "codex" => false,
+        // 플러그인이 준 스킬엔 개별 키가 없다 — 플러그인째 꺼야 한다.
+        RowKind::Skill => scope != "플러그인",
+        RowKind::Mcp | RowKind::Plugin => true,
+    }
+}
+
+/// 플러그인을 껐다 켠다 — `settings.json` 의 `enabledPlugins`. 여긴 **전역**이다
+/// (MCP 꺼짐이 폴더별인 것과 다르다).
+///
+/// 키가 `<이름>@<마켓>` 이라 목록의 이름만으론 모자란다. 설치 목록에서 되찾되, 같은
+/// 이름이 두 마켓에 있으면 어느 쪽인지 우리가 정할 일이 아니라 거절한다.
+fn set_claude_plugin_enabled(home: &std::path::Path, name: &str, on: bool) -> anyhow::Result<()> {
+    let inst: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(
+            home.join(".claude/plugins/installed_plugins.json"),
+        )?)?;
+    let keys: Vec<String> = inst
+        .get("plugins")
+        .and_then(|p| p.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k.clone())
+        .filter(|k| k.split('@').next() == Some(name))
+        .collect();
+    let [key] = keys.as_slice() else {
+        return Err(anyhow::anyhow!(
+            "{name} 을 설치 목록에서 하나로 못 좁혔다 ({}건)",
+            keys.len()
+        ));
+    };
+    let path = home.join(".claude/settings.json");
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    let obj = v
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json 이 객체가 아니다"))?;
+    // 스킬과 달리 켤 때도 키를 지우지 않는다 — 이 표는 "설치된 것의 on/off" 라서,
+    // 키가 없으면 꺼진 것으로 읽힌다.
+    obj.entry("enabledPlugins")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("enabledPlugins 가 객체가 아니다"))?
+        .insert(key.clone(), serde_json::json!(on));
+    write_config_atomic(&path, &format!("{}\n", serde_json::to_string_pretty(&v)?))?;
+    Ok(())
 }
 
 /// 한 줄을 뒤집는다. 어느 파일을 고칠지는 (하네스, 종류)가 정한다.
 fn toggle_row(row: &McpRow, cwd: Option<&std::path::Path>) -> anyhow::Result<()> {
-    if !is_toggleable(row.harness, row.kind) {
+    // 줄이 들고 있는 판정과 규칙을 함께 본다. 줄 쪽에는 규칙만으로 모르는 사정이
+    // 하나 더 실린다 — 꺼진 플러그인이 준 MCP 는 여기서 끄면 화면만 뒤집힌다.
+    if !row.toggleable || !is_toggleable(row.harness, row.kind, row.scope) {
         return Err(anyhow::anyhow!("여기선 못 끈다"));
     }
     let home = kasa_socket::home_dir().ok_or_else(|| anyhow::anyhow!("홈 디렉터리를 못 찾았다"))?;
@@ -663,6 +1117,7 @@ fn toggle_row(row: &McpRow, cwd: Option<&std::path::Path>) -> anyhow::Result<()>
     match (row.harness, row.kind) {
         ("codex", RowKind::Mcp) => set_codex_mcp_enabled(&home, &row.name, on),
         ("claude", RowKind::Skill) => set_claude_skill_enabled(&home, &row.name, on),
+        ("claude", RowKind::Plugin) => set_claude_plugin_enabled(&home, &row.name, on),
         ("claude", RowKind::Mcp) => {
             // 꺼짐이 폴더에 적히므로 폴더를 모르면 끌 자리가 없다.
             let cwd = cwd.ok_or_else(|| anyhow::anyhow!("이 pane 의 폴더를 몰라 못 끈다"))?;
@@ -670,6 +1125,85 @@ fn toggle_row(row: &McpRow, cwd: Option<&std::path::Path>) -> anyhow::Result<()>
         }
         _ => Err(anyhow::anyhow!("여기선 못 끈다")),
     }
+}
+
+/// 화면에 놓이는 것 하나. 머리도 줄도 여기서는 같은 지위다.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Item {
+    /// 하네스 머리(로고 + 이름 + 개수 + 더하기).
+    Section {
+        harness: &'static str,
+        open: bool,
+        count: usize,
+    },
+    /// 종류 머리(MCP / 스킬 / 플러그인 …).
+    Group {
+        harness: &'static str,
+        kind: RowKind,
+        open: bool,
+        count: usize,
+    },
+    /// `view` 의 몇 번째 줄인가.
+    Row(usize),
+}
+
+impl Item {
+    fn height(&self) -> f32 {
+        match self {
+            Item::Section { .. } => SECTION_H,
+            Item::Group { .. } => GROUP_H,
+            Item::Row(_) => ROW_H,
+        }
+    }
+}
+
+fn group_key(harness: &str, kind: RowKind) -> String {
+    format!("{harness}/{}", kind.key())
+}
+
+/// 목록을 화면 구조로 편다 — 머리와 줄이 나오는 차례 그대로.
+///
+/// **그리기와 높이 계산이 같은 목록을 본다.** 예전엔 둘이 각각 "앞줄과 달라졌나"를
+/// 세었는데, 그러면 규칙이 하나 늘 때마다 두 곳을 똑같이 고쳐야 하고 한쪽만 고치면
+/// 스크롤 상한이 어긋난다 — 목록 끝이 잘리거나 바닥에 빈 자리가 남는다. 접힘이
+/// 바로 그 "규칙 하나"라서, 붙이기 전에 세는 자리를 하나로 합쳤다.
+///
+/// 접힌 것은 **목록에서 아예 빠진다**. 화면 밖으로 밀어내는 것이 아니라 자리를 안
+/// 차지해야, 스크롤 상한과 클릭 좌표가 저절로 맞는다.
+pub(crate) fn layout(rows: &[McpRow], collapsed: &std::collections::HashSet<String>) -> Vec<Item> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let harness = rows[i].harness;
+        let hn = rows[i..].iter().take_while(|r| r.harness == harness).count();
+        let hopen = !collapsed.contains(harness);
+        out.push(Item::Section {
+            harness,
+            open: hopen,
+            count: hn,
+        });
+        if !hopen {
+            i += hn;
+            continue;
+        }
+        let end = i + hn;
+        while i < end {
+            let kind = rows[i].kind;
+            let kn = rows[i..end].iter().take_while(|r| r.kind == kind).count();
+            let kopen = !collapsed.contains(&group_key(harness, kind));
+            out.push(Item::Group {
+                harness,
+                kind,
+                open: kopen,
+                count: kn,
+            });
+            if kopen {
+                out.extend((i..i + kn).map(Item::Row));
+            }
+            i += kn;
+        }
+    }
+    out
 }
 
 /// 하네스 로고 아이콘 이름 — `sesscol::harness_icon` 과 같은 규약.
@@ -885,6 +1419,11 @@ impl App {
         let Some(row) = self.mcp_col.view.get(i).cloned() else {
             return;
         };
+        // 버튼을 안 그리는 줄이지만 좌표는 남을 수 있다(스크롤·재수집 사이) — 여기서도
+        // 같은 규칙을 본다.
+        if !row.deletable() {
+            return;
+        }
         let armed = self
             .mcp_col
             .confirm_delete
@@ -931,6 +1470,10 @@ impl App {
             (None, _) => Err(anyhow::anyhow!("홈 디렉터리를 못 찾았다")),
             (Some(h), RowKind::Skill) => remove_skill(&h, row.harness, &row.name),
             (Some(h), RowKind::Mcp) => remove_codex_mcp(&h, &row.name),
+            // 에이전트·커맨드는 `.md` 파일 하나가 곧 그 항목이다.
+            (Some(h), RowKind::Agent) => trash_md(&h, ".claude/agents", &row.name),
+            (Some(h), RowKind::Command) => trash_md(&h, ".claude/commands", &row.name),
+            (Some(_), k) => Err(anyhow::anyhow!("{} 은 여기서 못 지운다", k.label())),
         };
         self.set_toast(match res {
             Ok(m) => m,
@@ -985,6 +1528,23 @@ impl App {
                 harness: h,
                 ..Default::default()
             });
+            self.chrome_dirty = true;
+            return true;
+        }
+        // 머리를 누르면 접힌다. 더하기(+)보다 뒤에 보는 건 그 버튼이 머리 안에
+        // 겹쳐 있어서다 — 순서가 바뀌면 + 를 눌러도 접히기만 한다.
+        if let Some(key) = self
+            .mcp_col
+            .head_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(k, _)| k.clone())
+        {
+            if !self.mcp_col.collapsed.remove(&key) {
+                self.mcp_col.collapsed.insert(key);
+            }
+            // 접으면 목록이 짧아진다 — 스크롤이 끝을 넘어간 채 남으면 빈 화면이 된다.
+            // 상한 clamp 는 다음 그리기가 하므로 여기선 되돌릴 자리만 만들어 준다.
             self.chrome_dirty = true;
             return true;
         }
@@ -1064,6 +1624,7 @@ pub(crate) fn draw_mcp_col(
     mc.del_rects.clear();
     mc.refresh_rect = None;
     let mut add_rects: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+    let mut head_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
     // 확인 대기는 스스로 풀린다 — 무장한 줄이 화면에 남아 있으면 한참 뒤의 클릭이
     // 지우기가 된다.
     if mc
@@ -1080,12 +1641,19 @@ pub(crate) fn draw_mcp_col(
     // ── 머리: 개수 + 새로고침 (스크롤 밖 고정) ──
     let head_y = top + 6.0;
     {
-        let mcps = mc.view.iter().filter(|r| r.kind == RowKind::Mcp).count();
-        let skills = mc.view.len() - mcps;
+        // 종류마다 세야 한다. 「MCP 아닌 것」을 스킬로 묶던 때가 있었는데, 플러그인·
+        // 에이전트·커맨드·훅이 들어오자 스킬 26 이 112 로 뛰었다 — 세는 자리가 하나
+        // 늘어난 종류를 모르면 숫자는 조용히 거짓말을 한다.
+        let n = |k: RowKind| mc.view.iter().filter(|r| r.kind == k).count();
         g.draw_text(
             x0,
             head_y + 4.0,
-            &format!("MCP {mcps} · 스킬 {skills}"),
+            &format!(
+                "MCP {} · 스킬 {} · 총 {}",
+                n(RowKind::Mcp),
+                n(RowKind::Skill),
+                mc.view.len()
+            ),
             gpu::DrawOpts {
                 font_size: 11.0,
                 color: theme::text_mute(),
@@ -1237,6 +1805,7 @@ pub(crate) fn draw_mcp_col(
     if mc.view.is_empty() {
         mc.content_h = EMPTY_H;
         mc.add_rects = add_rects;
+        mc.head_rects = head_rects;
         g.draw_text(
             x0,
             body_top + 12.0,
@@ -1251,74 +1820,154 @@ pub(crate) fn draw_mcp_col(
         return;
     }
 
-    // 섹션·그룹 머리가 몇 줄 들어가는지 미리 세어 스크롤 상한을 잡는다.
-    mc.content_h = content_height(&mc.view);
+    // 접힘까지 반영해 화면 구조를 한 번 편다 — 아래 그리기와 스크롤 상한이 이 하나를
+    // 같이 본다.
+    let items = layout(&mc.view, &mc.collapsed);
+    mc.content_h = content_height(&items);
     let max_scroll = (mc.content_h - vis_h).max(0.0);
     mc.scroll = mc.scroll.clamp(0.0, max_scroll);
 
     let mut y = body_top - mc.scroll;
-    let mut cur_harness = "";
-    let mut cur_kind: Option<RowKind> = None;
-    for (i, row) in mc.view.iter().enumerate() {
-        if row.harness != cur_harness {
-            cur_harness = row.harness;
-            cur_kind = None;
-            if y + SECTION_H > body_top && y < bottom {
-                g.queue_icon(
-                    harness_icon(row.harness),
-                    x + 9.0,
-                    y + 7.0,
-                    15.0,
-                    theme::text(),
-                );
-                g.draw_text(
-                    text_x,
-                    y + 8.0,
-                    row.harness,
-                    gpu::DrawOpts {
-                        font_size: 12.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                // 더하기는 섹션 머리에 둔다 — 어느 하네스에 붙일지가 누르는 자리로
-                // 정해져야, 폼 안에서 하네스를 또 고르지 않아도 된다.
-                let r = (right - 18.0, y + 5.0, 18.0, 18.0);
-                let ah = hit(&r);
-                g.hover_pointer |= ah;
-                g.queue_icon(
-                    "plus",
-                    r.0,
-                    r.1,
-                    15.0,
-                    if ah { theme::text() } else { theme::text_dim() },
-                );
-                add_rects.push((row.harness, r));
+    for item in &items {
+        let visible = y + item.height() > body_top && y < bottom;
+        // 머리는 통째로 누르는 자리다 — 셰브런만 받으면 과녁이 12px 이 된다.
+        let head = (x, y, w, item.height());
+        let (i, row) = match item {
+            Item::Section {
+                harness,
+                open,
+                count,
+            } => {
+                if visible {
+                    let hov = hit(&head);
+                    if hov {
+                        round_rect(
+                            g,
+                            x + 4.0,
+                            y,
+                            w - 8.0,
+                            SECTION_H - 2.0,
+                            theme::radius_sm(),
+                            theme::surface_hover(),
+                        );
+                    }
+                    g.hover_pointer |= hov;
+                    g.queue_icon(
+                        if *open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        x + 2.0,
+                        y + 9.0,
+                        12.0,
+                        theme::text_dim(),
+                    );
+                    g.queue_icon(harness_icon(harness), x + 16.0, y + 7.0, 15.0, theme::text());
+                    let lw = g.measure_chrome_text(harness, 12.0, true);
+                    g.draw_text(
+                        x + 38.0,
+                        y + 8.0,
+                        harness,
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: theme::text(),
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                    // 개수는 접었을 때 특히 필요하다 — 접힌 머리만 남으면 그 안에
+                    // 무엇이 몇 개 있었는지가 화면에서 통째로 사라진다.
+                    g.draw_text(
+                        x + 44.0 + lw,
+                        y + 9.0,
+                        &count.to_string(),
+                        gpu::DrawOpts {
+                            font_size: 10.0,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    // 더하기는 섹션 머리에 둔다 — 어느 하네스에 붙일지가 누르는 자리로
+                    // 정해져야, 폼 안에서 하네스를 또 고르지 않아도 된다.
+                    let r = (right - 18.0, y + 5.0, 18.0, 18.0);
+                    let ah = hit(&r);
+                    g.hover_pointer |= ah;
+                    g.queue_icon(
+                        "plus",
+                        r.0,
+                        r.1,
+                        15.0,
+                        if ah { theme::text() } else { theme::text_dim() },
+                    );
+                    add_rects.push((harness, r));
+                    head_rects.push((harness.to_string(), head));
+                }
+                y += SECTION_H;
+                continue;
             }
-            y += SECTION_H;
-        }
-        if cur_kind != Some(row.kind) {
-            cur_kind = Some(row.kind);
-            if y + GROUP_H > body_top && y < bottom {
-                g.draw_text(
-                    text_x,
-                    y + 5.0,
-                    if row.kind == RowKind::Mcp {
-                        "MCP"
-                    } else {
-                        "스킬"
-                    },
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: theme::text_dim(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
+            Item::Group {
+                harness,
+                kind,
+                open,
+                count,
+            } => {
+                if visible {
+                    let hov = hit(&head);
+                    g.hover_pointer |= hov;
+                    g.queue_icon(
+                        if *open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        x + 18.0,
+                        y + 5.0,
+                        11.0,
+                        if hov {
+                            theme::text_dim()
+                        } else {
+                            theme::text_mute()
+                        },
+                    );
+                    let label = kind.label();
+                    g.draw_text(
+                        text_x + 2.0,
+                        y + 5.0,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: 10.0,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    let lw = g.measure_chrome_text(label, 10.0, false);
+                    g.draw_text(
+                        text_x + 8.0 + lw,
+                        y + 5.0,
+                        &count.to_string(),
+                        gpu::DrawOpts {
+                            font_size: 10.0,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    head_rects.push((group_key(harness, *kind), head));
+                }
+                y += GROUP_H;
+                continue;
             }
-            y += GROUP_H;
-        }
+            Item::Row(i) => match mc.view.get(*i) {
+                Some(r) => (*i, r),
+                None => {
+                    y += ROW_H;
+                    continue;
+                }
+            },
+        };
 
         let r = (x, y, w, ROW_H);
         // 화면 밖 행은 hit rect 도 안 남긴다 — 남기면 스크롤 위쪽 숨은 행이 클릭을 받는다.
@@ -1380,7 +2029,7 @@ pub(crate) fn draw_mcp_col(
             // 걸리고, 되돌릴 수 없는 버튼이 손끝에 늘 놓인다.
             let is_armed = armed == Some(i);
             let mut detail_w = avail - 12.0;
-            if hov || is_armed {
+            if (hov || is_armed) && row.deletable() {
                 let d = (right - 20.0, y + 11.0, 16.0, 16.0);
                 let dh = hit(&d);
                 g.hover_pointer |= dh;
@@ -1421,26 +2070,12 @@ pub(crate) fn draw_mcp_col(
         y += ROW_H;
     }
     mc.add_rects = add_rects;
+    mc.head_rects = head_rects;
 }
 
 /// 섹션·그룹 머리를 포함한 목록 전체 높이. 스크롤 상한이 이 값에 걸린다.
-fn content_height(rows: &[McpRow]) -> f32 {
-    let mut h = 0.0;
-    let mut cur_harness = "";
-    let mut cur_kind: Option<RowKind> = None;
-    for r in rows {
-        if r.harness != cur_harness {
-            cur_harness = r.harness;
-            cur_kind = None;
-            h += SECTION_H;
-        }
-        if cur_kind != Some(r.kind) {
-            cur_kind = Some(r.kind);
-            h += GROUP_H;
-        }
-        h += ROW_H;
-    }
-    h
+fn content_height(items: &[Item]) -> f32 {
+    items.iter().map(Item::height).sum()
 }
 
 #[cfg(test)]
@@ -1473,7 +2108,7 @@ mod tests {
     }
 
     /// 높이 계산이 렌더의 배치와 어긋나면 스크롤이 목록 끝에 못 닿거나 빈 공간이
-    /// 남는다 — 둘은 같은 규칙(섹션이 바뀌면 머리, 종류가 바뀌면 그룹)을 따라야 한다.
+    /// 남는다 — 둘이 같은 목록을 보므로 여기서 확인하는 건 그 목록의 모양이다.
     #[test]
     fn content_height_counts_each_header_once() {
         let rows = vec![
@@ -1482,10 +2117,60 @@ mod tests {
             row("claude", RowKind::Skill, "comfyui"),
             row("codex", RowKind::Mcp, "context7"),
         ];
+        let open = Default::default();
         // 섹션 2 + 그룹 3 + 행 4
         let want = SECTION_H * 2.0 + GROUP_H * 3.0 + ROW_H * 4.0;
-        assert_eq!(content_height(&rows), want);
-        assert_eq!(content_height(&[]), 0.0);
+        assert_eq!(content_height(&layout(&rows, &open)), want);
+        assert_eq!(content_height(&layout(&[], &open)), 0.0);
+    }
+
+    /// 접힌 것은 자리를 안 차지해야 한다. 화면 밖으로 밀어내는 식이면 스크롤 상한이
+    /// 접기 전 그대로라 바닥에 빈 화면이 생긴다.
+    #[test]
+    fn collapsing_takes_the_rows_out_of_the_layout() {
+        let rows = vec![
+            row("claude", RowKind::Mcp, "exa"),
+            row("claude", RowKind::Skill, "comfyui"),
+            row("claude", RowKind::Skill, "notebooklm"),
+            row("codex", RowKind::Mcp, "context7"),
+        ];
+        // 종류 하나만 접으면 그 머리는 남고 줄만 빠진다 — 남아야 다시 펼 수 있다.
+        let mut c = std::collections::HashSet::new();
+        c.insert("claude/skill".to_string());
+        let items = layout(&rows, &c);
+        assert_eq!(
+            content_height(&items),
+            SECTION_H * 2.0 + GROUP_H * 3.0 + ROW_H * 2.0
+        );
+        assert!(
+            items.contains(&Item::Group {
+                harness: "claude",
+                kind: RowKind::Skill,
+                open: false,
+                count: 2,
+            }),
+            "접힌 종류 머리가 개수를 들고 남아야 한다: {items:?}"
+        );
+
+        // 하네스를 접으면 그 안의 종류 머리까지 통째로 빠진다.
+        let mut c = std::collections::HashSet::new();
+        c.insert("claude".to_string());
+        let items = layout(&rows, &c);
+        assert_eq!(
+            content_height(&items),
+            SECTION_H * 2.0 + GROUP_H + ROW_H,
+            "claude 는 머리 한 줄만: {items:?}"
+        );
+        // 접힌 머리도 개수는 들고 있어야 한다 — 안 보이는 것이 몇 개였는지가
+        // 화면에서 통째로 사라지면 접은 쪽을 잊는다.
+        assert!(
+            items.contains(&Item::Section {
+                harness: "claude",
+                open: false,
+                count: 3,
+            }),
+            "접힌 하네스 머리가 개수를 들고 남아야 한다: {items:?}"
+        );
     }
 
     /// url 서버와 command 서버가 한 줄로 같은 모양이 되게.
@@ -1851,11 +2536,11 @@ enabled = false
     /// 끌 수 있는 줄이 못 끄는 것으로 표시되면 안내만 뜨고 설정은 그대로다.
     #[test]
     fn only_codex_skills_are_not_toggleable() {
-        assert!(is_toggleable("codex", RowKind::Mcp));
-        assert!(is_toggleable("claude", RowKind::Skill));
-        assert!(is_toggleable("claude", RowKind::Mcp));
+        assert!(is_toggleable("codex", RowKind::Mcp, ""));
+        assert!(is_toggleable("claude", RowKind::Skill, ""));
+        assert!(is_toggleable("claude", RowKind::Mcp, "전역"));
         // codex 스킬은 폴더가 곧 목록이라 끄기가 삭제와 같아진다.
-        assert!(!is_toggleable("codex", RowKind::Skill));
+        assert!(!is_toggleable("codex", RowKind::Skill, ""));
         // 목록이 만든 행의 표시와 실제 쓰기 게이트가 같은 함수를 봐야 어긋나지 않는다.
         let mut r = row("codex", RowKind::Skill, "orchestration");
         r.toggleable = true;

@@ -162,6 +162,14 @@ pub(crate) struct McpColState {
     pub(crate) del_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 섹션 머리의 더하기 버튼과 그게 여는 하네스.
     pub(crate) add_rects: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 접힌 머리들. 하네스는 `"claude"`, 종류는 `"claude/skill"`.
+    ///
+    /// 접힌 쪽을 담는다(펼친 쪽이 아니라) — 기본이 「다 펼침」이라 빈 집합이 곧
+    /// 기본값이고, 새 종류가 늘어도 저절로 보인다. 2026-08-11 지시 "다 뜨게하고
+    /// 접기도 가능하게".
+    pub(crate) collapsed: std::collections::HashSet<String>,
+    /// 섹션·종류 머리의 클릭 자리와 그 접힘 키.
+    pub(crate) head_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) content_h: f32,
@@ -185,6 +193,8 @@ impl Default for McpColState {
             row_rects: Vec::new(),
             del_rects: Vec::new(),
             add_rects: Vec::new(),
+            collapsed: Default::default(),
+            head_rects: Vec::new(),
             refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
             content_h: 0.0,
