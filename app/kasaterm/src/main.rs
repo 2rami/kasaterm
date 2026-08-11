@@ -3778,6 +3778,9 @@ pub(crate) enum ImeFocus {
     /// 별도창 raw 편집기(aux 인덱스).
     AuxEditor(usize),
     GitCommit,
+    /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
+    /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
+    McpAdd,
     /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
     RoomRename(usize),
     PathSearch,
@@ -5083,7 +5086,17 @@ impl App {
                     .is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
-            mcp_col: Default::default(),
+            mcp_col: state::McpColState {
+                // 추가 칸은 열어야만 보이는데 헤드리스 캡처는 클릭을 못 한다.
+                add: std::env::var("KASATERM_TEST_MCP")
+                    .ok()
+                    .filter(|v| v == "add")
+                    .map(|_| state::McpAddForm {
+                        harness: "claude",
+                        ..Default::default()
+                    }),
+                ..Default::default()
+            },
             statusbar: Default::default(),
             pane_cwd_check: None,
             show_pane_numbers: false,
