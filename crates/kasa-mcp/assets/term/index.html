@@ -6,9 +6,14 @@
 <title>kasaterm</title>
 <link rel="stylesheet" href="/term/xterm.css">
 <style>
-  /* claude code 가 그리는 Nerd Font 아이콘과 박스드로잉은 폰 기본 폰트에 없어서
-     두부(□)와 끊긴 선이 된다. 그래서 서브셋 폰트를 직접 내려준다.
-     한글은 이 폰트에 없다 — 폰이 가진 한글 폰트로 폴백된다. */
+  /* kasaterm 이 실제로 쓰는 폰트(D2Coding Nerd Font)를 서브셋해 내려준다 —
+     화면이 여기와 같아 보이려면 같은 폰트여야 하고, 폰 기본 폰트에는 Nerd Font
+     아이콘(사설영역)도 한글 고정폭도 없다.
+     ⚠️ **Mono 변종을 쓰면 안 된다.** 그쪽은 한글을 0.5em 으로 눌러 1셀에 맞추는데
+     터미널은 한글을 2셀로 잡으므로, 글리프가 칸의 절반만 채워 자간이 벌어진 것처럼
+     보인다(실측 advance: Mono 한글 500 = ASCII 와 동일). 논-Mono 는 한글 1000 으로
+     정확히 2셀이고 아이콘은 500 으로 1셀이라 둘 다 맞다 — gpu.rs 의 폴백 체인이
+     한글을 논-Mono 에 맡기는 이유와 같다. */
   @font-face {
     font-family: 'KasaTerm';
     src: url('/term/font.woff2') format('woff2');
@@ -97,7 +102,8 @@
   if (touch) document.body.classList.add('has-bar');
 
   const term = new Terminal({
-    fontFamily: '"KasaTerm", ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
+    // 웹폰트가 못 오면 맥에 설치된 같은 폰트가 받는다. Menlo 는 한글이 없어 맨 뒤.
+    fontFamily: '"KasaTerm", "D2Coding", ui-monospace, SFMono-Regular, Menlo, monospace',
     fontSize: 13,
     cursorBlink: true,
     allowProposedApi: true,
