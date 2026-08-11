@@ -22,6 +22,11 @@ type Rect = (f32, f32, f32, f32);
 const CAT_W: f32 = 200.0;
 const ROW_GAP: f32 = 28.0;
 
+/// 설명 문구에 박히는 주 수식키 이름. 실제 바인딩은 이미 갈려 있는데
+/// (`zoom_mod = macos ? Cmd : Ctrl`, 편집기 저장도 같다) 문구만 Cmd 로 고정돼
+/// 있어서, Windows 사용자에게 **키보드에 없는 키**를 안내하고 있었다.
+const PRIMARY_MOD: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
 /// Snapshot captured before the gpu borrow so the paint never touches `&self`.
 pub(crate) struct SettingsCtx {
     pub area: Rect,
@@ -1287,7 +1292,7 @@ pub(crate) fn paint_settings(
                 y,
                 clip,
                 "Editor autosave",
-                &["타자가 멎으면 편집기가 조용히 저장 (Cmd+S 는 그대로)"],
+                &[&format!("타자가 멎으면 편집기가 조용히 저장 ({PRIMARY_MOD}+S 는 그대로)")],
             );
             if y > clip {
                 let cells = [
@@ -1548,7 +1553,7 @@ pub(crate) fn paint_settings(
             y += 44.0 + ROW_GAP;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
-            y = field_header(g, fx, y, clip, "Font size", &["터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)"]);
+            y = field_header(g, fx, y, clip, "Font size", &[&format!("터미널 셀 폰트 크기 (기본 16 · {PRIMARY_MOD}+/- 줌과 별개인 기준값)")]);
             if y > clip {
                 let bs = 30.0_f32;
                 let minus = (fx, y, bs, bs);
