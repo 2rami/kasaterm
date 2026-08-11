@@ -1479,9 +1479,8 @@ fn snapshot(
     // Callers that change the *whole* view (scroll, resize) pass true.
     force_full: bool,
 ) -> ScreenUpdate {
-    // display_offset counts lines scrolled toward older history; visual
-    // row r maps to grid line `r - display_offset`. Read it before the
-    // &mut borrow from `damage()`.
+    // 히스토리로 몇 줄 올라가 있는지. 셀을 읽는 데는 안 쓴다(grid 인덱싱이 이미
+    // 반영한다) — 커서를 감출지 판단하는 데만 쓴다. `damage()` 의 &mut 대여 전에 읽는다.
     let display_offset = term.grid().display_offset() as i32;
     // Which visual rows to rebuild. damage() yields viewport-relative
     // line numbers (already display_offset-adjusted), and returns Full
@@ -1512,8 +1511,12 @@ fn snapshot(
         // repaints correctly, and we never crash on the race.
         let grid_cols = grid.columns();
         let grid_lines = grid.screen_lines();
-        let line = r as i32 - display_offset;
-        let line_ok = line >= 0 && (line as usize) < grid_lines;
+        // ⚠️`display_offset` 을 여기서 **빼지 않는다**. alacritty 의 `grid[Line(r)]` 는
+        // 이미 스크롤된 화면 기준이라, 빼면 이중 보정이 되어 위로 올린 만큼 윗줄이
+        // 빈칸이 되고 내용이 그만큼 아래로 밀린다 — 화면 높이보다 많이 올리면 통째로
+        // 빈다. 「위로 올리면 위에 게 없어진다」의 정체였다(2026-08-11 확정).
+        let line = r as i32;
+        let line_ok = (line as usize) < grid_lines;
         for c in 0..cols {
             if line_ok && (c as usize) < grid_cols {
                 let point = Point::new(
@@ -3261,6 +3264,49 @@ mod snapshot_fidelity_tests {
         let mut b = Utf8Buffer::new();
         assert_eq!(b.process(b"ab\xed\x95"), b"ab", "잘린 앞부분을 안 붙들었다");
         assert_eq!(b.process(b"\x9ccd"), "한cd".as_bytes(), "이어붙이지 못했다");
+    }
+
+    /// 스크롤해 올린 화면이 그리드와 같은가.
+    ///
+    /// `snapshot()` 은 `line = r - display_offset` 으로 한 번 더 빼서 읽는다.
+    /// alacritty 의 `grid[Line(r)]` 가 이미 display_offset 을 반영한다면 그 뺄셈은
+    /// 이중 보정이라, 위쪽 `display_offset` 행이 통째로 빈칸이 된다.
+    #[test]
+    fn scrolled_snapshot_matches_the_scrolled_grid() {
+        let (cols, rows) = (40u16, 10u16);
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        // 40줄을 흘려 30줄을 히스토리로 밀어낸다.
+        let mut feed = String::new();
+        for i in 1..=40 { feed.push_str(&format!("L{i}\r\n")); }
+        proc.advance(&mut term, feed.as_bytes());
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+        assert_eq!(term.grid().display_offset(), 5, "스크롤이 안 걸렸다");
+
+        let truth: Vec<String> = (0..rows as usize)
+            .map(|r| {
+                let g = term.grid();
+                let line = alacritty_terminal::index::Line(r as i32);
+                (0..cols as usize)
+                    .map(|c| g[line][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>().trim_end().to_string()
+            })
+            .collect();
+        let title = Arc::new(Mutex::new(None));
+        let upd = snapshot(&mut term, cols, rows, "%t", &title, true);
+        let mut got = vec![String::new(); rows as usize];
+        for (r, row) in &upd.dirty {
+            got[*r as usize] =
+                row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+        }
+        eprintln!("그리드: {truth:?}");
+        eprintln!("스냅샷: {got:?}");
+        assert_eq!(truth, got, "스크롤한 화면이 그리드와 다르다");
     }
 
     fn grid_rows(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<String> {
