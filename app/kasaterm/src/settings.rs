@@ -2260,18 +2260,30 @@ pub(crate) fn account_display(id: &str, label: &str, fallback: &str) -> String {
     if !label_is_auto(label) {
         return label.trim().to_string();
     }
-    // 이름 없는 슬롯은 **어느 한도를 쓰는지**로 부른다. 한 이메일에 팀 조직과 개인
-    // 조직이 둘 다 달려 있으면 이메일만으로는 두 슬롯이 똑같아 보이는데, 정작 한도는
-    // 따로 돈다 — 실제로 슬롯 셋이 전부 `2rami@sionic.ai` 로 보이면서 그중 아무도
-    // 팀플랜 한도를 안 쓰고 있었다(거노 2026-08-07: "3개가 모두 같을리가없는데").
-    //
-    // 개인 조직은 이름이 `<이메일>'s Organization` 이라 조직명으로 부르면 이메일을
-    // 두 번 쓰는 꼴이 된다 — 그래서 **이메일을 품지 않은 조직명**(=진짜 팀)만 조직으로
-    // 부르고 나머지는 이메일로 둔다.
+    account_identity(id).unwrap_or_else(|| fallback.to_string())
+}
+
+/// 그 슬롯이 **실제로** 어느 계정인지 한 줄로 — 진짜 팀 조직이면 조직명, 아니면
+/// 이메일. 아직 못 알아냈으면 None.
+///
+/// 이름 없는 슬롯은 **어느 한도를 쓰는지**로 불러야 한다. 한 이메일에 팀 조직과 개인
+/// 조직이 둘 다 달려 있으면 이메일만으로는 두 슬롯이 똑같아 보이는데 정작 한도는 따로
+/// 돈다 — 실제로 슬롯 셋이 전부 `2rami@sionic.ai` 로 보이면서 그중 아무도 팀플랜
+/// 한도를 안 쓰고 있었다(거노 2026-08-07: "3개가 모두 같을리가없는데").
+///
+/// 개인 조직은 이름이 `<이메일>'s Organization` 이라 조직명으로 부르면 이메일을 두 번
+/// 쓰는 꼴이 된다 — 그래서 **이메일을 품지 않은 조직명**(=진짜 팀)만 조직으로 부르고
+/// 나머지는 이메일로 둔다.
+///
+/// 라벨과 따로 내주는 이유: 라벨은 사람이 붙인 이름이라 **낡는다**. 재로그인으로 슬롯
+/// 셋이 전부 같은 개인 계정이 됐는데도 라벨은 여전히 "사이오닉팀플랜" 이라, 세 한도가
+/// 하나로 합쳐진 걸 아무도 몰랐다(2026-08-11 실측: 세 슬롯의 사용률이 session 17 ·
+/// weekly_all 68 · weekly_scoped 50 으로 완전히 같았다).
+pub(crate) fn account_identity(id: &str) -> Option<String> {
     match auth_probe(id) {
-        Some(p) if !p.org.is_empty() && !p.org.contains(&p.email) => p.org,
-        Some(p) if !p.email.is_empty() => p.email,
-        _ => fallback.to_string(),
+        Some(p) if !p.org.is_empty() && !p.org.contains(&p.email) => Some(p.org),
+        Some(p) if !p.email.is_empty() => Some(p.email),
+        _ => None,
     }
 }
 

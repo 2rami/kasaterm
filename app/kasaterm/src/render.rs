@@ -6134,17 +6134,33 @@ impl App {
                 let pad_x = 10.0_f32;
                 // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
                 // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
+                //
+                // 이름 뒤에 **실제 신원**(팀 조직명 또는 이메일)을 같이 적는다. 라벨은
+                // 사람이 붙인 이름이라 낡는데, 재로그인으로 슬롯 셋이 전부 같은 개인
+                // 계정이 됐는데도 "사이오닉팀플랜" 이라는 이름만 떠서 세 한도가 하나로
+                // 합쳐진 걸 아무도 몰랐다(2026-08-11: 세 슬롯 사용률이 완전히 같았다).
+                // 이름 없는 슬롯은 `account_display` 가 이미 신원으로 불리므로 중복은
+                // `contains` 로 건너뛴다.
+                let named = |id: &str, name: String| -> String {
+                    match crate::settings::account_identity(id) {
+                        Some(w) if !name.contains(&w) => format!("{name} · {w}"),
+                        _ => name,
+                    }
+                };
                 let mut rows: Vec<(AccountMenuItem, String)> = vec![(
                     AccountMenuItem::Select(String::new()),
-                    crate::settings::account_display("", "", "기본"),
+                    named("", crate::settings::account_display("", "", "기본")),
                 )];
                 rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
                     (
                         AccountMenuItem::Select(a.id.clone()),
-                        crate::settings::account_display(
+                        named(
                             &a.id,
-                            &a.label,
-                            &format!("계정 {}", i + 2),
+                            crate::settings::account_display(
+                                &a.id,
+                                &a.label,
+                                &format!("계정 {}", i + 2),
+                            ),
                         ),
                     )
                 }));
