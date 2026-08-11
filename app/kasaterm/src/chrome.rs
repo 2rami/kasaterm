@@ -113,7 +113,14 @@ impl App {
         };
         // 완료는 열쇠를 안 준다 — 턴마다 정당하게 떠야 하고, 학생이 여럿이면 서로
         // 다른 pane 의 완료가 같은 창 안에 겹치는 게 정상이다.
-        notify_desktop(&titled, body, who.as_deref(), None);
+        let sid = self.pane_claude_sid.get(surface_id).cloned();
+        notify_desktop(
+            &titled,
+            body,
+            who.as_deref(),
+            None,
+            Some((surface_id, sid.as_deref())),
+        );
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
@@ -159,11 +166,13 @@ impl App {
         // 화면 감지 경로(`input.rs` 의 `⚠ 승인 필요`)와 **같은 열쇠**를 쓴다 — 승인
         // 프롬프트 하나에 배너가 둘 나가던 것을 여기서 하나로 만든다. 훅이 먼저 오면
         // reason 이 실린 이쪽이 이기고, 화면 감지가 뒤따라 와도 조용히 접힌다.
+        let sid = self.pane_claude_sid.get(surface_id).cloned();
         notify_desktop(
             "⚠ 권한 필요",
             &body,
             character.as_deref(),
             Some(&format!("approval:{surface_id}")),
+            Some((surface_id, sid.as_deref())),
         );
     }
 
@@ -2612,11 +2621,14 @@ fn notify_dedup_passes(key: &str) -> bool {
 ///
 /// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
 /// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
+/// `route` 는 배너를 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
+/// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
 pub(crate) fn notify_desktop(
     title: &str,
     body: &str,
     character: Option<&str>,
     dedup: Option<&str>,
+    route: Option<(&str, Option<&str>)>,
 ) {
     if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
         return;
@@ -2624,14 +2636,14 @@ pub(crate) fn notify_desktop(
     #[cfg(target_os = "macos")]
     {
         if is_bundled() {
-            notify_native(title, body, character);
+            notify_native(title, body, character, route);
         } else {
             notify_osascript(title, body);
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (title, body, character);
+        let _ = (title, body, character, route);
     }
 }
 
@@ -2704,7 +2716,12 @@ pub(crate) fn ensure_notification_authorization() {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_native(title: &str, body: &str, character: Option<&str>) {
+fn notify_native(
+    title: &str,
+    body: &str,
+    character: Option<&str>,
+    route: Option<(&str, Option<&str>)>,
+) {
     use objc2_foundation::{NSArray, NSString, NSURL};
     use objc2_user_notifications::{
         UNMutableNotificationContent, UNNotificationAttachment, UNNotificationRequest,
@@ -2737,7 +2754,16 @@ fn notify_native(title: &str, body: &str, character: Option<&str>) {
             content.setAttachments(&NSArray::from_retained_slice(&[att]));
         }
     }
-    let ident = NSString::from_str(&format!("kasaterm-notify-{seq}"));
+    // 눌렀을 때 갈 자리를 **identifier 에 실어** 보낸다. `userInfo`(NSDictionary)를
+    // 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야 하는데, 여기
+    // 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
+    // 형식: `kasaterm-notify-{seq}|{pane}|{sid}` — pane id(`%116`)도 uuid 도 `|` 를
+    // 안 쓴다. 받는 쪽은 `macos_notify::route_from_identifier`.
+    let ident = match route {
+        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
+        None => format!("kasaterm-notify-{seq}"),
+    };
+    let ident = NSString::from_str(&ident);
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();

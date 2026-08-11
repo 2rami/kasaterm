@@ -559,11 +559,13 @@ impl App {
                         let who = ch.clone().unwrap_or_else(|| "pane".to_string());
                         // 훅 경로(`chrome.rs` 의 `⚠ 권한 필요`)와 같은 열쇠 — 같은
                         // 프롬프트에 배너가 둘 나가는 걸 발사구에서 막는다.
+                        let sid = self.pane_claude_sid.get(id).cloned();
                         crate::chrome::notify_desktop(
                             "⚠ 승인 필요",
                             &who,
                             ch.as_deref(),
                             Some(&format!("approval:{id}")),
+                            Some((id, sid.as_deref())),
                         );
                     }
                     changed = true;
