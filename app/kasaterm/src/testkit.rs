@@ -863,7 +863,7 @@ impl App {
             eprintln!(
                 "[autoclosereopen] hold — 하단바 칩={:?} 예약={} · Info 되살리기 줄={:?}",
                 self.dock_chip_rects,
-                self.dock_reserve_h(),
+                self.bottom_reserve_h(),
                 self.info.closed_rects
             );
             return;
@@ -2477,7 +2477,7 @@ impl App {
             "[autoundock] 접음 → aux={} 접힌목록={:?} 하단바예약={} PTY생존={}",
             self.aux_windows.len(),
             self.hidden_aux.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
-            self.dock_reserve_h(),
+            self.bottom_reserve_h(),
             self.pty.contains_key(&pid)
         );
         eprintln!("[autoundock] 하단바 칩={:?}", self.dock_chip_rects);
@@ -2487,7 +2487,7 @@ impl App {
             "[autoundock] 되살림 → aux={} 접힌목록={} 하단바예약={} PTY생존={}",
             self.aux_windows.len(),
             self.hidden_aux.len(),
-            self.dock_reserve_h(),
+            self.bottom_reserve_h(),
             self.pty.contains_key(&pid)
         );
         eprintln!(

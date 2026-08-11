@@ -2206,10 +2206,14 @@ impl App {
         // Rows that fit above the "+" button; the dock strip eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
-        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데, 이
+        // 렌더러엔 scissor 가 없어서 **잘리지 않고 그대로 덮어 그려진다** — 화면은
+        // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
+        let bottom_h =
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
         // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
         // chevron-down 오버플로 힌트 자리.
-        let avail_h = (win_h - dock_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
+        let avail_h = (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
         // 스크롤 시작점은 **접힌 높이 기준**으로 잡는다 — 펼침은 방금 사용자가
         // 편 것이라 그만큼 뒤가 밀리는 게 자연스럽고, 가변 높이로 역산하면 펼칠
         // 때마다 목록이 통째로 점프한다.

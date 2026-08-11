@@ -6402,6 +6402,113 @@ impl App {
                 self.dock_chip_rects.clear();
                 self.dock_chip_close_rects.clear();
             }
+            // ── 하단 상태줄 ─────────────────────────────────────────────────
+            // 창 맨 아래 한 줄. **계정 한도가 늘 보이는 자리**다 — 패널을 열어야
+            // 보이면 「지금 얼마나 남았나」를 확인하려는 순간마다 손이 한 번 더 가고,
+            // 그 손이 아까워 안 보다가 한도에 부딪힌다(거노 2026-08-11 「orca랑
+            // 똑같이 하단바 그 형식으로」). 형식은 Orca 하단바에서 가져왔다:
+            // 게이지 + 퍼센트 + 언제 풀리는지, 폭이 좁아지면 정해진 순서로 무너진다.
+            {
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                let sy = win_h - STATUS_HEIGHT;
+                g.rect(0.0, sy, win_w, STATUS_HEIGHT, theme::panel_bg());
+                g.rect(0.0, sy, win_w, 1.0, theme::border());
+
+                let badge = self.claude_usage.lock().ok().and_then(|v| v.clone());
+                // 활성 슬롯 이름. 계정을 하나도 안 더했으면 이름 자체가 의미 없다.
+                let acct_name = (!self.set_claude_accounts.is_empty()).then(|| {
+                    let id = self.set_claude_account.as_str();
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본"),
+                    }
+                });
+
+                let fs = 11.0_f32;
+                let ty = sy + (STATUS_HEIGHT - fs) / 2.0 - 1.0;
+                let mut x = 12.0_f32;
+                let seg_x0 = x;
+
+                // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
+                // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
+                // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
+                const GW: f32 = 48.0;
+                const GH: f32 = 6.0;
+                if win_w >= 500.0 {
+                    let gy = sy + (STATUS_HEIGHT - GH) / 2.0;
+                    g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 60));
+                    if let Some(b) = badge.as_ref() {
+                        let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(1.0);
+                        g.rect(x, gy, w, GH, theme::with_alpha(theme::text_dim(), 160));
+                    }
+                    x += GW + 8.0;
+                }
+
+                // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
+                // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
+                let (head, col) = match badge.as_ref() {
+                    Some(b) => {
+                        let mut s = if b.stale {
+                            format!("~{:.0}%", b.pct)
+                        } else {
+                            format!("{:.0}%", b.pct)
+                        };
+                        // 폭이 넉넉할 때만 창 이름(`5h`/`7d`)과 리셋까지 적는다.
+                        if win_w >= 900.0 {
+                            s = format!("{} {}", b.label, s);
+                            if let Some(l) = crate::resets_in_label(b.resets_at) {
+                                s = format!("{s} · {l}");
+                            }
+                        } else if win_w >= 720.0 {
+                            if let Some(l) = crate::resets_in_label(b.resets_at) {
+                                s = format!("{s} · {l}");
+                            }
+                        }
+                        let c = if b.pct >= 90.0 {
+                            theme::danger()
+                        } else if b.pct >= 70.0 {
+                            theme::syn_number()
+                        } else {
+                            theme::text()
+                        };
+                        (s, c)
+                    }
+                    None => ("—".to_string(), theme::text_dim()),
+                };
+                g.draw_text(
+                    x,
+                    ty,
+                    &head,
+                    gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                );
+                x += g.measure_chrome_text(head.as_str(), fs, true) + 10.0;
+
+                // 계정 이름은 가장 먼저 버린다 — 한도 숫자가 이 줄의 존재 이유고,
+                // 이름은 드롭다운을 열면 어차피 맨 위에 있다.
+                if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
+                    g.draw_text(
+                        x,
+                        ty,
+                        n,
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    x += g.measure_chrome_text(n.as_str(), fs, true);
+                }
+
+                // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
+                self.status_account_rect =
+                    Some((seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), STATUS_HEIGHT));
+            }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
             // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone
             // 박스는 라이브가 아닌 tab 드래그(멀티탭 탭 추출)의 착지 지점 힌트로만 남긴다.
@@ -6419,7 +6526,11 @@ impl App {
             // 계정의** 것이라, 이름을 같은 행에 적고 클릭을 전환에 쓰는 게 별도
             // 칩보다 정직하다.
             self.account_menu_hits.clear();
-            if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, self.account_chip_rect) {
+            // 앵커는 **연 손잡이**를 따라간다. 손잡이가 둘이라(Info 탭 계정 행 ·
+            // 상태줄) 하나로 고정하면 다른 쪽에서 열었을 때 메뉴가 화면 반대편에
+            // 뜬다. 기록이 없으면 옛 동작대로 계정 행에 붙인다.
+            let anchor = self.account_menu_anchor.or(self.account_chip_rect);
+            if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, anchor) {
                 let (hmx, hmy) = self.cursor_px;
                 let f = 13.0_f32;
                 let pad_x = 10.0_f32;

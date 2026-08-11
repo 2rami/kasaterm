@@ -2807,9 +2807,19 @@ impl ApplicationHandler<UserEvent> for App {
                     // 사용량 pill = Claude 계정 스위처. 드롭다운은 타이틀바 아래 pane
                     // 위로 걸치므로 pane 라우팅보다 먼저 잡아야 한다. rect 는 직전
                     // 프레임의 render 가 채운 것(⋮ 핸들 메뉴와 같은 짝).
-                    let chip_hit = self.account_chip_rect.is_some_and(|r| {
+                    let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    });
+                    };
+                    // 손잡이가 둘이다 — Info 탭의 계정 행과, 늘 보이는 상태줄 세그먼트.
+                    // 어느 쪽으로 열었는지 기억해 두고 메뉴를 그 자리에 붙인다.
+                    let chip_hit = self.account_chip_rect.as_ref().is_some_and(&inside);
+                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside);
+                    if chip_hit {
+                        self.account_menu_anchor = self.account_chip_rect;
+                    } else if status_hit {
+                        self.account_menu_anchor = self.status_account_rect;
+                    }
+                    let chip_hit = chip_hit || status_hit;
                     if self.account_menu {
                         let pick = self
                             .account_menu_hits
