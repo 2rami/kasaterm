@@ -2351,17 +2351,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 사이드바 pane 행 → 숨기기 메뉴. 이 띠는 좌클릭을 통째로 삼키므로
                 // (아래 `window_strip_click` 게이트) 우클릭도 여기서 끝낸다.
                 if self.sidebar_visible && !self.tabs_on_top && cx < self.sidebar_w_logical {
-                    let inside = |r: &(f32, f32, f32, f32)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    };
-                    if let Some((wi, pane)) = self
-                        .sidebar_row_rects
-                        .iter()
-                        .find(|(_, _, r)| inside(r))
-                        .map(|(i, p, _)| (*i, p.clone()))
-                    {
-                        self.sidebar_menu = Some((cx, cy, wi, pane));
-                        self.chrome_dirty = true;
+                    if self.sidebar_row_right_click(cx, cy) {
                         window.request_redraw();
                     }
                     return;
@@ -2947,18 +2937,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 사이드바 pane 메뉴가 떠 있으면 그게 최상단이다. **아래 게이트보다
                     // 앞이어야 한다** — 그 게이트가 왼쪽 띠의 클릭을 통째로 삼켜서,
                     // 뒤에 두면 메뉴가 영영 안 닫힌다.
-                    if let Some((_, _, wi, pane)) = self.sidebar_menu.clone() {
-                        let inside = |r: &(f32, f32, f32, f32)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        };
-                        let hit =
-                            self.sidebar_menu_rects.iter().find(|(_, r)| inside(r)).map(|(a, _)| *a);
-                        self.sidebar_menu = None;
-                        self.sidebar_menu_rects.clear();
-                        if let Some(a) = hit {
-                            self.run_sidebar_menu_action(a, wi, &pane);
-                        }
-                        self.chrome_dirty = true;
+                    if self.sidebar_menu_click(cx, cy) {
                         window.request_redraw();
                         return;
                     }
@@ -5259,6 +5238,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopathsearch();
         self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
+        self.run_pending_autostash();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
         self.run_pending_autoexpandclick();

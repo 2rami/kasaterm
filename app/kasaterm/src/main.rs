@@ -3798,7 +3798,7 @@ enum FtMenuAction {
 /// 갈래가 둘뿐이라 enum 이 과해 보이지만, 파일트리·Info 두 메뉴가 이미 같은 모양
 /// (`(action, label, …)` → rect 벡터 → 실행)이라 그 골격을 그대로 쓰는 편이 항목이
 /// 늘 때 싸다.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SidebarMenuAction {
     /// 화면에서만 뗀다 — PTY 는 계속 돌고, 닫기와 달리 **정리 대상에서도 빠진다**.
     Hide,

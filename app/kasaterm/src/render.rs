@@ -3322,6 +3322,20 @@ impl App {
                             theme::with_alpha(theme::border(), 0x66)
                         },
                     );
+                    // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
+                    // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
+                    // 아니라 잘못 칠해진 자리로 읽힌다(실측).
+                    if cur && mw > 5.0 && mh > 5.0 {
+                        round_rect(
+                            g,
+                            mx + 1.5,
+                            my + 1.5,
+                            mw - 3.0,
+                            mh - 3.0,
+                            1.5,
+                            theme::surface_active(),
+                        );
+                    }
                 }
                 for (k, ((wi, _, r), info)) in
                     sb_rows.iter().zip(sb_row_info.iter()).enumerate()
@@ -3399,7 +3413,10 @@ impl App {
                         // 그대로 두면 화면에 있는 줄과 구분이 안 된다 — 그리고 어차피
                         // 그 상태(도는 중·기다림)는 화면에 없는 pane 의 것이라 지금
                         // 손댈 수 있는 신호가 아니다.
-                        g.queue_icon("disabled", dot_x - 1.0, dot_y - 1.0, 9.0, theme::text_mute());
+                        // ⚠️ 이름은 `icon_svg`(gpu.rs)에 **등록된 것**이어야 한다 — 없는
+                        // 이름은 오류 없이 아무것도 안 그린다(실측: "disabled" 로 두어
+                        // 표시가 통째로 사라졌고, 흐린 글자만 남아 원인이 안 보였다).
+                        g.queue_icon("minus", dot_x - 1.5, dot_y - 1.5, 9.0, theme::text_mute());
                     } else if info.waiting {
                         blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
                     } else if info.alert {

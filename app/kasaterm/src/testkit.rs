@@ -896,6 +896,142 @@ impl App {
         );
     }
 
+    /// Headless pane 숨기기 repro: `KASATERM_AUTOSTASH_MS` 뒤에 사이드바를 켜고 pane 을
+    /// 셋으로 쪼갠 다음, 한 줄을 **진짜로 우클릭**해 「숨기기」를 고른다.
+    ///
+    /// 확인할 건 "목록에서 사라졌다"가 아니라 **살아 있느냐**다. 숨기기는 닫기와 같은
+    /// 스택에 들어가는데 그 스택에는 프로세스를 놓는 손이 둘 있다(개수 상한·idle reap).
+    /// 조용히 죽는 종류라 화면으로는 영영 안 보인다 — 그래서 대조군을 같이 둔다:
+    /// 하나는 숨기고 하나는 그냥 닫은 뒤 **같은 정리 한 번**을 돌린다. 닫은 것만 죽고
+    /// 숨긴 것이 남아야 통과다(둘 다 살면 정리가 안 돈 것이라 증명이 아니다).
+    /// `KASATERM_CLOSED_IDLE_SECS=1` 과 함께 쓴다 — 안 주면 15분을 기다려야 한다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autostash(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOSTASH_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        // pane 줄과 배치도는 **펼친 방**에만 그려진다 — 접힌 카드에는 rect 가 하나도
+        // 안 실려, 펼치지 않으면 목록이 빈 채로 "못 찾음"이 된다.
+        if !self.expanded_windows.contains(&self.active_window) {
+            self.toggle_window_expand(self.active_window);
+        }
+        // 펼침은 애니메이션이라 첫 프레임엔 카드가 아직 납작하고 줄 rect 가 하나도 안
+        // 실린다(실측: 목록=[]). 다 펴질 때까지 프레임을 돌린다.
+        for _ in 0..40 {
+            self.render_frame();
+            if !self.sidebar_row_rects.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let leaves = |app: &App| -> Vec<String> {
+            app.pty_layout
+                .as_ref()
+                .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let before = leaves(self);
+        let Some(victim) = before.last().cloned() else { return };
+        let control = before.first().cloned().unwrap_or_default();
+        if std::env::var("KASATERM_AUTOSTASH_HOLD").is_ok() {
+            // 배치도를 눈으로 볼 때 — 숨기기 전에 멈춘다. 숨긴 뒤에는 칸이 줄어
+            // 정작 확인하려던 "분할 모양이 맞나"를 못 본다.
+            // `_INFO=1` 이면 방을 하나 더 만들고 Info 를 켠다 — 방 머리 밴드는
+            // 경계를 보이려는 것이라 **방이 둘 이상일 때만** 확인이 된다.
+            if std::env::var("KASATERM_AUTOSTASH_INFO").is_ok() {
+                self.new_window();
+                if !self.git.col_visible {
+                    self.toggle_git_col();
+                }
+                self.info.tab = crate::state::SideTab::Info;
+            }
+            self.render_frame();
+            eprintln!("[autostash] hold — leaves={before:?} 배치도칸={}", self.sidebar_row_rects.len());
+            return;
+        }
+        // 그 pane 의 줄 한가운데. 미니맵 칸도 같은 벡터에 있어 `find` 는 먼저 오는
+        // 칸을 집을 수 있는데, 우클릭은 어느 쪽이든 같은 pane 을 가리키므로 무해하다.
+        let Some(row) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, p, _)| *p == victim)
+            .map(|(_, _, r)| *r)
+        else {
+            eprintln!("[autostash] {victim} 줄을 사이드바에서 못 찾음 — 목록={:?}", self.sidebar_row_rects);
+            return;
+        };
+        let armed = self.sidebar_row_right_click(row.0 + row.2 / 2.0, row.1 + row.3 / 2.0);
+        self.render_frame();
+        let items: Vec<String> =
+            self.sidebar_menu_rects.iter().map(|(a, _)| format!("{a:?}")).collect();
+        let Some(hide) = self
+            .sidebar_menu_rects
+            .iter()
+            .find(|(a, _)| matches!(a, crate::SidebarMenuAction::Hide))
+            .map(|(_, r)| *r)
+        else {
+            eprintln!("[autostash] 메뉴 장전={armed} 인데 숨기기 항목이 없음 — 항목={items:?}");
+            return;
+        };
+        self.sidebar_menu_click(hide.0 + hide.2 / 2.0, hide.1 + hide.3 / 2.0);
+        self.render_frame();
+        let stack = |app: &App| -> Vec<String> {
+            app.closed_panes
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}({}{})",
+                        c.pane_id,
+                        if c.stashed { "숨김" } else { "닫힘" },
+                        if c.alive { ",살아있음" } else { ",죽음" }
+                    )
+                })
+                .collect()
+        };
+        eprintln!(
+            "[autostash] 메뉴 장전={armed} 항목={items:?} · {victim} 숨김 → leaves={:?} 스택={:?}",
+            leaves(self),
+            stack(self)
+        );
+        // 대조군 — 같은 스택에 평범하게 닫은 것을 하나 넣는다.
+        self.close_pane(&control);
+        self.render_frame();
+        // idle_since 는 첫 정리에서 찍힌다. 한 번 돌리고 상한을 넘긴 뒤 다시 돌려야
+        // 실제로 놓는 자리까지 간다 — 헤드리스라 루프를 잠깐 세워도 된다.
+        self.reap_idle_closed_panes();
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::closed_pane_idle_reap().as_millis() as u64 + 300,
+        ));
+        self.reap_idle_closed_panes();
+        self.render_frame();
+        eprintln!(
+            "[autostash] 정리 뒤 스택={:?} · 숨긴 {victim} PTY={} · 닫은 {control} PTY={}",
+            stack(self),
+            self.pty.contains_key(&victim),
+            self.pty.contains_key(&control)
+        );
+        eprintln!(
+            "[autostash] 기대: 숨긴 PTY=true · 닫은 PTY=false (둘 다 true 면 정리가 안 돈 것이라 증명이 아니다)"
+        );
+    }
+
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
     /// 하나를 pane 셋짜리로 쪼갠 다음, 그 방을 통째로 별도 창으로 꺼낸다.
     ///
