@@ -1318,6 +1318,30 @@ impl App {
                             .as_ref()
                             .and_then(|m| m.sender.clone())
                             .unwrap_or(sender);
+                        // 그 이름으로도 학생을 못 찾으면 **세션 id 로 pane 을 되짚는다.**
+                        // 명부의 이름은 세션 제목이라 자동 요약에 덮인다 — 실측으로
+                        // 모모이 pane 은 `mcp, skill사이드바` 였고, 로스터가 아는 글자가
+                        // 하나도 없어 색도 프사도 안 걸렸다(거노 2026-08-11: "sm테마는 왜
+                        // 안됐어"). 앞서 이름 파싱을 고친 것은 이름에 슬러그가 들어 있을
+                        // 때만 듣는 반쪽이었다. pane 을 되짚으면 제목이 뭐로 바뀌든 맞는다.
+                        //
+                        // ⚠️ `pane_character_if_known` 을 부르면 안 된다 — 그 안에서
+                        // `ws` 를 다시 잠그는데 여기는 이미 그 락 안(557~1788)이라
+                        // 재진입 데드락이다. 들고 있는 `ws` 를 그대로 쓴다.
+                        let sender = if teammate_sender_slug(&sender).is_some() {
+                            sender
+                        } else {
+                            msg.as_ref()
+                                .and_then(|m| m.peer_sid.as_deref())
+                                .and_then(|sid| {
+                                    self.pane_claude_sid
+                                        .iter()
+                                        .find(|(_, s)| s.as_str() == sid)
+                                        .map(|(p, _)| ws.active_tab_pid(p))
+                                })
+                                .and_then(|key| ws.pane_character.get(&key).cloned())
+                                .unwrap_or(sender)
+                        };
                         let accent = teammate_sender_accent(
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
@@ -7961,6 +7985,11 @@ struct TeammateMsg {
     /// 화면에 뜬 이름이 쓸모없을 때(`@peer`) 태그에서 되찾은 진짜 발신자.
     /// 이게 있어야 학생색·프사·본문 조회가 이름으로 걸린다.
     sender: Option<String>,
+    /// 보낸 세션의 claude session id. **이름이 학생을 안 알려 줄 때의 정답**이다 —
+    /// 명부의 이름은 세션 제목으로 덮이는 값이라(`mcp, skill사이드바`) 로스터에 없는
+    /// 글자가 오기 일쑤인데, 세션 id 로는 그 pane 을 찾아 배정 학생을 직접 물을 수
+    /// 있다. 제목을 뭐로 바꾸든 안 흔들린다.
+    peer_sid: Option<String>,
 }
 
 /// `uds:/tmp/cc-socks/27516.sock` → 그 세션이 명부에 등록한 이름.
@@ -7974,13 +8003,31 @@ fn socket_pid(from: &str) -> Option<&str> {
     (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(pid)
 }
 
-fn peer_name_from_socket(from: &str) -> Option<String> {
+/// 소켓 경로 → 그 세션이 명부(`~/.claude/sessions/<pid>.json`)에 남긴 신원.
+///
+/// 둘을 같이 꺼내는 이유는 **이름만으로는 학생을 못 찾기 때문**이다. 명부의 `name`
+/// 은 세션 제목이라 자동 요약에 덮인다 — 실측(2026-08-11)으로 모모이 pane 은
+/// `mcp, skill사이드바` 였다. 거기엔 로스터가 아는 글자가 하나도 없어서 색도 프사도
+/// 못 걸린다. `sessionId` 는 그런 일이 없고, 그걸로 pane 을 되짚으면 배정 학생을
+/// 직접 물을 수 있다. 이름은 그래도 화면에 뭐라도 쓰기 위해 함께 들고 온다.
+fn peer_ident_from_socket(from: &str) -> Option<(Option<String>, Option<String>)> {
     let pid = socket_pid(from)?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
     let path = home.join(".claude/sessions").join(format!("{pid}.json"));
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let name = v.get("name")?.as_str()?.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    Some(peer_ident_from_json(&std::fs::read_to_string(path).ok()?))
+}
+
+/// 명부 파일 한 장에서 (이름, 세션 id). 파일 읽기와 갈라 둔 것은 검증 때문이다 —
+/// 이 판정이 틀리면 남의 메시지가 조용히 기본 표시로 떨어질 뿐 아무 오류도 안 난다.
+fn peer_ident_from_json(s: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return (None, None);
+    };
+    let pick = |k: &str| -> Option<String> {
+        let s = v.get(k)?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    (pick("name"), pick("sessionId"))
 }
 
 /// pane 에 도착한 남의 메시지 본문. 두 형식을 다 받는다.
@@ -8032,18 +8079,19 @@ fn extract_tagged_msg(
         };
         // `@peer` 로 뜬 줄은 이름 대조가 무의미하다 — 그 라벨은 발신자와 무관한
         // 고정값이라 어떤 태그와도 안 맞는다. 그래서 대조를 건너뛰고 최근 것을 잡되,
-        // 소켓 pid 로 진짜 이름을 되찾아 함께 돌려준다(못 찾으면 라벨 그대로).
+        // 소켓 pid 로 진짜 신원을 되찾아 함께 돌려준다(못 찾으면 라벨 그대로).
         let peer_probe = sender == PEER_LABEL && id_attr == "from-name";
         if peer_probe || attr(id_attr).as_deref() == Some(sender) {
             let end = tail.find(close_tag).unwrap_or(tail.len());
+            let ident = peer_probe
+                .then(|| attr("from"))
+                .flatten()
+                .and_then(|f| peer_ident_from_socket(&f));
             return Some(TeammateMsg {
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
-                sender: if peer_probe {
-                    attr("from").as_deref().and_then(peer_name_from_socket)
-                } else {
-                    None
-                },
+                sender: ident.as_ref().and_then(|(n, _)| n.clone()),
+                peer_sid: ident.and_then(|(_, s)| s),
             });
         }
         rest = tail;
@@ -11108,6 +11156,46 @@ This came from another Claude session";
         assert_eq!(socket_pid("uds:/tmp/cc-socks/27516.sock"), Some("27516"));
         assert_eq!(socket_pid("uds:/tmp/cc-socks/abc.sock"), None);
         assert_eq!(socket_pid("bridge:whatever"), None);
+    }
+
+    /// 명부 파일 실물(2026-08-11 채집, 모모이 pane 의 `~/.claude/sessions/78476.json`).
+    /// **`name` 이 세션 제목이다** — agent 이름(`momoi-p98-rv8`)이 아니다.
+    const ROSTER_FILE: &str = r#"{
+        "pid": 78476,
+        "sessionId": "53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b",
+        "cwd": "/Users/kasa/Desktop/momewomo/tmuxify",
+        "messagingSocketPath": "/tmp/cc-socks/78476.sock",
+        "name": "mcp, skill사이드바",
+        "status": "idle"
+    }"#;
+
+    #[test]
+    fn roster_name_is_a_session_title_so_the_slug_must_come_from_elsewhere() {
+        let (name, sid) = peer_ident_from_json(ROSTER_FILE);
+        assert_eq!(name.as_deref(), Some("mcp, skill사이드바"));
+        // 이 이름으로는 학생을 절대 못 찾는다 — 이것이 남의 메시지가 색도 프사도
+        // 없이 뜨던 이유였다(거노 2026-08-11: "sm테마는 왜안됐어").
+        assert_eq!(teammate_sender_slug("mcp, skill사이드바"), None);
+        // 그래서 세션 id 를 같이 들고 온다. 이걸로 pane 을 되짚어 배정 학생을 묻는다.
+        assert_eq!(sid.as_deref(), Some("53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b"));
+    }
+
+    #[test]
+    fn roster_file_missing_fields_are_none_not_empty() {
+        // 이름 없는 세션·깨진 파일에서 빈 문자열을 내보내면 그게 발신자 이름이 되어
+        // 화면에 `@ ❯` 가 뜬다. 없으면 없다고 해야 위쪽 폴백이 돈다.
+        assert_eq!(peer_ident_from_json(r#"{"name":"  ","sessionId":""}"#), (None, None));
+        assert_eq!(peer_ident_from_json("{}"), (None, None));
+        assert_eq!(peer_ident_from_json("not json at all"), (None, None));
+    }
+
+    #[test]
+    fn cross_session_msg_carries_the_session_id_for_pane_lookup() {
+        // 소켓 pid 27516 의 명부 파일은 이 테스트 머신에 없다 — 그래서 둘 다 None 이고,
+        // 그게 맞다(못 찾으면 화면 라벨 그대로 둔다). 여기서 보는 것은 본문 회수가
+        // 그 실패에 안 끌려간다는 점이다.
+        let m = extract_teammate_msg(REAL, PEER_LABEL).expect("본문을 못 뽑았다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
     }
 
     #[test]
