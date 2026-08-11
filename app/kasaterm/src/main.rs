@@ -6400,9 +6400,13 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
 ///    `~/.codex` 를 심볼릭으로 미러한다(세션·플러그인·스킬·캐시·인증 공유).
 /// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록·훅 해시를 여기 되쓰는데,
 ///    심볼릭이면 그 쓰기가 거노 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
-/// 3. **훅 trust 관문** — `[hooks.state]` 에 커맨드 SHA256 이 박히고 shim 경로가 GUI
-///    pid 별이라 매번 깨져 TUI 가 재승인을 묻는다 → `--dangerously-bypass-hook-trust`
-///    를 상시 붙인다(거노 승인).
+/// 3. **위험 플래그가 둘로 갈려 있다.** `--dangerously-bypass-hook-trust` 는 이름과
+///    달리 **훅 신뢰만** 푼다 — `[hooks.state]` 에 커맨드 SHA256 이 박히는데 shim 경로가
+///    GUI pid 별이라 매번 깨져 TUI 가 재승인을 묻기에 상시 붙인다. 명령 실행 승인은
+///    별개라 `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")를 함께
+///    붙인다. 앞의 것만 붙이면 화면에 "Ask for approval" 이 남아 학생이 첫 명령에서
+///    멈춘다(2026-08-11 지적). claude pane 의 `--dangerously-skip-permissions` 와 같은
+///    자리다.
 /// 4. **`timeout` 단위가 초다**(claude 는 ms). 실측 판별: `timeout:500`+`sleep 1` 은
 ///    완주하고 `timeout:1`+`sleep 3` 은 Failed — ms 였다면 전자가 죽었어야 하고,
 ///    무시였다면 후자가 살았어야 한다. claude 쪽 5000 을 그대로 옮기면 83분이 된다.
@@ -6511,6 +6515,15 @@ export CODEX_HOME="$CH"
 case " $* " in
   *" --dangerously-bypass-hook-trust "*) ;;
   *) set -- --dangerously-bypass-hook-trust "$@" ;;
+esac
+# 승인·샌드박스도 함께 우회한다 — claude pane 이 `--dangerously-skip-permissions` 로
+# 뜨는 것과 같은 자리다. 이게 없으면 학생이 첫 명령에서 승인 프롬프트에 멈춰 서고,
+# 오케스트레이터는 그걸 「일하는 중」으로 읽는다(화면 하단에 "Ask for approval").
+# 승인 정책이나 샌드박스를 직접 지정한 호출은 그 뜻을 존중해 건드리지 않는다.
+case " $* " in
+  *" --dangerously-bypass-approvals-and-sandbox "*) ;;
+  *" --ask-for-approval "*|*" -a "*|*" --sandbox "*|*" -s "*) ;;
+  *) set -- --dangerously-bypass-approvals-and-sandbox "$@" ;;
 esac
 exec "$REAL" "$@"
 "#;
@@ -7744,6 +7757,10 @@ mod tests {
         assert!(
             body.contains("--dangerously-bypass-hook-trust"),
             "훅 trust 관문을 안 넘으면 TUI 가 매번 재승인을 묻는다"
+        );
+        assert!(
+            body.contains("--dangerously-bypass-approvals-and-sandbox"),
+            "훅 신뢰만 풀면 명령 승인이 남아 학생이 첫 명령에서 멈춘다 — 둘은 별개 플래그다"
         );
         assert!(
             body.contains("export CODEX_HOME="),
