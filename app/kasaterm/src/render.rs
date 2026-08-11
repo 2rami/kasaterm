@@ -1075,6 +1075,17 @@ impl App {
                     if stand_anchor.is_none() {
                         stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
                     }
+                    // ultracode 턴이면 입력박스 테두리를 보라색으로 물들인다.
+                    // 상태줄 배지(`ultra`)는 세그먼트 맨 끝이라 좁은 pane 에서 제일
+                    // 먼저 잘리고, 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는
+                    // 턴인지는 **타이핑하는 자리**에서 보여야 한다(거노 2026-08-11:
+                    // "상태줄말고 프롬프트입력창 보라색 glow"). 색은 상태줄 배지와
+                    // 같은 bb9af7 이고, 숨쉬듯 흰빛으로 오르내려 정적인 테두리와
+                    // 구분된다(스피너 shimmer 와 같은 mix 방식).
+                    if self.pane_ultracode.contains(&id) {
+                        let t = self.version_anim_start.elapsed().as_secs_f32();
+                        paint_ultracode_box(&mut composed, t);
+                    }
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
@@ -7278,6 +7289,43 @@ impl PromptBox {
     }
 }
 
+/// ultracode 인 pane 의 입력박스 테두리를 보라색으로 물들인다. 칠했으면 true.
+///
+/// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
+/// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
+/// 보여야 한다(거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
+///
+/// 색은 상태줄 배지와 같은 `bb9af7`. `t`(초)에 따라 흰빛으로 숨쉬듯 오르내려
+/// 정적인 테두리와 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
+///
+/// 테두리를 이루는 **박스 문자만** 물들인다. 행 전체를 칠하면 입력한 글까지 색이
+/// 바뀌어 무엇을 쳤는지 읽기 어려워진다. codex(`Filled`)는 테두리 자체가 없어
+/// 대상이 아니다.
+fn paint_ultracode_box(composed: &mut [Vec<GridCell>], t: f32) -> bool {
+    let Some(PromptBox::Bordered { top, bottom, .. }) = prompt_box(composed) else {
+        return false;
+    };
+    use kasa_bridge::screen::Color;
+    let g = 0.34 * (0.5 + 0.5 * (t * 2.2).sin());
+    let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
+    let glow = Color::Rgb(mix(0xbb), mix(0x9a), mix(0xf7));
+    let last = bottom.min(composed.len().saturating_sub(1));
+    let mut painted = false;
+    for row in composed[top..=last].iter_mut() {
+        for c in row.iter_mut() {
+            if matches!(
+                c.ch,
+                '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '━' | '┃'
+            ) {
+                c.fg = glow.clone();
+                c.bold = true;
+                painted = true;
+            }
+        }
+    }
+    painted
+}
+
 /// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
 ///
 /// **claude**: `─` 보더 두 줄 사이. 그 사이에 `❯` 마커 행이 있어야 인정한다
@@ -10551,6 +10599,42 @@ mod prompt_box_tests {
             prompt_box(&rows),
             Some(PromptBox::Bordered { ref rows, top: 1, bottom: 3 }) if *rows == (2..3)
         ));
+    }
+
+    // ultracode 테두리 물들이기 — 테두리 문자만 바뀌고 입력한 글은 그대로여야 한다.
+    // 행 전체를 칠하면 무엇을 쳤는지 읽기 어려워진다(거노가 본 자리가 곧 입력창이다).
+    #[test]
+    fn ultracode_paints_only_the_border_glyphs() {
+        use kasa_bridge::screen::Color;
+        let mut rows = vec![
+            row_from("some output above"),
+            row_from(&"─".repeat(28)),
+            row_from(&format!("❯ hello{}", " ".repeat(21))),
+            row_from(&"─".repeat(28)),
+        ];
+        let before = rows[2].clone();
+        assert!(paint_ultracode_box(&mut rows, 0.0));
+
+        // 위·아래 테두리는 전부 보라색 계열 + bold.
+        for r in [1usize, 3] {
+            for c in &rows[r] {
+                assert!(matches!(c.fg, Color::Rgb(..)), "테두리가 안 칠해졌다: 행 {r}");
+                assert!(c.bold);
+            }
+        }
+        // 입력행은 손대지 않는다.
+        assert_eq!(rows[2], before, "입력한 글까지 색이 바뀌었다");
+        // 박스 밖도 그대로.
+        assert!(rows[0].iter().all(|c| !c.bold));
+    }
+
+    // 입력박스가 없는 화면(그냥 출력만)에서는 아무것도 칠하지 않는다 — 여기서
+    // 오탐이 나면 엉뚱한 구분선이 보라색으로 빛난다.
+    #[test]
+    fn ultracode_paints_nothing_without_a_box() {
+        let mut rows = vec![row_from("just output"), row_from("more output")];
+        assert!(!paint_ultracode_box(&mut rows, 0.0));
+        assert!(rows.iter().flatten().all(|c| !c.bold));
     }
 
     // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).
