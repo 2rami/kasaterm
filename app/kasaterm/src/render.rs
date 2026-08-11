@@ -8276,21 +8276,32 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
             }
         };
     }
-    Some(match slug {
-        "arona" => student!("arona"),
-        "prana" => student!("prana"),
-        "midori" => student!("midori"),
-        "momoi" => student!("momoi"),
-        "yuzu" => student!("yuzu"),
-        "arisu" => student!("arisu"),
-        "yuuka" => student!("yuuka"),
-        "shiroko" => student!("shiroko"),
-        "hoshino" => student!("hoshino"),
-        "koharu" => student!("koharu"),
-        "himari" => student!("himari"),
-        "aru" => student!("aru"),
-        _ => return None,
-    })
+    // 슬러그 하나가 18개 프레임(`include_bytes!`)으로 펼쳐지므로 arm 을 손으로 쓰면
+    // 로스터가 늘 때마다 79줄이 된다. 목록만 두고 arm 은 매크로가 만든다.
+    macro_rules! students {
+        ($($n:literal),* $(,)?) => {
+            match slug {
+                $($n => student!($n),)*
+                _ => return None,
+            }
+        };
+    }
+    // ⚠️`collab-hooks/characters.json` 로스터와 **같은 집합이어야 한다**. 빠진 슬러그는
+    // 오류가 아니라 「그림 없는 학생」이 되고, 그러면 배너·스피너 자리가 빈 구멍으로
+    // 남는다(`student_has_sprite` 주석 참고). 실제로 에셋을 67명분 만들어 놓고 이
+    // 목록에 안 넣어 앱에서는 12명만 보였다(2026-08-11).
+    Some(students![
+        "arona", "prana", "akane", "akari", "ako", "arisu", "aru", "asuna",
+        "atsuko", "ayane", "azusa", "chihiro", "chinatsu", "eimi", "fubuki", "fuuka",
+        "hanako", "hare", "haruka", "haruna", "hasumi", "hibiki", "hifumi", "himari",
+        "hina", "hinata", "hiyori", "hoshino", "ichika", "iori", "iroha", "izuna",
+        "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei", "kirino",
+        "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa",
+        "neru", "niya", "noa", "nonomi", "rio", "sakurako", "saori", "satsuki",
+        "seia", "sena", "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki",
+        "tsukuyo", "tsurugi", "utaha", "wakamo", "yukari", "yuuka", "yuzu",
+    ])
 }
 
 /// 이 학생 그림이 있나 — **슬롯을 세우기 전에** 물어야 한다.
@@ -10494,13 +10505,15 @@ mod student_asset_tests {
     fn bundled_sprite_frames_decode_for_every_student_and_motion() {
         let mut checked = 0;
         let mut with_art = 0;
-        // 그림은 **선택**이다 — 로스터는 79명인데 번들 아트는 12명분이다(2026-08-11).
-        // 그림이 있는 학생만 건다. 없는 학생은 `student_has_sprite` 가 걸러서 슬롯
-        // 자체가 안 서고, 그게 옳은 동작이라 여기서 실패로 볼 일이 아니다.
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
-            if student_sprite_png(slug, "idle").is_none() {
-                continue;
-            }
+            // 로스터(build.rs 가 characters.json 에서 굽는다)와 `student_sprite_png` 의
+            // 슬러그 목록은 **정본이 둘**이라 어긋나도 오류가 안 난다 — 빠진 학생은
+            // 그냥 그림 없는 학생이 되고 화면에서만 조용히 사라진다. 실제로 에셋을
+            // 67명분 만들어 놓고 목록에 안 넣어 앱에는 12명만 보였다(2026-08-11).
+            assert!(
+                student_sprite_png(slug, "idle").is_some(),
+                "{slug} 가 로스터엔 있는데 student_sprite_png 목록에 없다 — 앱에서 안 보인다"
+            );
             with_art += 1;
             for motion in ["idle", "wave", "cheer", "walk"] {
                 let frames = student_sprite_frames(slug, motion)
@@ -10523,9 +10536,9 @@ mod student_asset_tests {
             }
         }
         assert!(checked >= 4, "모션을 하나도 못 셌다 — 로스터가 비었나");
-        // 아트가 통째로 사라지면 위 루프는 조용히 0바퀴 돈다. 실측 12명을 하한으로
-        // 박아 그 침묵을 막는다.
-        assert!(with_art >= 12, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
+        // 로스터가 통째로 비면 위 루프는 조용히 0바퀴 돌고 전부 통과한다. 실측 79명을
+        // 하한으로 박아 그 침묵을 막는다.
+        assert!(with_art >= 79, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
     }
 
     /// 그림 유무를 **슬롯 세우기 전에** 가르는 계약.
@@ -10533,15 +10546,16 @@ mod student_asset_tests {
     /// 이게 무너지면 화면에 구멍이 난다: 호출부가 Clawd 배너·스피너 글리프를 먼저
     /// blank 로 지우고 나서 슬롯을 세우므로, 그림이 없는데 세우면 원래 있던 것까지
     /// 지워진 채 아무것도 안 그려진다. 로스터가 12→79명이 되며 실제로 그랬다.
+    ///
+    /// 로스터 79명은 이제 전원 그림이 있다(2026-08-11). 그래서 여기서 거르는 대상은
+    /// 로스터 **밖** 이름뿐이다 — 이름을 바꾼 세션이 그 경로로 들어온다.
     #[test]
     fn students_without_art_are_filtered_before_the_glyph_is_erased() {
         for motion in ["idle", "wave", "cheer", "walk"] {
             assert!(student_has_sprite("arisu", motion), "아리스/{motion}");
         }
-        // 로스터엔 있고 그림은 없는 학생(2026-08-11 기준 67명 중 하나).
-        assert!(crate::theme::slug_character("kei").is_some(), "케이가 로스터에서 빠졌나");
-        assert!(!student_has_sprite("kei", "idle"), "그림 없는 학생을 있다고 하면 배너가 지워진다");
         assert!(!student_has_sprite("존재하지않는슬러그", "walk"));
+        assert!(!student_has_sprite("모바일", "idle"));
     }
 
     // 사용자 override 파일이 없으면 None → 호출측이 번들 include_bytes 로 폴백.
