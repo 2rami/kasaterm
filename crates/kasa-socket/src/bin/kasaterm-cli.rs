@@ -1683,8 +1683,10 @@ const SL_C_CTX: &str = "ff9e64";
 const SL_C_SEP: &str = "565f89";
 const SL_C_FALLBACK: &str = "a0a6b0";
 
-// 학생 프사 자리표시자 — kasaterm 이 U+FFFC 연속을 프사(bust)로 대체. 5칸 고정.
-const SL_SPRITE: &str = "\u{fffc}\u{fffc}\u{fffc}\u{fffc}\u{fffc}";
+// kasaterm pane 표식 — 옛 프사 자리표시자(5칸)를 프사 제거와 함께 1칸으로 줄인 것.
+// **지우지 마라**: agents 뷰 판정·stale statusline 복구·standing 앵커가 이 문자의
+// 존재를 근거로 삼는다(statusline.py 의 SPRITE 주석에 자세히 적어 뒀다).
+const SL_SPRITE: &str = "\u{fffc}";
 
 struct SlIcons {
     model: &'static str,
@@ -1840,11 +1842,10 @@ fn run_statusline() {
             .map(|(_, v)| *v)
             .unwrap_or(SL_C_FALLBACK);
         let c = ansi_fg(hex);
-        if sl_env("KASATERM_PANE_ID").is_some() {
-            parts.push(format!("{c}{SL_SPRITE}{SL_RESET}"));
-        } else {
-            parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}"));
-        }
+        // pane 안이든 밖이든 같은 `● 이름` — 다른 것은 kasaterm 이 읽을 표식뿐이다
+        // (statusline.py 와 출력 바이트가 같아야 한다).
+        let mark = if sl_env("KASATERM_PANE_ID").is_some() { SL_SPRITE } else { "" };
+        parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}{mark}"));
     }
 
     // ⑂ bg 배지 — anchor 불일치이되 사용자 주도 resume(shim 마커)은 제외.

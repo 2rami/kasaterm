@@ -3119,18 +3119,15 @@ impl App {
         let pfx = format!("student:{slug}:");
         let keys: Vec<String> =
             g.drawn_image_keys().filter(|k| k.starts_with(&pfx)).map(str::to_string).collect();
-        let (mut stand, mut face) = (Vec::new(), Vec::new());
-        for k in &keys {
-            let dst = if k.ends_with(":profile") { &mut face } else { &mut stand };
-            dst.extend(g.drawn_image_rects(k));
-        }
+        // `:profile` 은 이제 statusline 에 안 그린다(2026-08-11 프사 제거) — 옛
+        // 판정은 그 rect 를 세로 기준으로 삼았고, 없으면 「보류」로 조용히 빠져나가
+        // 검증이 통째로 무의미해졌다. 기준을 **화면 하단**으로 바꾼다: 전신은
+        // 입력박스 위에 서므로 발이 마지막 두 행보다 위여야 한다.
+        let stand: Vec<(f32, f32, f32, f32)> =
+            keys.iter().flat_map(|k| g.drawn_image_rects(k)).collect();
         let feet = stand.iter().map(|r: &(f32, f32, f32, f32)| r.1 + r.3).fold(f32::MIN, f32::max);
-        let face_top = face.iter().map(|r: &(f32, f32, f32, f32)| r.1).fold(f32::MAX, f32::min);
-        eprintln!(
-            "[autostudent] 전신 {}개 / 프사 {}개 {keys:?}",
-            stand.len(),
-            face.len()
-        );
+        let floor = g.surface_size().1 as f32 / g.scale() - 2.0 * g.cell_h;
+        eprintln!("[autostudent] 전신 {}개 {keys:?}", stand.len());
         if stand.is_empty() {
             eprintln!(
                 "[autostudent] standing FAIL — 앵커가 안 잡혔다. 위 rule 표를 보라: \
@@ -3141,16 +3138,12 @@ impl App {
             );
             return;
         }
-        if face.is_empty() {
-            eprintln!("[autostudent] standing 판정 보류 — 프사가 없어 상대 위치를 못 잰다");
-            return;
-        }
         eprintln!(
-            "[autostudent] 전신 발={feet:.0} 프사 위={face_top:.0} → {}",
-            if feet <= face_top + 1.0 {
+            "[autostudent] 전신 발={feet:.0} 하한={floor:.0} → {}",
+            if feet <= floor + 1.0 {
                 "PASS — 입력박스 위에 섰다"
             } else {
-                "FAIL — 그려졌지만 프사보다 아래다(앵커 행 계산이 틀렸다)"
+                "FAIL — 그려졌지만 statusline 아래로 내려갔다(앵커 행 계산이 틀렸다)"
             }
         );
     }
