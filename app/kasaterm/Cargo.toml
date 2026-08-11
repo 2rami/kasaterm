@@ -23,7 +23,9 @@ winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
 serde.workspace = true
-serde_json = "1"
+# preserve_order: 남이 쓰는 설정 파일(`~/.claude.json`)을 고쳐 쓰기 때문이다. 기본
+# 맵은 키를 알파벳순으로 재정렬해, 한 줄만 바꿔도 4000줄짜리 파일이 통째로 흔들린다.
+serde_json = { version = "1", features = ["preserve_order"] }
 # codex 설정(config.toml)을 주석·형식을 보존한 채 읽고 쓴다 — MCP 탭이 거노 개인
 # 설정을 직접 고치므로, 통째로 재직렬화하는 파서는 쓸 수 없다.
 toml_edit = "0.22"
