@@ -44,38 +44,94 @@ pub(crate) struct McpRow {
     pub(crate) name: String,
     /// 사람이 보고 무엇인지 아는 한 줄 — 실행 커맨드나 URL, 스킬은 설명 앞머리.
     pub(crate) detail: String,
-    /// 꺼져 있으면 회색으로 눕는다.
+    /// 어디에 적힌 것인가 — `"전역"`/`"폴더"`/`"레포"`. codex 는 전역뿐이라 빈 값이다.
+    ///
+    /// 이게 안 보이면 목록이 거짓말을 한다. 같은 이름이 세 곳에 있을 수 있고(실측:
+    /// kasaspace 는 전역과 이 레포 `.mcp.json` 양쪽에 있다), 무엇보다 꺼짐이 **폴더마다
+    /// 다르다** — 2026-08-11 지시("프로젝트별, 전역도 보이게해야해").
+    pub(crate) scope: &'static str,
+    /// 꺼져 있으면 회색으로 눕는다. claude MCP 는 이 창이 보고 있는 폴더 기준이다.
     pub(crate) enabled: bool,
     /// 여기서 껐다 켤 수 있나. codex 스킬만 거짓이다 — 그쪽은 폴더(대개 심볼릭
     /// 링크)가 곧 목록이라, 끄려면 지우는 수밖에 없어 토글과 삭제가 같아진다.
     pub(crate) toggleable: bool,
 }
 
-/// claude 쪽 설정 — `~/.claude.json` 의 `mcpServers`.
-fn claude_mcp(home: &std::path::Path) -> Vec<McpRow> {
+/// claude 의 MCP 서버는 세 곳에 나뉘어 적힌다. 전부 읽어야 목록이 실상과 맞는다.
+///
+/// - **전역**(user) — `~/.claude.json` 의 `mcpServers`. 모든 폴더에서 뜬다.
+/// - **폴더**(local) — 같은 파일 `projects["<cwd>"].mcpServers`. 그 폴더에서 나만.
+/// - **레포**(project) — `<cwd>/.mcp.json`. 커밋되는 파일이라 팀이 함께 쓴다.
+///
+/// 그리고 **꺼짐은 폴더마다 다르다**: `projects["<cwd>"].disabledMcpServers` 가 앞의 둘을,
+/// `disabledMcpjsonServers` 가 `.mcp.json` 쪽을 끈다(두 배열은 서로 무관하다). 그래서
+/// 이 함수는 cwd 없이는 절반만 아는 셈이고, cwd 가 없으면 전역만 켜진 채로 돌려준다.
+///
+/// 꺼진 목록에만 있고 정의가 어디에도 없는 이름들(claude.ai 커넥터, 플러그인 서버, 예전에
+/// 지운 것들 — 실측 tmuxify 에서 14개 중 대부분)은 싣지 않는다. 실행 커맨드도 URL 도 알 수
+/// 없어 이름만 남는 줄이 되는데, 그건 「무엇이 붙어 있나」에 답하지 못한다.
+fn claude_mcp(home: &std::path::Path, cwd: Option<&std::path::Path>) -> Vec<McpRow> {
     let Ok(text) = std::fs::read_to_string(home.join(".claude.json")) else {
         return Vec::new();
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Vec::new();
     };
-    let Some(map) = v.get("mcpServers").and_then(|m| m.as_object()) else {
-        return Vec::new();
+    let proj = cwd
+        .and_then(|c| c.to_str())
+        .and_then(|c| v.get("projects")?.get(c));
+    let names = |key: &str| -> std::collections::HashSet<String> {
+        proj.and_then(|p| p.get(key))
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    let mut out: Vec<McpRow> = map
-        .iter()
-        .map(|(name, cfg)| McpRow {
-            harness: "claude",
-            kind: RowKind::Mcp,
-            name: name.clone(),
-            detail: server_detail(cfg),
-            // claude 쪽엔 서버를 끄는 전역 플래그가 없다 — 목록에 있으면 붙는다.
-            enabled: true,
-            toggleable: is_toggleable("claude", RowKind::Mcp),
-        })
-        .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    let off = names("disabledMcpServers");
+    let off_json = names("disabledMcpjsonServers");
+
+    let mut rows = Vec::new();
+    let mut push = |map: Option<&serde_json::Map<String, serde_json::Value>>,
+                    scope: &'static str,
+                    off: &std::collections::HashSet<String>| {
+        for (name, cfg) in map.into_iter().flatten() {
+            rows.push(McpRow {
+                harness: "claude",
+                kind: RowKind::Mcp,
+                scope,
+                enabled: !off.contains(name),
+                name: name.clone(),
+                detail: server_detail(cfg),
+                toggleable: is_toggleable("claude", RowKind::Mcp),
+            });
+        }
+    };
+    push(v.get("mcpServers").and_then(|m| m.as_object()), "전역", &off);
+    push(
+        proj.and_then(|p| p.get("mcpServers")).and_then(|m| m.as_object()),
+        "폴더",
+        &off,
+    );
+    let dot_mcp = cwd
+        .map(|c| c.join(".mcp.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    push(
+        dot_mcp
+            .as_ref()
+            .and_then(|d| d.get("mcpServers"))
+            .and_then(|m| m.as_object()),
+        "레포",
+        &off_json,
+    );
+    // 같은 이름이 여러 스코프에 있을 수 있다(실측: kasaspace 는 전역과 이 레포 양쪽에).
+    // 이름 다음에 스코프로 갈라 붙여 둔다 — 어느 쪽이 이겼는지는 하네스가 정하고,
+    // 우리가 아는 건 "둘 다 적혀 있다"까지다.
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.scope.cmp(b.scope)));
+    rows
 }
 
 /// `~/.claude/settings.json` 의 `skillOverrides` — 꺼진 스킬 이름들.
@@ -157,6 +213,8 @@ fn codex_mcp(home: &std::path::Path) -> Vec<McpRow> {
             McpRow {
                 harness: "codex",
                 kind: RowKind::Mcp,
+                // codex 는 서버를 한 파일에만 적는다 — 가를 스코프가 없다.
+                scope: "",
                 name: name.to_string(),
                 detail,
                 enabled: item
@@ -231,6 +289,8 @@ fn skills_in(
             Some(McpRow {
                 harness,
                 kind: RowKind::Skill,
+                // 스킬은 홈 폴더 한 곳에서만 읽는다.
+                scope: "",
                 enabled: !off.contains(&name),
                 name,
                 detail,
@@ -243,12 +303,14 @@ fn skills_in(
 }
 
 /// 두 하네스의 MCP·스킬을 한 벌로. 워커 스레드에서 부른다.
-pub(crate) fn collect() -> Vec<McpRow> {
+///
+/// `cwd` 는 이 창이 보고 있는 폴더 — claude 쪽 꺼짐과 `.mcp.json` 이 폴더마다 다르다.
+pub(crate) fn collect(cwd: Option<&std::path::Path>) -> Vec<McpRow> {
     let Some(home) = kasa_socket::home_dir() else {
         return Vec::new();
     };
     let mut rows = Vec::new();
-    rows.extend(claude_mcp(&home));
+    rows.extend(claude_mcp(&home, cwd));
     let off = claude_skills_off(&home);
     rows.extend(skills_in(
         &home.join(".claude/skills"),
@@ -397,12 +459,23 @@ impl App {
             self.mcp_col.seen_rev = rev;
             self.chrome_dirty = true;
         }
+        // 워커가 남긴 결과 한 줄(지우기처럼 시간이 걸리는 일)은 여기서 집어 간다.
+        if let Some(msg) = self.mcp_col.notice.lock().ok().and_then(|mut g| g.take()) {
+            self.set_toast(msg);
+        }
+        // claude 쪽은 꺼짐도 `.mcp.json` 도 폴더마다 다르다 — pane 을 옮겨 cwd 가 바뀌면
+        // 목록의 대상 자체가 달라지므로 주기를 기다리지 않는다.
+        let cwd = self.active_pane_cwd();
+        let cwd_changed = cwd != self.mcp_col.cwd;
+        if cwd_changed {
+            self.mcp_col.cwd = cwd.clone();
+        }
         let due = self
             .mcp_col
             .last_refresh
             .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(REFRESH_MS));
         // `stale` 은 우리가 설정을 고친 직후 세운다 — 그때는 주기를 기다리지 않는다.
-        if !(due || self.mcp_col.stale) || self.mcp_col.busy.swap(true, Relaxed) {
+        if !(due || self.mcp_col.stale || cwd_changed) || self.mcp_col.busy.swap(true, Relaxed) {
             return;
         }
         self.mcp_col.stale = false;
@@ -413,7 +486,7 @@ impl App {
             self.mcp_col.busy.clone(),
         );
         std::thread::spawn(move || {
-            let rows = collect();
+            let rows = collect(cwd.as_deref());
             if let Ok(mut g) = snap.lock() {
                 *g = rows;
             }
@@ -640,6 +713,22 @@ pub(crate) fn draw_mcp_col(
                     italic: false,
                 },
             );
+            // 스코프는 이름 바로 뒤에. 같은 이름이 두 스코프에 있을 수 있어서
+            // 줄 끝에 두면 어느 줄의 것인지 눈으로 잇기 어렵다.
+            if !row.scope.is_empty() {
+                let nw = g.measure_chrome_text(&row.name, 12.0, false);
+                g.draw_text(
+                    text_x + 18.0 + nw,
+                    y + 7.0,
+                    row.scope,
+                    gpu::DrawOpts {
+                        font_size: 9.0,
+                        color: theme::text_dim(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
             if !row.detail.is_empty() {
                 let d = crate::info::fit_text(g, &row.detail, avail - 12.0, 10.0, false);
                 g.draw_text(
@@ -688,6 +777,7 @@ mod tests {
         McpRow {
             harness: h,
             kind: k,
+            scope: "",
             name: n.into(),
             detail: String::new(),
             enabled: true,
@@ -898,6 +988,61 @@ enabled = false
             v["skillOverrides"].as_object().unwrap().is_empty(),
             "켜면 항목을 지운다 — 이 표는 기본에서 벗어난 것만 담는 자리다"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// claude 는 서버를 세 곳에 나눠 적고 꺼짐은 폴더마다 다르다. 전역만 읽으면
+    /// 목록이 실상의 일부만 보여준다 — 2026-08-11 지시("프로젝트별, 전역도 보이게").
+    #[test]
+    fn claude_mcp_reads_all_three_scopes_and_per_folder_off() {
+        let home = tmp_home("scopes");
+        let repo = home.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(".mcp.json"),
+            r#"{"mcpServers": {"kasaspace": {"url": "http://127.0.0.1:8765/mcp"},
+                               "teamonly": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            format!(
+                r#"{{
+                  "mcpServers": {{"exa": {{"command": "npx"}}, "kasaspace": {{"url": "u"}}}},
+                  "projects": {{
+                    "{}": {{
+                      "mcpServers": {{"myonly": {{"command": "uv"}}}},
+                      "disabledMcpServers": ["exa"],
+                      "disabledMcpjsonServers": ["teamonly"]
+                    }}
+                  }}
+                }}"#,
+                repo.display()
+            ),
+        )
+        .unwrap();
+
+        let rows = claude_mcp(&home, Some(&repo));
+        let find = |n: &str, s: &str| {
+            rows.iter()
+                .find(|r| r.name == n && r.scope == s)
+                .unwrap_or_else(|| panic!("{n}({s}) 이 없다: {rows:?}"))
+        };
+        // 전역 exa·kasaspace + 폴더 myonly + 레포 kasaspace·teamonly.
+        assert_eq!(rows.len(), 5, "세 스코프가 다 실려야 한다: {rows:?}");
+        assert_eq!(find("myonly", "폴더").detail, "uv");
+        assert_eq!(find("teamonly", "레포").detail, "npx");
+        // 같은 이름이 두 곳에 있으면 둘 다 남긴다 — 어느 쪽이 이겼는지는 하네스가 정한다.
+        assert!(rows.iter().filter(|r| r.name == "kasaspace").count() == 2);
+        // 꺼짐은 폴더 기준. 두 배열은 서로 무관해서 각자 제 스코프만 끈다.
+        assert!(!find("exa", "전역").enabled, "disabledMcpServers 가 전역을 끈다");
+        assert!(!find("teamonly", "레포").enabled, "disabledMcpjsonServers");
+        assert!(find("kasaspace", "레포").enabled);
+
+        // cwd 를 모르면 폴더 것들은 아예 안 보이고, 꺼짐도 알 수 없다.
+        let bare = claude_mcp(&home, None);
+        assert_eq!(bare.len(), 2, "전역만: {bare:?}");
+        assert!(bare.iter().all(|r| r.enabled && r.scope == "전역"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
