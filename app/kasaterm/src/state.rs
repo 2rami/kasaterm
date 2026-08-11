@@ -120,9 +120,20 @@ pub(crate) struct McpColState {
     /// 다음 pump 에서 주기를 무시하고 다시 읽는다. 우리가 설정을 고친 직후에 세운다 —
     /// 방금 누른 토글이 6초 뒤에 반영되면 눌린 건지 아닌지를 알 수 없다.
     pub(crate) stale: bool,
+    /// 워커가 끝내 놓고 가는 한 줄. GUI 스레드에서만 토스트를 띄울 수 있어서,
+    /// 지우기처럼 CLI 를 부르는 일은 결과를 여기 두고 다음 pump 가 집어 간다.
+    pub(crate) notice: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// 지우기를 한 번 눌러 확인을 기다리는 행(`view` 인덱스)과 그 시각. 삭제는
+    /// 되돌릴 수 없어 두 번 누르게 한다 — 다이얼로그를 띄우면 목록에서 눈이 떠난다.
+    pub(crate) confirm_delete: Option<(usize, std::time::Instant)>,
+    /// 이 창이 보고 있는 폴더. claude 쪽은 꺼짐도 `.mcp.json` 도 폴더마다 달라서,
+    /// 여기가 바뀌면 주기를 기다리지 않고 다시 읽는다.
+    pub(crate) cwd: Option<std::path::PathBuf>,
     pub(crate) scroll: f32,
     /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
     pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 행별 지우기 버튼. 행 hit 보다 먼저 본다 — 겹쳐 있다.
+    pub(crate) del_rects: Vec<(usize, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) content_h: f32,
@@ -138,8 +149,12 @@ impl Default for McpColState {
             busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_refresh: None,
             stale: false,
+            notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            confirm_delete: None,
+            cwd: None,
             scroll: 0.0,
             row_rects: Vec::new(),
+            del_rects: Vec::new(),
             refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
             content_h: 0.0,
