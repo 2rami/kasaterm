@@ -222,7 +222,14 @@ pub fn mode_slug(cwd: &Path) -> String {
 
 /// `C:\Users\x` → `/c/Users/x`. 이미 posix 형태거나 드라이브 문자가 없으면 구분자만 바꾼다.
 /// UNC 확장 접두사(`\\?\`)는 `canonicalize` 가 붙여 주는 것이라 먼저 떼야 한다.
+///
+/// Windows 밖에선 통째로 통과시킨다 — unix 폴더 이름엔 역슬래시가 실제로 들어갈
+/// 수 있어서, 거기서까지 구분자로 접으면 멀쩡하던 슬러그가 sh 훅(`pwd | sed`)과
+/// 갈린다. 고칠 대상은 Windows 뿐이다.
 fn posix_style(raw: &str) -> String {
+    if !cfg!(windows) {
+        return raw.to_string();
+    }
     let raw = raw.strip_prefix(r"\\?\").unwrap_or(raw);
     let mut chars = raw.chars();
     let drive = chars.next().filter(|c| c.is_ascii_alphabetic());
@@ -492,6 +499,9 @@ mod tests {
     /// 훅이 만드는 슬러그와 같은 자리로 접히는지. 어긋나면 앱과 훅이 서로 다른
     /// collab 방을 보고, 슬러그가 절대경로로 남으면 `collab_root().join()` 이 base 를
     /// 버려 마커가 collab 루트가 아니라 프로젝트 폴더 안에 쓰인다.
+    ///
+    /// 접기 자체가 Windows 전용이라(`posix_style`) 테스트도 거기서만 돈다.
+    #[cfg(windows)]
     #[test]
     fn mode_slug_folds_windows_paths_like_git_bash() {
         // Git bash 의 `pwd` 는 `/c/Users/...` 를 주고 훅은 거기에 s#[/.]#-#g 를 건다.

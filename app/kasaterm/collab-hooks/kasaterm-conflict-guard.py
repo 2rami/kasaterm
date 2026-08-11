@@ -118,8 +118,12 @@ def project_slug(cwd):
     `C:\\Users\\kshkj\\desktop` → `C--Users-kshkj-desktop`(실측). `/`·`.` 만
     접던 종전 규칙은 Windows 에서 존재할 수 없는 폴더를 가리켜, 아래 isdir
     가드에 걸려 충돌 감지가 통째로 무음 정지했다.
+
+    추가 두 글자는 Windows 에서만 접는다 — unix 폴더 이름엔 `\\`·`:` 가 실제로
+    들어갈 수 있어, 거기서까지 접으면 멀쩡하던 경로가 어긋난다.
     """
-    for ch in ("/", ".", "\\", ":"):
+    chars = ("/", ".", "\\", ":") if os.name == "nt" else ("/", ".")
+    for ch in chars:
         cwd = cwd.replace(ch, "-")
     return cwd
 
