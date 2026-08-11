@@ -1118,6 +1118,13 @@ impl App {
                     if stand_anchor.is_none() {
                         stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
                     }
+                    // agy — 자리표시자도 채운 입력행도 없다. 모양은 claude 와 같은
+                    // 대시 보더 두 줄인데 마커가 ASCII `>` 라 공용 판정에서 빠져 있다
+                    // (인용문·diff 오인 방지, 2026-07-22). 앵커 규칙은 그대로 쓰고
+                    // statusline 자리만 「맨 아래 보더 다음 행」으로 잡아 준다.
+                    if stand_anchor.is_none() {
+                        stand_anchor = find_agy_standing_anchor(&composed, cols_now as usize);
+                    }
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
@@ -1528,7 +1535,7 @@ impl App {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
                         (raw_lh
-                            - self.dock_reserve_h()
+                            - self.bottom_reserve_h()
                             - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h))
                             .max(0.0)
                     });
@@ -2319,7 +2326,7 @@ impl App {
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
         let quick_files_list = self.quick_files();
-        let dock_reserve = self.dock_reserve_h();
+        let dock_reserve = self.bottom_reserve_h();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
@@ -3848,12 +3855,12 @@ impl App {
                 // 본문 geometry 를 스크롤 처리에 넘겨주기 위해 저장: start_y 는 검색박스
                 // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 dock 을
                 // 뺀 창 끝까지. input.rs 가 이걸로 max_scroll 을 정확히 clamp 한다.
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
                     0.0
                 } else {
                     DOCK_HEIGHT
-                };
-                let body_visible_h = (sb_win_h - dock_h - start_y).max(0.0);
+                } + STATUS_HEIGHT;
+                let body_visible_h = (sb_win_h - bottom_h - start_y).max(0.0);
                 self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
@@ -4857,9 +4864,11 @@ impl App {
             // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Info {
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - dock_h).max(top);
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
@@ -4910,9 +4919,11 @@ impl App {
             // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
             // 본문만 다르다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Sessions {
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - dock_h).max(top);
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
@@ -4936,9 +4947,11 @@ impl App {
             }
             // MCP·Skill 탭 — 위 둘과 형제 블록.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Mcp {
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - dock_h).max(top);
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
@@ -6328,7 +6341,10 @@ impl App {
             if dock_reserve > 0.0 {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                let bar_y = win_h - DOCK_HEIGHT;
+                // 상태줄 **위**에 앉는다 — 상태줄은 창 맨 바닥에 고정이고 dock 은
+                // 접힌 pane 이 있을 때만 나타났다 사라지는 띠라, 순서가 반대면
+                // 접을 때마다 상태줄이 위아래로 뛴다.
+                let bar_y = win_h - STATUS_HEIGHT - DOCK_HEIGHT;
                 // Confine the dock to the pane-grid band: it must not bleed under
                 // the session-tab strip / file tree on the left or the git column
                 // on the right. Same bounds the cell grid uses in window_cells().
@@ -9712,6 +9728,31 @@ pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usi
 /// 윗 테두리는 `/rename` 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트 섬을
 /// 인정한다(max_label 24) — 순수 rule 만 보면 이름 지은 세션에서 standing 이
 /// 통째로 사라진다(거노 실사고). 아래 테두리는 항상 순수 '─'(0).
+/// agy 입력창 위 standing 앵커.
+///
+/// agy 화면 아래는 `[윗보더][> 입력][아래보더][? for shortcuts …]` 로, claude 와
+/// 같은 모양이다. 그래서 앵커 계산은 `find_standing_anchor` 를 그대로 쓰고, 그것이
+/// 요구하는 「statusline 행」만 여기서 찾아 준다 — 맨 아래 보더 바로 다음 행.
+///
+/// 마커로 ASCII `>` 를 인정하는 것은 **여기뿐**이다. 공용 `prompt_box` 는 인용문·diff
+/// 를 입력창으로 오인한 전례가 있어 `>` 를 뺐고, 그 판정은 건드리지 않는다.
+fn find_agy_standing_anchor(rows: &[Vec<GridCell>], cols: usize) -> Option<(usize, f32)> {
+    let border = |r: &Vec<GridCell>| {
+        let dash = r.iter().filter(|c| c.ch == '─').count();
+        let label = r.iter().filter(|c| !matches!(c.ch, '─' | ' ' | '\0')).count();
+        dash >= 8 && label == 0
+    };
+    let bottom = rows.iter().rposition(border)?;
+    let top = rows[..bottom].iter().rposition(border)?;
+    let marked = rows[top + 1..bottom].iter().any(|r| {
+        r.iter().find(|c| !matches!(c.ch, ' ' | '\0')).is_some_and(|c| c.ch == '>')
+    });
+    if !marked || bottom + 1 >= rows.len() {
+        return None;
+    }
+    find_standing_anchor(rows, bottom + 1, cols)
+}
+
 pub(crate) fn find_standing_anchor(
     rows: &[Vec<GridCell>],
     face_row: usize,
@@ -10145,6 +10186,41 @@ mod clawd_banner_tests {
         replace_banner_title(&mut rows, 0, 0, 0, n, CODEX_TITLE, "아리스", None);
         let after: String = rows[0].iter().map(|c| c.ch).collect();
         assert_eq!(before, after, "본문이 바뀌었다");
+    }
+
+    /// agy 화면 아래 실측 모양 — 보더 두 줄 사이 ASCII `>`, 그 아래 상태줄.
+    #[test]
+    fn agy_standing_anchor_found_under_the_prompt() {
+        let bar = "─".repeat(40);
+        let rows: Vec<_> = [
+            "  사과는 보통 빨간색이나 초록색이네요.",
+            "",
+            "",
+            "",
+            bar.as_str(),
+            "> ",
+            bar.as_str(),
+            "? for shortcuts                 Gemini 3.5 Flash",
+        ]
+        .iter()
+        .map(|s| row_from(s))
+        .collect();
+        assert!(
+            find_agy_standing_anchor(&rows, 40).is_some(),
+            "agy 입력창 위 앵커를 못 잡았다"
+        );
+    }
+
+    /// 인용문(`> …`)이 대시 사이에 있어도 **claude·codex 판정은 안 건드린다**.
+    /// agy 앵커는 여기서만 `>` 를 인정하므로, 공용 `prompt_box` 는 여전히 거절해야 한다.
+    #[test]
+    fn ascii_marker_still_rejected_by_the_shared_prompt_box() {
+        let bar = "─".repeat(40);
+        let rows: Vec<_> = [bar.as_str(), "> 인용된 문장", bar.as_str()]
+            .iter()
+            .map(|s| row_from(s))
+            .collect();
+        assert!(prompt_box(&rows).is_none(), "인용문을 입력창으로 잡았다");
     }
 
     #[test]
