@@ -134,6 +134,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.notify" => surface_notify(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
+        "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -337,6 +338,45 @@ fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
     match backend.pane_done(surface_id, outcome, summary) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_agent_status(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.agent_status requires `surface_id` (string)"),
+    };
+    // `surface.done` 의 outcome 과 같은 이유로 값을 입구에서 좁힌다 — 오타 하나가
+    // 조용히 「아무 일도 안 일어남」이 되는 자리라, 훅 스크립트가 틀리면 알아야 한다.
+    let phase = match params.get("phase").and_then(|v| v.as_str()) {
+        Some(p @ ("start" | "end" | "clear")) => p,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.agent_status `phase` must be start|end|clear, got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.agent_status requires `phase` (start|end|clear)"),
+    };
+    let kind = match params.get("kind").and_then(|v| v.as_str()) {
+        Some(k @ ("subagent" | "background")) => k,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.agent_status `kind` must be subagent|background, got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.agent_status requires `kind` (subagent|background)"),
+    };
+    let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("");
+    // `clear` 는 key 를 안 본다(그 kind 통째). start/end 는 짝지을 값이 있어야 한다.
+    if phase != "clear" && key.is_empty() {
+        return param_err(id, "surface.agent_status start/end requires a non-empty `key`");
+    }
+    match backend.agent_status(surface_id, phase, kind, key, label) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

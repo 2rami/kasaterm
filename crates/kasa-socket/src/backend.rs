@@ -695,6 +695,32 @@ pub trait Backend: Send + Sync {
     fn pane_done(&self, _surface_id: &str, _outcome: &str, _summary: &str) -> Result<()> {
         anyhow::bail!("pane_done unsupported by this backend")
     }
+    /// 이 pane 이 **지금 무엇을 돌리기 시작했고 무엇이 끝났는지** — `PreToolUse`/
+    /// `PostToolUse` 훅이 `kasaterm-cli agent-status` 로 부른다.
+    ///
+    /// 진행 표시(헤더 바·사이드바 펄스)는 원래 transcript 꼬리를 읽어 런치와 회수를
+    /// 짝지었다. 그 방식은 세션이 커지면 런치 기록이 꼬리 밖으로 밀려 **오래 걸리는
+    /// 작업일수록 표시가 사라진다**(2026-08-11 실측: 3.8MB 7건 / 8.3MB·24MB 0건).
+    /// 훅은 일어난 그 순간 한 번 오므로 세션 크기와 무관하다.
+    ///
+    /// - `phase` — `start` | `end` | `clear`
+    /// - `kind` — `subagent`(Task) | `background`(run_in_background Bash)
+    /// - `key` — 시작과 종료를 잇는 값. 겹칠 수 있어 소비부는 세어서 관리한다.
+    /// - `label` — 화면에 띄울 짧은 설명. `end`/`clear` 엔 없어도 된다.
+    ///
+    /// `clear` 는 `key` 를 무시하고 그 pane 의 해당 `kind` 를 통째로 비운다 — 턴이
+    /// 끝나면(`Stop`) 서브에이전트는 하나도 안 남으므로, `end` 를 놓친 것이 있어도
+    /// 거기서 새는 걸 막는다. Default unsupported.
+    fn agent_status(
+        &self,
+        _surface_id: &str,
+        _phase: &str,
+        _kind: &str,
+        _key: &str,
+        _label: &str,
+    ) -> Result<()> {
+        anyhow::bail!("agent_status unsupported by this backend")
+    }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just
     /// report one.

@@ -485,14 +485,30 @@ impl App {
     }
 
     /// 이 pane 에 **화면 밖에서 도는 일**이 있나 — `run_in_background` 셸·`Monitor`,
-    /// 그리고 아직 안 돌아온 **서브에이전트**. claude transcript tail 에서 읽는다.
-    /// mtime 게이트라 안 바뀐 transcript 는 캐시로 답해 노는 pane 은 `stat` 한 번이다.
+    /// 그리고 아직 안 돌아온 **서브에이전트**.
     ///
     /// 서브에이전트를 같이 보는 이유: 세션 자체는 idle(스피너 없음)인데 Task 가 정보를
     /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(거노
     /// 2026-08-11 제안). 표시는 이미 갈려 있다 — 도는 중은 쓸어가는 sweep, 이쪽은
     /// 3초 숨쉬기 pulse(`render.rs` 의 `working_bar` vs `pulse_bar`).
+    ///
+    /// 답은 두 군데서 온다. **훅이 정본**이고(`kasaterm-agent-status.sh` 가 시작·종료를
+    /// 그 순간 밀어 넣는다), transcript 꼬리는 폴백이다 — 앱이 나중에 떠서 시작을 못 본
+    /// pane, Windows(python3 없어 훅이 안 도는 경우), 옛 세션이 그 폴백으로 산다.
+    /// 순서가 이 방향인 이유: 꼬리는 64KB 라 세션이 커지면 런치 기록이 밀려나 **오래
+    /// 기다리는 작업일수록 안 보였다**(실측: 3.8MB 7건 / 8.3MB·24MB 0건). 훅이 「있다」고
+    /// 하면 그걸로 끝내고, 훅이 조용할 때만 꼬리를 읽는다.
     fn pane_bg_active(&mut self, pane_id: &str) -> bool {
+        if self
+            .collab
+            .hook_activity
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .is_some_and(|a| !a.is_empty())
+        {
+            return true;
+        }
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
             return false;
         };
@@ -507,7 +523,12 @@ impl App {
                 }
             }
         }
-        let (tail, idle) = crate::socket::read_tail(&path, 64 * 1024);
+        // 512KB — `collab_board`(socket.rs)와 **같은 값이어야 한다**. board 는 64KB
+        // 로는 런치가 대량 출력에 밀려 안 잡힌다는 걸 알고 진작 늘렸는데 이쪽만
+        // 64KB 로 남아, 같은 pane 을 두고 board 는 「서브에이전트 돌는 중」이라 하고
+        // 화면은 아무 표시도 안 하는 어긋남이 있었다(2026-08-11). 판정 재료가 다르면
+        // 판정도 다르다 — 두 벌을 둘 거면 최소한 창 크기는 맞춰 둔다.
+        let (tail, idle) = crate::socket::read_tail(&path, 512 * 1024);
         let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         if let Some(mt) = mtime {
