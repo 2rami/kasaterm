@@ -2332,36 +2332,178 @@ fn claude_keychain_service(dir: Option<&str>) -> String {
 /// 자기 프로세스 env 에 갱신)에서 오지만, env 를 읽는 것은 **호출자**다 — 그래야
 /// 캐시 키와 조회 대상이 같은 값에서 나오고, 테스트가 서로 env 를 안 밟는다.
 fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
-    let pick = |v: &serde_json::Value| {
-        v.pointer("/claudeAiOauth/accessToken")
-            .and_then(|t| t.as_str())
-            .map(str::to_string)
-    };
+    let (v, _) = read_claude_credentials(account_dir)?;
+    v.pointer("/claudeAiOauth/accessToken")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+}
+
+/// 자격증명이 **어디서 왔는지**. 갱신한 값은 읽은 자리에 그대로 되써야 한다 —
+/// 파일에서 읽고 키체인에 쓰면 claude CLI 는 옛 값을 계속 보고, 그 반대면 우리가
+/// 회전시킨 refresh token 을 CLI 가 모른 채 옛것으로 갱신을 시도해 죽는다.
+enum CredSource {
+    File(std::path::PathBuf),
+    Keychain(String),
+}
+
+/// 슬롯의 자격증명 문서 전체 + 그 출처. macOS 는 Keychain, 그 외는 저장소 dir 의
+/// `.credentials.json`. 빈 값/None = 기본 로그인.
+fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Value, CredSource)> {
     let account_dir = account_dir.filter(|s| !s.is_empty());
     let creds_dir = match account_dir {
         Some(d) => d.to_string(),
         None => format!("{}/.claude", std::env::var("HOME").ok()?),
     };
-    if let Ok(s) = std::fs::read_to_string(format!("{creds_dir}/.credentials.json")) {
+    let file = std::path::PathBuf::from(&creds_dir).join(".credentials.json");
+    if let Ok(s) = std::fs::read_to_string(&file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if let Some(t) = pick(&v) {
-                return Some(t);
-            }
+            return Some((v, CredSource::File(file)));
         }
     }
+    let svc = claude_keychain_service(account_dir);
     let out = crate::no_window_command("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            &claude_keychain_service(account_dir),
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", &svc, "-w"])
         .output()
         .ok()?;
     let s = String::from_utf8(out.stdout).ok()?;
-    serde_json::from_str::<serde_json::Value>(s.trim())
-        .ok()
-        .and_then(|v| pick(&v))
+    let v = serde_json::from_str::<serde_json::Value>(s.trim()).ok()?;
+    Some((v, CredSource::Keychain(svc)))
+}
+
+/// 갱신한 자격증명을 읽은 자리에 되쓴다.
+///
+/// ⚠️ 키체인 경로는 토큰이 `security` 의 **argv 에 실린다**. `security(1)` 은 비밀을
+/// stdin 으로 받는 길이 없고, 대신 Security 프레임워크를 직접 부르면 우리 프로세스가
+/// 남이 만든 키체인 항목을 건드리는 꼴이라 macOS 가 접근 승인 창을 띄운다. 읽기가
+/// 이미 같은 도구를 거치고 있어 권한 모델을 안 흔드는 쪽을 골랐다.
+fn write_claude_credentials(src: &CredSource, v: &serde_json::Value) -> bool {
+    let Ok(body) = serde_json::to_string(v) else {
+        return false;
+    };
+    match src {
+        CredSource::File(p) => std::fs::write(p, body).is_ok(),
+        CredSource::Keychain(svc) => {
+            // 계정(-a)이 다르면 같은 서비스에 **항목이 하나 더 생긴다** — 그러면
+            // claude 가 어느 쪽을 볼지 알 수 없으니 기존 항목의 acct 를 그대로 쓴다.
+            let acct = keychain_account(svc).unwrap_or_default();
+            if acct.is_empty() {
+                return false;
+            }
+            crate::no_window_command("security")
+                .args([
+                    "add-generic-password", "-U", "-a", &acct, "-s", svc, "-w", &body,
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+    }
+}
+
+/// 그 키체인 항목의 `acct` 필드. `security find-generic-password` 는 값을 뺀 속성
+/// 덤프를 stdout 으로 준다(`"acct"<blob>="kasa"`).
+fn keychain_account(svc: &str) -> Option<String> {
+    let out = crate::no_window_command("security")
+        .args(["find-generic-password", "-s", svc])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("\"acct\"<blob>=\""))
+        .and_then(|r| r.strip_suffix('"'))
+        .map(str::to_string)
+}
+
+/// claude CLI 가 쓰는 공개 OAuth 클라이언트. 토큰 엔드포인트도 CLI 와 같은 것이라,
+/// 여기서 회전시킨 토큰을 CLI 가 그대로 이어 쓴다.
+const CLAUDE_OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+/// 그 슬롯으로 claude 가 지금 돌고 있나.
+///
+/// 모르면 **있다고 답한다** — 판정이 한쪽으로만 틀리게 골랐다. 없는데 있다고 하면
+/// 갱신을 한 번 거를 뿐이지만, 있는데 없다고 하면 도는 세션의 토큰을 빼앗는다.
+fn slot_has_live_claude(dir: &str) -> bool {
+    // 기본 슬롯은 env 없이 도는 모든 claude 가 쓴다 — 셀 방법이 없으니 늘 산 것으로.
+    if dir.is_empty() {
+        return true;
+    }
+    let Ok(out) = crate::no_window_command("ps")
+        .args(["eww", "-ax", "-o", "command="])
+        .output()
+    else {
+        return true;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .contains(&format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={dir}"))
+}
+
+/// 만료된(또는 5분 안에 만료될) access token 을 refresh token 으로 되살린다.
+/// 갱신했으면 새 access token, 갱신할 필요/방법이 없으면 None.
+///
+/// **왜 우리가 하나**: 토큰 갱신은 그 계정으로 `claude` 가 실제로 돌 때만 일어난다.
+/// 그래서 안 쓰는 슬롯일수록 더 깜깜해지고, 정작 "어디로 옮길까" 고르려고 여는
+/// 계정 목록이 **옮기기 전엔 아무것도 못 알려주는** 닭-달걀이 된다(2026-08-11 실측:
+/// 두 슬롯이 각각 10시간·79시간 전 만료라 사용량도 신원도 전부 빈칸이었다).
+///
+/// ⚠️ refresh token 은 **1회용**이다. 도는 CLI 도 같은 토큰을 회전시키려 하므로,
+/// 먼저 쓴 쪽만 살고 나머지는 `invalid_grant` 로 죽는다 — 그 슬롯 세션이 통째로
+/// 로그아웃된다. 그래서 살아 있는 슬롯은 건드리지 않는다(어차피 CLI 가 갱신해 준다).
+async fn refresh_claude_token(dir: &str) -> Option<String> {
+    let (mut creds, src) = read_claude_credentials(Some(dir))?;
+    let oauth = creds.get("claudeAiOauth")?.as_object()?;
+    let expires_at = oauth.get("expiresAt")?.as_u64()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    // CLI 와 같은 5분 스큐 — 조회 도중 만료되는 걸 피한다.
+    if expires_at > now_ms + 5 * 60 * 1000 {
+        return None;
+    }
+    if slot_has_live_claude(dir) {
+        return None;
+    }
+    let refresh = oauth.get("refreshToken")?.as_str()?.to_string();
+    let resp = reqwest::Client::new()
+        .post(CLAUDE_OAUTH_TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", CLAUDE_OAUTH_CLIENT_ID),
+        ])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        // 상태만 남긴다(토큰은 절대). 400/401=죽은 refresh token, 429=스로틀 —
+        // 조용한 None 은 성공과 구분이 안 돼 현장에서 진단이 불가능하다.
+        eprintln!(
+            "[claude-token] 갱신 거부 {} · slot={dir}",
+            resp.status().as_u16()
+        );
+        return None;
+    }
+    // `.json()` 은 reqwest 의 json feature 가 필요한데 이 크레이트는 안 켰다 —
+    // 본문을 받아 직접 파싱한다(의존성 하나를 아끼려고).
+    let data: serde_json::Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+    let access = data.get("access_token")?.as_str()?.to_string();
+    let o = creds.get_mut("claudeAiOauth")?.as_object_mut()?;
+    o.insert("accessToken".into(), access.clone().into());
+    if let Some(exp) = data.get("expires_in").and_then(|v| v.as_u64()) {
+        o.insert("expiresAt".into(), (now_ms + exp * 1000).into());
+    }
+    // **회전된 refresh token 을 반드시 남긴다.** 이걸 빠뜨리면 다음 갱신이 죽은
+    // 토큰으로 나가 그 슬롯이 로그아웃된다 — 되살리려던 기능이 계정을 깨는 길.
+    if let Some(r) = data.get("refresh_token").and_then(|v| v.as_str()) {
+        o.insert("refreshToken".into(), r.into());
+    }
+    if !write_claude_credentials(&src, &creds) {
+        eprintln!("[claude-token] 갱신은 됐는데 저장 실패 · slot={dir} — 이 슬롯은 재로그인이 필요할 수 있다");
+        return None;
+    }
+    Some(access)
 }
 
 /// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
@@ -2446,7 +2588,13 @@ async fn claude_identity_handler(
             }
         }
     }
-    let Some(token) = read_claude_token_from(Some(dir.as_str())) else {
+    // 사용량과 같은 이유로 여기서도 먼저 되살린다 — 신원을 못 읽으면 화면은 라벨만
+    // 남고, 그 라벨이 낡았을 때(재로그인으로 슬롯이 겹쳤을 때) 알아챌 길이 사라진다.
+    let token = match refresh_claude_token(dir.as_str()).await {
+        Some(t) => Some(t),
+        None => read_claude_token_from(Some(dir.as_str())),
+    };
+    let Some(token) = token else {
         // 토큰이 없으면 그 슬롯은 로그인 자체가 안 된 것 — 호출자가 그대로 표시한다.
         return (cors, Json(serde_json::json!({ "ok": false, "error": "no token" })));
     };
@@ -2558,7 +2706,13 @@ async fn claude_usage_handler(
             }
         }
     }
-    let fresh: Option<serde_json::Value> = match read_claude_token_from(Some(dir.as_str())) {
+    // 만료됐으면 먼저 되살린다. 안 그러면 안 쓰는 슬롯은 영영 401 이고, 화면엔
+    // 「모름(—)」만 남아 정작 옮길 곳을 고를 때 아무 도움이 안 된다.
+    let token = match refresh_claude_token(dir.as_str()).await {
+        Some(t) => Some(t),
+        None => read_claude_token_from(Some(dir.as_str())),
+    };
+    let fresh: Option<serde_json::Value> = match token {
         Some(token) => {
             let resp = reqwest::Client::new()
                 .get("https://api.anthropic.com/api/oauth/usage")
