@@ -1002,22 +1002,14 @@ pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
     character_accent(name).map(|c| accent_variant(c, ordinal))
 }
 
-/// 캐릭터명 ↔ 에셋 슬러그 대응표 (assets/students/<slug>.png, arona-ui
-/// 디렉토리명·shim 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
-pub(crate) const CHARACTER_SLUGS: &[(&str, &str)] = &[
-    ("아로나", "arona"),
-    ("프라나", "prana"),
-    ("미도리", "midori"),
-    ("모모이", "momoi"),
-    ("유즈", "yuzu"),
-    ("아리스", "arisu"),
-    ("유우카", "yuuka"),
-    ("시로코", "shiroko"),
-    ("호시노", "hoshino"),
-    ("코하루", "koharu"),
-    ("히마리", "himari"),
-    ("아루", "aru"),
-];
+// 캐릭터명 ↔ 에셋 슬러그 대응표(`assets/students/<slug>.png`, arona-ui 디렉토리명·shim
+// 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
+//
+// 표 자체는 `collab-hooks/characters.json` 에서 build.rs 가 생성한다 — 정본이 둘이면
+// 어긋나고, 어긋나도 오류가 안 난다(슬러그가 inbox 파일명이라 브리프가 아무도 안 읽는
+// 우편함에 들어간다). 새 테마는 그 JSON 하나만 갈아 끼우면 된다. 슬러그 중복·형식
+// 위반은 build.rs 가 컴파일 에러로 막는다.
+include!(concat!(env!("OUT_DIR"), "/character_slugs.rs"));
 
 /// 캐릭터명 → 에셋 슬러그.
 pub fn character_slug(name: &str) -> Option<&'static str> {
