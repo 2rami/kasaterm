@@ -71,13 +71,32 @@ PPGEN=/path/to/ppgen python3 scripts/theme-sprites.py gen --jobs 4
 ```
 
 `ppgen` 은 [perfectpixel-studio](https://github.com/2rami/perfectpixel-studio) 의
-헤드리스 CLI 다(`go build -o /tmp/ppgen ./cmd/ppgen`). 1명당 5회 호출(base + 4상태),
-2분 남짓 걸린다.
+헤드리스 CLI 다(`go build -o /tmp/ppgen ./cmd/ppgen`). 1명에 2분 남짓 걸린다.
 
-**프로바이더는 `fal` 이다.** OpenAI 호환 게이트웨이로도 돌려 봤지만
-`/v1/images/generations` 만 있고 `/v1/images/edits` 가 없어(404) **동작 프레임을 못
-만든다** — 동작은 base 캐릭터를 참조 이미지로 넘겨 그리므로 편집 경로가 필수다.
-(그 게이트웨이로 base 하나만 만드는 것은 된다.)
+### 돈이 나가는 지점 — 1명당 API 호출은 **2회**다
+
+`out/` 에 24장이 쌓이지만 **과금되는 건 2장뿐**이다. 나머지는 로컬 가공이다.
+
+| 산출물 | 크기 | API |
+|---|---|---|
+| `base.png` | 1024×1024 | **호출 1** |
+| `sprite-sheet.png` | 1536×1024 (18프레임을 한 장에) | **호출 2** — base 를 참조로 |
+| `frames/**`, `apng/`, `gif/` | — | 시트를 **잘라낸 것**, 호출 없음 |
+
+`gpt-image-2` 는 출력 토큰 과금($30/1M)이라 품질에 따라 갈린다. 77명 = 151회 기준:
+low $1.5 · medium $6 · high $24, `-attempts`(기본 3) 재시도가 붙으면 최대 그 2배.
+**한 테마를 굽는 건 한 자릿수~수십 달러짜리 작업이다** — 돌리기 전에 어느 계정
+크레딧으로 나가는지 확인할 것. 2026-08-11 에 확인 없이 151회를 쏴서 개인 OpenAI
+크레딧을 다 태웠다.
+
+**프로바이더는 `codex` 를 기본으로 쓴다**(ChatGPT 구독 인증이라 위 과금과 별개).
+`openai` 는 api.openai.com 직결이라 위 표대로 돈이 나간다.
+
+⚠️ **사내 OpenGateway 로는 못 굽는다.** `/v1/images/generations` 만 있고
+`/v1/images/edits` 가 없어 **동작 프레임을 못 만든다** — 동작은 base 를 참조 이미지로
+넘겨 그리므로 편집 경로가 필수다. 게다가 게이트웨이는 **필드 검증을 전혀 안 해서**
+참조를 실어 보내도 200 을 주면서 조용히 무시하고 딴 그림을 준다. 404 로 막히는 게
+아니라 그럴듯한 결과가 와서 **눈으로 보기 전엔 모른다.**
 
 > ⚠️ **키는 `~/Library/Application Support/perfectpixel/config.json` 이 최우선**이다.
 > macOS 의 `os.UserConfigDir()` 은 `~/.config` 가 아니다 — ppgen 문서의 경로는 리눅스
@@ -128,6 +147,23 @@ python3 scripts/theme-sprites.py status   # 어디까지 됐는지
 > ⚠️ **프로필은 알파 경계 맨 위에서 자르면 안 된다.** BA 캐릭터는 **헤일로가 머리 위에
 > 떠 있어** 경계 상단이 헤일로 꼭대기다. 거기서 자르면 얼굴이 아래 가장자리로 밀려
 > 머리카락만 찬 그림이 나온다. 「처음으로 폭이 넉넉해지는 줄」을 머리 시작으로 잡는다.
+
+## ⑧ 대조 — `theme-sprites.py sheet`
+
+```bash
+python3 scripts/theme-sprites.py sheet --out /tmp/theme-sheet.png
+```
+
+**왼쪽 위키 원본 / 오른쪽 구운 프로필**을 한 줄에 6명씩 붙여 한 장으로 만든다.
+「누가 안 닮았나」는 한 명씩 열어 보면 기준이 흔들려서 못 고른다 — 나란히 놓고 훑어야
+튀는 애가 보인다. 열어 보려면 pane 에 직접 띄우면 된다:
+
+```bash
+curl "http://127.0.0.1:8765/open-image?path=/tmp/theme-sheet.png&pane=$KASATERM_PANE_ID"
+```
+
+⚠️ 이 시트는 **디스크에 있는 것을 그린다** — 다시 구운 학생과 옛 그림이 섞여 있어도
+구분해 주지 않는다. 화풍이 튀는 칸이 보이면 `stat` 으로 날짜를 확인할 것.
 
 ---
 
