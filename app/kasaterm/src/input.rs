@@ -511,15 +511,11 @@ impl App {
                     // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
                     // 건드리지 않는다.
                     if faces_user {
-                        let who = self
-                            .pane_character_if_known(id)
-                            .unwrap_or_else(|| "pane".to_string());
-                        let looking = self.window_focused
-                            && self.ws.lock().unwrap().active_pane.as_deref()
-                                == Some(id.as_str());
-                        if !looking {
-                            crate::chrome::notify_desktop("⚠ 승인 필요", &who);
-                        }
+                        // 보고 있는 pane 이라고 삼키지 않는다 — 거노 2026-08-11
+                        // "pane별로 그냥 다오게하자". 프사가 붙어 누구 건지 갈린다.
+                        let ch = self.pane_character_if_known(id);
+                        let who = ch.clone().unwrap_or_else(|| "pane".to_string());
+                        crate::chrome::notify_desktop("⚠ 승인 필요", &who, ch.as_deref());
                     }
                     changed = true;
                 }
