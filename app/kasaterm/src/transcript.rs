@@ -117,14 +117,28 @@ fn looks_like_codex(tail: &str) -> bool {
     })
 }
 
+/// `item.content[]` 의 텍스트 조각을 잇는다.
+///
+/// ⚠️ 조각의 `type` 으로 거르지 마라 — **대소문자가 갈린다**(실측 2026-08-11:
+/// `UserMessage` 는 `"text"`, `AgentMessage` 는 `"Text"`). `text` 필드가 있는
+/// 조각을 그대로 잇는 편이 스키마가 또 흔들려도 버틴다.
+fn item_text(it: &serde_json::Map<String, serde_json::Value>) -> String {
+    let Some(arr) = it.get("content").and_then(|c| c.as_array()) else { return String::new() };
+    arr.iter()
+        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// codex 롤아웃 로그(`~/.codex/sessions/**/rollout-*.jsonl`) → board 한 줄.
 ///
-/// 스키마는 거노 머신에서 직접 재서 매핑했다(2026-08-05):
+/// 스키마는 거노 머신에서 직접 재서 매핑했다(2026-08-05, 발화는 2026-08-11 재측):
 /// - `session_meta` → `cwd` (여기 `context_window` 는 숫자가 아니라 `{window_id}` 다)
 /// - `turn_context` → `model`(턴마다 실려 최신이 이긴다)
 /// - `event_msg/token_count` → `info.total_token_usage{input,cached_input,cache_write,output}`
 ///   + `info.model_context_window`(실측 258400) — 창 크기의 유일한 실값
-/// - `event_msg/user_message` → 마지막 프롬프트, `event_msg/agent_message` → 마지막 응답
+/// - `event_msg/item_completed` → `item.type` 이 `UserMessage`/`AgentMessage` 인 것이
+///   마지막 프롬프트/응답. 옛 로그의 `event_msg/user_message`·`agent_message` 도 받는다.
 ///
 /// **비용은 0 으로 둔다.** 로그에 단가도 금액도 없다. claude 쪽 `turn_cost` 처럼
 /// 단가표를 지어 넣으면 board 에 *틀린 숫자*가 뜬다 — 빈칸이 거짓 금액보다 낫다.
@@ -164,10 +178,26 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                 // `token_count.info.model_context_window`(실측 258400).
             }
             ("event_msg", "user_message") if last_prompt.is_empty() => {
-                last_prompt = get_str(p, "message");
+                last_prompt = clip(&get_str(p, "message"), 100);
             }
             ("event_msg", "agent_message") if last_reply.is_empty() => {
-                last_reply = get_str(p, "message");
+                last_reply = clip(&get_str(p, "message"), 120);
+            }
+            // 발화의 새 자리(2026-08-11 실측). 위 두 갈래는 그날 로그에 **한 줄도
+            // 없었다** — codex 가 `item_completed` 로 옮겼고, board 의 프롬프트·응답
+            // 칸이 그동안 통째로 비어 있었다. 옛 갈래는 지우지 않는다: 이어가는
+            // 예전 대화 로그는 여전히 그 모양이다.
+            ("event_msg", "item_completed") => {
+                let Some(it) = p.get("item").and_then(|i| i.as_object()) else { continue };
+                match it.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "UserMessage" if last_prompt.is_empty() => {
+                        last_prompt = clip(&item_text(it), 100);
+                    }
+                    "AgentMessage" if last_reply.is_empty() => {
+                        last_reply = clip(&item_text(it), 120);
+                    }
+                    _ => {}
+                }
             }
             ("event_msg", "token_count") => {
                 if let Some(rl) = p.get("rate_limits").and_then(|r| r.as_object()) {
@@ -859,6 +889,34 @@ mod codex_tests {
         assert_eq!(a.cwd, "/repo");
         assert_eq!(a.last_prompt, "이거 해줘");
         assert_eq!(a.last_reply, "했습니다");
+    }
+
+    /// 새 스키마(2026-08-11 실물 로그). 옛 갈래만 보던 동안 board 의 프롬프트·응답
+    /// 칸이 **통째로 비어 있었다** — 조용히 비는 회귀라 아무도 못 알아챈다.
+    #[test]
+    fn 발화가_item_completed_로_옮겨간_뒤에도_읽는다() {
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"그래","text_elements":[]}]}}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"msg_1","phase":"final_answer","content":[{"type":"Text","text":"연동을\n붙였어요"}]}}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.last_prompt, "그래");
+        // 조각 `type` 이 `text`/`Text` 로 갈리므로 그걸로 걸렀다면 한쪽이 빈다.
+        // 줄바꿈은 board 한 줄에 못 들어가니 clip 이 공백으로 편다.
+        assert_eq!(a.last_reply, "연동을 붙였어요");
+    }
+
+    /// codex 의 답변은 변경 목록째 실려 와 길다 — board 한 줄에 들어가려면 잘려야 한다.
+    #[test]
+    fn 긴_발화는_board_폭으로_자른다() {
+        let long = "가".repeat(300);
+        let tail = format!(
+            r#"{{"timestamp":"t","type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"AgentMessage","content":[{{"type":"Text","text":"{long}"}}]}}}}}}"#
+        );
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.last_reply.chars().count(), 121, "120자 + 말줄임");
+        assert!(a.last_reply.ends_with('…'));
     }
 
     #[test]
