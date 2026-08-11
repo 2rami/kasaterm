@@ -892,6 +892,8 @@ mod tests {
                 id: "surf-1".into(),
                 workspace_id: "ws-1".into(),
                 title: None,
+                cwd: None,
+                character: None,
             }])
         }
         fn focus_surface(&self, _surface_id: &str) -> anyhow::Result<()> {
@@ -910,6 +912,8 @@ mod tests {
                 id: "surf-2".into(),
                 workspace_id: "ws-1".into(),
                 title: None,
+                cwd: None,
+                character: None,
             })
         }
         fn send_text(&self, surface: Option<&str>, text: &str) -> anyhow::Result<()> {
