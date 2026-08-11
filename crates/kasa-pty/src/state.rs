@@ -1252,18 +1252,16 @@ fn spawn_reader_thread(
             // skip the normalize entirely; NFC is a no-op there but the
             // .nfc() iterator + String alloc still cost ~10us per read in
             // a hot loop. ASCII fast-path keeps the bytes borrowed.
-            let raw_str = utf8_buf.process(&buf[..n]);
-            let (nfc_holder, processed_bytes): (Option<String>, &[u8]) =
-                if raw_str.is_ascii() {
-                    (None, raw_str.as_bytes())
-                } else {
-                    let s: String = raw_str.nfc().collect();
-                    (Some(s), &[])
-                };
-            let processed_bytes: &[u8] = match &nfc_holder {
-                Some(s) => s.as_bytes(),
-                None => processed_bytes,
+            let batch = utf8_buf.process(&buf[..n]);
+            // NFC 는 배치가 **온전한 UTF-8 일 때만** 돌린다. 깨진 바이트가 섞여 있으면
+            // 정규화를 건너뛰고 원본을 그대로 파서에 넘긴다 — 버리지 않는 것이 핵심이다.
+            let nfc_holder: Option<String> = if batch.is_ascii() {
+                None
+            } else {
+                std::str::from_utf8(&batch).ok().map(|s| s.nfc().collect())
             };
+            let processed_bytes: &[u8] =
+                nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
             // Sniff for iTerm OSC 1337 inline images / kitty graphics. Both
             // scans walk the byte slice, so we cheaply prefix-check first —
             // most reads have no `\x1b]1337` / `\x1b_G` and we skip the
@@ -1428,15 +1426,27 @@ impl Utf8Buffer {
         Self { leftover: Vec::new() }
     }
 
-    fn process(&mut self, data: &[u8]) -> String {
+    /// 끝에 걸린 **잘린 코드포인트만** 남기고 나머지는 바이트 그대로 넘긴다.
+    ///
+    /// ⚠️깨진 바이트를 버리지 않는 것이 이 함수의 계약이다. 옛 구현은 마지막
+    /// 유효 시퀀스까지를 통째로 `from_utf8` 해 보고 실패하면 빈 문자열을 돌려주면서
+    /// 그 배치를 **전부** 버렸다. agy(antigravity CLI)가 SGR 이스케이프 사이에 한글
+    /// 코드포인트를 끊어 쓰는데(`\xeb\x94` 다음에 바로 `\x1b[`), 그 바이트 하나 때문에
+    /// read 한 번이 통째로 증발해 화면에서 프레임이 통으로 빠졌다(2026-08-11 확정).
+    /// 깨진 바이트는 VT 파서가 U+FFFD 로 알아서 처리하므로 그냥 흘려보내면 된다.
+    fn process(&mut self, data: &[u8]) -> Vec<u8> {
         self.leftover.extend_from_slice(data);
-        let mut valid_up_to = 0;
-        let mut i = 0;
-        while i < self.leftover.len() {
+        let n = self.leftover.len();
+        let mut cut = n;
+        // 잘린 시퀀스는 뒤 3바이트 안에 있다(UTF-8 최대 4바이트). 이어지는 바이트를
+        // 거슬러 올라가 선두 바이트를 찾고, 길이가 모자라면 거기서 끊어 보류한다.
+        for back in 1..=3.min(n) {
+            let i = n - back;
             let b = self.leftover[i];
-            let width = if b & 0x80 == 0 {
-                1
-            } else if b & 0xe0 == 0xc0 {
+            if b & 0xc0 == 0x80 {
+                continue;
+            }
+            let width = if b & 0xe0 == 0xc0 {
                 2
             } else if b & 0xf0 == 0xe0 {
                 3
@@ -1445,24 +1455,14 @@ impl Utf8Buffer {
             } else {
                 1
             };
-            if i + width <= self.leftover.len() {
-                if std::str::from_utf8(&self.leftover[i..i + width]).is_ok() {
-                    valid_up_to = i + width;
-                }
-                i += width;
-            } else {
-                break;
+            if width > 1 && i + width > n {
+                cut = i;
             }
+            break;
         }
-        if valid_up_to > 0 {
-            let s = std::str::from_utf8(&self.leftover[..valid_up_to])
-                .unwrap_or("")
-                .to_string();
-            self.leftover.drain(..valid_up_to);
-            s
-        } else {
-            String::new()
-        }
+        let out = self.leftover[..cut].to_vec();
+        self.leftover.drain(..cut);
+        out
     }
 }
 
@@ -3104,5 +3104,189 @@ mod snapshot_tap_tests {
             checked >= 12,
             "경쟁 상태를 충분히 못 만들었다 ({checked}회) — 검증이 무의미하다"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_fidelity_tests {
+    use super::*;
+
+    /// 픽스처를 뜬 pane 의 실제 크기. 폭이 어긋나면 재생 자체가 무의미해진다
+    /// (넓은 화면에서 뜬 녹음을 좁은 화면에 틀면 divider 가 줄바꿈돼 겹친다).
+    fn fixture_size() -> (u16, u16) {
+        let g = |k: &str, d: u16| {
+            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+        };
+        (g("KASATERM_SNAPSHOT_COLS", 363), g("KASATERM_SNAPSHOT_ROWS", 39))
+    }
+
+    /// 우리 `snapshot()` 이 alacritty 그리드를 그대로 옮기는가.
+    ///
+    /// agy(antigravity CLI) 화면이 kasaterm 에서만 뒤엉키는 걸 쫓다 여기까지 왔다
+    /// (2026-08-11). 같은 바이트를 alacritty Term 에 먹이면 그리드는 **정확한데**
+    /// pane 에 보이는 건 두 줄이 한 줄로 뭉쳐 있었다 — 파서가 아니라 그 위 변환층
+    /// 이 범인이라는 뜻이다. 이 테스트가 그 경계를 못박는다.
+    ///
+    /// 입력은 `KASATERM_SNAPSHOT_FIXTURE` 로 준 실제 녹음 파일. 없으면 건너뛴다
+    /// (녹음은 크고 사람 대화가 들어 있어 레포에 넣지 않는다).
+    #[test]
+    fn snapshot_rows_match_the_alacritty_grid() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        let (cols, rows) = fixture_size();
+
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        proc.advance(&mut term, &raw);
+
+        // 기준 = alacritty 그리드에서 직접 읽은 줄.
+        let truth: Vec<String> = {
+            let g = term.grid();
+            (0..rows as usize)
+                .map(|r| {
+                    let line = alacritty_terminal::index::Line(r as i32);
+                    (0..cols as usize)
+                        .map(|c| g[line][alacritty_terminal::index::Column(c)].c)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect()
+        };
+
+        let upd = snapshot(&mut term, cols, rows, "%t", &Arc::new(Mutex::new(None)), true);
+        let mut got = vec![String::new(); rows as usize];
+        for (r, row) in &upd.dirty {
+            got[*r as usize] =
+                row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+        }
+
+        check(&truth, &got, "한 번에 먹였을 때");
+    }
+
+    /// 같은 바이트를 **live 처럼 잘게 나눠** 먹이고 damage 기반 스냅샷을 누적한다.
+    ///
+    /// 실제 reader 가 하는 그대로다 — 읽을 때마다 `advance` → `scroll_display(Bottom)`
+    /// → `snapshot(force_full=false)` → 돌아온 dirty 행만 화면에 반영. 한 번에 먹이면
+    /// 멀쩡한데 이렇게 하면 어긋난다면, 범인은 파서도 스냅샷도 아니고 **부분갱신 누적**이다.
+    #[test]
+    fn chunked_damage_snapshots_still_match_the_grid() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        // ★높이를 좁혀 **스크롤이 일어나게** 한다. live pane 은 앞선 셸 출력 때문에
+        // agy 화면이 늘 스크롤 상태고, damage 는 뷰포트 기준이라 스크롤이 섞이면
+        // "안 damaged 된 행"이 실은 다른 내용을 가리키게 된다.
+        let (cols, base_rows) = fixture_size();
+        for rows in [base_rows, base_rows / 2, 12] {
+        for chunk in [65536usize, 4096, 1024, 512, 128] {
+            let listener = PtyEventForwarder {
+                writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+                size: Arc::new(Mutex::new((cols, rows))),
+                last_title: Arc::new(Mutex::new(None)),
+            };
+            let mut term = make_term(cols, rows, listener);
+            let mut proc: Processor<StdSyncHandler> = Processor::new();
+            let title = Arc::new(Mutex::new(None));
+            let mut mirror = vec![String::new(); rows as usize];
+            // ★reader 와 **똑같이** NFC 정규화를 거쳐 넘긴다. 이걸 빼면 실제 경로가
+            // 아니다 — 비-ASCII 청크만 정규화되므로 한글이 든 스트림에서만 갈린다.
+            let mut u8buf = Utf8Buffer::new();
+            for part in raw.chunks(chunk) {
+                use unicode_normalization::UnicodeNormalization;
+                let batch = u8buf.process(part);
+                let nfc_holder: Option<String> = if batch.is_ascii() {
+                    None
+                } else {
+                    std::str::from_utf8(&batch).ok().map(|s| s.nfc().collect())
+                };
+                let fed: &[u8] =
+                    nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
+                proc.advance(&mut term, fed);
+                if proc.sync_bytes_count() > 0 {
+                    continue; // reader 와 같은 규칙
+                }
+                term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                let upd = snapshot(&mut term, cols, rows, "%t", &title, false);
+                for (r, row) in &upd.dirty {
+                    mirror[*r as usize] =
+                        row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+                }
+            }
+            let truth = grid_rows(&term, cols, rows);
+            check(&truth, &mirror, &format!("rows={rows} chunk={chunk}"));
+        }
+        }
+    }
+
+    /// `Utf8Buffer` 가 바이트를 잃지 않는가. 청크 경계에서 갈라 넣어도 이어붙인
+    /// 결과는 원본과 **바이트 단위로 같아야** 한다.
+    #[test]
+    fn utf8_buffer_never_loses_bytes() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        for chunk in [raw.len(), 4096, 1024, 128, 7, 1] {
+            let mut b = Utf8Buffer::new();
+            let mut out: Vec<u8> = Vec::new();
+            for part in raw.chunks(chunk.max(1)) {
+                out.extend_from_slice(&b.process(part));
+            }
+            assert_eq!(
+                out.len(),
+                raw.len(),
+                "chunk={chunk}: {}바이트가 사라졌다",
+                raw.len() as i64 - out.len() as i64
+            );
+            assert!(out == raw, "chunk={chunk}: 내용이 달라졌다");
+        }
+    }
+
+    /// agy 가 실제로 보낸 모양: 한글 코드포인트를 SGR 이스케이프 사이에서 끊는다.
+    /// 옛 구현은 이 배치를 통째로 버렸다 — 화면에서 프레임이 통으로 사라진 원인.
+    #[test]
+    fn a_truncated_codepoint_mid_batch_never_eats_the_batch() {
+        let batch = b"\x1b[38;2;1;2;3m\xeb\x94\x1b[m\xed\x95\x9c \xec\xa4\x84\r\n";
+        let mut b = Utf8Buffer::new();
+        let out = b.process(batch);
+        assert_eq!(out, batch, "깨진 바이트 하나에 배치가 통째로 사라졌다");
+    }
+
+    /// 잘린 코드포인트는 **다음 read 까지만** 보류하고, 이어지면 그대로 흘려보낸다.
+    #[test]
+    fn a_codepoint_split_across_reads_is_rejoined() {
+        let mut b = Utf8Buffer::new();
+        assert_eq!(b.process(b"ab\xed\x95"), b"ab", "잘린 앞부분을 안 붙들었다");
+        assert_eq!(b.process(b"\x9ccd"), "한cd".as_bytes(), "이어붙이지 못했다");
+    }
+
+    fn grid_rows(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<String> {
+        let g = term.grid();
+        (0..rows as usize)
+            .map(|r| {
+                let line = alacritty_terminal::index::Line(r as i32);
+                (0..cols as usize)
+                    .map(|c| g[line][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn check(truth: &[String], got: &[String], what: &str) {
+        let rows = truth.len();
+        let mut bad = Vec::new();
+        for r in 0..rows {
+            // 넓은 글자 뒷칸을 어느 쪽이 어떻게 채우든 **글자 자체**는 같아야 한다.
+            let norm = |s: &str| s.replace('\0', "").replace(' ', "");
+            if norm(&truth[r]) != norm(&got[r]) {
+                bad.push(format!("  행 {r}\n    그리드: {:?}\n    스냅샷: {:?}", truth[r], got[r]));
+            }
+        }
+        assert!(bad.is_empty(), "[{what}] 그리드와 스냅샷이 어긋난다:\n{}", bad.join("\n"));
     }
 }
