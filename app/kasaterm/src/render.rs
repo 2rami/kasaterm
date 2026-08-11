@@ -243,6 +243,14 @@ impl App {
     /// 원점, 안쪽 여백 PANE_INNER 만 빼고 pane 상자 전체). 헤더 띠는 폐기돼(ghostty식,
     /// `layout.rs` 히트테스트 참조) 세로 보정이 없다. 프레임버퍼는 물리 픽셀이라
     /// 마지막에 scale 을 곱한다 — 안 곱하면 HiDPI 에서 좌상단 1/4 만 잘린다.
+    ///
+    /// ★ `pane` 이 **빈 문자열이면 창 전체**다. 프레임버퍼에는 사이드바·탭바·우측 칼럼이
+    /// 이미 다 그려져 있고 pane 캡처가 위 오프셋으로 **일부러 잘라내던 것**이라, 크롭을
+    /// 안 세우면(`capture_crop = None`) 그대로 창 한 장이 나온다. 에이전트가 제 UI 를
+    /// 보려면 이 길이 필요하다 — pane 만 찍혀서는 사이드바가 어떻게 보이는지 알 수 없다.
+    ///
+    /// ⚠️ **메인 창만이다.** 별도 창으로 꺼낸 방(`auxwin`)은 자기 `GpuRenderer` 를 따로
+    /// 들고 있어 이 서피스에 없다.
     pub(crate) fn arm_pane_capture(
         &mut self,
         pane: &str,
@@ -260,35 +268,43 @@ impl App {
             let _ = reply.send(Err("another capture is already armed; retry".into()));
             return;
         }
-        let (gcols, grows) = self.window_cells();
-        let Some((_, cx, cy, cw, ch)) = self
-            .effective_leaf_rects(gcols, grows)
-            .into_iter()
-            .find(|(id, ..)| id == pane)
-        else {
-            // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
-            // 답해야 부른 쪽이 줌을 풀 생각을 한다.
-            let zoomed = self.zoomed_pane.is_some();
-            let _ = reply.send(Err(if zoomed {
-                format!("{pane} is hidden behind a zoomed pane")
-            } else {
-                format!("no such pane: {pane}")
-            }));
-            return;
+        // 창 전체는 크롭을 안 세운다 — 아래 pane 갈래가 잘라내던 것을 안 자르는 것뿐이다.
+        let crop = if pane.is_empty() {
+            None
+        } else {
+            let (gcols, grows) = self.window_cells();
+            let Some((_, cx, cy, cw, ch)) = self
+                .effective_leaf_rects(gcols, grows)
+                .into_iter()
+                .find(|(id, ..)| id == pane)
+            else {
+                // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
+                // 답해야 부른 쪽이 줌을 풀 생각을 한다.
+                let zoomed = self.zoomed_pane.is_some();
+                let _ = reply.send(Err(if zoomed {
+                    format!("{pane} is hidden behind a zoomed pane")
+                } else {
+                    format!("no such pane: {pane}")
+                }));
+                return;
+            };
+            let s = self.effective_scale();
+            let px = (WINDOW_PADDING + self.effective_sidebar_w() + cx as f32 * self.cell.w) * s;
+            let py = (TITLE_HEIGHT + cy as f32 * self.cell.h) * s;
+            let pw = (cw as f32 * self.cell.w * s).round().max(1.0) as u32;
+            let ph = (ch as f32 * self.cell.h * s).round().max(1.0) as u32;
+            Some((px.max(0.0) as u32, py.max(0.0) as u32, pw, ph))
         };
-        let s = self.effective_scale();
-        let px = (WINDOW_PADDING + self.effective_sidebar_w() + cx as f32 * self.cell.w) * s;
-        let py = (TITLE_HEIGHT + cy as f32 * self.cell.h) * s;
-        let pw = (cw as f32 * self.cell.w * s).round().max(1.0) as u32;
-        let ph = (ch as f32 * self.cell.h * s).round().max(1.0) as u32;
         let path = path.unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join(format!("kasaterm-capture-{}.png", pane.trim_start_matches('%')))
-                .to_string_lossy()
-                .into_owned()
+            let name = if pane.is_empty() {
+                "kasaterm-window.png".to_string()
+            } else {
+                format!("kasaterm-capture-{}.png", pane.trim_start_matches('%'))
+            };
+            std::env::temp_dir().join(name).to_string_lossy().into_owned()
         });
         if let Some(g) = self.gpu.as_mut() {
-            g.capture_crop = Some((px.max(0.0) as u32, py.max(0.0) as u32, pw, ph));
+            g.capture_crop = crop;
             g.capture_max_w = max_w;
             g.capture_next = Some(path.clone());
         }
