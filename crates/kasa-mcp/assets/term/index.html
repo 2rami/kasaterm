@@ -30,11 +30,18 @@
   .xterm-viewport::-webkit-scrollbar-thumb { background: #2c3543; border-radius: 5px; }
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
 
+  /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다 — 11px 회색으로 흘리면
+     격자가 작아진 화면에서 그대로 묻힌다. kasaterm pane 헤더처럼 칩으로 띄운다. */
   #status {
-    position: absolute; right: 12px; top: 8px; z-index: 5;
-    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #6b7683; pointer-events: none;
+    position: absolute; right: 10px; top: 6px; z-index: 5;
+    font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9aa6b4; background: rgba(23, 28, 36, .88);
+    border: 1px solid #2a323e; border-radius: 6px;
+    padding: 5px 8px; pointer-events: none; max-width: 55vw;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  #status:empty { display: none; }
+  #status.waiting { color: #ffd479; border-color: #5a4a24; }
 
   /* 하단 바 — 소프트 키보드가 올라오면 visualViewport 로 그 위에 얹는다.
      transform 으로만 움직인다(§④): position 을 바꾸면 터미널이 뛴다. */
@@ -72,7 +79,13 @@
 <script src="/term/xterm.js"></script>
 <script>
 (() => {
-  const q = new URLSearchParams(location.search);
+  // pane id 는 `%151` 처럼 생겼는데, URLSearchParams 는 그 `%15` 를 퍼센트 인코딩으로
+  // 읽어 0x15 로 디코딩한다 — 남는 건 제어문자+`1` 이라 목록 매칭도 칩도 조용히 깨진다.
+  // (오류가 안 나서 「이름이 원래 안 뜨나 보다」로 보인다.) raw 쿼리에서 직접 꺼낸다.
+  const paneId = (() => {
+    const hit = location.search.slice(1).split('&').find((s) => s.startsWith('pane='));
+    return hit ? hit.slice(5) : '';
+  })();
   const statusEl = document.getElementById('status');
   const bar = document.getElementById('bar');
   const panesEl = document.getElementById('panes');
@@ -118,7 +131,8 @@
   };
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/term/ws?${q.toString()}`);
+  // 쿼리를 재조립하지 않고 그대로 넘긴다 — 여기서도 `%` 가 한 번 더 깎일 자리다.
+  const ws = new WebSocket(`${proto}://${location.host}/term/ws${location.search}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onmessage = (e) => {
@@ -131,7 +145,9 @@
         if (!orig) orig = { cols: m.cols, rows: m.rows };
         term.resize(m.cols, m.rows);
         fitFontToCols();
-        statusEl.textContent = mirror ? (q.get('pane') || '') : '';
+        // 이름은 /term/panes 가 오면 덮어쓴다. 그 전까지는 id 라도 띄워 둔다.
+        if (mirror && !statusEl.textContent) statusEl.textContent = paneId;
+        if (!mirror) statusEl.textContent = '';
         // 새 셸은 이미 우리 크기로 뜨므로 맞출 것이 없다.
         if (!mirror) fitBtn.style.display = 'none';
       }
@@ -178,7 +194,7 @@
   }
 
   fetch('/term/panes').then((r) => r.json()).then((list) => {
-    const here = q.get('pane') || '';
+    const here = paneId;
     // 답을 기다리는 pane 을 위로 올린다 — 폰을 여는 이유가 대개 그것이다.
     // sort 는 stable 이라 나머지 순서는 서버가 준 그대로 남는다.
     const rank = (p) => (p.status === 'waiting' ? 0 : 1);
@@ -191,8 +207,9 @@
       o.textContent = p.status === 'waiting' ? `● ${label}` : label;
       if (p.id === here) {
         o.selected = true;
-        // 우상단 칩도 id 대신 이름으로. 제목까지 넣으면 좁은 폭에서 넘친다.
-        if (p.name) statusEl.textContent = p.name;
+        // 우상단 칩도 id 대신 이름으로. 이름을 모르는 pane 은 id 라도 남긴다.
+        statusEl.textContent = p.name || p.id;
+        statusEl.classList.toggle('waiting', p.status === 'waiting');
       }
       panesEl.append(o);
     }
