@@ -2697,8 +2697,21 @@ impl App {
                 })
                 .unwrap_or_default()
         });
-        for id in ids {
-            self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
+        for spec in ids {
+            // `%2:blocked` 처럼 상태를 붙일 수 있고, `*` 는 활성 pane 이다.
+            //
+            // 어휘가 둘인데(`waiting`/`blocked`) **프로덕션에서 실제로 들어오는 건
+            // `blocked` 뿐**이라(화면 감지 경로가 그것만 쓴다), waiting 만 심을 수
+            // 있으면 정작 실제 경로를 한 번도 못 본다 — 표시 여섯 자리가 waiting 만
+            // 보다가 승인 대기가 통째로 안 그려진 걸 오래 몰랐던 이유다(2026-08-11).
+            let (id, st) = spec.split_once(':').unwrap_or((spec.as_str(), "waiting"));
+            let target = if id == "*" {
+                self.ws.lock().unwrap().active_pane.clone()
+            } else {
+                Some(id.to_string())
+            };
+            let Some(target) = target else { continue };
+            self.pane_activity.entry(target).or_default().status = st.into();
         }
     }
     /// Headless 학생 오버레이 repro: `KASATERM_AUTOSTUDENT_MS`.
