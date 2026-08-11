@@ -5293,7 +5293,10 @@ impl ApplicationHandler<UserEvent> for App {
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
             // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
-            || self.pane_activity.values().any(|a| a.status == "waiting")
+            || self
+                .pane_activity
+                .values()
+                .any(|a| crate::chrome::status_needs_you(&a.status))
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
             // 테마 전환 디졸브가 걷히는 동안.

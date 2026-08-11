@@ -111,7 +111,9 @@ impl App {
             Some(c) => format!("{c} · {title}"),
             None => title.to_string(),
         };
-        notify_desktop(&titled, body, who.as_deref());
+        // 완료는 열쇠를 안 준다 — 턴마다 정당하게 떠야 하고, 학생이 여럿이면 서로
+        // 다른 pane 의 완료가 같은 창 안에 겹치는 게 정상이다.
+        notify_desktop(&titled, body, who.as_deref(), None);
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
@@ -154,7 +156,15 @@ impl App {
         } else {
             format!("{who} — {reason}")
         };
-        notify_desktop("⚠ 권한 필요", &body, character.as_deref());
+        // 화면 감지 경로(`input.rs` 의 `⚠ 승인 필요`)와 **같은 열쇠**를 쓴다 — 승인
+        // 프롬프트 하나에 배너가 둘 나가던 것을 여기서 하나로 만든다. 훅이 먼저 오면
+        // reason 이 실린 이쪽이 이기고, 화면 감지가 뒤따라 와도 조용히 접힌다.
+        notify_desktop(
+            "⚠ 권한 필요",
+            &body,
+            character.as_deref(),
+            Some(&format!("approval:{surface_id}")),
+        );
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
@@ -232,7 +242,7 @@ impl App {
     /// 대기는 내가 손대야 풀리므로, 둘이 겹치면 급한 쪽을 보여야 한다.
     pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
         let st = self.pane_activity.get(id);
-        if st.is_some_and(|a| a.status == "waiting") {
+        if st.is_some_and(|a| status_needs_you(&a.status)) {
             theme::attention()
         } else if self.notify_flash_factor(id).is_some() {
             theme::success()
@@ -254,12 +264,16 @@ impl App {
     /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
     /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
     pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
-        self.pane_activity.get(id).is_some_and(|a| {
-            !a.status.is_empty()
-                && a.status != "idle"
-                && a.status != "waiting"
-                && a.status != "blocked"
-        })
+        self.pane_activity
+            .get(id)
+            .is_some_and(|a| !a.status.is_empty() && a.status != "idle" && !status_needs_you(&a.status))
+    }
+
+    /// 그 pane 이 **내 손을 기다리는 중**인가 — 승인 프롬프트든 질문이든.
+    pub(crate) fn pane_needs_you(&self, id: &str) -> bool {
+        self.pane_activity
+            .get(id)
+            .is_some_and(|a| status_needs_you(&a.status))
     }
 
     pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {
@@ -2545,17 +2559,79 @@ fn doc_name(path: &str) -> String {
         .to_string()
 }
 
+/// 그 상태가 **사람 손을 기다리는 중**인가.
+///
+/// 어휘가 둘로 갈려 있다: 화면 감지 경로는 `blocked` 을, 훅·board 경로는 `waiting` 을
+/// 쓴다. 표시하는 쪽에서 둘을 가릴 이유가 없는데 **여섯 자리가 전부 `waiting` 만 보고
+/// 있었고**, 정작 실제로 들어오는 값은 `blocked` 뿐이라(`route_approval_prompts` 가
+/// `faces_user` 를 true 로 고정) 승인 대기가 화면 어디에도 안 그려졌다 — 핑크 테두리도
+/// 사이드바 깜빡임도 방 탭 점도 전부 죽어 있었다(2026-08-11 조사).
+///
+/// 판정을 여기 한 벌로 둔다. 같은 조건을 여섯 군데 적어 두면 한쪽만 고쳐진다.
+pub(crate) fn status_needs_you(status: &str) -> bool {
+    status == "waiting" || status == "blocked"
+}
+
+/// 같은 열쇠의 알림은 이 창 안에서 한 번만 나간다.
+const NOTIFY_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// 이 열쇠로 지금 알려도 되나 — 처음이면 true 를 주고 시각을 적어 둔다.
+///
+/// 승인 프롬프트 하나에 배너가 **두 번** 나가고 있었다: 훅 경로(`⚠ 권한 필요`)와 화면
+/// 감지 경로(`⚠ 승인 필요`)가 서로를 모른 채 각자 쏜다. 두 경로를 합치는 대신 발사구에
+/// 게이트를 두면 앞으로 경로가 늘어도 자동으로 걸린다. pane 이 여섯이면 시끄러움은
+/// 배수로 늘고, 시끄러우면 사람은 알림을 꺼 버려 앞의 모든 표시가 같이 죽는다.
+///
+/// 열쇠는 **호출부가 정한다** — 완료 알림처럼 매번 떠야 하는 것은 열쇠를 안 준다.
+/// 상태는 함수-로컬 static 이다(`struct App` 필드는 다른 pane 작업과 충돌한다).
+fn notify_dedup_passes(key: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static SEEN: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let Ok(mut g) = SEEN.get_or_init(Mutex::default).lock() else {
+        return true; // 잠금이 깨졌으면 막지 않는다 — 알림을 삼키는 쪽이 더 나쁘다
+    };
+    let now = Instant::now();
+    // 지나간 것은 그때그때 치운다 — 맵이 살아 있는 pane 수만큼만 남는다.
+    g.retain(|_, t| now.duration_since(*t) < NOTIFY_DEDUP_WINDOW);
+    if g.contains_key(key) {
+        return false;
+    }
+    g.insert(key.to_string(), now);
+    true
+}
+
 /// Raise a macOS desktop notification. Inside the signed `.app` bundle we use
 /// `UNUserNotificationCenter` so the alert carries kasaterm's own app icon (and
 /// gets the native sound/click affordances). The bare `cargo run` binary has no
 /// bundle identifier and can't obtain notification authorization, so there we
 /// fall back to `osascript` — which shows the Script Editor icon (dev-only).
-#[cfg(target_os = "macos")]
-pub(crate) fn notify_desktop(title: &str, body: &str, character: Option<&str>) {
-    if is_bundled() {
-        notify_native(title, body, character);
-    } else {
-        notify_osascript(title, body);
+///
+/// `dedup` 을 주면 그 열쇠로 8초 게이트를 탄다(같은 일에 두 경로가 쏘는 경우).
+///
+/// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
+/// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
+pub(crate) fn notify_desktop(
+    title: &str,
+    body: &str,
+    character: Option<&str>,
+    dedup: Option<&str>,
+) {
+    if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if is_bundled() {
+            notify_native(title, body, character);
+        } else {
+            notify_osascript(title, body);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, body, character);
     }
 }
 
@@ -2632,7 +2708,7 @@ fn notify_native(title: &str, body: &str, character: Option<&str>) {
     use objc2_foundation::{NSArray, NSString, NSURL};
     use objc2_user_notifications::{
         UNMutableNotificationContent, UNNotificationAttachment, UNNotificationRequest,
-        UNUserNotificationCenter,
+        UNNotificationSound, UNUserNotificationCenter,
     };
     ensure_notification_authorization();
     // 거부가 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서 돌린다.
@@ -2646,6 +2722,10 @@ fn notify_native(title: &str, body: &str, character: Option<&str>) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
+    // 소리를 붙이지 않으면 **무음으로 배달된다**. 권한은 처음부터 `Alert | Sound` 로
+    // 받아 두고 정작 콘텐츠에 안 달아, 창을 뒤로 물린 동안 학생이 끝나도 알 길이
+    // dock 배지뿐이었다 — 그건 "봐야 보이는" 신호다(2026-08-11 조사).
+    content.setSound(Some(&UNNotificationSound::defaultSound()));
     // 학생 프사를 오른쪽 썸네일로 — 알림이 여럿 겹쳐도 누구 것인지 그림으로 갈린다.
     // **왼쪽 작은 아이콘은 번들 아이콘 고정**이라 여기서 못 바꾼다(그건 앱 아이콘).
     if let Some(p) = character.and_then(student_profile_file) {
@@ -2688,9 +2768,6 @@ fn notify_osascript(title: &str, body: &str) {
         .arg(script)
         .spawn();
 }
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn notify_desktop(_title: &str, _body: &str, _character: Option<&str>) {}
 
 /// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
 #[cfg(target_os = "macos")]
@@ -2841,5 +2918,26 @@ mod room_rename_tests {
     #[test]
     fn 직전_클릭이_없으면_편집이_아니다() {
         assert!(!starts_room_rename(None, 1, 1, Instant::now()));
+    }
+
+    /// 대기 어휘가 둘(`waiting`/`blocked`)인데 표시 여섯 자리가 앞의 것만 보고 있었고,
+    /// 정작 화면 감지는 뒤의 것만 쓴다 — 그래서 승인 대기가 아무 데도 안 그려졌다.
+    #[test]
+    fn 대기_판정은_두_어휘를_모두_받는다() {
+        assert!(status_needs_you("waiting"));
+        assert!(status_needs_you("blocked"));
+        assert!(!status_needs_you("working"));
+        assert!(!status_needs_you("idle"));
+        assert!(!status_needs_you(""));
+    }
+
+    /// 같은 승인에 훅과 화면 감지가 각각 쏘던 것을 발사구에서 막는다.
+    #[test]
+    fn 같은_열쇠는_한_번만_통과한다() {
+        // 열쇠는 테스트마다 고유해야 한다 — 게이트 상태가 프로세스 전역이라.
+        assert!(notify_dedup_passes("test:dedup-alpha"));
+        assert!(!notify_dedup_passes("test:dedup-alpha"));
+        // 다른 열쇠는 서로를 막지 않는다.
+        assert!(notify_dedup_passes("test:dedup-beta"));
     }
 }

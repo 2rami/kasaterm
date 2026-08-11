@@ -2075,10 +2075,7 @@ impl App {
                     .and_then(|p| p.osc_title())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, id, None));
-                let waiting = self
-                    .pane_activity
-                    .get(id)
-                    .is_some_and(|a| a.status == "waiting");
+                let waiting = self.pane_needs_you(id);
                 // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
                 // 부르면 두 신호가 서로를 부정한다.
@@ -2123,7 +2120,7 @@ impl App {
         let sb_wait: Vec<bool> = (0..sb_labels.len())
             .map(|i| {
                 self.window_leaves(i).iter().any(|id| {
-                    self.pane_activity.get(id).is_some_and(|a| a.status == "waiting")
+                    self.pane_needs_you(id)
                 })
             })
             .collect();
@@ -5330,10 +5327,12 @@ impl App {
                     // 포커스 테두리(학생색) 위에 덧그린다 — 지금 보고 있는 pane 이
                     // 물어보고 멈춘 경우, 급한 쪽이 이겨야 한다. border_inset 도
                     // 다시 적어 하단바가 이 테두리를 덮지 않게 한다.
+                    // 메서드(`pane_needs_you`)를 쓰면 `&self` 를 통째로 빌려 렌더 루프의
+                    // 가변 대여와 부딪힌다 — 필드만 집어 자유함수로 판정한다.
                     if self
                         .pane_activity
                         .get(fid)
-                        .is_some_and(|a| a.status == "waiting")
+                        .is_some_and(|a| crate::chrome::status_needs_you(&a.status))
                     {
                         let mut col = theme::attention();
                         col[3] = (90.0 + 165.0 * breathe(anim_phase, 1.1)) as u8;
