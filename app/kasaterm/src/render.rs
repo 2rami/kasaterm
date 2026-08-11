@@ -7267,8 +7267,9 @@ impl App {
 
 /// Clawd 아트가 차지하는 셀 박스 크기 (cols × rows).
 /// diff 의 삭제 줄 수를 적는 빨강. git 칼럼과 커밋 모달이 한 화면에 같이 뜨는데
-/// 둘이 각자 색을 들고 있으면 같은 뜻에 두 가지 빨강이 난다.
-const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
+/// 둘이 각자 색을 들고 있으면 같은 뜻에 두 가지 빨강이 난다. MCP 탭의 지우기 확인도
+/// 같은 이유로 이걸 쓴다 — "없애는 것"이라는 뜻이 같다.
+pub(crate) const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
 
 pub(crate) const CLAWD_COLS: usize = 9;
 pub(crate) const CLAWD_ROWS: usize = 3;

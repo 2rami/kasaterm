@@ -408,6 +408,101 @@ fn set_claude_skill_enabled(home: &std::path::Path, name: &str, on: bool) -> any
     Ok(())
 }
 
+/// 폴더를 휴지통으로 옮긴다. 지우지 않는 이유는 하나다 — 되돌릴 수 있어야 한다.
+///
+/// 스킬 폴더는 손으로 쓴 것일 수도, 다른 곳을 가리키는 심볼릭 링크일 수도 있다(실측:
+/// codex 스킬 5개 중 4개가 링크다). 링크면 링크만 옮겨지므로 원본은 그대로 남는다.
+/// 이름이 겹칠 수 있어 뒤에 시각을 붙인다 — 겹치면 rename 이 조용히 덮는다.
+///
+/// 홈을 인자로 받는 건 테스트 때문이다 — 스스로 찾게 두면 테스트가 돌 때마다 진짜
+/// 휴지통에 항목이 하나씩 쌓이고, macOS 에선 그걸 프로그램이 다시 읽어 치울 수도 없다
+/// (`~/.Trash` 는 Full Disk Access 없이는 목록조차 못 본다).
+#[cfg(target_os = "macos")]
+fn trash(home: &std::path::Path, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let trash = home.join(".Trash");
+    std::fs::create_dir_all(&trash)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("이름이 이상하다"))?;
+    let dest = trash.join(format!("{name}-kasaterm-{stamp}"));
+    std::fs::rename(path, &dest)?;
+    Ok(dest)
+}
+
+/// 휴지통이 없는 곳에선 지우지 않는다 — 되돌릴 수 없는 삭제를 조용히 하느니 실패가 낫다.
+#[cfg(not(target_os = "macos"))]
+fn trash(_home: &std::path::Path, _path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    Err(std::io::Error::other("이 OS 에선 휴지통으로 못 보낸다"))
+}
+
+/// 스킬 폴더를 목록에서 뺀다. 실제로는 휴지통으로 옮기는 것뿐이다.
+fn remove_skill(home: &std::path::Path, harness: &str, name: &str) -> anyhow::Result<String> {
+    // 이름이 경로를 벗어나면 엉뚱한 것을 지운다. 목록에서 온 값이라도 확인한다.
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(anyhow::anyhow!("이름이 이상하다: {name}"));
+    }
+    let dir = match harness {
+        "codex" => home.join(".codex/skills"),
+        _ => home.join(".claude/skills"),
+    }
+    .join(name);
+    // 링크 자체를 봐야 한다 — `exists()` 는 링크를 따라가서, 끊어진 링크를 없는 것으로
+    // 친다. 그러면 목록엔 있는데 지울 수 없는 줄이 된다.
+    if std::fs::symlink_metadata(&dir).is_err() {
+        return Err(anyhow::anyhow!("그 자리에 없다: {}", dir.display()));
+    }
+    let dest = trash(home, &dir)?;
+    Ok(format!(
+        "{name} 휴지통으로 ({})",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    ))
+}
+
+/// codex MCP 서버를 설정에서 뺀다. 주석·줄 순서를 지키려 `toml_edit` 으로 지운다.
+fn remove_codex_mcp(home: &std::path::Path, name: &str) -> anyhow::Result<String> {
+    let path = home.join(".codex/config.toml");
+    let text = std::fs::read_to_string(&path)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>()?;
+    let servers = doc
+        .get_mut("mcp_servers")
+        .and_then(|t| t.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("codex 설정에 mcp_servers 가 없다"))?;
+    if servers.remove(name).is_none() {
+        return Err(anyhow::anyhow!("codex 설정에 {name} 이 없다"));
+    }
+    write_config_atomic(&path, &doc.to_string())?;
+    Ok(format!("{name} 지웠다 — codex"))
+}
+
+/// claude MCP 서버를 뺀다. 우리가 `~/.claude.json` 을 쓰지 않고 CLI 에 맡긴다.
+///
+/// 그 파일은 수 MB 짜리에 도는 세션들이 함께 쓴다(세션 기록·프로젝트 상태가 다 거기
+/// 있다). 우리가 읽고-고쳐-쓰는 사이에 다른 세션이 쓰면 그쪽 기록이 통째로 날아간다.
+/// `claude mcp remove` 는 claude 자신이 제 파일을 제 방식으로 고치는 것이라 그 경합을
+/// 우리가 만들지 않는다. 대신 프로세스를 띄우는 일이라 워커에서 불러야 한다.
+fn remove_claude_mcp(name: &str, scope: &str) -> anyhow::Result<String> {
+    // `-s` 는 어느 자리에서 지울지다. 배지에 보이는 스코프가 그대로 여기로 온다.
+    let s = match scope {
+        "폴더" => "local",
+        "레포" => "project",
+        _ => "user",
+    };
+    let out = std::process::Command::new("claude")
+        .args(["mcp", "remove", name, "-s", s])
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim().lines().next().unwrap_or("이유 미상");
+        return Err(anyhow::anyhow!("{err}"));
+    }
+    Ok(format!("{name} 지웠다 — claude {scope}"))
+}
+
 /// 여기서 껐다 켤 수 있는 조합인가. 넷 중 둘뿐이다:
 ///
 /// - claude MCP — 전역으로 끄는 설정이 없다. 프로젝트별 `disabledMcpServers` 는 있지만
@@ -495,7 +590,67 @@ impl App {
         });
     }
 
-    /// 칼럼 안 클릭 — 새로고침, 그리고 행을 누르면 켜고 끈다.
+    /// 지우기 — 한 번은 확인, 두 번째에 실행. 되돌릴 수 없는 일이라 두 번 누르게
+    /// 한다. 다이얼로그를 띄우지 않는 건 그 순간 목록에서 눈이 떠나기 때문이다.
+    fn mcp_col_delete(&mut self, i: usize) {
+        let Some(row) = self.mcp_col.view.get(i).cloned() else {
+            return;
+        };
+        let armed = self
+            .mcp_col
+            .confirm_delete
+            .is_some_and(|(j, t)| j == i && t.elapsed() < std::time::Duration::from_secs(4));
+        if !armed {
+            self.mcp_col.confirm_delete = Some((i, std::time::Instant::now()));
+            self.set_toast(format!("{} 지울까 — 한 번 더", row.name));
+            return;
+        }
+        self.mcp_col.confirm_delete = None;
+        // claude 서버만 CLI(=프로세스 기동)라 워커로 보낸다. 나머지는 파일 한 번
+        // 고치는 일이라 그 자리에서 끝난다.
+        if row.harness == "claude" && row.kind == RowKind::Mcp {
+            let (notice, snap, rev, busy, cwd) = (
+                self.mcp_col.notice.clone(),
+                self.mcp_col.snap.clone(),
+                self.mcp_col.rev.clone(),
+                self.mcp_col.busy.clone(),
+                self.mcp_col.cwd.clone(),
+            );
+            self.set_toast(format!("{} 지우는 중…", row.name));
+            std::thread::spawn(move || {
+                let msg = match remove_claude_mcp(&row.name, row.scope) {
+                    Ok(m) => m,
+                    Err(e) => format!("⚠ {} 못 지웠다: {e}", row.name),
+                };
+                if let Ok(mut g) = notice.lock() {
+                    *g = Some(msg);
+                }
+                // 지운 뒤의 실상을 바로 싣는다 — 목록이 낡은 채로 남으면 방금 지운 것을
+                // 또 지우려 든다.
+                if let Ok(mut g) = snap.lock() {
+                    *g = collect(cwd.as_deref());
+                }
+                rev.fetch_add(1, Relaxed);
+                busy.store(false, Relaxed);
+            });
+            // 워커가 스냅샷을 갈아 끼우므로 pump 의 수집과 겹치지 않게 잠근다.
+            self.mcp_col.busy.store(true, Relaxed);
+            return;
+        }
+        let home = kasa_socket::home_dir();
+        let res = match (home, row.kind) {
+            (None, _) => Err(anyhow::anyhow!("홈 디렉터리를 못 찾았다")),
+            (Some(h), RowKind::Skill) => remove_skill(&h, row.harness, &row.name),
+            (Some(h), RowKind::Mcp) => remove_codex_mcp(&h, &row.name),
+        };
+        self.set_toast(match res {
+            Ok(m) => m,
+            Err(e) => format!("⚠ {} 못 지웠다: {e}", row.name),
+        });
+        self.mcp_col.stale = true;
+    }
+
+    /// 칼럼 안 클릭 — 새로고침, 지우기, 그리고 행을 누르면 켜고 끈다.
     pub(crate) fn mcp_col_click(&mut self, x: f32, y: f32) -> bool {
         if let Some(r) = self.mcp_col.refresh_rect {
             if x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3 {
@@ -504,6 +659,21 @@ impl App {
                 return true;
             }
         }
+        // 지우기는 행 위에 겹쳐 있어 먼저 본다.
+        if let Some(i) = self
+            .mcp_col
+            .del_rects
+            .iter()
+            .find(|(_, r)| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3)
+            .map(|(i, _)| *i)
+        {
+            self.mcp_col_delete(i);
+            self.chrome_dirty = true;
+            return true;
+        }
+        // 다른 곳을 누르면 확인 대기를 푼다 — 무장한 채로 남으면 한참 뒤의 클릭이
+        // 지우기가 된다.
+        self.mcp_col.confirm_delete = None;
         let hit = self
             .mcp_col
             .row_rects
@@ -559,7 +729,17 @@ pub(crate) fn draw_mcp_col(
     let text_x = x + 31.0;
     let avail = (right - text_x).max(0.0);
     mc.row_rects.clear();
+    mc.del_rects.clear();
     mc.refresh_rect = None;
+    // 확인 대기는 스스로 풀린다 — 무장한 줄이 화면에 남아 있으면 한참 뒤의 클릭이
+    // 지우기가 된다.
+    if mc
+        .confirm_delete
+        .is_some_and(|(_, t)| t.elapsed() >= std::time::Duration::from_secs(4))
+    {
+        mc.confirm_delete = None;
+    }
+    let armed = mc.confirm_delete.map(|(i, _)| i);
     let hit = |r: &(f32, f32, f32, f32)| {
         cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
     };
@@ -729,8 +909,34 @@ pub(crate) fn draw_mcp_col(
                     },
                 );
             }
+            // 지우기는 hover 했을 때만 — 늘 떠 있으면 목록을 훑는 눈이 매 줄에서
+            // 걸리고, 되돌릴 수 없는 버튼이 손끝에 늘 놓인다.
+            let is_armed = armed == Some(i);
+            let mut detail_w = avail - 12.0;
+            if hov || is_armed {
+                let d = (right - 20.0, y + 11.0, 16.0, 16.0);
+                let dh = hit(&d);
+                g.hover_pointer |= dh;
+                // 확인 대기는 색으로만 말한다 — 아이콘까지 바뀌면 그 순간 자리가
+                // 흔들려, 두 번째 클릭이 방금 있던 자리를 빗나간다.
+                g.queue_icon(
+                    "x",
+                    d.0,
+                    d.1,
+                    14.0,
+                    if is_armed {
+                        crate::render::DIFF_RED
+                    } else if dh {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    },
+                );
+                mc.del_rects.push((i, d));
+                detail_w -= 22.0;
+            }
             if !row.detail.is_empty() {
-                let d = crate::info::fit_text(g, &row.detail, avail - 12.0, 10.0, false);
+                let d = crate::info::fit_text(g, &row.detail, detail_w.max(0.0), 10.0, false);
                 g.draw_text(
                     text_x + 12.0,
                     y + 22.0,
@@ -1043,6 +1249,78 @@ enabled = false
         let bare = claude_mcp(&home, None);
         assert_eq!(bare.len(), 2, "전역만: {bare:?}");
         assert!(bare.iter().all(|r| r.enabled && r.scope == "전역"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 지우기는 설정에서 그 항목만 빠지고 나머지·주석은 그대로여야 한다.
+    #[test]
+    fn codex_remove_takes_only_that_server() {
+        let home = tmp_home("cx-rm");
+        let cx = home.join(".codex");
+        std::fs::create_dir_all(&cx).unwrap();
+        std::fs::write(
+            cx.join("config.toml"),
+            "# 손으로 관리하는 파일\nmodel = \"gpt-5.5\"\n\n[mcp_servers.exa]\ncommand = \"npx\"\n\n[mcp_servers.keep]\ncommand = \"uv\"\n",
+        )
+        .unwrap();
+        let msg = remove_codex_mcp(&home, "exa").unwrap();
+        assert!(msg.contains("exa"), "무엇을 지웠는지 알려야: {msg}");
+        let after = std::fs::read_to_string(cx.join("config.toml")).unwrap();
+        assert!(!after.contains("mcp_servers.exa"), "{after}");
+        assert!(after.contains("mcp_servers.keep"), "남은 것은 그대로: {after}");
+        assert!(after.contains("# 손으로 관리하는 파일"), "주석이 살아야: {after}");
+        assert!(after.contains("model = \"gpt-5.5\""));
+        let rows = codex_mcp(&home);
+        assert_eq!(rows.len(), 1);
+        // 없는 것을 지우라면 조용히 성공하면 안 된다 — 목록이 낡았다는 뜻이다.
+        assert!(remove_codex_mcp(&home, "exa").is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 스킬은 지우지 않고 휴지통으로 옮긴다 — 되돌릴 수 있어야 한다. 심볼릭 링크면
+    /// 링크만 옮겨지므로 원본은 그대로 남는다(codex 스킬 5개 중 4개가 링크다).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn skill_delete_moves_to_trash_and_spares_the_link_target() {
+        let home = tmp_home("sk-rm");
+        let skills = home.join(".claude/skills");
+        std::fs::create_dir_all(skills.join("plain")).unwrap();
+        let origin = home.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::os::unix::fs::symlink(&origin, skills.join("linked")).unwrap();
+
+        // 이름이 경로를 벗어나면 엉뚱한 것을 지운다. 목록에서 온 값이라도 막는다.
+        for bad in ["", "../evil", "a/b"] {
+            assert!(
+                remove_skill(&home, "claude", bad).is_err(),
+                "{bad:?} 가 통과하면 안 된다"
+            );
+        }
+        assert!(
+            remove_skill(&home, "claude", "없는것").is_err(),
+            "없는 것을 지웠다고 하면 목록이 낡은 걸 못 알아챈다"
+        );
+
+        let moved = remove_skill(&home, "claude", "linked").unwrap();
+        assert!(moved.contains("linked"), "{moved}");
+        assert!(
+            std::fs::symlink_metadata(skills.join("linked")).is_err(),
+            "링크가 자리에서 빠져야 한다"
+        );
+        assert!(origin.is_dir(), "링크가 가리키던 원본은 살아 있어야 한다");
+        // 지운 게 아니라 옮긴 것이다 — 그 자리에 있어야 되돌릴 수 있다.
+        let in_trash: Vec<_> = std::fs::read_dir(home.join(".Trash"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            in_trash.iter().any(|n| n.starts_with("linked-kasaterm-")),
+            "휴지통에 있어야 한다: {in_trash:?}"
+        );
+
+        remove_skill(&home, "claude", "plain").unwrap();
+        assert!(!skills.join("plain").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
