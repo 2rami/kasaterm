@@ -796,7 +796,9 @@ impl App {
     /// `alive` 는 이 pane 의 PTY 가 계속 도는지다 — 사용자가 닫은 것(`hide_pane`)은
     /// 참이라 되살리기가 재부착이 되고, 셸이 스스로 끝난 것(`reap_dead_panes`)은
     /// 거짓이라 레코드로 새로 띄운다.
-    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool) {
+    /// `stashed` 는 사이드바 「숨기기」로 치운 것 — 두 정리 루프(개수 상한·idle reap)가
+    /// 건너뛴다. 닫기(⌘W)는 `false` 로 들어와 종전대로 정리 대상이다.
+    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool, stashed: bool) {
         if self.tmux.is_some() || !self.pty.contains_key(pane) {
             return;
         }
@@ -846,6 +848,7 @@ impl App {
             neighbor,
             window,
             alive,
+            stashed,
             // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
             // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
             idle_since: None,
@@ -853,8 +856,11 @@ impl App {
         // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
         // 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
         // 무한정 쌓인다.
-        while self.closed_panes.len() > crate::CLOSED_PANE_KEEP {
-            let c = self.closed_panes.remove(0);
+        // 상한은 **정리 대상만** 센다. 숨긴 것(`stashed`)은 세지도 놓지도 않는다 —
+        // 숨겨 둔 학생 여럿 때문에 방금 닫은 pane 이 밀려 죽으면 안 된다.
+        while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {
+            let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else { break };
+            let c = self.closed_panes.remove(i);
             if c.alive {
                 self.kill_hidden_pane(&c.pane_id);
             }
@@ -893,7 +899,9 @@ impl App {
         let mut doomed: Vec<usize> = Vec::new();
         for (i, c) in self.closed_panes.iter_mut().enumerate() {
             // 이미 죽은 pane 은 레코드로만 되살아나므로 셀 것이 없다.
-            if !c.alive {
+            // 숨긴 것도 시간을 안 센다 — **놀고 있는 게 정상이고 그래서 치운 것**이다.
+            // 여기서 세면 15분 뒤 조용히 죽어, 돌아온 사용자가 빈 셸을 보게 된다.
+            if !c.alive || c.stashed {
                 continue;
             }
             if working[i] {
@@ -2211,7 +2219,16 @@ impl App {
         // 없어 반쪽 카드는 트레이를 침범한다).
         let mut y = top;
         for i in first..n {
-            let leaves = self.window_leaves(i);
+            let mut leaves = self.window_leaves(i);
+            // 숨긴 pane 도 같은 목록에 이어 붙인다 — 어디에도 안 보이면 되살릴 길이
+            // 없다. 트리에서 빠졌을 뿐 PTY 는 돌고 있으므로 「없는 것」이 아니다.
+            // 렌더가 `leaves` 길이 밖의 꼬리를 흐리게 그린다.
+            leaves.extend(
+                self.closed_panes
+                    .iter()
+                    .filter(|c| c.stashed && c.alive && c.window == i)
+                    .map(|c| c.pane_id.clone()),
+            );
             // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
             // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
             // 방에선 그 학생을 볼 길이 통째로 사라졌다(거노, 두 번). 손잡이 쪽은 이미

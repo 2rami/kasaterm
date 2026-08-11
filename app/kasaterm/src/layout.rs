@@ -1265,6 +1265,20 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 되살리기는 `reopen_pane_record` 의 재부착 경로, 정말 끄는 것은 인포의 ×
     /// (`discard_closed_pane_at`)다.
     pub(crate) fn hide_pane(&mut self, target: &str) {
+        self.tuck_pane(target, false);
+    }
+
+    /// 사이드바 「pane 숨기기」 — 닫기와 같은 자리에 넣되 **절대 정리하지 않는다.**
+    ///
+    /// 닫기(`hide_pane`)는 개수 상한과 15분 idle 로 언젠가 프로세스를 놓는다. 그런데
+    /// 숨기기는 *작업이 도는 중에* 화면에서만 치우는 것이라(2026-08-11 지시), 돌아왔을
+    /// 때 대화가 끊겨 있으면 쓸모가 없다. 그래서 같은 스택에 `stashed` 로 넣고 두 정리
+    /// 루프가 건너뛰게 한다.
+    pub(crate) fn stash_pane(&mut self, target: &str) {
+        self.tuck_pane(target, true);
+    }
+
+    fn tuck_pane(&mut self, target: &str, stashed: bool) {
         let in_active = self
             .pty_layout
             .as_ref()
@@ -1272,10 +1286,14 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if !in_active {
             // 다른 윈도우·백그라운드 세션의 pane 은 숨김 대상이 아니다(그쪽 트리를
             // 여기서 조작하면 유령 leaf 가 남는다) — 기존 경로로 보낸다.
+            //
+            // ⚠️ 그 경로는 **죽인다.** 사이드바는 모든 방의 pane 을 보여주므로, 거기서
+            // 부를 때는 부르는 쪽이 먼저 `switch_window` 로 그 방을 활성으로 만들어야
+            // 한다. 안 그러면 「숨겼는데 학생이 사라졌다」가 된다.
             self.remove_pane(target);
             return;
         }
-        self.record_closed_pane(target, true);
+        self.record_closed_pane(target, true, stashed);
         let was_active = self
             .ws
             .lock()
@@ -1332,7 +1350,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
         // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니
         // 되살리기가 재부착이 아니라 레코드로 새로 띄우는 쪽이다(`alive=false`).
-        self.record_closed_pane(target, false);
+        self.record_closed_pane(target, false, false);
         let was_active = self
             .ws
             .lock()

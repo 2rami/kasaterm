@@ -1748,6 +1748,13 @@ pub(crate) struct ClosedPane {
     /// PTY 가 아직 도는가. 참이면 되살리기는 트리에 leaf 를 다시 꽂는 것뿐이고
     /// (`pane_id` 가 그대로 유효하다), 거짓이면 `rec` 로 새로 띄운다.
     pub(crate) alive: bool,
+    /// 사이드바 「숨기기」로 치운 것인가. **참이면 두 정리 루프가 건너뛴다** —
+    /// 개수 상한(`CLOSED_PANE_KEEP`)도 idle reap(`CLOSED_PANE_IDLE_REAP`)도.
+    ///
+    /// 닫기와 갈라 두는 이유: 숨기기는 작업이 도는 중에 화면에서만 치우는 것이라
+    /// 돌아왔을 때 대화가 끊겨 있으면 쓸모가 없다(2026-08-11 지시). 대신 숨긴 만큼
+    /// 메모리를 계속 문다 — 그건 사용자가 고른 값이다.
+    pub(crate) stashed: bool,
     /// 놀기 시작한 시각 — 여기서부터 `CLOSED_PANE_IDLE_REAP` 을 세다 넘으면 놓는다.
     /// 다시 일하기 시작하면 `None` 으로 풀려 처음부터 다시 센다.
     pub(crate) idle_since: Option<Instant>,
@@ -3779,6 +3786,19 @@ enum FtMenuAction {
     OpenDefault,
 }
 
+/// 사이드바 pane 행 우클릭 메뉴 항목.
+///
+/// 갈래가 둘뿐이라 enum 이 과해 보이지만, 파일트리·Info 두 메뉴가 이미 같은 모양
+/// (`(action, label, …)` → rect 벡터 → 실행)이라 그 골격을 그대로 쓰는 편이 항목이
+/// 늘 때 싸다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidebarMenuAction {
+    /// 화면에서만 뗀다 — PTY 는 계속 돌고, 닫기와 달리 **정리 대상에서도 빠진다**.
+    Hide,
+    /// 숨겨 둔 것을 제자리로.
+    Unhide,
+}
+
 /// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
 /// 이걸 쓰는 입구는 아홉 곳이라, 문맥이 바뀌어도 조합 상태가 그대로 남아 다음
 /// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
@@ -4324,6 +4344,14 @@ struct App {
     /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
     /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
     sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
+    /// 사이드바 pane 행 우클릭 메뉴 — `(x, y, 방, pane id)`.
+    ///
+    /// 방을 함께 쥐는 이유: 숨기기는 **그 방을 활성으로 만든 뒤** 돌아야 한다. 사이드바는
+    /// 모든 방의 pane 을 보여주는데, 다른 방 pane 을 그냥 `stash_pane` 하면 활성 트리에
+    /// 없어서 `remove_pane`(죽이는 경로)으로 샌다.
+    sidebar_menu: Option<(f32, f32, usize, String)>,
+    /// 그 메뉴 항목의 rect — 렌더가 채우고 클릭이 읽는다(파일트리·Info 메뉴와 같은 관례).
+    sidebar_menu_rects: Vec<(SidebarMenuAction, (f32, f32, f32, f32))>,
     /// (window index, close-× rect) for each window tab. Only present when
     /// there's more than one window (the last window can't be closed).
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
@@ -4978,6 +5006,8 @@ impl App {
             pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
             sidebar_row_rects: Vec::new(),
+            sidebar_menu: None,
+            sidebar_menu_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             win_tab_first: 0,
             win_tab_vis: usize::MAX,

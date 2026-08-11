@@ -20,6 +20,9 @@ struct SidebarRowInfo {
     waiting: bool,
     /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
     busy: bool,
+    /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
+    /// 그려 「없는 것」이 아니라 「치워 둔 것」임을 말한다.
+    stashed: bool,
 }
 
 impl App {
@@ -2126,6 +2129,10 @@ impl App {
                     alert: !waiting && self.unread_panes.contains(id),
                     waiting,
                     busy,
+                    stashed: self
+                        .closed_panes
+                        .iter()
+                        .any(|c| c.stashed && c.alive && c.pane_id == *id),
                 }
             })
             .collect();
@@ -3329,7 +3336,15 @@ impl App {
                         &txt,
                         gpu::DrawOpts {
                             font_size: 11.0,
-                            color: if is_cur { theme::text() } else { theme::text_dim() },
+                            // 숨긴 줄은 한 단 더 낮춘다 — 목록에 남아 있되 「지금 화면에
+                            // 있는 것」과 한눈에 갈려야 한다.
+                            color: if info.stashed {
+                                theme::text_mute()
+                            } else if is_cur {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            },
                             bold: false,
                             italic: false,
                         },
@@ -3342,7 +3357,13 @@ impl App {
                     // 더하는 대신 있던 것을 깜빡이게 하면 목록에 늘어나는 게 없다.
                     let dot_x = rx + rw - 6.0;
                     let dot_y = ry + rh / 2.0 - 3.0;
-                    if info.waiting {
+                    if info.stashed {
+                        // 숨김 표시가 상태 점 자리를 대신 쓴다. 치워 둔 줄에 상태 점을
+                        // 그대로 두면 화면에 있는 줄과 구분이 안 된다 — 그리고 어차피
+                        // 그 상태(도는 중·기다림)는 화면에 없는 pane 의 것이라 지금
+                        // 손댈 수 있는 신호가 아니다.
+                        g.queue_icon("disabled", dot_x - 1.0, dot_y - 1.0, 9.0, theme::text_mute());
+                    } else if info.waiting {
                         blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
                     } else if info.alert {
                         blink_dot(g, dot_x, dot_y, 6.0, theme::accent(), 1.6);
@@ -3447,6 +3468,55 @@ impl App {
                                 if hover || on { theme::text() } else { theme::text_mute() },
                             );
                         }
+                    }
+                }
+                // pane 행 우클릭 메뉴 — 이 칼럼에서 **마지막**에 그린다(다른 것 위에
+                // 떠야 한다). 골격은 파일트리·Info 메뉴와 같은 것을 쓴다.
+                if let Some((mx0, my0, _, pane)) = self.sidebar_menu.clone() {
+                    // 이미 숨긴 줄이면 되돌리기 한 갈래만 낸다 — 같은 자리에서 같은
+                    // 동작을 토글로 부르는 편이 항목 두 개를 늘 보여주는 것보다 낫다.
+                    let hidden =
+                        self.closed_panes.iter().any(|c| c.stashed && c.alive && c.pane_id == pane);
+                    let items: [(SidebarMenuAction, &str); 1] = if hidden {
+                        [(SidebarMenuAction::Unhide, "다시 보이기")]
+                    } else {
+                        [(SidebarMenuAction::Hide, "pane 숨기기")]
+                    };
+                    const MIH: f32 = 28.0;
+                    let widest = items
+                        .iter()
+                        .map(|(_, l)| g.measure_chrome_text(l, 13.0, false))
+                        .fold(0.0f32, f32::max);
+                    let mw = (widest + 32.0).min((tab_strip_w - 8.0).max(80.0));
+                    let mh = 12.0 + items.len() as f32 * MIH;
+                    // 사이드바 안에 가둔다 — 넘치면 오른쪽 파일트리 위로 삐져나간다
+                    // (렌더러에 scissor 가 없다).
+                    let mx = mx0.min((tab_strip_w - mw - 4.0).max(4.0)).max(4.0);
+                    let my = my0.min((sb_win_h - mh - 6.0).max(TITLE_HEIGHT)).max(TITLE_HEIGHT);
+                    panel_rect_outlined(g, mx, my, mw, mh, theme::radius_md(), theme::surface());
+                    self.sidebar_menu_rects.clear();
+                    for (i, (a, label)) in items.iter().enumerate() {
+                        let r = (mx + 4.0, my + 6.0 + i as f32 * MIH, mw - 8.0, MIH);
+                        let hov = sb_cursor.0 >= r.0
+                            && sb_cursor.0 <= r.0 + r.2
+                            && sb_cursor.1 >= r.1
+                            && sb_cursor.1 <= r.1 + r.3;
+                        g.hover_pointer |= hov;
+                        if hov {
+                            hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
+                        }
+                        g.draw_text(
+                            r.0 + 12.0,
+                            r.1 + (MIH - 13.0) / 2.0,
+                            label,
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color: theme::text(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        self.sidebar_menu_rects.push((*a, r));
                     }
                 }
             }
