@@ -287,15 +287,11 @@ def main():
     if lvl:
         parts.append(f"{ansi(EFFORT_HEX.get(lvl, '7aa2f7'))}{ic['effort']} {lvl}{RESET}")
 
-    # ultracode 는 effort 와 별개 상태인데 claude 가 statusline 에 안 실어 준다
-    # (payload 의 effort 는 low|medium|high|xhigh|max 뿐). UserPromptSubmit 훅이
-    # 턴마다 남기는 마커로 그 한 칸을 채운다 — 턴 단위라 다음 프롬프트에 키워드가
-    # 없으면 훅이 지우고 배지도 함께 사라진다.
-    sid = d.get("session_id")
-    if isinstance(sid, str) and sid:
-        safe = "".join(c for c in sid if c.isalnum() or c in "-_")
-        if safe and os.path.exists(f"/tmp/kasaterm-collab/ultracode/{safe}.on"):
-            parts.append(f"{ansi('bb9af7')}ultra{RESET}")
+    # ultracode 배지는 여기 있었지만 뺐다 — 세그먼트 **맨 끝**이라 좁은 pane 에서
+    # 제일 먼저 잘리고, 안 잘려도 눈이 잘 안 갔다(거노 2026-08-11: 마커를 심어
+    # 놓고 물어야 그제서야 "아 보이네"). 지금은 kasaterm 이 같은 마커를 읽어
+    # **입력박스 테두리**를 보라색으로 물들인다 — 타이핑하는 자리라 놓칠 수 없다.
+    # `ultracode-mark.py`(UserPromptSubmit)가 마커를 쓰는 쪽은 그대로다.
 
     # 마커는 세그먼트 뒤 끝자락 — 좁은 pane 에서 잘리면 폴백(argv·타이틀·3s 폴)이 줍는다.
     print(sep.join(parts))
