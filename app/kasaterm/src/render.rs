@@ -6441,10 +6441,13 @@ impl App {
                 const GH: f32 = 6.0;
                 if win_w >= 500.0 {
                     let gy = sy + (STATUS_HEIGHT - GH) / 2.0;
-                    g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 60));
+                    // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15% 짜리
+                    // 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서 그냥 얼룩이
+                    // 된다(첫 캡처에서 실제로 그랬다). 트랙은 은은하게, 채움은 확실하게.
+                    g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
                     if let Some(b) = badge.as_ref() {
-                        let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(1.0);
-                        g.rect(x, gy, w, GH, theme::with_alpha(theme::text_dim(), 160));
+                        let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(2.0);
+                        g.rect(x, gy, w, GH, theme::with_alpha(theme::text(), 210));
                     }
                     x += GW + 8.0;
                 }
@@ -6490,11 +6493,17 @@ impl App {
 
                 // 계정 이름은 가장 먼저 버린다 — 한도 숫자가 이 줄의 존재 이유고,
                 // 이름은 드롭다운을 열면 어차피 맨 위에 있다.
+                //
+                // 라벨을 안 지은 슬롯은 이름이 이메일로 폴백되는데, 그걸 통째로 적으면
+                // 한 줄의 절반을 주소가 먹는다. **@ 앞만** 남긴다 — 계정을 가리는 데는
+                // 그걸로 충분하고(오늘 넷이 같은 계정인 걸 못 알아본 게 문제였지 주소
+                // 뒷부분을 몰라서가 아니다), 전체는 드롭다운에 그대로 있다.
                 if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
+                    let short = n.split_once('@').map(|(a, _)| a).unwrap_or(n.as_str());
                     g.draw_text(
                         x,
                         ty,
-                        n,
+                        short,
                         gpu::DrawOpts {
                             font_size: fs,
                             color: theme::text_dim(),
@@ -6502,7 +6511,7 @@ impl App {
                             italic: false,
                         },
                     );
-                    x += g.measure_chrome_text(n.as_str(), fs, true);
+                    x += g.measure_chrome_text(short, fs, true);
                 }
 
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
