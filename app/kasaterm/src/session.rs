@@ -311,7 +311,23 @@ impl App {
                 // 그마저 마르면 **가장 적게 쓰인 학생들** 중에서 고른다 — 전체 랜덤은
                 // 이미 셋인 학생을 넷으로 만든다(`least_used` 주석에 실측).
                 let least = kasa_mcp::character::least_used(&members, &all_taken);
-                let pick = kasa_mcp::character::pick_random(&free, id)
+                // 이 방에 이미 학생이 있으면 **같은 학원**에서 먼저 고른다. 첫 배정이
+                // 그 방의 학원을 정하고, 이후 pane 들이 거기 붙어 한 덩어리로 읽힌다.
+                // 학원이 마르면 아래 폴백으로 내려간다 — 학원을 맞추는 것보다 같은
+                // 방에서 안 겹치는 게 먼저다.
+                let here: Vec<String> = taken_local.iter().cloned().collect();
+                let same_school = kasa_mcp::character::prefer_same_school(&chars, &free, &here);
+                // 이 방의 첫 학생이면 반대로 **다른 방이 안 쓰는 학원**을 고른다 —
+                // 그 한 명이 이 방의 학원을 정하므로, 여기서 갈라 두면 방마다 다른
+                // 학원이 선다. 학원보다 방이 많아지면 빈 목록이 와 아래로 흐른다.
+                let fresh_school = if here.is_empty() {
+                    kasa_mcp::character::prefer_fresh_school(&chars, &free, &all_taken)
+                } else {
+                    Vec::new()
+                };
+                let pick = kasa_mcp::character::pick_random(&same_school, id)
+                    .or_else(|| kasa_mcp::character::pick_random(&fresh_school, id))
+                    .or_else(|| kasa_mcp::character::pick_random(&free, id))
                     .or_else(|| kasa_mcp::character::pick_random(&free_local, id))
                     .or_else(|| kasa_mcp::character::pick_random(&least, id))
                     .or_else(|| kasa_mcp::character::pick_random(&members, id));
