@@ -6,6 +6,7 @@
 //! Lifted out of app/kasaterm/src/socket.rs so the standalone `serve-web` bin
 //! can list/read sessions without depending on the winit/wgpu GUI crate.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards
@@ -474,11 +475,10 @@ mod tests {
 //
 //   claude  ~/.claude/projects/<cwd-slug>/<uuid>.jsonl   cwd 별로 디렉터리가 갈린다
 //   codex   ~/.codex/sessions/rollout-<날짜>-<uuid>.jsonl 한 디렉터리에 평평하게
-//   agy     ~/.gemini/antigravity-cli/conversation_summaries.db (SQLite)
+//   agy     ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/*.jsonl
 //
-// agy 가 오히려 제일 싸다 — 제목·미리보기·시각·워크스페이스가 한 테이블에 이미
-// 정리돼 있어 쿼리 한 번이면 끝난다. 대화 본문(`conversations/<uuid>.db`)은
-// protobuf BLOB 이라 여기서 건드리지 않는다.
+// 셋 다 결국 줄 단위 JSON 이라 읽는 모양은 같다. agy 만 제목을 저장해 두지 않아
+// 대화 안에서 파생해야 한다.
 
 /// 공백을 한 칸으로 합치고 `n` **문자**까지 자른다.
 /// `String::truncate` 를 쓰면 안 된다 — 그쪽은 바이트 오프셋이라 한글 한 글자
@@ -1089,59 +1089,236 @@ mod codex_listing_tests {
     }
 }
 
-/// 최근 agy 대화. 요약 테이블 한 번만 읽는다 — 본문 DB 들은 protobuf 라 안 연다.
+/// 최근 agy 대화.
 ///
-/// SQLite 를 `sqlite3` 프로세스로 읽는 이유: 이 crate 에 SQLite 의존성을 들이면
-/// 빌드가 무거워지는데, 얻는 건 쿼리 하나다. macOS 는 `sqlite3` 를 기본 탑재한다.
-/// ⚠️Windows 엔 없으므로 그때는 rusqlite 로 옮겨야 한다(지금은 빈 목록).
+/// ⚠️**`conversation_summaries.db` 를 다시 쳐다보지 마라.** 이름·스키마가 딱
+/// 여기 필요한 모양(제목·미리보기·시각·워크스페이스)이라 옛 구현이 그걸 읽었는데,
+/// **그 테이블은 2026-07-08 에 멈췄다** — 71행뿐이고 title 은 71건 전부 빈 문자열,
+/// 60/71 은 workspace 도 없다. 그래서 「제목 없는 옛날 항목 71개」가 뜨고 오늘 것은
+/// 하나도 안 뜬다. 죽은 걸 눈치채기 어려운 게, 쿼리는 성공하고 행도 돌아온다.
+/// 짝인 `cache/conversation_metadata.json` 도 같은 날 같은 71건에서 멈췄다.
+///
+/// 살아 있는 정본은 `brain/<uuid>/.system_generated/logs/transcript_full.jsonl`
+/// (구버전 대화는 `transcript_full` 없이 `transcript.jsonl` 만 있다). 대화 본문이
+/// 통째로 평문 JSONL 이라 `conversations/<uuid>.db` 의 protobuf 를 열 이유가 없다 —
+/// 실측으로 brain 105개 == conversations 105개, 차집합 0 이다.
 pub fn recent_agy_sessions(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let db = PathBuf::from(home).join(".gemini/antigravity-cli/conversation_summaries.db");
-    if !db.is_file() {
-        return Vec::new();
+    let Some(home) = crate::home_dir() else { return Vec::new() };
+    recent_agy_sessions_in(&home.join(".gemini/antigravity-cli"), limit)
+}
+
+/// 루트를 받는 본체. 테스트가 가짜 brain 을 심어 돌릴 수 있게 갈라 둔다
+/// (`recent_codex_sessions_in` 과 같은 이유·같은 모양).
+pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
+    // stat 만 먼저 하고 상위 limit 개만 파싱한다. 지금은 105개 3.4MB 라 전수를
+    // 읽어도 싸지만, 이 디렉터리는 대화마다 늘고 지워지지 않는다.
+    let mut files: Vec<(u64, String, PathBuf)> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(root.join("brain")) else { return Vec::new() };
+    for ent in rd.flatten() {
+        let Some(id) = ent.file_name().to_str().map(str::to_string) else { continue };
+        let logs = ent.path().join(".system_generated/logs");
+        // full 우선. 파일 크기로 신구를 가르면 안 된다 — transcript 쪽은 args 가
+        // 이중 인코딩돼 있어 절반은 오히려 full 보다 크다.
+        let path = ["transcript_full.jsonl", "transcript.jsonl"]
+            .iter()
+            .map(|n| logs.join(n))
+            .find(|p| p.is_file());
+        let Some(path) = path else { continue };
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        files.push((mtime_secs(&meta), id, path));
     }
-    // 시각은 SQL 에서 unix 초로 바꿔 받는다 — datetime 문자열 형식을 Rust 쪽에서
-    // 또 추측하지 않으려는 것이다.
-    let sql = format!(
-        "SELECT json_group_array(json_object('id',conversation_id,'title',title,\
-         'preview',preview,'ts',CAST(strftime('%s',last_modified_time) AS INTEGER),\
-         'ws',workspace_uris)) FROM (SELECT * FROM conversation_summaries \
-         ORDER BY last_modified_time DESC LIMIT {limit});"
-    );
-    let Ok(out) = std::process::Command::new("sqlite3").arg(&db).arg(&sql).output() else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<serde_json::Value> = serde_json::from_str(text.trim()).unwrap_or_default();
-    rows.iter()
-        .filter_map(|r| {
-            let id = r.get("id")?.as_str()?.to_string();
-            let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
-            let preview = r.get("preview").and_then(|x| x.as_str()).unwrap_or("").trim();
-            let mut label = if title.is_empty() { preview.to_string() } else { title.to_string() };
-            if label.is_empty() {
-                label = id.chars().take(8).collect();
-            }
-            label = label.split_whitespace().collect::<Vec<_>>().take_chars(120);
-            let mtime = r.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
-            // workspace_uris 는 `file:///path` 목록(JSON 배열 문자열)이다.
-            let cwd = r
-                .get("ws")
-                .and_then(|x| x.as_str())
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                .and_then(|v| v.into_iter().next())
-                .map(|u| u.strip_prefix("file://").unwrap_or(&u).to_string())
-                .unwrap_or_default();
-            // agy 만 요약을 DB 가 들고 있다. 화자는 안 적히므로 `나:`/`에이전트:`
-            // 를 붙이지 않는다 — 모르는 것을 지어내느니 없는 채로 둔다.
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(limit);
+
+    let ws = agy_workspace_index(root);
+    files
+        .into_iter()
+        .map(|(mtime, id, path)| {
+            let rows = read_jsonl(&path);
+            let objective = rows.iter().find_map(agy_objective);
+            let request = rows.iter().find_map(agy_request);
+            let label = objective
+                .clone()
+                .or_else(|| request.clone())
+                .unwrap_or_else(|| id.chars().take(8).collect());
             // 제목으로 이미 쓴 문장이면 같은 줄을 두 번 그리게 되니 비운다.
-            let preview = if label == preview { String::new() } else { preview.to_string() };
-            Some(RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview })
+            let preview = match &request {
+                Some(r) if *r != label => r.clone(),
+                _ => String::new(),
+            };
+            // 대화 안에 cwd 전용 필드가 없어 도구가 실제로 쓴 `Cwd` 를 줍는다.
+            // ⚠️같은 args 의 `AbsolutePath` 는 쓰면 안 된다 — 파일 경로여서
+            // `.../input/slime_00.png` 같은 값이 cwd 칸에 들어간다.
+            let cwd = rows
+                .iter()
+                .find_map(agy_cwd)
+                .or_else(|| ws.get(&id).cloned())
+                .unwrap_or_default();
+            RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview }
         })
         .collect()
+}
+
+/// 줄 단위 JSON 을 읽는다. 깨진 줄은 버린다 — append 도중 잘린 행이 실제로 있고
+/// (105개 중 2곳), `?` 로 흘리면 그 파일 하나가 통째로 목록에서 사라진다.
+fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+/// 한 행의 `content` 를 타입으로 걸러 꺼낸다.
+fn agy_content<'a>(row: &'a serde_json::Value, kind: &str) -> Option<&'a str> {
+    (row.get("type")?.as_str()? == kind).then(|| row.get("content")?.as_str()).flatten()
+}
+
+/// agy 가 스스로 붙인 제목. CHECKPOINT 행 안의 `# USER Objective:` 다음 줄이다.
+fn agy_objective(row: &serde_json::Value) -> Option<String> {
+    let body = agy_content(row, "CHECKPOINT")?;
+    let rest = body.split_once("# USER Objective:")?.1;
+    clean_label(rest.lines().find(|l| !l.trim().is_empty())?)
+}
+
+/// 사용자가 실제로 친 첫 문장. 제목이 없는 대화의 폴백이자 미리보기.
+fn agy_request(row: &serde_json::Value) -> Option<String> {
+    let body = agy_content(row, "USER_INPUT")?;
+    clean_label(body.split_once("<USER_REQUEST>")?.1.split_once("</USER_REQUEST>")?.0)
+}
+
+fn clean_label(s: &str) -> Option<String> {
+    let out = s.split_whitespace().collect::<Vec<_>>().take_chars(120);
+    (!out.is_empty()).then_some(out)
+}
+
+fn agy_cwd(row: &serde_json::Value) -> Option<String> {
+    row.get("tool_calls")?.as_array()?.iter().find_map(|c| {
+        let v = c.get("args")?.get("Cwd")?.as_str()?;
+        v.starts_with('/').then(|| v.to_string())
+    })
+}
+
+/// 도구를 한 번도 안 쓴 대화는 본문에 경로가 없다. agy 가 따로 남기는
+/// `{경로: 대화id}` 캐시를 뒤집어 보강한다.
+fn agy_workspace_index(root: &Path) -> HashMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(root.join("cache/last_conversations.json")) else {
+        return HashMap::new();
+    };
+    let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&text) else {
+        return HashMap::new();
+    };
+    map.into_iter().map(|(path, id)| (id, path)).collect()
+}
+
+#[cfg(test)]
+mod recent_agy_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn root(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kasaterm-agy-test-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn convo(root: &Path, id: &str, file: &str, lines: &[&str]) {
+        let p = root.join("brain").join(id).join(".system_generated/logs").join(file);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+    }
+
+    fn checkpoint(objective: &str) -> String {
+        json!({"type": "CHECKPOINT", "content": format!("# USER Objective:\n{objective}\n\n# ...")})
+            .to_string()
+    }
+
+    fn user_input(req: &str) -> String {
+        json!({"type": "USER_INPUT", "content": format!("<USER_REQUEST>\n{req}\n</USER_REQUEST>")})
+            .to_string()
+    }
+
+    #[test]
+    fn objective_wins_and_the_prompt_becomes_the_preview() {
+        let r = root("title");
+        convo(&r, "id-a", "transcript_full.jsonl", &[&checkpoint("켄지 이름 소개"), &user_input("얘 이름 뭐야")]);
+        let got = recent_agy_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].label, "켄지 이름 소개");
+        assert_eq!(got[0].preview, "얘 이름 뭐야");
+        assert_eq!(got[0].harness, "agy");
+        assert_eq!(got[0].id, "id-a");
+    }
+
+    #[test]
+    fn without_an_objective_the_prompt_is_the_title_and_the_preview_stays_empty() {
+        // 제목이 없는 대화가 105건 중 14건 있었다. 프롬프트를 제목으로 올리되
+        // 같은 줄을 두 번 그리지 않는지가 요지다.
+        let r = root("notitle");
+        convo(&r, "id-b", "transcript_full.jsonl", &[&user_input("이거도 팀모드 있나")]);
+        let got = recent_agy_sessions_in(&r, 10);
+        assert_eq!(got[0].label, "이거도 팀모드 있나");
+        assert_eq!(got[0].preview, "");
+    }
+
+    #[test]
+    fn a_torn_line_does_not_drop_the_conversation() {
+        // append 도중 잘린 행이 실제로 있다. 파일 하나가 통째로 사라지면 안 된다.
+        let r = root("torn");
+        convo(&r, "id-c", "transcript_full.jsonl", &["{\"step_index\":3,\"content\": 중간부터", &checkpoint("살아남기")]);
+        assert_eq!(recent_agy_sessions_in(&r, 10)[0].label, "살아남기");
+    }
+
+    #[test]
+    fn falls_back_to_transcript_when_full_is_missing() {
+        // 옛 대화엔 transcript.jsonl 만 있다(105건 중 6건).
+        let r = root("fallback");
+        convo(&r, "id-d", "transcript.jsonl", &[&checkpoint("옛날 대화")]);
+        assert_eq!(recent_agy_sessions_in(&r, 10)[0].label, "옛날 대화");
+    }
+
+    #[test]
+    fn cwd_comes_from_a_tool_call_never_from_a_file_path() {
+        // ⚠️같은 args 의 AbsolutePath 를 주우면 `.../slime_00.png` 가 cwd 칸에 박힌다.
+        let r = root("cwd");
+        let view = json!({"type": "VIEW_FILE", "tool_calls": [
+            {"name": "view_file", "args": {"AbsolutePath": "/Users/kasa/input/slime_00.png"}}]})
+            .to_string();
+        let run = json!({"type": "RUN_COMMAND", "tool_calls": [
+            {"name": "run_command", "args": {"CommandLine": "git log", "Cwd": "/Users/kasa/proj"}}]})
+            .to_string();
+        convo(&r, "id-e", "transcript_full.jsonl", &[&checkpoint("경로"), &view, &run]);
+        assert_eq!(recent_agy_sessions_in(&r, 10)[0].cwd, "/Users/kasa/proj");
+    }
+
+    #[test]
+    fn the_workspace_cache_fills_in_a_conversation_that_used_no_tools() {
+        let r = root("wscache");
+        convo(&r, "id-f", "transcript_full.jsonl", &[&checkpoint("도구 안 씀")]);
+        std::fs::create_dir_all(r.join("cache")).unwrap();
+        std::fs::write(
+            r.join("cache/last_conversations.json"),
+            json!({"/Users/kasa/other": "id-f"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(recent_agy_sessions_in(&r, 10)[0].cwd, "/Users/kasa/other");
+    }
+
+    #[test]
+    fn newest_first_and_the_limit_holds() {
+        let r = root("order");
+        for (i, id) in ["old", "mid", "new"].iter().enumerate() {
+            convo(&r, id, "transcript_full.jsonl", &[&checkpoint(id)]);
+            let p = r.join("brain").join(id).join(".system_generated/logs/transcript_full.jsonl");
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i as u64 * 100);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        }
+        let got = recent_agy_sessions_in(&r, 2);
+        assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["new", "mid"]);
+    }
+
+    #[test]
+    fn a_missing_brain_directory_is_empty_not_a_panic() {
+        assert!(recent_agy_sessions_in(&root("none"), 10).is_empty());
+    }
 }
 
 /// 세 하네스를 합쳐 최신순으로. 통합 피커의 단일 진입점.
