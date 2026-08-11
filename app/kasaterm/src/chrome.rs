@@ -247,6 +247,21 @@ impl App {
             theme::with_alpha(theme::text_mute(), 0x66)
         }
     }
+    /// 그 pane 이 **도는 중**인가 — 헤더 진행 바와 사이드바 걷기가 같이 쓴다.
+    ///
+    /// 기다리는 중(`waiting`·`blocked`)은 도는 게 아니다. 사람 답을 기다리는데 바가
+    /// 계속 차오르면 "일하는 줄" 알고 지나치게 된다(거노 2026-08-11: "프로세스바
+    /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
+    /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
+    pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
+        self.pane_activity.get(id).is_some_and(|a| {
+            !a.status.is_empty()
+                && a.status != "idle"
+                && a.status != "waiting"
+                && a.status != "blocked"
+        })
+    }
+
     pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {
         self.notify_flash.get(id).and_then(|t| {
             let age = t.elapsed().as_millis();
