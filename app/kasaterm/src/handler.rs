@@ -968,7 +968,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 부모 대화를 fork 해 새 sessionId 로 잇는데 raw json 엔 부모가 없어,
                 // 이 argv 가 원본→background 를 잇는 유일한 끈이다(macOS/Linux ps).
                 let parent_of = |pid: u64| -> Option<String> {
-                    let out = std::process::Command::new("ps")
+                    let out = crate::proc::command("ps")
                         .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
                         .output()
                         .ok()?;
@@ -990,7 +990,7 @@ impl ApplicationHandler<UserEvent> for App {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     let mut next: HashMap<String, Option<String>> = HashMap::new();
-                    if let Ok(out) = std::process::Command::new(&bin)
+                    if let Ok(out) = crate::proc::command(&bin)
                         .args(["agents", "--json", "--all"])
                         .output()
                     {
@@ -5024,7 +5024,7 @@ impl App {
 /// 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
 /// 없음/형식밖이면 None.
 fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
-    let out = std::process::Command::new("curl")
+    let out = crate::proc::command("curl")
         .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
         .output()
         .ok()?;

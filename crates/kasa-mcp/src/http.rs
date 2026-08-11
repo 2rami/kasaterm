@@ -1515,7 +1515,7 @@ pub fn claude_bin() -> std::path::PathBuf {
 /// 대화를 fork 해 새 sessionId 로 잇는데, jsonl 엔 부모 정보가 전혀 없어 이 argv 가
 /// A(원본 foreground)→B(background) 를 잇는 유일한 끈이다. macOS/Linux(ps); 그 외 None.
 fn parent_session_from_pid(pid: u64) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    let out = crate::no_window_command("ps")
         .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -1549,7 +1549,7 @@ async fn background_agents_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let mut cmd = std::process::Command::new(claude_bin());
+    let mut cmd = crate::no_window_command(claude_bin());
     cmd.args(["agents", "--json", "--all"]);
     if let Some(cwd) = params.get("cwd").filter(|s| !s.is_empty()) {
         cmd.args(["--cwd", cwd]);
