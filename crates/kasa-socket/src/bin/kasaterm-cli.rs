@@ -769,7 +769,9 @@ fn print_help() {
     eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
   kasaterm-cli capture [surface_id] [path] [--max-width N]
-                                            # screenshot ONE pane to PNG (peek's picture twin)");
+                                            # screenshot ONE pane to PNG (peek's picture twin)
+  kasaterm-cli capture --window [path] [--max-width N]
+                                            # the WHOLE window incl. sidebar/tabs/columns (main window only)");
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
@@ -1213,11 +1215,18 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // peek 의 그림 짝. 텍스트로는 안 보이는 것(색·정렬·겹침)을 판정하려면
             // 화면 자체가 필요하다 — 결과 경로를 Read 로 열면 된다.
             //   capture [surface_id] [path] [--max-width N]
+            //   capture --window [path] [--max-width N]
+            //
+            // `--window` 는 pane 이 아니라 **창 한 장**이다. pane 만 찍어서는 사이드바·
+            // 탭바·우측 칼럼이 안 보여, 에이전트가 제가 만든 UI 를 확인할 수 없다.
+            // 신호는 **빈 surface_id** — GUI 쪽(`arm_pane_capture`)이 그때 크롭을 안 세운다.
             let mut positional: Vec<String> = Vec::new();
             let mut max_width: Option<u64> = None;
+            let mut whole_window = false;
             let mut it = args.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
+                    "--window" => whole_window = true,
                     "--max-width" | "-w" => {
                         max_width = it.next().and_then(|s| s.parse().ok());
                     }
@@ -1227,13 +1236,16 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     s => positional.push(s.to_string()),
                 }
             }
-            let surface = positional
-                .first()
-                .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
-                .ok_or_else(|| anyhow!("capture needs a surface_id (or $KASATERM_PANE_ID)"))?;
+            let surface = if whole_window {
+                String::new()
+            } else {
+                positional.first().cloned().or_else(|| std::env::var("KASATERM_PANE_ID").ok()).ok_or_else(
+                    || anyhow!("capture needs a surface_id (or $KASATERM_PANE_ID) — or --window for the whole window"),
+                )?
+            };
             let mut params = json!({ "surface_id": surface });
-            if let Some(p) = positional.get(1) {
+            // `--window` 면 pane 자리가 없으니 경로가 첫 위치 인자다.
+            if let Some(p) = positional.get(usize::from(!whole_window)) {
                 params["path"] = json!(p);
             }
             if let Some(w) = max_width {
