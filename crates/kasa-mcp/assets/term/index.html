@@ -6,6 +6,14 @@
 <title>kasaterm</title>
 <link rel="stylesheet" href="/term/xterm.css">
 <style>
+  /* claude code 가 그리는 Nerd Font 아이콘과 박스드로잉은 폰 기본 폰트에 없어서
+     두부(□)와 끊긴 선이 된다. 그래서 서브셋 폰트를 직접 내려준다.
+     한글은 이 폰트에 없다 — 폰이 가진 한글 폰트로 폴백된다. */
+  @font-face {
+    font-family: 'KasaTerm';
+    src: url('/term/font.woff2') format('woff2');
+    font-display: swap;
+  }
   html, body { margin: 0; height: 100%; background: #12161c; }
   /* 데이터(터미널)가 0px 에서 시작한다 — 조작부는 전부 아래로 내렸다.
      100dvh: 주소창이 접힐 때 100vh 는 화면을 넘는다. */
@@ -76,7 +84,7 @@
   if (touch) document.body.classList.add('has-bar');
 
   const term = new Terminal({
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
+    fontFamily: '"KasaTerm", ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
     fontSize: 13,
     cursorBlink: true,
     allowProposedApi: true,
@@ -171,10 +179,21 @@
 
   fetch('/term/panes').then((r) => r.json()).then((list) => {
     const here = q.get('pane') || '';
-    for (const id of list) {
+    // 답을 기다리는 pane 을 위로 올린다 — 폰을 여는 이유가 대개 그것이다.
+    // sort 는 stable 이라 나머지 순서는 서버가 준 그대로 남는다.
+    const rank = (p) => (p.status === 'waiting' ? 0 : 1);
+    for (const p of [...list].sort((a, b) => rank(a) - rank(b))) {
       const o = document.createElement('option');
-      o.value = id; o.textContent = id;
-      if (id === here) o.selected = true;
+      o.value = p.id;
+      // `%86` 만으로는 누구 화면인지 알 수가 없다. 이름과 하던 일을 보여주고,
+      // 그걸 모르는 pane(웹 셸)만 id 로 떨어진다.
+      const label = [p.name, p.title].filter(Boolean).join(' · ') || p.id;
+      o.textContent = p.status === 'waiting' ? `● ${label}` : label;
+      if (p.id === here) {
+        o.selected = true;
+        // 우상단 칩도 id 대신 이름으로. 제목까지 넣으면 좁은 폭에서 넘친다.
+        if (p.name) statusEl.textContent = p.name;
+      }
       panesEl.append(o);
     }
   }).catch(() => {});
@@ -195,6 +214,14 @@
   };
   ws.onopen = () => { term.focus(); setTimeout(syncSize, 0); };
   window.addEventListener('resize', syncSize);
+
+  // 웹폰트는 늦게 온다. 그 사이 xterm 은 폴백 폰트로 글자 폭을 재서 격자를 잡아
+  // 두므로, 폰트가 바뀐 뒤 다시 재지 않으면 글자가 칸에서 어긋난 채 남는다.
+  if (document.fonts?.load) {
+    document.fonts.load(`${term.options.fontSize}px KasaTerm`)
+      .then(() => { term.clearTextureAtlas?.(); syncSize(); })
+      .catch(() => {});
+  }
 
   // 소프트 키보드가 올라오면 fixed 바가 그 아래로 숨는다. visualViewport 가
   // 실제로 보이는 영역을 알려 주므로 그만큼 바를 위로 얹는다.

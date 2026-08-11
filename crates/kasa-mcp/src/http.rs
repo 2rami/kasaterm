@@ -2750,6 +2750,24 @@ async fn term_page_handler(
     }
 }
 
+/// 터미널 폰트. claude code 의 Nerd Font 아이콘(사설영역)과 박스드로잉이 폰
+/// 시스템 폰트에는 없어서, 안 내려주면 두부(□)와 끊긴 선으로 보인다.
+///
+/// 번들 CascadiaCodeNF 를 실제로 쓰는 범위만 남겨 서브셋했다(2.4MB → 356KB).
+/// 한글은 일부러 뺐다 — 이 폰트에 애초에 없고, 넣으면 몇 MB가 된다. 폰에는 한글
+/// 폰트가 이미 있으므로 폴백에 맡긴다.
+async fn term_asset_font() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            // 내용이 바뀌지 않으므로 길게 캐시한다 — 폰이 열 때마다 356KB 를
+            // 다시 받으면 터널 너머에서 특히 아프다.
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_bytes!("../assets/term/font.woff2").as_slice(),
+    )
+}
+
 async fn term_asset_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
@@ -2765,8 +2783,30 @@ async fn term_asset_css() -> impl IntoResponse {
 }
 
 /// 살아 있는 pane 목록 — 미러 대상을 고르는 데 쓴다.
-async fn term_panes_handler() -> impl IntoResponse {
-    Json(kasa_pty::live_sessions())
+/// `GET /term/panes` — 붙을 수 있는 pane 목록.
+///
+/// id 만 주면 폰 드롭다운에 `%86` 이 뜰 뿐이라 **누가 무슨 일을 하던 pane 인지 알
+/// 수가 없다.** 그 정보는 이미 board 가 들고 있으므로(캐릭터 이름·작업 제목·상태)
+/// 여기서 얹어 준다. 목록의 정본은 여전히 `live_sessions()` 다 — board 에만 있고
+/// PTY 가 없는 행에 붙으면 연결이 그냥 끊긴다.
+///
+/// 웹 셸(`web-…`)은 board 에 없다. 그건 이름 없이 id 만 나가고, 클라가 그때 id 를
+/// 그대로 보여 준다.
+async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let board = backend.collab_board().unwrap_or_default();
+    let rows: Vec<serde_json::Value> = kasa_pty::live_sessions()
+        .into_iter()
+        .map(|id| {
+            let b = board.iter().find(|p| p.surface_id == id);
+            serde_json::json!({
+                "id": id,
+                "name": b.and_then(|p| p.character.clone()),
+                "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
+                "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
+            })
+        })
+        .collect();
+    Json(rows)
 }
 
 /// 이 서버 인스턴스의 1회용 토큰. 프로세스가 뜰 때 한 번 만들어진다.
@@ -3276,6 +3316,7 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let panes_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
@@ -3403,7 +3444,11 @@ pub fn spawn_http_server_opts(
                     .route("/term", get(term_page_handler))
                     .route("/term/xterm.js", get(term_asset_js))
                     .route("/term/xterm.css", get(term_asset_css))
-                    .route("/term/panes", get(term_panes_handler))
+                    .route("/term/font.woff2", get(term_asset_font))
+                    .route(
+                        "/term/panes",
+                        get(move || term_panes_handler(panes_backend.clone())),
+                    )
                     .route("/term/ws", get(term_ws_handler))
                     .route(
                         "/mode",
