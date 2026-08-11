@@ -181,6 +181,11 @@ pub struct PtyBackend {
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
     /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
     last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    /// codex rollout 경로 → 그 세션의 model. codex 는 model 이 실린 유일한 줄
+    /// (`turn_context`)이 파일 **앞** 87~122KB 에 있어 tail 창에 영영 안 걸린다 —
+    /// 그래서 머리를 한 번만 읽어 여기 기억한다. surface_id 가 아니라 **경로**가
+    /// 키다: 세션을 갈아타면 경로가 바뀌어 저절로 다시 읽는다.
+    codex_model: Arc<Mutex<HashMap<String, String>>>,
     /// surface_id → {cwd, git badge}, filled by the GUI each frame (shared Arc).
     /// `window_layout` reads it to stamp cwd/branch/diff onto each `PaneRect` so
     /// the BA GUI can draw a Warp-style bar without this thread shelling out to
@@ -328,6 +333,7 @@ impl PtyBackend {
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             reported_ctx: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
+            codex_model: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
@@ -1565,6 +1571,31 @@ impl Backend for PtyBackend {
                 let (tail, mtime_idle) = read_tail(path, 512 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
+                // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
+                // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
+                // 직후 잠깐 빌 뿐 곧 tail 에서 잡히니 여기서 읽으면 헛일이다.
+                if row.model.is_empty() && codex_sid_from_rollout(path).is_some() {
+                    const HEAD: u64 = 384 * 1024;
+                    let key = path.to_string_lossy().into_owned();
+                    let hit = self.codex_model.lock().unwrap().get(&key).cloned();
+                    match hit {
+                        Some(m) => row.model = m,
+                        None => {
+                            let head = read_head(path, HEAD);
+                            let m = crate::transcript::codex_model_from_head(&head);
+                            if !m.is_empty() {
+                                self.codex_model.lock().unwrap().insert(key, m.clone());
+                                row.model = m;
+                            } else if head.len() as u64 >= HEAD {
+                                // 머리를 꽉 읽고도 없다 = 지시문이 우리 창보다 크다.
+                                // 폴링마다 384KB 를 다시 읽어도 같은 답이라 굳힌다.
+                                self.codex_model.lock().unwrap().insert(key, String::new());
+                            }
+                            // 더 짧으면 파일을 통째로 본 것 — 아직 첫 턴을 안 썼을
+                            // 뿐이라 굳히지 않고 다음 폴링에 다시 본다.
+                        }
+                    }
+                }
                 // Prefer claude's official status when it reports this session
                 // (matched by transcript filename stem == sessionId). The
                 // mtime heuristic above is only a fallback for sessions claude
@@ -2042,6 +2073,17 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool
     let mut buf = Vec::new();
     let _ = f.read_to_end(&mut buf);
     (String::from_utf8_lossy(&buf).into_owned(), idle)
+}
+
+/// 파일 **머리** `max_bytes`. `read_tail` 의 짝이다 — 알고 싶은 값이 파일 앞에만
+/// 있는 로그(codex 의 `turn_context`)를 위해서다. 반환이 `max_bytes` 보다 짧으면
+/// 파일을 통째로 본 것이라, 호출부가 "아직 안 쓰였다"와 "우리 창 밖이다"를 가른다.
+pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(path) else { return String::new() };
+    let mut buf = Vec::new();
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0

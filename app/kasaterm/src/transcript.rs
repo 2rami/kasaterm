@@ -117,6 +117,28 @@ fn looks_like_codex(tail: &str) -> bool {
     })
 }
 
+/// codex 롤아웃의 **머리**에서 model 을 집는다 — 앞에서부터 첫 `turn_context`.
+///
+/// board 는 꼬리만 읽는데 codex 의 model 은 `turn_context` 에만 실리고, 그게 파일
+/// 앞 **87~122KB** 지점에 있다(실측 2026-08-11, 세션 4개). 그 앞을 채우는 건 지시문
+/// 뭉치다. 꼬리를 키워도 소용없다 — 한 턴이 exec 출력째 실려 512KB 를 넘으므로
+/// 마지막 `turn_context` 는 끝에서 1MB 넘게 떨어져 있다(같은 날 실측).
+///
+/// 세션 도중 모델을 갈면 첫 값이 낡는다. 그래도 빈칸보다는 낫다 — board 에서 model
+/// 은 "무엇이 돌고 있나"를 가르는 칸이라 비면 행 자체가 읽히지 않는다.
+pub(crate) fn codex_model_from_head(head: &str) -> String {
+    head.lines()
+        .find_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            if v.get("type")?.as_str()? != "turn_context" {
+                return None;
+            }
+            let m = v.get("payload")?.get("model")?.as_str()?;
+            (!m.is_empty()).then(|| m.to_string())
+        })
+        .unwrap_or_default()
+}
+
 /// `item.content[]` 의 텍스트 조각을 잇는다.
 ///
 /// ⚠️ 조각의 `type` 으로 거르지 마라 — **대소문자가 갈린다**(실측 2026-08-11:
@@ -905,6 +927,25 @@ mod codex_tests {
         // 조각 `type` 이 `text`/`Text` 로 갈리므로 그걸로 걸렀다면 한쪽이 빈다.
         // 줄바꿈은 board 한 줄에 못 들어가니 clip 이 공백으로 편다.
         assert_eq!(a.last_reply, "연동을 붙였어요");
+    }
+
+    /// model 은 꼬리가 아니라 **머리**에서 온다(실측 87~122KB 지점). 세션 도중
+    /// 모델을 갈아도 **첫** 것을 쓴다 — 뒤엣것은 우리 머리 창에 없을 수도 있어,
+    /// 있다 없다 하는 값보다 한 번 정해진 값이 board 에서 덜 헷갈린다.
+    #[test]
+    fn model_은_머리의_첫_turn_context_다() {
+        let head = [
+            r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#,
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것"}}"#,
+        ]
+        .join("\n");
+        assert_eq!(codex_model_from_head(&head), "gpt-5.5");
+        // 아직 첫 턴을 안 쓴 세션 — 빈 문자열이어야 호출부가 "다음에 다시" 로 읽는다.
+        let only_meta = r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#;
+        assert_eq!(codex_model_from_head(only_meta), "");
+        assert_eq!(codex_model_from_head("깨진 줄\n{}"), "");
     }
 
     /// codex 의 답변은 변경 목록째 실려 와 길다 — board 한 줄에 들어가려면 잘려야 한다.
