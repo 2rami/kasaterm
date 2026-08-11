@@ -36,17 +36,22 @@
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
 
   /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다 — 11px 회색으로 흘리면
-     격자가 작아진 화면에서 그대로 묻힌다. kasaterm pane 헤더처럼 칩으로 띄운다. */
+     격자가 작아진 화면에서 그대로 묻힌다. kasaterm pane 헤더처럼 프사 붙은 칩으로. */
   #status {
     position: absolute; right: 10px; top: 6px; z-index: 5;
+    display: none; align-items: center; gap: 6px;
     font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #9aa6b4; background: rgba(23, 28, 36, .88);
     border: 1px solid #2a323e; border-radius: 6px;
-    padding: 5px 8px; pointer-events: none; max-width: 55vw;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 4px 8px 4px 4px; pointer-events: none; max-width: 55vw;
   }
-  #status:empty { display: none; }
+  #status.on { display: flex; }
   #status.waiting { color: #ffd479; border-color: #5a4a24; }
+  #who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    object-fit: cover; flex: 0 0 auto; display: none;
+  }
 
   /* 하단 바 — 소프트 키보드가 올라오면 visualViewport 로 그 위에 얹는다.
      transform 으로만 움직인다(§④): position 을 바꾸면 터미널이 뛴다. */
@@ -71,10 +76,10 @@
 </head>
 <body>
 <div id="term"></div>
-<div id="status"></div>
+<div id="status"><img id="avatar" alt=""><span id="who"></span></div>
 <div id="bar">
   <select id="panes" aria-label="pane 고르기"><option value="">새 셸</option></select>
-  <button id="fitbtn" aria-label="화면 맞춤" aria-pressed="false">⤢</button>
+  <button id="fitbtn" aria-label="폰 크기 / 원래 크기 전환" aria-pressed="false">⤢</button>
   <button data-seq="\x1b" aria-label="Esc">esc</button>
   <button data-seq="\t" aria-label="Tab">⇥</button>
   <button data-seq="\x03" aria-label="Ctrl-C">^C</button>
@@ -92,6 +97,16 @@
     return hit ? hit.slice(5) : '';
   })();
   const statusEl = document.getElementById('status');
+  const whoEl = document.getElementById('who');
+  const avatarEl = document.getElementById('avatar');
+  const setWho = (text, slug) => {
+    whoEl.textContent = text;
+    statusEl.classList.toggle('on', !!text);
+    if (slug) {
+      avatarEl.src = `/term/avatar/${encodeURIComponent(slug)}.png`;
+      avatarEl.style.display = 'block';
+    }
+  };
   const bar = document.getElementById('bar');
   const panesEl = document.getElementById('panes');
   const fitBtn = document.getElementById('fitbtn');
@@ -152,10 +167,15 @@
         term.resize(m.cols, m.rows);
         fitFontToCols();
         // 이름은 /term/panes 가 오면 덮어쓴다. 그 전까지는 id 라도 띄워 둔다.
-        if (mirror && !statusEl.textContent) statusEl.textContent = paneId;
-        if (!mirror) statusEl.textContent = '';
+        if (mirror && !whoEl.textContent) setWho(paneId);
         // 새 셸은 이미 우리 크기로 뜨므로 맞출 것이 없다.
-        if (!mirror) fitBtn.style.display = 'none';
+        if (!mirror) { setWho(''); fitBtn.style.display = 'none'; }
+        // 폰에서는 pane 격자(196열)가 축소로 안 들어간다 — 폭을 맞추면 글자가 5px 라
+        // 읽지도 치지도 못한다. 그래서 터치 기기면 붙는 즉시 PTY 를 폰 격자로 줄인다.
+        // ⚠️ 이걸 자동으로 켤 수 있는 건 **서버가 끊길 때 원래 격자로 되돌리기**
+        // 때문이다. 그 복구가 없으면 폰으로 잠깐 들여다본 것만으로 kasaterm 쪽 pane 이
+        // 좁아진 채 남는다. 되돌리고 싶으면 ⤢ 로 원래 격자를 다시 볼 수 있다.
+        if (touch && mirror && !fitted) { fitted = true; applyFit(); }
       }
       return;
     }
@@ -213,8 +233,9 @@
       o.textContent = p.status === 'waiting' ? `● ${label}` : label;
       if (p.id === here) {
         o.selected = true;
-        // 우상단 칩도 id 대신 이름으로. 이름을 모르는 pane 은 id 라도 남긴다.
-        statusEl.textContent = p.name || p.id;
+        // 우상단 칩도 id 대신 이름과 프사로 — kasaterm pane 헤더가 보여 주는 것과
+        // 같다. 이름을 모르는 pane(웹 셸)은 id 만 남는다.
+        setWho(p.name || p.id, p.slug);
         statusEl.classList.toggle('waiting', p.status === 'waiting');
       }
       panesEl.append(o);
@@ -260,10 +281,10 @@
   }
 
   ws.onclose = () => {
-    statusEl.textContent = '';
+    setWho('');
     term.write('\r\n\x1b[31m● 연결이 끊겼습니다\x1b[0m\r\n');
   };
-  ws.onerror = () => { statusEl.textContent = '연결 오류'; };
+  ws.onerror = () => { setWho('연결 오류'); };
 })();
 </script>
 </body>

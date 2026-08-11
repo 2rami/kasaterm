@@ -2936,6 +2936,65 @@ async fn term_asset_css() -> impl IntoResponse {
     )
 }
 
+/// 프사가 있는 학생 슬러그. `AVATARS` 와 짝이므로 여기 없는 이름은 프사도 없다.
+const AVATAR_SLUGS: &[&str] = &[
+    "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana", "shiroko",
+    "yuuka", "yuzu",
+];
+
+/// agent 이름(`aru-p151-1uc`)의 앞 토막이 캐릭터 슬러그다.
+///
+/// ⚠️ 이름→슬러그 표(`theme::character_slug`)를 여기 복제하지 않는다. 그건 인박스
+/// 파일명을 정하는 정본이라 두 벌이 되면 어긋나고, 어긋나도 오류가 안 난다. 우리는
+/// 이미 만들어진 결과를 되읽기만 한다 — 표에 없는 커스텀 캐릭터는 해시 슬러그로
+/// 떨어져 여기서 `None` 이 되고, 프사 없이 이름만 뜬다.
+fn avatar_slug(agent_name: &str) -> Option<&'static str> {
+    let head = agent_name.split('-').next()?;
+    AVATAR_SLUGS.iter().copied().find(|s| *s == head)
+}
+
+/// `GET /term/avatar/<slug>.png` — pane 칩에 띄울 학생 프사.
+///
+/// kasaterm 은 pane 헤더에 프사를 그리는데 미러는 PTY 바이트만 받으므로 그게 없다.
+/// 폰에서 「누구 화면인가」가 이름 한 줄로만 남으면 눈에 안 들어와서, 같은 그림을
+/// 웹에도 준다. 자산은 GUI 가 쓰는 것 그대로다(따로 복제하지 않는다).
+async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> impl IntoResponse {
+    macro_rules! avatars {
+        ($($s:literal),* $(,)?) => {
+            match slug.trim_end_matches(".png") {
+                $($s => Some(
+                    include_bytes!(concat!(
+                        "../../../app/kasaterm/assets/students/", $s, "-profile.png"
+                    )).as_slice()
+                ),)*
+                _ => None,
+            }
+        };
+    }
+    let png = avatars!(
+        "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana",
+        "shiroko", "yuuka", "yuzu",
+    );
+    match png {
+        Some(b) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            b,
+        ),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            b"".as_slice(),
+        ),
+    }
+}
+
 /// 살아 있는 pane 목록 — 미러 대상을 고르는 데 쓴다.
 /// `GET /term/panes` — 붙을 수 있는 pane 목록.
 ///
@@ -2957,6 +3016,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
                 "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
+                "slug": b.and_then(|p| p.agent_name.as_deref()).and_then(avatar_slug),
             })
         })
         .collect();
@@ -3327,6 +3387,20 @@ async fn term_ws_run(
         }
     });
 
+    // 폰은 pane 격자(196열)를 축소로 담을 수가 없어서 PTY 자체를 줄여야 읽힌다.
+    // 그런데 PTY 는 winsize 가 하나뿐이라 그 순간 kasaterm 쪽 pane 도 같이 좁아진다 —
+    // 자동으로 줄이지 못했던 이유가 그것이고, **되돌릴 방법이 없다는 것**이 진짜
+    // 문제였다. 원래 격자를 들고 있다가 연결이 끝날 때 되돌리면, 폰 탭을 닫는 것만으로
+    // 여기가 복구되므로 자동으로 켜도 안전해진다.
+    //
+    // ⚠️ 되돌리는 건 **내가 바꿔 놓은 그 크기가 아직 그대로일 때만**이다. 미러가 둘
+    // 붙어 있으면 남이 그 사이 또 바꿨을 수 있는데, 그때 내 원본을 밀어 넣으면 보고
+    // 있는 쪽 화면을 내가 깨뜨린다.
+    let restore_to = mirrored.then_some((c, r));
+    // (cols<<16 | rows). 0 = 이 연결은 격자를 건드린 적이 없다.
+    let forced = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let forced_in = forced.clone();
+
     let sess_in = sess.clone();
     let mut to_browser = tokio::spawn(async move {
         loop {
@@ -3360,16 +3434,22 @@ async fn term_ws_run(
                         continue;
                     };
                     if v.get("t").and_then(|x| x.as_str()) == Some("resize") {
-                        // ⚠️ 미러일 땐 창 크기를 따라 자동으로 바꾸지 않는다 — 같은 PTY 를
-                        // 보고 있는 kasaterm pane 의 화면이 같이 깨진다. 폰에서는 넓은
-                        // pane(193열)이 축소로도 안 들어가서 이 규칙을 깨야만 읽을 수
-                        // 있는데, 그건 **사용자가 누른 순간에만** 허용한다(`force`).
-                        // 자동이면 폰으로 훔쳐본 것만으로 남의 화면이 줄어든다.
+                        // ⚠️ 미러일 땐 창 크기를 따라 **저절로** 바꾸지 않는다 — 같은 PTY 를
+                        // 보고 있는 kasaterm pane 이 같이 좁아진다. 폰은 그 규칙을 깨야만
+                        // 읽히므로 `force` 로 명시한 요청만 통과시키고, 그렇게 바꾼 격자는
+                        // 연결이 끝날 때 아래에서 되돌린다(그 복구가 있어야 클라이언트가
+                        // 이걸 자동으로 켤 수 있다).
                         let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
                         if !mirrored || force {
                             let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                             let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
-                            let _ = sess_in.resize(c.max(20), r.max(5));
+                            let (c, r) = (c.max(20), r.max(5));
+                            if sess_in.resize(c, r).is_ok() && mirrored {
+                                forced_in.store(
+                                    (c as u32) << 16 | r as u32,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
                         }
                     }
                 }
@@ -3384,6 +3464,20 @@ async fn term_ws_run(
     tokio::select! {
         _ = &mut to_browser => to_shell.abort(),
         _ = &mut to_shell => to_browser.abort(),
+    }
+
+    // 폰이 줄여 놓은 격자를 돌려준다. 안 하면 폰 탭을 닫은 뒤에도 kasaterm pane 이
+    // 좁아진 채로 남아, 「폰으로 잠깐 봤더니 내 화면이 줄었다」가 된다.
+    if let Some((oc, or)) = restore_to {
+        let packed = forced.load(std::sync::atomic::Ordering::Relaxed);
+        if packed != 0 {
+            let mine = ((packed >> 16) as u16, (packed & 0xffff) as u16);
+            // 내가 마지막으로 넣은 크기가 아직 살아 있을 때만 되돌린다 — 그 사이 남이
+            // (다른 미러든 kasaterm 이든) 바꿨다면 그쪽이 최신이고, 내 원본은 낡았다.
+            if sess.size() == mine && mine != (oc, or) {
+                let _ = sess.resize(oc, or);
+            }
+        }
     }
 }
 
@@ -3599,6 +3693,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/xterm.js", get(term_asset_js))
                     .route("/term/xterm.css", get(term_asset_css))
                     .route("/term/font.woff2", get(term_asset_font))
+                    .route("/term/avatar/{slug}", get(term_avatar))
                     .route(
                         "/term/panes",
                         get(move || term_panes_handler(panes_backend.clone())),
