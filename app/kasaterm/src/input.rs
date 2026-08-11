@@ -91,8 +91,12 @@ impl App {
             return (0.0, 0.0);
         };
         let ws = self.ws.lock().unwrap();
-        let Some(pane) = ws.panes.get(pane_id) else { return (0.0, 0.0) };
-        let Some(img) = pane.image() else { return (0.0, 0.0) };
+        let Some(pane) = ws.panes.get(pane_id) else {
+            return (0.0, 0.0);
+        };
+        let Some(img) = pane.image() else {
+            return (0.0, 0.0);
+        };
         // Rotation by an odd quarter swaps the texture's width/height.
         let (iw, ih) = if pane.image_rot % 2 == 1 {
             (img.h as f32, img.w as f32)
@@ -106,10 +110,7 @@ impl App {
         let z = pane.image_view_zoom().max(1.0);
         let raw_w = iw * fit * z;
         let raw_h = ih * fit * z;
-        (
-            ((raw_w - bw) * 0.5).max(0.0),
-            ((raw_h - bh) * 0.5).max(0.0),
-        )
+        (((raw_w - bw) * 0.5).max(0.0), ((raw_h - bh) * 0.5).max(0.0))
     }
     /// 이미지 pane 의 화면 박스(원점+크기, logical px). `image_pan_bounds` 와 같은
     /// `effective_leaf_rects` 기반 — 커서기준 줌의 pane 중심 계산에 쓴다.
@@ -217,7 +218,14 @@ impl App {
     /// the SGR button code (0 = left press/motion/release, +32 for
     /// motion-with-button-held). `press` toggles the final byte
     /// between `M` (press / motion) and `m` (release).
-    pub(crate) fn send_mouse_sgr(&self, pane_id: &str, button: u8, col: u16, row: u16, press: bool) {
+    pub(crate) fn send_mouse_sgr(
+        &self,
+        pane_id: &str,
+        button: u8,
+        col: u16,
+        row: u16,
+        press: bool,
+    ) {
         let final_byte = if press { 'M' } else { 'm' };
         let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
         if let Some(tmux) = self.tmux.as_ref() {
@@ -437,8 +445,11 @@ impl App {
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
-            let bg_active =
-                if busy { false } else { bg_tab_busy.contains(id) || self.pane_bg_active(id) };
+            let bg_active = if busy {
+                false
+            } else {
+                bg_tab_busy.contains(id) || self.pane_bg_active(id)
+            };
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
@@ -473,9 +484,14 @@ impl App {
         }
     }
 
-    /// Whether a `run_in_background` shell or `Monitor` is in-flight for this
-    /// pane, read from the claude transcript tail. mtime-gated: an unchanged
-    /// transcript returns the cached verdict, so an idle pane costs one `stat`.
+    /// 이 pane 에 **화면 밖에서 도는 일**이 있나 — `run_in_background` 셸·`Monitor`,
+    /// 그리고 아직 안 돌아온 **서브에이전트**. claude transcript tail 에서 읽는다.
+    /// mtime 게이트라 안 바뀐 transcript 는 캐시로 답해 노는 pane 은 `stat` 한 번이다.
+    ///
+    /// 서브에이전트를 같이 보는 이유: 세션 자체는 idle(스피너 없음)인데 Task 가 정보를
+    /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(거노
+    /// 2026-08-11 제안). 표시는 이미 갈려 있다 — 도는 중은 쓸어가는 sweep, 이쪽은
+    /// 3초 숨쉬기 pulse(`render.rs` 의 `working_bar` vs `pulse_bar`).
     fn pane_bg_active(&mut self, pane_id: &str) -> bool {
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
             return false;
@@ -492,9 +508,8 @@ impl App {
             }
         }
         let (tail, idle) = crate::socket::read_tail(&path, 64 * 1024);
-        let bg = !crate::transcript::snapshot_from_tail(&sid, &tail, idle)
-            .background
-            .is_empty();
+        let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
+        let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         if let Some(mt) = mtime {
             self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg));
         }
@@ -528,7 +543,8 @@ impl App {
                     // 막혀 선 학생이 「끝난 학생」으로 보였다 — 없는 신호보다 나쁜
                     // 틀린 신호다(2026-08-11). 대기는 attention 색이 말한다.
                     // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
-                    self.collab.attention
+                    self.collab
+                        .attention
                         .lock()
                         .unwrap()
                         .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
@@ -644,7 +660,10 @@ impl App {
                 .active_pane
                 .clone()
                 .or_else(|| ws.panes.keys().next().cloned());
-            let osc = id.as_ref().and_then(|i| ws.panes.get(i)).and_then(|p| p.title.clone());
+            let osc = id
+                .as_ref()
+                .and_then(|i| ws.panes.get(i))
+                .and_then(|p| p.title.clone());
             id.map(|i| (i, osc))
         };
         let Some((id, osc)) = active else { return };
@@ -827,7 +846,9 @@ impl App {
     }
     /// 렌더 뷰 선택을 클립보드로. true 면 이 호출이 복사를 처리했다.
     pub(crate) fn copy_md_render_selection(&self) -> bool {
-        let Some(text) = self.md_render_selection_text() else { return false };
+        let Some(text) = self.md_render_selection_text() else {
+            return false;
+        };
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
                 if let Err(e) = cb.set_text(text) {
@@ -842,7 +863,9 @@ impl App {
         if self.copy_md_render_selection() {
             return;
         }
-        let Some(sel) = self.selection else { return; };
+        let Some(sel) = self.selection else {
+            return;
+        };
         let rows = {
             let ws = self.ws.lock().unwrap();
             match ws.active().and_then(|p| p.term()) {
@@ -957,10 +980,8 @@ impl App {
                     if mx > 0.0 || my > 0.0 {
                         if let Ok(mut ws) = self.ws.lock() {
                             if let Some(pane) = ws.panes.get_mut(&pid) {
-                                pane.image_pan_x =
-                                    (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
-                                pane.image_pan_y =
-                                    (pane.image_pan_y - p.y as f32).clamp(-my, my);
+                                pane.image_pan_x = (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
+                                pane.image_pan_y = (pane.image_pan_y - p.y as f32).clamp(-my, my);
                                 pane.dirty = true;
                             }
                         }
@@ -999,11 +1020,19 @@ impl App {
                 // mode when the swipe is decisively sideways.
                 let d = match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
-                        if self.tabs_on_top && x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                        if self.tabs_on_top && x.abs() > y.abs() {
+                            x * 48.0
+                        } else {
+                            y * 48.0
+                        }
                     }
                     MouseScrollDelta::PixelDelta(p) => {
                         let (px, py) = (p.x as f32, p.y as f32);
-                        if self.tabs_on_top && px.abs() > py.abs() { px } else { py }
+                        if self.tabs_on_top && px.abs() > py.abs() {
+                            px
+                        } else {
+                            py
+                        }
                     }
                 };
                 self.win_tab_wheel_accum += d;
@@ -1047,11 +1076,19 @@ impl App {
                 if let Some((n, first, vis)) = overflow {
                     let d = match delta {
                         MouseScrollDelta::LineDelta(x, y) => {
-                            if x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                            if x.abs() > y.abs() {
+                                x * 48.0
+                            } else {
+                                y * 48.0
+                            }
                         }
                         MouseScrollDelta::PixelDelta(p) => {
                             let (px, py) = (p.x as f32, p.y as f32);
-                            if px.abs() > py.abs() { px } else { py }
+                            if px.abs() > py.abs() {
+                                px
+                            } else {
+                                py
+                            }
                         }
                     };
                     // Same 48px-per-tab accumulator as the window strip — a
@@ -1060,8 +1097,7 @@ impl App {
                     let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
                     if steps != 0 {
                         self.win_tab_wheel_accum -= steps as f32 * 48.0;
-                        let next =
-                            (first as i64 - steps).clamp(0, (n - vis) as i64) as usize;
+                        let next = (first as i64 - steps).clamp(0, (n - vis) as i64) as usize;
                         if next != first {
                             if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(p) = ws.panes.get_mut(&pid) {
@@ -1124,9 +1160,10 @@ impl App {
         // 먹어야 하므로 그 두 경우만 비켜 준다(target 이 활성 pane 으로 폴백하므로
         // 커서가 pane 밖에 있어도 여기 걸린다).
         let (cx, cy) = self.cursor_px;
-        let over_menu = self.statusbar.menu_rect.is_some_and(|(mx, my, mw, mh)| {
-            cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh
-        });
+        let over_menu = self
+            .statusbar
+            .menu_rect
+            .is_some_and(|(mx, my, mw, mh)| cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh);
         let over_side_col = self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x();
         // Decide which pane handles this wheel: the pane the pointer is
         // hovering over. Falls back to the active pane if the pointer
@@ -1333,14 +1370,19 @@ impl App {
         {
             let item_h = 22.0_f32;
             let n = self
-                .git.col_data
+                .git
+                .col_data
                 .lock()
                 .map(|g| g.staged.len() + g.unstaged.len())
                 .unwrap_or(0);
             let win_h = self.window.as_ref().map_or(800.0, |w| {
                 w.inner_size().height as f32 / self.effective_scale()
             });
-            let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+            let dock_h = if self.docked.is_empty() {
+                0.0
+            } else {
+                DOCK_HEIGHT
+            };
             // Header (branch + summary + rule) ≈ 68px; button zone ≈ 44px.
             let list_top = TITLE_HEIGHT + 68.0;
             let visible_h = (win_h - dock_h - list_top - 44.0).max(0.0);
@@ -1366,9 +1408,7 @@ impl App {
         }
         let (alt, hist_len, mouse_on, mouse_sgr) = {
             let ws = self.ws.lock().unwrap();
-            let pane = target_pane_id
-                .as_deref()
-                .and_then(|id| ws.panes.get(id));
+            let pane = target_pane_id.as_deref().and_then(|id| ws.panes.get(id));
             match pane.and_then(|p| p.term()) {
                 Some(t) => (t.alt_screen, t.history.len(), t.mouse_enabled, t.mouse_sgr),
                 None => return,
@@ -1490,7 +1530,9 @@ impl App {
         for a in self.aux_windows.iter_mut() {
             a.preedit.clear();
         }
-        let (Some(text), Some(prev)) = (pending, prev) else { return };
+        let (Some(text), Some(prev)) = (pending, prev) else {
+            return;
+        };
         match prev {
             crate::ImeFocus::Pane(id) => {
                 // 탭이 있는 pane 은 leaf id 와 실제 pid 가 갈린다 —
@@ -1828,7 +1870,8 @@ impl App {
         // PTY. (Branch menu has no search — its lists are short — so it falls
         // through.)
         if self
-            .statusbar.menu
+            .statusbar
+            .menu
             .as_ref()
             .map(|(_, k)| matches!(k, StatusbarMenu::Path))
             .unwrap_or(false)
@@ -1847,8 +1890,8 @@ impl App {
             && self.file_tree.rename.is_none()
             && !self.file_tree.search_active
         {
-            let has_sel = self.file_tree.selected.is_some()
-                || !self.file_tree.selected_more.is_empty();
+            let has_sel =
+                self.file_tree.selected.is_some() || !self.file_tree.selected_more.is_empty();
             if has_sel {
                 use winit::keyboard::{Key, NamedKey};
                 let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
@@ -1857,7 +1900,10 @@ impl App {
                 if std::env::var_os("KASATERM_KEY_DEBUG").is_some() {
                     eprintln!(
                         "[ftdel] has_sel={} del={} super={} key={:?}",
-                        has_sel, del, self.modifiers.super_key(), event.logical_key
+                        has_sel,
+                        del,
+                        self.modifiers.super_key(),
+                        event.logical_key
                     );
                 }
                 if del {
@@ -1980,7 +2026,11 @@ impl App {
                         // 실제로 바뀌었는지 다시 읽는다 — 못 바꿨는데 편집 경로로
                         // 넘기면 씨딩 안 된 버퍼를 건드린다.
                         let ws = self.ws.lock().unwrap();
-                        raw_now = ws.panes.get(&id).and_then(|p| p.markdown()).is_some_and(|m| m.raw_mode);
+                        raw_now = ws
+                            .panes
+                            .get(&id)
+                            .and_then(|p| p.markdown())
+                            .is_some_and(|m| m.raw_mode);
                     }
                 }
                 if raw_now {
@@ -2222,7 +2272,11 @@ impl App {
                 // assumption) AND the logical key text — Korean / European
                 // layouts may emit the same character from a different
                 // physical position.
-                let zoom_mod = if cfg!(target_os = "macos") { host } else { ctrl };
+                let zoom_mod = if cfg!(target_os = "macos") {
+                    host
+                } else {
+                    ctrl
+                };
                 if zoom_mod {
                     use winit::keyboard::Key;
                     let logical_str = match &event.logical_key {
@@ -2234,15 +2288,27 @@ impl App {
                     let pane_only = self.host_mod_alt();
                     match zoom_key(Some(code), logical_str) {
                         Some(ZoomKey::In) => {
-                            if pane_only { self.change_pane_font(0.1); } else { self.change_ui_zoom(0.1); }
+                            if pane_only {
+                                self.change_pane_font(0.1);
+                            } else {
+                                self.change_ui_zoom(0.1);
+                            }
                             return;
                         }
                         Some(ZoomKey::Out) => {
-                            if pane_only { self.change_pane_font(-0.1); } else { self.change_ui_zoom(-0.1); }
+                            if pane_only {
+                                self.change_pane_font(-0.1);
+                            } else {
+                                self.change_ui_zoom(-0.1);
+                            }
                             return;
                         }
                         Some(ZoomKey::Reset) => {
-                            if pane_only { self.reset_pane_font(); } else { self.reset_ui_zoom(); }
+                            if pane_only {
+                                self.reset_pane_font();
+                            } else {
+                                self.reset_ui_zoom();
+                            }
                             return;
                         }
                         None => {}
@@ -2524,8 +2590,7 @@ impl App {
                                                 .map(|t| (t.cursor_row, t.cursor_col))
                                         })
                                     });
-                                    self.commit_overlay =
-                                        before.map(|b| (commit.clone(), b));
+                                    self.commit_overlay = before.map(|b| (commit.clone(), b));
                                     self.input_buf.push_str(&commit);
                                     self.send_bytes(commit.as_bytes());
                                 }
@@ -2723,8 +2788,12 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
         if line.contains("esc to interrupt") {
             return true;
         }
-        let has_star = row.iter().any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
-        let has_braille = row.iter().any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
+        let has_star = row
+            .iter()
+            .any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
+        let has_braille = row
+            .iter()
+            .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
         // 스피너는 가운뎃점(·) 프레임도 순환하는데, 최근 claude code 는 스피너
         // 행에 "esc to interrupt" 힌트를 안 넣는다("· Verbing… (3m · ↓ 9k tokens)")
         // — 점 프레임에서 working 판정이 프레임마다 풀리지 않게 점도 잡는다.
@@ -2814,7 +2883,12 @@ mod working_scan_tests {
     use kasa_bridge::screen::Cell;
 
     fn row(s: &str) -> Vec<GridCell> {
-        s.chars().map(|ch| Cell { ch, ..Cell::blank() }).collect()
+        s.chars()
+            .map(|ch| Cell {
+                ch,
+                ..Cell::blank()
+            })
+            .collect()
     }
     fn blank() -> Vec<GridCell> {
         vec![Cell::blank(); 8]
@@ -2839,7 +2913,9 @@ mod working_scan_tests {
     fn dot_frame_without_esc_hint_is_working() {
         // 라이브 실측(claude code 2.1.207): 점 프레임 스피너 행에 "esc to
         // interrupt" 힌트가 없다 — 점+… 문맥만으로 working 이어야 한다.
-        assert!(rows_show_working(&[row("· Caramelizing… (3m 39s · ↓ 9.7k tokens)")]));
+        assert!(rows_show_working(&[row(
+            "· Caramelizing… (3m 39s · ↓ 9.7k tokens)"
+        )]));
     }
 
     #[test]
@@ -2867,7 +2943,9 @@ mod working_scan_tests {
     /// 문구를 바꾸면 조용히 죽는 대신 여기서 터지라고 있는 것이다.
     #[test]
     fn codex_working_line_is_working() {
-        assert!(rows_show_working(&[row("• Working (3s • esc to interrupt)")]));
+        assert!(rows_show_working(&[row(
+            "• Working (3s • esc to interrupt)"
+        )]));
         // 입력줄·상태줄이 아래에 깔려도 하단 10행 창 안이라 잡힌다(실측 배치).
         assert!(rows_show_working(&[
             row("• Working (12s • esc to interrupt)"),
@@ -2889,14 +2967,20 @@ mod working_scan_tests {
             row("  2. Yes, and don't ask again"),
             row("  3. No, and tell Claude what to do differently"),
         ];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
     fn ask_user_question_menu_without_yes_is_menu_prompt() {
         // AskUserQuestion 옵션은 Yes/No 가 아닐 수 있다 — 번호+점이면 메뉴.
         let cells = vec![row("❯ 1. worktree로 격리"), row("  2. 그냥 main에서")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
@@ -2908,14 +2992,20 @@ mod working_scan_tests {
     #[test]
     fn permission_footer_alone_is_not_a_prompt() {
         // 푸터의 "bypass permissions on" 은 항상 떠 있다 — 매칭 금지 (munder 함정).
-        let cells = vec![row("❯ "), row("  bypass permissions on (shift+tab to cycle)")];
+        let cells = vec![
+            row("❯ "),
+            row("  bypass permissions on (shift+tab to cycle)"),
+        ];
         assert_eq!(rows_show_approval_prompt(&cells), None);
     }
 
     #[test]
     fn yn_on_last_row_is_yesno_prompt() {
         let cells = vec![row("Overwrite existing file? (y/n)")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::YesNo));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::YesNo)
+        );
     }
 
     #[test]
@@ -2945,8 +3035,15 @@ mod working_scan_tests {
     #[test]
     fn live_menu_without_bare_chevron_below_is_menu() {
         // 진짜 활성 메뉴: 입력행이 메뉴 옵션으로 대체돼 아래에 bare "❯ " 가 없다.
-        let cells = vec![row("Do you want to proceed?"), row("❯ 1. Yes"), row("  2. No")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        let cells = vec![
+            row("Do you want to proceed?"),
+            row("❯ 1. Yes"),
+            row("  2. No"),
+        ];
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
@@ -2976,7 +3073,9 @@ mod working_scan_tests {
         // 글자·편집키는 그대로 조합을 확정시켜야 한다.
         assert!(!super::is_modifier_logical(&Key::Character("r".into())));
         assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Enter)));
-        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Backspace)));
+        assert!(!super::is_modifier_logical(&Key::Named(
+            NamedKey::Backspace
+        )));
         assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Escape)));
         assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Space)));
         // 단축키는 수식키가 눌린 채로 와도 logical_key 가 글자라 안 걸린다.
@@ -2992,17 +3091,29 @@ mod zoom_key_tests {
     #[test]
     fn us_layout_physical_keys() {
         assert_eq!(zoom_key(Some(KeyCode::Equal), Some("=")), Some(ZoomKey::In));
-        assert_eq!(zoom_key(Some(KeyCode::Minus), Some("-")), Some(ZoomKey::Out));
-        assert_eq!(zoom_key(Some(KeyCode::Digit0), Some("0")), Some(ZoomKey::Reset));
+        assert_eq!(
+            zoom_key(Some(KeyCode::Minus), Some("-")),
+            Some(ZoomKey::Out)
+        );
+        assert_eq!(
+            zoom_key(Some(KeyCode::Digit0), Some("0")),
+            Some(ZoomKey::Reset)
+        );
         assert_eq!(zoom_key(Some(KeyCode::NumpadAdd), None), Some(ZoomKey::In));
-        assert_eq!(zoom_key(Some(KeyCode::NumpadSubtract), None), Some(ZoomKey::Out));
+        assert_eq!(
+            zoom_key(Some(KeyCode::NumpadSubtract), None),
+            Some(ZoomKey::Out)
+        );
     }
 
     /// Shift 를 낀 `+` / `_` 도 같은 팔이어야 한다 — `+` 는 Shift+`=` 다.
     #[test]
     fn shifted_variants() {
         assert_eq!(zoom_key(Some(KeyCode::Equal), Some("+")), Some(ZoomKey::In));
-        assert_eq!(zoom_key(Some(KeyCode::Minus), Some("_")), Some(ZoomKey::Out));
+        assert_eq!(
+            zoom_key(Some(KeyCode::Minus), Some("_")),
+            Some(ZoomKey::Out)
+        );
     }
 
     /// 이게 이 함수의 존재 이유다: 한글(두벌식) 배열에선 Cmd 를 낀 키의 물리 위치가
