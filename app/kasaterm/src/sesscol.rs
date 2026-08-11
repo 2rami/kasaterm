@@ -157,6 +157,17 @@ fn harness_color(harness: &str) -> [u8; 4] {
     }
 }
 
+/// 하네스 로고. agy 는 공식 마크를 자산으로 갖고 있지 않아 일반 아이콘으로 둔다 —
+/// 남의 상표를 손으로 흉내 내 그리느니 중립적인 표시가 낫다. 자산을 구하면 여기
+/// 한 줄만 바꾸면 된다.
+fn harness_icon(harness: &str) -> &'static str {
+    match harness {
+        "codex" => "codex",
+        "agy" => "sparkles",
+        _ => "claude",
+    }
+}
+
 /// `mtime`(unix 초) → "12분 전". 목록을 훑는 눈이 찾는 건 절대 시각이 아니라
 /// "얼마나 최근인가"다.
 fn ago(mtime: u64) -> String {
@@ -194,7 +205,11 @@ pub(crate) fn draw_sessions_col(
 ) {
     let x0 = x + 14.0;
     let right = x + w - 12.0;
-    let avail = (right - x0).max(0.0);
+    // 행 왼쪽 거터에 하네스 로고가 앉고 텍스트 세 줄은 그만큼 들여쓴다. 머리(칩
+    // 줄)와 빈 목록 안내는 로고가 없어 `x0` 을 그대로 쓴다.
+    let icon_x = x + 9.0;
+    let text_x = x + 31.0;
+    let avail = (right - text_x).max(0.0);
     sc.row_rects.clear();
     sc.scope_rects.clear();
     sc.refresh_rect = None;
@@ -295,9 +310,16 @@ pub(crate) fn draw_sessions_col(
         if hov {
             g.rect(r.0, r.1, r.2, r.3, theme::surface_hover());
         }
-        // 하네스는 왼쪽 세로 바 하나로만 말한다. 텍스트 배지를 붙이면 칼럼이
-        // 좁을 때 정작 읽어야 할 라벨의 자리를 먹는다.
-        g.rect(x + 4.0, y + 10.0, 3.0, ROW_H - 20.0, harness_color(&s.harness));
+        // 하네스는 왼쪽 거터의 로고로 말한다. 텍스트 배지는 칼럼이 좁을 때 정작
+        // 읽어야 할 라벨의 자리를 먹고, 색 바 하나로는 세 하네스를 색으로만 갈라야
+        // 해서 어느 색이 무엇인지 외워야 한다(2026-08-11 지적: 로고가 있어야 한다).
+        g.queue_icon(
+            harness_icon(&s.harness),
+            icon_x,
+            y + (ROW_H - 16.0) / 2.0,
+            16.0,
+            harness_color(&s.harness),
+        );
 
         // 세 줄 다 `fit_text` 로 미리 자른다. `draw_text_clipped` 는 픽셀에서
         // 끊어 마지막 글자가 반쪽으로 남는데, 목록은 어차피 훑는 화면이라
@@ -305,7 +327,7 @@ pub(crate) fn draw_sessions_col(
         let label = if s.label.is_empty() { s.id.as_str() } else { s.label.as_str() };
         let label = info::fit_text(g, label, avail, 13.0, false);
         g.draw_text(
-            x0,
+            text_x,
             y + 8.0,
             &label,
             gpu::DrawOpts {
@@ -318,7 +340,7 @@ pub(crate) fn draw_sessions_col(
         if !s.preview.is_empty() {
             let prev = info::fit_text(g, &s.preview, avail, 11.0, false);
             g.draw_text(
-                x0,
+                text_x,
                 y + 25.0,
                 &prev,
                 gpu::DrawOpts {
@@ -330,11 +352,13 @@ pub(crate) fn draw_sessions_col(
             );
         }
         // 메타는 한 줄로 합쳐 그린다 — 조각마다 그리면 폭이 좁을 때 어느 조각이
-        // 잘렸는지 알 수 없어 "claude · pro" 같은 꼬리가 남는다.
-        let meta = format!("{} · {} · {}", ago(s.mtime), s.harness, tail(&s.cwd));
+        // 잘렸는지 알 수 없어 "claude · pro" 같은 꼬리가 남는다. 하네스 이름은
+        // 빠졌다: 왼쪽 로고가 같은 말을 하고, 좁은 칼럼에선 그 자리만큼 프로젝트
+        // 이름이 잘린다.
+        let meta = format!("{} · {}", ago(s.mtime), tail(&s.cwd));
         let meta = info::fit_text(g, &meta, avail, 10.0, false);
         g.draw_text(
-            x0,
+            text_x,
             y + 41.0,
             &meta,
             gpu::DrawOpts {
