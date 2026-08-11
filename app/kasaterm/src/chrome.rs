@@ -1104,6 +1104,43 @@ impl App {
         if opening { e } else { 1.0 - e }
     }
 
+    /// 사이드바 pane 행 우클릭 → 메뉴 장전. 그 줄을 맞혔으면 true.
+    ///
+    /// 판정을 메서드로 둔 건 하네스가 **같은 좌표 판정을 지나게** 하기 위함이다
+    /// (`window_strip_click` 과 같은 이유). 메뉴가 뜨는 자리는 미니맵 칸과 목록 줄이
+    /// 한 벡터에 섞여 있어, 상태를 손으로 세우는 검증은 정작 어긋나는 자리를 못 본다.
+    pub(crate) fn sidebar_row_right_click(&mut self, cx: f32, cy: f32) -> bool {
+        let inside =
+            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        let Some((wi, pane)) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, _, r)| inside(r))
+            .map(|(i, p, _)| (*i, p.clone()))
+        else {
+            return false;
+        };
+        self.sidebar_menu = Some((cx, cy, wi, pane));
+        self.chrome_dirty = true;
+        true
+    }
+
+    /// 떠 있는 사이드바 메뉴에 좌클릭. 메뉴가 떠 있었으면 true — 항목을 맞혔든
+    /// 빈 곳을 눌렀든 클릭을 삼키고 닫는다.
+    pub(crate) fn sidebar_menu_click(&mut self, cx: f32, cy: f32) -> bool {
+        let Some((_, _, wi, pane)) = self.sidebar_menu.clone() else { return false };
+        let inside =
+            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        let hit = self.sidebar_menu_rects.iter().find(|(_, r)| inside(r)).map(|(a, _)| *a);
+        self.sidebar_menu = None;
+        self.sidebar_menu_rects.clear();
+        if let Some(a) = hit {
+            self.run_sidebar_menu_action(a, wi, &pane);
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
     /// 사이드바 pane 행 우클릭 메뉴 실행.
     pub(crate) fn run_sidebar_menu_action(
         &mut self,
