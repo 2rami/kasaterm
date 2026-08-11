@@ -14,10 +14,12 @@ struct SidebarRowInfo {
     color: [u8; 4],
     /// 지금 보고 있는 pane.
     is_cur: bool,
-    /// 못 본 완료 — 이 줄이 느리게 숨쉰다.
+    /// 못 본 완료 — 줄 끝 점이 accent 로 깜빡인다.
     alert: bool,
-    /// 승인·입력을 기다리는 중 — 이 줄이 핑크로 깜빡인다.
+    /// 승인·입력을 기다리는 중 — 줄 끝 점이 주황으로, 두 배 빠르게 깜빡인다.
     waiting: bool,
+    /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
+    busy: bool,
 }
 
 impl App {
@@ -2015,28 +2017,12 @@ impl App {
             .map(|(cmd, _, _, r)| (cmd.clone(), *r))
             .collect();
         let sb_active = self.active_window;
-        // Per-window "working" flag for the sidebar dot: true when any pane in
-        // that window is mid-task (cross-window collab, from pane_activity). The
-        // active window's tree lives in pty_layout (its slot is None); the rest
-        // carry their own layout. Built here (no GPU borrow) so the paint loop
-        // just indexes sb_busy[i].
-        let sb_busy: Vec<bool> = (0..sb_labels.len())
-            .map(|i| {
-                self.window_leaves(i).iter().any(|id| {
-                    self.pane_activity
-                        .get(id)
-                        .is_some_and(|a| a.status != "idle" && !a.status.is_empty())
-                })
-            })
-            .collect();
-        // Per-window "just finished" flag: any leaf with a live completion
-        // flash. Lights a SUCCESS dot on the window's sidebar tab so a finish
-        // in a window you aren't viewing is visible across the strip.
-        let sb_done: Vec<bool> = (0..sb_labels.len())
-            .map(|i| {
-                self.window_leaves(i).iter().any(|id| self.notify_flash_factor(id).is_some())
-            })
-            .collect();
+        // 방 단위 "작업 중"·"방금 끝남" 플래그는 걷어냈다. 그 둘이 칩 모서리의 점
+        // 쌍을 켜던 유일한 자리였는데, 상태가 바뀔 때마다 점이 두 모서리를 오가는
+        // 게 정보보다 먼저 읽혔다(2026-08-11 지시). 지금은 방을 펴면 그 방의 줄이
+        // 학생을 걷게 해서 도는 중임을 말하고, 카드 머리에 남은 건 손이 필요할 때만
+        // 깜빡이는 동그라미 하나다.
+        //
         // 방마다 pane 하나당 점 하나 — 방을 열지 않고도 "누가 나를 기다리는지"가
         // 보이게 한다(거노). 색이 곧 상태다: 대기=danger(내가 엔터를 쳐야 풀린다) ·
         // 작업 중=accent · 방금 끝남=success · 쉬는 중=흐린 회색. 순서는 leaves
@@ -2098,6 +2084,13 @@ impl App {
                     .pane_activity
                     .get(id)
                     .is_some_and(|a| a.status == "waiting");
+                // 걷게 할 조건은 `sb_busy` 가 방 단위로 쓰던 것과 같다(idle 도 빈
+                // 문자열도 아님). 기다리는 중은 뺀다 — 그건 도는 게 아니라 멈춘
+                // 것이고, 걸으면서 동시에 나를 부르면 두 신호가 서로를 부정한다.
+                let busy = !waiting
+                    && self.pane_activity.get(id).is_some_and(|a| {
+                        a.status != "idle" && !a.status.is_empty()
+                    });
                 SidebarRowInfo {
                     who,
                     label,
@@ -2114,6 +2107,7 @@ impl App {
                     // 겹쳐 어느 쪽도 안 읽힌다. 급한 쪽이 이긴다.
                     alert: !waiting && self.unread_panes.contains(id),
                     waiting,
+                    busy,
                 }
             })
             .collect();
@@ -2881,17 +2875,6 @@ impl App {
                         let resting = theme::lerp(theme::surface_hover(), theme::bg(), 0.55);
                         round_rect(g, *tx, *ty, *tw, *th, theme::radius_sm(), resting);
                     }
-                    // 세로 사이드바와 같은 규칙 — 알림은 느린 숨, 대기는 danger 띠.
-                    if sb_alert.get(*i).copied().unwrap_or(false) {
-                        let mut c = theme::accent();
-                        c[3] = (16.0 + 44.0 * breathe(anim_phase_secs(), 2.4)) as u8;
-                        round_rect(g, *tx, *ty, *tw, *th, theme::radius_sm(), c);
-                    }
-                    if sb_wait.get(*i).copied().unwrap_or(false) {
-                        let mut c = theme::attention();
-                        c[3] = (140.0 + 115.0 * breathe(anim_phase_secs(), 1.1)) as u8;
-                        g.rect(*tx, *ty + 3.0, 3.0, *th - 6.0, c);
-                    }
                     let (name, _cwd) = sb_labels
                         .get(*i)
                         .cloned()
@@ -2906,18 +2889,12 @@ impl App {
                         isz,
                         if is_active { theme::text_dim() } else { theme::text_mute() },
                     );
-                    // Working / done dots on the glyph's corners (same meaning
-                    // as the side strip's chip dots).
-                    if sb_busy.get(*i).copied().unwrap_or(false) {
-                        let c = if sb_wait.get(*i).copied().unwrap_or(false) {
-                            theme::attention()
-                        } else {
-                            theme::accent()
-                        };
-                        circle_rect(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, c);
-                    }
-                    if sb_done.get(*i).copied().unwrap_or(false) {
-                        circle_rect(g, icon_x + isz - 3.0, icon_y + isz - 3.0, 6.0, theme::success());
+                    // 세로 사이드바와 같은 규칙 — 자리 고정, 색이 말하고, 깜빡인다.
+                    // 여기도 모서리 두 곳을 오가던 점 쌍을 하나로 합쳤다.
+                    if sb_wait.get(*i).copied().unwrap_or(false) {
+                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::attention(), 0.9);
+                    } else if sb_alert.get(*i).copied().unwrap_or(false) {
+                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::accent(), 1.6);
                     }
                     let show_close = sb_tabs.len() > 1 && (is_active || is_hover);
                     let text_x = icon_x + isz + 6.0;
@@ -3021,7 +2998,19 @@ impl App {
                     if out {
                         dashed_rect(g, *tx, *ty, *tw, *th, theme::with_alpha(theme::border(), 0xC0));
                     } else if is_active {
-                        panel_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), theme::surface_active());
+                        // 고른 방은 **테두리로만** 말한다(2026-08-11 지시: "선택한 방
+                        // 아웃라인으로 포커스 바꾸고"). 채운 판이었을 땐 그 밝은
+                        // 바탕이 카드 전체를 덮어, 그 위에 얹히는 상태색(알림 점·
+                        // 대기 주황)이 같은 밝기 대역에서 겨뤘다 — 정작 봐야 할
+                        // 신호가 "고름"에 묻혔다. 테두리는 자리만 두르고 안을 비운다.
+                        //
+                        // 되메우는 색이 `panel_bg` 인 건 이 스트립의 바탕이 그것이기
+                        // 때문이다(이 함수 위쪽에서 칼럼째 칠한다). 링만 그리는
+                        // 스트로크가 렌더러에 없어 안쪽을 바탕색으로 덮는 방식이다.
+                        outline_rect(
+                            g, *tx, *ty, *tw, *th, theme::radius_md(),
+                            theme::accent(), SIDEBAR_ACTIVE_RING, theme::panel_bg(),
+                        );
                     } else if is_hover {
                         panel_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), theme::surface_hover());
                     }
@@ -3032,32 +3021,6 @@ impl App {
                     if !is_active && *i + 1 < sb_tabs.len() && *i + 1 != sb_active {
                         let ly = (ty + th + SIDEBAR_TAB_GAP / 2.0).round();
                         g.rect(tx + 10.0, ly, tw - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
-                    }
-                    // 못 본 알림 — 카드 전체가 accent 로 **느리게 숨쉰다**. 예전엔
-                    // 커서 블링크에 맞춰 켜졌다 꺼졌는데, 온/오프 토글은 시야
-                    // 가장자리에서도 눈이 끌려가 작업을 방해했다(거노: "깜빡거리는
-                    // 거 말고"). 밝기가 이어지면 있다는 건 알아도 잡아채지는 않는다.
-                    // 칠하는 높이는 카드 **머리**까지다. 방을 펴면 카드가 pane 줄만큼
-                    // 길어지는데 예전엔 그 길이를 다 칠해, 한 세션이 끝났을 뿐인데
-                    // 방 전체가 빛났다(거노). 접힌 방은 머리가 곧 카드라 그대로다.
-                    let head_h = th.min(SIDEBAR_TAB_H);
-                    if sb_alert.get(*i).copied().unwrap_or(false)
-                        && !sb_row_alert_win.contains(i)
-                    {
-                        let mut c = theme::accent();
-                        c[3] = (16.0 + 44.0 * breathe(anim_phase_secs(), 2.4)) as u8;
-                        round_rect(g, *tx, *ty, *tw, head_h, theme::radius_md(), c);
-                    }
-                    // 손을 기다리는 방 — 알림과 **색·자리·속도가 전부 갈린다**.
-                    // 끝나서 알리는 것과 물어보고 멈춘 것은 급한 정도가 다른데,
-                    // 예전엔 둘 다 같은 파란 깜빡임이라 구별이 안 됐다. 이쪽은
-                    // 왼쪽 모서리에 attention(핑크) 띠로, 두 배 빠르게 숨쉰다.
-                    if sb_wait.get(*i).copied().unwrap_or(false)
-                        && !sb_row_wait_win.contains(i)
-                    {
-                        let mut c = theme::attention();
-                        c[3] = (140.0 + 115.0 * breathe(anim_phase_secs(), 1.1)) as u8;
-                        g.rect(*tx, *ty + 4.0, 3.0, head_h - 8.0, c);
                     }
                     // Icon chip: small rounded square with a glyph.
                     let (name, cwd) = sb_labels
@@ -3081,29 +3044,41 @@ impl App {
                         glyph,
                         if is_active { theme::text() } else { theme::text_dim() },
                     );
-                    // Working dot: this window has a pane mid-task (cross-window
-                    // collab). Top-right of the icon chip, opposite the number
-                    // badge (top-left) so the two never overlap. Static accent
-                    // dot — the flowing bar lives on the in-window pane header.
-                    if sb_busy.get(*i).copied().unwrap_or(false) {
-                        let dsz = 9.0_f32;
-                        let dx = icon_x + icon - dsz + 3.0;
-                        let dy = icon_y - 3.0;
-                        let c = if sb_wait.get(*i).copied().unwrap_or(false) {
-                            theme::attention()
+                    // 상태 동그라미 **하나**. 예전엔 칩의 두 모서리에 점이 따로
+                    // 있었다 — 작업 중은 오른쪽 위, 방금 끝남은 오른쪽 아래. 상태가
+                    // 바뀔 때마다 점이 두 모서리를 오갔고, 그 움직임이 정작 무엇이
+                    // 달라졌는지보다 먼저 눈에 들어왔다(2026-08-11 지시: "점 두개
+                    // 왔다갔다거리는거 없애자"). 이제 자리는 하나로 고정하고 **색이**
+                    // 무엇인지 말한다.
+                    //
+                    // 그리는 조건도 갈렸다. "작업 중"은 여기서 뺐다 — 펼친 방의 줄이
+                    // 학생을 걷게 해서 이미 말하고 있고(아래 pane 줄), 카드가 그걸 또
+                    // 말하면 같은 정보가 두 층에 겹친다. 여기 남는 건 **내 손이
+                    // 필요한 것**뿐이라 늘 깜빡인다.
+                    let wait = sb_wait.get(*i).copied().unwrap_or(false);
+                    let alert = sb_alert.get(*i).copied().unwrap_or(false);
+                    // 줄이 이미 말하고 있으면 머리는 조용히 둔다 — 접힌 방은 줄이
+                    // 없어 여기가 유일한 자리다.
+                    let head_wait = wait && !sb_row_wait_win.contains(i);
+                    let head_alert = alert && !sb_row_alert_win.contains(i);
+                    if head_wait || head_alert {
+                        // 대기가 이긴다: 끝나서 알리는 것과 막혀서 부르는 것은 급한
+                        // 정도가 다르고, `handle_attention` 이 unread 에도 넣기 때문에
+                        // 둘은 자주 같이 선다.
+                        let (c, period) = if head_wait {
+                            (theme::attention(), 0.9)
                         } else {
-                            theme::accent()
+                            (theme::accent(), 1.6)
                         };
-                        circle_rect(g, dx, dy, dsz, c);
-                    }
-                    // Completion dot: a pane in this window just finished
-                    // (notify_flash). SUCCESS green at the bottom-right corner so
-                    // it never overlaps the working dot (top-right).
-                    if sb_done.get(*i).copied().unwrap_or(false) {
                         let dsz = 9.0_f32;
-                        let dx = icon_x + icon - dsz + 3.0;
-                        let dy = icon_y + icon - dsz + 3.0;
-                        circle_rect(g, dx, dy, dsz, theme::success());
+                        blink_dot(
+                            g,
+                            icon_x + icon - dsz + 3.0,
+                            icon_y - 3.0,
+                            dsz,
+                            c,
+                            period,
+                        );
                     }
                     // Two-line label to the right of the icon.
                     let text_x = icon_x + icon + 10.0;
@@ -3316,38 +3291,25 @@ impl App {
                     if row_hover {
                         round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover());
                     }
-                    // 못 본 완료 — **이 줄만** 느리게 숨쉰다. 예전엔 같은 칠이 방
-                    // 카드 전체에 걸려, 세 pane 중 하나가 끝났는데 방이 통째로
-                    // 빛났다(거노: "숨쉬기효과 윈도우전체가 아니라 완료된세션하나만").
-                    // 속도·색은 그때 것을 그대로 옮겼다 — 바뀐 건 범위뿐이다.
-                    if info.alert {
-                        let mut c = theme::accent();
-                        // 카드에 걸던 16..60 을 그대로 옮기면 22px 줄에선 안 보인다 —
-                        // 같은 알파라도 칠하는 넓이가 1/3 이라 눈에 안 걸린다.
-                        c[3] = (24.0 + 76.0 * breathe(anim_phase_secs(), 2.4)) as u8;
-                        round_rect(g, rx, ry, rw, rh, theme::radius_sm(), c);
-                    }
-                    // 손을 기다리는 줄 — 숨쉬기와 **역할이 다르다**. 숨쉬기는 "돌고
-                    // 있다/끝났다"는 알림이고 이건 "내가 엔터를 쳐야 풀린다"는 호출이라,
-                    // 눈에 걸려야 맞다(거노: 핑크로 깜빡). 그래서 색은 attention,
-                    // 리듬은 두 배 빠르고 진폭도 크다.
-                    if info.waiting {
-                        let mut c = theme::attention();
-                        c[3] = (40.0 + 90.0 * breathe(anim_phase_secs(), 1.1)) as u8;
-                        round_rect(g, rx, ry, rw, rh, theme::radius_sm(), c);
-                        let mut edge = theme::attention();
-                        edge[3] = (140.0 + 115.0 * breathe(anim_phase_secs(), 1.1)) as u8;
-                        g.rect(rx, ry + 2.0, 2.0, rh - 4.0, edge);
-                    }
                     // 지금 보고 있는 pane 은 왼쪽 띠로 — 목록이 방을 넘나들어서
                     // 표시가 없으면 "내가 있는 곳"을 매번 번호로 대조하게 된다.
                     if is_cur {
                         g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent());
                     }
+                    // 도는 중이면 학생이 **걷는다**(2026-08-11 지시: "진행중인거 학생
+                    // 워크로 나오게하고"). 얼굴 GIF 는 도는 동안에도 가만히 앉아 있어
+                    // 줄만 봐서는 이 pane 이 일하는지 멈춰 있는지 알 수 없었고, 그걸
+                    // 대신 말하던 게 카드의 작업 점이었다 — 걷게 하면 그 점이 필요
+                    // 없어진다. 원본이 256 정사각(전신 + 여백)이라 상자도 정사각이다.
+                    // 얼굴보다 4px 키우는 건 그 여백 때문 — 같은 크기로 두면 캐릭터가
+                    // 얼굴 GIF 보다 작아 보여 걷기 시작할 때 줄이 움찔한다.
                     let face = rh - 6.0;
-                    let has_face = draw_student_face_anim(
-                        g, who, rx + 7.0, ry + 3.0, face, anim_phase_secs(),
-                    );
+                    let walked = info.busy
+                        && draw_student_walk(g, who, rx + 5.0, ry + 1.0, rh - 2.0, anim_phase_secs());
+                    let has_face = walked
+                        || draw_student_face_anim(
+                            g, who, rx + 7.0, ry + 3.0, face, anim_phase_secs(),
+                        );
                     if !has_face {
                         circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, *col);
                     }
@@ -3365,9 +3327,21 @@ impl App {
                             italic: false,
                         },
                     );
-                    // 카드 머리의 요약 점과 오른쪽 끝을 맞춘다 — 세로로 어긋나면
-                    // 같은 뜻의 점 둘이 다른 격자에 앉아 목록이 삐뚤어 보인다.
-                    circle_rect(g, rx + rw - 6.0, ry + rh / 2.0 - 3.0, 6.0, *col);
+                    // 줄 끝 상태 점. 손이 필요한 줄에서는 **이 점이 깜빡인다** —
+                    // 예전엔 줄 전체를 숨쉬게 해서 알렸는데, 넓은 판이 은근히 밝아지는
+                    // 신호는 22px 줄에서는 배경 얼룩처럼 읽혔고 두 줄이 동시에 서면
+                    // 목록이 통째로 일렁였다(2026-08-11 지시: "숨쉬기말고 동그라미
+                    // 깜빡이게"). 점은 이미 그 줄의 상태를 말하던 자리라, 새 표시를
+                    // 더하는 대신 있던 것을 깜빡이게 하면 목록에 늘어나는 게 없다.
+                    let dot_x = rx + rw - 6.0;
+                    let dot_y = ry + rh / 2.0 - 3.0;
+                    if info.waiting {
+                        blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
+                    } else if info.alert {
+                        blink_dot(g, dot_x, dot_y, 6.0, theme::accent(), 1.6);
+                    } else {
+                        circle_rect(g, dot_x, dot_y, 6.0, *col);
+                    }
                 }
                 // 끌고 있는 줄이 떨어질 자리 — 대상 줄의 위/아래 모서리에 긋는다.
                 // 끌리는 줄 자신은 옅게 낮춰 "지금 손에 들려 있다"를 남긴다.
@@ -8307,6 +8281,43 @@ fn breathe(t: f32, period: f32) -> f32 {
     0.5 - 0.5 * (std::f32::consts::TAU * t / period.max(0.001)).cos()
 }
 
+/// 켜짐/꺼짐이 또렷한 깜빡임. `breathe` 와 **역할이 갈린다** — 숨쉬기는 넓은 판을
+/// 은근히 밝혀 "있다"를 알리는 것이고, 이건 작은 동그라미 하나를 껐다 켜서 "지금
+/// 보라"를 말한다(2026-08-11 지시: "숨쉬기말고 동그라미깜빡이게").
+///
+/// 숨쉬기를 그 동그라미에 그대로 쓰면 안 되는 이유가 있다. 밝기가 이어지는 신호는
+/// 칠하는 넓이가 클 때만 눈에 걸리는데, 6px 점에서는 진폭이 그대로여도 보이는 총량이
+/// 1/100 이라 그냥 흐린 점으로 읽힌다 — 카드 전체를 숨쉬게 만들었던 게 애초에 그
+/// 때문이었다.
+///
+/// 완전한 사각파는 아니다. 가장자리 8% 를 램프로 밀어 두는 건 즉각 점멸이 시야
+/// 가장자리에서 지나치게 튀어서고(그게 예전 커서 블링크 동기 방식을 걷어낸 이유),
+/// 그래도 중간의 켜짐·꺼짐 구간이 평평해 "깜빡인다"로 읽힌다.
+/// 깜빡이는 상태 동그라미 — 사이드바에서 "내 손이 필요하다"를 말하는 유일한 모양.
+///
+/// 꺼짐 구간에도 알파를 0 까지 내리지 않는다. 점이 통째로 사라졌다 나타나면 그
+/// 자리에 무언가 있다는 것 자체를 매번 다시 찾게 되고, 여러 방이 동시에 깜빡일 때
+/// 목록이 들썩여 보인다. 자국을 남기면 "있다"는 계속 읽히고 깜빡임은 "봐라"만 한다.
+fn blink_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, size: f32, col: [u8; 4], period: f32) {
+    let mut c = col;
+    c[3] = (70.0 + 185.0 * blink(anim_phase_secs(), period)) as u8;
+    circle_rect(g, x, y, size, c);
+}
+
+fn blink(t: f32, period: f32) -> f32 {
+    const EDGE: f32 = 0.08;
+    let x = (t / period.max(0.001)).rem_euclid(1.0);
+    if x < EDGE {
+        x / EDGE
+    } else if x < 0.5 {
+        1.0
+    } else if x < 0.5 + EDGE {
+        1.0 - (x - 0.5) / EDGE
+    } else {
+        0.0
+    }
+}
+
 /// 프로세스 시작 기준 단조증가 초 — 시간으로 도는 그림(로딩바 스윕, idle gif)이
 /// 전부 같은 시계를 본다. 펌프가 도는 동안 매 프레임 갱신된다.
 pub(crate) fn anim_phase_secs() -> f32 {
@@ -8445,6 +8456,40 @@ pub(crate) fn draw_student_face_anim(
     if !g.has_image(&key) {
         let (rgba, w, h) = &anim.frames[idx];
         g.upload_image(&key, rgba, *w, *h);
+    }
+    g.queue_image_above(&key, x, y, size, size);
+    true
+}
+
+/// 사이드바 줄에서 **걷는** 학생. 도는 pane 임을 그림 자체로 말한다.
+///
+/// `draw_student_face_anim` 과 그리는 것이 다르다 — 저쪽은 GIF 를 얼굴만 잘라
+/// 쓰는 정지에 가까운 배너고, 이건 pane 안 스피너 자리에 쓰는 것과 같은 도트
+/// 스프라이트다(같은 프레임·같은 캐시 키라 텍스처를 두 번 올리지 않는다).
+///
+/// 스프라이트가 없는 캐릭터·슬러그가 안 잡히는 이름이면 `false` 를 돌려준다 —
+/// 호출자가 얼굴로 되돌아갈 수 있어야, 걷기 에셋이 빠진 학생의 줄이 빈칸이 되지
+/// 않는다.
+pub(crate) fn draw_student_walk(
+    g: &mut gpu::GpuRenderer,
+    name: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    phase: f32,
+) -> bool {
+    let Some(slug) = theme::character_slug(name) else {
+        return false;
+    };
+    let idx = ((phase * 1000.0 / STUDENT_WALK_FRAME_MS) as usize) % STUDENT_WALK_FRAMES;
+    let key = format!("student:{slug}:walk{idx}");
+    if !g.has_image(&key) {
+        let Some(frames) = student_sprite_frames(slug, "walk") else {
+            return false;
+        };
+        for (i, (rgba, w, h)) in frames.iter().enumerate() {
+            g.upload_image(&format!("student:{slug}:walk{i}"), rgba, *w, *h);
+        }
     }
     g.queue_image_above(&key, x, y, size, size);
     true
@@ -10630,5 +10675,28 @@ This came from another Claude session";
         assert_eq!(m.color.as_deref(), Some("red"));
         assert!(m.sender.is_none());
         assert!(extract_teammate_msg(t, "다른사람").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sidebar_blink_tests {
+    use super::*;
+
+    // 걷기 스프라이트가 전 학생에게 있는지는 `student_asset_tests` 의
+    // `bundled_sprite_frames_decode_for_every_student_and_motion` 이 이미, 더 깐깐하게
+    // 본다(프레임 수 + RGBA 길이까지). 여기서 또 보지 않는다.
+
+    /// 깜빡임은 켜짐·꺼짐이 **둘 다 평평해야** 깜빡임으로 읽힌다. 사인파로 돌아가면
+    /// (그게 걷어낸 숨쉬기다) 6px 점에서는 그냥 흐린 점이 된다.
+    #[test]
+    fn blink_rests_at_both_ends() {
+        assert!(blink(0.25, 1.0) > 0.99, "켜짐 구간이 평평하지 않다");
+        assert!(blink(0.80, 1.0) < 0.01, "꺼짐 구간이 평평하지 않다");
+        // 가장자리는 램프 — 즉각 점멸은 시야 가장자리에서 지나치게 튄다.
+        let mid = blink(0.04, 1.0);
+        assert!((0.1..0.9).contains(&mid), "전환이 계단이다: {mid}");
+        // 주기를 넘겨도 같은 위상. 프레임 시계는 프로세스 시작부터 단조증가라
+        // 몇 시간 뒤에도 같은 리듬이어야 한다.
+        assert!((blink(0.25, 1.0) - blink(600.25, 1.0)).abs() < 1e-3);
     }
 }

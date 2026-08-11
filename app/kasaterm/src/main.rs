@@ -192,6 +192,30 @@ fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32,
     panel_rect(g, x, y, w, h, r, fill);
 }
 
+/// 속이 빈 둥근 테두리 — **고른 것**을 채우지 않고 두르는 자리.
+///
+/// `panel_rect` 과 갈리는 건 무엇을 말하느냐다. 판은 "여기가 층이다"를 말하고
+/// 테두리는 "이걸 골랐다"만 말한다. 골랐다는 걸 판으로 그리면 그 색이 카드
+/// 전체를 덮어, 그 위에 얹히는 상태색이 같은 밝기 대역에서 겨루게 된다.
+///
+/// 안쪽을 `bg` 로 되메우는 방식이라 **바탕색을 호출자가 알아야 한다** — 링만
+/// 그리는 스트로크가 렌더러에 없어서고, 사각 넷으로 두르면 모서리 라운드가
+/// 죽는다.
+fn outline_rect(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    col: [u8; 4],
+    t: f32,
+    bg: [u8; 4],
+) {
+    round_rect(g, x, y, w, h, r, col);
+    round_rect(g, x + t, y + t, (w - t * 2.0).max(0.0), (h - t * 2.0).max(0.0), (r - t).max(0.0), bg);
+}
+
 /// 점선 사각 — "여기 뭔가 있었다"를 그리는 유일한 자리.
 ///
 /// 채운 판이 **없다**는 것 자체가 뜻이라, 실선으로 두르면 그냥 빈 카드가 되고
@@ -308,11 +332,15 @@ fn git_paint_dropdowns(
 /// 에이전트 pane 은 sparkle, markdown 은 문서, 나머지는 터미널 글리프.
 /// codex 도 학생 대접이라 같은 sparkle 을 쓴다(거노 2026-08-05) — 종류를 아이콘으로
 /// 가르면 "누가 에이전트인가"가 한눈에 안 들어온다.
+/// 방 카드 앞의 글리프. **무엇이 도는지**가 아니라 **무엇을 여는 자리인지**만
+/// 말한다.
+///
+/// 예전엔 이름에 claude·codex·✳ 가 걸리면 sparkles(별)를 줬는데, 여기 방은 거의
+/// 다 claude 라 결국 모든 카드에 같은 별이 박혔다 — 가르는 데 아무 일도 안 하면서
+/// 목록에서 가장 눈에 띄는 자리를 차지한 셈이다(2026-08-11 지시: "별표시 저건
+/// 없애자"). 무엇이 도는지는 이제 방을 펴면 학생이 걷는 것으로 보인다.
 fn tab_icon_glyph(name: &str) -> &'static str {
-    let l = name.to_ascii_lowercase();
-    if name.contains('✳') || l.contains("claude") || l.contains("codex") {
-        "sparkles"
-    } else if l.ends_with(".md") {
+    if name.to_ascii_lowercase().ends_with(".md") {
         "file-text"
     } else {
         "terminal"
@@ -487,6 +515,9 @@ const SIDEBAR_ROW_PAD: f32 = 8.0;
 /// 테마 전환(0.34)보다 짧다 — 여기서 기다려야 하면 곧 안 쓰게 된다.
 const EXPAND_ANIM_SECS: f32 = 0.16;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
+/// 고른 방을 두르는 테두리 두께. 1px 은 카드 사이 구분선(1px)과 굵기가 같아
+/// "골랐다"가 "칸막이"로 읽히고, 2px 은 좁은 칼럼에서 카드를 조여 보인다.
+const SIDEBAR_ACTIVE_RING: f32 = 1.5;
 /// 사이드바 바닥에 붙박인 트레이(+ · 피드백 · 설정)의 높이. 세션 목록은 여기까지만
 /// 자란다.
 const SIDEBAR_TRAY_H: f32 = 44.0;
