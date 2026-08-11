@@ -1860,10 +1860,13 @@ impl Backend for PtyBackend {
         for row in &mut board {
             // OSC title 은 claude 작업 중 "⠂ 제목" 꼴로 스피너 글리프가 붙는다 —
             // board 라벨(웹뷰 "학생 · 작업명")에 새지 않게 벗겨서 싣는다.
-            row.title = osc_titles
-                .get(&row.surface_id)
-                .map(|t| crate::strip_activity_prefix(t).to_string())
-                .unwrap_or_default();
+            // ⚠️OSC 제목이 **없을 때 빈 값으로 덮지 않는다.** 예전엔
+            // `unwrap_or_default()` 라, 터미널 제목을 안 다는 하네스(agy 는 TUI 라
+            // 안 단다)는 파서가 전사본에서 뽑아 온 제목까지 통째로 지워져 board 행이
+            // 늘 무제목이었다. OSC 가 있으면 그쪽이 여전히 이긴다 — 살아있는 값이라서다.
+            if let Some(t) = osc_titles.get(&row.surface_id) {
+                row.title = crate::strip_activity_prefix(t).to_string();
+            }
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
