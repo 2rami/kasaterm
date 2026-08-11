@@ -1652,11 +1652,7 @@ impl App {
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         // Busy = the daemon's transcript watcher sees this pane
                         // working (cross-window). Drives the header working bar.
-                        busy: self
-                            .pane_activity
-                            .get(&id)
-                            .map(|a| a.status != "idle" && !a.status.is_empty())
-                            .unwrap_or(false),
+                        busy: self.pane_is_busy(&id),
                         // A background shell / Monitor is running with no spinner —
                         // drives the slower header pulse bar when not busy.
                         bg_active: self
@@ -2084,13 +2080,10 @@ impl App {
                     .pane_activity
                     .get(id)
                     .is_some_and(|a| a.status == "waiting");
-                // 걷게 할 조건은 `sb_busy` 가 방 단위로 쓰던 것과 같다(idle 도 빈
-                // 문자열도 아님). 기다리는 중은 뺀다 — 그건 도는 게 아니라 멈춘
-                // 것이고, 걸으면서 동시에 나를 부르면 두 신호가 서로를 부정한다.
-                let busy = !waiting
-                    && self.pane_activity.get(id).is_some_and(|a| {
-                        a.status != "idle" && !a.status.is_empty()
-                    });
+                // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
+                // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
+                // 부르면 두 신호가 서로를 부정한다.
+                let busy = self.pane_is_busy(id);
                 SidebarRowInfo {
                     who,
                     label,
