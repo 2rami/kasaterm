@@ -34,6 +34,11 @@ PPGEN = os.environ.get("PPGEN", "/tmp/ppgen")
 # 생성 백엔드. `codex` 는 ChatGPT 구독 OAuth 로 도는 CLI 라 호출당 요금이 없고,
 # 참조 이미지(-i)를 받아 편집도 된다 — 그래서 기본값이다. `fal` 은 종량 과금이고,
 # OpenAI 호환 게이트웨이는 /images/edits 가 아예 없어 동작 프레임을 못 만든다.
+#
+# `openai` 는 종량 과금이지만 codex 한도에 걸렸을 때의 대안이다(2026-08-11 실측).
+# ⚠️ **입력 이미지가 조직당 분당 5개**다. 참조 편집은 호출마다 이미지가 들어가므로
+# 이게 처리량 상한이 된다 — `--jobs 4` 는 분당 약 5.8회라 429 로 절반이 떨어졌고
+# `--jobs 2`(약 2.9회)에서 전부 통과했다. 병렬을 올리지 마라.
 PROVIDER = os.environ.get("THEME_PROVIDER", "codex")
 
 # 상태 → (ppgen 프리셋 이름, 앱 파일명 중간 토큰, 프레임 수).
@@ -67,7 +72,21 @@ def desc_of(slug):
 
 
 def generated(slug):
-    return os.path.exists(os.path.join(SRC, slug, "out", "manifest.json"))
+    """**모든 상태의 프레임이 다 있는가.**
+
+    manifest.json 존재만 보면 안 된다 — ppgen 은 일부 상태가 실패해도 매니페스트를
+    남긴다. 그래서 cheer 나 wave 가 통째로 빠진 채 「생성됨」이 되고, `gen` 이
+    `--force` 없이는 건너뛰어 영영 안 채워진다. 실제로 429(분당 상한)에 걸린 3명이
+    이 경로로 조용히 미완성으로 남았고, install 단계에서야 프레임 없음으로 드러났다.
+    """
+    root = os.path.join(SRC, slug, "out")
+    if not os.path.exists(os.path.join(root, "manifest.json")):
+        return False
+    for state, _, count in STATES:
+        for i in range(count):
+            if not os.path.exists(os.path.join(root, "frames", state, f"frame-{i:02d}.png")):
+                return False
+    return True
 
 
 def frame_quality(path):
