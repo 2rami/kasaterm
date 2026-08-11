@@ -157,13 +157,11 @@ fn harness_color(harness: &str) -> [u8; 4] {
     }
 }
 
-/// 하네스 로고. agy 는 공식 마크를 자산으로 갖고 있지 않아 일반 아이콘으로 둔다 —
-/// 남의 상표를 손으로 흉내 내 그리느니 중립적인 표시가 낫다. 자산을 구하면 여기
-/// 한 줄만 바꾸면 된다.
+/// 하네스 로고.
 fn harness_icon(harness: &str) -> &'static str {
     match harness {
         "codex" => "codex",
-        "agy" => "sparkles",
+        "agy" => "antigravity",
         _ => "claude",
     }
 }
@@ -370,5 +368,52 @@ pub(crate) fn draw_sessions_col(
         );
         sc.row_rects.push((i, r));
         y = row_bottom;
+    }
+}
+
+#[cfg(test)]
+mod harness_icon_tests {
+    use super::harness_icon;
+    use crate::gpu::GpuRenderer;
+
+    /// 이름이 어긋나면 화면을 봐야만 안다 — 등록되지 않은 이름은 `icon_svg` 가
+    /// `None` 을 주고 `queue_icon` 이 아무것도 그리지 않은 채 조용히 돌아간다.
+    /// 행에서 로고만 빠지고 나머지는 멀쩡해 회귀로 보이지도 않는다.
+    #[test]
+    fn every_harness_maps_to_a_registered_icon() {
+        for h in ["claude", "codex", "agy", "처음 보는 하네스"] {
+            let name = harness_icon(h);
+            assert!(
+                GpuRenderer::icon_svg(name).is_some(),
+                "{h} → \"{name}\" 이 icon_svg 목록에 없다"
+            );
+        }
+    }
+
+    /// antigravity 는 원본 워드마크에서 심볼만 떼어내느라 viewBox 원점이 0 이
+    /// 아니다(`14 14 84 84`). 래스터라이저가 그 원점을 접어 넣지 못하면 잉크가
+    /// 캔버스 밖으로 밀려 **빈 이미지**가 되는데, 그래도 예외는 안 나고 아이콘만
+    /// 사라진다. 그려지는 것과 잘리지 않은 것을 함께 본다.
+    #[test]
+    fn an_offset_viewbox_still_lands_inside_the_canvas() {
+        const PX: u32 = 32;
+        for name in ["antigravity", "claude", "codex"] {
+            let svg = GpuRenderer::icon_svg(name).expect("등록된 아이콘");
+            let buf = GpuRenderer::rasterize_icon(svg, PX).expect("래스터");
+            let alpha = |x: u32, y: u32| buf[((y * PX + x) * 4 + 3) as usize];
+            let inked = (0..PX * PX).filter(|i| buf[(*i as usize) * 4 + 3] > 8).count();
+            let ratio = inked as f32 / (PX * PX) as f32;
+            assert!(
+                (0.05..0.9).contains(&ratio),
+                "{name}: 잉크 비율 {ratio:.3} — 빈 이미지이거나 캔버스를 다 덮었다"
+            );
+            // 가장자리 한 줄이 통째로 차 있으면 그 방향으로 잘려 나간 것이다.
+            let full_row = |y: u32| (0..PX).all(|x| alpha(x, y) > 8);
+            let full_col = |x: u32| (0..PX).all(|y| alpha(x, y) > 8);
+            assert!(
+                !full_row(0) && !full_row(PX - 1) && !full_col(0) && !full_col(PX - 1),
+                "{name}: 잉크가 캔버스 가장자리에 꽉 닿았다 — viewBox 밖으로 넘쳤을 수 있다"
+            );
+        }
     }
 }
