@@ -974,10 +974,8 @@ impl App {
     }
     /// cwd의 마지막 폴더명. 홈 디렉토리면 `~`.
     pub(crate) fn cwd_basename(p: &std::path::Path) -> String {
-        if let Ok(h) = std::env::var("HOME") {
-            if !h.is_empty() && p == std::path::Path::new(&h) {
-                return "~".to_string();
-            }
+        if kasa_socket::home_dir().as_deref() == Some(p) {
+            return "~".to_string();
         }
         p.file_name()
             .and_then(|s| s.to_str())
@@ -985,11 +983,7 @@ impl App {
             .unwrap_or_else(|| "/".to_string())
     }
     pub(crate) fn shorten_cwd(p: &std::path::Path) -> String {
-        let raw = p.to_string_lossy().to_string();
-        let s = match std::env::var("HOME") {
-            Ok(h) if !h.is_empty() && raw.starts_with(&h) => format!("~{}", &raw[h.len()..]),
-            _ => raw,
-        };
+        let s = tilde_home(&p.to_string_lossy());
         let max = 26usize;
         let chars: Vec<char> = s.chars().collect();
         if chars.len() > max {
@@ -2666,6 +2660,21 @@ impl App {
     }
 }
 
+/// 경로 앞의 홈을 `~` 로 접는다. 홈을 못 찾으면 원본 그대로.
+///
+/// 같은 코드가 pane 라벨·상태바·미리보기에 네 벌 흩어져 있었고, 전부 `HOME` 을
+/// 직접 읽어 Windows(GUI 프로세스엔 HOME 이 없다)에서 한 곳도 안 접혔다.
+/// `home_dir()` 은 `USERPROFILE` 까지 본다.
+pub(crate) fn tilde_home(s: &str) -> String {
+    match kasa_socket::home_dir() {
+        Some(h) => match s.strip_prefix(h.to_string_lossy().as_ref()) {
+            Some(rest) => format!("~{rest}"),
+            None => s.to_string(),
+        },
+        None => s.to_string(),
+    }
+}
+
 /// `start` 부터 위로 올라가며 첫 git 레포 루트를 찾는다.
 ///
 /// `.git` 은 일반 체크아웃이면 디렉토리, worktree·submodule 이면 **파일**이므로
@@ -2675,7 +2684,7 @@ impl App {
 /// 홈 자체가 레포라, 앵커가 어느 프로젝트에서든 홈 전체로 튀어 사이드바가
 /// 쓸모없어진다.
 pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    let home = kasa_socket::home_dir();
     let mut cur = Some(start);
     while let Some(dir) = cur {
         if dir.parent().is_none() || home.as_deref() == Some(dir) {

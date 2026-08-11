@@ -925,7 +925,7 @@ impl App {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        let _ = std::fs::remove_file(format!("/tmp/kasaterm-bound-{safe}"));
+        let _ = std::fs::remove_file(kasa_socket::bound_marker_path(&safe));
         let num = target.trim_start_matches('%');
         let slug = cwd.map(kasa_mcp::character::mode_slug);
         if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {

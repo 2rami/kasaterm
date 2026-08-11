@@ -5816,9 +5816,9 @@ pub(crate) fn resolve_spawn_cwd(prev: Option<std::path::PathBuf>) -> Option<Stri
         "last" | "home" => {}
         path => {
             let expanded = match path.strip_prefix("~/") {
-                Some(rest) => match std::env::var("HOME") {
-                    Ok(home) if !home.is_empty() => format!("{home}/{rest}"),
-                    _ => path.to_string(),
+                Some(rest) => match kasa_socket::home_dir() {
+                    Some(home) => format!("{}/{rest}", home.display()),
+                    None => path.to_string(),
                 },
                 None => path.to_string(),
             };
@@ -5827,10 +5827,8 @@ pub(crate) fn resolve_spawn_cwd(prev: Option<std::path::PathBuf>) -> Option<Stri
             }
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Some(home);
-        }
+    if let Some(home) = kasa_socket::home_dir() {
+        return Some(home.to_string_lossy().into_owned());
     }
     std::env::current_dir()
         .ok()
@@ -5928,15 +5926,19 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
 /// same file.
 pub(crate) fn mcp_port_file_path() -> std::path::PathBuf {
     let sock = std::env::var("KASATERM_SOCKET_PATH").unwrap_or_else(|_| {
-        format!(
-            "{}/.config/kasaterm/daemon.sock",
-            std::env::var("HOME").unwrap_or_default()
-        )
+        // 홈을 못 찾으면 temp 로 — 빈 문자열을 앞에 붙이면 `/.config/...` 라는
+        // 드라이브 루트 경로가 되어 쓰기가 조용히 실패하고, 패널 웹뷰가 포트를
+        // 영영 못 찾는다.
+        kasa_socket::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".config/kasaterm/daemon.sock")
+            .to_string_lossy()
+            .into_owned()
     });
     std::path::Path::new(&sock)
         .parent()
         .map(|p| p.join("mcp_port"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kasaterm-mcp-port"))
+        .unwrap_or_else(|| std::env::temp_dir().join("kasaterm-mcp-port"))
 }
 
 /// Port the panel webviews should poll. This process's own bound port
@@ -6806,8 +6808,10 @@ mod tests {
     #[test]
     fn cleanup_collab_markers_removes_pane_files() {
         // %987 keeps the test clear of any real pane's markers in /tmp.
-        let bound = std::path::PathBuf::from("/tmp/kasaterm-bound-_987");
-        let room = std::path::PathBuf::from("/tmp/kasaterm-collab/test-marker-cleanup");
+        // 픽스처는 코드와 **같은 헬퍼**로 놓는다 — 리터럴 "/tmp" 를 쓰면 Windows 에서
+        // 현재 드라이브의 `C:\tmp` 로 가고 코드는 `%TEMP%` 를 봐서 영영 안 만난다.
+        let bound = kasa_socket::bound_marker_path("_987");
+        let room = kasa_socket::collab_root().join("test-marker-cleanup");
         std::fs::create_dir_all(&room).unwrap();
         let character = room.join("character-987");
         let nudged = room.join("god-nudged-%987");
@@ -6827,8 +6831,8 @@ mod tests {
     #[test]
     fn cleanup_collab_markers_spares_other_rooms() {
         // 같은 pane 번호라도 *다른 방*의 마커는 살아남아야 한다(거노: 캐릭터 유실 근본).
-        let mine = std::path::PathBuf::from("/tmp/kasaterm-collab/-tmp-room-mine");
-        let other = std::path::PathBuf::from("/tmp/kasaterm-collab/-tmp-room-other");
+        let mine = kasa_socket::collab_root().join("-tmp-room-mine");
+        let other = kasa_socket::collab_root().join("-tmp-room-other");
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         let my_char = mine.join("character-1");

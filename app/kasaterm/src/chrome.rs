@@ -1588,10 +1588,10 @@ impl App {
     /// ③ 프로젝트 메모리(root/.memory/MEMORY.md, symlink 허용→exists) 는 있을 때만.
     pub(crate) fn quick_files(&self) -> Vec<(&'static str, std::path::PathBuf, &'static str)> {
         let mut out: Vec<(&'static str, std::path::PathBuf, &'static str)> = Vec::new();
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = kasa_socket::home_dir() {
             out.push((
                 "개인 CLAUDE.md",
-                std::path::PathBuf::from(home).join(".claude/CLAUDE.md"),
+                home.join(".claude/CLAUDE.md"),
                 "claude",
             ));
         }

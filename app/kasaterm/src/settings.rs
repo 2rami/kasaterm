@@ -511,8 +511,9 @@ impl App {
                 // seeds $HOME so the field isn't empty.
                 if m == "custom" {
                     if self.set_cwd_mode == "last" || self.set_cwd_mode == "home" {
-                        self.set_cwd_mode =
-                            std::env::var("HOME").unwrap_or_default();
+                        self.set_cwd_mode = kasa_socket::home_dir()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
                     }
                     self.settings_caret = self.set_cwd_mode.chars().count();
                     self.settings_input = Some(SettingsInput::CwdPath);
@@ -1039,10 +1040,13 @@ impl App {
     }
 }
 
-/// 저장된 피드백이 쌓이는 폴더.
+/// 저장된 피드백이 쌓이는 폴더. 홈을 못 찾으면 temp 로 — 빈 PathBuf 에 join 하면
+/// **상대경로**가 되어 피드백이 그때그때의 cwd 에 흩뿌려진다(Windows GUI 프로세스는
+/// HOME 이 없어 항상 그랬다).
 fn feedback_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".config/kasaterm/feedback")
+    kasa_socket::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".config/kasaterm/feedback")
 }
 
 /// 제보에 붙는 진단 한 줄. 이게 없으면 대부분의 제보가 "어느 버전에서요?"로

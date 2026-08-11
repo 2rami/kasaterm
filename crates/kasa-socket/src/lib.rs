@@ -52,3 +52,16 @@ pub fn collab_root() -> std::path::PathBuf {
         std::path::PathBuf::from("/tmp/kasaterm-collab")
     }
 }
+
+/// pane↔sid bind 마커(`kasaterm-bound-<safe id>`). `collab_root` 과 같은 이유로
+/// 플랫폼마다 갈린다 — 쓰는 쪽은 sh 훅(`kasaterm-bind-transcript.sh`)이라 리터럴
+/// `/tmp` 를 쓰고, Windows 의 Git bash 에선 그게 `%TEMP%` 다. 지우는 쪽(GUI)이
+/// 리터럴을 그대로 따라 하면 Windows 에서 영영 못 지운다.
+pub fn bound_marker_path(safe_id: &str) -> std::path::PathBuf {
+    let name = format!("kasaterm-bound-{safe_id}");
+    if cfg!(windows) {
+        std::env::temp_dir().join(name)
+    } else {
+        std::path::PathBuf::from("/tmp").join(name)
+    }
+}

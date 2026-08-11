@@ -1824,6 +1824,17 @@ fn unescape_lsof_path(line: &[u8]) -> std::path::PathBuf {
 /// our way down: PEB+0x20 → ProcessParameters pointer, +0x38 → the cwd
 /// `UNICODE_STRING`, then its buffer. Offsets are the stable x64 PEB/
 /// RTL_USER_PROCESS_PARAMETERS layout (windows-sys doesn't expose the fields).
+/// PEB 의 cwd 는 늘 구분자로 끝난다(`C:\Users\x\`). 그대로 흘리면 홈 접기가 `~`
+/// 대신 `~\` 를 만들어 빵부스러기·상태바·pane 라벨에 그대로 새고, 저장된 세션
+/// 경로도 다른 경로에서 온 같은 위치와 문자열 비교가 어긋난다. 드라이브 루트
+/// (`C:\`)만은 구분자를 떼면 "그 드라이브의 현재 폴더"라는 **상대경로**가 되니
+/// 남긴다.
+#[cfg(windows)]
+fn trim_trailing_sep(s: &str) -> &str {
+    let t = s.trim_end_matches(['\\', '/']);
+    if t.len() < 3 { s } else { t }
+}
+
 #[cfg(windows)]
 pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -1904,7 +1915,7 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
                 return None;
             }
             let s = std::ffi::OsString::from_wide(&wide);
-            Some(std::path::PathBuf::from(s))
+            Some(std::path::PathBuf::from(trim_trailing_sep(&s.to_string_lossy())))
         })();
         CloseHandle(handle);
         result
@@ -2971,7 +2982,10 @@ mod account_autoswitch_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+// macOS(libproc)·Windows(PEB) 두 네이티브 구현만 — 나머지 unix 는 `lsof` 셸아웃이라
+// 설치 여부에 결과가 달린다. Windows 를 넣는 이유는 그쪽이 가장 위험해서다: 하드코딩
+// 오프셋으로 남의 주소공간을 직접 읽는 코드라, 어긋나도 예외 없이 쓰레기 경로를 낸다.
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod pid_cwd_tests {
     /// libproc 경로가 예전 `lsof -d cwd` 와 같은 답을 내는지 — 자기 자신에게
     /// 물어 `current_dir` 과 맞춰본다. FFI(구조체 크기·평면화한 vip_path·NUL
@@ -2987,5 +3001,14 @@ mod pid_cwd_tests {
     #[test]
     fn pid_cwd_is_none_for_a_dead_pid() {
         assert_eq!(super::pid_cwd(u32::MAX - 1), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn peb_cwd_loses_its_trailing_separator_but_keeps_the_drive_root() {
+        assert_eq!(super::trim_trailing_sep(r"C:\Users\x\"), r"C:\Users\x");
+        assert_eq!(super::trim_trailing_sep(r"C:\Users\x"), r"C:\Users\x");
+        assert_eq!(super::trim_trailing_sep(r"C:\"), r"C:\");
+        assert_eq!(super::trim_trailing_sep(r"\\srv\share\"), r"\\srv\share");
     }
 }

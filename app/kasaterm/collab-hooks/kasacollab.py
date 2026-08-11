@@ -26,6 +26,37 @@ except ImportError:
     fcntl = None
 
 
+# ── 경로 정본 ──────────────────────────────────────────────────────
+# collab 경로를 만드는 쪽이 셋이다: sh 훅(kasaterm-steer-hook.sh 등), Rust
+# (kasa_socket::collab_root / character::mode_slug), 그리고 여기. sh 훅은 언제나
+# Git bash 안에서 돌아 `/tmp` = `%TEMP%`, cwd = `/c/Users/...` 형태만 만든다.
+# 정본을 그쪽에 맞춘다 — 이 파일은 네이티브 python3 이 실행하므로 리터럴을
+# 그대로 따라 하면 `/tmp` 가 `C:\tmp` 로, cwd 가 `C:\Users\...` 로 갈려서
+# 셋이 서로 다른 방을 보고 영영 안 만난다.
+
+def _posix_path(raw):
+    """`C:\\Users\\x` → `/c/Users/x`. 이미 posix 면 그대로."""
+    if raw.startswith("\\\\?\\"):
+        raw = raw[4:]
+    if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":
+        rest = raw[2:].replace("\\", "/").lstrip("/")
+        return f"/{raw[0].lower()}/{rest}"
+    return raw.replace("\\", "/")
+
+
+def _tmp(*parts):
+    """Git bash 의 `/tmp` 에 해당하는 실제 디렉터리."""
+    import tempfile
+    root = tempfile.gettempdir() if os.name == "nt" else "/tmp"
+    return os.path.join(root, *parts)
+
+
+def cwd_slug(cwd=None):
+    """collab 방 이름. Rust `character::mode_slug` 와 같은 규칙."""
+    p = _posix_path(cwd if cwd is not None else os.getcwd())
+    return p.replace("/", "-").replace(".", "-")
+
+
 @contextmanager
 def _locked(path):
     """`path` 에 대한 배타 락(임계구역). 본 파일이 아니라 별도 `<path>.lock` 에
@@ -106,8 +137,8 @@ def _room_suffix():
 
 
 def base():
-    enc = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
-    d = os.path.join("/tmp/kasaterm-collab", enc)
+    enc = cwd_slug() + _room_suffix()
+    d = _tmp("kasaterm-collab", enc)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -123,7 +154,7 @@ def me():
 # pane↔sid 매핑은 bind 마커(/tmp/kasaterm-bound-<N>, 내용 '<sock inode>:<tp>')
 # — inode 가 현 데몬과 다르면 옛 세대 잔재라 무시(복구가드 v2 와 같은 규칙).
 
-BOUND_GLOB = "/tmp/kasaterm-bound-*"  # 테스트가 임시 디렉터리로 패치한다
+BOUND_GLOB = _tmp("kasaterm-bound-*")  # 테스트가 임시 디렉터리로 패치한다
 
 _SID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
