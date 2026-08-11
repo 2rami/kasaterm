@@ -78,6 +78,52 @@ pub fn member_names(chars: &Value) -> Vec<String> {
     v
 }
 
+/// 방 학교 판정에서 빼는 소속 — 학원이 아니라 소속 기관이고 인원도 둘뿐이라,
+/// 이게 방 학교로 잡히면 그 방은 두 명 쓰고 곧장 고갈된다.
+const NOT_A_SCHOOL: &str = "샬레";
+
+/// 이름 → 학원. 없는 캐릭터(옛 테마·커스텀)는 `None`.
+pub fn school_of(chars: &Value, name: &str) -> Option<String> {
+    let s = find_character(chars, name)?.get("school")?.as_str()?;
+    (s != NOT_A_SCHOOL).then(|| s.to_string())
+}
+
+/// 후보를 **그 방에 이미 있는 학생들과 같은 학원**으로 좁힌다.
+///
+/// 한 방(프로젝트)에 같은 학원 학생들이 모이면 화면이 한 덩어리로 읽힌다 —
+/// 거노 2026-08-11: "방마다 같은학원소속이나 연관되게 생성되면 재밌을듯".
+///
+/// 좁힌 결과가 비면 **빈 Vec 을 돌려준다**. 호출부가 원래 후보로 폴백해야 한다 —
+/// 학원을 맞추는 것보다 학생이 겹치지 않는 게 먼저다(같은 방에 같은 얼굴이 둘이면
+/// 누가 누군지 사라진다).
+///
+/// 방이 비어 있으면(첫 학생) 좁히지 않는다. 그 첫 배정이 그 방의 학원을 정한다.
+pub fn prefer_same_school(chars: &Value, free: &[String], room: &[String]) -> Vec<String> {
+    let here: std::collections::HashSet<String> =
+        room.iter().filter_map(|n| school_of(chars, n)).collect();
+    if here.is_empty() {
+        return Vec::new();
+    }
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| here.contains(&s)))
+        .cloned()
+        .collect()
+}
+
+/// 방의 **첫 학생**을 고를 때, 다른 방이 이미 쓰는 학원을 피한다.
+///
+/// 첫 배정이 그 방의 학원을 정하므로(`prefer_same_school`), 여기서 갈라 두면 방마다
+/// 다른 학원이 서서 화면에서 방이 구분된다. 학원 수보다 방이 많으면 빈 Vec 을 주고,
+/// 그때는 겹쳐도 된다 — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+pub fn prefer_fresh_school(chars: &Value, free: &[String], elsewhere: &[String]) -> Vec<String> {
+    let used: std::collections::HashSet<String> =
+        elsewhere.iter().filter_map(|n| school_of(chars, n)).collect();
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| !used.contains(&s)))
+        .cloned()
+        .collect()
+}
+
 /// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
 fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
     let mut pool: Vec<&Value> = Vec::new();
@@ -550,6 +596,95 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
 /// 외부 uuidgen(Windows 부재 → kt- 폴백이 "Invalid session ID" 유발) 대신 crate 생성.
 pub fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod same_school_tests {
+    use super::{prefer_same_school, school_of};
+    use serde_json::json;
+
+    fn chars() -> serde_json::Value {
+        json!({
+            "leaders": [{"name": "아로나", "slug": "arona", "school": "샬레"}],
+            "members": [
+                {"name": "미도리", "slug": "midori", "school": "밀레니엄"},
+                {"name": "유즈",   "slug": "yuzu",   "school": "밀레니엄"},
+                {"name": "케이",   "slug": "kei",    "school": "밀레니엄"},
+                {"name": "아루",   "slug": "aru",    "school": "게헨나"},
+                {"name": "히나",   "slug": "hina",   "school": "게헨나"},
+                {"name": "코하루", "slug": "koharu", "school": "트리니티"},
+            ]
+        })
+    }
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pulls_the_rooms_own_school() {
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리"]));
+        assert_eq!(got, v(&["유즈", "케이"]));
+    }
+
+    /// 첫 배정은 좁히지 않는다 — 그 학생이 그 방의 학원을 정한다.
+    #[test]
+    fn empty_room_is_not_narrowed() {
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &[]).is_empty());
+    }
+
+    /// 학원이 마르면 빈 Vec — 호출부가 원래 후보로 폴백해야 한다. 학원을 맞추는 것보다
+    /// 같은 방에서 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn exhausted_school_falls_through() {
+        let free = v(&["아루", "히나", "코하루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["미도리", "유즈", "케이"])).is_empty());
+    }
+
+    /// 샬레는 학원이 아니다 — 둘뿐이라 방 학교로 잡히면 그 방이 즉시 마른다.
+    #[test]
+    fn shale_never_becomes_a_rooms_school() {
+        assert_eq!(school_of(&chars(), "아로나"), None);
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["아로나"])).is_empty());
+    }
+
+    /// 방에 두 학원이 섞여 있으면(폴백으로 그렇게 된다) 둘 다 인정한다 — 한쪽만
+    /// 고르면 이미 있는 다른 쪽이 영영 안 늘어난다.
+    #[test]
+    fn mixed_room_keeps_both_schools() {
+        let free = v(&["유즈", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["유즈", "히나"]));
+    }
+
+    #[test]
+    fn fresh_school_avoids_other_rooms() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        // 다른 방이 밀레니엄과 게헨나를 쓰고 있다 → 트리니티만 남는다.
+        let got = prefer_fresh_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["코하루"]));
+    }
+
+    /// 학원보다 방이 많아지면 빈 Vec — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn fresh_school_gives_up_when_all_used() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "히나"]);
+        let all = v(&["미도리", "아루", "코하루"]);
+        assert!(prefer_fresh_school(&chars(), &free, &all).is_empty());
+    }
+
+    /// 로스터에 없는 이름(옛 마커·커스텀 캐릭터)이 방에 있어도 안 흔들린다.
+    #[test]
+    fn unknown_names_are_ignored() {
+        let free = v(&["유즈", "아루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "모르는이름"]));
+        assert_eq!(got, v(&["유즈"]));
+    }
 }
 
 #[cfg(test)]
