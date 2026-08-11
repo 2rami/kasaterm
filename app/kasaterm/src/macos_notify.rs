@@ -111,6 +111,17 @@ pub(crate) fn install_notification_click_handler(proxy: EventLoopProxy<UserEvent
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // ⚠️ **번들 밖에서는 부르면 안 된다.** `currentNotificationCenter` 는 프로세스가
+        // 앱 번들 안에 있을 때만 살아서, `cargo run` 의 `target/debug/kasaterm` 에서는
+        // `bundleProxyForCurrentProcess is nil` 로 **ObjC 예외를 던지고 프로세스를
+        // 죽인다**. Rust panic 이 아니라 `catch_unwind` 로도 못 잡는다 — 부르고 나면
+        // 이미 늦으니 **부르기 전에** 갈라야 한다.
+        //
+        // 이걸 빠뜨려 개발 실행이 부팅 즉시 죽었다(2026-08-11). 이 레포의 자율 테스트가
+        // 전부 `cargo run` 위에 서 있어서, 그 사이 모든 pane 이 스크린샷 검증을 못 했다.
+        if !crate::chrome::is_bundled() {
+            return;
+        }
         let this = NotifyDelegate::alloc().set_ivars(Ivars { proxy });
         let this: Retained<NotifyDelegate> = unsafe { objc2::msg_send![super(this), init] };
         let center = UNUserNotificationCenter::currentNotificationCenter();

@@ -2678,7 +2678,7 @@ static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::n
 /// True when running from a `.app` bundle (has a `CFBundleIdentifier`). Native
 /// `UNUserNotificationCenter` requires this; the bare binary returns `None`.
 #[cfg(target_os = "macos")]
-fn is_bundled() -> bool {
+pub(crate) fn is_bundled() -> bool {
     objc2_foundation::NSBundle::mainBundle()
         .bundleIdentifier()
         .is_some()
