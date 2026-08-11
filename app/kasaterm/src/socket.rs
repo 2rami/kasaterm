@@ -163,6 +163,12 @@ pub struct PtyBackend {
     /// of `waiting`: a blocked claude writes nothing, so the transcript tail
     /// can't tell `collab_board` the pane is stuck — this map can.
     attention: Arc<Mutex<HashMap<String, String>>>,
+    /// surface_id → 그 pane 이 **지금 돌리는** 서브에이전트·백그라운드 셸. `PreToolUse`/
+    /// `PostToolUse` 훅이 `agent_status` 로 채운다. `attention` 과 같이 GUI
+    /// (`App.collab.hook_activity`)와 Arc 공유 — 쓰는 쪽은 소켓 스레드, 읽는 쪽은
+    /// 진행 표시(GUI)다. 이게 있기 전엔 transcript 꼬리에서 런치·회수를 짝지었는데,
+    /// 꼬리가 64KB 라 세션이 커지면 런치가 밀려나 **오래 걸리는 작업일수록 안 보였다**.
+    hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
@@ -332,10 +338,13 @@ impl PtyBackend {
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
+    /// `hook_activity` 도 같은 이유로 공유 — 훅은 이 소켓으로 들어오고, 그걸 그리는
+    /// 것은 GUI 다.
     pub fn new(
         proxy: EventLoopProxy<UserEvent>,
         ws: Arc<Mutex<Workspace>>,
         attention: Arc<Mutex<HashMap<String, String>>>,
+        hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
         pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
         bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
     ) -> Self {
@@ -344,6 +353,7 @@ impl PtyBackend {
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
             attention,
+            hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
@@ -1591,6 +1601,9 @@ impl Backend for PtyBackend {
         // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
         // 안 바뀌므로 별도 누적). 다음 폴링부턴 ws.pane_character 로 잡혀 불필요.
         let mut lazy_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // 훅이 보고한 in-flight — 아래에서 꼬리 판정 위에 얹는다. 루프 밖에서 한 번만
+        // 뜬다(pane 마다 잠그면 board 한 번에 락을 pane 수만큼 잡는다).
+        let hook_act = self.hook_activity.lock().unwrap().clone();
         let mut board: Vec<PaneActivity> = bound
             .iter()
             // 전 방(윈도우) 학생 — 활성 방 한정 폐기(거노: 전 방 영속). live = 모든 윈도우 pane.
@@ -1601,6 +1614,22 @@ impl Backend for PtyBackend {
                 // 최근 런치가 파일 끝에서 ~269KB 지점). 작은 transcript 는 전체라 부담 없음.
                 let (tail, mtime_idle) = read_tail(path, 512 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
+                // 훅이 본 것을 얹는다. 512KB 도 충분히 큰 세션에선 밀려나는데(24MB 짜리가
+                // 실재한다), 훅은 그 순간 오므로 파일 크기와 무관하다. 꼬리를 지우지 않고
+                // **합치는** 이유: 훅은 앱이 뜬 뒤에 시작한 것만 알아서, 그 전부터 돌던
+                // 작업은 꼬리에만 있다. 둘 중 하나라도 보면 도는 것이다.
+                if let Some(h) = hook_act.get(sid.as_str()) {
+                    for l in crate::state::HookActivity::labels(&h.subagents) {
+                        if !row.subagents.contains(&l) {
+                            row.subagents.push(l);
+                        }
+                    }
+                    for l in crate::state::HookActivity::labels(&h.background) {
+                        if !row.background.contains(&l) {
+                            row.background.push(l);
+                        }
+                    }
+                }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
                 // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
@@ -1867,6 +1896,12 @@ impl Backend for PtyBackend {
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
         self.done_reports.lock().unwrap().retain(|sid, _| live.contains(sid.as_str()));
+        // 훅 상태도 같이 — pane 이 닫히면 `end` 훅은 영영 안 온다. 안 걷으면 죽은
+        // 자리의 작업이 계속 도는 것처럼 남는다.
+        self.hook_activity
+            .lock()
+            .unwrap()
+            .retain(|sid, _| live.contains(sid.as_str()));
         // 학생 경로(cwd)를 PTY 셸 pid 의 라이브 cwd 로 덮어쓴다 — transcript 가 stale
         // 하거나(claude 가 jsonl 미기록) cd 직후라도 즉시 반영(2s 캐시). 아래 git
         // 브랜치도 이 라이브 cwd 기준이 되도록 branch 조회 전에 한다.
@@ -2026,6 +2061,23 @@ impl Backend for PtyBackend {
                 idle_seen: false,
             },
         );
+        Ok(())
+    }
+
+    fn agent_status(
+        &self,
+        surface_id: &str,
+        phase: &str,
+        kind: &str,
+        key: &str,
+        label: &str,
+    ) -> Result<()> {
+        let mut map = self.hook_activity.lock().unwrap();
+        let entry = map.entry(surface_id.to_string()).or_default();
+        entry.apply(phase, kind, key, label);
+        if entry.is_empty() {
+            map.remove(surface_id);
+        }
         Ok(())
     }
 }

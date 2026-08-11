@@ -500,6 +500,140 @@ pub(crate) struct FileTreeState {
     pub(crate) resize: Option<(f32, f32)>,
 }
 
+/// 한 pane 이 **지금 돌리고 있는** 서브에이전트·백그라운드 셸. 훅이 시작·종료를
+/// 직접 보고한 것이라, 화면에도 transcript 에도 안 물어보고 안다.
+///
+/// 원래는 transcript 꼬리 64KB 를 읽어 `tool_use`(런치)와 `tool_result`(회수)를
+/// 짝지어 알아냈다. 그 방식은 **세션이 커지면 조용히 눈이 먼다** — 런치 기록이
+/// 창 밖으로 밀려나면 짝이 안 맞아 in-flight 인 줄을 모른다. 실측(2026-08-11):
+/// 3.8MB 세션은 7건이 잡혔는데 8.3MB·24MB 세션은 0건이었다. 하필 **오래 기다리는
+/// 작업일수록 안 보이는** 쪽으로 틀리니, 진행 표시가 가장 필요한 자리에서 꺼졌다.
+/// 훅은 그 순간 한 번 오고 끝이라 세션 크기와 무관하다(Orca 의 「상태는 훅에서
+/// 온다」와 같은 자리).
+///
+/// 값이 `(라벨, 겹친 수)` 인 이유: 설명이 같은 작업을 동시에 여럿 띄울 수 있어서다
+/// (`Task` 셋을 같은 프롬프트로 부르는 fan-out). 키만 지우면 아직 도는 형제까지
+/// 함께 사라지므로 세어서 0 일 때만 뺀다.
+#[derive(Default, Clone)]
+pub(crate) struct HookActivity {
+    pub(crate) subagents: HashMap<String, (String, u32)>,
+    pub(crate) background: HashMap<String, (String, u32)>,
+}
+
+impl HookActivity {
+    /// 라벨을 화면 순서대로 — 맵은 순서가 없으니 정렬해 프레임마다 흔들리지 않게.
+    pub(crate) fn labels(map: &HashMap<String, (String, u32)>) -> Vec<String> {
+        let mut v: Vec<String> = map.values().map(|(l, _)| l.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.subagents.is_empty() && self.background.is_empty()
+    }
+
+    /// 훅 한 건을 반영한다. `phase` 는 `start`|`end`|`clear`, `kind` 는
+    /// `subagent`|`background` — 값은 소켓 입구(`methods.rs`)에서 이미 좁혔다.
+    pub(crate) fn apply(&mut self, phase: &str, kind: &str, key: &str, label: &str) {
+        let slot = match kind {
+            "subagent" => &mut self.subagents,
+            _ => &mut self.background,
+        };
+        match phase {
+            "start" => {
+                // 라벨은 시작할 때만 온다(종료 훅은 설명을 안 실어 준다). 같은 키가
+                // 다시 시작하면 세기만 올리고 처음 라벨을 지킨다 — 두 번째가 비어도
+                // 화면에서 이름이 사라지지 않게.
+                let e = slot
+                    .entry(key.to_string())
+                    .or_insert_with(|| (String::new(), 0));
+                if e.0.is_empty() {
+                    e.0 = if label.is_empty() {
+                        key.to_string()
+                    } else {
+                        label.to_string()
+                    };
+                }
+                e.1 += 1;
+            }
+            "end" => {
+                // 모르는 키의 `end` 는 흘린다 — 앱이 도중에 떠서 시작을 못 본 경우가
+                // 정상적으로 있다. 여기서 만들어 두면 없는 작업이 화면에 남는다.
+                if let Some(e) = slot.get_mut(key) {
+                    e.1 = e.1.saturating_sub(1);
+                    if e.1 == 0 {
+                        slot.remove(key);
+                    }
+                }
+            }
+            _ => slot.clear(), // "clear" — 그 kind 통째. `end` 를 놓친 것까지 함께 걷힌다.
+        }
+    }
+}
+
+#[cfg(test)]
+mod hook_activity_tests {
+    use super::*;
+
+    #[test]
+    fn start_and_end_pair_up_by_key() {
+        let mut a = HookActivity::default();
+        a.apply("start", "subagent", "toolu_1", "진행 조사");
+        assert_eq!(HookActivity::labels(&a.subagents), vec!["진행 조사"]);
+        a.apply("end", "subagent", "toolu_1", "");
+        assert!(a.is_empty(), "짝이 맞으면 아무것도 안 남는다");
+    }
+
+    #[test]
+    fn same_key_twice_needs_two_ends() {
+        // 설명이 같은 작업을 동시에 여럿 띄우는 fan-out. 키만 지우면 아직 도는
+        // 형제까지 사라지므로 세어야 한다.
+        let mut a = HookActivity::default();
+        a.apply("start", "subagent", "toolu_x", "코드 훑기");
+        a.apply("start", "subagent", "toolu_x", "코드 훑기");
+        a.apply("end", "subagent", "toolu_x", "");
+        assert_eq!(
+            HookActivity::labels(&a.subagents),
+            vec!["코드 훑기"],
+            "하나 끝났다고 둘 다 사라지면 안 된다"
+        );
+        a.apply("end", "subagent", "toolu_x", "");
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn unknown_end_is_ignored() {
+        // 앱이 나중에 떠서 시작을 못 본 작업의 종료. 여기서 항목을 만들면 이미 끝난
+        // 일이 「도는 중」으로 화면에 남는다.
+        let mut a = HookActivity::default();
+        a.apply("end", "subagent", "toolu_ghost", "");
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn clear_wipes_only_its_kind() {
+        // 턴이 끝나면(Stop) 서브에이전트는 안 남지만 백그라운드 셸은 계속 산다.
+        let mut a = HookActivity::default();
+        a.apply("start", "subagent", "toolu_1", "조사");
+        a.apply("start", "background", "toolu_2", "cargo build");
+        a.apply("clear", "subagent", "-", "");
+        assert!(a.subagents.is_empty());
+        assert_eq!(HookActivity::labels(&a.background), vec!["cargo build"]);
+    }
+
+    #[test]
+    fn label_falls_back_to_key_and_survives_a_blank_restart() {
+        let mut a = HookActivity::default();
+        a.apply("start", "background", "toolu_9", "");
+        assert_eq!(HookActivity::labels(&a.background), vec!["toolu_9"]);
+        let mut b = HookActivity::default();
+        b.apply("start", "subagent", "toolu_8", "첫 라벨");
+        b.apply("start", "subagent", "toolu_8", "");
+        assert_eq!(HookActivity::labels(&b.subagents), vec!["첫 라벨"]);
+    }
+}
+
 /// Collab completion toast + munder-style approval card. `toast` is the
 /// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
 /// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
@@ -514,6 +648,9 @@ pub(crate) struct CollabState {
     pub(crate) toast_approve_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) toast_deny_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) attention: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// pane → 훅이 보고한 in-flight. `attention` 과 같이 socket `PtyBackend` 와 Arc
+    /// 공유 — 쓰는 쪽은 훅(소켓 스레드), 읽는 쪽은 진행 표시(GUI 스레드)다.
+    pub(crate) hook_activity: std::sync::Arc<std::sync::Mutex<HashMap<String, HookActivity>>>,
     #[allow(dead_code)] // board badge count — bumped, render/clear lands with sidebar work
     pub(crate) unread: u32,
 }

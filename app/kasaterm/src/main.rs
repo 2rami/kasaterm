@@ -6210,17 +6210,34 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // board/inbox 자동인지는 폐기 — 조율은 GUI(SCHALE OS) 와 명시적 kasacollab 으로.
             // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
             // (transcript 직접 비교, 데몬 무관). 모든 pane 공통 안전망.
-            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
+            // 진행 표시 정본(`kasaterm-agent-status.sh`) — 서브에이전트·백그라운드의
+            // 시작과 끝을 그 순간 받는다. matcher 를 안 거는 이유: 걸러야 할 것이
+            // 도구 **이름**이 아니라 `tool_input.run_in_background` 라 matcher 로는
+            // 표현이 안 되고, 스크립트가 첫 줄에서 bash 만으로 관심 밖을 쳐낸다.
+            // timeout 은 초 단위라 5 초 — 표시가 한 번 빠지는 것이 도구 호출이
+            // 늦어지는 것보다 낫다(옆의 5000 은 사실상 무제한이다).
+            "PreToolUse": [
+                { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
+            ],
             "PostToolUse": [
                 { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] },
-                { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] }
+                { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
             // ultracode 는 effort 와 별개 상태인데 claude 가 statusline 에 안 실어 준다
             // (payload 스펙의 effort 는 low|medium|high|xhigh|max 뿐). 여러 에이전트를
             // 푸는 턴인지가 화면에 안 보이므로, 프롬프트를 보고 마커를 남겨 statusline 이
             // 읽게 한다. 턴 단위 opt-in 이라 마커도 프롬프트마다 다시 쓰고 지운다.
             "UserPromptSubmit": [{ "hooks": [cmd("ultracode-mark.py", 3000)] }],
-            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
+            // 두 훅을 **다른 그룹**으로 나눠 둔다 — stop-drain 은 인박스가 있으면
+            // stdout 에 block JSON 을 내는데, 같은 그룹이면 진행 표시 훅의 출력과
+            // 섞여 그 결정이 깨질 수 있다. agent-status 는 stdout 을 안 쓰지만
+            // 나란히 두는 것 자체가 나중에 그 규칙을 잊게 만든다.
+            "Stop": [
+                { "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
+            ],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
         },
         // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
@@ -6235,6 +6252,11 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     if cfg!(windows) {
         // conflict-guard 는 python3 의존 — 기본 Windows 엔 python3 가 없어 훅이 매
         // Edit 마다 실패 노이즈를 낸다. python3 가 PATH 에 있을 때만 유지.
+        //
+        // 같은 remove 에 진행 표시 훅(`agent-status`)의 `PreToolUse` 도 함께 빠지는데,
+        // 그게 맞다 — 그 스크립트도 payload 파싱에 python3 를 쓰므로 남겨 봐야 아무
+        // 일도 못 한다. Windows 는 transcript 폴백으로 표시가 이어진다(꼬리 한계는
+        // 그대로 남지만, 훅이 없는 편보다 낫다).
         let has_py3 = proc::command("python3")
             .arg("--version")
             .stdout(std::process::Stdio::null())

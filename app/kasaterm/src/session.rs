@@ -3095,6 +3095,7 @@ impl App {
             self.proxy.clone(),
             self.ws.clone(),
             self.collab.attention.clone(),
+            self.collab.hook_activity.clone(),
             self.pane_status_pub.clone(),
             self.bg_agents.clone(),
         ));

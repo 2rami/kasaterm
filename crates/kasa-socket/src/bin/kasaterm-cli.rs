@@ -777,6 +777,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
+    eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(학생색·학생명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");
@@ -1143,6 +1144,50 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.attention",
                 json!({ "surface_id": surface, "reason": reason }),
+            )
+        }
+        "agent-status" => {
+            // agent-status [--surface <id>] <start|end|clear> <subagent|background> [key] [라벨...]
+            //
+            // 진행 표시의 정본. `PreToolUse`/`PostToolUse` 훅이 부르며, 화면이나
+            // transcript 를 되짚지 않고 **일어난 그 순간** 사실을 밀어 넣는다.
+            // 옛 방식(꼬리 64KB 에서 런치·회수 짝짓기)은 세션이 커지면 런치가 창
+            // 밖으로 밀려 오래 걸리는 작업일수록 안 보였다.
+            //
+            // 훅에서 부르는 것이라 **실패해도 조용해야 한다** — 이 명령이 죽어서
+            // claude 의 도구 호출이 막히면 안 된다(호출부가 `|| true` 로 감싼다).
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("agent-status needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let phase = rest
+                .first()
+                .ok_or_else(|| anyhow!("agent-status needs <start|end|clear>"))?
+                .clone();
+            let kind = rest
+                .get(1)
+                .ok_or_else(|| anyhow!("agent-status needs <subagent|background>"))?
+                .clone();
+            let key = rest.get(2).cloned().unwrap_or_default();
+            let label = rest.get(3..).map(|s| s.join(" ")).unwrap_or_default();
+            (
+                "surface.agent_status",
+                json!({
+                    "surface_id": surface,
+                    "phase": phase,
+                    "kind": kind,
+                    "key": key,
+                    "label": label,
+                }),
             )
         }
         "done" => {
