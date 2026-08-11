@@ -2223,16 +2223,15 @@ impl App {
         // 없어 반쪽 카드는 트레이를 침범한다).
         let mut y = top;
         for i in first..n {
-            let mut leaves = self.window_leaves(i);
-            // 숨긴 pane 도 같은 목록에 이어 붙인다 — 어디에도 안 보이면 되살릴 길이
-            // 없다. 트리에서 빠졌을 뿐 PTY 는 돌고 있으므로 「없는 것」이 아니다.
-            // 렌더가 `leaves` 길이 밖의 꼬리를 흐리게 그린다.
-            leaves.extend(
-                self.closed_panes
-                    .iter()
-                    .filter(|c| c.stashed && c.alive && c.window == i)
-                    .map(|c| c.pane_id.clone()),
-            );
+            let leaves = self.window_leaves(i);
+            // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
+            // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.
+            let hidden: Vec<String> = self
+                .closed_panes
+                .iter()
+                .filter(|c| c.stashed && c.alive && c.window == i)
+                .map(|c| c.pane_id.clone())
+                .collect();
             // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
             // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
             // 방에선 그 학생을 볼 길이 통째로 사라졌다(거노, 두 번). 손잡이 쪽은 이미
@@ -2240,8 +2239,13 @@ impl App {
             // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
             // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
             let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
-            // 배치도 + 목록. 배치도는 **트리 모양**이라 pane 수와 무관하게 높이가 같다.
-            let full_h = SIDEBAR_MINI_H + leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+            // 펼친 카드는 **배치도 한 장**이다. 예전엔 지도와 목록을 같이 뒀는데 같은
+            // pane 을 두 번 말하는 셈이라, 목록이 먹던 높이를 지도에 넘겼다(거노
+            // 2026-08-11: "둘중에 한뷰만 보이게 미니맵은 학생뭔지 보여야해").
+            // 칸이 얼굴을 담아야 하므로 높이는 pane 수를 따라간다 — 여섯 칸을 46px
+            // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
+            let mini_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
+            let full_h = mini_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
             let list_h = (full_h * t).round();
             let h = SIDEBAR_TAB_H + list_h;
             if !tabs.is_empty() && y + h > top + avail_h {
@@ -2261,8 +2265,7 @@ impl App {
                 let bottom = y + h;
                 // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
                 // 이미 풀어 주므로 여기서 재귀할 것이 없다.
-                let ma =
-                    (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, SIDEBAR_MINI_H - 8.0);
+                let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, mini_h - 8.0);
                 if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
                     // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
                     // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
@@ -2290,10 +2293,11 @@ impl App {
                         ));
                     }
                 }
-                for (k, id) in leaves.iter().enumerate() {
+                // 지도 아래 꼬리 — 숨긴 pane 만. 트리에 칸이 없어 지도로는 못 말한다.
+                for (k, id) in hidden.iter().enumerate() {
                     let ry = y
                         + SIDEBAR_TAB_H
-                        + SIDEBAR_MINI_H
+                        + mini_h
                         + SIDEBAR_ROW_PAD / 2.0
                         + k as f32 * SIDEBAR_ROW_H;
                     if ry + SIDEBAR_ROW_H > bottom {
