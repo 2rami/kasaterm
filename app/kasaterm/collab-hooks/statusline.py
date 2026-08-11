@@ -233,10 +233,15 @@ def main():
         except Exception:
             pass
     if name:
-        c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
-        # pane 안이든 밖이든 같은 `● 이름`. 다른 것은 kasaterm 이 읽을 표식뿐이다.
-        mark = SPRITE if os.environ.get("KASATERM_PANE_ID") else ""
-        parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}{mark}")
+        if os.environ.get("KASATERM_PANE_ID"):
+            # pane 안에서는 학생을 여기 안 쓴다(거노 2026-08-11) — 이름도 프사도
+            # pane 헤더가 이미 보여주므로 상태줄에 또 있으면 같은 정보가 두 번이다.
+            # 표식만 남긴다(아래 SPRITE 주석: 이게 없으면 kasaterm 쪽 판정 셋이 죽는다).
+            parts.append(SPRITE)
+        else:
+            # 일반 터미널에는 pane 헤더가 없다 — 거기서는 누구인지 여기서만 알 수 있다.
+            c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
+            parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
     # 계정 — 프사 바로 오른쪽. kasaterm 설정의 **활성 계정** 라벨이 1순위다(거노가
     # 붙인 이름). 활성 계정이 없으면 기본 로그인이고 그때만 공유 캐시가 참이라 종전
