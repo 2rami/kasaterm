@@ -114,7 +114,19 @@ def check(slug):
 
 
 def installed(slug):
-    return os.path.exists(os.path.join(DST, f"{slug}-profile.png"))
+    """설치돼 있고 **생성물보다 낡지 않은가**.
+
+    파일 존재만 보면 재생성이 조용히 사라진다 — `gen --ref --force` 로 다시 구운
+    케이가 「이미 설치됨」으로 건너뛰어져 앱에는 옛 분홍머리가 그대로 남아 있었다.
+    오류가 안 나서 그리드를 눈으로 볼 때까지 몰랐다.
+    """
+    dst = os.path.join(DST, f"{slug}-profile.png")
+    if not os.path.exists(dst):
+        return False
+    src = os.path.join(SRC, slug, "out", "frames", "idle", "frame-00.png")
+    if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(dst):
+        return False
+    return True
 
 
 def generate(slug, force=False, use_ref=False):
