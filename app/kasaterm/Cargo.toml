@@ -95,8 +95,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_Debug",
     # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
     "Win32_System_LibraryLoader",
+    # bridge 테스트의 가짜 attach 클라이언트가 콘솔을 raw 로 내린다(SetConsoleMode).
+    "Win32_System_Console",
 ] }
-png = "0.17"
+# bg SendMessage 브리지(bridge.rs)가 `claude attach` 를 ConPTY 로 몰고 간다 —
+# unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는
+# 것과 같은 크레이트·버전.
+portable-pty = "0.9"
 
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.

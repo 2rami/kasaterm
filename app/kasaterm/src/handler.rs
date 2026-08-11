@@ -1041,7 +1041,6 @@ impl ApplicationHandler<UserEvent> for App {
         // bg SendMessage 브리지 — detach 포크(teammate 플래그 유실)에게 kt-* 팀
         // 인박스 미읽음을 attach pty 주입으로 배달. bg-agents 폴러가 채우는 맵을
         // 읽기 전용으로 공유받는다.
-        #[cfg(unix)]
         crate::bridge::spawn_inbox_bridge(self.bg_agents.clone());
         // cell-renderer GPU path is the only path. The old sugarloaf
         // opt-in branch (KASATERM_RENDERER=sugarloaf) was removed once
