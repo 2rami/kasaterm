@@ -10073,6 +10073,32 @@ mod clawd_banner_tests {
         assert!(!line.contains("Antigravity"), "제품명이 남았다: {line:?}");
     }
 
+    /// codex 시작 패널 실측 행. 마스코트가 없어 도트는 못 세우지만 이름표는 바꾼다.
+    #[test]
+    fn codex_panel_title_becomes_the_student_name() {
+        let mut rows = vec![row_from(
+            "│ >_ OpenAI Codex (v0.147.0)                     │",
+        )];
+        let n = rows.len();
+        replace_banner_title(&mut rows, 0, 0, 0, n, CODEX_TITLE, "아리스", None);
+        let line: String = rows[0].iter().map(|c| c.ch).collect();
+        let packed = line.replace(' ', "");
+        assert!(packed.contains("아리스"), "학생 이름이 안 들어갔다: {line:?}");
+        assert!(line.contains("(v0.147.0)"), "버전이 사라졌다: {line:?}");
+        assert!(!line.contains("OpenAI"), "제품명이 남았다: {line:?}");
+    }
+
+    /// 대화 본문에 "OpenAI Codex" 가 나와도 안 걸려야 한다 — `>_` 까지 묶어 잡는 이유.
+    #[test]
+    fn codex_title_ignores_the_words_in_prose() {
+        let mut rows = vec![row_from("OpenAI Codex 는 어떤 도구인가요?")];
+        let before: String = rows[0].iter().map(|c| c.ch).collect();
+        let n = rows.len();
+        replace_banner_title(&mut rows, 0, 0, 0, n, CODEX_TITLE, "아리스", None);
+        let after: String = rows[0].iter().map(|c| c.ch).collect();
+        assert_eq!(before, after, "본문이 바뀌었다");
+    }
+
     #[test]
     fn full_banner_detected() {
         let rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
