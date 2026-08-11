@@ -984,7 +984,12 @@ for p in glob.glob(os.path.join(d, '*.json')):
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
         lf.close()
 "#;
-        let _ = crate::proc::command("python3")
+        let Some(py) = crate::python3_program() else {
+            return;
+        };
+        let _ = crate::proc::command(py)
+            .arg("-X")
+            .arg("utf8")
             .arg("-c")
             .arg(SCRIPT)
             .arg(target)

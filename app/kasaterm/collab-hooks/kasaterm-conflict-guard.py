@@ -111,6 +111,19 @@ def pane_doing(fp):
     return None, None
 
 
+def project_slug(cwd):
+    """Claude Code 가 transcript 를 두는 `~/.claude/projects/<slug>` 의 이름 규칙.
+
+    Windows 는 드라이브 콜론과 역슬래시까지 같이 접힌다 —
+    `C:\\Users\\kshkj\\desktop` → `C--Users-kshkj-desktop`(실측). `/`·`.` 만
+    접던 종전 규칙은 Windows 에서 존재할 수 없는 폴더를 가리켜, 아래 isdir
+    가드에 걸려 충돌 감지가 통째로 무음 정지했다.
+    """
+    for ch in ("/", ".", "\\", ":"):
+        cwd = cwd.replace(ch, "-")
+    return cwd
+
+
 def main():
     if not os.environ.get("KASATERM_PANE_ID"):
         return
@@ -126,8 +139,7 @@ def main():
 
     my_tp = os.path.realpath(payload.get("transcript_path", "") or "")
     cwd = payload.get("cwd") or os.getcwd()
-    enc = cwd.replace("/", "-").replace(".", "-")
-    proj = os.path.expanduser("~/.claude/projects/" + enc)
+    proj = os.path.expanduser("~/.claude/projects/" + project_slug(cwd))
     if not os.path.isdir(proj):
         return
 
