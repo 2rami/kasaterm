@@ -1065,17 +1065,6 @@ impl App {
                     if stand_anchor.is_none() {
                         stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
                     }
-                    // ultracode 턴이면 입력박스 테두리를 보라색으로 물들인다.
-                    // 상태줄 배지(`ultra`)는 세그먼트 맨 끝이라 좁은 pane 에서 제일
-                    // 먼저 잘리고, 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는
-                    // 턴인지는 **타이핑하는 자리**에서 보여야 한다(거노 2026-08-11:
-                    // "상태줄말고 프롬프트입력창 보라색 glow"). 색은 상태줄 배지와
-                    // 같은 bb9af7 이고, 숨쉬듯 흰빛으로 오르내려 정적인 테두리와
-                    // 구분된다(스피너 shimmer 와 같은 mix 방식).
-                    if self.pane_ultracode.contains(&id) {
-                        let t = self.version_anim_start.elapsed().as_secs_f32();
-                        paint_ultracode_box(&mut composed, t);
-                    }
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
@@ -1389,6 +1378,15 @@ impl App {
                         })
                 };
                 if let Some(accent) = prompt_accent {
+                    // ultracode 턴이면 학생 accent 대신 보라로 칠한다 — 그 턴에 무엇이
+                    // 켜져 있는지가 누구 pane 인지보다 급한 정보다(거노 2026-08-11:
+                    // "상태줄말고 프롬프트입력창 보라색 glow"). 입력박스를 칠하는 손이
+                    // 여기 하나뿐이라 색만 갈아끼운다 — 따로 칠하면 이 호출이 덮는다.
+                    let accent = if self.pane_ultracode.contains(&tab_pid) {
+                        ultracode_accent(self.version_anim_start.elapsed().as_secs_f32())
+                    } else {
+                        accent
+                    };
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
                 }
@@ -7285,41 +7283,23 @@ impl PromptBox {
     }
 }
 
-/// ultracode 인 pane 의 입력박스 테두리를 보라색으로 물들인다. 칠했으면 true.
+/// ultracode 턴의 입력박스 accent — 학생 색 대신 이걸 `style_prompt_box` 에 넘긴다.
 ///
 /// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
 /// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
 /// 보여야 한다(거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
 ///
-/// 색은 상태줄 배지와 같은 `bb9af7`. `t`(초)에 따라 흰빛으로 숨쉬듯 오르내려
-/// 정적인 테두리와 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
+/// **입력박스를 따로 칠하지 않고 accent 만 갈아끼우는 이유**: 그 박스를 칠하는 손은
+/// `style_prompt_box` 하나뿐이고 pane 렌더 **뒤쪽**에서 돈다. 앞에서 셀을 직접
+/// 물들이면 그 호출이 학생 accent 로 깨끗이 덮어쓴다(2026-08-11 실측 — 스샷의
+/// 테두리가 보라가 아니라 학생 분홍 `d55580` 이었다).
 ///
-/// 테두리를 이루는 **박스 문자만** 물들인다. 행 전체를 칠하면 입력한 글까지 색이
-/// 바뀌어 무엇을 쳤는지 읽기 어려워진다. codex(`Filled`)는 테두리 자체가 없어
-/// 대상이 아니다.
-fn paint_ultracode_box(composed: &mut [Vec<GridCell>], t: f32) -> bool {
-    let Some(PromptBox::Bordered { top, bottom, .. }) = prompt_box(composed) else {
-        return false;
-    };
-    use kasa_bridge::screen::Color;
+/// 색은 `bb9af7`. `t`(초)에 따라 흰빛으로 숨쉬듯 오르내려 정적인 테두리와
+/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
+fn ultracode_accent(t: f32) -> [u8; 4] {
     let g = 0.34 * (0.5 + 0.5 * (t * 2.2).sin());
     let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
-    let glow = Color::Rgb(mix(0xbb), mix(0x9a), mix(0xf7));
-    let last = bottom.min(composed.len().saturating_sub(1));
-    let mut painted = false;
-    for row in composed[top..=last].iter_mut() {
-        for c in row.iter_mut() {
-            if matches!(
-                c.ch,
-                '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '━' | '┃'
-            ) {
-                c.fg = glow.clone();
-                c.bold = true;
-                painted = true;
-            }
-        }
-    }
-    painted
+    [mix(0xbb), mix(0x9a), mix(0xf7), 255]
 }
 
 /// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
@@ -10493,40 +10473,32 @@ mod prompt_box_tests {
         ));
     }
 
-    // ultracode 테두리 물들이기 — 테두리 문자만 바뀌고 입력한 글은 그대로여야 한다.
-    // 행 전체를 칠하면 무엇을 쳤는지 읽기 어려워진다(거노가 본 자리가 곧 입력창이다).
+    // ultracode accent — 학생 accent 와 **확실히 구분**돼야 의미가 있다. 실기에서
+    // 테두리가 학생 분홍(d55580)으로 나온 적이 있어(덮어쓰기) 그 색과의 거리도 본다.
     #[test]
-    fn ultracode_paints_only_the_border_glyphs() {
-        use kasa_bridge::screen::Color;
-        let mut rows = vec![
-            row_from("some output above"),
-            row_from(&"─".repeat(28)),
-            row_from(&format!("❯ hello{}", " ".repeat(21))),
-            row_from(&"─".repeat(28)),
-        ];
-        let before = rows[2].clone();
-        assert!(paint_ultracode_box(&mut rows, 0.0));
-
-        // 위·아래 테두리는 전부 보라색 계열 + bold.
-        for r in [1usize, 3] {
-            for c in &rows[r] {
-                assert!(matches!(c.fg, Color::Rgb(..)), "테두리가 안 칠해졌다: 행 {r}");
-                assert!(c.bold);
+    fn ultracode_accent_stays_purple_across_the_breath() {
+        let mut seen_dim = false;
+        let mut seen_bright = false;
+        for i in 0..80 {
+            let t = i as f32 * 0.05;
+            let [r, g, b, a] = ultracode_accent(t);
+            assert_eq!(a, 255);
+            // 언제나 보라 — 파랑이 가장 세고 초록이 가장 약하다. 이 순서가 깨지면
+            // 학생 accent(분홍 계열: R 강, G 약, B 중간)와 헷갈린다.
+            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t})");
+            // 원색(bb9af7)보다 어두워지지 않는다 — 흰빛을 섞기만 한다.
+            assert!(r >= 0xbb && g >= 0x9a && b >= 0xf7, "원색보다 어둡다: {r},{g},{b}");
+            // 초록이 가장 크게 흔들리는 채널이다(0x9a 에서 시작해 흰빛이 가장 많이
+            // 섞인다) — 실측 범위 154~188 의 양 끝을 각각 지나는지 본다.
+            if g < 0xa0 {
+                seen_dim = true;
+            }
+            if g > 0xb4 {
+                seen_bright = true;
             }
         }
-        // 입력행은 손대지 않는다.
-        assert_eq!(rows[2], before, "입력한 글까지 색이 바뀌었다");
-        // 박스 밖도 그대로.
-        assert!(rows[0].iter().all(|c| !c.bold));
-    }
-
-    // 입력박스가 없는 화면(그냥 출력만)에서는 아무것도 칠하지 않는다 — 여기서
-    // 오탐이 나면 엉뚱한 구분선이 보라색으로 빛난다.
-    #[test]
-    fn ultracode_paints_nothing_without_a_box() {
-        let mut rows = vec![row_from("just output"), row_from("more output")];
-        assert!(!paint_ultracode_box(&mut rows, 0.0));
-        assert!(rows.iter().flatten().all(|c| !c.bold));
+        // 실제로 숨쉬어야 한다 — 상수면 정적인 테두리와 구분이 안 된다.
+        assert!(seen_dim && seen_bright, "밝기가 오르내리지 않는다");
     }
 
     // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).
