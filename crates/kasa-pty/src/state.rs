@@ -599,6 +599,44 @@ impl PtySession {
         out
     }
 
+    /// 스크롤백 + 현재 화면을 텍스트 줄로. 뒤에서 `max_lines` 만큼(최신 우선).
+    ///
+    /// 세션 저장이 쓰는 경로다. 예전엔 GUI 가 프레임 diff 로 「몇 줄 밀렸나」를 추측해
+    /// 자체 history 를 쌓았는데, 그 추측이 scroll-region TUI 를 깨뜨려 폐기되면서
+    /// (`apply_screen_update`: "Shift detection on the pty side is retired") **아무도 그
+    /// history 를 안 채우게 됐다.** 그 뒤로 저장되는 스크롤백은 늘 화면 한 장뿐이라,
+    /// 재시작하면 그 전 대화가 통째로 사라진다 — 저장 상한(`SCROLLBACK_SAVE_MAX`)이나
+    /// 버퍼 예산(`KASATERM_SCROLLBACK_MB`)을 올려도 소용이 없었다(2026-08-11 실측:
+    /// 400줄을 뿌린 pane 의 저장 스크롤백이 38줄 = 화면 크기 그대로).
+    ///
+    /// 진짜 스크롤백은 여기, alacritty grid 가 갖고 있다. 그래서 추측을 되살리는 대신
+    /// 그것을 직접 읽는다.
+    pub fn scrollback_text(&self, max_lines: usize) -> Vec<String> {
+        let t = self.term.lock().unwrap();
+        let grid = t.grid();
+        let cols = grid.columns();
+        let hist = grid.history_size();
+        let screen = grid.screen_lines();
+        let total = hist + screen;
+        let take = max_lines.min(total);
+        let mut out = Vec::with_capacity(take);
+        // grid 의 줄 번호는 화면 첫 줄이 0 이고 스크롤백이 음수다.
+        for i in (total - take)..total {
+            let line = i as i32 - hist as i32;
+            let mut row = String::with_capacity(cols);
+            for c in 0..cols {
+                let point = Point::new(
+                    alacritty_terminal::index::Line(line),
+                    alacritty_terminal::index::Column(c),
+                );
+                let ch = grid[point].c;
+                row.push(if ch == '\0' { ' ' } else { ch });
+            }
+            out.push(row.trim_end().to_string());
+        }
+        out
+    }
+
     /// Jump straight to the live tail (display offset 0).
     pub fn scroll_to_bottom(&self) {
         let (cols, rows) = *self.size.lock().unwrap();
