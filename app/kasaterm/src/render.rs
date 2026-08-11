@@ -8177,7 +8177,7 @@ fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, 
 
 /// 캐릭터 슬러그 → statusline 프사 PNG(웹뷰 bust 를 96×96 contain-리사이즈한
 /// 정사각 상반신, 컴파일타임 내장).
-fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
+pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     Some(match slug {
         "arona" => include_bytes!("../assets/students/arona-profile.png"),
         "prana" => include_bytes!("../assets/students/prana-profile.png"),

@@ -98,10 +98,20 @@ impl App {
             }
         }
         self.chrome_dirty = true;
+        // 읽음 처리(=dock 배지)만 지금 보고 있는 pane 을 뺀다. 데스크톱 알림 자체는
+        // 그 pane 을 보고 있어도 쏜다 — 거노 2026-08-11 "pane별로 그냥 다오게하자".
+        // 학생이 여럿이면 어느 창을 보고 있든 나머지가 끝난 걸 놓치는 쪽이 손해다.
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
-            notify_desktop(title, body);
         }
+        let who = self.pane_character_if_known(surface_id);
+        // 누구 알림인지는 프사(오른쪽 썸네일)와 제목 둘 다로 말한다 — 캐릭터가 없는
+        // 순정 pane 은 프사가 안 붙으므로 제목만 남는다.
+        let titled = match who.as_deref() {
+            Some(c) => format!("{c} · {title}"),
+            None => title.to_string(),
+        };
+        notify_desktop(&titled, body, who.as_deref());
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
@@ -135,14 +145,16 @@ impl App {
         }
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
-            let who = character.as_deref().unwrap_or("pane");
-            let body = if reason.is_empty() {
-                who.to_string()
-            } else {
-                format!("{who} — {reason}")
-            };
-            notify_desktop("⚠ 권한 필요", &body);
         }
+        // 완료 알림과 같은 이유로 억제하지 않는다 — 막혀 선 학생은 더더욱 놓치면
+        // 안 되는 쪽이다(그 pane 을 보고 있었다면 어차피 화면에도 토스트가 떠 있다).
+        let who = character.as_deref().unwrap_or("pane");
+        let body = if reason.is_empty() {
+            who.to_string()
+        } else {
+            format!("{who} — {reason}")
+        };
+        notify_desktop("⚠ 권한 필요", &body, character.as_deref());
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
@@ -2524,13 +2536,41 @@ fn doc_name(path: &str) -> String {
 /// bundle identifier and can't obtain notification authorization, so there we
 /// fall back to `osascript` — which shows the Script Editor icon (dev-only).
 #[cfg(target_os = "macos")]
-pub(crate) fn notify_desktop(title: &str, body: &str) {
+pub(crate) fn notify_desktop(title: &str, body: &str, character: Option<&str>) {
     if is_bundled() {
-        notify_native(title, body);
+        notify_native(title, body, character);
     } else {
         notify_osascript(title, body);
     }
 }
+
+/// 알림에 붙일 그 학생의 프사 파일.
+///
+/// 이미지는 `include_bytes!` 로 바이너리에 박혀 있어 경로가 없는데, 첨부가 받는
+/// 것은 **파일 URL 뿐**이다. 그래서 슬러그마다 한 번씩 임시 파일로 떨궈 두고 그
+/// 경로를 재사용한다. 로스터에 없는 커스텀 캐릭터는 슬러그가 없어 None 이다.
+#[cfg(target_os = "macos")]
+fn student_profile_file(character: &str) -> Option<std::path::PathBuf> {
+    let slug = crate::theme::character_slug(character)?;
+    let path = std::env::temp_dir()
+        .join("kasaterm-notify-icons")
+        .join(format!("{slug}.png"));
+    if path.exists() {
+        return Some(path);
+    }
+    let png = crate::render::student_profile_png(slug)?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(&path, png).ok()?;
+    Some(path)
+}
+
+/// 알림 권한 판정 — 0=아직 답 없음 · 1=허용 · 2=거부.
+///
+/// 전에는 `requestAuthorization` 의 콜백이 **빈 블록**이라 거부돼도 아무도 몰랐다:
+/// 요청은 그대로 native 로 나가고 시스템이 조용히 버려, 화면에는 "알림이 안 온다"
+/// 만 남았다. 답을 여기 남겨 두면 다음 알림부터 osascript 로 돌릴 수 있다.
+#[cfg(target_os = "macos")]
+static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// True when running from a `.app` bundle (has a `CFBundleIdentifier`). Native
 /// `UNUserNotificationCenter` requires this; the bare binary returns `None`.
@@ -2551,7 +2591,21 @@ pub(crate) fn ensure_notification_authorization() {
         if !is_bundled() {
             return;
         }
-        let handler = block2::RcBlock::new(|_granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {});
+        let handler = block2::RcBlock::new(
+            |granted: objc2::runtime::Bool, err: *mut objc2_foundation::NSError| {
+                let ok = granted.as_bool();
+                NOTIFY_AUTH.store(
+                    if ok { 1 } else { 2 },
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if !ok {
+                    let why = unsafe { err.as_ref() }
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| "사유 없음".to_string());
+                    eprintln!("[notify] 데스크톱 알림 권한 없음 — osascript 로 돌린다: {why}");
+                }
+            },
+        );
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
         center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
@@ -2559,23 +2613,52 @@ pub(crate) fn ensure_notification_authorization() {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_native(title: &str, body: &str) {
-    use objc2_foundation::NSString;
+fn notify_native(title: &str, body: &str, character: Option<&str>) {
+    use objc2_foundation::{NSArray, NSString, NSURL};
     use objc2_user_notifications::{
-        UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter,
+        UNMutableNotificationContent, UNNotificationAttachment, UNNotificationRequest,
+        UNUserNotificationCenter,
     };
     ensure_notification_authorization();
+    // 거부가 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서 돌린다.
+    if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
+        notify_osascript(title, body);
+        return;
+    }
     // Unique id per request so rapid completions don't replace each other.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
+    // 학생 프사를 오른쪽 썸네일로 — 알림이 여럿 겹쳐도 누구 것인지 그림으로 갈린다.
+    // **왼쪽 작은 아이콘은 번들 아이콘 고정**이라 여기서 못 바꾼다(그건 앱 아이콘).
+    if let Some(p) = character.and_then(student_profile_file) {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
+        let aid = NSString::from_str(&format!("kasaterm-icon-{seq}"));
+        if let Ok(att) = unsafe {
+            UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(&aid, &url, None)
+        } {
+            content.setAttachments(&NSArray::from_retained_slice(&[att]));
+        }
+    }
     let ident = NSString::from_str(&format!("kasaterm-notify-{seq}"));
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    center.addNotificationRequest_withCompletionHandler(&request, None);
+    // 배달이 실패하면(권한 회수·첨부 거부 등) 그 자리에서 osascript 로 돌린다.
+    // 실패를 삼키면 "알림이 안 온다" 만 남고 이유는 어디에도 안 남는다.
+    let (t, b) = (title.to_string(), body.to_string());
+    let done = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
+        if let Some(e) = unsafe { err.as_ref() } {
+            eprintln!(
+                "[notify] native 배달 실패 — osascript 로 돌린다: {}",
+                e.localizedDescription()
+            );
+            notify_osascript(&t, &b);
+        }
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
 }
 
 #[cfg(target_os = "macos")]
@@ -2592,7 +2675,7 @@ fn notify_osascript(title: &str, body: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn notify_desktop(_title: &str, _body: &str) {}
+pub(crate) fn notify_desktop(_title: &str, _body: &str, _character: Option<&str>) {}
 
 /// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
 #[cfg(target_os = "macos")]
