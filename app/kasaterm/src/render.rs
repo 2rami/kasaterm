@@ -145,6 +145,41 @@ impl App {
         }
     }
 
+    /// OS IME 후보창을 커서 칸에 붙인다. macOS 는 플랫폼 IME 자체를 끄고 우리가
+    /// 조합하므로 해당 없고(`set_ime_allowed(false)`), 켜 두는 Windows·Linux 만
+    /// 대상이다. 한 번도 안 부르면 좌표가 클라이언트 영역 원점이라 한자 변환·
+    /// 후보 목록이 창 왼쪽 위 구석에 뜬다 — 조합 중인 글자와 딴 데.
+    ///
+    /// 좌표는 물리 픽셀(`self.cell` 이 이미 scale 반영). 프레임마다 Win32 를
+    /// 때리지 않도록 칸이 바뀔 때만 보낸다.
+    #[cfg(target_os = "macos")]
+    fn sync_ime_cursor_area(&mut self, _ov: &GpuOverlay) {}
+
+    #[cfg(not(target_os = "macos"))]
+    fn sync_ime_cursor_area(&mut self, ov: &GpuOverlay) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let cw = ov.cell_w * ov.font_scale;
+        let ch = ov.cell_h * ov.font_scale;
+        // 조합 중이면 조합 시작 칸, 아니면 커서 칸.
+        let (row, col) = if ov.preedit.is_empty() {
+            (ov.cursor_row, ov.cursor_col)
+        } else {
+            (ov.preedit_row, ov.preedit_col)
+        };
+        let x = (ov.pad_x + col as f32 * cw).round() as i32;
+        let y = (ov.pad_y + row as f32 * ch).round() as i32;
+        if self.ime_cursor_px == Some((x, y)) {
+            return;
+        }
+        self.ime_cursor_px = Some((x, y));
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x, y),
+            winit::dpi::PhysicalSize::new(cw.round() as u32, ch.round() as u32),
+        );
+    }
+
     /// Phase 2d overlays — pure free function on the snapshot so it
     /// doesn't fight a mutable borrow on `self.gpu`.
     fn paint_gpu_overlays(g: &mut gpu::GpuRenderer, ov: &GpuOverlay) {
@@ -1654,6 +1689,7 @@ impl App {
         // grid before snapshotting it into the overlay.
         self.update_suggestion();
         let overlay = self.gpu_overlay_snapshot();
+        self.sync_ime_cursor_area(&overlay);
         // Cache the × close-button hit rects (logical) for the mouse
         // handler, even before the GPU borrow below.
         let chrome_font = 14.0_f32;

@@ -3828,6 +3828,10 @@ struct App {
     cell: CellGeom,
     preedit: String,
     in_preedit: bool,
+    /// 마지막으로 OS 에 알린 IME 후보창 좌표(물리 px) — 안 바뀌었으면 안 부른다.
+    /// macOS 는 플랫폼 IME 를 꺼서(`set_ime_allowed(false)`) 읽는 쪽이 없다.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    ime_cursor_px: Option<(i32, i32)>,
     /// (committed text, cursor-at-commit). gpu paints frames so fast it
     /// draws the moment AFTER a syllable commits but BEFORE the shell's
     /// echo arrives, so the preedit ("ㄴ") briefly shows where the
@@ -4537,6 +4541,7 @@ impl App {
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
+            ime_cursor_px: None,
             commit_overlay: None,
             ime_active: false,
             hangul: kasa_ime::Composer::new(),
