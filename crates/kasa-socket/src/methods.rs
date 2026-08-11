@@ -482,7 +482,10 @@ fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Respo
     // GUI 가 종전 추정 폴백으로 떨어진다.
     let ctx_window = params.get("ctx_window").and_then(|v| v.as_u64()).unwrap_or(0);
     let ctx_tokens = params.get("ctx_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    match backend.report_cwd(surface_id, cwd, session_id, ctx_window, ctx_tokens) {
+    // 모델·effort 도 선택 — 빈 문자열이면 "미보고"라 종전 값을 안 덮는다.
+    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let effort = params.get("effort").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.report_cwd(surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

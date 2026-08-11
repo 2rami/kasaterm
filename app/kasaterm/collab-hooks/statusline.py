@@ -156,7 +156,8 @@ def get_git_branch(cwd):
     return None
 
 
-def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0):
+def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0,
+                           model_id="", effort=""):
     """kasaterm pane 안에서만 — claude 내부 cd 와 컨텍스트 창을 GUI 에 보고.
     claude 는 셸 위에서 돌아 lsof(최상위 셸 cwd)로는 내부 cd 가 안 보여, statusLine 이
     매 렌더 현재 cwd 를 직접 보고한다. pane 밖(KASATERM_PANE_ID 없음)에선 무동작.
@@ -164,14 +165,23 @@ def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0):
 
     창 크기를 같이 보내는 이유: transcript 의 model 엔 `[1m]` 태그가 안 실려(API 응답이
     `claude-opus-5`) GUI 가 1M 세션을 200k 로 오판했다 — 18만 토큰이 92%(200k) vs
-    19%(1M). 하네스가 훅 stdin 으로 주는 창 크기가 유일한 정본이라 그걸 그대로 넘긴다."""
+    19%(1M). 하네스가 훅 stdin 으로 주는 창 크기가 유일한 정본이라 그걸 그대로 넘긴다.
+
+    model_id·effort 는 앱을 재시작해도 그 pane 이 쓰던 모델·effort 로 되살아나게 하려고
+    싣는다. ★model_id 는 `[1m]` 이 붙은 **원본**이어야 한다 — board 에 뜨는 모델명은 API
+    응답 표기(`claude-opus-5`)라 그걸 복원 명령에 되먹이면 1M 세션이 200k 로 강등된다.
+    훅 stdin 의 `model.id` 만이 CLI 에 그대로 돌려줄 수 있는 값이다."""
     pane = os.environ.get("KASATERM_PANE_ID")
     if not pane or not cwd:
         return
-    argv = ["kasaterm-cli", "report-cwd", pane, str(cwd), session_id or ""]
-    # 창을 모를 때(0)만 생략 — 그때 GUI 는 종전 추정 폴백으로 떨어진다.
-    if ctx_window:
-        argv += [str(int(ctx_window)), str(int(ctx_tokens))]
+    # 뒤 네 칸은 **자리를 비우지 않고 항상** 보낸다. 예전엔 창을 모르면 생략했는데,
+    # 그러면 뒤에 붙는 model·effort 의 위치가 밀려 수신부가 엉뚱한 칸으로 읽는다.
+    # 0/빈 문자열도 "미보고"로 해석되므로(수신부가 0 을 안 채택) 동작은 그대로다.
+    argv = [
+        "kasaterm-cli", "report-cwd", pane, str(cwd), session_id or "",
+        str(int(ctx_window or 0)), str(int(ctx_tokens or 0)),
+        model_id or "", effort or "",
+    ]
     try:
         subprocess.Popen(
             argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -215,7 +225,14 @@ def main():
     cwd = d.get("cwd") or os.getcwd()
     session_id = d.get("session_id", "")
     ctx_win, ctx_pct, ctx_tot = resolve_context(d)
-    report_cwd_to_kasaterm(cwd, session_id, ctx_win, ctx_tot)
+    # ★ `id` 를 **가공 없이** 넘긴다. 아래 표시용으로 쓰는 display_name 이나
+    # resolve_context 의 `.split("[")[0]` 을 보내면 `[1m]` 이 떨어져, 복원 때
+    # 되먹였을 때 1M 세션이 200k 로 강등된다.
+    report_cwd_to_kasaterm(
+        cwd, session_id, ctx_win, ctx_tot,
+        (d.get("model") or {}).get("id", ""),
+        (d.get("effort") or {}).get("level") or "",
+    )
 
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "
     parts = []
