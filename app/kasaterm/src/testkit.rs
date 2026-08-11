@@ -1030,6 +1030,38 @@ impl App {
         eprintln!(
             "[autostash] 기대: 숨긴 PTY=true · 닫은 PTY=false (둘 다 true 면 정리가 안 돈 것이라 증명이 아니다)"
         );
+        // 되돌리기 — 숨긴 줄을 다시 우클릭하면 이번엔 항목이 「보이기」여야 하고,
+        // 누르면 **같은 id 가** 트리로 돌아와야 한다. 새 셸이 하나 뜨는 것과는 다르다.
+        let Some(hrow) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, p, _)| *p == victim)
+            .map(|(_, _, r)| *r)
+        else {
+            eprintln!("[autostash] 숨긴 {victim} 줄이 목록에 없다 — 되돌릴 길이 없음");
+            return;
+        };
+        self.sidebar_row_right_click(hrow.0 + hrow.2 / 2.0, hrow.1 + hrow.3 / 2.0);
+        self.render_frame();
+        let hitems: Vec<String> =
+            self.sidebar_menu_rects.iter().map(|(a, _)| format!("{a:?}")).collect();
+        let Some(un) = self
+            .sidebar_menu_rects
+            .iter()
+            .find(|(a, _)| matches!(a, crate::SidebarMenuAction::Unhide))
+            .map(|(_, r)| *r)
+        else {
+            eprintln!("[autostash] 숨긴 줄 메뉴에 보이기 항목이 없음 — 항목={hitems:?}");
+            return;
+        };
+        self.sidebar_menu_click(un.0 + un.2 / 2.0, un.1 + un.3 / 2.0);
+        self.render_frame();
+        let back = leaves(self);
+        eprintln!(
+            "[autostash] 되돌림 항목={hitems:?} → leaves={back:?} 같은id복귀={} 스택={:?}",
+            back.iter().any(|l| *l == victim),
+            stack(self)
+        );
     }
 
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
