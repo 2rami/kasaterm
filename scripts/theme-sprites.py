@@ -31,6 +31,10 @@ SRC = os.path.join(ROOT, "theme-src")
 DST = os.path.join(ROOT, "app/kasaterm/assets/students")
 ROSTER = os.path.join(ROOT, "app/kasaterm/collab-hooks/characters.json")
 PPGEN = os.environ.get("PPGEN", "/tmp/ppgen")
+# 생성 백엔드. `codex` 는 ChatGPT 구독 OAuth 로 도는 CLI 라 호출당 요금이 없고,
+# 참조 이미지(-i)를 받아 편집도 된다 — 그래서 기본값이다. `fal` 은 종량 과금이고,
+# OpenAI 호환 게이트웨이는 /images/edits 가 아예 없어 동작 프레임을 못 만든다.
+PROVIDER = os.environ.get("THEME_PROVIDER", "codex")
 
 # 상태 → (ppgen 프리셋 이름, 앱 파일명 중간 토큰, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
@@ -130,7 +134,7 @@ def generate(slug, force=False, use_ref=False):
     out = os.path.join(SRC, slug, "out")
     cmd = [
         PPGEN,
-        "-provider", "fal",
+        "-provider", PROVIDER,
         "-desc", desc,
         "-states", ",".join(s[0] for s in STATES),
         "-out", out,
