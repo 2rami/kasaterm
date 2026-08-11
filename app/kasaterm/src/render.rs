@@ -2000,7 +2000,7 @@ impl App {
         let sb_win_h = win_px.1 / scale;
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
-        let (sb_tabs, sb_closes, sb_plus, sb_rows) = self.sidebar_layout(sb_win_h);
+        let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
         // Windowed strip: publish the effective first/visible-count for the
         // wheel handler's clamp, and note per-side overflow for the chevron
         // hints painted with the tabs below.
@@ -2016,7 +2016,15 @@ impl App {
         // rects that a header-drag would false-hit as a cross-window drop.
         let sidebar_shown = self.tabs_on_top || self.tab_strip_w() > 0.0;
         self.window_tab_rects = if sidebar_shown { sb_tabs.clone() } else { Vec::new() };
-        self.sidebar_row_rects = if sidebar_shown { sb_rows.clone() } else { Vec::new() };
+        // 배치도 칸도 같은 히트 벡터에 넣는다 — 칸을 눌러도 목록 행을 누른 것과 똑같이
+        // 포커스가 가고 드래그·우클릭까지 그대로 따라온다. 한 pane 이 rect 둘(칸·행)을
+        // 갖지만 히트는 `find`(첫 매치)라 무해하다. **행이 먼저** 와야 좁은 칸보다
+        // 누르기 쉬운 쪽이 이긴다.
+        self.sidebar_row_rects = if sidebar_shown {
+            sb_rows.iter().chain(sb_mini.iter()).cloned().collect()
+        } else {
+            Vec::new()
+        };
         self.window_tab_close_rects = if sidebar_shown { sb_closes.clone() } else { Vec::new() };
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
@@ -2085,6 +2093,9 @@ impl App {
         // 줄에 적는 건 **그 pane 이 무엇을 하고 있나**(claude · zsh · 편집기…)다.
         // 학생 이름은 얼굴이 이미 말하고 있어, 글자로 한 번 더 쓰면 같은 말이 두 번
         // 나오고 정작 pane 을 가르는 정보가 자리를 잃는다(거노: "학생이름은 빼고").
+        // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
+        // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
+        let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
         let sb_row_info: Vec<SidebarRowInfo> = sb_rows
             .iter()
             .map(|(_, id, _)| {
@@ -3286,6 +3297,32 @@ impl App {
                 self.window_dock_rects = dock_back_hits;
                 // 펼친 방의 pane 줄. 탭 카드가 그 자리를 이미 비워 뒀으므로(레이아웃이
                 // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
+                // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
+                // 목록은 "누가 있나"만 말하고 어느 칸이 화면 어디인지는 못 말한다.
+                for (_, id, r) in sb_mini.iter() {
+                    let (mx, my, mw, mh) = *r;
+                    let cur = sb_active_pane.as_deref() == Some(id.as_str());
+                    let hov = sb_cursor.0 >= mx
+                        && sb_cursor.0 <= mx + mw
+                        && sb_cursor.1 >= my
+                        && sb_cursor.1 <= my + mh;
+                    g.hover_pointer |= hov;
+                    round_rect(
+                        g,
+                        mx,
+                        my,
+                        mw,
+                        mh,
+                        2.0,
+                        if cur {
+                            theme::accent()
+                        } else if hov {
+                            theme::surface_hover()
+                        } else {
+                            theme::with_alpha(theme::border(), 0x66)
+                        },
+                    );
+                }
                 for (k, ((wi, _, r), info)) in
                     sb_rows.iter().zip(sb_row_info.iter()).enumerate()
                 {
