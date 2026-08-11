@@ -1289,6 +1289,26 @@ impl Backend for PtyBackend {
         Ok(pane.tab_for_pid(surface_id).visible_text(lines))
     }
 
+    /// pane 을 스크롤백 안에서 움직인다 — 휠과 **같은 경로**(alacritty display_offset).
+    ///
+    /// 이게 없어서 스크롤 문제를 화면 밖에서 재현할 방법이 아예 없었다(트레이트에는
+    /// 정의돼 있는데 GUI 가 구현을 안 해 늘 unsupported 였다). `peek` 은 스크롤 위치와
+    /// 무관하게 라이브 화면만 읽으므로 이 둘을 짝지어야 「올려도 안 보인다」를 잰다.
+    ///
+    /// 부호는 트레이트 약속대로 **음수가 과거**다. `PtySession::scroll` 은 반대 규약
+    /// (양수가 과거)이라 여기서 뒤집는다.
+    fn scroll_surface(&self, surface_id: &str, lines: i32) -> Result<()> {
+        let key = {
+            let ws = self.ws.lock().unwrap();
+            ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string())
+        };
+        let sess = kasa_pty::lookup_session(surface_id)
+            .or_else(|| kasa_pty::lookup_session(&key))
+            .ok_or_else(|| anyhow::anyhow!("no live pty for pane: {surface_id}"))?;
+        sess.scroll(-lines);
+        Ok(())
+    }
+
     fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
         let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());

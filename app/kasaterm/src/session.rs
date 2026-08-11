@@ -2374,10 +2374,15 @@ impl App {
                     // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
                     // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
                     obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
-                    let sb = ws
-                        .panes
+                    // 진짜 스크롤백은 PTY(alacritty grid)가 갖고 있다. GUI 쪽
+                    // `scrollback_lines` 는 프레임 diff 로 쌓던 history 를 읽는데, 그
+                    // 추측이 폐기된 뒤로 아무도 그걸 안 채워 **늘 화면 한 장**만 저장됐다
+                    // (실측: 400줄 뿌린 pane 이 38줄). 상한을 올려도 안 늘던 이유다.
+                    // PTY 가 없는 백엔드(tmux)는 옛 경로로 떨어진다.
+                    let sb = pty
                         .get(pane_id)
-                        .map(scrollback_lines)
+                        .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
+                        .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
                         .unwrap_or_default();
                     obj.insert("scrollback".to_string(), serde_json::json!(sb));
                     // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
