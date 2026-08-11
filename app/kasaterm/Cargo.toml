@@ -83,7 +83,7 @@ objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", 
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 # UNNotificationAttachment 는 알림 오른쪽 썸네일 — pane 마다 그 학생 프사를 붙인다.
-objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationResponse", "UNNotificationAttachment"] }
+objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound"] }
 # Dock tile badge (unread-notification count) via NSApplication.dockTile,
 # 그리고 창마다 NSWindow.tabbingMode 를 끄는 데 NSWindow/NSView 가 필요하다.
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView"] }

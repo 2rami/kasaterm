@@ -523,7 +523,10 @@ impl App {
                     // 솔로(자동통솔 폐기 06-18) — 모든 pane 이 사용자 직행.
                     let faces_user = true;
                     self.pane_prompt_wait.insert(id.clone(), faces_user);
-                    self.notify_flash.insert(id.clone(), now);
+                    // ⚠️ 여기에 `notify_flash` 를 넣지 마라. 그 맵은 **턴 완료** 전용
+                    // 채널이라(초록 펄스 + 학생 만세), 승인 대기에 진입하는 순간
+                    // 막혀 선 학생이 「끝난 학생」으로 보였다 — 없는 신호보다 나쁜
+                    // 틀린 신호다(2026-08-11). 대기는 attention 색이 말한다.
                     // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
                     self.collab.attention
                         .lock()
@@ -538,7 +541,14 @@ impl App {
                         // "pane별로 그냥 다오게하자". 프사가 붙어 누구 건지 갈린다.
                         let ch = self.pane_character_if_known(id);
                         let who = ch.clone().unwrap_or_else(|| "pane".to_string());
-                        crate::chrome::notify_desktop("⚠ 승인 필요", &who, ch.as_deref());
+                        // 훅 경로(`chrome.rs` 의 `⚠ 권한 필요`)와 같은 열쇠 — 같은
+                        // 프롬프트에 배너가 둘 나가는 걸 발사구에서 막는다.
+                        crate::chrome::notify_desktop(
+                            "⚠ 승인 필요",
+                            &who,
+                            ch.as_deref(),
+                            Some(&format!("approval:{id}")),
+                        );
                     }
                     changed = true;
                 }
