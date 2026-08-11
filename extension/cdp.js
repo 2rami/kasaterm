@@ -229,6 +229,35 @@ export async function drag(tabId, { from, to }) {
   return { dispatched: true }
 }
 
+// ★터치는 마우스와 다르게 **보이지 않는 탭에서 멈춘다**. 마우스·키보드는 hidden 탭에서도 즉시
+// ack 이 오는데(그래서 지금까지 배경 탭 조작이 됐다), `Input.dispatchTouchEvent` 는 제스처 인식기를
+// 거치고 그것이 hidden 탭에서는 돌지 않아 **응답이 영영 오지 않는다** — 2026-08-11 실측: 배경 탭에서
+// touchStart 하나가 45초 도구 타임아웃까지 침묵했고, 탭을 앞으로 보내니 같은 명령이 즉시 `{}` 로 왔다.
+// 그래서 ①부르는 쪽(tools.swipe)이 먼저 탭을 앞으로 보내고 ②여기서는 짧은 상한을 걸어, 그래도 멈추면
+// 45초가 아니라 몇 초 만에 **원인을 이름에 달아** 실패시킨다. 침묵은 재시도도 우회도 못 하게 만든다.
+const TOUCH_TIMEOUT_MS = 5000
+
+const touchPoint = (x, y) => [{ x: Math.round(x), y: Math.round(y), id: 1, radiusX: 12, radiusY: 12, force: 1 }]
+
+export async function swipe(tabId, { from, to, steps = 12 }) {
+  await attach(tabId)
+  const t = (type, points) => send(tabId, 'Input.dispatchTouchEvent', { type, touchPoints: points }, { timeoutMs: TOUCH_TIMEOUT_MS })
+  // ⚠️touchStart 가 실패하면 **제스처가 열린 채로 남는다** — 그 뒤의 클릭·스크롤이 눌린 손가락이
+  // 하나 더 있는 것처럼 어긋난다. 어디서 깨지든 손가락을 떼고 나간다.
+  try {
+    await t('touchStart', touchPoint(from.x, from.y))
+    for (let i = 1; i <= steps; i++) {
+      const p = i / steps
+      await t('touchMove', touchPoint(from.x + (to.x - from.x) * p, from.y + (to.y - from.y) * p))
+    }
+    await t('touchEnd', [])
+  } catch (e) {
+    await t('touchEnd', []).catch(() => {})
+    throw e
+  }
+  return { dispatched: true, from, to, steps }
+}
+
 export async function wheel(tabId, { x, y, deltaX = 0, deltaY = 0 }) {
   await attach(tabId)
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })

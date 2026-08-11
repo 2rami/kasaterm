@@ -481,6 +481,54 @@ const handlers = {
     return await cdp.drag(id, { from: a, to: b })
   },
 
+  // 폰 제스처는 마우스 드래그로 재현되지 않는다 — 페이지가 보는 것은 touch 이벤트이고, 방향 락과
+  // 임계 거리 판정이 전부 거기 달려 있다. drag 는 mousePressed 를 보내므로 그 코드에 아예 닿지 않는다.
+  async swipe({ tabId, direction = 'left', distance, ref, coordinate, from, to, steps = 12 }) {
+    const id = await resolveTabId(tabId)
+
+    // ⚠️거절 사유를 **앞으로 끌어내기 전에** 본다. 순서가 반대면 어차피 못 할 일에 화면부터 바꾸고
+    // 나서 거절해, 사람이 보던 탭만 빼앗기고 얻는 것이 없다. evaluate 는 숨은 탭에서도 잘 돈다.
+    const env = await cdp.evaluate(id, '({ w: innerWidth, h: innerHeight, touch: navigator.maxTouchPoints })')
+    // 터치를 안 받는 탭에 터치를 쏘면 이벤트가 조용히 버려져 「밀었는데 아무 일도 없다」가 된다.
+    // 게다가 크기만 바꾼 화면은 `(pointer: coarse)` 가 안 걸려 실제 폰과 **다른 코드**가 돈다.
+    if (!env?.touch) {
+      throw new Error('NO_TOUCH_EMULATION: 이 탭은 터치를 받지 않습니다(maxTouchPoints 0). browser_emulate_device 로 폰뷰를 먼저 켜세요.')
+    }
+
+    // ★보이지 않는 탭에서는 터치가 통째로 멈춘다(cdp.swipe 주석의 실측). 창은 그대로 두고 탭만
+    // 앞으로 보낸다 — 사람이 다른 앱을 보고 있으면 화면에서 달라지는 것이 없다.
+    const tab = await chrome.tabs.get(id)
+    const activated = !tab.active
+    if (activated) await chrome.tabs.update(id, { active: true })
+
+    let a, b
+    if (from && to) {
+      a = { x: from[0], y: from[1] }
+      b = { x: to[0], y: to[1] }
+    } else {
+      a = coordinate ? { x: coordinate[0], y: coordinate[1] }
+        : ref ? (await page(id, 'box', { ref })).box
+          : { x: Math.round(env.w / 2), y: Math.round(env.h / 2) }
+      // 화면 밖으로 나가는 손가락은 브라우저가 도중에 놓아 버린다 — 남은 자리에 맞춰 줄인다.
+      const room = { left: a.x - 8, right: env.w - 8 - a.x, up: a.y - 8, down: env.h - 8 - a.y }
+      const d = Math.max(0, Math.min(Number(distance) || 160, room[direction] ?? 0))
+      if (d < 24) {
+        throw new Error(`NO_ROOM: 시작점 (${a.x},${a.y}) 에서 ${direction} 으로 ${d}px 밖에 못 갑니다(뷰포트 ${env.w}x${env.h}). 시작점을 옮기거나 방향을 바꾸세요.`)
+      }
+      const axis = direction === 'left' || direction === 'right' ? 'x' : 'y'
+      b = { ...a, [axis]: a[axis] + (direction === 'left' || direction === 'up' ? -d : d) }
+    }
+
+    const r = await cdp.swipe(id, { from: a, to: b, steps })
+    return {
+      ...r,
+      ...(from && to ? {} : { direction }),
+      // 앞으로 보냈다는 사실을 밝힌다 — 탭이 바뀐 것을 모르면 다음 조작이 엉뚱한 탭에 간 줄 안다.
+      ...(activated ? { activated: true, note: '터치는 보이는 탭에서만 처리되므로 이 탭을 앞으로 보냈습니다(창은 그대로).' } : {}),
+      page: await settle(id),
+    }
+  },
+
   async fill({ tabId, ref, value, trusted = false }) {
     const id = await resolveTabId(tabId)
     if (!trusted) {
@@ -743,6 +791,18 @@ const handlers = {
   async cdp_raw({ tabId, method, params }) {
     const id = await resolveTabId(tabId)
     await cdp.attach(id, 'raw')
+    // ⚠️터치만 특별 취급한다. 마우스·키보드는 보이지 않는 탭에서도 즉시 ack 이 오지만
+    // `Input.dispatchTouchEvent` 는 제스처 인식기를 타고, 그것이 hidden 탭에서 돌지 않아 **응답이
+    // 영영 오지 않는다**(2026-08-11 실측: 45초 도구 타임아웃까지 침묵). 여기서 막지 않으면 45초를
+    // 기다린 끝에 원인을 알 수 없는 타임아웃만 남는다 — raw 는 탈출구지 함정이 아니어야 한다.
+    // 탭을 자동으로 앞에 보내지는 않는다. raw 로 오는 명령은 무엇을 하려는지 모르므로 마음대로
+    // 화면을 바꾸지 않고, 무엇을 하면 되는지만 알린다(제스처 한 벌이면 browser_swipe 가 낫다).
+    if (method === 'Input.dispatchTouchEvent') {
+      const tab = await chrome.tabs.get(id).catch(() => null)
+      if (tab && !tab.active) {
+        throw new Error('HIDDEN_TAB_TOUCH: 보이지 않는 탭은 터치 이벤트를 처리하지 않아 이 명령이 응답 없이 멈춥니다. browser_activate_tab 으로 탭을 앞에 보내거나(창은 안 올라옵니다), 제스처 한 벌이면 browser_swipe 를 쓰세요.')
+      }
+    }
     return await cdp.raw(id, method, params || {})
   },
 }

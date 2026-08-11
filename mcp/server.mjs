@@ -201,6 +201,16 @@ tool('browser_drag', 'Drag from one element/point to another with real mouse eve
   from: z.array(z.number()).length(2).optional(), to: z.array(z.number()).length(2).optional(),
 }, async (a) => text(await call('drag', a)))
 
+tool('browser_swipe', 'Swipe with a real finger — the touch gesture a phone actually sends. Use this, not browser_drag, for anything a phone user swipes: a carousel or deck you flick sideways, pull-to-refresh, swipe-to-delete, a bottom sheet you drag up. Those UIs read touch events and decide from the direction lock and threshold distance, and drag never reaches that code because it sends mouse events.\n\nRequires phone emulation — call browser_emulate_device first (a tab with no touch is rejected rather than silently swallowing the gesture). The tab is brought to the front automatically, because a hidden tab never processes touch (its window is NOT raised, so this does not steal focus).\n\nBy default it swipes from the middle of the viewport; pass ref or coordinate to start somewhere specific, or from+to for exact control. distance defaults to 160px and is clamped to the room left in that direction.', {
+  tabId, direction: z.enum(['left', 'right', 'up', 'down']).optional().describe('Which way the finger moves. Default "left" — the direction that advances a carousel.'),
+  distance: z.number().optional().describe('How far the finger travels, in CSS px. Default 160; clamped to what fits.'),
+  ref: z.string().optional().describe('Start at this element\'s center.'),
+  coordinate: z.array(z.number()).length(2).optional().describe('Start at this exact point.'),
+  from: z.array(z.number()).length(2).optional().describe('With `to`: exact start point, ignoring direction/distance.'),
+  to: z.array(z.number()).length(2).optional().describe('With `from`: exact end point.'),
+  steps: z.number().int().optional().describe('Intermediate touchMove events. Default 12 — enough for direction-lock logic to see the movement.'),
+}, async (a) => text(await call('swipe', a)))
+
 tool('browser_fill', 'Set the value of an input, textarea, select, checkbox or contenteditable. Uses native setters so React/Vue state follows; if the value does not stick (CodeMirror, validated forms) it retries with real keystrokes.', {
   tabId, ref, value: z.union([z.string(), z.boolean()]), trusted: z.boolean().optional(),
 }, async (a) => text(await call('fill', a)))
@@ -283,7 +293,7 @@ tool('browser_ungroup_tabs', 'Pull tabs out of their tab groups. Omit tabIds to 
 tool('browser_dev_reload', 'Reload this extension itself after its source changed. Only needed while developing the extension.', {},
   async () => text(await call('dev_reload', {}, 5000)))
 
-tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol command (e.g. "Emulation.setDeviceMetricsOverride"). Everything CDP can do is reachable here.', {
+tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol command (e.g. "Emulation.setDeviceMetricsOverride"). Everything CDP can do is reachable here. One command is guarded: Input.dispatchTouchEvent on a hidden tab never gets acknowledged, so it is rejected with an explanation instead of hanging until the tool times out — for a whole gesture, prefer browser_swipe.', {
   tabId, method: z.string(), params: z.record(z.string(), z.any()).optional(),
 }, async (a) => text(await call('cdp_raw', a, 45000)))
 

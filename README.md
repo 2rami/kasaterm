@@ -170,6 +170,15 @@ claude-in-chrome 이 `✅Claude` 처럼 이모지를 쓰는 게 그 때문인데
 - **DevTools 를 열면 디버거가 끊긴다**(`canceled_by_user`). 붙일 때 이미 열려 있으면 `DEVTOOLS_CONFLICT` 로 알려준다.
 - **`chrome://`·웹스토어 페이지엔 붙을 수 없다.** `RESTRICTED_PAGE` 로 알려준다.
 - **숨은 탭(`visibilityState: "hidden"`)에서는 rAF·미디어·부드러운 스크롤·프레임워크 전환이 전부 멈춘다.** 스크린샷은 갱신되므로 "코드가 잘못됐다"로 오진하기 쉽다. 그래서 `read_page`·`get_text`·`find`·스크롤 결과에 `visibilityState` 를 **항상** 실어 보낸다. `hidden` 이면 `browser_activate_tab` 으로 탭을 앞으로 꺼내고 판단하라.
+- **숨은 탭에서는 터치 이벤트가 ack 조차 오지 않는다 — 마우스·키보드와 다르다.** 배경 탭 조작이 지금껏
+  잘 됐던 것은 `Input.dispatchMouseEvent`·`dispatchKeyEvent` 가 메인 스레드로 바로 가기 때문이고,
+  `Input.dispatchTouchEvent` 는 제스처 인식기를 타는데 그것이 hidden 탭에서 돌지 않는다. 응답이 **영영**
+  오지 않아 45초 도구 타임아웃까지 침묵하고, 탭을 앞으로 보내면 같은 명령이 즉시 `{}` 로 온다
+  (2026-08-11 실측). 그래서 `swipe` 는 탭을 자동으로 앞에 보내고(창은 안 올린다) 그 사실을 결과에 밝히며,
+  `cdp_raw` 로 직접 보낸 터치는 멈추기 전에 거절한다. 침묵은 재시도도 우회도 못 하게 만든다.
+- **터치를 못 받는 탭에 터치를 쏘면 조용히 버려진다.** `maxTouchPoints` 가 0 이면 이벤트가 사라져
+  「밀었는데 아무 일도 없다」가 되고, 크기만 바꾼 화면은 `(pointer: coarse)` 도 안 걸려 실제 폰과
+  **다른 코드**가 돈다. `swipe` 는 그 탭을 `NO_TOUCH_EMULATION` 으로 거절한다 — 먼저 `emulate_device`.
 - MV3 service worker 는 유휴 30초면 잠든다. 브리지가 20초마다 ping 을 보내고, 확장은 `chrome.alarms` 로도 깨어나 재연결한다.
 - 언팩 확장이라 크롬을 켤 때마다 "개발자 모드 확장" 경고 풍선이 뜬다.
 - **no-op 판정 구간 안에서 준비동작을 하면 승격이 영원히 안 돈다.** `el.focus()` 를 관찰 구간 안에서 부르면
@@ -247,7 +256,11 @@ node scripts/cc.mjs '[["list_tabs",{}],["read_page",{"tabId":123}]]'
 
 ## 툴
 
-`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `screenshot` `click` `hover` `drag` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `set_task` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
+`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `screenshot` `click` `hover` `drag` `swipe` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `emulate_device` `set_task` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
+
+`swipe` 는 진짜 손가락이다. 폰에서 손가락으로 하는 것(캐러셀·덱 넘기기, 당겨서 새로고침, 스와이프 삭제,
+바텀시트 끌어올리기)은 `drag` 로 재현되지 않는다 — 그 UI 들은 touch 이벤트를 읽고 방향 락과 임계 거리로
+판정하는데, `drag` 는 마우스를 보내므로 그 코드에 아예 닿지 않는다. `emulate_device` 로 폰뷰를 먼저 켤 것.
 
 `cdp_raw` 는 탈출구다. CDP 로 가능한 모든 것(디바이스 에뮬레이션, 쿠키, 인쇄, 성능 추적…)이 여기로 닿는다.
 
