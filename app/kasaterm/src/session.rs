@@ -2151,6 +2151,9 @@ impl App {
         Vec<(usize, (f32, f32, f32, f32))>,
         (f32, f32, f32, f32),
         Vec<(usize, String, (f32, f32, f32, f32))>,
+        // 배치도 칸 — 목록 행과 **같은 모양**이라 히트 벡터에 그대로 합칠 수 있다.
+        // 그러면 칸 클릭·드래그·우클릭이 행과 똑같이 동작한다(공짜로 따라온다).
+        Vec<(usize, String, (f32, f32, f32, f32))>,
     ) {
         let n = self.windows.len();
         if self.tabs_on_top {
@@ -2190,8 +2193,8 @@ impl App {
                 }
             }
             let plus = (x0 + tabs.len() as f32 * (tab_w + gap), y, plus_w, tab_h);
-            // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록은 세로 사이드바 전용.
-            return (tabs, closes, plus, Vec::new());
+            // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록도 배치도도 세로 전용.
+            return (tabs, closes, plus, Vec::new(), Vec::new());
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
@@ -2214,6 +2217,7 @@ impl App {
         let mut tabs = Vec::with_capacity(n_vis);
         let mut closes = Vec::new();
         let mut rows = Vec::new();
+        let mut mini = Vec::new();
         // 펼친 방은 카드가 pane 수만큼 길어진다 — 고정 stride 를 쓰던 자리를 누적
         // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(렌더러에 scissor 가
         // 없어 반쪽 카드는 트레이를 침범한다).
@@ -2236,7 +2240,8 @@ impl App {
             // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
             // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
             let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
-            let full_h = leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+            // 배치도 + 목록. 배치도는 **트리 모양**이라 pane 수와 무관하게 높이가 같다.
+            let full_h = SIDEBAR_MINI_H + leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
             let list_h = (full_h * t).round();
             let h = SIDEBAR_TAB_H + list_h;
             if !tabs.is_empty() && y + h > top + avail_h {
@@ -2254,8 +2259,43 @@ impl App {
                 // 카드 안에 온전히 들어온 줄만 낸다 — scissor 가 없어 반쪽 줄은
                 // 카드 밖으로 삐져나온다. 그래서 목록이 아래에서 한 줄씩 드러난다.
                 let bottom = y + h;
+                // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
+                // 이미 풀어 주므로 여기서 재귀할 것이 없다.
+                let ma =
+                    (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, SIDEBAR_MINI_H - 8.0);
+                if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
+                    // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
+                    // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
+                    let tree = if i == self.active_window {
+                        self.pty_layout.as_ref()
+                    } else {
+                        self.windows.get(i).and_then(|o| o.as_ref())
+                    };
+                    // 1000 을 기준으로 뽑는다. 작은 값(예: 100)을 넣으면 u16 반올림에
+                    // 얇은 pane 이 0 폭으로 뭉개진다.
+                    const G: f32 = 1000.0;
+                    let cells = tree.map(|t| t.leaf_rects(1000, 1000)).unwrap_or_default();
+                    for (id, cx, cy, cw, ch) in cells {
+                        // 1px 씩 깎아 칸 사이에 틈을 낸다 — 붙여 놓으면 분할선이 안 보여
+                        // 한 덩어리로 읽힌다.
+                        mini.push((
+                            i,
+                            id,
+                            (
+                                ma.0 + cx as f32 / G * ma.2,
+                                ma.1 + cy as f32 / G * ma.3,
+                                (cw as f32 / G * ma.2 - 1.0).max(2.0),
+                                (ch as f32 / G * ma.3 - 1.0).max(2.0),
+                            ),
+                        ));
+                    }
+                }
                 for (k, id) in leaves.iter().enumerate() {
-                    let ry = y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H;
+                    let ry = y
+                        + SIDEBAR_TAB_H
+                        + SIDEBAR_MINI_H
+                        + SIDEBAR_ROW_PAD / 2.0
+                        + k as f32 * SIDEBAR_ROW_H;
                     if ry + SIDEBAR_ROW_H > bottom {
                         break;
                     }
@@ -2271,7 +2311,7 @@ impl App {
             || (tab_x, y, tab_w, 28.0),
             |(_, p, ..)| p,
         );
-        (tabs, closes, plus, rows)
+        (tabs, closes, plus, rows, mini)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
