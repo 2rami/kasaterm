@@ -925,6 +925,10 @@ impl App {
         if !self.sidebar_visible {
             self.toggle_sidebar();
         }
+        // 넷으로 쪼갠다 — 배치도는 칸이 둘일 때와 넷일 때 읽히는 게 다르고, 하나를
+        // 숨기고 하나를 대조군으로 닫아도 목록에 볼 것이 남는다.
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
         let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
         let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
         // pane 줄과 배치도는 **펼친 방**에만 그려진다 — 접힌 카드에는 rect 가 하나도
@@ -1062,6 +1066,34 @@ impl App {
             back.iter().any(|l| *l == victim),
             stack(self)
         );
+        // `_INFO=1` — 검증을 다 지난 뒤 **그림용 상태**를 세운다(넷을 한 캡처에).
+        // 되돌리기가 방금 숨긴 것을 되살렸으므로 흐린 줄을 보려면 다시 치워야 하고,
+        // 방 머리 밴드는 방이 둘 이상일 때만 확인이 된다.
+        if std::env::var("KASATERM_AUTOSTASH_INFO").is_ok() {
+            self.stash_pane(&victim);
+            self.new_window();
+            if !self.git.col_visible {
+                self.toggle_git_col();
+            }
+            self.info.tab = crate::state::SideTab::Info;
+            // 방을 하나 더 만들면 활성이 그쪽으로 옮겨간다 — 배치도가 가리키는 방과
+            // 화면에 뜬 방이 갈리면 그림이 오히려 헷갈리므로 원래 방으로 돌아온다.
+            self.switch_window(0);
+            self.render_frame();
+            eprintln!(
+                "[autostash] 그림용 — 활성방={} 방수={} 방슬롯={:?} 그 트리={:?} 스택={:?} 살아있는PTY={:?}",
+                self.active_window,
+                self.windows.len(),
+                self.windows.iter().map(|w| w.as_ref().map(|t| t.leaves().len())).collect::<Vec<_>>(),
+                leaves(self),
+                stack(self),
+                {
+                    let mut k: Vec<&String> = self.pty.keys().collect();
+                    k.sort();
+                    k
+                }
+            );
+        }
     }
 
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
