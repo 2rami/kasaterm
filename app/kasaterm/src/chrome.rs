@@ -1104,6 +1104,36 @@ impl App {
         if opening { e } else { 1.0 - e }
     }
 
+    /// 사이드바 pane 행 우클릭 메뉴 실행.
+    pub(crate) fn run_sidebar_menu_action(
+        &mut self,
+        action: SidebarMenuAction,
+        wi: usize,
+        pane: &str,
+    ) {
+        match action {
+            SidebarMenuAction::Hide => {
+                // ★ 그 방을 **먼저 활성으로** 만든다. 사이드바는 모든 방의 pane 을
+                // 보여주는데, 다른 방 pane 에 `stash_pane` 을 걸면 활성 트리에서 못 찾아
+                // `remove_pane`(죽이는 경로)으로 샌다 — 「숨겼는데 학생이 사라졌다」가
+                // 되는 자리다.
+                if wi != self.active_window {
+                    self.switch_window(wi);
+                }
+                // 밖에 나간 방은 `switch_window` 가 그 창을 앞으로 보낼 뿐 활성은 안
+                // 바뀐다. 그때는 손대지 않는다 — 그 창에서 닫으면 된다.
+                if wi == self.active_window {
+                    self.stash_pane(pane);
+                }
+            }
+            SidebarMenuAction::Unhide => {
+                if let Some(i) = self.closed_panes.iter().position(|c| c.pane_id == pane) {
+                    self.reopen_closed_pane_at(i);
+                }
+            }
+        }
+    }
+
     /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.
     pub(crate) fn toggle_window_expand(&mut self, idx: usize) {
         let opening = !self.expanded_windows.contains(&idx);
