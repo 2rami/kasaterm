@@ -341,6 +341,7 @@ impl App {
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
         self.pump_info();
         self.pump_sessions_col();
+        self.pump_mcp_col();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -4659,6 +4660,32 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.sessions_col,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
+            }
+            // MCP·Skill 탭 — 위 둘과 형제 블록.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Mcp {
+                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - dock_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                mcpcol::draw_mcp_col(
+                    g,
+                    self.cursor_px,
+                    &mut self.mcp_col,
                     git_col_x,
                     git_col_w,
                     body_top,

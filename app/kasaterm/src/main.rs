@@ -34,6 +34,7 @@ mod lsp;
 mod links;
 mod proc;
 mod info;
+mod mcpcol;
 mod sesscol;
 mod state;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
@@ -4639,6 +4640,9 @@ struct App {
     /// 우측 칼럼의 Sessions 탭 — 과거 세션 기록(claude·codex·agy)을 골라 잇는다.
     /// `git`/`info` 와 칼럼 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
     sessions_col: state::SessionsColState,
+    /// 우측 칼럼의 MCP·Skill 탭 — 하네스별로 무엇이 붙어 있나. 위 둘과 칼럼
+    /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
+    mcp_col: state::McpColState,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -5065,6 +5069,8 @@ impl App {
                     state::SideTab::Info
                 } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
                     state::SideTab::Sessions
+                } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
+                    state::SideTab::Mcp
                 } else {
                     state::SideTab::Git
                 },
@@ -5077,6 +5083,7 @@ impl App {
                     .is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
+            mcp_col: Default::default(),
             statusbar: Default::default(),
             pane_cwd_check: None,
             show_pane_numbers: false,
