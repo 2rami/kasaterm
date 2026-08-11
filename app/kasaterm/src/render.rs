@@ -7617,8 +7617,18 @@ fn teammate_sender_slug(name: &str) -> Option<&'static str> {
     if let Some(s) = theme::character_slug(name) {
         return Some(s);
     }
-    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
-    theme::slug_character(slug).and_then(theme::character_slug)
+    theme::slug_character(sender_roman_head(name)).and_then(theme::character_slug)
+}
+
+/// agent 이름에서 로스터가 아는 로마자 부분만. **첫 토막**이다.
+///
+/// 전에는 마지막 `-` 앞을 뗐는데(`aru-9c88` → `aru`), 2026-08-04 에 이름이
+/// `<슬러그>-p<pane 번호>-<접미>` 세 토막이 되면서 `himari-p2-1uc` → `himari-p2` 가
+/// 되어 로스터에 없는 이름으로 떨어졌다 — 그래서 남이 보낸 메시지가 학생색도 프사도
+/// 없이 떴다(거노 2026-08-11: "sendmessage 학생테마 안나오는거"). 첫 토막을 보면 두
+/// 형식이 다 걸린다.
+fn sender_roman_head(name: &str) -> &str {
+    name.split_once('-').map(|(a, _)| a).unwrap_or(name)
 }
 
 fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
@@ -7628,8 +7638,8 @@ fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
     if let Some(c) = theme::character_accent(name) {
         return c;
     }
-    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
-    if let Some(c) = theme::slug_character(slug).and_then(theme::character_accent) {
+    if let Some(c) = theme::slug_character(sender_roman_head(name)).and_then(theme::character_accent)
+    {
         return c;
     }
     match tag_color {
@@ -10698,5 +10708,32 @@ mod sidebar_blink_tests {
         // 주기를 넘겨도 같은 위상. 프레임 시계는 프로세스 시작부터 단조증가라
         // 몇 시간 뒤에도 같은 리듬이어야 한다.
         assert!((blink(0.25, 1.0) - blink(600.25, 1.0)).abs() < 1e-3);
+    }
+
+    /// 남이 보낸 메시지가 학생 테마로 뜨려면 발신자 이름에서 슬러그가 나와야 한다.
+    /// 2026-08-04 에 이름이 세 토막(`<슬러그>-p<번호>-<접미>`)이 되면서 옛 파싱이
+    /// `himari-p2` 를 내어 로스터에 못 걸렸다 — 그때부터 색도 프사도 없이 떴다.
+    #[test]
+    fn sender_slug_survives_three_part_agent_names() {
+        assert_eq!(teammate_sender_slug("himari-p2-1uc"), Some("himari"));
+        assert_eq!(teammate_sender_slug("arisu-p116-1uc"), Some("arisu"));
+        // 옛 두 토막 형식도 그대로 걸려야 한다.
+        assert_eq!(teammate_sender_slug("aru-9c88"), Some("aru"));
+        // 한글 표시명은 로스터 정면 매칭.
+        assert_eq!(teammate_sender_slug("히마리"), Some("himari"));
+        // 이름을 바꾼 세션은 이름만으로 캐릭터를 알 길이 없다 — 여기서 None 이 맞고,
+        // 그 복구는 소켓 pid 로 pane 을 되짚는 별도 경로가 맡는다.
+        assert_eq!(teammate_sender_slug("모바일"), None);
+    }
+
+    #[test]
+    fn sender_accent_picks_the_student_before_the_tag_color() {
+        let himari = theme::character_accent("히마리").expect("로스터에 있어야 한다");
+        assert_eq!(teammate_sender_accent("himari-p2-1uc", None), himari);
+        // 학생을 못 찾을 때만 태그 색으로 떨어진다.
+        assert_eq!(
+            teammate_sender_accent("모바일", Some("red")),
+            [224, 88, 78, 255]
+        );
     }
 }
