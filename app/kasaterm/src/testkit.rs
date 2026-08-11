@@ -1161,6 +1161,48 @@ impl App {
             app.render_frame();
             hit
         };
+        // `_WAIT=1` — 배치도 칸이 **신호를 받았을 때** 어떻게 보이나. 판정이 아니라
+        // 그림을 보려는 것이라, 트랜스크립트 감시기가 쓰는 자리(`pane_activity` ·
+        // `unread_panes`)에 같은 값을 직접 심는다. 진짜 claude 를 띄워 대기 상태를
+        // 만들려면 승인 프롬프트가 뜰 때까지 기다려야 하는데 그건 재현이 안 된다.
+        if let Ok(path) = std::env::var("KASATERM_AUTOVIEW_WAIT") {
+            let ls = self.window_leaves(wi);
+            // ★ 심고서 이벤트 루프로 돌아가면 안 된다 — `refresh_pane_activity` 가 매
+            // 틱 `pane_activity` 를 통째로 다시 만들어 심은 값을 지운다(실측: 3초 뒤
+            // 예약 캡처에는 주황이 없고 파랑 둘만 찍혔다). 심은 **그 프레임에서**
+            // 찍는다. `capture_next` 는 handler 가 쓰는 것과 같은 한 칸이다.
+            if let Some(id) = ls.get(1) {
+                self.pane_activity.insert(
+                    id.clone(),
+                    crate::stream::PaneStatusView {
+                        status: "waiting".into(),
+                        waiting_for: Some("선택지".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Some(id) = ls.get(2) {
+                self.unread_panes.insert(id.clone());
+            }
+            // 깜빡임의 **밝은 쪽**에서 찍는다. 아무 프레임이나 잡으면 절반은 알파가
+            // 바닥이라 "글로우가 안 나온다"로 읽힌다 — 그림이 위상에 좌우되면 안 된다.
+            for _ in 0..60 {
+                if crate::render::blink_phase(0.9) > 0.95 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path.clone());
+            }
+            self.render_frame();
+            eprintln!(
+                "[autoview] 신호 심음 — 대기={:?} 못본완료={:?} → {path}",
+                ls.get(1),
+                ls.get(2)
+            );
+            return;
+        }
         let n_leaf = self.window_leaves(wi).len();
         let before = counts(self);
         let hit1 = press(self);

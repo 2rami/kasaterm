@@ -755,11 +755,9 @@ impl App {
                 // 접지 않으면 탭에서 도는 클로드가 안 잡혀, 프사·전신·배너 도트가
                 // 통째로 안 뜬다(거노 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
                 let tab_pid = ws.active_tab_pid(&id);
-                let runs_claude = self
-                    .pty
-                    .get(tab_pid.as_str())
-                    .and_then(|p| p.active_agent())
-                    .is_some();
+                let agent_kind =
+                    self.pty.get(tab_pid.as_str()).and_then(|p| p.active_agent());
+                let runs_claude = agent_kind.is_some();
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -954,6 +952,15 @@ impl App {
                         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
                         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
                         replace_welcome_greeting(&mut composed, br, name, accent);
+                    }
+                    // codex 시작 패널: 세울 아트가 없어 이름표만 바꾼다. 도트 유무와
+                    // 무관하니 위 로고 루프 밖이고, codex pane 일 때만 훑는다 —
+                    // 배너와 달리 화면 전체를 봐야 해서 공짜가 아니다.
+                    if agent_kind == Some(kasa_pty::AgentKind::Codex) {
+                        let n = composed.len();
+                        replace_banner_title(
+                            &mut composed, 0, 0, 0, n, CODEX_TITLE, name, accent,
+                        );
                     }
                     // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
                     // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
@@ -2184,7 +2191,14 @@ impl App {
         // 말한다(그때는 그게 유일한 자리다).
         let mut sb_row_alert_win: std::collections::HashSet<usize> = Default::default();
         let mut sb_row_wait_win: std::collections::HashSet<usize> = Default::default();
-        for ((wi, _, _), info) in sb_rows.iter().zip(sb_row_info.iter()) {
+        // 배치도 칸도 같은 말을 한다 — 칸이 통째로 숨쉬게 된 뒤로는 목록과 똑같은
+        // 자격이다. 여기 안 넣으면 배치도 모드에서 칸과 머리 점이 같이 떠, 목록을
+        // 고치며 없앴던 두 겹 칠하기가 그대로 되살아난다(실측: 캡처에 둘 다 떴다).
+        let signalled = sb_rows
+            .iter()
+            .zip(sb_row_info.iter())
+            .chain(sb_mini.iter().zip(sb_mini_info.iter()));
+        for ((wi, _, _), info) in signalled {
             if info.alert {
                 sb_row_alert_win.insert(*wi);
             }
@@ -3367,6 +3381,17 @@ impl App {
                         && sb_cursor.1 >= my
                         && sb_cursor.1 <= my + mh;
                     g.hover_pointer |= hov;
+                    // 손이 필요한 칸은 **칸째 숨쉰다**(2026-08-11 지시: "점 말고 칸이
+                    // 빛나게"). 모서리 점으로도 말해 봤는데 6px 짜리가 얼굴 옆에 붙으니
+                    // 칸이 작을수록 얼룩처럼 읽혔고, 좁은 칸에서는 아예 그려지지도
+                    // 않았다(`mw > 16` 게이트). 칸 전체는 크기와 무관하게 보인다.
+                    let signal = if info.waiting {
+                        Some((theme::attention(), 0.9))
+                    } else if info.alert {
+                        Some((theme::accent(), 1.6))
+                    } else {
+                        None
+                    };
                     round_rect(
                         g,
                         mx,
@@ -3374,7 +3399,11 @@ impl App {
                         mw,
                         mh,
                         2.0,
-                        if cur {
+                        // 신호가 테두리를 가져간다 — 「내가 여기 있다」(cur)보다
+                        // 「나를 기다린다」가 급한 소식이다.
+                        if let Some((c, _)) = signal {
+                            c
+                        } else if cur {
                             theme::accent()
                         } else if hov {
                             theme::surface_hover()
@@ -3385,7 +3414,7 @@ impl App {
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
                     // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
                     // 아니라 잘못 칠해진 자리로 읽힌다(실측).
-                    if cur && mw > 5.0 && mh > 5.0 {
+                    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
                         round_rect(
                             g,
                             mx + 1.5,
@@ -3393,8 +3422,17 @@ impl App {
                             mw - 3.0,
                             mh - 3.0,
                             1.5,
-                            theme::surface_active(),
+                            if cur { theme::surface_active() } else { theme::panel_bg() },
                         );
+                    }
+                    // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
+                    // 주기마다 사라져 배치도가 통째로 일렁인다.
+                    if let Some((col, period)) = signal {
+                        if mw > 5.0 && mh > 5.0 {
+                            let mut c = col;
+                            c[3] = (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8;
+                            round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
+                        }
                     }
                     // 칸이 **누구 자리인지** 말한다. 목록을 걷어낸 이상 얼굴이 여기
                     // 없으면 사이드바 어디에도 학생이 없다(거노 2026-08-11: "미니맵은
@@ -3415,15 +3453,6 @@ impl App {
                             isz,
                             theme::text_dim(),
                         );
-                    }
-                    // 손이 필요한 칸은 모서리 점이 깜빡인다 — 얼굴 위에 겹치지 않게
-                    // 오른쪽 위로 뺀다. 도는 중은 걷기가 이미 말하므로 점을 안 쓴다.
-                    if mw > 16.0 && mh > 12.0 {
-                        if info.waiting {
-                            blink_dot(g, mx + mw - 8.0, my + 3.0, 6.0, theme::attention(), 0.9);
-                        } else if info.alert {
-                            blink_dot(g, mx + mw - 8.0, my + 3.0, 6.0, theme::accent(), 1.6);
-                        }
                     }
                 }
                 for (k, ((wi, _, r), info)) in
@@ -7491,6 +7520,10 @@ pub(crate) const AGY_ROWS: usize = 5;
 const CLAWD_TITLE: &[char] = &['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
 const AGY_TITLE: &[char] =
     &['A', 'n', 't', 'i', 'g', 'r', 'a', 'v', 'i', 't', 'y', ' ', 'C', 'L', 'I'];
+/// codex 는 마스코트 아트가 없다 — 시작 패널 한 장뿐이라 도트는 못 세우고 이름표만
+/// 바꾼다. `>_` 까지 묶어 잡아야 대화 본문에 같은 낱말이 나와도 안 걸린다.
+const CODEX_TITLE: &[char] =
+    &['>', '_', ' ', 'O', 'p', 'e', 'n', 'A', 'I', ' ', 'C', 'o', 'd', 'e', 'x'];
 
 /// 학생 도트 애니메이션 — idle(배너)·walk(로딩바) 모션별 프레임 수·주기.
 const STUDENT_IDLE_FRAMES: usize = 4;
@@ -8600,6 +8633,12 @@ fn blink_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, size: f32, col: [u8; 4], 
     let mut c = col;
     c[3] = (70.0 + 185.0 * blink(anim_phase_secs(), period)) as u8;
     circle_rect(g, x, y, size, c);
+}
+
+/// 지금 이 순간 깜빡임이 어디쯤인가(0=바닥, 1=꼭대기). 헤드리스 캡처가 밝은 쪽을
+/// 골라 찍는 데 쓴다 — 위상에 따라 그림이 달라지면 "글로우가 안 나온다"가 된다.
+pub(crate) fn blink_phase(period: f32) -> f32 {
+    blink(anim_phase_secs(), period)
 }
 
 fn blink(t: f32, period: f32) -> f32 {
