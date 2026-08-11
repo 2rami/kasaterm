@@ -4495,6 +4495,11 @@ struct App {
     /// sidebar-window dot; a working→idle flip fires the completion toast. Keyed
     /// by surface id, replaced wholesale on each StateView.
     pane_activity: HashMap<String, crate::stream::PaneStatusView>,
+    /// ultracode 가 켜진 pane — 입력박스를 보라색으로 두른다. claude 는 이 상태를
+    /// statusline payload 에 안 실어 주므로(effort 는 low..max 뿐), UserPromptSubmit
+    /// 훅이 남기는 `/tmp/kasaterm-collab/ultracode/<sid>.on` 마커를 대신 읽는다.
+    /// `refresh_pane_activity` 박자(300ms)로 갱신 — 매 프레임 stat 하지 않는다.
+    pane_ultracode: std::collections::HashSet<String>,
     /// Whether our window currently has OS focus. Drives notification
     /// suppression: a completion alert for the already-focused active pane is
     /// pointless (the user is looking right at it), so we skip the desktop
@@ -5010,6 +5015,7 @@ impl App {
             claude_busy_until: None,
             last_claude_status: None,
             pane_activity: HashMap::new(),
+            pane_ultracode: std::collections::HashSet::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
             turn_done_panes: std::collections::HashSet::new(),

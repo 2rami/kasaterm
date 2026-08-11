@@ -332,6 +332,28 @@ impl App {
     /// Shared by the busy loop and the approval-prompt router below.
     const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
 
+    /// ultracode 가 켜진 pane 을 훑는다 — 입력박스 테두리를 보라색으로 두르는 근거.
+    ///
+    /// claude 는 이 상태를 statusline payload 에 안 실어 준다(effort 는 low..max 뿐)
+    /// → `ultracode-mark.py`(UserPromptSubmit)가 남기는 마커 파일이 유일한 신호다.
+    /// **턴 단위**라 다음 프롬프트에 키워드가 없으면 훅이 지우고 테두리도 함께 꺼진다.
+    fn refresh_pane_ultracode(&mut self) {
+        let dir = std::path::Path::new("/tmp/kasaterm-collab/ultracode");
+        self.pane_ultracode = self
+            .pane_claude_sid
+            .iter()
+            .filter(|(_, sid)| {
+                // 훅과 **같은** 정제 규칙이어야 파일명이 어긋나지 않는다.
+                !sid.is_empty()
+                    && sid
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    && dir.join(format!("{sid}.on")).exists()
+            })
+            .map(|(pane, _)| pane.clone())
+            .collect();
+    }
+
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
@@ -343,6 +365,7 @@ impl App {
         // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
         // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
         self.reap_idle_closed_panes();
+        self.refresh_pane_ultracode();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same
