@@ -1841,11 +1841,14 @@ fn run_statusline() {
             .find(|(k, _)| k == name)
             .map(|(_, v)| *v)
             .unwrap_or(SL_C_FALLBACK);
-        let c = ansi_fg(hex);
-        // pane 안이든 밖이든 같은 `● 이름` — 다른 것은 kasaterm 이 읽을 표식뿐이다
-        // (statusline.py 와 출력 바이트가 같아야 한다).
-        let mark = if sl_env("KASATERM_PANE_ID").is_some() { SL_SPRITE } else { "" };
-        parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}{mark}"));
+        // pane 안에서는 학생을 안 쓴다 — pane 헤더가 이미 보여준다. 밖에서는 헤더가
+        // 없으니 여기서만 알 수 있다. (statusline.py 와 출력 바이트가 같아야 한다.)
+        if sl_env("KASATERM_PANE_ID").is_some() {
+            parts.push(SL_SPRITE.to_string());
+        } else {
+            let c = ansi_fg(hex);
+            parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}"));
+        }
     }
 
     // ⑂ bg 배지 — anchor 불일치이되 사용자 주도 resume(shim 마커)은 제외.
