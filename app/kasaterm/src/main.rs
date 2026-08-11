@@ -5229,6 +5229,35 @@ fn install_pane_shims() {
     eprintln!("[shim] pane shim dir={shim_dir:?}");
 }
 
+/// 훅·CLI 가 쓸 python3 실행 이름. Windows 엔 `python3` 이 없는 게 보통이고,
+/// 있어도 대개 MS Store 스텁이라 `--version` 이 exit 49 로 죽는다 — 실물은
+/// `python` 이나 py 런처다. 후보를 순서대로 때려 보고 `Python 3` 이라 답하는
+/// 첫 놈을 쓴다. 프로세스 스폰이라 부팅 1회로 굳힌다.
+///
+/// unix 에서도 같은 순서를 도는데, 거기선 `python3` 이 첫 후보에서 바로 잡혀
+/// 동작이 바뀌지 않는다.
+///
+/// 부르는 쪽은 반드시 `-X utf8` 을 붙인다 — Windows python 은 파이프로 내보낼
+/// 때도 stdout 을 로케일 코드페이지(한국어 Windows 는 cp949)로 잡아서, 훅이
+/// 뱉는 한글이 UTF-8 파서인 우리 터미널에 깨져 들어오고 cp949 에 없는 글자엔
+/// UnicodeEncodeError 로 훅째 죽는다. roster JSON 처럼 파일로 쓰는 것도 같다.
+fn python3_program() -> Option<&'static str> {
+    static PROG: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PROG.get_or_init(|| {
+        ["python3", "python", "py"].into_iter().find(|p| {
+            proc::command(p)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).starts_with("Python 3")
+                })
+                .unwrap_or(false)
+        })
+    })
+}
+
 /// Write `imgopen` and `mdopen` into the shim dir (on the pane PATH). Each
 /// resolves its argument to an absolute path and curls the host's MCP
 /// open-preview endpoint, which spawns a separate wry window. No dependency
@@ -5398,12 +5427,19 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     } else {
         hooks_dir.display().to_string()
     };
-    // Windows 는 claude 가 훅/statusLine 커맨드를 cmd 로 돌리므로 .sh 직접 exec 이
-    // 안 된다 — `sh "<경로>"` 로 명시 실행(pane env PATH 에 Git usr/bin 의 sh.exe 가
-    // 있다). unix 는 종전대로 직접 exec.
+    // Windows 는 claude 가 훅/statusLine 커맨드를 cmd 로 돌리므로 스크립트 직접
+    // exec 이 안 된다 — 인터프리터를 명시한다. .sh 는 Git usr/bin 의 sh.exe(pane
+    // env PATH 에 있다), .py 는 python3_program(). `sh foo.py` 는 셰뱅을 무시하고
+    // 셸 스크립트로 읽어 통째로 문법오류가 난다. unix 는 종전대로 직접 exec.
     let cmd = |script: &str, timeout: u64| {
         let run = if cfg!(windows) {
-            format!("sh \"{hd}/{script}\"")
+            match script.strip_suffix(".py") {
+                Some(_) => format!(
+                    "{} -X utf8 \"{hd}/{script}\"",
+                    python3_program().unwrap_or("python3")
+                ),
+                None => format!("sh \"{hd}/{script}\""),
+            }
         } else {
             format!("\"{hd}/{script}\"")
         };
@@ -5446,16 +5482,9 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
     });
     if cfg!(windows) {
-        // conflict-guard 는 python3 의존 — 기본 Windows 엔 python3 가 없어 훅이 매
-        // Edit 마다 실패 노이즈를 낸다. python3 가 PATH 에 있을 때만 유지.
-        let has_py3 = proc::command("python3")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !has_py3 {
+        // conflict-guard 는 python 의존 — 없으면 훅이 매 Edit 마다 실패 노이즈를
+        // 낸다. 쓸 만한 인터프리터를 실제로 찾았을 때만 유지.
+        if python3_program().is_none() {
             settings["hooks"].as_object_mut().unwrap().remove("PreToolUse");
         }
     }
@@ -5664,9 +5693,8 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     // kasacollab(협업 CLI)도 pane PATH 에 스테이징 — 훅이 아니라 셸/claude 가
     // 직접 부르는 명령이라 settings 주입으로는 못 싣는다. 예전엔 ~/.local/bin
     // 수동 설치(개인 설정 오염 + 정본 이동 시 무음 고장)였다.
-    let collab = format!(
-        "#!/bin/sh\nexec python3 \"{hd}/kasacollab.py\" \"$@\"\n"
-    );
+    let py = python3_program().unwrap_or("python3");
+    let collab = format!("#!/bin/sh\nexec {py} -X utf8 \"{hd}/kasacollab.py\" \"$@\"\n");
     let collab_path = shim_dir.join("kasacollab");
     if let Err(e) = std::fs::write(&collab_path, collab) {
         eprintln!("[shim] write kasacollab wrapper failed: {e}");
@@ -5679,6 +5707,18 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
             std::fs::set_permissions(&collab_path, std::fs::Permissions::from_mode(0o755))
         {
             eprintln!("[shim] chmod kasacollab wrapper failed: {e}");
+        }
+    }
+    // sh 훅 아홉 개가 전부 `python3` 을 이름으로 부른다(bind-transcript·steer·
+    // stop-drain·notify·auto-imgopen …). Windows 에서 그 이름은 MS Store 스텁이라
+    // exit 49 로 죽고, 훅들은 죄다 `2>/dev/null || true` 라 **무음으로 통째 정지**
+    // 했다 — bind·steer·drain 이 전부 안 도는 상태가 눈에 안 보였다. 훅을 하나씩
+    // 고치는 대신 pane PATH 맨 앞(shim_dir)에 진짜를 가리키는 `python3` 를 놓는다.
+    // 이름이 이미 맞으면(unix) 아무것도 안 만든다.
+    if cfg!(windows) && py != "python3" && python3_program().is_some() {
+        let bridge = format!("#!/bin/sh\nexec {py} -X utf8 \"$@\"\n");
+        if let Err(e) = std::fs::write(shim_dir.join("python3"), bridge) {
+            eprintln!("[shim] write python3 bridge failed: {e}");
         }
     }
 }
