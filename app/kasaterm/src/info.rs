@@ -1620,9 +1620,19 @@ const SEC_GAP: f32 = 8.0;
 const HEAD_H: f32 = 30.0;
 /// pane 그룹 머리.
 const GROUP_H: f32 = 24.0;
-/// 방(윈도우) 머리. pane 머리보다 낮게 둬서 "구획선에 이름이 붙은 것"으로 읽히게
-/// 한다 — 좁은 칼럼에서 방까지 들여쓰기로 표현하면 정작 프로세스 트리가 눌린다.
-const WIN_H: f32 = 20.0;
+/// 방(윈도우) 머리. **위쪽 `WIN_PAD` 는 앞 방과의 여백이고 나머지가 실제 머리다.**
+///
+/// 여백을 상수 밖에 따로 두지 않는 이유: 이 값을 높이 계산(스크롤 clamp)과 페인트가
+/// **각각** 읽는데, 여백을 별도 항으로 더하면 한쪽만 고쳐져 목록이 어긋난다. 높이
+/// 안에 품으면 상수 하나로 둘이 같이 움직인다.
+///
+/// 종전엔 20 으로 pane 머리(24)보다 낮았다 — "구획선에 이름이 붙은 것"을 노린 것인데,
+/// 배경도 여백도 없어서 방 경계가 pane 경계보다 약하게 읽혔다(2026-08-11 지적).
+/// 들여쓰기로 가르는 길은 여전히 안 쓴다: 좁은 칼럼에서 한 단 더 들이면 프로세스
+/// 트리의 계보선이 설 자리가 없다.
+const WIN_H: f32 = 32.0;
+/// 방 머리 위 여백 — 앞 방의 마지막 프로세스 줄과 붙지 않게.
+const WIN_PAD: f32 = 10.0;
 /// 포트 행은 두 줄이다 — 번호·소유 pane 이 윗줄, "무엇인지"가 아랫줄.
 const PORT_H: f32 = 32.0;
 /// 계보 한 단의 가로 폭. 좁은 칼럼에서 깊이 3~4 단은 흔하므로(claude → MCP
@@ -2090,13 +2100,20 @@ fn draw_window_head(
     right: f32,
     y: f32,
 ) {
-    if hit(cursor, &(x, y, w, WIN_H)) {
-        g.rect(x, y, w, WIN_H, theme::surface_hover());
+    // 위 `WIN_PAD` 는 앞 방과의 여백이다 — 지나서 그린다. 아래 오프셋들이 종전 그대로
+    // 동작하도록 y 를 여기서 한 번만 옮긴다.
+    let y = y + WIN_PAD;
+    let hh = WIN_H - WIN_PAD;
+    // 옅은 밴드. 방 경계는 pane 경계보다 **세게** 읽혀야 하는데, 종전엔 배경도 여백도
+    // 없이 낮은 글자 한 줄뿐이라 그 반대였다.
+    round_rect(g, x, y, w, hh, theme::radius_sm(), theme::with_alpha(theme::surface(), 0x80));
+    if hit(cursor, &(x, y, w, hh)) {
+        g.rect(x, y, w, hh, theme::surface_hover());
     }
     g.queue_icon(
         if collapsed { "chevron-right" } else { "chevron-down" },
         x0 - 3.0,
-        y + 4.0,
+        y + 5.0,
         11.0,
         theme::text_mute(),
     );
