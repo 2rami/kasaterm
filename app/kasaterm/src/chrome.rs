@@ -1365,17 +1365,27 @@ impl App {
         let Some(cwd) = cwd else { return };
         self.open_file(cwd.join(rel), None, false);
     }
-    /// 하단바가 pane 그리드에서 먹는 높이(0 이면 바 자체가 없다).
+    /// 창 아래쪽이 pane 그리드에서 먹는 높이 — **접힘 dock + 상태줄**.
     ///
     /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
     /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다.
     ///
+    /// 상태줄(`STATUS_HEIGHT`)은 **조건 없이 항상** 들어간다. dock 과 달리 늘 있는
+    /// 띠라, 여기서 안 빼면 마지막 셀 줄 위에 그대로 덮여 그려진다 — 이 렌더러엔
+    /// scissor 가 없어서 넘친 것이 잘리지 않고 **멀쩡해 보이는 채로 겹친다**.
+    ///
     /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
-    /// 하단바에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
+    /// dock 에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
     /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
     ///
     /// 접어 둔 별도창은 **센다**. 그건 사용자가 그 순간 직접 접은 것이라 띠가 생기는
     /// 게 결과로 읽히고, 무엇보다 되살릴 손잡이가 여기 말고는 없다.
+    pub(crate) fn bottom_reserve_h(&self) -> f32 {
+        self.dock_reserve_h() + STATUS_HEIGHT
+    }
+
+    /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
+    /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
     pub(crate) fn dock_reserve_h(&self) -> f32 {
         if self.docked.is_empty() && self.zoomed_pane.is_none() && self.hidden_aux.is_empty() {
             0.0
@@ -1397,9 +1407,12 @@ impl App {
         if self.tabs_on_top || !self.sidebar_visible {
             return None;
         }
-        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        // 사이드바는 pane 그리드를 안 지나므로 `window_cells` 의 예약이 여기까지
+        // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
+        let bottom_h =
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
         let b = 28.0_f32;
-        let line_y = (win_h - dock_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
+        let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
         let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
         let left = SIDEBAR_TAB_INSET + 4.0;
         let right = (self.sidebar_w_logical - SIDEBAR_TAB_INSET - 4.0 - b).max(left);

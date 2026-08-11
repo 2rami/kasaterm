@@ -261,7 +261,7 @@ impl App {
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
         // Reserve the dock bar from the grid only when it carries chips.
-        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - self.dock_reserve_h()).max(0.0);
+        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - self.bottom_reserve_h()).max(0.0);
         let cols = (lw / self.cell.w).floor().max(40.0) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {

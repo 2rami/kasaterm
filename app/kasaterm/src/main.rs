@@ -489,6 +489,12 @@ const PANE_FOOTER_HEIGHT: f32 = 30.0;
 /// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
 /// grid only when the dock is non-empty.
 const DOCK_HEIGHT: f32 = 40.0;
+/// 창 맨 아래 상태줄 높이(logical px) — 계정 한도가 **항상** 보이는 자리.
+///
+/// dock 과 달리 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
+/// 아니라 「지금 얼마나 남았나」라서, 접혀 있으면 그걸 확인하려고 패널을 여는 순간
+/// 이미 늦는다. Orca 하단바(24px)와 같은 높이 — 거기서 형식을 가져왔다.
+const STATUS_HEIGHT: f32 = 24.0;
 /// 활성 탭 상단 accent 선 두께(logical px). BORDER stroke(1px)보다 살짝 굵게.
 const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
@@ -4255,6 +4261,13 @@ struct App {
     account_menu: bool,
     /// 사용량 pill 의 rect(클릭 = 계정 드롭다운 토글). pill 을 안 그리는 프레임엔 None.
     account_chip_rect: Option<(f32, f32, f32, f32)>,
+    /// 하단 상태줄의 계정 세그먼트 rect. Info 탭을 안 열어도 **항상** 있는 손잡이라
+    /// 실제로 계정을 여닫는 자리는 이쪽이 된다.
+    status_account_rect: Option<(f32, f32, f32, f32)>,
+    /// 드롭다운이 **어느 손잡이에서** 열렸나 — 메뉴를 그 자리에 붙여 그린다.
+    /// 손잡이가 둘(Info 탭 계정 행 · 상태줄)이라, 하나로 고정하면 다른 쪽에서 열었을
+    /// 때 메뉴가 화면 반대편에 뜬다.
+    account_menu_anchor: Option<(f32, f32, f32, f32)>,
     /// 드롭다운 항목 hit rect.
     account_menu_hits: Vec<(AccountMenuItem, (f32, f32, f32, f32))>,
     /// Rendered markdown content height (logical px) per pane id, published by
@@ -4993,6 +5006,8 @@ impl App {
             // 드롭다운이 열린 프레임을 캡처한다.
             account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
             account_chip_rect: None,
+            status_account_rect: None,
+            account_menu_anchor: None,
             account_menu_hits: Vec::new(),
             md_content_h: HashMap::new(),
             md_block_ys: HashMap::new(),
