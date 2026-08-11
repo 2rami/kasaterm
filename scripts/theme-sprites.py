@@ -7,16 +7,19 @@
 
     theme-sprites.py gen               # desc.txt 있는 학생 전부 생성 (이미 된 건 건너뜀)
     theme-sprites.py gen kei rio       # 일부만
+    theme-sprites.py gen --ref         # 공식 포트레이트를 정체성 참조로 함께 넘긴다
     theme-sprites.py install           # 생성물을 앱 자산 자리로 복사
     theme-sprites.py status            # 어디까지 됐는지
+    theme-sprites.py sheet             # 원본↔생성물 대조 시트 한 장(눈으로 검수)
 
 생성은 1명당 2분 남짓(호출 5회)이라 `--jobs` 로 병렬로 돌린다. 중간에 끊겨도 다시
-부르면 이어서 한다 — 상태 판정은 `theme-src/<slug>/out/manifest.json` 의 존재다.
+부르면 이어서 한다 — 판정은 모든 상태의 프레임이 다 있는지다(`generated`).
 
-⚠️ 프로바이더는 **fal** 이다. OpenGateway 는 `/images/generations` 만 있고
-`/images/edits` 가 없어(404) 동작 프레임을 못 만든다 — 동작은 base 캐릭터를 참조
-이미지로 넘겨 그리므로 편집 경로가 반드시 필요하다. 키는 ppgen 이 설정에서 읽는다
-(`~/Library/Application Support/perfectpixel/config.json`, macOS 의 UserConfigDir).
+⚠️ **OpenGateway 로는 못 굽는다.** 동작 프레임은 base 캐릭터를 참조 이미지로 넘겨
+그리는데 게이트웨이엔 그 경로(`/images/edits`)가 없다. 참조 이미지를 실어 보내도
+오류 없이 **무시하고 새 그림을 준다** — 필드 검증이 아예 없어서다(2026-08-11 실측).
+그래서 프로바이더는 codex(구독 OAuth, 무과금) · openai(종량) · fal(종량) 중에서 쓴다.
+키는 ppgen 이 설정에서 읽는다(`~/Library/Application Support/perfectpixel/config.json`).
 """
 import argparse
 import json
@@ -269,14 +272,60 @@ def run(fn, targets, jobs, force, **kw):
     return 0 if not (counts.keys() - {"ok", "skip"}) else 1
 
 
+def sheet(targets, out, cell=110):
+    """공식 원본과 생성물을 나란히 놓은 **대조 시트** 한 장.
+
+    정체성이 어긋났는지는 자동 검사로 못 잡는다 — 케이는 desc 에 `white hair` 라고
+    적혀 있는데도 분홍 머리로 나왔고, 그림 자체는 멀쩡해서 픽셀 검사를 다 통과했다.
+    사람 눈이 제일 빠르고 정확하므로, 전원을 한 장에 모아 보고 어긋난 애만 다시 굽는다.
+
+    왼쪽이 위키 원본(`ref.png`), 오른쪽이 생성된 프로필. 참조 없이 묘사만으로 구운
+    학생은 왼쪽이 비어 있고 — **그건 대조할 원본이 없다는 뜻이지 통과가 아니다**.
+    """
+    from PIL import Image, ImageDraw
+
+    cols = 6
+    rows = (len(targets) + cols - 1) // cols
+    pad, label = 6, 14
+    cw, ch = cell * 2 + pad, cell + label + pad
+    im = Image.new("RGB", (cols * cw + pad, rows * ch + pad), (24, 26, 31))
+    draw = ImageDraw.Draw(im)
+
+    for n, slug in enumerate(targets):
+        x0 = pad + (n % cols) * cw
+        y0 = pad + (n // cols) * ch
+        for i, path in enumerate(
+            [os.path.join(SRC, slug, "ref.png"), os.path.join(DST, f"{slug}-profile.png")]
+        ):
+            box = (x0 + i * cell, y0, x0 + (i + 1) * cell, y0 + cell)
+            if not os.path.exists(path):
+                draw.rectangle(box, outline=(70, 60, 60))
+                draw.text((box[0] + cell // 2 - 8, box[1] + cell // 2 - 5), "—", fill=(120, 110, 110))
+                continue
+            th = Image.open(path).convert("RGBA")
+            th.thumbnail((cell, cell), Image.LANCZOS)
+            bg = Image.new("RGB", th.size, (24, 26, 31))
+            bg.paste(th, (0, 0), th)
+            im.paste(bg, (box[0] + (cell - th.width) // 2, box[1] + (cell - th.height) // 2))
+        draw.text((x0 + 2, y0 + cell + 2), slug, fill=(150, 158, 170))
+
+    im.save(out)
+    print(f"{len(targets)}명 → {out}  ({im.width}x{im.height})")
+    missing = [s for s in targets if not os.path.exists(os.path.join(SRC, s, "ref.png"))]
+    if missing:
+        print(f"원본 없음 {len(missing)}: {' '.join(missing)} — 대조 불가")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["gen", "install", "status"])
+    ap.add_argument("cmd", choices=["gen", "install", "status", "sheet"])
     ap.add_argument("slugs", nargs="*")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--ref", action="store_true",
                     help="공식 포트레이트를 정체성 참조로 넘긴다(느리지만 색이 안 어긋난다)")
+    ap.add_argument("--out", default="/tmp/theme-sheet.png", help="sheet 저장 경로")
     a = ap.parse_args()
 
     targets = a.slugs or slugs()
@@ -292,6 +341,8 @@ def main():
         if nod:
             print(f"desc 없음 {len(nod)}: {' '.join(nod[:20])}{' …' if len(nod) > 20 else ''}")
         return 0
+    if a.cmd == "sheet":
+        return sheet(targets, a.out)
     if a.cmd == "gen":
         if not os.path.exists(PPGEN):
             print(f"ppgen 이 없다: {PPGEN} (PPGEN 환경변수로 지정)", file=sys.stderr)
