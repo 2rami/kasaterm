@@ -3472,8 +3472,10 @@ impl GpuRenderer {
     }
 
     /// Bundled Lucide SVG source for a chrome icon name. Compiled in so the
-    /// .app needs no external asset dir.
-    fn icon_svg(name: &str) -> Option<&'static str> {
+    /// .app needs no external asset dir. `pub(crate)` 인 건 아이콘 이름을 짓는
+    /// 쪽(예: `sesscol::harness_icon`)이 그 이름이 실제로 등록돼 있는지 테스트할
+    /// 수 있어야 해서다 — 없는 이름은 `queue_icon` 이 조용히 그냥 돌아간다.
+    pub(crate) fn icon_svg(name: &str) -> Option<&'static str> {
         Some(match name {
             "folder" => include_str!("../assets/icons/folder.svg"),
             "square" => include_str!("../assets/icons/square.svg"),
@@ -3522,6 +3524,7 @@ impl GpuRenderer {
             "external-link" => include_str!("../assets/icons/external-link.svg"),
             "claude" => include_str!("../assets/icons/claude.svg"),
             "codex" => include_str!("../assets/icons/codex.svg"),
+            "antigravity" => include_str!("../assets/icons/antigravity.svg"),
             // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
             // 이모지가 폰트에 따라 흑백 글리프로 떨어지기 때문 — 실제로 `⚠️` 가
             // 밋밋한 `▲` 로 나온다.
@@ -3656,7 +3659,7 @@ impl GpuRenderer {
     /// is forced white: only the alpha channel matters because icons draw
     /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
     /// applied at draw time, not bake time.
-    fn rasterize_icon(svg: &str, px: u32) -> Option<Vec<u8>> {
+    pub(crate) fn rasterize_icon(svg: &str, px: u32) -> Option<Vec<u8>> {
         let svg = svg.replace("currentColor", "#ffffff");
         let opt = resvg::usvg::Options::default();
         let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
