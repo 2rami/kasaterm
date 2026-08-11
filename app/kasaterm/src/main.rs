@@ -5615,6 +5615,9 @@ fn install_pane_shims() {
     // agy 도 학생이 된다. 셋 중 유일하게 사용자 홈에 파일을 쓰는데(그 CLI 가
     // 에이전트를 이름으로만 찾는다), 접두 `kasaterm-` 밖은 안 건드린다.
     install_agy_hook_shim(&shim_dir);
+    // pane 마다 rust-analyzer 가 하나씩 뜨던 것을 하나로 모은다(ra-multiplex 가
+    // 있을 때만 — 없으면 shim 이 진짜를 그대로 exec 한다).
+    install_rust_analyzer_shim(&shim_dir);
     // 학생 이름 자체를 명령으로(`시로코`/`shiroko`) — 이 pane 을 그 학생으로
     // 재배정하고 하네스(claude 기본, `시로코 codex`)를 띄운다. characters.json
     // 기준 부팅 1회 생성.
@@ -5687,6 +5690,65 @@ fn install_pane_shims() {
 /// open-preview endpoint, which spawns a separate wry window. No dependency
 /// beyond `curl` (ships on macOS/Linux); the port comes from
 /// KASASPACE_MCP_PORT (default 8765), inherited from the host process.
+/// `rust-analyzer` 를 가로채 **서버 하나를 모든 pane 이 나눠 쓰게** 한다.
+///
+/// pane 마다 claude 가 자기 rust-analyzer 를 띄운다 — 실측(2026-08-11) pane 7개에
+/// 서버 7 + proc-macro 서버 7 = **14 프로세스가 같은 워크스페이스를 각자 인덱싱**하고
+/// 있었고, 인덱싱이 돌자 CPU 119% · RSS 2.43GB 였다. claude 는 PATH 에서
+/// `rust-analyzer` 를 찾고 이 shim 디렉터리가 PATH 맨 앞이라, 여기서 가로채
+/// [`ra-multiplex`](https://crates.io/crates/ra-multiplex) 로 넘긴다.
+///
+/// 멀티플렉서가 없으면 shim 이 진짜를 그대로 exec 한다 — 없다고 LSP 를 죽이는 것보다
+/// pane 마다 하나가 뜨는 편이 낫다. `claude --bare` 로 LSP 를 끄는 길도 있지만 그건
+/// 훅·플러그인까지 함께 꺼서 협업(bind-transcript·statusline·페르소나)이 통째로 죽는다.
+fn install_rust_analyzer_shim(shim_dir: &std::path::Path) {
+    if cfg!(windows) {
+        return;
+    }
+    // 진짜 경로 탐색은 claude/codex/agy shim 과 같은 방식(`CLEAN_PATH`)이다 — 자기
+    // 디렉터리를 PATH 에서 빼고 찾는다.
+    let body = r#"#!/bin/sh
+# kasaterm rust-analyzer shim — pane 마다 서버가 하나씩 뜨는 것을 막는다.
+#
+# ⚠️ --server-path 에 **진짜 경로**를 넘겨야 한다. 안 주면 ra-multiplex 가 PATH 에서
+#    rust-analyzer 를 찾는데 그게 이 shim 이라 자기를 무한히 다시 부른다.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v rust-analyzer 2>/dev/null)
+if [ -z "$REAL" ]; then
+echo "kasaterm rust-analyzer shim: real rust-analyzer not found on PATH" >&2
+exit 127
+fi
+MUX=$(PATH="$CLEAN_PATH" command -v ra-multiplex 2>/dev/null)
+# 멀티플렉서가 없으면 진짜를 그대로 — LSP 가 죽는 것보다 pane 마다 하나가 낫다.
+[ -n "$MUX" ] || exec "$REAL" "$@"
+# 서버는 첫 pane 이 올린다. 자동 시작을 안 한다(실측: status 가 "Error: connect").
+# 여럿이 동시에 올려도 포트를 못 잡은 쪽이 조용히 죽으므로 무해하다.
+if ! "$MUX" status >/dev/null 2>&1; then
+"$MUX" server >/dev/null 2>&1 &
+# client 는 재시도하지 않는다 — 포트가 열릴 때까지 잠깐 기다린다(최대 5초).
+i=0
+while [ "$i" -lt 50 ] && ! "$MUX" status >/dev/null 2>&1; do
+sleep 0.1
+i=$((i+1))
+done
+fi
+exec "$MUX" client --server-path "$REAL" "$@"
+"#;
+    let path = shim_dir.join("rust-analyzer");
+    if let Err(e) = std::fs::write(&path, body) {
+        eprintln!("[shim] write rust-analyzer failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
+            eprintln!("[shim] chmod rust-analyzer failed: {e}");
+        }
+    }
+}
+
 fn install_preview_shims(shim_dir: &std::path::Path) {
     // Windows shells can't run /bin/sh scripts and the pane PATH there isn't
     // a POSIX shell; skip rather than drop broken files.
