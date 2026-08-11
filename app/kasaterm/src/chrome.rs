@@ -274,6 +274,7 @@ impl App {
             let scale = self.effective_scale();
             win.inner_size().width as f32 / scale
         })?;
+        #[cfg(not(windows))]
         let x = win_w - w - 8.0;
         // Windows paints min/max/close at the right edge; keep this toggle left
         // of that cluster so render (render.rs) and this hit-test agree.

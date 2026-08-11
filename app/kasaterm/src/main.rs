@@ -393,6 +393,10 @@ const TITLE_HEIGHT: f32 = 36.0;
 /// from the window's left edge. Mouse events inside this rectangle are
 /// reserved for the native buttons; our drag handler ignores them so a
 /// click on the red dot still closes the window.
+///
+/// Windows 는 프레임리스라 비켜 줄 신호등이 없다 — 두 참조처(`sidebar_toggle_rect`,
+/// 타이틀바 드래그 판정)가 모두 `cfg(not(windows))` 라 상수도 같이 접는다.
+#[cfg(not(windows))]
 const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// iTerm-style per-pane header height in logical pixels. Each split
 /// pane gets one of these strips above its cell grid; a single
@@ -4431,7 +4435,10 @@ struct App {
     version_anim_start: Instant,
     /// macOS menu bar (muda). Held here because the menu must outlive the
     /// app; `git_menu_item` is matched against incoming MenuEvent ids to
-    /// toggle the git panel from the menu.
+    /// toggle the git panel from the menu. 짓고 읽는 곳이 전부 cfg(macos) 라
+    /// 다른 플랫폼에선 자리만 차지한다 — 필드째 접으면 생성자까지 갈라져야 해서
+    /// 경고만 끈다.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     menu: Option<muda::Menu>,
     git_menu_item: Option<muda::MenuItem>,
     arona_menu_item: Option<muda::MenuItem>,
@@ -5035,7 +5042,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
     // 다른 인스턴스가 하나도 없으면 collab 캐릭터 마커도 전부 stale — 같이 청소.
-    #[cfg(unix)]
     if !sweep_dead_kasaterm_sockets() {
         cleanup_stale_collab_markers();
     }
@@ -6007,9 +6013,9 @@ fn mcp_panel_port() -> String {
 /// 시 누적). 여기서 connect 가 실패하는(=리스너 없는) 소켓 파일만 지운다 —
 /// 살아있는 인스턴스 소켓은 절대 건드리지 않으므로 멀티 인스턴스에서도 안전.
 /// 자기 PID 소켓은 아직 bind 전이라 connect 가 실패할 수 있으니 제외한다.
-#[cfg(unix)]
 /// 죽은 인스턴스의 소켓 잔재를 지우고, *살아있는 다른 인스턴스*가 있는지 돌려준다
 /// (connect 성공 = 살아있는 리스너). 반환값은 stale collab 마커 청소의 게이트.
+#[cfg(unix)]
 fn sweep_dead_kasaterm_sockets() -> bool {
     let own = format!("kasaterm-{}.sock", std::process::id());
     let mut other_alive = false;
@@ -6032,13 +6038,36 @@ fn sweep_dead_kasaterm_sockets() -> bool {
     other_alive
 }
 
+/// Windows 판. 여기선 **지울 잔재가 없다** — 소켓 경로가 파일이 아니라 named pipe
+/// (`\\.\pipe\kasaterm-<pid>.sock`, `kasa_socket::transport`)로 매핑되고, 파이프는
+/// 마지막 핸들이 닫히는 순간 커널이 지운다. 그래서 "존재 == 살아있음"이고, 남는
+/// 일은 다른 인스턴스가 있는지 세는 것뿐이다.
+///
+/// 파이프 네임스페이스는 디렉터리처럼 열거된다(`\\.\pipe\`). 이걸 못 읽으면
+/// `false` — 최악이라야 살아있는 인스턴스를 못 보고 collab 마커를 지우는 건데,
+/// 마커는 pane 이 뜰 때 다시 쓰인다(unix 쪽 read_dir 실패 폴백과 같은 판단).
+#[cfg(windows)]
+fn sweep_dead_kasaterm_sockets() -> bool {
+    let own = format!("kasaterm-{}.sock", std::process::id());
+    // 파이프 네임스페이스는 **슬래시 형태로만** 열린다. `\\.\pipe\` 를 주면 Rust 가
+    // 이미 verbatim 취급인 UNC 로 보고 `\*` 글롭을 못 붙여 os error 3 로 죽는다
+    // (실측: `//./pipe/` = 289개, `\\.\pipe\`·`\\.\pipe`·`\\?\pipe\` = 전부 실패).
+    let Ok(entries) = std::fs::read_dir("//./pipe/") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("kasaterm-") && name.ends_with(".sock") && name != own
+    })
+}
+
 /// 부팅 시 collab 캐릭터 마커 전면 청소 — 마커는 live pane 추적용인데 강제종료·크래시가
 /// 남긴 stale 이 assigned_global 의 유령 taken 을 만들어 랜덤 배정 풀을 쪼그라뜨린다
 /// (거노: 새 학생이 안 나옴). 우리 pane 은 아직 스폰 전이고(restore 가 마커를 다시 쓴다)
 /// 다른 인스턴스가 살아 있으면 그쪽 live 마커를 구분할 수 없어 통째로 건너뛴다(보수적).
-#[cfg(unix)]
 fn cleanup_stale_collab_markers() {
-    let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") else {
+    let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) else {
         return;
     };
     for room in rooms.flatten() {
@@ -6138,106 +6167,6 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
             }
         }
     }
-}
-
-/// PrintWindow + GDI capture of our own HWND, encoded as PNG.
-/// PW_RENDERFULLCONTENT pulls the wgpu/DXGI swap-chain contents that
-/// plain BitBlt would miss; we fall back to a BitBlt from the window
-/// DC if PrintWindow returns 0 (rare, but seen on some legacy GPUs).
-#[cfg(windows)]
-fn capture_window_to_png_windows(
-    hwnd_val: isize,
-    path: &str,
-) -> std::io::Result<(i32, i32)> {
-    use std::io::Error;
-    use windows_sys::Win32::Foundation::{HWND, RECT};
-    use windows_sys::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, SRCCOPY,
-    };
-    use windows_sys::Win32::Storage::Xps::PrintWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, SetForegroundWindow, PW_RENDERFULLCONTENT,
-    };
-
-    let hwnd: HWND = hwnd_val as *mut std::ffi::c_void;
-    unsafe { SetForegroundWindow(hwnd) };
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
-        return Err(Error::other("GetClientRect failed"));
-    }
-    let w = rect.right - rect.left;
-    let h = rect.bottom - rect.top;
-    if w <= 0 || h <= 0 {
-        return Err(Error::other(format!("client rect zero: {w}x{h}")));
-    }
-
-    let pixels = unsafe {
-        let hdc_window = GetDC(hwnd);
-        if hdc_window.is_null() {
-            return Err(Error::other("GetDC returned null"));
-        }
-        let hdc_mem = CreateCompatibleDC(hdc_window);
-        let hbm = CreateCompatibleBitmap(hdc_window, w, h);
-        let old = SelectObject(hdc_mem, hbm as _);
-
-        let ok = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT);
-        if ok == 0 {
-            // Fallback path. Only useful if the window is actually on
-            // screen and not occluded — PrintWindow usually wins.
-            BitBlt(hdc_mem, 0, 0, w, h, hdc_window, 0, 0, SRCCOPY);
-        }
-
-        let mut bmi: BITMAPINFO = std::mem::zeroed();
-        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = w;
-        // Negative height = top-down DIB so row 0 sits at the top, which
-        // is what PNG expects.
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB as u32;
-
-        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
-        GetDIBits(
-            hdc_mem,
-            hbm,
-            0,
-            h as u32,
-            buf.as_mut_ptr() as *mut _,
-            &mut bmi,
-            DIB_RGB_COLORS,
-        );
-
-        SelectObject(hdc_mem, old);
-        DeleteObject(hbm as _);
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_window);
-
-        // GDI hands us BGRA with alpha frequently zeroed. Swap to RGBA
-        // and stamp alpha = 0xFF so PNG viewers don't render us as fully
-        // transparent.
-        for px in buf.chunks_exact_mut(4) {
-            px.swap(0, 2);
-            px[3] = 0xFF;
-        }
-        buf
-    };
-
-    let file = std::fs::File::create(path)?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder
-        .write_header()
-        .map_err(|e| Error::other(format!("png header: {e}")))?;
-    writer
-        .write_image_data(&pixels)
-        .map_err(|e| Error::other(format!("png data: {e}")))?;
-    Ok((w, h))
 }
 
 #[cfg(test)]

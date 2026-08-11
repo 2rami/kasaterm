@@ -868,11 +868,16 @@ fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
     out
 }
 
-/// Windows 엔 남의 프로세스 cwd 를 싸게 읽을 방법이 없다 — 고아 서버는 못 잡고
-/// 셸 자손만 뜬다(unix 와 달리 레포 폴더 확장이 안 된다).
+/// Windows 엔 `lsof` 가 없어 pid 마다 PEB 를 직접 읽는다(`socket::pid_cwd`).
+/// unix 처럼 한 번의 fork 로 끝나진 않지만, 묻는 대상이 포트를 쥔 프로세스뿐이라
+/// 실제 호출은 한 자릿수고, 이 수집기 자체가 1.5초 스로틀된 워커 스레드에서 돈다.
+/// 열 수 없는 프로세스(권한 부족·이미 종료)는 그냥 빠진다 — 전부 비우던
+/// 종전 스텁보다 항상 낫다.
 #[cfg(windows)]
-fn cwds_of(_pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
-    HashMap::new()
+fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
+    pids.iter()
+        .filter_map(|&pid| crate::socket::pid_cwd(pid).map(|cwd| (pid, cwd)))
+        .collect()
 }
 
 /// 포트 오름차순 정렬 + 중복 제거. 같은 소켓이 IPv4 와 IPv6 로 한 번씩 잡히므로

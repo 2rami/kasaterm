@@ -2392,6 +2392,7 @@ impl App {
             {
                 let bw = 26.0_f32;
                 let bh = 22.0_f32;
+                #[cfg(not(windows))]
                 let bx = win_px.0 / scale - bw - 8.0;
                 // Windows paints its own min/max/close at the right edge; shove
                 // the git-column toggle left of that cluster so they don't stack.
