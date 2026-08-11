@@ -24,13 +24,15 @@ impl Backend for MockBackend {
             id: "%1".into(),
             workspace_id: "local-0".into(),
             title: Some("mock".into()),
+            cwd: None,
+            character: None,
         }])
     }
     fn focus_surface(&self, _: &str) -> Result<()> {
         Ok(())
     }
     fn split_surface(&self, _: SplitDirection, _focus: bool, _: Option<&str>) -> Result<SurfaceInfo> {
-        Ok(SurfaceInfo { id: "%2".into(), workspace_id: "local-0".into(), title: None })
+        Ok(SurfaceInfo { id: "%2".into(), workspace_id: "local-0".into(), title: None, cwd: None, character: None })
     }
     fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> {
         Ok(())

@@ -54,6 +54,8 @@ impl Backend for TmuxBackend {
             id: FIXED_SURFACE_ID.into(),
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         }])
     }
 
@@ -96,6 +98,8 @@ impl Backend for TmuxBackend {
             id: "pane-new".into(),
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         })
     }
 
@@ -679,7 +683,17 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// cwd·학생까지 실어 준다 — board 가 못 싣는 pane 이 있기 때문이다.
+    ///
+    /// board 는 transcript 가 바인딩된 pane 만 순회하므로 codex pane 이나 셸뿐인 pane 은
+    /// 줄이 아예 없다. `dismiss` 는 닫기 전에 그 pane 의 cwd 로 커밋 안 된 변경을 세는데,
+    /// board 만 보면 그 pane 들은 cwd 를 모른 채 **보호 없이 닫혔다**(실측: codex pane 이
+    /// `closed %5 ? — ` 로 학생도 폴더도 없이 닫혔다).
+    ///
+    /// cwd 는 GUI 가 공표하는 맵에서 읽는다 — `window_layout` 이 쓰는 그 맵이라 여기서도
+    /// lsof 없이 조회로 끝난다.
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
+        let status = self.pane_status_pub.lock().unwrap().clone();
         let ws = self.ws.lock().unwrap();
         Ok(ws
             .panes
@@ -688,6 +702,8 @@ impl Backend for PtyBackend {
                 id: id.clone(),
                 workspace_id: FIXED_WORKSPACE_ID.into(),
                 title: None,
+                cwd: status.get(id).map(|s| s.cwd.to_string_lossy().into_owned()),
+                character: ws.pane_character.get(id).cloned(),
             })
             .collect())
     }
@@ -1006,6 +1022,8 @@ impl Backend for PtyBackend {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         })
     }
 
@@ -1117,6 +1135,8 @@ impl Backend for PtyBackend {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         })
     }
 

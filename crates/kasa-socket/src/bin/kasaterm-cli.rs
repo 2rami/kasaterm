@@ -470,19 +470,43 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
     .and_then(|v| v.get("board").cloned())
     .and_then(|v| v.as_array().cloned())
     .unwrap_or_default();
+    // board 는 transcript 가 바인딩된 pane 만 싣는다 — codex pane 이나 셸뿐인 pane 은
+    // 줄이 없다. 그때 학생·cwd 를 여기서 보충하지 않으면 `? — ` 만 찍히고, 더 나쁘게는
+    // cwd 를 몰라 **커밋 안 된 변경 검사가 통째로 건너뛰어진다**(이 명령의 존재 이유다).
+    let surfaces = roundtrip(
+        socket_path,
+        &Request {
+            id: "dismiss".into(),
+            method: "surface.list".into(),
+            params: json!({}),
+        },
+    )
+    .ok()
+    .and_then(|r| r.result)
+    .and_then(|v| v.get("surfaces").cloned())
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
     let mut kept = 0usize;
     for id in &targets {
         let entry = board
             .iter()
             .find(|e| e.get("surface_id").and_then(|v| v.as_str()) == Some(id.as_str()));
-        let who = entry
-            .and_then(|e| e.get("character"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let cwd = entry
-            .and_then(|e| e.get("cwd"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let surf = surfaces
+            .iter()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let pick = |key: &str, alt: &str| -> Option<String> {
+            entry
+                .and_then(|e| e.get(key))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| surf.and_then(|e| e.get(alt)).and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let who = pick("character", "character").unwrap_or_else(|| "?".into());
+        let who = who.as_str();
+        let cwd = pick("cwd", "cwd").unwrap_or_default();
+        let cwd = cwd.as_str();
         let where_ = Path::new(cwd)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())

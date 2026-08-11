@@ -44,6 +44,17 @@ pub struct SurfaceInfo {
     /// inner shell emits; we forward whatever tmux-bridge captured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// 그 pane 의 작업 폴더.
+    ///
+    /// board 에도 있지만 board 는 **transcript 가 바인딩된 pane 만** 싣는다 — codex 나
+    /// 셸뿐인 pane 은 아예 줄이 없다. `dismiss` 가 닫기 전에 커밋 안 된 변경을 보는
+    /// 근거가 그 cwd 라, board 만 보면 그 pane 들은 **보호 없이 닫힌다**.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// 배정된 학생 이름. 위와 같은 이유로 여기에도 싣는다 — 무엇을 닫는지 사람이
+    /// 읽을 수 있어야 한다(board 미스 시 `dismiss` 가 `?` 만 찍었다).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
 }
 
 /// serde 기본값용 — 옛 기록(하네스 필드가 없던 시절)은 전부 claude 였다.
