@@ -60,10 +60,13 @@ ICON_SETS = {
     "plain": {"model": "M", "git": "git", "folder": "dir", "effort": "E"},
 }
 
-# 학생 프사 자리표시자 — kasaterm 이 이 U+FFFC 연속을 감지해 프사(bust)로
-# 대체(statusline 행 바닥 정렬, 위로 2행 높이). 5칸이어야 2행 키의 정사각
-# 얼굴 폭(≈0.95)이 contain-fit 으로 안 쪼그라든다.
-SPRITE = "￼￼￼￼￼"
+# kasaterm pane 표식 — 예전엔 U+FFFC 5칸이 학생 프사(bust) 자리표시자였는데,
+# 프사를 걷어내면서(거노 2026-08-11) 1칸으로 줄였다. **지우지는 마라.** 이 문자가
+# 화면에 있느냐가 kasaterm 쪽에서 세 가지 판정의 근거다: agents 목록 뷰인지
+# (render.rs `has_profile_slot`), statusline 이 stale 이라 재실행해야 하는지
+# (socket.rs), 입력박스 위 전신 학생을 어느 행 기준으로 세울지(render.rs standing).
+# kasaterm 은 이 칸을 blank 로 지우므로 화면에는 공백 한 칸으로만 남는다.
+SPRITE = "￼"
 
 
 def ansi(hex_color):
@@ -231,10 +234,9 @@ def main():
             pass
     if name:
         c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
-        if os.environ.get("KASATERM_PANE_ID"):
-            parts.append(f"{c}{SPRITE}{RESET}")  # kasaterm 이 idle 도트로 대체
-        else:
-            parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
+        # pane 안이든 밖이든 같은 `● 이름`. 다른 것은 kasaterm 이 읽을 표식뿐이다.
+        mark = SPRITE if os.environ.get("KASATERM_PANE_ID") else ""
+        parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}{mark}")
 
     # 계정 — 프사 바로 오른쪽. kasaterm 설정의 **활성 계정** 라벨이 1순위다(거노가
     # 붙인 이름). 활성 계정이 없으면 기본 로그인이고 그때만 공유 캐시가 참이라 종전

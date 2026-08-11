@@ -255,24 +255,6 @@ fn draw_aux_md_bar(a: &mut AuxWindow, w: f32, bar_h: f32) {
     }
 }
 
-/// 커서가 statusline 프사 위면 큰 bust 를 팝업. 메인 창과 같은 그리기 함수를 쓰고,
-/// 창 경계 클램프의 위쪽 한계만 이 창의 헤더(`AUX_HEADER_H`)로 준다.
-fn paint_aux_face_hover(a: &mut AuxWindow, slots: &crate::render::StudentOverlays, w: f32) {
-    // 히트 rect 를 남긴다 — CursorMoved 가 이걸 보고 재렌더를 걸어야 팝업이 뜨고
-    // 진다. 그린 프레임이 곧 판정이라는 규약(header_btns·tree_rows)과 같다.
-    a.face_rects = slots.faces.iter().map(|(_, _, r)| *r).collect();
-    let (mx, my) = a.cursor_px;
-    let Some((name, slug, r)) = slots
-        .faces
-        .iter()
-        .find(|(_, _, r)| mx >= r.0 && mx <= r.0 + r.2 && my >= r.1 && my <= r.1 + r.3)
-    else {
-        return;
-    };
-    let cell_h = a.gpu.cell_h;
-    crate::render::paint_face_popup(&mut a.gpu, name, slug, *r, cell_h, w, AUX_HEADER_H);
-}
-
 /// 별도창 왼쪽 파일트리 패널 한 프레임. 메인 창 트리에서 **행 그리기만** 옮겨 왔다
 /// — 검색·이름바꾸기·새 파일·빠른파일·드래그·git 배지는 `App.file_tree` 의 편집
 /// 상태를 같이 써야 하는데, 그건 메인 창 좌표로 적혀 있어 두 창이 한 상태를 두고
@@ -552,19 +534,11 @@ pub(crate) struct AuxWindow {
     /// CursorMoved 는 헤더 띠에서만 재렌더를 걸었다. 프사는 그 띠 밖(y≈131)이라
     /// 팝업이 뜨고 지는 프레임을 아무도 안 불렀고, 셸이 출력 중일 때만 PTY wake 에
     /// 얹혀 우연히 떴다(조용하면 안 뜸 — 거노의 "가끔 안 뜬다"가 이것).
-    pub(crate) face_rects: Vec<(f32, f32, f32, f32)>,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
 
 impl AuxWindow {
-    /// 커서가 statusline 프사 위인가 — hover 팝업이 떠야 하는 상태인지.
-    fn over_face(&self, at: (f32, f32)) -> bool {
-        self.face_rects
-            .iter()
-            .any(|r| at.0 >= r.0 && at.0 <= r.0 + r.2 && at.1 >= r.1 && at.1 <= r.1 + r.3)
-    }
-
     /// 마크다운 편집기 창 위에 얹히는 `Rendered | Raw` 띠의 높이. md 문서가 아니면 0.
     ///
     /// **본문 좌표는 전부 이 하나를 지나야 한다** — 그리는 곳(렌더 뷰·raw 뷰)과
@@ -811,7 +785,6 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
-            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1581,7 +1554,6 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
-            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1831,7 +1803,6 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
-            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -2016,7 +1987,6 @@ impl App {
         // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키. 셀 위 패스라
         // 비워 둔 자리표시자 위에 얼굴이 또렷하게 얹힌다.
         crate::render::paint_student_overlays(&mut a.gpu, &sprites, anim_ms);
-        paint_aux_face_hover(a, &sprites, w);
         // 커서 자리(논리 px). 조합 중 한글이 있으면 그 프리에딧을, 없으면 blink 커서.
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
@@ -2215,7 +2185,6 @@ impl App {
             student.waiting.extend(s.waiting);
             student.standing.extend(s.standing);
             student.profile.extend(s.profile);
-            student.faces.extend(s.faces);
         }
         let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
         // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
@@ -2319,7 +2288,6 @@ impl App {
         // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
         // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
         crate::render::paint_student_overlays(&mut a.gpu, &student, anim_ms);
-        paint_aux_face_hover(a, &student, w);
         // 커서/프리에딧은 포커스 pane 자리에만.
         if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
             .iter()
@@ -2436,15 +2404,9 @@ impl App {
             for cell in cells[sr].iter_mut().skip(sc).take(len) {
                 *cell = GridCell::blank();
             }
-            let face_h = crate::render::STATUSLINE_FACE_ROWS as f32 * ch;
-            let face_rect = (
-                ox + sc as f32 * cw,
-                (oy + (sr + 1) as f32 * ch - face_h).max(oy),
-                len as f32 * cw,
-                face_h,
-            );
-            out.profile.push((slug, face_rect));
-            out.faces.push((name, slug, face_rect));
+            // 프사는 안 그린다 — 메인 창과 같다(render.rs 의 같은 자리 주석 참고).
+            // 표식은 blank 로 지우고 `sr` 만 standing 앵커로 쓴다.
+            let _ = (sc, len, name, slug);
             stand_anchor = crate::render::find_standing_anchor(cells, sr, cols);
         }
         // statusline 자리표시자가 없는 하네스(codex)는 입력행에서 바로 — 메인 창과
@@ -2530,15 +2492,11 @@ impl App {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     let was_header = a.cursor_px.1 <= AUX_HEADER_H;
-                    let was_face = a.over_face(a.cursor_px);
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                     // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
                     // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
                     // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
-                    // 프사는 그 띠 밖이라 따로 봐야 한다 — 들고 나는 **경계에서만**
-                    // 그리면 팝업이 뜨고 지면서도 셀 위 매 픽셀 재렌더는 피한다.
-                    let is_face = a.over_face(a.cursor_px);
-                    if was_header || a.cursor_px.1 <= AUX_HEADER_H || was_face != is_face {
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
                         a.dirty = true;
                         a.window.request_redraw();
                     }
@@ -3195,15 +3153,11 @@ impl App {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     let was_header = a.cursor_px.1 <= AUX_HEADER_H;
-                    let was_face = a.over_face(a.cursor_px);
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                     // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
                     // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
                     // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
-                    // 프사는 그 띠 밖이라 따로 봐야 한다 — 들고 나는 **경계에서만**
-                    // 그리면 팝업이 뜨고 지면서도 셀 위 매 픽셀 재렌더는 피한다.
-                    let is_face = a.over_face(a.cursor_px);
-                    if was_header || a.cursor_px.1 <= AUX_HEADER_H || was_face != is_face {
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
                         a.dirty = true;
                         a.window.request_redraw();
                     }
@@ -3451,7 +3405,6 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
-            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window: window_handle,
         });

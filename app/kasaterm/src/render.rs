@@ -499,7 +499,6 @@ impl App {
         // statusline 프사의 hover 확대·클릭용 (학생이름, slug, rect). profile_slots
         // 와 달리 학생 이름을 들고 있어(hover 큰 bust·클릭→학생설정 딥링크) — /resume
         // 피커 프사는 이름을 모르므로 여기 안 담고 statusline 프사만.
-        let mut profile_face_hits: Vec<(String, &'static str, (f32, f32, f32, f32))> = Vec::new();
         // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(전신 애니).
         // 두 번째 필드 = 모션: "cheer"(턴 완료 직후) 또는 "idle"(대기).
         let mut standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))> =
@@ -1000,15 +999,7 @@ impl App {
                             waiting_slots.push((slug, (x, y, DOT, DOT)));
                         }
                     }
-                    // statusline 학생 프사: statusline.py 가 kasaterm 안에서
-                    // 학생 이름 대신 U+FFFC 자리표시자를 내보낸다. 그 셀을
-                    // 비우고 그 자리에 프사(bust 96×96)를 statusline 행 바닥
-                    // 정렬·STATUSLINE_FACE_ROWS 행 키로 얹는다 — 1행짜리는
-                    // 너무 작았다(거노). icon 패스라 아래 테두리 줄 위에
-                    // 스티커처럼 얹힌다.
-                    // 스캔 방향과 앵커 규칙은 `find_statusline_face` 주석 참고 —
-                    // 별도창(auxwin)이 같은 자리를 찍어야 해서 자유함수로 나가 있다.
-                    // 입력창 위 standing 앵커. claude 는 statusline 자리표시자에서
+                    // 입력창 위 standing 앵커. claude 는 statusline 표식(U+FFFC)에서
                     // 출발하지만 codex 는 그게 없어(위 `find_filled_standing_anchor`
                     // 주석) 입력행에서 바로 잡는다. 둘 다 못 잡으면 안 세운다.
                     let mut stand_anchor: Option<(usize, f32)> = None;
@@ -1016,15 +1007,13 @@ impl App {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
                         }
-                        let face_h = STATUSLINE_FACE_ROWS as f32 * sch;
-                        let face_rect = (
-                            body_left + sc as f32 * scw,
-                            (body_top + (sr + 1) as f32 * sch - face_h).max(body_top),
-                            len as f32 * scw,
-                            face_h,
-                        );
-                        profile_slots.push((slug, face_rect));
-                        profile_face_hits.push((name.to_string(), slug, face_rect));
+                        // 프사는 여기 안 그린다(거노 2026-08-11: "클로드코드 상태줄
+                        // 학생프사는 없애자"). statusline 은 이제 `● 이름` 을 직접
+                        // 찍고, 남은 U+FFFC 한 칸은 **신호**다 — 위 blank 로 지우고
+                        // `sr` 만 standing 앵커로 쓴다. 자리표시자를 아예 없애면
+                        // agents 뷰 판정(`has_profile_slot`)·stale statusline 복구
+                        // (socket.rs)·이 앵커가 한꺼번에 죽는다.
+                        let _ = (sc, len);
                         // 입력박스 위에 서 있는 학생(전신 idle) — 프롬프트 위
                         // 스페이서 행(effort 칩·context 경고가 뜨는 자리) 우측.
                         // statusline 바로 위 행이 아래 테두리(전폭 '─')면 그
@@ -2267,7 +2256,6 @@ impl App {
                 waiting: std::mem::take(&mut waiting_slots),
                 standing: std::mem::take(&mut standing_slots),
                 profile: std::mem::take(&mut profile_slots),
-                faces: Vec::new(),
             };
             paint_student_overlays(g, &student_slots, anim_ms);
             // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
@@ -2309,16 +2297,6 @@ impl App {
                 g.rect(*x, *y + *h - t, *w, t, *col);
                 g.rect(*x, *y, t, *h, *col);
                 g.rect(*x + *w - t, *y, t, *h, *col);
-            }
-            // 프사 hover 확대 — 커서가 statusline 프사 위면 큰 bust 를 그 위쪽에
-            // 팝업(창 경계 클램프). statusline 은 창 하단이라 위로 띄운다. 매
-            // 프레임 hover 재판정이라 커서가 벗어나면 저절로 사라진다(애니 없음).
-            let (fmx, fmy) = self.cursor_px;
-            if let Some((cname, slug, r)) = profile_face_hits
-                .iter()
-                .find(|(_, _, r)| fmx >= r.0 && fmx <= r.0 + r.2 && fmy >= r.1 && fmy <= r.1 + r.3)
-            {
-                paint_face_popup(g, cname, slug, *r, self.cell.h, win_px.0 / scale, TITLE_HEIGHT);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -6803,12 +6781,6 @@ impl App {
         }
         self.confirm_btn_rects = confirm_btn_hits;
         self.restore_btn_rects = restore_btn_hits;
-        // statusline 프사 클릭 hit-test (학생이름, rect) — 프사 클릭 시 학생 설정
-        // 별도창 딥링크. 매 프레임 재구축이라 stale rect 가 남지 않는다.
-        self.face_hit_rects = profile_face_hits
-            .iter()
-            .map(|(n, _, r)| (n.clone(), *r))
-            .collect();
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_tab_popout_rects = tab_popout_hits;
@@ -7279,10 +7251,6 @@ const STUDENT_IDLE_FRAMES: usize = 4;
 pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
 const STUDENT_WALK_FRAMES: usize = 6;
 const STUDENT_WALK_FRAME_MS: f32 = 140.0;
-/// statusline 프사 높이(행). statusline 행에 바닥 정렬하고 위로 이만큼
-/// 침범한다 — 1행짜리 얼굴은 너무 작았다(거노). 2행 = statusline + 바로 위
-/// 입력박스 아래 테두리 행까지. 3행이면 `❯` 입력행에 걸려 타이핑을 가린다.
-pub(crate) const STATUSLINE_FACE_ROWS: usize = 2;
 /// 입력박스 위 스페이서 행에 서 있는 학생(전신 idle)의 키(행). 발은 입력박스
 /// 윗 테두리에 닿고 위는 스크롤백 꼬리라 몇 행 덮여도 무해 — 배너와 같은 키.
 pub(crate) const INPUT_STANDING_ROWS: usize = 3;
@@ -8264,16 +8232,6 @@ pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     })
 }
 
-/// 프사 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
-/// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
-/// 프사 hover 확대 팝업의 좌상단 위치 — 프사 가로 중심 위로 띄우되 창 좌우/상단
-/// 경계 안으로 클램프한다. statusline 프사는 창 하단이라 팝업을 위로(음의 y) 낸다.
-/// 좁은 창(팝업 변보다 폭이 작을 때)에서도 x 가 6px 밑으로 안 내려가게 한다.
-fn face_popup_pos(fx: f32, fw: f32, fy: f32, pop: f32, win_w: f32, title_h: f32) -> (f32, f32) {
-    let px = (fx + fw / 2.0 - pop / 2.0).clamp(6.0, (win_w - pop - 6.0).max(6.0));
-    let py = (fy - pop - 8.0).max(title_h + 6.0);
-    (px, py)
-}
 
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     if let Some(r) = user_asset_rgba(&format!("{slug}-profile.png")) {
@@ -9262,10 +9220,6 @@ pub(crate) struct StudentOverlays {
     pub(crate) standing: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
     /// statusline 프사(bust) 자리.
     pub(crate) profile: Vec<(&'static str, (f32, f32, f32, f32))>,
-    /// 그중 hover 확대가 걸리는 것 — `(학생 이름, slug, rect)`. 별도창만 채운다:
-    /// 메인 창은 프사 rect 를 클릭 히트(`face_hit_rects`)로도 재활용하느라 자체
-    /// 목록을 따로 쥐고 있다. 이름이 slug 와 별개인 건 팝업 이름표 때문(slug 는 에셋 키).
-    pub(crate) faces: Vec<(String, &'static str, (f32, f32, f32, f32))>,
 }
 
 impl StudentOverlays {
@@ -9333,62 +9287,7 @@ pub(crate) fn paint_student_overlays(
     }
 }
 
-/// 프사 팝업 한 변 = 셀 높이의 몇 배인가.
-///
-/// 프사 원본이 96×96 뿐이라(12명 전부, 더 큰 바스트업 원본은 레포에 없다) 이
-/// 배수가 곧 확대율을 정한다 — 8배면 344px 라 3.6배 확대가 되어 총열·머리카락
-/// 윤곽에 계단이 보였다. 6배(2.7배 확대)가 "얼굴 크기 vs 뭉갬"의 절충점으로
-/// 거노가 고른 값이다. 256 전신 프레임으로 갈아타면 선명해지지만 캐릭터가 원본
-/// 100×208 이라 같은 박스에서 반토막이 나고 바스트업→전신으로 성격이 바뀐다.
-const FACE_POPUP_CELLS: f32 = 6.0;
 
-/// statusline 프사 위에 커서가 있을 때 뜨는 큰 bust 팝업.
-///
-/// `face` 는 그 프사 자리(논리 px), `cell_h` 는 셀 높이(팝업 크기 산출용),
-/// `title_h` 는 팝업이 넘어가면 안 되는 위쪽 크롬 높이. statusline 은 늘 창
-/// 아래쪽이라 위로 띄운다.
-///
-/// 팝업 크기를 호출자가 넘기지 않고 여기서 정하는 건, 메인 창과 별도창 두 곳이
-/// 부르기 때문이다 — 상수를 밖에 두면 한쪽만 고쳐진다.
-///
-/// bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스는 없다
-/// (거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성을 확보한다.
-///
-/// 매 프레임 hover 를 다시 판정하는 쪽이 호출자다 — 커서가 벗어나면 다음 프레임에
-/// 저절로 사라진다(애니 없음).
-pub(crate) fn paint_face_popup(
-    g: &mut gpu::GpuRenderer,
-    cname: &str,
-    slug: &str,
-    face: (f32, f32, f32, f32),
-    cell_h: f32,
-    win_w: f32,
-    title_h: f32,
-) {
-    let pop = FACE_POPUP_CELLS * cell_h;
-    let key = format!("student:{slug}:profile");
-    if !g.has_image(&key) {
-        if let Some((rgba, w, h)) = student_profile_rgba(slug) {
-            g.upload_image(&key, &rgba, w, h);
-        }
-    }
-    let (fx, fy, fw, _) = face;
-    let (px, py) = face_popup_pos(fx, fw, fy, pop, win_w, title_h);
-    g.queue_image_above(&key, px, py, pop, pop);
-    let accent = theme::character_accent(cname).unwrap_or_else(theme::accent);
-    let fs = 13.0;
-    let tw = g.measure_chrome_text(cname, fs, true);
-    let tx = px + (pop - tw) / 2.0;
-    let ty = py + pop + 4.0;
-    round_rect(
-        g, tx - 7.0, ty - 3.0, tw + 14.0, fs + 8.0,
-        theme::radius_sm(), theme::with_alpha(theme::bg(), 0xE6),
-    );
-    g.draw_text(
-        tx, ty, cname,
-        gpu::DrawOpts { font_size: fs, color: accent, bold: true, italic: false },
-    );
-}
 
 /// statusline 프사 자리표시자(U+FFFC 연속 셀) 위치 — `(행, 시작열, 칸수)`.
 ///
@@ -10507,41 +10406,6 @@ mod student_asset_tests {
         let (_, w, h) = user_asset_rgba_in(&dir, "schale-logo.png").expect("override read");
         assert_eq!((w, h), (96, 96));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod face_popup_tests {
-    use super::face_popup_pos;
-
-    #[test]
-    fn clamps_within_window() {
-        let pop = 160.0;
-        let (win_w, title_h) = (1440.0, 30.0);
-        // 창 오른쪽 끝 프사 → 팝업이 오른쪽 밖으로 넘치지 않는다.
-        let (px, _) = face_popup_pos(1400.0, 40.0, 1200.0, pop, win_w, title_h);
-        assert!(px + pop <= win_w - 6.0 + 0.01, "px={px} overflows right edge");
-        // 창 왼쪽 끝 프사 → 팝업 x 가 6px 밑으로 안 내려간다.
-        let (px, _) = face_popup_pos(0.0, 40.0, 1200.0, pop, win_w, title_h);
-        assert!(px >= 6.0 - 0.01, "px={px} underflows left edge");
-    }
-
-    #[test]
-    fn floats_above_and_clamps_to_titlebar() {
-        let pop = 160.0;
-        // 프사가 창 상단 근처면 팝업 top 이 타이틀바 아래로 클램프된다.
-        let (_, py) = face_popup_pos(100.0, 40.0, 40.0, pop, 1440.0, 30.0);
-        assert!(py >= 30.0 + 6.0 - 0.01, "py={py} intrudes into titlebar");
-        // 프사가 창 하단이면 팝업은 그 위로(음의 방향) 뜬다 = 프사 top 보다 위.
-        let (_, py) = face_popup_pos(100.0, 40.0, 1200.0, pop, 1440.0, 30.0);
-        assert!(py < 1200.0, "py={py} should float above the face");
-    }
-
-    #[test]
-    fn narrow_window_never_goes_negative() {
-        // 팝업 변보다 좁은 창에서도 x 가 6px 아래로 안 간다(max 방어).
-        let (px, _) = face_popup_pos(10.0, 20.0, 200.0, 160.0, 100.0, 30.0);
-        assert!(px >= 6.0 - 0.01, "px={px} negative on narrow window");
     }
 }
 

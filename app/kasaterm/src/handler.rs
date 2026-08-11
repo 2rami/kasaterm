@@ -1712,19 +1712,6 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
-                // 학생 프사 hover — 큰 bust 확대 팝업을 뜨고 지우려면 진입/이탈에
-                // 재페인트(이벤트 기반 루프라 커서 이동만으론 프레임이 안 돈다).
-                {
-                    let (cx, cy) = self.cursor_px;
-                    let new_face = self.face_hit_rects.iter().any(|(_, r)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    });
-                    if new_face != self.face_hover {
-                        self.face_hover = new_face;
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                    }
-                }
                 // File-tree row hover — drives the row highlight.
                 {
                     let (cx, cy) = self.cursor_px;
@@ -2309,16 +2296,6 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
-                    // 학생 프사 위 → pointer(클릭하면 학생 설정이 열린다는 암시).
-                    let icon = if matches!(icon, CursorIcon::Default)
-                        && self.face_hit_rects.iter().any(|(_, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                    {
-                        CursorIcon::Pointer
-                    } else {
-                        icon
-                    };
                     // 그 밖의 모든 누를 수 있는 표면 — 버튼·탭·메뉴 항목·목록 행.
                     // 히트렉트를 다시 훑지 않고 직전 프레임이 세운 플래그를 읽는다.
                     // 들림을 그린 자리가 곧 손가락이 뜨는 자리라, 새 버튼을 만들어도
@@ -2617,20 +2594,6 @@ impl ApplicationHandler<UserEvent> for App {
                         // 사이드바 "Settings" 항목 — 설정 별도창을 열거나(이미
                         // 열려 있으면) 그 창을 포커스한다.
                         self.open_settings_window(event_loop, None, None);
-                        window.request_redraw();
-                        return;
-                    }
-                    // 학생 프사(statusline) 클릭 → 학생 설정 별도창을 Students
-                    // 카테고리 + 그 학생 선택 상태로 연다(딥링크). pane 포커스
-                    // 클릭보다 먼저 잡아 프사를 눌러도 pane 이 안 튀게.
-                    if let Some((name, _)) =
-                        self.face_hit_rects.iter().find(|(_, r)| hit(*r)).cloned()
-                    {
-                        self.open_settings_window(
-                            event_loop,
-                            Some(SettingsCat::Students),
-                            Some(name),
-                        );
                         window.request_redraw();
                         return;
                     }

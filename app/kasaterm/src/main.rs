@@ -4718,13 +4718,6 @@ struct App {
     settings_caret: usize,
     /// Clickable targets collected during the settings paint, for hit-testing.
     settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
-    /// statusline 학생 프사 클릭 hit-test: (학생 이름, rect). 렌더가 매 프레임
-    /// 재구축 → 프사 클릭 시 학생 설정 별도창(Students 카테고리 + 그 학생 선택)을
-    /// 연다. 프사 hover 확대와 같은 slot(profile_face_hits)에서 나온다.
-    face_hit_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// 커서가 statusline 프사 위인지 — 진입/이탈 시에만 재페인트해 hover 확대
-    /// 팝업이 뜨고 사라지게 한다(이벤트 기반 루프라 이동만으론 재렌더 안 됨).
-    face_hover: bool,
     /// Students 카테고리 인라인 편집: 선택된 캐릭터(이름) + persona 편집 버퍼 +
     /// 캐럿(문자 인덱스). 선택 시 raw_persona 를 버퍼로 로드하고, blur/선택변경 시
     /// characters.json 에 flush 한다.
@@ -5149,8 +5142,6 @@ impl App {
                 .unwrap_or_default(),
             students_caret: 0,
             settings_caret: 0,
-            face_hit_rects: Vec::new(),
-            face_hover: false,
             window_frame_save_due: None,
             md_select_drag: None,
             // KASATERM_TEST_SETTINGS_SCROLL: 헤드리스 스크린샷으로 폼 스크롤을
