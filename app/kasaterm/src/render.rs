@@ -4038,6 +4038,11 @@ impl App {
             self.git.branch_hdr_rect = None;
             self.git.path_menu_rects.clear();
             self.git.branch_menu_rects.clear();
+            // 계정 칩 rect 는 Info 탭 블록에서만 채워진다 — 여기서 매 프레임 비우지
+            // 않으면 다른 탭으로 옮기거나 칼럼을 닫아도 옛 좌표가 남아, 그 자리에
+            // 무엇이 놓이든 클릭이 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적:
+            // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
+            self.account_chip_rect = None;
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
                 let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
                 let gcx0 = git_col_x + 14.0;
