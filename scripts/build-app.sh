@@ -8,21 +8,59 @@
 #   scripts/build-app.sh            # release build, dist/kasaterm.app
 #   scripts/build-app.sh --debug    # debug build (faster, larger)
 #   scripts/build-app.sh --install  # also copy into ~/Applications
+#   scripts/build-app.sh --force    # 다른 pane 이 코드를 만지는 중이어도 강행
 
 set -euo pipefail
 
 PROFILE="release"
 INSTALL=0
+FORCE=0
 for arg in "$@"; do
   case "$arg" in
     --debug)   PROFILE="debug" ;;
     --install) INSTALL=1 ;;
+    --force)   FORCE=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# 굽기는 워킹트리를 **통째로** 담는다 — 여러 pane 이 한 워킹트리를 공유하므로,
+# 남이 Rust 를 고치는 중에 구우면 그 반쯤 만든 기능이 함께 들어가고 운이 나쁘면
+# 컴파일조차 안 된다(2026-08-11 지시: "다른애들이 수정하면 안굽게하자").
+# board 를 못 읽으면(앱이 꺼짐·CLI 없음) 조용히 통과한다 — 이 가드가 사람이
+# 직접 굽는 길까지 막아서는 안 된다.
+if [[ $FORCE -eq 0 ]] && command -v kasaterm-cli >/dev/null 2>&1; then
+  BUSY="$(kasaterm-cli board 2>/dev/null | ROOT="$ROOT" python3 -c '
+import json, os, sys
+try:
+    board = (json.load(sys.stdin).get("result") or {}).get("board") or []
+except Exception:
+    sys.exit(0)
+root = os.environ["ROOT"].rstrip("/") + "/"
+me = os.environ.get("KASATERM_PANE_ID", "")
+for r in board:
+    if r.get("surface_id") == me or r.get("status") != "working":
+        continue
+    # 이 레포의 Rust 만 본다 — board 에는 다른 레포 pane 도 함께 실린다.
+    hits = [f for f in (r.get("changed_files") or [])
+            if f.startswith(root) and f.endswith(".rs")]
+    if hits:
+        sid = str(r.get("surface_id") or "?")
+        who = str(r.get("character") or sid)
+        names = ", ".join(os.path.basename(f) for f in hits[:3])
+        print("  " + who + " (" + sid + "): " + names)
+' || true)"
+  if [[ -n "$BUSY" ]]; then
+    echo "[build-app] 다른 pane 이 이 레포의 Rust 를 고치는 중이라 굽지 않는다:" >&2
+    echo "$BUSY" >&2
+    echo "" >&2
+    echo "  구우면 그쪽 미완성이 함께 들어간다. 끝나길 기다리거나 --force." >&2
+    exit 1
+  fi
+fi
 
 if [[ ! -f assets/AppIcon.icns ]]; then
   echo "error: assets/AppIcon.icns missing — run the iconset builder first" >&2
