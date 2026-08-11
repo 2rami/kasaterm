@@ -397,6 +397,30 @@ fn sweep_stale_markers_in(root: &Path, live: impl Fn(u32) -> bool) -> usize {
     n
 }
 
+/// 후보 중 **가장 적게 쓰인** 것들만 남긴다. 배정 풀이 말랐을 때의 폴백이다.
+///
+/// pane 수가 학생 총원을 넘으면 중복은 비둘기집이라 못 막는다. 막을 수 있는 건
+/// **몰리는 것**이다 — 예전 폴백은 전체에서 그냥 랜덤이라 이미 셋인 학생이 넷이 됐다
+/// (실측 2026-08-11: pane 15 > 총원 12 인데 아루 3·프라나 3 이고 한 번도 안 쓰인
+/// 학생이 남아 있었다). 최소 사용 횟수인 쪽만 남기면 15명이어도 3명만 2회씩이 된다.
+///
+/// `taken` 은 **중복을 살린** 목록이어야 한다. HashSet 을 넘기면 횟수가 사라져
+/// 이 함수가 하는 일이 없어진다.
+pub fn least_used(candidates: &[String], taken: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut n: std::collections::HashMap<&str, usize> =
+        candidates.iter().map(|c| (c.as_str(), 0)).collect();
+    for t in taken {
+        if let Some(c) = n.get_mut(t.as_str()) {
+            *c += 1;
+        }
+    }
+    let lo = n.values().copied().min().unwrap_or(0);
+    candidates.iter().filter(|c| n[c.as_str()] == lo).cloned().collect()
+}
+
 /// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
 /// (거노: 완전 랜덤). 시드 = SystemTime nanos ^ pid ^ salt(pane id) 해시라, 같은
 /// 순간 spawn 된 여러 pane 도 서로 갈린다. rand 크레이트 없이 std 만.
@@ -526,6 +550,69 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
 /// 외부 uuidgen(Windows 부재 → kt- 폴백이 "Invalid session ID" 유발) 대신 crate 생성.
 pub fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod least_used_tests {
+    use super::least_used;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unused_candidates_win() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &taken), v(&["케이"]));
+    }
+
+    /// pane 이 총원을 넘으면 중복은 못 막는다. 막아야 하는 건 **몰리는 것**이다 —
+    /// 이미 둘인 학생이 셋이 되는 대신 아직 하나인 쪽이 뽑혀야 한다.
+    #[test]
+    fn spreads_instead_of_piling_up() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리", "케이"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리", "케이"]));
+    }
+
+    /// 실측 재현: 총원 12, pane 15 에서 아루 3·프라나 3 이 나왔던 분포.
+    /// 이 폴백이 있었다면 3회짜리는 후보에서 빠졌어야 한다.
+    #[test]
+    fn the_aru_times_three_case() {
+        let members = v(&["아루", "프라나", "히마리", "호시노", "유우카", "코하루"]);
+        let taken = v(&[
+            "아루", "아루", "아루", "프라나", "프라나", "프라나", "히마리", "히마리",
+            "호시노", "호시노", "유우카", "유우카",
+        ]);
+        // 한 번도 안 쓰인 코하루만 남아야 한다 — 예전 폴백은 여기서 아루를 넷째로
+        // 뽑을 수 있었다.
+        assert_eq!(least_used(&members, &taken), v(&["코하루"]));
+    }
+
+    /// `taken` 을 HashSet 으로 넘기면(=중복이 사라지면) 이 함수는 무의미해진다.
+    /// 호출부가 중복을 살린 Vec 을 준다는 전제를 여기 박아 둔다.
+    #[test]
+    fn counts_duplicates_not_presence() {
+        let members = v(&["아루", "미도리"]);
+        let dedup = v(&["아루", "미도리"]);
+        assert_eq!(least_used(&members, &dedup), v(&["아루", "미도리"]));
+        let with_dupes = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &with_dupes), v(&["미도리"]));
+    }
+
+    #[test]
+    fn empty_candidates_stay_empty() {
+        assert!(least_used(&[], &v(&["아루"])).is_empty());
+    }
+
+    /// 로스터에 없는 이름(커스텀 캐릭터·옛 마커)이 섞여도 셈이 흔들리면 안 된다.
+    #[test]
+    fn ignores_names_outside_the_roster() {
+        let members = v(&["아루", "미도리"]);
+        let taken = v(&["아루", "모르는이름", "또다른이름"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리"]));
+    }
 }
 
 #[cfg(test)]
