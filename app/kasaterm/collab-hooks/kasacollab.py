@@ -35,7 +35,11 @@ except ImportError:
 # 셋이 서로 다른 방을 보고 영영 안 만난다.
 
 def _posix_path(raw):
-    """`C:\\Users\\x` → `/c/Users/x`. 이미 posix 면 그대로."""
+    """`C:\\Users\\x` → `/c/Users/x`. Windows 밖에선 손대지 않는다 — 역슬래시가
+    들어간 폴더 이름이 unix 에도 있을 수 있어, 무조건 접으면 sh 훅과 슬러그가
+    갈린다. 고칠 대상은 Windows 뿐이므로 거기서만 돈다."""
+    if os.name != "nt":
+        return raw
     if raw.startswith("\\\\?\\"):
         raw = raw[4:]
     if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":

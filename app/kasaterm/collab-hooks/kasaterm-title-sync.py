@@ -233,8 +233,9 @@ def generate(tp, sid, srclen):
     # junk cwd 의 -p 세션 잔재 청소(1일 초과분).
     # Windows 는 드라이브 콜론·역슬래시까지 같이 접힌다(`C:\\Users\\x` →
     # `C--Users-x`, 실측). `/`·`.` 만 접으면 없는 폴더라 청소가 무음 정지한다.
+    # 추가 두 글자는 nt 에서만 — unix 폴더 이름엔 실제로 들어갈 수 있다.
     slug = lockdir
-    for ch in ("/", ".", "\\", ":"):
+    for ch in ("/", ".", "\\", ":") if os.name == "nt" else ("/", "."):
         slug = slug.replace(ch, "-")
     proj = os.path.expanduser("~/.claude/projects/" + slug)
     try:

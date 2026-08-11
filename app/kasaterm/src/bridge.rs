@@ -23,7 +23,9 @@ const TICK: Duration = Duration::from_secs(5);
 const BACKOFF: Duration = Duration::from_secs(90);
 
 /// 입력 청크 크기(문자). 8자씩 끊는 이유는 모듈 머리말 참고 — 한 번에 밀면 긴
-/// send 중 pty 버퍼가 차서 클라이언트 write 가 막힌다.
+/// send 중 pty 버퍼가 차서 클라이언트 write 가 막힌다. unix 는 같은 값이 expect
+/// 스크립트 리터럴에 박혀 있어 이 상수를 안 읽는다(안 접으면 그쪽에서 dead_code).
+#[cfg(windows)]
 const CHUNK: usize = 8;
 
 /// attach 춤의 단계별 시한. unix 는 expect 스크립트 리터럴에, Windows 는 직접

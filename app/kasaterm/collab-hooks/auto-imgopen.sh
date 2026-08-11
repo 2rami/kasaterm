@@ -19,10 +19,14 @@ pane = os.environ.get('KASATERM_PANE_ID', '')
 # 'C:\\tmp' 로 잡힌다. 방 이름·루트를 sh 훅 형식(정본)으로 맞춰야 Rust 쪽
 # (kasa_socket::collab_root / character::mode_slug)과 같은 폴더에서 만난다.
 # chr(92) = 역슬래시 — 이 스크립트가 셸 큰따옴표 안이라 리터럴을 못 쓴다.
+# nt 에서만 접는다 — unix 폴더 이름엔 역슬래시가 실제로 들어갈 수 있어,
+# 거기서까지 접으면 멀쩡하던 슬러그가 sh 훅과 갈린다.
 cwd = os.getcwd()
-if len(cwd) >= 2 and cwd[0].isalpha() and cwd[1] == ':':
-    cwd = '/' + cwd[0].lower() + '/' + cwd[2:].replace(chr(92), '/').lstrip('/')
-slug = cwd.replace(chr(92), '/').replace('/', '-').replace('.', '-')
+if os.name == 'nt':
+    if len(cwd) >= 2 and cwd[0].isalpha() and cwd[1] == ':':
+        cwd = '/' + cwd[0].lower() + '/' + cwd[2:].replace(chr(92), '/').lstrip('/')
+    cwd = cwd.replace(chr(92), '/')
+slug = cwd.replace('/', '-').replace('.', '-')
 room = os.environ.get('KASATERM_ROOM', '')
 if room:
     slug = slug + '__room_' + room
