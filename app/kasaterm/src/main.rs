@@ -41,6 +41,10 @@ mod state;
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]
 mod macos_open;
+// 알림 배너 클릭 → 그 pane 으로. UNUserNotificationCenter 는 delegate 로만 클릭을
+// 알려주고, 그 delegate 는 macOS 에만 있다.
+#[cfg(target_os = "macos")]
+mod macos_notify;
 #[cfg(target_os = "macos")]
 mod macos_sparkle;
 // Windows 자동 업데이트 — WinSparkle.dll 런타임 로드(macos_sparkle 대칭).
@@ -3471,6 +3475,15 @@ enum UserEvent {
     /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
     SocketNewWindow,
     SocketFocus(String),
+    /// 데스크톱 알림 배너를 눌렀다 — 그 pane 으로 간다(`SocketFocus` 와 같은 길).
+    ///
+    /// `sid` 는 **알림을 쏜 시점의** claude 세션이다. surface id 는 재사용되므로,
+    /// 그 사이 pane 이 닫히고 번호가 새 셸에 넘어갔으면 여기서 걸러진다 — 엉뚱한
+    /// 자리로 끌려가는 것보다 아무 일도 안 일어나는 편이 낫다.
+    NotifyFocus {
+        pane: String,
+        sid: Option<String>,
+    },
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
     /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는
     /// `Backend::active_cwd` 용 — GUI 는 메모리 조회(active_pane→shell_pid)만
@@ -7881,7 +7894,8 @@ mod tests {
     /// "codex 였으면 codex 로" 를 못박는다.
     #[test]
     fn restore_command_picks_the_harness_it_was() {
-        use crate::session::restore_agent_command as cmd;
+        // 여기서는 **하네스 갈래만** 본다 — 모델·effort 조합은 session.rs 쪽에 건다.
+        let cmd = |a, s, r| crate::session::restore_agent_command(a, s, r, None, None);
         assert_eq!(cmd(Some("codex"), None, false), "codex\r");
         assert_eq!(
             cmd(Some("codex"), Some("019fd187-ba6e-7812-8976-2a27ffcd843e"), true),

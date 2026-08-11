@@ -809,6 +809,9 @@ impl App {
                 .or_else(|| leaves.get(i.wrapping_sub(1)))
                 .map(|s| s.to_string())
         });
+        // ws 락 **밖에서** 먼저 뜬다 — 이 스냅샷은 백엔드의 다른 뮤텍스를 잡으므로,
+        // 락 안에서 부르면 두 락의 획득 순서가 뒤엉킬 자리를 만든다.
+        let agent_cfg = self.agent_cfg_snapshot();
         let (rec, character) = {
             let ws = self.ws.lock().unwrap();
             let rec = Self::layout_to_json(
@@ -816,6 +819,7 @@ impl App {
                 &self.pty,
                 &ws,
                 &self.pane_claude_sid,
+                &agent_cfg,
             );
             let ch = ws.pane_character.get(pane).cloned().unwrap_or_default();
             (rec, ch)
@@ -2273,8 +2277,19 @@ impl App {
     /// Split out from `save_session_state` so the autosave path can hash the
     /// result and skip an identical write — the two must produce byte-identical
     /// state or a Cmd+Q would look like a change and rewrite for nothing.
+    /// 저장이 leaf 에 실을 surface_id → (model, effort). 소켓 백엔드가 없으면 빈 맵.
+    ///
+    /// 값을 모으는 쪽은 백엔드다(claude 는 statusline 보고, codex 는 transcript 머리).
+    /// App 에 같은 맵을 하나 더 두지 않고 그때그때 떠 오는 이유는, App struct 의 필드
+    /// 정의가 워커 여럿이 동시에 못 만지는 병목이기 때문이다(CLAUDE.md).
+    pub(crate) fn agent_cfg_snapshot(&self) -> HashMap<String, (String, String)> {
+        self.socket_backend.as_ref().map(|b| b.agent_cfg_snapshot()).unwrap_or_default()
+    }
+
     pub(crate) fn session_state_json(&self) -> Option<serde_json::Value> {
         let mut sessions_json = Vec::new();
+        // 창별 워크스페이스 락을 잡기 전에 한 번만 뜬다(락 순서 얽힘 방지).
+        let agent_cfg = self.agent_cfg_snapshot();
         for i in 0..self.sessions.len() {
             // Each session contributes all its windows. The active session's
             // live state is in self.{pty,pty_layout,windows,active_window};
@@ -2316,7 +2331,13 @@ impl App {
                 if j == active_window {
                     new_active = windows_json.len();
                 }
-                windows_json.push(Self::layout_to_json(layout, pty, &ws_guard, &self.pane_claude_sid));
+                windows_json.push(Self::layout_to_json(
+                    layout,
+                    pty,
+                    &ws_guard,
+                    &self.pane_claude_sid,
+                    &agent_cfg,
+                ));
             }
             if windows_json.is_empty() {
                 continue;
@@ -2382,6 +2403,7 @@ impl App {
         pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         ws: &Workspace,
         pane_claude_sid: &HashMap<String, String>,
+        agent_cfg: &HashMap<String, (String, String)>,
     ) -> serde_json::Value {
         match layout {
             kasa_pty::PtyLayout::Leaf { pane_id } => {
@@ -2425,6 +2447,17 @@ impl App {
                     if let Some(sid) = pane_claude_sid.get(pane_id) {
                         obj.insert("session_id".to_string(), serde_json::json!(sid));
                     }
+                    // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
+                    // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
+                    // `--model ''` 같은 게 나갈 위험만 는다.
+                    if let Some((model, effort)) = agent_cfg.get(pane_id) {
+                        if !model.is_empty() {
+                            obj.insert("model".to_string(), serde_json::json!(model));
+                        }
+                        if !effort.is_empty() {
+                            obj.insert("effort".to_string(), serde_json::json!(effort));
+                        }
+                    }
                 }
                 serde_json::json!({ "leaf": rec })
             }
@@ -2436,8 +2469,8 @@ impl App {
                 serde_json::json!({ "split": {
                     "dir": dir,
                     "ratio": ratio,
-                    "a": Self::layout_to_json(a, pty, ws, pane_claude_sid),
-                    "b": Self::layout_to_json(b, pty, ws, pane_claude_sid),
+                    "a": Self::layout_to_json(a, pty, ws, pane_claude_sid, agent_cfg),
+                    "b": Self::layout_to_json(b, pty, ws, pane_claude_sid, agent_cfg),
                 }})
             }
         }
@@ -2736,7 +2769,13 @@ impl App {
                     std::time::Instant::now(),
                 ));
             }
-            let cmd = restore_agent_command(was_agent, session_id.as_deref(), resumable);
+            let cmd = restore_agent_command(
+                was_agent,
+                session_id.as_deref(),
+                resumable,
+                saved_model(rec),
+                saved_effort(rec),
+            );
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
@@ -3045,6 +3084,20 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
         .then_some("claude")
 }
 
+/// 저장된 leaf 가 쓰던 모델 — 없으면 `None`(복원 명령에 플래그를 안 붙인다).
+///
+/// 옛 저장본엔 이 키가 없다. 그때 빈 문자열이 아니라 `None` 이어야 하는 이유는,
+/// 호출부가 "없으면 플래그 자체를 뺀다"로 갈리기 때문이다 — 빈 값을 흘리면
+/// `--model ''` 이 나가 하네스가 기본값도 못 고른다.
+fn saved_model(rec: &serde_json::Value) -> Option<&str> {
+    rec.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+/// 저장된 leaf 가 쓰던 reasoning effort — 없으면 `None`. `saved_model` 과 같은 규약.
+fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
+    rec.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
 /// 복원된 pane 에 넣을 명령. 하네스 셋 × (이어가기/새로)라 순수 함수로 뺐다 —
 /// `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를 테스트할 방법이
 /// 사라진다.
@@ -3062,22 +3115,61 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
 ///   uuid 를 떼어낸 값이다. argv 로는 못 집는다.
 /// - `resume --last` 는 쓰지 않는다. 그건 미러된 `~/.codex/sessions` 전체에서 최신 하나를
 ///   고르므로 **다른 pane·pane 밖 codex 의 대화**를 물어온다. id 가 없으면 새로 띄운다.
+/// `model`/`effort` 는 끄기 직전 그 pane 이 쓰던 값이다(없으면 `None`). **없으면
+/// 플래그 자체를 안 붙인다** — 빈 값을 넘기면 하네스가 기본값조차 못 고른다.
+///
+/// 문법이 셋 다 다르다(실측 2026-08-11): claude·agy 는 `--model`/`--effort` 플래그,
+/// codex 는 `-m` 과 config 오버라이드(`-c model_reasoning_effort=`).
+///
+/// ⚠️ agy 에는 지금 model 이 실려 오지 않는다 — 전사본의 모델이 되먹일 수 없는
+/// 표시용 이름(`Gemini 3.6 Flash (Low)`)이라 수집 쪽에서 일부러 안 담는다. 나중에
+/// 담게 되거든 **`agy models` 목록과 대조하고 나서** 담아라: agy 는 없는 모델값에
+/// 에러를 안 내고 조용히 기본값으로 돌아, 틀려도 아무 데도 안 남는다.
 pub(crate) fn restore_agent_command(
     agent: Option<&str>,
     session_id: Option<&str>,
     resumable: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> String {
-    match (agent, session_id) {
-        (Some("codex"), Some(sid)) if resumable => format!("codex resume {sid}\r"),
-        (Some("codex"), _) => "codex\r".to_string(),
+    // 값은 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라 무인용
+    // 이면 "no matches found" 로 명령이 통째 실패한다. shim 쪽에서 같은 사고가 실제로
+    // 났다(2026-07-27: 학생이 전부 구세대 Opus 로 떨어짐).
+    let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    let model = model.filter(|s| !s.is_empty());
+    let effort = effort.filter(|s| !s.is_empty());
+    let resume = session_id.filter(|_| resumable);
+    let mut cmd = match (agent, resume) {
+        (Some("codex"), Some(sid)) => format!("codex resume {sid}"),
+        (Some("codex"), None) => "codex".to_string(),
         // agy 는 아직 세션 id 가 안 들어온다 — bind-transcript 훅이 claude·codex
         // shim 에만 걸려 있어서다. 그래도 하네스는 맞춰 띄운다: 여기 없으면 agy
         // pane 이 claude 로 되살아난다.
-        (Some("agy"), Some(sid)) if resumable => format!("agy --conversation {sid}\r"),
-        (Some("agy"), _) => "agy\r".to_string(),
-        (_, Some(sid)) if resumable => format!("claude --resume {sid}\r"),
-        _ => "claude\r".to_string(),
+        (Some("agy"), Some(sid)) => format!("agy --conversation {sid}"),
+        (Some("agy"), None) => "agy".to_string(),
+        (_, Some(sid)) => format!("claude --resume {sid}"),
+        (_, None) => "claude".to_string(),
+    };
+    if agent == Some("codex") {
+        if let Some(m) = model {
+            cmd.push_str(&format!(" -m {}", q(m)));
+        }
+        if let Some(e) = effort {
+            cmd.push_str(&format!(" -c model_reasoning_effort={}", q(e)));
+        }
+    } else {
+        // claude 는 shim 이 전역 `--model` 을 **앞에** 붙이는데, 뒤에 온 우리 값이
+        // 이긴다(clap 은 같은 플래그를 마지막 것으로 덮는다). 그래서 pane 별 값이
+        // 전역 설정을 넘어선다.
+        if let Some(m) = model {
+            cmd.push_str(&format!(" --model {}", q(m)));
+        }
+        if let Some(e) = effort {
+            cmd.push_str(&format!(" --effort {}", q(e)));
+        }
     }
+    cmd.push('\r');
+    cmd
 }
 
 /// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
@@ -3171,7 +3263,12 @@ mod tests {
 
 #[cfg(test)]
 mod agy_restore_tests {
-    use super::{restore_agent_command, saved_agent};
+    use super::{restore_agent_command, saved_agent, saved_effort, saved_model};
+
+    /// 하네스 갈래만 보는 판 — 모델·effort 는 아래 전용 테스트가 건다.
+    fn cmd(agent: Option<&str>, sid: Option<&str>, resumable: bool) -> String {
+        restore_agent_command(agent, sid, resumable, None, None)
+    }
 
     /// 복원 명령의 마지막 갈래가 claude 라, 하네스를 여기 안 적으면 **오류 없이**
     /// claude 로 되살아난다. agy 를 붙이며 실제로 그 상태였다 — 하네스가 하나 더
@@ -3179,19 +3276,71 @@ mod agy_restore_tests {
     #[test]
     fn every_harness_restores_as_itself() {
         for (agent, fresh) in [("claude", "claude\r"), ("codex", "codex\r"), ("agy", "agy\r")] {
-            assert_eq!(restore_agent_command(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
+            assert_eq!(cmd(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
         }
-        assert_eq!(restore_agent_command(Some("claude"), Some("s1"), true), "claude --resume s1\r");
-        assert_eq!(restore_agent_command(Some("codex"), Some("s2"), true), "codex resume s2\r");
-        assert_eq!(restore_agent_command(Some("agy"), Some("s3"), true), "agy --conversation s3\r");
+        assert_eq!(cmd(Some("claude"), Some("s1"), true), "claude --resume s1\r");
+        assert_eq!(cmd(Some("codex"), Some("s2"), true), "codex resume s2\r");
+        assert_eq!(cmd(Some("agy"), Some("s3"), true), "agy --conversation s3\r");
     }
 
     /// 이어갈 수 없는 세션(파일이 사라짐)은 **id 를 버리고** 새로 띄워야 한다 —
     /// 남의 하네스 id 를 넘기면 그 CLI 가 엉뚱한 대화를 물어온다.
     #[test]
     fn unresumable_drops_the_id() {
-        assert_eq!(restore_agent_command(Some("agy"), Some("s3"), false), "agy\r");
-        assert_eq!(restore_agent_command(Some("codex"), Some("s2"), false), "codex\r");
+        assert_eq!(cmd(Some("agy"), Some("s3"), false), "agy\r");
+        assert_eq!(cmd(Some("codex"), Some("s2"), false), "codex\r");
+    }
+
+    /// 모델·effort 문법이 하네스마다 다르다. 한 판에서 복붙하다 갈리기 쉬운 자리라
+    /// 셋을 다 못박는다.
+    #[test]
+    fn each_harness_gets_its_own_model_and_effort_syntax() {
+        let m = Some("claude-opus-5[1m]");
+        assert_eq!(
+            restore_agent_command(Some("claude"), Some("s1"), true, m, Some("xhigh")),
+            "claude --resume s1 --model 'claude-opus-5[1m]' --effort 'xhigh'\r",
+            "★ 작은따옴표가 빠지면 `[1m]` 이 zsh 글롭이라 명령이 통째 실패한다"
+        );
+        assert_eq!(
+            restore_agent_command(Some("codex"), Some("s2"), true, Some("gpt-5.5"), Some("high")),
+            "codex resume s2 -m 'gpt-5.5' -c model_reasoning_effort='high'\r"
+        );
+        assert_eq!(
+            restore_agent_command(Some("agy"), Some("s3"), true, None, Some("low")),
+            "agy --conversation s3 --effort 'low'\r"
+        );
+    }
+
+    /// 값이 없으면 **플래그 자체가 빠져야** 한다 — 빈 문자열을 흘리면 `--model ''` 이
+    /// 나가 하네스가 기본값조차 못 고른다. 옛 저장본엔 이 키가 아예 없다.
+    #[test]
+    fn missing_values_drop_the_flag_entirely() {
+        assert_eq!(
+            restore_agent_command(Some("claude"), Some("s1"), true, None, None),
+            "claude --resume s1\r"
+        );
+        // 빈 문자열도 없음으로 친다(수집 쪽이 빈 값을 실어 보낼 수 있다).
+        assert_eq!(
+            restore_agent_command(Some("claude"), None, false, Some(""), Some("")),
+            "claude\r"
+        );
+        // 한쪽만 있어도 그쪽만 붙는다 — effort 를 안 정한 세션이 흔하다.
+        assert_eq!(
+            restore_agent_command(Some("claude"), None, false, Some("sonnet"), None),
+            "claude --model 'sonnet'\r"
+        );
+    }
+
+    /// 저장본 어댑터. 옛 저장본(`{}`)이 `None` 이어야 위 "플래그를 뺀다"가 성립한다.
+    #[test]
+    fn saved_model_and_effort_fall_back_to_none() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(saved_model(&j(r#"{"model":"claude-opus-5[1m]"}"#)), Some("claude-opus-5[1m]"));
+        assert_eq!(saved_effort(&j(r#"{"effort":"xhigh"}"#)), Some("xhigh"));
+        assert_eq!(saved_model(&j(r#"{}"#)), None, "옛 저장본");
+        assert_eq!(saved_effort(&j(r#"{}"#)), None, "옛 저장본");
+        // 빈 문자열이 새어 들어와도 없음으로 친다.
+        assert_eq!(saved_model(&j(r#"{"model":""}"#)), None);
     }
 
     #[test]

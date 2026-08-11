@@ -320,6 +320,15 @@ impl PtyBackend {
         ws.panes.keys().cloned().chain(ws.pid_to_pane.keys().cloned()).collect()
     }
 
+    /// surface_id → (model, effort) 스냅샷. 세션 저장이 leaf 에 실으려고 읽는다.
+    ///
+    /// GUI(`App`)가 `socket_backend` 로 이 백엔드를 들고 있으므로 App 쪽에 같은 맵을
+    /// 하나 더 두지 않는다 — `pane_claude_sid` 처럼 이벤트로 넘기면 App struct 에 필드가
+    /// 늘고, 그 자리는 워커 여럿이 동시에 못 만지는 병목이다(CLAUDE.md).
+    pub(crate) fn agent_cfg_snapshot(&self) -> HashMap<String, (String, String)> {
+        self.reported_agent_cfg.lock().unwrap().clone()
+    }
+
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
