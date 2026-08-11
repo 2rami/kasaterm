@@ -102,6 +102,49 @@ pub(crate) enum SideTab {
     Info,
     /// 과거 세션 기록(claude·codex·agy)을 골라 그 자리에서 잇는다.
     Sessions,
+    /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
+    Mcp,
+}
+
+/// 우측 칼럼의 「MCP·Skill」 탭 상태.
+///
+/// 설정 두 벌(`~/.claude.json` json · `~/.codex/config.toml` toml)을 파싱하고 스킬
+/// 폴더를 훑는 일이라 수집을 워커로 뺀다 — `SessionsColState` 와 같은 얼개다.
+pub(crate) struct McpColState {
+    pub(crate) snap: std::sync::Arc<std::sync::Mutex<Vec<crate::mcpcol::McpRow>>>,
+    pub(crate) view: Vec<crate::mcpcol::McpRow>,
+    pub(crate) rev: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) seen_rev: u64,
+    pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) last_refresh: Option<std::time::Instant>,
+    /// 다음 pump 에서 주기를 무시하고 다시 읽는다. 우리가 설정을 고친 직후에 세운다 —
+    /// 방금 누른 토글이 6초 뒤에 반영되면 눌린 건지 아닌지를 알 수 없다.
+    pub(crate) stale: bool,
+    pub(crate) scroll: f32,
+    /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
+    pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) body_rect: (f32, f32, f32, f32),
+    pub(crate) content_h: f32,
+}
+
+impl Default for McpColState {
+    fn default() -> Self {
+        Self {
+            snap: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            view: Vec::new(),
+            rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seen_rev: 0,
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_refresh: None,
+            stale: false,
+            scroll: 0.0,
+            row_rects: Vec::new(),
+            refresh_rect: None,
+            body_rect: (0.0, 0.0, 0.0, 0.0),
+            content_h: 0.0,
+        }
+    }
 }
 
 /// 우측 칼럼의 「세션 기록」 탭 — 과거 대화를 골라 잇는 레일.

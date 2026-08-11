@@ -3258,6 +3258,11 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // 세션 기록 행 / 범위 칩 / 새로고침. Info 와 같은 이유로
                         // 탭을 먼저 확인한다 — 다른 탭에선 낡은 좌표가 남는다.
+                        if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
                         if self.info.tab == state::SideTab::Sessions
                             && self.sessions_col_click(cx, cy)
                         {
