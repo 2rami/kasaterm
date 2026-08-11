@@ -92,20 +92,54 @@ def teammate_name(sid):
     return hits[0] if len(hits) == 1 else None
 
 
-def pane_doing(fp):
-    """board에서 이 파일(fp)을 만지는 중인 pane의 (surface_id, intent).
+def roster_pane(cwd, sid):
+    """이 transcript(sid)를 돌리는 pane — roster 가 pane↔session 의 정본이다.
+
+    차단 판정은 남의 jsonl 로 하면서 '누구'는 board 에서 **파일 경로**로 찾던 게
+    문제였다: 같은 파일을 오늘 만진 pane 이 여럿이면 아무나 걸리고, 하필 나
+    자신이 걸리면 "%3이 작업 중이라 막았다"는 자가당착이 된다(2026-08-11 실측 —
+    내 Edit 이 내 이름으로 거부됐다). 세션 id 로 주인을 확정하면 안 어긋난다."""
+    enc = cwd.replace("/", "-").replace(".", "-")
+    path = os.path.expanduser("~/.config/kasaterm/agent-roster/" + enc + ".json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    for key, rec in (d or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        rs = str(rec.get("session_id") or "")
+        # codex 는 `rollout-<날짜>-<uuid>` 라 접미 일치도 본다.
+        if rs and (rs == sid or rs.endswith(sid)):
+            return rec.get("pane_id") or key
+    return None
+
+
+def pane_doing(fp, owner=None):
+    """차단 원인 pane 의 (surface_id, intent).
 
     deny 메시지에 '누구'와 '무슨 작업 중'을 채워, 막기를 조율(합류/회피)로
-    끌어올리기 위함. board 조회 실패하면 (None, None)."""
+    끌어올리기 위함. `owner`(roster 로 확정한 주인)가 있으면 그 pane 의 intent 를
+    쓰고, 없을 때만 파일 경로로 훑는다 — 그때도 **나 자신은 건너뛴다.**
+    board 조회 실패하면 (owner, None)."""
     cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    me = os.environ.get("KASATERM_PANE_ID")
     try:
         out = subprocess.run(
             [cli, "board"], capture_output=True, text=True, timeout=2
         ).stdout
         board = json.loads(out)["result"]["board"]
     except Exception:
-        return None, None
+        return owner, None
+    if owner:
+        for p in board:
+            if p.get("surface_id") == owner:
+                return owner, (p.get("intent") or "")
+        return owner, None
     for p in board:
+        if p.get("surface_id") == me:
+            continue
         if fp in (p.get("files") or []):
             return p.get("surface_id"), (p.get("intent") or "")
     return None, None
@@ -124,7 +158,11 @@ def main():
     if not fp:
         return
 
-    my_tp = os.path.realpath(payload.get("transcript_path", "") or "")
+    # 빈 문자열을 realpath 하면 **cwd** 가 나와 어떤 jsonl 과도 안 맞는다 —
+    # 그러면 아래 자기 제외가 통째로 무력해진다(빈 값이 틀린 값보다 위험한 자리).
+    raw_tp = payload.get("transcript_path") or ""
+    my_tp = os.path.realpath(raw_tp) if raw_tp else ""
+    me = os.environ.get("KASATERM_PANE_ID")
     cwd = payload.get("cwd") or os.getcwd()
     enc = cwd.replace("/", "-").replace(".", "-")
     proj = os.path.expanduser("~/.claude/projects/" + enc)
@@ -134,7 +172,13 @@ def main():
     now = datetime.now().timestamp()
     for jf in glob.glob(os.path.join(proj, "*.jsonl")):
         # 내 transcript는 제외 — 내가 방금 만진 걸 충돌로 오인하면 안 된다.
-        if os.path.realpath(jf) == my_tp:
+        if my_tp and os.path.realpath(jf) == my_tp:
+            continue
+        # transcript 는 하나가 아니다 — resume 로 갈린 이전 대화, 서브에이전트가
+        # 같은 폴더에 자기 jsonl 을 남긴다. 그 주인이 나면 내 편집이 내 이름으로
+        # 막힌다(2026-08-11 실측). 세션 id → pane 은 roster 가 정본.
+        owner = roster_pane(cwd, os.path.basename(jf).split(".")[0])
+        if owner and me and owner == me:
             continue
         try:
             if now - os.path.getmtime(jf) > STALE:
@@ -152,7 +196,7 @@ def main():
         # 단순 차단이 아니라 '누가/뭘' 하는지 + 합류·회피 선택지를 줘서 조율로.
         name = os.path.basename(fp)
         secs = int(now - last_file)
-        pane, intent = pane_doing(fp)
+        pane, intent = pane_doing(fp, owner)
         sid = os.path.basename(jf).split(".")[0]
         who = pane or f"다른 pane({sid[:8]}…)"
         doing = f" (지금: {intent[:70]})" if intent else ""
