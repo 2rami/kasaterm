@@ -2096,9 +2096,10 @@ impl App {
         // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
         // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
         let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
-        let sb_row_info: Vec<SidebarRowInfo> = sb_rows
-            .iter()
-            .map(|(_, id, _)| {
+        // 배치도 칸과 꼬리 줄이 **같은 것**을 말한다 — 한쪽만 고치면 같은 pane 이
+        // 자리마다 다른 얼굴을 갖는다. 그래서 계산은 한 벌이다.
+        let pane_info = |id: &String| -> SidebarRowInfo {
+            {
                 // 얼굴은 claude 가 붙은 pane 에만 — 셸만 도는 자리에 학생이 먼저 앉아
                 // 있으면 목록이 "이미 일하는 중"이라고 거짓말한다.
                 let who = self
@@ -2145,8 +2146,12 @@ impl App {
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == *id),
                 }
-            })
-            .collect();
+            }
+        };
+        let sb_row_info: Vec<SidebarRowInfo> =
+            sb_rows.iter().map(|(_, id, _)| pane_info(id)).collect();
+        let sb_mini_info: Vec<SidebarRowInfo> =
+            sb_mini.iter().map(|(_, id, _)| pane_info(id)).collect();
         // 펼친 방에서 그 방의 알림·대기를 **줄이 이미 말하고 있는가**. 말하고 있으면
         // 카드 머리는 조용히 둔다 — 같은 뜻을 두 겹으로 칠하면 결국 방 전체가 빛나
         // 고치기 전으로 돌아간다. 접힌 방은 줄이 없으니 여기에 안 들고, 머리가 계속
@@ -3299,7 +3304,7 @@ impl App {
                 // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
                 // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
                 // 목록은 "누가 있나"만 말하고 어느 칸이 화면 어디인지는 못 말한다.
-                for (_, id, r) in sb_mini.iter() {
+                for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
                     let (mx, my, mw, mh) = *r;
                     let cur = sb_active_pane.as_deref() == Some(id.as_str());
                     let hov = sb_cursor.0 >= mx
@@ -3335,6 +3340,35 @@ impl App {
                             1.5,
                             theme::surface_active(),
                         );
+                    }
+                    // 칸이 **누구 자리인지** 말한다. 목록을 걷어낸 이상 얼굴이 여기
+                    // 없으면 사이드바 어디에도 학생이 없다(거노 2026-08-11: "미니맵은
+                    // 학생뭔지 보여야해"). 도는 중이면 줄에서 그랬듯 걷는다.
+                    let face = (mw.min(mh) - 8.0).clamp(10.0, 26.0);
+                    let fx = mx + (mw - face) / 2.0;
+                    let fy = my + (mh - face) / 2.0;
+                    let walked = info.busy
+                        && draw_student_walk(g, &info.who, fx - 2.0, fy - 2.0, face + 4.0, anim_phase_secs());
+                    if !walked && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs()) {
+                        // 학생이 없는 자리(셸만 도는 pane) — 빈 칸으로 두면 "여긴
+                        // 뭐지"가 되므로 터미널이라고 말해 둔다.
+                        let isz = face.min(16.0);
+                        g.queue_icon(
+                            "terminal",
+                            mx + (mw - isz) / 2.0,
+                            my + (mh - isz) / 2.0,
+                            isz,
+                            theme::text_dim(),
+                        );
+                    }
+                    // 손이 필요한 칸은 모서리 점이 깜빡인다 — 얼굴 위에 겹치지 않게
+                    // 오른쪽 위로 뺀다. 도는 중은 걷기가 이미 말하므로 점을 안 쓴다.
+                    if mw > 16.0 && mh > 12.0 {
+                        if info.waiting {
+                            blink_dot(g, mx + mw - 8.0, my + 3.0, 6.0, theme::attention(), 0.9);
+                        } else if info.alert {
+                            blink_dot(g, mx + mw - 8.0, my + 3.0, 6.0, theme::accent(), 1.6);
+                        }
                     }
                 }
                 for (k, ((wi, _, r), info)) in
