@@ -8,7 +8,9 @@ import { WebSocket } from 'ws'
 import { resolveIdentity } from './identity.mjs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, isAbsolute, extname } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
@@ -155,14 +157,32 @@ tool('browser_get_text', 'Plain innerText of the page. Cheaper than read_page wh
 tool('browser_find', 'Find elements by role/name/placeholder text and get their refs plus viewport coordinates.', { tabId, query: z.string() },
   async (a) => text(await call('find', a)))
 
-tool('browser_screenshot', 'Screenshot a tab. The agent overlay — presence chip, operating border, avatar cursor — is taken down for the shot and put back after, so the image is the page alone and is safe to hand to a human or drop into a doc; pass overlay:true only when the overlay itself is what you are checking. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
+tool('browser_screenshot', 'Screenshot a tab. The agent overlay — presence chip, operating border, avatar cursor — is taken down for the shot and put back after, so the image is the page alone and is safe to hand to a human or drop into a doc; pass overlay:true only when the overlay itself is what you are checking. Pass `path` (absolute) when the file itself is the deliverable — a release shot, an attachment, anything you will hand over rather than look at: the PNG is written there and you get back the path instead of the image, so it never enters your context. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
   tabId, fullPage: z.boolean().optional(), format: z.enum(['png', 'jpeg']).optional(), quality: z.number().int().optional(),
   overlay: z.boolean().optional().describe('Keep the agent overlay in the picture. Default false — it is hidden for the shot.'),
+  path: z.string().optional().describe('Absolute path to write the image to (~ is expanded, parent dirs are created). Returns the path, not the image — the picture never lands in your context. A .jpg/.jpeg extension selects jpeg unless format says otherwise.'),
 }, async (a) => {
-  const r = await call('screenshot', a, 45000)
-  const img = { type: 'image', data: r.data, mimeType: r.format === 'jpeg' ? 'image/jpeg' : 'image/png' }
+  const { path: dest, ...shot } = a
+  // ⚠️MCP 서버의 cwd 는 이 도구를 부른 pane 의 cwd 가 아니다(claude 가 서버를 따로 띄운다).
+  // 상대경로를 받아주면 아무 데나 쓰이고, 파일이 안 보이는 이유를 아무도 못 찾는다.
+  // `~` 도 셸이 아니면 안 풀려 「~」 라는 이름의 디렉토리가 생긴다 — 둘 다 조용히 어긋나는 길이라 막는다.
+  let out = dest
+  if (out?.startsWith('~/')) out = join(homedir(), out.slice(2))
+  if (out && !isAbsolute(out)) throw new Error(`path must be absolute (got "${dest}") — the MCP server's cwd is not your pane's.`)
+  // 확장자가 곧 의도다. .jpg 로 저장해 놓고 안에 PNG 가 들어 있으면 받는 쪽이 먼저 속는다.
+  if (out && !shot.format && /^\.jpe?g$/i.test(extname(out))) shot.format = 'jpeg'
+  const r = await call('screenshot', shot, 45000)
   // 걷고 찍었다는 사실을 밝힌다. 안 그러면 오버레이를 확인하려고 찍은 사람이 "왜 칩이 없지" 로 헛돈다.
-  return { content: r.overlayHidden ? [{ type: 'text', text: 'Agent overlay (chip, border, cursor) was hidden for this shot — pass overlay:true to keep it.' }, img] : [img] }
+  const note = r.overlayHidden ? [{ type: 'text', text: 'Agent overlay (chip, border, cursor) was hidden for this shot — pass overlay:true to keep it.' }] : []
+  if (out) {
+    const buf = Buffer.from(r.data, 'base64')
+    await mkdir(dirname(out), { recursive: true })
+    await writeFile(out, buf)
+    // 이미지를 함께 싣지 않는 것이 이 옵션의 요점이다 — 파일이 결과물일 때 그림까지 대화에 들어오면
+    // 한 장에 수천 토큰이 나가고, 그걸 피하려고 사람들이 screencapture 로 우회하던 것을 여기서 없앤다.
+    return { content: [...note, { type: 'text', text: `Saved ${buf.length.toLocaleString()} bytes to ${out} (${r.format}, via ${r.via}). Not shown here — Read it if you need to look.` }] }
+  }
+  return { content: [...note, { type: 'image', data: r.data, mimeType: r.format === 'jpeg' ? 'image/jpeg' : 'image/png' }] }
 })
 
 tool('browser_click', 'Click an element by ref (or raw coordinate). Tries a synthetic click first; if nothing on the page changed it automatically retries as a real trusted input event. Set trusted:true to skip straight to the real event.', {
