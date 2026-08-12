@@ -2362,7 +2362,8 @@ impl App {
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
         let quick_files_list = self.quick_files();
-        let dock_reserve = self.bottom_reserve_h();
+        // 아래 &mut self.gpu 빌림 안에서 &self 메서드를 못 부른다 — 미리 스냅샷.
+        let dock_own_reserve = self.dock_reserve_h();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
@@ -6358,9 +6359,15 @@ impl App {
             for (i, h) in self.hidden_aux.iter().enumerate() {
                 dock_items.push((format!("aux:{i}"), h.label.clone(), false));
             }
-            // 칩이 하나도 없어도 예약된 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
+            // 칩이 하나도 없어도 **예약된** 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
             // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
-            if dock_reserve > 0.0 {
+            //
+            // ⚠️판정은 dock **자신의** 예약(`dock_reserve_h`)으로 한다. 상태줄이 생기며
+            // `bottom_reserve_h()`(= dock + 상태줄)가 무조건 양수가 됐는데, 그 값으로
+            // 걸었더니 숨긴 pane 이 하나도 없어도 빈 dock 띠가 항상 칠해져 마지막 셀
+            // 줄들을 덮었다 — 그리드는 상태줄 몫만 비워 둔 상태라 「의문의 하단바」로
+            // 보였다(2026-08-12 지적).
+            if dock_own_reserve > 0.0 {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 // 상태줄 **위**에 앉는다 — 상태줄은 창 맨 바닥에 고정이고 dock 은
