@@ -356,7 +356,16 @@ impl App {
                     && sid
                         .chars()
                         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                    && dir.join(format!("{sid}.on")).exists()
+                    // 훅이 프롬프트마다 마커를 다시 쓰므로 살아 있는 세션은 mtime 이
+                    // 계속 갱신된다. 죽은 세션의 .on 은 영구 잔존해, 같은 sid 를
+                    // `--resume` 으로 새 pane 에 물리면 첫 프롬프트 전까지 거짓
+                    // 글로우가 뜬다(2026-08-12 조사: 잔존 9개) — 반나절 지난 마커는
+                    // 무시한다.
+                    && std::fs::metadata(dir.join(format!("{sid}.on")))
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age.as_secs() < 12 * 3600)
             })
             .map(|(pane, _)| pane.clone())
             .collect();
@@ -2794,24 +2803,11 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
         return false;
     };
     let start = (last + 1).saturating_sub(10);
-    cells[start..=last].iter().any(|row| {
-        let line: String = row.iter().map(|cell| cell.ch).collect();
-        if line.contains("esc to interrupt") {
-            return true;
-        }
-        let has_star = row
-            .iter()
-            .any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
-        let has_braille = row
-            .iter()
-            .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
-        // 스피너는 가운뎃점(·) 프레임도 순환하는데, 최근 claude code 는 스피너
-        // 행에 "esc to interrupt" 힌트를 안 넣는다("· Verbing… (3m · ↓ 9k tokens)")
-        // — 점 프레임에서 working 판정이 프레임마다 풀리지 않게 점도 잡는다.
-        // 점은 본문에 흔해 행 앞머리(col<8)로만 제한한다.
-        let has_dot = row.iter().take(8).any(|cell| cell.ch == '·');
-        ((has_star || has_dot) && line.contains('…')) || has_braille
-    })
+    // 판정은 render 쪽과 한 곳에서 — 도트 위치와 busy 판정이 갈리면 학생만
+    // 걸어다니고 헤더는 멈춰 있는(혹은 그 반대) 꼴이 된다. 오탐 이력은 거기 주석에.
+    cells[start..=last]
+        .iter()
+        .any(|row| crate::render::spinner_row_col(row).is_some())
 }
 
 /// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
@@ -2968,6 +2964,17 @@ mod working_scan_tests {
             row("› Run /review on my current changes"),
             row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
         ]));
+    }
+
+    /// 답변 본문이 working 으로 잡히면 헤더 busy 바와 pane 펄스가 답이 끝난 뒤로도
+    /// 계속 돈다. 한국어 문장부호(·, …)가 그대로 스피너 시그니처와 겹쳐서 났다
+    /// (2026-08-12 지적 — 학생이 본문 위를 걸어다녔다).
+    #[test]
+    fn korean_prose_is_idle() {
+        assert!(!rows_show_working(&[row(
+            "간·창별 막대) → Usage details & history / Manage Accounts…"
+        )]));
+        assert!(!rows_show_working(&[row("· 임계 60/80%, 문구까지 Orca 그대로…")]));
     }
 
     #[test]
