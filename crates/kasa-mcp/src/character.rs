@@ -41,7 +41,35 @@ fn themes_root() -> Option<PathBuf> {
 /// **폴더에 `theme.json` 이 실재할 때만** 돌려준다. 테마를 지우고 앱을 켜면 설정
 /// 키만 남는데 그걸 믿으면 로스터가 통째로 비어 캐릭터 배정이 멈춘다. 없으면
 /// 조용히 번들로 돌아가는 쪽이 맞다.
+/// 캐시. 바깥 `None` = 아직 안 정함, `Some(None)` = 테마 없음(번들로 간다).
+///
+/// 캐시가 필요한 이유: `students_dir()` 을 거쳐 **매 프레임** 불린다
+/// (`student_has_sprite` 가 스프라이트 슬롯을 세우기 전에 묻는다). 캐시가 없으면
+/// 프레임마다 settings.json 을 열게 된다.
+static ACTIVE_THEME: std::sync::RwLock<Option<Option<PathBuf>>> = std::sync::RwLock::new(None);
+
 pub fn active_theme_dir() -> Option<PathBuf> {
+    if let Some(v) = ACTIVE_THEME.read().unwrap().as_ref() {
+        return v.clone();
+    }
+    let mut w = ACTIVE_THEME.write().unwrap();
+    // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 정했을 수 있다.
+    if let Some(v) = w.as_ref() {
+        return v.clone();
+    }
+    let v = resolve_active_theme_dir();
+    *w = Some(v.clone());
+    v
+}
+
+/// 테마를 갈아 끼운 뒤 부른다 — 다음 조회가 다시 해석한다.
+/// `theme::invalidate_roster()` 와 **짝으로** 불러야 한다. 한쪽만 비우면 그림은 새
+/// 테마인데 이름·색은 옛 테마가 되어, 화면이 두 테마를 섞어 보여 준다.
+pub fn invalidate_active_theme() {
+    *ACTIVE_THEME.write().unwrap() = None;
+}
+
+fn resolve_active_theme_dir() -> Option<PathBuf> {
     // env 가 설정을 이긴다 — 헤드리스 검증이 사용자 settings.json 을 건드리지 않고
     // 테마를 갈아 끼울 유일한 손잡이다(`KASATERM_STUDENTS_DIR` 과 같은 역할).
     let id = std::env::var("KASATERM_CHARACTER_THEME")

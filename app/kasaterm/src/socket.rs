@@ -2597,16 +2597,22 @@ fn settings_file_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/settings.json"))
 }
 
-/// User's per-character image override dir — `~/.config/kasaterm/students/`.
-/// Drop `<slug>-profile.png` / `<slug>-<i>.png` / `<slug>-walk-<i>.png` /
-/// `schale-logo.png` here to replace the bundled default dots (see
-/// render.rs loaders). Missing dir/file → the loader falls back to the
-/// compiled-in `include_bytes!` asset, so an empty dir changes nothing.
+/// 지금 화면이 학생 그림을 찾는 폴더. `<slug>-profile.png` / `<slug>-<i>.png` /
+/// `<slug>-walk-<i>.png` / `schale-logo.png` 를 여기 넣으면 번들 도트를 대체한다
+/// (render.rs 로더). 파일이 없으면 로더가 `include_bytes!` 번들로 떨어지므로 빈
+/// 폴더는 아무것도 바꾸지 않는다.
+///
+/// **테마를 골랐으면 그 테마의 `sprites/` 가 이 자리다** — 테마 팩에서 로스터와
+/// 그림은 한 벌이라, 이름은 새 테마인데 그림은 옛 폴더에서 오면 짝이 어긋난다.
+/// 테마를 안 고른 사용자는 종전대로 `~/.config/kasaterm/students/` 를 쓴다.
 pub fn students_dir() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("KASATERM_STUDENTS_DIR") {
         if !p.is_empty() {
             return Some(std::path::PathBuf::from(p));
         }
+    }
+    if let Some(d) = kasa_mcp::character::active_theme_dir() {
+        return Some(d.join("sprites"));
     }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"))
 }
