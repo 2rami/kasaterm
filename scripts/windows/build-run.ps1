@@ -31,10 +31,12 @@ if (-not (Test-Path "web\arona-ui\dist\index.html")) {
 
 # 2) 네이티브 빌드. 루트 Cargo.toml 이 kasa-mcp 를 opt-level=0 으로 pin 해 둬서
 #    Windows LLVM 의 STATUS_ACCESS_VIOLATION 을 피한다 — 그대로 둘 것.
-Write-Host "-- cargo build --release -p kasaterm"
-cargo build --release -p kasaterm
+Write-Host "-- cargo build --release -p kasaterm -p kasa-socket"
+cargo build --release -p kasaterm -p kasa-socket
 
 $exe = Join-Path $Repo "target\release\kasaterm.exe"
+$cli = Join-Path $Repo "target\release\kasaterm-cli.exe"
+if (-not (Test-Path $cli)) { throw "missing build artifact: $cli" }
 if (-not (Test-Path $exe)) { throw "빌드 산출물 없음: $exe" }
 
 # 3) 실행. 웹뷰 dist 를 명시 지정(폴백에 의존하지 않게), 필요 시 wgpu 백엔드 강제.

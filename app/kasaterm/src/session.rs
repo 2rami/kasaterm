@@ -485,9 +485,31 @@ impl App {
                         let _ = kasa_mcp::character::bind_session_character(sid, &true_char);
                     }
                     None => {
-                        // 첫 인지 — 이 세션의 정본 캐릭터로 현재 배정을 영속화.
                         if let Some(cur) = cur.filter(|c| !c.is_empty()) {
                             let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                        } else if let Some(chars) = kasa_mcp::character::characters_json() {
+                            // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
+                            // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
+                            let members = kasa_mcp::character::member_names(&chars);
+                            let taken: std::collections::HashSet<String> = self
+                                .ws
+                                .lock()
+                                .unwrap()
+                                .pane_character
+                                .values()
+                                .cloned()
+                                .collect();
+                            let free: Vec<String> = members
+                                .iter()
+                                .filter(|name| !taken.contains(name.as_str()))
+                                .cloned()
+                                .collect();
+                            if let Some(name) = kasa_mcp::character::pick_random(&free, sid)
+                                .or_else(|| kasa_mcp::character::pick_random(&members, sid))
+                            {
+                                self.relabel_pane(pane, &name);
+                                let _ = kasa_mcp::character::bind_session_character(sid, &name);
+                            }
                         }
                     }
                 }
