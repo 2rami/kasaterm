@@ -2131,7 +2131,9 @@ pub(crate) fn paint_settings(
             let row_h = 30.0_f32;
             for (name, slug) in &ctx.characters {
                 if y > clip {
-                    let r = (fx - 6.0, y - 2.0, fw.min(380.0), row_h);
+                    // 테마 목록과 같은 이유로 카드 안 라벨 왼쪽선에 맞춘다 — 바로 위
+                    // 목록만 고치면 두 목록의 선택 박스가 서로 어긋난다.
+                    let r = (fx, y - 2.0, fw.min(380.0), row_h);
                     let selected = ctx.student_selected.as_deref() == Some(name.as_str());
                     let hover = inside(r, ctx.cursor);
                     g.hover_pointer |= hover;
@@ -2140,15 +2142,18 @@ pub(crate) fn paint_settings(
                     } else if hover {
                         round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
                     }
+                    // 내용은 박스 왼쪽선에서 10px 들여쓴다 — 테마 목록의 라벨과 같은
+                    // 값이다. 박스를 fx 로 당긴 뒤 점을 fx 에 두면 선택·hover 때 점이
+                    // 박스 경계에 물려 잘린 것처럼 보인다.
                     let sw = theme::character_accent(name).unwrap_or([128, 128, 128, 255]);
-                    round_rect(g, fx, y + 3.0, 14.0, 14.0, theme::radius_sm(), sw);
+                    round_rect(g, fx + 10.0, y + 3.0, 14.0, 14.0, theme::radius_sm(), sw);
                     g.draw_text(
-                        fx + 24.0, y, name,
+                        fx + 34.0, y, name,
                         gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
                     );
                     let nw = g.measure_chrome_text(name, 14.0, false);
                     g.draw_text(
-                        fx + 24.0 + nw + 12.0, y + 2.0, slug.unwrap_or("(에셋 없음)"),
+                        fx + 34.0 + nw + 12.0, y + 2.0, slug.unwrap_or("(에셋 없음)"),
                         gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
                     );
                     rects.push((SettingsAction::SelectStudent(name.clone()), r));
