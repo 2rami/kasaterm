@@ -10,19 +10,17 @@
 //! `&self` is off-limits, so the paint is a free function fed a snapshot
 //! (`SettingsCtx`) and returns the frame's clickable rects for hit-testing.
 //!
-//! Segmented controls (`segmented`), field titles (`field_header`) and the
-//! single-line text fields (`text_field`, char-index caret) are shared helpers
-//! so every page reads consistently. Single-line fields borrow `students_caret`
-//! as their caret store since only one field is focused at a time.
+//! Segmented controls (`segmented`), the two-column row primitives (`row2`,
+//! `row_wide`) and the single-line text fields (`text_field`, char-index caret)
+//! are shared helpers so every page reads consistently. Single-line fields
+//! borrow `students_caret` as their caret store since only one field is
+//! focused at a time.
 
 use super::*;
 
 type Rect = (f32, f32, f32, f32);
 
 const CAT_W: f32 = 200.0;
-/// 항목과 항목 **사이**. `field_header` 안쪽 간격보다 넓게 유지할 것 — 안쪽이
-/// 더 벌어지면 설명이 제 제목을 떠나 위 항목에 붙어 읽힌다.
-const ROW_GAP: f32 = 24.0;
 
 /// 설명 문구에 박히는 주 수식키 이름. 실제 바인딩은 이미 갈려 있는데
 /// (`zoom_mod = macos ? Cmd : Ctrl`, 편집기 저장도 같다) 문구만 Cmd 로 고정돼
@@ -1493,7 +1491,7 @@ pub(crate) fn paint_settings(
             // 테마 — 프리셋 카드 그리드. 카드 하나 = 그 팔레트의 미니 프리뷰
             // (bg 칠 + 프롬프트 샘플 + ANSI 도트 + 라벨)라서 고르기 전에 색이
             // 보인다. UI 토큰과 터미널 ANSI 16색이 함께 바뀐다.
-            y = field_header(g, fx, y, clip, "Theme",
+            y = row_wide(g, fx, y, clip, "Theme",
                 &["UI + 터미널 ANSI 팔레트가 함께 바뀌어요",
                   "System 은 OS 의 밝게/어둡게를 따라가요 — 바꾸면 알아서 넘어가요"]);
             let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
@@ -1578,12 +1576,12 @@ pub(crate) fn paint_settings(
                 card(g, &mut rects, "custom", "Custom (settings.json)", None);
             }
             let rows = idx.div_ceil(per_row);
-            y += rows as f32 * (card_h + gap) + ROW_GAP;
+            y += rows as f32 * (card_h + gap) + 12.0;
             // 형태 — 팔레트와 독립된 축. 각 카드가 *자기* 실루엣으로 그려진다
             // (모서리 반경 · 테두리 두께 · 그림자 · 점과 캡슐의 둥글기) — 테마
             // 카드가 팔레트를 미리 보여주는 것과 같은 규칙이라, 고르기 전에
             // 형태가 눈에 보인다.
-            y = field_header(g, fx, y, clip, "Shape", &["모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)"]);
+            y = row_wide(g, fx, y, clip, "Shape", &["모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)"]);
             if y > clip {
                 let (sw, sh) = (108.0_f32, 58.0_f32);
                 let mut sxp = fx;
@@ -1623,8 +1621,8 @@ pub(crate) fn paint_settings(
                     sxp += sw + 12.0;
                 }
             }
-            y += 58.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Accent color", &["선택 영역 · 커서 · 링크 색"]);
+            y += 58.0 + 12.0;
+            y = row_wide(g, fx, y, clip, "Accent color", &["선택 영역 · 커서 · 링크 색"]);
             if y > clip {
                 let mut cxp = fx;
                 for (name, col) in theme::ACCENT_PRESETS {
@@ -1645,11 +1643,11 @@ pub(crate) fn paint_settings(
                     cxp += sz + 14.0;
                 }
             }
-            y += 30.0 + ROW_GAP;
+            y += 30.0 + 12.0;
             // 최소 대비 — 앱이 스스로 이름 붙인 색만 대상이다. 각 버튼은 자기
             // 임계를 적용한 샘플을 그려서, 고르기 전에 그 값이 실제로 얼마나
             // 끌어올리는지 눈으로 비교된다.
-            y = field_header(
+            y = row_wide(
                 g, fx, y, clip, "Minimum contrast",
                 &["앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올린다 (dim 은 제외)"],
             );
@@ -1703,10 +1701,10 @@ pub(crate) fn paint_settings(
                     bxp += bw + 10.0;
                 }
             }
-            y += 44.0 + ROW_GAP;
+            y += 44.0 + 12.0;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
-            y = field_header(g, fx, y, clip, "Font size", &[&format!("터미널 셀 폰트 크기 — {PRIMARY_MOD}+/− 배율과는 별개인 기준값이에요")]);
+            y = row_wide(g, fx, y, clip, "Font size", &[&format!("터미널 셀 폰트 크기 — {PRIMARY_MOD}+/− 배율과는 별개인 기준값이에요")]);
             if y > clip {
                 let bs = 30.0_f32;
                 let minus = (fx, y, bs, bs);
@@ -1725,12 +1723,12 @@ pub(crate) fn paint_settings(
                 stepper_btn(g, plus, "plus", ctx.cursor);
                 rects.push((SettingsAction::FontSizeDelta(1), plus));
             }
-            y += 30.0 + ROW_GAP;
+            y += 30.0 + 12.0;
             // UI 배율 — 여태 Cmd+/− 키에만 있었다. 키로만 있으면 지금 몇 %인지
             // 화면 어디에도 안 적혀서, 폰트 크기와 배율을 번갈아 만지다 UI 가
             // 어긋나도 어느 쪽이 범인인지 알 수가 없다(거노). 숫자를 보여 주고,
             // 둘을 한 번에 되돌릴 자리를 옆에 둔다.
-            y = field_header(g, fx, y, clip, "UI 배율",
+            y = row_wide(g, fx, y, clip, "UI 배율",
                 &[&format!("크롬·사이드바·pane 이 함께 커져요 ({PRIMARY_MOD}+/− 와 같은 축)")]);
             if y > clip {
                 let bs = 30.0_f32;
@@ -1781,32 +1779,33 @@ pub(crate) fn paint_settings(
         }
         SettingsCat::Shell => {
             let mut y = fy;
-            y = field_header(g, fx, y, clip, "Default shell", &["새 pane 의 셸 (비우면 시스템 $SHELL)"]);
+            // Preset 칸들 + 자유입력 필드로 포커스를 주는 "Custom" 칸.
             let presets: [(&str, &str); 3] =
                 [("", "System default"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
             let shell_is_preset = presets.iter().any(|(v, _)| *v == ctx.shell);
-            if y > clip {
-                // Preset 칸들 + 자유입력 필드로 포커스를 주는 "Custom" 칸.
-                let cells = [
-                    ("System default", ctx.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
-                    ("zsh", ctx.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".to_string())),
-                    ("bash", ctx.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".to_string())),
-                    ("Custom", !shell_is_preset, SettingsAction::FocusShell),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+            let cells = [
+                ("System default", ctx.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+                ("zsh", ctx.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".to_string())),
+                ("bash", ctx.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".to_string())),
+                ("Custom", !shell_is_preset, SettingsAction::FocusShell),
+            ];
+            let sw = seg_width(g, &cells);
+            let (cr, ny) = row2(g, fx, y, fw, clip, "Default shell",
+                &["새 pane 의 셸 (비우면 시스템 $SHELL)"], (sw, SEG_H));
+            if ny > clip {
+                segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
             }
-            y += SEG_H;
+            y = ny;
             if !shell_is_preset {
-                y += 10.0;
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::Shell);
                     text_field(g, r, &ctx.shell, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                     rects.push((SettingsAction::FocusShell, r));
                 }
-                y += 34.0;
+                y += 34.0 + 8.0;
             }
-            content_bottom = y + ROW_GAP;
+            content_bottom = y;
         }
         SettingsCat::Claude => {
             // Page 헤더가 이미 "Claude" 를 크게 쓰므로 별도 브랜드 워드마크는
@@ -1815,23 +1814,26 @@ pub(crate) fn paint_settings(
             // Shim injection — global. off = install_pane_shims never makes the shim
             // dir, so claude runs vanilla (no persona/proxy/hooks). Read once at boot,
             // so a change needs a restart.
-            y = field_header(g, fx, y, clip, "Shim injection",
-                &["끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음",
-                  "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서"]);
-            if y > clip {
-                let sr = (fx, y, 52.0, 30.0);
-                toggle(g, sr, ctx.shim_inject, ctx.cursor);
-                rects.push((SettingsAction::ToggleShimInject, sr));
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Shim injection",
+                    &["끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음",
+                      "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서"], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.shim_inject, ctx.cursor);
+                    rects.push((SettingsAction::ToggleShimInject, cr));
+                }
+                y = ny;
             }
-            y += 30.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Persona injection", &["이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요"]);
-            if y > clip {
-                let pr = (fx, y, 52.0, 30.0);
-                toggle(g, pr, ctx.claude_persona, ctx.cursor);
-                rects.push((SettingsAction::ToggleClaudePersona, pr));
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Persona injection",
+                    &["이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요"], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.claude_persona, ctx.cursor);
+                    rects.push((SettingsAction::ToggleClaudePersona, cr));
+                }
+                y = ny;
             }
-            y += 30.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Account",
+            y = row_wide(g, fx, y, clip, "Account",
                 &["로그인 계정을 골라요 — 다음에 뜨는 claude 부터 그 계정으로",
                   "이미 돌고 있는 세션은 원래 계정 그대로예요",
                   "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
@@ -1899,40 +1901,42 @@ pub(crate) fn paint_settings(
                     SettingsAction::AddClaudeAccount, "Claude",
                 );
             }
-            y += 34.0 + ROW_GAP;
+            y += 34.0 + 12.0;
             // 자동 전환. 계정이 하나뿐이면 갈 곳이 없어 아무 일도 안 일어나므로
             // 그 상태를 설명 줄로 미리 알려 준다 — 켜 놓고 "안 되네" 하는 게 이
             // 기능에서 제일 흔한 오해다.
             let lone = ctx.claude_accounts.is_empty();
-            y = field_header(g, fx, y, clip, "Auto switch",
-                &["한도가 차면 다음 계정으로 알아서 넘어가요 — 다음에 뜨는 claude 부터",
-                  if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
-                  else { "떠난 계정은 그 한도가 풀릴 때까지 후보에서 빠져요" }]);
-            if y > clip {
-                let ar = (fx, y, 52.0, 30.0);
-                toggle(g, ar, ctx.account_autoswitch, ctx.cursor);
-                rects.push((SettingsAction::ToggleAccountAutoswitch, ar));
-            }
-            y += 30.0 + ROW_GAP;
-            if ctx.account_autoswitch {
-                y = field_header(g, fx, y, clip, "Switch at",
-                    &["이 사용률을 넘으면 넘어가요 — 5시간 창과 주간 한도 중 높은 쪽 기준"]);
-                if y > clip {
-                    let pct = ctx.account_autoswitch_pct.round() as u32;
-                    let cells = [
-                        ("80%", pct == 80, SettingsAction::AccountAutoswitchPct(80)),
-                        ("85%", pct == 85, SettingsAction::AccountAutoswitchPct(85)),
-                        ("90%", pct == 90, SettingsAction::AccountAutoswitchPct(90)),
-                        ("95%", pct == 95, SettingsAction::AccountAutoswitchPct(95)),
-                    ];
-                    segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Auto switch",
+                    &["한도가 차면 다음 계정으로 알아서 넘어가요 — 다음에 뜨는 claude 부터",
+                      if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
+                      else { "떠난 계정은 그 한도가 풀릴 때까지 후보에서 빠져요" }], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.account_autoswitch, ctx.cursor);
+                    rects.push((SettingsAction::ToggleAccountAutoswitch, cr));
                 }
-                y += SEG_H + ROW_GAP;
+                y = ny;
+            }
+            if ctx.account_autoswitch {
+                let pct = ctx.account_autoswitch_pct.round() as u32;
+                let cells = [
+                    ("80%", pct == 80, SettingsAction::AccountAutoswitchPct(80)),
+                    ("85%", pct == 85, SettingsAction::AccountAutoswitchPct(85)),
+                    ("90%", pct == 90, SettingsAction::AccountAutoswitchPct(90)),
+                    ("95%", pct == 95, SettingsAction::AccountAutoswitchPct(95)),
+                ];
+                let sw = seg_width(g, &cells);
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Switch at",
+                    &["이 사용률을 넘으면 다음 계정으로 넘어가요"], (sw, SEG_H));
+                if ny > clip {
+                    segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
+                }
+                y = ny;
             }
             // Codex(ChatGPT) 계정 — claude 슬롯 바로 아래 둔다. pane 에서 codex 를
             // 띄우는 것도 같은 손이라, 두 로그인이 설정의 다른 층에 흩어져 있으면
             // 「지금 어느 계정으로 돌고 있나」를 두 군데서 확인해야 한다.
-            y = field_header(g, fx, y, clip, "Codex account",
+            y = row_wide(g, fx, y, clip, "Codex account",
                 &["ChatGPT 로그인을 골라요 — 다음에 뜨는 codex 부터 그 계정으로",
                   "이미 돌고 있는 세션은 원래 계정 그대로예요",
                   "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
@@ -1999,20 +2003,23 @@ pub(crate) fn paint_settings(
                     SettingsAction::AddCodexAccount, "Codex",
                 );
             }
-            y += 34.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
-            if y > clip {
+            y += 34.0 + 12.0;
+            {
                 let cells = [
                     ("Default", ctx.claude_model.is_empty(), SettingsAction::ClaudeModel(String::new())),
                     ("opus", ctx.claude_model == "opus", SettingsAction::ClaudeModel("opus".to_string())),
                     ("sonnet", ctx.claude_model == "sonnet", SettingsAction::ClaudeModel("sonnet".to_string())),
                     ("haiku", ctx.claude_model == "haiku", SettingsAction::ClaudeModel("haiku".to_string())),
                 ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+                let sw = seg_width(g, &cells);
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Model",
+                    &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"], (sw, SEG_H));
+                if ny > clip {
+                    segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
+                }
+                y = ny;
             }
-            y += SEG_H + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Effort", &["추론 강도 (CLAUDE_EFFORT). Default = 그대로 둠"]);
-            if y > clip {
+            {
                 let cells = [
                     ("Default", ctx.claude_effort.is_empty(), SettingsAction::ClaudeEffort(String::new())),
                     ("low", ctx.claude_effort == "low", SettingsAction::ClaudeEffort("low".to_string())),
@@ -2020,10 +2027,15 @@ pub(crate) fn paint_settings(
                     ("high", ctx.claude_effort == "high", SettingsAction::ClaudeEffort("high".to_string())),
                     ("xhigh", ctx.claude_effort == "xhigh", SettingsAction::ClaudeEffort("xhigh".to_string())),
                 ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+                let sw = seg_width(g, &cells);
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Effort",
+                    &["추론 강도 — Default 는 그대로 둬요"], (sw, SEG_H));
+                if ny > clip {
+                    segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
+                }
+                y = ny;
             }
-            y += SEG_H + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Extra args", &["claude 실행에 항상 붙는 플래그 (예: --verbose)"]);
+            y = row_wide(g, fx, y, clip, "Extra args", &["claude 실행에 항상 붙는 플래그 (예: --verbose)"]);
             if y > clip {
                 let r = (fx, y, fw.min(420.0), 34.0);
                 let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
@@ -2035,7 +2047,7 @@ pub(crate) fn paint_settings(
         SettingsCat::Theme => {
             let mut y = fy;
             // ── 테마 고르기 ──────────────────────────────────────────────
-            y = field_header(g, fx, y, clip, "Theme",
+            y = row_wide(g, fx, y, clip, "Theme",
                 &["캐릭터 세트를 통째로 갈아 끼웁니다 — 이름·색·그림이 한 벌로 바뀌어요",
                   "폴더 하나가 테마 하나: ~/.config/kasaterm/themes/<이름>/"]);
             // 번들을 맨 앞에 세운다 — 폴더가 없어 list_themes 에 안 잡히지만
@@ -2064,22 +2076,23 @@ pub(crate) fn paint_settings(
                 }
                 y += row_h;
             }
-            y += ROW_GAP;
+            y += 12.0;
 
             // ── 페르소나를 쓸지 ──────────────────────────────────────────
             // 「테마로만 쓸지, 말투까지 쓸지」 — 이 스위치가 그 갈림길이라 테마
             // 바로 아래 둔다(설정은 Claude 쪽과 같은 `claude_persona` 하나다).
-            y = field_header(g, fx, y, clip, "Persona",
-                &["끄면 그림·이름·색만 씁니다. 켜면 캐릭터 말투로 대답해요",
-                  "이미 떠 있는 pane 은 그대로고, 새로 여는 pane 부터 바뀝니다"]);
-            if y > clip {
-                let r = (fx, y, 44.0, 24.0);
-                toggle(g, r, ctx.claude_persona, ctx.cursor);
-                rects.push((SettingsAction::ToggleClaudePersona, r));
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Persona",
+                    &["끄면 그림·이름·색만 씁니다. 켜면 캐릭터 말투로 대답해요",
+                      "이미 떠 있는 pane 은 그대로고, 새로 여는 pane 부터 바뀝니다"], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.claude_persona, ctx.cursor);
+                    rects.push((SettingsAction::ToggleClaudePersona, cr));
+                }
+                y = ny;
             }
-            y += 24.0 + ROW_GAP;
 
-            y = field_header(g, fx, y, clip, "Character images",
+            y = row_wide(g, fx, y, clip, "Character images",
                 &["테마 폴더의 sprites/ 에 이미지를 넣으면 학생 그림이 바뀌어요",
                   "파일명: <slug>-profile.png · <slug>-0..3.png · <slug>-walk-0..5.png · schale-logo.png"]);
             // 액션 버튼 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드) / 본보기 내보내기.
@@ -2107,8 +2120,8 @@ pub(crate) fn paint_settings(
                     bx += bw + 8.0;
                 }
             }
-            y += 34.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Characters", &["캐릭터를 눌러 성격(persona)을 바로 편집하세요"]);
+            y += 34.0 + 12.0;
+            y = row_wide(g, fx, y, clip, "Characters", &["캐릭터를 눌러 성격(persona)을 바로 편집하세요"]);
             // 색 점 + 이름 + slug 한 줄, 행 전체가 클릭 대상(→ persona 편집). 실제
             // 프사·전신은 statusline·배너에서 보인다(설정 오버레이는 배경 rect 가
             // 이미지 z-order 를 가려 인라인 썸네일이 안 뜸). 스크롤로 전 인원 도달.
@@ -2141,8 +2154,8 @@ pub(crate) fn paint_settings(
             }
             // 선택된 캐릭터의 persona 멀티라인 편집기 — 줄 단위 클립.
             if let Some(sel) = &ctx.student_selected {
-                y += ROW_GAP;
-                y = field_header(g, fx, y, clip, &format!("{sel} · persona"),
+                y += 12.0;
+                y = row_wide(g, fx, y, clip, &format!("{sel} · persona"),
                     &["성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
                 y += multiline_field(
                     g, &mut rects, ctx, (fx, y, fw.min(560.0)), &ctx.student_persona,
@@ -2154,7 +2167,7 @@ pub(crate) fn paint_settings(
         }
         SettingsCat::Feedback => {
             let mut y = fy;
-            y = field_header(g, fx, y, clip, "무엇이 불편했나요",
+            y = row_wide(g, fx, y, clip, "무엇이 불편했나요",
                 &["버그 · 이상한 동작 · 있었으면 하는 것 — 아무 형식이나 괜찮아요",
                   "Enter=줄바꿈, Esc=포커스 해제"]);
             y += multiline_field(
@@ -2162,15 +2175,16 @@ pub(crate) fn paint_settings(
                 ctx.feedback_caret, SettingsInput::FeedbackBody,
                 SettingsAction::FocusFeedbackBody, clip,
             );
-            y += ROW_GAP;
+            y += 12.0;
             let diag = diag_line();
-            y = field_header(g, fx, y, clip, "진단 정보 함께 남기기", &[diag.as_str()]);
-            if y > clip {
-                let tr = (fx, y, 52.0, 30.0);
-                toggle(g, tr, ctx.feedback_diag, ctx.cursor);
-                rects.push((SettingsAction::ToggleFeedbackDiag, tr));
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "진단 정보 함께 남기기", &[diag.as_str()], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.feedback_diag, ctx.cursor);
+                    rects.push((SettingsAction::ToggleFeedbackDiag, cr));
+                }
+                y = ny;
             }
-            y += 30.0 + ROW_GAP;
             // 보내는 게 아니라 쌓는 거라 "저장". 받는 곳이 생기기 전에 "보내기"라고
             // 쓰면 안 간 걸 갔다고 말하는 셈이다.
             if y > clip {
@@ -3049,32 +3063,6 @@ const CARD_PAD: f32 = 20.0;
 /// 이었던 것이 다른 컨트롤보다 유난히 커서, 같은 행에 서면 눈금이 안 맞았다.
 const TOGGLE: (f32, f32) = (36.0, 20.0);
 
-/// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.
-/// 스크롤로 clip 위로 올라간 줄은 그리지 않되 자리(y 전진)는 유지한다 — 렌더러에
-/// scissor 가 없어 헤더/타이틀바를 침범하지 않으려면 통째로 스킵해야 한다.
-/// 항목 하나의 머리(제목 + 설명 줄). 다음 요소가 설 y 를 돌려준다.
-///
-/// 간격이 **제목 쪽으로 쏠려 있다** — 제목·설명·컨트롤은 한 덩어리고, 덩어리와
-/// 덩어리 사이(`ROW_GAP`)가 그보다 넓어야 눈이 항목 단위로 끊어 읽는다. 예전엔
-/// 제목→설명 24 · 설명→컨트롤 10 · 항목 사이 28 이라 안쪽이 바깥보다 벌어져,
-/// 설명이 제 제목이 아니라 위 항목의 꼬리처럼 붙어 보였다.
-fn field_header(g: &mut gpu::GpuRenderer, x: f32, y: f32, clip: f32, title: &str, help: &[&str]) -> f32 {
-    if y > clip {
-        section_label(g, x, y, title);
-    }
-    if help.is_empty() {
-        return y + 26.0;
-    }
-    let mut hy = y + 20.0;
-    for line in help {
-        if hy > clip {
-            help_text(g, x, hy, line);
-        }
-        hy += 16.0;
-    }
-    hy + 8.0
-}
-
 /// 트랙 안쪽 여백(Orca `p-0.5`) — 폭 계산과 그리기가 같은 값을 써야 한다.
 const SEG_PAD: f32 = 2.0;
 /// 칸 좌우 텍스트 여백(Orca `px-3`).
@@ -3144,17 +3132,6 @@ fn segmented(
         rects.push((action.clone(), (cxp, y, cw, SEG_H)));
         cxp += cw;
     }
-}
-
-/// 항목 제목. 화면 제목(24)과 **두 단 아래**여야 한다 — 15 였을 때는 둘이 거의
-/// 같은 크기라, 페이지 안에 항목이 나열된 게 아니라 제목만 여럿 흩어져 보였다.
-fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
-    g.draw_text(
-        x,
-        y,
-        text,
-        gpu::DrawOpts { font_size: 13.5, color: theme::text(), bold: true, italic: false },
-    );
 }
 
 fn help_text(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
