@@ -350,15 +350,19 @@ fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
     }
 }
 
+/// 마크다운 편집기 창의 `Rendered | Raw` 띠 높이. 자체 헤더가 없는 창이라(OS
+/// 타이틀바를 쓴다) 본문 위에 이 띠를 얹고 그만큼 원점을 민다 — 별도창엔 토글이
+/// 아예 없어 새 창으로 연 문서를 고칠 수가 없었다.
+///
+/// 플랫폼 무관이다. 전에 이 상수가 아래 `AUX_HEADER_H` 의 `#[cfg]` 와 doc 주석
+/// **사이에** 끼어들어, 속성이 이쪽에 붙어버린 적이 있다(2026-08-12). 속성은 뒤에
+/// 오는 doc 주석을 건너뛰고 다음 아이템을 잡으므로 사이에 무엇도 넣지 말 것.
+const AUX_MD_BAR_H: f32 = 28.0;
+
 /// 별도 창 헤더 높이. macOS 에선 OS 타이틀바 **자리 위에** 그리므로 메인 창의
 /// `TITLE_HEIGHT` 와 같아야 두 창이 같은 앱으로 읽힌다. 그 외 플랫폼은 OS
 /// 타이틀바가 따로 있고 이 띠는 그 아래라, 더 얇게 둔다.
 #[cfg(target_os = "macos")]
-/// 마크다운 편집기 창의 `Rendered | Raw` 띠 높이. 자체 헤더가 없는 창이라(OS
-/// 타이틀바를 쓴다) 본문 위에 이 띠를 얹고 그만큼 원점을 민다 — 별도창엔 토글이
-/// 아예 없어 새 창으로 연 문서를 고칠 수가 없었다(거노).
-const AUX_MD_BAR_H: f32 = 28.0;
-
 const AUX_HEADER_H: f32 = TITLE_HEIGHT;
 #[cfg(not(target_os = "macos"))]
 const AUX_HEADER_H: f32 = 30.0;
