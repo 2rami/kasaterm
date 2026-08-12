@@ -1816,8 +1816,7 @@ pub(crate) fn paint_settings(
             // so a change needs a restart.
             {
                 let (cr, ny) = row2(g, fx, y, fw, clip, "Shim injection",
-                    &["끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음",
-                      "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서"], TOGGLE);
+                    &["끄면 순정 Claude — 페르소나 · 프록시 · 훅 없음 (재시작 필요)"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.shim_inject, ctx.cursor);
                     rects.push((SettingsAction::ToggleShimInject, cr));
@@ -1834,12 +1833,10 @@ pub(crate) fn paint_settings(
                 y = ny;
             }
             y = row_wide(g, fx, y, clip, "Account",
-                &["로그인 계정을 골라요 — 다음에 뜨는 claude 부터 그 계정으로",
-                  "이미 돌고 있는 세션은 원래 계정 그대로예요",
-                  "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
+                &["다음에 뜨는 claude 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
             // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
             // 우리가 만든 슬롯이 아니라 지울 것도, 이름 붙일 것도 없다.
-            let acct_rows = std::iter::once((String::new(), "기본 (지금 로그인된 계정)".to_string(), None))
+            let acct_rows = std::iter::once((String::new(), "기본".to_string(), None))
                 .chain(
                     ctx.claude_accounts
                         .iter()
@@ -1877,17 +1874,20 @@ pub(crate) fn paint_settings(
                         reauth: SettingsAction::ReauthAccount(AccountProvider::Claude, id.clone()),
                         remove: SettingsAction::RemoveClaudeAccount(id.clone()),
                     });
-                    let view = AcctRowView {
-                        name: if idx.is_none() {
-                            "기본 (지금 로그인된 계정)".to_string()
-                        } else {
-                            account_display(&id, &label, &format!("계정 {}", idx.unwrap_or(0) + 2))
-                        },
-                        sub,
-                        sub_col,
-                        active,
-                        slot,
+                    let name = if idx.is_none() {
+                        "기본".to_string()
+                    } else {
+                        account_display(&id, &label, &format!("계정 {}", idx.unwrap_or(0) + 2))
                     };
+                    // 이름 없는 슬롯은 `account_display` 가 이메일을 이름으로 쓴다 —
+                    // 그러면 2줄이 같은 값을 되풀이한다(캡처에서 한 카드가 이메일을
+                    // 두 번 적고 있었다). 이름이 이미 그 값이면 2줄에서 걷어내고,
+                    // 조직만 남으면 그것을 남긴다.
+                    let sub = match sub.strip_prefix(name.as_str()) {
+                        Some(rest) => rest.trim_start_matches(" · ").to_string(),
+                        None => sub,
+                    };
+                    let view = AcctRowView { name, sub, sub_col, active, slot };
                     account_card(
                         g, &mut rects, (fx, y, fw, ACCT_H), ctx.cursor, &view,
                         SettingsAction::ClaudeAccount(id.clone()),
@@ -1908,9 +1908,9 @@ pub(crate) fn paint_settings(
             let lone = ctx.claude_accounts.is_empty();
             {
                 let (cr, ny) = row2(g, fx, y, fw, clip, "Auto switch",
-                    &["한도가 차면 다음 계정으로 알아서 넘어가요 — 다음에 뜨는 claude 부터",
-                      if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
-                      else { "떠난 계정은 그 한도가 풀릴 때까지 후보에서 빠져요" }], TOGGLE);
+                    &[if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
+                      else { "한도가 차면 다음에 뜨는 claude 부터 다음 계정으로 — 떠난 계정은 풀릴 때까지 쉬어요" }],
+                    TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.account_autoswitch, ctx.cursor);
                     rects.push((SettingsAction::ToggleAccountAutoswitch, cr));
@@ -1937,10 +1937,8 @@ pub(crate) fn paint_settings(
             // 띄우는 것도 같은 손이라, 두 로그인이 설정의 다른 층에 흩어져 있으면
             // 「지금 어느 계정으로 돌고 있나」를 두 군데서 확인해야 한다.
             y = row_wide(g, fx, y, clip, "Codex account",
-                &["ChatGPT 로그인을 골라요 — 다음에 뜨는 codex 부터 그 계정으로",
-                  "이미 돌고 있는 세션은 원래 계정 그대로예요",
-                  "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
-            let codex_rows = std::iter::once((String::new(), "기본 (지금 로그인된 계정)".to_string(), None))
+                &["다음에 뜨는 codex 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
+            let codex_rows = std::iter::once((String::new(), "기본".to_string(), None))
                 .chain(
                     ctx.codex_accounts
                         .iter()
@@ -1972,7 +1970,7 @@ pub(crate) fn paint_settings(
                     });
                     let view = AcctRowView {
                         name: match (idx, label.is_empty()) {
-                            (None, _) => "기본 (지금 로그인된 계정)".to_string(),
+                            (None, _) => "기본".to_string(),
                             // 라벨이 없으면 이메일이 이름이 된다. 그러면 2줄이 같은
                             // 값을 되풀이하므로 claude 쪽 `account_display` 규칙을
                             // 그대로 쓰되, 폴백은 슬롯 번호다.
@@ -2325,7 +2323,9 @@ fn account_card(
     let edge = if v.active { theme::with_alpha(theme::text(), 0x33) } else { theme::border() };
     outline_rect(g, x, y, w, h, theme::radius_md(), edge, 1.0, fill);
     let pad = 12.0_f32;
-    let line1 = y + 9.0;
+    // 신원 줄이 없는 슬롯(이름이 곧 이메일이라 2줄이 같은 값이 되는 경우)은 이름을
+    // 세로 중앙에 둔다 — 2줄 자리에 1줄만 그리면 카드 위쪽에 붙어 떠 보인다.
+    let line1 = if v.sub.is_empty() { y + (h - 18.0) / 2.0 } else { y + 9.0 };
     let line2 = y + 27.0;
     // 오른쪽 액션부터 — 자리를 먹은 만큼 이름이 쓸 폭이 줄어든다.
     let mut right = x + w - pad;
