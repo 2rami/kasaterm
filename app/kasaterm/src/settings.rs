@@ -1333,18 +1333,28 @@ pub(crate) fn paint_settings(
     let fx = ax + CAT_W + 40.0;
     let fw = (aw - CAT_W - 80.0).max(120.0).min(CONTENT_W);
     g.draw_text(
-        fx, ay + 26.0, active_label,
+        fx, ay + 22.0, active_label,
         gpu::DrawOpts { font_size: 24.0, color: theme::text(), bold: true, italic: false },
     );
-    g.rect(fx, ay + 62.0, fw, 1.0, theme::border());
+    // 제목 아래 설명 한 줄. 없으면 24px 제목이 허공에 뜬다 — Orca 는 섹션마다
+    // `text-sm leading-6 text-muted-foreground` 문단을 두고, 그게 「이 페이지에서
+    // 무엇을 정하는가」를 미리 말해 준다.
+    g.draw_text(
+        fx, ay + 52.0, cat_blurb(ctx.cat),
+        gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    g.rect(fx, ay + 78.0, fw, 1.0, theme::border());
     // ── Scrollable form ── the wheel shifts everything below the page header
     // up by ctx.scroll. The renderer has no scissor, so the coarse clip rule
     // is: a control whose TOP is above the header hairline isn't painted at
     // all (and its rect isn't pushed, so it isn't clickable either). Popping
     // whole controls at the boundary beats controls bleeding over the header
     // and title bar.
-    let fy = ay + 84.0 - ctx.scroll;
-    let clip = ay + 66.0;
+    let fy = ay + 110.0 - ctx.scroll;
+    let clip = ay + 82.0;
+    // 본문을 담는 카드는 내용보다 **먼저** 그려야 한다(나중이면 글자를 덮는다).
+    // 높이는 직전 프레임 값이다 — `form_card` 주석 참고.
+    form_card(g, fx, fy, fw);
     // Every match arm must set this to its last element's bottom edge — the
     // compiler enforces it (no initializer), so a new category can't silently
     // break the scroll clamp.
@@ -1361,151 +1371,122 @@ pub(crate) fn paint_settings(
                     ctx.cwd_mode != "last" && ctx.cwd_mode != "home"
                 }
             };
-            y = field_header(g, fx, y, clip, "Startup folder", &["새 창과 탭이 열리는 위치"]);
-            if y > clip {
-                let cells = [
-                    ("Last folder", cwd_is("last"), SettingsAction::CwdMode("last")),
-                    ("Home", cwd_is("home"), SettingsAction::CwdMode("home")),
-                    ("Custom", cwd_is("custom"), SettingsAction::CwdMode("custom")),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
-            }
-            y += SEG_H;
-            // Custom path field, only when "Custom" is active.
-            if cwd_is("custom") {
-                y += 10.0;
-                if y > clip {
-                    let r = (fx, y, fw.min(420.0), 34.0);
-                    let focused = ctx.input == Some(SettingsInput::CwdPath);
-                    text_field(g, r, &ctx.cwd_mode, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
-                    rects.push((SettingsAction::FocusCwdPath, r));
-                }
-                y += 34.0;
-            }
-            y += ROW_GAP;
-            y = field_header(g, fx, y, clip, "File tree by default", &["시작할 때 파일 트리 사이드바 열기"]);
-            if y > clip {
-                let tr = (fx, y, 52.0, 30.0);
-                toggle(g, tr, ctx.file_tree_default, ctx.cursor);
-                rects.push((SettingsAction::ToggleFileTree, tr));
-            }
-            y += 30.0 + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Pane status bar by default", &["각 pane 아래 경로 · 브랜치 · diff 바 표시"]);
-            if y > clip {
-                let fr = (fx, y, 52.0, 30.0);
-                toggle(g, fr, ctx.footer_default, ctx.cursor);
-                rects.push((SettingsAction::ToggleFooter, fr));
-            }
-            y += 30.0 + ROW_GAP;
-            y = field_header(
-                g,
-                fx,
-                y,
-                clip,
-                "File open",
-                &[
-                    "파일 트리에서 파일을 열 때 무엇으로 열지",
-                    "App = VS Code 같은 GUI 편집기로 열기",
-                    "Terminal = 새 pane 에서 CLI 편집기 ({} 는 파일 경로 자리)",
-                ],
-            );
             // `"system"` 은 `"app"` 의 옛 저장값 — 앱 미지정과 뜻이 같아 같은 칸으로.
             let open_is = |m: &str| {
                 ctx.file_open_mode == m || (m == "app" && ctx.file_open_mode == "system")
             };
-            if y > clip {
-                let cells = [
-                    ("Built-in", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),
-                    ("App", open_is("app"), SettingsAction::FileOpenMode("app")),
-                    ("Terminal", open_is("terminal"), SettingsAction::FileOpenMode("terminal")),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
-            }
-            y += SEG_H;
-            if open_is("app") {
-                y += 10.0;
+            let x100 = (ctx.wheel_pixel_gain * 100.0).round() as u32;
+            // 두 칸 행 하나 = 세그먼트 한 벌. 폭을 미리 재야 오른쪽에 붙일 수 있다.
+            let seg_row = |g: &mut gpu::GpuRenderer,
+                               rects: &mut Vec<(SettingsAction, Rect)>,
+                               y: f32,
+                               label: &str,
+                               desc: &[&str],
+                               cells: &[(&str, bool, SettingsAction)]| {
+                let sw = seg_width(g, cells);
+                let (cr, ny) = row2(g, fx, y, fw, clip, label, desc, (sw, SEG_H));
+                if ny > clip {
+                    segmented(g, rects, cr.0, cr.1, cells, ctx.cursor);
+                }
+                ny
+            };
+            y = seg_row(g, &mut rects, y, "Startup folder", &["새 창과 탭이 열리는 위치"], &[
+                ("Last folder", cwd_is("last"), SettingsAction::CwdMode("last")),
+                ("Home", cwd_is("home"), SettingsAction::CwdMode("home")),
+                ("Custom", cwd_is("custom"), SettingsAction::CwdMode("custom")),
+            ]);
+            // 조건부로 딸려 나오는 필드는 폭을 다 쓰므로 그 행 아래로 내린다 —
+            // 오른쪽 칸에 밀어 넣으면 라벨과 겹친다.
+            if cwd_is("custom") {
                 if y > clip {
-                    // 설치된 것만 뜬다(`open_with_apps`). 마지막 "기본 앱" 은 OS
-                    // 연결 프로그램 — 목록에 없는 앱을 쓰는 사람의 탈출구다.
-                    let apps = crate::proc::open_with_apps();
-                    let mut cells: Vec<(&str, bool, SettingsAction)> = apps
-                        .iter()
-                        .map(|(name, _)| {
-                            (
-                                crate::info::short_app_name(name),
-                                ctx.file_open_app == *name,
-                                SettingsAction::FileOpenApp(name.clone()),
-                            )
-                        })
-                        .collect();
-                    cells.push((
-                        "기본 앱",
-                        ctx.file_open_app.is_empty(),
-                        SettingsAction::FileOpenApp(String::new()),
-                    ));
+                    let r = (fx, y, fw.min(420.0), 32.0);
+                    let focused = ctx.input == Some(SettingsInput::CwdPath);
+                    text_field(g, r, &ctx.cwd_mode, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
+                    rects.push((SettingsAction::FocusCwdPath, r));
+                }
+                y += 32.0 + 8.0;
+            }
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "File tree by default",
+                    &["시작할 때 파일 트리 사이드바 열기"], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.file_tree_default, ctx.cursor);
+                    rects.push((SettingsAction::ToggleFileTree, cr));
+                }
+                y = ny;
+            }
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "Pane status bar by default",
+                    &["각 pane 아래 경로 · 브랜치 · diff 바 표시"], TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.footer_default, ctx.cursor);
+                    rects.push((SettingsAction::ToggleFooter, cr));
+                }
+                y = ny;
+            }
+            y = seg_row(g, &mut rects, y, "File open",
+                &["파일 트리에서 파일을 열 때 무엇으로 열지"], &[
+                ("Built-in", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),
+                ("App", open_is("app"), SettingsAction::FileOpenMode("app")),
+                ("Terminal", open_is("terminal"), SettingsAction::FileOpenMode("terminal")),
+            ]);
+            if open_is("app") {
+                // 설치된 것만 뜬다(`open_with_apps`). 마지막 "기본 앱" 은 OS 연결
+                // 프로그램 — 목록에 없는 앱을 쓰는 사람의 탈출구다. 칸이 여럿이라
+                // 오른쪽 칸에 안 들어가므로 아래 줄을 통째로 쓴다.
+                let apps = crate::proc::open_with_apps();
+                let mut cells: Vec<(&str, bool, SettingsAction)> = apps
+                    .iter()
+                    .map(|(name, _)| {
+                        (
+                            crate::info::short_app_name(name),
+                            ctx.file_open_app == *name,
+                            SettingsAction::FileOpenApp(name.clone()),
+                        )
+                    })
+                    .collect();
+                cells.push((
+                    "기본 앱",
+                    ctx.file_open_app.is_empty(),
+                    SettingsAction::FileOpenApp(String::new()),
+                ));
+                if y > clip {
                     segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
                 }
-                y += SEG_H;
+                y += SEG_H + 8.0;
             }
             if open_is("terminal") {
-                y += 10.0;
                 if y > clip {
-                    let r = (fx, y, fw.min(420.0), 34.0);
+                    help_text(g, fx, y, "새 pane 에서 CLI 편집기 — {} 는 파일 경로 자리");
+                    let r = (fx, y + 16.0, fw.min(420.0), 32.0);
                     let focused = ctx.input == Some(SettingsInput::FileOpenCmd);
                     text_field(g, r, &ctx.file_open_cmd, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                     rects.push((SettingsAction::FocusFileOpenCmd, r));
                 }
-                y += 34.0;
+                y += 16.0 + 32.0 + 8.0;
             }
-            y += ROW_GAP;
-            y = field_header(
-                g,
-                fx,
-                y,
-                clip,
-                "Editor autosave",
-                &[&format!("타자가 멎으면 편집기가 조용히 저장 ({PRIMARY_MOD}+S 는 그대로)")],
-            );
-            if y > clip {
-                let cells = [
-                    ("Off", ctx.autosave_ms == 0, SettingsAction::AutosaveDelay(0)),
-                    ("1s", ctx.autosave_ms == 1000, SettingsAction::AutosaveDelay(1000)),
-                    ("3s", ctx.autosave_ms == 3000, SettingsAction::AutosaveDelay(3000)),
-                    ("10s", ctx.autosave_ms == 10000, SettingsAction::AutosaveDelay(10000)),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
-            }
-            y += SEG_H + ROW_GAP;
-            y = field_header(g, fx, y, clip, "Tab position", &["윈도우 탭을 상단 타이틀바 또는 좌측 사이드바에 표시"]);
-            if y > clip {
-                let cells = [
-                    ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
-                    ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
-            }
-            y += SEG_H + ROW_GAP;
+            y = seg_row(g, &mut rects, y, "Editor autosave",
+                &[&format!("타자가 멎으면 조용히 저장 ({PRIMARY_MOD}+S 는 그대로)")], &[
+                ("Off", ctx.autosave_ms == 0, SettingsAction::AutosaveDelay(0)),
+                ("1s", ctx.autosave_ms == 1000, SettingsAction::AutosaveDelay(1000)),
+                ("3s", ctx.autosave_ms == 3000, SettingsAction::AutosaveDelay(3000)),
+                ("10s", ctx.autosave_ms == 10000, SettingsAction::AutosaveDelay(10000)),
+            ]);
+            y = seg_row(g, &mut rects, y, "Tab position",
+                &["윈도우 탭을 타이틀바 또는 사이드바에 표시"], &[
+                ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
+                ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
+            ]);
             // 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
             // 그래서 한쪽에 맞추면 다른 쪽이 어긋난다. 고르는 몫을 사람에게 넘긴다.
-            y = field_header(
-                g,
-                fx,
-                y,
-                clip,
-                "Scroll sensitivity",
-                &["트랙패드 기준이 기본이에요. 마우스 휠이 굼뜨면 올리세요"],
-            );
-            if y > clip {
-                let x100 = (ctx.wheel_pixel_gain * 100.0).round() as u32;
-                let cells = [
-                    ("트랙패드", x100 == 30, SettingsAction::WheelPixelGain(30)),
-                    ("보통", x100 == 60, SettingsAction::WheelPixelGain(60)),
-                    ("마우스", x100 == 100, SettingsAction::WheelPixelGain(100)),
-                    ("빠르게", x100 == 150, SettingsAction::WheelPixelGain(150)),
-                ];
-                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
-            }
-            content_bottom = y + SEG_H;
+            y = seg_row(g, &mut rects, y, "Scroll sensitivity",
+                &["트랙패드 기준이 기본이에요. 휠이 굼뜨면 올리세요"], &[
+                ("트랙패드", x100 == 30, SettingsAction::WheelPixelGain(30)),
+                ("보통", x100 == 60, SettingsAction::WheelPixelGain(60)),
+                ("마우스", x100 == 100, SettingsAction::WheelPixelGain(100)),
+                ("빠르게", x100 == 150, SettingsAction::WheelPixelGain(150)),
+            ]);
+            content_bottom = y;
         }
         SettingsCat::Appearance => {
             let mut y = fy;
@@ -2250,11 +2231,28 @@ pub(crate) fn paint_settings(
         );
     }
 
+    // 이번 프레임 높이를 남긴다 — 다음 프레임의 카드가 이 값으로 그려진다.
+    form_card_end(content_bottom - fy);
     (rects, content_bottom - fy)
 }
 
-/// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
-const SEG_H: f32 = 34.0;
+/// 카테고리 제목 아래 한 줄. 「이 페이지에서 무엇을 정하는가」를 미리 말한다 —
+/// Orca 의 `SettingsSection description` 자리고, 문구도 그쪽 대응 섹션에서 옮겼다
+/// (General = "Workspace defaults, app setup, and maintenance." 등).
+fn cat_blurb(cat: SettingsCat) -> &'static str {
+    match cat {
+        SettingsCat::General => "새 창 기본값, 파일 열기, 스크롤 · 탭 배치",
+        SettingsCat::Appearance => "테마와 폰트, 사이드바와 상태줄, 창 모양",
+        SettingsCat::Shell => "새 pane 이 띄울 셸",
+        SettingsCat::Claude => "계정과 자동 전환, 모델 · 추론 강도, 훅",
+        SettingsCat::Theme => "학생 그림과 페르소나, 캐릭터 목록",
+        SettingsCat::Feedback => "버그와 건의를 보냅니다",
+    }
+}
+
+/// 세그먼트 컨트롤의 고정 높이. Orca 의 md 사이즈(`px-3 py-1 text-sm`)에 트랙
+/// 여백(`p-0.5`)을 더한 값 — 전에 34 였던 것이 다른 컨트롤과 눈금이 안 맞았다.
+const SEG_H: f32 = 28.0;
 
 
 /// 계정 한 줄이 화면에 어떻게 보일지. 값 준비(신원 조회·라벨 폴백)는 부르는 쪽이
@@ -2943,6 +2941,114 @@ fn team_org(email: &str, org: &str) -> Option<String> {
     (!org.is_empty() && org != personal).then(|| org.to_string())
 }
 
+/// 설정 항목 한 줄 = **두 칸**. 왼쪽에 이름과 설명, 오른쪽에 컨트롤.
+///
+/// 이 화면이 못생겼던 첫 번째 이유가 이것이었다(거노 2026-08-13 「왤케 못생겼을까」).
+/// 전에는 제목 → 설명 → 컨트롤을 위에서 아래로만 쌓았다. 폭을 600 잡아 놓고 왼쪽
+/// 정렬만 하니 오른쪽 절반이 늘 비었고, 화면이 「설명 문단 + 작은 컨트롤」의 반복이
+/// 되어 읽을 것이 누를 것보다 많았다. 두 칸으로 가르면 그 빈 절반이 컨트롤 자리가
+/// 되고, 눈이 왼쪽을 훑다 오른쪽에서 멈춘다 — Orca `SettingsRow` 의 문법이다.
+///
+/// 반환은 (컨트롤이 놓일 rect, 다음 줄 y). 컨트롤 크기는 부르는 쪽이 준다.
+fn row2(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    clip: f32,
+    label: &str,
+    desc: &[&str],
+    ctrl: (f32, f32),
+) -> (Rect, f32) {
+    // Orca: 설명이 있으면 py-3, 없으면 py-2. 이 안쪽 여백이 곧 행 사이 간격이라
+    // `ROW_GAP` 같은 바깥 간격을 따로 두지 않는다 — 그 둘을 한 값으로 처리한 것이
+    // 「항목 안」과 「항목 사이」가 구분되지 않던 원인이었다.
+    let pad = if desc.is_empty() { 8.0 } else { 12.0 };
+    let text_h = 18.0 + desc.len() as f32 * 16.0;
+    let h = pad * 2.0 + text_h.max(ctrl.1);
+    if y + h > clip {
+        g.draw_text(
+            x, y + pad, label,
+            gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
+        );
+        let mut dy = y + pad + 20.0;
+        for line in desc {
+            g.draw_text(
+                x, dy, line,
+                gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+            );
+            dy += 16.0;
+        }
+    }
+    let cr = (x + w - ctrl.0, y + (h - ctrl.1) / 2.0, ctrl.0, ctrl.1);
+    (cr, y + h)
+}
+
+/// 두 칸에 안 담기는 항목(계정 목록·긴 텍스트 필드처럼 폭을 다 쓰는 것)의 머리.
+/// 라벨·설명만 그리고 그 아래를 통째로 내준다 — 오른쪽 칸에 밀어 넣으면 컨트롤이
+/// 찌그러지므로, 두 칸을 억지로 지키는 것보다 이 층을 하나 두는 편이 낫다.
+fn row_wide(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    clip: f32,
+    label: &str,
+    desc: &[&str],
+) -> f32 {
+    let pad = 12.0_f32;
+    if y > clip {
+        g.draw_text(
+            x, y + pad, label,
+            gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
+        );
+        let mut dy = y + pad + 20.0;
+        for line in desc {
+            g.draw_text(
+                x, dy, line,
+                gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+            );
+            dy += 16.0;
+        }
+    }
+    y + pad + 20.0 + desc.len() as f32 * 16.0 + 4.0
+}
+
+/// 폼 본문을 담는 카드. Orca 는 섹션 본문을 둥근 카드(`rounded-xl border bg-card/50
+/// px-7 py-6`)에 담아 「이 안이 한 묶음」을 형태로 말한다 — 간격만으로 나열하면
+/// 어디까지가 한 덩어리인지 눈이 못 끊는다.
+///
+/// 높이는 **직전 프레임의 콘텐츠 높이**를 쓴다. 조건부 항목(Custom 경로 필드처럼
+/// 켤 때만 나오는 것)이 있어 그리기 전에는 높이를 모르고, 카드는 내용보다 먼저
+/// 그려야 하기 때문이다(나중에 그리면 방금 쓴 글자를 덮는다). 항목이 늘거나 줄는
+/// 그 한 프레임만 어긋나고, 설정 화면은 매 프레임 다시 그리므로 눈에 안 띈다.
+fn form_card(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32) {
+    let h = FORM_H.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    if h < 8.0 {
+        return;
+    }
+    let p = CARD_PAD;
+    outline_rect(
+        g, x - p, y - p / 2.0, w + p * 2.0, h + p,
+        theme::radius_md(), theme::border(), 1.0,
+        theme::with_alpha(theme::panel_bg(), 0x99),
+    );
+}
+
+/// 이번 프레임에 실제로 그린 콘텐츠 높이 — 다음 프레임의 카드가 이 값을 쓴다.
+fn form_card_end(h: f32) {
+    FORM_H.store(h.clamp(0.0, 20000.0) as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
+static FORM_H: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 카드 안쪽 여백. Orca 의 `px-7 py-6`(28/24)을 하나로 눌러 20 으로 쓴다 — 좌우를
+/// 더 벌리면 폼 폭(600)에서 오른쪽 칸이 설 자리가 줄어든다.
+const CARD_PAD: f32 = 20.0;
+
+/// 토글이 오른쪽 칸에서 차지하는 크기. Orca `h-5 w-9`(20×36) 그대로 — 전에 52×30
+/// 이었던 것이 다른 컨트롤보다 유난히 커서, 같은 행에 서면 눈금이 안 맞았다.
+const TOGGLE: (f32, f32) = (36.0, 20.0);
+
 /// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.
 /// 스크롤로 clip 위로 올라간 줄은 그리지 않되 자리(y 전진)는 유지한다 — 렌더러에
 /// scissor 가 없어 헤더/타이틀바를 침범하지 않으려면 통째로 스킵해야 한다.
@@ -2969,10 +3075,28 @@ fn field_header(g: &mut gpu::GpuRenderer, x: f32, y: f32, clip: f32, title: &str
     hy + 8.0
 }
 
-/// 세그먼트 컨트롤 — 하나의 트랙(pill) 안에 옵션 칸들이 붙어 있는 형태. 선택된
-/// 칸만 accent 로 채우고, hover 칸은 옅게 밝힌다. 칸 폭은 라벨을 **bold** 로 재서
-/// (선택 시 bold 라 더 넓어짐) 글자가 칸 밖으로 넘치지 않게 한다 — 예전엔 non-bold
-/// 로 재고 bold 로 그려 선택 칸 글자가 잘렸다. 각 칸이 클릭 rect 로 등록된다.
+/// 트랙 안쪽 여백(Orca `p-0.5`) — 폭 계산과 그리기가 같은 값을 써야 한다.
+const SEG_PAD: f32 = 2.0;
+/// 칸 좌우 텍스트 여백(Orca `px-3`).
+const SEG_CELL_PAD: f32 = 12.0;
+
+/// 세그먼트가 차지할 폭. `row2` 는 컨트롤 크기를 미리 알아야 오른쪽 정렬을 할 수
+/// 있는데, 세그먼트 폭은 라벨 길이로 정해지므로 그리기 전에 한 번 재야 한다.
+fn seg_width(g: &mut gpu::GpuRenderer, cells: &[(&str, bool, SettingsAction)]) -> f32 {
+    SEG_PAD * 2.0
+        + cells
+            .iter()
+            .map(|(l, _, _)| g.measure_chrome_text(l, 13.0, true) + SEG_CELL_PAD * 2.0)
+            .sum::<f32>()
+}
+
+/// 세그먼트 컨트롤 — 하나의 트랙 안에 옵션 칸들이 붙어 있는 형태. 칸 폭은 라벨을
+/// **bold** 로 재서(선택 시 bold 라 더 넓어짐) 글자가 칸 밖으로 넘치지 않게 한다 —
+/// 예전엔 non-bold 로 재고 bold 로 그려 선택 칸 글자가 잘렸다.
+///
+/// 트랙에 테두리를 두르는 건 Orca 를 따른 것이다(`border border-border
+/// bg-background/50`). 채움만으로는 배경과 한 톤 차이라 「여기가 고르는 자리」가
+/// 안 읽혔고, 항목이 여럿 쌓이면 어느 칸 묶음이 한 컨트롤인지 흐려졌다.
 fn segmented(
     g: &mut gpu::GpuRenderer,
     rects: &mut Vec<(SettingsAction, Rect)>,
@@ -2981,14 +3105,17 @@ fn segmented(
     cells: &[(&str, bool, SettingsAction)],
     cursor: (f32, f32),
 ) {
-    let pad = 4.0_f32; // 트랙 안쪽 여백 (칸이 트랙 테두리에 붙지 않게)
-    let cell_pad = 16.0_f32; // 칸 좌우 텍스트 여백
+    let pad = SEG_PAD;
+    let cell_pad = SEG_CELL_PAD;
     let widths: Vec<f32> = cells
         .iter()
         .map(|(label, _, _)| g.measure_chrome_text(label, 13.0, true) + cell_pad * 2.0)
         .collect();
     let total: f32 = pad * 2.0 + widths.iter().sum::<f32>();
-    round_rect(g, x, y, total, SEG_H, theme::radius_md(), theme::surface_active());
+    outline_rect(
+        g, x, y, total, SEG_H, theme::radius_md(), theme::border(), 1.0,
+        theme::with_alpha(theme::surface_active(), 0x80),
+    );
     let mut cxp = x + pad;
     let cell_h = SEG_H - pad * 2.0;
     for (i, (label, sel, action)) in cells.iter().enumerate() {
@@ -3060,17 +3187,22 @@ fn stepper_btn(g: &mut gpu::GpuRenderer, r: Rect, glyph: &str, cursor: (f32, f32
 fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     let hover = inside(r, cursor);
     g.hover_pointer |= hover;
+    // 꺼진 트랙은 **카드 배경보다 확실히 밝아야** 한다. `surface_active` 는 폼 카드와
+    // 같은 대역이라, 카드 안에 놓이자마자 트랙이 사라지고 흰 손잡이만 공중에 떠
+    // 보였다(2026-08-13 캡처). Orca 의 `bg-muted-foreground/30` 과 같은 뜻이다.
     let track = if on {
         theme::accent()
     } else if hover {
-        theme::surface_hover()
+        theme::with_alpha(theme::text_mute(), 0x66)
     } else {
-        theme::surface_active()
+        theme::with_alpha(theme::text_mute(), 0x4d)
     };
     pill_rect(g, r.0, r.1, r.2, r.3, track);
-    let knob = r.3 - 8.0;
-    let kx = if on { r.0 + r.2 - knob - 4.0 } else { r.0 + 4.0 };
-    circle_rect(g, kx, r.1 + 4.0, knob, theme::text());
+    // Orca 비율(w9 h5 knob 3.5 = 36×20, 손잡이 14)에 맞춘 여백 3. 전에는 4 여서
+    // 20 높이 트랙에 손잡이가 12 로 앉아 유난히 작아 보였다.
+    let knob = r.3 - 6.0;
+    let kx = if on { r.0 + r.2 - knob - 3.0 } else { r.0 + 3.0 };
+    circle_rect(g, kx, r.1 + 3.0, knob, theme::text());
 }
 
 /// 멀티라인 평문 편집기 — 배경 박스 + 접힌 줄 + 캐럿. 자란 높이를 돌려주므로
