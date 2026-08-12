@@ -2738,6 +2738,50 @@ pub fn read_default_shell() -> Option<String> {
 /// Per-pane claude wrapper knobs, read by the shim installer and the settings
 /// "클로드" tab. Invariants (session-id / --settings / task-list) are never
 /// keyed here — they stay hardcoded in the wrapper.
+/// 지금 로스터와 그림을 `~/.config/kasaterm/themes/<id>/` 로 복제한다. 만들어진
+/// 폴더를 돌려준다.
+///
+/// 새 테마를 만들 **본보기**다 — 없으면 사용자는 80명치 JSON 과 파일명 규칙을
+/// 맨손으로 맞춰야 한다. 복제본을 곧바로 활성화하지는 않는다(내용이 지금과 같아서
+/// 켜 봤자 아무것도 안 바뀐 것처럼 보인다).
+///
+/// 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
+/// 되돌릴 수 없다.
+pub fn export_current_theme() -> std::io::Result<std::path::PathBuf> {
+    let root = kasa_socket::home_dir()
+        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?
+        .join(".config/kasaterm/themes");
+    let dir = (1..1000)
+        .map(|n| root.join(if n == 1 { "my-theme".into() } else { format!("my-theme-{n}") }))
+        .find(|p| !p.exists())
+        .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
+    std::fs::create_dir_all(&dir)?;
+
+    let mut roster = kasa_mcp::character::characters_json()
+        .ok_or_else(|| std::io::Error::other("로스터를 못 읽었다"))?;
+    // 폴더명을 그대로 표시명으로 둔다 — 사용자가 여기부터 고치라는 자리 표시다.
+    if let Some(o) = roster.as_object_mut() {
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("my-theme");
+        o.insert("label".into(), serde_json::Value::String(name.into()));
+    }
+    let body = serde_json::to_string_pretty(&roster).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join("theme.json"), body)?;
+    crate::render::export_student_sprites(&dir.join("sprites"))?;
+    Ok(dir)
+}
+
+/// 고른 캐릭터 테마 id — 빈 문자열이면 번들. 폴더가 실재하는지는 여기서 안 본다
+/// (`character::active_theme_dir` 이 그걸 판정한다). 설정 화면이 「지금 고른 것」을
+/// 표시하는 데 쓰므로, 폴더가 사라져도 고른 값 자체는 그대로 보여야 사용자가
+/// 무엇이 어긋났는지 안다.
+pub fn read_character_theme() -> String {
+    read_settings()
+        .get("character_theme")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 pub fn read_claude_persona() -> bool {
     read_settings().get("claude_persona").and_then(|x| x.as_bool()).unwrap_or(true)
 }
