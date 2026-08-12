@@ -1965,11 +1965,22 @@ impl ApplicationHandler<UserEvent> for App {
             // 때까지 화면이 stale — "다른 앱 보다가 돌아오면 0.5초 늦음"의 원인.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
-                self.chrome_dirty = true;
+                if focused {
+                    // A restored pane can acquire its footer after the first
+                    // PTY snapshot, making its initially assigned grid a few
+                    // rows too tall. Focus return is a reliable reconciliation
+                    // point, and same-size PTY resizes are no-ops.
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    for pane in self.pty.values() {
+                        pane.publish_full_snapshot();
+                    }
+                }
+                self.repaint_all();
                 window.request_redraw();
             }
             WindowEvent::Occluded(false) => {
-                self.chrome_dirty = true;
+                self.repaint_all();
                 window.request_redraw();
             }
             // 비-macOS 에서 OS 의 밝게/어둡게를 아는 유일한 창구. macOS 는 창
@@ -5588,6 +5599,13 @@ impl ApplicationHandler<UserEvent> for App {
         // any session (active or stashed background).
         if !self.pending_restores.is_empty() {
             let now = std::time::Instant::now();
+            if self.pending_restores.iter().any(|(_, _, at)| now >= *at) {
+                // The first shell frame has populated pane chrome by now, so
+                // size once more before starting a full-screen program. This
+                // prevents Claude from laying out against the pre-footer grid.
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+            }
             self.pending_restores.retain(|(sess, cmd, at)| {
                 if now >= *at {
                     let _ = sess.send_bytes(cmd.as_bytes());
