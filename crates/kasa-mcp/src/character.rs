@@ -9,15 +9,103 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
+fn home() -> Option<PathBuf> {
+    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).map(PathBuf::from)
+}
+
+/// settings.json 의 문자열 설정 하나. 앱의 `socket::read_settings` 와 같은 파일을
+/// 보지만 여기서 직접 읽는다 — kasa-mcp → app 은 없는 의존 방향이라 부를 수가 없다.
+fn read_setting_str(key: &str) -> Option<String> {
+    let p = home()?.join(".config/kasaterm/settings.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    v.get(key)?.as_str().map(String::from)
+}
+
+/// 테마 팩 루트 — `~/.config/kasaterm/themes/`. **폴더 하나가 테마 하나**다:
+/// `theme.json`(로스터 + 팔레트) + `sprites/`(캐릭터 그림). 지금까지 흩어져 있던
+/// 세 override(`students/`·`characters.json`·`custom_theme`)를 한 단위로 묶은 것이라,
+/// 폴더째 주고받으면 그게 곧 테마 배포다.
+fn themes_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_THEMES_DIR") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    Some(home()?.join(".config/kasaterm/themes"))
+}
+
+/// 활성 테마 폴더. settings.json 의 `character_theme` 가 고른다(팔레트 테마 키
+/// `theme` 와 다른 이름인 이유가 이것 — 둘은 따로 고른다).
+///
+/// **폴더에 `theme.json` 이 실재할 때만** 돌려준다. 테마를 지우고 앱을 켜면 설정
+/// 키만 남는데 그걸 믿으면 로스터가 통째로 비어 캐릭터 배정이 멈춘다. 없으면
+/// 조용히 번들로 돌아가는 쪽이 맞다.
+pub fn active_theme_dir() -> Option<PathBuf> {
+    // env 가 설정을 이긴다 — 헤드리스 검증이 사용자 settings.json 을 건드리지 않고
+    // 테마를 갈아 끼울 유일한 손잡이다(`KASATERM_STUDENTS_DIR` 과 같은 역할).
+    let id = std::env::var("KASATERM_CHARACTER_THEME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_setting_str("character_theme"))?;
+    active_theme_dir_in(&themes_root()?, &id)
+}
+
+/// root 주입 버전(테스트용) — themes_root·settings 해석과 분리해 env 없이 검증한다.
+fn active_theme_dir_in(root: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let d = root.join(id);
+    d.join("theme.json").is_file().then_some(d)
+}
+
+/// 설치된 테마 `(id, label)` 목록 — 설정 화면의 선택지. 번들은 폴더가 없으니 여기
+/// 안 들어간다(호출부가 맨 앞에 따로 세운다). label 은 `theme.json` 의 `label`,
+/// 없으면 기존 스키마의 `theme` 필드, 그것도 없으면 폴더 이름.
+pub fn list_themes() -> Vec<(String, String)> {
+    themes_root().map(|r| list_themes_in(&r)).unwrap_or_default()
+}
+
+/// root 주입 버전(테스트용).
+fn list_themes_in(root: &Path) -> Vec<(String, String)> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let f = e.path().join("theme.json");
+            if !f.is_file() {
+                return None;
+            }
+            let id = e.file_name().to_str()?.to_string();
+            let label = std::fs::read_to_string(&f)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("label")
+                        .or_else(|| v.get("theme"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| id.clone());
+            Some((id, label))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// characters.json 후보 경로 — kasaterm-assign-character.py 와 동일 우선순위:
-/// ~/.config → env override → .app Resources(mac)/exe 옆(win MSI) → 레포 소스.
+/// 활성 테마 → ~/.config → env override → .app Resources(mac)/exe 옆(win MSI) → 레포 소스.
 fn candidate_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    // Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
-    if let Some(home) =
-        std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
-    {
-        v.push(PathBuf::from(home).join(".config/kasaterm/characters.json"));
+    // 테마가 최우선 — 고른 테마의 로스터가 개별 override 보다 앞선다. 뒤에 두면
+    // 옛 characters.json 이 남아 있는 사용자에게 테마 선택이 아무 일도 안 한다.
+    if let Some(d) = active_theme_dir() {
+        v.push(d.join("theme.json"));
+    }
+    if let Some(home) = home() {
+        v.push(home.join(".config/kasaterm/characters.json"));
     }
     if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
         v.push(PathBuf::from(p).join("characters.json"));
@@ -165,11 +253,17 @@ pub fn raw_persona_for(chars: &Value, name: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// 사용자 override characters.json 경로 — `~/.config/kasaterm/characters.json`
-/// (candidate_paths 의 최우선 슬롯). 설정 폼 저장 대상.
+/// 설정 폼이 persona·색을 저장할 파일 — `candidate_paths` 의 최우선 슬롯과 **같은
+/// 자리여야 한다**. 활성 테마가 있으면 그 테마의 `theme.json`, 없으면 기존
+/// `~/.config/kasaterm/characters.json`.
+///
+/// 여기가 읽기 우선순위와 어긋나면 저장은 성공하는데 읽기는 테마가 이겨서, 편집한
+/// persona 가 화면에 영영 안 나타난다 — 오류도 안 나므로 알아챌 방법이 없다.
 pub fn user_characters_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".config/kasaterm/characters.json"))
+    if let Some(d) = active_theme_dir() {
+        return Some(d.join("theme.json"));
+    }
+    Some(home()?.join(".config/kasaterm/characters.json"))
 }
 
 /// 사용자 override characters.json 에서 `name` 캐릭터의 `key` 필드를 갱신한다
@@ -784,6 +878,53 @@ mod least_used_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 테마 폴더 판정은 `theme.json` 의 **실재**로만 한다.
+    ///
+    /// 설정 키만 믿으면, 테마 폴더를 지운 뒤 앱을 켰을 때 로스터가 통째로 비어
+    /// 캐릭터 배정이 멈춘다. 그건 오류로 안 드러나고 「학생이 안 뜬다」로만 보인다.
+    #[test]
+    fn theme_pack_discovery() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kasaterm-themes-{}-{n}", std::process::id()));
+
+        // label 있음 / label 없이 기존 스키마의 theme 필드만 / 둘 다 없음.
+        for (id, body) in [
+            ("eternal-return", r#"{"label":"이터널 리턴","members":[]}"#),
+            ("wuwa", r#"{"theme":"명조","members":[]}"#),
+            ("nameless", r#"{"members":[]}"#),
+        ] {
+            std::fs::create_dir_all(root.join(id)).unwrap();
+            std::fs::write(root.join(id).join("theme.json"), body).unwrap();
+        }
+        // theme.json 없는 폴더는 테마가 아니다 — sprites 만 놓다 만 자리일 수 있다.
+        std::fs::create_dir_all(root.join("half-made/sprites")).unwrap();
+
+        let got = list_themes_in(&root);
+        assert_eq!(
+            got,
+            vec![
+                ("eternal-return".into(), "이터널 리턴".into()),
+                ("nameless".into(), "nameless".into()),
+                ("wuwa".into(), "명조".into()),
+            ]
+        );
+
+        assert_eq!(
+            active_theme_dir_in(&root, "eternal-return"),
+            Some(root.join("eternal-return"))
+        );
+        // 폴더는 있는데 theme.json 이 없다 → 번들로 폴백.
+        assert_eq!(active_theme_dir_in(&root, "half-made"), None);
+        // 지워진 테마가 설정에 남아 있는 경우.
+        assert_eq!(active_theme_dir_in(&root, "deleted"), None);
+        assert_eq!(active_theme_dir_in(&root, ""), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn session_character_roundtrip() {
