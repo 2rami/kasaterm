@@ -1411,6 +1411,87 @@ impl App {
                             profile_slots.push((slug, (x, y, face_w, face_h)));
                         }
                     }
+                    // claude v2.1.228 은 처리 끝난 팀메시지를 접힌 줄이 아니라
+                    // `@ <발신 라벨>❯` + 들여쓴 본문으로 **펼쳐서** 그린다 — 위
+                    // 접힌 줄 탐지가 영영 안 걸리는 형태다(2026-08-12, 거노 스샷).
+                    // 화면 라벨이 transcript 태그의 from_label 과 일치할 때만
+                    // 남의 메시지로 인정한다 — 사용자가 직접 친 `@ …❯` 보호.
+                    for r in 0..composed.len() {
+                        let Some((c0, qcol, label)) =
+                            peer_native_header_line(&composed[r])
+                        else {
+                            continue;
+                        };
+                        let Some(msg) = msg_path
+                            .as_deref()
+                            .and_then(|p| latest_teammate_msg(p, PEER_LABEL))
+                        else {
+                            continue;
+                        };
+                        // 와이드 글리프 스페이서가 공백으로 섞이므로 공백 무시 대조.
+                        let norm = |s: &str| -> String {
+                            s.chars().filter(|c| !c.is_whitespace()).collect()
+                        };
+                        if msg.from_label.as_deref().map(&norm) != Some(norm(&label)) {
+                            continue;
+                        }
+                        let sender = msg
+                            .sender
+                            .clone()
+                            .unwrap_or_else(|| PEER_LABEL.to_string());
+                        // 이름이 학생을 안 알려 주면 세션 id 로 pane 을 되짚는다 —
+                        // 접힌 경로와 같은 규칙(⚠️pane_character_if_known 금지, 위 주석).
+                        let sender = if teammate_sender_slug(&sender).is_some() {
+                            sender
+                        } else {
+                            msg.peer_sid
+                                .as_deref()
+                                .and_then(|sid| {
+                                    self.pane_claude_sid
+                                        .iter()
+                                        .find(|(_, s)| s.as_str() == sid)
+                                        .map(|(p, _)| ws.active_tab_pid(p))
+                                })
+                                .and_then(|key| ws.pane_character.get(&key).cloned())
+                                .unwrap_or(sender)
+                        };
+                        let accent =
+                            teammate_sender_accent(&sender, msg.color.as_deref());
+                        let slug = teammate_sender_slug(&sender);
+                        // 학생을 알면 긴 발신 라벨을 이름으로 갈아끼운다 — 라벨은
+                        // 발신 세션의 자동 제목이라 「sendmessage로 7유저에게…」 같은
+                        // 소음이다. 못 찾으면 원문 유지(색만).
+                        if slug.is_some() {
+                            restyle_peer_native_header(
+                                &mut composed[r], c0, qcol, &sender, accent,
+                            );
+                        }
+                        tint_row(&mut composed[r], accent);
+                        let mut rr = r + 1;
+                        let mut face_row: Option<usize> = None;
+                        while rr < composed.len() && tell_wrap_continuation(&composed[rr])
+                        {
+                            face_row.get_or_insert(rr);
+                            tint_row(&mut composed[rr], accent);
+                            rr += 1;
+                        }
+                        // 프사 — tell 과 같은 관례: 본문 행 왼쪽 여백(들여쓰기 2칸)에
+                        // 본문과 같은 행으로. 본문이 없으면(헤더뿐) 포기하고 색만.
+                        if let (Some(fr), Some(slug)) = (face_row, slug) {
+                            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                            let scw = self.cell.w * fs;
+                            let sch = self.cell.h * fs;
+                            profile_slots.push((
+                                slug,
+                                (
+                                    body_left,
+                                    body_top + fr as f32 * sch,
+                                    TELL_FACE_COLS as f32 * scw,
+                                    sch,
+                                ),
+                            ));
+                        }
+                    }
                 }
                 // 크로스-방 tell(⟦캐릭터⟧ 본문)을 발신 학생 테마색으로 — 팀 경계를
                 // 넘는 tell 은 네이티브 teammate 가 아니라 raw user 입력이라 거노 발신
@@ -6587,10 +6668,13 @@ impl App {
                         _ => name,
                     }
                 };
-                let mut rows: Vec<(AccountMenuItem, String)> = vec![(
-                    AccountMenuItem::Select(String::new()),
-                    named("", crate::settings::account_display("", "", "기본")),
-                )];
+                let mut rows: Vec<(AccountMenuItem, String)> = vec![
+                    (AccountMenuItem::Header("Claude"), "Claude".to_string()),
+                    (
+                        AccountMenuItem::Select(String::new()),
+                        named("", crate::settings::account_display("", "", "기본")),
+                    ),
+                ];
                 rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
                     (
                         AccountMenuItem::Select(a.id.clone()),
@@ -6602,6 +6686,28 @@ impl App {
                                 &format!("계정 {}", i + 2),
                             ),
                         ),
+                    )
+                }));
+                // codex 판. 신원은 `auth.json` 하나로 즉시 읽히므로 라벨이 없으면 그
+                // 이메일로 부른다 — claude 쪽 `account_display` 와 같은 규칙이다.
+                let codex_name = |id: &str, label: &str, fallback: String| -> String {
+                    let ident = crate::settings::codex_identity(id);
+                    match (label.is_empty(), ident) {
+                        (true, Some(e)) => e,
+                        (true, None) => fallback,
+                        (false, Some(e)) if !label.contains(&e) => format!("{label} · {e}"),
+                        (false, _) => label.to_string(),
+                    }
+                };
+                rows.push((AccountMenuItem::Header("Codex"), "Codex".to_string()));
+                rows.push((
+                    AccountMenuItem::SelectCodex(String::new()),
+                    codex_name("", "", "기본".to_string()),
+                ));
+                rows.extend(self.set_codex_accounts.iter().enumerate().map(|(i, a)| {
+                    (
+                        AccountMenuItem::SelectCodex(a.id.clone()),
+                        codex_name(&a.id, &a.label, format!("계정 {}", i + 2)),
                     )
                 }));
                 rows.push((
@@ -6649,6 +6755,17 @@ impl App {
                         _ => None,
                     }
                 };
+                // codex 쪽엔 한도 조회 경로가 없다. 대신 **로그인 여부**를 같은 자리에
+                // 적는다 — 아직 로그인 안 한 슬롯은 이름이 "계정 2" 로 폴백돼, 아무
+                // 표시가 없으면 멀쩡한 계정과 구별이 안 된다(눌러 보고서야 안다).
+                let row_note = |item: &AccountMenuItem| -> Option<&'static str> {
+                    match item {
+                        AccountMenuItem::SelectCodex(id) => {
+                            crate::settings::codex_identity(id).is_none().then_some("로그인 필요")
+                        }
+                        _ => None,
+                    }
+                };
                 let rh = 28.0_f32;
                 let pad = 4.0_f32;
                 // 한도 칸이 이름을 밀지 않게 폭 계산에 함께 넣는다.
@@ -6660,11 +6777,25 @@ impl App {
                         if let Some(b) = row_usage(item) {
                             w += gap + g.measure_chrome_text(usage_text(&b).as_str(), f - 1.0, true);
                         }
+                        if let Some(n) = row_note(item) {
+                            w += gap + g.measure_chrome_text(n, f - 1.0, true);
+                        }
                         w
                     })
                     .fold(aw, f32::max);
-                // +5 = "추가" 행 위 구분선이 먹는 자리.
-                let mh = pad * 2.0 + rh * rows.len() as f32 + 5.0;
+                // 구역 라벨은 계정 행보다 낮다 — 누를 수 없는 줄이 같은 높이를 먹으면
+                // 목록이 그만큼 길어 보이고, 헤더가 계정처럼 읽힌다.
+                let head_h = 20.0_f32;
+                let heads = rows
+                    .iter()
+                    .filter(|(i, _)| matches!(i, AccountMenuItem::Header(_)))
+                    .count();
+                // 구분선이 먹는 자리 = "추가" 행 위 하나 + 첫 헤더를 뺀 나머지 헤더 위.
+                let rules = 1 + heads.saturating_sub(1);
+                let mh = pad * 2.0
+                    + rh * (rows.len() - heads) as f32
+                    + head_h * heads as f32
+                    + 5.0 * rules as f32;
                 // 계정 행 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
                 let mx = (ax + aw - mw).max(4.0);
                 // 아래로 펼치되 자리가 없으면 **위로 뒤집는다**. 손잡이 하나가 창 맨
@@ -6685,13 +6816,34 @@ impl App {
                 panel_rect_outlined(g, mx, my, mw, mh, theme::radius_sm(), theme::surface_hover());
                 let mut ry = my + pad;
                 for (item, label) in rows {
-                    if item == AccountMenuItem::AddInSettings {
-                        // 전환 목록과는 다른 종류의 동작이라 얇은 선으로 가른다.
+                    let head = matches!(item, AccountMenuItem::Header(_));
+                    // 구역이 바뀌는 자리와 "추가" 행 위에 얇은 선. 첫 헤더는 메뉴 맨
+                    // 위라 선이 테두리와 겹쳐 지저분해지므로 뺀다.
+                    if (head && ry > my + pad) || item == AccountMenuItem::AddInSettings {
                         g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
                         ry += 5.0;
                     }
+                    if head {
+                        // 누를 수 없는 줄이다 — hover 도 히트박스도 주지 않는다.
+                        let hf = f - 2.0;
+                        g.draw_text(
+                            mx + pad_x, ry + (head_h - hf) / 2.0 - 1.0, &label,
+                            gpu::DrawOpts {
+                                font_size: hf,
+                                color: theme::text_mute(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        ry += head_h;
+                        continue;
+                    }
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + rh;
-                    let active = item == AccountMenuItem::Select(self.set_claude_account.clone());
+                    let active = match &item {
+                        AccountMenuItem::Select(id) => *id == self.set_claude_account,
+                        AccountMenuItem::SelectCodex(id) => *id == self.set_codex_account,
+                        _ => false,
+                    };
                     if on {
                         round_rect(g, mx + pad, ry, mw - pad * 2.0, rh,
                             theme::radius_sm(), theme::surface_active());
@@ -6730,6 +6882,19 @@ impl App {
                         g.draw_text(
                             mx + mw - pad_x - uw, ry + (rh - uf) / 2.0 - 1.0, &u,
                             gpu::DrawOpts { font_size: uf, color: col, bold: true, italic: false },
+                        );
+                    }
+                    if let Some(n) = row_note(&item) {
+                        let nf = f - 1.0;
+                        let nw = g.measure_chrome_text(n, nf, true);
+                        g.draw_text(
+                            mx + mw - pad_x - nw, ry + (rh - nf) / 2.0 - 1.0, n,
+                            gpu::DrawOpts {
+                                font_size: nf,
+                                color: theme::danger(),
+                                bold: true,
+                                italic: false,
+                            },
                         );
                     }
                     self.account_menu_hits.push((item, (mx, ry, mw, rh)));
@@ -7918,6 +8083,31 @@ fn tint_toward(base: [u8; 3], accent: [u8; 4], amount: f32) -> kasa_bridge::scre
     )
 }
 
+/// claude v2.1.228 이 **펼쳐서** 그리는 팀메시지 헤더 — `@ <발신 라벨>❯`. 본문은
+/// 다음 행부터 2칸 들여쓰기로 이미 화면에 있다(접힌 형태와 달리 전개가 필요 없다).
+/// 반환은 (첫 글리프 col, `❯` col, 라벨). '@' 로 시작하는 아무 행이나 잡으면 사용자가
+/// 직접 친 텍스트를 덮으므로, 호출부가 transcript 태그의 from_label 과 대조해
+/// 일치할 때만 쓴다.
+fn peer_native_header_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
+    let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
+    if row[first].ch != '@' || row.get(first + 1).map(|c| c.ch) != Some(' ') {
+        return None;
+    }
+    let qcol = (first + 2..row.len()).find(|&i| row[i].ch == '❯')?;
+    let label: String = row[first + 2..qcol]
+        .iter()
+        .filter(|c| c.ch != '\0')
+        .map(|c| c.ch)
+        .collect();
+    let label = label.trim().to_string();
+    if label.is_empty()
+        || row[qcol + 1..].iter().any(|c| !matches!(c.ch, ' ' | '\0'))
+    {
+        return None;
+    }
+    Some((first, qcol, label))
+}
+
 /// verbose OFF 에서 접힌 팀메시지 행 탐지 — 단수 "› Message from @<이름>" 또는
 /// 복수 "› <N> messages from @<이름>". 반환은 (첫 글리프 col, 메시지 수, 보낸이
 /// agent 이름). 이름 뒤에 다른 글자가 있으면(본문 안 인용 등) 접힌 줄이 아니라고
@@ -8004,6 +8194,45 @@ pub(crate) const TELL_FACE_COLS: usize = 2;
 /// 폭만큼 밀려 계단이 졌다(거노 2026-07-27). 위 행 헤더로 올리는 안은 claude 가
 /// user 턴 앞에 빈 줄을 두지 않아 윗줄 글자를 덮어 기각(실측). slug 없는
 /// 캐릭터만 `이름 ›` 인라인 폴백. 반환은 프사 rect 의 x 기준 col — 없으면 None.
+/// `@ <발신 라벨>❯` 헤더의 라벨을 학생 이름으로 — `@ 이름❯` 만 남기고 뒤는 지운다.
+/// 색은 tint_row 가 뒤에서 입히므로 여기선 글자만 놓는다.
+fn restyle_peer_native_header(
+    row: &mut [GridCell],
+    c0: usize,
+    qcol: usize,
+    name: &str,
+    accent: [u8; 4],
+) {
+    use unicode_width::UnicodeWidthChar;
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+    let style = row[c0].clone();
+    let end = (qcol + 1).min(row.len());
+    for c in row[c0..end].iter_mut() {
+        let mut b = style.clone();
+        b.ch = ' ';
+        *c = b;
+    }
+    let text = format!("@ {name}❯");
+    let mut w = c0;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(1).max(1);
+        if w + cw > end {
+            break;
+        }
+        let mut cell = style.clone();
+        cell.ch = ch;
+        cell.fg = fg.clone();
+        row[w] = cell;
+        if cw == 2 && w + 1 < end {
+            let mut sp = style.clone();
+            sp.ch = ' ';
+            sp.fg = fg.clone();
+            row[w + 1] = sp;
+        }
+        w += cw;
+    }
+}
+
 fn restyle_tell_line(
     row: &mut [GridCell],
     marker_start: usize,
@@ -8160,6 +8389,10 @@ struct TeammateMsg {
     /// 화면에 뜬 이름이 쓸모없을 때(`@peer`) 태그에서 되찾은 진짜 발신자.
     /// 이게 있어야 학생색·프사·본문 조회가 이름으로 걸린다.
     sender: Option<String>,
+    /// 태그 원문의 발신 라벨(teammate_id / from-name 그대로). claude 가 메시지를
+    /// `@ <라벨>❯` 로 펼쳐 그릴 때 화면 제목과 대조하는 앵커다 — 사용자가 직접 친
+    /// `@ …❯` 텍스트를 남의 메시지로 오인해 덮지 않기 위한 필수 관문.
+    from_label: Option<String>,
     /// 보낸 세션의 claude session id. **이름이 학생을 안 알려 줄 때의 정답**이다 —
     /// 명부의 이름은 세션 제목으로 덮이는 값이라(`mcp, skill사이드바`) 로스터에 없는
     /// 글자가 오기 일쑤인데, 세션 id 로는 그 pane 을 찾아 배정 학생을 직접 물을 수
@@ -8266,6 +8499,7 @@ fn extract_tagged_msg(
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
                 sender: ident.as_ref().and_then(|(n, _)| n.clone()),
+                from_label: attr(id_attr),
                 peer_sid: ident.and_then(|(_, s)| s),
             });
         }
@@ -8306,7 +8540,15 @@ fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateM
     }
     let (tail, _) = crate::socket::read_tail(path, 256 * 1024);
     let found = tail.lines().rev().find_map(|l| {
-        if !l.contains("<teammate-message") || !l.contains(sender) {
+        // ⚠️두 태그 형식을 **둘 다** 통과시켜야 한다. `<teammate-message` 만 보던
+        // 동안 cross-session 배달(`<cross-session-message`)이 전부 걸러져, 272c508
+        // 의 발신자 되짚기가 라이브에서 한 번도 돌지 않았다(2026-08-12 확정 —
+        // 테스트는 이 프리필터를 우회해 extract 를 직접 불러서 못 잡았다).
+        // `@peer` 라벨은 발신자와 무관한 고정값이라 이름 대조 자체를 건너뛴다.
+        let tag_hit =
+            l.contains("<teammate-message") || l.contains("<cross-session-message");
+        let sender_hit = sender == PEER_LABEL || l.contains(sender);
+        if !tag_hit || !sender_hit {
             return None;
         }
         let v: serde_json::Value = serde_json::from_str(l).ok()?;
@@ -11373,6 +11615,56 @@ mod cross_session_msg_tests {
 ROUNDTRIP-OK\n\
 </cross-session-message>\n\
 This came from another Claude session";
+
+    fn row_from(s: &str, cols: usize) -> Vec<GridCell> {
+        let mut row = vec![GridCell::blank(); cols];
+        for (i, c) in s.chars().enumerate() {
+            row[i].ch = c;
+        }
+        row
+    }
+
+    /// ★프리필터 회귀 — 이 레벨 테스트가 없어서 272c508 이 라이브에서 죽은 채
+    /// 통과했다. extract 직접 호출이 아니라 **latest_teammate_msg** 를 지나야 한다.
+    #[test]
+    fn latest_teammate_msg_passes_cross_session_lines() {
+        let dir = std::env::temp_dir().join("kasaterm-prefilter-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("t.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": REAL }
+        });
+        std::fs::write(&path, format!("{line}
+")).unwrap();
+        let m = latest_teammate_msg(&path, PEER_LABEL)
+            .expect("cross-session 줄이 프리필터에서 걸러졌다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
+        assert_eq!(m.from_label.as_deref(), Some("타이틀 생성 푸시"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// claude v2.1.228 펼침 헤더 — `@ <라벨>❯` + 다음 행 2칸 들여쓴 본문.
+    #[test]
+    fn native_expanded_header_detected() {
+        let row = row_from("@ sendmessage로 7유저에게 메시지 전송❯", 60);
+        let (c0, qcol, label) =
+            peer_native_header_line(&row).expect("펼침 헤더를 못 잡았다");
+        assert_eq!(c0, 0);
+        assert_eq!(row[qcol].ch, '❯');
+        assert_eq!(label, "sendmessage로 7유저에게 메시지 전송");
+    }
+
+    /// `❯` 없이 '@' 로 시작하는 행(사용자 입력·멘션)은 잡으면 안 된다.
+    #[test]
+    fn native_header_rejects_plain_at_lines() {
+        assert!(peer_native_header_line(&row_from("@ 아루 봐줘", 40)).is_none());
+        assert!(peer_native_header_line(&row_from("@아루", 40)).is_none());
+        // '❯' 뒤에 딴 글자가 이어지면 본문 인용이다.
+        assert!(
+            peer_native_header_line(&row_from("@ 제목❯ 이어지는 말", 40)).is_none()
+        );
+    }
 
     #[test]
     fn peer_label_picks_up_cross_session_body() {
