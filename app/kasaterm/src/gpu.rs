@@ -819,6 +819,26 @@ impl GpuRenderer {
         });
     }
 
+    /// Compact-progress rail (logical px). Pushes ONE `FLAG_COMPACT_BAR` instance;
+    /// the shader fills from the left on a 2.4s loop and restarts, so the header
+    /// says "something with an end is running" — the shape a sweep can't say.
+    /// Same idle-0-CPU property as the two bars above.
+    ///
+    /// 채운 칸이 실제 진행률은 아니다. claude 는 compact 진행률을 화면에만 내놓고
+    /// 우리에게 넘기지 않으므로 시간으로 채운다. 그 화면 표시가 teammate 메시지
+    /// 오버레이에 가려질 수 있어서 헤더에 따로 신호를 두는 것이 이 바의 존재 이유다.
+    pub fn compact_bar(&mut self, x: f32, y: f32, w: f32, h: f32, rgba_u8: [u8; 4]) {
+        let s = self.scale;
+        self.chrome.push(CellInstance {
+            cell_px: [x * s, y * s, w * s, h * s],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            flags: CellInstance::FLAG_COMPACT_BAR,
+            ..Default::default()
+        });
+    }
+
     /// Filled rounded rectangle (logical px) — circle-traced caps, same as
     /// main.rs's `round_rect` but a method so the markdown renderer can round
     /// code blocks / inline-code chips.
