@@ -345,44 +345,20 @@ impl App {
             .push(socket::ClaudeAccount { id: id.clone(), label: String::new() });
         self.settings_save();
 
-        // env 를 명령 앞에 붙여 그 claude 프로세스에만 새 저장소를 물린다. shim 의
-        // export 는 `${VAR+x}` 가드라 이미 설정된 값을 덮지 않는다.
-        let pane = self
-            .split_active_pane(kasa_pty::SplitDir::Horizontal)
-            .unwrap_or_default();
-        let Some(sess) = self.pty.get(&pane).cloned() else {
-            self.set_toast("계정 추가됨 — pane 을 열지 못해 로그인은 수동으로".to_string());
-            return;
-        };
-        let q = dir.display().to_string().replace('\'', "'\\''");
-        // 900ms = swap_character 와 같은 "셸 프롬프트가 뜰 즈음" 대기.
-        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
-        // 예전엔 맨 `claude` 를 띄웠다. 그러면 로그인은 거노가 그 안에서 `/login` 을
-        // 찾아 눌러야 하는 숨은 한 단계였고(거노: "계정추가 누르면 그냥 클로드가
-        // 켜지는데?"), 정작 계정을 가르는 일은 아무것도 안 했다.
-        self.pending_restores.push((
-            sess,
-            format!("CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}' claude auth login --claudeai\r"),
-            at,
-        ));
-        // 슬롯이 자꾸 같은 계정으로 겹친 진짜 원인은 여기다: `claude auth login` 이
-        // 기본 브라우저를 여는데 거기엔 지금 계정의 claude.ai 세션이 살아 있어
-        // 그대로 승인돼 버린다. 슬롯마다 **쿠키 없는 브라우저 프로필**을 갈라 두면
-        // 새 창은 로그인 화면부터 뜨고, 그제서야 다른 계정을 넣을 수 있다.
-        spawn_oauth_browser_watch(self.ws.clone(), pane.clone(), socket::oauth_profile_dir(&id));
-        self.set_toast(
-            "빈 브라우저 창에서 새 계정으로 로그인하세요 — 기본 브라우저 탭은 닫으시고요"
-                .to_string(),
+        // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
+        // 닫지도, pane 을 띄우지도 않는다 — 이 자리에 「로그인 중… / 취소」가 뜬다.
+        // 슬롯마다 쿠키 없는 브라우저 프로필을 갈라 주는 건 그대로다: `claude auth
+        // login` 이 기본 브라우저를 열면 지금 계정의 claude.ai 세션이 그대로 승인돼
+        // 슬롯 전부가 같은 계정이 됐다(거노: "계정추가하면 1,2 같은계정으로 되는데").
+        spawn_hidden_login(
+            "Claude",
+            id.clone(),
+            "claude auth login --claudeai".to_string(),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            dir,
+            socket::oauth_profile_dir(&id),
         );
-        // 설정은 **별도 창**이라, 이걸 안 닫으면 로그인 pane 도 토스트도 전부 그
-        // 창 뒤에서 벌어진다 — 거노 눈엔 버튼이 먹통인 것과 구별이 안 됐다.
-        // 어차피 다음 할 일이 터미널에서 로그인하는 것이니 본창으로 넘긴다.
-        if let Some(i) = self.settings_window_idx() {
-            self.close_settings_window(i);
-        }
-        if let Some(w) = self.window.as_ref() {
-            w.focus_window();
-        }
+        self.set_toast("빈 브라우저 창에서 새 계정으로 로그인하세요".to_string());
     }
 
     /// 같은 것의 codex 판 — 슬롯을 만들고 그 홈을 얹은 `codex login` 을 새 pane 에
@@ -409,31 +385,18 @@ impl App {
             .push(socket::CodexAccount { id: id.clone(), label: String::new() });
         self.settings_save();
 
-        let pane = self
-            .split_active_pane(kasa_pty::SplitDir::Horizontal)
-            .unwrap_or_default();
-        let Some(sess) = self.pty.get(&pane).cloned() else {
-            self.set_toast("계정 추가됨 — pane 을 열지 못해 로그인은 수동으로".to_string());
-            return;
-        };
-        let q = dir.display().to_string().replace('\'', "'\\''");
-        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
-        // `login` 은 shim 이 **순정으로 통과**시키는 관리 서브커맨드라(우리 홈을 씌우면
-        // 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이 그대로 진짜 codex 에 닿아 이
-        // 슬롯에 auth.json 을 쓴다.
-        self.pending_restores
-            .push((sess, format!("CODEX_HOME='{q}' codex login\r"), at));
-        spawn_oauth_browser_watch(self.ws.clone(), pane.clone(), socket::oauth_profile_dir(&id));
-        self.set_toast(
-            "빈 브라우저 창에서 새 ChatGPT 계정으로 로그인하세요 — 기본 브라우저 탭은 닫으시고요"
-                .to_string(),
+        // claude 와 같은 숨은 로그인. `login` 은 shim 이 **순정으로 통과**시키는 관리
+        // 서브커맨드라(우리 홈을 씌우면 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이
+        // 그대로 진짜 codex 에 닿아 이 슬롯에 auth.json 을 쓴다.
+        spawn_hidden_login(
+            "Codex",
+            id.clone(),
+            "codex login".to_string(),
+            "CODEX_HOME",
+            dir,
+            socket::oauth_profile_dir(&id),
         );
-        if let Some(i) = self.settings_window_idx() {
-            self.close_settings_window(i);
-        }
-        if let Some(w) = self.window.as_ref() {
-            w.focus_window();
-        }
+        self.set_toast("빈 브라우저 창에서 새 ChatGPT 계정으로 로그인하세요".to_string());
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
@@ -797,6 +760,8 @@ impl App {
                 crate::invalidate_wheel_pixel_gain();
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
+            SettingsAction::CancelLogin => cancel_login(),
+            SettingsAction::DismissLogin => clear_login_job(),
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);
                 // 지운 계정이 활성이었으면 기본 로그인으로 — 아무도 로그인할 수
@@ -1889,16 +1854,10 @@ pub(crate) fn paint_settings(
                 y += row_h + 6.0;
             }
             if y > clip {
-                let label = "+ 계정 추가";
-                let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                let r = (fx, y, bw, 34.0);
-                round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
-                    if inside(r, ctx.cursor) { theme::surface_hover() } else { theme::surface_active() });
-                g.draw_text(
-                    r.0 + 14.0, r.1 + 9.0, label,
-                    gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                add_account_row(
+                    g, &mut rects, fx, y, ctx.cursor,
+                    SettingsAction::AddClaudeAccount, "Claude",
                 );
-                rects.push((SettingsAction::AddClaudeAccount, r));
             }
             y += 34.0 + ROW_GAP;
             // 자동 전환. 계정이 하나뿐이면 갈 곳이 없어 아무 일도 안 일어나므로
@@ -1992,16 +1951,10 @@ pub(crate) fn paint_settings(
                 y += row_h + 6.0;
             }
             if y > clip {
-                let label = "+ 계정 추가";
-                let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                let r = (fx, y, bw, 34.0);
-                round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
-                    if inside(r, ctx.cursor) { theme::surface_hover() } else { theme::surface_active() });
-                g.draw_text(
-                    r.0 + 14.0, r.1 + 9.0, label,
-                    gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                add_account_row(
+                    g, &mut rects, fx, y, ctx.cursor,
+                    SettingsAction::AddCodexAccount, "Codex",
                 );
-                rects.push((SettingsAction::AddCodexAccount, r));
             }
             y += 34.0 + ROW_GAP;
             y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
@@ -2195,59 +2148,319 @@ pub(crate) fn paint_settings(
 /// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
 const SEG_H: f32 = 34.0;
 
-/// 로그인 pane 이 뱉는 OAuth URL 을 주워 **쿠키 없는 별도 브라우저 창**으로 넘긴다.
+
+/// 「+ 계정 추가」 줄. 로그인이 도는 중이면 그 자리에 진행·결과와 취소를 둔다 —
+/// Orca 도 Add Account 를 스피너로 바꾸고 옆에 Cancel 을 붙인다. 이 줄이 버튼 하나로
+/// 안 끝나는 이유는 로그인이 이제 **이 화면 안에서** 벌어지기 때문이다: 예전처럼
+/// 설정창을 닫고 pane 으로 보내면 결과를 알릴 자리가 없다.
+fn add_account_row(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    fx: f32,
+    y: f32,
+    cursor: (f32, f32),
+    add: SettingsAction,
+    provider: &str,
+) {
+    let btn = |g: &mut gpu::GpuRenderer,
+               rects: &mut Vec<(SettingsAction, Rect)>,
+               x: f32,
+               label: &str,
+               act: SettingsAction| {
+        let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+        let r = (x, y, bw, 34.0);
+        let hov = inside(r, cursor);
+        g.hover_pointer |= hov;
+        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
+            if hov { theme::surface_hover() } else { theme::surface_active() });
+        g.draw_text(
+            r.0 + 14.0, r.1 + 9.0, label,
+            gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+        );
+        rects.push((act, r));
+        bw
+    };
+    let job = login_job().filter(|j| j.provider == provider);
+    match job.as_ref().map(|j| &j.state) {
+        None => {
+            btn(g, rects, fx, "+ 계정 추가", add);
+        }
+        Some(LoginState::Running) => {
+            let t = "로그인 중… 브라우저에서 승인하세요";
+            g.draw_text(
+                fx, y + 10.0, t,
+                gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+            );
+            let w = g.measure_chrome_text(t, 13.0, false);
+            btn(g, rects, fx + w + 12.0, "취소", SettingsAction::CancelLogin);
+        }
+        Some(LoginState::Ok) => {
+            g.draw_text(
+                fx, y + 10.0, "로그인 완료",
+                gpu::DrawOpts { font_size: 13.0, color: theme::success(), bold: true, italic: false },
+            );
+            let w = g.measure_chrome_text("로그인 완료", 13.0, true);
+            btn(g, rects, fx + w + 12.0, "확인", SettingsAction::DismissLogin);
+        }
+        Some(LoginState::Err(msg)) => {
+            g.draw_text(
+                fx, y + 10.0, msg,
+                gpu::DrawOpts { font_size: 13.0, color: theme::danger(), bold: false, italic: false },
+            );
+            let w = g.measure_chrome_text(msg, 13.0, false);
+            btn(g, rects, fx + w + 12.0, "닫기", SettingsAction::DismissLogin);
+        }
+    }
+}
+
+/// 진행 중인 숨은 로그인 한 건. **동시에 하나만** — 두 슬롯을 같이 로그인하면
+/// 브라우저 창이 둘 뜨고 어느 창이 어느 슬롯인지 알 수가 없다.
+#[derive(Clone)]
+pub(crate) struct LoginJob {
+    /// 로그인 중인 슬롯 id(`acct-2` · `codex-1`).
+    pub(crate) id: String,
+    pub(crate) provider: &'static str,
+    pub(crate) state: LoginState,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) enum LoginState {
+    Running,
+    Ok,
+    /// 실패 이유 한 줄. 사용자에게 그대로 보인다.
+    Err(String),
+}
+
+/// 로그인 중인 CLI 프로세스의 그룹 id — 취소가 브라우저 손자까지 걷어내야 한다.
+type LoginCell = std::sync::Mutex<(Option<LoginJob>, Option<u32>)>;
+fn login_cell() -> &'static LoginCell {
+    static CELL: std::sync::OnceLock<LoginCell> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new((None, None)))
+}
+
+/// 지금 진행 중이거나 방금 끝난 로그인. 설정 화면이 매 프레임 읽는다.
+pub(crate) fn login_job() -> Option<LoginJob> {
+    login_cell().lock().ok()?.0.clone()
+}
+
+/// 로그인 표시를 지운다 — 결과를 읽은 사용자가 닫을 때.
+pub(crate) fn clear_login_job() {
+    if let Ok(mut c) = login_cell().lock() {
+        c.0 = None;
+    }
+}
+
+/// 진행 중인 로그인을 죽인다. **프로세스 그룹째** 죽이는 게 핵심이다 — 로그인
+/// 프로세스는 콜백 서버와 브라우저 자식을 남기고, 그 서버가 살아 있으면 다음 시도가
+/// 같은 포트에서 막힌다(Orca 도 같은 이유로 POSIX 프로세스 그룹을 쓴다).
+pub(crate) fn cancel_login() {
+    let pgid = {
+        let Ok(mut c) = login_cell().lock() else { return };
+        c.0 = None;
+        c.1.take()
+    };
+    if let Some(pgid) = pgid {
+        // 셸을 안 거친다 — `kill -TERM -<pgid>` 를 직접 부른다.
+        let _ = crate::proc::command("kill")
+            .args(["-TERM", &format!("-{pgid}")])
+            .status();
+    }
+}
+
+/// CLI 로그인을 **터미널 없이** 돌린다. pane 을 띄워 사용자가 직접 진행하게 하던
+/// 것을 Orca 방식으로 바꾼 것이다(거노 2026-08-13 「로그인방식도 ㄱ」).
 ///
-/// `claude auth login` 은 기본 브라우저를 여는데, 거기엔 지금 계정의 claude.ai
-/// 세션이 살아 있어 그대로 승인된다 — 슬롯을 아무리 갈라도 전부 같은 계정이 붙는
-/// 이유가 이것뿐이었다(거노: "계정추가하면 1,2 같은계정으로 되는데"). 프로필이 빈
-/// 창은 로그인 화면부터 뜨므로 그제서야 다른 계정을 넣을 수 있다.
+/// pane 방식은 실제로 두 가지가 나빴다. ①로그인하려면 설정창을 닫고 본창으로
+/// 넘어가야 해서, 설정에서 시작한 일이 다른 창에서 끝났다. ②그 pane 이 로그인이
+/// 끝난 뒤에도 남아 사용자가 손으로 닫아야 했다. 여기서는 설정 화면이 그 자리에서
+/// 「로그인 중… / 취소」를 보이고, 끝나면 그 자리에 결과가 뜬다.
 ///
-/// 화면을 폴링하는 이유: 우리는 이 pane 의 PTY 를 소유하니 URL 이 찍히는 걸 그냥
-/// 읽으면 된다. 30초 안에 못 찾으면 조용히 포기한다 — 그때는 pane 에 URL 이
-/// 그대로 남아 있으니 사용자가 직접 열 수 있다.
-fn spawn_oauth_browser_watch(
-    ws: Arc<Mutex<Workspace>>,
-    pane: String,
+/// TTY 없이도 되는 게 확인됐다(2026-08-13 실측): claude CLI 자식이 localhost 에
+/// 콜백 서버를 띄우므로 브라우저 승인만 하면 코드를 붙여넣을 일이 없다. 화면에
+/// 찍히는 "Paste code here if prompted" 는 콜백이 실패했을 때의 폴백이다. 그래서
+/// **stdin 을 열어둔 채** 둔다 — 닫으면 그 폴백 경로가 통째로 죽는다.
+fn spawn_hidden_login(
+    provider: &'static str,
+    id: String,
+    argv: String,
+    env_key: &'static str,
+    dir: std::path::PathBuf,
     profile: Option<std::path::PathBuf>,
 ) {
-    let Some(profile) = profile else { return };
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    if let Ok(mut c) = login_cell().lock() {
+        c.0 = Some(LoginJob { id: id.clone(), provider, state: LoginState::Running });
+    }
     std::thread::spawn(move || {
-        for _ in 0..75 {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let screen = {
-                let Ok(w) = ws.lock() else { return };
-                match w.panes.get(&pane) {
-                    Some(p) => p.visible_text(40),
-                    None => return,
-                }
-            };
-            let Some(url) = oauth_url_in(&screen) else { continue };
-            let _ = std::fs::create_dir_all(&profile);
-            open_isolated_browser(&url, &profile);
-            return;
+        // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의
+        // PATH 에는 claude·codex 가 없어 직접 spawn 하면 항상 실패한다.
+        let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
+        let mut cmd = crate::proc::command(shell);
+        cmd.arg("-lc")
+            .arg(&argv)
+            .env(env_key, &dir)
+            // CLI 가 **기본** 브라우저를 열면 지금 계정의 세션이 그대로 승인돼
+            // 슬롯을 아무리 갈라도 전부 같은 계정이 붙는다. URL 은 우리가 주워
+            // 쿠키 없는 프로필로 연다.
+            .env("BROWSER", "/usr/bin/true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // 자기 프로세스 그룹을 갖게 해 취소가 트리째 걷어낼 수 있게 한다.
+            cmd.process_group(0);
         }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                finish_login(&id, LoginState::Err(format!("로그인 실행 실패: {e}")));
+                return;
+            }
+        };
+        if let Ok(mut c) = login_cell().lock() {
+            c.1 = Some(child.id());
+        }
+        // stdin 핸들을 **떨어뜨리지 않는다**(위 주석). 스레드가 끝날 때 닫힌다.
+        let _stdin = child.stdin.take();
+        // 두 파이프를 각각 읽어 한 버퍼에 모은다 — URL 이 어느 쪽으로 오는지는
+        // CLI 버전에 따라 다르고, 실패 이유는 대개 stderr 로 온다.
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let mut readers = Vec::new();
+        for pipe in [
+            child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let buf = buf.clone();
+            let profile = profile.clone();
+            readers.push(std::thread::spawn(move || {
+                let mut opened = false;
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    if let Ok(mut b) = buf.lock() {
+                        b.push_str(&line);
+                        b.push('\n');
+                    }
+                    if opened {
+                        continue;
+                    }
+                    // 프로세스 출력은 PTY 와 달리 접히지 않아 URL 이 한 줄에 온다.
+                    if let (Some(url), Some(prof)) = (login_url_in(&line), profile.as_deref()) {
+                        let _ = std::fs::create_dir_all(prof);
+                        open_isolated_browser(&url, prof);
+                        opened = true;
+                    }
+                }
+            }));
+        }
+        // 3분. 브라우저에서 계정을 새로 만드는 사람도 있어 넉넉히 두지만, 무한정
+        // 두면 취소를 안 누른 사용자가 「로그인 중」에 영구히 갇힌다.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let code = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break st.success(),
+                Ok(None) => {}
+                Err(_) => break false,
+            }
+            // 사용자가 취소하면 pgid 가 비워지고 프로세스는 이미 죽었다.
+            if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                finish_login(&id, LoginState::Err("로그인이 3분 안에 안 끝났어요".into()));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        };
+        for r in readers {
+            let _ = r.join();
+        }
+        let out = buf.lock().map(|b| b.clone()).unwrap_or_default();
+        let state = if code {
+            LoginState::Ok
+        } else {
+            LoginState::Err(login_error_line(&out))
+        };
+        finish_login(&id, state);
     });
 }
 
-/// 화면에서 OAuth authorize URL 을 뽑는다. 화면은 폭에 맞춰 접혀 있으므로 개행을
-/// 걷어내고 이어 붙인다.
-///
-/// ⚠️ `state` 를 **정확히 43자**로 끊는 게 핵심이다. 공백까지 먹게 두면 접힌 URL
-/// 뒤에 이어진 다음 줄의 첫 단어("Paste code here …")가 그대로 붙어 `…-r8Paste`
-/// 가 되고, 그 링크는 invalid state 로 튕긴다. state 는 32바이트 base64url 이라
-/// 길이가 항상 43이다.
-fn oauth_url_in(screen: &str) -> Option<String> {
-    const HEAD: &str = "https://claude.com/cai/oauth/authorize";
-    const STATE_LEN: usize = 43;
-    let joined: String = screen.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-    let tail = &joined[joined.rfind(HEAD)?..];
-    let end = tail.find("state=")? + "state=".len() + STATE_LEN;
-    let url = tail.get(..end)?;
-    // 화면이 아직 덜 찍혔으면 state 가 43자를 못 채운다 — 그때는 다음 폴에 다시.
-    let state = &url[url.len() - STATE_LEN..];
-    let ok = state.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    (ok && !url.contains(' ')).then(|| url.to_string())
+/// 결과를 기록한다 — 단, 그 사이 사용자가 취소했거나 다른 슬롯을 시작했으면
+/// 덮지 않는다(늦게 끝난 옛 작업이 새 작업의 표시를 갈아치우면 안 된다).
+fn finish_login(id: &str, state: LoginState) {
+    if let Ok(mut c) = login_cell().lock() {
+        if c.0.as_ref().is_some_and(|j| j.id == id) {
+            if let Some(j) = c.0.as_mut() {
+                j.state = state;
+            }
+            c.1 = None;
+        }
+    }
 }
+
+/// 실패 출력에서 사용자에게 보일 한 줄을 고른다. 마지막 비공백 줄이 대개 원인이고,
+/// 승인 거부는 문구가 정해져 있어 따로 잡는다(Orca 도 같은 패턴을 특별 취급한다).
+fn login_error_line(out: &str) -> String {
+    let low = out.to_ascii_lowercase();
+    if low.contains("access_denied") || low.contains("denied") {
+        return "브라우저에서 승인이 거부됐어요".to_string();
+    }
+    out.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(120).collect())
+        .unwrap_or_else(|| "로그인이 실패했어요".to_string())
+}
+
+/// 프로세스 한 줄에서 로그인 URL 을 뽑는다. claude·codex 를 같이 받는다 — 접히지
+/// 않은 한 줄이라 공백까지 자르면 끝이고, PTY 화면을 폴링하며 접힌 URL 을 이어 붙이던
+/// 곡예(state 를 정확히 43자로 끊어야 다음 줄 첫 단어가 안 딸려왔다)가 필요 없다.
+fn login_url_in(line: &str) -> Option<String> {
+    let at = line.find("https://")?;
+    let url: String = line[at..].chars().take_while(|c| !c.is_whitespace()).collect();
+    let low = url.to_ascii_lowercase();
+    (low.contains("authorize") || low.contains("oauth")).then_some(url)
+}
+
+#[cfg(test)]
+mod login_url_tests {
+    use super::login_url_in;
+
+    /// 2026-08-13 실측 출력 그대로. URL 을 못 뽑으면 격리 브라우저가 안 열리고,
+    /// 그러면 CLI 가 기본 브라우저를 열어 지금 계정으로 그대로 승인돼 버린다 —
+    /// 슬롯이 전부 같은 계정이 되는 그 버그로 되돌아간다. 조용히 실패하는 자리라
+    /// 테스트로 못 박는다.
+    #[test]
+    fn takes_the_claude_authorize_url() {
+        let line = "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&state=abc";
+        assert_eq!(
+            login_url_in(line).as_deref(),
+            Some("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&state=abc")
+        );
+    }
+
+    /// 프로세스 출력은 PTY 와 달리 접히지 않아, 뒤에 무슨 말이 붙어도 공백에서 끊긴다.
+    #[test]
+    fn stops_at_whitespace() {
+        let u = login_url_in("visit https://auth.openai.com/oauth/authorize?x=1 and paste the code")
+            .expect("URL");
+        assert!(u.ends_with("x=1"), "뒷말이 딸려 왔다: {u}");
+    }
+
+    /// 로그인과 무관한 링크는 무시한다 — 안내문에 도움말 URL 이 섞여 나온다.
+    #[test]
+    fn ignores_unrelated_links() {
+        assert_eq!(login_url_in("see https://docs.claude.com/help for details"), None);
+        assert_eq!(login_url_in("no url here"), None);
+    }
+}
+
 
 /// 프로필을 갈라 브라우저를 띄운다. 크롬이 없으면 아무것도 안 한다 — 그 경우
 /// pane 에 URL 이 남아 있으니 사용자가 직접 시크릿 창에 붙여넣으면 된다.
@@ -2272,47 +2485,6 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
     }
 }
 
-#[cfg(test)]
-mod oauth_url_tests {
-    use super::oauth_url_in;
-
-    /// 화면에 실제로 찍히는 모양 — URL 이 폭에 맞춰 세 줄로 접히고 바로 다음 줄에
-    /// 프롬프트가 온다. 접힌 걸 이어 붙이면 `state` 뒤에 `Paste` 가 그대로 달라붙는데,
-    /// 그 링크는 invalid state 로 튕긴다. 오늘 로그인이 두 번 깨진 원인이 이거였다.
-    const SCREEN: &str = "\
-Opening browser to sign in…
-If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&response_type=code&r
-edirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge_method=S256&state=VI3QV7OJRM5
-WNUMLZqCgXipW1WXeZQhoWTHm3R3Smtw
-Paste code here if prompted > ";
-
-    #[test]
-    fn joins_the_wrapped_url_without_swallowing_the_next_line() {
-        let url = oauth_url_in(SCREEN).expect("접힌 URL 도 복원돼야 한다");
-        assert!(url.ends_with("state=VI3QV7OJRM5WNUMLZqCgXipW1WXeZQhoWTHm3R3Smtw"));
-        assert!(!url.contains("Paste"), "다음 줄이 딸려 들어왔다: {url}");
-    }
-
-    #[test]
-    fn waits_while_the_state_is_still_being_printed() {
-        // 43자를 아직 다 못 받은 프레임은 URL 로 치지 않는다 — 반쪽 링크를 열면
-        // 그 시도는 그대로 죽고 사용자는 다시 처음부터 해야 한다.
-        let half = SCREEN.split("WNUMLZ").next().unwrap();
-        assert_eq!(oauth_url_in(half), None);
-    }
-
-    #[test]
-    fn ignores_a_screen_with_no_login_url() {
-        assert_eq!(oauth_url_in("kasa@mac ~ % ls\nCargo.toml  src"), None);
-    }
-
-    #[test]
-    fn takes_the_newest_url_when_an_earlier_attempt_is_still_on_screen() {
-        let two = format!("{SCREEN}\n{}", SCREEN.replace("VI3QV7OJRM5", "ZZ9QV7OJRM5"));
-        let url = oauth_url_in(&two).expect("두 번째 시도의 URL");
-        assert!(url.contains("state=ZZ9QV7OJRM5WNUMLZ"), "옛 URL 을 골랐다: {url}");
-    }
-}
 
 /// 계정 슬롯 하나의 실제 로그인 상태.
 ///
@@ -2325,6 +2497,7 @@ Paste code here if prompted > ";
 ///
 /// 그래서 `logged_in` 만 `claude auth status` 에서 받고, 신원은 로컬
 /// `/claude-identity`(그 슬롯의 토큰으로 `oauth/profile` 조회)에서 받는다.
+
 #[derive(Clone)]
 struct AuthProbe {
     logged_in: bool,
@@ -2336,6 +2509,16 @@ struct AuthProbe {
     org: String,
 }
 
+/// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
+/// 된다. 값이 `None` 이면 **아직 한 번도 못 물어봤다**는 뜻 — 그동안은 아무것도
+/// 안 그린다. TTL 을 두는 이유: 거노가 pane 에서 `/login` 을 마치면 클릭 없이
+/// 저절로 반영돼야 한다. 함수-로컬 static 이라 `struct App` 은 안 건드린다.
+///
+/// 재조회를 걸 때 **옛 값을 지우지 않는다.** 예전엔 `None` 으로 덮어 "조회 중" 을
+/// 표시했는데, `claude auth status` 는 로그인 셸을 거쳐 claude 를 띄우는 일이라
+/// 초 단위로 걸린다 — TTL 20초마다 그만큼 계정 칸이 빈칸이 되어, 가만히 보고 있으면
+/// 계정이 주기적으로 풀리는 것처럼 깜빡였다(거노 2026-08-03). git 폴러가 일시적
+/// 실패에 마지막 값을 붙드는 것과 같은 이유로, 새 답이 올 때까지는 알던 값을 보인다.
 /// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
 /// 된다. 값이 `None` 이면 **아직 한 번도 못 물어봤다**는 뜻 — 그동안은 아무것도
 /// 안 그린다. TTL 을 두는 이유: 거노가 pane 에서 `/login` 을 마치면 클릭 없이

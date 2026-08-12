@@ -3974,10 +3974,13 @@ pub(crate) enum SettingsAction {
     FocusClaudeExtra,
     /// 활성 Claude 계정 선택. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
     ClaudeAccount(String),
-    /// 계정 추가 — 저장소 dir 을 만들고, 그 dir 을 가리킨 채 `claude` 를 띄운
-    /// 새 pane 을 연다. 로그인은 거노가 그 pane 에서 한 번 한다(OAuth 브라우저
-    /// 흐름이라 우리가 대신 못 한다).
+    /// 계정 추가 — 저장소 dir 을 만들고 그 dir 을 물린 로그인 CLI 를 **터미널 없이**
+    /// 돌린다. 브라우저 승인만 사람이 하고, 결과는 설정 화면 그 자리에 뜬다.
     AddClaudeAccount,
+    /// 진행 중인 숨은 로그인을 취소(프로세스 그룹째 종료).
+    CancelLogin,
+    /// 끝난 로그인의 결과 표시를 지운다.
+    DismissLogin,
     /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
     /// 말고는 복구가 없고, 남겨 둬도 해가 없다.
     RemoveClaudeAccount(String),

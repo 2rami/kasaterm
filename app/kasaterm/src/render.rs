@@ -6655,8 +6655,19 @@ impl App {
                 }
 
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
-                self.status_account_rect =
-                    Some((seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), STATUS_HEIGHT));
+                let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), STATUS_HEIGHT);
+                // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
+                // 생각조차 안 든다(거노 2026-08-12). 채움은 주지 않는다: 세그먼트
+                // 폭은 텍스트를 다 그린 뒤에야 확정되고, 이 렌더는 나중에 그린 것이
+                // 위로 오므로 여기서 사각형을 깔면 방금 쓴 글자를 덮는다.
+                {
+                    let (hx, hy) = self.cursor_px;
+                    g.hover_pointer |= hx >= acct_r.0
+                        && hx <= acct_r.0 + acct_r.2
+                        && hy >= acct_r.1
+                        && hy <= acct_r.1 + acct_r.3;
+                }
+                self.status_account_rect = Some(acct_r);
             }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
             // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone
@@ -6835,6 +6846,7 @@ impl App {
                         let r = (cx, ry + 2.0, cw, seg_h - 6.0);
                         let on = compact == want;
                         let hover = hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
+                        g.hover_pointer |= hover;
                         if on || hover {
                             round_rect(
                                 g, r.0, r.1, r.2, r.3, theme::radius_sm(),
@@ -6866,6 +6878,7 @@ impl App {
                 for (p, _) in provs.iter().copied() {
                     let open = self.account_menu_provider == Some(p);
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + prow_h;
+                    g.hover_pointer |= on;
                     if on || open {
                         round_rect(g, mx + pad, ry, mw - pad * 2.0, prow_h,
                             theme::radius_sm(), theme::surface_active());
@@ -6983,6 +6996,7 @@ impl App {
                     (AccountMenuItem::ManageAccounts, "Manage Accounts…"),
                 ] {
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + row_h;
+                    g.hover_pointer |= on;
                     if on {
                         round_rect(g, mx + pad, ry, mw - pad * 2.0, row_h,
                             theme::radius_sm(), theme::surface_active());
@@ -7074,7 +7088,8 @@ impl App {
                     }
                     for (id, label, active) in rows {
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
-                        // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 주지 않는다.
+                        // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 손모양도 없다.
+                        g.hover_pointer |= on && !active;
                         if on && !active {
                             round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
                                 theme::radius_sm(), theme::surface_active());
@@ -7129,6 +7144,7 @@ impl App {
                     sry += rule;
                     {
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
+                        g.hover_pointer |= on;
                         if on {
                             round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
                                 theme::radius_sm(), theme::surface_active());

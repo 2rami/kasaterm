@@ -2885,11 +2885,12 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             None => self.account_menu_provider = None,
                         }
-                        // 칩 자기 클릭은 여기서 소비 — 안 그러면 아래 토글이 다시 연다.
-                        if chip_hit {
-                            return;
-                        }
-                        // 그 밖의 클릭은 닫기만 하고 계속 흘러간다(pane focus 등).
+                        // 메뉴 밖 클릭은 **닫기만 하고 소비한다.** 예전엔 pane focus 를
+                        // 위해 흘려보냈는데, 메뉴가 창 하단에 뜨는 데다 pane 하단바를
+                        // 여는 손잡이가 바로 그 아래라 「닫으려고 눌렀는데 하단바가
+                        // 열리는」 꼴이었다(거노 2026-08-13 지적). 팝오버 밖 클릭을
+                        // 삼키는 것이 데스크톱 관례고 Orca(radix Popover)도 그렇다.
+                        return;
                     } else if chip_hit {
                         self.account_menu = true;
                         self.chrome_dirty = true;
@@ -5336,6 +5337,88 @@ impl ApplicationHandler<UserEvent> for App {
         // 깜빡이는 건 충분히 있을 법하다) 조용한 편집기가 소리 없이 안 써진다.
         // 대기 중인 게 없으면 None 이라 유휴 비용은 0.
         let autosave_due = self.run_editor_autosave();
+        // 유휴인데 프레임이 계속 나가는 원인을 잡는 계측(`KASATERM_PUMP_DEBUG=1`).
+        // 아래 펌프 조건이 17개라 어느 것이 참인지 눈으로 가릴 수가 없다. 값이
+        // **바뀔 때만** 한 줄 찍는다 — 매 프레임 찍으면 그 출력이 프레임을 먹는다.
+        // 아래 `if` 를 그대로 두고 따로 재평가하는 이유: 조건을 Vec 수집으로
+        // 합치면 `||` 단락이 사라져 모든 조건이 매번 평가된다.
+        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+            let mut why: Vec<&'static str> = Vec::new();
+            if self.version_alpha() > 0.0 {
+                why.push("version");
+            }
+            if self.copy_toast_alpha() > 0.0 {
+                why.push("copy_toast");
+            }
+            if self.collab_toast_alpha() > 0.0 && self.collab.toast_action.is_none() {
+                why.push("collab_toast");
+            }
+            if self.any_notify_flash() {
+                why.push("notify_flash");
+            }
+            if self.pane_activity.values().any(|a| a.status == "working") {
+                why.push("pane_working");
+            }
+            if !self.pending_capture.is_empty() {
+                why.push("pending_capture");
+            }
+            if self.aux_windows.iter().any(|a| a.pending_capture.is_some()) {
+                why.push("aux_capture");
+            }
+            if self.pending_autogit.is_some() {
+                why.push("autogit");
+            }
+            if self.autoquit_at.is_some() {
+                why.push("autoquit");
+            }
+            if crate::testkit::mdscript_pending() {
+                why.push("mdscript");
+            }
+            if crate::render::sticky_seek_active() {
+                why.push("sticky_seek");
+            }
+            if !self.window_alert.is_empty() {
+                why.push("window_alert");
+            }
+            if self
+                .pane_activity
+                .values()
+                .any(|a| crate::chrome::status_needs_you(&a.status))
+            {
+                why.push("needs_you");
+            }
+            if !self.md_scroll_anim.is_empty() {
+                why.push("md_scroll");
+            }
+            if self.theme_fx.is_some() {
+                why.push("theme_fx");
+            }
+            if self.expand_anim.is_some() {
+                why.push("expand_anim");
+            }
+            if self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty() {
+                why.push("sidebar_gif");
+            }
+            let line = why.join(",");
+            thread_local! {
+                static PUMP_PREV: std::cell::RefCell<String> =
+                    std::cell::RefCell::new(String::from("\0"));
+            }
+            PUMP_PREV.with(|p| {
+                let mut prev = p.borrow_mut();
+                if *prev != line {
+                    eprintln!(
+                        "[pump] {}",
+                        if line.is_empty() {
+                            "(none → Wait, 여기서 프레임이 계속 나가면 원인은 UserEvent 쪽)"
+                        } else {
+                            line.as_str()
+                        }
+                    );
+                    *prev = line;
+                }
+            });
+        }
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
