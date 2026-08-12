@@ -926,32 +926,23 @@ pub fn raised_on(base: [u8; 4], hover: bool) -> [u8; 4] {
     [step(0), step(1), step(2), 255]
 }
 
-/// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 전원 원작색
-/// 기준으로 교정(거노): 아로나=하늘, 프라나=은백(흰 계열), 유즈=핑크레드(분홍
-/// 머리·빨간 리본), 아리스=남색. 미도리 민트·모모이 코랄은 원작과 이미 일치.
+/// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 정본은 로스터
+/// (`characters.json` 의 `header_color`, build.rs 가 굽는다) — 수동 12명 목록으로
+/// 남아 있던 동안 신규 67명이 전부 무색(테두리·글로우·sm테마 폴백)이었다
+/// (2026-08-12 지시: "애들 색도 다입혀야돼"). 수동 값은 로스터와 동일했다.
 /// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
 pub fn character_accent(name: &str) -> Option<[u8; 4]> {
-    Some(unpack(match name {
-        "아로나" => 0x4a90e2_ff, // sky
-        "프라나" => 0xe6e9f0_ff, // silver-white
-        "미도리" => 0x6bcf7f_ff, // mint
-        "모모이" => 0xff6b6b_ff, // coral
-        "유즈" => 0xe64980_ff,   // pink-red
-        "아리스" => 0x4c6ef5_ff, // navy-indigo
-        // 확장 로스터(거노 2026-07-13 확정 6명) — 원작 외형 기준.
-        "유우카" => 0x7a5fd4_ff, // violet (청보라 머리)
-        "시로코" => 0x8fb8d8_ff, // gray-blue (회색머리·하늘 스카프)
-        "호시노" => 0xf2a0c0_ff, // soft pink (분홍 머리)
-        "코하루" => 0xf27b9b_ff, // rose (핑크 트윈테일·핑크 헤일로)
-        "히마리" => 0xa88be0_ff, // lavender (은보라 머리)
-        "아루" => 0xe85d4a_ff,   // red-orange (붉은 머리·주황 헤일로)
-        // 학생 아님 — claude agents(에이전트 목록 뷰)의 SCHALE 조직 정체성 색.
-        // render 가 argv(is_claude_agents)+프사 슬롯 부재로 목록 뷰를 판정해
-        // 타이틀바 이름·테두리에만 쓴다(pane_character 엔 저장 안 함, 세션 진입
-        // 시 배정 학생을 가리지 않게). 로스터엔 없어 랜덤 배정 후보 아님.
-        "샬레" => 0x3a6eb4_ff,
-        _ => return None,
-    }))
+    // 학생 아님 — claude agents(에이전트 목록 뷰)의 SCHALE 조직 정체성 색.
+    // render 가 argv(is_claude_agents)+프사 슬롯 부재로 목록 뷰를 판정해
+    // 타이틀바 이름·테두리에만 쓴다(pane_character 엔 저장 안 함, 세션 진입
+    // 시 배정 학생을 가리지 않게). 로스터엔 없어 랜덤 배정 후보 아님.
+    if name == "샬레" {
+        return Some(unpack(0x3a6eb4_ff));
+    }
+    CHARACTER_ACCENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, rgb)| unpack((rgb << 8) | 0xff))
 }
 
 /// 같은 학생이 여러 pane 에 떠 있을 때 n번째(0-기준) 인스턴스의 accent 변주 —
@@ -1099,5 +1090,25 @@ mod accent_tests {
             assert_ne!(v2, base, "{name}: 2번째 변주가 원색과 같음");
             assert_ne!(v1, v2, "{name}: 1·2번째 변주가 서로 같음");
         }
+    }
+
+    /// 로스터 전원이 accent 를 가져야 한다 — 12명 수동 목록 시절 신규 67명이
+    /// 무색(테두리·글로우·sm테마 폴백)이었다(2026-08-12 지시: "애들 색도 다입혀야돼").
+    /// build.rs 가 header_color 누락을 빌드에서 거부하지만, 표와 이 함수의 연결이
+    /// 끊기는 회귀는 여기서 잡는다.
+    #[test]
+    fn every_roster_member_has_an_accent() {
+        for (name, slug) in CHARACTER_SLUGS {
+            let a = character_accent(name)
+                .unwrap_or_else(|| panic!("{name}({slug}) 의 accent 가 없다"));
+            assert_eq!(a[3], 255, "{name}: 알파는 불투명");
+        }
+        // 수동 시절 교정값이 로스터와 같았음을 대표 표본으로 재확인 — 코드젠 이관이
+        // 색을 바꾸지 않았다는 보증.
+        assert_eq!(character_accent("미도리"), Some([0x6b, 0xcf, 0x7f, 255]));
+        assert_eq!(character_accent("아리스"), Some([0x4c, 0x6e, 0xf5, 255]));
+        // 로스터 밖 특례.
+        assert!(character_accent("샬레").is_some());
+        assert!(character_accent("없는학생").is_none());
     }
 }
