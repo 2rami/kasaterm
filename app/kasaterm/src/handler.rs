@@ -3686,6 +3686,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 ActionKind::Close => self.close_pane(&menu_pid),
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
+                                ActionKind::Undock => {
+                                    self.undock_pane_terminal(&menu_pid, event_loop, None)
+                                }
                                 // md 토글은 헤더 세그먼트 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
@@ -3772,6 +3775,9 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::RefreshRenderer => {
                                 self.refresh_renderer();
+                            }
+                            ActionKind::Undock => {
+                                self.undock_pane_terminal(&pid, event_loop, None);
                             }
                         }
                         window.request_redraw();
@@ -3939,8 +3945,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        // 파일 탭 → 에디터 팝아웃 창. 터미널 탭 → PTY pane undock(별도
-                        // 터미널 창). 같은 pop-out 아이콘을 content 종류로 분기한다.
+                        // 파일 탭 → 에디터 팝아웃 창. 터미널 탭 → 그 탭만 undock
+                        // (다중탭이면 탭 승격, 아니면 pane 통째 — undock_pane_tab
+                        // 이 가른다). 같은 pop-out 아이콘을 content 종류로 분기한다.
                         let is_term = self
                             .ws
                             .lock()
@@ -3951,7 +3958,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|t| matches!(t.content, PaneContent::Terminal(_)))
                             .unwrap_or(false);
                         if is_term {
-                            self.undock_pane_terminal(&pid, event_loop, None);
+                            self.undock_pane_tab(&pid, idx, event_loop, None);
                         } else {
                             self.popout_pane_tab(&pid, idx, event_loop, None);
                         }
@@ -4433,8 +4440,8 @@ impl ApplicationHandler<UserEvent> for App {
                                     if is_term {
                                         self.finish_live_drag();
                                         let near = self.cursor_screen_phys();
-                                        self.undock_pane_terminal(
-                                            &td.pane, event_loop, near,
+                                        self.undock_pane_tab(
+                                            &td.pane, td.from, event_loop, near,
                                         );
                                         self.chrome_dirty = true;
                                         window.request_redraw();
