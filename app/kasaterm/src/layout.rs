@@ -64,6 +64,41 @@ pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
 }
 
 impl App {
+    /// 지금 화면에 보이는 pane id — 활성 방(`active_window`)의 BSP leaf 와, 그 leaf
+    /// 자리에 사는 보조 탭들.
+    ///
+    /// damage gate 와 애니메이션 펌프가 **모든 방의 모든 pane** 을 세고 있었다. 방마다
+    /// claude 를 띄우면 그 pane 들이 죄 「working」이라, **보이지도 않는 헤더 바** 하나
+    /// 때문에 앱이 상시 30fps 를 갈았다(2026-08-13 실측: pane 12개·방 4개). 빈
+    /// 인스턴스는 claude 가 없어 재현되지 않아서, 이 증상이 오래 「스크롤이 버벅인다」로
+    /// 보였다 — 정작 스크롤 경로는 멀쩡했다.
+    ///
+    /// 안 보이는 pane 은 상태가 바뀌어도 그릴 그림이 없으니 판정에서 뺀다. 방을 전환하는
+    /// 순간엔 `chrome_dirty` 가 서고, 그릴 때 셀은 항상 PTY 의 최신 상태를 다시 읽으므로
+    /// 「전환했더니 옛 화면」이 되지는 않는다.
+    pub(crate) fn visible_pane_ids(&self) -> std::collections::HashSet<String> {
+        let mut set: std::collections::HashSet<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|l| l.leaves().into_iter().map(String::from).collect())
+            .unwrap_or_default();
+        // 보조 탭의 pty 는 leaf 가 아니다 — 화면을 든 건 그 탭이 사는 바깥 pane 이라,
+        // 바깥이 보이면 안쪽도 보이는 것으로 센다(`window_of_pane` 과 같은 접기 규칙).
+        if let Ok(ws) = self.ws.lock() {
+            let inner: Vec<String> = ws
+                .panes
+                .keys()
+                .filter(|id| {
+                    ws.outer_for_pty(id.as_str())
+                        .is_some_and(|outer| set.contains(&outer))
+                })
+                .cloned()
+                .collect();
+            set.extend(inner);
+        }
+        set
+    }
+
     /// Convert logical-pixel position into a (pane_id, col, row) cell
     /// inside the pane the click landed in. Multi-pane aware: walks the
     /// parsed Layout to find the pane whose rect contains the click,

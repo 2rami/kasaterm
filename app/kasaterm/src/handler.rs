@@ -5356,7 +5356,14 @@ impl ApplicationHandler<UserEvent> for App {
             if self.any_notify_flash() {
                 why.push("notify_flash");
             }
-            if self.pane_activity.values().any(|a| a.status == "working") {
+            // 아래 실제 조건과 같게 **보이는** pane 만 센다 — 좁힌 쪽과 어긋나면
+            // 로그가 「pane_working 이라 펌프한다」고 하는데 실제론 안 걸린다.
+            if {
+                let visible = self.visible_pane_ids();
+                self.pane_activity
+                    .iter()
+                    .any(|(id, a)| a.status == "working" && visible.contains(id))
+            } {
                 why.push("pane_working");
             }
             if !self.pending_capture.is_empty() {
@@ -5447,10 +5454,18 @@ impl ApplicationHandler<UserEvent> for App {
             // A busy pane's header working bar sweeps every frame — pump ~30fps
             // so the bar animates and the working→idle flip is caught promptly.
             // `blocked`/`waiting` (approval prompt) are static states: no pump.
-            || self
-                .pane_activity
-                .values()
-                .any(|a| a.status == "working")
+            //
+            // **보이는** pane 만 센다. 그 바는 pane 헤더에 있어 다른 방의 pane 은 화면에
+            // 없는데, 좁히기 전에는 방마다 claude 를 띄운 것만으로 이 조건이 늘 참이 되어
+            // 앱이 유휴에도 30fps 를 갈았다(2026-08-13 실측). working→idle 전환을 놓치는
+            // 것도 아니다 — `refresh_pane_activity` 는 300ms 주기로 따로 돌고, 방을
+            // 전환하면 `chrome_dirty` 가 서서 그 방의 바가 곧바로 다시 움직인다.
+            || {
+                let visible = self.visible_pane_ids();
+                self.pane_activity
+                    .iter()
+                    .any(|(id, a)| a.status == "working" && visible.contains(id))
+            }
             || !self.pending_capture.is_empty()
             // 별도창 캡처가 대기 중이면 그 deadline 까지 깨어 있어야 arming 이 발화한다.
             || self.aux_windows.iter().any(|a| a.pending_capture.is_some())
