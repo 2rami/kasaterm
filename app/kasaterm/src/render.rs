@@ -8472,14 +8472,18 @@ fn restyle_peer_native_header(
         if w + cw > end {
             break;
         }
+        // bold — 본문도 같은 학생색이라 이름이 색만으로는 안 튄다(2026-08-12
+        // 지시 「이름은 bold로」). 접힌 경로(expand_teammate_message)의 헤더와 동일.
         let mut cell = style.clone();
         cell.ch = ch;
         cell.fg = fg.clone();
+        cell.bold = true;
         row[w] = cell;
         if cw == 2 && w + 1 < end {
             let mut sp = style.clone();
             sp.ch = ' ';
             sp.fg = fg.clone();
+            sp.bold = true;
             row[w + 1] = sp;
         }
         w += cw;
@@ -8548,13 +8552,17 @@ fn restyle_tell_line(
         if w + cw > end {
             break;
         }
+        // bold — 본문도 같은 학생색이라 이름이 색만으로는 안 튄다(2026-08-12
+        // 지시 「이름은 bold로」). 네이티브 헤더·접힌 경로 헤더와 동일.
         let mut cell = GridCell::blank();
         cell.ch = ch;
         cell.fg = fg.clone();
+        cell.bold = true;
         row[w] = cell;
         if cw == 2 && w + 1 < end {
             let mut sp = GridCell::blank();
             sp.fg = fg.clone();
+            sp.bold = true;
             row[w + 1] = sp;
         }
         w += cw;
@@ -12058,6 +12066,30 @@ This came from another Claude session";
         assert_eq!(c0, 0);
         assert_eq!(row[qcol].ch, '❯');
         assert_eq!(label, "sendmessage로 7유저에게 메시지 전송");
+    }
+
+    /// 재작성된 헤더 이름은 bold 다 — 본문도 같은 학생색이라 색만으로는 이름이
+    /// 안 튄다(2026-08-12 지시 「이름은 bold로」).
+    #[test]
+    fn restyled_header_name_is_bold() {
+        let mut row = row_from("@ 12889❯", 40);
+        let (c0, qcol, _) = peer_native_header_line(&row).unwrap();
+        restyle_peer_native_header(&mut row, c0, qcol, "후부키", [0xa9, 0xd5, 0xea, 255]);
+        // 한글 wide 셀 뒤엔 스페이서(' ')가 실리므로 공백 무시 대조.
+        let text: String =
+            row.iter().map(|c| c.ch).filter(|c| !c.is_whitespace() && *c != '\0').collect();
+        assert!(text.ends_with("❯"), "❯ 유지: {text:?}");
+        assert!(text.contains("후부키"), "이름 재작성: {text:?}");
+        for (i, c) in row.iter().enumerate() {
+            if c.ch != ' ' && c.ch != '\0' {
+                assert!(c.bold, "col {i} ({:?}) 가 bold 아님", c.ch);
+                assert_eq!(
+                    c.fg,
+                    kasa_bridge::screen::Color::Rgb(0xa9, 0xd5, 0xea),
+                    "col {i} accent"
+                );
+            }
+        }
     }
 
     /// `❯` 없이 '@' 로 시작하는 행(사용자 입력·멘션)은 잡으면 안 된다.
