@@ -61,9 +61,13 @@ MAX_RUN = 4
 ATTEMPTS = 3
 
 
-def slugs():
+def members():
     d = json.load(open(ROSTER, encoding="utf-8"))
-    return [m["slug"] for m in d["members"] if m.get("slug")]
+    return [m for m in d["members"] if m.get("slug")]
+
+
+def slugs():
+    return [m["slug"] for m in members()]
 
 
 def desc_of(slug):
@@ -317,15 +321,125 @@ def sheet(targets, out, cell=110):
     return 0
 
 
+def phash(path, side=16):
+    """축소 흑백 이미지를 평균으로 이진화한 지각 해시.
+
+    파일 해시로는 **같은 그림을 두 번 그린 것을 못 잡는다** — 생성은 매번 픽셀이
+    달라서 md5 가 절대 안 겹친다. 실루엣이 같으면 걸리게 하려면 축소해서 봐야 한다.
+
+    투명 배경을 흰색에 합성하고 나서 흑백으로 바꾼다. 알파를 버리고 바로 `convert("L")`
+    하면 **투명 픽셀이 검정 0 이 되어** 캐릭터가 아니라 배경 모양을 해싱하게 되고,
+    그러면 여백이 비슷한 학생끼리 전부 「닮았다」로 뜬다.
+    """
+    from PIL import Image
+
+    im = Image.open(path).convert("RGBA")
+    bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+    bg.alpha_composite(im)
+    g = bg.convert("L").resize((side, side), Image.LANCZOS)
+    px = list(g.tobytes())
+    avg = sum(px) / len(px)
+    return [v > avg for v in px]
+
+
+def dupes(targets, out, top=12, cell=110):
+    """서로 제일 닮은 학생 쌍을 가까운 순으로 늘어놓은 **중복 점검 시트**.
+
+    로스터에 같은 캐릭터가 두 번 들어갔거나, 생성이 무너져 옆 학생과 같은 그림이
+    나온 것을 잡는다. 후자는 desc 가 멀쩡해도 일어나므로 묘사 검사로는 못 잡는다.
+
+    슬러그·이름·위키 문서·desc 의 **완전 중복은 먼저 따로 알린다** — 그건 눈으로
+    볼 것도 없이 데이터가 잘못된 것이라 시트에 섞으면 묻힌다.
+
+    한 줄이 한 쌍이고 `원본A 생성A │ 생성B 원본B` 순서다. 가운데 둘을 붙여 놓는 건
+    비교할 대상이 그 둘이기 때문이고, 바깥의 원본은 「원래 다른 캐릭터가 맞나」를
+    같은 줄에서 확인하라고 둔다.
+
+    ⚠️거리는 참고값이지 판정이 아니다. 같은 화풍·같은 교복이면 다른 캐릭터도 가깝게
+    나온다 — 실제로 겹쳤는지는 사람이 보고 정한다.
+    """
+    from PIL import Image, ImageDraw
+
+    # ① 데이터 자체가 겹치는 것 — 그림을 보기 전에 알려야 한다
+    import collections
+
+    ros = [m for m in members() if m["slug"] in set(targets)]
+    for field in ("slug", "name"):
+        dup = [k for k, n in collections.Counter(m[field] for m in ros).items() if n > 1]
+        if dup:
+            print(f"⚠️{field} 중복: {' '.join(dup)}")
+    for label, path, key in (
+        ("위키 문서", "wiki.json", lambda p: json.load(open(p))["title"]),
+        ("묘사", "desc.txt", lambda p: open(p, encoding="utf-8").read().strip()),
+    ):
+        seen = collections.defaultdict(list)
+        for m in ros:
+            p = os.path.join(SRC, m["slug"], path)
+            if os.path.exists(p):
+                seen[key(p)].append(m["slug"])
+        for v in (v for v in seen.values() if len(v) > 1):
+            print(f"⚠️{label}가 같다: {' '.join(v)}")
+
+    # ② 그림이 닮은 쌍
+    have = [s for s in targets if os.path.exists(os.path.join(DST, f"{s}-profile.png"))]
+    h = {s: phash(os.path.join(DST, f"{s}-profile.png")) for s in have}
+    pairs = sorted(
+        (sum(x != y for x, y in zip(h[a], h[b])), a, b)
+        for i, a in enumerate(sorted(have))
+        for b in sorted(have)[i + 1 :]
+    )[:top]
+    if not pairs:
+        print("비교할 스프라이트가 부족하다")
+        return 1
+
+    pad, label_h, gap = 6, 14, 18
+    rw = cell * 4 + gap + pad
+    rh = cell + label_h + pad
+    im = Image.new("RGB", (rw + pad, len(pairs) * rh + pad), (24, 26, 31))
+    draw = ImageDraw.Draw(im)
+
+    for n, (d, a, b) in enumerate(pairs):
+        y0 = pad + n * rh
+        cells = [
+            (os.path.join(SRC, a, "ref.png"), 0),
+            (os.path.join(DST, f"{a}-profile.png"), 1),
+            (os.path.join(DST, f"{b}-profile.png"), 2),
+            (os.path.join(SRC, b, "ref.png"), 3),
+        ]
+        for path, i in cells:
+            x = pad + i * cell + (gap if i >= 2 else 0)
+            if not os.path.exists(path):
+                draw.rectangle((x, y0, x + cell, y0 + cell), outline=(70, 60, 60))
+                continue
+            th = Image.open(path).convert("RGBA")
+            th.thumbnail((cell, cell), Image.LANCZOS)
+            bgc = Image.new("RGB", th.size, (24, 26, 31))
+            bgc.paste(th, (0, 0), th)
+            im.paste(bgc, (x + (cell - th.width) // 2, y0 + (cell - th.height) // 2))
+        # 가운데 경계 — 어느 둘을 비교하는 줄인지 눈에 박히게
+        draw.line((pad + cell * 2 + gap // 2, y0, pad + cell * 2 + gap // 2, y0 + cell),
+                  fill=(60, 64, 74))
+        draw.text((pad + 2, y0 + cell + 2), f"{a}  ·  {b}    거리 {d}/256",
+                  fill=(150, 158, 170))
+
+    im.save(out)
+    for d, a, b in pairs:
+        print(f"  {d:3}/256  {a} ↔ {b}")
+    print(f"가까운 쌍 {len(pairs)} → {out}  ({im.width}x{im.height})")
+    print(f"가장 가까운 거리 {pairs[0][0]}/256 — 0 이면 같은 그림이다")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["gen", "install", "status", "sheet"])
+    ap.add_argument("cmd", choices=["gen", "install", "status", "sheet", "dupes"])
     ap.add_argument("slugs", nargs="*")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--ref", action="store_true",
                     help="공식 포트레이트를 정체성 참조로 넘긴다(느리지만 색이 안 어긋난다)")
-    ap.add_argument("--out", default="/tmp/theme-sheet.png", help="sheet 저장 경로")
+    ap.add_argument("--out", default="/tmp/theme-sheet.png", help="sheet/dupes 저장 경로")
+    ap.add_argument("--top", type=int, default=12, help="dupes: 가까운 쌍 몇 개까지 볼지")
     a = ap.parse_args()
 
     targets = a.slugs or slugs()
@@ -343,6 +457,8 @@ def main():
         return 0
     if a.cmd == "sheet":
         return sheet(targets, a.out)
+    if a.cmd == "dupes":
+        return dupes(targets, a.out, a.top)
     if a.cmd == "gen":
         if not os.path.exists(PPGEN):
             print(f"ppgen 이 없다: {PPGEN} (PPGEN 환경변수로 지정)", file=sys.stderr)
