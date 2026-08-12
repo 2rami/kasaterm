@@ -10,7 +10,7 @@ use kasa_socket::backend::{
     Backend, PaneActivity, PaneBlock, PaneRect, RecentSession, SessionsInfo, SplitDirection,
     SubagentInfo, SurfaceInfo, TranscriptChunk, WorkspaceInfo,
 };
-use kasa_socket::sessions::{is_uuid, recent_sessions_for, session_jsonl_path};
+use kasa_socket::sessions::{is_uuid, recent_sessions_here, session_jsonl_path};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -54,6 +54,8 @@ impl Backend for TmuxBackend {
             id: FIXED_SURFACE_ID.into(),
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         }])
     }
 
@@ -63,7 +65,13 @@ impl Backend for TmuxBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        _from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
+        // tmux 백엔드는 늘 현재 pane 을 쪼갠다 — 대상 지정은 로컬 PTY 경로만.
         // tmux's split-window takes -h for horizontal split, -v for
         // vertical. cmux's direction terminology is what *cell rows*
         // grow into — right/left are horizontal splits, up/down are
@@ -75,6 +83,10 @@ impl Backend for TmuxBackend {
             SplitDirection::Left => "split-window -hb",
             SplitDirection::Down => "split-window -v",
             SplitDirection::Up => "split-window -vb",
+            // tmux 백엔드는 pane 픽셀 크기를 우리가 모른다(tmux 가 레이아웃 주인).
+            // 종횡비 판정은 로컬 PTY 경로 전용이라 여기선 가로로 떨어진다 — 창이
+            // 대개 가로로 넓으니 옛 기본과 같은 결과다.
+            SplitDirection::Auto => "split-window -h",
         };
         let cmd = if focus { base.to_string() } else { format!("{base} -d") };
         self.tmux.send_cmd(&cmd)?;
@@ -86,6 +98,8 @@ impl Backend for TmuxBackend {
             id: "pane-new".into(),
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         })
     }
 
@@ -149,6 +163,12 @@ pub struct PtyBackend {
     /// of `waiting`: a blocked claude writes nothing, so the transcript tail
     /// can't tell `collab_board` the pane is stuck — this map can.
     attention: Arc<Mutex<HashMap<String, String>>>,
+    /// surface_id → 그 pane 이 **지금 돌리는** 서브에이전트·백그라운드 셸. `PreToolUse`/
+    /// `PostToolUse` 훅이 `agent_status` 로 채운다. `attention` 과 같이 GUI
+    /// (`App.collab.hook_activity`)와 Arc 공유 — 쓰는 쪽은 소켓 스레드, 읽는 쪽은
+    /// 진행 표시(GUI)다. 이게 있기 전엔 transcript 꼬리에서 런치·회수를 짝지었는데,
+    /// 꼬리가 64KB 라 세션이 커지면 런치가 밀려나 **오래 걸리는 작업일수록 안 보였다**.
+    hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
@@ -158,10 +178,27 @@ pub struct PtyBackend {
     /// surface_id → statusLine 이 보고한 "현재 보는 경로"(report_cwd). claude 내부 cd 는
     /// lsof(cwd_cache)로 안 보여, statusline.py 가 매 렌더 직접 push 한다.
     reported_cwd: Arc<Mutex<HashMap<String, String>>>,
+    /// surface_id → statusLine 이 보고한 (컨텍스트 창, 사용 토큰). 하네스가 훅 stdin 으로
+    /// 준 값이라 ctx% 분모의 정본이다 — transcript 의 model 엔 `[1m]` 이 안 실려(API 응답
+    /// 이 `claude-opus-5`) 모델명 추정으로는 1M 세션이 200k 로 잡혔다(18만 토큰이 92%로
+    /// 보이던 원인). 미보고(구버전 statusline·창 미상)면 없음 → 추정 폴백.
+    reported_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
     /// surface_id → 마지막 유효 (context_tokens, context_limit). transcript usage 가 tail
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
     /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
     last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    /// codex rollout 경로 → 그 세션의 model. codex 는 model 이 실린 유일한 줄
+    /// (`turn_context`)이 파일 **앞** 87~122KB 에 있어 tail 창에 영영 안 걸린다 —
+    /// 그래서 머리를 한 번만 읽어 여기 기억한다. surface_id 가 아니라 **경로**가
+    /// 키다: 세션을 갈아타면 경로가 바뀌어 저절로 다시 읽는다.
+    codex_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// surface_id → statusline 이 보고한 (model.id, effort.level). 재시작 뒤 그 pane 을
+    /// **끄기 직전 쓰던 모델·effort 로** 되살리는 데 쓴다(세션 저장에 실린다).
+    ///
+    /// ★ board 의 `model` 과 **일부러 다른 값**이다. 그쪽은 API 응답 표기(`claude-opus-5`)
+    /// 나 화면 표시명이라 사람이 읽기엔 낫지만 `[1m]` 이 없어, 복원 명령에 되먹이면 1M
+    /// 세션이 200k 로 강등된다. 여기 담기는 `model.id` 만이 CLI 에 그대로 돌려줄 수 있다.
+    reported_agent_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
     /// surface_id → {cwd, git badge}, filled by the GUI each frame (shared Arc).
     /// `window_layout` reads it to stamp cwd/branch/diff onto each `PaneRect` so
     /// the BA GUI can draw a Warp-style bar without this thread shelling out to
@@ -179,6 +216,21 @@ pub struct PtyBackend {
     /// 유래 진짜 세션 cwd 를 덮는다(거노: bg 세션 파일트리가 pane cwd 고착) —
     /// report_cwd 가 이 집합을 보고 GUI 이벤트를 생략한다.
     view_panes: Arc<Mutex<HashSet<String>>>,
+    /// surface_id → 명시적 완료 보고(`kasaterm-cli done`). transcript 휴리스틱은
+    /// "놀고 있다"만 알지 "맡은 일이 성공/실패로 끝났다"는 모른다 — 학생 자기 보고가
+    /// board 완료 판정의 정본. 소거 규칙은 board 빌더 참조(idle 을 지나 다시 working
+    /// = 새 브리프 → 스테일).
+    done_reports: Arc<Mutex<HashMap<String, DoneReport>>>,
+}
+
+/// 한 pane 의 명시적 완료 보고 한 건. `idle_seen`: 보고 직후엔 그 턴이 아직
+/// working 이라(보고 명령 자체가 턴 안에서 돈다) "working 이면 소거"를 즉시 적용하면
+/// 한 번도 못 보인다 — idle 을 한 번 관찰한 뒤의 working 만 새 브리프로 친다.
+struct DoneReport {
+    outcome: String,
+    summary: String,
+    at: std::time::Instant,
+    idle_seen: bool,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -264,13 +316,35 @@ pub(crate) fn agents_name_sids_cached() -> HashMap<String, String> {
 }
 
 impl PtyBackend {
+    /// 살아 있는 surface 전부 — BSP leaf(`ws.panes`) **와 탭 pid**(`ws.pid_to_pane`).
+    ///
+    /// `panes` 만 모으면 탭으로 띄운 학생이 transcript 바인딩 후보에서부터 빠지고,
+    /// 그러면 board 의 `bound.filter(live.contains)` 에서도 탈락해 **아예 등재되지
+    /// 않는다** — 화면에도 board 에도 없는 유령이 된다(거노 2026-08-07).
+    fn live_surfaces(&self) -> std::collections::HashSet<String> {
+        let ws = self.ws.lock().unwrap();
+        ws.panes.keys().cloned().chain(ws.pid_to_pane.keys().cloned()).collect()
+    }
+
+    /// surface_id → (model, effort) 스냅샷. 세션 저장이 leaf 에 실으려고 읽는다.
+    ///
+    /// GUI(`App`)가 `socket_backend` 로 이 백엔드를 들고 있으므로 App 쪽에 같은 맵을
+    /// 하나 더 두지 않는다 — `pane_claude_sid` 처럼 이벤트로 넘기면 App struct 에 필드가
+    /// 늘고, 그 자리는 워커 여럿이 동시에 못 만지는 병목이다(CLAUDE.md).
+    pub(crate) fn agent_cfg_snapshot(&self) -> HashMap<String, (String, String)> {
+        self.reported_agent_cfg.lock().unwrap().clone()
+    }
+
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
+    /// `hook_activity` 도 같은 이유로 공유 — 훅은 이 소켓으로 들어오고, 그걸 그리는
+    /// 것은 GUI 다.
     pub fn new(
         proxy: EventLoopProxy<UserEvent>,
         ws: Arc<Mutex<Workspace>>,
         attention: Arc<Mutex<HashMap<String, String>>>,
+        hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
         pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
         bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
     ) -> Self {
@@ -279,14 +353,19 @@ impl PtyBackend {
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
             attention,
+            hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
+            reported_ctx: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
+            codex_cfg: Arc::new(Mutex::new(HashMap::new())),
+            reported_agent_cfg: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
             view_panes: Arc::new(Mutex::new(HashSet::new())),
+            done_reports: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -596,12 +675,24 @@ impl Backend for PtyBackend {
         foreground_proc_name(pid)
     }
 
+    /// 활성 pane 의 하네스. `active_process_name` 은 직속 자식 이름이라 codex 를 못
+    /// 본다(npm shim → `node`) — 판정은 kasa-pty 의 `agent_for_shell` 에 맡긴다.
+    fn active_agent(&self) -> Option<String> {
+        let active = self.ws.lock().unwrap().active_pane.clone()?;
+        let pid = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(id, _)| *id == active)
+            .map(|(_, p)| p)?;
+        kasa_pty::agent_for_shell(&kasa_pty::process_table_shared(), pid)
+            .map(|k| k.as_str().to_string())
+    }
+
     /// pane → claude session_id(`/pane-tasks` 용) = bound transcript 파일명 stem.
     /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
     /// 매핑에 폴백으로 쓴다.
     fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
-        let live: std::collections::HashSet<String> =
-            self.ws.lock().unwrap().panes.keys().cloned().collect();
+        let live = self.live_surfaces();
         self.discover_unbound(&live);
         let bound = self.bound.lock().unwrap();
         let mut out: Vec<(String, String)> = Vec::new();
@@ -625,7 +716,17 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// cwd·학생까지 실어 준다 — board 가 못 싣는 pane 이 있기 때문이다.
+    ///
+    /// board 는 transcript 가 바인딩된 pane 만 순회하므로 codex pane 이나 셸뿐인 pane 은
+    /// 줄이 아예 없다. `dismiss` 는 닫기 전에 그 pane 의 cwd 로 커밋 안 된 변경을 세는데,
+    /// board 만 보면 그 pane 들은 cwd 를 모른 채 **보호 없이 닫혔다**(실측: codex pane 이
+    /// `closed %5 ? — ` 로 학생도 폴더도 없이 닫혔다).
+    ///
+    /// cwd 는 GUI 가 공표하는 맵에서 읽는다 — `window_layout` 이 쓰는 그 맵이라 여기서도
+    /// lsof 없이 조회로 끝난다.
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
+        let status = self.pane_status_pub.lock().unwrap().clone();
         let ws = self.ws.lock().unwrap();
         Ok(ws
             .panes
@@ -634,6 +735,8 @@ impl Backend for PtyBackend {
                 id: id.clone(),
                 workspace_id: FIXED_WORKSPACE_ID.into(),
                 title: None,
+                cwd: status.get(id).map(|s| s.cwd.to_string_lossy().into_owned()),
+                character: ws.pane_character.get(id).cloned(),
             })
             .collect())
     }
@@ -802,16 +905,27 @@ impl Backend for PtyBackend {
             .map(std::path::PathBuf::from)
             .or_else(|| self.active_cwd())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-        Ok(recent_sessions_for(&base, 20))
+        // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
+        // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
+        // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
+        Ok(recent_sessions_here(&base, 60))
     }
 
-    fn resume_session(&self, id: &str, cwd: Option<&str>, newroom: bool, attach: bool) -> Result<()> {
+    fn resume_session(
+        &self,
+        id: &str,
+        cwd: Option<&str>,
+        newroom: bool,
+        attach: bool,
+        harness: &str,
+    ) -> Result<()> {
         self.proxy
             .send_event(UserEvent::ResumeSession {
                 id: id.to_string(),
                 cwd: cwd.map(str::to_string),
                 newroom,
                 attach,
+                harness: harness.to_string(),
             })
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())
@@ -849,11 +963,41 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn report_cwd(&self, surface_id: &str, cwd: &str, session_id: &str) -> Result<()> {
+    fn report_cwd(
+        &self,
+        surface_id: &str,
+        cwd: &str,
+        session_id: &str,
+        ctx_window: u64,
+        ctx_tokens: u64,
+        model: &str,
+        effort: &str,
+    ) -> Result<()> {
         self.reported_cwd
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        // 둘 중 **하나라도** 실려 오면 채택한다. 빈 값은 "미보고"라 종전 값을 안 덮는다 —
+        // effort 는 아예 안 정한 세션이 흔해서, 빈 effort 때문에 model 까지 버리면 안 된다.
+        if !model.is_empty() || !effort.is_empty() {
+            let mut cfg = self.reported_agent_cfg.lock().unwrap();
+            let e = cfg.entry(surface_id.to_string()).or_default();
+            if !model.is_empty() {
+                e.0 = model.to_string();
+            }
+            if !effort.is_empty() {
+                e.1 = effort.to_string();
+            }
+        }
+        // 창을 아는 보고만 채택 — 0 은 "미보고"라 옛 정답을 덮지 않는다. 뷰 pane 도
+        // 저장한다: cwd 와 달리 컨텍스트는 뷰어 자신의 것이 맞고, 그 pane 의 ctx% 는
+        // 뷰어 세션 기준으로 보여야 한다.
+        if ctx_window > 0 {
+            self.reported_ctx
+                .lock()
+                .unwrap()
+                .insert(surface_id.to_string(), (ctx_window, ctx_tokens));
+        }
         // agents/attach 뷰 pane: 이 보고는 뷰어 claude 프로세스 자신의 cwd(pane
         // 스폰 경로)지 표시 중인 세션의 프로젝트가 아니다 — GUI 로 흘리면
         // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(거노:
@@ -882,10 +1026,17 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
         let dir = match direction {
-            SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
-            SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
+            SplitDirection::Right | SplitDirection::Left => Some(kasa_pty::SplitDir::Horizontal),
+            SplitDirection::Up | SplitDirection::Down => Some(kasa_pty::SplitDir::Vertical),
+            // 여기선 못 정한다 — pane 픽셀 크기는 GUI 스레드만 안다.
+            SplitDirection::Auto => None,
         };
         // Split runs on the GUI thread; block on a reply channel so we can hand
         // the new pane's real id back to the caller. The teammate launcher uses
@@ -894,17 +1045,178 @@ impl Backend for PtyBackend {
         // `focus` rides along so the GUI thread keeps focus on the current pane
         // unless the caller opted in (CLI `--focus`).
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir, focus, tx));
-        let id = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "pane-new".into());
+        let _ = self.proxy.send_event(UserEvent::SocketSplit(
+            dir,
+            focus,
+            from.map(str::to_string),
+            tx,
+        ));
+        // 타임아웃이 넉넉한 이유: GUI 스레드가 답하는 데 걸리는 시간은 머신 부하에
+        // 좌우된다. 로드 400 에서 5초를 넘겨 자리표시자로 떨어졌고, 그게 곧 "성공했다"로
+        // 읽혀 학생 스폰이 통째로 샜다(거노 실사고 2026-08-05). 한가할 때 실측 0.06초라
+        // 정상 경로에서 이 값이 체감되는 일은 없다.
+        let id = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(id)) if !id.is_empty() => id,
+            // **성공 봉투에 자리표시자를 싣지 않는다.** 못 만들었으면 못 만들었다고
+            // 답해야 호출자가 재시도·중단을 고를 수 있다.
+            Ok(Ok(_)) => anyhow::bail!("split 이 빈 pane id 를 돌려줬다"),
+            Ok(Err(why)) => anyhow::bail!("split 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "split 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
+            ),
+        };
         Ok(SurfaceInfo {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
+            cwd: None,
+            character: None,
         })
+    }
+
+    /// 셰임(`teammate_case_arms`/`install_claude_hook_shim`)이 조립하는 것과 **같은
+    /// 규칙**으로 이름을 미리 짓는다: `<학생 슬러그>-p<pane 번호>` + cwd 기준 팀.
+    /// 규칙이 갈리면 부른 쪽이 닿지 않는 인박스에 브리프를 넣고도 성공으로 읽으므로,
+    /// 셰임 쪽을 고칠 땐 여기도 같이 고쳐야 한다.
+    fn closed_panes(&self, discard: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        // `closed_panes` 는 App 필드라 이 스레드에서 직접 못 읽는다 — split 과 같은
+        // 회신 채널 패턴으로 GUI 스레드에 물어본다.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketClosedPanes(discard.map(str::to_string), tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(why)) => anyhow::bail!("{why}"),
+            Err(_) => anyhow::bail!("되살리기 목록 응답 없음(10초) — GUI 스레드가 막혀 있다"),
+        }
+    }
+    fn pane_agent(&self, surface_id: &str) -> Option<(String, String)> {
+        let name = self.ws.lock().unwrap().pane_character.get(surface_id).cloned()?;
+        let slug = crate::theme::agent_slug(&name);
+        let cwd = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(p, _)| p == surface_id)
+            .and_then(|(_, pid)| self.pane_cwd_live(pid))?;
+        let team = kasa_mcp::team::team_name_for(&kasa_mcp::character::mode_slug(&cwd));
+        // 셰임은 팀명이 비면 트리플을 통째로 생략한다 — 그때는 이름도 안 생긴다.
+        if team.is_empty() {
+            return None;
+        }
+        Some((
+            format!(
+                "{slug}-p{}{}",
+                surface_id.trim_start_matches('%'),
+                crate::agent_name_suffix()
+            ),
+            team,
+        ))
+    }
+
+    /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
+    /// 보여야 하는데, 이게 미구현이라 `kasaterm-cli windows` 가 늘 "(윈도우 없음)"을
+    /// 냈다 — 이동 기능을 붙여 놓고 목적지를 못 찾는 상태였다.
+    ///
+    /// GUI RPC 없이 `ws.pane_window`(pane → 창 인덱스)로 짓는다. 그건 `publish_pty_layout`
+    /// 이 **전 윈도우** leaf 를 채워 두는 미러라 socket 스레드에서 그대로 읽힌다
+    /// (App 의 `windows`/`pty_layout` 은 GUI 스레드 소유라 여기서 못 본다).
+    ///
+    /// rect 는 **활성 창만** 채운다 — ws 에 실리는 layout 트리가 활성 창 하나뿐이다.
+    /// 비활성 창은 pane 목록만 준다(이동 대상을 고르는 데는 그걸로 충분하다).
+    fn windows_overview(&self) -> Result<Vec<kasa_socket::backend::WindowOverview>> {
+        // ws 를 잠그기 **전에** 부른다 — std Mutex 는 재진입이 안 돼 안에서 부르면 멈춘다.
+        let active_rects = self.window_layout().unwrap_or_default();
+        let ws = self.ws.lock().unwrap();
+        let mut by_win: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+        for (pane, idx) in &ws.pane_window {
+            by_win.entry(*idx).or_default().push(pane.clone());
+        }
+        // 활성 창 = 활성 leaf 집합의 아무 pane 이 속한 창.
+        let active_idx = ws
+            .active_window_panes
+            .iter()
+            .find_map(|p| ws.pane_window.get(p))
+            .copied();
+        drop(ws);
+        Ok(by_win
+            .into_iter()
+            .map(|(idx, mut surfaces)| {
+                surfaces.sort();
+                let active = Some(idx) == active_idx;
+                kasa_socket::backend::WindowOverview {
+                    idx,
+                    active,
+                    panes: if active { active_rects.clone() } else { Vec::new() },
+                    surfaces,
+                }
+            })
+            .collect())
+    }
+
+    fn new_window(&self) -> Result<()> {
+        // 창 생성은 회신할 게 없다(창 인덱스는 `windows` 로 읽는다) — 이벤트만 던진다.
+        let _ = self.proxy.send_event(UserEvent::SocketNewWindow);
+        Ok(())
+    }
+
+    /// 부른 pane **안에 새 탭**. 쪼개지 않으므로 화면이 안 줄어든다 — 학생을 하나 더
+    /// 띄울 때마다 split 하면 네 번째쯤에서 다 종잇장이 된다(거노 2026-08-05).
+    fn new_tab(&self, outer: Option<&str>) -> Result<SurfaceInfo> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketNewTab(
+            outer.map(str::to_string),
+            tx,
+        ));
+        // 타임아웃·자리표시자 정책은 split 과 같다 — 못 만들었으면 못 만들었다고
+        // 답해야 호출자가 재시도를 고를 수 있다.
+        let id = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(id)) if !id.is_empty() => id,
+            Ok(Ok(_)) => anyhow::bail!("new_tab 이 빈 pane id 를 돌려줬다"),
+            Ok(Err(why)) => anyhow::bail!("탭 생성 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "탭 생성 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
+            ),
+        };
+        Ok(SurfaceInfo {
+            id,
+            workspace_id: FIXED_WORKSPACE_ID.into(),
+            title: None,
+            cwd: None,
+            character: None,
+        })
+    }
+
+    /// pane 을 다른 pane 옆으로 — **대상이 다른 창이면 창을 건너뛴다.** PTY 는 안
+    /// 죽고 레이아웃 트리만 옮겨 붙는다(GUI 의 사이드바 드롭과 같은 경로).
+    fn move_surface(
+        &self,
+        surface_id: &str,
+        target: &str,
+        direction: SplitDirection,
+    ) -> Result<()> {
+        let zone = match direction {
+            SplitDirection::Left => crate::DropZone::Left,
+            SplitDirection::Right => crate::DropZone::Right,
+            SplitDirection::Up => crate::DropZone::Up,
+            SplitDirection::Down => crate::DropZone::Down,
+            // 놓을 방향을 안 정했으면 오른쪽 — 창이 대개 가로로 넓다. split 처럼
+            // 종횡비로 고르지 않는 이유: 여기선 "어디에 붙일지"가 사용자 의도라
+            // 자동으로 뒤집으면 놓인 자리가 예측이 안 된다.
+            SplitDirection::Auto => crate::DropZone::Right,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketMovePane(
+            surface_id.to_string(),
+            target.to_string(),
+            zone,
+            tx,
+        ));
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(why)) => anyhow::bail!("이동 실패: {why}"),
+            Err(_) => anyhow::bail!("이동 응답 없음(20초) — GUI 스레드가 막혀 있다"),
+        }
     }
 
     fn close_surface(&self, surface_id: &str) -> Result<()> {
@@ -917,12 +1229,44 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn capture_surface(
+        &self,
+        surface_id: &str,
+        path: Option<&str>,
+        max_width: u32,
+    ) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketCapture(
+                surface_id.to_string(),
+                path.map(|s| s.to_string()),
+                max_width,
+                tx,
+            ))
+            .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
+        // GUI 가 이벤트를 받아 한 프레임을 그리고 리드백까지 마쳐야 답이 온다. 창이
+        // 다른 창 뒤에 있거나 리사이즈 중이면 그 프레임이 늦으므로 넉넉히 준다 —
+        // 무한 대기는 안 된다(소켓 워커가 물려 다른 명령까지 멈춘다).
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Err(_) => anyhow::bail!("capture timed out (window may be minimized)"),
+        }
+    }
+
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
         // 대상 surface 가 지정됐는데 현재 없는 pane 이면 거부 — 재시작·종료로 사라진 학생에게
         // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(거노). 보낸 쪽이 ok:false
         // 로 즉시 알아 떠맡기/--resume 을 결정한다. None(focused)은 항상 통과.
         if let Some(sid) = surface_id {
-            if !self.ws.lock().unwrap().panes.contains_key(sid) {
+            // pane 뿐 아니라 **탭 pid** 도 유효한 대상이다(`surface.new_tab` 이 주는 id).
+            // 탭은 `ws.panes` 가 아니라 `pid_to_pane` 에 등록되므로 panes 만 보면 방금
+            // 만든 탭이 "없는 pane" 으로 거절된다 — 만들어 놓고 아무것도 못 보내니
+            // 기능이 통째로 무의미했다. 배달 경로(`pty_for_pane`)는 원래 탭을 찾는다.
+            let ws = self.ws.lock().unwrap();
+            let known = ws.panes.contains_key(sid) || ws.pid_to_pane.contains_key(sid);
+            drop(ws);
+            if !known {
                 anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
             }
         }
@@ -967,31 +1311,59 @@ impl Backend for PtyBackend {
         // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
         // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
         // 소유라 proxy 로 넘긴다(SocketBytes 관례).
-        if let Some(sid) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
-            let _ = self.proxy.send_event(UserEvent::SocketSessionBound(
-                surface_id.to_string(),
-                sid.to_string(),
-            ));
+        //
+        // codex 는 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다 — 그대로 쓰면
+        // `rollout-2026-…-019f…` 가 세션 id 로 박혀 캐릭터 조회도 재시작 이어가기도 전부
+        // 빗나간다. 파일명이 rollout 꼴이면 거기서 uuid 를 떼어 쓴다.
+        let p = std::path::Path::new(path);
+        let sid = codex_sid_from_rollout(p)
+            .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
+        if let Some(sid) = sid {
+            let _ = self
+                .proxy
+                .send_event(UserEvent::SocketSessionBound(surface_id.to_string(), sid));
         }
         Ok(())
     }
 
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
+        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
-            .get(surface_id)
+            .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
-        Ok(pane.visible_text(lines))
+        Ok(pane.tab_for_pid(surface_id).visible_text(lines))
+    }
+
+    /// pane 을 스크롤백 안에서 움직인다 — 휠과 **같은 경로**(alacritty display_offset).
+    ///
+    /// 이게 없어서 스크롤 문제를 화면 밖에서 재현할 방법이 아예 없었다(트레이트에는
+    /// 정의돼 있는데 GUI 가 구현을 안 해 늘 unsupported 였다). `peek` 은 스크롤 위치와
+    /// 무관하게 라이브 화면만 읽으므로 이 둘을 짝지어야 「올려도 안 보인다」를 잰다.
+    ///
+    /// 부호는 트레이트 약속대로 **음수가 과거**다. `PtySession::scroll` 은 반대 규약
+    /// (양수가 과거)이라 여기서 뒤집는다.
+    fn scroll_surface(&self, surface_id: &str, lines: i32) -> Result<()> {
+        let key = {
+            let ws = self.ws.lock().unwrap();
+            ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string())
+        };
+        let sess = kasa_pty::lookup_session(surface_id)
+            .or_else(|| kasa_pty::lookup_session(&key))
+            .ok_or_else(|| anyhow::anyhow!("no live pty for pane: {surface_id}"))?;
+        sess.scroll(-lines);
+        Ok(())
     }
 
     fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
+        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
-            .get(surface_id)
+            .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
-        Ok(pane.visible_text_ansi(lines))
+        Ok(pane.tab_for_pid(surface_id).visible_text_ansi(lines))
     }
 
     fn pane_blocks(&self, surface_id: &str, limit: usize) -> Result<Vec<PaneBlock>> {
@@ -1146,7 +1518,7 @@ impl Backend for PtyBackend {
         // now and derive its row. No background watcher, no cache — the board
         // is exactly as fresh as the moment it's asked for. Panes with no hook
         // bind (no claude / not started) simply don't appear.
-        let live: HashSet<String> = self.ws.lock().unwrap().panes.keys().cloned().collect();
+        let live = self.live_surfaces();
         // hook-free 발견 — claude 훅(bind-transcript)이 안 걸린 pane 도 PTY 소유를
         // 이용해 직접 추적·bind(스로틀 2s). 훅은 빠른 보조 경로일 뿐, 이게 안전망.
         self.discover_unbound(&live);
@@ -1191,6 +1563,34 @@ impl Backend for PtyBackend {
         // 최우선으로 읽어 복원된 ws·marker·랜덤보다 먼저 정체성을 고정한다. 로스터 밖
         // 값은 무시(오염 방지). ps 는 폴당 pane 수만큼(1/s)이라 부담 없음.
         let pane_shell_pid: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
+        // ⚠️ KASATERM_* 은 **pane 셸에 없다** — shim 이 claude 를 띄우며 그 프로세스에만
+        // 실어 준다(실측: `/bin/zsh -il` env 엔 하나도 없고 자식 claude 엔 전부 있다).
+        // 그래서 셸이 아니라 자식 claude 를 찾아 읽는다. AGENT/TEAM 이 있는 pane 은
+        // 인박스를 폴링하므로, 말을 걸 때 입력창이 아니라 인박스를 써야 한다.
+        // pane 당 ps 한 번 — 키마다 부르면 폴링마다 pane×키 개의 ps 가 뜬다.
+        let ptable = kasa_pty::process_table_shared();
+        // cross-session 명부 — 이 pane 에 SendMessage 가 닿는지 판정한다. 보내 보고
+        // 아는 수밖에 없던 자리인데, 그 성공 응답이 도달을 증명하지 않아 늘 추측이었다.
+        // 살아있는 pid 는 위 ptable 을 그대로 쓴다(명부에 소켓 파일이 남아 있어도
+        // 프로세스가 죽었으면 안 닿는다 — 파일만 보면 그걸 못 가른다).
+        let peers = kasa_socket::peers::by_session_id();
+        let live_pids: HashSet<u32> = ptable.iter().map(|(pid, _, _)| *pid).collect();
+        let pane_env: HashMap<String, HashMap<String, String>> = pane_shell_pid
+            .iter()
+            .filter_map(|(sid, &shell)| {
+                let pid = claude_under(&ptable, shell)?;
+                let vars = kasa_pty::process_env_vars(
+                    pid,
+                    &[
+                        "KASATERM_SESSION_ID",
+                        "KASATERM_CHARACTER",
+                        "KASATERM_AGENT",
+                        "KASATERM_TEAM",
+                    ],
+                );
+                Some((sid.clone(), vars))
+            })
+            .collect();
         let valid_members: HashSet<String> = kasa_mcp::character::characters_json()
             .map(|c| kasa_mcp::character::member_names(&c).into_iter().collect())
             .unwrap_or_default();
@@ -1201,6 +1601,9 @@ impl Backend for PtyBackend {
         // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
         // 안 바뀌므로 별도 누적). 다음 폴링부턴 ws.pane_character 로 잡혀 불필요.
         let mut lazy_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // 훅이 보고한 in-flight — 아래에서 꼬리 판정 위에 얹는다. 루프 밖에서 한 번만
+        // 뜬다(pane 마다 잠그면 board 한 번에 락을 pane 수만큼 잡는다).
+        let hook_act = self.hook_activity.lock().unwrap().clone();
         let mut board: Vec<PaneActivity> = bound
             .iter()
             // 전 방(윈도우) 학생 — 활성 방 한정 폐기(거노: 전 방 영속). live = 모든 윈도우 pane.
@@ -1211,17 +1614,67 @@ impl Backend for PtyBackend {
                 // 최근 런치가 파일 끝에서 ~269KB 지점). 작은 transcript 는 전체라 부담 없음.
                 let (tail, mtime_idle) = read_tail(path, 512 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
+                // 훅이 본 것을 얹는다. 512KB 도 충분히 큰 세션에선 밀려나는데(24MB 짜리가
+                // 실재한다), 훅은 그 순간 오므로 파일 크기와 무관하다. 꼬리를 지우지 않고
+                // **합치는** 이유: 훅은 앱이 뜬 뒤에 시작한 것만 알아서, 그 전부터 돌던
+                // 작업은 꼬리에만 있다. 둘 중 하나라도 보면 도는 것이다.
+                if let Some(h) = hook_act.get(sid.as_str()) {
+                    for l in crate::state::HookActivity::labels(&h.subagents) {
+                        if !row.subagents.contains(&l) {
+                            row.subagents.push(l);
+                        }
+                    }
+                    for l in crate::state::HookActivity::labels(&h.background) {
+                        if !row.background.contains(&l) {
+                            row.background.push(l);
+                        }
+                    }
+                }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
+                // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
+                // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
+                // 직후 잠깐 빌 뿐 곧 tail 에서 잡히니 여기서 읽으면 헛일이다.
+                if row.model.is_empty() && codex_sid_from_rollout(path).is_some() {
+                    const HEAD: u64 = 384 * 1024;
+                    let key = path.to_string_lossy().into_owned();
+                    let hit = self.codex_cfg.lock().unwrap().get(&key).cloned();
+                    let cfg = match hit {
+                        Some(c) => c,
+                        None => {
+                            let head = read_head(path, HEAD);
+                            let c = crate::transcript::codex_cfg_from_head(&head);
+                            // 찾았거나, 머리를 꽉 읽고도 없을 때만 굳힌다. 후자는
+                            // 지시문이 우리 창보다 크다는 뜻이라 다시 읽어도 같은 답이다.
+                            // 더 짧게 읽혔으면 파일을 통째로 본 것 — 아직 첫 턴을 안
+                            // 썼을 뿐이라 굳히지 않고 다음 폴링에 다시 본다.
+                            if !c.0.is_empty() || head.len() as u64 >= HEAD {
+                                self.codex_cfg.lock().unwrap().insert(key, c.clone());
+                            }
+                            c
+                        }
+                    };
+                    row.model.clone_from(&cfg.0);
+                    // 저장 경로가 맵 하나만 보게 여기서 합류시킨다 — claude 는
+                    // statusline 이, codex 는 이 자리가 같은 맵을 채운다.
+                    if !cfg.0.is_empty() || !cfg.1.is_empty() {
+                        self.reported_agent_cfg.lock().unwrap().insert(sid.clone(), cfg);
+                    }
+                }
                 // Prefer claude's official status when it reports this session
                 // (matched by transcript filename stem == sessionId). The
                 // mtime heuristic above is only a fallback for sessions claude
                 // doesn't list. `effectively_idle` then drives the attention
                 // (permission-prompt) override below.
-                let official = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|stem| agents.get(stem))
-                    .map(|s| s.as_str());
+                let stem = path.file_stem().and_then(|s| s.to_str());
+                let official = stem.and_then(|s| agents.get(s)).map(|s| s.as_str());
+                // 같은 stem(=sessionId)으로 명부를 조회한다. **이름으로 잇지 않는 게
+                // 핵심이다** — 명부의 name 은 /rename 으로 바뀌고(pane 은
+                // arisu-p116 인데 명부엔 "agy code") 같은 캐릭터가 여러 pane 에 뜨면
+                // 겹친다. sessionId 만 안 흔들린다.
+                let peer = stem.and_then(|s| peers.get(s));
+                let peer_alive = peer.map(|p| live_pids.contains(&p.pid)).unwrap_or(false);
+                row.reach = kasa_socket::peers::reach_of(peer, peer_alive).as_str().to_string();
+                row.peer_name = peer.map(|p| p.name.clone()).filter(|n| !n.is_empty());
                 let effectively_idle = match official {
                     Some("busy") => {
                         row.status = "working".into();
@@ -1268,6 +1721,26 @@ impl Backend for PtyBackend {
                 } else {
                     attention.remove(sid);
                 }
+                // 명시적 완료 보고 부착 — idle 을 한 번 지난 보고가 다시 working 이
+                // 되면 새 브리프를 받은 것이므로 소거한다(스테일 방지). 그 전까지는
+                // working 중에도 싣는다: 보고 시점엔 아직 자기 턴이 안 끝났는데
+                // 그때 숨기면 "보고 즉시 표시"라는 명시 보고의 이점이 죽는다.
+                {
+                    let mut reports = self.done_reports.lock().unwrap();
+                    if let Some(rep) = reports.get_mut(sid.as_str()) {
+                        if row.status == "working" && rep.idle_seen {
+                            reports.remove(sid.as_str());
+                        } else {
+                            if row.status != "working" {
+                                rep.idle_seen = true;
+                            }
+                            row.done_outcome = Some(rep.outcome.clone());
+                            row.done_summary =
+                                (!rep.summary.is_empty()).then(|| rep.summary.clone());
+                            row.done_ago_secs = Some(rep.at.elapsed().as_secs());
+                        }
+                    }
+                }
                 // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). character
                 // 마커를 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
                 let base_slug = path
@@ -1307,14 +1780,28 @@ impl Backend for PtyBackend {
                 // SESSION_ID 가 가리키는 실제 세션 bind 는 각자 아루·히마리·아리스였다).
                 // 그래서 SESSION_ID 의 세션 bind 를 먼저(신선) 조회하고, 없을 때만 동결
                 // CHARACTER 로 폴백한다.
-                let env_char = pane_shell_pid
-                    .get(sid.as_str())
-                    .and_then(|&pid| {
-                        kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID")
-                            .and_then(|s| kasa_mcp::character::session_character(&s))
-                            .or_else(|| kasa_pty::process_env_var(pid, "KASATERM_CHARACTER"))
+                let env = pane_env.get(sid.as_str());
+                let env_char = env
+                    .and_then(|e| {
+                        e.get("KASATERM_SESSION_ID")
+                            .and_then(|s| kasa_mcp::character::session_character(s))
+                            .or_else(|| e.get("KASATERM_CHARACTER").cloned())
                     })
                     .filter(|c| valid_members.contains(c));
+                // 둘 다 있을 때만 인박스 경로가 성립한다 — 한쪽만으론 파일 경로가 안 나온다.
+                if let (Some(a), Some(t)) =
+                    (env.and_then(|e| e.get("KASATERM_AGENT")), env.and_then(|e| e.get("KASATERM_TEAM")))
+                {
+                    row.agent_name = Some(a.clone());
+                    row.team = Some(t.clone());
+                }
+                // 어느 하네스인지 — codex 는 인박스가 없어 위 두 칸이 영영 비고,
+                // 그것만으론 "트리플 없이 뜬 claude" 와 구별이 안 된다. 종류를 밝혀야
+                // 오케스트레이터가 SendMessage 대신 tell 을 고른다.
+                row.harness = pane_shell_pid
+                    .get(sid.as_str())
+                    .and_then(|&pid| kasa_pty::agent_for_shell(&ptable, pid))
+                    .map(|k| k.as_str().to_string());
                 row.character = retained
                     .clone()
                     .or(env_char)
@@ -1408,6 +1895,13 @@ impl Backend for PtyBackend {
             .collect();
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
+        self.done_reports.lock().unwrap().retain(|sid, _| live.contains(sid.as_str()));
+        // 훅 상태도 같이 — pane 이 닫히면 `end` 훅은 영영 안 온다. 안 걷으면 죽은
+        // 자리의 작업이 계속 도는 것처럼 남는다.
+        self.hook_activity
+            .lock()
+            .unwrap()
+            .retain(|sid, _| live.contains(sid.as_str()));
         // 학생 경로(cwd)를 PTY 셸 pid 의 라이브 cwd 로 덮어쓴다 — transcript 가 stale
         // 하거나(claude 가 jsonl 미기록) cd 직후라도 즉시 반영(2s 캐시). 아래 git
         // 브랜치도 이 라이브 cwd 기준이 되도록 branch 조회 전에 한다.
@@ -1436,10 +1930,13 @@ impl Backend for PtyBackend {
         for row in &mut board {
             // OSC title 은 claude 작업 중 "⠂ 제목" 꼴로 스피너 글리프가 붙는다 —
             // board 라벨(웹뷰 "학생 · 작업명")에 새지 않게 벗겨서 싣는다.
-            row.title = osc_titles
-                .get(&row.surface_id)
-                .map(|t| crate::strip_activity_prefix(t).to_string())
-                .unwrap_or_default();
+            // ⚠️OSC 제목이 **없을 때 빈 값으로 덮지 않는다.** 예전엔
+            // `unwrap_or_default()` 라, 터미널 제목을 안 다는 하네스(agy 는 TUI 라
+            // 안 단다)는 파서가 전사본에서 뽑아 온 제목까지 통째로 지워져 board 행이
+            // 늘 무제목이었다. OSC 가 있으면 그쪽이 여전히 이긴다 — 살아있는 값이라서다.
+            if let Some(t) = osc_titles.get(&row.surface_id) {
+                row.title = crate::strip_activity_prefix(t).to_string();
+            }
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
@@ -1458,9 +1955,25 @@ impl Backend for PtyBackend {
                     row.model = m;
                 }
             }
-            // 1M 보정 — 상태바 모델이 "1M context" 면 한도를 1M 로 확정. transcript 모델엔 [1m]
-            // 태그가 안 실려 토큰<200k 인 1M 세션이 200k 한도로 잘못 잡히던 걸 교정.
-            if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000 {
+            // 컨텍스트 창 — statusLine 이 보고한 하네스 정본이 최우선. transcript 의 model
+            // 엔 `[1m]` 이 안 실리고(API 응답이 `claude-opus-5`) 상태바 모델명도 좁은 pane
+            // 대비로 "(1M context)" 괄호가 잘려 나가, 추정 3종이 모두 빗나가면 1M 세션이
+            // 200k 로 잡혔다 — 18만 토큰이 92%(빨강)로 보이다 200k 를 넘는 순간 20% 로
+            // 떨어지는 역주행의 원인. 보고가 없을 때만 종전 상태바 폴백을 쓴다.
+            let reported = self
+                .reported_ctx
+                .lock()
+                .unwrap()
+                .get(&row.surface_id)
+                .copied();
+            if let Some((win, tok)) = reported {
+                row.context_limit = win;
+                // transcript usage 가 tail 윈도 밖이라 0 이면 보고된 토큰으로 메운다.
+                if row.context_tokens == 0 {
+                    row.context_tokens = tok;
+                }
+            } else if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000
+            {
                 row.context_limit = 1_000_000;
             }
             // 정확 소스(transcript usage)가 tail 윈도에 없어 0 이면 직전 유효값을 유지 — 컨텍스트량·
@@ -1532,6 +2045,39 @@ impl Backend for PtyBackend {
             surface_id: surface_id.to_string(),
             reason: reason.to_string(),
         });
+        Ok(())
+    }
+
+    fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> Result<()> {
+        // 보고만 기록 — 표시는 board 빌더가, 데스크톱 알림은 어차피 그 턴 끝의
+        // Stop 훅(notify)이 한다. notify 가 attention 처럼 이 맵을 지우면 안 된다:
+        // done 직후 같은 턴 끝에 notify 가 와서 보고가 보이기도 전에 죽는다.
+        self.done_reports.lock().unwrap().insert(
+            surface_id.to_string(),
+            DoneReport {
+                outcome: outcome.to_string(),
+                summary: summary.to_string(),
+                at: std::time::Instant::now(),
+                idle_seen: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn agent_status(
+        &self,
+        surface_id: &str,
+        phase: &str,
+        kind: &str,
+        key: &str,
+        label: &str,
+    ) -> Result<()> {
+        let mut map = self.hook_activity.lock().unwrap();
+        let entry = map.entry(surface_id.to_string()).or_default();
+        entry.apply(phase, kind, key, label);
+        if entry.is_empty() {
+            map.remove(surface_id);
+        }
         Ok(())
     }
 }
@@ -1619,6 +2165,17 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool
     (String::from_utf8_lossy(&buf).into_owned(), idle)
 }
 
+/// 파일 **머리** `max_bytes`. `read_tail` 의 짝이다 — 알고 싶은 값이 파일 앞에만
+/// 있는 로그(codex 의 `turn_context`)를 위해서다. 반환이 `max_bytes` 보다 짧으면
+/// 파일을 통째로 본 것이라, 호출부가 "아직 안 쓰였다"와 "우리 창 밖이다"를 가른다.
+pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(path) else { return String::new() };
+    let mut buf = Vec::new();
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0
 /// (첫 로드)이거나 파일이 줄었으면(세션 교체) 마지막 `TRANSCRIPT_TAIL` 바이트 윈도를
 /// `reset` 으로 준다(첫 불완전 줄은 버림). 끝의 쓰다 만 줄은 다음 호출로 미뤄, 반환
@@ -1701,6 +2258,11 @@ fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
 /// (a running `claude`/`vim`/build), else the shell itself at a bare prompt. One
 /// `ps` scan (Windows has no `ps` → None, degrades to "not a shell"). Lets
 /// `room_cd` send raw `cd` only at a shell, never into a live claude (거노).
+/// ⚠️ 이쪽은 런처(node·npx)를 지나 내려가지 **않는다**. 여기 쓰임은 "셸이냐
+/// 아니냐" 하나뿐이라 이름이 `node` 로 나와도 목적을 이루기 때문이다. 사용자에게
+/// 보여줄 정확한 프로그램 이름이 필요하면 kasa-pty 의 `active_process_name`
+/// (런처를 만나면 자식으로 내려간다)을 써라 — 같은 일을 하는 코드가 둘이라는
+/// 사실 자체가 함정이므로, 고칠 일이 생기면 양쪽을 같이 볼 것.
 pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
     let out = crate::proc::command("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
@@ -1924,15 +2486,17 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
 
 
 /// Build one layout-tree leaf's restore record from a live PtySession: its
-/// cwd, whether it was running claude, and the newest claude session id under
-/// that cwd (for `claude --resume`). `cwd` is null when the shell pid/cwd
-/// can't be resolved — restore then falls back to the default cwd.
+/// cwd, **which harness** it was running (`was_agent`: "claude"|"codex"|null),
+/// and that claude's session id (for `claude --resume`). `cwd` is null when the
+/// shell pid/cwd can't be resolved — restore then falls back to the default cwd.
 pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     let shell_pid = sess.shell_pid();
     let cwd = shell_pid.and_then(pid_cwd);
-    let was_claude = sess
-        .active_process_name()
-        .map_or(false, |p| p.contains("claude"));
+    // 어떤 하네스로 돌던 pane 인지 **종류**를 남긴다. 예전엔 bool 하나(`was_claude`)
+    // 라서 codex pane 은 재시작하면 셸로 돌아왔다 — 무엇이었는지 기록이 없으니
+    // 되살릴 수가 없었다. 판정은 state.rs 의 `active_agent`(런처 한 세대 하강 포함).
+    let agent = sess.active_agent();
+    let was_agent = agent.map(|k| k.as_str());
     // Only record a session id for panes actually running claude, straight off
     // the running claude's argv (exact per-pane). The cwd-mtime fallback that
     // used to fill argv-less `claude` panes is gone — it collapsed every pane
@@ -1940,14 +2504,18 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // 캐릭터로 뭉침). layout_to_json 이 pane_claude_sid(SocketSessionBound)로 정확한
     // per-pane 세션을 채우므로, pane_record 는 argv id 만 보고하고 없으면 None 을 둔다
     // (restore_leaf 가 fresh claude 로 복원).
-    let session_id = if was_claude {
+    //
+    // codex 는 여기서 세션 id 를 못 집는다 — argv 에 없고 rollout 파일명에만 있다(실측).
+    // 대신 bind-transcript 훅이 보고한 값이 `pane_claude_sid` 에 들어와 `layout_to_json`
+    // 이 그걸 정본으로 덮어쓴다(claude 와 같은 경로). 그래서 여기선 None 이 맞다.
+    let session_id = if matches!(agent, Some(kasa_pty::AgentKind::Claude)) {
         shell_pid.and_then(claude_session_id_from_cmdline)
     } else {
         None
     };
     serde_json::json!({
         "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
-        "was_claude": was_claude,
+        "was_agent": was_agent,
         "session_id": session_id,
     })
 }
@@ -2112,12 +2680,17 @@ pub fn read_tab_position() -> String {
 /// 커졌네"). 13 이면 0.600 × 13 = 7.8px 로 옛 0.500 × 16 = 8px 과 사실상 같다.
 /// 폰트 크기 = em 픽셀이라는 의미는 그대로 두고 기본값만 새 폰트에 맞춘 것 —
 /// 명시적으로 값을 저장해 둔 사용자는 자기 크기를 그대로 유지한다.
+/// 설정을 지웠을 때 돌아오는 셀 폰트 크기. 설정 화면의 "되돌리기"도 같은 값을
+/// 써야 해서 상수로 둔다 — 두 곳에 숫자를 적으면 한쪽만 바뀌어 되돌린 결과가
+/// 기본값과 다른 자리에 선다.
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
 pub fn read_font_size() -> f32 {
     read_settings()
         .get("font_size")
         .and_then(|x| x.as_f64())
         .map(|v| (v as f32).clamp(9.0, 32.0))
-        .unwrap_or(13.0)
+        .unwrap_or(DEFAULT_FONT_SIZE)
 }
 
 /// Whether the file-tree sidebar starts open on launch. Default `false`
@@ -2250,20 +2823,6 @@ pub struct ClaudeAccount {
     pub label: String,
 }
 
-impl ClaudeAccount {
-    /// 목록·칩에 보일 이름. 라벨은 설정 화면에서 통째로 지울 수 있는 자유
-    /// 텍스트라 빈 문자열이 되는데, 그대로 그리면 **글자가 하나도 없는 행**이
-    /// 남아 슬롯이 깨진 것처럼 보인다. 비면 추가할 때와 같은 규칙으로 자리를
-    /// 메운다 — `idx` 는 이 목록에서의 위치고, 목록 밖 "기본"이 1번이라 +2.
-    pub fn display_label(&self, idx: usize) -> String {
-        if self.label.trim().is_empty() {
-            format!("계정 {}", idx + 2)
-        } else {
-            self.label.clone()
-        }
-    }
-}
-
 /// Configured extra logins, in display order. The default login (whatever
 /// `claude` already uses) is *not* in this list — it is the implicit first row.
 pub fn read_claude_accounts() -> Vec<ClaudeAccount> {
@@ -2387,14 +2946,31 @@ pub fn clear_account_cooldowns() {
     }
 }
 
-/// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것. 5시간 창만
-/// 보면 주간 한도에 먼저 부딪히는 요즘 패턴을 통째로 놓친다(pill 은 여전히
-/// five_hour 만 보여준다 — 그건 "이 세션이 얼마나 남았나"라는 다른 질문이다).
+/// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것.
+///
+/// **화면도 이걸 봐야 한다**(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). 전에는
+/// pill·info 가 `five_hour.utilization` 만 봤는데, 실측 세 계정 모두 그 값이 `0.0`
+/// 이고 실제 압박은 전부 `weekly_all`(95%/25%)이었다 — 화면은 한도가 코앞인데도
+/// 0% 를 보여줬고, 자동 전환만 이 함수로 옳게 판정하고 있었다. 사용자에게 "이 세션이
+/// 얼마나 남았나"와 "언제 막히나"를 갈라 보여줄 이유가 없다: 먼저 닫히는 창이 답이다.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UsagePressure {
     pub pct: f32,
     /// 그 창이 풀리는 시각(epoch 초). 없으면 쿨다운 없이 즉시 후보로 돌아온다.
     pub resets_at: Option<u64>,
+    /// 어느 창인가 — 표시용 짧은 라벨. 숫자만 보여주면 5시간 창인지 주간인지 몰라
+    /// "0% 인데 왜 막히나"가 된다(그게 정확히 이번 신고였다).
+    pub label: &'static str,
+}
+
+/// `limits[].group`(`session`/`weekly`) → 화면 라벨. `kind` 가 아니라 `group` 을
+/// 보는 것은 `weekly_all`·`weekly_scoped` 가 같은 주간 창의 두 갈래라서다.
+fn usage_window_label(e: &serde_json::Value) -> &'static str {
+    match e.get("group").and_then(|g| g.as_str()) {
+        Some("session") => "5h",
+        Some("weekly") => "7d",
+        _ => "한도",
+    }
 }
 
 pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
@@ -2402,18 +2978,23 @@ pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
         arr.iter()
             .filter_map(|e| {
                 let pct = e.get("percent").and_then(|p| p.as_f64())? as f32;
-                Some((pct, e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch)))
+                Some((
+                    pct,
+                    e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+                    usage_window_label(e),
+                ))
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
     });
-    if let Some((pct, resets_at)) = top {
-        return Some(UsagePressure { pct, resets_at });
+    if let Some((pct, resets_at, label)) = top {
+        return Some(UsagePressure { pct, resets_at, label });
     }
     // limits[] 가 없는 옛/축약 응답 폴백 — pill 과 같은 소스.
     let five = v.get("five_hour")?;
     Some(UsagePressure {
         pct: five.get("utilization")?.as_f64()? as f32,
         resets_at: five.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+        label: "5h",
     })
 }
 
@@ -2544,6 +3125,32 @@ fn claude_saved_effort() -> String {
 /// 아니라 데몬 띄운 셸값을 전 세션이 공유해 못 쓴다(거노: 한 뷰 다 같은 학생). 대신 argv 의
 /// `--resume <부모>` 사슬을 따라 원본 세션의 바인딩까지 되짚는다. `ps`(env 불필요) 1회/프로세스,
 /// 2s 캐시. parent = --resume 값의 파일명 stem(=uuid) 또는 값 그대로.
+/// pane 셸 아래에서 도는 claude 프로세스 pid. shim 이 심는 KASATERM_* env 와 팀원
+/// 트리플은 이 프로세스에만 있다(셸엔 없다). 셸 → claude 가 보통 직계지만 래퍼가
+/// 끼는 경우가 있어 몇 대 아래까지 훑는다.
+fn claude_under(table: &[(u32, u32, String)], shell: u32) -> Option<u32> {
+    let mut frontier = vec![shell];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for (pid, ppid, cmd) in table {
+            if !frontier.contains(ppid) {
+                continue;
+            }
+            // 셸이 낳은 것 중 claude 실행파일만 — `claude` 를 인자로 든 셸 명령이
+            // 아니라 실행 경로가 claude 로 끝나는 프로세스.
+            if cmd.split_whitespace().next().is_some_and(|exe| exe.ends_with("claude")) {
+                return Some(*pid);
+            }
+            next.push(*pid);
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    None
+}
+
 fn daemon_session_parents() -> HashMap<String, String> {
     static CACHE: std::sync::LazyLock<
         std::sync::Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
@@ -2754,15 +3361,118 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
 /// 즉석 확정할 때 쓴다 — cwd 로 프로젝트 dir 슬러그를 재현하는 대신 실재 파일을 찾아
 /// claude 의 슬러그 규칙 드리프트에 무해하다. 세션 id 는 uuid 라 전역 유일.
 pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
+    scan_projects_for_session(&projects, sid)
+}
+
+/// `transcript_path_for_session` 의 순수 부분 — projects 루트를 인자로 받아
+/// `$HOME` 없이도 테스트할 수 있게 갈라 뒀다.
+///
+/// 같은 sid 가 여러 폴더에 있을 수 있다 — rename 을 겪은 사람이 옛 폴더의 대화를
+/// 새 폴더로 복사해 손수 복구하기 때문이다(미도리 실측). `read_dir` 순서는
+/// 파일시스템이 정하므로 첫 히트를 쓰면 어느 쪽을 이어갈지가 실행마다 달라진다.
+/// 최근에 쓰인 것이 곧 이어가려던 대화라 mtime 최신을 고르고, 같으면 경로
+/// 사전순으로 끊어 답을 하나로 굳힌다.
+fn scan_projects_for_session(
+    projects: &std::path::Path,
+    sid: &str,
+) -> Option<std::path::PathBuf> {
     if sid.is_empty() || sid.contains('/') {
         return None;
     }
-    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
     let want = format!("{sid}.jsonl");
-    for d in std::fs::read_dir(projects).ok()?.flatten() {
-        let p = d.path().join(&want);
-        if p.exists() {
-            return Some(p);
+    let mut hits: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+        std::fs::read_dir(projects)
+            .ok()?
+            .flatten()
+            .filter_map(|d| {
+                let p = d.path().join(&want);
+                let mtime = p.metadata().and_then(|m| m.modified()).ok()?;
+                Some((mtime, p))
+            })
+            .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    hits.into_iter().next().map(|(_, p)| p)
+}
+
+/// codex rollout 파일명에서 세션 id 를 뽑는다 — `rollout-<ISO ts>-<uuid>.jsonl`.
+///
+/// claude 는 파일명 자체가 sid 라 `file_stem()` 이 곧 답이지만 codex 는 접두사·타임스탬프가
+/// 붙는다. 그대로 stem 을 쓰면 `rollout-2026-08-05T19-46-01-019f…` 가 sid 로 박혀
+/// `codex resume` 도 sqlite 조회도 전부 빗나간다.
+///
+/// uuid 는 `-` 를 품으므로 뒤에서 5토막을 떼어 붙인다(8-4-4-4-12). 타임스탬프도 `-` 를
+/// 품어 앞에서 세는 방식은 못 쓴다.
+pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let rest = stem.strip_prefix("rollout-")?;
+    let parts: Vec<&str> = rest.rsplitn(6, '-').collect();
+    if parts.len() < 6 {
+        return None;
+    }
+    // rsplitn 은 역순 — 앞 5개가 uuid 의 뒤 5토막이다(6번째는 타임스탬프 잔여).
+    let sid = parts[..5]
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("-");
+    let ok = sid.len() == 36
+        && sid
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    ok.then_some(sid)
+}
+
+/// 세션 id → codex rollout jsonl. `transcript_path_for_session` 의 codex 판.
+///
+/// sqlite(`state_5.sqlite` 의 `threads`)에도 같은 정보가 있지만 **파일 탐색으로 간다**:
+/// 워크스페이스에 sqlite 의존성이 없고(넣을 만큼 큰 조회가 아니다), rollout 파일명이
+/// sid 를 그대로 품으며, transcript 파서도 같은 디렉터리를 읽는다 — 정본이 하나로 남는다.
+///
+/// **`~/.codex/sessions` 만 본다.** shim 이 세운 pane 별 CODEX_HOME 은 이 디렉터리를
+/// 심볼릭으로 미러하므로 pane 안에서 만든 세션의 실체도 여기 있다(실측). sqlite 에는
+/// 그때의 pane 홈 경유 경로가 박히는데 그 홈은 GUI 재시작이면 사라진다 — 그래서 기록된
+/// 경로를 믿지 않고 여기서 다시 찾는 편이 재시작 후에도 성립한다.
+pub(crate) fn codex_rollout_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    let root = kasa_socket::home_dir()?.join(".codex").join("sessions");
+    scan_codex_sessions(&root, sid)
+}
+
+/// `codex_rollout_for_session` 의 순수 부분 — 루트를 인자로 받아 `$HOME` 없이 테스트한다.
+///
+/// 레이아웃은 `sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`. 날짜 칸이 셋이라 깊이 3을
+/// 그대로 내려간다(전체 walk 은 하지 않는다 — 오래 쓰면 날짜 폴더만 수백 개다).
+fn scan_codex_sessions(root: &std::path::Path, sid: &str) -> Option<std::path::PathBuf> {
+    if sid.is_empty() || sid.contains('/') {
+        return None;
+    }
+    let suffix = format!("-{sid}.jsonl");
+    // 날짜 폴더를 이름 역순으로 — 최신이 먼저라 대개 첫 폴더에서 끝난다.
+    let sorted_dirs = |d: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        v.sort_by(|a, b| b.cmp(a));
+        v
+    };
+    for y in sorted_dirs(root) {
+        for m in sorted_dirs(&y) {
+            for d in sorted_dirs(&m) {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(&suffix))
+                    {
+                        return Some(p);
+                    }
+                }
+            }
         }
     }
     None
@@ -2779,7 +3489,7 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
     }
     // 2순위: argv 의 session id(exact) — --resume/--session-id claude.
     if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
-        return project_jsonl(&cwd, &id).filter(|p| p.exists());
+        return jsonl_for_session(&cwd, &id);
     }
     // agents/attach 뷰 pane 은 여기서 절대 추측하지 않는다 — 어느 세션을 보는지 cwd 로
     // 알 수 없어, recent-jsonl 폴백이 같은 cwd 의 남의 활성 세션을 훔쳤다(거노: bg 뷰
@@ -2815,7 +3525,36 @@ fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::
         return None;
     }
     let session = entry.get("session_id").and_then(|s| s.as_str())?;
-    project_jsonl(cwd, session).filter(|p| p.exists())
+    jsonl_for_session(cwd, session)
+}
+
+/// `session` 의 transcript 경로. cwd 로 만든 폴더를 먼저 보고, 없으면 projects
+/// 전체에서 그 uuid 를 찾는다.
+///
+/// ⚠️ 폴더명은 **claude 가 시작한 시점의 cwd** 로 굳는다 — 레포 폴더 이름을
+/// 바꾸면 대화는 옛 이름 폴더에 남는데 우리는 새 cwd 로만 찾아, 살아 있는
+/// 세션의 바인딩이 조용히 끊겼다. 그러면 저장에 sid 가 안 실리고 다음 재시작이
+/// 이어가기 대신 빈 세션을 띄운다(미도리 실측: chromeclaude→kasachrome rename
+/// 뒤 19MB 대화가 끊김). sid 는 uuid 라 전역에서 유일하니 폴더가 갈려도 안전하다.
+pub(crate) fn jsonl_for_session(
+    cwd: &std::path::Path,
+    session: &str,
+) -> Option<std::path::PathBuf> {
+    let projects = kasa_socket::home_dir()?.join(".claude/projects");
+    jsonl_for_session_in(&projects, cwd, session)
+}
+
+/// `jsonl_for_session` 의 순수 부분 — projects 루트를 인자로 받는다.
+fn jsonl_for_session_in(
+    projects: &std::path::Path,
+    cwd: &std::path::Path,
+    session: &str,
+) -> Option<std::path::PathBuf> {
+    let direct = projects.join(project_slug(cwd)).join(format!("{session}.jsonl"));
+    if direct.exists() {
+        return Some(direct);
+    }
+    scan_projects_for_session(projects, session)
 }
 
 /// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
@@ -2861,21 +3600,122 @@ fn parse_status_model(screen: &str) -> Option<String> {
     None
 }
 
+/// claude 가 cwd 를 projects 폴더 이름으로 굳힐 때 쓰는 규칙 — `/` 와 `.` 이 `-`.
+pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy().replace(['/', '.'], "-")
+}
+
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
 pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     Some(
         kasa_socket::home_dir()?
             .join(".claude/projects")
-            .join(encoded)
+            .join(project_slug(cwd))
             .join(format!("{session}.jsonl")),
     )
 }
 
 
 #[cfg(test)]
+mod codex_session_lookup_tests {
+    use super::*;
+
+    /// codex 파일명은 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다.
+    /// 타임스탬프도 uuid 도 `-` 를 품어 앞에서 세는 방식은 못 쓴다.
+    #[test]
+    fn sid_comes_from_the_tail_not_the_stem() {
+        let p = std::path::Path::new(
+            "/x/sessions/2026/08/05/rollout-2026-08-05T19-46-01-019fd187-ba6e-7812-8976-2a27ffcd843e.jsonl",
+        );
+        assert_eq!(
+            codex_sid_from_rollout(p).as_deref(),
+            Some("019fd187-ba6e-7812-8976-2a27ffcd843e")
+        );
+        // claude 파일(파일명 자체가 sid)은 rollout 이 아니라 None — 호출측이 stem 폴백을 쓴다.
+        assert_eq!(
+            codex_sid_from_rollout(std::path::Path::new("/x/abcd-1234.jsonl")),
+            None
+        );
+        // 토막이 모자라거나 hex 가 아니면 안 받는다 — 엉뚱한 값을 sid 로 박느니 없는 편이 낫다.
+        assert_eq!(
+            codex_sid_from_rollout(std::path::Path::new("/x/rollout-2026-08-05.jsonl")),
+            None
+        );
+    }
+
+    /// 날짜 3단 아래에서 sid 로 끝나는 파일을 찾는다. **suffix 매칭이라** 다른 세션의
+    /// 파일명이 이 sid 를 접두사로 품어도 안 걸린다.
+    #[test]
+    fn finds_the_rollout_under_the_date_dirs() {
+        let root = std::env::temp_dir().join(format!("kt-codexsess-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let day = root.join("2026/08/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "019fd187-ba6e-7812-8976-2a27ffcd843e";
+        let want = day.join(format!("rollout-2026-08-05T19-46-01-{sid}.jsonl"));
+        std::fs::write(&want, "{}").unwrap();
+        // 다른 날 + 다른 세션 — 골라내면 안 되는 것들.
+        let other = root.join("2026/08/04");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("rollout-2026-08-04T10-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"),
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(scan_codex_sessions(&root, sid).as_deref(), Some(want.as_path()));
+        assert_eq!(scan_codex_sessions(&root, "no-such-session"), None);
+        // 방어: 빈 sid·경로 조각은 디렉터리 전체를 훑게 두지 않는다.
+        assert_eq!(scan_codex_sessions(&root, ""), None);
+        assert_eq!(scan_codex_sessions(&root, "../x"), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
 mod agents_view_tests {
     use super::*;
+
+    #[test]
+    fn session_found_after_the_repo_folder_was_renamed() {
+        // 폴더명은 claude 가 시작한 시점의 cwd 로 굳는다 — rename 하면 대화는 옛
+        // 이름 폴더에 남는다. 새 cwd 로만 찾던 동안엔 살아 있는 세션의 바인딩이
+        // 조용히 끊겨 다음 재시작이 빈 세션이 됐다(미도리 실측).
+        let root = std::env::temp_dir().join(format!("kt-proj-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let new_cwd = std::path::Path::new("/Users/kasa/Desktop/momewomo/kasachrome");
+        let old = root.join("-Users-kasa-Desktop-momewomo-chromeclaude");
+        let new = root.join(project_slug(new_cwd));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap(); // rename 직후라 비어 있다
+        let sid = "6fbe280f-1111-2222-3333-444455556666";
+        let in_old = old.join(format!("{sid}.jsonl"));
+        std::fs::write(&in_old, "{}\n").unwrap();
+
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_old.clone()));
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, "no-such-session"), None);
+
+        // 새 cwd 폴더에 같은 대화가 생기면(사용자가 손수 복구) 그쪽이 이긴다 —
+        // 폴백은 cwd 로 못 찾았을 때만 도는 뒷문이다.
+        let in_new = new.join(format!("{sid}.jsonl"));
+        std::fs::write(&in_new, "{}\n").unwrap();
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_new.clone()));
+
+        // 폴백이 여러 폴더에서 같은 sid 를 만나도 답은 하나여야 한다 — mtime 최신.
+        // (read_dir 순서에 기대면 어느 대화를 이어갈지가 실행마다 갈린다.)
+        let now = std::time::SystemTime::now();
+        set_mtime(&in_old, now);
+        set_mtime(&in_new, now - std::time::Duration::from_secs(60));
+        let other_cwd = std::path::Path::new("/nowhere");
+        assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_old));
+        set_mtime(&new.join(format!("{sid}.jsonl")), now + std::time::Duration::from_secs(60));
+        assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_new));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(t).unwrap();
+    }
 
     #[test]
     fn screen_marker_sid8_finds_last_valid_marker() {
@@ -2943,6 +3783,38 @@ mod account_autoswitch_tests {
         let p = usage_pressure(&v).expect("five_hour 만 있어도 판정된다");
         assert_eq!(p.pct, 91.0);
         assert_eq!(p.resets_at, None);
+        assert_eq!(p.label, "5h");
+    }
+
+    /// 거노 화면에서 그대로 뜬 응답(2026-08-05, 기본 슬롯 토큰으로 직접 조회).
+    /// `five_hour.utilization` 이 **0.0** 인데 주간이 95% 다 — 화면이 five_hour 만
+    /// 보던 탓에 한도가 코앞인데 「0%」 가 떴다. 라벨까지 재는 것은 숫자만 고치면
+    /// 「5h 95%」 가 되어 5시간 창 이야기로 읽히기 때문이다.
+    #[test]
+    fn real_world_zero_five_hour_with_critical_weekly() {
+        let v = serde_json::json!({
+            "five_hour": { "utilization": 0.0, "resets_at": null },
+            "limits": [
+                { "group": "session", "kind": "session", "percent": 0, "resets_at": null },
+                { "group": "weekly", "kind": "weekly_all", "percent": 95,
+                  "resets_at": "2026-08-05T10:00:00.423760+00:00" },
+                { "group": "weekly", "kind": "weekly_scoped", "percent": 11,
+                  "resets_at": "2026-08-05T10:00:00.424089+00:00" },
+            ]
+        });
+        let p = usage_pressure(&v).expect("limits 가 있으면 판정된다");
+        assert_eq!(p.pct, 95.0, "화면에 뜰 숫자는 주간 95% 여야 한다");
+        assert_eq!(p.label, "7d", "그게 어느 창인지도 말해야 한다");
+    }
+
+    /// `group` 이 없는(옛/축약) 항목은 창 종류를 단정하지 않는다 — `5h` 로 찍으면
+    /// 주간 압박을 5시간 이야기로 오독하게 만든다.
+    #[test]
+    fn unknown_group_gets_a_neutral_label() {
+        let v = serde_json::json!({ "limits": [{ "kind": "mystery", "percent": 42 }] });
+        let p = usage_pressure(&v).expect("percent 만 있어도 판정된다");
+        assert_eq!(p.pct, 42.0);
+        assert_eq!(p.label, "한도");
     }
 
     fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {
@@ -3010,5 +3882,28 @@ mod pid_cwd_tests {
         assert_eq!(super::trim_trailing_sep(r"C:\Users\x"), r"C:\Users\x");
         assert_eq!(super::trim_trailing_sep(r"C:\"), r"C:\");
         assert_eq!(super::trim_trailing_sep(r"\\srv\share\"), r"\\srv\share");
+    }
+
+    #[test]
+    fn finds_claude_below_the_pane_shell() {
+        // 실측 형태: pane 셸(zsh) → claude. claude 의 자식 셸(Bash 툴)도 같이 있다.
+        let table = vec![
+            (100, 1, "/bin/zsh -il".to_string()),
+            (200, 100, "/Users/x/.local/bin/claude --model opus".to_string()),
+            (300, 200, "/bin/zsh -c ls".to_string()),
+        ];
+        assert_eq!(super::claude_under(&table, 100), Some(200));
+        // claude 없이 셸만 도는 pane — 인박스로 말을 걸 수 없다.
+        assert_eq!(super::claude_under(&table[..1], 100), None);
+    }
+
+    #[test]
+    fn a_shell_running_the_word_claude_is_not_claude() {
+        // `send` 로 부팅 커맨드를 흘려보낸 직후의 셸 — 아직 claude 가 아니다.
+        let table = vec![
+            (100, 1, "/bin/zsh -il".to_string()),
+            (200, 100, "/bin/zsh -c cd /repo && claude --model opus".to_string()),
+        ];
+        assert_eq!(super::claude_under(&table, 100), None);
     }
 }

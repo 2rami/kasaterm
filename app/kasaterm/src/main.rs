@@ -26,17 +26,24 @@ mod layout;
 mod markdown;
 mod auxwin;
 mod input;
+mod lineedit;
 mod settings;
 mod syntax;
 mod lsp;
 mod links;
 mod proc;
 mod info;
+mod mcpcol;
+mod sesscol;
 mod state;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]
 mod macos_open;
+// 알림 배너 클릭 → 그 pane 으로. UNUserNotificationCenter 는 delegate 로만 클릭을
+// 알려주고, 그 delegate 는 macOS 에만 있다.
+#[cfg(target_os = "macos")]
+mod macos_notify;
 #[cfg(target_os = "macos")]
 mod macos_sparkle;
 // Windows 자동 업데이트 — WinSparkle.dll 런타임 로드(macos_sparkle 대칭).
@@ -110,6 +117,23 @@ fn shell_quote_path(p: &str) -> String {
     }
 }
 
+/// 커서가 놓인 칸의 글자가 몇 칸짜리인지. 한글·CJK·이모지는 두 칸이다.
+///
+/// 전각 글자는 그리드에서 두 칸을 먹고 뒤 칸엔 스페이서(`'\0'`)가 들어간다. 커서를
+/// 항상 한 칸으로 칠하면 글자의 왼쪽 절반만 덮여, 커서가 글자를 가리키는 게 아니라
+/// 반쯤 깨진 것처럼 보인다. 커서가 스페이서 쪽에 놓이는 경우는 앞 칸을 보지 않는다 —
+/// vt100 은 전각 글자의 첫 칸에 커서를 세우고, 안 겪은 경우를 위한 코드는 검증할 수
+/// 없는 채로 남는다.
+fn cursor_cell_width(cells: &[kasa_bridge::screen::Row], row: u16, col: u16) -> u16 {
+    use unicode_width::UnicodeWidthChar;
+    cells
+        .get(row as usize)
+        .and_then(|r| r.get(col as usize))
+        .and_then(|c| c.ch.width())
+        .unwrap_or(1)
+        .clamp(1, 2) as u16
+}
+
 fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
     // Single anti-aliased implementation lives on the renderer so the chrome
     // and the markdown code-block chips round identically.
@@ -170,6 +194,55 @@ fn panel_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
 fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, fill: [u8; 4]) {
     round_rect(g, x - 1.0, y - 1.0, w + 2.0, h + 2.0, r, theme::border());
     panel_rect(g, x, y, w, h, r, fill);
+}
+
+/// 속이 빈 둥근 테두리 — **고른 것**을 채우지 않고 두르는 자리.
+///
+/// `panel_rect` 과 갈리는 건 무엇을 말하느냐다. 판은 "여기가 층이다"를 말하고
+/// 테두리는 "이걸 골랐다"만 말한다. 골랐다는 걸 판으로 그리면 그 색이 카드
+/// 전체를 덮어, 그 위에 얹히는 상태색이 같은 밝기 대역에서 겨루게 된다.
+///
+/// 안쪽을 `bg` 로 되메우는 방식이라 **바탕색을 호출자가 알아야 한다** — 링만
+/// 그리는 스트로크가 렌더러에 없어서고, 사각 넷으로 두르면 모서리 라운드가
+/// 죽는다.
+fn outline_rect(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    col: [u8; 4],
+    t: f32,
+    bg: [u8; 4],
+) {
+    round_rect(g, x, y, w, h, r, col);
+    round_rect(g, x + t, y + t, (w - t * 2.0).max(0.0), (h - t * 2.0).max(0.0), (r - t).max(0.0), bg);
+}
+
+/// 점선 사각 — "여기 뭔가 있었다"를 그리는 유일한 자리.
+///
+/// 채운 판이 **없다**는 것 자체가 뜻이라, 실선으로 두르면 그냥 빈 카드가 되고
+/// 아무것도 안 두르면 목록에서 그 자리가 사라진다. 점선은 자리는 지키되 비어
+/// 있음을 말한다.
+fn dashed_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, col: [u8; 4]) {
+    const DASH: f32 = 4.0;
+    const GAP: f32 = 3.0;
+    let step = DASH + GAP;
+    let mut px = x;
+    while px < x + w {
+        let seg = DASH.min(x + w - px);
+        g.rect(px, y, seg, 1.0, col);
+        g.rect(px, y + h - 1.0, seg, 1.0, col);
+        px += step;
+    }
+    let mut py = y;
+    while py < y + h {
+        let seg = DASH.min(y + h - py);
+        g.rect(x, py, 1.0, seg, col);
+        g.rect(x + w - 1.0, py, 1.0, seg, col);
+        py += step;
+    }
 }
 
 /// 커서가 얹힌 것을 **들어 올리는** 유일한 함수 — 버튼·탭·행·메뉴 항목, 눌리는
@@ -260,13 +333,18 @@ fn git_paint_dropdowns(
 }
 
 /// Lucide icon name for a sidebar tab's chip, chosen from the window label.
-/// claude panes get the sparkle, markdown docs a file, everything else the
-/// terminal glyph — keeps window identity readable after the SVG switch.
+/// 에이전트 pane 은 sparkle, markdown 은 문서, 나머지는 터미널 글리프.
+/// codex 도 학생 대접이라 같은 sparkle 을 쓴다(거노 2026-08-05) — 종류를 아이콘으로
+/// 가르면 "누가 에이전트인가"가 한눈에 안 들어온다.
+/// 방 카드 앞의 글리프. **무엇이 도는지**가 아니라 **무엇을 여는 자리인지**만
+/// 말한다.
+///
+/// 예전엔 이름에 claude·codex·✳ 가 걸리면 sparkles(별)를 줬는데, 여기 방은 거의
+/// 다 claude 라 결국 모든 카드에 같은 별이 박혔다 — 가르는 데 아무 일도 안 하면서
+/// 목록에서 가장 눈에 띄는 자리를 차지한 셈이다(2026-08-11 지시: "별표시 저건
+/// 없애자"). 무엇이 도는지는 이제 방을 펴면 학생이 걷는 것으로 보인다.
 fn tab_icon_glyph(name: &str) -> &'static str {
-    let l = name.to_ascii_lowercase();
-    if name.contains('✳') || l.contains("claude") {
-        "sparkles"
-    } else if l.ends_with(".md") {
+    if name.to_ascii_lowercase().ends_with(".md") {
         "file-text"
     } else {
         "terminal"
@@ -414,6 +492,12 @@ const PANE_FOOTER_HEIGHT: f32 = 30.0;
 /// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
 /// grid only when the dock is non-empty.
 const DOCK_HEIGHT: f32 = 40.0;
+/// 창 맨 아래 상태줄 높이(logical px) — 계정 한도가 **항상** 보이는 자리.
+///
+/// dock 과 달리 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
+/// 아니라 「지금 얼마나 남았나」라서, 접혀 있으면 그걸 확인하려고 패널을 여는 순간
+/// 이미 늦는다. Orca 하단바(24px)와 같은 높이 — 거기서 형식을 가져왔다.
+const STATUS_HEIGHT: f32 = 24.0;
 /// 활성 탭 상단 accent 선 두께(logical px). BORDER stroke(1px)보다 살짝 굵게.
 const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
@@ -438,7 +522,16 @@ const SIDEBAR_W: f32 = 200.0;
 /// highlight inset from the strip edges. Tabs sit close together.
 const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
+/// 방을 펼쳤을 때 그 안 pane 한 줄의 높이와, 목록 위아래 숨통.
+const SIDEBAR_ROW_H: f32 = 22.0;
+const SIDEBAR_ROW_PAD: f32 = 8.0;
+/// 방을 펴고 접는 데 걸리는 시간. 사이드바는 하루에도 여러 번 여닫는 곳이라
+/// 테마 전환(0.34)보다 짧다 — 여기서 기다려야 하면 곧 안 쓰게 된다.
+const EXPAND_ANIM_SECS: f32 = 0.16;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
+/// 고른 방을 두르는 테두리 두께. 1px 은 카드 사이 구분선(1px)과 굵기가 같아
+/// "골랐다"가 "칸막이"로 읽히고, 2px 은 좁은 칼럼에서 카드를 조여 보인다.
+const SIDEBAR_ACTIVE_RING: f32 = 1.5;
 /// 사이드바 바닥에 붙박인 트레이(+ · 피드백 · 설정)의 높이. 세션 목록은 여기까지만
 /// 자란다.
 const SIDEBAR_TRAY_H: f32 = 44.0;
@@ -800,6 +893,10 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .badge.tok { color: #e3b341; }
   .badge.cost { color: #70AD47; }
   .badge.chg { color: #f0883e; }
+  /* 정액제 한도 — 비용(초록)과 다른 색이라야 "돈"과 "쿼터"가 안 섞인다. 90% 넘으면
+     경고색으로 바뀐다(ctx 90% 규칙과 같은 문턱). */
+  .badge.rate { color: #79c0ff; }
+  .badge.rate.hot { color: #f7768e; }
   .tools { margin-top: 4px; font-size: 10px; color: #5a5f6b; word-break: break-word; }
   .row1 { display: flex; align-items: center; gap: 8px; }
   .sid { font-weight: 600; color: #5a8ce6; }
@@ -879,9 +976,27 @@ function render(board) {
     const tot = (p.tokens_in || 0) + (p.tokens_out || 0);
     const changed = (p.changed_files || []).length;
     const cost = p.cost_usd || 0;
+    // 정액제(codex)는 비용이 없다 — 한도 지표가 있으면 그쪽이다. 비용 칸을 그냥
+    // 비우면 "아직 안 썼다"로 읽히니 `—` 를 박아 **해당 없음**을 표시한다(거노).
+    const metered = p.rate_used_pct == null;
     const bg = [];
     if (tot) bg.push(`<span class="badge tok">${fmtTok(tot)} tok</span>`);
-    if (cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
+    if (metered && cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
+    if (!metered) {
+      // 창 라벨은 **분**으로 온다(창이 늘어도 파서를 안 고치려고). 표시만 여기서 붙인다.
+      const wm = p.rate_window_minutes || 0;
+      const win = wm === 10080 ? "주간" : wm === 1440 ? "일간" : wm === 300 ? "5시간"
+                : wm ? `${wm}분` : "한도";
+      // resets_at 은 절대 시각(unix 초) — 읽는 사람이 뺄셈을 하지 않게 상대로 바꾼다.
+      const left = (p.rate_resets_at || 0) - Math.floor(Date.now() / 1000);
+      const rel = left <= 0 ? "" :
+        left < 3600 ? ` (${Math.round(left / 60)}m 뒤 리셋)` :
+        left < 86400 ? ` (${Math.round(left / 3600)}h 뒤 리셋)` :
+        ` (${Math.round(left / 86400)}d 뒤 리셋)`;
+      bg.push(`<span class="badge cost">—</span>`);
+      const hot = p.rate_used_pct >= 90 ? " hot" : "";
+      bg.push(`<span class="badge rate${hot}">${win} ${Math.round(p.rate_used_pct)}%${rel}</span>`);
+    }
     if (changed) bg.push(`<span class="badge chg">변경 ${changed}</span>`);
     const badges = bg.length ? `<div class="badges">${bg.join("")}</div>` : "";
     const tools = (p.tool_counts || []).map(t => `${esc(t[0])}×${t[1]}`).join(" · ");
@@ -1211,6 +1326,10 @@ struct GpuOverlay {
     pad_y: f32,
     cursor_row: u16,
     cursor_col: u16,
+    /// 커서가 덮는 칸 수. 한글·CJK 는 두 칸을 차지하는데 한 칸만 칠하면 커서가
+    /// 글자의 왼쪽 절반에만 걸려, 그 자리에 뭐가 있는지가 아니라 커서가 깨진 것처럼
+    /// 보인다. 나머지는 전부 1 이다.
+    cursor_w: u16,
     cursor_visible: bool,
     cols: u16,
     blink_on: bool,
@@ -1481,6 +1600,15 @@ enum CloseWhy {
     Busy(String),
     /// Editors with unsaved changes: where each one is, and its file name.
     Dirty(Vec<(DirtyDoc, String)>),
+    /// Cmd+W 를 눌렀는데 그 pane 이 이 방의 **마지막**이라, 닫으면 방(세션)째
+    /// 사라지는 경우. 전에는 여기서 아무 일도 안 일어나 키가 죽은 것처럼 보였다
+    /// (거노: "pane 하나 있고 다른 방 있으면 커맨드 W 해도 무반응"). 방이 하나뿐일
+    /// 때는 여전히 no-op 다 — 그건 앱 종료라 OS 닫기 버튼(Cmd+Q)의 몫이다.
+    ///
+    /// 바쁜 것도 저장 안 된 것도 없어도 **무조건 묻는다**: Cmd+W 는 「하나 닫기」로
+    /// 익힌 키인데 여기선 방 전체가 닫혀, 조용히 실행하면 되돌릴 수 없는 것을
+    /// 눌린 줄도 모르고 잃는다.
+    LastPane,
 }
 
 /// A pending close confirmation: `why` it was raised, `action` is what
@@ -1583,9 +1711,34 @@ struct TabDrag {
 
 /// 닫은 pane 하나 — ⌘⇧T 로 되살릴 대상.
 ///
-/// 되살리는 데 필요한 것이 세션 복원이 쓰는 레코드와 **똑같아서** 그대로 들고 있는다:
-/// cwd·claude 세션 id·캐릭터·스크롤백이 한 덩어리다. 덕분에 복원은 `restore_leaf`
-/// 재사용이고, claude 였던 pane 은 `--resume` 까지 그 함수가 알아서 처리한다.
+/// **닫아도 프로세스는 죽지 않는다.** 사용자가 닫은 pane 은 화면(BSP 트리)에서만
+/// 빠지고 PTY 는 계속 돌아, 되살리기가 "다시 붙이기"가 된다 — claude 가 하던 일을
+/// 이어서 하고 있으므로 `--resume` 으로 대화를 되감을 이유가 없다(거노: 데몬처럼
+/// 계속 돌기를 원함). 진짜로 끄고 싶으면 인포 줄의 × 다.
+///
+/// 다만 죽은 채 목록에 남는 경우도 있다 — 셸이 스스로 exit 한 pane, 그리고 앱을
+/// 껐다 켜 프로세스가 사라진 뒤의 복원분. 그때는 세션 복원과 **똑같은 레코드**
+/// (cwd·claude 세션 id·캐릭터·스크롤백)를 들고 있으므로 `restore_leaf` 재사용으로
+/// 새로 띄우고 `--resume` 까지 그 함수가 처리한다. `alive` 가 그 두 길을 가른다.
+/// 접어 둔 별도창 하나. 창을 되살리는 데 필요한 최소한만 든다 — 내용물(pane 의
+/// PTY·스크롤백, 방의 레이아웃 트리)은 App 이 그대로 쥐고 있으므로 여기 복사하지
+/// 않는다. 그래서 접기는 "창만 없애기"고, 되살리기는 `spawn_aux_*` 재호출이다.
+pub(crate) struct HiddenAux {
+    /// 하단바 칩에 적을 이름.
+    pub(crate) label: String,
+    pub(crate) what: HiddenAuxKind,
+    /// 접을 때의 창 위치 — 되살릴 때 같은 자리에 세운다. 화면 한가운데로
+    /// 튀어나오면 "아까 그 창"으로 안 읽힌다.
+    pub(crate) pos: Option<winit::dpi::PhysicalPosition<i32>>,
+}
+
+pub(crate) enum HiddenAuxKind {
+    /// 꺼낸 pane 하나. `home_window` 는 되돌릴 방.
+    Terminal { pane_id: String, home_window: usize },
+    /// 통째로 꺼낸 방.
+    Room { window: usize },
+}
+
 pub(crate) struct ClosedPane {
     /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
     pub(crate) rec: serde_json::Value,
@@ -1601,16 +1754,65 @@ pub(crate) struct ClosedPane {
     /// 닫힌 방. 아직 있으면 그 방으로 돌아간다. 방 재배치를 따라 remap 된다 —
     /// 안 그러면 되살린 pane 이 남의 방에서 튀어나온다.
     pub(crate) window: usize,
+    /// PTY 가 아직 도는가. 참이면 되살리기는 트리에 leaf 를 다시 꽂는 것뿐이고
+    /// (`pane_id` 가 그대로 유효하다), 거짓이면 `rec` 로 새로 띄운다.
+    pub(crate) alive: bool,
+    /// 사이드바 「숨기기」로 치운 것인가. **참이면 두 정리 루프가 건너뛴다** —
+    /// 개수 상한(`CLOSED_PANE_KEEP`)도 idle reap(`CLOSED_PANE_IDLE_REAP`)도.
+    ///
+    /// 닫기와 갈라 두는 이유: 숨기기는 작업이 도는 중에 화면에서만 치우는 것이라
+    /// 돌아왔을 때 대화가 끊겨 있으면 쓸모가 없다(2026-08-11 지시). 대신 숨긴 만큼
+    /// 메모리를 계속 문다 — 그건 사용자가 고른 값이다.
+    pub(crate) stashed: bool,
+    /// 놀기 시작한 시각 — 여기서부터 `CLOSED_PANE_IDLE_REAP` 을 세다 넘으면 놓는다.
+    /// 다시 일하기 시작하면 `None` 으로 풀려 처음부터 다시 센다.
+    pub(crate) idle_since: Option<Instant>,
 }
 
 /// 닫은 pane 을 몇 개까지 들고 있을지. 레코드마다 스크롤백이 통째 붙어 있어
 /// 무한히 쌓으면 닫기만 반복해도 메모리가 는다.
 const CLOSED_PANE_KEEP: usize = 10;
 
+/// 닫아 둔 pane 이 이만큼 내리 놀면 스스로 놓는다.
+///
+/// 닫아도 안 죽이는 건 의도지만(`hide_pane`), 개수 상한은 **다음 닫기가 있어야만**
+/// 걷어내서 몇 개 닫고 손 떼면 그 셸들이 계속 남는다(실측: 닫힌 pane 4개가 살아
+/// 있었고 그중 셋은 놀고 있었다). 실수로 닫은 걸 알아채는 데는 몇 분이면 충분하고,
+/// 그 뒤로도 노는 pane 은 잊힌 것이다.
+const CLOSED_PANE_IDLE_REAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// 위 시간을 초 단위로 덮는다(`KASATERM_CLOSED_IDLE_SECS`). 15분을 기다리지 않고
+/// 회수를 확인할 수 있는 유일한 길이라 테스트가 이걸 쓰고, 15분이 길거나 짧게
+/// 느껴질 때 손대는 곳도 여기다. 0 이나 파싱 실패는 무시하고 기본값으로 돌아간다.
+fn closed_pane_idle_reap() -> std::time::Duration {
+    std::env::var("KASATERM_CLOSED_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(CLOSED_PANE_IDLE_REAP)
+}
+
 /// State for an in-flight window-tab (방) reorder drag in the sidebar / top
 /// strip. Unlike `TabDrag` the press already switched to the tab — a window
 /// switch is cheap and browser tabs behave that way — so a press that never
 /// passes the threshold leaves nothing for the release to undo.
+/// 사이드바에서 **pane 줄 하나**를 끌고 있는 상태.
+///
+/// 방 탭(`WinTabDrag`)과 갈리는 건 옮기는 것이 방이 아니라 그 안의 pane 이라는
+/// 점이다. 목록이 방 경계를 넘어 이어져 있으므로, 남의 방 줄 위에 떨어뜨리면 그게
+/// 곧 방 옮기기가 된다 — 따로 "다른 방으로" 명령을 두지 않아도 된다.
+struct SidebarRowDrag {
+    /// 잡은 pane.
+    pane: String,
+    /// 누른 자리(논리 px) — 클릭과 드래그를 가르는 문턱용.
+    start: (f32, f32),
+    /// 문턱을 넘었나.
+    active: bool,
+    /// 떨어질 자리 — `(기준 pane, 그 위인가)`. 아무 줄 위도 아니면 None.
+    target: Option<(String, bool)>,
+}
+
 struct WinTabDrag {
     /// Window index grabbed at press time.
     from: usize,
@@ -2087,6 +2289,18 @@ impl PaneState {
     /// 같은 값을 써야 PTY 그리드↔셀 클립이 어긋나지 않는다.
     fn header_px(&self) -> f32 {
         if self.has_header() { PANE_HEADER_HEIGHT } else { 0.0 }
+    }
+    /// `pid` 를 가진 탭. 없으면 활성 탭(= `Deref` 가 주는 것).
+    ///
+    /// **탭을 지목한 조회가 지나야 하는 유일한 문이다.** `PaneState` 는 `Deref` 로
+    /// 활성 탭을 가리키므로, 탭 pid 를 outer pane 으로 접은 뒤 그냥 읽으면 **앞 탭
+    /// 화면이 돌아온다** — 실패가 아니라 조용히 틀린 답이라 부른 쪽이 알 수가 없다
+    /// (아루 실측 2026-08-07: `peek %뒤탭` 이 앞 탭 화면을 줬다).
+    pub(crate) fn tab_for_pid(&self, pid: &str) -> &PaneTab {
+        self.tabs
+            .iter()
+            .find(|t| t.pid.as_deref() == Some(pid))
+            .unwrap_or_else(|| &self.tabs[self.active_tab.min(self.tabs.len() - 1)])
     }
 }
 
@@ -3062,6 +3276,20 @@ fn build_markdown_doc(p: &std::path::Path, text: &str) -> MarkdownDoc {
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
 /// most recently parsed Layout tree, and which pane is active for
 /// keyboard / selection / cursor display.
+/// 사이드바 방 이름 인라인 편집 상태.
+///
+/// **느린 더블클릭**(Finder 파일명 바꾸기)이라 진짜 더블클릭과 갈라야 한다. 규칙은
+/// `starts_room_rename` 에 순수 함수로 두고 여기선 상태만 든다.
+#[derive(Default)]
+struct RoomRename {
+    /// 마지막으로 누른 방 줄과 그 시각 — 다음 클릭이 "느린" 것인지 판정하는 기준.
+    last_click: Option<(usize, std::time::Instant)>,
+    /// 편집 중인 방과 입력 버퍼. None = 편집 아님.
+    editing: Option<(usize, String)>,
+    /// 버퍼 안 커서(문자 단위). 편집을 열 때 이름 끝에 둔다.
+    cursor: usize,
+}
+
 struct Workspace {
     panes: HashMap<String, PaneState>,
     layout: Option<Layout>,
@@ -3154,6 +3382,23 @@ impl Workspace {
         None
     }
 
+    /// `outer_for_pty` 의 반대 — 바깥 pane 이 **지금 보여 주는 탭**의 pid.
+    ///
+    /// 학생 관련 상태(`pane_character`·`pane_claude_sid`·`pane_cwd_cache`…)는 전부
+    /// **탭 pid** 로 기록된다(`assign_character_env` 가 spawn 하는 pane 마다 그 pid 로
+    /// 쓴다). 그런데 그리는 쪽은 BSP leaf(=outer)를 들고 있어, 접지 않으면 탭으로 띄운
+    /// 학생의 색·프사·이름이 **아무 데도 안 나온다**(거노 2026-08-07: "탭안에서
+    /// 생성하면 학생테마가안먹네"). PTY 조회의 `pty_for_pane` 과 짝이다.
+    ///
+    /// 탭이 아직 pid 를 못 받은 순간(첫 ScreenUpdate 전)엔 outer 를 그대로 돌려준다 —
+    /// 단일 탭 pane 은 그 둘이 같은 값이라 무해하다.
+    pub(crate) fn active_tab_pid(&self, outer: &str) -> String {
+        self.panes
+            .get(outer)
+            .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+            .unwrap_or_else(|| outer.to_string())
+    }
+
     /// Locate `(outer_pane, tab_index)` for a backend pty id. Used by
     /// `pump_pty_screens` to write the right tab's content even when the
     /// update came from a non-active or secondary-tab shell.
@@ -3197,8 +3442,64 @@ enum UserEvent {
     /// non-existent pane and its `send-keys` payload is dropped. The `bool` is
     /// `focus`: false (CLI/automation default) keeps focus on the current pane,
     /// true follows into the new one.
-    SocketSplit(kasa_pty::SplitDir, bool, std::sync::mpsc::Sender<String>),
+    /// 세 번째 필드는 **쪼갤 pane**. None 이면 포커스된 pane 을 쪼갠다(GUI 와 같은
+    /// 뜻). 에이전트가 자기 pane 에서 부를 때는 자기 id 를 실어 보낸다 — 안 그러면
+    /// 사람이 보고 있는 창이 쪼개진다(거노: "자꾸 내가 포커스하는 윈도우에 띄우냐").
+    /// 네 번째 필드는 회신 채널 — `Ok(새 pane id)` 아니면 `Err(사유)`. 사유를
+    /// 실어야 소켓이 `ok:false` 로 답할 수 있다. 빈 문자열을 성공으로 실어 보내면
+    /// 호출자가 실패를 감지할 방법이 없다(거노 실사고 2026-08-05).
+    /// 첫 번째 필드가 `None` 이면 **auto** — GUI 스레드가 쪼갤 pane 의 종횡비를 보고
+    /// 긴 축을 고른다. 소켓 스레드는 pane 픽셀 크기를 모르므로 거기서 못 정한다.
+    SocketSplit(
+        Option<kasa_pty::SplitDir>,
+        bool,
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// 되살리기 목록(`closed_panes`)을 읽거나 그중 하나를 **진짜 끈다**.
+    ///
+    /// 왜 소켓에 뚫는가: 닫은 pane 은 **죽지 않는다**(`alive`). 프로세스를 그대로 물고
+    /// 되살리기 목록에 앉아 있어서, 오케스트레이터가 `dismiss` 로 학생을 정리해도 그
+    /// claude 들은 계속 살아 있다 — 그런데 그 목록은 App 필드라 CLI 에서 보이지도, 끄지도
+    /// 못했다(거노 2026-08-06: "너도 보여? 너도 진짜 끄게 할 수 있는지").
+    ///
+    /// `Some(pane_id)` 면 그 항목을 버린다(살아 있으면 프로세스까지). `None` 이면 조회만.
+    /// pane id 로 지목하는 이유: 인덱스는 목록이 바뀌면 다른 항목을 가리킨다 —
+    /// 조회와 종료 사이에 pane 하나만 더 닫혀도 **엉뚱한 학생을 죽인다**.
+    SocketClosedPanes(
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
+    /// 부른 pane **안에 새 탭**을 연다(쪼개지 않는다). 첫 필드가 없으면 포커스된
+    /// pane. 회신은 새 탭의 pane id — 부른 쪽이 거기에 명령을 실어야 한다.
+    ///
+    /// split 과 나뉘는 이유: 학생을 하나 더 띄울 때마다 쪼개면 화면이 계속 줄어든다.
+    /// 탭은 자리를 안 뺏는다(거노 2026-08-05).
+    SocketNewTab(
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// pane 을 **다른 pane 옆으로** 옮긴다 — 그 대상이 다른 창에 있으면 창을 건너뛴다
+    /// (PTY 는 안 죽는다, 트리만 옮겨 붙는다). 셋째는 놓을 방향.
+    SocketMovePane(
+        String,
+        String,
+        crate::DropZone,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// 새 창(사이드바에 하나 더). 창 간 이동(`surface.move`)의 목적지를 만들 때 쓴다 —
+    /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
+    SocketNewWindow,
     SocketFocus(String),
+    /// 데스크톱 알림 배너를 눌렀다 — 그 pane 으로 간다(`SocketFocus` 와 같은 길).
+    ///
+    /// `sid` 는 **알림을 쏜 시점의** claude 세션이다. surface id 는 재사용되므로,
+    /// 그 사이 pane 이 닫히고 번호가 새 셸에 넘어갔으면 여기서 걸러진다 — 엉뚱한
+    /// 자리로 끌려가는 것보다 아무 일도 안 일어나는 편이 낫다.
+    NotifyFocus {
+        pane: String,
+        sid: Option<String>,
+    },
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
     /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는
     /// `Backend::active_cwd` 용 — GUI 는 메모리 조회(active_pane→shell_pid)만
@@ -3254,6 +3555,19 @@ enum UserEvent {
     /// 들어오자마자 바뀌게). PTY 1행 지글(줄였다 원복)로 SIGWINCH 재레이아웃을 유도.
     /// 발동 게이트·rate-limit 은 backend(rebind_agents_panes)가 진다.
     NudgePaneResize(String),
+    /// `surface.capture` 위임 — pane 한 칸만 잘라 PNG 로 굽는다.
+    ///
+    /// 소켓 스레드가 직접 못 하는 이유는 둘이다: pane 의 픽셀 사각형은 레이아웃 트리와
+    /// 셀 치수를 알아야 나오고(GUI 만 쥐고 있다), 프레임버퍼 리드백은 wgpu Surface 를
+    /// 만져야 한다. 그래서 좌표 계산과 무장을 GUI 스레드에서 하고, **저장이 끝난 뒤**
+    /// 회신한다 — 무장하자마자 회신하면 받는 쪽이 아직 없는 파일을 열게 된다.
+    /// `(pane, 저장경로 None=임시, 가로상한 0=원본, 회신)`.
+    SocketCapture(
+        String,
+        Option<String>,
+        u32,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
@@ -3289,17 +3603,20 @@ enum UserEvent {
     /// pane header. Used by the rename override.
     SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
-    /// `POST /session-resume` from arona-ui — open a pane and queue
-    /// `claude --resume <id>` once its shell prompt is up. `newroom` opens a
-    /// fresh window; otherwise it splits the active one. `cwd` (when set) is the
-    /// session's project dir so resume lands in the right place.
+    /// `POST /session-resume` from arona-ui — open a pane and queue the resume
+    /// command once its shell prompt is up. `newroom` opens a fresh window;
+    /// otherwise it splits the active one. `cwd` (when set) is the session's
+    /// project dir so resume lands in the right place.
     ResumeSession {
         id: String,
         cwd: Option<String>,
         newroom: bool,
         /// true → `claude attach <id>`(daemon background 세션 연결, 세션 background 유지).
-        /// false → `claude --resume <id>`(jsonl 새 프로세스, 과거 세션 이어가기).
+        /// false → 하네스별 이어가기 명령(jsonl 새 프로세스, 과거 세션 이어가기).
         attach: bool,
+        /// 그 세션을 만든 코딩 프로그램 — `claude`/`codex`/`agy`. 빈 값이면 claude.
+        /// `attach` 는 claude 의 daemon 개념이라 이 값과 무관하게 claude 로 간다.
+        harness: String,
     },
     /// "대화 저장하기" — surface pane 의 foreground claude 를 ←←(agents view = bg-detach)
     /// 주입으로 background daemon 으로 detach. surface 없으면 active pane. 터미널이 꺼져도
@@ -3385,6 +3702,47 @@ fn is_git_repo(p: &std::path::Path) -> bool {
     p.join(".git").exists()
 }
 
+/// 화면에 띄울 한도 한 줄 — 가장 먼저 닫히는 창의 사용률, 그게 어느 창인지,
+/// 그리고 그 숫자가 지금 값인지. 셋을 함께 들고 다니는 이유는 전에 percent 하나만
+/// 들고 다니다 (가) 어느 창인지 몰라 0% 를 이상하게 여기지 않았고 (나) upstream 이
+/// 막혀 며칠 묵은 값을 보여줘도 화면이 똑같아 보였기 때문이다(거노 2026-08-05).
+#[derive(Clone, PartialEq)]
+pub(crate) struct UsageBadge {
+    pub(crate) pct: f32,
+    /// `5h`/`7d` — `socket::usage_pressure` 가 `limits[].group` 에서 고른 라벨.
+    pub(crate) label: &'static str,
+    /// upstream 이 막혀 마지막 성공값을 재사용한 것. 흐리게 그려 "지금 값이 아님"을
+    /// 말한다 — 숨기지는 않는다(빈칸은 "한도 여유"로 오해된다).
+    pub(crate) stale: bool,
+    /// 이 숫자가 어느 계정 저장소의 것인가(`""` = 기본 로그인). 계정을 바꾼 직후
+    /// 옛 계정 값을 새 계정 것으로 그리지 않기 위한 표식.
+    pub(crate) account_dir: String,
+    /// 그 창이 풀리는 시각(epoch 초). 화면은 이걸 **남은 시간**으로 바꿔 그린다 —
+    /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(거노 2026-08-07).
+    pub(crate) resets_at: Option<u64>,
+}
+
+/// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).
+///
+/// 분까지만 쓴다 — 초는 매 프레임 바뀌어 눈이 그리로 끌리는데, 이 숫자로 하는 판단은
+/// "지금 계정을 옮길까"라 분 단위면 충분하다.
+pub(crate) fn resets_in_label(resets_at: Option<u64>) -> Option<String> {
+    let at = resets_at?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let left = at.saturating_sub(now);
+    if left == 0 {
+        return None; // 이미 지났다 — 다음 조회가 0% 를 실어 온다
+    }
+    let (h, m) = (left / 3600, (left % 3600) / 60);
+    Some(match (h, m) {
+        (0, 0) => "곧".to_string(),
+        (0, m) => format!("{m}m"),
+        (h, m) => format!("{h}h{m}m"),
+    })
+}
+
 /// Parsed `git status` snapshot for the right-hand git column. The background
 /// poller fills it from `kasa_mcp::git::git_status` (off the main thread);
 /// the render reads it. Kept as a flat, render-ready struct so the gpu block
@@ -3437,6 +3795,19 @@ enum FtMenuAction {
     OpenDefault,
 }
 
+/// 사이드바 pane 행 우클릭 메뉴 항목.
+///
+/// 갈래가 둘뿐이라 enum 이 과해 보이지만, 파일트리·Info 두 메뉴가 이미 같은 모양
+/// (`(action, label, …)` → rect 벡터 → 실행)이라 그 골격을 그대로 쓰는 편이 항목이
+/// 늘 때 싸다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SidebarMenuAction {
+    /// 화면에서만 뗀다 — PTY 는 계속 돌고, 닫기와 달리 **정리 대상에서도 빠진다**.
+    Hide,
+    /// 숨겨 둔 것을 제자리로.
+    Unhide,
+}
+
 /// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
 /// 이걸 쓰는 입구는 아홉 곳이라, 문맥이 바뀌어도 조합 상태가 그대로 남아 다음
 /// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
@@ -3449,6 +3820,11 @@ pub(crate) enum ImeFocus {
     /// 별도창 raw 편집기(aux 인덱스).
     AuxEditor(usize),
     GitCommit,
+    /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
+    /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
+    McpAdd,
+    /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
+    RoomRename(usize),
     PathSearch,
     TreeSearch,
     TreeNew,
@@ -3549,6 +3925,12 @@ pub(crate) enum SettingsAction {
     Shape(&'static str),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
+    /// UI 배율 스테퍼(±10%). Cmd+/− 와 같은 축이지만, 키로만 있으면 얼마나
+    /// 틀어졌는지 화면에 안 보여 되돌릴 생각을 못 한다.
+    UiZoomDelta(i8),
+    /// 배율 100% + 폰트 기본값으로 한 번에. 둘을 따로 만지다 보면 어느 쪽이
+    /// 어긋났는지 알 수 없게 되는데, 그때 돌아올 자리가 필요하다.
+    ResetScale,
     /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
     TabPosition(&'static str),
     ToggleClaudePersona,
@@ -3729,8 +4111,6 @@ struct App {
     /// the tmux daemon owns the layout there and ships it via
     /// `%layout-change` instead.
     pty_layout: Option<kasa_pty::PtyLayout>,
-    /// Monotonic counter for the next "%N" pane id when splitting.
-    next_pane_id: u32,
     /// Queued `claude --resume …\n` injections for restored panes, one per
     /// claude pane, fired once each pane's shell prompt is up. Holds the
     /// PtySession Arc directly so it works for panes in any session (active or
@@ -3747,6 +4127,13 @@ struct App {
     /// `about_to_wait` arms `gpu.capture_next` once a deadline passes so the
     /// next render reads the frame back to a PNG — no screen-record permission.
     pending_capture: Vec<(std::time::Instant, String)>,
+    /// `surface.capture` 회신 대기 `(png 경로, 회신 채널)`.
+    ///
+    /// GPU 리드백은 렌더 안에서 동기로 끝나므로(`device.poll(Wait)`), 무장한 프레임을
+    /// 그린 직후 파일이 이미 있다. 그래서 렌더 뒤에 이 큐를 훑어 파일을 확인하고
+    /// 회신한다 — 무장 시점에 미리 답하면 받는 쪽이 없는 파일을 Read 하게 된다.
+    pending_capture_reply:
+        Vec<(String, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>)>,
     /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
     /// "diff" expands the first changed file's inline diff, "modal" opens the
     /// commit modal, so those states can be self-captured without clicking.
@@ -3881,6 +4268,13 @@ struct App {
     account_menu: bool,
     /// 사용량 pill 의 rect(클릭 = 계정 드롭다운 토글). pill 을 안 그리는 프레임엔 None.
     account_chip_rect: Option<(f32, f32, f32, f32)>,
+    /// 하단 상태줄의 계정 세그먼트 rect. Info 탭을 안 열어도 **항상** 있는 손잡이라
+    /// 실제로 계정을 여닫는 자리는 이쪽이 된다.
+    status_account_rect: Option<(f32, f32, f32, f32)>,
+    /// 드롭다운이 **어느 손잡이에서** 열렸나 — 메뉴를 그 자리에 붙여 그린다.
+    /// 손잡이가 둘(Info 탭 계정 행 · 상태줄)이라, 하나로 고정하면 다른 쪽에서 열었을
+    /// 때 메뉴가 화면 반대편에 뜬다.
+    account_menu_anchor: Option<(f32, f32, f32, f32)>,
     /// 드롭다운 항목 hit rect.
     account_menu_hits: Vec<(AccountMenuItem, (f32, f32, f32, f32))>,
     /// Rendered markdown content height (logical px) per pane id, published by
@@ -3964,6 +4358,20 @@ struct App {
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
     window_tab_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 사이드바 방 이름 인라인 편집(느린 더블클릭). 필드를 늘리지 않으려 한 줄로 묶었다 —
+    /// `struct App` 정의는 병렬 작업 충돌 핫스팟이다(CLAUDE.md).
+    room_rename: RoomRename,
+    /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
+    /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
+    sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
+    /// 사이드바 pane 행 우클릭 메뉴 — `(x, y, 방, pane id)`.
+    ///
+    /// 방을 함께 쥐는 이유: 숨기기는 **그 방을 활성으로 만든 뒤** 돌아야 한다. 사이드바는
+    /// 모든 방의 pane 을 보여주는데, 다른 방 pane 을 그냥 `stash_pane` 하면 활성 트리에
+    /// 없어서 `remove_pane`(죽이는 경로)으로 샌다.
+    sidebar_menu: Option<(f32, f32, usize, String)>,
+    /// 그 메뉴 항목의 rect — 렌더가 채우고 클릭이 읽는다(파일트리·Info 메뉴와 같은 관례).
+    sidebar_menu_rects: Vec<(SidebarMenuAction, (f32, f32, f32, f32))>,
     /// (window index, close-× rect) for each window tab. Only present when
     /// there's more than one window (the last window can't be closed).
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
@@ -3982,6 +4390,9 @@ struct App {
     /// 닫은 pane 스택(최근이 뒤). ⌘⇧T 가 뒤에서 꺼내 되살리고, 인포가 흐린 줄로
     /// 보여 준다 — 되돌릴 수 있다는 걸 알리지 않으면 있으나 마나다.
     closed_panes: Vec<ClosedPane>,
+    /// 접어 둔 별도창(하단바 칩). 창만 없애고 pane·PTY 는 그대로라, 칩을 누르면
+    /// 같은 내용의 창이 다시 선다.
+    hidden_aux: Vec<HiddenAux>,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -4149,6 +4560,11 @@ struct App {
     /// sidebar-window dot; a working→idle flip fires the completion toast. Keyed
     /// by surface id, replaced wholesale on each StateView.
     pane_activity: HashMap<String, crate::stream::PaneStatusView>,
+    /// ultracode 가 켜진 pane — 입력박스를 보라색으로 두른다. claude 는 이 상태를
+    /// statusline payload 에 안 실어 주므로(effort 는 low..max 뿐), UserPromptSubmit
+    /// 훅이 남기는 `/tmp/kasaterm-collab/ultracode/<sid>.on` 마커를 대신 읽는다.
+    /// `refresh_pane_activity` 박자(300ms)로 갱신 — 매 프레임 stat 하지 않는다.
+    pane_ultracode: std::collections::HashSet<String>,
     /// Whether our window currently has OS focus. Drives notification
     /// suppression: a completion alert for the already-focused active pane is
     /// pointless (the user is looking right at it), so we skip the desktop
@@ -4167,6 +4583,42 @@ struct App {
     /// pulses until the user switches to that window, which clears the entry —
     /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
     window_alert: std::collections::HashSet<usize>,
+    /// 사이드바에서 pane 목록을 펴 둔 방. **펼친 것만** 담으므로 기본은 접힘이다
+    /// (info.rs 의 `group_collapsed` 는 기본이 열림이라 반대 뜻 — 한 집합에 못 담아
+    /// 따로 둔다). 방 인덱스가 키라 `reorder_window` 의 remap 을 반드시 통과해야
+    /// 한다 — 안 그러면 2번을 펴 두고 3번 자리로 끌어 옮겼을 때 3번이 펴진 채 뜬다.
+    expanded_windows: std::collections::HashSet<usize>,
+    /// 펼친 카드를 **목록**으로 보는 방. 기본(비어 있음)은 배치도다.
+    ///
+    /// 배치도와 목록은 같은 pane 을 서로 다른 축으로 말한다 — 지도는 "어느 칸이
+    /// 화면 어디인지", 목록은 "무엇을 돌리고 있는지"(claude·zsh·편집기). 둘을 한
+    /// 카드에 같이 두면 카드가 두 배로 길어지면서도 어느 쪽도 온전하지 못해, 한
+    /// 번에 하나만 띄우고 카드 머리에서 갈아 끼운다(2026-08-11 지시).
+    ///
+    /// `expanded_windows` 와 같은 이유로 방 인덱스가 키다 — `reorder_window` 의
+    /// remap 을 반드시 지나야 방을 끌어 옮겨도 뷰가 따라간다.
+    list_view_windows: std::collections::HashSet<usize>,
+    /// 지금 펴지거나 접히는 중인 방 — `(방, 펴는 중인가, 시작 시각)`.
+    ///
+    /// 한 번에 하나만 담는다. 다른 방을 토글하면 앞엣것은 그 자리에서 끝난 것으로
+    /// 친다 — 목록이 동시에 두 군데서 밀리면 어느 쪽이 내가 누른 것인지 못 읽는다.
+    expand_anim: Option<(usize, bool, std::time::Instant)>,
+    /// 사이드바 pane 줄을 끌고 있는 중이면 그 상태.
+    sidebar_row_drag: Option<SidebarRowDrag>,
+    /// 밖에 나간 방을 **되돌리는** 아이콘의 자리 — `(방 인덱스, 사각)`. 매 프레임
+    /// 재구축이라 창을 닫으면 그 자리도 같이 사라진다.
+    window_dock_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// claude 가 **한 번이라도** 떴던 pane. 학생 얼굴을 여기에만 내보인다.
+    ///
+    /// 캐릭터 자체는 pane 을 만들 때 배정된다 — 셸 env(`KASATERM_CHARACTER`·
+    /// `KASATERM_PERSONA`)에 미리 심어 둬야 나중에 거기서 켜는 claude 가 그 학생으로
+    /// 부팅되기 때문이다. 그런데 그러면 셸만 도는 pane 에도 얼굴이 먼저 떠 있어
+    /// "누가 일하고 있다"로 읽힌다(거노: "zsh 인데 학생이 이미 있는 이유는 뭐야").
+    /// 배정은 그대로 두고 **보이는 시점만** claude 가 실제로 붙을 때로 미룬다.
+    ///
+    /// 한 번 본 것을 계속 기억하는 건, claude 가 cargo 같은 자식을 띄우면 그동안
+    /// 프로세스 이름이 그쪽으로 바뀌어 얼굴이 깜빡 사라지기 때문이다.
+    pane_claude_seen: std::collections::HashSet<String>,
     /// Panes that fired a notify/attention while not being looked at and
     /// haven't been opened since — drives the Dock badge count. Cleared when
     /// the pane becomes the focused active pane (`sync_dock_badge`).
@@ -4222,10 +4674,18 @@ struct App {
     /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
     /// (부모 캐릭터 상속)가 읽는다. 백그라운드 세션이 아니면 키 없음.
     bg_agents: std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
-    /// claude 5시간 사용량 창 사용률(%). handler.rs resumed 의 폴러가 로컬
-    /// `/claude-usage`(oauth/usage 프록시)를 60초마다 조회해 채운다. 타이틀바
-    /// 우상단 사용량 pill 이 읽는다. 토큰 없음/실패면 None → pill 숨김.
-    claude_usage: std::sync::Arc<std::sync::Mutex<Option<f32>>>,
+    /// 활성 계정의 **가장 먼저 닫히는 한도 창**. handler.rs resumed 의 폴러가 로컬
+    /// `/claude-usage`(oauth/usage 프록시)를 조회해 채운다. Info 탭 머리의 계정 행이
+    /// 읽는다. 토큰 없음/실패면 None → 숫자 숨김.
+    claude_usage: std::sync::Arc<std::sync::Mutex<Option<UsageBadge>>>,
+    /// **계정 저장소 경로 → 그 계정의 한도**(`""` = 기본 로그인). 위 `claude_usage` 가
+    /// 활성 계정 하나만 담는 것과 달리, 이건 등록된 계정 전부를 담는다.
+    ///
+    /// 계정 드롭다운이 읽는다 — 누르기 **전에** 각 계정의 사용률이 보여야 하기 때문이다
+    /// (거노: "누르면 전환되버리잖아"). 전환해 봐야 아는 구조면 한도 때문에 옮기려는
+    /// 사람이 옮길 곳을 못 고른다. 활성이 아닌 계정도 조회할 수 있는 것은 usage 프록시가
+    /// 슬롯별 토큰을 직접 읽기 때문이다(`/claude-usage?dir=<슬롯>`) — 전환이 필요 없다.
+    claude_usage_all: std::sync::Arc<std::sync::Mutex<HashMap<String, UsageBadge>>>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -4251,6 +4711,12 @@ struct App {
     /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
     /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
     info: state::InfoState,
+    /// 우측 칼럼의 Sessions 탭 — 과거 세션 기록(claude·codex·agy)을 골라 잇는다.
+    /// `git`/`info` 와 칼럼 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
+    sessions_col: state::SessionsColState,
+    /// 우측 칼럼의 MCP·Skill 탭 — 하네스별로 무엇이 붙어 있나. 위 둘과 칼럼
+    /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
+    mcp_col: state::McpColState,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -4323,13 +4789,6 @@ struct App {
     settings_caret: usize,
     /// Clickable targets collected during the settings paint, for hit-testing.
     settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
-    /// statusline 학생 프사 클릭 hit-test: (학생 이름, rect). 렌더가 매 프레임
-    /// 재구축 → 프사 클릭 시 학생 설정 별도창(Students 카테고리 + 그 학생 선택)을
-    /// 연다. 프사 hover 확대와 같은 slot(profile_face_hits)에서 나온다.
-    face_hit_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// 커서가 statusline 프사 위인지 — 진입/이탈 시에만 재페인트해 hover 확대
-    /// 팝업이 뜨고 사라지게 한다(이벤트 기반 루프라 이동만으론 재렌더 안 됨).
-    face_hover: bool,
     /// Students 카테고리 인라인 편집: 선택된 캐릭터(이름) + persona 편집 버퍼 +
     /// 캐럿(문자 인덱스). 선택 시 raw_persona 를 버퍼로 로드하고, blur/선택변경 시
     /// characters.json 에 flush 한다.
@@ -4507,11 +4966,11 @@ impl App {
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,
-            next_pane_id: 1, // %0 is the initial pane created in start_pty
             pending_restores: Vec::new(),
             pending_unjiggle: Vec::new(),
             autoquit_at: None,
             pending_capture: Vec::new(),
+            pending_capture_reply: Vec::new(),
             pending_autogit: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
@@ -4558,6 +5017,8 @@ impl App {
             // 드롭다운이 열린 프레임을 캡처한다.
             account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
             account_chip_rect: None,
+            status_account_rect: None,
+            account_menu_anchor: None,
             account_menu_hits: Vec::new(),
             md_content_h: HashMap::new(),
             md_block_ys: HashMap::new(),
@@ -4580,12 +5041,16 @@ impl App {
             pane_last_busy: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
+            sidebar_row_rects: Vec::new(),
+            sidebar_menu: None,
+            sidebar_menu_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             win_tab_first: 0,
             win_tab_vis: usize::MAX,
             win_tab_wheel_accum: 0.0,
             win_tab_drag: None,
             closed_panes: Vec::new(),
+            hidden_aux: Vec::new(),
             new_window_btn_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
@@ -4593,6 +5058,7 @@ impl App {
             window_labels: Vec::new(),
             window_labels_at: None,
             window_name_override: HashMap::new(),
+            room_rename: RoomRename::default(),
             selection: None,
             drag_anchor: None,
             link_armed: None,
@@ -4628,10 +5094,17 @@ impl App {
             claude_busy_until: None,
             last_claude_status: None,
             pane_activity: HashMap::new(),
+            pane_ultracode: std::collections::HashSet::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
             turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
+            expanded_windows: std::collections::HashSet::new(),
+            list_view_windows: std::collections::HashSet::new(),
+            expand_anim: None,
+            sidebar_row_drag: None,
+            window_dock_rects: Vec::new(),
+            pane_claude_seen: std::collections::HashSet::new(),
             unread_panes: std::collections::HashSet::new(),
             dock_badge_n: 0,
             collab: Default::default(),
@@ -4647,6 +5120,7 @@ impl App {
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            claude_usage_all: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -4669,9 +5143,31 @@ impl App {
                 // 가 사이드바를 강제로 여는 것과 같은 이유).
                 tab: if std::env::var("KASATERM_TEST_INFO").is_ok() {
                     state::SideTab::Info
+                } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
+                    state::SideTab::Sessions
+                } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
+                    state::SideTab::Mcp
                 } else {
                     state::SideTab::Git
                 },
+                ..Default::default()
+            },
+            sessions_col: state::SessionsColState {
+                // 헤드리스 검증에서 방 하나에 기록이 없으면 빈 목록만 찍힌다 —
+                // 전체 범위로 열어야 목록이 실제로 그려진 프레임을 캡처할 수 있다.
+                scope_all: std::env::var("KASATERM_TEST_SESSIONS")
+                    .is_ok_and(|v| v == "all"),
+                ..Default::default()
+            },
+            mcp_col: state::McpColState {
+                // 추가 칸은 열어야만 보이는데 헤드리스 캡처는 클릭을 못 한다.
+                add: std::env::var("KASATERM_TEST_MCP")
+                    .ok()
+                    .filter(|v| v == "add")
+                    .map(|_| state::McpAddForm {
+                        harness: "claude",
+                        ..Default::default()
+                    }),
                 ..Default::default()
             },
             statusbar: Default::default(),
@@ -4726,8 +5222,6 @@ impl App {
                 .unwrap_or_default(),
             students_caret: 0,
             settings_caret: 0,
-            face_hit_rects: Vec::new(),
-            face_hover: false,
             window_frame_save_due: None,
             md_select_drag: None,
             // KASATERM_TEST_SETTINGS_SCROLL: 헤드리스 스크린샷으로 폼 스크롤을
@@ -5050,10 +5544,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     install_pane_shims();
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
-    // 다른 인스턴스가 하나도 없으면 collab 캐릭터 마커도 전부 stale — 같이 청소.
-    if !sweep_dead_kasaterm_sockets() {
-        cleanup_stale_collab_markers();
+    // 그렇게 얻은 live pid 목록으로 죽은 인스턴스의 캐릭터 마커도 지운다 — 예전엔
+    // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
+    // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
+    // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
+    {
+        let live = live_kasaterm_pids();
+        kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
     }
+    prune_finished_tasks();
+    prune_empty_inboxes();
     // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
     // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
@@ -5181,9 +5681,21 @@ fn install_pane_shims() {
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
     // (`--settings`) so ~/.claude/settings.json is never modified.
     install_claude_hook_shim(&shim_dir);
+    // codex 도 같은 대접 — pane 전용 CODEX_HOME 에 우리 훅·페르소나를 얹는다.
+    install_codex_hook_shim(&shim_dir);
+    // agy 도 학생이 된다. 셋 중 유일하게 사용자 홈에 파일을 쓰는데(그 CLI 가
+    // 에이전트를 이름으로만 찾는다), 접두 `kasaterm-` 밖은 안 건드린다.
+    install_agy_hook_shim(&shim_dir);
+    // pane 마다 rust-analyzer 가 하나씩 뜨던 것을 하나로 모은다(ra-multiplex 가
+    // 있을 때만 — 없으면 shim 이 진짜를 그대로 exec 한다).
+    install_rust_analyzer_shim(&shim_dir);
     // 학생 이름 자체를 명령으로(`시로코`/`shiroko`) — 이 pane 을 그 학생으로
-    // 재배정하고 claude 를 띄운다. characters.json 기준 부팅 1회 생성.
+    // 재배정하고 하네스(claude 기본, `시로코 codex`)를 띄운다. characters.json
+    // 기준 부팅 1회 생성.
     install_student_shims(&shim_dir);
+    // 내장 `/rename` 을 가리는 대체 커맨드. 셰임이 아니라 `~/.claude/commands` 라
+    // shim_dir 을 안 받는다.
+    remove_rename_command();
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -5278,6 +5790,65 @@ fn python3_program() -> Option<&'static str> {
 /// open-preview endpoint, which spawns a separate wry window. No dependency
 /// beyond `curl` (ships on macOS/Linux); the port comes from
 /// KASASPACE_MCP_PORT (default 8765), inherited from the host process.
+/// `rust-analyzer` 를 가로채 **서버 하나를 모든 pane 이 나눠 쓰게** 한다.
+///
+/// pane 마다 claude 가 자기 rust-analyzer 를 띄운다 — 실측(2026-08-11) pane 7개에
+/// 서버 7 + proc-macro 서버 7 = **14 프로세스가 같은 워크스페이스를 각자 인덱싱**하고
+/// 있었고, 인덱싱이 돌자 CPU 119% · RSS 2.43GB 였다. claude 는 PATH 에서
+/// `rust-analyzer` 를 찾고 이 shim 디렉터리가 PATH 맨 앞이라, 여기서 가로채
+/// [`ra-multiplex`](https://crates.io/crates/ra-multiplex) 로 넘긴다.
+///
+/// 멀티플렉서가 없으면 shim 이 진짜를 그대로 exec 한다 — 없다고 LSP 를 죽이는 것보다
+/// pane 마다 하나가 뜨는 편이 낫다. `claude --bare` 로 LSP 를 끄는 길도 있지만 그건
+/// 훅·플러그인까지 함께 꺼서 협업(bind-transcript·statusline·페르소나)이 통째로 죽는다.
+fn install_rust_analyzer_shim(shim_dir: &std::path::Path) {
+    if cfg!(windows) {
+        return;
+    }
+    // 진짜 경로 탐색은 claude/codex/agy shim 과 같은 방식(`CLEAN_PATH`)이다 — 자기
+    // 디렉터리를 PATH 에서 빼고 찾는다.
+    let body = r#"#!/bin/sh
+# kasaterm rust-analyzer shim — pane 마다 서버가 하나씩 뜨는 것을 막는다.
+#
+# ⚠️ --server-path 에 **진짜 경로**를 넘겨야 한다. 안 주면 ra-multiplex 가 PATH 에서
+#    rust-analyzer 를 찾는데 그게 이 shim 이라 자기를 무한히 다시 부른다.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v rust-analyzer 2>/dev/null)
+if [ -z "$REAL" ]; then
+echo "kasaterm rust-analyzer shim: real rust-analyzer not found on PATH" >&2
+exit 127
+fi
+MUX=$(PATH="$CLEAN_PATH" command -v ra-multiplex 2>/dev/null)
+# 멀티플렉서가 없으면 진짜를 그대로 — LSP 가 죽는 것보다 pane 마다 하나가 낫다.
+[ -n "$MUX" ] || exec "$REAL" "$@"
+# 서버는 첫 pane 이 올린다. 자동 시작을 안 한다(실측: status 가 "Error: connect").
+# 여럿이 동시에 올려도 포트를 못 잡은 쪽이 조용히 죽으므로 무해하다.
+if ! "$MUX" status >/dev/null 2>&1; then
+"$MUX" server >/dev/null 2>&1 &
+# client 는 재시도하지 않는다 — 포트가 열릴 때까지 잠깐 기다린다(최대 5초).
+i=0
+while [ "$i" -lt 50 ] && ! "$MUX" status >/dev/null 2>&1; do
+sleep 0.1
+i=$((i+1))
+done
+fi
+exec "$MUX" client --server-path "$REAL" "$@"
+"#;
+    let path = shim_dir.join("rust-analyzer");
+    if let Err(e) = std::fs::write(&path, body) {
+        eprintln!("[shim] write rust-analyzer failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
+            eprintln!("[shim] chmod rust-analyzer failed: {e}");
+        }
+    }
+}
+
 fn install_preview_shims(shim_dir: &std::path::Path) {
     // Windows shells can't run /bin/sh scripts and the pane PATH there isn't
     // a POSIX shell; skip rather than drop broken files.
@@ -5430,6 +6001,228 @@ fn claude_account_export_line(dir: Option<&std::path::Path>) -> String {
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
 /// pane runs exactly as the user configured it and install-hooks.sh is no
 /// longer needed.
+/// claude shim 의 teammate 이름/색 case 분기(`미도리) AGENT=midori; ACOLOR=green ;;`) —
+/// 배정 캐릭터(한글)를 ASCII agent 이름과 8색 --agent-color 로 사상한다. 로마자 슬러그가
+/// 정본(inbox 파일명이 agent-name 슬러그라 한글은 "---" 로 붕괴), 슬러그 없는 커스텀
+/// 캐릭터는 해시 축약으로 방어. 색은 characters.json claude_color 를 8색으로 정규화 —
+/// --agent-color 는 teammate TUI 전체 테마라 pane accent 와 결이 맞아야 한다(team.rs).
+fn teammate_case_arms() -> String {
+    let Some(chars) = kasa_mcp::character::characters_json() else {
+        return String::new();
+    };
+    let mut arms = String::new();
+    for name in kasa_mcp::character::member_names(&chars) {
+        // case 패턴 자리에 그대로 박히므로 sh 특수문자가 든 이름은 건너뛴다(사용자 편집
+        // characters.json 방어 — 그 캐릭터만 팀모드 없이 부팅될 뿐 스크립트는 안 깨진다).
+        if name.chars().any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c)) {
+            continue;
+        }
+        let slug = theme::agent_slug(&name);
+        let color = kasa_mcp::character::claude_color_for(&chars, &name)
+            .map(|c| kasa_mcp::team::normalize_agent_color(&c).to_string())
+            .unwrap_or_default();
+        arms.push_str(&format!("      {name}) AGENT={slug}; ACOLOR={color} ;;\n"));
+    }
+    arms
+}
+
+/// 이 실행이 **하네스가 띄운 검증 인스턴스**인가.
+///
+/// 판정 근거는 창 기하를 env 로 강제했다는 것 하나다 — 사람이 쓰는 창은 저장된 자리에
+/// 뜨지 강제되지 않는다. 이게 참이면 그 인스턴스는 거노의 설정을 **읽지도 쓰지도**
+/// 않는다: 창 크기를 저장하지 않고(`save_window_frame`), 저장 세션 복원도 묻지 않는다.
+/// 설정 파일이 인스턴스 사이에 공유되기 때문이고, 실제로 한쪽만 막았다가 나머지에
+/// 당했다(430x700 검증 실행이 `window.json` 을 덮었고, 복원 대화상자가 캡처를 가렸다).
+pub(crate) fn verification_run() -> bool {
+    std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
+        || std::env::var_os("KASATERM_WINDOW_POS").is_some()
+}
+
+/// teammate 이름 꼬리 — **이 앱 부팅 동안 고정**인 3자 토큰(`-k7q`).
+///
+/// 없을 때 무슨 일이 났나: 이름이 `<슬러그>-p<pane번호>` 뿐이라 인박스 파일명이
+/// `midori-p3.json` 이었고, pane 번호는 앱을 껐다 켜면 낮은 수부터 다시 쓰인다.
+/// 그래서 **새 학생이 죽은 학생의 인박스를 물려받았다** — 실측 2026-08-06: `koharu-p7`
+/// 에 08-04 "영문 데모 쇼케이스 브리프", `momoi-p1` 에 "폴더 정리 제외 요청" 이 배달
+/// 안 된 채 남아 있었고, 그 번호에 새 학생이 뜨면 이틀 전 지시를 자기 것으로 읽는다.
+/// 같은 이유로 같은 레포에 인스턴스를 둘 띄우면 두 학생이 한 파일을 나눠 먹는다.
+///
+/// 부팅마다 달라지면 되고 **예측 가능할 필요는 없다** — 부른 쪽은 `split` 응답이
+/// 알려 주는 이름을 그대로 쓴다(`Backend::pane_agent`). 셰임과 GUI 가 같은 값을 봐야
+/// 하므로 pane env(`KASATERM_AGENT_SUFFIX`)로 건네고, 슬러그와 독립이라 `--resume` 이
+/// 캐릭터를 바꿔 달아도 어긋나지 않는다.
+pub(crate) fn agent_name_suffix() -> String {
+    static TOK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOK.get_or_init(|| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // 초 단위 base36 뒤 3자 — 46656초(약 13시간) 주기라 재시작 간 충돌이 사실상 없다.
+        let mut n = secs % 46_656;
+        let d: Vec<u8> = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        let mut s = [0u8; 3];
+        for i in (0..3).rev() {
+            s[i] = d[(n % 36) as usize];
+            n /= 36;
+        }
+        format!("-{}", String::from_utf8_lossy(&s))
+    })
+    .clone()
+}
+
+/// 끝난 태스크를 며칠 뒤에 지울지. `KASATERM_TASK_KEEP_DAYS` 로 조절.
+const TASK_KEEP_DAYS: u64 = 3;
+
+/// **열린 채로** 방치된 태스크를 며칠 뒤에 지울지. 끝난 것보다 훨씬 길게 잡는다 —
+/// 어제 안 끝낸 일은 밀린 일이지만, 2주를 손 안 댄 일은 버려진 일이다.
+/// (실측 2026-08-06 sionic 방: 07-24 slack-sentry 미완료 4건이 방이 다른 주제로
+/// 옮겨 간 뒤에도 목록 맨 위를 차지하고 있었다 — 열린 것이 먼저 그려지기 때문.)
+const TASK_OPEN_KEEP_DAYS: u64 = 14;
+
+/// 다 끝난 태스크 파일을 치운다 — **태스크 저장소가 쌓이기만 하고 아무도 안 비웠다.**
+///
+/// 저장소는 `~/.claude/tasks/<팀>/` 이고 팀 = 방(cwd) 이라, 한 방에서 2주를 일하면
+/// 그 방의 모든 pane 이 2주치 완료 목록을 달고 다닌다(실측 2026-08-06 sionic 방:
+/// 34개 중 29개 완료, 가장 오래된 것이 7월 24일). board 가 그걸 거르지 않고 다 그려서
+/// 「지금 뭘 하는지」가 안 보였다 — 거노: "아루 태스크는 왜 저렇게 돼 있어".
+///
+/// 문턱은 둘이다: 끝난 것 `TASK_KEEP_DAYS`(3일), **열린 채 방치된 것**
+/// `TASK_OPEN_KEEP_DAYS`(14일). 어제 안 끝낸 일은 밀린 일이라 살려 두고, 2주를 손 안
+/// 댄 일만 버려진 것으로 본다.
+///
+/// 되돌릴 수 없는 삭제라 판정을 좁게 잡는다: 파일이 파싱되고 status 를 읽을 수 있을
+/// 때만 손댄다(깨진 파일·모르는 형식은 그대로 둔다).
+fn prune_finished_tasks() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let days = |k: &str, d: u64| {
+        std::time::Duration::from_secs(
+            std::env::var(k).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(d) * 86_400,
+        )
+    };
+    let cutoff = (
+        days("KASATERM_TASK_KEEP_DAYS", TASK_KEEP_DAYS),
+        days("KASATERM_TASK_OPEN_KEEP_DAYS", TASK_OPEN_KEEP_DAYS),
+    );
+    let Ok(teams) = std::fs::read_dir(home.join(".claude/tasks")) else {
+        return;
+    };
+    let mut gone = 0usize;
+    for team in teams.flatten() {
+        let Ok(files) = std::fs::read_dir(team.path()) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            if !task_file_is_stale(&p, cutoff) {
+                continue;
+            }
+            if std::fs::remove_file(&p).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    if gone > 0 {
+        eprintln!("[tasks] 오래된 태스크 {gone}개 정리");
+    }
+}
+
+/// **다 읽은** 인박스 파일을 치운다. 이름에 부팅 꼬리가 붙은 뒤로 pane 마다 새 파일이
+/// 생기므로(`agent_name_suffix`) 안 지우면 팀 디렉터리가 무한히 자란다 — 꼬리를 넣기
+/// 전에 이미 74개가 쌓여 있었다.
+///
+/// **비어 있는 것만** 지운다. 내용이 남아 있으면 아직 아무도 안 읽은 지시일 수 있고,
+/// 그건 지울 게 아니라 사람이 봐야 할 것이다(실측: 08-04 브리프 4건이 그렇게 남아
+/// 있었다). 하루가 지나야 손대는 것도 같은 이유 — 방금 만들어진 빈 파일은 지금 막 뜬
+/// 학생의 것이다.
+fn prune_empty_inboxes() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(86_400);
+    let Ok(teams) = std::fs::read_dir(home.join(".claude/teams")) else {
+        return;
+    };
+    let mut gone = 0usize;
+    for team in teams.flatten() {
+        let Ok(files) = std::fs::read_dir(team.path().join("inboxes")) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            let empty = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .is_some_and(|v| v.as_array().is_some_and(|a| a.is_empty()));
+            let old = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > day);
+            if empty && old && std::fs::remove_file(&p).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    if gone > 0 {
+        eprintln!("[inbox] 다 읽은 빈 인박스 {gone}개 정리");
+    }
+}
+
+/// 지워도 되는 태스크 파일인가. `cutoff` = (끝난 것 기준, 열린 것 기준).
+/// 판정을 파일시스템 순회에서 갈라 두면 규칙을 테스트로 고정할 수 있다.
+fn task_file_is_stale(
+    path: &std::path::Path,
+    cutoff: (std::time::Duration, std::time::Duration),
+) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
+    let limit = match v.get("status").and_then(|s| s.as_str()) {
+        Some("completed") | Some("deleted") => cutoff.0,
+        // 열린 것도 지우긴 하지만 훨씬 뒤에. 상태를 못 읽는 파일은 손대지 않는다.
+        Some("pending") | Some("in_progress") => cutoff.1,
+        _ => return false,
+    };
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age > limit)
+}
+
+/// 우리가 쓴 파일인지 알아보는 표식. 이게 없으면 사용자가 손수 쓴 것으로 보고
+/// 건드리지 않는다 — `~/.claude/commands` 는 거노 개인 설정이지 우리 것이 아니다.
+const RENAME_CMD_MARK: &str = "<!-- kasaterm-managed -->";
+
+/// 예전에 심어 둔 `~/.claude/commands/rename.md` 를 **지운다**.
+///
+/// 내장 `/rename` 이 거부되던 건("Teammate names are set by the team leader") 셰임이
+/// 트리플을 붙여 pane 의 claude 가 전부 팀원이었기 때문이다. 이제 트리플을 걷어냈으니
+/// 내장이 다시 돈다 — 2026-08-09 실측: `Session renamed to: RENAMED-OK` 이 뜨고 그
+/// 이름이 입력박스 상단 보더(칩이 덮던 그 자리)에 표시됐다. 그러면 커스텀 커맨드는
+/// 이득 없이 내장을 가리기만 한다(커스텀이 내장을 이긴다).
+///
+/// 레포 밖 파일이라 심는 코드를 지우는 것만으론 이미 깔린 파일이 안 없어진다. 그래서
+/// 부팅마다 우리 표식이 붙은 것만 골라 지운다. 표식 없는 파일 = 사용자가 쓴 것이라
+/// 그대로 둔다 — 자동 정리가 남의 편집을 지우면 그게 더 나쁘다.
+fn remove_rename_command() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let path = home.join(".claude/commands/rename.md");
+    if !rename_cmd_is_ours(std::fs::read_to_string(&path).ok().as_deref()) {
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&path) {
+        eprintln!("[shim] /rename 대체 커맨드 제거 실패 {path:?}: {e}");
+    }
+}
+
+/// 지울지 판정만 — 파일시스템을 안 타야 테스트가 `$HOME` 을 흔들지 않는다.
+fn rename_cmd_is_ours(existing: Option<&str>) -> bool {
+    existing.is_some_and(|cur| cur.contains(RENAME_CMD_MARK))
+}
+
 pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     let Some(hooks_dir) = locate_collab_hooks_dir() else {
         eprintln!("[shim] collab-hooks dir not found — claude hook shim skipped");
@@ -5483,22 +6276,55 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // board/inbox 자동인지는 폐기 — 조율은 GUI(SCHALE OS) 와 명시적 kasacollab 으로.
             // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
             // (transcript 직접 비교, 데몬 무관). 모든 pane 공통 안전망.
-            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
+            // 진행 표시 정본(`kasaterm-agent-status.sh`) — 서브에이전트·백그라운드의
+            // 시작과 끝을 그 순간 받는다. matcher 를 안 거는 이유: 걸러야 할 것이
+            // 도구 **이름**이 아니라 `tool_input.run_in_background` 라 matcher 로는
+            // 표현이 안 되고, 스크립트가 첫 줄에서 bash 만으로 관심 밖을 쳐낸다.
+            // timeout 은 초 단위라 5 초 — 표시가 한 번 빠지는 것이 도구 호출이
+            // 늦어지는 것보다 낫다(옆의 5000 은 사실상 무제한이다).
+            "PreToolUse": [
+                { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
+            ],
             "PostToolUse": [
                 { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] },
-                { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] }
+                { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
-            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
+            // ultracode 는 effort 와 별개 상태인데 claude 가 statusline 에 안 실어 준다
+            // (payload 스펙의 effort 는 low|medium|high|xhigh|max 뿐). 여러 에이전트를
+            // 푸는 턴인지가 화면에 안 보이므로, 프롬프트를 보고 마커를 남겨 statusline 이
+            // 읽게 한다. 턴 단위 opt-in 이라 마커도 프롬프트마다 다시 쓰고 지운다.
+            "UserPromptSubmit": [{ "hooks": [cmd("ultracode-mark.py", 3000)] }],
+            // 두 훅을 **다른 그룹**으로 나눠 둔다 — stop-drain 은 인박스가 있으면
+            // stdout 에 block JSON 을 내는데, 같은 그룹이면 진행 표시 훅의 출력과
+            // 섞여 그 결정이 깨질 수 있다. agent-status 는 stdout 을 안 쓰지만
+            // 나란히 두는 것 자체가 나중에 그 규칙을 잊게 만든다.
+            "Stop": [
+                { "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] },
+                { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
+            ],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
         },
         // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
         // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
         "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
+        // 다른 방 pane 이 보낸 메시지를 승인 대기로 잡지 않는다. 기본값은 권한 프롬프트를
+        // 건너뛰는 세션의 인바운드를 붙잡는데, pane claude 는 전부 그 모드라 기본값이면
+        // 학생을 굴리는 흐름이 매 메시지 사용자 클릭에서 끊긴다(08-09: accept 로 도달 확인).
+        "crossSessionInbound": "accept",
     });
     if cfg!(windows) {
-        // conflict-guard 는 python 의존 — 없으면 훅이 매 Edit 마다 실패 노이즈를
-        // 낸다. 쓸 만한 인터프리터를 실제로 찾았을 때만 유지.
+        // conflict-guard 는 python 의존 — 기본 Windows 엔 쓸 만한 인터프리터가 없어
+        // 훅이 매 Edit 마다 실패 노이즈를 낸다. 실제로 찾았을 때만 유지한다
+        // (`python3` 이라는 이름만 보면 안 된다 — Windows 의 그 이름은 exit 49 로
+        // 죽는 MS Store 스텁이라, 실행해서 "Python 3" 을 확인하는 쪽이 정본이다).
+        //
+        // 같은 remove 에 진행 표시 훅(`agent-status`)의 `PreToolUse` 도 함께 빠지는데,
+        // 그게 맞다 — 그 스크립트도 payload 파싱에 python 을 쓰므로 남겨 봐야 아무
+        // 일도 못 한다. Windows 는 transcript 폴백으로 표시가 이어진다(꼬리 한계는
+        // 그대로 남지만, 훅이 없는 편보다 낫다).
         if python3_program().is_none() {
             settings["hooks"].as_object_mut().unwrap().remove("PreToolUse");
         }
@@ -5597,17 +6423,43 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         account_dir.as_deref().map_or(String::new(), |d| d.display().to_string()),
     );
     let account_block = claude_account_export_line(account_dir.as_deref());
-    // teammate 트리플 자동 부착은 제거됐다(거노 2026-07-24): kasaterm 재시작으로 복원된
-    // 세션(claude --resume)은 인박스 폴러가 안 돌아 SendMessage 가 조용히 유실되고(파일에만
-    // 쌓임, 아루 실측), tell 이 발신 학생 프사·색으로 렌더되면서 크로스 pane 통신의 정식
-    // 경로가 됐다. 팀 채널(SendMessage)은 오케스트레이터가 학생을 **명시 트리플로 스폰**한
-    // 세트 안에서만 연다 — 사용자/스폰 다이얼로그의 --agent-* 는 이전처럼 그대로 통과된다.
-    // 아래 블록은 트리플과 무관하게 유지되는 resume 연속성 처리만 남긴 것:
+    // teammate 트리플 자동 부착 — pane 의 claude 를 전부 팀원으로 부팅해 SendMessage 를
+    // 상시 연다. 인박스 폴러는 트리플만으로 arm 되고 config.json 은 필요 없다.
+    //
+    // 이 블록은 2026-07-24 에 한 번 통째로 제거됐다가 08-04 에 되살아났다. 제거 사유는
+    // 둘이었는데 **둘 다 이름 꼬리가 세션 id 였던 탓**이다: `--resume` 마다 sid 가 바뀌니
+    // 이름이 바뀌고, 옛 이름 인박스로 간 SendMessage 는 아무도 안 읽는 파일에 쌓였다(조용한
+    // 유실). 유령 인박스도 재시작 횟수만큼 늘었다. 그래서 꼬리를 **pane 번호**로 바꿨다 —
+    // pane 은 자기 생애 동안 번호가 안 바뀌므로 같은 pane 에서 몇 번을 resume 해도 같은
+    // 이름·같은 인박스고, 인박스 개수는 방의 pane 슬롯 수로 묶인다.
+    //
+    // 되살린 이유: 제거의 진짜 동기는 `@이름` 칩이 입력박스 구분선에서 /rename 세션 이름
+    // 자리를 뺏는 것이었는데(거노), 그건 이제 render.rs 의 strip_teammate_chip 이 칩만
+    // 지워서 해결한다 — 통신을 끄지 않고도 화면이 조용해진다.
+    //
+    // 나머지 규칙:
+    // - 이름 = <로마자 슬러그>-p<pane 번호>. 한글은 inbox 파일명 슬러그가 "---" 로 붕괴해
+    //   충돌한다(team.rs). 같은 캐릭터가 여러 pane 에 있어도 번호로 갈린다.
+    // - 팀 = 방(cwd) 단위, /teamname 엔드포인트가 계산(fnv 해시는 순수 sh 재현 불가).
+    //   서버가 죽어 팀명이 비면 플래그 전체 생략 — 순정 claude 부팅으로 조용히 폴백.
+    // - pane 밖(--bg detach 포크 등)은 트리플을 안 붙인다. 데몬이 argv 를 재구성하는
+    //   경로라 어차피 유실되고, pane 번호도 없어 이름이 안 선다.
+    // - agent-name=목표작업명 규칙(team.rs, 다이얼로그 스폰용)과 공존: 사용자가 --agent-*
+    //   를 직접 주면 우리 트리플은 통째 생략된다.
+    // - agent-id 는 전원 고정 문자열 "team-lead": claude 의 승인 포워딩 게이트가
+    //   agent-id=="team-lead" 를 리더로 판정해 꺼지므로, AskUserQuestion·권한 요청이
+    //   "Waiting for team lead approval"(존재하지 않는 리더 무한대기 + 요청 유실)로 새지
+    //   않고 그 pane 에 네이티브 렌더된다. 수신 폴러·인박스 파일명·SendMessage 주소는 전부
+    //   agent-name 기준이라 id 중복은 무해하다. 비공개 인터페이스 문자열 비교라 claude
+    //   버전 업 시 재검증 필요.
+    //
+    // 함께 남아 있는 resume 연속성 처리(트리플과 무관):
     // - TSID 파싱(--session-id/--resume 값, --continue 는 cwd 프로젝트 최신 transcript 추론)
     // - KASATERM_RESUMED_SID/RESUME_PICKER 마커(statusline ⑂bg 오발화 방지)
     // - resume 부팅 캐릭터 정합 교정(거노: 모모이 세션이 프라나 배지·persona 로 부팅)
+    let team_arms = teammate_case_arms();
     let team_block = format!(
-        "TSID=\"$SID\"; prev=\"\"\n\
+        "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
 for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
 # id 없는 --continue 는 claude 와 같은 기준(cwd 프로젝트 최신 transcript)으로 sid 를\n\
 # 추론해 캐릭터 정합·RESUMED_SID 마커의 연속성을 유지한다(추론 실패는 마커 없이 부팅).\n\
@@ -5633,6 +6485,25 @@ if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
     export KASATERM_CHARACTER=\"$RC\"\n\
     KASATERM_PERSONA=$(curl -s --max-time 2 --get --data-urlencode \"sid=$TSID\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/persona\" 2>/dev/null)\n\
   fi\n\
+fi\n\
+if [ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PANE_ID\" ] && [ -n \"$KASATERM_CHARACTER\" ]; then\n\
+  case \" $* \" in *\" --agent-id \"*|*\" --agent-name \"*|*\" --team-name \"*) : ;; *)\n\
+    case \"$KASATERM_CHARACTER\" in\n\
+{team_arms}\
+    esac\n\
+  ;; esac\n\
+fi\n\
+if [ -n \"$AGENT\" ]; then\n\
+  TEAM=$(curl -s --max-time 2 --get --data-urlencode \"cwd=$PWD\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/teamname\" 2>/dev/null)\n\
+  if [ -n \"$TEAM\" ]; then\n\
+    AGENT=\"$AGENT-p${{KASATERM_PANE_ID#%}}${{KASATERM_AGENT_SUFFIX}}\"\n\
+    export KASATERM_TEAM=\"$TEAM\" KASATERM_AGENT=\"$AGENT\"\n\
+    # 트리플(--agent-id/--agent-name/--team-name) 대신 세션 이름만 준다. 트리플을 붙이면\n\
+    # claude 가 이 세션을 cross-session 명부에서 통째로 제외해(등록 함수 첫 줄이\n\
+    # `if(W4()!=null) return false`, W4()=--agent-id) 다른 방 pane 과 서로 못 찾는다.\n\
+    # 이름만 주면 방(cwd) 경계 없이 ListAgents→SendMessage 가 닿는다(08-09 실측).\n\
+    export CLAUDE_CODE_SESSION_NAME=\"$AGENT\"\n\
+  fi\n\
 fi\n"
     );
     let wrapper = format!("#!/bin/sh\n\
@@ -5647,7 +6518,20 @@ if [ -z \"$REAL\" ]; then\n\
   echo \"kasaterm claude shim: real claude not found on PATH\" >&2\n\
   exit 127\n\
 fi\n\
+# `claude kimi` ≡ `kimi claude` — 첫 인자가 모델 이름이면 런처로 넘긴다. 런처는\n\
+# 게이트웨이 env 를 얹고 다시 PATH 의 claude(=이 shim)를 부르므로, 그때는 첫 인자가\n\
+# --model 이라 여기 안 걸리고 훅·페르소나 주입이 정상으로 걸린다.\n\
+case \"$1\" in\n\
+  kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
+esac\n\
 {ablk}\
+# 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
+# tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
+# — 그러니 이 줄은 지금 당장 필요한 것이 아니라 플래그가 회수돼도 pane 통신이 안 끊기게\n\
+# 하는 잠금장치다. 켜지면 세션이 ~/.claude/sessions/<pid>.json 에 등록되고\n\
+# /tmp/cc-socks/<pid>.sock 로 오간다. (아침에 ListAgents 가 비었던 건 플래그가 아니라\n\
+# 트리플 때문이었다 — 명부 등록이 --agent-id 있는 세션을 거부한다.)\n\
+export CLAUDE_CODE_HARBOR_KITE=1\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
 # per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
@@ -5738,6 +6622,297 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     }
 }
 
+/// codex 판 hook shim. claude 와 목적은 같다(pane 안에서만 협업 훅·페르소나를 얹고
+/// 거노 개인 설정은 안 건드린다) — 수단이 넷 다르다. 전부 2026-08-05 실측 확정:
+///
+/// 1. **`--settings` 등가물이 없다.** codex 는 훅을 `$CODEX_HOME/hooks.json` 에서만
+///    읽으므로, 세션 스코프 주입 자리가 `CODEX_HOME` 자체다 → pane 별 홈을 세우고
+///    `~/.codex` 를 심볼릭으로 미러한다(세션·플러그인·스킬·캐시·인증 공유).
+/// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록·훅 해시를 여기 되쓰는데,
+///    심볼릭이면 그 쓰기가 거노 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
+/// 3. **위험 플래그가 둘로 갈려 있다.** `--dangerously-bypass-hook-trust` 는 이름과
+///    달리 **훅 신뢰만** 푼다 — `[hooks.state]` 에 커맨드 SHA256 이 박히는데 shim 경로가
+///    GUI pid 별이라 매번 깨져 TUI 가 재승인을 묻기에 상시 붙인다. 명령 실행 승인은
+///    별개라 `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")를 함께
+///    붙인다. 앞의 것만 붙이면 화면에 "Ask for approval" 이 남아 학생이 첫 명령에서
+///    멈춘다(2026-08-11 지적). claude pane 의 `--dangerously-skip-permissions` 와 같은
+///    자리다.
+/// 4. **`timeout` 단위가 초다**(claude 는 ms). 실측 판별: `timeout:500`+`sleep 1` 은
+///    완주하고 `timeout:1`+`sleep 3` 은 Failed — ms 였다면 전자가 죽었어야 하고,
+///    무시였다면 후자가 살았어야 한다. claude 쪽 5000 을 그대로 옮기면 83분이 된다.
+///
+/// 이벤트는 claude 와 같은 PascalCase 스키마고 stdin JSON 도 같다(`session_id`·
+/// `transcript_path`·`cwd`·`hook_event_name`·`model`·`permission_mode`). 다만
+/// **`Notification` 이 없어** attention 훅은 `PermissionRequest` 에 건다.
+/// `transcript_path` 는 `$CODEX_HOME/sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`.
+pub(crate) fn install_codex_hook_shim(shim_dir: &std::path::Path) {
+    let Some(hooks_dir) = locate_collab_hooks_dir() else {
+        eprintln!("[shim] collab-hooks dir not found — codex hook shim skipped");
+        return;
+    };
+    let hd = if cfg!(windows) {
+        hooks_dir.display().to_string().replace('\\', "/")
+    } else {
+        hooks_dir.display().to_string()
+    };
+    // 초 단위. claude 판(`install_claude_hook_shim`)의 ms 값을 복붙하지 말 것.
+    let cmd = |script: &str, timeout_s: u64| {
+        let run = if cfg!(windows) {
+            format!("sh \"{hd}/{script}\"")
+        } else {
+            format!("\"{hd}/{script}\"")
+        };
+        serde_json::json!({ "type": "command", "command": run, "timeout": timeout_s })
+    };
+    let settings = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5)] }],
+            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5)] }],
+            "PostToolUse": [
+                { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 5)] },
+                { "hooks": [cmd("kasaterm-steer-hook.sh", 5)] }
+            ],
+            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5)] }],
+            // claude 의 Notification 자리 — codex 엔 그 이벤트가 없다.
+            "PermissionRequest": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5)] }],
+        },
+    });
+    let settings_path = shim_dir.join("codex-hooks.json");
+    match serde_json::to_string_pretty(&settings) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&settings_path, s) {
+                eprintln!("[shim] write codex-hooks.json failed: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("[shim] serialize codex hook settings failed: {e}");
+            return;
+        }
+    }
+    // 래퍼는 Rust 쪽 값이 하나도 안 박혀 정적 문자열이다 — hooks 경로는 위 json 안에
+    // 있고 나머지는 전부 실행 시점에 셸이 푼다. 덕분에 format! 이스케이프가 없다.
+    let wrapper = r#"#!/bin/sh
+# kasaterm pane-only codex wrapper — pane 전용 CODEX_HOME 을 세워 훅·페르소나를 얹는다.
+# ~/.codex 는 읽기만 한다. pane 밖에선 이 래퍼가 PATH 에 없어 순정 codex 가 돈다.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v codex 2>/dev/null)
+if [ -z "$REAL" ]; then
+  echo "kasaterm codex shim: real codex not found on PATH" >&2
+  exit 127
+fi
+# 관리 서브커맨드는 순정으로 통과 — 우리 홈을 씌우면 `login` 이 엉뚱한 자리를 보고
+# `plugin add` 는 다음 실행에 사라진다(config 를 매번 새로 복사하므로). 대화 계열
+# (서브커맨드 없음=TUI · exec · resume · fork · review)만 우리 홈을 쓴다.
+SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
+case "$SUB" in
+  login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
+    exec "$REAL" "$@" ;;
+esac
+SRC="$HOME/.codex"
+CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
+mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
+# ~/.codex 를 심볼릭으로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
+# codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 심볼릭이라 토큰 갱신이 원본에
+# 그대로 써져 로그인이 안 갈린다(실측: doctor 가 stored ChatGPT tokens=true). 매 실행
+# ln -sfn 이라 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
+for e in "$SRC"/* "$SRC"/.[!.]*; do
+  [ -e "$e" ] || continue
+  n=${e##*/}
+  case "$n" in config.toml|hooks.json|AGENTS.md) continue ;; esac
+  ln -sfn "$e" "$CH/$n" 2>/dev/null
+done
+cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
+# 디렉터리 신뢰 프롬프트 선해결 — 무인 스폰이 여기서 멈춘다("Do you trust the contents
+# of this directory?", 실측). 같은 경로를 또 쓰면 TOML 중복 테이블이라 config 가 통째로
+# 안 읽히므로 없을 때만 붙인다.
+if [ -n "$PWD" ] && ! grep -qF "[projects.\"$PWD\"]" "$CH/config.toml" 2>/dev/null; then
+  printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PWD" >> "$CH/config.toml"
+fi
+cp "$SELF_DIR/codex-hooks.json" "$CH/hooks.json" 2>/dev/null
+# 페르소나 — codex 엔 --append-system-prompt 등가물이 없어 CODEX_HOME/AGENTS.md 로 준다
+# (pane 별 홈이라 격리). 거노 전역 AGENTS.md 를 먼저 깔고 뒤에 얹는다 — 통째로 갈아치우면
+# 그의 전역 지시가 pane 안에서만 조용히 사라진다. 매 실행 다시 복사라 누적되지 않는다.
+OVP="$SELF_DIR/repersona-${KASATERM_PANE_ID}.persona"
+if [ -n "$KASATERM_PANE_ID" ] && [ -f "$OVP" ]; then
+  KASATERM_PERSONA=$(cat "$OVP")
+  [ -f "${OVP%.persona}.character" ] && export KASATERM_CHARACTER="$(cat "${OVP%.persona}.character")"
+fi
+cp "$SRC/AGENTS.md" "$CH/AGENTS.md" 2>/dev/null || : > "$CH/AGENTS.md"
+[ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$CH/AGENTS.md"
+export CODEX_HOME="$CH"
+case " $* " in
+  *" --dangerously-bypass-hook-trust "*) ;;
+  *) set -- --dangerously-bypass-hook-trust "$@" ;;
+esac
+# 승인·샌드박스도 함께 우회한다 — claude pane 이 `--dangerously-skip-permissions` 로
+# 뜨는 것과 같은 자리다. 이게 없으면 학생이 첫 명령에서 승인 프롬프트에 멈춰 서고,
+# 오케스트레이터는 그걸 「일하는 중」으로 읽는다(화면 하단에 "Ask for approval").
+# 승인 정책이나 샌드박스를 직접 지정한 호출은 그 뜻을 존중해 건드리지 않는다.
+case " $* " in
+  *" --dangerously-bypass-approvals-and-sandbox "*) ;;
+  *" --ask-for-approval "*|*" -a "*|*" --sandbox "*|*" -s "*) ;;
+  *) set -- --dangerously-bypass-approvals-and-sandbox "$@" ;;
+esac
+exec "$REAL" "$@"
+"#;
+    let wrapper_path = shim_dir.join("codex");
+    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+        eprintln!("[shim] write codex wrapper failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("[shim] chmod codex wrapper failed: {e}");
+        }
+    }
+}
+
+/// 이름 하나를 sh `case` 패턴으로. **작은따옴표가 필수다** — case 패턴은 glob 이라
+/// 따옴표가 없으면 `*`·`?`·`[` 가 든 이름이 엉뚱한 것과 매칭되고, `|`·`)` 는 문법을
+/// 깨뜨린다. 지금 로스터는 한글뿐이라 아무 일도 안 일어나지만, 사용자가
+/// characters.json 에 넣는 이름을 우리가 정하지 않는다.
+fn sh_case_pat(name: &str) -> String {
+    format!("'{}'", name.replace('\'', "'\\''"))
+}
+
+/// agy(Google Antigravity CLI) 판. claude·codex 와 목적은 같은데 **수단이 셋 다
+/// 다르다** — 전부 2026-08-11 실측 확정:
+///
+/// 1. **주입 자리는 `--agent <이름>`.** `--append-system-prompt` 등가물이 없고
+///    (바이너리 문자열 전수 검색), 그 대신 `~/.gemini/agents/<이름>.md` 의 본문이
+///    시스템 지시로 들어간다. 캐너리로 확인했다 — 플래그를 주면 첫 줄에 나오고
+///    안 주면 안 나온다.
+/// 2. **이름만 받는다. 경로는 안 받는다.** `--agent /abs/path.md` 는 조용히
+///    무시된다(직접 재 봤다). 그래서 파일이 `~/.gemini/agents/` 에 실재해야
+///    한다 — shim dir 에 두고 가리키는 길이 없다. 사용자 홈에 쓰는 유일한
+///    shim 이라 이름을 `kasaterm-` 으로 못박고 그 접두 밖은 건드리지 않는다.
+/// 3. **홈을 옮기는 env 가 없다.** `CODEX_HOME` 등가물이 없어(`GEMINI_HOME`·
+///    `ANTIGRAVITY_HOME` 둘 다 바이너리에 없다) 격리하려면 `HOME` 자체를 갈아야
+///    하는데, 그러면 agy 가 shell out 하는 git·ssh·gh 가 전부 딸려 간다. 게다가
+///    `.gemini` 만 넘기면 인증이 깨진다(`Library` 도 심링크해야 한다). 그래서
+///    **격리하지 않는다** — 파일은 공유하고 pane 별 선택만 플래그로 한다.
+///    codex 가 홈을 통째로 미러해야 했던 것에 비하면 오히려 단순하다.
+///
+/// ⚠️ **없는 에이전트 이름을 줘도 에러가 안 난다** — 조용히 페르소나 없이 돈다.
+/// 그래서 파일 쓰기가 실패하면 플래그도 안 붙이는 편이 낫다(붙이면 「됐다」로
+/// 보이는데 실제로는 순정이다). 아래 래퍼가 파일 존재를 확인하고 붙인다.
+///
+/// ⚠️ 본문 상한이 있다. 18KB 는 맨 끝 규칙까지 살아남았고 47KB 는 잘렸다
+/// (바이너리에 `customizationBudget`·`HasTruncatedCustomizationType` 심볼이 있다).
+/// 지금 페르소나는 규약 포함 8KB 안쪽이라 여유가 있지만, 규약이 두 배가 되면
+/// 조용히 잘리는 쪽이라 눈에 안 띈다.
+///
+/// 훅은 아직 안 붙인다 — agy 훅 스키마를 재지 않았다. 이 함수는 페르소나까지다.
+fn install_agy_hook_shim(shim_dir: &std::path::Path) {
+    let Some(chars) = kasa_mcp::character::characters_json() else {
+        return;
+    };
+    // agy 는 이름으로만 에이전트를 찾으므로 파일이 사용자 홈에 실재해야 한다.
+    // 없으면 만든다 — 만들기가 실패하면 페르소나 없이 도는 게 맞다(래퍼가
+    // 파일 존재를 다시 확인한다).
+    let Some(home) = kasa_socket::home_dir() else {
+        return;
+    };
+    let agents_dir = home.join(".gemini").join("agents");
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+        eprintln!("[shim] mkdir {agents_dir:?} failed: {e} — agy persona skipped");
+        return;
+    }
+    // 이름 → 슬러그 case 를 래퍼에 굽는다. 래퍼는 sh 라 한글 이름밖에 못 받는데
+    // (`KASATERM_CHARACTER`) 파일명은 슬러그여야 해서다 — `agy agents` 목록과
+    // `--agent` 인자에 한글이 들어가는 건 확인하지 않았고, 확인 안 한 것을
+    // 기본 경로에 두지 않는다.
+    let mut arms = String::new();
+    for name in kasa_mcp::character::member_names(&chars) {
+        let Some(slug) = theme::character_slug(&name) else {
+            // 로스터 밖 캐릭터 — 슬러그가 없으면 스프라이트도 없다. 페르소나만
+            // 따로 주면 화면과 어긋나므로 여기서도 뺀다.
+            continue;
+        };
+        let Some(persona) = kasa_mcp::character::persona_for(&chars, &name) else {
+            continue;
+        };
+        let body = format!(
+            "---\nname: kasaterm-{slug}\ndescription: kasaterm pane persona ({name}) — 자동 생성, 직접 고치지 마세요\n---\n\n{persona}\n"
+        );
+        let path = agents_dir.join(format!("kasaterm-{slug}.md"));
+        if let Err(e) = std::fs::write(&path, body) {
+            eprintln!("[shim] write agy agent {path:?} failed: {e}");
+            continue;
+        }
+        arms.push_str(&format!("    {}) S={slug} ;;\n", sh_case_pat(&name)));
+    }
+    if arms.is_empty() {
+        return;
+    }
+    let wrapper = format!(
+        r#"#!/bin/sh
+# kasaterm pane-only agy wrapper — 이 pane 에 배정된 학생을 --agent 로 얹는다.
+# ~/.gemini 는 agents/kasaterm-*.md 만 쓴다(그 파일들은 GUI 가 부팅 때 굽는다).
+# pane 밖에선 이 래퍼가 PATH 에 없어 순정 agy 가 돈다.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v agy 2>/dev/null)
+if [ -z "$REAL" ]; then
+  echo "kasaterm agy shim: real agy not found on PATH" >&2
+  exit 127
+fi
+# 관리 서브커맨드는 순정으로 통과 — 페르소나도 위험 플래그도 뜻이 없고,
+# `agy agents` 는 우리가 구운 목록을 그대로 보여줘야 진단이 된다.
+SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
+case "$SUB" in
+  agent|agents|changelog|help|install|models|plugin|plugins|update)
+    exec "$REAL" "$@" ;;
+esac
+# 이 pane 의 학생 — `시로코` 런처로 갈아탔으면 그 파일이 env 를 이긴다(env 는 셸
+# spawn 시 고정이라 늦게 못 바꾼다). codex 래퍼와 같은 규약.
+C="$KASATERM_CHARACTER"
+OVC="$SELF_DIR/repersona-${{KASATERM_PANE_ID}}.character"
+[ -n "$KASATERM_PANE_ID" ] && [ -f "$OVC" ] && C=$(cat "$OVC")
+S=""
+case "$C" in
+{arms}esac
+# 파일이 실재할 때만 붙인다. agy 는 **없는 에이전트 이름에 에러를 안 낸다** —
+# 조용히 페르소나 없이 도는데, 플래그가 붙어 있으면 로그만 보고는 붙은 줄 안다.
+if [ -n "$S" ] && [ -f "$HOME/.gemini/agents/kasaterm-$S.md" ]; then
+  case " $* " in
+    *" --agent "*) ;;
+    *) set -- --agent "kasaterm-$S" "$@" ;;
+  esac
+fi
+# 승인 우회 — claude 의 `--dangerously-skip-permissions`, codex 의
+# `--dangerously-bypass-approvals-and-sandbox` 와 같은 자리다. 없으면 헤드리스에서
+# 도구가 auto-deny 되어 빈 출력이 나오고, 오케스트레이터는 그걸 「일하는 중」으로
+# 읽는다. 샌드박스를 직접 지정한 호출은 그 뜻을 존중한다.
+case " $* " in
+  *" --dangerously-skip-permissions "*|*" --sandbox "*) ;;
+  *) set -- --dangerously-skip-permissions "$@" ;;
+esac
+exec "$REAL" "$@"
+"#
+    );
+    let wrapper_path = shim_dir.join("agy");
+    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+        eprintln!("[shim] write agy wrapper failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("[shim] chmod agy wrapper failed: {e}");
+        }
+    }
+}
+
 /// 학생 이름을 pane 명령으로 스테이징 — `시로코`(또는 슬러그 `shiroko`)를 치면
 /// 그 pane 을 해당 학생으로 재배정하고 claude 를 실행한다. persona 는 override
 /// 파일(`repersona-<pane>.persona`)로 claude 래퍼에 전달(env 는 셸 spawn 시
@@ -5755,7 +6930,7 @@ fn install_student_shims(shim_dir: &std::path::Path) {
         let persona = kasa_mcp::character::persona_for(&chars, &name).unwrap_or_default();
         let script = format!(
             "#!/bin/sh\n\
-# kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 claude 실행.\n\
+# kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 하네스 실행.\n\
 SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
 if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
   printf '%s' '{persona_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.persona\"\n\
@@ -5764,8 +6939,18 @@ if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
     --data-urlencode \"character={name_sq}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
 fi\n\
-[ \"$1\" = claude ] && shift\n\
-exec claude \"$@\"\n",
+# 하네스·모델 선택 — `{name}` 는 claude(기본), `{name} codex` 는 codex 로 뜬다.\n\
+# `{name} kimi` 는 kimi 모델로 claude 를, `{name} kimi codex` 는 kimi 로 codex 를 띄운다.\n\
+# 모델 이름은 ~/.local/bin/kasa-ai 심링크(kimi·glm)로 PATH 에 있어 exec 이 닿는다.\n\
+# 아는 이름일 때만 소비하므로 `{name} \"버그 고쳐\"` 같은 프롬프트 전달은 그대로다.\n\
+H=claude\n\
+M=\n\
+case \"$1\" in\n\
+  claude|codex|agy) H=$1; shift ;;\n\
+  kimi|glm) M=$1; shift; case \"$1\" in claude|codex|agy) H=$1; shift ;; esac ;;\n\
+esac\n\
+[ -n \"$M\" ] && exec \"$M\" \"$H\" \"$@\"\n\
+exec \"$H\" \"$@\"\n",
             name_sq = sq(&name),
             persona_sq = sq(&persona),
         );
@@ -5973,37 +7158,54 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
 /// in two places — the early env-var seed in `start_pty` so the very
 /// first shell sees a stable value, and the actual server bind in
 /// `start_socket_with` — and must return the same path in both.
-/// Path of the file the http-serving process (daemon, or in-process GUI)
-/// writes its ACTUAL bound MCP port into, so the panel webviews poll the right
-/// port even when the preferred one was taken and `spawn_http_server` fell back
-/// to an OS-assigned one. Lives beside the control socket (same
-/// `KASATERM_SOCKET_PATH` the daemon inherits) so GUI and daemon resolve the
-/// same file.
-pub(crate) fn mcp_port_file_path() -> std::path::PathBuf {
-    let sock = std::env::var("KASATERM_SOCKET_PATH").unwrap_or_else(|_| {
-        // 홈을 못 찾으면 temp 로 — 빈 문자열을 앞에 붙이면 `/.config/...` 라는
-        // 드라이브 루트 경로가 되어 쓰기가 조용히 실패하고, 패널 웹뷰가 포트를
-        // 영영 못 찾는다.
-        kasa_socket::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".config/kasaterm/daemon.sock")
-            .to_string_lossy()
-            .into_owned()
-    });
-    std::path::Path::new(&sock)
-        .parent()
-        .map(|p| p.join("mcp_port"))
-        .unwrap_or_else(|| std::env::temp_dir().join("kasaterm-mcp-port"))
+/// Path of the file the http-serving process writes its ACTUAL bound MCP port
+/// into, so pane hooks poll the right port even when the preferred one was
+/// taken and `spawn_http_server` fell back to an OS-assigned one.
+///
+/// Derived from the socket path by swapping the extension, so it is 1:1 with
+/// the socket: `kasaterm-25057.sock` → `kasaterm-25057.mcp_port`. That pairing
+/// is the whole point. The old shape was `<socket's dir>/mcp_port` — one file
+/// per *directory*, while sockets are per *pid* — so every concurrent instance
+/// wrote its port over the same file, and pane hooks reading it got whichever
+/// instance booted last. A test instance launched from a pane inherits the main
+/// app's `KASATERM_SOCKET_PATH`, so it landed its port in the main app's
+/// directory and silently redirected the main app's own panes at itself.
+pub(crate) fn mcp_port_file_for(sock: &str) -> std::path::PathBuf {
+    std::path::Path::new(sock).with_extension("mcp_port")
+}
+
+/// The socket path this process would use if it has not bound yet — env first
+/// (the value our own `start_socket_with` exported, or one inherited from a
+/// parent pane), else the daemon default. Read-only: unlike
+/// `resolve_kasaterm_socket_path` it never probes or decides to isolate.
+fn socket_path_hint() -> String {
+    std::env::var("KASATERM_SOCKET_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // 홈은 `home_dir()`(HOME → USERPROFILE) 로 읽는다 — Windows 엔 HOME 이
+            // 없어 `var("HOME").unwrap_or_default()` 가 빈 문자열을 주고, 그러면
+            // `/.config/...` 라는 드라이브 루트 경로가 되어 조용히 빗나간다.
+            kasa_socket::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".config/kasaterm/daemon.sock")
+                .to_string_lossy()
+                .into_owned()
+        })
 }
 
 /// Port the panel webviews should poll. This process's own bound port
 /// (`KASASPACE_MCP_PORT`, set by `start_socket_with` right after the server
 /// binds) wins — env is per-process, so each instance's panels always reach
-/// their own server. `mcp_port_file_path` is a single global file that any
-/// concurrent instance overwrites; trusting it first stranded a second
-/// instance's panel webview on a dead/foreign port (the panel window stays
-/// hidden forever waiting for a load that never finishes). So the file is
-/// only a fallback for callers without the env, else the 8765 default.
+/// their own server. The port file is only a fallback for callers without the
+/// env; it is keyed to the socket path now, so it names one instance rather
+/// than "whoever booted last".
+///
+/// The last resort is 8765, which is *someone else's* server whenever this
+/// process failed to bind it — reaching it means panels quietly show another
+/// instance's panes. Kept because a panel with no port at all just hangs, but
+/// it is a wrong answer, not a neutral one.
 fn mcp_panel_port() -> String {
     let trimmed_nonempty = |s: String| {
         let s = s.trim().to_string();
@@ -6012,7 +7214,11 @@ fn mcp_panel_port() -> String {
     std::env::var("KASASPACE_MCP_PORT")
         .ok()
         .and_then(trimmed_nonempty)
-        .or_else(|| std::fs::read_to_string(mcp_port_file_path()).ok().and_then(trimmed_nonempty))
+        .or_else(|| {
+            std::fs::read_to_string(mcp_port_file_for(&socket_path_hint()))
+                .ok()
+                .and_then(trimmed_nonempty)
+        })
         .unwrap_or_else(|| "8765".to_string())
 }
 
@@ -6022,73 +7228,69 @@ fn mcp_panel_port() -> String {
 /// 시 누적). 여기서 connect 가 실패하는(=리스너 없는) 소켓 파일만 지운다 —
 /// 살아있는 인스턴스 소켓은 절대 건드리지 않으므로 멀티 인스턴스에서도 안전.
 /// 자기 PID 소켓은 아직 bind 전이라 connect 가 실패할 수 있으니 제외한다.
-/// 죽은 인스턴스의 소켓 잔재를 지우고, *살아있는 다른 인스턴스*가 있는지 돌려준다
-/// (connect 성공 = 살아있는 리스너). 반환값은 stale collab 마커 청소의 게이트.
 #[cfg(unix)]
-fn sweep_dead_kasaterm_sockets() -> bool {
+/// 죽은 인스턴스의 소켓 잔재를 지우고, **지금 살아있는 kasaterm pid 들**을 돌려준다
+/// (connect 성공 = 살아있는 리스너). 소켓 이름이 `kasaterm-<pid>.sock` 이라 여기서
+/// 인스턴스 명부가 공짜로 나온다 — collab 마커 청소가 그걸로 주인을 가린다.
+/// 자기 pid 는 아직 bind 전이라 connect 로는 안 잡히므로 직접 넣는다.
+fn live_kasaterm_pids() -> std::collections::HashSet<u32> {
+    let mut live = std::collections::HashSet::from([std::process::id()]);
     let own = format!("kasaterm-{}.sock", std::process::id());
-    let mut other_alive = false;
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return other_alive;
+        return live;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("kasaterm-") || !name.ends_with(".sock") || name == own {
+        let Some(pid) = name
+            .strip_prefix("kasaterm-")
+            .and_then(|s| s.strip_suffix(".sock"))
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if name == own {
             continue;
         }
         let path = entry.path();
         if std::os::unix::net::UnixStream::connect(&path).is_err() {
             let _ = std::fs::remove_file(&path);
         } else {
-            other_alive = true;
+            live.insert(pid);
         }
     }
-    other_alive
+    live
 }
 
 /// Windows 판. 여기선 **지울 잔재가 없다** — 소켓 경로가 파일이 아니라 named pipe
 /// (`\\.\pipe\kasaterm-<pid>.sock`, `kasa_socket::transport`)로 매핑되고, 파이프는
 /// 마지막 핸들이 닫히는 순간 커널이 지운다. 그래서 "존재 == 살아있음"이고, 남는
-/// 일은 다른 인스턴스가 있는지 세는 것뿐이다.
+/// 일은 이름에서 pid 를 읽어내는 것뿐이다.
 ///
-/// 파이프 네임스페이스는 디렉터리처럼 열거된다(`\\.\pipe\`). 이걸 못 읽으면
-/// `false` — 최악이라야 살아있는 인스턴스를 못 보고 collab 마커를 지우는 건데,
-/// 마커는 pane 이 뜰 때 다시 쓰인다(unix 쪽 read_dir 실패 폴백과 같은 판단).
+/// 파이프 네임스페이스를 못 읽으면 자기 pid 만 돌려준다 — 최악이라야 살아있는
+/// 남의 마커를 지우는 건데, 마커는 pane 이 뜰 때 다시 쓰인다(unix 쪽 read_dir
+/// 실패 폴백과 같은 판단).
 #[cfg(windows)]
-fn sweep_dead_kasaterm_sockets() -> bool {
-    let own = format!("kasaterm-{}.sock", std::process::id());
+fn live_kasaterm_pids() -> std::collections::HashSet<u32> {
+    let mut live = std::collections::HashSet::from([std::process::id()]);
     // 파이프 네임스페이스는 **슬래시 형태로만** 열린다. `\\.\pipe\` 를 주면 Rust 가
     // 이미 verbatim 취급인 UNC 로 보고 `\*` 글롭을 못 붙여 os error 3 로 죽는다
     // (실측: `//./pipe/` = 289개, `\\.\pipe\`·`\\.\pipe`·`\\?\pipe\` = 전부 실패).
     let Ok(entries) = std::fs::read_dir("//./pipe/") else {
-        return false;
+        return live;
     };
-    entries.flatten().any(|entry| {
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        name.starts_with("kasaterm-") && name.ends_with(".sock") && name != own
-    })
-}
-
-/// 부팅 시 collab 캐릭터 마커 전면 청소 — 마커는 live pane 추적용인데 강제종료·크래시가
-/// 남긴 stale 이 assigned_global 의 유령 taken 을 만들어 랜덤 배정 풀을 쪼그라뜨린다
-/// (거노: 새 학생이 안 나옴). 우리 pane 은 아직 스폰 전이고(restore 가 마커를 다시 쓴다)
-/// 다른 인스턴스가 살아 있으면 그쪽 live 마커를 구분할 수 없어 통째로 건너뛴다(보수적).
-fn cleanup_stale_collab_markers() {
-    let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) else {
-        return;
-    };
-    for room in rooms.flatten() {
-        let Ok(files) = std::fs::read_dir(room.path()) else {
-            continue;
-        };
-        for f in files.flatten() {
-            if f.file_name().to_string_lossy().starts_with("character-") {
-                let _ = std::fs::remove_file(f.path());
-            }
+        if let Some(pid) = name
+            .strip_prefix("kasaterm-")
+            .and_then(|s| s.strip_suffix(".sock"))
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            live.insert(pid);
         }
     }
+    live
 }
 
 fn resolve_kasaterm_socket_path() -> String {
@@ -6185,6 +7387,36 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn cursor_covers_the_whole_glyph_it_sits_on() {
+        use kasa_bridge::screen::Cell;
+        let row: Vec<Cell> = "가A 나"
+            .chars()
+            .flat_map(|ch| {
+                // 전각 뒤엔 그리드가 스페이서를 하나 둔다 — 실제 화면과 같은 모양으로.
+                let mut c = Cell::blank();
+                c.ch = ch;
+                let wide = matches!(ch, '가' | '나');
+                let mut out = vec![c];
+                if wide {
+                    let mut sp = Cell::blank();
+                    sp.ch = '\0';
+                    out.push(sp);
+                }
+                out
+            })
+            .collect();
+        let cells = vec![row];
+        assert_eq!(cursor_cell_width(&cells, 0, 0), 2, "한글은 두 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 2), 1, "ASCII 는 한 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 3), 1, "공백도 한 칸");
+        assert_eq!(cursor_cell_width(&cells, 0, 4), 2, "한글은 두 칸");
+        // 스페이서와 그리드 밖은 폭을 모른다 — 0 칸짜리 커서는 안 보이므로 1 로 눕힌다.
+        assert_eq!(cursor_cell_width(&cells, 0, 1), 1, "스페이서");
+        assert_eq!(cursor_cell_width(&cells, 0, 99), 1, "행 밖");
+        assert_eq!(cursor_cell_width(&cells, 9, 0), 1, "화면 밖");
     }
 
     #[test]
@@ -6577,7 +7809,52 @@ mod tests {
     }
 
     #[test]
-    fn claude_wrapper_is_valid_sh_without_auto_teammate_triple() {
+    fn task_prune_spares_open_tasks_however_old() {
+        let dir = std::env::temp_dir().join(format!("kt-task-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, status: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("{{\"id\":\"1\",\"status\":\"{status}\"}}")).unwrap();
+            p
+        };
+        let zero = std::time::Duration::from_secs(0);
+        let long = std::time::Duration::from_secs(86_400);
+        // 끝난 것은 지나고 열린 것은 아직 — 이 조합이 두 문턱이 갈려 있음을 고정한다.
+        // (하나로 합치면 어제 안 끝낸 일이 완료분과 같이 쓸려 나간다.)
+        assert!(task_file_is_stale(&write("done.json", "completed"), (zero, long)));
+        assert!(task_file_is_stale(&write("gone.json", "deleted"), (zero, long)));
+        assert!(!task_file_is_stale(&write("open.json", "pending"), (zero, long)));
+        assert!(!task_file_is_stale(&write("busy.json", "in_progress"), (zero, long)));
+        // 열린 문턱까지 지나면 그건 밀린 일이 아니라 버려진 일이다.
+        assert!(task_file_is_stale(&write("dead.json", "pending"), (zero, zero)));
+        // 아직 안 지난 완료분은 남는다.
+        assert!(!task_file_is_stale(&write("fresh.json", "completed"), (long, long)));
+        // 깨진 파일·없는 파일·모르는 status 는 건드리지 않는다(삭제는 못 되돌린다).
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "not json").unwrap();
+        assert!(!task_file_is_stale(&broken, (zero, zero)));
+        assert!(!task_file_is_stale(&write("weird.json", "쩜쩜"), (zero, zero)));
+        assert!(!task_file_is_stale(&dir.join("nope.json"), (zero, zero)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_command_removed_only_when_it_is_ours() {
+        // 트리플을 걷어내 내장 /rename 이 다시 도니, 우리가 심었던 대체 커맨드는 지운다.
+        assert!(rename_cmd_is_ours(Some(&format!(
+            "---\ndescription: 옛 버전\n---\n{RENAME_CMD_MARK}\n"
+        ))));
+        // 표식 없는 파일은 사용자 것 — 자동 정리가 남의 편집을 지우면 더 나쁘다.
+        assert!(!rename_cmd_is_ours(Some(
+            "---\ndescription: 내가 쓴 rename\n---\n직접 만든 커맨드\n"
+        )));
+        // 애초에 없으면 지울 것도 없다.
+        assert!(!rename_cmd_is_ours(None));
+    }
+
+    #[test]
+    fn claude_wrapper_is_valid_sh_and_free_of_teammate_triple() {
         // 실제 생성물(팀모드 블록 포함)이 POSIX sh 로 파싱되는지 — 문자열 조립이라
         // 이스케이프 하나로 전체 pane claude 부팅이 깨질 수 있는 지점의 안전망.
         let dir = std::env::temp_dir().join(format!("kt-shim-syntax-{}", std::process::id()));
@@ -6596,11 +7873,24 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "generated claude wrapper failed sh -n");
-        // 자동 teammate 트리플은 제거됐다(거노 2026-07-24) — 부활하면 재시작 복원
-        // 세션의 SendMessage 조용한 유실 클래스가 돌아온다. 팀 채널은 스폰 다이얼로그/
-        // 사용자 명시 --agent-* 만. wrapper 에 자동 트리플 흔적이 없어야 한다.
-        assert!(!body.contains("--agent-id"), "auto teammate triple resurfaced in shim");
-        assert!(!body.contains("/teamname"), "auto team computation resurfaced in shim");
+        // 자동 트리플은 2026-08-09 에 걷어냈다 — `--agent-id` 가 붙은 세션은 claude 가
+        // cross-session 명부에서 통째로 제외해(등록 함수 첫 줄 `if(W4()!=null) return false`)
+        // 방(cwd)이 다른 pane 끼리 서로 찾지도 못하고 메시지도 안 간다. 발신·수신 양쪽이
+        // 다 죽으므로, 트리플이 되살아나면 그 순간 pane 간 협업이 조용히 끊긴다.
+        assert!(
+            !body.contains("set -- --agent-id"),
+            "teammate triple came back — cross-session 명부 등록이 거부된다"
+        );
+        // 트리플 대신 이름만 넘기고, 명부 등록 게이트를 env 로 연다.
+        assert!(
+            body.contains("CLAUDE_CODE_SESSION_NAME"),
+            "session name went missing — 상대가 이름으로 못 부른다"
+        );
+        assert!(
+            body.contains("CLAUDE_CODE_HARBOR_KITE=1"),
+            "harbor kite env went missing — 명부에 안 오른다"
+        );
+        assert!(body.contains("KASATERM_AGENT="), "board 가 읽는 AGENT env 가 사라졌다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6632,8 +7922,11 @@ mod tests {
     #[test]
     fn count_claude_panes_walks_nested_splits_and_windows() {
         // Mirrors save_session_state's schema: nested split leaves + a second
-        // window, mixed was_claude. Only claude leaves count; a null leaf
+        // window, mixed agents. Only agent leaves count; a null leaf
         // (unresolved pane at save) and a plain shell are ignored.
+        //
+        // 이 테스트는 **옛 키(`was_claude`)로만** 짜여 있다 — 그대로 두는 것이
+        // 하위호환의 단언이다. 새 키는 아래 `was_agent_*` 테스트가 본다.
         let leaf = |claude: bool| {
             serde_json::json!({ "leaf": {
                 "cwd": "/repo",
@@ -6691,6 +7984,140 @@ mod tests {
         assert_eq!(App::count_panes(&state), 5, "null leaf 포함 전체 leaf");
         assert_eq!(App::count_panes(&char_only), 1);
         assert_eq!(App::count_panes(&serde_json::json!({})), 0);
+    }
+
+    /// 새 키 `was_agent` 는 종류를 담고, codex pane 도 복원 대상으로 센다.
+    /// 옛 `was_claude` 는 계속 claude 로 읽혀야 한다 — 판올림 한 번에 거노가 쓰던
+    /// 학생 pane 이 전부 셸로 되살아나는 것을 막는 단언.
+    #[test]
+    fn was_agent_counts_codex_and_keeps_legacy_was_claude() {
+        let win = |leaf: serde_json::Value| {
+            serde_json::json!({ "sessions": [{ "windows": [{ "leaf": leaf }]}]})
+        };
+        let n = |leaf: serde_json::Value| App::count_claude_panes(&win(leaf));
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": "codex", "session_id": null })),
+            1,
+            "codex pane 도 복원 대상"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": "claude", "session_id": null })),
+            1
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": null, "session_id": null })),
+            0,
+            "순수 셸"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_claude": true, "session_id": null })),
+            1,
+            "옛 저장본은 claude 로 읽힌다"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_claude": false, "session_id": null })),
+            0
+        );
+    }
+
+    /// 복원 명령 분기. codex pane 이 셸로 되살아나던 것이 이 작업의 출발점이라,
+    /// "codex 였으면 codex 로" 를 못박는다.
+    #[test]
+    fn restore_command_picks_the_harness_it_was() {
+        // 여기서는 **하네스 갈래만** 본다 — 모델·effort 조합은 session.rs 쪽에 건다.
+        let cmd = |a, s, r| crate::session::restore_agent_command(a, s, r, None, None);
+        assert_eq!(cmd(Some("codex"), None, false), "codex\r");
+        assert_eq!(
+            cmd(Some("codex"), Some("019fd187-ba6e-7812-8976-2a27ffcd843e"), true),
+            "codex resume 019fd187-ba6e-7812-8976-2a27ffcd843e\r"
+        );
+        // rollout 이 사라졌으면 새로 — `resume --last` 로 흘리지 않는다(미러된
+        // ~/.codex/sessions 전체에서 골라 남의 대화를 물어온다).
+        assert_eq!(cmd(Some("codex"), Some("019fd187-ba6e"), false), "codex\r");
+        assert_eq!(
+            cmd(Some("claude"), Some("abcd-1234"), true),
+            "claude --resume abcd-1234\r"
+        );
+        // jsonl 이 사라진 세션은 fresh 로 — "No conversation found" 로 pane 이 통째 죽는다.
+        assert_eq!(cmd(Some("claude"), Some("abcd-1234"), false), "claude\r");
+        assert_eq!(cmd(Some("claude"), None, false), "claude\r");
+    }
+
+    /// codex shim 의 불변식. claude 판에서 값을 복붙하다 깨지기 쉬운 것들만 못박는다.
+    #[test]
+    fn codex_shim_wrapper_and_hooks_hold_their_invariants() {
+        let dir = std::env::temp_dir().join(format!("kt-shim-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        install_codex_hook_shim(&dir);
+        let (Ok(body), Ok(hooks)) = (
+            std::fs::read_to_string(dir.join("codex")),
+            std::fs::read_to_string(dir.join("codex-hooks.json")),
+        ) else {
+            // collab-hooks 를 못 찾는 환경 — 설치 자체가 스킵돼 볼 대상이 없다.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        assert!(
+            body.contains("--dangerously-bypass-hook-trust"),
+            "훅 trust 관문을 안 넘으면 TUI 가 매번 재승인을 묻는다"
+        );
+        assert!(
+            body.contains("--dangerously-bypass-approvals-and-sandbox"),
+            "훅 신뢰만 풀면 명령 승인이 남아 학생이 첫 명령에서 멈춘다 — 둘은 별개 플래그다"
+        );
+        assert!(
+            body.contains("export CODEX_HOME="),
+            "pane 전용 홈을 안 내보내면 훅도 페르소나도 안 붙는다"
+        );
+        assert!(
+            body.contains("cp \"$SRC/config.toml\""),
+            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰/훅해시 쓰기가 거노 개인 설정으로 샌다"
+        );
+        assert!(
+            body.contains("trust_level = \\\"trusted\\\"") || body.contains("trust_level"),
+            "디렉터리 신뢰를 선주입하지 않으면 무인 스폰이 프롬프트에서 멈춘다"
+        );
+        assert!(
+            body.contains("grep -qF \"[projects.\\\"$PWD\\\"]\""),
+            "중복 [projects] 테이블은 TOML 파싱을 통째로 깬다 — 없을 때만 붙여야 한다"
+        );
+        let v: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+        let h = &v["hooks"];
+        assert!(
+            h.get("Notification").is_none(),
+            "codex 엔 Notification 이벤트가 없다"
+        );
+        assert!(
+            h.get("PermissionRequest").is_some(),
+            "attention 훅은 PermissionRequest 로 간다"
+        );
+        // timeout 은 **초**다(실측: 500+sleep1 완주, 1+sleep3 Failed). claude 판의
+        // 5000 을 복붙하면 83분이 된다 — 세 자리 이상이면 그 사고다.
+        fn walk_timeouts(v: &serde_json::Value, out: &mut Vec<u64>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, x) in m {
+                        if k == "timeout" {
+                            if let Some(n) = x.as_u64() {
+                                out.push(n);
+                            }
+                        }
+                        walk_timeouts(x, out);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|x| walk_timeouts(x, out)),
+                _ => {}
+            }
+        }
+        let mut ts = Vec::new();
+        walk_timeouts(&v, &mut ts);
+        assert!(!ts.is_empty(), "훅이 하나도 안 실렸다");
+        assert!(
+            ts.iter().all(|t| *t <= 60),
+            "timeout 이 ms 값처럼 크다 — codex 는 초 단위다: {ts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6910,5 +8337,22 @@ mod tests {
         assert!(App::drag_left_window(w + 1.0, 400.0, w, h)); // 오른쪽 밖
         assert!(App::drag_left_window(600.0, -1.0, w, h)); // 위쪽 밖(탭바 위로 뜯음)
         assert!(App::drag_left_window(600.0, h + 1.0, w, h)); // 아래쪽 밖
+    }
+
+    #[test]
+    fn port_file_is_paired_with_its_socket_not_its_directory() {
+        // 실사고: 두 인스턴스의 소켓은 PID 로 갈렸는데 포트 파일은 "소켓의 디렉터리 +
+        // mcp_port" 라 한 파일이었다. pane 에서 띄운 테스트 인스턴스가 부모 앱의
+        // TMPDIR 에 자기 포트를 덮어써, 부모 pane 의 hook 들이 테스트 서버로 갔다.
+        let a = mcp_port_file_for("/tmp/kasaterm-25057.sock");
+        let b = mcp_port_file_for("/tmp/kasaterm-82694.sock");
+        assert_ne!(a, b, "같은 디렉터리의 두 인스턴스가 같은 포트 파일을 쓰면 안 된다");
+        assert_eq!(a, std::path::PathBuf::from("/tmp/kasaterm-25057.mcp_port"));
+        // 셸 hook 이 ${sock%.sock}.mcp_port 로 유도하는 것과 같은 결과여야 한다 —
+        // 한쪽만 바뀌면 hook 이 영영 빈 파일을 읽고 8765(남의 서버)로 폴백한다.
+        for sock in ["/tmp/kasaterm-1.sock", "/home/u/.config/kasaterm/daemon.sock"] {
+            let shell = format!("{}.mcp_port", sock.trim_end_matches(".sock"));
+            assert_eq!(mcp_port_file_for(sock), std::path::PathBuf::from(shell));
+        }
     }
 }

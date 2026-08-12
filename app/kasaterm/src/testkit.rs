@@ -5,12 +5,46 @@ use super::*;
 /// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
 static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 학생이 든 별도창을 전제로 하는 하네스들(`autofacehover`·`autoroomsplit`)이
+/// 「창이 없다」로 끝났을 때 붙이는 안내. 둘 다 **내가 인자를 잘못 준 것인데
+/// 검사 대상이 틀린 것처럼 읽히는** 부류라, 메시지가 직접 짚어 준다.
+///
+/// 실제로 동료가 둘을 한꺼번에 밟았다(2026-08-05). 이전 문구는 "AUTOSTUDENT_ROOM
+/// 을 앞에 둬라"였는데, 그 변수는 이미 켜 있었고 문제는 **시각**이었다 — 조언이
+/// 오답이면 없는 것보다 나쁘다.
+/// `autoboxlabel` 이 심는 가짜 transcript 자리. `/tmp/...` 로 골라 프로젝트 슬러그가
+/// 거노 실제 폴더와 안 겹치게 한다 — 그 폴더를 잘못 건드린 사고를 한 번 냈다.
+const BOXLABEL_CWD: &str = "/tmp/kasaterm-boxlabel";
+const BOXLABEL_SID: &str = "boxlabel-probe";
+
+const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
+슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
+\n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
+이 하네스의 _MS 를 그보다 뒤로 둬라. 터미널창은 AUTOUNDOCK_MS 로 따로 꺼낼 수도 있다.";
+
 /// `KASATERM_AUTOPANEMERGE` 예약 슬롯 — (발사 시각, 대상 leaf).
 static AUTO_MERGE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
     std::sync::OnceLock::new();
 
 fn auto_merge_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
     AUTO_MERGE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// `KASATERM_AUTOUNDOCK_SCROLL` 예약 슬롯 — (발사 시각, pane, 줄수).
+static AUTO_UNDOCK_SCROLL: std::sync::OnceLock<
+    std::sync::Mutex<Option<(Instant, String, f32)>>,
+> = std::sync::OnceLock::new();
+
+fn auto_undock_scroll_slot() -> &'static std::sync::Mutex<Option<(Instant, String, f32)>> {
+    AUTO_UNDOCK_SCROLL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// `KASATERM_AUTOUNDOCK_DOCK_MS` 예약 슬롯 — (발사 시각, pane).
+static AUTO_UNDOCK_DOCK: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
+    std::sync::OnceLock::new();
+
+fn auto_undock_dock_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
+    AUTO_UNDOCK_DOCK.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 pub(crate) fn mdscript_pending() -> bool {
@@ -62,6 +96,162 @@ impl App {
         self.cursor_px = (x, y);
         self.chrome_dirty = true;
         eprintln!("[autocursor] ({x:.0},{y:.0})");
+    }
+    /// `KASATERM_AUTOEXPANDCLICK="<방idx>"` (+ `_MS`) — 그 방의 **펼치기 버튼**을
+    /// 진짜로 누른다. `"2:body"` 는 같은 카드의 이름줄, `"2:dots"` 는 버튼 바로
+    /// 오른쪽 상태 점 자리 — 둘 다 방 전환으로 흘러야 하는 곳이다.
+    ///
+    /// 상태를 직접 세우는 `AUTOEXPAND` 와 갈리는 건 좌표 판정을 지난다는 점이다.
+    /// 버튼과 전환이 한 카드 안에서 갈리므로, 정작 검증해야 할 것이 그 갈림
+    /// 자체다 — 예전엔 클릭 쪽이 "아랫줄 오른쪽 100px" 라는 자기 공식을 갖고 있어
+    /// 눈에 보이는 삼각형보다 훨씬 넓은 구역이 전환을 삼켰다.
+    pub(crate) fn run_pending_autoexpandclick(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, usize, u8)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOEXPANDCLICK").ok()?;
+            let (idx, rest) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            let ms: u64 = std::env::var("KASATERM_AUTOEXPANDCLICK_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+            Some((
+                Instant::now() + std::time::Duration::from_millis(ms),
+                idx.trim().parse().ok()?,
+                match rest.trim() {
+                    "body" => 1,
+                    "dots" => 2,
+                    _ => 0,
+                },
+            ))
+        });
+        let Some((due, idx, spot)) = *due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(tab) = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r)
+        else {
+            eprintln!("[autoexpandclick] 방 {idx} 없음");
+            return;
+        };
+        let btn = self.window_expand_rect(idx, tab);
+        let (x, y) = match (spot, btn) {
+            (1, _) => (tab.0 + 40.0, tab.1 + 14.0),
+            // 배지 **왼쪽** 여백 — 아랫줄에서 드래그를 시작할 수 있는 자리다.
+            // 오른쪽은 배지가 카드 끝에 붙어 있어 카드 밖으로 나간다(실측 handled=false).
+            (2, Some(r)) => (r.0 - 10.0, r.1 + r.3 / 2.0),
+            (_, Some(r)) => (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0),
+            _ => {
+                eprintln!("[autoexpandclick] 방 {idx} 는 pane 이 하나라 버튼이 없음");
+                return;
+            }
+        };
+        let before = self.active_window;
+        let handled = self.window_strip_click(x, y);
+        // 드래그 장전 여부까지 찍는다 — 버튼을 카드에서 도려내는 변경은 그 자리의
+        // tear-off 를 조용히 죽일 수 있고(빌드도 클릭도 멀쩡하다), 신호가 여기뿐이다.
+        eprintln!(
+            "[autoexpandclick] ({x:.0},{y:.0}) handled={handled} 활성 {before}->{} 펼침={:?} 드래그장전={}",
+            self.active_window,
+            self.expanded_windows,
+            self.win_tab_drag.is_some()
+        );
+        // 펼침 모션 프레임은 **클릭 기준**으로 잡아야 한다. 시작 기준
+        // `AUTOCAPTURE_MS` 로는 못 잡는다 — 이 클릭 자체가 이벤트 루프가 깨어날 때
+        // 나가서, 예약보다 한참 늦게 발화한다(실측: 캡처가 먼저 찍혀 네 장 모두
+        // 접힌 그림이 나왔다). `_CAP` 에 경로, `_CAP_MS` 에 클릭 후 ms 를 콤마로.
+        //
+        // ⚠️ 여러 장을 걸 때는 **간격을 readback 보다 넓게**. 캡처는 `capture_next`
+        // 한 칸을 거쳐 다음 렌더에 찍히는데 그 전에 다음 만기가 오면 앞엣것을
+        // 덮어써 파일이 조용히 빈다(실측: 30·70·120·300 중 1·4 번만 남았다).
+        // 0.16초짜리 이 모션은 오프셋을 바꿔 가며 한 실행에 한 장이 확실하다.
+        let Ok(path) = std::env::var("KASATERM_AUTOEXPANDCLICK_CAP") else { return };
+        let offs = std::env::var("KASATERM_AUTOEXPANDCLICK_CAP_MS")
+            .unwrap_or_else(|_| "40,90,140,260".into());
+        let now = Instant::now();
+        for (i, ms) in offs.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).enumerate() {
+            let p = match path.rsplit_once('.') {
+                Some((stem, ext)) => format!("{stem}-{}.{ext}", i + 1),
+                None => format!("{path}-{}", i + 1),
+            };
+            self.pending_capture.push((now + std::time::Duration::from_millis(ms), p));
+        }
+    }
+    /// `KASATERM_AUTOROWDRAG="<src줄>:<dst줄>[:before]"` (+ `_MS`) — 사이드바
+    /// 목록의 src 번째 줄을 잡아 dst 번째 줄 위(`before`)나 아래에 떨어뜨린다.
+    ///
+    /// 누르기는 진짜 클릭 판정(`window_strip_click`)을 지나고, 떨어질 자리는
+    /// handler 와 같은 규칙(대상 줄의 위/아래 절반)으로 잡는다. 확인할 건 "옮겼다"가
+    /// 아니라 **아무것도 잃지 않았나**다 — pane 이동은 트리에서 leaf 를 떼어 다른
+    /// 트리에 붙이는 일이라, 어긋나면 캡처는 멀쩡한데 pane 하나가 조용히 사라진다.
+    pub(crate) fn run_pending_autorowdrag(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, usize, usize, bool)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOROWDRAG").ok()?;
+            let mut it = spec.split(':');
+            let src: usize = it.next()?.trim().parse().ok()?;
+            let dst: usize = it.next()?.trim().parse().ok()?;
+            let before = it.next().map(|s| s.trim() == "before").unwrap_or(false);
+            let ms: u64 = std::env::var("KASATERM_AUTOROWDRAG_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), src, dst, before))
+        });
+        let Some((due, src, dst, before)) = *due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let rows = self.sidebar_row_rects.clone();
+        let Some((_, sid, sr)) = rows.get(src) else {
+            eprintln!("[autorowdrag] 줄 {src} 없음 (총 {})", rows.len());
+            return;
+        };
+        // dst 가 줄 범위를 넘으면 **방 카드**에 떨어뜨린 것으로 본다(넘긴 만큼이 방
+        // 인덱스) — pane 하나짜리 방은 목록에 줄이 없어 이 경로로만 닿는다.
+        let did = match rows.get(dst) {
+            Some((_, id, _)) => id.clone(),
+            None => {
+                let wi = dst - rows.len();
+                match self.window_leaves(wi).into_iter().last() {
+                    Some(id) => id,
+                    None => {
+                        eprintln!("[autorowdrag] 방 {wi} 가 비었음");
+                        return;
+                    }
+                }
+            }
+        };
+        let did = &did;
+        let all = |s: &Self| -> Vec<String> {
+            (0..s.windows.len()).flat_map(|i| s.window_leaves(i)).collect()
+        };
+        let before_leaves = all(self);
+        self.window_strip_click(sr.0 + sr.2 / 2.0, sr.1 + sr.3 / 2.0);
+        let armed = self.sidebar_row_drag.is_some();
+        if let Some(d) = self.sidebar_row_drag.as_mut() {
+            d.active = true;
+            d.target = Some((did.clone(), before));
+        }
+        let zone = if before { crate::DropZone::Up } else { crate::DropZone::Down };
+        let (sid, did) = (sid.clone(), did.clone());
+        self.move_pane(&sid, &did, zone);
+        self.sidebar_row_drag = None;
+        self.render_frame();
+        let after = all(self);
+        eprintln!(
+            "[autorowdrag] {sid} → {did} ({}) 장전={armed} leaves {}개→{}개 {:?}",
+            if before { "위" } else { "아래" },
+            before_leaves.len(),
+            after.len(),
+            after
+        );
+        eprintln!("[autorowdrag] 기대: 장전=true · leaves 수 그대로 · 모든 pane 살아 있음");
     }
     /// `KASATERM_AUTOTHEME="<키>"` (+ `_MS`) — 그 시각에 테마를 갈아 끼운다.
     ///
@@ -161,6 +351,28 @@ impl App {
                 }
             }
             "modal" => self.open_commit_modal(),
+            // 커밋 메시지 칸의 **커서 산수**를 화면으로 확인한다. 조작을 `lineedit`
+            // 한 벌로 합친 뒤(2026-08-07) 캐럿이 한글 경계에서 어긋나지 않는지가
+            // 눈으로 보여야 한다 — 단위테스트는 문자열만 보고 캐럿 픽셀은 못 본다.
+            // 키는 `logical_key` 만 있으면 되므로 KeyEvent 를 짓지 않는다.
+            "commitedit" => {
+                use winit::keyboard::{Key, NamedKey};
+                self.open_commit_modal();
+                self.git.commit_focused = true;
+                self.git.commit_msg.clear();
+                self.git.commit_cursor = 0;
+                self.git_commit_insert("한글커밋메시지");
+                let (msg, cur) = (&mut self.git.commit_msg, &mut self.git.commit_cursor);
+                // 맨 앞으로 갔다가 두 칸 오른쪽 → "한글" 뒤에 캐럿.
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::Home));
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
+                crate::lineedit::key(msg, cur, &Key::Named(NamedKey::ArrowRight));
+                crate::lineedit::key(msg, cur, &Key::Character("X".into()));
+                eprintln!(
+                    "[autogit] commitedit msg={:?} cursor={} (기대: '한글X커밋메시지' / 3)",
+                    self.git.commit_msg, self.git.commit_cursor
+                );
+            }
             "menu" => self.git.commit_menu_open = true,
             "spin" => self.git.op = Some("Pushing"),
             "hover" => {
@@ -274,6 +486,60 @@ impl App {
                 CloseWhy::Busy(p) => format!("busy:{p}"),
                 CloseWhy::Dirty(d) =>
                     format!("dirty:{}", d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")),
+                CloseWhy::LastPane => "lastpane".to_string(),
+            }),
+        );
+    }
+    /// Headless Cmd+W repro: `KASATERM_AUTOLASTCLOSE_MS` 뒤에 방을 둘로 만들고
+    /// **pane 이 하나인 상태에서** `close_active_tab`(Cmd+W 가 부르는 그 함수)을 친다.
+    ///
+    /// 이 경로는 아무 일도 안 하던 자리다 — 마지막 pane 이면 `confirm_or_close_tab`
+    /// 이 조용히 return 해서 키가 죽은 것처럼 보였다(거노). 확인 모달이 뜨는지를
+    /// 로그로 못박는다. 모달만 띄우고 실제로 닫지는 않으므로 캡처도 그대로 남는다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autolastclose(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOLASTCLOSE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if self.windows.len() < 2 {
+            self.new_window();
+        }
+        let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
+        // 갈림길이 셋(탭 여러 개 / 마지막 pane / active_pane 없음)이라 어디로 갔는지
+        // 못 보면 "안 뜬다"까지만 알고 왜인지는 모른다.
+        let (active, tabs) = {
+            let ws = self.ws.lock().unwrap();
+            let a = ws.active_pane.clone();
+            let t = a.as_ref().and_then(|id| ws.panes.get(id)).map(|p| p.tabs.len());
+            (a, t)
+        };
+        self.close_active_tab();
+        eprintln!(
+            "[autolastclose] active={active:?} tabs={tabs:?} windows={} leaves={leaves} confirm_raised={} why={:?} action={:?}",
+            self.windows.len(),
+            self.confirm_close.is_some(),
+            self.confirm_close.as_ref().map(|c| match &c.why {
+                CloseWhy::Busy(p) => format!("busy:{p}"),
+                CloseWhy::Dirty(_) => "dirty".to_string(),
+                CloseWhy::LastPane => "lastpane".to_string(),
+            }),
+            self.confirm_close.as_ref().map(|c| match &c.action {
+                crate::PendingClose::Session(i) => format!("session:{i}"),
+                crate::PendingClose::Window => "window".to_string(),
+                crate::PendingClose::Pane { pane } => format!("pane:{pane}"),
+                _ => "other".to_string(),
             }),
         );
     }
@@ -365,6 +631,172 @@ impl App {
             "[autowinreorder] 기대: A,C,B / 잡은 B 가 활성인 채 맨 뒤 / alert 는 C 를 따라 1번 / 모든 leaves>0"
         );
     }
+    /// Headless 방 이름 편집 repro: `KASATERM_AUTOROOMRENAME_MS` 뒤에 방 탭을 **실제
+    /// hit-test 경로**(`window_strip_click`)로 두 번 눌러 편집에 들어가고, 글자를 넣은
+    /// 직후의 라벨을 찍는다.
+    ///
+    /// 여기서 봐야 할 건 두 가지다. ①편집에 들어간 순간의 버퍼 — 빈칸이면 사람이
+    /// 이름을 통째로 다시 쳐야 한다. ②글자를 넣은 **그 프레임**의 라벨 — 라벨은
+    /// `refresh_window_labels` 의 1초 캐시를 타므로, 합성이 캐시 안에 있으면 타이핑이
+    /// 1초씩 뭉쳐 나온다. 그래서 캐시를 일부러 fresh 로 만들어 둔 채 확인한다.
+    /// (한글 조합은 OS 키 경로라 여기서 재현 못 한다 — 사람이 직접 쳐야 한다.)
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoroomrename(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOROOMRENAME_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        self.render_frame();
+        let Some((_, r)) = self.window_tab_rects.first().copied() else {
+            eprintln!("[autoroomrename] 탭 rect 없음 — 사이드바 창 탭이 안 그려졌다");
+            return;
+        };
+        let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        let before = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        // 첫 클릭은 전환·장전만. 두 번째가 편집을 연다(Finder 의 느린 재클릭).
+        self.window_strip_click(cx, cy);
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::chrome::ROOM_RENAME_DOUBLE_CLICK_MS as u64 + 60,
+        ));
+        self.window_strip_click(cx, cy);
+        let opened = self.room_rename.editing.clone();
+        eprintln!("[autoroomrename] 라벨={before:?} 편집진입={opened:?}");
+        // 라벨 캐시를 일부러 갓 만든 상태로 둔다 — 캐시가 살아 있는데도 방금 넣은
+        // 글자가 라벨에 보여야 통과다.
+        self.refresh_window_labels();
+        self.room_rename_insert("X");
+        self.refresh_window_labels();
+        let after = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        eprintln!("[autoroomrename] 한 글자 넣은 뒤 라벨={after:?}");
+        // 커서를 앞으로 옮겨 가운데에 넣는다 — 캐럿이 늘 끝에 붙던 시절엔 여기서
+        // 글자와 캐럿 자리가 갈렸다.
+        self.room_rename.cursor = 0;
+        self.room_rename_insert("A");
+        self.refresh_window_labels();
+        let mid = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        eprintln!("[autoroomrename] 맨 앞에 넣은 뒤 라벨={mid:?} 커서={}", self.room_rename.cursor);
+        eprintln!(
+            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 'X▌' / 맨 앞 삽입은 'A▌' 뒤에 원래 이름"
+        );
+        self.render_frame();
+    }
+
+    /// Headless 파일트리 이름변경 repro: `KASATERM_AUTOFTRENAME_MS` 뒤에 트리를 켜고
+    /// 첫 파일의 인라인 이름변경을 열어, 커서가 어디에 서는지와 가운데 삽입이 그
+    /// 자리에 들어가는지를 찍는다.
+    ///
+    /// 봐야 할 건 둘이다. ①편집을 연 순간의 커서 — 0 이면 이름 맨 앞에 서서, 확장자
+    /// 하나 고치려는 사람이 커서를 끝까지 몰고 가야 한다. ②커서를 옮긴 뒤의 삽입
+    /// 자리 — 끝에만 붙던 시절엔 여기서 글자가 엉뚱한 데로 갔다. 캐럿이 그 자리에
+    /// 그려지는지는 같은 프레임의 캡처로 눈으로 본다.
+    /// (한글 조합은 OS 키 경로라 여기서 재현 못 한다 — 사람이 직접 쳐야 한다.)
+    pub(crate) fn run_pending_autoftrename(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFTRENAME_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.file_tree.visible {
+            self.toggle_file_tree();
+        }
+        self.refresh_file_tree();
+        self.render_frame();
+        // 같은 칼럼의 검색칸도 한 화면에 담아 둔다 — 커서를 옮겨 넣은 글자가
+        // 제자리에 그려지는지 본다(이 칸의 캐럿은 rename 이 열리며 꺼진다).
+        self.file_tree_search_insert("sc");
+        self.file_tree.search_cursor = 0;
+        self.file_tree_search_insert("A");
+        eprintln!(
+            "[autoftrename] 검색칸={:?} 커서={} (기대: \"Asc\" / 1)",
+            self.file_tree.search_query, self.file_tree.search_cursor
+        );
+        let Some(target) = self.file_tree.nodes.iter().find(|n| !n.is_dir).map(|n| n.path.clone())
+        else {
+            eprintln!("[autoftrename] 트리에 파일이 없다 — cwd 를 확인할 것");
+            return;
+        };
+        self.file_tree.selected = Some(target.clone());
+        self.run_ft_menu_action(crate::FtMenuAction::Rename);
+        let opened = self.file_tree.rename.clone();
+        eprintln!("[autoftrename] 대상={target:?} 편집진입={opened:?} 커서={}", self.file_tree.edit_cursor);
+        // 커서를 이름 한가운데로 옮겨 넣어 본다 — 끝에만 붙던 시절의 회귀 감시.
+        let mid = self.file_tree.rename.as_ref().map_or(0, |(_, n)| n.chars().count() / 2);
+        self.file_tree.edit_cursor = mid;
+        self.ft_edit_insert("Z");
+        eprintln!(
+            "[autoftrename] {mid} 번째에 넣은 뒤 버퍼={:?} 커서={}",
+            self.file_tree.rename.as_ref().map(|(_, n)| n.clone()),
+            self.file_tree.edit_cursor
+        );
+        eprintln!("[autoftrename] 기대: 진입 커서 = 이름 길이 / 'Z' 가 이름 한가운데 / 캐럿이 그 뒤");
+        self.render_frame();
+    }
+
+    /// Headless 경로 검색칸 repro: `KASATERM_AUTOPATHSEARCH_MS` 뒤에 활성 pane 의 경로
+    /// 드롭다운을 열고, 검색어를 친 뒤 커서를 앞으로 옮겨 한 글자를 더 넣는다.
+    ///
+    /// 이 칸엔 원래 캐럿이 없었다 — 끝에만 붙는 칸이었기 때문이다. 그래서 여기서는
+    /// 커서가 가운데 있을 때 **캐럿이 그 자리에 서는지**를 캡처로 본다.
+    pub(crate) fn run_pending_autopathsearch(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOPATHSEARCH_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let Some(id) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autopathsearch] 활성 pane 이 없다");
+            return;
+        };
+        // 드롭다운은 footer 의 경로 칩에 앵커링된다 — 바를 안 켜면 칩 rect 가 없어
+        // 메뉴가 통째로 안 그려진다(첫 시도에서 빈 화면만 찍혔다).
+        self.set_footer_default = true;
+        self.render_frame();
+        self.open_statusbar_menu(&id, crate::StatusbarMenu::Path);
+        self.statusbar_search_insert("sc");
+        // 커서를 맨 앞으로 몰고 한 글자 — 끝에만 붙던 시절엔 "sc" 뒤에 붙었다.
+        self.statusbar.menu_search_cursor = 0;
+        self.statusbar_search_insert("A");
+        eprintln!(
+            "[autopathsearch] 검색어={:?} 커서={} (기대: \"Asc\" / 1, 캐럿은 A 뒤)",
+            self.statusbar.menu_search, self.statusbar.menu_search_cursor
+        );
+        self.render_frame();
+    }
+
     /// Headless 닫기→되살리기 repro: `KASATERM_AUTOCLOSEREOPEN_MS` 뒤에 pane 을 쪼갠 뒤
     /// 하나를 닫고, 되살리기 스택에 남았는지 찍고, 다시 되살린다.
     ///
@@ -397,7 +829,14 @@ impl App {
         let stack = |app: &App| -> Vec<String> {
             app.closed_panes
                 .iter()
-                .map(|c| format!("{}({})", c.pane_id, c.folder))
+                .map(|c| {
+                    format!(
+                        "{}({}{})",
+                        c.pane_id,
+                        c.folder,
+                        if c.alive { ",살아있음" } else { ",죽음" }
+                    )
+                })
                 .collect()
         };
         let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
@@ -408,24 +847,384 @@ impl App {
         self.close_pane(&victim);
         self.render_frame();
         eprintln!(
-            "[autoclosereopen] {victim} 닫음 → leaves={:?} 스택={:?}",
+            "[autoclosereopen] {victim} 닫음 → leaves={:?} 스택={:?} PTY생존={}",
             leaves(self),
-            stack(self)
+            stack(self),
+            self.pty.contains_key(&victim)
         );
         if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
-            eprintln!("[autoclosereopen] hold — 인포의 대기 줄 캡처 대기");
+            // 되살리기는 Info 섹션이 맡으므로 hold 는 그 화면에서 멈춘다 — 하단바가
+            // 0 이라는 것만 찍고 끝내면 "되살릴 길이 사라진 것"과 구분이 안 된다.
+            if !self.git.col_visible {
+                self.toggle_git_col();
+            }
+            self.info.tab = crate::state::SideTab::Info;
+            self.render_frame();
+            eprintln!(
+                "[autoclosereopen] hold — 하단바 칩={:?} 예약={} · Info 되살리기 줄={:?}",
+                self.dock_chip_rects,
+                self.bottom_reserve_h(),
+                self.info.closed_rects
+            );
             return;
         }
         self.reopen_closed_pane();
         self.render_frame();
+        let after = leaves(self);
         eprintln!(
-            "[autoclosereopen] 되살린 뒤: leaves={:?} 스택={:?}",
-            leaves(self),
+            "[autoclosereopen] 되살린 뒤: leaves={:?} 스택={:?} 같은id복귀={}",
+            after,
+            stack(self),
+            after.iter().any(|l| *l == victim)
+        );
+        // × 경로 — 다시 닫고 이번엔 되살리는 대신 끈다. 여기서만 프로세스가 죽어야
+        // 한다. "끄기전=true, 끈뒤=false" 가 아니면 × 가 목록만 지우고 셸을 남긴
+        // 것이고, 그건 닫을수록 프로세스가 쌓인다는 뜻이다.
+        self.close_pane(&victim);
+        self.render_frame();
+        let before_kill = self.pty.contains_key(&victim);
+        let last = self.closed_panes.len().saturating_sub(1);
+        self.discard_closed_pane_at(last);
+        self.render_frame();
+        eprintln!(
+            "[autoclosereopen] × 로 끔 → 끄기전PTY={before_kill} 끈뒤PTY={} 스택={:?}",
+            self.pty.contains_key(&victim),
             stack(self)
         );
         eprintln!(
-            "[autoclosereopen] 기대: 닫으면 leaf 하나 줄고 스택에 남고 · 되살리면 leaf 수가 돌아오고 스택은 빈다"
+            "[autoclosereopen] 기대: 닫아도 PTY생존=true(죽이지 않는다) · 되살리면 같은id복귀=true(새로 띄우는 게 아니라 다시 붙인다) · × 만 끄기전true→끈뒤false"
         );
+    }
+
+    /// Headless pane 숨기기 repro: `KASATERM_AUTOSTASH_MS` 뒤에 사이드바를 켜고 pane 을
+    /// 셋으로 쪼갠 다음, 한 줄을 **진짜로 우클릭**해 「숨기기」를 고른다.
+    ///
+    /// 확인할 건 "목록에서 사라졌다"가 아니라 **살아 있느냐**다. 숨기기는 닫기와 같은
+    /// 스택에 들어가는데 그 스택에는 프로세스를 놓는 손이 둘 있다(개수 상한·idle reap).
+    /// 조용히 죽는 종류라 화면으로는 영영 안 보인다 — 그래서 대조군을 같이 둔다:
+    /// 하나는 숨기고 하나는 그냥 닫은 뒤 **같은 정리 한 번**을 돌린다. 닫은 것만 죽고
+    /// 숨긴 것이 남아야 통과다(둘 다 살면 정리가 안 돈 것이라 증명이 아니다).
+    /// `KASATERM_CLOSED_IDLE_SECS=1` 과 함께 쓴다 — 안 주면 15분을 기다려야 한다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autostash(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOSTASH_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        // 넷으로 쪼갠다 — 배치도는 칸이 둘일 때와 넷일 때 읽히는 게 다르고, 하나를
+        // 숨기고 하나를 대조군으로 닫아도 목록에 볼 것이 남는다.
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        // pane 줄과 배치도는 **펼친 방**에만 그려진다 — 접힌 카드에는 rect 가 하나도
+        // 안 실려, 펼치지 않으면 목록이 빈 채로 "못 찾음"이 된다.
+        if !self.expanded_windows.contains(&self.active_window) {
+            self.toggle_window_expand(self.active_window);
+        }
+        // 펼침은 애니메이션이라 첫 프레임엔 카드가 아직 납작하고 줄 rect 가 하나도 안
+        // 실린다(실측: 목록=[]). 다 펴질 때까지 프레임을 돌린다.
+        for _ in 0..40 {
+            self.render_frame();
+            if !self.sidebar_row_rects.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let leaves = |app: &App| -> Vec<String> {
+            app.pty_layout
+                .as_ref()
+                .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let before = leaves(self);
+        let Some(victim) = before.last().cloned() else { return };
+        let control = before.first().cloned().unwrap_or_default();
+        if std::env::var("KASATERM_AUTOSTASH_HOLD").is_ok() {
+            // 배치도를 눈으로 볼 때 — 숨기기 전에 멈춘다. 숨긴 뒤에는 칸이 줄어
+            // 정작 확인하려던 "분할 모양이 맞나"를 못 본다.
+            // `_INFO=1` 이면 방을 하나 더 만들고 Info 를 켠다 — 방 머리 밴드는
+            // 경계를 보이려는 것이라 **방이 둘 이상일 때만** 확인이 된다.
+            if std::env::var("KASATERM_AUTOSTASH_INFO").is_ok() {
+                self.new_window();
+                if !self.git.col_visible {
+                    self.toggle_git_col();
+                }
+                self.info.tab = crate::state::SideTab::Info;
+            }
+            self.render_frame();
+            eprintln!("[autostash] hold — leaves={before:?} 배치도칸={}", self.sidebar_row_rects.len());
+            return;
+        }
+        // 그 pane 의 줄 한가운데. 미니맵 칸도 같은 벡터에 있어 `find` 는 먼저 오는
+        // 칸을 집을 수 있는데, 우클릭은 어느 쪽이든 같은 pane 을 가리키므로 무해하다.
+        let Some(row) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, p, _)| *p == victim)
+            .map(|(_, _, r)| *r)
+        else {
+            eprintln!("[autostash] {victim} 줄을 사이드바에서 못 찾음 — 목록={:?}", self.sidebar_row_rects);
+            return;
+        };
+        let armed = self.sidebar_row_right_click(row.0 + row.2 / 2.0, row.1 + row.3 / 2.0);
+        self.render_frame();
+        let items: Vec<String> =
+            self.sidebar_menu_rects.iter().map(|(a, _)| format!("{a:?}")).collect();
+        let Some(hide) = self
+            .sidebar_menu_rects
+            .iter()
+            .find(|(a, _)| matches!(a, crate::SidebarMenuAction::Hide))
+            .map(|(_, r)| *r)
+        else {
+            eprintln!("[autostash] 메뉴 장전={armed} 인데 숨기기 항목이 없음 — 항목={items:?}");
+            return;
+        };
+        self.sidebar_menu_click(hide.0 + hide.2 / 2.0, hide.1 + hide.3 / 2.0);
+        self.render_frame();
+        let stack = |app: &App| -> Vec<String> {
+            app.closed_panes
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}({}{})",
+                        c.pane_id,
+                        if c.stashed { "숨김" } else { "닫힘" },
+                        if c.alive { ",살아있음" } else { ",죽음" }
+                    )
+                })
+                .collect()
+        };
+        eprintln!(
+            "[autostash] 메뉴 장전={armed} 항목={items:?} · {victim} 숨김 → leaves={:?} 스택={:?}",
+            leaves(self),
+            stack(self)
+        );
+        // 대조군 — 같은 스택에 평범하게 닫은 것을 하나 넣는다.
+        self.close_pane(&control);
+        self.render_frame();
+        // idle_since 는 첫 정리에서 찍힌다. 한 번 돌리고 상한을 넘긴 뒤 다시 돌려야
+        // 실제로 놓는 자리까지 간다 — 헤드리스라 루프를 잠깐 세워도 된다.
+        self.reap_idle_closed_panes();
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::closed_pane_idle_reap().as_millis() as u64 + 300,
+        ));
+        self.reap_idle_closed_panes();
+        self.render_frame();
+        eprintln!(
+            "[autostash] 정리 뒤 스택={:?} · 숨긴 {victim} PTY={} · 닫은 {control} PTY={}",
+            stack(self),
+            self.pty.contains_key(&victim),
+            self.pty.contains_key(&control)
+        );
+        eprintln!(
+            "[autostash] 기대: 숨긴 PTY=true · 닫은 PTY=false (둘 다 true 면 정리가 안 돈 것이라 증명이 아니다)"
+        );
+        // 되돌리기 — 숨긴 줄을 다시 우클릭하면 이번엔 항목이 「보이기」여야 하고,
+        // 누르면 **같은 id 가** 트리로 돌아와야 한다. 새 셸이 하나 뜨는 것과는 다르다.
+        let Some(hrow) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, p, _)| *p == victim)
+            .map(|(_, _, r)| *r)
+        else {
+            eprintln!("[autostash] 숨긴 {victim} 줄이 목록에 없다 — 되돌릴 길이 없음");
+            return;
+        };
+        self.sidebar_row_right_click(hrow.0 + hrow.2 / 2.0, hrow.1 + hrow.3 / 2.0);
+        self.render_frame();
+        let hitems: Vec<String> =
+            self.sidebar_menu_rects.iter().map(|(a, _)| format!("{a:?}")).collect();
+        let Some(un) = self
+            .sidebar_menu_rects
+            .iter()
+            .find(|(a, _)| matches!(a, crate::SidebarMenuAction::Unhide))
+            .map(|(_, r)| *r)
+        else {
+            eprintln!("[autostash] 숨긴 줄 메뉴에 보이기 항목이 없음 — 항목={hitems:?}");
+            return;
+        };
+        self.sidebar_menu_click(un.0 + un.2 / 2.0, un.1 + un.3 / 2.0);
+        self.render_frame();
+        let back = leaves(self);
+        eprintln!(
+            "[autostash] 되돌림 항목={hitems:?} → leaves={back:?} 같은id복귀={} 스택={:?}",
+            back.iter().any(|l| *l == victim),
+            stack(self)
+        );
+        // `_INFO=1` — 검증을 다 지난 뒤 **그림용 상태**를 세운다(넷을 한 캡처에).
+        // 되돌리기가 방금 숨긴 것을 되살렸으므로 흐린 줄을 보려면 다시 치워야 하고,
+        // 방 머리 밴드는 방이 둘 이상일 때만 확인이 된다.
+        if std::env::var("KASATERM_AUTOSTASH_INFO").is_ok() {
+            self.stash_pane(&victim);
+            self.new_window();
+            if !self.git.col_visible {
+                self.toggle_git_col();
+            }
+            self.info.tab = crate::state::SideTab::Info;
+            // 방을 하나 더 만들면 활성이 그쪽으로 옮겨간다 — 배치도가 가리키는 방과
+            // 화면에 뜬 방이 갈리면 그림이 오히려 헷갈리므로 원래 방으로 돌아온다.
+            self.switch_window(0);
+            self.render_frame();
+            eprintln!(
+                "[autostash] 그림용 — 활성방={} 방수={} 방슬롯={:?} 그 트리={:?} 스택={:?} 살아있는PTY={:?}",
+                self.active_window,
+                self.windows.len(),
+                self.windows.iter().map(|w| w.as_ref().map(|t| t.leaves().len())).collect::<Vec<_>>(),
+                leaves(self),
+                stack(self),
+                {
+                    let mut k: Vec<&String> = self.pty.keys().collect();
+                    k.sort();
+                    k
+                }
+            );
+        }
+    }
+
+    /// Headless 뷰 전환 검증: `KASATERM_AUTOVIEW_MS` 뒤에 방을 쪼개 펼치고, 카드 머리의
+    /// 전환 배지를 **실제 좌표 판정으로** 눌러 배치도↔목록을 왕복한다.
+    ///
+    /// 세는 건 `sidebar_row_rects` 가 아니다 — 거기엔 칸과 줄이 한 벡터에 섞여 있어
+    /// 넷이 넷으로 바뀌면 아무것도 안 바뀐 것과 구별이 안 된다. 레이아웃을 직접 불러
+    /// 줄과 칸을 갈라 센다. 통과 모양은 `칸4/줄0` ↔ `칸0/줄4` 다.
+    /// `_HOLD=1` 이면 목록 모드에서 멈춘다(캡처로 눈으로 보려는 자리).
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoview(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOVIEW_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let wi0 = self.active_window;
+        if !self.expanded_windows.contains(&wi0) {
+            self.toggle_window_expand(wi0);
+        }
+        // ★ **다 펴질 때까지** 기다린다 — rect 가 생기자마자 세면 안 된다. 목록은
+        // 카드가 자라는 동안 아래에서 한 줄씩 드러나는 설계라, 애니메이션 중간에
+        // 세면 마지막 줄이 아직 카드 밖이어서 「줄이 하나 모자란다」로 읽힌다
+        // (실측: h=139 일 때 4번째 줄이 잘렸고, 다 펴진 150 에서는 들어온다).
+        for _ in 0..40 {
+            self.render_frame();
+            if self.expand_progress(wi0) >= 1.0 && !self.sidebar_row_rects.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let counts = |app: &App| -> (usize, usize) {
+            let win_h = app
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as f32 / app.effective_scale())
+                .unwrap_or(800.0);
+            let (_, _, _, rows, mini) = app.sidebar_layout(win_h);
+            (mini.len(), rows.len())
+        };
+        let wi = self.active_window;
+        let press = |app: &mut App| -> bool {
+            let Some(tab) = app.window_tab_rects.iter().find(|(i, _)| *i == wi).map(|(_, r)| *r)
+            else {
+                return false;
+            };
+            let Some(vr) = app.window_view_rect(wi, tab) else { return false };
+            let hit = app.window_strip_click(vr.0 + vr.2 / 2.0, vr.1 + vr.3 / 2.0);
+            app.render_frame();
+            hit
+        };
+        // `_WAIT=1` — 배치도 칸이 **신호를 받았을 때** 어떻게 보이나. 판정이 아니라
+        // 그림을 보려는 것이라, 트랜스크립트 감시기가 쓰는 자리(`pane_activity` ·
+        // `unread_panes`)에 같은 값을 직접 심는다. 진짜 claude 를 띄워 대기 상태를
+        // 만들려면 승인 프롬프트가 뜰 때까지 기다려야 하는데 그건 재현이 안 된다.
+        if let Ok(path) = std::env::var("KASATERM_AUTOVIEW_WAIT") {
+            let ls = self.window_leaves(wi);
+            // ★ 심고서 이벤트 루프로 돌아가면 안 된다 — `refresh_pane_activity` 가 매
+            // 틱 `pane_activity` 를 통째로 다시 만들어 심은 값을 지운다(실측: 3초 뒤
+            // 예약 캡처에는 주황이 없고 파랑 둘만 찍혔다). 심은 **그 프레임에서**
+            // 찍는다. `capture_next` 는 handler 가 쓰는 것과 같은 한 칸이다.
+            if let Some(id) = ls.get(1) {
+                self.pane_activity.insert(
+                    id.clone(),
+                    crate::stream::PaneStatusView {
+                        status: "waiting".into(),
+                        waiting_for: Some("선택지".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Some(id) = ls.get(2) {
+                self.unread_panes.insert(id.clone());
+            }
+            // 깜빡임의 **밝은 쪽**에서 찍는다. 아무 프레임이나 잡으면 절반은 알파가
+            // 바닥이라 "글로우가 안 나온다"로 읽힌다 — 그림이 위상에 좌우되면 안 된다.
+            for _ in 0..60 {
+                if crate::render::blink_phase(0.9) > 0.95 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path.clone());
+            }
+            self.render_frame();
+            eprintln!(
+                "[autoview] 신호 심음 — 대기={:?} 못본완료={:?} → {path}",
+                ls.get(1),
+                ls.get(2)
+            );
+            return;
+        }
+        let n_leaf = self.window_leaves(wi).len();
+        let before = counts(self);
+        let hit1 = press(self);
+        let after = counts(self);
+        eprintln!(
+            "[autoview] leaf={n_leaf} · 배치도(칸{}/줄{}) --누름{}--> 목록(칸{}/줄{})",
+            before.0, before.1, if hit1 { "" } else { "실패" }, after.0, after.1
+        );
+        if std::env::var("KASATERM_AUTOVIEW_HOLD").is_ok() {
+            eprintln!("[autoview] hold — 목록 모드에서 멈춤");
+            return;
+        }
+        let hit2 = press(self);
+        let back = counts(self);
+        eprintln!(
+            "[autoview] --누름{}--> 배치도(칸{}/줄{}) 왕복복귀={}",
+            if hit2 { "" } else { "실패" },
+            back.0,
+            back.1,
+            back == before
+        );
+        eprintln!("[autoview] 기대: 칸N/줄0 ↔ 칸0/줄N (한쪽이 늘 0 이 아니면 두 뷰가 같이 떠 있는 것)");
     }
 
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
@@ -502,11 +1301,31 @@ impl App {
                 .map(|(p, x, y, w, h)| format!("{p}@{x},{y} {w}x{h}"))
                 .collect::<Vec<_>>()
         );
+        // 창이 떴어도 macOS 가 탭으로 합쳐 버렸으면 「별도 창」이 아니다. mode 2 =
+        // Disallowed, 탭수 0 = 어디에도 안 묶임. 하나라도 어긋나면 드래그로 떼는
+        // 순간 형제까지 딸려 나온다(거노).
+        #[cfg(target_os = "macos")]
+        {
+            let main = self.window.as_ref().map(|w| crate::auxwin::tabbing_probe(w));
+            let aux = aux_idx.map(|i| crate::auxwin::tabbing_probe(&self.aux_windows[i].window));
+            eprintln!("[autowinundock] 탭(mode,묶인수): 메인={main:?} 꺼낸창={aux:?} · 기대 (2,0)");
+        }
         eprintln!(
             "[autowinundock] 기대: windows 그대로 · 활성은 남은 방 · 꺼낸 방에 「밖」 · rect 수 = 꺼내기 전 leaf 수"
         );
-        if std::env::var("KASATERM_AUTOWINUNDOCK_DOCK").is_ok() {
-            if let Some(i) = aux_idx {
+        if let Ok(mode) = std::env::var("KASATERM_AUTOWINUNDOCK_DOCK") {
+            // `click` 은 사이드바 빈 슬롯의 되돌리기 버튼을 실제로 눌러 본다 —
+            // `dock_window_room` 직접 호출은 aux 인덱스로 말하고 사이드바는 방
+            // 인덱스로 말해서, 둘이 어긋나면 엉뚱한 창이 돌아온다.
+            if mode == "click" {
+                self.render_frame();
+                let hit = self.window_dock_rects.first().copied();
+                eprintln!("[autowinundock] 되돌리기 버튼={hit:?}");
+                if let Some((_, r)) = hit {
+                    let handled = self.window_strip_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    eprintln!("[autowinundock] 버튼 클릭 handled={handled}");
+                }
+            } else if let Some(i) = aux_idx {
                 self.dock_window_room(i);
             }
             self.render_frame();
@@ -996,6 +1815,34 @@ impl App {
         // 한 글자씩 먹여, 조합기가 완성 음절을 만드는지 낱자로 흘리는지 찍는다.
         // 실제 IME 없이 재현할 수 있는 건 macOS 가 OS IME 를 끄고 자모를 그대로
         // 받기 때문 — 그 경로가 곧 거노가 치는 경로다.
+        // 페이지 아래쪽 항목은 창을 아무리 키워도 첫 화면에 안 들어온다 —
+        // 스크롤 위치를 직접 심어 그 자리를 캡처한다(휠 이벤트는 aux 창으로
+        // 안 간다).
+        if let Ok(s) = std::env::var("KASATERM_AUTOSETTINGS_SCROLL") {
+            if let Ok(v) = s.parse::<f32>() {
+                self.settings_scroll = v;
+            }
+        }
+        // 배율/폰트를 흐트러뜨린 뒤 "1:1 로 되돌리기"가 둘 다 되돌리는지. 되돌린
+        // 값이 맞아도 격자를 다시 안 재면 화면만 옛 크기로 남으므로 cells 도 찍는다.
+        if std::env::var("KASATERM_AUTOSETTINGS_RESET").is_ok() {
+            self.change_ui_zoom(0.3);
+            self.font_size = 22.0;
+            self.apply_effective_scale();
+            eprintln!(
+                "[autoreset] 흐트러뜨림: zoom={:.2} font={} cells={:?}",
+                self.ui_zoom,
+                self.font_size,
+                self.window_cells()
+            );
+            self.settings_apply(crate::SettingsAction::ResetScale);
+            eprintln!(
+                "[autoreset] 되돌린 뒤: zoom={:.2} font={} cells={:?}",
+                self.ui_zoom,
+                self.font_size,
+                self.window_cells()
+            );
+        }
         if let Ok(t) = std::env::var("KASATERM_AUTOSETTINGS_TYPE") {
             self.settings_input = Some(SettingsInput::ClaudeAccountLabel(0));
             self.settings_caret = 0;
@@ -1494,6 +2341,7 @@ impl App {
                         "dirty:{}",
                         d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")
                     ),
+                    CloseWhy::LastPane => "lastpane".to_string(),
                 });
                 eprintln!("[mdscript] close why={why:?}");
             }
@@ -1586,12 +2434,400 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
+        // `_SCROLL=<줄수>` 면 창이 **자리를 잡은 뒤**(+1500ms) 실제 휠 경로로 그만큼
+        // 위로(과거로) 굴린다. 사람이 하는 순서가 그렇고, 그 순서여야만 재현된다 —
+        // undock 직후엔 aux 창 크기에 맞춘 PTY resize 가 아직 안 끝나 스냅샷이 계속
+        // 갈아엎이므로, 그때 재면 「셀은 멀쩡한데 화면만 빈다」로 잘못 읽힌다.
+        // `pty.scroll` 을 직접 부르지 않는 이유는 휠 라우팅(트리 가로채기·pane_id
+        // 해석)까지 태우기 위해서다 — 거기서 새고 있어도 통과해 버리면 안 된다.
+        if let Some(lines) = std::env::var("KASATERM_AUTOUNDOCK_SCROLL")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            *auto_undock_scroll_slot().lock().unwrap() =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), pid.clone(), lines));
+        }
         if let Some(a) = self.aux_windows.iter_mut().find(|a| {
             matches!(&a.kind,
-                crate::auxwin::AuxWindowKind::Terminal { pane_id } if *pane_id == pid)
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
         }) {
             a.pending_capture =
-                Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+                Some((Instant::now() + std::time::Duration::from_millis(1900), cap));
+        }
+        // `_DOCK_MS=<ms>` 면 그만큼 뒤에 되돌린다(dock). 꺼낼 때와 되돌릴 때의 학생
+        // 판정 재료를 나란히 찍어야 어느 칸이 비는지 보인다 — 창 수만 세면 "돌아왔다"와
+        // "돌아왔는데 남이 됐다"가 똑같아 보인다.
+        if let Some(ms) = std::env::var("KASATERM_AUTOUNDOCK_DOCK_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            self.dump_undock_theme("undock직후", &pid);
+            *auto_undock_dock_slot().lock().unwrap() =
+                Some((Instant::now() + std::time::Duration::from_millis(ms), pid.clone()));
+        }
+        // `_HIDE=1` 이면 이어서 접기→되살리기까지 본다. 접기는 창만 없애는 것이라
+        // **PTY 가 살아 있는지**가 판정의 전부다 — 창 수만 세면 "접었다"와 "죽였다"가
+        // 똑같아 보인다.
+        if std::env::var("KASATERM_AUTOUNDOCK_HIDE").is_err() {
+            return;
+        }
+        self.hide_aux_window(0);
+        self.render_frame();
+        eprintln!(
+            "[autoundock] 접음 → aux={} 접힌목록={:?} 하단바예약={} PTY생존={}",
+            self.aux_windows.len(),
+            self.hidden_aux.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
+            self.bottom_reserve_h(),
+            self.pty.contains_key(&pid)
+        );
+        eprintln!("[autoundock] 하단바 칩={:?}", self.dock_chip_rects);
+        self.unhide_aux(0, event_loop);
+        self.render_frame();
+        eprintln!(
+            "[autoundock] 되살림 → aux={} 접힌목록={} 하단바예약={} PTY생존={}",
+            self.aux_windows.len(),
+            self.hidden_aux.len(),
+            self.bottom_reserve_h(),
+            self.pty.contains_key(&pid)
+        );
+        eprintln!(
+            "[autoundock] 기대: 접으면 aux=0·예약=40·PTY생존=true / 되살리면 aux=1·예약=0·PTY생존=true"
+        );
+    }
+    /// 학생 테마가 서는 재료를 한 줄로 찍는다. 렌더가 실제로 보는 순서 그대로 —
+    /// `active_tab_pid` 로 접고, 그 pid 로 `active_agent`(=runs_claude)를 묻고,
+    /// `display_pane_char` 로 이름을 얻는다. 셋 중 하나만 비어도 보더색·프사·이름이
+    /// 통째로 사라지므로, 하나씩 갈라 찍지 않으면 범인을 못 가른다.
+    fn dump_undock_theme(&self, when: &str, pid: &str) {
+        let ws = self.ws.lock().unwrap();
+        let tab_pid = ws.active_tab_pid(pid);
+        let runs = self
+            .pty
+            .get(tab_pid.as_str())
+            .and_then(|p| p.active_agent())
+            .map(|a| format!("{a:?}"));
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        eprintln!(
+            "[undock/{when}] pane={pid} tab_pid={tab_pid} agent={runs:?} \
+             char={:?} display={:?} sid={:?} room={:?} 트리leaf={leaves:?} 활성={:?}",
+            ws.pane_character.get(pid),
+            self.display_pane_char(&ws, pid),
+            self.pane_claude_sid.get(pid),
+            ws.pane_room.get(pid),
+            ws.active_pane,
+        );
+    }
+
+    /// 예약된 dock 복귀를 발사한다(위 `run_pending_autoundock` 이 심는다). 되돌린
+    /// 뒤 메인 창을 찍어, 보더색·헤더 이름이 꺼내기 전과 같은지 눈으로 본다.
+    pub(crate) fn run_pending_autoundock_dock(&mut self) {
+        let due = {
+            let g = auto_undock_dock_slot().lock().unwrap();
+            matches!(g.as_ref(), Some((at, _)) if Instant::now() >= *at)
+        };
+        if !due {
+            return;
+        }
+        let Some((_, pid)) = auto_undock_dock_slot().lock().unwrap().take() else {
+            return;
+        };
+        let Some(i) = self.aux_windows.iter().position(|a| {
+            matches!(&a.kind,
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
+        }) else {
+            eprintln!("[undock/dock] 되돌릴 별도창이 없다 — pane {pid}");
+            return;
+        };
+        self.dock_pane_terminal(i);
+        self.render_frame();
+        self.dump_undock_theme("dock후", &pid);
+        let cap = std::env::var("KASATERM_AUTOUNDOCK_DOCK_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("undock-dock.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        // 되돌린 직후가 아니라 한 박자 뒤에 찍는다 — dock 은 `resize_backend` 로 PTY 를
+        // 다시 재고, 셸이 SIGWINCH 로 리플로우한 결과가 도착해야 화면이 자리를 잡는다.
+        self.pending_capture
+            .push((Instant::now() + std::time::Duration::from_millis(1200), cap));
+    }
+
+    /// 예약된 별도창 휠을 발사한다(위 `run_pending_autoundock` 이 심는다). 굴린 직후
+    /// **렌더가 실제로 읽는 셀**(`ws.panes[pid].term()`)까지 찍는다 — PTY 가 굴렀는지와
+    /// 화면에 보이는지는 별개라, 둘을 같이 안 보면 어느 쪽이 범인인지 못 가른다.
+    pub(crate) fn run_pending_autoundock_scroll(&mut self) {
+        let due = {
+            let g = auto_undock_scroll_slot().lock().unwrap();
+            match g.as_ref() {
+                Some((at, _, _)) if Instant::now() >= *at => true,
+                _ => false,
+            }
+        };
+        if !due {
+            return;
+        }
+        let Some((_, pid, lines)) = auto_undock_scroll_slot().lock().unwrap().take() else {
+            return;
+        };
+        let Some(i) = self.aux_windows.iter().position(|a| {
+            matches!(&a.kind,
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
+        }) else {
+            eprintln!("[autoundock] 휠 대상 aux 창이 없다 — pane {pid}");
+            return;
+        };
+        let before = self.pty.get(&pid).map(|p| p.scroll(0));
+        self.aux_terminal_wheel(i, MouseScrollDelta::LineDelta(0.0, lines));
+        let after = self.pty.get(&pid).map(|p| p.scroll(0));
+        let seen = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(&pid).and_then(|p| p.term()).map(|t| {
+                let nonblank = t
+                    .cells
+                    .iter()
+                    .filter(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')))
+                    .count();
+                let idx = t
+                    .cells
+                    .iter()
+                    .position(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')));
+                let first: String = idx
+                    .map(|i| t.cells[i].iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+                    .unwrap_or_default();
+                let last = t
+                    .cells
+                    .iter()
+                    .rposition(|r| r.iter().any(|c| !matches!(c.ch, ' ' | '\0')));
+                (t.cols, t.rows, t.cells.len(), nonblank, idx, last, first)
+            })
+        };
+        let aux_cells = self
+            .aux_windows
+            .get(i)
+            .map(|a| (a.gpu.cell_w, a.gpu.cell_h));
+        eprintln!("[autoundock] 휠 {lines}줄 → display_offset {before:?} → {after:?}");
+        eprintln!("[autoundock] 렌더가 읽는 셀: {seen:?}");
+        eprintln!("[autoundock] aux 창(cell_w, cell_h): {aux_cells:?}");
+    }
+    /// Headless 마크다운 별도창 repro: `KASATERM_AUTOAUXMD="<파일>"`(+`_MS`) 로 그
+    /// 파일을 별도창 편집기로 띄우고 +1500ms 에 캡처(`KASATERM_AUTOAUXMD_CAP`).
+    /// `_RAW=1` 이면 캡처 전에 헤더의 `Raw` 칸을 **실제 클릭 좌표로** 눌러 본다 —
+    /// 알약을 그렸다는 것과 눌러서 모드가 바뀐다는 것은 별개라, 그린 rect 를 그대로
+    /// 히트 테스트에 태워야 배선까지 확인된다(header_btns 규약).
+    pub(crate) fn run_pending_autoauxmd(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let path = std::env::var("KASATERM_AUTOAUXMD").ok()?;
+            let ms = std::env::var("KASATERM_AUTOAUXMD_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(4000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), path))
+        });
+        let Some((at, path)) = due.clone() else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < at {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // 사람이 여는 그 경로(팝아웃)를 그대로 탄다 — 여기서 MarkdownPane 을 손으로
+        // 만들면 `is_md_doc`·초기 뷰 모드 결정이 사본이 돼, 정작 그 결정이 틀려도 통과한다.
+        self.popout_file_window(std::path::PathBuf::from(&path), event_loop);
+        let Some(idx) = self.aux_windows.iter().position(|a| a.editor().is_some()) else {
+            eprintln!("[autoauxmd] 별도창이 안 떴다: {path}");
+            return;
+        };
+        self.aux_render(idx);
+        let pills: Vec<_> = self
+            .aux_windows
+            .get(idx)
+            .map(|a| {
+                a.header_btns
+                    .iter()
+                    .filter(|(k, _)| {
+                        matches!(k, crate::auxwin::AuxHeaderBtn::MdRender | crate::auxwin::AuxHeaderBtn::MdRaw)
+                    })
+                    .map(|(k, r)| ((*k == crate::auxwin::AuxHeaderBtn::MdRaw).then_some("Raw").unwrap_or("Rendered"), *r))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        eprintln!("[autoauxmd] 알약 rect: {pills:?}");
+        if std::env::var("KASATERM_AUTOAUXMD_RAW").is_ok() {
+            let hit = self.aux_windows.get(idx).and_then(|a| {
+                a.header_btns
+                    .iter()
+                    .find(|(k, _)| *k == crate::auxwin::AuxHeaderBtn::MdRaw)
+                    .map(|(_, r)| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0))
+            });
+            match hit {
+                Some((cx, cy)) => {
+                    // 클릭 판정이 커서 위치를 보므로 커서부터 옮긴다(실제 경로와 동일).
+                    if let Some(a) = self.aux_windows.get_mut(idx) {
+                        a.cursor_px = (cx, cy);
+                    }
+                    let handled = self.aux_header_click(idx);
+                    let raw = self
+                        .aux_windows
+                        .get(idx)
+                        .and_then(|a| a.editor())
+                        .map(|m| m.raw_mode);
+                    eprintln!("[autoauxmd] Raw 클릭({cx:.0},{cy:.0}) handled={handled} raw_mode={raw:?}");
+                }
+                None => eprintln!("[autoauxmd] Raw 칸이 안 그려졌다"),
+            }
+        }
+        let cap = std::env::var("KASATERM_AUTOAUXMD_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir().join("auxmd.png").to_string_lossy().into_owned()
+        });
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+        }
+    }
+    /// Headless 드래그-tear repro: `KASATERM_AUTOTEARDRAG_MS` 뒤에 활성 pane 의 탭
+    /// 드래그를 세우고 커서를 창 **밖으로** 옮긴다 — 마우스를 놓지 않은 채 별도창이
+    /// 떨어지는지, 그 창이 커서를 따라오는지, 놓았을 때 되꽂히지 않는지까지 본다.
+    /// 상태를 손으로 세팅하지 않고 `CursorMoved`/`MouseInput` 을 그대로 `window_event`
+    /// 에 흘려보내 handler 라우팅까지 태운다(automenuclick 과 같은 이유).
+    /// autoundock 처럼 함수-로컬 static — struct App 은 건드리지 않는다.
+    /// 단계 사이에 900ms 를 두는 이유: macOS 의 `set_outer_position` 은 윈도우
+    /// 서버에 비동기로 전달돼, 같은 이벤트 루프 반복 안에서 `outer_position()` 을
+    /// 다시 읽으면 **옮기기 전 값**이 나온다("따라오지 않는다"로 오판했던 자리).
+    pub(crate) fn run_pending_autoteardrag(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        static POS1: AtomicI32 = AtomicI32::new(i32::MIN);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTEARDRAG_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 3 || Instant::now() < *due + std::time::Duration::from_millis(900 * step as u64)
+        {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let scale = self.effective_scale() as f64;
+        let moved = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        let dragged = self.tab_drag.as_ref().map(|d| d.pane.clone());
+        match step {
+            // 0) 메인 창을 화면보다 작게 줄인다. 창 밖 좌표가 **화면 안**이어야
+            //    별도창이 커서 자리에 그대로 놓인다 — 화면 밖을 노리면 macOS 가
+            //    두 요청을 같은 자리로 물려 "안 따라온다"로 오독된다.
+            0 => {
+                if let Some(w) = self.window.as_ref() {
+                    let _ = w.request_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0));
+                }
+                STEP.store(1, Ordering::Relaxed);
+            }
+            // 1) 드래그를 세우고 커서를 창 밖으로 — 여기서 이미 뜯겨야 한다(놓기 전).
+            1 => {
+                // 뜯긴 뒤에도 메인 창에 뭐가 남아 있어야 리플로우를 볼 수 있다.
+                if self.pty_layout.as_ref().map(|t| t.leaves().len()).unwrap_or(0) < 2 {
+                    let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+                }
+                let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+                self.tab_drag = Some(TabDrag {
+                    pane: pid.clone(),
+                    from: 0,
+                    start: (120.0, 10.0),
+                    active: true,
+                    target: 0,
+                    drop_pane: pid.clone(),
+                });
+                moved(self, 1000.0, 120.0);
+                let torn = self.torn_aux_window(&pid);
+                if let Some(p) =
+                    torn.and_then(|i| self.aux_windows[i].window.outer_position().ok())
+                {
+                    POS1.store(p.y, Ordering::Relaxed);
+                }
+                eprintln!(
+                    "[autoteardrag] 1) pane={pid} win={:?} 놓기전뜯김={} 트리에남음={}",
+                    self.logical_win_size(),
+                    torn.is_some(),
+                    self.pty_layout
+                        .as_ref()
+                        .map(|t| t.leaves().iter().any(|l| *l == pid))
+                        .unwrap_or(false),
+                );
+                STEP.store(2, Ordering::Relaxed);
+            }
+            // 2) 커서를 더 내린다 — 창이 따라오는지.
+            2 => {
+                moved(self, 1000.0, 400.0);
+                STEP.store(3, Ordering::Relaxed);
+            }
+            // 3) 옮겨진 자리를 읽고 놓는다 — 되꽂히면 안 된다.
+            _ => {
+                STEP.store(4, Ordering::Relaxed);
+                let Some(pid) = dragged else {
+                    eprintln!("[autoteardrag] FAIL — 드래그 상태가 사라졌다");
+                    return;
+                };
+                let y2 = self
+                    .torn_aux_window(&pid)
+                    .and_then(|i| self.aux_windows[i].window.outer_position().ok())
+                    .map(|p| p.y);
+                let y1 = POS1.load(Ordering::Relaxed);
+                let followed = matches!(y2, Some(y) if y1 != i32::MIN && y != y1);
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    },
+                );
+                let still_torn = self.torn_aux_window(&pid).is_some();
+                let back_in_tree = self
+                    .pty_layout
+                    .as_ref()
+                    .map(|t| t.leaves().iter().any(|l| *l == pid))
+                    .unwrap_or(false);
+                eprintln!(
+                    "[autoteardrag] 2) 따라옴={followed}(y {y1}→{y2:?}) 3) 놓은뒤유지={still_torn} 트리복귀={back_in_tree}"
+                );
+                // 뜯긴 창이 살아 있는 셸을 계속 그리는지는 눈으로만 확인된다.
+                if let Some(cap) = std::env::var("KASATERM_AUTOTEARDRAG_CAP").ok() {
+                    if let Some(i) = self.torn_aux_window(&pid) {
+                        self.aux_windows[i].pending_capture = Some((
+                            Instant::now() + std::time::Duration::from_millis(2000),
+                            cap,
+                        ));
+                    }
+                }
+                eprintln!(
+                    "[autoteardrag] {}",
+                    if followed && still_torn && !back_in_tree { "PASS" } else { "FAIL" }
+                );
+            }
         }
     }
     /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
@@ -1760,6 +2996,1269 @@ impl App {
         } else {
             self.autotoggle_sidebar_at = None;
         }
+    }
+    /// 사이드바 방 펼치기 헤드리스 재현 — `KASATERM_AUTOEXPAND` 에 방 인덱스를
+    /// 콤마로(`0,2`). 펼침은 클릭 손잡이가 유일한 입구라, 상태를 직접 세워야
+    /// 목록의 배치·잘림·넘침을 캡처로 볼 수 있다. 방이 아직 없어도 인덱스만
+    /// 담아 두면 나중에 생기는 방에 그대로 적용된다.
+    /// `KASATERM_AUTOALERT="0,2"` — 그 방들에 "못 본 알림"을 세운다.
+    ///
+    /// 알림·대기 표시는 밖에서 일이 일어나야(claude 가 끝나거나 물어봐야) 켜지는데,
+    /// 헤드리스에는 그 일이 없다. 상태만 세워 두면 캡처가 곧 그 표시의 스크린샷이
+    /// 된다 — 색·자리·속도가 정말 갈리는지는 눈으로만 확인된다.
+    pub(crate) fn arm_autoalert(&mut self) {
+        let Ok(v) = std::env::var("KASATERM_AUTOALERT") else { return };
+        for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
+            self.window_alert.insert(i);
+        }
+        eprintln!("[autoalert] {:?}", self.window_alert);
+    }
+    /// `KASATERM_AUTOWAIT="%2"` — 그 pane 을 "손을 기다리는 중"으로 세운다.
+    ///
+    /// 한 번 세우고 끝낼 수 없다. `refresh_pane_activity` 가 틱마다 transcript 를
+    /// 다시 읽어 `pane_activity` 를 통째로 덮어쓰므로, 캡처가 뜰 즈음엔 세워 둔
+    /// 상태가 이미 지워져 있다(실측: 띠가 한 장도 안 나왔다). 그래서 매 틱 덮는다.
+    pub(crate) fn apply_autowait(&mut self) {
+        use std::sync::OnceLock;
+        static IDS: OnceLock<Vec<String>> = OnceLock::new();
+        let ids = IDS.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWAIT")
+                .map(|v| {
+                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                })
+                .unwrap_or_default()
+        });
+        for spec in ids {
+            // `%2:blocked` 처럼 상태를 붙일 수 있고, `*` 는 활성 pane 이다.
+            //
+            // 어휘가 둘인데(`waiting`/`blocked`) **프로덕션에서 실제로 들어오는 건
+            // `blocked` 뿐**이라(화면 감지 경로가 그것만 쓴다), waiting 만 심을 수
+            // 있으면 정작 실제 경로를 한 번도 못 본다 — 표시 여섯 자리가 waiting 만
+            // 보다가 승인 대기가 통째로 안 그려진 걸 오래 몰랐던 이유다(2026-08-11).
+            let (id, st) = spec.split_once(':').unwrap_or((spec.as_str(), "waiting"));
+            let target = if id == "*" {
+                self.ws.lock().unwrap().active_pane.clone()
+            } else {
+                Some(id.to_string())
+            };
+            let Some(target) = target else { continue };
+            self.pane_activity.entry(target).or_default().status = st.into();
+        }
+    }
+    /// Headless 학생 오버레이 repro: `KASATERM_AUTOSTUDENT_MS`.
+    ///
+    /// 학생 표시(statusline 프사·standing·배너 도트)는 밖에서 claude 가 실제로 돌고
+    /// statusline.py 가 자리표시자를 내보내야 켜지는데, 헤드리스엔 그 일이 없다.
+    /// 그래서 지금까지 **이 층을 아예 재현할 수 없었다** — "별도창에 학생이 안 뜬다"
+    /// 같은 보고를 스크린샷 없이 코드만 읽고 좇아야 했다.
+    ///
+    /// 게이트가 셋인데, 셋 다 **우회 코드 없이** 진짜로 만족시킨다:
+    /// ① `runs_claude` — 셸의 직속 자식 이름이 claude 여야 한다. env 우회를 render 에
+    ///    심는 대신 **`claude` 라는 이름의 실제 바이너리를 rustc 로 즉석에서 굽는다**
+    ///    (300초 자는 3줄짜리, 0.1초면 빌드된다). 판정 코드가 손대지 않은 채로 참이
+    ///    되므로 게이트 자체도 같이 검증된다.
+    ///
+    ///    막다른 길 셋을 먼저 밟았다(다시 밟지 말라고 적어 둔다): macOS 의 `ps -o comm`
+    ///    은 **실제로 실행된 바이너리의 경로**를 준다. 그래서 `/bin/sh` 복사본은
+    ///    SIP/AMFI 가 SIGKILL(exit 137) 하고, 심링크는 `/bin/zsh` 로 풀려 보이고,
+    ///    셰방 스크립트는 인터프리터 이름으로 뜬다. 이름이 claude 인 **파일을 진짜로
+    ///    실행**하는 것 말고는 방법이 없다.
+    /// ② `display_pane_char` — `ws.pane_character` 에 실재하는 학생명을 배정한다
+    ///    (셸 pane 은 `is_claude_agents()` 가 false 라 이 폴백이 정본이 된다).
+    /// ③ 셀에 U+FFFC — 그 가짜 claude 가 statusline 을 흉내 낸 줄을 **PTY 로 실제
+    ///    출력**한다. 셀 그리드에 손으로 써넣지 않는 이유: 다음 pump 가 덮어쓴다.
+    ///
+    /// ④ standing(입력박스 위 전신) — 위 셋이 다 열려도 **앵커**가 따로 걸린다.
+    ///    그래서 가짜 claude 가 입력박스를 테두리 두 줄까지 온전히 찍고,
+    ///    `autostudent_assert_standing` 이 전신이 정말 그려졌는지 따로 판정한다.
+    pub(crate) fn run_pending_autostudent(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOSTUDENT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            let who = std::env::var("KASATERM_AUTOSTUDENT")
+                .unwrap_or_else(|_| "미도리".to_string());
+            Some((Instant::now() + std::time::Duration::from_millis(ms), who))
+        });
+        let Some((due, who)) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        // 2초씩 두는 이유: rustc 빌드 + 프로세스 표 캐시(300ms)와 pty 의 proc 캐시
+        // (500ms)가 겹쳐, 바로 물으면 아직 셸 이름이 돌아온다. 마지막 칸만 4초인
+        // 건 별도창 캡처(+2500ms)가 끝난 **뒤에** 판정해야 해서다.
+        const AT_MS: [u64; 4] = [0, 2000, 4000, 8000];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
+            return;
+        }
+        // 학생을 심은 pane 을 **기억**한다. 3단계에서 방을 새로 열면 활성 pane 이
+        // 그쪽으로 옮겨가므로, 그때 active_pane 을 다시 읽으면 엉뚱한 pane 을
+        // 학생으로 알고 판정한다(실측으로 한 번 속았다).
+        static PLANTED: OnceLock<String> = OnceLock::new();
+        let pid = match PLANTED.get() {
+            Some(p) => p.clone(),
+            None => {
+                let Some(p) = self.ws.lock().unwrap().active_pane.clone() else { return };
+                PLANTED.get_or_init(|| p).clone()
+            }
+        };
+        if step == 0 {
+            STEP.store(1, Ordering::Relaxed);
+            if crate::theme::character_slug(who).is_none() {
+                eprintln!("[autostudent] FAIL — 없는 학생명 {who:?}");
+                STEP.store(2, Ordering::Relaxed);
+                return;
+            }
+            if let Ok(mut ws) = self.ws.lock() {
+                ws.pane_character.insert(pid.clone(), who.clone());
+            }
+            self.pane_claude_seen.insert(pid.clone());
+            // 순서가 중요하다: **먼저 찍고 그 다음에** 가짜 claude 를 띄운다. 그래야
+            // 화면 바닥 두 줄이 rule + statusline 인 채로 남는다(셸은 foreground job
+            // 이 끝날 때까지 프롬프트를 안 찍는다). exec 은 쓰지 않는다 — 셸을 갈아
+            // 치우면 그게 pane 의 셸이 돼 버려 직속 자식이 사라진다.
+            // U+FFFC 는 8진 이스케이프(EF BF BC)로 — 셸마다 \u 지원이 갈린다.
+            //
+            // 찍는 것은 claude 입력박스 **한 벌 전체**다. 오래도록 아래 테두리
+            // 한 줄만 찍었는데, 그러면 `find_standing_anchor` 의 위쪽 스캔이 걸릴
+            // rule 이 없어 앵커가 늘 None 이고 standing 이 통째로 안 그려진다 —
+            // 그 위 행은 셸이 되울린 명령줄이라 label>24 로 즉시 탈락한다. 프사만
+            // 뜨고 전신이 안 서는 층을 이 하네스가 못 태우고 있었다.
+            //
+            //   (빈 행)                  ← 앵커. 비어 있어야 한다(내용이 0열부터
+            //                              시작하면 left_c 가 음수가 되어 None)
+            //   ────…──── 대시보드 ──    ← 윗 테두리. 텍스트 섬을 일부러 넣어
+            //                              max_label 24 분기까지 태운다(세션명이
+            //                              박히면 standing 이 사라졌던 거노 실사고).
+            //                              **라벨은 오른쪽 끝**에 둔다 — 실제 claude 가
+            //                              그 모양이고, 왼쪽 대시 run 이 짧으면 좌측
+            //                              제목 인레이가 폭 부족으로 포기한다(4칸으로
+            //                              뒀다가 `autoboxlabel` 이 좌측을 못 봤다)
+            //   ❯                        ← 입력 영역
+            //   ──────────────           ← 아래 테두리(순수 '─')
+            //   FFFC×4 ctx 42%           ← statusline = face_row
+            let script = concat!(
+                "d=\"$TMPDIR/kasaterm-student-probe\"; mkdir -p \"$d\"; ",
+                "[ -x \"$d/claude\" ] || { ",
+                "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
+                "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
+                "R(){ printf \"\\342\\224\\200%.0s\" $(seq 1 \"$1\"); }; ",
+                "echo; R 40; printf ' 대시보드 '; R 2; echo; ",
+                "printf \"\\342\\235\\257 \\n\"; ",
+                "R 60; echo; ",
+                "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
+                "\"$d/claude\"\n",
+            );
+            if let Some(pty) = self.pty.get(&pid) {
+                let _ = pty.send_bytes(script.as_bytes());
+            }
+            eprintln!("[autostudent] pane={pid} 학생={who} — 가짜 claude 띄우는 중");
+            return;
+        }
+        if step == 2 {
+            STEP.store(3, Ordering::Relaxed);
+            self.autostudent_room(&pid, event_loop);
+            return;
+        }
+        if step == 3 {
+            STEP.store(4, Ordering::Relaxed);
+            self.autostudent_assert_aux(&pid);
+            return;
+        }
+        STEP.store(2, Ordering::Relaxed);
+        // 게이트가 실제로 열렸는지 셋 다 따로 찍는다 — 하나만 닫혀도 화면엔
+        // 똑같이 "아무것도 안 뜸"이라, 뭉뚱그리면 어디가 막혔는지 못 짚는다.
+        let proc = self
+            .pty
+            .get(&pid)
+            .and_then(|p| p.active_process_name())
+            .unwrap_or_default();
+        let g1 = proc.contains("claude");
+        let g2 = {
+            let ws = self.ws.lock().unwrap();
+            self.display_pane_char(&ws, &pid)
+                .and_then(|n| crate::theme::character_slug(&n).map(|s| s.to_string()))
+        };
+        let g3 = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(&pid)
+            .and_then(|p| p.term())
+            .map(|t| t.cells.iter().any(|row| row.iter().any(|c| c.ch == '\u{fffc}')))
+            .unwrap_or(false);
+        eprintln!(
+            "[autostudent] ①runs_claude={g1}(proc={proc:?}) ②학생slug={g2:?} ③U+FFFC={g3}"
+        );
+        eprintln!(
+            "[autostudent] {}",
+            if g1 && g2.is_some() && g3 { "PASS — 세 게이트 다 열림" } else { "FAIL" }
+        );
+        // 게이트가 열린 **바로 그 프레임**을 찍는다. `pending_capture` 큐에 넣으면
+        // 그 뒤로 아무도 프레임을 안 내보내(학생 오버레이엔 애니 펌프가 없다) 자동
+        // 캡처가 영영 발화하지 않는다 — 실측으로 두 번 놓쳤다. mdscript 의 `cap:` 과
+        // 같은 방식으로 gpu 에 직접 무장하고 그 자리에서 한 장 그린다.
+        self.chrome_dirty = true;
+        if let Ok(path) = std::env::var("KASATERM_AUTOSTUDENT_CAP") {
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path);
+            }
+        }
+        self.render_frame();
+        self.autostudent_assert_standing(&pid);
+    }
+    /// 입력박스 보더의 좌=대화요약 / 우=pane 이름(`/rename`)이 **각자 제자리에**
+    /// 그려졌는지: `KASATERM_AUTOBOXLABEL_MS`.
+    ///
+    /// `KASATERM_AUTOSTUDENT_MS` 와 함께 켜라 — 입력박스를 찍는 건 그쪽 가짜 claude 다.
+    /// `KASATERM_TEXT_LOG` 도 필요하다(신고 통이 그 env 로 열린다).
+    ///
+    /// 이름의 정본은 transcript jsonl 이라 헤드리스엔 없다. 그래서 **가짜 jsonl 을
+    /// 심는다** — 진짜 claude 를 띄우는 대신, 판정 대상(`pane_rename_label` →
+    /// `session_rename_for`)이 손대지 않은 채로 참이 되게. 프로젝트 디렉터리는
+    /// `/tmp/...` 로 슬러그가 나게 골라 거노 실제 프로젝트 폴더를 안 건드린다.
+    ///
+    /// 판정 셋: ①좌측 요약 ②우측 이름 ③**겹치지 않았나**. ③이 없으면 좌우가 한
+    /// 낱말로 붙어 읽히는 실제 버그를 통과시킨다 — 신고는 "썼다"만 말하기 때문이다.
+    /// 음성 대조군으로 심지 않은 문자열을 하나 물어 판정이 항상-PASS 가 아님을 보인다.
+    pub(crate) fn run_pending_autoboxlabel(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOBOXLABEL_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        // 두 단계인 이유: 좌측 제목은 타이프라이터라 **시간이 지나야** 다 드러난다
+        // (`title_typewriter_frame` 이 elapsed/글자당ms). 심은 직후 한 프레임만 그리고
+        // 판정하면 좌측은 커서 '▍' 하나뿐이라 "안 그렸다"로 읽힌다 — 실측으로 한 번
+        // 그렇게 FAIL 을 냈다. 1단계에서 심고, 2단계에서 다 드러난 뒤 잰다.
+        let step = STEP.load(Ordering::Relaxed);
+        const AT_MS: [u64; 2] = [0, 1200];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        if step == 1 {
+            // **판정한 그 프레임**을 찍는다(`_CAP`). 별도 시각에 찍으면 타이프라이터
+            // 때문에 픽셀과 판정이 어긋나 "숫자는 PASS 인데 화면엔 없다"가 된다 —
+            // 실측으로 한 번 그렇게 봤다.
+            // cwd 를 **다시** 심는다. `SocketViewCwd`(handler)가 살아 있어 1단계에서
+            // 심어 둔 `pane_view_cwd` 를 실제 cwd 로 덮는다 — 그러면 인레이가 없는
+            // jsonl 을 가리켜 좌·우가 한꺼번에 사라진다. 판정 프레임 직전이 유일하게
+            // 안전한 시점이다.
+            self.boxlabel_seed(&pid);
+            // 신고 통을 **비우고** 한 프레임 그린다. 안 비우면 `drew_text` 가
+            // "지금까지 한 번이라도"에 답해 **꺼진 기능도 통과한다** — 실제로 그랬다
+            // (인레이가 초반엔 그리다 cwd 가 덮여 꺼졌는데 옛 신고가 PASS 를 냈다).
+            // 캡처도 같이 이 프레임에 걸어 픽셀과 판정을 맞물린다.
+            self.chrome_dirty = true;
+            if let Some(g) = self.gpu.as_mut() {
+                crate::gpu::clear_text_logs(g);
+                if let Ok(path) = std::env::var("KASATERM_AUTOBOXLABEL_CAP") {
+                    g.capture_next = Some(path);
+                }
+            }
+            self.render_frame();
+            self.autoboxlabel_judge();
+            return;
+        }
+
+        const SUMMARY: &str = "테스트요약";
+        const RENAME: &str = "지어준이름";
+        let cwd = std::path::PathBuf::from(BOXLABEL_CWD);
+        let sid = BOXLABEL_SID;
+        let _ = std::fs::create_dir_all(&cwd);
+        let Some(jsonl) = crate::socket::project_jsonl(&cwd, sid) else {
+            eprintln!("[autoboxlabel] FAIL — project_jsonl 이 경로를 못 만든다");
+            return;
+        };
+        if let Some(dir) = jsonl.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // 좌측 요약은 **`type:"ai-title"`** 레코드에서 온다 — `"summary"` 로 적었다가
+        // 좌측이 안 뜨는 FAIL 을 한 번 봤다(파서가 타입으로 갈라 받는다).
+        // 우측 이름은 `custom-title`.
+        let body = format!(
+            "{{\"type\":\"ai-title\",\"aiTitle\":\"{SUMMARY}\"}}\n\
+             {{\"type\":\"custom-title\",\"customTitle\":\"{RENAME}\",\
+             \"sessionId\":\"{sid}\",\"nameSource\":\"user\"}}\n"
+        );
+        if let Err(e) = std::fs::write(&jsonl, body) {
+            eprintln!("[autoboxlabel] FAIL — 가짜 jsonl 을 못 썼다: {e}");
+            return;
+        }
+        self.boxlabel_seed(&pid);
+        // 헤더 띠는 **일부러 켜지 않는다.** 켜면 `{캐릭터} %N` 이 띠에서도 그려져
+        // 판정이 통과하는데, 거노 화면의 학생 pane 은 대부분 단일 탭이라 띠가 없다
+        // (`has_header()` = 탭>1 ‖ 이미지 ‖ md ‖ ⋮강제; 학생 띠는 거노가 폐기,
+        // main.rs:2146). 그러면 "하네스는 보는데 화면엔 없다"가 된다 — 오늘 그 모양에
+        // 두 번 물렸다. 띠를 끈 채로 통과하면 그건 **타이틀바**가 실었다는 뜻이고,
+        // 그게 거노가 실제로 보는 자리다.
+        // 여기서 한 번 그려 타이프라이터 시계를 출발시킨다. 판정은 2단계.
+        self.chrome_dirty = true;
+        self.render_frame();
+        eprintln!("[autoboxlabel] pane={pid} 가짜 jsonl 심었다 — 타이핑 기다리는 중");
+    }
+
+    /// `autoboxlabel` 이 pane 을 가짜 transcript 로 가리키게 한다.
+    ///
+    /// **둘 다** 심어야 한다 — 인레이는 `pane_view_cwd` 를 먼저 보고 없을 때만
+    /// `pane_cwd_cache` 로 간다(render.rs:1298~). 캐시에만 심으면 `SocketViewCwd` 가
+    /// 실제 cwd(`~/Desktop`)를 채우는 순간 그쪽이 이겨 `project_jsonl` 이 없는 파일을
+    /// 가리키고 좌·우가 **한꺼번에** 사라진다(둘이 같은 jsonl 을 쓴다).
+    ///
+    /// 그리고 그 소켓 갱신이 계속 도니 **판정 프레임 직전에 다시** 불러야 한다.
+    fn boxlabel_seed(&mut self, pid: &str) {
+        let cwd = std::path::PathBuf::from(BOXLABEL_CWD);
+        self.pane_view_cwd.insert(pid.to_string(), cwd.clone());
+        self.pane_cwd_cache.insert(pid.to_string(), cwd);
+        self.pane_claude_sid.insert(pid.to_string(), BOXLABEL_SID.to_string());
+    }
+
+    /// `autoboxlabel` 2단계 판정. 1단계와 나눈 이유는 그쪽 주석에.
+    fn autoboxlabel_judge(&mut self) {
+        const SUMMARY: &str = "테스트요약";
+        const RENAME: &str = "지어준이름";
+        const NEVER: &str = "심지않은문자열";
+        let Some(g) = self.gpu.as_ref() else {
+            eprintln!("[autoboxlabel] 미측정 — gpu 렌더러가 아니다");
+            return;
+        };
+        let (left, right, never) =
+            (g.drew_text(SUMMARY), g.drew_text(RENAME), g.drew_text(NEVER));
+        // 정체 표시(`{캐릭터} %N`) — 보더 우측을 `/rename` 자리로 비웠으니 "이 pane 이
+        // 누구인가"는 **타이틀바**가 든다(거노 2026-08-05). 하네스가 헤더 띠를 안 켜니
+        // (그쪽 주석 참고) 이 판정이 통과하면 타이틀바가 실었다는 뜻이다 — 거노가
+        // 단일 탭에서 실제로 보는 자리. 인레이와 달리 크롬 텍스트 draw 라 `text_log` 가
+        // 직접 잡는다.
+        let who = {
+            let ws = self.ws.lock().unwrap();
+            ws.active_pane
+                .clone()
+                .and_then(|p| self.display_pane_char(&ws, &p).map(|n| (n, p)))
+        };
+        if let Some((name, pid)) = who.as_ref() {
+            let want = format!("{name} {pid}");
+            eprintln!(
+                "[autoboxlabel] 정체 표시 {want:?} → {}",
+                match g.drew_text(&want) {
+                    Some(true) => "그림 PASS",
+                    Some(false) => "안 그림 FAIL — 타이틀바에 pane 아이디가 안 붙었다",
+                    None => "미측정",
+                }
+            );
+        }
+        if left.is_none() {
+            eprintln!("[autoboxlabel] 미측정 — KASATERM_TEXT_LOG 를 켜라");
+            return;
+        }
+        eprintln!(
+            "[autoboxlabel] 좌측 요약 {} / 우측 이름 {} / 대조군 {}",
+            if left == Some(true) { "그림" } else { "안 그림" },
+            if right == Some(true) { "그림" } else { "안 그림" },
+            if never == Some(true) { "그림(오염!)" } else { "안 그림" },
+        );
+        let span = g.staged_span();
+        match (left, right, never) {
+            (_, _, Some(true)) => eprintln!(
+                "[autoboxlabel] FAIL — 심지도 않은 문자열이 그려졌다고 나온다(신고 통이 오염됐다)"
+            ),
+            (Some(true), Some(true), _) => match span {
+                Some((l, c0, _)) if l >= 0 && (c0 as i64) <= l => eprintln!(
+                    "[autoboxlabel] FAIL — 좌측이 {l} 열까지 쓰는데 우측이 {c0} 열에서 시작한다(겹침)"
+                ),
+                Some((l, c0, c1)) => eprintln!(
+                    "[autoboxlabel] PASS — 좌 …{l} / 우 {c0}-{c1}, 겹치지 않는다"
+                ),
+                None => eprintln!("[autoboxlabel] FAIL — 자리 신고가 없다(우측 인레이가 안 불렸다)"),
+            },
+            (Some(true), _, _) => eprintln!(
+                "[autoboxlabel] FAIL — 좌측만 그렸다. 우측은 `session_rename_for` 가 \
+                 custom-title 을 못 찾거나 폭이 모자라 포기한 것이다"
+            ),
+            (_, Some(true), _) => eprintln!("[autoboxlabel] FAIL — 우측만 그렸다(좌측 요약이 죽었다)"),
+            _ => eprintln!(
+                "[autoboxlabel] FAIL — 둘 다 안 그렸다. 입력박스를 못 찾은 쪽이 크다 \
+                 — AUTOSTUDENT 로 가짜 박스를 먼저 찍고 이 하네스를 그 뒤에 둬라"
+            ),
+        }
+    }
+
+    /// 프사와 별개로 **전신이 입력박스 위에 섰는지**.
+    ///
+    /// 프사(`:profile`)는 statusline 한 줄만 있으면 뜨는데 standing 은 앵커가 더
+    /// 걸린다(테두리 두 줄 + 앵커 행이 비어 있어야 함). 그래서 "프사는 뜨는데
+    /// 전신만 안 선다"가 실제로 나오고, 프사만 세던 판정은 그걸 통과시켰다.
+    ///
+    /// `find_standing_anchor` 를 다시 부르지 않는다 — 그러면 검사 대상과 같은
+    /// 코드를 믿는 셈이고, 자리는 멀쩡한데 부르는 쪽이 없던 #48 을 또 놓친다.
+    /// 한 프레임 그린 뒤 GPU 에 올라간 키와 사각형만 본다. 위치까지 재는 이유:
+    /// 키 존재만 보면 전신이 엉뚱한 자리(프사 아래·화면 밖)에 그려져도 PASS 다.
+    /// 발은 statusline 프사보다 **위**여야 한다.
+    fn autostudent_assert_standing(&mut self, pid: &str) {
+        let slug = {
+            let ws = self.ws.lock().unwrap();
+            match self
+                .display_pane_char(&ws, pid)
+                .and_then(|n| crate::theme::character_slug(&n))
+            {
+                Some(s) => s,
+                None => return,
+            }
+        };
+        // 그리드 진단을 먼저 찍는다 — 앵커가 안 잡혔을 때 거노 실화면의
+        // `KASATERM_STUDENT_DEBUG` 출력과 **같은 단위**로 견줄 수 있어야 한다.
+        // 여기 숫자와 실화면 숫자가 다른 지점이 곧 원인이다.
+        if let Some(rows) = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(pid)
+            .and_then(|p| p.term())
+            .map(|t| t.cells.clone())
+        {
+            if let Some(sr) = rows
+                .iter()
+                .rposition(|row| row.iter().any(|c| c.ch == '\u{fffc}'))
+            {
+                for back in 1..=4usize {
+                    let Some(r) = sr.checked_sub(back) else { break };
+                    let (mut dash, mut label, mut cw) = (0usize, 0usize, 0usize);
+                    for (i, c) in rows[r].iter().enumerate() {
+                        match c.ch {
+                            '─' => {
+                                dash += 1;
+                                cw = i + 1;
+                            }
+                            ' ' | '\0' => {}
+                            _ => {
+                                label += 1;
+                                cw = i + 1;
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[autostudent]   rows[{r}] (face_row-{back}) dash={dash} label={label} 내용폭={cw} → rule={}",
+                        dash >= 8 && dash > cw / 2
+                    );
+                }
+            }
+        }
+        let Some(g) = self.gpu.as_ref() else {
+            eprintln!("[autostudent] standing 미측정 — gpu 렌더러가 아니다");
+            return;
+        };
+        let pfx = format!("student:{slug}:");
+        let keys: Vec<String> =
+            g.drawn_image_keys().filter(|k| k.starts_with(&pfx)).map(str::to_string).collect();
+        // `:profile` 은 이제 statusline 에 안 그린다(2026-08-11 프사 제거) — 옛
+        // 판정은 그 rect 를 세로 기준으로 삼았고, 없으면 「보류」로 조용히 빠져나가
+        // 검증이 통째로 무의미해졌다. 기준을 **화면 하단**으로 바꾼다: 전신은
+        // 입력박스 위에 서므로 발이 마지막 두 행보다 위여야 한다.
+        let stand: Vec<(f32, f32, f32, f32)> =
+            keys.iter().flat_map(|k| g.drawn_image_rects(k)).collect();
+        let feet = stand.iter().map(|r: &(f32, f32, f32, f32)| r.1 + r.3).fold(f32::MIN, f32::max);
+        let floor = g.surface_size().1 as f32 / g.scale() - 2.0 * g.cell_h;
+        eprintln!("[autostudent] 전신 {}개 {keys:?}", stand.len());
+        if stand.is_empty() {
+            eprintln!(
+                "[autostudent] standing FAIL — 앵커가 안 잡혔다. 위 rule 표를 보라: \
+                 face_row-1 이 rule(label 0)이어야 아래 테두리로 인정되고, 그 위 \
+                 16행 안에 rule 이 하나 더(label≤24) 있어야 윗 테두리다. 앵커 행\
+                 (윗 테두리 바로 위)에 0열부터 시작하는 내용이 있으면 left_c 가 \
+                 음수가 되어 역시 None 이다."
+            );
+            return;
+        }
+        eprintln!(
+            "[autostudent] 전신 발={feet:.0} 하한={floor:.0} → {}",
+            if feet <= floor + 1.0 {
+                "PASS — 입력박스 위에 섰다"
+            } else {
+                "FAIL — 그려졌지만 statusline 아래로 내려갔다(앵커 행 계산이 틀렸다)"
+            }
+        );
+    }
+    /// `autostudent` 3단계: 학생이 선 pane 이 **든 방을 통째로** 별도창으로 꺼내
+    /// 거기서도 학생이 뜨는지 본다(`KASATERM_AUTOSTUDENT_ROOM` = 캡처 경로).
+    ///
+    /// 터미널 별도창과 코드 경로가 같아 보여도 따로 재야 한다 — 방 창은 pane 이
+    /// 여럿이라 좌표를 `leaf_rects` 로 펼치고 **pane 마다** 스캔한다. 자리 계산이
+    /// 한 겹 더 있는 쪽이 틀리기 쉽다.
+    ///
+    /// 방을 **둘** 새로 여는 이유가 둘이다. 하나는 `undock_window_room` 이 방이
+    /// 하나뿐이면 거부해서고(꺼내면 메인이 빈 채로 남는다), 다른 하나는 **음성
+    /// 대조군**이다 — 학생이 없는 빈 방도 같이 꺼내 둔다. 그래야 판정이 "항상
+    /// PASS 하는 판정"이 아니라는 게 같은 실행 안에서 증명된다.
+    ///
+    /// 새 방은 열자마자 활성이 되므로, 꺼낼 방은 **학생을 심기 전에 기억해 둔
+    /// 번호**여야 한다.
+    fn autostudent_room(&mut self, pid: &str, event_loop: &ActiveEventLoop) {
+        let Ok(cap) = std::env::var("KASATERM_AUTOSTUDENT_ROOM") else { return };
+        let Some(win) = self.window_of_pane(pid) else {
+            eprintln!("[autostudent] FAIL — pane {pid} 이 어느 방에도 없다");
+            return;
+        };
+        self.new_window();
+        let empty = self.active_window;
+        self.new_window();
+        self.undock_window_room(win, event_loop, None);
+        self.undock_window_room(empty, event_loop, None);
+        let Some(a) = self.aux_windows.iter_mut().find(|a| a.room_window() == Some(win)) else {
+            eprintln!("[autostudent] FAIL — 방 {win} 별도창이 안 떴다(방 수={})", self.windows.len());
+            return;
+        };
+        a.pending_capture = Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+        eprintln!(
+            "[autostudent] 방 {win}(학생 {pid})·방 {empty}(빈 방, 음성대조군) 을 별도창으로"
+        );
+    }
+    /// `autostudent` 마지막 단계: 떠 있는 별도창마다 **학생 스프라이트가 정말
+    /// 그려졌는지** 판정한다. 캡처만 남기면 사람이 봐야 하고, 안 보면 오버레이
+    /// 패스가 다시 끊겨도 조용히 통과한다.
+    ///
+    /// 스캐너를 여기서 다시 돌리지 않는다 — `aux_student_slots` 를 하네스가 직접
+    /// 부르면 **자리가 있는지**만 알 뿐 렌더 패스가 그걸 부르는지는 못 본다.
+    /// 그게 정확히 #48 이었다(자리는 멀쩡했고 부르는 쪽이 없었다). 그래서 한 프레임
+    /// 실제로 그린 뒤 GPU 에 올라간 이미지 키를 센다.
+    /// 기대값은 "그 창이 학생 pane 을 담고 있나"로 정한다 — 스캐너를 다시 돌려
+    /// 정하면 판정이 검사 대상과 같은 코드를 믿는 셈이 된다.
+    fn autostudent_assert_aux(&mut self, pid: &str) {
+        if self.aux_windows.is_empty() {
+            return;
+        }
+        let home = self.window_of_pane(pid);
+        let who = { self.ws.lock().unwrap().pane_character.get(pid).cloned() };
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            let keys: Vec<&str> =
+                a.gpu.drawn_image_keys().filter(|k| k.starts_with("student:")).collect();
+            // 방창부터 봐야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
+            // 내주므로 터미널창을 먼저 물으면 방창이 그리로 빨려 들어간다.
+            let (what, want) = match (a.room_window(), a.term_pane_id()) {
+                (Some(w), _) => (format!("방창 {w}"), home == Some(w)),
+                (_, Some(p)) => (format!("터미널창 {p}"), p == pid),
+                _ => ("별도창".into(), false),
+            };
+            let got = !keys.is_empty();
+            eprintln!(
+                "[autostudent] {what} — 학생 스프라이트 {}개 {keys:?} 기대={} → {}",
+                keys.len(),
+                if want { "있음" } else { "없음(대조군)" },
+                match (want, got) {
+                    (true, true) | (false, false) => "PASS",
+                    (true, false) => "FAIL — 오버레이 패스를 안 탔다",
+                    (false, true) => "FAIL — 학생 없는 창에 스프라이트가 샜다",
+                }
+            );
+            // 프사와 별개로 **헤더에 학생 이름이 실렸는지**. 터미널 창은 싣고 방
+            // 창은 방 이름만 실어 갈리는데, 캡처를 눈으로 보지 않으면 그 차이가
+            // 안 드러난다(거노가 방 창에서 짚은 것).
+            if let Some(name) = who.as_deref().filter(|_| want) {
+                match a.gpu.drew_text(name) {
+                    Some(true) => eprintln!("[autostudent] {what} 헤더 학생이름 {name} → 있음"),
+                    Some(false) => eprintln!("[autostudent] {what} 헤더 학생이름 {name} → 없음"),
+                    None => eprintln!("[autostudent] {what} 헤더 이름 미측정(KASATERM_TEXT_LOG 를 켜라)"),
+                }
+            }
+        }
+    }
+    /// Headless **다른 방 pane 을 쪼개기** repro: `KASATERM_AUTOFOREIGNSPLIT_MS`.
+    ///
+    /// 소켓 split(`kasaterm-cli split`)이 거치는 길을 그대로 탄다 — `ws.active_pane`
+    /// 을 대상 pane 으로 갈아끼우고 `split_pane_auto`. 거노 실사고: 오케스트레이터가
+    /// 자기 자리를 쪼개려는데 거노가 다른 방을 보고 있어서 "pane %5 이 활성
+    /// window(1) 트리에 없다" 로 통째 실패했다. 스폰은 배경 작업이라 **거노가 어느
+    /// 방을 보고 있는지와 무관해야** 한다.
+    ///
+    /// `KASATERM_AUTOSTUDENT_ROOM` 이 방을 여럿 만들어 두므로 여기 오는 대상 pane 은
+    /// 비활성 window 에 있다 — 그게 이 하네스의 유일한 관문이다.
+    pub(crate) fn run_pending_autoforeignsplit(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFOREIGNSPLIT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // 활성이 **아닌** window 의 leaf 하나를 고른다 — 활성 window 를 쪼개는 건
+        // 옛 코드로도 통과해 회귀를 못 잡는다.
+        let Some((win, target)) = (0..self.windows.len())
+            .filter(|w| *w != self.active_window)
+            .find_map(|w| self.window_leaves(w).into_iter().next().map(|l| (w, l)))
+        else {
+            eprintln!(
+                "[autoforeignsplit] FAIL — 비활성 window 가 없다(window {}개). {AUX_STUDENT_HINT}",
+                self.windows.len()
+            );
+            return;
+        };
+        let before = self.window_leaves(win).len();
+        let prev = self.ws.lock().unwrap().active_pane.clone();
+        self.ws.lock().unwrap().active_pane = Some(target.clone());
+        let outcome = self.split_pane_auto(None);
+        // 소켓 split 은 기본 no-focus 라 부른 뒤 되돌린다(handler.rs SocketSplit).
+        if let Some(prev) = prev {
+            self.ws.lock().unwrap().active_pane = Some(prev);
+        }
+        let after = self.window_leaves(win).len();
+        match outcome {
+            Ok(new_id) => eprintln!(
+                "[autoforeignsplit] {}: window {win}(활성={}) {target} → {new_id}, leaf {before}→{after}",
+                if after == before + 1 { "PASS" } else { "FAIL(트리에 안 꽂힘)" },
+                win == self.active_window
+            ),
+            Err(e) => eprintln!("[autoforeignsplit] FAIL — split 거부: {e:#}"),
+        }
+    }
+    /// Headless 방 별도창 split repro: `KASATERM_AUTOROOMSPLIT_MS`(+`_DIR=v|h`,
+    /// `_CAP`). `KASATERM_AUTOSTUDENT_ROOM` 이 꺼내 둔 방 창을 쪼갠다.
+    ///
+    /// ⌘D 를 창에 실제로 넣고 싶었으나 **못 한다**: winit 의 `KeyEvent` 는 macOS 에서
+    /// 밖에서 만들 수 없다(`platform_specific` 가 private 이고 그 타입에 `Default` 도
+    /// 없다). 그래서 `split_room_pane` 을 직접 부른다 — **키 화음과 「방 창일 때만」
+    /// 게이트는 이 하네스가 못 본다**. 그 배선이 끊기면 여기선 여전히 PASS 다.
+    ///
+    /// 진짜 관문은 **비활성 window** 다. `split_room_pane` 은 활성이면
+    /// `pty_layout` 을, 아니면 `windows[w]` 슬롯을 쪼개는데 활성 경로는 메인 창
+    /// 코드로도 통과해 회귀를 못 잡는다. `autostudent_room` 이 방을 둘 꺼내고
+    /// 활성을 세 번째 방으로 밀어 두므로 여기 오는 방 창은 항상 비활성이다.
+    pub(crate) fn run_pending_autoroomsplit(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOROOMSPLIT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        // 2단계로 나누는 이유: split 이 낳은 셸이 뜨기 전에 PTY 생존을 물으면
+        // 아직 spawn 중이라 판정이 흔들린다.
+        if step > 1 || Instant::now() < *due + std::time::Duration::from_millis(1500 * step as u64)
+        {
+            return;
+        }
+        let Some(idx) = self.aux_windows.iter().position(|a| a.room_window().is_some()) else {
+            if step == 0 {
+                eprintln!(
+                    "[autoroomsplit] FAIL — 방 별도창이 없다(별도창 {}개). {}",
+                    self.aux_windows.len(),
+                    AUX_STUDENT_HINT
+                );
+            }
+            STEP.store(2, Ordering::Relaxed);
+            return;
+        };
+        let win = self.aux_windows[idx].room_window().unwrap();
+        if step == 0 {
+            STEP.store(1, Ordering::Relaxed);
+            let vertical = std::env::var("KASATERM_AUTOROOMSPLIT_DIR")
+                .map(|d| d.starts_with('v'))
+                .unwrap_or(false);
+            let before = self.window_leaves(win);
+            eprintln!(
+                // ⌘ 표기는 「이 키가 부르는 것과 같은 함수」라는 뜻이지 키를 넣었다는
+                // 뜻이 아니다 — 키 주입은 못 한다(위 doc 주석).
+                "[autoroomsplit] 방 {win}(활성={}) leaf {}개 → split_room_pane({}) 직접 호출(⌘{} 경로)",
+                win == self.active_window,
+                before.len(),
+                if vertical { "Vertical" } else { "Horizontal" },
+                if vertical { "E" } else { "D" }
+            );
+            let dir = if vertical {
+                kasa_pty::SplitDir::Vertical
+            } else {
+                kasa_pty::SplitDir::Horizontal
+            };
+            self.split_room_pane(idx, dir);
+            return;
+        }
+        STEP.store(2, Ordering::Relaxed);
+        let leaves = self.window_leaves(win);
+        let alive: Vec<&String> = leaves.iter().filter(|l| self.pty.contains_key(*l)).collect();
+        eprintln!(
+            "[autoroomsplit] 방 {win} leaf {}개 {leaves:?} PTY생존 {}개 → {}",
+            leaves.len(),
+            alive.len(),
+            if leaves.len() >= 2 && alive.len() == leaves.len() {
+                "PASS"
+            } else if leaves.len() < 2 {
+                "FAIL — 안 쪼개졌다"
+            } else {
+                "FAIL — 쪼개졌는데 PTY 가 죽었다"
+            }
+        );
+        if let Ok(path) = std::env::var("KASATERM_AUTOROOMSPLIT_CAP") {
+            if let Some(a) = self.aux_windows.get_mut(idx) {
+                a.pending_capture =
+                    Some((Instant::now() + std::time::Duration::from_millis(600), path));
+            }
+        }
+    }
+    /// Headless 별도창 **프사 마우스오버 확대** repro: `KASATERM_AUTOFACEHOVER_MS`
+    /// (+`_CAP`). `KASATERM_AUTOSTUDENT_ROOM` 이 꺼내 둔 창을 쓴다.
+    ///
+    /// 판정을 **키 이름으로 못 한다**: 팝업(`paint_face_popup`)이 작은 프사와 같은
+    /// `student:<slug>:profile` 을 크기만 키워 재사용한다. 헤더 이름도 못 쓴다 —
+    /// 별도창 헤더는 커서와 무관하게 늘 학생 이름을 싣는다. 그래서 **같은 키의
+    /// quad 가 하나 더, 훨씬 크게 붙었나**로 본다(팝업은 `FACE_POPUP_CELLS *
+    /// cell_h`). 배수를 줄여도 판정은 안 흔들린다 — 프사가 한 칸이라 배수가 곧
+    /// 배율이고, 아래 `* 2.0` 문턱은 6배(약 7.6배 확대)에도 한참 여유가 있다.
+    ///
+    /// 프사 자리는 렌더에서 **되읽는다**. `cell_left()`·`AUX_CELL_TOP` 은 auxwin
+    /// private 이라 하네스가 좌표를 다시 계산해야 하는데, 그 복제본이 틀리면
+    /// 커서가 엉뚱한 데 놓여 「팝업 안 뜸」으로 읽힌다 — 검사 대상이 아니라
+    /// 하네스가 틀린 건데 구분이 안 된다.
+    ///
+    /// 커서를 프사 **밖**에 둔 대조 프레임을 같은 실행에서 먼저 찍는다. 그게
+    /// 없으면 「팝업이 늘 떠 있는」 회귀를 PASS 로 넘긴다.
+    ///
+    /// 커서는 `cursor_px` 에 직접 꽂지 않고 **진짜 `WindowEvent::CursorMoved`** 를
+    /// `window_event` 에 넣어 옮긴다. 필드를 손으로 채우면 「그림은 맞는데 아무도
+    /// 안 부른다」(#48 계열)를 통째로 못 본다 — 실제로 여기서 하나 나왔다:
+    /// 방창의 CursorMoved arm 은 **헤더 띠(36px)에서만** 재렌더를 걸고 프사는
+    /// 그보다 아래라, 이벤트는 `cursor_px` 를 갱신하되 프레임을 요청하지 않는다.
+    /// 그래서 팝업 판정과 **재렌더 요청 여부**를 갈라 찍는다.
+    pub(crate) fn run_pending_autofacehover(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFACEHOVER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if DONE.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        DONE.store(true, Ordering::Relaxed);
+        // 프사를 실제로 그리는 창을 찾는다. 어느 창이 학생을 담았는지 트리를
+        // 뒤져 고르면 그 계산이 곧 검사 대상과 같은 코드가 된다.
+        let mut target = None;
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            if let Some(k) = a.gpu.drawn_image_keys().find(|k| k.ends_with(":profile")) {
+                target = Some((idx, k.to_string()));
+                break;
+            }
+        }
+        let Some((idx, key)) = target else {
+            eprintln!(
+                "[autofacehover] FAIL — 프사를 그리는 별도창이 없다(별도창 {}개). {}",
+                self.aux_windows.len(),
+                AUX_STUDENT_HINT
+            );
+            return;
+        };
+        // 대조점을 프사 기준으로 잡으려면 자리를 먼저 알아야 한다. 이 프레임엔
+        // 팝업이 섞여 있을 수 있으니(커서가 이미 프사 위였을 수 있다) **가장 작은**
+        // quad 를 작은 프사로 본다 — 팝업은 정의상 훨씬 크다.
+        let Some(seed) = self.aux_windows[idx]
+            .gpu
+            .drawn_image_rects(&key)
+            .into_iter()
+            .min_by(|a, b| a.3.total_cmp(&b.3))
+        else {
+            eprintln!("[autofacehover] FAIL — 키는 있는데 quad 가 없다");
+            return;
+        };
+        let wid = self.aux_windows[idx].window.id();
+        let scale = self.aux_windows[idx].gpu.scale() as f64;
+        // 창 id 로 `window_event` 에 넣는다 — handler.rs 가 id 로 별도창을 갈라
+        // `aux_window_event` → kind 별 arm 으로 보내는 그 라우팅까지 같이 탄다.
+        // 좌표는 winit 규약대로 **물리 px**. 논리로 넣으면 고DPI 에서 커서가
+        // 프사 왼쪽 위로 어긋나 「팝업 안 뜸」이 된다.
+        let hover = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        // 대조 프레임: 프사 바로 아래, 셀 그리드 한복판. **창 밖 음수 좌표를 쓰면
+        // 안 된다** — 재렌더 게이트가 `was_header = cursor_px.1 <= 36` 이라 음수 y 가
+        // 「방금 헤더에 있었다」로 읽혀, 뒤이은 이동이 무조건 재렌더를 건 것처럼
+        // 보인다(실측으로 이 하네스가 한 번 거짓 PASS 를 냈다).
+        let (cold_x, cold_y) = (seed.0 + seed.2 / 2.0, seed.1 + seed.3 + 140.0);
+        hover(self, cold_x, cold_y);
+        self.aux_render(idx);
+        let cold = self.aux_windows[idx].gpu.drawn_image_rects(&key);
+        let Some(&(fx, fy, fw, fh)) = cold.first() else {
+            eprintln!("[autofacehover] FAIL — 대조 프레임에 프사가 아예 없다");
+            return;
+        };
+        let cold_max = cold.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        // 대조: 프사 **밖 → 밖**. 여기서도 재렌더가 걸리면 게이트가 「늘 그린다」로
+        // 풀린 것이고, 그러면 아래 PASS 는 경계 판정을 증명하지 못한다(그냥 매
+        // 픽셀 재렌더라도 통과하니까). 셀 위 이동은 조용해야 맞다.
+        self.aux_windows[idx].dirty = false;
+        hover(self, cold_x + 60.0, cold_y + 60.0);
+        let idle_redraw = self.aux_windows[idx].dirty;
+        // `aux_render` 가 방금 내렸으니, 여기서 다시 서면 그건 이 이벤트가 세운 것.
+        self.aux_windows[idx].dirty = false;
+        hover(self, fx + fw / 2.0, fy + fh / 2.0);
+        let asked_redraw = self.aux_windows[idx].dirty;
+        let landed = self.aux_windows[idx].cursor_px;
+        if let Ok(path) = std::env::var("KASATERM_AUTOFACEHOVER_CAP") {
+            self.aux_windows[idx].gpu.capture_next = Some(path);
+        }
+        self.aux_render(idx);
+        let hot = self.aux_windows[idx].gpu.drawn_image_rects(&key);
+        let hot_max = hot.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        // 나가는 쪽도 재야 한다 — 들어올 때만 그리면 팝업이 뜬 채로 굳는다.
+        self.aux_windows[idx].dirty = false;
+        hover(self, cold_x, cold_y);
+        let leave_redraw = self.aux_windows[idx].dirty;
+        let a = &self.aux_windows[idx];
+        // 방창을 먼저 물어야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
+        // 내주므로 순서를 바꾸면 방창이 터미널창으로 찍힌다.
+        let what = match (a.room_window(), a.term_pane_id()) {
+            (Some(w), _) => format!("방창 {w}"),
+            (_, Some(p)) => format!("터미널창 {p}"),
+            _ => "별도창".into(),
+        };
+        eprintln!(
+            "[autofacehover] {what} 프사 {key} rect=({fx:.0},{fy:.0},{fw:.0}x{fh:.0})"
+        );
+        // 이벤트가 정말 필드까지 닿았나. 여기가 어긋나면 아래 판정은 팝업이 아니라
+        // 주입 실패를 재는 것이 된다(고DPI 스케일 실수가 대표적).
+        let reached = (landed.0 - (fx + fw / 2.0)).abs() < 1.0
+            && (landed.1 - (fy + fh / 2.0)).abs() < 1.0;
+        eprintln!(
+            "[autofacehover] CursorMoved → cursor_px=({:.0},{:.0}) {}",
+            landed.0,
+            landed.1,
+            if reached { "도달" } else { "FAIL — 이벤트가 좌표를 못 옮겼다" }
+        );
+        // 「하나 더」와 「더 크다」를 같이 본다. 개수만 보면 같은 크기 프사가 둘
+        // 그려지는 회귀를 팝업으로 읽고, 크기만 보면 작은 프사가 통째로 커진
+        // 회귀를 팝업으로 읽는다.
+        let grew = hot.len() > cold.len() && hot_max > cold_max * 2.0;
+        eprintln!(
+            "[autofacehover] 커서 밖: quad {}개(최대 {cold_max:.0}px) / 프사 위: {}개(최대 {hot_max:.0}px) → {}",
+            cold.len(),
+            hot.len(),
+            if grew {
+                "PASS"
+            } else if hot.len() == cold.len() {
+                "FAIL — 팝업이 안 떴다"
+            } else {
+                "FAIL — quad 는 늘었는데 확대가 아니다"
+            }
+        );
+        // 위 PASS 는 「강제로 그리면 팝업이 있다」까지다. 실제 화면에 뜨려면 그
+        // 프레임을 **누가 요청**해야 하는데, 그건 별개다 — 이 줄이 그 칸이다.
+        // 방창은 PTY wake 재렌더 목록에서도 빠져 있어(handler.rs `about_to_wait`:
+        // focused 이거나 Terminal 종류만) 요청이 없으면 정말로 안 뜬다.
+        eprintln!(
+            "[autofacehover] 재렌더 요청: 밖→밖 {} / 밖→프사 {} / 프사→밖 {} → {}",
+            if idle_redraw { "함" } else { "안 함" },
+            if asked_redraw { "함" } else { "안 함" },
+            if leave_redraw { "함" } else { "안 함" },
+            match (idle_redraw, asked_redraw, leave_redraw) {
+                (false, true, true) => "PASS — 경계에서만 그린다",
+                (true, ..) => "FAIL — 셀 위 아무 이동에도 그린다(게이트가 풀렸다)",
+                (_, false, _) => "FAIL — 그림은 맞는데 프레임을 아무도 안 부른다(#48 계열)",
+                _ => "FAIL — 들어올 때만 그린다(팝업이 뜬 채로 굳는다)",
+            }
+        );
+    }
+    /// Headless 별도창 **트리 버튼 클릭** repro: `KASATERM_AUTOTREECLICK_MS`.
+    /// `KASATERM_AUTOAUXTREE_MS` 가 `toggle_aux_tree` 를 직접 부르는 것과 달리,
+    /// 여기는 헤더 버튼을 **눌러서** 연다 — `CursorMoved` + `MouseInput` 을
+    /// `window_event` 에 넣어 id 라우팅 → `aux_header_click` → 히트 판정까지 태운다.
+    /// 함수가 맞아도 버튼 rect 이 어긋나거나 클릭이 pane 포커스로 새면 트리는
+    /// 영영 안 열리는데, 직접 호출 하네스는 그걸 통째로 못 본다.
+    ///
+    /// 버튼 자리는 렌더가 적어 둔 `header_btns` 에서 되읽는다(좌표 복제 금지 규약).
+    /// 대조로 **버튼 아닌 헤더 지점**을 같은 실행에서 먼저 눌러 본다 — 그게 없으면
+    /// 「헤더 아무 데나 누르면 열리는」 회귀를 PASS 로 넘긴다.
+    pub(crate) fn run_pending_autotreeclick(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTREECLICK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if DONE.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        DONE.store(true, Ordering::Relaxed);
+        // 버튼은 렌더가 채우므로 먼저 한 프레임 그린다.
+        let mut found = None;
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            if let Some(&(_, r)) = a
+                .header_btns
+                .iter()
+                .find(|(k, _)| matches!(k, crate::auxwin::AuxHeaderBtn::FileTree))
+            {
+                found = Some((idx, r));
+                break;
+            }
+        }
+        let Some((idx, (bx, by, bw, bh))) = found else {
+            eprintln!("[autotreeclick] FAIL — 트리 버튼을 그리는 별도창이 없다(AUTOUNDOCK 을 앞에 둬라)");
+            return;
+        };
+        let wid = self.aux_windows[idx].window.id();
+        let scale = self.aux_windows[idx].gpu.scale() as f64;
+        let click = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(),
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                },
+            );
+        };
+        let before = self.aux_windows[idx].tree_open;
+        // 대조: 같은 헤더 높이의 빈 자리. 어느 버튼 rect 에도 안 걸리는 x 를 실제
+        // 목록에서 골라야 한다 — 「왼쪽 끝은 비었겠지」는 배치가 바뀌면 틀린다.
+        let cy = by + bh / 2.0;
+        let btns = self.aux_windows[idx].header_btns.clone();
+        let empty_x = (2..400)
+            .map(|i| i as f32)
+            .find(|&x| !btns.iter().any(|(_, (rx, _, rw, _))| x >= *rx && x <= rx + rw));
+        match empty_x {
+            Some(x) => {
+                click(self, x, cy);
+                let flipped = self.aux_windows[idx].tree_open != before;
+                eprintln!(
+                    "[autotreeclick] 대조: 헤더 빈자리({x:.0},{cy:.0}) 클릭 → tree_open {} {}",
+                    if flipped { "바뀜" } else { "그대로" },
+                    if flipped { "FAIL — 버튼 밖인데 열린다" } else { "PASS" }
+                );
+            }
+            None => eprintln!("[autotreeclick] 대조 생략 — 헤더에 빈 x 가 없다"),
+        }
+        click(self, bx + bw / 2.0, cy);
+        let after = self.aux_windows[idx].tree_open;
+        self.aux_render(idx);
+        let rows = self.aux_windows[idx].tree_rows.len();
+        eprintln!(
+            "[autotreeclick] 버튼({:.0},{cy:.0}) 클릭 → tree_open {before}→{after}, 트리 행 {rows}개 → {}",
+            bx + bw / 2.0,
+            if after != before && rows > 0 {
+                "PASS"
+            } else if after == before {
+                "FAIL — 클릭이 버튼에 안 닿았다"
+            } else {
+                "FAIL — 열리긴 했는데 판이 비었다"
+            }
+        );
+    }
+    /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
+    /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
+    /// 「창 밖」이 아니라 「사이드바 패널 밖 + 40px」이다. 거노가 "드래그 뗄 때
+    /// 분리된다"고 한 게 이쪽이라 따로 잰다.
+    pub(crate) fn run_pending_autotearroom(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTEARROOM_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 2 || Instant::now() < *due + std::time::Duration::from_millis(900 * step as u64)
+        {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let scale = self.effective_scale() as f64;
+        let moved = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        match step {
+            // 방 탭을 잡고(press) 패널 밖으로 끌어낸다. 잡는 자리는 렌더가 적어 둔
+            // 실제 탭 rect — 좌표를 손으로 지어내면 press 가 엉뚱한 데 떨어진다.
+            0 => {
+                STEP.store(1, Ordering::Relaxed);
+                let Some(&(_, r)) = self.window_tab_rects.first() else {
+                    eprintln!("[autotearroom] FAIL — 방 탭 rect 이 없다(사이드바를 켜라)");
+                    STEP.store(3, Ordering::Relaxed);
+                    return;
+                };
+                self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                    },
+                );
+                // 패널 밖 + 여유. 여기서 이미 떨어져야 한다(놓기 전).
+                moved(self, self.effective_sidebar_w() + 160.0, r.1 + 40.0);
+                let torn = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                eprintln!(
+                    "[autotearroom] 1) drag={} 놓기전뜯김={torn}",
+                    self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false),
+                );
+            }
+            // 더 옮긴다 — 창이 따라오는지.
+            1 => {
+                STEP.store(2, Ordering::Relaxed);
+                moved(self, self.effective_sidebar_w() + 320.0, 260.0);
+            }
+            _ => {
+                STEP.store(3, Ordering::Relaxed);
+                let torn_before = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    },
+                );
+                let torn_after = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                eprintln!(
+                    "[autotearroom] 2) 놓기직전뜯김={torn_before} 3) 놓은뒤뜯김={torn_after}"
+                );
+                eprintln!(
+                    "[autotearroom] {}",
+                    if torn_before { "PASS" } else { "FAIL — 놓아야만 떨어진다" }
+                );
+            }
+        }
+    }
+    /// Headless 별도창 파일트리 repro: `KASATERM_AUTOAUXTREE_MS` 뒤에 첫 aux 창의
+    /// 트리 패널을 연다(헤더 버튼 클릭은 그 창 좌표라 헤드리스 주입이 번거롭다).
+    /// `KASATERM_AUTOUNDOCK_MS` 로 창을 먼저 띄워 두고 쓴다.
+    ///
+    /// 트리를 여는 것만으론 반쪽이다 — 진짜 확인할 것은 **셀이 트리만큼 밀렸는가**라,
+    /// 열기 전후 cols 를 같이 찍는다. 원점만 밀고 cols 를 안 줄이면 오른쪽이 창 밖으로
+    /// 나가는데, 그건 스크린샷에서 "글자가 좀 잘렸네"로 흘려보내기 쉽다.
+    pub(crate) fn run_pending_autoauxtree(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOAUXTREE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if self.aux_windows.is_empty() {
+            eprintln!("[autoauxtree] FAIL — 별도창이 없다(KASATERM_AUTOUNDOCK_MS 를 앞에 둬라)");
+            return;
+        }
+        let cols_before = self
+            .aux_windows
+            .first()
+            .and_then(|a| a.term_pane_id())
+            .and_then(|p| self.pty.get(p))
+            .map(|p| p.size().0);
+        self.toggle_aux_tree(0);
+        // 한 프레임 그려야 `tree_rows` 가 찬다 — 안 그리고 세면 항상 0 이라 "행이
+        // 그려졌나"를 묻는 척만 하게 된다.
+        self.aux_render(0);
+        let (open, rows) = self
+            .aux_windows
+            .first()
+            .map(|a| (a.tree_open, a.tree_rows.len()))
+            .unwrap_or((false, 0));
+        let cols_after = self
+            .aux_windows
+            .first()
+            .and_then(|a| a.term_pane_id())
+            .and_then(|p| self.pty.get(p))
+            .map(|p| p.size().0);
+        eprintln!(
+            "[autoauxtree] 열림={open} 트리노드={} 그린줄={rows} cols {cols_before:?}→{cols_after:?}",
+            self.file_tree.nodes.len()
+        );
+        let narrowed = matches!((cols_before, cols_after), (Some(b), Some(a)) if a < b);
+        eprintln!(
+            "[autoauxtree] {}",
+            if open && rows > 0 && narrowed { "PASS" } else { "FAIL" }
+        );
+        self.autoauxtree_probe_bg();
+        if let Ok(cap) = std::env::var("KASATERM_AUTOAUXTREE_CAP") {
+            if let Some(a) = self.aux_windows.first_mut() {
+                a.pending_capture =
+                    Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+            }
+        }
+    }
+    /// 트리 패널이 **정말 `panel_bg()` 로 칠해졌나** — 실제 프레임 픽셀 한 점.
+    ///
+    /// 거노가 "파일트리 배경이 검정이야"라고 한 자리다. 그리기 목록을 뒤져
+    /// "`rect(panel_bg)` 를 부르긴 했다"로 판정하면 그 위에 뭔가 덮어 그려도
+    /// 통과한다 — 합성된 결과를 봐야 그 구분이 선다. 그래서 캡처 PNG 를 도로
+    /// 읽는다(readback 이 `aux_render` 안에서 동기로 끝나 그 자리에서 열린다).
+    ///
+    /// 표본 자리는 `tree_rows`(그린 행의 히트 rect)에서 되읽는다 — `AUX_TREE_W`·
+    /// `AUX_HEADER_H` 는 auxwin private 이고, 여기서 다시 계산하면 그 복제본이
+    /// 틀렸을 때 "패널이 검다"로 잘못 읽힌다. x 는 행 내용이 시작하는 6px 보다
+    /// 왼쪽(3px)이라 어느 행 위에서도 순수 배경이다.
+    ///
+    /// 패널 **밖**(트리 오른쪽 셀 영역) 한 점을 같은 프레임에서 같이 잰다. 거긴
+    /// `bg()` 라 `panel_bg()` 와 달라야 한다 — 그게 안 갈리면 허용오차가 두 색을
+    /// 삼킨 것이고, 그러면 패널 쪽 PASS 도 의미가 없다.
+    fn autoauxtree_probe_bg(&mut self) {
+        let Some(a) = self.aux_windows.first_mut() else { return };
+        let Some(&(_, _, (_, row_y, row_w, row_h))) = a.tree_rows.first() else {
+            eprintln!("[autoauxtree] 배경 미측정 — 그린 행이 없어 표본 자리를 못 잡는다");
+            return;
+        };
+        // 커서가 행 위에 있으면 hover 하이라이트(`surface_hover`)가 표본을 덮는다.
+        let saved = a.cursor_px;
+        a.cursor_px = (-1000.0, -1000.0);
+        let scale = a.gpu.scale();
+        let path = std::env::temp_dir().join("kasaterm-treeprobe.png");
+        let Some(path) = path.to_str().map(str::to_string) else { return };
+        a.gpu.capture_next = Some(path.clone());
+        self.aux_render(0);
+        if let Some(a) = self.aux_windows.first_mut() {
+            a.cursor_px = saved;
+        }
+        let img = match image::open(&path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("[autoauxtree] 배경 미측정 — 캡처를 못 읽었다: {e}");
+                return;
+            }
+        };
+        let y = ((row_y + row_h / 2.0) * scale) as u32;
+        let at = |x: f32| img.get_pixel_checked((x * scale) as u32, y).map(|p| p.0);
+        let (Some(inside), Some(outside)) = (at(3.0), at(row_w + 20.0)) else {
+            eprintln!("[autoauxtree] 배경 미측정 — 표본 자리가 캡처 밖이다");
+            return;
+        };
+        // 캡처는 sRGB 서피스를 도로 읽은 값이라 원본과 1 LSB 어긋난다. 딱 그만큼만
+        // 봐준다 — `panel_bg` 는 `lerp(bg, surface_hover, 0.5)` 라 `bg` 와 채널당
+        // 5~8 밖에 안 떨어져, 넉넉히 잡으면 판정이 두 색을 한 색으로 삼킨다(실측:
+        // 6 이면 R·G 가 통과하고 B 하나로 겨우 갈렸다).
+        let near = |a: [u8; 4], b: [u8; 4]| (0..3).all(|i| a[i].abs_diff(b[i]) <= 2);
+        let want = crate::theme::panel_bg();
+        let black = [0u8, 0, 0, 0xFF];
+        eprintln!(
+            "[autoauxtree] 패널 배경 rgba={inside:?} 기대 panel_bg={want:?} → {}",
+            if near(inside, want) {
+                "PASS"
+            } else if near(inside, black) {
+                "FAIL — 검정이다(거노가 신고한 그 상태)"
+            } else {
+                "FAIL — panel_bg 가 아닌 다른 색이 덮었다"
+            }
+        );
+        eprintln!(
+            "[autoauxtree] 대조점(패널 밖) rgba={outside:?} → {}",
+            if near(outside, want) {
+                "FAIL — 패널 안팎이 같은 색으로 읽힌다(판정이 색을 못 가른다)"
+            } else {
+                "PASS — 판정이 색을 가른다"
+            }
+        );
+    }
+    /// `KASATERM_AUTOUNREAD="%2"` — 그 pane 을 "끝났는데 아직 안 본" 상태로 세운다.
+    /// 방 단위인 `KASATERM_AUTOALERT` 의 pane 판 — 완료 숨쉬기가 방 전체가 아니라
+    /// **그 세션 줄** 에만 걸리는지 보려면 둘을 따로 세울 수 있어야 한다.
+    ///
+    /// autowait 과 같은 이유로 매 틱 다시 넣는다: `sync_dock_badge` 가 활성 pane 을
+    /// 지우고 지나가므로 한 번 세워 두면 캡처 전에 사라질 수 있다.
+    pub(crate) fn apply_autounread(&mut self) {
+        use std::sync::OnceLock;
+        static IDS: OnceLock<Vec<String>> = OnceLock::new();
+        let ids = IDS.get_or_init(|| {
+            std::env::var("KASATERM_AUTOUNREAD")
+                .map(|v| {
+                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                })
+                .unwrap_or_default()
+        });
+        for id in ids {
+            self.unread_panes.insert(id.clone());
+        }
+    }
+    pub(crate) fn arm_autoexpand(&mut self) {
+        let Ok(v) = std::env::var("KASATERM_AUTOEXPAND") else { return };
+        for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
+            self.expanded_windows.insert(i);
+        }
+        eprintln!("[autoexpand] {:?}", self.expanded_windows);
     }
     pub(crate) fn arm_autotoggle(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOTOGGLE_SIDEBAR_MS") else { return };

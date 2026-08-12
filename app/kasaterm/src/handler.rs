@@ -52,22 +52,147 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketSplit(dir, focus, reply) => {
+            UserEvent::SocketNewWindow => self.new_window(),
+            UserEvent::SocketNewTab(from, reply) => {
+                let outer = from
+                    .clone()
+                    .or_else(|| self.ws.lock().unwrap().active_pane.clone());
+                let outcome = match outer {
+                    // split 과 같은 규칙: 지정한 pane 이 없으면 **거절한다**. 조용히
+                    // 포커스로 떨어지면 엉뚱한 창에 탭이 생기고도 성공으로 답한다.
+                    Some(o) if self.window_of_pane(&o).is_none() => {
+                        Err(format!("탭을 열 pane {o} 이 없다"))
+                    }
+                    Some(o) => self.spawn_new_tab(&o).map_err(|e| format!("{e:#}")),
+                    None => Err("활성 pane 이 없다".to_string()),
+                };
+                let _ = reply.send(outcome);
+            }
+            UserEvent::SocketMovePane(moving, target, zone, reply) => {
+                let outcome = if self.window_of_pane(moving).is_none() {
+                    Err(format!("옮길 pane {moving} 이 없다"))
+                } else if self.window_of_pane(target).is_none() {
+                    Err(format!("놓을 자리 {target} 이 없다"))
+                } else if moving == target {
+                    Err("자기 자신 옆으로는 못 옮긴다".to_string())
+                } else {
+                    self.move_pane(moving, target, *zone);
+                    // `move_pane` 은 성공/실패를 안 돌려준다(드래그 경로라 실패해도
+                    // 화면이 그대로면 사용자가 안다). 소켓은 그럴 수 없으니 **옮겨진
+                    // 자리로 판정한다** — 대상과 같은 창에 있으면 붙은 것이다.
+                    match self.window_of_pane(moving) {
+                        Some(w) if Some(w) == self.window_of_pane(target) => Ok(moving.clone()),
+                        _ => Err(format!(
+                            "{moving} 이 {target} 옆으로 안 붙었다 — 트리에서 떨어졌는지 확인해라"
+                        )),
+                    }
+                };
+                let _ = reply.send(outcome);
+            }
+            UserEvent::SocketClosedPanes(discard, reply) => {
+                // 지목이 있으면 **먼저** 끈다 — 그 뒤 남은 목록을 실어 보내므로 호출자는
+                // 한 왕복으로 "무엇을 껐고 무엇이 남았는지"를 같이 받는다.
+                let mut killed = serde_json::Value::Null;
+                if let Some(want) = discard {
+                    match self.closed_panes.iter().position(|c| &c.pane_id == want) {
+                        Some(i) => {
+                            let c = &self.closed_panes[i];
+                            killed = serde_json::json!({
+                                "pane": c.pane_id, "character": c.character,
+                                "folder": c.folder, "was_alive": c.alive,
+                            });
+                            self.discard_closed_pane_at(i);
+                        }
+                        None => {
+                            let _ = reply.send(Err(format!(
+                                "되살리기 목록에 {want} 이 없다 — 이미 끄거나 되살렸다"
+                            )));
+                            return;
+                        }
+                    }
+                }
+                let list: Vec<serde_json::Value> = self
+                    .closed_panes
+                    .iter()
+                    .rev() // 최근에 닫은 것이 위 — Info 패널·⌘⇧T 와 같은 순서
+                    .map(|c| {
+                        serde_json::json!({
+                            "pane": c.pane_id,
+                            "character": c.character,
+                            "folder": c.folder,
+                            // 살아 있는 항목이 진짜 비용이다 — 셸·claude 를 그대로 물고 있다.
+                            "alive": c.alive,
+                            "window": c.window,
+                        })
+                    })
+                    .collect();
+                let _ = reply.send(Ok(serde_json::json!({
+                    "closed": list, "killed": killed, "keep": crate::CLOSED_PANE_KEEP,
+                })));
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketSplit(dir, focus, from, reply) => {
                 // `split_active_pane` always sets the new pane active (correct
                 // for the GUI's keyboard split). The socket path defaults to
                 // no-focus so a scripted split doesn't yank the user's focus
                 // (like `tell`) — restore the prior active pane unless the
                 // caller opted in with `--focus`.
                 let prev = self.ws.lock().unwrap().active_pane.clone();
-                let new_id = self.split_active_pane(*dir).unwrap_or_default();
+                // 부른 쪽이 pane 을 지정했으면 그 pane 을 쪼갠다. split_active_pane 이
+                // active_pane 하나만 보고 cwd·방·트리 위치를 전부 거기서 가져오므로,
+                // 잠깐 갈아끼웠다 아래에서 되돌리는 것으로 충분하다. 없는 pane 이면
+                // 무시하고 포커스 기준으로 — 죽은 id 로 갈아끼우면 split 이 통째로
+                // 실패한다.
+                // 지정한 pane 이 없으면 **거절한다**. 예전엔 조용히 포커스 기준으로
+                // 떨어졌는데, 그러면 「%999 를 쪼개 달라」가 엉뚱한 창을 쪼개고도
+                // 성공으로 답한다 — 부른 쪽은 자기 대상이 무시된 걸 모른다.
+                // 존재 판정은 `ws.panes` 가 아니라 **레이아웃 트리**로 한다:
+                // split 직후 새 pane 은 `ws.panes` 에 PaneState 가 아직 없어서,
+                // 방금 만든 pane 을 다음 대상으로 넘기는 연속 split(`--count`)이
+                // 「없는 pane」으로 거절당한다. 트리는 `split_leaf` 가 동기로 갱신한다.
+                let missing = from.as_ref().and_then(|f| {
+                    self.window_of_pane(f).is_none().then(|| f.clone())
+                });
+                let outcome = if let Some(f) = missing {
+                    Err(format!("쪼갤 pane {f} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"))
+                } else {
+                    if let Some(from) = from {
+                        self.ws.lock().unwrap().active_pane = Some(from.clone());
+                    }
+                    self.split_pane_auto(*dir).map_err(|e| format!("{e:#}"))
+                };
                 if !*focus {
                     if let Some(prev) = prev {
                         self.ws.lock().unwrap().active_pane = Some(prev);
                     }
                 }
-                let _ = reply.send(new_id);
+                if let Err(ref why) = outcome {
+                    eprintln!("[kasaterm] socket split 실패: {why}");
+                }
+                let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
+                return;
+            }
+            UserEvent::NotifyFocus { pane, sid } => {
+                // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
+                // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
+                // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.
+                let same = match sid.as_deref() {
+                    Some(s) => self.pane_claude_sid.get(pane).is_some_and(|c| c == s),
+                    // 세션을 못 실은 알림(순정 셸 pane)은 존재 확인까지만.
+                    None => self.ws.lock().unwrap().panes.contains_key(pane),
+                };
+                if !same {
+                    return;
+                }
+                // 배너를 눌렀는데 창이 뒤에 남아 있으면 누른 뜻이 없다. 방 전환은
+                // `SocketFocus` 가 하므로 여기서는 창만 앞으로 올리고 넘긴다.
+                if let Some(w) = self.window.as_ref() {
+                    w.focus_window();
+                }
+                let _ = self.proxy.send_event(UserEvent::SocketFocus(pane.clone()));
                 return;
             }
             UserEvent::SocketFocus(id) => {
@@ -262,7 +387,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::ResumeSession { id, cwd, newroom, attach } => {
+            UserEvent::ResumeSession { id, cwd, newroom, attach, harness } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
@@ -354,15 +479,17 @@ impl ApplicationHandler<UserEvent> for App {
                         let cmd = if *attach {
                             // daemon background 세션 연결(claude attach) — 세션은 background
                             // 유지, detach 해도 안 죽음. id 로 daemon 직접이라 cwd 불필요.
+                            // claude 의 daemon 개념이라 harness 와 무관하게 claude 다.
                             format!("claude attach {id}\r")
                         } else {
-                            match cwd {
-                                Some(c) if !c.is_empty() => {
-                                    let q = c.replace('\'', "'\\''");
-                                    format!("cd '{q}' && claude --resume {id}\r")
-                                }
-                                _ => format!("claude --resume {id}\r"),
-                            }
+                            // 하네스별 조립은 sessions::resume_command 한 곳에만 둔다 —
+                            // 예전에 CLI 와 GUI 가 각자 만들다 한쪽만 고쳐진 적이 있다.
+                            let line = kasa_socket::sessions::resume_command(
+                                harness,
+                                id,
+                                cwd.as_deref().unwrap_or(""),
+                            );
+                            format!("{line}\r")
                         };
                         let at = std::time::Instant::now()
                             + std::time::Duration::from_millis(900);
@@ -402,6 +529,14 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SocketClose(id) => {
                 self.close_pane(id);
                 self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketCapture(pane, path, max_w, reply) => {
+                self.arm_pane_capture(pane, path.clone(), *max_w, reply.clone());
+                // 무장만으로는 부족하다 — 여기서 한 프레임을 직접 그려야 리드백이
+                // 돌고 회신이 나간다. request_redraw 만 걸면 창이 가려져 있을 때
+                // OS 가 그 그리기를 미뤄, 부른 쪽이 타임아웃까지 매달린다.
                 self.render_frame();
                 return;
             }
@@ -506,14 +641,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(until) = *cooldown_until {
                     socket::write_account_cooldown(&self.set_claude_account, until);
                 }
+                // 어느 계정으로 갈아탔는지가 이 토스트의 전부다 — 이름을 안 붙인
+                // 슬롯이면 이메일로 부른다("계정 3 으로 전환" 은 아무 말도 아니다).
                 let label = |id: &str| -> String {
-                    if id.is_empty() {
-                        "기본 계정".to_string()
-                    } else {
-                        self.set_claude_accounts
-                            .iter()
-                            .find(|a| a.id == id)
-                            .map_or_else(|| id.to_string(), |a| a.label.clone())
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본 계정"),
                     }
                 };
                 let (from_label, to_label) = (label(&self.set_claude_account), label(to));
@@ -625,6 +762,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Ask for desktop-notification permission up front so the prompt
         // appears at launch rather than mid-work on the first completion.
         crate::chrome::ensure_notification_authorization();
+        // 배너 클릭을 받을 delegate. **알림이 배달되기 전에** 걸려야 한다 — delegate 가
+        // 없는 동안 눌린 알림은 앱만 깨우고 어디로 갈지 없이 사라진다.
+        #[cfg(target_os = "macos")]
+        crate::macos_notify::install_notification_click_handler(self.proxy.clone());
         // Windows 자동 업데이트 시작 — WinSparkle.dll 이 있을 때만(없으면 no-op).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
@@ -700,8 +841,17 @@ impl ApplicationHandler<UserEvent> for App {
             Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
         ));
         // Restore the last window size; fall back to the default on first run.
-        let (init_w, init_h) =
-            crate::socket::read_window_size().unwrap_or((1100.0, 860.0));
+        // `KASATERM_WINDOW_SIZE="w,h"` — 저장된 크기를 무시한다. 폭에 딸린 버그
+        // (학생 테마가 좁은 pane 에서 안 붙는 것 같은)는 **그 폭으로 띄워야만** 재현되는데,
+        // 검증 인스턴스는 저장된 크기를 물려받아 늘 넓게 떴다. `KASATERM_WINDOW_POS` 와 같은
+        // 목적·같은 형식.
+        let forced_size = std::env::var("KASATERM_WINDOW_SIZE").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+        });
+        let (init_w, init_h) = forced_size
+            .or_else(crate::socket::read_window_size)
+            .unwrap_or((1100.0, 860.0));
         // 저장된 자리가 아직 살아 있는 화면이면 **창을 만들 때부터** 그 자리에
         // 띄운다. 만든 뒤에 옮기면 세 가지를 잃는다: ① 저장된 크기가 만들어진
         // 화면에 맞춰 깎이고(큰 모니터용 3840 이 내장에서 1512 로 잘렸다) ②
@@ -731,10 +881,20 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(LogicalSize::new(init_w, init_h))
             // 배경 실행(검증 캡처)일 땐 뜨면서 키 포커스를 가져가지 않는다.
             .with_active(!crate::background_launch());
-        let attrs = match restore_pos {
+        // `KASATERM_WINDOW_POS="x,y"` — 저장된 위치를 무시하고 거기 띄운다. 헤드리스
+        // 검증용이다: 그냥 두면 테스트 인스턴스가 **저장된 자리**(=쓰던 모니터의
+        // 그 자리)에 떠서 작업 화면을 덮는다. `KASATERM_NO_FOCUS` 가 키 포커스는
+        // 막아 주지만 가리는 것까지는 못 막는다(거노: "포커스 안 뺏어가게 맥북에
+        // 띄워서 해봐"). 기본 디스플레이 좌표가 (0,0) 이라 `100,100` 이면 맥북 화면이다.
+        let forced_pos = std::env::var("KASATERM_WINDOW_POS").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+        });
+        let attrs = match forced_pos.or(restore_pos) {
             Some((px, py)) => attrs.with_position(winit::dpi::PhysicalPosition::new(px, py)),
             None => attrs,
         };
+        let restore_pos = forced_pos.or(restore_pos);
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
         // native buttons. OS still owns the traffic lights themselves
@@ -755,9 +915,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(windows)]
         let attrs = attrs.with_decorations(false);
         let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("create window"),
+            crate::auxwin::create_untabbed(event_loop, attrs).expect("create window"),
         );
         // `with_position` 을 무시하는 플랫폼(일부 Wayland 컴포지터)을 위한 폴백.
         // 이미 그 자리에 떴으면 no-op 이라 mac/Windows 에선 값이 없다.
@@ -813,9 +971,7 @@ impl ApplicationHandler<UserEvent> for App {
                     crate::render::STUDENT_ANIM_FRAME_MS,
                 ));
                 let animating = crate::render::STUDENT_SPRITE_ANIMATING
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    || crate::render::TITLE_TYPE_ANIMATING
-                        .load(std::sync::atomic::Ordering::Relaxed);
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if animating && anim_proxy.send_event(UserEvent::Redraw).is_err() {
                     break;
                 }
@@ -890,23 +1046,41 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // claude 5시간 사용량 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 60초마다
-        // 조회해 5시간 창 사용률(%)을 채운다. 타이틀바 우상단 pill 의 소스(거노: 웹뷰
-        // TitleBar UsagePill 을 웹뷰 안 봐서 터미널에도). curl 로 로컬 엔드포인트만 쳐
-        // 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만 redraw.
+        // claude 한도 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 조회해 **가장 먼저
+        // 닫히는 창**의 사용률을 채운다. Info 탭 머리 계정 행의 소스. curl 로 로컬
+        // 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만
+        // redraw.
+        //
+        // 주기는 60초지만 **5초 단위로 쪼개 자며** 계정이 바뀌었는지 본다. 전에는 통째로
+        // 60초를 자서, 계정을 눌러도 숫자가 최대 1분(+서버 캐시 1분) 동안 옛 계정 것으로
+        // 남았다 — 거노: "누를때마다 바뀐다는 표시가 없고".
         {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
+            let usage_all = self.claude_usage_all.clone();
             std::thread::spawn(move || {
-                // 방금 전환했으면 잠시 판정을 쉰다. `/claude-usage` 는 60초 TTL 캐시라
-                // 전환 직후 한 번은 **떠나온 계정의 값**이 그대로 나올 수 있고, 그걸
-                // 새 계정의 사용률로 읽으면 계정을 연쇄로 건너뛴다.
+                // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
+                let mut seen_account = socket::read_claude_account();
+                // 비활성 계정 조회까지 남은 사이클 수(0 이면 이번에 친다). 60초 주기라
+                // 5 = 5분. 첫 바퀴는 0 이라 창을 열자마자 표가 찬다.
+                let mut others_due = 0u8;
                 loop {
-                    let usage = fetch_claude_usage(&crate::mcp_panel_port());
-                    let next = usage.as_ref().and_then(five_hour_pct);
-                    // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — pill 깜빡임/사라짐 방지.
-                    // (git col 폴러와 동일 정책. 5시간 창은 항상 존재해 참 None 은 사실상 없음.)
+                    let fetched = fetch_claude_usage(&crate::mcp_panel_port(), None);
+                    let usage = fetched.as_ref().map(|(u, _, _)| u);
+                    let next = fetched.as_ref().and_then(|(u, stale, dir)| {
+                        socket::usage_pressure(u).map(|p| crate::UsageBadge {
+                            pct: p.pct,
+                            label: p.label,
+                            stale: *stale,
+                            account_dir: dir.clone(),
+                            resets_at: p.resets_at,
+                        })
+                    });
+                    // 아래 계정별 표에서 다시 쓴다 — 활성 계정을 두 번 조회하지 않게.
+                    let active_badge = next.clone();
+                    // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — 깜빡임/사라짐 방지.
+                    // (git col 폴러와 동일 정책.)
                     if next.is_some() {
                         match usage_cache.lock() {
                             Ok(mut g) => {
@@ -921,10 +1095,99 @@ impl ApplicationHandler<UserEvent> for App {
                             Err(_) => break,
                         }
                     }
+                    // 등록된 **모든** 계정의 한도 — 드롭다운이 누르기 전에 보여줘야 하는
+                    // 값이다(거노: "누르면 전환되버리잖아"). 활성 계정은 방금 받은 값을
+                    // 그대로 재사용하고, 나머지만 슬롯을 지정해 추가로 조회한다.
+                    // 프록시가 슬롯별 토큰을 직접 읽어 **전환 없이** 답한다.
+                    //
+                    // ⚠️ 오래 안 쓴 계정은 못 읽는다 — OAuth 토큰이 8시간쯤에 만료되고
+                    // 갱신은 그 계정으로 claude 를 돌릴 때 일어난다(실측 2026-08-05:
+                    // 세 슬롯 중 둘이 3시간 전 만료라 usage 가 거부됐다). 그런 계정은
+                    // 표에 안 들어가고 화면이 `—`(모름)를 그린다.
+                    //
+                    // 비활성 슬롯은 **5분마다**만 친다. 매 사이클 치면 만료된 슬롯에
+                    // 헛 curl 을 계속 띄우고, 살아 있는 슬롯은 upstream 레이트리밋을
+                    // 활성 계정과 나눠 쓰게 된다. 6시간짜리 디스크 스냅샷이 사이를 메운다.
+                    // 지금 쓰는 계정 값은 **매 사이클** 표에도 넣는다. 표 전체를 5분마다만
+                    // 갱신하던 동안, 드롭다운·계정 행의 숫자는 활성 계정 것마저 5분 동안
+                    // 굳어 있었다 — 계정을 눌러 전환할 때만 움직이는 것처럼 보인 이유다
+                    // (거노 2026-08-07: "전환해야만 사용량 갱신되는데"). 비활성 슬롯은
+                    // 아래 5분 주기 그대로다(만료 토큰에 헛 curl, upstream 레이트리밋 공유).
+                    if others_due != 0 {
+                        if let Some(b) = active_badge.clone() {
+                            if let Ok(mut g) = usage_all.lock() {
+                                if g.get(&b.account_dir) != Some(&b) {
+                                    g.insert(b.account_dir.clone(), b);
+                                    drop(g);
+                                    if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if others_due == 0 {
+                        let mut all: HashMap<String, crate::UsageBadge> = HashMap::new();
+                        if let Some(b) = active_badge {
+                            all.insert(b.account_dir.clone(), b);
+                        }
+                        let mut dirs: Vec<String> = vec![String::new()];
+                        dirs.extend(socket::read_claude_accounts().iter().filter_map(|a| {
+                            socket::claude_account_dir(&a.id)
+                                .map(|p| p.to_string_lossy().into_owned())
+                        }));
+                        for d in dirs {
+                            if all.contains_key(&d) {
+                                continue;
+                            }
+                            let Some((u, stale, dir)) =
+                                fetch_claude_usage(&crate::mcp_panel_port(), Some(&d))
+                            else {
+                                continue;
+                            };
+                            if let Some(p) = socket::usage_pressure(&u) {
+                                all.insert(
+                                    dir.clone(),
+                                    crate::UsageBadge {
+                                        pct: p.pct,
+                                        label: p.label,
+                                        stale,
+                                        account_dir: dir,
+                                        resets_at: p.resets_at,
+                                    },
+                                );
+                            }
+                        }
+                        // 조회가 통째로 실패한 사이클엔 옛 표를 지우지 않는다 — 빈칸은
+                        // "한도 여유"로 읽혀서, 낡은 숫자보다 나쁘다.
+                        if !all.is_empty() {
+                            match usage_all.lock() {
+                                Ok(mut g) => {
+                                    if *g != all {
+                                        *g = all;
+                                        drop(g);
+                                        if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        others_due = 5;
+                    } else {
+                        others_due -= 1;
+                    }
                     // 한도 자동 계정 전환. 판정은 여기(폴러)서 하고 실제 전환은 GUI
                     // 스레드가 한다 — 설정 저장이 shim 을 다시 까는 일이라 App 이 필요하다.
+                    //
+                    // **stale 값으로는 안 옮긴다**: upstream 이 막혀 재사용된 숫자로
+                    // 계정을 떠나면 멀쩡한 자리를 옛 기록 때문에 버리는 셈이다.
                     let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300);
-                    if let (Some(u), true, true) = (usage.as_ref(), socket::read_account_autoswitch(), rested) {
+                    let fresh = fetched.as_ref().is_some_and(|(_, stale, _)| !*stale);
+                    if let (Some(u), true, true, true) =
+                        (usage, socket::read_account_autoswitch(), rested, fresh)
+                    {
                         if let Some(p) = socket::usage_pressure(u) {
                             if p.pct >= socket::read_account_autoswitch_pct() {
                                 let now = std::time::SystemTime::now()
@@ -950,7 +1213,19 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    // 60초를 5초씩 쪼개 자며 활성 계정이 바뀌었는지 본다. 바뀌면 즉시
+                    // 다시 조회한다 — 서버 캐시도 계정별로 갈렸으니 그 조회는 캐시
+                    // 미스라 새 계정 값을 곧바로 물어 온다. 설정 파일을 보는 것은
+                    // 폴러가 GUI 상태를 못 만지기 때문이고, `settings_save` 가 파일과
+                    // shim env 를 함께 갱신하므로 이 신호로 충분하다.
+                    for _ in 0..12 {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let now = socket::read_claude_account();
+                        if now != seen_account {
+                            seen_account = now;
+                            break;
+                        }
+                    }
                 }
             });
         }
@@ -1085,7 +1360,11 @@ impl ApplicationHandler<UserEvent> for App {
         // spawned is the "새로 시작" fallback that stays if the user declines;
         // 복원 tears it down and rebuilds. Tmux backend manages its own restore,
         // so only the direct-PTY path prompts.
-        if !want_tmux {
+        // 검증 실행은 거노의 저장 세션을 안 읽는다 — 복원 대화상자가 캡처를 통째로
+        // 덮어서 정작 봐야 할 화면이 안 보였고(실측 2026-08-06 좁은 창 촬영), 실수로
+        // "복원"이 눌리면 그 인스턴스가 14 pane 을 열어 셸을 무더기로 띄운다.
+        // 저장하지 않는 실행이 읽지도 않는 것이 짝이 맞다(`save_window_frame` 가드).
+        if !want_tmux && !crate::verification_run() {
             if let Some(state) = crate::socket::read_session_state() {
                 // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
                 // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
@@ -1103,6 +1382,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autocapture();
         self.arm_autosplit();
         self.arm_autowindows();
+        self.arm_autoexpand();
+        self.arm_autoalert();
         self.arm_autotoggle();
         self.arm_autoarona();
         // 온보딩 제거(거노) — 강제 ModePicker 자동오픈 안 함. 터미널이 기본,
@@ -1454,19 +1735,6 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
-                // 학생 프사 hover — 큰 bust 확대 팝업을 뜨고 지우려면 진입/이탈에
-                // 재페인트(이벤트 기반 루프라 커서 이동만으론 프레임이 안 돈다).
-                {
-                    let (cx, cy) = self.cursor_px;
-                    let new_face = self.face_hit_rects.iter().any(|(_, r)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    });
-                    if new_face != self.face_hover {
-                        self.face_hover = new_face;
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                    }
-                }
                 // File-tree row hover — drives the row highlight.
                 {
                     let (cx, cy) = self.cursor_px;
@@ -1729,6 +1997,52 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 사이드바 pane 줄 드래그. 떨어질 자리는 **커서가 얹힌 줄의 위/아래
+                // 절반**이라, 같은 방 안 재배치와 다른 방으로 옮기기가 한 규칙으로
+                // 처리된다(목록이 방 경계를 넘어 이어져 있어서다).
+                if self.sidebar_row_drag.is_some() {
+                    let (px, py) = self.cursor_px;
+                    let start = self.sidebar_row_drag.as_ref().unwrap().start;
+                    let (dx, dy) = (px - start.0, py - start.1);
+                    let src = self.sidebar_row_drag.as_ref().unwrap().pane.clone();
+                    let target = self
+                        .sidebar_row_rects
+                        .iter()
+                        .find(|(_, id, r)| {
+                            *id != src
+                                && px >= r.0
+                                && px <= r.0 + r.2
+                                && py >= r.1
+                                && py <= r.1 + r.3
+                        })
+                        .map(|(_, id, r)| (id.clone(), py < r.1 + r.3 / 2.0))
+                        // 줄이 아니라 **방 카드**에 떨어뜨려도 받는다. pane 이 하나뿐인
+                        // 방은 목록을 펴지 않으므로 줄만 받으면 그런 방으로는 영영 못
+                        // 옮긴다 — 정작 옮길 이유가 가장 큰 쪽이 막히는 셈이다.
+                        .or_else(|| {
+                            let wi = self
+                                .window_tab_rects
+                                .iter()
+                                .find(|(_, r)| {
+                                    px >= r.0 && px <= r.0 + r.2 && py >= r.1 && py <= r.1 + r.3
+                                })
+                                .map(|(i, _)| *i)?;
+                            let last = self.window_leaves(wi).into_iter().last()?;
+                            (last != src).then_some((last, false))
+                        });
+                    if let Some(d) = self.sidebar_row_drag.as_mut() {
+                        if !d.active && dx * dx + dy * dy > 9.0 {
+                            d.active = true;
+                        }
+                        d.target = target;
+                    }
+                    if self.sidebar_row_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                        window.set_cursor(CursorIcon::Grabbing);
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // 방(윈도우) 탭 재배치 드래그. 문턱을 넘으면 active 로 바꾸고,
                 // 커서가 지나친 탭 개수로 삽입 자리를 다시 읽는다.
                 if self.win_tab_drag.is_some() {
@@ -1752,14 +2066,27 @@ impl ApplicationHandler<UserEvent> for App {
                             target = i + 1;
                         }
                     }
+                    let mut from = 0usize;
                     if let Some(d) = self.win_tab_drag.as_mut() {
                         if !d.active && dx * dx + dy * dy > 9.0 {
                             d.active = true;
                         }
                         d.target = target;
+                        from = d.from;
                     }
                     if self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
+                        // 꺼내기 자리에 들어서는 **순간** 방이 별도창으로 떨어지고,
+                        // 그 창이 커서를 따라온다. 놓을 때까지 기다리면 드래그 내내
+                        // 이게 나갈지 말지가 화면에 안 보인다(거노: "아직도 드래그
+                        // 뗄 때 분리된다"). 판정은 놓을 때 쓰던 `room_drag_tears`
+                        // 그대로라 두 순간이 갈리지 않는다.
+                        let tears = self.room_drag_tears();
+                        let torn = self.torn_aux_room(from).is_some();
+                        self.drag_trace("방탭", tears, torn);
+                        if torn || tears {
+                            self.drag_tear_follow_room(from, event_loop);
+                        }
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1771,9 +2098,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // `tab_drag.target`.
                 if self.tab_drag.is_some() {
                     let (px, py) = self.cursor_px;
-                    let (start, src_pane) = {
+                    let (start, src_pane, src_tab) = {
                         let d = self.tab_drag.as_ref().unwrap();
-                        (d.start, d.pane.clone())
+                        (d.start, d.pane.clone(), d.from)
                     };
                     let dx = self.cursor_px.0 - start.0;
                     let dy = self.cursor_px.1 - start.1;
@@ -1836,9 +2163,22 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
-                        // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
-                        self.update_live_drag();
+                        // 창 밖으로 나가는 순간 뜯어낸다 — 놓을 때까지 기다리면
+                        // 드래그 내내 "빠질지 말지"가 화면에 안 보인다. 한 번
+                        // 뜯긴 뒤엔 커서가 창 안으로 돌아와도 계속 따라오게 두고
+                        // (되돌리기는 창 닫기 = dock), 라이브 재배치는 멈춘다 —
+                        // 레이아웃에 없는 pane 을 옮기려 들면 안 되기 때문이다.
+                        let (win_w, win_h) = self.logical_win_size();
+                        let out = Self::drag_left_window(px, py, win_w, win_h);
+                        self.drag_trace("pane탭", out, self.torn_aux_window(&src_pane).is_some());
+                        let torn = out || self.torn_aux_window(&src_pane).is_some();
+                        let followed = torn
+                            && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
+                        if !followed {
+                            // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
+                            // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
+                            self.update_live_drag();
+                        }
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1854,10 +2194,24 @@ impl ApplicationHandler<UserEvent> for App {
                         hd.active = true;
                     }
                     let active = hd.active;
+                    let pane = hd.pane.clone();
                     if active {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
-                        self.update_live_drag();
+                        // 탭 pill 과 같은 규칙 — 창 밖으로 나가면 놓기 전에 뜯긴다.
+                        let (win_w, win_h) = self.logical_win_size();
+                        let out = Self::drag_left_window(
+                            self.cursor_px.0,
+                            self.cursor_px.1,
+                            win_w,
+                            win_h,
+                        );
+                        self.drag_trace("pane헤더", out, self.torn_aux_window(&pane).is_some());
+                        let torn = out || self.torn_aux_window(&pane).is_some();
+                        let followed = torn && self.drag_tear_follow(&pane, None, event_loop);
+                        if !followed {
+                            // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
+                            self.update_live_drag();
+                        }
                         window.request_redraw();
                     }
                     return;
@@ -1965,16 +2319,6 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
-                    // 학생 프사 위 → pointer(클릭하면 학생 설정이 열린다는 암시).
-                    let icon = if matches!(icon, CursorIcon::Default)
-                        && self.face_hit_rects.iter().any(|(_, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                    {
-                        CursorIcon::Pointer
-                    } else {
-                        icon
-                    };
                     // 그 밖의 모든 누를 수 있는 표면 — 버튼·탭·메뉴 항목·목록 행.
                     // 히트렉트를 다시 훑지 않고 직전 프레임이 세운 플래그를 읽는다.
                     // 들림을 그린 자리가 곧 손가락이 뜨는 자리라, 새 버튼을 만들어도
@@ -2003,6 +2347,14 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 let (cx, cy) = self.cursor_px;
+                // 사이드바 pane 행 → 숨기기 메뉴. 이 띠는 좌클릭을 통째로 삼키므로
+                // (아래 `window_strip_click` 게이트) 우클릭도 여기서 끝낸다.
+                if self.sidebar_visible && !self.tabs_on_top && cx < self.sidebar_w_logical {
+                    if self.sidebar_row_right_click(cx, cy) {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 if self.file_tree.visible
                     && cy > TITLE_HEIGHT
                     && cx >= self.file_tree_col_x()
@@ -2276,20 +2628,6 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // 학생 프사(statusline) 클릭 → 학생 설정 별도창을 Students
-                    // 카테고리 + 그 학생 선택 상태로 연다(딥링크). pane 포커스
-                    // 클릭보다 먼저 잡아 프사를 눌러도 pane 이 안 튀게.
-                    if let Some((name, _)) =
-                        self.face_hit_rects.iter().find(|(_, r)| hit(*r)).cloned()
-                    {
-                        self.open_settings_window(
-                            event_loop,
-                            Some(SettingsCat::Students),
-                            Some(name),
-                        );
-                        window.request_redraw();
-                        return;
-                    }
                     // Claude Code 스크롤 sticky prompt pill 클릭 → 그 프롬프트가
                     // 화면에 들어올 때까지 위로 스크롤. mouse-tracking TUI 라 정확한
                     // 오프셋은 모르지만, 화면에 프롬프트 행이 나타났는지는 kasaterm 이
@@ -2322,7 +2660,12 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| hit(*r))
                         .map(|(i, _)| i.clone())
                     {
-                        if self.zoomed_pane.is_some() {
+                        // `aux:<i>` = 접어 둔 별도창. pane id 와 한 목록에 서므로
+                        // 접두사로 가른다 — 그 id 로 toggle_pane_zoom 을 부르면
+                        // 레이아웃에 없는 pane 으로 zoom 이 들어가 화면이 빈다.
+                        if let Some(i) = id.strip_prefix("aux:").and_then(|n| n.parse().ok()) {
+                            self.unhide_aux(i, event_loop);
+                        } else if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
                         window.request_redraw();
@@ -2463,9 +2806,19 @@ impl ApplicationHandler<UserEvent> for App {
                     // 사용량 pill = Claude 계정 스위처. 드롭다운은 타이틀바 아래 pane
                     // 위로 걸치므로 pane 라우팅보다 먼저 잡아야 한다. rect 는 직전
                     // 프레임의 render 가 채운 것(⋮ 핸들 메뉴와 같은 짝).
-                    let chip_hit = self.account_chip_rect.is_some_and(|r| {
+                    let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    });
+                    };
+                    // 손잡이가 둘이다 — Info 탭의 계정 행과, 늘 보이는 상태줄 세그먼트.
+                    // 어느 쪽으로 열었는지 기억해 두고 메뉴를 그 자리에 붙인다.
+                    let chip_hit = self.account_chip_rect.as_ref().is_some_and(&inside);
+                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside);
+                    if chip_hit {
+                        self.account_menu_anchor = self.account_chip_rect;
+                    } else if status_hit {
+                        self.account_menu_anchor = self.status_account_rect;
+                    }
+                    let chip_hit = chip_hit || status_hit;
                     if self.account_menu {
                         let pick = self
                             .account_menu_hits
@@ -2590,6 +2943,13 @@ impl ApplicationHandler<UserEvent> for App {
                     // Left window-tab sidebar. Caught first — it owns the whole
                     // left strip, so a click there never falls through to the
                     // cell grid. Hit order lives in `window_strip_click`.
+                    // 사이드바 pane 메뉴가 떠 있으면 그게 최상단이다. **아래 게이트보다
+                    // 앞이어야 한다** — 그 게이트가 왼쪽 띠의 클릭을 통째로 삼켜서,
+                    // 뒤에 두면 메뉴가 영영 안 닫힌다.
+                    if self.sidebar_menu_click(cx, cy) {
+                        window.request_redraw();
+                        return;
+                    }
                     if self.sidebar_visible && cx < self.sidebar_w_logical {
                         if self.window_strip_click(cx, cy) {
                             return;
@@ -2886,8 +3246,8 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 칼럼 탭(Git / Info). 닫기·확장보다 먼저 봐야 한다 —
-                        // 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
+                        // 칼럼 탭(Git / Info / 세션). 닫기·확장보다 먼저 봐야
+                        // 한다 — 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
                         if let Some((tab, _)) = self
                             .info
                             .tab_rects
@@ -2904,6 +3264,20 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
                                 self.info.ctx_menu = None;
                             }
+                            window.request_redraw();
+                            return;
+                        }
+                        // 세션 기록 행 / 범위 칩 / 새로고침. Info 와 같은 이유로
+                        // 탭을 먼저 확인한다 — 다른 탭에선 낡은 좌표가 남는다.
+                        if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.info.tab == state::SideTab::Sessions
+                            && self.sessions_col_click(cx, cy)
+                        {
+                            self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
@@ -2950,6 +3324,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 let flag = match sec {
                                     state::InfoSection::Dir => &mut self.info.dir_collapsed,
                                     state::InfoSection::Procs => &mut self.info.procs_collapsed,
+                                    state::InfoSection::Closed => &mut self.info.closed_collapsed,
                                     state::InfoSection::Ports => &mut self.info.ports_collapsed,
                                 };
                                 *flag = !*flag;
@@ -2977,6 +3352,20 @@ impl ApplicationHandler<UserEvent> for App {
                                         }
                                     }
                                 }
+                                window.request_redraw();
+                                return;
+                            }
+                            // 되살리기 대기 줄의 × → 목록에서 지우고 프로세스도 끈다.
+                            // 줄 자체보다 먼저 본다 — × 는 그 줄 위에 얹혀 있어,
+                            // 순서가 반대면 끄려던 것이 되살아난다.
+                            if let Some(idx) = self
+                                .info
+                                .closed_kill_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(i, _)| *i)
+                            {
+                                self.discard_closed_pane_at(idx);
                                 window.request_redraw();
                                 return;
                             }
@@ -3904,20 +4293,37 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 사이드바 pane 줄 드래그 종료. 문턱을 넘고 떨어질 줄이
+                        // 있을 때만 옮긴다 — 포커스는 press 가 이미 했다.
+                        if let Some(d) = self.sidebar_row_drag.take() {
+                            window.set_cursor(CursorIcon::Default);
+                            if let (true, Some((target, before))) = (d.active, d.target) {
+                                let zone = if before {
+                                    crate::DropZone::Up
+                                } else {
+                                    crate::DropZone::Down
+                                };
+                                self.move_pane(&d.pane, &target, zone);
+                                self.chrome_dirty = true;
+                            }
+                            window.request_redraw();
+                            return;
+                        }
                         // 방 탭 재배치 종료. 문턱을 넘었을 때만 옮긴다 — 전환은
                         // press 가 이미 했으므로, 안 넘었으면 버릴 것뿐이다.
                         if let Some(d) = self.win_tab_drag.take() {
                             if d.active {
                                 window.set_cursor(CursorIcon::Default);
-                                // 창 밖에 놓으면 재배치가 아니라 그 방을 통째로
-                                // 별도 창으로 꺼낸다 — pane 탭 tear-off 와 같은 규칙.
-                                let (win_w, win_h) = self.logical_win_size();
-                                if Self::drag_left_window(
-                                    self.cursor_px.0,
-                                    self.cursor_px.1,
-                                    win_w,
-                                    win_h,
-                                ) {
+                                // 끄는 도중에 이미 나갔으면 놓는 순간 할 일이 없다 —
+                                // 여기서 재배치를 태우면 방금 꺼낸 방을 다시 줄 세운다.
+                                // 판정(`room_drag_tears`)은 CursorMoved 와 한 벌을
+                                // 쓴다: 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
+                                // 어긋남이 생기고 화면만 봐선 원인을 못 짚는다.
+                                if self.torn_aux_room(d.from).is_some() {
+                                    window.request_redraw();
+                                    return;
+                                }
+                                if self.room_drag_tears() {
                                     let near = self.cursor_screen_phys();
                                     self.undock_window_room(d.from, event_loop, near);
                                 } else {
@@ -3937,6 +4343,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 드래그 중 이미 뜯겨 별도창이 됐다 — 놓는 순간 할 일이
+                            // 없다. 아래 split/dock 경로를 그대로 태우면 레이아웃에
+                            // 없는 pane 을 다시 꽂으려 든다.
+                            if td.active && self.torn_aux_window(&td.pane).is_some() {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             // Phase 3 tear-off: 탭을 창 밖에서 놓으면 별도 창으로
                             // 뜯어낸다 — 파일 탭=편집기 창, 터미널 탭=undock 터미널
                             // 창(헤더 pop-out 아이콘과 동일 경로, 커서 자리에 스폰).
@@ -4239,6 +4653,12 @@ impl ApplicationHandler<UserEvent> for App {
                         // reset the cursor.
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 이미 뜯긴 pane — 탭 드래그와 같은 이유로 여기서 끝낸다.
+                            if hd.active && self.torn_aux_window(&hd.pane).is_some() {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             if hd.active {
                                 // 커서가 사이드바의 다른 윈도우 탭 위면 cross-window
                                 // 이동이 최우선이다. 라이브 재배치가 pane 가장자리에
@@ -4777,6 +5197,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
+        self.note_claude_panes();
+        self.apply_autowait();
+        self.apply_autounread();
         // rust 파일이 편집기로 열려 있으면 rust-analyzer 를 붙인다. 여기서 하는
         // 이유는 편집기가 열리는 경로가 여러 개라서다(사이드바·소켓·복원·팝아웃)
         // — 한 자리에 두면 어느 경로로 열려도 같은 순간에 붙는다. 이미 알린
@@ -4817,11 +5240,19 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
+        self.run_pending_autolastclose();
         self.run_pending_autowinreorder();
+        self.run_pending_autoroomrename();
+        self.run_pending_autoftrename();
+        self.run_pending_autopathsearch();
         self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
+        self.run_pending_autostash();
+        self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
+        self.run_pending_autoexpandclick();
+        self.run_pending_autorowdrag();
         self.run_pending_autotheme();
         // OS 의 밝게/어둡게가 바뀌었나 — `theme: system` 일 때만 실제로 조회한다
         // (게이트는 poll 안에 있다). 바뀐 순간에만 참이라 평소엔 아무 일도 없다.
@@ -4845,6 +5276,18 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
+        self.run_pending_autoauxmd(event_loop);
+        self.run_pending_autoundock_scroll();
+        self.run_pending_autoundock_dock();
+        self.run_pending_autoauxtree();
+        self.run_pending_autoteardrag(event_loop);
+        self.run_pending_autotearroom(event_loop);
+        self.run_pending_autostudent(event_loop);
+        self.run_pending_autoboxlabel();
+        self.run_pending_autoroomsplit();
+        self.run_pending_autoforeignsplit();
+        self.run_pending_autofacehover(event_loop);
+        self.run_pending_autotreeclick(event_loop);
         self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
         // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도
@@ -4896,19 +5339,32 @@ impl ApplicationHandler<UserEvent> for App {
             // sticky 클릭 seek 이 도는 동안엔 스크롤이 목표 프롬프트에 닿을 때까지
             // 프레임을 펌프해야 노치가 계속 나가고 화면 관찰이 이어진다.
             || crate::render::sticky_seek_active()
-            // An unseen-notification window tab blinks (synced to the cursor
-            // blink) until the user switches to it — pump frames so it pulses.
+            // 못 본 알림이 있는 방 탭은 숨쉰다 — 그 호흡이 이어지려면 프레임이
+            // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
+            // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
+            || self
+                .pane_activity
+                .values()
+                .any(|a| crate::chrome::status_needs_you(&a.status))
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
             // 테마 전환 디졸브가 걷히는 동안.
             || self.theme_fx.is_some()
+            // 사이드바 방이 펴지거나 접히는 동안.
+            || self.expand_anim.is_some()
+            // 펼친 목록의 학생 얼굴은 idle gif 라 프레임을 계속 넘겨야 한다.
+            // 접으면 멈춘다 — 안 보이는 그림에 프레임을 태우지 않는다.
+            || (self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty())
         {
             // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
             // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —
             // 0.4초짜리라 30fps 면 열두 장뿐이고, 그러면 블록이 퍼지는 게 아니라
             // 뚝뚝 끊겨 보인다. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
-            let period = if self.md_scroll_anim.is_empty() && self.theme_fx.is_none() {
+            let period = if self.md_scroll_anim.is_empty()
+                && self.theme_fx.is_none()
+                && self.expand_anim.is_none()
+            {
                 33
             } else {
                 8
@@ -5019,12 +5475,41 @@ impl App {
 /// Returns `None` on a transient git failure so the caller keeps the last good
 /// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
 /// so a + / − press reflects immediately instead of waiting for the next tick.
-/// 로컬 `/claude-usage`(oauth/usage 프록시)의 `usage` 본문. curl 로 로컬
-/// 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
-/// 없음/형식밖이면 None.
-fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
+/// 로컬 `/claude-usage`(oauth/usage 프록시) 응답 — `usage` 본문에 `stale` 과
+/// `account_dir` 을 함께 돌려준다. curl 로 로컬 엔드포인트만 쳐 토큰은 서버(키체인)가
+/// 읽는다 — argv 유출 없음. 실패/토큰 없음/형식밖이면 None.
+///
+/// `stale`·`account_dir` 이 필요한 이유: 화면이 "지금 값인지"와 "어느 계정 값인지"를
+/// 말해야 한다. 전에는 `usage` 만 떠서, upstream 이 막힌 옛 숫자와 방금 조회한 숫자가
+/// 화면에서 똑같이 보였고 계정을 바꿔도 표시가 안 바뀌었다(거노 2026-08-05).
+///
+/// `dir` 은 조회할 계정 저장소 — `None` 이면 활성 계정. 프록시가 슬롯별 토큰을 직접
+/// 읽으므로 **전환하지 않고** 남의 계정 한도를 볼 수 있다(계정 드롭다운이 그걸 쓴다).
+///
+/// 쿼리 값 퍼센트 인코딩. 슬롯 경로는 홈 아래 절대경로라 공백·한글·`&` 가 들어올 수
+/// 있고, 그대로 붙이면 거기서 쿼리가 잘려 **엉뚱한 슬롯**(대개 기본 계정)을 조회한다.
+/// `/` 는 쿼리 값에서 합법이라 남겨 로그를 읽을 수 있게 둔다.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn fetch_claude_usage(port: &str, dir: Option<&str>) -> Option<(serde_json::Value, bool, String)> {
+    // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
+    let url = match dir {
+        Some(d) => format!("http://127.0.0.1:{port}/claude-usage?dir={}", urlencode(d)),
+        None => format!("http://127.0.0.1:{port}/claude-usage"),
+    };
     let out = crate::proc::command("curl")
-        .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
+        .args(["-s", "--max-time", "5", &url])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -5034,14 +5519,9 @@ fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         return None;
     }
-    v.get("usage").cloned()
-}
-
-/// 타이틀바 pill 이 쓰는 5시간 창 사용률(%). 자동 전환은 이걸 안 보고 주간까지
-/// 아우르는 `socket::usage_pressure` 를 본다 — pill 은 "이 세션이 얼마나
-/// 남았나"라는 다른 질문에 답한다. utilization 은 이미 0..100 퍼센트.
-fn five_hour_pct(usage: &serde_json::Value) -> Option<f32> {
-    usage.get("five_hour")?.get("utilization")?.as_f64().map(|x| x as f32)
+    let stale = v.get("stale").and_then(|b| b.as_bool()).unwrap_or(false);
+    let dir = v.get("account_dir").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+    Some((v.get("usage")?.clone(), stale, dir))
 }
 
 fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {

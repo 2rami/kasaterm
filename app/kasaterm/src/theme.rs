@@ -53,6 +53,22 @@ color_slot!(S_SYN_COMMENT, syn_comment, [106, 115, 130, 255]);
 color_slot!(S_SYN_FUNCTION, syn_function, [97, 175, 239, 255]);
 color_slot!(S_SYN_TYPE, syn_type, [229, 192, 123, 255]);
 
+/// 「내 손을 기다린다」 색. 상태 언어의 네 번째 자리 — accent=도는 중,
+/// success=끝남, danger=잘못됨, 그리고 이것은 **막혀서 나를 부르는 중**이다.
+/// 예전엔 danger 를 빌려 썼는데 빨강은 "고장났다"로 읽혀, 승인 한 번이면 풀릴
+/// 일이 사고처럼 보였다(거노: "내가 엔터해야되는 건 핑크색으로").
+///
+/// 팔레트 슬롯이 아니라 고정값인 이유: 이건 테마 취향이 아니라 신호다. 테마마다
+/// 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다. 밝기를 중간에 둬 밝은 테마의
+/// 흰 바탕과 어두운 테마의 검정 바탕 양쪽에서 다 떠오른다.
+///
+/// 핑크였다가 주황으로 옮겼다(2026-08-11 지시: "선택하는거 뜨면 주황색으로
+/// 깜빡이게"). 한 군데만 바꾸지 않고 토큰째 옮기는 건 위 문단 그대로의 이유다 —
+/// 같은 신호가 사이드바에선 주황, pane 헤더에선 핑크면 두 색을 각각 외워야 한다.
+pub fn attention() -> [u8; 4] {
+    [250, 140, 42, 255]
+}
+
 /// Terminal ANSI 0-15, runtime-swappable alongside the UI tokens so a theme
 /// switch recolors the terminal body too (256-cube / grayscale stay computed).
 /// Seeded with the dark default (Ghostty Tomorrow Night Bright) so pre-settings
@@ -894,6 +910,22 @@ pub fn panel_bg() -> [u8; 4] {
     lerp(bg(), surface_hover(), 0.5)
 }
 
+/// 판 위에 **올라온 부액션 버튼**의 채움 — `base` 는 그 버튼이 얹힌 배경색.
+///
+/// 고정 토큰을 못 쓰는 건 배경이 자리마다 달라서다. 예전엔 여기에 `surface` 를
+/// 깔았는데, 그건 팔레트에서 패널 바닥보다도 **어두운** 색이라 버튼이 올라온
+/// 판이 아니라 파인 구멍으로 보였다 — 호버해야 비로소 버튼처럼 밝아지는 게 그
+/// 증거였다. `bg→surface_active` 가 이 테마에서 "들리는 방향"이니, 그 델타만큼
+/// 배경에서 밀어 올리면 어느 배경 위에서도, 여덟 테마 전부에서 한 단계 뜬다.
+pub fn raised_on(base: [u8; 4], hover: bool) -> [u8; 4] {
+    let (a, b) = (bg(), surface_active());
+    let t = if hover { 1.0 } else { 0.5 };
+    let step = |i: usize| {
+        (base[i] as f32 + (b[i] as f32 - a[i] as f32) * t).clamp(0.0, 255.0).round() as u8
+    };
+    [step(0), step(1), step(2), 255]
+}
+
 /// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 전원 원작색
 /// 기준으로 교정(거노): 아로나=하늘, 프라나=은백(흰 계열), 유즈=핑크레드(분홍
 /// 머리·빨간 리본), 아리스=남색. 미도리 민트·모모이 코랄은 원작과 이미 일치.
@@ -970,22 +1002,14 @@ pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
     character_accent(name).map(|c| accent_variant(c, ordinal))
 }
 
-/// 캐릭터명 ↔ 에셋 슬러그 대응표 (assets/students/<slug>.png, arona-ui
-/// 디렉토리명·shim 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
-const CHARACTER_SLUGS: &[(&str, &str)] = &[
-    ("아로나", "arona"),
-    ("프라나", "prana"),
-    ("미도리", "midori"),
-    ("모모이", "momoi"),
-    ("유즈", "yuzu"),
-    ("아리스", "arisu"),
-    ("유우카", "yuuka"),
-    ("시로코", "shiroko"),
-    ("호시노", "hoshino"),
-    ("코하루", "koharu"),
-    ("히마리", "himari"),
-    ("아루", "aru"),
-];
+// 캐릭터명 ↔ 에셋 슬러그 대응표(`assets/students/<slug>.png`, arona-ui 디렉토리명·shim
+// 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
+//
+// 표 자체는 `collab-hooks/characters.json` 에서 build.rs 가 생성한다 — 정본이 둘이면
+// 어긋나고, 어긋나도 오류가 안 난다(슬러그가 inbox 파일명이라 브리프가 아무도 안 읽는
+// 우편함에 들어간다). 새 테마는 그 JSON 하나만 갈아 끼우면 된다. 슬러그 중복·형식
+// 위반은 build.rs 가 컴파일 에러로 막는다.
+include!(concat!(env!("OUT_DIR"), "/character_slugs.rs"));
 
 /// 캐릭터명 → 에셋 슬러그.
 pub fn character_slug(name: &str) -> Option<&'static str> {
@@ -993,6 +1017,18 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, s)| *s)
+}
+
+/// 캐릭터명 → **teammate agent 이름에 쓰는** 슬러그. 로스터에 없는 커스텀 캐릭터는
+/// 해시 축약으로 떨어진다(inbox 파일명이 이 슬러그라 한글은 "---" 로 붕괴한다).
+///
+/// 셰임이 굽는 case 분기(`teammate_case_arms`)와 split 이 미리 알려 주는 이름
+/// (`PtyBackend::pane_agent`)이 **이 하나를** 쓴다. 두 벌이 되면 부른 쪽이 닿지 않는
+/// 인박스에 브리프를 넣고도 성공으로 읽는다 — 어긋나도 오류가 안 나는 종류의 버그다.
+pub fn agent_slug(name: &str) -> String {
+    character_slug(name)
+        .map(String::from)
+        .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
 }
 
 /// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸

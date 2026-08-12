@@ -65,6 +65,8 @@ impl Server {
     /// handling. Backend is `Arc`-shared so multiple concurrent clients
     /// see the same terminal state.
     pub fn spawn(self, backend: Arc<dyn Backend>) -> thread::JoinHandle<()> {
+        #[cfg(unix)]
+        spawn_path_watchdog(self.socket_path.clone(), backend.clone());
         thread::spawn(move || {
             for incoming in self.listener.incoming() {
                 let stream = match incoming {
@@ -79,6 +81,42 @@ impl Server {
             }
         })
     }
+}
+
+/// 소켓 파일이 사라지면 다시 만든다.
+///
+/// 유닉스 소켓은 **경로가 곧 주소**라, 파일 노드가 지워지면 프로세스도 listener 도
+/// 멀쩡한 채로 아무도 못 붙는 상태가 된다. accept 는 영원히 블록하고 밖에서는
+/// 되살릴 방법이 없다 — bind 는 그 프로세스만 할 수 있으니 앱을 껐다 켜는 것 말고는
+/// 손이 없다. 붙어 있던 모든 세션이 같이 죽는다.
+///
+/// 실제로 겪었다(2026-08-10): 테스트 인스턴스를 정리하려던 `rm -f …/kasaterm-*.sock`
+/// 한 줄이 살아 있는 앱의 소켓까지 지웠다. 지우는 쪽을 조심하는 것으로는 못 막는다 —
+/// 임시 디렉터리는 청소 도구·OS·사람이 다 같이 건드리는 자리다. 그래서 없어지면
+/// 다시 만드는 쪽으로 막는다.
+///
+/// 옛 listener 는 그대로 둔다. 닫을 방법이 마땅치 않고, 아무도 못 붙는 fd 하나는
+/// 프로세스가 끝날 때까지 놀고 있을 뿐이다.
+#[cfg(unix)]
+fn spawn_path_watchdog(path: PathBuf, backend: Arc<dyn Backend>) {
+    thread::spawn(move || loop {
+        thread::sleep(std::time::Duration::from_secs(5));
+        if path.exists() {
+            continue;
+        }
+        match Server::bind(&path) {
+            Ok(s) => {
+                eprintln!("[agent-socket] socket file vanished — rebound {path:?}");
+                // 새 서버가 자기 감시자를 띄운다. 이쪽은 여기서 손을 뗀다.
+                let _ = s.spawn(backend);
+                return;
+            }
+            // 남이 그 경로를 가져갔으면 bind 가 거절한다(hijack 방지). 그건 옳은
+            // 결과이므로 물러나지 않고 다음 주기에 다시 본다 — 그 인스턴스가 죽으면
+            // 우리가 도로 주인이 된다.
+            Err(e) => eprintln!("[agent-socket] rebind {path:?} failed: {e:#}"),
+        }
+    });
 }
 
 impl Drop for Server {
@@ -154,7 +192,12 @@ mod tests {
         fn focus_surface(&self, _: &str) -> Result<()> {
             Ok(())
         }
-        fn split_surface(&self, _: crate::backend::SplitDirection, _focus: bool) -> Result<SurfaceInfo> {
+        fn split_surface(
+            &self,
+            _: crate::backend::SplitDirection,
+            _focus: bool,
+            _from: Option<&str>,
+        ) -> Result<SurfaceInfo> {
             anyhow::bail!("not implemented")
         }
         fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> {

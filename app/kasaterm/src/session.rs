@@ -256,11 +256,30 @@ impl App {
         // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
         // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
         // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
-        let taken: std::collections::HashSet<String> = {
+        // 이 방 live 만 따로 들고 있는다 — 전 방 마커까지 합친 taken 이 학생 총원을
+        // 넘기면 고를 것이 하나도 안 남는데, 그때 members 전체로 되돌아가면 **같은 방
+        // 안에서도** 겹친다. 실측 2026-08-09: 마커 17개 > 총원 12명이라 배정 풀이
+        // 통째로 말라 아루가 셋이 됐다. 마커는 pane 을 정상적으로 닫을 때만 지워지므로
+        // 앱을 재시작하면 옛 마커가 그대로 남아 이 고갈이 시간이 갈수록 잦아진다.
+        // `all_taken` 은 중복을 살린 사본이다 — 풀이 마른 뒤 「가장 적게 쓰인 학생」을
+        // 고르려면 있고 없고가 아니라 **몇 번 쓰였나**를 알아야 한다.
+        let mut all_taken: Vec<String> = Vec::new();
+        let (taken, taken_local): (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ) = {
             let ws = self.ws.lock().unwrap();
-            let mut t: std::collections::HashSet<String> = ws
+            // **`ws.panes` 로만 돌면 안 된다** — split 로 생긴 leaf 는 보조탭이 생기기
+            // 전까지 `PaneState` 가 없다(희소, main.rs `pane_font_scales` 주석). 그래서
+            // 예전엔 방금 쪼갠 pane 들이 taken 에 안 잡혀 **연달아 쪼개면 같은 학생이
+            // 둘 나왔다**(실측 2026-08-06 `split --count`: 모모이 둘·프라나 둘. 거노가
+            // 전에 신고한 "미도리 둘"과 같은 증상, 원인만 다른 갈래).
+            // 마커(`assigned_global`)도 못 메운다 — 그건 claude 가 뜰 때 쓰이므로 갓
+            // 만든 pane 엔 아직 없다. 배정의 정본은 `pane_character` 다.
+            let here: Vec<String> = ws
                 .panes
                 .keys()
+                .chain(ws.pane_character.keys())
                 .filter(|p| p.as_str() != id)
                 .filter_map(|p| {
                     ws.pane_character
@@ -269,8 +288,10 @@ impl App {
                         .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
                 })
                 .collect();
-            t.extend(kasa_mcp::character::assigned_global());
-            t
+            let local: std::collections::HashSet<String> = here.iter().cloned().collect();
+            all_taken.extend(here);
+            all_taken.extend(kasa_mcp::character::assigned_global());
+            (all_taken.iter().cloned().collect(), local)
         };
         // pending(사용자 지정 캐릭터)은 중복이어도 존중 — 같은 학생 허용, 색은
         // character_ordinal 변주로 구분(거노). 랜덤 배정만 taken 을 피한다.
@@ -279,7 +300,36 @@ impl App {
             None => {
                 let free: Vec<String> =
                     members.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
-                let pick = kasa_mcp::character::pick_random(&free, id)
+                // 고갈되면 곧장 전체로 되돌아가지 않고 **이 방 live 만** 피해 한 번 더
+                // 고른다. 다른 방과 겹치는 것은 이름에 pane 번호가 붙어 구분되지만,
+                // 같은 방에서 겹치면 화면에 같은 얼굴이 나란히 서서 누가 누군지 사라진다.
+                let free_local: Vec<String> = members
+                    .iter()
+                    .filter(|n| !taken_local.contains(n.as_str()))
+                    .cloned()
+                    .collect();
+                // 그마저 마르면 **가장 적게 쓰인 학생들** 중에서 고른다 — 전체 랜덤은
+                // 이미 셋인 학생을 넷으로 만든다(`least_used` 주석에 실측).
+                let least = kasa_mcp::character::least_used(&members, &all_taken);
+                // 이 방에 이미 학생이 있으면 **같은 학원**에서 먼저 고른다. 첫 배정이
+                // 그 방의 학원을 정하고, 이후 pane 들이 거기 붙어 한 덩어리로 읽힌다.
+                // 학원이 마르면 아래 폴백으로 내려간다 — 학원을 맞추는 것보다 같은
+                // 방에서 안 겹치는 게 먼저다.
+                let here: Vec<String> = taken_local.iter().cloned().collect();
+                let same_school = kasa_mcp::character::prefer_same_school(&chars, &free, &here);
+                // 이 방의 첫 학생이면 반대로 **다른 방이 안 쓰는 학원**을 고른다 —
+                // 그 한 명이 이 방의 학원을 정하므로, 여기서 갈라 두면 방마다 다른
+                // 학원이 선다. 학원보다 방이 많아지면 빈 목록이 와 아래로 흐른다.
+                let fresh_school = if here.is_empty() {
+                    kasa_mcp::character::prefer_fresh_school(&chars, &free, &all_taken)
+                } else {
+                    Vec::new()
+                };
+                let pick = kasa_mcp::character::pick_random(&same_school, id)
+                    .or_else(|| kasa_mcp::character::pick_random(&fresh_school, id))
+                    .or_else(|| kasa_mcp::character::pick_random(&free, id))
+                    .or_else(|| kasa_mcp::character::pick_random(&free_local, id))
+                    .or_else(|| kasa_mcp::character::pick_random(&least, id))
                     .or_else(|| kasa_mcp::character::pick_random(&members, id));
                 match pick {
                     Some(n) => n,
@@ -306,11 +356,39 @@ impl App {
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
             ("KASATERM_SESSION_ID".to_string(), sid.clone()),
+            // teammate 이름 꼬리 — 셰임이 `<슬러그>-p<번호>` 뒤에 그대로 붙인다.
+            ("KASATERM_AGENT_SUFFIX".to_string(), crate::agent_name_suffix()),
         ];
         if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
             env.push(("KASATERM_PERSONA".to_string(), p));
         }
         env
+    }
+
+    /// 지금 어딘가에 등록돼 있는 pane 번호 전부.
+    ///
+    /// pane 을 담는 곳이 셋이라 셋을 다 봐야 한다. `self.pty` 만 보면 PTY 없이
+    /// `ws.panes` 에만 사는 미리보기·마크다운 pane 을 덮어쓰고, `ws.panes` 만 보면
+    /// split 직후 아직 `PaneState` 가 없는 leaf 를 덮어쓴다(희소 저장이라 보조탭이
+    /// 생기기 전까지 없다). 레이아웃 트리는 비활성 창(방 별도창)까지 훑는다.
+    pub(crate) fn used_pane_ids(&self) -> std::collections::HashSet<String> {
+        let mut used: std::collections::HashSet<String> = self.pty.keys().cloned().collect();
+        used.extend(self.ws.lock().unwrap().panes.keys().cloned());
+        for l in self.windows.iter().flatten().chain(self.pty_layout.as_ref()) {
+            used.extend(l.leaves().into_iter().map(str::to_string));
+        }
+        used
+    }
+    /// 지금 안 쓰는 **가장 작은** pane 번호. 예전엔 단조 증가 카운터라 열고 닫기를
+    /// 반복한 하루치가 `%116` 같은 번호로 쌓였다 — 학생 이름(`아루-p116`)에도 붙고
+    /// `tell`·`dismiss` 로 부를 때마다 그걸 봐야 했다(거노: "pane 번호는 계속 늘어난다").
+    ///
+    /// 번호 재사용이 위험했던 자리는 collab 마커다: 닫힌 pane 의 `kasaterm-bound-_N` 이
+    /// 남은 채 같은 번호가 다시 나면 죽은 세션이 산 것처럼 붙는다. 그래서 닫을 때
+    /// [`Self::cleanup_collab_markers`] 가 지우고, 앱이 죽어 그 경로를 못 탄 잔재는
+    /// 부팅 sweep(`character::sweep_stale_markers`)이 걷는다.
+    pub(crate) fn alloc_pane_id(&mut self) -> String {
+        next_free_pane_id(&self.used_pane_ids())
     }
 
     /// Spawn the first shell pane for the *current* (already-cleared) session.
@@ -319,8 +397,7 @@ impl App {
     pub(crate) fn spawn_session_pane(&mut self) -> Result<()> {
         let (cols, rows) = self.window_cells();
         let cwd = resolve_initial_cwd();
-        let id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let id = self.alloc_pane_id();
         // 방별 분리(거노): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
         // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
         let mut env = crate::proxy_env(&id);
@@ -551,13 +628,24 @@ impl App {
     /// lives in `pty_layout` (its `windows` slot is None); the rest carry their
     /// own layout. Mirrors the sidebar `sb_busy`/`sb_done` lookup.
     pub(crate) fn window_of_pane(&self, pane: &str) -> Option<usize> {
+        // 탭 pid 는 BSP leaf 가 아니다 — 화면을 든 건 그 탭이 사는 바깥 pane 이다.
+        // 접지 않으면 「그 surface 가 어느 창에 있나」가 탭에 대해 항상 None 이 되고,
+        // 그걸 존재 판정으로 쓰는 소켓 split 이 「없는 pane」이라며 거절했다. 그래서
+        // 학생들이 split 을 포기하고 탭으로 우회했다(거노 2026-08-07: "갑자기 애들
+        // 왜 탭안에 생성하지"). 접는 규칙은 `outer_for_pty` 한 곳에만 둔다.
+        let pane = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|w| w.outer_for_pty(pane))
+            .unwrap_or_else(|| pane.to_string());
         (0..self.windows.len()).find(|&i| {
             let layout = if i == self.active_window {
                 self.pty_layout.as_ref()
             } else {
                 self.windows[i].as_ref()
             };
-            layout.is_some_and(|l| l.leaves().contains(&pane))
+            layout.is_some_and(|l| l.leaves().contains(&pane.as_str()))
         })
     }
     /// PTY 세션을 App 에 넣으면서 전역 레지스트리에도 등록한다.
@@ -663,11 +751,25 @@ impl App {
             overrides.into_iter().map(|(i, name)| (remap(i), name)).collect();
         let alerts = std::mem::take(&mut self.window_alert);
         self.window_alert = alerts.into_iter().map(remap).collect();
+        let expanded = std::mem::take(&mut self.expanded_windows);
+        self.expanded_windows = expanded.into_iter().map(remap).collect();
+        let list_view = std::mem::take(&mut self.list_view_windows);
+        self.list_view_windows = list_view.into_iter().map(remap).collect();
+        // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
+        // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
+        // 지나야 다음 사람이 이 목록을 믿는다.
+        self.expand_anim = self.expand_anim.map(|(i, opening, at)| (remap(i), opening, at));
         // 밖에 나가 있는 방도 인덱스로 자기 트리를 찾는다 — 여기서 안 옮기면 재배치
         // 한 번에 별도 창이 남의 방을 그린다.
+        // 꺼낸 pane 도 나온 방을 인덱스로 들고 있다 — 안 옮기면 되돌릴 때 남의 방에서
+        // 튀어나온다. 인덱스를 키로 쓰는 필드는 예외 없이 이 목록을 지난다.
         for a in self.aux_windows.iter_mut() {
-            if let crate::auxwin::AuxWindowKind::Room { window, .. } = &mut a.kind {
-                *window = remap(*window);
+            match &mut a.kind {
+                crate::auxwin::AuxWindowKind::Room { window, .. }
+                | crate::auxwin::AuxWindowKind::Terminal { window, .. } => {
+                    *window = remap(*window);
+                }
+                _ => {}
             }
         }
         // 되살리기 대기 중인 pane 도 자기 방을 인덱스로 가리킨다 — 안 옮기면 ⌘⇧T 가
@@ -692,7 +794,13 @@ impl App {
     /// 레코드는 세션 저장이 쓰는 것과 **같은 형식**(`layout_to_json` 의 leaf 본문)이다.
     /// 그래서 되살리기가 `restore_leaf` 재사용이 되고, claude 였던 pane 은 `--resume`
     /// 까지 그 함수가 알아서 딸려 온다.
-    pub(crate) fn record_closed_pane(&mut self, pane: &str) {
+    ///
+    /// `alive` 는 이 pane 의 PTY 가 계속 도는지다 — 사용자가 닫은 것(`hide_pane`)은
+    /// 참이라 되살리기가 재부착이 되고, 셸이 스스로 끝난 것(`reap_dead_panes`)은
+    /// 거짓이라 레코드로 새로 띄운다.
+    /// `stashed` 는 사이드바 「숨기기」로 치운 것 — 두 정리 루프(개수 상한·idle reap)가
+    /// 건너뛴다. 닫기(⌘W)는 `false` 로 들어와 종전대로 정리 대상이다.
+    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool, stashed: bool) {
         if self.tmux.is_some() || !self.pty.contains_key(pane) {
             return;
         }
@@ -705,6 +813,9 @@ impl App {
                 .or_else(|| leaves.get(i.wrapping_sub(1)))
                 .map(|s| s.to_string())
         });
+        // ws 락 **밖에서** 먼저 뜬다 — 이 스냅샷은 백엔드의 다른 뮤텍스를 잡으므로,
+        // 락 안에서 부르면 두 락의 획득 순서가 뒤엉킬 자리를 만든다.
+        let agent_cfg = self.agent_cfg_snapshot();
         let (rec, character) = {
             let ws = self.ws.lock().unwrap();
             let rec = Self::layout_to_json(
@@ -712,6 +823,7 @@ impl App {
                 &self.pty,
                 &ws,
                 &self.pane_claude_sid,
+                &agent_cfg,
             );
             let ch = ws.pane_character.get(pane).cloned().unwrap_or_default();
             (rec, ch)
@@ -737,12 +849,104 @@ impl App {
             folder,
             neighbor,
             window,
+            alive,
+            stashed,
+            // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
+            // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
+            idle_since: None,
         });
-        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있다.
-        while self.closed_panes.len() > crate::CLOSED_PANE_KEEP {
-            self.closed_panes.remove(0);
+        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
+        // 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
+        // 무한정 쌓인다.
+        // 상한은 **정리 대상만** 센다. 숨긴 것(`stashed`)은 세지도 놓지도 않는다 —
+        // 숨겨 둔 학생 여럿 때문에 방금 닫은 pane 이 밀려 죽으면 안 된다.
+        while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {
+            let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else { break };
+            let c = self.closed_panes.remove(i);
+            if c.alive {
+                self.kill_hidden_pane(&c.pane_id);
+            }
         }
         self.chrome_dirty = true;
+    }
+
+    /// 닫아 둔 pane 중 **잊힌 것**을 놓는다 — 내리 노는 상태가 `CLOSED_PANE_IDLE_REAP`
+    /// 를 넘으면 프로세스를 끈다.
+    ///
+    /// 닫아도 안 죽이는 건 의도다(`hide_pane`): 그 안의 claude 가 하던 일을 계속하고,
+    /// 되살리기가 재부착이 된다. 문제는 놓는 계기가 개수 상한뿐이었다는 것 — 그건
+    /// **다음 닫기가 있어야** 도니, 몇 개 닫고 손 떼면 그 셸들이 무기한 남았다.
+    ///
+    /// 그래서 일하는 것과 잊힌 것을 가른다. 일하는 중이면 타이머가 매번 풀리므로
+    /// 닫아 두고 계속 돌리는 용법은 그대로 산다.
+    pub(crate) fn reap_idle_closed_panes(&mut self) {
+        if self.closed_panes.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        // ws 락과 `closed_panes` 를 동시에 빌릴 수 없어 판정을 먼저 걷어 온다.
+        let working: Vec<bool> = {
+            let ws = self.ws.lock().unwrap();
+            self.closed_panes
+                .iter()
+                .map(|c| {
+                    ws.panes
+                        .get(&c.pane_id)
+                        .and_then(|p| p.term())
+                        .is_some_and(crate::input::term_is_working)
+                })
+                .collect()
+        };
+        let limit = crate::closed_pane_idle_reap();
+        let mut doomed: Vec<usize> = Vec::new();
+        for (i, c) in self.closed_panes.iter_mut().enumerate() {
+            // 이미 죽은 pane 은 레코드로만 되살아나므로 셀 것이 없다.
+            // 숨긴 것도 시간을 안 센다 — **놀고 있는 게 정상이고 그래서 치운 것**이다.
+            // 여기서 세면 15분 뒤 조용히 죽어, 돌아온 사용자가 빈 셸을 보게 된다.
+            if !c.alive || c.stashed {
+                continue;
+            }
+            if working[i] {
+                c.idle_since = None;
+                continue;
+            }
+            let since = *c.idle_since.get_or_insert(now);
+            if now.duration_since(since) >= limit {
+                doomed.push(i);
+            }
+        }
+        if doomed.is_empty() {
+            return;
+        }
+        // 뒤에서부터 — 앞을 지우면 뒤 인덱스가 밀린다.
+        for i in doomed.into_iter().rev() {
+            let c = self.closed_panes.remove(i);
+            self.kill_hidden_pane(&c.pane_id);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 인포의 × — 되살리기 목록에서 지우고, 아직 돌고 있으면 프로세스까지 끈다.
+    pub(crate) fn discard_closed_pane_at(&mut self, idx: usize) {
+        if idx >= self.closed_panes.len() {
+            return;
+        }
+        let c = self.closed_panes.remove(idx);
+        if c.alive {
+            self.kill_hidden_pane(&c.pane_id);
+        }
+        // 마지막 하나를 지우면 하단바가 접힌다 — 그만큼 그리드가 다시 늘어야 한다.
+        // 안 그러면 바가 있던 40px 이 빈 띠로 남는다(닫을 때는 `hide_pane` 이 이미
+        // 같은 일을 한다).
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// ⌘⇧T — 가장 최근에 닫은 pane 을 되살린다.
@@ -771,10 +975,20 @@ impl App {
         {
             self.switch_window(c.window);
         }
-        let (cols, rows) = self.window_cells();
-        let Some(new_id) = self.restore_leaf(&c.rec, cols, rows) else {
-            eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
-            return;
+        // 아직 돌고 있으면 새로 띄우지 않는다 — 그 pane 은 화면에서만 빠져 있었을
+        // 뿐 셸도 claude 도 그대로다. `--resume` 으로 대화를 되감으면 오히려 하던
+        // 일이 끊긴다. `alive` 를 믿지 말고 실제 PTY 로 확인하는 건, 숨긴 사이에
+        // 셸이 스스로 끝났을 수 있어서다(그때는 아래 레코드 경로로 흘러간다).
+        let attached = c.alive && self.pty.contains_key(&c.pane_id);
+        let new_id = if attached {
+            c.pane_id.clone()
+        } else {
+            let (cols, rows) = self.window_cells();
+            let Some(id) = self.restore_leaf(&c.rec, cols, rows) else {
+                eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
+                return;
+            };
+            id
         };
         let anchor = c
             .neighbor
@@ -905,6 +1119,7 @@ impl App {
                 .window_labels_at
                 .is_some_and(|t| now.duration_since(t).as_millis() < 1000);
         if fresh {
+            self.overlay_room_rename_label();
             return;
         }
         let n = self.windows.len();
@@ -913,20 +1128,46 @@ impl App {
         for i in 0..n {
             // Representative pane = first leaf of the window's layout. The
             // active window's tree lives in pty_layout; the rest in windows[i].
-            let repr = {
+            let leaves: Vec<String> = {
                 let layout = if i == self.active_window {
                     self.pty_layout.as_ref()
                 } else {
                     self.windows.get(i).and_then(|o| o.as_ref())
                 };
-                layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))
+                layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
             };
-            // window.rename override 가 파생 이름보다 우선한다 —
-            // 지정 pane 이 대표 leaf 가 아니어도 유지돼야 한다.
+            let repr = leaves.first().cloned();
+            // 방을 대표하는 cwd — 첫 leaf 가 아니라 **방 전체의 최빈값**이다. 첫
+            // pane 하나로 이름을 지으면 그 pane 이 뭘 띄웠는지에 따라 방 이름이
+            // 흔들려, 사이드바에서 자리로 방을 찾던 눈이 매번 다시 읽어야 했다.
+            // 방은 대개 한 프로젝트라 최빈 cwd 가 곧 그 방의 정체다(거노 확인).
+            let home = leaves
+                .iter()
+                .filter_map(|id| self.pane_current_cwd(id))
+                .fold(Vec::<(std::path::PathBuf, usize)>::new(), |mut acc, p| {
+                    match acc.iter_mut().find(|(q, _)| *q == p) {
+                        Some((_, c)) => *c += 1,
+                        None => acc.push((p, 1)),
+                    }
+                    acc
+                })
+                .into_iter()
+                // 동률이면 먼저 나온 것(첫 leaf 쪽)을 남긴다 — leaves 순서가
+                // 고정이라 같은 방이 늘 같은 이름을 얻는다.
+                .reduce(|a, b| if b.1 > a.1 { b } else { a })
+                .map(|(p, _)| p);
+            // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
+            // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
                 .window_name_override
                 .get(&i)
                 .cloned()
+                .or_else(|| {
+                    home.as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                })
                 .or_else(|| {
                     repr.as_ref().and_then(|id| {
                         ws.panes
@@ -942,16 +1183,37 @@ impl App {
                     })
                 })
                 .unwrap_or_else(|| format!("win {}", i + 1));
-            let cwd = repr
+            let cwd = home
                 .as_ref()
-                .and_then(|id| self.pane_current_cwd(id))
-                .map(|p| Self::shorten_cwd(&p))
+                .map(|p| Self::shorten_cwd(p))
                 .unwrap_or_default();
             out.push((name, cwd));
         }
         drop(ws);
         self.window_labels = out;
         self.window_labels_at = Some(now);
+        self.overlay_room_rename_label();
+    }
+
+    /// 편집 중인 방의 라벨을 버퍼(+조합 중인 글자+캐럿)로 덮는다. 별도 입력칸을
+    /// 띄우지 않고 라벨 자리를 그대로 쓰는 Finder 식 편집이다.
+    ///
+    /// **재계산 안이 아니라 밖에서 덮는 게 핵심이다.** 위 캐시는 1초짜리고 cwd 를
+    /// `lsof` 로 캐느라 비싸서 매 키마다 깰 수가 없는데, 합성을 그 안에 두면 타이핑이
+    /// 1초씩 뭉쳐 나온다(거노: "이름 바꾸는 게 버벅여").
+    fn overlay_room_rename_label(&mut self) {
+        let Some((idx, buf)) = self.room_rename.editing.as_ref() else { return };
+        let composing = match self.ime_focus {
+            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
+            _ => "",
+        };
+        // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안 커서가 어디 있는지
+        // 화면이 거짓말을 한다. 조합 중인 글자는 커서 바로 앞에 온다.
+        let (before, after) = crate::lineedit::split(buf, self.room_rename.cursor);
+        let text = format!("{before}{composing}\u{258c}{after}");
+        if let Some(slot) = self.window_labels.get_mut(*idx) {
+            slot.0 = text;
+        }
     }
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
     /// runs past `max` chars so the meaningful (deepest) part stays visible.
@@ -1324,7 +1586,7 @@ impl App {
             return;
         }
 
-        let new_id = format!("%{}", self.next_pane_id);
+        let new_id = self.alloc_pane_id();
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -1388,7 +1650,6 @@ impl App {
         let Some(active) = active else {
             return;
         };
-        self.next_pane_id += 1;
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -1452,9 +1713,9 @@ impl App {
 
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, kasa_pty::SplitDir::Horizontal, new_id.clone()) {
-            // Active pane isn't in the tree — undo the orphan insert.
+            // Active pane isn't in the tree — undo the orphan insert. 번호는 따로
+            // 되돌릴 게 없다: 등록을 지우면 alloc_pane_id 가 다시 빈 번호로 본다.
             self.ws.lock().unwrap().panes.remove(&new_id);
-            self.next_pane_id -= 1;
             return;
         }
         self.ws.lock().unwrap().active_pane = Some(new_id);
@@ -1505,8 +1766,7 @@ impl App {
                 return;
             }
         };
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_id = self.alloc_pane_id();
         let doc = Arc::new(build_markdown_doc(&path, &raw));
         let title = path
             .file_name()
@@ -1868,6 +2128,17 @@ impl App {
     /// the renderer has no scissor). This only clamps `first` into range;
     /// keeping the *active* tab in view is `win_tab_reveal`'s job at
     /// switch/create time, so a free wheel-scroll is never yanked back.
+    /// `i` 번 방의 pane id 들. 활성 방의 트리만 `pty_layout` 에 나가 있어 슬롯이
+    /// 비는데, 그걸 모르고 `windows[i]` 만 보면 지금 보고 있는 방이 늘 빈 방이 된다
+    /// — 사이드바·라벨·상태 점이 다 이 갈래를 각자 쓰고 있어 한 곳으로 모은다.
+    pub(crate) fn window_leaves(&self, i: usize) -> Vec<String> {
+        let layout = if i == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(i).and_then(|o| o.as_ref())
+        };
+        layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
+    }
     pub(crate) fn sidebar_layout(
         &self,
         win_h: f32,
@@ -1875,6 +2146,10 @@ impl App {
         Vec<(usize, (f32, f32, f32, f32))>,
         Vec<(usize, (f32, f32, f32, f32))>,
         (f32, f32, f32, f32),
+        Vec<(usize, String, (f32, f32, f32, f32))>,
+        // 배치도 칸 — 목록 행과 **같은 모양**이라 히트 벡터에 그대로 합칠 수 있다.
+        // 그러면 칸 클릭·드래그·우클릭이 행과 똑같이 동작한다(공짜로 따라온다).
+        Vec<(usize, String, (f32, f32, f32, f32))>,
     ) {
         let n = self.windows.len();
         if self.tabs_on_top {
@@ -1914,7 +2189,8 @@ impl App {
                 }
             }
             let plus = (x0 + tabs.len() as f32 * (tab_w + gap), y, plus_w, tab_h);
-            return (tabs, closes, plus);
+            // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록도 배치도도 세로 전용.
+            return (tabs, closes, plus, Vec::new(), Vec::new());
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
@@ -1924,18 +2200,62 @@ impl App {
         // Rows that fit above the "+" button; the dock strip eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
-        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데, 이
+        // 렌더러엔 scissor 가 없어서 **잘리지 않고 그대로 덮어 그려진다** — 화면은
+        // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
+        let bottom_h =
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
         // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
         // chevron-down 오버플로 힌트 자리.
-        let avail_h = (win_h - dock_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
+        let avail_h = (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
+        // 스크롤 시작점은 **접힌 높이 기준**으로 잡는다 — 펼침은 방금 사용자가
+        // 편 것이라 그만큼 뒤가 밀리는 게 자연스럽고, 가변 높이로 역산하면 펼칠
+        // 때마다 목록이 통째로 점프한다.
         let n_vis = n
             .min((((avail_h + SIDEBAR_TAB_GAP) / stride) as usize).max(1));
         let first = self.win_tab_first.min(n.saturating_sub(n_vis));
         let mut tabs = Vec::with_capacity(n_vis);
         let mut closes = Vec::new();
-        for (vi, i) in (first..n.min(first + n_vis)).enumerate() {
-            let y = top + vi as f32 * stride;
-            tabs.push((i, (tab_x, y, tab_w, SIDEBAR_TAB_H)));
+        let mut rows = Vec::new();
+        let mut mini = Vec::new();
+        // 펼친 방은 카드가 pane 수만큼 길어진다 — 고정 stride 를 쓰던 자리를 누적
+        // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(렌더러에 scissor 가
+        // 없어 반쪽 카드는 트레이를 침범한다).
+        let mut y = top;
+        for i in first..n {
+            let leaves = self.window_leaves(i);
+            // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
+            // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.
+            let hidden: Vec<String> = self
+                .closed_panes
+                .iter()
+                .filter(|c| c.stashed && c.alive && c.window == i)
+                .map(|c| c.pane_id.clone())
+                .collect();
+            // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
+            // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
+            // 방에선 그 학생을 볼 길이 통째로 사라졌다(거노, 두 번). 손잡이 쪽은 이미
+            // 폈는데 여기가 안 따라와 버튼만 있고 아무것도 안 나오는 상태였다 — 두
+            // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
+            // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
+            let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
+            // 펼친 카드는 **한 번에 한 뷰**다 — 배치도(기본)거나 목록이거나. 둘을 같이
+            // 두면 같은 pane 을 두 번 말하면서 카드만 두 배로 길어진다(2026-08-11 지시).
+            // 지도 모드에선 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 —
+            // 여섯 칸을 46px 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
+            let list_view = self.list_view_windows.contains(&i);
+            let body_h = if list_view {
+                leaves.len() as f32 * SIDEBAR_ROW_H
+            } else {
+                (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
+            };
+            let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+            let list_h = (full_h * t).round();
+            let h = SIDEBAR_TAB_H + list_h;
+            if !tabs.is_empty() && y + h > top + avail_h {
+                break;
+            }
+            tabs.push((i, (tab_x, y, tab_w, h)));
             if n > 1 {
                 let cs = 14.0;
                 // Centered on the *name* row (drawn at y+11, 13.5px) rather than
@@ -1943,15 +2263,67 @@ impl App {
                 // title it belongs to, reading as detached from both lines.
                 closes.push((i, (tab_x + tab_w - cs - 3.0, y + 11.0, cs, cs)));
             }
+            if list_h > 0.0 {
+                // 카드 안에 온전히 들어온 줄만 낸다 — scissor 가 없어 반쪽 줄은
+                // 카드 밖으로 삐져나온다. 그래서 목록이 아래에서 한 줄씩 드러난다.
+                let bottom = y + h;
+                // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
+                // 이미 풀어 주므로 여기서 재귀할 것이 없다.
+                let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
+                if !list_view && ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
+                    // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
+                    // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
+                    let tree = if i == self.active_window {
+                        self.pty_layout.as_ref()
+                    } else {
+                        self.windows.get(i).and_then(|o| o.as_ref())
+                    };
+                    // 1000 을 기준으로 뽑는다. 작은 값(예: 100)을 넣으면 u16 반올림에
+                    // 얇은 pane 이 0 폭으로 뭉개진다.
+                    const G: f32 = 1000.0;
+                    let cells = tree.map(|t| t.leaf_rects(1000, 1000)).unwrap_or_default();
+                    for (id, cx, cy, cw, ch) in cells {
+                        // 1px 씩 깎아 칸 사이에 틈을 낸다 — 붙여 놓으면 분할선이 안 보여
+                        // 한 덩어리로 읽힌다.
+                        mini.push((
+                            i,
+                            id,
+                            (
+                                ma.0 + cx as f32 / G * ma.2,
+                                ma.1 + cy as f32 / G * ma.3,
+                                (cw as f32 / G * ma.2 - 1.0).max(2.0),
+                                (ch as f32 / G * ma.3 - 1.0).max(2.0),
+                            ),
+                        ));
+                    }
+                }
+                // 목록 모드면 트리 pane 이 여기서 줄이 되고, 지도 모드면 지도 아래
+                // 꼬리에 숨긴 pane 만 남는다 — 숨긴 것은 트리에 없어 칸이 없으므로
+                // 지도로는 말할 방법이 아예 없다.
+                let head = if list_view { 0.0 } else { body_h };
+                let tree_rows: &[String] = if list_view { &leaves } else { &[] };
+                for (k, id) in tree_rows.iter().chain(hidden.iter()).enumerate() {
+                    let ry = y
+                        + SIDEBAR_TAB_H
+                        + head
+                        + SIDEBAR_ROW_PAD / 2.0
+                        + k as f32 * SIDEBAR_ROW_H;
+                    if ry + SIDEBAR_ROW_H > bottom {
+                        break;
+                    }
+                    rows.push((i, id.clone(), (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H)));
+                }
+            }
+            y += h + SIDEBAR_TAB_GAP;
         }
         // `+` 는 목록 꼬리가 아니라 하단 트레이의 왼쪽 칸이다 — 세션이 늘어도 자리가
         // 안 움직인다. 트레이가 없는 배치(top 탭·사이드바 접힘)에서는 어차피 이
         // 분기를 안 타므로 폴백은 목록 꼬리 그대로.
         let plus = self.sidebar_tray_rects(win_h).map_or_else(
-            || (tab_x, top + tabs.len() as f32 * stride, tab_w, 28.0),
+            || (tab_x, y, tab_w, 28.0),
             |(_, p, ..)| p,
         );
-        (tabs, closes, plus)
+        (tabs, closes, plus, rows, mini)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
@@ -1974,8 +2346,19 @@ impl App {
     /// Split out from `save_session_state` so the autosave path can hash the
     /// result and skip an identical write — the two must produce byte-identical
     /// state or a Cmd+Q would look like a change and rewrite for nothing.
+    /// 저장이 leaf 에 실을 surface_id → (model, effort). 소켓 백엔드가 없으면 빈 맵.
+    ///
+    /// 값을 모으는 쪽은 백엔드다(claude 는 statusline 보고, codex 는 transcript 머리).
+    /// App 에 같은 맵을 하나 더 두지 않고 그때그때 떠 오는 이유는, App struct 의 필드
+    /// 정의가 워커 여럿이 동시에 못 만지는 병목이기 때문이다(CLAUDE.md).
+    pub(crate) fn agent_cfg_snapshot(&self) -> HashMap<String, (String, String)> {
+        self.socket_backend.as_ref().map(|b| b.agent_cfg_snapshot()).unwrap_or_default()
+    }
+
     pub(crate) fn session_state_json(&self) -> Option<serde_json::Value> {
         let mut sessions_json = Vec::new();
+        // 창별 워크스페이스 락을 잡기 전에 한 번만 뜬다(락 순서 얽힘 방지).
+        let agent_cfg = self.agent_cfg_snapshot();
         for i in 0..self.sessions.len() {
             // Each session contributes all its windows. The active session's
             // live state is in self.{pty,pty_layout,windows,active_window};
@@ -2017,7 +2400,13 @@ impl App {
                 if j == active_window {
                     new_active = windows_json.len();
                 }
-                windows_json.push(Self::layout_to_json(layout, pty, &ws_guard, &self.pane_claude_sid));
+                windows_json.push(Self::layout_to_json(
+                    layout,
+                    pty,
+                    &ws_guard,
+                    &self.pane_claude_sid,
+                    &agent_cfg,
+                ));
             }
             if windows_json.is_empty() {
                 continue;
@@ -2083,6 +2472,7 @@ impl App {
         pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         ws: &Workspace,
         pane_claude_sid: &HashMap<String, String>,
+        agent_cfg: &HashMap<String, (String, String)>,
     ) -> serde_json::Value {
         match layout {
             kasa_pty::PtyLayout::Leaf { pane_id } => {
@@ -2099,10 +2489,15 @@ impl App {
                     // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
                     // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
                     obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
-                    let sb = ws
-                        .panes
+                    // 진짜 스크롤백은 PTY(alacritty grid)가 갖고 있다. GUI 쪽
+                    // `scrollback_lines` 는 프레임 diff 로 쌓던 history 를 읽는데, 그
+                    // 추측이 폐기된 뒤로 아무도 그걸 안 채워 **늘 화면 한 장**만 저장됐다
+                    // (실측: 400줄 뿌린 pane 이 38줄). 상한을 올려도 안 늘던 이유다.
+                    // PTY 가 없는 백엔드(tmux)는 옛 경로로 떨어진다.
+                    let sb = pty
                         .get(pane_id)
-                        .map(scrollback_lines)
+                        .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
+                        .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
                         .unwrap_or_default();
                     obj.insert("scrollback".to_string(), serde_json::json!(sb));
                     // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
@@ -2121,6 +2516,17 @@ impl App {
                     if let Some(sid) = pane_claude_sid.get(pane_id) {
                         obj.insert("session_id".to_string(), serde_json::json!(sid));
                     }
+                    // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
+                    // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
+                    // `--model ''` 같은 게 나갈 위험만 는다.
+                    if let Some((model, effort)) = agent_cfg.get(pane_id) {
+                        if !model.is_empty() {
+                            obj.insert("model".to_string(), serde_json::json!(model));
+                        }
+                        if !effort.is_empty() {
+                            obj.insert("effort".to_string(), serde_json::json!(effort));
+                        }
+                    }
                 }
                 serde_json::json!({ "leaf": rec })
             }
@@ -2132,8 +2538,8 @@ impl App {
                 serde_json::json!({ "split": {
                     "dir": dir,
                     "ratio": ratio,
-                    "a": Self::layout_to_json(a, pty, ws, pane_claude_sid),
-                    "b": Self::layout_to_json(b, pty, ws, pane_claude_sid),
+                    "a": Self::layout_to_json(a, pty, ws, pane_claude_sid, agent_cfg),
+                    "b": Self::layout_to_json(b, pty, ws, pane_claude_sid, agent_cfg),
                 }})
             }
         }
@@ -2149,15 +2555,12 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
-                let was_claude = leaf
-                    .get("was_claude")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
+                let was_agent = saved_agent(leaf).is_some();
                 let bound_sid = leaf
                     .get("session_id")
                     .and_then(|c| c.as_str())
                     .is_some_and(|s| !s.is_empty());
-                if was_claude || bound_sid {
+                if was_agent || bound_sid {
                     *n += 1;
                 }
             } else if let Some(split) = node.get("split") {
@@ -2324,9 +2727,9 @@ impl App {
         }
         None
     }
-    /// Spawn one restored pane from its saved record and, when it was running
-    /// claude, queue the resume command. Returns the new pane id, or None if the
-    /// PTY failed to start (caller then collapses the split).
+    /// Spawn one restored pane from its saved record and, when it was running an
+    /// agent, queue the command that brings it back. Returns the new pane id, or
+    /// None if the PTY failed to start (caller then collapses the split).
     fn restore_leaf(
         &mut self,
         rec: &serde_json::Value,
@@ -2334,17 +2737,17 @@ impl App {
         rows: u16,
     ) -> Option<String> {
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
-        let taken = |s: &str| self.pty.contains_key(s);
-        let id = pick_restore_id(saved, taken, &mut self.next_pane_id);
+        // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
+        // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.
+        let used = self.used_pane_ids();
+        let id = pick_restore_id(saved, |s| used.contains(s))
+            .unwrap_or_else(|| next_free_pane_id(&used));
         let cwd = rec
             .get("cwd")
             .and_then(|c| c.as_str())
             .map(|s| s.to_string())
             .or_else(resolve_initial_cwd);
-        let was_claude = rec
-            .get("was_claude")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
+        let was_agent = saved_agent(rec);
         let session_id = rec
             .get("session_id")
             .and_then(|s| s.as_str())
@@ -2395,28 +2798,53 @@ impl App {
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
         self.insert_pty(id.clone(), session.clone());
-        // Bring claude back: --resume the saved conversation (the shim
+        // Bring the agent back: --resume the saved conversation (the shim
         // re-attaches team/persona/character from the session id), or a fresh
-        // claude when the pane ran claude but no session id was captured.
+        // one when the pane ran an agent but no session id was captured.
         // Plain-shell panes restore to just their shell + scrollback. 900ms
         // mirrors swap_character's wait for the shell prompt before injection.
-        // was_claude 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
+        // 하네스 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
         // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
-        if was_claude || (saved_char.is_some() && session_id.is_some()) {
+        if was_agent.is_some() || (saved_char.is_some() && session_id.is_some()) {
             // --resume 대상 대화가 실재할 때만 resume 한다. 저장된 sid 의 jsonl 이
             // 사라졌으면 claude 가 "No conversation found" 를 뱉고 빈 셸만 남아 학생
             // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
             // 순회에서 빠졌다). 그땐 fresh claude 로 폴백해 최소한 학생 pane(캐릭터는
             // env/marker 로 유지)은 살린다 — 대화는 잃지만 pane 이 통째 죽는 것보다 낫다.
+            //
+            // 파일이 사는 곳이 하네스마다 다르다 — claude 는 `~/.claude/projects/<슬러그>/
+            // <sid>.jsonl`, codex 는 `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`.
             let resumable = session_id
                 .as_deref()
-                .and_then(socket::transcript_path_for_session)
+                .and_then(|sid| {
+                    if was_agent == Some("codex") {
+                        socket::codex_rollout_for_session(sid)
+                    } else {
+                        socket::transcript_path_for_session(sid)
+                    }
+                })
                 .map(|p| p.exists())
                 .unwrap_or(false);
-            let cmd = match &session_id {
-                Some(sid) if resumable => format!("claude --resume {sid}\r"),
-                _ => "claude\r".to_string(),
-            };
+            // 이어가기 실패는 무증상이었다 — 빈 세션이 학생 얼굴로 멀쩡히 떠서,
+            // 대화를 잃은 줄 모른 채 계속 쓰게 된다(미도리 실측). 자리를 만들어
+            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다. 하네스와 무관하게
+            // 같다 — codex 도 이제 이어가므로 잃으면 똑같이 말해야 한다.
+            if session_id.is_some() && !resumable {
+                self.collab.toast = Some((
+                    format!(
+                        "{} 이어갈 대화를 못 찾아 새로 시작합니다",
+                        saved_char.as_deref().unwrap_or("이 pane 은")
+                    ),
+                    std::time::Instant::now(),
+                ));
+            }
+            let cmd = restore_agent_command(
+                was_agent,
+                session_id.as_deref(),
+                resumable,
+                saved_model(rec),
+                saved_effort(rec),
+            );
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
@@ -2614,17 +3042,23 @@ impl App {
         // Model-invoked tools for the claude running inside a pane: the
         // same Backend, exposed over MCP-on-HTTP. Replaces the external
         // python bridge (mcp/kasa_mcp.py).
-        match kasa_mcp::spawn_http_server(backend.clone(), 8765) {
+        // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어지고,
+        // 그러면 register_clients 가 전역 등록을 건너뛴다(주인 주소 보호).
+        const CANONICAL_MCP_PORT: u16 = 8765;
+        let http_port = match kasa_mcp::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT) {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
-                let _ = std::fs::write(mcp_port_file_path(), port.to_string());
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
-                kasa_mcp::register_clients(port);
+                kasa_mcp::register_clients(port, CANONICAL_MCP_PORT);
+                Some(port)
             }
-            Err(e) => eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}"),
-        }
+            Err(e) => {
+                eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}");
+                None
+            }
+        };
         let path = resolve_kasaterm_socket_path();
         let server = match kasa_socket::Server::bind(&path) {
             Ok(s) => s,
@@ -2637,6 +3071,15 @@ impl App {
         eprintln!("[agent-socket] listening on {resolved}");
         std::env::set_var("KASATERM_SOCKET_PATH", &resolved);
         std::env::set_var("CMUX_SOCKET_PATH", &resolved);
+        // Publish the port only now: the file is keyed to the *resolved* socket,
+        // and until `Server::bind` returns we do not know it. Writing earlier
+        // used the inherited env — so an instance launched from a pane stamped
+        // its port next to the parent's socket and hijacked the parent's hooks.
+        // A failed bind returns above without publishing, which is correct: a
+        // port nobody can reach through this socket should not be advertised.
+        if let Some(port) = http_port {
+            let _ = std::fs::write(mcp_port_file_for(&resolved), port.to_string());
+        }
         let _join = server.spawn(backend);
     }
     pub(crate) fn start_socket_tmux(&self, tmux: Arc<kasa_bridge::TmuxSession>) {
@@ -2650,6 +3093,7 @@ impl App {
             self.proxy.clone(),
             self.ws.clone(),
             self.collab.attention.clone(),
+            self.collab.hook_activity.clone(),
             self.pane_status_pub.clone(),
             self.bg_agents.clone(),
         ));
@@ -2706,18 +3150,124 @@ pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBu
 /// 저장본에 id 가 없거나(옛 포맷) 이미 쓰이는 번호면 새로 발급한다. 되살린 번호가
 /// 카운터보다 크면 카운터를 그 위로 밀어, 이후 split 이 같은 번호를 다시 내주지
 /// 않게 한다.
-fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool, next: &mut u32) -> String {
-    if let Some(s) = saved {
-        if let Some(n) = s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok()) {
-            if !taken(s) {
-                *next = (*next).max(n + 1);
-                return s.to_string();
-            }
+/// 저장된 leaf 가 어떤 하네스로 돌던 pane 인지 — 없으면 순수 셸.
+///
+/// 정본 키는 `was_agent`("claude"|"codex"|"agy"). 그 전 포맷은 `was_claude: true` 뿐이라
+/// **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던 학생
+/// pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
+/// 언젠가 갈린다).
+fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
+    match rec.get("was_agent").and_then(|v| v.as_str()) {
+        Some("codex") => return Some("codex"),
+        Some("claude") => return Some("claude"),
+        Some("agy") => return Some("agy"),
+        _ => {}
+    }
+    rec.get("was_claude")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+        .then_some("claude")
+}
+
+/// 저장된 leaf 가 쓰던 모델 — 없으면 `None`(복원 명령에 플래그를 안 붙인다).
+///
+/// 옛 저장본엔 이 키가 없다. 그때 빈 문자열이 아니라 `None` 이어야 하는 이유는,
+/// 호출부가 "없으면 플래그 자체를 뺀다"로 갈리기 때문이다 — 빈 값을 흘리면
+/// `--model ''` 이 나가 하네스가 기본값도 못 고른다.
+fn saved_model(rec: &serde_json::Value) -> Option<&str> {
+    rec.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+/// 저장된 leaf 가 쓰던 reasoning effort — 없으면 `None`. `saved_model` 과 같은 규약.
+fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
+    rec.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+/// 복원된 pane 에 넣을 명령. 하네스 셋 × (이어가기/새로)라 순수 함수로 뺐다 —
+/// `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를 테스트할 방법이
+/// 사라진다.
+///
+/// ⚠️ **마지막 갈래가 claude 라는 게 함정이다.** 새 하네스를 여기 안 적으면 오류
+/// 없이 claude 로 되살아나고, 이어가기까지 걸리면 남의 하네스 세션 id 로
+/// `claude --resume` 을 친다. agy 를 붙일 때 실제로 그 상태였다(2026-08-11).
+///
+/// codex 도 이어간다. 셋을 실측으로 확인했다(2026-08-05):
+/// - `codex resume <uuid>` 는 **pane 홈이 사라져도** 대화를 되살린다. shim 이 세운
+///   pane 별 CODEX_HOME 은 GUI pid 별이라 재시작이면 통째로 없어지는데, `sessions` 가
+///   `~/.codex/sessions` 심볼릭이라 실체가 남고 codex 가 거기서 찾아낸다(홈을 치우고
+///   다른 pane 홈에서 resume 해 첫 질문까지 그대로 복원되는 것을 확인).
+/// - 세션 id 는 `pane_claude_sid`(bind-transcript 훅)로 들어온다 — rollout 파일명에서
+///   uuid 를 떼어낸 값이다. argv 로는 못 집는다.
+/// - `resume --last` 는 쓰지 않는다. 그건 미러된 `~/.codex/sessions` 전체에서 최신 하나를
+///   고르므로 **다른 pane·pane 밖 codex 의 대화**를 물어온다. id 가 없으면 새로 띄운다.
+/// `model`/`effort` 는 끄기 직전 그 pane 이 쓰던 값이다(없으면 `None`). **없으면
+/// 플래그 자체를 안 붙인다** — 빈 값을 넘기면 하네스가 기본값조차 못 고른다.
+///
+/// 문법이 셋 다 다르다(실측 2026-08-11): claude·agy 는 `--model`/`--effort` 플래그,
+/// codex 는 `-m` 과 config 오버라이드(`-c model_reasoning_effort=`).
+///
+/// ⚠️ agy 에는 지금 model 이 실려 오지 않는다 — 전사본의 모델이 되먹일 수 없는
+/// 표시용 이름(`Gemini 3.6 Flash (Low)`)이라 수집 쪽에서 일부러 안 담는다. 나중에
+/// 담게 되거든 **`agy models` 목록과 대조하고 나서** 담아라: agy 는 없는 모델값에
+/// 에러를 안 내고 조용히 기본값으로 돌아, 틀려도 아무 데도 안 남는다.
+pub(crate) fn restore_agent_command(
+    agent: Option<&str>,
+    session_id: Option<&str>,
+    resumable: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    // 값은 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라 무인용
+    // 이면 "no matches found" 로 명령이 통째 실패한다. shim 쪽에서 같은 사고가 실제로
+    // 났다(2026-07-27: 학생이 전부 구세대 Opus 로 떨어짐).
+    let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    let model = model.filter(|s| !s.is_empty());
+    let effort = effort.filter(|s| !s.is_empty());
+    let resume = session_id.filter(|_| resumable);
+    let mut cmd = match (agent, resume) {
+        (Some("codex"), Some(sid)) => format!("codex resume {sid}"),
+        (Some("codex"), None) => "codex".to_string(),
+        // agy 는 아직 세션 id 가 안 들어온다 — bind-transcript 훅이 claude·codex
+        // shim 에만 걸려 있어서다. 그래도 하네스는 맞춰 띄운다: 여기 없으면 agy
+        // pane 이 claude 로 되살아난다.
+        (Some("agy"), Some(sid)) => format!("agy --conversation {sid}"),
+        (Some("agy"), None) => "agy".to_string(),
+        (_, Some(sid)) => format!("claude --resume {sid}"),
+        (_, None) => "claude".to_string(),
+    };
+    if agent == Some("codex") {
+        if let Some(m) = model {
+            cmd.push_str(&format!(" -m {}", q(m)));
+        }
+        if let Some(e) = effort {
+            cmd.push_str(&format!(" -c model_reasoning_effort={}", q(e)));
+        }
+    } else {
+        // claude 는 shim 이 전역 `--model` 을 **앞에** 붙이는데, 뒤에 온 우리 값이
+        // 이긴다(clap 은 같은 플래그를 마지막 것으로 덮는다). 그래서 pane 별 값이
+        // 전역 설정을 넘어선다.
+        if let Some(m) = model {
+            cmd.push_str(&format!(" --model {}", q(m)));
+        }
+        if let Some(e) = effort {
+            cmd.push_str(&format!(" --effort {}", q(e)));
         }
     }
-    let s = format!("%{next}");
-    *next += 1;
-    s
+    cmd.push('\r');
+    cmd
+}
+
+/// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
+fn next_free_pane_id(used: &std::collections::HashSet<String>) -> String {
+    (0u32..).map(|n| format!("%{n}")).find(|id| !used.contains(id)).unwrap_or_default()
+}
+
+/// 저장본의 pane 번호를 그대로 되살릴 수 있으면 그것. 없거나(옛 저장본) 형식이
+/// 깨졌거나 이미 살아 있으면 `None` — 그때는 호출부가 `alloc_pane_id` 로 새로 받는다.
+fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<String> {
+    let s = saved?;
+    s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok())?;
+    (!taken(s)).then(|| s.to_string())
 }
 
 /// 편집기 명령과 파일 경로로 셸에 칠 한 줄을 만든다. `{}` 가 있으면 그 자리에,
@@ -2735,7 +3285,19 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_command_line, git_repo_root, pick_restore_id};
+    use super::{editor_command_line, git_repo_root, next_free_pane_id, pick_restore_id};
+
+    /// 닫힌 번호를 되쓰는 것이 요점이다 — 안 그러면 하루 쓰면 `%116` 이 된다.
+    #[test]
+    fn pane_ids_fill_the_holes_left_by_closed_panes() {
+        let used = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        assert_eq!(next_free_pane_id(&used(&[])), "%0", "첫 pane 은 %0");
+        assert_eq!(next_free_pane_id(&used(&["%0", "%1", "%2"])), "%3");
+        // %1 이 닫혔으면 다음 pane 이 그 자리를 채운다(옛 카운터는 %3 을 줬다).
+        assert_eq!(next_free_pane_id(&used(&["%0", "%2"])), "%1");
+        // 번호는 정수 순서로 센다 — 사전순이면 %10 뒤에 %2 가 아니라 %9 를 놓친다.
+        assert_eq!(next_free_pane_id(&used(&["%0", "%1", "%10", "%2"])), "%3");
+    }
 
     #[test]
     fn editor_line_quotes_the_path_and_honors_the_placeholder() {
@@ -2754,32 +3316,17 @@ mod tests {
 
     #[test]
     fn restore_keeps_the_saved_pane_id() {
-        let mut next = 1;
-        assert_eq!(pick_restore_id(Some("%9"), |_| false, &mut next), "%9");
-        // 되살린 번호 위로 카운터가 밀려야 다음 split 이 %9 를 다시 안 준다.
-        assert_eq!(next, 10);
+        assert_eq!(pick_restore_id(Some("%9"), |_| false).as_deref(), Some("%9"));
     }
 
     #[test]
     fn restore_falls_back_when_the_id_is_missing_or_taken() {
-        // 옛 저장본엔 pane_id 가 없다.
-        let mut next = 3;
-        assert_eq!(pick_restore_id(None, |_| false, &mut next), "%3");
-        assert_eq!(next, 4);
+        // 옛 저장본엔 pane_id 가 없다 → 호출부가 새 번호를 받는다.
+        assert_eq!(pick_restore_id(None, |_| false), None);
         // 이미 살아 있는 번호는 뺏지 않는다.
-        let mut next = 3;
-        assert_eq!(pick_restore_id(Some("%1"), |s| s == "%1", &mut next), "%3");
-        assert_eq!(next, 4);
+        assert_eq!(pick_restore_id(Some("%1"), |s| s == "%1"), None);
         // `%` 없는 쓰레기 값도 폴백.
-        let mut next = 5;
-        assert_eq!(pick_restore_id(Some("garbage"), |_| false, &mut next), "%5");
-    }
-
-    #[test]
-    fn restore_never_lowers_the_counter() {
-        let mut next = 20;
-        assert_eq!(pick_restore_id(Some("%2"), |_| false, &mut next), "%2");
-        assert_eq!(next, 20);
+        assert_eq!(pick_restore_id(Some("garbage"), |_| false), None);
     }
 
     #[test]
@@ -2796,5 +3343,98 @@ mod tests {
     fn returns_none_outside_any_repo() {
         // /tmp 는 레포가 아니고 홈 아래도 아니라 위로 훑어도 `.git` 이 없다.
         assert_eq!(git_repo_root(std::path::Path::new("/tmp")), None);
+    }
+}
+
+#[cfg(test)]
+mod agy_restore_tests {
+    use super::{restore_agent_command, saved_agent, saved_effort, saved_model};
+
+    /// 하네스 갈래만 보는 판 — 모델·effort 는 아래 전용 테스트가 건다.
+    fn cmd(agent: Option<&str>, sid: Option<&str>, resumable: bool) -> String {
+        restore_agent_command(agent, sid, resumable, None, None)
+    }
+
+    /// 복원 명령의 마지막 갈래가 claude 라, 하네스를 여기 안 적으면 **오류 없이**
+    /// claude 로 되살아난다. agy 를 붙이며 실제로 그 상태였다 — 하네스가 하나 더
+    /// 늘 때 같은 함정에 다시 빠지지 않게 셋을 다 건다.
+    #[test]
+    fn every_harness_restores_as_itself() {
+        for (agent, fresh) in [("claude", "claude\r"), ("codex", "codex\r"), ("agy", "agy\r")] {
+            assert_eq!(cmd(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
+        }
+        assert_eq!(cmd(Some("claude"), Some("s1"), true), "claude --resume s1\r");
+        assert_eq!(cmd(Some("codex"), Some("s2"), true), "codex resume s2\r");
+        assert_eq!(cmd(Some("agy"), Some("s3"), true), "agy --conversation s3\r");
+    }
+
+    /// 이어갈 수 없는 세션(파일이 사라짐)은 **id 를 버리고** 새로 띄워야 한다 —
+    /// 남의 하네스 id 를 넘기면 그 CLI 가 엉뚱한 대화를 물어온다.
+    #[test]
+    fn unresumable_drops_the_id() {
+        assert_eq!(cmd(Some("agy"), Some("s3"), false), "agy\r");
+        assert_eq!(cmd(Some("codex"), Some("s2"), false), "codex\r");
+    }
+
+    /// 모델·effort 문법이 하네스마다 다르다. 한 판에서 복붙하다 갈리기 쉬운 자리라
+    /// 셋을 다 못박는다.
+    #[test]
+    fn each_harness_gets_its_own_model_and_effort_syntax() {
+        let m = Some("claude-opus-5[1m]");
+        assert_eq!(
+            restore_agent_command(Some("claude"), Some("s1"), true, m, Some("xhigh")),
+            "claude --resume s1 --model 'claude-opus-5[1m]' --effort 'xhigh'\r",
+            "★ 작은따옴표가 빠지면 `[1m]` 이 zsh 글롭이라 명령이 통째 실패한다"
+        );
+        assert_eq!(
+            restore_agent_command(Some("codex"), Some("s2"), true, Some("gpt-5.5"), Some("high")),
+            "codex resume s2 -m 'gpt-5.5' -c model_reasoning_effort='high'\r"
+        );
+        assert_eq!(
+            restore_agent_command(Some("agy"), Some("s3"), true, None, Some("low")),
+            "agy --conversation s3 --effort 'low'\r"
+        );
+    }
+
+    /// 값이 없으면 **플래그 자체가 빠져야** 한다 — 빈 문자열을 흘리면 `--model ''` 이
+    /// 나가 하네스가 기본값조차 못 고른다. 옛 저장본엔 이 키가 아예 없다.
+    #[test]
+    fn missing_values_drop_the_flag_entirely() {
+        assert_eq!(
+            restore_agent_command(Some("claude"), Some("s1"), true, None, None),
+            "claude --resume s1\r"
+        );
+        // 빈 문자열도 없음으로 친다(수집 쪽이 빈 값을 실어 보낼 수 있다).
+        assert_eq!(
+            restore_agent_command(Some("claude"), None, false, Some(""), Some("")),
+            "claude\r"
+        );
+        // 한쪽만 있어도 그쪽만 붙는다 — effort 를 안 정한 세션이 흔하다.
+        assert_eq!(
+            restore_agent_command(Some("claude"), None, false, Some("sonnet"), None),
+            "claude --model 'sonnet'\r"
+        );
+    }
+
+    /// 저장본 어댑터. 옛 저장본(`{}`)이 `None` 이어야 위 "플래그를 뺀다"가 성립한다.
+    #[test]
+    fn saved_model_and_effort_fall_back_to_none() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(saved_model(&j(r#"{"model":"claude-opus-5[1m]"}"#)), Some("claude-opus-5[1m]"));
+        assert_eq!(saved_effort(&j(r#"{"effort":"xhigh"}"#)), Some("xhigh"));
+        assert_eq!(saved_model(&j(r#"{}"#)), None, "옛 저장본");
+        assert_eq!(saved_effort(&j(r#"{}"#)), None, "옛 저장본");
+        // 빈 문자열이 새어 들어와도 없음으로 친다.
+        assert_eq!(saved_model(&j(r#"{"model":""}"#)), None);
+    }
+
+    #[test]
+    fn saved_agent_reads_agy_and_keeps_the_legacy_key() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(saved_agent(&j(r#"{"was_agent":"agy"}"#)), Some("agy"));
+        assert_eq!(saved_agent(&j(r#"{"was_agent":"codex"}"#)), Some("codex"));
+        // 옛 저장본 — 이게 깨지면 판올림 한 번에 학생 pane 이 전부 셸이 된다.
+        assert_eq!(saved_agent(&j(r#"{"was_claude":true}"#)), Some("claude"));
+        assert_eq!(saved_agent(&j(r#"{}"#)), None);
     }
 }

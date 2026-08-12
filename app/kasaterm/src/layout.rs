@@ -17,6 +17,39 @@ const DROP_CENTER_R: f32 = 0.42;
 /// 중앙은 어느 쪽으로 가를지 정할 수 없는 자리이므로 split 이 아니라 병합
 /// (`Center` = 이 pane 의 탭으로 들어가기)이다. 이 존이 없으면 pane 을 통째로
 /// 끌어 놓을 때 헤더 띠(28px)를 정확히 맞히지 않는 한 무조건 split 이 됐다.
+/// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
+///
+/// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네 번째
+/// pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음 split 은 자연히
+/// 반대 축을 골라 격자가 된다.
+///
+/// 판정은 **셀이 아니라 픽셀**로 한다 — 셀은 세로로 2.5배 길어(7×17.5) 80×24 pane 은
+/// 셀로는 "가로가 3배"지만 화면에선 거의 정사각이다. 눈에 보이는 모양이 기준이다.
+///
+/// 다만 가로로 쪼개 **80칸을 못 지키면** 세로로 돌린다 — 코드·로그가 접히는 건 좀
+/// 길쭉한 것보다 나쁘다. 반대로 세로로 쪼개 16줄을 못 지키면 가로로. 둘 다 못 지키면
+/// 긴 축 규칙 그대로(더 나은 선택이 없다).
+///
+/// 최소 줄수가 16인 이유: claude 입력박스만 5줄이라 12줄짜리 pane 은 대화가 두 줄
+/// 보인다. 「좁은 것보다 짧은 게 낫다」가 성립하려면 짧은 쪽이 실제로 쓸 만해야 한다 —
+/// 12로 뒀다가 80×24 pane(표준 크기)이 12줄 두 장으로 갈렸다.
+pub(crate) fn pick_split_axis(
+    px_w: f32,
+    px_h: f32,
+    cols: u16,
+    rows: u16,
+) -> kasa_pty::SplitDir {
+    use kasa_pty::SplitDir::{Horizontal, Vertical};
+    const MIN_COLS: u16 = 80;
+    const MIN_ROWS: u16 = 16;
+    let long_axis = if px_w >= px_h { Horizontal } else { Vertical };
+    match long_axis {
+        Horizontal if cols / 2 < MIN_COLS && rows / 2 >= MIN_ROWS => Vertical,
+        Vertical if rows / 2 < MIN_ROWS && cols / 2 >= MIN_COLS => Horizontal,
+        d => d,
+    }
+}
+
 pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
         return DropZone::Center;
@@ -228,8 +261,7 @@ impl App {
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
         // Reserve the dock bar from the grid only when it carries chips.
-        let dock = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
-        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - dock).max(0.0);
+        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - self.bottom_reserve_h()).max(0.0);
         let cols = (lw / self.cell.w).floor().max(40.0) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {
@@ -439,29 +471,27 @@ impl App {
         id
     }
 
-    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
-        if self.tmux.is_some() {
-            return Ok(String::new());
-        }
-        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            return Ok(String::new());
-        };
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+    /// split 이 얹을 새 셸을 띄우고 `self.pty` 에 등록한다 — **레이아웃은 안 건드린다**.
+    /// 트리에 꽂는 일과 갈라 둔 건 방 별도창 때문이다: 그 창의 pane 은 비활성 window
+    /// 트리에 살아 `pty_layout` 에 없고, 리사이즈도 메인 그리드가 아니라 그 창이 한다.
+    /// 트리에 못 꽂았으면 호출부가 `self.pty` 에서 지운다 — 번호는 거기 등록된 것으로만
+    /// 판정하므로(`alloc_pane_id`) 그것으로 자동 회수된다.
+    pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
+        let new_id = self.alloc_pane_id();
 
         // Spawn the new session at a placeholder size — the resize
         // pass right after `split_leaf` puts every leaf at its real
         // rect, so the initial cols/rows here only matters for the
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
-        let cwd = self.spawn_cwd_from(Some(&active));
+        let cwd = self.spawn_cwd_from(Some(active));
         // split = room 만 상속, 학생은 새로 랜덤 배정(전역 유일). 07-13 의 "소스 학생 상속"
         // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
         // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
         // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
         // shim 의 /character 교정이 세션 정본 캐릭터로 되돌리고, 사용자가 '+ 학생'·학생
         // 명령으로 명시 지정한 pending 은 그대로 존중(중복 허용, 색 변주로 구분).
-        let room = self.ws.lock().unwrap().pane_room.get(&active).cloned();
+        let room = self.ws.lock().unwrap().pane_room.get(active).cloned();
         let mut env = crate::proxy_env(&new_id);
         if let Some(ref r) = room {
             env.push(("KASATERM_ROOM".to_string(), r.clone()));
@@ -479,14 +509,102 @@ impl App {
         })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
         self.insert_pty(new_id.clone(), Arc::new(session));
+        Ok(new_id)
+    }
 
-        let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
-        if !layout.split_leaf(&active, dir, new_id.clone()) {
-            // Active pane isn't in the tree — shouldn't happen, but
-            // bail without leaking the spawned session entry.
+    /// 포커스된 pane 을 쪼갠다. 실패는 **전부 `Err` + 사유**다.
+    ///
+    /// 예전엔 실패 셋을 `Ok(String::new())` 로 돌려줬는데, 소켓 경로가 그 빈
+    /// 문자열을 `pane-new` 자리표시자로 바꿔 **`ok:true` 에 실어 보냈다** —
+    /// 호출자가 성공으로 읽고 그 id 로 send 를 쏘면 조용히 사라진다. 거노가 학생
+    /// 5명을 띄우려다 1명만 뜬 게 이것이다(2026-08-05). 사유 없는 실패는 호출자가
+    /// `list surfaces` 를 다시 대조해야만 알 수 있어, 스크립트가 감지할 방법이 없었다.
+    /// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
+    ///
+    /// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네
+    /// 번째 pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음
+    /// split 은 자연히 반대 축을 골라 격자가 된다.
+    ///
+    /// 판정은 **셀이 아니라 픽셀**로 한다 — 셀은 세로로 2.5배 길어(7×17.5) 80×24
+    /// pane 은 셀로는 "가로가 3배"지만 화면에선 거의 정사각이다. 눈에 보이는 모양을
+    /// 기준으로 삼는 게 요구사항에 맞다.
+    ///
+    /// 다만 가로로 쪼개 **80칸을 못 지키면** 세로로 돌린다(코드·로그가 접히면 좁은
+    /// 것보다 나쁘다). 반대로 세로로 쪼개 16줄을 못 지키면 가로로. 둘 다 못 지키면
+    /// 긴 축 규칙 그대로 — 어차피 더 나은 선택이 없다.
+    fn auto_split_dir(&mut self, pane: &str) -> kasa_pty::SplitDir {
+        let (cols, rows) = self.window_cells();
+        let Some((_, _, _, w, h)) = self
+            .effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, _, _, _, _)| id == pane)
+        else {
+            // 트리에서 못 찾으면 가로 — 창이 대개 가로로 넓다.
+            return kasa_pty::SplitDir::Horizontal;
+        };
+        pick_split_axis(
+            w as f32 * self.cell.w.max(1.0),
+            h as f32 * self.cell.h.max(1.0),
+            w,
+            h,
+        )
+    }
+
+    /// `dir` 가 `None` 이면 종횡비로 고른다(`auto_split_dir`).
+    pub(crate) fn split_pane_auto(&mut self, dir: Option<kasa_pty::SplitDir>) -> Result<String> {
+        let dir = match dir {
+            Some(d) => d,
+            None => {
+                let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+                    anyhow::bail!("활성 pane 이 없다");
+                };
+                self.auto_split_dir(&active)
+            }
+        };
+        self.split_active_pane(dir)
+    }
+
+    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 로컬 split 을 쓰지 않는다");
+        }
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            anyhow::bail!("활성 pane 이 없다");
+        };
+        // 탭을 지목받았으면 **그 탭이 든 pane** 을 쪼갠다. 탭은 BSP leaf 가 아니라
+        // `split_leaf` 가 못 찾고, 그러면 셸만 새로 띄운 채 통째로 실패한다.
+        let active = self
+            .ws
+            .lock()
+            .unwrap()
+            .outer_for_pty(&active)
+            .unwrap_or(active);
+        // **그 pane 을 가진 트리**에 꽂는다 — 활성 window 트리가 아니라.
+        // 예전엔 `pty_layout` 만 봐서, 거노가 다른 방을 보고 있으면 pane 이 자기
+        // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
+        // 스폰은 오케스트레이터가 배경에서 하는 일이라 **거노가 어느 방을 보고 있는지와
+        // 무관해야** 한다. 방 별도창이 같은 이유로 이미 이렇게 하고 있다
+        // (`split_room_pane`) — 그 두 벌을 여기 한 벌로 모은다.
+        let owner = self.window_of_pane(&active);
+        let new_id = self.spawn_split_session(&active)?;
+        let (win_cols, win_rows) = self.window_cells();
+        let foreign = owner.filter(|w| *w != self.active_window);
+        let layout = match foreign {
+            Some(w) => self.windows.get_mut(w).and_then(|s| s.as_mut()),
+            None => self.pty_layout.as_mut(),
+        };
+        if !layout.is_some_and(|l| l.split_leaf(&active, dir, new_id.clone())) {
+            // 샌 세션을 되감고 사유를 올린다.
             self.pty.remove(&new_id);
-            self.next_pane_id -= 1;
-            return Ok(String::new());
+            anyhow::bail!(
+                "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
+            );
+        }
+        if foreign.is_some() {
+            // 안 보이는 방을 쪼갠 것이라 포커스도 메인 그리드도 건드리지 않는다.
+            // 그 방의 PTY 치수는 그 창을 앞으로 가져올 때(`aux_room_resize_pty`
+            // ·window 전환) 어차피 다시 맞춰진다.
+            return Ok(new_id);
         }
         self.ws.lock().unwrap().active_pane = Some(new_id.clone());
         self.resize_backend(win_cols, win_rows);
@@ -501,7 +619,10 @@ impl App {
     /// (outer pane, tab) pair, and appends a `PaneTab` whose `pid` points at
     /// the new shell. The new tab becomes active. Outer pane id and layout
     /// don't change — adding a tab never reshapes the BSP tree.
-    pub(crate) fn spawn_new_tab(&mut self, outer: &str) -> Result<()> {
+    /// 새 탭의 pane id 를 돌려준다 — 부른 쪽이 거기에 명령을 실어야 하기 때문이다.
+    /// 예전엔 `()` 라 소켓으로 탭을 만들면 대상이 뭔지 알 방법이 없었다(split 이
+    /// 자리표시자를 돌려주던 것과 같은 함정).
+    pub(crate) fn spawn_new_tab(&mut self, outer: &str) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
         }
@@ -511,14 +632,25 @@ impl App {
         // sane initial size keeps the welcome banner from wrapping weird.
         let (cols, rows) = self.pane_cells(outer).unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(outer));
-        let new_pid = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_pid = self.alloc_pane_id();
+        // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
+        // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
+        // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(거노 2026-08-07:
+        // "탭안에서 생성하면 학생테마가안먹네"). split 이 깨져 학생들이 탭으로
+        // 우회하던 참이라 더 눈에 띄었다.
+        let room = self.ws.lock().unwrap().pane_room.get(outer).cloned();
+        let mut env = crate::proxy_env(&new_pid);
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+            self.ws.lock().unwrap().pane_room.insert(new_pid.clone(), r.clone());
+        }
+        env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
             rows,
-            env: crate::proxy_env(&new_pid),
+            env,
             pane_id: new_pid.clone(),
             initial_scrollback: Vec::new(),
         })?;
@@ -538,7 +670,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        Ok(())
+        Ok(new_pid)
     }
     /// Cell extent of `outer` inside the current `pty_layout`. Used by
     /// `spawn_new_tab` to size a brand-new shell at the pane's real bounds.
@@ -652,7 +784,14 @@ impl App {
             return;
         }
         for id in ids {
-            if !self.pty.contains_key(&id) {
+            // PTY 를 놓는 것과 트리에서 leaf 를 걷는 것은 경로가 갈려 있다 —
+            // `swap_character` 는 PTY 를 **먼저** 놓고 같은 pane id 로 새로 띄우는데,
+            // 그 spawn 이 실패하면 PTY 없이 leaf 만 남는다. 옛 PTY 의 EOF 는 그
+            // 뒤에 도착하므로, pty 맵만 보고 건너뛰면 그 자리가 **빈 pane 으로
+            // 영구히 남았다**(화면엔 빈 칸, board 엔 안 잡히고, 저장 때
+            // `layout_to_json` 이 `{"leaf": null}` 을 흘린다 — 2026-08-11 실측).
+            // 트리에 아직 leaf 가 있다는 건 정리가 안 끝났다는 뜻이므로 진행한다.
+            if !self.pty.contains_key(&id) && !self.leaf_lingers_anywhere(&id) {
                 continue;
             }
             self.remove_pane(&id);
@@ -675,8 +814,7 @@ impl App {
         }
         let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(source));
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_id = self.alloc_pane_id();
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
@@ -708,7 +846,6 @@ impl App {
         if !inserted {
             // Source vanished mid-drag — bail and clean up the spawned shell.
             self.pty.remove(&new_id);
-            self.next_pane_id -= 1;
             return Ok(());
         }
         let (win_cols, win_rows) = self.window_cells();
@@ -754,8 +891,7 @@ impl App {
         //    pty ids decoupled from stage-3 onward, so this avoids any
         //    clash with the moved tab's pid (which may have been the old
         //    source's outer id).
-        let new_outer = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let new_outer = self.alloc_pane_id();
         let (dir, before) = match zone {
             DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
             DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
@@ -1016,6 +1152,36 @@ for p in glob.glob(os.path.join(d, '*.json')):
         true
     }
 
+    /// `remove_stashed_leaf` 의 읽기 전용 짝 — 이 슬롯이 그 leaf 를 담고 있는지.
+    fn stashed_leaf_exists(slot: &Option<kasa_pty::PtyLayout>, target: &str) -> bool {
+        slot.as_ref()
+            .map(|t| t.leaves().iter().any(|l| *l == target))
+            .unwrap_or(false)
+    }
+
+    /// PTY 가 이미 없는 pane 이 아직 어느 트리엔가 leaf 로 남아 있는지 — 남아 있으면
+    /// 그 자리는 그릴 것이 없는 유령 pane 이다. 활성 창만 봐서는 안 된다: 다른
+    /// 윈도우로 전환해 둔 pane 은 stash 슬롯에 있고, 백그라운드 세션은 자기 트리를
+    /// 따로 쥔다. 실제로 빈 칸이 남은 자리가 활성 창이 아니라 **다른 윈도우**였다.
+    fn leaf_lingers_anywhere(&self, target: &str) -> bool {
+        if Self::stashed_leaf_exists(&self.pty_layout, target) {
+            return true;
+        }
+        if self
+            .windows
+            .iter()
+            .any(|w| Self::stashed_leaf_exists(w, target))
+        {
+            return true;
+        }
+        self.sessions.iter().flatten().any(|s| {
+            Self::stashed_leaf_exists(&s.pty_layout, target)
+                || s.windows
+                    .iter()
+                    .any(|w| Self::stashed_leaf_exists(w, target))
+        })
+    }
+
     /// active 트리 밖(현재 세션의 stash 윈도우 + 백그라운드 세션들)에서 pane 을
     /// 걷어낸다 — CLI close 가 다른 윈도우/세션 pane 을 겨눌 때 유령 leaf(빈
     /// pane)가 남는 것 방지. 마지막 leaf 로 윈도우가 비면 그 윈도우도 닫는다.
@@ -1061,11 +1227,135 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
     /// pane.
+    /// pane 이 쥐고 있던 자원을 놓는다 — PTY(**여기서 셸과 claude 가 죽는다**)·보조
+    /// 탭 셸·협업 마커·GPU 텍스처·마크다운 캐시·화면 상태. 트리는 건드리지 않으므로
+    /// 트리에서 이미 빠진 pane(숨긴 것)에도 그대로 쓴다.
+    fn drop_pane_resources(&mut self, target: &str) {
+        let closed_cwd = self.pane_cwd_cache.get(target).cloned();
+        // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
+        self.pty.remove(target);
+        Self::cleanup_collab_markers(target, closed_cwd.as_deref());
+        // Free the GPU texture if this was an image pane (no-op otherwise).
+        if let Some(g) = self.gpu.as_mut() {
+            g.drop_image(target);
+        }
+        self.md_content_h.remove(target);
+        self.md_block_ys.remove(target);
+        self.md_scroll_anchor.remove(target);
+        // Drop secondary-tab ptys hosted by this pane and prune the reverse
+        // map. Without this, an in-pane tab's shell would linger past its
+        // container pane and `find_tab_by_pty` would point at a dead outer.
+        let secondary_pids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.pid_to_pane
+                .iter()
+                .filter_map(|(pid, outer)| (outer == target).then(|| pid.clone()))
+                .collect()
+        };
+        for pid in &secondary_pids {
+            self.pty.remove(pid);
+        }
+        let mut ws = self.ws.lock().unwrap();
+        ws.panes.remove(target);
+        ws.rebuild_pid_map();
+    }
+
+    /// 사용자가 닫은 pane — **죽이지 않고 화면에서만 뗀다.** BSP 트리에서 leaf 를
+    /// 빼는 것이 전부라 PTY 도 화면 상태도 남고, 그래서 그 안의 claude 는 하던 일을
+    /// 계속한다(거노: resume 로 잇는 게 아니라 데몬처럼 돌기를 원함). 출력이 유실될
+    /// 걱정은 없다 — 화면 갱신은 pane 마다 붙은 전용 스레드(`pump_pty_screens`)라
+    /// 트리와 무관하게 계속 돈다. 리사이즈는 `leaf_cells` 기반이라 트리 밖 pane 을
+    /// 건드리지 않아 마지막 크기가 그대로 유지된다.
+    ///
+    /// 되살리기는 `reopen_pane_record` 의 재부착 경로, 정말 끄는 것은 인포의 ×
+    /// (`discard_closed_pane_at`)다.
+    pub(crate) fn hide_pane(&mut self, target: &str) {
+        self.tuck_pane(target, false);
+    }
+
+    /// 사이드바 「pane 숨기기」 — 닫기와 같은 자리에 넣되 **절대 정리하지 않는다.**
+    ///
+    /// 닫기(`hide_pane`)는 개수 상한과 15분 idle 로 언젠가 프로세스를 놓는다. 그런데
+    /// 숨기기는 *작업이 도는 중에* 화면에서만 치우는 것이라(2026-08-11 지시), 돌아왔을
+    /// 때 대화가 끊겨 있으면 쓸모가 없다. 그래서 같은 스택에 `stashed` 로 넣고 두 정리
+    /// 루프가 건너뛰게 한다.
+    pub(crate) fn stash_pane(&mut self, target: &str) {
+        self.tuck_pane(target, true);
+    }
+
+    fn tuck_pane(&mut self, target: &str, stashed: bool) {
+        let in_active = self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().iter().any(|l| *l == target));
+        if !in_active {
+            // 다른 윈도우·백그라운드 세션의 pane 은 숨김 대상이 아니다(그쪽 트리를
+            // 여기서 조작하면 유령 leaf 가 남는다) — 기존 경로로 보낸다.
+            //
+            // ⚠️ 그 경로는 **죽인다.** 사이드바는 모든 방의 pane 을 보여주므로, 거기서
+            // 부를 때는 부르는 쪽이 먼저 `switch_window` 로 그 방을 활성으로 만들어야
+            // 한다. 안 그러면 「숨겼는데 학생이 사라졌다」가 된다.
+            self.remove_pane(target);
+            return;
+        }
+        self.record_closed_pane(target, true, stashed);
+        let was_active = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_deref()
+            .map(|a| a == target)
+            .unwrap_or(false);
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        let next_focus: Option<String> = if was_active && leaves.len() > 1 {
+            let i = leaves.iter().position(|l| l == target).unwrap_or(0);
+            Some(leaves[if i + 1 < leaves.len() { i + 1 } else { i - 1 }].clone())
+        } else {
+            None
+        };
+        if leaves.len() > 1 {
+            if let Some(tree) = self.pty_layout.as_mut() {
+                tree.remove_leaf(target);
+            }
+        } else {
+            self.pty_layout = None;
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if was_active {
+                ws.active_pane = next_focus;
+            }
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
+        }
+        self.chrome_dirty = true;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 숨겨 둔 pane 을 정말 끈다 — 트리 밖이라 레이아웃 조작이 필요 없고, 자원만
+    /// 놓으면 된다. `remove_pane` 을 쓰면 되살리기 기록이 한 번 더 쌓인다.
+    pub(crate) fn kill_hidden_pane(&mut self, target: &str) {
+        self.drop_pane_resources(target);
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn remove_pane(&mut self, target: &str) {
-        // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 모든 닫기 경로의 길목이라
+        // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 "정말 죽는" 경로의 길목이라
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
-        // 실수로 exit 한 학생도 되돌릴 수 있다.
-        self.record_closed_pane(target);
+        // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니
+        // 되살리기가 재부착이 아니라 레코드로 새로 띄우는 쪽이다(`alive=false`).
+        self.record_closed_pane(target, false, false);
         let was_active = self
             .ws
             .lock()
@@ -1110,33 +1400,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 self.pty_layout = None;
             }
         }
-        let closed_cwd = self.pane_cwd_cache.get(target).cloned();
-        self.pty.remove(target);
-        Self::cleanup_collab_markers(target, closed_cwd.as_deref());
-        // Free the GPU texture if this was an image pane (no-op otherwise).
-        if let Some(g) = self.gpu.as_mut() {
-            g.drop_image(target);
-        }
-        self.md_content_h.remove(target);
-        self.md_block_ys.remove(target);
-        self.md_scroll_anchor.remove(target);
-        // Drop secondary-tab ptys hosted by this pane and prune the reverse
-        // map. Without this, an in-pane tab's shell would linger past its
-        // container pane and `find_tab_by_pty` would point at a dead outer.
-        let secondary_pids: Vec<String> = {
-            let ws = self.ws.lock().unwrap();
-            ws.pid_to_pane
-                .iter()
-                .filter_map(|(pid, outer)| (outer == target).then(|| pid.clone()))
-                .collect()
-        };
-        for pid in &secondary_pids {
-            self.pty.remove(pid);
-        }
+        self.drop_pane_resources(target);
         {
             let mut ws = self.ws.lock().unwrap();
-            ws.panes.remove(target);
-            ws.rebuild_pid_map();
             if was_active {
                 ws.active_pane = next_focus;
             }
@@ -1177,16 +1443,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
         let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
         if leaves <= 1 {
-            // split a fresh shell next to it, then drop the original — the new
-            // shell takes over the whole window, the closed pane (claude) is gone.
+            // split a fresh shell next to it, then hide the original — the new
+            // shell takes over the whole window. 원본은 죽지 않고 백그라운드로
+            // 물러날 뿐이라 ⌘⇧T 로 그대로 데려올 수 있다.
             if let Ok(new_id) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
                 if !new_id.is_empty() && new_id != pid {
-                    self.remove_pane(pid);
+                    self.hide_pane(pid);
                 }
             }
             return;
         }
-        self.remove_pane(pid);
+        self.hide_pane(pid);
     }
     /// Cmd+W: close the active *tab*. A pane with several tabs drops only the
     /// focused one — the rest stay alive (the "Cmd+W killed every bound tab /
@@ -1608,6 +1875,128 @@ for p in glob.glob(os.path.join(d, '*.json')):
             })
             .unwrap_or(false)
     }
+
+    /// `KASATERM_DRAG_DEBUG=1` 일 때 드래그 판정을 한 줄로 찍는다.
+    ///
+    /// "끌어도 안 떨어진다"는 보고가 오면 **어느 제스처를 쓰는지**부터 갈라야 하는데,
+    /// pane 탭·pane 헤더·방 탭이 각각 다른 경로라 화면만 봐선 구별이 안 된다. 실제로
+    /// pane 탭만 고쳐 놓고 방 탭 제스처를 쓰는 바람에 "하나도 안 고쳐졌다"로 읽힌
+    /// 왕복이 한 번 있었다 — 그때 이게 있었으면 한 줄로 끝났다.
+    pub(crate) fn drag_trace(&self, what: &str, tears: bool, torn: bool) {
+        if std::env::var_os("KASATERM_DRAG_DEBUG").is_none() {
+            return;
+        }
+        let (w, h) = self.logical_win_size();
+        eprintln!(
+            "[drag] {what} cursor=({:.0},{:.0}) win=({w:.0}x{h:.0}) 꺼내기자리={tears} 이미나감={torn}",
+            self.cursor_px.0, self.cursor_px.1
+        );
+    }
+
+    /// 방 탭 드래그가 「꺼내기」 자리에 와 있는가. **놓을 때와 끄는 도중이 같은 판정을
+    /// 써야 하므로** 한 벌만 둔다 — 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
+    /// 어긋남이 생기고, 그건 화면만 봐선 원인을 못 짚는다.
+    ///
+    /// 기준이 「창 밖」이 아니라 **패널 밖**인 이유: 창을 통째로 벗어나야 꺼지게 뒀더니
+    /// 사이드바에서 옆으로 빼는 자연스러운 동작이 전부 재배치로 흘러 기능이 죽어 있었다
+    /// (거노: "윈도우 패널에서 꺼내면"). 상단 탭 모드는 스트립이 가로라 같은 논리를 쓰면
+    /// 재배치(좌우)와 꺼내기(아래)가 뒤엉켜, 그쪽만 창 밖 기준을 남긴다.
+    pub(crate) fn room_drag_tears(&self) -> bool {
+        const TEAR_MARGIN: f32 = 40.0;
+        let (win_w, win_h) = self.logical_win_size();
+        let left_win =
+            Self::drag_left_window(self.cursor_px.0, self.cursor_px.1, win_w, win_h);
+        let left_panel = !self.tabs_on_top
+            && self.cursor_px.0 > self.effective_sidebar_w() + TEAR_MARGIN;
+        left_win || left_panel
+    }
+
+    /// 이 방이 이미 별도창으로 나가 있는가 — 그 aux 창 인덱스.
+    pub(crate) fn torn_aux_room(&self, win: usize) -> Option<usize> {
+        self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+    }
+
+    /// 방 탭 드래그 도중: 아직 안 나갔으면 **놓기 전에** 꺼내고, 이미 나갔으면 그 창을
+    /// 커서 밑으로 옮긴다. 반환값 = 이 방이 지금 별도창이다(= 호출부는 재배치 미리보기를
+    /// 멈춰야 한다).
+    ///
+    /// pane 쪽 `drag_tear_follow` 와 형제지만 대상이 다르다 — 이쪽은 방(윈도우) 통째다.
+    /// 거노가 "드래그 뗄 때 분리된다"고 한 건 이 경로였다: pane 탭만 고쳐 두고 방 탭을
+    /// 안 고쳐서, 고친 쪽을 안 쓰면 아무것도 안 바뀐 것처럼 보였다.
+    pub(crate) fn drag_tear_follow_room(
+        &mut self,
+        win: usize,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool {
+        if let Some(i) = self.torn_aux_room(win) {
+            if let Some(pos) = self.cursor_screen_phys() {
+                self.aux_windows[i].window.set_outer_position(pos);
+            }
+            return true;
+        }
+        let near = self.cursor_screen_phys();
+        self.undock_window_room(win, event_loop, near);
+        self.torn_aux_room(win).is_some()
+    }
+
+    /// 이 pane 이 이미 별도창으로 뜯겨 있는가 — 그 aux 창 인덱스. 드래그 도중
+    /// 뜯긴 상태를 App 필드 없이 판별하는 유일한 기준이다(`aux_windows` 자체가
+    /// 상태다). 병렬 작업 규칙상 struct App 은 건드리지 않는다.
+    pub(crate) fn torn_aux_window(&self, pane: &str) -> Option<usize> {
+        self.aux_windows.iter().position(|a| {
+            matches!(&a.kind, crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if pane_id == pane)
+        })
+    }
+
+    /// 드래그 중 커서가 창 밖으로 나갔을 때: 아직 안 뜯겼으면 **놓기 전에** 별도창으로
+    /// 뜯어내고, 이미 뜯겼으면 그 창을 커서 밑으로 옮긴다. 반환값 = 이 pane 이 지금
+    /// 별도창이다(= 호출부는 라이브 재배치를 하지 말아야 한다 — 레이아웃에 없는 pane 을
+    /// 옮기려 들면 엉뚱한 자리에 꽂힌다).
+    ///
+    /// 터미널 pane 만 대상이다. 파일(마크다운) 탭은 별도창 종류가 달라(`Editor`) 뜯긴
+    /// 여부를 pane id 로 판별할 수 없으니 놓는 순간 처리하는 기존 경로에 남긴다.
+    /// `tab` = 잡은 탭 인덱스(헤더 드래그처럼 모르면 `None` → 활성 탭).
+    pub(crate) fn drag_tear_follow(
+        &mut self,
+        pane: &str,
+        tab: Option<usize>,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool {
+        if let Some(i) = self.torn_aux_window(pane) {
+            // 창이 커서를 따라온다 — 뜯긴 순간의 자리에 못 박으면 "들고 있다"는
+            // 감각이 끊긴다. 위치 계산은 스폰 때와 같은 오프셋(cursor_screen_phys).
+            if let Some(pos) = self.cursor_screen_phys() {
+                self.aux_windows[i].window.set_outer_position(pos);
+            }
+            return true;
+        }
+        // 파일 탭이면 넘긴다. 판정은 `ws.panes` 를 보는데, 갓 split 된 pane 은 아직
+        // PaneState 가 없다(첫 출력이 만든다) — 그때 "터미널이 아니다"로 읽히면
+        // 안 되므로 없으면 false(=터미널)로 떨어지는 tab_is_file 을 그대로 쓴다.
+        let tab_idx = tab
+            .or_else(|| {
+                self.ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.panes.get(pane).map(|p| p.active_tab))
+            })
+            .unwrap_or(0);
+        if self.tab_is_file(pane, tab_idx) {
+            return false;
+        }
+        // PTY 없는 pane(이미지·md)은 undock 이 어차피 거절한다 — 미리 걸러 쓸데없이
+        // 라이브 백업만 날리는 일을 막는다.
+        if !self.pty.contains_key(pane) {
+            return false;
+        }
+        // 라이브 재배치 백업을 먼저 정리한다 — 놓는 순간 뜯어내던 경로와 같은 순서.
+        // 안 하면 undock 뒤에도 백업 트리가 남아 다음 드래그가 옛 레이아웃을 복원한다.
+        self.finish_live_drag();
+        let near = self.cursor_screen_phys();
+        self.undock_pane_terminal(pane, event_loop, near);
+        self.torn_aux_window(pane).is_some()
+    }
+
     /// Detach `moving` from the active window and graft it beside `target`,
     /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
     /// the BSP trees are rewired. If the active window held `moving` as its sole
@@ -1685,6 +2074,64 @@ for p in glob.glob(os.path.join(d, '*.json')):
 }
 
 #[cfg(test)]
+mod auto_split_tests {
+    use super::*;
+    use kasa_pty::SplitDir::{Horizontal, Vertical};
+
+    // 실측 셀(logical 7×17.5). 셀과 픽셀의 모양이 다르다는 게 이 규칙의 핵심이라
+    // 테스트도 그 비율로 재야 의미가 있다.
+    const CW: f32 = 7.0;
+    const CH: f32 = 17.5;
+    fn pick(cols: u16, rows: u16) -> kasa_pty::SplitDir {
+        pick_split_axis(cols as f32 * CW, rows as f32 * CH, cols, rows)
+    }
+
+    #[test]
+    fn 화면에서_가로로_긴_pane_은_가로를_쪼갠다() {
+        // 240×50 = 1680×875px — 눈에 가로로 넓다.
+        assert_eq!(pick(240, 50), Horizontal);
+    }
+
+    #[test]
+    fn 화면에서_세로로_긴_pane_은_세로를_쪼갠다() {
+        // 90×90 = 630×1575px. 셀 수만 보면 정사각이라 판정이 갈리지 않는데,
+        // 픽셀로 보면 세로가 2.5배다 — 셀로 재면 여기서 틀린다.
+        assert_eq!(pick(90, 90), Vertical);
+    }
+
+    #[test]
+    fn 가로로_쪼개면_80칸을_못_지킬_때는_세로로_돌린다() {
+        // 150×40 = 1050×700px 라 긴 축은 가로지만, 반으로 자르면 75칸이라 글이
+        // 접힌다. 세로로 자르면 20줄이 남아 쓸 만하다.
+        assert_eq!(pick(150, 40), Vertical);
+    }
+
+    #[test]
+    fn 세로로_쪼개면_16줄을_못_지킬_때는_가로로_돌린다() {
+        // 200×20 = 1400×350px. 긴 축은 가로이므로 원래도 가로다 — 반대 방향의
+        // 가드가 발동하는 조합을 따로 만든다: 세로로 긴데 줄이 모자란 경우.
+        assert_eq!(pick_split_axis(300.0, 400.0, 200, 20), Horizontal);
+    }
+
+    #[test]
+    fn 표준_80x24_는_가로로_쪼갠다() {
+        // 680×516px — 아직 가로가 길다. 반 쪼개면 40칸이라 가드가 걸릴 것 같지만,
+        // 세로로 돌리면 12줄짜리 두 장이 된다(claude 입력박스만 5줄). **대안이
+        // 쓸 만할 때만** 돌리는 게 규칙이라 여기선 안 돌린다.
+        // MIN_ROWS 를 12 로 뒀을 때 이게 세로로 갈렸다 — 그래서 16.
+        assert_eq!(pick_split_axis(680.0, 516.0, 80, 24), Horizontal);
+    }
+
+    #[test]
+    fn 둘_다_못_지키면_긴_축_규칙_그대로() {
+        // 40×10 — 가로로 쪼개도 20칸, 세로로 쪼개도 5줄. 더 나은 선택이 없으니
+        // 규칙을 뒤집지 않는다(뒤집으면 어느 쪽이 나은지 설명할 수 없다).
+        assert_eq!(pick_split_axis(400.0, 200.0, 40, 10), Horizontal);
+        assert_eq!(pick_split_axis(200.0, 400.0, 40, 10), Vertical);
+    }
+}
+
+#[cfg(test)]
 mod drop_zone_tests {
     use super::*;
 
@@ -1725,5 +2172,40 @@ mod drop_zone_tests {
         assert_eq!(drop_zone_for_offsets(0.5, 0.8), DropZone::Down);
         assert_eq!(drop_zone_for_offsets(-0.8, -0.5), DropZone::Left);
         assert_eq!(drop_zone_for_offsets(-0.5, -0.8), DropZone::Up);
+    }
+
+    #[test]
+    fn stashed_leaf_lookup_pairs_with_removal() {
+        // reap 이 "유령 leaf 가 있다"고 판정하는 눈(`stashed_leaf_exists`)과 실제로
+        // 걷어내는 손(`remove_stashed_leaf`)이 어긋나면, PTY 없는 자리가 빈 pane 으로
+        // 화면에 그대로 남는다 — 2026-08-11 실측 버그. 이 짝을 못박는다.
+        let leaf = |id: &str| kasa_pty::PtyLayout::Leaf {
+            pane_id: id.to_string(),
+        };
+        let mut slot = Some(kasa_pty::PtyLayout::Split {
+            dir: kasa_pty::SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(leaf("%1")),
+            b: Box::new(kasa_pty::PtyLayout::Split {
+                dir: kasa_pty::SplitDir::Vertical,
+                ratio: 0.5,
+                a: Box::new(leaf("%2")),
+                b: Box::new(leaf("%3")),
+            }),
+        });
+        // 중첩 깊이와 무관하게 찾는다 — 실제로 빈 칸이 남았던 자리가 깊이 2였다.
+        assert!(App::stashed_leaf_exists(&slot, "%3"));
+        assert!(!App::stashed_leaf_exists(&slot, "%9"));
+        // 찾았다면 반드시 걷어낼 수 있어야 한다. 어긋나면 reap 이 매 틱 같은 id 를
+        // 유령으로 판정하고도 못 지운다.
+        assert!(App::remove_stashed_leaf(&mut slot, "%3"));
+        assert!(!App::stashed_leaf_exists(&slot, "%3"));
+        assert!(App::stashed_leaf_exists(&slot, "%2"));
+        // 마지막 leaf 까지 걷으면 슬롯째 비고, 빈 슬롯·없는 대상 조회도 안전하다.
+        assert!(App::remove_stashed_leaf(&mut slot, "%1"));
+        assert!(App::remove_stashed_leaf(&mut slot, "%2"));
+        assert!(slot.is_none());
+        assert!(!App::stashed_leaf_exists(&slot, "%1"));
+        assert!(!App::remove_stashed_leaf(&mut slot, "%1"));
     }
 }

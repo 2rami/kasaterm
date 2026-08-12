@@ -22,7 +22,11 @@ impl App {
     /// (거노: 세션 진입 직후 다른 학생으로 보임 — 뷰 pane 의 로컬 배정은 무의미한 잔재
     /// 라 None 으로 두면 학생 시각 요소가 중립으로 남는다). 일반 pane 은 스폰 배정
     /// 폴백 유지(첫 프레임부터 학생 표시). render 의 프사·타이틀바·테두리가 공유한다.
+    ///
+    /// **탭 접기는 여기서 한다** — 부르는 쪽은 BSP leaf(outer)를 들고 있는데 학생 상태는
+    /// 탭 pid 로 기록된다. 접지 않으면 탭으로 띄운 학생이 화면에 아예 안 나온다.
     pub(crate) fn display_pane_char(&self, ws: &Workspace, id: &str) -> Option<String> {
+        let id = &ws.active_tab_pid(id);
         self.pane_claude_sid
             .get(id)
             .and_then(|sid| kasa_mcp::character::session_character(sid))
@@ -35,6 +39,22 @@ impl App {
                     ws.pane_character.get(id).cloned()
                 }
             })
+    }
+
+    /// pane 에 **학생색을 입힐지**의 정본. 이름(`display_pane_char`)과 달리
+    /// 「지금 에이전트가 도는가」 관문을 지난다 — 순수 셸 pane 에 남의 학생색이
+    /// 둘리면 「저기 누가 있다」로 잘못 읽히기 때문이고, 메인 그리드의 pane 테두리가
+    /// 이미 그 규칙이다(`render.rs` 의 `claude_panes` 필터).
+    ///
+    /// 별도창(터미널·방)이 이걸 안 쓰고 `ws.pane_character` 를 날로 읽던 동안,
+    /// 같은 pane 이 창마다 다른 대접을 받았다 — 셸 pane 이 별도창에선 학생색·이름을
+    /// 달고 메인에선 무채색이라, 되돌리면 「학생 테마가 깨졌다」로 보였다(거노).
+    /// 관문은 이름과 같은 키(**탭 pid**)로 본다 — 탭에서 도는 학생을 놓치지 않게.
+    pub(crate) fn pane_accent(&self, ws: &Workspace, id: &str) -> Option<[u8; 4]> {
+        let tab = ws.active_tab_pid(id);
+        self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
+        let name = self.display_pane_char(ws, id)?;
+        crate::theme::character_accent_n(&name, crate::theme::character_ordinal(&ws.pane_character, id))
     }
 
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
@@ -78,10 +98,29 @@ impl App {
             }
         }
         self.chrome_dirty = true;
+        // 읽음 처리(=dock 배지)만 지금 보고 있는 pane 을 뺀다. 데스크톱 알림 자체는
+        // 그 pane 을 보고 있어도 쏜다 — 거노 2026-08-11 "pane별로 그냥 다오게하자".
+        // 학생이 여럿이면 어느 창을 보고 있든 나머지가 끝난 걸 놓치는 쪽이 손해다.
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
-            notify_desktop(title, body);
         }
+        let who = self.pane_character_if_known(surface_id);
+        // 누구 알림인지는 프사(오른쪽 썸네일)와 제목 둘 다로 말한다 — 캐릭터가 없는
+        // 순정 pane 은 프사가 안 붙으므로 제목만 남는다.
+        let titled = match who.as_deref() {
+            Some(c) => format!("{c} · {title}"),
+            None => title.to_string(),
+        };
+        // 완료는 열쇠를 안 준다 — 턴마다 정당하게 떠야 하고, 학생이 여럿이면 서로
+        // 다른 pane 의 완료가 같은 창 안에 겹치는 게 정상이다.
+        let sid = self.pane_claude_sid.get(surface_id).cloned();
+        notify_desktop(
+            &titled,
+            body,
+            who.as_deref(),
+            None,
+            Some((surface_id, sid.as_deref())),
+        );
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
@@ -115,14 +154,26 @@ impl App {
         }
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
-            let who = character.as_deref().unwrap_or("pane");
-            let body = if reason.is_empty() {
-                who.to_string()
-            } else {
-                format!("{who} — {reason}")
-            };
-            notify_desktop("⚠ 권한 필요", &body);
         }
+        // 완료 알림과 같은 이유로 억제하지 않는다 — 막혀 선 학생은 더더욱 놓치면
+        // 안 되는 쪽이다(그 pane 을 보고 있었다면 어차피 화면에도 토스트가 떠 있다).
+        let who = character.as_deref().unwrap_or("pane");
+        let body = if reason.is_empty() {
+            who.to_string()
+        } else {
+            format!("{who} — {reason}")
+        };
+        // 화면 감지 경로(`input.rs` 의 `⚠ 승인 필요`)와 **같은 열쇠**를 쓴다 — 승인
+        // 프롬프트 하나에 배너가 둘 나가던 것을 여기서 하나로 만든다. 훅이 먼저 오면
+        // reason 이 실린 이쪽이 이기고, 화면 감지가 뒤따라 와도 조용히 접힌다.
+        let sid = self.pane_claude_sid.get(surface_id).cloned();
+        notify_desktop(
+            "⚠ 권한 필요",
+            &body,
+            character.as_deref(),
+            Some(&format!("approval:{surface_id}")),
+            Some((surface_id, sid.as_deref())),
+        );
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
@@ -131,7 +182,49 @@ impl App {
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let known = ws.panes.contains_key(id) || self.pty.contains_key(id);
-        known.then(|| ws.pane_character.get(id).cloned()).flatten()
+        let key = ws.active_tab_pid(id);
+        known.then(|| ws.pane_character.get(&key).cloned()).flatten()
+    }
+
+    /// claude 가 떠 있는 pane 을 기억해 둔다 — 얼굴을 내보일 자격.
+    ///
+    /// pane 이 사라지면 같이 잊는다. surface id 는 재사용되므로, 안 지우면 새로 난
+    /// 셸 pane 이 남의 자격을 물려받아 켜지도 않은 학생을 달고 뜬다.
+    pub(crate) fn note_claude_panes(&mut self) {
+        // 판정은 **OSC 제목** 이 먼저다. claude 는 뜨자마자 「✳ Claude Code」를
+        // 보내는데, 프로세스 이름 쪽은 셸의 직계 자식을 500ms 캐시로 훑는 경로라
+        // 헤드리스 실측에서 claude 가 떠 있는데도 계속 `zsh` 를 돌려줬다.
+        let seen: Vec<String> = self
+            .pty
+            .iter()
+            .filter(|(_, p)| {
+                p.osc_title()
+                    .is_some_and(|t| t.contains("Claude") || t.contains("Codex"))
+                    || p.active_agent().is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.pane_claude_seen.extend(seen);
+        self.pane_claude_seen.retain(|id| self.pty.contains_key(id));
+    }
+
+    /// 밖에 나간 방을 메인으로 되돌린다 — 사이드바가 부르는 쪽 입구.
+    ///
+    /// `dock_window_room` 은 **aux 창 인덱스**를 받는데 사이드바는 방 인덱스로만
+    /// 말한다. 그 둘을 그대로 넘기면 엉뚱한 창이 닫히므로 여기서 한 번 옮긴다.
+    pub(crate) fn dock_room_back(&mut self, win: usize) {
+        let Some(aux) =
+            self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+        else {
+            return;
+        };
+        self.dock_window_room(aux);
+        self.chrome_dirty = true;
+    }
+
+    /// 이 pane 에 학생 얼굴을 내보여도 되나 — claude 를 한 번이라도 띄웠는가.
+    pub(crate) fn pane_claude_ready(&self, id: &str) -> bool {
+        self.pane_claude_seen.contains(id)
     }
 
     /// Drop the focused pane from the unread set (the user is now looking at
@@ -153,6 +246,45 @@ impl App {
     /// Flash strength (1.0 → 0.0) for `id`'s completion pulse, or `None` when
     /// it isn't flashing. Drives the header pulse and the sidebar done-dot;
     /// both fade over `NOTIFY_FLASH_MS`.
+    /// pane 하나의 상태를 색 하나로. 사이드바가 방을 열지 않고도 "누가 나를
+    /// 기다리는지"를 말하는 근거다 — 대기가 먼저다: 작업 중은 놔두면 끝나지만
+    /// 대기는 내가 손대야 풀리므로, 둘이 겹치면 급한 쪽을 보여야 한다.
+    pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
+        let st = self.pane_activity.get(id);
+        if st.is_some_and(|a| status_needs_you(&a.status)) {
+            theme::attention()
+        } else if self.notify_flash_factor(id).is_some() {
+            theme::success()
+        } else if st.is_some_and(|a| a.status != "idle" && !a.status.is_empty())
+            // 파란 점은 **지금 보고 있는 pane** 에만 준다. 작업 중인 pane 이 여럿이면
+            // 목록이 온통 파래져 정작 손이 필요한 빨강·끝난 초록이 묻혔다 — 남의
+            // 진행은 배너 바가 이미 말하고 있으니 여기서 한 번 더 외칠 자리가 아니다.
+            && self.ws.lock().unwrap().active_pane.as_deref() == Some(id)
+        {
+            theme::accent()
+        } else {
+            theme::with_alpha(theme::text_mute(), 0x66)
+        }
+    }
+    /// 그 pane 이 **도는 중**인가 — 헤더 진행 바와 사이드바 걷기가 같이 쓴다.
+    ///
+    /// 기다리는 중(`waiting`·`blocked`)은 도는 게 아니다. 사람 답을 기다리는데 바가
+    /// 계속 차오르면 "일하는 줄" 알고 지나치게 된다(거노 2026-08-11: "프로세스바
+    /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
+    /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
+    pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
+        self.pane_activity
+            .get(id)
+            .is_some_and(|a| !a.status.is_empty() && a.status != "idle" && !status_needs_you(&a.status))
+    }
+
+    /// 그 pane 이 **내 손을 기다리는 중**인가 — 승인 프롬프트든 질문이든.
+    pub(crate) fn pane_needs_you(&self, id: &str) -> bool {
+        self.pane_activity
+            .get(id)
+            .is_some_and(|a| status_needs_you(&a.status))
+    }
+
     pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {
         self.notify_flash.get(id).and_then(|t| {
             let age = t.elapsed().as_millis();
@@ -525,6 +657,9 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    // 이름을 싣고 여는 유일한 칸이라 커서를 여기서 끝에 찍는다 —
+                    // 0 으로 두면 고치려던 확장자 앞이 아니라 이름 맨 앞에 선다.
+                    self.file_tree.edit_cursor = name.chars().count();
                     self.file_tree.rename = Some((p, name));
                     self.file_tree.new = None;
                     self.file_tree.search_active = false;
@@ -926,6 +1061,14 @@ impl App {
     /// Called from `exiting` and from the Moved/Resized debounce in
     /// `about_to_wait` — the debounce keeps the frame safe across a crash.
     pub(crate) fn save_window_frame(&self) {
+        // **검증 실행은 저장하지 않는다.** 위치·크기를 env 로 강제했다는 건 그 창이
+        // 사람이 쓰던 창이 아니라 하네스가 띄운 창이라는 뜻인데, 설정 파일은 인스턴스
+        // 사이에 공유돼서 그 값이 그대로 거노 앱의 다음 크기가 된다(실사고 2026-08-06:
+        // 좁은 화면 재현으로 430x700 를 띄웠더니 `window.json` 이 그 값으로 덮여,
+        // 재시작하면 앱이 구석에 손바닥만 하게 뜰 뻔했다).
+        if crate::verification_run() {
+            return;
+        }
         let Some(win) = self.window.as_ref() else { return };
         let scale = win.scale_factor().max(0.5);
         let sz = win.inner_size();
@@ -945,9 +1088,169 @@ impl App {
     /// the side sidebar strip and the top-tabs title strip — the top strip
     /// previously had no click gate at all, so its tabs painted but never
     /// switched/closed. Returns true when the click was handled.
+    /// 그 방의 목록이 얼마나 펴져 있나 — 0(접힘)..1(다 폄).
+    ///
+    /// 애니메이션이 없으면 0 이나 1 이고, 도는 중이면 그 사이다. 목록 높이·행
+    /// 투명도가 이 하나를 같이 보므로 밀림과 나타남이 어긋나지 않는다.
+    pub(crate) fn expand_progress(&self, idx: usize) -> f32 {
+        let target = if self.expanded_windows.contains(&idx) { 1.0 } else { 0.0 };
+        let Some((ai, opening, at)) = self.expand_anim else { return target };
+        if ai != idx {
+            return target;
+        }
+        let t = (at.elapsed().as_secs_f32() / EXPAND_ANIM_SECS).clamp(0.0, 1.0);
+        // ease-out — 손을 뗀 직후가 가장 빠르고 끝에서 가라앉는다. 선형은 멈추는
+        // 순간이 툭 끊겨 목록이 "튄" 것처럼 보인다.
+        let e = 1.0 - (1.0 - t).powi(3);
+        if opening { e } else { 1.0 - e }
+    }
+
+    /// 사이드바 pane 행 우클릭 → 메뉴 장전. 그 줄을 맞혔으면 true.
+    ///
+    /// 판정을 메서드로 둔 건 하네스가 **같은 좌표 판정을 지나게** 하기 위함이다
+    /// (`window_strip_click` 과 같은 이유). 메뉴가 뜨는 자리는 미니맵 칸과 목록 줄이
+    /// 한 벡터에 섞여 있어, 상태를 손으로 세우는 검증은 정작 어긋나는 자리를 못 본다.
+    pub(crate) fn sidebar_row_right_click(&mut self, cx: f32, cy: f32) -> bool {
+        let inside =
+            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        let Some((wi, pane)) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, _, r)| inside(r))
+            .map(|(i, p, _)| (*i, p.clone()))
+        else {
+            return false;
+        };
+        self.sidebar_menu = Some((cx, cy, wi, pane));
+        self.chrome_dirty = true;
+        true
+    }
+
+    /// 떠 있는 사이드바 메뉴에 좌클릭. 메뉴가 떠 있었으면 true — 항목을 맞혔든
+    /// 빈 곳을 눌렀든 클릭을 삼키고 닫는다.
+    pub(crate) fn sidebar_menu_click(&mut self, cx: f32, cy: f32) -> bool {
+        let Some((_, _, wi, pane)) = self.sidebar_menu.clone() else { return false };
+        let inside =
+            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        let hit = self.sidebar_menu_rects.iter().find(|(_, r)| inside(r)).map(|(a, _)| *a);
+        self.sidebar_menu = None;
+        self.sidebar_menu_rects.clear();
+        if let Some(a) = hit {
+            self.run_sidebar_menu_action(a, wi, &pane);
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
+    /// 사이드바 pane 행 우클릭 메뉴 실행.
+    pub(crate) fn run_sidebar_menu_action(
+        &mut self,
+        action: SidebarMenuAction,
+        wi: usize,
+        pane: &str,
+    ) {
+        match action {
+            SidebarMenuAction::Hide => {
+                // ★ 그 방을 **먼저 활성으로** 만든다. 사이드바는 모든 방의 pane 을
+                // 보여주는데, 다른 방 pane 에 `stash_pane` 을 걸면 활성 트리에서 못 찾아
+                // `remove_pane`(죽이는 경로)으로 샌다 — 「숨겼는데 학생이 사라졌다」가
+                // 되는 자리다.
+                if wi != self.active_window {
+                    self.switch_window(wi);
+                }
+                // 밖에 나간 방은 `switch_window` 가 그 창을 앞으로 보낼 뿐 활성은 안
+                // 바뀐다. 그때는 손대지 않는다 — 그 창에서 닫으면 된다.
+                if wi == self.active_window {
+                    self.stash_pane(pane);
+                }
+            }
+            SidebarMenuAction::Unhide => {
+                if let Some(i) = self.closed_panes.iter().position(|c| c.pane_id == pane) {
+                    self.reopen_closed_pane_at(i);
+                }
+            }
+        }
+    }
+
+    /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.
+    pub(crate) fn toggle_window_expand(&mut self, idx: usize) {
+        let opening = !self.expanded_windows.contains(&idx);
+        if opening {
+            self.expanded_windows.insert(idx);
+        } else {
+            self.expanded_windows.remove(&idx);
+        }
+        self.expand_anim = Some((idx, opening, std::time::Instant::now()));
+        self.chrome_dirty = true;
+    }
+
+    /// 펼친 카드의 뷰를 배치도↔목록으로 갈아 끼운다.
+    pub(crate) fn toggle_window_list_view(&mut self, idx: usize) {
+        if !self.list_view_windows.remove(&idx) {
+            self.list_view_windows.insert(idx);
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// 카드 머리의 **뷰 전환 버튼** — 펼치기 배지 바로 왼쪽. `tab` 은 그 방 카드의 사각.
+    ///
+    /// 접힌 방에는 없다. 안 보이는 뷰를 미리 고르는 버튼은 누를 이유가 없고, 카드
+    /// 머리는 이미 이름·cwd·⌘번호·×·배지가 다투는 자리다.
+    pub(crate) fn window_view_rect(
+        &self,
+        idx: usize,
+        tab: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32, f32, f32)> {
+        if self.expand_progress(idx) <= 0.0 {
+            return None;
+        }
+        let er = self.window_expand_rect(idx, tab)?;
+        Some((er.0 - 4.0 - 22.0, er.1, 22.0, er.3))
+    }
+
+    /// 방 탭 카드 안 **펼치기 버튼**의 사각 — 상태 점 왼쪽의 삼각형 자리.
+    /// `tab` 은 그 방 카드의 사각.
+    ///
+    /// 렌더와 클릭 판정이 이 하나를 같이 본다. 예전엔 클릭 쪽이 "아랫줄 오른쪽
+    /// 100px" 이라는 자기 공식을 따로 갖고 있어서, 눈에는 삼각형 하나만 보이는데
+    /// 그 옆 점들까지 눌러도 방 전환이 안 됐다 — 버튼이 어디까지인지 화면이
+    /// 말해 주지 않는 상태였다(거노: "접기 버튼이 따로 있어야, 누르면 전환은
+    /// 되고"). pane 이 하나뿐인 방은 펼쳐도 그 하나뿐이라 버튼을 두지 않는다.
+    pub(crate) fn window_expand_rect(
+        &self,
+        idx: usize,
+        tab: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32, f32, f32)> {
+        let n = self.window_leaves(idx).len();
+        // pane 이 하나뿐인 방도 편다. 예전엔 `n < 2` 로 막았는데 — 한 줄짜리 목록은
+        // 펼 값어치가 없다는 판단이었다 — 그 한 줄이 **누가 거기 있고 무슨 상태인지**
+        // 다. 학생 하나를 방 하나에 두고 쓰면 사이드바에서 그 학생을 볼 길이 통째로
+        // 사라졌다(거노: "방하나에 학생하나면 펼치기가 없어서 학생목록이 안보이네").
+        if n == 0 {
+            return None;
+        }
+        // 삼각형 하나짜리 18px 칩은 눌러 보기에 너무 작았다(거노). pane 개수를
+        // 같이 담아 pill 로 키우면 타깃이 두 배 넘게 커지고, 방을 펴지 않고도
+        // 몇 개짜리 방인지 읽힌다 — 커진 자리에 정보가 같이 들어온 셈이다.
+        let w = if n >= 10 { 44.0 } else { 37.0 };
+        Some((tab.0 + tab.2 - 8.0 - w, tab.1 + 26.0, w, 20.0))
+    }
+
     pub(crate) fn window_strip_click(&mut self, cx: f32, cy: f32) -> bool {
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        // 밖에 나간 방의 되돌리기 버튼이 가장 먼저다. × 히트렉트는 그려지지 않는
+        // 탭에도 남아 있고 자리가 정확히 겹쳐서, 뒤에 두면 되돌리려던 클릭이
+        // 「이 방 닫을까요」로 새어 나갔다(실측: 방이 통째로 사라짐).
+        if let Some(idx) = self
+            .window_dock_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            self.dock_room_back(idx);
+            return true;
+        }
         if let Some(idx) = self
             .window_tab_close_rects
             .iter()
@@ -960,12 +1263,72 @@ impl App {
             self.confirm_or_close_session(idx);
             return true;
         }
+        // 펼쳐 둔 pane 줄이 먼저다 — 줄은 탭 카드 **안에** 그려지므로, 탭을 먼저
+        // 검사하면 줄을 눌러도 방 전환만 되고 학생에게는 영영 못 간다.
+        if let Some((wi, pane)) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, _, r)| inside(r))
+            .map(|(i, p, _)| (*i, p.clone()))
+        {
+            if wi != self.active_window {
+                self.switch_window(wi);
+            }
+            self.focus_pane(&pane);
+            // 포커스는 누르는 즉시(목록에서 pane 을 고르는 게 이 줄의 본업이다),
+            // 옮기기는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥 버린다.
+            self.sidebar_row_drag = Some(crate::SidebarRowDrag {
+                pane,
+                start: (cx, cy),
+                active: false,
+                target: None,
+            });
+            self.chrome_dirty = true;
+            return true;
+        }
         if let Some(idx) = self
             .window_tab_rects
             .iter()
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
+            // 펼치기·뷰 전환 버튼만 전환의 예외다 — 그 배지 두 개 크기.
+            let tab = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r);
+            if let Some(r) = tab.and_then(|t| self.window_view_rect(idx, t)) {
+                if inside(&r) {
+                    self.toggle_window_list_view(idx);
+                    return true;
+                }
+            }
+            if let Some(r) = tab.and_then(|t| self.window_expand_rect(idx, t)) {
+                if inside(&r) {
+                    self.toggle_window_expand(idx);
+                    return true;
+                }
+            }
+            // 이미 열려 있는 방을 **천천히** 다시 누르면 이름 편집(Finder 규칙).
+            // 전환보다 먼저 본다 — 전환은 같은 방이면 어차피 무동작이다.
+            let now = std::time::Instant::now();
+            if starts_room_rename(self.room_rename.last_click, idx, self.active_window, now) {
+                // 손으로 붙인 이름이 없으면 **지금 화면에 보이는 라벨**로 시작한다.
+                // 빈칸으로 열면 cwd 에서 파생된 이름이 눈앞에서 사라져, 고치려던
+                // 사람이 이름을 통째로 다시 쳐야 한다(Finder 는 현 이름을 채워 준다).
+                let cur = self
+                    .window_name_override
+                    .get(&idx)
+                    .cloned()
+                    .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
+                    .unwrap_or_default();
+                self.room_rename.cursor = cur.chars().count();
+                self.room_rename.editing = Some((idx, cur));
+                self.room_rename.last_click = None;
+                let _ = self.hangul.flush();
+                self.mark_room_label_dirty();
+                return true;
+            }
+            self.room_rename.last_click = Some((idx, now));
+            // 다른 방을 누르면 편집은 확정하고 넘어간다(바깥 클릭 = 확정).
+            self.commit_room_rename();
             self.switch_window(idx);
             // 전환은 누르는 즉시(브라우저 탭과 같다 — 방 전환은 트리 스왑이라
             // 싸다), 재배치는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥
@@ -1003,6 +1366,35 @@ impl App {
         let Some(cwd) = cwd else { return };
         self.open_file(cwd.join(rel), None, false);
     }
+    /// 창 아래쪽이 pane 그리드에서 먹는 높이 — **접힘 dock + 상태줄**.
+    ///
+    /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
+    /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다.
+    ///
+    /// 상태줄(`STATUS_HEIGHT`)은 **조건 없이 항상** 들어간다. dock 과 달리 늘 있는
+    /// 띠라, 여기서 안 빼면 마지막 셀 줄 위에 그대로 덮여 그려진다 — 이 렌더러엔
+    /// scissor 가 없어서 넘친 것이 잘리지 않고 **멀쩡해 보이는 채로 겹친다**.
+    ///
+    /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
+    /// dock 에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
+    /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
+    ///
+    /// 접어 둔 별도창은 **센다**. 그건 사용자가 그 순간 직접 접은 것이라 띠가 생기는
+    /// 게 결과로 읽히고, 무엇보다 되살릴 손잡이가 여기 말고는 없다.
+    pub(crate) fn bottom_reserve_h(&self) -> f32 {
+        self.dock_reserve_h() + STATUS_HEIGHT
+    }
+
+    /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
+    /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
+    pub(crate) fn dock_reserve_h(&self) -> f32 {
+        if self.docked.is_empty() && self.zoomed_pane.is_none() && self.hidden_aux.is_empty() {
+            0.0
+        } else {
+            DOCK_HEIGHT
+        }
+    }
+
     /// 사이드바 하단에 붙박인 트레이 — 새 세션(`+`)과 앱 전역 버튼(피드백·설정).
     /// 반환은 `(구분선 y, +, 피드백, 설정)`, 세로 사이드바가 없으면 `None`.
     ///
@@ -1016,9 +1408,12 @@ impl App {
         if self.tabs_on_top || !self.sidebar_visible {
             return None;
         }
-        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        // 사이드바는 pane 그리드를 안 지나므로 `window_cells` 의 예약이 여기까지
+        // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
+        let bottom_h =
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
         let b = 28.0_f32;
-        let line_y = (win_h - dock_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
+        let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
         let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
         let left = SIDEBAR_TAB_INSET + 4.0;
         let right = (self.sidebar_w_logical - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
@@ -1085,6 +1480,126 @@ impl App {
     /// new usable width (every layout calc reads `effective_sidebar_w()`),
     /// so we just flip the flag, resize the PTYs to the new cols/rows, and
     /// repaint.
+    /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
+    /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
+    pub(crate) fn commit_room_rename(&mut self) {
+        let Some((idx, mut buf)) = self.room_rename.editing.take() else { return };
+        // 조합 중이던 마지막 글자도 이름의 일부다 — 안 흘리면 "가나다" 를 치고
+        // Enter 를 눌렀을 때 "가나" 만 남는다.
+        if let Some(tail) = self.hangul.flush() {
+            buf.push_str(&tail);
+        }
+        self.end_room_rename_ime();
+        let name = buf.trim().to_string();
+        if name.is_empty() {
+            self.window_name_override.remove(&idx);
+        } else {
+            self.window_name_override.insert(idx, name);
+        }
+        self.window_labels_at = None;
+        self.mark_room_label_dirty();
+    }
+
+    /// 편집을 버린다(Esc).
+    pub(crate) fn cancel_room_rename(&mut self) {
+        if self.room_rename.editing.take().is_some() {
+            let _ = self.hangul.flush();
+            self.end_room_rename_ime();
+            self.window_labels_at = None;
+            self.mark_room_label_dirty();
+        }
+    }
+
+    /// 편집이 끝났으니 조합 상태를 걷는다. `ime_focus` 를 비워 두지 않으면 다음에
+    /// pane 으로 치는 한글이 `ime_retarget` 에서 사라진 편집칸으로 흘러간다.
+    fn end_room_rename_ime(&mut self) {
+        if matches!(self.ime_focus, Some(crate::ImeFocus::RoomRename(_))) {
+            self.ime_focus = None;
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+    }
+
+    /// 조합이 끝난 글자를 커서 자리에 넣는다(`ime_retarget` 도 여기로 흘린다).
+    pub(crate) fn room_rename_insert(&mut self, text: &str) {
+        let cursor = &mut self.room_rename.cursor;
+        if let Some((_, buf)) = self.room_rename.editing.as_mut() {
+            crate::lineedit::insert(buf, cursor, text);
+            self.chrome_dirty = true;
+        }
+    }
+
+    /// 편집 중인 방에 키를 넣는다. 처리했으면 true — 호출부가 그 키를 pane 으로
+    /// 흘리지 않게 한다(편집 중 타이핑이 셸에 새면 안 된다).
+    ///
+    /// **한글은 자체 조합기(`self.hangul`)를 태운다.** macOS 는 OS IME 를 꺼 두고
+    /// (`set_ime_allowed(false)`) 자모를 `KeyboardInput.text` 로 직접 받으므로, 여기서
+    /// 조합하지 않으면 "안녕"이 "ㅇㅏㄴㄴㅕㅇ"으로 박힌다 — 거노: "이름 바꾸는 거
+    /// 이상한데". git 커밋 칸(`git_commit_input`)이 같은 이유로 같은 경로를 탄다.
+    pub(crate) fn room_rename_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(idx) = self.room_rename.editing.as_ref().map(|(i, _)| *i) else { return false };
+        if crate::input::is_modifier_key(event) {
+            return true;
+        }
+        // Cmd/Ctrl 조합은 삼키되 버퍼엔 안 넣는다. 앞단에서 안 잡힌 조합(Cmd+C 등)이
+        // 여기 오면 글자만 박히고, 흘려보내면 편집 중인데 셸이 그 키를 먹는다.
+        if self.modifiers.super_key() || self.modifiers.control_key() {
+            return true;
+        }
+        self.ime_retarget(crate::ImeFocus::RoomRename(idx));
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
+                if (0x3130..=0x318F).contains(&(c as u32)) {
+                    if let Some(done) = self.hangul.feed(c) {
+                        self.room_rename_insert(&done);
+                    }
+                    self.preedit = self.hangul.preedit().unwrap_or_default();
+                    self.in_preedit = !self.preedit.is_empty();
+                    self.mark_room_label_dirty();
+                    return true;
+                }
+            }
+        }
+        // 조합 중이던 자모를 지우는 백스페이스가 먼저다 — 완성 글자를 지우기 전에
+        // 조합기 안의 것부터 물린다.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.mark_room_label_dirty();
+            return true;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.room_rename_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let cursor = &mut self.room_rename.cursor;
+        let act = match self.room_rename.editing.as_mut() {
+            Some((_, buf)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            None => crate::lineedit::LineEditAction::Ignored,
+        };
+        match act {
+            crate::lineedit::LineEditAction::Submit => self.commit_room_rename(),
+            crate::lineedit::LineEditAction::Cancel => self.cancel_room_rename(),
+            _ => {}
+        }
+        self.mark_room_label_dirty();
+        true
+    }
+
+    /// 방 라벨을 이번 프레임에 다시 짓게 한다. `refresh_window_labels` 는 1초 캐시라
+    /// 이걸 안 깨면 **타이핑이 1초씩 뭉쳐 나온다**(거노: "버벅여"). 편집 중인 방의
+    /// 라벨은 캐시 밖에서 버퍼로 덮으므로 재계산 자체는 안 돌지만, 편집을 끝낸 뒤
+    /// 원래 이름으로 돌아가려면 캐시를 한 번 비워야 한다.
+    fn mark_room_label_dirty(&mut self) {
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     pub(crate) fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
         let (cols, rows) = self.window_cells();
@@ -1587,19 +2102,27 @@ impl App {
     /// "빠른 파일" 고정 섹션 목록: (라벨, 경로, 아이콘 이름). ① 개인 CLAUDE.md
     /// (~/.claude/CLAUDE.md) 는 항상, ② 프로젝트 CLAUDE.md(트리 root/CLAUDE.md)·
     /// ③ 프로젝트 메모리(root/.memory/MEMORY.md, symlink 허용→exists) 는 있을 때만.
+    /// codex 짝(개인 ~/.codex/AGENTS.md · 프로젝트 root/AGENTS.md)도 있을 때만 넣는다 —
+    /// codex pane 도 claude 처럼 자기 지시 파일을 한 번에 열게.
+    /// ⚠️ 아이콘 "codex" 는 codex.svg 가 아직 없으면 gpu.rs match 에서 None 으로
+    /// 빠져 아이콘만 안 뜬다(빌드는 안 깨진다). svg 들어오면 gpu.rs 에 arm 추가 필요.
     pub(crate) fn quick_files(&self) -> Vec<(&'static str, std::path::PathBuf, &'static str)> {
         let mut out: Vec<(&'static str, std::path::PathBuf, &'static str)> = Vec::new();
         if let Some(home) = kasa_socket::home_dir() {
-            out.push((
-                "개인 CLAUDE.md",
-                home.join(".claude/CLAUDE.md"),
-                "claude",
-            ));
+            out.push(("개인 CLAUDE.md", home.join(".claude/CLAUDE.md"), "claude"));
+            let agents = home.join(".codex/AGENTS.md");
+            if agents.exists() {
+                out.push(("개인 AGENTS.md", agents, "codex"));
+            }
         }
         if let Some(root) = self.file_tree.root.as_ref() {
             let proj = root.join("CLAUDE.md");
             if proj.exists() {
                 out.push(("프로젝트 CLAUDE.md", proj, "claude"));
+            }
+            let agents = root.join("AGENTS.md");
+            if agents.exists() {
+                out.push(("프로젝트 AGENTS.md", agents, "codex"));
             }
             let mem = root.join(".memory/MEMORY.md");
             if mem.exists() {
@@ -1816,7 +2339,11 @@ impl App {
             let ws = self.ws.lock().unwrap();
             match ws.panes.get(pane) {
                 Some(p) => (p.tabs.len(), p.tabs.get(idx).and_then(|t| t.pid.clone())),
-                None => return,
+                // PaneState 가 **없는 게 정상**인 pane 이 있다 — split leaf 는 보조 탭이
+                // 생길 때까지 `ws.panes` 에 안 들어간다(main.rs `pane_font_scales` 주석이
+                // 같은 사실을 말한다). 여기서 return 하면 그런 pane 은 Cmd+W 가 통째로
+                // 죽는다(거노: "커맨드 W 해도 무반응"). 항목이 없다 = 탭 하나짜리 pane.
+                None => (1, None),
             }
         };
         let action = if tabs_len > 1 {
@@ -1824,8 +2351,22 @@ impl App {
         } else {
             let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
             if leaves <= 1 {
-                // Last pane of the window: close is a no-op (OS button quits),
-                // so don't even confirm.
+                // 이 방의 마지막 pane. 방이 여럿이면 **방을 닫는 것**으로 잇는다 —
+                // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(거노).
+                // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
+                let idx = self.active_window;
+                if self.windows.len() <= 1 {
+                    return;
+                }
+                let action = PendingClose::Session(idx);
+                // 바쁨·미저장이 있으면 그쪽 대화가 무엇을 잃는지까지 말해 주므로 먼저다.
+                if self.guard_dirty(&action) {
+                    return;
+                }
+                match self.window_busy(idx) {
+                    Some(proc) => self.open_confirm_close(proc, action),
+                    None => self.raise_confirm(ConfirmClose { why: CloseWhy::LastPane, action }),
+                }
                 return;
             }
             PendingClose::Pane { pane: pane.to_string() }
@@ -2137,24 +2678,117 @@ fn doc_name(path: &str) -> String {
         .to_string()
 }
 
+/// 그 상태가 **사람 손을 기다리는 중**인가.
+///
+/// 어휘가 둘로 갈려 있다: 화면 감지 경로는 `blocked` 을, 훅·board 경로는 `waiting` 을
+/// 쓴다. 표시하는 쪽에서 둘을 가릴 이유가 없는데 **여섯 자리가 전부 `waiting` 만 보고
+/// 있었고**, 정작 실제로 들어오는 값은 `blocked` 뿐이라(`route_approval_prompts` 가
+/// `faces_user` 를 true 로 고정) 승인 대기가 화면 어디에도 안 그려졌다 — 핑크 테두리도
+/// 사이드바 깜빡임도 방 탭 점도 전부 죽어 있었다(2026-08-11 조사).
+///
+/// 판정을 여기 한 벌로 둔다. 같은 조건을 여섯 군데 적어 두면 한쪽만 고쳐진다.
+pub(crate) fn status_needs_you(status: &str) -> bool {
+    status == "waiting" || status == "blocked"
+}
+
+/// 같은 열쇠의 알림은 이 창 안에서 한 번만 나간다.
+const NOTIFY_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// 이 열쇠로 지금 알려도 되나 — 처음이면 true 를 주고 시각을 적어 둔다.
+///
+/// 승인 프롬프트 하나에 배너가 **두 번** 나가고 있었다: 훅 경로(`⚠ 권한 필요`)와 화면
+/// 감지 경로(`⚠ 승인 필요`)가 서로를 모른 채 각자 쏜다. 두 경로를 합치는 대신 발사구에
+/// 게이트를 두면 앞으로 경로가 늘어도 자동으로 걸린다. pane 이 여섯이면 시끄러움은
+/// 배수로 늘고, 시끄러우면 사람은 알림을 꺼 버려 앞의 모든 표시가 같이 죽는다.
+///
+/// 열쇠는 **호출부가 정한다** — 완료 알림처럼 매번 떠야 하는 것은 열쇠를 안 준다.
+/// 상태는 함수-로컬 static 이다(`struct App` 필드는 다른 pane 작업과 충돌한다).
+fn notify_dedup_passes(key: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static SEEN: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let Ok(mut g) = SEEN.get_or_init(Mutex::default).lock() else {
+        return true; // 잠금이 깨졌으면 막지 않는다 — 알림을 삼키는 쪽이 더 나쁘다
+    };
+    let now = Instant::now();
+    // 지나간 것은 그때그때 치운다 — 맵이 살아 있는 pane 수만큼만 남는다.
+    g.retain(|_, t| now.duration_since(*t) < NOTIFY_DEDUP_WINDOW);
+    if g.contains_key(key) {
+        return false;
+    }
+    g.insert(key.to_string(), now);
+    true
+}
+
 /// Raise a macOS desktop notification. Inside the signed `.app` bundle we use
 /// `UNUserNotificationCenter` so the alert carries kasaterm's own app icon (and
 /// gets the native sound/click affordances). The bare `cargo run` binary has no
 /// bundle identifier and can't obtain notification authorization, so there we
 /// fall back to `osascript` — which shows the Script Editor icon (dev-only).
-#[cfg(target_os = "macos")]
-pub(crate) fn notify_desktop(title: &str, body: &str) {
-    if is_bundled() {
-        notify_native(title, body);
-    } else {
-        notify_osascript(title, body);
+///
+/// `dedup` 을 주면 그 열쇠로 8초 게이트를 탄다(같은 일에 두 경로가 쏘는 경우).
+///
+/// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
+/// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
+/// `route` 는 배너를 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
+/// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
+pub(crate) fn notify_desktop(
+    title: &str,
+    body: &str,
+    character: Option<&str>,
+    dedup: Option<&str>,
+    route: Option<(&str, Option<&str>)>,
+) {
+    if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if is_bundled() {
+            notify_native(title, body, character, route);
+        } else {
+            notify_osascript(title, body);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, body, character, route);
     }
 }
+
+/// 알림에 붙일 그 학생의 프사 파일.
+///
+/// 이미지는 `include_bytes!` 로 바이너리에 박혀 있어 경로가 없는데, 첨부가 받는
+/// 것은 **파일 URL 뿐**이다. 그래서 슬러그마다 한 번씩 임시 파일로 떨궈 두고 그
+/// 경로를 재사용한다. 로스터에 없는 커스텀 캐릭터는 슬러그가 없어 None 이다.
+#[cfg(target_os = "macos")]
+fn student_profile_file(character: &str) -> Option<std::path::PathBuf> {
+    let slug = crate::theme::character_slug(character)?;
+    let path = std::env::temp_dir()
+        .join("kasaterm-notify-icons")
+        .join(format!("{slug}.png"));
+    if path.exists() {
+        return Some(path);
+    }
+    let png = crate::render::student_profile_png(slug)?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(&path, png).ok()?;
+    Some(path)
+}
+
+/// 알림 권한 판정 — 0=아직 답 없음 · 1=허용 · 2=거부.
+///
+/// 전에는 `requestAuthorization` 의 콜백이 **빈 블록**이라 거부돼도 아무도 몰랐다:
+/// 요청은 그대로 native 로 나가고 시스템이 조용히 버려, 화면에는 "알림이 안 온다"
+/// 만 남았다. 답을 여기 남겨 두면 다음 알림부터 osascript 로 돌릴 수 있다.
+#[cfg(target_os = "macos")]
+static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// True when running from a `.app` bundle (has a `CFBundleIdentifier`). Native
 /// `UNUserNotificationCenter` requires this; the bare binary returns `None`.
 #[cfg(target_os = "macos")]
-fn is_bundled() -> bool {
+pub(crate) fn is_bundled() -> bool {
     objc2_foundation::NSBundle::mainBundle()
         .bundleIdentifier()
         .is_some()
@@ -2170,7 +2804,21 @@ pub(crate) fn ensure_notification_authorization() {
         if !is_bundled() {
             return;
         }
-        let handler = block2::RcBlock::new(|_granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {});
+        let handler = block2::RcBlock::new(
+            |granted: objc2::runtime::Bool, err: *mut objc2_foundation::NSError| {
+                let ok = granted.as_bool();
+                NOTIFY_AUTH.store(
+                    if ok { 1 } else { 2 },
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if !ok {
+                    let why = unsafe { err.as_ref() }
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| "사유 없음".to_string());
+                    eprintln!("[notify] 데스크톱 알림 권한 없음 — osascript 로 돌린다: {why}");
+                }
+            },
+        );
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
         center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
@@ -2178,23 +2826,70 @@ pub(crate) fn ensure_notification_authorization() {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_native(title: &str, body: &str) {
-    use objc2_foundation::NSString;
+fn notify_native(
+    title: &str,
+    body: &str,
+    character: Option<&str>,
+    route: Option<(&str, Option<&str>)>,
+) {
+    use objc2_foundation::{NSArray, NSString, NSURL};
     use objc2_user_notifications::{
-        UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter,
+        UNMutableNotificationContent, UNNotificationAttachment, UNNotificationRequest,
+        UNNotificationSound, UNUserNotificationCenter,
     };
     ensure_notification_authorization();
+    // 거부가 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서 돌린다.
+    if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
+        notify_osascript(title, body);
+        return;
+    }
     // Unique id per request so rapid completions don't replace each other.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
-    let ident = NSString::from_str(&format!("kasaterm-notify-{seq}"));
+    // 소리를 붙이지 않으면 **무음으로 배달된다**. 권한은 처음부터 `Alert | Sound` 로
+    // 받아 두고 정작 콘텐츠에 안 달아, 창을 뒤로 물린 동안 학생이 끝나도 알 길이
+    // dock 배지뿐이었다 — 그건 "봐야 보이는" 신호다(2026-08-11 조사).
+    content.setSound(Some(&UNNotificationSound::defaultSound()));
+    // 학생 프사를 오른쪽 썸네일로 — 알림이 여럿 겹쳐도 누구 것인지 그림으로 갈린다.
+    // **왼쪽 작은 아이콘은 번들 아이콘 고정**이라 여기서 못 바꾼다(그건 앱 아이콘).
+    if let Some(p) = character.and_then(student_profile_file) {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
+        let aid = NSString::from_str(&format!("kasaterm-icon-{seq}"));
+        if let Ok(att) = unsafe {
+            UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(&aid, &url, None)
+        } {
+            content.setAttachments(&NSArray::from_retained_slice(&[att]));
+        }
+    }
+    // 눌렀을 때 갈 자리를 **identifier 에 실어** 보낸다. `userInfo`(NSDictionary)를
+    // 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야 하는데, 여기
+    // 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
+    // 형식: `kasaterm-notify-{seq}|{pane}|{sid}` — pane id(`%116`)도 uuid 도 `|` 를
+    // 안 쓴다. 받는 쪽은 `macos_notify::route_from_identifier`.
+    let ident = match route {
+        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
+        None => format!("kasaterm-notify-{seq}"),
+    };
+    let ident = NSString::from_str(&ident);
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    center.addNotificationRequest_withCompletionHandler(&request, None);
+    // 배달이 실패하면(권한 회수·첨부 거부 등) 그 자리에서 osascript 로 돌린다.
+    // 실패를 삼키면 "알림이 안 온다" 만 남고 이유는 어디에도 안 남는다.
+    let (t, b) = (title.to_string(), body.to_string());
+    let done = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
+        if let Some(e) = unsafe { err.as_ref() } {
+            eprintln!(
+                "[notify] native 배달 실패 — osascript 로 돌린다: {}",
+                e.localizedDescription()
+            );
+            notify_osascript(&t, &b);
+        }
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
 }
 
 #[cfg(target_os = "macos")]
@@ -2209,9 +2904,6 @@ fn notify_osascript(title: &str, body: &str) {
         .arg(script)
         .spawn();
 }
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn notify_desktop(_title: &str, _body: &str) {}
 
 /// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
 #[cfg(target_os = "macos")]
@@ -2298,3 +2990,90 @@ mod toast_tests {
     }
 }
 
+
+/// 이 간격 안에 다시 누르면 더블클릭이지 이름 편집이 아니다. 헤드리스 하네스도
+/// 이 값을 봐야 하므로(문턱을 두 벌로 두면 하네스가 조용히 어긋난다) 밖에 둔다.
+pub(crate) const ROOM_RENAME_DOUBLE_CLICK_MS: u128 = 500;
+
+/// 「느린 더블클릭」인가 — **이미 열려 있는 방**의 줄을, **더블클릭 문턱보다 늦게**
+/// 다시 누른 경우.
+///
+/// 셋을 다 봐야 한다: ①같은 줄 ②그 방이 지금 활성(=첫 클릭이 전환이 아니라 선택이었다)
+/// ③직전 클릭에서 문턱 초과. ③이 없으면 진짜 더블클릭이 편집을 열고, ②가 없으면
+/// 다른 방으로 전환하려던 두 번째 클릭이 편집을 연다.
+pub(crate) fn starts_room_rename(
+    last: Option<(usize, std::time::Instant)>,
+    idx: usize,
+    active: usize,
+    now: std::time::Instant,
+) -> bool {
+    // 너무 오래 지난 클릭은 "다시 누른 것"이 아니라 새 클릭이다 — 몇 분 전 클릭이
+    // 편집을 열면 사용자는 이유를 못 찾는다.
+    const STALE_MS: u128 = 5_000;
+    let Some((prev_idx, at)) = last else { return false };
+    let ms = now.duration_since(at).as_millis();
+    prev_idx == idx && idx == active && ms > ROOM_RENAME_DOUBLE_CLICK_MS && ms <= STALE_MS
+}
+
+#[cfg(test)]
+mod room_rename_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn at(ms: u64) -> (Option<(usize, Instant)>, Instant) {
+        let t0 = Instant::now();
+        (Some((1, t0)), t0 + Duration::from_millis(ms))
+    }
+
+    #[test]
+    fn 느리게_다시_누르면_편집이다() {
+        let (last, now) = at(700);
+        assert!(starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 진짜_더블클릭은_편집이_아니다() {
+        // 문턱 안(300ms) — 여기서 열면 더블클릭 동작과 겹쳐 둘 다 오작동한다.
+        let (last, now) = at(300);
+        assert!(!starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 다른_방으로_전환하는_두번째_클릭은_편집이_아니다() {
+        // 누른 줄(2)이 활성(1)이 아니다 = 첫 클릭이 선택이 아니라 전환이었다.
+        let (last, now) = at(700);
+        assert!(!starts_room_rename(last, 2, 1, now));
+    }
+
+    #[test]
+    fn 한참_뒤_클릭은_새_클릭이다() {
+        let (last, now) = at(9_000);
+        assert!(!starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 직전_클릭이_없으면_편집이_아니다() {
+        assert!(!starts_room_rename(None, 1, 1, Instant::now()));
+    }
+
+    /// 대기 어휘가 둘(`waiting`/`blocked`)인데 표시 여섯 자리가 앞의 것만 보고 있었고,
+    /// 정작 화면 감지는 뒤의 것만 쓴다 — 그래서 승인 대기가 아무 데도 안 그려졌다.
+    #[test]
+    fn 대기_판정은_두_어휘를_모두_받는다() {
+        assert!(status_needs_you("waiting"));
+        assert!(status_needs_you("blocked"));
+        assert!(!status_needs_you("working"));
+        assert!(!status_needs_you("idle"));
+        assert!(!status_needs_you(""));
+    }
+
+    /// 같은 승인에 훅과 화면 감지가 각각 쏘던 것을 발사구에서 막는다.
+    #[test]
+    fn 같은_열쇠는_한_번만_통과한다() {
+        // 열쇠는 테스트마다 고유해야 한다 — 게이트 상태가 프로세스 전역이라.
+        assert!(notify_dedup_passes("test:dedup-alpha"));
+        assert!(!notify_dedup_passes("test:dedup-alpha"));
+        // 다른 열쇠는 서로를 막지 않는다.
+        assert!(notify_dedup_passes("test:dedup-beta"));
+    }
+}

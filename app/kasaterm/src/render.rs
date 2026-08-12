@@ -2,6 +2,29 @@
 //! main.rs 의 impl App 에서 분리. struct App·자유함수·타입은 crate root 그대로 참조.
 use super::*;
 
+/// 펼친 방의 pane 줄 하나를 그리는 데 필요한 것 전부 — 페인트 루프가 `g`
+/// (=&mut self.gpu) 를 잡고 있어 `self` 를 다시 읽을 수 없으므로 미리 뜬 스냅샷이다.
+/// 튜플로 두다 필드가 여섯이 되면서 `.3`/`.4` 가 무엇인지 호출부에서 안 읽혀 이름을 달았다.
+struct SidebarRowInfo {
+    /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
+    who: String,
+    /// 줄에 적는 것 — 그 pane 이 지금 무엇인가(claude · zsh · 편집기…).
+    label: String,
+    /// 오른쪽 끝 상태 점 색(`pane_state_color`).
+    color: [u8; 4],
+    /// 지금 보고 있는 pane.
+    is_cur: bool,
+    /// 못 본 완료 — 줄 끝 점이 accent 로 깜빡인다.
+    alert: bool,
+    /// 승인·입력을 기다리는 중 — 줄 끝 점이 주황으로, 두 배 빠르게 깜빡인다.
+    waiting: bool,
+    /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
+    busy: bool,
+    /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
+    /// 그려 「없는 것」이 아니라 「치워 둔 것」임을 말한다.
+    stashed: bool,
+}
+
 impl App {
     /// Phase 2a path. Collects every pane's live cell grid and hands
     /// it to the cell-renderer pipeline. Chrome (sidebar, tabs,
@@ -14,12 +37,16 @@ impl App {
     /// already cell-space — the renderer-side helper applies cell
     /// metric multiplication.
     fn gpu_overlay_snapshot(&self) -> GpuOverlay {
-        // 터미널 오버레이도 조합기 주인일 때만 그린다. 편집기가 조합 중인데
+        // 터미널 오버레이는 조합기 주인이 터미널일 때만 그린다. 편집기가 조합 중인데
         // 포커스만 터미널로 옮겨진 순간(클릭 직후, 아직 아무 키도 안 친 상태)
         // 남의 조합 글자를 터미널 커서에 그리게 된다.
+        //
+        // **화이트리스트로 둔다.** 크롬 쪽 입력칸(git 커밋·파일트리·방 이름·경로 검색)은
+        // 전부 자기 자리에 프리에딧을 그리므로, 빠뜨린 갈래가 하나라도 있으면 같은 글자가
+        // 그 칸과 터미널 커서에 이중으로 뜬다. 목록에 없는 새 필드가 생겨도 안 새게.
         let preedit_text = match &self.ime_focus {
-            Some(crate::ImeFocus::Editor(_)) | Some(crate::ImeFocus::AuxEditor(_)) => String::new(),
-            _ => self.preedit.clone(),
+            None | Some(crate::ImeFocus::Pane(_)) => self.preedit.clone(),
+            _ => String::new(),
         };
         let commit_overlay = self.commit_overlay.clone();
         // Active pane's font multiplier — the overlay anchors to this same
@@ -64,14 +91,15 @@ impl App {
                     // spaces the PTY echoes), so trust it directly.
                     // Image/markdown panes have no PTY cursor — their terminal
                     // block cursor stays hidden (the Raw editor draws its own).
-                    let (cur_row, cur_col, cur_vis, cols) = match pane.term() {
+                    let (cur_row, cur_col, cur_vis, cols, cur_w) = match pane.term() {
                         Some(t) => (
                             t.cursor_row,
                             t.cursor_col,
                             t.cursor_visible,
                             t.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                            cursor_cell_width(&t.cells, t.cursor_row, t.cursor_col),
                         ),
-                        None => (0, 0, false, 80),
+                        None => (0, 0, false, 80, 1),
                     };
                     let (base_row, base_col) = (cur_row, cur_col);
                     // Until the committed syllable's echo lands (cursor
@@ -95,6 +123,7 @@ impl App {
                         cur_col,
                         cur_vis,
                         cols,
+                        cur_w,
                         prow,
                         pcol,
                         display,
@@ -110,13 +139,14 @@ impl App {
             cursor_col,
             cursor_visible,
             cols,
+            cursor_w,
             preedit_row,
             preedit_col,
             preedit,
             pane_x,
             pane_y,
             header_shift,
-        ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0, 0.0));
+        ) = snap.unwrap_or((0, 0, false, 80, 1, 0, 0, preedit_text.clone(), 0, 0, 0.0));
         // When split OR any pane is multi-tab, every pane body is pushed
         // down by its header band. The cursor / preedit / selection
         // overlays anchor off the same origin as the cells, so they must
@@ -132,6 +162,7 @@ impl App {
             pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h + header_shift + PANE_INNER_Y,
             cursor_row,
             cursor_col,
+            cursor_w,
             cursor_visible,
             cols,
             blink_on: self.cursor_blink_on(Instant::now()),
@@ -195,7 +226,7 @@ impl App {
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
             let mut c = cells::iterm_cursor();
             c[3] = 140; // ~0.55 alpha
-            g.rect(cx, cy, cw, ch, c);
+            g.rect(cx, cy, cw * ov.cursor_w as f32, ch, c);
         }
         // Inline autosuggestion ghost text — dim, on the same baseline as
         // committed cells, starting at the cursor and clipped to the row's
@@ -244,6 +275,105 @@ impl App {
         }
     }
 
+    /// `surface.capture` — pane 한 칸만 잘라 다음 프레임에 PNG 로 굽도록 무장한다.
+    ///
+    /// 좌표는 렌더가 셀을 놓는 식 그대로다(`render_frame_gpu` 의 pad_x/pad_y 와 같은
+    /// 원점, 안쪽 여백 PANE_INNER 만 빼고 pane 상자 전체). 헤더 띠는 폐기돼(ghostty식,
+    /// `layout.rs` 히트테스트 참조) 세로 보정이 없다. 프레임버퍼는 물리 픽셀이라
+    /// 마지막에 scale 을 곱한다 — 안 곱하면 HiDPI 에서 좌상단 1/4 만 잘린다.
+    ///
+    /// ★ `pane` 이 **빈 문자열이면 창 전체**다. 프레임버퍼에는 사이드바·탭바·우측 칼럼이
+    /// 이미 다 그려져 있고 pane 캡처가 위 오프셋으로 **일부러 잘라내던 것**이라, 크롭을
+    /// 안 세우면(`capture_crop = None`) 그대로 창 한 장이 나온다. 에이전트가 제 UI 를
+    /// 보려면 이 길이 필요하다 — pane 만 찍혀서는 사이드바가 어떻게 보이는지 알 수 없다.
+    ///
+    /// ⚠️ **메인 창만이다.** 별도 창으로 꺼낸 방(`auxwin`)은 자기 `GpuRenderer` 를 따로
+    /// 들고 있어 이 서피스에 없다.
+    pub(crate) fn arm_pane_capture(
+        &mut self,
+        pane: &str,
+        path: Option<String>,
+        max_w: u32,
+        reply: std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ) {
+        if self.gpu.is_none() {
+            let _ = reply.send(Err("capture needs the gpu renderer".into()));
+            return;
+        }
+        // 프레임당 한 장만 읽는다. 헤드리스 autocapture 와 겹치면 그쪽이 먼저다 —
+        // 덮어쓰면 그 검증이 엉뚱한 pane 을 찍고 조용히 통과한다.
+        if self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some()) {
+            let _ = reply.send(Err("another capture is already armed; retry".into()));
+            return;
+        }
+        // 창 전체는 크롭을 안 세운다 — 아래 pane 갈래가 잘라내던 것을 안 자르는 것뿐이다.
+        let crop = if pane.is_empty() {
+            None
+        } else {
+            let (gcols, grows) = self.window_cells();
+            let Some((_, cx, cy, cw, ch)) = self
+                .effective_leaf_rects(gcols, grows)
+                .into_iter()
+                .find(|(id, ..)| id == pane)
+            else {
+                // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
+                // 답해야 부른 쪽이 줌을 풀 생각을 한다.
+                let zoomed = self.zoomed_pane.is_some();
+                let _ = reply.send(Err(if zoomed {
+                    format!("{pane} is hidden behind a zoomed pane")
+                } else {
+                    format!("no such pane: {pane}")
+                }));
+                return;
+            };
+            let s = self.effective_scale();
+            let px = (WINDOW_PADDING + self.effective_sidebar_w() + cx as f32 * self.cell.w) * s;
+            let py = (TITLE_HEIGHT + cy as f32 * self.cell.h) * s;
+            let pw = (cw as f32 * self.cell.w * s).round().max(1.0) as u32;
+            let ph = (ch as f32 * self.cell.h * s).round().max(1.0) as u32;
+            Some((px.max(0.0) as u32, py.max(0.0) as u32, pw, ph))
+        };
+        let path = path.unwrap_or_else(|| {
+            let name = if pane.is_empty() {
+                "kasaterm-window.png".to_string()
+            } else {
+                format!("kasaterm-capture-{}.png", pane.trim_start_matches('%'))
+            };
+            std::env::temp_dir().join(name).to_string_lossy().into_owned()
+        });
+        if let Some(g) = self.gpu.as_mut() {
+            g.capture_crop = crop;
+            g.capture_max_w = max_w;
+            g.capture_next = Some(path.clone());
+        }
+        self.pending_capture_reply.push((path, reply));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// 무장한 캡처가 실제로 파일로 떨어졌는지 확인하고 회신한다(렌더 직후 호출).
+    pub(crate) fn settle_pane_captures(&mut self) {
+        if self.pending_capture_reply.is_empty() {
+            return;
+        }
+        // 아직 안 그려진 요청이 남아 있으면 이번엔 건너뛴다 — 무장이 그대로면
+        // 렌더가 소비하지 않은 것이다.
+        if self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some()) {
+            return;
+        }
+        for (path, reply) in std::mem::take(&mut self.pending_capture_reply) {
+            let msg = match std::fs::metadata(&path) {
+                Ok(m) if m.len() > 0 => Ok(serde_json::json!({
+                    "path": path,
+                    "bytes": m.len(),
+                })),
+                Ok(_) => Err(format!("capture wrote an empty file: {path}")),
+                Err(e) => Err(format!("capture produced no file ({path}): {e}")),
+            };
+            let _ = reply.send(msg);
+        }
+    }
+
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
         // Glyph-atlas repack, if one is pending. This is the only safe point
         // for it: from here on the frame emits quads whose UVs index the
@@ -264,6 +394,8 @@ impl App {
         self.publish_git_col_cwd();
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
         self.pump_info();
+        self.pump_sessions_col();
+        self.pump_mcp_col();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -409,9 +541,6 @@ impl App {
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
-        // 세션 제목 타이프라이터 진행 중인 pane 이 하나라도 있나 — 프레임 끝에
-        // TITLE_TYPE_ANIMATING 으로 발행해 펌프 스레드가 33ms Redraw 를 돌린다.
-        let mut title_typing = false;
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
@@ -424,7 +553,6 @@ impl App {
         // statusline 프사의 hover 확대·클릭용 (학생이름, slug, rect). profile_slots
         // 와 달리 학생 이름을 들고 있어(hover 큰 bust·클릭→학생설정 딥링크) — /resume
         // 피커 프사는 이름을 모르므로 여기 안 담고 statusline 프사만.
-        let mut profile_face_hits: Vec<(String, &'static str, (f32, f32, f32, f32))> = Vec::new();
         // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(전신 애니).
         // 두 번째 필드 = 모션: "cheer"(턴 완료 직후) 또는 "idle"(대기).
         let mut standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))> =
@@ -658,11 +786,13 @@ impl App {
                 // active_process_name 은 셸의 **직속** 자식이라, claude 가 안에서
                 // cargo·vim 을 띄워도 여전히 claude 다(그것들의 부모는 claude).
                 // 500ms 캐시가 이미 붙어 있어 매 프레임 불러도 싸다.
-                let runs_claude = self
-                    .pty
-                    .get(id.as_str())
-                    .and_then(|p| p.active_process_name())
-                    .is_some_and(|n| n.contains("claude"));
+                // 학생 상태는 **탭 pid** 로 기록되고 이 루프가 든 `id` 는 BSP leaf 다.
+                // 접지 않으면 탭에서 도는 클로드가 안 잡혀, 프사·전신·배너 도트가
+                // 통째로 안 뜬다(거노 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
+                let tab_pid = ws.active_tab_pid(&id);
+                let agent_kind =
+                    self.pty.get(tab_pid.as_str()).and_then(|p| p.active_agent());
+                let runs_claude = agent_kind.is_some();
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -807,35 +937,65 @@ impl App {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
-                    for (br, bc) in find_clawd_banners(&composed) {
+                    // 그림이 없는 학생은 배너를 건드리지 않는다 — 지운 뒤 못
+                    // 그리면 원래 있던 Clawd 배너까지 사라진다.
+                    // claude 의 Clawd 아트와 agy 의 Antigravity 로고는 모양도 크기도
+                    // 다르다. 어느 하네스로 떴는지 따지지 않고 둘 다 훑는다 — 화면에
+                    // 실제로 그려진 로고가 정본이고, 한 pane 에 둘이 함께 뜰 일은 없다.
+                    let logos: Vec<(isize, usize, usize, usize, &[char])> =
+                        find_clawd_banners(&composed)
+                            .into_iter()
+                            .map(|(br, bc)| (br, bc, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE))
+                            .chain(find_agy_banners(&composed).into_iter().map(
+                                |(br, bc)| (br, bc, AGY_COLS, AGY_ROWS, AGY_TITLE),
+                            ))
+                            .filter(|_| student_has_sprite(slug, "idle"))
+                            .collect();
+                    for (br, bc, lcols, lrows, title) in logos {
                         // br 은 스크롤로 위가 잘리면 음수, 아래가 잘리면 박스가
                         // 그리드 밖까지 이어진다 — 스프라이트는 pane 세로 범위로
                         // 클립해 셀 스크롤과 함께 자연스럽게 잘려 나가게 한다.
+                        // 로고 칸이 Clawd 보다 크면 도트를 늘리지 말고 비율을 지켜
+                        // 안에 맞춘 뒤 바닥에 세운다(발이 로고 밑선에 닿는다).
+                        let (bw, bh) = fit_sprite_box(lcols, lrows, scw, sch);
                         banner_slots.push((
                             slug,
                             (
-                                body_left + bc as f32 * scw,
-                                body_top + br as f32 * sch,
-                                CLAWD_COLS as f32 * scw,
-                                CLAWD_ROWS as f32 * sch,
+                                body_left
+                                    + bc as f32 * scw
+                                    + (lcols as f32 * scw - bw) * 0.5,
+                                body_top + br as f32 * sch + (lrows as f32 * sch - bh),
+                                bw,
+                                bh,
                             ),
                             (body_top, body_top + composed.len() as f32 * sch),
                         ));
                         let r0 = br.max(0) as usize;
-                        let r1 = (br + CLAWD_ROWS as isize)
+                        let r1 = (br + lrows as isize)
                             .clamp(0, composed.len() as isize)
                             as usize;
                         for row in composed[r0..r1].iter_mut() {
-                            for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
+                            for cell in row.iter_mut().skip(bc).take(lcols) {
                                 *cell = GridCell::blank();
                             }
                         }
-                        // 배너 타이틀 "Claude Code" 도 학생 이름으로 — 도트만
-                        // 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
-                        replace_banner_title(&mut composed, br, bc, name, accent);
+                        // 배너 타이틀("Claude Code"·"Antigravity CLI")도 학생 이름으로 —
+                        // 도트만 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
+                        replace_banner_title(
+                            &mut composed, br, bc, lcols, lrows, title, name, accent,
+                        );
                         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
                         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
                         replace_welcome_greeting(&mut composed, br, name, accent);
+                    }
+                    // codex 시작 패널: 세울 아트가 없어 이름표만 바꾼다. 도트 유무와
+                    // 무관하니 위 로고 루프 밖이고, codex pane 일 때만 훑는다 —
+                    // 배너와 달리 화면 전체를 봐야 해서 공짜가 아니다.
+                    if agent_kind == Some(kasa_pty::AgentKind::Codex) {
+                        let n = composed.len();
+                        replace_banner_title(
+                            &mut composed, 0, 0, 0, n, CODEX_TITLE, name, accent,
+                        );
                     }
                     // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
                     // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
@@ -898,17 +1058,21 @@ impl App {
                                 cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
                             }
                         }
-                        composed[sr][sc] = GridCell::blank();
-                        let top_r = sr.saturating_sub(1);
-                        spinner_slots.push((
-                            slug,
-                            (
-                                body_left + sc as f32 * scw,
-                                body_top + top_r as f32 * sch,
-                                2.0 * scw,
-                                (sr - top_r + 1) as f32 * sch,
-                            ),
-                        ));
+                        // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수
+                        // 있을 때만. 못 세우면 도는 표시가 통째로 없어진다.
+                        if student_has_sprite(slug, "walk") {
+                            composed[sr][sc] = GridCell::blank();
+                            let top_r = sr.saturating_sub(1);
+                            spinner_slots.push((
+                                slug,
+                                (
+                                    body_left + sc as f32 * scw,
+                                    body_top + top_r as f32 * sch,
+                                    2.0 * scw,
+                                    (sr - top_r + 1) as f32 * sch,
+                                ),
+                            ));
+                        }
                     } else if !crate::input::rows_show_working(&composed)
                         && crate::input::rows_show_approval_prompt(&composed).is_some()
                     {
@@ -918,41 +1082,26 @@ impl App {
                             let x = (body_left + (ac + 2) as f32 * scw)
                                 .min(body_left + cols_now as f32 * scw - DOT);
                             let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
-                            waiting_slots.push((slug, (x, y, DOT, DOT)));
+                            if student_has_sprite(slug, "wave") {
+                                waiting_slots.push((slug, (x, y, DOT, DOT)));
+                            }
                         }
                     }
-                    // statusline 학생 프사: statusline.py 가 kasaterm 안에서
-                    // 학생 이름 대신 U+FFFC 자리표시자를 내보낸다. 그 셀을
-                    // 비우고 그 자리에 프사(bust 96×96)를 statusline 행 바닥
-                    // 정렬·STATUSLINE_FACE_ROWS 행 키로 얹는다 — 1행짜리는
-                    // 너무 작았다(거노). icon 패스라 아래 테두리 줄 위에
-                    // 스티커처럼 얹힌다.
-                    // 아래→위 스캔: statusline 은 항상 화면 바닥 쪽이고, 대화
-                    // 출력에 U+FFFC 원문이 섞이면(statusline 디버그 출력 등)
-                    // 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다(실사고).
-                    if let Some((sr, sc, len)) =
-                        composed.iter().enumerate().rev().find_map(|(r, row)| {
-                            row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
-                                let n = row[c0..]
-                                    .iter()
-                                    .take_while(|c| c.ch == '\u{fffc}')
-                                    .count();
-                                (r, c0, n)
-                            })
-                        })
-                    {
+                    // 입력창 위 standing 앵커. claude 는 statusline 표식(U+FFFC)에서
+                    // 출발하지만 codex 는 그게 없어(위 `find_filled_standing_anchor`
+                    // 주석) 입력행에서 바로 잡는다. 둘 다 못 잡으면 안 세운다.
+                    let mut stand_anchor: Option<(usize, f32)> = None;
+                    if let Some((sr, sc, len)) = find_statusline_face(&composed) {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
                         }
-                        let face_h = STATUSLINE_FACE_ROWS as f32 * sch;
-                        let face_rect = (
-                            body_left + sc as f32 * scw,
-                            (body_top + (sr + 1) as f32 * sch - face_h).max(body_top),
-                            len as f32 * scw,
-                            face_h,
-                        );
-                        profile_slots.push((slug, face_rect));
-                        profile_face_hits.push((name.to_string(), slug, face_rect));
+                        // 프사는 여기 안 그린다(거노 2026-08-11: "클로드코드 상태줄
+                        // 학생프사는 없애자"). statusline 은 이제 `● 이름` 을 직접
+                        // 찍고, 남은 U+FFFC 한 칸은 **신호**다 — 위 blank 로 지우고
+                        // `sr` 만 standing 앵커로 쓴다. 자리표시자를 아예 없애면
+                        // agents 뷰 판정(`has_profile_slot`)·stale statusline 복구
+                        // (socket.rs)·이 앵커가 한꺼번에 죽는다.
+                        let _ = (sc, len);
                         // 입력박스 위에 서 있는 학생(전신 idle) — 프롬프트 위
                         // 스페이서 행(effort 칩·context 경고가 뜨는 자리) 우측.
                         // statusline 바로 위 행이 아래 테두리(전폭 '─')면 그
@@ -960,47 +1109,62 @@ impl App {
                         // 여러 줄로 자라도 스캔이라 따라간다. 발은 윗 테두리
                         // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
                         // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
-                        // 학생을 그리므로(pet_busy) 세우지 않는다.
-                        // max_label: 테두리 줄에 허용하는 비-대시 글자 수.
-                        // 아래 테두리는 항상 순수 '─'(0), 윗 테두리는 /rename
-                        // 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트
-                        // 섬을 인정한다 — 순수 rule 만 보면 이름 지은 세션에서
-                        // standing 도트가 통째로 사라진다(거노 실사고).
-                        let is_rule = |row: &[GridCell], max_label: usize| {
-                            let mut dashes = 0usize;
-                            let mut label = 0usize;
-                            for c in row {
-                                match c.ch {
-                                    '─' => dashes += 1,
-                                    ' ' | '\0' => {}
-                                    _ => {
-                                        label += 1;
-                                        if label > max_label {
-                                            return false;
-                                        }
-                                    }
+                        // 학생을 그리므로(pet_busy) 세우지 않는다. 앵커 규칙은
+                        // `find_standing_anchor` 에 — 별도창도 같은 자리에 세운다.
+                        // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이
+                        // 직접 말한다. 이 자리는 조건 셋(스피너 감지·pet_busy·앵커)이
+                        // 겹쳐 있고 실패하면 **아무것도 안 그려** 밖에서 원인을 가릴
+                        // 수 없다. 정적 스프라이트(프사)만 뜨고 애니가 안 뜬다는
+                        // 신고를 받고도 코드 읽기로는 못 좁혔다(2026-08-05).
+                        if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
+                            use std::sync::{Mutex, OnceLock};
+                            static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+                            let last = LAST.get_or_init(|| Mutex::new(std::time::Instant::now()));
+                            let mut g = last.lock().unwrap();
+                            if g.elapsed() >= std::time::Duration::from_millis(1000) {
+                                *g = std::time::Instant::now();
+                                let a = find_standing_anchor(&composed, sr, cols_now as usize);
+                                eprintln!(
+                                    "[student-debug] pane={id} slug={slug} face_row={sr} cols={cols_now} pet_busy={pet_busy} spinner={} anchor={a:?} rows={}",
+                                    find_claude_spinner(&composed).is_some(),
+                                    composed.len(),
+                                );
+                                if sr >= 4 {
+                                    let rule = |r: usize| {
+                                        let row = &composed[r];
+                                        let d = row.iter().filter(|c| c.ch == '─').count();
+                                        let l = row
+                                            .iter()
+                                            .filter(|c| !matches!(c.ch, '─' | ' ' | '\0'))
+                                            .count();
+                                        format!("dash={d}/{} label={l}", row.len())
+                                    };
+                                    eprintln!(
+                                        "[student-debug]   아래테두리 rows[{}] {}",
+                                        sr - 1,
+                                        rule(sr - 1)
+                                    );
                                 }
                             }
-                            dashes > row.len() / 2
-                        };
-                        if !pet_busy && sr >= 4 && is_rule(&composed[sr - 1], 0) {
-                            if let Some(tr) = (sr.saturating_sub(16)..sr - 1)
-                                .rev()
-                                .find(|&r| is_rule(&composed[r], 24))
-                                .filter(|&tr| tr >= 1)
-                            {
-                                let anchor = tr - 1;
-                                let first = composed[anchor]
-                                    .iter()
-                                    .position(|c| !matches!(c.ch, ' ' | '\0'));
-                                let right_c = match first {
-                                    Some(f) => f as f32 - 1.5,
-                                    None => cols_now as f32 - 1.0,
-                                };
-                                const STAND_CELLS: f32 = 4.0;
-                                let left_c = right_c - STAND_CELLS;
+                        }
+                        stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
+                    }
+                    // statusline 자리표시자가 없는 하네스(codex) — 입력행에서 바로.
+                    if stand_anchor.is_none() {
+                        stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
+                    }
+                    // agy — 자리표시자도 채운 입력행도 없다. 모양은 claude 와 같은
+                    // 대시 보더 두 줄인데 마커가 ASCII `>` 라 공용 판정에서 빠져 있다
+                    // (인용문·diff 오인 방지, 2026-07-22). 앵커 규칙은 그대로 쓰고
+                    // statusline 자리만 「맨 아래 보더 다음 행」으로 잡아 준다.
+                    if stand_anchor.is_none() {
+                        stand_anchor = find_agy_standing_anchor(&composed, cols_now as usize);
+                    }
+                    {
+                        if !pet_busy {
+                            if let Some((anchor, left_c)) = stand_anchor {
                                 let h = INPUT_STANDING_ROWS as f32 * sch;
-                                if left_c > 2.0 {
+                                {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                                     // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
                                     // wave("선생님, 다음 지시 기다려요"). 학생 pane 은
@@ -1017,17 +1181,19 @@ impl App {
                                     } else {
                                         "idle"
                                     };
-                                    standing_slots.push((
-                                        slug,
-                                        motion,
-                                        (
-                                            body_left + left_c * scw,
-                                            (body_top + (anchor + 1) as f32 * sch - h)
-                                                .max(body_top),
-                                            STAND_CELLS * scw,
-                                            h,
-                                        ),
-                                    ));
+                                    if student_has_sprite(slug, motion) {
+                                        standing_slots.push((
+                                            slug,
+                                            motion,
+                                            (
+                                                body_left + left_c * scw,
+                                                (body_top + (anchor + 1) as f32 * sch - h)
+                                                    .max(body_top),
+                                                STAND_CELLS * scw,
+                                                h,
+                                            ),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1047,12 +1213,18 @@ impl App {
                     let col = pane
                         .color
                         .or_else(|| {
-                            pane.character.as_deref().and_then(|n| {
-                                theme::character_accent_n(
-                                    n,
-                                    theme::character_ordinal(&ws.pane_character, &id),
-                                )
-                            })
+                            // `pane.character` 는 pane 단위 필드라 탭이 둘이면 **마지막에
+                            // 출력한 탭**이 이긴다. 접힌 `true_char` 를 앞에 세워 지금
+                            // 보이는 탭의 학생을 쓴다.
+                            true_char
+                                .as_deref()
+                                .or(pane.character.as_deref())
+                                .and_then(|n| {
+                                    theme::character_accent_n(
+                                        n,
+                                        theme::character_ordinal(&ws.pane_character, &tab_pid),
+                                    )
+                                })
                         })
                         .unwrap_or_else(theme::border);
                     title_outline_slots.push((
@@ -1182,6 +1354,36 @@ impl App {
                         let msg = msg_path
                             .as_deref()
                             .and_then(|p| latest_teammate_msg(p, &sender));
+                        // 화면에 `@peer` 로 떴어도 태그에서 진짜 발신자를 찾았으면 그것으로
+                        // 그린다 — 이름이 바뀌어야 아래 색·프사·전개가 전부 걸린다.
+                        let sender = msg
+                            .as_ref()
+                            .and_then(|m| m.sender.clone())
+                            .unwrap_or(sender);
+                        // 그 이름으로도 학생을 못 찾으면 **세션 id 로 pane 을 되짚는다.**
+                        // 명부의 이름은 세션 제목이라 자동 요약에 덮인다 — 실측으로
+                        // 모모이 pane 은 `mcp, skill사이드바` 였고, 로스터가 아는 글자가
+                        // 하나도 없어 색도 프사도 안 걸렸다(거노 2026-08-11: "sm테마는 왜
+                        // 안됐어"). 앞서 이름 파싱을 고친 것은 이름에 슬러그가 들어 있을
+                        // 때만 듣는 반쪽이었다. pane 을 되짚으면 제목이 뭐로 바뀌든 맞는다.
+                        //
+                        // ⚠️ `pane_character_if_known` 을 부르면 안 된다 — 그 안에서
+                        // `ws` 를 다시 잠그는데 여기는 이미 그 락 안(557~1788)이라
+                        // 재진입 데드락이다. 들고 있는 `ws` 를 그대로 쓴다.
+                        let sender = if teammate_sender_slug(&sender).is_some() {
+                            sender
+                        } else {
+                            msg.as_ref()
+                                .and_then(|m| m.peer_sid.as_deref())
+                                .and_then(|sid| {
+                                    self.pane_claude_sid
+                                        .iter()
+                                        .find(|(_, s)| s.as_str() == sid)
+                                        .map(|(p, _)| ws.active_tab_pid(p))
+                                })
+                                .and_then(|key| ws.pane_character.get(&key).cloned())
+                                .unwrap_or(sender)
+                        };
                         let accent = teammate_sender_accent(
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
@@ -1280,54 +1482,34 @@ impl App {
                 let prompt_accent = if agents_view || resume_picker || ask_picker {
                     None
                 } else {
-                    pane.character
+                    true_char
                         .as_deref()
+                        .or(pane.character.as_deref())
                         .and_then(|n| {
                             theme::character_accent_n(
                                 n,
-                                theme::character_ordinal(&ws.pane_character, &id),
+                                theme::character_ordinal(&ws.pane_character, &tab_pid),
                             )
                         })
                         .filter(|_| {
                             self.pty
-                                .get(id.as_str())
-                                .and_then(|p| p.active_process_name())
-                                .is_some_and(|n| n == "claude")
+                                .get(tab_pid.as_str())
+                                .and_then(|p| p.active_agent())
+                                .is_some()
                         })
                 };
                 if let Some(accent) = prompt_accent {
+                    // ultracode 턴이면 학생 accent 대신 보라로 칠한다 — 그 턴에 무엇이
+                    // 켜져 있는지가 누구 pane 인지보다 급한 정보다(거노 2026-08-11:
+                    // "상태줄말고 프롬프트입력창 보라색 glow"). 입력박스를 칠하는 손이
+                    // 여기 하나뿐이라 색만 갈아끼운다 — 따로 칠하면 이 호출이 덮는다.
+                    let accent = if self.pane_ultracode.contains(&tab_pid) {
+                        ultracode_accent(self.version_anim_start.elapsed().as_secs_f32())
+                    } else {
+                        accent
+                    };
                     style_prompt_box(&mut composed, accent);
-                    // teammate 칩(@agent이름)은 입력박스에서 걷어낸다 — 그 이름은
-                    // pane 헤더 탭이 들고 있고, 여기 남으면 좌측 대화 제목과 정체가
-                    // 다른 이름 둘이 한 줄에 서서 헷갈린다(거노 2026-07-27). 칩을
-                    // 지우면 보더 run 이 넓어져 제목 인레이 여유도 늘어난다.
-                    strip_agent_chip(&mut composed);
-                    // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
-                    // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
-                    // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
-                    // Stop hook(title-sync)이 턴마다 custom-title 을 최신
-                    // 프롬프트로 갱신해 "지금 하는 작업"이 이 자리에 흐른다.
-                    let title = self
-                        .pane_claude_sid
-                        .get(id.as_str())
-                        .and_then(|sid| {
-                            let cwd = self
-                                .pane_view_cwd
-                                .get(id.as_str())
-                                .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
-                            crate::socket::project_jsonl(cwd, sid)
-                        })
-                        .and_then(|p| pane_session_label(&p));
-                    if let Some(t) = title.as_deref() {
-                        // 타이프라이터: 제목이 처음 뜨거나 바뀌면 한 글자씩 드러난다
-                        // (거노). 진행 중엔 펌프 스레드(handler)가 33ms Redraw 를 돌림.
-                        let (shown, typing) = title_typewriter_frame(id.as_str(), t);
-                        title_typing |= typing;
-                        // 사각 테두리는 뺐다(거노 2026-07-26: "네모칸 구려") —
-                        // bold 굵기만으로 보더 대시와 무게 차등이 충분하고,
-                        // 박스가 입력 첫 줄과 겹치던 간섭도 원천 소멸한다.
-                        inlay_prompt_box_title(&mut composed, &shown);
-                    }
+                    // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
                 }
                 slots.push(PaneSlot {
                     rows: composed,
@@ -1387,8 +1569,10 @@ impl App {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
-                        let dock = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
-                        (raw_lh - dock - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
+                        (raw_lh
+                            - self.bottom_reserve_h()
+                            - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h))
+                            .max(0.0)
                     });
                     base_h + extra
                 } else {
@@ -1532,8 +1716,19 @@ impl App {
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|t| !t.is_empty())
                         {
-                            Some(t) => format!("{c} · {t}"),
-                            None => c.clone(),
+                            // pane 아이디를 캐릭터 뒤에 붙인다(거노 2026-08-05: "칩 위치를
+                            // 바꿔 pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
+                            // 입력박스 보더 우측은 `/rename` 이름 자리로 비워 뒀으니
+                            // (`inlay_prompt_box_right`) **이 pane 이 누구인가**는 헤더가
+                            // 든다. 학생 pane 은 여태 캐릭터만 실어 아이디가 어디에도
+                            // 없었다 — `tell %N` 을 쓰려면 그걸 알아야 한다.
+                            //
+                            // agent 이름(`midori-p1`)을 그대로 싣지 않는 이유: 그건 캐릭터
+                            // 슬러그 + pane 번호라 `미도리 %1` 과 같은 정보인데, 로마자
+                            // 슬러그는 스프라이트·board 의 한글 이름과 안 맞아 두 이름을
+                            // 오가게 만든다. 정체 표시는 한 벌로 둔다.
+                            Some(t) => format!("{c} {id} · {t}"),
+                            None => format!("{c} {id}"),
                         }
                     } else {
                         // Custom title (rename / OSC) wins; otherwise the live
@@ -1577,11 +1772,7 @@ impl App {
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         // Busy = the daemon's transcript watcher sees this pane
                         // working (cross-window). Drives the header working bar.
-                        busy: self
-                            .pane_activity
-                            .get(&id)
-                            .map(|a| a.status != "idle" && !a.status.is_empty())
-                            .unwrap_or(false),
+                        busy: self.pane_is_busy(&id),
                         // A background shell / Monitor is running with no spinner —
                         // drives the slower header pulse bar when not busy.
                         bg_active: self
@@ -1661,13 +1852,12 @@ impl App {
             }
             (slots, headers, footer_slots, agents_view_panes)
         };
-        TITLE_TYPE_ANIMATING.store(title_typing, std::sync::atomic::Ordering::Relaxed);
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
-        // 5시간 사용량 값 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
+        // 한도 배지 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
         // 쓰는 곳은 Info 탭 머리의 계정 행(info::draw_info_actions).
-        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| *v);
+        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| v.clone());
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
@@ -1848,6 +2038,10 @@ impl App {
                 // True window edges (logical). window_cells floors the grid,
                 // so a seam spanning the last row/col must reach past the grid
                 // to the real edge — otherwise it stops short like box_h did.
+                // ⚠️ 오른쪽 끝은 **창 끝이 아니라 우측 컬럼(Git·Info) 앞**이다.
+                // 격자는 `window_cells` 가 그 폭을 이미 접어 두는데 이 선만 창 끝을
+                // 써서, 마지막 열까지 걸친 가로선이 열려 있는 패널을 관통했다
+                // (거노: "73·27 사이 선이 우측 패널까지 뚫어버려").
                 let (win_right, win_bottom) = self.window.as_ref().map_or(
                     (
                         pad + cols as f32 * self.cell.w,
@@ -1856,7 +2050,7 @@ impl App {
                     |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         (
-                            w.inner_size().width as f32 / s,
+                            w.inner_size().width as f32 / s - self.effective_right_chrome_w(),
                             w.inner_size().height as f32 / s,
                         )
                     },
@@ -1896,7 +2090,7 @@ impl App {
         let sb_win_h = win_px.1 / scale;
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
-        let (sb_tabs, sb_closes, sb_plus) = self.sidebar_layout(sb_win_h);
+        let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
         // Windowed strip: publish the effective first/visible-count for the
         // wheel handler's clamp, and note per-side overflow for the chevron
         // hints painted with the tabs below.
@@ -1912,6 +2106,15 @@ impl App {
         // rects that a header-drag would false-hit as a cross-window drop.
         let sidebar_shown = self.tabs_on_top || self.tab_strip_w() > 0.0;
         self.window_tab_rects = if sidebar_shown { sb_tabs.clone() } else { Vec::new() };
+        // 배치도 칸도 같은 히트 벡터에 넣는다 — 칸을 눌러도 목록 행을 누른 것과 똑같이
+        // 포커스가 가고 드래그·우클릭까지 그대로 따라온다. 한 pane 이 rect 둘(칸·행)을
+        // 갖지만 히트는 `find`(첫 매치)라 무해하다. **행이 먼저** 와야 좁은 칸보다
+        // 누르기 쉬운 쪽이 이긴다.
+        self.sidebar_row_rects = if sidebar_shown {
+            sb_rows.iter().chain(sb_mini.iter()).cloned().collect()
+        } else {
+            Vec::new()
+        };
         self.window_tab_close_rects = if sidebar_shown { sb_closes.clone() } else { Vec::new() };
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
@@ -1939,41 +2142,144 @@ impl App {
             .map(|(cmd, _, _, r)| (cmd.clone(), *r))
             .collect();
         let sb_active = self.active_window;
-        // Per-window "working" flag for the sidebar dot: true when any pane in
-        // that window is mid-task (cross-window collab, from pane_activity). The
-        // active window's tree lives in pty_layout (its slot is None); the rest
-        // carry their own layout. Built here (no GPU borrow) so the paint loop
-        // just indexes sb_busy[i].
-        let sb_busy: Vec<bool> = (0..sb_labels.len())
+        // 방 단위 "작업 중"·"방금 끝남" 플래그는 걷어냈다. 그 둘이 칩 모서리의 점
+        // 쌍을 켜던 유일한 자리였는데, 상태가 바뀔 때마다 점이 두 모서리를 오가는
+        // 게 정보보다 먼저 읽혔다(2026-08-11 지시). 지금은 방을 펴면 그 방의 줄이
+        // 학생을 걷게 해서 도는 중임을 말하고, 카드 머리에 남은 건 손이 필요할 때만
+        // 깜빡이는 동그라미 하나다.
+        //
+        // 방마다 pane 하나당 점 하나 — 방을 열지 않고도 "누가 나를 기다리는지"가
+        // 보이게 한다(거노). 색이 곧 상태다: 대기=danger(내가 엔터를 쳐야 풀린다) ·
+        // 작업 중=accent · 방금 끝남=success · 쉬는 중=흐린 회색. 순서는 leaves
+        // 순서라 pane 이 늘거나 줄기 전까진 점의 자리가 고정된다.
+        //
+        // `sb_busy` 하나로 뭉뚱그리던 것을 여기서 가른다 — 그건 `status != "idle"`
+        // 이라 **엔터를 기다리는 pane 도 작업 중과 같은 파란 점**이었다. 정작 손이
+        // 필요한 쪽이 바쁜 쪽과 구별되지 않던 게 이 화면의 가장 큰 거짓말이었다.
+        let sb_dots: Vec<Vec<[u8; 4]>> = (0..sb_labels.len())
             .map(|i| {
-                let layout = if i == self.active_window {
-                    self.pty_layout.as_ref()
-                } else {
-                    self.windows.get(i).and_then(|w| w.as_ref())
-                };
-                layout.map_or(false, |l| {
-                    l.leaves().iter().any(|leaf| {
-                        self.pane_activity
-                            .get(&leaf.to_string())
-                            .map_or(false, |a| a.status != "idle" && !a.status.is_empty())
-                    })
-                })
+                self.window_leaves(i).iter().map(|id| self.pane_state_color(id)).collect()
             })
             .collect();
-        // Per-window "just finished" flag: any leaf with a live completion
-        // flash. Lights a SUCCESS dot on the window's sidebar tab so a finish
-        // in a window you aren't viewing is visible across the strip.
-        let sb_done: Vec<bool> = (0..sb_labels.len())
+        let sb_expand_t: Vec<f32> =
+            (0..sb_labels.len()).map(|i| self.expand_progress(i)).collect();
+        let sb_row_drop: Option<(String, bool, String)> = self
+            .sidebar_row_drag
+            .as_ref()
+            .filter(|d| d.active)
+            .and_then(|d| d.target.as_ref().map(|(t, b)| (t.clone(), *b, d.pane.clone())));
+        // 펼치기 버튼의 사각은 클릭 판정과 같은 것을 쓴다 — 페인트 루프는 `&self`
+        // 를 다시 못 빌리므로(GPU 를 이미 빌렸다) 방 인덱스로 늘어놓고 들어간다.
+        let sb_expand: Vec<Option<(f32, f32, f32, f32)>> = (0..sb_labels.len())
             .map(|i| {
-                let layout = if i == self.active_window {
-                    self.pty_layout.as_ref()
-                } else {
-                    self.windows.get(i).and_then(|w| w.as_ref())
-                };
-                layout.map_or(false, |l| {
-                    l.leaves()
+                sb_tabs
+                    .iter()
+                    .find(|(ti, _)| *ti == i)
+                    .and_then(|(_, r)| self.window_expand_rect(i, *r))
+            })
+            .collect();
+        // 뷰 전환 배지도 같은 이유로 미리 늘어놓는다. `(사각, 목록모드인가)`.
+        let sb_view: Vec<Option<((f32, f32, f32, f32), bool)>> = (0..sb_labels.len())
+            .map(|i| {
+                sb_tabs
+                    .iter()
+                    .find(|(ti, _)| *ti == i)
+                    .and_then(|(_, r)| self.window_view_rect(i, *r))
+                    .map(|r| (r, self.list_view_windows.contains(&i)))
+            })
+            .collect();
+        // 펼친 방의 pane 한 줄씩 — 이름·색을 여기서 뽑아 둔다. `pane_character_if_known`
+        // 이 `ws` 를 잠그므로 GPU 를 빌린 페인트 루프 안에서 부르면 그 자리에서 멈춘다.
+        // 줄에 적는 건 **그 pane 이 무엇을 하고 있나**(claude · zsh · 편집기…)다.
+        // 학생 이름은 얼굴이 이미 말하고 있어, 글자로 한 번 더 쓰면 같은 말이 두 번
+        // 나오고 정작 pane 을 가르는 정보가 자리를 잃는다(거노: "학생이름은 빼고").
+        // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
+        // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
+        let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
+        // 배치도 칸과 꼬리 줄이 **같은 것**을 말한다 — 한쪽만 고치면 같은 pane 이
+        // 자리마다 다른 얼굴을 갖는다. 그래서 계산은 한 벌이다.
+        let pane_info = |id: &String| -> SidebarRowInfo {
+            {
+                // 얼굴은 claude 가 붙은 pane 에만 — 셸만 도는 자리에 학생이 먼저 앉아
+                // 있으면 목록이 "이미 일하는 중"이라고 거짓말한다.
+                let who = self
+                    .pane_claude_ready(id)
+                    .then(|| self.pane_character_if_known(id))
+                    .flatten()
+                    .unwrap_or_default();
+                let is_cur =
+                    self.ws.lock().unwrap().active_pane.as_deref() == Some(id.as_str());
+                // 안에서 도는 프로그램이 보낸 OSC 0/2 제목이 첫 번째 진실이다
+                // (claude 는 뜨자마자 「✳ Claude Code」를 보낸다). `ws.panes` 의
+                // 탭 제목은 사용자 rename 전용이라 여기선 늘 비어, 줄이 영영
+                // `zsh` 로 남았다. 프로세스 이름은 그다음 폴백.
+                let label = self
+                    .pty
+                    .get(id)
+                    .and_then(|p| p.osc_title())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, id, None));
+                let waiting = self.pane_needs_you(id);
+                // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
+                // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
+                // 부르면 두 신호가 서로를 부정한다.
+                let busy = self.pane_is_busy(id);
+                SidebarRowInfo {
+                    who,
+                    label,
+                    color: self.pane_state_color(id),
+                    is_cur,
+                    // 못 본 완료 — 방이 아니라 **이 줄** 이 숨쉰다(거노: "숨쉬기효과
+                    // 윈도우전체가 아니라 완료된세션하나만"). window_alert 가 아니라
+                    // unread_panes 를 보는 이유: 전자는 배경 방에만 서고, 지금 보고
+                    // 있는 방에서 옆 pane 이 끝난 것도 알려야 한다. 내가 그 pane 을
+                    // 보는 순간 sync_dock_badge 가 지운다.
+                    //
+                    // 대기 중이면 양보한다 — `handle_attention` 이 unread 에도 넣기
+                    // 때문에 둘이 같이 서고, 그러면 한 줄에 느린 숨과 빠른 깜빡임이
+                    // 겹쳐 어느 쪽도 안 읽힌다. 급한 쪽이 이긴다.
+                    alert: !waiting && self.unread_panes.contains(id),
+                    waiting,
+                    busy,
+                    stashed: self
+                        .closed_panes
                         .iter()
-                        .any(|leaf| self.notify_flash_factor(&leaf.to_string()).is_some())
+                        .any(|c| c.stashed && c.alive && c.pane_id == *id),
+                }
+            }
+        };
+        let sb_row_info: Vec<SidebarRowInfo> =
+            sb_rows.iter().map(|(_, id, _)| pane_info(id)).collect();
+        let sb_mini_info: Vec<SidebarRowInfo> =
+            sb_mini.iter().map(|(_, id, _)| pane_info(id)).collect();
+        // 펼친 방에서 그 방의 알림·대기를 **줄이 이미 말하고 있는가**. 말하고 있으면
+        // 카드 머리는 조용히 둔다 — 같은 뜻을 두 겹으로 칠하면 결국 방 전체가 빛나
+        // 고치기 전으로 돌아간다. 접힌 방은 줄이 없으니 여기에 안 들고, 머리가 계속
+        // 말한다(그때는 그게 유일한 자리다).
+        let mut sb_row_alert_win: std::collections::HashSet<usize> = Default::default();
+        let mut sb_row_wait_win: std::collections::HashSet<usize> = Default::default();
+        // 배치도 칸도 같은 말을 한다 — 칸이 통째로 숨쉬게 된 뒤로는 목록과 똑같은
+        // 자격이다. 여기 안 넣으면 배치도 모드에서 칸과 머리 점이 같이 떠, 목록을
+        // 고치며 없앴던 두 겹 칠하기가 그대로 되살아난다(실측: 캡처에 둘 다 떴다).
+        let signalled = sb_rows
+            .iter()
+            .zip(sb_row_info.iter())
+            .chain(sb_mini.iter().zip(sb_mini_info.iter()));
+        for ((wi, _, _), info) in signalled {
+            if info.alert {
+                sb_row_alert_win.insert(*wi);
+            }
+            if info.waiting {
+                sb_row_wait_win.insert(*wi);
+            }
+        }
+        // 아이콘 칩 모서리의 작업 점도 같은 구분을 따른다 — 사이드바를 좁혀 두면
+        // 그 점이 그 방의 유일한 표시라, 여기서만 뭉뚱그리면 좁은 모드에서 다시
+        // 거짓말이 된다.
+        let sb_wait: Vec<bool> = (0..sb_labels.len())
+            .map(|i| {
+                self.window_leaves(i).iter().any(|id| {
+                    self.pane_needs_you(id)
                 })
             })
             .collect();
@@ -2056,6 +2362,7 @@ impl App {
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
         let quick_files_list = self.quick_files();
+        let dock_reserve = self.bottom_reserve_h();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
@@ -2094,24 +2401,17 @@ impl App {
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
             // 디코딩 실패 시 queue_image가 조용히 skip.
             let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
-            let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
-            // 모션 프레임을 (캐릭터×모션당 1회) 업로드 — 배너·승인대기·standing
-            // 이 공유. idle 키는 "f"(기존 호환), 나머지는 모션 이름 그대로.
-            let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
-                let pfx = sprite_key_prefix(motion);
-                if !g.has_image(&format!("student:{slug}:{pfx}0")) {
-                    if let Some(frames) = student_sprite_frames(slug, motion) {
-                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                            g.upload_image(&format!("student:{slug}:{pfx}{i}"), rgba, *w, *h);
-                        }
-                    }
-                }
+            // 배너·스피너·승인대기·standing·프사는 별도창(auxwin)도 그린다 —
+            // 그리기와 이미지 키는 `paint_student_overlays` 한 곳에 있고, 여기선
+            // 이 창의 좌표로 모은 자리만 넘긴다.
+            let student_slots = StudentOverlays {
+                banner: std::mem::take(&mut banner_slots),
+                spinner: std::mem::take(&mut spinner_slots),
+                waiting: std::mem::take(&mut waiting_slots),
+                standing: std::mem::take(&mut standing_slots),
+                profile: std::mem::take(&mut profile_slots),
             };
-            for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &banner_slots {
-                ensure_anim(g, slug, "idle");
-                let key = format!("student:{slug}:f{anim_idx}");
-                g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
-            }
+            paint_student_overlays(g, &student_slots, anim_ms);
             // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
             // 셀을 선명화(등폭 유지)해 이미 그려졌다. 여기선 클릭 rect(셀 영역)만
             // STICKY_PILLS 로 mouse handler·seek 에 넘긴다 — 클릭 = "그 프롬프트가
@@ -2151,91 +2451,6 @@ impl App {
                 g.rect(*x, *y + *h - t, *w, t, *col);
                 g.rect(*x, *y, t, *h, *col);
                 g.rect(*x + *w - t, *y, t, *h, *col);
-            }
-            // working 스피너 자리 — walk 프레임 제자리 걸음(분주하게 일하는 중).
-            // 셀 위 icon 패스라 blank 처리한 스피너 자리 위에 또렷하게 뜬다.
-            let walk_idx =
-                (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
-            for (slug, (bx, by, bw, bh)) in &spinner_slots {
-                if !g.has_image(&format!("student:{slug}:walk0")) {
-                    if let Some(frames) = student_sprite_frames(slug, "walk") {
-                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                            g.upload_image(&format!("student:{slug}:walk{i}"), rgba, *w, *h);
-                        }
-                    }
-                }
-                g.queue_image_above(
-                    &format!("student:{slug}:walk{walk_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // 승인 대기 — pane 우상단에서 학생이 한 팔 인사(wave, "봐주세요!").
-            // wave 는 발 고정·팔만 움직이는 모션이라 바운스는 얹지 않는다.
-            for (slug, (bx, by, bw, bh)) in &waiting_slots {
-                ensure_anim(g, slug, "wave");
-                g.queue_image_above(
-                    &format!("student:{slug}:wave{anim_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // 입력박스 위 standing — 전신 애니(완료 직후 cheer 만세 · 그 외 idle),
-            // 발이 윗 테두리 줄에 닿게 바닥 정렬. 꼬리 행 위라 icon 패스.
-            for (slug, motion, (bx, by, bw, bh)) in &standing_slots {
-                ensure_anim(g, slug, motion);
-                let pfx = sprite_key_prefix(motion);
-                g.queue_image_above(
-                    &format!("student:{slug}:{pfx}{anim_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // statusline 프사 — bust 96×96 정적 1프레임, 캐릭터당 1회 업로드.
-            // 박스가 아래 테두리 행을 침범하는 2행 키라 icon 패스(셀 위) —
-            // 이미지 패스(셀 아래)면 테두리 글리프가 얼굴을 가로지른다.
-            for (slug, (bx, by, bw, bh)) in &profile_slots {
-                let key = format!("student:{slug}:profile");
-                if !g.has_image(&key) {
-                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
-                        g.upload_image(&key, &rgba, w, h);
-                    }
-                }
-                g.queue_image_above(&key, *bx, *by, *bw, *bh);
-            }
-            // 프사 hover 확대 — 커서가 statusline 프사 위면 큰 bust 를 그 위쪽에
-            // 팝업(창 경계 클램프). statusline 은 창 하단이라 위로 띄운다. 매
-            // 프레임 hover 재판정이라 커서가 벗어나면 저절로 사라진다(애니 없음).
-            let (fmx, fmy) = self.cursor_px;
-            if let Some((cname, slug, r)) = profile_face_hits
-                .iter()
-                .find(|(_, _, r)| fmx >= r.0 && fmx <= r.0 + r.2 && fmy >= r.1 && fmy <= r.1 + r.3)
-            {
-                let cname = cname.clone();
-                let slug = *slug;
-                let (fx, fy, fw, _) = *r;
-                let key = format!("student:{slug}:profile");
-                if !g.has_image(&key) {
-                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
-                        g.upload_image(&key, &rgba, w, h);
-                    }
-                }
-                let pop = 8.0 * self.cell.h;
-                let win_w = win_px.0 / scale;
-                let (px, py) = face_popup_pos(fx, fw, fy, pop, win_w, TITLE_HEIGHT);
-                // bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스
-                // 제거(거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성 확보.
-                g.queue_image_above(&key, px, py, pop, pop);
-                let accent = theme::character_accent(&cname).unwrap_or_else(theme::accent);
-                let fs = 13.0;
-                let tw = g.measure_chrome_text(&cname, fs, true);
-                let tx = px + (pop - tw) / 2.0;
-                let ty = py + pop + 4.0;
-                round_rect(
-                    g, tx - 7.0, ty - 3.0, tw + 14.0, fs + 8.0,
-                    theme::radius_sm(), theme::with_alpha(theme::bg(), 0xE6),
-                );
-                g.draw_text(
-                    tx, ty, &cname,
-                    gpu::DrawOpts { font_size: fs, color: accent, bold: true, italic: false },
-                );
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -2544,8 +2759,8 @@ impl App {
                         .filter(|id| {
                             self.pty
                                 .get(*id)
-                                .and_then(|p| p.active_process_name())
-                                .is_some_and(|n| n == "claude")
+                                .and_then(|p| p.active_agent())
+                                .is_some()
                         })
                         .and_then(|id| {
                             // 프사와 동일 규칙(display_pane_char 인라인 — gpu 가변 차용
@@ -2588,9 +2803,22 @@ impl App {
                             .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|s| !s.is_empty());
-                        match work {
-                            Some(w) => format!("{c}  ·  {w}"),
+                        // pane 아이디를 캐릭터 뒤에 (거노 2026-08-05: "칩 위치를 바꿔
+                        // pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
+                        //
+                        // 헤더 띠가 아니라 **타이틀바**에 붙이는 이유: 학생 헤더 띠는
+                        // 거노가 폐기했고(main.rs:2146) 학생 정체는 그때 타이틀바로
+                        // 옮겨졌다. 단일 탭 pane 은 `has_header()` 가 false 라 띠 쪽에만
+                        // 붙이면 **거노 화면엔 안 보인다** — 하네스만 통과하는 그 모양이
+                        // 오늘 두 번 물었다. 띠를 되살리면 거노가 회수한 세로 공간이
+                        // pane 마다 다시 나가므로 그건 그의 결정이다.
+                        let with_id = match active.as_deref() {
+                            Some(id) => format!("{c} {id}"),
                             None => c,
+                        };
+                        match work {
+                            Some(w) => format!("{with_id}  ·  {w}"),
+                            None => with_id,
                         }
                     } else {
                         let title = active
@@ -2785,12 +3013,6 @@ impl App {
                         let resting = theme::lerp(theme::surface_hover(), theme::bg(), 0.55);
                         round_rect(g, *tx, *ty, *tw, *th, theme::radius_sm(), resting);
                     }
-                    // Unseen-notification pulse, same cadence as the side strip.
-                    if sb_alert.get(*i).copied().unwrap_or(false) && raw_cursor_on {
-                        let mut c = theme::accent();
-                        c[3] = 64;
-                        round_rect(g, *tx, *ty, *tw, *th, theme::radius_sm(), c);
-                    }
                     let (name, _cwd) = sb_labels
                         .get(*i)
                         .cloned()
@@ -2805,13 +3027,12 @@ impl App {
                         isz,
                         if is_active { theme::text_dim() } else { theme::text_mute() },
                     );
-                    // Working / done dots on the glyph's corners (same meaning
-                    // as the side strip's chip dots).
-                    if sb_busy.get(*i).copied().unwrap_or(false) {
-                        circle_rect(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::accent());
-                    }
-                    if sb_done.get(*i).copied().unwrap_or(false) {
-                        circle_rect(g, icon_x + isz - 3.0, icon_y + isz - 3.0, 6.0, theme::success());
+                    // 세로 사이드바와 같은 규칙 — 자리 고정, 색이 말하고, 깜빡인다.
+                    // 여기도 모서리 두 곳을 오가던 점 쌍을 하나로 합쳤다.
+                    if sb_wait.get(*i).copied().unwrap_or(false) {
+                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::attention(), 0.9);
+                    } else if sb_alert.get(*i).copied().unwrap_or(false) {
+                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::accent(), 1.6);
                     }
                     let show_close = sb_tabs.len() > 1 && (is_active || is_hover);
                     let text_x = icon_x + isz + 6.0;
@@ -2899,6 +3120,7 @@ impl App {
             if tab_strip_w > 0.0 {
                 // 칼럼 바닥과 오른쪽 실선은 위 크롬 판에서 한 번에 칠했다.
                 let multi = sb_tabs.len() > 1;
+                let mut dock_back_hits: Vec<(usize, (f32, f32, f32, f32))> = Vec::new();
                 for (i, (tx, ty, tw, th)) in &sb_tabs {
                     let is_active = *i == sb_active;
                     let is_hover = sb_hover == Some(*i);
@@ -2906,18 +3128,37 @@ impl App {
                     // accent bar). Non-selected: flat, only a faint box on
                     // hover. Warp-style.
                     g.hover_pointer |= is_hover;
-                    if is_active {
-                        panel_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), theme::surface_active());
+                    // 밖에 나간 방은 **자리만 남긴다**. 채운 카드로 두면 여기 있는
+                    // 것처럼 읽혀 눌렀다가 아무 일도 안 일어나고, 목록에서 빼면
+                    // 어디로 갔는지 알 길이 없다(거노: "그 자리 빵꾸나게"). 점선이
+                    // 그 사이를 말한다 — 자리는 네 것이지만 지금 비어 있다.
+                    let out = sb_undocked.get(*i).copied().unwrap_or(false);
+                    if out {
+                        dashed_rect(g, *tx, *ty, *tw, *th, theme::with_alpha(theme::border(), 0xC0));
+                    } else if is_active {
+                        // 고른 방은 **테두리로만** 말한다(2026-08-11 지시: "선택한 방
+                        // 아웃라인으로 포커스 바꾸고"). 채운 판이었을 땐 그 밝은
+                        // 바탕이 카드 전체를 덮어, 그 위에 얹히는 상태색(알림 점·
+                        // 대기 주황)이 같은 밝기 대역에서 겨뤘다 — 정작 봐야 할
+                        // 신호가 "고름"에 묻혔다. 테두리는 자리만 두르고 안을 비운다.
+                        //
+                        // 되메우는 색이 `panel_bg` 인 건 이 스트립의 바탕이 그것이기
+                        // 때문이다(이 함수 위쪽에서 칼럼째 칠한다). 링만 그리는
+                        // 스트로크가 렌더러에 없어 안쪽을 바탕색으로 덮는 방식이다.
+                        outline_rect(
+                            g, *tx, *ty, *tw, *th, theme::radius_md(),
+                            theme::accent(), SIDEBAR_ACTIVE_RING, theme::panel_bg(),
+                        );
                     } else if is_hover {
                         panel_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), theme::surface_hover());
                     }
-                    // Unseen-notification pulse: an accent wash over the tab on
-                    // the blink's "on" phase, so a finish/attention in a
-                    // background window blinks until the user switches to it.
-                    if sb_alert.get(*i).copied().unwrap_or(false) && raw_cursor_on {
-                        let mut c = theme::accent();
-                        c[3] = 64;
-                        round_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), c);
+                    // 방과 방 사이 실선. 활성·호버 카드만 판을 깔기 때문에, 조용한
+                    // 방끼리는 3px 틈만 있고 경계가 없었다 — 두 줄짜리 카드가 죽
+                    // 이어지면 어디까지가 한 방인지 안 읽힌다(거노: "구분선이 하나도
+                    // 없어"). 활성 카드는 스스로 판이라 그 위아래엔 긋지 않는다.
+                    if !is_active && *i + 1 < sb_tabs.len() && *i + 1 != sb_active {
+                        let ly = (ty + th + SIDEBAR_TAB_GAP / 2.0).round();
+                        g.rect(tx + 10.0, ly, tw - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
                     }
                     // Icon chip: small rounded square with a glyph.
                     let (name, cwd) = sb_labels
@@ -2929,7 +3170,10 @@ impl App {
                     // 색의 원들이 먼저 읽혀 정작 이름이 뒤로 밀린다.
                     let icon = 22.0_f32;
                     let icon_x = *tx + 12.0;
-                    let icon_y = *ty + (*th - icon) / 2.0;
+                    // 카드 **머리** 기준으로 가운데다. 카드 높이(`th`)로 재면 방을
+                    // 펼친 순간 카드가 pane 줄만큼 길어져, 칩이 이름 두 줄을 떠나
+                    // 목록 한가운데로 흘러내렸다.
+                    let icon_y = *ty + (SIDEBAR_TAB_H - icon) / 2.0;
                     let glyph = 17.0_f32;
                     g.queue_icon(
                         tab_icon_glyph(&name),
@@ -2938,24 +3182,41 @@ impl App {
                         glyph,
                         if is_active { theme::text() } else { theme::text_dim() },
                     );
-                    // Working dot: this window has a pane mid-task (cross-window
-                    // collab). Top-right of the icon chip, opposite the number
-                    // badge (top-left) so the two never overlap. Static accent
-                    // dot — the flowing bar lives on the in-window pane header.
-                    if sb_busy.get(*i).copied().unwrap_or(false) {
+                    // 상태 동그라미 **하나**. 예전엔 칩의 두 모서리에 점이 따로
+                    // 있었다 — 작업 중은 오른쪽 위, 방금 끝남은 오른쪽 아래. 상태가
+                    // 바뀔 때마다 점이 두 모서리를 오갔고, 그 움직임이 정작 무엇이
+                    // 달라졌는지보다 먼저 눈에 들어왔다(2026-08-11 지시: "점 두개
+                    // 왔다갔다거리는거 없애자"). 이제 자리는 하나로 고정하고 **색이**
+                    // 무엇인지 말한다.
+                    //
+                    // 그리는 조건도 갈렸다. "작업 중"은 여기서 뺐다 — 펼친 방의 줄이
+                    // 학생을 걷게 해서 이미 말하고 있고(아래 pane 줄), 카드가 그걸 또
+                    // 말하면 같은 정보가 두 층에 겹친다. 여기 남는 건 **내 손이
+                    // 필요한 것**뿐이라 늘 깜빡인다.
+                    let wait = sb_wait.get(*i).copied().unwrap_or(false);
+                    let alert = sb_alert.get(*i).copied().unwrap_or(false);
+                    // 줄이 이미 말하고 있으면 머리는 조용히 둔다 — 접힌 방은 줄이
+                    // 없어 여기가 유일한 자리다.
+                    let head_wait = wait && !sb_row_wait_win.contains(i);
+                    let head_alert = alert && !sb_row_alert_win.contains(i);
+                    if head_wait || head_alert {
+                        // 대기가 이긴다: 끝나서 알리는 것과 막혀서 부르는 것은 급한
+                        // 정도가 다르고, `handle_attention` 이 unread 에도 넣기 때문에
+                        // 둘은 자주 같이 선다.
+                        let (c, period) = if head_wait {
+                            (theme::attention(), 0.9)
+                        } else {
+                            (theme::accent(), 1.6)
+                        };
                         let dsz = 9.0_f32;
-                        let dx = icon_x + icon - dsz + 3.0;
-                        let dy = icon_y - 3.0;
-                        circle_rect(g, dx, dy, dsz, theme::accent());
-                    }
-                    // Completion dot: a pane in this window just finished
-                    // (notify_flash). SUCCESS green at the bottom-right corner so
-                    // it never overlaps the working dot (top-right).
-                    if sb_done.get(*i).copied().unwrap_or(false) {
-                        let dsz = 9.0_f32;
-                        let dx = icon_x + icon - dsz + 3.0;
-                        let dy = icon_y + icon - dsz + 3.0;
-                        circle_rect(g, dx, dy, dsz, theme::success());
+                        blink_dot(
+                            g,
+                            icon_x + icon - dsz + 3.0,
+                            icon_y - 3.0,
+                            dsz,
+                            c,
+                            period,
+                        );
                     }
                     // Two-line label to the right of the icon.
                     let text_x = icon_x + icon + 10.0;
@@ -2964,8 +3225,17 @@ impl App {
                     } else {
                         theme::text_dim()
                     };
-                    let cwd_fg: [u8; 4] = theme::text_mute();
-                    let show_close = multi && (is_active || is_hover);
+                    // 경로는 방을 가르는 유일한 단서일 때가 많다(이름이 죄다
+                    // 폴더명이라 같아진다). `text_mute` 는 "있지만 안 읽어도 되는
+                    // 것"의 톤이라 여기선 너무 물러나 있었다 — 한 단 올린다.
+                    let cwd_fg: [u8; 4] = theme::text_dim();
+                    // 밖에 나간 방은 × 를 내주고 되돌리기 버튼이 그 자리를 쓴다.
+                    // 둘은 카드 오른쪽 위 같은 칸이라 나눠 가질 수 없고, 안 보이는
+                    // 창의 claude 를 여기서 죽일 일도 아니다(닫으려면 그 창에서).
+                    // 예전엔 hover 하는 순간 되돌리기가 × 로 바뀌어, 누르러 가면
+                    // 버튼이 사라졌다.
+                    let undocked = sb_undocked.get(*i).copied().unwrap_or(false);
+                    let show_close = multi && (is_active || is_hover) && !undocked;
                     // Budgets are measured against the tab's own right edge, not
                     // the sidebar width: the label starts at `text_x` (inset +
                     // ordinal gutter + chip), so a sidebar-width budget overshoots
@@ -2978,10 +3248,9 @@ impl App {
                     // 숫자를 왼쪽 여백에 두면 "몇 번째"까지만 말하지만, 이름 옆의
                     // `⌘1` 은 "이 키로 온다"까지 말한다. 9 까지만 매핑돼 있고, ×
                     // 가 뜨는 동안은 같은 자리라 물러난다.
-                    // 밖에 나가 있는 방은 그 자리에 ⌘N 대신 나갔다는 표시가 온다 —
-                    // 그 키는 방을 메인에 다시 그리는 게 아니라 별도 창을 앞으로
-                    // 가져오므로(switch_window 라우팅), 키 힌트를 남기면 거짓말이 된다.
-                    let undocked = !show_close && sb_undocked.get(*i).copied().unwrap_or(false);
+                    // 밖에 나가 있는 방은 그 자리를 되돌리기 버튼이 쓴다 — 그 키는
+                    // 방을 메인에 다시 그리는 게 아니라 별도 창을 앞으로 가져오므로
+                    // (switch_window 라우팅), 키 힌트를 남기면 거짓말이 된다.
                     let kbd =
                         (!show_close && !undocked && *i < 9).then(|| format!("\u{2318}{}", *i + 1));
                     let kfs = 11.0_f32;
@@ -2992,7 +3261,13 @@ impl App {
                         - if show_close { 23.0 } else { 8.0 + right_slot + 6.0 }
                         - text_x)
                         .max(0.0);
-                    let cwd_budget = (tab_right - 8.0 - text_x).max(0.0);
+                    // 아랫줄 오른쪽은 이제 펼치기 배지 몫이다. 여기 있던 pane 별
+                    // 상태 점은 뺐다 — 방 목록은 "어느 방으로 갈까"를 고르는 자리고,
+                    // pane 하나하나의 상태는 방을 펴면 그 줄이 이미 말한다. 둘 다
+                    // 두면 같은 정보가 두 층에 겹쳐 목록이 시끄러워진다(거노:
+                    // "학생 목록 말고 윈도우 목록에선 없애").
+                    let badge_w = sb_expand.get(*i).copied().flatten().map_or(0.0, |r| r.2 + 14.0);
+                    let cwd_budget = (tab_right - 8.0 - badge_w - text_x).max(0.0);
                     // Clip before drawing — `draw_text` also borrows `g`.
                     let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
                     g.draw_text(
@@ -3014,14 +3289,38 @@ impl App {
                             gpu::DrawOpts { font_size: kfs, color: theme::text_mute(), bold: false, italic: false },
                         );
                     }
+                    // 밖에 나간 방 자리엔 **되돌리는 버튼**을 둔다. 여기 있던
+                    // external-link 는 점선 슬롯이 이미 하는 말("나가 있다")을 한 번
+                    // 더 할 뿐이었고, 정작 다시 넣는 길은 별도 창을 찾아 닫는 것뿐
+                    // 이었다. 나간 자리가 곧 돌아올 자리다.
                     if undocked {
+                        let ix = tab_right - 8.0 - UNDOCK_ICON;
+                        let iy = *ty + 9.0;
+                        let hit = (ix - 6.0, iy - 5.0, UNDOCK_ICON + 12.0, UNDOCK_ICON + 10.0);
+                        let hov = sb_cursor.0 >= hit.0
+                            && sb_cursor.0 <= hit.0 + hit.2
+                            && sb_cursor.1 >= hit.1
+                            && sb_cursor.1 <= hit.1 + hit.3;
+                        g.hover_pointer |= hov;
+                        if hov {
+                            round_rect(
+                                g,
+                                hit.0,
+                                hit.1,
+                                hit.2,
+                                hit.3,
+                                theme::radius_sm(),
+                                theme::surface_hover(),
+                            );
+                        }
                         g.queue_icon(
-                            "external-link",
-                            tab_right - 8.0 - UNDOCK_ICON,
-                            *ty + 9.0,
+                            "undo-2",
+                            ix,
+                            iy,
                             UNDOCK_ICON,
-                            theme::accent(),
+                            if hov { theme::accent() } else { theme::text_dim() },
                         );
+                        dock_back_hits.push((*i, hit));
                     }
                     if !cwd.is_empty() {
                         let cwd_txt = clip_px(g, &cwd, 11.0, false, cwd_budget);
@@ -3035,6 +3334,79 @@ impl App {
                                 bold: false,
                                 italic: false,
                             },
+                        );
+                    }
+                    // 펼치기 배지 — 삼각형 + pane 개수. 방 전환의 유일한 예외라
+                    // 평소에도 테두리를 둘러 "여긴 버튼"이라고 말해 둔다. 사각은
+                    // 클릭 판정과 같은 것을 쓴다(`window_expand_rect`).
+                    if let Some(er) = sb_expand.get(*i).copied().flatten() {
+                        let hov = sb_cursor.0 >= er.0
+                            && sb_cursor.0 <= er.0 + er.2
+                            && sb_cursor.1 >= er.1
+                            && sb_cursor.1 <= er.1 + er.3;
+                        g.hover_pointer |= hov;
+                        // 밝기는 **이 카드 위에서** 정해진다. 고정 톤을 쓰면 활성
+                        // 카드(더 밝은 판) 위에서 들리기는커녕 되레 어두워졌다.
+                        let base = if is_active {
+                            theme::surface_active()
+                        } else if is_hover {
+                            theme::surface_hover()
+                        } else {
+                            theme::panel_bg()
+                        };
+                        round_rect(g, er.0 - 1.0, er.1 - 1.0, er.2 + 2.0, er.3 + 2.0,
+                            theme::radius_sm(), theme::border());
+                        round_rect(g, er.0, er.1, er.2, er.3, theme::radius_sm(),
+                            theme::raised_on(base, hov));
+                        let fg = if hov { theme::text() } else { theme::text_dim() };
+                        // 삼각형은 목록이 절반 열렸을 때 넘어간다 — 누르자마자
+                        // 바뀌면 아직 닫힌 목록 위에서 이미 열린 표시가 된다.
+                        g.queue_icon(
+                            if sb_expand_t.get(*i).copied().unwrap_or(0.0) >= 0.5 {
+                                "chevron-down"
+                            } else {
+                                "chevron-right"
+                            },
+                            er.0 + 7.0,
+                            er.1 + 5.0,
+                            10.0,
+                            fg,
+                        );
+                        let n = sb_dots.get(*i).map_or(0, |v| v.len()).to_string();
+                        g.draw_text(
+                            er.0 + 21.0,
+                            er.1 + 5.0,
+                            &n,
+                            gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
+                        );
+                    }
+                    // 뷰 전환 — 펼치기 배지와 같은 칩으로 그려 "여기도 버튼"이 한눈에
+                    // 읽히게 한다. 아이콘은 **누르면 갈 곳**이다(지금 모드가 아니라):
+                    // 지금 뭘 보고 있는지는 바로 아래 카드 본문이 이미 말하고 있어,
+                    // 버튼까지 그걸 되풀이하면 정작 무엇이 일어날지는 아무도 안 말한다.
+                    if let Some((vr, list_view)) = sb_view.get(*i).copied().flatten() {
+                        let hov = sb_cursor.0 >= vr.0
+                            && sb_cursor.0 <= vr.0 + vr.2
+                            && sb_cursor.1 >= vr.1
+                            && sb_cursor.1 <= vr.1 + vr.3;
+                        g.hover_pointer |= hov;
+                        let base = if is_active {
+                            theme::surface_active()
+                        } else if is_hover {
+                            theme::surface_hover()
+                        } else {
+                            theme::panel_bg()
+                        };
+                        round_rect(g, vr.0 - 1.0, vr.1 - 1.0, vr.2 + 2.0, vr.3 + 2.0,
+                            theme::radius_sm(), theme::border());
+                        round_rect(g, vr.0, vr.1, vr.2, vr.3, theme::radius_sm(),
+                            theme::raised_on(base, hov));
+                        g.queue_icon(
+                            if list_view { "columns-2" } else { "rows-2" },
+                            vr.0 + (vr.2 - 12.0) / 2.0,
+                            vr.1 + (vr.3 - 12.0) / 2.0,
+                            12.0,
+                            if hov { theme::text() } else { theme::text_dim() },
                         );
                     }
                     // × close — only on the active or hovered tab (where the
@@ -3061,6 +3433,194 @@ impl App {
                                 theme::ICON_SIZE,
                                 xcol,
                             );
+                        }
+                    }
+                }
+                self.window_dock_rects = dock_back_hits;
+                // 펼친 방의 pane 줄. 탭 카드가 그 자리를 이미 비워 뒀으므로(레이아웃이
+                // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
+                // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
+                // 목록은 "누가 있나"만 말하고 어느 칸이 화면 어디인지는 못 말한다.
+                for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
+                    let (mx, my, mw, mh) = *r;
+                    let cur = sb_active_pane.as_deref() == Some(id.as_str());
+                    let hov = sb_cursor.0 >= mx
+                        && sb_cursor.0 <= mx + mw
+                        && sb_cursor.1 >= my
+                        && sb_cursor.1 <= my + mh;
+                    g.hover_pointer |= hov;
+                    // 손이 필요한 칸은 **칸째 숨쉰다**(2026-08-11 지시: "점 말고 칸이
+                    // 빛나게"). 모서리 점으로도 말해 봤는데 6px 짜리가 얼굴 옆에 붙으니
+                    // 칸이 작을수록 얼룩처럼 읽혔고, 좁은 칸에서는 아예 그려지지도
+                    // 않았다(`mw > 16` 게이트). 칸 전체는 크기와 무관하게 보인다.
+                    let signal = if info.waiting {
+                        Some((theme::attention(), 0.9))
+                    } else if info.alert {
+                        Some((theme::accent(), 1.6))
+                    } else {
+                        None
+                    };
+                    round_rect(
+                        g,
+                        mx,
+                        my,
+                        mw,
+                        mh,
+                        2.0,
+                        // 신호가 테두리를 가져간다 — 「내가 여기 있다」(cur)보다
+                        // 「나를 기다린다」가 급한 소식이다.
+                        if let Some((c, _)) = signal {
+                            c
+                        } else if cur {
+                            theme::accent()
+                        } else if hov {
+                            theme::surface_hover()
+                        } else {
+                            theme::with_alpha(theme::border(), 0x66)
+                        },
+                    );
+                    // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
+                    // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
+                    // 아니라 잘못 칠해진 자리로 읽힌다(실측).
+                    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
+                        round_rect(
+                            g,
+                            mx + 1.5,
+                            my + 1.5,
+                            mw - 3.0,
+                            mh - 3.0,
+                            1.5,
+                            if cur { theme::surface_active() } else { theme::panel_bg() },
+                        );
+                    }
+                    // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
+                    // 주기마다 사라져 배치도가 통째로 일렁인다.
+                    if let Some((col, period)) = signal {
+                        if mw > 5.0 && mh > 5.0 {
+                            let mut c = col;
+                            c[3] = (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8;
+                            round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
+                        }
+                    }
+                    // 칸이 **누구 자리인지** 말한다. 목록을 걷어낸 이상 얼굴이 여기
+                    // 없으면 사이드바 어디에도 학생이 없다(거노 2026-08-11: "미니맵은
+                    // 학생뭔지 보여야해"). 도는 중이면 줄에서 그랬듯 걷는다.
+                    let face = (mw.min(mh) - 8.0).clamp(10.0, 26.0);
+                    let fx = mx + (mw - face) / 2.0;
+                    let fy = my + (mh - face) / 2.0;
+                    let walked = info.busy
+                        && draw_student_walk(g, &info.who, fx - 2.0, fy - 2.0, face + 4.0, anim_phase_secs());
+                    if !walked && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs()) {
+                        // 학생이 없는 자리(셸만 도는 pane) — 빈 칸으로 두면 "여긴
+                        // 뭐지"가 되므로 터미널이라고 말해 둔다.
+                        let isz = face.min(16.0);
+                        g.queue_icon(
+                            "terminal",
+                            mx + (mw - isz) / 2.0,
+                            my + (mh - isz) / 2.0,
+                            isz,
+                            theme::text_dim(),
+                        );
+                    }
+                }
+                for (k, ((wi, _, r), info)) in
+                    sb_rows.iter().zip(sb_row_info.iter()).enumerate()
+                {
+                    let (who, label, col, is_cur) =
+                        (&info.who, &info.label, &info.color, info.is_cur);
+                    let (rx, ry, rw, rh) = *r;
+                    // 줄 사이 실선 — 같은 방 안의 칸막이라 방과 방을 가르는
+                    // 카드 테두리보다 옅어야 한다. 첫 줄 위에는 안 긋는다(카드
+                    // 머리와 목록은 이미 여백으로 갈려 있다).
+                    if k > 0 && sb_rows.get(k - 1).map(|(pw, _, _)| pw == wi).unwrap_or(false) {
+                        g.rect(rx + 6.0, ry, rw - 12.0, 1.0, theme::with_alpha(theme::border(), 0x50));
+                    }
+                    let row_hover = sb_cursor.0 >= rx
+                        && sb_cursor.0 <= rx + rw
+                        && sb_cursor.1 >= ry
+                        && sb_cursor.1 <= ry + rh;
+                    if row_hover {
+                        round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover());
+                    }
+                    // 지금 보고 있는 pane 은 왼쪽 띠로 — 목록이 방을 넘나들어서
+                    // 표시가 없으면 "내가 있는 곳"을 매번 번호로 대조하게 된다.
+                    if is_cur {
+                        g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent());
+                    }
+                    // 도는 중이면 학생이 **걷는다**(2026-08-11 지시: "진행중인거 학생
+                    // 워크로 나오게하고"). 얼굴 GIF 는 도는 동안에도 가만히 앉아 있어
+                    // 줄만 봐서는 이 pane 이 일하는지 멈춰 있는지 알 수 없었고, 그걸
+                    // 대신 말하던 게 카드의 작업 점이었다 — 걷게 하면 그 점이 필요
+                    // 없어진다. 원본이 256 정사각(전신 + 여백)이라 상자도 정사각이다.
+                    // 얼굴보다 4px 키우는 건 그 여백 때문 — 같은 크기로 두면 캐릭터가
+                    // 얼굴 GIF 보다 작아 보여 걷기 시작할 때 줄이 움찔한다.
+                    let face = rh - 6.0;
+                    let walked = info.busy
+                        && draw_student_walk(g, who, rx + 5.0, ry + 1.0, rh - 2.0, anim_phase_secs());
+                    let has_face = walked
+                        || draw_student_face_anim(
+                            g, who, rx + 7.0, ry + 3.0, face, anim_phase_secs(),
+                        );
+                    if !has_face {
+                        circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, *col);
+                    }
+                    let name_x = rx + 7.0 + face + 6.0;
+                    let budget = (rx + rw - 14.0 - name_x).max(0.0);
+                    let txt = clip_px(g, label, 11.0, false, budget);
+                    g.draw_text(
+                        name_x,
+                        ry + (rh - 11.0) / 2.0,
+                        &txt,
+                        gpu::DrawOpts {
+                            font_size: 11.0,
+                            // 숨긴 줄은 한 단 더 낮춘다 — 목록에 남아 있되 「지금 화면에
+                            // 있는 것」과 한눈에 갈려야 한다.
+                            color: if info.stashed {
+                                theme::text_mute()
+                            } else if is_cur {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            },
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    // 줄 끝 상태 점. 손이 필요한 줄에서는 **이 점이 깜빡인다** —
+                    // 예전엔 줄 전체를 숨쉬게 해서 알렸는데, 넓은 판이 은근히 밝아지는
+                    // 신호는 22px 줄에서는 배경 얼룩처럼 읽혔고 두 줄이 동시에 서면
+                    // 목록이 통째로 일렁였다(2026-08-11 지시: "숨쉬기말고 동그라미
+                    // 깜빡이게"). 점은 이미 그 줄의 상태를 말하던 자리라, 새 표시를
+                    // 더하는 대신 있던 것을 깜빡이게 하면 목록에 늘어나는 게 없다.
+                    let dot_x = rx + rw - 6.0;
+                    let dot_y = ry + rh / 2.0 - 3.0;
+                    if info.stashed {
+                        // 숨김 표시가 상태 점 자리를 대신 쓴다. 치워 둔 줄에 상태 점을
+                        // 그대로 두면 화면에 있는 줄과 구분이 안 된다 — 그리고 어차피
+                        // 그 상태(도는 중·기다림)는 화면에 없는 pane 의 것이라 지금
+                        // 손댈 수 있는 신호가 아니다.
+                        // ⚠️ 이름은 `icon_svg`(gpu.rs)에 **등록된 것**이어야 한다 — 없는
+                        // 이름은 오류 없이 아무것도 안 그린다(실측: "disabled" 로 두어
+                        // 표시가 통째로 사라졌고, 흐린 글자만 남아 원인이 안 보였다).
+                        g.queue_icon("minus", dot_x - 1.5, dot_y - 1.5, 9.0, theme::text_mute());
+                    } else if info.waiting {
+                        blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
+                    } else if info.alert {
+                        blink_dot(g, dot_x, dot_y, 6.0, theme::accent(), 1.6);
+                    } else {
+                        circle_rect(g, dot_x, dot_y, 6.0, *col);
+                    }
+                }
+                // 끌고 있는 줄이 떨어질 자리 — 대상 줄의 위/아래 모서리에 긋는다.
+                // 끌리는 줄 자신은 옅게 낮춰 "지금 손에 들려 있다"를 남긴다.
+                if let Some((tid, before, src)) = sb_row_drop.as_ref() {
+                    for (_, id, r) in sb_rows.iter() {
+                        if id == src {
+                            g.rect(r.0, r.1, r.2, r.3, theme::with_alpha(theme::bg(), 0x88));
+                        }
+                        if id == tid {
+                            let ly = if *before { r.1 } else { r.1 + r.3 - 2.0 };
+                            g.rect(r.0 + 4.0, ly, r.2 - 8.0, 2.0, theme::accent());
                         }
                     }
                 }
@@ -3150,6 +3710,55 @@ impl App {
                         }
                     }
                 }
+                // pane 행 우클릭 메뉴 — 이 칼럼에서 **마지막**에 그린다(다른 것 위에
+                // 떠야 한다). 골격은 파일트리·Info 메뉴와 같은 것을 쓴다.
+                if let Some((mx0, my0, _, pane)) = self.sidebar_menu.clone() {
+                    // 이미 숨긴 줄이면 되돌리기 한 갈래만 낸다 — 같은 자리에서 같은
+                    // 동작을 토글로 부르는 편이 항목 두 개를 늘 보여주는 것보다 낫다.
+                    let hidden =
+                        self.closed_panes.iter().any(|c| c.stashed && c.alive && c.pane_id == pane);
+                    let items: [(SidebarMenuAction, &str); 1] = if hidden {
+                        [(SidebarMenuAction::Unhide, "다시 보이기")]
+                    } else {
+                        [(SidebarMenuAction::Hide, "pane 숨기기")]
+                    };
+                    const MIH: f32 = 28.0;
+                    let widest = items
+                        .iter()
+                        .map(|(_, l)| g.measure_chrome_text(l, 13.0, false))
+                        .fold(0.0f32, f32::max);
+                    let mw = (widest + 32.0).min((tab_strip_w - 8.0).max(80.0));
+                    let mh = 12.0 + items.len() as f32 * MIH;
+                    // 사이드바 안에 가둔다 — 넘치면 오른쪽 파일트리 위로 삐져나간다
+                    // (렌더러에 scissor 가 없다).
+                    let mx = mx0.min((tab_strip_w - mw - 4.0).max(4.0)).max(4.0);
+                    let my = my0.min((sb_win_h - mh - 6.0).max(TITLE_HEIGHT)).max(TITLE_HEIGHT);
+                    panel_rect_outlined(g, mx, my, mw, mh, theme::radius_md(), theme::surface());
+                    self.sidebar_menu_rects.clear();
+                    for (i, (a, label)) in items.iter().enumerate() {
+                        let r = (mx + 4.0, my + 6.0 + i as f32 * MIH, mw - 8.0, MIH);
+                        let hov = sb_cursor.0 >= r.0
+                            && sb_cursor.0 <= r.0 + r.2
+                            && sb_cursor.1 >= r.1
+                            && sb_cursor.1 <= r.1 + r.3;
+                        g.hover_pointer |= hov;
+                        if hov {
+                            hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
+                        }
+                        g.draw_text(
+                            r.0 + 12.0,
+                            r.1 + (MIH - 13.0) / 2.0,
+                            label,
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color: theme::text(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        self.sidebar_menu_rects.push((*a, r));
+                    }
+                }
             }
             // ── File-tree column ── independent of the tab strip, parked just
             // right of it (VSCode explorer). Root = active pane's cwd; folders
@@ -3189,11 +3798,17 @@ impl App {
                     round_rect(g, row_x + 1.0, sbx_y + 1.0, search_w - 2.0, search_box_h - 2.0, theme::radius_sm() - 1.0, fill);
                     let ic = if active { theme::text() } else { theme::text_dim() };
                     g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
-                    let mut shown = self.file_tree.search_query.clone();
+                    // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안
+                    // 화면이 거짓말을 한다. 커서 앞뒤로 갈라 「앞 → 조합 중 글자
+                    // → 뒤」로 붙여 그리고, 캐럿은 그 앞부분 폭에 세운다.
+                    let (head, tail) =
+                        crate::lineedit::split(&self.file_tree.search_query, self.file_tree.search_cursor);
+                    let mut head = head;
                     if active && self.in_preedit {
-                        shown.push_str(&self.preedit);
+                        head.push_str(&self.preedit);
                     }
-                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
+                    let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                    let shown = format!("{head}{tail}");
                     let (txt, col) = if shown.is_empty() {
                         ("검색…".to_string(), theme::text_mute())
                     } else {
@@ -3230,11 +3845,12 @@ impl App {
                     round_rect(g, row_x, iy, row_w, item_h, theme::radius_sm(), theme::surface_active());
                     g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::accent());
                     g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::text());
-                    let mut shown = buf.clone();
+                    let (mut head, tail) = crate::lineedit::split(&buf, self.file_tree.edit_cursor);
                     if self.in_preedit {
-                        shown.push_str(&self.preedit);
+                        head.push_str(&self.preedit);
                     }
-                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
+                    let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                    let shown = format!("{head}{tail}");
                     let (txt, col) = if shown.is_empty() {
                         ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::text_mute())
                     } else {
@@ -3276,12 +3892,12 @@ impl App {
                 // 본문 geometry 를 스크롤 처리에 넘겨주기 위해 저장: start_y 는 검색박스
                 // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 dock 을
                 // 뺀 창 끝까지. input.rs 가 이걸로 max_scroll 을 정확히 clamp 한다.
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
                     0.0
                 } else {
                     DOCK_HEIGHT
-                };
-                let body_visible_h = (sb_win_h - dock_h - start_y).max(0.0);
+                } + STATUS_HEIGHT;
+                let body_visible_h = (sb_win_h - bottom_h - start_y).max(0.0);
                 self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
@@ -3444,11 +4060,13 @@ impl App {
                         .filter(|(p, _)| p == &node.path)
                         .map(|(_, n)| n.clone());
                     if let Some(name) = editing {
-                        let mut shown = name;
+                        let (mut head, tail) =
+                            crate::lineedit::split(&name, self.file_tree.edit_cursor);
                         if self.in_preedit {
-                            shown.push_str(&self.preedit);
+                            head.push_str(&self.preedit);
                         }
-                        let caret_w = g.measure_chrome_text(&shown, font, false);
+                        let caret_w = g.measure_chrome_text(&head, font, false);
+                        let shown = format!("{head}{tail}");
                         let (txt, tcol) = if shown.is_empty() {
                             ("이름…".to_string(), theme::text_mute())
                         } else {
@@ -3711,6 +4329,11 @@ impl App {
             self.git.branch_hdr_rect = None;
             self.git.path_menu_rects.clear();
             self.git.branch_menu_rects.clear();
+            // 계정 칩 rect 는 Info 탭 블록에서만 채워진다 — 여기서 매 프레임 비우지
+            // 않으면 다른 탭으로 옮기거나 칼럼을 닫아도 옛 좌표가 남아, 그 자리에
+            // 무엇이 놓이든 클릭이 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적:
+            // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
+            self.account_chip_rect = None;
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
                 let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
                 let gcx0 = git_col_x + 14.0;
@@ -4271,9 +4894,11 @@ impl App {
             // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Info {
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - dock_h).max(top);
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
@@ -4287,20 +4912,22 @@ impl App {
                 );
                 // 계정을 하나라도 추가했을 때만 이름을 붙인다.
                 let acct_label = (!self.set_claude_accounts.is_empty()).then(|| {
-                    self.set_claude_accounts
-                        .iter()
-                        .position(|a| a.id == self.set_claude_account)
-                        .map_or_else(
-                            || "기본".to_string(),
-                            |i| self.set_claude_accounts[i].display_label(i),
-                        )
+                    let id = self.set_claude_account.as_str();
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본"),
+                    }
                 });
                 let (body_top, acct_rect) = info::draw_info_actions(
                     g,
                     self.cursor_px,
                     &mut self.info,
                     acct_label.as_deref(),
-                    claude_usage_pct,
+                    claude_usage_pct.as_ref(),
                     self.account_menu,
                     crate::socket::read_shim_inject(),
                     git_col_x,
@@ -4313,6 +4940,63 @@ impl App {
                     self.cursor_px,
                     &mut self.info,
                     &self.closed_panes,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
+            }
+            // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
+            // 본문만 다르다.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Sessions {
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                sesscol::draw_sessions_col(
+                    g,
+                    self.cursor_px,
+                    &mut self.sessions_col,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
+            }
+            // MCP·Skill 탭 — 위 둘과 형제 블록.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Mcp {
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
+                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                mcpcol::draw_mcp_col(
+                    g,
+                    self.cursor_px,
+                    &mut self.mcp_col,
                     git_col_x,
                     git_col_w,
                     body_top,
@@ -4824,9 +5508,14 @@ impl App {
             // 모은다. statusbar 루프(아래)도 active 보더 inset 계산에 active_pane/
             // is_split을 쓰므로 settings 분기 밖, 더 넓은 스코프에 둔다.
             let is_split = footer_slots.len() > 1;
+            // 테두리를 실제로 그린 pane 과 그 두께. 하단바(footer)는 나중에 그려지므로
+            // 이 값만큼 안쪽으로 물러나야 테두리를 안 덮는다. 두 곳이 각자 조건을
+            // 계산하면 반드시 어긋난다 — 줌 pane 은 테두리가 있는데 하단바는 그걸
+            // 모르고 덮어 아래쪽만 끊겨 보였다(거노). 그린 쪽이 기록하고 덮는 쪽이 읽는다.
+            let mut border_inset: HashMap<String, f32> = HashMap::new();
             // active_pane + pane 별 캐릭터명을 한 lock 으로 스냅샷 — 아래 pane 테두리
             // 루프가 g(=&mut self.gpu) 안이라 self 재borrow 불가. character_accent 폴백용.
-            let (active_pane, pane_chars) = self
+            let (active_pane, pane_chars, tab_pids) = self
                 .ws
                 .lock()
                 .ok()
@@ -4838,27 +5527,36 @@ impl App {
                         .panes
                         .keys()
                         .filter_map(|id| {
+                            // **키는 outer, 값은 활성 탭**. 테두리는 바깥 박스에 그리니
+                            // 키는 leaf 여야 하고, 학생은 탭 pid 로 기록되니 값은 접어서
+                            // 가져온다. 안 접으면 탭으로 띄운 학생이 무색으로 남는다.
+                            let key = w.active_tab_pid(id);
                             self.pane_claude_sid
-                                .get(id)
+                                .get(&key)
                                 .and_then(|sid| {
                                     kasa_mcp::character::session_character(sid)
                                 })
                                 .or_else(|| {
                                     let view = self
                                         .pty
-                                        .get(id)
+                                        .get(&key)
                                         .map(|p| p.is_claude_agents())
                                         .unwrap_or(false);
                                     if view {
                                         None
                                     } else {
-                                        w.pane_character.get(id).cloned()
+                                        w.pane_character.get(&key).cloned()
                                     }
                                 })
                                 .map(|c| (id.clone(), c))
                         })
                         .collect();
-                    (w.active_pane.clone(), chars)
+                    // outer → 활성 탭 pid. 아래 루프는 `g(=&mut self.gpu)` 를 잡고 있어
+                    // `pty_for_pane` 같은 `&self` 메서드를 못 부른다 — 이 lock 한 번에
+                    // 같이 떠 두고 거기서 필드 접근만 한다.
+                    let tab_pids: HashMap<String, String> =
+                        w.panes.keys().map(|id| (id.clone(), w.active_tab_pid(id))).collect();
+                    (w.active_pane.clone(), chars, tab_pids)
                 })
                 .unwrap_or_default();
             // claude 가 foreground 인 pane 집합 — 테두리 게이트. 캐릭터는 pane spawn 시
@@ -4869,10 +5567,10 @@ impl App {
             let claude_panes: std::collections::HashSet<String> = footer_slots
                 .iter()
                 .filter(|(id, ..)| {
-                    self.pty
-                        .get(id.as_str())
-                        .and_then(|p| p.active_process_name())
-                        .is_some_and(|n| n == "claude")
+                    // outer 키가 아니라 활성 탭 pid — 탭에서 도는 클로드는 outer 로
+                    // 안 잡혀 테두리 게이트를 통째로 못 지났다.
+                    let key = tab_pids.get(id.as_str()).map_or(id.as_str(), String::as_str);
+                    self.pty.get(key).and_then(|p| p.active_agent()).is_some()
                 })
                 .map(|(id, ..)| id.clone())
                 .collect();
@@ -4889,11 +5587,7 @@ impl App {
             {
                 let (hmx, hmy) = self.cursor_px;
                 let accent = theme::accent_color(theme::accent_name());
-                // 로딩바 스윕 위상 — 프로세스 시작 기준 단조증가 초. working pane 이
-                // 있으면 about_to_wait 가 ~30fps 펌프하므로 매 프레임 갱신된다.
-                static ANIM_EPOCH: std::sync::LazyLock<Instant> =
-                    std::sync::LazyLock::new(Instant::now);
-                let anim_phase = ANIM_EPOCH.elapsed().as_secs_f32();
+                let anim_phase = anim_phase_secs();
                 let mut handle_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut zones: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))> = Vec::new();
@@ -4939,6 +5633,7 @@ impl App {
                             g.rect(*fx, fy + fbox_h - t, *fw, t, col);
                             g.rect(*fx, *fy, t, *fbox_h, col);
                             g.rect(fx + fw - t, *fy, t, *fbox_h, col);
+                            border_inset.insert(fid.clone(), t);
                         }
                     }
                     // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
@@ -4960,6 +5655,32 @@ impl App {
                         if ex > sx {
                             g.rect(sx, *fy, ex - sx, BAR_H, accent);
                         }
+                    }
+                    // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(거노: "내가
+                    // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 로딩바(숨쉬기)
+                    // 와 **뜻이 정반대**라 형태부터 갈랐다: 스윕바는 "놔둬도 진행
+                    // 된다", 이 테두리는 "내가 손대야 풀린다". 상태가 배타적이라
+                    // (working ≠ waiting) 둘이 한 pane 에 같이 뜨지 않는다.
+                    //
+                    // 포커스 테두리(학생색) 위에 덧그린다 — 지금 보고 있는 pane 이
+                    // 물어보고 멈춘 경우, 급한 쪽이 이겨야 한다. border_inset 도
+                    // 다시 적어 하단바가 이 테두리를 덮지 않게 한다.
+                    // 메서드(`pane_needs_you`)를 쓰면 `&self` 를 통째로 빌려 렌더 루프의
+                    // 가변 대여와 부딪힌다 — 필드만 집어 자유함수로 판정한다.
+                    if self
+                        .pane_activity
+                        .get(fid)
+                        .is_some_and(|a| crate::chrome::status_needs_you(&a.status))
+                    {
+                        let mut col = theme::attention();
+                        col[3] = (90.0 + 165.0 * breathe(anim_phase, 1.1)) as u8;
+                        let t = 2.0_f32;
+                        g.rect(*fx, *fy, *fw, t, col);
+                        g.rect(*fx, fy + fbox_h - t, *fw, t, col);
+                        g.rect(*fx, *fy, t, *fbox_h, col);
+                        g.rect(fx + fw - t, *fy, t, *fbox_h, col);
+                        let inset = border_inset.entry(fid.clone()).or_insert(t);
+                        *inset = inset.max(t);
                     }
                     // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
                     // ··· 핸들을 생략한다 — 중복 진입점 제거.
@@ -5070,11 +5791,11 @@ impl App {
                     continue;
                 }
                 let bar_y = fy + fbox_h - PANE_FOOTER_HEIGHT;
-                // active pane 파란 보더(1.5px)를 footer 배경이 덮지 않게 좌우·하단을
-                // 보더 두께만큼 안쪽으로 그린다 — 안 그러면 나중에 그려지는 footer bg 가
-                // 보더의 하단·좌우 끝을 덮어 "파란선이 하단바를 제외하고 감싸는"것처럼
-                // 보인다(거노). active 가 아니면 inset 0.
-                let bt = if is_split && active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.0 };
+                // 테두리를 footer 배경이 덮지 않게 좌우·하단을 그 두께만큼 안쪽으로
+                // 그린다 — 안 그러면 나중에 그려지는 footer bg 가 보더의 하단·좌우 끝을
+                // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(거노). 두께는
+                // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
+                let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, PANE_FOOTER_HEIGHT - bt, theme::bg());
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
@@ -5284,10 +6005,15 @@ impl App {
                         let fh = search_h - 8.0;
                         round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::radius_sm(), theme::bg());
                         g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::text_dim());
-                        let mut shown = self.statusbar.menu_search.clone();
+                        let (mut head, tail) = crate::lineedit::split(
+                            &self.statusbar.menu_search,
+                            self.statusbar.menu_search_cursor,
+                        );
                         if self.in_preedit {
-                            shown.push_str(&self.preedit);
+                            head.push_str(&self.preedit);
                         }
+                        let caret_w = g.measure_chrome_text(&head, 13.0, false);
+                        let shown = format!("{head}{tail}");
                         let (txt, col) = if shown.is_empty() {
                             ("디렉터리 검색…".to_string(), theme::text_mute())
                         } else {
@@ -5295,6 +6021,12 @@ impl App {
                         };
                         g.draw_text(menu_x + 38.0, fy + (fh - 13.0) / 2.0, &txt,
                             gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                        // 이 칸엔 캐럿이 없었다 — 끝에만 붙는 칸이라 커서가 어딘지
+                        // 물을 일이 없었기 때문이다. 이제 가운데를 고칠 수 있으니
+                        // 자리를 보여 줘야 한다.
+                        if commit_caret_on {
+                            g.rect(menu_x + 38.0 + caret_w, fy + (fh - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                        }
                     }
                     if total == 0 {
                         g.draw_text(menu_x + 16.0, rows_top + 4.0, "(없음)",
@@ -5583,7 +6315,7 @@ impl App {
             // — the hidden sibling panes, so the maximize visibly "sends the
             // others to the dock" and a sibling chip click switches the zoom to
             // it. zoom siblings have no × (they're live panes, not parked).
-            let dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
+            let mut dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
                 let ws = self.ws.lock().unwrap();
                 self.pty_layout
                     .as_ref()
@@ -5617,10 +6349,24 @@ impl App {
                     })
                     .collect()
             };
-            if !dock_items.is_empty() {
+            // 닫은 pane 은 여기 안 선다 — 되살리기는 Info 의 「되살리기」 섹션이
+            // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
+            // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
+            //
+            // 접어 둔 별도창은 여기 선다. id 는 `aux:<i>` 로 접두사를 붙여 pane id
+            // 와 섞이지 않게 한다 — 클릭 라우팅이 둘을 같은 목록에서 가른다.
+            for (i, h) in self.hidden_aux.iter().enumerate() {
+                dock_items.push((format!("aux:{i}"), h.label.clone(), false));
+            }
+            // 칩이 하나도 없어도 예약된 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
+            // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
+            if dock_reserve > 0.0 {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                let bar_y = win_h - DOCK_HEIGHT;
+                // 상태줄 **위**에 앉는다 — 상태줄은 창 맨 바닥에 고정이고 dock 은
+                // 접힌 pane 이 있을 때만 나타났다 사라지는 띠라, 순서가 반대면
+                // 접을 때마다 상태줄이 위아래로 뛴다.
+                let bar_y = win_h - STATUS_HEIGHT - DOCK_HEIGHT;
                 // Confine the dock to the pane-grid band: it must not bleed under
                 // the session-tab strip / file tree on the left or the git column
                 // on the right. Same bounds the cell grid uses in window_cells().
@@ -5638,7 +6384,7 @@ impl App {
                 let mut cx = grid_x + 8.0;
                 let mut chip_hits = Vec::new();
                 let mut chip_close_hits = Vec::new();
-                for (id, label, killable) in &dock_items {
+                for (id, label, killable) in dock_items.iter() {
                     let lw = g.measure_chrome_text(label, chrome_font, false);
                     let chip_w = if *killable { lw + icon + 24.0 } else { lw + 20.0 };
                     let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
@@ -5678,6 +6424,122 @@ impl App {
                 self.dock_chip_rects.clear();
                 self.dock_chip_close_rects.clear();
             }
+            // ── 하단 상태줄 ─────────────────────────────────────────────────
+            // 창 맨 아래 한 줄. **계정 한도가 늘 보이는 자리**다 — 패널을 열어야
+            // 보이면 「지금 얼마나 남았나」를 확인하려는 순간마다 손이 한 번 더 가고,
+            // 그 손이 아까워 안 보다가 한도에 부딪힌다(거노 2026-08-11 「orca랑
+            // 똑같이 하단바 그 형식으로」). 형식은 Orca 하단바에서 가져왔다:
+            // 게이지 + 퍼센트 + 언제 풀리는지, 폭이 좁아지면 정해진 순서로 무너진다.
+            {
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                let sy = win_h - STATUS_HEIGHT;
+                g.rect(0.0, sy, win_w, STATUS_HEIGHT, theme::panel_bg());
+                g.rect(0.0, sy, win_w, 1.0, theme::border());
+
+                let badge = self.claude_usage.lock().ok().and_then(|v| v.clone());
+                // 활성 슬롯 이름. 계정을 하나도 안 더했으면 이름 자체가 의미 없다.
+                let acct_name = (!self.set_claude_accounts.is_empty()).then(|| {
+                    let id = self.set_claude_account.as_str();
+                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
+                        Some(i) => crate::settings::account_display(
+                            id,
+                            &self.set_claude_accounts[i].label,
+                            &format!("계정 {}", i + 2),
+                        ),
+                        None => crate::settings::account_display("", "", "기본"),
+                    }
+                });
+
+                let fs = 11.0_f32;
+                let ty = sy + (STATUS_HEIGHT - fs) / 2.0 - 1.0;
+                let mut x = 12.0_f32;
+                let seg_x0 = x;
+
+                // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
+                // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
+                // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
+                const GW: f32 = 48.0;
+                const GH: f32 = 6.0;
+                if win_w >= 500.0 {
+                    let gy = sy + (STATUS_HEIGHT - GH) / 2.0;
+                    // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15% 짜리
+                    // 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서 그냥 얼룩이
+                    // 된다(첫 캡처에서 실제로 그랬다). 트랙은 은은하게, 채움은 확실하게.
+                    g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
+                    if let Some(b) = badge.as_ref() {
+                        let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(2.0);
+                        g.rect(x, gy, w, GH, theme::with_alpha(theme::text(), 210));
+                    }
+                    x += GW + 8.0;
+                }
+
+                // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
+                // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
+                let (head, col) = match badge.as_ref() {
+                    Some(b) => {
+                        let mut s = if b.stale {
+                            format!("~{:.0}%", b.pct)
+                        } else {
+                            format!("{:.0}%", b.pct)
+                        };
+                        // 폭이 넉넉할 때만 창 이름(`5h`/`7d`)과 리셋까지 적는다.
+                        if win_w >= 900.0 {
+                            s = format!("{} {}", b.label, s);
+                            if let Some(l) = crate::resets_in_label(b.resets_at) {
+                                s = format!("{s} · {l}");
+                            }
+                        } else if win_w >= 720.0 {
+                            if let Some(l) = crate::resets_in_label(b.resets_at) {
+                                s = format!("{s} · {l}");
+                            }
+                        }
+                        let c = if b.pct >= 90.0 {
+                            theme::danger()
+                        } else if b.pct >= 70.0 {
+                            theme::syn_number()
+                        } else {
+                            theme::text()
+                        };
+                        (s, c)
+                    }
+                    None => ("—".to_string(), theme::text_dim()),
+                };
+                g.draw_text(
+                    x,
+                    ty,
+                    &head,
+                    gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                );
+                x += g.measure_chrome_text(head.as_str(), fs, true) + 10.0;
+
+                // 계정 이름은 가장 먼저 버린다 — 한도 숫자가 이 줄의 존재 이유고,
+                // 이름은 드롭다운을 열면 어차피 맨 위에 있다.
+                //
+                // 라벨을 안 지은 슬롯은 이름이 이메일로 폴백되는데, 그걸 통째로 적으면
+                // 한 줄의 절반을 주소가 먹는다. **@ 앞만** 남긴다 — 계정을 가리는 데는
+                // 그걸로 충분하고(오늘 넷이 같은 계정인 걸 못 알아본 게 문제였지 주소
+                // 뒷부분을 몰라서가 아니다), 전체는 드롭다운에 그대로 있다.
+                if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
+                    let short = n.split_once('@').map(|(a, _)| a).unwrap_or(n.as_str());
+                    g.draw_text(
+                        x,
+                        ty,
+                        short,
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    x += g.measure_chrome_text(short, fs, true);
+                }
+
+                // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
+                self.status_account_rect =
+                    Some((seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), STATUS_HEIGHT));
+            }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
             // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone
             // 박스는 라이브가 아닌 tab 드래그(멀티탭 탭 추출)의 착지 지점 힌트로만 남긴다.
@@ -5695,26 +6557,104 @@ impl App {
             // 계정의** 것이라, 이름을 같은 행에 적고 클릭을 전환에 쓰는 게 별도
             // 칩보다 정직하다.
             self.account_menu_hits.clear();
-            if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, self.account_chip_rect) {
+            // 앵커는 **연 손잡이**를 따라간다. 손잡이가 둘이라(Info 탭 계정 행 ·
+            // 상태줄) 하나로 고정하면 다른 쪽에서 열었을 때 메뉴가 화면 반대편에
+            // 뜬다. 기록이 없으면 옛 동작대로 계정 행에 붙인다.
+            let anchor = self.account_menu_anchor.or(self.account_chip_rect);
+            if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, anchor) {
                 let (hmx, hmy) = self.cursor_px;
                 let f = 13.0_f32;
                 let pad_x = 10.0_f32;
                 // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
                 // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
-                let mut rows: Vec<(AccountMenuItem, String)> =
-                    vec![(AccountMenuItem::Select(String::new()), "기본".to_string())];
+                //
+                // 이름 뒤에 **실제 신원**(팀 조직명 또는 이메일)을 같이 적는다. 라벨은
+                // 사람이 붙인 이름이라 낡는데, 재로그인으로 슬롯 셋이 전부 같은 개인
+                // 계정이 됐는데도 "사이오닉팀플랜" 이라는 이름만 떠서 세 한도가 하나로
+                // 합쳐진 걸 아무도 몰랐다(2026-08-11: 세 슬롯 사용률이 완전히 같았다).
+                // 이름 없는 슬롯은 `account_display` 가 이미 신원으로 불리므로 중복은
+                // `contains` 로 건너뛴다.
+                let named = |id: &str, name: String| -> String {
+                    match crate::settings::account_identity(id) {
+                        Some(w) if !name.contains(&w) => format!("{name} · {w}"),
+                        _ => name,
+                    }
+                };
+                let mut rows: Vec<(AccountMenuItem, String)> = vec![(
+                    AccountMenuItem::Select(String::new()),
+                    named("", crate::settings::account_display("", "", "기본")),
+                )];
                 rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
-                    (AccountMenuItem::Select(a.id.clone()), a.display_label(i))
+                    (
+                        AccountMenuItem::Select(a.id.clone()),
+                        named(
+                            &a.id,
+                            crate::settings::account_display(
+                                &a.id,
+                                &a.label,
+                                &format!("계정 {}", i + 2),
+                            ),
+                        ),
+                    )
                 }));
                 rows.push((
                     AccountMenuItem::AddInSettings,
                     "설정에서 계정 추가…".to_string(),
                 ));
+                // 계정별 한도 — **누르기 전에** 보여야 한다(거노: "누르면 전환되버리잖아").
+                // 폴러가 슬롯별로 채운 표(`claude_usage_all`)를 그대로 읽는다. 값이 없는
+                // 계정(한 번도 조회 못 함·토큰 없음)은 빈칸으로 둔다 — 0% 로 그리면
+                // "여유 있음"이라는 **거짓말**이 되고, 그게 옮길 곳을 고르는 판단을 망친다.
+                let usage_of = |id: &str| -> Option<crate::UsageBadge> {
+                    let key = crate::socket::claude_account_dir(id)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.claude_usage_all.lock().ok()?.get(&key).cloned()
+                };
+                // 표기·색은 **Info 탭 사용량 pill 과 같은 규칙**을 쓴다(info.rs
+                // draw_info_actions): `7d 62%`, stale 이면 `~` 를 앞에. 같은 숫자가
+                // 두 자리에서 다르게 보이면 어느 쪽을 믿을지가 문제가 된다.
+                // 퍼센트 뒤에 **언제 풀리는지**를 붙인다 — 90% 라도 12분 뒤면 기다리면
+                // 되고, 3시간 뒤면 지금 옮겨야 한다(거노 2026-08-07).
+                let usage_text = |b: &Option<crate::UsageBadge>| -> String {
+                    match b {
+                        Some(b) => {
+                            let head = if b.stale {
+                                format!("~{} {:.0}%", b.label, b.pct)
+                            } else {
+                                format!("{} {:.0}%", b.label, b.pct)
+                            };
+                            match crate::resets_in_label(b.resets_at) {
+                                Some(l) => format!("{head} · {l}"),
+                                None => head,
+                            }
+                        }
+                        None => "—".to_string(),
+                    }
+                };
+                // 값이 없는 계정은 **빈칸이 아니라 `—`**. 빈칸은 "한도 여유"로 읽혀서,
+                // 옮길 곳을 고르는 판단을 정확히 반대로 만든다. 오래 안 쓴 계정은 OAuth
+                // 토큰이 만료돼(8시간쯤) usage 조회가 거부되므로 실제로 자주 생긴다 —
+                // 그 계정으로 claude 를 한 번 돌리면 토큰이 갱신돼 숫자가 돌아온다.
+                let row_usage = |item: &AccountMenuItem| -> Option<Option<crate::UsageBadge>> {
+                    match item {
+                        AccountMenuItem::Select(id) => Some(usage_of(id)),
+                        _ => None,
+                    }
+                };
                 let rh = 28.0_f32;
                 let pad = 4.0_f32;
+                // 한도 칸이 이름을 밀지 않게 폭 계산에 함께 넣는다.
+                let gap = 14.0_f32;
                 let mw = rows
                     .iter()
-                    .map(|(_, l)| g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0)
+                    .map(|(item, l)| {
+                        let mut w = g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0;
+                        if let Some(b) = row_usage(item) {
+                            w += gap + g.measure_chrome_text(usage_text(&b).as_str(), f - 1.0, true);
+                        }
+                        w
+                    })
                     .fold(aw, f32::max);
                 // +5 = "추가" 행 위 구분선이 먹는 자리.
                 let mh = pad * 2.0 + rh * rows.len() as f32 + 5.0;
@@ -5752,6 +6692,29 @@ impl App {
                             italic: false,
                         },
                     );
+                    if let Some(b) = row_usage(&item) {
+                        let u = usage_text(&b);
+                        let uf = f - 1.0;
+                        let uw = g.measure_chrome_text(u.as_str(), uf, true);
+                        // 임계도 pill 과 같은 값(90 위험 · 70 주의). 옮길 곳을 고르려고
+                        // 여는 목록이라 "여기도 꽉 찼다"가 이름만큼 빨리 읽혀야 한다.
+                        // 모르는 값(`—`)은 색을 안 준다 — 초록으로 그리면 여유로 읽힌다.
+                        let col = match &b {
+                            None => theme::text_mute(),
+                            Some(b) if b.pct >= 90.0 => theme::danger(),
+                            Some(b) if b.pct >= 70.0 => theme::syn_number(),
+                            Some(_) => theme::success(),
+                        };
+                        let col = if b.as_ref().is_some_and(|b| b.stale) {
+                            theme::with_alpha(col, 0x99)
+                        } else {
+                            col
+                        };
+                        g.draw_text(
+                            mx + mw - pad_x - uw, ry + (rh - uf) / 2.0 - 1.0, &u,
+                            gpu::DrawOpts { font_size: uf, color: col, bold: true, italic: false },
+                        );
+                    }
                     self.account_menu_hits.push((item, (mx, ry, mw, rh)));
                     ry += rh;
                 }
@@ -5963,6 +6926,12 @@ impl App {
                             format!("{names} — {what} 닫을까요?"),
                         )
                     }
+                    // 왜 하나가 아니라 방이 닫히는지부터 말한다 — Cmd+W 는 「하나
+                    // 닫기」로 익힌 키라, 이유 없이 방 확인이 뜨면 오작동처럼 읽힌다.
+                    crate::CloseWhy::LastPane => (
+                        "이 방의 마지막 pane 이에요".to_string(),
+                        format!("{what} 닫을까요?"),
+                    ),
                 };
                 let title = &title;
                 let subtitle = subtitle.as_str();
@@ -6015,12 +6984,18 @@ impl App {
                             true,
                         ),
                         None => (
-                            if hot { theme::surface_hover() } else { theme::surface() },
+                            theme::raised_on(theme::surface_active(), hot),
                             theme::text(),
                             false,
                         ),
                     };
-                    panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
+                    // 무채색 쪽은 테두리로 선다 — 주액션과 갈리는 축이 색 하나가
+                    // 아니라 형태여야 흑백에서도 어느 쪽이 기본인지 읽힌다.
+                    if tone.is_some() {
+                        panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
+                    } else {
+                        panel_rect_outlined(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
+                    }
                     g.draw_text(
                         x + bpad,
                         btn_y + (btn_h - bf) / 2.0,
@@ -6059,83 +7034,92 @@ impl App {
                     format!("pane {total}개를 마지막 레이아웃 그대로 이어서 켭니다")
                 };
                 const RESTORE_TITLE: &str = "이전 세션을 복원할까요?";
-                let pad = 24.0_f32;
+                let pad = 26.0_f32;
+                let bf = 13.0_f32;
+                let bpad = 18.0_f32;
+                let btn_h = 34.0_f32;
+                let btn_gap = 8.0_f32;
+                // 두 버튼은 **같은 폭**으로 간다. 글자 수대로 재면 기본 액션인 "복원"(2자)이
+                // 부액션 "새로 시작"(4자)보다 좁아져, 색을 걷어내면 큰 쪽이 주액션으로
+                // 읽혔다 — 위계가 accent 파랑 하나에만 얹혀 있었다는 뜻이다.
+                let btn_w = g
+                    .measure_chrome_text("새로 시작", bf, false)
+                    .max(g.measure_chrome_text("복원", bf, true))
+                    + bpad * 2.0;
                 // 카드 폭은 두 줄을 실측해서 나온다. 448 을 박아 두었더니 크롬 페이스를
                 // 픽셀로 바꾸는 순간 부제 꼬리가 카드 밖으로 잘렸다 — 같은 문장이
                 // pane 수 자릿수로도 길어지니 애초에 잴 일이었다.
                 let title_w = g.measure_chrome_text(RESTORE_TITLE, 15.0, true);
                 let sub_w = g.measure_chrome_text(&subtitle, 13.0, false);
-                let card_w = (title_w.max(sub_w) + pad * 2.0)
-                    .clamp(448.0, (win_w - 48.0).max(448.0));
-                let card_h = 176.0_f32;
+                let body_w = title_w.max(sub_w).max(btn_w * 2.0 + btn_gap);
+                let card_w = (body_w + pad * 2.0).clamp(448.0, (win_w - 48.0).max(448.0));
+                // 높이도 내용에서 나온다. 176 을 박아 두었더니 글 두 줄이 위에 몰리고
+                // 그 아래 60px 가 아무 이유 없이 비어, 카드가 대충 얹힌 것처럼 보였다.
+                let title_y = 28.0_f32;
+                let sub_y = title_y + 30.0;
+                let btn_dy = sub_y + 40.0;
+                let card_h = btn_dy + btn_h + 26.0;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
                 panel_rect_outlined(g, cx0, cy0, card_w, card_h, theme::radius_md(), theme::surface_active());
                 g.draw_text(
                     cx0 + pad,
-                    cy0 + 30.0,
+                    cy0 + title_y,
                     RESTORE_TITLE,
                     gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
                 );
                 g.draw_text(
                     cx0 + pad,
-                    cy0 + 60.0,
+                    cy0 + sub_y,
                     &subtitle,
                     gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
                 );
                 let (mx, my) = self.cursor_px;
-                let bf = 13.0_f32;
-                let bpad = 18.0_f32;
-                let btn_h = 34.0_f32;
-                let btn_y = cy0 + card_h - 20.0 - btn_h;
+                let btn_y = cy0 + btn_dy;
+                let hit = |x: f32| mx >= x && mx <= x + btn_w && my >= btn_y && my <= btn_y + btn_h;
                 // 복원 (primary/accent), flush to the card's right edge.
-                let restore_w = g.measure_chrome_text("복원", bf, true) + bpad * 2.0;
-                let restore_x = cx0 + card_w - pad - restore_w;
-                let restore_hover = mx >= restore_x
-                    && mx <= restore_x + restore_w
-                    && my >= btn_y
-                    && my <= btn_y + btn_h;
+                let restore_x = cx0 + card_w - pad - btn_w;
+                let restore_hover = hit(restore_x);
                 g.hover_pointer |= restore_hover;
                 panel_rect(
                     g,
                     restore_x,
                     btn_y,
-                    restore_w,
+                    btn_w,
                     btn_h,
                     theme::radius_sm(),
                     theme::with_alpha(theme::accent(), if restore_hover { 0xFF } else { 0xDD }),
                 );
+                let rl_w = g.measure_chrome_text("복원", bf, true);
                 g.draw_text(
-                    restore_x + bpad,
+                    restore_x + (btn_w - rl_w) / 2.0,
                     btn_y + (btn_h - bf) / 2.0,
                     "복원",
                     gpu::DrawOpts { font_size: bf, color: theme::fg(), bold: true, italic: false },
                 );
-                restore_btn_hits.push((crate::RestoreBtn::Restore, (restore_x, btn_y, restore_w, btn_h)));
-                // 새로 시작, to its left.
-                let fresh_w = g.measure_chrome_text("새로 시작", bf, false) + bpad * 2.0;
-                let fresh_x = restore_x - 10.0 - fresh_w;
-                let fresh_hover = mx >= fresh_x
-                    && mx <= fresh_x + fresh_w
-                    && my >= btn_y
-                    && my <= btn_y + btn_h;
+                restore_btn_hits.push((crate::RestoreBtn::Restore, (restore_x, btn_y, btn_w, btn_h)));
+                // 새로 시작, to its left. 채움 대신 테두리로 갈린다 — 주액션과 갈리는 축이
+                // 색 하나가 아니라 형태여야 흑백에서도 어느 쪽이 기본인지 읽힌다.
+                let fresh_x = restore_x - btn_gap - btn_w;
+                let fresh_hover = hit(fresh_x);
                 g.hover_pointer |= fresh_hover;
-                panel_rect(
+                panel_rect_outlined(
                     g,
                     fresh_x,
                     btn_y,
-                    fresh_w,
+                    btn_w,
                     btn_h,
                     theme::radius_sm(),
-                    if fresh_hover { theme::surface_hover() } else { theme::surface() },
+                    theme::raised_on(theme::surface_active(), fresh_hover),
                 );
+                let fl_w = g.measure_chrome_text("새로 시작", bf, false);
                 g.draw_text(
-                    fresh_x + bpad,
+                    fresh_x + (btn_w - fl_w) / 2.0,
                     btn_y + (btn_h - bf) / 2.0,
                     "새로 시작",
                     gpu::DrawOpts { font_size: bf, color: theme::text(), bold: false, italic: false },
                 );
-                restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, fresh_w, btn_h)));
+                restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
             // File-tree drag ghost — a small pill trailing the cursor with the
             // dragged item's name, drawn last so it floats over everything.
@@ -6232,18 +7216,21 @@ impl App {
                     paint_theme_dissolve(g, t, old_bg, win_px.0 / scale, win_px.1 / scale);
                 }
             }
+            // 방 펼침이 도는 동안은 다음 장을 스스로 부른다 — 사이드바는 입력이
+            // 없으면 다시 안 그려지므로, 손을 뗀 자리에서 목록이 멈춰 버린다.
+            if let Some((_, _, at)) = self.expand_anim {
+                if at.elapsed().as_secs_f32() >= EXPAND_ANIM_SECS {
+                    self.expand_anim = None;
+                } else {
+                    self.chrome_dirty = true;
+                }
+            }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
         self.confirm_btn_rects = confirm_btn_hits;
         self.restore_btn_rects = restore_btn_hits;
-        // statusline 프사 클릭 hit-test (학생이름, rect) — 프사 클릭 시 학생 설정
-        // 별도창 딥링크. 매 프레임 재구축이라 stale rect 가 남지 않는다.
-        self.face_hit_rects = profile_face_hits
-            .iter()
-            .map(|(n, _, r)| (n.clone(), *r))
-            .collect();
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_tab_popout_rects = tab_popout_hits;
@@ -6679,6 +7666,10 @@ impl App {
             // render_frame_gpu로 cells를 다시 그려 echo가 stale되지 않게.
             let _ = rebuild;
             self.render_frame_gpu(scale, time_secs);
+            // 리드백은 render_frame_gpu 안에서 device.poll(Wait) 로 끝나므로 여기선
+            // 파일이 이미 디스크에 있다. 회신을 여기 두는 이유가 그것 — 무장 시점에
+            // 답하면 받는 쪽이 아직 없는 파일을 Read 한다.
+            self.settle_pane_captures();
             if trace {
                 eprintln!(
                     "[render-gpu] {}us since_input={}ms",
@@ -6698,21 +7689,29 @@ impl App {
 
 /// Clawd 아트가 차지하는 셀 박스 크기 (cols × rows).
 /// diff 의 삭제 줄 수를 적는 빨강. git 칼럼과 커밋 모달이 한 화면에 같이 뜨는데
-/// 둘이 각자 색을 들고 있으면 같은 뜻에 두 가지 빨강이 난다.
-const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
+/// 둘이 각자 색을 들고 있으면 같은 뜻에 두 가지 빨강이 난다. MCP 탭의 지우기 확인도
+/// 같은 이유로 이걸 쓴다 — "없애는 것"이라는 뜻이 같다.
+pub(crate) const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
 
-const CLAWD_COLS: usize = 9;
-const CLAWD_ROWS: usize = 3;
+pub(crate) const CLAWD_COLS: usize = 9;
+pub(crate) const CLAWD_ROWS: usize = 3;
+/// agy(Antigravity CLI) 시작 로고 — Clawd 와 아트도 크기도 달라 따로 잰다(실측 5행 12칸).
+pub(crate) const AGY_COLS: usize = 12;
+pub(crate) const AGY_ROWS: usize = 5;
+/// 로고 옆 제품명 — 도트만 학생으로 바뀌면 남의 이름표를 달고 선 꼴이라 함께 바꾼다.
+const CLAWD_TITLE: &[char] = &['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
+const AGY_TITLE: &[char] =
+    &['A', 'n', 't', 'i', 'g', 'r', 'a', 'v', 'i', 't', 'y', ' ', 'C', 'L', 'I'];
+/// codex 는 마스코트 아트가 없다 — 시작 패널 한 장뿐이라 도트는 못 세우고 이름표만
+/// 바꾼다. `>_` 까지 묶어 잡아야 대화 본문에 같은 낱말이 나와도 안 걸린다.
+const CODEX_TITLE: &[char] =
+    &['>', '_', ' ', 'O', 'p', 'e', 'n', 'A', 'I', ' ', 'C', 'o', 'd', 'e', 'x'];
 
 /// 학생 도트 애니메이션 — idle(배너)·walk(로딩바) 모션별 프레임 수·주기.
 const STUDENT_IDLE_FRAMES: usize = 4;
 pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
 const STUDENT_WALK_FRAMES: usize = 6;
 const STUDENT_WALK_FRAME_MS: f32 = 140.0;
-/// statusline 프사 높이(행). statusline 행에 바닥 정렬하고 위로 이만큼
-/// 침범한다 — 1행짜리 얼굴은 너무 작았다(거노). 2행 = statusline + 바로 위
-/// 입력박스 아래 테두리 행까지. 3행이면 `❯` 입력행에 걸려 타이핑을 가린다.
-pub(crate) const STATUSLINE_FACE_ROWS: usize = 2;
 /// 입력박스 위 스페이서 행에 서 있는 학생(전신 idle)의 키(행). 발은 입력박스
 /// 윗 테두리에 닿고 위는 스크롤백 꼬리라 몇 행 덮여도 무해 — 배너와 같은 키.
 pub(crate) const INPUT_STANDING_ROWS: usize = 3;
@@ -6723,52 +7722,58 @@ pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 세션 제목 타이프라이터 진행 중 — 같은 펌프 스레드가 OR 로 보고 33ms Redraw.
-/// 매 프레임 render 가 실측으로 재발행(타이핑 끝나면 저절로 false).
-pub(crate) static TITLE_TYPE_ANIMATING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
-/// 글자당 드러나는 간격(ms) — 사람 타자 체감. 너무 빠르면 효과가 안 보인다.
-const TITLE_TYPE_MS_PER_CHAR: u128 = 45;
 
-thread_local! {
-    /// pane별 (전체 제목, 타이핑 시작 시각). 제목이 처음 뜨거나 바뀌면 리셋해
-    /// 한 글자씩 드러난다. struct App 무접촉(병렬 작업 규칙) — GUI 단일 스레드라
-    /// thread_local 로 충분. 닫힌 pane 의 잔존 엔트리는 무해(수 개 수준).
-    static TITLE_TYPEWRITER: std::cell::RefCell<
-        std::collections::HashMap<String, (String, std::time::Instant)>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+/// 에이전트 TUI 의 입력 영역. 하네스마다 **모양이 다르다** — claude 는 `─` 보더
+/// 두 줄이 입력행을 감싸고, codex 는 보더가 없는 대신 입력행 전체가 배경색으로
+/// 칠해져 있다(실측 `bg=Rgb(63,69,77)`, 주변은 `Default`).
+///
+/// 판정을 한 곳에 모으는 이유는 `strip_agent_chip` 주석(아래)에 적힌 사고 그대로다:
+/// 같은 일을 하는 사본이 각자 관문을 들면 한쪽만 고쳐져 조용히 어긋난다.
+pub(crate) enum PromptBox {
+    /// claude — `rows` 가 입력행, 그 바깥 `top`/`bottom` 이 대시 보더.
+    Bordered { rows: std::ops::Range<usize>, top: usize, bottom: usize },
+    /// codex — 보더가 없다. 칠할 것도 칩을 지울 자리도 입력행 자신뿐이다.
+    Filled { rows: std::ops::Range<usize> },
 }
 
-/// 이번 프레임에 보여줄 제목 조각. 반환 (표시 문자열, 타이핑 진행 중?).
-/// 진행 중엔 끝에 '▍' 캐럿을 붙여 "치는 중" 을 판다.
-fn title_typewriter_frame(pane_id: &str, full: &str) -> (String, bool) {
-    TITLE_TYPEWRITER.with(|m| {
-        let mut m = m.borrow_mut();
-        let now = std::time::Instant::now();
-        let e = m
-            .entry(pane_id.to_string())
-            .or_insert_with(|| (full.to_string(), now));
-        if e.0 != full {
-            *e = (full.to_string(), now);
+impl PromptBox {
+    pub(crate) fn rows(&self) -> std::ops::Range<usize> {
+        match self {
+            PromptBox::Bordered { rows, .. } | PromptBox::Filled { rows } => rows.clone(),
         }
-        let chars: Vec<char> = full.chars().collect();
-        let n = (e.1.elapsed().as_millis() / TITLE_TYPE_MS_PER_CHAR) as usize;
-        if n >= chars.len() {
-            (full.to_string(), false)
-        } else {
-            let mut s: String = chars[..n].iter().collect();
-            s.push('▍');
-            (s, true)
-        }
-    })
+    }
 }
 
-/// claude TUI 입력박스 행 탐지 — 화면 하단에서 위로 ─ 보더 두 줄을 찾아 그
-/// 사이 행 범위를 돌려준다(양끝 보더 행 번호는 range.start-1 / range.end).
-/// 사이에 ❯ 프롬프트 마커 행이 있어야 입력박스로 인정한다(권한 메뉴 등
-/// 다른 풀폭 박스 오인 방지).
-fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
+/// ultracode 턴의 입력박스 accent — 학생 색 대신 이걸 `style_prompt_box` 에 넘긴다.
+///
+/// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
+/// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
+/// 보여야 한다(거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
+///
+/// **입력박스를 따로 칠하지 않고 accent 만 갈아끼우는 이유**: 그 박스를 칠하는 손은
+/// `style_prompt_box` 하나뿐이고 pane 렌더 **뒤쪽**에서 돈다. 앞에서 셀을 직접
+/// 물들이면 그 호출이 학생 accent 로 깨끗이 덮어쓴다(2026-08-11 실측 — 스샷의
+/// 테두리가 보라가 아니라 학생 분홍 `d55580` 이었다).
+///
+/// 색은 `bb9af7`. `t`(초)에 따라 흰빛으로 숨쉬듯 오르내려 정적인 테두리와
+/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
+fn ultracode_accent(t: f32) -> [u8; 4] {
+    let g = 0.34 * (0.5 + 0.5 * (t * 2.2).sin());
+    let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
+    [mix(0xbb), mix(0x9a), mix(0xf7), 255]
+}
+
+/// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
+///
+/// **claude**: `─` 보더 두 줄 사이. 그 사이에 `❯` 마커 행이 있어야 인정한다
+/// (권한 메뉴 등 다른 풀폭 박스 오인 방지).
+///
+/// **codex**: 보더가 없다. 대신 입력행이 **명시 배경색으로 통째로 칠해져** 있어서
+/// 그걸 시그니처로 쓴다 — `›` 로 시작하고 그 행의 모든 글리프가 같은 non-Default
+/// `bg` 를 공유하는 행. 배경 없이 `›` 만 보면 인용문·diff 를 입력창으로 오인한다.
+fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
         let (mut dash, mut glyph) = (0usize, 0usize);
         for c in r {
@@ -6782,44 +7787,96 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
         }
         dash >= 10 && dash * 2 >= glyph
     }
-    let b2 = rows.iter().rposition(|r| is_border(r))?;
-    let b1 = rows[..b2].iter().rposition(|r| is_border(r))?;
-    let range = (b1 + 1)..b2;
     // claude 입력박스 마커는 `❯`(U+276F, 또는 옛 `›`)뿐 — ASCII `>` 는 제외한다.
     // diff·git·노트 TUI 는 대시줄 사이에 ASCII `>`(인용·프롬프트) 를 흔히 둬서,
     // `>` 까지 마커로 치면 그 대시줄 쌍을 입력박스로 오인해 뜬금없는 빈 초록
     // 사각형을 덧그렸다(거노 2026-07-22).
-    let has_marker = rows[range.clone()].iter().any(|r| {
-        r.iter()
-            .find(|c| c.ch != ' ' && c.ch != '\0')
-            .is_some_and(|c| matches!(c.ch, '❯' | '›'))
-    });
-    (has_marker && !range.is_empty()).then_some(range)
+    fn marker_row(r: &[GridCell]) -> bool {
+        r.iter().find(|c| c.ch != ' ' && c.ch != '\0').is_some_and(|c| matches!(c.ch, '❯' | '›'))
+    }
+    if let Some(b2) = rows.iter().rposition(|r| is_border(r)) {
+        if let Some(b1) = rows[..b2].iter().rposition(|r| is_border(r)) {
+            let range = (b1 + 1)..b2;
+            if !range.is_empty() && rows[range.clone()].iter().any(|r| marker_row(r)) {
+                return Some(PromptBox::Bordered { rows: range, top: b1, bottom: b2 });
+            }
+        }
+    }
+    // codex — 칠해진 입력행. 행 전체가 같은 non-Default bg 를 쓰는 것이 시그니처고,
+    // 마커(`›`)를 함께 요구해 배경만 남은 여백 행과 구별한다.
+    let uniform_fill = |r: &[GridCell]| -> Option<kasa_bridge::screen::Color> {
+        let mut fill: Option<kasa_bridge::screen::Color> = None;
+        let mut glyphs = 0usize;
+        for c in r.iter().filter(|c| c.ch != '\0') {
+            if matches!(c.bg, kasa_bridge::screen::Color::Default) {
+                return None;
+            }
+            if fill.is_some_and(|f| f != c.bg) {
+                return None;
+            }
+            fill = Some(c.bg.clone());
+            glyphs += 1;
+        }
+        (glyphs >= 8).then_some(fill?)
+    };
+    let f = rows
+        .iter()
+        .rposition(|r| marker_row(r) && uniform_fill(r).is_some())?;
+    let fill = uniform_fill(&rows[f])?;
+    // 입력창은 **여러 줄이다** — 마커 행 위아래로 같은 채움색 여백 행이 붙고,
+    // 여러 줄을 입력하면 그만큼 자란다(실측 0.146.0: 여백-입력-여백 3줄). 마커
+    // 행만 칠하면 가운데 한 줄만 색이 바뀌어 상자가 아니라 밑줄로 보인다(거노).
+    let same = |r: &[GridCell]| uniform_fill(r).is_some_and(|c| c == fill);
+    let mut start = f;
+    while start > 0 && same(&rows[start - 1]) {
+        start -= 1;
+    }
+    let mut end = f + 1;
+    while end < rows.len() && same(&rows[end]) {
+        end += 1;
+    }
+    Some(PromptBox::Filled { rows: start..end })
 }
 
 /// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
 /// --agent-color 로 그린 명시색을 **무시하고** 학생 accent 로 강제 도색한다 —
 /// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
 /// 틴트에서 빼는 처리도 여기 있었는데, 본문이 테마 기본 fg 로 돌아가며 폐기.)
-fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
-    let Some(range) = prompt_box_rows(rows) else { return };
-    let (b1, b2) = (range.start - 1, range.end);
+pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
+    let Some(bx) = prompt_box(rows) else { return };
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
-    for i in [b1, b2] {
-        for c in rows[i].iter_mut() {
-            // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
-            // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
-            // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
-            c.bg = kasa_bridge::screen::Color::Default;
-            if c.ch != ' ' && c.ch != '\0' {
-                c.fg = fg.clone();
+    match &bx {
+        PromptBox::Bordered { top, bottom, .. } => {
+            for i in [*top, *bottom] {
+                for c in rows[i].iter_mut() {
+                    // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
+                    // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
+                    // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
+                    c.bg = kasa_bridge::screen::Color::Default;
+                    if c.ch != ' ' && c.ch != '\0' {
+                        c.fg = fg.clone();
+                    }
+                }
+            }
+        }
+        // codex 는 칠할 보더가 없다. 이미 배경으로 칠해진 그 줄을 학생색 쪽으로
+        // 끌어당긴다 — 거노 선택(2026-08-05). 원래 배경을 버리지 않고 섞는 이유는
+        // 입력 글자가 묻히지 않게 하기 위해서다(보더 도색이 배경을 비우는 것과
+        // 같은 이유). 여기서 fg 는 건드리지 않는다.
+        PromptBox::Filled { rows: r } => {
+            for i in r.clone() {
+                for c in rows[i].iter_mut() {
+                    if let kasa_bridge::screen::Color::Rgb(br, bg_, bb) = c.bg {
+                        c.bg = tint_toward([br, bg_, bb], accent, PROMPT_TINT);
+                    }
+                }
             }
         }
     }
     // 입력행 왼쪽 ❯ 프롬프트 마커도 학생 accent 로 — claude --agent-color(8색
     // 근사)가 남으면 보더와 화살표 색이 어긋난다(거노). 마커 글리프 한 칸만
     // 칠하고 입력 글자는 테마 기본 fg 유지.
-    for r in range {
+    for r in bx.rows() {
         if let Some(c) = rows[r]
             .iter_mut()
             .find(|c| c.ch != ' ' && c.ch != '\0')
@@ -6830,133 +7887,18 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     }
 }
 
-/// 입력박스 상단 보더 오른쪽 `@<slug>-<sid>` 칩의 이름(캐릭터 slug) 부분을 pane
-/// 캐릭터로 통일한다. claude argv 의 agent 이름은 부팅 시 고정이라, 이후
-/// swap-character 나 컴팩트 재부팅으로 pane 시각 캐릭터가 바뀌면 칩(@yuuka)과
-/// pane(코하루)이 갈라진다(거노: "%5 코하루인데 @yuuka"). `-<sid>` 는 세션
-/// 식별로 유지하고 첫 slug run 만 교체 — 칩을 오른쪽 끝 고정으로 두고 왼쪽 '─'
-/// 보더를 흡수/보충해 뒤쪽 ` ──` 정렬을 지킨다. 스냅샷 전용(원본 무손상).
-/// 입력박스 상단 보더의 teammate 칩(`@agent이름`)을 지우고 보더 대시로 되메운다.
-/// 거노 2026-07-27: 같은 줄에 정체가 다른 두 이름(좌=대화 제목, 우=agent 이름)이
-/// 나란히 떠 "세션이름이 왜 둘이냐"가 됐다. agent 이름은 pane 헤더 탭이 이미
-/// 들고 있으므로(패턴 F 는 rename 을 agent-name 과 일치시킨다) 입력박스에서는
-/// 대화 제목 하나만 남긴다. 칩 양옆 공백까지 함께 메워 대시가 끊기지 않게 한다.
-fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
-    let Some(range) = prompt_box_rows(rows) else { return };
-    let row = &mut rows[range.start - 1];
-    let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
-    // 칩 토큰: '@' + 영숫자/'-'/'_' 연속. 그 뒤가 보더('─')나 행 끝이어야 칩으로
-    // 인정한다 — 본문에 우연히 섞인 '@단어' 를 지우지 않기 위한 가드.
-    let tok_end = at
-        + 1
-        + row[at + 1..]
-            .iter()
-            .take_while(|c| c.ch.is_ascii_alphanumeric() || c.ch == '-' || c.ch == '_')
-            .count();
-    if tok_end == at + 1 {
-        return;
-    }
-    let style = row[at].clone();
-    let mk = |ch: char| {
-        let mut c = style.clone();
-        c.ch = ch;
-        c
-    };
-    // 칩 앞뒤 공백도 대시로 흡수(보더 연속성).
-    let lo = row[..at]
-        .iter()
-        .rposition(|c| c.ch != ' ' && c.ch != '\0')
-        .map_or(at, |i| i + 1);
-    let hi = row[tok_end..]
-        .iter()
-        .position(|c| c.ch != ' ' && c.ch != '\0')
-        .map_or(row.len(), |i| tok_end + i);
-    for i in lo..hi.min(row.len()) {
-        row[i] = mk('─');
-    }
-}
+/// codex 입력줄 배경을 학생색 쪽으로 끌어당기는 비율. 글자가 묻히지 않을 만큼만.
+const PROMPT_TINT: f32 = 0.22;
 
-/// pane transcript 의 세션 라벨(피커와 동일 규칙: custom-title > aiTitle > 첫
-/// user 프롬프트) — 파일 길이가 그대로면 캐시 반환(프레임당 stat 1회), 대화가
-/// 자라 길이가 변했을 때만 재파싱(latest_teammate_msg 와 같은 전략).
-fn pane_session_label(path: &std::path::Path) -> Option<String> {
-    type Cache = std::collections::HashMap<std::path::PathBuf, (u64, Option<String>)>;
-    static CACHE: std::sync::LazyLock<std::sync::Mutex<Cache>> =
-        std::sync::LazyLock::new(Default::default);
-    let len = std::fs::metadata(path).ok()?.len();
-    let mut map = CACHE.lock().ok()?;
-    if let Some((l, t)) = map.get(path) {
-        if *l == len {
-            return t.clone();
-        }
-    }
-    // `session_label_for` 가 아니라 `_summary_for` — /rename 이름은 claude 가
-    // 이 줄 오른쪽에 이미 그린다. 좌측은 "무슨 작업 중인지" 자리다.
-    let found = kasa_socket::sessions::session_summary_for(path);
-    map.insert(path.to_path_buf(), (len, found.clone()));
-    found
-}
-
-/// 입력박스 상단 보더의 왼쪽 '─' 연속 구간에 세션 제목을 인레이 — 스냅샷 전용,
-/// 원본 그리드 무손상(배너 타이틀 치환과 같은 원칙). 오른쪽 @이름칩은 왼쪽
-/// run 안에서만 쓰므로 건드리지 않는다. 스타일은 보더 셀 승계 —
-/// style_prompt_box 가 학생 accent 로 칠한 뒤 호출되어 칩·보더와 색 언어가
-/// 같다. 폭이 모자라면 '…' 말줄임, 대시 여유(양끝 대시+양옆 공백 4칸)조차
-/// 없는 극단 폭은 그냥 포기한다. 반환 = 쓴 구간 (row, c0, c1) — 호출측이
-/// 그 구간을 학생색 테두리로 감싼다(거노 스케치. 네이티브 /rename 아웃라인
-/// 스캔은 인레이 전 그리드를 봐서 이 구간을 모름).
-fn inlay_prompt_box_title(
-    rows: &mut [Vec<GridCell>],
-    title: &str,
-) -> Option<(usize, usize, usize)> {
-    use unicode_width::UnicodeWidthChar;
-    let range = prompt_box_rows(rows)?;
-    let tr = range.start - 1;
-    let row = &mut rows[tr];
-    let l0 = row.iter().position(|c| c.ch == '─')?;
-    let run = row[l0..].iter().take_while(|c| c.ch == '─').count();
-    let avail = run.checked_sub(4).filter(|a| *a >= 2)?;
-    let style = row[l0].clone();
-    let mk = |ch: char| {
-        let mut c = style.clone();
-        c.ch = ch;
-        c.bold = true; // 제목은 굵게(거노 3안) — 보더 대시와 무게 차등
-        c
-    };
-    let total: usize = title.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
-    let mut cells: Vec<GridCell> = Vec::with_capacity(avail.min(total));
-    for ch in title.chars() {
-        let w = ch.width().unwrap_or(1).max(1);
-        if total > avail && cells.len() + w + 1 > avail {
-            cells.push(mk('…'));
-            break;
-        }
-        if cells.len() + w > avail {
-            break;
-        }
-        cells.push(mk(ch));
-        // 와이드 글리프 다음 칸은 스페이서(composed 경로 실측은 ' ').
-        if w == 2 {
-            cells.push(mk(' '));
-        }
-    }
-    if cells.is_empty() {
-        return None;
-    }
-    // 좌측 정렬(거노 2026-07-27): 우측은 claude 네이티브 teammate 칩(`@이름`)
-    // 자리라 세션명을 그리로 보내면 서로 다른 내용이 한 구석에 몰려 헷갈린다
-    // (거노: "세션이름이랑 우측 이거 내용이 다른데"). 칩=우측 / 세션명=좌측 으로
-    // 자리를 나눈다. 사각 테두리를 뺀 뒤라 옛 ╭ 모서리 간섭은 재발하지 않는다.
-    let start = l0 + 1;
-    let mut w = start;
-    row[w] = mk(' ');
-    w += 1;
-    for cell in cells {
-        row[w] = cell;
-        w += 1;
-    }
-    row[w] = mk(' ');
-    Some((tr, start, w))
+/// `base` 를 `accent` 쪽으로 `amount` 만큼 섞는다. 셀 배경은 알파가 없어
+/// (`Color::Rgb` 뿐) 미리 합성해야 한다 — `theme::with_alpha` 를 못 쓰는 이유.
+fn tint_toward(base: [u8; 3], accent: [u8; 4], amount: f32) -> kasa_bridge::screen::Color {
+    let mix = |b: u8, a: u8| (b as f32 + (a as f32 - b as f32) * amount).round().clamp(0.0, 255.0) as u8;
+    kasa_bridge::screen::Color::Rgb(
+        mix(base[0], accent[0]),
+        mix(base[1], accent[1]),
+        mix(base[2], accent[2]),
+    )
 }
 
 /// verbose OFF 에서 접힌 팀메시지 행 탐지 — 단수 "› Message from @<이름>" 또는
@@ -7155,8 +8097,18 @@ fn teammate_sender_slug(name: &str) -> Option<&'static str> {
     if let Some(s) = theme::character_slug(name) {
         return Some(s);
     }
-    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
-    theme::slug_character(slug).and_then(theme::character_slug)
+    theme::slug_character(sender_roman_head(name)).and_then(theme::character_slug)
+}
+
+/// agent 이름에서 로스터가 아는 로마자 부분만. **첫 토막**이다.
+///
+/// 전에는 마지막 `-` 앞을 뗐는데(`aru-9c88` → `aru`), 2026-08-04 에 이름이
+/// `<슬러그>-p<pane 번호>-<접미>` 세 토막이 되면서 `himari-p2-1uc` → `himari-p2` 가
+/// 되어 로스터에 없는 이름으로 떨어졌다 — 그래서 남이 보낸 메시지가 학생색도 프사도
+/// 없이 떴다(거노 2026-08-11: "sendmessage 학생테마 안나오는거"). 첫 토막을 보면 두
+/// 형식이 다 걸린다.
+fn sender_roman_head(name: &str) -> &str {
+    name.split_once('-').map(|(a, _)| a).unwrap_or(name)
 }
 
 fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
@@ -7166,8 +8118,8 @@ fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
     if let Some(c) = theme::character_accent(name) {
         return c;
     }
-    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
-    if let Some(c) = theme::slug_character(slug).and_then(theme::character_accent) {
+    if let Some(c) = theme::slug_character(sender_roman_head(name)).and_then(theme::character_accent)
+    {
         return c;
     }
     match tag_color {
@@ -7188,15 +8140,92 @@ fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
 struct TeammateMsg {
     body: String,
     color: Option<String>,
+    /// 화면에 뜬 이름이 쓸모없을 때(`@peer`) 태그에서 되찾은 진짜 발신자.
+    /// 이게 있어야 학생색·프사·본문 조회가 이름으로 걸린다.
+    sender: Option<String>,
+    /// 보낸 세션의 claude session id. **이름이 학생을 안 알려 줄 때의 정답**이다 —
+    /// 명부의 이름은 세션 제목으로 덮이는 값이라(`mcp, skill사이드바`) 로스터에 없는
+    /// 글자가 오기 일쑤인데, 세션 id 로는 그 pane 을 찾아 배정 학생을 직접 물을 수
+    /// 있다. 제목을 뭐로 바꾸든 안 흔들린다.
+    peer_sid: Option<String>,
 }
 
-/// `<teammate-message …>본문</teammate-message>` 파싱 — teammate_id 가 sender 와
-/// 일치하는 첫 태그. 속성은 key="value" 나열(순서 무관).
+/// `uds:/tmp/cc-socks/27516.sock` → 그 세션이 명부에 등록한 이름.
+///
+/// claude 는 cross-session 메시지를 `@peer` 라는 고정 라벨로 그린다(발신자 이름이
+/// 명부에 멀쩡히 있어도 그렇다 — 2026-08-09 실측). 그 이름으로는 학생색도 프사도
+/// 본문도 못 찾으므로, 태그가 실어 준 소켓 경로의 pid 로 명부를 되짚는다.
+/// `from-name` 을 안 쓰는 이유는 그게 세션 이름이라 자동 제목에 덮이기 때문이다.
+fn socket_pid(from: &str) -> Option<&str> {
+    let pid = from.rsplit('/').next()?.strip_suffix(".sock")?;
+    (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(pid)
+}
+
+/// 소켓 경로 → 그 세션이 명부(`~/.claude/sessions/<pid>.json`)에 남긴 신원.
+///
+/// 둘을 같이 꺼내는 이유는 **이름만으로는 학생을 못 찾기 때문**이다. 명부의 `name`
+/// 은 세션 제목이라 자동 요약에 덮인다 — 실측(2026-08-11)으로 모모이 pane 은
+/// `mcp, skill사이드바` 였다. 거기엔 로스터가 아는 글자가 하나도 없어서 색도 프사도
+/// 못 걸린다. `sessionId` 는 그런 일이 없고, 그걸로 pane 을 되짚으면 배정 학생을
+/// 직접 물을 수 있다. 이름은 그래도 화면에 뭐라도 쓰기 위해 함께 들고 온다.
+fn peer_ident_from_socket(from: &str) -> Option<(Option<String>, Option<String>)> {
+    let pid = socket_pid(from)?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let path = home.join(".claude/sessions").join(format!("{pid}.json"));
+    Some(peer_ident_from_json(&std::fs::read_to_string(path).ok()?))
+}
+
+/// 명부 파일 한 장에서 (이름, 세션 id). 파일 읽기와 갈라 둔 것은 검증 때문이다 —
+/// 이 판정이 틀리면 남의 메시지가 조용히 기본 표시로 떨어질 뿐 아무 오류도 안 난다.
+fn peer_ident_from_json(s: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return (None, None);
+    };
+    let pick = |k: &str| -> Option<String> {
+        let s = v.get(k)?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    (pick("name"), pick("sessionId"))
+}
+
+/// pane 에 도착한 남의 메시지 본문. 두 형식을 다 받는다.
+///
+/// 트리플을 걷어내기 전에는 팀 인박스만 있어 `<teammate-message teammate_id=… color=…>`
+/// 하나였는데, cross-session 으로 옮기면서 `<cross-session-message from=… from-name=…>`
+/// 이 새로 생겼다. 후자를 모르면 남의 메시지가 학생 테마 없이 claude 기본 표시
+/// (`Message from @peer`)로만 뜬다 — 2026-08-09 회귀.
+///
+/// ⚠️ cross-session 태그엔 **`color` 가 없다.** 발신자 학생색은 여기서 못 얻으므로
+/// 색 없이 돌려주고, 표시층이 이름으로 찾거나 기본색을 쓴다.
 fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
+    extract_tagged_msg(text, sender, "<teammate-message", "teammate_id", "</teammate-message>")
+        .or_else(|| {
+            extract_tagged_msg(
+                text,
+                sender,
+                "<cross-session-message",
+                "from-name",
+                "</cross-session-message>",
+            )
+        })
+}
+
+/// claude 가 cross-session 발신자를 부르는 고정 라벨. 이 이름으로는 아무것도 못 찾으므로
+/// 태그를 이름 대조 없이 잡고 소켓 pid 로 진짜 발신자를 되찾는 신호로 쓴다.
+const PEER_LABEL: &str = "peer";
+
+/// 한 태그 형식에 대한 파싱 — 속성은 key="value" 나열(순서 무관).
+fn extract_tagged_msg(
+    text: &str,
+    sender: &str,
+    open: &str,
+    id_attr: &str,
+    close_tag: &str,
+) -> Option<TeammateMsg> {
     let mut rest = text;
     loop {
-        let s = rest.find("<teammate-message")?;
-        let after = &rest[s + "<teammate-message".len()..];
+        let s = rest.find(open)?;
+        let after = &rest[s + open.len()..];
         let close = after.find('>')?;
         let attrs = &after[..close];
         let tail = &after[close + 1..];
@@ -7206,11 +8235,21 @@ fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
             let e = attrs[a..].find('"')?;
             Some(attrs[a..a + e].to_string())
         };
-        if attr("teammate_id").as_deref() == Some(sender) {
-            let end = tail.find("</teammate-message>").unwrap_or(tail.len());
+        // `@peer` 로 뜬 줄은 이름 대조가 무의미하다 — 그 라벨은 발신자와 무관한
+        // 고정값이라 어떤 태그와도 안 맞는다. 그래서 대조를 건너뛰고 최근 것을 잡되,
+        // 소켓 pid 로 진짜 신원을 되찾아 함께 돌려준다(못 찾으면 라벨 그대로).
+        let peer_probe = sender == PEER_LABEL && id_attr == "from-name";
+        if peer_probe || attr(id_attr).as_deref() == Some(sender) {
+            let end = tail.find(close_tag).unwrap_or(tail.len());
+            let ident = peer_probe
+                .then(|| attr("from"))
+                .flatten()
+                .and_then(|f| peer_ident_from_socket(&f));
             return Some(TeammateMsg {
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
+                sender: ident.as_ref().and_then(|(n, _)| n.clone()),
+                peer_sid: ident.and_then(|(_, s)| s),
             });
         }
         rest = tail;
@@ -7572,21 +8611,54 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
             }
         };
     }
-    Some(match slug {
-        "arona" => student!("arona"),
-        "prana" => student!("prana"),
-        "midori" => student!("midori"),
-        "momoi" => student!("momoi"),
-        "yuzu" => student!("yuzu"),
-        "arisu" => student!("arisu"),
-        "yuuka" => student!("yuuka"),
-        "shiroko" => student!("shiroko"),
-        "hoshino" => student!("hoshino"),
-        "koharu" => student!("koharu"),
-        "himari" => student!("himari"),
-        "aru" => student!("aru"),
-        _ => return None,
-    })
+    // 슬러그 하나가 18개 프레임(`include_bytes!`)으로 펼쳐지므로 arm 을 손으로 쓰면
+    // 로스터가 늘 때마다 79줄이 된다. 목록만 두고 arm 은 매크로가 만든다.
+    macro_rules! students {
+        ($($n:literal),* $(,)?) => {
+            match slug {
+                $($n => student!($n),)*
+                _ => return None,
+            }
+        };
+    }
+    // ⚠️`collab-hooks/characters.json` 로스터와 **같은 집합이어야 한다**. 빠진 슬러그는
+    // 오류가 아니라 「그림 없는 학생」이 되고, 그러면 배너·스피너 자리가 빈 구멍으로
+    // 남는다(`student_has_sprite` 주석 참고). 실제로 에셋을 67명분 만들어 놓고 이
+    // 목록에 안 넣어 앱에서는 12명만 보였다(2026-08-11).
+    Some(students![
+        "arona", "prana", "akane", "akari", "ako", "arisu", "aru", "asuna",
+        "atsuko", "ayane", "azusa", "chihiro", "chinatsu", "eimi", "fubuki", "fuuka",
+        "hanako", "hare", "haruka", "haruna", "hasumi", "hibiki", "hifumi", "himari",
+        "hina", "hinata", "hiyori", "hoshino", "ichika", "iori", "iroha", "izuna",
+        "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei", "kirino",
+        "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa",
+        "neru", "niya", "noa", "nonomi", "rio", "sakurako", "saori", "satsuki",
+        "seia", "sena", "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki",
+        "tsukuyo", "tsurugi", "utaha", "wakamo", "yukari", "yuuka", "yuzu",
+    ])
+}
+
+/// 이 학생 그림이 있나 — **슬롯을 세우기 전에** 물어야 한다.
+///
+/// ⚠️그리기 직전에 물으면 늦다. 호출부는 스프라이트를 얹을 자리(Clawd 배너·스피너
+/// 글리프)를 **먼저 `GridCell::blank()` 으로 지우고** 나서 슬롯을 세운다. 그림이
+/// 없으면 `paint_student_overlays` 가 조용히 아무것도 안 올리고 없는 키로 그리기를
+/// 부르는데, 그건 에러도 안 나고 아무것도 안 그린다 — 결과는 「폴백」이 아니라
+/// **원래 있던 것까지 지워진 빈 구멍**이다. 로스터가 12→79명이 되자 그림 없는
+/// 67명에게서 배너와 스피너가 통째로 사라졌다(2026-08-11).
+///
+/// 싸다: 번들은 `include_bytes` 매치라 디코딩이 없고, override 는 첫 프레임 파일
+/// 존재만 본다. 디코딩까지 되는지는 안 본다 — 그건 번들 테스트가 잡는 문제고,
+/// 여기서 매 프레임 디코딩할 수는 없다.
+pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
+    if student_sprite_png(slug, motion).is_some() {
+        return true;
+    }
+    let Some(dir) = crate::socket::students_dir() else { return false };
+    let first =
+        if motion == "idle" { format!("{slug}-0.png") } else { format!("{slug}-{motion}-0.png") };
+    dir.join(first).is_file()
 }
 
 /// 모션 프레임들을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 전 프레임
@@ -7642,7 +8714,7 @@ fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, 
 
 /// 캐릭터 슬러그 → statusline 프사 PNG(웹뷰 bust 를 96×96 contain-리사이즈한
 /// 정사각 상반신, 컴파일타임 내장).
-fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
+pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     Some(match slug {
         "arona" => include_bytes!("../assets/students/arona-profile.png"),
         "prana" => include_bytes!("../assets/students/prana-profile.png"),
@@ -7660,16 +8732,6 @@ fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     })
 }
 
-/// 프사 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
-/// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
-/// 프사 hover 확대 팝업의 좌상단 위치 — 프사 가로 중심 위로 띄우되 창 좌우/상단
-/// 경계 안으로 클램프한다. statusline 프사는 창 하단이라 팝업을 위로(음의 y) 낸다.
-/// 좁은 창(팝업 변보다 폭이 작을 때)에서도 x 가 6px 밑으로 안 내려가게 한다.
-fn face_popup_pos(fx: f32, fw: f32, fy: f32, pop: f32, win_w: f32, title_h: f32) -> (f32, f32) {
-    let px = (fx + fw / 2.0 - pop / 2.0).clamp(6.0, (win_w - pop - 6.0).max(6.0));
-    let py = (fy - pop - 8.0).max(title_h + 6.0);
-    (px, py)
-}
 
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     if let Some(r) = user_asset_rgba(&format!("{slug}-profile.png")) {
@@ -7743,6 +8805,234 @@ pub(crate) fn draw_student_face(
             return false;
         };
         g.upload_image(&key, &rgba, w, h);
+    }
+    g.queue_image_above(&key, x, y, size, size);
+    true
+}
+
+/// 0..1 을 오가는 부드러운 호흡 — `period` 초에 한 번 왕복한다.
+///
+/// 켰다 끄는 깜빡임과 갈리는 건 **가장자리 시야**에서다. 밝기가 뚝 끊기면 눈이
+/// 그쪽으로 끌려가 하던 일을 놓치는데, 이어지면 있다는 것만 알고 지나칠 수 있다.
+fn breathe(t: f32, period: f32) -> f32 {
+    0.5 - 0.5 * (std::f32::consts::TAU * t / period.max(0.001)).cos()
+}
+
+/// 켜짐/꺼짐이 또렷한 깜빡임. `breathe` 와 **역할이 갈린다** — 숨쉬기는 넓은 판을
+/// 은근히 밝혀 "있다"를 알리는 것이고, 이건 작은 동그라미 하나를 껐다 켜서 "지금
+/// 보라"를 말한다(2026-08-11 지시: "숨쉬기말고 동그라미깜빡이게").
+///
+/// 숨쉬기를 그 동그라미에 그대로 쓰면 안 되는 이유가 있다. 밝기가 이어지는 신호는
+/// 칠하는 넓이가 클 때만 눈에 걸리는데, 6px 점에서는 진폭이 그대로여도 보이는 총량이
+/// 1/100 이라 그냥 흐린 점으로 읽힌다 — 카드 전체를 숨쉬게 만들었던 게 애초에 그
+/// 때문이었다.
+///
+/// 완전한 사각파는 아니다. 가장자리 8% 를 램프로 밀어 두는 건 즉각 점멸이 시야
+/// 가장자리에서 지나치게 튀어서고(그게 예전 커서 블링크 동기 방식을 걷어낸 이유),
+/// 그래도 중간의 켜짐·꺼짐 구간이 평평해 "깜빡인다"로 읽힌다.
+/// 깜빡이는 상태 동그라미 — 사이드바에서 "내 손이 필요하다"를 말하는 유일한 모양.
+///
+/// 꺼짐 구간에도 알파를 0 까지 내리지 않는다. 점이 통째로 사라졌다 나타나면 그
+/// 자리에 무언가 있다는 것 자체를 매번 다시 찾게 되고, 여러 방이 동시에 깜빡일 때
+/// 목록이 들썩여 보인다. 자국을 남기면 "있다"는 계속 읽히고 깜빡임은 "봐라"만 한다.
+fn blink_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, size: f32, col: [u8; 4], period: f32) {
+    let mut c = col;
+    c[3] = (70.0 + 185.0 * blink(anim_phase_secs(), period)) as u8;
+    circle_rect(g, x, y, size, c);
+}
+
+/// 지금 이 순간 깜빡임이 어디쯤인가(0=바닥, 1=꼭대기). 헤드리스 캡처가 밝은 쪽을
+/// 골라 찍는 데 쓴다 — 위상에 따라 그림이 달라지면 "글로우가 안 나온다"가 된다.
+pub(crate) fn blink_phase(period: f32) -> f32 {
+    blink(anim_phase_secs(), period)
+}
+
+fn blink(t: f32, period: f32) -> f32 {
+    const EDGE: f32 = 0.08;
+    let x = (t / period.max(0.001)).rem_euclid(1.0);
+    if x < EDGE {
+        x / EDGE
+    } else if x < 0.5 {
+        1.0
+    } else if x < 0.5 + EDGE {
+        1.0 - (x - 0.5) / EDGE
+    } else {
+        0.0
+    }
+}
+
+/// 프로세스 시작 기준 단조증가 초 — 시간으로 도는 그림(로딩바 스윕, idle gif)이
+/// 전부 같은 시계를 본다. 펌프가 도는 동안 매 프레임 갱신된다.
+pub(crate) fn anim_phase_secs() -> f32 {
+    static EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    EPOCH.elapsed().as_secs_f32()
+}
+
+fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
+    Some(match slug {
+        "arona" => include_bytes!("../assets/students/arona-idle.gif"),
+        "prana" => include_bytes!("../assets/students/prana-idle.gif"),
+        "midori" => include_bytes!("../assets/students/midori-idle.gif"),
+        "momoi" => include_bytes!("../assets/students/momoi-idle.gif"),
+        "yuzu" => include_bytes!("../assets/students/yuzu-idle.gif"),
+        "arisu" => include_bytes!("../assets/students/arisu-idle.gif"),
+        "yuuka" => include_bytes!("../assets/students/yuuka-idle.gif"),
+        "shiroko" => include_bytes!("../assets/students/shiroko-idle.gif"),
+        "hoshino" => include_bytes!("../assets/students/hoshino-idle.gif"),
+        "koharu" => include_bytes!("../assets/students/koharu-idle.gif"),
+        "himari" => include_bytes!("../assets/students/himari-idle.gif"),
+        "aru" => include_bytes!("../assets/students/aru-idle.gif"),
+        _ => return None,
+    })
+}
+
+/// 투명하지 않은 픽셀이 차지하는 사각 `(x, y, w, h)`. 빈 그림이면 전체.
+fn alpha_bbox(img: &image::RgbaImage) -> (u32, u32, u32, u32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p.0[3] > 8 {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 == u32::MAX {
+        return (0, 0, img.width(), img.height());
+    }
+    (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+}
+
+/// 한 캐릭터의 idle 애니메이션 — 프레임 RGBA 와 각 프레임이 머무는 ms.
+struct IdleAnim {
+    frames: Vec<(Vec<u8>, u32, u32)>,
+    delays_ms: Vec<u32>,
+    total_ms: u32,
+}
+
+/// idle.gif → 프레임 배열. 캐릭터당 **한 번만** 디코딩해 캐시한다.
+///
+/// 캔버스는 256² 인데 캐릭터는 그 안에 94×208 짜리 전신 도트로 서 있다. 그걸
+/// 통째로 16px 칸에 넣으면 캐릭터 폭이 6px 이 되어 누구인지 못 알아본다 — 그래서
+/// 알파 bbox 를 잡아 **어깨 위 정사각**만 도려낸다. 정적 프사가 이미 얼굴에 맞춰
+/// 잘린 에셋인 것과 같은 이유고, 덕분에 두 경로가 같은 크기로 읽힌다.
+///
+/// 픽셀 아트라 축소는 Nearest 로 — 보간을 쓰면 도트가 뭉개져 흐려진다.
+fn student_idle_anim(slug: &str) -> Option<std::sync::Arc<IdleAnim>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<Arc<IdleAnim>>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(slug).cloned()) {
+        return hit;
+    }
+    let built = (|| {
+        use image::AnimationDecoder;
+        let bytes = student_idle_gif(slug)?;
+        let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+        let mut frames = Vec::new();
+        let mut delays_ms = Vec::new();
+        let mut crop: Option<(u32, u32, u32)> = None;
+        for f in dec.into_frames().collect_frames().ok()? {
+            let (num, den) = f.delay().numer_denom_ms();
+            // 0ms 프레임은 브라우저 관행대로 100ms 로 — 그대로 두면 루프 길이가
+            // 0 이 되어 나눗셈이 터진다.
+            let ms = if den == 0 { 100 } else { (num / den.max(1)).max(20) };
+            let mut buf = f.into_buffer();
+            // 자를 자리는 **첫 프레임에서 한 번만** 잡는다. 프레임마다 다시 재면
+            // 팔이 오르내릴 때 사각이 따라 흔들려 얼굴이 칸 안에서 덜컹거린다.
+            let (cx, cy, cs) = *crop.get_or_insert_with(|| {
+                let (bx, by, bw, _bh) = alpha_bbox(&buf);
+                (bx, by, bw.max(1))
+            });
+            let cs = cs.min(buf.width().saturating_sub(cx)).min(buf.height().saturating_sub(cy));
+            if cs == 0 {
+                return None;
+            }
+            let face = image::imageops::crop(&mut buf, cx, cy, cs, cs).to_image();
+            // 쓰는 자리가 16~22px 이라 32² 면 충분하고, 프레임 수만큼 곱해도 가볍다.
+            const OUT: u32 = 32;
+            let small =
+                image::imageops::resize(&face, OUT, OUT, image::imageops::FilterType::Nearest);
+            frames.push((small.into_raw(), OUT, OUT));
+            delays_ms.push(ms);
+        }
+        (!frames.is_empty()).then(|| {
+            let total_ms = delays_ms.iter().sum::<u32>().max(1);
+            Arc::new(IdleAnim { frames, delays_ms, total_ms })
+        })
+    })();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(slug.to_string(), built.clone());
+    }
+    built
+}
+
+/// 캐릭터 자리에 **움직이는** 얼굴을 그린다 — `phase` 는 앱이 켜진 뒤 흐른 초.
+///
+/// gif 가 없는 캐릭터는 정지 프사로 되돌아간다(`draw_student_face`). 프레임마다
+/// 텍스처 키가 갈리므로 업로드는 프레임당 한 번뿐이고, 이후로는 큐잉만 한다.
+pub(crate) fn draw_student_face_anim(
+    g: &mut gpu::GpuRenderer,
+    name: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    phase: f32,
+) -> bool {
+    let Some(slug) = theme::character_slug(name) else {
+        return false;
+    };
+    let Some(anim) = student_idle_anim(slug) else {
+        return draw_student_face(g, name, x, y, size);
+    };
+    let mut at = ((phase * 1000.0) as u32) % anim.total_ms;
+    let mut idx = 0;
+    for (i, d) in anim.delays_ms.iter().enumerate() {
+        if at < *d {
+            idx = i;
+            break;
+        }
+        at -= d;
+    }
+    let key = format!("student:{slug}:idle:{idx}");
+    if !g.has_image(&key) {
+        let (rgba, w, h) = &anim.frames[idx];
+        g.upload_image(&key, rgba, *w, *h);
+    }
+    g.queue_image_above(&key, x, y, size, size);
+    true
+}
+
+/// 사이드바 줄에서 **걷는** 학생. 도는 pane 임을 그림 자체로 말한다.
+///
+/// `draw_student_face_anim` 과 그리는 것이 다르다 — 저쪽은 GIF 를 얼굴만 잘라
+/// 쓰는 정지에 가까운 배너고, 이건 pane 안 스피너 자리에 쓰는 것과 같은 도트
+/// 스프라이트다(같은 프레임·같은 캐시 키라 텍스처를 두 번 올리지 않는다).
+///
+/// 스프라이트가 없는 캐릭터·슬러그가 안 잡히는 이름이면 `false` 를 돌려준다 —
+/// 호출자가 얼굴로 되돌아갈 수 있어야, 걷기 에셋이 빠진 학생의 줄이 빈칸이 되지
+/// 않는다.
+pub(crate) fn draw_student_walk(
+    g: &mut gpu::GpuRenderer,
+    name: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    phase: f32,
+) -> bool {
+    let Some(slug) = theme::character_slug(name) else {
+        return false;
+    };
+    let idx = ((phase * 1000.0 / STUDENT_WALK_FRAME_MS) as usize) % STUDENT_WALK_FRAMES;
+    let key = format!("student:{slug}:walk{idx}");
+    if !g.has_image(&key) {
+        let Some(frames) = student_sprite_frames(slug, "walk") else {
+            return false;
+        };
+        for (i, (rgba, w, h)) in frames.iter().enumerate() {
+            g.upload_image(&format!("student:{slug}:walk{i}"), rgba, *w, *h);
+        }
     }
     g.queue_image_above(&key, x, y, size, size);
     true
@@ -8088,7 +9378,54 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
     None
 }
 
-fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
+/// agy 시작 로고 자리(왼쪽 위 칸, 스크롤로 잘렸으면 top 이 음수).
+///
+/// 아래로 갈수록 한 칸씩 넓어지는 5행 아트라, 가장 넓고 특징적인 **맨 아랫줄**로
+/// 자리를 잡고 위 네 줄은 화면에 남아 있는 것만 대조한다 — Clawd 쪽과 같은 규약이다.
+pub(crate) fn find_agy_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
+    // (맨 아랫줄 기준 들여쓰기, 글리프). 배열 순서는 로고 위→아래.
+    const SHAPE: [(usize, &str); AGY_ROWS] = [
+        (4, "▄▀▀▄"),
+        (3, "▀▀▀▀▀▀"),
+        (2, "▀▀▀▀▀▀▀▀"),
+        (1, "▄▀▀    ▀▀▄"),
+        (0, "▄▀▀      ▀▀▄"),
+    ];
+    let hit = |row: &[GridCell], at: usize, pat: &str| {
+        at + pat.chars().count() <= row.len()
+            && pat.chars().enumerate().all(|(i, p)| row[at + i].ch == p)
+    };
+    let mut out = Vec::new();
+    for r in 0..rows.len() {
+        let mut c = 0usize;
+        while c + AGY_COLS <= rows[r].len() {
+            if hit(&rows[r], c, SHAPE[AGY_ROWS - 1].1) {
+                let top = r as isize - (AGY_ROWS as isize - 1);
+                let ok = SHAPE[..AGY_ROWS - 1].iter().enumerate().all(|(i, &(ind, pat))| {
+                    let gr = top + i as isize;
+                    gr < 0 || hit(&rows[gr as usize], c + ind, pat)
+                });
+                if ok {
+                    out.push((top, c));
+                    c += AGY_COLS;
+                    continue;
+                }
+            }
+            c += 1;
+        }
+    }
+    out
+}
+
+/// 로고 칸에 **Clawd 칸 비율(9x3)을 유지한 채** 최대로 맞춘 도트 상자.
+/// Clawd 자신에겐 항등이라 기존 배치는 한 픽셀도 안 움직인다.
+fn fit_sprite_box(cols: usize, rows: usize, cw: f32, ch: f32) -> (f32, f32) {
+    let (aw, ah) = (CLAWD_COLS as f32 * cw, CLAWD_ROWS as f32 * ch);
+    let s = ((cols as f32 * cw) / aw).min((rows as f32 * ch) / ah);
+    (aw * s, ah * s)
+}
+
+pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
     const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
     // 발 행: 배너 좌단 기준 2칸 들여쓰기 `▘▘ ▝▝`, 양옆은 공백(2.1.212 실측).
@@ -8162,23 +9499,26 @@ fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
 /// 갈아끼우고, 뒤따르는 버전 텍스트를 이름 바로 뒤로 당긴다. 당겨서 남는 칸은
 /// blank — 연속 공백 2칸 너머는 박스형 웰컴 변형의 오른쪽 테두리 영역이라
 /// 건드리지 않는다(테두리 열이 밀리면 박스가 깨진다).
+#[allow(clippy::too_many_arguments)]
 fn replace_banner_title(
     rows: &mut [Vec<GridCell>],
     br: isize,
     bc: usize,
+    lcols: usize,
+    lrows: usize,
+    title: &[char],
     name: &str,
     accent: Option<[u8; 4]>,
 ) {
-    const TITLE: [char; 11] = ['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
     let r0 = br.max(0) as usize;
-    let r1 = (br + CLAWD_ROWS as isize).clamp(0, rows.len() as isize) as usize;
+    let r1 = (br + lrows as isize).clamp(0, rows.len() as isize) as usize;
     for row in rows[r0..r1].iter_mut() {
-        let start = bc + CLAWD_COLS;
+        let start = bc + lcols;
         if start >= row.len() {
             continue;
         }
-        let Some(tc) = (start..row.len().saturating_sub(TITLE.len() - 1))
-            .find(|&c| TITLE.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
+        let Some(tc) = (start..row.len().saturating_sub(title.len() - 1))
+            .find(|&c| title.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
         else {
             continue;
         };
@@ -8188,7 +9528,7 @@ fn replace_banner_title(
         if let Some([r, g, b, _]) = accent {
             style.fg = kasa_bridge::screen::Color::Rgb(r, g, b);
         }
-        let mut repl: Vec<GridCell> = Vec::with_capacity(TITLE.len());
+        let mut repl: Vec<GridCell> = Vec::with_capacity(title.len());
         for ch in name.chars() {
             let mut cell = style.clone();
             cell.ch = ch;
@@ -8198,10 +9538,10 @@ fn replace_banner_title(
             sp.ch = ' ';
             repl.push(sp);
         }
-        if repl.len() > TITLE.len() {
+        if repl.len() > title.len() {
             return; // 로스터 이름은 최대 3자(6칸) — 넘치면 원문 유지
         }
-        let mut end = tc + TITLE.len();
+        let mut end = tc + title.len();
         let mut probe = end;
         while probe < row.len() {
             if matches!(row[probe].ch, ' ' | '\0') {
@@ -8213,7 +9553,7 @@ fn replace_banner_title(
             }
             probe += 1;
         }
-        let tail: Vec<GridCell> = row[tc + TITLE.len()..end].to_vec();
+        let tail: Vec<GridCell> = row[tc + title.len()..end].to_vec();
         let mut w = tc;
         for cell in repl.into_iter().chain(tail) {
             row[w] = cell;
@@ -8418,11 +9758,226 @@ fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
         && (squashed.contains("Esc to cancel") || squashed.contains("Enter to select"))
 }
 
+/// 한 창이 이번 프레임에 얹을 학생 스프라이트 자리들.
+///
+/// 셀을 훑어 모으는 쪽(메인 그리드 / 별도창)과 그리는 쪽을 가르는 경계다 —
+/// 좌표계는 창마다 다르지만 **이미지 키와 업로드 규칙은 한 벌**이어야 한다.
+/// 두 벌이 되면 한쪽만 프레임을 올리거나 캐시 키가 갈려, 같은 학생이 창마다
+/// 다른 그림으로 뜬다.
+#[derive(Default)]
+pub(crate) struct StudentOverlays {
+    /// Clawd 배너 자리 — `(slug, rect, (클립 위, 클립 아래))`. 스크롤로 잘리게 클립.
+    pub(crate) banner: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
+    /// working 스피너 자리 — 제자리 걸음(walk).
+    pub(crate) spinner: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 승인 대기 — 한 팔 인사(wave).
+    pub(crate) waiting: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 입력박스 위 standing — `(slug, motion, rect)`.
+    pub(crate) standing: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
+    /// statusline 프사(bust) 자리.
+    pub(crate) profile: Vec<(&'static str, (f32, f32, f32, f32))>,
+}
+
+impl StudentOverlays {
+    /// 다음 프레임을 스스로 불러야 하나 — 움직이는 스프라이트가 하나라도 있으면.
+    /// 프사만 있는 창은 정적 1프레임이라 깨울 필요가 없다.
+    pub(crate) fn animating(&self) -> bool {
+        !self.banner.is_empty()
+            || !self.spinner.is_empty()
+            || !self.waiting.is_empty()
+            || !self.standing.is_empty()
+    }
+}
+
+/// 모은 자리에 스프라이트를 얹는다. `anim_ms` 는 창이 공유하는 애니 시계
+/// (`version_anim_start` 경과). 프레임 업로드는 캐릭터×모션당 1회고, 창마다
+/// GpuRenderer 가 달라 창별로 한 번씩 올라간다(같은 키, 같은 픽셀).
+///
+/// 전부 `queue_image_above` — 셀 **위** 패스다. 아래 패스로 내리면 statusline
+/// 테두리 글리프가 얼굴을 가로지르고 blank 처리한 자리에 셀 배경이 덮인다.
+pub(crate) fn paint_student_overlays(
+    g: &mut gpu::GpuRenderer,
+    slots: &StudentOverlays,
+    anim_ms: u64,
+) {
+    let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
+    let walk_idx = (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
+    let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
+        let pfx = sprite_key_prefix(motion);
+        if !g.has_image(&format!("student:{slug}:{pfx}0")) {
+            if let Some(frames) = student_sprite_frames(slug, motion) {
+                for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                    g.upload_image(&format!("student:{slug}:{pfx}{i}"), rgba, *w, *h);
+                }
+            }
+        }
+    };
+    for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &slots.banner {
+        ensure_anim(g, slug, "idle");
+        g.queue_image_clipped(
+            &format!("student:{slug}:f{anim_idx}"),
+            *bx, *by, *bw, *bh, *clip_y0, *clip_y1,
+        );
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.spinner {
+        ensure_anim(g, slug, "walk");
+        g.queue_image_above(&format!("student:{slug}:walk{walk_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.waiting {
+        ensure_anim(g, slug, "wave");
+        g.queue_image_above(&format!("student:{slug}:wave{anim_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, motion, (bx, by, bw, bh)) in &slots.standing {
+        ensure_anim(g, slug, motion);
+        let pfx = sprite_key_prefix(motion);
+        g.queue_image_above(&format!("student:{slug}:{pfx}{anim_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.profile {
+        let key = format!("student:{slug}:profile");
+        if !g.has_image(&key) {
+            if let Some((rgba, w, h)) = student_profile_rgba(slug) {
+                g.upload_image(&key, &rgba, w, h);
+            }
+        }
+        g.queue_image_above(&key, *bx, *by, *bw, *bh);
+    }
+}
+
+
+
+/// statusline 프사 자리표시자(U+FFFC 연속 셀) 위치 — `(행, 시작열, 칸수)`.
+///
+/// statusline.py 가 학생 이름 대신 이 문자를 내보낸다. **아래→위 스캔**인 것이
+/// 중요하다: statusline 은 늘 화면 바닥 쪽인데, 대화 출력에 U+FFFC 원문이 섞이면
+/// (statusline 디버그 출력 등) 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다
+/// (실사고). 메인 창과 별도창이 같은 자리를 찍도록 한 곳에 둔다.
+pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
+    rows.iter().enumerate().rev().find_map(|(r, row)| {
+        row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
+            let n = row[c0..].iter().take_while(|c| c.ch == '\u{fffc}').count();
+            (r, c0, n)
+        })
+    })
+}
+
+/// 입력박스 위 standing 학생의 앵커 — `(앵커 행, 학생 왼쪽 열)`.
+///
+/// `face_row` 는 statusline 행. 그 바로 위가 아래 테두리(순수 '─')면, 거기서
+/// 위로 첫 rule 행이 입력박스 윗 테두리다 — ❯ 영역이 여러 줄로 자라도 스캔이라
+/// 따라간다. 학생은 그 윗 테두리 줄에 발이 닿게 서고, 칩(effort·context 경고)이
+/// 떠 있으면 그 왼쪽으로 비켜선다.
+///
+/// 윗 테두리는 `/rename` 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트 섬을
+/// 인정한다(max_label 24) — 순수 rule 만 보면 이름 지은 세션에서 standing 이
+/// 통째로 사라진다(거노 실사고). 아래 테두리는 항상 순수 '─'(0).
+/// agy 입력창 위 standing 앵커.
+///
+/// agy 화면 아래는 `[윗보더][> 입력][아래보더][? for shortcuts …]` 로, claude 와
+/// 같은 모양이다. 그래서 앵커 계산은 `find_standing_anchor` 를 그대로 쓰고, 그것이
+/// 요구하는 「statusline 행」만 여기서 찾아 준다 — 맨 아래 보더 바로 다음 행.
+///
+/// 마커로 ASCII `>` 를 인정하는 것은 **여기뿐**이다. 공용 `prompt_box` 는 인용문·diff
+/// 를 입력창으로 오인한 전례가 있어 `>` 를 뺐고, 그 판정은 건드리지 않는다.
+fn find_agy_standing_anchor(rows: &[Vec<GridCell>], cols: usize) -> Option<(usize, f32)> {
+    let border = |r: &Vec<GridCell>| {
+        let dash = r.iter().filter(|c| c.ch == '─').count();
+        let label = r.iter().filter(|c| !matches!(c.ch, '─' | ' ' | '\0')).count();
+        dash >= 8 && label == 0
+    };
+    let bottom = rows.iter().rposition(border)?;
+    let top = rows[..bottom].iter().rposition(border)?;
+    let marked = rows[top + 1..bottom].iter().any(|r| {
+        r.iter().find(|c| !matches!(c.ch, ' ' | '\0')).is_some_and(|c| c.ch == '>')
+    });
+    if !marked || bottom + 1 >= rows.len() {
+        return None;
+    }
+    find_standing_anchor(rows, bottom + 1, cols)
+}
+
+pub(crate) fn find_standing_anchor(
+    rows: &[Vec<GridCell>],
+    face_row: usize,
+    cols: usize,
+) -> Option<(usize, f32)> {
+    // 다수 판정을 **격자 전체 폭이 아니라 내용 폭**(마지막 non-blank 까지)으로 한다.
+    // 전체 폭으로 재면 pane 이 claude 의 입력박스보다 넓을 때 테두리가 소수가 되어
+    // `is_rule` 이 거짓이 되고, standing 이 통째로 사라진다 — 155칸 pane 에 60칸
+    // 테두리로 실측(dash=60/155 → anchor=None). 내용 폭 기준이면 박스가 pane 보다
+    // 좁아도 성립한다. 대신 짧은 구분선 조각을 테두리로 오인하지 않게 최소 길이를 둔다.
+    let is_rule = |row: &[GridCell], max_label: usize| {
+        let mut dashes = 0usize;
+        let mut label = 0usize;
+        let mut content_w = 0usize;
+        for (i, c) in row.iter().enumerate() {
+            match c.ch {
+                '─' => {
+                    dashes += 1;
+                    content_w = i + 1;
+                }
+                ' ' | '\0' => {}
+                _ => {
+                    label += 1;
+                    content_w = i + 1;
+                    if label > max_label {
+                        return false;
+                    }
+                }
+            }
+        }
+        dashes >= 8 && dashes > content_w / 2
+    };
+    if face_row < 4 || !is_rule(&rows[face_row - 1], 0) {
+        return None;
+    }
+    let tr = (face_row.saturating_sub(16)..face_row - 1)
+        .rev()
+        .find(|&r| is_rule(&rows[r], 24))
+        .filter(|&tr| tr >= 1)?;
+    let anchor = tr - 1;
+    Some((anchor, stand_left_col(rows, anchor, cols)?))
+}
+
+/// 앵커 행이 정해진 뒤의 가로 자리 — 그 행에 이미 뭐가 떠 있으면(effort 칩·
+/// context 경고) 그 왼쪽으로 비켜선다. 하네스마다 세로 앵커를 찾는 법은 다르지만
+/// 가로 규칙은 같아서 여기 한 곳에만 둔다.
+fn stand_left_col(rows: &[Vec<GridCell>], anchor: usize, cols: usize) -> Option<f32> {
+    let first = rows[anchor].iter().position(|c| !matches!(c.ch, ' ' | '\0'));
+    let right_c = match first {
+        Some(f) => f as f32 - 1.5,
+        None => cols as f32 - 1.0,
+    };
+    let left_c = right_c - STAND_CELLS;
+    (left_c > 2.0).then_some(left_c)
+}
+
+/// 테두리 없는 입력창(`PromptBox::Filled`, codex) 위 standing 앵커.
+///
+/// claude 는 statusline 자리표시자(U+FFFC)에서 아래 테두리를 짚고 위로 스캔하지만
+/// **codex 엔 자리표시자를 심을 데가 없다** — `[tui] status_line` 은 정해진 세그먼트
+/// 이름 배열이고 모르는 항목은 `⚠ Ignored invalid status line item` 으로 버려진다
+/// (0.146.0 실측). 커맨드 훅도 없다. 대신 입력행 자체는 `prompt_box` 가 배경 채움으로
+/// 이미 정확히 집어내므로 그 바로 윗행을 앵커로 쓴다 — 테두리 스캔이 통째로 없어
+/// claude 쪽이 밟았던 함정(dash 비율 오판)에서 자유롭다.
+pub(crate) fn find_filled_standing_anchor(
+    rows: &[Vec<GridCell>],
+    cols: usize,
+) -> Option<(usize, f32)> {
+    let PromptBox::Filled { rows: r } = prompt_box(rows)? else {
+        return None;
+    };
+    let anchor = r.start.checked_sub(1)?;
+    Some((anchor, stand_left_col(rows, anchor, cols)?))
+}
+
+/// standing 학생이 차지하는 가로 칸수 — 앵커 계산과 그리기가 같은 값을 써야 한다.
+pub(crate) const STAND_CELLS: f32 = 4.0;
+
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
 /// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
 /// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
 /// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
-fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
+pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     let last = rows
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
@@ -8507,7 +10062,13 @@ fn approval_anchor(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
 /// only holds for the CJK/ASCII mix it was tuned against — an all-ASCII title
 /// measures far narrower than its column count implies, and an all-Hangul one
 /// wider. Where a label sits next to another element, measure instead of guess.
-fn clip_px(g: &mut gpu::GpuRenderer, s: &str, font_size: f32, bold: bool, budget: f32) -> String {
+pub(crate) fn clip_px(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    font_size: f32,
+    bold: bool,
+    budget: f32,
+) -> String {
     if budget <= 0.0 {
         return String::new();
     }
@@ -8683,6 +10244,127 @@ mod clawd_banner_tests {
     const BODY: &str = "▝▜█████▛▘ Fable 5 · ~/Desktop";
     const FEET: &str = "  ▘▘ ▝▝   0 awaiting input";
 
+    // 실측 agy 로고(Antigravity CLI 1.1.12) — 아래로 갈수록 한 칸씩 넓어진다.
+    const AGY: [&str; 5] = [
+        "      ▄▀▀▄        Antigravity CLI 1.1.12",
+        "     ▀▀▀▀▀▀       goenho0613@example.com (Google AI Pro)",
+        "    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)",
+        "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/tmuxify",
+        "  ▄▀▀      ▀▀▄",
+    ];
+
+    #[test]
+    fn agy_logo_detected() {
+        let rows: Vec<_> = AGY.iter().map(|s| row_from(s)).collect();
+        assert_eq!(find_agy_banners(&rows), vec![(0, 2)]);
+    }
+
+    /// 스크롤로 위 세 줄이 잘려도 남은 두 줄로 잡아야 한다 — 못 잡으면 원본
+    /// 로고가 그대로 노출돼 학생이 사라진다(Clawd 쪽에서 이미 겪은 회귀).
+    #[test]
+    fn agy_logo_cropped_from_top_is_still_detected() {
+        let rows: Vec<_> = AGY[3..].iter().map(|s| row_from(s)).collect();
+        assert_eq!(find_agy_banners(&rows), vec![(-3, 2)]);
+    }
+
+    #[test]
+    fn agy_detector_ignores_ordinary_text() {
+        let rows: Vec<_> = ["사과는 무슨 색인가", "▀▀▀ 짧은 괘선 ▀▀▀", ""]
+            .iter()
+            .map(|s| row_from(s))
+            .collect();
+        assert!(find_agy_banners(&rows).is_empty());
+    }
+
+    /// Clawd 칸에 대해서는 **항등**이어야 한다 — 이 커밋이 기존 배치를 건드리지
+    /// 않았다는 증명이고, 어긋나면 claude 배너 도트가 통째로 밀린다.
+    #[test]
+    fn clawd_sprite_box_is_unchanged() {
+        let (w, h) = fit_sprite_box(CLAWD_COLS, CLAWD_ROWS, 8.0, 17.0);
+        assert_eq!((w, h), (CLAWD_COLS as f32 * 8.0, CLAWD_ROWS as f32 * 17.0));
+    }
+
+    /// 넓은 agy 칸에서는 늘리지 않고 비율을 지킨 채 채운다(12x5 칸 → 12x4 도트).
+    #[test]
+    fn agy_sprite_box_keeps_the_clawd_aspect() {
+        let (w, h) = fit_sprite_box(AGY_COLS, AGY_ROWS, 8.0, 17.0);
+        assert_eq!((w, h), (12.0 * 8.0, 4.0 * 17.0));
+        assert!(h <= AGY_ROWS as f32 * 17.0, "칸 밖으로 넘쳤다");
+    }
+
+    #[test]
+    fn agy_title_becomes_the_student_name() {
+        let mut rows: Vec<_> = AGY.iter().map(|s| row_from(s)).collect();
+        replace_banner_title(&mut rows, 0, 2, AGY_COLS, AGY_ROWS, AGY_TITLE, "시로코", None);
+        let line: String = rows[0].iter().map(|c| c.ch).collect();
+        // 와이드 글자는 뒷칸에 스페이서가 붙어 `시 로 코` 로 읽힌다 — 글자만 본다.
+        let packed = line.replace(' ', "");
+        assert!(packed.contains("시로코"), "학생 이름이 안 들어갔다: {line:?}");
+        assert!(line.contains("1.1.12"), "버전이 사라졌다: {line:?}");
+        assert!(!line.contains("Antigravity"), "제품명이 남았다: {line:?}");
+    }
+
+    /// codex 시작 패널 실측 행. 마스코트가 없어 도트는 못 세우지만 이름표는 바꾼다.
+    #[test]
+    fn codex_panel_title_becomes_the_student_name() {
+        let mut rows = vec![row_from(
+            "│ >_ OpenAI Codex (v0.147.0)                     │",
+        )];
+        let n = rows.len();
+        replace_banner_title(&mut rows, 0, 0, 0, n, CODEX_TITLE, "아리스", None);
+        let line: String = rows[0].iter().map(|c| c.ch).collect();
+        let packed = line.replace(' ', "");
+        assert!(packed.contains("아리스"), "학생 이름이 안 들어갔다: {line:?}");
+        assert!(line.contains("(v0.147.0)"), "버전이 사라졌다: {line:?}");
+        assert!(!line.contains("OpenAI"), "제품명이 남았다: {line:?}");
+    }
+
+    /// 대화 본문에 "OpenAI Codex" 가 나와도 안 걸려야 한다 — `>_` 까지 묶어 잡는 이유.
+    #[test]
+    fn codex_title_ignores_the_words_in_prose() {
+        let mut rows = vec![row_from("OpenAI Codex 는 어떤 도구인가요?")];
+        let before: String = rows[0].iter().map(|c| c.ch).collect();
+        let n = rows.len();
+        replace_banner_title(&mut rows, 0, 0, 0, n, CODEX_TITLE, "아리스", None);
+        let after: String = rows[0].iter().map(|c| c.ch).collect();
+        assert_eq!(before, after, "본문이 바뀌었다");
+    }
+
+    /// agy 화면 아래 실측 모양 — 보더 두 줄 사이 ASCII `>`, 그 아래 상태줄.
+    #[test]
+    fn agy_standing_anchor_found_under_the_prompt() {
+        let bar = "─".repeat(40);
+        let rows: Vec<_> = [
+            "  사과는 보통 빨간색이나 초록색이네요.",
+            "",
+            "",
+            "",
+            bar.as_str(),
+            "> ",
+            bar.as_str(),
+            "? for shortcuts                 Gemini 3.5 Flash",
+        ]
+        .iter()
+        .map(|s| row_from(s))
+        .collect();
+        assert!(
+            find_agy_standing_anchor(&rows, 40).is_some(),
+            "agy 입력창 위 앵커를 못 잡았다"
+        );
+    }
+
+    /// 인용문(`> …`)이 대시 사이에 있어도 **claude·codex 판정은 안 건드린다**.
+    /// agy 앵커는 여기서만 `>` 를 인정하므로, 공용 `prompt_box` 는 여전히 거절해야 한다.
+    #[test]
+    fn ascii_marker_still_rejected_by_the_shared_prompt_box() {
+        let bar = "─".repeat(40);
+        let rows: Vec<_> = [bar.as_str(), "> 인용된 문장", bar.as_str()]
+            .iter()
+            .map(|s| row_from(s))
+            .collect();
+        assert!(prompt_box(&rows).is_none(), "인용문을 입력창으로 잡았다");
+    }
+
     #[test]
     fn full_banner_detected() {
         let rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
@@ -8786,7 +10468,10 @@ mod clawd_banner_tests {
     #[test]
     fn banner_title_replaced_with_student_name() {
         let mut rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
-        replace_banner_title(&mut rows, 1, 0, "아루", Some([255, 128, 0, 255]));
+        replace_banner_title(
+            &mut rows, 1, 0, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "아루",
+            Some([255, 128, 0, 255]),
+        );
         // HEAD 에서 "Claude Code" 는 col 10 부터 — 이름이 그 자리에 앉는다.
         assert_eq!(rows[1][10].ch, '아');
         assert_eq!(rows[1][11].ch, ' '); // 와이드 스페이서
@@ -8809,7 +10494,9 @@ mod clawd_banner_tests {
         let head_box = "│  ▐▛███▜▌  Claude Code v2.1.212    │";
         let mut rows = vec![row_from(""), row_from(head_box), row_from(""), row_from("")];
         let border = head_box.chars().count() - 1;
-        replace_banner_title(&mut rows, 1, 1, "시로코", None);
+        replace_banner_title(
+            &mut rows, 1, 1, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "시로코", None,
+        );
         assert_eq!(rows[1][border].ch, '│');
         assert_eq!(rows[1][12].ch, '시');
         // accent 없으면 원 타이틀 fg(blank 기본 = Default) 유지.
@@ -8821,7 +10508,9 @@ mod clawd_banner_tests {
     fn cropped_banner_leaves_rows_unchanged() {
         let mut rows = vec![row_from(BODY), row_from(FEET), row_from("")];
         let before = rows.clone();
-        replace_banner_title(&mut rows, -1, 0, "아루", None);
+        replace_banner_title(
+            &mut rows, -1, 0, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "아루", None,
+        );
         assert_eq!(rows, before);
     }
 
@@ -9349,6 +11038,70 @@ mod teammate_msg_tests {
 mod student_asset_tests {
     use super::*;
 
+    /// 번들 내장 프레임이 **모든 학생 × 모든 모션**에서 실제로 디코딩되는지.
+    ///
+    /// `student_sprite_frames` 는 프레임 크기가 하나라도 다르거나 PNG 하나가
+    /// 안 풀리면 그 모션을 통째로 `None` 으로 돌려주고, 호출측은 업로드를 건너뛴
+    /// 뒤 없는 키로 `queue_image_above` 를 부른다 — **아무것도 안 그려지고 에러도
+    /// 없다**. 그래서 "프사(정적 로더)는 뜨는데 애니만 안 뜬다" 가 되면 원인을
+    /// 밖에서 가릴 수 없다(2026-08-05 거노 신고 추적에 하루가 들었다).
+    #[test]
+    fn bundled_sprite_frames_decode_for_every_student_and_motion() {
+        let mut checked = 0;
+        let mut with_art = 0;
+        for (_, slug) in crate::theme::CHARACTER_SLUGS {
+            // 로스터(build.rs 가 characters.json 에서 굽는다)와 `student_sprite_png` 의
+            // 슬러그 목록은 **정본이 둘**이라 어긋나도 오류가 안 난다 — 빠진 학생은
+            // 그냥 그림 없는 학생이 되고 화면에서만 조용히 사라진다. 실제로 에셋을
+            // 67명분 만들어 놓고 목록에 안 넣어 앱에는 12명만 보였다(2026-08-11).
+            assert!(
+                student_sprite_png(slug, "idle").is_some(),
+                "{slug} 가 로스터엔 있는데 student_sprite_png 목록에 없다 — 앱에서 안 보인다"
+            );
+            with_art += 1;
+            for motion in ["idle", "wave", "cheer", "walk"] {
+                let frames = student_sprite_frames(slug, motion)
+                    .unwrap_or_else(|| panic!("{slug}/{motion}: 프레임이 None — 애니가 통째로 안 그려진다"));
+                let want = if motion == "walk" {
+                    STUDENT_WALK_FRAMES
+                } else {
+                    STUDENT_IDLE_FRAMES
+                };
+                assert_eq!(frames.len(), want, "{slug}/{motion}: 프레임 수");
+                for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                    assert!(*w > 0 && *h > 0, "{slug}/{motion}[{i}]: 0 크기");
+                    assert_eq!(
+                        rgba.len(),
+                        (*w as usize) * (*h as usize) * 4,
+                        "{slug}/{motion}[{i}]: RGBA 길이가 w*h*4 와 안 맞는다"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "모션을 하나도 못 셌다 — 로스터가 비었나");
+        // 로스터가 통째로 비면 위 루프는 조용히 0바퀴 돌고 전부 통과한다. 실측 79명을
+        // 하한으로 박아 그 침묵을 막는다.
+        assert!(with_art >= 79, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
+    }
+
+    /// 그림 유무를 **슬롯 세우기 전에** 가르는 계약.
+    ///
+    /// 이게 무너지면 화면에 구멍이 난다: 호출부가 Clawd 배너·스피너 글리프를 먼저
+    /// blank 로 지우고 나서 슬롯을 세우므로, 그림이 없는데 세우면 원래 있던 것까지
+    /// 지워진 채 아무것도 안 그려진다. 로스터가 12→79명이 되며 실제로 그랬다.
+    ///
+    /// 로스터 79명은 이제 전원 그림이 있다(2026-08-11). 그래서 여기서 거르는 대상은
+    /// 로스터 **밖** 이름뿐이다 — 이름을 바꾼 세션이 그 경로로 들어온다.
+    #[test]
+    fn students_without_art_are_filtered_before_the_glyph_is_erased() {
+        for motion in ["idle", "wave", "cheer", "walk"] {
+            assert!(student_has_sprite("arisu", motion), "아리스/{motion}");
+        }
+        assert!(!student_has_sprite("존재하지않는슬러그", "walk"));
+        assert!(!student_has_sprite("모바일", "idle"));
+    }
+
     // 사용자 override 파일이 없으면 None → 호출측이 번들 include_bytes 로 폴백.
     #[test]
     fn user_asset_missing_falls_back() {
@@ -9392,154 +11145,6 @@ mod student_asset_tests {
         let (_, w, h) = user_asset_rgba_in(&dir, "schale-logo.png").expect("override read");
         assert_eq!((w, h), (96, 96));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-// 입력박스 상단 보더 세션 제목 인레이 — 왼쪽 '─' run 에만 쓰고 @이름칩은
-// 무손상, 좁으면 '…', 극단 폭은 원문 유지.
-#[cfg(test)]
-mod prompt_title_inlay_tests {
-    use super::*;
-
-    fn row_from(s: &str) -> Vec<GridCell> {
-        s.chars()
-            .map(|c| {
-                let mut cell = GridCell::blank();
-                cell.ch = c;
-                cell
-            })
-            .collect()
-    }
-
-    fn box_rows(width: usize) -> Vec<Vec<GridCell>> {
-        vec![
-            row_from(&"─".repeat(width)),
-            row_from(&format!("❯{}", " ".repeat(width - 1))),
-            row_from(&"─".repeat(width)),
-        ]
-    }
-
-    fn row_text(row: &[GridCell]) -> String {
-        row.iter().map(|c| c.ch).collect()
-    }
-
-    // teammate 칩은 입력박스에서 걷어내고 보더 대시로 되메운다 — agent 이름은
-    // pane 헤더가 들고, 입력박스엔 대화 제목 하나만(거노 2026-07-27).
-    #[test]
-    fn agent_chip_stripped_from_prompt_border() {
-        let mut rows = box_rows(40);
-        // 보더 오른쪽에 claude 네이티브 칩을 얹은 상태를 재현.
-        let chip = " @model-check ";
-        for (i, ch) in chip.chars().enumerate() {
-            rows[0][20 + i].ch = ch;
-        }
-        strip_agent_chip(&mut rows);
-        let text = row_text(&rows[0]);
-        assert!(!text.contains('@'), "칩이 남았다: {text}");
-        assert!(text.chars().all(|c| c == '─'), "대시로 되메움: {text}");
-    }
-
-    #[test]
-    fn title_inlaid_left_of_border() {
-        let mut rows = box_rows(30);
-        let span = inlay_prompt_box_title(&mut rows, "제목");
-        // 좌측 정렬(칩은 우측이라 자리를 나눈다): 대시 1칸 뒤 " 제(sp)목(sp) ".
-        assert_eq!(row_text(&rows[0]), format!("─ 제 목  {}", "─".repeat(23)));
-        // 아래 보더·본문은 무손상.
-        assert!(rows[2].iter().all(|c| c.ch == '─'));
-        assert_eq!(span, Some((0, 1, 6)));
-    }
-
-    #[test]
-    fn long_title_truncated_with_ellipsis() {
-        let mut rows = box_rows(14); // avail = 10
-        inlay_prompt_box_title(&mut rows, "가나다라마바사");
-        let text = row_text(&rows[0]);
-        assert!(text.starts_with("─ 가 나 다 라 …"), "{text}");
-        // 오른쪽 끝 대시는 남는다(칩 영역 침범 금지 원칙의 최소 보증).
-        assert_eq!(rows[0].last().unwrap().ch, '─');
-    }
-
-    #[test]
-    fn narrow_border_left_untouched() {
-        let mut rows = box_rows(11); // run=11 → avail=7 이지만 최소폭 실험은 5로
-        let mut tiny = vec![
-            row_from(&"─".repeat(5)),
-            row_from("❯    "),
-            row_from(&"─".repeat(5)),
-        ];
-        inlay_prompt_box_title(&mut tiny, "제목");
-        // run 5 는 prompt_box_rows 의 dash>=10 미달 — 인식 자체가 안 돼 원문 유지.
-        assert!(tiny[0].iter().all(|c| c.ch == '─'));
-        // 정상 인식되는 11칸: "제목"(4칸)이 우측에 앉고 왼쪽 대시는 유지된다.
-        inlay_prompt_box_title(&mut rows, "제목");
-        assert!(row_text(&rows[0]).starts_with('─'));
-        assert!(row_text(&rows[0]).contains(" 제 목 "));
-    }
-
-    #[test]
-    fn non_input_box_untouched() {
-        // ❯ 마커 없는 풀폭 박스(권한 메뉴 등)는 건드리지 않는다.
-        let mut rows = vec![
-            row_from(&"─".repeat(30)),
-            row_from(&format!("no marker{}", " ".repeat(21))),
-            row_from(&"─".repeat(30)),
-        ];
-        inlay_prompt_box_title(&mut rows, "제목");
-        assert!(rows[0].iter().all(|c| c.ch == '─'));
-    }
-
-    // 보더 두 줄 + 입력행 ❯ 마커까지 학생 accent — 입력 글자는 무도색.
-    #[test]
-    fn prompt_box_paints_borders_and_marker() {
-        let accent = [143u8, 184, 216, 255]; // 시로코
-        let expect = kasa_bridge::screen::Color::Rgb(143, 184, 216);
-        let mut rows = vec![
-            row_from(&"─".repeat(30)),
-            row_from(&format!("❯ hello{}", " ".repeat(23))),
-            row_from(&"─".repeat(30)),
-        ];
-        style_prompt_box(&mut rows, accent);
-        assert_eq!(rows[0][0].fg, expect, "위 보더");
-        assert_eq!(rows[2][0].fg, expect, "아래 보더");
-        assert_eq!(rows[1][0].fg, expect, "❯ 마커");
-        // 입력 텍스트('h')는 테마 기본 fg 유지.
-        assert_ne!(rows[1][2].fg, expect, "입력 글자는 무도색");
-    }
-}
-
-#[cfg(test)]
-mod face_popup_tests {
-    use super::face_popup_pos;
-
-    #[test]
-    fn clamps_within_window() {
-        let pop = 160.0;
-        let (win_w, title_h) = (1440.0, 30.0);
-        // 창 오른쪽 끝 프사 → 팝업이 오른쪽 밖으로 넘치지 않는다.
-        let (px, _) = face_popup_pos(1400.0, 40.0, 1200.0, pop, win_w, title_h);
-        assert!(px + pop <= win_w - 6.0 + 0.01, "px={px} overflows right edge");
-        // 창 왼쪽 끝 프사 → 팝업 x 가 6px 밑으로 안 내려간다.
-        let (px, _) = face_popup_pos(0.0, 40.0, 1200.0, pop, win_w, title_h);
-        assert!(px >= 6.0 - 0.01, "px={px} underflows left edge");
-    }
-
-    #[test]
-    fn floats_above_and_clamps_to_titlebar() {
-        let pop = 160.0;
-        // 프사가 창 상단 근처면 팝업 top 이 타이틀바 아래로 클램프된다.
-        let (_, py) = face_popup_pos(100.0, 40.0, 40.0, pop, 1440.0, 30.0);
-        assert!(py >= 30.0 + 6.0 - 0.01, "py={py} intrudes into titlebar");
-        // 프사가 창 하단이면 팝업은 그 위로(음의 방향) 뜬다 = 프사 top 보다 위.
-        let (_, py) = face_popup_pos(100.0, 40.0, 1200.0, pop, 1440.0, 30.0);
-        assert!(py < 1200.0, "py={py} should float above the face");
-    }
-
-    #[test]
-    fn narrow_window_never_goes_negative() {
-        // 팝업 변보다 좁은 창에서도 x 가 6px 아래로 안 간다(max 방어).
-        let (px, _) = face_popup_pos(10.0, 20.0, 200.0, 160.0, 100.0, 30.0);
-        assert!(px >= 6.0 - 0.01, "px={px} negative on narrow window");
     }
 }
 
@@ -9621,7 +11226,108 @@ mod prompt_box_tests {
             row_from(&format!("❯ hello{}", " ".repeat(21))),
             row_from(&"─".repeat(28)),
         ];
-        assert_eq!(prompt_box_rows(&rows), Some(2..3));
+        assert!(matches!(
+            prompt_box(&rows),
+            Some(PromptBox::Bordered { ref rows, top: 1, bottom: 3 }) if *rows == (2..3)
+        ));
+    }
+
+    // ultracode accent — 학생 accent 와 **확실히 구분**돼야 의미가 있다. 실기에서
+    // 테두리가 학생 분홍(d55580)으로 나온 적이 있어(덮어쓰기) 그 색과의 거리도 본다.
+    #[test]
+    fn ultracode_accent_stays_purple_across_the_breath() {
+        let mut seen_dim = false;
+        let mut seen_bright = false;
+        for i in 0..80 {
+            let t = i as f32 * 0.05;
+            let [r, g, b, a] = ultracode_accent(t);
+            assert_eq!(a, 255);
+            // 언제나 보라 — 파랑이 가장 세고 초록이 가장 약하다. 이 순서가 깨지면
+            // 학생 accent(분홍 계열: R 강, G 약, B 중간)와 헷갈린다.
+            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t})");
+            // 원색(bb9af7)보다 어두워지지 않는다 — 흰빛을 섞기만 한다.
+            assert!(r >= 0xbb && g >= 0x9a && b >= 0xf7, "원색보다 어둡다: {r},{g},{b}");
+            // 초록이 가장 크게 흔들리는 채널이다(0x9a 에서 시작해 흰빛이 가장 많이
+            // 섞인다) — 실측 범위 154~188 의 양 끝을 각각 지나는지 본다.
+            if g < 0xa0 {
+                seen_dim = true;
+            }
+            if g > 0xb4 {
+                seen_bright = true;
+            }
+        }
+        // 실제로 숨쉬어야 한다 — 상수면 정적인 테두리와 구분이 안 된다.
+        assert!(seen_dim && seen_bright, "밝기가 오르내리지 않는다");
+    }
+
+    // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).
+    // 배경 없이 `›` 만 보면 인용문을 입력창으로 오인하므로 둘을 함께 요구한다.
+    #[test]
+    fn codex_filled_prompt_row_detected() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            for c in r.iter_mut() {
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        let rows = vec![
+            row_from("⚠ MCP startup incomplete"),
+            filled("› Use /skills to list available skills"),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (1..2)));
+
+        // 실제 codex 는 마커 행 위아래에 같은 채움색 여백 행을 둔다(실측 3줄).
+        // 마커 행만 잡으면 가운데 한 줄만 칠해져 상자가 아니라 밑줄이 된다(거노).
+        let boxed = vec![
+            row_from("⚠ MCP startup incomplete"),
+            filled(&" ".repeat(50)),
+            filled("› Use /skills to list available skills"),
+            filled(&" ".repeat(50)),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        assert!(
+            matches!(prompt_box(&boxed), Some(PromptBox::Filled { ref rows }) if *rows == (1..4)),
+            "여백 행까지 한 상자로"
+        );
+        // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
+        let plain = vec![row_from("› quoted line, not an input box at all")];
+        assert!(prompt_box(&plain).is_none());
+    }
+
+    /// codex 학생은 입력행 **바로 위**에 선다. claude 처럼 statusline 자리표시자
+    /// (U+FFFC)에서 출발할 수 없어서다 — `[tui] status_line` 은 정해진 세그먼트
+    /// 이름 배열이라 모르는 항목을 넣으면 `Ignored invalid status line item` 으로
+    /// 버려진다(0.146.0 실측). 앵커가 입력행에 직접 매이는지 못박는다.
+    #[test]
+    fn codex_student_stands_on_the_row_above_the_input() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            for c in r.iter_mut() {
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        let rows = vec![
+            row_from("⚠ MCP startup incomplete"),
+            row_from(""),
+            filled(&" ".repeat(50)),
+            filled("› Write tests for @filename"),
+            filled(&" ".repeat(50)),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        let (anchor, left_c) = find_filled_standing_anchor(&rows, 80).expect("앵커");
+        assert_eq!(anchor, 1, "여백 행까지 포함한 상자(2..5) 바로 위");
+        // 앵커 행이 비어 있으면 오른쪽 끝에 선다.
+        assert!((left_c - (80.0 - 1.0 - STAND_CELLS)).abs() < f32::EPSILON);
+
+        // 입력창을 못 찾으면 아무 데도 안 세운다 — 빈 화면에 학생이 뜨는 회귀 방지.
+        assert!(find_filled_standing_anchor(&[row_from("just text")], 80).is_none());
+
+        // 입력행이 첫 줄이면(스크롤로 위가 잘림) 설 자리가 없다.
+        let top = vec![filled("› Write tests for @filename")];
+        assert!(find_filled_standing_anchor(&top, 80).is_none());
     }
 
     // diff·git·노트 TUI 의 대시 구분선 쌍은 사이에 ASCII '>'(인용·프롬프트)가
@@ -9636,6 +11342,138 @@ mod prompt_box_tests {
             row_from(&"─".repeat(30)),
             row_from("Notes: press n to add notes"),
         ];
-        assert!(prompt_box_rows(&rows).is_none());
+        assert!(prompt_box(&rows).is_none());
+    }
+}
+
+#[cfg(test)]
+mod cross_session_msg_tests {
+    use super::*;
+
+    /// 실제 transcript 에 박히는 원문 그대로(2026-08-09 채집).
+    const REAL: &str = "Another Claude session sent a message:\n\
+<cross-session-message from=\"uds:/tmp/cc-socks/27516.sock\" from-name=\"타이틀 생성 푸시\" from-mode=\"bypass\">\n\
+ROUNDTRIP-OK\n\
+</cross-session-message>\n\
+This came from another Claude session";
+
+    #[test]
+    fn peer_label_picks_up_cross_session_body() {
+        // 화면엔 `@peer` 로 뜨므로 sender 는 그 라벨이다 — 이름 대조로는 절대 안 걸린다.
+        let m = extract_teammate_msg(REAL, PEER_LABEL).expect("본문을 못 뽑았다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
+        // color 는 cross-session 태그에 아예 없다.
+        assert!(m.color.is_none());
+    }
+
+    #[test]
+    fn real_sender_comes_from_socket_pid_not_from_name() {
+        // from-name 은 세션 이름이라 자동 제목에 덮인다 — 이 검체가 그 실물이다
+        // (진짜 발신자는 aru-p107-a2x 인데 「타이틀 생성 푸시」로 실려 왔다).
+        // 그래서 되찾기는 소켓 경로의 pid 로만 한다.
+        assert_eq!(socket_pid("uds:/tmp/cc-socks/27516.sock"), Some("27516"));
+        assert_eq!(socket_pid("uds:/tmp/cc-socks/abc.sock"), None);
+        assert_eq!(socket_pid("bridge:whatever"), None);
+    }
+
+    /// 명부 파일 실물(2026-08-11 채집, 모모이 pane 의 `~/.claude/sessions/78476.json`).
+    /// **`name` 이 세션 제목이다** — agent 이름(`momoi-p98-rv8`)이 아니다.
+    const ROSTER_FILE: &str = r#"{
+        "pid": 78476,
+        "sessionId": "53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b",
+        "cwd": "/Users/kasa/Desktop/momewomo/tmuxify",
+        "messagingSocketPath": "/tmp/cc-socks/78476.sock",
+        "name": "mcp, skill사이드바",
+        "status": "idle"
+    }"#;
+
+    #[test]
+    fn roster_name_is_a_session_title_so_the_slug_must_come_from_elsewhere() {
+        let (name, sid) = peer_ident_from_json(ROSTER_FILE);
+        assert_eq!(name.as_deref(), Some("mcp, skill사이드바"));
+        // 이 이름으로는 학생을 절대 못 찾는다 — 이것이 남의 메시지가 색도 프사도
+        // 없이 뜨던 이유였다(거노 2026-08-11: "sm테마는 왜안됐어").
+        assert_eq!(teammate_sender_slug("mcp, skill사이드바"), None);
+        // 그래서 세션 id 를 같이 들고 온다. 이걸로 pane 을 되짚어 배정 학생을 묻는다.
+        assert_eq!(sid.as_deref(), Some("53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b"));
+    }
+
+    #[test]
+    fn roster_file_missing_fields_are_none_not_empty() {
+        // 이름 없는 세션·깨진 파일에서 빈 문자열을 내보내면 그게 발신자 이름이 되어
+        // 화면에 `@ ❯` 가 뜬다. 없으면 없다고 해야 위쪽 폴백이 돈다.
+        assert_eq!(peer_ident_from_json(r#"{"name":"  ","sessionId":""}"#), (None, None));
+        assert_eq!(peer_ident_from_json("{}"), (None, None));
+        assert_eq!(peer_ident_from_json("not json at all"), (None, None));
+    }
+
+    #[test]
+    fn cross_session_msg_carries_the_session_id_for_pane_lookup() {
+        // 소켓 pid 27516 의 명부 파일은 이 테스트 머신에 없다 — 그래서 둘 다 None 이고,
+        // 그게 맞다(못 찾으면 화면 라벨 그대로 둔다). 여기서 보는 것은 본문 회수가
+        // 그 실패에 안 끌려간다는 점이다.
+        let m = extract_teammate_msg(REAL, PEER_LABEL).expect("본문을 못 뽑았다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
+    }
+
+    #[test]
+    fn teammate_tag_still_matches_by_name() {
+        // 옛 형식은 이름 대조 그대로 — 쌓인 transcript 를 거슬러 읽을 때 만난다.
+        let t = "<teammate-message teammate_id=\"momoi\" color=\"red\">안녕</teammate-message>";
+        let m = extract_teammate_msg(t, "momoi").expect("옛 형식이 깨졌다");
+        assert_eq!(m.body, "안녕");
+        assert_eq!(m.color.as_deref(), Some("red"));
+        assert!(m.sender.is_none());
+        assert!(extract_teammate_msg(t, "다른사람").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sidebar_blink_tests {
+    use super::*;
+
+    // 걷기 스프라이트가 전 학생에게 있는지는 `student_asset_tests` 의
+    // `bundled_sprite_frames_decode_for_every_student_and_motion` 이 이미, 더 깐깐하게
+    // 본다(프레임 수 + RGBA 길이까지). 여기서 또 보지 않는다.
+
+    /// 깜빡임은 켜짐·꺼짐이 **둘 다 평평해야** 깜빡임으로 읽힌다. 사인파로 돌아가면
+    /// (그게 걷어낸 숨쉬기다) 6px 점에서는 그냥 흐린 점이 된다.
+    #[test]
+    fn blink_rests_at_both_ends() {
+        assert!(blink(0.25, 1.0) > 0.99, "켜짐 구간이 평평하지 않다");
+        assert!(blink(0.80, 1.0) < 0.01, "꺼짐 구간이 평평하지 않다");
+        // 가장자리는 램프 — 즉각 점멸은 시야 가장자리에서 지나치게 튄다.
+        let mid = blink(0.04, 1.0);
+        assert!((0.1..0.9).contains(&mid), "전환이 계단이다: {mid}");
+        // 주기를 넘겨도 같은 위상. 프레임 시계는 프로세스 시작부터 단조증가라
+        // 몇 시간 뒤에도 같은 리듬이어야 한다.
+        assert!((blink(0.25, 1.0) - blink(600.25, 1.0)).abs() < 1e-3);
+    }
+
+    /// 남이 보낸 메시지가 학생 테마로 뜨려면 발신자 이름에서 슬러그가 나와야 한다.
+    /// 2026-08-04 에 이름이 세 토막(`<슬러그>-p<번호>-<접미>`)이 되면서 옛 파싱이
+    /// `himari-p2` 를 내어 로스터에 못 걸렸다 — 그때부터 색도 프사도 없이 떴다.
+    #[test]
+    fn sender_slug_survives_three_part_agent_names() {
+        assert_eq!(teammate_sender_slug("himari-p2-1uc"), Some("himari"));
+        assert_eq!(teammate_sender_slug("arisu-p116-1uc"), Some("arisu"));
+        // 옛 두 토막 형식도 그대로 걸려야 한다.
+        assert_eq!(teammate_sender_slug("aru-9c88"), Some("aru"));
+        // 한글 표시명은 로스터 정면 매칭.
+        assert_eq!(teammate_sender_slug("히마리"), Some("himari"));
+        // 이름을 바꾼 세션은 이름만으로 캐릭터를 알 길이 없다 — 여기서 None 이 맞고,
+        // 그 복구는 소켓 pid 로 pane 을 되짚는 별도 경로가 맡는다.
+        assert_eq!(teammate_sender_slug("모바일"), None);
+    }
+
+    #[test]
+    fn sender_accent_picks_the_student_before_the_tag_color() {
+        let himari = theme::character_accent("히마리").expect("로스터에 있어야 한다");
+        assert_eq!(teammate_sender_accent("himari-p2-1uc", None), himari);
+        // 학생을 못 찾을 때만 태그 색으로 떨어진다.
+        assert_eq!(
+            teammate_sender_accent("모바일", Some("red")),
+            [224, 88, 78, 255]
+        );
     }
 }

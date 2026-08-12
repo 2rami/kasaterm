@@ -2,36 +2,123 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>kasaterm</title>
 <link rel="stylesheet" href="/term/xterm.css">
 <style>
+  /* kasaterm 이 실제로 쓰는 폰트(D2Coding Nerd Font)를 서브셋해 내려준다 —
+     화면이 여기와 같아 보이려면 같은 폰트여야 하고, 폰 기본 폰트에는 Nerd Font
+     아이콘(사설영역)도 한글 고정폭도 없다.
+     ⚠️ **Mono 변종을 쓰면 안 된다.** 그쪽은 한글을 0.5em 으로 눌러 1셀에 맞추는데
+     터미널은 한글을 2셀로 잡으므로, 글리프가 칸의 절반만 채워 자간이 벌어진 것처럼
+     보인다(실측 advance: Mono 한글 500 = ASCII 와 동일). 논-Mono 는 한글 1000 으로
+     정확히 2셀이고 아이콘은 500 으로 1셀이라 둘 다 맞다 — gpu.rs 의 폴백 체인이
+     한글을 논-Mono 에 맡기는 이유와 같다. */
+  @font-face {
+    font-family: 'KasaTerm';
+    src: url('/term/font.woff2') format('woff2');
+    font-display: swap;
+  }
   html, body { margin: 0; height: 100%; background: #12161c; }
-  #term { position: absolute; inset: 8px; }
+  /* 데이터(터미널)가 0px 에서 시작한다 — 조작부는 전부 아래로 내렸다.
+     100dvh: 주소창이 접힐 때 100vh 는 화면을 넘는다. */
+  #term {
+    position: absolute;
+    inset: 8px 8px calc(var(--bar) + env(safe-area-inset-bottom, 0px)) 8px;
+  }
+  :root { --bar: 8px; }
+  body.has-bar { --bar: 52px; }
+
   /* xterm 기본 스크롤바는 밝은 톤이라 어두운 터미널 위에서 흰 띠로 튄다. */
   .xterm-viewport::-webkit-scrollbar { width: 10px; }
   .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-  .xterm-viewport::-webkit-scrollbar-thumb {
-    background: #2c3543; border-radius: 5px;
-  }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: #2c3543; border-radius: 5px; }
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
+
+  /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다 — 11px 회색으로 흘리면
+     격자가 작아진 화면에서 그대로 묻힌다. kasaterm pane 헤더처럼 프사 붙은 칩으로. */
   #status {
-    position: absolute; right: 12px; bottom: 8px; z-index: 5;
-    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #6b7683; pointer-events: none;
+    position: absolute; right: 10px; top: 6px; z-index: 5;
+    display: none; align-items: center; gap: 6px;
+    font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9aa6b4; background: rgba(23, 28, 36, .88);
+    border: 1px solid #2a323e; border-radius: 6px;
+    padding: 4px 8px 4px 4px; pointer-events: none; max-width: 55vw;
   }
+  #status.on { display: flex; }
+  #status.waiting { color: #ffd479; border-color: #5a4a24; }
+  #who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    object-fit: cover; flex: 0 0 auto; display: none;
+  }
+
+  /* 하단 바 — 소프트 키보드가 올라오면 visualViewport 로 그 위에 얹는다.
+     transform 으로만 움직인다(§④): position 을 바꾸면 터미널이 뛴다. */
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: none; gap: 6px; align-items: center;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)) 8px;
+    background: #171c24; border-top: 1px solid #232b36;
+    will-change: transform;
+  }
+  body.has-bar #bar { display: flex; }
+  #bar select, #bar button {
+    min-height: 44px;                    /* iOS HIG 터치 타깃 */
+    font: 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;  /* 16px 미만이면 iOS 가 확대한다 */
+    color: #c8d0d9; background: #222a35;
+    border: 1px solid #2f3846; border-radius: 8px;
+  }
+  #bar select { flex: 1 1 auto; min-width: 0; padding: 0 6px; }
+  #bar button { flex: 0 0 auto; min-width: 44px; padding: 0 6px; }
+  #bar button:active { background: #2c3543; }
 </style>
 </head>
 <body>
 <div id="term"></div>
-<div id="status"></div>
+<div id="status"><img id="avatar" alt=""><span id="who"></span></div>
+<div id="bar">
+  <select id="panes" aria-label="pane 고르기"><option value="">새 셸</option></select>
+  <button id="fitbtn" aria-label="폰 크기 / 원래 크기 전환" aria-pressed="false">⤢</button>
+  <button data-seq="\x1b" aria-label="Esc">esc</button>
+  <button data-seq="\t" aria-label="Tab">⇥</button>
+  <button data-seq="\x03" aria-label="Ctrl-C">^C</button>
+  <button data-seq="\x1b[A" aria-label="위">↑</button>
+  <button data-seq="\x1b[B" aria-label="아래">↓</button>
+</div>
 <script src="/term/xterm.js"></script>
 <script>
 (() => {
-  const q = new URLSearchParams(location.search);
+  // pane id 는 `%151` 처럼 생겼는데, URLSearchParams 는 그 `%15` 를 퍼센트 인코딩으로
+  // 읽어 0x15 로 디코딩한다 — 남는 건 제어문자+`1` 이라 목록 매칭도 칩도 조용히 깨진다.
+  // (오류가 안 나서 「이름이 원래 안 뜨나 보다」로 보인다.) raw 쿼리에서 직접 꺼낸다.
+  const paneId = (() => {
+    const hit = location.search.slice(1).split('&').find((s) => s.startsWith('pane='));
+    return hit ? hit.slice(5) : '';
+  })();
   const statusEl = document.getElementById('status');
+  const whoEl = document.getElementById('who');
+  const avatarEl = document.getElementById('avatar');
+  const setWho = (text, slug) => {
+    whoEl.textContent = text;
+    statusEl.classList.toggle('on', !!text);
+    if (slug) {
+      avatarEl.src = `/term/avatar/${encodeURIComponent(slug)}.png`;
+      avatarEl.style.display = 'block';
+    }
+  };
+  const bar = document.getElementById('bar');
+  const panesEl = document.getElementById('panes');
+  const fitBtn = document.getElementById('fitbtn');
+
+  // 물리 키보드가 있으면 esc/tab 버튼은 자리만 먹는다. pane 선택은 양쪽 다 쓰므로
+  // 바 자체는 터치 기기에서만 띄우고, 데스크톱은 예전처럼 터미널만 남긴다.
+  const touch = matchMedia('(hover: none)').matches;
+  if (touch) document.body.classList.add('has-bar');
+
   const term = new Terminal({
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
+    // 웹폰트가 못 오면 맥에 설치된 같은 폰트가 받는다. Menlo 는 한글이 없어 맨 뒤.
+    fontFamily: '"KasaTerm", "D2Coding", ui-monospace, SFMono-Regular, Menlo, monospace',
     fontSize: 13,
     cursorBlink: true,
     allowProposedApi: true,
@@ -48,9 +135,25 @@
   // 미러 모드에서는 PTY 크기를 우리가 바꾸면 안 된다 — 같은 PTY 를 보고 있는
   // kasaterm pane 의 화면이 같이 깨진다. 서버가 알려준 크기에 우리를 맞춘다.
   let mirror = false;
+  let cols = 0;
+  let orig = null;      // 미러가 원래 쓰던 격자 — 되돌릴 때 쓴다
+  let fitted = false;
+
+  // 미러는 격자를 못 줄이므로, 대신 우리 글자를 줄여 그 격자를 화면 안에 넣는다.
+  // 안 그러면 80열이 폰 폭을 넘어 가로 스크롤이 생긴다(§⑤ 실패).
+  const fitFontToCols = () => {
+    if (!mirror || !cols) return;
+    const avail = document.getElementById('term').clientWidth;
+    const size = Math.max(5, Math.min(13, Math.floor(avail / (cols * 0.62))));
+    if (size !== term.options.fontSize) {
+      term.options.fontSize = size;
+      term.resize(cols, term.rows);
+    }
+  };
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/term/ws?${q.toString()}`);
+  // 쿼리를 재조립하지 않고 그대로 넘긴다 — 여기서도 `%` 가 한 번 더 깎일 자리다.
+  const ws = new WebSocket(`${proto}://${location.host}/term/ws${location.search}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onmessage = (e) => {
@@ -59,8 +162,20 @@
       const m = JSON.parse(e.data);
       if (m.t === 'size') {
         mirror = !!m.mirror;
+        cols = m.cols;
+        if (!orig) orig = { cols: m.cols, rows: m.rows };
         term.resize(m.cols, m.rows);
-        statusEl.textContent = mirror ? `mirror ${q.get('pane') || ''}` : '';
+        fitFontToCols();
+        // 이름은 /term/panes 가 오면 덮어쓴다. 그 전까지는 id 라도 띄워 둔다.
+        if (mirror && !whoEl.textContent) setWho(paneId);
+        // 새 셸은 이미 우리 크기로 뜨므로 맞출 것이 없다.
+        if (!mirror) { setWho(''); fitBtn.style.display = 'none'; }
+        // 폰에서는 pane 격자(196열)가 축소로 안 들어간다 — 폭을 맞추면 글자가 5px 라
+        // 읽지도 치지도 못한다. 그래서 터치 기기면 붙는 즉시 PTY 를 폰 격자로 줄인다.
+        // ⚠️ 이걸 자동으로 켤 수 있는 건 **서버가 끊길 때 원래 격자로 되돌리기**
+        // 때문이다. 그 복구가 없으면 폰으로 잠깐 들여다본 것만으로 kasaterm 쪽 pane 이
+        // 좁아진 채 남는다. 되돌리고 싶으면 ⤢ 로 원래 격자를 다시 볼 수 있다.
+        if (touch && mirror && !fitted) { fitted = true; applyFit(); }
       }
       return;
     }
@@ -68,21 +183,108 @@
   };
 
   const enc = new TextEncoder();
-  term.onData((d) => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+  const send = (s) => { if (ws.readyState === 1) ws.send(enc.encode(s)); };
+  term.onData(send);
+
+  // 넓은 pane(193열)은 폰에서 축소로 안 들어간다 — 읽을 만한 크기면 1158px 가
+  // 필요한데 화면은 374px 다. 그래서 PTY 자체를 폰 격자로 줄이는 길을 열어 두되,
+  // ⚠️ **누른 순간에만** 한다. 자동으로 하면 폰으로 잠깐 들여다본 것만으로 데스크톱
+  // kasaterm 쪽 화면이 같이 줄어든다.
+  const applyFit = () => {
+    if (ws.readyState !== 1) return;
+    term.options.fontSize = 13;
+    if (fitted) {
+      fit.fit();
+      ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows, force: true }));
+    } else if (orig) {
+      term.resize(orig.cols, orig.rows);
+      ws.send(JSON.stringify({ t: 'resize', cols: orig.cols, rows: orig.rows, force: true }));
+      cols = orig.cols;
+      fitFontToCols();
+    }
+    fitBtn.setAttribute('aria-pressed', String(fitted));
+    fitBtn.style.background = fitted ? '#2f4a6b' : '';
+  };
+  fitBtn.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    fitted = !fitted;
+    applyFit();
+  });
+
+  for (const b of bar.querySelectorAll('button[data-seq]')) {
+    // 눌러도 터미널이 포커스를 잃지 않아야 소프트 키보드가 안 내려간다.
+    b.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      send(JSON.parse(`"${b.dataset.seq}"`));
+    });
+  }
+
+  fetch('/term/panes').then((r) => r.json()).then((list) => {
+    const here = paneId;
+    // 답을 기다리는 pane 을 위로 올린다 — 폰을 여는 이유가 대개 그것이다.
+    // sort 는 stable 이라 나머지 순서는 서버가 준 그대로 남는다.
+    const rank = (p) => (p.status === 'waiting' ? 0 : 1);
+    for (const p of [...list].sort((a, b) => rank(a) - rank(b))) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      // `%86` 만으로는 누구 화면인지 알 수가 없다. 이름과 하던 일을 보여주고,
+      // 그걸 모르는 pane(웹 셸)만 id 로 떨어진다.
+      const label = [p.name, p.title].filter(Boolean).join(' · ') || p.id;
+      o.textContent = p.status === 'waiting' ? `● ${label}` : label;
+      if (p.id === here) {
+        o.selected = true;
+        // 우상단 칩도 id 대신 이름과 프사로 — kasaterm pane 헤더가 보여 주는 것과
+        // 같다. 이름을 모르는 pane(웹 셸)은 id 만 남는다.
+        setWho(p.name || p.id, p.slug);
+        statusEl.classList.toggle('waiting', p.status === 'waiting');
+      }
+      panesEl.append(o);
+    }
+  }).catch(() => {});
+  panesEl.addEventListener('change', () => {
+    // 토큰은 쿠키에 있으므로 주소에 다시 실을 필요가 없다.
+    location.search = panesEl.value ? `?pane=${encodeURIComponent(panesEl.value)}` : '';
+  });
 
   const syncSize = () => {
-    if (mirror || ws.readyState !== 1) return;
+    if (mirror) {
+      if (fitted) applyFit();
+      else fitFontToCols();
+      return;
+    }
+    if (ws.readyState !== 1) return;
     fit.fit();
     ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
   };
   ws.onopen = () => { term.focus(); setTimeout(syncSize, 0); };
   window.addEventListener('resize', syncSize);
 
+  // 웹폰트는 늦게 온다. 그 사이 xterm 은 폴백 폰트로 글자 폭을 재서 격자를 잡아
+  // 두므로, 폰트가 바뀐 뒤 다시 재지 않으면 글자가 칸에서 어긋난 채 남는다.
+  if (document.fonts?.load) {
+    document.fonts.load(`${term.options.fontSize}px KasaTerm`)
+      .then(() => { term.clearTextureAtlas?.(); syncSize(); })
+      .catch(() => {});
+  }
+
+  // 소프트 키보드가 올라오면 fixed 바가 그 아래로 숨는다. visualViewport 가
+  // 실제로 보이는 영역을 알려 주므로 그만큼 바를 위로 얹는다.
+  const vv = window.visualViewport;
+  if (vv) {
+    const lift = () => {
+      const hidden = Math.max(0, innerHeight - vv.height - vv.offsetTop);
+      bar.style.transform = `translateY(${-hidden}px)`;
+    };
+    vv.addEventListener('resize', lift);
+    vv.addEventListener('scroll', lift);
+    lift();
+  }
+
   ws.onclose = () => {
-    statusEl.textContent = '';
+    setWho('');
     term.write('\r\n\x1b[31m● 연결이 끊겼습니다\x1b[0m\r\n');
   };
-  ws.onerror = () => { statusEl.textContent = '연결 오류'; };
+  ws.onerror = () => { setWho('연결 오류'); };
 })();
 </script>
 </body>

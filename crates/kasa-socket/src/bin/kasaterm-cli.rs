@@ -63,6 +63,87 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
+    // `split --count N` 은 한 번의 호출로 pane N 개를 확보한다. 학생 여럿을 띄우는
+    // 게 기본 흐름인데, 예전엔 호출자가 split 을 N 번 부르고 **매번 성공했는지
+    // 직접 대조**해야 했다(응답이 실패를 성공으로 실어 보냈다 — 거노가 5명 중 1명만
+    // 띄운 사고). 여기서 실패하면 그 자리에서 멈추고 **몇 개까지 됐는지**를 준다.
+    // 새로 만든 pane 을 다음 대상으로 삼는 건 ⌘D 를 연달아 누른 것과 같은 모양이다.
+    if cmd == "split" {
+        let count = args
+            .iter()
+            .position(|a| a == "--count")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+        if count > 1 {
+            args.retain(|a| a != "--count");
+            let n = count.to_string();
+            args.retain(|a| *a != n);
+            let socket_path = resolve_socket_path()?;
+            let mut made: Vec<String> = Vec::new();
+            // pane 별로 「claude 로 뜨면 쓸 이름」도 모은다 — N 명을 띄우고 나면
+            // 그 다음 할 일이 N 통의 SendMessage 라, 이름이 여기 같이 나와야 board 를
+            // 되짚는 왕복이 안 생긴다. 모르는 pane 은 null.
+            let mut agents: Vec<Value> = Vec::new();
+            let mut failed: Option<String> = None;
+            for i in 0..count {
+                let mut a = args.clone();
+                // 2회차부터는 방금 만든 pane 을 쪼갠다 — 명시 대상이 있으면 그것을
+                // 첫 회차에만 쓰고, 그 뒤로는 체인.
+                if i > 0 {
+                    a.retain(|x| !x.starts_with('%'));
+                    a.push(made[i - 1].clone());
+                }
+                let req = build_request("split", &a)?;
+                match roundtrip(&socket_path, &req) {
+                    Ok(r) if r.ok => match r
+                        .result
+                        .as_ref()
+                        .and_then(|v| v.get("surface"))
+                        .and_then(|v| v.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        Some(id) => {
+                            made.push(id.to_string());
+                            agents.push(
+                                r.result
+                                    .as_ref()
+                                    .and_then(|v| v.get("agent"))
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                            );
+                        }
+                        None => {
+                            failed = Some("응답에 surface.id 가 없다".into());
+                            break;
+                        }
+                    },
+                    Ok(r) => {
+                        failed = Some(
+                            r.error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "사유 없음".into()),
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        failed = Some(format!("{e:#}"));
+                        break;
+                    }
+                }
+            }
+            let ok = failed.is_none();
+            println!(
+                "{}",
+                json!({
+                    "ok": ok,
+                    "result": { "surfaces": made, "agents": agents, "requested": count },
+                    "error": failed,
+                })
+            );
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+    }
     // `wake-watch <surface>` blocks until ONE teammate finishes a turn, then
     // exits — the inverse of board-watch (which streams forever). Meant to run
     // as a Claude Code background task: its exit auto-re-invokes the idle pane
@@ -87,6 +168,35 @@ fn run() -> Result<Option<Response>> {
             .unwrap_or(1800);
         let socket_path = resolve_socket_path()?;
         run_wake_watch(&socket_path, &target, interval, timeout)?;
+        return Ok(None);
+    }
+    // `dismiss <id>…` — 일 끝난 학생 pane 을 한 번에 닫는다. 인사말·완료 보고를
+    // 주고받는 대신 오케스트레이터가 그냥 닫는다(회수할 게 있으면 git 이 막는다).
+    if cmd == "dismiss" {
+        let socket_path = resolve_socket_path()?;
+        run_dismiss(&socket_path, &args)?;
+        return Ok(None);
+    }
+    // `closed [%pane]` — 되살리기 목록. pane 을 주면 그 항목을 **진짜 끈다**.
+    //
+    // 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 10개를 넘겨
+    // 밀려날 때 죽는다. 그래서 `dismiss` 로 정리한 학생 claude 들이 계속 살아 있는데,
+    // 그 사실이 GUI 밖에서는 보이지도 않았다(거노 2026-08-06).
+    if cmd == "closed" {
+        let want = args.iter().find(|a| a.starts_with('%')).cloned();
+        let socket_path = resolve_socket_path()?;
+        let resp = roundtrip(
+            &socket_path,
+            &Request {
+                id: "closed".into(),
+                method: "surface.closed".into(),
+                params: match want {
+                    Some(p) => json!({ "pane": p }),
+                    None => Value::Null,
+                },
+            },
+        )?;
+        println!("{}", serde_json::to_string(&resp)?);
         return Ok(None);
     }
     // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
@@ -174,9 +284,22 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                     let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
                     let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
                     let waiting = e.get("waiting_for").and_then(|v| v.as_str());
-                    let line = match waiting {
-                        Some(w) => format!("{status} (waiting: {w}) — {intent}"),
-                        None => format!("{status} — {intent}"),
+                    // 명시적 완료 보고 — 상태 줄에 실어 diff 가 잡게 한다: 보고가
+                    // 도착하는 순간(아직 working 이어도) 한 줄이 흐르고, Monitor 의
+                    // done 필터가 idle 전에 깨어난다.
+                    let done = e.get("done_outcome").and_then(|v| v.as_str());
+                    let line = match (done, waiting) {
+                        (Some(d), _) => {
+                            let sum =
+                                e.get("done_summary").and_then(|v| v.as_str()).unwrap_or("");
+                            if sum.is_empty() {
+                                format!("{status} [done:{d}] — {intent}")
+                            } else {
+                                format!("{status} [done:{d}] {sum} — {intent}")
+                            }
+                        }
+                        (None, Some(w)) => format!("{status} (waiting: {w}) — {intent}"),
+                        (None, None) => format!("{status} — {intent}"),
                     };
                     cur.insert(id, line);
                 }
@@ -308,6 +431,133 @@ fn run_wake_watch(
         }
         std::thread::sleep(std::time::Duration::from_secs(interval));
     }
+}
+
+/// `dismiss <id>…` — 일이 끝난 학생 pane 을 한 번에 닫는다. 닫기 전에 각 pane 의
+/// cwd 를 `git status --porcelain` 으로 보고, **커밋 안 된 변경이 있으면 닫지 않고
+/// 보고만** 한다. 회수할 것이 있는지는 오케스트레이터가 pane 을 죽인 뒤엔 물어볼
+/// 데가 없기 때문이다 — 워크트리 파일은 남지만 어느 pane 이 무엇을 만지고 있었는지는
+/// board 와 함께 사라진다.
+///
+/// 대상은 **항상 명시**한다(`--all` 없음). 스폰한 쪽은 자기가 띄운 id 를 알고,
+/// 화면에는 그 작업과 무관한 pane 이 늘 함께 떠 있다 — 한 번의 오작동이 남의 세션을
+/// 통째로 날린다.
+///
+/// 출력은 JSON 이 아니라 한 줄씩이다. 이 명령을 읽는 것은 사람 아니면 에이전트고,
+/// 둘 다 "무엇이 닫혔고 무엇이 남았나" 한 눈에 보는 편이 싸다.
+fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
+    let force = args.iter().any(|a| a == "--force");
+    let targets: Vec<String> = args
+        .iter()
+        .filter(|a| a.starts_with('%'))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "dismiss 는 닫을 pane 을 명시해야 한다 (예: dismiss %3 %4 [--force])"
+        ));
+    }
+    let board = roundtrip(
+        socket_path,
+        &Request {
+            id: "dismiss".into(),
+            method: "collab.board".into(),
+            params: json!({}),
+        },
+    )
+    .ok()
+    .and_then(|r| r.result)
+    .and_then(|v| v.get("board").cloned())
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
+    // board 는 transcript 가 바인딩된 pane 만 싣는다 — codex pane 이나 셸뿐인 pane 은
+    // 줄이 없다. 그때 학생·cwd 를 여기서 보충하지 않으면 `? — ` 만 찍히고, 더 나쁘게는
+    // cwd 를 몰라 **커밋 안 된 변경 검사가 통째로 건너뛰어진다**(이 명령의 존재 이유다).
+    let surfaces = roundtrip(
+        socket_path,
+        &Request {
+            id: "dismiss".into(),
+            method: "surface.list".into(),
+            params: json!({}),
+        },
+    )
+    .ok()
+    .and_then(|r| r.result)
+    .and_then(|v| v.get("surfaces").cloned())
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
+    let mut kept = 0usize;
+    for id in &targets {
+        let entry = board
+            .iter()
+            .find(|e| e.get("surface_id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let surf = surfaces
+            .iter()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let pick = |key: &str, alt: &str| -> Option<String> {
+            entry
+                .and_then(|e| e.get(key))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| surf.and_then(|e| e.get(alt)).and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let who = pick("character", "character").unwrap_or_else(|| "?".into());
+        let who = who.as_str();
+        let cwd = pick("cwd", "cwd").unwrap_or_default();
+        let cwd = cwd.as_str();
+        let where_ = Path::new(cwd)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.to_string());
+        let dirty = if force || cwd.is_empty() {
+            0
+        } else {
+            git_dirty_count(cwd)
+        };
+        if dirty > 0 {
+            kept += 1;
+            println!("kept    {id} {who} — {where_}: 커밋 안 된 변경 {dirty}개");
+            continue;
+        }
+        let resp = roundtrip(
+            socket_path,
+            &Request {
+                id: "dismiss".into(),
+                method: "surface.close".into(),
+                params: json!({ "surface_id": id }),
+            },
+        )?;
+        if resp.ok {
+            println!("closed  {id} {who} — {where_}");
+        } else {
+            kept += 1;
+            let why = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "close 실패".into());
+            println!("failed  {id} {who} — {why}");
+        }
+    }
+    if kept > 0 {
+        println!("\n남은 {kept}개는 손대지 않았다 — 회수하거나 --force 로 다시.");
+    }
+    Ok(())
+}
+
+/// 그 디렉토리의 커밋 안 된 변경 개수. git 이 아니거나 실패하면 0 — "모르면 닫는다"
+/// 가 아니라 "모르면 막지 않는다" 쪽인데, 여기서 막으면 git 아닌 cwd 의 pane 을
+/// 영영 못 닫는다. 진짜 회수 대상은 워크트리이고 그건 git 이다.
+fn git_dirty_count(cwd: &str) -> usize {
+    std::process::Command::new("git")
+        .args(["-C", cwd, "--no-optional-locks", "status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0)
 }
 
 /// `/tmp/kasaterm-collab/<cwd-with-/-and-.-as-->/messages.jsonl` — the same
@@ -493,11 +743,20 @@ fn print_help() {
     eprintln!("  kasaterm-cli list <workspaces|surfaces>");
     eprintln!("  kasaterm-cli focus <surface_id>");
     eprintln!("  kasaterm-cli close <surface_id>");
+    eprintln!(
+        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 학생 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)
+  kasaterm-cli closed [%pane]                # 되살리기 목록(닫아도 안 죽은 pane 들). %pane 을 주면 그것만 진짜 끈다"
+    );
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
-    eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
-    eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
+    eprintln!(
+        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N]  # 기본 no-focus·이 pane 을 쪼갬. --count N 으로 한 번에 N개(실패하면 멈추고 몇 개까지 됐는지 준다)"
+    );
+    eprintln!("  kasaterm-cli window-new                    # 새 창
+  kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
+  kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
+  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
@@ -508,11 +767,17 @@ fn print_help() {
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
     eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
-    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
+    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
+  kasaterm-cli capture [surface_id] [path] [--max-width N]
+                                            # screenshot ONE pane to PNG (peek's picture twin)
+  kasaterm-cli capture --window [path] [--max-width N]
+                                            # the WHOLE window incl. sidebar/tabs/columns (main window only)");
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
+    eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
+    eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(학생색·학생명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");
@@ -592,26 +857,85 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "report-cwd" => {
-            // statusline.py 가 매 렌더 호출: report-cwd <surface_id> <cwd> [session_id].
-            // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출.
+            // statusline.py 가 매 렌더 호출:
+            //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens] [model] [effort]
+            // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출하고, 컨텍스트 창·사용
+            // 토큰을 함께 실어 board 의 ctx% 분모를 확정한다(추정 대신 하네스 정본).
+            // 뒤 넷은 선택 — 구버전 statusline 은 안 보내고, 그때는 0/빈값이라 GUI 가 폴백한다.
+            //
+            // model 은 훅 stdin 의 `model.id` **원본**이다(`claude-opus-5[1m]`). 재시작 뒤
+            // 같은 모델로 되살리는 데 쓰므로 `[1m]` 이 붙은 채로 와야 한다 — board 에 뜨는
+            // 쪽은 API 응답 표기라 그걸 되먹이면 1M 세션이 200k 로 강등된다.
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
             let cwd = args.get(1).ok_or_else(|| anyhow!("report-cwd needs a cwd"))?;
             let session_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let ctx_window: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let ctx_tokens: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let model = args.get(5).map(|s| s.as_str()).unwrap_or("");
+            let effort = args.get(6).map(|s| s.as_str()).unwrap_or("");
             (
                 "surface.report_cwd",
-                json!({ "surface_id": surface, "cwd": cwd, "session_id": session_id }),
+                json!({
+                    "surface_id": surface,
+                    "cwd": cwd,
+                    "session_id": session_id,
+                    "ctx_window": ctx_window,
+                    "ctx_tokens": ctx_tokens,
+                    "model": model,
+                    "effort": effort,
+                }),
             )
         }
         "split" => {
             // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
             let focus = args.iter().any(|a| a == "--focus");
+            // 방향은 **선택**이다 — 생략하면 `auto`, 즉 앱이 pane 의 종횡비를 보고 긴
+            // 축을 쪼갠다(거노 2026-08-05: "너무 가로로나 세로로 안 길게"). 사람이
+            // 방향을 정해 부를 때만 명시하면 된다.
             let dir = args
                 .iter()
-                .find(|a| !a.starts_with("--"))
-                .ok_or_else(|| anyhow!("split needs a direction"))?;
-            ("surface.split", json!({ "direction": dir, "focus": focus }))
+                .find(|a| !a.starts_with("--") && !a.starts_with('%'))
+                .map(String::as_str)
+                .unwrap_or("auto");
+            // 쪼갤 pane: 명시한 %id > 이 CLI 가 도는 pane. 둘 다 없을 때만(=pane 밖에서
+            // 부른 경우) 포커스 기준으로 떨어진다. 예전엔 늘 포커스 기준이라, 에이전트가
+            // 자기 pane 에서 학생을 띄워도 사람이 보고 있는 창이 쪼개졌다.
+            let from = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            (
+                "surface.split",
+                json!({ "direction": dir, "focus": focus, "from": from }),
+            )
+        }
+        // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
+        "window-new" => ("window.new", json!({})),
+        // 쪼개지 않고 **이 pane 안에** 새 탭. 학생을 더 띄워도 화면이 안 줄어든다.
+        "tab" => {
+            let outer = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            ("surface.new_tab", json!({ "outer": outer }))
+        }
+        // pane 을 다른 pane 옆으로 — 대상이 다른 창이면 **창을 건너뛴다**(PTY 유지).
+        "move" => {
+            let moving = args
+                .first()
+                .ok_or_else(|| anyhow!("move needs <surface> <target> [left|right|up|down]"))?;
+            let target = args
+                .get(1)
+                .ok_or_else(|| anyhow!("move needs a target surface to land beside"))?;
+            let dir = args.get(2).map(String::as_str).unwrap_or("right");
+            (
+                "surface.move",
+                json!({ "surface_id": moving, "target": target, "direction": dir }),
+            )
         }
         "swap" => {
             let a = args
@@ -822,6 +1146,84 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "reason": reason }),
             )
         }
+        "agent-status" => {
+            // agent-status [--surface <id>] <start|end|clear> <subagent|background> [key] [라벨...]
+            //
+            // 진행 표시의 정본. `PreToolUse`/`PostToolUse` 훅이 부르며, 화면이나
+            // transcript 를 되짚지 않고 **일어난 그 순간** 사실을 밀어 넣는다.
+            // 옛 방식(꼬리 64KB 에서 런치·회수 짝짓기)은 세션이 커지면 런치가 창
+            // 밖으로 밀려 오래 걸리는 작업일수록 안 보였다.
+            //
+            // 훅에서 부르는 것이라 **실패해도 조용해야 한다** — 이 명령이 죽어서
+            // claude 의 도구 호출이 막히면 안 된다(호출부가 `|| true` 로 감싼다).
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("agent-status needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let phase = rest
+                .first()
+                .ok_or_else(|| anyhow!("agent-status needs <start|end|clear>"))?
+                .clone();
+            let kind = rest
+                .get(1)
+                .ok_or_else(|| anyhow!("agent-status needs <subagent|background>"))?
+                .clone();
+            let key = rest.get(2).cloned().unwrap_or_default();
+            let label = rest.get(3..).map(|s| s.join(" ")).unwrap_or_default();
+            (
+                "surface.agent_status",
+                json!({
+                    "surface_id": surface,
+                    "phase": phase,
+                    "kind": kind,
+                    "key": key,
+                    "label": label,
+                }),
+            )
+        }
+        "done" => {
+            // done [--surface <id>] <succeeded|failed> [요약...] — 브리프를 마친
+            // 학생의 명시적 완료 보고. 오케스트레이터가 board 에서 완료를 추정하지
+            // 않고 읽게 한다. --surface 기본값은 자기 pane($KASATERM_PANE_ID).
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("done needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let outcome = match rest.first().map(String::as_str) {
+                // 흔한 이형 표기는 여기서 정규형으로 — 서버는 두 값만 받는다.
+                Some("succeeded" | "success" | "ok") => "succeeded",
+                Some("failed" | "fail") => "failed",
+                Some(other) => {
+                    return Err(anyhow!(
+                        "done outcome must be succeeded|failed, got \"{other}\""
+                    ))
+                }
+                None => return Err(anyhow!("done needs <succeeded|failed> [한 줄 요약]")),
+            };
+            let summary = rest.get(1..).unwrap_or(&[]).join(" ");
+            (
+                "surface.done",
+                json!({ "surface_id": surface, "outcome": outcome, "summary": summary }),
+            )
+        }
         "layout" => ("window.layout", json!({})),
         "windows" => ("window.list", json!({})),
         "bind-transcript" => {
@@ -853,6 +1255,48 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["lines"] = json!(lines);
             }
             ("surface.peek", params)
+        }
+        "capture" => {
+            // peek 의 그림 짝. 텍스트로는 안 보이는 것(색·정렬·겹침)을 판정하려면
+            // 화면 자체가 필요하다 — 결과 경로를 Read 로 열면 된다.
+            //   capture [surface_id] [path] [--max-width N]
+            //   capture --window [path] [--max-width N]
+            //
+            // `--window` 는 pane 이 아니라 **창 한 장**이다. pane 만 찍어서는 사이드바·
+            // 탭바·우측 칼럼이 안 보여, 에이전트가 제가 만든 UI 를 확인할 수 없다.
+            // 신호는 **빈 surface_id** — GUI 쪽(`arm_pane_capture`)이 그때 크롭을 안 세운다.
+            let mut positional: Vec<String> = Vec::new();
+            let mut max_width: Option<u64> = None;
+            let mut whole_window = false;
+            let mut it = args.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--window" => whole_window = true,
+                    "--max-width" | "-w" => {
+                        max_width = it.next().and_then(|s| s.parse().ok());
+                    }
+                    s if s.starts_with("--max-width=") => {
+                        max_width = s.split_once('=').and_then(|(_, v)| v.parse().ok());
+                    }
+                    s => positional.push(s.to_string()),
+                }
+            }
+            let surface = if whole_window {
+                String::new()
+            } else {
+                positional.first().cloned().or_else(|| std::env::var("KASATERM_PANE_ID").ok()).ok_or_else(
+                    || anyhow!("capture needs a surface_id (or $KASATERM_PANE_ID) — or --window for the whole window"),
+                )?
+            };
+            let mut params = json!({ "surface_id": surface });
+            // `--window` 면 pane 자리가 없으니 경로가 첫 위치 인자다.
+            if let Some(p) = positional.get(usize::from(!whole_window)) {
+                params["path"] = json!(p);
+            }
+            if let Some(w) = max_width {
+                params["max_width"] = json!(w);
+            }
+            ("surface.capture", params)
         }
         "transcript" => {
             // Structured dialogue of a sibling pane's claude: the last N turns
@@ -914,17 +1358,43 @@ fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
 // ---------------------------------------------------------------- sessions --
 
 /// 터미널 세션 피커 본체. `interactive=false`(sessions)면 목록만, `true`(resume)면
-/// 번호 입력을 받아 그 세션을 `claude --resume` 으로 이어간다. 목록은
-/// `recent_sessions_for`(jsonl 직스캔)라 claude /resume 의 teamName 필터를 안 탄다.
+/// 번호 입력을 받아 그 세션을 이어간다. 목록은 jsonl·SQLite 직스캔이라 claude
+/// /resume 의 teamName 필터를 안 탄다.
+///
+/// 기본은 **세 하네스 전체**(claude·codex·agy)를 가로지른다 — 하네스가 셋이 된
+/// 뒤로 "어디서 뭘 하다 말았나"를 한 자리에서 봐야 하기 때문이다. `--here` 는
+/// 예전처럼 지금 cwd 의 claude 세션만 본다(그 프로젝트 것만 훑을 때).
 fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     let limit = args
         .iter()
         .find_map(|s| s.parse::<usize>().ok())
         .unwrap_or(20);
+    let here = args.iter().any(|a| a == "--here");
+    // 하네스를 대놓고 고를 수 있어야 한다. 합친 목록은 최신순이라 요즘 안 쓰는
+    // 쪽(예: codex)이 통째로 뒤로 밀리는데, 그걸 찾자고 limit 를 키우면 화면이
+    // 다른 하네스로 덮인다.
+    let only = args
+        .iter()
+        .find(|a| matches!(a.as_str(), "claude" | "codex" | "agy"))
+        .cloned();
     let cwd = std::env::current_dir().context("cwd")?;
-    let list = kasa_socket::sessions::recent_sessions_for(&cwd, limit);
+    let list = match only.as_deref() {
+        Some("claude") if here => kasa_socket::sessions::recent_sessions_for(&cwd, limit),
+        Some("claude") => kasa_socket::sessions::recent_claude_sessions_all(limit),
+        Some("codex") if here => kasa_socket::sessions::recent_codex_sessions_for(&cwd, limit),
+        Some("codex") => kasa_socket::sessions::recent_codex_sessions(limit),
+        Some("agy") => kasa_socket::sessions::recent_agy_sessions(limit),
+        // 하네스를 안 고른 `--here` 는 세 하네스를 가로지른다 — 예전엔 claude 만
+        // 봐서, 이 폴더에서 codex 로 일한 기록이 목록에 없는 것이 됐다.
+        _ if here => kasa_socket::sessions::recent_sessions_here(&cwd, limit),
+        _ => kasa_socket::sessions::recent_all_sessions(limit),
+    };
     if list.is_empty() {
-        println!("최근 세션 없음 ({})", cwd.display());
+        if here {
+            println!("최근 세션 없음 ({})", cwd.display());
+        } else {
+            println!("최근 세션 없음");
+        }
         return Ok(());
     }
     let home = std::env::var("HOME").unwrap_or_default();
@@ -939,14 +1409,34 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         let color = colors.get(&student).map(|h| ansi_fg(h)).unwrap_or_default();
         let dot = if student.is_empty() { format!("{DIM}·{RESET}") } else { format!("{color}●{RESET}") };
         let name_cell = pad_display(&student, 8);
-        let label_cell = pad_display(&clip_display(&s.label, 44), 44);
-        let live_mark = if live.contains(&s.id) { " \x1b[31m[실행중]\x1b[0m" } else { "" };
+        let label_cell = pad_display(&clip_display(&s.label, 38), 38);
+        // 실행 중 표시는 claude 세션 id 로만 판정된다(live_session_ids). 다른
+        // 하네스에 그 잣대를 대면 늘 "아님"이라 거짓 안심을 준다 — 아예 안 붙인다.
+        let live_mark = if s.harness == "claude" && live.contains(&s.id) {
+            " \x1b[31m[실행중]\x1b[0m"
+        } else {
+            ""
+        };
+        // 위치는 프로젝트 이름이 제일 쓸모 있다. cwd 를 모르는 하네스(codex 등)는
+        // short id 로 대신한다 — 목록에서 같은 제목을 가릴 최소한의 단서.
+        let where_cell = std::path::Path::new(&s.cwd)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| s.id.chars().take(8).collect());
         println!(
-            "{:>3}  {dot} {color}{name_cell}{RESET} {label_cell} {DIM}{:>7} · {}{RESET}{live_mark}",
+            "{:>3}  {dot} {color}{name_cell}{RESET} {label_cell} {DIM}{:<6} {:>7} · {}{RESET}{live_mark}",
             i + 1,
+            s.harness,
             rel_time(s.mtime),
-            &s.id[..8.min(s.id.len())],
+            clip_display(&where_cell, 18),
         );
+        // 제목은 세션이 무엇으로 시작했나일 뿐이다. 어디서 멈췄는지는 이 줄에만
+        // 있고, 그게 스무 개 중 하나를 고르는 근거가 된다. 없으면 안 그린다 —
+        // 빈 들여쓰기 줄이 목록 높이만 두 배로 만든다.
+        if !s.preview.is_empty() {
+            println!("     {DIM}{}{RESET}", clip_display(&s.preview, term_cols().saturating_sub(6)));
+        }
     }
     if !interactive {
         return Ok(());
@@ -962,35 +1452,33 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     let Some(sel) = n.checked_sub(1).and_then(|i| list.get(i)) else {
         return Err(anyhow!("{n}번 세션이 없어요 (1..{})", list.len()));
     };
-    if live.contains(&sel.id) {
+    if sel.harness == "claude" && live.contains(&sel.id) {
         return Err(anyhow!(
             "이미 실행 중인 세션이에요 ({}) — 그 pane 을 쓰거나 `claude agents` 로 attach 하세요. \
              중복 --resume 은 프로세스가 갈라져요.",
             &sel.id[..8]
         ));
     }
+    let run = kasa_socket::sessions::resume_command(&sel.harness, &sel.id, &sel.cwd);
     // 사용자 셸(-i)로 실행 — zshrc 의 claude() 래퍼(권한 플래그 등)와 pane PATH 의
     // kasaterm shim(트리플·페르소나)을 사람이 직접 친 것과 똑같이 태운다.
-    // id 는 recent_sessions_for 가 uuid 검증을 마친 값이라 인터폴레이션 안전.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let err = std::process::Command::new(shell)
-            .arg("-ic")
-            .arg(format!("claude --resume {}", sel.id))
-            .exec();
-        Err(anyhow!("claude 실행 실패: {err}"))
+        let err = std::process::Command::new(shell).arg("-ic").arg(&run).exec();
+        Err(anyhow!("{} 실행 실패: {err}", sel.harness))
     }
     #[cfg(not(unix))]
     {
         let status = std::process::Command::new("cmd")
-            .args(["/C", &format!("claude --resume {}", sel.id)])
+            .args(["/C", &run])
             .status()
-            .context("claude 실행")?;
-        if status.success() { Ok(()) } else { Err(anyhow!("claude exit {status}")) }
+            .context("하네스 실행")?;
+        if status.success() { Ok(()) } else { Err(anyhow!("exit {status}")) }
     }
 }
+
 
 /// 세션 제목 변경 본체 — `rename [sid|sid8] <이름...>`. sid 생략 시 이 pane 의
 /// 세션($KASATERM_RESUMED_SID > $KASATERM_SESSION_ID). claude `/rename` 과 같은
@@ -1170,6 +1658,26 @@ fn display_width(s: &str) -> usize {
 }
 
 /// 표시폭 기준으로 자르기(넘치면 … 붙임).
+/// 터미널 가로 칸 수. 못 알아내면 80 으로 본다.
+///
+/// 접히면 목록이 통째로 망가진다 — 한 항목이 두 줄이 되면서 번호와 내용이
+/// 어긋나 무엇을 고르는지 알 수 없게 된다. 그래서 넘치게 두느니 자른다.
+fn term_cols() -> usize {
+    // TIOCGWINSZ 를 직접 쓰지 않는다 — 상수도 구조체도 플랫폼마다 달라서, 손으로
+    // 적으면 한 OS 에서만 맞는 값이 박힌다. `COLUMNS` 도 못 믿는다: 셸이 export
+    // 해야만 있고 파이프 너머로는 안 온다. 그래서 libc 에 맡기고, 그마저 실패하면
+    // (파이프·리다이렉트) 80 으로 본다.
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 20
+        {
+            return ws.ws_col as usize;
+        }
+    }
+    std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 20).unwrap_or(80)
+}
+
 fn clip_display(s: &str, max: usize) -> String {
     let flat: String = s
         .chars()
@@ -1240,8 +1748,10 @@ const SL_C_CTX: &str = "ff9e64";
 const SL_C_SEP: &str = "565f89";
 const SL_C_FALLBACK: &str = "a0a6b0";
 
-// 학생 프사 자리표시자 — kasaterm 이 U+FFFC 연속을 프사(bust)로 대체. 5칸 고정.
-const SL_SPRITE: &str = "\u{fffc}\u{fffc}\u{fffc}\u{fffc}\u{fffc}";
+// kasaterm pane 표식 — 옛 프사 자리표시자(5칸)를 프사 제거와 함께 1칸으로 줄인 것.
+// **지우지 마라**: agents 뷰 판정·stale statusline 복구·standing 앵커가 이 문자의
+// 존재를 근거로 삼는다(statusline.py 의 SPRITE 주석에 자세히 적어 뒀다).
+const SL_SPRITE: &str = "\u{fffc}";
 
 struct SlIcons {
     model: &'static str,
@@ -1274,6 +1784,31 @@ fn sl_home() -> std::path::PathBuf {
 
 fn sl_read_json(path: &std::path::Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// 훅 stdin → (창 크기, 사용률%, 사용 토큰). 화면 표시와 GUI 보고가 같은 값을 쓰도록 한
+/// 곳에서만 계산한다. 모델명으로 창을 추정하지 않는다 — 하네스가 준 값이 정본이다.
+/// 예외는 Fable 5 뿐: 실제 1M 창인데 Claude Code(2.1.207)가 200k 로 잘못 보고해(#63015
+/// 계열, 31만 토큰 요청이 실제 성공함을 확인) 알려진 진짜 창으로 재계산한다. 더 큰 쪽만
+/// 취하는 보정이라 하네스 메타데이터가 고쳐지면 자동으로 무해해진다.
+fn sl_context(d: &Value) -> (u64, f64, u64) {
+    let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
+    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tot = ctx.get("total_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mid_owned = d
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mid = mid_owned.split('[').next().unwrap_or("");
+    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
+    if known > win {
+        win = known;
+        pct = (tot as f64 / win as f64 * 100.0).min(100.0);
+    }
+    (win, pct, tot)
 }
 
 fn sl_git_branch(cwd: &str) -> Option<String> {
@@ -1319,13 +1854,23 @@ fn run_statusline() {
         .unwrap_or_default();
     let session_id = d.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
 
-    // claude 내부 cd 를 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행(비동기,
-    // statusline 출력을 지연시키지 않는다). pane 밖에선 무동작.
+    // claude 내부 cd 와 컨텍스트 창을 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행
+    // (비동기, statusline 출력을 지연시키지 않는다). pane 밖에선 무동작. 창을 함께
+    // 보내는 이유는 transcript 의 model 에 `[1m]` 이 안 실려 GUI 가 1M 세션을 200k 로
+    // 오판하기 때문 — 하네스가 준 이 값만이 정본이다.
     if let Some(pane) = sl_env("KASATERM_PANE_ID") {
         if !cwd.is_empty() {
             if let Ok(me) = std::env::current_exe() {
+                let (ctx_win, _, ctx_tot) = sl_context(&d);
+                let (win_s, tot_s) = (ctx_win.to_string(), ctx_tot.to_string());
+                // 재시작 뒤 같은 모델·effort 로 되살리려고 함께 싣는다. `id` 는 **가공
+                // 없이** — `[1m]` 을 떼면 되먹였을 때 1M 세션이 200k 로 강등된다.
+                let model = d.pointer("/model/id").and_then(|v| v.as_str()).unwrap_or("");
+                let effort = d.pointer("/effort/level").and_then(|v| v.as_str()).unwrap_or("");
                 let _ = std::process::Command::new(me)
-                    .args(["report-cwd", &pane, &cwd, session_id])
+                    .args([
+                        "report-cwd", &pane, &cwd, session_id, &win_s, &tot_s, model, effort,
+                    ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn();
@@ -1367,10 +1912,12 @@ fn run_statusline() {
             .find(|(k, _)| k == name)
             .map(|(_, v)| *v)
             .unwrap_or(SL_C_FALLBACK);
-        let c = ansi_fg(hex);
+        // pane 안에서는 학생을 안 쓴다 — pane 헤더가 이미 보여준다. 밖에서는 헤더가
+        // 없으니 여기서만 알 수 있다. (statusline.py 와 출력 바이트가 같아야 한다.)
         if sl_env("KASATERM_PANE_ID").is_some() {
-            parts.push(format!("{c}{SL_SPRITE}{SL_RESET}"));
+            parts.push(SL_SPRITE.to_string());
         } else {
+            let c = ansi_fg(hex);
             parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}"));
         }
     }
@@ -1404,23 +1951,7 @@ fn run_statusline() {
         .unwrap_or_default();
     parts.push(format!("{}{} {dir_name}{SL_RESET}", ansi_fg(SL_C_DIR), ic.folder));
 
-    // ctx% — Fable 5 창 오보고(200k) 보정: 알려진 진짜 창(1M)이 더 크면 재계산.
-    let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
-    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let mid_owned = d
-        .get("model")
-        .and_then(|m| m.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mid = mid_owned.split('[').next().unwrap_or("");
-    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
-    if known > win {
-        win = known;
-        let tot = ctx.get("total_input_tokens").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        pct = (tot / win as f64 * 100.0).min(100.0);
-    }
+    let (win, pct, _) = sl_context(&d);
     let win_s = if win >= 1_000_000 {
         format!("·{}M", win / 1_000_000)
     } else if win > 0 {

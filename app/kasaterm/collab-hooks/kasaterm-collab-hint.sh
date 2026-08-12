@@ -14,6 +14,7 @@ read -r -d '' CTX <<'EOF'
 
 네가 능동적으로 할 것:
 - 작업을 맡을 때 선언: kasacollab task add "무슨 일" (다른 pane과 안 겹치게). 끝나면 kasacollab task done <id>.
+- 다른 pane이 시킨 작업(브리프)을 마쳤으면 마지막에: kasaterm-cli done succeeded "한 줄: 뭘 했고 뭐가 남았나" — board에 완료가 정본으로 뜬다(추정 아님). 실패로 끝나도 숨기지 말고 failed로 같은 보고를 해라. (kasacollab task done은 태스크 목록 정리, kasaterm-cli done은 pane 완료 보고 — 다른 것)
 - 다른 pane에 말 걸기: kasacollab msg %N "메시지" (상대가 kasacollab inbox로 확인). 급히 깨우려면 kasaterm-cli tell %N "메시지" (idle claude를 즉시 깨운다).
 - kasacollab = python3 ~/.claude/hooks/kasacollab.py — task add|list|done, msg, inbox.
 

@@ -35,8 +35,8 @@ impl Backend for FakeBackend {
     fn focus_surface(&self, _: &str) -> Result<()> {
         Ok(())
     }
-    fn split_surface(&self, _: SplitDirection, _: bool) -> Result<SurfaceInfo> {
-        Ok(SurfaceInfo { id: "%x".into(), workspace_id: "w".into(), title: None })
+    fn split_surface(&self, _: SplitDirection, _: bool, _: Option<&str>) -> Result<SurfaceInfo> {
+        Ok(SurfaceInfo { id: "%x".into(), workspace_id: "w".into(), title: None, cwd: None, character: None })
     }
     fn send_key(&self, _: Option<&str>, _: &str) -> Result<()> {
         Ok(())
@@ -80,7 +80,7 @@ impl Backend for FakeBackend {
         Ok(f
             .panes
             .iter()
-            .map(|id| SurfaceInfo { id: id.clone(), workspace_id: "w".into(), title: None })
+            .map(|id| SurfaceInfo { id: id.clone(), workspace_id: "w".into(), title: None, cwd: None, character: None })
             .collect())
     }
 
