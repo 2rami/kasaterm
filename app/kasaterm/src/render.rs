@@ -1199,6 +1199,11 @@ impl App {
                         }
                     }
                 }
+                // ` ultracode ` 배지는 지운다 — 모드는 입력박스 글로우가 이미
+                // 말하므로 글자는 중복이고, 그 자리는 /rename 세션명 자리라 이름이
+                // 바뀐 것처럼 읽힌다(2026-08-12 지적 「/rename 그자리에 ultracode
+                // 써진다」). find_titled_rule 보다 먼저 — 지운 뒤엔 순수 rule 이다.
+                erase_ultracode_badge(&mut composed);
                 // /rename 세션명 아웃라인 — claude 입력박스 위 "── 세션명 ──" 구분선의
                 // 이름 텍스트 섬을 찾아 그 셀 범위를 rename/학생 색 사각 테두리로 두른다
                 // (거노). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
@@ -9695,6 +9700,55 @@ fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> 
     None
 }
 
+/// claude 2.1.228 이 세션명 자리(입력박스 상단 보더 우측 끝)에 그리는 ` ultracode `
+/// 배지를 보더 대시로 되메운다 — 모드는 입력박스 글로우가 이미 말하므로 글자는
+/// 중복이고, 그 자리는 /rename 세션명 자리라 이름이 바뀐 것처럼 읽힌다(2026-08-12
+/// 지적). ` ultracode  fast ` 처럼 이어 붙는 태그도 같은 섬이라 함께 지워진다.
+/// 진짜 세션명이 이 단어로 시작하는 극단 케이스만 함께 잃는다 — find_titled_rule
+/// 의 스킵과 같은 트레이드. 스킵은 이 소거가 안 도는 경로의 보험으로 남긴다.
+fn erase_ultracode_badge(rows: &mut [Vec<GridCell>]) {
+    let n = rows.len();
+    for r in (n.saturating_sub(10)..n).rev() {
+        let row = &mut rows[r];
+        let dashes = row.iter().filter(|c| c.ch == '─').count();
+        if dashes < row.len() / 2 {
+            continue;
+        }
+        let is_name = |c: &GridCell| {
+            !matches!(c.ch, ' ' | '\0') && !('\u{2500}'..='\u{257F}').contains(&c.ch)
+        };
+        let Some(first) = row.iter().position(is_name) else { continue };
+        let Some(last) = row.iter().rposition(is_name) else { continue };
+        let island: String = row[first..=last]
+            .iter()
+            .filter_map(|c| (c.ch != '\0').then_some(c.ch))
+            .collect();
+        if !island.trim().starts_with("ultracode") {
+            continue;
+        }
+        // 섬과 양옆 공백(대시 경계 안쪽 전부)을 이웃 대시 셀 스타일로 되메운다 —
+        // 색·배경이 보더와 이어져야 이음매가 안 보인다.
+        let c0 = row[..first].iter().rposition(|c| c.ch == '─').map_or(first, |i| i + 1);
+        let c1 = row[last + 1..]
+            .iter()
+            .position(|c| c.ch == '─')
+            .map_or(last, |i| (last + 1 + i).saturating_sub(1));
+        let Some(donor) = row[..c0]
+            .iter()
+            .rev()
+            .find(|c| c.ch == '─')
+            .or_else(|| row[c1 + 1..].iter().find(|c| c.ch == '─'))
+            .cloned()
+        else {
+            continue;
+        };
+        for c in row[c0..=c1].iter_mut() {
+            *c = donor.clone();
+        }
+        return;
+    }
+}
+
 /// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
 /// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
 /// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
@@ -11444,6 +11498,31 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[both]).is_none(), "배지 + fast 태그도 무시");
         let title = row_from(&format!("{} 세션명 {}", dash(30), dash(30)), 80);
         assert!(find_titled_rule(&[title]).is_some(), "세션명 rule 은 유지");
+    }
+
+    /// 배지는 무시를 넘어 **지워진다** — 그 자리는 /rename 세션명 자리라 글자가
+    /// 남아 있으면 이름이 바뀐 것처럼 읽힌다(2026-08-12 지적 「/rename 그자리에
+    /// ultracode 써진다」). 세션명 rule 은 건드리면 안 된다.
+    #[test]
+    fn ultracode_badge_erased_from_rule() {
+        let dash = |n: usize| "─".repeat(n);
+        for badge_text in ["ultracode", "ultracode  fast"] {
+            let badge =
+                row_from(&format!("{} {badge_text} {}", dash(55), dash(4)), 80);
+            let mut rows = vec![badge];
+            erase_ultracode_badge(&mut rows);
+            let text: String = rows[0].iter().map(|c| c.ch).collect();
+            assert!(!text.contains("ultracode"), "배지가 남았다: {text:?}");
+            assert!(
+                rows[0].iter().all(|c| matches!(c.ch, '─' | ' ' | '\0')),
+                "대시로 되메워져야 한다: {text:?}"
+            );
+        }
+        let title = row_from(&format!("{} 세션명 {}", dash(30), dash(30)), 80);
+        let mut rows = vec![title];
+        erase_ultracode_badge(&mut rows);
+        let text: String = rows[0].iter().map(|c| c.ch).collect();
+        assert!(text.contains("세션명"), "세션명 rule 을 지우면 안 된다: {text:?}");
     }
 
     // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
