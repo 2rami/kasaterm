@@ -1834,6 +1834,35 @@ impl App {
             .filter(|s| !s.is_empty());
         eprintln!("[autosettings] open settings window cat={cat_env} student={student:?}");
         self.open_settings_window(event_loop, Some(cat), student);
+        // 클릭이 유일한 진입점인 동작을 헤드리스로 실행한다. 테마 복제는 누르기
+        // 전엔 아무 흔적도 안 남겨서, 이 손잡이가 없으면 「눌러 봤다」를 사람 손으로만
+        // 확인할 수 있다. UI 래퍼(토스트·폴더 열기)는 건너뛰고 파일을 쓰는 부분만
+        // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
+        match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
+            "" => {}
+            "export-theme" => match crate::socket::export_current_theme() {
+                Ok(d) => eprintln!("[autosettings] 테마 복제 → {}", d.display()),
+                Err(e) => eprintln!("[autosettings] 테마 복제 실패: {e}"),
+            },
+            other => eprintln!("[autosettings] 모르는 액션 '{other}'"),
+        }
+        // 설정은 **별도 OS 창**이라 `KASATERM_AUTOCAPTURE`(메인 창 전용)로는 한 장도
+        // 못 찍는다 — 폼을 고치면서 화면을 확인할 길이 아예 없었다(2026-08-13).
+        // popout 하네스와 같은 방식으로 그 창 자신에게 캡처를 건다. +1200ms 는 새
+        // 창이 첫 프레임을 다 그릴 시간이고, 카드 높이가 직전 프레임 값을 쓰므로
+        // 두 프레임은 지나야 카드가 제 높이로 나온다.
+        if let Ok(cap) = std::env::var("KASATERM_AUTOSETTINGS_CAP") {
+            if !cap.is_empty() {
+                let ms: u64 = std::env::var("KASATERM_AUTOSETTINGS_CAP_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1200);
+                if let Some(a) = self.aux_windows.last_mut() {
+                    a.pending_capture =
+                        Some((Instant::now() + std::time::Duration::from_millis(ms), cap));
+                }
+            }
+        }
         // 피드백 본문은 키 이벤트로만 채워지는데 헤드리스엔 그 경로가 없다 —
         // 버퍼를 직접 심어 wrap·캐럿·활성 버튼을 캡처로 본다.
         // KASATERM_AUTOFEEDBACK_SAVE=1 이면 저장까지 눌러, 캡처엔 비워진 폼과
