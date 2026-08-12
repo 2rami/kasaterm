@@ -2046,8 +2046,7 @@ pub(crate) fn paint_settings(
             let mut y = fy;
             // ── 테마 고르기 ──────────────────────────────────────────────
             y = row_wide(g, fx, y, clip, "Theme",
-                &["캐릭터 세트를 통째로 갈아 끼웁니다 — 이름·색·그림이 한 벌로 바뀌어요",
-                  "폴더 하나가 테마 하나: ~/.config/kasaterm/themes/<이름>/"]);
+                &["폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다"]);
             // 번들을 맨 앞에 세운다 — 폴더가 없어 list_themes 에 안 잡히지만
             // 「지금 무엇을 쓰는가」는 목록에 보여야 고를 수 있다.
             let theme_rows: Vec<(&str, &str)> = std::iter::once(("", "블루 아카이브 (기본)"))
@@ -2056,7 +2055,9 @@ pub(crate) fn paint_settings(
             let row_h = 30.0_f32;
             for (id, label) in theme_rows {
                 if y > clip {
-                    let r = (fx - 6.0, y - 2.0, fw.min(380.0), row_h);
+                    // 카드 안에선 라벨 왼쪽선에 맞춘다 — 목록만 밖으로 튀어나오면
+                    // 선택 박스가 카드에서 새어 나온 것처럼 보인다.
+                    let r = (fx, y - 2.0, fw.min(380.0), row_h);
                     let selected = ctx.theme_active == id;
                     let hover = inside(r, ctx.cursor);
                     g.hover_pointer |= hover;
@@ -2080,9 +2081,10 @@ pub(crate) fn paint_settings(
             // 「테마로만 쓸지, 말투까지 쓸지」 — 이 스위치가 그 갈림길이라 테마
             // 바로 아래 둔다(설정은 Claude 쪽과 같은 `claude_persona` 하나다).
             {
+                // 「새로 여는 pane 부터」는 빼면 안 된다 — 이미 도는 pane 은 persona 가
+                // spawn 시 고정이라 안 바뀌는데, 그걸 안 알리면 전환이 실패한 것으로 읽힌다.
                 let (cr, ny) = row2(g, fx, y, fw, clip, "Persona",
-                    &["끄면 그림·이름·색만 씁니다. 켜면 캐릭터 말투로 대답해요",
-                      "이미 떠 있는 pane 은 그대로고, 새로 여는 pane 부터 바뀝니다"], TOGGLE);
+                    &["켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.claude_persona, ctx.cursor);
                     rects.push((SettingsAction::ToggleClaudePersona, cr));
@@ -2090,9 +2092,12 @@ pub(crate) fn paint_settings(
                 y = ny;
             }
 
+            // 파일명은 줄일 수 없다 — 이걸 안 보고 맞출 방법이 없고, 한 모션이라도
+            // 빠지면 그 모션만 번들로 떨어져 한 캐릭터가 두 그림으로 갈린다.
+            // wave·cheer 가 빠져 있었다(2026-08-13): 안내대로 idle·walk 만 넣은 사용자는
+            // 승인 대기·턴 완료 때만 옛 그림이 튀어나오는 이유를 알 길이 없었다.
             y = row_wide(g, fx, y, clip, "Character images",
-                &["테마 폴더의 sprites/ 에 이미지를 넣으면 학생 그림이 바뀌어요",
-                  "파일명: <slug>-profile.png · <slug>-0..3.png · <slug>-walk-0..5.png · schale-logo.png"]);
+                &["테마 폴더의 sprites/ 에: <slug>-0..3 · -walk-0..5 · -wave-0..3 · -cheer-0..3 · -profile.png"]);
             // 액션 버튼 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드) / 본보기 내보내기.
             if y > clip {
                 let mut bx = fx;
