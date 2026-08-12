@@ -18,6 +18,9 @@
 
 use kasa_bridge::layout::Layout;
 
+const MIN_PANE_COLS: u16 = 20;
+const MIN_PANE_ROWS: u16 = 6;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitDir {
     /// Children laid out left-to-right (vertical divider line).
@@ -42,6 +45,35 @@ pub enum PtyLayout {
 }
 
 impl PtyLayout {
+    fn min_size(&self) -> (u16, u16) {
+        match self {
+            PtyLayout::Leaf { .. } => (MIN_PANE_COLS, MIN_PANE_ROWS),
+            PtyLayout::Split { dir: SplitDir::Horizontal, a, b, .. } => {
+                let (aw, ah) = a.min_size();
+                let (bw, bh) = b.min_size();
+                (aw.saturating_add(bw), ah.max(bh))
+            }
+            PtyLayout::Split { dir: SplitDir::Vertical, a, b, .. } => {
+                let (aw, ah) = a.min_size();
+                let (bw, bh) = b.min_size();
+                (aw.max(bw), ah.saturating_add(bh))
+            }
+        }
+    }
+
+    fn split_extent(total: u16, ratio: f32, min_a: u16, min_b: u16) -> (u16, u16) {
+        if total < 2 {
+            return (total, 0);
+        }
+        let desired = ((total as f32) * ratio).round() as u16;
+        let a = if total >= min_a.saturating_add(min_b) {
+            desired.clamp(min_a, total - min_b)
+        } else {
+            desired.clamp(1, total - 1)
+        };
+        (a, total - a)
+    }
+
     pub fn single(pane_id: impl Into<String>) -> Self {
         PtyLayout::Leaf { pane_id: pane_id.into() }
     }
@@ -263,16 +295,16 @@ impl PtyLayout {
                     // Reserve one cell of divider between children so the
                     // visual gutter the renderer draws doesn't double up
                     // on a pane's own cells.
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (min_a, _) = a.min_size();
+                    let (min_b, _) = b.min_size();
+                    let (aw, bw) = Self::split_extent(w, *ratio, min_a, min_b);
                     a.walk_rects(x, y, aw, h, out);
                     b.walk_rects(x + aw, y, bw, h, out);
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (_, min_a) = a.min_size();
+                    let (_, min_b) = b.min_size();
+                    let (ah, bh) = Self::split_extent(h, *ratio, min_a, min_b);
                     a.walk_rects(x, y, w, ah, out);
                     b.walk_rects(x, y + ah, w, bh, out);
                 }
@@ -298,9 +330,9 @@ impl PtyLayout {
             }
             PtyLayout::Split { dir, ratio, a, b } => match dir {
                 SplitDir::Horizontal => {
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (min_a, _) = a.min_size();
+                    let (min_b, _) = b.min_size();
+                    let (aw, bw) = Self::split_extent(w, *ratio, min_a, min_b);
                     let children = vec![
                         a.build_layout(x, y, aw, h),
                         b.build_layout(x + aw, y, bw, h),
@@ -308,9 +340,9 @@ impl PtyLayout {
                     Layout::HSplit { w, h, x, y, children }
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (_, min_a) = a.min_size();
+                    let (_, min_b) = b.min_size();
+                    let (ah, bh) = Self::split_extent(h, *ratio, min_a, min_b);
                     let children = vec![
                         a.build_layout(x, y, w, ah),
                         b.build_layout(x, y + ah, w, bh),
@@ -348,9 +380,9 @@ impl PtyLayout {
         if let PtyLayout::Split { dir, ratio, a, b } = self {
             match dir {
                 SplitDir::Horizontal => {
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (min_a, _) = a.min_size();
+                    let (min_b, _) = b.min_size();
+                    let (aw, bw) = Self::split_extent(w, *ratio, min_a, min_b);
                     out.push(Divider {
                         path: path.clone(),
                         dir: *dir,
@@ -366,9 +398,9 @@ impl PtyLayout {
                     path.pop();
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (_, min_a) = a.min_size();
+                    let (_, min_b) = b.min_size();
+                    let (ah, bh) = Self::split_extent(h, *ratio, min_a, min_b);
                     out.push(Divider {
                         path: path.clone(),
                         dir: *dir,
@@ -565,19 +597,22 @@ impl PtyLayout {
             return false;
         };
         if path.is_empty() {
-            let r = match dir {
-                SplitDir::Horizontal => pos.saturating_sub(x) as f32 / w.max(1) as f32,
-                SplitDir::Vertical => pos.saturating_sub(y) as f32 / h.max(1) as f32,
+            let (total, offset, min_a, min_b) = match dir {
+                SplitDir::Horizontal => (w, x, a.min_size().0, b.min_size().0),
+                SplitDir::Vertical => (h, y, a.min_size().1, b.min_size().1),
             };
-            *ratio = r.clamp(0.1, 0.9);
+            let requested = pos.saturating_sub(offset).min(total);
+            let requested_ratio = requested as f32 / total.max(1) as f32;
+            let (first, _) = Self::split_extent(total, requested_ratio, min_a, min_b);
+            *ratio = first as f32 / total.max(1) as f32;
             return true;
         }
         let (head, tail) = path.split_first().unwrap();
         match dir {
             SplitDir::Horizontal => {
-                let aw = ((w as f32) * *ratio).round() as u16;
-                let aw = aw.min(w.saturating_sub(1)).max(1);
-                let bw = w.saturating_sub(aw);
+                let (min_a, _) = a.min_size();
+                let (min_b, _) = b.min_size();
+                let (aw, bw) = Self::split_extent(w, *ratio, min_a, min_b);
                 if *head == 0 {
                     a.resize_at(tail, pos, x, y, aw, h)
                 } else {
@@ -585,9 +620,9 @@ impl PtyLayout {
                 }
             }
             SplitDir::Vertical => {
-                let ah = ((h as f32) * *ratio).round() as u16;
-                let ah = ah.min(h.saturating_sub(1)).max(1);
-                let bh = h.saturating_sub(ah);
+                let (_, min_a) = a.min_size();
+                let (_, min_b) = b.min_size();
+                let (ah, bh) = Self::split_extent(h, *ratio, min_a, min_b);
                 if *head == 0 {
                     a.resize_at(tail, pos, x, y, w, ah)
                 } else {
@@ -808,6 +843,30 @@ mod tests {
         t.resize_divider(&path, 0, 80, 24);
         let left = t.leaf_rects(80, 24)[0].3;
         assert!(left >= 8 && left < 40, "clamped left width = {left}");
+    }
+
+    #[test]
+    fn nested_layout_preserves_leaf_minimums_when_space_allows() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        t.split_leaf("%1", SplitDir::Horizontal, "%2".into());
+        t.set_ratio_at(&[], 0.9);
+        t.set_ratio_at(&[1], 0.9);
+        let rects = t.leaf_rects(80, 24);
+        assert!(
+            rects
+                .iter()
+                .all(|(_, _, _, w, h)| *w >= MIN_PANE_COLS && *h >= MIN_PANE_ROWS)
+        );
+    }
+
+    #[test]
+    fn undersized_layout_still_allocates_every_leaf() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        let rects = t.leaf_rects(10, 4);
+        assert_eq!(rects.iter().map(|r| r.3).sum::<u16>(), 10);
+        assert!(rects.iter().all(|r| r.3 >= 1));
     }
 
     #[test]

@@ -1126,11 +1126,17 @@ impl App {
                         if let Some((ar, ac)) = approval_anchor(&composed) {
                             pet_busy = true;
                             const DOT: f32 = 40.0;
-                            let x = (body_left + (ac + 2) as f32 * scw)
-                                .min(body_left + cols_now as f32 * scw - DOT);
-                            let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
                             if student_has_sprite(slug, "wave") {
-                                waiting_slots.push((slug, (x, y, DOT, DOT)));
+                                let pane_w = cols_now as f32 * scw;
+                                let pane_h = rows_now as f32 * sch;
+                                let dot = DOT.min(pane_w).min(pane_h);
+                                if dot >= scw.min(sch) {
+                                    let x = (body_left + (ac + 2) as f32 * scw)
+                                        .clamp(body_left, body_left + pane_w - dot);
+                                    let y = (body_top + (ar + 1) as f32 * sch - dot)
+                                        .clamp(body_top, body_top + pane_h - dot);
+                                    waiting_slots.push((slug, (x, y, dot, dot)));
+                                }
                             }
                         }
                     }
@@ -1210,7 +1216,8 @@ impl App {
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
-                                let h = INPUT_STANDING_ROWS as f32 * sch;
+                                let h = (INPUT_STANDING_ROWS as f32 * sch)
+                                    .min(rows_now as f32 * sch);
                                 {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                                     // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
