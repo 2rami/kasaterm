@@ -939,10 +939,7 @@ pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     if name == "샬레" {
         return Some(unpack(0x3a6eb4_ff));
     }
-    CHARACTER_ACCENTS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, rgb)| unpack((rgb << 8) | 0xff))
+    roster().accents.iter().find(|(n, _)| *n == name).map(|(_, rgb)| unpack((rgb << 8) | 0xff))
 }
 
 /// 같은 학생이 여러 pane 에 떠 있을 때 n번째(0-기준) 인스턴스의 accent 변주 —
@@ -1002,12 +999,115 @@ pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
 // 위반은 build.rs 가 컴파일 에러로 막는다.
 include!(concat!(env!("OUT_DIR"), "/character_slugs.rs"));
 
+/// 지금 화면이 쓰는 이름↔슬러그·이름→색 표.
+#[derive(Clone, Copy)]
+struct Roster {
+    slugs: &'static [(&'static str, &'static str)],
+    accents: &'static [(&'static str, u32)],
+}
+
+static ROSTER: std::sync::RwLock<Option<Roster>> = std::sync::RwLock::new(None);
+
+/// 활성 로스터. 테마(또는 사용자 override)의 `theme.json`/`characters.json` 이 앞서고,
+/// 읽을 게 없으면 위 코드젠 상수(번들 기본값)로 떨어진다 — 스프라이트가 이미 쓰는
+/// 순서(override 먼저, 번들 폴백)와 같다.
+///
+/// 코드젠을 남겨 둔 이유: 번들 로스터의 정본이자 슬러그 중복·형식 위반을 컴파일 때
+/// 막는 관문이다. 런타임 테마엔 그 관문이 없으니, 깨진 테마는 여기서 조용히 번들로
+/// 되돌아가는 것이 로스터가 텅 빈 채 도는 것보다 낫다.
+fn roster() -> Roster {
+    if let Some(r) = *ROSTER.read().unwrap() {
+        return r;
+    }
+    let mut w = ROSTER.write().unwrap();
+    // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 구웠을 수 있다.
+    if let Some(r) = *w {
+        return r;
+    }
+    let r = build_roster();
+    *w = Some(r);
+    r
+}
+
+/// 테마를 갈아 끼운 뒤 부른다 — 다음 조회가 새 로스터를 굽는다.
+pub fn invalidate_roster() {
+    *ROSTER.write().unwrap() = None;
+}
+
+fn build_roster() -> Roster {
+    let bundled = Roster { slugs: CHARACTER_SLUGS, accents: CHARACTER_ACCENTS };
+    match kasa_mcp::character::characters_json() {
+        Some(chars) => roster_from(&chars).unwrap_or(bundled),
+        None => bundled,
+    }
+}
+
+/// JSON 주입 버전(테스트용) — 활성 로스터 해석과 분리해 파일 없이 검증한다.
+/// 쓸 만한 항목이 하나도 없으면 None → 호출부가 번들로 떨어진다.
+///
+/// **`&'static` 으로 새는 것은 의도다.** 조회 함수들이 `Option<&'static str>` 을 주고
+/// 호출부가 그걸 그대로 들고 다닌다 — String 으로 바꾸면 렌더 경로가 매 프레임
+/// 할당하게 된다. 로스터는 80명 남짓이고 테마 전환은 사용자가 손으로 하는 일이라,
+/// 전환 한 번에 수 KB 가 남는 쪽을 택했다.
+fn roster_from(chars: &serde_json::Value) -> Option<Roster> {
+    let mut slugs: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut accents: Vec<(&'static str, u32)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for m in roster_entries(chars) {
+        let (Some(name), Some(slug)) = (
+            m.get("name").and_then(|v| v.as_str()),
+            m.get("slug").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        // `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드다(build.rs 와
+        // 같은 규칙으로 접는다). 슬러그가 빈 캐릭터는 그림도 인박스도 없어 건너뛴다.
+        if name.is_empty() || slug.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        let name: &'static str = Box::leak(name.to_string().into_boxed_str());
+        slugs.push((name, Box::leak(slug.to_string().into_boxed_str())));
+        if let Some(c) = m.get("header_color").and_then(|v| v.as_str()).and_then(parse_hex_rgb) {
+            accents.push((name, c));
+        }
+    }
+    if slugs.is_empty() {
+        return None;
+    }
+    Some(Roster {
+        slugs: Box::leak(slugs.into_boxed_slice()),
+        accents: Box::leak(accents.into_boxed_slice()),
+    })
+}
+
+/// leader/leaders/members 를 한 줄로 편다.
+fn roster_entries(chars: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut v = Vec::new();
+    if let Some(l) = chars.get("leader") {
+        v.push(l);
+    }
+    for k in ["leaders", "members"] {
+        if let Some(a) = chars.get(k).and_then(|x| x.as_array()) {
+            v.extend(a.iter());
+        }
+    }
+    v
+}
+
+/// `"#6BCF7F"` → `0x6bcf7f`. 어긋나면 None — 그 캐릭터만 무색으로 두고 넘어간다.
+/// 로스터 전체를 번들로 되돌릴 일은 아니다(색 하나 빠진 것과 테마가 통째로 안 뜨는
+/// 것은 사용자에게 전혀 다른 사고다).
+fn parse_hex_rgb(s: &str) -> Option<u32> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    if h.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(h, 16).ok()
+}
+
 /// 캐릭터명 → 에셋 슬러그.
 pub fn character_slug(name: &str) -> Option<&'static str> {
-    CHARACTER_SLUGS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, s)| *s)
+    roster().slugs.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
 
 /// 캐릭터명 → **teammate agent 이름에 쓰는** 슬러그. 로스터에 없는 커스텀 캐릭터는
@@ -1025,10 +1125,7 @@ pub fn agent_slug(name: &str) -> String {
 /// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸
 /// 학생을 역추적할 때 쓴다(접힌 팀메시지 줄 학생색).
 pub fn slug_character(slug: &str) -> Option<&'static str> {
-    CHARACTER_SLUGS
-        .iter()
-        .find(|(_, s)| *s == slug)
-        .map(|(n, _)| *n)
+    roster().slugs.iter().find(|(_, s)| *s == slug).map(|(n, _)| *n)
 }
 
 /// claude 시작 배너의 "Welcome back <user>!" 를 대체할 배정 학생 인사말 —
@@ -1055,6 +1152,71 @@ pub fn character_welcome(name: &str, user: &str) -> Option<String> {
         _ => return None,
     };
     Some(g)
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::*;
+
+    /// 런타임 로스터는 같은 JSON 에서 **코드젠과 똑같은 표**를 구워야 한다.
+    ///
+    /// 두 벌이 어긋나도 컴파일도 실행도 통과한다 — 슬러그는 teammate inbox 파일명이라,
+    /// 한쪽에만 있는 학생에게 보낸 브리프는 아무도 안 읽는 우편함에 들어가고 보낸 쪽은
+    /// 성공으로 읽는다. 코드젠을 폴백으로 남긴 이상 이 대조가 그 위험을 대신 막는다.
+    #[test]
+    fn runtime_roster_matches_codegen() {
+        let raw = include_str!("../collab-hooks/characters.json");
+        let chars: serde_json::Value = serde_json::from_str(raw).expect("번들 로스터 파싱");
+        let r = roster_from(&chars).expect("번들 로스터를 굽지 못했다");
+        assert_eq!(r.slugs, CHARACTER_SLUGS, "이름↔슬러그 표가 코드젠과 어긋난다");
+        assert_eq!(r.accents, CHARACTER_ACCENTS, "이름→색 표가 코드젠과 어긋난다");
+    }
+
+    /// 쓸 항목이 없는 JSON 은 번들로 떨어진다 — 깨진 테마가 로스터를 비우면 캐릭터
+    /// 배정이 통째로 멈추는데, 그건 오류가 아니라 「학생이 안 뜬다」로만 보인다.
+    #[test]
+    fn empty_or_broken_roster_falls_back() {
+        assert!(roster_from(&serde_json::json!({})).is_none());
+        assert!(roster_from(&serde_json::json!({ "members": [] })).is_none());
+        // 이름만 있고 슬러그가 없는 항목은 그림도 인박스도 없어 쓸 수 없다.
+        assert!(roster_from(&serde_json::json!({ "members": [{ "name": "이름만" }] })).is_none());
+    }
+
+    /// 색이 어긋난 캐릭터 하나가 로스터 전체를 번들로 되돌리면 안 된다 — 색 하나가
+    /// 빠지는 것과 테마가 통째로 안 뜨는 것은 사용자에게 전혀 다른 사고다.
+    #[test]
+    fn bad_color_drops_only_that_accent() {
+        let v = serde_json::json!({
+            "members": [
+                { "name": "가", "slug": "ga", "header_color": "#FF0000" },
+                { "name": "나", "slug": "na", "header_color": "빨강" },
+                { "name": "다", "slug": "da" },
+            ]
+        });
+        let r = roster_from(&v).expect("색이 어긋나도 로스터는 서야 한다");
+        assert_eq!(r.slugs.len(), 3);
+        assert_eq!(r.accents, &[("가", 0xff0000)]);
+    }
+
+    /// `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드라 접혀야 한다.
+    #[test]
+    fn duplicate_leader_entry_folds() {
+        let one = serde_json::json!({ "name": "아로나", "slug": "arona" });
+        let v = serde_json::json!({ "leader": one, "leaders": [one], "members": [] });
+        let r = roster_from(&v).unwrap();
+        assert_eq!(r.slugs, &[("아로나", "arona")]);
+    }
+
+    /// 캐시를 비우고 다시 부르면 새로 굽는다.
+    ///
+    /// 데드락 감시도 겸한다 — `build_roster` 안에서 누가 `roster()` 를 부르면 쓰기
+    /// 잠금을 잡은 채 읽기를 기다려 그대로 멈춘다. 그 회귀는 이 테스트가 매달린다.
+    #[test]
+    fn cache_invalidates_without_deadlock() {
+        let before = roster().slugs.len();
+        invalidate_roster();
+        assert_eq!(roster().slugs.len(), before);
+    }
 }
 
 #[cfg(test)]

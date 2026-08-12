@@ -11818,6 +11818,10 @@ mod student_asset_tests {
     fn bundled_sprite_frames_decode_for_every_student_and_motion() {
         let mut checked = 0;
         let mut with_art = 0;
+        // 여기는 활성 로스터가 아니라 코드젠 상수를 직접 쓴다 — 이건
+        // **번들** 자산이 번들 로스터 전원을 덮는지 보는 테스트다. 런타임 로스터로
+        // 바꾸면 테마를 깐 기계에서 그 테마를 검사하게 되고, 번들 구멍은 못 잡으면서
+        // 남의 테마 때문에 실패한다.
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
             // 로스터(build.rs 가 characters.json 에서 굽는다)와 `student_sprite_png` 의
             // 슬러그 목록은 **정본이 둘**이라 어긋나도 오류가 안 난다 — 빠진 학생은
@@ -11859,6 +11863,7 @@ mod student_asset_tests {
     #[test]
     fn bundled_profile_decodes_for_every_student() {
         let mut with_art = 0;
+        // 코드젠 상수 직접 사용 — 위 테스트와 같은 이유(번들끼리 대조).
         for (_, slug) in crate::theme::CHARACTER_SLUGS {
             let png = student_profile_png(slug).unwrap_or_else(|| {
                 panic!("{slug} 가 로스터엔 있는데 student_profile_png 목록에 없다")
