@@ -8811,6 +8811,13 @@ fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateM
             return None;
         }
         let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        // user 턴만 — 수신측 assistant 가 프로즈에 태그 문자열을 인용하면("
+        // <cross-session-message>에는 머리말만…" 같은 수신 확인) 역스캔이 그
+        // 턴을 최신 메시지로 잡아 진짜 배달을 가린다(2026-08-12 실측: 그 인용
+        // 하나로 7차 배달의 테마가 통째로 안 걸렸다).
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            return None;
+        }
         extract_teammate_msg(&jsonl_user_text(&v)?, sender)
     });
     map.insert(key, (len, found.clone()));
@@ -11990,6 +11997,32 @@ This came from another Claude session";
             .expect("cross-session 줄이 프리필터에서 걸러졌다");
         assert_eq!(m.body, "ROUNDTRIP-OK");
         assert_eq!(m.from_label.as_deref(), Some("타이틀 생성 푸시"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// assistant 가 프로즈에 태그 문자열을 인용해도(수신 확인 답변) 역스캔이
+    /// 그걸 최신 메시지로 잡으면 안 된다 — 진짜 user 배달이 가려진다(2026-08-12
+    /// 실측: 인용 하나로 다음 배달의 테마가 통째로 안 걸렸다).
+    #[test]
+    fn assistant_prose_quoting_the_tag_does_not_shadow_delivery() {
+        let dir = std::env::temp_dir().join("kasaterm-prefilter-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("shadow.jsonl");
+        let user = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": REAL }
+        });
+        let quote = serde_json::json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [{
+                "type": "text",
+                "text": "<cross-session-message>에는 머리말만 실려 오고 본문이 없다"
+            }] }
+        });
+        std::fs::write(&path, format!("{user}\n{quote}\n")).unwrap();
+        let m = latest_teammate_msg(&path, PEER_LABEL)
+            .expect("assistant 인용이 진짜 배달을 가렸다");
+        assert_eq!(m.body, "ROUNDTRIP-OK");
         let _ = std::fs::remove_file(&path);
     }
 
