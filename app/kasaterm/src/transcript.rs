@@ -97,12 +97,513 @@ fn turn_cost(model: &str, ti: u64, to: u64, cr: u64, cc: u64) -> f64 {
     (ti as f64 * pin + to as f64 * pout + cr as f64 * pcr + cc as f64 * pcc) / 1_000_000.0
 }
 
+/// codex 롤아웃 로그인가 — 한 줄이라도 `{timestamp,type,payload}` 꼴이면.
+///
+/// 포맷을 **내용으로** 가른다. 호출부(`socket.rs`)에 종류를 실어 보내는 게 깔끔하지만
+/// 그 파일은 지금 다른 작업이 잡고 있고, 무엇보다 tail 만 보고도 확실히 갈린다 —
+/// claude jsonl 은 `payload` 키가 없고 codex 는 모든 줄에 있다(실측 2026-08-05).
+fn looks_like_codex(tail: &str) -> bool {
+    tail.lines().filter(|l| !l.trim().is_empty()).take(40).any(|l| {
+        serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
+            v.get("payload").is_some_and(|p| p.is_object())
+                && v.get("timestamp").is_some()
+                && v.get("type").and_then(|t| t.as_str()).is_some_and(|t| {
+                    matches!(
+                        t,
+                        "event_msg" | "response_item" | "turn_context" | "session_meta"
+                    )
+                })
+        })
+    })
+}
+
+/// codex 롤아웃의 **머리**에서 `(model, effort)` 를 집는다 — 앞에서부터 첫
+/// `turn_context`. 둘이 같은 줄에 실려 오므로 한 번에 뽑는다.
+///
+/// board 는 꼬리만 읽는데 codex 의 model 은 `turn_context` 에만 실리고, 그게 파일
+/// 앞 **87~122KB** 지점에 있다(실측 2026-08-11, 세션 4개). 그 앞을 채우는 건 지시문
+/// 뭉치다. 꼬리를 키워도 소용없다 — 한 턴이 exec 출력째 실려 512KB 를 넘으므로
+/// 마지막 `turn_context` 는 끝에서 1MB 넘게 떨어져 있다(같은 날 실측).
+///
+/// effort 는 재시작 뒤 되살릴 때 쓴다(`-c model_reasoning_effort=…`). model 과 달리
+/// 없는 세션이 흔하니 빈 문자열이 정상이고, 그때는 플래그를 아예 안 붙인다.
+///
+/// 세션 도중 모델을 갈면 첫 값이 낡는다. 그래도 빈칸보다는 낫다 — board 에서 model
+/// 은 "무엇이 돌고 있나"를 가르는 칸이라 비면 행 자체가 읽히지 않는다.
+pub(crate) fn codex_cfg_from_head(head: &str) -> (String, String) {
+    head.lines()
+        .find_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            if v.get("type")?.as_str()? != "turn_context" {
+                return None;
+            }
+            let p = v.get("payload")?;
+            let get = |k: &str| {
+                p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+            };
+            let m = get("model");
+            // model 이 빈 `turn_context` 는 우리가 찾는 줄이 아니다 — 계속 훑는다.
+            (!m.is_empty()).then(|| (m, get("effort")))
+        })
+        .unwrap_or_default()
+}
+
+/// `item.content[]` 의 텍스트 조각을 잇는다.
+///
+/// ⚠️ 조각의 `type` 으로 거르지 마라 — **대소문자가 갈린다**(실측 2026-08-11:
+/// `UserMessage` 는 `"text"`, `AgentMessage` 는 `"Text"`). `text` 필드가 있는
+/// 조각을 그대로 잇는 편이 스키마가 또 흔들려도 버틴다.
+fn item_text(it: &serde_json::Map<String, serde_json::Value>) -> String {
+    let Some(arr) = it.get("content").and_then(|c| c.as_array()) else { return String::new() };
+    arr.iter()
+        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// codex 롤아웃 로그(`~/.codex/sessions/**/rollout-*.jsonl`) → board 한 줄.
+///
+/// 스키마는 거노 머신에서 직접 재서 매핑했다(2026-08-05, 발화는 2026-08-11 재측):
+/// - `session_meta` → `cwd` (여기 `context_window` 는 숫자가 아니라 `{window_id}` 다)
+/// - `turn_context` → `model`(턴마다 실려 최신이 이긴다)
+/// - `event_msg/token_count` → `info.total_token_usage{input,cached_input,cache_write,output}`
+///   + `info.model_context_window`(실측 258400) — 창 크기의 유일한 실값
+/// - `event_msg/item_completed` → `item.type` 이 `UserMessage`/`AgentMessage` 인 것이
+///   마지막 프롬프트/응답. 옛 로그의 `event_msg/user_message`·`agent_message` 도 받는다.
+///
+/// **비용은 0 으로 둔다.** 로그에 단가도 금액도 없다. claude 쪽 `turn_cost` 처럼
+/// 단가표를 지어 넣으면 board 에 *틀린 숫자*가 뜬다 — 빈칸이 거짓 금액보다 낫다.
+/// 대신 codex 는 `rate_limits.used_percent`/`plan_type` 을 주는데, 구독제라 그쪽이
+/// 실제로 알고 싶은 값이다. 담을 칸이 생기면 그때 싣는다.
+fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    let mut model = String::new();
+    let mut cwd = String::new();
+    let mut last_prompt = String::new();
+    let mut last_reply = String::new();
+    let (mut ti, mut to, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
+    let mut observed_ctx = 0u64;
+    let mut ctx_window = 0u64;
+    let mut intent = String::new();
+    // 한도 — 창이 여럿이면 **가장 먼저 터질 것**(사용률 최대) 하나만 남긴다.
+    let mut rate: Option<(f32, u32, i64)> = None;
+    let mut plan_type: Option<String> = None;
+    let mut recent_tools: Vec<String> = Vec::new();
+    let mut tool_counts: Vec<(String, u32)> = Vec::new();
+    // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude 경로와 같은 규칙).
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(p) = v.get("payload").and_then(|p| p.as_object()) else { continue };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let sub = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let get_str = |o: &serde_json::Map<String, serde_json::Value>, k: &str| {
+            o.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+        };
+        match (kind, sub) {
+            ("turn_context", _) if model.is_empty() => model = get_str(p, "model"),
+            ("session_meta", _) => {
+                if cwd.is_empty() {
+                    cwd = get_str(p, "cwd");
+                }
+                // ⚠️ `session_meta.context_window` 는 **숫자가 아니다** — `{window_id: …}`
+                // 객체다(실측). 여기서 창 크기를 읽으려 하면 늘 0 이 된다. 진짜 값은
+                // `token_count.info.model_context_window`(실측 258400).
+            }
+            ("event_msg", "user_message") if last_prompt.is_empty() => {
+                last_prompt = clip(&get_str(p, "message"), 100);
+            }
+            ("event_msg", "agent_message") if last_reply.is_empty() => {
+                last_reply = clip(&get_str(p, "message"), 120);
+            }
+            // 발화의 새 자리(2026-08-11 실측). 위 두 갈래는 그날 로그에 **한 줄도
+            // 없었다** — codex 가 `item_completed` 로 옮겼고, board 의 프롬프트·응답
+            // 칸이 그동안 통째로 비어 있었다. 옛 갈래는 지우지 않는다: 이어가는
+            // 예전 대화 로그는 여전히 그 모양이다.
+            ("event_msg", "item_completed") => {
+                let Some(it) = p.get("item").and_then(|i| i.as_object()) else { continue };
+                match it.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "UserMessage" if last_prompt.is_empty() => {
+                        last_prompt = clip(&item_text(it), 100);
+                    }
+                    "AgentMessage" if last_reply.is_empty() => {
+                        last_reply = clip(&item_text(it), 120);
+                    }
+                    _ => {}
+                }
+            }
+            ("event_msg", "token_count") => {
+                if let Some(rl) = p.get("rate_limits").and_then(|r| r.as_object()) {
+                    if plan_type.is_none() {
+                        plan_type = rl
+                            .get("plan_type")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                    }
+                    // 실측(78표본)에선 primary 하나뿐이었지만, 창이 늘어도 코드를 안
+                    // 고치게 후보를 다 훑어 최대치를 고른다.
+                    for key in ["primary", "secondary", "individual_limit"] {
+                        let Some(w) = rl.get(key).and_then(|x| x.as_object()) else { continue };
+                        let Some(pct) = w.get("used_percent").and_then(|x| x.as_f64()) else {
+                            continue;
+                        };
+                        let cand = (
+                            pct as f32,
+                            w.get("window_minutes").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                            w.get("resets_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                        );
+                        if rate.is_none_or(|(cur, _, _)| cand.0 > cur) {
+                            rate = Some(cand);
+                        }
+                    }
+                }
+                let Some(info) = p.get("info").and_then(|i| i.as_object()) else { continue };
+                if ctx_window == 0 {
+                    ctx_window = info
+                        .get("model_context_window")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                }
+                // 누적 합은 codex 가 **이미** total 로 준다 — 우리가 더하면 이중 계산이다.
+                // 그래서 최신 total 한 번만 쓴다(claude 는 턴별이라 합산이 맞지만 여기선 아니다).
+                if ti == 0 && to == 0 {
+                    if let Some(t) = info.get("total_token_usage").and_then(|x| x.as_object()) {
+                        let n = |k: &str| t.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                        // ⚠️ codex 의 `input_tokens` 는 **캐시된 것을 이미 포함**한다
+                        // (실측: total_tokens = input + output, cached 를 안 더한다).
+                        // board 의 in/cache_read 는 claude 규약(둘을 더하면 총 입력)이라
+                        // 캐시분을 빼서 맞춘다 — 안 그러면 입력이 이중 계산된다.
+                        cr = n("cached_input_tokens");
+                        ti = n("input_tokens").saturating_sub(cr);
+                        to = n("output_tokens");
+                        cc = n("cache_write_input_tokens");
+                    }
+                }
+                // 컨텍스트 점유 = **마지막 요청**이 끌어온 크기(claude 경로와 같은 정의).
+                if observed_ctx == 0 {
+                    if let Some(l) = info.get("last_token_usage").and_then(|x| x.as_object()) {
+                        // `input_tokens` 하나가 곧 그 요청이 끌어온 컨텍스트다. 캐시분을
+                        // 더하면 두 배 가까이 부풀어 board 가 "곧 터진다"고 거짓말한다.
+                        observed_ctx = l.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                    }
+                }
+            }
+            // 도구 호출 — claude 의 `tool_use` 자리. 이름·인자 구조가 달라 라벨은
+            // 여기서 만든다(실측: exec_command{cmd,workdir} · view_image{path} ·
+            // update_plan{plan[]} · imagegen{prompt}).
+            ("response_item", "function_call") => {
+                let name = get_str(p, "name");
+                if name.is_empty() {
+                    continue;
+                }
+                let args: serde_json::Value = serde_json::from_str(&get_str(p, "arguments"))
+                    .unwrap_or(serde_json::Value::Null);
+                let a = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                let label = match name.as_str() {
+                    // 첫 명령만·공백 정규화·40자 — claude Bash 라벨과 같은 규칙이라
+                    // board 두 종류가 같은 모양으로 읽힌다.
+                    "exec_command" => {
+                        let first = a("cmd").split(['\n', ';', '&']).next().unwrap_or("").trim();
+                        let short: String = first
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(40)
+                            .collect();
+                        format!("exec {short}")
+                    }
+                    "view_image" => format!("view {}", basename(a("path"))),
+                    other => other.to_string(),
+                };
+                bump(&mut tool_counts, &name);
+                if recent_tools.len() < 8 {
+                    recent_tools.push(label.clone());
+                }
+                if intent.is_empty() {
+                    intent = label;
+                }
+            }
+            _ => {}
+        }
+    }
+    let context_limit = if ctx_window > 0 {
+        ctx_window
+    } else {
+        context_limit_for(&model, observed_ctx)
+    };
+    // u8 이라 100 을 넘기면 감긴다 — codex 는 compact 전에 한도를 살짝 넘길 수 있어
+    // 상한을 건다(0% 로 보이는 것보다 100% 가 맞다).
+    let context_pct = if context_limit > 0 {
+        (((observed_ctx as f64 / context_limit as f64) * 100.0).round() as u64).min(100) as u8
+    } else {
+        0
+    };
+    PaneActivity {
+        // 도달성은 transcript 로는 알 수 없다 — 명부·프로세스를 봐야 하므로
+        // board 조립부(socket.rs)가 채운다. 여기선 비워 둔다.
+        reach: String::new(),
+        peer_name: None,
+        surface_id: surface_id.to_string(),
+        title: String::new(),
+        last_prompt,
+        last_reply,
+        // claude 경로와 같은 규칙 — 비면 "active"(board UI 가 그 값을 숨긴다).
+        intent: if intent.is_empty() { "active".into() } else { intent },
+        status: if idle { "idle".into() } else { "working".into() },
+        files: Vec::new(),
+        screen: None,
+        character: None,
+        agent_name: None,
+        team: None,
+        // 하네스 종류도 pane 프로세스 소관 — collab_board 가 채운다.
+        harness: None,
+        waiting_for: None,
+        tokens_in: ti,
+        tokens_out: to,
+        cache_read: cr,
+        cache_creation: cc,
+        cost_usd: 0.0,
+        tool_counts,
+        changed_files: Vec::new(),
+        subagents: Vec::new(),
+        subagents_done: Vec::new(),
+        background: Vec::new(),
+        recent_tools,
+        model,
+        context_limit,
+        context_pct,
+        context_tokens: observed_ctx,
+        cwd,
+        view_cwd: String::new(),
+        effort_default: String::new(),
+        branch: None,
+        window_idx: 0,
+        rate_used_pct: rate.map(|(p, _, _)| p),
+        rate_window_minutes: rate.map(|(_, w, _)| w),
+        rate_resets_at: rate.map(|(_, _, r)| r),
+        plan_type,
+        // 완료 보고는 transcript 소관이 아니다 — collab_board(done_reports)가 채운다.
+        done_outcome: None,
+        done_summary: None,
+        done_ago_secs: None,
+    }
+}
+
+/// agy 전사본인가 — 모든 줄에 `step_index`(정수)가 있고 `payload` 는 없다.
+///
+/// claude·codex 어느 쪽과도 안 겹쳐 세 갈래가 깨끗이 갈린다. codex 판정과 같은
+/// 이유로 **경로가 아니라 내용**으로 가른다 — 경로로 가르면 bind 쪽까지 고쳐야 하는데
+/// 내용 판정은 파서 안에서 끝난다.
+fn looks_like_agy(tail: &str) -> bool {
+    tail.lines().filter(|l| !l.trim().is_empty()).take(40).any(|l| {
+        serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
+            v.get("step_index").is_some_and(|s| s.is_number())
+                && v.get("payload").is_none()
+                && v.get("type").and_then(|t| t.as_str()).is_some_and(|t| !t.is_empty())
+        })
+    })
+}
+
+/// `<TAG>` … `</TAG>` 안쪽만. agy 는 사용자 발화를 태그로 감싸 보내고 그 뒤에
+/// `<ADDITIONAL_METADATA>`(로컬 시각)·`<USER_SETTINGS_CHANGE>`(모델 변경 안내)를
+/// 덧붙인다 — 안 벗기면 board 프롬프트 칸이 `<USER_REQUEST>` 로 시작하는 한 줄이 된다.
+fn tag_body<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    s.split_once(&open)?.1.split_once(&close).map(|(body, _)| body.trim())
+}
+
+/// agy 전사본(`brain/<uuid>/.system_generated/logs/transcript_full.jsonl`) → board 한 줄.
+///
+/// 거노 머신에서 직접 재서 매핑했다(2026-08-11, 대화 105개):
+/// - `USER_INPUT.content` → `<USER_REQUEST>` 안쪽이 마지막 프롬프트
+/// - `CHECKPOINT.content` 의 `# USER Objective:` 다음 줄 → `title`. agy 가 스스로
+///   붙인 세션 제목이라 claude 의 `ai-title` 과 같은 자리다.
+/// - `PLANNER_RESPONSE.content` → 마지막 응답. `thinking` 은 별도 필드라 안 섞인다.
+/// - `tool_calls[]` → 도구. 라벨 규칙은 codex 와 맞춘다(`exec …`/`view …`/`edit …`)
+///   — board 두 종류가 같은 모양으로 읽히는 게 각자 예쁜 것보다 낫다.
+///
+/// **토큰·비용·컨텍스트는 0 이다.** 전사본에 그 값이 아예 없다 — 105파일 3,698행의
+/// 최상위 키를 전수 집계해도 token/usage/cost 계열이 0개다. 유일한 소스는
+/// `conversations/<uuid>.db` 의 protobuf 인데 그건 agy 업데이트에 조용히 깨진다.
+/// 지어내느니 빈칸으로 둔다(codex 의 `cost_usd` 와 같은 판단).
+///
+/// **머리를 따로 읽지 않아도 된다.** codex 는 model 이 파일 앞 87~122KB 에 박혀
+/// tail 로 영영 못 잡았지만(`codex_model_from_head`), agy 는 전사본 최대가 137KB 라
+/// tail 512KB 가 파일 전체를 덮는다. 게다가 모델을 갈 때마다 다시 실려 역순 첫
+/// 값이 곧 현재 모델이다.
+fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    let mut title = String::new();
+    let mut model = String::new();
+    let mut last_prompt = String::new();
+    let mut last_reply = String::new();
+    let mut intent = String::new();
+    let mut recent_tools: Vec<String> = Vec::new();
+    let mut tool_counts: Vec<(String, u32)> = Vec::new();
+    let mut changed_files: Vec<String> = Vec::new();
+
+    // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude·codex 와 같은 규칙).
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        match kind {
+            "USER_INPUT" => {
+                if last_prompt.is_empty() {
+                    if let Some(req) = tag_body(content, "USER_REQUEST") {
+                        last_prompt = clip(req, 100);
+                    }
+                }
+                // 모델은 여기 안내문에 실린다. 대화 첫 프롬프트에 `from None to X` 로
+                // 항상 찍히고 도중에 갈면 다시 찍히므로, 역순 첫 값이 현재 모델이다.
+                if model.is_empty() {
+                    model = agy_model_from_settings(content);
+                }
+            }
+            "CHECKPOINT" if title.is_empty() => {
+                if let Some(rest) = content.split_once("# USER Objective:") {
+                    title = rest.1.lines().find(|l| !l.trim().is_empty()).map(|l| clip(l, 80)).unwrap_or_default();
+                }
+            }
+            "PLANNER_RESPONSE" if last_reply.is_empty() => last_reply = clip(content, 120),
+            _ => {}
+        }
+
+        let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) else { continue };
+        for call in calls {
+            let Some(name) = call.get("name").and_then(|n| n.as_str()) else { continue };
+            let a = |k: &str| {
+                call.get("args").and_then(|x| x.get(k)).and_then(|x| x.as_str()).unwrap_or("")
+            };
+            let label = match name {
+                // 첫 명령만·공백 정규화·40자 — codex 의 exec 라벨과 같은 규칙.
+                "run_command" => {
+                    let first = a("CommandLine").split(['\n', ';', '&']).next().unwrap_or("").trim();
+                    let short: String =
+                        first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
+                    format!("exec {short}")
+                }
+                "view_file" => format!("view {}", basename(a("AbsolutePath"))),
+                "list_dir" => format!("ls {}", basename(a("DirectoryPath"))),
+                "write_to_file" | "replace_file_content" => format!("edit {}", basename(a("TargetFile"))),
+                "generate_image" => format!("image {}", basename(a("ImageName"))),
+                // ⚠️ args 의 `toolAction` 은 agy 가 써 준 한 문장 설명이라 훨씬 친절하지만
+                // 문장이다("Checking the input image file existence"). intent 칸은 짧은
+                // 라벨 자리라 안 쓴다 — 담을 칸이 생기면 그때 싣는다.
+                other => other.to_string(),
+            };
+            bump(&mut tool_counts, name);
+            if recent_tools.len() < 8 {
+                recent_tools.push(label.clone());
+            }
+            if intent.is_empty() {
+                intent = label;
+            }
+            // 편집한 파일. ⚠️agy 는 제 할일목록·계획서를 `brain/<uuid>/` 안에 같은
+            // 도구로 쓴다 — 그건 제 살림이지 이 pane 이 만지는 소스가 아니므로
+            // 충돌 감지 신호에서 뺀다.
+            let target = a("TargetFile");
+            if matches!(name, "write_to_file" | "replace_file_content")
+                && target.starts_with('/')
+                && !target.contains("/antigravity-cli/brain/")
+                && changed_files.len() < 12
+                && !changed_files.iter().any(|f| f == target)
+            {
+                changed_files.push(target.to_string());
+            }
+        }
+    }
+
+    PaneActivity {
+        // 도달성·창 번호는 transcript 로 알 수 없다 — 조립부(socket.rs)가 채운다.
+        reach: String::new(),
+        peer_name: None,
+        surface_id: surface_id.to_string(),
+        title,
+        last_prompt,
+        last_reply,
+        intent: if intent.is_empty() { "active".into() } else { intent },
+        // ⚠️행의 `status`(DONE/RUNNING)로 판정하면 안 된다 — 기록 시점 스냅샷이고
+        // **절대 UPDATE 되지 않아서**, 끝난 뒤에도 RUNNING 인 채 굳은 행이 실측 7개다.
+        // codex 와 똑같이 mtime idle + 화면 신호로 가른다.
+        status: if idle { "idle".into() } else { "working".into() },
+        files: Vec::new(),
+        screen: None,
+        character: None,
+        agent_name: None,
+        team: None,
+        harness: None,
+        waiting_for: None,
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        cost_usd: 0.0,
+        tool_counts,
+        changed_files,
+        subagents: Vec::new(),
+        subagents_done: Vec::new(),
+        background: Vec::new(),
+        recent_tools,
+        model,
+        context_limit: 0,
+        context_pct: 0,
+        context_tokens: 0,
+        // ⚠️전사본에 pane 의 cwd 는 없다. `tool_calls.args.Cwd` 는 **그 명령이 돈
+        // 자리**라 agy 제 살림(`~/.gemini/antigravity-cli/scratch`)인 경우가 흔한데,
+        // board 의 cwd 는 방을 가르는 키라 거기 넣으면 pane 이 엉뚱한 방에 묶인다.
+        // 살아있는 pane 은 조립부가 PTY 에서 진짜 cwd 를 덮으니 여기선 비워 둔다.
+        // (세션 레일은 사정이 달라 그 값을 쓴다 — 거긴 유일한 단서다.)
+        cwd: String::new(),
+        view_cwd: String::new(),
+        effort_default: String::new(),
+        branch: None,
+        window_idx: 0,
+        rate_used_pct: None,
+        rate_window_minutes: None,
+        rate_resets_at: None,
+        plan_type: None,
+        done_outcome: None,
+        done_summary: None,
+        done_ago_secs: None,
+    }
+}
+
+/// `<USER_SETTINGS_CHANGE>` 안내문에서 사람이 읽는 모델 이름을 꺼낸다.
+///
+/// 실물: ``The user changed setting `Model Selection` from None to Gemini 3.5
+/// Flash (High). No need to comment on this change…``
+///
+/// ⚠️첫 마침표에서 끊으면 안 된다 — 버전의 점에 걸려 "Gemini 3" 이 된다.
+/// 이 라벨이 정확한 값이라는 건 교차검증됐다: 97개 DB 의 표시명과 97/97 일치.
+fn agy_model_from_settings(content: &str) -> String {
+    let Some(body) = tag_body(content, "USER_SETTINGS_CHANGE") else { return String::new() };
+    let Some(after) = body.split_once("`Model Selection`") else { return String::new() };
+    let Some((_, rest)) = after.1.split_once(" to ") else { return String::new() };
+    // 안내 문장이 이어 붙는다. 문구가 바뀌어도 통째로 싣지 않게 줄·길이로도 막는다.
+    let cut = rest
+        .split_once(". No need")
+        .map(|(m, _)| m)
+        .unwrap_or_else(|| rest.lines().next().unwrap_or(""));
+    clip(cut.trim().trim_end_matches('.'), 40)
+}
+
 /// transcript의 **마지막 부분**(socket.rs가 tail 64KB를 잘라 넘김)을 역순으로
 /// 1패스 훑어 board 한 줄을 만든다. 각 필드는 **처음 만나는(=최신)** 값에서
 /// 채우고, 다 차면 조기 종료한다. `idle`(파일 mtime 기준)은 socket.rs가 판정해
 /// 넘긴다 — transcript 자체엔 "막힘/대기" 신호가 없다.
+///
+/// codex 롤아웃 로그면 `codex_snapshot` 으로 넘긴다 — 스키마가 통째로 달라
+/// 같은 루프에서 갈래를 치면 두 포맷이 서로를 오염시킨다.
 pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    if looks_like_codex(tail) {
+        return codex_snapshot(surface_id, tail, idle);
+    }
+    if looks_like_agy(tail) {
+        return agy_snapshot(surface_id, tail, idle);
+    }
     let mut title = String::new();
+    let mut custom_title = String::new();
     let mut last_prompt = String::new();
     let mut last_reply = String::new();
     let mut intent = String::new();
@@ -159,6 +660,13 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
             Some("ai-title") if title.is_empty() => {
                 if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
                     title = clip(t, 60);
+                }
+            }
+            // `/rename` 은 사람이 직접 붙인 이름이라 자동 생성 제목을 이긴다. 역순
+            // 파싱이므로 먼저 만나는 것이 가장 최근 rename 이다(여러 번 바꾸면 마지막).
+            Some("custom-title") if custom_title.is_empty() => {
+                if let Some(t) = v.get("customTitle").and_then(|x| x.as_str()) {
+                    custom_title = clip(t, 60);
                 }
             }
             Some("last-prompt") if last_prompt.is_empty() => {
@@ -329,8 +837,12 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     };
 
     PaneActivity {
+        // 도달성은 transcript 로는 알 수 없다 — 명부·프로세스를 봐야 하므로
+        // board 조립부(socket.rs)가 채운다. 여기선 비워 둔다.
+        reach: String::new(),
+        peer_name: None,
         surface_id: surface_id.to_string(),
-        title,
+        title: if custom_title.is_empty() { title } else { custom_title },
         last_prompt,
         last_reply,
         intent: if intent.is_empty() { "active".into() } else { intent },
@@ -339,6 +851,10 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         screen: None,
         // 캐릭터는 transcript 가 아니라 collab 마커 소관 — collab_board 가 채운다.
         character: None,
+        // 하네스 이름·팀·종류도 pane 프로세스 소관 — collab_board 가 채운다.
+        agent_name: None,
+        team: None,
+        harness: None,
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
         tokens_in,
@@ -363,13 +879,27 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         effort_default: String::new(), // collab_board 가 settings.json effortLevel 로 채운다.
         branch: None,
         window_idx: 0,
+        // claude 는 종량제라 이 지표가 없다 — 비용($)이 그 자리를 대신한다.
+        rate_used_pct: None,
+        rate_window_minutes: None,
+        rate_resets_at: None,
+        plan_type: None,
+        // 완료 보고는 transcript 소관이 아니다 — collab_board(done_reports)가 채운다.
+        done_outcome: None,
+        done_summary: None,
+        done_ago_secs: None,
     }
 }
 
-/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). fable/mythos 계열은 API 기본이 1M(최대=기본)
-/// 이라 모델명만으로 확정 — [1m] 태그·관측치 추정에 기대면 토큰<200k 인 세션이 200k 로 잘못
-/// 잡힌다(실측: fable-5 pane 이 200000 표시). 그 외 모델은 transcript 가 1M 베타 플래그를
-/// 기록 안 하고 model 도 보통 `[1m]` 태그 없이 와서(예 "claude-opus-4-8") 두 신호로 추정:
+/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). **폴백 전용이다** — 정본은 statusLine 이
+/// report_cwd 로 보고하는 하네스 창(socket.rs `reported_ctx`)이고, 이 함수는 그 보고가
+/// 아직 없는 프레임에만 쓰인다.
+///
+/// 추정이 폴백으로 밀려난 이유: transcript 는 1M 베타 플래그를 기록하지 않고 model 에도
+/// `[1m]` 이 안 실려(shim 이 `--model 'claude-opus-5[1m]'` 로 줘도 API 응답은
+/// `claude-opus-5`), 토큰<200k 인 1M 세션이 통째로 200k 로 잡혔다(실측: 18만 토큰이
+/// 92% 빨강 → 200k 를 넘는 순간 20% 로 역주행). fable/mythos 계열만 API 기본이 1M
+/// (최대=기본)이라 모델명으로 확정할 수 있고, 나머지는 두 신호로 추정한다:
 /// ① model 에 `[1m]` 포함 ② 관측 컨텍스트가 200k 초과(200k 한도면 그 전에 compact 됨).
 /// 둘 다 아니면 200k. model 미상 + 관측 0 이면 0(미상).
 fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {
@@ -556,5 +1086,256 @@ mod tests {
         // sonnet 단가: (300*3 + 130*15 + 10*0.3 + 20*3.75) / 1e6
         let expect = (300.0 * 3.0 + 130.0 * 15.0 + 10.0 * 0.3 + 20.0 * 3.75) / 1_000_000.0;
         assert!((a.cost_usd - expect).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    /// 거노 머신 실물 로그(2026-08-05, gpt-5.5)에서 뽑은 값 그대로. 스키마 매핑이
+    /// 조용히 되돌아가면 board 가 **거짓 숫자**를 내므로 실값으로 못박는다.
+    fn sample() -> String {
+        [
+            r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo","context_window":{"window_id":"w1"},"session_id":"s1"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","cwd":"/repo"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"user_message","message":"이거 해줘"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message","message":"했습니다"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":37822,"cached_input_tokens":22272,"cache_write_input_tokens":0,"output_tokens":1375,"total_tokens":39197},"last_token_usage":{"input_tokens":19055,"cached_input_tokens":17792,"output_tokens":1046,"total_tokens":20101},"model_context_window":258400}}}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn codex_로그를_claude_파서로_보내지_않는다() {
+        assert!(looks_like_codex(&sample()));
+        // 음성 대조군 — claude jsonl 은 payload 가 없다.
+        assert!(!looks_like_codex(
+            r#"{"type":"assistant","message":{"content":[]}}"#
+        ));
+    }
+
+    #[test]
+    fn 모델과_cwd_를_뽑는다() {
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.model, "gpt-5.5");
+        assert_eq!(a.cwd, "/repo");
+        assert_eq!(a.last_prompt, "이거 해줘");
+        assert_eq!(a.last_reply, "했습니다");
+    }
+
+    /// 새 스키마(2026-08-11 실물 로그). 옛 갈래만 보던 동안 board 의 프롬프트·응답
+    /// 칸이 **통째로 비어 있었다** — 조용히 비는 회귀라 아무도 못 알아챈다.
+    #[test]
+    fn 발화가_item_completed_로_옮겨간_뒤에도_읽는다() {
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"그래","text_elements":[]}]}}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"msg_1","phase":"final_answer","content":[{"type":"Text","text":"연동을\n붙였어요"}]}}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.last_prompt, "그래");
+        // 조각 `type` 이 `text`/`Text` 로 갈리므로 그걸로 걸렀다면 한쪽이 빈다.
+        // 줄바꿈은 board 한 줄에 못 들어가니 clip 이 공백으로 편다.
+        assert_eq!(a.last_reply, "연동을 붙였어요");
+    }
+
+    /// model·effort 는 꼬리가 아니라 **머리**에서, 그것도 같은 줄에서 온다(실측
+    /// 87~122KB 지점). 세션 도중 갈아도 **첫** 것을 쓴다 — 뒤엣것은 우리 머리 창에
+    /// 없을 수도 있어, 있다 없다 하는 값보다 한 번 정해진 값이 board 에서 덜 헷갈린다.
+    #[test]
+    fn model_과_effort_는_머리의_첫_turn_context_다() {
+        let head = [
+            r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#,
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것"}}"#,
+        ]
+        .join("\n");
+        assert_eq!(codex_cfg_from_head(&head), ("gpt-5.5".into(), "high".into()));
+        // 아직 첫 턴을 안 쓴 세션 — 빈 문자열이어야 호출부가 "다음에 다시" 로 읽는다.
+        let only_meta = r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#;
+        assert_eq!(codex_cfg_from_head(only_meta), (String::new(), String::new()));
+        assert_eq!(codex_cfg_from_head("깨진 줄\n{}"), (String::new(), String::new()));
+        // effort 없는 세션이 흔하다 — model 만 있어도 채택해야 한다(빈 effort 때문에
+        // model 까지 버리면 복원이 통째로 기본값으로 떨어진다).
+        let no_effort = r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#;
+        assert_eq!(codex_cfg_from_head(no_effort), ("gpt-5.5".into(), String::new()));
+    }
+
+    /// codex 의 답변은 변경 목록째 실려 와 길다 — board 한 줄에 들어가려면 잘려야 한다.
+    #[test]
+    fn 긴_발화는_board_폭으로_자른다() {
+        let long = "가".repeat(300);
+        let tail = format!(
+            r#"{{"timestamp":"t","type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"AgentMessage","content":[{{"type":"Text","text":"{long}"}}]}}}}}}"#
+        );
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.last_reply.chars().count(), 121, "120자 + 말줄임");
+        assert!(a.last_reply.ends_with('…'));
+    }
+
+    #[test]
+    fn 입력토큰에서_캐시분을_뺀다() {
+        // codex 의 input_tokens 는 cached 를 **포함**한다(total = input + output 으로 확인).
+        // board 규약은 in + cache_read = 총 입력이라, 안 빼면 입력이 이중 계산된다.
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.cache_read, 22272);
+        assert_eq!(a.tokens_in, 37822 - 22272);
+        assert_eq!(a.tokens_in + a.cache_read, 37822, "합이 원본 input 이어야 한다");
+        assert_eq!(a.tokens_out, 1375);
+    }
+
+    #[test]
+    fn 컨텍스트는_마지막_요청의_input_하나다() {
+        // 캐시분을 더하면 36847 로 부풀어 board 가 "곧 터진다"고 거짓말한다.
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.context_tokens, 19055);
+        assert_eq!(a.context_limit, 258400, "창 크기는 token_count 쪽 실값");
+        assert_eq!(a.context_pct, 7);
+    }
+
+    #[test]
+    fn 도구_호출을_intent_와_최근도구에_싣는다() {
+        // 실측 인자 구조(exec_command{cmd,workdir} · view_image{path}).
+        let tail = [
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build -p kasaterm\",\"workdir\":\"/repo\"}"}}"#,
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/a/b/shot.png\"}"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        // 역순 순회라 **가장 나중 호출**이 intent 다.
+        assert_eq!(a.intent, "view shot.png");
+        assert_eq!(a.recent_tools, vec!["view shot.png", "exec cargo build -p kasaterm"]);
+        assert_eq!(a.tool_counts.len(), 2);
+    }
+
+    #[test]
+    fn 도구가_없으면_intent_는_active() {
+        // board UI 가 "active" 를 숨긴다 — 빈 문자열을 넣으면 빈 줄이 생긴다.
+        assert_eq!(snapshot_from_tail("%1", &sample(), false).intent, "active");
+    }
+
+    #[test]
+    fn 한도는_가장_먼저_터질_창을_고른다() {
+        // 실측(2026-08-05, 78표본)은 primary 주간창 하나뿐이고 secondary 는 늘 null
+        // 이었다. 창이 늘어도 코드를 안 고치게 최대치를 고르는지 함께 잰다.
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1786433096},"secondary":{"used_percent":62.5,"window_minutes":300,"resets_at":1786400000}}}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.rate_used_pct, Some(62.5), "주간 3% 가 아니라 5시간 62.5% 가 먼저 터진다");
+        assert_eq!(a.rate_window_minutes, Some(300));
+        assert_eq!(a.rate_resets_at, Some(1786400000));
+        assert_eq!(a.plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn 실측_한도는_주간창_하나다() {
+        let tail = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1786433096},"secondary":null}}}"#;
+        let a = snapshot_from_tail("%1", tail, false);
+        assert_eq!(a.rate_used_pct, Some(3.0));
+        assert_eq!(a.rate_window_minutes, Some(10080), "10080분 = 7일");
+    }
+
+    #[test]
+    fn 비용은_지어내지_않는다() {
+        // 로그에 단가도 금액도 없다 — 빈칸이 거짓 금액보다 낫다.
+        assert_eq!(snapshot_from_tail("%1", &sample(), false).cost_usd, 0.0);
+    }
+}
+
+
+#[cfg(test)]
+mod agy_snapshot_tests {
+    use super::*;
+
+    /// 실물에서 그대로 뜬 줄들(2026-08-11, `brain/2e7d9059…`·`550915fa…`).
+    ///
+    /// ⚠️**빈 칸은 조용하다.** codex 가 발화를 `item_completed` 로 옮겼을 때 board 의
+    /// 프롬프트·응답 칸이 통째로 비었는데 터지지도 로그가 남지도 않아 아무도 못
+    /// 알아챘다(2026-08-11). 실측값을 그대로 박아 두면 스키마가 또 흔들릴 때
+    /// 테스트가 대신 비명을 지른다.
+    fn real_tail() -> String {
+        [
+            r##"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\n내 이름이 뭐였지?\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is 2026-08-11.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.6 Flash (Low). No need to comment on this change if the user doesn't ask about it.\n</USER_SETTINGS_CHANGE>"}"##,
+            r##"{"step_index":1,"source":"MODEL","type":"CHECKPOINT","status":"DONE","content":"# Conversation\n# USER Objective:\n켄지 이름 소개\n\n# Progress"}"##,
+            r##"{"step_index":2,"source":"MODEL","type":"RUN_COMMAND","status":"DONE","content":"Output: ok","tool_calls":[{"name":"run_command","args":{"CommandLine":"git log --oneline\nrm -rf /","Cwd":"/Users/kasa/proj","toolAction":"Checking history"}}]}"##,
+            r##"{"step_index":3,"source":"MODEL","type":"CODE_ACTION","status":"RUNNING","content":"","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"/Users/kasa/proj/foo.rs","Overwrite":true}},{"name":"write_to_file","args":{"TargetFile":"/Users/kasa/.gemini/antigravity-cli/brain/2e7d9059/todo_list.md","Overwrite":true}}]}"##,
+            r##"{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","thinking":"**Recalling the name**","content":"켄지 님이라고 하셨습니다!"}"##,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn a_real_transcript_fills_every_plaintext_field() {
+        let a = agy_snapshot("%9", &real_tail(), false);
+        assert_eq!(a.title, "켄지 이름 소개");
+        assert_eq!(a.last_prompt, "내 이름이 뭐였지?", "<USER_REQUEST> 를 안 벗기면 태그째 들어온다");
+        assert_eq!(a.last_reply, "켄지 님이라고 하셨습니다!");
+        assert_eq!(a.model, "Gemini 3.6 Flash (Low)", "버전의 점에서 끊기면 'Gemini 3' 이 된다");
+        assert_eq!(a.status, "working");
+        // 역순이라 가장 최근 도구가 intent.
+        assert_eq!(a.intent, "edit foo.rs");
+    }
+
+    #[test]
+    fn the_exec_label_stops_at_the_first_command() {
+        // codex 의 `exec` 라벨과 같은 규칙 — board 두 종류가 같은 모양으로 읽혀야 한다.
+        let a = agy_snapshot("%9", &real_tail(), false);
+        assert!(a.recent_tools.contains(&"exec git log --oneline".to_string()), "{:?}", a.recent_tools);
+    }
+
+    #[test]
+    fn agys_own_artifacts_are_not_reported_as_changed_files() {
+        // agy 는 제 할일목록·계획서를 같은 도구로 `brain/<uuid>/` 안에 쓴다. 그건 제
+        // 살림이지 이 pane 이 만지는 소스가 아니라, 충돌 감지 신호에 섞이면 안 된다.
+        let a = agy_snapshot("%9", &real_tail(), false);
+        assert_eq!(a.changed_files, ["/Users/kasa/proj/foo.rs"]);
+    }
+
+    #[test]
+    fn the_pane_cwd_is_left_to_the_assembler() {
+        // args 의 Cwd 는 **그 명령이 돈 자리**다. board 의 cwd 는 방을 가르는 키라
+        // 여기에 넣으면 pane 이 엉뚱한 방에 묶인다.
+        assert_eq!(agy_snapshot("%9", &real_tail(), false).cwd, "");
+    }
+
+    #[test]
+    fn a_running_row_does_not_make_the_pane_look_busy() {
+        // ⚠️행의 status 는 기록 시점 스냅샷이고 **절대 UPDATE 되지 않는다** — 끝난
+        // 뒤에도 RUNNING 인 채 굳은 행이 실측 7개다. 판정은 mtime idle 만 쓴다.
+        assert_eq!(agy_snapshot("%9", &real_tail(), true).status, "idle");
+    }
+
+    #[test]
+    fn the_three_harnesses_route_to_their_own_parser() {
+        // 오분류는 조용히 빈 행이 된다 — 세 갈래가 서로를 안 먹는지 못박는다.
+        let agy = &real_tail();
+        let codex = r##"{"timestamp":"2026-08-11T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"##;
+        let claude = r##"{"type":"user","message":{"role":"user","content":"안녕"}}"##;
+        assert!(looks_like_agy(agy) && !looks_like_codex(agy));
+        assert!(looks_like_codex(codex) && !looks_like_agy(codex));
+        assert!(!looks_like_agy(claude) && !looks_like_codex(claude));
+        assert_eq!(snapshot_from_tail("%9", agy, false).title, "켄지 이름 소개");
+        assert_eq!(snapshot_from_tail("%9", codex, false).model, "gpt-5");
+    }
+
+    #[test]
+    fn tokens_and_cost_stay_zero_because_the_plaintext_has_none() {
+        // 105파일 3,698행의 최상위 키를 전수 집계해도 token/usage/cost 계열이 0개다.
+        // 지어내면 board 에 *틀린 숫자*가 뜬다 — 빈칸이 거짓 금액보다 낫다.
+        let a = agy_snapshot("%9", &real_tail(), false);
+        assert_eq!((a.tokens_in, a.tokens_out, a.context_pct), (0, 0, 0));
+        assert_eq!(a.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn a_model_line_without_the_trailing_notice_still_parses() {
+        // 안내 문구가 바뀌어도 모델명만 남게. 줄·길이로 이중 방어한다.
+        let line = r##"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\n하이\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 3.5 Flash (High) to Claude Opus 4.6 (Thinking)\n</USER_SETTINGS_CHANGE>"}"##;
+        assert_eq!(agy_snapshot("%9", line, false).model, "Claude Opus 4.6 (Thinking)");
     }
 }

@@ -442,6 +442,7 @@ impl PtySession {
                 best_child = Some((*row_pid, name.clone()));
             }
         }
+        let best_child = descend_launchers(&table, best_child);
         let resolved = best_child.map(|(_, n)| n).or(shell_comm).map(strip_exe_suffix);
         // Git bash 는 스크립트 실행 시 중간 프로세스가 죽어 부모 사슬이 영구
         // 단절된다(bash → [dead] → sh.exe → claude.exe, VM 실측) — ppid 하강
@@ -461,6 +462,25 @@ impl PtySession {
         };
         cache.1 = resolved.clone();
         resolved
+    }
+
+    /// 이 pane 이 지금 돌리는 **에이전트 종류**. 셸이거나 다른 프로그램이면 None.
+    ///
+    /// 게이트를 이 하나로 모으는 이유: 예전엔 11곳이 `active_process_name()` 을 각자
+    /// 보며 어떤 곳은 `== "claude"`, 어떤 곳은 `contains` 로 갈렸다. 종류가 둘이 되는
+    /// 순간 그 사본들이 제각각 갈라진다 — 오늘만 사본 때문에 세 번 물렸다.
+    ///
+    /// ⚠️ **codex 는 이름만 봐선 절대 못 잡는다.** npm shim 이라 셸의 직속 자식이
+    /// `node` 이고 진짜 바이너리는 **손자**다(실측):
+    /// ```text
+    /// 32387 ppid=셸    comm=node          args=node …/.npm-global/bin/codex
+    /// 32410 ppid=32387 comm=…/bin/codex   ← 이것
+    /// ```
+    /// 그래서 직속 자식이 런처류(node·npm·sh…)면 한 세대 더 내려간다. 프로세스
+    /// 테이블은 300ms 공유 캐시라 `ps` 추가 호출이 없다.
+    pub fn active_agent(&self) -> Option<AgentKind> {
+        let pid = self.shell_pid?;
+        agent_for_shell(&process_table_shared(), pid)
     }
 
     /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
@@ -579,6 +599,44 @@ impl PtySession {
         out
     }
 
+    /// 스크롤백 + 현재 화면을 텍스트 줄로. 뒤에서 `max_lines` 만큼(최신 우선).
+    ///
+    /// 세션 저장이 쓰는 경로다. 예전엔 GUI 가 프레임 diff 로 「몇 줄 밀렸나」를 추측해
+    /// 자체 history 를 쌓았는데, 그 추측이 scroll-region TUI 를 깨뜨려 폐기되면서
+    /// (`apply_screen_update`: "Shift detection on the pty side is retired") **아무도 그
+    /// history 를 안 채우게 됐다.** 그 뒤로 저장되는 스크롤백은 늘 화면 한 장뿐이라,
+    /// 재시작하면 그 전 대화가 통째로 사라진다 — 저장 상한(`SCROLLBACK_SAVE_MAX`)이나
+    /// 버퍼 예산(`KASATERM_SCROLLBACK_MB`)을 올려도 소용이 없었다(2026-08-11 실측:
+    /// 400줄을 뿌린 pane 의 저장 스크롤백이 38줄 = 화면 크기 그대로).
+    ///
+    /// 진짜 스크롤백은 여기, alacritty grid 가 갖고 있다. 그래서 추측을 되살리는 대신
+    /// 그것을 직접 읽는다.
+    pub fn scrollback_text(&self, max_lines: usize) -> Vec<String> {
+        let t = self.term.lock().unwrap();
+        let grid = t.grid();
+        let cols = grid.columns();
+        let hist = grid.history_size();
+        let screen = grid.screen_lines();
+        let total = hist + screen;
+        let take = max_lines.min(total);
+        let mut out = Vec::with_capacity(take);
+        // grid 의 줄 번호는 화면 첫 줄이 0 이고 스크롤백이 음수다.
+        for i in (total - take)..total {
+            let line = i as i32 - hist as i32;
+            let mut row = String::with_capacity(cols);
+            for c in 0..cols {
+                let point = Point::new(
+                    alacritty_terminal::index::Line(line),
+                    alacritty_terminal::index::Column(c),
+                );
+                let ch = grid[point].c;
+                row.push(if ch == '\0' { ' ' } else { ch });
+            }
+            out.push(row.trim_end().to_string());
+        }
+        out
+    }
+
     /// Jump straight to the live tail (display offset 0).
     pub fn scroll_to_bottom(&self) {
         let (cols, rows) = *self.size.lock().unwrap();
@@ -619,6 +677,26 @@ impl PtySession {
         let (tx, rx) = crossbeam_channel::bounded(64);
         self.byte_taps.lock().unwrap().push(tx);
         rx
+    }
+
+    /// 구독하면서 "지금 화면"을 ANSI 로 함께 받는다. 돌려준 바이트를 tap 스트림
+    /// 보다 **먼저** 보내면 붙는 즉시 화면이 찬다.
+    ///
+    /// `tap_bytes` 만으로는 붙은 뒤의 출력만 오므로, 조용한 pane 에 미러로 붙으면
+    /// 다음 출력이 날 때까지 화면이 빈 채였다(사용자가 Enter 를 쳐야 프롬프트가
+    /// 보였다).
+    ///
+    /// ⚠️ 스냅샷 채취와 구독 등록은 `term` 락 하나 안에서 끝나야 한다. 둘로 나누면
+    /// 그 사이의 출력이 스냅샷에도 tap 에도 없이 사라지거나(유실), 양쪽에 다 담겨
+    /// 두 번 그려진다(중복 — `abc` 뒤에 `c` 가 또 찍히는 식). reader 도 같은 락
+    /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
+    pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        let snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        self.byte_taps.lock().unwrap().push(tx);
+        (rx, snap.to_ansi())
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         // Kernel-side PTY first (child sees SIGWINCH).
@@ -903,12 +981,25 @@ const SCROLLBACK_BYTES_PER_CELL: usize = 24;
 const SCROLLBACK_MIN_LINES: usize = 1_000;
 const SCROLLBACK_MAX_LINES: usize = 100_000;
 
+/// 기본 예산. **줄 상한(`SCROLLBACK_MAX_LINES`)이 실질 기준이 되도록** 크게 잡는다 —
+/// 1024MB 면 폭 1170칸까지 10만 줄을 다 받는다.
+///
+/// 크게 잡아도 되는 이유는 **캡이 예약이 아니라 상한이라서**다(실측 2026-08-06,
+/// 363칸 pane): 캡 10만 줄에 1,964줄만 실으면 RSS 39MB, 61,624줄을 실제로 채우면
+/// 742MB. 즉 안 쓰면 안 먹는다. 옛 기본값 16MB 는 **폭에 반비례**해서, 넓게 쓰는
+/// pane 이 1,925줄밖에 못 남겼다 — 거노: "히스토리가 왜 다 안 남지, 보려고 위로
+/// 올리면 없어져 있어". claude 한 세션이 몇 분이면 미는 양이다.
+///
+/// 대가는 **진짜로 10만 줄을 채운 pane** 이 1GB 를 쥔다는 것. RAM 이 아쉬우면
+/// `KASATERM_SCROLLBACK_MB` 로 내린다.
+const SCROLLBACK_DEFAULT_MB: usize = 1024;
+
 fn scrollback_budget_bytes() -> usize {
     std::env::var("KASATERM_SCROLLBACK_MB")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|mb| *mb > 0)
-        .unwrap_or(16)
+        .unwrap_or(SCROLLBACK_DEFAULT_MB)
         * 1024
         * 1024
 }
@@ -961,6 +1052,56 @@ pub fn live_sessions() -> Vec<String> {
     let mut r = registry().lock().unwrap();
     r.retain(|_, w| w.strong_count() > 0);
     let mut ids: Vec<String> = r.keys().cloned().collect();
+    ids.sort();
+    ids
+}
+
+/// 보는 사람이 없어도 살려 둘 세션들.
+///
+/// `registry` 는 `Weak` 라서 **소유자가 사라지면 세션도 사라진다.** 웹에서 띄운
+/// 셸은 소유자가 그 WebSocket 하나뿐이라, 탭을 닫는 순간 셸까지 죽었다. 여기에
+/// 강한 `Arc` 를 두면 연결과 수명이 갈린다 — 폰을 덮었다 다시 열어도 하던 작업이
+/// 그대로 있다.
+fn persistent() -> &'static Mutex<std::collections::HashMap<String, Arc<PtySession>>> {
+    static P: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Arc<PtySession>>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// 세션을 프로세스에 붙들어 둔다. 셸이 끝나면(EOF) 스스로 빠진다.
+///
+/// ⚠️ **`screens` 를 소비하므로 GUI pane 에는 쓰면 안 된다.** 그 채널은 MPMC 라
+/// 여기서 받은 프레임은 GUI pump 에 안 간다 — 화면이 띄엄띄엄 갱신된다. 보는
+/// 사람이 따로 없는 웹 전용 셸에만 쓴다.
+pub fn keep_session(id: &str, sess: Arc<PtySession>) {
+    let watch = sess.screens.clone();
+    persistent()
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), sess);
+    let id = id.to_string();
+    // 셸이 끝나면 스스로 빠진다 — 안 그러면 죽은 세션이 목록에 영원히 남는다.
+    std::thread::Builder::new()
+        .name(format!("pty-keep-{id}"))
+        .spawn(move || {
+            while let Ok(u) = watch.recv() {
+                if u.eof {
+                    break;
+                }
+            }
+            persistent().lock().unwrap().remove(&id);
+        })
+        .ok();
+}
+
+/// 붙들어 둔 세션을 놓아 준다. 마지막 참조였다면 셸이 종료된다.
+pub fn release_session(id: &str) -> bool {
+    persistent().lock().unwrap().remove(id).is_some()
+}
+
+/// 붙들려 있는 세션 id 목록(정렬).
+pub fn kept_sessions() -> Vec<String> {
+    let mut ids: Vec<String> = persistent().lock().unwrap().keys().cloned().collect();
     ids.sort();
     ids
 }
@@ -1072,21 +1213,6 @@ fn spawn_reader_thread(
                     return;
                 }
             };
-            // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
-            // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
-            //
-            // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
-            // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
-            // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
-            // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
-            // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
-            // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
-            {
-                let mut taps = byte_taps.lock().unwrap();
-                if !taps.is_empty() {
-                    taps.retain(|t| t.try_send(buf[..n].to_vec()).is_ok());
-                }
-            }
             // Append raw bytes (hex + escaped-printable preview) to the
             // KASATERM_PTY_LOG file so claude-code escape sequences can
             // be diffed against ghostty's `script` capture.
@@ -1126,18 +1252,16 @@ fn spawn_reader_thread(
             // skip the normalize entirely; NFC is a no-op there but the
             // .nfc() iterator + String alloc still cost ~10us per read in
             // a hot loop. ASCII fast-path keeps the bytes borrowed.
-            let raw_str = utf8_buf.process(&buf[..n]);
-            let (nfc_holder, processed_bytes): (Option<String>, &[u8]) =
-                if raw_str.is_ascii() {
-                    (None, raw_str.as_bytes())
-                } else {
-                    let s: String = raw_str.nfc().collect();
-                    (Some(s), &[])
-                };
-            let processed_bytes: &[u8] = match &nfc_holder {
-                Some(s) => s.as_bytes(),
-                None => processed_bytes,
+            let batch = utf8_buf.process(&buf[..n]);
+            // NFC 는 배치가 **온전한 UTF-8 일 때만** 돌린다. 깨진 바이트가 섞여 있으면
+            // 정규화를 건너뛰고 원본을 그대로 파서에 넘긴다 — 버리지 않는 것이 핵심이다.
+            let nfc_holder: Option<String> = if batch.is_ascii() {
+                None
+            } else {
+                std::str::from_utf8(&batch).ok().map(|s| s.nfc().collect())
             };
+            let processed_bytes: &[u8] =
+                nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
             // Sniff for iTerm OSC 1337 inline images / kitty graphics. Both
             // scans walk the byte slice, so we cheaply prefix-check first —
             // most reads have no `\x1b]1337` / `\x1b_G` and we skip the
@@ -1185,6 +1309,27 @@ fn spawn_reader_thread(
 
             let update = {
                 let mut t = term.lock().unwrap();
+                // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
+                // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
+                //
+                // ⚠️ term 락을 **든 채로** 뿌려야 한다. 밖에서 뿌리면 뿌리기와
+                // 파싱 사이에 락이 풀린 틈이 생기고, 하필 그 틈에 붙은 미러는 이
+                // 청크를 tap 으로도(구독 전이라) 스냅샷으로도(파싱 전이라) 못 받아
+                // 그만큼 화면이 어긋난다. `tap_bytes_with_snapshot` 의 원자성이
+                // 이 순서에 기대고 있다.
+                //
+                // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
+                // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
+                // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
+                // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
+                // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
+                // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
+                {
+                    let mut taps = byte_taps.lock().unwrap();
+                    if !taps.is_empty() {
+                        taps.retain(|sub| sub.try_send(buf[..n].to_vec()).is_ok());
+                    }
+                }
                 processor.advance(&mut *t, processed_bytes);
                 // alacritty buffers DECSET 2026 synchronized output internally:
                 // while its sync buffer is non-empty the Term grid still holds
@@ -1281,15 +1426,27 @@ impl Utf8Buffer {
         Self { leftover: Vec::new() }
     }
 
-    fn process(&mut self, data: &[u8]) -> String {
+    /// 끝에 걸린 **잘린 코드포인트만** 남기고 나머지는 바이트 그대로 넘긴다.
+    ///
+    /// ⚠️깨진 바이트를 버리지 않는 것이 이 함수의 계약이다. 옛 구현은 마지막
+    /// 유효 시퀀스까지를 통째로 `from_utf8` 해 보고 실패하면 빈 문자열을 돌려주면서
+    /// 그 배치를 **전부** 버렸다. agy(antigravity CLI)가 SGR 이스케이프 사이에 한글
+    /// 코드포인트를 끊어 쓰는데(`\xeb\x94` 다음에 바로 `\x1b[`), 그 바이트 하나 때문에
+    /// read 한 번이 통째로 증발해 화면에서 프레임이 통으로 빠졌다(2026-08-11 확정).
+    /// 깨진 바이트는 VT 파서가 U+FFFD 로 알아서 처리하므로 그냥 흘려보내면 된다.
+    fn process(&mut self, data: &[u8]) -> Vec<u8> {
         self.leftover.extend_from_slice(data);
-        let mut valid_up_to = 0;
-        let mut i = 0;
-        while i < self.leftover.len() {
+        let n = self.leftover.len();
+        let mut cut = n;
+        // 잘린 시퀀스는 뒤 3바이트 안에 있다(UTF-8 최대 4바이트). 이어지는 바이트를
+        // 거슬러 올라가 선두 바이트를 찾고, 길이가 모자라면 거기서 끊어 보류한다.
+        for back in 1..=3.min(n) {
+            let i = n - back;
             let b = self.leftover[i];
-            let width = if b & 0x80 == 0 {
-                1
-            } else if b & 0xe0 == 0xc0 {
+            if b & 0xc0 == 0x80 {
+                continue;
+            }
+            let width = if b & 0xe0 == 0xc0 {
                 2
             } else if b & 0xf0 == 0xe0 {
                 3
@@ -1298,24 +1455,14 @@ impl Utf8Buffer {
             } else {
                 1
             };
-            if i + width <= self.leftover.len() {
-                if std::str::from_utf8(&self.leftover[i..i + width]).is_ok() {
-                    valid_up_to = i + width;
-                }
-                i += width;
-            } else {
-                break;
+            if width > 1 && i + width > n {
+                cut = i;
             }
+            break;
         }
-        if valid_up_to > 0 {
-            let s = std::str::from_utf8(&self.leftover[..valid_up_to])
-                .unwrap_or("")
-                .to_string();
-            self.leftover.drain(..valid_up_to);
-            s
-        } else {
-            String::new()
-        }
+        let out = self.leftover[..cut].to_vec();
+        self.leftover.drain(..cut);
+        out
     }
 }
 
@@ -1332,10 +1479,11 @@ fn snapshot(
     // Callers that change the *whole* view (scroll, resize) pass true.
     force_full: bool,
 ) -> ScreenUpdate {
-    // display_offset counts lines scrolled toward older history; visual
-    // row r maps to grid line `r - display_offset`. Read it before the
-    // &mut borrow from `damage()`.
+    // 히스토리로 몇 줄 올라가 있는지 + 스크롤백이 얼마나 깊은지. 화면 행 r 은 그리드
+    // 줄 `r - display_offset` 이고, 그 값이 음수면 히스토리다(0 이 화면 첫 줄).
+    // `damage()` 의 &mut 대여 전에 읽는다.
     let display_offset = term.grid().display_offset() as i32;
+    let topmost = -(term.grid().history_size() as i32);
     // Which visual rows to rebuild. damage() yields viewport-relative
     // line numbers (already display_offset-adjusted), and returns Full
     // on first frame / resize / scroll, which we expand to every row.
@@ -1365,8 +1513,13 @@ fn snapshot(
         // repaints correctly, and we never crash on the race.
         let grid_cols = grid.columns();
         let grid_lines = grid.screen_lines();
+        // ⚠️**음수 line 을 막지 마라.** alacritty 는 스크롤백을 음수 `Line` 으로
+        // 노출한다(`topmost_line()` = `-history_size`). 예전엔 `line >= 0` 만
+        // 인정해 히스토리를 통째로 빈칸으로 채웠고, 그래서 위로 N줄 올리면 윗줄
+        // N개가 비고 화면 높이보다 많이 올리면 화면이 통째로 비었다 —
+        // 「위로 올려도 위에 게 없어진다」의 정체였다(2026-08-11 확정).
         let line = r as i32 - display_offset;
-        let line_ok = line >= 0 && (line as usize) < grid_lines;
+        let line_ok = line >= topmost && line < grid_lines as i32;
         for c in 0..cols {
             if line_ok && (c as usize) < grid_cols {
                 let point = Point::new(
@@ -2181,6 +2334,127 @@ fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
 /// Windows 프로세스명은 "claude.exe" — active_process_name 호출자들은 "claude" /
 /// "bash" 같은 bare 이름과 정확 일치 비교하므로 여기서 확장자를 벗겨 플랫폼
 /// 균질화한다. Unix 는 no-op.
+/// pane 에서 도는 에이전트 종류. 학생 대접(보더 학생색·타이틀바·얼굴·탭칩)은
+/// claude 전용이 아니라 **이 값이 Some 이면** 붙는다(거노 2026-08-05: codex 도 학생).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Agy,
+}
+
+impl AgentKind {
+    /// 저장·전송용 이름. `pane_record` 의 `was_agent`, board 의 `harness`, 소켓
+    /// 응답이 전부 이 하나를 쓴다 — match 를 사본으로 늘리면 한쪽만 고쳐져 갈린다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Agy => "agy",
+        }
+    }
+
+    /// 프로세스 comm 으로 판정. comm 은 경로가 붙어 올 수 있어(손자 행은
+    /// `…/bin/codex`) 파일명만 떼어 본다.
+    fn from_comm(comm: &str) -> Option<Self> {
+        let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+        let base = strip_exe_suffix(base.to_string());
+        match base.as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            // shim 래퍼도 `agy` 라는 이름의 sh 스크립트지만 마지막에 `exec` 로
+            // 진짜 바이너리가 그 자리를 차지하므로, 여기 걸리는 건 늘 진짜다.
+            "agy" => Some(Self::Agy),
+            _ => None,
+        }
+    }
+}
+
+/// 셸 pid 아래에서 에이전트를 찾는다 — 테이블만 보는 순수 함수라 실측 트리로 잴 수 있다.
+///
+/// 같은 부모의 자식 중 **가장 나중에 뜬 것**(pid 큰 쪽)을 고른다 — `active_process_name`
+/// 과 같은 규칙. 직속 자식이 런처류면 한 세대 더 내려간다.
+/// 셸 pid 하나로 하네스를 묻는다 — `PtySession` 을 못 쥐고 pid 만 아는 호출자
+/// (board 조립·소켓 백엔드)용. 프로세스 테이블은 이미 공유 캐시라 `ps` 가 추가로
+/// 안 돈다. 판정 본체는 `agent_in_table` 하나뿐이라 `active_agent` 와 결과가 같다.
+pub fn agent_for_shell(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
+    agent_in_table(table, effective_shell_pid(table, shell_pid))
+}
+
+fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
+    let newest_child = |parent: u32| -> Option<(u32, &str)> {
+        let mut best: Option<(u32, &str)> = None;
+        for (row_pid, row_ppid, name) in table.iter() {
+            if *row_ppid == parent && best.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                best = Some((*row_pid, name.as_str()));
+            }
+        }
+        best
+    };
+    let (child_pid, child) = newest_child(shell_pid)?;
+    if let Some(kind) = AgentKind::from_comm(child) {
+        return Some(kind);
+    }
+    if is_agent_launcher(child) {
+        if let Some((_, grandchild)) = newest_child(child_pid) {
+            return AgentKind::from_comm(grandchild);
+        }
+    }
+    None
+}
+
+/// 에이전트를 감싸 띄우는 것들 — 이게 직속 자식이면 진짜 프로세스는 한 세대 아래다.
+/// codex 가 npm shim 이라 `node` 를 거치는 게 대표 사례고, `npx`·래퍼 셸도 같다.
+fn is_agent_launcher(comm: &str) -> bool {
+    let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    let base = strip_exe_suffix(base.to_string());
+    matches!(
+        base.as_str(),
+        "node" | "npm" | "npx" | "bun" | "deno" | "env" | "sh" | "bash" | "zsh" | "fish"
+    )
+}
+
+/// 자기 이름으로는 아무것도 말해 주지 않는, 남을 띄우기만 하는 것들.
+/// 진짜 프로그램은 이들의 자식으로 뜨므로 이름 해석은 여기서 멈추면 안 된다.
+/// python 류는 넣지 않았다 — `python train.py` 처럼 자기가 곧 작업인 경우가
+/// 흔해서, 내려갔다가 엉뚱한 자식 이름을 집을 수 있다.
+fn is_launcher_name(name: &str) -> bool {
+    matches!(
+        strip_exe_suffix(name.to_string()).as_str(),
+        "node" | "npx" | "npm" | "bun" | "deno"
+    )
+}
+
+/// 런처를 만나면 그 아래 최신 자식으로 계속 내려간다.
+///
+/// 여기서 멈추면 pane 을 닫을 때 "node 실행 중"이라고 물어 무엇을 닫는 건지 알
+/// 수가 없다 — codex 는 npm shim 을 거쳐 진짜 바이너리가 손자로 뜨고, agy 를
+/// 게이트웨이 모델(kimi·glm)로 돌릴 때도 free-antigravity-cli(node)를 지난다.
+/// 사슬이 길어질 수 있으니 몇 걸음만 내려가고, 더 못 내려가면 그 자리를 답으로 쓴다.
+fn descend_launchers(
+    table: &[(u32, u32, String)],
+    start: Option<(u32, String)>,
+) -> Option<(u32, String)> {
+    let mut cur = start;
+    for _ in 0..3 {
+        let (cpid, cname) = cur.clone()?;
+        if !is_launcher_name(&cname) {
+            break;
+        }
+        let mut grandchild: Option<(u32, String)> = None;
+        for (row_pid, row_ppid, name) in table.iter() {
+            if *row_ppid == cpid && grandchild.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                grandchild = Some((*row_pid, name.clone()));
+            }
+        }
+        match grandchild {
+            Some(g) => cur = Some(g),
+            None => break,
+        }
+    }
+    cur
+}
+
 fn strip_exe_suffix(name: String) -> String {
     #[cfg(not(windows))]
     {
@@ -2458,21 +2732,41 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
 /// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
 #[cfg(unix)]
 pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    process_env_vars(pid, &[key]).remove(key)
+}
+
+/// 여러 키를 **ps 한 번**으로 읽는다 — board 는 pane 마다 여러 env 를 보는데 키당
+/// 프로세스를 띄우면 폴링(1s)마다 pane 수 × 키 수만큼 ps 가 뜬다.
+#[cfg(unix)]
+pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut found = std::collections::HashMap::new();
+    let Ok(out) = std::process::Command::new("ps")
         .args(["eww", "-p", &pid.to_string(), "-o", "command="])
         .output()
-        .ok()?;
+    else {
+        return found;
+    };
     let s = String::from_utf8_lossy(&out.stdout);
-    let needle = format!("{key}=");
-    s.split_whitespace()
-        .find_map(|tok| tok.strip_prefix(&needle))
-        .filter(|v| !v.is_empty())
-        .map(String::from)
+    for tok in s.split_whitespace() {
+        for k in keys {
+            if let Some(v) = tok.strip_prefix(&format!("{k}=")) {
+                if !v.is_empty() {
+                    found.insert((*k).to_string(), v.to_string());
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(not(unix))]
 pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
     None
+}
+
+#[cfg(not(unix))]
+pub fn process_env_vars(_pid: u32, _keys: &[&str]) -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
 }
 
 #[cfg(test)]
@@ -2500,5 +2794,550 @@ mod process_table_tests {
         let a = process_table_shared();
         let b = process_table_shared();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "TTL 안인데 표가 새로 만들어졌다");
+    }
+}
+
+#[cfg(test)]
+mod agent_kind_tests {
+    use super::*;
+
+    /// 실측 트리(2026-08-05, 거노 머신). codex 는 npm shim 이라 진짜 바이너리가
+    /// **손자**다 — 이름만 보는 판정은 여기서 반드시 실패한다.
+    fn codex_tree() -> Vec<(u32, u32, String)> {
+        vec![
+            (60536, 1, "zsh".into()),
+            (60973, 60536, "node".into()),
+            (60992, 60973, "codex".into()),
+        ]
+    }
+
+    #[test]
+    fn codex_는_node_아래_손자로_잡힌다() {
+        assert_eq!(agent_in_table(&codex_tree(), 60536), Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn claude_는_직속_자식으로_잡힌다() {
+        let t = vec![(71388, 1, "zsh".into()), (71391, 71388, "claude".into())];
+        assert_eq!(agent_in_table(&t, 71388), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn 그냥_셸은_아무것도_아니다() {
+        // 음성 대조군이 없으면 "늘 Some" 을 내는 판정도 통과한다.
+        let t = vec![(100, 1, "zsh".into()), (101, 100, "vim".into())];
+        assert_eq!(agent_in_table(&t, 100), None);
+    }
+
+    #[test]
+    fn 런처만_있고_손자가_없으면_아무것도_아니다() {
+        // node 를 띄웠지만 codex 가 아닌 경우 — 런처를 봤다고 에이전트로 치면 안 된다.
+        let t = vec![(200, 1, "zsh".into()), (201, 200, "node".into())];
+        assert_eq!(agent_in_table(&t, 200), None);
+    }
+
+    #[test]
+    fn 자식이_여럿이면_가장_나중_것() {
+        // active_process_name 과 같은 규칙(pid 큰 쪽) — 옛 자식이 남아 있어도
+        // 지금 화면에 보이는 것을 고른다.
+        let t = vec![
+            (300, 1, "zsh".into()),
+            (301, 300, "vim".into()),
+            (302, 300, "claude".into()),
+        ];
+        assert_eq!(agent_in_table(&t, 300), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn 경로가_붙어_와도_파일명으로_본다() {
+        // 테이블은 basename 으로 정규화하지만, 그 전제가 깨져도 판정은 서야 한다.
+        let t = vec![
+            (400, 1, "zsh".into()),
+            (401, 400, "/usr/local/bin/node".into()),
+            (402, 401, "/opt/homebrew/bin/codex".into()),
+        ];
+        assert_eq!(agent_in_table(&t, 400), Some(AgentKind::Codex));
+    }
+}
+
+#[cfg(test)]
+mod scrollback_probe {
+    use super::*;
+
+    /// 실 PTY 로 스크롤백 **보존 줄수와 그 대가(RSS)** 를 잰다 — 거노: "히스토리가 왜
+    /// 다 안 남지, 보려고 위로 올리면 없어져 있어". 캡은 폭에서 나오므로(예산 ÷ 폭)
+    /// 넓은 pane 일수록 짧아진다. `KASATERM_SCROLLBACK_MB` 와 `PROBE_COLS` 로 조합을
+    /// 바꿔 가며 돌린다. 무시(ignore)인 이유는 셸을 띄우고 몇십 초 기다려서다.
+    #[test]
+    #[ignore]
+    fn how_many_lines_survive() {
+        let cols: u16 = std::env::var("PROBE_COLS").ok().and_then(|s| s.parse().ok()).unwrap_or(363);
+        let rss = || -> u64 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output().ok();
+            out.and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+                .unwrap_or(0) / 1024
+        };
+        let before = rss();
+        let s = PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()),
+            cols, rows: 40, pane_id: "%probe".into(),
+            ..Default::default()
+        }).unwrap();
+        s.send_bytes(format!("for i in $(seq 1 {}); do echo line-$i; done\n", std::env::var("PROBE_LINES").unwrap_or_else(|_| "200000".into())).as_bytes()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(
+            std::env::var("PROBE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(40),
+        ));
+        // 양수 = 오래된 쪽(위).
+        let up = s.scroll(1_000_000);
+        eprintln!(
+            "예산={}MB cols={cols} 캡={}줄 실제보존={up}줄 RSS {}→{}MB",
+            scrollback_budget_bytes() / 1024 / 1024,
+            history_lines_for_cols(cols),
+            before, rss()
+        );
+    }
+}
+
+#[cfg(test)]
+mod launcher_descend_tests {
+    use super::descend_launchers;
+
+    fn row(pid: u32, ppid: u32, name: &str) -> (u32, u32, String) {
+        (pid, ppid, name.to_string())
+    }
+
+    #[test]
+    fn stops_at_a_real_program() {
+        let t = vec![row(100, 1, "zsh"), row(200, 100, "vim")];
+        let got = descend_launchers(&t, Some((200, "vim".into())));
+        assert_eq!(got.unwrap().1, "vim");
+    }
+
+    #[test]
+    fn descends_past_node_to_the_real_binary() {
+        // 실측 트리: 셸 → node(free-antigravity-cli) → agy
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "node"),
+            row(300, 200, "agy"),
+        ];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "agy", "node 에서 멈추면 pane 닫기가 'node' 라고 묻는다");
+    }
+
+    #[test]
+    fn descends_two_hops_for_npm_shim() {
+        // codex 처럼 npm shim 을 한 번 더 지나는 경우
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "npm"),
+            row(300, 200, "node"),
+            row(400, 300, "codex"),
+        ];
+        let got = descend_launchers(&t, Some((200, "npm".into())));
+        assert_eq!(got.unwrap().1, "codex");
+    }
+
+    #[test]
+    fn keeps_launcher_when_it_has_no_child() {
+        // `node` 를 맨손으로 띄운 REPL — 내려갈 곳이 없으면 그대로 둔다
+        let t = vec![row(100, 1, "zsh"), row(200, 100, "node")];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "node");
+    }
+
+    #[test]
+    fn picks_the_newest_child() {
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "node"),
+            row(300, 200, "old"),
+            row(400, 200, "new"),
+        ];
+        let got = descend_launchers(&t, Some((200, "node".into())));
+        assert_eq!(got.unwrap().1, "new");
+    }
+}
+
+/// 살아 있는 PTY 로 스냅샷 재생을 검증한다. 순수 변환(`to_ansi`) 쪽 테스트는
+/// kasa-bridge 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
+/// **구독-스냅샷 원자성**을 본다.
+#[cfg(test)]
+mod snapshot_tap_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn sh(pane_id: &str) -> PtySession {
+        PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()),
+            cols: 40,
+            rows: 10,
+            pane_id: pane_id.into(),
+            ..Default::default()
+        })
+        .expect("PTY 를 못 띄웠다")
+    }
+
+    fn wait_on_screen(sess: &PtySession, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let (_rx, ansi) = sess.tap_bytes_with_snapshot();
+            if String::from_utf8_lossy(&ansi).contains(needle) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("{needle} 이 10초 안에 화면에 안 나타났다");
+    }
+
+    #[test]
+    fn snapshot_carries_what_is_already_on_screen() {
+        let sess = sh("test-snap");
+        sess.send_bytes(b"printf 'HELLO-SNAP\\n'\n").unwrap();
+        wait_on_screen(&sess, "HELLO-SNAP");
+    }
+
+    /// 붙는 순간 이미 화면에 있던 출력은 스냅샷으로만, 그 뒤의 출력은 tap 으로만
+    /// 와야 한다. 하나라도 양쪽에 걸치면 그만큼 두 번 그려진다.
+    #[test]
+    fn subscription_and_snapshot_do_not_overlap() {
+        let sess = sh("test-atomic");
+        sess.send_bytes(b"printf 'BEFORE-TAP\\n'\n").unwrap();
+        wait_on_screen(&sess, "BEFORE-TAP");
+
+        let (rx, ansi) = sess.tap_bytes_with_snapshot();
+        assert!(String::from_utf8_lossy(&ansi).contains("BEFORE-TAP"));
+
+        sess.send_bytes(b"printf 'AFTER-TAP\\n'\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut streamed = String::new();
+        while Instant::now() < deadline && !streamed.contains("AFTER-TAP") {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                streamed.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
+        assert!(
+            streamed.contains("AFTER-TAP"),
+            "구독 뒤의 출력이 tap 으로 안 왔다"
+        );
+        assert!(
+            !streamed.contains("BEFORE-TAP"),
+            "스냅샷에 이미 담긴 출력이 tap 으로 또 왔다 — 두 번 그려진다: {streamed:?}"
+        );
+    }
+
+    fn nums(s: &str) -> Vec<u32> {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::new(), 0);
+        while i < b.len() {
+            if b[i] == b'L' {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    if let Ok(n) = s[start..j].parse::<u32>() {
+                        out.push(n);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// 조용한 pane 에서만 맞는 건 원자성이 아니다. 출력이 쏟아지는 한가운데서
+    /// 구독해도 한 줄도 빠지거나 겹치지 않아야 한다.
+    ///
+    /// 경쟁 창은 마이크로초라 한 번 붙어서는 절대 안 걸린다 — 폭주 내내 반복해서
+    /// 붙어야 한다(옛 락 순서에서 이 테스트가 실패하는 것으로 유효성을 확인했다).
+    #[test]
+    fn no_gap_or_overlap_while_output_streams() {
+        const TOTAL: u32 = 40_000;
+        let sess = sh("test-race");
+        sess.send_bytes(
+            format!(
+                "i=0; while [ $i -lt {TOTAL} ]; do i=$((i+1)); echo L$i; \
+                 for j in 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5; do :; done; done\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut checked = 0u32;
+        while Instant::now() < deadline && checked < 300 {
+            let (rx, ansi) = sess.tap_bytes_with_snapshot();
+            let Some(&drawn) = nums(&String::from_utf8_lossy(&ansi)).last() else {
+                continue;
+            };
+
+            let mut streamed = String::new();
+            let until = Instant::now() + Duration::from_millis(60);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(30)) {
+                    Ok(c) => streamed.push_str(&String::from_utf8_lossy(&c)),
+                    Err(_) => break,
+                }
+            }
+            drop(rx);
+
+            let got = nums(&streamed);
+            let (Some(&lo), Some(&hi)) = (got.iter().min(), got.iter().max()) else {
+                continue;
+            };
+            if hi <= drawn {
+                continue; // 폭주가 멎었다 — 이번 회차는 경쟁이 아니다
+            }
+            assert!(
+                lo >= drawn,
+                "L{lo} 이 스냅샷(≤L{drawn})과 tap 양쪽에 있다 — 두 번 그려진다 (시도 {checked})"
+            );
+            assert!(
+                lo <= drawn + 2,
+                "L{}~L{} 가 스냅샷에도 tap 에도 없다 — 유실 (시도 {checked})",
+                drawn + 1,
+                lo - 1
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 12,
+            "경쟁 상태를 충분히 못 만들었다 ({checked}회) — 검증이 무의미하다"
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_fidelity_tests {
+    use super::*;
+
+    /// 픽스처를 뜬 pane 의 실제 크기. 폭이 어긋나면 재생 자체가 무의미해진다
+    /// (넓은 화면에서 뜬 녹음을 좁은 화면에 틀면 divider 가 줄바꿈돼 겹친다).
+    fn fixture_size() -> (u16, u16) {
+        let g = |k: &str, d: u16| {
+            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+        };
+        (g("KASATERM_SNAPSHOT_COLS", 363), g("KASATERM_SNAPSHOT_ROWS", 39))
+    }
+
+    /// 우리 `snapshot()` 이 alacritty 그리드를 그대로 옮기는가.
+    ///
+    /// agy(antigravity CLI) 화면이 kasaterm 에서만 뒤엉키는 걸 쫓다 여기까지 왔다
+    /// (2026-08-11). 같은 바이트를 alacritty Term 에 먹이면 그리드는 **정확한데**
+    /// pane 에 보이는 건 두 줄이 한 줄로 뭉쳐 있었다 — 파서가 아니라 그 위 변환층
+    /// 이 범인이라는 뜻이다. 이 테스트가 그 경계를 못박는다.
+    ///
+    /// 입력은 `KASATERM_SNAPSHOT_FIXTURE` 로 준 실제 녹음 파일. 없으면 건너뛴다
+    /// (녹음은 크고 사람 대화가 들어 있어 레포에 넣지 않는다).
+    #[test]
+    fn snapshot_rows_match_the_alacritty_grid() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        let (cols, rows) = fixture_size();
+
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        proc.advance(&mut term, &raw);
+
+        // 기준 = alacritty 그리드에서 직접 읽은 줄.
+        let truth: Vec<String> = {
+            let g = term.grid();
+            (0..rows as usize)
+                .map(|r| {
+                    let line = alacritty_terminal::index::Line(r as i32);
+                    (0..cols as usize)
+                        .map(|c| g[line][alacritty_terminal::index::Column(c)].c)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect()
+        };
+
+        let upd = snapshot(&mut term, cols, rows, "%t", &Arc::new(Mutex::new(None)), true);
+        let mut got = vec![String::new(); rows as usize];
+        for (r, row) in &upd.dirty {
+            got[*r as usize] =
+                row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+        }
+
+        check(&truth, &got, "한 번에 먹였을 때");
+    }
+
+    /// 같은 바이트를 **live 처럼 잘게 나눠** 먹이고 damage 기반 스냅샷을 누적한다.
+    ///
+    /// 실제 reader 가 하는 그대로다 — 읽을 때마다 `advance` → `scroll_display(Bottom)`
+    /// → `snapshot(force_full=false)` → 돌아온 dirty 행만 화면에 반영. 한 번에 먹이면
+    /// 멀쩡한데 이렇게 하면 어긋난다면, 범인은 파서도 스냅샷도 아니고 **부분갱신 누적**이다.
+    #[test]
+    fn chunked_damage_snapshots_still_match_the_grid() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        // ★높이를 좁혀 **스크롤이 일어나게** 한다. live pane 은 앞선 셸 출력 때문에
+        // agy 화면이 늘 스크롤 상태고, damage 는 뷰포트 기준이라 스크롤이 섞이면
+        // "안 damaged 된 행"이 실은 다른 내용을 가리키게 된다.
+        let (cols, base_rows) = fixture_size();
+        for rows in [base_rows, base_rows / 2, 12] {
+        for chunk in [65536usize, 4096, 1024, 512, 128] {
+            let listener = PtyEventForwarder {
+                writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+                size: Arc::new(Mutex::new((cols, rows))),
+                last_title: Arc::new(Mutex::new(None)),
+            };
+            let mut term = make_term(cols, rows, listener);
+            let mut proc: Processor<StdSyncHandler> = Processor::new();
+            let title = Arc::new(Mutex::new(None));
+            let mut mirror = vec![String::new(); rows as usize];
+            // ★reader 와 **똑같이** NFC 정규화를 거쳐 넘긴다. 이걸 빼면 실제 경로가
+            // 아니다 — 비-ASCII 청크만 정규화되므로 한글이 든 스트림에서만 갈린다.
+            let mut u8buf = Utf8Buffer::new();
+            for part in raw.chunks(chunk) {
+                use unicode_normalization::UnicodeNormalization;
+                let batch = u8buf.process(part);
+                let nfc_holder: Option<String> = if batch.is_ascii() {
+                    None
+                } else {
+                    std::str::from_utf8(&batch).ok().map(|s| s.nfc().collect())
+                };
+                let fed: &[u8] =
+                    nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
+                proc.advance(&mut term, fed);
+                if proc.sync_bytes_count() > 0 {
+                    continue; // reader 와 같은 규칙
+                }
+                term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                let upd = snapshot(&mut term, cols, rows, "%t", &title, false);
+                for (r, row) in &upd.dirty {
+                    mirror[*r as usize] =
+                        row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+                }
+            }
+            let truth = grid_rows(&term, cols, rows);
+            check(&truth, &mirror, &format!("rows={rows} chunk={chunk}"));
+        }
+        }
+    }
+
+    /// `Utf8Buffer` 가 바이트를 잃지 않는가. 청크 경계에서 갈라 넣어도 이어붙인
+    /// 결과는 원본과 **바이트 단위로 같아야** 한다.
+    #[test]
+    fn utf8_buffer_never_loses_bytes() {
+        let Some(path) = std::env::var_os("KASATERM_SNAPSHOT_FIXTURE") else { return };
+        let raw = std::fs::read(&path).expect("fixture");
+        for chunk in [raw.len(), 4096, 1024, 128, 7, 1] {
+            let mut b = Utf8Buffer::new();
+            let mut out: Vec<u8> = Vec::new();
+            for part in raw.chunks(chunk.max(1)) {
+                out.extend_from_slice(&b.process(part));
+            }
+            assert_eq!(
+                out.len(),
+                raw.len(),
+                "chunk={chunk}: {}바이트가 사라졌다",
+                raw.len() as i64 - out.len() as i64
+            );
+            assert!(out == raw, "chunk={chunk}: 내용이 달라졌다");
+        }
+    }
+
+    /// agy 가 실제로 보낸 모양: 한글 코드포인트를 SGR 이스케이프 사이에서 끊는다.
+    /// 옛 구현은 이 배치를 통째로 버렸다 — 화면에서 프레임이 통으로 사라진 원인.
+    #[test]
+    fn a_truncated_codepoint_mid_batch_never_eats_the_batch() {
+        let batch = b"\x1b[38;2;1;2;3m\xeb\x94\x1b[m\xed\x95\x9c \xec\xa4\x84\r\n";
+        let mut b = Utf8Buffer::new();
+        let out = b.process(batch);
+        assert_eq!(out, batch, "깨진 바이트 하나에 배치가 통째로 사라졌다");
+    }
+
+    /// 잘린 코드포인트는 **다음 read 까지만** 보류하고, 이어지면 그대로 흘려보낸다.
+    #[test]
+    fn a_codepoint_split_across_reads_is_rejoined() {
+        let mut b = Utf8Buffer::new();
+        assert_eq!(b.process(b"ab\xed\x95"), b"ab", "잘린 앞부분을 안 붙들었다");
+        assert_eq!(b.process(b"\x9ccd"), "한cd".as_bytes(), "이어붙이지 못했다");
+    }
+
+    /// 위로 올린 화면에 **히스토리가 실제로 보이는가**.
+    ///
+    /// 기준값을 그리드에서 뽑으면 동어반복이 되므로 내용으로 못박는다: 40줄을 흘린
+    /// 10행 화면은 L31..L40 을 보여주고, 5줄 올리면 L26..L35 여야 한다. 예전 코드는
+    /// 히스토리를 음수 `Line` 으로 읽지 못하게 막아 윗 5줄이 빈칸이 됐다.
+    #[test]
+    fn scrolling_up_actually_shows_history() {
+        let (cols, rows) = (40u16, 10u16);
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        let mut feed = String::new();
+        for i in 1..=40 {
+            feed.push_str(&format!("L{i}\r\n"));
+        }
+        proc.advance(&mut term, feed.as_bytes());
+        let title = Arc::new(Mutex::new(None));
+
+        let view = |t: &mut Term<PtyEventForwarder>| -> Vec<String> {
+            let upd = snapshot(t, cols, rows, "%t", &title, true);
+            let mut got = vec![String::new(); rows as usize];
+            for (r, row) in &upd.dirty {
+                got[*r as usize] =
+                    row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string();
+            }
+            got
+        };
+
+        let live = view(&mut term);
+        assert_eq!(&live[..9], &["L32", "L33", "L34", "L35", "L36", "L37", "L38", "L39", "L40"]);
+
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+        assert_eq!(term.grid().display_offset(), 5, "스크롤이 안 걸렸다");
+        let scrolled = view(&mut term);
+        assert_eq!(
+            &scrolled[..],
+            &["L27", "L28", "L29", "L30", "L31", "L32", "L33", "L34", "L35", "L36"],
+            "위로 올린 화면에 히스토리가 안 보인다"
+        );
+    }
+
+    fn grid_rows(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<String> {
+        let g = term.grid();
+        (0..rows as usize)
+            .map(|r| {
+                let line = alacritty_terminal::index::Line(r as i32);
+                (0..cols as usize)
+                    .map(|c| g[line][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn check(truth: &[String], got: &[String], what: &str) {
+        let rows = truth.len();
+        let mut bad = Vec::new();
+        for r in 0..rows {
+            // 넓은 글자 뒷칸을 어느 쪽이 어떻게 채우든 **글자 자체**는 같아야 한다.
+            let norm = |s: &str| s.replace('\0', "").replace(' ', "");
+            if norm(&truth[r]) != norm(&got[r]) {
+                bad.push(format!("  행 {r}\n    그리드: {:?}\n    스냅샷: {:?}", truth[r], got[r]));
+            }
+        }
+        assert!(bad.is_empty(), "[{what}] 그리드와 스냅샷이 어긋난다:\n{}", bad.join("\n"));
     }
 }

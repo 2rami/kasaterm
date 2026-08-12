@@ -9,6 +9,14 @@ import { PaneToolTimeline } from './PaneToolTimeline';
 
 const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2 : 1);
 
+// 한 pane 줄에 완료 태스크를 몇 개까지 보일지. 저장소는 **방 단위로 공유**돼서 바쁜
+// 방은 하루 이틀 만에 완료가 수십 개 쌓인다(실측 2026-08-06: 34개 중 29개 완료,
+// 전부 어제·오늘 것) — 거노: "아루 태스크는 왜 저렇게 돼 있어". 그 줄에서 봐야 할 건
+// **지금 뭘 하는가**지 오늘 끝낸 것 전부가 아니라, 열린 것은 다 보이고 완료는 최근
+// 몇 개만 남긴 뒤 나머지는 개수로 접는다. 오래된 파일 자체는 앱이 부팅 때 지운다
+// (main.rs `prune_finished_tasks`) — 그건 어제 것을 못 지우니 이 상한이 따로 필요하다.
+const DONE_SHOWN = 3;
+
 // 확인 대기 알림 종 — 이모지 금지 SVG.
 function BellGlyph() {
   return (
@@ -18,6 +26,14 @@ function BellGlyph() {
     </svg>
   );
 }
+
+// 완료 보고 경과 — 절대 시각은 읽는 사람이 매번 뺄셈해야 한다(거노: 상대 시간으로).
+const agoLabel = (secs?: number) => {
+  if (secs == null) return '';
+  if (secs < 60) return '방금';
+  if (secs < 3600) return `${Math.floor(secs / 60)}분 전`;
+  return `${Math.floor(secs / 3600)}시간 전`;
+};
 
 const SectionLabel = ({ children }: { children: string }) => (
   <div style={{
@@ -117,6 +133,21 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                   title="대화 저장 — background daemon 으로 보내 터미널이 꺼져도 유지(←← detach)"
                   style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', background: 'transparent', border: '1px solid var(--cth-cream-200)', borderRadius: 6, padding: '2px 7px', cursor: 'pointer' }}
                 >저장</button>
+                {/* 명시적 완료 보고 — idle 추정이 아니라 학생이 직접 선언한 결과.
+                    요약·경과는 툴팁에(칩은 한 눈에 성패만). */}
+                {a.doneOutcome && (
+                  <span
+                    title={[a.doneSummary, agoLabel(a.doneAgoSecs)].filter(Boolean).join(' — ')}
+                    style={{
+                      flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800,
+                      color: a.doneOutcome === 'succeeded' ? 'var(--cth-status-success)' : 'var(--cth-coral)',
+                      background: a.doneOutcome === 'succeeded'
+                        ? 'color-mix(in srgb, var(--cth-status-success) 13%, #fff)'
+                        : 'color-mix(in srgb, var(--cth-coral) 13%, #fff)',
+                      padding: '2px 7px', borderRadius: 6,
+                    }}
+                  >{a.doneOutcome === 'succeeded' ? '✓ 완료 보고' : '✗ 실패 보고'}</span>
+                )}
                 {building ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
                 ) : a.currentTool ? (
@@ -132,18 +163,63 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
               {/* claude TaskCreate 태스크 — 진행중(◉) 먼저. */}
               {!!paneTasks[a.id]?.length && (
                 <div style={{ marginLeft: 16, marginTop: 5, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {[...paneTasks[a.id]]
-                    .sort((x, y) => taskRank(x.status) - taskRank(y.status))
-                    .map((t) => {
-                      const done = t.status === 'completed';
-                      const active = t.status === 'in_progress';
-                      return (
-                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
-                          <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
-                        </div>
-                      );
-                    })}
+                  {(() => {
+                    // 목록은 방 하나를 여럿이 나눠 쓴다 — 그대로 그리면 같은 방 pane 카드마다
+                    // **같은 태스크 뭉치가 통째로 반복**된다(거노 2026-08-06: "각자 태스크가
+                    // 있으면 좋겠네"). 남이 주인인 것은 그 사람 카드에만 두고, 여기선 개수로만
+                    // 알린다. 주인 없는 것도 마찬가지 — 방 저장소엔 그 cwd 에서 돌았던 옛
+                    // 세션이 전부 쌓여 있어서(실측 59개 중 55개가 주인 없는 유령) 그걸 카드에
+                    // 풀면 지금 뭘 하는지가 통째로 묻힌다. 개수로만 알리고 툴팁에 담는다.
+                    const room = [...paneTasks[a.id]].sort((x, y) => taskRank(x.status) - taskRank(y.status));
+                    const all = room.filter((t) => t.mine !== false);
+                    // 미배정은 아무도 안 잡은 일 — 끝난 것까지 셀 이유는 없다(주인 없이 끝난
+                    // 건 이미 지나간 일이고, 여기서 봐야 할 건 「누가 집어 가야 하나」다).
+                    const idle = room.filter((t) => t.mine === false && !t.owner && t.status !== 'completed');
+                    const others = room.filter((t) => t.mine === false && !!t.owner).length;
+                    // 정렬이 완료를 뒤로 몰아 두므로 앞에서 자르면 열린 것은 하나도 안 잘린다.
+                    const open = all.filter((t) => t.status !== 'completed');
+                    const doneAll = all.filter((t) => t.status === 'completed');
+                    const shown = [...open, ...doneAll.slice(0, DONE_SHOWN)];
+                    const folded = doneAll.length - Math.min(doneAll.length, DONE_SHOWN);
+                    return (
+                      <>
+                        {shown.map((t) => {
+                          const done = t.status === 'completed';
+                          const active = t.status === 'in_progress';
+                          return (
+                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
+                              <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
+                            </div>
+                          );
+                        })}
+                        {folded > 0 && (
+                          <div
+                            title={doneAll.slice(DONE_SHOWN).map((t) => t.subject).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            완료 {folded}개 더
+                          </div>
+                        )}
+                        {idle.length > 0 && (
+                          <div
+                            title={idle.map((t) => t.subject).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            미배정 {idle.length}개
+                          </div>
+                        )}
+                        {others > 0 && (
+                          <div
+                            title={room.filter((t) => t.mine === false && !!t.owner).map((t) => `${t.owner} · ${t.subject}`).join('\n')}
+                            style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
+                          >
+                            같은 방 다른 학생 {others}개
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
               {/* 백그라운드/서브에이전트 이름 + 완료 흔적 */}

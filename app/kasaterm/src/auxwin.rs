@@ -15,6 +15,393 @@
 //! refcount 만 줄고 실제 Window 는 `aux.window` 가 아직 잡고 있어 살아있다.
 use super::*;
 
+/// macOS 창 탭 묶기를 끄고 창을 만든다.
+///
+/// 시스템 설정이 "탭 선호: 항상"(`AppleWindowTabbingMode=always`)이면 macOS 가 새
+/// 창을 기존 창의 **탭으로 합쳐** 버린다. 그러면 pane 을 꺼내도 별도 창이 아니라
+/// 탭 한 장이 되고, 그 탭을 떼면 같이 묶인 것들이 전부 딸려 나온다(거노 실측).
+///
+/// 창마다 다른 `tabbingIdentifier` 를 주는 것으론 **안 막힌다** — 그건 "묶을 짝"만
+/// 가릴 뿐 창의 탭 참여 자체는 켜진 채라, 탭바 드래그·창 합치기 경로가 그대로
+/// 살아 있다(거노: 새 빌드에서도 여전히 안 떼짐). 꺼야 하는 건 모드 자체다.
+/// `NSWindowTabbingMode::Disallowed` 는 시스템 설정과 무관하게 그 창을 탭에서
+/// 통째로 뺀다.
+pub(crate) fn create_untabbed(
+    event_loop: &ActiveEventLoop,
+    attrs: WindowAttributes,
+) -> Result<Window, winit::error::OsError> {
+    let win = event_loop.create_window(attrs)?;
+    #[cfg(target_os = "macos")]
+    disallow_tabbing(&win);
+    Ok(win)
+}
+
+/// 이미 만들어진 창의 탭 참여를 끈다. `create_untabbed` 를 못 쓰는 자리(winit 이
+/// 만들어 준 창을 나중에 받는 경로)에서 쓴다.
+#[cfg(target_os = "macos")]
+pub(crate) fn disallow_tabbing(window: &Window) {
+    use objc2_app_kit::{NSView, NSWindowTabbingMode};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return };
+    // ns_view 는 살아 있는 NSView* 다(창이 이 함수 호출 동안 유지된다). 거기서
+    // 얻는 window 는 방금 만든 그 NSWindow.
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        if let Some(w) = view.window() {
+            w.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        }
+    }
+}
+
+/// 터미널·방 별도창을 만든다 — 탭 묶기 없이, OS 신호등 없이, 우리 헤더 자리를
+/// 비운 채로. 편집기·설정 창은 본문이 상단 여백을 안 비워 이 경로를 안 쓴다.
+fn create_aux_window(
+    event_loop: &ActiveEventLoop,
+    attrs: WindowAttributes,
+) -> Result<Window, winit::error::OsError> {
+    let win = create_untabbed(event_loop, with_aux_chrome(attrs))?;
+    #[cfg(target_os = "macos")]
+    hide_traffic_lights(&win);
+    Ok(win)
+}
+
+/// OS 신호등(닫기·최소화·최대화) 세 개를 숨긴다.
+///
+/// 우리 헤더가 이미 같은 일을 한다 — `↶` 가 되돌리기(=닫기), `−` 가 접기다.
+/// 둘이 나란히 있으면 같은 기능이 창마다 두 벌이고, 신호등이 헤더 왼쪽 78px 을
+/// 붙박이로 먹어 방 이름·학생 칩이 그만큼 밀린다(거노).
+///
+/// ⚠️ **`with_decorations(false)` 로 하면 안 된다.** 그건 타이틀바 자체를 없애서
+/// 창 이동·가장자리 리사이즈까지 통째로 앗아간다(옛 TODO 가 그래서 막혀 있었다).
+/// 버튼 세 개만 `isHidden` 으로 지우면 타이틀바는 남아 드래그·리사이즈가 그대로다.
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_traffic_lights(window: &Window) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return };
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        let Some(w) = view.window() else { return };
+        for b in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            if let Some(btn) = w.standardWindowButton(b) {
+                btn.setHidden(true);
+            }
+        }
+    }
+}
+
+/// `(tabbingMode, 이 창이 묶여 있는 탭 수)`. 헤드리스 검증용 — "탭이 안 보인다"는
+/// 눈으로 못 재고, 묶였는지는 `tabbedWindows` 가 nil 이 아닌지로만 확실해진다
+/// (mode 만 보면 "끄긴 껐는데 이미 묶인 뒤"를 못 가른다).
+#[cfg(target_os = "macos")]
+pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return (-1, 0) };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return (-1, 0) };
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        match view.window() {
+            Some(w) => (w.tabbingMode().0, w.tabbedWindows().map_or(0, |t| t.len())),
+            None => (-1, 0),
+        }
+    }
+}
+
+/// 헤더 오른쪽 버튼 — [파일트리][접기][되돌리기]. 그리면서 히트 rect 을 창에 적어
+/// 두므로 그림과 판정이 갈릴 수 없다. 되돌리기는 ⌘W 와 같은 동작이지만, 그
+/// 단축키를 모르면 창에 갇힌다.
+fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
+    const B: f32 = AUX_HEADER_BTN;
+    const ICON: f32 = 14.0;
+    // 트리 버튼은 켜져 있으면 accent 로 남긴다 — 토글은 눌린 상태가 안 보이면
+    // 누를 때마다 "이게 켜진 거야 꺼진 거야"를 화면 밖에서 세게 된다.
+    let on = a.tree_open;
+    let pinned = a.pinned;
+    // 파일트리는 **왼쪽**, 창 조작(접기·되돌리기)은 오른쪽. 메인 창 타이틀 스트립이
+    // 같은 규칙이고(트리 토글이 맨 왼쪽), 트리 패널 자체가 왼쪽에서 열리니 버튼도
+    // 그쪽에 있어야 무엇을 여는 버튼인지가 위치로 읽힌다(거노).
+    let btns: [(AuxHeaderBtn, &str, bool); 4] = [
+        (AuxHeaderBtn::FileTree, "folder-tree", true),
+        (AuxHeaderBtn::Pin, "pin", false),
+        (AuxHeaderBtn::Hide, "minus", false),
+        // `corner-down-left` 은 에셋에도 gpu 아이콘 표에도 없어 **아무것도 안 그려졌다**
+        // — 보이지 않는데 눌리기는 하는 26px 버튼이라, 헤더 오른쪽을 잘못 짚으면 창이
+        // 영문 모르게 되돌아간다. 뜻이 같고 실재하는 undo-2 로 바꾼다.
+        (AuxHeaderBtn::Dock, "undo-2", false),
+    ];
+    let n_right = btns.iter().filter(|(_, _, left)| !left).count();
+    a.header_btns.clear();
+    let (mx, my) = a.cursor_px;
+    let mut right_i = 0usize;
+    for (kind, icon, left) in btns.into_iter() {
+        let bx = if left {
+            AUX_HEADER_PAD
+        } else {
+            let x = w - B * (n_right - right_i) as f32 - AUX_HEADER_PAD;
+            right_i += 1;
+            x
+        };
+        let by = (AUX_HEADER_H - B) / 2.0;
+        let hov = mx >= bx && mx <= bx + B && my >= by && my <= by + B;
+        if hov {
+            crate::round_rect(
+                &mut a.gpu,
+                bx,
+                by,
+                B,
+                B,
+                crate::theme::radius_sm(),
+                crate::theme::surface_hover(),
+            );
+        }
+        let lit = (kind == AuxHeaderBtn::FileTree && on) || (kind == AuxHeaderBtn::Pin && pinned);
+        a.gpu.queue_icon(
+            icon,
+            bx + (B - ICON) / 2.0,
+            by + (B - ICON) / 2.0,
+            ICON,
+            if lit {
+                crate::theme::accent()
+            } else if hov {
+                crate::theme::text()
+            } else {
+                crate::theme::text_mute()
+            },
+        );
+        a.header_btns.push((kind, (bx, by, B, B)));
+    }
+}
+
+/// 마크다운 편집기 별도창 맨 위의 `Rendered | Raw` 띠. 메인 그리드 헤더의 알약과
+/// **같은 두 칸**이다(render.rs 의 `is_markdown` 분기) — 별도창엔 이게 없어 새 창으로
+/// 연 문서는 읽기 전용이나 마찬가지였다(거노).
+///
+/// 이 창은 자체 헤더가 없어(OS 타이틀바를 쓴다) 본문 위에 띠를 하나 얹고 그만큼
+/// 원점을 민다. 히트 rect 는 `header_btns` 에 넣는다 — 그린 프레임이 곧 클릭 판정이라는
+/// 이 파일의 규약을 그대로 따른다.
+fn draw_aux_md_bar(a: &mut AuxWindow, w: f32, bar_h: f32) {
+    let Some(m) = a.editor() else { return };
+    let raw_now = m.raw_mode;
+    let modified = m.modified;
+    a.header_btns
+        .retain(|(k, _)| !matches!(k, AuxHeaderBtn::MdRender | AuxHeaderBtn::MdRaw));
+    a.gpu.rect(0.0, 0.0, w, bar_h, crate::theme::surface());
+    a.gpu.rect(0.0, bar_h - 1.0, w, 1.0, crate::theme::border());
+    let f = 11.0_f32;
+    let pad = 8.0_f32;
+    let seg_h = bar_h - 8.0;
+    let seg_y = (bar_h - seg_h) / 2.0;
+    let wr = a.gpu.measure_chrome_text("Rendered", f, false);
+    let wraw = a.gpu.measure_chrome_text("Raw", f, false);
+    let total = wr + wraw + pad * 4.0;
+    let sx0 = (w - total - 10.0).max(10.0);
+    // 저장 안 된 편집이 있으면 왼쪽에 점 하나 — Raw 에서 친 것은 Rendered 로 돌아갈
+    // 때 디스크에 쓰이므로, 안 돌아가면 안 쓰인다는 걸 알아야 한다.
+    if modified {
+        a.gpu.draw_text(
+            10.0,
+            seg_y + (seg_h - f) / 2.0 - 1.0,
+            "● 저장 안 됨",
+            crate::gpu::DrawOpts {
+                font_size: f,
+                color: crate::theme::text_dim(),
+                bold: false,
+                italic: false,
+            },
+        );
+    }
+    crate::round_rect(
+        &mut a.gpu, sx0, seg_y, total, seg_h,
+        crate::theme::radius_sm(), crate::theme::panel_bg(),
+    );
+    let (mx, my) = a.cursor_px;
+    let mut sx = sx0;
+    for (label, lw, raw) in [("Rendered", wr, false), ("Raw", wraw, true)] {
+        let cell_w = lw + pad * 2.0;
+        let active = raw_now == raw;
+        let hov = mx >= sx && mx <= sx + cell_w && my >= seg_y && my <= seg_y + seg_h;
+        if active {
+            crate::round_rect(
+                &mut a.gpu, sx, seg_y, cell_w, seg_h,
+                crate::theme::radius_sm(), crate::theme::surface_hover(),
+            );
+        } else if hov {
+            crate::round_rect(
+                &mut a.gpu, sx, seg_y, cell_w, seg_h,
+                crate::theme::radius_sm(), crate::theme::surface_active(),
+            );
+        }
+        a.gpu.draw_text(
+            sx + pad,
+            seg_y + (seg_h - f) / 2.0 - 1.0,
+            label,
+            crate::gpu::DrawOpts {
+                font_size: f,
+                color: if active { crate::theme::text() } else { crate::theme::text_dim() },
+                bold: false,
+                italic: false,
+            },
+        );
+        let kind = if raw { AuxHeaderBtn::MdRaw } else { AuxHeaderBtn::MdRender };
+        a.header_btns.push((kind, (sx, seg_y, cell_w, seg_h)));
+        sx += cell_w;
+    }
+}
+
+/// 별도창 왼쪽 파일트리 패널 한 프레임. 메인 창 트리에서 **행 그리기만** 옮겨 왔다
+/// — 검색·이름바꾸기·새 파일·빠른파일·드래그·git 배지는 `App.file_tree` 의 편집
+/// 상태를 같이 써야 하는데, 그건 메인 창 좌표로 적혀 있어 두 창이 한 상태를 두고
+/// 싸운다. 여기선 읽기 전용으로 두고 펼치기·열기만 태운다.
+///
+/// 그린 행의 히트 rect 을 `a.tree_rows` 에 적어 클릭 판정이 그림과 갈리지 않게 한다.
+fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
+    let w = AUX_TREE_W;
+    let top = AUX_HEADER_H;
+    a.tree_rows.clear();
+    // `surface` 는 팔레트에서 본문(`bg`)보다 **어두운** 색이라, 트리가 판이 아니라
+    // 검게 파인 구멍으로 보였다(거노: "파일트리 배경이 검정이야"). 메인 창 사이드바가
+    // 쓰는 `panel_bg`(bg↔surface_hover 중간)로 맞춘다 — 대비로 가는 방향이 테마마다
+    // 반대라 고정색으로는 여덟 테마를 다 못 맞춘다.
+    a.gpu.rect(0.0, top, w, h - top, crate::theme::panel_bg());
+    // 트리와 셀 사이 실선 — 배경색이 비슷해 경계가 없으면 글자가 패널 안에서
+    // 시작하는 것처럼 읽힌다.
+    a.gpu.rect(w - 1.0, top, 1.0, h - top, crate::theme::border());
+    let body_h = (h - top).max(0.0);
+    let max_scroll = (rows.len() as f32 * AUX_TREE_ROW_H - body_h).max(0.0);
+    a.tree_scroll = a.tree_scroll.clamp(0.0, max_scroll);
+    let (mx, my) = a.cursor_px;
+    const STEP: f32 = 12.0;
+    const ISZ: f32 = 15.0;
+    for (i, node) in rows.iter().enumerate() {
+        let y = top + i as f32 * AUX_TREE_ROW_H - a.tree_scroll;
+        // 이 렌더러엔 scissor 가 없다 — 위아래로 벗어난 행은 아예 안 그린다.
+        // 안 그러면 헤더 띠와 창 밖으로 글자가 삐져나온다.
+        if y + AUX_TREE_ROW_H <= top || y >= h {
+            continue;
+        }
+        let hov = mx >= 0.0 && mx < w && my >= y && my < y + AUX_TREE_ROW_H;
+        if hov {
+            crate::round_rect(
+                &mut a.gpu,
+                2.0,
+                y,
+                w - 6.0,
+                AUX_TREE_ROW_H,
+                crate::theme::radius_sm(),
+                crate::theme::surface_hover(),
+            );
+        }
+        let base_x = 6.0 + node.depth as f32 * STEP;
+        if node.is_dir {
+            let chev = if node.expanded { "chevron-down" } else { "chevron-right" };
+            a.gpu.queue_icon(
+                chev,
+                base_x,
+                y + (AUX_TREE_ROW_H - 11.0) / 2.0,
+                11.0,
+                if hov { crate::theme::text() } else { crate::theme::text_mute() },
+            );
+        }
+        let icon_x = base_x + 15.0;
+        let iy = y + (AUX_TREE_ROW_H - ISZ) / 2.0;
+        let icon_col = if node.ignored {
+            crate::theme::with_alpha(crate::theme::text_dim(), 0x99)
+        } else if hov {
+            crate::theme::text()
+        } else {
+            crate::theme::text_dim()
+        };
+        if node.is_dir {
+            // 메인 창과 같은 규칙 — 레포는 폴더 대신 브랜치 아이콘.
+            let ic = if node.is_repo { "git-branch" } else { "folder" };
+            a.gpu.queue_icon(ic, icon_x, iy, ISZ, icon_col);
+        } else if let Some(ft) = crate::file_icon(&node.name) {
+            a.gpu
+                .queue_icon_colored(ft, icon_x, iy, ISZ, if node.ignored { 0.35 } else { 0.9 });
+        } else {
+            a.gpu.queue_icon("file", icon_x, iy, ISZ, icon_col);
+        }
+        let text_x = icon_x + ISZ + 6.0;
+        let font = 12.0_f32;
+        let budget = (w - text_x - 6.0).max(0.0);
+        let label = crate::render::clip_px(&mut a.gpu, &node.name, font, false, budget);
+        let fg = if node.ignored {
+            crate::theme::text_mute()
+        } else if hov || node.is_dir {
+            crate::theme::text()
+        } else {
+            crate::theme::text_dim()
+        };
+        a.gpu.draw_text(
+            text_x,
+            y + (AUX_TREE_ROW_H - font) / 2.0,
+            &label,
+            gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
+        );
+        a.tree_rows
+            .push((node.path.clone(), node.is_dir, (0.0, y, w, AUX_TREE_ROW_H)));
+    }
+}
+
+/// 별도 창 헤더 높이. macOS 에선 OS 타이틀바 **자리 위에** 그리므로 메인 창의
+/// `TITLE_HEIGHT` 와 같아야 두 창이 같은 앱으로 읽힌다. 그 외 플랫폼은 OS
+/// 타이틀바가 따로 있고 이 띠는 그 아래라, 더 얇게 둔다.
+#[cfg(target_os = "macos")]
+/// 마크다운 편집기 창의 `Rendered | Raw` 띠 높이. 자체 헤더가 없는 창이라(OS
+/// 타이틀바를 쓴다) 본문 위에 이 띠를 얹고 그만큼 원점을 민다 — 별도창엔 토글이
+/// 아예 없어 새 창으로 연 문서를 고칠 수가 없었다(거노).
+const AUX_MD_BAR_H: f32 = 28.0;
+
+const AUX_HEADER_H: f32 = TITLE_HEIGHT;
+#[cfg(not(target_os = "macos"))]
+const AUX_HEADER_H: f32 = 30.0;
+
+/// 헤더 양끝 여백.
+const AUX_HEADER_PAD: f32 = 6.0;
+/// 헤더 버튼 한 변.
+const AUX_HEADER_BTN: f32 = 26.0;
+
+/// 라벨(방 이름·학생 이름)이 시작되는 x — 왼쪽 파일트리 버튼 바로 오른쪽.
+///
+/// 전엔 신호등 세 개(`TRAFFIC_LIGHT_WIDTH`)를 피해 78px 을 통째로 비웠다.
+/// 이제 그 버튼들을 숨기므로(`hide_traffic_lights`) 그 자리가 우리 것이다 —
+/// 라벨이 창 왼쪽으로 붙어 학생 이름이 헤더 한가운데로 밀리지 않는다.
+const AUX_HEADER_X: f32 = AUX_HEADER_PAD * 2.0 + AUX_HEADER_BTN;
+
+/// 셀 그리드가 시작되는 y — 헤더 띠 바로 아래.
+///
+/// 전엔 이 값을 쓰는 곳과 안 쓰는 곳이 갈려 있었다: 셀은 헤더 아래로 내려 그리면서
+/// **행 수와 커서 위치는 창 꼭대기 기준**이라, 마지막 줄이 창 밖으로 밀리고 커서가
+/// 헤더 위에 찍혔다. 상단 오프셋을 쓰는 자리는 전부 이 상수 하나를 지난다.
+const AUX_CELL_TOP: f32 = PANE_INNER_Y + AUX_HEADER_H;
+
+/// 별도창에 메인 창과 같은 크롬 정책을 건다 — macOS 는 OS 타이틀바를 투명하게
+/// 비우고 콘텐츠를 그 위까지 끌어올려, **띠 하나**로 합친다.
+///
+/// 전엔 OS 타이틀바(회색 OS 테마) 바로 밑에 우리 헤더가 또 있어 띠가 두 겹이었다
+/// (거노: "상단바가 os테마이고 바로밑에 방 뭐시기"). decorations 를 끄는 대신
+/// 투명으로 가는 이유는 창 이동·리사이즈·신호등을 계속 OS 에 맡기기 위해서다 —
+/// 끄면 손잡이 없는 창이 남는다.
+fn with_aux_chrome(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        return attrs
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    attrs
+}
+
 /// 별도창이 담는 내용물. 이 enum 을 match 하는 지점(render/key/mouse/title)의
 /// 팔만 채우면 새 창 종류를 꽂을 수 있다. `Settings` 는 데이터를 안 들고 있다 —
 /// 설정 상태(`settings_cat`/`set_*`/`students_*`)는 App 이 소유하고 이 창은 뷰라,
@@ -29,7 +416,10 @@ pub(crate) enum AuxWindowKind {
     /// 은 App.pty 에 그대로 살아 세션이 안 끊긴다(undock 은 레이아웃 트리에서 leaf 만
     /// 빼고 pty·ws.panes 는 유지). 렌더는 `aux_terminal_render`, 이벤트는
     /// `aux_terminal_event` 로 위임(Settings 가 paint_settings 를 재사용하는 것과 동형).
-    Terminal { pane_id: String },
+    /// pane 하나를 꺼낸 창. `window` 는 **어느 방에서 나왔는지** — 이게 없으면
+    /// 되돌릴 때 원래 방이 아니라 그때 활성 pane 옆에 붙고, 헤더에 소속을 적을
+    /// 수도 없다. 방 재배치를 따라 remap 된다(`reorder_window`).
+    Terminal { pane_id: String, window: usize },
     /// 방(윈도우) 하나를 통째로 별도 OS 창으로 분리. `Terminal` 이 pane 하나를 보듯
     /// 이건 그 방의 **BSP 트리 전체**를 본다 — pane 여러 개가 자기 자리에 그려진다.
     ///
@@ -54,6 +444,50 @@ fn aux_editor_title(m: &MarkdownPane) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// 별도창 헤더의 버튼.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuxHeaderBtn {
+    /// 창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY 는 그대로 살아 있고
+    /// 칩을 누르면 같은 창이 다시 선다 — 최소화와 달리 Dock 이 아니라 **일하던
+    /// 창 안**으로 들어가므로, 꺼내 둔 것이 몇인지 거기서 한눈에 보인다(거노).
+    Hide,
+    /// 메인 그리드로 되돌린다(창 닫기·⌘W 와 같은 동작).
+    Dock,
+    /// 이 창 왼쪽에 파일트리 패널을 연다/닫는다. 창마다 따로 기억한다 — 전역
+    /// 설정으로 두면 pane 하나를 크게 보려고 꺼낸 창까지 같이 좁아진다.
+    FileTree,
+    /// 마크다운을 **렌더 뷰**로 본다. 메인 그리드 헤더의 `Rendered | Raw` 알약과
+    /// 같은 것이다 — 별도창엔 이게 없어 새 창으로 연 문서는 고칠 수가 없었다(거노).
+    MdRender,
+    /// 마크다운을 **원문 편집기**로 연다. 여기서 친 것은 Rendered 로 돌아갈 때
+    /// 디스크에 쓰인다(pane 판과 같은 규칙 — `switch_md_mode` 한 벌을 공유한다).
+    MdRaw,
+    /// 이 창을 다른 앱 위에 고정한다(always-on-top). 별도창을 꺼내는 이유가 대개
+    /// "다른 걸 보면서 이걸 곁눈질"이라, 클릭할 때마다 앞으로 끌어올리는 대신
+    /// 아예 위에 붙여 둔다. 창마다 따로 기억한다.
+    Pin,
+}
+
+/// 별도창 파일트리 패널 폭(logical px). 메인 창 컬럼보다 좁다 — 별도창은 대개
+/// pane 하나를 크게 보려고 꺼낸 것이라, 트리가 본문을 반이나 먹으면 꺼낸 이유가
+/// 사라진다.
+const AUX_TREE_W: f32 = 200.0;
+
+/// 파일트리 한 줄 높이(logical px).
+const AUX_TREE_ROW_H: f32 = 22.0;
+
+/// 페인트 루프에 넘길 파일트리 한 줄. `App.file_tree.nodes` 를 그대로 빌리면
+/// `self.aux_windows` 가변 차용과 겹치므로, 그리기 전에 필요한 것만 떠 온다.
+struct AuxTreeRow {
+    path: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+    expanded: bool,
+    ignored: bool,
+    is_repo: bool,
 }
 
 pub(crate) struct AuxWindow {
@@ -81,11 +515,54 @@ pub(crate) struct AuxWindow {
     /// 렌더 뷰는 **그려 봐야** 안다(`draw_markdown` 의 반환값) — 휠 clamp 가 한 프레임
     /// 전 값을 쓰는 건 그래서다. 0 이면 아직 안 그렸다는 뜻이라 clamp 를 걸지 않는다.
     pub(crate) md_content_h: f32,
+    /// 헤더 버튼의 히트 rect — 그린 프레임이 곧 클릭 판정이라 렌더가 채운다.
+    /// 아이콘 자리를 코드 두 곳에 적으면 그림과 판정이 어긋난다.
+    pub(crate) header_btns: Vec<(AuxHeaderBtn, (f32, f32, f32, f32))>,
+    /// 이 창 왼쪽 파일트리 패널이 열려 있나. 트리 **내용**은 App.file_tree 하나를
+    /// 공유한다(같은 루트·같은 펼침 상태) — 창마다 따로 두면 같은 폴더를 창마다
+    /// 다시 펼쳐야 하고, 메인 창에서 연 것이 여기 안 보인다.
+    pub(crate) tree_open: bool,
+    /// 다른 앱 위에 고정(always-on-top)돼 있나. winit 에 "지금 레벨" 을 묻는 API 가
+    /// 없어 우리가 기억한다 — 헤더 아이콘 불빛도 이 값으로 켠다.
+    pub(crate) pinned: bool,
+    /// 트리 세로 스크롤(logical px). 이건 창마다 따로다 — 보는 자리는 창의 것이다.
+    pub(crate) tree_scroll: f32,
+    /// 트리 행의 히트 rect — 그린 프레임이 곧 클릭 판정(header_btns 와 같은 규약).
+    pub(crate) tree_rows: Vec<(std::path::PathBuf, bool, (f32, f32, f32, f32))>,
+    /// statusline 프사의 히트 rect — 렌더가 채운다(header_btns 와 같은 규약).
+    /// hover 팝업은 매 프레임 재판정이라 그 프레임을 **부를 사람**이 필요한데,
+    /// CursorMoved 는 헤더 띠에서만 재렌더를 걸었다. 프사는 그 띠 밖(y≈131)이라
+    /// 팝업이 뜨고 지는 프레임을 아무도 안 불렀고, 셸이 출력 중일 때만 PTY wake 에
+    /// 얹혀 우연히 떴다(조용하면 안 뜸 — 거노의 "가끔 안 뜬다"가 이것).
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
 
 impl AuxWindow {
+    /// 마크다운 편집기 창 위에 얹히는 `Rendered | Raw` 띠의 높이. md 문서가 아니면 0.
+    ///
+    /// **본문 좌표는 전부 이 하나를 지나야 한다** — 그리는 곳(렌더 뷰·raw 뷰)과
+    /// 클릭을 줄로 되돌리는 곳(`raw_editor_caret_at`)이 같은 값을 안 쓰면, 화면은
+    /// 멀쩡한데 클릭만 한 줄씩 어긋난다(이 레포가 반복해 데인 자리라 게이트를 하나로 둔다).
+    pub(crate) fn md_bar_h(&self) -> f32 {
+        match self.editor() {
+            Some(m) if m.is_md_doc => AUX_MD_BAR_H,
+            _ => 0.0,
+        }
+    }
+
+    /// 파일트리가 먹는 폭(logical px). 닫혀 있으면 0.
+    fn tree_w(&self) -> f32 {
+        if self.tree_open { AUX_TREE_W } else { 0.0 }
+    }
+
+    /// 셀 그리드가 시작되는 x — 트리 폭만큼 밀린다. **셀 원점·커서·leaf rect·
+    /// cols 계산이 전부 이 하나를 지나야 한다.** 한 군데라도 빼먹으면 트리가 글자
+    /// 위에 겹치거나(원점만 밀고 cols 를 안 줄임) 오른쪽이 잘린다(반대).
+    fn cell_left(&self) -> f32 {
+        PANE_INNER_X + self.tree_w()
+    }
+
     pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
         match &self.kind {
             AuxWindowKind::Editor(m) => Some(m),
@@ -104,9 +581,9 @@ impl AuxWindow {
     }
     /// 키 입력이 갈 pane id. 터미널 창은 그 pane, 방 창은 지금 포커스된 pane.
     /// 둘을 한 값으로 내주는 덕에 키·휠·IME 라우팅이 한 벌로 끝난다.
-    fn term_pane_id(&self) -> Option<&str> {
+    pub(crate) fn term_pane_id(&self) -> Option<&str> {
         match &self.kind {
-            AuxWindowKind::Terminal { pane_id } => Some(pane_id.as_str()),
+            AuxWindowKind::Terminal { pane_id, .. } => Some(pane_id.as_str()),
             AuxWindowKind::Room { focus, .. } => focus.as_deref(),
             _ => None,
         }
@@ -131,7 +608,7 @@ impl AuxWindow {
             AuxWindowKind::Settings => "Settings".to_string(),
             // v1 은 pane id — 프로세스명(vim/claude…) 인레이는 App 만 알아 aux_render 가
             // 더 나은 라벨로 덮어쓸 수 있다(현재는 id 그대로).
-            AuxWindowKind::Terminal { pane_id } => pane_id.clone(),
+            AuxWindowKind::Terminal { pane_id, .. } => pane_id.clone(),
             // 방 이름(window_labels)은 App 만 알아 `aux_room_render` 가 덮어쓴다.
             AuxWindowKind::Room { window, .. } => format!("방 {}", window + 1),
         }
@@ -146,6 +623,11 @@ impl AuxWindow {
         // letterbox 없이 한 판. (clear 색과 겹쳐도 무해.)
         self.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
         let pe = self.preedit.clone();
+        // 본문 원점을 미는 값 — 아래 두 갈래와 클릭 판정이 **같은 값**을 써야 한다.
+        let bar = self.md_bar_h();
+        if bar > 0.0 {
+            draw_aux_md_bar(self, w, bar);
+        }
         match &self.kind {
             // 렌더 뷰 — pane 과 같은 `raw_mode` 분기다. 별도창이 늘 raw 였던 건
             // 이 갈래가 없어서지 의도가 아니었다(거노: "별도창으로 보면 렌더뷰가
@@ -154,7 +636,7 @@ impl AuxWindow {
                 let blocks = m.doc.blocks.clone();
                 let gen = m.doc.gen;
                 let scroll = m.scroll;
-                let ch = self.gpu.draw_markdown(&blocks, gen, 0.0, 0.0, w, h, scroll, None);
+                let ch = self.gpu.draw_markdown(&blocks, gen, 0.0, bar, w, h - bar, scroll, None);
                 self.md_content_h = ch;
             }
             AuxWindowKind::Editor(m) => {
@@ -166,9 +648,9 @@ impl AuxWindow {
                     (m.cur_line, m.cur_col),
                     sel,
                     0.0,
-                    0.0,
+                    bar,
                     w,
-                    h,
+                    h - bar,
                     m.scroll,
                     m.h_scroll,
                     lang,
@@ -260,11 +742,15 @@ impl App {
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(760.0, 560.0));
+            .with_inner_size(LogicalSize::new(760.0, 560.0))
+            // 배경 실행(헤드리스 검증)이면 뜨면서 키 포커스를 안 가져간다 — 메인 창은
+            // 이미 그렇게 하는데 별도창만 빠져 있어, 검증 한 번에 작업하던 창을
+            // 통째로 빼앗겼다(거노).
+            .with_active(!crate::background_launch());
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(attrs) {
+        let window = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] window create failed: {e}");
@@ -295,6 +781,11 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            pinned: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
@@ -740,6 +1231,9 @@ impl App {
     /// self.hangul 를 쓰되 프리에딧은 이 창의 것으로 스탬프한다.
     fn aux_editor_input(&mut self, idx: usize, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::AuxEditor(idx));
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -914,9 +1408,10 @@ impl App {
             )
         };
         let (lines, scroll, h_scroll, cx, cy) = snap;
+        let bar = self.aux_windows.get(idx).map_or(0.0, |a| a.md_bar_h());
         let Some(a) = self.aux_windows.get_mut(idx) else { return (0, 0) };
         a.gpu
-            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy, &[], 0)
+            .raw_editor_caret_at(&lines, 0.0, bar, scroll, h_scroll, cx, cy, &[], 0)
     }
 
     fn aux_mouse_press(&mut self, idx: usize) {
@@ -1024,7 +1519,7 @@ impl App {
             // four rows — at 720 the palette cards alone filled the viewport and
             // pushed shape/accent below the fold.
             .with_inner_size(LogicalSize::new(920.0, 720.0));
-        let window = match event_loop.create_window(attrs) {
+        let window = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] settings window create failed: {e}");
@@ -1055,6 +1550,11 @@ impl App {
             last_title: "Settings".to_string(),
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            pinned: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1148,6 +1648,9 @@ impl App {
             return;
         }
         self.last_input_at = Instant::now();
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::Settings);
         // Cmd/Ctrl+W: 설정 창 닫기.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
@@ -1217,23 +1720,31 @@ impl App {
     // 창 크기를 셀수로 환산해 `pty.resize`.
 
     /// `pane_id` 터미널 pane 을 별도창으로 띄운다. `near` Some 이면 그 물리좌표에
-    /// (tear-off), None 이면 OS 기본 위치. 새 창 인덱스 반환. 진입점(undock)은 이미
-    /// 레이아웃 트리에서 leaf 를 빼고 pty·ws.panes 를 유지한 상태로 호출한다.
+    /// (tear-off), None 이면 OS 기본 위치. `want_cells` Some 이면 그 칸수가 들어가는
+    /// 크기로 연다(그리드에서 쓰던 폭·높이 유지). 새 창 인덱스 반환. 진입점(undock)은
+    /// 이미 레이아웃 트리에서 leaf 를 빼고 pty·ws.panes 를 유지한 상태로 호출한다.
     pub(crate) fn spawn_aux_terminal(
         &mut self,
         pane_id: String,
+        home_window: usize,
         event_loop: &ActiveEventLoop,
         near: Option<winit::dpi::PhysicalPosition<i32>>,
+        want_cells: Option<(u16, u16)>,
     ) -> Option<usize> {
         let title = pane_id.clone();
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
+            // TODO(다음): 헤더의 클릭·드래그 배선(되돌리기 버튼 + drag_window)이
+            // 붙는 즉시 `.with_decorations(false)` 를 여기 되살린다. 헤더 그리기는
+            // 이미 됐지만 배선 없이 타이틀바를 끄면 창을 옮길 손잡이도, 되돌릴
+            // 수단도 없는 창이 남는다 — 거노 요구는 "우리 UI 로"지 "손잡이 없이"가
+            // 아니다.
             .with_theme(Some(Theme::Dark))
             .with_inner_size(LogicalSize::new(800.0, 520.0));
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(attrs) {
+        let window = match create_aux_window(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] terminal window create failed: {e}");
@@ -1245,16 +1756,41 @@ impl App {
         window.set_ime_allowed(false);
         #[cfg(not(target_os = "macos"))]
         window.set_ime_allowed(true);
-        let gpu = match gpu::GpuRenderer::new(window.clone(), FONT_SIZE) {
+        let mut gpu = match gpu::GpuRenderer::new(window.clone(), FONT_SIZE) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("[auxwin] terminal gpu init failed: {e}");
                 return None;
             }
         };
+        // 그리드에서 쓰던 칸수를 그대로 담을 크기로 창을 다시 잰다. 800×520 고정이면
+        // 넓게 쓰던 pane 이 꺼내는 순간 좁아져 오른쪽·아래가 통째로 사라진다 —
+        // 셸은 SIGWINCH 로 리플로우하니 "지워진" 게 아니라 "잘린" 것으로 보인다(거노).
+        // gpu 를 만든 뒤라야 이 창의 셀 크기를 알고, 그래야 칸수→px 환산이 맞는다.
+        if let Some((wc, hc)) = want_cells {
+            let (cw, ch) = (gpu.cell_w, gpu.cell_h);
+            if cw > 0.0 && ch > 0.0 {
+                // 모니터 밖으로 나가는 창은 잘림을 옮겨 놓을 뿐이다 — 작업영역에 맞춘다.
+                let (max_w, max_h) = window
+                    .current_monitor()
+                    .map(|m| {
+                        let s = m.scale_factor() as f32;
+                        (m.size().width as f32 / s * 0.94, m.size().height as f32 / s * 0.88)
+                    })
+                    .unwrap_or((1600.0, 1000.0));
+                let want_w = (PANE_INNER_X * 2.0 + wc as f32 * cw).clamp(420.0, max_w);
+                let want_h =
+                    (AUX_CELL_TOP + PANE_INNER_Y + hc as f32 * ch).clamp(260.0, max_h);
+                if let Some(got) =
+                    window.request_inner_size(LogicalSize::new(want_w, want_h))
+                {
+                    gpu.resize(got.width, got.height);
+                }
+            }
+        }
         let aux = AuxWindow {
             gpu,
-            kind: AuxWindowKind::Terminal { pane_id: pane_id.clone() },
+            kind: AuxWindowKind::Terminal { pane_id: pane_id.clone(), window: home_window },
             dirty: true,
             cursor_px: (0.0, 0.0),
             selecting: false,
@@ -1263,11 +1799,19 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            pinned: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
         let idx = self.aux_windows.len() - 1;
-        eprintln!("[auxwin] opened terminal window #{idx} for {pane_id}");
+        eprintln!(
+            "[auxwin] opened terminal window #{idx} for {pane_id} 요청칸={want_cells:?} 창={:?}",
+            self.aux_windows[idx].logical_size()
+        );
         // 창 client 크기에 맞춰 PTY 를 즉시 resize — 셸이 SIGWINCH 로 새 셀수에 리플로우.
         self.aux_terminal_resize_pty(idx);
         self.aux_redraw(idx);
@@ -1277,17 +1821,19 @@ impl App {
     /// 창 client 크기(logical)를 셀수로 환산해 이 창이 뷰하는 pane 의 PTY 를 resize.
     /// 본문 = 창 − 좌우/상하 PANE_INNER 여백. 셀 메트릭은 이 창 gpu 의 것(논리 px).
     fn aux_terminal_resize_pty(&mut self, idx: usize) {
-        let (pane_id, w, h, cw, ch) = {
+        let (pane_id, w, h, cw, ch, left) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
             let (w, h) = a.logical_size();
-            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h)
+            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h, a.cell_left())
         };
         if cw <= 0.0 || ch <= 0.0 {
             return;
         }
-        let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
-        let rows = (((h - PANE_INNER_Y * 2.0) / ch).floor() as i32).max(1) as u16;
+        // 왼쪽은 트리 폭까지 포함한 `cell_left`, 오른쪽은 여백 하나 — 트리를 열면
+        // 셀이 들어갈 칸 수가 그만큼 줄어야 셸이 새 폭으로 줄바꿈한다.
+        let cols = (((w - left - PANE_INNER_X) / cw).floor() as i32).max(1) as u16;
+        let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         if let Some(pty) = self.pty.get(&pane_id) {
             let _ = pty.resize(cols, rows);
         }
@@ -1297,19 +1843,79 @@ impl App {
     /// `draw_cells` 로 본문을, blink 위상이면 커서 rect 를 그린다(단일 pane 이라
     /// 헤더/링크hover/선택 오버레이는 v1 제외 — paint_gpu_overlays 커서부만 복제).
     fn aux_terminal_render(&mut self, idx: usize, blink: bool) {
-        let (pane_id, scale, w, h, focused) = {
+        let (pane_id, scale, w, h, focused, home_window) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
             let (w, h) = a.logical_size();
-            (pid.to_string(), a.gpu.scale(), w, h, a.focused)
+            let home = match &a.kind {
+                AuxWindowKind::Terminal { window, .. } => *window,
+                _ => 0,
+            };
+            (pid.to_string(), a.gpu.scale(), w, h, a.focused, home)
         };
-        // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷.
-        let snap = {
+        // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷. 배정 학생도 같이 —
+        // 꺼낸 pane 도 메인 그리드에 있을 때와 **같은 답**을 내야 한다(거노: 별도창이
+        // 완전 다른 앱 같다). 그래서 이름은 `display_pane_char`, 색은 `pane_accent`
+        // 로 메인과 같은 함수를 지난다. 여기서 `ws.pane_character` 를 날로 읽던 동안
+        // 셸만 도는 pane 이 이 창에선 학생, 메인 그리드에선 남이었다 — 되돌리면
+        // 「학생 테마가 깨졌다」로 보이던 것의 정체다.
+        let (snap, student, student_col) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes.get(&pane_id).and_then(|p| {
+            let cells = ws.panes.get(&pane_id).and_then(|p| {
                 p.term()
                     .map(|t| (t.cells.clone(), t.cursor_row, t.cursor_col, t.cursor_visible))
-            })
+            });
+            let name = self.display_pane_char(&ws, &pane_id);
+            let col = self.pane_accent(&ws, &pane_id);
+            (cells, name, col)
+        };
+        let working = self
+            .pane_activity
+            .get(&pane_id)
+            .is_some_and(|a| a.status == "working");
+        let accent = student_col.unwrap_or_else(crate::theme::accent);
+        // 트리는 `self.file_tree` 를 읽는데 아래에서 `self.aux_windows` 를 가변으로
+        // 잡으므로 먼저 떠 둔다. 닫혀 있으면 아예 안 뜬다 — 매 프레임 노드를 통째로
+        // clone 하는 값은 트리를 보고 있을 때만 치른다.
+        let tree_rows = if self.aux_windows.get(idx).is_some_and(|a| a.tree_open) {
+            self.aux_tree_rows()
+        } else {
+            Vec::new()
+        };
+        // 학생 스프라이트 자리 — 셀 사본을 훑으며 자리표시자를 지우므로 draw_cells
+        // 전에, 그리고 `aux_windows` 를 가변으로 잡기 전에 끝낸다.
+        let mut snap = snap;
+        // 입력박스 손질을 **메인 그리드와 같은 함수로** — 거노 2026-08-05: 별도창엔
+        // `@aru-p12` 칩이 그대로 남아 있었다. 이 창은 자기 셀 스냅샷을 따로 뜨는
+        // 경로라(`render_frame_gpu` 를 안 탄다) 메인에만 걸린 손질이 통째로 빠져
+        // 있었다 — 꺼낸 pane 이 "완전 다른 앱 같다"는 그 증상의 남은 조각이다.
+        //
+        // 사본을 만들지 않고 `render::` 함수를 그대로 부른다. 오늘 같은 로직 두 벌이
+        // 세 번 물었고(칩 관문·`is_rule`·인레이), 그때마다 한쪽만 고쳐졌다.
+        if let Some((cells, ..)) = snap.as_mut() {
+            let runs_claude = self
+                .pty
+                .get(pane_id.as_str())
+                .and_then(|p| p.active_agent())
+                .is_some();
+            if runs_claude {
+                crate::render::style_prompt_box(cells, accent);
+            }
+        }
+        let (sprites, anim_ms) = {
+            let (cl, cw, ch) = self
+                .aux_windows
+                .get(idx)
+                .map_or((PANE_INNER_X, 0.0, 0.0), |a| {
+                    (a.cell_left(), a.gpu.cell_w, a.gpu.cell_h)
+                });
+            let s = match snap.as_mut() {
+                Some((cells, ..)) if cw > 0.0 => {
+                    self.aux_student_slots(&pane_id, cells, cl, AUX_CELL_TOP, cw, ch)
+                }
+                _ => crate::render::StudentOverlays::default(),
+            };
+            (s, self.version_anim_start.elapsed().as_millis() as u64)
         };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
@@ -1320,8 +1926,55 @@ impl App {
             a.dirty = false;
             return;
         };
+        // macOS 는 OS 타이틀바를 투명으로 비웠으므로 이 띠가 그 자리에 얹힌다 —
+        // 신호등만 OS 것이고 나머지는 우리가 그린다(메인 창과 같은 방식). 왼쪽에
+        // 「아루 · %3 · 2번 방」, 오른쪽에 되돌리기. 창 이동·리사이즈는 OS 몫이다.
+        {
+            // 학생이 있으면 그 이름을 앞에 세우고 학생색으로 — 메인 그리드에서
+            // 테두리·헤더가 하던 "이 창에 누가 있나"를 여기서도 한눈에. 이름은
+            // 배정만으로 뜨고(메인 pane 헤더와 같은 규칙) 색은 실제로 도는 pane 만
+            // (메인 pane 테두리와 같은 규칙) — 두 규칙이 원래 다르다.
+            let label = match &student {
+                Some(name) => format!("{name} · {pane_id} · {}번 방", home_window + 1),
+                None => format!("{pane_id} · {}번 방", home_window + 1),
+            };
+            // 배경은 창 배경 그대로 둔다 — 투명 타이틀바 위에 판을 하나 더 깔면
+            // 없애려던 두 겹이 색만 바뀐 채 돌아온다. 아래 hairline 만 남긴다.
+            a.gpu.rect(0.0, AUX_HEADER_H - 1.0, w, 1.0, crate::theme::border());
+            let label_col = if student_col.is_some() { accent } else { crate::theme::text_mute() };
+            a.gpu.draw_text(
+                AUX_HEADER_X,
+                (AUX_HEADER_H - 12.0) / 2.0,
+                &label,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: crate::theme::with_alpha(label_col, if focused { 0xF0 } else { 0x99 }),
+                    bold: student.is_some(),
+                    italic: false,
+                },
+            );
+            // working 스윕바 — 메인 pane 상단의 그것과 같은 신호다. 없으면 꺼낸
+            // 창만 "멈춘 것처럼" 보인다.
+            if working {
+                const BAR_H: f32 = 2.5;
+                let phase = crate::render::anim_phase_secs();
+                a.gpu.rect(0.0, 0.0, w, BAR_H, crate::theme::with_alpha(accent, 0x2e));
+                let seg = (w * 0.32).clamp(36.0, 160.0);
+                let span = w + seg;
+                let off = (phase * 0.5).fract() * span - seg;
+                let sx = off.max(0.0);
+                let ex = (off + seg).min(w);
+                if ex > sx {
+                    a.gpu.rect(sx, 0.0, ex - sx, BAR_H, accent);
+                }
+            }
+            draw_aux_header_btns(a, w);
+        }
+        if a.tree_open {
+            draw_aux_tree(a, &tree_rows, h);
+        }
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
-        let origin_px = (PANE_INNER_X * scale, PANE_INNER_Y * scale);
+        let origin_px = (a.cell_left() * scale, AUX_CELL_TOP * scale);
         let slot = gpu::PaneSlot {
             rows: &rows,
             origin_px,
@@ -1331,11 +1984,14 @@ impl App {
             default_fg: crate::cells::default_fg(),
         };
         a.gpu.draw_cells(&[slot]);
+        // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키. 셀 위 패스라
+        // 비워 둔 자리표시자 위에 얼굴이 또렷하게 얹힌다.
+        crate::render::paint_student_overlays(&mut a.gpu, &sprites, anim_ms);
         // 커서 자리(논리 px). 조합 중 한글이 있으면 그 프리에딧을, 없으면 blink 커서.
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
-        let px = PANE_INNER_X + cur_col as f32 * cw;
-        let py = PANE_INNER_Y + cur_row as f32 * ch;
+        let px = a.cell_left() + cur_col as f32 * cw;
+        let py = AUX_CELL_TOP + cur_row as f32 * ch;
         let pe = a.preedit.clone();
         if pe.is_empty() {
             if cur_vis && focused && blink {
@@ -1347,8 +2003,33 @@ impl App {
             // 조합 중 한글 — 커서 자리에 프리에딧(메인 render 와 동일 draw_preedit).
             a.gpu.draw_preedit(px, py, &pe, crate::cells::iterm_cursor(), 1.0);
         }
+        // 창 외곽선 — 셀 위에 얹어야 가장자리 글자에 안 먹힌다. 학생이 있으면 그
+        // 색으로(메인 그리드의 active pane 테두리와 같은 신호), 없으면 border 로.
+        // **학생 유무와 무관하게 항상 두른다**: OS 타이틀바를 껐으므로 테두리가
+        // 없으면 창이 어디서 끝나는지가 배경색 차이 하나뿐이라, 어두운 바탕 위에서
+        // 경계가 통째로 사라진다(거노). 포커스가 없을 땐 흐리게.
+        {
+            const T: f32 = 1.5;
+            let base = if student_col.is_some() { accent } else { crate::theme::border() };
+            let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
+            // 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
+            // 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그
+            // 네 점만 두 배로 진해져 꼭짓점이 점처럼 튄다(거노: "테두리 꼭짓점이
+            // 이상해"). 불투명일 땐 안 보이던 게 반투명이 되며 드러났다.
+            a.gpu.rect(0.0, 0.0, w, T, col);
+            a.gpu.rect(0.0, h - T, w, T, col);
+            a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
+            a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
+        }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
+        // 스윕바는 애니메이션이라 다음 프레임을 스스로 불러야 한다 — PTY 출력이
+        // 없으면 아무도 이 창을 다시 그리지 않아 바가 한 자리에 얼어붙는다.
+        // working 이 끝나면 이 요청도 끊긴다.
+        if working || sprites.animating() {
+            a.dirty = true;
+            a.window.request_redraw();
+        }
     }
 
     /// 이 방이 지금 별도 창으로 나가 있나. 사이드바 탭 표시와 info 배지가 같은
@@ -1369,8 +2050,8 @@ impl App {
         if cw <= 0.0 || ch <= 0.0 {
             return Vec::new();
         }
-        let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
-        let rows = (((h - PANE_INNER_Y * 2.0) / ch).floor() as i32).max(1) as u16;
+        let cols = (((w - a.cell_left() - PANE_INNER_X) / cw).floor() as i32).max(1) as u16;
+        let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         let layout = if window == self.active_window {
             self.pty_layout.as_ref()
         } else {
@@ -1396,8 +2077,55 @@ impl App {
             .get(window)
             .map(|(n, _)| n.clone())
             .filter(|n| !n.is_empty());
+        // 헤더에 쓸 이름. 이름을 안 지은 방이면 번호로 — 띠를 비워 두면 창이
+        // 무엇인지 말해주는 게 아무것도 없다(OS 제목을 껐으므로).
+        //
+        // 포커스 pane 에 학생이 있으면 그 이름을 **앞에** 세운다(터미널 별도창과
+        // 같은 「학생 · %N · 방」 꼴). 방 이름만 있으면 pane 을 옮겨 다녀도 지금
+        // 누구를 보고 있는지가 어디에도 안 뜬다(거노).
+        let room_label = {
+            let room = label.clone().unwrap_or_else(|| format!("{}번 방", window + 1));
+            match focus.as_deref() {
+                Some(pid) => {
+                    let who = {
+                        let ws = self.ws.lock().unwrap();
+                        self.display_pane_char(&ws, pid)
+                    };
+                    match who {
+                        Some(name) => format!("{name} · {pid} · {room}"),
+                        None => format!("{pid} · {room}"),
+                    }
+                }
+                None => room,
+            }
+        };
+        // 헤더 라벨 색 — 포커스 pane 의 학생색. 창 테두리·pane 테두리와 같은 신호를
+        // 띠에서도 준다(터미널 별도창이 이미 그렇게 한다).
+        let label_col = focus.as_deref().and_then(|pid| {
+            let ws = self.ws.lock().unwrap();
+            self.pane_accent(&ws, pid)
+        });
+        // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 **같은 함수**로 정해야 같은
+        // 색이 나온다(`pane_accent`: 이름 + 도는 에이전트 관문 + 동명이인 순번).
+        let pane_cols: HashMap<String, [u8; 4]> = {
+            let ws = self.ws.lock().unwrap();
+            rects
+                .iter()
+                .filter_map(|(pid, ..)| Some((pid.clone(), self.pane_accent(&ws, pid)?)))
+                .collect()
+        };
+        // working pane 집합도 미리 — 아래에서 창(`a`)을 가변 차용하고 나면 self 를
+        // 다시 못 읽는다.
+        let working_panes: std::collections::HashSet<String> = rects
+            .iter()
+            .filter(|(pid, ..)| {
+                self.pane_activity.get(pid).is_some_and(|s| s.status == "working")
+            })
+            .map(|(pid, ..)| pid.clone())
+            .collect();
+        let any_working = !working_panes.is_empty();
         // 셀은 draw 전에 복사해 둔다 — 그리는 동안 ws lock 을 쥐지 않기 위해서.
-        let snaps: Vec<_> = {
+        let mut snaps: Vec<_> = {
             let ws = self.ws.lock().unwrap();
             rects
                 .iter()
@@ -1418,6 +2146,53 @@ impl App {
                 })
                 .collect()
         };
+        // 입력박스 손질 — 터미널 별도창과 같은 이유·같은 함수(거노 2026-08-05:
+        // 별도창에 `@aru-p12` 칩이 남아 있었다). 방 창은 pane 이 여럿이라 각자
+        // 자기 accent 로 도색한다.
+        for (pid, cells, ..) in snaps.iter_mut() {
+            let runs_claude = self
+                .pty
+                .get(pid.as_str())
+                .and_then(|p| p.active_agent())
+                .is_some();
+            if !runs_claude {
+                continue;
+            }
+            if let Some(col) = pane_cols.get(pid) {
+                crate::render::style_prompt_box(cells, *col);
+            }
+        }
+        // 학생 스프라이트 자리 — pane 마다 자기 셀을 훑는다. 사본을 훑으므로
+        // 자리표시자 지우기가 draw_cells 에 그대로 반영된다(아래 slots 가 같은
+        // 사본을 본다). `aux_windows` 를 가변 차용하기 전에 끝내야 self 를 읽을
+        // 수 있다.
+        let cell_left = self.aux_windows.get(idx).map_or(PANE_INNER_X, |a| a.cell_left());
+        let mut student = crate::render::StudentOverlays::default();
+        for (pid, cells, x, y, ..) in snaps.iter_mut() {
+            let s = self.aux_student_slots(
+                pid,
+                cells,
+                cell_left + *x as f32 * cw,
+                AUX_CELL_TOP + *y as f32 * ch,
+                cw,
+                ch,
+            );
+            // 필드를 손으로 합치는 자리 — 하나라도 빠뜨리면 그 종류만 조용히
+            // 사라진다(faces 를 빠뜨려 방 창 hover 팝업이 통째로 안 떴다). 늘릴
+            // 때 여기도 같이 늘릴 것.
+            student.banner.extend(s.banner);
+            student.spinner.extend(s.spinner);
+            student.waiting.extend(s.waiting);
+            student.standing.extend(s.standing);
+            student.profile.extend(s.profile);
+        }
+        let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
+        // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
+        let tree_rows = if self.aux_windows.get(idx).is_some_and(|a| a.tree_open) {
+            self.aux_tree_rows()
+        } else {
+            Vec::new()
+        };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         if let Some(name) = label {
             if a.last_title != name {
@@ -1427,14 +2202,39 @@ impl App {
         }
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
+        // 헤더 띠 — macOS 는 OS 타이틀바를 투명으로 비웠으므로 방 이름이 여기 선다.
+        // 전엔 OS 가 그린 제목이 그 자리를 채웠는데, 그건 회색 OS 테마라 창 하나만
+        // 다른 앱처럼 보였다(거노).
+        {
+            a.gpu.rect(0.0, AUX_CELL_TOP - 1.0, w, 1.0, crate::theme::border());
+            a.gpu.draw_text(
+                AUX_HEADER_X,
+                (AUX_HEADER_H - 12.0) / 2.0,
+                &room_label,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: crate::theme::with_alpha(
+                        label_col.unwrap_or_else(crate::theme::text_mute),
+                        if focused { 0xF0 } else { 0x99 },
+                    ),
+                    bold: label_col.is_some(),
+                    italic: false,
+                },
+            );
+            draw_aux_header_btns(a, w);
+        }
+        if a.tree_open {
+            draw_aux_tree(a, &tree_rows, h);
+        }
+        let left = a.cell_left();
         let slots: Vec<gpu::PaneSlot> = snaps
             .iter()
             .map(|(pid, cells, x, y, _, _, _)| gpu::PaneSlot {
                 rows: cells,
                 // origin_px 는 물리 px(draw_cells 규약) — 셀 좌표를 논리 px 로 편 뒤 스케일.
                 origin_px: (
-                    (PANE_INNER_X + *x as f32 * cw) * scale,
-                    (PANE_INNER_Y + *y as f32 * ch) * scale,
+                    (left + *x as f32 * cw) * scale,
+                    (AUX_CELL_TOP + *y as f32 * ch) * scale,
                 ),
                 font_scale: 1.0,
                 dim: focus.as_deref() != Some(pid.as_str()),
@@ -1443,25 +2243,58 @@ impl App {
             })
             .collect();
         a.gpu.draw_cells(&slots);
-        // pane 경계 — 나눠져 있다는 걸 보이게. 포커스만 accent 테두리.
+        // pane 경계 — 나눠져 있다는 걸 보이게. 포커스 pane 은 그 학생색으로(메인
+        // 그리드의 active 테두리와 같은 신호). 학생이 없으면 종전대로 accent.
         for (pid, x, y, pw, ph) in &rects {
-            let rx = PANE_INNER_X + *x as f32 * cw;
-            let ry = PANE_INNER_Y + *y as f32 * ch;
+            let rx = left + *x as f32 * cw;
+            let ry = AUX_CELL_TOP + *y as f32 * ch;
             let (rw, rh) = (*pw as f32 * cw, *ph as f32 * ch);
             let is_focus = focus.as_deref() == Some(pid.as_str());
-            let col = if is_focus { crate::theme::accent() } else { crate::theme::border() };
+            let student = pane_cols.get(pid.as_str()).copied();
+            let col = if is_focus {
+                student.unwrap_or_else(crate::theme::accent)
+            } else {
+                // 비포커스라도 학생이 있으면 그 색을 흐리게 — 여러 pane 이 나온 방에서
+                // 누가 어디 있는지가 경계선만으로 읽힌다.
+                student
+                    .map(|c| crate::theme::with_alpha(c, 0x55))
+                    .unwrap_or_else(crate::theme::border)
+            };
+            // 세로 변은 가로 변 사이만 — 모서리를 두 번 칠하면 반투명(비포커스
+            // 0x55)일 때 네 꼭짓점만 진해져 점처럼 튄다.
             a.gpu.rect(rx, ry, rw, 1.0, col);
             a.gpu.rect(rx, ry + rh - 1.0, rw, 1.0, col);
-            a.gpu.rect(rx, ry, 1.0, rh, col);
-            a.gpu.rect(rx + rw - 1.0, ry, 1.0, rh, col);
+            a.gpu.rect(rx, ry + 1.0, 1.0, (rh - 2.0).max(0.0), col);
+            a.gpu.rect(rx + rw - 1.0, ry + 1.0, 1.0, (rh - 2.0).max(0.0), col);
+            // working 스윕바 — 메인 pane 상단의 그것과 같은 자리, 같은 신호.
+            if working_panes.contains(pid.as_str()) {
+                const BAR_H: f32 = 2.5;
+                let base = student.unwrap_or_else(crate::theme::accent);
+                let phase = crate::render::anim_phase_secs();
+                a.gpu.rect(rx, ry, rw, BAR_H, crate::theme::with_alpha(base, 0x2e));
+                let seg = (rw * 0.32).clamp(36.0, 160.0);
+                let off = (phase * 0.5).fract() * (rw + seg) - seg;
+                let (sx, ex) = ((rx + off).max(rx), (rx + off + seg).min(rx + rw));
+                if ex > sx {
+                    a.gpu.rect(sx, ry, ex - sx, BAR_H, base);
+                }
+            }
         }
+        // 창 전체 외곽선은 **여기 넣지 않는다** — 방 창은 pane 마다 테두리를 두고,
+        // 창 겉을 두르는 건 pane 별도창만이다(거노 2026-08-05). 어제 이 자리에
+        // 외곽선을 넣었다가 되돌렸다: 방 창은 안에 pane 이 여럿이라 겉테두리까지
+        // 두르면 테두리가 두 겹이 되고, 어느 pane 이 포커스인지를 말해야 할 색이
+        // 창 전체로 번져 신호가 흐려진다.
+        // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
+        // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
+        crate::render::paint_student_overlays(&mut a.gpu, &student, anim_ms);
         // 커서/프리에딧은 포커스 pane 자리에만.
         if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
             .iter()
             .find(|(pid, ..)| focus.as_deref() == Some(pid.as_str()))
         {
-            let px = PANE_INNER_X + (*x as f32 + *cur_col as f32) * cw;
-            let py = PANE_INNER_Y + (*y as f32 + *cur_row as f32) * ch;
+            let px = left + (*x as f32 + *cur_col as f32) * cw;
+            let py = AUX_CELL_TOP + (*y as f32 + *cur_row as f32) * ch;
             let pe = a.preedit.clone();
             if pe.is_empty() {
                 if *cur_vis && focused && blink {
@@ -1475,6 +2308,148 @@ impl App {
         }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
+        // 스윕바가 도는 동안은 다음 프레임을 스스로 부른다(터미널 창과 같은 이유).
+        // 움직이는 학생 스프라이트도 같은 이유로 — 정적 프사만 있으면 안 깨운다.
+        if any_working || student.animating() {
+            a.dirty = true;
+            a.window.request_redraw();
+        }
+    }
+
+    /// 이 pane 의 셀을 훑어 학생 스프라이트 자리를 모은다(별도창 좌표계).
+    ///
+    /// 메인 그리드가 `render_frame` 에서 하는 일과 같다 — 다른 건 좌표뿐이다.
+    /// **찾는 규칙은 공유**한다(`find_statusline_face`·`find_standing_anchor`·
+    /// `find_clawd_banners`·`find_claude_spinner`): 같은 화면인데 창마다 학생이
+    /// 다른 자리에 서면 그게 곧 버그다. 그리는 것도 `paint_student_overlays`
+    /// 한 곳이라, 이미지 키와 프레임 규칙이 갈릴 데가 없다.
+    ///
+    /// `cells` 는 창이 들고 있는 **사본**이라 자리표시자를 지워도 원본 화면은
+    /// 안 상한다 — 지우지 않으면 U+FFFC 가 빈 네모로 얼굴 밑에 남는다.
+    ///
+    /// 메인과 같은 두 게이트를 지난다: claude 가 실제로 도는 pane 이어야 하고
+    /// (남의 TUI 를 claude 로 오인하지 않기 위해), 그 pane 에 학생이 배정돼
+    /// 있어야 한다.
+    pub(crate) fn aux_student_slots(
+        &self,
+        pane_id: &str,
+        cells: &mut [Vec<GridCell>],
+        ox: f32,
+        oy: f32,
+        cw: f32,
+        ch: f32,
+    ) -> crate::render::StudentOverlays {
+        let mut out = crate::render::StudentOverlays::default();
+        if !self
+            .pty
+            .get(pane_id)
+            .and_then(|p| p.active_agent())
+                .is_some()
+        {
+            return out;
+        }
+        let Some((name, slug)) = ({
+            let ws = self.ws.lock().unwrap();
+            self.display_pane_char(&ws, pane_id)
+                .and_then(|n| crate::theme::character_slug(&n).map(|s| (n, s)))
+        }) else {
+            return out;
+        };
+        let cols = cells.first().map_or(0, |r| r.len());
+        let rows = cells.len();
+        // Clawd 배너 → 학생 도트. 스크롤로 위아래가 잘리면 셀과 함께 잘리도록
+        // pane 세로 범위로 클립한다.
+        // 그림이 없는 학생은 배너를 건드리지 않는다 — 지운 뒤 못 그리면 원래 있던
+        // Clawd 배너까지 사라진다(메인 창과 같은 규칙).
+        for (br, bc) in crate::render::find_clawd_banners(cells)
+            .into_iter()
+            .filter(|_| crate::render::student_has_sprite(slug, "idle"))
+        {
+            out.banner.push((
+                slug,
+                (
+                    ox + bc as f32 * cw,
+                    oy + br as f32 * ch,
+                    crate::render::CLAWD_COLS as f32 * cw,
+                    crate::render::CLAWD_ROWS as f32 * ch,
+                ),
+                (oy, oy + rows as f32 * ch),
+            ));
+            let r0 = br.max(0) as usize;
+            let r1 = (br + crate::render::CLAWD_ROWS as isize).clamp(0, rows as isize) as usize;
+            for row in cells[r0..r1].iter_mut() {
+                for cell in row.iter_mut().skip(bc).take(crate::render::CLAWD_COLS) {
+                    *cell = GridCell::blank();
+                }
+            }
+        }
+        // working 스피너 → 제자리 걸음. 스피너가 도는 동안은 standing 을 세우지
+        // 않는다 — 같은 학생이 화면에 둘이면 버그로 보인다(메인과 같은 규칙).
+        let mut busy = false;
+        if let Some((sr, sc)) = crate::render::find_claude_spinner(cells) {
+            busy = true;
+            // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수 있을 때만.
+            if crate::render::student_has_sprite(slug, "walk") {
+                let top_r = sr.saturating_sub(1);
+                out.spinner.push((
+                    slug,
+                    (
+                        ox + sc as f32 * cw,
+                        oy + top_r as f32 * ch,
+                        2.0 * cw,
+                        (sr - top_r + 1) as f32 * ch,
+                    ),
+                ));
+                if let Some(row) = cells.get_mut(sr) {
+                    if let Some(cell) = row.get_mut(sc) {
+                        *cell = GridCell::blank();
+                    }
+                }
+            }
+        }
+        let mut stand_anchor: Option<(usize, f32)> = None;
+        if let Some((sr, sc, len)) = crate::render::find_statusline_face(cells) {
+            for cell in cells[sr].iter_mut().skip(sc).take(len) {
+                *cell = GridCell::blank();
+            }
+            // 프사는 안 그린다 — 메인 창과 같다(render.rs 의 같은 자리 주석 참고).
+            // 표식은 blank 로 지우고 `sr` 만 standing 앵커로 쓴다.
+            let _ = (sc, len, name, slug);
+            stand_anchor = crate::render::find_standing_anchor(cells, sr, cols);
+        }
+        // statusline 자리표시자가 없는 하네스(codex)는 입력행에서 바로 — 메인 창과
+        // 같은 규칙을 쓴다(`find_filled_standing_anchor`).
+        if stand_anchor.is_none() {
+            stand_anchor = crate::render::find_filled_standing_anchor(cells, cols);
+        }
+        {
+            if !busy {
+                if let Some((anchor, left_c)) = stand_anchor {
+                    let h = crate::render::INPUT_STANDING_ROWS as f32 * ch;
+                    // 턴이 끝났으면 손 흔들며 기다리는 wave, 아니면 idle. 완료
+                    // 직후 cheer 는 메인 창의 notify_flash 타이머에 매인 연출이라
+                    // 별도창에선 그 두 상태만 쓴다.
+                    let motion = if self.turn_done_panes.contains(pane_id) {
+                        "wave"
+                    } else {
+                        "idle"
+                    };
+                    if crate::render::student_has_sprite(slug, motion) {
+                        out.standing.push((
+                            slug,
+                            motion,
+                            (
+                                ox + left_c * cw,
+                                (oy + (anchor + 1) as f32 * ch - h).max(oy),
+                                crate::render::STAND_CELLS * cw,
+                                h,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 이 창이 뷰하는 pane 의 PTY 로 바이트 전송(빈 입력 무시).
@@ -1526,7 +2501,24 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let was_header = a.cursor_px.1 <= AUX_HEADER_H;
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                    // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
+                    // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
+                    // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                        a.dirty = true;
+                        a.window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if !self.aux_header_click(idx) {
+                    self.aux_tree_click(idx);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
@@ -1537,8 +2529,224 @@ impl App {
         }
     }
 
+    /// 헤더 버튼 클릭 처리. 눌린 게 없으면 `false` — 호출부가 평소 경로를 잇는다.
+    pub(crate) fn aux_header_click(&mut self, idx: usize) -> bool {
+        let Some(a) = self.aux_windows.get(idx) else { return false };
+        let (cx, cy) = a.cursor_px;
+        let hit = a
+            .header_btns
+            .iter()
+            .find(|(_, (bx, by, bw, bh))| {
+                cx >= *bx && cx <= bx + bw && cy >= *by && cy <= by + bh
+            })
+            .map(|(k, _)| *k);
+        match hit {
+            Some(AuxHeaderBtn::Hide) => {
+                self.hide_aux_window(idx);
+                true
+            }
+            Some(AuxHeaderBtn::Dock) => {
+                // 창 종류마다 되돌리는 곳이 다르다 — pane 은 메인 그리드로,
+                // 방은 방 목록으로. 둘 다 창 닫기(⌘W)와 같은 경로다.
+                match self.aux_windows.get(idx).map(|a| matches!(a.kind, AuxWindowKind::Room { .. }))
+                {
+                    Some(true) => self.dock_window_room(idx),
+                    Some(false) => self.dock_pane_terminal(idx),
+                    None => {}
+                }
+                true
+            }
+            Some(AuxHeaderBtn::FileTree) => {
+                self.toggle_aux_tree(idx);
+                true
+            }
+            // 두 칸이 각자 자기 모드를 **지정**한다(뒤집기가 아니라) — 메인 그리드
+            // 알약과 같은 규약이라, 이미 그 모드면 아무 일도 안 일어난다.
+            Some(AuxHeaderBtn::MdRender) => {
+                self.aux_set_md_mode(idx, false);
+                true
+            }
+            Some(AuxHeaderBtn::MdRaw) => {
+                self.aux_set_md_mode(idx, true);
+                true
+            }
+            Some(AuxHeaderBtn::Pin) => {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.pinned = !a.pinned;
+                    a.window.set_window_level(if a.pinned {
+                        winit::window::WindowLevel::AlwaysOnTop
+                    } else {
+                        winit::window::WindowLevel::Normal
+                    });
+                    a.window.request_redraw();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 이 창의 파일트리 패널을 열고 닫는다. 셀 그리드가 트리 폭만큼 밀리므로
+    /// **PTY 도 같이 좁혀야** 한다 — 안 그러면 셸이 옛 폭으로 줄바꿈해 오른쪽이
+    /// 창 밖으로 나간다. 트리를 처음 열 때 루트가 아직 없으면 세우고 채운다:
+    /// 메인 창에서 트리를 한 번도 안 열었으면 `file_tree.nodes` 가 비어 있어,
+    /// 패널이 열리긴 하는데 빈 판으로 뜬다(고장으로 읽힌다).
+    pub(crate) fn toggle_aux_tree(&mut self, idx: usize) {
+        let Some(a) = self.aux_windows.get_mut(idx) else { return };
+        a.tree_open = !a.tree_open;
+        let opened = a.tree_open;
+        let is_room = matches!(a.kind, AuxWindowKind::Room { .. });
+        if opened && self.file_tree.nodes.is_empty() {
+            if self.file_tree.root.is_none() {
+                // 이 창이 보는 pane 의 cwd 가 가장 그럴듯한 루트다 — 트리를 여는
+                // 사람은 "여기서 일하는 폴더"를 보려는 것이다.
+                let cwd = self
+                    .aux_windows
+                    .get(idx)
+                    .and_then(|a| a.term_pane_id())
+                    .and_then(|p| self.pane_cwd_cache.get(p).cloned())
+                    .or_else(|| std::env::current_dir().ok());
+                if let Some(root) = cwd {
+                    // 루트는 펼친 채로 연다 — 메인 창이 루트를 세울 때와 같은 규칙.
+                    // 안 그러면 트리를 열었는데 접힌 폴더 한 줄만 떠, 켠 게 아니라
+                    // 고장난 것처럼 보인다.
+                    self.file_tree.expanded.insert(root.clone());
+                    self.file_tree.root = Some(root);
+                }
+            }
+            self.rebuild_file_tree_nodes();
+        }
+        if is_room {
+            self.aux_room_resize_pty(idx);
+        } else {
+            self.aux_terminal_resize_pty(idx);
+        }
+        self.aux_redraw(idx);
+    }
+
+    /// 그리기 직전에 뜨는 트리 스냅샷. `App.file_tree.nodes` 를 `aux_windows` 가변
+    /// 차용과 같은 자리에서 읽을 수 없어 필요한 것만 옮겨 담는다.
+    fn aux_tree_rows(&self) -> Vec<AuxTreeRow> {
+        self.file_tree
+            .nodes
+            .iter()
+            .map(|n| AuxTreeRow {
+                path: n.path.clone(),
+                name: n.name.clone(),
+                is_dir: n.is_dir,
+                depth: n.depth,
+                expanded: self.file_tree.expanded.contains(&n.path),
+                ignored: n.ignored,
+                is_repo: n.is_repo,
+            })
+            .collect()
+    }
+
+    /// 트리 패널 클릭. 폴더는 펼치고/접고(메인 창과 **같은** 펼침 상태를 쓰므로
+    /// 양쪽이 함께 움직인다), 파일은 연다. 판정은 `true` = 트리가 먹었다.
+    fn aux_tree_click(&mut self, idx: usize) -> bool {
+        let Some(a) = self.aux_windows.get(idx) else { return false };
+        if !a.tree_open {
+            return false;
+        }
+        let (cx, cy) = a.cursor_px;
+        if cx >= AUX_TREE_W || cy < AUX_HEADER_H {
+            return false;
+        }
+        let hit = a
+            .tree_rows
+            .iter()
+            .find(|(_, _, (_, ry, _, rh))| cy >= *ry && cy < ry + rh)
+            .map(|(p, d, _)| (p.clone(), *d));
+        // 패널 빈자리를 눌러도 셀 클릭으로 새면 안 된다 — 트리 위는 트리 것이다.
+        let Some((path, is_dir)) = hit else { return true };
+        if is_dir {
+            if !self.file_tree.expanded.remove(&path) {
+                self.file_tree.expanded.insert(path.clone());
+            }
+            self.rebuild_file_tree_nodes();
+            self.chrome_dirty = true;
+        } else {
+            // 파일은 메인 창에 연다(`open_file_split` — 사이드바 트리와 같은 경로).
+            // 별도창 안에서 여는 길은 아직 없다: 이 창은 pane 하나를 보는 뷰라
+            // 새 탭을 담을 자리가 없다.
+            self.open_file_split(path);
+        }
+        self.aux_redraw(idx);
+        true
+    }
+
+    /// 별도창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY·방 트리는 그대로
+    /// 두고 **창만** 없앤다 — 그래서 되살리기가 `spawn_aux_*` 재호출로 끝난다.
+    ///
+    /// 되돌리기(dock)와 다르다: 되돌리기는 pane 을 메인 그리드에 다시 꽂아 레이아웃을
+    /// 바꾸고, 접기는 꺼내 둔 상태를 유지한 채 화면에서만 물러난다. OS 최소화와도
+    /// 다르다 — Dock 이 아니라 일하던 창 안으로 들어가므로, 꺼내 둔 게 몇인지
+    /// 거기서 한눈에 보인다(거노).
+    pub(crate) fn hide_aux_window(&mut self, idx: usize) {
+        let Some(a) = self.aux_windows.get(idx) else { return };
+        let pos = a.window.outer_position().ok();
+        let what = match &a.kind {
+            AuxWindowKind::Terminal { pane_id, window, .. } => {
+                crate::HiddenAuxKind::Terminal { pane_id: pane_id.clone(), home_window: *window }
+            }
+            AuxWindowKind::Room { window, .. } => crate::HiddenAuxKind::Room { window: *window },
+            // 편집기·설정은 접을 자리가 없다(하단바는 pane 그리드의 띠다).
+            _ => return,
+        };
+        let label = match &what {
+            crate::HiddenAuxKind::Terminal { pane_id, .. } => {
+                let ws = self.ws.lock().unwrap();
+                match ws.pane_character.get(pane_id) {
+                    Some(name) => format!("{name} · {pane_id}"),
+                    None => pane_id.clone(),
+                }
+            }
+            crate::HiddenAuxKind::Room { window } => self
+                .window_labels
+                .get(*window)
+                .map(|(n, _)| n.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("{}번 방", window + 1)),
+        };
+        self.hidden_aux.push(crate::HiddenAux { label, what, pos });
+        self.aux_windows.remove(idx);
+        // 하단바가 새로 생기면 그리드가 그만큼 줄어든다 — PTY 도 같이 줄여야
+        // 마지막 줄이 띠 밑으로 숨지 않는다.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 접어 둔 별도창을 다시 세운다. 그 사이 pane 이 사라졌거나 방이 없어졌으면
+    /// 조용히 목록에서만 지운다 — 되살릴 대상이 없는데 빈 창을 띄우면 그게 더 나쁘다.
+    pub(crate) fn unhide_aux(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        if i >= self.hidden_aux.len() {
+            return;
+        }
+        let h = self.hidden_aux.remove(i);
+        match h.what {
+            crate::HiddenAuxKind::Terminal { pane_id, home_window } => {
+                if self.pty.contains_key(&pane_id) {
+                    // 접었다 되살리는 창은 트리에 leaf 가 없다 — 잴 칸수가 없으므로 기본 크기.
+                    self.spawn_aux_terminal(pane_id, home_window, event_loop, h.pos, None);
+                }
+            }
+            crate::HiddenAuxKind::Room { window } => {
+                self.spawn_aux_room(window, None, event_loop, h.pos);
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// 휠 → PTY 스크롤백(alacritty display_offset). 위로(y>0)=과거로.
-    fn aux_terminal_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {
+    pub(crate) fn aux_terminal_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {
         let pane_id = match self.aux_windows.get(idx).and_then(|a| a.term_pane_id()) {
             Some(p) => p.to_string(),
             None => return,
@@ -1548,6 +2756,20 @@ impl App {
             MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
         };
         if lines.abs() < 0.01 {
+            return;
+        }
+        // 커서가 트리 위면 트리를 굴린다 — 같은 창 안에 스크롤 대상이 둘이면
+        // 어느 쪽이냐는 커서가 정한다(메인 창 사이드바와 같은 규칙). 클램프는
+        // 그리는 쪽이 rows 를 알고 있으므로 draw_aux_tree 가 맡는다.
+        let on_tree = self
+            .aux_windows
+            .get(idx)
+            .is_some_and(|a| a.tree_open && a.cursor_px.0 < AUX_TREE_W && a.cursor_px.1 >= AUX_HEADER_H);
+        if on_tree {
+            if let Some(a) = self.aux_windows.get_mut(idx) {
+                a.tree_scroll = (a.tree_scroll - lines * AUX_TREE_ROW_H).max(0.0);
+            }
+            self.aux_redraw(idx);
             return;
         }
         let step = lines.abs().ceil() as i32;
@@ -1571,6 +2793,11 @@ impl App {
             None => return,
         };
         self.ime_retarget(crate::ImeFocus::Pane(pane_id.clone()));
+        // OS 키 자동반복은 Cmd 조합에선 삼킨다 — 메인 창(forward_key)과 같은 규칙.
+        // Cmd 단축키는 전부 단발성이라, 살짝 길게 눌린 것만으로 여러 번 발사된다.
+        if self.host_mod() && event.repeat {
+            return;
+        }
         // Cmd/Ctrl+W: 이 창 닫기 → dock 복귀. 방 창이면 방을, 아니면 pane 을 되돌린다.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
             if self.aux_windows.get(idx).and_then(|a| a.room_window()).is_some() {
@@ -1579,6 +2806,60 @@ impl App {
                 self.dock_pane_terminal(idx);
             }
             return;
+        }
+        // Cmd+D / Cmd+Shift+D / Cmd+E: split — **방 창만**. pane 하나짜리 터미널
+        // 별도창은 leaf 하나를 창 전체에 그리므로 쪼개 봐야 새 pane 이 어디에도 안
+        // 보이고 셸만 는다. 화음은 메인 창(input::forward_key)과 같게 맞춘다.
+        if self.host_mod() && self.aux_windows.get(idx).and_then(|a| a.room_window()).is_some() {
+            if let PhysicalKey::Code(code) = event.physical_key {
+                let dir = match code {
+                    KeyCode::KeyD if self.host_mod_alt() => Some(kasa_pty::SplitDir::Vertical),
+                    KeyCode::KeyD => Some(kasa_pty::SplitDir::Horizontal),
+                    KeyCode::KeyE => Some(kasa_pty::SplitDir::Vertical),
+                    _ => None,
+                };
+                if let Some(dir) = dir {
+                    self.split_room_pane(idx, dir);
+                    return;
+                }
+            }
+        }
+        // 폰트 줌(Cmd+= / Cmd+- / Cmd+0). **한글 조합 분기보다 먼저** 와야 한다 —
+        // 조합 중엔 아래 자모 경로나 맨 끝 평문 경로가 이 키를 먼저 먹어 셸에 '-' 가
+        // 박혔다(별도창엔 줌 처리가 아예 없었다). 메인 창(forward_key)과 같은 규칙으로
+        // **물리키와 논리문자를 둘 다** 본다: 한글·유럽 배열은 같은 문자를 다른 물리
+        // 위치에서 내놓는다. 메인 창은 App 전역 ui_zoom 을 움직이지만 별도창은 자기
+        // gpu 의 폰트 크기가 전부라, 여기서 그 값을 직접 올리고 PTY 를 리플로우한다.
+        let zoom_mod = if cfg!(target_os = "macos") {
+            self.host_mod()
+        } else {
+            self.modifiers.control_key()
+        };
+        if zoom_mod {
+            let logical_str = match &event.logical_key {
+                Key::Character(s) => Some(s.as_str()),
+                _ => None,
+            };
+            let code = match event.physical_key {
+                PhysicalKey::Code(c) => Some(c),
+                _ => None,
+            };
+            if let Some(z) = crate::input::zoom_key(code, logical_str) {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let next = match z {
+                        crate::input::ZoomKey::Reset => FONT_SIZE,
+                        crate::input::ZoomKey::In => (a.gpu.font_size() + 1.0).clamp(8.0, 40.0),
+                        crate::input::ZoomKey::Out => (a.gpu.font_size() - 1.0).clamp(8.0, 40.0),
+                    };
+                    a.gpu.set_font_size(next);
+                    a.dirty = true;
+                    a.window.request_redraw();
+                }
+                // 셀이 커졌으니 같은 창에 들어가는 칸 수가 달라진다 — 셸이 SIGWINCH
+                // 로 리플로우하지 않으면 글자만 커지고 줄바꿈이 옛 폭에 묶인다.
+                self.aux_terminal_resize_pty(idx);
+                return;
+            }
         }
         // macOS in-process 한글 조합: 자모(U+3130..318F)면 completer 로, 완성 음절만 PTY.
         #[cfg(target_os = "macos")]
@@ -1718,6 +2999,9 @@ impl App {
         if self.tmux.is_some() || !self.pty.contains_key(pane_id) {
             return;
         }
+        // 나온 방을 지금 붙들어야 한다 — 아래에서 트리의 leaf 를 빼고 나면
+        // `window_of_pane` 이 더는 못 찾는다.
+        let home_window = self.window_of_pane(pane_id).unwrap_or(self.active_window);
         let leaves: Vec<String> = self
             .pty_layout
             .as_ref()
@@ -1727,6 +3011,18 @@ impl App {
         if !leaves.iter().any(|l| l == pane_id) {
             return;
         }
+        // 지금 이 pane 이 차지한 칸수 — **leaf 를 빼기 전에** 재야 한다. 빼고 나면
+        // 트리에 없어 rect 를 못 구하고, 그러면 창이 고정 크기로 열려 보던 화면이
+        // 잘린다.
+        let want_cells = {
+            let (cols, rows) = self.window_cells();
+            self.pty_layout.as_ref().and_then(|t| {
+                t.leaf_rects(cols, rows)
+                    .into_iter()
+                    .find(|(id, ..)| id == pane_id)
+                    .map(|(_, _, _, w, h)| (w, h))
+            })
+        };
         let was_active =
             self.ws.lock().unwrap().active_pane.as_deref() == Some(pane_id);
         // 제거 pane 이 active 였으면 형제 leaf 로 포커스 이동(remove_pane 과 동일 규칙).
@@ -1764,14 +3060,14 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        self.spawn_aux_terminal(pane_id.to_string(), event_loop, near);
+        self.spawn_aux_terminal(pane_id.to_string(), home_window, event_loop, near, want_cells);
     }
 
     /// 터미널 별도창을 닫으며 그 pane 을 메인 레이아웃으로 되돌린다(dock). 창을 먼저
     /// 제거하고(idx 확보 후), 살아있는 세션이면 활성 pane 오른쪽(Horizontal)에
     /// `split_leaf` 로 기존 pane_id 를 재삽입한다 — 새 세션을 만드는 split_active_pane
     /// 과 달리 기존 PtySession 을 그대로 얹으므로 셸이 안 끊긴다.
-    fn dock_pane_terminal(&mut self, idx: usize) {
+    pub(crate) fn dock_pane_terminal(&mut self, idx: usize) {
         let pane_id = match self.aux_windows.get(idx).and_then(|a| a.term_pane_id()) {
             Some(p) => p.to_string(),
             None => {
@@ -1779,10 +3075,23 @@ impl App {
                 return;
             }
         };
+        // 나온 방을 창이 들고 있다 — 닫기 전에 꺼내야 한다.
+        let home = match self.aux_windows.get(idx).map(|a| &a.kind) {
+            Some(AuxWindowKind::Terminal { window, .. }) => Some(*window),
+            _ => None,
+        };
         self.close_aux_window(idx);
         // 셸이 이미 종료돼 세션이 사라졌으면 되돌릴 게 없다.
         if !self.pty.contains_key(&pane_id) {
             return;
+        }
+        // 나왔던 방으로 돌아간다. 이게 없으면 그때 보고 있던 방에 남의 pane 이
+        // 튀어나온다 — 꺼낼 때와 되돌릴 때 활성 방이 같으리란 보장이 없다.
+        // 밖에 나가 있는 방으로는 보내지 않는다(그 방은 메인에 안 그려진다).
+        if let Some(w) = home {
+            if w < self.windows.len() && w != self.active_window && !self.window_is_undocked(w) {
+                self.switch_window(w);
+            }
         }
         let in_tree = self
             .pty_layout
@@ -1853,14 +3162,28 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let was_header = a.cursor_px.1 <= AUX_HEADER_H;
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                    // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
+                    // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
+                    // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                        a.dirty = true;
+                        a.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.aux_room_click(idx),
+            } => {
+                // 헤더 버튼이 먼저다 — 그 띠는 셀 그리드 밖이라 pane 포커스로
+                // 흘려보내면 버튼이 영영 안 눌린다.
+                if !self.aux_header_click(idx) && !self.aux_tree_click(idx) {
+                    self.aux_room_click(idx);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_terminal_key(idx, &event),
             WindowEvent::Ime(ime) => self.aux_terminal_ime(idx, ime),
@@ -1879,18 +3202,65 @@ impl App {
         }
     }
 
+    /// 방 별도창의 포커스 pane 을 쪼갠다(⌘D / ⌘⇧D / ⌘E — 메인 창과 같은 화음).
+    ///
+    /// `split_active_pane` 을 못 쓰는 건 그게 **활성 window 트리**(`pty_layout`)만
+    /// 보기 때문이다 — 꺼내 둔 방이 비활성이면 그 트리엔 이 pane 이 없어 split_leaf
+    /// 이 false 를 돌려주고 새 셸만 조용히 새 나간다. 여기선 어느 window 를 그리고
+    /// 있는지 창이 알고 있으니 그 트리에 직접 꽂고, 리사이즈도 메인 그리드가 아니라
+    /// 이 창의 leaf_rects 로 한다.
+    pub(crate) fn split_room_pane(&mut self, idx: usize, dir: kasa_pty::SplitDir) {
+        if self.tmux.is_some() {
+            return;
+        }
+        let Some((window, target)) = self
+            .aux_windows
+            .get(idx)
+            .and_then(|a| Some((a.room_window()?, a.term_pane_id()?.to_string())))
+        else {
+            return;
+        };
+        // 트리 선택·롤백은 `split_active_pane` 이 이미 한다 — 사본을 두면 한쪽만
+        // 고쳐진다. 그쪽이 `ws.active_pane` 을 기준으로 잡으므로 잠깐 갈아끼운다
+        // (소켓 split 과 같은 관례).
+        let prev = self.ws.lock().unwrap().active_pane.clone();
+        self.ws.lock().unwrap().active_pane = Some(target);
+        let new_id = match self.split_active_pane(dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[kasaterm] room split failed: {e:#}");
+                self.ws.lock().unwrap().active_pane = prev;
+                return;
+            }
+        };
+        // 비활성 방을 쪼갠 거면 메인 창의 포커스는 원래 자리로 — 안 보이는 방의
+        // pane 이 활성이 되면 키 입력이 화면 밖으로 샌다.
+        if window != self.active_window {
+            self.ws.lock().unwrap().active_pane = prev;
+        }
+        // 새 pane 으로 포커스를 옮긴다 — 메인 창 split 과 같은 관례(방금 만든 곳에
+        // 바로 친다).
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            if let AuxWindowKind::Room { focus, .. } = &mut a.kind {
+                *focus = Some(new_id);
+            }
+        }
+        self.aux_room_resize_pty(idx);
+        self.aux_redraw(idx);
+    }
+
     /// 방 창 클릭 → 커서 아래 pane 으로 포커스 이동(키 입력이 그리로 간다).
     fn aux_room_click(&mut self, idx: usize) {
-        let (cx, cy, cw, ch) = {
+        let (cx, cy, cw, ch, left) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
-            (a.cursor_px.0, a.cursor_px.1, a.gpu.cell_w, a.gpu.cell_h)
+            (a.cursor_px.0, a.cursor_px.1, a.gpu.cell_w, a.gpu.cell_h, a.cell_left())
         };
         if cw <= 0.0 || ch <= 0.0 {
             return;
         }
         let hit = self.room_leaf_rects(idx).into_iter().find(|(_, x, y, w, h)| {
-            let rx = PANE_INNER_X + *x as f32 * cw;
-            let ry = PANE_INNER_Y + *y as f32 * ch;
+            let rx = left + *x as f32 * cw;
+            let ry = AUX_CELL_TOP + *y as f32 * ch;
             cx >= rx && cx < rx + *w as f32 * cw && cy >= ry && cy < ry + *h as f32 * ch
         });
         let Some((pid, ..)) = hit else { return };
@@ -2004,11 +3374,15 @@ impl App {
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(1000.0, 660.0));
+            .with_inner_size(LogicalSize::new(1000.0, 660.0))
+            // 배경 실행(헤드리스 검증)이면 뜨면서 키 포커스를 안 가져간다 — 메인 창은
+            // 이미 그렇게 하는데 별도창만 빠져 있어, 검증 한 번에 작업하던 창을
+            // 통째로 빼앗겼다(거노).
+            .with_active(!crate::background_launch());
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window_handle = match event_loop.create_window(attrs) {
+        let window_handle = match create_aux_window(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] room window create failed: {e}");
@@ -2037,6 +3411,11 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            pinned: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
+            header_btns: Vec::new(),
             window: window_handle,
         });
         let idx = self.aux_windows.len() - 1;

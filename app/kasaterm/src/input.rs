@@ -91,8 +91,12 @@ impl App {
             return (0.0, 0.0);
         };
         let ws = self.ws.lock().unwrap();
-        let Some(pane) = ws.panes.get(pane_id) else { return (0.0, 0.0) };
-        let Some(img) = pane.image() else { return (0.0, 0.0) };
+        let Some(pane) = ws.panes.get(pane_id) else {
+            return (0.0, 0.0);
+        };
+        let Some(img) = pane.image() else {
+            return (0.0, 0.0);
+        };
         // Rotation by an odd quarter swaps the texture's width/height.
         let (iw, ih) = if pane.image_rot % 2 == 1 {
             (img.h as f32, img.w as f32)
@@ -106,10 +110,7 @@ impl App {
         let z = pane.image_view_zoom().max(1.0);
         let raw_w = iw * fit * z;
         let raw_h = ih * fit * z;
-        (
-            ((raw_w - bw) * 0.5).max(0.0),
-            ((raw_h - bh) * 0.5).max(0.0),
-        )
+        (((raw_w - bw) * 0.5).max(0.0), ((raw_h - bh) * 0.5).max(0.0))
     }
     /// 이미지 pane 의 화면 박스(원점+크기, logical px). `image_pan_bounds` 와 같은
     /// `effective_leaf_rects` 기반 — 커서기준 줌의 pane 중심 계산에 쓴다.
@@ -217,7 +218,14 @@ impl App {
     /// the SGR button code (0 = left press/motion/release, +32 for
     /// motion-with-button-held). `press` toggles the final byte
     /// between `M` (press / motion) and `m` (release).
-    pub(crate) fn send_mouse_sgr(&self, pane_id: &str, button: u8, col: u16, row: u16, press: bool) {
+    pub(crate) fn send_mouse_sgr(
+        &self,
+        pane_id: &str,
+        button: u8,
+        col: u16,
+        row: u16,
+        press: bool,
+    ) {
         let final_byte = if press { 'M' } else { 'm' };
         let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
         if let Some(tmux) = self.tmux.as_ref() {
@@ -332,6 +340,28 @@ impl App {
     /// Shared by the busy loop and the approval-prompt router below.
     const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
 
+    /// ultracode 가 켜진 pane 을 훑는다 — 입력박스 테두리를 보라색으로 두르는 근거.
+    ///
+    /// claude 는 이 상태를 statusline payload 에 안 실어 준다(effort 는 low..max 뿐)
+    /// → `ultracode-mark.py`(UserPromptSubmit)가 남기는 마커 파일이 유일한 신호다.
+    /// **턴 단위**라 다음 프롬프트에 키워드가 없으면 훅이 지우고 테두리도 함께 꺼진다.
+    fn refresh_pane_ultracode(&mut self) {
+        let dir = std::path::Path::new("/tmp/kasaterm-collab/ultracode");
+        self.pane_ultracode = self
+            .pane_claude_sid
+            .iter()
+            .filter(|(_, sid)| {
+                // 훅과 **같은** 정제 규칙이어야 파일명이 어긋나지 않는다.
+                !sid.is_empty()
+                    && sid
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    && dir.join(format!("{sid}.on")).exists()
+            })
+            .map(|(pane, _)| pane.clone())
+            .collect();
+    }
+
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
@@ -340,16 +370,28 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
+        // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
+        self.reap_idle_closed_panes();
+        self.refresh_pane_ultracode();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same
         // pass also looks for a pending approval prompt (munder BLOCK_HINTS):
         // only meaningful when the spinner is gone, so busy panes skip it.
-        let busy_now: Vec<(String, bool, Option<ApprovalPrompt>)> = {
+        // `bg_tab_busy` = **안 보이는 탭**에서 클로드가 도는 pane. 스캔이 활성 탭만
+        // 보던 동안 뒤 탭 학생은 화면에 아무 흔적이 없었다 — busy 바도 완료 펄스도.
+        // 그렇다고 스윕바를 띄우면 노는 화면 위에서 "이 화면이 일한다"는 거짓말이
+        // 되므로, 있는 언어를 쓴다: 보이는 것은 busy, 안 보이는 것은 bg 펄스.
+        let (busy_now, bg_tab_busy): (
+            Vec<(String, bool, Option<ApprovalPrompt>)>,
+            std::collections::HashSet<String>,
+        ) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
-                .iter()
-                .map(|(id, pane)| match pane.term() {
+            let mut rows = Vec::with_capacity(ws.panes.len());
+            let mut bg = std::collections::HashSet::new();
+            for (id, pane) in ws.panes.iter() {
+                match pane.term() {
                     Some(t) => {
                         let busy = term_is_working(t);
                         let prompt = if busy {
@@ -357,11 +399,21 @@ impl App {
                         } else {
                             rows_show_approval_prompt(&t.cells)
                         };
-                        (id.clone(), busy, prompt)
+                        rows.push((id.clone(), busy, prompt));
                     }
-                    None => (id.clone(), false, None),
-                })
-                .collect()
+                    None => rows.push((id.clone(), false, None)),
+                }
+                let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
+                if pane
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| i != active && t.term().is_some_and(term_is_working))
+                {
+                    bg.insert(id.clone());
+                }
+            }
+            (rows, bg)
         };
 
         // The claude spinner blanks/scrolls between frames, so the raw glyph
@@ -393,7 +445,11 @@ impl App {
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
-            let bg_active = if busy { false } else { self.pane_bg_active(id) };
+            let bg_active = if busy {
+                false
+            } else {
+                bg_tab_busy.contains(id) || self.pane_bg_active(id)
+            };
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
@@ -428,10 +484,31 @@ impl App {
         }
     }
 
-    /// Whether a `run_in_background` shell or `Monitor` is in-flight for this
-    /// pane, read from the claude transcript tail. mtime-gated: an unchanged
-    /// transcript returns the cached verdict, so an idle pane costs one `stat`.
+    /// 이 pane 에 **화면 밖에서 도는 일**이 있나 — `run_in_background` 셸·`Monitor`,
+    /// 그리고 아직 안 돌아온 **서브에이전트**.
+    ///
+    /// 서브에이전트를 같이 보는 이유: 세션 자체는 idle(스피너 없음)인데 Task 가 정보를
+    /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(거노
+    /// 2026-08-11 제안). 표시는 이미 갈려 있다 — 도는 중은 쓸어가는 sweep, 이쪽은
+    /// 3초 숨쉬기 pulse(`render.rs` 의 `working_bar` vs `pulse_bar`).
+    ///
+    /// 답은 두 군데서 온다. **훅이 정본**이고(`kasaterm-agent-status.sh` 가 시작·종료를
+    /// 그 순간 밀어 넣는다), transcript 꼬리는 폴백이다 — 앱이 나중에 떠서 시작을 못 본
+    /// pane, Windows(python3 없어 훅이 안 도는 경우), 옛 세션이 그 폴백으로 산다.
+    /// 순서가 이 방향인 이유: 꼬리는 64KB 라 세션이 커지면 런치 기록이 밀려나 **오래
+    /// 기다리는 작업일수록 안 보였다**(실측: 3.8MB 7건 / 8.3MB·24MB 0건). 훅이 「있다」고
+    /// 하면 그걸로 끝내고, 훅이 조용할 때만 꼬리를 읽는다.
     fn pane_bg_active(&mut self, pane_id: &str) -> bool {
+        if self
+            .collab
+            .hook_activity
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .is_some_and(|a| !a.is_empty())
+        {
+            return true;
+        }
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
             return false;
         };
@@ -446,10 +523,14 @@ impl App {
                 }
             }
         }
-        let (tail, idle) = crate::socket::read_tail(&path, 64 * 1024);
-        let bg = !crate::transcript::snapshot_from_tail(&sid, &tail, idle)
-            .background
-            .is_empty();
+        // 512KB — `collab_board`(socket.rs)와 **같은 값이어야 한다**. board 는 64KB
+        // 로는 런치가 대량 출력에 밀려 안 잡힌다는 걸 알고 진작 늘렸는데 이쪽만
+        // 64KB 로 남아, 같은 pane 을 두고 board 는 「서브에이전트 돌는 중」이라 하고
+        // 화면은 아무 표시도 안 하는 어긋남이 있었다(2026-08-11). 판정 재료가 다르면
+        // 판정도 다르다 — 두 벌을 둘 거면 최소한 창 크기는 맞춰 둔다.
+        let (tail, idle) = crate::socket::read_tail(&path, 512 * 1024);
+        let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
+        let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         if let Some(mt) = mtime {
             self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg));
         }
@@ -478,9 +559,13 @@ impl App {
                     // 솔로(자동통솔 폐기 06-18) — 모든 pane 이 사용자 직행.
                     let faces_user = true;
                     self.pane_prompt_wait.insert(id.clone(), faces_user);
-                    self.notify_flash.insert(id.clone(), now);
+                    // ⚠️ 여기에 `notify_flash` 를 넣지 마라. 그 맵은 **턴 완료** 전용
+                    // 채널이라(초록 펄스 + 학생 만세), 승인 대기에 진입하는 순간
+                    // 막혀 선 학생이 「끝난 학생」으로 보였다 — 없는 신호보다 나쁜
+                    // 틀린 신호다(2026-08-11). 대기는 attention 색이 말한다.
                     // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
-                    self.collab.attention
+                    self.collab
+                        .attention
                         .lock()
                         .unwrap()
                         .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
@@ -489,15 +574,20 @@ impl App {
                     // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
                     // 건드리지 않는다.
                     if faces_user {
-                        let who = self
-                            .pane_character_if_known(id)
-                            .unwrap_or_else(|| "pane".to_string());
-                        let looking = self.window_focused
-                            && self.ws.lock().unwrap().active_pane.as_deref()
-                                == Some(id.as_str());
-                        if !looking {
-                            crate::chrome::notify_desktop("⚠ 승인 필요", &who);
-                        }
+                        // 보고 있는 pane 이라고 삼키지 않는다 — 거노 2026-08-11
+                        // "pane별로 그냥 다오게하자". 프사가 붙어 누구 건지 갈린다.
+                        let ch = self.pane_character_if_known(id);
+                        let who = ch.clone().unwrap_or_else(|| "pane".to_string());
+                        // 훅 경로(`chrome.rs` 의 `⚠ 권한 필요`)와 같은 열쇠 — 같은
+                        // 프롬프트에 배너가 둘 나가는 걸 발사구에서 막는다.
+                        let sid = self.pane_claude_sid.get(id).cloned();
+                        crate::chrome::notify_desktop(
+                            "⚠ 승인 필요",
+                            &who,
+                            ch.as_deref(),
+                            Some(&format!("approval:{id}")),
+                            Some((id, sid.as_deref())),
+                        );
                     }
                     changed = true;
                 }
@@ -593,7 +683,10 @@ impl App {
                 .active_pane
                 .clone()
                 .or_else(|| ws.panes.keys().next().cloned());
-            let osc = id.as_ref().and_then(|i| ws.panes.get(i)).and_then(|p| p.title.clone());
+            let osc = id
+                .as_ref()
+                .and_then(|i| ws.panes.get(i))
+                .and_then(|p| p.title.clone());
             id.map(|i| (i, osc))
         };
         let Some((id, osc)) = active else { return };
@@ -764,7 +857,9 @@ impl App {
     }
     /// 렌더 뷰 선택을 클립보드로. true 면 이 호출이 복사를 처리했다.
     pub(crate) fn copy_md_render_selection(&self) -> bool {
-        let Some(text) = self.md_render_selection_text() else { return false };
+        let Some(text) = self.md_render_selection_text() else {
+            return false;
+        };
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
                 if let Err(e) = cb.set_text(text) {
@@ -779,7 +874,9 @@ impl App {
         if self.copy_md_render_selection() {
             return;
         }
-        let Some(sel) = self.selection else { return; };
+        let Some(sel) = self.selection else {
+            return;
+        };
         let rows = {
             let ws = self.ws.lock().unwrap();
             match ws.active().and_then(|p| p.term()) {
@@ -894,10 +991,8 @@ impl App {
                     if mx > 0.0 || my > 0.0 {
                         if let Ok(mut ws) = self.ws.lock() {
                             if let Some(pane) = ws.panes.get_mut(&pid) {
-                                pane.image_pan_x =
-                                    (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
-                                pane.image_pan_y =
-                                    (pane.image_pan_y - p.y as f32).clamp(-my, my);
+                                pane.image_pan_x = (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
+                                pane.image_pan_y = (pane.image_pan_y - p.y as f32).clamp(-my, my);
                                 pane.dirty = true;
                             }
                         }
@@ -936,11 +1031,19 @@ impl App {
                 // mode when the swipe is decisively sideways.
                 let d = match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
-                        if self.tabs_on_top && x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                        if self.tabs_on_top && x.abs() > y.abs() {
+                            x * 48.0
+                        } else {
+                            y * 48.0
+                        }
                     }
                     MouseScrollDelta::PixelDelta(p) => {
                         let (px, py) = (p.x as f32, p.y as f32);
-                        if self.tabs_on_top && px.abs() > py.abs() { px } else { py }
+                        if self.tabs_on_top && px.abs() > py.abs() {
+                            px
+                        } else {
+                            py
+                        }
                     }
                 };
                 self.win_tab_wheel_accum += d;
@@ -984,11 +1087,19 @@ impl App {
                 if let Some((n, first, vis)) = overflow {
                     let d = match delta {
                         MouseScrollDelta::LineDelta(x, y) => {
-                            if x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                            if x.abs() > y.abs() {
+                                x * 48.0
+                            } else {
+                                y * 48.0
+                            }
                         }
                         MouseScrollDelta::PixelDelta(p) => {
                             let (px, py) = (p.x as f32, p.y as f32);
-                            if px.abs() > py.abs() { px } else { py }
+                            if px.abs() > py.abs() {
+                                px
+                            } else {
+                                py
+                            }
                         }
                     };
                     // Same 48px-per-tab accumulator as the window strip — a
@@ -997,8 +1108,7 @@ impl App {
                     let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
                     if steps != 0 {
                         self.win_tab_wheel_accum -= steps as f32 * 48.0;
-                        let next =
-                            (first as i64 - steps).clamp(0, (n - vis) as i64) as usize;
+                        let next = (first as i64 - steps).clamp(0, (n - vis) as i64) as usize;
                         if next != first {
                             if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(p) = ws.panes.get_mut(&pid) {
@@ -1061,9 +1171,10 @@ impl App {
         // 먹어야 하므로 그 두 경우만 비켜 준다(target 이 활성 pane 으로 폴백하므로
         // 커서가 pane 밖에 있어도 여기 걸린다).
         let (cx, cy) = self.cursor_px;
-        let over_menu = self.statusbar.menu_rect.is_some_and(|(mx, my, mw, mh)| {
-            cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh
-        });
+        let over_menu = self
+            .statusbar
+            .menu_rect
+            .is_some_and(|(mx, my, mw, mh)| cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh);
         let over_side_col = self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x();
         // Decide which pane handles this wheel: the pane the pointer is
         // hovering over. Falls back to the active pane if the pointer
@@ -1229,6 +1340,38 @@ impl App {
             }
             return;
         }
+        // 세션 기록 탭: 목록 스크롤. Info 와 같은 이유로 상한은 렌더가 잡는다
+        // (행 수가 워커 스레드에서 바뀌어 입력 시점의 최대치는 낡았을 수 있다).
+        if self.git.col_visible
+            && self.info.tab == state::SideTab::Mcp
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.git_col_x()
+        {
+            let next = (self.mcp_col.scroll - lines as f32 * 22.0).max(0.0);
+            if (next - self.mcp_col.scroll).abs() > 0.01 {
+                self.mcp_col.scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
+        if self.git.col_visible
+            && self.info.tab == state::SideTab::Sessions
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.git_col_x()
+        {
+            let next = (self.sessions_col.scroll - lines as f32 * 22.0).max(0.0);
+            if (next - self.sessions_col.scroll).abs() > 0.01 {
+                self.sessions_col.scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         // Git column: scroll the change list when the pointer is over it. Same
         // clamp idea as the file tree; the visible height is the band between
         // the header and the bottom button zone.
@@ -1238,14 +1381,19 @@ impl App {
         {
             let item_h = 22.0_f32;
             let n = self
-                .git.col_data
+                .git
+                .col_data
                 .lock()
                 .map(|g| g.staged.len() + g.unstaged.len())
                 .unwrap_or(0);
             let win_h = self.window.as_ref().map_or(800.0, |w| {
                 w.inner_size().height as f32 / self.effective_scale()
             });
-            let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+            let dock_h = if self.docked.is_empty() {
+                0.0
+            } else {
+                DOCK_HEIGHT
+            };
             // Header (branch + summary + rule) ≈ 68px; button zone ≈ 44px.
             let list_top = TITLE_HEIGHT + 68.0;
             let visible_h = (win_h - dock_h - list_top - 44.0).max(0.0);
@@ -1271,9 +1419,7 @@ impl App {
         }
         let (alt, hist_len, mouse_on, mouse_sgr) = {
             let ws = self.ws.lock().unwrap();
-            let pane = target_pane_id
-                .as_deref()
-                .and_then(|id| ws.panes.get(id));
+            let pane = target_pane_id.as_deref().and_then(|id| ws.panes.get(id));
             match pane.and_then(|p| p.term()) {
                 Some(t) => (t.alt_screen, t.history.len(), t.mouse_enabled, t.mouse_sgr),
                 None => return,
@@ -1366,13 +1512,7 @@ impl App {
     /// Insert text at the commit-message cursor (committed Hangul or a typed
     /// char). Char-indexed; advances the cursor by the inserted char count.
     pub(crate) fn git_commit_insert(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let col = self.git.commit_cursor.min(self.git.commit_msg.chars().count());
-        let b = char_byte(&self.git.commit_msg, col);
-        self.git.commit_msg.insert_str(b, text);
-        self.git.commit_cursor = col + text.chars().count();
+        crate::lineedit::insert(&mut self.git.commit_msg, &mut self.git.commit_cursor, text);
     }
     /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
     ///
@@ -1401,7 +1541,9 @@ impl App {
         for a in self.aux_windows.iter_mut() {
             a.preedit.clear();
         }
-        let (Some(text), Some(prev)) = (pending, prev) else { return };
+        let (Some(text), Some(prev)) = (pending, prev) else {
+            return;
+        };
         match prev {
             crate::ImeFocus::Pane(id) => {
                 // 탭이 있는 pane 은 leaf id 와 실제 pid 가 갈린다 —
@@ -1413,13 +1555,11 @@ impl App {
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
-            crate::ImeFocus::PathSearch => self.statusbar.menu_search.push_str(&text),
-            crate::ImeFocus::TreeSearch => self.file_tree.search_query.push_str(&text),
-            crate::ImeFocus::TreeNew => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push_str(&text);
-                }
-            }
+            crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
+            crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
+            crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
+            crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
+            crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
             crate::ImeFocus::Settings => self.settings_insert_text(&text),
         }
     }
@@ -1430,6 +1570,9 @@ impl App {
     /// flushes the pending syllable first, then edits.
     pub(crate) fn git_commit_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::GitCommit);
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1460,70 +1603,50 @@ impl App {
         self.in_preedit = false;
         self.git_commit_key(event);
     }
-    /// Single-line editing for the commit field: char insert, backspace/delete,
-    /// left/right/home/end. Enter submits the commit, Escape blurs. Hangul is
-    /// composed in `git_commit_input` before this runs.
+    /// Single-line editing for the commit field. 조작은 `lineedit` 한 벌을 쓴다 —
+    /// 칸마다 커서 산수를 다시 짜면 한글 경계에서 하나씩 어긋난다. Enter 는 커밋을
+    /// 실행하고 Esc 는 포커스를 뗀다(그 둘만 이 칸의 몫). 한글 조합은 이 함수 앞의
+    /// `git_commit_input` 이 이미 흘려보냈다.
     pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
-        use winit::keyboard::{Key, NamedKey};
-        let len = self.git.commit_msg.chars().count();
-        let mut col = self.git.commit_cursor.min(len);
-        match &event.logical_key {
-            Key::Named(NamedKey::Backspace) => {
-                if col > 0 {
-                    let b0 = char_byte(&self.git.commit_msg, col - 1);
-                    let b1 = char_byte(&self.git.commit_msg, col);
-                    self.git.commit_msg.replace_range(b0..b1, "");
-                    col -= 1;
-                }
-            }
-            Key::Named(NamedKey::Delete) => {
-                if col < len {
-                    let b0 = char_byte(&self.git.commit_msg, col);
-                    let b1 = char_byte(&self.git.commit_msg, col + 1);
-                    self.git.commit_msg.replace_range(b0..b1, "");
-                }
-            }
-            Key::Named(NamedKey::ArrowLeft) => col = col.saturating_sub(1),
-            Key::Named(NamedKey::ArrowRight) => {
-                if col < len {
-                    col += 1;
-                }
-            }
-            Key::Named(NamedKey::Home) => col = 0,
-            Key::Named(NamedKey::End) => col = len,
-            Key::Named(NamedKey::Enter) => {
-                self.git.commit_cursor = col;
+        let act = crate::lineedit::key(
+            &mut self.git.commit_msg,
+            &mut self.git.commit_cursor,
+            &event.logical_key,
+        );
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 self.run_git_col_action(GitColBtn::Commit);
                 return;
             }
-            Key::Named(NamedKey::Escape) => {
+            crate::lineedit::LineEditAction::Cancel => {
                 self.git.commit_focused = false;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Space) => {
-                let b = char_byte(&self.git.commit_msg, col);
-                self.git.commit_msg.insert(b, ' ');
-                col += 1;
-            }
-            Key::Character(txt) => {
-                let b = char_byte(&self.git.commit_msg, col);
-                self.git.commit_msg.insert_str(b, txt);
-                col += txt.chars().count();
             }
             _ => {}
         }
-        self.git.commit_cursor = col;
         self.chrome_dirty = true;
     }
-    /// Type-to-search for the open path dropdown. Append-only (no mid-string
-    /// cursor — a search box doesn't need one), with the shared Hangul composer
-    /// so Korean filters compose. Esc closes, Enter opens the first match,
-    /// Backspace deletes a jamo then a char. Every edit resets the scroll.
+    /// 커서 자리에 글자를 넣는다 — 조합이 끝난 한글도, 포커스가 떠나며 확정된
+    /// 음절(`ime_retarget`)도 여기로 온다.
+    pub(crate) fn statusbar_search_insert(&mut self, text: &str) {
+        crate::lineedit::insert(
+            &mut self.statusbar.menu_search,
+            &mut self.statusbar.menu_search_cursor,
+            text,
+        );
+        self.statusbar.menu_scroll = 0.0;
+    }
+    /// Type-to-search for the open path dropdown, with the shared Hangul
+    /// composer so Korean filters compose. 조작은 `lineedit` 한 벌 — 검색칸도
+    /// 가운데를 고칠 수 있어야 한다. Esc 는 드롭다운을 닫고 Enter 는 첫 후보를
+    /// 연다(그 둘만 이 칸의 몫). 목록이 실제로 달라졌을 때만 스크롤을 되감는다 —
+    /// 커서만 옮겼는데 스크롤이 튀면 보던 자리를 잃는다.
     pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::PathSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1532,64 +1655,68 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.statusbar.menu_search.push_str(&commit);
+                            self.statusbar_search_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.statusbar.menu_scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.statusbar.menu = None;
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Enter) => {
-                let _ = self.hangul.flush();
-                self.preedit.clear();
-                self.in_preedit = false;
+        // 조합 중이던 자모를 지우는 백스페이스가 먼저다 — 완성 글자를 지우기 전에
+        // 조합기 안의 것부터 물린다.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.statusbar_search_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let act = crate::lineedit::key(
+            &mut self.statusbar.menu_search,
+            &mut self.statusbar.menu_search_cursor,
+            &event.logical_key,
+        );
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 self.statusbar_menu_activate_first();
                 self.chrome_dirty = true;
                 return;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else {
-                    self.statusbar.menu_search.pop();
-                }
-                self.statusbar.menu_scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
+            crate::lineedit::LineEditAction::Cancel => {
+                self.statusbar.menu = None;
             }
+            // 걸러지는 목록이 바뀐 키에만 맨 위로. 커서 이동에 되돌리면 ←→ 마다
+            // 스크롤이 튄다.
+            crate::lineedit::LineEditAction::Edited => self.statusbar.menu_scroll = 0.0,
             _ => {}
         }
-        if let Some(flushed) = self.hangul.flush() {
-            self.statusbar.menu_search.push_str(&flushed);
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.statusbar.menu_search.push(' '),
-            Key::Character(txt) => self.statusbar.menu_search.push_str(txt),
-            _ => {}
-        }
-        self.statusbar.menu_scroll = 0.0;
         self.chrome_dirty = true;
     }
-    /// Same append-only search entry for the file-tree column's search box.
-    /// Esc closes the box, Backspace deletes a jamo then a char. The filtered
-    /// node list is recomputed by `rebuild_file_tree_nodes` on each edit.
+    /// 트리 검색칸의 커서 자리에 글자를 넣고 걸린 노드를 다시 모은다.
+    pub(crate) fn file_tree_search_insert(&mut self, text: &str) {
+        crate::lineedit::insert(
+            &mut self.file_tree.search_query,
+            &mut self.file_tree.search_cursor,
+            text,
+        );
+        self.file_tree_search_collect();
+        self.file_tree.scroll = 0.0;
+    }
+    /// Same search entry for the file-tree column's search box, on the shared
+    /// `lineedit` 조작. Esc closes the box; the filtered node list is recomputed
+    /// by `file_tree_search_collect` on each edit — 쿼리가 그대로인 커서 이동엔
+    /// 안 돌린다(트리를 다시 훑을 이유가 없고 스크롤도 안 튄다).
     pub(crate) fn file_tree_search_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::TreeSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1598,56 +1725,44 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.file_tree.search_query.push_str(&commit);
-                            self.file_tree_search_collect();
+                            self.file_tree_search_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.file_tree.scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.file_tree.search_active = false;
-                self.file_tree.search_query.clear();
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.file_tree_search_collect(); // empty query → restore tree
-                self.file_tree.scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else {
-                    self.file_tree.search_query.pop();
-                }
-                self.file_tree_search_collect();
-                self.file_tree.scroll = 0.0;
-                self.chrome_dirty = true;
-                return;
-            }
-            _ => {}
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
         }
         if let Some(flushed) = self.hangul.flush() {
-            self.file_tree.search_query.push_str(&flushed);
+            self.file_tree_search_insert(&flushed);
         }
         self.preedit.clear();
         self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.file_tree.search_query.push(' '),
-            Key::Character(txt) => self.file_tree.search_query.push_str(txt),
-            _ => {}
+        let act = crate::lineedit::key(
+            &mut self.file_tree.search_query,
+            &mut self.file_tree.search_cursor,
+            &event.logical_key,
+        );
+        let cancelled = act == crate::lineedit::LineEditAction::Cancel;
+        if cancelled {
+            self.file_tree.search_active = false;
+            self.file_tree.search_query.clear();
+            self.file_tree.search_cursor = 0;
         }
-        self.file_tree_search_collect();
-        self.file_tree.scroll = 0.0;
+        // 쿼리가 실제로 바뀐 키에만 다시 훑는다 — 커서 이동에도 돌리면 ←→ 를
+        // 누를 때마다 트리를 재수집하고 스크롤이 맨 위로 튄다.
+        if cancelled || act == crate::lineedit::LineEditAction::Edited {
+            self.file_tree_search_collect(); // 빈 쿼리 → 트리 복원
+            self.file_tree.scroll = 0.0;
+        }
         self.chrome_dirty = true;
     }
     /// Name entry for the inline new-file/folder row. Enter creates the entry,
@@ -1656,6 +1771,9 @@ impl App {
     /// `ft_edit_buf` 로 통일 — rename 이 있으면 그쪽, 없으면 new. Enter 는 모드에
     /// 맞는 commit, Esc 는 둘 다 취소. 한글 조합은 search 행과 동일 경로.
     pub(crate) fn file_tree_new_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::TreeNew);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1664,9 +1782,7 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            if let Some(buf) = self.ft_edit_buf() {
-                                buf.push_str(&commit);
-                            }
+                            self.ft_edit_insert(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
@@ -1676,80 +1792,64 @@ impl App {
                 }
             }
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.file_tree.new = None;
-                self.file_tree.new_parent = None;
-                self.file_tree.rename = None;
-                self.preedit.clear();
-                self.in_preedit = false;
-                let _ = self.hangul.flush();
-                self.chrome_dirty = true;
-                return;
-            }
-            Key::Named(NamedKey::Enter) => {
-                if let Some(f) = self.hangul.flush() {
-                    if let Some(buf) = self.ft_edit_buf() {
-                        buf.push_str(&f);
-                    }
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.ft_edit_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let act = match self.ft_edit() {
+            Some((buf, cursor)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            None => crate::lineedit::LineEditAction::Ignored,
+        };
+        match act {
+            crate::lineedit::LineEditAction::Submit => {
                 if self.file_tree.rename.is_some() {
                     self.commit_rename();
                 } else {
                     self.commit_new_entry();
                 }
-                self.chrome_dirty = true;
-                return;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if self.hangul.backspace() {
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                } else if let Some(buf) = self.ft_edit_buf() {
-                    buf.pop();
-                }
-                self.chrome_dirty = true;
-                return;
-            }
-            _ => {}
-        }
-        if let Some(flushed) = self.hangul.flush() {
-            if let Some(buf) = self.ft_edit_buf() {
-                buf.push_str(&flushed);
-            }
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        match &event.logical_key {
-            Key::Named(NamedKey::Space) => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push(' ');
-                }
-            }
-            Key::Character(txt) => {
-                if let Some(buf) = self.ft_edit_buf() {
-                    buf.push_str(txt);
-                }
+            crate::lineedit::LineEditAction::Cancel => {
+                self.file_tree.new = None;
+                self.file_tree.new_parent = None;
+                self.file_tree.rename = None;
+                self.file_tree.edit_cursor = 0;
             }
             _ => {}
         }
         self.chrome_dirty = true;
     }
-    /// 인라인 입력행의 편집 버퍼 — rename 우선, 없으면 new. 둘 다 마지막 필드가
-    /// 편집 중 텍스트라 키 입력을 한 곳에서 받는다.
-    fn ft_edit_buf(&mut self) -> Option<&mut String> {
-        if let Some((_, b)) = self.file_tree.rename.as_mut() {
-            return Some(b);
+    /// 인라인 입력행의 편집 버퍼와 그 커서 — rename 우선, 없으면 new. 둘은 서로
+    /// 배타라 커서(`edit_cursor`)를 한 벌만 두고 열린 쪽에 붙인다.
+    fn ft_edit(&mut self) -> Option<(&mut String, &mut usize)> {
+        let ft = &mut self.file_tree;
+        let buf = match (ft.rename.as_mut(), ft.new.as_mut()) {
+            (Some((_, b)), _) => b,
+            (None, Some((_, b))) => b,
+            (None, None) => return None,
+        };
+        Some((buf, &mut ft.edit_cursor))
+    }
+    /// 커서 자리에 글자를 넣는다 — 조합이 끝난 한글도, 포커스가 떠나며 확정된
+    /// 음절(`ime_retarget`)도 여기로 온다.
+    pub(crate) fn ft_edit_insert(&mut self, text: &str) {
+        if let Some((buf, cursor)) = self.ft_edit() {
+            crate::lineedit::insert(buf, cursor, text);
         }
-        if let Some((_, b)) = self.file_tree.new.as_mut() {
-            return Some(b);
-        }
-        None
     }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
+            return;
+        }
+        // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
+        // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
+        if self.room_rename_key(event) {
             return;
         }
         // Touch the input timer so the cursor stays solid for a beat and
@@ -1769,11 +1869,20 @@ impl App {
             }
             return;
         }
+        // MCP 탭의 추가 칸도 같은 자리에서 가른다 — 열려 있으면 키가 PTY 로 안 간다.
+        if self.mcp_col.add.is_some() {
+            self.mcp_add_input(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         // Open path dropdown is a modal search: keystrokes filter it, not the
         // PTY. (Branch menu has no search — its lists are short — so it falls
         // through.)
         if self
-            .statusbar.menu
+            .statusbar
+            .menu
             .as_ref()
             .map(|(_, k)| matches!(k, StatusbarMenu::Path))
             .unwrap_or(false)
@@ -1792,8 +1901,8 @@ impl App {
             && self.file_tree.rename.is_none()
             && !self.file_tree.search_active
         {
-            let has_sel = self.file_tree.selected.is_some()
-                || !self.file_tree.selected_more.is_empty();
+            let has_sel =
+                self.file_tree.selected.is_some() || !self.file_tree.selected_more.is_empty();
             if has_sel {
                 use winit::keyboard::{Key, NamedKey};
                 let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
@@ -1802,7 +1911,10 @@ impl App {
                 if std::env::var_os("KASATERM_KEY_DEBUG").is_some() {
                     eprintln!(
                         "[ftdel] has_sel={} del={} super={} key={:?}",
-                        has_sel, del, self.modifiers.super_key(), event.logical_key
+                        has_sel,
+                        del,
+                        self.modifiers.super_key(),
+                        event.logical_key
                     );
                 }
                 if del {
@@ -1925,7 +2037,11 @@ impl App {
                         // 실제로 바뀌었는지 다시 읽는다 — 못 바꿨는데 편집 경로로
                         // 넘기면 씨딩 안 된 버퍼를 건드린다.
                         let ws = self.ws.lock().unwrap();
-                        raw_now = ws.panes.get(&id).and_then(|p| p.markdown()).is_some_and(|m| m.raw_mode);
+                        raw_now = ws
+                            .panes
+                            .get(&id)
+                            .and_then(|p| p.markdown())
+                            .is_some_and(|m| m.raw_mode);
                     }
                 }
                 if raw_now {
@@ -2167,38 +2283,46 @@ impl App {
                 // assumption) AND the logical key text — Korean / European
                 // layouts may emit the same character from a different
                 // physical position.
-                let zoom_mod = if cfg!(target_os = "macos") { host } else { ctrl };
+                let zoom_mod = if cfg!(target_os = "macos") {
+                    host
+                } else {
+                    ctrl
+                };
                 if zoom_mod {
                     use winit::keyboard::Key;
                     let logical_str = match &event.logical_key {
                         Key::Character(s) => Some(s.as_str()),
                         _ => None,
                     };
-                    let is_plus = code == KeyCode::Equal
-                        || code == KeyCode::NumpadAdd
-                        || logical_str == Some("=")
-                        || logical_str == Some("+");
-                    let is_minus = code == KeyCode::Minus
-                        || code == KeyCode::NumpadSubtract
-                        || logical_str == Some("-")
-                        || logical_str == Some("_");
-                    let is_zero = code == KeyCode::Digit0
-                        || code == KeyCode::Numpad0
-                        || logical_str == Some("0");
                     // host_mod_alt (Win: Alt, mac: Shift) narrows the zoom to
                     // just the focused pane; without it, the whole UI zooms.
                     let pane_only = self.host_mod_alt();
-                    if is_plus {
-                        if pane_only { self.change_pane_font(0.1); } else { self.change_ui_zoom(0.1); }
-                        return;
-                    }
-                    if is_minus {
-                        if pane_only { self.change_pane_font(-0.1); } else { self.change_ui_zoom(-0.1); }
-                        return;
-                    }
-                    if is_zero {
-                        if pane_only { self.reset_pane_font(); } else { self.reset_ui_zoom(); }
-                        return;
+                    match zoom_key(Some(code), logical_str) {
+                        Some(ZoomKey::In) => {
+                            if pane_only {
+                                self.change_pane_font(0.1);
+                            } else {
+                                self.change_ui_zoom(0.1);
+                            }
+                            return;
+                        }
+                        Some(ZoomKey::Out) => {
+                            if pane_only {
+                                self.change_pane_font(-0.1);
+                            } else {
+                                self.change_ui_zoom(-0.1);
+                            }
+                            return;
+                        }
+                        Some(ZoomKey::Reset) => {
+                            if pane_only {
+                                self.reset_pane_font();
+                            } else {
+                                self.reset_ui_zoom();
+                            }
+                            return;
+                        }
+                        None => {}
                     }
                 }
                 // Ctrl+letter → the corresponding ASCII control byte.
@@ -2477,8 +2601,7 @@ impl App {
                                                 .map(|t| (t.cursor_row, t.cursor_col))
                                         })
                                     });
-                                    self.commit_overlay =
-                                        before.map(|b| (commit.clone(), b));
+                                    self.commit_overlay = before.map(|b| (commit.clone(), b));
                                     self.input_buf.push_str(&commit);
                                     self.send_bytes(commit.as_bytes());
                                 }
@@ -2560,8 +2683,88 @@ impl App {
 /// this line the moment it goes idle, so the absence of a marker is a reliable
 /// idle signal. Only the last ~10 rows are scanned (the live status sits at the
 /// bottom); scrollback above is ignored.
-fn term_is_working(t: &TerminalPane) -> bool {
+pub(crate) fn term_is_working(t: &TerminalPane) -> bool {
     rows_show_working(&t.cells)
+}
+
+/// 수식키 **단독** 입력인가.
+///
+/// 조합기를 쓰는 입구들은 하나같이 "자모도 Backspace 도 아니면 조합을 확정한다"로
+/// 짜여 있는데, 그 규칙에 Shift 가 걸린다. "계"의 ㅖ 는 **Shift+ㅔ** 라, ㄱ 을 친
+/// 뒤 Shift 를 누르는 순간 ㄱ 이 확정돼 "ㄱㅖ"가 된다(거노 실측 2026-08-04).
+/// 수식키를 누르는 것은 조합을 끝내겠다는 뜻이 아니므로 조합기에 닿으면 안 된다.
+///
+/// 수식키가 **조합된** 단축키(Cmd+W 등)는 여기 안 걸린다 — 그때 logical_key 는
+/// 글자 쪽이다. 걸리는 건 수식키만 눌린 프레임뿐이라 단축키 경로는 그대로다.
+pub(crate) fn is_modifier_key(event: &KeyEvent) -> bool {
+    is_modifier_logical(&event.logical_key)
+}
+
+/// `is_modifier_key` 의 판정부. winit `KeyEvent` 는 비공개 필드가 있어 테스트에서
+/// 만들 수 없어 logical_key 만 따로 받는다.
+fn is_modifier_logical(key: &winit::keyboard::Key) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::Hyper
+                | NamedKey::CapsLock
+                | NamedKey::NumLock
+                | NamedKey::ScrollLock
+                | NamedKey::Fn
+                | NamedKey::FnLock
+                | NamedKey::Symbol
+                | NamedKey::SymbolLock
+        )
+    )
+}
+
+/// 줌 단축키(확대/축소/원래대로) 판정.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ZoomKey {
+    In,
+    Out,
+    Reset,
+}
+
+/// `code`(물리 위치) 와 `logical`(그 키가 실제로 내놓은 문자)을 **둘 다** 본다.
+/// 한글·유럽 배열은 같은 문자를 다른 물리 위치에서 내놓기 때문이다 — 물리키만
+/// 보면 그 배열에서 Cmd+- 가 안 먹고, 문자만 보면 US 배열의 NumpadSubtract 를
+/// 놓친다. 메인 창(`forward_key`)과 별도창(`aux_terminal_key`)이 같은 판정을
+/// 쓰라고 한 벌만 둔다: 두 벌이면 한쪽만 고쳐진다(별도창이 실제로 그랬다).
+///
+/// winit `KeyEvent` 는 비공개 필드가 있어 테스트에서 만들 수 없으니
+/// `is_modifier_logical` 과 같은 이유로 두 조각만 따로 받는다.
+pub(crate) fn zoom_key(
+    code: Option<winit::keyboard::KeyCode>,
+    logical: Option<&str>,
+) -> Option<ZoomKey> {
+    use winit::keyboard::KeyCode;
+    // `+` 는 Shift+`=` 라 같은 팔에 든다.
+    if code == Some(KeyCode::Equal)
+        || code == Some(KeyCode::NumpadAdd)
+        || logical == Some("=")
+        || logical == Some("+")
+    {
+        return Some(ZoomKey::In);
+    }
+    if code == Some(KeyCode::Minus)
+        || code == Some(KeyCode::NumpadSubtract)
+        || logical == Some("-")
+        || logical == Some("_")
+    {
+        return Some(ZoomKey::Out);
+    }
+    if code == Some(KeyCode::Digit0) || code == Some(KeyCode::Numpad0) || logical == Some("0") {
+        return Some(ZoomKey::Reset);
+    }
+    None
 }
 
 /// Whether the bottom of `cells` shows a live "agent working" indicator.
@@ -2596,8 +2799,12 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
         if line.contains("esc to interrupt") {
             return true;
         }
-        let has_star = row.iter().any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
-        let has_braille = row.iter().any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
+        let has_star = row
+            .iter()
+            .any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
+        let has_braille = row
+            .iter()
+            .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
         // 스피너는 가운뎃점(·) 프레임도 순환하는데, 최근 claude code 는 스피너
         // 행에 "esc to interrupt" 힌트를 안 넣는다("· Verbing… (3m · ↓ 9k tokens)")
         // — 점 프레임에서 working 판정이 프레임마다 풀리지 않게 점도 잡는다.
@@ -2687,7 +2894,12 @@ mod working_scan_tests {
     use kasa_bridge::screen::Cell;
 
     fn row(s: &str) -> Vec<GridCell> {
-        s.chars().map(|ch| Cell { ch, ..Cell::blank() }).collect()
+        s.chars()
+            .map(|ch| Cell {
+                ch,
+                ..Cell::blank()
+            })
+            .collect()
     }
     fn blank() -> Vec<GridCell> {
         vec![Cell::blank(); 8]
@@ -2712,7 +2924,9 @@ mod working_scan_tests {
     fn dot_frame_without_esc_hint_is_working() {
         // 라이브 실측(claude code 2.1.207): 점 프레임 스피너 행에 "esc to
         // interrupt" 힌트가 없다 — 점+… 문맥만으로 working 이어야 한다.
-        assert!(rows_show_working(&[row("· Caramelizing… (3m 39s · ↓ 9.7k tokens)")]));
+        assert!(rows_show_working(&[row(
+            "· Caramelizing… (3m 39s · ↓ 9.7k tokens)"
+        )]));
     }
 
     #[test]
@@ -2731,6 +2945,31 @@ mod working_scan_tests {
         assert!(rows_show_working(&[row("⠋ installing")]));
     }
 
+    /// codex 도 같은 판정에 걸린다 — 실측 문구가 claude 와 글자 그대로 겹친다.
+    /// 2026-08-05 codex 0.146.0 화면에서 그대로 떠온 줄이다:
+    ///   `• Working (3s • esc to interrupt)`
+    /// 앞머리 글리프는 `•`(U+2022)라 claude 의 Dingbat 별(U+2720–274F)에도
+    /// 점자에도 안 걸리지만, "esc to interrupt" 가 먼저 잡아 준다. 그래서 codex
+    /// busy 표시는 **코드를 안 고치고** 동작한다 — 이 테스트는 codex 가 나중에
+    /// 문구를 바꾸면 조용히 죽는 대신 여기서 터지라고 있는 것이다.
+    #[test]
+    fn codex_working_line_is_working() {
+        assert!(rows_show_working(&[row(
+            "• Working (3s • esc to interrupt)"
+        )]));
+        // 입력줄·상태줄이 아래에 깔려도 하단 10행 창 안이라 잡힌다(실측 배치).
+        assert!(rows_show_working(&[
+            row("• Working (12s • esc to interrupt)"),
+            row("› Run /review on my current changes"),
+            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+        ]));
+        // 답이 끝나면 그 줄이 사라진다 → idle. 상태줄만 남은 화면은 working 이 아니다.
+        assert!(!rows_show_working(&[
+            row("› Run /review on my current changes"),
+            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+        ]));
+    }
+
     #[test]
     fn numbered_menu_is_menu_prompt() {
         let cells = vec![
@@ -2739,14 +2978,20 @@ mod working_scan_tests {
             row("  2. Yes, and don't ask again"),
             row("  3. No, and tell Claude what to do differently"),
         ];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
     fn ask_user_question_menu_without_yes_is_menu_prompt() {
         // AskUserQuestion 옵션은 Yes/No 가 아닐 수 있다 — 번호+점이면 메뉴.
         let cells = vec![row("❯ 1. worktree로 격리"), row("  2. 그냥 main에서")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
@@ -2758,14 +3003,20 @@ mod working_scan_tests {
     #[test]
     fn permission_footer_alone_is_not_a_prompt() {
         // 푸터의 "bypass permissions on" 은 항상 떠 있다 — 매칭 금지 (munder 함정).
-        let cells = vec![row("❯ "), row("  bypass permissions on (shift+tab to cycle)")];
+        let cells = vec![
+            row("❯ "),
+            row("  bypass permissions on (shift+tab to cycle)"),
+        ];
         assert_eq!(rows_show_approval_prompt(&cells), None);
     }
 
     #[test]
     fn yn_on_last_row_is_yesno_prompt() {
         let cells = vec![row("Overwrite existing file? (y/n)")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::YesNo));
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::YesNo)
+        );
     }
 
     #[test]
@@ -2795,8 +3046,15 @@ mod working_scan_tests {
     #[test]
     fn live_menu_without_bare_chevron_below_is_menu() {
         // 진짜 활성 메뉴: 입력행이 메뉴 옵션으로 대체돼 아래에 bare "❯ " 가 없다.
-        let cells = vec![row("Do you want to proceed?"), row("❯ 1. Yes"), row("  2. No")];
-        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+        let cells = vec![
+            row("Do you want to proceed?"),
+            row("❯ 1. Yes"),
+            row("  2. No"),
+        ];
+        assert_eq!(
+            rows_show_approval_prompt(&cells),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 
     #[test]
@@ -2812,5 +3070,80 @@ mod working_scan_tests {
             rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
             Some(ApprovalPrompt::Menu)
         );
+    }
+
+    #[test]
+    fn modifier_alone_must_not_end_a_composition() {
+        use winit::keyboard::{Key, NamedKey};
+        // "계"의 ㅖ 는 Shift+ㅔ — 조합 중 Shift 는 조합의 일부지 끝내라는 뜻이 아니다.
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Shift)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Control)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Alt)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Super)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::CapsLock)));
+        // 글자·편집키는 그대로 조합을 확정시켜야 한다.
+        assert!(!super::is_modifier_logical(&Key::Character("r".into())));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Enter)));
+        assert!(!super::is_modifier_logical(&Key::Named(
+            NamedKey::Backspace
+        )));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Escape)));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Space)));
+        // 단축키는 수식키가 눌린 채로 와도 logical_key 가 글자라 안 걸린다.
+        assert!(!super::is_modifier_logical(&Key::Character("w".into())));
+    }
+}
+
+#[cfg(test)]
+mod zoom_key_tests {
+    use super::{zoom_key, ZoomKey};
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn us_layout_physical_keys() {
+        assert_eq!(zoom_key(Some(KeyCode::Equal), Some("=")), Some(ZoomKey::In));
+        assert_eq!(
+            zoom_key(Some(KeyCode::Minus), Some("-")),
+            Some(ZoomKey::Out)
+        );
+        assert_eq!(
+            zoom_key(Some(KeyCode::Digit0), Some("0")),
+            Some(ZoomKey::Reset)
+        );
+        assert_eq!(zoom_key(Some(KeyCode::NumpadAdd), None), Some(ZoomKey::In));
+        assert_eq!(
+            zoom_key(Some(KeyCode::NumpadSubtract), None),
+            Some(ZoomKey::Out)
+        );
+    }
+
+    /// Shift 를 낀 `+` / `_` 도 같은 팔이어야 한다 — `+` 는 Shift+`=` 다.
+    #[test]
+    fn shifted_variants() {
+        assert_eq!(zoom_key(Some(KeyCode::Equal), Some("+")), Some(ZoomKey::In));
+        assert_eq!(
+            zoom_key(Some(KeyCode::Minus), Some("_")),
+            Some(ZoomKey::Out)
+        );
+    }
+
+    /// 이게 이 함수의 존재 이유다: 한글(두벌식) 배열에선 Cmd 를 낀 키의 물리 위치가
+    /// US 와 어긋날 수 있어, 물리키만 보면 별도창에서 Cmd+- 가 안 먹고 '-' 가 셸에
+    /// 박혔다. 문자가 맞으면 물리 위치를 몰라도 잡아야 한다.
+    #[test]
+    fn logical_char_alone_is_enough() {
+        assert_eq!(zoom_key(None, Some("-")), Some(ZoomKey::Out));
+        assert_eq!(zoom_key(None, Some("=")), Some(ZoomKey::In));
+        assert_eq!(zoom_key(None, Some("0")), Some(ZoomKey::Reset));
+    }
+
+    /// 조합 중인 자모나 평범한 글자는 절대 줌으로 새면 안 된다 — 새면 그 키가
+    /// 셸에 안 가고 조용히 사라진다.
+    #[test]
+    fn ordinary_keys_are_not_zoom() {
+        assert_eq!(zoom_key(Some(KeyCode::KeyA), Some("a")), None);
+        assert_eq!(zoom_key(Some(KeyCode::KeyR), Some("ㄱ")), None);
+        assert_eq!(zoom_key(Some(KeyCode::Digit1), Some("1")), None);
+        assert_eq!(zoom_key(None, None), None);
     }
 }

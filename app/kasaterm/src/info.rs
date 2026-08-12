@@ -28,6 +28,9 @@ pub(crate) enum ProcKind {
     Plain,
     /// CLI claude 세션 자신.
     Claude,
+    /// codex 세션 자신. claude 와 같은 대접(강조색·요약 행)을 받는다 —
+    /// 프로세스 트리에서 둘을 다르게 그리면 학생 pane 이 종류에 따라 딴판이 된다.
+    Codex,
     /// claude 가 stdio 로 띄운 MCP 서버.
     Mcp,
     /// claude 의 Bash 도구가 띄운 셸(과 그 자손).
@@ -100,6 +103,13 @@ pub(crate) struct PortRow {
     /// 무엇이 떠 있는지 — 프로젝트 폴더명, 알려진 서비스명, 또는 응답한 HTML 의
     /// `<title>`. 포트 번호만으로는 며칠 전 띄워둔 서버의 정체를 알 수 없다.
     pub(crate) site: String,
+    /// 띄운 pane 이 **이미 없다**. 이때만 "꺼도 되나" 에 답할 수 있다.
+    ///
+    /// `orphan` 과 다르다 — 그건 "셸 자손이 아니다"(재부모화됐다)일 뿐이고, 주인이
+    /// 살아 있어도 참이다. 이 값은 주인 자체가 사라졌다는 뜻이라 끄는 판단의 근거가
+    /// 된다. 가릴 수 있게 된 것은 귀속을 작업 폴더가 아니라 프로세스 env 로 하기
+    /// 때문이다(`panes_of`).
+    pub(crate) owner_dead: bool,
 }
 
 /// 한 pane 과 그 셸 아래 프로세스들. pane 을 묶음으로 두는 건 목록이 전 pane
@@ -224,6 +234,9 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // cwd 는 소유 여부와 무관하게 전부 받는다 — 귀속 판정에도, "무슨 사이트인지"
     // 라벨에도 같은 값을 쓰므로 lsof 를 두 번 부를 이유가 없다.
     let cwds = cwds_of(&port_pids);
+    // 포트를 쥔 프로세스가 어느 pane 에서 났는지는 env 로만 정확히 알 수 있다 —
+    // 부모 체인은 서버가 launchd 밑으로 넘어가는 순간 끊긴다(위 주석의 그 실측).
+    let env_panes = panes_of(&port_pids);
     let roots: Vec<(String, std::path::PathBuf)> = targets
         .iter()
         .filter_map(|t| {
@@ -237,16 +250,27 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     let mut ports: Vec<PortRow> = all
         .into_iter()
         .filter_map(|(port, pid)| {
-            let (pane, orphan) = match owner.get(&pid) {
-                Some(p) => (Some(p.clone()), false),
-                None => {
-                    let cwd = cwds.get(&pid)?;
-                    let pane = roots
-                        .iter()
-                        .find(|(_, r)| cwd.starts_with(r))
-                        .map(|(id, _)| id.clone())?;
-                    (Some(pane), true)
-                }
+            let (pane, orphan, owner_dead) = match owner.get(&pid) {
+                Some(p) => (Some(p.clone()), false, false),
+                // env 는 재부모화돼도 남으므로 **띄운 pane 을 정확히 가리킨다**. 작업
+                // 폴더 추정보다 먼저 보는 이유는, 폴더로는 같은 레포에 pane 이 여럿일
+                // 때 못 가르고 **죽은 pane 이 띄운 서버가 살아 있는 pane 것으로 붙기**
+                // 때문이다 — 아래 폴백이 `roots`(살아 있는 pane 의 레포)에서 찾으므로
+                // 주인이 죽었다는 사실 자체가 사라진다.
+                None => match env_panes.get(&pid) {
+                    Some(p) => {
+                        let alive = targets.iter().any(|t| &t.id == p);
+                        (Some(p.clone()), true, !alive)
+                    }
+                    None => {
+                        let cwd = cwds.get(&pid)?;
+                        let pane = roots
+                            .iter()
+                            .find(|(_, r)| cwd.starts_with(r))
+                            .map(|(id, _)| id.clone())?;
+                        (Some(pane), true, false)
+                    }
+                },
             };
             Some(PortRow {
                 port,
@@ -263,6 +287,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     .unwrap_or_default(),
                 pane,
                 site: site_label(port, cwds.get(&pid).map(|p| p.as_path()), sites),
+                owner_dead,
             })
         })
         .collect();
@@ -616,6 +641,11 @@ fn classify(args: &str, parent: ProcKind) -> (String, String, ProcKind) {
             .fold(rest, |acc, f| strip_flag_pair(&acc, f));
         return ("claude".to_string(), rest, ProcKind::Claude);
     }
+    // codex 본체. npm shim(node …/bin/codex)과 진짜 바이너리 둘 다 여기로 접는다 —
+    // 트리에 `node` 로 뜨면 사람이 그게 codex 인 줄 모른다.
+    if name == "codex" || (name == "node" && rest.contains("/bin/codex")) {
+        return ("codex".to_string(), rest, ProcKind::Codex);
+    }
     // Bash 도구가 띄운 셸. 앞머리는 스냅샷 source + alias 정리 상수문이라 모든
     // 도구 셸이 똑같이 생겼고, 진짜 명령은 맨 끝 `eval '…'` 안에 있다.
     if args.contains("shell-snapshots/snapshot-") {
@@ -626,7 +656,7 @@ fn classify(args: &str, parent: ProcKind) -> (String, String, ProcKind) {
         let (n, r) = launcher_identity(&name, &rest);
         return (n, r, ProcKind::Tool);
     }
-    if matches!(parent, ProcKind::Claude | ProcKind::Mcp) {
+    if matches!(parent, ProcKind::Claude | ProcKind::Codex | ProcKind::Mcp) {
         if let Some(server) = mcp_name_in(args) {
             return (format!("mcp {server}"), mcp_detail(&rest), ProcKind::Mcp);
         }
@@ -840,6 +870,40 @@ fn listening_ports() -> Vec<(u16, u32)> {
 
 /// pid → 작업 폴더. 셸 트리 밖의 포트를 "이 레포 것"으로 인정할지 가르는 유일한
 /// 근거다. 포트를 쥔 프로세스만 물으므로 한 번의 fork 로 끝난다(실측 32ms).
+/// pid → 그 프로세스가 물려받은 `KASATERM_PANE_ID`.
+///
+/// `ps eww` 는 환경변수까지 붙여 주므로, 셸이 죽어 부모 체인이 끊긴 뒤에도 **어느
+/// pane 에서 났는지**가 남는다. 작업 폴더 추정과 달리 같은 레포의 pane 여럿을 가른다.
+#[cfg(unix)]
+fn panes_of(pids: &[u32]) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(o) = proc::command("ps").args(["eww", "-o", "pid=,command=", "-p", &list]).output()
+    else {
+        return out;
+    };
+    const KEY: &str = "KASATERM_PANE_ID=";
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid_s, rest)) = line.split_once(' ') else { continue };
+        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        let Some(i) = rest.find(KEY) else { continue };
+        let v = rest[i + KEY.len()..].split_whitespace().next().unwrap_or("");
+        if !v.is_empty() {
+            out.insert(pid, v.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn panes_of(_pids: &[u32]) -> HashMap<u32, String> {
+    HashMap::new()
+}
+
 #[cfg(unix)]
 fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
     let mut out = HashMap::new();
@@ -1179,9 +1243,29 @@ impl App {
             .pty
             .iter()
             .filter_map(|(id, s)| {
-                let window = ws.pane_window.get(id).copied().unwrap_or(self.active_window);
+                // 숨긴 pane 은 어느 트리에도 없어 `pane_window` 에 안 잡히는데, 폴백이
+                // **활성 방**이라 치워 둔 pane 이 지금 보고 있는 방에 붙어 버린다(실측:
+                // 방 1 에서 숨긴 %4 가 방 2 밑에 섰다). 치운 자리를 기억하는 곳이
+                // `closed_panes.window` 이므로 그걸 먼저 본다.
+                let window = ws
+                    .pane_window
+                    .get(id)
+                    .copied()
+                    .or_else(|| {
+                        self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
+                    })
+                    .unwrap_or(self.active_window);
                 Some(PaneTarget {
-                    label: self.display_pane_char(&ws, id).unwrap_or_default(),
+                    // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
+                    // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
+                    // 때만이다 — 테두리·타이틀바가 쓰는 조건과 같아야 한 pane 이 자리마다
+                    // 다른 얼굴을 갖지 않는다. 안 걸었더니 `%1 유우카 zsh` 처럼 셸에
+                    // 학생이 붙었다(거노 2026-08-07: "일반pane은 실행전에 학생배정
+                    // 안되게하지않았나").
+                    label: s
+                        .active_agent()
+                        .and_then(|_| self.display_pane_char(&ws, id))
+                        .unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
                     // 셸이 spawn 디렉터리에 머물러 실제 프로젝트와 어긋난다.
                     cwd: self
@@ -1372,7 +1456,12 @@ pub(crate) fn draw_side_tabs(
     git.col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
     info.tab_rects.clear();
     let mut tx = x + 14.0;
-    for (tab, label) in [(state::SideTab::Git, "Git"), (state::SideTab::Info, "Info")] {
+    for (tab, label) in [
+        (state::SideTab::Git, "Git"),
+        (state::SideTab::Info, "Info"),
+        (state::SideTab::Sessions, "세션"),
+        (state::SideTab::Mcp, "MCP"),
+    ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
         let hot = (tx - 4.0, y - 4.0, tw + 8.0, 21.0);
@@ -1418,7 +1507,7 @@ pub(crate) fn draw_info_actions(
     cursor: (f32, f32),
     info: &mut state::InfoState,
     acct_label: Option<&str>,
-    usage_pct: Option<f32>,
+    usage: Option<&crate::UsageBadge>,
     menu_open: bool,
     arona_on: bool,
     x: f32,
@@ -1434,14 +1523,14 @@ pub(crate) fn draw_info_actions(
     // ── 계정 · 사용량 ──
     // 여기 보이는 한도가 **활성 계정의** 것이라 이름과 한 행에 둔다. 계정을 안 쓰면
     // 이름 없이 사용률만 — 안 쓰는 사람 행에 "기본" 을 얹는 건 잡음이다.
-    let acct_rect = (acct_label.is_some() || usage_pct.is_some()).then(|| {
+    let acct_rect = (acct_label.is_some() || usage.is_some()).then(|| {
         let h = 30.0_f32;
         let r = (x0, y, avail, h);
         let hov = menu_open || hit(cursor, &r);
         g.hover_pointer |= hov;
         // 한도가 코앞이면 행 전체가 물든다. 숫자 색만 바꾸면 11px 글자 하나가
         // 빨개질 뿐이라, 정작 알아야 할 때(작업 중 한도가 닫히는 것) 눈에 안 든다.
-        let danger = usage_pct.is_some_and(|p| p >= 90.0);
+        let danger = usage.is_some_and(|u| u.pct >= 90.0);
         round_rect(
             g, r.0, r.1, r.2, r.3, theme::radius_sm(),
             match (danger, hov) {
@@ -1468,18 +1557,34 @@ pub(crate) fn draw_info_actions(
                 gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false });
             tx += lw + 8.0;
         }
-        if let Some(pct) = usage_pct {
+        if let Some(u) = usage {
             // 70%↑ 주의·90%↑ 위험(웹뷰 UsagePill 과 같은 임계). 세 색 다 테마
             // 토큰이다 — 하드코딩한 청록/산호는 팔레트를 갈아도 그대로 남아,
             // 호박색 화면에서 이 숫자 하나만 딴 데서 온 것처럼 떴다.
-            let col = if pct >= 90.0 {
+            let col = if u.pct >= 90.0 {
                 theme::danger()
-            } else if pct >= 70.0 {
+            } else if u.pct >= 70.0 {
                 theme::syn_number()
             } else {
                 theme::success()
             };
-            let l = format!("5h {pct:.0}%");
+            // 창 라벨을 숫자와 함께 — `5h 0%` 로 고정 표기하던 시절엔 실제 압박이
+            // 주간 창 95% 인데도 「5h 0%」 가 떠서 "다 0퍼로 뜬다"가 됐다(거노
+            // 2026-08-05). 이제 라벨은 그 숫자가 나온 창을 말한다.
+            //
+            // stale(upstream 막혀 재사용된 값)이면 흐리게 + `~` 를 앞에 붙인다.
+            // 숨기지 않는 것은 빈칸이 "한도 여유"로 읽히기 때문이다.
+            // 퍼센트 뒤에 그 창이 풀리기까지 남은 시간 — 드롭다운과 같은 표기다.
+            let l = if u.stale {
+                format!("~{} {:.0}%", u.label, u.pct)
+            } else {
+                format!("{} {:.0}%", u.label, u.pct)
+            };
+            let l = match crate::resets_in_label(u.resets_at) {
+                Some(r) => format!("{l} · {r}"),
+                None => l,
+            };
+            let col = if u.stale { theme::with_alpha(col, 0x99) } else { col };
             g.draw_text(tx, ty, &l,
                 gpu::DrawOpts { font_size: f, color: col, bold: true, italic: false });
         }
@@ -1504,9 +1609,9 @@ pub(crate) fn draw_info_actions(
         let bx = x0 + i as f32 * (bw + gap);
         let hov = hit(cursor, &(bx, y, bw, bh));
         g.hover_pointer |= hov;
-        panel_rect(
+        panel_rect_outlined(
             g, bx, y, bw, bh, theme::radius_sm(),
-            if hov { theme::surface_hover() } else { theme::surface() },
+            theme::raised_on(theme::panel_bg(), hov),
         );
         let col = if hov { theme::text() } else { theme::text_dim() };
         let f = 11.0_f32;
@@ -1531,9 +1636,19 @@ const SEC_GAP: f32 = 8.0;
 const HEAD_H: f32 = 30.0;
 /// pane 그룹 머리.
 const GROUP_H: f32 = 24.0;
-/// 방(윈도우) 머리. pane 머리보다 낮게 둬서 "구획선에 이름이 붙은 것"으로 읽히게
-/// 한다 — 좁은 칼럼에서 방까지 들여쓰기로 표현하면 정작 프로세스 트리가 눌린다.
-const WIN_H: f32 = 20.0;
+/// 방(윈도우) 머리. **위쪽 `WIN_PAD` 는 앞 방과의 여백이고 나머지가 실제 머리다.**
+///
+/// 여백을 상수 밖에 따로 두지 않는 이유: 이 값을 높이 계산(스크롤 clamp)과 페인트가
+/// **각각** 읽는데, 여백을 별도 항으로 더하면 한쪽만 고쳐져 목록이 어긋난다. 높이
+/// 안에 품으면 상수 하나로 둘이 같이 움직인다.
+///
+/// 종전엔 20 으로 pane 머리(24)보다 낮았다 — "구획선에 이름이 붙은 것"을 노린 것인데,
+/// 배경도 여백도 없어서 방 경계가 pane 경계보다 약하게 읽혔다(2026-08-11 지적).
+/// 들여쓰기로 가르는 길은 여전히 안 쓴다: 좁은 칼럼에서 한 단 더 들이면 프로세스
+/// 트리의 계보선이 설 자리가 없다.
+const WIN_H: f32 = 32.0;
+/// 방 머리 위 여백 — 앞 방의 마지막 프로세스 줄과 붙지 않게.
+const WIN_PAD: f32 = 10.0;
 /// 포트 행은 두 줄이다 — 번호·소유 pane 이 윗줄, "무엇인지"가 아랫줄.
 const PORT_H: f32 = 32.0;
 /// 계보 한 단의 가로 폭. 좁은 칼럼에서 깊이 3~4 단은 흔하므로(claude → MCP
@@ -1550,7 +1665,8 @@ pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,
-    // 되살리기 대기 중인 pane(최근이 뒤). 프로세스 목록 끝에 흐린 줄로 붙는다 —
+    // 되살리기 대기 중인 pane(최근이 뒤). 되살릴 게 있을 때만 나타나는 독립
+    // 섹션이다 — 프로세스 목록 꼬리에 달아 두면 목록이 길 때 통째로 묻히고,
     // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
     closed: &[crate::ClosedPane],
     x: f32,
@@ -1573,6 +1689,7 @@ pub(crate) fn draw_info_col(
     info.group_rects.clear();
     info.proc_rects.clear();
     info.closed_rects.clear();
+    info.closed_kill_rects.clear();
     info.kill_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
@@ -1617,16 +1734,24 @@ pub(crate) fn draw_info_col(
             h += GROUP_H;
             h += visible_row_count(info, gp) as f32 * ROW_H;
         }
-        // 되살리기 대기 줄은 목록 끝에 붙는다.
-        h += closed.len() as f32 * ROW_H;
         h
+    };
+    // 되살릴 게 없으면 섹션 머리조차 안 그린다 — 늘 비어 있는 섹션이 자리를
+    // 차지하면 알려주는 게 없다.
+    let closed_h = if closed.is_empty() {
+        0.0
+    } else if info.closed_collapsed {
+        SEC_H + SEC_GAP
+    } else {
+        SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
     let ports_h = match (info.ports_collapsed, snap.ports.len()) {
         (true, _) => 0.0,
         (false, 0) => EMPTY_H,
         (false, n) => n as f32 * PORT_H,
     };
-    let content = HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + ports_h + 14.0;
+    let content =
+        HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + ports_h + 14.0;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
     let mut y = top - info.scroll;
 
@@ -1708,14 +1833,14 @@ pub(crate) fn draw_info_col(
                 let bx = x0 + i as f32 * (bw + gap);
                 let hov = hit(cursor, &(bx, y, bw, BTN_H));
                 g.hover_pointer |= hov;
-                panel_rect(
+                panel_rect_outlined(
                     g,
                     bx,
                     y,
                     bw,
                     BTN_H,
                     theme::radius_sm(),
-                    if hov { theme::surface_hover() } else { theme::surface() },
+                    theme::raised_on(theme::panel_bg(), hov),
                 );
                 let col = if hov { theme::text() } else { theme::text_dim() };
                 let lw = g.measure_chrome_text(label, 10.5, false);
@@ -1786,15 +1911,6 @@ pub(crate) fn draw_info_col(
                 y += ROW_H;
             }
         }
-        // ── 되살리기 대기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
-        // 맨 위(=가장 최근) 것을 되살린다.
-        for (i, c) in closed.iter().enumerate().rev() {
-            if y + ROW_H > top && y < bottom {
-                draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y);
-            }
-            info.closed_rects.push((i, (x, y, w, ROW_H)));
-            y += ROW_H;
-        }
     }
     let d_dir = match (t_a, t_procs) {
         (Some(a), Some(b)) => (b - a).as_secs_f32() * 1000.0,
@@ -1802,6 +1918,40 @@ pub(crate) fn draw_info_col(
     };
     let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
+
+    // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
+    // 맨 위(=가장 최근) 것을 되살린다. 되살릴 게 없으면 통째로 없다.
+    if !closed.is_empty() {
+        let r = draw_section(
+            g,
+            cursor,
+            "되살리기",
+            Some(closed.len()),
+            None,
+            info.closed_collapsed,
+            x,
+            w,
+            y,
+            bottom,
+            top,
+        );
+        info.sec_rects.push((state::InfoSection::Closed, r));
+        y += SEC_H;
+        if !info.closed_collapsed {
+            for (i, c) in closed.iter().enumerate().rev() {
+                if y + ROW_H > top && y < bottom {
+                    if let Some(br) =
+                        draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y)
+                    {
+                        info.closed_kill_rects.push((i, br));
+                    }
+                }
+                info.closed_rects.push((i, (x, y, w, ROW_H)));
+                y += ROW_H;
+            }
+        }
+        y += SEC_GAP;
+    }
 
     // ── 포트 ──
     let r = draw_section(
@@ -1966,13 +2116,20 @@ fn draw_window_head(
     right: f32,
     y: f32,
 ) {
-    if hit(cursor, &(x, y, w, WIN_H)) {
-        g.rect(x, y, w, WIN_H, theme::surface_hover());
+    // 위 `WIN_PAD` 는 앞 방과의 여백이다 — 지나서 그린다. 아래 오프셋들이 종전 그대로
+    // 동작하도록 y 를 여기서 한 번만 옮긴다.
+    let y = y + WIN_PAD;
+    let hh = WIN_H - WIN_PAD;
+    // 옅은 밴드. 방 경계는 pane 경계보다 **세게** 읽혀야 하는데, 종전엔 배경도 여백도
+    // 없이 낮은 글자 한 줄뿐이라 그 반대였다.
+    round_rect(g, x, y, w, hh, theme::radius_sm(), theme::with_alpha(theme::surface(), 0x80));
+    if hit(cursor, &(x, y, w, hh)) {
+        g.rect(x, y, w, hh, theme::surface_hover());
     }
     g.queue_icon(
         if collapsed { "chevron-right" } else { "chevron-down" },
         x0 - 3.0,
-        y + 4.0,
+        y + 5.0,
         11.0,
         theme::text_mute(),
     );
@@ -2132,14 +2289,47 @@ fn draw_closed_row(
     x0: f32,
     right: f32,
     y: f32,
-) {
+) -> Option<(f32, f32, f32, f32)> {
     let row = (x, y, w, ROW_H);
     let hov = hit(cursor, &row);
     g.hover_pointer |= hov;
     if hov {
         g.rect(x, y, w, ROW_H, theme::surface_hover());
     }
-    let fg = theme::with_alpha(theme::text_mute(), if hov { 0xF0 } else { 0x99 });
+    // 아직 도는 pane 이 기본이다 — 닫아도 죽지 않으니까. 프로세스가 사라진 것만
+    // 흐리게 두고 꼬리표를 달아, 되살리기가 재부착이 아니라 `--resume` 이라는 걸
+    // 누르기 전에 알 수 있게 한다.
+    let base = if c.alive { 0x99 } else { 0x66 };
+    let fg = theme::with_alpha(theme::text_mute(), if hov { base + 0x57 } else { base });
+    // 커서가 얹힌 줄에만 × — 상시 노출하면 되살리려다 잘못 끄기 쉽다(프로세스 행과
+    // 같은 규칙).
+    let mut right = right;
+    let mut kill = None;
+    if hov {
+        let br = (right - 16.0, y + 3.0, 16.0, 16.0);
+        let bhov = hit(cursor, &br);
+        g.hover_pointer |= bhov;
+        if bhov {
+            round_rect(
+                g,
+                br.0,
+                br.1,
+                br.2,
+                br.3,
+                theme::radius_sm(),
+                theme::with_alpha(theme::danger(), 0x33),
+            );
+        }
+        g.queue_icon(
+            "x",
+            br.0 + 3.0,
+            br.1 + 3.0,
+            10.0,
+            if bhov { theme::danger() } else { theme::text_mute() },
+        );
+        kill = Some(br);
+        right = br.0 - 6.0;
+    }
     // ⌘⇧T 는 맨 위 한 줄에만 적는다 — 그 키가 되살리는 건 언제나 가장 최근 것이다.
     let kbd = newest.then(|| "\u{2318}\u{21E7}T".to_string());
     let kfs = 10.0_f32;
@@ -2154,6 +2344,9 @@ fn draw_closed_row(
     if !c.folder.is_empty() {
         label.push_str(" · ");
         label.push_str(&c.folder);
+    }
+    if !c.alive {
+        label.push_str(" · resume");
     }
     let tx = x0 + isz + 8.0;
     let label = fit_text(g, &label, (right - kbd_w - 8.0 - tx).max(0.0), 11.0, false);
@@ -2176,6 +2369,7 @@ fn draw_closed_row(
             },
         );
     }
+    kill
 }
 
 /// 프로세스 한 줄 — `├─ mcp playwright  --cdp-endpoint …    :9222  2% · 90 MB  pid`.
@@ -2308,7 +2502,7 @@ fn draw_proc_row(
     // claude 본체는 로고를 앞에 단다. 이름만으로도 읽히지만 목록에서 계보의
     // 기점이라 — 그 아래 npm·node·Bash 가 전부 이 프로세스의 자손이다 — 눈이
     // 한 번에 찾아야 할 자리다. 색(accent)만으로는 흑백에 가까운 테마에서 약하다.
-    if matches!(p.kind, ProcKind::Claude) && avail > 40.0 {
+    if matches!(p.kind, ProcKind::Claude | ProcKind::Codex) && avail > 40.0 {
         g.queue_icon("claude", nx, y + 5.0, 12.0, theme::accent());
         nx += 16.0;
     }
@@ -2325,7 +2519,7 @@ fn draw_proc_row(
         }
     }
     let name_col = match p.kind {
-        ProcKind::Claude => theme::accent(),
+        ProcKind::Claude | ProcKind::Codex => theme::accent(),
         ProcKind::Tool => theme::text_dim(),
         _ => theme::text(),
     };
@@ -2372,9 +2566,20 @@ fn draw_port_row(
     if hov {
         g.rect(x, y, w, PORT_H, theme::surface_hover());
     }
-    // 어느 pane 도 돌리고 있지 않으면(띄운 셸이 죽어 launchd 로 넘어간 서버) 점을
-    // 흐리게 — pane 을 닫아도 안 죽는다는 사실이 목록에서 바로 보여야 한다.
-    let dot = if p.orphan { theme::text_dim() } else { theme::accent() };
+    // 점 색이 곧 "이걸 꺼도 되나" 에 대한 답이다. 세 갈래인 것이 요점 —
+    //   파랑  = 지금 이 pane 이 돌리고 있다(셸 자손). 끄려면 그 pane 을 보라.
+    //   흐림  = 띄운 셸이 죽어 launchd 로 넘어갔지만 **주인 pane 은 살아 있다**.
+    //           pane 을 닫아도 안 죽으니 여기서 꺼야 한다.
+    //   빨강  = 띄운 pane 자체가 없다. 아무도 안 쓰는 것이므로 꺼도 된다.
+    // 예전엔 뒤의 둘이 같은 흐림이라, 주인이 사라진 서버와 학생이 방금 띄운 서버가
+    // 구별되지 않았다(거노: "죽은 학생이 생성해서 꺼도 되는지 모르겠다").
+    let dot = if p.owner_dead {
+        theme::danger()
+    } else if p.orphan {
+        theme::text_dim()
+    } else {
+        theme::accent()
+    };
     circle_rect(g, x0, y + 7.0, 6.0, dot);
     let port_s = p.port.to_string();
     g.draw_text(
@@ -2597,7 +2802,13 @@ fn wrap_path(g: &mut gpu::GpuRenderer, s: &str, avail: f32, max_lines: usize) ->
 /// 그 자체가 글자마다 아틀라스를 뒤지므로 그 방식은 길이의 제곱으로 붇고,
 /// claude·MCP 처럼 argv 가 긴 행이 목록에 깔리면 프레임 예산을 통째로 먹는다.
 /// 글자 폭은 서로 독립이라 한 번 훑으며 누적하면 같은 답이 한 바퀴에 나온다.
-fn fit_text(g: &mut gpu::GpuRenderer, s: &str, avail: f32, size: f32, bold: bool) -> String {
+pub(crate) fn fit_text(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    avail: f32,
+    size: f32,
+    bold: bool,
+) -> String {
     if avail <= 0.0 {
         return String::new();
     }

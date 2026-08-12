@@ -92,6 +92,12 @@ pub struct GpuRenderer {
     /// When set, the next `render` reads the presented frame back into a PNG at
     /// this path — permission-free self-capture for headless verification.
     pub capture_next: Option<String>,
+    /// 물리픽셀 크롭 `(x, y, w, h)`. `capture_next` 와 함께 소비된다. None = 창 전체.
+    /// `surface.capture` 가 pane 한 칸만 잘라 내는 데 쓴다.
+    pub capture_crop: Option<(u32, u32, u32, u32)>,
+    /// 저장 전 가로 상한(0 = 원본). 넘을 때만 비율을 지켜 줄인다 — 캡처를 읽는
+    /// 쪽은 보통 에이전트라, 원본 해상도 그대로면 컨텍스트를 크게 태운다.
+    pub capture_max_w: u32,
     pipeline: Pipeline,
     atlas: Atlas,
     shaper: Shaper,
@@ -115,6 +121,13 @@ pub struct GpuRenderer {
     /// Per-frame chrome instances. main.rs's chrome code pushes via
     /// `rect()` / `draw_text()` between frames; `render()` drains.
     chrome: Vec<CellInstance>,
+    /// 이번 프레임에 그린 문자열 원문 — 하네스 전용, `KASATERM_TEXT_LOG` 가 있을
+    /// 때만 켜진다(없으면 `Option` 검사 하나라 프로덕션엔 비용이 없다).
+    ///
+    /// `chrome` 에는 글리프 인스턴스만 남아 문자열을 되살릴 수 없다. 그래서
+    /// "헤더에 학생 이름이 떴나" 같은 걸 캡처를 눈으로 보는 것 말고는 물을 수가
+    /// 없었다 — 안 보면 조용히 통과한다.
+    text_log: Option<Vec<String>>,
     /// Scale we cached on init. winit logical→physical conversion.
     scale: f32,
     /// True when KASATERM_P3_ROOT installed our own root metal layer and
@@ -275,6 +288,91 @@ pub struct DrawOpts {
     pub bold: bool,
     pub italic: bool,
 }
+
+/// 셀 스냅샷에 **써넣은** 인레이 텍스트를 담는 통 — `KASATERM_TEXT_LOG` 가 있을 때만.
+///
+/// `text_log` 는 크롬 텍스트 draw 경로만 채운다. 입력박스 보더의 제목·pane 이름
+/// 인레이는 셀에 직접 써넣어 그 경로를 안 타므로, 하네스가 "그 자리에 무엇이
+/// 그려졌나"를 물을 수단이 없었다. 그 공백의 대가를 실제로 치렀다 — 칩 제거 관문이
+/// 폭 조건에서 조용히 돌아서는 걸 아무 판정도 못 잡아 거노 화면까지 갔다(2026-08-05).
+///
+/// 메서드가 아니라 자유 함수인 이유: 슬롯 조립(`inlay_prompt_box_*`)은 `g` 를 만들기
+/// **전에** 돌아서 `&mut GpuRenderer` 가 없다. 거기서 `self.gpu` 를 다시 빌리면
+/// borrow 가 충돌한다.
+fn cell_text_log() -> Option<&'static std::sync::Mutex<Vec<String>>> {
+    static ON: std::sync::OnceLock<Option<std::sync::Mutex<Vec<String>>>> =
+        std::sync::OnceLock::new();
+    ON.get_or_init(|| {
+        std::env::var_os("KASATERM_TEXT_LOG").map(|_| std::sync::Mutex::new(Vec::new()))
+    })
+    .as_ref()
+}
+
+/// 신고 통과 크롬 텍스트 로그를 **둘 다** 비운다 — 하네스가 "이 프레임에 그렸나"를
+/// 물으려면 필수다.
+///
+/// 비우지 않으면 `drew_text` 는 "지금까지 한 번이라도"에 답하고, 그건 **꺼진 기능도
+/// 통과시킨다**. 실제로 그랬다(2026-08-05): 인레이가 초반 프레임엔 그리다가 조건이
+/// 무너져 꺼졌는데, 남아 있던 옛 신고가 뒤 프레임 판정을 PASS 로 만들었다. 판정
+/// 직전에 이걸 부르고 → 한 프레임 그리고 → 그 프레임만 보라.
+pub fn clear_text_logs(g: &mut GpuRenderer) {
+    if let Some(log) = g.text_log.as_mut() {
+        log.clear();
+    }
+    if let Some(m) = cell_text_log() {
+        m.lock().unwrap().clear();
+    }
+}
+
+
+/// `KASATERM_CELL_PROBE=<문자>` — 그 문자를 담은 행이 **글리프 패스에 도달할 때**
+/// 그 행의 셀 속성을 한 번 찍는다.
+///
+/// 왜 여기인가: "셀에 써넣었는데 화면에 없다"를 진단할 자리는 쓴 쪽이 아니라 **받는
+/// 쪽**이다. 쓴 쪽 로그는 데이터가 들어갔다는 것만 말하고, 그 뒤 어디서 떨어졌는지는
+/// 침묵한다(2026-08-05: 인레이가 자기 결과 문자열을 뱉는데도 픽셀엔 없었고, 그
+/// 사이 구간이 통째로 안 보였다). 이 프로브는 `hidden`(SGR 8 — 글리프만 생략하고
+/// 텍스트 추출엔 남아 하네스가 "그렸다"로 읽는다)·`bold`·`fg`·`bg`·`dim` 을 나란히
+/// 찍으므로, 안 보이는 셀과 보이는 이웃을 **같은 줄에서** 대조할 수 있다.
+///
+/// 행당 한 번만(프레임마다 반복하면 로그가 흐른다).
+fn probe_cell_row(r: usize, row: &[kasa_bridge::screen::Cell], dim: bool, font_scale: f32) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WANT: OnceLock<Option<String>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let Some(want) = WANT.get_or_init(|| std::env::var("KASATERM_CELL_PROBE").ok()).as_deref()
+    else {
+        return;
+    };
+    if want.is_empty() || !row.iter().any(|c| want.contains(c.ch)) {
+        return;
+    }
+    let text: String = row.iter().map(|c| c.ch).collect();
+    // 호출 순번을 키와 출력에 함께 싣는다 — 한 프레임에 `draw_cells` 가 두 번
+    // 불리고 나중 것이 앞의 것을 덮으면, 순번 없이는 그 사실이 로그에서 안 보인다.
+    let pass = DRAW_CELLS_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let key = format!("{pass}:{r}:{}", text.trim_end());
+    if !SEEN.get_or_init(Default::default).lock().is_ok_and(|mut s| s.insert(key)) {
+        return;
+    }
+    eprintln!(
+        "[cell-probe] call#{pass} row {r} dim={dim} font_scale={font_scale} → {:?}",
+        text.trim_end()
+    );
+    for (col, c) in row.iter().enumerate() {
+        if matches!(c.ch, ' ' | '\0') {
+            continue;
+        }
+        eprintln!(
+            "  col {col:>3} {:?} bold={} hidden={} dim={} inverse={} fg={:?} bg={:?}",
+            c.ch, c.bold, c.hidden, c.dim, c.inverse, c.fg, c.bg
+        );
+    }
+}
+
+/// `draw_cells` 진입 횟수 — `probe_cell_row` 가 "몇 번째 호출의 그리드인가"를 찍는다.
+static DRAW_CELLS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl GpuRenderer {
     pub fn new(window: Arc<Window>, font_size_logical: f32) -> Result<Self> {
@@ -537,6 +635,8 @@ impl GpuRenderer {
             device,
             queue,
             capture_next: None,
+            capture_crop: None,
+            capture_max_w: 0,
             config,
             pipeline,
             atlas,
@@ -550,6 +650,7 @@ impl GpuRenderer {
             cell_w: cell_w / scale,
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
+            text_log: std::env::var_os("KASATERM_TEXT_LOG").map(|_| Vec::new()),
             scale,
             p3_root_owned: p3_root,
             image_pipeline,
@@ -607,6 +708,14 @@ impl GpuRenderer {
     /// (a missed DPI change) and self-heal before painting a compressed frame.
     pub fn scale(&self) -> f32 {
         self.scale
+    }
+
+    /// Current font size in **logical** px — the value `set_font_size` was last
+    /// given (round-tripped through the physical size it stores). Separate
+    /// windows keep their own zoom here instead of in App's global `ui_zoom`,
+    /// so a zoom shortcut needs to read back what this window is at.
+    pub fn font_size(&self) -> f32 {
+        self.font_size_px as f32 / self.scale
     }
 
     /// Repack the glyph atlas if it asked to be repacked — because a bake
@@ -895,6 +1004,9 @@ impl GpuRenderer {
         force_mono: bool,
     ) -> f32 {
         let s = self.scale;
+        if let Some(log) = self.text_log.as_mut() {
+            log.push(text.to_string());
+        }
         let (font, size_px) = self.chrome_face_opt(opts.font_size, force_mono);
         // The pixel face sets ascent == em, so its glyphs sit far higher above
         // the baseline than the mono primary's 0.78 assumption — without the
@@ -3211,6 +3323,9 @@ impl GpuRenderer {
     /// frame don't pile up.
     pub fn clear_chrome(&mut self) {
         self.chrome.clear();
+        if let Some(log) = self.text_log.as_mut() {
+            log.clear();
+        }
         self.image_quads.clear();
         self.icon_quads.clear();
         self.hover_pointer = false;
@@ -3220,6 +3335,70 @@ impl GpuRenderer {
     /// re-handing us the pixel buffer every frame.
     pub fn has_image(&self, id: &str) -> bool {
         self.images.contains_key(id)
+    }
+
+    /// 이번 프레임에 실제로 올라간 이미지 드로우의 키들 — **두 목록 다**.
+    ///
+    /// 하네스가 "학생 스프라이트가 정말 그려졌나"를 그림 없이 판정하는 유일한
+    /// 창구다. 스캐너(`find_statusline_face` 등)를 하네스가 직접 다시 돌리면
+    /// **자리가 있는지**만 알 뿐, 렌더 패스가 그걸 부르는지는 못 본다 — 그게
+    /// 정확히 #48 이었다(자리는 멀쩡했고 부르는 쪽이 없었다).
+    ///
+    /// `image_quads` 만 세면 안 된다: 같은 학생이라도 statusline 프사는 셀 위에
+    /// 얹히는 `queue_image_above` → `icon_quads` 로 가고 배경/커버는 `image_quads`
+    /// 로 간다. 한쪽만 보면 프사가 멀쩡히 떠 있는데 0 개로 읽힌다(실측).
+    pub fn drawn_image_keys(&self) -> impl Iterator<Item = &str> {
+        self.image_quads.iter().chain(self.icon_quads.iter()).map(|(k, ..)| k.as_str())
+    }
+
+    /// 이번 프레임에 그 키로 그린 quad 들의 자리 — LOGICAL px `(x, y, w, h)`.
+    ///
+    /// 키만으로는 못 가르는 게 있어서 필요하다: 프사 마우스오버 팝업은 작은
+    /// 프사와 **같은 키**(`student:<slug>:profile`)를 크기만 키워 재사용한다.
+    /// 그래서 「팝업이 떴나」는 키 존재가 아니라 **큰 quad 가 하나 더 붙었나**로
+    /// 판정해야 한다.
+    ///
+    /// 덤으로 하네스가 프사 자리를 렌더에서 되읽을 수 있다 — 좌표 계산
+    /// (`cell_left()`·`AUX_CELL_TOP`)을 복제하면 그 복제본이 틀려도 하네스는
+    /// 통과해 버린다.
+    pub fn drawn_image_rects(&self, key: &str) -> Vec<(f32, f32, f32, f32)> {
+        let s = self.scale.max(f32::EPSILON);
+        self.image_quads
+            .iter()
+            .chain(self.icon_quads.iter())
+            .filter(|(k, ..)| k == key)
+            .map(|(_, c, _)| {
+                let [x, y, w, h] = c.cell_px;
+                (x / s, y / s, w / s, h / s)
+            })
+            .collect()
+    }
+
+    /// 이번 프레임에 그린 문자열에 `needle` 이 들어간 게 있나. `KASATERM_TEXT_LOG`
+    /// 를 안 켜면 항상 `None` — "안 그려졌다"와 "안 재고 있다"를 섞지 않기 위해
+    /// bool 이 아니라 `Option` 이다.
+    pub fn drew_text(&self, needle: &str) -> Option<bool> {
+        let log = self.text_log.as_ref()?;
+        Some(log.iter().any(|t| t.contains(needle)) || Self::staged_cell_text(needle))
+    }
+
+    /// `drew_text` 가 셀 인레이까지 보게 하는 두 번째 통. `stage_cell_text` 참고.
+    fn staged_cell_text(needle: &str) -> bool {
+        cell_text_log()
+            .map(|m| m.lock().unwrap().iter().any(|t| t.contains(needle)))
+            .unwrap_or(false)
+    }
+
+    /// 입력박스 보더 인레이가 신고한 마지막 자리 `(좌측 끝, 우측 시작, 우측 끝)`.
+    /// 좌측이 없으면 -1. 좌우가 **겹쳤는지**를 재려면 이게 필요하다 — "그렸다"는
+    /// 신고만으로는 같은 칸에 겹쳐 써도 통과한다.
+    pub fn staged_span(&self) -> Option<(i64, usize, usize)> {
+        let m = cell_text_log()?;
+        let log = m.lock().unwrap();
+        let line = log.iter().rev().find(|t| t.starts_with("[boxspan] "))?;
+        let (l, r) = line.strip_prefix("[boxspan] L=")?.split_once(" R=")?;
+        let (c0, c1) = r.split_once('-')?;
+        Some((l.parse().ok()?, c0.parse().ok()?, c1.parse().ok()?))
     }
 
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed
@@ -3293,8 +3472,10 @@ impl GpuRenderer {
     }
 
     /// Bundled Lucide SVG source for a chrome icon name. Compiled in so the
-    /// .app needs no external asset dir.
-    fn icon_svg(name: &str) -> Option<&'static str> {
+    /// .app needs no external asset dir. `pub(crate)` 인 건 아이콘 이름을 짓는
+    /// 쪽(예: `sesscol::harness_icon`)이 그 이름이 실제로 등록돼 있는지 테스트할
+    /// 수 있어야 해서다 — 없는 이름은 `queue_icon` 이 조용히 그냥 돌아간다.
+    pub(crate) fn icon_svg(name: &str) -> Option<&'static str> {
         Some(match name {
             "folder" => include_str!("../assets/icons/folder.svg"),
             "square" => include_str!("../assets/icons/square.svg"),
@@ -3304,6 +3485,7 @@ impl GpuRenderer {
             "minus" => include_str!("../assets/icons/minus.svg"),
             "panel-left" => include_str!("../assets/icons/panel-left.svg"),
             "panel-right" => include_str!("../assets/icons/panel-right.svg"),
+            "pin" => include_str!("../assets/icons/pin.svg"),
             "folder-tree" => include_str!("../assets/icons/folder-tree.svg"),
             "folder-open" => include_str!("../assets/icons/folder-open.svg"),
             "folder-plus" => include_str!("../assets/icons/folder-plus.svg"),
@@ -3341,6 +3523,8 @@ impl GpuRenderer {
             "undo-2" => include_str!("../assets/icons/undo-2.svg"),
             "external-link" => include_str!("../assets/icons/external-link.svg"),
             "claude" => include_str!("../assets/icons/claude.svg"),
+            "codex" => include_str!("../assets/icons/codex.svg"),
+            "antigravity" => include_str!("../assets/icons/antigravity.svg"),
             // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
             // 이모지가 폰트에 따라 흑백 글리프로 떨어지기 때문 — 실제로 `⚠️` 가
             // 밋밋한 `▲` 로 나온다.
@@ -3452,6 +3636,7 @@ impl GpuRenderer {
             "panel-bottom-dashed" => include_str!("../assets/icons/pixel/panel-bottom-dashed.svg"),
             "panel-left" => include_str!("../assets/icons/pixel/panel-left.svg"),
             "panel-right" => include_str!("../assets/icons/pixel/panel-right.svg"),
+            "pin" => include_str!("../assets/icons/pixel/pin.svg"),
             "panel-top" => include_str!("../assets/icons/pixel/panel-top.svg"),
             "panel-top-dashed" => include_str!("../assets/icons/pixel/panel-top-dashed.svg"),
             "plus" => include_str!("../assets/icons/pixel/plus.svg"),
@@ -3474,7 +3659,7 @@ impl GpuRenderer {
     /// is forced white: only the alpha channel matters because icons draw
     /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
     /// applied at draw time, not bake time.
-    fn rasterize_icon(svg: &str, px: u32) -> Option<Vec<u8>> {
+    pub(crate) fn rasterize_icon(svg: &str, px: u32) -> Option<Vec<u8>> {
         let svg = svg.replace("currentColor", "#ffffff");
         let opt = resvg::usvg::Options::default();
         let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
@@ -3813,6 +3998,7 @@ impl GpuRenderer {
     /// pipeline draws everything in insertion order, so painting
     /// layers fall out naturally from the call sequence.
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
+        DRAW_CELLS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The URL currently under the mouse renders in this blue — both its
         // glyphs (Pass 2) and its underline (Pass 3) — so a hovered link reads
         // like a hyperlink. `pane.links` holds the 0..1 hovered range.
@@ -3857,6 +4043,7 @@ impl GpuRenderer {
             let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
             for (r, row) in pane.rows.iter().enumerate() {
+                probe_cell_row(r, row, pane.dim, pane.font_scale);
                 // Right edge of the last glyph painted on this row. A blank
                 // cell an oversized neighbour already spilled into is not free
                 // room any more, so `fit_cell_glyph` is told about it.
@@ -4282,12 +4469,25 @@ impl GpuRenderer {
                 self.config.format,
                 wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
             );
+            // 크롭은 GPU 가 아니라 여기서 한다. copy_texture_to_buffer 의 origin 을
+            // 옮기면 bytes_per_row 256 정렬을 잘린 폭 기준으로 다시 맞춰야 하는데,
+            // 캡처는 드문 연산이라 전체를 읽고 잘라 내는 편이 훨씬 단순하다.
+            let (cx, cy, cw, chh) = match self.capture_crop.take() {
+                Some((x, y, cw, ch)) => (
+                    x.min(w.saturating_sub(1)),
+                    y.min(h.saturating_sub(1)),
+                    cw.min(w.saturating_sub(x)).max(1),
+                    ch.min(h.saturating_sub(y)).max(1),
+                ),
+                None => (0, 0, w, h),
+            };
+            let max_w = std::mem::take(&mut self.capture_max_w);
             {
                 let data = buf.slice(..).get_mapped_range();
-                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                for row in 0..h {
-                    let s = (row * bpr) as usize;
-                    let line = &data[s..s + (w * 4) as usize];
+                let mut rgba = Vec::with_capacity((cw * chh * 4) as usize);
+                for row in cy..cy + chh {
+                    let s = (row * bpr + cx * 4) as usize;
+                    let line = &data[s..s + (cw * 4) as usize];
                     for px in line.chunks_exact(4) {
                         if bgra {
                             rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
@@ -4296,9 +4496,26 @@ impl GpuRenderer {
                         }
                     }
                 }
-                match save_rgba_png(&path, &rgba, w, h) {
-                    Ok(()) => eprintln!("[autocapture] gpu readback → {path} ({w}x{h})"),
-                    Err(e) => eprintln!("[autocapture] gpu png failed: {e}"),
+                let saved = if max_w > 0 && cw > max_w {
+                    let nh = ((chh as u64 * max_w as u64) / cw as u64).max(1) as u32;
+                    match image::RgbaImage::from_raw(cw, chh, rgba.clone()) {
+                        Some(img) => {
+                            let small = image::imageops::resize(
+                                &img,
+                                max_w,
+                                nh,
+                                image::imageops::FilterType::Lanczos3,
+                            );
+                            save_rgba_png(&path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
+                        }
+                        None => save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh)),
+                    }
+                } else {
+                    save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh))
+                };
+                match saved {
+                    Ok((ow, oh)) => eprintln!("[capture] gpu readback → {path} ({ow}x{oh})"),
+                    Err(e) => eprintln!("[capture] gpu png failed: {e}"),
                 }
             }
             buf.unmap();

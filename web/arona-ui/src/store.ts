@@ -64,6 +64,11 @@ export interface Agent {
   /** 선생님 입력을 기다리는 진짜 이유(AskUserQuestion·권한). 있을 때만 '확인 필요'(빨강).
    *  단순 waiting(완료 보고·응답 대기)은 이게 없다(거노: 빨강 남발 방지). */
   waitingFor?: string;
+  /** 명시적 완료 보고(`kasaterm-cli done`) — "succeeded" | "failed". idle 추정과 달리
+   *  학생이 직접 선언한 정본. 새 브리프로 다시 일하면 백엔드가 걷는다. */
+  doneOutcome?: string;
+  doneSummary?: string;
+  doneAgoSecs?: number;
 }
 
 /** 한 학생(pane)이 소환한 서브에이전트(Task/Agent) — 백엔드 /subagents 가

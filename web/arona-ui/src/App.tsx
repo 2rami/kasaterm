@@ -4,7 +4,7 @@ import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
 import { TitleBar } from './components/TitleBar';
 import { RoomMap } from './components/RoomMap';
-import { startBoardPolling, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent } from './lib/mcp';
+import { startBoardPolling, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent, type Harness } from './lib/mcp';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
@@ -16,7 +16,7 @@ type ViewMode = 'terminal' | 'classroom';
 // "오프라인" 대신 "백그라운드로 넘어감" 배지를 띄운다.
 // daemonShort = background(claude agents) 세션의 short id(8자). 있으면 이어가기 명령을
 // `claude attach <short>` 로 — background 세션은 `--resume` 불가("use claude agents to attach").
-type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; transferred?: boolean; daemonShort?: string };
+type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; transferred?: boolean; daemonShort?: string; harness?: Harness };
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
@@ -81,7 +81,7 @@ export function App() {
   // 최근 세션 클릭 → 바로 resume 하지 않고, 그 세션의 대화를 오프라인(읽기 전용) 뷰어로
   // 메인에 단독 띄운다(layout 미러와 별개). 이어가기는 뷰어 하단 '현재 터미널에 입력'.
   const openOfflineSession = (s: RecentSession) => {
-    setOfflinePeek({ id: s.id, title: s.label, offline: true, cwd: s.cwd });
+    setOfflinePeek({ id: s.id, title: s.label, offline: true, cwd: s.cwd, harness: s.harness });
     setView('terminal');
   };
   // 보드의 background daemon 세션 클릭 → 그 session_id 의 transcript 를 중앙에 읽기 전용으로
@@ -117,7 +117,8 @@ export function App() {
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
   }, []);
-  const [usage, setUsage] = useState<ClaudeUsage | null>(null); // claude oauth 사용량(5h/주간)
+  // claude oauth 한도 — 본문 + 그 값이 지금 것인지(stale) + 어느 계정 것인지.
+  const [usage, setUsage] = useState<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null>(null);
   // 라이트/다크 테마 — 태양 버튼 토글, localStorage 영속(거노). data-theme 로 토큰 재매핑.
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('schale-theme') === 'dark' ? 'dark' : 'light'));
   useEffect(() => {
@@ -323,7 +324,7 @@ export function App() {
                   title={offlinePeek.title}
                   onClose={() => setOfflinePeek(null)}
                   embedded
-                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort }}
+                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort, harness: offlinePeek.harness }}
                 />
               ) : (
                 // bg peek(좌, 있으면) + layout 미러(중, flex) + 서브에이전트 드릴인(우) — fg pane
@@ -336,7 +337,7 @@ export function App() {
                         title={offlinePeek.title}
                         onClose={() => setOfflinePeek(null)}
                         embedded
-                        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort }}
+                        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort, harness: offlinePeek.harness }}
                       />
                     </div>
                   )}

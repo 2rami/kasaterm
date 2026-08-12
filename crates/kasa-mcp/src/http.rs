@@ -537,9 +537,13 @@ async fn sent_images_handler(
     (cors, Json(serde_json::json!({ "ok": true, "images": imgs })))
 }
 
-/// task 디렉토리에서 `[(id, subject, status)]` 파싱. id(숫자) 오름차순. 비-json 제외.
-fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String)> {
-    let mut tasks: Vec<(u64, String, String, String)> = Vec::new();
+/// task 디렉토리에서 `[(id, subject, status, owner)]` 파싱. id(숫자) 오름차순. 비-json 제외.
+///
+/// `owner` 를 같이 싣는 이유: 같은 방 pane 들이 **한 목록을 공유하는 건 설계**라, 주인이
+/// 없으면 화면에서 「내 것」과 「방 전체」를 가를 근거가 아무것도 없다(거노 2026-08-06).
+/// 비어 있는 owner 는 주인 없는 방 공용 태스크다 — 그것도 정보다.
+fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String, String)> {
+    let mut tasks: Vec<(u64, String, String, String, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let path = e.path();
@@ -554,16 +558,17 @@ fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String)> {
             if subject.is_empty() {
                 continue;
             }
+            let owner = v.get("owner").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let ord = id.parse::<u64>().unwrap_or(u64::MAX);
-            tasks.push((ord, id, subject, status));
+            tasks.push((ord, id, subject, status, owner));
         }
     }
     tasks.sort_by_key(|t| t.0);
-    tasks.into_iter().map(|(_, id, s, st)| (id, s, st)).collect()
+    tasks.into_iter().map(|(_, id, s, st, o)| (id, s, st, o)).collect()
 }
 
 /// session_id → task. 신형 `session-<8hex>` 우선·구형 full-uuid 폴백(solo claude 용).
-fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
+fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> {
     if session_id.is_empty() {
         return Vec::new();
     }
@@ -583,6 +588,31 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
         Some(dir) => read_tasks_in_dir(dir),
         None => Vec::new(),
     }
+}
+
+/// pane 의 **팀 이름** → task 디렉토리(`~/.claude/tasks/<team>/`). 정본 경로다.
+///
+/// 팀 이름은 board 의 `team`(= shim 이 pane 에 export 한 `KASATERM_TEAM`)이라 pane 마다
+/// 정확하고, cwd·mtime 추측이 필요 없다. 같은 방 pane 들이 **같은 목록을 공유하는 건 설계**다
+/// (그래서 여러 pane 을 한 번에 물을 때만 호출부가 dedup 한다).
+///
+/// 이게 없던 동안 태스크가 **모든 pane 에서 0개**로 떴다(거노: 아루 태스크가 이상하다).
+/// 옛 경로 둘이 다 빗나가서다 — store 는 `tasks/<team>/` 인데 세션 경로는 `tasks/session-<8hex>/`
+/// 를 찾았고, cwd 폴백은 `teams/<team>/config.json` 의 `members[].cwd` 를 읽는데 그 파일이
+/// 이제 안 생긴다(팀 디렉토리엔 `inboxes/` 뿐, 실측 2026-08-05).
+fn team_task_dir_by_name(team: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    team_task_dir_in(&home.join(".claude/tasks"), team)
+}
+
+/// `team_task_dir_by_name` 의 순수 부분 — `$HOME` 없이 테스트할 수 있게 갈라 뒀다.
+/// 팀 이름은 그대로 경로 조각이 되므로 구분자·상위참조를 막는다(외부에서 온 문자열).
+fn team_task_dir_in(base: &std::path::Path, team: &str) -> Option<std::path::PathBuf> {
+    if team.is_empty() || team.contains(['/', '\\']) || team.contains("..") {
+        return None;
+    }
+    let dir = base.join(team);
+    dir.is_dir().then_some(dir)
 }
 
 /// pane cwd → 그 cwd 의 **팀(TeamCreate) 세션** task 디렉토리. claude 가 팀 컨텍스트에서
@@ -639,6 +669,24 @@ fn team_task_dir_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// 이 태스크가 그 pane 것인가. `shared` = 방 저장소에서 읽었는지.
+///
+/// **방 저장소에서는 주인이 찍혀 있어야 내 것이다.** 전에는 `owner: ""` 를 「방 공용이라
+/// 모두의 것」으로 쳤는데, 방 저장소는 그 cwd 에서 돌았던 *모든 옛 세션*이 쌓이는 곳이라
+/// 아무도 안 잡고 죽은 태스크가 새 학생 카드마다 통째로 붙었다(실측 2026-08-07 sionic 방:
+/// 59개 중 55개가 주인 없음 — 7/24 slack-sentry, 8/5 recall-gui·larva, 8/6 ref2va. 모모이
+/// 본인 것은 3개인데 카드엔 58행). 주인 없는 것도 사라지진 않고 UI 가 「미배정 N개」로 접는다.
+///
+/// 세션 저장소는 반대다 — 그 pane 혼자 쓰는 목록이라 주인 없는 것도 제 것이고, 여기까지
+/// 엄격하게 굴면 혼자 도는 pane 은 카드가 통째로 빈다.
+fn task_is_mine(owner: &str, me: &str, shared: bool) -> bool {
+    if shared {
+        !owner.is_empty() && !me.is_empty() && owner == me
+    } else {
+        owner.is_empty() || (!me.is_empty() && owner == me)
+    }
+}
+
 /// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
 /// `pane_session_ids`(bound transcript stem) → 없으면 board cwd 로 팀 task 디렉토리 폴백.
 async fn pane_tasks_handler(
@@ -664,11 +712,20 @@ async fn pane_tasks_handler(
         // 1) bound transcript session(solo claude — session==task), 2) 팀(cwd) 폴백.
         let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
         let mut tasks = read_claude_tasks(&reported_sid);
-        let team = team_task_dir_for_cwd(&row.cwd);
+        // 세션 저장소는 그 pane 혼자 쓰고, 방 저장소는 여럿이 나눠 쓴다 — 주인 판정이
+        // 갈리는 지점이라 어느 쪽에서 읽었는지를 들고 간다.
+        let mut shared = false;
+        // 팀 이름이 정본 — 없을 때만(트리플 없이 뜬 pane·옛 TeamCreate 팀) cwd 로 더듬는다.
+        let team = row
+            .team
+            .as_deref()
+            .and_then(team_task_dir_by_name)
+            .or_else(|| team_task_dir_for_cwd(&row.cwd));
         if tasks.is_empty() {
             if let Some(dir) = &team {
                 if claimed_team.insert(dir.clone()) {
                     tasks = read_tasks_in_dir(dir);
+                    shared = true;
                 }
             }
         }
@@ -677,9 +734,15 @@ async fn pane_tasks_handler(
             "team_dir": team.as_ref().map(|p| p.to_string_lossy().into_owned()),
             "n": tasks.len(),
         }));
-        for (id, subject, status) in tasks {
+        // 주인 판정은 **여기서** 한다 — 웹뷰는 pane 의 surface_id 만 알고 그 pane 이 어떤
+        // 에이전트 이름으로 떠 있는지는 모른다. 이름 비교를 UI 로 넘기면 board 타입에
+        // agent_name 을 실어 나르는 배관이 하나 더 생긴다.
+        let me = row.agent_name.as_deref().unwrap_or("");
+        for (id, subject, status, owner) in tasks {
             out.push(serde_json::json!({
-                "pane": row.surface_id, "id": id, "subject": subject, "status": status,
+                "pane": row.surface_id, "id": id, "subject": subject,
+                "status": status, "owner": owner,
+                "mine": task_is_mine(&owner, me, shared),
             }));
         }
     }
@@ -782,15 +845,19 @@ struct AiCommitReq {
 }
 
 /// `POST /git-ai-commit` — delegate the commit to the AI. If the active pane
-/// runs claude, inject a commit instruction (with the checked files) so the
-/// working agent does the commit; otherwise ask the user to focus a claude
+/// runs an agent, inject a commit instruction (with the checked files) so the
+/// working agent does the commit; otherwise ask the user to focus an agent
 /// pane (agent spawn is phase 2).
+///
+/// ⚠️ 판정은 **`active_agent`(하네스)** 로 한다. 예전엔 `active_process_name` 에
+/// "claude" 가 들었나만 봤는데, codex 는 npm shim 이라 프로세스 이름이 `node` 라서
+/// codex pane 에선 버튼이 영영 "claude 가 켜진 pane 에서 눌러주세요" 만 뱉었다.
 async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
     // Raw JSON string body (text/plain) to avoid the CORS preflight — see
     // git_commit_handler. Empty/garbage body falls back to "no files".
     let req: AiCommitReq = serde_json::from_str(&body).unwrap_or(AiCommitReq { files: Vec::new() });
-    let proc = backend.active_process_name().unwrap_or_default();
-    let body = if proc.contains("claude") {
+    let agent = backend.active_agent();
+    let body = if let Some(agent) = agent {
         let msg = if req.files.is_empty() {
             "git 패널에서 AI 커밋을 눌렀어. 지금 작업 디렉토리의 변경사항을 검토하고 적절한 한국어 커밋 메시지로 git add + commit 해줘.\n".to_string()
         } else {
@@ -800,10 +867,11 @@ async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl 
             )
         };
         let _ = backend.send_text(None, &msg);
-        serde_json::json!({ "ok": true, "output": "작업 중인 claude에게 커밋을 요청했어요" })
+        serde_json::json!({ "ok": true, "output": format!("작업 중인 {agent}에게 커밋을 요청했어요") })
     } else {
+        let proc = backend.active_process_name().unwrap_or_default();
         let who = if proc.is_empty() { "셸".to_string() } else { proc };
-        serde_json::json!({ "ok": false, "output": format!("claude가 켜진 pane에서 눌러주세요 (활성: {who})") })
+        serde_json::json!({ "ok": false, "output": format!("claude·codex가 켜진 pane에서 눌러주세요 (활성: {who})") })
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
@@ -1408,9 +1476,35 @@ async fn session_rename_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `GET /recent-sessions?cwd=<abs>` — recent Claude sessions under `cwd` (or
-/// the active pane's cwd when omitted) for the arona-ui resume picker. Newest
-/// first: `{ ok, sessions: [{id, label, mtime, cwd, character?}] }`.
+/// 세션 목록에 학생(캐릭터)을 얹는다. `scope` 두 갈래가 같은 모양을 내도록 공통.
+fn with_bound_characters(sessions: &[kasa_socket::backend::RecentSession]) -> serde_json::Value {
+    let mut arr = serde_json::to_value(sessions).unwrap_or_default();
+    if let Some(list) = arr.as_array_mut() {
+        for s in list.iter_mut() {
+            let bound = s
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(crate::character::session_character);
+            if let (Some(ch), Some(obj)) = (bound, s.as_object_mut()) {
+                obj.insert("character".into(), serde_json::json!(ch));
+            }
+        }
+    }
+    arr
+}
+
+/// `GET /recent-sessions?cwd=<abs>&scope=here|all` — recent sessions for the
+/// arona-ui resume picker. Newest first:
+/// `{ ok, sessions: [{harness, id, label, mtime, cwd, character?}] }`.
+///
+/// `scope=here`(기본) 는 `cwd`(생략 시 활성 pane 의 cwd) 아래의 세션만. 이쪽도
+/// 하네스를 가로지른다 — 같은 폴더에서 codex 로 일한 기록이 프로젝트 목록에
+/// 없으면 "여기서 뭘 하다 말았지"에 답이 안 된다. `scope=all` 은 cwd 를 무시하고
+/// **하네스 전부**(claude·codex·agy)를
+/// 섞어 돌려준다. 목표는 오르카의 「Agent 세션 기록」 처럼 어느 코딩 프로그램의
+/// 세션이든 한 목록에서 골라 잇는 것이고, 각 항목의 `harness` 를
+/// `/session-resume?harness=` 로 되돌리면 그 프로그램의 이어가기 명령이 나간다.
+///
 /// `character` 는 세션→학생 영속 바인딩(session_characters.json) — teamName 기록
 /// 세션이 claude 자체 /resume 에서 숨겨지는 탓에 이 피커가 사실상 유일한 복원
 /// 입구라, 어느 학생의 세션인지 프사·학생색으로 즉시 구분하게 얹는다(거노).
@@ -1419,32 +1513,35 @@ async fn recent_sessions_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // 하네스별로 이만큼씩 모아 시각순으로 자른다. 기본 20 은 `scope=here` 이 예전부터
+    // 쓰던 값이고, 상한을 두는 건 각 하네스 저장소를 그만큼 훑기 때문이다.
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map_or(20, |n| n.clamp(1, 200));
+    if params.get("scope").is_some_and(|s| s == "all") {
+        let sessions = kasa_socket::sessions::recent_all_sessions(limit);
+        let body = serde_json::json!({ "ok": true, "sessions": with_bound_characters(&sessions) });
+        return ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body));
+    }
     let cwd = params.get("cwd").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let body = match backend.recent_sessions(cwd) {
         Ok(sessions) => {
-            let mut arr = serde_json::to_value(&sessions).unwrap_or_default();
-            if let Some(list) = arr.as_array_mut() {
-                for s in list.iter_mut() {
-                    let bound = s
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .and_then(crate::character::session_character);
-                    if let (Some(ch), Some(obj)) = (bound, s.as_object_mut()) {
-                        obj.insert("character".into(), serde_json::json!(ch));
-                    }
-                }
-            }
-            serde_json::json!({ "ok": true, "sessions": arr })
+            serde_json::json!({ "ok": true, "sessions": with_bound_characters(&sessions) })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>` — open a pane and
-/// inject `claude --resume <id>` once its shell prompt is up. `newroom=true`
-/// opens a fresh window; otherwise it splits the active one. Query params for
-/// the same no-preflight reason as session-switch.
+/// `POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>&harness=<name>` —
+/// open a pane and inject that session's resume command once its shell prompt is
+/// up. `newroom=true` opens a fresh window; otherwise it splits the active one.
+/// Query params for the same no-preflight reason as session-switch.
+///
+/// `harness` 는 `/recent-sessions` 가 각 항목에 실어 주는 값을 그대로 되돌려 주면
+/// 된다(`claude`/`codex`/`agy`). 없으면 claude — 이 파라미터가 없던 시절의 호출도
+/// 그대로 동작한다.
 async fn session_resume_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -1459,10 +1556,15 @@ async fn session_resume_handler(
         .get("attach")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
+    let harness = params
+        .get("harness")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
     let body = if id.is_empty() {
         serde_json::json!({ "ok": false, "error": "missing id" })
     } else {
-        match backend.resume_session(&id, cwd.as_deref(), newroom, attach) {
+        match backend.resume_session(&id, cwd.as_deref(), newroom, attach, harness) {
             Ok(()) => serde_json::json!({ "ok": true, "id": id }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
@@ -2066,10 +2168,10 @@ fn find_collab_dir(room_cwd: Option<&std::path::Path>) -> Option<std::path::Path
 /// `%N` → character 마커에서 이름 읽기. 마커 없으면 pane id 그대로.
 fn char_from_pane(pane: &str, collab_dir: &std::path::Path) -> String {
     let n = pane.trim_start_matches('%');
-    if let Ok(name) = std::fs::read_to_string(collab_dir.join(format!("character-{n}"))) {
-        let name = name.trim().to_string();
-        if !name.is_empty() {
-            return name;
+    // 마커 둘째 줄은 주인 pid(sweep 용)라 이름은 첫 줄까지다.
+    if let Ok(body) = std::fs::read_to_string(collab_dir.join(format!("character-{n}"))) {
+        if let Some(name) = body.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+            return name.to_string();
         }
     }
     pane.to_string()
@@ -2223,52 +2325,185 @@ fn claude_keychain_service(dir: Option<&str>) -> String {
     }
 }
 
-/// claude oauth usage API 토큰 — 활성 계정의 저장소에서 읽는다. macOS 는
-/// Keychain, 그 외는 저장소 dir 의 `.credentials.json`.
+/// claude oauth API 토큰 — 주어진 계정 저장소에서 읽는다. macOS 는 Keychain,
+/// 그 외는 저장소 dir 의 `.credentials.json`. 빈 값/None = 기본 로그인.
 ///
-/// 활성 계정은 `KASATERM_CLAUDE_ACCOUNT_DIR`(kasaterm 이 shim 을 깔 때마다 자기
-/// 프로세스 env 에 갱신)로 온다. 이게 없으면 기본 로그인이라 예전과 똑같이 동작한다.
-/// 이걸 안 따라가면 계정을 바꿔도 pill 이 기본 계정 사용량을 계속 보여준다 —
-/// 한도 분산이 목적인 기능에서 한도 표시가 거짓말을 하는 셈이라 같이 따라가야 한다.
-fn read_claude_token() -> Option<String> {
-    let account_dir = std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR")
-        .ok()
-        .filter(|s| !s.is_empty());
-    read_claude_token_from(account_dir.as_deref())
+/// 활성 계정 경로는 `KASATERM_CLAUDE_ACCOUNT_DIR`(kasaterm 이 shim 을 깔 때마다
+/// 자기 프로세스 env 에 갱신)에서 오지만, env 를 읽는 것은 **호출자**다 — 그래야
+/// 캐시 키와 조회 대상이 같은 값에서 나오고, 테스트가 서로 env 를 안 밟는다.
+fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
+    let (v, _) = read_claude_credentials(account_dir)?;
+    v.pointer("/claudeAiOauth/accessToken")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
 }
 
-/// 위와 같되 계정 저장소를 인자로 받는다 — env 를 안 건드려 테스트가 서로 안 밟는다.
-fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
-    let pick = |v: &serde_json::Value| {
-        v.pointer("/claudeAiOauth/accessToken")
-            .and_then(|t| t.as_str())
-            .map(str::to_string)
-    };
+/// 자격증명이 **어디서 왔는지**. 갱신한 값은 읽은 자리에 그대로 되써야 한다 —
+/// 파일에서 읽고 키체인에 쓰면 claude CLI 는 옛 값을 계속 보고, 그 반대면 우리가
+/// 회전시킨 refresh token 을 CLI 가 모른 채 옛것으로 갱신을 시도해 죽는다.
+enum CredSource {
+    File(std::path::PathBuf),
+    Keychain(String),
+}
+
+/// 슬롯의 자격증명 문서 전체 + 그 출처. macOS 는 Keychain, 그 외는 저장소 dir 의
+/// `.credentials.json`. 빈 값/None = 기본 로그인.
+fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Value, CredSource)> {
     let account_dir = account_dir.filter(|s| !s.is_empty());
     let creds_dir = match account_dir {
         Some(d) => d.to_string(),
         None => format!("{}/.claude", std::env::var("HOME").ok()?),
     };
-    if let Ok(s) = std::fs::read_to_string(format!("{creds_dir}/.credentials.json")) {
+    let file = std::path::PathBuf::from(&creds_dir).join(".credentials.json");
+    if let Ok(s) = std::fs::read_to_string(&file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if let Some(t) = pick(&v) {
-                return Some(t);
-            }
+            return Some((v, CredSource::File(file)));
         }
     }
+    let svc = claude_keychain_service(account_dir);
     let out = crate::no_window_command("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            &claude_keychain_service(account_dir),
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", &svc, "-w"])
         .output()
         .ok()?;
     let s = String::from_utf8(out.stdout).ok()?;
-    serde_json::from_str::<serde_json::Value>(s.trim())
-        .ok()
-        .and_then(|v| pick(&v))
+    let v = serde_json::from_str::<serde_json::Value>(s.trim()).ok()?;
+    Some((v, CredSource::Keychain(svc)))
+}
+
+/// 갱신한 자격증명을 읽은 자리에 되쓴다.
+///
+/// ⚠️ 키체인 경로는 토큰이 `security` 의 **argv 에 실린다**. `security(1)` 은 비밀을
+/// stdin 으로 받는 길이 없고, 대신 Security 프레임워크를 직접 부르면 우리 프로세스가
+/// 남이 만든 키체인 항목을 건드리는 꼴이라 macOS 가 접근 승인 창을 띄운다. 읽기가
+/// 이미 같은 도구를 거치고 있어 권한 모델을 안 흔드는 쪽을 골랐다.
+fn write_claude_credentials(src: &CredSource, v: &serde_json::Value) -> bool {
+    let Ok(body) = serde_json::to_string(v) else {
+        return false;
+    };
+    match src {
+        CredSource::File(p) => std::fs::write(p, body).is_ok(),
+        CredSource::Keychain(svc) => {
+            // 계정(-a)이 다르면 같은 서비스에 **항목이 하나 더 생긴다** — 그러면
+            // claude 가 어느 쪽을 볼지 알 수 없으니 기존 항목의 acct 를 그대로 쓴다.
+            let acct = keychain_account(svc).unwrap_or_default();
+            if acct.is_empty() {
+                return false;
+            }
+            crate::no_window_command("security")
+                .args([
+                    "add-generic-password", "-U", "-a", &acct, "-s", svc, "-w", &body,
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+    }
+}
+
+/// 그 키체인 항목의 `acct` 필드. `security find-generic-password` 는 값을 뺀 속성
+/// 덤프를 stdout 으로 준다(`"acct"<blob>="kasa"`).
+fn keychain_account(svc: &str) -> Option<String> {
+    let out = crate::no_window_command("security")
+        .args(["find-generic-password", "-s", svc])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("\"acct\"<blob>=\""))
+        .and_then(|r| r.strip_suffix('"'))
+        .map(str::to_string)
+}
+
+/// claude CLI 가 쓰는 공개 OAuth 클라이언트. 토큰 엔드포인트도 CLI 와 같은 것이라,
+/// 여기서 회전시킨 토큰을 CLI 가 그대로 이어 쓴다.
+const CLAUDE_OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+/// 그 슬롯으로 claude 가 지금 돌고 있나.
+///
+/// 모르면 **있다고 답한다** — 판정이 한쪽으로만 틀리게 골랐다. 없는데 있다고 하면
+/// 갱신을 한 번 거를 뿐이지만, 있는데 없다고 하면 도는 세션의 토큰을 빼앗는다.
+fn slot_has_live_claude(dir: &str) -> bool {
+    // 기본 슬롯은 env 없이 도는 모든 claude 가 쓴다 — 셀 방법이 없으니 늘 산 것으로.
+    if dir.is_empty() {
+        return true;
+    }
+    let Ok(out) = crate::no_window_command("ps")
+        .args(["eww", "-ax", "-o", "command="])
+        .output()
+    else {
+        return true;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .contains(&format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={dir}"))
+}
+
+/// 만료된(또는 5분 안에 만료될) access token 을 refresh token 으로 되살린다.
+/// 갱신했으면 새 access token, 갱신할 필요/방법이 없으면 None.
+///
+/// **왜 우리가 하나**: 토큰 갱신은 그 계정으로 `claude` 가 실제로 돌 때만 일어난다.
+/// 그래서 안 쓰는 슬롯일수록 더 깜깜해지고, 정작 "어디로 옮길까" 고르려고 여는
+/// 계정 목록이 **옮기기 전엔 아무것도 못 알려주는** 닭-달걀이 된다(2026-08-11 실측:
+/// 두 슬롯이 각각 10시간·79시간 전 만료라 사용량도 신원도 전부 빈칸이었다).
+///
+/// ⚠️ refresh token 은 **1회용**이다. 도는 CLI 도 같은 토큰을 회전시키려 하므로,
+/// 먼저 쓴 쪽만 살고 나머지는 `invalid_grant` 로 죽는다 — 그 슬롯 세션이 통째로
+/// 로그아웃된다. 그래서 살아 있는 슬롯은 건드리지 않는다(어차피 CLI 가 갱신해 준다).
+async fn refresh_claude_token(dir: &str) -> Option<String> {
+    let (mut creds, src) = read_claude_credentials(Some(dir))?;
+    let oauth = creds.get("claudeAiOauth")?.as_object()?;
+    let expires_at = oauth.get("expiresAt")?.as_u64()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    // CLI 와 같은 5분 스큐 — 조회 도중 만료되는 걸 피한다.
+    if expires_at > now_ms + 5 * 60 * 1000 {
+        return None;
+    }
+    if slot_has_live_claude(dir) {
+        return None;
+    }
+    let refresh = oauth.get("refreshToken")?.as_str()?.to_string();
+    let resp = reqwest::Client::new()
+        .post(CLAUDE_OAUTH_TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", CLAUDE_OAUTH_CLIENT_ID),
+        ])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        // 상태만 남긴다(토큰은 절대). 400/401=죽은 refresh token, 429=스로틀 —
+        // 조용한 None 은 성공과 구분이 안 돼 현장에서 진단이 불가능하다.
+        eprintln!(
+            "[claude-token] 갱신 거부 {} · slot={dir}",
+            resp.status().as_u16()
+        );
+        return None;
+    }
+    // `.json()` 은 reqwest 의 json feature 가 필요한데 이 크레이트는 안 켰다 —
+    // 본문을 받아 직접 파싱한다(의존성 하나를 아끼려고).
+    let data: serde_json::Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+    let access = data.get("access_token")?.as_str()?.to_string();
+    let o = creds.get_mut("claudeAiOauth")?.as_object_mut()?;
+    o.insert("accessToken".into(), access.clone().into());
+    if let Some(exp) = data.get("expires_in").and_then(|v| v.as_u64()) {
+        o.insert("expiresAt".into(), (now_ms + exp * 1000).into());
+    }
+    // **회전된 refresh token 을 반드시 남긴다.** 이걸 빠뜨리면 다음 갱신이 죽은
+    // 토큰으로 나가 그 슬롯이 로그아웃된다 — 되살리려던 기능이 계정을 깨는 길.
+    if let Some(r) = data.get("refresh_token").and_then(|v| v.as_str()) {
+        o.insert("refreshToken".into(), r.into());
+    }
+    if !write_claude_credentials(&src, &creds) {
+        eprintln!("[claude-token] 갱신은 됐는데 저장 실패 · slot={dir} — 이 슬롯은 재로그인이 필요할 수 있다");
+        return None;
+    }
+    Some(access)
 }
 
 /// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
@@ -2353,7 +2588,13 @@ async fn claude_identity_handler(
             }
         }
     }
-    let Some(token) = read_claude_token_from(Some(dir.as_str())) else {
+    // 사용량과 같은 이유로 여기서도 먼저 되살린다 — 신원을 못 읽으면 화면은 라벨만
+    // 남고, 그 라벨이 낡았을 때(재로그인으로 슬롯이 겹쳤을 때) 알아챌 길이 사라진다.
+    let token = match refresh_claude_token(dir.as_str()).await {
+        Some(t) => Some(t),
+        None => read_claude_token_from(Some(dir.as_str())),
+    };
+    let Some(token) = token else {
         // 토큰이 없으면 그 슬롯은 로그인 자체가 안 된 것 — 호출자가 그대로 표시한다.
         return (cors, Json(serde_json::json!({ "ok": false, "error": "no token" })));
     };
@@ -2405,33 +2646,73 @@ async fn claude_identity_handler(
     (cors, Json(out))
 }
 
-async fn claude_usage_handler() -> impl IntoResponse {
+async fn claude_usage_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    // (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면 디스크에서
-    // 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale 폴백).
-    static CACHE: OnceLock<Mutex<Option<(Option<Instant>, serde_json::Value)>>> = OnceLock::new();
+    // 계정 저장소별 (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면
+    // 디스크에서 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale).
+    //
+    // **캐시를 계정별로 가르는 이유**(거노 2026-08-05: "누를때마다 바뀐다는 표시가
+    // 없고 사용량도 제대로 표기안돼"): 전에는 프로세스 전역 한 벌이라, 계정을 바꿔도
+    // 60초 동안은 **떠나온 계정의 숫자**가 그대로 나왔고 upstream 이 막히면 stale
+    // 폴백이 그 값을 무한히 이어 줬다. 계정별로 가르면 전환 직후는 캐시 미스라 그
+    // 자리에서 새 계정을 조회한다. 실측 당시 세 슬롯의 weekly_all 이 95/25/? 로
+    // 제각각인데 화면엔 하나의 숫자만 떴다.
+    #[allow(clippy::type_complexity)]
+    static CACHE: OnceLock<Mutex<HashMap<String, (Option<Instant>, serde_json::Value)>>> =
+        OnceLock::new();
     const TTL: Duration = Duration::from_secs(60);
-    // 첫 접근 시 디스크 캐시를 로드 — kasaterm 재시작(서버도 함께 재시작)에도 마지막
-    // 성공값을 즉시 돌려줘 pill 이 안 꺼진다(거노: "사용량 또 안 뜸").
-    let cache = CACHE.get_or_init(|| Mutex::new(load_usage_disk().map(|v| (None, v))));
+    let cache = CACHE.get_or_init(Default::default);
+
+    // 조회 대상 슬롯: `?dir=` 이 있으면 그것, 없으면 활성 계정(kasaterm 이 shim 을
+    // 깔 때마다 `KASATERM_CLAUDE_ACCOUNT_DIR` 로 알려 준다). 빈 문자열 = 기본 로그인.
+    let dir = params
+        .get("dir")
+        .cloned()
+        .unwrap_or_else(|| std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR").unwrap_or_default());
 
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    // `account_dir` 을 함께 돌려준다 — 어느 계정의 숫자인지 소비자가 알 수 있어야
+    // 전환 직후 옛 값을 새 계정 것으로 오인하지 않는다.
     let ok = |v: &serde_json::Value, stale: bool| {
-        serde_json::json!({ "ok": true, "usage": v, "stale": stale })
+        serde_json::json!({ "ok": true, "usage": v, "stale": stale, "account_dir": dir })
     };
 
     // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
-        if let Some((Some(at), v)) = g.as_ref() {
+        if let Some((Some(at), v)) = g.get(&dir) {
             if at.elapsed() < TTL {
                 return (cors, Json(ok(v, false)));
             }
         }
     }
 
-    // 2) 신선 캐시가 없을 때만 upstream 시도.
-    let fresh: Option<serde_json::Value> = match read_claude_token() {
+    // 2) 신선 캐시가 없을 때만 upstream 시도. 첫 조회면 디스크 스냅샷을 먼저 실어
+    //    둔다 — 재시작 직후 upstream 이 429 면 3) 이 그걸 stale 로 돌려줘 pill 이
+    //    빈칸으로 떨어지지 않는다(거노: "사용량 또 안 뜸").
+    {
+        let mut seed = None;
+        if let Ok(g) = cache.lock() {
+            if !g.contains_key(&dir) {
+                seed = load_usage_disk(&dir);
+            }
+        }
+        if let Some(v) = seed {
+            if let Ok(mut g) = cache.lock() {
+                g.entry(dir.clone()).or_insert((None, v));
+            }
+        }
+    }
+    // 만료됐으면 먼저 되살린다. 안 그러면 안 쓰는 슬롯은 영영 401 이고, 화면엔
+    // 「모름(—)」만 남아 정작 옮길 곳을 고를 때 아무 도움이 안 된다.
+    let token = match refresh_claude_token(dir.as_str()).await {
+        Some(t) => Some(t),
+        None => read_claude_token_from(Some(dir.as_str())),
+    };
+    let fresh: Option<serde_json::Value> = match token {
         Some(token) => {
             let resp = reqwest::Client::new()
                 .get("https://api.anthropic.com/api/oauth/usage")
@@ -2453,56 +2734,95 @@ async fn claude_usage_handler() -> impl IntoResponse {
 
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
-            *g = Some((Some(Instant::now()), v.clone()));
+            g.insert(dir.clone(), (Some(Instant::now()), v.clone()));
         }
-        save_usage_disk(&v);
+        save_usage_disk(&dir, &v);
         return (cors, Json(ok(&v, false)));
     }
 
-    // 3) upstream 실패 — 만료됐어도 마지막 성공값이 있으면 stale 로 폴백(pill 유지).
+    // 3) upstream 실패 — 만료됐어도 이 슬롯의 마지막 성공값이 있으면 stale 로
+    //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
+    //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
     if let Ok(g) = cache.lock() {
-        if let Some((_, v)) = g.as_ref() {
+        if let Some((_, v)) = g.get(&dir) {
             return (cors, Json(ok(v, true)));
         }
     }
     (
         cors,
-        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)" })),
+        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)", "account_dir": dir })),
     )
 }
 
-/// `~/.config/kasaterm/usage-cache.json` — claude 5시간 사용량 마지막 성공 스냅샷.
+/// `~/.config/kasaterm/usage-cache.json` — 계정 저장소별 마지막 성공 스냅샷 한 파일.
+/// 슬롯 경로를 키로 쓰므로 계정을 늘려도 파일이 안 늘고, 계정을 지워도 남은 항목이
+/// 다른 계정 숫자로 새지 않는다.
 fn usage_cache_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/usage-cache.json"))
 }
 
-/// 디스크 캐시 로드 — 6시간 이내 기록만(5시간 창이 만료됐으면 폐기). 반환은 usage 본문.
-fn load_usage_disk() -> Option<serde_json::Value> {
+/// 스냅샷 문서에서 `dir` 슬롯의 usage 본문을 꺼낸다 — 6시간 이내 기록만(5시간 창이
+/// 만료됐으면 폐기). 파일 IO 를 밖에 두는 이유는 이 판정이 **한 계정의 숫자를 다른
+/// 계정에 붙이지 않는가**를 결정하는 자리라, HOME 을 흔들지 않고 검증돼야 해서다.
+fn usage_from_snapshot(json: &str, dir: &str, now: u64) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let fresh = |e: &serde_json::Value| -> Option<serde_json::Value> {
+        let ts = e.get("ts")?.as_u64()?;
+        (now.saturating_sub(ts) <= 6 * 3600).then(|| e.get("usage").cloned())?
+    };
+    // 새 형식: { slots: { "<dir>": {ts, usage} } }. 옛 형식({ts, usage})은 어느 계정
+    // 것인지 기록이 없으므로 **기본 슬롯(빈 dir)일 때만** 받아들인다 — 그러지 않으면
+    // 업그레이드 직후 한 번, 옛 계정 숫자가 새 계정 자리에 그대로 앉는다.
+    if let Some(slot) = v.pointer("/slots").and_then(|s| s.get(dir)) {
+        return fresh(slot);
+    }
+    if dir.is_empty() && v.get("ts").is_some() {
+        return fresh(&v);
+    }
+    None
+}
+
+/// 디스크 캐시 로드 — `dir` 슬롯 항목만 본다. 프로세스 전역 한 벌이던 옛 구조는
+/// 재시작 직후 활성 계정에 **떠나온 계정의** 스냅샷을 붙여 줬다.
+fn load_usage_disk(dir: &str) -> Option<serde_json::Value> {
     let s = std::fs::read_to_string(usage_cache_path()?).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-    let ts = v.get("ts")?.as_u64()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    if now.saturating_sub(ts) > 6 * 3600 {
-        return None;
-    }
-    v.get("usage").cloned()
+    usage_from_snapshot(&s, dir, now)
+}
+
+/// 기존 스냅샷 문서에 `dir` 슬롯을 갱신해 되쓸 문서를 만든다. 다른 슬롯 항목은
+/// 그대로 살려 둔다 — 계정을 옮겨 다녀도 각자의 마지막 값이 남는다.
+fn merge_usage_snapshot(
+    existing: Option<&str>,
+    dir: &str,
+    usage: &serde_json::Value,
+    now: u64,
+) -> String {
+    let mut slots = existing
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("slots").cloned())
+        .and_then(|s| s.as_object().cloned())
+        .unwrap_or_default();
+    slots.insert(dir.to_string(), serde_json::json!({ "ts": now, "usage": usage }));
+    serde_json::json!({ "slots": slots }).to_string()
 }
 
 /// 성공 usage 본문을 ts 와 함께 디스크에 저장(재시작 폴백 소스).
-fn save_usage_disk(usage: &serde_json::Value) {
+fn save_usage_disk(dir: &str, usage: &serde_json::Value) {
     let Some(p) = usage_cache_path() else { return };
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = std::fs::write(p, serde_json::json!({ "ts": now, "usage": usage }).to_string());
+    let existing = std::fs::read_to_string(&p).ok();
+    let _ = std::fs::write(p, merge_usage_snapshot(existing.as_deref(), dir, usage, now));
 }
 
 /// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
@@ -2557,10 +2877,48 @@ async fn schale_state_handler() -> impl IntoResponse {
 
 // xterm.js 는 vendored 다(assets/term, MIT). CDN 을 쓰면 오프라인에서 죽고
 // 사내망 정책에도 걸린다 — 바이너리에 박아 넣으면 서버 하나로 자족한다.
-async fn term_page_handler() -> impl IntoResponse {
+/// `?t=<토큰>` 으로 들어온 원격 접속에 쿠키를 심어 준다.
+///
+/// WebSocket 은 커스텀 헤더를 못 붙이므로, 한 번 붙은 뒤 `/term/ws` 와 정적 자산이
+/// 인증을 통과하는 경로는 쿠키뿐이다. 폰은 주소를 한 번만 열면 그 다음부터 쿠키로
+/// 다닌다.
+async fn term_page_handler(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let html = include_str!("../assets/term/index.html");
+    let content_type = (header::CONTENT_TYPE, "text/html; charset=utf-8");
+    // HttpOnly — 페이지 스크립트가 토큰을 읽을 이유가 없다.
+    // SameSite=Strict — 남의 사이트에서 건너온 요청에는 안 실린다.
+    let cookie = remote_token()
+        .filter(|want| q.get("t").map(String::as_str) == Some(*want))
+        .map(|want| {
+            format!("kasa_token={want}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+        });
+    match &cookie {
+        Some(c) => (
+            [content_type, (header::SET_COOKIE, c.as_str())],
+            html,
+        )
+            .into_response(),
+        None => ([content_type], html).into_response(),
+    }
+}
+
+/// 터미널 폰트. claude code 의 Nerd Font 아이콘(사설영역)과 박스드로잉이 폰
+/// 시스템 폰트에는 없어서, 안 내려주면 두부(□)와 끊긴 선으로 보인다.
+///
+/// 번들 CascadiaCodeNF 를 실제로 쓰는 범위만 남겨 서브셋했다(2.4MB → 356KB).
+/// 한글은 일부러 뺐다 — 이 폰트에 애초에 없고, 넣으면 몇 MB가 된다. 폰에는 한글
+/// 폰트가 이미 있으므로 폴백에 맡긴다.
+async fn term_asset_font() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../assets/term/index.html"),
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            // 내용이 바뀌지 않으므로 길게 캐시한다 — 폰이 열 때마다 356KB 를
+            // 다시 받으면 터널 너머에서 특히 아프다.
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_bytes!("../assets/term/font.woff2").as_slice(),
     )
 }
 
@@ -2578,9 +2936,91 @@ async fn term_asset_css() -> impl IntoResponse {
     )
 }
 
+/// 프사가 있는 학생 슬러그. `AVATARS` 와 짝이므로 여기 없는 이름은 프사도 없다.
+const AVATAR_SLUGS: &[&str] = &[
+    "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana", "shiroko",
+    "yuuka", "yuzu",
+];
+
+/// agent 이름(`aru-p151-1uc`)의 앞 토막이 캐릭터 슬러그다.
+///
+/// ⚠️ 이름→슬러그 표(`theme::character_slug`)를 여기 복제하지 않는다. 그건 인박스
+/// 파일명을 정하는 정본이라 두 벌이 되면 어긋나고, 어긋나도 오류가 안 난다. 우리는
+/// 이미 만들어진 결과를 되읽기만 한다 — 표에 없는 커스텀 캐릭터는 해시 슬러그로
+/// 떨어져 여기서 `None` 이 되고, 프사 없이 이름만 뜬다.
+fn avatar_slug(agent_name: &str) -> Option<&'static str> {
+    let head = agent_name.split('-').next()?;
+    AVATAR_SLUGS.iter().copied().find(|s| *s == head)
+}
+
+/// `GET /term/avatar/<slug>.png` — pane 칩에 띄울 학생 프사.
+///
+/// kasaterm 은 pane 헤더에 프사를 그리는데 미러는 PTY 바이트만 받으므로 그게 없다.
+/// 폰에서 「누구 화면인가」가 이름 한 줄로만 남으면 눈에 안 들어와서, 같은 그림을
+/// 웹에도 준다. 자산은 GUI 가 쓰는 것 그대로다(따로 복제하지 않는다).
+async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> impl IntoResponse {
+    macro_rules! avatars {
+        ($($s:literal),* $(,)?) => {
+            match slug.trim_end_matches(".png") {
+                $($s => Some(
+                    include_bytes!(concat!(
+                        "../../../app/kasaterm/assets/students/", $s, "-profile.png"
+                    )).as_slice()
+                ),)*
+                _ => None,
+            }
+        };
+    }
+    let png = avatars!(
+        "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana",
+        "shiroko", "yuuka", "yuzu",
+    );
+    match png {
+        Some(b) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            b,
+        ),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            b"".as_slice(),
+        ),
+    }
+}
+
 /// 살아 있는 pane 목록 — 미러 대상을 고르는 데 쓴다.
-async fn term_panes_handler() -> impl IntoResponse {
-    Json(kasa_pty::live_sessions())
+/// `GET /term/panes` — 붙을 수 있는 pane 목록.
+///
+/// id 만 주면 폰 드롭다운에 `%86` 이 뜰 뿐이라 **누가 무슨 일을 하던 pane 인지 알
+/// 수가 없다.** 그 정보는 이미 board 가 들고 있으므로(캐릭터 이름·작업 제목·상태)
+/// 여기서 얹어 준다. 목록의 정본은 여전히 `live_sessions()` 다 — board 에만 있고
+/// PTY 가 없는 행에 붙으면 연결이 그냥 끊긴다.
+///
+/// 웹 셸(`web-…`)은 board 에 없다. 그건 이름 없이 id 만 나가고, 클라가 그때 id 를
+/// 그대로 보여 준다.
+async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let board = backend.collab_board().unwrap_or_default();
+    let rows: Vec<serde_json::Value> = kasa_pty::live_sessions()
+        .into_iter()
+        .map(|id| {
+            let b = board.iter().find(|p| p.surface_id == id);
+            serde_json::json!({
+                "id": id,
+                "name": b.and_then(|p| p.character.clone()),
+                "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
+                "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
+                "slug": b.and_then(|p| p.agent_name.as_deref()).and_then(avatar_slug),
+            })
+        })
+        .collect();
+    Json(rows)
 }
 
 /// 이 서버 인스턴스의 1회용 토큰. 프로세스가 뜰 때 한 번 만들어진다.
@@ -2617,6 +3057,116 @@ fn has_token(h: &HeaderMap) -> bool {
         .is_some_and(|t| t == session_token())
 }
 
+/// 서버가 붙을 주소. 기본은 loopback이고, 여는 것은 **명시적 선택**이어야 한다.
+/// 이 서버에는 셸에 바이트를 꽂는 창구가 있다.
+///
+/// env 다음에 파일을 본다 — **GUI 앱은 env 를 물려받지 않는다**(`open` 이 안
+/// 넘기고, Finder 로 띄우면 셸 환경 자체가 없다). 파일이 없으면 앱에서는 원격을
+/// 켤 방법이 사실상 `launchctl setenv` 뿐인데 그건 로그인 세션 전역이라 거칠다.
+///
+/// ```json
+/// // ~/.config/kasaterm/remote.json
+/// { "bind": "0.0.0.0" }
+/// ```
+fn bind_addr() -> String {
+    if let Some(v) = std::env::var("KASATERM_BIND")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return v;
+    }
+    remote_conf_bind().unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn remote_conf_bind() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home).join(".config/kasaterm/remote.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("bind")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn remote_token_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/remote-token"))
+}
+
+/// 원격 접속용 토큰. `session_token` 과 달리 **디스크에 남는다** — 프로세스마다
+/// 새로 만들면 폰 북마크가 앱을 껐다 켤 때마다 깨져서 쓸 수가 없다.
+///
+/// 이 토큰 하나면 셸에 임의 입력을 꽂을 수 있으므로 파일은 0600 으로 만든다.
+pub fn remote_token() -> Option<&'static str> {
+    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let path = remote_token_path()?;
+        if let Some(existing) = std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(existing);
+        }
+        let fresh = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, &fresh).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Some(fresh)
+    })
+    .as_deref()
+}
+
+/// loopback 밖에서 온 연결인가. `ConnectInfo` 가 없으면(=연결 정보를 안 붙인
+/// 경로) 원격이 아닌 것으로 본다 — 바인딩이 loopback 이면 원격 자체가 불가능하다.
+///
+/// ⚠️ **peer 주소만으로는 터널을 못 가른다.** `cloudflared` 같은 터널과 리버스
+/// 프록시는 **같은 머신에서 loopback 으로** 붙는다. 그래서 밖에서 들어온 요청이
+/// peer 로는 로컬로 보이고, 아래 토큰 관문을 통째로 건너뛴다 — 바인딩이
+/// `127.0.0.1` 그대로인데도 **터널 주소를 아는 사람이 무인증으로 셸에 닿는다.**
+/// 그러니 프록시가 붙이는 원-클라이언트 헤더가 있으면 그것만으로 원격으로 본다.
+///
+/// 이 판정은 한쪽으로만 틀릴 수 있다: 우리 코드도 브라우저도 이 헤더를 보내지
+/// 않으니 로컬 경로는 그대로고, 로컬에서 굳이 위조해 붙여도 **토큰을 더 요구받을
+/// 뿐**이라 느슨해지는 방향이 없다.
+fn is_remote_peer(req: &axum::extract::Request) -> bool {
+    let h = req.headers();
+    if h.contains_key("cf-connecting-ip") || h.contains_key("x-forwarded-for") {
+        return true;
+    }
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|ci| !ci.0.ip().is_loopback())
+}
+
+/// 요청에 실려온 원격 토큰이 맞는가. 헤더 → 쿠키 → 쿼리 순으로 본다.
+///
+/// 셋이 다 필요하다: WebSocket 은 커스텀 헤더를 못 붙이니 **쿠키**가 실제 경로이고,
+/// **쿼리**는 폰이 처음 붙을 때(북마크·QR) 쓰는 입구이며, **헤더**는 CLI 용이다.
+fn has_remote_token(h: &HeaderMap, query: Option<&str>) -> bool {
+    let Some(want) = remote_token() else {
+        return false;
+    };
+    if h.get("x-kasa-token").and_then(|v| v.to_str().ok()) == Some(want) {
+        return true;
+    }
+    if let Some(cookies) = h.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        if cookies
+            .split(';')
+            .any(|kv| kv.trim().strip_prefix("kasa_token=") == Some(want))
+        {
+            return true;
+        }
+    }
+    query.is_some_and(|q| q.split('&').any(|kv| kv.strip_prefix("t=") == Some(want)))
+}
+
 /// 남의 사이트에서 건너온 요청인가.
 ///
 /// ⚠️ **Origin 검사만으로는 GET 을 못 막는다.** `location = "…/open-markdown?…"`
@@ -2648,6 +3198,26 @@ async fn origin_guard_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // 원격(loopback 밖)은 **토큰이 유일한 관문**이다. 아래 로컬 규칙을 그대로
+    // 물려주면 안 된다 — 「Origin 이 없으면 로컬 CLI 라 통과」의 근거가 "이미 같은
+    // 사용자 권한으로 도는 프로세스"인데 원격에는 그게 성립하지 않는다. 그대로 두면
+    // 바인딩을 여는 순간 Origin 없는 요청(curl 한 줄)이 전부 무인증으로 셸에 닿는다.
+    if is_remote_peer(&req) {
+        let h = req.headers();
+        if cross_site_request(h) || !has_remote_token(h, req.uri().query()) {
+            eprintln!(
+                "[http] 원격 요청을 거부했습니다: {} {}",
+                req.method(),
+                req.uri().path()
+            );
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                "remote access requires a valid token",
+            )
+                .into_response();
+        }
+        return next.run(req).await;
+    }
     let h = req.headers();
     // ① 메서드를 가리지 않는다 — GET 에도 창을 띄우거나 대화를 내주는 창구가 있고,
     //    navigation 은 Origin 을 안 보내 ②만으로는 못 잡는다.
@@ -2694,16 +3264,34 @@ fn ws_origin_ok(h: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let o = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
-    // 호스트명을 정확히 대조한다 — starts_with 로 봤다면 `127.0.0.1.evil.com`
-    // 이 통과한다.
-    let hostname = host.rsplit_once(':').map(|(n, _)| n).unwrap_or(host);
-    !host.is_empty() && o == host && (hostname == "127.0.0.1" || hostname == "localhost")
+    // Origin 은 우리 Host 와 **정확히** 같아야 한다. 부분 일치로 봤다면
+    // `127.0.0.1.evil.com` 이 통과한다.
+    //
+    // 호스트명을 127.0.0.1/localhost 로 못박지는 않는다 — 폰이 LAN IP 나 터널
+    // 주소로 붙으면 Host 가 그 주소이고, 그때도 우리 페이지에서 온 요청은
+    // 통과해야 한다. 브라우저는 Host 를 조작할 수 없고(실제 연결 대상으로
+    // 채워진다), 원격 연결은 `origin_guard_mw` 가 토큰으로 이미 걸러 낸 뒤다.
+    !host.is_empty() && o == host
+}
+
+/// pane id 를 **디코딩하지 않은 원문**으로 꺼낸다.
+///
+/// pane id 는 `%1` 처럼 `%` 로 시작한다. 그래서 주소창에 `?pane=%116` 을 그대로 치면
+/// 퍼센트 인코딩으로 해석돼 `%11`(제어문자) + `6` 이 되고, 조회가 조용히 실패한다 —
+/// 화면에는 아무것도 안 뜨고 연결만 끊겨서 원인을 짐작하기 어렵다. 사람이 흔히
+/// 밟는 함정이라, 디코딩된 값으로 못 찾으면 이 원문으로 한 번 더 본다.
+fn raw_pane_param(raw: Option<&str>) -> Option<String> {
+    raw?.split('&')
+        .find_map(|kv| kv.strip_prefix("pane="))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 async fn term_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> axum::response::Response {
     if !ws_origin_ok(&headers) {
         eprintln!(
@@ -2717,32 +3305,52 @@ async fn term_ws_handler(
             .into_response();
     }
     let pane = q.get("pane").cloned().unwrap_or_default();
+    let pane_raw = raw_pane_param(raw.as_deref());
     let cwd = q.get("cwd").cloned();
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, cwd))
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd))
         .into_response()
 }
 
-async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
+async fn term_ws_run(
+    socket: WebSocket,
+    pane: String,
+    pane_raw: Option<String>,
+    cwd: Option<String>,
+) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
     // (레지스트리 키 충돌) — 웹 전용 접두사를 붙인다.
     let (sess, mirrored) = if pane.is_empty() {
+        let id = format!("web-{}", uuid::Uuid::new_v4());
         let opts = kasa_pty::PtyOptions {
             cwd: cwd.or_else(|| std::env::var("HOME").ok()),
             cols: 80,
             rows: 24,
-            pane_id: format!("web-{}", uuid::Uuid::new_v4()),
+            pane_id: id.clone(),
             ..Default::default()
         };
         match kasa_pty::PtySession::start(opts) {
-            Ok(s) => (std::sync::Arc::new(s), false),
+            Ok(s) => {
+                let sess = std::sync::Arc::new(s);
+                // 목록(`/term/panes`)에 띄우고, 연결이 끊겨도 살려 둔다. 이게 없으면
+                // 탭을 닫는 순간 셸이 죽어서 폰을 덮었다 열면 처음부터다.
+                kasa_pty::register_session(&id, &sess);
+                kasa_pty::keep_session(&id, sess.clone());
+                (sess, false)
+            }
             Err(e) => {
                 eprintln!("[term-ws] 셸을 못 띄웠습니다: {e}");
                 return;
             }
         }
     } else {
-        match kasa_pty::lookup_session(&pane) {
+        // 디코딩된 값 → 원문 순으로 본다(`raw_pane_param` 주석 참고).
+        match kasa_pty::lookup_session(&pane).or_else(|| {
+            pane_raw
+                .as_deref()
+                .filter(|r| *r != pane)
+                .and_then(kasa_pty::lookup_session)
+        }) {
             Some(s) => (s, true),
             None => {
                 eprintln!("[term-ws] 그런 pane 이 없습니다: {pane}");
@@ -2750,7 +3358,9 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             }
         }
     };
-    let rx = sess.tap_bytes();
+    // 구독과 화면 스냅샷을 한 번에 받는다 — 둘로 나누면 그 사이 출력이 유실되거나
+    // 두 번 그려진다(`tap_bytes_with_snapshot` 주석 참고).
+    let (rx, screen) = sess.tap_bytes_with_snapshot();
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
@@ -2760,6 +3370,11 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             format!(r#"{{"t":"size","cols":{c},"rows":{r},"mirror":{mirrored}}}"#).into(),
         ))
         .await;
+    // 이어서 현재 화면. 크기를 먼저 알린 뒤라야 클라가 격자를 맞춘 상태에서 그린다.
+    // 바이너리로 나가므로 클라는 PTY 바이트와 구분 없이 그대로 `term.write` 한다 —
+    // 받는 쪽에 필요한 코드가 0줄이다. 이게 없으면 이미 떠 있는 pane 에 붙었을 때
+    // 다음 출력이 날 때까지 화면이 빈 채로 남는다.
+    let _ = ws_tx.send(Message::Binary(screen.into())).await;
 
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
@@ -2772,11 +3387,38 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
         }
     });
 
+    // 폰은 pane 격자(196열)를 축소로 담을 수가 없어서 PTY 자체를 줄여야 읽힌다.
+    // 그런데 PTY 는 winsize 가 하나뿐이라 그 순간 kasaterm 쪽 pane 도 같이 좁아진다 —
+    // 자동으로 줄이지 못했던 이유가 그것이고, **되돌릴 방법이 없다는 것**이 진짜
+    // 문제였다. 원래 격자를 들고 있다가 연결이 끝날 때 되돌리면, 폰 탭을 닫는 것만으로
+    // 여기가 복구되므로 자동으로 켜도 안전해진다.
+    //
+    // ⚠️ 되돌리는 건 **내가 바꿔 놓은 그 크기가 아직 그대로일 때만**이다. 미러가 둘
+    // 붙어 있으면 남이 그 사이 또 바꿨을 수 있는데, 그때 내 원본을 밀어 넣으면 보고
+    // 있는 쪽 화면을 내가 깨뜨린다.
+    let restore_to = mirrored.then_some((c, r));
+    // (cols<<16 | rows). 0 = 이 연결은 격자를 건드린 적이 없다.
+    let forced = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let forced_in = forced.clone();
+
     let sess_in = sess.clone();
     let mut to_browser = tokio::spawn(async move {
-        while let Some(chunk) = brx.recv().await {
-            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
-                break;
+        loop {
+            // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
+            // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
+            // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), brx.recv()).await {
+                Ok(Some(chunk)) => {
+                    if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break, // tap 스레드가 끝났다(PTY 종료)
+                Err(_) => {
+                    if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -2791,12 +3433,24 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
                         continue;
                     };
-                    if v.get("t").and_then(|x| x.as_str()) == Some("resize") && !mirrored {
-                        // ⚠️ 미러일 땐 무시한다. 같은 PTY 를 보고 있는 kasaterm
-                        // pane 의 화면이 같이 깨진다.
-                        let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
-                        let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
-                        let _ = sess_in.resize(c.max(20), r.max(5));
+                    if v.get("t").and_then(|x| x.as_str()) == Some("resize") {
+                        // ⚠️ 미러일 땐 창 크기를 따라 **저절로** 바꾸지 않는다 — 같은 PTY 를
+                        // 보고 있는 kasaterm pane 이 같이 좁아진다. 폰은 그 규칙을 깨야만
+                        // 읽히므로 `force` 로 명시한 요청만 통과시키고, 그렇게 바꾼 격자는
+                        // 연결이 끝날 때 아래에서 되돌린다(그 복구가 있어야 클라이언트가
+                        // 이걸 자동으로 켤 수 있다).
+                        let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+                        if !mirrored || force {
+                            let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+                            let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                            let (c, r) = (c.max(20), r.max(5));
+                            if sess_in.resize(c, r).is_ok() && mirrored {
+                                forced_in.store(
+                                    (c as u32) << 16 | r as u32,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                        }
                     }
                 }
                 Message::Close(_) => break,
@@ -2804,10 +3458,26 @@ async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
             }
         }
     });
-    // 한쪽이 끝나면 다른 쪽도 접는다. 새 셸이면 여기서 Arc 가 떨어져 셸이 종료된다.
+    // 한쪽이 끝나면 다른 쪽도 접는다. **셸은 여기서 안 죽는다** — `keep_session` 이
+    // 붙들고 있어서, 다시 붙으면 하던 작업이 그대로 있다(셸이 exit 하면 EOF 를 보고
+    // 스스로 빠진다).
     tokio::select! {
         _ = &mut to_browser => to_shell.abort(),
         _ = &mut to_shell => to_browser.abort(),
+    }
+
+    // 폰이 줄여 놓은 격자를 돌려준다. 안 하면 폰 탭을 닫은 뒤에도 kasaterm pane 이
+    // 좁아진 채로 남아, 「폰으로 잠깐 봤더니 내 화면이 줄었다」가 된다.
+    if let Some((oc, or)) = restore_to {
+        let packed = forced.load(std::sync::atomic::Ordering::Relaxed);
+        if packed != 0 {
+            let mine = ((packed >> 16) as u16, (packed & 0xffff) as u16);
+            // 내가 마지막으로 넣은 크기가 아직 살아 있을 때만 되돌린다 — 그 사이 남이
+            // (다른 미러든 kasaterm 이든) 바꿨다면 그쪽이 최신이고, 내 원본은 낡았다.
+            if sess.size() == mine && mine != (oc, or) {
+                let _ = sess.resize(oc, or);
+            }
+        }
     }
 }
 
@@ -2832,10 +3502,21 @@ pub fn spawn_http_server_opts(
 ) -> std::io::Result<u16> {
     // Bind synchronously so we can learn (and return) the real port before
     // handing the socket to tokio.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", preferred_port))
-        .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))?;
+    let addr = bind_addr();
+    let listener = std::net::TcpListener::bind((addr.as_str(), preferred_port))
+        .or_else(|_| std::net::TcpListener::bind((addr.as_str(), 0)))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    if !matches!(addr.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        // 여는 순간 토큰이 유일한 방어다. 어디서 얻는지를 로그에 남겨 두지 않으면
+        // 「왜 403 이냐」로 헤매다 결국 토큰을 끄는 쪽으로 가게 된다.
+        eprintln!(
+            "[kasaspace-mcp] {addr}:{port} 로 열었습니다 — 원격 접속에는 토큰이 필요합니다.\n\
+             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term?t=$(cat ~/.config/kasaterm/remote-token)"
+        );
+        // 파일을 미리 만들어 둔다 — 첫 원격 요청 때 만들면 그 요청이 먼저 튕긴다.
+        let _ = remote_token();
+    }
 
     std::thread::Builder::new()
         .name("kasaspace-mcp-http".into())
@@ -2883,6 +3564,7 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let panes_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
@@ -3010,7 +3692,12 @@ pub fn spawn_http_server_opts(
                     .route("/term", get(term_page_handler))
                     .route("/term/xterm.js", get(term_asset_js))
                     .route("/term/xterm.css", get(term_asset_css))
-                    .route("/term/panes", get(term_panes_handler))
+                    .route("/term/font.woff2", get(term_asset_font))
+                    .route("/term/avatar/{slug}", get(term_avatar))
+                    .route(
+                        "/term/panes",
+                        get(move || term_panes_handler(panes_backend.clone())),
+                    )
                     .route("/term/ws", get(term_ws_handler))
                     .route(
                         "/mode",
@@ -3324,7 +4011,15 @@ pub fn spawn_http_server_opts(
                     // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
                     // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.
                     .layer(axum::middleware::from_fn(origin_guard_mw));
-                if let Err(e) = axum::serve(tokio_listener, app).await {
+                // ConnectInfo 를 붙여야 `origin_guard_mw` 가 peer 주소를 보고
+                // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
+                // 토큰 없이 통과한다.
+                if let Err(e) = axum::serve(
+                    tokio_listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                {
                     eprintln!("[kasaspace-mcp] serve error: {e}");
                 }
             });
@@ -3342,6 +4037,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// pane 의 팀 이름으로 task 디렉토리를 집는지. 옛 경로 둘(`tasks/session-<8hex>`,
+    /// `teams/<team>/config.json` 의 cwd 매칭)이 모두 빗나가 **모든 pane 의 태스크가 0개**
+    /// 로 뜨던 회귀를 못박는다 — store 는 `tasks/<team>/` 이고 그 config.json 은 이제 없다.
+    #[test]
+    fn team_task_dir_comes_from_the_team_name() {
+        let base = temp_dir("team-task-dir");
+        let team = "kt-Users-kasa-Desktop-momewomo-sionic-15b5";
+        std::fs::create_dir_all(base.join(team)).unwrap();
+        assert_eq!(team_task_dir_in(&base, team), Some(base.join(team)));
+        // 없는 팀은 빈 값 — 옆 팀 목록을 대신 보여주면 남의 태스크가 뜬다.
+        assert_eq!(team_task_dir_in(&base, "kt-other-0000"), None);
+        assert_eq!(team_task_dir_in(&base, ""), None);
+        // 팀 이름이 그대로 경로 조각이 되므로 탈출 시도는 막는다.
+        assert_eq!(team_task_dir_in(&base, "../etc"), None);
+        assert_eq!(team_task_dir_in(&base, "a/b"), None);
+    }
+
+    /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면
+    /// 한도 분산 기능에서 한도 표시가 거짓말을 한다(거노 2026-08-05: 세 계정의
+    /// weekly_all 이 95/25/? 인데 화면엔 하나의 숫자만 떴다).
+    #[test]
+    fn usage_snapshot_is_per_account_slot() {
+        let now = 1_785_000_000u64;
+        let a = serde_json::json!({ "limits": [{ "group": "weekly", "percent": 95 }] });
+        let b = serde_json::json!({ "limits": [{ "group": "weekly", "percent": 25 }] });
+        let doc = merge_usage_snapshot(None, "", &a, now);
+        let doc = merge_usage_snapshot(Some(&doc), "/slots/acct-1", &b, now);
+        // 각 슬롯이 자기 값을 돌려주고, 서로 섞이지 않는다.
+        assert_eq!(usage_from_snapshot(&doc, "", now), Some(a));
+        assert_eq!(usage_from_snapshot(&doc, "/slots/acct-1", now), Some(b));
+        // 기록이 없는 슬롯은 **다른 슬롯 값으로 폴백하지 않는다** — 빈 값이 틀린 값보다 낫다.
+        assert_eq!(usage_from_snapshot(&doc, "/slots/acct-2", now), None);
+    }
+
+    #[test]
+    fn usage_snapshot_expires_after_six_hours() {
+        let saved_at = 1_785_000_000u64;
+        let doc = merge_usage_snapshot(None, "", &serde_json::json!({ "x": 1 }), saved_at);
+        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600).is_some(), "6시간 경계는 유효");
+        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600 + 1).is_none(), "그 뒤는 폐기");
+    }
+
+    /// 업그레이드 경로 — 옛 형식(`{ts, usage}`)은 어느 계정 것인지 기록이 없다.
+    /// 기본 슬롯일 때만 받아들이고, 이름 붙은 슬롯에는 절대 붙이지 않는다.
+    #[test]
+    fn legacy_flat_snapshot_only_feeds_the_default_slot() {
+        let now = 1_785_000_000u64;
+        let legacy = serde_json::json!({ "ts": now, "usage": { "limits": [] } }).to_string();
+        assert!(usage_from_snapshot(&legacy, "", now).is_some());
+        assert!(usage_from_snapshot(&legacy, "/slots/acct-1", now).is_none());
     }
 
     /// Pins the naming to Claude Code's own scheme. Expected values come from
@@ -3406,4 +4153,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn shared_room_tasks_need_an_owner() {
+        // 방 저장소: 주인 없는 것은 아무의 것도 아니다(옛 세션 유령이 카드마다 붙던 원인).
+        assert!(!task_is_mine("", "모모이", true));
+        assert!(task_is_mine("모모이", "모모이", true));
+        assert!(!task_is_mine("히마리", "모모이", true));
+        // 이름 없는 pane 은 방 목록에서 아무것도 가져가지 않는다.
+        assert!(!task_is_mine("", "", true));
+
+        // 세션 저장소: 그 pane 혼자 쓰므로 주인 없는 것도 제 것.
+        assert!(task_is_mine("", "모모이", false));
+        assert!(task_is_mine("", "", false));
+        assert!(!task_is_mine("히마리", "모모이", false));
+    }
+}
+
+#[cfg(test)]
+mod raw_pane_tests {
+    use super::raw_pane_param;
+
+    #[test]
+    fn keeps_the_percent_that_query_decoding_would_eat() {
+        // pane id 는 `%1` 처럼 % 로 시작한다. 디코딩된 값은 제어문자가 되어
+        // 조회에 실패하므로, 원문을 그대로 들고 있어야 한다.
+        assert_eq!(raw_pane_param(Some("pane=%116")).as_deref(), Some("%116"));
+        assert_eq!(
+            raw_pane_param(Some("t=abc&pane=%25116")).as_deref(),
+            Some("%25116")
+        );
+    }
+
+    #[test]
+    fn none_when_absent_or_empty() {
+        assert_eq!(raw_pane_param(Some("pane=")), None);
+        assert_eq!(raw_pane_param(Some("cwd=/tmp")), None);
+        assert_eq!(raw_pane_param(None), None);
+    }
+}
+
+#[cfg(test)]
+mod remote_peer_tests {
+    use super::is_remote_peer;
+
+    fn req(headers: &[(&str, &str)], peer: Option<&str>) -> axum::extract::Request {
+        let mut b = axum::http::Request::builder().uri("/term/ws");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let mut r = b.body(axum::body::Body::empty()).unwrap();
+        if let Some(p) = peer {
+            r.extensions_mut().insert(axum::extract::ConnectInfo(
+                p.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+        }
+        r
+    }
+
+    #[test]
+    fn plain_loopback_stays_local() {
+        assert!(!is_remote_peer(&req(&[], Some("127.0.0.1:51234"))));
+        assert!(!is_remote_peer(&req(&[], Some("[::1]:51234"))));
+        assert!(!is_remote_peer(&req(&[], None)));
+    }
+
+    #[test]
+    fn another_machine_is_remote() {
+        assert!(is_remote_peer(&req(&[], Some("192.168.0.7:51234"))));
+    }
+
+    /// 터널은 같은 머신에서 loopback 으로 붙는다. peer 만 보면 로컬로 보여
+    /// 토큰 관문을 건너뛰므로, 프록시 헤더 하나로도 원격이어야 한다.
+    #[test]
+    fn tunnel_arriving_over_loopback_is_remote() {
+        for h in ["cf-connecting-ip", "x-forwarded-for"] {
+            assert!(
+                is_remote_peer(&req(&[(h, "203.0.113.9")], Some("127.0.0.1:51234"))),
+                "{h} 가 붙었는데도 로컬로 봤다"
+            );
+        }
+    }
 }

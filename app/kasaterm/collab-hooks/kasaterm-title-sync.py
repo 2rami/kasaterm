@@ -35,6 +35,11 @@ CLIP = 48
 TAIL = 128 * 1024
 MIN_INTERVAL_S = 60
 CTX_CHARS = 2000
+# 전 머신 동시 생성 상한. 세션당 flock 만으로는 못 막는다 — 락이 sid 별이라
+# 세션이 200개면 락도 200개고 전부 동시에 통과한다(2026-08-05 실사고: 벤치마크가
+# 만든 junk 세션 수백 개가 저마다 제목 생성을 띄워 로드 348, 코어 14). 여기서
+# 막히면 그냥 물러난다 — 다음 Stop 턴에 어차피 다시 시도한다.
+MAX_CONCURRENT = 2
 
 
 def read_tail(tp):
@@ -108,6 +113,10 @@ def scan(lines):
     return title, users, asst
 
 
+def lockdir_path():
+    return os.path.join(tempfile.gettempdir(), "kasaterm-title-gen")
+
+
 def decide():
     try:
         payload = json.load(sys.stdin)
@@ -116,6 +125,15 @@ def decide():
     tp = payload.get("transcript_path") or ""
     sid = payload.get("session_id") or ""
     if not tp or not sid or not os.path.isfile(tp):
+        return
+    # 제 꼬리를 물지 않는다. 우리가 띄운 headless claude 는 그 자체가 세션이고,
+    # claude 는 **그 세션에도** 제목을 지어주려 또 하나를 띄운다. 그 손자는 shim
+    # settings 를 물려받아 Stop 훅이 발화하고, 그러면 여기로 돌아와 또 스폰한다.
+    # 매번 새 sid 라 60초 스로틀도 세션당 flock 도 하나도 안 걸린다 — 5초에
+    # 한 개씩 무한증식했다(2026-08-05: 로드 348, MCP 47개, 앱 재시작으로도 안 죽음.
+    # detach 라 앱 수명 밖이다). 우리 세션은 cwd 가 junk 락디렉터리라 transcript
+    # 프로젝트 경로에 그 이름이 박힌다 — 그게 유일하게 믿을 만한 표식이다.
+    if os.path.basename(lockdir_path()) in tp.replace(os.sep, "-"):
         return
     size, lines = read_tail(tp)
     title, users, _ = scan(lines)
@@ -161,13 +179,26 @@ def real_claude():
 
 
 def generate(tp, sid, srclen):
-    lockdir = os.path.join(tempfile.gettempdir(), "kasaterm-title-gen")
+    lockdir = lockdir_path()
     os.makedirs(lockdir, exist_ok=True)
     lock = open(os.path.join(lockdir, f"{sid}.lock"), "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return  # 같은 세션 생성이 이미 진행 중
+    # 슬롯을 하나 못 잡으면 물러난다. 변수에 붙들어 둬야 한다 — 파일 객체가
+    # GC 되면 fd 가 닫히며 flock 도 풀려, 상한이 있으나 마나가 된다.
+    slot = None
+    for i in range(MAX_CONCURRENT):
+        f = open(os.path.join(lockdir, f"slot-{i}.lock"), "w")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            slot = f
+            break
+        except OSError:
+            f.close()
+    if slot is None:
+        return
     if not os.path.isfile(tp):
         return
     _, lines = read_tail(tp)
@@ -197,12 +228,16 @@ def generate(tp, sid, srclen):
     # 입력박스 인레이에 "아래 대화의 주제를…" 메타프롬프트가 유출된다(거노 실측).
     # PANE_ID 가 없으면 hook 이 첫 줄에서 즉시 no-op.
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("KASATERM_")}
+    # `--strict-mcp-config` 없이 부르면 이 한 줄짜리 제목 생성이 사용자의 MCP
+    # 스택을 통째로 띄운다 — exa·playwright·context7 이 매번 node 프로세스로
+    # 붙어 제목 하나에 4프로세스가 됐다(2026-08-05: 고아 MCP 43개). 제목 짓는 데
+    # 툴은 하나도 안 쓴다. `--mcp-config` 를 안 준 채로 strict 면 서버 0개다.
     try:
         out = subprocess.run(
-            [claude, "-p", "--model", "haiku", prompt],
+            [claude, "-p", "--strict-mcp-config", "--model", "haiku", prompt],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=60,
             cwd=lockdir,  # -p 가 남기는 세션 파일을 junk 프로젝트로 격리
             env=clean_env,
         ).stdout.strip()

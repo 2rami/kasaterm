@@ -7,17 +7,20 @@ import { parseJsonlSync } from './jsonl';
 // munder 는 electron IPC(window.cth.*)로 hive 와 통신했지만, 우리는 kasaterm 의
 // kasaspace MCP HTTP 를 fetch 로 폴링한다. dist 는 MCP 가 /arona-ui/ 로 정적
 // 서빙하므로 페이지·API 가 **same-origin** → BASE='' (relative). 8765 가 점유돼
-// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차). vite dev 로 띄울 때만 절대주소
-// (개발 서버는 5173, API 는 별도 포트라 same-origin 이 아님). 기본 8765 지만
-// `VITE_MCP_PORT` 로 덮어쓸 수 있다 — 8765 점유돼 폴백 포트로 뜬 인스턴스에 붙어
-// 검증할 때 쓴다.
-const MCP_PORT = import.meta.env.VITE_MCP_PORT || '8765';
+// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차).
+//
+// dev(vite)도 상대경로를 쓴다 — vite.config 의 proxy 가 API 경로를 실서버로 넘긴다.
+// 전에는 여기서 절대주소(`http://127.0.0.1:8765`)를 썼는데, 그 포트엔 CORS 헤더가
+// 없어 **모든 요청이 막히고 화면이 통째로 빈다**. 빈 화면은 원인이 백 가지라 이걸로
+// 반나절이 날아갔다(2026-08-10). `VITE_MCP_PORT` 를 **명시했을 때만** 옛 절대주소로
+// 간다 — 다른 포트로 뜬 인스턴스에 붙어 볼 때 쓰던 길이라 남겨 둔다(그 경우엔 CORS 가
+// 되는 서버여야 한다). 헤드리스에 붙일 땐 그쪽 말고 `VITE_MCP_TARGET` 을 써라.
+const DEV_PORT = import.meta.env.VITE_MCP_PORT;
 // 웹뷰 백엔드 후보. 프로덕션은 same-origin(페이지를 서빙한 kasaterm 8765) 우선, 그게
 // 죽으면 standalone serve-web(8766)으로 폴백 — 터미널이 꺼져도 daemon 세션을 계속 본다.
-// dev(vite 5173)는 kasaterm 8765 절대주소만(cross-origin, 폴백 없음).
 const FALLBACK_PORT = import.meta.env.VITE_MCP_FALLBACK_PORT || '8766';
 const CANDIDATES: string[] = import.meta.env.DEV
-  ? [`http://127.0.0.1:${MCP_PORT}`]
+  ? (DEV_PORT ? [`http://127.0.0.1:${DEV_PORT}`] : [''])
   : ['', `http://127.0.0.1:${FALLBACK_PORT}`];
 // 호출부(약 50곳)가 전부 `${BASE}` 를 호출 시점 lazy read 하므로, let 재대입 하나로 전
 // 사이트에 폴백이 전파된다(호출부 수정 0).
@@ -111,6 +114,10 @@ interface BoardRow {
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
+  /** 명시적 완료 보고(kasaterm-cli done) — "succeeded"|"failed" + 한 줄 요약 + 경과 초. */
+  done_outcome?: string;
+  done_summary?: string;
+  done_ago_secs?: number;
 }
 
 function toStatus(s?: string): StatusKind {
@@ -175,7 +182,10 @@ function toAgent(r: BoardRow): Agent {
     contextLimit: r.context_limit,
     contextPct: r.context_pct,
     branch: r.branch,
-    windowIdx: r.window_idx ?? 0
+    windowIdx: r.window_idx ?? 0,
+    doneOutcome: r.done_outcome,
+    doneSummary: r.done_summary,
+    doneAgoSecs: r.done_ago_secs
   };
 }
 
@@ -368,14 +378,45 @@ export async function swapCharacter(surface: string, character: string): Promise
 
 /** `character` = 세션→학생 영속 바인딩(백엔드가 session_characters.json 에서 얹음).
  *  미바인딩 세션은 undefined — 피커가 실루엣/무색 폴백. */
-export interface RecentSession { id: string; label: string; mtime: number; cwd: string; character?: string; }
+/** 세션을 만든 코딩 프로그램. 이어가는 명령이 셋 다 달라서(`claude --resume` /
+ *  `codex resume` / `agy --conversation`) 목록을 합칠 때 이 값이 없으면 무엇으로
+ *  여는지 알 수가 없다. 옛 기록엔 없어서 서버가 `"claude"` 를 기본으로 채운다. */
+export type Harness = 'claude' | 'codex' | 'agy';
 
-/** GET /recent-sessions?cwd=<abs> — 최근 claude 세션 목록(이어가기 후보, 최신순).
- *  cwd 생략 시 active 방 cwd. fail-soft 빈 배열. */
-export async function fetchRecentSessions(cwd?: string): Promise<RecentSession[]> {
+export interface RecentSession {
+  harness?: Harness;
+  id: string;
+  label: string;
+  mtime: number;
+  cwd: string;
+  character?: string;
+  /** 마지막 대화 한 줄. 서버가 아직 안 보내므로 대개 비어 있다 — 생기면 행에 자동으로 붙는다. */
+  preview?: string;
+}
+
+/** 그 세션을 이어가는 셸 명령. 하네스마다 다르므로 한 곳에서만 만든다 —
+ *  목록에 세 프로그램이 섞이는 순간, claude 명령을 하드코딩해 두면 codex 세션을
+ *  골라도 claude 로 열려 그냥 실패한다. */
+export function resumeCommand(id: string, harness?: Harness): string {
+  switch (harness) {
+    case 'codex': return `codex resume ${id}`;
+    case 'agy': return `agy --conversation ${id}`;
+    default: return `claude --resume ${id}`;
+  }
+}
+
+/** GET /recent-sessions?cwd=<abs>[&scope=here|all] — 최근 세션 목록(이어가기 후보, 최신순).
+ *  cwd 생략 시 active 방 cwd. `scope='all'` 이면 cwd 를 넘어 전체.
+ *  fail-soft 빈 배열. */
+export async function fetchRecentSessions(cwd?: string, scope?: 'here' | 'all'): Promise<RecentSession[]> {
   try {
-    const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
-    const r = await fetch(`${BASE}/recent-sessions${q}`);
+    const q = new URLSearchParams();
+    if (cwd) q.set('cwd', cwd);
+    // 서버가 아는 값은 `here|all` 이다. 지금은 `all` 만 보고 나머지를 else 로 떨어뜨려
+    // 안 보내도 같지만, 세 번째 값이 생기면 조용히 어긋난다 — 그래서 명시해 보낸다.
+    if (scope) q.set('scope', scope);
+    const qs = q.toString();
+    const r = await fetch(`${BASE}/recent-sessions${qs ? `?${qs}` : ''}`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { sessions?: RecentSession[] };
     return Array.isArray(d?.sessions) ? d.sessions : [];
@@ -434,15 +475,25 @@ export async function killBackgroundAgent(pid: number): Promise<boolean> {
   }
 }
 
-/** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
- *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
-export async function resumeSession(id: string, cwd?: string, newroom = false, attach = false): Promise<boolean> {
+/** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>[&harness=<h>] — 새 pane 을
+ *  열고 셸 프롬프트가 뜨면 이어가기 명령을 주입한다. newroom=true 면 새 방.
+ *
+ *  `harness` 는 무엇으로 여는지를 정한다(`claude --resume` / `codex resume` /
+ *  `agy --conversation`). 안 주면 서버가 claude 로 친다 — 옛 호출부가 그대로 돌게. */
+export async function resumeSession(
+  id: string,
+  cwd?: string,
+  newroom = false,
+  attach = false,
+  harness?: Harness,
+): Promise<boolean> {
   if (!id) return false;
   try {
     const q = new URLSearchParams({ id });
     if (cwd) q.set('cwd', cwd);
     if (newroom) q.set('newroom', '1');
     if (attach) q.set('attach', '1');
+    if (harness && harness !== 'claude') q.set('harness', harness);
     const r = await fetch(`${BASE}/session-resume?${q}`, { method: 'POST' });
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
@@ -612,19 +663,50 @@ export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Pr
 }
 
 export interface ClaudeUsageWindow { utilization: number; resets_at: string; }
+/** oauth/usage 의 `limits[]` 한 항목 — 창별 사용률. `group` 은 session|weekly. */
+export interface ClaudeUsageLimit {
+  group?: string;
+  kind?: string;
+  percent?: number;
+  resets_at?: string | null;
+  is_active?: boolean;
+  severity?: string;
+}
 export interface ClaudeUsage {
   five_hour?: ClaudeUsageWindow | null;
   seven_day?: ClaudeUsageWindow | null;
   seven_day_opus?: ClaudeUsageWindow | null;
   seven_day_sonnet?: ClaudeUsageWindow | null;
+  limits?: ClaudeUsageLimit[] | null;
 }
-/** GET /claude-usage — claude oauth usage(5시간/주간 사용률·리셋). 토큰 없거나 실패면 null. */
-export async function fetchClaudeUsage(): Promise<ClaudeUsage | null> {
+/** 화면에 띄울 한 줄 — 가장 먼저 닫히는 창. `stale` 이면 upstream 이 막혀 재사용된 값. */
+export interface UsageBadge { pct: number; label: string; resetsAt: string | null; stale: boolean; accountDir: string; }
+
+/** `limits[]` 중 percent 가 가장 높은 창. `five_hour.utilization` 만 보면 안 되는
+ *  이유: 실측 세 계정 모두 그 값이 0 이고 실제 압박은 전부 weekly(95%/25%)였다 —
+ *  pill 이 "다 0퍼"로 보인 원인(거노 2026-08-05). limits 가 없는 옛 응답은 five_hour 로 폴백. */
+export function usagePressure(u: ClaudeUsage | null): { pct: number; label: string; resetsAt: string | null } | null {
+  if (!u) return null;
+  const top = (u.limits ?? [])
+    .filter((l) => typeof l.percent === 'number')
+    .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0))[0];
+  if (top) {
+    const label = top.group === 'session' ? '5h' : top.group === 'weekly' ? '7d' : '한도';
+    return { pct: top.percent ?? 0, label, resetsAt: top.resets_at ?? null };
+  }
+  if (u.five_hour) return { pct: u.five_hour.utilization, label: '5h', resetsAt: u.five_hour.resets_at ?? null };
+  return null;
+}
+
+/** GET /claude-usage — 활성 계정의 한도. 토큰 없거나 실패면 null. `stale`·`account_dir`
+ *  까지 실어 오므로 호출자가 "지금 값인지 / 어느 계정 값인지"를 구분할 수 있다. */
+export async function fetchClaudeUsage(): Promise<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null> {
   try {
     const r = await fetch(`${BASE}/claude-usage`);
     if (!r.ok) return null;
-    const d = (await r.json()) as { ok?: boolean; usage?: ClaudeUsage };
-    return d?.ok ? (d.usage ?? null) : null;
+    const d = (await r.json()) as { ok?: boolean; usage?: ClaudeUsage; stale?: boolean; account_dir?: string };
+    if (!d?.ok || !d.usage) return null;
+    return { usage: d.usage, stale: d.stale === true, accountDir: d.account_dir ?? '' };
   } catch {
     return null;
   }
@@ -709,7 +791,9 @@ export async function fetchSentImages(surfaceId: string, n = 12, since?: number)
 
 /** GET /pane-tasks — claude TaskCreate 태스크(~/.claude/tasks/<session>/<n>.json)를
  *  pane 별로. surface 주면 그 pane 만. arona 업무 탭이 학생별 진행을 보여준다. fail-soft. */
-export interface PaneTask { pane: string; id: string; subject: string; status: string }
+/** `mine` = 이 pane 이 주인이거나 주인이 없는(방 공용) 태스크. 서버가 판정한다 — 웹뷰는
+ *  pane 이 어떤 에이전트 이름으로 떠 있는지 모른다. */
+export interface PaneTask { pane: string; id: string; subject: string; status: string; owner?: string; mine?: boolean }
 export async function fetchPaneTasks(surface?: string): Promise<PaneTask[]> {
   try {
     const q = surface ? `?surface=${encodeURIComponent(surface)}` : '';

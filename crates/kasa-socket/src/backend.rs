@@ -21,6 +21,9 @@ pub enum SplitDirection {
     Right,
     Up,
     Down,
+    /// 방향을 부른 쪽이 안 정한다 — 쪼갤 pane 의 종횡비를 보고 **긴 축**을 쪼갠다.
+    /// 결정은 GUI 스레드에서만 가능하다(pane 픽셀 크기를 거기서만 안다).
+    Auto,
 }
 
 /// A workspace as seen by the protocol — analogous to a tmux session
@@ -41,6 +44,22 @@ pub struct SurfaceInfo {
     /// inner shell emits; we forward whatever tmux-bridge captured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// 그 pane 의 작업 폴더.
+    ///
+    /// board 에도 있지만 board 는 **transcript 가 바인딩된 pane 만** 싣는다 — codex 나
+    /// 셸뿐인 pane 은 아예 줄이 없다. `dismiss` 가 닫기 전에 커밋 안 된 변경을 보는
+    /// 근거가 그 cwd 라, board 만 보면 그 pane 들은 **보호 없이 닫힌다**.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// 배정된 학생 이름. 위와 같은 이유로 여기에도 싣는다 — 무엇을 닫는지 사람이
+    /// 읽을 수 있어야 한다(board 미스 시 `dismiss` 가 `?` 만 찍었다).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
+}
+
+/// serde 기본값용 — 옛 기록(하네스 필드가 없던 시절)은 전부 claude 였다.
+fn harness_claude() -> String {
+    "claude".to_string()
 }
 
 /// A past Claude session discoverable for `claude --resume`, built from the
@@ -48,6 +67,11 @@ pub struct SurfaceInfo {
 /// arona-ui lists these so the user can pick one to continue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentSession {
+    /// 어느 하네스의 세션인가 — `"claude"` | `"codex"` | `"agy"`. 이어가는 명령이
+    /// 셋 다 달라서(`claude --resume` / `codex resume` / `agy --conversation`)
+    /// 목록을 합칠 때 이 값이 없으면 무엇으로 여는지 알 수가 없다.
+    #[serde(default = "harness_claude")]
+    pub harness: String,
     /// Claude session uuid (the jsonl file stem) — pass to `claude --resume`.
     pub id: String,
     /// Human-readable label: the session's aiTitle, else its first user
@@ -57,6 +81,12 @@ pub struct RecentSession {
     pub mtime: u64,
     /// Absolute cwd the session ran in.
     pub cwd: String,
+    /// 마지막으로 오간 말 한 줄(`나: …` / `에이전트: …`). 제목은 세션이 무엇으로
+    /// **시작했나**를 말할 뿐이라, 목록을 훑을 때 "어디서 멈췄지"가 안 보인다 —
+    /// 그 칸을 채우는 값이다. 못 뽑으면 빈 문자열이고 그때는 아예 안 실어 보낸다
+    /// (웹뷰가 `preview?: string` 으로 받아 없으면 그 줄을 안 그린다).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preview: String,
 }
 
 /// Multi-session (tmux-style tab) state for the session panel. `count`
@@ -120,6 +150,12 @@ pub struct PaneActivity {
     /// Coarse state for at-a-glance scanning: conventionally one of
     /// "working" | "building" | "blocked" | "idle", but free text is
     /// allowed so a pane can be specific ("running test suite").
+    ///
+    /// ⚠️ **"free text 허용"을 믿고 값을 늘리지 마라.** 실제 소비부는 **정확 일치**로
+    /// 비교한다(2026-08-05 실측 4곳): `auxwin.rs`(busy 바·펄스 둘), `chrome.rs`
+    /// (`== "waiting"`), `handler.rs`(창 단위 working 판정). "working 12s" 같은 값을
+    /// 넣는 순간 그 표시들이 통째로 죽는다 — 문서와 코드가 어긋난 자리다. 부가 정보는
+    /// 이 칸에 얹지 말고 전용 칸을 늘려라(`rate_used_pct` 가 그렇게 생겼다).
     pub status: String,
     /// Files this pane is currently touching. The conflict-detection
     /// signal: a sibling checks the board before editing and backs off
@@ -133,12 +169,47 @@ pub struct PaneActivity {
     /// `surface.peek` per pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// 이 pane 에 **어떻게 말을 걸 수 있나** — `"message"`(cross-session
+    /// SendMessage 로 닿는다) · `"tell"`(명부에 없어 입력창 주입뿐) ·
+    /// `"stale"`(명부엔 있는데 소켓이나 프로세스가 없다).
+    ///
+    /// 이 칸이 있는 이유: `SendMessage` 의 성공 응답은 **도달 증명이 아니다**.
+    /// 죽은 상대에게 보내도 "Message sent" 가 오고, 이름이 어긋나면 오류 없이
+    /// 사라진다. 그래서 보내기 전에 볼 자리가 필요하다 — 2026-08-10 새벽에
+    /// 같은 캐릭터 pane 이 둘이라 엉뚱한 쪽에 브리프를 보냈고, 정작 상대는
+    /// 명부에 없어 애초에 닿지도 않았다.
+    #[serde(default)]
+    pub reach: String,
+    /// 명부에 등록된 **그 세션의 실제 이름** — `SendMessage` 의 `to` 에 그대로
+    /// 넣을 값이다. `agent_name` 과 다를 수 있다(`/rename` 하면 명부 쪽만 바뀐다).
+    /// 이름을 규칙으로 짐작하면 어긋나므로 실측값만 싣는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
     /// 이 pane 에 배정된 캐릭터명(아로나 모드 테마) — assign-character 가 박은
     /// `/tmp/kasaterm-collab/<slug>/character-<N>` 마커 내용. arona-ui 가 교실
     /// 도트칩 이름표에 쓴다(title 은 작업 제목이라 캐릭터명이 아니다). 캐릭터
     /// 테마 없는 방은 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character: Option<String>,
+    /// 이 pane 의 claude 가 팀원으로 떠 있을 때의 하네스 이름·팀(shim 이 pane 셸에
+    /// export 하는 `KASATERM_AGENT`/`KASATERM_TEAM`). 둘 다 있으면 그 pane 은
+    /// `teams/<team>/inboxes/<agent>.json` 을 폴링하므로 **인박스로 말을 걸 수 있다**
+    /// — 입력창에 텍스트를 밀어넣지 않고 SendMessage 와 같은 경로가 열린다. 이름을
+    /// 규칙(`<슬러그>-p<번호>`)으로 추측하면 어긋난 순간 고아 인박스가 되므로 실측값만
+    /// 싣는다. 트리플 없이 뜬 pane(비-claude·다른 방)은 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    /// 이 pane 이 돌리는 하네스(`"claude"` | `"codex"`). 셸이면 None.
+    ///
+    /// **말 거는 법이 갈리는 자리다.** codex 엔 팀 모드도 인박스도 없어
+    /// `agent_name`/`team` 이 영영 None 이고, SendMessage 는 실패하지 않고 **조용히
+    /// 사라진다** — 오케스트레이터가 헛되이 쏘고 답을 기다리게 된다. 그래서 board 가
+    /// 종류를 밝힌다: `"codex"` 면 `kasaterm-cli tell`(입력창 주입)이 유일한 경로다.
+    /// `agent_name` 이 None 인 것만으로는 "트리플 없이 뜬 claude" 와 구별이 안 된다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// Why this pane is `status == "waiting"` — the `waitingFor` field from
     /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
     /// The transcript watcher can't see this: when claude blocks on a
@@ -224,6 +295,41 @@ pub struct PaneActivity {
     /// 0 기본 — board 빌더(socket.rs)가 윈도우별로 채운다.
     #[serde(default)]
     pub window_idx: usize,
+    /// 구독 한도 사용률(%) — **codex 전용**, claude pane 은 None.
+    ///
+    /// 거노 2026-08-05: codex 는 정액제라 비용($)이 무의미하고(그래서 board 비용 칸은
+    /// `—`), 실제로 알고 싶은 건 "얼마나 썼나 / 언제 리셋되나"다. 화면 모양:
+    /// ```text
+    /// claude   $126.02  ctx 50%
+    /// codex     —       ctx 7%   주간 62% (3h 뒤 리셋)
+    /// ```
+    /// 창이 여럿이면 **가장 먼저 터질 것**(사용률 최대) 하나만 싣는다. 실측(2026-08-05,
+    /// 78표본)에선 `primary` 주간창(10080분) 하나뿐이고 `secondary` 는 늘 null 이었다.
+    #[serde(default)]
+    pub rate_used_pct: Option<f32>,
+    /// 위 사용률이 어느 창의 것인지(분). 10080 = 주간. 표시 라벨을 여기서 정한다 —
+    /// 창 종류가 늘어도 코드를 안 고치게 이름 대신 숫자를 싣는다.
+    #[serde(default)]
+    pub rate_window_minutes: Option<u32>,
+    /// 그 창이 리셋되는 절대 시각(unix 초). **표시는 상대 시간으로** 바꿔라(거노) —
+    /// 절대 시각은 읽는 사람이 매번 뺄셈을 해야 한다.
+    #[serde(default)]
+    pub rate_resets_at: Option<i64>,
+    /// 구독 플랜 이름(실측 "plus"). 같은 사용률도 플랜에 따라 뜻이 달라 함께 싣는다.
+    #[serde(default)]
+    pub plan_type: Option<String>,
+    /// 명시적 완료 보고(`pane_done`) — "succeeded" | "failed". None=보고 없음.
+    /// 새 브리프를 받아 다시 working 이 되면 board 빌더가 지운다(스테일 방지).
+    /// status 칸과 별개인 이유: status 는 "지금 뭘 하나"(순간), 이건 "맡은 일이
+    /// 어떻게 끝났나"(결과)라 겹쳐 쓰면 정확 일치 소비부가 죽는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_outcome: Option<String>,
+    /// 완료 보고 한 줄 요약 — 뭘 했고 뭐가 남았는지. done_outcome 없이는 안 실린다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_summary: Option<String>,
+    /// 보고 후 경과 초 — UI 가 "3분 전 완료" 상대 표시를 하도록 절대시각 대신 나이.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_ago_secs: Option<u64>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).
@@ -333,11 +439,23 @@ pub trait Backend: Send + Sync {
     fn recent_sessions(&self, _cwd: Option<&str>) -> Result<Vec<RecentSession>> {
         Ok(Vec::new())
     }
-    /// Open a pane and resume the Claude session `id` in it: `newroom=true`
-    /// opens a fresh window, otherwise it splits the active one; the pane is
-    /// spawned in `cwd` when given. The actual `claude --resume <id>` is
-    /// injected once the new pane's shell prompt is up. Default: unsupported.
-    fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool, _attach: bool) -> Result<()> {
+    /// Open a pane and resume session `id` in it: `newroom=true` opens a fresh
+    /// window, otherwise it splits the active one; the pane is spawned in `cwd`
+    /// when given. The resume command is injected once the new pane's shell
+    /// prompt is up. Default: unsupported.
+    ///
+    /// `harness` 는 그 세션을 만든 코딩 프로그램(`claude`/`codex`/`agy`). 빈 문자열이면
+    /// claude 로 본다. 주입 문자열은 [`crate::sessions::resume_command`] 한 곳에서만
+    /// 만든다 — 예전에 CLI 와 GUI 가 각자 `claude --resume` 을 조립하다 한쪽만 고쳐진
+    /// 적이 있어 일부러 한 벌로 합쳤다.
+    fn resume_session(
+        &self,
+        _id: &str,
+        _cwd: Option<&str>,
+        _newroom: bool,
+        _attach: bool,
+        _harness: &str,
+    ) -> Result<()> {
         anyhow::bail!("resume_session unsupported by this backend")
     }
     /// "대화 저장하기" — foreground claude 를 ←← 주입으로 background daemon 으로 detach.
@@ -346,12 +464,44 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("save_session unsupported by this backend")
     }
     fn focus_surface(&self, surface_id: &str) -> Result<()>;
-    /// Split the focused surface. `focus` decides whether the *new* pane
-    /// becomes active: CLI/automation callers pass `false` so a scripted split
-    /// doesn't yank the user's focus (like `tell`, it stays put); the GUI's own
-    /// keyboard split keeps focus-follows behavior by going through `layout`
-    /// directly, not this method.
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo>;
+    /// Split a surface. `from` is the pane to split — `None` means "the focused
+    /// one", which is only right for a human at the keyboard. An agent calling
+    /// from its own pane passes its id, otherwise the split lands wherever the
+    /// human happens to be looking.
+    ///
+    /// `focus` decides whether the *new* pane becomes active: CLI/automation
+    /// callers pass `false` so a scripted split doesn't yank the user's focus
+    /// (like `tell`, it stays put); the GUI's own keyboard split keeps
+    /// focus-follows behavior by going through `layout` directly, not this
+    /// method.
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        from: Option<&str>,
+    ) -> Result<SurfaceInfo>;
+    /// 그 pane 이 claude 를 띄우면 **쓰게 될** teammate 이름과 팀 — `(agent, team)`.
+    ///
+    /// 예측이 가능한 이유: 학생은 pane 이 생길 때 배정되고(`assign_character_env`),
+    /// 셰임은 그 학생 슬러그에 `-p<번호>` 를 붙일 뿐이다. 그래서 **부팅을 기다리지
+    /// 않고** split 응답에 실어 보낼 수 있고, 부른 쪽은 곧바로 SendMessage 로 브리프를
+    /// 보낼 수 있다(인박스 파일은 셰임이 `[ -f ] ||` 로 만들어 먼저 쓴 걸 안 덮는다).
+    /// 이게 없으면 오케스트레이터가 board 를 되짚거나 이름을 짐작하는데, 짐작은
+    /// 어긋나도 오류가 안 나고 지시가 조용히 사라진다.
+    ///
+    /// 팀은 pane 의 cwd 로 계산한다 — 학생을 **다른 레포로 `cd` 시켜** 띄우면 그
+    /// 학생의 실제 팀은 달라지므로 이 값이 틀린다. 그 경우는 board 가 정본이다.
+    fn pane_agent(&self, _surface_id: &str) -> Option<(String, String)> {
+        None
+    }
+    /// 되살리기 목록을 읽고, `discard` 가 있으면 그 pane 을 **진짜 끈다**.
+    ///
+    /// 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 밀려날 때
+    /// 비로소 죽는다. 오케스트레이터가 `dismiss` 로 정리한 학생들이 그래서 계속 살아
+    /// 있는데, GUI 밖에서는 그 사실을 볼 수도 끌 수도 없었다(거노 2026-08-06).
+    fn closed_panes(&self, _discard: Option<&str>) -> Result<serde_json::Value> {
+        anyhow::bail!("이 백엔드는 되살리기 목록을 모른다")
+    }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).
@@ -421,11 +571,50 @@ pub trait Backend: Send + Sync {
     fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
         anyhow::bail!("set_color unsupported by this backend")
     }
-    /// statusLine 이 매 렌더 보고하는 "현재 보는 경로". claude 가 셸 위에서 cd 해도
-    /// lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가 직접 push 한다. board 의
-    /// `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로"). 기본: 무동작(저장 안 함).
-    fn report_cwd(&self, _surface_id: &str, _cwd: &str, _session_id: &str) -> Result<()> {
+    /// statusLine 이 매 렌더 보고하는 "현재 보는 경로" + 컨텍스트 창/사용 토큰.
+    /// claude 가 셸 위에서 cd 해도 lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가
+    /// 직접 push 한다. board 의 `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로").
+    ///
+    /// `ctx_window`/`ctx_tokens` 는 훅 stdin 의 하네스 정본이다(0 = 미보고). transcript
+    /// 의 model 엔 `[1m]` 태그가 안 실려(API 응답이 `claude-opus-5`) 모델명으로는 1M
+    /// 세션을 가려낼 수 없어, 이 값이 ctx% 분모의 유일한 확정 소스다. 기본: 무동작.
+    ///
+    /// `model`/`effort` 도 같은 훅 stdin 에서 온다(빈 문자열 = 미보고). 앱을 재시작해
+    /// pane 을 복원할 때 **끄기 직전 쓰던 것으로** 되살리는 데 쓴다. ★`model` 은
+    /// `model.id` 원본(`claude-opus-5[1m]`)이라 CLI 에 그대로 되먹일 수 있다 — board 에
+    /// 뜨는 모델명은 API 응답 표기라 `[1m]` 이 없고, 그걸 되먹이면 1M 세션이 200k 로
+    /// 강등된다. 그래서 board 쪽 값과 **의도적으로 다른 경로**를 쓴다.
+    fn report_cwd(
+        &self,
+        _surface_id: &str,
+        _cwd: &str,
+        _session_id: &str,
+        _ctx_window: u64,
+        _ctx_tokens: u64,
+        _model: &str,
+        _effort: &str,
+    ) -> Result<()> {
         Ok(())
+    }
+    /// Render one pane to a PNG and return the file path.
+    ///
+    /// `peek` 는 텍스트만 준다 — 에이전트가 제 화면이 실제로 어떻게 보이는지는
+    /// 못 본다(2026-08-10 지시). 이 메서드가 그 구멍을 메운다: pane 영역만 잘라
+    /// 저장하고, 받는 쪽은 경로를 Read 로 연다.
+    ///
+    /// GPU 프레임버퍼 리드백이라 **창이 다른 창에 가려져 있어도 찍힌다** —
+    /// `screencapture` 와 달리 화면이 아니라 방금 그린 프레임을 읽기 때문이다.
+    /// 다만 창이 최소화되면 OS 가 렌더를 멈추므로 그때는 갱신이 서 있다.
+    ///
+    /// `max_width` = 0 이면 원본 크기. 그 외에는 가로가 그 값을 넘을 때만 비율을
+    /// 지켜 줄인다(읽는 쪽 컨텍스트 절약). 기본: 미지원.
+    fn capture_surface(
+        &self,
+        _surface_id: &str,
+        _path: Option<&str>,
+        _max_width: u32,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("capture_surface unsupported by this backend")
     }
     /// Swap two surfaces' positions in the layout. Default: unsupported.
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
@@ -437,6 +626,12 @@ pub trait Backend: Send + Sync {
     /// daemon stays the layout authority. Default: unsupported.
     fn move_surface(&self, _surface_id: &str, _target: &str, _direction: SplitDirection) -> Result<()> {
         anyhow::bail!("move_surface unsupported by this backend")
+    }
+    /// `outer` **안에 새 탭**을 연다 — 쪼개지 않으므로 화면이 안 줄어든다. `outer` 가
+    /// None 이면 포커스된 pane. 새 탭의 surface 를 돌려준다(부른 쪽이 거기에 명령을
+    /// 실어야 한다). Default: unsupported.
+    fn new_tab(&self, _outer: Option<&str>) -> Result<SurfaceInfo> {
+        anyhow::bail!("new_tab unsupported by this backend")
     }
     /// Set the split ratio at `path` (the seam the GUI just dragged) so the
     /// daemon — the layout authority — persists it and restores it on restart.
@@ -465,6 +660,15 @@ pub trait Backend: Send + Sync {
     fn active_process_name(&self) -> Option<String> {
         None
     }
+    /// 활성 pane 이 돌리는 **하네스 종류**(`"claude"` | `"codex"`). 셸이면 None.
+    ///
+    /// `active_process_name` 으로는 못 갈음한다 — codex 는 npm shim 이라 셸의 직속
+    /// 자식이 `node` 라서 이름에 "codex" 가 없다(실측). 판정은 kasa-pty 의
+    /// `agent_for_shell` 하나이고 여기선 그 문자열만 건넨다(kasa-socket 은 kasa-pty
+    /// 를 안 쓴다). Default 는 None — PTY 를 안 가진 백엔드는 알 길이 없다.
+    fn active_agent(&self) -> Option<String> {
+        None
+    }
     /// Fire a "work complete" notification for a surface. The push half of
     /// the board (which is pull-only): a claude `Stop` hook runs
     /// `kasaterm-cli notify`, the host decides whether to raise a desktop
@@ -482,6 +686,40 @@ pub trait Backend: Send + Sync {
     /// "permission" / the prompt text); empty is fine. Default unsupported.
     fn attention(&self, _surface_id: &str, _reason: &str) -> Result<()> {
         anyhow::bail!("attention unsupported by this backend")
+    }
+    /// 학생의 명시적 완료 보고 — 브리프를 마친 pane 이 `kasaterm-cli done` 으로
+    /// 부른다. board 의 완료 판정을 idle 추정에서 자기 보고 정본으로 바꾸는 자리:
+    /// transcript 휴리스틱은 "놀고 있음"만 알지 "성공/실패로 끝났음"은 모른다.
+    /// `outcome` 은 "succeeded" | "failed" 둘뿐(자유 텍스트 금지 — status 칸과 같은
+    /// 정확 일치 소비 함정을 처음부터 막는다). Default unsupported.
+    fn pane_done(&self, _surface_id: &str, _outcome: &str, _summary: &str) -> Result<()> {
+        anyhow::bail!("pane_done unsupported by this backend")
+    }
+    /// 이 pane 이 **지금 무엇을 돌리기 시작했고 무엇이 끝났는지** — `PreToolUse`/
+    /// `PostToolUse` 훅이 `kasaterm-cli agent-status` 로 부른다.
+    ///
+    /// 진행 표시(헤더 바·사이드바 펄스)는 원래 transcript 꼬리를 읽어 런치와 회수를
+    /// 짝지었다. 그 방식은 세션이 커지면 런치 기록이 꼬리 밖으로 밀려 **오래 걸리는
+    /// 작업일수록 표시가 사라진다**(2026-08-11 실측: 3.8MB 7건 / 8.3MB·24MB 0건).
+    /// 훅은 일어난 그 순간 한 번 오므로 세션 크기와 무관하다.
+    ///
+    /// - `phase` — `start` | `end` | `clear`
+    /// - `kind` — `subagent`(Task) | `background`(run_in_background Bash)
+    /// - `key` — 시작과 종료를 잇는 값. 겹칠 수 있어 소비부는 세어서 관리한다.
+    /// - `label` — 화면에 띄울 짧은 설명. `end`/`clear` 엔 없어도 된다.
+    ///
+    /// `clear` 는 `key` 를 무시하고 그 pane 의 해당 `kind` 를 통째로 비운다 — 턴이
+    /// 끝나면(`Stop`) 서브에이전트는 하나도 안 남으므로, `end` 를 놓친 것이 있어도
+    /// 거기서 새는 걸 막는다. Default unsupported.
+    fn agent_status(
+        &self,
+        _surface_id: &str,
+        _phase: &str,
+        _kind: &str,
+        _key: &str,
+        _label: &str,
+    ) -> Result<()> {
+        anyhow::bail!("agent_status unsupported by this backend")
     }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just

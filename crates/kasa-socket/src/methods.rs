@@ -48,6 +48,17 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
+        "surface.capture" => surface_capture(backend, id, &req.params),
+        // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
+        // 한 왕복에 두는 것은 인덱스가 아니라 pane id 로 지목하기 때문이다(목록이 그
+        // 사이 바뀌어도 엉뚱한 학생을 죽이지 않는다).
+        "surface.closed" => {
+            let want = req.params.get("pane").and_then(|v| v.as_str());
+            match backend.closed_panes(want) {
+                Ok(v) => Response::success(id, v),
+                Err(e) => backend_err(id, e),
+            }
+        }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
         "surface.send_raw" => surface_send_raw(backend, id, &req.params),
@@ -78,6 +89,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
+        "surface.new_tab" => match backend.new_tab(
+            req.params.get("outer").and_then(|v| v.as_str()),
+        ) {
+            Ok(s) => Response::success(id, json!({ "surface": s })),
+            Err(e) => backend_err(id, e),
+        },
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
         "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
@@ -116,6 +133,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "surface.notify" => surface_notify(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
+        "surface.done" => surface_done(backend, id, &req.params),
+        "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -196,6 +215,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.list",
                 "surface.focus",
                 "surface.split",
+                "surface.closed",
                 "surface.send_text",
                 "surface.send_key",
                 "surface.send_raw",
@@ -203,6 +223,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.scroll",
                 "surface.peek",
                 "surface.open_preview",
+                "surface.capture",
                 "surface.dock",
                 "surface.undock",
                 "surface.move",
@@ -218,6 +239,7 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.transcript",
                 "surface.notify",
                 "surface.attention",
+                "surface.done",
             ],
         }),
     )
@@ -297,6 +319,69 @@ fn surface_attention(backend: &dyn Backend, id: Value, params: &Value) -> Respon
     }
 }
 
+fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.done requires `surface_id` (string)"),
+    };
+    // outcome 두 값 강제 — board status 칸에서 겪은 "free text 라더니 소비부는 정확
+    // 일치" 함정을 서버 입구에서 막는다. 실패도 정식 보고다(프로즈에만 실으면 못 읽음).
+    let outcome = match params.get("outcome").and_then(|v| v.as_str()) {
+        Some(o @ ("succeeded" | "failed")) => o,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.done `outcome` must be \"succeeded\" or \"failed\", got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
+    };
+    let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.pane_done(surface_id, outcome, summary) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_agent_status(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.agent_status requires `surface_id` (string)"),
+    };
+    // `surface.done` 의 outcome 과 같은 이유로 값을 입구에서 좁힌다 — 오타 하나가
+    // 조용히 「아무 일도 안 일어남」이 되는 자리라, 훅 스크립트가 틀리면 알아야 한다.
+    let phase = match params.get("phase").and_then(|v| v.as_str()) {
+        Some(p @ ("start" | "end" | "clear")) => p,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.agent_status `phase` must be start|end|clear, got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.agent_status requires `phase` (start|end|clear)"),
+    };
+    let kind = match params.get("kind").and_then(|v| v.as_str()) {
+        Some(k @ ("subagent" | "background")) => k,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.agent_status `kind` must be subagent|background, got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.agent_status requires `kind` (subagent|background)"),
+    };
+    let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("");
+    // `clear` 는 key 를 안 본다(그 kind 통째). start/end 는 짝지을 값이 있어야 한다.
+    if phase != "clear" && key.is_empty() {
+        return param_err(id, "surface.agent_status start/end requires a non-empty `key`");
+    }
+    match backend.agent_status(surface_id, phase, kind, key, label) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
 fn surface_peek(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -322,6 +407,25 @@ fn surface_focus(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     match backend.focus_surface(surface_id) {
         Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// pane 한 칸을 PNG 로 찍는다. `path` 를 안 주면 백엔드가 임시 경로를 만든다.
+/// `max_width` 미지정 시 1200 — 큰 이미지는 받는 쪽 컨텍스트를 크게 태우므로
+/// 기본값부터 작게 잡는다.
+fn surface_capture(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.capture requires `surface_id` (string)"),
+    };
+    let path = params.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let max_width = params
+        .get("max_width")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1200) as u32;
+    match backend.capture_surface(surface_id, path, max_width) {
+        Ok(v) => Response::success(id, v),
         Err(e) => backend_err(id, e),
     }
 }
@@ -414,7 +518,14 @@ fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Respo
         None => return param_err(id, "surface.report_cwd requires `cwd` (string)"),
     };
     let session_id = params.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-    match backend.report_cwd(surface_id, cwd, session_id) {
+    // 컨텍스트 창·사용 토큰은 선택 — 구버전 statusline 은 안 보내고, 그때는 0(미상)이라
+    // GUI 가 종전 추정 폴백으로 떨어진다.
+    let ctx_window = params.get("ctx_window").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ctx_tokens = params.get("ctx_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    // 모델·effort 도 선택 — 빈 문자열이면 "미보고"라 종전 값을 안 덮는다.
+    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let effort = params.get("effort").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.report_cwd(surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -507,24 +618,36 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         Some("right") => SplitDirection::Right,
         Some("up") => SplitDirection::Up,
         Some("down") => SplitDirection::Down,
+        Some("auto") => SplitDirection::Auto,
         Some(other) => {
             return param_err(
                 id,
-                format!("surface.split: direction must be left/right/up/down, got {other:?}"),
+                format!("surface.split: direction must be left/right/up/down/auto, got {other:?}"),
             )
         }
-        None => {
-            return param_err(
-                id,
-                "surface.split requires `direction` (left/right/up/down)",
-            )
-        }
+        // 방향 생략 = auto. 부른 쪽이 pane 모양을 모르는 게 정상이라 이게 기본이다.
+        None => SplitDirection::Auto,
     };
     // 기본 no-focus (자동화 경로): `focus:true` 를 명시할 때만 새 pane 으로 포커스
     // 이동. CLI 의 `--focus` 플래그가 이 값을 채운다.
     let focus = params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
-    match backend.split_surface(dir, focus) {
-        Ok(s) => Response::success(id, json!({"surface": s})),
+    // `from` 없이 오면 포커스된 pane 을 쪼갠다(사람이 키보드로 부른 경우). CLI 는
+    // pane 안에서 부르면 자기 id 를 채워 보낸다 — 그래야 에이전트의 split 이 사람이
+    // 보고 있는 창을 건드리지 않는다.
+    let from = params.get("from").and_then(|v| v.as_str());
+    match backend.split_surface(dir, focus, from) {
+        Ok(s) => {
+            // 새 pane 이 claude 로 뜨면 쓸 이름을 **여기서** 알려 준다 — 부른 쪽이
+            // 부팅을 기다렸다 board 를 되짚는 왕복이 통째로 사라진다(거노: "바로
+            // SendMessage 하면 되는데"). 모르면 키를 아예 안 싣는다.
+            let agent = backend.pane_agent(&s.id);
+            let mut body = json!({"surface": s});
+            if let (Some((a, t)), Some(o)) = (agent, body.as_object_mut()) {
+                o.insert("agent".into(), json!(a));
+                o.insert("team".into(), json!(t));
+            }
+            Response::success(id, body)
+        }
         Err(e) => backend_err(id, e),
     }
 }
@@ -537,7 +660,9 @@ fn session_resume(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let newroom = params.get("newroom").and_then(|v| v.as_bool()).unwrap_or(false);
     let attach = params.get("attach").and_then(|v| v.as_bool()).unwrap_or(false);
-    simple(id, backend.resume_session(sid, cwd, newroom, attach))
+    // 하네스 미지정은 claude — 이 파라미터가 없던 시절의 호출을 그대로 받는다.
+    let harness = params.get("harness").and_then(|v| v.as_str()).unwrap_or("claude");
+    simple(id, backend.resume_session(sid, cwd, newroom, attach, harness))
 }
 
 fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response {
@@ -567,10 +692,90 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
             log_agent_tell(backend, from, to, plain);
         }
     }
+    if let Some(to) = target {
+        if let Some(msg) = claude_boot_into_running_pane(backend, to, text) {
+            return param_err(id, &msg);
+        }
+    }
     match backend.send_text(target, text) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
+}
+
+/// 이미 에이전트가 도는 pane 에 **부팅 커맨드**를 쏘는 것을 막는다.
+///
+/// 그 pane 의 에이전트는 셸이 아니라 자기 입력창에 그 문자열을 받아 지시로 읽어 버리고,
+/// 브리프를 인박스에 미리 넣어 두는 스폰 절차(인박스 선주입 → pane 에서 claude 부팅)를
+/// 그대로 쓰면 **아무도 뜨지 않은 이름의 인박스**가 하나 생겨 지시가 조용히 사라진다.
+/// 도는 pane 에 말을 거는 정답은 인박스(SendMessage)이고, codex pane 은 tell 뿐이다.
+///
+/// 거부 사유 문자열을 돌려주고, 보내도 되면 `None`.
+fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str) -> Option<String> {
+    if !looks_like_claude_boot(text) {
+        return None;
+    }
+    // board 에 있다 = transcript 가 도는 에이전트가 그 pane 에 있다. 비싼 조회라
+    // 부팅 커맨드로 보일 때만 확인한다(대부분의 send 는 여기 오지 않는다).
+    let row = backend
+        .collab_board()
+        .ok()?
+        .into_iter()
+        .find(|r| r.surface_id == target)?;
+    // 줄이 있다는 것만으론 부족하다 — **셸만 있는 pane 도 줄을 갖는다**. 탭이 board 에
+    // 들어온 뒤로는 갓 만든 빈 탭이 여기 걸려, 정작 학생을 띄우려는 부팅이 막혔다.
+    // 막을 근거는 「이 pane 에 하네스가 실제로 잡혔다」 하나뿐이다.
+    row.harness.as_deref()?;
+    // codex 는 인박스가 없어 agent_name 이 영영 비므로, 하네스를 알 때는 그걸 먼저
+    // 본다 — 안 그러면 닿지도 않는 SendMessage 를 답으로 알려주게 된다.
+    let how = match (row.harness.as_deref(), &row.agent_name, &row.team) {
+        (Some("codex"), _, _) => "codex 엔 인박스가 없다 — tell 로 보내라".to_string(),
+        (_, Some(a), Some(_)) => format!("SendMessage 로 `to: \"{a}\"` 에 보내라"),
+        _ => "SendMessage(같은 방 pane) 나 tell(그 밖) 로 보내라".to_string(),
+    };
+    let who = row.harness.as_deref().unwrap_or("에이전트");
+    Some(format!(
+        "{target} 에는 이미 {who} 가 돌고 있다 — 부팅 커맨드를 보내면 그 입력창에 \
+         텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
+         이 pane 에 지시할 거라면 {how}."
+    ))
+}
+
+/// 에이전트를 **띄우는** 명령처럼 보이는지. 좁게 잡는다 — "claude 가 왜 이래" 같은
+/// 평범한 지시문이 걸리면 tell 이 막혀 더 나쁘다. 그래서 실행 형태(`cd … && claude`)
+/// 이거나, 줄머리 `claude` + 런처 플래그가 붙은 경우만 본다.
+///
+/// codex 도 같은 함정이라 같이 본다 — 도는 codex pane 에 `cd … && codex` 를 쏘면
+/// 그 codex 가 입력창에 그대로 받아 읽는다(claude 와 판박이).
+fn looks_like_claude_boot(text: &str) -> bool {
+    const FLAGS: [&str; 8] = [
+        "--model",
+        "--agent-id",
+        "--agent-name",
+        "--team-name",
+        "--resume",
+        "--effort",
+        "--dangerously-skip-permissions",
+        "--dangerously-bypass-hook-trust",
+    ];
+    text.lines().any(|line| {
+        let l = line.trim_matches(|c: char| c.is_control() || c == '~' || c == '[').trim();
+        let parts: Vec<&str> = l.split("&&").flat_map(|p| p.split(';')).map(str::trim).collect();
+        let runs_agent = |p: &str| {
+            ["claude", "codex"]
+                .iter()
+                .any(|a| p == *a || p.starts_with(&format!("{a} ")))
+        };
+        let bare = |p: &str| p == "claude" || p == "codex";
+        // `cd … && claude …` 처럼 이어붙인 명령은 그 자체로 실행이다. 조각이 하나뿐이면
+        // 사람이 쓴 문장일 수 있으니 런처 플래그가 붙었을 때만 본다.
+        if parts.len() > 1 {
+            return parts.iter().any(|p| runs_agent(p));
+        }
+        parts
+            .first()
+            .is_some_and(|p| runs_agent(p) && (bare(p) || FLAGS.iter().any(|f| p.contains(f))))
+    })
 }
 
 /// tell 발신 이벤트를 messages.jsonl 에 append — http `persist_sensei_msg` 와 같은
@@ -703,6 +908,10 @@ mod tests {
         // tell 기록(log_agent_tell)의 slug 소스 — 테스트가 스크래치 경로를 지정해
         // 실제 방 slug 를 오염시키지 않게 한다. None 이면 trait 기본(None)과 동일.
         cwd: Option<std::path::PathBuf>,
+        // claude 가 도는 pane 들 — 부팅 커맨드 가드가 이걸 보고 판정한다.
+        board: Vec<crate::backend::PaneActivity>,
+        // 완료 보고 기록 — surface.done 이 outcome 검증을 통과했을 때만 쌓인다.
+        done: Mutex<Vec<(String, String, String)>>,
     }
 
     impl Backend for FakeBackend {
@@ -726,16 +935,28 @@ mod tests {
                 id: "surf-1".into(),
                 workspace_id: "ws-1".into(),
                 title: None,
+                cwd: None,
+                character: None,
             }])
         }
         fn focus_surface(&self, _surface_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        fn split_surface(&self, _direction: SplitDirection, _focus: bool) -> anyhow::Result<SurfaceInfo> {
+        fn collab_board(&self) -> anyhow::Result<Vec<crate::backend::PaneActivity>> {
+            Ok(self.board.clone())
+        }
+        fn split_surface(
+            &self,
+            _direction: SplitDirection,
+            _focus: bool,
+            _from: Option<&str>,
+        ) -> anyhow::Result<SurfaceInfo> {
             Ok(SurfaceInfo {
                 id: "surf-2".into(),
                 workspace_id: "ws-1".into(),
                 title: None,
+                cwd: None,
+                character: None,
             })
         }
         fn send_text(&self, surface: Option<&str>, text: &str) -> anyhow::Result<()> {
@@ -754,6 +975,14 @@ mod tests {
         }
         fn resize_divider(&self, path: &[u8], ratio: f32) -> anyhow::Result<()> {
             self.resized.lock().unwrap().push((path.to_vec(), ratio));
+            Ok(())
+        }
+        fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> anyhow::Result<()> {
+            self.done.lock().unwrap().push((
+                surface_id.to_string(),
+                outcome.to_string(),
+                summary.to_string(),
+            ));
             Ok(())
         }
     }
@@ -915,6 +1144,130 @@ mod tests {
             .collect();
         let path = crate::collab_root().join(&slug).join("messages.jsonl");
         assert!(!path.exists(), "메타 없는 send_text 는 기록을 남기지 않는다");
+    }
+
+    #[test]
+    fn claude_boot_signature_is_narrow() {
+        // 실행 형태 — 막아야 한다.
+        assert!(looks_like_claude_boot("cd /repo && claude"));
+        assert!(looks_like_claude_boot("cd /repo && claude --model 'claude-opus-5[1m]'"));
+        assert!(looks_like_claude_boot("claude --resume abc123"));
+        assert!(looks_like_claude_boot("claude"));
+        // 사람이 쓴 지시문 — tell 이 막히면 안 된다.
+        assert!(!looks_like_claude_boot("claude 코드 좀 봐줘"));
+        assert!(!looks_like_claude_boot("claude 가 왜 이래?"));
+        assert!(!looks_like_claude_boot("이거 claude --model 로 띄웠었나?"));
+    }
+
+    /// codex 도 같은 함정이다 — 도는 codex pane 에 부팅 커맨드를 쏘면 그 codex 의
+    /// 입력창에 텍스트로 박힌다. claude 판정만 있던 시절엔 그냥 통과했다.
+    #[test]
+    fn codex_boot_is_caught_too() {
+        assert!(looks_like_claude_boot("cd /repo && codex"));
+        assert!(looks_like_claude_boot("codex --dangerously-bypass-hook-trust"));
+        assert!(looks_like_claude_boot("codex"));
+        // 좁기는 claude 와 똑같이 — 사람이 쓴 문장은 통과시킨다.
+        assert!(!looks_like_claude_boot("codex 가 왜 이래?"));
+        assert!(!looks_like_claude_boot("codex 로 한번 띄워봐"));
+    }
+
+    /// codex pane 은 인박스가 없어 `agent_name` 이 영영 빈다 — 그때 SendMessage 를
+    /// 답으로 알려주면 부른 쪽이 닿지도 않는 곳에 쏘고 기다린다.
+    #[test]
+    fn codex_pane_is_told_to_use_tell_not_sendmessage() {
+        let backend = FakeBackend {
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-9".into(),
+                harness: Some("codex".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-9", "text": "cd /repo && codex\n"}),
+            ),
+        );
+        assert!(!r.ok);
+        let msg = r.error.unwrap().message;
+        assert!(msg.contains("tell"), "tell 을 답으로 줘야 한다: {msg}");
+        assert!(!msg.contains("SendMessage"), "codex 엔 인박스가 없다: {msg}");
+        assert!(msg.contains("codex"), "무엇이 돌고 있는지 밝혀야 한다: {msg}");
+        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    /// done 의 outcome 은 두 값뿐 — status 칸에서 겪은 "free text 라더니 소비부는
+    /// 정확 일치" 함정을 서버 입구에서 막는다. 통과한 보고만 backend 에 닿는다.
+    #[test]
+    fn surface_done_gates_outcome_to_two_values() {
+        let backend = FakeBackend::default();
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.done",
+                json!({"surface_id": "surf-1", "outcome": "거의 다 됨", "summary": "x"}),
+            ),
+        );
+        assert!(!r.ok);
+        assert!(r.error.unwrap().message.contains("succeeded"), "고칠 값을 알려줘야 한다");
+        assert!(backend.done.lock().unwrap().is_empty(), "거부했으면 기록하지 않는다");
+
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.done",
+                json!({"surface_id": "surf-1", "outcome": "failed", "summary": "빌드 깨짐"}),
+            ),
+        );
+        assert!(r.ok);
+        assert_eq!(
+            backend.done.lock().unwrap().as_slice(),
+            &[("surf-1".to_string(), "failed".to_string(), "빌드 깨짐".to_string())]
+        );
+    }
+
+    #[test]
+    fn boot_command_into_running_pane_is_refused() {
+        let backend = FakeBackend {
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-1".into(),
+                agent_name: Some("prana-p5".into()),
+                team: Some("kt-x".into()),
+                // 막는 근거는 「이 pane 에 하네스가 실제로 잡혔다」 하나다(a9acb69) —
+                // 줄이 있다는 것만으론 셸뿐인 빈 탭까지 막혀 정작 학생을 못 띄웠다.
+                harness: Some("claude".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-1", "text": "cd /repo && claude --model opus\n"}),
+            ),
+        );
+        assert!(!r.ok);
+        // 무엇을 대신 쓸지까지 알려줘야 부른 쪽이 고칠 수 있다.
+        assert!(r.error.unwrap().message.contains("prana-p5"));
+        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    #[test]
+    fn boot_command_into_shell_only_pane_passes() {
+        // board 에 없다 = claude 가 아직 없다. 새 학생을 띄우는 정상 경로다.
+        let backend = FakeBackend::default();
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-9", "text": "cd /repo && claude --model opus\n"}),
+            ),
+        );
+        assert!(r.ok);
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
     }
 
     #[test]

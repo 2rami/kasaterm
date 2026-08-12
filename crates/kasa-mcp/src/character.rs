@@ -78,6 +78,52 @@ pub fn member_names(chars: &Value) -> Vec<String> {
     v
 }
 
+/// 방 학교 판정에서 빼는 소속 — 학원이 아니라 소속 기관이고 인원도 둘뿐이라,
+/// 이게 방 학교로 잡히면 그 방은 두 명 쓰고 곧장 고갈된다.
+const NOT_A_SCHOOL: &str = "샬레";
+
+/// 이름 → 학원. 없는 캐릭터(옛 테마·커스텀)는 `None`.
+pub fn school_of(chars: &Value, name: &str) -> Option<String> {
+    let s = find_character(chars, name)?.get("school")?.as_str()?;
+    (s != NOT_A_SCHOOL).then(|| s.to_string())
+}
+
+/// 후보를 **그 방에 이미 있는 학생들과 같은 학원**으로 좁힌다.
+///
+/// 한 방(프로젝트)에 같은 학원 학생들이 모이면 화면이 한 덩어리로 읽힌다 —
+/// 거노 2026-08-11: "방마다 같은학원소속이나 연관되게 생성되면 재밌을듯".
+///
+/// 좁힌 결과가 비면 **빈 Vec 을 돌려준다**. 호출부가 원래 후보로 폴백해야 한다 —
+/// 학원을 맞추는 것보다 학생이 겹치지 않는 게 먼저다(같은 방에 같은 얼굴이 둘이면
+/// 누가 누군지 사라진다).
+///
+/// 방이 비어 있으면(첫 학생) 좁히지 않는다. 그 첫 배정이 그 방의 학원을 정한다.
+pub fn prefer_same_school(chars: &Value, free: &[String], room: &[String]) -> Vec<String> {
+    let here: std::collections::HashSet<String> =
+        room.iter().filter_map(|n| school_of(chars, n)).collect();
+    if here.is_empty() {
+        return Vec::new();
+    }
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| here.contains(&s)))
+        .cloned()
+        .collect()
+}
+
+/// 방의 **첫 학생**을 고를 때, 다른 방이 이미 쓰는 학원을 피한다.
+///
+/// 첫 배정이 그 방의 학원을 정하므로(`prefer_same_school`), 여기서 갈라 두면 방마다
+/// 다른 학원이 서서 화면에서 방이 구분된다. 학원 수보다 방이 많으면 빈 Vec 을 주고,
+/// 그때는 겹쳐도 된다 — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+pub fn prefer_fresh_school(chars: &Value, free: &[String], elsewhere: &[String]) -> Vec<String> {
+    let used: std::collections::HashSet<String> =
+        elsewhere.iter().filter_map(|n| school_of(chars, n)).collect();
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| !used.contains(&s)))
+        .cloned()
+        .collect()
+}
+
 /// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
 fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
     let mut pool: Vec<&Value> = Vec::new();
@@ -174,36 +220,93 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
     std::fs::rename(&tmp, &path)
 }
 
-/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
-/// `board-watch` 를 Monitor 에 걸어 자동 재개. 예전엔 `wake-watch` 를 권했는데
-/// 동료가 끝났는데도 완료를 못 잡고 40분 타임아웃으로 죽는 걸 실측했다(2026-07-30).
+/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다리는 기본은 **그냥 기다리는
+/// 것**이다. 학생 보고(SendMessage)가 알아서 도착하므로 완료 감시는 중복이고,
+/// board-watch 는 모든 pane 을 보므로 `idle` 을 넣으면 남의 턴 종료마다 깨운다
+/// (거노 2026-08-10: "어차피 끝나면 보고하는데 필요없지 않나"). 그래서 Monitor 는
+/// **보고가 올 수 없는 상태**(승인 막힘·죽음·경로 끊김)에만 남겼다.
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
-동료 pane 의 작업이 끝나길 기다려야 할 때는 tell 로 깨우거나 board 를 반복 확인하지 말고, **Monitor 도구**에 아래를 걸어라(persistent: true):\n\
-  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|idle|attention)'\n\
-동료가 턴을 끝내면(idle) 또는 입력·승인에 막히면(waiting/attention) 그 줄이 알림으로 온다 — 한 명이 아니라 **모든 pane 을 한 번에** 본다. 깨어나면 그 pane 이 뭘 했는지 `kasaterm-cli peek`·`transcript` 로 확인하고 이어서 진행해라.\n\
+**기본은 그냥 기다리는 것이다.** 학생에게 「끝나면 알려라」고 시켰으면 SendMessage 가 알아서 도착한다 — 상대가 유휴로 떠 있어도 읽는다. 거기에 감시를 겹치면 같은 완료를 두 번 받고, board-watch 는 **모든 pane** 을 보므로 내가 안 기다리는 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
+**Monitor 는 보고가 올 수 없을 때만 건다** — 승인 프롬프트에 막혔거나, 죽었거나, 보고 경로가 끊긴 것. 그 셋은 상대가 스스로 알릴 수가 없다(persistent: true):\n\
+  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|\\[done:'\n\
+⚠️ **`idle` 은 넣지 마라.** 「쉬는 중」일 뿐 완료가 아니고, 그 한 단어가 남의 턴마다 깨우는 원인이다. 완료의 정본은 `[done:` 이며 그것도 보고를 안 시킨 일감에만 필요하다.\n\
 ⚠️ 필터는 **필수**다. 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄(분당 40줄)이 되고, Monitor 가 알림 폭주로 자동 중지된다(실측).\n\
-⚠️ `kasaterm-cli wake-watch <surface_id>` 도 있지만 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 한 명만 볼 때의 폴백으로만 쓰고 기본은 위 Monitor 로 해라.\n\
-⚠️ 기다릴 일이 있을 때만 걸어라. 아무도 안 기다리는데 걸어 두면 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
+⚠️ **침묵을 성공으로 읽지 마라.** `SendMessage` 의 success 는 도달 증명이 아니고(죽은 상대에게도 「Message sent」가 온다), 이름이 어긋나면 오류 없이 사라진다. 끝났는지는 상대가 남긴 것(커밋·파일·`peek`·`transcript`)으로 확인해라.\n\
+⚠️ `kasaterm-cli wake-watch <surface_id>` 는 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 쓰지 마라.\n\
 \n\
 [협업 — 학생 채팅]\n\
-SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). ⚠️ **본문에 네 이름을 붙이지 마라** — 「아로나: 확인했어요」 처럼 쓰지 말고 「확인했어요」 만 보내라. kasaterm-cli 가 발신 마커를 자동으로 붙여 받는 pane 에 네 프사와 학생색으로 렌더하므로, 직접 쓴 이름은 그 위에 한 번 더 찍혀 중복이 된다. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.\n\
+**SendMessage 가 기본이고, 방(cwd)이 달라도 닿는다.** pane claude 는 트리플 없이 세션 이름만 갖고 뜨므로 전부 cross-session 명부(`~/.claude/sessions/`)에 오른다 — 다른 레포에 띄운 학생에게도 그냥 간다. 유휴로 프롬프트만 떠 있어도 읽는다. 도구 한 번이면 끝이고 상대 화면을 어지럽히지 않는다.\n\\
+**보내기 전에 `ListAgents` 로 이름을 확인해라.** 거기 뜬 이름을 `to` 에 그대로 넣는다(`[ref]` 는 이름이 겹치거나 오류가 시킬 때만 덧붙인다). 이름을 `<슬러그>-p<번호>` 규칙으로 짐작하지 마라 — 어긋나도 오류가 안 나고 조용히 사라진다.\n\\
+⚠️ **`SendMessage` 의 `success` 는 도달 증명이 아니다** — 이미 죽은 상대에게 보내도 「Message sent」가 돌아온다(실측). 지시가 먹었는지는 상대가 남긴 것(커밋·파일·`peek`)으로 확인해라.\n\\
+⚠️ **트리플(`--agent-id`)을 직접 주고 claude 를 띄우지 마라.** 그 세션은 명부에서 통째로 제외돼(등록 함수 첫 줄 `if(W4()!=null) return false`) 남을 못 찾고 남도 못 찾는다 — **발신·수신 양쪽이 다 죽는다**(2026-08-09 실측, 이것 때문에 트리플을 걷어냈다). shim 이 알아서 이름만 붙이니 손대지 마라.\n\\
+**태스크 목록은 이제 pane 마다 따로다**(팀이 없어졌다). 남이 뭘 하는지는 `kasaterm-cli board` 로 본다.\n\\
+`kasaterm-cli tell <surface_id> \"...\"` 는 **SendMessage 가 안 닿을 때만** — 비-claude pane(codex 등)이나 `ListAgents` 에 안 뜨는 세션. tell 은 상대 입력창에 글자를 밀어넣는 것이라 상대가 타이핑 중이면 섞인다. ⚠️ tell 본문에 네 이름을 붙이지 마라 — 「아로나: 확인했어요」 말고 「확인했어요」만. kasaterm-cli 가 발신 마커를 붙여 네 프사·학생색으로 렌더하므로 직접 쓴 이름은 중복이 된다.\n\\
+**말은 짧게.** 지시는 무엇을·어느 파일·무엇으로 끝났다고 볼지 세 줄이면 된다. 긴 브리프는 파일에 쓰고 「<절대경로> 읽고 수행」 한 줄만 보내라 — 받는 pane 은 거노가 보고 있는 화면이다.\n\
 \n\
 [협업 — 학생 스폰]\n\
-네가 직접 학생을 띄울 때는 **트리플 플래그를 반드시 붙여라** — 안 붙이면 그 학생에게 SendMessage 가 영영 닿지 않는다(인박스 폴러가 arm 되지 않음). 정본 한 줄:\n\
-`kasaterm-cli send --surface <새 pane> $'cd <레포> && claude --model \\'claude-opus-5[1m]\\' --effort xhigh --agent-id team-lead --agent-name <ASCII작업명> --team-name <팀명>\\n'`\n\
-- 셋(--agent-id/--agent-name/--team-name)은 세트다. 하나라도 빠지면 부팅이 에러난다. 이후 SendMessage 의 `to:` 는 여기 준 --agent-name.\n\
-- 모델은 **`claude-opus-5[1m]`** — `opus` alias 는 아직 옛 버전(4.8)을 가리켜 오푸스 5 로 안 뜬다. 가벼운 정찰은 `claude-sonnet-5[1m]`. 대괄호 때문에 따옴표 필수.\n\
-- --agent-id 는 `team-lead` 그대로 둬라(학생의 AskUserQuestion 이 그 pane 에서 거노에게 직접 뜬다).\n\
-- ⚠️ 스폰 직후 SendMessage 가 'not reachable' 이면 **네 쪽에 트리플이 없어서**다(거노가 연 pane 은 트리플 없이 뜬다). 재시도하지 말고 인박스 파일에 직접 append 해라 — SendMessage 의 실체가 이 파일이라 학생은 똑같이 네이티브로 받는다:\n\
-  `~/.claude/teams/<팀명>/inboxes/<agent-name>.json` 에 `{\"from\":\"<네 캐릭터명>\",\"color\":\"cyan\",\"text\":\"<지시>\",\"summary\":\"<요약>\",\"timestamp\":\"<ISO8601 Z>\",\"msgV\":1,\"msg_id\":\"<uuid>\",\"type\":\"message\",\"read\":false}` 를 배열에 추가(디렉토리 없으면 mkdir -p). 폴러가 먹으면 파일이 `[]` 로 비니 그걸로 도착을 확인해라.\n\
-- 학생의 보고는 SendMessage 로 받지 못한다(같은 이유) — 브리프에 \"보고·질문·완료 통지는 `kasaterm-cli tell <네 pane id>` 로\" 를 네 pane id 와 함께 명시해라.\n\
+**두 줄이면 끝난다. 브리프는 SendMessage 로 보낸다 — 파일도 tell 도 쓰지 마라.**\n\
+```\n\
+kasaterm-cli split <방향>        # 부른 pane(=네 자리)을 쪼갠다. 거노가 보는 창이 아니다\n\
+kasaterm-cli send --surface <새 pane> $'cd <레포> && claude\\n'\n\
+SendMessage(to: <split 이 알려준 agent>, message: 브리프)\n\
+```\n\
+- **`split` 응답이 그 pane 의 `agent` 와 `team` 을 준다** — 학생은 pane 이 생길 때 배정되므로 부팅 전에 이미 정해져 있다. **기다리지도, board 를 되짚지도, 이름을 짐작하지도 마라.** `--count N` 이면 `agents` 배열로 온다.\n\
+- **부팅을 기다릴 필요가 없다.** 인박스 파일은 셰임이 `[ -f ] ||` 로 만들어 먼저 넣어 둔 것을 안 덮는다 — claude 가 뜨자마자 읽는다. 거노: \"claude 켜면 바로 켜지는데, 바로 SendMessage 하면 되는데\".\n\
+- **부팅 커맨드에 브리프를 싣지 마라.** 인자로 실으면 그 텍스트가 프롬프트 한 줄로 박혀 긴 브리프가 화면을 덮고, 파일 경로로 우회하면 학생이 읽는 왕복이 하나 더 는다. 인박스가 정본이다.\n\
+- **tell 은 SendMessage 가 안 닿을 때만** — 다른 방(팀이 다름), codex pane, 비-claude pane. tell 은 상대 입력창에 글자를 밀어넣는 것이라 화면이 지저분해지고 타이핑 중이면 섞인다.\n\
+- 트리플 플래그·모델은 **붙이지 마라**. shim 이 자동으로 붙인다(이름·팀·`claude-opus-5[1m]`). 직접 주면 자동 부착이 통째로 꺼진다. 가벼운 정찰만 `--model 'claude-sonnet-5[1m]'` 로 덮어라(대괄호가 zsh glob 이라 따옴표 필수).\n\
+- ⚠️ **send 를 두 번 연달아 보내지 마라.** 셸이 첫 줄을 아직 exec 하기 전이라 둘째 텍스트가 **그 명령줄 안으로 빨려 들어간다**(실측: 모델명이 `claude-opus-5[1m]지금[1m]` 으로 오염돼 부팅 실패). 부팅은 한 번의 send 로 끝내고, 할 말은 SendMessage 로 해라.\n\
+**모델은 「가벼우냐」가 아니라 「컨텍스트를 태우느냐」로 가른다.** glm·kimi 는 200k 라 Claude 의 1/5 다 — 가볍더라도 **오래 훑는 일**(큰 바이너리 grep, 파일 수십 개 열기)에 붙이면 중간에 말라 죽고, 반대로 **짧지만 무거운 판단**(갈림길 결정, 함정 해석)은 창을 거의 안 먹으면서 품질이 갈린다. 그래서:\n\
+- **glm·kimi** — 답이 정해진 수집(grep·검색·스샷·목록화), 결과가 짧게 요약돼 돌아오는 일. `cd <레포> && glm claude --dangerously-skip-permissions` (`glm`→`kimi` 로 바꾸면 Kimi). 브리프는 SendMessage 로.\n\
+- **opus·fable(나)** — 갈림길 판단, 설계, 남의 결과를 종합해 다음을 정하는 일.\n\
+**비싼 창을 「읽느라」 태우지 마라** — 2026-08-09 실측: 279MB 바이너리를 grep·dd 로 반복해 훑는 일을 내가 직접 하다 창을 크게 태웠다. 그건 glm 에게 「이 오프셋 주변 문자열을 뽑아 와라」로 넘겼어야 했고, 내가 할 것은 그 결과가 무슨 뜻인지 해석하는 쪽이었다.\n\
+⚠️ `--dangerously-skip-permissions` 를 **직접 줘야 한다** — `glm`·`kimi` 는 `command claude` 라 zshrc 의 claude 별칭을 건너뛴다. 빠뜨리면 학생이 권한 프롬프트에서 멈춘다.\n\
+  `cd <레포> && glm claude --dangerously-skip-permissions` (`glm` 을 `kimi` 로 바꾸면 Kimi 다). 브리프는 여기도 SendMessage 로 — 부팅 커맨드에 싣지 마라.\n\
+  **이유는 컨텍스트다.** 손이 많고 판단이 적은 일에 오푸스를 붙이면 검색 결과와 파일 덩어리로 창이 금세 차 compact 가 돌고, 압축될 때마다 앞의 맥락이 깎인다 — 거노가 지금 실제로 겪고 있는 문제다. 값싼 창을 태워야 할 일에 비싼 창을 태우지 마라.\n\
+  트리플·캐릭터·페르소나가 그대로 붙어 SendMessage 도 닿는다.\n\
+  ⚠️ `--dangerously-skip-permissions` 를 **직접 줘야 한다** — `glm`·`kimi` 는 `command claude` 라 zshrc 의 claude 별칭(그 플래그를 붙여 주는)을 건너뛴다. 빠뜨리면 학생이 권한 프롬프트에서 멈춘다.\n\
+  ⚠️ **컨텍스트가 200k 로 Claude 의 1/5.** 긴 파일을 통째로 훑거나 오래 이어갈 일에는 쓰지 마라 — 중간에 말라 죽는다. 짧고 손 많은 일에만 보내는 것이 이 둘을 쓰는 법이다.\n\
+- **기본 2명.** 넷을 띄우면 거노가 네 화면을 동시에 좇아야 한다. 더 필요하면 그때 늘려라.\n\
+- 브리프에 **커밋은 각자 자기 브랜치에** 라고 적어라. 검수하겠다고 커밋을 막으면 네가 병목이 되고, 학생은 자기가 뭘 했는지 남길 데가 없어진다. 네가 볼 것은 diff 가 아니라 커밋이다.\n\
+- 질문은 학생이 **자기 pane 에서 AskUserQuestion 으로 거노께 직접** 하게 해라. 너를 거쳐 오면 왕복이 두 배가 되고 맥락이 깎인다.\n\
+\n\
+[협업 — 태스크 목록]\n\
+같은 방 pane 은 **태스크 목록을 하나 공유한다**(`~/.claude/tasks/<팀>/`, 팀=방). 이게 보고 대신이다 — 진행 상황을 말로 알리지 말고 목록을 갱신해라. 거노도 학생도 한 화면에서 본다.\n\
+- 시작할 때 `TaskUpdate` 로 `in_progress`, 끝나면 `completed`. 안 하면 남이 같은 걸 또 잡는다.\n\
+- **`owner` 에 네 이름(`$KASATERM_AGENT`)을 걸어라** — 잡을 때 `status` 와 함께. 목록은 방 하나를 여럿이 쓰므로, 주인이 안 적힌 태스크는 **누구 것도 아닌 것**이 되어 화면에서 갈라 볼 수가 없다(거노 요청 2026-08-06). 「Task #N assigned by 나」 알림이 네 화면에 한 번 뜨는데, 그건 거노가 보기로 한 것이다.\n\
+  ⚠️ `owner` 를 아예 빼면 `in_progress` 만으로도 하네스가 이름을 자동으로 박는다 — 그래도 되지만, **자동 배정은 falsy 값에 되살아나니** 이름을 명시하는 편이 예측 가능하다. 이미 같은 이름이 박힌 걸 다시 걸면 아무 일도 안 난다(변경 없음, 알림 없음).\n\
+- **남의 owner 가 붙은 태스크는 건드리지 마라.** 지우지도 말고 상태도 바꾸지 마라 — 그 사람이 아직 도는 중이다.\n\
+- 오케스트레이터는 배분 전에 `TaskList` 로 이미 잡힌 것을 먼저 보고, 겹치지 않게 나눠라.\n\
+\n\
+[브라우저 — 화면을 읽는 법]\n\
+웹에서 내용을 알아내야 할 때 **스크린샷을 찍어 보지 마라.** `browser_get_text`(본문 텍스트) 나 `browser_read_page`(접근성 트리 + ref) 로 읽어라. 클릭할 것을 찾을 때도 `browser_find` 가 ref 와 좌표를 준다 — 눈으로 찾을 필요가 없다.\n\
+이미지 한 장이 텍스트 수천 자만큼 컨텍스트를 먹는다. 조사하느라 몇 장 보면 창이 차서 compact 가 돌고, 압축될 때마다 앞의 맥락이 깎인다(거노 2026-08-07: \"compact를 너무해 브라우저쓰면서\"). 텍스트로 읽으면 같은 일을 훨씬 싸게 한다.\n\
+**스샷이 정당한 경우는 픽셀로만 판단되는 것뿐이다** — 레이아웃이 깨졌는지, 색이 맞는지, 요소가 겹쳤는지. 그때도 한 장만 찍고 무엇을 확인할지 정한 뒤에 봐라. 「일단 보고 판단」은 그 한 장이 열 장이 된다.\n\
+읽고 나면 안 쓰는 탭은 `browser_close_tab` 으로 닫아라 — 네가 연 것은 네가 치운다.\n\
+\n\
+[협업 — 완료 보고]\n\
+**남이 시킨 작업(브리프)을 끝냈으면 마지막 액션으로 보고해라 — 성공이든 실패든:**\n\
+  `kasaterm-cli done succeeded \"한 줄: 뭘 했고, 뭘 확인 못 했고, 뭐가 남았나\"`\n\
+실패로 끝났으면 `succeeded` 대신 `failed`. **이 보고까지가 작업이다** — 안 하면 오케스트레이터는 네 화면을 읽어 「끝났나 보다」를 추측해야 하고, 추측은 어긋난다(idle 은 「쉬는 중」이지 「다 됐다」가 아니다).\n\
+- board 에 결과·요약·경과가 정본으로 뜨고, 네가 새 브리프를 받아 다시 일을 시작하면 자동으로 걷힌다.\n\
+- 실패를 프로즈로만 남기지 마라 — 기계가 못 읽는다. `failed` 로 보고하고 요약에 원인 한 줄.\n\
+- 스스로 시작한 일(브리프 없음)엔 안 해도 된다 — 이건 배정받은 일의 완료 신호다.\n\
+\n\
+[협업 — 해산]\n\
+일이 끝나면 인사말을 주고받지 말고 **그냥 닫아라**: `kasaterm-cli dismiss %64 %65`. 커밋 안 된 변경이 남은 pane 은 닫지 않고 알려주므로, 그때만 회수하면 된다. 「마무리하겠습니다」·「수고했다」·완료 인사는 전부 없어도 되는 왕복이다 — 무엇이 끝났는지는 커밋과 `done` 보고가 말한다.\n\
 \n\
 [협업 — 무엇을 누구에게 묻나]\n\
-**승인 프로토콜을 쓰지 마라** — `plan_approval_request`·`shutdown_request` 를 originate 하지 마라. 너를 부른 상대도 사람이 아니라 학생이라 대신 결재할 권한이 없고, 결재 형식으로 물으면 그쪽은 승인/거부만 고를 수 있어 정작 필요한 대화가 안 된다. 물을 것은 셋으로 갈린다:\n\
-- **사람 판단이 필요하면 → `AskUserQuestion`.** 되돌릴 수 없는 것(배포·push·삭제·외부 전송·계정 조작)과 거노 취향이 갈리는 선택이 여기다. `--agent-id team-lead` 면 네 pane 에서 거노께 바로 뜬다.\n\
-- **「이 방향이 맞나」 같은 설계·범위 판단은 → 너를 부른 학생에게 `kasaterm-cli tell` 로.** 그쪽이 전체 그림을 쥐고 있으니 물어보는 게 맞다. 다만 **결재가 아니라 상의**다 — 「A 로 가려는데 B 와 겹치나?」처럼 판단 재료를 담아 물어라.\n\
-- **절차적인 것은 묻지 말고 그냥 해라.** 커밋 요청·진행 보고·검증 결과 공유가 여기다. \"커밋해도 될까요\"가 아니라 \"이 단위 끝났으니 커밋해 달라, 근거는 이것\"이다.\n\
-그리고 **갈림길에서 막히면 멈추지 말고 가장 그럴듯한 쪽으로 진행한 뒤 무엇을 왜 골랐는지 보고에 적어라.** 「A 로 갔다, 이유는 B, 아니면 되돌리기 쉽다」가 멈춰 서서 묻는 것보다 언제나 낫다.";
+**질문은 전부 `AskUserQuestion` 으로 거노께 직접 한다.** 다른 학생에게 물어 상의하지 마라(거노 지시 2026-08-04) — 학생끼리 주고받는 상의는 거노 눈에 안 보이는 곳에서 방향이 정해지고, 왕복이 두 배가 되고, 물어본 쪽도 결국 추측으로 답한다. `--agent-id team-lead` 라 AskUserQuestion 은 네 pane 에서 거노께 바로 뜬다.\n\
+**승인 프로토콜은 쓰지 마라** — `plan_approval_request`·`shutdown_request` 를 originate 하지 마라. 승인/거부 두 칸으로는 정작 필요한 대화가 안 된다.\n\
+- **거노께 물을 것**: 되돌릴 수 없는 것(배포·push·삭제·외부 전송·계정 조작), 취향이 갈리는 선택, 「이 방향이 맞나」 같은 설계·범위 판단.\n\
+- **묻지 말고 그냥 할 것**: 커밋·진행 보고·검증 결과 공유. 자기 브랜치 커밋은 허락을 구할 일이 아니다 — 되돌릴 수 있고, 안 하면 한 일이 어디에도 안 남는다.\n\
+- 다른 학생에게 보내는 SendMessage 는 **질문이 아니라 통보**여야 한다 — 「이 파일 내가 만진다」, 「이거 끝났으니 이어서」.\n\
+그리고 **갈림길에서 막히면 멈추지 말고 가장 그럴듯한 쪽으로 진행한 뒤 무엇을 왜 골랐는지 보고에 적어라.** 「A 로 갔다, 이유는 B, 아니면 되돌리기 쉽다」가 멈춰 서서 묻는 것보다 언제나 낫다.\n\
+\n\
+[거노에게 말하는 법]\n\
+거노는 네가 뭘 하는지 모른 채 기다리는 걸 제일 싫어한다. **짧게 자주** 말해라 — 학생을 띄우기 전에 「무엇을 누구에게, 대략 몇 분」 한 줄, 중간에 끝난 것마다 한 줄. 긴 보고 한 번보다 짧은 줄 여러 번이 낫다.\n\
+보고는 셋이다: **바뀐 것 / 걸리는 것 / 못 확인한 것**. 마지막 칸을 비우지 마라 — 검증 못 한 것을 안 적으면 다 된 것처럼 읽힌다.\n\
+그리고 하려다 만 것·곁길로 샐 것 같은 것은 발견 즉시 「이거 파도 되나」 한 줄로 물어라. 혼자 판단해서 파고들면 시간은 네가 쓰고 놀라는 건 거노다.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 ///
@@ -262,6 +365,20 @@ pub fn character_marker(rslug: &str, surface_id: &str) -> PathBuf {
     collab_dir(rslug).join(format!("character-{}", surface_id.trim_start_matches('%')))
 }
 
+/// 마커 파일 이름인가 — `character-<N>`. `write_marker` 의 원자 교체가 잠깐 남기는
+/// `character-<N>.tmp` 는 뺀다(같은 접두사로 시작해 그냥 두면 유령 배정으로 잡힌다).
+fn is_marker_file(name: &str) -> bool {
+    name.starts_with("character-") && !name.ends_with(".tmp")
+}
+
+/// 마커 본문에서 캐릭터 이름만. 형식은 `<이름>\n<쓴 kasaterm pid>` 이고 pid 줄은
+/// sweep 전용이라 이름을 읽는 모든 경로가 첫 줄만 본다. pid 가 없는 옛 마커도 그대로
+/// 읽힌다(한 줄뿐이라 첫 줄 = 전부).
+fn marker_name(body: &str) -> Option<String> {
+    let s = body.lines().next()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// 한 collab 디렉토리의 character-* 마커 내용들.
 fn assigned_in(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -269,14 +386,12 @@ fn assigned_in(dir: &Path) -> Vec<String> {
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(n) = name.to_str() else { continue };
-            if !n.starts_with("character-") {
+            if !is_marker_file(n) {
                 continue;
             }
-            if let Ok(s) = std::fs::read_to_string(e.path()) {
-                let s = s.trim().to_string();
-                if !s.is_empty() {
-                    out.push(s);
-                }
+            if let Some(s) = std::fs::read_to_string(e.path()).ok().as_deref().and_then(marker_name)
+            {
+                out.push(s);
             }
         }
     }
@@ -306,10 +421,81 @@ pub fn assigned_global() -> Vec<String> {
 /// resume 복원처럼 ws.pane_character 엔 없지만 마커엔 있는 캐릭터를 중복 배정에서
 /// 피하려 쓴다(assign_character_env).
 pub fn read_marker(rslug: &str, surface_id: &str) -> Option<String> {
-    std::fs::read_to_string(character_marker(rslug, surface_id))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    std::fs::read_to_string(character_marker(rslug, surface_id)).ok().as_deref().and_then(marker_name)
+}
+
+/// 죽은 kasaterm 이 남긴 character-* 마커를 지운다. `live` 는 「이 pid 가 지금 도는
+/// kasaterm 인가」.
+///
+/// **왜 필요한가.** 마커는 pane 을 *정상적으로 닫을 때만* 지워진다
+/// (`cleanup_collab_markers`). 그래서 앱이 죽거나 그냥 재시작되면 옛 마커가 전부 남고,
+/// 배정은 그것들을 taken 으로 세므로 쓸 수 있는 학생이 재시작마다 줄어든다. 실측
+/// 2026-08-09 에 마커 17개 > 총원 12명이 되어 풀이 통째로 말랐고, 그때 폴백이
+/// members 전체로 되돌아가 **아루가 셋**이 됐다. 지금은 그 폴백이 이 방 live 만 피하는
+/// 단계를 거치지만, 그건 피해를 줄일 뿐 마르는 것 자체를 못 막는다.
+///
+/// 살았는지를 pane 번호로는 못 판단한다 — 번호는 방 간에도 창 간에도 재사용된다.
+/// 그래서 마커를 쓸 때 **쓴 프로세스의 pid** 를 함께 적고 여기서 그 pid 를 본다.
+/// pid 줄이 없는 마커는 이 코드가 나오기 전 것이므로 지운다 — 지금 도는 kasaterm 이
+/// 쓴 것이라면 반드시 pid 가 있다.
+///
+/// 지워도 살아있는 pane 은 안 다친다. 배정의 정본은 `ws.pane_character` 이고 마커는
+/// 그 사본이라, 잘못 지워봐야 **다른 인스턴스가 그 캐릭터를 겹쳐 쓸 수 있다**가 전부다.
+/// 반대로 안 지우면 풀이 마른다.
+pub fn sweep_stale_markers(live: impl Fn(u32) -> bool) -> usize {
+    sweep_stale_markers_in(&kasa_socket::collab_root(), live)
+}
+
+/// [`sweep_stale_markers`] 의 본체 — 루트를 받는 건 테스트 때문이다. 이 함수는 **모든
+/// 방**을 훑으므로 실제 `/tmp/kasaterm-collab` 에 대고 테스트하면 돌고 있는 pane 의
+/// 마커를 지운다.
+fn sweep_stale_markers_in(root: &Path, live: impl Fn(u32) -> bool) -> usize {
+    let mut n = 0;
+    let Ok(rooms) = std::fs::read_dir(root) else { return 0 };
+    for room in rooms.flatten() {
+        let Ok(rd) = std::fs::read_dir(room.path()) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(f) = name.to_str() else { continue };
+            if !is_marker_file(f) {
+                continue;
+            }
+            let owner = std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|s| s.lines().nth(1)?.trim().parse::<u32>().ok());
+            if owner.is_some_and(&live) {
+                continue;
+            }
+            if std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// 후보 중 **가장 적게 쓰인** 것들만 남긴다. 배정 풀이 말랐을 때의 폴백이다.
+///
+/// pane 수가 학생 총원을 넘으면 중복은 비둘기집이라 못 막는다. 막을 수 있는 건
+/// **몰리는 것**이다 — 예전 폴백은 전체에서 그냥 랜덤이라 이미 셋인 학생이 넷이 됐다
+/// (실측 2026-08-11: pane 15 > 총원 12 인데 아루 3·프라나 3 이고 한 번도 안 쓰인
+/// 학생이 남아 있었다). 최소 사용 횟수인 쪽만 남기면 15명이어도 3명만 2회씩이 된다.
+///
+/// `taken` 은 **중복을 살린** 목록이어야 한다. HashSet 을 넘기면 횟수가 사라져
+/// 이 함수가 하는 일이 없어진다.
+pub fn least_used(candidates: &[String], taken: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut n: std::collections::HashMap<&str, usize> =
+        candidates.iter().map(|c| (c.as_str(), 0)).collect();
+    for t in taken {
+        if let Some(c) = n.get_mut(t.as_str()) {
+            *c += 1;
+        }
+    }
+    let lo = n.values().copied().min().unwrap_or(0);
+    candidates.iter().filter(|c| n[c.as_str()] == lo).cloned().collect()
 }
 
 /// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
@@ -331,13 +517,17 @@ pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
 }
 
 /// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.
+///
+/// 둘째 줄에 이 프로세스 pid 를 남긴다 — 마커가 죽은 뒤에도 남는 문제를
+/// [`sweep_stale_markers`] 가 풀 때 「누가 쓴 것인가」의 유일한 단서다. 이름을 읽는
+/// 경로는 전부 첫 줄만 보므로 board·배정에는 아무 변화가 없다.
 pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Result<()> {
     let path = character_marker(rslug, surface_id);
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, name)?;
+    std::fs::write(&tmp, format!("{name}\n{}", std::process::id()))?;
     std::fs::rename(&tmp, &path)
 }
 
@@ -440,6 +630,158 @@ pub fn new_session_id() -> String {
 }
 
 #[cfg(test)]
+mod same_school_tests {
+    use super::{prefer_same_school, school_of};
+    use serde_json::json;
+
+    fn chars() -> serde_json::Value {
+        json!({
+            "leaders": [{"name": "아로나", "slug": "arona", "school": "샬레"}],
+            "members": [
+                {"name": "미도리", "slug": "midori", "school": "밀레니엄"},
+                {"name": "유즈",   "slug": "yuzu",   "school": "밀레니엄"},
+                {"name": "케이",   "slug": "kei",    "school": "밀레니엄"},
+                {"name": "아루",   "slug": "aru",    "school": "게헨나"},
+                {"name": "히나",   "slug": "hina",   "school": "게헨나"},
+                {"name": "코하루", "slug": "koharu", "school": "트리니티"},
+            ]
+        })
+    }
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pulls_the_rooms_own_school() {
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리"]));
+        assert_eq!(got, v(&["유즈", "케이"]));
+    }
+
+    /// 첫 배정은 좁히지 않는다 — 그 학생이 그 방의 학원을 정한다.
+    #[test]
+    fn empty_room_is_not_narrowed() {
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &[]).is_empty());
+    }
+
+    /// 학원이 마르면 빈 Vec — 호출부가 원래 후보로 폴백해야 한다. 학원을 맞추는 것보다
+    /// 같은 방에서 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn exhausted_school_falls_through() {
+        let free = v(&["아루", "히나", "코하루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["미도리", "유즈", "케이"])).is_empty());
+    }
+
+    /// 샬레는 학원이 아니다 — 둘뿐이라 방 학교로 잡히면 그 방이 즉시 마른다.
+    #[test]
+    fn shale_never_becomes_a_rooms_school() {
+        assert_eq!(school_of(&chars(), "아로나"), None);
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["아로나"])).is_empty());
+    }
+
+    /// 방에 두 학원이 섞여 있으면(폴백으로 그렇게 된다) 둘 다 인정한다 — 한쪽만
+    /// 고르면 이미 있는 다른 쪽이 영영 안 늘어난다.
+    #[test]
+    fn mixed_room_keeps_both_schools() {
+        let free = v(&["유즈", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["유즈", "히나"]));
+    }
+
+    #[test]
+    fn fresh_school_avoids_other_rooms() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        // 다른 방이 밀레니엄과 게헨나를 쓰고 있다 → 트리니티만 남는다.
+        let got = prefer_fresh_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["코하루"]));
+    }
+
+    /// 학원보다 방이 많아지면 빈 Vec — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn fresh_school_gives_up_when_all_used() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "히나"]);
+        let all = v(&["미도리", "아루", "코하루"]);
+        assert!(prefer_fresh_school(&chars(), &free, &all).is_empty());
+    }
+
+    /// 로스터에 없는 이름(옛 마커·커스텀 캐릭터)이 방에 있어도 안 흔들린다.
+    #[test]
+    fn unknown_names_are_ignored() {
+        let free = v(&["유즈", "아루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "모르는이름"]));
+        assert_eq!(got, v(&["유즈"]));
+    }
+}
+
+#[cfg(test)]
+mod least_used_tests {
+    use super::least_used;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unused_candidates_win() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &taken), v(&["케이"]));
+    }
+
+    /// pane 이 총원을 넘으면 중복은 못 막는다. 막아야 하는 건 **몰리는 것**이다 —
+    /// 이미 둘인 학생이 셋이 되는 대신 아직 하나인 쪽이 뽑혀야 한다.
+    #[test]
+    fn spreads_instead_of_piling_up() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리", "케이"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리", "케이"]));
+    }
+
+    /// 실측 재현: 총원 12, pane 15 에서 아루 3·프라나 3 이 나왔던 분포.
+    /// 이 폴백이 있었다면 3회짜리는 후보에서 빠졌어야 한다.
+    #[test]
+    fn the_aru_times_three_case() {
+        let members = v(&["아루", "프라나", "히마리", "호시노", "유우카", "코하루"]);
+        let taken = v(&[
+            "아루", "아루", "아루", "프라나", "프라나", "프라나", "히마리", "히마리",
+            "호시노", "호시노", "유우카", "유우카",
+        ]);
+        // 한 번도 안 쓰인 코하루만 남아야 한다 — 예전 폴백은 여기서 아루를 넷째로
+        // 뽑을 수 있었다.
+        assert_eq!(least_used(&members, &taken), v(&["코하루"]));
+    }
+
+    /// `taken` 을 HashSet 으로 넘기면(=중복이 사라지면) 이 함수는 무의미해진다.
+    /// 호출부가 중복을 살린 Vec 을 준다는 전제를 여기 박아 둔다.
+    #[test]
+    fn counts_duplicates_not_presence() {
+        let members = v(&["아루", "미도리"]);
+        let dedup = v(&["아루", "미도리"]);
+        assert_eq!(least_used(&members, &dedup), v(&["아루", "미도리"]));
+        let with_dupes = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &with_dupes), v(&["미도리"]));
+    }
+
+    #[test]
+    fn empty_candidates_stay_empty() {
+        assert!(least_used(&[], &v(&["아루"])).is_empty());
+    }
+
+    /// 로스터에 없는 이름(커스텀 캐릭터·옛 마커)이 섞여도 셈이 흔들리면 안 된다.
+    #[test]
+    fn ignores_names_outside_the_roster() {
+        let members = v(&["아루", "미도리"]);
+        let taken = v(&["아루", "모르는이름", "또다른이름"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리"]));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -528,5 +870,41 @@ mod tests {
         );
         assert_eq!(mode_slug(Path::new("/tmp/room/mine")), "-tmp-room-mine");
         assert_eq!(mode_slug(Path::new("/a/b.c")), "-a-b-c");
+    }
+
+    /// 마커의 둘째 줄(주인 pid)이 배정 풀 고갈을 막는 유일한 단서다. 살아있는 주인 것은
+    /// 남기고, 죽은 주인 것과 주인을 모르는 옛 형식은 지운다.
+    #[test]
+    fn sweep_keeps_live_owner_only() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kasaterm-sweep-{}-{n}", std::process::id()));
+        let room = root.join("-tmp-room-a");
+        let other = root.join("-tmp-room-b");
+        std::fs::create_dir_all(&room).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(room.join("character-1"), "아루\n111").unwrap();
+        std::fs::write(room.join("character-2"), "미도리\n222").unwrap();
+        std::fs::write(other.join("character-1"), "유즈\n111").unwrap();
+        // 이 코드가 나오기 전 형식 — 주인을 알 수 없으니 지운다.
+        std::fs::write(other.join("character-9"), "프라나").unwrap();
+        // 원자 교체가 남긴 조각은 마커가 아니다.
+        std::fs::write(other.join("character-9.tmp"), "노아\n111").unwrap();
+
+        assert_eq!(sweep_stale_markers_in(&root, |pid| pid == 111), 2);
+        assert!(room.join("character-1").exists(), "살아있는 주인의 마커는 남는다");
+        assert!(!room.join("character-2").exists(), "죽은 주인의 마커는 지운다");
+        assert!(other.join("character-1").exists(), "다른 방도 주인 기준으로 남긴다");
+        assert!(!other.join("character-9").exists(), "pid 없는 옛 마커는 지운다");
+        assert!(other.join("character-9.tmp").exists(), ".tmp 는 건드리지 않는다");
+
+        // 이름을 읽는 쪽은 pid 줄을 못 본다 — 배정·board 가 "아루\n111" 로 굳으면 안 된다.
+        let mut names = assigned_in(&room);
+        names.sort();
+        assert_eq!(names, vec!["아루".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -366,6 +366,15 @@ pub struct DispatchRuntime {
 /// 한 tick 에 할 일. 판단(`decide`)과 실행(PTY·스폰)을 갈라 두면 판단을 파일도 터미널도
 /// 없이 검증할 수 있다 — 이 로직은 잘못 돌면 학생을 이중으로 부르거나 남의 화면을
 /// 덮어쓰는 종류라, 눈으로 확인하는 것 말고 테스트가 필요하다.
+/// 인박스로 말을 걸 수 있는 pane 의 좌표 — `teams/<team>/inboxes/<agent>.json`.
+/// board 가 pane 프로세스 env 에서 실측한 값만 담는다(이름 규칙 추측 금지 — 어긋나면
+/// 고아 인박스가 되고 지시가 조용히 사라진다).
+#[derive(Debug, PartialEq, Clone)]
+pub struct InboxAddr {
+    pub team: String,
+    pub agent: String,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Decision {
     /// 끝났다 — 그 학생의 마지막 답변을 결과로 걷는다.
@@ -376,8 +385,14 @@ pub enum Decision {
     /// 몇 번 시도해도 학생이 올라오지 않아 접는다. 조용히 반복하는 것보다 큐에
     /// 실패로 남는 게 낫다(선생님이 `GET /tasks` 에서 사유를 본다).
     Fail { idx: usize, reason: String },
-    /// 이미 도는 자기 학생에게 지시를 제출한다.
-    AssignExisting { idx: usize, surface: String, character: String },
+    /// 이미 도는 자기 학생에게 지시를 준다. `inbox` 가 있으면 인박스로(SendMessage 와
+    /// 같은 경로), 없으면 입력창 주입으로 — 후자는 상대가 타이핑 중이면 섞인다.
+    AssignExisting {
+        idx: usize,
+        surface: String,
+        character: String,
+        inbox: Option<InboxAddr>,
+    },
     /// 새 학생을 부른다(브리프를 부팅 인자로 싣는다).
     SpawnFor { idx: usize, character: String },
 }
@@ -489,11 +504,12 @@ pub fn decide(
             continue;
         }
         if let Some(surface) = free.pop() {
-            let character = by_surface
-                .get(surface.as_str())
-                .and_then(|r| r.character.clone())
-                .unwrap_or_default();
-            out.push(Decision::AssignExisting { idx: i, surface, character });
+            let row = by_surface.get(surface.as_str());
+            let character = row.and_then(|r| r.character.clone()).unwrap_or_default();
+            let inbox = row.and_then(|r| {
+                Some(InboxAddr { team: r.team.clone()?, agent: r.agent_name.clone()? })
+            });
+            out.push(Decision::AssignExisting { idx: i, surface, character, inbox });
         } else if q[i].depth == 0 && headcount < cfg.max_students {
             let character = pick_character(cfg, &taken, cursor);
             taken.insert(character.clone());
@@ -575,10 +591,33 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 q[idx].updated_ts = now;
                 changed = true;
             }
-            Decision::AssignExisting { idx, surface, character } => {
+            Decision::AssignExisting { idx, surface, character, inbox } => {
                 let brief = compose_brief(idx, &q, &board);
-                if let Err(e) = backend.send_text(Some(&surface), &submit_payload(&brief)) {
-                    eprintln!("[dispatch] send failed to {surface}: {e:#}");
+                // 이미 도는 학생에겐 인박스가 정답이다 — 입력창 주입은 상대가 타이핑
+                // 중이면 글자가 섞이고, 그 pane 이 무엇을 하던 중이든 화면을 가로챈다.
+                //
+                // 유휴 pane 도 인박스를 읽는다(실측 2026-08-04: 넣고 5초 만에 드레인+
+                // 턴 시작). "유휴는 못 깨운다"는 관찰이 한 번 있었지만 그건 **다른 방에
+                // 만든 학생에게 자기 팀 이름으로 보내** 고아 인박스가 된 것이었다 —
+                // 그래서 team 은 규칙으로 짐작하지 않고 board 실측값만 쓴다.
+                let delivered = match &inbox {
+                    Some(addr) => crate::team::append_message(
+                        &crate::team::teams_root(),
+                        &addr.team,
+                        &addr.agent,
+                        &crate::team::InboxMessage {
+                            from: "선생님",
+                            text: &brief,
+                            summary: Some(&brief_summary(&brief)),
+                            color: None,
+                        },
+                    )
+                    .map_err(anyhow::Error::from),
+                    // 트리플 없이 뜬 pane(비-claude·shim 밖)은 인박스를 안 읽는다.
+                    None => backend.send_text(Some(&surface), &submit_payload(&brief)),
+                };
+                if let Err(e) = delivered {
+                    eprintln!("[dispatch] assign failed to {surface}: {e:#}");
                     continue; // 배정하지 않은 채로 남긴다 — 다음 tick 에 재시도
                 }
                 q[idx].character = character;
@@ -617,6 +656,12 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
         write_queue(&q);
     }
     write_state(&state);
+}
+
+/// 인박스 카드에 뜰 한 줄 — 브리프 첫 줄을 자른다.
+fn brief_summary(brief: &str) -> String {
+    let head = brief.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    head.chars().take(60).collect()
 }
 
 /// TUI 입력창을 비우고(0x15) 붙여넣기로 감싼 뒤 제출 — 잔류 draft 에 지시가 합승해
@@ -731,6 +776,15 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
             task.report_to
         ));
     }
+
+    // 완료의 정본 보고 — board 가 idle 추정(transcript 휴리스틱) 대신 이 보고를 싣는다.
+    // report_to(tell)와 별개다: tell 은 사람/오케스트레이터에게 가는 통보고, done 은
+    // board 상태를 뒤집는 기록이다. 실패를 프로즈에만 적으면 기계가 못 읽는다.
+    ctx.push(
+        "일을 마치면 마지막에 `kasaterm-cli done succeeded \"<한 줄: 뭘 했고 뭐가 남았나>\"` 를 \
+         실행해라. 실패로 끝났으면 succeeded 대신 failed 로 — 성공이든 실패든 이 보고까지가 작업이다"
+            .to_string(),
+    );
 
     if !ctx.is_empty() {
         out.push_str("\n\n[맥락] ");
@@ -1118,9 +1172,16 @@ mod tests {
 
     #[test]
     fn brief_stays_bare_when_there_is_no_context() {
-        // 혼자 도는 첫 작업 — 붙일 사실이 없으면 원래 지시 그대로 둔다(잡음 금지).
+        // 혼자 도는 첫 작업 — 붙일 사실이 없으면 원래 지시에 아무 맥락도 얹지 않는다
+        // (잡음 금지). 완료 보고 안내만은 예외로 늘 붙는다(ae4161c): 그건 맥락이 아니라
+        // 작업의 일부라, 형제도 선행도 없는 첫 작업일수록 오히려 빠뜨리면 안 된다.
         let q = vec![task("t1", "pending", &["a.rs"], &[])];
-        assert_eq!(compose_brief(0, &q, &[]), "일");
+        let brief = compose_brief(0, &q, &[]);
+        assert!(brief.starts_with("일"), "원래 지시가 앞에 온다: {brief}");
+        assert!(brief.contains("kasaterm-cli done"), "완료 보고 안내: {brief}");
+        for noise in ["진행", "남이 잡은", "물려받", "tell %"] {
+            assert!(!brief.contains(noise), "붙일 사실이 없는데 {noise} 가 붙었다: {brief}");
+        }
     }
 
     #[test]
@@ -1215,7 +1276,7 @@ mod tests {
         let d = decide_t(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 2), 1000.0, &mut cur);
         assert_eq!(
             d,
-            vec![Decision::AssignExisting { idx: 0, surface: "%1".into(), character: String::new() }],
+            vec![Decision::AssignExisting { idx: 0, surface: "%1".into(), character: String::new(), inbox: None }],
             "빈 학생이 있으면 부르지 않고 그에게 준다"
         );
     }
@@ -1317,7 +1378,7 @@ mod tests {
         assert!(matches!(d[0], Decision::Harvest { idx: 0, .. }));
         assert_eq!(
             d[1],
-            Decision::AssignExisting { idx: 1, surface: "%1".into(), character: String::new() },
+            Decision::AssignExisting { idx: 1, surface: "%1".into(), character: String::new(), inbox: None },
             "상한 1이라 새로 부를 수 없지만 방금 빈 학생을 쓴다"
         );
     }
