@@ -1844,6 +1844,14 @@ impl App {
                 Ok(d) => eprintln!("[autosettings] 테마 복제 → {}", d.display()),
                 Err(e) => eprintln!("[autosettings] 테마 복제 실패: {e}"),
             },
+            // `select-theme:<id>` — 빈 id 는 번들로 되돌린다. 전환은 캐시 셋을 함께
+            // 비워야 화면이 한 테마로 보이는데, 그게 실제로 먹었는지는 전환 **뒤**
+            // 그린 화면으로만 확인된다(캡처가 이 다음에 걸린다).
+            a if a.starts_with("select-theme:") => {
+                let id = a.trim_start_matches("select-theme:").to_string();
+                eprintln!("[autosettings] 테마 전환 → '{id}'");
+                self.settings_apply(SettingsAction::SelectTheme(id));
+            }
             other => eprintln!("[autosettings] 모르는 액션 '{other}'"),
         }
         // 설정은 **별도 OS 창**이라 `KASATERM_AUTOCAPTURE`(메인 창 전용)로는 한 장도

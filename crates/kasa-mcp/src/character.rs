@@ -14,10 +14,15 @@ fn home() -> Option<PathBuf> {
     std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).map(PathBuf::from)
 }
 
-/// settings.json 의 문자열 설정 하나. 앱의 `socket::read_settings` 와 같은 파일을
-/// 보지만 여기서 직접 읽는다 — kasa-mcp → app 은 없는 의존 방향이라 부를 수가 없다.
+/// settings.json 의 문자열 설정 하나. 앱의 `socket::read_settings` 와 **같은 파일**을
+/// 봐야 한다 — kasa-mcp → app 은 없는 의존 방향이라 부를 수 없어 경로 규칙만 옮겨
+/// 왔다. `KASATERM_SETTINGS_FILE` 을 빠뜨렸더니 설정 화면은 이 파일을, 로더는 저
+/// 파일을 읽어 「테마를 바꿨는데 아무 일도 안 일어나는」 상태가 됐다(2026-08-13 실측).
 fn read_setting_str(key: &str) -> Option<String> {
-    let p = home()?.join(".config/kasaterm/settings.json");
+    let p = match std::env::var("KASATERM_SETTINGS_FILE") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => home()?.join(".config/kasaterm/settings.json"),
+    };
     let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
     v.get(key)?.as_str().map(String::from)
 }
@@ -26,7 +31,7 @@ fn read_setting_str(key: &str) -> Option<String> {
 /// `theme.json`(로스터 + 팔레트) + `sprites/`(캐릭터 그림). 지금까지 흩어져 있던
 /// 세 override(`students/`·`characters.json`·`custom_theme`)를 한 단위로 묶은 것이라,
 /// 폴더째 주고받으면 그게 곧 테마 배포다.
-fn themes_root() -> Option<PathBuf> {
+pub fn themes_root() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KASATERM_THEMES_DIR") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
@@ -86,6 +91,17 @@ fn active_theme_dir_in(root: &Path, id: &str) -> Option<PathBuf> {
     }
     let d = root.join(id);
     d.join("theme.json").is_file().then_some(d)
+}
+
+/// 지금 고른 테마 id — 빈 문자열이면 번들. **`active_theme_dir` 과 같은 손잡이를
+/// 본다**(env 우선, 그다음 설정). 화면이 「고른 것」을 표시할 때 이걸 써야 실제로
+/// 도는 테마와 어긋나지 않는다.
+pub fn active_theme_id() -> String {
+    std::env::var("KASATERM_CHARACTER_THEME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_setting_str("character_theme"))
+        .unwrap_or_default()
 }
 
 /// 설치된 테마 `(id, label)` 목록 — 설정 화면의 선택지. 번들은 폴더가 없으니 여기

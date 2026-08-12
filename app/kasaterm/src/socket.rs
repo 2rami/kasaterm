@@ -2748,9 +2748,10 @@ pub fn read_default_shell() -> Option<String> {
 /// 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
 /// 되돌릴 수 없다.
 pub fn export_current_theme() -> std::io::Result<std::path::PathBuf> {
-    let root = kasa_socket::home_dir()
-        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?
-        .join(".config/kasaterm/themes");
+    // 목록을 읽는 곳과 **같은 뿌리**여야 한다 — 여기만 따로 계산하면
+    // `KASATERM_THEMES_DIR` 을 쓰는 사용자는 복제본이 목록에 안 뜬다.
+    let root = kasa_mcp::character::themes_root()
+        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     let dir = (1..1000)
         .map(|n| root.join(if n == 1 { "my-theme".into() } else { format!("my-theme-{n}") }))
         .find(|p| !p.exists())
@@ -2775,11 +2776,7 @@ pub fn export_current_theme() -> std::io::Result<std::path::PathBuf> {
 /// 표시하는 데 쓰므로, 폴더가 사라져도 고른 값 자체는 그대로 보여야 사용자가
 /// 무엇이 어긋났는지 안다.
 pub fn read_character_theme() -> String {
-    read_settings()
-        .get("character_theme")
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string()
+    kasa_mcp::character::active_theme_id()
 }
 
 pub fn read_claude_persona() -> bool {
