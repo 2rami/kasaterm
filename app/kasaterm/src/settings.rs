@@ -79,9 +79,14 @@ pub(crate) struct SettingsCtx {
     /// 한도가 차면 다음 계정으로 알아서 넘어간다 + 그 임계 사용률(%).
     pub account_autoswitch: bool,
     pub account_autoswitch_pct: f32,
-    /// (표시명, 에셋 슬러그) — Students 카테고리 목록·프사 썸네일용. slug 가
+    /// (표시명, 에셋 슬러그) — Theme 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
+    /// 설치된 캐릭터 테마 (id, 표시명) — `~/.config/kasaterm/themes/` 에서 찾은 것.
+    /// 번들은 여기 없다(폴더가 없으니). 목록 맨 앞에 따로 세운다.
+    pub themes: Vec<(String, String)>,
+    /// 지금 고른 테마 id. 빈 문자열이면 번들.
+    pub theme_active: String,
     /// 단일라인 텍스트 필드(경로·셸·claude extra)의 캐럿(문자 인덱스).
     /// persona 멀티라인 캐럿(`student_caret`)과 분리 — 한 번에 한 필드만
     /// 포커스되지만, 저장소를 나눠 포커스 이동 시 캐럿이 튀지 않게 한다.
@@ -437,6 +442,48 @@ impl App {
         self.repaint_all();
     }
 
+    /// 캐릭터 테마를 갈아 끼운다(빈 id = 번들).
+    ///
+    /// 세 캐시를 **함께** 비워야 한다 — 테마 폴더 해석, 이름↔슬러그·색 로스터,
+    /// GPU 스프라이트 텍스처. 하나라도 남으면 화면이 두 테마를 섞어 보여 주는데,
+    /// 그건 "덜 바뀐 것" 이 아니라 사용자에겐 그냥 고장으로 읽힌다.
+    ///
+    /// 이미 도는 pane 의 persona 는 안 바뀐다 — 셸 spawn 시 env 로 고정되기
+    /// 때문이다(session.rs). 그래서 토스트로 그 사실을 알린다. 조용히 안 바뀌면
+    /// 사용자는 전환이 실패했다고 읽는다.
+    fn select_theme(&mut self, id: String) {
+        if self.settings_cat == SettingsCat::Theme && socket::read_character_theme() == id {
+            return;
+        }
+        // 편집 중이던 persona 는 **먼저** 옛 테마 파일에 흘려보낸다. 순서를 바꾸면
+        // 활성 테마가 이미 새것이라, 옛 테마에서 고친 글이 새 테마 파일에 쓰인다.
+        self.flush_student_persona();
+        socket::write_setting("character_theme", serde_json::Value::String(id));
+        kasa_mcp::character::invalidate_active_theme();
+        theme::invalidate_roster();
+        self.students_selected = None;
+        self.students_persona.clear();
+        self.students_caret = 0;
+        self.refresh_student_assets();
+        self.set_toast("테마를 바꿨어요 — 새로 여는 pane 부터 적용돼요".to_string());
+    }
+
+    /// 지금 로스터와 그림을 `themes/<id>/` 로 복제한다 — 새 테마를 만들 본보기.
+    ///
+    /// 이게 없으면 사용자는 80명치 JSON 과 파일명 규칙을 맨손으로 맞춰야 한다.
+    /// 복제한 테마를 곧바로 활성화하지는 않는다 — 내용이 번들과 똑같아서, 켜 봤자
+    /// 아무것도 안 바뀐 것처럼만 보인다. 편집하고 나서 고르는 순서가 맞다.
+    fn export_theme(&mut self) {
+        match socket::export_current_theme() {
+            Ok(dir) => {
+                let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("theme").to_string();
+                open_path(&dir);
+                self.set_toast(format!("'{name}' 으로 복제했어요 — 고쳐서 고르세요"));
+            }
+            Err(e) => self.set_toast(format!("복제 실패: {e}")),
+        }
+    }
+
     /// Build the render snapshot for the settings paint. `area` is the logical
     /// rect the form draws into (the whole aux settings-window client area) and
     /// `cursor` is that window's local cursor — both supplied by the caller so
@@ -487,6 +534,8 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default(),
+            themes: kasa_mcp::character::list_themes(),
+            theme_active: socket::read_character_theme(),
             settings_caret: self.settings_caret,
             student_selected: self.students_selected.clone(),
             student_persona: self.students_persona.clone(),
@@ -834,6 +883,8 @@ impl App {
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
+            SettingsAction::SelectTheme(id) => self.select_theme(id),
+            SettingsAction::ExportTheme => self.export_theme(),
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
             SettingsAction::FocusFeedbackBody => {
                 self.feedback_caret = self.feedback_body.chars().count();
@@ -1238,7 +1289,7 @@ pub(crate) fn paint_settings(
         (SettingsCat::Appearance, "Appearance", "sparkles"),
         (SettingsCat::Shell, "Shell", "terminal"),
         (SettingsCat::Claude, "Claude", "claude"),
-        (SettingsCat::Students, "Students", "users"),
+        (SettingsCat::Theme, "Theme", "users"),
         (SettingsCat::Feedback, "Feedback", "message-square-warning"),
     ];
     let mut cy = ay + 48.0;
@@ -2000,18 +2051,64 @@ pub(crate) fn paint_settings(
             }
             content_bottom = y + 34.0;
         }
-        SettingsCat::Students => {
+        SettingsCat::Theme => {
             let mut y = fy;
+            // ── 테마 고르기 ──────────────────────────────────────────────
+            y = field_header(g, fx, y, clip, "Theme",
+                &["캐릭터 세트를 통째로 갈아 끼웁니다 — 이름·색·그림이 한 벌로 바뀌어요",
+                  "폴더 하나가 테마 하나: ~/.config/kasaterm/themes/<이름>/"]);
+            // 번들을 맨 앞에 세운다 — 폴더가 없어 list_themes 에 안 잡히지만
+            // 「지금 무엇을 쓰는가」는 목록에 보여야 고를 수 있다.
+            let theme_rows: Vec<(&str, &str)> = std::iter::once(("", "블루 아카이브 (기본)"))
+                .chain(ctx.themes.iter().map(|(id, label)| (id.as_str(), label.as_str())))
+                .collect();
+            let row_h = 30.0_f32;
+            for (id, label) in theme_rows {
+                if y > clip {
+                    let r = (fx - 6.0, y - 2.0, fw.min(380.0), row_h);
+                    let selected = ctx.theme_active == id;
+                    let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    if selected {
+                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_active());
+                        g.rect(r.0, r.1 + 5.0, 2.0, r.3 - 10.0, theme::accent());
+                    } else if hover {
+                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
+                    }
+                    g.draw_text(
+                        fx + 10.0, y, label,
+                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
+                    );
+                    rects.push((SettingsAction::SelectTheme(id.to_string()), r));
+                }
+                y += row_h;
+            }
+            y += ROW_GAP;
+
+            // ── 페르소나를 쓸지 ──────────────────────────────────────────
+            // 「테마로만 쓸지, 말투까지 쓸지」 — 이 스위치가 그 갈림길이라 테마
+            // 바로 아래 둔다(설정은 Claude 쪽과 같은 `claude_persona` 하나다).
+            y = field_header(g, fx, y, clip, "Persona",
+                &["끄면 그림·이름·색만 씁니다. 켜면 캐릭터 말투로 대답해요",
+                  "이미 떠 있는 pane 은 그대로고, 새로 여는 pane 부터 바뀝니다"]);
+            if y > clip {
+                let r = (fx, y, 44.0, 24.0);
+                toggle(g, r, ctx.claude_persona, ctx.cursor);
+                rects.push((SettingsAction::ToggleClaudePersona, r));
+            }
+            y += 24.0 + ROW_GAP;
+
             y = field_header(g, fx, y, clip, "Character images",
-                &["~/.config/kasaterm/students/ 에 이미지를 넣으면 학생 그림이 바뀌어요",
+                &["테마 폴더의 sprites/ 에 이미지를 넣으면 학생 그림이 바뀌어요",
                   "파일명: <slug>-profile.png · <slug>-0..3.png · <slug>-walk-0..5.png · schale-logo.png"]);
-            // 액션 버튼 3개 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드).
+            // 액션 버튼 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드) / 본보기 내보내기.
             if y > clip {
                 let mut bx = fx;
                 for (label, action) in [
                     ("이미지 폴더 열기", SettingsAction::OpenStudentsDir),
-                    ("characters.json 열기", SettingsAction::OpenCharactersJson),
+                    ("로스터 열기", SettingsAction::OpenCharactersJson),
                     ("새로고침", SettingsAction::RefreshStudentAssets),
+                    ("새 테마로 복제", SettingsAction::ExportTheme),
                 ] {
                     let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                     let r = (bx, y, bw, 34.0);

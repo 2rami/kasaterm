@@ -9267,6 +9267,58 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
     ])
 }
 
+/// 지금 쓰는 학생 그림을 전부 파일로 꺼낸다(테마 복제용). 쓴 파일 수를 돌려준다.
+///
+/// 사용자 override 가 있으면 그 파일을, 없으면 번들을 쓴다 — `student_sprite_frames`
+/// 와 **같은 우선순위**여야 복제본이 지금 화면과 같은 그림이 된다.
+///
+/// 번들은 `include_bytes!` 라 경로가 없다. 그래서 디코딩 없이 바이트를 그대로 쓴다
+/// (80명 × 18프레임이라 디코딩하면 몇 초가 사람 눈에 그대로 보인다).
+pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let src = crate::socket::students_dir();
+    let copy = |name: String, bundled: Option<&'static [u8]>| -> std::io::Result<bool> {
+        let dst = dir.join(&name);
+        if let Some(p) = src.as_ref().map(|d| d.join(&name)).filter(|p| p.is_file()) {
+            std::fs::copy(p, dst)?;
+            return Ok(true);
+        }
+        match bundled {
+            Some(b) => {
+                std::fs::write(dst, b)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    };
+
+    let mut n = 0;
+    for (_, slug) in crate::theme::character_slugs() {
+        for motion in ["idle", "wave", "cheer", "walk"] {
+            let frames = student_sprite_png(slug, motion);
+            let count = if motion == "walk" { STUDENT_WALK_FRAMES } else { STUDENT_IDLE_FRAMES };
+            for i in 0..count {
+                let name = if motion == "idle" {
+                    format!("{slug}-{i}.png")
+                } else {
+                    format!("{slug}-{motion}-{i}.png")
+                };
+                if copy(name, frames.and_then(|f| f.get(i).copied()))? {
+                    n += 1;
+                }
+            }
+        }
+        if copy(format!("{slug}-profile.png"), student_profile_png(slug))? {
+            n += 1;
+        }
+    }
+    let logo: &'static [u8] = include_bytes!("../assets/students/schale-logo.png");
+    if copy("schale-logo.png".to_string(), Some(logo))? {
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// 이 학생 그림이 있나 — **슬롯을 세우기 전에** 물어야 한다.
 ///
 /// ⚠️그리기 직전에 물으면 늦다. 호출부는 스프라이트를 얹을 자리(Clawd 배너·스피너

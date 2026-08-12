@@ -1034,6 +1034,11 @@ pub fn invalidate_roster() {
     *ROSTER.write().unwrap() = None;
 }
 
+/// 활성 로스터의 이름↔슬러그 전부 — 전 캐릭터를 훑어야 하는 곳(테마 복제)용.
+pub fn character_slugs() -> &'static [(&'static str, &'static str)] {
+    roster().slugs
+}
+
 fn build_roster() -> Roster {
     let bundled = Roster { slugs: CHARACTER_SLUGS, accents: CHARACTER_ACCENTS };
     match kasa_mcp::character::characters_json() {

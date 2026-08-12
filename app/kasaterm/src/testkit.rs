@@ -1822,7 +1822,8 @@ impl App {
             "appearance" => SettingsCat::Appearance,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
-            "students" => SettingsCat::Students,
+            // "students" 는 옛 이름 — 이 env 를 쓰는 검증 스크립트가 밖에 있어 함께 받는다.
+            "theme" | "students" => SettingsCat::Theme,
             "feedback" => SettingsCat::Feedback,
             _ => SettingsCat::General,
         };

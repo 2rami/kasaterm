@@ -3904,7 +3904,10 @@ pub(crate) enum SettingsCat {
     Appearance,
     Shell,
     Claude,
-    Students,
+    /// 캐릭터 세트 — 로스터·색·그림·persona 를 한 벌로 고르는 곳. 예전엔
+    /// `Students`(그림 override 안내 한 줄)였는데, 테마 팩이 생기면서 「누가
+    /// 나오는가」를 통째로 정하는 자리가 됐다.
+    Theme,
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
     /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
     Feedback,
@@ -4010,6 +4013,12 @@ pub(crate) enum SettingsAction {
     /// Open `~/.config/kasaterm/characters.json` in the default editor to edit
     /// names / colors / persona text.
     OpenCharactersJson,
+    /// 캐릭터 테마를 갈아 끼운다 — 빈 문자열이면 번들. 로스터·색·그림이 한꺼번에
+    /// 바뀌므로 캐시 무효화가 짝으로 따라붙는다.
+    SelectTheme(String),
+    /// 지금 로스터와 그림을 `themes/<id>/` 로 써 낸다 — 새 테마를 만들 본보기.
+    /// 79명치 JSON 과 파일명 규칙을 맨손으로 맞추는 건 현실적인 경로가 아니다.
+    ExportTheme,
     /// Evict cached character textures so edited images reload on next paint.
     RefreshStudentAssets,
     /// Select a character in the Students list → load its persona into the edit
