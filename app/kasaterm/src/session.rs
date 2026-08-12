@@ -171,6 +171,14 @@ impl App {
                                     body,
                                 });
                             }
+                            // A resize makes row numbers and widths belong to
+                            // a different grid. Combining both generations
+                            // leaves narrow panes with rows from the transient
+                            // size until a later full redraw happens.
+                            if (next.cols, next.rows) != (update.cols, update.rows) {
+                                update = next;
+                                continue;
+                            }
                             let mut row_map: std::collections::HashMap<u16, Row> =
                                 update.dirty.into_iter().collect();
                             for (r, row) in next.dirty {
@@ -2602,17 +2610,6 @@ impl App {
                     // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
                     // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
                     obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
-                    // 진짜 스크롤백은 PTY(alacritty grid)가 갖고 있다. GUI 쪽
-                    // `scrollback_lines` 는 프레임 diff 로 쌓던 history 를 읽는데, 그
-                    // 추측이 폐기된 뒤로 아무도 그걸 안 채워 **늘 화면 한 장**만 저장됐다
-                    // (실측: 400줄 뿌린 pane 이 38줄). 상한을 올려도 안 늘던 이유다.
-                    // PTY 가 없는 백엔드(tmux)는 옛 경로로 떨어진다.
-                    let sb = pty
-                        .get(pane_id)
-                        .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
-                        .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
-                        .unwrap_or_default();
-                    obj.insert("scrollback".to_string(), serde_json::json!(sb));
                     // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
                     // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
                     // 실패해도 캐릭터는 여기서 확실히 저장한다.
@@ -2640,6 +2637,30 @@ impl App {
                             obj.insert("effort".to_string(), serde_json::json!(effort));
                         }
                     }
+                    // Agent TUI는 새 화면을 다시 그리므로 옛 터미널 행을 넣지 않는다.
+                    // 일반 셸은 실제 PTY history를 저장해야 재시작 뒤 출력이 남는다.
+                    let restores_agent = obj
+                        .get("was_agent")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|agent| matches!(agent, "claude" | "codex" | "agy"))
+                        || obj
+                            .get("was_claude")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        || obj
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|sid| !sid.is_empty());
+                    let sb = if restores_agent {
+                        Vec::new()
+                    } else {
+                        pty
+                            .get(pane_id)
+                            .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
+                            .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
+                            .unwrap_or_default()
+                    };
+                    obj.insert("scrollback".to_string(), serde_json::json!(sb));
                 }
                 serde_json::json!({ "leaf": rec })
             }
@@ -2879,15 +2900,8 @@ impl App {
                 let _ = kasa_mcp::character::bind_session_character(sid, c);
             }
         }
-        let scrollback: Vec<String> = rec
-            .get("scrollback")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let restores_agent = was_agent.is_some() || (saved_char.is_some() && session_id.is_some());
+        let scrollback = restored_scrollback(rec, restores_agent);
         let mut env = crate::proxy_env(&id);
         env.extend(self.assign_character_env(&id, cwd.as_deref(), None));
         let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -2918,7 +2932,7 @@ impl App {
         // mirrors swap_character's wait for the shell prompt before injection.
         // 하네스 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
         // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
-        if was_agent.is_some() || (saved_char.is_some() && session_id.is_some()) {
+        if restores_agent {
             // --resume 대상 대화가 실재할 때만 resume 한다. 저장된 sid 의 jsonl 이
             // 사라졌으면 claude 가 "No conversation found" 를 뱉고 빈 셸만 남아 학생
             // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
@@ -3255,6 +3269,21 @@ pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBu
     None
 }
 
+fn restored_scrollback(rec: &serde_json::Value, restarting_agent: bool) -> Vec<String> {
+    if restarting_agent {
+        return Vec::new();
+    }
+    rec.get("scrollback")
+        .and_then(|v| v.as_array())
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|line| line.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 복원되는 pane 이 쓸 id 를 고른다. **저장된 id 를 최우선**으로 되살린다 —
 /// `--resume` 으로 되살아난 학생은 재시작 전의 surface_id 를 대화 기록째 기억하고
 /// 있어서, 번호를 새로 매기면 `tell` 이 없는 pane 이거나 그 사이 다른 pane 이
@@ -3398,7 +3427,10 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_command_line, git_repo_root, next_free_pane_id, pick_restore_id};
+    use super::{
+        editor_command_line, git_repo_root, next_free_pane_id, pick_restore_id,
+        restored_scrollback,
+    };
 
     /// 닫힌 번호를 되쓰는 것이 요점이다 — 안 그러면 하루 쓰면 `%116` 이 된다.
     #[test]
@@ -3410,6 +3442,16 @@ mod tests {
         assert_eq!(next_free_pane_id(&used(&["%0", "%2"])), "%1");
         // 번호는 정수 순서로 센다 — 사전순이면 %10 뒤에 %2 가 아니라 %9 를 놓친다.
         assert_eq!(next_free_pane_id(&used(&["%0", "%1", "%10", "%2"])), "%3");
+    }
+
+    #[test]
+    fn agent_restore_drops_terminal_history_but_shell_restore_keeps_it() {
+        let rec = serde_json::json!({ "scrollback": ["old output", "old prompt"] });
+        assert!(restored_scrollback(&rec, true).is_empty());
+        assert_eq!(
+            restored_scrollback(&rec, false),
+            vec!["old output".to_string(), "old prompt".to_string()]
+        );
     }
 
     #[test]

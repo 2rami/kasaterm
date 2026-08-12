@@ -1240,6 +1240,20 @@ fn spawn_reader_thread(
                     return;
                 }
             };
+            // resize() can run while read() is blocked. Refresh the reader's
+            // local dimensions before parsing those newly arrived bytes, or
+            // the resulting snapshot is stamped with the previous grid size
+            // and can overwrite the correct resize snapshot.
+            let want = *size.lock().unwrap();
+            if want != current_size {
+                let mut t = term.lock().unwrap();
+                t.resize(TermSize::new(want.0 as usize, want.1 as usize));
+                if want.0 != current_size.0 {
+                    t.grid_mut().update_history(history_lines_for_cols(want.0));
+                }
+                drop(t);
+                current_size = want;
+            }
             // Append raw bytes (hex + escaped-printable preview) to the
             // KASATERM_PTY_LOG file so claude-code escape sequences can
             // be diffed against ghostty's `script` capture.

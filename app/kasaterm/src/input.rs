@@ -1,6 +1,13 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+fn claude_launch_screen(text: &str) -> bool {
+    (text.contains("Claude Code")
+        && text.contains("Welcome back")
+        && text.contains("Using Opus"))
+        || (text.contains("Accessing workspace:") && text.contains("Quick safety check:"))
+}
+
 impl App {
     pub(crate) fn send_bytes(&self, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -1449,14 +1456,27 @@ impl App {
                 self.ws.lock().unwrap().active_pane
             );
         }
-        let (alt, hist_len, mouse_on, mouse_sgr) = {
+        let (alt, hist_len, mouse_on, mouse_sgr, launch_screen) = {
             let ws = self.ws.lock().unwrap();
             let pane = target_pane_id.as_deref().and_then(|id| ws.panes.get(id));
             match pane.and_then(|p| p.term()) {
-                Some(t) => (t.alt_screen, t.history.len(), t.mouse_enabled, t.mouse_sgr),
+                Some(t) => (
+                    t.alt_screen,
+                    t.history.len(),
+                    t.mouse_enabled,
+                    t.mouse_sgr,
+                    pane.is_some_and(|p| claude_launch_screen(&p.visible_text(0))),
+                ),
                 None => return,
             }
         };
+        // Claude builds its welcome screen through several intermediate
+        // redraws. Those frames are terminal history, not user-visible
+        // conversation, and exposing them tears narrow launch cards apart.
+        // Downward wheel input remains available to leave an older offset.
+        if lines > 0 && launch_screen {
+            return;
+        }
         if mouse_on && mouse_sgr {
             let (col, row) = self
                 .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
@@ -2973,6 +2993,19 @@ mod working_scan_tests {
     }
     fn blank() -> Vec<GridCell> {
         vec![Cell::blank(); 8]
+    }
+
+    #[test]
+    fn claude_launch_screens_do_not_expose_redraw_history() {
+        assert!(claude_launch_screen(
+            "╭─ Claude Code ─╮\nWelcome back 양건호!\nUsing Opus 5"
+        ));
+        assert!(claude_launch_screen(
+            "Accessing workspace:\nQuick safety check: Is this a project you trust?"
+        ));
+        assert!(!claude_launch_screen(
+            "Claude Code\n작업 결과입니다.\n❯ 다음 요청"
+        ));
     }
 
     #[test]
