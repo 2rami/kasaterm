@@ -5858,6 +5858,9 @@ impl App {
                             // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
                             ("columns-2", ActionKind::SplitH),
                             ("rows-2", ActionKind::SplitV),
+                            // 별도창 — 헤더 없는 pane 의 유일한 undock 진입점
+                            // (2026-08-13 지적 「점3개 메뉴에 별도창 버튼도 없고」).
+                            ("external-link", ActionKind::Undock),
                             (hdr_icon, ActionKind::ToggleHeader),
                             (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),

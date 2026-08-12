@@ -2984,6 +2984,88 @@ impl App {
     /// 빼고 `self.pty`·`ws.panes` 는 유지해, PtySession 이 살아있고 그 셀 그리드를
     /// 별도창이 계속 뷰한다. 진입점 = 헤더 pop-out 아이콘 클릭(near=None) +
     /// 탭을 창 밖으로 드래그(tear-off, near=커서 물리좌표 — 파일 탭과 동일 제스처).
+    /// 탭 하나만 별도창으로. 다중탭 pane 에서 탭의 pop-out(아이콘·창밖 드래그)이
+    /// pane 통째를 꺼내면 다른 탭까지 같이 나간다(2026-08-13 지적 「같이 꺼내질때」)
+    /// — secondary 탭은 `drop_tab_into_body` 와 같은 들어올리기로 자기 pane 으로
+    /// 승격하되 레이아웃 트리에는 꽂지 않고 바로 별도창으로 세운다.
+    ///
+    /// 승격 pane 의 이름은 **그 탭의 pid** — aux 터미널 기계 전체(aux_term_send·
+    /// unhide_aux·resize)가 pane_id ∈ App.pty 를 전제한다. 그래서 pid 가 pane
+    /// 이름과 같은 **첫 탭**(pane 의 정체성 그 자체)은 못 가르고 pane undock 으로
+    /// 폴백한다 — 소스가 이름을 쥔 채 pid 만 내보내면 나중에 소스가 닫힐 때
+    /// `drop_pane_resources` 의 `pty.remove(pane_id)` 가 꺼내 둔 셸을 죽인다.
+    pub(crate) fn undock_pane_tab(
+        &mut self,
+        pane_id: &str,
+        idx: usize,
+        event_loop: &ActiveEventLoop,
+        near: Option<winit::dpi::PhysicalPosition<i32>>,
+    ) {
+        if self.tmux.is_some() {
+            return;
+        }
+        let tab_pid: Option<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(pane_id)
+                .filter(|p| p.tabs.len() > 1)
+                .and_then(|p| p.tabs.get(idx))
+                .filter(|t| matches!(t.content, PaneContent::Terminal(_)))
+                .and_then(|t| t.pid.clone())
+                .filter(|pid| pid != pane_id && !ws.panes.contains_key(pid))
+        };
+        let Some(tab_pid) = tab_pid.filter(|p| self.pty.contains_key(p)) else {
+            // 단일탭·첫 탭·PTY 없는 탭 — pane undock 그대로.
+            self.undock_pane_terminal(pane_id, event_loop, near);
+            return;
+        };
+        let home_window = self.window_of_pane(pane_id).unwrap_or(self.active_window);
+        // 꺼낸 창은 탭이 보이던 pane 칸수를 그대로 담는다(pane undock 과 같은 이유
+        // — 고정 크기면 넓게 쓰던 화면의 오른쪽·아래가 잘린다).
+        let want_cells = {
+            let (cols, rows) = self.window_cells();
+            self.pty_layout.as_ref().and_then(|t| {
+                t.leaf_rects(cols, rows)
+                    .into_iter()
+                    .find(|(id, ..)| id == pane_id)
+                    .map(|(_, _, _, w, h)| (w, h))
+            })
+        };
+        {
+            let mut ws = self.ws.lock().unwrap();
+            // 들어올리기 — drop_tab_into_body 1단계와 같은 active 보정. 다중탭을
+            // 위에서 확인했으므로 소스가 비는 경우는 없다.
+            let moved = {
+                let Some(src) = ws.panes.get_mut(pane_id) else { return };
+                if idx >= src.tabs.len() {
+                    return;
+                }
+                let t = src.tabs.remove(idx);
+                if idx < src.active_tab && src.active_tab > 0 {
+                    src.active_tab -= 1;
+                }
+                if src.active_tab >= src.tabs.len() && !src.tabs.is_empty() {
+                    src.active_tab = src.tabs.len() - 1;
+                }
+                src.dirty = true;
+                t
+            };
+            let mut ps = PaneState::default();
+            ps.tabs.clear();
+            ps.tabs.push(moved);
+            ps.active_tab = 0;
+            ps.dirty = true;
+            ws.panes.insert(tab_pid.clone(), ps);
+            // pid→pane 재계산: ScreenUpdate 가 새 pane 으로 흐르고, 소스가 닫힐 때
+            // drop_pane_resources 의 secondary 정리가 이 pid 를 소스 것으로 안 본다.
+            ws.rebuild_pid_map();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.spawn_aux_terminal(tab_pid, home_window, event_loop, near, want_cells);
+    }
+
     pub(crate) fn undock_pane_terminal(
         &mut self,
         pane_id: &str,
