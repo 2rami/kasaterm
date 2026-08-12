@@ -163,6 +163,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
     }
+    // Compact-bar (flags & 16): fills from the left on a 2.4s loop, then
+    // restarts. compact 는 몇 초에서 수십 초 걸리는 **끝이 있는** 작업이라,
+    // 「칸이 차는」 모양이 「쓸고 지나가는」 working bar 보다 상태를 옳게 읽힌다.
+    // 진행률 자체는 claude 가 화면에만 내놓고 우리에게 주지 않으므로 시간으로
+    // 채운다(indeterminate) — 그래서 채운 칸이 실제 퍼센트는 아니다.
+    if ((in.flags & 16u) != 0u) {
+        let fill = fract(u.time / 2.4);
+        let infill = step(in.uv.x, fill);
+        let a = in.fg.a * mix(0.18, 1.0, infill);
+        let rgb = boost_saturation(in.fg.rgb, u.color_sat);
+        return vec4<f32>(prepare_output(rgb), a);
+    }
     // Pulse-bar (flags & 8): a full-width rail whose alpha breathes on a slow
     // 3s sine — a background/Monitor job is running with no on-screen spinner.
     // The gentler, slower rhythm keeps it distinct from the working-bar sweep.

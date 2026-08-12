@@ -5362,7 +5362,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let visible = self.visible_pane_ids();
                 self.pane_activity
                     .iter()
-                    .any(|(id, a)| a.status == "working" && visible.contains(id))
+                    .any(|(id, a)| {
+                        matches!(a.status.as_str(), "working" | "compacting")
+                            && visible.contains(id)
+                    })
             } {
                 why.push("pane_working");
             }
@@ -5464,7 +5467,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let visible = self.visible_pane_ids();
                 self.pane_activity
                     .iter()
-                    .any(|(id, a)| a.status == "working" && visible.contains(id))
+                    .any(|(id, a)| {
+                        matches!(a.status.as_str(), "working" | "compacting")
+                            && visible.contains(id)
+                    })
             }
             || !self.pending_capture.is_empty()
             // 별도창 캡처가 대기 중이면 그 deadline 까지 깨어 있어야 arming 이 발화한다.

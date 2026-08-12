@@ -42,6 +42,13 @@ impl CellInstance {
     /// alpha on a slow 3s sine — the "background job / Monitor running" signal,
     /// whose slower rhythm reads as distinct from the working-bar sweep.
     pub const FLAG_PULSE_BAR: u32 = 8;
+    /// Bit 4 set = a compact-bar quad. Same atlas-free, GPU-animated deal as the
+    /// two above, but the fill grows from the left and restarts — the shape people
+    /// read as "this has an end and it's getting there", which a sweeping segment
+    /// does not. Used while claude compacts its conversation: that runs for
+    /// seconds and the on-screen notice can be covered by a teammate-message
+    /// overlay, so the pane header has to carry the signal.
+    pub const FLAG_COMPACT_BAR: u32 = 16;
 }
 
 #[repr(C)]

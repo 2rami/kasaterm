@@ -473,6 +473,11 @@ impl App {
             /// shows (from the transcript tail, not the glyph scan). When `busy`
             /// is false, this draws the slower pulse bar instead.
             bg_active: bool,
+            /// True while claude compacts its conversation. `busy` 도 같이 참이지만
+            /// 이쪽이 이기고 채워지는 바를 그린다 — compact 는 끝이 있는 작업이라
+            /// 쓸림바로는 「얼마나 남았나」가 안 읽히고, 화면에 뜨는 알림은 teammate
+            /// 메시지 오버레이에 가려질 수 있어 헤더가 그 신호를 들어야 한다.
+            compacting: bool,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -1891,6 +1896,10 @@ impl App {
                             .get(&id)
                             .map(|a| a.bg_active)
                             .unwrap_or(false),
+                        compacting: self
+                            .pane_activity
+                            .get(&id)
+                            .is_some_and(|a| a.status == "compacting"),
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
@@ -5160,7 +5169,16 @@ impl App {
                 // "로딩바" the user picked. 2px over a faint accent rail; idle
                 // panes draw nothing. about_to_wait keeps frames coming (a
                 // cheap GPU-time present, no chrome rebuild) while a pane is busy.
-                if h.busy {
+                if h.compacting {
+                    // compact 중 — 쓸림 대신 왼쪽부터 채워지는 바. compact 는 끝이 있는
+                    // 작업이라 이 모양이 상태를 옳게 읽히고, 화면에 뜨는 알림이 teammate
+                    // 메시지에 가려져도 헤더는 남는다(거노 2026-08-13: "가끔 sm으로
+                    // 가려질때도 있어"). busy 보다 먼저 봐야 한다 — compact 중에도 스피너가
+                    // 돌아 busy 가 함께 참이고, 순서가 뒤면 늘 쓸림바가 이긴다.
+                    let bar_h = 3.0;
+                    let by = h.y + PANE_HEADER_HEIGHT - bar_h;
+                    g.compact_bar(h.x, by, h.w, bar_h, theme::accent());
+                } else if h.busy {
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
                     // One FLAG_WORKING_BAR quad — the shader sweeps the segment

@@ -398,13 +398,17 @@ impl App {
         // 보던 동안 뒤 탭 학생은 화면에 아무 흔적이 없었다 — busy 바도 완료 펄스도.
         // 그렇다고 스윕바를 띄우면 노는 화면 위에서 "이 화면이 일한다"는 거짓말이
         // 되므로, 있는 언어를 쓴다: 보이는 것은 busy, 안 보이는 것은 bg 펄스.
-        let (busy_now, bg_tab_busy): (
+        let (busy_now, bg_tab_busy, compacting_now): (
             Vec<(String, bool, Option<ApprovalPrompt>)>,
+            std::collections::HashSet<String>,
             std::collections::HashSet<String>,
         ) = {
             let ws = self.ws.lock().unwrap();
             let mut rows = Vec::with_capacity(ws.panes.len());
             let mut bg = std::collections::HashSet::new();
+            // compact 중인 pane. 같은 스캔에서 뽑는다 — 따로 한 바퀴 돌면 ws 락을
+            // 두 번 잡고, 그 사이 화면이 바뀌어 busy 와 compacting 이 어긋난다.
+            let mut compacting = std::collections::HashSet::new();
             for (id, pane) in ws.panes.iter() {
                 match pane.term() {
                     Some(t) => {
@@ -414,6 +418,11 @@ impl App {
                         } else {
                             rows_show_approval_prompt(&t.cells)
                         };
+                        // compact 중에도 스피너는 돌아서 busy 가 이미 참이다. 그 안에서만
+                        // 좁히므로, 스크롤을 되짚다 옛 알림을 만나 바가 켜지는 일은 없다.
+                        if busy && rows_show_compacting(&t.cells) {
+                            compacting.insert(id.clone());
+                        }
                         rows.push((id.clone(), busy, prompt));
                     }
                     None => rows.push((id.clone(), false, None)),
@@ -428,7 +437,7 @@ impl App {
                     bg.insert(id.clone());
                 }
             }
-            (rows, bg)
+            (rows, bg, compacting)
         };
 
         // The claude spinner blanks/scrolls between frames, so the raw glyph
@@ -448,15 +457,29 @@ impl App {
             // Only a real "working" run counts toward the completion toast —
             // a pane leaving `blocked`/`waiting` (prompt answered) didn't
             // finish anything, it just got unstuck.
+            // compact 도 「일하던 중」에 든다 — 여기서 빼면 compact 로 시작해 그대로 끝난
+            // 턴이 완료로 안 잡혀 토스트가 사라진다.
             let was_busy = self
                 .pane_activity
                 .get(id)
-                .map_or(false, |a| a.status == "working");
+                .map_or(false, |a| matches!(a.status.as_str(), "working" | "compacting"));
             if was_busy && !busy {
                 completed.push(id.clone());
                 self.pane_last_busy.remove(id);
             }
-            let status = if busy { "working" } else { "idle" };
+            // compact 중이면 「working」보다 좁게 적는다 — 헤더가 쓸림바 대신 차오르는
+            // 바를 그리는 갈림길이 이 한 값이다. `busy` 가 grace 로 늘어나 있는 동안에도
+            // 화면에 알림이 남아 있으면 compacting 으로 유지된다(끝나면 알림이 사라져
+            // 자동으로 working→idle 로 떨어진다).
+            let status = if busy {
+                if compacting_now.contains(id) {
+                    "compacting"
+                } else {
+                    "working"
+                }
+            } else {
+                "idle"
+            };
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
@@ -2816,6 +2839,33 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
         .any(|row| crate::render::spinner_row_col(row).is_some())
 }
 
+/// claude 가 대화를 compact 하는 중인가 — 화면 하단에 그 알림이 떠 있는지 본다.
+///
+/// 문구는 claude 번들에서 실측한 것이다(`Compacting conversation`·`compacting
+/// history`). 추측한 패턴을 넣으면 감지가 조용히 실패하고 바가 영원히 안 뜨므로,
+/// 실제 문자열에서 **가장 짧고 변하지 않을 조각**(`ompacting`)만 본다 — 대문자
+/// 여부와 뒤에 붙는 말("conversation"·"history"·"…")이 버전마다 흔들려도 남는 부분이다.
+///
+/// compact 중에도 스피너는 돌기 때문에 `rows_show_working` 은 이미 true 다. 그래서
+/// 이 판정은 working 을 **대체하지 않고 덧붙는다** — 상태를 「working」에서
+/// 「compacting」으로 좁히는 데만 쓴다.
+///
+/// 스캔 폭이 `rows_show_working` 과 같은 하단 10행인 이유: 그 알림은 스피너와 같은
+/// 자리에 뜨고, 위로 흘러간 옛 알림을 잡으면 compact 가 끝난 뒤에도 바가 남는다.
+pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> bool {
+    let Some(last) = cells
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
+    else {
+        return false;
+    };
+    let start = (last + 1).saturating_sub(10);
+    cells[start..=last].iter().any(|row| {
+        let text: String = row.iter().map(|c| c.ch).collect();
+        text.contains("ompacting")
+    })
+}
+
 /// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
 ///   Menu:  claude 의 "❯ 1. Yes" 번호 메뉴(permission/AskUserQuestion). Enter=하이라이트
 ///          선택(기본 Yes), Esc=거부. 'y'/'n' 글자는 메뉴에서 무시되므로 못 쓴다.
@@ -3083,6 +3133,34 @@ mod working_scan_tests {
             rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
             Some(ApprovalPrompt::Menu)
         );
+    }
+
+    // compact 알림을 잡는가. 문구는 claude 번들 실측(`Compacting conversation`·
+    // `compacting history`)이고, 판정은 그 둘에 공통인 `ompacting` 만 본다 — 대문자
+    // 여부와 뒤에 붙는 말이 버전마다 흔들려도 남는 조각이다.
+    #[test]
+    fn compacting_notice_is_detected_in_either_wording() {
+        assert!(rows_show_compacting(&[row("✻ Compacting conversation…")]));
+        assert!(rows_show_compacting(&[row("compacting history")]));
+    }
+
+    // 평범한 working 화면을 compact 로 오인하면 모든 바쁜 pane 이 채워지는 바를 단다.
+    #[test]
+    fn ordinary_working_screen_is_not_compacting() {
+        assert!(!rows_show_compacting(&[row("✻ Pondering… (esc to interrupt)")]));
+        assert!(!rows_show_compacting(&[row("")]));
+        assert!(!rows_show_compacting(&[]));
+    }
+
+    // 스캔은 하단 10행만 본다 — 위로 흘러간 옛 알림을 잡으면 compact 가 끝난 뒤에도
+    // 바가 영원히 남는다. 11행 위에 둔 알림은 무시돼야 한다.
+    #[test]
+    fn compacting_notice_scrolled_out_of_the_bottom_rows_is_ignored() {
+        let mut cells = vec![row("Compacting conversation…")];
+        for _ in 0..11 {
+            cells.push(row("그 뒤에 쌓인 출력"));
+        }
+        assert!(!rows_show_compacting(&cells));
     }
 
     #[test]
