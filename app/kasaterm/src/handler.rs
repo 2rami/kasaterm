@@ -333,7 +333,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
                 // report-cwd 가 매 렌더 이 이벤트를 재발화해 bg 세션 pane_claude_sid 를
                 // 보강하므로(F/H), 이미 같은 sid 면 no-op — 무한 relabel·render 를 막는다.
-                if self.pane_claude_sid.get(pane.as_str()) == Some(&sid) {
+                let already_labeled = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|ws| ws.pane_character.get(pane.as_str()).cloned())
+                    .is_some_and(|name| !name.is_empty());
+                if self.pane_claude_sid.get(pane.as_str()) == Some(&sid) && already_labeled {
                     return;
                 }
                 self.pane_claude_sid.insert(pane.clone(), sid.clone());

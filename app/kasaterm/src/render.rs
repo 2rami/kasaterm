@@ -2255,7 +2255,8 @@ impl App {
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
         // click hit-list and the painted boxes share one source of truth.
-        // Items stack directly under the "+" button.
+        // Top tabs have room below the button, while the sidebar button lives
+        // in the bottom tray and must open upward to stay inside the window.
         let menu_open = self.shell_menu_open;
         let shell_items: Vec<(&'static str, &'static str, String)> =
             if menu_open { available_shells() } else { Vec::new() };
@@ -2263,7 +2264,12 @@ impl App {
         let menu_w_for_paint = sb_plus.2.max(210.0);
         let shell_menu_layout: Vec<(String, &'static str, &'static str, (f32, f32, f32, f32))> = {
             let (px, py, _, ph) = sb_plus;
-            let mut iy = py + ph + 4.0;
+            let menu_h = shell_items.len() as f32 * SHELL_ITEM_H;
+            let mut iy = if self.tabs_on_top {
+                py + ph + 4.0
+            } else {
+                py - menu_h - 4.0
+            };
             shell_items
                 .iter()
                 .map(|(label, icon, cmd)| {
@@ -3099,10 +3105,15 @@ impl App {
                 }
                 let (px, py, _, ph) = sb_plus;
                 let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
+                let backdrop_y = if self.tabs_on_top {
+                    py + ph
+                } else {
+                    py - backdrop_h
+                };
                 round_rect(
                     g,
                     px - 4.0,
-                    py + ph,
+                    backdrop_y,
                     menu_w_for_paint + 8.0,
                     backdrop_h,
                     theme::radius_md(),
