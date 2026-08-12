@@ -1604,19 +1604,20 @@ impl App {
                         .and_then(|p| p.active_agent())
                         .is_some();
                 if ultra {
-                    // 학생 accent 대신 보라로 칠한다 — 그 턴에 무엇이 켜져 있는지가
-                    // 누구 pane 인지보다 급한 정보다(거노 2026-08-11: "상태줄말고
-                    // 프롬프트입력창 보라색 glow"). 입력박스를 칠하는 손이 여기
-                    // 하나뿐이라 색만 갈아끼운다 — 따로 칠하면 이 호출이 덮는다.
-                    // 학생 색은 숨쉬기 목표에 섞여 빛에 남는다(2026-08-12 지적:
-                    // "학생색이랑 어울리게 글로우").
-                    style_prompt_box(
-                        &mut composed,
-                        ultracode_accent(
-                            prompt_accent,
-                            self.version_anim_start.elapsed().as_secs_f32(),
-                        ),
-                    );
+                    let t = self.version_anim_start.elapsed().as_secs_f32();
+                    if let Some(accent) = prompt_accent {
+                        // 학생색 보더는 그대로 두고 그 위를 보라 혜성이 돈다 —
+                        // 통보라 도색은 누구 pane 인지를 지웠다(2026-08-12 지시
+                        // 「학생색이 있는 프롬프트창은 보이게, 보라 효과가
+                        // 지나다니게」). 혜성은 style_prompt_box **뒤**여야 한다 —
+                        // 앞이면 그 호출이 학생색으로 덮는다.
+                        style_prompt_box(&mut composed, accent);
+                        overlay_ultracode_comet(&mut composed, accent, t);
+                    } else {
+                        // 미배정 pane 은 지킬 학생색이 없다 — 보라 숨쉬기 유지
+                        // (거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
+                        style_prompt_box(&mut composed, ultracode_accent(t));
+                    }
                 } else if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
@@ -8144,6 +8145,17 @@ pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// ultracode 애니(혜성·숨쉬기) 프레임 주기. 도트 배너(200ms)와 달리 혜성은
+/// 픽셀 이동이라 그 주기론 프레임당 8셀씩 순간이동으로 보인다 — 66ms(~15fps)면
+/// 프레임당 ~2.8셀로 흐르는 빛으로 읽힌다.
+pub(crate) const ULTRA_COMET_FRAME_MS: u64 = 66;
+
+/// ultracode pane 이 하나라도 있는 동안 true. 혜성 타이머 스레드(handler.rs)가
+/// 이걸 보고 redraw 를 깨운다 — 갱신은 `refresh_pane_ultracode`(input.rs, 마커
+/// 스캔과 같은 손)에서. 없으면 sleep 루프만 돌아 idle 비용 0.
+pub(crate) static ULTRA_COMET_ANIMATING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 
 
 
@@ -8168,7 +8180,9 @@ impl PromptBox {
     }
 }
 
-/// ultracode 턴의 입력박스 accent — 학생 색 대신 이걸 `style_prompt_box` 에 넘긴다.
+/// ultracode 턴, **미배정** pane 의 입력박스 accent — 학생 색이 없는 pane 만
+/// 이걸 `style_prompt_box` 에 넘긴다(학생색 pane 은 학생색을 유지하고
+/// `overlay_ultracode_comet` 이 위를 지나간다 — 2026-08-12 지시).
 ///
 /// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
 /// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
@@ -8180,25 +8194,69 @@ impl PromptBox {
 /// 테두리가 보라가 아니라 학생 분홍 `d55580` 이었다).
 ///
 /// 색은 `bb9af7`. `t`(초)에 따라 밝은 쪽으로 숨쉬듯 오르내려 정적인 테두리와
-/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다. `student` 가 있으면 숨쉬기
-/// 목표(흰빛)를 그쪽으로 30% 기울인다 — 보라 정체성(B>R>G)이 유지되는 상한이라
-/// 더 키우지 말 것(분홍 계열 학생에서 순서가 무너진다).
-fn ultracode_accent(student: Option<[u8; 4]>, t: f32) -> [u8; 4] {
+/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
+fn ultracode_accent(t: f32) -> [u8; 4] {
     let g = 0.34 * (0.5 + 0.5 * (t * 2.2).sin());
     let base = [0xbbu8, 0x9a, 0xf7];
     let mut out = [255u8; 4];
     for i in 0..3 {
         let b = base[i] as f32;
-        // 목표가 원색보다 어두운 채널(학생 색이 짙은 쪽)은 원색에 묶는다 —
-        // 어두워지는 숨쉬기는 꺼져 가는 것처럼 읽히고 "원색보다 어둡지 않다"
-        // 불변식이 깨진다.
-        let target = student
-            .map(|s| 255.0 + (s[i] as f32 - 255.0) * 0.3)
-            .unwrap_or(255.0)
-            .max(b);
-        out[i] = (b + (target - b) * g).round() as u8;
+        out[i] = (b + (255.0 - b) * g).round() as u8;
     }
     out
+}
+
+/// 혜성 속도(셀/초)와 꼬리 길이(셀). 전폭 pane(둘레 ~360셀) 기준 한 바퀴 ~8.5초 —
+/// 시선을 끌 만큼은 움직이되 타이핑을 방해할 만큼 바쁘지 않은 지점.
+const COMET_SPEED: f32 = 42.0;
+const COMET_TAIL: f32 = 16.0;
+
+/// ultracode 가 켜진 **학생색** pane 의 입력박스 — 보더는 학생색 그대로 두고,
+/// 그 위를 보라 혜성이 돈다(2026-08-12 지시 「학생색이 있는 프롬프트창은 보이게,
+/// 보라 효과가 지나다니게」— 통보라 도색은 누구 pane 인지를 지웠다).
+///
+/// 궤도는 위 보더 좌→우, 아래 보더 우→좌의 순환 — claude 입력박스는 세로 보더가
+/// 없어서 이게 「둘레를 돈다」로 읽히는 유일한 경로다. 머리는 흰빛을 한 줌 얹은
+/// 보라(bb9af7), 꼬리는 학생색으로 사그라든다. 반드시 `style_prompt_box` **뒤에**
+/// 부를 것 — 앞이면 그 호출이 학생색으로 덮는다(ultracode_accent 와 같은 함정).
+fn overlay_ultracode_comet(rows: &mut [Vec<GridCell>], student: [u8; 4], t: f32) {
+    let Some(PromptBox::Bordered { top, bottom, .. }) = prompt_box(rows) else { return };
+    let (w_top, w_bot) = (rows[top].len(), rows[bottom].len());
+    let total = (w_top + w_bot) as f32;
+    // 둘레가 꼬리보다 짧으면 혜성이 자기 꼬리를 물어 통보라가 된다 — 그 폭에선
+    // 학생색을 지키는 게 목적에 맞다.
+    if total < COMET_TAIL * 2.0 {
+        return;
+    }
+    let head = (t * COMET_SPEED) % total;
+    let purple = [0xbbu8, 0x9a, 0xf7];
+    let mix = |b: u8, a: u8, k: f32| (b as f32 + (a as f32 - b as f32) * k).round() as u8;
+    let paint = |cell: &mut GridCell, pos: f32| {
+        if matches!(cell.ch, ' ' | '\0') {
+            return;
+        }
+        let d = (head - pos).rem_euclid(total);
+        if d > COMET_TAIL {
+            return;
+        }
+        // 제곱 감쇠 — 선형이면 균일한 띠로 보여 「지나가는 빛」이 안 된다.
+        let s = (1.0 - d / COMET_TAIL) * (1.0 - d / COMET_TAIL);
+        let mut rgb = [0u8; 3];
+        for i in 0..3 {
+            rgb[i] = mix(student[i], purple[i], s);
+        }
+        let lift = 0.3 * s * s;
+        for c in rgb.iter_mut() {
+            *c = mix(*c, 0xff, lift);
+        }
+        cell.fg = kasa_bridge::screen::Color::Rgb(rgb[0], rgb[1], rgb[2]);
+    };
+    for (col, cell) in rows[top].iter_mut().enumerate() {
+        paint(cell, col as f32);
+    }
+    for (col, cell) in rows[bottom].iter_mut().enumerate() {
+        paint(cell, (w_top + (w_bot - 1 - col)) as f32);
+    }
 }
 
 /// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
@@ -11929,22 +11987,20 @@ mod prompt_box_tests {
         ));
     }
 
-    // ultracode accent — 학생 accent 와 **확실히 구분**돼야 의미가 있다. 실기에서
-    // 테두리가 학생 분홍(d55580)으로 나온 적이 있어(덮어쓰기) 그 색과의 거리도 본다.
+    // ultracode accent(미배정 pane 의 숨쉬기) — 학생 accent 와 **확실히 구분**돼야
+    // 의미가 있다. 실기에서 테두리가 학생 분홍(d55580)으로 나온 적이 있어(덮어쓰기)
+    // 색 순서(B>R>G)를 본다.
     #[test]
     fn ultracode_accent_stays_purple_across_the_breath() {
         let mut seen_dim = false;
         let mut seen_bright = false;
-        // 학생 없음(순수 흰빛 숨쉬기)과 분홍 학생(d55580, B>R>G 를 깨기 가장 쉬운
-        // 상대) 두 케이스 모두에서 보라 정체성이 유지돼야 한다.
-        for student in [None, Some([0xd5u8, 0x55, 0x80, 255])] {
         for i in 0..80 {
             let t = i as f32 * 0.05;
-            let [r, g, b, a] = ultracode_accent(student, t);
+            let [r, g, b, a] = ultracode_accent(t);
             assert_eq!(a, 255);
             // 언제나 보라 — 파랑이 가장 세고 초록이 가장 약하다. 이 순서가 깨지면
             // 학생 accent(분홍 계열: R 강, G 약, B 중간)와 헷갈린다.
-            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t}, {student:?})");
+            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t})");
             // 원색(bb9af7)보다 어두워지지 않는다 — 밝은 쪽으로만 숨쉰다.
             assert!(r >= 0xbb && g >= 0x9a && b >= 0xf7, "원색보다 어둡다: {r},{g},{b}");
             // 초록이 가장 크게 흔들리는 채널이다(0x9a 에서 시작해 흰빛이 가장 많이
@@ -11956,10 +12012,54 @@ mod prompt_box_tests {
                 seen_bright = true;
             }
         }
-        }
         // 실제로 숨쉬어야 한다 — 상수면 정적인 테두리와 구분이 안 된다.
-        // (bright 는 학생 없음 케이스가 채운다 — 학생을 섞으면 목표가 낮아진다.)
         assert!(seen_dim && seen_bright, "밝기가 오르내리지 않는다");
+    }
+
+    // ultracode 혜성 — 보더 대부분은 학생색 그대로(창이 「보인다」)이고, 혜성
+    // 구간만 보라 쪽으로 물들며, 시간이 흐르면 그 자리가 이동한다(2026-08-12 지시
+    // 「학생색이 있는 프롬프트창은 보이게, 보라 효과가 지나다니게」).
+    #[test]
+    fn ultracode_comet_roams_over_student_border() {
+        let student = [0xd5u8, 0x55, 0x80, 255];
+        let build = || {
+            vec![
+                row_from(&"─".repeat(60)),
+                row_from(&format!("❯ hi{}", " ".repeat(56))),
+                row_from(&"─".repeat(60)),
+            ]
+        };
+        // 학생색 그대로가 아닌 보더 대시 = 혜성이 지나는 자리.
+        let comet_cells = |rows: &[Vec<GridCell>]| -> Vec<(usize, usize)> {
+            let mut v = Vec::new();
+            for (ri, row) in rows.iter().enumerate() {
+                for (ci, c) in row.iter().enumerate() {
+                    if c.ch != '─' {
+                        continue;
+                    }
+                    if let kasa_bridge::screen::Color::Rgb(r, g, b) = c.fg {
+                        if [r, g, b] != [student[0], student[1], student[2]] {
+                            // 보라 쪽으로 물든다 — B 가 학생색보다 오른다.
+                            assert!(b > student[2], "보라가 아니다: {r},{g},{b}");
+                            v.push((ri, ci));
+                        }
+                    }
+                }
+            }
+            v
+        };
+        let mut a = build();
+        style_prompt_box(&mut a, student);
+        overlay_ultracode_comet(&mut a, student, 0.3);
+        let ca = comet_cells(&a);
+        assert!(!ca.is_empty(), "혜성이 안 칠해졌다");
+        // 꼬리 길이 언저리만 물들어야 학생색 보더가 남는다 — 전부 물들면
+        // 통보라 도색과 다를 게 없다.
+        assert!(ca.len() <= COMET_TAIL as usize + 2, "너무 넓다: {}", ca.len());
+        let mut b = build();
+        style_prompt_box(&mut b, student);
+        overlay_ultracode_comet(&mut b, student, 1.3);
+        assert_ne!(ca, comet_cells(&b), "혜성이 움직이지 않는다");
     }
 
     // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).

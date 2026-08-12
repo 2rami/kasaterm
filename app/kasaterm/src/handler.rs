@@ -977,6 +977,22 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // ultracode 혜성 타이머. 도트 배너 스레드와 같은 패턴이지만 주기가 다르다
+        // (66ms) — 혜성은 픽셀 이동이라 200ms 론 순간이동으로 보인다. ultracode
+        // pane 이 없으면 sleep+load 만 도는 무비용 루프.
+        {
+            let comet_proxy = self.proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::render::ULTRA_COMET_FRAME_MS,
+                ));
+                let animating = crate::render::ULTRA_COMET_ANIMATING
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if animating && comet_proxy.send_event(UserEvent::Redraw).is_err() {
+                    break;
+                }
+            });
+        }
         // Sidebar git-badge poller. The sidebar paint publishes each window's
         // repr cwd into `git_poll_cwds`; this thread shells out to `git_badge`
         // off the main thread and wakes the loop only when a badge actually

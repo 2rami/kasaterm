@@ -369,6 +369,12 @@ impl App {
             })
             .map(|(pane, _)| pane.clone())
             .collect();
+        // 혜성 redraw 펌프(handler.rs)의 게이트 — 마커 스캔과 같은 손이 갱신해야
+        // 켜짐/꺼짐이 글로우와 같은 박자로 움직인다.
+        crate::render::ULTRA_COMET_ANIMATING.store(
+            !self.pane_ultracode.is_empty(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn refresh_pane_activity(&mut self) {
