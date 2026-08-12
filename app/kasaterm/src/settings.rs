@@ -760,6 +760,33 @@ impl App {
                 crate::invalidate_wheel_pixel_gain();
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
+            // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
+            // 붙은 한도 이력이 남는다. 새로 만들었다 지우는 것과 여기가 갈린다.
+            SettingsAction::ReauthAccount(p, id) => {
+                let (provider, argv, key, dir) = match p {
+                    AccountProvider::Claude => (
+                        "Claude",
+                        "claude auth login --claudeai",
+                        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                        socket::claude_account_dir(&id),
+                    ),
+                    AccountProvider::Codex => (
+                        "Codex",
+                        "codex login",
+                        "CODEX_HOME",
+                        socket::codex_account_dir(&id),
+                    ),
+                };
+                let Some(dir) = dir else {
+                    self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+                    return;
+                };
+                let _ = std::fs::create_dir_all(&dir);
+                // id 접두사가 `acct-`/`codex-` 로 갈려 있어 프로필도 그대로 갈린다.
+                let profile = socket::oauth_profile_dir(&id);
+                spawn_hidden_login(provider, id, argv.to_string(), key, dir, profile);
+                self.set_toast("빈 브라우저 창에서 로그인하세요".to_string());
+            }
             SettingsAction::CancelLogin => cancel_login(),
             SettingsAction::DismissLogin => clear_login_job(),
             SettingsAction::RemoveClaudeAccount(id) => {
@@ -1776,7 +1803,6 @@ pub(crate) fn paint_settings(
                 &["로그인 계정을 골라요 — 다음에 뜨는 claude 부터 그 계정으로",
                   "이미 돌고 있는 세션은 원래 계정 그대로예요",
                   "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
-            let row_h = 34.0_f32;
             // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
             // 우리가 만든 슬롯이 아니라 지울 것도, 이름 붙일 것도 없다.
             let acct_rows = std::iter::once((String::new(), "기본 (지금 로그인된 계정)".to_string(), None))
@@ -1789,69 +1815,51 @@ pub(crate) fn paint_settings(
             for (id, label, idx) in acct_rows {
                 if y > clip {
                     let active = ctx.claude_account == id;
-                    // 라디오 — 켜지면 accent 링 + 가운데 점.
-                    let dot = (fx, y + (row_h - 16.0) / 2.0, 16.0, 16.0);
-                    circle_rect(g, dot.0, dot.1, dot.2,
-                        if active { theme::accent() } else { theme::surface_active() });
-                    if active {
-                        circle_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, theme::bg());
-                    }
-                    let hit = (fx - 4.0, y, 24.0, row_h);
-                    if inside(hit, ctx.cursor) && !active {
-                        circle_rect(g, dot.0, dot.1, dot.2, theme::surface_hover());
-                    }
-                    rects.push((SettingsAction::ClaudeAccount(id.clone()), hit));
-                    // 오른쪽 끝에 그 슬롯의 진짜 신원 — 라벨은 거노가 붙인 별명이라
-                    // 로그인이 실제로 됐는지는 말해 주지 않는다.
-                    let status_x = match idx {
-                        None => {
-                            g.draw_text(
-                                fx + 28.0, y + (row_h - 14.0) / 2.0, &label,
-                                gpu::DrawOpts { font_size: 14.0, color: theme::text_mute(), bold: active, italic: false },
-                            );
-                            fx + 28.0 + g.measure_chrome_text(&label, 14.0, active) + 12.0
-                        }
-                        Some(i) => {
-                            let lr = (fx + 28.0, y, fw.min(240.0), row_h);
-                            let focused = ctx.input == Some(SettingsInput::ClaudeAccountLabel(i));
-                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
-                            rects.push((SettingsAction::FocusClaudeAccountLabel(i), lr));
-                            let dr = (lr.0 + lr.2 + 8.0, y, 30.0, row_h);
-                            stepper_btn(g, dr, "x", ctx.cursor);
-                            rects.push((SettingsAction::RemoveClaudeAccount(id.clone()), dr));
-                            dr.0 + dr.2 + 12.0
-                        }
-                    };
-                    // 빈칸을 남기지 않는다. 답이 아직 없는 두 경우 — 첫 조회 중이거나,
-                    // 로그인은 됐는데 안 쓰던 슬롯이라 토큰이 만료돼 갱신이 도는 중 —
-                    // 이 자리를 비워 두면 계정이 사라진 것처럼 보인다(거노: "계정
-                    // 재시작할때마다 또 없어지냐"). 실제로는 몇 초 뒤 채워지므로,
-                    // 없다고 말하지 말고 아직 모른다고 말한다.
+                    // 2줄은 그 슬롯의 진짜 신원 — 라벨은 거노가 붙인 별명이라 로그인이
+                    // 실제로 됐는지는 말해 주지 않는다. 빈칸으로 두지 않는다: 답이 아직
+                    // 없는 두 경우(첫 조회 중 / 안 쓰던 슬롯의 토큰 갱신 중)에 비우면
+                    // 계정이 사라진 것처럼 보였다(거노: "계정 재시작할때마다 또
+                    // 없어지냐"). 없다고 말하지 말고 아직 모른다고 말한다.
                     let probe = auth_probe(&id);
-                    let team = probe.as_ref().and_then(|p| team_org(&p.email, &p.org));
-                    let (txt, col) = match &probe {
+                    let (mut sub, sub_col) = match &probe {
                         Some(p) if !p.logged_in => ("로그인 필요".to_string(), theme::danger()),
                         Some(p) if !p.email.is_empty() => (p.email.clone(), theme::text_mute()),
                         _ => ("확인 중…".to_string(), theme::with_alpha(theme::text_mute(), 0x99)),
                     };
-                    g.draw_text(
-                        status_x, y + (row_h - 12.0) / 2.0, &txt,
-                        gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
-                    );
-                    // 팀 조직만 배지로. 같은 이메일이 두 슬롯에 걸릴 때 이게 유일한
-                    // 구분점이라 이메일 옆에 붙여 한 눈에 같이 읽히게 둔다.
-                    if let Some(org) = team {
-                        let bx = status_x + g.measure_chrome_text(&txt, 12.0, false) + 8.0;
-                        let bw = g.measure_chrome_text(&org, 11.0, false) + 14.0;
-                        round_rect(g, bx, y + (row_h - 18.0) / 2.0, bw, 18.0,
-                            theme::radius_sm(), theme::surface_active());
-                        g.draw_text(
-                            bx + 7.0, y + (row_h - 11.0) / 2.0, &org,
-                            gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false },
-                        );
+                    // 팀 조직을 같은 줄에 이어 붙인다. 같은 이메일이 두 슬롯에 걸릴 때
+                    // 이게 유일한 구분점이다(거노: "팀플랜인지 구분하게 돼?").
+                    if let Some(org) = probe.as_ref().and_then(|p| team_org(&p.email, &p.org)) {
+                        sub = format!("{sub} · {org}");
                     }
+                    let editing = idx
+                        .is_some_and(|i| ctx.input == Some(SettingsInput::ClaudeAccountLabel(i)));
+                    let slot = idx.map(|i| AcctSlot {
+                        editing,
+                        label: &label,
+                        caret: ctx.settings_caret,
+                        caret_on: ctx.caret_on,
+                        preedit: if editing { &ctx.preedit } else { "" },
+                        focus: SettingsAction::FocusClaudeAccountLabel(i),
+                        reauth: SettingsAction::ReauthAccount(AccountProvider::Claude, id.clone()),
+                        remove: SettingsAction::RemoveClaudeAccount(id.clone()),
+                    });
+                    let view = AcctRowView {
+                        name: if idx.is_none() {
+                            "기본 (지금 로그인된 계정)".to_string()
+                        } else {
+                            account_display(&id, &label, &format!("계정 {}", idx.unwrap_or(0) + 2))
+                        },
+                        sub,
+                        sub_col,
+                        active,
+                        slot,
+                    };
+                    account_card(
+                        g, &mut rects, (fx, y, fw, ACCT_H), ctx.cursor, &view,
+                        SettingsAction::ClaudeAccount(id.clone()),
+                    );
                 }
-                y += row_h + 6.0;
+                y += ACCT_H + 6.0;
             }
             if y > clip {
                 add_account_row(
@@ -1906,49 +1914,52 @@ pub(crate) fn paint_settings(
             for (id, label, idx) in codex_rows {
                 if y > clip {
                     let active = ctx.codex_account == id;
-                    let dot = (fx, y + (row_h - 16.0) / 2.0, 16.0, 16.0);
-                    circle_rect(g, dot.0, dot.1, dot.2,
-                        if active { theme::accent() } else { theme::surface_active() });
-                    if active {
-                        circle_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, theme::bg());
-                    }
-                    let hit = (fx - 4.0, y, 24.0, row_h);
-                    if inside(hit, ctx.cursor) && !active {
-                        circle_rect(g, dot.0, dot.1, dot.2, theme::surface_hover());
-                    }
-                    rects.push((SettingsAction::CodexAccount(id.clone()), hit));
-                    let status_x = match idx {
-                        None => {
-                            g.draw_text(
-                                fx + 28.0, y + (row_h - 14.0) / 2.0, &label,
-                                gpu::DrawOpts { font_size: 14.0, color: theme::text_mute(), bold: active, italic: false },
-                            );
-                            fx + 28.0 + g.measure_chrome_text(&label, 14.0, active) + 12.0
-                        }
-                        Some(i) => {
-                            let lr = (fx + 28.0, y, fw.min(240.0), row_h);
-                            let focused = ctx.input == Some(SettingsInput::CodexAccountLabel(i));
-                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
-                            rects.push((SettingsAction::FocusCodexAccountLabel(i), lr));
-                            let dr = (lr.0 + lr.2 + 8.0, y, 30.0, row_h);
-                            stepper_btn(g, dr, "x", ctx.cursor);
-                            rects.push((SettingsAction::RemoveCodexAccount(id.clone()), dr));
-                            dr.0 + dr.2 + 12.0
-                        }
-                    };
                     // claude 판과 달리 "확인 중…" 이 없다 — 신원이 파일 하나에 들어
                     // 있어 즉시 읽힌다(HTTP 왕복이 아니다). 그래서 값이 없다는 건
                     // 정말로 아직 로그인 안 한 슬롯이라는 뜻이다.
-                    let (txt, col) = match codex_identity(&id) {
-                        Some(e) => (e, theme::text_mute()),
+                    let ident = codex_identity(&id);
+                    let (sub, sub_col) = match &ident {
+                        Some(e) => (e.clone(), theme::text_mute()),
                         None => ("로그인 필요".to_string(), theme::danger()),
                     };
-                    g.draw_text(
-                        status_x, y + (row_h - 12.0) / 2.0, &txt,
-                        gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
+                    let editing = idx
+                        .is_some_and(|i| ctx.input == Some(SettingsInput::CodexAccountLabel(i)));
+                    let slot = idx.map(|i| AcctSlot {
+                        editing,
+                        label: &label,
+                        caret: ctx.settings_caret,
+                        caret_on: ctx.caret_on,
+                        preedit: if editing { &ctx.preedit } else { "" },
+                        focus: SettingsAction::FocusCodexAccountLabel(i),
+                        reauth: SettingsAction::ReauthAccount(AccountProvider::Codex, id.clone()),
+                        remove: SettingsAction::RemoveCodexAccount(id.clone()),
+                    });
+                    let view = AcctRowView {
+                        name: match (idx, label.is_empty()) {
+                            (None, _) => "기본 (지금 로그인된 계정)".to_string(),
+                            // 라벨이 없으면 이메일이 이름이 된다. 그러면 2줄이 같은
+                            // 값을 되풀이하므로 claude 쪽 `account_display` 규칙을
+                            // 그대로 쓰되, 폴백은 슬롯 번호다.
+                            (Some(i), true) => ident
+                                .clone()
+                                .unwrap_or_else(|| format!("계정 {}", i + 2)),
+                            (Some(_), false) => label.clone(),
+                        },
+                        sub: if idx.is_some() && label.is_empty() && ident.is_some() {
+                            String::new()
+                        } else {
+                            sub
+                        },
+                        sub_col,
+                        active,
+                        slot,
+                    };
+                    account_card(
+                        g, &mut rects, (fx, y, fw, ACCT_H), ctx.cursor, &view,
+                        SettingsAction::CodexAccount(id.clone()),
                     );
                 }
-                y += row_h + 6.0;
+                y += ACCT_H + 6.0;
             }
             if y > clip {
                 add_account_row(
@@ -2148,6 +2159,130 @@ pub(crate) fn paint_settings(
 /// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
 const SEG_H: f32 = 34.0;
 
+
+/// 계정 한 줄이 화면에 어떻게 보일지. 값 준비(신원 조회·라벨 폴백)는 부르는 쪽이
+/// 하고, 여기는 그리기만 한다 — claude 와 codex 가 신원을 얻는 경로가 전혀 달라
+/// (HTTP 왕복 vs 파일 한 개) 그걸 헬퍼 안으로 넣으면 두 갈래가 다시 생긴다.
+struct AcctRowView<'a> {
+    /// 1줄에 쓸 이름. 라벨이 있으면 라벨, 없으면 이메일, 둘 다 없으면 폴백.
+    name: String,
+    /// 2줄 — 그 슬롯의 진짜 신원(이메일·조직). 비면 2줄을 안 그린다.
+    sub: String,
+    sub_col: [u8; 4],
+    active: bool,
+    /// `None` = 「기본」 행. 우리가 만든 슬롯이 아니라 이름 붙일 것도 지울 것도 없다.
+    slot: Option<AcctSlot<'a>>,
+}
+
+struct AcctSlot<'a> {
+    editing: bool,
+    label: &'a str,
+    caret: usize,
+    caret_on: bool,
+    preedit: &'a str,
+    /// 이름을 눌렀을 때 — 라벨 편집. Orca 엔 rename 이 없지만(이름=이메일) kasaterm 은
+    /// 거노가 붙인 별명이 곧 이름이라, 그 이름을 직접 누르는 것이 가장 짧은 길이다.
+    focus: SettingsAction,
+    reauth: SettingsAction,
+    remove: SettingsAction,
+}
+
+/// 계정 한 줄 = **카드 하나**. Orca AccountsPane 의 행 문법 그대로다: 테두리 있는
+/// 둥근 카드, 왼쪽에 이름 + `Active` 배지, 그 아래 작은 글씨로 진짜 신원, 오른쪽에
+/// 행 단위 액션. 라디오를 뺀 것이 핵심 변화다 — 행 전체가 「이 계정으로」라서 과녁이
+/// 16px 점에서 카드 전체로 커진다.
+///
+/// 히트박스는 **좁은 것부터** push 한다. `settings_click` 이 첫 일치를 쓰므로,
+/// 행 전체를 먼저 넣으면 그 안의 버튼이 영원히 안 눌린다.
+fn account_card(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    r: Rect,
+    cursor: (f32, f32),
+    v: &AcctRowView,
+    select: SettingsAction,
+) {
+    let hov = inside(r, cursor);
+    let (x, y, w, h) = r;
+    // 활성은 채움 + 테두리 둘 다 준다. 채움만으로는 흑백에서 겨우 보이고, 여기는
+    // 「지금 어느 계정으로 도는가」라 잘못 읽으면 엉뚱한 계정으로 claude 를 띄운다.
+    let fill = if v.active {
+        theme::with_alpha(theme::accent(), 0x26)
+    } else if hov {
+        theme::with_alpha(theme::accent(), 0x14)
+    } else {
+        theme::with_alpha(theme::surface_active(), 0x40)
+    };
+    let edge = if v.active { theme::with_alpha(theme::text(), 0x33) } else { theme::border() };
+    outline_rect(g, x, y, w, h, theme::radius_md(), edge, 1.0, fill);
+    let pad = 12.0_f32;
+    let line1 = y + 9.0;
+    let line2 = y + 27.0;
+    // 오른쪽 액션부터 — 자리를 먹은 만큼 이름이 쓸 폭이 줄어든다.
+    let mut right = x + w - pad;
+    if let Some(s) = v.slot.as_ref() {
+        for (glyph, act) in [("x", &s.remove), ("rotate-cw", &s.reauth)] {
+            let br = (right - 24.0, y + (h - 24.0) / 2.0, 24.0, 24.0);
+            let bh = inside(br, cursor);
+            g.hover_pointer |= bh;
+            if bh {
+                round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::surface_hover());
+            }
+            let ic = theme::ICON_SIZE;
+            g.queue_icon(glyph, br.0 + (24.0 - ic) / 2.0, br.1 + (24.0 - ic) / 2.0, ic,
+                if bh { theme::text() } else { theme::text_mute() });
+            rects.push((act.clone(), br));
+            right = br.0 - 4.0;
+        }
+    }
+    // 이름 — 편집 중인 슬롯은 그 자리가 텍스트 필드가 된다.
+    let name_w = (right - (x + pad) - 8.0).max(60.0);
+    match v.slot.as_ref().filter(|s| s.editing) {
+        Some(s) => {
+            let fr = (x + pad, y + (h - 28.0) / 2.0, name_w.min(240.0), 28.0);
+            text_field(g, fr, s.label, s.caret, true, s.caret_on, cursor, s.preedit);
+            rects.push((s.focus.clone(), fr));
+        }
+        None => {
+            let nw = g.measure_chrome_text(&v.name, 14.0, v.active);
+            g.draw_text(
+                x + pad, line1, &v.name,
+                gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: v.active, italic: false },
+            );
+            if v.active {
+                // Orca 와 같은 자리·같은 크기의 `Active` 배지. 라디오를 뺐으니
+                // 활성 표시는 이것뿐이라 이름 바로 옆에 붙인다.
+                let bx = x + pad + nw + 8.0;
+                let bw = g.measure_chrome_text("Active", 10.0, true) + 12.0;
+                round_rect(g, bx, line1 - 1.0, bw, 16.0, theme::radius_sm(),
+                    theme::with_alpha(theme::text(), 0x1a));
+                g.draw_text(
+                    bx + 6.0, line1 + 2.0, "Active",
+                    gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: true, italic: false },
+                );
+            }
+            if let Some(s) = v.slot.as_ref() {
+                let nr = (x + pad, y, nw.max(40.0) + 8.0, h / 2.0);
+                g.hover_pointer |= inside(nr, cursor);
+                rects.push((s.focus.clone(), nr));
+            }
+        }
+    }
+    if !v.sub.is_empty() {
+        g.draw_text(
+            x + pad, line2, &v.sub,
+            gpu::DrawOpts { font_size: 11.0, color: v.sub_col, bold: false, italic: false },
+        );
+    }
+    // 행 전체 = 이 계정으로 전환. 활성 행은 갈 곳이 없어 손모양도 안 준다.
+    g.hover_pointer |= hov && !v.active;
+    if !v.active {
+        rects.push((select, r));
+    }
+}
+
+/// 계정 카드의 높이. 두 줄(14px 이름 + 11px 신원)에 Orca 의 py-2.5 를 얹은 값.
+const ACCT_H: f32 = 46.0;
 
 /// 「+ 계정 추가」 줄. 로그인이 도는 중이면 그 자리에 진행·결과와 취소를 둔다 —
 /// Orca 도 Add Account 를 스피너로 바꾸고 옆에 Cancel 을 붙인다. 이 줄이 버튼 하나로
