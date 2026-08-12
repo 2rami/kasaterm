@@ -294,6 +294,7 @@ impl App {
             serde_json::to_value(&self.set_codex_accounts).unwrap_or(serde_json::Value::Null),
         );
         socket::write_setting("codex_account", serde_json::Value::String(self.set_codex_account.clone()));
+        socket::write_setting("usage_compact", serde_json::Value::Bool(self.set_usage_compact));
         socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),

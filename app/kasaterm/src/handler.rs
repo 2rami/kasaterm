@@ -2829,24 +2829,37 @@ impl ApplicationHandler<UserEvent> for App {
                         self.chrome_dirty = true;
                         window.request_redraw();
                         match pick {
-                            // settings_save 가 끝에서 shim 을 재생성하므로, 이미 열려
-                            // 있는 pane 도 다음 claude 부터 이 계정으로 뜬다.
-                            Some(AccountMenuItem::Select(id)) => {
-                                self.set_claude_account = id;
+                            // 제공자 행은 **메뉴를 닫지 않는다** — 계정 목록을 옆으로
+                            // 여는 손잡이라, 열자마자 닫히면 아무 데도 못 간다. 같은
+                            // 행을 다시 누르면 접힌다.
+                            Some(AccountMenuItem::Provider(p)) => {
+                                self.account_menu_provider =
+                                    (self.account_menu_provider != Some(p)).then_some(p);
+                                self.account_menu = true;
+                                return;
+                            }
+                            // 밀도도 그 자리에서 바뀌는 것을 봐야 하므로 메뉴를 유지한다.
+                            Some(AccountMenuItem::Density(c)) => {
+                                self.set_usage_compact = c;
+                                self.settings_save();
+                                self.account_menu = true;
+                                return;
+                            }
+                            // claude 는 settings_save 가 끝에서 shim 을 재생성하고,
+                            // codex 는 활성 슬롯 경로 파일만 갈아 끼운다 — 어느 쪽이든
+                            // 이미 떠 있는 pane 도 다음 실행부터 이 계정으로 뜬다.
+                            Some(AccountMenuItem::Select(p, id)) => {
+                                match p {
+                                    AccountProvider::Claude => self.set_claude_account = id,
+                                    AccountProvider::Codex => self.set_codex_account = id,
+                                }
+                                self.account_menu_provider = None;
                                 self.settings_save();
                                 return;
                             }
-                            // codex 는 shim 을 다시 굽지 않는다 — settings_save 가
-                            // 활성 슬롯 경로 파일만 갈아 끼우면 이미 떠 있는 pane 도
-                            // 다음 codex 실행부터 이 계정으로 뜬다.
-                            Some(AccountMenuItem::SelectCodex(id)) => {
-                                self.set_codex_account = id;
-                                self.settings_save();
-                                return;
-                            }
-                            // 히트박스에 안 넣는 줄이라 여기 올 수 없다. 메뉴만 닫힌다.
-                            Some(AccountMenuItem::Header(_)) => {}
-                            Some(AccountMenuItem::AddInSettings) => {
+                            Some(AccountMenuItem::UsageDetails)
+                            | Some(AccountMenuItem::ManageAccounts) => {
+                                self.account_menu_provider = None;
                                 self.open_settings_window(
                                     event_loop,
                                     Some(SettingsCat::Claude),
@@ -2854,7 +2867,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 );
                                 return;
                             }
-                            None => {}
+                            None => self.account_menu_provider = None,
                         }
                         // 칩 자기 클릭은 여기서 소비 — 안 그러면 아래 토글이 다시 연다.
                         if chip_hit {

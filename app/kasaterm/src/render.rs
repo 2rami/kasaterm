@@ -1432,7 +1432,13 @@ impl App {
                         let norm = |s: &str| -> String {
                             s.chars().filter(|c| !c.is_whitespace()).collect()
                         };
-                        if msg.from_label.as_deref().map(&norm) != Some(norm(&label)) {
+                        // from-name 은 발신 세션에 제목이 없으면 통째로 빠진다(신생
+                        // pane 첫 메시지, 2026-08-12 실측) — 그때 claude 는 소켓
+                        // pid 를 라벨로 그리므로(`@ 12889❯`) pid 대조를 함께 받는다.
+                        let label_hit = msg.from_label.as_deref().map(&norm)
+                            == Some(norm(&label))
+                            || msg.from_pid.as_deref().map(&norm) == Some(norm(&label));
+                        if !label_hit {
                             continue;
                         }
                         let sender = msg
@@ -1579,16 +1585,32 @@ impl App {
                                 .is_some()
                         })
                 };
-                if let Some(accent) = prompt_accent {
-                    // ultracode 턴이면 학생 accent 대신 보라로 칠한다 — 그 턴에 무엇이
-                    // 켜져 있는지가 누구 pane 인지보다 급한 정보다(거노 2026-08-11:
-                    // "상태줄말고 프롬프트입력창 보라색 glow"). 입력박스를 칠하는 손이
-                    // 여기 하나뿐이라 색만 갈아끼운다 — 따로 칠하면 이 호출이 덮는다.
-                    let accent = if self.pane_ultracode.contains(&tab_pid) {
-                        ultracode_accent(self.version_anim_start.elapsed().as_secs_f32())
-                    } else {
-                        accent
-                    };
+                // ultracode 는 학생 배정과 무관한 pane 상태다 — 학생 accent 게이트
+                // (Some 일 때만 칠함) 안쪽에 두면 미배정 pane 은 마커가 있어도 영영
+                // 안 칠해진다(2026-08-12 조사). 피커 게이트는 prompt_accent 와 같은
+                // 조건을 그대로 쓴다 — resume/ask 피커 오탐 방지 유지.
+                let ultra = self.pane_ultracode.contains(&tab_pid)
+                    && !(agents_view || resume_picker || ask_picker)
+                    && self
+                        .pty
+                        .get(tab_pid.as_str())
+                        .and_then(|p| p.active_agent())
+                        .is_some();
+                if ultra {
+                    // 학생 accent 대신 보라로 칠한다 — 그 턴에 무엇이 켜져 있는지가
+                    // 누구 pane 인지보다 급한 정보다(거노 2026-08-11: "상태줄말고
+                    // 프롬프트입력창 보라색 glow"). 입력박스를 칠하는 손이 여기
+                    // 하나뿐이라 색만 갈아끼운다 — 따로 칠하면 이 호출이 덮는다.
+                    // 학생 색은 숨쉬기 목표에 섞여 빛에 남는다(2026-08-12 지적:
+                    // "학생색이랑 어울리게 글로우").
+                    style_prompt_box(
+                        &mut composed,
+                        ultracode_accent(
+                            prompt_accent,
+                            self.version_anim_start.elapsed().as_secs_f32(),
+                        ),
+                    );
+                } else if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
                 }
@@ -6652,253 +6674,464 @@ impl App {
             if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, anchor) {
                 let (hmx, hmy) = self.cursor_px;
                 let f = 13.0_f32;
+                let pad = 4.0_f32;
                 let pad_x = 10.0_f32;
-                // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
-                // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
-                //
-                // 이름 뒤에 **실제 신원**(팀 조직명 또는 이메일)을 같이 적는다. 라벨은
-                // 사람이 붙인 이름이라 낡는데, 재로그인으로 슬롯 셋이 전부 같은 개인
-                // 계정이 됐는데도 "사이오닉팀플랜" 이라는 이름만 떠서 세 한도가 하나로
-                // 합쳐진 걸 아무도 몰랐다(2026-08-11: 세 슬롯 사용률이 완전히 같았다).
-                // 이름 없는 슬롯은 `account_display` 가 이미 신원으로 불리므로 중복은
-                // `contains` 로 건너뛴다.
-                let named = |id: &str, name: String| -> String {
-                    match crate::settings::account_identity(id) {
-                        Some(w) if !name.contains(&w) => format!("{name} · {w}"),
-                        _ => name,
-                    }
-                };
-                let mut rows: Vec<(AccountMenuItem, String)> = vec![
-                    (AccountMenuItem::Header("Claude"), "Claude".to_string()),
-                    (
-                        AccountMenuItem::Select(String::new()),
-                        named("", crate::settings::account_display("", "", "기본")),
-                    ),
-                ];
-                rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
-                    (
-                        AccountMenuItem::Select(a.id.clone()),
-                        named(
-                            &a.id,
-                            crate::settings::account_display(
-                                &a.id,
-                                &a.label,
-                                &format!("계정 {}", i + 2),
-                            ),
-                        ),
-                    )
-                }));
-                // codex 판. 신원은 `auth.json` 하나로 즉시 읽히므로 라벨이 없으면 그
-                // 이메일로 부른다 — claude 쪽 `account_display` 와 같은 규칙이다.
-                let codex_name = |id: &str, label: &str, fallback: String| -> String {
-                    let ident = crate::settings::codex_identity(id);
-                    match (label.is_empty(), ident) {
-                        (true, Some(e)) => e,
-                        (true, None) => fallback,
-                        (false, Some(e)) if !label.contains(&e) => format!("{label} · {e}"),
-                        (false, _) => label.to_string(),
-                    }
-                };
-                rows.push((AccountMenuItem::Header("Codex"), "Codex".to_string()));
-                rows.push((
-                    AccountMenuItem::SelectCodex(String::new()),
-                    codex_name("", "", "기본".to_string()),
-                ));
-                rows.extend(self.set_codex_accounts.iter().enumerate().map(|(i, a)| {
-                    (
-                        AccountMenuItem::SelectCodex(a.id.clone()),
-                        codex_name(&a.id, &a.label, format!("계정 {}", i + 2)),
-                    )
-                }));
-                rows.push((
-                    AccountMenuItem::AddInSettings,
-                    "설정에서 계정 추가…".to_string(),
-                ));
-                // 계정별 한도 — **누르기 전에** 보여야 한다(거노: "누르면 전환되버리잖아").
-                // 폴러가 슬롯별로 채운 표(`claude_usage_all`)를 그대로 읽는다. 값이 없는
-                // 계정(한 번도 조회 못 함·토큰 없음)은 빈칸으로 둔다 — 0% 로 그리면
-                // "여유 있음"이라는 **거짓말**이 되고, 그게 옮길 곳을 고르는 판단을 망친다.
+                let icon = theme::ICON_SIZE;
+                let compact = self.set_usage_compact;
+                let win_h = win_px.1 / scale;
+                let win_w = win_px.0 / scale;
+
+                // ── 값 읽기 ──────────────────────────────────────────────────
+                // 슬롯별 한도표. 폴러가 계정 디렉터리를 키로 채운다.
                 let usage_of = |id: &str| -> Option<crate::UsageBadge> {
                     let key = crate::socket::claude_account_dir(id)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     self.claude_usage_all.lock().ok()?.get(&key).cloned()
                 };
-                // 표기·색은 **Info 탭 사용량 pill 과 같은 규칙**을 쓴다(info.rs
-                // draw_info_actions): `7d 62%`, stale 이면 `~` 를 앞에. 같은 숫자가
-                // 두 자리에서 다르게 보이면 어느 쪽을 믿을지가 문제가 된다.
-                // 퍼센트 뒤에 **언제 풀리는지**를 붙인다 — 90% 라도 12분 뒤면 기다리면
-                // 되고, 3시간 뒤면 지금 옮겨야 한다(거노 2026-08-07).
-                let usage_text = |b: &Option<crate::UsageBadge>| -> String {
-                    match b {
-                        Some(b) => {
-                            let head = if b.stale {
-                                format!("~{} {:.0}%", b.label, b.pct)
-                            } else {
-                                format!("{} {:.0}%", b.label, b.pct)
-                            };
-                            match crate::resets_in_label(b.resets_at) {
-                                Some(l) => format!("{head} · {l}"),
-                                None => head,
-                            }
-                        }
-                        None => "—".to_string(),
-                    }
+                // 로스터 행은 **활성 계정의** 한도를 말한다. 표에 아직 없으면 상태줄이
+                // 쓰는 값으로 떨어진다 — 둘 다 지금 계정을 가리키므로 숫자가 갈리지 않는다.
+                let claude_badge = usage_of(&self.set_claude_account)
+                    .or_else(|| self.claude_usage.lock().ok().and_then(|v| v.clone()));
+
+                // `62% used 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
+                // 를 먼저 읽는데, 정작 판단을 가르는 건 숫자다.
+                let usage_text = |b: &crate::UsageBadge| -> String {
+                    let head = if b.stale {
+                        format!("~{:.0}% used", b.pct)
+                    } else {
+                        format!("{:.0}% used", b.pct)
+                    };
+                    format!("{head} {}", b.label)
                 };
-                // 값이 없는 계정은 **빈칸이 아니라 `—`**. 빈칸은 "한도 여유"로 읽혀서,
-                // 옮길 곳을 고르는 판단을 정확히 반대로 만든다. 오래 안 쓴 계정은 OAuth
-                // 토큰이 만료돼(8시간쯤) usage 조회가 거부되므로 실제로 자주 생긴다 —
-                // 그 계정으로 claude 를 한 번 돌리면 토큰이 갱신돼 숫자가 돌아온다.
-                let row_usage = |item: &AccountMenuItem| -> Option<Option<crate::UsageBadge>> {
-                    match item {
-                        AccountMenuItem::Select(id) => Some(usage_of(id)),
-                        _ => None,
+                // `Resets in 3h 54m`. 90% 라도 12분 뒤면 기다리면 되고 3시간 뒤면 지금
+                // 옮겨야 한다 — 퍼센트만으로는 그 둘이 구별되지 않는다.
+                let resets_text = |b: &crate::UsageBadge| -> Option<String> {
+                    let at = b.resets_at?;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let left = at.saturating_sub(now);
+                    if left == 0 {
+                        return Some("Resets now".to_string());
                     }
-                };
-                // codex 쪽엔 한도 조회 경로가 없다. 대신 **로그인 여부**를 같은 자리에
-                // 적는다 — 아직 로그인 안 한 슬롯은 이름이 "계정 2" 로 폴백돼, 아무
-                // 표시가 없으면 멀쩡한 계정과 구별이 안 된다(눌러 보고서야 안다).
-                let row_note = |item: &AccountMenuItem| -> Option<&'static str> {
-                    match item {
-                        AccountMenuItem::SelectCodex(id) => {
-                            crate::settings::codex_identity(id).is_none().then_some("로그인 필요")
-                        }
-                        _ => None,
-                    }
-                };
-                let rh = 28.0_f32;
-                let pad = 4.0_f32;
-                // 한도 칸이 이름을 밀지 않게 폭 계산에 함께 넣는다.
-                let gap = 14.0_f32;
-                let mw = rows
-                    .iter()
-                    .map(|(item, l)| {
-                        let mut w = g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0;
-                        if let Some(b) = row_usage(item) {
-                            w += gap + g.measure_chrome_text(usage_text(&b).as_str(), f - 1.0, true);
-                        }
-                        if let Some(n) = row_note(item) {
-                            w += gap + g.measure_chrome_text(n, f - 1.0, true);
-                        }
-                        w
+                    let (h, m) = (left / 3600, (left % 3600) / 60);
+                    Some(match (h, m) {
+                        (0, m) => format!("Resets in {m}m"),
+                        (h, 0) => format!("Resets in {h}h"),
+                        (h, m) => format!("Resets in {h}h {m}m"),
                     })
-                    .fold(aw, f32::max);
-                // 구역 라벨은 계정 행보다 낮다 — 누를 수 없는 줄이 같은 높이를 먹으면
-                // 목록이 그만큼 길어 보이고, 헤더가 계정처럼 읽힌다.
-                let head_h = 20.0_f32;
-                let heads = rows
-                    .iter()
-                    .filter(|(i, _)| matches!(i, AccountMenuItem::Header(_)))
-                    .count();
-                // 구분선이 먹는 자리 = "추가" 행 위 하나 + 첫 헤더를 뺀 나머지 헤더 위.
-                let rules = 1 + heads.saturating_sub(1);
+                };
+                // 임계는 60/80. 그 아래는 초록이 아니라 **중립**이다 — 초록은 "좋다"는
+                // 신호라 늘 켜져 있으면 아무 말도 안 하는 색이 된다.
+                let pct_col = |pct: f32| {
+                    if pct >= 80.0 {
+                        theme::danger()
+                    } else if pct >= 60.0 {
+                        theme::syn_number()
+                    } else {
+                        theme::text()
+                    }
+                };
+                let bar_col = |pct: f32| {
+                    if pct >= 80.0 {
+                        theme::danger()
+                    } else if pct >= 60.0 {
+                        theme::syn_number()
+                    } else {
+                        theme::with_alpha(theme::text_dim(), 0x66)
+                    }
+                };
+
+                // 제공자 두 줄. **사용률 높은 순** — 옮길 곳을 고르려고 여는 목록이라
+                // 급한 쪽이 위로 와야 한다. 값이 없는 쪽(codex 는 한도 조회 경로가 아예
+                // 없다)은 -1 로 두어 뒤로 민다.
+                let codex_signed_in = crate::settings::codex_identity(&self.set_codex_account).is_some();
+                let mut provs: Vec<(AccountProvider, f32)> = vec![
+                    (AccountProvider::Claude, claude_badge.as_ref().map_or(-1.0, |b| b.pct)),
+                    (AccountProvider::Codex, -1.0),
+                ];
+                provs.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+                // ── 치수 ────────────────────────────────────────────────────
+                let mw = 340.0_f32;
+                let head_h = 26.0_f32;
+                let seg_h = 28.0_f32;
+                let row_h = 28.0_f32;
+                let prow_h = if compact { 30.0 } else { 46.0 };
+                let rule = 5.0_f32;
                 let mh = pad * 2.0
-                    + rh * (rows.len() - heads) as f32
-                    + head_h * heads as f32
-                    + 5.0 * rules as f32;
-                // 계정 행 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
+                    + head_h
+                    + seg_h
+                    + rule
+                    + prow_h * provs.len() as f32
+                    + rule
+                    + row_h * 2.0;
+                // 아래로 펼치되 자리가 없으면 위로 뒤집는다. 손잡이 하나가 창 맨 아래
+                // 상태줄이라(늘 보이는 자리) 아래로만 펼치면 메뉴가 통째로 창 밖에
+                // 그려졌다 — 열리기는 열리는데 화면엔 아무 일도 안 일어난 것처럼 보인다
+                // (2026-08-12 지적: "눌러도 안 열린다").
                 let mx = (ax + aw - mw).max(4.0);
-                // 아래로 펼치되 자리가 없으면 **위로 뒤집는다**. 손잡이 하나가 창 맨
-                // 아래 상태줄이라(늘 보이는 자리) 아래로만 펼치면 메뉴가 통째로 창
-                // 밖에 그려졌다 — 열리기는 열리는데(account_menu=true) 화면엔 아무
-                // 일도 안 일어난 것처럼 보인다(2026-08-12 지적: "눌러도 안 열린다").
-                let win_h = win_px.1 / scale;
                 let below = ay + ah + 4.0;
                 let my = if below + mh <= win_h - 4.0 {
                     below
                 } else {
                     (ay - mh - 4.0).max(4.0)
                 };
-                // 패널 배경과 팝업 배경은 6단계밖에 안 벌어져서, 색만으로는 이게
-                // 떠 있는 메뉴인지 패널의 한 구역인지 읽히지 않았다(거노: 뒤가
-                // 비쳐 보인다). 층 선언은 색이 아니라 그림자·테두리가 하는 일이라
-                // 그걸 위해 있는 공통 함수로 넘긴다 — 셸 메뉴·모달과 같은 언어.
+                // 패널 배경과 팝업 배경은 6단계밖에 안 벌어져서, 색만으로는 이게 떠 있는
+                // 메뉴인지 패널의 한 구역인지 읽히지 않았다(거노: 뒤가 비쳐 보인다).
+                // 층 선언은 색이 아니라 그림자·테두리가 하는 일이다.
                 panel_rect_outlined(g, mx, my, mw, mh, theme::radius_sm(), theme::surface_hover());
                 let mut ry = my + pad;
-                for (item, label) in rows {
-                    let head = matches!(item, AccountMenuItem::Header(_));
-                    // 구역이 바뀌는 자리와 "추가" 행 위에 얇은 선. 첫 헤더는 메뉴 맨
-                    // 위라 선이 테두리와 겹쳐 지저분해지므로 뺀다.
-                    if (head && ry > my + pad) || item == AccountMenuItem::AddInSettings {
-                        g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
-                        ry += 5.0;
-                    }
-                    if head {
-                        // 누를 수 없는 줄이다 — hover 도 히트박스도 주지 않는다.
-                        let hf = f - 2.0;
-                        g.draw_text(
-                            mx + pad_x, ry + (head_h - hf) / 2.0 - 1.0, &label,
-                            gpu::DrawOpts {
-                                font_size: hf,
-                                color: theme::text_mute(),
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                        ry += head_h;
-                        continue;
-                    }
-                    let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + rh;
-                    let active = match &item {
-                        AccountMenuItem::Select(id) => *id == self.set_claude_account,
-                        AccountMenuItem::SelectCodex(id) => *id == self.set_codex_account,
-                        _ => false,
-                    };
-                    if on {
-                        round_rect(g, mx + pad, ry, mw - pad * 2.0, rh,
-                            theme::radius_sm(), theme::surface_active());
-                    }
-                    if active {
-                        // 활성 표시는 왼쪽 accent 막대 — 체크 아이콘보다 좁다.
-                        pill_rect(g, mx + pad, ry + 5.0, 2.5, rh - 10.0, theme::accent());
-                    }
+
+                // ── 머리: Usage · all agents ────────────────────────────────
+                g.draw_text(
+                    mx + pad_x,
+                    ry + (head_h - f) / 2.0 - 1.0,
+                    "Usage",
+                    gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false },
+                );
+                {
+                    let sub = "all agents";
+                    let sf = f - 2.0;
+                    let sw = g.measure_chrome_text(sub, sf, false);
                     g.draw_text(
-                        mx + pad_x, ry + (rh - f) / 2.0 - 1.0, &label,
+                        mx + mw - pad_x - icon - 8.0 - sw,
+                        ry + (head_h - sf) / 2.0 - 1.0,
+                        sub,
                         gpu::DrawOpts {
-                            font_size: f,
-                            color: if active { theme::text() } else { theme::text_dim() },
-                            bold: active,
+                            font_size: sf,
+                            color: theme::text_mute(),
+                            bold: false,
                             italic: false,
                         },
                     );
-                    if let Some(b) = row_usage(&item) {
-                        let u = usage_text(&b);
-                        let uf = f - 1.0;
-                        let uw = g.measure_chrome_text(u.as_str(), uf, true);
-                        // 임계도 pill 과 같은 값(90 위험 · 70 주의). 옮길 곳을 고르려고
-                        // 여는 목록이라 "여기도 꽉 찼다"가 이름만큼 빨리 읽혀야 한다.
-                        // 모르는 값(`—`)은 색을 안 준다 — 초록으로 그리면 여유로 읽힌다.
-                        let col = match &b {
-                            None => theme::text_mute(),
-                            Some(b) if b.pct >= 90.0 => theme::danger(),
-                            Some(b) if b.pct >= 70.0 => theme::syn_number(),
-                            Some(_) => theme::success(),
-                        };
-                        let col = if b.as_ref().is_some_and(|b| b.stale) {
-                            theme::with_alpha(col, 0x99)
-                        } else {
-                            col
-                        };
+                    g.queue_icon(
+                        "rotate-cw",
+                        mx + mw - pad_x - icon,
+                        ry + (head_h - icon) / 2.0,
+                        icon,
+                        theme::text_dim(),
+                    );
+                }
+                ry += head_h;
+
+                // ── 밀도 선택 ───────────────────────────────────────────────
+                {
+                    let cw = (mw - pad_x * 2.0) / 2.0;
+                    for (i, (label, want)) in [("Detailed", false), ("Compact", true)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let cx = mx + pad_x + cw * i as f32;
+                        let r = (cx, ry + 2.0, cw, seg_h - 6.0);
+                        let on = compact == want;
+                        let hover = hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
+                        if on || hover {
+                            round_rect(
+                                g, r.0, r.1, r.2, r.3, theme::radius_sm(),
+                                if on { theme::surface_active() } else { theme::with_alpha(theme::surface_active(), 0x66) },
+                            );
+                        }
+                        let lf = f - 2.0;
+                        let lw = g.measure_chrome_text(label, lf, on);
                         g.draw_text(
-                            mx + mw - pad_x - uw, ry + (rh - uf) / 2.0 - 1.0, &u,
-                            gpu::DrawOpts { font_size: uf, color: col, bold: true, italic: false },
-                        );
-                    }
-                    if let Some(n) = row_note(&item) {
-                        let nf = f - 1.0;
-                        let nw = g.measure_chrome_text(n, nf, true);
-                        g.draw_text(
-                            mx + mw - pad_x - nw, ry + (rh - nf) / 2.0 - 1.0, n,
+                            r.0 + (r.2 - lw) / 2.0,
+                            r.1 + (r.3 - lf) / 2.0 - 1.0,
+                            label,
                             gpu::DrawOpts {
-                                font_size: nf,
-                                color: theme::danger(),
-                                bold: true,
+                                font_size: lf,
+                                color: if on { theme::text() } else { theme::text_mute() },
+                                bold: on,
                                 italic: false,
                             },
                         );
+                        self.account_menu_hits.push((AccountMenuItem::Density(want), r));
                     }
-                    self.account_menu_hits.push((item, (mx, ry, mw, rh)));
-                    ry += rh;
+                }
+                ry += seg_h;
+                g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
+                ry += rule;
+
+                // ── 제공자 행 ───────────────────────────────────────────────
+                let mut sub_anchor: Option<(AccountProvider, f32)> = None;
+                for (p, _) in provs.iter().copied() {
+                    let open = self.account_menu_provider == Some(p);
+                    let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + prow_h;
+                    if on || open {
+                        round_rect(g, mx + pad, ry, mw - pad * 2.0, prow_h,
+                            theme::radius_sm(), theme::surface_active());
+                    }
+                    let line1 = ry + if compact { (prow_h - f) / 2.0 - 1.0 } else { 7.0 };
+                    g.queue_icon(
+                        p.icon(),
+                        mx + pad_x,
+                        line1 + (f - icon) / 2.0,
+                        icon,
+                        theme::text(),
+                    );
+                    let name_x = mx + pad_x + icon + 8.0;
+                    g.draw_text(
+                        name_x, line1, p.label(),
+                        gpu::DrawOpts { font_size: f, color: theme::text(), bold: false, italic: false },
+                    );
+                    // 오른쪽 끝은 언제나 › — 이 행이 열리는 행이라는 유일한 표시다.
+                    g.queue_icon(
+                        "chevron-right",
+                        mx + mw - pad_x - icon,
+                        ry + (prow_h - icon) / 2.0,
+                        icon,
+                        theme::text_dim(),
+                    );
+                    let right = mx + mw - pad_x - icon - 6.0;
+                    let badge = match p {
+                        AccountProvider::Claude => claude_badge.clone(),
+                        AccountProvider::Codex => None,
+                    };
+                    match (&badge, p) {
+                        // 값이 있으면: 첫 줄 오른쪽에 리셋, 둘째 줄에 창별 막대.
+                        (Some(b), _) => {
+                            if compact {
+                                let t = usage_text(b);
+                                let tf = f - 1.0;
+                                let tw = g.measure_chrome_text(t.as_str(), tf, true);
+                                g.draw_text(
+                                    right - tw, line1, &t,
+                                    gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
+                                );
+                            } else {
+                                if let Some(t) = resets_text(b) {
+                                    let tf = f - 2.0;
+                                    let tw = g.measure_chrome_text(t.as_str(), tf, false);
+                                    g.draw_text(
+                                        right - tw, line1 + 1.0, &t,
+                                        gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                    );
+                                }
+                                // 둘째 줄: [창 이름][막대][퍼센트]. 막대는 트랙을 함께
+                                // 그린다 — 채움만 있으면 15% 짜리가 어디까지 갈 수 있는
+                                // 것인지 알 수가 없어 그냥 얼룩이 된다.
+                                let l2 = ry + prow_h - 17.0;
+                                let lf = f - 3.0;
+                                let bx = name_x;
+                                g.draw_text(
+                                    bx, l2, &b.label,
+                                    gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: false, italic: false },
+                                );
+                                let lw = g.measure_chrome_text(&b.label, lf, false);
+                                let gx = bx + lw + 6.0;
+                                const GW: f32 = 28.0;
+                                const GH: f32 = 5.0;
+                                let gy = l2 + (lf - GH) / 2.0;
+                                g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
+                                let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(1.5);
+                                g.rect(gx, gy, w, GH, bar_col(b.pct));
+                                let pt = format!("{:.0}%", b.pct);
+                                g.draw_text(
+                                    gx + GW + 6.0, l2, &pt,
+                                    gpu::DrawOpts { font_size: lf, color: pct_col(b.pct), bold: true, italic: false },
+                                );
+                            }
+                        }
+                        // codex 는 한도 조회 경로가 없다. 그 자리에 로그인 여부를 적는다 —
+                        // 아직 로그인 안 한 슬롯은 이름이 폴백되어, 표시가 없으면 멀쩡한
+                        // 계정과 구별이 안 된다.
+                        (None, AccountProvider::Codex) => {
+                            let (t, col) = if codex_signed_in {
+                                ("No usage data", theme::text_mute())
+                            } else {
+                                ("not signed in", theme::danger())
+                            };
+                            let tf = f - 2.0;
+                            let tw = g.measure_chrome_text(t, tf, false);
+                            g.draw_text(
+                                right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
+                                gpu::DrawOpts { font_size: tf, color: col, bold: false, italic: false },
+                            );
+                        }
+                        (None, AccountProvider::Claude) => {
+                            let t = "No usage data";
+                            let tf = f - 2.0;
+                            let tw = g.measure_chrome_text(t, tf, false);
+                            g.draw_text(
+                                right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
+                                gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                            );
+                        }
+                    }
+                    self.account_menu_hits
+                        .push((AccountMenuItem::Provider(p), (mx, ry, mw, prow_h)));
+                    if open {
+                        sub_anchor = Some((p, ry));
+                    }
+                    ry += prow_h;
+                }
+
+                // ── 하단 액션 ───────────────────────────────────────────────
+                g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
+                ry += rule;
+                for (item, label) in [
+                    (AccountMenuItem::UsageDetails, "Usage details & history"),
+                    (AccountMenuItem::ManageAccounts, "Manage Accounts…"),
+                ] {
+                    let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + row_h;
+                    if on {
+                        round_rect(g, mx + pad, ry, mw - pad * 2.0, row_h,
+                            theme::radius_sm(), theme::surface_active());
+                    }
+                    g.draw_text(
+                        mx + pad_x, ry + (row_h - f) / 2.0 - 1.0, label,
+                        gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false },
+                    );
+                    g.queue_icon(
+                        "chevron-right",
+                        mx + mw - pad_x - icon,
+                        ry + (row_h - icon) / 2.0,
+                        icon,
+                        theme::text_dim(),
+                    );
+                    self.account_menu_hits.push((item, (mx, ry, mw, row_h)));
+                    ry += row_h;
+                }
+
+                // ── 계정 목록(서브메뉴) ─────────────────────────────────────
+                // 로스터 오른쪽에 붙는다. 계정을 첫 화면에 늘어놓지 않는 이유는 위
+                // `AccountMenuItem::Provider` 주석에 있다.
+                if let Some((p, py)) = sub_anchor {
+                    let rows: Vec<(String, String, bool)> = match p {
+                        AccountProvider::Claude => {
+                            let mut v = vec![(
+                                String::new(),
+                                crate::settings::account_display("", "", "기본"),
+                                self.set_claude_account.is_empty(),
+                            )];
+                            v.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
+                                (
+                                    a.id.clone(),
+                                    crate::settings::account_display(
+                                        &a.id, &a.label, &format!("계정 {}", i + 2),
+                                    ),
+                                    self.set_claude_account == a.id,
+                                )
+                            }));
+                            v
+                        }
+                        AccountProvider::Codex => {
+                            // 라벨이 없으면 그 슬롯의 실제 이메일로 부른다 — claude 쪽
+                            // `account_display` 와 같은 규칙이다.
+                            let name = |id: &str, label: &str, fallback: String| -> String {
+                                let ident = crate::settings::codex_identity(id);
+                                match (label.is_empty(), ident) {
+                                    (true, Some(e)) => e,
+                                    (true, None) => fallback,
+                                    (false, Some(e)) if !label.contains(&e) => format!("{label} · {e}"),
+                                    (false, _) => label.to_string(),
+                                }
+                            };
+                            let mut v = vec![(
+                                String::new(),
+                                name("", "", "기본".to_string()),
+                                self.set_codex_account.is_empty(),
+                            )];
+                            v.extend(self.set_codex_accounts.iter().enumerate().map(|(i, a)| {
+                                (
+                                    a.id.clone(),
+                                    name(&a.id, &a.label, format!("계정 {}", i + 2)),
+                                    self.set_codex_account == a.id,
+                                )
+                            }));
+                            v
+                        }
+                    };
+                    let sw = 300.0_f32;
+                    let lab_h = 24.0_f32;
+                    let sh = pad * 2.0 + lab_h + row_h * rows.len() as f32 + rule + row_h;
+                    // 로스터 오른쪽에 두되, 창 밖으로 나가면 왼쪽으로 접는다.
+                    let sx = if mx + mw + 4.0 + sw <= win_w - 4.0 {
+                        mx + mw + 4.0
+                    } else {
+                        (mx - sw - 4.0).max(4.0)
+                    };
+                    let sy = (py - pad).min(win_h - sh - 4.0).max(4.0);
+                    panel_rect_outlined(g, sx, sy, sw, sh, theme::radius_sm(), theme::surface_hover());
+                    let mut sry = sy + pad;
+                    {
+                        let t = format!("{} Account", p.label());
+                        let lf = f - 2.0;
+                        g.draw_text(
+                            sx + pad_x, sry + (lab_h - lf) / 2.0 - 1.0, &t,
+                            gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: true, italic: false },
+                        );
+                        sry += lab_h;
+                    }
+                    for (id, label, active) in rows {
+                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
+                        // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 주지 않는다.
+                        if on && !active {
+                            round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
+                                theme::radius_sm(), theme::surface_active());
+                        }
+                        g.draw_text(
+                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, &label,
+                            gpu::DrawOpts {
+                                font_size: f,
+                                color: if active { theme::text() } else { theme::text_dim() },
+                                bold: active,
+                                italic: false,
+                            },
+                        );
+                        // 활성 표시는 오른쪽 `Active` 배지. 체크 아이콘이나 왼쪽 막대와
+                        // 달리, 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
+                        if active {
+                            let t = "Active";
+                            let tf = f - 3.0;
+                            let tw = g.measure_chrome_text(t, tf, true);
+                            g.draw_text(
+                                sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, t,
+                                gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: true, italic: false },
+                            );
+                        } else if p == AccountProvider::Claude {
+                            // 비활성 슬롯은 그 계정의 한도를 적는다 — 어디로 옮길지
+                            // 고르는 자리라 이름만으로는 못 정한다.
+                            if let Some(b) = usage_of(&id) {
+                                let t = usage_text(&b);
+                                let tf = f - 3.0;
+                                let tw = g.measure_chrome_text(t.as_str(), tf, true);
+                                g.draw_text(
+                                    sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, &t,
+                                    gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
+                                );
+                            }
+                        } else if crate::settings::codex_identity(&id).is_none() {
+                            let t = "Sign in";
+                            let tf = f - 3.0;
+                            let tw = g.measure_chrome_text(t, tf, true);
+                            g.draw_text(
+                                sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, t,
+                                gpu::DrawOpts { font_size: tf, color: theme::danger(), bold: true, italic: false },
+                            );
+                        }
+                        if !active {
+                            self.account_menu_hits
+                                .push((AccountMenuItem::Select(p, id), (sx, sry, sw, row_h)));
+                        }
+                        sry += row_h;
+                    }
+                    g.rect(sx + pad, sry + 2.0, sw - pad * 2.0, 1.0, theme::border());
+                    sry += rule;
+                    {
+                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
+                        if on {
+                            round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
+                                theme::radius_sm(), theme::surface_active());
+                        }
+                        g.draw_text(
+                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, "Manage Accounts…",
+                            gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false },
+                        );
+                        self.account_menu_hits
+                            .push((AccountMenuItem::ManageAccounts, (sx, sry, sw, row_h)));
+                    }
                 }
             }
             let v_alpha = version_alpha;
@@ -7939,12 +8172,26 @@ impl PromptBox {
 /// 물들이면 그 호출이 학생 accent 로 깨끗이 덮어쓴다(2026-08-11 실측 — 스샷의
 /// 테두리가 보라가 아니라 학생 분홍 `d55580` 이었다).
 ///
-/// 색은 `bb9af7`. `t`(초)에 따라 흰빛으로 숨쉬듯 오르내려 정적인 테두리와
-/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다.
-fn ultracode_accent(t: f32) -> [u8; 4] {
+/// 색은 `bb9af7`. `t`(초)에 따라 밝은 쪽으로 숨쉬듯 오르내려 정적인 테두리와
+/// 구분된다 — 스피너 shimmer 와 같은 mix 방식이다. `student` 가 있으면 숨쉬기
+/// 목표(흰빛)를 그쪽으로 30% 기울인다 — 보라 정체성(B>R>G)이 유지되는 상한이라
+/// 더 키우지 말 것(분홍 계열 학생에서 순서가 무너진다).
+fn ultracode_accent(student: Option<[u8; 4]>, t: f32) -> [u8; 4] {
     let g = 0.34 * (0.5 + 0.5 * (t * 2.2).sin());
-    let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
-    [mix(0xbb), mix(0x9a), mix(0xf7), 255]
+    let base = [0xbbu8, 0x9a, 0xf7];
+    let mut out = [255u8; 4];
+    for i in 0..3 {
+        let b = base[i] as f32;
+        // 목표가 원색보다 어두운 채널(학생 색이 짙은 쪽)은 원색에 묶는다 —
+        // 어두워지는 숨쉬기는 꺼져 가는 것처럼 읽히고 "원색보다 어둡지 않다"
+        // 불변식이 깨진다.
+        let target = student
+            .map(|s| 255.0 + (s[i] as f32 - 255.0) * 0.3)
+            .unwrap_or(255.0)
+            .max(b);
+        out[i] = (b + (target - b) * g).round() as u8;
+    }
+    out
 }
 
 /// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
@@ -8393,6 +8640,10 @@ struct TeammateMsg {
     /// `@ <라벨>❯` 로 펼쳐 그릴 때 화면 제목과 대조하는 앵커다 — 사용자가 직접 친
     /// `@ …❯` 텍스트를 남의 메시지로 오인해 덮지 않기 위한 필수 관문.
     from_label: Option<String>,
+    /// `from` 소켓 경로에서 뽑은 발신 pid. **발신 세션에 제목이 없으면 `from-name`
+    /// 이 통째로 빠지고**(신생 pane 첫 메시지, 2026-08-12 실측) claude 는 이 pid 를
+    /// 라벨로 그린다(`@ 12889❯`) — from_label 대조가 비는 그 경우의 보조 앵커.
+    from_pid: Option<String>,
     /// 보낸 세션의 claude session id. **이름이 학생을 안 알려 줄 때의 정답**이다 —
     /// 명부의 이름은 세션 제목으로 덮이는 값이라(`mcp, skill사이드바`) 로스터에 없는
     /// 글자가 오기 일쑤인데, 세션 id 로는 그 pane 을 찾아 배정 학생을 직접 물을 수
@@ -8491,8 +8742,9 @@ fn extract_tagged_msg(
         let peer_probe = sender == PEER_LABEL && id_attr == "from-name";
         if peer_probe || attr(id_attr).as_deref() == Some(sender) {
             let end = tail.find(close_tag).unwrap_or(tail.len());
+            let from = attr("from");
             let ident = peer_probe
-                .then(|| attr("from"))
+                .then(|| from.clone())
                 .flatten()
                 .and_then(|f| peer_ident_from_socket(&f));
             return Some(TeammateMsg {
@@ -8500,6 +8752,7 @@ fn extract_tagged_msg(
                 color: attr("color"),
                 sender: ident.as_ref().and_then(|(n, _)| n.clone()),
                 from_label: attr(id_attr),
+                from_pid: from.as_deref().and_then(socket_pid).map(str::to_string),
                 peer_sid: ident.and_then(|(_, s)| s),
             });
         }
@@ -9436,6 +9689,17 @@ fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
         // teammate 칩(`──── @이름 ──`)은 claude 네이티브가 그리는 agent 배지지
         // 세션명이 아니다 — 아웃라인을 두르면 칩에 네모칸이 생긴다(거노 2026-07-27).
         if row[first].ch == '@' {
+            continue;
+        }
+        // ` ultracode ` 배지도 마찬가지 — claude 2.1.228 이 세션명과 같은 자리
+        // (상단 보더 우측 끝)에 그리는 모드 표시라, 아웃라인을 두르면 /rename 된
+        // 것처럼 보인다(2026-08-12 지적). 진짜 세션명이 이 단어로 시작하는 극단
+        // 케이스만 함께 잃는다.
+        let island: String = row[first..=last]
+            .iter()
+            .filter_map(|c| (c.ch != '\0').then_some(c.ch))
+            .collect();
+        if island.trim().starts_with("ultracode") {
             continue;
         }
         // 이름 왼쪽의 마지막 '─' 다음 셀 = c0(선행 공백 포함), 오른쪽 첫 '─' 이전 셀 = c1
@@ -11105,6 +11369,21 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[title]).is_some(), "세션명 rule 은 유지");
     }
 
+    // ` ultracode ` 배지 행도 세션명이 아니다 — claude 2.1.228 이 세션명과 같은
+    // 자리(상단 보더 우측 끝)에 그리는 모드 표시라, 아웃라인을 두르면 /rename 된
+    // 것처럼 보인다(2026-08-12 지적).
+    #[test]
+    fn titled_rule_ignores_ultracode_badge() {
+        let dash = |n: usize| "─".repeat(n);
+        let badge = row_from(&format!("{} ultracode {}", dash(60), dash(4)), 80);
+        assert!(find_titled_rule(&[badge]).is_none(), "ultracode 배지는 세션명 아님");
+        // fast 모드 태그가 이어 붙는 형태도 같은 배지다.
+        let both = row_from(&format!("{} ultracode  fast {}", dash(55), dash(4)), 80);
+        assert!(find_titled_rule(&[both]).is_none(), "배지 + fast 태그도 무시");
+        let title = row_from(&format!("{} 세션명 {}", dash(30), dash(30)), 80);
+        assert!(find_titled_rule(&[title]).is_some(), "세션명 rule 은 유지");
+    }
+
     // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
     // 오탐(`⟦…⟧` 이지만 캐릭터 아님)은 무시 = 무색.
     #[test]
@@ -11497,14 +11776,17 @@ mod prompt_box_tests {
     fn ultracode_accent_stays_purple_across_the_breath() {
         let mut seen_dim = false;
         let mut seen_bright = false;
+        // 학생 없음(순수 흰빛 숨쉬기)과 분홍 학생(d55580, B>R>G 를 깨기 가장 쉬운
+        // 상대) 두 케이스 모두에서 보라 정체성이 유지돼야 한다.
+        for student in [None, Some([0xd5u8, 0x55, 0x80, 255])] {
         for i in 0..80 {
             let t = i as f32 * 0.05;
-            let [r, g, b, a] = ultracode_accent(t);
+            let [r, g, b, a] = ultracode_accent(student, t);
             assert_eq!(a, 255);
             // 언제나 보라 — 파랑이 가장 세고 초록이 가장 약하다. 이 순서가 깨지면
             // 학생 accent(분홍 계열: R 강, G 약, B 중간)와 헷갈린다.
-            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t})");
-            // 원색(bb9af7)보다 어두워지지 않는다 — 흰빛을 섞기만 한다.
+            assert!(b > r && r > g, "보라가 아니다: {r},{g},{b} (t={t}, {student:?})");
+            // 원색(bb9af7)보다 어두워지지 않는다 — 밝은 쪽으로만 숨쉰다.
             assert!(r >= 0xbb && g >= 0x9a && b >= 0xf7, "원색보다 어둡다: {r},{g},{b}");
             // 초록이 가장 크게 흔들리는 채널이다(0x9a 에서 시작해 흰빛이 가장 많이
             // 섞인다) — 실측 범위 154~188 의 양 끝을 각각 지나는지 본다.
@@ -11515,7 +11797,9 @@ mod prompt_box_tests {
                 seen_bright = true;
             }
         }
+        }
         // 실제로 숨쉬어야 한다 — 상수면 정적인 테두리와 구분이 안 된다.
+        // (bright 는 학생 없음 케이스가 채운다 — 학생을 섞으면 목표가 낮아진다.)
         assert!(seen_dim && seen_bright, "밝기가 오르내리지 않는다");
     }
 
@@ -11641,6 +11925,29 @@ This came from another Claude session";
             .expect("cross-session 줄이 프리필터에서 걸러졌다");
         assert_eq!(m.body, "ROUNDTRIP-OK");
         assert_eq!(m.from_label.as_deref(), Some("타이틀 생성 푸시"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 발신 세션에 제목이 없으면 `from-name` 이 통째로 빠진다(2026-08-12 실측:
+    /// 신생 pane 의 `@ 12889❯`) — 그때는 소켓 pid 가 보조 앵커로 남아야 한다.
+    #[test]
+    fn cross_session_without_from_name_keeps_pid_anchor() {
+        let dir = std::env::temp_dir().join("kasaterm-prefilter-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("nofromname.jsonl");
+        // pid 는 명부에 없을 값으로 — 있으면 이 머신의 실세션 신원이 섞여 든다.
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/99999912.sock\" \
+                       hop-chain=\"abc\">\nPID-ANCHOR-OK\n</cross-session-message>";
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": content }
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let m = latest_teammate_msg(&path, PEER_LABEL)
+            .expect("from-name 없는 cross-session 태그를 놓쳤다");
+        assert_eq!(m.body, "PID-ANCHOR-OK");
+        assert_eq!(m.from_label, None, "없는 속성이 빈 값으로 잡히면 안 된다");
+        assert_eq!(m.from_pid.as_deref(), Some("99999912"));
         let _ = std::fs::remove_file(&path);
     }
 
