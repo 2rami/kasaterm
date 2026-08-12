@@ -1466,10 +1466,12 @@ impl App {
                         let slug = teammate_sender_slug(&sender);
                         // 학생을 알면 긴 발신 라벨을 이름으로 갈아끼운다 — 라벨은
                         // 발신 세션의 자동 제목이라 「sendmessage로 7유저에게…」 같은
-                        // 소음이다. 못 찾으면 원문 유지(색만).
-                        if slug.is_some() {
+                        // 소음이다. 표시는 한글 이름으로(agent 명 "kanna-p1-qpo" 를
+                        // 그대로 쓰면 로마자 꼬리표가 남는다). 못 찾으면 원문 유지(색만).
+                        if let Some(slug) = slug {
+                            let display = theme::slug_character(slug).unwrap_or(&sender);
                             restyle_peer_native_header(
-                                &mut composed[r], c0, qcol, &sender, accent,
+                                &mut composed[r], c0, qcol, display, accent,
                             );
                         }
                         tint_row(&mut composed[r], accent);
@@ -8453,13 +8455,17 @@ fn restyle_peer_native_header(
     use unicode_width::UnicodeWidthChar;
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let style = row[c0].clone();
-    let end = (qcol + 1).min(row.len());
+    let text = format!("@ {name}❯");
+    // 헤더 행은 `❯` 뒤가 전부 빈칸이다(탐지기가 보장) — 원 라벨이 이름보다 짧으면
+    // (`@ 12889❯` 등 pid 라벨) 필요한 만큼 오른쪽으로 늘려 쓴다. 라벨 폭에 가두면
+    // 이름이 잘리고 ❯ 가 사라진다(2026-08-12 실측: `@ kanna` 로 잘림).
+    let need: usize = text.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+    let end = (qcol + 1).max(c0 + need).min(row.len());
     for c in row[c0..end].iter_mut() {
         let mut b = style.clone();
         b.ch = ' ';
         *c = b;
     }
-    let text = format!("@ {name}❯");
     let mut w = c0;
     for ch in text.chars() {
         let cw = ch.width().unwrap_or(1).max(1);
@@ -9226,22 +9232,32 @@ fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, 
 
 /// 캐릭터 슬러그 → statusline 프사 PNG(웹뷰 bust 를 96×96 contain-리사이즈한
 /// 정사각 상반신, 컴파일타임 내장).
+///
+/// ⚠️`student_sprite_png` 의 로스터와 **같은 집합이어야 한다**. 로스터가 12→79명이
+/// 될 때 여기만 12명 수동 목록으로 남아, 신규 학생은 SendMessage/tell 프사 자리가
+/// 조용히 비었다(2026-08-12 실측: 칸나 발신 메시지에 아바타 없음).
 pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
-    Some(match slug {
-        "arona" => include_bytes!("../assets/students/arona-profile.png"),
-        "prana" => include_bytes!("../assets/students/prana-profile.png"),
-        "midori" => include_bytes!("../assets/students/midori-profile.png"),
-        "momoi" => include_bytes!("../assets/students/momoi-profile.png"),
-        "yuzu" => include_bytes!("../assets/students/yuzu-profile.png"),
-        "arisu" => include_bytes!("../assets/students/arisu-profile.png"),
-        "yuuka" => include_bytes!("../assets/students/yuuka-profile.png"),
-        "shiroko" => include_bytes!("../assets/students/shiroko-profile.png"),
-        "hoshino" => include_bytes!("../assets/students/hoshino-profile.png"),
-        "koharu" => include_bytes!("../assets/students/koharu-profile.png"),
-        "himari" => include_bytes!("../assets/students/himari-profile.png"),
-        "aru" => include_bytes!("../assets/students/aru-profile.png"),
-        _ => return None,
-    })
+    macro_rules! profiles {
+        ($($n:literal),* $(,)?) => {
+            match slug {
+                $($n => include_bytes!(concat!("../assets/students/", $n, "-profile.png"))
+                    as &'static [u8],)*
+                _ => return None,
+            }
+        };
+    }
+    Some(profiles![
+        "arona", "prana", "akane", "akari", "ako", "arisu", "aru", "asuna",
+        "atsuko", "ayane", "azusa", "chihiro", "chinatsu", "eimi", "fubuki", "fuuka",
+        "hanako", "hare", "haruka", "haruna", "hasumi", "hibiki", "hifumi", "himari",
+        "hina", "hinata", "hiyori", "hoshino", "ichika", "iori", "iroha", "izuna",
+        "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei", "kirino",
+        "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa",
+        "neru", "niya", "noa", "nonomi", "rio", "sakurako", "saori", "satsuki",
+        "seia", "sena", "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki",
+        "tsukuyo", "tsurugi", "utaha", "wakamo", "yukari", "yuuka", "yuzu",
+    ])
 }
 
 
@@ -10515,37 +10531,52 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
     // (별+…/점자/"esc to interrupt")으로 working 행을 찾고, 그 행 첫 글리프
     // (=스피너 자리) col 을 돌려준다. 스피너가 어떤 프레임이든 위치가 고정된다.
     for r in (start..=last).rev() {
-        let row = &rows[r];
-        let line: String = row
-            .iter()
-            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
-            .collect();
-        let has_star = row
-            .iter()
-            .take(8)
-            .any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
-        let has_braille = row
-            .iter()
-            .take(8)
-            .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
-        // 최근 claude code(2.1.207 실측)는 스피너 행에 "esc to interrupt" 를
-        // 안 넣는다("· Verbing… (3m · ↓ 9k tokens)") — 점(·) 프레임을 문맥
-        // 폴백이 못 받아 감지가 프레임마다 끊겼다. 점도 앞머리 글리프로 인정.
-        let has_dot = row.iter().take(8).any(|cell| cell.ch == '·');
-        let working_row = ((has_star || has_dot) && line.contains('…'))
-            || has_braille
-            || line.contains("esc to interrupt");
-        if working_row {
-            if let Some(c) = row
-                .iter()
-                .take(8)
-                .position(|cell| !matches!(cell.ch, ' ' | '\0'))
-            {
-                return Some((r, c));
-            }
+        if let Some(c) = spinner_row_col(&rows[r]) {
+            return Some((r, c));
         }
     }
     None
+}
+
+/// 한 행이 claude 의 working 스피너 행인가 — 맞으면 스피너 글리프의 col.
+/// `find_claude_spinner`(도트 위치)와 `rows_show_working`(busy 판정)이 **같은
+/// 판정**을 써야 한다. 한쪽만 맞으면 도트가 도는데 헤더는 안 돌거나 그 반대다.
+///
+/// 앞머리 글리프(별·점자·가운뎃점)가 어딘가 있고 행에 줄임표가 있으면 스피너로
+/// 보던 것이 한국어 본문을 통째로 걸었다 — 가운뎃점과 줄임표는 한국어에서 흔한
+/// 문장부호라 「간·창별 막대) → … Manage Accounts…」 같은 평범한 답변 줄이 잡혀
+/// 학생이 본문 위를 걸어다녔다(2026-08-12 지적). 그래서 두 가지를 못 박는다:
+///   ① 글리프가 그 행의 **첫** non-blank 여야 한다(본문 중간의 점은 무시).
+///   ② 글리프와 줄임표 사이가 ASCII 여야 한다 — 스피너 동사는 claude code 가
+///      찍는 영어다("Cerebrating…"). 한국어 본문은 여기서 전부 떨어진다.
+pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
+    let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
+    if first >= 8 {
+        return None;
+    }
+    let rest: String = row[first + 1..]
+        .iter()
+        .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+        .collect();
+    // 옛 claude code 는 스피너 행에 이 힌트를 붙였다. 있으면 그것만으로 확정.
+    if rest.contains("esc to interrupt") {
+        return Some(first);
+    }
+    let g = row[first].ch;
+    if (0x2800..=0x28FF).contains(&(g as u32)) {
+        return Some(first);
+    }
+    // 최근 claude code(2.1.207 실측)는 힌트 없이 "· Verbing… (3m · ↓ 9k tokens)"
+    // 만 찍는다 — 점(·) 프레임도 별과 같이 인정해야 감지가 프레임마다 끊기지 않는다.
+    if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
+        return None;
+    }
+    let verb = rest.split('…').next().filter(|_| rest.contains('…'))?;
+    (!verb.trim().is_empty()
+        && verb
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '-'))
+    .then_some(first)
 }
 
 /// 승인 대기 도트가 설 자리 — 질문 헤더 행("Do you want to proceed", 없으면 첫
@@ -11258,6 +11289,22 @@ mod spinner_tests {
         let rows = vec![row_from("just some normal output line")];
         assert_eq!(find_claude_spinner(&rows), None);
     }
+
+    // 2026-08-12 지적: 학생이 답변 본문 위를 걸어다녔다. 가운뎃점과 줄임표는
+    // 한국어에서 흔한 문장부호라 「앞머리 8칸 안의 · + 행에 …」 규칙에 평범한
+    // 답변 줄이 걸렸다. 아래 셋은 전부 실제로 오탐했던 줄이다.
+    #[test]
+    fn spinner_ignores_korean_prose() {
+        // 줄바꿈된 본문 — 가운뎃점이 col 2, 줄 끝에 줄임표.
+        let wrapped = vec![row_from("간·창별 막대) → Usage details & history / Manage Accounts…")];
+        assert_eq!(find_claude_spinner(&wrapped), None);
+        // 가운뎃점으로 시작하는 한국어 목록 줄.
+        let bullet = vec![row_from("· 임계 60/80%, 문구까지 Orca 그대로…")];
+        assert_eq!(find_claude_spinner(&bullet), None);
+        // 별표로 시작해도 뒤가 한국어면 스피너가 아니다.
+        let star = vec![row_from("✻ 계정 메뉴를 다시 그렸어요…")];
+        assert_eq!(find_claude_spinner(&star), None);
+    }
 }
 
 #[cfg(test)]
@@ -11621,6 +11668,24 @@ mod student_asset_tests {
         // 로스터가 통째로 비면 위 루프는 조용히 0바퀴 돌고 전부 통과한다. 실측 79명을
         // 하한으로 박아 그 침묵을 막는다.
         assert!(with_art >= 79, "아트 있는 학생이 {with_art}명뿐 — 에셋이 빠졌나");
+    }
+
+    /// 프사도 같은 계약이다 — 스프라이트만 79명이고 프사가 12명 수동 목록으로
+    /// 남아, 신규 학생의 SendMessage/tell 아바타 자리가 조용히 비었다(2026-08-12).
+    #[test]
+    fn bundled_profile_decodes_for_every_student() {
+        let mut with_art = 0;
+        for (_, slug) in crate::theme::CHARACTER_SLUGS {
+            let png = student_profile_png(slug).unwrap_or_else(|| {
+                panic!("{slug} 가 로스터엔 있는데 student_profile_png 목록에 없다")
+            });
+            let img = image::load_from_memory(png)
+                .unwrap_or_else(|e| panic!("{slug}-profile.png 디코드 실패: {e}"));
+            let (w, h) = (img.width(), img.height());
+            assert!(w > 0 && h > 0, "{slug}-profile.png 크기 0");
+            with_art += 1;
+        }
+        assert!(with_art >= 79, "프사 있는 학생이 {with_art}명뿐");
     }
 
     /// 그림 유무를 **슬롯 세우기 전에** 가르는 계약.
