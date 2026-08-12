@@ -2829,6 +2829,15 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> Option<kasa_pty::PtyLayout> {
+        self.restore_window_layout_at(node, cols, rows)
+    }
+
+    fn restore_window_layout_at(
+        &mut self,
+        node: &serde_json::Value,
+        cols: u16,
+        rows: u16,
+    ) -> Option<kasa_pty::PtyLayout> {
         if let Some(leaf) = node.get("leaf") {
             if leaf.is_null() {
                 return None;
@@ -2842,12 +2851,21 @@ impl App {
                 _ => kasa_pty::SplitDir::Horizontal,
             };
             let ratio = split.get("ratio").and_then(|r| r.as_f64()).unwrap_or(0.5) as f32;
+            let probe = kasa_pty::PtyLayout::Split {
+                dir,
+                ratio,
+                a: Box::new(kasa_pty::PtyLayout::single("a")),
+                b: Box::new(kasa_pty::PtyLayout::single("b")),
+            };
+            let rects = probe.leaf_rects(cols, rows);
+            let (_, _, _, aw, ah) = rects[0].clone();
+            let (_, _, _, bw, bh) = rects[1].clone();
             let a = split
                 .get("a")
-                .and_then(|a| self.restore_window_layout(a, cols, rows));
+                .and_then(|a| self.restore_window_layout_at(a, aw, ah));
             let b = split
                 .get("b")
-                .and_then(|b| self.restore_window_layout(b, cols, rows));
+                .and_then(|b| self.restore_window_layout_at(b, bw, bh));
             return match (a, b) {
                 (Some(a), Some(b)) => Some(kasa_pty::PtyLayout::Split {
                     dir,
