@@ -1,0 +1,72 @@
+name: CI
+
+# PR 과 main push 에서 macOS·Windows 양쪽 컴파일을 확인한다.
+#
+# 왜 러너 두 대인가 — 이 레포는 한 머신에서 양쪽을 검사할 수 없다.
+#   · 맥의 `cargo check` 는 `#[cfg(windows)]` 블록을 한 줄도 보지 않는다.
+#     cfg 로 꺼진 코드는 파싱 뒤 통째로 버려져서 타입 오류·없는 API·시그니처
+#     불일치가 전부 통과한다. 「맥에서 경고 0」은 Windows 안전의 근거가 못 된다.
+#   · 크로스 체크(`--target x86_64-pc-windows-msvc`)도 막힌다. `ring` 이 C 소스를
+#     직접 컴파일하는데 맥에 Windows SDK 헤더가 없어 의존성에서 죽는다.
+#     반대 방향도 대칭이다 — Windows 에선 `objc2`·`core-foundation` 이 안 돈다.
+# (2026-08-12 PR #1 머지 중 실측)
+#
+# 그래서 러너 두 대가 각자 자기 쪽 cfg 를 실제로 컴파일하는 것이 유일한 관문이다.
+# release.yml 은 `v*` 태그에만 돌아 PR 을 전혀 검증하지 않는다 — 이 파일이 그 자리를 메운다.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      # 한쪽이 깨져도 다른 쪽 결과를 봐야 한다. 어느 플랫폼만 깨졌는지가
+      # 곧 원인이라, 먼저 실패한 잡이 나머지를 취소하면 그 정보를 잃는다.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # 워크스페이스 전체(`--workspace`)는 금지 — spikes/ 6개가 실험용이라
+      # objc2·core-foundation 같은 Apple 전용 의존성을 들고 있어 Windows 에서
+      # 컴파일조차 안 된다. release.yml 이 `-p` 로 좁히는 것과 같은 이유로,
+      # 여기서도 제품 크레이트만 본다.
+      #
+      # `--all-targets` 라 테스트·예제 코드까지 컴파일 검사된다(실행은 안 한다).
+      - name: cargo check
+        run: >
+          cargo check --all-targets
+          -p kasaterm
+          -p kasa-socket
+          -p kasa-mcp
+          -p kasa-cells
+          -p kasa-ime
+          -p kasa-pty
+          -p kasa-bridge
+
+# 일부러 넣지 않은 것
+#   · `cargo fmt --check` — 이 레포에 fmt 를 걸면 한 번에 28파일 9,361줄이
+#     바뀐다(`mod` 선언 순서까지). 관문이 아니라 대형 diff 생성기가 된다.
+#   · `cargo clippy` — 기존 경고 규모를 재지 않았다. 초록을 확인한 뒤 별도로 켤 것.
+#   · `cargo test` — macOS 는 이미 초록이다(2026-08-13, HEAD 전용 워크트리에서
+#     위 7개 크레이트 400 passed / 0 failed). 안 넣은 이유는 Windows 쪽을 아직
+#     한 번도 재 보지 않아서다. check 가 양쪽 초록인 것을 확인한 다음 붙일 것.
+#     (첫 판부터 빨간불이면 「원래 빨간 CI」가 되어 아무도 보지 않는다.)
