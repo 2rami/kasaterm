@@ -1682,16 +1682,43 @@ enum ActionKind {
 /// 타이틀바 사용량 pill 드롭다운의 한 줄.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum AccountMenuItem {
-    /// 이 계정으로 전환. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
-    Select(String),
-    /// 같은 것의 codex(ChatGPT) 판. 저장소도 전환 수단도 달라 항목을 가른다.
-    SelectCodex(String),
-    /// 클릭 안 되는 구역 라벨(`Claude` · `Codex`). 서비스가 둘이라 이름만 죽
-    /// 늘어놓으면 어느 쪽 계정인지 알 수가 없다. 히트박스에 넣지 않는다.
-    Header(&'static str),
-    /// 설정 → Claude 로 보낸다. 계정이 하나뿐일 때 드롭다운이 막다른 골목이
-    /// 되지 않게 항상 맨 아래에 둔다 — 실제 추가는 거기서 /login 까지 간다.
-    AddInSettings,
+    /// 로스터 한 행 = 제공자 하나. 누르면 그 제공자의 계정 목록이 옆으로 열린다.
+    ///
+    /// 계정을 첫 화면에 죽 늘어놓지 않는 건 Orca 하단바를 그대로 따른 것이다(거노
+    /// 2026-08-12 「똑같이 하라니까」). 첫 화면이 답하는 질문은 «어느 쪽이 얼마나
+    /// 찼나» 고, «누구로 바꿀까» 는 그 다음이다 — 제공자가 늘수록 이 차이가 커진다.
+    Provider(AccountProvider),
+    /// 서브메뉴 안의 계정 행. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
+    Select(AccountProvider, String),
+    /// 로스터 하단 액션 둘. Orca 와 같은 자리·같은 순서.
+    UsageDetails,
+    ManageAccounts,
+    /// 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만).
+    Density(bool),
+}
+
+/// 계정을 가진 하네스. 저장소도 전환 수단도 갈려서(claude 는 자격 저장소 env,
+/// codex 는 auth.json 링크) 타입으로 못 박아 둔다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountProvider {
+    Claude,
+    Codex,
+}
+
+impl AccountProvider {
+    /// 로스터에 적는 이름과 그 옆 아이콘 에셋 이름.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
@@ -4792,6 +4819,10 @@ struct App {
     /// 같은 것의 codex(ChatGPT) 판. 목록을 따로 드는 이유도 같다.
     set_codex_accounts: Vec<socket::CodexAccount>,
     set_codex_account: String,
+    /// 계정 메뉴 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만, 막대 없이).
+    set_usage_compact: bool,
+    /// 계정 메뉴에서 지금 계정 목록이 열려 있는 제공자. `None` = 로스터만.
+    account_menu_provider: Option<AccountProvider>,
     /// 한도가 차면 다음 계정으로 알아서 넘어간다(기본 off) + 그 임계 사용률(%).
     set_account_autoswitch: bool,
     set_account_autoswitch_pct: f32,
@@ -5223,6 +5254,8 @@ impl App {
             set_claude_account: socket::read_claude_account(),
             set_codex_accounts: socket::read_codex_accounts(),
             set_codex_account: socket::read_codex_account(),
+            set_usage_compact: socket::read_usage_compact(),
+            account_menu_provider: None,
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),
             settings_input: None,

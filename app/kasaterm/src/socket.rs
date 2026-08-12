@@ -2871,6 +2871,13 @@ pub struct CodexAccount {
     pub label: String,
 }
 
+/// 계정 메뉴 표시 밀도. `true` = Compact — 창별 막대를 접고 가장 빡빡한 창 하나만.
+/// 기본은 Detailed(false): 처음 여는 사람에게는 전부 보이는 편이 낫고, 좁게 쓰고 싶은
+/// 사람은 메뉴 안에서 바로 바꾼다.
+pub fn read_usage_compact() -> bool {
+    read_settings().get("usage_compact").and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
 /// 등록된 codex 슬롯들. claude 와 같은 규칙 — 기본 로그인(`~/.codex/auth.json`)은
 /// 이 목록에 없고 암묵적 첫 행이다.
 pub fn read_codex_accounts() -> Vec<CodexAccount> {

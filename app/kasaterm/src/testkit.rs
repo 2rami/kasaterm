@@ -1767,25 +1767,32 @@ impl App {
                 );
                 STEP.store(1, Ordering::Relaxed);
             }
-            1 => {
-                let pick = std::env::var("KASATERM_AUTOPILLPICK")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok());
-                if let Some(i) = pick {
-                    match self.account_menu_hits.get(i).map(|(_, r)| *r) {
-                        Some(r) => {
-                            click(self, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-                            eprintln!(
-                                "[autopillclick] row{i} 클릭 → account='{}' menu={}",
-                                self.set_claude_account, self.account_menu
-                            );
+            n => {
+                // 픽은 쉼표로 여러 개를 준다 — Orca 구조는 「제공자 행 → 서브메뉴 행」
+                // 2단이라 한 번의 클릭으로는 전환까지 못 간다.
+                let picks = std::env::var("KASATERM_AUTOPILLPICK").unwrap_or_default();
+                let picks: Vec<usize> =
+                    picks.split(',').filter_map(|s| s.trim().parse::<usize>().ok()).collect();
+                match picks.get(n as usize - 1) {
+                    Some(&i) => {
+                        match self.account_menu_hits.get(i).map(|(_, r)| *r) {
+                            Some(r) => {
+                                click(self, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                                eprintln!(
+                                    "[autopillclick] row{i} 클릭 → claude='{}' codex='{}' menu={} rows={}",
+                                    self.set_claude_account,
+                                    self.set_codex_account,
+                                    self.account_menu,
+                                    self.account_menu_hits.len()
+                                );
+                            }
+                            None => eprintln!("[autopillclick] row{i} 없음"),
                         }
-                        None => eprintln!("[autopillclick] row{i} 없음"),
+                        STEP.store(n + 1, Ordering::Relaxed);
                     }
+                    None => STEP.store(9, Ordering::Relaxed),
                 }
-                STEP.store(9, Ordering::Relaxed);
             }
-            _ => {}
         }
     }
     /// Headless settings-window repro: open the settings *window* (auxwin) after
