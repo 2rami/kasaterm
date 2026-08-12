@@ -2862,6 +2862,51 @@ pub fn claude_account_dir(id: &str) -> Option<std::path::PathBuf> {
     Some(base.join("claude-accounts").join(id))
 }
 
+/// One switchable Codex (ChatGPT) login. 필드는 `ClaudeAccount` 와 같지만 **타입을
+/// 일부러 가른다** — 두 목록을 섞어 넣는 실수가 컴파일에서 잡힌다.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodexAccount {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// 등록된 codex 슬롯들. claude 와 같은 규칙 — 기본 로그인(`~/.codex/auth.json`)은
+/// 이 목록에 없고 암묵적 첫 행이다.
+pub fn read_codex_accounts() -> Vec<CodexAccount> {
+    read_settings()
+        .get("codex_accounts")
+        .and_then(|v| serde_json::from_value::<Vec<CodexAccount>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// 활성 codex 슬롯 id, `""` = 기본 로그인. 목록에서 사라진 id 는 `""` 로 읽는다 —
+/// 지워진 슬롯을 가리키면 codex 가 아무도 로그인 못 하는 자리를 본다.
+pub fn read_codex_account() -> String {
+    let id = read_settings()
+        .get("codex_account")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if id.is_empty() || read_codex_accounts().iter().any(|a| a.id == id) {
+        id
+    } else {
+        String::new()
+    }
+}
+
+/// 슬롯의 `auth.json` 이 사는 자리. claude 와 달리 **인증 파일 하나만** 여기 둔다 —
+/// codex shim 은 이미 pane 별 `CODEX_HOME` 을 세우고 `~/.codex` 를 심볼릭으로 미러하니
+/// 계정마다 갈라야 하는 것은 auth.json 뿐이다. 홈을 통째로 가르면 세션·플러그인·스킬·
+/// 캐시까지 계정 수만큼 쪼개져, pane 안 codex 가 pane 밖 codex 와 다른 것을 보게 된다.
+pub fn codex_account_dir(id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let base = settings_file_path()?.parent()?.to_path_buf();
+    Some(base.join("codex-accounts").join(id))
+}
+
 /// 슬롯별 OAuth 브라우저 프로필 자리. 계정 저장소와 같은 이유로 설정 파일 옆에
 /// 매단다 — 스크래치 설정으로 도는 헤드리스 실행이 진짜 프로필을 안 밟는다.
 /// 프로필이 슬롯마다 갈려야 두 번째 로그인이 첫 번째 세션을 물려받지 않는다.

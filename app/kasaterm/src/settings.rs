@@ -73,6 +73,9 @@ pub(crate) struct SettingsCtx {
     pub claude_accounts: Vec<socket::ClaudeAccount>,
     /// 활성 계정 id, `""` = 기본 로그인.
     pub claude_account: String,
+    /// 같은 것의 codex(ChatGPT) 판.
+    pub codex_accounts: Vec<socket::CodexAccount>,
+    pub codex_account: String,
     /// 한도가 차면 다음 계정으로 알아서 넘어간다 + 그 임계 사용률(%).
     pub account_autoswitch: bool,
     pub account_autoswitch_pct: f32,
@@ -287,6 +290,11 @@ impl App {
         );
         socket::write_setting("claude_account", serde_json::Value::String(self.set_claude_account.clone()));
         socket::write_setting(
+            "codex_accounts",
+            serde_json::to_value(&self.set_codex_accounts).unwrap_or(serde_json::Value::Null),
+        );
+        socket::write_setting("codex_account", serde_json::Value::String(self.set_codex_account.clone()));
+        socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),
         );
@@ -299,6 +307,12 @@ impl App {
             serde_json::Value::from(self.set_wheel_pixel_gain),
         );
         self.regen_claude_shim();
+        // codex 는 래퍼를 다시 굽지 않는다 — 값이 하나도 안 박힌 정적 문자열이라
+        // 다시 구울 이유가 없고, 활성 슬롯 경로만 파일로 갈아 끼우면 **이미 떠 있는
+        // pane 도 다음 codex 실행부터** 그 계정으로 뜬다.
+        if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
+            crate::write_codex_account_file(std::path::Path::new(&dir));
+        }
     }
 
     /// 계정 슬롯을 하나 만들고, 그 인증 저장소를 얹은 `claude` 를 새 pane 에 띄운다.
@@ -362,6 +376,57 @@ impl App {
         // 설정은 **별도 창**이라, 이걸 안 닫으면 로그인 pane 도 토스트도 전부 그
         // 창 뒤에서 벌어진다 — 거노 눈엔 버튼이 먹통인 것과 구별이 안 됐다.
         // 어차피 다음 할 일이 터미널에서 로그인하는 것이니 본창으로 넘긴다.
+        if let Some(i) = self.settings_window_idx() {
+            self.close_settings_window(i);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.focus_window();
+        }
+    }
+
+    /// 같은 것의 codex 판 — 슬롯을 만들고 그 홈을 얹은 `codex login` 을 새 pane 에
+    /// 띄운다. claude 와 마찬가지로 **추가만 하고 활성 전환은 안 한다**(아직 아무도
+    /// 로그인 안 한 슬롯으로 갈아타면 그 뒤 codex 가 전부 로그아웃 상태로 뜬다).
+    ///
+    /// id 접두사를 `codex-` 로 갈라 두는 건 OAuth 브라우저 프로필 때문이다 —
+    /// `oauth_profile_dir` 은 id 하나로 자리를 잡으므로 claude 의 `acct-1` 과 겹치면
+    /// 두 서비스가 같은 브라우저 프로필을 나눠 쓰게 된다.
+    fn add_codex_account(&mut self) {
+        let id = (1..)
+            .map(|n| format!("codex-{n}"))
+            .find(|c| self.set_codex_accounts.iter().all(|a| &a.id != c))
+            .expect("1.. is infinite");
+        let Some(dir) = socket::codex_account_dir(&id) else {
+            self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast(format!("계정 폴더 생성 실패: {e}"));
+            return;
+        }
+        self.set_codex_accounts
+            .push(socket::CodexAccount { id: id.clone(), label: String::new() });
+        self.settings_save();
+
+        let pane = self
+            .split_active_pane(kasa_pty::SplitDir::Horizontal)
+            .unwrap_or_default();
+        let Some(sess) = self.pty.get(&pane).cloned() else {
+            self.set_toast("계정 추가됨 — pane 을 열지 못해 로그인은 수동으로".to_string());
+            return;
+        };
+        let q = dir.display().to_string().replace('\'', "'\\''");
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        // `login` 은 shim 이 **순정으로 통과**시키는 관리 서브커맨드라(우리 홈을 씌우면
+        // 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이 그대로 진짜 codex 에 닿아 이
+        // 슬롯에 auth.json 을 쓴다.
+        self.pending_restores
+            .push((sess, format!("CODEX_HOME='{q}' codex login\r"), at));
+        spawn_oauth_browser_watch(self.ws.clone(), pane.clone(), socket::oauth_profile_dir(&id));
+        self.set_toast(
+            "빈 브라우저 창에서 새 ChatGPT 계정으로 로그인하세요 — 기본 브라우저 탭은 닫으시고요"
+                .to_string(),
+        );
         if let Some(i) = self.settings_window_idx() {
             self.close_settings_window(i);
         }
@@ -443,6 +508,8 @@ impl App {
             claude_extra: self.set_claude_extra.clone(),
             claude_accounts: self.set_claude_accounts.clone(),
             claude_account: self.set_claude_account.clone(),
+            codex_accounts: self.set_codex_accounts.clone(),
+            codex_account: self.set_codex_account.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             characters: kasa_mcp::character::characters_json()
@@ -747,6 +814,30 @@ impl App {
                     .map_or(0, |a| a.label.chars().count());
                 self.settings_input = Some(SettingsInput::ClaudeAccountLabel(i));
             }
+            SettingsAction::CodexAccount(id) => {
+                self.set_codex_account = id;
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::AddCodexAccount => self.add_codex_account(),
+            SettingsAction::RemoveCodexAccount(id) => {
+                self.set_codex_accounts.retain(|a| a.id != id);
+                // claude 판과 같은 이유 — 사라진 슬롯을 가리키면 codex 가 아무도
+                // 로그인 못 하는 자리를 본다. auth.json 은 남긴다(재로그인 말고는
+                // 복구가 없고, 남겨 둬도 해가 없다).
+                if self.set_codex_account == id {
+                    self.set_codex_account = String::new();
+                }
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::FocusCodexAccountLabel(i) => {
+                self.settings_caret = self
+                    .set_codex_accounts
+                    .get(i)
+                    .map_or(0, |a| a.label.chars().count());
+                self.settings_input = Some(SettingsInput::CodexAccountLabel(i));
+            }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
@@ -817,6 +908,10 @@ impl App {
                 // 행 인덱스라 목록이 줄면 가리키던 행이 사라질 수 있다 — 그땐 키를
                 // 소비만 하고 흘린다(엉뚱한 행에 글자가 찍히는 것보다 낫다).
                 SettingsInput::ClaudeAccountLabel(i) => match self.set_claude_accounts.get_mut(i) {
+                    Some(a) => &mut a.label,
+                    None => return true,
+                },
+                SettingsInput::CodexAccountLabel(i) => match self.set_codex_accounts.get_mut(i) {
                     Some(a) => &mut a.label,
                     None => return true,
                 },
@@ -995,6 +1090,10 @@ impl App {
             SettingsInput::Shell => &mut self.set_shell,
             SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
             SettingsInput::ClaudeAccountLabel(i) => match self.set_claude_accounts.get_mut(i) {
+                Some(a) => &mut a.label,
+                None => return,
+            },
+            SettingsInput::CodexAccountLabel(i) => match self.set_codex_accounts.get_mut(i) {
                 Some(a) => &mut a.label,
                 None => return,
             },
@@ -1830,6 +1929,80 @@ pub(crate) fn paint_settings(
                 }
                 y += SEG_H + ROW_GAP;
             }
+            // Codex(ChatGPT) 계정 — claude 슬롯 바로 아래 둔다. pane 에서 codex 를
+            // 띄우는 것도 같은 손이라, 두 로그인이 설정의 다른 층에 흩어져 있으면
+            // 「지금 어느 계정으로 돌고 있나」를 두 군데서 확인해야 한다.
+            y = field_header(g, fx, y, clip, "Codex account",
+                &["ChatGPT 로그인을 골라요 — 다음에 뜨는 codex 부터 그 계정으로",
+                  "이미 돌고 있는 세션은 원래 계정 그대로예요",
+                  "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
+            let codex_rows = std::iter::once((String::new(), "기본 (지금 로그인된 계정)".to_string(), None))
+                .chain(
+                    ctx.codex_accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
+                );
+            for (id, label, idx) in codex_rows {
+                if y > clip {
+                    let active = ctx.codex_account == id;
+                    let dot = (fx, y + (row_h - 16.0) / 2.0, 16.0, 16.0);
+                    circle_rect(g, dot.0, dot.1, dot.2,
+                        if active { theme::accent() } else { theme::surface_active() });
+                    if active {
+                        circle_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, theme::bg());
+                    }
+                    let hit = (fx - 4.0, y, 24.0, row_h);
+                    if inside(hit, ctx.cursor) && !active {
+                        circle_rect(g, dot.0, dot.1, dot.2, theme::surface_hover());
+                    }
+                    rects.push((SettingsAction::CodexAccount(id.clone()), hit));
+                    let status_x = match idx {
+                        None => {
+                            g.draw_text(
+                                fx + 28.0, y + (row_h - 14.0) / 2.0, &label,
+                                gpu::DrawOpts { font_size: 14.0, color: theme::text_mute(), bold: active, italic: false },
+                            );
+                            fx + 28.0 + g.measure_chrome_text(&label, 14.0, active) + 12.0
+                        }
+                        Some(i) => {
+                            let lr = (fx + 28.0, y, fw.min(240.0), row_h);
+                            let focused = ctx.input == Some(SettingsInput::CodexAccountLabel(i));
+                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
+                            rects.push((SettingsAction::FocusCodexAccountLabel(i), lr));
+                            let dr = (lr.0 + lr.2 + 8.0, y, 30.0, row_h);
+                            stepper_btn(g, dr, "x", ctx.cursor);
+                            rects.push((SettingsAction::RemoveCodexAccount(id.clone()), dr));
+                            dr.0 + dr.2 + 12.0
+                        }
+                    };
+                    // claude 판과 달리 "확인 중…" 이 없다 — 신원이 파일 하나에 들어
+                    // 있어 즉시 읽힌다(HTTP 왕복이 아니다). 그래서 값이 없다는 건
+                    // 정말로 아직 로그인 안 한 슬롯이라는 뜻이다.
+                    let (txt, col) = match codex_identity(&id) {
+                        Some(e) => (e, theme::text_mute()),
+                        None => ("로그인 필요".to_string(), theme::danger()),
+                    };
+                    g.draw_text(
+                        status_x, y + (row_h - 12.0) / 2.0, &txt,
+                        gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
+                    );
+                }
+                y += row_h + 6.0;
+            }
+            if y > clip {
+                let label = "+ 계정 추가";
+                let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                let r = (fx, y, bw, 34.0);
+                round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
+                    if inside(r, ctx.cursor) { theme::surface_hover() } else { theme::surface_active() });
+                g.draw_text(
+                    r.0 + 14.0, r.1 + 9.0, label,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                );
+                rects.push((SettingsAction::AddCodexAccount, r));
+            }
+            y += 34.0 + ROW_GAP;
             y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
             if y > clip {
                 let cells = [
@@ -2294,6 +2467,31 @@ pub(crate) fn account_identity(id: &str) -> Option<String> {
         Some(p) if !p.email.is_empty() => Some(p.email),
         _ => None,
     }
+}
+
+/// codex 슬롯이 실제로 어느 ChatGPT 계정인지. 빈 id = 기본 로그인(`~/.codex`).
+///
+/// claude 판(`auth_probe`)이 HTTP 를 도는 것과 달리 **파일 하나면 끝난다** — `auth.json`
+/// 의 id_token 은 JWT 고 payload 에 이메일이 평문으로 들어 있다. 그래서 "확인 중" 같은
+/// 중간 상태가 없고, 값이 없으면 정말로 로그인이 안 된 슬롯이다.
+///
+/// 서명은 확인하지 않는다. 이 값의 쓰임은 «이 슬롯이 누구인가» 를 화면에 적는 것뿐이고,
+/// 토큰이 유효한지는 codex 가 그걸로 API 를 부를 때 판가름난다.
+pub(crate) fn codex_identity(id: &str) -> Option<String> {
+    use base64::Engine as _;
+    let path = match socket::codex_account_dir(id) {
+        Some(d) => d.join("auth.json"),
+        None => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".codex/auth.json"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let tok = v.get("tokens")?.get("id_token")?.as_str()?;
+    // JWT = header.payload.signature — 가운데만 필요하다. 패딩 없는 URL-safe base64.
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(tok.split('.').nth(1)?)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let email = claims.get("email")?.as_str()?;
+    (!email.is_empty()).then(|| email.to_string())
 }
 
 /// 슬롯 이메일을 `settings.json` 에 남긴다 — **statusline 이 읽을 유일한 경로**다.

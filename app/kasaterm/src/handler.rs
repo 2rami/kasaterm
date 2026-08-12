@@ -2836,6 +2836,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.settings_save();
                                 return;
                             }
+                            // codex 는 shim 을 다시 굽지 않는다 — settings_save 가
+                            // 활성 슬롯 경로 파일만 갈아 끼우면 이미 떠 있는 pane 도
+                            // 다음 codex 실행부터 이 계정으로 뜬다.
+                            Some(AccountMenuItem::SelectCodex(id)) => {
+                                self.set_codex_account = id;
+                                self.settings_save();
+                                return;
+                            }
+                            // 히트박스에 안 넣는 줄이라 여기 올 수 없다. 메뉴만 닫힌다.
+                            Some(AccountMenuItem::Header(_)) => {}
                             Some(AccountMenuItem::AddInSettings) => {
                                 self.open_settings_window(
                                     event_loop,

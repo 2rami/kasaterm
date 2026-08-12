@@ -1684,6 +1684,11 @@ enum ActionKind {
 pub(crate) enum AccountMenuItem {
     /// 이 계정으로 전환. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
     Select(String),
+    /// 같은 것의 codex(ChatGPT) 판. 저장소도 전환 수단도 달라 항목을 가른다.
+    SelectCodex(String),
+    /// 클릭 안 되는 구역 라벨(`Claude` · `Codex`). 서비스가 둘이라 이름만 죽
+    /// 늘어놓으면 어느 쪽 계정인지 알 수가 없다. 히트박스에 넣지 않는다.
+    Header(&'static str),
     /// 설정 → Claude 로 보낸다. 계정이 하나뿐일 때 드롭다운이 막다른 골목이
     /// 되지 않게 항상 맨 아래에 둔다 — 실제 추가는 거기서 /login 까지 간다.
     AddInSettings,
@@ -3896,6 +3901,8 @@ pub(crate) enum SettingsInput {
     /// `Copy` 로 여기저기 값 복사돼 돌아서 String 을 못 넣는다 — 행 인덱스로 잡고
     /// 계정 삭제 시 포커스를 푼다(인덱스가 밀려 엉뚱한 행을 가리키지 않게).
     ClaudeAccountLabel(usize),
+    /// 같은 것의 codex 판.
+    CodexAccountLabel(usize),
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -3957,6 +3964,12 @@ pub(crate) enum SettingsAction {
     /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
     /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
     FocusClaudeAccountLabel(usize),
+    /// 위 넷의 codex(ChatGPT) 판. 로그인 수단이 달라 동작이 갈리므로(claude 는
+    /// `claude auth login`, codex 는 `CODEX_HOME=<슬롯> codex login`) 액션도 가른다.
+    CodexAccount(String),
+    AddCodexAccount,
+    RemoveCodexAccount(String),
+    FocusCodexAccountLabel(usize),
     /// Open `~/.config/kasaterm/students/` in the OS file manager so the user
     /// can drop replacement character images there.
     OpenStudentsDir,
@@ -4776,6 +4789,9 @@ struct App {
     /// 스냅샷이 프레임마다 만들어지므로 파일을 그때 읽지 않고 여기 들고 있는다.
     set_claude_accounts: Vec<socket::ClaudeAccount>,
     set_claude_account: String,
+    /// 같은 것의 codex(ChatGPT) 판. 목록을 따로 드는 이유도 같다.
+    set_codex_accounts: Vec<socket::CodexAccount>,
+    set_codex_account: String,
     /// 한도가 차면 다음 계정으로 알아서 넘어간다(기본 off) + 그 임계 사용률(%).
     set_account_autoswitch: bool,
     set_account_autoswitch_pct: f32,
@@ -5205,6 +5221,8 @@ impl App {
             set_claude_extra: socket::read_claude_extra(),
             set_claude_accounts: socket::read_claude_accounts(),
             set_claude_account: socket::read_claude_account(),
+            set_codex_accounts: socket::read_codex_accounts(),
+            set_codex_account: socket::read_codex_account(),
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),
             settings_input: None,
@@ -6723,6 +6741,17 @@ for e in "$SRC"/* "$SRC"/.[!.]*; do
   case "$n" in config.toml|hooks.json|AGENTS.md) continue ;; esac
   ln -sfn "$e" "$CH/$n" 2>/dev/null
 done
+# 계정 슬롯 — 이 파일 한 줄이 활성 슬롯의 auth 디렉터리다. **매 실행 읽으므로**
+# 설정에서 계정을 바꾸면 이미 열려 있는 pane 도 다음 codex 부터 그 계정으로 뜬다.
+# 갈아 끼우는 건 auth.json 하나뿐 — 세션·플러그인·스킬·캐시는 위 미러 그대로라
+# pane 안 codex 가 pane 밖과 같은 것을 계속 본다. 빈 파일/없는 파일 = 기본 로그인.
+# 아직 로그인 안 한 슬롯은 링크가 대상 없이 걸리는데, 그게 맞다: codex 는 로그인
+# 필요로 보고, `codex login` 이 쓰는 순간 그 파일이 슬롯 안에 생긴다.
+ACCT=$(cat "$SELF_DIR/codex-account" 2>/dev/null)
+if [ -n "$ACCT" ]; then
+  mkdir -p "$ACCT" 2>/dev/null
+  ln -sfn "$ACCT/auth.json" "$CH/auth.json" 2>/dev/null
+fi
 cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
 # 디렉터리 신뢰 프롬프트 선해결 — 무인 스폰이 여기서 멈춘다("Do you trust the contents
 # of this directory?", 실측). 같은 경로를 또 쓰면 TOML 중복 테이블이라 config 가 통째로
@@ -6770,6 +6799,27 @@ exec "$REAL" "$@"
         {
             eprintln!("[shim] chmod codex wrapper failed: {e}");
         }
+    }
+    write_codex_account_file(shim_dir);
+}
+
+/// 활성 codex 슬롯의 auth 디렉터리를 위 래퍼가 읽는 파일에 적는다(빈 줄 = 기본 로그인).
+///
+/// claude 는 이 정보를 shim 본문에 `export` 로 굽지만 codex 는 파일로 넘긴다 — 래퍼가
+/// 값 하나 없는 정적 문자열이라 계정을 바꿀 때마다 다시 구울 이유가 없고, 파일이면
+/// **이미 떠 있는 pane 도 다음 codex 실행부터** 새 계정을 본다.
+pub(crate) fn write_codex_account_file(shim_dir: &std::path::Path) {
+    let dir = socket::codex_account_dir(&socket::read_codex_account());
+    // 슬롯 디렉터리는 여기서 만들어 둔다 — 없으면 래퍼의 auth.json 링크가 걸릴 자리가
+    // 없어, `codex login` 이 그 슬롯에 토큰을 못 쓴다.
+    if let Some(ref d) = dir {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("[shim] codex account dir 생성 실패: {e}");
+        }
+    }
+    let body = dir.map_or(String::new(), |d| d.display().to_string());
+    if let Err(e) = std::fs::write(shim_dir.join("codex-account"), body) {
+        eprintln!("[shim] write codex-account failed: {e}");
     }
 }
 
