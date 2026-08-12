@@ -8014,7 +8014,18 @@ impl App {
         // pane dirty bit; chrome events flag `self.chrome_dirty`;
         // cursor blink phase toggles count separately.
         let blink_changed = blink_on != self.last_blink_on;
-        let pty_dirty = self.ws.lock().unwrap().panes.values().any(|p| p.dirty);
+        // 보이는 pane 으로 한정한다 — 안 보이는 방의 pane 이 dirty 여도 그릴 그림이
+        // 없는데, 전에는 그 하나가 프레임을 통째로 불렀다. 방마다 claude 를 띄우면
+        // 다른 방의 스트리밍이 지금 보는 방의 프레임을 계속 태운다(2026-08-13).
+        // `visible_pane_ids` 가 ws 락을 잡으므로 아래 락보다 **먼저** 부른다.
+        let visible_panes = self.visible_pane_ids();
+        let pty_dirty = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|(id, p)| p.dirty && visible_panes.contains(id));
         // The launch banner fade is its own animation source: while it's
         // still visible the picture changes every frame, so force the GPU
         // pass even when panes are clean (about_to_wait re-arms WaitUntil
@@ -8026,10 +8037,15 @@ impl App {
             self.copy_toast_alpha() > 0.0 || self.collab_toast_alpha() > 0.0;
         // A busy pane's header bar sweeps every frame, so it's an animation
         // source too — keep painting while any pane is working.
-        let bar_animating = self
-            .pane_activity
-            .values()
-            .any(|a| a.status != "idle" && !a.status.is_empty());
+        //
+        // 단 **보이는** pane 만 센다. 그 바는 pane 헤더에 그려지므로 다른 방의 pane 은
+        // 아무리 바빠도 화면에 없다. 좁히지 않으면 claude 를 여러 방에 띄운 것만으로
+        // 상시 애니메이션 모드가 되어, 유휴여도 30fps 로 9~11ms 프레임을 계속 갈았다.
+        // (사이드바에 뜨는 다른 방의 상태 표시는 정적이고, 깜빡이는 것들은
+        // `window_alert`·`status_needs_you` 가 따로 펌프를 건다 — 여기서 좁혀도 안 멈춘다.)
+        let bar_animating = self.pane_activity.iter().any(|(id, a)| {
+            a.status != "idle" && !a.status.is_empty() && visible_panes.contains(id)
+        });
         // Split "needs a full chrome+grid rebuild" from "only the working-bar
         // sweep advances". A bar-only frame redraws cached chrome with a fresh
         // GPU time uniform — no clear_chrome, no per-pane grid clone, no draw-
