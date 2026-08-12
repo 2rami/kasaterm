@@ -1734,15 +1734,34 @@ impl App {
         };
         match step {
             0 => {
-                let Some(r) = self.account_chip_rect else {
-                    eprintln!("[autopillclick] chip rect 없음 — pill 자체가 안 그려졌다");
+                // 손잡이가 둘이다 — Info 탭 pill(기본)과 늘 보이는 상태줄 세그먼트.
+                // `KASATERM_AUTOPILLCLICK=status` 로 후자를 누른다. 두 손잡이는 창의
+                // 위/아래 끝이라 메뉴가 펼쳐질 방향이 반대고, 그 방향 계산이 실제로
+                // 틀렸던 자리다(상태줄에서 열면 메뉴가 창 밖으로 나갔다).
+                let handle = std::env::var("KASATERM_AUTOPILLCLICK").unwrap_or_default();
+                let (name, rect) = if handle == "status" {
+                    ("status", self.status_account_rect)
+                } else {
+                    ("chip", self.account_chip_rect)
+                };
+                let Some(r) = rect else {
+                    eprintln!("[autopillclick] {name} rect 없음 — 손잡이가 안 그려졌다");
                     STEP.store(9, Ordering::Relaxed);
                     return;
                 };
                 let (x, y) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
                 click(self, x, y);
+                // 행 y 범위를 함께 찍는다 — 메뉴가 «열렸는데 화면 밖»인 경우
+                // rows 개수만 봐서는 성공과 구분이 안 된다.
+                let span = match (
+                    self.account_menu_hits.first(),
+                    self.account_menu_hits.last(),
+                ) {
+                    (Some((_, a)), Some((_, b))) => format!("y={:.0}..{:.0}", a.1, b.1 + b.3),
+                    _ => "y=-".to_string(),
+                };
                 eprintln!(
-                    "[autopillclick] pill({x:.0},{y:.0}) 클릭 → account_menu={} rows={}",
+                    "[autopillclick] {name}({x:.0},{y:.0}) 클릭 → account_menu={} rows={} {span}",
                     self.account_menu,
                     self.account_menu_hits.len()
                 );
