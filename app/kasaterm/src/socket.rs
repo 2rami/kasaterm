@@ -2794,22 +2794,6 @@ pub fn read_default_shell() -> Option<String> {
         .map(String::from)
 }
 
-/// Per-pane claude wrapper knobs, read by the shim installer and the settings
-/// "클로드" tab. Invariants (session-id / --settings / task-list) are never
-/// keyed here — they stay hardcoded in the wrapper.
-/// 지금 로스터와 그림을 `~/.config/kasaterm/themes/<id>/` 로 복제한다. 만들어진
-/// 폴더를 돌려준다.
-///
-/// 새 테마를 만들 **본보기**다 — 없으면 사용자는 80명치 JSON 과 파일명 규칙을
-/// 맨손으로 맞춰야 한다. 복제본을 곧바로 활성화하지는 않는다(내용이 지금과 같아서
-/// 켜 봤자 아무것도 안 바뀐 것처럼 보인다).
-///
-/// 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
-/// 되돌릴 수 없다.
-pub fn export_current_theme() -> std::io::Result<std::path::PathBuf> {
-    create_theme("")
-}
-
 /// 폴더 이름으로 쓸 수 있게 다듬는다. 한글은 그대로 둔다 — macOS·Windows 모두
 /// 유니코드 폴더명을 받고, 사용자가 붙인 이름이 Finder 에서 그대로 보이는 편이
 /// `theme-3` 보다 낫다. 걷어내는 건 실제로 깨지는 것들뿐이다: 경로 구분자(하위
@@ -2850,8 +2834,16 @@ pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
     let mut roster = kasa_mcp::character::characters_json()
         .ok_or_else(|| std::io::Error::other("로스터를 못 읽었다"))?;
     if let Some(o) = roster.as_object_mut() {
+        // 화면에 보일 이름은 한글로 짓는다 — 폴더 이름(`my-theme-3`)을 그대로
+        // 보이면 한국어 화면에 영어 슬러그가 튄다. 그렇다고 폴더까지 한글로
+        // 만들지는 않는다: macOS 는 한글 경로를 자모로 분해해 저장하는데 폴더
+        // 이름이 곧 테마 id 인 구조라, 조합형으로 들어온 id 와 어긋나는 순간
+        // 고른 테마를 못 찾는다.
         let shown = if label.trim().is_empty() {
-            dir.file_name().and_then(|s| s.to_str()).unwrap_or("my-theme").to_string()
+            match dir.file_name().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("my-theme")) {
+                None | Some("") => "새 테마".to_string(),
+                Some(n) => format!("새 테마 {}", n.trim_start_matches('-')),
+            }
         } else {
             label.trim().to_string()
         };
