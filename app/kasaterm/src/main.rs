@@ -5014,13 +5014,6 @@ struct App {
     /// 아로나 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
     arona_panel_window: Option<Arc<Window>>,
     arona_panel_webview: Option<wry::WebView>,
-    /// Open preview windows (image viewer / markdown editor), each a
-    /// separate OS window + webview spawned by `imgopen` / `mdopen` (or the
-    /// MCP `/open-image` `/open-markdown` endpoints). A Vec, not a single
-    /// slot, so the user can have several open at once; each entry is
-    /// dropped when its own window is closed. Webview must outlive its
-    /// window, so both are owned together.
-    preview_windows: Vec<(Arc<Window>, wry::WebView)>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -5414,7 +5407,6 @@ impl App {
             board_panel_webview: None,
             arona_panel_window: None,
             arona_panel_webview: None,
-            preview_windows: Vec::new(),
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
