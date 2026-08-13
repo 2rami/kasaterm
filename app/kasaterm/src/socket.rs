@@ -1074,6 +1074,48 @@ impl Backend for PtyBackend {
         })
     }
 
+    fn split_fleet(
+        &self,
+        count: usize,
+        from: Option<&str>,
+        host_ratio: Option<f32>,
+    ) -> Result<Vec<SurfaceInfo>> {
+        // 기본 0.6 — 부른 쪽(오케스트레이터)이 대화를 읽는 자리라 학생 칸보다 넓어야
+        // 한다. 거노가 그려서 고른 비율이다(2026-08-13).
+        let ratio = host_ratio.unwrap_or(0.6);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketSplitFleet(
+            count,
+            from.map(str::to_string),
+            ratio,
+            tx,
+        ));
+        // 타임아웃이 split 과 같은 20초인 이유도 같다 — 부하가 걸리면 GUI 응답이
+        // 밀리고, 그때 자리표시자로 떨어지면 「성공했다」로 읽혀 스폰이 통째로 샌다
+        // (거노 실사고 2026-08-05). 셸 N 개를 낳으므로 한 번 호출이 split 보다
+        // 오래 걸리지만, 실측은 그래도 밀리초 단위다.
+        let ids = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(ids)) if !ids.is_empty() => ids,
+            // 빈 목록을 성공으로 실어 보내지 않는다 — 부른 쪽이 실패를 감지할
+            // 방법이 없어진다.
+            Ok(Ok(_)) => anyhow::bail!("배치가 pane 을 하나도 안 만들었다"),
+            Ok(Err(why)) => anyhow::bail!("배치 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "배치 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
+            ),
+        };
+        Ok(ids
+            .into_iter()
+            .map(|id| SurfaceInfo {
+                id,
+                workspace_id: FIXED_WORKSPACE_ID.into(),
+                title: None,
+                cwd: None,
+                character: None,
+            })
+            .collect())
+    }
+
     /// 셰임(`teammate_case_arms`/`install_claude_hook_shim`)이 조립하는 것과 **같은
     /// 규칙**으로 이름을 미리 짓는다: `<학생 슬러그>-p<pane 번호>` + cwd 기준 팀.
     /// 규칙이 갈리면 부른 쪽이 닿지 않는 인박스에 브리프를 넣고도 성공으로 읽으므로,

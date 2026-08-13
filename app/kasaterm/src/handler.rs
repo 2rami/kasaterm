@@ -175,6 +175,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketSplitFleet(count, from, host_ratio, reply) => {
+                // 배치는 포커스를 옮기지 않는다 — 오케스트레이터가 배경에서 하는
+                // 일이라, 사람이 보고 있는 자리를 빼앗으면 안 된다(`tell` 과 같은
+                // 규칙). `spawn_split_session` 은 트리만 건드리고 active_pane 을
+                // 안 만지므로 따로 되돌릴 것도 없다.
+                let outcome = self
+                    .split_fleet(*count, from.as_deref(), *host_ratio)
+                    .map_err(|e| format!("{e:#}"));
+                if let Err(ref why) = outcome {
+                    eprintln!("[kasaterm] socket split_fleet 실패: {why}");
+                }
+                let _ = reply.send(outcome);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::NotifyFocus { pane, sid } => {
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에

@@ -48,6 +48,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
+        "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
         // 한 왕복에 두는 것은 인덱스가 아니라 pane id 로 지목하기 때문이다(목록이 그
@@ -215,6 +216,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.list",
                 "surface.focus",
                 "surface.split",
+                "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
                 "surface.send_key",
@@ -647,6 +649,50 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
                 o.insert("team".into(), json!(t));
             }
             Response::success(id, body)
+        }
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// `surface.split_fleet` — pane 여러 개를 한 번에 배치한다.
+/// params: `{count, from?, host_ratio?}`.
+///
+/// 응답에 `requested` 와 `placed` 를 **함께** 싣는다. 하한(80칸·16줄)에 걸려 요청보다
+/// 적게 앉을 수 있는데, 개수만 세어 보고 「됐다」로 읽으면 「다섯 불렀는데 셋」이 또
+/// 조용히 지나간다 — 부른 쪽이 그 차이를 사람에게 말할 수 있어야 한다.
+fn surface_split_fleet(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let count = match params.get("count").and_then(|v| v.as_u64()) {
+        Some(n) if n >= 1 => n as usize,
+        _ => return param_err(id, "surface.split_fleet requires `count` >= 1"),
+    };
+    // 상한을 두는 이유는 실수 한 번의 값이 크기 때문이다 — `count: 500` 은 셸 500 개를
+    // 띄우고 나서야 하한에 걸린다. 하한 계산도 이걸 자르지만 그건 pane 을 낳은 뒤다.
+    if count > 16 {
+        return param_err(id, "surface.split_fleet: count 는 16 이하");
+    }
+    let from = params.get("from").and_then(|v| v.as_str());
+    let host_ratio = params.get("host_ratio").and_then(|v| v.as_f64()).map(|f| f as f32);
+    match backend.split_fleet(count, from, host_ratio) {
+        Ok(surfaces) => {
+            // 새 pane 이 claude 로 뜨면 쓸 이름을 여기서 함께 준다 — N 명을 띄우면
+            // 다음 할 일이 N 통의 SendMessage 라, 이름이 같이 나와야 board 를
+            // 되짚는 왕복이 안 생긴다(`surface.split` 과 같은 이유).
+            let agents: Vec<Value> = surfaces
+                .iter()
+                .map(|s| match backend.pane_agent(&s.id) {
+                    Some((a, t)) => json!({"agent": a, "team": t}),
+                    None => Value::Null,
+                })
+                .collect();
+            Response::success(
+                id,
+                json!({
+                    "surfaces": surfaces,
+                    "agents": agents,
+                    "requested": count,
+                    "placed": surfaces.len(),
+                }),
+            )
         }
         Err(e) => backend_err(id, e),
     }
