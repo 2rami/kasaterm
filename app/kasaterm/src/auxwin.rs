@@ -1614,6 +1614,12 @@ impl App {
                     a.dirty = true;
                     a.window.request_redraw();
                 }
+                // 색 선택기 드래그 — press 에서 잡은 면을 커서가 따라간다.
+                // rect 밖은 picker_pick 이 클램프하므로 창 어디까지 끌어도 된다.
+                if let Some((act, r)) = self.settings_drag.clone() {
+                    let p = self.aux_windows.get(idx).map(|a| a.cursor_px).unwrap_or((0.0, 0.0));
+                    self.picker_pick(&act, r, p);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -1625,6 +1631,13 @@ impl App {
                 // rects 는 area=(0,0,w,h) 좌표계라 창 로컬 커서를 그대로 넘긴다.
                 self.settings_click(cx, cy);
                 self.aux_redraw(idx);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.settings_drag = None;
             }
             WindowEvent::MouseWheel { delta, .. } => self.aux_settings_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_settings_key(idx, &event),

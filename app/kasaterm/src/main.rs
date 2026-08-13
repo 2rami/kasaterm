@@ -3931,6 +3931,9 @@ pub(crate) enum SettingsInput {
     ClaudeExtra,
     /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
     StudentPersona,
+    /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
+    /// 들고 있다 — 상세는 한 번에 한 명뿐이라 여기 실을 것이 없다.
+    StudentName,
     /// Feedback 본문 멀티라인 필드. persona 와 같은 편집 경로를 타지만 캐럿·버퍼가
     /// 따로라, 설정 창을 두 카테고리로 오가도 서로 안 덮어쓴다.
     FeedbackBody,
@@ -3978,6 +3981,12 @@ pub(crate) enum SettingsAction {
     ResetCustomTheme,
     /// 팔레트 색 한 칸의 hex 필드에 포커스(인덱스 규약은 `SettingsInput::PaletteHex`).
     FocusPaletteHex(usize),
+    /// 색 선택기의 채도×명도 사각형. 좌표는 액션에 못 싣는다(연속값) —
+    /// settings_click 이 히트 rect 와 커서로 상대좌표를 직접 계산한다
+    /// (2026-08-13 지시: hex 타이핑 말고 마우스로 고르게).
+    PickerSV,
+    /// 색 선택기의 색상(Hue) 띠. 처리 방식은 PickerSV 와 같다.
+    PickerHue,
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -4053,8 +4062,12 @@ pub(crate) enum SettingsAction {
     /// Select a character in the Students list → load its persona into the edit
     /// buffer. Carries the character's display name.
     SelectStudent(String),
+    /// 캐릭터 상세를 닫고 목록으로 돌아간다(편집 중이던 것은 저장하고).
+    CloseStudent,
     /// Focus the persona multiline editor for the selected character.
     FocusStudentPersona,
+    /// 상세 화면의 이름 칸에 포커스.
+    FocusStudentName,
     /// 피드백 본문 편집기에 포커스.
     FocusFeedbackBody,
     /// 진단 정보(버전·OS·창 구성)를 같이 남길지. 기본 켬 — 없으면 대부분의
@@ -4857,6 +4870,12 @@ struct App {
     /// 팔레트 hex 편집 버퍼 — 포커스된 칸 하나가 쓴다. custom_theme 에는
     /// 완성된(파싱되는) 값만 나가므로, 타이핑 중의 반쪽 값은 여기서만 산다.
     set_palette_edit: String,
+    /// 색 선택기의 HSV 상태. RGB 에서 매번 역산하면 s=0·v=0 에서 색상(H)이
+    /// 소실돼 핸들이 튄다 — 포커스 때 한 번 역산해 시드하고 이후는 이게 정본.
+    set_picker_hsv: (f32, f32, f32),
+    /// 색 선택기 드래그 중인 면(액션)과 그 히트 rect(x,y,w,h). 커서가 rect
+    /// 밖으로 나가도 클램프해 계속 따라오게, press 때 잡아 release 때 놓는다.
+    settings_drag: Option<(SettingsAction, (f32, f32, f32, f32))>,
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
@@ -4884,12 +4903,16 @@ struct App {
     settings_caret: usize,
     /// Clickable targets collected during the settings paint, for hit-testing.
     settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
-    /// Students 카테고리 인라인 편집: 선택된 캐릭터(이름) + persona 편집 버퍼 +
-    /// 캐럿(문자 인덱스). 선택 시 raw_persona 를 버퍼로 로드하고, blur/선택변경 시
-    /// characters.json 에 flush 한다.
+    /// Theme 카테고리의 캐릭터 상세 화면: 열린 캐릭터(이름) + persona 편집 버퍼 +
+    /// 캐럿(문자 인덱스). 열 때 raw_persona 를 버퍼로 로드하고, blur/닫기 시
+    /// characters.json 에 flush 한다. `None` 이면 목록 화면이다.
     students_selected: Option<String>,
     students_persona: String,
     students_caret: usize,
+    /// 상세 화면의 이름 편집 버퍼. `students_selected` 는 파일에 **저장된** 이름을
+    /// 유지한다 — 타이핑 도중의 반쯤 지운 이름으로 persona·그림을 조회하면
+    /// 한 글자 지울 때마다 화면이 빈 캐릭터로 튄다.
+    students_name: String,
     /// 이름을 고치는 중인 테마 — `(폴더 id, 편집 버퍼)`. 캐럿은 `settings_caret`
     /// 을 같이 쓴다(한 번에 한 칸만 포커스). 버퍼를 파일과 따로 두는 건 타이핑
     /// 도중의 반쯤 지운 이름이 목록에 그대로 새어 나가지 않게 하려는 것이다.
@@ -5300,6 +5323,8 @@ impl App {
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),
             set_palette_edit: String::new(),
+            set_picker_hsv: (0.0, 0.0, 0.0),
+            settings_drag: None,
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),
@@ -5325,6 +5350,7 @@ impl App {
                 })
                 .unwrap_or_default(),
             students_caret: 0,
+            students_name: std::env::var("KASATERM_TEST_STUDENT").unwrap_or_default(),
             theme_label_edit: None,
             settings_caret: 0,
             window_frame_save_due: None,
