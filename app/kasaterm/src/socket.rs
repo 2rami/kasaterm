@@ -2666,6 +2666,65 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
     }
 }
 
+/// kasaterm 테마가 바뀌면 Claude Code 도 따라간다 — `~/.claude/settings.json`
+/// 의 `theme` 를 새 배경의 밝기에 맞춰 고쳐 쓴다. Claude Code 는 설정 파일을
+/// 감시하다 즉시 리로드하므로 **이미 떠 있는 세션도 그 자리에서** 바뀐다.
+/// 파일을 안 쓰면 달리는 세션은 따라올 길이 없다: `theme: auto` 조차 배경
+/// 질의(OSC 11)를 시작할 때 한 번만 하기 때문이다(2026-08-13 지적 — 라이트로
+/// 바꿔도 안쪽 claude 는 어두운 채라 /theme 을 손으로 쳐야 했다).
+///
+/// - `-daltonized`·`-ansi` 변형은 밝기 절반만 갈아 끼운다 — 색약 배려·ANSI
+///   고정은 사용자의 선택이라 지우면 안 된다.
+/// - `custom:<슬러그>` 는 건드리지 않는다. 사용자가 직접 고른 전용 팔레트다.
+/// - `auto` 는 명시값으로 **대체한다**: auto 의 목적(터미널 배경 따라가기)을
+///   우리가 라이브로 대신 이뤄 주는 것이라, 시작 때 한 번 판별로 끝나는
+///   원래 auto 보다 의도에 더 충실하다.
+/// - 계정 슬롯은 자격증명 저장소만 가르므로(`CLAUDE_SECURESTORAGE_CONFIG_DIR`,
+///   `claude_account_export_line` 참고) 설정은 모든 계정이 이 한 파일을 읽는다.
+/// - 파일이 JSON 으로 안 읽히면 손대지 않는다 — 테마 하나 맞추자고 env·권한
+///   설정이 든 파일을 날리는 것보다 안 바뀌는 쪽이 싸다.
+/// - 스크래치 설정(`KASATERM_SETTINGS_FILE`)으로 뜬 헤드리스 리그에서는 아무
+///   것도 안 한다: 리그는 HOME 을 공유해서, 리그의 테마 실험이 진짜 Claude
+///   설정을 뒤집으면 안 된다. (`KASATERM_SOCKET_PATH` 는 가드로 못 쓴다 —
+///   본 앱도 부팅하며 자기 env 에 export 한다.)
+pub fn sync_claude_theme(light: bool) {
+    if std::env::var_os("KASATERM_SETTINGS_FILE").is_some() {
+        return;
+    }
+    let Some(path) = kasa_socket::home_dir().map(|h| h.join(".claude/settings.json")) else {
+        return;
+    };
+    let mut obj = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
+        Some(serde_json::Value::Object(m)) => m,
+        Some(_) => return,
+        // 파일이 없으면 새로 만든다 — 키 하나짜리 파일도 Claude 는 잘 읽는다.
+        None if !path.exists() => serde_json::Map::new(),
+        None => return,
+    };
+    let cur = obj.get("theme").and_then(|x| x.as_str()).unwrap_or("dark");
+    if cur.starts_with("custom:") {
+        return;
+    }
+    let suffix = if cur.ends_with("-daltonized") {
+        "-daltonized"
+    } else if cur.ends_with("-ansi") {
+        "-ansi"
+    } else {
+        ""
+    };
+    let desired = format!("{}{}", if light { "light" } else { "dark" }, suffix);
+    if cur == desired {
+        return;
+    }
+    obj.insert("theme".to_string(), serde_json::Value::String(desired));
+    if let Ok(txt) = serde_json::to_string_pretty(&serde_json::Value::Object(obj)) {
+        let _ = std::fs::write(&path, txt);
+    }
+}
+
 /// Where window tabs live: "side" (Warp-style vertical sidebar list, the
 /// default) or "top" (Windows Terminal-style horizontal tabs in the title
 /// strip). Only an explicit "top" opts into the title-strip tabs; anything
@@ -2748,27 +2807,213 @@ pub fn read_default_shell() -> Option<String> {
 /// 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
 /// 되돌릴 수 없다.
 pub fn export_current_theme() -> std::io::Result<std::path::PathBuf> {
+    create_theme("")
+}
+
+/// 폴더 이름으로 쓸 수 있게 다듬는다. 한글은 그대로 둔다 — macOS·Windows 모두
+/// 유니코드 폴더명을 받고, 사용자가 붙인 이름이 Finder 에서 그대로 보이는 편이
+/// `theme-3` 보다 낫다. 걷어내는 건 실제로 깨지는 것들뿐이다: 경로 구분자(하위
+/// 폴더를 만들어 버린다) · 제어문자 · 앞뒤 공백과 점(`.` `..` 과 숨김 파일).
+fn sanitize_theme_id(label: &str) -> String {
+    let cleaned: String = label
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c == ':' || c.is_control() { ' ' } else { c })
+        .collect();
+    cleaned.trim().trim_matches('.').trim().to_string()
+}
+
+/// 새 테마를 만든다 — 지금 로스터와 그림을 그 폴더로 복제해 채운다.
+///
+/// 빈 껍데기를 만들지 않는 건 **본보기가 없으면 아무도 테마를 못 만들기**
+/// 때문이다: 80명치 JSON 스키마와 파일명 규칙을 맨손으로 맞춰야 한다. 채워
+/// 두면 고칠 것만 고치면 된다.
+///
+/// 만든 테마를 곧바로 활성화하지 않는다 — 내용이 지금 것과 같아서 켜 봤자
+/// 아무것도 안 바뀐 것처럼 보이고, 그럼 "만들기가 실패했나" 로 읽힌다.
+pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
     // 목록을 읽는 곳과 **같은 뿌리**여야 한다 — 여기만 따로 계산하면
-    // `KASATERM_THEMES_DIR` 을 쓰는 사용자는 복제본이 목록에 안 뜬다.
+    // `KASATERM_THEMES_DIR` 을 쓰는 사용자는 새 테마가 목록에 안 뜬다.
     let root = kasa_mcp::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
+    let base = match sanitize_theme_id(label) {
+        s if s.is_empty() => "my-theme".to_string(),
+        s => s,
+    };
+    // 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
+    // 되돌릴 수 없다.
     let dir = (1..1000)
-        .map(|n| root.join(if n == 1 { "my-theme".into() } else { format!("my-theme-{n}") }))
+        .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
         .find(|p| !p.exists())
         .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
     std::fs::create_dir_all(&dir)?;
 
     let mut roster = kasa_mcp::character::characters_json()
         .ok_or_else(|| std::io::Error::other("로스터를 못 읽었다"))?;
-    // 폴더명을 그대로 표시명으로 둔다 — 사용자가 여기부터 고치라는 자리 표시다.
     if let Some(o) = roster.as_object_mut() {
-        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("my-theme");
-        o.insert("label".into(), serde_json::Value::String(name.into()));
+        let shown = if label.trim().is_empty() {
+            dir.file_name().and_then(|s| s.to_str()).unwrap_or("my-theme").to_string()
+        } else {
+            label.trim().to_string()
+        };
+        o.insert("label".into(), serde_json::Value::String(shown));
     }
     let body = serde_json::to_string_pretty(&roster).map_err(std::io::Error::other)?;
     std::fs::write(dir.join("theme.json"), body)?;
     crate::render::export_student_sprites(&dir.join("sprites"))?;
     Ok(dir)
+}
+
+/// 테마 목록의 한 줄 — 카드 하나가 이걸 그린다.
+#[derive(Clone)]
+pub struct ThemeRow {
+    /// 폴더 이름. 번들은 빈 문자열이다.
+    pub id: String,
+    pub label: String,
+    /// 로스터에 든 캐릭터 수 — "이 테마에 몇 명 있나"가 고르는 기준이 된다.
+    pub count: usize,
+    /// 미리보기 얼굴 `(slug, png 경로)`. 경로가 `None` 이면 번들 그림.
+    pub faces: Vec<(String, Option<std::path::PathBuf>)>,
+}
+
+/// 목록에 그릴 테마들. **캐시된다** — 카드 한 장마다 79명치 theme.json 을 파싱하는데
+/// 스냅샷은 매 프레임 만들어지므로, 캐시가 없으면 설정 화면을 여는 것만으로 디스크가
+/// 계속 돈다. 테마를 만들거나 지우거나 이름을 바꾸면 `invalidate_theme_rows` 로 비운다.
+///
+/// 손으로 폴더를 넣은 경우는 캐시가 모른다 — 그래서 "새로고침" 버튼이 이것도 함께
+/// 비운다(그 버튼의 뜻이 곧 "파일을 다시 봐라"다).
+pub fn theme_rows() -> Vec<ThemeRow> {
+    if let Some(v) = THEME_ROWS.read().unwrap().as_ref() {
+        return v.clone();
+    }
+    let mut w = THEME_ROWS.write().unwrap();
+    if let Some(v) = w.as_ref() {
+        return v.clone();
+    }
+    let v = build_theme_rows();
+    *w = Some(v.clone());
+    v
+}
+
+pub fn invalidate_theme_rows() {
+    *THEME_ROWS.write().unwrap() = None;
+}
+
+static THEME_ROWS: std::sync::RwLock<Option<Vec<ThemeRow>>> = std::sync::RwLock::new(None);
+
+/// 미리보기로 몇 명을 세울지. 셋이면 "여러 명이 든 한 벌"이라는 게 보이고, 카드가
+/// 목록으로 늘어설 만큼 좁게 남는다.
+const THEME_PREVIEW_FACES: usize = 3;
+
+fn build_theme_rows() -> Vec<ThemeRow> {
+    // 번들이 맨 앞 — 폴더가 없어 `list_themes` 에 안 잡히지만 「지금 무엇을
+    // 쓰는가」는 목록에 보여야 되돌아갈 수 있다.
+    let bundled = ThemeRow {
+        id: String::new(),
+        label: "블루 아카이브 (기본)".into(),
+        count: crate::theme::CHARACTER_SLUGS.len(),
+        faces: crate::theme::CHARACTER_SLUGS
+            .iter()
+            .take(THEME_PREVIEW_FACES)
+            .map(|(_, slug)| (slug.to_string(), None))
+            .collect(),
+    };
+    let mut out = vec![bundled];
+    for (id, label) in kasa_mcp::character::list_themes() {
+        let dir = kasa_mcp::character::themes_root().map(|r| r.join(&id));
+        let roster = dir
+            .as_ref()
+            .and_then(|d| std::fs::read_to_string(d.join("theme.json")).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let slugs = roster.as_ref().map(roster_slugs).unwrap_or_default();
+        let faces = slugs
+            .iter()
+            .filter_map(|slug| {
+                let p = dir.as_ref()?.join("sprites").join(format!("{slug}-profile.png"));
+                p.is_file().then(|| (slug.clone(), Some(p)))
+            })
+            .take(THEME_PREVIEW_FACES)
+            .collect();
+        out.push(ThemeRow { id, label, count: slugs.len(), faces });
+    }
+    out
+}
+
+/// 로스터의 슬러그를 등장 순서대로. leader 가 먼저인 건 미리보기에 그 테마의
+/// 얼굴마담이 서야 하기 때문 — 알파벳 순으로 자르면 아무 상관 없는 셋이 뽑힌다.
+fn roster_slugs(v: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |e: &serde_json::Value| {
+        if let Some(s) = e.get("slug").and_then(|x| x.as_str()) {
+            if !s.is_empty() && !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
+        }
+    };
+    if let Some(l) = v.get("leader") {
+        push(l);
+    }
+    for key in ["leaders", "members"] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            for e in arr {
+                push(e);
+            }
+        }
+    }
+    out
+}
+
+/// 테마 폴더. id 가 비었으면 번들이라 폴더가 없다.
+pub fn theme_dir(id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let d = kasa_mcp::character::themes_root()?.join(id);
+    d.is_dir().then_some(d)
+}
+
+/// 목록에 보이는 이름만 바꾼다 — **폴더는 그대로 둔다.**
+///
+/// 폴더까지 따라 옮기면 이름 한 번 고치는 데 주소가 바뀐다: 활성 테마 선택이
+/// 끊기고, 열어 둔 Finder 창과 사용자가 걸어 둔 심링크가 죽는다. label 은
+/// 화면에 보이는 이름이고 폴더명은 파일시스템의 주소라, 이 둘은 갈라 두는 게 맞다.
+pub fn rename_theme(id: &str, label: &str) -> std::io::Result<()> {
+    let dir = theme_dir(id).ok_or_else(|| std::io::Error::other("그 테마 폴더가 없다"))?;
+    let p = dir.join("theme.json");
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p)?)
+        .map_err(std::io::Error::other)?;
+    let o = v.as_object_mut().ok_or_else(|| std::io::Error::other("theme.json 이 객체가 아니다"))?;
+    match label.trim() {
+        // 이름을 비우면 폴더명으로 되돌린다 — 빈 이름은 목록에서 고를 수 없는
+        // 칸이 되어 그 테마가 사라진 것처럼 보인다.
+        "" => {
+            o.remove("label");
+        }
+        s => {
+            o.insert("label".into(), serde_json::Value::String(s.to_string()));
+        }
+    }
+    let body = serde_json::to_string_pretty(&v).map_err(std::io::Error::other)?;
+    std::fs::write(&p, body)
+}
+
+/// 테마를 목록에서 치운다 — 지우지 않고 `themes/_trash/` 로 옮긴다.
+///
+/// 사용자가 며칠에 걸쳐 그림을 갈아 끼운 폴더를 클릭 한 번에 영영 날리는 건
+/// 되돌릴 방법이 없다. `_trash` 안은 `theme.json` 이 한 단계 더 깊어 `list_themes`
+/// 에 안 잡히므로, 목록에선 사라지고 파일은 남는다. 옮겨진 자리를 돌려주니
+/// 부르는 쪽이 그 경로를 사용자에게 보여 줄 수 있다.
+pub fn delete_theme(id: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = theme_dir(id).ok_or_else(|| std::io::Error::other("그 테마 폴더가 없다"))?;
+    let trash = kasa_mcp::character::themes_root()
+        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?
+        .join("_trash");
+    std::fs::create_dir_all(&trash)?;
+    let dest = (1..1000)
+        .map(|n| trash.join(if n == 1 { id.to_string() } else { format!("{id}-{n}") }))
+        .find(|p| !p.exists())
+        .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
+    std::fs::rename(&dir, &dest)?;
+    Ok(dest)
 }
 
 /// 고른 캐릭터 테마 id — 빈 문자열이면 번들. 폴더가 실재하는지는 여기서 안 본다

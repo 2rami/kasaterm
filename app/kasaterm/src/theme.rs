@@ -434,6 +434,12 @@ fn store_palette(p: &Palette) {
         },
     );
     // Accent intentionally not touched here — see set_accent.
+    //
+    // pane 안에서 **이미 도는** Claude Code 까지 따라오게 하는 건 호스트 색
+    // 응답이 아니라 이쪽이다 — 설정 파일을 고쳐 쓰면 Claude 가 감시하다 즉시
+    // 리로드한다. 팔레트가 실제로 갈리는 지점은 여기뿐이라(프리셋·custom·
+    // system 폴링 전부 통과) 훅도 여기 하나면 된다.
+    crate::socket::sync_claude_theme(is_light(p.bg));
 }
 
 /// 배경이 밝은 쪽인가. ITU-R BT.601 휘도 — 사람이 느끼는 밝기에 맞춰 녹색에
@@ -636,13 +642,60 @@ fn apply_custom_theme(s: &serde_json::Value) {
 }
 
 /// "#rrggbb" / "rrggbb" → RGB. Anything else → None (key is skipped).
-fn parse_hex(s: &str) -> Option<[u8; 3]> {
+pub(crate) fn parse_hex(s: &str) -> Option<[u8; 3]> {
     let h = s.trim().trim_start_matches('#');
     if h.len() != 6 {
         return None;
     }
     let v = u32::from_str_radix(h, 16).ok()?;
     Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+pub(crate) fn hex_str(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// `custom_theme` 이 다루는 UI 색 — (settings.json 키, Palette 필드 접근자).
+/// `apply_custom_theme` 의 `hex(...)` 호출 목록과 짝이다: 여기 늘리면 저쪽도
+/// 늘려야 화면과 파일이 같은 것을 말한다. 라벨을 따로 안 두는 건 설정 화면이
+/// 키를 그대로 보여 주기 때문 — 파일을 손으로 고칠 때 같은 이름을 찾게 된다.
+/// syn_* 는 뺐다: apply_custom_theme 이 아직 안 읽는 키를 UI 에 먼저 내면
+/// 고쳐도 안 먹는 칸이 생긴다.
+pub const PALETTE_KEYS: &[(&str, fn(&Palette) -> [u8; 4])] = &[
+    ("bg", |p| p.bg),
+    ("fg", |p| p.fg),
+    ("surface", |p| p.surface),
+    ("surface_hover", |p| p.surface_hover),
+    ("surface_active", |p| p.surface_active),
+    ("border", |p| p.border),
+    ("text", |p| p.text),
+    ("text_dim", |p| p.text_dim),
+    ("text_mute", |p| p.text_mute),
+    ("success", |p| p.success),
+    ("danger", |p| p.danger),
+];
+
+/// 프리셋 하나를 custom_theme JSON 으로 복제한다 — 팔레트 편집의 시작점.
+/// 부분 파일도 동작은 하지만(빠진 키는 base 값) 모든 키를 명시해 쓴다:
+/// 파일을 열었을 때 고칠 수 있는 키가 다 보여야 발견이 된다.
+pub fn custom_theme_seed(base_key: &str) -> serde_json::Value {
+    let (key, _, p) = THEME_PRESETS
+        .iter()
+        .find(|(k, _, _)| *k == base_key)
+        .unwrap_or(&THEME_PRESETS[0]);
+    let mut o = serde_json::Map::new();
+    o.insert("base".to_string(), serde_json::Value::String((*key).to_string()));
+    for (k, get) in PALETTE_KEYS {
+        let c = get(p);
+        o.insert((*k).to_string(), serde_json::Value::String(hex_str([c[0], c[1], c[2]])));
+    }
+    o.insert(
+        "ansi".to_string(),
+        serde_json::Value::Array(
+            p.ansi.iter().map(|c| serde_json::Value::String(hex_str(*c))).collect(),
+        ),
+    );
+    serde_json::Value::Object(o)
 }
 
 pub fn set_accent(name: &str) {
