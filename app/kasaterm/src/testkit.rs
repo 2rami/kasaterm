@@ -1691,6 +1691,7 @@ impl App {
         use std::sync::OnceLock;
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static OPENED: AtomicBool = AtomicBool::new(false);
+        static DIFFED: AtomicBool = AtomicBool::new(false);
         static FIRED: AtomicBool = AtomicBool::new(false);
         let due = DUE.get_or_init(|| {
             let any = std::env::var_os("KASATERM_AUTOCOLSCROLL").is_some()
@@ -1720,6 +1721,45 @@ impl App {
             return;
         }
         if Instant::now() < *due + std::time::Duration::from_millis(1500) {
+            return;
+        }
+        // `KASATERM_AUTOCOLDIFF=<개수>` — 변경 목록에서 그만큼의 파일 diff 를 펼친다.
+        // git 칼럼에서 「끝까지 스크롤이 닿나」를 물으려면 목록이 화면보다 길어야 하는데,
+        // 이 레포의 변경 파일 몇 개로는 절대 안 넘친다(11행 = 263px vs 화면 1152px).
+        // 펼친 diff 만이 그 길이를 만든다.
+        //
+        // ⚠️ **칼럼을 여는 단계에서는 못 한다** — git 스캔은 칼럼이 보이게 된 뒤에
+        // 돌아서, 그 시점의 `col_data` 는 아직 비어 있다(실측: 「펼치기 0개」).
+        // 그래서 목록이 찬 뒤인 여기서 걸고, 본문은 워커가 가져오므로 다시 1.5초
+        // 기다렸다가 잰다.
+        if !DIFFED.swap(true, Ordering::Relaxed) {
+            if let Some(n) = std::env::var("KASATERM_AUTOCOLDIFF")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+            {
+                let picks: Vec<(bool, String)> = self
+                    .git
+                    .col_data
+                    .lock()
+                    .map(|g| {
+                        g.staged
+                            .iter()
+                            .map(|(_, p)| (true, p.clone()))
+                            .chain(g.unstaged.iter().map(|(_, p)| (false, p.clone())))
+                            .take(n)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!("[autocolscroll] diff 펼치기 {}개", picks.len());
+                for (staged, path) in picks {
+                    self.toggle_git_diff(staged, path);
+                }
+                return;
+            }
+        }
+        if std::env::var_os("KASATERM_AUTOCOLDIFF").is_some()
+            && Instant::now() < *due + std::time::Duration::from_millis(3000)
+        {
             return;
         }
         // 로그는 한 번만, **세우는 것은 매 틱**이다. 목록을 채우는 pump 들이
@@ -1758,17 +1798,40 @@ impl App {
         let Some((tab, px)) = Self::autocolscroll_spec() else { return };
         // 탭도 매 틱 다시 세운다 — 칼럼을 여는 다른 경로가 탭을 갈아 끼울 수 있다.
         self.info.tab = tab;
-        match tab {
-            SideTab::Sessions => self.sessions_col.scroll = px,
-            SideTab::Mcp => self.mcp_col.scroll = px,
-            SideTab::Info => self.info.scroll = px,
-            SideTab::Git => self.git.col_scroll = px,
+        // `KASATERM_AUTOCOLWHEEL=<노치>` — 스크롤을 **손으로 세우는 대신 칼럼 위에서
+        // 휠을 굴린다.** 값을 대입하는 길은 스크롤 상한 계산을 통째로 건너뛰므로,
+        // 「끝까지 스크롤이 닿나」는 이 길로만 물을 수 있다. 음수면 위로 굴린다.
+        //
+        // 이 갈래에서는 스크롤 재설정을 **첫 틱에만** 한다 — 매 틱 다시 세우면 그
+        // 대입이 휠이 밀어 둔 자리를 도로 지운다.
+        let wheel = std::env::var("KASATERM_AUTOCOLWHEEL")
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok());
+        if wheel.is_none() || first {
+            match tab {
+                SideTab::Sessions => self.sessions_col.scroll = px,
+                SideTab::Mcp => self.mcp_col.scroll = px,
+                SideTab::Info => self.info.scroll = px,
+                SideTab::Git => self.git.col_scroll = px,
+            }
         }
         self.chrome_dirty = true;
         self.render_frame();
         if !first {
             return;
         }
+        if let Some(notches) = wheel {
+            use winit::event::MouseScrollDelta;
+            let (gx, gw) = (self.git_col_x(), self.git_col_w());
+            self.cursor_px = (gx + gw * 0.5, TITLE_HEIGHT + 200.0);
+            let step = if notches >= 0 { -1.0 } else { 1.0 };
+            for _ in 0..notches.abs() {
+                self.handle_wheel(MouseScrollDelta::LineDelta(0.0, step));
+            }
+            self.render_frame();
+        }
+        // 읽는 것은 휠까지 굴린 **뒤**다. 앞에서 읽으면 대입한 값을 그대로 되읽어
+        // 「휠이 안 먹었다」와 구분이 안 된다.
         let actual = match tab {
             SideTab::Sessions => self.sessions_col.scroll,
             SideTab::Mcp => self.mcp_col.scroll,
@@ -1783,7 +1846,16 @@ impl App {
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
         };
-        eprintln!("[autocolscroll] 요청={px} 실제={actual} 행={rows}");
+        let (vis_h, content_h) = self.git.col_list_extent;
+        // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
+        // 「펼쳤는데 캐시가 아직 안 왔다」는 화면으로 구분이 안 된다(둘 다 파일 목록만
+        // 보인다).
+        eprintln!(
+            "[autocolscroll] 요청={px} 실제={actual} 행={rows} git기하=(보임 {vis_h:.0} / 내용 {content_h:.0} / 상한 {:.0}) 펼침={} 캐시={}",
+            (content_h - vis_h).max(0.0),
+            self.git.col_expanded.len(),
+            self.git.col_diff_cache.len()
+        );
     }
     /// `KASATERM_FORCE_HANDLE_MENU=*` → 활성 pane 의 ⋮ 메뉴를 연다. 이 env 는
     /// 생성자에서 pane id 를 그대로 받는데(main.rs), 로컬 PTY 모드의 leaf id 는

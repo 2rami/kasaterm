@@ -52,6 +52,16 @@ pub(crate) struct GitState {
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,
     pub(crate) col_scroll: f32,
+    /// 직전 프레임의 변경 목록 기하 — `(보이는 높이, 내용 높이)`, LOGICAL px.
+    /// 휠이 스크롤 상한을 여기서 읽는다.
+    ///
+    /// 그리기 쪽이 써 주는 이유: 휠은 이 값을 자기 힘으로 알 수 없다. 목록 높이는
+    /// 파일 수만이 아니라 섹션 머리 두 개와 **펼친 diff 줄 수**로 정해지는데, 그건
+    /// 캐시를 뒤져야 나온다. 예전엔 휠이 `파일 수 × 22` 로 어림했고 그래서 diff 를
+    /// 펼치면 끝까지 스크롤이 안 됐다 — 목록은 화면 몇 배로 길어졌는데 상한은
+    /// 파일 몇 개 몫 그대로였다. 보이는 높이도 `헤더 68px · 버튼 44px` 로 박혀 있어
+    /// 최근 커밋 미리보기가 자리를 얼마나 먹는지를 아예 못 봤다.
+    pub(crate) col_list_extent: (f32, f32),
     pub(crate) col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
     pub(crate) col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
     pub(crate) col_expanded: std::collections::HashSet<(bool, String)>,
