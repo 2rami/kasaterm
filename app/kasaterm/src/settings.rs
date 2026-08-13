@@ -22,6 +22,23 @@ type Rect = (f32, f32, f32, f32);
 
 const CAT_W: f32 = 200.0;
 
+/// 테마 카드 한 장. 폭은 미리보기 얼굴 셋 + 좌우 여백에서 나오고, 높이는 그
+/// 얼굴 아래로 이름 한 줄과 부제 한 줄이 들어갈 만큼이다.
+const THEME_CARD_W: f32 = 236.0;
+const THEME_CARD_H: f32 = 136.0;
+const THEME_GAP: f32 = 12.0;
+/// 미리보기 얼굴 한 칸. 프사 원본이 전신이라 세로로 길다 — 정사각으로 잡으면
+/// contain-fit 이 가로 여백을 크게 남겨 얼굴이 작아진다.
+const THEME_FACE_W: f32 = 64.0;
+const THEME_FACE_H: f32 = 72.0;
+
+/// 캐릭터 카드. 79명이 격자로 늘어서므로 한 장이 작아야 한 화면에 여러 줄이
+/// 들어오고, 그래도 얼굴이 누구인지 알아볼 만큼은 커야 한다.
+const STU_CARD_W: f32 = 104.0;
+const STU_CARD_H: f32 = 128.0;
+const STU_GAP: f32 = 10.0;
+const STU_FACE_W: f32 = 72.0;
+
 /// 설명 문구에 박히는 주 수식키 이름. 실제 바인딩은 이미 갈려 있는데
 /// (`zoom_mod = macos ? Cmd : Ctrl`, 편집기 저장도 같다) 문구만 Cmd 로 고정돼
 /// 있어서, Windows 사용자에게 **키보드에 없는 키**를 안내하고 있었다.
@@ -54,6 +71,12 @@ pub(crate) struct SettingsCtx {
     pub shape: String,
     /// settings.json has a `custom_theme` object → show the Custom card.
     pub has_custom_theme: bool,
+    /// 팔레트 hex 편집 버퍼 — 포커스된 칸의 타이핑 중 값. 완성 전 반쪽 값은
+    /// custom_theme 에 없고 여기에만 있다.
+    pub palette_edit: String,
+    /// custom_theme 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개
+    /// 뒤에 ANSI 16개. 스냅샷에서 한 번 계산해 paint 가 파일을 다시 안 읽게 한다.
+    pub palette_hex: Vec<String>,
     pub accent: String,
     pub font_size: f32,
     /// 전체 UI 배율(1.0 = 100%). 화면에 숫자로 보여야 얼마나 틀어졌는지 안다.
@@ -80,11 +103,13 @@ pub(crate) struct SettingsCtx {
     /// (표시명, 에셋 슬러그) — Theme 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
-    /// 설치된 캐릭터 테마 (id, 표시명) — `~/.config/kasaterm/themes/` 에서 찾은 것.
-    /// 번들은 여기 없다(폴더가 없으니). 목록 맨 앞에 따로 세운다.
-    pub themes: Vec<(String, String)>,
+    /// 고를 수 있는 캐릭터 테마들 — 번들이 맨 앞이고, 그 뒤가
+    /// `~/.config/kasaterm/themes/` 에서 찾은 것들. 미리보기 얼굴까지 실어 온다.
+    pub themes: Vec<socket::ThemeRow>,
     /// 지금 고른 테마 id. 빈 문자열이면 번들.
     pub theme_active: String,
+    /// 이름을 고치는 중인 테마 `(폴더 id, 편집 버퍼)`.
+    pub theme_label_edit: Option<(String, String)>,
     /// 단일라인 텍스트 필드(경로·셸·claude extra)의 캐럿(문자 인덱스).
     /// persona 멀티라인 캐럿(`student_caret`)과 분리 — 한 번에 한 필드만
     /// 포커스되지만, 저장소를 나눠 포커스 이동 시 캐럿이 튀지 않게 한다.
@@ -113,6 +138,23 @@ const CONTENT_W: f32 = 600.0;
 
 fn inside(r: Rect, p: (f32, f32)) -> bool {
     p.0 >= r.0 && p.0 <= r.0 + r.2 && p.1 >= r.1 && p.1 <= r.1 + r.3
+}
+
+/// 라벨 폭에 맞춰 늘어나는 작은 액션 버튼. 그린 사각형을 돌려주므로 부르는 쪽이
+/// 그대로 `rects` 에 담아 클릭 대상으로 쓴다.
+fn chip(g: &mut gpu::GpuRenderer, x: f32, y: f32, label: &str, cursor: (f32, f32)) -> Rect {
+    let r = (x, y, g.measure_chrome_text(label, 13.0, false) + 28.0, 34.0);
+    let hover = inside(r, cursor);
+    g.hover_pointer |= hover;
+    round_rect(
+        g, r.0, r.1, r.2, r.3, theme::radius_md(),
+        if hover { theme::surface_hover() } else { theme::surface_active() },
+    );
+    g.draw_text(
+        r.0 + 14.0, r.1 + 9.0, label,
+        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+    );
+    r
 }
 
 /// 문자열+캐럿 편집 코어 — 캐럿은 문자(char) 인덱스. 단일·멀티라인 공용이라
@@ -404,11 +446,24 @@ impl App {
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
     /// 매니저로 연다 — 없으면 먼저 만든다.
-    fn open_students_dir(&self) {
-        if let Some(dir) = socket::students_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            open_path(&dir);
+    /// 학생 그림 폴더를 연다. **비어 있으면 지금 쓰는 그림을 그 자리에 풀고** 연다.
+    ///
+    /// 번들 그림은 `include_bytes` 라 파일로 존재하지 않는다 — 그래서 예전엔 폴더를
+    /// 만들어 열기만 했고, 사용자는 텅 빈 창을 봤다(2026-08-13 지적: "이미지 폴더
+    /// 열면 아무것도없어"). 무엇을 어떤 이름으로 넣어야 하는지 알 방법이 그 창에
+    /// 하나도 없었다는 뜻이다. `open_characters_json` 이 빈 파일 대신 현재 정본을
+    /// seed 하는 것과 같은 원칙을 그림에도 적용한다.
+    fn open_students_dir(&mut self) {
+        let Some(dir) = socket::students_dir() else { return };
+        let _ = std::fs::create_dir_all(&dir);
+        let empty = std::fs::read_dir(&dir).map_or(true, |mut it| it.next().is_none());
+        if empty {
+            match render::export_student_sprites(&dir) {
+                Ok(n) => self.set_toast(format!("지금 그림 {n}장을 풀었어요 — 고친 뒤 새로고침")),
+                Err(e) => self.set_toast(format!("본보기를 못 풀었어요: {e}")),
+            }
         }
+        open_path(&dir);
     }
 
     /// characters.json(사용자 override 슬롯)을 기본 앱으로 연다. 아직 없으면
@@ -435,8 +490,16 @@ impl App {
     fn refresh_student_assets(&mut self) {
         if let Some(g) = self.gpu.as_mut() {
             g.drop_images_with_prefix("student:");
+            // 테마 카드 미리보기는 키가 갈려 있어 위 한 줄로는 안 걷힌다 — 남겨
+            // 두면 그림을 갈아 끼운 테마의 카드만 옛 얼굴로 남는다.
+            g.drop_images_with_prefix("theme:");
             g.drop_image("schale:logo");
         }
+        // 이 버튼의 뜻이 곧 "파일을 다시 봐라"다. 손으로 폴더를 넣거나 지운 경우는
+        // 캐시가 알 길이 없으니, 목록 자체도 여기서 함께 다시 읽는다.
+        socket::invalidate_theme_rows();
+        kasa_mcp::character::invalidate_active_theme();
+        theme::invalidate_roster();
         self.repaint_all();
     }
 
@@ -459,6 +522,8 @@ impl App {
         socket::write_setting("character_theme", serde_json::Value::String(id));
         kasa_mcp::character::invalidate_active_theme();
         theme::invalidate_roster();
+        // 목록의 "쓰는 중" 배지가 어느 카드에 붙는지가 여기서 바뀐다.
+        socket::invalidate_theme_rows();
         self.students_selected = None;
         self.students_persona.clear();
         self.students_caret = 0;
@@ -472,14 +537,83 @@ impl App {
     /// 복제한 테마를 곧바로 활성화하지는 않는다 — 내용이 번들과 똑같아서, 켜 봤자
     /// 아무것도 안 바뀐 것처럼만 보인다. 편집하고 나서 고르는 순서가 맞다.
     fn export_theme(&mut self) {
-        match socket::export_current_theme() {
+        match socket::create_theme("") {
             Ok(dir) => {
+                socket::invalidate_theme_rows();
                 let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("theme").to_string();
-                open_path(&dir);
-                self.set_toast(format!("'{name}' 으로 복제했어요 — 고쳐서 고르세요"));
+                // 만들자마자 이름 칸에 포커스를 준다 — 새 테마에서 사용자가 제일
+                // 먼저 하려는 게 이름 짓기고, 안 그러면 `my-theme` 이 그대로 굳는다.
+                self.focus_theme_label(name.clone());
+                self.set_toast(format!("'{name}' 을 만들었어요 — 이름부터 지으세요"));
             }
-            Err(e) => self.set_toast(format!("복제 실패: {e}")),
+            Err(e) => self.set_toast(format!("새 테마를 못 만들었어요: {e}")),
         }
+    }
+
+    fn open_theme_dir(&mut self, id: &str) {
+        match socket::theme_dir(id) {
+            Some(d) => open_path(&d),
+            // 번들은 폴더가 없다(그림이 바이너리 안에 있다) — 여기서 조용히
+            // 아무것도 안 하면 버튼이 고장 난 것으로 읽히므로 갈 길을 알려 준다.
+            None => self.set_toast("기본 테마는 폴더가 없어요 — 새 테마를 만들면 생겨요".into()),
+        }
+    }
+
+    /// 테마를 목록에서 치운다. 지우던 게 지금 쓰는 테마면 번들로 되돌린다 —
+    /// 안 그러면 없는 폴더를 가리킨 채로 남아, 화면은 번들인데 설정은 사라진
+    /// 테마 이름을 보여 주는 어긋난 상태가 된다.
+    fn delete_theme(&mut self, id: &str) {
+        match socket::delete_theme(id) {
+            Ok(dest) => {
+                socket::invalidate_theme_rows();
+                if socket::read_character_theme() == id {
+                    self.select_theme(String::new());
+                }
+                if self.theme_label_edit.as_ref().is_some_and(|(t, _)| t == id) {
+                    self.theme_label_edit = None;
+                    self.settings_input = None;
+                }
+                kasa_mcp::character::invalidate_active_theme();
+                let where_to = dest.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str())
+                    .unwrap_or("_trash").to_string();
+                self.set_toast(format!("치웠어요 — 지운 건 아니고 {where_to}/ 에 있어요"));
+            }
+            Err(e) => self.set_toast(format!("못 치웠어요: {e}")),
+        }
+    }
+
+    /// 테마 이름 칸에 포커스를 준다 — 지금 이름을 버퍼로 읽어 온다.
+    fn focus_theme_label(&mut self, id: String) {
+        // 다른 테마를 고치던 중이었으면 그것부터 굳힌다. 안 그러면 버퍼가 새 테마
+        // 것으로 갈아 끼워지면서 앞에서 친 이름이 어디에도 안 남고 사라진다.
+        self.flush_theme_label();
+        let label = self
+            .settings_snapshot_themes()
+            .into_iter()
+            .find(|(t, _)| *t == id)
+            .map(|(_, l)| l)
+            .unwrap_or_else(|| id.clone());
+        self.settings_caret = label.chars().count();
+        self.theme_label_edit = Some((id, label));
+        self.settings_input = Some(SettingsInput::ThemeLabel);
+    }
+
+    /// 편집 중이던 테마 이름을 그 테마의 `theme.json` 에 굳힌다.
+    pub(crate) fn flush_theme_label(&mut self) {
+        let Some((id, label)) = self.theme_label_edit.clone() else { return };
+        if let Err(e) = socket::rename_theme(&id, &label) {
+            self.set_toast(format!("이름을 못 바꿨어요: {e}"));
+            return;
+        }
+        // 목록 표시명은 활성 테마 해석과 같은 캐시를 타므로 함께 비워야 한다.
+        kasa_mcp::character::invalidate_active_theme();
+        socket::invalidate_theme_rows();
+        self.theme_label_edit = None;
+    }
+
+    /// 테마 목록 `(폴더 id, 표시명)` — 번들은 목록에 없다(폴더가 없어서).
+    fn settings_snapshot_themes(&self) -> Vec<(String, String)> {
+        kasa_mcp::character::list_themes()
     }
 
     /// Build the render snapshot for the settings paint. `area` is the logical
@@ -487,6 +621,7 @@ impl App {
     /// `cursor` is that window's local cursor — both supplied by the caller so
     /// this stays a pure `&self` snapshot taken outside any gpu borrow.
     pub(crate) fn settings_snapshot(&self, area: Rect, cursor: (f32, f32)) -> SettingsCtx {
+        let s = socket::read_settings();
         SettingsCtx {
             area,
             cat: self.settings_cat,
@@ -503,7 +638,9 @@ impl App {
             caret_on: self.last_blink_on,
             scroll: self.settings_scroll,
             theme: theme::theme_name().to_string(),
-            has_custom_theme: socket::read_settings().get("custom_theme").is_some(),
+            has_custom_theme: s.get("custom_theme").is_some(),
+            palette_edit: self.set_palette_edit.clone(),
+            palette_hex: palette_hex_list(&s),
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             font_size: self.font_size,
@@ -532,8 +669,9 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default(),
-            themes: kasa_mcp::character::list_themes(),
+            themes: socket::theme_rows(),
             theme_active: socket::read_character_theme(),
+            theme_label_edit: self.theme_label_edit.clone(),
             settings_caret: self.settings_caret,
             student_selected: self.students_selected.clone(),
             student_persona: self.students_persona.clone(),
@@ -585,6 +723,7 @@ impl App {
             // just drops text focus; clicks land here only while the screen is
             // open, so this never eats terminal input.
             self.flush_student_persona();
+            self.flush_theme_label();
             self.settings_input = None;
             self.chrome_dirty = true;
             return true;
@@ -705,6 +844,41 @@ impl App {
                 theme::set_theme(m);
                 socket::write_setting("theme", serde_json::Value::String(m.to_string()));
                 self.repaint_all();
+            }
+            SettingsAction::StartCustomTheme => {
+                // 이미 편집하던 custom_theme 이 있으면 그대로 이어 간다 — 입구
+                // 버튼을 다시 눌렀다고 하던 편집이 날아가면 안 된다. 리셋은
+                // ResetCustomTheme 이 따로 맡는다.
+                if socket::read_settings().get("custom_theme").is_none() {
+                    let base = if theme::theme_name() == "system" {
+                        theme::system_theme_key()
+                    } else {
+                        theme::theme_name()
+                    };
+                    socket::write_setting("custom_theme", theme::custom_theme_seed(base));
+                }
+                self.begin_theme_fx();
+                theme::set_theme("custom");
+                socket::write_setting("theme", serde_json::Value::String("custom".to_string()));
+                self.repaint_all();
+            }
+            SettingsAction::ResetCustomTheme => {
+                let base = socket::read_settings()
+                    .get("custom_theme")
+                    .and_then(|o| o.get("base"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("dark")
+                    .to_string();
+                socket::write_setting("custom_theme", theme::custom_theme_seed(&base));
+                self.settings_input = None;
+                self.begin_theme_fx();
+                theme::set_theme("custom");
+                self.repaint_all();
+            }
+            SettingsAction::FocusPaletteHex(i) => {
+                self.set_palette_edit = self.palette_hex_at(i);
+                self.settings_caret = self.set_palette_edit.chars().count();
+                self.settings_input = Some(SettingsInput::PaletteHex(i));
             }
             SettingsAction::Accent(name) => {
                 theme::set_accent(&name);
@@ -883,6 +1057,9 @@ impl App {
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
             SettingsAction::SelectTheme(id) => self.select_theme(id),
             SettingsAction::ExportTheme => self.export_theme(),
+            SettingsAction::OpenThemeDir(id) => self.open_theme_dir(&id),
+            SettingsAction::DeleteTheme(id) => self.delete_theme(&id),
+            SettingsAction::FocusThemeLabel(id) => self.focus_theme_label(id),
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
             SettingsAction::FocusFeedbackBody => {
                 self.feedback_caret = self.feedback_body.chars().count();
@@ -957,6 +1134,13 @@ impl App {
                     Some(a) => &mut a.label,
                     None => return true,
                 },
+                SettingsInput::PaletteHex(_) => &mut self.set_palette_edit,
+                // 계정 라벨과 같은 이유로 대상이 사라졌을 수 있다(다른 곳에서
+                // 테마를 지웠거나 폴더가 없어졌거나) — 그땐 키를 삼키고 흘린다.
+                SettingsInput::ThemeLabel => match self.theme_label_edit.as_mut() {
+                    Some((_, buf)) => buf,
+                    None => return true,
+                },
                 SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
                     unreachable!("multiline_key 가 먼저 가로챈다")
                 }
@@ -1010,7 +1194,20 @@ impl App {
             self.settings_input = None;
         }
         if changed {
-            self.settings_save();
+            // 팔레트 hex 는 settings_save 대상이 아니다 — 버퍼가 App 설정 필드가
+            // 아니라서 저장할 곳이 custom_theme 쪽이고, 완성된 값만 나간다.
+            if let SettingsInput::PaletteHex(i) = field {
+                self.apply_palette_edit(i);
+            } else if field != SettingsInput::ThemeLabel {
+                // 테마 이름만 여기서 빠진다 — 그 값은 settings.json 이 아니라 79명치
+                // 로스터가 든 theme.json 에 사는데, 매 키마다 그 파일을 통째로 읽고
+                // 다시 쓰면 타이핑이 눈에 띄게 끌린다. 화면엔 편집 버퍼가 그대로
+                // 보이므로 파일에 굳히는 건 blur·Enter 한 번이면 된다.
+                self.settings_save();
+            }
+        }
+        if (blur || commit) && field == SettingsInput::ThemeLabel {
+            self.flush_theme_label();
         }
         if commit {
             self.set_toast("저장됐어요".to_string());
@@ -1139,6 +1336,11 @@ impl App {
                 Some(a) => &mut a.label,
                 None => return,
             },
+            SettingsInput::PaletteHex(_) => &mut self.set_palette_edit,
+            SettingsInput::ThemeLabel => match self.theme_label_edit.as_mut() {
+                Some((_, buf)) => buf,
+                None => return,
+            },
             SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
                 unreachable!("multiline_key 가 먼저 가로챈다")
             }
@@ -1149,8 +1351,52 @@ impl App {
         for ch in text.chars() {
             textedit::insert(buf, caret, ch);
         }
-        self.settings_save();
+        if let SettingsInput::PaletteHex(i) = field {
+            self.apply_palette_edit(i);
+        } else {
+            self.settings_save();
+        }
         self.chrome_dirty = true;
+    }
+
+    /// 팔레트 칸 `i` 의 지금 유효값(#rrggbb) — custom_theme 에 적힌 값, 없으면
+    /// base 프리셋 값. 포커스 시드·리스트 표시가 같은 곳을 읽어야 「눌렀더니
+    /// 다른 값이 뜨는」 어긋남이 없다.
+    fn palette_hex_at(&self, i: usize) -> String {
+        palette_hex_list(&socket::read_settings())
+            .into_iter()
+            .nth(i)
+            .unwrap_or_else(|| "#000000".to_string())
+    }
+
+    /// 팔레트 hex 버퍼를 검증해 custom_theme 에 반영하고 즉시 다시 칠한다.
+    /// 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친 값으로
+    /// 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
+    fn apply_palette_edit(&mut self, i: usize) {
+        let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
+        let s = socket::read_settings();
+        let mut obj = match s.get("custom_theme").cloned() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let hex = theme::hex_str(c);
+        let n = theme::PALETTE_KEYS.len();
+        if i < n {
+            obj.insert(theme::PALETTE_KEYS[i].0.to_string(), serde_json::Value::String(hex));
+        } else {
+            // ansi 배열이 없거나 짧을 수 있다 — 지금 유효값으로 16칸을 다 채운
+            // 뒤 한 칸만 바꾼다. 부분 배열을 그대로 두면 인덱스가 어긋난다.
+            let list = palette_hex_list(&s);
+            let mut arr: Vec<serde_json::Value> = (0..16)
+                .map(|k| serde_json::Value::String(list[n + k].clone()))
+                .collect();
+            let j = (i - n).min(15);
+            arr[j] = serde_json::Value::String(hex);
+            obj.insert("ansi".to_string(), serde_json::Value::Array(arr));
+        }
+        socket::write_setting("custom_theme", serde_json::Value::Object(obj));
+        theme::set_theme("custom");
+        self.repaint_all();
     }
 
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로
@@ -1573,10 +1819,132 @@ pub(crate) fn paint_settings(
                 card(g, &mut rects, key, label, Some(pal));
             }
             if ctx.has_custom_theme {
-                card(g, &mut rects, "custom", "Custom (settings.json)", None);
+                card(g, &mut rects, "custom", "Custom", None);
             }
             let rows = idx.div_ceil(per_row);
             y += rows as f32 * (card_h + gap) + 12.0;
+            // 팔레트 — 프리셋을 복제해 색을 한 칸씩 고치는 자리(2026-08-13 지시:
+            // 라이트가 너무 밝다 → 팔레트 커스텀). custom 테마일 때만 편집 칸이
+            // 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래 색으로 돌아갈 길이
+            // 없다: 프리셋은 불변, 편집은 복제본에.
+            if ctx.theme == "custom" {
+                y = row_wide(g, fx, y, clip, "Palette",
+                    &["칸을 눌러 #rrggbb 를 치면 여섯 자리가 완성되는 즉시 적용돼요"]);
+                let n = theme::PALETTE_KEYS.len();
+                let (cw, ch, pgap) = (294.0_f32, 30.0_f32, 8.0_f32);
+                for (i, (key, _)) in theme::PALETTE_KEYS.iter().enumerate() {
+                    let x = fx + (i % 2) as f32 * (cw + pgap);
+                    let cy = y + (i / 2) as f32 * (ch + pgap);
+                    if cy <= clip {
+                        continue;
+                    }
+                    let r = (x, cy, cw, ch);
+                    let focused = ctx.input == Some(SettingsInput::PaletteHex(i));
+                    let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    if hover && !focused {
+                        round_rect(g, x, cy, cw, ch, theme::radius_sm(), theme::surface_hover());
+                    }
+                    let hex = ctx.palette_hex.get(i).map(String::as_str).unwrap_or("#000000");
+                    let c = theme::parse_hex(hex).unwrap_or([0, 0, 0]);
+                    // 견본이 배경과 같은 색일 수 있어 테두리 판을 깔고 색을 얹는다.
+                    round_rect(g, x + 4.0, cy + 5.0, 20.0, 20.0, 5.0, theme::border());
+                    round_rect(g, x + 5.0, cy + 6.0, 18.0, 18.0, 4.0, [c[0], c[1], c[2], 255]);
+                    g.draw_text(
+                        x + 34.0, cy + 8.0, key,
+                        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                    );
+                    let fr = (x + cw - 96.0, cy + 3.0, 92.0, 24.0);
+                    if focused {
+                        text_field(g, fr, &ctx.palette_edit, ctx.settings_caret, true, ctx.caret_on, ctx.cursor, &ctx.preedit);
+                    } else {
+                        g.draw_text(
+                            fr.0 + 6.0, cy + 8.0, hex,
+                            gpu::DrawOpts { font_size: 12.5, color: theme::text_dim(), bold: false, italic: false },
+                        );
+                    }
+                    rects.push((SettingsAction::FocusPaletteHex(i), r));
+                }
+                y += n.div_ceil(2) as f32 * (ch + pgap) + 4.0;
+                y = row_wide(g, fx, y, clip, "Terminal ANSI",
+                    &["터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)"]);
+                let sz = 30.0_f32;
+                for j in 0..16usize {
+                    let x = fx + (j % 8) as f32 * (sz + pgap);
+                    let cy = y + (j / 8) as f32 * (sz + pgap);
+                    if cy <= clip {
+                        continue;
+                    }
+                    let r = (x, cy, sz, sz);
+                    let pi = n + j;
+                    let focused = ctx.input == Some(SettingsInput::PaletteHex(pi));
+                    let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    if focused || hover {
+                        let ring = if focused { theme::accent() } else { theme::surface_hover() };
+                        round_rect(g, x - 2.0, cy - 2.0, sz + 4.0, sz + 4.0, theme::radius_sm() + 2.0, ring);
+                    }
+                    let hex = ctx.palette_hex.get(pi).map(String::as_str).unwrap_or("#000000");
+                    let c = theme::parse_hex(hex).unwrap_or([0, 0, 0]);
+                    round_rect(g, x, cy, sz, sz, theme::radius_sm(), theme::border());
+                    round_rect(g, x + 1.0, cy + 1.0, sz - 2.0, sz - 2.0, (theme::radius_sm() - 1.0).max(0.0), [c[0], c[1], c[2], 255]);
+                    rects.push((SettingsAction::FocusPaletteHex(pi), r));
+                }
+                y += 2.0 * (sz + pgap) + 4.0;
+                // ANSI 그리드 안엔 글자 자리가 없다 — 고른 칸의 편집 필드를 아래
+                // 한 줄로 공유한다(어느 칸인지는 인덱스 라벨과 accent 링이 말한다).
+                if let Some(SettingsInput::PaletteHex(pi)) = ctx.input {
+                    if pi >= n {
+                        if y > clip {
+                            g.draw_text(
+                                fx, y + 6.0, &format!("ansi {}", pi - n),
+                                gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+                            );
+                            let fr = (fx + 64.0, y, 110.0, 26.0);
+                            text_field(g, fr, &ctx.palette_edit, ctx.settings_caret, true, ctx.caret_on, ctx.cursor, &ctx.preedit);
+                            rects.push((SettingsAction::FocusPaletteHex(pi), fr));
+                        }
+                        y += 26.0 + pgap;
+                    }
+                }
+                if y > clip {
+                    let label = "베이스 값으로 되돌리기";
+                    let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                    let r = (fx, y, bw, 30.0);
+                    let hov = inside(r, ctx.cursor);
+                    g.hover_pointer |= hov;
+                    round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
+                        if hov { theme::surface_hover() } else { theme::surface_active() });
+                    g.draw_text(
+                        r.0 + 14.0, r.1 + 7.0, label,
+                        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                    );
+                    rects.push((SettingsAction::ResetCustomTheme, r));
+                }
+                y += 30.0 + 12.0;
+            } else {
+                y = row_wide(g, fx, y, clip, "Palette",
+                    &["지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 (custom_theme 으로 저장)"]);
+                if y > clip {
+                    let label = if ctx.has_custom_theme {
+                        "커스텀 팔레트 이어서 편집"
+                    } else {
+                        "지금 테마를 복제해 시작"
+                    };
+                    let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                    let r = (fx, y, bw, 30.0);
+                    let hov = inside(r, ctx.cursor);
+                    g.hover_pointer |= hov;
+                    round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
+                        if hov { theme::surface_hover() } else { theme::surface_active() });
+                    g.draw_text(
+                        r.0 + 14.0, r.1 + 7.0, label,
+                        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                    );
+                    rects.push((SettingsAction::StartCustomTheme, r));
+                }
+                y += 30.0 + 12.0;
+            }
             // 형태 — 팔레트와 독립된 축. 각 카드가 *자기* 실루엣으로 그려진다
             // (모서리 반경 · 테두리 두께 · 그림자 · 점과 캡슐의 둥글기) — 테마
             // 카드가 팔레트를 미리 보여주는 것과 같은 규칙이라, 고르기 전에
@@ -2047,35 +2415,127 @@ pub(crate) fn paint_settings(
             // ── 테마 고르기 ──────────────────────────────────────────────
             y = row_wide(g, fx, y, clip, "Theme",
                 &["폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다"]);
-            // 번들을 맨 앞에 세운다 — 폴더가 없어 list_themes 에 안 잡히지만
-            // 「지금 무엇을 쓰는가」는 목록에 보여야 고를 수 있다.
-            let theme_rows: Vec<(&str, &str)> = std::iter::once(("", "블루 아카이브 (기본)"))
-                .chain(ctx.themes.iter().map(|(id, label)| (id.as_str(), label.as_str())))
-                .collect();
-            let row_h = 30.0_f32;
-            for (id, label) in theme_rows {
-                if y > clip {
-                    // 카드 안에선 라벨 왼쪽선에 맞춘다 — 목록만 밖으로 튀어나오면
-                    // 선택 박스가 카드에서 새어 나온 것처럼 보인다.
-                    let r = (fx, y - 2.0, fw.min(380.0), row_h);
-                    let selected = ctx.theme_active == id;
-                    let hover = inside(r, ctx.cursor);
-                    g.hover_pointer |= hover;
-                    if selected {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_active());
-                        g.rect(r.0, r.1 + 5.0, 2.0, r.3 - 10.0, theme::accent());
-                    } else if hover {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
-                    }
-                    g.draw_text(
-                        fx + 10.0, y, label,
-                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
-                    );
-                    rects.push((SettingsAction::SelectTheme(id.to_string()), r));
+            // 카드 격자. 얼굴이 보여야 고를 수 있다 — 이름만 늘어놓은 목록은
+            // "이터널리턴" 이 무슨 그림인지 켜 보기 전엔 알 수 없다.
+            let cols = (((fw + THEME_GAP) / (THEME_CARD_W + THEME_GAP)).floor() as usize).max(1);
+            let row_top = y;
+            for (i, t) in ctx.themes.iter().enumerate() {
+                let cx0 = fx + (i % cols) as f32 * (THEME_CARD_W + THEME_GAP);
+                let cy0 = row_top + (i / cols) as f32 * (THEME_CARD_H + THEME_GAP);
+                y = cy0 + THEME_CARD_H;
+                if cy0 + THEME_CARD_H <= clip {
+                    continue;
                 }
-                y += row_h;
+                let card = (cx0, cy0, THEME_CARD_W, THEME_CARD_H);
+                let selected = ctx.theme_active == t.id;
+                let hover = inside(card, ctx.cursor);
+                g.hover_pointer |= hover;
+                round_rect(
+                    g, card.0, card.1, card.2, card.3, theme::radius_md(),
+                    if selected || hover { theme::surface_active() } else { theme::surface() },
+                );
+                if selected {
+                    // 왼쪽 띠 하나로 "이걸 쓰는 중"을 말한다 — 체크 아이콘을 얹으면
+                    // 얼굴 미리보기를 가린다.
+                    g.rect(card.0, card.1 + 8.0, 3.0, card.3 - 16.0, theme::accent());
+                }
+                // 미리보기 얼굴 — 셋이 겹치지 않게 나란히.
+                let mut face_x = cx0 + 14.0;
+                for (slug, src) in &t.faces {
+                    render::draw_theme_face(
+                        g, &t.id, slug, src.as_deref(),
+                        face_x, cy0 + 10.0, THEME_FACE_W, THEME_FACE_H,
+                    );
+                    face_x += THEME_FACE_W + 4.0;
+                }
+                let name_y = cy0 + THEME_CARD_H - 46.0;
+                let editing = ctx.theme_label_edit.as_ref().filter(|(id, _)| *id == t.id);
+                match editing {
+                    Some((_, buf)) => {
+                        let r = (cx0 + 12.0, name_y - 4.0, THEME_CARD_W - 24.0, 26.0);
+                        let focused = ctx.input == Some(SettingsInput::ThemeLabel);
+                        text_field(
+                            g, r, buf, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor,
+                            if focused { &ctx.preedit } else { "" },
+                        );
+                        rects.push((SettingsAction::FocusThemeLabel(t.id.clone()), r));
+                    }
+                    None => {
+                        g.draw_text(
+                            cx0 + 14.0, name_y, &t.label,
+                            gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
+                        );
+                    }
+                }
+                let sub = if selected {
+                    format!("{}명 · 쓰는 중", t.count)
+                } else {
+                    format!("{}명", t.count)
+                };
+                g.draw_text(
+                    cx0 + 14.0, cy0 + THEME_CARD_H - 24.0, &sub,
+                    gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+                );
+                // 관리 버튼은 hover 일 때만. 늘 떠 있으면 카드 열두 장에 버튼이
+                // 서른여섯 개라 정작 "고르기"가 안 보인다. 번들은 폴더도 없고
+                // 지울 수도 없어 버튼 자체를 안 그린다.
+                if hover && !t.id.is_empty() {
+                    let mut bx = cx0 + THEME_CARD_W - 12.0;
+                    for (label, action) in [
+                        ("치우기", SettingsAction::DeleteTheme(t.id.clone())),
+                        ("폴더", SettingsAction::OpenThemeDir(t.id.clone())),
+                        ("이름", SettingsAction::FocusThemeLabel(t.id.clone())),
+                    ] {
+                        let w = g.measure_chrome_text(label, 11.0, false) + 16.0;
+                        bx -= w;
+                        let r = (bx, cy0 + THEME_CARD_H - 50.0, w, 22.0);
+                        let bh = inside(r, ctx.cursor);
+                        round_rect(
+                            g, r.0, r.1, r.2, r.3, theme::radius_sm(),
+                            if bh { theme::surface_hover() } else { theme::panel_bg() },
+                        );
+                        g.draw_text(
+                            r.0 + 8.0, r.1 + 5.0, label,
+                            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+                        );
+                        // 카드보다 **먼저** 담아야 이긴다 — hit-test 가 첫 매치를 쓴다.
+                        rects.push((action, r));
+                        bx -= 4.0;
+                    }
+                }
+                rects.push((SettingsAction::SelectTheme(t.id.clone()), card));
             }
-            y += 12.0;
+            // 「+ 새 테마」도 같은 격자의 한 칸 — 목록 밖 버튼으로 빼면 테마가
+            // 늘어날수록 멀어져서, 정작 만들려는 사람이 못 찾는다.
+            {
+                let i = ctx.themes.len();
+                let cx0 = fx + (i % cols) as f32 * (THEME_CARD_W + THEME_GAP);
+                let cy0 = row_top + (i / cols) as f32 * (THEME_CARD_H + THEME_GAP);
+                y = y.max(cy0 + THEME_CARD_H);
+                if cy0 + THEME_CARD_H > clip {
+                    let card = (cx0, cy0, THEME_CARD_W, THEME_CARD_H);
+                    let hover = inside(card, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    round_rect(
+                        g, card.0, card.1, card.2, card.3, theme::radius_md(),
+                        if hover { theme::surface_hover() } else { theme::panel_bg() },
+                    );
+                    let label = "+ 새 테마";
+                    let lw = g.measure_chrome_text(label, 14.0, true);
+                    g.draw_text(
+                        cx0 + (THEME_CARD_W - lw) * 0.5, cy0 + THEME_CARD_H * 0.5 - 16.0, label,
+                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
+                    );
+                    let hint = "지금 것을 복제해 시작해요";
+                    let hw = g.measure_chrome_text(hint, 11.0, false);
+                    g.draw_text(
+                        cx0 + (THEME_CARD_W - hw) * 0.5, cy0 + THEME_CARD_H * 0.5 + 6.0, hint,
+                        gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                    rects.push((SettingsAction::ExportTheme, card));
+                }
+            }
+            y += 20.0;
 
             // ── 페르소나를 쓸지 ──────────────────────────────────────────
             // 「테마로만 쓸지, 말투까지 쓸지」 — 이 스위치가 그 갈림길이라 테마
@@ -2124,45 +2584,64 @@ pub(crate) fn paint_settings(
                 }
             }
             y += 34.0 + 12.0;
-            y = row_wide(g, fx, y, clip, "Characters", &["캐릭터를 눌러 성격(persona)을 바로 편집하세요"]);
-            // 색 점 + 이름 + slug 한 줄, 행 전체가 클릭 대상(→ persona 편집). 실제
-            // 프사·전신은 statusline·배너에서 보인다(설정 오버레이는 배경 rect 가
-            // 이미지 z-order 를 가려 인라인 썸네일이 안 뜸). 스크롤로 전 인원 도달.
-            let row_h = 30.0_f32;
-            for (name, slug) in &ctx.characters {
-                if y > clip {
-                    // 테마 목록과 같은 이유로 카드 안 라벨 왼쪽선에 맞춘다 — 바로 위
-                    // 목록만 고치면 두 목록의 선택 박스가 서로 어긋난다.
-                    let r = (fx, y - 2.0, fw.min(380.0), row_h);
-                    let selected = ctx.student_selected.as_deref() == Some(name.as_str());
-                    let hover = inside(r, ctx.cursor);
-                    g.hover_pointer |= hover;
-                    if selected {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_active());
-                    } else if hover {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
-                    }
-                    // 내용은 박스 왼쪽선에서 10px 들여쓴다 — 테마 목록의 라벨과 같은
-                    // 값이다. 박스를 fx 로 당긴 뒤 점을 fx 에 두면 선택·hover 때 점이
-                    // 박스 경계에 물려 잘린 것처럼 보인다.
-                    let sw = theme::character_accent(name).unwrap_or([128, 128, 128, 255]);
-                    round_rect(g, fx + 10.0, y + 3.0, 14.0, 14.0, theme::radius_sm(), sw);
-                    g.draw_text(
-                        fx + 34.0, y, name,
-                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
-                    );
-                    let nw = g.measure_chrome_text(name, 14.0, false);
-                    g.draw_text(
-                        fx + 34.0 + nw + 12.0, y + 2.0, slug.unwrap_or("(에셋 없음)"),
-                        gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
-                    );
-                    rects.push((SettingsAction::SelectStudent(name.clone()), r));
+            y = row_wide(g, fx, y, clip, "Characters",
+                &[&format!("{}명 — 캐릭터를 눌러 성격과 그림을 고치세요", ctx.characters.len())]);
+            // 얼굴이 붙은 카드 격자. 한 줄짜리 색 점 목록이던 것을 바꾼 이유는
+            // 단순하다 — 79명 중 하나를 고르는 데 이름만 읽어서는 못 찾는다.
+            let scols = (((fw + STU_GAP) / (STU_CARD_W + STU_GAP)).floor() as usize).max(1);
+            let srow_top = y;
+            for (i, (name, slug)) in ctx.characters.iter().enumerate() {
+                let cx0 = fx + (i % scols) as f32 * (STU_CARD_W + STU_GAP);
+                let cy0 = srow_top + (i / scols) as f32 * (STU_CARD_H + STU_GAP);
+                y = cy0 + STU_CARD_H;
+                if cy0 + STU_CARD_H <= clip {
+                    continue;
                 }
-                y += row_h;
+                let card = (cx0, cy0, STU_CARD_W, STU_CARD_H);
+                let selected = ctx.student_selected.as_deref() == Some(name.as_str());
+                let hover = inside(card, ctx.cursor);
+                g.hover_pointer |= hover;
+                round_rect(
+                    g, card.0, card.1, card.2, card.3, theme::radius_md(),
+                    if selected || hover { theme::surface_active() } else { theme::surface() },
+                );
+                let accent = theme::character_accent(name).unwrap_or([128, 128, 128, 255]);
+                if selected {
+                    // 강조는 그 캐릭터의 색으로 — 어느 색이 누구 것인지 여기서 배운다.
+                    g.rect(cx0, cy0 + STU_CARD_H - 3.0, STU_CARD_W, 3.0, accent);
+                }
+                if !render::draw_student_face(
+                    g, name, cx0 + (STU_CARD_W - STU_FACE_W) * 0.5, cy0 + 8.0, STU_FACE_W,
+                ) {
+                    // 그림이 없는 캐릭터는 색 판으로 자리를 지킨다 — 칸을 비우면
+                    // 격자에 구멍이 뚫려 목록이 끊긴 것처럼 보인다.
+                    round_rect(
+                        g, cx0 + (STU_CARD_W - 34.0) * 0.5, cy0 + 8.0 + (STU_FACE_W - 34.0) * 0.5,
+                        34.0, 34.0, theme::radius_sm(), accent,
+                    );
+                }
+                let nw = g.measure_chrome_text(name, 13.0, selected);
+                g.draw_text(
+                    cx0 + (STU_CARD_W - nw) * 0.5, cy0 + STU_CARD_H - 34.0, name,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: selected, italic: false },
+                );
+                let sl = slug.unwrap_or("에셋 없음");
+                let sw = g.measure_chrome_text(sl, 10.0, false);
+                g.draw_text(
+                    cx0 + (STU_CARD_W - sw) * 0.5, cy0 + STU_CARD_H - 17.0, sl,
+                    gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+                );
+                rects.push((SettingsAction::SelectStudent(name.clone()), card));
             }
-            // 선택된 캐릭터의 persona 멀티라인 편집기 — 줄 단위 클립.
+            // 고른 캐릭터의 편집 패널 — persona 와 "이 캐릭터의 그림 파일명".
             if let Some(sel) = &ctx.student_selected {
-                y += 12.0;
+                y += 20.0;
+                let slug = ctx
+                    .characters
+                    .iter()
+                    .find(|(n, _)| n == sel)
+                    .and_then(|(_, s)| *s)
+                    .unwrap_or("");
                 y = row_wide(g, fx, y, clip, &format!("{sel} · persona"),
                     &["성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
                 y += multiline_field(
@@ -2170,6 +2649,21 @@ pub(crate) fn paint_settings(
                     ctx.student_caret, SettingsInput::StudentPersona,
                     SettingsAction::FocusStudentPersona, clip,
                 );
+                if !slug.is_empty() {
+                    y += 12.0;
+                    // 전체 규칙(위 Character images)이 아니라 **이 캐릭터의 실제
+                    // 파일명**을 적는다 — `<slug>` 를 자기 이름으로 바꿔 적는 그
+                    // 한 단계에서 사람은 틀린다.
+                    y = row_wide(g, fx, y, clip, &format!("{sel} 그림 바꾸기"),
+                        &[&format!("{slug}-0..3.png · {slug}-walk-0..5.png · {slug}-wave-0..3.png · {slug}-cheer-0..3.png · {slug}-profile.png")]);
+                    if y > clip {
+                        let r = chip(g, fx, y, "이 폴더에 넣기", ctx.cursor);
+                        rects.push((SettingsAction::OpenStudentsDir, r));
+                        let r2 = chip(g, fx + r.2 + 8.0, y, "새로고침", ctx.cursor);
+                        rects.push((SettingsAction::RefreshStudentAssets, r2));
+                    }
+                    y += 34.0;
+                }
             }
             content_bottom = y;
         }
@@ -3006,6 +3500,44 @@ fn row2(
     }
     let cr = (x + w - ctrl.0, y + (h - ctrl.1) / 2.0, ctrl.0, ctrl.1);
     (cr, y + h)
+}
+
+/// custom_theme 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개 뒤에
+/// ANSI 16개. 파일에 적힌(파싱되는) 값이 우선이고, 없는 키는 base 프리셋 값.
+/// 포커스 시드(`palette_hex_at`)·화면 표시·ansi 배열 재구성이 전부 이 하나를
+/// 읽어야 「누른 칸과 뜬 값이 다른」 어긋남이 없다.
+fn palette_hex_list(s: &serde_json::Value) -> Vec<String> {
+    let obj = s.get("custom_theme");
+    let base_key = obj
+        .and_then(|o| o.get("base"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("dark");
+    let (_, _, base) = theme::THEME_PRESETS
+        .iter()
+        .find(|(k, _, _)| *k == base_key)
+        .unwrap_or(&theme::THEME_PRESETS[0]);
+    let mut out = Vec::with_capacity(theme::PALETTE_KEYS.len() + 16);
+    for (key, get) in theme::PALETTE_KEYS {
+        let c = obj
+            .and_then(|o| o.get(*key))
+            .and_then(|x| x.as_str())
+            .and_then(theme::parse_hex)
+            .unwrap_or_else(|| {
+                let c = get(base);
+                [c[0], c[1], c[2]]
+            });
+        out.push(theme::hex_str(c));
+    }
+    let arr = obj.and_then(|o| o.get("ansi")).and_then(|x| x.as_array());
+    for j in 0..16 {
+        let c = arr
+            .and_then(|a| a.get(j))
+            .and_then(|x| x.as_str())
+            .and_then(theme::parse_hex)
+            .unwrap_or(base.ansi[j]);
+        out.push(theme::hex_str(c));
+    }
+    out
 }
 
 /// 두 칸에 안 담기는 항목(계정 목록·긴 텍스트 필드처럼 폭을 다 쓰는 것)의 머리.

@@ -1852,6 +1852,21 @@ impl App {
                 eprintln!("[autosettings] 테마 전환 → '{id}'");
                 self.settings_apply(SettingsAction::SelectTheme(id));
             }
+            // 팔레트 편집 딥링크 — 복제 입구를 누른 뒤의 편집 그리드를 캡처한다.
+            // 이 화면은 custom 테마일 때만 열려서, 이 손잡이 없이는 캡처 한 장에
+            // 클릭이 한 번 끼어야 한다.
+            "start-custom-theme" => {
+                eprintln!("[autosettings] 커스텀 팔레트 시작");
+                self.settings_apply(SettingsAction::StartCustomTheme);
+            }
+            // `focus-palette:<i>` — 팔레트 칸 i 의 hex 필드가 포커스된 상태.
+            a if a.starts_with("focus-palette:") => {
+                if let Ok(i) = a.trim_start_matches("focus-palette:").parse::<usize>() {
+                    eprintln!("[autosettings] 팔레트 칸 {i} 포커스");
+                    self.settings_apply(SettingsAction::StartCustomTheme);
+                    self.settings_apply(SettingsAction::FocusPaletteHex(i));
+                }
+            }
             other => eprintln!("[autosettings] 모르는 액션 '{other}'"),
         }
         // 설정은 **별도 OS 창**이라 `KASATERM_AUTOCAPTURE`(메인 창 전용)로는 한 장도
