@@ -4067,6 +4067,58 @@ impl App {
                 // for whole-tree search hits (file_tree_search_collect), empty
                 // restores the expanded tree. So just render it as-is.
                 let vis_nodes: Vec<&FileNode> = self.file_tree.nodes.iter().collect();
+                // ── 빠른 파일 고정 섹션 ── 트리 본문 **앞**에 그린다. 원래 자리다.
+                //
+                // 한동안 트리 뒤로 미뤄 뒀었는데, 이유는 레이아웃이 아니라 클리핑이
+                // 없어서였다: 스크롤로 `start_y` 위까지 올라온 트리 항목을 막을 길이
+                // 이 섹션의 불투명 배경으로 덮는 것뿐이었다. 이제 시저가 그 위를
+                // 자르므로 덮을 것이 없고, 덮기를 위해 순서를 뒤집어 둘 이유도 없다.
+                //
+                // 순서를 되돌리는 편이 나은 이유: 「나중에 덮는다」는 배경이 불투명할
+                // 때만 성립하는 약속이라, 이 섹션에 반투명 배경이나 둥근 모서리가
+                // 붙는 순간 조용히 깨진다. 그리는 차례가 곧 z-order 인 편이 읽기도 쉽다.
+                self.file_tree.quick_rects.clear();
+                if !quick.is_empty() {
+                    g.rect(tree_col_x, quick_top, tree_col_w - 1.0, quick_h, theme::panel_bg());
+                    let mut qy = quick_top;
+                    g.draw_text(
+                        row_x + 6.0,
+                        qy + 3.0,
+                        "빠른 파일",
+                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                    qy += 19.0;
+                    let (qmx, qmy) = self.cursor_px;
+                    for (label, path, icon) in quick {
+                        let y = qy;
+                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
+                        let is_open = active_file.as_deref() == Some(path.as_path());
+                        if hovered {
+                            hover_rect(g, row_x, y, row_w, item_h, theme::radius_sm());
+                        } else if is_open {
+                            round_rect(g, row_x, y, row_w, item_h, theme::radius_sm(), theme::surface_active());
+                        }
+                        if is_open {
+                            g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
+                        }
+                        let isz = 16.0_f32;
+                        let iy = y + (item_h - isz) / 2.0;
+                        let icon_x = row_x + 18.0;
+                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
+                        g.queue_icon(icon, icon_x, iy, isz, col);
+                        g.draw_text(
+                            icon_x + isz + 8.0,
+                            y + (item_h - 13.0) / 2.0,
+                            label,
+                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
+                        );
+                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
+                        qy += item_h;
+                    }
+                    // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
+                    qy += 4.0;
+                    g.rect(row_x, qy, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
+                }
                 // git 표시는 **배지 폴러**가 채운 맵을 읽는다(git 컬럼 폴러가 아니라)
                 // — 컬럼 폴러는 그 패널이 열렸을 때만 돌아서, 파일트리 표시가 남의
                 // 패널 개폐에 묶여 버린다. 배지는 모든 pane 의 cwd 로 항상 돈다.
@@ -4344,51 +4396,6 @@ impl App {
                             view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
                         pill_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, theme::with_alpha(theme::text(), 0x66));
                     }
-                }
-                // ── 빠른 파일 섹션(지연 그리기) ── 트리 본문·페이드 뒤에 그려, 스크롤로
-                // start_y 위로 올라온 트리 항목을 불투명 배경으로 덮는다(scissor 없는
-                // 렌더러의 겹침 방지). 클릭=보조탭, Opt+클릭=별도창.
-                self.file_tree.quick_rects.clear();
-                if !quick.is_empty() {
-                    g.rect(tree_col_x, quick_top, tree_col_w - 1.0, quick_h, theme::panel_bg());
-                    let mut qy = quick_top;
-                    g.draw_text(
-                        row_x + 6.0,
-                        qy + 3.0,
-                        "빠른 파일",
-                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
-                    );
-                    qy += 19.0;
-                    let (qmx, qmy) = self.cursor_px;
-                    for (label, path, icon) in quick {
-                        let y = qy;
-                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
-                        let is_open = active_file.as_deref() == Some(path.as_path());
-                        if hovered {
-                            hover_rect(g, row_x, y, row_w, item_h, theme::radius_sm());
-                        } else if is_open {
-                            round_rect(g, row_x, y, row_w, item_h, theme::radius_sm(), theme::surface_active());
-                        }
-                        if is_open {
-                            g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
-                        }
-                        let isz = 16.0_f32;
-                        let iy = y + (item_h - isz) / 2.0;
-                        let icon_x = row_x + 18.0;
-                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
-                        g.queue_icon(icon, icon_x, iy, isz, col);
-                        g.draw_text(
-                            icon_x + isz + 8.0,
-                            y + (item_h - 13.0) / 2.0,
-                            label,
-                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
-                        );
-                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
-                        qy += item_h;
-                    }
-                    // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
-                    qy += 4.0;
-                    g.rect(row_x, qy, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
                 }
                 // Right-click context menu — painted last in the column so it
                 // overlays the rows. Items + hit rects build straight into
