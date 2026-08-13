@@ -1575,10 +1575,16 @@ impl App {
             {
                 let mut ws = self.ws.lock().unwrap();
                 if let Some(p) = ws.panes.get_mut(&id) {
-                    p.active_tab = tab_idx.min(p.tabs.len().saturating_sub(1));
+                    // 에이전트가 부른 것(`as_tab`)이면 이미 있는 탭도 앞으로 끌어내지
+                    // 않는다 — 사람이 파일트리에서 누른 것만 「보여 달라」는 뜻이다.
+                    if !as_tab {
+                        p.active_tab = tab_idx.min(p.tabs.len().saturating_sub(1));
+                    }
                     p.dirty = true;
                 }
-                ws.active_pane = Some(id);
+                if !as_tab {
+                    ws.active_pane = Some(id);
+                }
             }
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
@@ -1697,10 +1703,13 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             if let Some(pane) = ws.panes.get_mut(&outer) {
                 pane.tabs.push(tab);
-                pane.active_tab = pane.tabs.len() - 1;
+                // **백그라운드 탭이다** — 활성 탭도 활성 pane 도 안 건드린다(거노
+                // 2026-08-13). 학생이 이미지를 보내면 그 pane 의 대화가 통째로 이미지에
+                // 덮이고, 키보드 포커스까지 그 pane 으로 끌려가 다른 데서 타이핑 중이면
+                // 뺏긴다. 그림 자체는 OSC 1337 인라인으로 대화 흐름 안에 이미 뜨므로
+                // (ad6c04d), 이 탭은 「크게 볼 때 누르는 자리」로 족하다.
                 pane.dirty = true;
             }
-            ws.active_pane = Some(outer);
             drop(ws);
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
