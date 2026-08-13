@@ -1330,6 +1330,9 @@ impl Backend for PtyBackend {
             .unwrap_or_default();
         serde_json::json!({
             "active_theme": kasa_mcp::character::active_theme_id(),
+            // persona 토글은 로스터와 같은 화면에 있다 — 상태를 안 실으면 웹이
+            // 토글을 항상 켜진 모양으로 그려 화면이 거짓말을 한다.
+            "persona_enabled": read_claude_persona(),
             "themes": themes,
             "roster": roster,
         })

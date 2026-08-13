@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/* arona 의 design/tailwind.css 를 쓰지 않는다 — 거기엔 `--cth-*`(SCHALE 클린
+   블루, 라이트 기본) 매핑이 붙어 있어서 import 하는 순간 설정 화면이 터미널과
+   다른 색이 된다. 이 화면의 색은 `--kt-*` 하나이고 서버(useTokens)가 채운다.
+
+   아래 값은 폴백이다: 토큰이 오기 전 한 프레임과 fetch 실패 시에만 보인다.
+   기본 dark 팔레트와 같은 값이라 그 순간에도 화면이 튀지 않는다. */
+:root {
+  --kt-bg: #252c35;
+  --kt-fg: #ffffff;
+  --kt-surface: #1a1d23;
+  --kt-surface-hover: #303843;
+  --kt-surface-active: #3c4654;
+  --kt-border: #505c6e6e;
+  --kt-accent: #5a8ce6;
+  --kt-text: #eceef3;
+  --kt-text-dim: #a0a6b0;
+  --kt-text-mute: #787e8a;
+  --kt-success: #3fb950;
+  --kt-danger: #e0584e;
+  --kt-attention: #fa8c2a;
+
+  --kt-radius-sm: 6px;
+  --kt-radius-md: 9px;
+  --kt-border-w: 1px;
+  --kt-dot-radius: 50%;
+
+  /* 한글을 모노로 그리면 폰트에 글자가 없어 시스템 폰트로 폴백되고, 그때 폭이
+     안 맞아 자간이 벌어져 보인다("학 생  그 림"). 네이티브 설정 화면이 지금
+     그 모양이고, 그게 "못생겼다"의 실체적 일부다. 그래서 UI 는 산세리프로,
+     값(hex·경로)만 모노로 쓴다.
+
+     CDN 폰트는 쓰지 않는다 — 웹뷰는 인터넷 없이도 떠야 한다. */
+  --kt-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --kt-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--kt-bg);
+  color: var(--kt-text);
+  font-family: var(--kt-font-ui);
+  /* 창을 좁혀도 가로 스크롤이 생기면 안 된다 — 설정은 사용자가 창을 자유롭게
+     줄이는 화면이다. */
+  overflow-x: hidden;
+}
+
+/* 사용자가 폴더에 넣은 프사는 크기가 제각각이다. 도트 그림이 많아 확대 시
+   흐려지지 않게 픽셀 보간으로 둔다(네이티브도 같은 이유로 도트를 그대로 찍는다). */
+img.kt-face {
+  image-rendering: pixelated;
+}
