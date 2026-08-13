@@ -219,6 +219,34 @@ impl PtyLayout {
         }
     }
 
+    /// `target` leaf 를 `subtree` 로 통째로 갈아 끼운다. `fleet` 로 만든 배치를
+    /// **그 pane 자리에만** 꽂는 데 쓴다.
+    ///
+    /// 루트를 그냥 덮어쓰면 안 되는 이유: 그 창에 이미 다른 pane 이 있으면 그
+    /// leaf 들이 트리에서 사라진다. PTY 는 pane id 로만 묶여 있어 **죽지 않고**
+    /// 화면에서만 없어지므로, 셸이 계속 돌면서 아무 데도 안 보이는 상태가 된다.
+    /// 그래서 배치는 언제나 자리 교체다.
+    pub fn replace_leaf(&mut self, target: &str, subtree: PtyLayout) -> bool {
+        match self {
+            PtyLayout::Leaf { pane_id } if pane_id == target => {
+                *self = subtree;
+                true
+            }
+            PtyLayout::Leaf { .. } => false,
+            PtyLayout::Split { a, b, .. } => {
+                // `subtree` 는 Clone 이 아니라 한쪽만 시도해야 한다 — 먼저 어디에
+                // 있는지 보고 그쪽으로만 내려간다.
+                if a.leaves().contains(&target) {
+                    a.replace_leaf(target, subtree)
+                } else if b.leaves().contains(&target) {
+                    b.replace_leaf(target, subtree)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Remove the leaf with `target` pane id. Its sibling absorbs the
     /// space (the parent Split collapses into the surviving child).
     /// Returns true if removed. Removing the last leaf returns false —
@@ -975,6 +1003,34 @@ mod tests {
                 assert_eq!(r.3, 200 - host.3, "n={n}: {id} 폭");
             }
         }
+    }
+
+    /// 이미 다른 pane 이 있는 창에 배치를 꽂아도 **그 pane 들이 안 사라져야** 한다 —
+    /// 루트를 덮어쓰면 PTY 는 살아 있는데 화면에서만 없어진다.
+    #[test]
+    fn replace_leaf_grafts_fleet_without_losing_siblings() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%9".into());
+        let ids: Vec<String> = vec!["%1".into(), "%2".into()];
+        assert!(t.replace_leaf("%0", fleet("%0", &ids, SplitDir::Horizontal, 0.6)));
+        assert_eq!(t.leaves(), vec!["%0", "%1", "%2", "%9"], "%9 가 남아 있어야");
+        // 호스트는 자기 배치의 루트 직계 자식이라 set_leaf_ratio 가 계속 먹는다.
+        assert!(t.set_leaf_ratio("%0", 0.8));
+        let rects = t.leaf_rects(200, 60);
+        let host = rects.iter().find(|r| r.0 == "%0").unwrap();
+        let s1 = rects.iter().find(|r| r.0 == "%1").unwrap();
+        assert!(host.3 > s1.3, "호스트가 자기 칸 안에서 넓어져야");
+        // 학생 둘은 여전히 균등.
+        let s2 = rects.iter().find(|r| r.0 == "%2").unwrap();
+        assert!(s1.4.abs_diff(s2.4) <= 1);
+    }
+
+    #[test]
+    fn replace_leaf_missing_target_is_noop() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        assert!(!t.replace_leaf("%9", PtyLayout::single("%7")));
+        assert_eq!(t.leaves(), vec!["%0", "%1"], "거부 시 원본 유지");
     }
 
     #[test]

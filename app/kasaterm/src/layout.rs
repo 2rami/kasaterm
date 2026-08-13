@@ -40,15 +40,22 @@ pub(crate) fn pick_split_axis(
     rows: u16,
 ) -> kasa_pty::SplitDir {
     use kasa_pty::SplitDir::{Horizontal, Vertical};
-    const MIN_COLS: u16 = 80;
-    const MIN_ROWS: u16 = 16;
     let long_axis = if px_w >= px_h { Horizontal } else { Vertical };
     match long_axis {
-        Horizontal if cols / 2 < MIN_COLS && rows / 2 >= MIN_ROWS => Vertical,
-        Vertical if rows / 2 < MIN_ROWS && cols / 2 >= MIN_COLS => Horizontal,
+        Horizontal if cols / 2 < MIN_PANE_COLS && rows / 2 >= MIN_PANE_ROWS => Vertical,
+        Vertical if rows / 2 < MIN_PANE_ROWS && cols / 2 >= MIN_PANE_COLS => Horizontal,
         d => d,
     }
 }
+
+/// 쓸 만한 pane 의 하한. `pick_split_axis` 의 축 선택과 `split_fleet` 의 인원 상한이
+/// **같은 숫자**를 봐야 한다 — 축은 「80칸을 못 지키니 세로로」라고 판단했는데 인원
+/// 상한이 다른 기준이면, 축 판단이 피하려던 좁은 pane 을 인원이 다시 만든다.
+///
+/// 16줄인 이유는 claude 입력박스만 5줄이라 12줄 pane 은 대화가 두 줄 보인다는 것이다
+/// (12로 뒀다가 표준 80×24 pane 이 12줄 두 장으로 갈렸다).
+pub(crate) const MIN_PANE_COLS: u16 = 80;
+pub(crate) const MIN_PANE_ROWS: u16 = 16;
 
 pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
@@ -489,7 +496,10 @@ impl App {
     /// 그 학생에게 브리프를 주입할 주소로 쓴다.
     pub(crate) fn spawn_student(&mut self, character: &str) -> String {
         self.pending_character = Some(character.to_string());
-        let id = match self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+        // 축을 고정하지 않는다(예전엔 `Horizontal` 이었다) — 디스패처가 학생을 여럿
+        // 띄우면 매번 좌우로 갈라 얇은 세로 기둥이 된다. `None` 은 쪼갤 pane 의
+        // 종횡비를 보고 긴 축을 고르므로, 이어 띄워도 칸이 정사각에 가깝게 수렴한다.
+        let id = match self.split_pane_auto(None) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("[spawn_student] split failed: {e:#}");
@@ -504,6 +514,124 @@ impl App {
             w.request_redraw();
         }
         id
+    }
+
+    /// pane 여러 개를 **한 번에** 배치한다 — 부른 pane 이 크게 남고 학생들이 균등하게.
+    ///
+    /// 옛 경로는 CLI 가 split 을 N 번 부르면서 **직전에 만든 pane 을 다음 대상으로**
+    /// 삼았다. ⌘D 를 연달아 누른 것과 같은 모양이라 몫이 1/2 → 1/4 → 1/8 로
+    /// 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이다(거노 2026-08-13:
+    /// "너네가 부르면 내가 드래그로 정렬하고"). 방향을 명시하면 더 나빴다 — 모든
+    /// 회차가 같은 축이라 얇은 기둥이 된다.
+    ///
+    /// 그래서 pane 은 기존 경로로 낳고(cwd·방·학생 배정·이름이 다 거기 붙어 있다)
+    /// **트리만 마지막에 한 번** 갈아 끼운다. 중간의 반감하는 모양은 화면에 안
+    /// 나간다 — 이 함수가 끝날 때까지 프레임을 그리지 않기 때문이다.
+    ///
+    /// 창에 이미 다른 pane 이 있으면 그 자리는 건드리지 않는다(`replace_leaf`).
+    ///
+    /// 반환값은 **실제로 앉힌** pane id 들이다. `fleet_capacity` 가 하한(80칸·16줄)
+    /// 으로 자르므로 요청보다 적을 수 있고, 부른 쪽이 그 차이를 사람에게 알려야
+    /// 한다 — 조용히 적게 만들면 「5명 불렀는데 3명」이 또 사고가 된다.
+    pub(crate) fn split_fleet(
+        &mut self,
+        count: usize,
+        from: Option<&str>,
+        host_ratio: f32,
+    ) -> Result<Vec<String>> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 로컬 배치를 쓰지 않는다");
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        let Some(host) = from.map(str::to_string).or(active) else {
+            anyhow::bail!("배치할 기준 pane 이 없다");
+        };
+        // 탭을 지목받았으면 그 탭이 든 pane — 탭은 BSP leaf 가 아니라 트리에서 못 찾는다.
+        let host = self.ws.lock().unwrap().outer_for_pty(&host).unwrap_or(host);
+        let Some(owner) = self.window_of_pane(&host) else {
+            anyhow::bail!("배치할 pane {host} 이 어느 window 트리에도 없다");
+        };
+
+        // 축은 **호스트 칸의 종횡비**로 고른다 — 창 전체가 아니라. 이미 쪼개진
+        // 창에서 호스트가 세로로 긴 칸이면 좌우로 가르는 게 맞다.
+        let (win_cols, win_rows) = self.window_cells();
+        let host_rect = self
+            .effective_leaf_rects(win_cols, win_rows)
+            .into_iter()
+            .find(|(id, ..)| *id == host)
+            .map(|(_, _, _, w, h)| (w, h))
+            .unwrap_or((win_cols, win_rows));
+        let dir = pick_split_axis(
+            host_rect.0 as f32 * self.cell.w.max(1.0),
+            host_rect.1 as f32 * self.cell.h.max(1.0),
+            host_rect.0,
+            host_rect.1,
+        );
+        // 하한을 지키며 앉을 수 있는 만큼만. 0 이면 한 명도 못 앉힌다 —
+        // 그때는 조용히 좁은 pane 을 만드는 대신 사유를 올린다.
+        let room = kasa_pty::fleet_capacity(
+            dir,
+            host_ratio,
+            host_rect.0,
+            host_rect.1,
+            MIN_PANE_COLS,
+            MIN_PANE_ROWS,
+        );
+        if room == 0 {
+            anyhow::bail!(
+                "{host} 칸이 {}x{} 라 학생 한 명도 못 앉힌다 — 창을 키우거나 탭으로 띄워라",
+                host_rect.0,
+                host_rect.1
+            );
+        }
+        let want = count.min(room);
+
+        let mut made: Vec<String> = Vec::new();
+        for _ in 0..want {
+            match self.spawn_split_session(&host) {
+                Ok(id) => made.push(id),
+                Err(e) => {
+                    // 반쯤 만든 셸을 남기지 않는다 — 트리에 안 꽂힌 pane 은 화면에
+                    // 없는데 셸은 계속 돈다.
+                    for id in &made {
+                        self.pty.remove(id);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        let tree = kasa_pty::fleet(&host, &made, dir, host_ratio);
+        let layout = if owner == self.active_window {
+            self.pty_layout.as_mut()
+        } else {
+            self.windows.get_mut(owner).and_then(|s| s.as_mut())
+        };
+        if !layout.is_some_and(|l| l.replace_leaf(&host, tree)) {
+            for id in &made {
+                self.pty.remove(id);
+            }
+            anyhow::bail!("pane {host} 자리를 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라");
+        }
+        // 줌은 트리 밖 렌더 상태다 — 재배치하면 줌 대상이 화면과 어긋나므로 푼다.
+        // 안 풀면 학생을 셋 띄웠는데 화면엔 옛 pane 하나만 크게 남는다.
+        if self.zoomed_pane.is_some() {
+            self.zoomed_pane = None;
+        }
+        if owner != self.active_window {
+            // 안 보이는 방이라 포커스도 메인 그리드도 안 건드린다. 그 방 PTY 치수는
+            // 그 창을 앞으로 가져올 때 다시 맞춰진다.
+            return Ok(made);
+        }
+        self.resize_backend(win_cols, win_rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(made)
     }
 
     /// split 이 얹을 새 셸을 띄우고 `self.pty` 에 등록한다 — **레이아웃은 안 건드린다**.

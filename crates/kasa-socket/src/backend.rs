@@ -480,6 +480,24 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
+    /// pane `count` 개를 **한 번의 호출로** 배치한다 — 부른 pane 이 크게 남고 나머지가
+    /// 균등하게 선다.
+    ///
+    /// `split_surface` 를 N 번 부르는 것과 결과가 다르다. 그쪽은 회차마다 대상이
+    /// 직전에 만든 pane 으로 이어져 몫이 1/2 → 1/4 → 1/8 로 반감한다 — 넷을 부르면
+    /// 마지막이 화면의 1/16 이고, 사람이 매번 드래그로 고쳐 왔다.
+    ///
+    /// 반환은 **실제로 앉힌** pane 들이다. 쓸 만한 크기의 하한(80칸·16줄)에 걸려
+    /// 요청보다 적을 수 있으므로, 부른 쪽은 개수를 대조해 사람에게 알려야 한다.
+    /// 디폴트가 unsupported 인 이유는 tmux/원격 백엔드가 트리를 소유하지 않아서다.
+    fn split_fleet(
+        &self,
+        _count: usize,
+        _from: Option<&str>,
+        _host_ratio: Option<f32>,
+    ) -> Result<Vec<SurfaceInfo>> {
+        anyhow::bail!("split_fleet unsupported by this backend")
+    }
     /// 그 pane 이 claude 를 띄우면 **쓰게 될** teammate 이름과 팀 — `(agent, team)`.
     ///
     /// 예측이 가능한 이유: 학생은 pane 이 생길 때 배정되고(`assign_character_env`),

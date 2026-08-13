@@ -3501,6 +3501,23 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
+    ///
+    /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에
+    /// 만든 pane 으로 이어져 몫이 1/2 → 1/4 → 1/8 로 반감한다 — 그게 지금 고치는
+    /// 것이다. 여기서는 pane 을 다 낳은 **뒤에** 트리를 한 번 갈아 끼운다.
+    ///
+    /// GUI 스레드여야 하는 이유는 `SocketSplit` 과 같다: `App.pty_layout` 이 GUI
+    /// 소유이고, 축 판정에 필요한 셀 픽셀 크기도 여기만 안다.
+    ///
+    /// `(인원, 기준 pane, 호스트 몫, 회신)`. 회신은 **실제로 앉힌** pane id 들이다 —
+    /// 하한에 걸려 요청보다 적을 수 있어 부른 쪽이 개수를 대조해야 한다.
+    SocketSplitFleet(
+        usize,
+        Option<String>,
+        f32,
+        std::sync::mpsc::Sender<std::result::Result<Vec<String>, String>>,
+    ),
     /// 되살리기 목록(`closed_panes`)을 읽거나 그중 하나를 **진짜 끈다**.
     ///
     /// 왜 소켓에 뚫는가: 닫은 pane 은 **죽지 않는다**(`alive`). 프로세스를 그대로 물고
