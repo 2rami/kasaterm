@@ -1758,11 +1758,16 @@ pub(crate) fn draw_info_col(
     // 그려져 탭 줄 위로 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면
     // 목록이 길 때 인스턴스가 수천 개 늘어난다), 삐져나온 픽셀만 여기서 자른다.
     g.push_clip(x, top, w, (bottom - top).max(0.0));
-    // 시저는 픽셀만 자르지 클릭은 안 자른다. 이 아래로 히트렉트가 열다섯 곳에서
-    // 쌓이는데, 클립이 본문 사각형 **하나**뿐이라 `커서 ∈ (행 ∩ 본문)` 과
-    // `커서 ∈ 행 && 커서 ∈ 본문` 이 같은 판정이다 — rect 마다 교집합을 내는 대신
-    // 커서를 한 번 걸러 두면 새 행을 추가하는 사람이 빠뜨릴 자리가 없다.
-    // 교집합 계산 자체는 `clip_hit` 을 그대로 써서 둘이 갈릴 수 없게 한다.
+    // 시저는 픽셀만 자르지 클릭은 안 자른다. 막을 것이 둘인데 **시점이 다르다**:
+    //
+    // ① **이 프레임의 호버** — 커서가 잘려 안 보이는 부분에 있는데 행의 보이는
+    //    쪽에 하이라이트가 그려지는 것. 시저는 이걸 못 막는다(하이라이트의 보이는
+    //    부분은 클립 안이니까). 커서를 여기서 한 번 걸러 막는다.
+    // ② **나중의 클릭** — 아래에서 쌓는 히트렉트는 `handler.rs` 가 **다음 클릭
+    //    좌표로 다시** 검사한다. 그래서 커서를 거른 것만으로는 안 되고, 저장되는
+    //    rect 자체가 잘려 있어야 한다. 그건 이 함수 끝의 `clip_rects!` 가 한다.
+    //
+    // ①만 하고 ②를 빠뜨리면 화면은 완벽한데 헤더 뒤에 숨은 행이 눌린다.
     let raw_cursor = cursor;
     let cursor = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
         Some(_) => cursor,
@@ -1987,6 +1992,36 @@ pub(crate) fn draw_info_col(
             y += PORT_H;
         }
     }
+
+    // ── 히트렉트를 본문과 교집합 ──
+    // 여기 한 곳에서 몰아서 하는 이유: 이 함수는 rect 를 아홉 갈래로 쌓고 그중
+    // 넷은 헬퍼 함수 안에서 쌓는다. 쌓는 자리마다 교집합을 내면 **새 줄을 추가하는
+    // 사람이 반드시 빠뜨린다** — 빠뜨려도 화면은 멀쩡하고 컴파일도 초록이라, 안
+    // 보이는 줄이 눌리기 전까지 아무도 모른다. 클립이 아직 서 있는 지금 걸러 두면
+    // 그 자리가 한 곳으로 모인다.
+    macro_rules! clip_rects {
+        ($v:expr, $i:tt) => {
+            $v.retain_mut(|e| match g.clip_hit(e.$i) {
+                Some(h) => {
+                    e.$i = h;
+                    true
+                }
+                None => false,
+            })
+        };
+    }
+    clip_rects!(info.sec_rects, 1);
+    clip_rects!(info.dir_btn_rects, 1);
+    clip_rects!(info.group_rects, 1);
+    clip_rects!(info.proc_rects, 1);
+    clip_rects!(info.kill_rects, 1);
+    clip_rects!(info.closed_rects, 1);
+    clip_rects!(info.closed_kill_rects, 1);
+    clip_rects!(info.port_rects, 2);
+    clip_rects!(info.port_kill_rects, 2);
+    info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
+    // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
+    // 자르면 멀쩡한 버튼이 사라진다.
 
     // 메뉴는 클립 **밖**이다 — 목록 위에 얹히는 오버레이라 본문 사각형에 가두면
     // 아래쪽 행에서 연 메뉴가 잘린다. 커서도 거르지 않은 것을 쓴다.
