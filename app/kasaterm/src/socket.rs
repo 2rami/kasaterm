@@ -1299,6 +1299,13 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// 살아 있는 토큰을 그대로 읽는다 — atomic 슬롯 로드뿐이라 GUI 스레드에
+    /// 위임(`EventLoopProxy`)할 필요가 없다. `App` 상태를 안 만지는 몇 안 되는
+    /// 창구다.
+    fn design_tokens(&self) -> serde_json::Value {
+        crate::theme::tokens_json()
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)

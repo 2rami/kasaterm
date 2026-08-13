@@ -1212,6 +1212,73 @@ pub fn character_welcome(name: &str, user: &str) -> Option<String> {
     Some(g)
 }
 
+/// `[r,g,b,a]` → CSS hex. 알파가 불투명하면 6자리로 — 대부분이 그렇고, 8자리를
+/// 강요하면 사람이 읽는 값이 전부 `ff` 꼬리를 달게 된다. CSS 는 둘 다 받는다.
+fn css_hex(c: [u8; 4]) -> String {
+    if c[3] == 255 {
+        format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+    } else {
+        format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+    }
+}
+
+/// 지금 화면에 쓰이는 디자인 토큰 전부 — 웹뷰 UI 가 `--kt-*` CSS 변수로 심어
+/// 네이티브와 같은 색·같은 실루엣으로 그린다(`GET /design-tokens`).
+///
+/// **`Palette`/`Shape` 구조체를 직렬화하지 않는다.** 그 둘은 *프리셋*이고, 살아
+/// 있는 값은 `color_slot!`·`f32_slot!` 의 atomic 슬롯 안에 있다. 사용자가 팔레트에서
+/// 색을 하나 고치면(custom 테마) 슬롯만 바뀌고 프리셋 상수는 그대로다 — 구조체를
+/// 직렬화하면 그 편집이 통째로 무시된 값이 나가는데, **타입이 맞아 오류가 안 난다.**
+/// 그래서 여기서는 reader 함수만 부른다. 이 규칙이 깨지면 웹 화면의 색이 네이티브와
+/// 조용히 갈린다.
+pub fn tokens_json() -> serde_json::Value {
+    serde_json::json!({
+        // 프리셋 키·accent 이름은 색만으로 되짚을 수 없어 따로 추적된다
+        // (`CURRENT_THEME`) — 웹 UI 의 선택 표시가 이걸 쓴다.
+        "theme": theme_name(),
+        "accent_name": accent_name(),
+        "palette": {
+            "bg": css_hex(bg()),
+            "fg": css_hex(fg()),
+            "surface": css_hex(surface()),
+            "surface_hover": css_hex(surface_hover()),
+            "surface_active": css_hex(surface_active()),
+            "border": css_hex(border()),
+            "accent": css_hex(accent()),
+            "text": css_hex(text()),
+            "text_dim": css_hex(text_dim()),
+            "text_mute": css_hex(text_mute()),
+            "success": css_hex(success()),
+            "danger": css_hex(danger()),
+            // 테마 슬롯이 아니라 고정값이다 — 「내 손을 기다린다」는 취향이 아니라
+            // 신호이고, 테마마다 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다.
+            "attention": css_hex(attention()),
+            "syn_keyword": css_hex(syn_keyword()),
+            "syn_string": css_hex(syn_string()),
+            "syn_number": css_hex(syn_number()),
+            "syn_comment": css_hex(syn_comment()),
+            "syn_function": css_hex(syn_function()),
+            "syn_type": css_hex(syn_type()),
+        },
+        "ansi": (0..16)
+            .map(|i| {
+                let c = ansi16(i);
+                css_hex([c[0], c[1], c[2], 255])
+            })
+            .collect::<Vec<_>>(),
+        // 형태는 색과 독립된 축이다(같은 팔레트를 어떤 실루엣으로도 입을 수 있게).
+        // px 숫자로 내보내 웹이 `calc()` 없이 그대로 쓴다.
+        "shape": {
+            "radius_sm": radius_sm(),
+            "radius_md": radius_md(),
+            "border_w": border_w(),
+            "shadow_offset": shadow_offset(),
+            "roundness": roundness(),
+            "pixel_chrome": pixel_chrome(),
+        },
+    })
+}
+
 #[cfg(test)]
 mod roster_tests {
     use super::*;
