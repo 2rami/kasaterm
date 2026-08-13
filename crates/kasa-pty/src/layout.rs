@@ -26,6 +26,119 @@ pub enum SplitDir {
     Vertical,
 }
 
+impl SplitDir {
+    pub fn opposite(self) -> Self {
+        match self {
+            SplitDir::Horizontal => SplitDir::Vertical,
+            SplitDir::Vertical => SplitDir::Horizontal,
+        }
+    }
+}
+
+/// 학생 여럿을 **한 번에** 앉히는 배치 — 호스트(부른 pane)가 크게 남고 학생들이
+/// 반대 축으로 균등하게 서는 모양.
+///
+/// ```text
+/// dir = Horizontal, host_ratio = 0.6
+/// ┌────────────────┬────────┐
+/// │                │  학생1  │
+/// │   호스트         ├────────┤
+/// │                │  학생2  │
+/// │                ├────────┤
+/// │                │  학생3  │
+/// └────────────────┴────────┘
+/// ```
+///
+/// **호스트를 루트 직계 자식에 두는 게 요점이다.** `set_leaf_ratio` 는 직계 부모의
+/// ratio 만 바꾸므로(그 함수 주석 참고), 호스트가 더 깊이 있으면 「부른 쪽을 크게」가
+/// 루트 하나로 안 잡힌다.
+///
+/// 그리고 학생 쪽은 **균형 이진트리가 아니라 「남은 개수의 역수」 사슬**이다. 0.5 로
+/// 반씩 가르는 균형트리는 N 이 2의 거듭제곱일 때만 균등해서, N=3 이면 1/2·1/4·1/4 로
+/// 어긋난다. 사슬은 모든 N 에서 정확히 균등하고, leaf 순서가 화면 순서(위→아래 또는
+/// 왼→오른쪽)와 같아 `Cmd+[`/`Cmd+]` 순환이 눈에 보이는 순서를 따른다.
+///
+/// 학생이 없으면 호스트 혼자인 트리다(쪼갤 이유가 없다).
+pub fn fleet(host: &str, students: &[String], dir: SplitDir, host_ratio: f32) -> PtyLayout {
+    let Some((first, rest)) = students.split_first() else {
+        return PtyLayout::single(host);
+    };
+    PtyLayout::Split {
+        dir,
+        ratio: host_ratio.clamp(0.1, 0.9),
+        a: Box::new(PtyLayout::single(host)),
+        b: Box::new(even_chain(first, rest, dir.opposite())),
+    }
+}
+
+/// 한 축을 정확히 균등하게 나누는 사슬. 첫 조각이 `1/남은개수` 를 갖고 나머지가
+/// 그 뒤를 같은 규칙으로 나눈다.
+fn even_chain(first: &String, rest: &[String], dir: SplitDir) -> PtyLayout {
+    let Some((next, tail)) = rest.split_first() else {
+        return PtyLayout::single(first.clone());
+    };
+    PtyLayout::Split {
+        dir,
+        ratio: 1.0 / (rest.len() + 1) as f32,
+        a: Box::new(PtyLayout::single(first.clone())),
+        b: Box::new(even_chain(next, tail, dir)),
+    }
+}
+
+/// split 하나가 부모 길이 `total` 을 두 조각으로 가르는 **정본 산술**. 트리를
+/// 그리는 곳(`walk_rects`·`build_layout`·`collect_dividers`·`resize_at`)과 용량을
+/// 재는 곳이 전부 이걸 쓴다.
+///
+/// 하나로 모은 이유가 있다. 처음엔 용량 쪽만 `total * (1 - ratio)` 로 따로 셌는데,
+/// f32 에서 `1 - 0.6 = 0.39999998` 이라 200칸이 **79** 로 나왔다 — 그리는 쪽은 같은
+/// 창에서 80 을 준다. 그 한 칸 차이로 「한 명도 못 앉힌다」고 답했다. 재는 산술과
+/// 그리는 산술이 갈리면 용량은 언제든 조용히 거짓말한다.
+///
+/// 조각 사이에 칸 하나를 남기지 않는다 — `a` 를 `total-1` 로 묶어 두므로 `b` 는
+/// 최소 한 칸을 갖고, 렌더러가 그 자리에 구분선을 그린다.
+fn split_extent(total: u16, ratio: f32) -> (u16, u16) {
+    let a = ((total as f32) * ratio).round() as u16;
+    let a = a.min(total.saturating_sub(1)).max(1);
+    (a, total.saturating_sub(a))
+}
+
+/// `fleet` 로 앉힐 수 있는 **최대 인원**. 넘겨서 앉히면 쓸 수 없는 크기가 되므로
+/// 부르는 쪽이 이걸로 자르고, 남는 인원은 탭으로 보내거나 사람에게 알려야 한다.
+///
+/// 지금 split 경로엔 이 가드가 없어서 아무리 좁아도 계속 쪼갠다 — 그래서 셋을
+/// 부르면 마지막 학생이 글자 몇 줄만 남는다. 0 이 나오면 **한 명도 못 앉힌다**는
+/// 뜻이다(창이 이미 너무 작다).
+///
+/// 학생들이 나눠 갖는 축만 인원으로 갈리고, 나머지 축은 다 같이 쓰므로 인원과
+/// 무관하다 — 그 축이 이미 하한 밑이면 몇 명이든 안 된다.
+pub fn fleet_capacity(
+    dir: SplitDir,
+    host_ratio: f32,
+    cols: u16,
+    rows: u16,
+    min_cols: u16,
+    min_rows: u16,
+) -> usize {
+    let r = host_ratio.clamp(0.1, 0.9);
+    match dir {
+        SplitDir::Horizontal => {
+            // 학생 열은 폭을 호스트와 나눠 갖고(인원 무관), 높이를 인원끼리 나눈다.
+            let (_, w) = split_extent(cols, r);
+            if w < min_cols {
+                return 0;
+            }
+            (rows / min_rows.max(1)) as usize
+        }
+        SplitDir::Vertical => {
+            let (_, h) = split_extent(rows, r);
+            if h < min_rows {
+                return 0;
+            }
+            (cols / min_cols.max(1)) as usize
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PtyLayout {
     Leaf {
@@ -260,19 +373,12 @@ impl PtyLayout {
             }
             PtyLayout::Split { dir, ratio, a, b } => match dir {
                 SplitDir::Horizontal => {
-                    // Reserve one cell of divider between children so the
-                    // visual gutter the renderer draws doesn't double up
-                    // on a pane's own cells.
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (aw, bw) = split_extent(w, *ratio);
                     a.walk_rects(x, y, aw, h, out);
                     b.walk_rects(x + aw, y, bw, h, out);
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (ah, bh) = split_extent(h, *ratio);
                     a.walk_rects(x, y, w, ah, out);
                     b.walk_rects(x, y + ah, w, bh, out);
                 }
@@ -298,9 +404,7 @@ impl PtyLayout {
             }
             PtyLayout::Split { dir, ratio, a, b } => match dir {
                 SplitDir::Horizontal => {
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (aw, bw) = split_extent(w, *ratio);
                     let children = vec![
                         a.build_layout(x, y, aw, h),
                         b.build_layout(x + aw, y, bw, h),
@@ -308,9 +412,7 @@ impl PtyLayout {
                     Layout::HSplit { w, h, x, y, children }
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (ah, bh) = split_extent(h, *ratio);
                     let children = vec![
                         a.build_layout(x, y, w, ah),
                         b.build_layout(x, y + ah, w, bh),
@@ -348,9 +450,7 @@ impl PtyLayout {
         if let PtyLayout::Split { dir, ratio, a, b } = self {
             match dir {
                 SplitDir::Horizontal => {
-                    let aw = ((w as f32) * ratio).round() as u16;
-                    let aw = aw.min(w.saturating_sub(1)).max(1);
-                    let bw = w.saturating_sub(aw);
+                    let (aw, bw) = split_extent(w, *ratio);
                     out.push(Divider {
                         path: path.clone(),
                         dir: *dir,
@@ -366,9 +466,7 @@ impl PtyLayout {
                     path.pop();
                 }
                 SplitDir::Vertical => {
-                    let ah = ((h as f32) * ratio).round() as u16;
-                    let ah = ah.min(h.saturating_sub(1)).max(1);
-                    let bh = h.saturating_sub(ah);
+                    let (ah, bh) = split_extent(h, *ratio);
                     out.push(Divider {
                         path: path.clone(),
                         dir: *dir,
@@ -575,9 +673,7 @@ impl PtyLayout {
         let (head, tail) = path.split_first().unwrap();
         match dir {
             SplitDir::Horizontal => {
-                let aw = ((w as f32) * *ratio).round() as u16;
-                let aw = aw.min(w.saturating_sub(1)).max(1);
-                let bw = w.saturating_sub(aw);
+                let (aw, bw) = split_extent(w, *ratio);
                 if *head == 0 {
                     a.resize_at(tail, pos, x, y, aw, h)
                 } else {
@@ -585,9 +681,7 @@ impl PtyLayout {
                 }
             }
             SplitDir::Vertical => {
-                let ah = ((h as f32) * *ratio).round() as u16;
-                let ah = ah.min(h.saturating_sub(1)).max(1);
-                let bh = h.saturating_sub(ah);
+                let (ah, bh) = split_extent(h, *ratio);
                 if *head == 0 {
                     a.resize_at(tail, pos, x, y, w, ah)
                 } else {
@@ -841,6 +935,140 @@ mod tests {
                 assert_eq!(children.len(), 2);
             }
             _ => panic!("expected HSplit"),
+        }
+    }
+
+    /// 학생 몫이 **반감하지 않는지**가 이 배치의 존재 이유다 — 옛 경로는 split 을
+    /// N 번 연달아 불러 1/2 → 1/4 → 1/8 로 줄었고, 넷을 부르면 마지막이 1/16 이었다.
+    #[test]
+    fn fleet_students_are_equal_not_halving() {
+        for n in 1..=6usize {
+            let ids: Vec<String> = (1..=n).map(|i| format!("%{i}")).collect();
+            let t = fleet("%0", &ids, SplitDir::Horizontal, 0.6);
+            // 호스트는 루트 직계 자식 — 「부른 쪽을 크게」가 루트 ratio 하나로 잡힌다.
+            match &t {
+                PtyLayout::Split { dir: SplitDir::Horizontal, ratio, a, .. } => {
+                    assert!((ratio - 0.6).abs() < 1e-6, "n={n}");
+                    assert!(matches!(a.as_ref(), PtyLayout::Leaf { pane_id } if pane_id == "%0"));
+                }
+                _ => panic!("n={n}: 루트가 Horizontal split 이어야"),
+            }
+            // 화면 순서 = leaf 순서(포커스 순환이 눈을 따라가야 한다).
+            let mut want = vec!["%0"];
+            want.extend(ids.iter().map(|s| s.as_str()));
+            assert_eq!(t.leaves(), want, "n={n}");
+
+            let rects = t.leaf_rects(200, 60);
+            let host = rects.iter().find(|r| r.0 == "%0").unwrap();
+            assert_eq!(host.4, 60, "n={n}: 호스트는 전체 높이");
+            let hs: Vec<u16> = ids
+                .iter()
+                .map(|id| rects.iter().find(|r| &r.0 == id).unwrap().4)
+                .collect();
+            let (lo, hi) = (*hs.iter().min().unwrap(), *hs.iter().max().unwrap());
+            // 셀은 정수라 나머지가 한 칸씩 갈릴 수 있다 — 그 이상 벌어지면 반감이다.
+            assert!(hi - lo <= 1, "n={n}: 학생 높이가 균등해야 (got {hs:?})");
+            assert_eq!(hs.iter().sum::<u16>(), 60, "n={n}: 높이 합이 창 높이");
+            // 폭은 전원이 호스트와 나눠 갖는 한 덩어리를 공유한다.
+            for id in &ids {
+                let r = rects.iter().find(|x| &x.0 == id).unwrap();
+                assert_eq!(r.3, 200 - host.3, "n={n}: {id} 폭");
+            }
+        }
+    }
+
+    #[test]
+    fn fleet_vertical_puts_students_side_by_side() {
+        // 세로로 긴 창: 호스트가 위, 학생들이 좌우로 선다.
+        let ids: Vec<String> = vec!["%1".into(), "%2".into(), "%3".into()];
+        let t = fleet("%0", &ids, SplitDir::Vertical, 0.6);
+        let rects = t.leaf_rects(90, 100);
+        let host = rects.iter().find(|r| r.0 == "%0").unwrap();
+        assert_eq!(host.3, 90, "호스트는 전체 폭");
+        let ws: Vec<u16> = ids
+            .iter()
+            .map(|id| rects.iter().find(|r| &r.0 == id).unwrap().3)
+            .collect();
+        assert_eq!(ws, vec![30, 30, 30]);
+        for id in &ids {
+            let r = rects.iter().find(|x| &x.0 == id).unwrap();
+            assert_eq!(r.4, 100 - host.4, "{id} 높이는 호스트가 남긴 만큼");
+        }
+    }
+
+    #[test]
+    fn fleet_empty_and_single() {
+        // 학생이 없으면 쪼갤 이유가 없다.
+        let t = fleet("%0", &[], SplitDir::Horizontal, 0.6);
+        assert!(matches!(t, PtyLayout::Leaf { pane_id } if pane_id == "%0"));
+        // 한 명이면 사슬 없이 split 하나.
+        let t = fleet("%0", &["%1".into()], SplitDir::Horizontal, 0.6);
+        assert_eq!(t.leaves(), vec!["%0", "%1"]);
+        match &t {
+            PtyLayout::Split { b, .. } => {
+                assert!(matches!(b.as_ref(), PtyLayout::Leaf { .. }), "사슬이 없어야")
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn fleet_host_ratio_is_clamped() {
+        // 0/1 을 넘기면 pane 이 사라진다 — 트리 쪽에서 먼저 막는다.
+        let t = fleet("%0", &["%1".into()], SplitDir::Horizontal, 5.0);
+        match &t {
+            PtyLayout::Split { ratio, .. } => assert!((ratio - 0.9).abs() < 1e-6),
+            _ => panic!(),
+        }
+        let t = fleet("%0", &["%1".into()], SplitDir::Horizontal, -1.0);
+        match &t {
+            PtyLayout::Split { ratio, .. } => assert!((ratio - 0.1).abs() < 1e-6),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn fleet_capacity_counts_the_divided_axis() {
+        // 가로 배치: 학생 열은 높이를 나눠 갖는다 → 60줄 / 16줄 = 3명.
+        assert_eq!(fleet_capacity(SplitDir::Horizontal, 0.6, 200, 60, 80, 16), 3);
+        // 창이 커지면 인원도 늘고,
+        assert_eq!(fleet_capacity(SplitDir::Horizontal, 0.6, 200, 96, 80, 16), 6);
+        // 남은 폭이 하한 밑이면 **인원과 무관하게** 0 이다(다 같이 쓰는 축이라).
+        assert_eq!(fleet_capacity(SplitDir::Horizontal, 0.6, 150, 60, 80, 16), 0);
+        // 세로 배치는 갈리는 축이 폭이다.
+        assert_eq!(fleet_capacity(SplitDir::Vertical, 0.6, 240, 100, 80, 16), 3);
+        assert_eq!(fleet_capacity(SplitDir::Vertical, 0.9, 240, 100, 80, 16), 0);
+    }
+
+    /// 용량대로 앉히면 **정말로** 하한을 지키는지. 창 크기를 훑는 이유는 이 둘이
+    /// 갈리는 게 반올림 한 칸에서 나기 때문이다 — 한 크기만 보면 통과한다(처음
+    /// 79 vs 80 으로 어긋났을 때 실제로 그랬다).
+    #[test]
+    fn fleet_capacity_matches_actual_rects() {
+        let (min_c, min_r) = (80u16, 16u16);
+        for cols in [160u16, 161, 199, 200, 240, 320] {
+            for rows in [32u16, 33, 47, 60, 64, 100] {
+                for r in [0.5f32, 0.6, 0.75] {
+                    for dir in [SplitDir::Horizontal, SplitDir::Vertical] {
+                        let n = fleet_capacity(dir, r, cols, rows, min_c, min_r);
+                        if n == 0 {
+                            continue;
+                        }
+                        let ids: Vec<String> = (1..=n).map(|i| format!("%{i}")).collect();
+                        let t = fleet("%0", &ids, dir, r);
+                        let rects = t.leaf_rects(cols, rows);
+                        for id in &ids {
+                            let g = rects.iter().find(|x| &x.0 == id).unwrap();
+                            assert!(
+                                g.3 >= min_c && g.4 >= min_r,
+                                "{cols}x{rows} r={r} {dir:?} n={n}: {id} = {}x{} 가 하한 밑",
+                                g.3,
+                                g.4
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
