@@ -30,4 +30,10 @@ pub struct PaneStatusView {
     /// from the transcript tail, not the glyph scan.
     #[serde(default)]
     pub bg_active: bool,
+    /// compact 진행률 — claude 가 화면에 찍는 `▰▰▱ N%` 를 파싱한 값(0..=100).
+    /// claude 는 이 값을 화면에만 내놓고 API 로 주지 않으므로 글자에서 읽는 수밖에
+    /// 없다. None = compact 중이 아니거나 퍼센트 행이 안 보임(그땐 바가 시간 루프로
+    /// 돈다). status 와 같은 틱에 같은 화면에서 읽어 어긋나지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_pct: Option<u8>,
 }

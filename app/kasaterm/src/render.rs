@@ -492,6 +492,9 @@ impl App {
             /// 쓸림바로는 「얼마나 남았나」가 안 읽히고, 화면에 뜨는 알림은 teammate
             /// 메시지 오버레이에 가려질 수 있어 헤더가 그 신호를 들어야 한다.
             compacting: bool,
+            /// 화면의 `▰▰▱ N%` 에서 읽은 compact 진행률. Some 이면 바를 이 값으로
+            /// 채우고(진짜 진행률), None 이면 시간 루프로 폴백한다.
+            compact_pct: Option<u8>,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -1939,6 +1942,10 @@ impl App {
                             .pane_activity
                             .get(&id)
                             .is_some_and(|a| a.status == "compacting"),
+                        compact_pct: self
+                            .pane_activity
+                            .get(&id)
+                            .and_then(|a| a.compact_pct),
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
@@ -5269,7 +5276,14 @@ impl App {
                     // 돌아 busy 가 함께 참이고, 순서가 뒤면 늘 쓸림바가 이긴다.
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
-                    g.compact_bar(h.x, by, h.w, bar_h, theme::accent());
+                    if let Some(p) = h.compact_pct {
+                        // 화면의 `▰▰▱ N%` 에서 읽은 진짜 진행률(2026-08-13 지시).
+                        // 퍼센트 행이 안 잡힌 프레임만 시간 루프로 폴백한다.
+                        g.rect(h.x, by, h.w, bar_h, theme::with_alpha(theme::accent(), 0x2e));
+                        g.rect(h.x, by, h.w * (p as f32 / 100.0), bar_h, theme::accent());
+                    } else {
+                        g.compact_bar(h.x, by, h.w, bar_h, theme::accent());
+                    }
                 } else if h.busy {
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
@@ -5898,13 +5912,18 @@ impl App {
                     // 좁혀지는 순간 헤더 없는 pane 은 표시가 통째로 사라졌다.
                     if !headered.contains(fid.as_str()) {
                         const BAR_H: f32 = 2.5;
-                        let st = self
+                        let (st, pct) = self
                             .pane_activity
                             .get(fid)
-                            .map_or("", |a| a.status.as_str());
+                            .map_or(("", None), |a| (a.status.as_str(), a.compact_pct));
                         if st == "compacting" {
                             g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
-                            g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
+                            if let Some(p) = pct {
+                                // 화면의 `▰▰▱ N%` 그대로 — 진짜 진행률(2026-08-13 지시).
+                                g.rect(*fx, *fy, fw * (p as f32 / 100.0), BAR_H, accent);
+                            } else {
+                                g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
+                            }
                         } else if st == "working" {
                             g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                             let seg = (fw * 0.32).clamp(36.0, 160.0);
