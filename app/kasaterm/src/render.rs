@@ -5893,21 +5893,28 @@ impl App {
                     // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
                     // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(거노).
                     // 학생이름은 타이틀바(claude 실행 시), 로딩바는 working 시 — 역할 분리.
-                    if !headered.contains(fid.as_str())
-                        && self
+                    // compact 중이면 쓸림 대신 왼쪽부터 채워지는 바 — 헤더 pane 과 같은
+                    // 형태 언어다. working 만 보던 시절엔 status 가 "compacting" 으로
+                    // 좁혀지는 순간 헤더 없는 pane 은 표시가 통째로 사라졌다.
+                    if !headered.contains(fid.as_str()) {
+                        const BAR_H: f32 = 2.5;
+                        let st = self
                             .pane_activity
                             .get(fid)
-                            .map_or(false, |a| a.status == "working")
-                    {
-                        const BAR_H: f32 = 2.5;
-                        g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
-                        let seg = (fw * 0.32).clamp(36.0, 160.0);
-                        let span = fw + seg;
-                        let off = (anim_phase * 0.5).fract() * span - seg;
-                        let sx = (fx + off).max(*fx);
-                        let ex = (fx + off + seg).min(fx + fw);
-                        if ex > sx {
-                            g.rect(sx, *fy, ex - sx, BAR_H, accent);
+                            .map_or("", |a| a.status.as_str());
+                        if st == "compacting" {
+                            g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
+                            g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
+                        } else if st == "working" {
+                            g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
+                            let seg = (fw * 0.32).clamp(36.0, 160.0);
+                            let span = fw + seg;
+                            let off = (anim_phase * 0.5).fract() * span - seg;
+                            let sx = (fx + off).max(*fx);
+                            let ex = (fx + off + seg).min(fx + fw);
+                            if ex > sx {
+                                g.rect(sx, *fy, ex - sx, BAR_H, accent);
+                            }
                         }
                     }
                     // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(거노: "내가
@@ -11037,8 +11044,23 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 /// 빠진다. 마커 유무는 todo 가 몇 행이든 영향을 안 받는다.
 fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
     !rows[r + 1..].iter().any(|row| {
-        let first = row.iter().find(|c| !matches!(c.ch, ' ' | '\0'));
-        matches!(first.map(|c| c.ch), Some('⏺') | Some('⎿'))
+        let Some(fi) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
+            return false;
+        };
+        match row[fi].ch {
+            '⏺' => true,
+            // compact 화면은 알림 아래에 `⎿ Tip: …` 를 깐다(2026-08-13 스샷 실측).
+            // 대화 마커와 같은 글리프지만 본문이 아니라 스피너 UI 의 일부다 — 이걸
+            // 마커로 세면 compact 알림이 스스로를 죽인다. Tip 행만 예외.
+            '⎿' => {
+                let text: String = row[fi + 1..]
+                    .iter()
+                    .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                    .collect();
+                !text.contains("Tip:")
+            }
+            _ => false,
+        }
     })
 }
 
@@ -11079,6 +11101,13 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     // 만 찍는다 — 점(·) 프레임도 별과 같이 인정해야 감지가 프레임마다 끊기지 않는다.
     if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
         return None;
+    }
+    // compact 알림에는 경과시간 괄호가 아예 없는 변형이 있다 — `· Compacting
+    // conversation…` 뒤에 아무것도 안 붙는다(2026-08-13 스샷 실측). 이 행이 그
+    // 화면의 유일한 스피너 행이라, 아래 괄호 요구까지 내려보내면 compact 중인
+    // pane 전체가 idle 로 읽혀 바도 완료 판정도 전부 죽는다.
+    if rest.contains("ompacting") {
+        return Some(first);
     }
     // 줄임표 **뒤**의 `(3m 19s · ↓ 14.2k tokens)` 가 스피너의 진짜 표식이다. 숫자로
     // 시작하고 초 단위가 들어 있는 괄호를 요구한다.
