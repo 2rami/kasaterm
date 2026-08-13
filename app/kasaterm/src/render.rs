@@ -4667,6 +4667,10 @@ impl App {
                     g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
                     list_top = y + 10.0;
                 }
+                    // 휠이 읽을 기하. 목록이 없는 갈래에서도 반드시 써야 한다 —
+                    // 안 쓰면 직전 프레임의 값이 남아, 변경이 사라진 뒤에도 휠이
+                    // 없는 목록을 스크롤한다.
+                    self.git.col_list_extent = ((input_top - list_top).max(0.0), 0.0);
                     if git_view.clean {
                         circle_rect(g, gcx0, list_top + 4.0, 8.0, theme::success());
                         g.draw_text(
@@ -4912,6 +4916,15 @@ impl App {
                         clip_rects!(discard_rects, 2);
                         clip_rects!(open_rects, 1);
                         g.pop_clip();
+                        // 휠에게 넘기는 기하. `y_cur` 는 `list_top - col_scroll` 에서
+                        // 출발해 섹션 머리·파일 행·펼친 diff 줄을 **실제로 그린 만큼**
+                        // 지나왔으므로, 스크롤을 되더하면 그게 곧 내용 높이다. 휠이
+                        // 자기 힘으로는 못 구하는 값이라(펼친 diff 는 캐시를 뒤져야
+                        // 나온다) 여기서 써 준다.
+                        self.git.col_list_extent = (
+                            (input_top - list_top).max(0.0),
+                            (y_cur + self.git.col_scroll - list_top).max(0.0),
+                        );
                         self.git.col_file_rects = rects;
                         self.git.col_stage_rects = stage_rects;
                         self.git.col_discard_rects = discard_rects;

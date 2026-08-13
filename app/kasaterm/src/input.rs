@@ -1418,24 +1418,12 @@ impl App {
             && self.cursor_px.0 >= self.git_col_x()
         {
             let item_h = 22.0_f32;
-            let n = self
-                .git
-                .col_data
-                .lock()
-                .map(|g| g.staged.len() + g.unstaged.len())
-                .unwrap_or(0);
-            let win_h = self.window.as_ref().map_or(800.0, |w| {
-                w.inner_size().height as f32 / self.effective_scale()
-            });
-            let dock_h = if self.docked.is_empty() {
-                0.0
-            } else {
-                DOCK_HEIGHT
-            };
-            // Header (branch + summary + rule) ≈ 68px; button zone ≈ 44px.
-            let list_top = TITLE_HEIGHT + 68.0;
-            let visible_h = (win_h - dock_h - list_top - 44.0).max(0.0);
-            let content_h = n as f32 * item_h;
+            // 기하는 그리기 쪽이 직전 프레임에 써 둔 것을 쓴다. 여기서 다시 세면
+            // 반드시 어긋난다 — 예전엔 `헤더 68px · 버튼 44px` 로 자리를 어림하고
+            // 내용은 `파일 수 × 22` 로 셌는데, 그 셈에는 섹션 머리 둘과 **펼친 diff
+            // 줄이 통째로 빠져 있었다.** 그래서 diff 를 펼치면 목록은 화면 몇 배로
+            // 길어지는데 상한은 파일 몇 개 몫 그대로라 끝까지 스크롤이 안 됐다.
+            let (visible_h, content_h) = self.git.col_list_extent;
             let max_scroll = (content_h - visible_h).max(0.0);
             let delta_px = lines as f32 * item_h;
             let next = (self.git.col_scroll - delta_px).clamp(0.0, max_scroll);
