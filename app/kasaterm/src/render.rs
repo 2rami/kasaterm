@@ -8104,13 +8104,33 @@ impl App {
         // 통과시켜야 프레임이 넘어간다.
         let banner_animating =
             STUDENT_SPRITE_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
+        // ultracode 혜성은 셀 그리드(`composed`) 위에 얹혀 66ms 마다 위상이 바뀐다.
+        // 그런데 이 게이트에 그 사유가 없어서, claude 가 idle 이면 통과하는 게 커서
+        // blink(530ms) 뿐이었다 — 혜성이 프레임당 2.8셀이 아니라 **22셀씩** 튀어
+        // 「흐르는 빛」이 아니라 순간이동으로 보였고, `KASATERM_NOBLINK=1` 이면 아예
+        // 멈췄다. 66ms 타이머(handler.rs)가 깨운 redraw 는 `chrome_dirty` 를 세우지
+        // 않으므로 여기서 직접 통과시켜야 한다.
+        //
+        // ⚠️`ULTRA_COMET_ANIMATING` 원자값을 쓰면 안 된다 — 그건 「어느 방에든
+        // ultracode pane 이 하나라도 있으면 true」라, 위 `pty_dirty`·`bar_animating`
+        // 을 보이는 pane 으로 좁힌 것을 통째로 되돌린다(다른 방의 ultracode 하나가
+        // 지금 보는 방을 상시 15fps 로 태운다). 이미 잡아 둔 `visible_panes` 로
+        // 좁힌다 — `pane_ultracode` 의 키는 `pane_claude_sid` 의 키(pane/pty id)라
+        // `visible_pane_ids()` 와 같은 네임스페이스다(보조 탭도 접혀 들어온다).
+        let comet_animating = self
+            .pane_ultracode
+            .iter()
+            .any(|id| visible_panes.contains(id));
         let rebuild = pty_dirty
             || self.chrome_dirty
             || blink_changed
             || version_animating
             || toast_animating
             || git_op_animating
-            || banner_animating;
+            || banner_animating
+            // 혜성은 그리드에 얹히므로 `bar_animating` 처럼 bar-only 경로로 두면 안 된다
+            // — 전체 프레임을 다시 그려야 위상이 반영된다.
+            || comet_animating;
         if !rebuild && !bar_animating {
             return;
         }
