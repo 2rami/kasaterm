@@ -3632,6 +3632,25 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
     ),
+    /// `POST /settings/action` 위임 — 웹뷰 설정의 버튼 하나를 네이티브 액션으로 태운다.
+    ///
+    /// 액션 이름을 문자열로 받는 건 네이티브가 이미 `SettingsAction` enum 하나로
+    /// 모여 있어서다. 여기서 그 이름을 그 변형으로 1:1 로 옮기기만 하므로 구현이
+    /// 둘로 갈릴 수가 없다.
+    ///
+    /// GUI 스레드여야 하는 이유가 액션마다 다르다 — `refresh-assets` 는 GPU
+    /// 텍스처를 축출하고, `select-theme` 은 그걸 안에서 부르며, 나머지는 `self` 의
+    /// 편집 버퍼(`theme_label_edit`)와 설정 저장을 만진다.
+    ///
+    /// **끝난 뒤** 회신한다. 세 캐시(테마 해석·로스터·GPU)가 그 사이에 비워지므로,
+    /// 부른 쪽이 회신을 받고 나서 다시 읽으면 새 상태가 보장된다.
+    /// `(액션, 테마 id, 새 이름, 회신)`.
+    SocketSettingsAction(
+        String,
+        Option<String>,
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
     /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
     /// 이미지 바이트를 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16)를 보내
     /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.
@@ -4517,7 +4536,7 @@ struct App {
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// Window-tab overflow windowing: index of the first tab shown in the
     /// strip. The strip shows a contiguous run of whole tabs (no partial
-    /// clipping — the renderer has no scissor); the wheel steps this, and
+    /// clipping — 이 띠는 클립을 안 세운다); the wheel steps this, and
     /// switch/new reveal the active tab via `win_tab_reveal`.
     win_tab_first: usize,
     /// How many window tabs the strip fit last frame. Written by the render

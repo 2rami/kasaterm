@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { postAction } from './api';
 import { faceUrl } from './types';
 import type { Character, SettingsCharacters, ThemeCard } from './types';
 
@@ -28,18 +30,91 @@ function Section({
   );
 }
 
+/// 카드·목록에서 같은 모양으로 쓰는 작은 버튼.
+function MiniButton({
+  label,
+  onClick,
+  disabled,
+  danger,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={(e) => {
+        // 카드 자체가 「이 테마 쓰기」 라서, 막지 않으면 버튼 하나 누를 때마다
+        // 테마까지 갈아 끼워진다.
+        e.stopPropagation();
+        onClick();
+      }}
+      className="px-2 py-1 text-[11px] disabled:opacity-40"
+      style={{
+        borderRadius: 'var(--kt-radius-sm)',
+        background: 'var(--kt-surface-hover)',
+        color: danger ? 'var(--kt-danger)' : 'var(--kt-text)',
+        boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 /// 테마 한 장. 미리보기 얼굴 셋 + 이름 + 「N명 · 쓰는 중」.
 ///
 /// 프사는 `theme` 을 붙여 그 폴더의 그림을 받는다 — 붙이지 않으면 활성 테마의
 /// 그림이 와서, 어느 카드를 봐도 같은 얼굴이 뜬다.
-function ThemeCardView({ card, active }: { card: ThemeCard; active: boolean }) {
+///
+/// 카드 전체가 「이 테마 쓰기」이고 관리 버튼은 hover 때만 보인다 — 네이티브와
+/// 같은 규칙이다. 늘 띄우면 카드 열두 장에 버튼 서른여섯 개라 정작 고르기가
+/// 안 보인다. `invisible` 로 숨기는 게 `opacity-0` 보다 맞다: 투명한 버튼은
+/// 여전히 눌리고 탭으로 잡혀서, 안 보이는 「치우기」가 카드 위에 남는다.
+function ThemeCardView({
+  card,
+  active,
+  busy,
+  renaming,
+  onSelect,
+  onAction,
+  onRenameStart,
+  onRenameEnd,
+}: {
+  card: ThemeCard;
+  active: boolean;
+  busy: boolean;
+  renaming: boolean;
+  onSelect: () => void;
+  onAction: (action: string, label?: string) => void;
+  onRenameStart: () => void;
+  onRenameEnd: () => void;
+}) {
+  // 번들은 폴더가 없어 이름도 못 바꾸고 치울 수도 없다(그림이 바이너리 안에 있다).
+  const managed = card.id !== '';
   return (
     <div
-      className="relative overflow-hidden px-4 py-3"
+      className="group relative overflow-hidden px-4 py-3"
+      // 카드를 `<button>` 으로 만들 수 없다 — 안에 관리 버튼이 들어가고 버튼 중첩은
+      // 잘못된 HTML 이다. role/tabIndex 로 같은 조작을 준다.
+      role="button"
+      tabIndex={0}
+      aria-current={active}
+      onClick={() => !active && onSelect()}
+      onKeyDown={(e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+          e.preventDefault();
+          if (!active) onSelect();
+        }
+      }}
       style={{
         borderRadius: 'var(--kt-radius-md)',
         background: active ? 'var(--kt-surface-active)' : 'var(--kt-surface)',
         boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
+        cursor: active ? 'default' : 'pointer',
       }}
     >
       {active && (
@@ -63,7 +138,45 @@ function ThemeCardView({ card, active }: { card: ThemeCard; active: boolean }) {
           />
         ))}
       </div>
-      <div className="mt-2 text-[14px] font-medium text-[var(--kt-text)]">{card.label}</div>
+
+      {managed && !renaming && (
+        <div className="invisible absolute right-3 top-3 flex gap-1 group-focus-within:visible group-hover:visible">
+          <MiniButton label="이름" disabled={busy} onClick={onRenameStart} />
+          <MiniButton label="폴더" disabled={busy} onClick={() => onAction('open-theme-dir')} />
+          <MiniButton
+            label="치우기"
+            danger
+            disabled={busy}
+            onClick={() => onAction('delete-theme')}
+          />
+        </div>
+      )}
+
+      {renaming ? (
+        <input
+          className="kt-field mt-2 w-full"
+          autoFocus
+          defaultValue={card.label}
+          onClick={(e) => e.stopPropagation()}
+          // 칸을 벗어나면 굳힌다 — 네이티브 이름 칸과 같은 시점이다.
+          onBlur={(e) => {
+            const next = e.currentTarget.value.trim();
+            if (next && next !== card.label) onAction('rename-theme', next);
+            else onRenameEnd();
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') {
+              // 되돌린 뒤 blur 가 또 저장하지 않도록 값을 먼저 원래대로.
+              e.currentTarget.value = card.label;
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      ) : (
+        <div className="mt-2 text-[14px] font-medium text-[var(--kt-text)]">{card.label}</div>
+      )}
       <div className="text-[12px] text-[var(--kt-text-mute)]">
         {card.count}명{active && ' · 쓰는 중'}
       </div>
@@ -71,16 +184,18 @@ function ThemeCardView({ card, active }: { card: ThemeCard; active: boolean }) {
   );
 }
 
-/// 테마를 새로 만드는 빈 칸. 네이티브 그리드의 마지막 칸과 같은 자리라 빼면
-/// 「나란히 비교」에서 칸 수가 어긋난다 — 대신 아직 안 눌리는 걸 흐림으로 말한다.
-function NewThemeCard() {
+/// 테마를 새로 만드는 칸. 목록 밖 버튼으로 빼지 않는 이유는 네이티브와 같다 —
+/// 테마가 늘어날수록 멀어져서, 정작 만들려는 사람이 못 찾는다.
+function NewThemeCard({ busy, onClick }: { busy: boolean; onClick: () => void }) {
   return (
-    <div
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onClick}
       // 높이를 못 박지 않는다 — grid stretch 라 카드와 같은 줄에 서면 알아서
       // 키가 맞고, 혼자 다음 줄로 떨어지면 얇은 띠로 남는다. 176px 을 박아 두면
       // 그 떨어진 줄이 빈 상자로 화면 하나를 먹는다.
-      className="flex cursor-not-allowed items-center justify-center py-6 opacity-40"
-      title="다음 단계에서 붙습니다"
+      className="flex items-center justify-center py-6 disabled:opacity-40"
       style={{
         borderRadius: 'var(--kt-radius-md)',
         // 있는 테마와 구별되게 점선. 살아 있는 카드는 실선 inset ring 이다.
@@ -89,7 +204,7 @@ function NewThemeCard() {
       }}
     >
       <span className="text-[13px]">+ 새 테마</span>
-    </div>
+    </button>
   );
 }
 
@@ -119,34 +234,41 @@ function CharacterCell({ c, onSelect }: { c: Character; onSelect: () => void }) 
   );
 }
 
-/// 아직 안 붙은 액션. 흐리게 두는 게 정직하다 — 눌리는 것처럼 그려 두면 눌러
-/// 보고 나서야 없는 기능인 걸 알게 된다.
-function PendingButton({ label }: { label: string }) {
-  return (
-    <button
-      type="button"
-      disabled
-      title="다음 단계에서 붙습니다"
-      className="cursor-not-allowed px-3 py-1.5 text-[13px] opacity-40"
-      style={{
-        borderRadius: 'var(--kt-radius-sm)',
-        background: 'var(--kt-surface-hover)',
-        color: 'var(--kt-text)',
-        boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
 export function ThemeTab({
   data,
   onSelect,
+  onChanged,
 }: {
   data: SettingsCharacters;
   onSelect: (c: Character) => void;
+  /// 액션이 끝난 뒤 로스터를 다시 읽는다. **파일이 진실**이라, 요청값으로 화면을
+  /// 그리면 저장 쪽에서 거부된 변경이 화면에만 남는다.
+  onChanged: () => Promise<void>;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
+  /// 이름을 고치는 중인 테마 id. 네이티브도 카드 안에서 바로 고친다.
+  const [renaming, setRenaming] = useState<string | null>(null);
+
+  async function run(action: string, args?: { id?: string; label?: string }) {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const out = await postAction(action, args);
+      // `error` 는 요청이 거부된 것(모르는 액션·못 쓰는 이름), `message` 는
+      // 네이티브가 하려던 말이다 — 성공에도 온다("테마를 바꿨어요…").
+      if (out.error) setNotice({ ok: false, msg: out.error });
+      else if (out.message) setNotice({ ok: out.ok, msg: out.message });
+      else if (!out.ok) setNotice({ ok: false, msg: '안 됐어요' });
+      await onChanged();
+    } catch (e) {
+      setNotice({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+      setRenaming(null);
+    }
+  }
+
   return (
     <div
       className="p-6"
@@ -156,6 +278,18 @@ export function ThemeTab({
         boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
       }}
     >
+      {/* 네이티브 토스트는 웹뷰 창에서 안 보인다 — 그 문구가 갈 자리가 여기다.
+          맨 위에 두는 이유는 「새로 여는 pane 부터 적용돼요」처럼 놓치면 안 되는
+          말이 섞여 오기 때문이다. */}
+      {notice && (
+        <p
+          className="mb-4 text-[12px]"
+          style={{ color: notice.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger)' }}
+        >
+          {notice.msg}
+        </p>
+      )}
+
       <Section title="Theme" hint="폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
           {data.themes.map((card) => (
@@ -163,9 +297,15 @@ export function ThemeTab({
               key={card.id || '(bundled)'}
               card={card}
               active={card.id === data.active_theme}
+              busy={busy}
+              renaming={renaming === card.id}
+              onSelect={() => void run('select-theme', { id: card.id })}
+              onAction={(action, label) => void run(action, { id: card.id, label })}
+              onRenameStart={() => setRenaming(card.id)}
+              onRenameEnd={() => setRenaming(null)}
             />
           ))}
-          <NewThemeCard />
+          <NewThemeCard busy={busy} onClick={() => void run('new-theme')} />
         </div>
       </Section>
 
@@ -173,9 +313,12 @@ export function ThemeTab({
         title="Persona"
         hint="켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터"
         right={
-          <span
-            className="relative inline-block h-[22px] w-[40px] shrink-0 opacity-60"
-            title="다음 단계에서 붙습니다"
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void run('toggle-persona')}
+            aria-pressed={data.persona_enabled}
+            className="relative inline-block h-[22px] w-[40px] shrink-0 disabled:opacity-40"
             style={{
               borderRadius: '11px',
               background: data.persona_enabled ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',
@@ -188,7 +331,7 @@ export function ThemeTab({
                 left: data.persona_enabled ? '21px' : '3px',
               }}
             />
-          </span>
+          </button>
         }
       />
 
@@ -197,9 +340,13 @@ export function ThemeTab({
         hint="테마 폴더의 sprites/ 에: <slug>-0..3 · -walk-0..5 · -wave-0..3 · -cheer-0..3 · -profile.png"
       >
         <div className="flex gap-2">
-          <PendingButton label="이미지 폴더 열기" />
-          <PendingButton label="로스터 열기" />
-          <PendingButton label="새로고침" />
+          <MiniButton
+            label="이미지 폴더 열기"
+            disabled={busy}
+            onClick={() => void run('open-students-dir')}
+          />
+          <MiniButton label="로스터 열기" disabled={busy} onClick={() => void run('open-roster')} />
+          <MiniButton label="새로고침" disabled={busy} onClick={() => void run('refresh-assets')} />
         </div>
       </Section>
 

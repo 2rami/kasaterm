@@ -569,6 +569,126 @@ impl ApplicationHandler<UserEvent> for App {
                 })));
                 return;
             }
+            UserEvent::SocketSettingsAction(action, id, label, reply) => {
+                // 성공 판정을 토스트로 하지 않는다 — Step 5 의 캐릭터 저장과 다른
+                // 점이다. 거기선 토스트가 뜨는 것 자체가 거부였지만, 여기선
+                // `select_theme`·`delete_theme` 이 **성공에도** 토스트를 띄운다.
+                // 그래서 판정은 액션마다 그 액션이 남긴 상태로 하고, 토스트 문구는
+                // 판정과 무관하게 그대로 실어 보낸다(웹뷰 창에선 네이티브 토스트가
+                // 안 보이니, 네이티브가 하려던 말은 여기서만 전달된다).
+                let toast_before = self.collab.toast.clone();
+                let arg = id.clone().unwrap_or_default();
+                // 네이티브에는 이 검사가 필요 없다 — 카드가 있는 것만 눌리기
+                // 때문이다. HTTP 는 아무 문자열이나 보낼 수 있고, 없는 id 로
+                // `select-theme` 을 태우면 `character_theme` 가 없는 폴더를 가리킨
+                // 채 굳는다. 그러면 로스터는 번들로 떨어지는데 「쓰는 중」 배지는
+                // **어느 카드에도 안 붙어서**, 사용자는 무엇이 켜져 있는지 화면에서
+                // 알 수 없게 된다(실측으로 그 상태를 만들었다).
+                let theme_exists =
+                    |id: &str| kasa_mcp::character::list_themes().iter().any(|(t, _)| t.as_str() == id);
+                let ok = match action.as_str() {
+                    "select-theme" if !arg.is_empty() && !theme_exists(&arg) => {
+                        Err(format!("'{arg}' 테마가 없어요"))
+                    }
+                    "select-theme" => {
+                        self.settings_apply(SettingsAction::SelectTheme(arg.clone()));
+                        Ok(socket::read_character_theme() == arg)
+                    }
+                    // 만들기는 성공하면 새 테마의 이름 칸을 포커스한다(사용자가
+                    // 곧바로 이름을 짓게) — 그 버퍼가 섰는지가 곧 성공 신호다.
+                    // 웹뷰에는 포커스 개념이 없으니 확인한 뒤 걷어낸다.
+                    "new-theme" => {
+                        self.settings_apply(SettingsAction::ExportTheme);
+                        let made = self.theme_label_edit.take().map(|(t, _)| t);
+                        self.settings_input = None;
+                        Ok(made.is_some())
+                    }
+                    // 네이티브의 3단(포커스 → 버퍼 → 커밋)을 그대로 태운다. 키
+                    // 이벤트 경로가 없어 버퍼를 직접 심는 건 testkit 하네스와 같다.
+                    "rename-theme" => {
+                        let next = label.clone().unwrap_or_default();
+                        let next = next.trim().to_string();
+                        if next.is_empty() {
+                            // 네이티브에는 이 상태가 없다 — 포커스하면 지금 이름이
+                            // 버퍼에 실려 있어서다. 막지 않으면 `theme.json` 의
+                            // label 이 빈 문자열로 굳어 이름 없는 카드가 선다.
+                            Err("이름은 비울 수 없어요".to_string())
+                        } else {
+                            self.settings_apply(SettingsAction::FocusThemeLabel(arg));
+                            if let Some((_, buf)) = self.theme_label_edit.as_mut() {
+                                *buf = next;
+                            }
+                            self.flush_theme_label();
+                            // 실패하면 `flush_theme_label` 이 버퍼를 남긴 채
+                            // 돌아온다(네이티브에선 사용자가 계속 고치는 자리다).
+                            // 웹뷰 요청엔 이어서 고칠 사람이 없으니 여기서 걷어야,
+                            // 다음 액션이 이 찌꺼기를 엉뚱한 테마에 흘려보내지 않는다.
+                            let failed = self.theme_label_edit.take().is_some();
+                            self.settings_input = None;
+                            Ok(!failed)
+                        }
+                    }
+                    // 번들은 폴더가 없어 치울 것도 없다 — 네이티브도 그 카드엔
+                    // 버튼을 안 그린다. 없는 테마를 「치웠다」고 답하지 않으려면
+                    // **있었는지**를 먼저 봐야 한다: 사라졌는지만 보면 처음부터
+                    // 없던 것도 성공으로 읽힌다(실측).
+                    "delete-theme" if arg.is_empty() => {
+                        Err("기본 테마는 치울 수 없어요".to_string())
+                    }
+                    "delete-theme" if !theme_exists(&arg) => {
+                        Err(format!("'{arg}' 테마가 없어요"))
+                    }
+                    "delete-theme" => {
+                        self.settings_apply(SettingsAction::DeleteTheme(arg.clone()));
+                        Ok(!theme_exists(&arg))
+                    }
+                    // 폴더 열기는 실패를 알 창구가 없다(`open_path` 는 OS 에
+                    // 던지고 끝). 번들은 열 폴더가 없다는 걸 네이티브가 토스트로
+                    // 말해 주고, 그 문구가 회신에 실린다 — 그래서 빈 id 는 통과.
+                    "open-theme-dir" if !arg.is_empty() && !theme_exists(&arg) => {
+                        Err(format!("'{arg}' 테마가 없어요"))
+                    }
+                    "open-theme-dir" => {
+                        self.settings_apply(SettingsAction::OpenThemeDir(arg));
+                        Ok(true)
+                    }
+                    "open-students-dir" => {
+                        self.settings_apply(SettingsAction::OpenStudentsDir);
+                        Ok(true)
+                    }
+                    "open-roster" => {
+                        self.settings_apply(SettingsAction::OpenCharactersJson);
+                        Ok(true)
+                    }
+                    "refresh-assets" => {
+                        self.settings_apply(SettingsAction::RefreshStudentAssets);
+                        Ok(true)
+                    }
+                    // 스위치는 켠 값이 파일에 남았는지로 판정한다 — 토글이라
+                    // 「눌렀다」만으로는 반영됐는지 알 수 없다.
+                    "toggle-persona" => {
+                        self.settings_apply(SettingsAction::ToggleClaudePersona);
+                        Ok(socket::read_claude_persona() == self.set_claude_persona)
+                    }
+                    other => Err(format!("모르는 액션이에요: {other}")),
+                };
+                let message = match (&toast_before, &self.collab.toast) {
+                    (_, None) => None,
+                    (None, Some((m, _))) => Some(m.clone()),
+                    (Some((bm, bt)), Some((m, t))) => (t != bt || m != bm).then(|| m.clone()),
+                };
+                let _ = reply.send(match ok {
+                    Ok(ok) => Ok(serde_json::json!({ "ok": ok, "message": message })),
+                    Err(e) => Err(e),
+                });
+                // 네이티브 설정 화면이 열려 있으면 같은 변경을 곧바로 보여야 한다.
+                // `refresh_student_assets` 를 지나는 액션은 스스로 repaint 하지만
+                // 나머지(만들기·치우기·이름)는 아니라, 이 한 줄이 없으면 다음 입력이
+                // 올 때까지 옛 목록이 남는다.
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketCapture(pane, path, max_w, reply) => {
                 self.arm_pane_capture(pane, path.clone(), *max_w, reply.clone());
                 // 무장만으로는 부족하다 — 여기서 한 프레임을 직접 그려야 리드백이

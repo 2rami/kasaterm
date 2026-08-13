@@ -1340,6 +1340,44 @@ async fn settings_character_handler(
     }
 }
 
+/// `POST /settings/action` — 설정 화면의 버튼 하나를 누른 것과 같은 일.
+/// body(JSON): `{"action": "select-theme", "id": "my-theme", "label": "새 이름"}`.
+///
+/// 액션별로 라우트를 파지 않은 이유는 네이티브가 이미 액션 enum 하나로 모여
+/// 있어서다 — 1:1 로 옮기면 구현이 둘로 갈릴 수가 없고, 네이티브에 버튼이 늘어도
+/// 여기와 프록시 목록에 손댈 게 없다. 나중에 갈라야 하면 그때 가르는 건 싸다.
+///
+/// `Content-Type` 을 보지 않는 것도 `/settings/character` 와 같은 이유다 —
+/// `text/plain` 으로 보내면 CORS simple request 라 preflight 가 아예 안 뜬다.
+///
+/// **스냅샷을 회신에 싣지 않는다.** 부른 쪽은 이 응답을 받은 뒤 `/settings/characters`
+/// 를 다시 읽는다. GUI 가 세 캐시(테마 해석·로스터·GPU)를 비운 **뒤에** 이 응답이
+/// 나가므로 그 다음 읽기는 새 상태가 보장되고, 스냅샷 만드는 코드가 두 벌이 되는
+/// 것도 막는다.
+async fn settings_action_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let bad = |msg: String| (cors(), Json(serde_json::json!({ "ok": false, "error": msg })));
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return bad(format!("bad body: {e}")),
+    };
+    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if action.is_empty() {
+        return bad("action required".to_string());
+    }
+    // 테마 폴더 이름은 경로 조각이 된다. 탈출은 저장 쪽(`safe_theme_id`)도 막지만
+    // 여기서 먼저 걸러 **이유를 웹에 돌려준다** — 저쪽 거부는 토스트로만 말한다.
+    let id = v.get("id").and_then(|x| x.as_str());
+    if id.is_some_and(|s| s.contains('/') || s.contains("..")) {
+        return bad("테마 이름에 쓸 수 없는 글자가 있어요".to_string());
+    }
+    let label = v.get("label").and_then(|x| x.as_str());
+    match backend.settings_action(action, id, label) {
+        Ok(v) => (cors(), Json(v)),
+        Err(e) => bad(e.to_string()),
+    }
+}
+
 /// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
 /// 쿼리 파라미터인 이유는 session-switch 와 같다(null-origin webview 의 CORS
 /// preflight 회피). surface id 의 '%' 는 %25 인코딩(encodeURIComponent) 권장
@@ -3751,6 +3789,7 @@ pub fn spawn_http_server_opts(
                 let design_tokens_backend = backend.clone();
                 let settings_chars_backend = backend.clone();
                 let settings_char_save_backend = backend.clone();
+                let settings_action_backend = backend.clone();
                 let character_face_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
@@ -3880,6 +3919,12 @@ pub fn spawn_http_server_opts(
                         "/settings/character",
                         post(move |body: String| {
                             settings_character_handler(settings_char_save_backend.clone(), body)
+                        }),
+                    )
+                    .route(
+                        "/settings/action",
+                        post(move |body: String| {
+                            settings_action_handler(settings_action_backend.clone(), body)
                         }),
                     )
                     .route(
