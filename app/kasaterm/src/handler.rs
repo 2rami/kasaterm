@@ -1485,6 +1485,25 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
+        // 설정 웹뷰 창. 위 패널들과 같은 격리가 **반드시** 필요하다 — 이 가드가
+        // 없으면 이 창의 Resized 가 아래로 흘러 `g.resize()` 를 이 창 크기로 불러
+        // 메인 뷰포트가 통째로 줄고(모든 게 2배 확대로 보인다), CloseRequested 는
+        // 패널 하나가 아니라 **앱 전체**를 종료시킨다.
+        if self.settings_web_window.as_ref().map(|w| w.id()) == Some(id) {
+            match &event {
+                WindowEvent::CloseRequested => self.close_settings_web_window(),
+                WindowEvent::Resized(size) => {
+                    if let Some(wv) = self.settings_web_webview.as_ref() {
+                        let _ = wv.set_bounds(wry::Rect {
+                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
         // 창의 surface·터미널 로직과 완전히 격리 — 이벤트를 kind 별 라우팅에 위임한다.
         if let Some(pos) = self.aux_windows.iter().position(|a| a.window.id() == id) {

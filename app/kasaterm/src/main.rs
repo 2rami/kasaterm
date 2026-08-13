@@ -5014,6 +5014,12 @@ struct App {
     /// 아로나 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
     arona_panel_window: Option<Arc<Window>>,
     arona_panel_webview: Option<wry::WebView>,
+    /// 설정 화면의 웹뷰 판(`/arona-ui/settings.html`). 네이티브 GPU 설정창
+    /// (`AuxWindowKind::Settings`)과 **한 번에 하나만** 뜬다 — 진입점이
+    /// `open_settings_window` 하나라 거기서 갈린다. 이행이 끝나면 네이티브
+    /// 쪽이 지워지고 이 필드만 남는다. webview 가 window 를 빌리므로 같이 소유.
+    settings_web_window: Option<Arc<Window>>,
+    settings_web_webview: Option<wry::WebView>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -5407,6 +5413,8 @@ impl App {
             board_panel_webview: None,
             arona_panel_window: None,
             arona_panel_webview: None,
+            settings_web_window: None,
+            settings_web_webview: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,

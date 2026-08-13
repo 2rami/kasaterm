@@ -437,6 +437,12 @@ pub(crate) enum AuxWindowKind {
     Room { window: usize, focus: Option<String> },
 }
 
+/// 설정 화면을 웹뷰 판으로 띄우는 이행 스위치. **기본 OFF** — 네이티브가 아직
+/// 정본이고, 갈래 A 가 화면을 다 옮긴 뒤 기본을 뒤집는다. `=0` 은 명시적 OFF.
+fn settings_web_enabled() -> bool {
+    std::env::var("KASATERM_SETTINGS_WEB").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// 편집기 창의 OS 타이틀 — 파일명(+ dirty ●). doc.path 는 String 이라 Path 로 감싼다.
 fn aux_editor_title(m: &MarkdownPane) -> String {
     let name = std::path::Path::new(m.doc.path.as_str())
@@ -1486,12 +1492,21 @@ impl App {
 
     /// 설정 별도창 진입점(기어·사이드바 항목·프사 클릭). 이미 열려 있으면 포커스만,
     /// `cat`/`student` 가 주어지면 그 페이지·학생으로 전환한다(딥링크).
+    ///
+    /// 웹뷰 이행의 **단일 분기점**이다 — 진입 경로가 여기 하나로 모여 있어서
+    /// settings.rs 를 한 줄도 안 건드리고 화면을 갈 수 있다.
     pub(crate) fn open_settings_window(
         &mut self,
         event_loop: &ActiveEventLoop,
         cat: Option<SettingsCat>,
         student: Option<String>,
     ) {
+        // 창 생성이 실패하면 아래 네이티브로 그대로 흐른다 — 이행 스위치가
+        // 설정 화면 자체를 못 열게 만드는 단일 실패점이 되면 안 된다.
+        // 딥링크(cat/student)는 웹 라우팅이 붙는 Step 4 이후에 이어진다.
+        if settings_web_enabled() && self.open_settings_web_window(event_loop) {
+            return;
+        }
         let Some(idx) = self
             .settings_window_idx()
             .or_else(|| self.spawn_aux_settings(event_loop))
