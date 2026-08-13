@@ -1864,6 +1864,21 @@ impl App {
                 eprintln!("[autosettings] 테마 치우기 '{id}'");
                 self.settings_apply(SettingsAction::DeleteTheme(id));
             }
+            // `rename-student:<새 이름>` — 상세 화면에 열린 캐릭터의 이름을 바꾼다.
+            // 이름은 로스터의 **키**라 잘못 쓰면 그 캐릭터가 통째로 사라지는데,
+            // 그걸 막는 방어(빈 이름·중복)가 실제로 먹는지는 이 손잡이로만 잰다.
+            a if a.starts_with("rename-student:") => {
+                let label = a.trim_start_matches("rename-student:").to_string();
+                eprintln!("[autosettings] 캐릭터 이름 → '{label}'");
+                self.settings_apply(SettingsAction::FocusStudentName);
+                self.students_name = label;
+                self.flush_student_name();
+                eprintln!("[autosettings] 저장된 이름 = {:?}", self.students_selected);
+            }
+            "close-student" => {
+                eprintln!("[autosettings] 캐릭터 목록으로");
+                self.settings_apply(SettingsAction::CloseStudent);
+            }
             // `select-theme:<id>` — 빈 id 는 번들로 되돌린다. 전환은 캐시 셋을 함께
             // 비워야 화면이 한 테마로 보이는데, 그게 실제로 먹었는지는 전환 **뒤**
             // 그린 화면으로만 확인된다(캡처가 이 다음에 걸린다).
@@ -1885,6 +1900,22 @@ impl App {
                     eprintln!("[autosettings] 팔레트 칸 {i} 포커스");
                     self.settings_apply(SettingsAction::StartCustomTheme);
                     self.settings_apply(SettingsAction::FocusPaletteHex(i));
+                }
+            }
+            // `picker-probe:<i>` — 클릭 없이 픽 로직만 검증: Hue 1/3(=120°),
+            // SV (0.75, 위에서 1/4) 를 찍고 결과 hex 를 로그로 남긴다.
+            // 기대값 #30bf30 — hsv(120, .75, .75). 캡처는 렌더를, 이건 수학을 본다.
+            a if a.starts_with("picker-probe:") => {
+                if let Ok(i) = a.trim_start_matches("picker-probe:").parse::<usize>() {
+                    self.settings_apply(SettingsAction::StartCustomTheme);
+                    self.settings_apply(SettingsAction::FocusPaletteHex(i));
+                    let r = (0.0, 0.0, 300.0, 300.0);
+                    self.picker_pick(&SettingsAction::PickerHue, r, (100.0, 8.0));
+                    self.picker_pick(&SettingsAction::PickerSV, r, (225.0, 75.0));
+                    eprintln!(
+                        "[picker-probe] 칸 {i} hsv={:?} hex={}",
+                        self.set_picker_hsv, self.set_palette_edit
+                    );
                 }
             }
             other => eprintln!("[autosettings] 모르는 액션 '{other}'"),

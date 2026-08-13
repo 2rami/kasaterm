@@ -85,6 +85,8 @@ pub(crate) struct SettingsCtx {
     /// custom_theme 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개
     /// 뒤에 ANSI 16개. 스냅샷에서 한 번 계산해 paint 가 파일을 다시 안 읽게 한다.
     pub palette_hex: Vec<String>,
+    /// 색 선택기의 HSV 상태(h: 0..360, s·v: 0..1) — SV 사각형·Hue 마커 위치.
+    pub picker_hsv: (f32, f32, f32),
     pub accent: String,
     pub font_size: f32,
     /// 전체 UI 배율(1.0 = 100%). 화면에 숫자로 보여야 얼마나 틀어졌는지 안다.
@@ -122,10 +124,13 @@ pub(crate) struct SettingsCtx {
     /// persona 멀티라인 캐럿(`student_caret`)과 분리 — 한 번에 한 필드만
     /// 포커스되지만, 저장소를 나눠 포커스 이동 시 캐럿이 튀지 않게 한다.
     pub settings_caret: usize,
-    /// Students 인라인 편집 — 선택 캐릭터·persona 버퍼·persona 캐럿(문자 인덱스).
+    /// 캐릭터 상세 — 열려 있는 캐릭터(None 이면 목록 화면)·persona 버퍼·캐럿.
     pub student_selected: Option<String>,
     pub student_persona: String,
     pub student_caret: usize,
+    /// 상세 화면의 이름 편집 버퍼. `student_selected` 는 **저장된** 이름이라
+    /// 타이핑 중에는 둘이 어긋난다 — 그림·persona 조회는 저장된 쪽을 쓴다.
+    pub student_name: String,
     /// Feedback 본문 버퍼·캐럿·진단 첨부 스위치.
     pub feedback_body: String,
     pub feedback_caret: usize,
@@ -649,6 +654,7 @@ impl App {
             has_custom_theme: s.get("custom_theme").is_some(),
             palette_edit: self.set_palette_edit.clone(),
             palette_hex: palette_hex_list(&s),
+            picker_hsv: self.set_picker_hsv,
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             font_size: self.font_size,
@@ -684,6 +690,7 @@ impl App {
             student_selected: self.students_selected.clone(),
             student_persona: self.students_persona.clone(),
             student_caret: self.students_caret,
+            student_name: self.students_name.clone(),
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
@@ -725,8 +732,8 @@ impl App {
             .settings_rects
             .iter()
             .find(|(_, r)| inside(*r, (cx, cy)))
-            .map(|(a, _)| a.clone());
-        let Some(action) = hit else {
+            .map(|(a, r)| (a.clone(), *r));
+        let Some((action, rect)) = hit else {
             // A click anywhere inside the settings area that misses a control
             // just drops text focus; clicks land here only while the screen is
             // open, so this never eats terminal input.
@@ -736,6 +743,14 @@ impl App {
             self.chrome_dirty = true;
             return true;
         };
+        // 피커 면은 dispatch 전에 가로챈다 — 클릭 지점이 곧 값인데(연속 좌표)
+        // 액션 enum 은 그걸 못 싣는다. press 에서 드래그를 잡아 release 까지
+        // 커서를 따라간다(auxwin CursorMoved/Released 가 짝).
+        if matches!(action, SettingsAction::PickerSV | SettingsAction::PickerHue) {
+            self.settings_drag = Some((action.clone(), rect));
+            self.picker_pick(&action, rect, (cx, cy));
+            return true;
+        }
         self.settings_apply(action);
         true
     }
@@ -886,8 +901,16 @@ impl App {
             SettingsAction::FocusPaletteHex(i) => {
                 self.set_palette_edit = self.palette_hex_at(i);
                 self.settings_caret = self.set_palette_edit.chars().count();
+                // 피커 시드 — RGB→HSV 역산은 여기 한 번뿐이다. 매 픽마다
+                // 역산하면 s=0·v=0 에서 색상(H)이 소실돼 핸들이 튄다.
+                if let Some(c) = theme::parse_hex(&self.set_palette_edit) {
+                    self.set_picker_hsv = rgb_to_hsv(c);
+                }
                 self.settings_input = Some(SettingsInput::PaletteHex(i));
             }
+            // 피커 면은 settings_click 이 좌표와 함께 가로챈다(picker_pick) —
+            // 좌표 없는 이 경로로 오면 고를 값이 없다.
+            SettingsAction::PickerSV | SettingsAction::PickerHue => {}
             SettingsAction::Accent(name) => {
                 theme::set_accent(&name);
                 socket::write_setting("accent", serde_json::Value::String(name));
@@ -1069,6 +1092,11 @@ impl App {
             SettingsAction::DeleteTheme(id) => self.delete_theme(&id),
             SettingsAction::FocusThemeLabel(id) => self.focus_theme_label(id),
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
+            SettingsAction::CloseStudent => self.close_student_edit(),
+            SettingsAction::FocusStudentName => {
+                self.settings_caret = self.students_name.chars().count();
+                self.settings_input = Some(SettingsInput::StudentName);
+            }
             SettingsAction::FocusFeedbackBody => {
                 self.feedback_caret = self.feedback_body.chars().count();
                 self.settings_input = Some(SettingsInput::FeedbackBody);
@@ -1149,6 +1177,7 @@ impl App {
                     Some((_, buf)) => buf,
                     None => return true,
                 },
+                SettingsInput::StudentName => &mut self.students_name,
                 SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
                     unreachable!("multiline_key 가 먼저 가로챈다")
                 }
@@ -1275,18 +1304,76 @@ impl App {
         true
     }
 
-    /// 다른 캐릭터를 편집 중이었으면 먼저 저장하고, 새 캐릭터의 원본 persona 를
-    /// 버퍼로 로드(캐럿은 끝으로). settings_click 의 학생 행 클릭과 별도창 딥링크
-    /// (프사 클릭 → Students 페이지 + 해당 학생 선택)가 공유한다.
+    /// 그 캐릭터의 상세 화면을 연다 — 편집 중이던 것은 먼저 저장하고, 원본
+    /// persona·이름을 버퍼로 로드한다. 카드 클릭과 별도창 딥링크(프사 클릭 →
+    /// Theme 페이지 + 그 캐릭터)가 공유한다.
+    ///
+    /// 포커스는 **주지 않는다**. 상세는 목록을 통째로 덮는 화면이라, 열자마자
+    /// 커서가 성격 칸에 있으면 뒤로 가려고 누른 키가 본문에 박힌다.
     pub(crate) fn select_student_for_edit(&mut self, name: String) {
         self.flush_student_persona();
+        self.flush_student_name();
         let persona = kasa_mcp::character::characters_json()
             .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
             .unwrap_or_default();
         self.students_caret = persona.chars().count();
         self.students_persona = persona;
+        self.students_name = name.clone();
         self.students_selected = Some(name);
-        self.settings_input = Some(SettingsInput::StudentPersona);
+        self.settings_input = None;
+        // 목록을 한참 내려서 골랐어도 상세는 맨 위부터 — 이어받으면 빈 화면이 뜬다.
+        self.settings_scroll = 0.0;
+    }
+
+    /// 상세를 닫고 목록으로. 편집 중이던 것은 여기서 굳힌다(persona 를 **먼저** —
+    /// 저장 키가 이름이라, 이름부터 바꾸면 옛 이름 자리에 쓰려다 못 찾는다).
+    pub(crate) fn close_student_edit(&mut self) {
+        self.flush_student_persona();
+        self.flush_student_name();
+        self.students_selected = None;
+        self.students_persona.clear();
+        self.students_name.clear();
+        self.settings_input = None;
+        self.settings_scroll = 0.0;
+    }
+
+    /// 이름 버퍼를 로스터에 굳힌다. 이름은 로스터의 **키**라 바꾸면 그 캐릭터의
+    /// persona·색·그림 조회가 통째로 새 이름을 따라간다 — 그래서 되돌릴 수 없는
+    /// 두 경우를 먼저 막는다: 빈 이름(그 캐릭터가 로스터에서 사라진다)과 중복
+    /// (로스터 빌드가 뒤엣것을 통째로 버려 한 명이 증발한다).
+    pub(crate) fn flush_student_name(&mut self) {
+        let Some(old) = self.students_selected.clone() else { return };
+        let new = self.students_name.trim().to_string();
+        if new == old {
+            return;
+        }
+        let reject = if new.is_empty() {
+            Some("이름은 비울 수 없어요".to_string())
+        } else if theme::character_slugs().iter().any(|(n, _)| *n == new) {
+            Some(format!("{new} 은(는) 이미 있어요"))
+        } else if kasa_mcp::character::update_member(
+            &old, "name", serde_json::Value::String(new.clone()),
+        )
+        .is_err()
+        {
+            Some("이름을 못 저장했어요".to_string())
+        } else {
+            None
+        };
+        if let Some(msg) = reject {
+            // 버퍼를 되돌린다 — 안 되돌리면 화면엔 새 이름이 남아 저장된 것처럼
+            // 보이는데 파일은 옛 이름 그대로다.
+            self.students_name = old;
+            self.set_toast(msg);
+            return;
+        }
+        // 로스터는 `&'static` 으로 구운 캐시라, 무효화하지 않으면 이름·색·슬러그가
+        // 옛 값 그대로 남는다.
+        theme::invalidate_roster();
+        socket::invalidate_theme_rows();
+        self.students_selected = Some(new);
+        self.regen_claude_shim();
+        self.repaint_all();
     }
 
     /// 현재 포커스된 설정 필드에 텍스트를 삽입(IME commit·한글 조합 완성 경로 공용).
@@ -1349,6 +1436,7 @@ impl App {
                 Some((_, buf)) => buf,
                 None => return,
             },
+            SettingsInput::StudentName => &mut self.students_name,
             SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
                 unreachable!("multiline_key 가 먼저 가로챈다")
             }
@@ -1361,7 +1449,9 @@ impl App {
         }
         if let SettingsInput::PaletteHex(i) = field {
             self.apply_palette_edit(i);
-        } else {
+        } else if !matches!(field, SettingsInput::ThemeLabel | SettingsInput::StudentName) {
+            // 이 둘은 settings.json 이 아니라 로스터에 산다 — 키 입력 경로와 같은
+            // 이유로 blur·Enter 때 한 번만 굳힌다.
             self.settings_save();
         }
         self.chrome_dirty = true;
@@ -1377,11 +1467,45 @@ impl App {
             .unwrap_or_else(|| "#000000".to_string())
     }
 
+    /// 색 선택기의 한 픽 — press(settings_click)와 드래그(auxwin CursorMoved)
+    /// 양쪽이 부른다. rect 밖 커서는 클램프해 가장자리 값으로 잇는다: 드래그
+    /// 중 손이 살짝 벗어났다고 픽이 끊기면 끝값(0·1·순수 원색)을 잡을 수 없다.
+    pub(crate) fn picker_pick(
+        &mut self,
+        action: &SettingsAction,
+        r: (f32, f32, f32, f32),
+        p: (f32, f32),
+    ) {
+        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else { return };
+        let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
+        let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
+        let (h, s, v) = self.set_picker_hsv;
+        self.set_picker_hsv = match action {
+            // 360.0 은 0.0 과 같은 색이지만 마커가 왼쪽 끝으로 감겨 보인다.
+            SettingsAction::PickerHue => ((rx * 360.0).min(359.9), s, v),
+            _ => (h, rx, 1.0 - ry),
+        };
+        let (h, s, v) = self.set_picker_hsv;
+        self.set_palette_edit = theme::hex_str(hsv_to_rgb(h, s, v));
+        self.settings_caret = self.set_palette_edit.chars().count();
+        self.apply_palette_edit(i);
+        self.chrome_dirty = true;
+    }
+
     /// 팔레트 hex 버퍼를 검증해 custom_theme 에 반영하고 즉시 다시 칠한다.
     /// 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친 값으로
     /// 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
     fn apply_palette_edit(&mut self, i: usize) {
         let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
+        // 타이핑으로 들어온 새 색이면 피커 핸들도 따라온다. 피커 픽이면 지금
+        // HSV 가 이미 이 색이라(변환 일치) 건드리지 않는다 — 무조건 역산하면
+        // s=0·v=0 을 지날 때마다 색상(H)이 0 으로 튄다.
+        {
+            let (h, s, v) = self.set_picker_hsv;
+            if hsv_to_rgb(h, s, v) != c {
+                self.set_picker_hsv = rgb_to_hsv(c);
+            }
+        }
         let s = socket::read_settings();
         let mut obj = match s.get("custom_theme").cloned() {
             Some(serde_json::Value::Object(m)) => m,
@@ -1584,15 +1708,22 @@ pub(crate) fn paint_settings(
     // reads as its own page instead of floating controls.
     let fx = ax + CAT_W + 40.0;
     let fw = (aw - CAT_W - 80.0).max(120.0).min(CONTENT_W);
+    // 캐릭터 상세는 페이지가 통째로 바뀐 것이라 제목도 그 캐릭터 것이어야 한다 —
+    // "Theme" 이 그대로 걸려 있으면 화면만 바뀌고 어디로 왔는지는 안 알려 주는 꼴이다.
+    let detail = ctx
+        .student_selected
+        .as_deref()
+        .filter(|_| ctx.cat == SettingsCat::Theme);
     g.draw_text(
-        fx, ay + 22.0, active_label,
+        fx, ay + 22.0, detail.unwrap_or(active_label),
         gpu::DrawOpts { font_size: 24.0, color: theme::text(), bold: true, italic: false },
     );
     // 제목 아래 설명 한 줄. 없으면 24px 제목이 허공에 뜬다 — Orca 는 섹션마다
     // `text-sm leading-6 text-muted-foreground` 문단을 두고, 그게 「이 페이지에서
     // 무엇을 정하는가」를 미리 말해 준다.
     g.draw_text(
-        fx, ay + 52.0, cat_blurb(ctx.cat),
+        fx, ay + 52.0,
+        if detail.is_some() { "사진과 이름, 성격을 여기서 정합니다" } else { cat_blurb(ctx.cat) },
         gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false },
     );
     g.rect(fx, ay + 78.0, fw, 1.0, theme::border());
@@ -1837,9 +1968,60 @@ pub(crate) fn paint_settings(
             // 없다: 프리셋은 불변, 편집은 복제본에.
             if ctx.theme == "custom" {
                 y = row_wide(g, fx, y, clip, "Palette",
-                    &["칸을 눌러 #rrggbb 를 치면 여섯 자리가 완성되는 즉시 적용돼요"]);
+                    &["칸을 고르면 선택기가 열려요 — 마우스로 고르거나 #rrggbb 를 쳐도 돼요"]);
                 let n = theme::PALETTE_KEYS.len();
                 let (cw, ch, pgap) = (294.0_f32, 30.0_f32, 8.0_f32);
+                // 색 선택기 — 포커스된 칸 바로 아래 뜬다(UI 색이면 격자 밑,
+                // ANSI 면 공유 필드 밑). SV 사각형은 셀 격자로 근사한다:
+                // 렌더러에 그라데이션이 없고, 4px 셀이면 눈에는 연속으로 읽힌다.
+                // hex 필드는 남긴다 — 정밀값 입력·복붙은 키보드가 빠르다
+                // (2026-08-13 지시: "마우스로 선택 … 키보드로 색을 어케쳐").
+                let picker = |g: &mut gpu::GpuRenderer,
+                              rects: &mut Vec<(SettingsAction, Rect)>,
+                              mut y: f32|
+                 -> f32 {
+                    let (ph, ps, pv) = ctx.picker_hsv;
+                    let (pw, sh) = (216.0_f32, 144.0_f32);
+                    if y > clip {
+                        let cell = 4.0_f32;
+                        let (cols, rows) = ((pw / cell) as i32, (sh / cell) as i32);
+                        for cyi in 0..rows {
+                            for cxi in 0..cols {
+                                let s = (cxi as f32 + 0.5) / cols as f32;
+                                let v = 1.0 - (cyi as f32 + 0.5) / rows as f32;
+                                let c = hsv_to_rgb(ph, s, v);
+                                g.rect(
+                                    fx + cxi as f32 * cell, y + cyi as f32 * cell,
+                                    cell, cell, [c[0], c[1], c[2], 255],
+                                );
+                            }
+                        }
+                        // 핸들 — 밝은 자리선 검정 링, 어두운 자리선 흰 링.
+                        let hx = fx + ps * pw;
+                        let hy = y + (1.0 - pv) * sh;
+                        let ring = if pv > 0.5 { [0, 0, 0, 255] } else { [255, 255, 255, 255] };
+                        circle_rect(g, hx - 6.0, hy - 6.0, 12.0, ring);
+                        let cc = hsv_to_rgb(ph, ps, pv);
+                        circle_rect(g, hx - 4.0, hy - 4.0, 8.0, [cc[0], cc[1], cc[2], 255]);
+                        g.hover_pointer |= inside((fx, y, pw, sh), ctx.cursor);
+                        rects.push((SettingsAction::PickerSV, (fx, y, pw, sh)));
+                    }
+                    y += sh + 8.0;
+                    let hh = 16.0_f32;
+                    if y > clip {
+                        let step = 3.0_f32;
+                        let nsteps = (pw / step) as i32;
+                        for k in 0..nsteps {
+                            let c = hsv_to_rgb(k as f32 / nsteps as f32 * 360.0, 1.0, 1.0);
+                            g.rect(fx + k as f32 * step, y, step, hh, [c[0], c[1], c[2], 255]);
+                        }
+                        let mx = (fx + (ph / 360.0) * pw).min(fx + pw - 1.5);
+                        g.rect(mx - 1.5, y - 2.0, 3.0, hh + 4.0, theme::text());
+                        g.hover_pointer |= inside((fx, y, pw, hh), ctx.cursor);
+                        rects.push((SettingsAction::PickerHue, (fx, y, pw, hh)));
+                    }
+                    y + hh + 12.0
+                };
                 for (i, (key, _)) in theme::PALETTE_KEYS.iter().enumerate() {
                     let x = fx + (i % 2) as f32 * (cw + pgap);
                     let cy = y + (i / 2) as f32 * (ch + pgap);
@@ -1874,6 +2056,9 @@ pub(crate) fn paint_settings(
                     rects.push((SettingsAction::FocusPaletteHex(i), r));
                 }
                 y += n.div_ceil(2) as f32 * (ch + pgap) + 4.0;
+                if matches!(ctx.input, Some(SettingsInput::PaletteHex(i)) if i < n) {
+                    y = picker(g, &mut rects, y);
+                }
                 y = row_wide(g, fx, y, clip, "Terminal ANSI",
                     &["터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)"]);
                 let sz = 30.0_f32;
@@ -1913,6 +2098,7 @@ pub(crate) fn paint_settings(
                             rects.push((SettingsAction::FocusPaletteHex(pi), fr));
                         }
                         y += 26.0 + pgap;
+                        y = picker(g, &mut rects, y);
                     }
                 }
                 if y > clip {
@@ -2418,6 +2604,12 @@ pub(crate) fn paint_settings(
             }
             content_bottom = y + 34.0;
         }
+        // 캐릭터를 고른 동안은 목록 대신 그 캐릭터만 — guard 로 가르는 건 아래
+        // 목록 arm 을 통째로 한 단 더 들여쓰지 않으려는 것뿐이다.
+        SettingsCat::Theme if ctx.student_selected.is_some() => {
+            let sel = ctx.student_selected.clone().unwrap_or_default();
+            content_bottom = student_detail(g, &mut rects, ctx, fx, fy, fw, clip, &sel);
+        }
         SettingsCat::Theme => {
             let mut y = fy;
             // ── 테마 고르기 ──────────────────────────────────────────────
@@ -2652,38 +2844,6 @@ pub(crate) fn paint_settings(
                     gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
                 );
                 rects.push((SettingsAction::SelectStudent(name.clone()), card));
-            }
-            // 고른 캐릭터의 편집 패널 — persona 와 "이 캐릭터의 그림 파일명".
-            if let Some(sel) = &ctx.student_selected {
-                y += 20.0;
-                let slug = ctx
-                    .characters
-                    .iter()
-                    .find(|(n, _)| n == sel)
-                    .and_then(|(_, s)| *s)
-                    .unwrap_or("");
-                y = row_wide(g, fx, y, clip, &format!("{sel} · persona"),
-                    &["성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
-                y += multiline_field(
-                    g, &mut rects, ctx, (fx, y, fw.min(560.0)), &ctx.student_persona,
-                    ctx.student_caret, SettingsInput::StudentPersona,
-                    SettingsAction::FocusStudentPersona, clip,
-                );
-                if !slug.is_empty() {
-                    y += 12.0;
-                    // 전체 규칙(위 Character images)이 아니라 **이 캐릭터의 실제
-                    // 파일명**을 적는다 — `<slug>` 를 자기 이름으로 바꿔 적는 그
-                    // 한 단계에서 사람은 틀린다.
-                    y = row_wide(g, fx, y, clip, &format!("{sel} 그림 바꾸기"),
-                        &[&format!("{slug}-0..3.png · {slug}-walk-0..5.png · {slug}-wave-0..3.png · {slug}-cheer-0..3.png · {slug}-profile.png")]);
-                    if y > clip {
-                        let r = chip(g, fx, y, "이 폴더에 넣기", ctx.cursor);
-                        rects.push((SettingsAction::OpenStudentsDir, r));
-                        let r2 = chip(g, fx + r.2 + 8.0, y, "새로고침", ctx.cursor);
-                        rects.push((SettingsAction::RefreshStudentAssets, r2));
-                    }
-                    y += 34.0;
-                }
             }
             content_bottom = y;
         }
@@ -3522,6 +3682,47 @@ fn row2(
     (cr, y + h)
 }
 
+/// HSV(h: 0..360, s·v: 0..1) → RGB. 색 선택기 전용 — 표준 육분면 공식.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    ]
+}
+
+/// RGB → HSV. 무채색(d≈0)은 h=0 으로 둔다 — 호출부(포커스 시드)가 그 손실을
+/// 알고, 이후로는 HSV 쪽(`set_picker_hsv`)을 정본으로 유지한다.
+fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
+    let (r, g, b) = (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= f32::EPSILON {
+        0.0
+    } else if (max - r).abs() <= f32::EPSILON {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if (max - g).abs() <= f32::EPSILON {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max <= f32::EPSILON { 0.0 } else { d / max };
+    (h, s, max)
+}
+
 /// custom_theme 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개 뒤에
 /// ANSI 16개. 파일에 적힌(파싱되는) 값이 우선이고, 없는 키는 base 프리셋 값.
 /// 포커스 시드(`palette_hex_at`)·화면 표시·ansi 배열 재구성이 전부 이 하나를
@@ -3750,6 +3951,98 @@ fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     let knob = r.3 - 6.0;
     let kx = if on { r.0 + r.2 - knob - 3.0 } else { r.0 + 3.0 };
     circle_rect(g, kx, r.1 + 3.0, knob, theme::text());
+}
+
+/// 캐릭터 상세 — 카드를 누르면 목록 **대신** 이 화면이 뜬다. 사진·이름·성격이
+/// 한 자리에 있어야 "이 캐릭터를 고친다"가 한 화면에서 끝난다.
+///
+/// 목록 아래에 이어 붙이지 않고 통째로 갈아 끼우는 이유: 79명 격자 밑에 편집
+/// 패널이 달리면, 고르려고 한참 내려간 사람이 고친 뒤 무엇을 눌렀는지 보려고
+/// 다시 올라가야 한다(거노 2026-08-13: "누르면 창이 바뀌던해서").
+///
+/// 반환값은 콘텐츠 바닥 y — 호출부의 스크롤 클램프가 그걸 쓴다.
+#[allow(clippy::too_many_arguments)]
+fn student_detail(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    ctx: &SettingsCtx,
+    fx: f32,
+    fy: f32,
+    fw: f32,
+    clip: f32,
+    sel: &str,
+) -> f32 {
+    let mut y = fy;
+    // 돌아가는 길을 맨 위에. 상세가 목록을 덮으므로 이게 없으면 설정 창을 닫았다
+    // 다시 여는 것 말고는 나올 방법이 없다.
+    if y > clip {
+        let r = chip(g, fx, y, "← 캐릭터 목록", ctx.cursor);
+        rects.push((SettingsAction::CloseStudent, r));
+    }
+    y += 34.0 + 18.0;
+
+    let slug = ctx
+        .characters
+        .iter()
+        .find(|(n, _)| n == sel)
+        .and_then(|(_, s)| *s)
+        .unwrap_or("");
+    // 프사는 크게 — 목록 카드에서 이미 작게 봤는데 여기서도 작으면 넘어온 값이
+    // 없다. 좁은 창에서는 오른쪽 열이 밀려나지 않을 만큼만 줄인다.
+    let face = 144.0f32.min((fw - 300.0).max(72.0));
+    let col_x = fx + face + 20.0;
+    let col_w = (fw - face - 20.0).max(160.0);
+    if y > clip {
+        if !render::draw_student_face(g, sel, fx, y, face) {
+            // 그림이 없으면 그 캐릭터의 색 판 — 칸을 비우면 이름 칸이 허공에 뜬다.
+            let accent = theme::character_accent(sel).unwrap_or([128, 128, 128, 255]);
+            round_rect(g, fx, y, face, face, theme::radius_md(), accent);
+        }
+        g.draw_text(
+            col_x, y + 2.0, "이름",
+            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        let r = (col_x, y + 22.0, col_w.min(280.0), 34.0);
+        let focused = ctx.input == Some(SettingsInput::StudentName);
+        text_field(
+            g, r, &ctx.student_name, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor,
+            if focused { &ctx.preedit } else { "" },
+        );
+        rects.push((SettingsAction::FocusStudentName, r));
+        // 슬러그는 고칠 수 없다 — 그림 파일 이름이 이걸로 정해져 있어서, 바꾸면
+        // 넣어 둔 그림이 통째로 안 붙는다. 그래서 보여만 준다.
+        let sub = if slug.is_empty() {
+            "그림 없음 — 로스터에 slug 가 비어 있어요".to_string()
+        } else {
+            format!("그림 파일은 {slug} 로 시작해요")
+        };
+        g.draw_text(
+            col_x, y + 64.0, &sub,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        let r1 = chip(g, col_x, y + 84.0, "이 폴더에 넣기", ctx.cursor);
+        rects.push((SettingsAction::OpenStudentsDir, r1));
+        let r2 = chip(g, col_x + r1.2 + 8.0, y + 84.0, "새로고침", ctx.cursor);
+        rects.push((SettingsAction::RefreshStudentAssets, r2));
+    }
+    y += face + 22.0;
+
+    y = row_wide(g, fx, y, clip, "성격",
+        &["말투·성격을 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
+    y += multiline_field(
+        g, rects, ctx, (fx, y, fw.min(560.0)), &ctx.student_persona,
+        ctx.student_caret, SettingsInput::StudentPersona,
+        SettingsAction::FocusStudentPersona, clip,
+    );
+
+    if !slug.is_empty() {
+        y += 14.0;
+        // 전체 규칙이 아니라 **이 캐릭터의 실제 파일명**을 적는다 — `<slug>` 를
+        // 자기 이름으로 바꿔 적는 그 한 단계에서 사람은 틀린다.
+        y = row_wide(g, fx, y, clip, "그림 파일 이름",
+            &[&format!("{slug}-0..3.png · {slug}-walk-0..5.png · {slug}-wave-0..3.png · {slug}-cheer-0..3.png · {slug}-profile.png")]);
+    }
+    y
 }
 
 /// 멀티라인 평문 편집기 — 배경 박스 + 접힌 줄 + 캐럿. 자란 높이를 돌려주므로
