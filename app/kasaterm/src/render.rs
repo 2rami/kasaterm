@@ -2039,37 +2039,7 @@ impl App {
         self.update_suggestion();
         let overlay = self.gpu_overlay_snapshot();
         self.sync_ime_cursor_area(&overlay);
-        // Cache the × close-button hit rects (logical) for the mouse
-        // handler, even before the GPU borrow below.
         let chrome_font = 14.0_f32;
-        let close_size = chrome_font + 4.0;
-        // × close sits inside the left tab, after [icon + title]. Approximate
-        // the proportional label width (wide glyphs ~1em, ascii ~0.55em) so
-        // the hit rect tracks the drawn glyph.
-        self.pane_header_rects = headers
-            .iter()
-            .map(|h| {
-                let label_w: f32 = h
-                    .label
-                    .chars()
-                    .map(|c| {
-                        if (c as u32) > 0x2000 {
-                            chrome_font
-                        } else {
-                            chrome_font * 0.55
-                        }
-                    })
-                    .sum();
-                let close_x = h.x + 8.0 + (chrome_font + 6.0) + 6.0 + label_w + 8.0;
-                let close = (
-                    close_x,
-                    h.y + (PANE_HEADER_HEIGHT - close_size) / 2.0,
-                    close_size,
-                    close_size,
-                );
-                (h.id.clone(), close)
-            })
-            .collect();
         // Markdown Render/Raw toggle lives in the pane action buttons
         // (drawn in the header loop), not a separate pill.
         // Session tabs live in a wry webview panel (like the git panel), not
