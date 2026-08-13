@@ -4401,10 +4401,6 @@ struct App {
     /// 순간 조합 중이던 음절을 **떠나는 쪽에** 확정시킨다 — 안 그러면 터미널에서
     /// 치던 글자가 편집기에 떨어지고, Backspace 는 그 잔재만 갉는다.
     ime_focus: Option<ImeFocus>,
-    /// (pane_id, close_rect) for every visible pane header. Populated
-    /// by `render_frame` and consumed by the MouseInput handler so a
-    /// click on the × button closes that pane.
-    pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// ghostty식 pane 핸들(⋮) hit rect: (pane id, logical rect). 상단 중앙에
     /// 평소 흐릿하게 상시 표시, 클릭=컨트롤 메뉴(Phase 3)·드래그=pane 이동(Phase 4).
     pane_handle_rects: Vec<(String, (f32, f32, f32, f32))>,
@@ -5205,7 +5201,6 @@ impl App {
             ime_active: false,
             hangul: kasa_ime::Composer::new(),
             ime_focus: None,
-            pane_header_rects: Vec::new(),
             pane_handle_rects: Vec::new(),
             pane_top_zones: Vec::new(),
             handle_hovered: false,
