@@ -2212,7 +2212,7 @@ impl App {
     /// Pure read of `windows.len()` so the render path and the mouse
     /// hit-test agree on every rect. Overflow: the strip shows a contiguous
     /// run of whole tabs starting at `win_tab_first` (no partial clipping —
-    /// the renderer has no scissor). This only clamps `first` into range;
+    /// 이 띠는 클립을 안 세운다). This only clamps `first` into range;
     /// keeping the *active* tab in view is `win_tab_reveal`'s job at
     /// switch/create time, so a free wheel-scroll is never yanked back.
     /// `i` 번 방의 pane id 들. 활성 방의 트리만 `pty_layout` 에 나가 있어 슬롯이
@@ -2287,8 +2287,8 @@ impl App {
         // Rows that fit above the "+" button; the dock strip eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
-        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데, 이
-        // 렌더러엔 scissor 가 없어서 **잘리지 않고 그대로 덮어 그려진다** — 화면은
+        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
+        // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
         let bottom_h =
             if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
@@ -2306,8 +2306,11 @@ impl App {
         let mut rows = Vec::new();
         let mut mini = Vec::new();
         // 펼친 방은 카드가 pane 수만큼 길어진다 — 고정 stride 를 쓰던 자리를 누적
-        // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(렌더러에 scissor 가
-        // 없어 반쪽 카드는 트레이를 침범한다).
+        // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(사이드바는 클립을
+        // 안 세워서 반쪽 카드가 트레이를 침범한다).
+        //
+        // 여기는 배치 계산이라 시저를 세워도 이 규칙은 남는다 — 이 rect 들은 그리기와
+        // 클릭 판정이 함께 쓰는 값이고, 클릭은 시저가 안 자른다.
         let mut y = top;
         for i in first..n {
             let leaves = self.window_leaves(i);
@@ -2351,8 +2354,9 @@ impl App {
                 closes.push((i, (tab_x + tab_w - cs - 3.0, y + 11.0, cs, cs)));
             }
             if list_h > 0.0 {
-                // 카드 안에 온전히 들어온 줄만 낸다 — scissor 가 없어 반쪽 줄은
-                // 카드 밖으로 삐져나온다. 그래서 목록이 아래에서 한 줄씩 드러난다.
+                // 카드 안에 온전히 들어온 줄만 낸다 — 사이드바는 클립을 안 세워서
+                // 반쪽 줄이 카드 밖으로 삐져나온다. 그래서 목록이 아래에서 한 줄씩
+                // 드러난다.
                 let bottom = y + h;
                 // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
                 // 이미 풀어 주므로 여기서 재귀할 것이 없다.
