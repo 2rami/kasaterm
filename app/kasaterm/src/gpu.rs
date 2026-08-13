@@ -4087,52 +4087,6 @@ impl GpuRenderer {
         ));
     }
 
-    /// `queue_image` 의 세로 클립 버전 — 박스가 pane 밖까지 이어질 때(스크롤로
-    /// 잘린 학생 배너) contain-fit 결과를 클립 범위와 교차시키고 UV 를 같은
-    /// 비율로 잘라, 스프라이트가 셀 스크롤과 함께 자연스럽게 잘려 나가게
-    /// 한다. 클립이 박스를 다 덮으면 `queue_image(zoom=1)` 와 동일. LOGICAL px.
-    pub fn queue_image_clipped(
-        &mut self,
-        id: &str,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        clip_y0: f32,
-        clip_y1: f32,
-    ) {
-        let Some(entry) = self.images.get(id) else { return };
-        let s = self.scale;
-        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
-        if bw <= 0.0 || bh <= 0.0 {
-            return;
-        }
-        let (iw, ih) = (entry.w as f32, entry.h as f32);
-        let fit = (bw / iw).min(bh / ih).min(1.0);
-        let (dw, dh) = (iw * fit, ih * fit);
-        let dx = bx + (bw - dw) * 0.5;
-        let dy = by + (bh - dh) * 0.5;
-        let top = dy.max(clip_y0 * s);
-        let bot = (dy + dh).min(clip_y1 * s);
-        if bot <= top {
-            return;
-        }
-        let (uv_y0, uv_y1) = ((top - dy) / dh, (bot - dy) / dh);
-        self.image_quads.push((
-            id.to_string(),
-            CellInstance {
-                cell_px: [dx, top, dw, bot - top],
-                uv_min: [0.0, uv_y0],
-                uv_max: [1.0, uv_y1],
-                fg_rgba: [1.0, 1.0, 1.0, 1.0],
-                flags: CellInstance::FLAG_COLOR,
-                ..Default::default()
-            },
-            self.chrome.len() as u32,
-            self.cur_clip_phys(),
-        ));
-    }
-
     /// `queue_image` 의 전경(chrome 위) 버전 — icon 패스로 그려져 셀 글리프·
     /// rect 위에 뜬다(학생 걷기 도트 등 장식 스프라이트용). 박스 안 contain-fit
     /// 후 가로 중앙·**바닥 정렬**(발이 박스 바닥에 닿게). 좌표는 LOGICAL px.
