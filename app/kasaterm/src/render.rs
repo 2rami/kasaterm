@@ -9479,6 +9479,49 @@ fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
+/// 테마 목록의 미리보기 얼굴 — **지정한 그림 하나**를 그린다.
+///
+/// `draw_student_face` 와 갈라 두는 이유가 있다. 그건 "지금 고른 테마의 그림"을
+/// 찾으므로, 테마 목록처럼 **여러 테마를 나란히** 놓는 자리에서는 전부 같은
+/// 얼굴이 된다 — 고르기 전에 무엇을 고르는지 보여 주는 게 목적인 화면에서 그건
+/// 아무것도 안 보여 주는 것과 같다. `src` 가 파일이면 그 png 를, `None` 이면
+/// 바이너리에 박힌 번들 그림을 쓴다(번들 테마 카드).
+///
+/// 키가 서로 다르므로 `student:` 캐시와 섞이지 않는다 — 테마를 바꿔도
+/// `drop_images_with_prefix("student:")` 가 이 미리보기를 건드리지 않고, 대신
+/// 테마 목록이 바뀔 때 `theme:` 접두사로 따로 비운다.
+pub(crate) fn draw_theme_face(
+    g: &mut gpu::GpuRenderer,
+    theme_id: &str,
+    slug: &str,
+    src: Option<&std::path::Path>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> bool {
+    let key = format!("theme:{theme_id}:{slug}");
+    if !g.has_image(&key) {
+        let decoded = match src {
+            Some(p) => std::fs::read(p)
+                .ok()
+                .and_then(|b| image::load_from_memory(&b).ok())
+                .map(|i| i.to_rgba8()),
+            None => student_profile_png(slug)
+                .and_then(|b| image::load_from_memory(b).ok())
+                .map(|i| i.to_rgba8()),
+        };
+        let Some(img) = decoded else { return false };
+        let (iw, ih) = img.dimensions();
+        g.upload_image(&key, &img.into_raw(), iw, ih);
+    }
+    if !g.has_image(&key) {
+        return false;
+    }
+    g.queue_image_above(&key, x, y, w, h);
+    true
+}
+
 /// 테마 전환이 걷히는 데 걸리는 시간. 눈이 "무엇이 바뀌었나"를 읽을 만큼은 길고,
 /// 다음 클릭을 기다리게 할 만큼 길지는 않은 자리.
 pub(crate) const THEME_FX_SECS: f32 = 0.34;
@@ -10855,8 +10898,13 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 /// 문장부호라 「간·창별 막대) → … Manage Accounts…」 같은 평범한 답변 줄이 잡혀
 /// 학생이 본문 위를 걸어다녔다(2026-08-12 지적). 그래서 두 가지를 못 박는다:
 ///   ① 글리프가 그 행의 **첫** non-blank 여야 한다(본문 중간의 점은 무시).
-///   ② 글리프와 줄임표 사이가 ASCII 여야 한다 — 스피너 동사는 claude code 가
-///      찍는 영어다("Cerebrating…"). 한국어 본문은 여기서 전부 떨어진다.
+///   ② 줄임표 **뒤**에 `(3m 19s · ↓ 14.2k tokens)` 같은 경과시간 괄호가 와야 한다.
+///
+/// ②를 처음엔 "글리프와 줄임표 사이가 ASCII"로 뒀는데 그게 **진짜 스피너를 통째로
+/// 죽였다** — 동사가 영어라는 전제가 틀렸다. claude 는 한국어로도 찍는다:
+/// `· claude 테마 자동 연동 구현 중… (3m 19s · ↓ 14.2k tokens)`. 그래서 working 인
+/// pane 의 학생이 안 걸었다(거노 2026-08-13 지적). 언어에 안 묶이는 표식은 동사가
+/// 아니라 뒤에 붙는 경과시간이다.
 pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
     if first >= 8 {
@@ -10879,12 +10927,12 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
         return None;
     }
-    let verb = rest.split('…').next().filter(|_| rest.contains('…'))?;
-    (!verb.trim().is_empty()
-        && verb
-            .chars()
-            .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '-'))
-    .then_some(first)
+    // 줄임표 **뒤**의 `(3m 19s · ↓ 14.2k tokens)` 가 스피너의 진짜 표식이다. 숫자로
+    // 시작하고 초 단위가 들어 있는 괄호를 요구한다.
+    let tail = rest.split_once('…')?.1;
+    let inside = tail.split_once('(')?.1;
+    let head = inside.split_once(')').map_or(inside, |(h, _)| h);
+    (head.starts_with(|c: char| c.is_ascii_digit()) && head.contains('s')).then_some(first)
 }
 
 /// 승인 대기 도트가 설 자리 — 질문 헤더 행("Do you want to proceed", 없으면 첫
@@ -11609,9 +11657,22 @@ mod spinner_tests {
         // 가운뎃점으로 시작하는 한국어 목록 줄.
         let bullet = vec![row_from("· 임계 60/80%, 문구까지 Orca 그대로…")];
         assert_eq!(find_claude_spinner(&bullet), None);
-        // 별표로 시작해도 뒤가 한국어면 스피너가 아니다.
+        // 별표로 시작해도 경과시간 괄호가 없으면 스피너가 아니다.
         let star = vec![row_from("✻ 계정 메뉴를 다시 그렸어요…")];
         assert_eq!(find_claude_spinner(&star), None);
+        // 줄임표 뒤에 괄호가 있어도 경과시간이 아니면 본문이다.
+        let paren = vec![row_from("· 셋을 고쳤어요… (아래 표 참고)")];
+        assert_eq!(find_claude_spinner(&paren), None);
+    }
+
+    #[test]
+    fn spinner_reads_korean_verb() {
+        // 동사가 한국어인 진짜 스피너 — 뒤의 경과시간이 표식이다. 이걸 놓치면
+        // working 인 pane 의 학생이 안 걷는다(2026-08-13 회귀).
+        let ko = vec![row_from("· claude 테마 자동 연동 구현 중… (3m 19s · ↓ 14.2k tokens)")];
+        assert_eq!(find_claude_spinner(&ko), Some((0, 0)));
+        let en = vec![row_from("✻ Cerebrating… (12s · ↑ 2.1k tokens)")];
+        assert_eq!(find_claude_spinner(&en), Some((0, 0)));
     }
 }
 
