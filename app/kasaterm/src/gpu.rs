@@ -1008,13 +1008,23 @@ impl GpuRenderer {
         self.draw_text_inner(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY, true)
     }
 
-    /// `draw_text` with hard left/right edges (logical px): a glyph that would
-    /// cross either edge is skipped, but the pen keeps advancing so the returned
-    /// width stays accurate. This renderer has no scissor (see render loop), so
-    /// a Raw-editor pane's long code line would otherwise bleed past the pane
-    /// (right) or, once panned by horizontal scroll, into the line-number gutter
-    /// (left). Pass the pane's right edge and the gutter's right edge to fence
-    /// the text in on both sides.
+    /// `draw_text` 에 좌우 울타리(logical px)를 세운 것. Raw 편집기의 긴 코드 줄이
+    /// pane 오른쪽으로 넘치거나, 가로 스크롤로 밀렸을 때 줄번호 여백(왼쪽)을 침범하는
+    /// 것을 막는다 — pane 오른쪽 끝과 여백의 오른쪽 끝을 넘기면 양쪽이 막힌다.
+    ///
+    /// **계약(2026-08-13 개정): 이건 가로 컬링이지 클리핑이 아니다.** 잘라내기의
+    /// 보증은 [`push_clip`](Self::push_clip) 이 세우는 시저가 한다. 이 함수는 울타리
+    /// 밖으로 **완전히** 나간 글리프만 버려서 인스턴스를 아끼고, 걸친 글리프는
+    /// 그대로 그린 뒤 시저가 반으로 자르게 둔다. 브라우저와 같은 모양이다.
+    ///
+    /// 예전에는 걸친 글리프를 통째로 버렸는데(= 클리핑을 글리프 단위로 흉내), 그러면
+    /// 경계에서 글자가 반쯤 잘리는 대신 **툭 사라진다**. "여기서 끝난 게 아니라
+    /// 이어진다" 는 신호가 없어져 읽는 사람이 잘린 줄인 줄 모른다.
+    ///
+    /// 그래서 울타리가 유한하면 **이 함수가 자기 시저를 직접 세운다**. 호출부 다섯
+    /// 중 넷(`draw_raw_editor`·최근 커밋 목록·`draw_find_bar`)은 바깥에 클립이 없어,
+    /// 세워 주지 않으면 완화가 그냥 "울타리 밖으로 새는" 회귀가 된다.
+    /// 세로는 건드리지 않는다 — 지금 서 있는 클립과 교집합이라 그게 그대로 남는다.
     pub fn draw_text_clipped(
         &mut self,
         x: f32,
@@ -1051,6 +1061,16 @@ impl GpuRenderer {
         let fg = srgb_rgba_to_linear(opts.color);
         let clip_l = clip_left * s;
         let clip_px = clip_right * s;
+        // 울타리가 유한하면 그 자리에 시저를 세운다. 무한(= `draw_text`)이면 아무것도
+        // 안 세운다 — 이 경로가 압도적으로 흔해서, 여기에 run 하나라도 얹으면 세그먼트가
+        // 라벨 수만큼 는다.
+        let fenced = clip_left.is_finite() || clip_right.is_finite();
+        if fenced {
+            let (fw, fh) = (self.config.width as f32 / s, self.config.height as f32 / s);
+            let l = if clip_left.is_finite() { clip_left } else { 0.0 };
+            let r = if clip_right.is_finite() { clip_right } else { fw };
+            self.push_clip(l, 0.0, (r - l).max(0.0), fh);
+        }
         let mut pen = x * s;
         for ch in text.chars() {
             if ch == ' ' {
@@ -1069,7 +1089,9 @@ impl GpuRenderer {
             };
             let glyph_x = pen + entry.bearing_x as f32;
             let glyph_y = baseline_px - entry.bearing_y as f32;
-            if glyph_x < clip_l || glyph_x + entry.px_w as f32 > clip_px {
+            // 컬링이지 클리핑이 아니다 — **완전히** 밖일 때만 버린다. 걸친 글리프는
+            // 그려서 위에서 세운 시저가 반으로 자르게 둔다.
+            if glyph_x + entry.px_w as f32 <= clip_l || glyph_x >= clip_px {
                 pen += Self::pen_step(ch, entry.px_w as f32, entry.advance, size_px as f32);
                 continue;
             }
@@ -1082,6 +1104,12 @@ impl GpuRenderer {
             });
             pen += Self::pen_step(ch, entry.px_w as f32, entry.advance, size_px as f32);
         }
+        if fenced {
+            self.pop_clip();
+        }
+        // 버린 글리프도 `pen_step` 만큼은 전진시켰으므로 이 값은 완화 전후가 같다.
+        // git 칼럼 헤더(`경로 : 브랜치 ↑n ↓n`)가 이걸로 요소를 이어붙이고 히트렉트까지
+        // 만든다 — 여기가 흔들리면 배치가 통째로 어긋난다.
         pen / s
     }
 
@@ -3424,12 +3452,21 @@ impl GpuRenderer {
     /// 클립이 방금 바뀌었음을 기록한다. 같은 chrome 위치에 두 번 기록되면 뒤엣것만
     /// 살아남게 덮어쓴다 — `push_clip` 직후 `pop_clip` 처럼 사이에 아무것도 안 그린
     /// 경우 세그먼트가 빈 채로 쌓이는 것을 막는다.
+    ///
+    /// 그리고 **앞과 값이 같아진 run 은 지운다.** 세그먼트를 가르지 않으니 draw call
+    /// 만 하나 늘 뿐이다. 이게 있어야 `draw_text_clipped` 를 줄마다 부르는 편집기가
+    /// 세그먼트 N 개가 아니라 하나로 접힌다 — pop 이 남긴 run 을 다음 줄의 push 가
+    /// 같은 인덱스에서 덮어써 앞 run 과 같은 값이 되기 때문이다.
     fn note_clip(&mut self) {
         let at = self.chrome.len() as u32;
         let cur = self.cur_clip_phys();
         match self.clip_runs.last_mut() {
             Some((i, c)) if *i == at => *c = cur,
             _ => self.clip_runs.push((at, cur)),
+        }
+        let n = self.clip_runs.len();
+        if n >= 2 && self.clip_runs[n - 1].1 == self.clip_runs[n - 2].1 {
+            self.clip_runs.pop();
         }
     }
 
