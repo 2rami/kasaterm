@@ -5853,29 +5853,31 @@ impl App {
                         *inset = inset.max(t);
                     }
                     // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
-                    // ··· 핸들을 생략한다 — 중복 진입점 제거.
-                    if headered.contains(fid.as_str()) {
-                        continue;
-                    }
-                    // ⋮ 핸들 — 상단 중앙. 평소엔 완전히 숨김. pane 상단 30% 띠에
-                    // 커서가 들어오면 흐릿하게 등장하고, ⋮ 바로 위로 가면 진해진다
-                    // (그때 손모양 커서 — handler 측). 클릭=메뉴·드래그=이동.
+                    // ··· 핸들은 생략한다 — 중복 진입점 제거. 단 메뉴 자체는 그린다:
+                    // 헤더 우클릭이 이 메뉴를 열어 상단바를 다시 접는 유일한 입구다
+                    // (2026-08-13 지적: 점3개로 만든 헤더를 되돌릴 길이 없었다).
+                    let is_headered = headered.contains(fid.as_str());
                     let hx = fx + (fw - HANDLE) / 2.0;
                     let hy = fy + HMARGIN;
-                    let on_handle = hmx >= hx && hmx <= hx + HANDLE
-                        && hmy >= hy && hmy <= hy + HANDLE;
-                    let zone_h = fbox_h * 0.30;
-                    let in_zone = hmx >= *fx && hmx <= fx + fw
-                        && hmy >= *fy && hmy <= fy + zone_h;
-                    let isz = 16.0_f32;
-                    // glow/chip 없이 ⋮ 아이콘 자체만 숨김→흐릿→진함 3단계.
-                    if on_handle || in_zone {
-                        g.queue_icon("ellipsis-horizontal",
-                            hx + (HANDLE - isz) / 2.0, hy + (HANDLE - isz) / 2.0, isz,
-                            if on_handle { theme::text() } else { theme::with_alpha(theme::text(), 0x66) });
+                    if !is_headered {
+                        // ⋮ 핸들 — 상단 중앙. 평소엔 완전히 숨김. pane 상단 30% 띠에
+                        // 커서가 들어오면 흐릿하게 등장하고, ⋮ 바로 위로 가면 진해진다
+                        // (그때 손모양 커서 — handler 측). 클릭=메뉴·드래그=이동.
+                        let on_handle = hmx >= hx && hmx <= hx + HANDLE
+                            && hmy >= hy && hmy <= hy + HANDLE;
+                        let zone_h = fbox_h * 0.30;
+                        let in_zone = hmx >= *fx && hmx <= fx + fw
+                            && hmy >= *fy && hmy <= fy + zone_h;
+                        let isz = 16.0_f32;
+                        // glow/chip 없이 ⋮ 아이콘 자체만 숨김→흐릿→진함 3단계.
+                        if on_handle || in_zone {
+                            g.queue_icon("ellipsis-horizontal",
+                                hx + (HANDLE - isz) / 2.0, hy + (HANDLE - isz) / 2.0, isz,
+                                if on_handle { theme::text() } else { theme::with_alpha(theme::text(), 0x66) });
+                        }
+                        handle_rects.push((fid.clone(), (hx, hy, HANDLE, HANDLE)));
+                        zones.push((fid.clone(), (*fx, *fy, *fw, zone_h)));
                     }
-                    handle_rects.push((fid.clone(), (hx, hy, HANDLE, HANDLE)));
-                    zones.push((fid.clone(), (*fx, *fy, *fw, zone_h)));
                     // ⋮ 메뉴 열림 → 이 pane ⋮ 아래 버튼3개(좌우분할·상하분할·닫기).
                     if self.handle_menu.as_deref() == Some(fid.as_str()) {
                         // 상태바(footer) 토글 아이콘은 현재 표시 상태를 그대로
@@ -5925,7 +5927,13 @@ impl App {
                             (2.0, (win_px.0 / scale - mw - 2.0).max(2.0))
                         };
                         mx = mx.clamp(lo, hi);
-                        let my = hy + HANDLE + 3.0;
+                        // 앵커: ⋮ 핸들 아래 / 헤더 pane 은 헤더 띠 바로 아래(핸들이
+                        // 없고, 띠 위에 겹치면 우클릭한 자리가 가려진다).
+                        let my = if is_headered {
+                            fy + PANE_HEADER_HEIGHT + 3.0
+                        } else {
+                            hy + HANDLE + 3.0
+                        };
                         round_rect(g, mx, my, mw, mh, theme::radius_sm(), theme::border());
                         round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
                             theme::radius_sm() - 1.0, theme::surface_hover());

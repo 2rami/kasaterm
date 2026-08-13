@@ -1635,6 +1635,156 @@ impl App {
         self.cursor_px = (cx, cy);
         eprintln!("[autoinfo] act={act} pid={pid} at ({cx:.0},{cy:.0})");
     }
+    /// 스크롤을 **경계에 걸친 자리**에 세워 두는 구멍. 잘라내기(시저) 작업은
+    /// "위로 반쯤 나간 행이 헤더를 덮나"를 봐야 하는데, 그 상태는 목록을 조금
+    /// 밀어야만 나온다 — 스크롤이 0 이면 첫 행이 마침 경계에 딱 붙어 있어 클리핑이
+    /// 있으나 없으나 그림이 같고, 그래서 **없는 클리핑이 통과해 버린다**.
+    ///
+    /// - `KASATERM_AUTOCOLSCROLL="<탭>:<px>"` — 우측 칼럼을 열고 그 탭으로 바꾼 뒤
+    ///   본문을 `px` 만큼 민다. 탭은 `sessions` | `mcp` | `info` | `git`.
+    /// - `KASATERM_AUTOFTSCROLL="<px>"` — 파일트리를 켜고 그만큼 민다.
+    /// - `KASATERM_AUTOGITSCROLL="<px>"` — `AUTOCOLSCROLL="git:<px>"` 의 준말.
+    /// - `_MS` 로 시각을 옮긴다(기본 5000). 캡처(`AUTOCAPTURE_MS`)보다 앞에 둘 것.
+    ///
+    /// 스크롤 값은 그리기 쪽 `clamp` 가 다시 잡는다 — 목록이 짧아 밀 데가 없으면
+    /// 0 으로 돌아오고, 로그에 요청값과 실제값이 함께 찍혀 "하네스는 돌았는데
+    /// 화면이 안 움직인 것"과 "하네스가 안 돈 것"이 구분된다.
+    ///
+    /// **두 단계로 나뉜다.** 먼저 칼럼을 열어 탭만 세우고, 1.5초 뒤에 스크롤을
+    /// 넣는다. 세션·MCP·Info 목록은 전부 워커 스레드가 채우므로(디스크 stat·`ps`),
+    /// 탭을 연 프레임에는 아직 0행이다 — 그 자리에서 밀면 clamp 가 통째로 먹고
+    /// **스크롤이 0 인 화면을 "밀어 봤다"고 찍게 된다**.
+    /// `AUTOCOLSCROLL`(또는 `AUTOGITSCROLL` 준말)을 `(탭, 픽셀)` 로. 두 단계가
+    /// 같은 해석을 쓰도록 여기 한 곳에 둔다 — 열 때와 밀 때가 다른 탭을 고르면
+    /// 「열긴 열었는데 안 밀린다」로 끝난다.
+    fn autocolscroll_spec() -> Option<(crate::state::SideTab, f32)> {
+        use crate::state::SideTab;
+        let spec = std::env::var("KASATERM_AUTOCOLSCROLL").ok().or_else(|| {
+            std::env::var("KASATERM_AUTOGITSCROLL").ok().map(|px| format!("git:{px}"))
+        })?;
+        let Some((tab, px)) = spec.split_once(':') else {
+            eprintln!("[autocolscroll] 형식은 \"<탭>:<px>\" 다 — 받은 것: {spec:?}");
+            return None;
+        };
+        let px = match px.trim().parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("[autocolscroll] 픽셀이 숫자가 아니다: {px:?}");
+                return None;
+            }
+        };
+        let tab = match tab.trim() {
+            "sessions" => SideTab::Sessions,
+            "mcp" => SideTab::Mcp,
+            "info" => SideTab::Info,
+            "git" => SideTab::Git,
+            other => {
+                eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git");
+                return None;
+            }
+        };
+        Some((tab, px))
+    }
+
+    pub(crate) fn run_pending_autocolscroll(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static OPENED: AtomicBool = AtomicBool::new(false);
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let any = std::env::var_os("KASATERM_AUTOCOLSCROLL").is_some()
+                || std::env::var_os("KASATERM_AUTOFTSCROLL").is_some()
+                || std::env::var_os("KASATERM_AUTOGITSCROLL").is_some();
+            any.then(|| {
+                let ms: u64 = std::env::var("KASATERM_AUTOCOLSCROLL_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5000);
+                Instant::now() + std::time::Duration::from_millis(ms)
+            })
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < *due {
+            return;
+        }
+        if !OPENED.swap(true, Ordering::Relaxed) {
+            if let Some(tab) = Self::autocolscroll_spec().map(|(t, _)| t) {
+                if !self.git.col_visible {
+                    self.toggle_git_col();
+                }
+                self.info.tab = tab;
+                self.chrome_dirty = true;
+                eprintln!("[autocolscroll] 칼럼 열림 — 목록이 차기를 1.5초 기다린다");
+            }
+            return;
+        }
+        if Instant::now() < *due + std::time::Duration::from_millis(1500) {
+            return;
+        }
+        // 로그는 한 번만, **세우는 것은 매 틱**이다. 목록을 채우는 pump 들이
+        // 자기 판단으로 스크롤을 0 으로 되돌리기 때문이다 — `pump_info` 는 pane
+        // 집합이 달라지면(첫 수집이 곧 그 경우다), `pump_sessions_col` 은 cwd 가
+        // 달라지면 되돌린다. 한 번만 세우면 그 되돌림이 캡처 직전에 끼어들어
+        // **스크롤이 0 인 화면을 「밀어 봤다」고 찍는다**(실측: Info 탭이 그랬다).
+        let first = !FIRED.swap(true, Ordering::Relaxed);
+        if let Ok(px) = std::env::var("KASATERM_AUTOFTSCROLL") {
+            match px.trim().parse::<f32>() {
+                Ok(px) => {
+                    if !self.file_tree.visible {
+                        self.toggle_file_tree();
+                    }
+                    if first {
+                        self.refresh_file_tree();
+                    }
+                    self.file_tree.scroll = px;
+                    // 그리기가 clamp 하므로 한 프레임 태운 뒤에 실제값을 읽는다.
+                    self.render_frame();
+                    if first {
+                        eprintln!(
+                            "[autocolscroll] 파일트리 요청={px} 실제={} 항목={}",
+                            self.file_tree.scroll,
+                            self.file_tree.nodes.len()
+                        );
+                    }
+                }
+                Err(_) if first => {
+                    eprintln!("[autocolscroll] AUTOFTSCROLL 이 숫자가 아니다: {px:?}")
+                }
+                Err(_) => {}
+            }
+        }
+        use crate::state::SideTab;
+        let Some((tab, px)) = Self::autocolscroll_spec() else { return };
+        // 탭도 매 틱 다시 세운다 — 칼럼을 여는 다른 경로가 탭을 갈아 끼울 수 있다.
+        self.info.tab = tab;
+        match tab {
+            SideTab::Sessions => self.sessions_col.scroll = px,
+            SideTab::Mcp => self.mcp_col.scroll = px,
+            SideTab::Info => self.info.scroll = px,
+            SideTab::Git => self.git.col_scroll = px,
+        }
+        self.chrome_dirty = true;
+        self.render_frame();
+        if !first {
+            return;
+        }
+        let actual = match tab {
+            SideTab::Sessions => self.sessions_col.scroll,
+            SideTab::Mcp => self.mcp_col.scroll,
+            SideTab::Info => self.info.scroll,
+            SideTab::Git => self.git.col_scroll,
+        };
+        // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
+        // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
+        let rows = match tab {
+            SideTab::Sessions => self.sessions_col.view.len(),
+            SideTab::Mcp => self.mcp_col.row_rects.len(),
+            SideTab::Info => self.info.proc_rects.len(),
+            SideTab::Git => self.git.col_file_rects.len(),
+        };
+        eprintln!("[autocolscroll] 요청={px} 실제={actual} 행={rows}");
+    }
     /// `KASATERM_FORCE_HANDLE_MENU=*` → 활성 pane 의 ⋮ 메뉴를 연다. 이 env 는
     /// 생성자에서 pane id 를 그대로 받는데(main.rs), 로컬 PTY 모드의 leaf id 는
     /// 곧 셸 pid 라 실행 전에는 알 수가 없다 — 그래서 `*` 만 여기서 한 번
@@ -1695,6 +1845,115 @@ impl App {
             );
         }
         eprintln!("[automenuclick] idx{idx} {act:?} 클릭 @({:.0},{:.0})", self.cursor_px.0, self.cursor_px.1);
+    }
+    /// `KASATERM_AUTOHDRMENU_MS` — 헤더 우클릭 → ⋮ 메뉴 경로를 통째로 검증한다.
+    /// 0: 활성 pane 헤더 켜기 → 1: 헤더 띠 중앙 **진짜 우클릭**(winit MouseInput
+    /// 을 window_event 로) → 메뉴가 열렸는지 → 2: 메뉴의 상단바 토글 항목 좌클릭
+    /// → 헤더가 꺼졌는지. 상태를 손으로 안 세팅하고 이벤트를 흘리는 이유는
+    /// automenuclick 과 같다 — handler 디스패치까지 타야 잡히는 버그가 있다.
+    /// 부팅 기본인 홀 pane 에서 돌린다 — 분할 게이트가 있는 `header_at_px` 를
+    /// 우클릭이 썼다면 여기서 잡힌다.
+    pub(crate) fn run_pending_autohdrmenu(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOHDRMENU_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 2
+            || Instant::now() < *due + std::time::Duration::from_millis(900 * step as u64)
+        {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let Some(target) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        match step {
+            0 => {
+                self.toggle_pane_header(&target);
+                let on = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .panes
+                    .get(&target)
+                    .is_some_and(|p| p.has_header());
+                eprintln!("[autohdrmenu] 0 헤더 켬 has_header={on}");
+            }
+            1 => {
+                let (cols, rows) = self.window_cells();
+                let pad = WINDOW_PADDING + self.effective_sidebar_w();
+                let Some((_, rx, ry, rw, _)) = self
+                    .effective_leaf_rects(cols, rows)
+                    .into_iter()
+                    .find(|(i, ..)| i == &target)
+                else {
+                    eprintln!("[autohdrmenu] 1 대상 rect 없음");
+                    return;
+                };
+                let x = pad + (rx as f32 + rw as f32 / 2.0) * self.cell.w;
+                let y = TITLE_HEIGHT + ry as f32 * self.cell.h + PANE_HEADER_HEIGHT / 2.0;
+                self.cursor_px = (x, y);
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    self.window_event(
+                        event_loop,
+                        wid,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Right,
+                        },
+                    );
+                }
+                eprintln!(
+                    "[autohdrmenu] 1 우클릭@({x:.0},{y:.0}) menu={:?}",
+                    self.handle_menu
+                );
+            }
+            _ => {
+                let Some(&(_, r)) = self
+                    .handle_menu_hits
+                    .iter()
+                    .find(|(a, _)| matches!(a, ActionKind::ToggleHeader))
+                else {
+                    eprintln!(
+                        "[autohdrmenu] 2 토글 항목 없음 (rects={})",
+                        self.handle_menu_hits.len()
+                    );
+                    return;
+                };
+                self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    self.window_event(
+                        event_loop,
+                        wid,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                    );
+                }
+                let on = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .panes
+                    .get(&target)
+                    .is_some_and(|p| p.has_header());
+                eprintln!(
+                    "[autohdrmenu] 2 토글 클릭 has_header={on} menu={:?}",
+                    self.handle_menu
+                );
+            }
+        }
     }
     /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.
     /// 다른 probe 처럼 상태를 손으로 세팅하지 않고 winit `MouseInput` 을 그대로
