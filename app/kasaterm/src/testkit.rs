@@ -3144,6 +3144,19 @@ impl App {
                 None => eprintln!("[autoauxmd] Raw 칸이 안 그려졌다"),
             }
         }
+        // `_SCROLL=<px>` — 캡처 전에 문서를 그만큼 민다. 클리핑을 물으려면 무언가가
+        // 경계에 **걸쳐** 있어야 하는데, 스크롤 0 에서는 문서 첫 줄이 마침 상자 top 에
+        // 딱 붙어 있어 자르나 마나 그림이 같다 — 그래서 없는 클리핑도 통과한다.
+        if let Some(px) = std::env::var("KASATERM_AUTOAUXMD_SCROLL")
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+        {
+            if let Some(m) = self.aux_windows.get_mut(idx).and_then(|a| a.editor_mut()) {
+                m.scroll = px;
+            }
+            self.aux_render(idx);
+            eprintln!("[autoauxmd] 스크롤 {px}");
+        }
         let cap = std::env::var("KASATERM_AUTOAUXMD_CAP").unwrap_or_else(|_| {
             std::env::temp_dir().join("auxmd.png").to_string_lossy().into_owned()
         });
