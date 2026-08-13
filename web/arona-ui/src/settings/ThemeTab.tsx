@@ -94,10 +94,12 @@ function NewThemeCard() {
 }
 
 /// 캐릭터 한 칸. 이름 위에 학교색 점을 둬서 소속이 색으로 읽힌다(네이티브
-/// header_color 와 같은 값).
-function CharacterCell({ c }: { c: Character }) {
+/// header_color 와 같은 값). 누르면 상세로 — 그게 성격을 고치는 입구다.
+function CharacterCell({ c, onSelect }: { c: Character; onSelect: () => void }) {
   return (
-    <div
+    <button
+      type="button"
+      onClick={onSelect}
       className="flex flex-col items-center gap-1 px-2 py-3"
       style={{
         borderRadius: 'var(--kt-radius-sm)',
@@ -113,7 +115,7 @@ function CharacterCell({ c }: { c: Character }) {
         />
         <span className="text-[12px] text-[var(--kt-text)]">{c.name}</span>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -138,7 +140,13 @@ function PendingButton({ label }: { label: string }) {
   );
 }
 
-export function ThemeTab({ data }: { data: SettingsCharacters }) {
+export function ThemeTab({
+  data,
+  onSelect,
+}: {
+  data: SettingsCharacters;
+  onSelect: (c: Character) => void;
+}) {
   return (
     <div
       className="p-6"
@@ -198,7 +206,7 @@ export function ThemeTab({ data }: { data: SettingsCharacters }) {
       <Section title="Characters" hint={`${data.roster.length}명 — 캐릭터를 눌러 성격과 그림을 고치세요`}>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
           {data.roster.map((c) => (
-            <CharacterCell key={c.name} c={c} />
+            <CharacterCell key={c.name} c={c} onSelect={() => onSelect(c)} />
           ))}
         </div>
       </Section>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Asterisk,
   MessageSquare,
@@ -9,7 +9,8 @@ import {
 } from 'lucide-react';
 import { useTokens } from './useTokens';
 import { ThemeTab } from './ThemeTab';
-import type { SettingsCharacters } from './types';
+import { CharacterDetail } from './CharacterDetail';
+import type { Character, SettingsCharacters } from './types';
 
 /// 이 페이지가 붙은 인스턴스의 포트. 웹뷰가 same-origin 으로 로드되므로
 /// `location.port` 가 곧 그 인스턴스다 — 네이티브의 `mcp_panel_port()` 는 8765
@@ -44,23 +45,32 @@ export function SettingsApp() {
   const [cat, setCat] = useState<CatKey>('theme');
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /// 열려 있는 캐릭터. **이름이 아니라 객체를 들고 있는다.**
+  ///
+  /// 이름으로 들고 로스터에서 찾으면 이름을 바꾼 직후 한 프레임 동안 그 이름이
+  /// 로스터에 없다(리로드가 아직 안 끝났다) — 그 순간 상세가 언마운트되고 리로드
+  /// 뒤 새 컴포넌트로 다시 마운트돼, 방금 띄운 「저장했어요」가 사라진다(실측).
+  /// slug 로 찾는 것도 답이 아니다: slug 는 캐릭터끼리 겹칠 수 있어 엉뚱한 사람이
+  /// 열린다.
+  const [open, setOpen] = useState<Character | null>(null);
+
+  /// 로스터를 다시 읽는다. 저장 뒤에도 부르는 이유는 **파일이 진실**이기
+  /// 때문이다 — 화면이 요청값을 그대로 믿으면 저장 쪽에서 거부된 변경이 화면에만
+  /// 남는다.
+  const reload = useCallback(async () => {
+    try {
+      const res = await fetch('/settings/characters');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setChars((await res.json()) as SettingsCharacters);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
 
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res = await fetch('/settings/characters');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as SettingsCharacters;
-        if (alive) setChars(data);
-      } catch (e) {
-        if (alive) setErr(e instanceof Error ? e.message : String(e));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
+    void reload();
+  }, [reload]);
 
   const meta = TITLES[cat];
 
@@ -125,7 +135,21 @@ export function SettingsApp() {
 
         {cat === 'theme' ? (
           chars ? (
-            <ThemeTab data={chars} />
+            open ? (
+              <CharacterDetail
+                character={open}
+                onBack={() => setOpen(null)}
+                onSaved={(name) => {
+                  // 이름만 갱신하고 객체는 그대로 둔다 — 상세는 자기가 유일한
+                  // 편집자라 서버에서 다시 받아올 게 없고, 갈아치우면 draft 가
+                  // 리셋된다.
+                  setOpen((prev) => (prev ? { ...prev, name } : prev));
+                  void reload();
+                }}
+              />
+            ) : (
+              <ThemeTab data={chars} onSelect={setOpen} />
+            )
           ) : (
             !err && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>
           )

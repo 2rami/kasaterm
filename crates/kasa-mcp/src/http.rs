@@ -1272,11 +1272,72 @@ async fn character_face_handler(
     }
 }
 
-/// `POST /settings/ping` — 설정 웹뷰의 배선 확인용. 200 이 오면 셋이 증명된다:
-/// 페이지가 same-origin 으로 로드됐고, `origin_guard_mw` 를 통과했고, 라우터가
-/// 이 prefix 를 잡는다. 실제 설정 mutation 창구가 붙으면 지운다.
-async fn settings_ping_handler() -> impl IntoResponse {
-    axum::Json(serde_json::json!({ "ok": true, "pong": true }))
+/// `POST /settings/character` — 캐릭터 한 명의 성격·이름을 굳힌다.
+/// body(JSON): `{"name": "아로나", "persona": "…", "new_name": "…"}` — `persona`·
+/// `new_name` 은 **준 것만** 바꾼다(빠뜨리면 그대로).
+///
+/// body 를 `String` 으로 받아 직접 파싱하는 건 관례를 따른 것이다(`/task-add` 등).
+/// 덤으로 `Content-Type` 을 안 보므로 `text/plain` 으로 보낼 수 있고, 그러면 이
+/// 요청이 CORS simple request 라 preflight(OPTIONS)가 아예 안 뜬다 — `post()` 만
+/// 걸린 라우트는 OPTIONS 에 405 를 답하고 요청은 조용히 죽는다.
+///
+/// 이름은 로스터의 **키**라 되돌릴 수 없는 두 경우를 여기서 먼저 막는다: 빈 이름
+/// (그 캐릭터가 로스터에서 사라진다)과 중복(로스터 빌드가 뒤엣것을 통째로 버려 한
+/// 명이 증발한다). 문구는 네이티브(`settings.rs` 의 `flush_student_name`)와 같은
+/// 것을 쓴다 — 같은 거부를 두 화면이 다르게 말하면 다른 문제로 읽힌다.
+///
+/// 저장 쪽도 같은 판정을 한 번 더 한다. 겹치는 게 낭비가 아닌 이유는 둘이 답하는
+/// 게 다르기 때문이다 — 여기 것은 **이유를 웹에 돌려주고**(네이티브 토스트는
+/// 웹뷰에서 안 보인다), 저쪽 것은 그 사이 파일이 바뀌었을 때 파일을 지킨다.
+async fn settings_character_handler(
+    backend: Arc<dyn Backend>,
+    body: String,
+) -> impl IntoResponse {
+    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let bad = |msg: String| (cors(), Json(serde_json::json!({ "ok": false, "error": msg })));
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return bad(format!("bad body: {e}")),
+    };
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if name.is_empty() {
+        return bad("name required".to_string());
+    }
+    // 판정에 쓰는 로스터를 웹이 보는 것과 같은 창구에서 받는다 — 따로 읽으면
+    // 화면엔 있는 캐릭터가 여기선 없는 것으로 갈릴 수 있다.
+    let chars = backend.settings_characters();
+    let names: Vec<&str> = chars
+        .get("roster")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|e| e.get("name")?.as_str()).collect())
+        .unwrap_or_default();
+    if !names.contains(&name) {
+        return bad(format!("{name} 은(는) 로스터에 없어요"));
+    }
+    let persona = v.get("persona").and_then(|x| x.as_str());
+    let new_name = match v.get("new_name").and_then(|x| x.as_str()) {
+        // 같은 이름을 보낸 건 안 바꾸겠다는 뜻이다 — 그대로 넘기면 저장 쪽이
+        // 「이미 있는 이름」으로 읽어 자기 자신과 부딪힌다.
+        Some(n) if n.trim() == name => None,
+        Some(n) => {
+            let n = n.trim();
+            if n.is_empty() {
+                return bad("이름은 비울 수 없어요".to_string());
+            }
+            if names.contains(&n) {
+                return bad(format!("{n} 은(는) 이미 있어요"));
+            }
+            Some(n)
+        }
+        None => None,
+    };
+    if persona.is_none() && new_name.is_none() {
+        return bad("바꿀 게 없어요".to_string());
+    }
+    match backend.save_character(name, persona, new_name) {
+        Ok(v) => (cors(), Json(v)),
+        Err(e) => bad(e.to_string()),
+    }
 }
 
 /// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
@@ -3689,6 +3750,7 @@ pub fn spawn_http_server_opts(
                 let git_panel_backend = backend.clone();
                 let design_tokens_backend = backend.clone();
                 let settings_chars_backend = backend.clone();
+                let settings_char_save_backend = backend.clone();
                 let character_face_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
@@ -3814,7 +3876,12 @@ pub fn spawn_http_server_opts(
                             arona_ui_serve(p)
                         }),
                     )
-                    .route("/settings/ping", post(settings_ping_handler))
+                    .route(
+                        "/settings/character",
+                        post(move |body: String| {
+                            settings_character_handler(settings_char_save_backend.clone(), body)
+                        }),
+                    )
                     .route(
                         "/design-tokens",
                         get(move || design_tokens_handler(design_tokens_backend.clone())),

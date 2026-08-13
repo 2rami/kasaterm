@@ -56,3 +56,30 @@ body {
 img.kt-face {
   image-rendering: pixelated;
 }
+
+/* 텍스트 입력칸. 색과 모양만 팔레트에서 받고 나머지는 브라우저 기본을 그대로
+   둔다 — 선택 하이라이트·캐럿 깜빡임·Cmd+Z·IME 조합 표시가 전부 거기서 온다.
+   네이티브 판은 이걸 손으로 그려야 해서 없었다.
+
+   `field-sizing` 같은 최신 속성은 안 쓴다(웹뷰의 WebKit 버전을 우리가 못 고정
+   한다). 높이는 쓰는 쪽에서 클래스로 준다. */
+.kt-field {
+  background: var(--kt-surface);
+  color: var(--kt-text);
+  border: var(--kt-border-w) solid var(--kt-border);
+  border-radius: var(--kt-radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.kt-field:focus {
+  /* 포커스 링을 테두리 색 교체로 낸다 — box-shadow 로 겹치면 옆 칸을 덮는다. */
+  border-color: var(--kt-accent);
+}
+
+.kt-field::selection {
+  background: var(--kt-accent);
+  color: var(--kt-fg);
+}

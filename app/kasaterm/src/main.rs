@@ -3616,6 +3616,22 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
+    /// `POST /settings/character` 위임 — 웹뷰 설정이 고친 성격·이름을 굳힌다.
+    ///
+    /// 저장 함수(`flush_student_persona`/`flush_student_name`)를 직접 부르지 않고
+    /// 네이티브가 사람 손으로 하는 3단(열기 → 버퍼 → 닫기)을 그대로 태운다.
+    /// 순서가 규칙이기 때문이다 — 성격의 저장 키가 이름이라 이름부터 바꾸면 옛
+    /// 이름 자리에 쓰려다 못 찾고, 뒤처리(shim 재생성·로스터 캐시 무효화)는
+    /// `close_student_edit` 에 묶여 있다.
+    ///
+    /// **저장이 끝난 뒤** 회신한다 — 위임만 하고 바로 답하면 부른 쪽이 아직
+    /// 안 써진 파일을 다시 읽는다. `(이름, 새 성격, 새 이름, 회신)`.
+    SocketSaveCharacter(
+        String,
+        Option<String>,
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    ),
     /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
     /// 이미지 바이트를 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16)를 보내
     /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.

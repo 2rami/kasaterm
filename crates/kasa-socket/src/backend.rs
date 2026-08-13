@@ -856,6 +856,26 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// 캐릭터 한 명의 성격·이름을 굳힌다. `persona`·`new_name` 은 각각 준 것만
+    /// 바꾼다(None = 그대로).
+    ///
+    /// 이 크레이트가 직접 파일을 쓰지 못하는 이유는 저장이 파일 쓰기로 끝나지
+    /// 않기 때문이다 — 성격은 shim 재생성이, 이름은 로스터 캐시 무효화가 짝으로
+    /// 따라붙고 그 둘은 GUI 가 쥐고 있다. 그래서 구현이 GUI 로 위임하고 결과를
+    /// 되받는다.
+    ///
+    /// 반환값은 `{ok, name}` — 이름 변경이 거부되면 `ok: false` 에 **저장된**
+    /// 이름이 실린다. 부른 쪽이 화면을 요청값으로 그려 두면 파일과 어긋나므로,
+    /// 회신의 이름을 써야 한다.
+    fn save_character(
+        &self,
+        _name: &str,
+        _persona: Option<&str>,
+        _new_name: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("save_character unsupported")
+    }
+
     /// Read every pane's activity. Default: empty board — a backend that
     /// doesn't track activity reports nothing rather than erroring, so
     /// callers can always scan.
