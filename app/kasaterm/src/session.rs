@@ -80,6 +80,7 @@ impl App {
         tp.cursor_col = update.cursor_col;
         tp.cursor_visible = update.cursor_visible;
         tp.alt_screen = update.alt_screen;
+        tp.inline_images = update.inline_images;
         tp.mouse_enabled = update.mouse_enabled;
         tp.mouse_sgr = update.mouse_sgr;
         tp.app_cursor = update.app_cursor;

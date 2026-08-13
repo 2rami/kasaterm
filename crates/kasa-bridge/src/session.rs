@@ -467,6 +467,8 @@ fn spawn_flusher(
                 prompt_end: None,
                 // tmux backend doesn't sniff OSC 777 desktop notifications.
                 notify: None,
+                // tmux backend 는 인라인 이미지도 안 잡는다 — PTY backend 전용.
+                inline_images: Vec::new(),
             };
             if out.send(update).is_err() {
                 return;

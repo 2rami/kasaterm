@@ -549,6 +549,9 @@ impl App {
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
+        // 인라인 이미지(OSC 1337) 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h,
+        // clip_y0, clip_y1). 좌표는 LOGICAL px(queue_image 관례).
+        let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32)> = Vec::new();
         // working 스피너(✻/braille) 자리 학생 도트(제자리 걸음): 같은 형태.
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
@@ -822,6 +825,28 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
+                // 인라인 이미지(OSC 1337) — PTY 가 절대 줄 앵커를 뷰포트 좌표로
+                // 환산해 준 그대로 그린다. GUI 는 스크롤 상태를 모르므로 여기서
+                // 계산을 더하면 반드시 어긋난다(정본은 alacritty Term). 클립은
+                // pane 셀 영역 — 스크롤로 반쯤 나간 그림이 셀과 함께 잘린다.
+                if let Some(t) = pane.term().filter(|t| !t.inline_images.is_empty()) {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let (icw, ich) = (self.cell.w * fs, self.cell.h * fs);
+                    let clip_y0 = body_top;
+                    let clip_y1 = body_top + rows_now as f32 * ich;
+                    for v in &t.inline_images {
+                        inline_slots.push((
+                            format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
+                            v.path.clone(),
+                            body_left + v.col as f32 * icw,
+                            body_top + v.row as f32 * ich,
+                            v.cols as f32 * icw,
+                            v.rows as f32 * ich,
+                            clip_y0,
+                            clip_y1,
+                        ));
+                    }
+                }
                 // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. mouse-tracking
                 // 중이라 뷰포트 스크롤 여부를 직접 못 안다 — "Jump to bottom" 힌트로
                 // 게이트한다(find_sticky_prompt). 감지 행 셀은 스냅샷에서 blank 처리해
@@ -2517,6 +2542,7 @@ impl App {
                 let key = format!("{id}-p{:x}-r{rot}-f{}", Arc::as_ptr(image) as usize, image.cur_idx());
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
+            paint_inline_images(g, &inline_slots);
             // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
             // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
@@ -9861,6 +9887,56 @@ fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> 
         }
     }
     None
+}
+
+/// 인라인 이미지(OSC 1337)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로
+/// 올리고, 이번 프레임 배치에 없는 키는 텍스처를 놓는다. PTY 쪽이 뷰포트에
+/// 겹치는 그림만 보내므로, 스크롤로 벗어난 그림의 GPU 메모리가 여기서 함께
+/// 회수된다(안 놓으면 샌다). 디코드에 실패한 키는 false 로 남겨 매 프레임
+/// 재시도하지 않는다.
+///
+/// 키 집합은 이번 프레임에 **렌더된 pane** 기준이다 — 워크스페이스를 전환하면
+/// 그쪽 그림 텍스처가 놓였다가 돌아올 때 다시 디코드된다(전환은 드물고
+/// 디코드는 ms 급이라 캐시를 창 넘어 유지할 이유가 없다).
+fn paint_inline_images(
+    g: &mut gpu::GpuRenderer,
+    slots: &[(String, String, f32, f32, f32, f32, f32, f32)],
+) {
+    static UPLOADED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, bool>>,
+    > = std::sync::OnceLock::new();
+    let mut up = UPLOADED.get_or_init(Default::default).lock().unwrap();
+    let live: std::collections::HashSet<&str> =
+        slots.iter().map(|s| s.0.as_str()).collect();
+    up.retain(|k, _| {
+        let keep = live.contains(k.as_str());
+        if !keep {
+            g.drop_image(k);
+        }
+        keep
+    });
+    for (key, path, x, y, w, h, c0, c1) in slots {
+        match up.get(key) {
+            Some(true) => {}
+            Some(false) => continue,
+            None => {
+                let ok = std::fs::read(path)
+                    .ok()
+                    .and_then(|b| image::load_from_memory(&b).ok())
+                    .map(|img| {
+                        let rgba = img.to_rgba8();
+                        let (iw, ih) = rgba.dimensions();
+                        g.upload_image(key, &rgba, iw, ih);
+                    })
+                    .is_some();
+                up.insert(key.clone(), ok);
+                if !ok {
+                    continue;
+                }
+            }
+        }
+        g.queue_image_clipped(key, *x, *y, *w, *h, *c0, *c1);
+    }
 }
 
 /// claude 2.1.228 이 세션명 자리(입력박스 상단 보더 우측 끝)에 그리는 ` ultracode `

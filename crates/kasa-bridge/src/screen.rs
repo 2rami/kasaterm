@@ -49,6 +49,25 @@ impl Cell {
 
 pub type Row = Vec<Cell>;
 
+/// OSC 1337 인라인 이미지 한 장의 이번 프레임 뷰포트 배치. PTY 쪽이 내용 절대
+/// 줄 앵커를 쥐고 프레임마다 화면 좌표로 환산해 싣는다 — 스크롤 상태의 정본이
+/// alacritty Term 이라, GUI 가 따로 계산하면 반드시 어긋난다. GUI 는 받은
+/// 자리에 그리기만 한다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InlineImageView {
+    /// pane 안에서 안정적인 식별자 — 같은 그림의 재전송(자리 이동)에도 유지돼
+    /// GUI 텍스처 캐시가 산다.
+    pub id: u64,
+    /// 원본 임시 파일(PNG/JPEG). GUI 가 읽어 텍스처로 올린다.
+    pub path: String,
+    /// 이미지 상단의 뷰포트 행 — 스크롤로 위가 잘리면 음수.
+    pub row: i32,
+    pub col: u16,
+    /// 차지하는 셀 폭·높이(송신측 width=<cells> + 픽셀 비율).
+    pub cols: u16,
+    pub rows: u16,
+}
+
 /// Screen diff sent from the flusher thread to consumers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenUpdate {
@@ -99,6 +118,11 @@ pub struct ScreenUpdate {
     /// notify` path — any shell command can fire one via
     /// `printf '\e]777;notify;Title;Body\a'`.
     pub notify: Option<(String, String)>,
+    /// 이번 프레임에 뷰포트와 겹치는 인라인 이미지(OSC 1337)들. 셀-흐름 렌더가
+    /// 꺼져 있거나(레거시 탭 모드) 그림이 없으면 빈 목록. 구버전 스냅샷(webterm
+    /// 미러 등 직렬화 소비자) 호환 위해 default.
+    #[serde(default)]
+    pub inline_images: Vec<InlineImageView>,
 }
 
 impl Color {
