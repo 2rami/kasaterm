@@ -22,22 +22,30 @@ type Rect = (f32, f32, f32, f32);
 
 const CAT_W: f32 = 200.0;
 
-/// 테마 카드 한 장. 폭은 미리보기 얼굴 셋 + 좌우 여백에서 나오고, 높이는 그
-/// 얼굴 아래로 이름 한 줄과 부제 한 줄이 들어갈 만큼이다.
-const THEME_CARD_W: f32 = 236.0;
+/// 테마 카드가 이보다 좁아지면 열을 줄인다. 미리보기 얼굴 셋이 겹치지 않는
+/// 최소 폭이다.
+const THEME_CARD_MIN_W: f32 = 218.0;
 const THEME_CARD_H: f32 = 136.0;
 const THEME_GAP: f32 = 12.0;
-/// 미리보기 얼굴 한 칸. 프사 원본이 전신이라 세로로 길다 — 정사각으로 잡으면
-/// contain-fit 이 가로 여백을 크게 남겨 얼굴이 작아진다.
-const THEME_FACE_W: f32 = 64.0;
+/// 미리보기 얼굴 한 칸의 높이. 프사 원본이 전신이라 세로로 길다 — 정사각으로
+/// 잡으면 contain-fit 이 가로 여백을 크게 남겨 얼굴이 작아진다.
 const THEME_FACE_H: f32 = 72.0;
 
-/// 캐릭터 카드. 79명이 격자로 늘어서므로 한 장이 작아야 한 화면에 여러 줄이
-/// 들어오고, 그래도 얼굴이 누구인지 알아볼 만큼은 커야 한다.
-const STU_CARD_W: f32 = 104.0;
+/// 캐릭터 카드의 최소 폭. 79명이 격자로 늘어서므로 한 장이 작아야 한 화면에
+/// 여러 줄이 들어오고, 그래도 얼굴이 누구인지 알아볼 만큼은 커야 한다.
+const STU_CARD_MIN_W: f32 = 88.0;
 const STU_CARD_H: f32 = 128.0;
 const STU_GAP: f32 = 10.0;
-const STU_FACE_W: f32 = 72.0;
+
+/// 남는 폭 없이 꽉 채우는 격자 — `(열 수, 카드 폭)`.
+///
+/// 카드 폭을 고정하면 오른쪽에 늘 어중간한 빈 띠가 남아, 카드가 카드 안에서
+/// 왼쪽으로 쏠린 것처럼 보인다(2026-08-13 지적: "박스 제대로 안맞아"). 열 수만
+/// 폭에서 정하고 남는 자리는 카드들이 나눠 갖게 하면 양끝이 폼에 딱 맞는다.
+fn grid_fit(avail: f32, min_w: f32, gap: f32) -> (usize, f32) {
+    let cols = (((avail + gap) / (min_w + gap)).floor() as usize).max(1);
+    (cols, (avail - gap * (cols - 1) as f32) / cols as f32)
+}
 
 /// 설명 문구에 박히는 주 수식키 이름. 실제 바인딩은 이미 갈려 있는데
 /// (`zoom_mod = macos ? Cmd : Ctrl`, 편집기 저장도 같다) 문구만 Cmd 로 고정돼
@@ -2417,22 +2425,28 @@ pub(crate) fn paint_settings(
                 &["폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다"]);
             // 카드 격자. 얼굴이 보여야 고를 수 있다 — 이름만 늘어놓은 목록은
             // "이터널리턴" 이 무슨 그림인지 켜 보기 전엔 알 수 없다.
-            let cols = (((fw + THEME_GAP) / (THEME_CARD_W + THEME_GAP)).floor() as usize).max(1);
+            let (cols, tcw) = grid_fit(fw, THEME_CARD_MIN_W, THEME_GAP);
+            // 얼굴 셋이 카드 폭을 나눠 갖는다 — 카드가 넓어지면 얼굴도 같이 큰다.
+            let tface_w = ((tcw - 28.0 - 8.0) / 3.0).floor();
             let row_top = y;
             for (i, t) in ctx.themes.iter().enumerate() {
-                let cx0 = fx + (i % cols) as f32 * (THEME_CARD_W + THEME_GAP);
+                let cx0 = fx + (i % cols) as f32 * (tcw + THEME_GAP);
                 let cy0 = row_top + (i / cols) as f32 * (THEME_CARD_H + THEME_GAP);
                 y = cy0 + THEME_CARD_H;
                 if cy0 + THEME_CARD_H <= clip {
                     continue;
                 }
-                let card = (cx0, cy0, THEME_CARD_W, THEME_CARD_H);
+                let card = (cx0, cy0, tcw, THEME_CARD_H);
                 let selected = ctx.theme_active == t.id;
                 let hover = inside(card, ctx.cursor);
                 g.hover_pointer |= hover;
+                // 안 고른 카드도 폼 카드보다는 밝아야 한다 — 어둡게 깔면 격자가
+                // 판에 뚫린 구멍처럼 보이고, 정작 고른 카드가 안 도드라진다.
                 round_rect(
                     g, card.0, card.1, card.2, card.3, theme::radius_md(),
-                    if selected || hover { theme::surface_active() } else { theme::surface() },
+                    if selected { theme::surface_active() }
+                    else if hover { theme::surface_hover() }
+                    else { theme::panel_bg() },
                 );
                 if selected {
                     // 왼쪽 띠 하나로 "이걸 쓰는 중"을 말한다 — 체크 아이콘을 얹으면
@@ -2444,15 +2458,15 @@ pub(crate) fn paint_settings(
                 for (slug, src) in &t.faces {
                     render::draw_theme_face(
                         g, &t.id, slug, src.as_deref(),
-                        face_x, cy0 + 10.0, THEME_FACE_W, THEME_FACE_H,
+                        face_x, cy0 + 10.0, tface_w, THEME_FACE_H,
                     );
-                    face_x += THEME_FACE_W + 4.0;
+                    face_x += tface_w + 4.0;
                 }
                 let name_y = cy0 + THEME_CARD_H - 46.0;
                 let editing = ctx.theme_label_edit.as_ref().filter(|(id, _)| *id == t.id);
                 match editing {
                     Some((_, buf)) => {
-                        let r = (cx0 + 12.0, name_y - 4.0, THEME_CARD_W - 24.0, 26.0);
+                        let r = (cx0 + 12.0, name_y - 4.0, tcw - 24.0, 26.0);
                         let focused = ctx.input == Some(SettingsInput::ThemeLabel);
                         text_field(
                             g, r, buf, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor,
@@ -2480,7 +2494,7 @@ pub(crate) fn paint_settings(
                 // 서른여섯 개라 정작 "고르기"가 안 보인다. 번들은 폴더도 없고
                 // 지울 수도 없어 버튼 자체를 안 그린다.
                 if hover && !t.id.is_empty() {
-                    let mut bx = cx0 + THEME_CARD_W - 12.0;
+                    let mut bx = cx0 + tcw - 12.0;
                     for (label, action) in [
                         ("치우기", SettingsAction::DeleteTheme(t.id.clone())),
                         ("폴더", SettingsAction::OpenThemeDir(t.id.clone())),
@@ -2509,11 +2523,11 @@ pub(crate) fn paint_settings(
             // 늘어날수록 멀어져서, 정작 만들려는 사람이 못 찾는다.
             {
                 let i = ctx.themes.len();
-                let cx0 = fx + (i % cols) as f32 * (THEME_CARD_W + THEME_GAP);
+                let cx0 = fx + (i % cols) as f32 * (tcw + THEME_GAP);
                 let cy0 = row_top + (i / cols) as f32 * (THEME_CARD_H + THEME_GAP);
                 y = y.max(cy0 + THEME_CARD_H);
                 if cy0 + THEME_CARD_H > clip {
-                    let card = (cx0, cy0, THEME_CARD_W, THEME_CARD_H);
+                    let card = (cx0, cy0, tcw, THEME_CARD_H);
                     let hover = inside(card, ctx.cursor);
                     g.hover_pointer |= hover;
                     round_rect(
@@ -2523,13 +2537,13 @@ pub(crate) fn paint_settings(
                     let label = "+ 새 테마";
                     let lw = g.measure_chrome_text(label, 14.0, true);
                     g.draw_text(
-                        cx0 + (THEME_CARD_W - lw) * 0.5, cy0 + THEME_CARD_H * 0.5 - 16.0, label,
+                        cx0 + (tcw - lw) * 0.5, cy0 + THEME_CARD_H * 0.5 - 16.0, label,
                         gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
                     );
                     let hint = "지금 것을 복제해 시작해요";
                     let hw = g.measure_chrome_text(hint, 11.0, false);
                     g.draw_text(
-                        cx0 + (THEME_CARD_W - hw) * 0.5, cy0 + THEME_CARD_H * 0.5 + 6.0, hint,
+                        cx0 + (tcw - hw) * 0.5, cy0 + THEME_CARD_H * 0.5 + 6.0, hint,
                         gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
                     );
                     rects.push((SettingsAction::ExportTheme, card));
@@ -2588,47 +2602,48 @@ pub(crate) fn paint_settings(
                 &[&format!("{}명 — 캐릭터를 눌러 성격과 그림을 고치세요", ctx.characters.len())]);
             // 얼굴이 붙은 카드 격자. 한 줄짜리 색 점 목록이던 것을 바꾼 이유는
             // 단순하다 — 79명 중 하나를 고르는 데 이름만 읽어서는 못 찾는다.
-            let scols = (((fw + STU_GAP) / (STU_CARD_W + STU_GAP)).floor() as usize).max(1);
+            let (scols, scw) = grid_fit(fw, STU_CARD_MIN_W, STU_GAP);
+            let sface = (scw - 24.0).floor();
             let srow_top = y;
             for (i, (name, slug)) in ctx.characters.iter().enumerate() {
-                let cx0 = fx + (i % scols) as f32 * (STU_CARD_W + STU_GAP);
+                let cx0 = fx + (i % scols) as f32 * (scw + STU_GAP);
                 let cy0 = srow_top + (i / scols) as f32 * (STU_CARD_H + STU_GAP);
                 y = cy0 + STU_CARD_H;
                 if cy0 + STU_CARD_H <= clip {
                     continue;
                 }
-                let card = (cx0, cy0, STU_CARD_W, STU_CARD_H);
+                let card = (cx0, cy0, scw, STU_CARD_H);
                 let selected = ctx.student_selected.as_deref() == Some(name.as_str());
                 let hover = inside(card, ctx.cursor);
                 g.hover_pointer |= hover;
                 round_rect(
                     g, card.0, card.1, card.2, card.3, theme::radius_md(),
-                    if selected || hover { theme::surface_active() } else { theme::surface() },
+                    if selected { theme::surface_active() }
+                    else if hover { theme::surface_hover() }
+                    else { theme::panel_bg() },
                 );
                 let accent = theme::character_accent(name).unwrap_or([128, 128, 128, 255]);
                 if selected {
                     // 강조는 그 캐릭터의 색으로 — 어느 색이 누구 것인지 여기서 배운다.
-                    g.rect(cx0, cy0 + STU_CARD_H - 3.0, STU_CARD_W, 3.0, accent);
+                    g.rect(cx0, cy0 + STU_CARD_H - 3.0, scw, 3.0, accent);
                 }
-                if !render::draw_student_face(
-                    g, name, cx0 + (STU_CARD_W - STU_FACE_W) * 0.5, cy0 + 8.0, STU_FACE_W,
-                ) {
+                if !render::draw_student_face(g, name, cx0 + 12.0, cy0 + 8.0, sface) {
                     // 그림이 없는 캐릭터는 색 판으로 자리를 지킨다 — 칸을 비우면
                     // 격자에 구멍이 뚫려 목록이 끊긴 것처럼 보인다.
                     round_rect(
-                        g, cx0 + (STU_CARD_W - 34.0) * 0.5, cy0 + 8.0 + (STU_FACE_W - 34.0) * 0.5,
+                        g, cx0 + (scw - 34.0) * 0.5, cy0 + 8.0 + (sface - 34.0) * 0.5,
                         34.0, 34.0, theme::radius_sm(), accent,
                     );
                 }
                 let nw = g.measure_chrome_text(name, 13.0, selected);
                 g.draw_text(
-                    cx0 + (STU_CARD_W - nw) * 0.5, cy0 + STU_CARD_H - 34.0, name,
+                    cx0 + (scw - nw) * 0.5, cy0 + STU_CARD_H - 34.0, name,
                     gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: selected, italic: false },
                 );
                 let sl = slug.unwrap_or("에셋 없음");
                 let sw = g.measure_chrome_text(sl, 10.0, false);
                 g.draw_text(
-                    cx0 + (STU_CARD_W - sw) * 0.5, cy0 + STU_CARD_H - 17.0, sl,
+                    cx0 + (scw - sw) * 0.5, cy0 + STU_CARD_H - 17.0, sl,
                     gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
                 );
                 rects.push((SettingsAction::SelectStudent(name.clone()), card));
