@@ -20,7 +20,16 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 
 사용자에게 "테스트 해보세요"라고 떠넘기지 말고 **너가 직접** 실행·확인·수정 사이클을 돌려라.
 
-반드시 먼저 정리: `pkill -f "target/debug/kasaterm"; pkill -f "target/release/kasaterm"; pkill -f "tmux -C"; sleep 1; rm -rf /tmp/tmux-501`
+⚠️ **광역 `pkill` 을 쓰지 마라.** 이 레포는 여러 pane 이 동시에 만진다 — `pkill -f "target/debug/kasaterm"` 은 **남이 지금 검증 중인 앱을 죽인다**(2026-08-13 실측: 남의 8초짜리 프로세스가 그렇게 사라지는 것을 봤다). `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같다. 죽은 쪽은 자기 앱이 왜 사라졌는지 알 방법이 없어 엉뚱한 데서 원인을 찾는다.
+
+**자기가 띄운 것만 거둬라.** 가장 안전한 건 앱이 스스로 끝나게 하는 것이다:
+
+```bash
+KASATERM_AUTOQUIT_MS=10500 cargo run -p kasaterm > /tmp/kasaterm-run.log 2>&1 &
+APP=$!            # 필요하면 이 PID 만 kill $APP
+```
+
+`/tmp/tmux-501` 을 지워야 할 만큼 상태가 꼬였다면, 지우기 전에 다른 pane 이 쓰는 중인지 `kasaterm-cli board` 로 먼저 확인해라.
 
 1. **빌드/실행** — `cargo run -p kasaterm > /tmp/kasaterm-run.log 2>&1 &` (백그라운드)
 2. **스크린샷** — `KASATERM_AUTOCAPTURE_MS=8000` 로 N초 후 자동 캡처. 기본 경로 `$TMPDIR/kasaterm.png` (`KASATERM_AUTOCAPTURE_PATH` 로 변경). Read tool 로 즉시 보기. macOS `screencapture` 는 권한 막혀 안 됨 — 무조건 자체 캡처.
