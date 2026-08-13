@@ -1231,6 +1231,23 @@ fn css_hex(c: [u8; 4]) -> String {
 /// 직렬화하면 그 편집이 통째로 무시된 값이 나가는데, **타입이 맞아 오류가 안 난다.**
 /// 그래서 여기서는 reader 함수만 부른다. 이 규칙이 깨지면 웹 화면의 색이 네이티브와
 /// 조용히 갈린다.
+/// 캐릭터별 고정 accent 를 `{이름: hex}` 로. 색 정본은 활성 로스터 하나이고,
+/// 이 함수는 그것을 웹이 읽을 모양으로만 옮긴다.
+fn character_accents_json() -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for (name, _) in character_slugs() {
+        if let Some(c) = character_accent(name) {
+            m.insert((*name).to_string(), serde_json::Value::String(css_hex(c)));
+        }
+    }
+    // 샬레는 학생이 아니라 조직 색이라 로스터에 이름이 없다 — 에이전트 목록
+    // 뷰가 이 색을 쓰므로 따로 넣는다.
+    if let Some(c) = character_accent("샬레") {
+        m.insert("샬레".to_string(), serde_json::Value::String(css_hex(c)));
+    }
+    serde_json::Value::Object(m)
+}
+
 pub fn tokens_json() -> serde_json::Value {
     serde_json::json!({
         // 프리셋 키·accent 이름은 색만으로 되짚을 수 없어 따로 추적된다
@@ -1266,6 +1283,12 @@ pub fn tokens_json() -> serde_json::Value {
                 css_hex([c[0], c[1], c[2], 255])
             })
             .collect::<Vec<_>>(),
+        // 캐릭터별 고정 accent(이름 → hex). 팔레트와 달리 **테마가 정하는 값**이라
+        // 여기 실어야 한다 — 전에는 웹이 이 표를 `lib/mcp.ts` 에 손으로 베껴 뒀고,
+        // 그게 번들 로스터에 얼어붙어 있어서 사용자가 만든 테마의 색이 아로나
+        // 창에 영영 닿지 않았다(커스텀 캐릭터는 아예 표에 없어 색이 pane 번호
+        // 순환색으로 떨어졌다). 정본은 활성 로스터 하나다.
+        "character_accents": character_accents_json(),
         // 형태는 색과 독립된 축이다(같은 팔레트를 어떤 실루엣으로도 입을 수 있게).
         // px 숫자로 내보내 웹이 `calc()` 없이 그대로 쓴다.
         "shape": {
