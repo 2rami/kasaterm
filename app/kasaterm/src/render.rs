@@ -10883,10 +10883,34 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
     // (=스피너 자리) col 을 돌려준다. 스피너가 어떤 프레임이든 위치가 고정된다.
     for r in (start..=last).rev() {
         if let Some(c) = spinner_row_col(&rows[r]) {
-            return Some((r, c));
+            if spinner_is_live(rows, r) {
+                return Some((r, c));
+            }
         }
     }
     None
+}
+
+/// 그 스피너 행이 **지금 도는 것**인가, 아니면 스크롤백에 굳은 옛 텍스트인가.
+///
+/// 글자만으로는 못 가른다 — 답변이 스피너 형태를 **인용**하면 진짜와 한 글자도
+/// 다르지 않다. 실제로 스피너 감지를 설명하는 답변 자체가 잡혀, 턴이 끝난 뒤에도
+/// 그 인용줄 위에서 학생이 계속 걸었다(거노 2026-08-13 지적: "저기서 왜 걷고있어").
+///
+/// 가르는 축은 글자가 아니라 **위치**다. claude 화면에서 진짜 스피너 아래에는
+/// 입력박스와 statusline 뿐이고, 대화 마커(`⏺` 응답 · `⎿` 도구 출력)는 언제나
+/// 스피너 **위**에 쌓인다. 그러니 후보 행 아래에 마커가 하나라도 있으면 그건
+/// 이미 지나간 본문이다. 실측(2026-08-13, pane 3개): 인용줄은 입력박스에서 16행
+/// 위이고 그 사이에 `⎿` 가 있었으며, 살아 있는 스피너는 3행 위에 마커 없이 있었다.
+///
+/// 거리(N행 이내)로 자르지 않은 이유: todo 트리가 스피너와 입력박스 사이에 끼면
+/// 그 거리가 통째로 흔들려, 넉넉히 잡으면 인용줄이 들어오고 좁게 잡으면 진짜가
+/// 빠진다. 마커 유무는 todo 가 몇 행이든 영향을 안 받는다.
+fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
+    !rows[r + 1..].iter().any(|row| {
+        let first = row.iter().find(|c| !matches!(c.ch, ' ' | '\0'));
+        matches!(first.map(|c| c.ch), Some('⏺') | Some('⎿'))
+    })
 }
 
 /// 한 행이 claude 의 working 스피너 행인가 — 맞으면 스피너 글리프의 col.
@@ -11673,6 +11697,53 @@ mod spinner_tests {
         assert_eq!(find_claude_spinner(&ko), Some((0, 0)));
         let en = vec![row_from("✻ Cerebrating… (12s · ↑ 2.1k tokens)")];
         assert_eq!(find_claude_spinner(&en), Some((0, 0)));
+    }
+
+    // 2026-08-13 지적("저기서 왜 걷고있어"): 스피너 감지를 설명하는 답변이 스피너
+    // 형태를 인용하자 그 인용줄이 잡혀, 턴이 끝난 뒤에도 학생이 본문 위를 걸었다.
+    // 글자는 진짜와 완전히 같으므로 위치로 가른다 — 아래에 대화 마커가 있으면 옛것.
+    #[test]
+    fn spinner_ignores_quoted_spinner_above_prose() {
+        let quoted = vec![
+            row_from("⏺ claude 는 한국어로도 찍어요:"),
+            row_from("  · claude 테마 자동 연동 구현 중… (3m 19s · ↓ 14.2k tokens)"),
+            row_from(""),
+            row_from("  ⎿  Referenced file app/kasaterm/src/render.rs"),
+            row_from("✻ Cogitated for 4m 3s"),
+            row_from("❯"),
+        ];
+        assert_eq!(find_claude_spinner(&quoted), None);
+        assert!(!crate::input::rows_show_working(&quoted));
+    }
+
+    // 같은 화면에 인용줄과 진짜 스피너가 둘 다 있으면 살아 있는 쪽만 잡아야 한다.
+    #[test]
+    fn spinner_picks_live_one_over_quote() {
+        let mixed = vec![
+            row_from("  ✢ Processing… (4m 10s · ↓ 5.5k tokens)"),
+            row_from("  ⎿  $ kasaterm-cli peek %14"),
+            row_from(""),
+            row_from("✶ Processing… (5m 11s · ↓ 8.7k tokens)"),
+            row_from("❯"),
+        ];
+        assert_eq!(find_claude_spinner(&mixed), Some((3, 0)));
+        assert!(crate::input::rows_show_working(&mixed));
+    }
+
+    // todo 트리가 스피너와 입력박스 사이에 끼어 거리가 흔들려도 살아 있다고 봐야
+    // 한다 — 거리 대신 마커 유무로 가르는 이유가 이것이다.
+    #[test]
+    fn spinner_survives_todo_tree_below() {
+        let with_todo = vec![
+            row_from("  ⎿  이전 도구 출력"),
+            row_from(""),
+            row_from("✢ Processing… (1m 2s · ↓ 900 tokens)"),
+            row_from("  ☐ 첫째 할 일"),
+            row_from("  ☒ 둘째 할 일"),
+            row_from("❯"),
+        ];
+        assert_eq!(find_claude_spinner(&with_todo), Some((2, 0)));
+        assert!(crate::input::rows_show_working(&with_todo));
     }
 }
 

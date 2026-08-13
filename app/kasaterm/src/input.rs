@@ -2825,18 +2825,14 @@ pub(crate) fn zoom_key(
 ///     bare-star check pinned the bar on forever after a turn.)
 ///   - braille spinner (other CLIs) — animation-only, safe on its own.
 pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
-    let Some(last) = cells
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
-    else {
-        return false;
-    };
-    let start = (last + 1).saturating_sub(10);
     // 판정은 render 쪽과 한 곳에서 — 도트 위치와 busy 판정이 갈리면 학생만
     // 걸어다니고 헤더는 멈춰 있는(혹은 그 반대) 꼴이 된다. 오탐 이력은 거기 주석에.
-    cells[start..=last]
-        .iter()
-        .any(|row| crate::render::spinner_row_col(row).is_some())
+    //
+    // 전에는 행 판정(`spinner_row_col`)만 공유하고 스캔 창은 각자 가졌다(여기 10행,
+    // 저기 30행). 그래서 todo 트리가 끼어 스피너가 10행 밖으로 밀리면 학생은 걷는데
+    // 헤더 바는 멈추는 어긋남이 남았고, 「스피너 아래에 대화 마커가 없어야 한다」는
+    // 문맥 조건도 행 하나만 봐서는 못 건다. 창까지 통째로 넘긴다.
+    crate::render::find_claude_spinner(cells).is_some()
 }
 
 /// claude 가 대화를 compact 하는 중인가 — 화면 하단에 그 알림이 떠 있는지 본다.
