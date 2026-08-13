@@ -3694,6 +3694,14 @@ enum UserEvent {
         cooldown_until: Option<u64>,
         pct: f32,
     },
+    /// 한도에 닿았는데 **옮겨갈 계정이 없다**(남은 슬롯이 전부 쿨다운이거나 하나뿐).
+    /// 전에는 이 경우 조용히 아무 일도 안 일어나, 리밋에 걸린 줄 모른 채 손으로
+    /// 계정마다 로그인하는 일이 벌어졌다. 폴러가 60초마다 보내므로 받는 쪽에서
+    /// dedup 해야 한다(`notify_desktop` 의 dedup 키).
+    ClaudeAccountExhausted {
+        pct: f32,
+        resets_at: Option<u64>,
+    },
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
     /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
     /// 단독 pane 으로 띄워 기존 작업 워크스페이스를 안 건드린다. 페이로드 = 경로.
