@@ -1214,6 +1214,13 @@ async fn arona_ui_serve(rel: String) -> axum::response::Response {
     }
 }
 
+/// `POST /settings/ping` — 설정 웹뷰의 배선 확인용. 200 이 오면 셋이 증명된다:
+/// 페이지가 same-origin 으로 로드됐고, `origin_guard_mw` 를 통과했고, 라우터가
+/// 이 prefix 를 잡는다. 실제 설정 mutation 창구가 붙으면 지운다.
+async fn settings_ping_handler() -> impl IntoResponse {
+    axum::Json(serde_json::json!({ "ok": true, "pong": true }))
+}
+
 /// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
 /// 쿼리 파라미터인 이유는 session-switch 와 같다(null-origin webview 의 CORS
 /// preflight 회피). surface id 의 '%' 는 %25 인코딩(encodeURIComponent) 권장
@@ -3746,6 +3753,7 @@ pub fn spawn_http_server_opts(
                             arona_ui_serve(p)
                         }),
                     )
+                    .route("/settings/ping", post(settings_ping_handler))
                     .route(
                         "/session-switch",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {

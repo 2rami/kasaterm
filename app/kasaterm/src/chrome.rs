@@ -1996,6 +1996,86 @@ impl App {
         }
         eprintln!("[arona-panel] closed; terminal revealed");
     }
+    /// 설정 화면의 웹뷰 판. 별도 OS 창 + `/arona-ui/settings.html` 을 MCP HTTP 로
+    /// 로드한다 — same-origin 이라 페이지의 fetch 가 CORS 없이 붙고, POST 는
+    /// `origin_guard_mw`(Router::layer)가 새 라우트까지 자동으로 보호한다.
+    /// 이미 열려 있으면 포커스만 주고 `true`.
+    ///
+    /// **`set_ime_allowed` 를 부르지 않는다.** 네이티브 설정창은 macOS 에서 OS IME
+    /// 를 끄고 in-process 조합기를 쓰지만(auxwin.rs `spawn_aux_settings`), 그건 GPU
+    /// 폼의 텍스트 편집용이다. 웹뷰에 그걸 걸면 WKWebView 가 제 IME 로 받아야 할
+    /// 한글 조합을 끊어 이행의 목적을 정확히 무효화한다 — 아로나 창도 같은 이유로
+    /// 안 부르고, 거기서 한글 입력이 이미 프로덕션으로 돌고 있다.
+    pub(crate) fn open_settings_web_window(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if let Some(w) = self.settings_web_window.as_ref() {
+            w.focus_window();
+            return true;
+        }
+        // 포트를 제목에 박는다 — `mcp_panel_port()` 는 8765 폴백을 가지고 있어
+        // 멀티 인스턴스에서 **남의 프로세스**를 가리킬 수 있다. 아로나는 읽기만
+        // 해서 넘어갔지만 설정은 파일을 쓴다. 어디에 말하는지 보여야 한다.
+        let port = mcp_panel_port();
+        let attrs = WindowAttributes::default()
+            .with_title(format!("설정 — 127.0.0.1:{port}"))
+            .with_theme(Some(Theme::Dark))
+            .with_visible(true)
+            // 네이티브 설정창과 같은 치수 — 나란히 스샷 비교(Step 4)가 목적이다.
+            .with_inner_size(LogicalSize::new(920.0, 720.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[settings-web] window create failed: {e}");
+                return false;
+            }
+        };
+        // launch 별 캐시버스트 — WKWebView 가 옛 settings.html+JS 를 캐시해도 새
+        // URL 이라 무조건 새로 받는다(서버 no-store 와 이중 방어).
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let win_show = window.clone();
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(format!("http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}"))
+            .with_background_color((27, 37, 65, 255))
+            .with_on_page_load_handler(move |event, _url| {
+                if matches!(event, wry::PageLoadEvent::Finished) {
+                    win_show.focus_window();
+                }
+            })
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(920.0, 720.0).into(),
+            })
+            // 아로나 패널과 같은 use-after-free 사유로 build_as_child.
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => Some(wv),
+            Err(e) => {
+                // 창은 살려둔다 — 여기서 return 하면 로컬 window 가 drop 되어
+                // "검은 창이 떴다 사라짐"이 된다. 실패 원인을 제목에 띄운다.
+                eprintln!("[settings-web] webview build failed: {e}");
+                window.set_title(&format!("설정 — 웹뷰 로드 실패: {e}"));
+                None
+            }
+        };
+        eprintln!("[settings-web] open; http://127.0.0.1:{port}/arona-ui/settings.html");
+        self.settings_web_window = Some(window);
+        self.settings_web_webview = webview;
+        true
+    }
+
+    /// 설정 웹뷰 창의 단일 닫기 경로 — 창 X 버튼(`window_event` 가드)과 메뉴/토글이
+    /// 모두 여기로 온다. webview 를 그것이 빌린 window 보다 먼저 drop 한다.
+    pub(crate) fn close_settings_web_window(&mut self) {
+        if self.settings_web_window.is_none() {
+            return;
+        }
+        self.settings_web_webview = None;
+        self.settings_web_window = None;
+        eprintln!("[settings-web] closed");
+    }
+
     /// 거노: "터미널 보기"를 누르면 화면을 2분할 — 터미널(왼쪽)·아로나 교실(오른쪽).
     /// 두 네이티브 창을 현재 모니터 작업영역의 좌/우 절반에 타일링한다. 둘 다 떠
     /// 있을 때만 의미가 있어, 아로나 창이 없으면(순수 터미널) no-op.
