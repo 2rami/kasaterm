@@ -654,6 +654,34 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 };
                 let (from_label, to_label) = (label(&self.set_claude_account), label(to));
+                // 지금 **에이전트가 도는** pane 은 옛 계정 토큰을 문 채로 남는다 —
+                // 계정은 프로세스 env 라 뜰 때 박힌다. 표시해 두고 헤더에서 재시작을
+                // 권한다(셸만 있는 pane 은 되띄울 게 없으니 뺀다).
+                //
+                // A→B→A 로 돌아온 pane 은 지운다. 옛 표시를 남기면 이미 맞는 계정으로
+                // 도는 pane 에 「재시작할까요」가 떠 있게 된다(Orca 도 이 collapse 를
+                // 따로 다룬다).
+                let running: Vec<String> = self
+                    .pty
+                    .iter()
+                    .filter(|(_, p)| p.active_agent().is_some())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in running {
+                    match self.pane_account_stale.get(&id) {
+                        // 떠났던 계정으로 되돌아왔다 — 이 pane 은 다시 맞는 계정이다.
+                        Some((orig, _)) if orig == &to_label => {
+                            self.pane_account_stale.remove(&id);
+                        }
+                        // 이미 표시된 pane 은 **최초의** 계정을 유지한다. 갱신하면
+                        // A→B→C 에서 "B → C" 가 되어, 실제로 도는 A 를 잃는다.
+                        Some(_) => {}
+                        None => {
+                            self.pane_account_stale
+                                .insert(id, (from_label.clone(), to_label.clone()));
+                        }
+                    }
+                }
                 self.set_claude_account = to.clone();
                 // shim 을 다시 깔아 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로.
                 self.settings_save();
