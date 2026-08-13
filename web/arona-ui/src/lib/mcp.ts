@@ -52,24 +52,33 @@ export async function resolveBase(force = false): Promise<void> {
 // 워커 accent — pane id 숫자 해시로 고정 팔레트 순환.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
 
-// 학생 캐릭터 고정 accent(hex) — kasaterm 네이티브(theme.rs character_accent)와
-// 동일 값. pane 번호 순환색(accentFor)은 캐릭터와 무관해 시로코가 mint 로 뜨는
-// 식의 불일치가 났다 — 캐릭터 배정 pane 은 이 색이 테두리·버블 이름색을 이긴다.
-const CHARACTER_ACCENT: Record<string, string> = {
-  '아로나': '#4A90E2',
-  '프라나': '#E6E9F0',
-  '미도리': '#6BCF7F',
-  '모모이': '#FF6B6B',
-  '유즈': '#E64980',
-  '아리스': '#4C6EF5',
-  '유우카': '#7A5FD4',
-  '시로코': '#8FB8D8',
-  '호시노': '#F2A0C0',
-  '코하루': '#F27B9B',
-  '히마리': '#A88BE0',
-  '아루': '#E85D4A',
-  '샬레': '#3A6EB4',
-};
+// 학생 캐릭터 고정 accent(hex). pane 번호 순환색(accentFor)은 캐릭터와 무관해
+// 시로코가 mint 로 뜨는 식의 불일치가 났다 — 캐릭터 배정 pane 은 이 색이
+// 테두리·버블 이름색을 이긴다.
+//
+// **값을 여기 적지 않는다.** 전에는 네이티브 표(theme.rs `character_accent`)를 손으로
+// 베껴 뒀는데, 그러면 번들 로스터 열세 명에 얼어붙는다 — 사용자가 만든 테마의 색은
+// 영영 안 닿고, 커스텀 캐릭터는 표에 없어 pane 번호 순환색으로 떨어졌다. 정본은
+// 활성 로스터 하나이고 `/design-tokens` 가 그것을 실어 온다.
+let CHARACTER_ACCENT: Record<string, string> = {};
+let accentsFetchedMs = -Infinity;
+
+/** 캐릭터 accent 표를 서버에서 받아 둔다. 테마를 갈아 끼우면 값이 통째로 바뀌므로
+ *  주기적으로 다시 읽는다 — 이름이 그대로인 채 색만 바뀌는 경우엔 「모르는 이름」
+ *  같은 신호가 없어서, 시간 말고는 갱신을 걸 곳이 없다. 실패하면 옛 표를 그대로
+ *  둔다: 빈 표로 덮으면 색이 순환색으로 떨어져 화면이 통째로 흔들린다. */
+async function refreshCharacterAccents(intervalMs = 30000): Promise<void> {
+  const now = typeof performance !== 'undefined' ? performance.now() : 0;
+  if (now - accentsFetchedMs < intervalMs) return;
+  accentsFetchedMs = now;
+  try {
+    const res = await fetch(`${BASE}/design-tokens`);
+    if (!res.ok) return;
+    const t = await res.json();
+    const map = t?.character_accents;
+    if (map && typeof map === 'object') CHARACTER_ACCENT = map as Record<string, string>;
+  } catch { /* 옛 표 유지 */ }
+}
 
 interface BoardRow {
   surface_id: string;
@@ -207,6 +216,10 @@ export function startBoardPolling(intervalMs = 1000): () => void {
   let stopped = false;
   const tick = async () => {
     if (stopped) return;
+    // accent 표를 board 와 같은 틱에 태운다(안에서 30초 쓰로틀). 처음 한 틱은
+    // 표가 비어 순환색으로 그려질 수 있는데, 그건 로스터에 없는 캐릭터의 기존
+    // 동작과 같고 다음 프레임에 제 색으로 바뀐다.
+    await refreshCharacterAccents();
     const rows = await fetchBoard();
     useStore.getState().setAgents(rows.map(toAgent));
   };
