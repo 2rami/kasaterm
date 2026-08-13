@@ -2834,20 +2834,22 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
 /// 이 판정은 working 을 **대체하지 않고 덧붙는다** — 상태를 「working」에서
 /// 「compacting」으로 좁히는 데만 쓴다.
 ///
-/// 스캔 폭이 `rows_show_working` 과 같은 하단 10행인 이유: 그 알림은 스피너와 같은
-/// 자리에 뜨고, 위로 흘러간 옛 알림을 잡으면 compact 가 끝난 뒤에도 바가 남는다.
+/// 스캔 창(하단 N행)을 쓰지 않고 `find_claude_spinner` 가 짚은 **행 하나**만 보는
+/// 이유: 그 창은 todo 트리(~7행)와 입력박스(~4행)가 사이에 끼는 순간 통째로
+/// 어긋난다. 실제로 하단 10행으로 뒀더니 알림이 맨 아랫줄에서 12행 위에 있어 한
+/// 번도 안 걸렸다(2026-08-13 지적: "compacting 프로세스바도 안되네"). 바로 위
+/// `rows_show_working` 이 같은 함정을 밟고 이미 창을 버렸는데, 여기에 그 창을 다시
+/// 만들어 둔 것이었다.
+///
+/// 행 하나로 좁혀도 되는 건 알림이 스피너와 **같은 줄**에 뜨기 때문이고
+/// (`✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)`), 덤으로 스크롤백에 굳은
+/// 옛 알림 오탐이 사라진다 — `spinner_is_live` 가 이미 그 둘을 가른다.
 pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> bool {
-    let Some(last) = cells
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
-    else {
+    let Some((r, _)) = crate::render::find_claude_spinner(cells) else {
         return false;
     };
-    let start = (last + 1).saturating_sub(10);
-    cells[start..=last].iter().any(|row| {
-        let text: String = row.iter().map(|c| c.ch).collect();
-        text.contains("ompacting")
-    })
+    let text: String = cells[r].iter().map(|c| c.ch).collect();
+    text.contains("ompacting")
 }
 
 /// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
@@ -3124,8 +3126,12 @@ mod working_scan_tests {
     // 여부와 뒤에 붙는 말이 버전마다 흔들려도 남는 조각이다.
     #[test]
     fn compacting_notice_is_detected_in_either_wording() {
-        assert!(rows_show_compacting(&[row("✻ Compacting conversation…")]));
-        assert!(rows_show_compacting(&[row("compacting history")]));
+        assert!(rows_show_compacting(&[row(
+            "✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"
+        )]));
+        assert!(rows_show_compacting(&[row(
+            "✻ compacting history (esc to interrupt)"
+        )]));
     }
 
     // 평범한 working 화면을 compact 로 오인하면 모든 바쁜 pane 이 채워지는 바를 단다.
@@ -3136,14 +3142,29 @@ mod working_scan_tests {
         assert!(!rows_show_compacting(&[]));
     }
 
-    // 스캔은 하단 10행만 본다 — 위로 흘러간 옛 알림을 잡으면 compact 가 끝난 뒤에도
-    // 바가 영원히 남는다. 11행 위에 둔 알림은 무시돼야 한다.
+    // ★회귀: 알림과 맨 아랫줄 사이에 todo 트리와 입력박스가 끼어도 잡아야 한다.
+    // 하단 10행 창으로 뒀을 때 거노 화면에서 그 거리가 12행이라 한 번도 안 걸렸다
+    // (2026-08-13). 판정을 스피너 행에 앵커하면 그 거리는 무의미해진다.
     #[test]
-    fn compacting_notice_scrolled_out_of_the_bottom_rows_is_ignored() {
-        let mut cells = vec![row("Compacting conversation…")];
-        for _ in 0..11 {
-            cells.push(row("그 뒤에 쌓인 출력"));
+    fn compacting_notice_far_above_the_bottom_is_still_detected() {
+        let mut cells = vec![row("✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)")];
+        cells.push(row("▰▰▰▱▱▱ 45%"));
+        cells.push(row("└ □ 딜 검토에 출구를 만든다"));
+        cells.push(row("   ✓ 딜 등록의 담당자를 여러 명으로"));
+        for _ in 0..8 {
+            cells.push(row("│ 입력박스와 statusline"));
         }
+        assert!(rows_show_compacting(&cells));
+    }
+
+    // 스크롤백에 굳은 옛 알림은 무시돼야 한다 — 안 그러면 compact 가 끝난 뒤에도
+    // 바가 영원히 남는다. 가르는 축은 거리가 아니라 아래에 쌓인 대화 마커(`⎿`)다.
+    #[test]
+    fn compacting_notice_scrolled_into_the_backlog_is_ignored() {
+        let cells = vec![
+            row("✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"),
+            row("⎿ 그 뒤에 이어진 도구 출력"),
+        ];
         assert!(!rows_show_compacting(&cells));
     }
 
