@@ -1330,6 +1330,12 @@ struct GpuOverlay {
     /// 글자의 왼쪽 절반에만 걸려, 그 자리에 뭐가 있는지가 아니라 커서가 깨진 것처럼
     /// 보인다. 나머지는 전부 1 이다.
     cursor_w: u16,
+    /// 커서 모양 — `"block"` · `"bar"` · `"underline"`. `paint_gpu_overlays` 가
+    /// `self` 를 못 보는 자유함수라(gpu 가변 대여와 싸우지 않으려고) 설정값을 여기
+    /// 실어 나른다.
+    cursor_shape: String,
+    /// bar·underline 굵기(논리 px). block 은 셀을 통째로 채우므로 안 쓴다.
+    cursor_thickness: f32,
     cursor_visible: bool,
     cols: u16,
     blink_on: bool,
@@ -4001,6 +4007,13 @@ pub(crate) enum SettingsAction {
     ResetScale,
     /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
     TabPosition(&'static str),
+    /// 터미널 커서 모양 — `"block"` · `"bar"` · `"underline"`.
+    CursorShape(&'static str),
+    /// bar·underline 커서의 굵기(논리 px). block 에는 안 쓴다.
+    ///
+    /// `SettingsAction` 이 `Eq` 를 derive 하므로 f32 를 실을 수 없다 — 굵기는 어차피
+    /// 픽셀 정수라 u8 로 나른다.
+    CursorThickness(u8),
     ToggleClaudePersona,
     ToggleShimInject,
     ClaudeModel(String),
@@ -5067,6 +5080,12 @@ struct App {
     /// and `tab_strip_w()` pins the side strip to 0, so render + click routing
     /// follow automatically. Persisted as settings.json `tab_position`.
     tabs_on_top: bool,
+    /// 터미널 커서 모양 — `"block"`(기본) · `"bar"` · `"underline"`. settings.json
+    /// `cursor_shape`. 문자열로 두는 이유는 `tab_position` 과 같다: 설정 파일이
+    /// 사람이 손대는 자리라, 모르는 값이 들어와도 읽는 쪽에서 기본으로 떨어뜨린다.
+    cursor_shape: String,
+    /// bar·underline 커서 굵기(논리 px, 1~6). settings.json `cursor_thickness`.
+    cursor_thickness: f32,
     /// macOS `.md` 더블클릭이 cold-launch(앱 꺼진 채)로 들어오면 odoc 이벤트가
     /// `resumed()`(window·pty_layout 생성) 전에 도착할 수 있다. 그때 경로를 여기
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
@@ -5419,6 +5438,8 @@ impl App {
             // 기본은 side(사이드바 탭) — read_tab_position 이 "top" 만 top 으로,
             // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",
+            cursor_shape: socket::read_cursor_shape(),
+            cursor_thickness: socket::read_cursor_thickness(),
             pending_open_md: Vec::new(),
             aux_windows: Vec::new(),
         }

@@ -94,6 +94,10 @@ pub(crate) struct SettingsCtx {
     /// PixelDelta 스크롤 감도 배율(트랙패드·고해상도 마우스휠 공용).
     pub wheel_pixel_gain: f32,
     pub tabs_on_top: bool,
+    /// 터미널 커서 모양 — `"block"` · `"bar"` · `"underline"`.
+    pub cursor_shape: String,
+    /// bar·underline 커서 굵기(논리 px).
+    pub cursor_thickness: f32,
     pub claude_persona: bool,
     pub shim_inject: bool,
     pub claude_model: String,
@@ -661,6 +665,8 @@ impl App {
             ui_zoom: self.ui_zoom,
             wheel_pixel_gain: self.set_wheel_pixel_gain,
             tabs_on_top: self.tabs_on_top,
+            cursor_shape: self.cursor_shape.clone(),
+            cursor_thickness: self.cursor_thickness,
             claude_persona: self.set_claude_persona,
             shim_inject: self.set_shim_inject,
             claude_model: self.set_claude_model.clone(),
@@ -938,6 +944,25 @@ impl App {
                     // The side strip appearing/disappearing changes usable cols.
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
+                }
+            }
+            SettingsAction::CursorShape(shape) => {
+                if self.cursor_shape != shape {
+                    self.cursor_shape = shape.to_string();
+                    socket::write_setting(
+                        "cursor_shape",
+                        serde_json::Value::String(shape.to_string()),
+                    );
+                    // 커서는 셀 그리드 위에 그려지므로 chrome 만 더럽히면 안 바뀐다.
+                    self.chrome_dirty = true;
+                }
+            }
+            SettingsAction::CursorThickness(px) => {
+                let want = (px as f32).clamp(1.0, 6.0);
+                if (self.cursor_thickness - want).abs() > 0.01 {
+                    self.cursor_thickness = want;
+                    socket::write_setting("cursor_thickness", serde_json::Value::from(px));
+                    self.chrome_dirty = true;
                 }
             }
             SettingsAction::FontSizeDelta(d) => {
@@ -1859,6 +1884,26 @@ pub(crate) fn paint_settings(
                 &["윈도우 탭을 타이틀바 또는 사이드바에 표시"], &[
                 ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
                 ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
+            ]);
+            y = seg_row(g, &mut rects, y, "Cursor shape",
+                &["셀을 채우는 블록, Ghostty 식 세로선, 또는 밑줄"], &[
+                ("Block", ctx.cursor_shape == "block", SettingsAction::CursorShape("block")),
+                ("Bar", ctx.cursor_shape == "bar", SettingsAction::CursorShape("bar")),
+                ("Underline", ctx.cursor_shape == "underline", SettingsAction::CursorShape("underline")),
+            ]);
+            // 굵기는 bar·underline 에만 쓰인다 — block 은 셀을 통째로 채우므로 고를 게
+            // 없다. 줄 자체를 감추면 「왜 사라졌지」가 되므로, block 일 때도 두되 무엇에
+            // 쓰이는지 곁글로 밝힌다.
+            y = seg_row(g, &mut rects, y, "Cursor thickness",
+                &[if ctx.cursor_shape == "block" {
+                    "Bar·Underline 을 고르면 적용돼요"
+                } else {
+                    "세로선·밑줄의 굵기"
+                }], &[
+                ("1px", (ctx.cursor_thickness - 1.0).abs() < 0.01, SettingsAction::CursorThickness(1)),
+                ("2px", (ctx.cursor_thickness - 2.0).abs() < 0.01, SettingsAction::CursorThickness(2)),
+                ("3px", (ctx.cursor_thickness - 3.0).abs() < 0.01, SettingsAction::CursorThickness(3)),
+                ("4px", (ctx.cursor_thickness - 4.0).abs() < 0.01, SettingsAction::CursorThickness(4)),
             ]);
             // 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
             // 그래서 한쪽에 맞추면 다른 쪽이 어긋난다. 고르는 몫을 사람에게 넘긴다.
