@@ -841,6 +841,21 @@ pub trait Backend: Send + Sync {
         serde_json::Value::Null
     }
 
+    /// 설정 화면의 캐릭터 탭이 그릴 것 전부 — 테마 카드 목록과 활성 로스터.
+    /// 기본 `null`(캐릭터 개념이 없는 백엔드는 오류가 아니라 "없음"을 답한다).
+    fn settings_characters(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// 캐릭터 프사 PNG 바이트. `theme` 이 있으면 **그 테마 폴더의** 그림을(카드
+    /// 미리보기), 없으면 활성 스프라이트 폴더 → 번들 순으로 찾는다.
+    ///
+    /// `slug`·`theme` 은 경로 조각이 되므로 구현이 탈출을 막아야 한다. 기본 None
+    /// = 404.
+    fn character_face(&self, _slug: &str, _theme: Option<&str>) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Read every pane's activity. Default: empty board — a backend that
     /// doesn't track activity reports nothing rather than erroring, so
     /// callers can always scan.
