@@ -1981,7 +1981,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // I-beam over the file-tree text inputs (search box / inline
                     // new-entry name). The commit modal + settings screen are
                     // full-window overlays, handled by the earlier branch.
-                    let want_text = (self.file_tree.visible && hit(self.file_tree.search_rect))
+                    // 터미널 셀 위에서도 I-beam 을 쓸지는 설정이 정한다(기본 화살표).
+                    // 글자를 고르는 자리라 I-beam 이 맞다는 쪽과, 화살표여야 클릭 대상이
+                    // 보인다는 쪽이 갈려서 고르는 몫을 사람에게 넘긴다. 위 입력칸 판정은
+                    // 설정과 무관하게 그대로다 — 거긴 정말 글자를 치는 자리다.
+                    let over_cells = self.mouse_cursor == "ibeam"
+                        && self.px_to_pane_cell(cx, cy).is_some();
+                    let want_text = over_cells
+                        || (self.file_tree.visible && hit(self.file_tree.search_rect))
                         || (self.file_tree.new.is_some() && hit(self.file_tree.new_row_rect));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;

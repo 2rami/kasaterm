@@ -4038,6 +4038,8 @@ pub(crate) enum SettingsAction {
     /// `SettingsAction` 이 `Eq` 를 derive 하므로 f32 를 실을 수 없다 — 굵기는 어차피
     /// 픽셀 정수라 u8 로 나른다.
     CursorThickness(u8),
+    /// 터미널 셀 위 마우스 포인터 — `"arrow"` · `"ibeam"`.
+    MouseCursor(&'static str),
     ToggleClaudePersona,
     ToggleShimInject,
     ClaudeModel(String),
@@ -5119,6 +5121,9 @@ struct App {
     cursor_shape: String,
     /// bar·underline 커서 굵기(논리 px, 1~6). settings.json `cursor_thickness`.
     cursor_thickness: f32,
+    /// 터미널 셀 위 마우스 포인터 — `"arrow"`(기본) · `"ibeam"`. settings.json
+    /// `mouse_cursor`. 텍스트 입력칸 위 I-beam 은 이 값과 무관하게 늘 뜬다.
+    mouse_cursor: String,
     /// macOS `.md` 더블클릭이 cold-launch(앱 꺼진 채)로 들어오면 odoc 이벤트가
     /// `resumed()`(window·pty_layout 생성) 전에 도착할 수 있다. 그때 경로를 여기
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
@@ -5475,6 +5480,7 @@ impl App {
             tabs_on_top: socket::read_tab_position() == "top",
             cursor_shape: socket::read_cursor_shape(),
             cursor_thickness: socket::read_cursor_thickness(),
+            mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
             aux_windows: Vec::new(),
         }
