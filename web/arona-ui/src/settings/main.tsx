@@ -3,8 +3,7 @@
 // 화면에도 딸려와 이 엔트리를 나눈 이유가 없어진다.
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import '../design/tailwind.css';
-import '../design/global.css';
+import './settings.css';
 import { SettingsApp } from './SettingsApp';
 
 createRoot(document.getElementById('root')!).render(
