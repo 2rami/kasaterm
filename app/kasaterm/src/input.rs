@@ -765,6 +765,40 @@ impl App {
         }
         self.last_window_title = Some(label);
     }
+    /// 사이드바 pane 줄이 쓰는 이름 — **붙인 이름 > OSC > 프로세스 이름** 순.
+    ///
+    /// 붙인 이름이 먼저인 이유: `title_pinned` 은 사람이나 에이전트가 이 pane 을
+    /// 뭐라고 부를지 **직접 정했다**는 표시다(`surface.rename`·`kasaspace_rename`·
+    /// 파일 탭). OSC 를 적용하는 쪽(`session.rs`)이 이미 같은 핀을 보고 비켜서므로,
+    /// 여기서도 같은 핀을 봐야 두 곳이 같은 이름을 말한다.
+    ///
+    /// ⚠️ 핀과 OSC 는 **저장소가 다르다.** 핀이 막는 건 GUI 쪽 사본
+    /// (`ws.panes[id].title`)뿐이고, PTY 는 `title_handle` 에 OSC 를 계속 받아 둔다.
+    /// 그래서 예전처럼 `osc_title()` 만 읽으면 이름을 붙여도 줄은 안 바뀐다 — 붙인
+    /// 이름이 사이드바에 닿는 길이 아예 없었다(2026-08-13 실측). GUI 사본을 먼저
+    /// 보는 것이 그 길이다.
+    ///
+    /// 핀이 없으면 예전 규칙 그대로다: OSC 가 첫 번째 진실이고(claude 는 뜨자마자
+    /// 「✳ Claude Code」를 보낸다) 프로세스 이름이 폴백이다. 즉 **이름을 안 붙인
+    /// pane 의 그림은 하나도 안 바뀐다.**
+    pub(crate) fn pane_row_label(&self, id: &str) -> String {
+        let pinned = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(id)
+                .filter(|p| p.title_pinned)
+                .and_then(|p| p.title.clone())
+                .filter(|s| !s.trim().is_empty())
+        };
+        if let Some(name) = pinned {
+            return name;
+        }
+        self.pty
+            .get(id)
+            .and_then(|p| p.osc_title())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, id, None))
+    }
     pub(crate) fn resolve_pane_label(
         pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         pane_id: &str,

@@ -3390,6 +3390,51 @@ impl App {
             self.open_file(p, None, true);
         }
     }
+    /// `KASATERM_PANELABEL_DEBUG=1` — 사이드바 pane 줄에 **실제로 적히는 이름**을
+    /// 바뀔 때마다 한 줄씩 찍는다. 사이드바를 열고 방을 펼치고 목록 모드로 바꾸는
+    /// 세 단계를 거치지 않고도 이름 규칙을 물을 수 있다.
+    ///
+    /// 세 소스를 같이 찍는 게 요점이다 — 붙인 이름(GUI 사본)과 OSC(PTY 사본)는
+    /// **저장소가 달라서**, 하나만 보면 「이름을 붙였는데 왜 안 바뀌지」의 원인이
+    /// 어느 쪽인지 못 가른다. 표시값이 그 둘 중 어느 것을 골랐는지가 그대로 보인다.
+    ///
+    /// 바뀔 때만 찍는다 — 매 프레임 찍으면 초당 수십 줄이라 로그에서 변화를 못 찾는다.
+    pub(crate) fn probe_pane_labels(&mut self) {
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("KASATERM_PANELABEL_DEBUG").is_some()) {
+            return;
+        }
+        let ids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            let mut v: Vec<String> = ws.panes.keys().cloned().collect();
+            v.sort();
+            v
+        };
+        for id in ids {
+            let shown = self.pane_row_label(&id);
+            let osc = self.pty.get(&id).and_then(|p| p.osc_title()).unwrap_or_default();
+            let (pinned, pin) = {
+                let ws = self.ws.lock().unwrap();
+                match ws.panes.get(&id) {
+                    Some(p) => (p.title.clone().unwrap_or_default(), p.title_pinned),
+                    None => (String::new(), false),
+                }
+            };
+            let line = format!("붙인이름={pinned:?} 핀={pin} osc={osc:?} → 표시={shown:?}");
+            // 상태는 모듈 static 이다 — `struct App` 은 병렬 작업 충돌 핫스팟이라
+            // 하네스가 거기 필드를 늘리면 남의 작업과 매번 부딪힌다(CLAUDE.md).
+            static SEEN: OnceLock<
+                std::sync::Mutex<std::collections::HashMap<String, String>>,
+            > = OnceLock::new();
+            let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
+            if seen.get(&id) == Some(&line) {
+                continue;
+            }
+            eprintln!("[panelabel] {id} {line}");
+            seen.insert(id, line);
+        }
+    }
     /// Headless verification helper. Reads `KASATERM_AUTOSPLIT` ("h" / "v"
     /// / "hv" / "vh" ...) and fires the matching splits from
     /// `about_to_wait` after `KASATERM_AUTOSPLIT_MS` (default 2500ms),

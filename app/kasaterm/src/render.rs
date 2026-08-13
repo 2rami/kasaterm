@@ -2345,16 +2345,7 @@ impl App {
                     .unwrap_or_default();
                 let is_cur =
                     self.ws.lock().unwrap().active_pane.as_deref() == Some(id.as_str());
-                // 안에서 도는 프로그램이 보낸 OSC 0/2 제목이 첫 번째 진실이다
-                // (claude 는 뜨자마자 「✳ Claude Code」를 보낸다). `ws.panes` 의
-                // 탭 제목은 사용자 rename 전용이라 여기선 늘 비어, 줄이 영영
-                // `zsh` 로 남았다. 프로세스 이름은 그다음 폴백.
-                let label = self
-                    .pty
-                    .get(id)
-                    .and_then(|p| p.osc_title())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, id, None));
+                let label = self.pane_row_label(id);
                 let waiting = self.pane_needs_you(id);
                 // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
@@ -8167,6 +8158,7 @@ impl App {
     }
 
     pub(crate) fn render_frame(&mut self) {
+        self.probe_pane_labels();
         // commit_overlay's job ends the moment the echo lands and moves
         // the cursor. Retire it permanently then — otherwise erasing
         // back to the commit position re-satisfies `cursor == stored`
