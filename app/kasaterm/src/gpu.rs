@@ -2043,9 +2043,10 @@ impl GpuRenderer {
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
                     let cell = self.mono_advance(' ', size);
                     // 논리 줄 하나를 상자 폭에 맞는 시각 줄들로 접는다: (줄 번호,
-                    // 들여쓰기, 문자 범위). 이 렌더러엔 scissor 가 없어 넘친 코드가
-                    // 상자·읽기 열·스크롤바까지 밟고 지나갔다. 가로 스크롤은 블록마다
-                    // 상태가 필요하니 읽기 뷰에선 노션처럼 접는 쪽이 맞다.
+                    // 들여쓰기, 문자 범위). 접기 전에는 넘친 코드가 상자·읽기 열·
+                    // 스크롤바까지 밟고 지나갔다. 시저가 생겼어도 접는 쪽이 맞다 —
+                    // 자르면 글자가 안 보이지만 접으면 읽을 수 있고, 가로 스크롤로
+                    // 대신하려면 블록마다 상태를 들고 있어야 한다.
                     let mut plans: Vec<(usize, f32, usize, usize)> = Vec::new();
                     for (li, line) in lines.iter().enumerate() {
                         let chs: Vec<char> = line.chars().collect();
@@ -2551,12 +2552,10 @@ impl GpuRenderer {
                         let row_h = row_h + pad_y * 2.0;
                         if pen_y + row_h > clip_top && pen_y < clip_bot {
                             if is_head {
-                                let by0 = pen_y.max(clip_top);
-                                let by1 = (pen_y + row_h).min(clip_bot);
                                 // A hair *lighter* than bg so the header band
                                 // reads as raised; SURFACE is near-black here and
                                 // made the table top-heavy.
-                                self.rect(x, by0, table_w, by1 - by0, crate::theme::surface_hover());
+                                self.rect(x, pen_y, table_w, row_h, crate::theme::surface_hover());
                             }
                             let col = if is_head {
                                 crate::theme::text()
@@ -2581,20 +2580,15 @@ impl GpuRenderer {
                         }
                         pen_y += row_h;
                     }
-                    // Column rules + the top hairline, clamped to the scroll clip
-                    // (this renderer has no scissor, so a tall table would
-                    // otherwise bleed past the pane box).
-                    let vy0 = table_top.max(clip_top);
-                    let vy1 = pen_y.min(clip_bot);
-                    if vy1 > vy0 {
+                    // Column rules + the top hairline. 스크롤 클립으로 손수 잘라 두던
+                    // 자리다 — 시저가 같은 일을 하므로 온전한 길이로 그리고 맡긴다.
+                    if pen_y > table_top {
                         let mut vx = x;
                         for c in colw.iter().take(ncols - 1) {
                             vx += c;
-                            self.rect(vx, vy0, 1.0, vy1 - vy0, crate::theme::border());
+                            self.rect(vx, table_top, 1.0, pen_y - table_top, crate::theme::border());
                         }
-                        if table_top >= clip_top {
-                            self.rect(x, table_top, table_w, 1.0, crate::theme::border());
-                        }
+                        self.rect(x, table_top, table_w, 1.0, crate::theme::border());
                     }
                     pen_y += base * 0.9;
                 }
@@ -2969,7 +2963,8 @@ impl GpuRenderer {
         // 보조 커서들. 비어 있는 게 보통이고, 그때는 아래 loop 가 한 번도 안 돈다.
         extra: &[crate::markdown::Caret],
     ) -> f32 {
-        // 이 렌더러엔 scissor 가 없어서 clip_right 가 곧 본문의 오른쪽 벽이다.
+        // 본문의 오른쪽 벽. `draw_text_clipped` 에 넘기면 그 함수가 이 자리에
+        // 시저를 세우므로, 걸친 글자는 사라지지 않고 반으로 잘린다.
         let clip_right = x + w;
         let base = self.font_size_px as f32 / self.scale;
         let (pad, lh) = self.raw_editor_metrics();

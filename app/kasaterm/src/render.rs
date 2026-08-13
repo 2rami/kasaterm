@@ -3892,8 +3892,9 @@ impl App {
                         .fold(0.0f32, f32::max);
                     let mw = (widest + 32.0).min((tab_strip_w - 8.0).max(80.0));
                     let mh = 12.0 + items.len() as f32 * MIH;
-                    // 사이드바 안에 가둔다 — 넘치면 오른쪽 파일트리 위로 삐져나간다
-                    // (렌더러에 scissor 가 없다).
+                    // 사이드바 안에 가둔다 — 넘치면 오른쪽 파일트리 위로 삐져나간다.
+                    // 시저로 자를 수도 있지만, 반쯤 잘린 메뉴는 읽을 수가 없다.
+                    // 안 보이게 자르는 것보다 자리를 옮겨 다 보이는 편이 낫다.
                     let mx = mx0.min((tab_strip_w - mw - 4.0).max(4.0)).max(4.0);
                     let my = my0.min((sb_win_h - mh - 6.0).max(TITLE_HEIGHT)).max(TITLE_HEIGHT);
                     panel_rect_outlined(g, mx, my, mw, mh, theme::radius_md(), theme::surface());
@@ -4038,10 +4039,10 @@ impl App {
                         .as_ref()
                         .and_then(|id| ws.panes.get(id).and_then(|p| p.preview_path.clone()))
                 });
-                // ── 빠른 파일 고정 섹션 ── 여기선 높이만 잡아 start_y 를 확정하고,
-                // 실제 그리기는 트리 본문 뒤로 미룬다. 이 렌더러는 scissor 가 없어
-                // 스크롤로 start_y 위까지 올라온 트리 항목을 나중에 불투명 배경으로
-                // 덮어야 겹침이 안 난다(개인 CLAUDE.md 행에 폴더가 파고들던 문제).
+                // ── 빠른 파일 고정 섹션 ── 여기선 높이만 잡아 start_y 를 확정한다.
+                // 그리기는 아래 원래 자리(트리 본문 앞)에서 한다 — 시저가 생기기
+                // 전에는 스크롤로 start_y 위까지 올라온 트리 항목을 이 섹션의 불투명
+                // 배경으로 **나중에 덮어야** 했고, 그 때문에 그리기만 뒤로 밀려 있었다.
                 let quick = &quick_files_list;
                 let quick_top = tree_top;
                 let quick_h = if quick.is_empty() {
@@ -5134,7 +5135,8 @@ impl App {
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Info {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
-                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
+                // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
                 let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
@@ -5189,7 +5191,8 @@ impl App {
             // 본문만 다르다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Sessions {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
-                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
+                // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
                 let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
@@ -5217,7 +5220,8 @@ impl App {
             // MCP·Skill 탭 — 위 둘과 형제 블록.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Mcp {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
-                // 그 띠 위로 덮여 그려진다(이 렌더러엔 scissor 가 없다).
+                // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
+                // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
                 let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
@@ -5394,8 +5398,8 @@ impl App {
                 // Each tab's title gets an equal share of the leftover width.
                 let tabs_area = (h.w - 8.0 - btn_cluster - plus_w - 16.0).max(0.0);
                 let gap = 6.0_f32;
-                // Overflow windowing: whole tabs only (no scissor to clip a
-                // partial pill). When they can't all fit at the 56px minimum,
+                // Overflow windowing: whole tabs only — 이 띠는 클립을 안 세우므로
+                // 반쪽 알약이 나온다. When they can't all fit at the 56px minimum,
                 // show a contiguous run from `tab_first` and reserve 12px at
                 // each end for the overflow chevrons; the wheel over the strip
                 // steps the run.
@@ -6279,9 +6283,10 @@ impl App {
                     let menu_h = search_h + item_h * view_rows.max(1) as f32 + 8.0;
                     let menu_x = ax.min((win_px.0 / scale) - menu_w - 8.0).max(4.0);
                     let menu_y = (ay - menu_h - 2.0).max(TITLE_HEIGHT + 2.0);
-                    // Whole-row scroll: this renderer has no scissor clip, so a
-                    // partial row would spill past the rounded menu edge. Snap
-                    // the wheel offset to row units and page by integer rows.
+                    // Whole-row scroll: 이 메뉴는 클립을 안 세우므로 반쪽 행이
+                    // 둥근 모서리 밖으로 삐져나간다. 휠 오프셋을 행 단위로 스냅해
+                    // 정수 행씩 넘긴다. 시저를 세워도 되지만 둥근 모서리는 시저의
+                    // 직사각형으로 못 흉내 낸다 — 모서리에서 각지게 잘린다.
                     let overflow = total.saturating_sub(view_rows);
                     let scroll = self.statusbar.menu_scroll.clamp(0.0, overflow as f32 * item_h);
                     self.statusbar.menu_scroll = scroll;
