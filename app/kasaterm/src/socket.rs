@@ -1366,6 +1366,31 @@ impl Backend for PtyBackend {
         crate::render::student_profile_png(slug).map(|b| b.to_vec())
     }
 
+    fn save_character(
+        &self,
+        name: &str,
+        persona: Option<&str>,
+        new_name: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketSaveCharacter(
+                name.to_string(),
+                persona.map(str::to_string),
+                new_name.map(str::to_string),
+                tx,
+            ))
+            .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
+        // 파일 두 번 쓰기(성격·이름)와 shim 재생성이 끝나야 답이 온다 — 밀리초
+        // 단위지만 GUI 가 프레임을 그리는 중이면 그 뒤로 밀린다. 무한 대기는 안
+        // 된다(소켓 워커가 물려 다른 명령까지 멈춘다).
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Err(_) => anyhow::bail!("저장이 시간 안에 안 끝났어요"),
+        }
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)

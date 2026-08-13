@@ -532,6 +532,43 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketSaveCharacter(name, persona, new_name, reply) => {
+                // 네이티브가 사람 손으로 하는 3단을 그대로 태운다. 이유는
+                // `SocketSaveCharacter` 주석에 있다 — 요약하면 순서와 뒤처리가
+                // 이 두 액션에 묶여 있어서다.
+                // 거부는 **토스트로만** 알려진다(`flush_student_name` 은 버퍼를
+                // 조용히 되돌리고 반환값이 없다). 그래서 저장 전후의 토스트를
+                // 비교해 판정하고, 그 문구를 그대로 회신에 실어 웹뷰가 같은 말을
+                // 보여 주게 한다 — 네이티브 토스트는 웹뷰 창에서 안 보인다.
+                //
+                // 로스터 캐시(`character_slugs`)로 판정하지 않는 이유: 캐시는 이름이
+                // **실제로 바뀔 때만** 무효화되므로, 캐시와 파일이 어긋난 순간
+                // 거부를 성공으로 읽는다(실측으로 거짓 성공을 냈다).
+                let toast_before = self.collab.toast.clone();
+                self.settings_apply(SettingsAction::SelectStudent(name.clone()));
+                if let Some(p) = persona {
+                    self.students_caret = p.chars().count();
+                    self.students_persona = p.clone();
+                }
+                if let Some(n) = new_name {
+                    self.students_name = n.clone();
+                }
+                self.settings_apply(SettingsAction::CloseStudent);
+                let rejected = match (&toast_before, &self.collab.toast) {
+                    (_, None) => None,
+                    (None, Some((m, _))) => Some(m.clone()),
+                    // 시각까지 보는 건 같은 문구가 연달아 떴을 때를 가르기
+                    // 위해서다(같은 이름으로 두 번 시도하면 문구가 같다).
+                    (Some((bm, bt)), Some((m, t))) => (t != bt || m != bm).then(|| m.clone()),
+                };
+                let want = new_name.clone().unwrap_or_else(|| name.clone());
+                let _ = reply.send(Ok(serde_json::json!({
+                    "ok": rejected.is_none(),
+                    "name": if rejected.is_none() { want } else { name.clone() },
+                    "error": rejected,
+                })));
+                return;
+            }
             UserEvent::SocketCapture(pane, path, max_w, reply) => {
                 self.arm_pane_capture(pane, path.clone(), *max_w, reply.clone());
                 // 무장만으로는 부족하다 — 여기서 한 프레임을 직접 그려야 리드백이
