@@ -4784,6 +4784,16 @@ struct App {
     /// pane_session_id(백엔드 발급)와 달리 fork/detach 시 갈라진 진짜 세션이라, 이걸로
     /// bg_agents 를 조회해 포크/백그라운드 배지를 판정한다.
     pane_claude_sid: HashMap<String, String>,
+    /// 계정이 바뀐 뒤에도 **옛 계정으로 도는** pane → (떠난 계정 이름, 새 계정 이름).
+    ///
+    /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
+    /// 전환해도 이미 열린 pane 은 옛 계정 그대로다 — 화면(상태줄·Info)만 새 계정을
+    /// 가리켜 「전환했는데 왜 그대로지」가 된다(거노 2026-08-13). 여기 적어 두고
+    /// pane 헤더에 「재시작할까요?」를 띄운다. Orca 도 같은 한계를 같은 방식으로 푼다.
+    ///
+    /// `restart_pane_agent` 가 성공하거나 사용자가 무시하면 지운다. A→B→A 로 되돌아온
+    /// pane 도 지운다 — 다시 맞는 계정이 됐는데 물어볼 이유가 없다.
+    pane_account_stale: HashMap<String, (String, String)>,
     /// cmux socket backend 핸들 — ResumeSession(attach/재개)이 세션 id 를 아는 유일한
     /// 시점에 pane↔transcript 를 bind_transcript 로 즉석 확정하기 위해 보관. attach 뷰는
     /// bind hook 이 안 떠서 board discovery 의 recent-jsonl 추측이 남의 활성 세션에
@@ -5265,6 +5275,7 @@ impl App {
             pending_character: None,
             pane_session_id: HashMap::new(),
             pane_claude_sid: HashMap::new(),
+            pane_account_stale: HashMap::new(),
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),

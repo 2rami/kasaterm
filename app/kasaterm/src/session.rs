@@ -596,6 +596,83 @@ impl App {
             Err(e) => eprintln!("[swap_character] respawn failed: {e:#}"),
         }
     }
+    /// 도는 에이전트를 **같은 pane 자리에서** 새 계정으로 다시 띄운다.
+    ///
+    /// 계정은 `CLAUDE_SECURESTORAGE_CONFIG_DIR` = 프로세스 env 라 pane 이 뜰 때 박히고,
+    /// 도는 프로세스의 env 는 누구도 못 바꾼다. 그래서 계정을 전환해도 이미 열려 있는
+    /// pane 은 옛 계정으로 계속 돌았다(거노 2026-08-13: "전환하면 인포랑 하단은 바뀌는데
+    /// pane안에 세션이 인식못하나봐"). Orca 도 같은 한계를 재시작으로 푼다
+    /// (`CodexRestartChip` → `queueCodexPaneRestarts`) — 자동 승계는 저쪽에도 없다.
+    ///
+    /// `swap_character` 와 같은 골격이다: 같은 pane id 로 PTY 를 갈아끼우고 셸 프롬프트가
+    /// 뜰 즈음 명령을 주입한다. 다른 점은 주입하는 명령뿐 — 캐릭터는 그대로 두고
+    /// `restore_agent_command` 로 **하던 대화를 이어서** 띄운다(claude·codex·agy 각각).
+    ///
+    /// 대화 파일이 없으면 resume 을 걸지 않는다. 그 상태로 `--resume` 하면 claude 가
+    /// "No conversation found" 를 뱉고 빈 셸만 남아 학생 pane 이 통째 죽는다 — 대화를
+    /// 잃더라도 fresh 로 띄우는 편이 낫다(restore_leaf 와 같은 판단).
+    ///
+    /// 반환값은 「정말 다시 띄웠나」다. false 면 부르는 쪽이 알림을 되돌려야 한다 —
+    /// 재시작이 조용히 실패하면 사용자는 옛 계정으로 도는 pane 을 새 계정이라 믿는다.
+    pub(crate) fn restart_pane_agent(&mut self, pane: &str) -> bool {
+        // 지금 그 pane 에서 **실제로 도는** 하네스. 셸만 있는 pane 은 되띄울 것이 없다.
+        let Some(agent) = self.pty.get(pane).and_then(|p| p.active_agent()) else {
+            return false;
+        };
+        let agent = agent.as_str();
+        let sid = self.pane_claude_sid.get(pane).cloned();
+        let resumable = sid.as_deref().is_some_and(|s| {
+            if agent == "codex" {
+                socket::codex_rollout_for_session(s).is_some()
+            } else {
+                socket::transcript_path_for_session(s).is_some()
+            }
+        });
+        let cwd = self.pane_cwd_cache.get(pane).map(|p| p.to_string_lossy().into_owned());
+        let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+        let (cols, rows) = self.window_cells();
+        // 옛 PTY 종료 — 여기서 옛 계정 토큰을 문 프로세스가 사라진다. pump 스레드는
+        // EOF 로 빠진다.
+        self.pty.remove(pane);
+        let mut env = crate::proxy_env(pane);
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+        }
+        // 캐릭터는 유지한다 — 계정이 바뀌었다고 학생이 바뀔 이유가 없다.
+        env.extend(self.assign_character_env(pane, cwd.as_deref(), room.as_deref()));
+        match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env,
+            pane_id: pane.to_string(),
+            initial_scrollback: Vec::new(),
+        }) {
+            Ok(session) => {
+                let sess = Arc::new(session);
+                self.pump_pty_screens(sess.screens.clone(), pane.to_string());
+                self.insert_pty(pane.to_string(), sess.clone());
+                // 옛 PTY 의 EOF 가 이 id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
+                // 되띄웠으니 지운다(swap_character 와 같은 이유).
+                self.dead_panes.lock().unwrap().retain(|x| x != pane);
+                let cmd = restore_agent_command(Some(agent), sid.as_deref(), resumable, None, None);
+                let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+                self.pending_restores.push((sess, format!("{cmd}\r"), at));
+                self.resize_backend(cols, rows);
+                self.publish_pty_layout();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                true
+            }
+            Err(e) => {
+                eprintln!("[restart_pane_agent] respawn failed: {e:#}");
+                false
+            }
+        }
+    }
+
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
     /// The new pane's PTY joins the session's shared `pty` map and runs in the
