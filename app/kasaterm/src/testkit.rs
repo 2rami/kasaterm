@@ -4605,6 +4605,18 @@ impl App {
             .and_then(|p| self.pty.get(p))
             .map(|p| p.size().0);
         self.toggle_aux_tree(0);
+        // `_SCROLL=<px>` — 잘라내기를 물으려면 행이 경계에 **걸쳐** 있어야 하는데,
+        // 스크롤 0 에서는 첫 행이 헤더 밑에 딱 붙어 자르나 마나 그림이 같다.
+        // 행 높이의 배수가 아닌 값을 줘야 반쪽 행이 생긴다.
+        if let Some(px) = std::env::var("KASATERM_AUTOAUXTREE_SCROLL")
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+        {
+            if let Some(a) = self.aux_windows.first_mut() {
+                a.tree_scroll = px;
+            }
+            eprintln!("[autoauxtree] 스크롤 {px}");
+        }
         // 한 프레임 그려야 `tree_rows` 가 찬다 — 안 그리고 세면 항상 0 이라 "행이
         // 그려졌나"를 묻는 척만 하게 된다.
         self.aux_render(0);
