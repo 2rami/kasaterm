@@ -2017,11 +2017,19 @@ pub(crate) fn draw_mcp_col(
     let max_scroll = (mc.content_h - vis_h).max(0.0);
     mc.scroll = mc.scroll.clamp(0.0, max_scroll);
 
+    // 목록은 시저로 가둔다 — 위에 반쯤 걸친 섹션 머리가 폼·탭 줄을 덮던 자리다.
+    // 루프 밖에서 한 번만 세운다(안에서 세우면 항목마다 세그먼트가 둘씩 쌓인다).
+    g.push_clip(x, body_top, w, vis_h);
     let mut y = body_top - mc.scroll;
     for item in &items {
-        let visible = y + item.height() > body_top && y < bottom;
+        // 완전히 밖인 것만 건너뛴다. 반쯤 걸친 것은 그리고 시저가 자른다 — 경계는
+        // 손으로 다시 쓰지 않고 클립에게 묻는다.
+        let visible = g.clip_visible(x, y, w, item.height());
         // 머리는 통째로 누르는 자리다 — 셰브런만 받으면 과녁이 12px 이 된다.
         let head = (x, y, w, item.height());
+        // 눌리는 자리는 늘 클립과의 교집합이다. 시저가 자른 부분이 그대로 눌리면
+        // 「화면엔 없는데 눌리는 머리」가 생기고, 그건 스크린샷이 못 잡는다.
+        let head_hit = g.clip_hit(head);
         let (i, row) = match item {
             Item::Section {
                 harness,
@@ -2029,7 +2037,7 @@ pub(crate) fn draw_mcp_col(
                 count,
             } => {
                 if visible {
-                    let hov = hit(&head);
+                    let hov = head_hit.is_some_and(|h| hit(&h));
                     if hov {
                         round_rect(
                             g,
@@ -2093,9 +2101,13 @@ pub(crate) fn draw_mcp_col(
                             15.0,
                             if ah { theme::text() } else { theme::text_dim() },
                         );
-                        add_rects.push((harness, r));
+                        if let Some(hr) = g.clip_hit(r) {
+                            add_rects.push((harness, hr));
+                        }
                     }
-                    head_rects.push((harness.to_string(), head));
+                    if let Some(hh) = head_hit {
+                        head_rects.push((harness.to_string(), hh));
+                    }
                 }
                 y += SECTION_H;
                 continue;
@@ -2108,7 +2120,7 @@ pub(crate) fn draw_mcp_col(
                 count,
             } => {
                 if visible {
-                    let hov = hit(&head);
+                    let hov = head_hit.is_some_and(|h| hit(&h));
                     g.hover_pointer |= hov;
                     g.queue_icon(
                         if *open {
@@ -2149,7 +2161,9 @@ pub(crate) fn draw_mcp_col(
                             italic: false,
                         },
                     );
-                    head_rects.push((group_key(harness, *kind, scope), head));
+                    if let Some(hh) = head_hit {
+                        head_rects.push((group_key(harness, *kind, scope), hh));
+                    }
                 }
                 y += GROUP_H;
                 continue;
@@ -2164,9 +2178,10 @@ pub(crate) fn draw_mcp_col(
         };
 
         let r = (x, y, w, ROW_H);
-        // 화면 밖 행은 hit rect 도 안 남긴다 — 남기면 스크롤 위쪽 숨은 행이 클릭을 받는다.
-        if y + ROW_H > body_top && y < bottom {
-            let hov = hit(&r);
+        // 완전히 밖인 행만 건너뛴다. 반쯤 걸친 행은 그리고 시저가 자르며, 눌리는
+        // 자리는 그 잘린 만큼을 뺀 교집합이다.
+        if let Some(rh) = g.clip_hit(r) {
+            let hov = hit(&rh);
             if hov {
                 round_rect(
                     g,
@@ -2212,7 +2227,10 @@ pub(crate) fn draw_mcp_col(
             let mut detail_w = avail - 12.0;
             if (hov || is_armed) && row.deletable() {
                 let d = (right - 20.0, y + 11.0, 16.0, 16.0);
-                let dh = hit(&d);
+                // 지우기는 되돌릴 수 없다 — 잘려 안 보이는 자리에서 눌리는 일은
+                // 여기서만은 절대 없어야 한다.
+                let d_hit = g.clip_hit(d);
+                let dh = d_hit.is_some_and(|h| hit(&h));
                 g.hover_pointer |= dh;
                 // 확인 대기는 색으로만 말한다 — 아이콘까지 바뀌면 그 순간 자리가
                 // 흔들려, 두 번째 클릭이 방금 있던 자리를 빗나간다.
@@ -2229,7 +2247,9 @@ pub(crate) fn draw_mcp_col(
                         theme::text_dim()
                     },
                 );
-                mc.del_rects.push((i, d));
+                if let Some(dh) = d_hit {
+                    mc.del_rects.push((i, dh));
+                }
                 detail_w -= 22.0;
             }
             if !row.detail.is_empty() {
@@ -2246,10 +2266,11 @@ pub(crate) fn draw_mcp_col(
                     },
                 );
             }
-            mc.row_rects.push((i, r));
+            mc.row_rects.push((i, rh));
         }
         y += ROW_H;
     }
+    g.pop_clip();
     mc.add_rects = add_rects;
     mc.head_rects = head_rects;
 }

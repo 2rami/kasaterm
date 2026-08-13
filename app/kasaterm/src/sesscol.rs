@@ -294,17 +294,29 @@ pub(crate) fn draw_sessions_col(
         return;
     }
 
+    // 본문은 여기서부터 시저로 가둔다. 스크롤로 위에 반쯤 걸친 행은 예전엔 통째로
+    // 그려져 범위 칩을 덮었다 — 「화면 밖이면 건너뛴다」로는 **반쯤** 걸친 것을 막을
+    // 수가 없기 때문이다. 루프 **밖**에서 한 번만 세운다: 안에서 세우면 행마다
+    // 세그먼트가 둘씩 쌓여 draw call 이 행 수만큼 는다.
+    g.push_clip(x, body_top, w, vis_h);
     let mut y = body_top - sc.scroll;
     for (i, s) in sc.view.iter().enumerate() {
         let row_bottom = y + ROW_H;
-        // 화면 밖 행은 rect 도 남기지 않는다 — 남기면 스크롤 위쪽에 숨은 행이
-        // 클릭을 받아 엉뚱한 세션이 열린다.
-        if row_bottom < body_top || y > bottom {
+        // 완전히 밖인 행만 건너뛴다(컬링). 반쯤 걸친 행은 그리고, 삐져나온 픽셀은
+        // 시저가 자른다 — 컬링은 클리핑이 아니다. 경계를 손으로 다시 쓰지 않고
+        // 클립에게 묻는 건, 그래야 클립을 옮겼을 때 컬링이 따라오기 때문이다.
+        if !g.clip_visible(x, y, w, ROW_H) {
             y = row_bottom;
             continue;
         }
         let r = (x, y, w, ROW_H);
-        let hov = hit(&r) && cursor.1 >= body_top && cursor.1 <= bottom;
+        // 시저는 픽셀만 자르지 클릭은 안 자른다. 잘려 안 보이는 부분이 눌리면
+        // 엉뚱한 세션이 열리므로, 눌리는 자리는 클립과의 교집합이어야 한다.
+        let Some(hitr) = g.clip_hit(r) else {
+            y = row_bottom;
+            continue;
+        };
+        let hov = hit(&hitr);
         g.hover_pointer |= hov;
         if hov {
             g.rect(r.0, r.1, r.2, r.3, theme::surface_hover());
@@ -367,9 +379,10 @@ pub(crate) fn draw_sessions_col(
                 italic: false,
             },
         );
-        sc.row_rects.push((i, r));
+        sc.row_rects.push((i, hitr));
         y = row_bottom;
     }
+    g.pop_clip();
 }
 
 #[cfg(test)]

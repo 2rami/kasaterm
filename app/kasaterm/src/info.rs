@@ -1753,6 +1753,21 @@ pub(crate) fn draw_info_col(
     let content =
         HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + ports_h + 14.0;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
+    // 본문 전체를 시저로 가둔다. 지금까지는 섹션·행마다 `y + H > top && y < bottom`
+    // 으로 걸렀는데, 그건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로
+    // 그려져 탭 줄 위로 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면
+    // 목록이 길 때 인스턴스가 수천 개 늘어난다), 삐져나온 픽셀만 여기서 자른다.
+    g.push_clip(x, top, w, (bottom - top).max(0.0));
+    // 시저는 픽셀만 자르지 클릭은 안 자른다. 이 아래로 히트렉트가 열다섯 곳에서
+    // 쌓이는데, 클립이 본문 사각형 **하나**뿐이라 `커서 ∈ (행 ∩ 본문)` 과
+    // `커서 ∈ 행 && 커서 ∈ 본문` 이 같은 판정이다 — rect 마다 교집합을 내는 대신
+    // 커서를 한 번 걸러 두면 새 행을 추가하는 사람이 빠뜨릴 자리가 없다.
+    // 교집합 계산 자체는 `clip_hit` 을 그대로 써서 둘이 갈릴 수 없게 한다.
+    let raw_cursor = cursor;
+    let cursor = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
+        Some(_) => cursor,
+        None => (f32::MIN, f32::MIN),
+    };
     let mut y = top - info.scroll;
 
     // ── 요약 머리 ──
@@ -1973,7 +1988,10 @@ pub(crate) fn draw_info_col(
         }
     }
 
-    draw_row_menu(g, cursor, info, x, w, top, bottom);
+    // 메뉴는 클립 **밖**이다 — 목록 위에 얹히는 오버레이라 본문 사각형에 가두면
+    // 아래쪽 행에서 연 메뉴가 잘린다. 커서도 거르지 않은 것을 쓴다.
+    g.pop_clip();
+    draw_row_menu(g, raw_cursor, info, x, w, top, bottom);
     info.view = snap;
     if let Some(t) = prof {
         eprintln!(
