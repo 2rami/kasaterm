@@ -4084,15 +4084,22 @@ impl App {
                     .zip(git_badges.as_ref())
                     .and_then(|(p, m)| m.get(p))
                     .map(|b| &b.marks);
+                // 트리 본문을 시저로 가둔다. 아래쪽 경계는 지금까지 컬링이 쓰던
+                // `win_h` 그대로다 — 여기서 칼럼 끝(`view_bottom`)으로 좁히면 그 아래
+                // 그려지던 행이 사라져 다른 변경이 섞인다. 위쪽만 진짜로 자른다.
+                g.push_clip(tree_col_x, start_y, tree_col_w, (win_h - start_y).max(0.0));
+                // 커서가 잘려 안 보이는 쪽에 있는데 행의 보이는 부분에 hover 배경이
+                // 그려지는 것은 시저가 못 막는다 — hover 판정은 `file_tree.hover`
+                // (마우스 이동 때 히트렉트로 정해진다)라 히트렉트를 자르면 함께 막힌다.
                 for (idx, node) in vis_nodes.iter().enumerate() {
                     let node = *node;
                     let y = start_y - self.file_tree.scroll + idx as f32 * item_h;
-                    // start_y 위로 조금이라도 걸친 항목은 통째 스킵한다. 그리기만
-                    // 놓고 보면 이제 뒤에 오는 빠른파일 배경이 덮어 주지만, 이 루프는
-                    // 히트렉트도 같이 만들어서 — 덮인 행이 여전히 눌린다. 그리기와
-                    // 히트를 함께 끊는 자리가 여기뿐이다. 상단 잘림은 위쪽 fade 가 가린다.
-                    if y < start_y - 0.5 || y > win_h {
-                        continue; // off-screen / 상단 부분걸침 → clip (hit rect 도 생략)
+                    // 완전히 밖인 항목만 건너뛴다. 위로 반쯤 걸친 항목은 **그리고**
+                    // 시저가 자른다 — 예전엔 여기서 통째로 스킵했고, 그래야 했던 이유가
+                    // "덮어 줄 배경이 나중에 온다"였다. 잘라 낼 수 있게 된 지금은 반쯤
+                    // 걸친 행이 반쯤 보이는 것이 맞다.
+                    if !g.clip_visible(row_x, y, row_w, item_h) {
+                        continue;
                     }
                     let hovered =
                         self.file_tree.hover.as_deref() == Some(node.path.as_path());
@@ -4279,8 +4286,15 @@ impl App {
                             }
                         }
                     }
-                    rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
+                    // 눌리는 자리는 클립과의 교집합이다. 시저는 픽셀만 자르지 클릭은
+                    // 안 자르므로, 원본을 담으면 「빠른 파일」 뒤로 스크롤된 행이
+                    // 그대로 눌린다 — 예전 통째 스킵이 막아 주던 것이 바로 이것이고,
+                    // 스킵을 지웠으니 여기서 대신 막아야 한다.
+                    if let Some(hr) = g.clip_hit((row_x, y, row_w, item_h)) {
+                        rects.push((node.path.clone(), hr));
+                    }
                 }
+                g.pop_clip();
                 self.file_tree.rects = rects;
 
                 // Overflow affordances: a soft fade at whichever edge still has
