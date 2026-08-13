@@ -1923,10 +1923,24 @@ impl GpuRenderer {
         let side_pad = base * 1.7;
         let avail = (w - side_pad * 2.0).max(1.0);
         let cw = avail.min(base * 46.0);
+        // 읽기 열은 좁지만 **클리핑은 pane 상자 전체**다. 표식이 왼쪽으로 넘치는 것도
+        // 스크롤바가 오른쪽 여백에 서는 것도 열 밖이지만 pane 안이라, 열로 자르면
+        // 멀쩡한 것들이 사라진다.
+        let (pane_x, pane_w) = (x, w);
         let x = x + side_pad + (avail - cw) * 0.5;
         let w = cw;
         let clip_top = y;
         let clip_bot = y + h;
+        // 지금까지 이 뷰의 잘라내기는 블록·줄 단위 「완전히 밖이면 건너뛴다」뿐이었다.
+        // 그래서 경계에 반쯤 걸친 것은 통째로 그려져 pane 밖으로 샜다 — 스크롤 1100px
+        // 에서 상자 top 에 걸친 본문 한 줄이 글자·인라인코드 배경째 헤더 위에 그려지는
+        // 것을 확인했다(8863px). 표는 `by0 = pen_y.max(clip_top)` 로 손으로 잘라 둬서
+        // 안 샜는데, 그런 자리는 그 하나만 막을 뿐이라 30여 곳에 같은 짓을 반복해야 한다.
+        //
+        // 컬링(`clip_top`/`clip_bot` 검사)은 그대로 남긴다 — 문단이 수천 줄일 수 있고,
+        // 그걸 다 그리면 인스턴스가 그만큼 늘어난다. 시저는 그 위에 얹혀 삐져나온
+        // 픽셀만 자른다.
+        self.push_clip(pane_x, y, pane_w, h.max(0.0));
         let top0 = y - scroll;
         let mut pen_y = top0 + base * 1.1;
         // 지난 프레임에 잰 블록 높이. 스크롤은 레이아웃을 바꾸지 않으므로
@@ -2588,6 +2602,30 @@ impl GpuRenderer {
                 col,
             );
         }
+        // 히트렉트를 pane 상자와 교집합 낸다. 시저는 픽셀만 자르지 클릭은 안 자르므로,
+        // 경계에 걸친 낱말·링크의 **잘려 안 보이는 쪽**이 그대로 눌린다 — 마크다운 뷰는
+        // pane 하나라, 그 위쪽은 pane 헤더거나 아예 다른 pane 이다.
+        //
+        // 쌓는 자리(낱말 둘·링크·복사)마다 거는 대신 여기 한 곳에서 몰아서 한다.
+        // `mem::take` 로 잠깐 꺼내는 건 `retain_mut`(&mut self)와 `clip_hit`(&self)이
+        // 같이 못 살아서다 — 교집합 계산을 손으로 베끼면 그게 클립과 갈린다.
+        macro_rules! clip_flat {
+            ($f:ident) => {{
+                let mut v = std::mem::take(&mut self.$f);
+                v.retain_mut(|e| match self.clip_hit((e.0, e.1, e.2, e.3)) {
+                    Some((x, y, w, h)) => {
+                        (e.0, e.1, e.2, e.3) = (x, y, w, h);
+                        true
+                    }
+                    None => false,
+                });
+                self.$f = v;
+            }};
+        }
+        clip_flat!(md_word_rects);
+        clip_flat!(md_link_rects);
+        clip_flat!(md_copy_rects);
+        self.pop_clip();
         content_h
     }
 
