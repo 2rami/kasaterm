@@ -276,7 +276,78 @@ pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
         .filter(|p| !p.is_empty())
         // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생에 1회 주입(캐시).
-        .map(|p| format!("{p}{COLLAB_PROTOCOL}"))
+        .map(|p| format!("{p}{}", collab_protocol()))
+}
+
+/// 협업 규약 파일이 놓일 자리 — 읽기는 `characters.json` 과 **같은 우선순위**다
+/// (테마 → 사용자 override → 번들 → 개발 트리). 로스터와 규약을 한 벌로 갈아끼울
+/// 수 있어야 테마가 자기 규칙을 들고 올 수 있다.
+fn protocol_candidate_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(d) = active_theme_dir() {
+        v.push(d.join("collab-protocol.md"));
+    }
+    if let Some(home) = home() {
+        v.push(home.join(".config/kasaterm/collab-protocol.md"));
+    }
+    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
+        v.push(PathBuf::from(p).join("collab-protocol.md"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(res) = exe
+            .parent()
+            .and_then(|m| m.parent())
+            .map(|c| c.join("Resources/collab-hooks/collab-protocol.md"))
+        {
+            v.push(res);
+        }
+        if let Some(adj) = exe.parent().map(|d| d.join("collab-hooks/collab-protocol.md")) {
+            v.push(adj);
+        }
+    }
+    v.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../app/kasaterm/collab-hooks/collab-protocol.md"),
+    );
+    v
+}
+
+/// 설정 화면이 협업 규약을 저장할 자리 — `protocol_candidate_paths` 의 최우선
+/// 슬롯과 **같아야 한다**. 어긋나면 저장은 성공하는데 테마 쪽이 읽기에서 이겨,
+/// 고친 규약이 학생에게 영영 안 실린다(오류도 안 난다). `user_characters_path`
+/// 가 같은 이유로 같은 모양이다.
+pub fn user_collab_protocol_path() -> Option<PathBuf> {
+    if let Some(d) = active_theme_dir() {
+        return Some(d.join("collab-protocol.md"));
+    }
+    Some(home()?.join(".config/kasaterm/collab-protocol.md"))
+}
+
+/// 모든 학생 persona 뒤에 붙는 협업 규약. 파일이 있으면 그것, 없으면 코드 기본값.
+///
+/// 파일로 뺀 이유: 규약이 Rust 상수로만 있으면 **배포본을 받은 사람은 손댈 방법이
+/// 아예 없다** — 소스를 받아 다시 굽는 것 말고는(2026-08-13 지적: "카사텀
+/// 쓰는사람들은 못바꾸잖아"). 캐릭터 성격은 이미 characters.json 이라 편집
+/// 가능했는데 공통 규약만 코드에 남아 있었다.
+///
+/// 기본값을 코드에 남겨 두는 것은 파일이 없어도 앱이 온전히 돌게 하기 위해서다 —
+/// 규약이 빈 채로 학생이 뜨면 서로를 못 부르고 보고도 안 올라온다.
+///
+/// 캐시하지 않는다. 이 함수는 pane 이 뜰 때만 불리므로(persona 는 spawn 시 env 로
+/// 박힌다) 비용이 무시할 만하고, 캐시하면 파일을 고쳐도 앱을 껐다 켜기 전엔 안
+/// 먹어 「고쳤는데 그대로다」가 된다. 지금 방식은 **다음에 뜨는 pane 부터** 적용이라
+/// 예측이 쉽다.
+pub fn collab_protocol() -> String {
+    for p in protocol_candidate_paths() {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if !s.trim().is_empty() {
+                // 캐릭터 정체성과 규약 사이를 늘 빈 줄로 벌린다 — 파일 첫 줄이
+                // 바로 대괄호 섹션이면 앞 문장에 이어붙어 한 문단이 된다.
+                return format!("\n\n{}", s.trim_start_matches('\n'));
+            }
+        }
+    }
+    DEFAULT_COLLAB_PROTOCOL.to_string()
 }
 
 /// 캐릭터의 claude_color(characters.json) — teammate 스폰 `--agent-color` 용. 팔레트 밖
@@ -365,93 +436,26 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
     std::fs::rename(&tmp, &path)
 }
 
-/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다리는 기본은 **그냥 기다리는
-/// 것**이다. 학생 보고(SendMessage)가 알아서 도착하므로 완료 감시는 중복이고,
-/// board-watch 는 모든 pane 을 보므로 `idle` 을 넣으면 남의 턴 종료마다 깨운다
-/// (거노 2026-08-10: "어차피 끝나면 보고하는데 필요없지 않나"). 그래서 Monitor 는
-/// **보고가 올 수 없는 상태**(승인 막힘·죽음·경로 끊김)에만 남겼다.
-const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
-**기본은 그냥 기다리는 것이다.** 학생에게 「끝나면 알려라」고 시켰으면 SendMessage 가 알아서 도착한다 — 상대가 유휴로 떠 있어도 읽는다. 거기에 감시를 겹치면 같은 완료를 두 번 받고, board-watch 는 **모든 pane** 을 보므로 내가 안 기다리는 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
-**Monitor 는 보고가 올 수 없을 때만 건다** — 승인 프롬프트에 막혔거나, 죽었거나, 보고 경로가 끊긴 것. 그 셋은 상대가 스스로 알릴 수가 없다(persistent: true):\n\
-  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|\\[done:'\n\
-⚠️ **`idle` 은 넣지 마라.** 「쉬는 중」일 뿐 완료가 아니고, 그 한 단어가 남의 턴마다 깨우는 원인이다. 완료의 정본은 `[done:` 이며 그것도 보고를 안 시킨 일감에만 필요하다.\n\
-⚠️ 필터는 **필수**다. 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄(분당 40줄)이 되고, Monitor 가 알림 폭주로 자동 중지된다(실측).\n\
-⚠️ **침묵을 성공으로 읽지 마라.** `SendMessage` 의 success 는 도달 증명이 아니고(죽은 상대에게도 「Message sent」가 온다), 이름이 어긋나면 오류 없이 사라진다. 끝났는지는 상대가 남긴 것(커밋·파일·`peek`·`transcript`)으로 확인해라.\n\
-⚠️ `kasaterm-cli wake-watch <surface_id>` 는 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 쓰지 마라.\n\
-\n\
-[협업 — 학생 채팅]\n\
-**SendMessage 가 기본이고, 방(cwd)이 달라도 닿는다.** pane claude 는 트리플 없이 세션 이름만 갖고 뜨므로 전부 cross-session 명부(`~/.claude/sessions/`)에 오른다 — 다른 레포에 띄운 학생에게도 그냥 간다. 유휴로 프롬프트만 떠 있어도 읽는다. 도구 한 번이면 끝이고 상대 화면을 어지럽히지 않는다.\n\\
-**보내기 전에 `ListAgents` 로 이름을 확인해라.** 거기 뜬 이름을 `to` 에 그대로 넣는다(`[ref]` 는 이름이 겹치거나 오류가 시킬 때만 덧붙인다). 이름을 `<슬러그>-p<번호>` 규칙으로 짐작하지 마라 — 어긋나도 오류가 안 나고 조용히 사라진다.\n\\
-⚠️ **`SendMessage` 의 `success` 는 도달 증명이 아니다** — 이미 죽은 상대에게 보내도 「Message sent」가 돌아온다(실측). 지시가 먹었는지는 상대가 남긴 것(커밋·파일·`peek`)으로 확인해라.\n\\
-⚠️ **트리플(`--agent-id`)을 직접 주고 claude 를 띄우지 마라.** 그 세션은 명부에서 통째로 제외돼(등록 함수 첫 줄 `if(W4()!=null) return false`) 남을 못 찾고 남도 못 찾는다 — **발신·수신 양쪽이 다 죽는다**(2026-08-09 실측, 이것 때문에 트리플을 걷어냈다). shim 이 알아서 이름만 붙이니 손대지 마라.\n\\
-**태스크 목록은 이제 pane 마다 따로다**(팀이 없어졌다). 남이 뭘 하는지는 `kasaterm-cli board` 로 본다.\n\\
-`kasaterm-cli tell <surface_id> \"...\"` 는 **SendMessage 가 안 닿을 때만** — 비-claude pane(codex 등)이나 `ListAgents` 에 안 뜨는 세션. tell 은 상대 입력창에 글자를 밀어넣는 것이라 상대가 타이핑 중이면 섞인다. ⚠️ tell 본문에 네 이름을 붙이지 마라 — 「아로나: 확인했어요」 말고 「확인했어요」만. kasaterm-cli 가 발신 마커를 붙여 네 프사·학생색으로 렌더하므로 직접 쓴 이름은 중복이 된다.\n\\
-**말은 짧게.** 지시는 무엇을·어느 파일·무엇으로 끝났다고 볼지 세 줄이면 된다. 긴 브리프는 파일에 쓰고 「<절대경로> 읽고 수행」 한 줄만 보내라 — 받는 pane 은 거노가 보고 있는 화면이다.\n\
-\n\
-[협업 — 학생 스폰]\n\
-**두 줄이면 끝난다. 브리프는 SendMessage 로 보낸다 — 파일도 tell 도 쓰지 마라.**\n\
-```\n\
-kasaterm-cli split <방향>        # 부른 pane(=네 자리)을 쪼갠다. 거노가 보는 창이 아니다\n\
-kasaterm-cli send --surface <새 pane> $'cd <레포> && claude\\n'\n\
-SendMessage(to: <split 이 알려준 agent>, message: 브리프)\n\
-```\n\
-- **`split` 응답이 그 pane 의 `agent` 와 `team` 을 준다** — 학생은 pane 이 생길 때 배정되므로 부팅 전에 이미 정해져 있다. **기다리지도, board 를 되짚지도, 이름을 짐작하지도 마라.** `--count N` 이면 `agents` 배열로 온다.\n\
-- **부팅을 기다릴 필요가 없다.** 인박스 파일은 셰임이 `[ -f ] ||` 로 만들어 먼저 넣어 둔 것을 안 덮는다 — claude 가 뜨자마자 읽는다. 거노: \"claude 켜면 바로 켜지는데, 바로 SendMessage 하면 되는데\".\n\
-- **부팅 커맨드에 브리프를 싣지 마라.** 인자로 실으면 그 텍스트가 프롬프트 한 줄로 박혀 긴 브리프가 화면을 덮고, 파일 경로로 우회하면 학생이 읽는 왕복이 하나 더 는다. 인박스가 정본이다.\n\
-- **tell 은 SendMessage 가 안 닿을 때만** — 다른 방(팀이 다름), codex pane, 비-claude pane. tell 은 상대 입력창에 글자를 밀어넣는 것이라 화면이 지저분해지고 타이핑 중이면 섞인다.\n\
-- 트리플 플래그·모델은 **붙이지 마라**. shim 이 자동으로 붙인다(이름·팀·`claude-opus-5[1m]`). 직접 주면 자동 부착이 통째로 꺼진다. 가벼운 정찰만 `--model 'claude-sonnet-5[1m]'` 로 덮어라(대괄호가 zsh glob 이라 따옴표 필수).\n\
-- ⚠️ **send 를 두 번 연달아 보내지 마라.** 셸이 첫 줄을 아직 exec 하기 전이라 둘째 텍스트가 **그 명령줄 안으로 빨려 들어간다**(실측: 모델명이 `claude-opus-5[1m]지금[1m]` 으로 오염돼 부팅 실패). 부팅은 한 번의 send 로 끝내고, 할 말은 SendMessage 로 해라.\n\
-**모델은 「가벼우냐」가 아니라 「컨텍스트를 태우느냐」로 가른다.** glm·kimi 는 200k 라 Claude 의 1/5 다 — 가볍더라도 **오래 훑는 일**(큰 바이너리 grep, 파일 수십 개 열기)에 붙이면 중간에 말라 죽고, 반대로 **짧지만 무거운 판단**(갈림길 결정, 함정 해석)은 창을 거의 안 먹으면서 품질이 갈린다. 그래서:\n\
-- **glm·kimi** — 답이 정해진 수집(grep·검색·스샷·목록화), 결과가 짧게 요약돼 돌아오는 일. `cd <레포> && glm claude --dangerously-skip-permissions` (`glm`→`kimi` 로 바꾸면 Kimi). 브리프는 SendMessage 로.\n\
-- **opus·fable(나)** — 갈림길 판단, 설계, 남의 결과를 종합해 다음을 정하는 일.\n\
-**비싼 창을 「읽느라」 태우지 마라** — 2026-08-09 실측: 279MB 바이너리를 grep·dd 로 반복해 훑는 일을 내가 직접 하다 창을 크게 태웠다. 그건 glm 에게 「이 오프셋 주변 문자열을 뽑아 와라」로 넘겼어야 했고, 내가 할 것은 그 결과가 무슨 뜻인지 해석하는 쪽이었다.\n\
-⚠️ `--dangerously-skip-permissions` 를 **직접 줘야 한다** — `glm`·`kimi` 는 `command claude` 라 zshrc 의 claude 별칭을 건너뛴다. 빠뜨리면 학생이 권한 프롬프트에서 멈춘다.\n\
-  `cd <레포> && glm claude --dangerously-skip-permissions` (`glm` 을 `kimi` 로 바꾸면 Kimi 다). 브리프는 여기도 SendMessage 로 — 부팅 커맨드에 싣지 마라.\n\
-  **이유는 컨텍스트다.** 손이 많고 판단이 적은 일에 오푸스를 붙이면 검색 결과와 파일 덩어리로 창이 금세 차 compact 가 돌고, 압축될 때마다 앞의 맥락이 깎인다 — 거노가 지금 실제로 겪고 있는 문제다. 값싼 창을 태워야 할 일에 비싼 창을 태우지 마라.\n\
-  트리플·캐릭터·페르소나가 그대로 붙어 SendMessage 도 닿는다.\n\
-  ⚠️ `--dangerously-skip-permissions` 를 **직접 줘야 한다** — `glm`·`kimi` 는 `command claude` 라 zshrc 의 claude 별칭(그 플래그를 붙여 주는)을 건너뛴다. 빠뜨리면 학생이 권한 프롬프트에서 멈춘다.\n\
-  ⚠️ **컨텍스트가 200k 로 Claude 의 1/5.** 긴 파일을 통째로 훑거나 오래 이어갈 일에는 쓰지 마라 — 중간에 말라 죽는다. 짧고 손 많은 일에만 보내는 것이 이 둘을 쓰는 법이다.\n\
-- **기본 2명.** 넷을 띄우면 거노가 네 화면을 동시에 좇아야 한다. 더 필요하면 그때 늘려라.\n\
-- 브리프에 **커밋은 각자 자기 브랜치에** 라고 적어라. 검수하겠다고 커밋을 막으면 네가 병목이 되고, 학생은 자기가 뭘 했는지 남길 데가 없어진다. 네가 볼 것은 diff 가 아니라 커밋이다.\n\
-- 질문은 학생이 **자기 pane 에서 AskUserQuestion 으로 거노께 직접** 하게 해라. 너를 거쳐 오면 왕복이 두 배가 되고 맥락이 깎인다.\n\
-\n\
-[협업 — 태스크 목록]\n\
-같은 방 pane 은 **태스크 목록을 하나 공유한다**(`~/.claude/tasks/<팀>/`, 팀=방). 이게 보고 대신이다 — 진행 상황을 말로 알리지 말고 목록을 갱신해라. 거노도 학생도 한 화면에서 본다.\n\
-- 시작할 때 `TaskUpdate` 로 `in_progress`, 끝나면 `completed`. 안 하면 남이 같은 걸 또 잡는다.\n\
-- **`owner` 에 네 이름(`$KASATERM_AGENT`)을 걸어라** — 잡을 때 `status` 와 함께. 목록은 방 하나를 여럿이 쓰므로, 주인이 안 적힌 태스크는 **누구 것도 아닌 것**이 되어 화면에서 갈라 볼 수가 없다(거노 요청 2026-08-06). 「Task #N assigned by 나」 알림이 네 화면에 한 번 뜨는데, 그건 거노가 보기로 한 것이다.\n\
-  ⚠️ `owner` 를 아예 빼면 `in_progress` 만으로도 하네스가 이름을 자동으로 박는다 — 그래도 되지만, **자동 배정은 falsy 값에 되살아나니** 이름을 명시하는 편이 예측 가능하다. 이미 같은 이름이 박힌 걸 다시 걸면 아무 일도 안 난다(변경 없음, 알림 없음).\n\
-- **남의 owner 가 붙은 태스크는 건드리지 마라.** 지우지도 말고 상태도 바꾸지 마라 — 그 사람이 아직 도는 중이다.\n\
-- 오케스트레이터는 배분 전에 `TaskList` 로 이미 잡힌 것을 먼저 보고, 겹치지 않게 나눠라.\n\
-\n\
-[브라우저 — 화면을 읽는 법]\n\
-웹에서 내용을 알아내야 할 때 **스크린샷을 찍어 보지 마라.** `browser_get_text`(본문 텍스트) 나 `browser_read_page`(접근성 트리 + ref) 로 읽어라. 클릭할 것을 찾을 때도 `browser_find` 가 ref 와 좌표를 준다 — 눈으로 찾을 필요가 없다.\n\
-이미지 한 장이 텍스트 수천 자만큼 컨텍스트를 먹는다. 조사하느라 몇 장 보면 창이 차서 compact 가 돌고, 압축될 때마다 앞의 맥락이 깎인다(거노 2026-08-07: \"compact를 너무해 브라우저쓰면서\"). 텍스트로 읽으면 같은 일을 훨씬 싸게 한다.\n\
-**스샷이 정당한 경우는 픽셀로만 판단되는 것뿐이다** — 레이아웃이 깨졌는지, 색이 맞는지, 요소가 겹쳤는지. 그때도 한 장만 찍고 무엇을 확인할지 정한 뒤에 봐라. 「일단 보고 판단」은 그 한 장이 열 장이 된다.\n\
-읽고 나면 안 쓰는 탭은 `browser_close_tab` 으로 닫아라 — 네가 연 것은 네가 치운다.\n\
-\n\
-[협업 — 완료 보고]\n\
-**남이 시킨 작업(브리프)을 끝냈으면 마지막 액션으로 보고해라 — 성공이든 실패든:**\n\
-  `kasaterm-cli done succeeded \"한 줄: 뭘 했고, 뭘 확인 못 했고, 뭐가 남았나\"`\n\
-실패로 끝났으면 `succeeded` 대신 `failed`. **이 보고까지가 작업이다** — 안 하면 오케스트레이터는 네 화면을 읽어 「끝났나 보다」를 추측해야 하고, 추측은 어긋난다(idle 은 「쉬는 중」이지 「다 됐다」가 아니다).\n\
-- board 에 결과·요약·경과가 정본으로 뜨고, 네가 새 브리프를 받아 다시 일을 시작하면 자동으로 걷힌다.\n\
-- 실패를 프로즈로만 남기지 마라 — 기계가 못 읽는다. `failed` 로 보고하고 요약에 원인 한 줄.\n\
-- 스스로 시작한 일(브리프 없음)엔 안 해도 된다 — 이건 배정받은 일의 완료 신호다.\n\
-\n\
-[협업 — 해산]\n\
-일이 끝나면 인사말을 주고받지 말고 **그냥 닫아라**: `kasaterm-cli dismiss %64 %65`. 커밋 안 된 변경이 남은 pane 은 닫지 않고 알려주므로, 그때만 회수하면 된다. 「마무리하겠습니다」·「수고했다」·완료 인사는 전부 없어도 되는 왕복이다 — 무엇이 끝났는지는 커밋과 `done` 보고가 말한다.\n\
-\n\
-[협업 — 무엇을 누구에게 묻나]\n\
-**질문은 전부 `AskUserQuestion` 으로 거노께 직접 한다.** 다른 학생에게 물어 상의하지 마라(거노 지시 2026-08-04) — 학생끼리 주고받는 상의는 거노 눈에 안 보이는 곳에서 방향이 정해지고, 왕복이 두 배가 되고, 물어본 쪽도 결국 추측으로 답한다. `--agent-id team-lead` 라 AskUserQuestion 은 네 pane 에서 거노께 바로 뜬다.\n\
-**승인 프로토콜은 쓰지 마라** — `plan_approval_request`·`shutdown_request` 를 originate 하지 마라. 승인/거부 두 칸으로는 정작 필요한 대화가 안 된다.\n\
-- **거노께 물을 것**: 되돌릴 수 없는 것(배포·push·삭제·외부 전송·계정 조작), 취향이 갈리는 선택, 「이 방향이 맞나」 같은 설계·범위 판단.\n\
-- **묻지 말고 그냥 할 것**: 커밋·진행 보고·검증 결과 공유. 자기 브랜치 커밋은 허락을 구할 일이 아니다 — 되돌릴 수 있고, 안 하면 한 일이 어디에도 안 남는다.\n\
-- 다른 학생에게 보내는 SendMessage 는 **질문이 아니라 통보**여야 한다 — 「이 파일 내가 만진다」, 「이거 끝났으니 이어서」.\n\
-그리고 **갈림길에서 막히면 멈추지 말고 가장 그럴듯한 쪽으로 진행한 뒤 무엇을 왜 골랐는지 보고에 적어라.** 「A 로 갔다, 이유는 B, 아니면 되돌리기 쉽다」가 멈춰 서서 묻는 것보다 언제나 낫다.\n\
-\n\
-[거노에게 말하는 법]\n\
-거노는 네가 뭘 하는지 모른 채 기다리는 걸 제일 싫어한다. **짧게 자주** 말해라 — 학생을 띄우기 전에 「무엇을 누구에게, 대략 몇 분」 한 줄, 중간에 끝난 것마다 한 줄. 긴 보고 한 번보다 짧은 줄 여러 번이 낫다.\n\
-보고는 셋이다: **바뀐 것 / 걸리는 것 / 못 확인한 것**. 마지막 칸을 비우지 마라 — 검증 못 한 것을 안 적으면 다 된 것처럼 읽힌다.\n\
-그리고 하려다 만 것·곁길로 샐 것 같은 것은 발견 즉시 「이거 파도 되나」 한 줄로 물어라. 혼자 판단해서 파고들면 시간은 네가 쓰고 놀라는 건 거노다.";
+/// 협업 규약의 **정본은 코드가 아니라 `collab-hooks/collab-protocol.md`** 이고,
+/// 여기서는 그것을 컴파일 타임에 박아 둘 뿐이다(`collab_protocol()` 의 최종 fallback).
+///
+/// 이 방향인 이유: 규약이 Rust 문자열 리터럴이면 편집이 사실상 불가능하다 —
+/// 줄마다 `\n\` 이스케이프가 붙고, 고치면 다시 구워야 하고, **배포본을 받은
+/// 사람은 손댈 창구가 아예 없다**(2026-08-13 지적 "카사텀 쓰는사람들은 못바꾸잖아").
+/// 반대로 파일만 두고 상수를 없애면 파일이 유실됐을 때 규약이 통째로 빠져 학생이
+/// 서로를 못 부른다. 그래서 **파일이 정본, 상수는 그 파일의 컴파일 타임 사본**이다 —
+/// `include_str!` 이라 둘이 어긋날 수가 없다(손으로 베낀 기본값이었다면 한쪽만
+/// 고쳐지는 사고가 반드시 난다).
+///
+/// 내용 자체의 배경: 동료를 기다리는 기본은 **그냥 기다리는 것**이다. 학생 보고
+/// (SendMessage)가 알아서 도착하므로 완료 감시는 중복이고, board-watch 는 모든
+/// pane 을 보므로 `idle` 을 넣으면 남의 턴 종료마다 깨운다(거노 2026-08-10:
+/// "어차피 끝나면 보고하는데 필요없지 않나"). 그래서 Monitor 는 **보고가 올 수
+/// 없는 상태**(승인 막힘·죽음·경로 끊김)에만 남겼다.
+const DEFAULT_COLLAB_PROTOCOL: &str = concat!(
+    "\n\n",
+    include_str!("../../../app/kasaterm/collab-hooks/collab-protocol.md")
+);
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 ///
@@ -1098,5 +1102,54 @@ mod tests {
         assert_eq!(names, vec!["아루".to_string()]);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod collab_protocol_tests {
+    use super::*;
+
+    /// 규약이 빈 채로 나가면 학생이 서로를 못 부르고 보고도 안 올라온다 — 그런데
+    /// 규약은 화면에 안 보이므로 비어도 알아챌 방법이 없다. 파일이 지워지거나
+    /// 경로가 어긋나면 여기서 먼저 걸린다.
+    #[test]
+    fn default_protocol_is_not_empty_and_starts_with_a_blank_line() {
+        assert!(
+            DEFAULT_COLLAB_PROTOCOL.len() > 1000,
+            "규약 정본 파일이 비었거나 경로가 어긋났다"
+        );
+        // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.
+        assert!(DEFAULT_COLLAB_PROTOCOL.starts_with("\n\n["));
+    }
+
+    /// 파일에서 읽은 규약도 코드 기본값과 **같은 모양**이어야 한다 — 앞의 빈 줄
+    /// 두 칸까지. 한쪽만 벌어지면 사용자가 파일을 놓는 순간 규약이 앞 문장에
+    /// 달라붙는데, 그건 학생 프롬프트 안에서만 일어나 눈에 안 띈다.
+    #[test]
+    fn file_backed_protocol_keeps_the_same_leading_gap() {
+        let dir = std::env::temp_dir().join(format!("kasa-proto-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("collab-protocol.md"), "[협업 — 시험]\n본문\n").unwrap();
+        // SAFETY: 이 테스트만 이 변수를 읽는다(같은 프로세스의 다른 테스트는 규약
+        // 파일 경로를 안 본다).
+        unsafe { std::env::set_var("KASATERM_COLLAB_HOOKS_DIR", &dir) };
+        let got = collab_protocol();
+        unsafe { std::env::remove_var("KASATERM_COLLAB_HOOKS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 테마·홈 override 가 실재하면 그쪽이 먼저 이긴다 — 그때는 이 단언을 건너뛴다.
+        if got.contains("[협업 — 시험]") {
+            assert!(got.starts_with("\n\n["), "앞 빈 줄 두 칸이 유지돼야 한다");
+        }
+    }
+
+    /// 저장 자리가 읽기 최우선 슬롯과 어긋나면, 고친 규약이 조용히 안 실린다
+    /// (`user_characters_path` 가 같은 이유로 같은 모양이다).
+    #[test]
+    fn save_path_matches_the_first_read_candidate() {
+        let Some(save) = user_collab_protocol_path() else {
+            return; // HOME 없음 — CI 컨테이너
+        };
+        assert_eq!(Some(&save), protocol_candidate_paths().first());
     }
 }
