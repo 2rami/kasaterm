@@ -279,14 +279,21 @@ fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
     let (mx, my) = a.cursor_px;
     const STEP: f32 = 12.0;
     const ISZ: f32 = 15.0;
+    // 본문을 시저로 가둔다. 예전엔 위아래로 걸친 행을 통째로 건너뛰어서, 스크롤이
+    // 행 높이의 배수가 아닌 자리에 서면 위쪽에 빈 띠가 생기고 목록이 헤더에서
+    // 뚝 떨어져 시작하는 것처럼 보였다.
+    a.gpu.push_clip(0.0, top, w, body_h);
     for (i, node) in rows.iter().enumerate() {
         let y = top + i as f32 * AUX_TREE_ROW_H - a.tree_scroll;
-        // 이 렌더러엔 scissor 가 없다 — 위아래로 벗어난 행은 아예 안 그린다.
-        // 안 그러면 헤더 띠와 창 밖으로 글자가 삐져나온다.
-        if y + AUX_TREE_ROW_H <= top || y >= h {
+        // 완전히 밖인 행만 버린다 — 걸친 행은 그리고 시저가 자른다. 경계를 손으로
+        // 다시 쓰지 않는 것이 요점이다(클립과 갈리면 그때부터 조용히 어긋난다).
+        //
+        // 눌리는 자리는 클립과의 교집합이다. 시저는 픽셀만 자르지 클릭은 안 자르므로,
+        // 원본 rect 을 넣으면 헤더 밑에 숨은 절반이 그대로 눌린다.
+        let Some(hitr) = a.gpu.clip_hit((0.0, y, w, AUX_TREE_ROW_H)) else {
             continue;
-        }
-        let hov = mx >= 0.0 && mx < w && my >= y && my < y + AUX_TREE_ROW_H;
+        };
+        let hov = mx >= hitr.0 && mx < hitr.0 + hitr.2 && my >= hitr.1 && my < hitr.1 + hitr.3;
         if hov {
             crate::round_rect(
                 &mut a.gpu,
@@ -345,9 +352,9 @@ fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
             &label,
             gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
         );
-        a.tree_rows
-            .push((node.path.clone(), node.is_dir, (0.0, y, w, AUX_TREE_ROW_H)));
+        a.tree_rows.push((node.path.clone(), node.is_dir, hitr));
     }
+    a.gpu.pop_clip();
 }
 
 /// 마크다운 편집기 창의 `Rendered | Raw` 띠 높이. 자체 헤더가 없는 창이라(OS
