@@ -1227,6 +1227,51 @@ async fn design_tokens_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     )
 }
 
+/// `GET /settings/characters` — 설정 화면 캐릭터 탭의 데이터: 테마 카드 목록과
+/// 활성 테마의 로스터 전원(이름·슬러그·학교·색·성격).
+async fn settings_characters_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(backend.settings_characters()),
+    )
+}
+
+/// `GET /character-face?slug=<slug>&theme=<id>` — 캐릭터 프사 PNG. `theme` 을 주면
+/// 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성 폴더 → 번들 순.
+///
+/// 캐시를 1분만 주는 이유: 프사는 사용자가 스프라이트 폴더에 파일을 넣어 바꿀 수
+/// 있다. `immutable` 로 굳히면 그림을 갈아도 화면이 그대로여서 원인을 못 찾는다.
+/// 1분이면 한 화면을 그리는 동안은 캐시되고 파일 교체는 곧 반영된다.
+async fn character_face_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+    match backend.character_face(slug, params.get("theme").map(String::as_str)) {
+        Some(bytes) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "max-age=60"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            "not found",
+        )
+            .into_response(),
+    }
+}
+
 /// `POST /settings/ping` — 설정 웹뷰의 배선 확인용. 200 이 오면 셋이 증명된다:
 /// 페이지가 same-origin 으로 로드됐고, `origin_guard_mw` 를 통과했고, 라우터가
 /// 이 prefix 를 잡는다. 실제 설정 mutation 창구가 붙으면 지운다.
@@ -3643,6 +3688,8 @@ pub fn spawn_http_server_opts(
                 let paste_image_backend = backend.clone();
                 let git_panel_backend = backend.clone();
                 let design_tokens_backend = backend.clone();
+                let settings_chars_backend = backend.clone();
+                let character_face_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -3771,6 +3818,16 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/design-tokens",
                         get(move || design_tokens_handler(design_tokens_backend.clone())),
+                    )
+                    .route(
+                        "/settings/characters",
+                        get(move || settings_characters_handler(settings_chars_backend.clone())),
+                    )
+                    .route(
+                        "/character-face",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            character_face_handler(character_face_backend.clone(), q)
+                        }),
                     )
                     .route(
                         "/session-switch",

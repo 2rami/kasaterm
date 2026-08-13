@@ -1306,6 +1306,63 @@ impl Backend for PtyBackend {
         crate::theme::tokens_json()
     }
 
+    /// 테마 카드 목록은 `theme_rows()` 를 그대로 쓴다 — **캐시된 함수**라서 매
+    /// 요청에 79명치 theme.json 을 다시 파싱하지 않는다(네이티브 화면이 이미
+    /// 같은 이유로 이걸 쓴다). 미리보기 얼굴은 경로가 아니라 slug 만 넘긴다:
+    /// 파일 경로를 웹에 흘리면 그게 곧 임의 파일 읽기 창구가 된다.
+    fn settings_characters(&self) -> serde_json::Value {
+        let themes: Vec<serde_json::Value> = theme_rows()
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "label": r.label,
+                    "count": r.count,
+                    "faces": r.faces.into_iter().map(|(slug, _)| slug).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        // characters_json 은 활성 테마의 theme.json 을 최우선으로 본다 — 그래서
+        // 테마를 고르면 이 목록도 함께 바뀐다.
+        let roster = kasa_mcp::character::characters_json()
+            .as_ref()
+            .map(roster_entries)
+            .unwrap_or_default();
+        serde_json::json!({
+            "active_theme": kasa_mcp::character::active_theme_id(),
+            "themes": themes,
+            "roster": roster,
+        })
+    }
+
+    fn character_face(&self, slug: &str, theme: Option<&str>) -> Option<Vec<u8>> {
+        if !safe_path_component(slug) {
+            return None;
+        }
+        let file = format!("{slug}-profile.png");
+        // 테마를 지정했으면 그 폴더 안에서만 찾는다. 없으면 404 로 두고 번들로
+        // 떨어지지 않는다 — 카드는 "이 테마의 얼굴"을 보이는 자리라, 폴백하면
+        // 그 테마에 없는 그림이 그 테마 것처럼 보인다.
+        if let Some(id) = theme.filter(|s| !s.is_empty()) {
+            if !safe_path_component(id) {
+                return None;
+            }
+            let root = kasa_mcp::character::themes_root()?;
+            return read_file_under(&root, &root.join(id).join("sprites").join(&file));
+        }
+        // 활성 스프라이트 폴더(테마의 sprites/ 또는 ~/.config/kasaterm/students/)가
+        // 번들을 덮어쓴다 — 네이티브 로더와 같은 순서다(render.rs `user_asset_rgba`
+        // 우선). 순서가 뒤집히면 사용자가 넣은 그림이 무시된다.
+        if let Some(dir) = students_dir() {
+            if let Some(b) = read_file_under(&dir, &dir.join(&file)) {
+                return Some(b);
+            }
+        }
+        // 번들 PNG 는 **이미 바이너리에 있는 것을 재사용**한다. 여기서 다시
+        // include_bytes! 하면 79장이 두 번 들어가 바이너리가 그만큼 커진다.
+        crate::render::student_profile_png(slug).map(|b| b.to_vec())
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)
@@ -2957,6 +3014,64 @@ fn build_theme_rows() -> Vec<ThemeRow> {
             .take(THEME_PREVIEW_FACES)
             .collect();
         out.push(ThemeRow { id, label, count: slugs.len(), faces });
+    }
+    out
+}
+
+/// 경로 조각으로 써도 안전한가. slug·테마 id 는 HTTP 쿼리에서 오고 그대로
+/// `join` 되므로, 구분자와 상위참조를 여기서 끊는다. 아래 canonicalize 검사와
+/// 이중 방어다 — 이쪽은 `..` 를 아예 만들지 않고, 저쪽은 심볼릭 링크로 밖을
+/// 가리키는 경우를 잡는다.
+fn safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
+        && s != "."
+        && s != ".."
+}
+
+/// `root` 아래에 실재하는 파일만 읽는다(`arona_ui_serve` 와 같은 방어).
+fn read_file_under(root: &std::path::Path, path: &std::path::Path) -> Option<Vec<u8>> {
+    let (croot, cpath) = (root.canonicalize().ok()?, path.canonicalize().ok()?);
+    if !cpath.starts_with(&croot) {
+        return None;
+    }
+    std::fs::read(&cpath).ok()
+}
+
+/// characters.json 의 캐릭터들을 **화면에 세울 순서대로** 펼친다. 이름이 키라
+/// 중복은 첫 것만 남긴다 — `member_names` 와 같은 규칙이어야 설정 화면의 목록과
+/// 실제 배정 대상이 어긋나지 않는다. leader/leaders 는 하위호환 필드다(god 개념은
+/// 폐기됐고 전원이 동등한 배정 대상이다).
+fn roster_entries(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut push = |e: &serde_json::Value| {
+        let Some(name) = e.get("name").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if out.iter().any(|o| o.get("name").and_then(|x| x.as_str()) == Some(name)) {
+            return;
+        }
+        let field = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        out.push(serde_json::json!({
+            "name": name,
+            "slug": field("slug"),
+            "school": field("school"),
+            "header_color": field("header_color"),
+            "persona": field("persona"),
+        }));
+    };
+    if let Some(l) = v.get("leader") {
+        push(l);
+    }
+    for key in ["leaders", "members"] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            for e in arr {
+                push(e);
+            }
+        }
     }
     out
 }

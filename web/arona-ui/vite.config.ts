@@ -35,7 +35,7 @@ export default defineConfig({
   // 파싱하다 죽는" 모양이 된다. 실서버는 멀쩡하니 원인을 프런트에서 찾게 된다.
   server: {
     proxy: {
-      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|peek|transcript|transcript-raw|conversation|pane-tasks|schale-state|git-status|git-panel|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|schedule|slash-commands|spawn-student|focus|send|design-tokens|settings)(/|$|\\?)':
+      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|peek|transcript|transcript-raw|conversation|pane-tasks|schale-state|git-status|git-panel|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|schedule|slash-commands|spawn-student|focus|send|design-tokens|settings|character-face)(/|$|\\?)':
         { target: process.env.VITE_MCP_TARGET || 'http://127.0.0.1:8765', changeOrigin: true }
     }
   }
