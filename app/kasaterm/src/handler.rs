@@ -1485,20 +1485,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
-        // Preview windows (image viewer / markdown editor): same isolation as
-        // the panels above. A CloseRequested drops just that one entry
-        // (window + its webview together); everything else is swallowed so a
-        // preview window's resize never touches the terminal's wgpu surface.
-        if let Some(pos) = self
-            .preview_windows
-            .iter()
-            .position(|(w, _)| w.id() == id)
-        {
-            if matches!(event, WindowEvent::CloseRequested) {
-                self.preview_windows.remove(pos);
-            }
-            return;
-        }
         // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
         // 창의 surface·터미널 로직과 완전히 격리 — 이벤트를 kind 별 라우팅에 위임한다.
         if let Some(pos) = self.aux_windows.iter().position(|a| a.window.id() == id) {

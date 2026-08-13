@@ -96,6 +96,6 @@ bash scripts/build-app.sh      # dist/kasaterm.app 을 새로 굽는다
 **데몬 제거로 빠졌던 것은 2026-07 기준 전부 로컬 재구현 완료** (미구현이라 적혀 있던 옛 문서에 속지 말 것 — 2026-07-27 실측 확인):
 - **세션 복원** — `restore_session_state`(session.rs)가 저장된 split 트리를 재생성하고 leaf 별 scrollback 을 심은 뒤, claude 를 돌던 pane 에는 `claude --resume <sid>` 를 큐잉한다. 저장된 sid 의 jsonl 이 실재할 때만 resume(없으면 셸만 뜨던 회귀 차단).
 - **working bar status** — `refresh_pane_activity`(input.rs:335)가 `handler.rs` 틱에서 `App.pane_activity` 를 채우고, 렌더가 그걸 읽어 헤더 busy 바 / bg 펄스를 그린다. render.rs 의 "the daemon's transcript watcher" 주석은 낡은 문구고 동작은 로컬이다.
-- **파일 미리보기·cross-window drag** — `open_preview` 로컬 재구현(main.rs:2372, `open_file` 이 확장자로 분기 → `preview_windows`), 창 간 pane 이동은 `move_pane_cross_window`(layout.rs:1435) + 헤드리스 하네스 `KASATERM_AUTOPANEMOVE`.
+- **파일 미리보기·cross-window drag** — `/open-image`·`/open-markdown` → `SocketOpenPreview` → `open_file`(session.rs:1549)이 확장자로 분기해 **pane 또는 보조 탭**으로 띄운다(별도 OS 창이 필요한 편집기/파일뷰는 auxwin.rs 의 `aux_windows`). 창 간 pane 이동은 `move_pane_cross_window`(layout.rs:1435) + 헤드리스 하네스 `KASATERM_AUTOPANEMOVE`.
 
 **undock(2026-07-24)**: 헤더 pop-out 아이콘 → `undock_pane_terminal`(auxwin.rs, aux wgpu 창이 App.ws 셀 그리드를 뷰·PTY는 App.pty에 잔존이라 세션 무중단), 창 닫기/Cmd+W = dock(활성 pane 오른쪽 split 재삽입). 헤드리스 검증은 `KASATERM_AUTOUNDOCK_MS`(+`_CAP`, testkit.rs). 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].
