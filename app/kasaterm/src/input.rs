@@ -3157,6 +3157,30 @@ mod working_scan_tests {
         assert!(rows_show_compacting(&cells));
     }
 
+    // ★회귀: 경과시간 괄호가 아예 없는 변형(2026-08-13 스샷 실측). 이 행이 그
+    // 화면의 유일한 스피너 행이라, spinner_row_col 의 괄호 요구에 걸리면 compact
+    // 중인 pane 전체가 busy 도 아니게 읽혀 바·완료 판정이 전부 죽었다.
+    #[test]
+    fn compacting_notice_without_elapsed_suffix_is_detected_and_busy() {
+        let cells = vec![row("· Compacting conversation…")];
+        assert!(rows_show_working(&cells));
+        assert!(rows_show_compacting(&cells));
+    }
+
+    // ★회귀: 실제 compact 화면 그대로 — 알림 아래 진행률 행과 `⎿ Tip:` 행이 깔린다
+    // (2026-08-13 스샷 실측). Tip 의 `⎿` 를 대화 마커로 세면 spinner_is_live 가
+    // 알림을 스크롤백으로 오판해 스스로를 죽인다.
+    #[test]
+    fn compacting_screen_with_progress_and_tip_rows_is_detected() {
+        let cells = vec![
+            row("· Compacting conversation…"),
+            row("▰▰▰▱▱▱▱▱▱▱ 7%"),
+            row("⎿  Tip: Did you know you can drag and drop image files into your terminal?"),
+        ];
+        assert!(rows_show_working(&cells));
+        assert!(rows_show_compacting(&cells));
+    }
+
     // 스크롤백에 굳은 옛 알림은 무시돼야 한다 — 안 그러면 compact 가 끝난 뒤에도
     // 바가 영원히 남는다. 가르는 축은 거리가 아니라 아래에 쌓인 대화 마커(`⎿`)다.
     #[test]
