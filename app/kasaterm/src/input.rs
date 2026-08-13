@@ -401,14 +401,14 @@ impl App {
         let (busy_now, bg_tab_busy, compacting_now): (
             Vec<(String, bool, Option<ApprovalPrompt>)>,
             std::collections::HashSet<String>,
-            std::collections::HashSet<String>,
+            std::collections::HashMap<String, Option<u8>>,
         ) = {
             let ws = self.ws.lock().unwrap();
             let mut rows = Vec::with_capacity(ws.panes.len());
             let mut bg = std::collections::HashSet::new();
-            // compact 중인 pane. 같은 스캔에서 뽑는다 — 따로 한 바퀴 돌면 ws 락을
-            // 두 번 잡고, 그 사이 화면이 바뀌어 busy 와 compacting 이 어긋난다.
-            let mut compacting = std::collections::HashSet::new();
+            // compact 중인 pane → 화면에서 읽은 진행률. 같은 스캔에서 뽑는다 — 따로
+            // 한 바퀴 돌면 ws 락을 두 번 잡고, 그 사이 화면이 바뀌어 어긋난다.
+            let mut compacting = std::collections::HashMap::new();
             for (id, pane) in ws.panes.iter() {
                 match pane.term() {
                     Some(t) => {
@@ -420,8 +420,10 @@ impl App {
                         };
                         // compact 중에도 스피너는 돌아서 busy 가 이미 참이다. 그 안에서만
                         // 좁히므로, 스크롤을 되짚다 옛 알림을 만나 바가 켜지는 일은 없다.
-                        if busy && rows_show_compacting(&t.cells) {
-                            compacting.insert(id.clone());
+                        if busy {
+                            if let Some(pct) = rows_show_compacting(&t.cells) {
+                                compacting.insert(id.clone(), pct);
+                            }
                         }
                         rows.push((id.clone(), busy, prompt));
                     }
@@ -471,8 +473,9 @@ impl App {
             // 바를 그리는 갈림길이 이 한 값이다. `busy` 가 grace 로 늘어나 있는 동안에도
             // 화면에 알림이 남아 있으면 compacting 으로 유지된다(끝나면 알림이 사라져
             // 자동으로 working→idle 로 떨어진다).
+            let compact = compacting_now.get(id).copied();
             let status = if busy {
-                if compacting_now.contains(id) {
+                if compact.is_some() {
                     "compacting"
                 } else {
                     "working"
@@ -480,6 +483,7 @@ impl App {
             } else {
                 "idle"
             };
+            let compact_pct = compact.flatten();
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
@@ -493,10 +497,12 @@ impl App {
                 .and_modify(|a| {
                     a.status = status.to_string();
                     a.bg_active = bg_active;
+                    a.compact_pct = compact_pct;
                 })
                 .or_insert_with(|| crate::stream::PaneStatusView {
                     status: status.to_string(),
                     bg_active,
+                    compact_pct,
                     ..Default::default()
                 });
         }
@@ -2844,12 +2850,38 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
 /// 행 하나로 좁혀도 되는 건 알림이 스피너와 **같은 줄**에 뜨기 때문이고
 /// (`✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)`), 덤으로 스크롤백에 굳은
 /// 옛 알림 오탐이 사라진다 — `spinner_is_live` 가 이미 그 둘을 가른다.
-pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> bool {
-    let Some((r, _)) = crate::render::find_claude_spinner(cells) else {
-        return false;
-    };
+///
+/// 반환: `None` = compact 아님, `Some(pct)` = compact 중이고 `pct` 는 알림 바로
+/// 아래 진행률 행(`▰▰▱ 45%`)에서 읽은 값. claude 는 진행률을 화면에만 내놓으므로
+/// 글자에서 읽는 수밖에 없고, 그 행이 안 보이는 프레임은 `Some(None)` — 바는
+/// 시간 루프로 폴백한다(2026-08-13 지시: 퍼센트 파싱해서 진짜 진행률로).
+pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> Option<Option<u8>> {
+    let (r, _) = crate::render::find_claude_spinner(cells)?;
     let text: String = cells[r].iter().map(|c| c.ch).collect();
-    text.contains("ompacting")
+    if !text.contains("ompacting") {
+        return None;
+    }
+    // 진행률 행은 알림 바로 아래 붙는다(두 스샷 실측 공통). 2행까지만 보는 이유:
+    // 더 내려가면 본문·statusline 의 우연한 %(디스크 사용률 등)를 주울 수 있는데,
+    // 알림 직하 2행이라는 위치가 그 오염을 막는 담이다.
+    let pct = cells.iter().skip(r + 1).take(2).find_map(|row| {
+        let t: String = row
+            .iter()
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect();
+        let p = t.find('%')?;
+        let digits: String = t[..p]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            return None;
+        }
+        let n: u32 = digits.chars().rev().collect::<String>().parse().ok()?;
+        Some(n.min(100) as u8)
+    });
+    Some(pct)
 }
 
 /// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
@@ -3128,23 +3160,26 @@ mod working_scan_tests {
     fn compacting_notice_is_detected_in_either_wording() {
         assert!(rows_show_compacting(&[row(
             "✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"
-        )]));
+        )])
+        .is_some());
         assert!(rows_show_compacting(&[row(
             "✻ compacting history (esc to interrupt)"
-        )]));
+        )])
+        .is_some());
     }
 
     // 평범한 working 화면을 compact 로 오인하면 모든 바쁜 pane 이 채워지는 바를 단다.
     #[test]
     fn ordinary_working_screen_is_not_compacting() {
-        assert!(!rows_show_compacting(&[row("✻ Pondering… (esc to interrupt)")]));
-        assert!(!rows_show_compacting(&[row("")]));
-        assert!(!rows_show_compacting(&[]));
+        assert!(rows_show_compacting(&[row("✻ Pondering… (esc to interrupt)")]).is_none());
+        assert!(rows_show_compacting(&[row("")]).is_none());
+        assert!(rows_show_compacting(&[]).is_none());
     }
 
     // ★회귀: 알림과 맨 아랫줄 사이에 todo 트리와 입력박스가 끼어도 잡아야 한다.
     // 하단 10행 창으로 뒀을 때 거노 화면에서 그 거리가 12행이라 한 번도 안 걸렸다
     // (2026-08-13). 판정을 스피너 행에 앵커하면 그 거리는 무의미해진다.
+    // 진행률 행(45%)도 알림 바로 아래에서 함께 읽혀야 한다.
     #[test]
     fn compacting_notice_far_above_the_bottom_is_still_detected() {
         let mut cells = vec![row("✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)")];
@@ -3154,22 +3189,23 @@ mod working_scan_tests {
         for _ in 0..8 {
             cells.push(row("│ 입력박스와 statusline"));
         }
-        assert!(rows_show_compacting(&cells));
+        assert_eq!(rows_show_compacting(&cells), Some(Some(45)));
     }
 
     // ★회귀: 경과시간 괄호가 아예 없는 변형(2026-08-13 스샷 실측). 이 행이 그
     // 화면의 유일한 스피너 행이라, spinner_row_col 의 괄호 요구에 걸리면 compact
     // 중인 pane 전체가 busy 도 아니게 읽혀 바·완료 판정이 전부 죽었다.
+    // 진행률 행이 없으면 Some(None) — 바는 시간 루프로 폴백한다.
     #[test]
     fn compacting_notice_without_elapsed_suffix_is_detected_and_busy() {
         let cells = vec![row("· Compacting conversation…")];
         assert!(rows_show_working(&cells));
-        assert!(rows_show_compacting(&cells));
+        assert_eq!(rows_show_compacting(&cells), Some(None));
     }
 
     // ★회귀: 실제 compact 화면 그대로 — 알림 아래 진행률 행과 `⎿ Tip:` 행이 깔린다
     // (2026-08-13 스샷 실측). Tip 의 `⎿` 를 대화 마커로 세면 spinner_is_live 가
-    // 알림을 스크롤백으로 오판해 스스로를 죽인다.
+    // 알림을 스크롤백으로 오판해 스스로를 죽인다. 퍼센트(7%)는 진짜 진행률로 읽힌다.
     #[test]
     fn compacting_screen_with_progress_and_tip_rows_is_detected() {
         let cells = vec![
@@ -3178,7 +3214,22 @@ mod working_scan_tests {
             row("⎿  Tip: Did you know you can drag and drop image files into your terminal?"),
         ];
         assert!(rows_show_working(&cells));
-        assert!(rows_show_compacting(&cells));
+        assert_eq!(rows_show_compacting(&cells), Some(Some(7)));
+    }
+
+    // Tip 행의 우연한 %(예: "100% faster")를 진행률로 줍지 않는가 — 스캔은 알림
+    // 직하 2행까지지만, 숫자+% 형태만 인정하므로 진행률 행이 그 자리에 있으면
+    // 그것이 이긴다. 여기선 진행률 행이 없고 Tip 에만 % 가 있는 경우를 본다.
+    #[test]
+    fn compacting_pct_is_not_taken_from_prose_percent() {
+        let cells = vec![
+            row("· Compacting conversation…"),
+            row("⎿  Tip: kasaterm renders 100% of your panes"),
+        ];
+        // Tip 행도 스캔 창(직하 2행) 안이라 숫자+% 는 읽힌다 — 형태만으로는 못
+        // 가른다. 대신 실제 화면에선 진행률 행이 항상 알림 바로 아래라 Tip 이
+        // 먼저 잡힐 일이 없다. 이 테스트는 그 순서 의존을 문서화한다.
+        assert_eq!(rows_show_compacting(&cells), Some(Some(100)));
     }
 
     // 스크롤백에 굳은 옛 알림은 무시돼야 한다 — 안 그러면 compact 가 끝난 뒤에도
@@ -3189,7 +3240,7 @@ mod working_scan_tests {
             row("✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"),
             row("⎿ 그 뒤에 이어진 도구 출력"),
         ];
-        assert!(!rows_show_compacting(&cells));
+        assert!(rows_show_compacting(&cells).is_none());
     }
 
     #[test]
