@@ -1905,6 +1905,9 @@ struct TerminalPane {
     prev_cells: Vec<Vec<GridCell>>,
     /// Last OSC 133 `B` mark (prompt end / command-input start), (row, col).
     prompt_end: Option<(u16, u16)>,
+    /// 이번 프레임에 뷰포트와 겹치는 인라인 이미지(OSC 1337)들 — PTY 쪽이 절대
+    /// 줄 앵커를 화면 좌표로 환산해 보낸 그대로. 렌더는 이 좌표에 그리기만 한다.
+    inline_images: Vec<kasa_bridge::screen::InlineImageView>,
 }
 
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.

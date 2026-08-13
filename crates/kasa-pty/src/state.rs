@@ -143,6 +143,10 @@ pub struct PtySession {
     /// 전혀 묶이지 않는다. `blocks` 와 같은 이유로 Arc 공유 — HTTP 백엔드가
     /// GUI 스레드를 거치지 않고 직접 붙는다.
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    /// 셀-흐름 인라인 이미지(OSC 1337) 기록. 리더 스레드가 채우고, 스냅샷을
+    /// 만드는 모든 경로(reader·scroll·full_snapshot)가 뷰포트 배치로 환산해
+    /// ScreenUpdate 에 싣는다.
+    inline_imgs: Arc<Mutex<InlineImgs>>,
 }
 
 impl PtySession {
@@ -342,6 +346,7 @@ impl PtySession {
             proc.advance(&mut *t, b"\r\n");
         }
         let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let reader_thread = spawn_reader_thread(
             reader,
             tx.clone(),
@@ -354,6 +359,7 @@ impl PtySession {
             Arc::clone(&blocks),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
+            Arc::clone(&inline_imgs),
         );
 
         Ok(Self {
@@ -380,6 +386,7 @@ impl PtySession {
             tty_short,
             blocks,
             cwd_handle,
+            inline_imgs,
         })
     }
 
@@ -559,7 +566,7 @@ impl PtySession {
         if before == after {
             return after;
         }
-        let update = snapshot(
+        let mut update = snapshot(
             &mut t,
             cols,
             rows,
@@ -567,6 +574,7 @@ impl PtySession {
             &self.title_handle,
             true,
         );
+        attach_inline_views(&mut update, &t, &self.inline_imgs);
         let _ = self.screens_tx.try_send(update);
         after
     }
@@ -642,7 +650,7 @@ impl PtySession {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
         t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-        let update = snapshot(
+        let mut update = snapshot(
             &mut t,
             cols,
             rows,
@@ -650,6 +658,7 @@ impl PtySession {
             &self.title_handle,
             true,
         );
+        attach_inline_views(&mut update, &t, &self.inline_imgs);
         let _ = self.screens_tx.try_send(update);
     }
 
@@ -659,7 +668,10 @@ impl PtySession {
     pub fn full_snapshot(&self) -> ScreenUpdate {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
-        snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true)
+        let mut update =
+            snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        attach_inline_views(&mut update, &t, &self.inline_imgs);
+        update
     }
 
     /// raw PTY 바이트 스트림을 구독한다. 받는 쪽이 자기 VT 파서를 갖고 있을 때
@@ -1119,6 +1131,7 @@ fn spawn_reader_thread(
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    inline_imgs: Arc<Mutex<InlineImgs>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -1146,8 +1159,11 @@ fn spawn_reader_thread(
         // two reads).
         let mut utf8_buf = Utf8Buffer::new();
         // OSC 1337 inline-image capture state (a payload can span reads).
+        // img_buf/img_capturing 은 레거시 탭 모드 전용, inline_scan 은 셀-흐름
+        // 모드 전용 — 같은 시퀀스를 두 경로가 동시에 잡지 않는다.
         let mut img_buf: Vec<u8> = Vec::new();
         let mut img_capturing = false;
+        let mut inline_scan = InlineScan::default();
         // Kitty graphics protocol (APC `\x1b_G…\x1b\\`) capture state. One
         // image can arrive as multiple APC chunks linked by `m=1` / `m=0` —
         // `kitty_chunk_buf` is the current chunk's raw bytes, while
@@ -1267,8 +1283,11 @@ fn spawn_reader_thread(
             // most reads have no `\x1b]1337` / `\x1b_G` and we skip the
             // walk entirely. Critical for TUI throughput (claude code emits
             // thousands of small reads per second with neither prefix).
-            if img_capturing
-                || memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some()
+            // 셀-흐름 모드에선 이 시퀀스를 term 락 안의 advance_scanning_inline
+            // 이 잡는다(커서 위치가 필요해서다). 여기 레거시 스캔은 탭 모드 전용.
+            if !inline_cell_flow()
+                && (img_capturing
+                    || memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some())
             {
                 scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
             }
@@ -1330,7 +1349,20 @@ fn spawn_reader_thread(
                         taps.retain(|sub| sub.try_send(buf[..n].to_vec()).is_ok());
                     }
                 }
-                processor.advance(&mut *t, processed_bytes);
+                if inline_cell_flow()
+                    && (inline_scan.capturing
+                        || memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some())
+                {
+                    advance_scanning_inline(
+                        &mut processor,
+                        &mut t,
+                        processed_bytes,
+                        &mut inline_scan,
+                        &inline_imgs,
+                    );
+                } else {
+                    processor.advance(&mut *t, processed_bytes);
+                }
                 // alacritty buffers DECSET 2026 synchronized output internally:
                 // while its sync buffer is non-empty the Term grid still holds
                 // the pre-sync frame, so skip the snapshot until it flushes on
@@ -1352,6 +1384,7 @@ fn spawn_reader_thread(
                         &title_handle,
                         false,
                     );
+                    attach_inline_views(&mut snap, &t, &inline_imgs);
                     // OSC 133 `B` = prompt end / command-input start. Our
                     // VT parser (alacritty 0.26 / vte 0.15) drops OSC 133
                     // as unhandled, so we sniff the raw batch for it and
@@ -1575,6 +1608,9 @@ fn snapshot(
         prompt_end: None,
         // Likewise stamped by the reader when an OSC 777 notify was sniffed.
         notify: None,
+        // 뷰포트 배치는 스냅샷 뒤 attach_inline_views 가 채운다 — snapshot 은
+        // Term 만 알고 이미지 기록(InlineImgs)을 모른다.
+        inline_images: Vec::new(),
     }
 }
 
@@ -1851,6 +1887,347 @@ fn emit_inline_image(body: &[u8]) {
             &url,
         ])
         .status();
+}
+
+/// 셀-흐름 인라인 이미지 모드인가. 기본 on — OSC 1337 이 도착한 그 자리에
+/// 그린다. `KASATERM_INLINE_IMAGES=tab` 이면 옛 동작(temp PNG → 이미지 탭)으로
+/// 돌아간다 — 셀 렌더가 실사용에서 검증될 때까지 남겨 둔 도피로(2026-08-13).
+fn inline_cell_flow() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        std::env::var("KASATERM_INLINE_IMAGES").map(|v| v != "tab").unwrap_or(true)
+    })
+}
+
+/// 셀-흐름 인라인 이미지 한 장의 PTY측 기록.
+///
+/// 앵커는 **내용 절대 줄**(`history_size + 화면 행`) — 새 출력이 밀어 올리는
+/// 일반 스크롤과 높이 리사이즈(줄이 화면↔히스토리를 오가도 이 값은 그대로)에는
+/// 안정하고, 가로 리사이즈(리플로우)·히스토리 캡 회전·clear 에서만 무너진다.
+/// 그 셋은 `attach_inline_views` 가 전량 폐기한다 — 어긋난 자리에 그리는 것보다
+/// 안 그리는 게 낫다.
+struct InlineImg {
+    id: u64,
+    /// 재전송 판별 키 (name, size) — recall 은 그림 자리가 밀리면 같은 시퀀스를
+    /// 새 커서 위치에서 다시 흘린다(recall 35b7f5e). 같은 키는 새 레코드가
+    /// 아니라 **이동**이다.
+    key: (String, u64),
+    path: std::path::PathBuf,
+    abs_line: i64,
+    col: u16,
+    cols: u16,
+    rows: u16,
+    /// 앵커 행 텍스트(앞 64자, trim). recall 은 그림 자리에 대체 텍스트
+    /// (`[그림] name`)를 먼저 깔고 시퀀스를 덮으므로, 이 행이 다른 내용으로
+    /// 바뀌면 그림이 그 자리를 떠난 것이다(스크롤 아웃·리페인트) — 남겨 두면
+    /// 남의 글 위에 유령으로 뜬다. **기록 시점이 아니라 flush 뒤 첫 스냅샷에서
+    /// 뜬다**(None=아직) — 기록은 동기 출력(2026) 한가운데라 그리드가 옛
+    /// 프레임이고, 거기서 뜨면 다음 프레임에 반드시 어긋나 자기를 지운다.
+    row_sig: Option<String>,
+}
+
+#[derive(Default)]
+struct InlineImgs {
+    imgs: Vec<InlineImg>,
+    next_id: u64,
+    /// 리플로우·clear·alt 전환 감지용 직전 프레임 상태.
+    last_cols: u16,
+    last_rows: u16,
+    last_hist: i64,
+    last_alt: bool,
+}
+
+/// 리더 스레드의 OSC 1337 캡처 상태(셀-흐름 경로). 페이로드가 read 여러 번에
+/// 걸칠 수 있어 buf/capturing 이 프레임을 넘어 살고, anchor 는 마커를 만난
+/// 순간의 커서(= 이미지 좌상단)다.
+#[derive(Default)]
+struct InlineScan {
+    buf: Vec<u8>,
+    capturing: bool,
+    anchor: Option<(i64, u16)>,
+}
+
+/// PNG IHDR 의 (width, height). PNG 가 아니면 None — 그때 줄수는 기본값으로.
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((w, h))
+}
+
+/// 접두 바이트에서 **마지막** 절대 커서 이동(CUP — `ESC[{row};{col}H|f`)의
+/// 0-기반 (row, col). 동기 출력(2026) 중엔 Term 커서를 못 믿으므로, 시퀀스를
+/// 그 자리에 심으려던 송신측의 CUP 이 앵커의 정본이 된다.
+fn last_cup(bytes: &[u8]) -> Option<(u16, u16)> {
+    let mut found = None;
+    let mut i = 0;
+    while let Some(rel) = find_subslice(&bytes[i..], b"\x1b[") {
+        let start = i + rel + 2;
+        let mut j = start;
+        while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+            j += 1;
+        }
+        if j < bytes.len() && (bytes[j] == b'H' || bytes[j] == b'f') {
+            let params = std::str::from_utf8(&bytes[start..j]).unwrap_or("");
+            let mut it = params.split(';');
+            let row = it.next().and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+            let col = it.next().and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
+            found = Some((row.saturating_sub(1), col.saturating_sub(1)));
+        }
+        i = start;
+    }
+    found
+}
+
+/// 그리드 한 줄의 앞부분 텍스트(trim, 최대 64자) — 인라인 이미지 생존 신호용.
+/// `line` 은 화면 좌표(0=화면 첫 줄, 음수=히스토리).
+fn grid_line_sig(term: &Term<PtyEventForwarder>, line: i32) -> String {
+    let grid = term.grid();
+    if line < -(grid.history_size() as i32) || line >= grid.screen_lines() as i32 {
+        return String::new();
+    }
+    let cols = grid.columns().min(64);
+    let mut s = String::with_capacity(cols);
+    for c in 0..cols {
+        let ch = grid[Point::new(alacritty_terminal::index::Line(line), alacritty_terminal::index::Column(c))].c;
+        s.push(if ch == '\0' { ' ' } else { ch });
+    }
+    s.trim().to_string()
+}
+
+/// OSC 1337 이 섞인 배치를 파서에 먹이면서 이미지를 **그 자리에서** 뜬다.
+///
+/// 마커 직전까지 파서를 먼저 돌려야 커서가 이미지 자리에 가 있다 — 배치를
+/// 통째로 advance 한 뒤 커서를 읽으면 이미지 뒤에 온 출력(recall 의 절대좌표
+/// 리페인트)이 커서를 이미 딴 데로 옮긴 뒤다. 시퀀스 본문은 파서에 안 먹인다:
+/// alacritty 는 어차피 버리고, vte OSC 버퍼에 MB 급 base64 를 밀 이유가 없다.
+/// 마커가 read 경계에 걸치면 이번 배치는 놓친다 — 기존 scan_inline_image 와
+/// 같은 트레이드(게이트 프리픽스 검사도 같은 한계를 이미 안고 있었다).
+fn advance_scanning_inline(
+    processor: &mut Processor<StdSyncHandler>,
+    term: &mut Term<PtyEventForwarder>,
+    bytes: &[u8],
+    st: &mut InlineScan,
+    imgs: &Mutex<InlineImgs>,
+) {
+    const MARKER: &[u8] = b"\x1b]1337;File=";
+    let mut data = bytes;
+    loop {
+        if st.capturing {
+            let bel = data.iter().position(|&b| b == 0x07);
+            let stx = find_subslice(data, b"\x1b\\");
+            let end = match (bel, stx) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            match end {
+                Some(e) => {
+                    st.buf.extend_from_slice(&data[..e]);
+                    record_inline_image(term, st, imgs);
+                    st.buf.clear();
+                    st.capturing = false;
+                    let term_len = if data.get(e) == Some(&0x07) { 1 } else { 2 };
+                    data = &data[(e + term_len).min(data.len())..];
+                }
+                None => {
+                    // 말라 죽은 스트림 무한 성장 방지 — scan_inline_image 와 동일.
+                    if st.buf.len() < 8 * 1024 * 1024 {
+                        st.buf.extend_from_slice(data);
+                    } else {
+                        st.buf.clear();
+                        st.capturing = false;
+                        st.anchor = None;
+                    }
+                    return;
+                }
+            }
+        } else {
+            match find_subslice(data, MARKER) {
+                Some(m) => {
+                    processor.advance(term, &data[..m]);
+                    // 동기 출력(DECSET 2026) 안이면 방금 먹인 바이트가 파서
+                    // 버퍼에만 쌓여 커서가 옛 자리(입력줄)에 있다 — recall 은
+                    // 프레임 전체를 2026 으로 감싼다(2026-08-13 실측 137쌍).
+                    // 그때는 마커 직전의 절대 커서 이동(CUP)에서 앵커를 읽는다.
+                    // CUP 도 없으면 앵커 불명 — 페이로드는 그대로 소비하되
+                    // 기록은 버린다(엉뚱한 자리에 그리는 것보다 낫다).
+                    let hist = term.grid().history_size() as i64;
+                    st.anchor = if processor.sync_bytes_count() > 0 {
+                        last_cup(&data[..m]).map(|(row, col)| (hist + row as i64, col))
+                    } else {
+                        let cur = term.grid().cursor.point;
+                        Some((hist + cur.line.0.max(0) as i64, cur.column.0 as u16))
+                    };
+                    st.capturing = true;
+                    data = &data[m + MARKER.len()..];
+                }
+                None => {
+                    processor.advance(term, data);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// 완성된 OSC 1337 본문(`params:base64`)을 temp 파일로 떨구고 앵커에 건다.
+fn record_inline_image(
+    term: &Term<PtyEventForwarder>,
+    st: &mut InlineScan,
+    imgs: &Mutex<InlineImgs>,
+) {
+    let Some((abs_line, col)) = st.anchor.take() else { return };
+    let body: &[u8] = &st.buf;
+    let Some(colon) = body.iter().position(|&b| b == b':') else { return };
+    let params = String::from_utf8_lossy(&body[..colon]).into_owned();
+    let bytes = b64_decode(&body[colon + 1..]);
+    if bytes.len() < 16 {
+        return;
+    }
+    let grid_cols = term.grid().columns() as u16;
+    // 히스토리 캡에 닿으면 이후 줄들이 회전해 절대 줄 번호가 조용히 밀린다 —
+    // 그 상태에선 새 앵커도 못 믿으므로 받지 않는다(기존 것은
+    // attach_inline_views 가 이미 전량 폐기했다).
+    if term.grid().history_size() >= history_lines_for_cols(grid_cols.max(1)) {
+        return;
+    }
+    let mut name = String::new();
+    let mut size: u64 = bytes.len() as u64;
+    let mut width_cells: Option<u16> = None;
+    for kv in params.split(';') {
+        if let Some((k, v)) = kv.split_once('=') {
+            match k {
+                "name" => {
+                    name = String::from_utf8_lossy(&b64_decode(v.as_bytes())).into_owned()
+                }
+                "size" => size = v.parse().unwrap_or(size),
+                // iTerm 스펙은 N(셀)·Npx·N%·auto — 셀 수만 다룬다(recall 이 보내는
+                // 형태). 나머지는 기본폭으로 떨어진다.
+                "width" => width_cells = v.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    let cols = width_cells
+        .unwrap_or_else(|| (grid_cols as u32 * 6 / 10).clamp(20, 100) as u16)
+        .clamp(1, grid_cols.saturating_sub(col).max(1));
+    // 셀은 세로가 가로의 두 배쯤. recall 의 자리 예약 계산(image_rows 의 2.1)과
+    // 같은 비율이어야 recall 이 비워 둔 줄 수와 우리가 덮는 줄 수가 맞아떨어진다.
+    // 실제 폰트 비율과의 오차는 GUI 의 contain-fit 이 레터박스로 흡수한다.
+    const CELL_ASPECT: f64 = 2.1;
+    let rows = match png_size(&bytes) {
+        Some((w, h)) if w > 0 => {
+            (((cols as f64) * h as f64 / w as f64) / CELL_ASPECT).ceil() as u16
+        }
+        _ => 12,
+    }
+    .max(1);
+    let key = (name, size);
+    let mut lock = imgs.lock().unwrap();
+    if let Some(existing) = lock.imgs.iter_mut().find(|i| i.key == key) {
+        // 같은 그림의 재전송 = 자리 이동. 파일과 id(=GUI 텍스처)는 그대로 산다.
+        existing.abs_line = abs_line;
+        existing.col = col;
+        existing.cols = cols;
+        existing.rows = rows;
+        existing.row_sig = None;
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("kasaterm-inline-{nanos}.png"));
+    if std::fs::write(&tmp, &bytes).is_err() {
+        return;
+    }
+    let id = lock.next_id;
+    lock.next_id += 1;
+    lock.imgs.push(InlineImg { id, key, path: tmp, abs_line, col, cols, rows, row_sig: None });
+    // 한 pane 에 무한정 쌓이지 않게 — 오래된 것부터 파일째 놓는다.
+    while lock.imgs.len() > 16 {
+        let old = lock.imgs.remove(0);
+        let _ = std::fs::remove_file(&old.path);
+    }
+}
+
+/// 스냅샷에 인라인 이미지의 이번 프레임 뷰포트 배치를 싣는다. 앵커가 무너지는
+/// 사건은 여기서 감지해 통째로 버린다.
+fn attach_inline_views(
+    update: &mut ScreenUpdate,
+    term: &Term<PtyEventForwarder>,
+    imgs: &Mutex<InlineImgs>,
+) {
+    let mut lock = imgs.lock().unwrap();
+    let grid = term.grid();
+    let cols = grid.columns() as u16;
+    let rows = grid.screen_lines() as u16;
+    let hist = grid.history_size() as i64;
+    let alt = term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+    let clear_all =
+        // 가로 리사이즈 = 리플로우. 절대 줄이 전부 다시 감긴다.
+        (lock.last_cols != 0 && cols != lock.last_cols)
+        // alt 화면 전환 = 좌표 공간이 통째로 바뀐다. alt 안의 내용이 화면에서
+        // 사라지는 것과 같은 운명이라 그림도 함께 사라지는 게 일관적이다.
+        || alt != lock.last_alt
+        // 높이 변화 없이 히스토리가 줄었다 = clear_history. (높이가 커질 때는
+        // 히스토리 줄이 화면으로 복귀하며 줄어드는데, 그건 내용 이동이라
+        // 절대 줄 앵커가 산다 — 함께 버리면 안 된다.)
+        || (hist < lock.last_hist && rows == lock.last_rows)
+        // 캡 도달 = 이후 줄들이 회전해 번호가 조용히 밀린다.
+        || hist >= history_lines_for_cols(cols.max(1)) as i64;
+    if clear_all && !lock.imgs.is_empty() {
+        for im in lock.imgs.drain(..) {
+            let _ = std::fs::remove_file(&im.path);
+        }
+    }
+    lock.last_cols = cols;
+    lock.last_rows = rows;
+    lock.last_hist = hist;
+    lock.last_alt = alt;
+    if lock.imgs.is_empty() {
+        return;
+    }
+    // 앵커 행이 다른 내용으로 바뀐 그림은 그 자리를 떠났다(recall 이 스크롤로
+    // 걷어 갔거나 다른 글이 덮었다) — 유령으로 남기지 않는다. 서명이 아직
+    // 없는 그림(기록 직후)은 지금 그리드에서 처음 뜬다 — 동기 출력이 flush 된
+    // 첫 스냅샷이 여기라서다.
+    lock.imgs.retain_mut(|im| {
+        let sig_now = grid_line_sig(term, (im.abs_line - hist) as i32);
+        let alive = match &im.row_sig {
+            None => {
+                im.row_sig = Some(sig_now);
+                true
+            }
+            Some(sig) => *sig == sig_now,
+        };
+        if !alive {
+            let _ = std::fs::remove_file(&im.path);
+        }
+        alive
+    });
+    let top_abs = hist - grid.display_offset() as i64;
+    update.inline_images = lock
+        .imgs
+        .iter()
+        .filter_map(|im| {
+            let row = im.abs_line - top_abs;
+            // 뷰포트와 겹치는 것만 — GUI 는 받은 것만 그리고, 안 온 그림의
+            // 텍스처는 놓는다(스크롤로 벗어난 그림의 GPU 메모리 회수).
+            (row + (im.rows as i64) > 0 && row < rows as i64).then(|| {
+                kasa_bridge::screen::InlineImageView {
+                    id: im.id,
+                    path: im.path.display().to_string(),
+                    row: row as i32,
+                    col: im.col,
+                    cols: im.cols,
+                    rows: im.rows,
+                }
+            })
+        })
+        .collect();
 }
 
 /// Injected into PowerShell (`pwsh` / `powershell`) via `-Command` so it reports
@@ -3110,6 +3487,117 @@ mod snapshot_tap_tests {
             checked >= 12,
             "경쟁 상태를 충분히 못 만들었다 ({checked}회) — 검증이 무의미하다"
         );
+    }
+}
+
+/// 셀-흐름 인라인 이미지(OSC 1337) — 실제 PTY 로 전 경로(스캔→앵커→기록→뷰)를
+/// 돈다. recall 이 kasaterm 에서 쓰는 형태(`width=<셀수>`, base64 PNG)를 그대로
+/// 흘린다.
+#[cfg(test)]
+mod inline_image_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// 1x1 빨강 PNG. png_size 가 (1,1) 을 읽어 rows 계산까지 실경로를 탄다.
+    const PNG_1X1: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    fn sh(pane_id: &str) -> PtySession {
+        PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()),
+            cols: 40,
+            rows: 10,
+            pane_id: pane_id.into(),
+            ..Default::default()
+        })
+        .expect("PTY 를 못 띄웠다")
+    }
+
+    fn emit(sess: &PtySession, name_b64: &str) {
+        // printf 한 방이 recall 의 show_image 시퀀스와 같은 꼴이다. 뒤의 \n 은
+        // 커서를 이미지 아래로 내린다(recall 은 자리를 스스로 예약한다).
+        let cmd = format!(
+            "printf '\\033]1337;File=name={name_b64};size=68;width=4;inline=1:{PNG_1X1}\\007\\n\\n\\n'\n"
+        );
+        sess.send_bytes(cmd.as_bytes()).unwrap();
+    }
+
+    fn wait_views(sess: &PtySession, want: usize) -> Vec<kasa_bridge::screen::InlineImageView> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let v = sess.full_snapshot().inline_images;
+            if v.len() == want || Instant::now() > deadline {
+                return v;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn osc1337_lands_as_a_placed_view() {
+        let sess = sh("test-inline");
+        emit(&sess, "YS5wbmc="); // a.png
+        let views = wait_views(&sess, 1);
+        assert_eq!(views.len(), 1, "이미지가 뷰로 안 실렸다");
+        let v = &views[0];
+        assert_eq!(v.cols, 4, "width=4(셀) 가 그대로 와야 한다");
+        // 1x1 픽셀 → rows = ceil(4/2.1) = 2.
+        assert_eq!(v.rows, 2);
+        assert!((0..10).contains(&v.row), "뷰포트 밖 배치: row={}", v.row);
+        assert!(std::path::Path::new(&v.path).exists(), "temp 파일이 없다");
+        let _ = std::fs::remove_file(&v.path);
+    }
+
+    /// 같은 (name, size) 재전송은 새 그림이 아니라 **이동**이다 — recall 은 그림
+    /// 자리가 밀리면 같은 시퀀스를 다시 흘린다(recall 35b7f5e). 두 장으로 쌓이면
+    /// 재전송마다 화면에 그림이 늘어난다.
+    #[test]
+    fn resend_of_same_image_moves_instead_of_duplicating() {
+        let sess = sh("test-inline-move");
+        emit(&sess, "Yi5wbmc="); // b.png
+        let first = wait_views(&sess, 1);
+        assert_eq!(first.len(), 1);
+        emit(&sess, "Yi5wbmc=");
+        // 재전송 완료를 화면 마커로 못박는다 — 이동 결과가 첫 배치와 같은 상대
+        // 위치라, 뷰만 봐서는 「처리 전」과 「이동 후」가 구별되지 않는다.
+        sess.send_bytes(b"printf 'RESEND-DONE\\n'\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sess.visible_text(10).contains("RESEND-DONE") {
+            assert!(Instant::now() < deadline, "마커가 10초 안에 안 떴다");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let v = sess.full_snapshot().inline_images;
+        assert_eq!(v.len(), 1, "재전송이 두 장으로 쌓였다: {v:?}");
+        assert_eq!(v[0].id, first[0].id, "이동인데 id 가 바뀌었다(텍스처 캐시가 죽는다)");
+        assert_eq!(v[0].path, first[0].path, "이동인데 파일이 바뀌었다");
+        let _ = std::fs::remove_file(&v[0].path);
+    }
+
+    /// 스크롤백으로 밀려난 그림은 그 프레임의 뷰에서 빠지고, 위로 올리면
+    /// 돌아온다 — 「그림이 대화 기록에 남는다」의 실체다.
+    #[test]
+    fn scrolled_out_image_returns_when_scrolling_back() {
+        let sess = sh("test-inline-scroll");
+        emit(&sess, "Yy5wbmc="); // c.png
+        let placed = wait_views(&sess, 1);
+        assert_eq!(placed.len(), 1);
+        // 화면(10행)보다 많이 밀어 그림을 히스토리로 보낸다.
+        sess.send_bytes(b"printf '\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n'\n").unwrap();
+        let gone = wait_views(&sess, 0);
+        assert!(gone.is_empty(), "밀려난 그림이 뷰에 남았다: {gone:?}");
+        // 한 줄씩 올리며 찾는다 — 한 번에 크게 올리면 앵커를 지나칠 수 있고
+        // (실측: scroll(20)이 정확히 한 줄 지나쳐 row=10 에 뒀다), 얼마나
+        // 올려야 하는지는 배너·프롬프트 줄수에 따라 환경마다 다르다.
+        let mut back = Vec::new();
+        for _ in 0..40 {
+            sess.scroll(1);
+            back = sess.full_snapshot().inline_images;
+            if !back.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(back.len(), 1, "스크롤백을 다 올려도 그림이 안 돌아왔다");
+        let _ = std::fs::remove_file(&back[0].path);
     }
 }
 
