@@ -2431,6 +2431,44 @@ impl ApplicationHandler<UserEvent> for App {
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
+                    return;
+                }
+                // 헤더 띠 우클릭 → ⋮ 메뉴. 헤더가 생기면 hover ⋮ 핸들이 사라져
+                // (중복 진입점 제거) 상단바 토글로 되돌아갈 입구가 통째로 없었다
+                // (2026-08-13 지적) — 헤더 자신이 그 메뉴의 진입점이 된다.
+                // 헤더 없는 pane 은 기존 hover ⋮ 가 있으니 여기서 안 잡는다.
+                // `header_at_px` 를 안 쓰는 이유: 분할이 아니면 무조건 None 이라
+                // 홀로 있는 pane 에 ⋮ 로 켠 헤더가 안 잡힌다 — has_header() 로
+                // 실제 그려진 헤더만 가른다.
+                let hdr_hit = {
+                    let (cols, rows) = self.window_cells();
+                    let pad = WINDOW_PADDING + self.effective_sidebar_w();
+                    self.effective_leaf_rects(cols, rows)
+                        .into_iter()
+                        .find(|(_, rx, ry, rw, _)| {
+                            let bx = pad + *rx as f32 * self.cell.w;
+                            let by = TITLE_HEIGHT + *ry as f32 * self.cell.h;
+                            let bw = *rw as f32 * self.cell.w;
+                            cx >= bx && cx <= bx + bw
+                                && cy >= by && cy <= by + PANE_HEADER_HEIGHT
+                        })
+                        .map(|(id, ..)| id)
+                };
+                if let Some(pid) = hdr_hit {
+                    let headered = self
+                        .ws
+                        .lock()
+                        .unwrap()
+                        .panes
+                        .get(&pid)
+                        .is_some_and(|p| p.has_header());
+                    if headered {
+                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        self.handle_menu = Some(pid);
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
                 }
             }
             // Middle-click → close the tab under the cursor: in-pane tab pill
@@ -5302,6 +5340,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autostash();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
+        // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
+        // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.
+        self.run_pending_autocolscroll();
         self.run_pending_autocursor();
         self.run_pending_autoexpandclick();
         self.run_pending_autorowdrag();
@@ -5319,6 +5360,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_forcesurfacehalf();
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
+        self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
