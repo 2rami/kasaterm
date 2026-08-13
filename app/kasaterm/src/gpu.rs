@@ -155,10 +155,23 @@ pub struct GpuRenderer {
     /// you queue things in is the order they come out**. Without it images and
     /// icons live in their own passes, permanently below/above all chrome, and
     /// no panel or modal can cover them however late it is drawn.
-    image_quads: Vec<(String, CellInstance, u32)>,
+    image_quads: Vec<(String, CellInstance, u32, Option<[u32; 4]>)>,
     /// Per-frame chrome icon quads: (texture key, instance, chrome watermark).
     /// Same texture path and same ordering rule as `image_quads`.
-    icon_quads: Vec<(String, CellInstance, u32)>,
+    icon_quads: Vec<(String, CellInstance, u32, Option<[u32; 4]>)>,
+    /// 지금 유효한 클립 사각형들 — LOGICAL px `[x0, y0, x1, y1]`, 이미 교집합이
+    /// 접혀 있어 `last()` 하나가 곧 현재 클립이다. 프레임마다 `clear_chrome` 이
+    /// 비운다.
+    ///
+    /// 클로저(`with_clip(|g| …)`)가 아니라 스택인 건 호출부 사정이다. 칼럼 그리기는
+    /// `&mut GpuRenderer` 를 이미 손에 쥔 자유 함수들이고 루프 안에서 `continue`
+    /// 로 빠져나간다 — 클로저로 감싸면 그 `continue` 가 안 넘어가고, 12,000줄짜리
+    /// 파일 전체에 들여쓰기가 한 단 더 붙는다.
+    clip_stack: Vec<[f32; 4]>,
+    /// 클립이 바뀐 지점들 — `(그 시점의 chrome.len(), 그 뒤로 유효한 클립)`.
+    /// PHYSICAL px `[x, y, w, h]`(`set_scissor_rect` 가 받는 그대로), `None` 은
+    /// 클립 없음. `render` 가 이걸로 chrome 패스를 세그먼트로 잘라 그린다.
+    clip_runs: Vec<(u32, Option<[u32; 4]>)>,
     /// 이번 프레임에 `hover_rect` 가 한 번이라도 그려졌나 — 즉 커서 밑에
     /// 누를 수 있는 표면이 있나. 커서 모양(손가락)을 이 하나로 정하려고 둔다.
     ///
@@ -658,6 +671,8 @@ impl GpuRenderer {
             images: HashMap::new(),
             image_quads: Vec::new(),
             icon_quads: Vec::new(),
+            clip_stack: Vec::new(),
+            clip_runs: Vec::new(),
             hover_pointer: false,
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
@@ -3348,7 +3363,98 @@ impl GpuRenderer {
         }
         self.image_quads.clear();
         self.icon_quads.clear();
+        self.clip_stack.clear();
+        self.clip_runs.clear();
         self.hover_pointer = false;
+    }
+
+    /// 지금 유효한 클립을 PHYSICAL px `[x, y, w, h]` 로. 클립이 없으면 `None`.
+    /// 폭이나 높이가 0 이면 「아무것도 안 보이는 클립」이라 그리기 자체를 건너뛴다.
+    fn cur_clip_phys(&self) -> Option<[u32; 4]> {
+        let [x0, y0, x1, y1] = *self.clip_stack.last()?;
+        let s = self.scale;
+        let (fw, fh) = (self.config.width as f32, self.config.height as f32);
+        // 바깥으로 나간 만큼은 잘라 낸다 — `set_scissor_rect` 는 어태치먼트를
+        // 넘는 사각형에 패닉한다.
+        let px0 = (x0 * s).floor().clamp(0.0, fw);
+        let py0 = (y0 * s).floor().clamp(0.0, fh);
+        let px1 = (x1 * s).ceil().clamp(px0, fw);
+        let py1 = (y1 * s).ceil().clamp(py0, fh);
+        Some([px0 as u32, py0 as u32, (px1 - px0) as u32, (py1 - py0) as u32])
+    }
+
+    /// 클립이 방금 바뀌었음을 기록한다. 같은 chrome 위치에 두 번 기록되면 뒤엣것만
+    /// 살아남게 덮어쓴다 — `push_clip` 직후 `pop_clip` 처럼 사이에 아무것도 안 그린
+    /// 경우 세그먼트가 빈 채로 쌓이는 것을 막는다.
+    fn note_clip(&mut self) {
+        let at = self.chrome.len() as u32;
+        let cur = self.cur_clip_phys();
+        match self.clip_runs.last_mut() {
+            Some((i, c)) if *i == at => *c = cur,
+            _ => self.clip_runs.push((at, cur)),
+        }
+    }
+
+    /// 이 뒤로 그리는 chrome 을 `(x, y, w, h)`(LOGICAL px) 안으로 가둔다. 이미 클립이
+    /// 서 있으면 **교집합**이 된다 — 안쪽 클립이 바깥을 넓힐 수는 없다.
+    ///
+    /// ⚠️ **행 루프 밖에서 한 번만 불러라.** 안에서 부르면 행마다 run 이 두 개씩
+    /// 쌓여 세그먼트가 행 수만큼 늘고, 그만큼 draw call 이 는다.
+    ///
+    /// ⚠️ **시저는 픽셀만 자르지 클릭은 안 자른다.** 그리기 스킵을 지운 자리마다
+    /// 히트렉트를 [`clip_hit`](Self::clip_hit) 로 교집합 내지 않으면 화면은 멀쩡한데
+    /// 안 보이는 행이 눌린다 — 스크린샷이 절대 못 잡는 부류다.
+    pub fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let (mut x0, mut y0, mut x1, mut y1) = (x, y, x + w.max(0.0), y + h.max(0.0));
+        if let Some([px0, py0, px1, py1]) = self.clip_stack.last().copied() {
+            x0 = x0.max(px0);
+            y0 = y0.max(py0);
+            x1 = x1.min(px1).max(x0);
+            y1 = y1.min(py1).max(y0);
+        }
+        self.clip_stack.push([x0, y0, x1, y1]);
+        self.note_clip();
+    }
+
+    /// 가장 안쪽 클립을 걷는다. 짝이 안 맞는 `pop` 은 무시하고 로그만 남긴다 —
+    /// 여기서 패닉하면 그리기 한 곳의 실수가 앱을 죽인다.
+    pub fn pop_clip(&mut self) {
+        if self.clip_stack.pop().is_none() {
+            eprintln!("[clip] pop_clip 이 push 보다 많다 — 이 프레임의 클립은 버려진다");
+            // 스택을 음수로 만들 수는 없으니, 대신 `render` 의 fail-open 이 물도록
+            // 균형을 깨 둔다.
+            self.clip_stack.push([0.0, 0.0, 0.0, 0.0]);
+            return;
+        }
+        self.note_clip();
+    }
+
+    /// 히트렉트를 지금 클립과 교집합 낸다 — 잘려 안 보이는 부분은 눌려도 안 되므로.
+    /// 교집합이 비면 `None`(= 그 rect 는 등록하지 마라).
+    ///
+    /// 클립이 없으면 받은 그대로 돌려준다. LOGICAL px `(x, y, w, h)`.
+    pub fn clip_hit(&self, r: (f32, f32, f32, f32)) -> Option<(f32, f32, f32, f32)> {
+        let Some([cx0, cy0, cx1, cy1]) = self.clip_stack.last().copied() else {
+            return (r.2 > 0.0 && r.3 > 0.0).then_some(r);
+        };
+        let x0 = r.0.max(cx0);
+        let y0 = r.1.max(cy0);
+        let x1 = (r.0 + r.2).min(cx1);
+        let y1 = (r.1 + r.3).min(cy1);
+        (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+    }
+
+    /// 이 사각형이 지금 클립에 조금이라도 걸치나 — **컬링용**이다.
+    ///
+    /// 완전히 밖이면 `false`, 즉 그리기를 통째로 건너뛰어도 되는 경우다. 반쯤
+    /// 걸치면 `true` 이고, 그건 시저가 알아서 자르니 **그릴 것**이다. 목록이
+    /// 5000행쯤 되면 이 컬링이 없을 때 인스턴스가 수만 개로 불어난다 —
+    /// 시저는 컬링을 대체하지 않는다.
+    pub fn clip_visible(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
+        let Some([cx0, cy0, cx1, cy1]) = self.clip_stack.last().copied() else {
+            return true;
+        };
+        x + w > cx0 && x < cx1 && y + h > cy0 && y < cy1
     }
 
     /// Has this pane's image already been uploaded? Lets the caller skip
@@ -3387,7 +3493,7 @@ impl GpuRenderer {
             .iter()
             .chain(self.icon_quads.iter())
             .filter(|(k, ..)| k == key)
-            .map(|(_, c, _)| {
+            .map(|(_, c, ..)| {
                 let [x, y, w, h] = c.cell_px;
                 (x / s, y / s, w / s, h / s)
             })
@@ -3767,6 +3873,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -3800,6 +3907,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -3868,6 +3976,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -3899,6 +4008,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -3944,6 +4054,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -3972,6 +4083,7 @@ impl GpuRenderer {
                 ..Default::default()
             },
             self.chrome.len() as u32,
+            self.cur_clip_phys(),
         ));
     }
 
@@ -4362,7 +4474,7 @@ impl GpuRenderer {
                     .image_quads
                     .iter()
                     .chain(self.icon_quads.iter())
-                    .map(|(_, inst, _)| *inst)
+                    .map(|(_, inst, ..)| *inst)
                     .collect();
                 self.image_pipeline
                     .write_instances(&self.device, &self.queue, &all_instances);
@@ -4409,37 +4521,96 @@ impl GpuRenderer {
             // there — an icon queued before a panel ends up under that panel,
             // and one queued after ends up on top, which is what every caller
             // already assumes when it draws a cover over something.
-            let mut ordered: Vec<(u32, u32, &String)> = self
+            let mut ordered: Vec<(u32, u32, &String, Option<[u32; 4]>)> = self
                 .image_quads
                 .iter()
                 .enumerate()
-                .map(|(i, (id, _, wm))| (*wm, i as u32, id))
+                .map(|(i, (id, _, wm, clip))| (*wm, i as u32, id, *clip))
                 .chain(
                     self.icon_quads
                         .iter()
                         .enumerate()
-                        .map(|(j, (id, _, wm))| (*wm, (n_img + j) as u32, id)),
+                        .map(|(j, (id, _, wm, clip))| (*wm, (n_img + j) as u32, id, *clip)),
                 )
                 .collect();
             // Stable so quads with the same watermark keep queue order — that
             // is the case for an icon drawn right on top of an image.
-            ordered.sort_by_key(|(wm, _, _)| *wm);
+            ordered.sort_by_key(|(wm, ..)| *wm);
+            // 클립 세그먼트. `clip_runs` 는 `(chrome 인덱스, 그 뒤로 유효한 클립)` 이
+            // 오름차순으로 들어 있고, 여기서 그 경계마다 chrome 패스를 끊어
+            // `set_scissor_rect` 를 갈아 끼운다.
+            //
+            // ⚠️ fail-open: 스택이 안 닫힌 채로 프레임이 끝났으면 run 을 통째로
+            // 버린다. 최악이 「오늘과 똑같은 그림」이어야지 「화면 절반 실종」이면
+            // 안 된다 — 클립 하나 안 닫은 실수가 앱을 못 쓰게 만들면 안 된다.
+            let runs: &[(u32, Option<[u32; 4]>)] = if self.clip_stack.is_empty() {
+                &self.clip_runs
+            } else {
+                eprintln!(
+                    "[clip] 프레임이 끝났는데 클립 {}개가 안 닫혔다 — 이 프레임은 클립 없이 그린다",
+                    self.clip_stack.len()
+                );
+                &[]
+            };
+            let (full_w, full_h) = (self.config.width, self.config.height);
             let mut drawn = 0u32;
-            for (wm, buf_idx, id) in ordered {
-                let wm = wm.min(instance_count as u32);
-                if wm > drawn {
-                    self.pipeline
-                        .draw_range(&mut pass, &self.bind_group, drawn, wm);
-                    drawn = wm;
-                }
+            let mut run_i = 0usize;
+            let mut cur: Option<[u32; 4]> = None;
+            // 한 세그먼트를 그리기 직전마다 시저를 **매번** 정한다. 「바뀔 때만
+            // 세운다」로 하면 한 번 세운 사각형이 되돌려지지 않아 그 뒤 전부가
+            // 거기 갇히는 사고가 난다.
+            macro_rules! scissor {
+                ($c:expr) => {
+                    match $c {
+                        Some([x, y, w, h]) => pass.set_scissor_rect(x, y, w, h),
+                        None => pass.set_scissor_rect(0, 0, full_w, full_h),
+                    }
+                };
+            }
+            macro_rules! flush_chrome {
+                ($upto:expr) => {{
+                    let upto: u32 = $upto;
+                    while drawn < upto {
+                        while run_i < runs.len() && runs[run_i].0 <= drawn {
+                            cur = runs[run_i].1;
+                            run_i += 1;
+                        }
+                        // 다음 경계까지가 이번 세그먼트. 위에서 `<= drawn` 을 다
+                        // 소비했으므로 남은 run 의 인덱스는 반드시 `drawn` 보다 커
+                        // 세그먼트가 비지 않는다(무한루프 방지).
+                        let seg_end =
+                            runs.get(run_i).map(|(i, _)| (*i).min(upto)).unwrap_or(upto);
+                        // 빈 클립은 그리기 자체를 건너뛴다 — 0 크기 시저를 세우느니
+                        // draw call 을 안 내는 편이 싸고 검증도 명확하다.
+                        if !matches!(cur, Some([_, _, 0, _]) | Some([_, _, _, 0])) {
+                            scissor!(cur);
+                            self.pipeline
+                                .draw_range(&mut pass, &self.bind_group, drawn, seg_end);
+                        }
+                        drawn = seg_end;
+                    }
+                }};
+            }
+            for (wm, buf_idx, id, qclip) in ordered {
+                flush_chrome!(wm.min(instance_count as u32));
                 if let Some(entry) = self.images.get(id) {
-                    self.image_pipeline
-                        .draw_at(&mut pass, &entry.bind_group, buf_idx);
+                    // 이미지·아이콘은 자기가 큐잉될 때의 클립을 들고 다닌다.
+                    // chrome 인덱스로 되짚으면 같은 워터마크에 여러 run 이 붙었을 때
+                    // 어느 쪽인지 못 가른다.
+                    if !matches!(qclip, Some([_, _, 0, _]) | Some([_, _, _, 0])) {
+                        scissor!(qclip);
+                        self.image_pipeline
+                            .draw_at(&mut pass, &entry.bind_group, buf_idx);
+                    }
                 }
             }
-            if drawn < instance_count as u32 {
-                self.pipeline
-                    .draw_range(&mut pass, &self.bind_group, drawn, instance_count as u32);
+            flush_chrome!(instance_count as u32);
+            if std::env::var_os("KASATERM_CLIP_DEBUG").is_some() {
+                eprintln!(
+                    "[clip] 인스턴스 {instance_count} · 세그먼트 {} · runs {:?}",
+                    runs.len() + 1,
+                    runs
+                );
             }
         }
         // Self-capture: copy the just-rendered frame into a buffer before
