@@ -2485,6 +2485,8 @@ impl App {
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         // 파일 탭 hover 시 뜨는 팝아웃(별도창) 아이콘 hit rect: (pane id, 탭 idx, rect).
         let mut tab_popout_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
+        // 계정이 바뀐 pane 의 「재시작」 칩 — gpu 대여가 끝난 뒤 self 로 옮긴다.
+        let mut restart_chip_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         // Tab-overflow windowing per pane: (id, effective first, visible
         // count, active tab this frame) — written back to ws.panes after the
@@ -5309,6 +5311,38 @@ impl App {
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
                     g.pulse_bar(h.x, by, h.w, bar_h, theme::accent());
                 }
+                // 계정이 바뀌었는데 이 pane 은 옛 계정으로 돈다 — 헤더에 「⟳ 재시작」
+                // 칩을 띄운다. 계정은 프로세스 env 라 뜰 때 박히고 도는 프로세스는 못
+                // 바꾸므로, 되띄우는 것 말고는 새 계정으로 옮길 길이 없다.
+                //
+                // 오른쪽 버튼 무리보다 **먼저** 그린다 — 그쪽은 x 를 오른쪽 끝에서
+                // 거꾸로 잡아 나가서, 나중에 그리면 칩 위에 겹친다.
+                if let Some((from, to)) = self.pane_account_stale.get(&h.id) {
+                    let label = format!("⟳ {from} → {to} 재시작");
+                    let pad = 6.0;
+                    let cw = g.measure_chrome_text(&label, chrome_font, true) + pad * 2.0;
+                    let ch = PANE_HEADER_HEIGHT - 6.0;
+                    // 오른쪽 버튼 무리를 피해 그 왼쪽에 붙인다. 자리가 모자라면
+                    // 아예 안 그린다 — 겹쳐 그리면 둘 다 못 읽는다.
+                    let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
+                    let cx = h.x + h.w - btn_zone - cw;
+                    if cx > h.x + 8.0 {
+                        let cy = h.y + 3.0;
+                        g.round_rect_fill(cx, cy, cw, ch, 4.0, theme::attention());
+                        g.draw_text(
+                            cx + pad,
+                            h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: chrome_font,
+                                color: theme::bg(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        restart_chip_hits.push((h.id.clone(), (cx, cy, cw, ch)));
+                    }
+                }
                 // No bottom hairline: the band == body, and the active tab
                 // flows straight into the cell grid (browser-tab feel).
                 // Compact glyphs — a touch bigger than the label so icons
@@ -7818,6 +7852,7 @@ impl App {
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_tab_popout_rects = tab_popout_hits;
+        self.pane_restart_chip_rects = restart_chip_hits;
         self.pane_plus_rects = plus_hits;
         // Tab-windowing write-back: clamped first + fit count for the wheel
         // handler, and this frame's active tab for the next reveal check.
@@ -10096,7 +10131,9 @@ fn paint_inline_images(
                 }
             }
         }
-        g.queue_image_clipped(key, *x, *y, *w, *h, *c0, *c1);
+        g.push_clip(*x, *c0, *w, *c1 - *c0);
+        g.queue_image(key, *x, *y, *w, *h, 1.0, 0.0, 0.0);
+        g.pop_clip();
     }
 }
 
@@ -10822,10 +10859,9 @@ pub(crate) fn paint_student_overlays(
     };
     for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &slots.banner {
         ensure_anim(g, slug, "idle");
-        g.queue_image_clipped(
-            &format!("student:{slug}:f{anim_idx}"),
-            *bx, *by, *bw, *bh, *clip_y0, *clip_y1,
-        );
+        g.push_clip(*bx, *clip_y0, *bw, *clip_y1 - *clip_y0);
+        g.queue_image(&format!("student:{slug}:f{anim_idx}"), *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
+        g.pop_clip();
     }
     for (slug, (bx, by, bw, bh)) in &slots.spinner {
         ensure_anim(g, slug, "walk");

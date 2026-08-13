@@ -4166,6 +4166,27 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // 계정 재시작 칩 — 옛 계정으로 도는 pane 을 새 계정으로 되띄운다.
+                    // 오른쪽 버튼 무리보다 왼쪽에 있어 순서는 상관없지만, 눌렀을 때
+                    // 뒤의 헤더 드래그가 같이 먹지 않게 여기서 먼저 가로챈다.
+                    if let Some(pid) = self
+                        .pane_restart_chip_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, _)| id.clone())
+                    {
+                        // 표시는 **성공했을 때만** 지운다. 실패했는데 지우면 옛 계정으로
+                        // 도는 pane 이 새 계정인 것처럼 보인다(Orca 의
+                        // `reopenCodexRestartPrompt` 와 같은 이유).
+                        if self.restart_pane_agent(&pid) {
+                            self.pane_account_stale.remove(&pid);
+                        } else {
+                            self.set_toast("되띄우지 못했어요 — 그 pane 에 도는 에이전트가 없어요".into());
+                        }
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
                     // Pop-out icon (file tabs): tear the tab's editor into its
                     // own wgpu window. Checked before × since it sits left of it.
                     if let Some((pid, idx)) = self

@@ -4460,6 +4460,9 @@ struct App {
     /// index, logical rect). Click moves that tab's editor into its own wgpu
     /// window (auxwin.rs). Rebuilt each header paint.
     pane_tab_popout_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
+    /// 계정이 바뀐 pane 헤더의 「재시작」 칩 hit rect — (pane, rect).
+    /// 실제로 그리는 조건은 `pane_account_stale` 에 그 pane 이 있을 때.
+    pane_restart_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// "+" new-tab button hit rect per pane: (pane id, logical rect).
     pane_plus_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Panes folded into the active session's dock (bottom-bar chips). Mirror of
@@ -5211,6 +5214,7 @@ impl App {
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
             pane_tab_popout_rects: Vec::new(),
+            pane_restart_chip_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
             docked: Vec::new(),
             dock_chip_rects: Vec::new(),
