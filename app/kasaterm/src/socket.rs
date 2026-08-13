@@ -1391,6 +1391,31 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn settings_action(
+        &self,
+        action: &str,
+        id: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketSettingsAction(
+                action.to_string(),
+                id.map(str::to_string),
+                label.map(str::to_string),
+                tx,
+            ))
+            .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
+        // 테마 복제는 80명치 로스터와 그림 폴더를 통째로 복사한다 — 저장보다 훨씬
+        // 오래 걸릴 수 있어 여유를 더 준다. 무한 대기는 여전히 안 된다(소켓 워커가
+        // 물리면 다른 명령까지 함께 멈춘다).
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Err(_) => anyhow::bail!("시간 안에 안 끝났어요"),
+        }
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)
@@ -3445,6 +3470,20 @@ pub fn read_account_cooldowns() -> std::collections::HashMap<String, u64> {
 
 /// 만료 시각을 기록한다. 이미 더 뒤를 가리키고 있으면 그대로 둔다 — 짧은 창
 /// (5시간)이 긴 창(주간)의 금지를 덮어 계정을 너무 일찍 되돌리면 안 된다.
+/// 슬롯을 지울 때 그 쿨다운 기록도 함께 지운다. 안 지우면 목록에 없는 유령 키가
+/// 남고, 같은 번호를 다시 쓰는 슬롯이 **옛 계정의 잠금을 물려받아** 멀쩡한데도
+/// 전환 후보에서 빠진다.
+pub fn forget_account_cooldown(id: &str) {
+    let Some(p) = account_cooldown_path() else { return };
+    let mut map = read_account_cooldowns();
+    if map.remove(id).is_none() {
+        return;
+    }
+    if let Ok(txt) = serde_json::to_string(&map) {
+        let _ = std::fs::write(p, txt);
+    }
+}
+
 pub fn write_account_cooldown(id: &str, until: u64) {
     let Some(p) = account_cooldown_path() else { return };
     let mut map = read_account_cooldowns();

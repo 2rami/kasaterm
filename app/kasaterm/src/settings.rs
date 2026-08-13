@@ -390,9 +390,16 @@ impl App {
     fn add_claude_account(&mut self) {
         // dir 이름이 곧 Keychain 서비스명 해시의 입력이라 계정마다 유일하고 그 뒤로
         // 안 변해야 한다 — 재사용하면 지운 계정의 토큰을 새 계정이 물려받는다.
+        // 목록에 없어도 **폴더가 남아 있으면 쓰지 않는다.** 슬롯을 지울 때 키체인
+        // 항목과 폴더는 일부러 두는데(자격은 되돌릴 수 없다), 번호만 보고 고르면
+        // 지운 계정의 토큰을 새 계정이 그대로 물려받아 「새로 만들었는데 옛 계정으로
+        // 로그인돼 있는」 상태가 된다.
         let id = (1..)
             .map(|n| format!("acct-{n}"))
-            .find(|c| self.set_claude_accounts.iter().all(|a| &a.id != c))
+            .find(|c| {
+                self.set_claude_accounts.iter().all(|a| &a.id != c)
+                    && socket::claude_account_dir(c).is_none_or(|d| !d.exists())
+            })
             .expect("1.. is infinite");
         let Some(dir) = socket::claude_account_dir(&id) else {
             self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
@@ -1090,6 +1097,17 @@ impl App {
                 if self.set_claude_account == id {
                     self.set_claude_account = String::new();
                 }
+                // 슬롯에 딸린 곁 기록도 함께 지운다. 목록에서만 빼면 이메일 표와
+                // 쿨다운에 유령 키가 남아, 지웠는데도 뭔가 계속 남아 있는 것처럼
+                // 보인다(거노 2026-08-13: "슬롯정리가 안 되던데" — 실제로 지운
+                // acct-2 의 키가 두 표에 다 남아 있었다).
+                //
+                // ⚠️ 키체인 항목과 슬롯 폴더는 **일부러 안 지운다**. 자격은 되돌릴 수
+                // 없고, 실수로 지운 슬롯을 같은 번호로 다시 만들면 로그인이 그대로
+                // 살아 있는 편이 낫다. 대신 번호 재사용을 막아(`add_claude_account`)
+                // 남의 토큰을 물려받는 사고를 없앴다.
+                forget_account_email(&id);
+                socket::forget_account_cooldown(&id);
                 // 라벨 포커스는 행 인덱스라 목록이 줄면 다른 행을 가리킨다.
                 self.settings_input = None;
                 self.settings_save();
@@ -3687,6 +3705,21 @@ fn remember_account_email(id: &str, email: &str) {
         return; // 값이 그대로면 쓰지 않는다 — 20초마다 파일을 다시 쓸 이유가 없다
     }
     m.insert(id.to_string(), serde_json::Value::String(email.to_string()));
+    socket::write_setting("claude_account_emails", serde_json::Value::Object(m));
+}
+
+/// 슬롯을 지울 때 그 이메일 기록도 지운다. 안 지우면 목록에 없는 유령 키가 남고,
+/// 같은 번호를 다시 쓰는 슬롯이 **옛 계정의 이메일로 불린다** — statusline 은 이 표만
+/// 보므로 화면이 조용히 거짓말을 한다.
+fn forget_account_email(id: &str) {
+    let Some(serde_json::Value::Object(mut m)) =
+        socket::read_settings().get("claude_account_emails").cloned()
+    else {
+        return;
+    };
+    if m.remove(id).is_none() {
+        return;
+    }
     socket::write_setting("claude_account_emails", serde_json::Value::Object(m));
 }
 
