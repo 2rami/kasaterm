@@ -2348,6 +2348,13 @@ enum CredSource {
 
 /// 슬롯의 자격증명 문서 전체 + 그 출처. macOS 는 Keychain, 그 외는 저장소 dir 의
 /// `.credentials.json`. 빈 값/None = 기본 로그인.
+///
+/// **둘 다 있으면 만료가 늦은 쪽을 쓴다.** 예전엔 파일을 먼저 찾고 있으면 거기서
+/// 끝냈는데, macOS 에서 claude CLI 가 갱신하는 정본은 키체인이라 한 번 남은
+/// `~/.claude/.credentials.json` 은 아무도 안 고쳐 주고 몇 시간이면 썩는다. 그러면
+/// 살아 있는 키체인 토큰을 눈앞에 두고 죽은 파일 토큰으로 401 을 받아, 화면은
+/// 기본 계정을 영영 "확인 중…" 으로 붙잡는다(거노 2026-08-13. 실측: 파일 토큰은
+/// 11:09 만료·401, 같은 시각 키체인 토큰은 200 이었다).
 fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Value, CredSource)> {
     let account_dir = account_dir.filter(|s| !s.is_empty());
     let creds_dir = match account_dir {
@@ -2355,19 +2362,27 @@ fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Val
         None => format!("{}/.claude", std::env::var("HOME").ok()?),
     };
     let file = std::path::PathBuf::from(&creds_dir).join(".credentials.json");
-    if let Ok(s) = std::fs::read_to_string(&file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            return Some((v, CredSource::File(file)));
-        }
-    }
+    let from_file = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|v| (v, CredSource::File(file)));
     let svc = claude_keychain_service(account_dir);
-    let out = crate::no_window_command("security")
+    let from_keychain = crate::no_window_command("security")
         .args(["find-generic-password", "-s", &svc, "-w"])
         .output()
-        .ok()?;
-    let s = String::from_utf8(out.stdout).ok()?;
-    let v = serde_json::from_str::<serde_json::Value>(s.trim()).ok()?;
-    Some((v, CredSource::Keychain(svc)))
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok())
+        .map(|v| (v, CredSource::Keychain(svc)));
+    let expires_at = |v: &serde_json::Value| {
+        v.pointer("/claudeAiOauth/expiresAt")
+            .and_then(|e| e.as_u64())
+            .unwrap_or(0)
+    };
+    match (from_file, from_keychain) {
+        (Some(f), Some(k)) => Some(if expires_at(&k.0) > expires_at(&f.0) { k } else { f }),
+        (some, None) | (None, some) => some,
+    }
 }
 
 /// 갱신한 자격증명을 읽은 자리에 되쓴다.
