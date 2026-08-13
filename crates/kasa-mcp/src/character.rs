@@ -314,6 +314,17 @@ pub fn user_characters_path() -> Option<PathBuf> {
 /// (persona·claude_color 인라인 편집용). 파일이 없으면 현재 활성 정본을 seed 로
 /// 로드해 편집하므로 첫 저장이 다른 캐릭터를 지우지 않는다. 원자 write
 /// (tmp→rename). 이름을 못 찾으면 조용히 무시(파일 오염 방지).
+///
+/// ⚠️ **같은 이름이 여러 군데 적혀 있으면 전부 고친다** — 첫 매치에서 멈추면 안
+/// 된다. `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드라(로스터
+/// 빌드가 **이름으로** 접는다) 리더는 늘 두 번 적혀 있는데, 한쪽만 고치면
+/// 이름을 바꿨을 때 두 이름이 갈려 접히지 않고 **로스터에 유령이 하나 늘어난다**
+/// (79→80명, 실측). UI 에는 캐릭터를 지우는 창구가 없으니 밟으면 파일을 손으로
+/// 고쳐야 한다. persona 도 같은 이유로 전부 고쳐야 옳다 — 안 그러면 안 고쳐진
+/// 쪽에 옛 성격이 그림자로 남는다.
+///
+/// 이름이 로스터의 키라 같은 이름은 곧 같은 사람이다(중복 이름은 저장 단계에서
+/// 막힌다) — 그래서 "전부"가 "엉뚱한 사람까지"가 되지 않는다.
 pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()> {
     let path = user_characters_path().ok_or_else(|| std::io::Error::other("no HOME"))?;
     let mut root = if path.exists() {
@@ -333,15 +344,11 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
         }
     }
     for arr_key in ["leaders", "members"] {
-        if applied {
-            break;
-        }
         if let Some(arr) = root.get_mut(arr_key).and_then(|x| x.as_array_mut()) {
             for m in arr.iter_mut() {
                 if m.get("name").and_then(|n| n.as_str()) == Some(name) {
                     m[key] = value.clone();
                     applied = true;
-                    break;
                 }
             }
         }
