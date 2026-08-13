@@ -4694,6 +4694,25 @@ impl App {
                         let menus_open = self.git.commit_menu_open
                             || self.git.path_menu_open
                             || self.git.branch_menu_open;
+                        // 목록은 `list_top`~`input_top` 안에 가둔다. 지금까지는 행마다
+                        // 「완전히 밖이면 건너뛴다」로만 걸러, 위로 반쯤 걸친 행이 통째로
+                        // 그려져 Commit 버튼 줄과 구분선을 덮었다. 루프 **밖**에서 한 번만
+                        // 세운다 — 안에서 세우면 행마다 세그먼트가 둘씩 쌓인다.
+                        g.push_clip(
+                            git_col_x,
+                            list_top,
+                            git_col_w,
+                            (input_top - list_top).max(0.0),
+                        );
+                        // 커서가 잘려 안 보이는 쪽에 있는데 행의 보이는 쪽에 하이라이트가
+                        // 그려지는 것은 시저가 못 막는다(그 하이라이트는 클립 안이니까).
+                        // 그래서 이 목록 안에서는 걸러 낸 커서를 쓴다. 저장되는 히트렉트는
+                        // 그것과 별개로 루프 끝에서 교집합을 낸다 — `handler.rs` 가 **다음
+                        // 클릭 좌표로 다시** 검사하므로 커서를 거른 것만으로는 안 된다.
+                        let cur = match g.clip_hit((self.cursor_px.0, self.cursor_px.1, 1.0, 1.0)) {
+                            Some(_) => self.cursor_px,
+                            None => (f32::MIN, f32::MIN),
+                        };
                         for (title, staged, files) in [
                             ("Staged Changes", true, &git_view.staged),
                             ("Changes", false, &git_view.unstaged),
@@ -4701,8 +4720,9 @@ impl App {
                             if files.is_empty() {
                                 continue;
                             }
-                            // Section header (count) — clipped to the list zone.
-                            if !menus_open && y_cur + header_h > list_top && y_cur < input_top {
+                            // Section header (count) — 완전히 밖일 때만 건너뛴다.
+                            // 경계는 손으로 다시 쓰지 않고 클립에게 묻는다.
+                            if !menus_open && g.clip_visible(git_col_x, y_cur, git_col_w, header_h) {
                                 g.draw_text(
                                     gcx0,
                                     y_cur + 5.0,
@@ -4715,12 +4735,13 @@ impl App {
                                 let ry = y_cur;
                                 y_cur += item_h;
                                 let expanded = self.git.col_expanded.contains(&(staged, path.clone()));
-                                let row_visible = !menus_open && !(ry + item_h < list_top || ry > input_top);
+                                let row_visible =
+                                    !menus_open && g.clip_visible(git_col_x, ry, git_col_w, item_h);
                                 if row_visible {
-                                    let hovered = self.cursor_px.0 >= git_col_x
-                                        && self.cursor_px.0 <= git_col_x + git_col_w
-                                        && self.cursor_px.1 >= ry
-                                        && self.cursor_px.1 < ry + item_h;
+                                    let hovered = cur.0 >= git_col_x
+                                        && cur.0 <= git_col_x + git_col_w
+                                        && cur.1 >= ry
+                                        && cur.1 < ry + item_h;
                                     if hovered {
                                         hover_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::radius_sm());
                                     }
@@ -4762,7 +4783,7 @@ impl App {
                                     let mut ax = git_col_x + git_col_w - 12.0 - aw;
                                     let icon_dim = if hovered { theme::text_dim() } else { theme::with_alpha(theme::text_dim(), 0x88) };
                                     {
-                                        let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
+                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
                                         }
@@ -4771,7 +4792,7 @@ impl App {
                                         ax -= aw + agap;
                                     }
                                     {
-                                        let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
+                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
                                         }
@@ -4780,7 +4801,7 @@ impl App {
                                         ax -= aw + agap;
                                     }
                                     {
-                                        let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
+                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
                                         }
@@ -4817,7 +4838,7 @@ impl App {
                                         for dl in rows_d.iter() {
                                             let dy = y_cur;
                                             y_cur += dline_h;
-                                            if dy + dline_h < list_top || dy > input_top {
+                                            if !g.clip_visible(git_col_x, dy, git_col_w, dline_h) {
                                                 continue;
                                             }
                                             use kasa_mcp::git::DiffLineKind as K;
@@ -4870,6 +4891,27 @@ impl App {
                                 }
                             }
                         }
+                        // 히트렉트를 목록 구역과 교집합 낸다. 이 넷은 `handler.rs` 가
+                        // **다음 클릭 좌표로 다시** 검사하므로, 위에서 커서를 거른 것과는
+                        // 별개로 rect 자체가 잘려 있어야 한다. 안 자르면 화면은 완벽한데
+                        // Commit 버튼 뒤로 스크롤된 행의 「되돌리기」가 눌린다 — 되돌릴 수
+                        // 없는 동작이고, 스크린샷이 절대 못 잡는 부류다.
+                        macro_rules! clip_rects {
+                            ($v:expr, $i:tt) => {
+                                $v.retain_mut(|e| match g.clip_hit(e.$i) {
+                                    Some(h) => {
+                                        e.$i = h;
+                                        true
+                                    }
+                                    None => false,
+                                })
+                            };
+                        }
+                        clip_rects!(rects, 2);
+                        clip_rects!(stage_rects, 2);
+                        clip_rects!(discard_rects, 2);
+                        clip_rects!(open_rects, 1);
+                        g.pop_clip();
                         self.git.col_file_rects = rects;
                         self.git.col_stage_rects = stage_rects;
                         self.git.col_discard_rects = discard_rects;
