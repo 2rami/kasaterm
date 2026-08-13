@@ -1606,7 +1606,7 @@ pub(crate) fn paint_settings(
     let clip = ay + 82.0;
     // 본문을 담는 카드는 내용보다 **먼저** 그려야 한다(나중이면 글자를 덮는다).
     // 높이는 직전 프레임 값이다 — `form_card` 주석 참고.
-    form_card(g, fx, fy, fw);
+    form_card(g, fx, fy, fw, clip);
     // Every match arm must set this to its last element's bottom edge — the
     // compiler enforces it (no initializer), so a new category can't silently
     // break the scroll clamp.
@@ -2433,7 +2433,10 @@ pub(crate) fn paint_settings(
                 let cx0 = fx + (i % cols) as f32 * (tcw + THEME_GAP);
                 let cy0 = row_top + (i / cols) as f32 * (THEME_CARD_H + THEME_GAP);
                 y = cy0 + THEME_CARD_H;
-                if cy0 + THEME_CARD_H <= clip {
+                // 카드 **위쪽**이 기준이다(폼 전체의 클립 규약). 바닥으로 재면
+                // 반쯤 걸친 카드가 통째로 그려져 헤더 위로 얼굴이 삐져나온다 —
+                // 렌더러에 시저가 없어 잘라 낼 방법이 없다.
+                if cy0 <= clip {
                     continue;
                 }
                 let card = (cx0, cy0, tcw, THEME_CARD_H);
@@ -2572,14 +2575,16 @@ pub(crate) fn paint_settings(
             // 승인 대기·턴 완료 때만 옛 그림이 튀어나오는 이유를 알 길이 없었다.
             y = row_wide(g, fx, y, clip, "Character images",
                 &["테마 폴더의 sprites/ 에: <slug>-0..3 · -walk-0..5 · -wave-0..3 · -cheer-0..3 · -profile.png"]);
-            // 액션 버튼 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드) / 본보기 내보내기.
+            // 액션 버튼 — 지금 쓰는 테마의 그림 폴더 / 로스터 json / 텍스처 재로드.
+            // 「새 테마로 복제」는 여기 있었는데 위 격자의 `+ 새 테마` 카드와 같은
+            // 동작이라 뺐다. 같은 일을 하는 입구가 한 화면에 둘이면 다른 일을 하는
+            // 것처럼 보인다.
             if y > clip {
                 let mut bx = fx;
                 for (label, action) in [
                     ("이미지 폴더 열기", SettingsAction::OpenStudentsDir),
                     ("로스터 열기", SettingsAction::OpenCharactersJson),
                     ("새로고침", SettingsAction::RefreshStudentAssets),
-                    ("새 테마로 복제", SettingsAction::ExportTheme),
                 ] {
                     let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                     let r = (bx, y, bw, 34.0);
@@ -2609,7 +2614,7 @@ pub(crate) fn paint_settings(
                 let cx0 = fx + (i % scols) as f32 * (scw + STU_GAP);
                 let cy0 = srow_top + (i / scols) as f32 * (STU_CARD_H + STU_GAP);
                 y = cy0 + STU_CARD_H;
-                if cy0 + STU_CARD_H <= clip {
+                if cy0 <= clip {
                     continue;
                 }
                 let card = (cx0, cy0, scw, STU_CARD_H);
@@ -3592,14 +3597,22 @@ fn row_wide(
 /// 켤 때만 나오는 것)이 있어 그리기 전에는 높이를 모르고, 카드는 내용보다 먼저
 /// 그려야 하기 때문이다(나중에 그리면 방금 쓴 글자를 덮는다). 항목이 늘거나 줄는
 /// 그 한 프레임만 어긋나고, 설정 화면은 매 프레임 다시 그리므로 눈에 안 띈다.
-fn form_card(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32) {
+fn form_card(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, clip: f32) {
     let h = FORM_H.load(std::sync::atomic::Ordering::Relaxed) as f32;
     if h < 8.0 {
         return;
     }
     let p = CARD_PAD;
+    // 스크롤하면 카드 위쪽이 헤더 위로 올라간다. 안에 든 컨트롤은 `clip` 으로
+    // 걸러지지만 카드 자신은 배경이라 그냥 그리면 반투명 판이 제목을 덮어
+    // 흐려진다 — 헤더 선에서 잘라 낸다(시저가 없어 이렇게만 자를 수 있다).
+    let top = (y - p / 2.0).max(clip);
+    let bottom = y - p / 2.0 + h + p;
+    if bottom <= top {
+        return;
+    }
     outline_rect(
-        g, x - p, y - p / 2.0, w + p * 2.0, h + p,
+        g, x - p, top, w + p * 2.0, bottom - top,
         theme::radius_md(), theme::border(), 1.0,
         theme::with_alpha(theme::panel_bg(), 0x99),
     );

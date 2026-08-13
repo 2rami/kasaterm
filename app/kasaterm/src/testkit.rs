@@ -1840,10 +1840,30 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
-            "export-theme" => match crate::socket::export_current_theme() {
-                Ok(d) => eprintln!("[autosettings] 테마 복제 → {}", d.display()),
-                Err(e) => eprintln!("[autosettings] 테마 복제 실패: {e}"),
-            },
+            // 파일 쓰기만 부르지 않고 UI 액션을 그대로 태운다 — 복제는 만든 뒤
+            // 이름 칸에 포커스를 옮기는 것까지가 한 동작이라, `create_theme` 만
+            // 부르면 정작 사람이 겪는 절반을 안 지나간다.
+            "export-theme" => {
+                eprintln!("[autosettings] 새 테마 만들기");
+                self.settings_apply(SettingsAction::ExportTheme);
+            }
+            // `rename-theme:<id>=<새 이름>` — 이름 칸을 포커스하고 버퍼를 채운 뒤
+            // 커밋까지. 키 이벤트 경로가 헤드리스엔 없어 버퍼를 직접 심는다.
+            a if a.starts_with("rename-theme:") => {
+                let rest = a.trim_start_matches("rename-theme:");
+                let (id, label) = rest.split_once('=').unwrap_or((rest, ""));
+                eprintln!("[autosettings] 테마 이름 '{id}' → '{label}'");
+                self.settings_apply(SettingsAction::FocusThemeLabel(id.to_string()));
+                if let Some((_, buf)) = self.theme_label_edit.as_mut() {
+                    *buf = label.to_string();
+                }
+                self.flush_theme_label();
+            }
+            a if a.starts_with("delete-theme:") => {
+                let id = a.trim_start_matches("delete-theme:").to_string();
+                eprintln!("[autosettings] 테마 치우기 '{id}'");
+                self.settings_apply(SettingsAction::DeleteTheme(id));
+            }
             // `select-theme:<id>` — 빈 id 는 번들로 되돌린다. 전환은 캐시 셋을 함께
             // 비워야 화면이 한 테마로 보이는데, 그게 실제로 먹었는지는 전환 **뒤**
             // 그린 화면으로만 확인된다(캡처가 이 다음에 걸린다).
