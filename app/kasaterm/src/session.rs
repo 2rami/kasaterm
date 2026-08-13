@@ -2597,6 +2597,23 @@ impl App {
                     if let Some(name) = ws.pane_character.get(pane_id) {
                         obj.insert("character".to_string(), serde_json::json!(name));
                     }
+                    // 붙인 이름(`/rename`·`surface.rename`·`kasaspace_rename`). 이게
+                    // 없으면 재시작마다 이름이 증발해 OSC 제목으로 되돌아갔다 — 이 앱은
+                    // 종료 시 자기 설치를 하므로 껐다 켜는 일이 잦고, 그래서 이름을
+                    // 붙이는 행위 자체가 몇 분짜리가 됐다.
+                    //
+                    // ⚠️ **핀이 섰을 때만 저장한다.** 핀 없는 `title` 은 안에서 도는
+                    // 프로그램이 쏜 OSC 라, 그걸 굳혀 두면 다음에 켤 때 「사람이 정한
+                    // 이름」인 척하면서 그 뒤의 OSC 를 영영 막는다.
+                    if let Some(t) = ws
+                        .panes
+                        .get(pane_id)
+                        .filter(|p| p.title_pinned)
+                        .and_then(|p| p.title.as_deref())
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        obj.insert("title".to_string(), serde_json::json!(t));
+                    }
                     // per-pane 실제 세션은 SocketSessionBound 로 채워진 pane_claude_sid
                     // (정본)로 최우선 확정한다. 예전엔 argv(pane_record)·cwd 최신 jsonl 로
                     // 폴백했는데, argv 없는 fresh `claude` 여럿이 같은 cwd 면 전부 cwd 최신
@@ -2889,6 +2906,20 @@ impl App {
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
         self.insert_pty(id.clone(), session.clone());
+        // 붙인 이름을 되살린다. 핀도 같이 세워야 한다 — 안 세우면 되살린 이름이
+        // pane 안 프로그램의 첫 OSC 에 곧바로 덮여, 저장한 보람이 몇 초 만에 사라진다
+        // (claude 는 뜨자마자 제목을 쏜다). 저장 쪽이 핀 선 것만 넣으므로 여기 온
+        // 값은 전부 사람이 정한 이름이다.
+        if let Some(t) = rec
+            .get("title")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let pane = ws.pane_mut(&id);
+            pane.title = Some(t.to_string());
+            pane.title_pinned = true;
+        }
         // Bring the agent back: --resume the saved conversation (the shim
         // re-attaches team/persona/character from the session id), or a fresh
         // one when the pane ran an agent but no session id was captured.
