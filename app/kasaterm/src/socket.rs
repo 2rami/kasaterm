@@ -2840,6 +2840,18 @@ pub fn read_cursor_shape() -> String {
     }
 }
 
+/// 터미널 셀 위에서 마우스 포인터 모양 — `"arrow"`(기본) · `"ibeam"`.
+///
+/// 터미널은 글자를 고르는 자리라 I-beam 이 맞다는 사람과, 화살표여야 클릭 대상이
+/// 보인다는 사람이 갈린다. 텍스트 입력칸(파일트리 검색 등) 위 I-beam 은 이 설정과
+/// 무관하게 늘 뜬다 — 거긴 정말 글자를 치는 자리다.
+pub fn read_mouse_cursor() -> String {
+    match read_settings().get("mouse_cursor").and_then(|x| x.as_str()) {
+        Some("ibeam") => "ibeam".to_string(),
+        _ => "arrow".to_string(),
+    }
+}
+
 /// `bar`·`underline` 커서의 굵기(논리 px). block 은 셀을 통째로 채우므로 안 쓴다.
 ///
 /// 1~6 으로 조인다. 0 이면 커서가 보이지 않고, 셀 폭(≈8.5px)을 넘기면 bar 가 block

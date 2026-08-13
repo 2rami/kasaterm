@@ -98,6 +98,8 @@ pub(crate) struct SettingsCtx {
     pub cursor_shape: String,
     /// bar·underline 커서 굵기(논리 px).
     pub cursor_thickness: f32,
+    /// 터미널 셀 위 마우스 포인터 — `"arrow"` · `"ibeam"`.
+    pub mouse_cursor: String,
     pub claude_persona: bool,
     pub shim_inject: bool,
     pub claude_model: String,
@@ -667,6 +669,7 @@ impl App {
             tabs_on_top: self.tabs_on_top,
             cursor_shape: self.cursor_shape.clone(),
             cursor_thickness: self.cursor_thickness,
+            mouse_cursor: self.mouse_cursor.clone(),
             claude_persona: self.set_claude_persona,
             shim_inject: self.set_shim_inject,
             claude_model: self.set_claude_model.clone(),
@@ -954,6 +957,20 @@ impl App {
                         serde_json::Value::String(shape.to_string()),
                     );
                     // 커서는 셀 그리드 위에 그려지므로 chrome 만 더럽히면 안 바뀐다.
+                    self.chrome_dirty = true;
+                }
+            }
+            SettingsAction::MouseCursor(kind) => {
+                if self.mouse_cursor != kind {
+                    self.mouse_cursor = kind.to_string();
+                    socket::write_setting(
+                        "mouse_cursor",
+                        serde_json::Value::String(kind.to_string()),
+                    );
+                    // 포인터는 다음 마우스 이동에서 갱신된다. 지금 커서가 터미널 위에
+                    // 있으면 그 전환을 놓치므로(판정이 값이 **바뀔 때만** set_cursor 를
+                    // 부른다) 표시 상태를 풀어 다음 move 가 반드시 다시 세우게 한다.
+                    self.text_cursor_shown = false;
                     self.chrome_dirty = true;
                 }
             }
@@ -1904,6 +1921,11 @@ pub(crate) fn paint_settings(
                 ("2px", (ctx.cursor_thickness - 2.0).abs() < 0.01, SettingsAction::CursorThickness(2)),
                 ("3px", (ctx.cursor_thickness - 3.0).abs() < 0.01, SettingsAction::CursorThickness(3)),
                 ("4px", (ctx.cursor_thickness - 4.0).abs() < 0.01, SettingsAction::CursorThickness(4)),
+            ]);
+            y = seg_row(g, &mut rects, y, "Mouse pointer",
+                &["터미널 위 마우스 포인터 모양 (입력칸 위 I-beam 은 그대로예요)"], &[
+                ("Arrow", ctx.mouse_cursor != "ibeam", SettingsAction::MouseCursor("arrow")),
+                ("I-beam", ctx.mouse_cursor == "ibeam", SettingsAction::MouseCursor("ibeam")),
             ]);
             // 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
             // 그래서 한쪽에 맞추면 다른 쪽이 어긋난다. 고르는 몫을 사람에게 넘긴다.
