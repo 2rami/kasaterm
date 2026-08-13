@@ -664,6 +664,40 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::ClaudeAccountExhausted { pct, resets_at } => {
+                // 갈 곳이 없다. 토스트만 띄우면 창을 안 보고 있을 때 놓치므로 데스크톱
+                // 알림까지 쏜다 — 이건 「일하다 막혔다」라서 지금 알아야 하는 종류다.
+                //
+                // 폴러가 60초마다 보낸다. `dedup` 키를 **풀리는 시각**으로 잡아 같은
+                // 한도 창에서는 한 번만 울리게 한다(시각을 모르면 pct 로라도 묶는다 —
+                // 키가 매번 달라지면 매분 알림이 뜬다).
+                let when = resets_at
+                    .map(|t| {
+                        let left = t.saturating_sub(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs()),
+                        );
+                        format!("{}분 뒤 풀려요", left.div_ceil(60))
+                    })
+                    .unwrap_or_else(|| "언제 풀리는지는 모르겠어요".to_string());
+                let body =
+                    format!("사용량 {pct:.0}% — 옮겨갈 계정이 없어요. {when}");
+                self.set_toast(body.clone());
+                crate::chrome::notify_desktop(
+                    "계정 한도",
+                    &body,
+                    None,
+                    Some(&format!(
+                        "acct-exhausted:{}",
+                        resets_at.map_or_else(|| format!("pct{pct:.0}"), |t| t.to_string())
+                    )),
+                    None,
+                );
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::BgAgentsChanged => {
                 // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
                 // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰
@@ -1082,7 +1116,29 @@ impl ApplicationHandler<UserEvent> for App {
                 // 5 = 5분. 첫 바퀴는 0 이라 창을 열자마자 표가 찬다.
                 let mut others_due = 0u8;
                 loop {
-                    let fetched = fetch_claude_usage(&crate::mcp_panel_port(), None);
+                    // 조회할 슬롯을 **매 사이클 설정에서 다시 읽어 URL 에 못 박는다.**
+                    //
+                    // 전에는 dir 을 안 넘겼는데, 그 경우 프록시(kasa-mcp/http.rs)는
+                    // 「활성 슬롯」이 아니라 **자기 프로세스의**
+                    // `KASATERM_CLAUDE_ACCOUNT_DIR` env 로 떨어진다. 그 env 를 세우는
+                    // 곳은 shim 을 굽는 자리 하나뿐이라 이 앱의 설정과 갈릴 수 있고,
+                    // 특히 `mcp_panel_port()` 의 최후 폴백이 8765 라 **다른 인스턴스의**
+                    // 서버에 물리면 남의 계정 숫자로 판정한다(2026-08-13 실측: 설정은
+                    // 기본 슬롯인데 조회는 acct-2 를 보고 있었다).
+                    //
+                    // 그래서 자동전환이 「떠날 계정이 아닌 계정」의 사용률을 보고,
+                    // 100% 인 슬롯을 쓰면서 47% 를 읽어 95% 게이트가 영영 안 열렸다.
+                    // 슬롯을 URL 로 말하면 어느 인스턴스가 답하든 답이 맞는다.
+                    //
+                    // `id` 와 `dir` 은 **한 스냅샷**이다(dir 은 id 에서 순수 파생) —
+                    // 아래 판정의 `current` 가 같은 값을 봐야 「어느 계정의 숫자인가」와
+                    // 「어느 계정에서 떠나는가」가 안 갈린다. 기본 슬롯은 경로가 없고
+                    // (`claude_account_dir("") == None`) 프록시에서 빈 문자열이 곧 기본
+                    // 로그인이라, 빈 문자열로 눌러 넘기면 의미가 정확히 맞는다.
+                    let active_id = socket::read_claude_account();
+                    let active_dir = socket::claude_account_dir(&active_id)
+                        .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                    let fetched = fetch_claude_usage(&crate::mcp_panel_port(), &active_dir);
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {
@@ -1157,7 +1213,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 continue;
                             }
                             let Some((u, stale, dir)) =
-                                fetch_claude_usage(&crate::mcp_panel_port(), Some(&d))
+                                fetch_claude_usage(&crate::mcp_panel_port(), &d)
                             else {
                                 continue;
                             };
@@ -1201,6 +1257,39 @@ impl ApplicationHandler<UserEvent> for App {
                     // 계정을 떠나면 멀쩡한 자리를 옛 기록 때문에 버리는 셈이다.
                     let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300);
                     let fresh = fetched.as_ref().is_some_and(|(_, stale, _)| !*stale);
+                    // 소진된 슬롯을 **전환과 무관하게** 쿨다운에 적는다.
+                    //
+                    // 전에는 쿨다운이 전환이 실제로 일어날 때만(`ClaudeAccountAutoswitch`
+                    // 처리부) 찍혔다. 그래서 「전환 못 하고 그냥 터진」 슬롯은 기록이 없고,
+                    // `pick_next_account` 는 쿨다운만 보므로 그 슬롯을 멀쩡한 후보로 골라
+                    // 옮겨가자마자 또 막혔다(2026-08-13 실측: acct-3 이 100% critical 인데
+                    // account-cooldown.json 에 키 자체가 없었다).
+                    //
+                    // 표(`usage_all`)는 모든 슬롯의 압력을 이미 알고 있으니 여기서 적는다.
+                    // 기준은 자동전환 임계와 같은 값이다 — 「옮겨갈 수 없다고 판단하는 선」과
+                    // 「가면 안 된다고 적는 선」이 다르면 그 사이 값에서 왕복이 생긴다.
+                    // `write_account_cooldown` 은 더 뒤를 가리키는 기록을 덮지 않으므로
+                    // 매 사이클 불러도 안전하고, resets_at 이 없는 슬롯은 언제 풀릴지 모르니
+                    // 적지 않는다(모르는 값으로 잠그면 영영 안 풀린다).
+                    {
+                        let limit = socket::read_account_autoswitch_pct();
+                        let known: Vec<(String, std::path::PathBuf)> = socket::read_claude_accounts()
+                            .iter()
+                            .filter_map(|a| socket::claude_account_dir(&a.id).map(|d| (a.id.clone(), d)))
+                            .collect();
+                        if let Ok(g) = usage_all.lock() {
+                            for (id, dir) in &known {
+                                let key = dir.to_string_lossy();
+                                if let Some(b) = g.get(key.as_ref()) {
+                                    if !b.stale && b.pct >= limit {
+                                        if let Some(until) = b.resets_at {
+                                            socket::write_account_cooldown(id, until);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let (Some(u), true, true, true) =
                         (usage, socket::read_account_autoswitch(), rested, fresh)
                     {
@@ -1209,21 +1298,46 @@ impl ApplicationHandler<UserEvent> for App {
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map_or(0, |d| d.as_secs());
+                                // `active_id` 재사용 — 위 조회와 **같은 스냅샷**이어야
+                                // 「어느 계정의 숫자로 판정했나」와 「어느 계정에서
+                                // 떠나나」가 안 갈린다. 그 사이에 비활성 슬롯 curl 이
+                                // 끼므로(슬롯당 최대 5초) 다시 읽으면 값이 바뀔 수 있다.
                                 let to = socket::pick_next_account(
-                                    &socket::read_claude_account(),
+                                    &active_id,
                                     &socket::read_claude_accounts(),
                                     &socket::read_account_cooldowns(),
                                     now,
                                 );
-                                if let Some(to) = to {
-                                    last_switch = Some(std::time::Instant::now());
-                                    let ev = UserEvent::ClaudeAccountAutoswitch {
-                                        to,
-                                        cooldown_until: p.resets_at,
-                                        pct: p.pct,
-                                    };
-                                    if usage_proxy.send_event(ev).is_err() {
-                                        break;
+                                match to {
+                                    Some(to) => {
+                                        last_switch = Some(std::time::Instant::now());
+                                        let ev = UserEvent::ClaudeAccountAutoswitch {
+                                            to,
+                                            cooldown_until: p.resets_at,
+                                            pct: p.pct,
+                                        };
+                                        if usage_proxy.send_event(ev).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        // 갈 곳이 없다 — 남은 계정이 전부 쿨다운이거나
+                                        // 등록된 게 하나뿐이다. 전에는 여기서 **조용히**
+                                        // 아무 일도 안 일어나, 리밋에 걸린 줄 모르고 손으로
+                                        // 계정마다 로그인하는 일이 벌어졌다(거노 2026-08-13:
+                                        // "방금도 리밋걸린거 하나씩 로그인함").
+                                        //
+                                        // 폴러는 60초마다 도는 백그라운드 스레드라 알림을
+                                        // 직접 쏘면 매분 뜬다. GUI 로 넘겨 dedup 을 태운다.
+                                        if usage_proxy
+                                            .send_event(UserEvent::ClaudeAccountExhausted {
+                                                pct: p.pct,
+                                                resets_at: p.resets_at,
+                                            })
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -5699,12 +5813,15 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-fn fetch_claude_usage(port: &str, dir: Option<&str>) -> Option<(serde_json::Value, bool, String)> {
+/// `dir` 은 조회할 **계정 저장소 경로** — 빈 문자열이 기본 로그인이다.
+///
+/// 호출자가 반드시 명시한다. 안 넘기는 길을 두면 프록시가 자기 프로세스의
+/// `KASATERM_CLAUDE_ACCOUNT_DIR` env 로 떨어져 엉뚱한(또는 **다른 인스턴스의**)
+/// 계정을 조회하는데, 그게 자동전환을 통째로 멈춰 세운 버그였다(2026-08-13).
+/// `Option` 을 없애 그 실수를 타입으로 막는다.
+fn fetch_claude_usage(port: &str, dir: &str) -> Option<(serde_json::Value, bool, String)> {
     // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
-    let url = match dir {
-        Some(d) => format!("http://127.0.0.1:{port}/claude-usage?dir={}", urlencode(d)),
-        None => format!("http://127.0.0.1:{port}/claude-usage"),
-    };
+    let url = format!("http://127.0.0.1:{port}/claude-usage?dir={}", urlencode(dir));
     let out = crate::proc::command("curl")
         .args(["-s", "--max-time", "5", &url])
         .output()
