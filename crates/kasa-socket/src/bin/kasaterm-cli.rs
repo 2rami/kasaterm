@@ -63,11 +63,16 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
-    // `split --count N` 은 한 번의 호출로 pane N 개를 확보한다. 학생 여럿을 띄우는
-    // 게 기본 흐름인데, 예전엔 호출자가 split 을 N 번 부르고 **매번 성공했는지
-    // 직접 대조**해야 했다(응답이 실패를 성공으로 실어 보냈다 — 거노가 5명 중 1명만
-    // 띄운 사고). 여기서 실패하면 그 자리에서 멈추고 **몇 개까지 됐는지**를 준다.
-    // 새로 만든 pane 을 다음 대상으로 삼는 건 ⌘D 를 연달아 누른 것과 같은 모양이다.
+    // `split --count N` 은 **한 번의 호출로** pane N 개를 배치한다.
+    //
+    // 예전엔 여기서 split 을 N 번 부르면서 2회차부터 직전에 만든 pane 을 대상으로
+    // 삼았다. ⌘D 를 연달아 누른 것과 같은 모양이라 몫이 1/2 → 1/4 → 1/8 로
+    // 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이었다 — 거노가 매번 드래그로
+    // 고쳤다(2026-08-13). 방향을 명시하면 더 나빴다: 모든 회차가 같은 축이라 얇은
+    // 세로 기둥 넷이 된다.
+    //
+    // 서버가 트리를 한 번에 짜므로 왕복도 N 번에서 한 번으로 줄었다. 실패도 부분
+    // 성공이 아니라 한 번의 사유로 온다.
     if cmd == "split" {
         let count = args
             .iter()
@@ -76,70 +81,44 @@ fn run() -> Result<Option<Response>> {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
         if count > 1 {
-            args.retain(|a| a != "--count");
-            let n = count.to_string();
-            args.retain(|a| *a != n);
+            let from = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            // 호스트 몫을 넘길 수 있게 둔다 — 기본(0.6)은 서버가 정한다.
+            let host_ratio = args
+                .iter()
+                .position(|a| a == "--host-ratio")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse::<f32>().ok());
             let socket_path = resolve_socket_path()?;
-            let mut made: Vec<String> = Vec::new();
-            // pane 별로 「claude 로 뜨면 쓸 이름」도 모은다 — N 명을 띄우고 나면
-            // 그 다음 할 일이 N 통의 SendMessage 라, 이름이 여기 같이 나와야 board 를
-            // 되짚는 왕복이 안 생긴다. 모르는 pane 은 null.
-            let mut agents: Vec<Value> = Vec::new();
-            let mut failed: Option<String> = None;
-            for i in 0..count {
-                let mut a = args.clone();
-                // 2회차부터는 방금 만든 pane 을 쪼갠다 — 명시 대상이 있으면 그것을
-                // 첫 회차에만 쓰고, 그 뒤로는 체인.
-                if i > 0 {
-                    a.retain(|x| !x.starts_with('%'));
-                    a.push(made[i - 1].clone());
-                }
-                let req = build_request("split", &a)?;
-                match roundtrip(&socket_path, &req) {
-                    Ok(r) if r.ok => match r
-                        .result
-                        .as_ref()
-                        .and_then(|v| v.get("surface"))
-                        .and_then(|v| v.get("id"))
-                        .and_then(|v| v.as_str())
-                    {
-                        Some(id) => {
-                            made.push(id.to_string());
-                            agents.push(
-                                r.result
-                                    .as_ref()
-                                    .and_then(|v| v.get("agent"))
-                                    .cloned()
-                                    .unwrap_or(Value::Null),
-                            );
-                        }
-                        None => {
-                            failed = Some("응답에 surface.id 가 없다".into());
-                            break;
-                        }
-                    },
-                    Ok(r) => {
-                        failed = Some(
-                            r.error
-                                .map(|e| e.message)
-                                .unwrap_or_else(|| "사유 없음".into()),
-                        );
-                        break;
-                    }
-                    Err(e) => {
-                        failed = Some(format!("{e:#}"));
-                        break;
-                    }
-                }
-            }
-            let ok = failed.is_none();
+            let req = Request {
+                id: json!(format!("cli-{}", std::process::id())),
+                method: "surface.split_fleet".into(),
+                params: json!({ "count": count, "from": from, "host_ratio": host_ratio }),
+            };
+            let (ok, result, error) = match roundtrip(&socket_path, &req) {
+                Ok(r) if r.ok => (true, r.result, None),
+                Ok(r) => (
+                    false,
+                    r.result,
+                    Some(r.error.map(|e| e.message).unwrap_or_else(|| "사유 없음".into())),
+                ),
+                Err(e) => (false, None, Some(format!("{e:#}"))),
+            };
+            // 요청보다 적게 앉을 수 있다(창 크기 하한). **그 차이를 여기서 말한다** —
+            // 개수만 세어 보고 「됐다」로 읽으면 「다섯 불렀는데 셋」이 조용히 지나간다.
+            let placed = result
+                .as_ref()
+                .and_then(|v| v.get("placed"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let short = (ok && placed < count)
+                .then(|| format!("창이 좁아 {count} 명 중 {placed} 명만 앉혔다"));
             println!(
                 "{}",
-                json!({
-                    "ok": ok,
-                    "result": { "surfaces": made, "agents": agents, "requested": count },
-                    "error": failed,
-                })
+                json!({ "ok": ok, "result": result, "error": error, "note": short })
             );
             std::process::exit(if ok { 0 } else { 1 });
         }
@@ -751,7 +730,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
     eprintln!(
-        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N]  # 기본 no-focus·이 pane 을 쪼갬. --count N 으로 한 번에 N개(실패하면 멈추고 몇 개까지 됐는지 준다)"
+        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
   kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
