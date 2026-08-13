@@ -3940,6 +3940,14 @@ pub(crate) enum SettingsInput {
     ClaudeAccountLabel(usize),
     /// 같은 것의 codex 판.
     CodexAccountLabel(usize),
+    /// 테마 이름 칸. 어느 테마인지는 `App.theme_label_edit` 이 폴더 id 로 들고
+    /// 있다 — 이 enum 이 `Copy` 라 String 을 못 실어서다. 인덱스로 잡지 않는 건
+    /// 테마를 지우면 뒷 번호가 밀려 엉뚱한 폴더를 고치게 되기 때문이다.
+    ThemeLabel,
+    /// 팔레트 hex 편집 필드. 인덱스는 `theme::PALETTE_KEYS` 순서(0..11)이고,
+    /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
+    /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
+    PaletteHex(usize),
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -3963,6 +3971,13 @@ pub(crate) enum SettingsAction {
     ShellPreset(String),
     FocusShell,
     ThemeMode(&'static str),
+    /// 지금 테마를 `custom_theme` 으로 복제하고 custom 으로 전환 — 팔레트 편집의
+    /// 입구. 이미 custom_theme 이 있으면 복제 없이 전환만 한다(하던 편집 보존).
+    StartCustomTheme,
+    /// `custom_theme` 을 base 프리셋 값으로 다시 시드 — 편집을 처음부터.
+    ResetCustomTheme,
+    /// 팔레트 색 한 칸의 hex 필드에 포커스(인덱스 규약은 `SettingsInput::PaletteHex`).
+    FocusPaletteHex(usize),
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -4023,9 +4038,16 @@ pub(crate) enum SettingsAction {
     /// 캐릭터 테마를 갈아 끼운다 — 빈 문자열이면 번들. 로스터·색·그림이 한꺼번에
     /// 바뀌므로 캐시 무효화가 짝으로 따라붙는다.
     SelectTheme(String),
-    /// 지금 로스터와 그림을 `themes/<id>/` 로 써 낸다 — 새 테마를 만들 본보기.
-    /// 79명치 JSON 과 파일명 규칙을 맨손으로 맞추는 건 현실적인 경로가 아니다.
+    /// 새 테마를 만든다 — 지금 로스터와 그림을 `themes/<id>/` 로 복제해 채운다.
+    /// 79명치 JSON 과 파일명 규칙을 맨손으로 맞추는 건 현실적인 경로가 아니라,
+    /// 빈 껍데기가 아니라 채워진 본보기를 만든다.
     ExportTheme,
+    /// 그 테마의 폴더를 파일 관리자로 연다(그림·json 을 손으로 갈아 끼우는 자리).
+    OpenThemeDir(String),
+    /// 그 테마를 목록에서 치운다 — 지우지 않고 `themes/_trash/` 로 옮긴다.
+    DeleteTheme(String),
+    /// 그 테마의 이름 칸에 포커스를 준다. 인자는 폴더 id.
+    FocusThemeLabel(String),
     /// Evict cached character textures so edited images reload on next paint.
     RefreshStudentAssets,
     /// Select a character in the Students list → load its persona into the edit
@@ -4832,6 +4854,9 @@ struct App {
     /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
     set_claude_persona: bool,
     set_shim_inject: bool,
+    /// 팔레트 hex 편집 버퍼 — 포커스된 칸 하나가 쓴다. custom_theme 에는
+    /// 완성된(파싱되는) 값만 나가므로, 타이핑 중의 반쪽 값은 여기서만 산다.
+    set_palette_edit: String,
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
@@ -4865,6 +4890,10 @@ struct App {
     students_selected: Option<String>,
     students_persona: String,
     students_caret: usize,
+    /// 이름을 고치는 중인 테마 — `(폴더 id, 편집 버퍼)`. 캐럿은 `settings_caret`
+    /// 을 같이 쓴다(한 번에 한 칸만 포커스). 버퍼를 파일과 따로 두는 건 타이핑
+    /// 도중의 반쯤 지운 이름이 목록에 그대로 새어 나가지 않게 하려는 것이다.
+    theme_label_edit: Option<(String, String)>,
     /// Debounced window-frame save deadline: set 1s after every Moved/Resized,
     /// written by about_to_wait. Exit-only persistence lost the frame on a
     /// crash/force-quit.
@@ -5270,6 +5299,7 @@ impl App {
             set_wheel_pixel_gain: socket::read_wheel_pixel_gain(),
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),
+            set_palette_edit: String::new(),
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),
@@ -5295,6 +5325,7 @@ impl App {
                 })
                 .unwrap_or_default(),
             students_caret: 0,
+            theme_label_edit: None,
             settings_caret: 0,
             window_frame_save_due: None,
             md_select_drag: None,
