@@ -830,6 +830,17 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("close_arona not supported")
     }
 
+    /// 지금 화면에 쓰이는 디자인 토큰(색 팔레트·실루엣). 설정 화면의 웹뷰 판이
+    /// 이걸 CSS 변수로 심어 네이티브와 같은 색으로 그린다.
+    ///
+    /// 트레이트를 거치는 이유는 의존 방향이다 — 토큰의 정본은 GUI crate 의
+    /// `theme` 모듈이고 HTTP 서버는 그 아래 crate 라 직접 못 본다. 기본값은
+    /// `null`: 테마 개념이 없는 백엔드(레거시 tmux)는 오류가 아니라 "없음"을
+    /// 답해야 호출부가 항상 조회할 수 있다.
+    fn design_tokens(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     /// Read every pane's activity. Default: empty board — a backend that
     /// doesn't track activity reports nothing rather than erroring, so
     /// callers can always scan.

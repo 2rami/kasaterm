@@ -1214,6 +1214,19 @@ async fn arona_ui_serve(rel: String) -> axum::response::Response {
     }
 }
 
+/// `GET /design-tokens` — 지금 화면에 쓰이는 색 팔레트·실루엣. 설정 웹뷰가 이걸
+/// `--kt-*` CSS 변수로 심어 네이티브와 같은 색·같은 모서리로 그린다.
+///
+/// 경로 이름이 `/theme` 이 아닌 이유: 이 레포에서 "theme" 은 **캐릭터 테마**(학생
+/// 프사·말투)와 **색 팔레트** 두 뜻으로 쓰인다. 한 이름에 얹으면 다음 사람이 무엇을
+/// 받는 창구인지 URL 만 보고 가릴 수 없다.
+async fn design_tokens_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(backend.design_tokens()),
+    )
+}
+
 /// `POST /settings/ping` — 설정 웹뷰의 배선 확인용. 200 이 오면 셋이 증명된다:
 /// 페이지가 same-origin 으로 로드됐고, `origin_guard_mw` 를 통과했고, 라우터가
 /// 이 prefix 를 잡는다. 실제 설정 mutation 창구가 붙으면 지운다.
@@ -3629,6 +3642,7 @@ pub fn spawn_http_server_opts(
                 let pane_session_backend = backend.clone();
                 let paste_image_backend = backend.clone();
                 let git_panel_backend = backend.clone();
+                let design_tokens_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -3754,6 +3768,10 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/settings/ping", post(settings_ping_handler))
+                    .route(
+                        "/design-tokens",
+                        get(move || design_tokens_handler(design_tokens_backend.clone())),
+                    )
                     .route(
                         "/session-switch",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
