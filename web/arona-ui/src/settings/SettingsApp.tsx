@@ -148,7 +148,7 @@ export function SettingsApp() {
                 }}
               />
             ) : (
-              <ThemeTab data={chars} onSelect={setOpen} />
+              <ThemeTab data={chars} onSelect={setOpen} onChanged={reload} />
             )
           ) : (
             !err && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>

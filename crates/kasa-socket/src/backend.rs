@@ -876,6 +876,25 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("save_character unsupported")
     }
 
+    /// 설정 화면의 버튼 하나를 누른 것과 같은 일을 한다 — 테마 고르기·만들기·
+    /// 이름 바꾸기·치우기, 폴더 열기, 그림 다시 읽기, 페르소나 스위치.
+    ///
+    /// 액션마다 라우트를 따로 파지 않고 이름으로 가르는 이유는 **네이티브가 이미
+    /// 그 모양**이기 때문이다(액션 enum 하나에 전부 모여 있다). 1:1 로 두면 구현이
+    /// 둘로 갈릴 수가 없고, 네이티브에 액션이 늘어도 여기 손댈 게 없다.
+    ///
+    /// `id` 는 테마 폴더 이름(`select-theme` 에선 빈 문자열 = 번들), `label` 은
+    /// `rename-theme` 의 새 이름. 반환값은 `{ok, message}` — `message` 는 네이티브가
+    /// 토스트로 띄우려던 문구다. 웹뷰는 그 토스트를 못 보므로 그대로 실어 보낸다.
+    fn settings_action(
+        &self,
+        _action: &str,
+        _id: Option<&str>,
+        _label: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("settings_action unsupported")
+    }
+
     /// Read every pane's activity. Default: empty board — a backend that
     /// doesn't track activity reports nothing rather than erroring, so
     /// callers can always scan.
