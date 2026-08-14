@@ -483,13 +483,26 @@ pub fn accent_name() -> &'static str {
         .unwrap_or("blue")
 }
 
-/// Active theme key ("dark", "catppuccin-mocha", "custom"…) for the settings
-/// screen's selected state. Colors alone can't tell presets apart, so the key
-/// is tracked at set time.
-static CURRENT_THEME: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+/// Active theme key ("dark", "catppuccin-mocha", "custom:<slug>"…) for the
+/// settings screen's selected state. Colors alone can't tell presets apart, so
+/// the key is tracked at set time.
+///
+/// 문자열을 소유하는 이유: 커스텀 팔레트 키는 설정 파일에서 읽은 slug 를 달고
+/// 태어나(`custom:midnight`) 컴파일 시점에 존재하지 않는다.
+static CURRENT_THEME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-pub fn theme_name() -> &'static str {
-    CURRENT_THEME.lock().ok().and_then(|g| *g).unwrap_or("dark")
+pub fn theme_name() -> String {
+    CURRENT_THEME
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| "dark".to_string())
+}
+
+fn set_current(key: &str) {
+    if let Ok(mut g) = CURRENT_THEME.lock() {
+        *g = Some(key.to_string());
+    }
 }
 
 /// OS 가 지금 밝은 모드인가. 판단이 안 서면 `None` — 그때는 다크로 둔다(이 앱의
@@ -594,26 +607,31 @@ fn apply_system_palette() {
     let s = crate::socket::read_settings();
     let light = system_theme_key() == "light";
     let slot = system_slot_theme_in(&s, light);
-    if slot == "custom" && s.get("custom_theme").is_some() {
-        apply_custom_theme(&s);
-    } else if let Some((_, _, p)) = THEME_PRESETS
-        .iter()
-        .find(|(k, _, _)| *k == slot.as_str())
-        // 배정된 테마가 사라졌으면(설정 파일 수기 수정 등) 내장 기본으로.
-        .or_else(|| THEME_PRESETS.iter().find(|(k, _, _)| *k == system_theme_key()))
-    {
-        store_palette(p);
+    // 배정이 커스텀인데 그 팔레트가 지워졌으면 아래 프리셋 분기로 떨어진다 —
+    // 지운 팔레트를 기다리느라 화면이 안 바뀌면 「시스템 따라가기가 고장났다」로
+    // 읽힌다.
+    let applied = custom_key(&slot).is_some_and(|slug| {
+        let list = custom_themes(&s);
+        find_custom(&list, slug).map(|e| store_palette(&custom_palette(e))).is_some()
+    });
+    if !applied {
+        if let Some((_, _, p)) = THEME_PRESETS
+            .iter()
+            .find(|(k, _, _)| *k == slot.as_str())
+            // 배정된 테마가 사라졌으면(설정 파일 수기 수정 등) 내장 기본으로.
+            .or_else(|| THEME_PRESETS.iter().find(|(k, _, _)| *k == system_theme_key()))
+        {
+            store_palette(p);
+        }
     }
-    if let Ok(mut g) = CURRENT_THEME.lock() {
-        *g = Some("system");
-    }
+    set_current("system");
 }
 
-/// Switch to a preset theme by key; unknown keys fall back to dark. "custom"
-/// re-reads the settings file's palette overrides.
+/// Switch to a preset theme by key; unknown keys fall back to dark.
+/// `custom:<slug>`(및 옛 `custom`)은 설정 파일의 팔레트를 다시 읽는다.
 pub fn set_theme(mode: &str) {
-    if mode == "custom" {
-        apply_custom_theme(&crate::socket::read_settings());
+    if let Some(slug) = custom_key(mode) {
+        apply_custom_theme(&crate::socket::read_settings(), slug);
         return;
     }
     // 저장되는 값은 "system" 그대로다 — 지금 해석한 결과(dark/light)를 적어 버리면
@@ -628,55 +646,167 @@ pub fn set_theme(mode: &str) {
         .find(|(k, _, _)| *k == mode)
         .unwrap_or(&THEME_PRESETS[0]);
     store_palette(p);
-    if let Ok(mut g) = CURRENT_THEME.lock() {
-        *g = Some(key);
+    set_current(key);
+}
+
+// ── 커스텀 팔레트 ────────────────────────────────────────────────────────
+// 프리셋은 불변이고 편집은 복제본에 쌓인다. 그 복제본이 **여럿**일 수 있다는 것이
+// 이 절의 전부다(2026-08-15 지시 「커스텀 테마 하나밖에 추가못해?」).
+//
+// 저장 정본은 `custom_themes` 배열이고, 하나뿐이던 시절의 `custom_theme` 오브젝트는
+// 읽기에서만 살아 첫 항목으로 들어온다 — 쓰기는 언제나 배열로 나가므로 아무 편집이나
+// 한 번 하면 자연히 새 형식으로 넘어간다. 옛 키를 지우지는 않는다: 지워 봐야 얻는
+// 것이 없고, 구버전으로 되돌아간 사람의 팔레트가 통째로 사라진다.
+
+/// 옛 단일 커스텀이 배열로 들어올 때 갖는 slug.
+pub const LEGACY_CUSTOM_SLUG: &str = "custom";
+
+/// 테마 키가 커스텀을 가리키면 그 slug — 옛 값 `"custom"` 은 빈 문자열(=첫 항목).
+pub fn custom_key(key: &str) -> Option<&str> {
+    if key == LEGACY_CUSTOM_SLUG {
+        Some("")
+    } else {
+        key.strip_prefix("custom:")
     }
 }
 
-/// Custom theme: `custom_theme` object in settings.json overrides individual
-/// keys on top of a base preset. Shape:
-/// `{ "base": "dark", "bg": "#252c35", …, "ansi": ["#1d1f21", …×16] }`
-/// Unknown/missing keys keep the base value, so a partial file is fine.
-fn apply_custom_theme(s: &serde_json::Value) {
-    let obj = s.get("custom_theme");
-    let base_key = obj
-        .and_then(|o| o.get("base"))
+/// settings.json 의 커스텀 팔레트들. 새 형식이 있으면 **그것만** 읽는다 — 둘 다
+/// 있을 때 옛 오브젝트를 덧붙이면 마이그레이션 뒤 첫 항목이 두 벌로 보인다.
+pub fn custom_themes(s: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(arr) = s.get("custom_themes").and_then(|x| x.as_array()) {
+        return arr.iter().filter(|e| e.is_object()).cloned().collect();
+    }
+    match s.get("custom_theme") {
+        Some(v) if v.is_object() => vec![v.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// 항목의 slug — 옛 오브젝트에는 없으므로 그때는 `"custom"`.
+pub fn custom_slug(e: &serde_json::Value) -> String {
+    e.get("slug")
         .and_then(|x| x.as_str())
-        .unwrap_or("dark");
+        .filter(|s| !s.is_empty())
+        .unwrap_or(LEGACY_CUSTOM_SLUG)
+        .to_string()
+}
+
+/// 화면에 뜨는 이름. 사용자가 고칠 수 있고, 없으면 카드가 비어 보이므로 기본값을 준다.
+pub fn custom_label(e: &serde_json::Value) -> String {
+    e.get("label")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Custom")
+        .to_string()
+}
+
+/// 목록에서 slug 하나를 고른다. 빈 slug(옛 `"custom"`)거나 못 찾으면 첫 항목 —
+/// 설정 파일을 손으로 고쳐 사라진 slug 를 가리키게 됐을 때 아무것도 안 입는 것보다
+/// 낫다.
+pub fn find_custom<'a>(
+    list: &'a [serde_json::Value],
+    slug: &str,
+) -> Option<&'a serde_json::Value> {
+    if !slug.is_empty() {
+        if let Some(e) = list.iter().find(|e| custom_slug(e) == slug) {
+            return Some(e);
+        }
+    }
+    list.first()
+}
+
+/// 새 팔레트의 (slug, 라벨) — 기존 것과 안 겹치는 `palette-N` / `Custom N`.
+pub fn next_custom_name(list: &[serde_json::Value]) -> (String, String) {
+    (1u32..)
+        .map(|n| (format!("palette-{n}"), format!("Custom {n}")))
+        .find(|(slug, label)| {
+            !list.iter().any(|e| &custom_slug(e) == slug || &custom_label(e) == label)
+        })
+        .unwrap_or_else(|| (LEGACY_CUSTOM_SLUG.to_string(), "Custom".to_string()))
+}
+
+/// 커스텀 항목 → 실제 팔레트. base 프리셋 위에 적힌 키만 덮는다. 모양:
+/// `{ "slug": "palette-1", "label": "Custom 1", "base": "dark",
+///    "bg": "#252c35", …, "ansi": ["#1d1f21", …×16] }`
+/// Unknown/missing keys keep the base value, so a partial entry is fine.
+pub fn custom_palette(e: &serde_json::Value) -> Palette {
+    let base_key = e.get("base").and_then(|x| x.as_str()).unwrap_or("dark");
     let (_, _, base) = THEME_PRESETS
         .iter()
         .find(|(k, _, _)| *k == base_key)
         .unwrap_or(&THEME_PRESETS[0]);
     let mut p: Palette = **base;
-    if let Some(o) = obj.and_then(|o| o.as_object()) {
-        let hex = |key: &str, dst: &mut [u8; 4]| {
-            if let Some(c) = o.get(key).and_then(|x| x.as_str()).and_then(parse_hex) {
-                *dst = [c[0], c[1], c[2], dst[3]];
-            }
-        };
-        hex("bg", &mut p.bg);
-        hex("fg", &mut p.fg);
-        hex("surface", &mut p.surface);
-        hex("surface_hover", &mut p.surface_hover);
-        hex("surface_active", &mut p.surface_active);
-        hex("border", &mut p.border);
-        hex("text", &mut p.text);
-        hex("text_dim", &mut p.text_dim);
-        hex("text_mute", &mut p.text_mute);
-        hex("success", &mut p.success);
-        hex("danger", &mut p.danger);
-        if let Some(arr) = o.get("ansi").and_then(|x| x.as_array()) {
-            for (i, v) in arr.iter().take(16).enumerate() {
-                if let Some(c) = v.as_str().and_then(parse_hex) {
-                    p.ansi[i] = c;
-                }
+    let Some(o) = e.as_object() else { return p };
+    let hex = |key: &str, dst: &mut [u8; 4]| {
+        if let Some(c) = o.get(key).and_then(|x| x.as_str()).and_then(parse_hex) {
+            *dst = [c[0], c[1], c[2], dst[3]];
+        }
+    };
+    hex("bg", &mut p.bg);
+    hex("fg", &mut p.fg);
+    hex("surface", &mut p.surface);
+    hex("surface_hover", &mut p.surface_hover);
+    hex("surface_active", &mut p.surface_active);
+    hex("border", &mut p.border);
+    hex("text", &mut p.text);
+    hex("text_dim", &mut p.text_dim);
+    hex("text_mute", &mut p.text_mute);
+    hex("success", &mut p.success);
+    hex("danger", &mut p.danger);
+    if let Some(arr) = o.get("ansi").and_then(|x| x.as_array()) {
+        for (i, v) in arr.iter().take(16).enumerate() {
+            if let Some(c) = v.as_str().and_then(parse_hex) {
+                p.ansi[i] = c;
             }
         }
     }
-    store_palette(&p);
-    if let Ok(mut g) = CURRENT_THEME.lock() {
-        *g = Some("custom");
+    p
+}
+
+/// 커스텀 하나를 입는다. CURRENT_THEME 에는 언제나 **찾아낸 항목의** slug 를
+/// 적는다(옛 `"custom"` 으로 들어와도) — 화면의 선택 표시가 목록의 어느 카드인지
+/// 정확히 가리켜야 한다.
+fn apply_custom_theme(s: &serde_json::Value, slug: &str) {
+    let list = custom_themes(s);
+    let Some(e) = find_custom(&list, slug) else {
+        // 목록이 비었는데 custom 이 걸려 있다 — 마지막 팔레트를 지웠거나 설정
+        // 파일을 손으로 비운 경우다. 색이 그대로면 「지워지지 않았다」로 읽히므로
+        // 내장 기본으로 되돌린다.
+        store_palette(&DARK);
+        set_current("dark");
+        return;
+    };
+    store_palette(&custom_palette(e));
+    set_current(&format!("custom:{}", custom_slug(e)));
+}
+
+/// 지금 편집 대상이 되는 커스텀의 slug — 커스텀을 입고 있지 않으면 `None`.
+pub fn active_custom_slug() -> Option<String> {
+    let name = theme_name();
+    custom_key(&name).map(|s| s.to_string())
+}
+
+/// 지금 입고 있는 색을 **새** 커스텀 항목으로 복제한다(이름은 목록과 안 겹치게).
+///
+/// 커스텀을 입고 있으면 그 항목을 통째로 베낀다 — 「지금 팔레트를 복제」가 base 만
+/// 물려받으면 눈앞의 색이 안 따라와, 복제했는데 다른 색이 나온다.
+pub fn clone_current_custom(s: &serde_json::Value) -> serde_json::Value {
+    let list = custom_themes(s);
+    let (slug, label) = next_custom_name(&list);
+    let name = theme_name();
+    let mut e = match custom_key(&name).and_then(|want| find_custom(&list, want)) {
+        Some(src) => src.clone(),
+        None => {
+            // "system" 은 팔레트가 아니다 — 그 순간 가리키는 프리셋이 시작점.
+            let base = if name == "system" { system_theme_key().to_string() } else { name };
+            custom_theme_seed(&base, &slug, &label)
+        }
+    };
+    if let Some(o) = e.as_object_mut() {
+        o.insert("slug".to_string(), serde_json::Value::String(slug));
+        o.insert("label".to_string(), serde_json::Value::String(label));
     }
+    e
 }
 
 /// "#rrggbb" / "rrggbb" → RGB. Anything else → None (key is skipped).
@@ -713,15 +843,17 @@ pub const PALETTE_KEYS: &[(&str, fn(&Palette) -> [u8; 4])] = &[
     ("danger", |p| p.danger),
 ];
 
-/// 프리셋 하나를 custom_theme JSON 으로 복제한다 — 팔레트 편집의 시작점.
+/// 프리셋 하나를 커스텀 항목 JSON 으로 복제한다 — 팔레트 편집의 시작점.
 /// 부분 파일도 동작은 하지만(빠진 키는 base 값) 모든 키를 명시해 쓴다:
 /// 파일을 열었을 때 고칠 수 있는 키가 다 보여야 발견이 된다.
-pub fn custom_theme_seed(base_key: &str) -> serde_json::Value {
+pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json::Value {
     let (key, _, p) = THEME_PRESETS
         .iter()
         .find(|(k, _, _)| *k == base_key)
         .unwrap_or(&THEME_PRESETS[0]);
     let mut o = serde_json::Map::new();
+    o.insert("slug".to_string(), serde_json::Value::String(slug.to_string()));
+    o.insert("label".to_string(), serde_json::Value::String(label.to_string()));
     o.insert("base".to_string(), serde_json::Value::String((*key).to_string()));
     for (k, get) in PALETTE_KEYS {
         let c = get(p);
@@ -1406,6 +1538,84 @@ mod roster_tests {
         let before = roster().slugs.len();
         invalidate_roster();
         assert_eq!(roster().slugs.len(), before);
+    }
+}
+
+#[cfg(test)]
+mod custom_theme_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 하나뿐이던 시절의 `custom_theme` 오브젝트는 첫 항목으로 읽혀야 한다 —
+    /// 안 그러면 업데이트한 사람의 팔레트가 목록에서 통째로 사라진다.
+    #[test]
+    fn legacy_object_reads_as_first_entry() {
+        let s = json!({ "custom_theme": { "base": "light", "bg": "#112233" } });
+        let list = custom_themes(&s);
+        assert_eq!(list.len(), 1);
+        assert_eq!(custom_slug(&list[0]), LEGACY_CUSTOM_SLUG);
+        assert_eq!(custom_palette(&list[0]).bg, [0x11, 0x22, 0x33, 255]);
+        // 옛 `theme: "custom"` 값도 그 항목을 가리킨다.
+        assert_eq!(custom_key("custom"), Some(""));
+        assert!(find_custom(&list, "").is_some());
+    }
+
+    /// 새 형식이 있으면 옛 오브젝트는 안 읽는다 — 둘 다 읽으면 마이그레이션 뒤
+    /// 첫 항목이 두 벌로 보인다.
+    #[test]
+    fn array_wins_over_legacy_object() {
+        let s = json!({
+            "custom_theme": { "base": "dark", "bg": "#000000" },
+            "custom_themes": [{ "slug": "a", "label": "A", "base": "dark" }],
+        });
+        let list = custom_themes(&s);
+        assert_eq!(list.len(), 1);
+        assert_eq!(custom_slug(&list[0]), "a");
+    }
+
+    /// `custom:<slug>` 는 그 항목을, 없는 slug 는 첫 항목으로 떨어진다(파일을
+    /// 손으로 고쳐 사라진 slug 를 가리키게 됐을 때 아무것도 안 입는 것보다 낫다).
+    #[test]
+    fn slug_selects_entry_and_falls_back() {
+        let s = json!({ "custom_themes": [
+            { "slug": "one", "base": "dark", "bg": "#010101" },
+            { "slug": "two", "base": "dark", "bg": "#020202" },
+        ]});
+        let list = custom_themes(&s);
+        assert_eq!(custom_key("custom:two"), Some("two"));
+        assert_eq!(custom_palette(find_custom(&list, "two").unwrap()).bg, [2, 2, 2, 255]);
+        assert_eq!(custom_palette(find_custom(&list, "없다").unwrap()).bg, [1, 1, 1, 255]);
+        assert_eq!(custom_key("dark"), None);
+    }
+
+    /// 새 이름은 기존 slug·라벨 어느 쪽과도 안 겹친다 — 겹치면 두 카드가 같은
+    /// 이름으로 뜨고, slug 가 겹치면 편집이 남의 팔레트로 들어간다.
+    #[test]
+    fn new_names_avoid_collisions() {
+        let list = vec![
+            json!({ "slug": "palette-1", "label": "Custom 1" }),
+            json!({ "slug": "palette-3", "label": "Custom 2" }),
+        ];
+        // 3번째 후보는 slug 만 겹치는데도 통째로 건너뛴다 — 한쪽만 피하면
+        // `palette-3` 두 벌이 생겨 편집이 남의 팔레트로 들어간다.
+        let (slug, label) = next_custom_name(&list);
+        assert_eq!((slug.as_str(), label.as_str()), ("palette-4", "Custom 4"));
+        assert_eq!(next_custom_name(&[]).0, "palette-1");
+    }
+
+    /// 시드는 base 를 그대로 베끼고, 부분 항목은 빠진 키만 base 에서 채운다.
+    #[test]
+    fn seed_copies_base_and_partial_entry_inherits() {
+        let seed = custom_theme_seed("catppuccin-mocha", "s", "L");
+        assert_eq!(custom_slug(&seed), "s");
+        assert_eq!(custom_label(&seed), "L");
+        assert_eq!(custom_palette(&seed).bg, CATPPUCCIN_MOCHA.bg);
+        assert_eq!(custom_palette(&seed).ansi, CATPPUCCIN_MOCHA.ansi);
+        // bg 만 적힌 항목: 나머지는 base 값.
+        let partial = json!({ "base": "gruvbox-dark", "bg": "#ff0000" });
+        let p = custom_palette(&partial);
+        assert_eq!(p.bg, [0xff, 0, 0, 255]);
+        assert_eq!(p.text, GRUVBOX_DARK.text);
     }
 }
 

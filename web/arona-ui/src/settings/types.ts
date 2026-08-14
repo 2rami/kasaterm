@@ -76,12 +76,18 @@ export type GeneralValues = {
 };
 
 export type AppearanceValues = {
+  /// 프리셋 키 · `"system"` · `custom:<slug>`.
   theme: string;
   themes: ThemePreset[];
-  /// system 모드가 밝기별로 입을 테마 — 프리셋 키 또는 `"custom"`.
+  /// system 모드가 밝기별로 입을 테마 — 프리셋 키 또는 `custom:<slug>`.
   theme_system_light: string;
   theme_system_dark: string;
-  has_custom_theme: boolean;
+  /// 저장된 커스텀 팔레트들. 카드는 `themes` 안에 이미 섞여 있고, 이 목록은
+  /// 이름 바꾸기·치우기처럼 **커스텀에만** 있는 조작을 그릴 때 쓴다.
+  custom_themes: { key: string; slug: string; label: string }[];
+  /// 지금 편집 중인 커스텀의 slug. 커스텀을 안 입고 있으면 빈 문자열이다 —
+  /// 팔레트 편집 칸이 열릴지가 이 값 하나로 갈린다.
+  custom_active: string;
   palette_keys: string[];
   /// UI 색(palette_keys 순서) 뒤에 ANSI 16색이 이어 붙는다.
   palette_hex: string[];

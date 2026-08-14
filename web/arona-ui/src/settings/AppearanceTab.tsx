@@ -175,7 +175,10 @@ export function AppearanceTab({
   const uiCount = data.palette_keys.length;
   const uiHex = data.palette_hex.slice(0, uiCount);
   const ansiHex = data.palette_hex.slice(uiCount);
-  const custom = data.theme === 'custom';
+  // 커스텀은 여러 벌일 수 있고(2026-08-15), 편집 칸은 **지금 입고 있는** 한 벌을
+  // 고친다 — 어느 것을 고치는지는 위 카드 그리드의 선택 링이 말한다.
+  const custom = data.custom_active !== '';
+  const activeCustom = data.custom_themes.find((c) => c.slug === data.custom_active);
   // 사용자가 `settings.json` 에 임의 값을 넣을 수 있으니 동등이 아니라 가장 가까운
   // 프리셋을 선택으로 본다(네이티브와 같은 판정).
   const nearestContrast = data.contrasts.reduce((a, b) =>
@@ -257,63 +260,91 @@ export function AppearanceTab({
       </Section>
 
       {/* 팔레트는 custom 일 때만 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래
-          색으로 돌아갈 길이 없다: 프리셋은 불변, 편집은 복제본에. */}
-      {custom ? (
-        <Section title={t.appearance.palette} hint={t.appearance.paletteHint}>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(294px,1fr))] gap-x-2 gap-y-1">
-            {data.palette_keys.map((key, i) => (
-              <div key={key} className="flex items-center gap-2 py-1">
-                <ColorSwatch
-                  hex={uiHex[i] ?? '#000000'}
-                  title={key}
-                  disabled={busy}
-                  onCommit={commitHex(i)}
-                />
-                <span className="flex-1 text-[13px] text-[var(--kt-text)]">{key}</span>
-                <TextField
-                  value={uiHex[i] ?? '#000000'}
-                  disabled={busy}
-                  mono
-                  className="w-[104px]"
-                  onCommit={commitHex(i)}
-                />
-              </div>
-            ))}
-          </div>
-
-          <p className="mb-2 mt-5 text-[13px] text-[var(--kt-text)]">{t.appearance.ansi}</p>
-          <p className="mb-2 text-[12px] text-[var(--kt-text-mute)]">{t.appearance.ansiHint}</p>
-          <div className="grid w-max grid-cols-8 gap-2">
-            {ansiHex.map((hex, i) => (
-              <ColorSwatch
-                key={i}
-                hex={hex}
-                title={`ansi ${i}`}
-                disabled={busy}
-                onCommit={commitHex(uiCount + i)}
-              />
-            ))}
-          </div>
-
-          <div className="mt-5">
-            <Button
-              label={t.appearance.paletteReset}
-              disabled={busy}
-              onClick={() => void run('reset-custom-theme')}
-            />
-          </div>
-        </Section>
-      ) : (
-        <Section title={t.appearance.palette} hint={t.appearance.paletteLocked}>
+          색으로 돌아갈 길이 없다: 프리셋은 불변, 편집은 복제본에. 복제본을 몇 벌
+          두든 상관없으므로 「새로 만들기」는 늘 자리에 있다. */}
+      <Section
+        title={t.appearance.palette}
+        hint={custom ? t.appearance.paletteHint : t.appearance.paletteLocked}
+        right={
           <Button
             label={
-              data.has_custom_theme ? t.appearance.paletteContinue : t.appearance.paletteStart
+              data.custom_themes.length ? t.appearance.paletteNew : t.appearance.paletteStart
             }
             disabled={busy}
             onClick={() => void run('start-custom-theme')}
           />
-        </Section>
-      )}
+        }
+      >
+        {custom && (
+          <>
+            {/* 이름과 치우기는 편집 칸 위에 둔다 — 어느 팔레트를 고치는 중인지
+                먼저 읽히고, 그 다음이 색이다. */}
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <span className="text-[13px] text-[var(--kt-text-dim)]">
+                {t.appearance.paletteName}
+              </span>
+              <TextField
+                value={activeCustom?.label ?? ''}
+                disabled={busy}
+                className="w-[200px]"
+                onCommit={(next) =>
+                  void run('rename-custom-theme', { id: data.custom_active, label: next })
+                }
+              />
+              <Button
+                label={t.appearance.paletteDelete}
+                disabled={busy}
+                onClick={() =>
+                  void run('delete-custom-theme', { id: data.custom_active })
+                }
+              />
+            </div>
+
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(294px,1fr))] gap-x-2 gap-y-1">
+              {data.palette_keys.map((key, i) => (
+                <div key={key} className="flex items-center gap-2 py-1">
+                  <ColorSwatch
+                    hex={uiHex[i] ?? '#000000'}
+                    title={key}
+                    disabled={busy}
+                    onCommit={commitHex(i)}
+                  />
+                  <span className="flex-1 text-[13px] text-[var(--kt-text)]">{key}</span>
+                  <TextField
+                    value={uiHex[i] ?? '#000000'}
+                    disabled={busy}
+                    mono
+                    className="w-[104px]"
+                    onCommit={commitHex(i)}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <p className="mb-2 mt-5 text-[13px] text-[var(--kt-text)]">{t.appearance.ansi}</p>
+            <p className="mb-2 text-[12px] text-[var(--kt-text-mute)]">{t.appearance.ansiHint}</p>
+            <div className="grid w-max grid-cols-8 gap-2">
+              {ansiHex.map((hex, i) => (
+                <ColorSwatch
+                  key={i}
+                  hex={hex}
+                  title={`ansi ${i}`}
+                  disabled={busy}
+                  onCommit={commitHex(uiCount + i)}
+                />
+              ))}
+            </div>
+
+            <div className="mt-5">
+              <Button
+                label={t.appearance.paletteReset}
+                disabled={busy}
+                onClick={() => void run('reset-custom-theme')}
+              />
+            </div>
+          </>
+        )}
+      </Section>
 
       <Section title={t.appearance.shape} hint={t.appearance.shapeHint}>
         <div className="flex flex-wrap gap-3">

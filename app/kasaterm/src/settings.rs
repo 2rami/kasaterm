@@ -73,12 +73,12 @@ pub(crate) struct SettingsCtx {
     pub caret_on: bool,
     /// Form scroll offset in logical px (wheel-driven). 0 = top.
     pub scroll: f32,
-    /// Active theme key ("dark", "catppuccin-mocha", "custom"…).
+    /// Active theme key ("dark", "catppuccin-mocha", "custom:<slug>"…).
     pub theme: String,
     /// Active silhouette key ("rounded" · "sharp" · "pixel").
     pub shape: String,
-    /// settings.json has a `custom_theme` object → show the Custom card.
-    pub has_custom_theme: bool,
+    /// 저장된 커스텀 팔레트들 `(slug, 라벨)` — 각각 테마 카드 한 장이 된다.
+    pub custom_themes: Vec<(String, String)>,
     /// 팔레트 hex 편집 버퍼 — 포커스된 칸의 타이핑 중 값. 완성 전 반쪽 값은
     /// custom_theme 에 없고 여기에만 있다.
     pub palette_edit: String,
@@ -427,7 +427,9 @@ impl App {
             "claude auth login --claudeai".to_string(),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             dir,
-            socket::oauth_profile_dir(&id),
+            // 새 슬롯은 **격리 고정**이다. 여기서 쓰던 브라우저를 열면 그 창의
+            // claude.ai 세션이 그대로 승인돼, 슬롯을 새로 만든 의미가 사라진다.
+            LoginBrowser::Isolated,
         );
         self.set_toast("빈 브라우저 창에서 새 계정으로 로그인하세요".to_string());
     }
@@ -465,7 +467,7 @@ impl App {
             "codex login".to_string(),
             "CODEX_HOME",
             dir,
-            socket::oauth_profile_dir(&id),
+            LoginBrowser::Isolated,
         );
         self.set_toast("빈 브라우저 창에서 새 ChatGPT 계정으로 로그인하세요".to_string());
     }
@@ -671,10 +673,13 @@ impl App {
             cursor,
             caret_on: self.last_blink_on,
             scroll: self.settings_scroll,
-            theme: theme::theme_name().to_string(),
-            has_custom_theme: s.get("custom_theme").is_some(),
+            theme: theme::theme_name(),
+            custom_themes: theme::custom_themes(&s)
+                .iter()
+                .map(|e| (theme::custom_slug(e), theme::custom_label(e)))
+                .collect(),
             palette_edit: self.set_palette_edit.clone(),
-            palette_hex: palette_hex_list(&s),
+            palette_hex: palette_hex_list(&s, theme::active_custom_slug().as_deref()),
             picker_hsv: self.set_picker_hsv,
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
@@ -888,38 +893,77 @@ impl App {
             }
             SettingsAction::ThemeMode(m) => {
                 self.begin_theme_fx();
-                theme::set_theme(m);
-                socket::write_setting("theme", serde_json::Value::String(m.to_string()));
+                theme::set_theme(&m);
+                socket::write_setting("theme", serde_json::Value::String(m));
                 self.repaint_all();
             }
             SettingsAction::StartCustomTheme => {
-                // 이미 편집하던 custom_theme 이 있으면 그대로 이어 간다 — 입구
-                // 버튼을 다시 눌렀다고 하던 편집이 날아가면 안 된다. 리셋은
-                // ResetCustomTheme 이 따로 맡는다.
-                if socket::read_settings().get("custom_theme").is_none() {
-                    let base = if theme::theme_name() == "system" {
-                        theme::system_theme_key()
-                    } else {
-                        theme::theme_name()
-                    };
-                    socket::write_setting("custom_theme", theme::custom_theme_seed(base));
-                }
+                // 언제나 **새** 팔레트를 더한다 — 하던 편집은 목록에 그대로 남고,
+                // 이어서 고치려면 그 카드를 고르면 된다(2026-08-15 지시: 커스텀을
+                // 여러 개). 하나뿐이던 시절엔 이 버튼이 「이어서 편집」을 겸했다.
+                let s = socket::read_settings();
+                let entry = theme::clone_current_custom(&s);
+                let key = format!("custom:{}", theme::custom_slug(&entry));
+                let mut list = theme::custom_themes(&s);
+                list.push(entry);
+                write_custom_themes(list);
+                self.settings_input = None;
                 self.begin_theme_fx();
-                theme::set_theme("custom");
-                socket::write_setting("theme", serde_json::Value::String("custom".to_string()));
+                theme::set_theme(&key);
+                socket::write_setting("theme", serde_json::Value::String(key));
                 self.repaint_all();
             }
             SettingsAction::ResetCustomTheme => {
-                let base = socket::read_settings()
-                    .get("custom_theme")
-                    .and_then(|o| o.get("base"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("dark")
-                    .to_string();
-                socket::write_setting("custom_theme", theme::custom_theme_seed(&base));
+                // 지금 편집 중인 것만 되돌린다. 이름은 지키고 색만 base 로 —
+                // 되돌리기 한 번에 카드 이름까지 바뀌면 목록에서 그것을 잃는다.
+                let s = socket::read_settings();
+                let mut list = theme::custom_themes(&s);
+                let want = theme::active_custom_slug().unwrap_or_default();
+                if let Some(e) = list.iter_mut().find(|e| {
+                    want.is_empty() || theme::custom_slug(e) == want
+                }) {
+                    let base = e.get("base").and_then(|x| x.as_str()).unwrap_or("dark").to_string();
+                    *e = theme::custom_theme_seed(
+                        &base,
+                        &theme::custom_slug(e),
+                        &theme::custom_label(e),
+                    );
+                }
+                write_custom_themes(list);
                 self.settings_input = None;
                 self.begin_theme_fx();
-                theme::set_theme("custom");
+                theme::set_theme(&theme::theme_name());
+                self.repaint_all();
+            }
+            SettingsAction::DeleteCustomTheme(slug) => {
+                let s = socket::read_settings();
+                let mut list = theme::custom_themes(&s);
+                list.retain(|e| theme::custom_slug(e) != slug);
+                write_custom_themes(list);
+                // system 밝기 슬롯이 방금 지운 팔레트를 가리키고 있으면 내장으로
+                // 되돌린다. 그냥 두면 팔레트는 프리셋으로 폴백해 도는데 화면의
+                // 슬롯 배지는 아무것도 안 고른 것처럼 보인다.
+                for (key, fallback) in
+                    [("theme_system_light", "light"), ("theme_system_dark", "dark")]
+                {
+                    if s.get(key).and_then(|x| x.as_str())
+                        == Some(format!("custom:{slug}").as_str())
+                    {
+                        socket::write_setting(key, serde_json::Value::String(fallback.to_string()));
+                    }
+                }
+                self.settings_input = None;
+                self.begin_theme_fx();
+                // 지우던 것을 입고 있었으면 갈아입어야 한다 — 남은 첫 커스텀,
+                // 그것도 없으면 그 팔레트의 base 로. `set_theme` 이 빈 목록을
+                // dark 로 떨어뜨리므로 여기서는 키만 다시 세운다.
+                if theme::active_custom_slug().is_some_and(|a| a == slug || a.is_empty()) {
+                    theme::set_theme("custom");
+                    let key = theme::theme_name();
+                    socket::write_setting("theme", serde_json::Value::String(key));
+                } else {
+                    theme::set_theme(&theme::theme_name());
+                }
                 self.repaint_all();
             }
             SettingsAction::FocusPaletteHex(i) => {
@@ -1071,7 +1115,7 @@ impl App {
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
             // 붙은 한도 이력이 남는다. 새로 만들었다 지우는 것과 여기가 갈린다.
-            SettingsAction::ReauthAccount(p, id) => {
+            SettingsAction::ReauthAccount(p, id, browser) => {
                 let (provider, argv, key, dir) = match p {
                     AccountProvider::Claude => (
                         "Claude",
@@ -1091,10 +1135,16 @@ impl App {
                     return;
                 };
                 let _ = std::fs::create_dir_all(&dir);
-                // id 접두사가 `acct-`/`codex-` 로 갈려 있어 프로필도 그대로 갈린다.
-                let profile = socket::oauth_profile_dir(&id);
-                spawn_hidden_login(provider, id, argv.to_string(), key, dir, profile);
-                self.set_toast("빈 브라우저 창에서 로그인하세요".to_string());
+                spawn_hidden_login(provider, id, argv.to_string(), key, dir, browser);
+                self.set_toast(
+                    match browser {
+                        LoginBrowser::Isolated => "빈 브라우저 창에서 로그인하세요",
+                        // 쓰던 브라우저는 이미 붙어 있는 계정으로 승인된다 — 다른
+                        // 계정을 붙이려던 사람이 결과를 보고 놀라지 않게 미리 말한다.
+                        LoginBrowser::Default => "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요",
+                    }
+                    .to_string(),
+                );
             }
             SettingsAction::CancelLogin => cancel_login(),
             SettingsAction::DismissLogin => clear_login_job(),
@@ -1338,62 +1388,22 @@ impl App {
             // ── Appearance ───────────────────────────────────────────────
             "theme-mode" => {
                 let key = if id == "system" {
-                    "system"
-                } else if id == "custom" {
-                    // 편집본이 없으면 고를 수 없다 — 네이티브도 그때는 카드를 아예
-                    // 안 그린다. 만드는 건 `start-custom-theme` 의 몫이다.
-                    if socket::read_settings().get("custom_theme").is_none() {
-                        return Err(reject(
-                            "custom_theme_absent",
-                            "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
-                        ));
-                    }
-                    "custom"
+                    "system".to_string()
                 } else {
-                    theme::THEME_PRESETS
-                        .iter()
-                        .find(|(k, _, _)| *k == id)
-                        .map(|(k, _, _)| *k)
-                        .ok_or_else(|| {
-                            reject_with(
-                                "theme_missing",
-                                serde_json::json!({ "theme": id }),
-                                format!("'{id}' 테마가 없어요"),
-                            )
-                        })?
+                    theme_key_or_reject(id)?
                 };
-                self.settings_apply(SettingsAction::ThemeMode(key));
+                self.settings_apply(SettingsAction::ThemeMode(key.clone()));
                 Ok(theme::theme_name() == key)
             }
-            // system 모드의 밝기 슬롯에 테마 배정 — id 는 프리셋 키 또는 "custom".
-            // "system" 자신은 못 들어간다(자기참조). 지금 system 으로 보는 중이면
-            // 그 자리에서 다시 해석해 갈아입는다.
+            // system 모드의 밝기 슬롯에 테마 배정 — id 는 프리셋 키 또는
+            // `custom:<slug>`. "system" 자신은 못 들어간다(자기참조). 지금 system
+            // 으로 보는 중이면 그 자리에서 다시 해석해 갈아입는다.
             "theme-system-light" | "theme-system-dark" => {
                 let light = action == "theme-system-light";
-                let key = if id == "custom" {
-                    if socket::read_settings().get("custom_theme").is_none() {
-                        return Err(reject(
-                            "custom_theme_absent",
-                            "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
-                        ));
-                    }
-                    "custom"
-                } else {
-                    theme::THEME_PRESETS
-                        .iter()
-                        .find(|(k, _, _)| *k == id)
-                        .map(|(k, _, _)| *k)
-                        .ok_or_else(|| {
-                            reject_with(
-                                "theme_missing",
-                                serde_json::json!({ "theme": id }),
-                                format!("'{id}' 테마가 없어요"),
-                            )
-                        })?
-                };
+                let key = theme_key_or_reject(id)?;
                 socket::write_setting(
                     if light { "theme_system_light" } else { "theme_system_dark" },
-                    serde_json::Value::String(key.to_string()),
+                    serde_json::Value::String(key.clone()),
                 );
                 if theme::theme_name() == "system" {
                     self.begin_theme_fx();
@@ -1404,7 +1414,45 @@ impl App {
             }
             "start-custom-theme" => {
                 self.settings_apply(SettingsAction::StartCustomTheme);
-                Ok(theme::theme_name() == "custom")
+                Ok(theme::active_custom_slug().is_some())
+            }
+            // 커스텀 팔레트 하나 치우기 — id 는 slug.
+            "delete-custom-theme" => {
+                let s = socket::read_settings();
+                if !theme::custom_themes(&s).iter().any(|e| theme::custom_slug(e) == id) {
+                    return Err(reject(
+                        "custom_theme_absent",
+                        "그 커스텀 팔레트가 없어요".to_string(),
+                    ));
+                }
+                self.settings_apply(SettingsAction::DeleteCustomTheme(id.to_string()));
+                Ok(!theme::custom_themes(&socket::read_settings())
+                    .iter()
+                    .any(|e| theme::custom_slug(e) == id))
+            }
+            // 이름 바꾸기 — id 는 slug, 새 이름은 label. 이름만 바뀌므로 팔레트를
+            // 다시 적용할 것이 없다(색은 그대로다).
+            "rename-custom-theme" => {
+                let label = arg.trim().to_string();
+                if label.is_empty() {
+                    return Err(reject("label_empty", "이름을 적어 주세요".to_string()));
+                }
+                let s = socket::read_settings();
+                let mut list = theme::custom_themes(&s);
+                let Some(e) = list.iter_mut().find(|e| theme::custom_slug(e) == id) else {
+                    return Err(reject(
+                        "custom_theme_absent",
+                        "그 커스텀 팔레트가 없어요".to_string(),
+                    ));
+                };
+                if let Some(o) = e.as_object_mut() {
+                    o.insert("label".to_string(), serde_json::Value::String(label.clone()));
+                }
+                write_custom_themes(list);
+                self.chrome_dirty = true;
+                Ok(theme::custom_themes(&socket::read_settings())
+                    .iter()
+                    .any(|e| theme::custom_slug(e) == id && theme::custom_label(e) == label))
             }
             "reset-custom-theme" => {
                 self.settings_apply(SettingsAction::ResetCustomTheme);
@@ -1582,7 +1630,8 @@ impl App {
             }
             // 로그인 수단이 갈리므로(claude 는 `claude auth login`, codex 는
             // `CODEX_HOME=<슬롯> codex login`) 어느 쪽인지를 label 로 받는다.
-            "reauth-account" => {
+            // `-here` 는 쿠키 없는 창 대신 **쓰던 브라우저**로 승인받는 길이다.
+            "reauth-account" | "reauth-account-here" => {
                 let claude = match arg.as_str() {
                     "claude" => true,
                     "codex" => false,
@@ -1598,7 +1647,16 @@ impl App {
                 }
                 let provider =
                     if claude { AccountProvider::Claude } else { AccountProvider::Codex };
-                self.settings_apply(SettingsAction::ReauthAccount(provider, id.to_string()));
+                let browser = if action.ends_with("-here") {
+                    LoginBrowser::Default
+                } else {
+                    LoginBrowser::Isolated
+                };
+                self.settings_apply(SettingsAction::ReauthAccount(
+                    provider,
+                    id.to_string(),
+                    browser,
+                ));
                 Ok(true)
             }
             "toggle-account-autoswitch" => {
@@ -1658,8 +1716,8 @@ impl App {
         let hex3 = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
         let s = socket::read_settings();
 
-        // 테마 카드 한 장의 미리보기 재료. `pal` 이 없으면(custom) 지금 화면에
-        // 적용된 색으로 그린다 — 고른 상태에서는 그게 곧 그 팔레트다.
+        // 테마 카드 한 장의 미리보기 재료. `pal` 이 없으면 지금 화면에 적용된
+        // 색으로 그린다.
         let card = |key: &str, label: String, pal: Option<&theme::Palette>| {
             let ansi: Vec<String> = (1..7)
                 .map(|i| match pal {
@@ -1689,9 +1747,17 @@ impl App {
         themes.extend(
             theme::THEME_PRESETS.iter().map(|(k, l, p)| card(k, l.to_string(), Some(p))),
         );
-        if s.get("custom_theme").is_some() {
-            themes.push(card("custom", "Custom".to_string(), None));
-        }
+        // 커스텀들은 **각자의 팔레트로** 그린다 — 라이브 색으로 그리면 지금 입은 한
+        // 벌만 제 색이고 나머지가 전부 같은 카드로 보인다.
+        let customs = theme::custom_themes(&s);
+        themes.extend(customs.iter().map(|e| {
+            let p = theme::custom_palette(e);
+            card(
+                &format!("custom:{}", theme::custom_slug(e)),
+                theme::custom_label(e),
+                Some(&p),
+            )
+        }));
 
         // 계정 한 행. 첫 행은 언제나 "기본"(슬롯이 아니라 지금 로그인)이라 지울
         // 것도 이름 붙일 것도 없다 — `slot: false` 가 그 뜻이다.
@@ -1840,13 +1906,26 @@ impl App {
             "appearance": {
                 "theme": theme::theme_name(),
                 "themes": themes,
-                // system 모드가 밝기별로 입을 테마(프리셋 키 또는 "custom") —
+                // system 모드가 밝기별로 입을 테마(프리셋 키 또는 `custom:<slug>`) —
                 // OS 는 밝기만 알려 주고 팔레트는 사용자가 배정한다(2026-08-15).
                 "theme_system_light": theme::system_slot_theme(true),
                 "theme_system_dark": theme::system_slot_theme(false),
-                "has_custom_theme": s.get("custom_theme").is_some(),
+                // 카드는 위 `themes` 에 이미 섞여 있다. 이 목록은 이름 바꾸기·치우기
+                // 처럼 커스텀에만 있는 조작을 그리는 데 쓴다.
+                "custom_themes": customs
+                    .iter()
+                    .map(|e| {
+                        let slug = theme::custom_slug(e);
+                        serde_json::json!({
+                            "key": format!("custom:{slug}"),
+                            "slug": slug,
+                            "label": theme::custom_label(e),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "custom_active": theme::active_custom_slug().unwrap_or_default(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
-                "palette_hex": palette_hex_list(&s),
+                "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()),
                 "accent": theme::accent_name(),
                 "accents": theme::ACCENT_PRESETS
                     .iter()
@@ -2234,7 +2313,7 @@ impl App {
     /// base 프리셋 값. 포커스 시드·리스트 표시가 같은 곳을 읽어야 「눌렀더니
     /// 다른 값이 뜨는」 어긋남이 없다.
     fn palette_hex_at(&self, i: usize) -> String {
-        palette_hex_list(&socket::read_settings())
+        palette_hex_list(&socket::read_settings(), theme::active_custom_slug().as_deref())
             .into_iter()
             .nth(i)
             .unwrap_or_else(|| "#000000".to_string())
@@ -2265,9 +2344,9 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    /// 팔레트 hex 버퍼를 검증해 custom_theme 에 반영하고 즉시 다시 칠한다.
-    /// 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친 값으로
-    /// 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
+    /// 팔레트 hex 버퍼를 검증해 **지금 입고 있는 커스텀**에 반영하고 즉시 다시
+    /// 칠한다. 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친
+    /// 값으로 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
     fn apply_palette_edit(&mut self, i: usize) {
         let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
         // 타이핑으로 들어온 새 색이면 피커 핸들도 따라온다. 피커 픽이면 지금
@@ -2280,9 +2359,21 @@ impl App {
             }
         }
         let s = socket::read_settings();
-        let mut obj = match s.get("custom_theme").cloned() {
-            Some(serde_json::Value::Object(m)) => m,
-            _ => serde_json::Map::new(),
+        // 편집 대상은 지금 입고 있는 커스텀. 아직 하나도 없으면(설정 파일을 손으로
+        // 비운 경우) 새로 하나 만들어 그것을 고친다 — 색을 골랐는데 아무 데도
+        // 안 적히는 편이 더 나쁘다.
+        let want = theme::active_custom_slug().unwrap_or_default();
+        let mut list = theme::custom_themes(&s);
+        if list.is_empty() {
+            list.push(theme::clone_current_custom(&s));
+        }
+        let idx = list
+            .iter()
+            .position(|e| !want.is_empty() && theme::custom_slug(e) == want)
+            .unwrap_or(0);
+        let mut obj = match list[idx].as_object() {
+            Some(m) => m.clone(),
+            None => serde_json::Map::new(),
         };
         let hex = theme::hex_str(c);
         let n = theme::PALETTE_KEYS.len();
@@ -2291,16 +2382,18 @@ impl App {
         } else {
             // ansi 배열이 없거나 짧을 수 있다 — 지금 유효값으로 16칸을 다 채운
             // 뒤 한 칸만 바꾼다. 부분 배열을 그대로 두면 인덱스가 어긋난다.
-            let list = palette_hex_list(&s);
+            let cur = palette_hex_list(&s, Some(&theme::custom_slug(&list[idx])));
             let mut arr: Vec<serde_json::Value> = (0..16)
-                .map(|k| serde_json::Value::String(list[n + k].clone()))
+                .map(|k| serde_json::Value::String(cur[n + k].clone()))
                 .collect();
             let j = (i - n).min(15);
             arr[j] = serde_json::Value::String(hex);
             obj.insert("ansi".to_string(), serde_json::Value::Array(arr));
         }
-        socket::write_setting("custom_theme", serde_json::Value::Object(obj));
-        theme::set_theme("custom");
+        let key = format!("custom:{}", theme::custom_slug(&list[idx]));
+        list[idx] = serde_json::Value::Object(obj);
+        write_custom_themes(list);
+        theme::set_theme(&key);
         self.repaint_all();
     }
 
@@ -2409,6 +2502,33 @@ fn put_web_code(key: &str, value: serde_json::Value) {
 
 /// 거부 문구와 그 코드를 한 번에 만든다. 반환값은 **사람이 읽을 문구** — 코드는
 /// 곁으로 빠져나가므로 호출부는 지금처럼 문자열만 다루면 된다.
+/// 웹에서 온 테마 id 를 실재하는 키로 굳힌다 — 프리셋 키이거나 `custom:<slug>`.
+/// 옛 `"custom"` 도 받는다(첫 커스텀). 없는 것을 고르면 화면만 안 바뀌고 이유를
+/// 모르므로, 여기서 이름 붙은 거절로 돌려보낸다.
+fn theme_key_or_reject(id: &str) -> Result<String, String> {
+    if let Some(slug) = theme::custom_key(id) {
+        let list = theme::custom_themes(&socket::read_settings());
+        return match theme::find_custom(&list, slug) {
+            Some(e) => Ok(format!("custom:{}", theme::custom_slug(e))),
+            None => Err(reject(
+                "custom_theme_absent",
+                "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
+            )),
+        };
+    }
+    theme::THEME_PRESETS
+        .iter()
+        .find(|(k, _, _)| *k == id)
+        .map(|(k, _, _)| (*k).to_string())
+        .ok_or_else(|| {
+            reject_with(
+                "theme_missing",
+                serde_json::json!({ "theme": id }),
+                format!("'{id}' 테마가 없어요"),
+            )
+        })
+}
+
 fn reject(code: &'static str, msg: String) -> String {
     put_web_code("error_code", serde_json::Value::String(code.to_string()));
     msg
@@ -2798,9 +2918,11 @@ pub(crate) fn paint_settings(
             let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
             let per_row = (((fw + gap) / (card_w + gap)).floor() as usize).max(1);
             let mut idx = 0usize;
+            // key 를 빌려 받는다(`&'static str` 이 아니라) — 커스텀 카드의 키는
+            // 설정 파일에서 읽은 slug 로 그 자리에서 만든다.
             let mut card = |g: &mut gpu::GpuRenderer,
                             rects: &mut Vec<(SettingsAction, Rect)>,
-                            key: &'static str,
+                            key: &str,
                             label: &str,
                             pal: Option<&theme::Palette>| {
                 let col = idx % per_row;
@@ -2856,7 +2978,7 @@ pub(crate) fn paint_settings(
                     x + 12.0, cy + card_h - 26.0, label,
                     gpu::DrawOpts { font_size: 12.0, color: dim, bold: sel, italic: false },
                 );
-                rects.push((SettingsAction::ThemeMode(key), r));
+                rects.push((SettingsAction::ThemeMode(key.to_string()), r));
             };
             // System 이 맨 앞 — Dark·Light 와 함께 기본 셋을 이룬다. 미리보기는
             // 지금 OS 가 가리키는 팔레트로 그린다(라이브 색을 쓰면 다른 테마를
@@ -2873,8 +2995,18 @@ pub(crate) fn paint_settings(
             for (key, label, pal) in theme::THEME_PRESETS {
                 card(g, &mut rects, key, label, Some(pal));
             }
-            if ctx.has_custom_theme {
-                card(g, &mut rects, "custom", "Custom", None);
+            // 커스텀들은 각자의 팔레트로 그린다 — 라이브 색으로 그리면 지금 입은
+            // 한 벌만 제 색이고 나머지가 전부 같은 카드로 보인다.
+            let customs = theme::custom_themes(&socket::read_settings());
+            for e in &customs {
+                let pal = theme::custom_palette(e);
+                card(
+                    g,
+                    &mut rects,
+                    &format!("custom:{}", theme::custom_slug(e)),
+                    &theme::custom_label(e),
+                    Some(&pal),
+                );
             }
             let rows = idx.div_ceil(per_row);
             y += rows as f32 * (card_h + gap) + 12.0;
@@ -2882,7 +3014,7 @@ pub(crate) fn paint_settings(
             // 라이트가 너무 밝다 → 팔레트 커스텀). custom 테마일 때만 편집 칸이
             // 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래 색으로 돌아갈 길이
             // 없다: 프리셋은 불변, 편집은 복제본에.
-            if ctx.theme == "custom" {
+            if theme::custom_key(&ctx.theme).is_some() {
                 y = row_wide(g, fx, y, clip, "Palette",
                     &["칸을 고르면 선택기가 열려요 — 마우스로 고르거나 #rrggbb 를 쳐도 돼요"]);
                 let n = theme::PALETTE_KEYS.len();
@@ -3034,12 +3166,14 @@ pub(crate) fn paint_settings(
                 y += 30.0 + 12.0;
             } else {
                 y = row_wide(g, fx, y, clip, "Palette",
-                    &["지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 (custom_theme 으로 저장)"]);
+                    &["지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 — 여러 개 만들어 둬도 돼요"]);
                 if y > clip {
-                    let label = if ctx.has_custom_theme {
-                        "커스텀 팔레트 이어서 편집"
-                    } else {
+                    // 이미 만들어 둔 게 있어도 이 버튼은 **새로** 만든다 — 이어서
+                    // 고치려면 그 팔레트 카드를 고르면 된다.
+                    let label = if ctx.custom_themes.is_empty() {
                         "지금 테마를 복제해 시작"
+                    } else {
+                        "새 팔레트 만들기"
                     };
                     let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                     let r = (fx, y, bw, 30.0);
@@ -3349,7 +3483,16 @@ pub(crate) fn paint_settings(
                         caret_on: ctx.caret_on,
                         preedit: if editing { &ctx.preedit } else { "" },
                         focus: SettingsAction::FocusClaudeAccountLabel(i),
-                        reauth: SettingsAction::ReauthAccount(AccountProvider::Claude, id.clone()),
+                        reauth: SettingsAction::ReauthAccount(
+                            AccountProvider::Claude,
+                            id.clone(),
+                            LoginBrowser::Isolated,
+                        ),
+                        reauth_here: SettingsAction::ReauthAccount(
+                            AccountProvider::Claude,
+                            id.clone(),
+                            LoginBrowser::Default,
+                        ),
                         remove: SettingsAction::RemoveClaudeAccount(id.clone()),
                     });
                     let name = if idx.is_none() {
@@ -3443,7 +3586,16 @@ pub(crate) fn paint_settings(
                         caret_on: ctx.caret_on,
                         preedit: if editing { &ctx.preedit } else { "" },
                         focus: SettingsAction::FocusCodexAccountLabel(i),
-                        reauth: SettingsAction::ReauthAccount(AccountProvider::Codex, id.clone()),
+                        reauth: SettingsAction::ReauthAccount(
+                            AccountProvider::Codex,
+                            id.clone(),
+                            LoginBrowser::Isolated,
+                        ),
+                        reauth_here: SettingsAction::ReauthAccount(
+                            AccountProvider::Codex,
+                            id.clone(),
+                            LoginBrowser::Default,
+                        ),
                         remove: SettingsAction::RemoveCodexAccount(id.clone()),
                     });
                     let view = AcctRowView {
@@ -3891,7 +4043,11 @@ struct AcctSlot<'a> {
     /// 이름을 눌렀을 때 — 라벨 편집. Orca 엔 rename 이 없지만(이름=이메일) kasaterm 은
     /// 거노가 붙인 별명이 곧 이름이라, 그 이름을 직접 누르는 것이 가장 짧은 길이다.
     focus: SettingsAction,
+    /// 쿠키 없는 창으로 다시 로그인(`rotate-cw`).
     reauth: SettingsAction,
+    /// 쓰던 브라우저로 다시 로그인(`external-link`) — 그 계정이 이미 브라우저에
+    /// 붙어 있으면 비밀번호·2단계를 다시 칠 일이 없다.
+    reauth_here: SettingsAction,
     remove: SettingsAction,
 }
 
@@ -3931,7 +4087,11 @@ fn account_card(
     // 오른쪽 액션부터 — 자리를 먹은 만큼 이름이 쓸 폭이 줄어든다.
     let mut right = x + w - pad;
     if let Some(s) = v.slot.as_ref() {
-        for (glyph, act) in [("x", &s.remove), ("rotate-cw", &s.reauth)] {
+        // 오른쪽부터 왼쪽으로 쌓인다 — 파괴적인 것(빼기)을 끝에 두고, 자주 쓰는
+        // 「쓰던 브라우저로」가 이름 쪽에 가장 가깝게 온다.
+        for (glyph, act) in
+            [("x", &s.remove), ("rotate-cw", &s.reauth), ("external-link", &s.reauth_here)]
+        {
             let br = (right - 24.0, y + (h - 24.0) / 2.0, 24.0, 24.0);
             let bh = inside(br, cursor);
             g.hover_pointer |= bh;
@@ -4112,6 +4272,21 @@ pub(crate) fn cancel_login() {
     }
 }
 
+/// 로그인 승인을 **어느 브라우저**에서 받을지. 두 길이 다 필요하다.
+///
+/// 격리만 있던 동안 불편이 실재했다(거노 2026-08-15 「계정 로그인이 쓰던 브라우저로
+/// 안 열림」): 만료된 슬롯을 **그 계정 그대로** 되살릴 때도 빈 크롬이 떠서 비밀번호와
+/// 2단계 인증을 처음부터 다시 쳐야 했다. 반대로 쓰던 브라우저만 있으면 새 슬롯이
+/// 전부 같은 계정으로 붙는 옛 버그로 돌아간다. 그래서 고르게 둔다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginBrowser {
+    /// 쿠키 없는 크롬 프로필. URL 을 우리가 주워 그 창으로 연다.
+    Isolated,
+    /// 사용자가 쓰던 기본 브라우저. CLI 가 직접 연다 — 지금 로그인된 claude.ai
+    /// 세션이 그대로 승인되므로 **다른 계정을 붙일 수는 없다**.
+    Default,
+}
+
 /// CLI 로그인을 **터미널 없이** 돌린다. pane 을 띄워 사용자가 직접 진행하게 하던
 /// 것을 Orca 방식으로 바꾼 것이다(거노 2026-08-13 「로그인방식도 ㄱ」).
 ///
@@ -4130,10 +4305,11 @@ fn spawn_hidden_login(
     argv: String,
     env_key: &'static str,
     dir: std::path::PathBuf,
-    profile: Option<std::path::PathBuf>,
+    browser: LoginBrowser,
 ) {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
+    let profile = login_profile(browser, &id);
     if let Ok(mut c) = login_cell().lock() {
         c.0 = Some(LoginJob { id: id.clone(), provider, state: LoginState::Running });
     }
@@ -4145,13 +4321,16 @@ fn spawn_hidden_login(
         cmd.arg("-lc")
             .arg(&argv)
             .env(env_key, &dir)
-            // CLI 가 **기본** 브라우저를 열면 지금 계정의 세션이 그대로 승인돼
-            // 슬롯을 아무리 갈라도 전부 같은 계정이 붙는다. URL 은 우리가 주워
-            // 쿠키 없는 프로필로 연다.
-            .env("BROWSER", "/usr/bin/true")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if profile.is_some() {
+            // CLI 가 **기본** 브라우저를 열면 지금 계정의 세션이 그대로 승인돼
+            // 슬롯을 아무리 갈라도 전부 같은 계정이 붙는다. URL 은 우리가 주워
+            // 쿠키 없는 프로필로 연다. 쓰던 브라우저를 고른 경우에만 이 가로채기를
+            // 걷어 CLI 가 직접 열게 둔다 — 덮은 채로 두면 아무 창도 안 뜬다.
+            cmd.env("BROWSER", "/usr/bin/true");
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -4263,6 +4442,18 @@ fn login_error_line(out: &str) -> String {
         .unwrap_or_else(|| "로그인이 실패했어요".to_string())
 }
 
+/// 이 로그인이 쓸 격리 프로필. **`None` 이면 URL 가로채기를 통째로 끈다** — 그
+/// 하나가 「우리가 크롬을 연다」와 「CLI 가 기본 브라우저를 연다」를 가른다. 값이
+/// `Some` 인데 `BROWSER` 를 안 덮으면 창이 둘 뜨고, `None` 인데 덮으면 아무 창도
+/// 안 떠 3분을 갇힌다. 격리를 골랐는데 자리를 못 잡는 극단(홈을 못 찾음)에서는
+/// 아무것도 못 여느니 쓰던 브라우저로 떨어뜨린다.
+fn login_profile(browser: LoginBrowser, id: &str) -> Option<std::path::PathBuf> {
+    match browser {
+        LoginBrowser::Isolated => socket::oauth_profile_dir(id),
+        LoginBrowser::Default => None,
+    }
+}
+
 /// 프로세스 한 줄에서 로그인 URL 을 뽑는다. claude·codex 를 같이 받는다 — 접히지
 /// 않은 한 줄이라 공백까지 자르면 끝이고, PTY 화면을 폴링하며 접힌 URL 을 이어 붙이던
 /// 곡예(state 를 정확히 43자로 끊어야 다음 줄 첫 단어가 안 딸려왔다)가 필요 없다.
@@ -4303,6 +4494,27 @@ mod login_url_tests {
     fn ignores_unrelated_links() {
         assert_eq!(login_url_in("see https://docs.claude.com/help for details"), None);
         assert_eq!(login_url_in("no url here"), None);
+    }
+
+    /// 「쓰던 브라우저」를 고르면 프로필이 없어야 한다. 이 값 하나가 `BROWSER`
+    /// 가로채기와 크롬 실행을 **동시에** 끄므로, 여기가 `Some` 으로 새면 사용자는
+    /// 빈 크롬 창을 다시 보게 된다(거노 2026-08-15 「쓰던 브라우저로 안 열림」).
+    #[test]
+    fn default_browser_takes_no_profile() {
+        assert!(super::login_profile(super::LoginBrowser::Default, "acct-2").is_none());
+    }
+
+    /// 격리는 슬롯마다 다른 자리를 잡는다 — 같은 자리를 나눠 쓰면 두 슬롯이 한
+    /// 계정으로 붙는다(이 기능이 존재하는 이유인 그 버그).
+    #[test]
+    fn isolated_takes_a_per_slot_profile() {
+        let a = super::login_profile(super::LoginBrowser::Isolated, "acct-2");
+        let b = super::login_profile(super::LoginBrowser::Isolated, "codex-1");
+        // 홈을 못 찾는 환경에서는 둘 다 `None` 이라 비교할 것이 없다.
+        if let (Some(a), Some(b)) = (a, b) {
+            assert!(a.ends_with("acct-2"), "슬롯 자리가 아니다: {}", a.display());
+            assert_ne!(a, b, "두 슬롯이 같은 브라우저 프로필을 쓴다");
+        }
     }
 }
 
@@ -4655,12 +4867,23 @@ fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
     (h, s, max)
 }
 
-/// custom_theme 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개 뒤에
-/// ANSI 16개. 파일에 적힌(파싱되는) 값이 우선이고, 없는 키는 base 프리셋 값.
+/// 커스텀 팔레트 목록을 통째로 저장한다. 쓰기는 언제나 새 형식(`custom_themes`
+/// 배열)으로 나가고, 옛 `custom_theme` 오브젝트는 건드리지 않는다 — 읽기가 배열을
+/// 우선하므로 무해하고, 지우면 구버전으로 되돌아간 사람의 팔레트가 사라진다.
+fn write_custom_themes(list: Vec<serde_json::Value>) {
+    socket::write_setting("custom_themes", serde_json::Value::Array(list));
+}
+
+/// 커스텀 팔레트 `slug` 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개
+/// 뒤에 ANSI 16개. 파일에 적힌(파싱되는) 값이 우선이고, 없는 키는 base 프리셋 값.
 /// 포커스 시드(`palette_hex_at`)·화면 표시·ansi 배열 재구성이 전부 이 하나를
 /// 읽어야 「누른 칸과 뜬 값이 다른」 어긋남이 없다.
-fn palette_hex_list(s: &serde_json::Value) -> Vec<String> {
-    let obj = s.get("custom_theme");
+///
+/// `slug` 가 `None`(커스텀을 안 입은 상태)이면 첫 항목, 그것도 없으면 dark 값이
+/// 나온다 — 편집 칸은 커스텀일 때만 열리므로 이 경우는 표시용 폴백이다.
+fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
+    let list = theme::custom_themes(s);
+    let obj = theme::find_custom(&list, slug.unwrap_or(""));
     let base_key = obj
         .and_then(|o| o.get("base"))
         .and_then(|x| x.as_str())

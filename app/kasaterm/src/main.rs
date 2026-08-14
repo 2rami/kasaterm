@@ -4063,12 +4063,16 @@ pub(crate) enum SettingsAction {
     AutosaveDelay(u64),
     ShellPreset(String),
     FocusShell,
-    ThemeMode(&'static str),
-    /// 지금 테마를 `custom_theme` 으로 복제하고 custom 으로 전환 — 팔레트 편집의
-    /// 입구. 이미 custom_theme 이 있으면 복제 없이 전환만 한다(하던 편집 보존).
+    /// 프리셋 키 · `"system"` · `custom:<slug>`. 커스텀 키는 설정 파일에서 읽은
+    /// slug 를 달고 태어나 `&'static str` 로 못 담는다.
+    ThemeMode(String),
+    /// 지금 팔레트를 복제해 **새** 커스텀을 목록에 더하고 그것으로 전환 —
+    /// 팔레트 편집의 입구. 하던 편집은 목록에 그대로 남는다.
     StartCustomTheme,
-    /// `custom_theme` 을 base 프리셋 값으로 다시 시드 — 편집을 처음부터.
+    /// 지금 편집 중인 커스텀을 base 프리셋 값으로 다시 시드 — 편집을 처음부터.
     ResetCustomTheme,
+    /// 커스텀 팔레트 하나를 목록에서 치운다(인자는 slug).
+    DeleteCustomTheme(String),
     /// 팔레트 색 한 칸의 hex 필드에 포커스(인덱스 규약은 `SettingsInput::PaletteHex`).
     FocusPaletteHex(usize),
     /// 색 선택기의 채도×명도 사각형. 좌표는 액션에 못 싣는다(연속값) —
@@ -4113,7 +4117,10 @@ pub(crate) enum SettingsAction {
     /// 이미 있는 슬롯에 로그인을 다시 돌린다. 토큰이 만료돼 「로그인 필요」로 뜬
     /// 슬롯을 되살리는 유일한 길이다 — 예전엔 지우고 새로 만드는 수밖에 없었고,
     /// 그러면 슬롯 dir 이 바뀌어 그 계정에 붙은 한도 이력까지 함께 버렸다.
-    ReauthAccount(AccountProvider, String),
+    ///
+    /// 마지막 칸은 승인을 **어느 브라우저**에서 받을지다. 되살리려는 계정이 이미
+    /// 브라우저에 로그인돼 있으면 쓰던 창이 훨씬 짧다(`settings::LoginBrowser`).
+    ReauthAccount(AccountProvider, String, settings::LoginBrowser),
     /// 진행 중인 숨은 로그인을 취소(프로세스 그룹째 종료).
     CancelLogin,
     /// 끝난 로그인의 결과 표시를 지운다.

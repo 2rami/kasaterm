@@ -172,9 +172,13 @@ export const ko = {
     systemDarkSlot: '어둡게일 때',
     palette: '팔레트',
     paletteHint: '칸을 누르면 색 선택기가 열려요 — #rrggbb 를 쳐도 됩니다',
-    paletteLocked: '지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 (custom_theme 으로 저장)',
+    paletteLocked: '지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 — 여러 개 만들어 둬도 돼요',
     paletteStart: '지금 테마를 복제해 시작',
-    paletteContinue: '커스텀 팔레트 이어서 편집',
+    /// 이미 만들어 둔 게 있어도 이 버튼은 **새로** 만든다 — 이어서 고치려면 그
+    /// 팔레트 카드를 고르면 되므로, 문구가 그 둘을 헷갈리게 하면 안 된다.
+    paletteNew: '+ 새 팔레트',
+    paletteName: '이름',
+    paletteDelete: '이 팔레트 치우기',
     paletteReset: '베이스 값으로 되돌리기',
     ansi: '터미널 ANSI',
     ansiHint: '터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)',
@@ -212,6 +216,11 @@ export const ko = {
     addAccount: (a: { provider: string }) => `+ ${a.provider} 계정 추가`,
     rename: '이름',
     reauth: '다시 로그인',
+    reauthHere: '쓰던 브라우저',
+    /// 두 버튼이 왜 갈리는지 — 「빈 창」이 불편해 보여서 누른 사람이 엉뚱한 계정을
+    /// 붙이고 놀라는 자리라, 고르기 전에 결과를 말해 준다.
+    browserHint:
+      '「다시 로그인」은 빈 창에서 — 다른 계정을 붙일 때 써요. 「쓰던 브라우저」는 그 브라우저에 지금 로그인된 계정으로 붙어요.',
     removeSlot: '빼기',
     inUse: '쓰는 중',
     labelPlaceholder: '별명 (비우면 이메일로 불러요)',
@@ -415,9 +424,11 @@ export const en: Strings = {
     systemDarkSlot: 'When dark',
     palette: 'Palette',
     paletteHint: 'Click a swatch to open the color picker — or type #rrggbb',
-    paletteLocked: 'Copy the current theme and edit it color by color (saved as custom_theme)',
+    paletteLocked: 'Copy the current theme and edit it color by color — keep as many as you like',
     paletteStart: 'Copy the current theme to start',
-    paletteContinue: 'Keep editing the custom palette',
+    paletteNew: '+ New palette',
+    paletteName: 'Name',
+    paletteDelete: 'Remove this palette',
     paletteReset: 'Back to the base values',
     ansi: 'Terminal ANSI',
     ansiHint: 'The terminal’s 16 colors — 0..7 on top, 8..15 (bright) below',
@@ -454,6 +465,9 @@ export const en: Strings = {
     addAccount: (a) => `+ Add ${a.provider} account`,
     rename: 'Rename',
     reauth: 'Sign in again',
+    reauthHere: 'This browser',
+    browserHint:
+      '“Sign in again” opens a clean window — use it to attach a different account. “This browser” attaches whichever account is signed in there.',
     removeSlot: 'Remove',
     inUse: 'in use',
     labelPlaceholder: 'Nickname (empty = called by its email)',
