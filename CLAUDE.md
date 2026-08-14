@@ -86,7 +86,7 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 현재 `v0.1.19` MSI는 Windows Installer 관리 설치로 69개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. 관련 커밋은 `43effc7`부터 `8f18ff8`까지의 Windows/작은 pane 수정과 패키징 커밋 `13ad934`다.
 
-아직 하지 않은 것은 버전 태그 생성, 원격 push, GitHub Release 게시다. 사용자가 게시를 명시하면 버전을 결정한 뒤 태그 릴리스 절차를 진행한다. 로컬 패키징 완료를 원격 게시 완료로 오해하지 말 것.
+`fork/windows-port`에는 Windows 수정, 패키징, 이 인수인계까지 push했다. 아직 하지 않은 것은 upstream PR, 버전 태그 생성, GitHub Release 게시다. upstream `main`과 비교하면 이 브랜치는 2026-08-14 기준 321커밋 뒤에서 갈라져 있으므로 바로 릴리스하지 말고 최신 `origin/main` 위로 rebase하거나 새 브랜치에 Windows 커밋을 cherry-pick한 뒤 패키지 검증을 다시 해야 한다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징 완료나 fork push를 upstream 게시 완료로 오해하지 말 것.
 
 ## 함정·배경·수정 주의점은 메모리에
 
