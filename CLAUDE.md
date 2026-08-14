@@ -120,7 +120,9 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main` + tests 만. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
 
-- `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`)
+- `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지
+- `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치
+- `sprites.rs` — 학생 스프라이트·프사 **에셋 적재와 드로잉**: 번들/override 프레임, idle GIF 캐시, `draw_student_*`
 - `handler.rs` — winit `ApplicationHandler`(`window_event`/`user_event`/`new_events`/`resumed`/`exiting`/`about_to_wait`). 소켓 백엔드 위임(`SocketBytes`/`SocketSplit`/`SocketFocus`) 처리·`window.json` 저장(`exiting`)/복원(`resumed`)·header/divider drag·tab-drag move·socket 명령 드레인
 - `layout.rs` — pane 조작(`split_active_pane`/`move_pane`/`close_active_pane`/`spawn_new_tab`/`swap_dir`/`focus_dir`/`drop_*`/`divider_at_px`/`toggle_pane_zoom`/`close_tab`) + `resize_backend`/`publish_pty_layout`/좌표·`target_*`
 - `session.rs` — `start_pty`(로컬 pane spawn)·`start_socket_pty`(cmux 소켓 + `socket::PtyBackend`)·window/session/cwd·label·tmux/socket·`save_session_state`·`apply_screen_update`/`pump_pty_screens`
@@ -144,7 +146,7 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 - **`main.rs` struct App 정의(필드 추가/수정)는 한 번에 한 워커만.** 새 필드는 오케스트레이터가 조율해 직렬화. 특히 `git_col_*`(2812행대)·`file_tree_*`(2955행대)는 인접+구조 동일 → 파일트리·git 두 작업은 한 워커가 묶거나 순차로.
 - **`chrome.rs`(메서드별 분리), `collab-hooks/`(셸·py), `web/arona-ui/`(TS·React) 는 독립 작업 OK** — 특히 하네스·아로나 UI 는 Rust 코드와 물리 분리라 충돌 0, ③ 작업은 여기서 마음껏.
-- **`handler.rs`·`input.rs`·`render.rs`는 거대하지만 메서드 heavy** — 다른 메서드면 충돌 드묾, 중앙 디스패치라 쪼개지 말 것.
+- **`handler.rs`·`input.rs`·`render.rs`는 거대하지만 메서드 heavy** — 다른 메서드면 충돌 드묾, 중앙 디스패치라 더 쪼개지 말 것. 화면 판독·스프라이트 자유함수는 이미 `screenread.rs`·`sprites.rs` 로 나가 있으니 그 도메인 작업은 거기서(렌더 패스와 충돌 없음).
 - 층 매핑: 렌더/입력=① / 파일트리·git=②(아직 app/src) / 하네스·협업=③(분리됨). 충돌 핫스팟은 ②가 app/src 에 박혀서다 → 본격 확장 시 `kasa-workspace`·`kasa-git-badge` crate 추출 ROI 1순위. 상세 [[reference_kasaterm_parallel_work_boundaries]].
 
 ## 로컬 PTY 모드 (데몬 완전 제거 — 2026-06-05)

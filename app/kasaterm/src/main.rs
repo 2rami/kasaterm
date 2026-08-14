@@ -13,6 +13,8 @@ mod autosuggest;
 mod cells;
 mod gpu;
 mod render;
+mod screenread;
+mod sprites;
 mod handler;
 mod socket;
 mod bridge;
