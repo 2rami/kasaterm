@@ -8,6 +8,7 @@ import {
   TextField,
   useSettingsAction,
 } from './controls';
+import { useT } from './lang';
 import type { AppearanceValues, ShapePreset, ThemePreset } from './types';
 
 /// 테마 한 장 — 그 팔레트로 그린 미니 프리뷰(배경 칠 + 프롬프트 샘플 + ANSI 점 +
@@ -83,6 +84,7 @@ function ColorSwatch({
   disabled?: boolean;
   onCommit: (next: string) => void;
 }) {
+  const t = useT();
   const [draft, setDraft] = useState(hex);
   useEffect(() => setDraft(hex), [hex]);
   return (
@@ -91,7 +93,7 @@ function ColorSwatch({
       value={draft}
       disabled={disabled}
       title={title}
-      aria-label={`${title} 색`}
+      aria-label={t.common.colorOf({ name: title })}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
         if (draft.toLowerCase() !== hex.toLowerCase()) onCommit(draft);
@@ -168,6 +170,7 @@ export function AppearanceTab({
   data: AppearanceValues;
   reload: () => Promise<void>;
 }) {
+  const t = useT();
   const { busy, notice, run } = useSettingsAction(reload);
   const uiCount = data.palette_keys.length;
   const uiHex = data.palette_hex.slice(0, uiCount);
@@ -188,10 +191,7 @@ export function AppearanceTab({
     <TabCard>
       <Notice notice={notice} />
 
-      <Section
-        title="Theme"
-        hint="UI + 터미널 ANSI 팔레트가 함께 바뀌어요 — System 은 OS 의 밝게/어둡게를 따라갑니다"
-      >
+      <Section title={t.appearance.theme} hint={t.appearance.themeHint}>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(158px,1fr))] gap-3">
           {data.themes.map((p) => (
             <ThemeCard
@@ -208,7 +208,7 @@ export function AppearanceTab({
       {/* 팔레트는 custom 일 때만 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래
           색으로 돌아갈 길이 없다: 프리셋은 불변, 편집은 복제본에. */}
       {custom ? (
-        <Section title="Palette" hint="칸을 누르면 색 선택기가 열려요 — #rrggbb 를 쳐도 됩니다">
+        <Section title={t.appearance.palette} hint={t.appearance.paletteHint}>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(294px,1fr))] gap-x-2 gap-y-1">
             {data.palette_keys.map((key, i) => (
               <div key={key} className="flex items-center gap-2 py-1">
@@ -230,10 +230,8 @@ export function AppearanceTab({
             ))}
           </div>
 
-          <p className="mb-2 mt-5 text-[13px] text-[var(--kt-text)]">Terminal ANSI</p>
-          <p className="mb-2 text-[12px] text-[var(--kt-text-mute)]">
-            터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)
-          </p>
+          <p className="mb-2 mt-5 text-[13px] text-[var(--kt-text)]">{t.appearance.ansi}</p>
+          <p className="mb-2 text-[12px] text-[var(--kt-text-mute)]">{t.appearance.ansiHint}</p>
           <div className="grid w-max grid-cols-8 gap-2">
             {ansiHex.map((hex, i) => (
               <ColorSwatch
@@ -248,26 +246,25 @@ export function AppearanceTab({
 
           <div className="mt-5">
             <Button
-              label="베이스 값으로 되돌리기"
+              label={t.appearance.paletteReset}
               disabled={busy}
               onClick={() => void run('reset-custom-theme')}
             />
           </div>
         </Section>
       ) : (
-        <Section
-          title="Palette"
-          hint="지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 (custom_theme 으로 저장)"
-        >
+        <Section title={t.appearance.palette} hint={t.appearance.paletteLocked}>
           <Button
-            label={data.has_custom_theme ? '커스텀 팔레트 이어서 편집' : '지금 테마를 복제해 시작'}
+            label={
+              data.has_custom_theme ? t.appearance.paletteContinue : t.appearance.paletteStart
+            }
             disabled={busy}
             onClick={() => void run('start-custom-theme')}
           />
         </Section>
       )}
 
-      <Section title="Shape" hint="모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)">
+      <Section title={t.appearance.shape} hint={t.appearance.shapeHint}>
         <div className="flex flex-wrap gap-3">
           {data.shapes.map((s) => (
             <ShapeCard
@@ -281,7 +278,7 @@ export function AppearanceTab({
         </div>
       </Section>
 
-      <Section title="Accent color" hint="선택 영역 · 커서 · 링크 색">
+      <Section title={t.appearance.accent} hint={t.appearance.accentHint}>
         <div className="flex flex-wrap gap-3.5">
           {data.accents.map((a) => {
             const on = a.name === data.accent;
@@ -307,10 +304,7 @@ export function AppearanceTab({
         </div>
       </Section>
 
-      <Section
-        title="Minimum contrast"
-        hint="앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올려요 (dim 은 제외)"
-      >
+      <Section title={t.appearance.contrast} hint={t.appearance.contrastHint}>
         <div className="flex flex-wrap gap-2.5">
           {data.contrasts.map((c) => {
             const on = c.label === nearestContrast.label;
@@ -333,7 +327,7 @@ export function AppearanceTab({
                 {/* 샘플은 그 임계를 실제로 적용한 색이라, 고르기 전에 얼마나
                     끌어올리는지 눈으로 비교된다. */}
                 <div className="text-[12px]" style={{ color: c.sample }}>
-                  Aa 가나
+                  {t.appearance.contrastSample}
                 </div>
                 <div
                   className="mt-1 text-[11px]"
@@ -350,7 +344,7 @@ export function AppearanceTab({
         </div>
       </Section>
 
-      <Section title="Font size" hint="터미널 셀 폰트 크기 — UI 배율과는 별개인 기준값이에요">
+      <Section title={t.appearance.fontSize} hint={t.appearance.fontSizeHint}>
         <Stepper
           text={String(Math.round(data.font_size))}
           disabled={busy}
@@ -360,7 +354,7 @@ export function AppearanceTab({
 
       {/* 배율은 여태 키에만 있었다. 지금 몇 %인지 화면 어디에도 안 적혀서, 폰트와
           배율을 번갈아 만지다 UI 가 어긋나도 어느 쪽이 범인인지 알 수가 없었다. */}
-      <Section title="UI 배율" hint="크롬·사이드바·pane 이 함께 커져요">
+      <Section title={t.appearance.uiZoom} hint={t.appearance.uiZoomHint}>
         <Stepper
           text={`${Math.round(data.ui_zoom * 100)}%`}
           disabled={busy}
@@ -369,7 +363,7 @@ export function AppearanceTab({
             // 이미 기본값이면 누를 것이 없다 — 눌러도 아무 일 없는 버튼은 고장으로
             // 읽히므로 그때는 흐리게 두고 막는다.
             <Button
-              label="1:1 로 되돌리기"
+              label={t.appearance.scaleReset}
               disabled={busy || atDefaultScale}
               onClick={() => void run('reset-scale')}
             />

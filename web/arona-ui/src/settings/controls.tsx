@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { postAction } from './api';
+import { serverText, useT } from './lang';
 
 /// 카드 안의 소제목 + 설명. 네이티브 폼의 `row_wide` 대응 — 제목만 크게 하고 설명은
 /// dim 으로 한 줄 아래 둔다. `right` 는 제목 줄 오른쪽에 붙는 컨트롤(스위치처럼
@@ -230,6 +231,7 @@ export function Stepper({
   disabled?: boolean;
   right?: React.ReactNode;
 }) {
+  const t = useT();
   const box = {
     borderRadius: 'var(--kt-radius-md)',
     background: 'var(--kt-surface-hover)',
@@ -242,7 +244,7 @@ export function Stepper({
         type="button"
         disabled={disabled}
         onClick={() => onStep(-1)}
-        aria-label="한 칸 줄이기"
+        aria-label={t.common.stepDown}
         className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
         style={box}
       >
@@ -255,7 +257,7 @@ export function Stepper({
         type="button"
         disabled={disabled}
         onClick={() => onStep(1)}
-        aria-label="한 칸 늘리기"
+        aria-label={t.common.stepUp}
         className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
         style={box}
       >
@@ -321,6 +323,7 @@ export function Notice({ notice }: { notice: { ok: boolean; msg: string } | null
 /// 화면이 들고 있는 입력을 비우는 자리(피드백 본문)는 이걸 봐야 한다 — 실패했는데
 /// 비우면 쓰던 글이 통째로 사라진다.
 export function useSettingsAction(reload: () => Promise<void>) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -332,9 +335,19 @@ export function useSettingsAction(reload: () => Promise<void>) {
     setNotice(null);
     try {
       const out = await postAction(action, args);
-      if (out.error) setNotice({ ok: false, msg: out.error });
-      else if (out.message) setNotice({ ok: out.ok, msg: out.message });
-      else if (!out.ok) setNotice({ ok: false, msg: '안 됐어요' });
+      // 서버 문구는 코드가 있으면 사전에서, 없으면 받은 그대로 — 이 폴백이 있어야
+      // 코드화가 덜 끝난 자리도 원래 한국어로 멀쩡히 뜬다.
+      if (out.error) {
+        setNotice({
+          ok: false,
+          msg: serverText(t, out.error_code, out.error, out.error_args),
+        });
+      } else if (out.message) {
+        setNotice({
+          ok: out.ok,
+          msg: serverText(t, out.message_code, out.message, out.message_args),
+        });
+      } else if (!out.ok) setNotice({ ok: false, msg: t.common.failed });
       await reload();
       return out.ok && !out.error;
     } catch (e) {
