@@ -166,6 +166,10 @@ export const ko = {
     theme: '테마',
     themeHint:
       'UI + 터미널 ANSI 팔레트가 함께 바뀌어요 — System 은 OS 의 밝게/어둡게를 따라갑니다',
+    systemSlots: '시스템을 따를 때',
+    systemSlotsHint: 'OS 가 밝게/어둡게로 바뀔 때 각각 어떤 테마를 입을지 골라요',
+    systemLightSlot: '밝게일 때',
+    systemDarkSlot: '어둡게일 때',
     palette: '팔레트',
     paletteHint: '칸을 누르면 색 선택기가 열려요 — #rrggbb 를 쳐도 됩니다',
     paletteLocked: '지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 (custom_theme 으로 저장)',
@@ -405,6 +409,10 @@ export const en: Strings = {
     theme: 'Theme',
     themeHint:
       'The UI and the terminal ANSI palette change together — System follows the OS light/dark setting',
+    systemSlots: 'When following the system',
+    systemSlotsHint: 'Pick which theme to wear when the OS turns light or dark',
+    systemLightSlot: 'When light',
+    systemDarkSlot: 'When dark',
     palette: 'Palette',
     paletteHint: 'Click a swatch to open the color picker — or type #rrggbb',
     paletteLocked: 'Copy the current theme and edit it color by color (saved as custom_theme)',

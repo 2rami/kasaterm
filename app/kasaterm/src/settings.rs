@@ -1365,6 +1365,43 @@ impl App {
                 self.settings_apply(SettingsAction::ThemeMode(key));
                 Ok(theme::theme_name() == key)
             }
+            // system 모드의 밝기 슬롯에 테마 배정 — id 는 프리셋 키 또는 "custom".
+            // "system" 자신은 못 들어간다(자기참조). 지금 system 으로 보는 중이면
+            // 그 자리에서 다시 해석해 갈아입는다.
+            "theme-system-light" | "theme-system-dark" => {
+                let light = action == "theme-system-light";
+                let key = if id == "custom" {
+                    if socket::read_settings().get("custom_theme").is_none() {
+                        return Err(reject(
+                            "custom_theme_absent",
+                            "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
+                        ));
+                    }
+                    "custom"
+                } else {
+                    theme::THEME_PRESETS
+                        .iter()
+                        .find(|(k, _, _)| *k == id)
+                        .map(|(k, _, _)| *k)
+                        .ok_or_else(|| {
+                            reject_with(
+                                "theme_missing",
+                                serde_json::json!({ "theme": id }),
+                                format!("'{id}' 테마가 없어요"),
+                            )
+                        })?
+                };
+                socket::write_setting(
+                    if light { "theme_system_light" } else { "theme_system_dark" },
+                    serde_json::Value::String(key.to_string()),
+                );
+                if theme::theme_name() == "system" {
+                    self.begin_theme_fx();
+                    theme::set_theme("system");
+                    self.repaint_all();
+                }
+                Ok(theme::system_slot_theme(light) == key)
+            }
             "start-custom-theme" => {
                 self.settings_apply(SettingsAction::StartCustomTheme);
                 Ok(theme::theme_name() == "custom")
@@ -1803,6 +1840,10 @@ impl App {
             "appearance": {
                 "theme": theme::theme_name(),
                 "themes": themes,
+                // system 모드가 밝기별로 입을 테마(프리셋 키 또는 "custom") —
+                // OS 는 밝기만 알려 주고 팔레트는 사용자가 배정한다(2026-08-15).
+                "theme_system_light": theme::system_slot_theme(true),
+                "theme_system_dark": theme::system_slot_theme(false),
                 "has_custom_theme": s.get("custom_theme").is_some(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
                 "palette_hex": palette_hex_list(&s),

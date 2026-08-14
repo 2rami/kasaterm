@@ -78,6 +78,9 @@ export type GeneralValues = {
 export type AppearanceValues = {
   theme: string;
   themes: ThemePreset[];
+  /// system 모드가 밝기별로 입을 테마 — 프리셋 키 또는 `"custom"`.
+  theme_system_light: string;
+  theme_system_dark: string;
   has_custom_theme: boolean;
   palette_keys: string[];
   /// UI 색(palette_keys 순서) 뒤에 ANSI 16색이 이어 붙는다.

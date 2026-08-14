@@ -203,6 +203,57 @@ export function AppearanceTab({
             />
           ))}
         </div>
+
+        {/* system 을 따를 때 밝기별로 입을 테마 — OS 는 밝기만 알려 주고 팔레트는
+            여기서 배정한다(내장 라이트/다크에 묶이지 않게, 2026-08-15). system 이
+            활성일 때만 펼친다: 다른 테마를 골라 둔 사람에게는 소음이다. */}
+        {data.theme === 'system' && (
+          <div className="mt-4 space-y-2">
+            <p className="text-[13px] text-[var(--kt-text)]">{t.appearance.systemSlots}</p>
+            <p className="text-[12px] text-[var(--kt-text-mute)]">
+              {t.appearance.systemSlotsHint}
+            </p>
+            {(
+              [
+                ['light', t.appearance.systemLightSlot, data.theme_system_light],
+                ['dark', t.appearance.systemDarkSlot, data.theme_system_dark],
+              ] as const
+            ).map(([slot, label, current]) => (
+              <div key={slot} className="flex flex-wrap items-center gap-1.5">
+                <span className="w-[88px] shrink-0 text-[12.5px] text-[var(--kt-text-dim)]">
+                  {label}
+                </span>
+                {data.themes
+                  .filter((p) => p.key !== 'system')
+                  .map((p) => (
+                    <button
+                      key={p.key}
+                      type="button"
+                      disabled={busy}
+                      aria-pressed={p.key === current}
+                      onClick={() =>
+                        p.key !== current && void run(`theme-system-${slot}`, { id: p.key })
+                      }
+                      className="px-2.5 py-1 text-[12px] disabled:opacity-40"
+                      style={{
+                        borderRadius: 'var(--kt-radius-sm)',
+                        // 미리보기 배지: 그 테마의 실제 배경·글자색으로 물들인다 —
+                        // 라벨만 나열하면 이름을 외운 사람만 고를 수 있다.
+                        background: p.bg,
+                        color: p.text,
+                        boxShadow:
+                          p.key === current
+                            ? '0 0 0 2px var(--kt-accent)'
+                            : `inset 0 0 0 1px var(--kt-border)`,
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       {/* 팔레트는 custom 일 때만 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래

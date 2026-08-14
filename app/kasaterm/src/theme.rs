@@ -547,10 +547,9 @@ pub fn poll_system_theme() -> bool {
     if SYSTEM_RESOLVED.swap(now, Ordering::Relaxed) == now {
         return false;
     }
-    let key = if now == 1 { "light" } else { "dark" };
-    if let Some((_, _, p)) = THEME_PRESETS.iter().find(|(k, _, _)| *k == key) {
-        store_palette(p);
-    }
+    // 슬롯 배정을 다시 읽어 그 밝기용 테마로 갈아입는다 — 내장 light/dark 로
+    // 못 박으면 슬롯에 다른 팔레트를 배정한 뜻이 OS 플립 순간 사라진다.
+    apply_system_palette();
     true
 }
 
@@ -571,6 +570,45 @@ pub fn system_theme_key() -> &'static str {
     }
 }
 
+/// system 모드에서 이 밝기 슬롯이 입을 테마 키 — 프리셋 키 또는 "custom".
+/// 기본은 내장 light/dark 라 설정이 없으면 종전과 똑같이 동작한다.
+/// (2026-08-15 지시 「시스템설정으로하면 라이트랑 다크밖에 못 쓰는데 그걸
+/// 따로 설정할수있게」— OS 는 밝기만 알려 주고, 그 밝기에 무슨 팔레트를
+/// 입을지는 사용자가 정한다.)
+pub fn system_slot_theme(light: bool) -> String {
+    system_slot_theme_in(&crate::socket::read_settings(), light)
+}
+
+fn system_slot_theme_in(s: &serde_json::Value, light: bool) -> String {
+    s.get(if light { "theme_system_light" } else { "theme_system_dark" })
+        .and_then(|x| x.as_str())
+        .unwrap_or(if light { "light" } else { "dark" })
+        .to_string()
+}
+
+/// system 모드가 지금 이 순간 실제로 입힐 팔레트를 굳힌다 — OS 밝기가 가리키는
+/// 슬롯의 배정 테마(프리셋 or custom)를 적용하고, CURRENT_THEME 은 "system"
+/// 으로 유지한다(슬롯이 custom 이어도 — apply_custom_theme 이 "custom" 을 적는
+/// 것을 되돌린다. 저장/표시 정본은 여전히 "시스템 따라가기"다).
+fn apply_system_palette() {
+    let s = crate::socket::read_settings();
+    let light = system_theme_key() == "light";
+    let slot = system_slot_theme_in(&s, light);
+    if slot == "custom" && s.get("custom_theme").is_some() {
+        apply_custom_theme(&s);
+    } else if let Some((_, _, p)) = THEME_PRESETS
+        .iter()
+        .find(|(k, _, _)| *k == slot.as_str())
+        // 배정된 테마가 사라졌으면(설정 파일 수기 수정 등) 내장 기본으로.
+        .or_else(|| THEME_PRESETS.iter().find(|(k, _, _)| *k == system_theme_key()))
+    {
+        store_palette(p);
+    }
+    if let Ok(mut g) = CURRENT_THEME.lock() {
+        *g = Some("system");
+    }
+}
+
 /// Switch to a preset theme by key; unknown keys fall back to dark. "custom"
 /// re-reads the settings file's palette overrides.
 pub fn set_theme(mode: &str) {
@@ -581,15 +619,8 @@ pub fn set_theme(mode: &str) {
     // 저장되는 값은 "system" 그대로다 — 지금 해석한 결과(dark/light)를 적어 버리면
     // 다음에 켤 때 그 순간의 OS 설정이 고정값으로 굳어 따라다니길 그만둔다.
     if mode == "system" {
-        let (key, _, p) = THEME_PRESETS
-            .iter()
-            .find(|(k, _, _)| *k == system_theme_key())
-            .unwrap_or(&THEME_PRESETS[0]);
-        store_palette(p);
-        if let Ok(mut g) = CURRENT_THEME.lock() {
-            *g = Some("system");
-        }
-        SYSTEM_RESOLVED.store(u32::from(*key == "light"), Ordering::Relaxed);
+        SYSTEM_RESOLVED.store(u32::from(system_theme_key() == "light"), Ordering::Relaxed);
+        apply_system_palette();
         return;
     }
     let (key, _, p) = THEME_PRESETS
