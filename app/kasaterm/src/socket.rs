@@ -2435,7 +2435,15 @@ impl Backend for PtyBackend {
                 } else {
                     format!("[{mark}] {who}({surface_id}) — {summary}")
                 };
-                let _ = self.send_text(Some(&parent), &format!("{line}\n"));
+                // tell 과 같은 포장이어야 **제출까지 된다** — claude 의 Ink 입력은
+                // CR(0x0d)로만 제출되고 bare \n 은 줄삽입일 뿐이라, \n 으로 보낸
+                // 보고가 부모 입력창에 미제출로 앉아 있었다(2026-08-15 실측: 보고
+                // 두 건이 오케스트레이터 입력창에 쌓인 채 사용자 엔터에 딸려
+                // 들어감). \x15 는 반쯤 친 초안 제거, bracketed paste 는 메뉴
+                // 상태에서도 안전한 주입, 꼬리 \r 는 핸들러(split_trailing_submit)
+                // 가 140ms 뒤 별개 read 로 보내 Enter 로 읽히게 한다.
+                let _ = self
+                    .send_text(Some(&parent), &format!("\x15\x1b[200~{line}\x1b[201~\r"));
             }
         }
         Ok(())
