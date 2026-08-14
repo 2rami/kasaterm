@@ -1536,11 +1536,16 @@ impl App {
                         tint_row(&mut composed[r], accent);
                         let mut rr = r + 1;
                         let mut face_row: Option<usize> = None;
-                        while rr < composed.len() && tell_wrap_continuation(&composed[rr])
-                        {
-                            face_row.get_or_insert(rr);
-                            tint_row(&mut composed[rr], accent);
-                            rr += 1;
+                        while rr < composed.len() {
+                            if tell_wrap_continuation(&composed[rr]) {
+                                face_row.get_or_insert(rr);
+                                tint_row(&mut composed[rr], accent);
+                                rr += 1;
+                            } else if msg_paragraph_gap(&composed, rr) {
+                                rr += 1;
+                            } else {
+                                break;
+                            }
                         }
                         // 프사 — tell 과 같은 관례: 본문 행 왼쪽 여백(들여쓰기 2칸)에
                         // 본문과 같은 행으로. 본문이 없으면(헤더뿐) 포기하고 색만.
@@ -8901,6 +8906,23 @@ fn tell_wrap_continuation(row: &[GridCell]) -> bool {
     }
 }
 
+fn msg_blank_row(row: &[GridCell]) -> bool {
+    row.iter().all(|c| c.ch == ' ' || c.ch == '\0')
+}
+
+/// 문단 사이 빈 행에서 팀메시지가 계속되는지 — 빈 행 뒤 첫 non-blank 행이 여전히
+/// wrap 연속 행이면 같은 메시지의 문단 구분이다. 빈 행을 무조건 끝으로 보면
+/// 여러 문단짜리 SendMessage 는 첫 문단만 학생색이 입혀졌다(2026-08-15 신고).
+/// 메시지가 실제로 끝나면 다음 블록은 구조 글리프(⏺·❯·╭ 박스)나 col 0 행이라
+/// 연속 판정에 안 걸려 여기서 멈춘다.
+fn msg_paragraph_gap(rows: &[Vec<GridCell>], at: usize) -> bool {
+    msg_blank_row(&rows[at])
+        && rows[at + 1..]
+            .iter()
+            .find(|r| !msg_blank_row(r))
+            .is_some_and(|r| tell_wrap_continuation(r))
+}
+
 /// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
 /// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
 /// 명 → 그것도 없으면 테마 accent.
@@ -11220,13 +11242,22 @@ fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
             '⏺' => true,
             // compact 화면은 알림 아래에 `⎿ Tip: …` 를 깐다(2026-08-13 스샷 실측).
             // 대화 마커와 같은 글리프지만 본문이 아니라 스피너 UI 의 일부다 — 이걸
-            // 마커로 세면 compact 알림이 스스로를 죽인다. Tip 행만 예외.
+            // 마커로 세면 compact 알림이 스스로를 죽인다. Tip 행만 예외였는데,
+            // 태스크 목록 위젯도 스피너 바로 아래에 `⎿  ◻ 항목` 으로 뜬다는 게
+            // 실측됐다(2026-08-15 peek: `✽ Ideating…` 아래 `⎿  ◻ 설정 다국어`).
+            // 이 행을 마커로 세면 태스크를 쓰는 working pane 전부에서 스피너가
+            // 죽어 학생이 걷다 말고 입력창 위에 서 버린다(거노 신고). 체크박스
+            // 글리프로 시작하는 ⎿ 행은 위젯이다 — 도구 출력 인용(`⎿ Read 50
+            // lines…`)은 일반 글자로 시작해 안 걸린다.
             '⎿' => {
                 let text: String = row[fi + 1..]
                     .iter()
                     .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
                     .collect();
-                !text.contains("Tip:")
+                let widget = text.trim_start().starts_with([
+                    '◻', '◼', '□', '■', '☐', '☑', '✔', '✘', '✖', '◉', '○', '●',
+                ]);
+                !(text.contains("Tip:") || widget)
             }
             _ => false,
         }
@@ -12072,6 +12103,29 @@ mod spinner_tests {
         assert_eq!(find_claude_spinner(&with_todo), Some((2, 0)));
         assert!(crate::input::rows_show_working(&with_todo));
     }
+
+    // 태스크 목록 위젯은 스피너 **바로 아래** `⎿  ◻ 항목` 으로 뜬다(2026-08-15
+    // 라이브 pane peek 실측). 이 ⎿ 를 대화 마커로 세면 태스크를 쓰는 working
+    // pane 전부에서 스피너가 죽어 학생이 걷다 말고 입력창 위에 서 버린다.
+    #[test]
+    fn spinner_survives_task_widget_below() {
+        let with_widget = vec![
+            row_from("✽ Ideating… (3m 55s · ↓ 11.4k tokens · esc to interrupt)"),
+            row_from("  ⎿  ◻ 설정 다국어 — 문구 사전과 언어 훅"),
+            row_from("     ◻ 다음 태스크"),
+            row_from("❯"),
+        ];
+        assert_eq!(find_claude_spinner(&with_widget), Some((0, 0)));
+        assert!(crate::input::rows_show_working(&with_widget));
+        // 도구 출력 인용 ⎿ 는 여전히 스피너를 죽이는 마커다 — 지난 턴 화면에
+        // 남은 스피너 문구를 살아 있다고 오인하지 않게 보호.
+        let quoted = vec![
+            row_from("✽ Ideating… (3m 55s · ↓ 11.4k tokens · esc to interrupt)"),
+            row_from("  ⎿  Read 50 lines"),
+            row_from("❯"),
+        ];
+        assert_eq!(find_claude_spinner(&quoted), None);
+    }
 }
 
 #[cfg(test)]
@@ -12276,6 +12330,23 @@ mod teammate_msg_tests {
         assert!(!tell_wrap_continuation(&row_from("⏺ 확인", 80)));
         assert!(!tell_wrap_continuation(&row_from("", 80)));
         assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
+    }
+
+    // 여러 문단 SendMessage: 문단 사이 빈 행은 메시지 끝이 아니다 — 빈 행 뒤
+    // 첫 non-blank 가 여전히 연속 행이면 계속, 구조 글리프(⏺ 등)면 거기서 끝.
+    // 빈 행에서 무조건 끊던 시절엔 첫 문단만 학생색이 입혀졌다(2026-08-15 신고).
+    #[test]
+    fn paragraph_gap_continues_multiparagraph_message() {
+        let rows: Vec<Vec<GridCell>> = vec![
+            row_from("  좋은 지적이다. (나) 로 간다", 80),
+            row_from("", 80),
+            row_from("  응답 형식은 이렇게 맞춰라.", 80),
+            row_from("", 80),
+            row_from("⏺ 다음 블록", 80),
+        ];
+        assert!(msg_paragraph_gap(&rows, 1), "문단 구분 빈 행은 계속");
+        assert!(!msg_paragraph_gap(&rows, 3), "다음 블록 앞 빈 행은 끝");
+        assert!(!msg_paragraph_gap(&rows, 0), "본문 행 자체는 gap 이 아니다");
     }
 
     // 인라인 재작성(학생 발신): 프사는 본문 위 행(호출측 이미지 패스)이고 첫 줄은
