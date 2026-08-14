@@ -1870,7 +1870,12 @@ impl App {
                         let extra = self.window.as_ref().map_or(0.0, |w| {
                             let s = w.scale_factor() as f32 * self.ui_zoom;
                             let raw_lh = w.inner_size().height as f32 / s;
-                            (raw_lh - bottom_edge).max(0.0)
+                            // 상태줄·dock 예약을 빼야 한다 — body_rects 의 stretch 는
+                            // 빼는데 여기만 안 빼서, 하단행 pane 의 박스가 창 끝까지
+                            // 내려가 포커스 테두리 아랫변이 나중에 그려지는 전역
+                            // 상태줄 뒤에 통째로 깔렸다(거노 2026-08-15 「하단바때문에
+                            // 포커스 테두리 밑에가 안보여」, 창 캡처 실측).
+                            (raw_lh - self.bottom_reserve_h() - bottom_edge).max(0.0)
                         });
                         base + extra
                     } else {
@@ -6973,6 +6978,60 @@ impl App {
                             hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
                     }
                     self.statusbar.tunnel_rect = Some(r);
+
+                    // 바깥 스위치 왼쪽으로 리소스 → 포트 순서(Orca 하단바처럼 —
+                    // 2026-08-15 지시 「포트 하단바로」·「리소스사용량도」).
+                    let mut rx = tx - 8.0;
+                    // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:
+                    // 이 줄의 존재 이유는 한도(왼쪽)와 조작(바깥·포트)이다.
+                    if let (Some((cpu, rss)), true) = (self.statusbar.res, win_w >= 640.0) {
+                        let gb = rss as f32 / (1024.0 * 1024.0 * 1024.0);
+                        let label = if gb >= 1.0 {
+                            format!("{cpu:.0}% · {gb:.1}G")
+                        } else {
+                            format!("{cpu:.0}% · {:.0}M", gb * 1024.0)
+                        };
+                        let lw = g.measure_chrome_text(&label, fs, false);
+                        rx -= lw + 12.0;
+                        g.draw_text(
+                            rx,
+                            ty,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                    // 포트 — 클릭하면 웹터미널(/term)이 브라우저로 열린다.
+                    self.statusbar.port_rect = None;
+                    if let Some(port) = self.statusbar.port.clone() {
+                        let label = format!(":{port}");
+                        let lw = g.measure_chrome_text(&label, fs, false);
+                        rx -= lw + 14.0;
+                        g.draw_text(
+                            rx,
+                            ty,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        let pr = (rx - 6.0, sy, lw + 12.0, STATUS_HEIGHT);
+                        {
+                            let (hx, hy) = self.cursor_px;
+                            g.hover_pointer |= hx >= pr.0
+                                && hx <= pr.0 + pr.2
+                                && hy >= pr.1
+                                && hy <= pr.1 + pr.3;
+                        }
+                        self.statusbar.port_rect = Some(pr);
+                    }
                 }
             }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로

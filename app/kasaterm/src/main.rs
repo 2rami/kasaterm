@@ -7555,7 +7555,7 @@ fn socket_path_hint() -> String {
 /// process failed to bind it — reaching it means panels quietly show another
 /// instance's panes. Kept because a panel with no port at all just hangs, but
 /// it is a wrong answer, not a neutral one.
-fn mcp_panel_port() -> String {
+pub(crate) fn mcp_panel_port() -> String {
     let trimmed_nonempty = |s: String| {
         let s = s.trim().to_string();
         (!s.is_empty()).then_some(s)

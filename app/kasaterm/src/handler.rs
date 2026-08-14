@@ -4232,6 +4232,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // 바깥주소(터널) 칩 — 전역이라 pane id 가 없다. 결과는 낙관
                     // 반영하고(끄기 TERM 은 소멸이 한 박자 늦어 즉시 pgrep 하면
                     // 아직 살아 보인다) 5초 뒤 폴이 확정한다.
+                    // 포트 라벨 — 웹터미널을 브라우저로 연다(폰 미러 입구를
+                    // 하단바에서 바로, 2026-08-15 지시).
+                    if self.statusbar.port_rect.is_some_and(|r| sb_hit(&r)) {
+                        if let Some(port) = self.statusbar.port.clone() {
+                            let _ = std::process::Command::new("open")
+                                .arg(format!("http://127.0.0.1:{port}/term"))
+                                .spawn();
+                        }
+                        return;
+                    }
                     if self.statusbar.tunnel_rect.is_some_and(|r| sb_hit(&r)) {
                         let want = !self.statusbar.tunnel_on.unwrap_or(false);
                         let msg = match kasa_mcp::tunnel::set(want) {

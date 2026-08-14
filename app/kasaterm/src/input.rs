@@ -365,6 +365,10 @@ impl App {
         }
         self.statusbar.tunnel_checked = Some(now);
         self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
+        // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
+        // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
+        self.statusbar.port = Some(crate::mcp_panel_port());
+        self.statusbar.res = sample_process_tree_usage();
     }
 
     fn refresh_pane_ultracode(&mut self) {
@@ -3092,6 +3096,51 @@ fn claude_theme_token(v: &str) -> Option<&str> {
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'));
     ok.then_some(v)
+}
+
+/// kasaterm 자신 + 자식 트리(PTY 셸·claude 들)의 (CPU %, RSS bytes) 합 —
+/// 하단바 리소스 표시(2026-08-15 지시). 터미널의 체감 무게는 앱 하나가 아니라
+/// 그 아래 도는 학생들까지라 트리로 합산한다. ps 한 번이라 5초 폴에 충분히 싸다.
+fn sample_process_tree_usage() -> Option<(f32, u64)> {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pcpu=,rss="])
+        .output()
+        .ok()?;
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<(u32, u32, f32, u64)> = txt
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((
+                it.next()?.parse().ok()?,
+                it.next()?.parse().ok()?,
+                it.next()?.parse().ok()?,
+                it.next()?.parse().ok()?,
+            ))
+        })
+        .collect();
+    let me = std::process::id();
+    let mut tree: std::collections::HashSet<u32> = std::collections::HashSet::from([me]);
+    // ppid 순서가 임의라 고정점까지 돈다 — 트리 깊이만큼(셸→claude→도구, 얕다).
+    loop {
+        let before = tree.len();
+        for (pid, ppid, _, _) in &rows {
+            if tree.contains(ppid) {
+                tree.insert(*pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+    let (mut cpu, mut rss_kb) = (0.0f32, 0u64);
+    for (pid, _, c, r) in &rows {
+        if tree.contains(pid) {
+            cpu += c;
+            rss_kb += r;
+        }
+    }
+    Some((cpu, rss_kb * 1024))
 }
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.

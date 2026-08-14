@@ -45,6 +45,14 @@ pub(crate) struct StatusbarState {
     pub(crate) tunnel_on: Option<bool>,
     pub(crate) tunnel_checked: Option<std::time::Instant>,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
+    /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
+    /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어
+    /// 터널 폴과 같은 5초 박자로 읽어 여기 캐시한다. 클릭 = /term 열기.
+    pub(crate) port: Option<String>,
+    pub(crate) port_rect: Option<(f32, f32, f32, f32)>,
+    /// 리소스 사용량 — kasaterm 자신 + 자식 트리(PTY 셸·claude 들) 합.
+    /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
+    pub(crate) res: Option<(f32, u64)>,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
