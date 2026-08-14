@@ -962,6 +962,7 @@ impl Backend for PtyBackend {
             surface_id.to_string(),
             title.to_string(),
         ));
+        mark_title_manual(&self.bound, surface_id, title);
         Ok(())
     }
 
@@ -2949,6 +2950,37 @@ pub fn students_dir() -> Option<std::path::PathBuf> {
         return Some(d.join("sprites"));
     }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"))
+}
+
+/// pane 제목을 **손으로** 바꾼 사실을 그 세션 기록에도 남긴다.
+///
+/// 이게 없으면 자동 제목 갱신(`kasaterm-title-sync.py`)이 다음 턴 끝에 덮어쓴다 — 그
+/// 스크립트는 `nameSource: "user"` 인 제목만 존중하기 때문이다. 자기 세션을 고치는 CLI
+/// 경로(`kasaterm-cli rename <이름>`)는 처음부터 같은 레코드를 남기고 있었고, **남의
+/// pane 을 고치는 이 경로만 빠져 있었다** — 그래서 오케스트레이터가 소환한 학생에게
+/// 역할 이름을 붙여도 한 턴 뒤 활동 요약으로 되돌아갔다(2026-08-15 지적).
+///
+/// 기록할 자리를 못 찾으면 조용히 지나간다. 제목 변경 자체는 이미 GUI 로 갔고,
+/// transcript 가 아직 없는 pane(셸만 도는 자리)도 이름은 가질 수 있어야 한다.
+fn mark_title_manual(bound: &Arc<Mutex<HashMap<String, PathBuf>>>, surface_id: &str, title: &str) {
+    use std::io::Write as _;
+    let Some(path) = bound.lock().ok().and_then(|b| b.get(surface_id).cloned()) else {
+        return;
+    };
+    // 파일명(stem)이 곧 세션 id — CLI 가 남기는 레코드와 같은 모양을 맞춘다.
+    let sid = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let record = serde_json::json!({
+        "type": "custom-title",
+        "customTitle": title,
+        "sessionId": sid,
+        "nameSource": "user",
+    });
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// User's `default_cwd` preference for where new shells start — mirrors the
