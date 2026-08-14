@@ -14,13 +14,13 @@
 
 kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자이너→개발 입문). 패키지/바이너리명 = **`kasaterm`**.
 
-[!] 작업 시작 전 반드시 [.memory/MEMORY.md](file://./.memory/MEMORY.md) 를 먼저 읽어라 — 거노님 개발 성향·todos·피드백, 그리고 **맨 위 핸드오프 블록**(직전 세션이 어디서 멈췄는지)부터 파악. 렌더러·색·아키텍처 배경, 렌더버그 카탈로그, 코드 수정 주의점은 전부 거기 토픽 파일에 있다.
+작업 시작 전 반드시 [공통 핸드오프](docs/agent-handoff.md)를 먼저 읽어라. `.memory/MEMORY.md`가 존재하면 세부 배경도 추가로 읽되, 로컬 메모리가 없다는 이유로 작업을 중단하지 않는다.
 
 ## 자율 테스트 우선
 
 사용자에게 "테스트 해보세요"라고 떠넘기지 말고 **너가 직접** 실행·확인·수정 사이클을 돌려라.
 
-⚠️ **광역 `pkill` 을 쓰지 마라.** 이 레포는 여러 pane 이 동시에 만진다 — `pkill -f "target/debug/kasaterm"` 은 **남이 지금 검증 중인 앱을 죽인다**(2026-08-13 실측: 남의 8초짜리 프로세스가 그렇게 사라지는 것을 봤다). `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같다. 죽은 쪽은 자기 앱이 왜 사라졌는지 알 방법이 없어 엉뚱한 데서 원인을 찾는다.
+주의: **광역 `pkill` 을 쓰지 마라.** 이 레포는 여러 pane 이 동시에 만진다 — `pkill -f "target/debug/kasaterm"` 은 **남이 지금 검증 중인 앱을 죽인다**(2026-08-13 실측: 남의 8초짜리 프로세스가 그렇게 사라지는 것을 봤다). `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같다. 죽은 쪽은 자기 앱이 왜 사라졌는지 알 방법이 없어 엉뚱한 데서 원인을 찾는다.
 
 **자기가 띄운 것만 거둬라.** 가장 안전한 건 앱이 스스로 끝나게 하는 것이다:
 
@@ -47,15 +47,15 @@ APP=$!            # 필요하면 이 PID 만 kill $APP
 bash scripts/build-app.sh      # dist/kasaterm.app 을 새로 굽는다
 ```
 
-⚠️ **다른 pane 이 이 레포의 Rust 를 고치는 중이면 이 스크립트는 거부한다** — 굽기는 워킹트리를 통째로 담으므로 남의 반쯤 만든 기능이 함께 들어가고, 운이 나쁘면 컴파일조차 안 된다(2026-08-11 지시). 누가 무엇을 만지는지 이름과 파일이 찍히니 **기다렸다가 다시 부르면 된다.** `--force` 는 그걸 알고도 강행할 때만.
+주의: **다른 pane 이 이 레포의 Rust 를 고치는 중이면 이 스크립트는 거부한다** — 굽기는 워킹트리를 통째로 담으므로 남의 반쯤 만든 기능이 함께 들어가고, 운이 나쁘면 컴파일조차 안 된다(2026-08-11 지시). 누가 무엇을 만지는지 이름과 파일이 찍히니 **기다렸다가 다시 부르면 된다.** `--force` 는 그걸 알고도 강행할 때만.
 
 그리고 **네 커밋을 반영하려고 급히 구울 필요가 없다.** 워킹트리는 공유라 나중에 누가 굽든 네 변경이 함께 실린다. 굽기는 "이제 다 됐으니 화면으로 확인하자"는 시점에 한 번이면 충분하다.
 
 그 다음은 **거노가 앱을 껐다 켜면 끝난다.** 종료 시 `arm_self_install`(main.rs)이 도우미를 남겨, 프로세스가 완전히 사라진 뒤 `dist` 를 설치본 자리에 복사한다. 그래서 다음에 켜는 것이 새 바이너리다. 다시 띄워 주지는 않는다 — 끄려고 끈 것일 수도 있어서다. 결과는 `$TMPDIR/kasaterm-selfinstall.log`.
 
-- **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). ⚠️ **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 거노가 `! scripts/relaunch.sh --no-build` 로 돌린다.
+- **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). 주의: **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 거노가 `! scripts/relaunch.sh --no-build` 로 돌린다.
 - 자기 설치는 **그 설치본으로 도는 앱**에서만, **빌드 트리의 번들이 더 새로울 때만** 움직인다. `cargo run` 개발 실행과 배포된 남의 머신에서는 아무 일도 안 한다.
-- ⚠️ **앱을 claude 세션 안에서 띄우지 마라**(pane 에서 `open`·relaunch). 그 앱이 claude 의 `CLAUDE_CODE_CHILD_SESSION`·`TEAMMATE_MODE`·`SESSION_ID` 를 물려받고, 그러면 그 앱이 낳는 **모든 pane** 의 claude 가 transcript 저장을 끈다. `scrub_inherited_claude_markers`(main.rs, 부팅 첫 줄)가 이제 그걸 지우지만, 애초에 안 물리는 게 낫다.
+- 주의: **앱을 claude 세션 안에서 띄우지 마라**(pane 에서 `open`·relaunch). 그 앱이 claude 의 `CLAUDE_CODE_CHILD_SESSION`·`TEAMMATE_MODE`·`SESSION_ID` 를 물려받고, 그러면 그 앱이 낳는 **모든 pane** 의 claude 가 transcript 저장을 끈다. `scrub_inherited_claude_markers`(main.rs, 부팅 첫 줄)가 이제 그걸 지우지만, 애초에 안 물리는 게 낫다.
 
 ## Windows 포트 인수인계 (2026-08-14)
 
@@ -86,11 +86,11 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 현재 `v0.1.19` MSI는 최신 upstream `main` 위로 Windows 커밋을 rebase한 뒤 다시 만들었다. Windows Installer 관리 설치로 75개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. `cargo check -p kasaterm`과 agent/shell scrollback 복원 회귀 테스트도 통과했다.
 
-`fork/windows-port`는 최신 upstream보다 8커밋 앞, 0커밋 뒤인 상태로 push했고 upstream PR은 `https://github.com/2rami/kasaterm/pull/2`다. 아직 하지 않은 것은 PR 병합, 버전 태그 생성, GitHub Release 게시다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 PR 병합 뒤 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징이나 PR 생성 완료를 정식 릴리스 완료로 오해하지 말 것.
+upstream PR #2는 `main`에 병합됐다. Windows 기능과 패키징 변경은 승인된 상태로 유지하며, 제거용 PR #3은 닫았다. 버전 태그와 GitHub Release는 별도 요청이 있을 때 진행한다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징이나 PR 병합을 정식 릴리스 완료로 오해하지 말 것.
 
 ## 함정·배경·수정 주의점은 메모리에
 
-렌더러/색 파이프라인·아키텍처 배경, 렌더버그 디버깅 카탈로그, 코드 수정 주의점(PTY reader **`try_send` 필수** 등), 성능 히스토리는 CLAUDE.md 에 중복해 두지 않는다 — `.memory/MEMORY.md` 토픽 파일에 있다. 1순위 = [[feedback_tmuxify_rendering_pipeline]] (렌더버그 카탈로그 + try_send 트랩). 코드 만지기 전 관련 토픽을 먼저 recall 할 것.
+공유 상태와 결정은 `docs/agent-handoff.md`에 남긴다. `.memory/MEMORY.md`가 존재하면 렌더러·색 파이프라인·아키텍처 배경과 코드 수정 주의점도 확인한다. 로컬 메모리에만 있는 중요한 결정은 다음 에이전트도 볼 수 있도록 공통 핸드오프로 옮긴다.
 
 ## 코드 맵 (main.rs 12896→5187줄, App 메서드 기능별 모듈 분할 — 2026-06-05 8모듈에서 이후 확장)
 
