@@ -20,14 +20,38 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 
 사용자에게 "테스트 해보세요"라고 떠넘기지 말고 **너가 직접** 실행·확인·수정 사이클을 돌려라.
 
-⚠️ **광역 `pkill` 을 쓰지 마라.** 이 레포는 여러 pane 이 동시에 만진다 — `pkill -f "target/debug/kasaterm"` 은 **남이 지금 검증 중인 앱을 죽인다**(2026-08-13 실측: 남의 8초짜리 프로세스가 그렇게 사라지는 것을 봤다). `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같다. 죽은 쪽은 자기 앱이 왜 사라졌는지 알 방법이 없어 엉뚱한 데서 원인을 찾는다.
+### ⛔ 검증용 앱을 띄우고 거두는 법 — 이 블록을 어기면 사용자 세션이 통째로 날아간다
 
-**자기가 띄운 것만 거둬라.** 가장 안전한 건 앱이 스스로 끝나게 하는 것이다:
+2026-08-15 실측: 검증용 앱을 띄웠다가 `pkill -f "target/debug/kasaterm"` 으로 거뒀더니 **사용자 창의 pane 9개에서 claude 가 전부 종료**됐다(전부 "Resume this session with:" 를 남기고 셸로 돌아갔다). 원인은 둘 중 하나이고 **둘 다 아래 규칙 하나로 막힌다** — ①`pkill -f` 의 패턴이 의도보다 넓게 잡혔거나 ②새로 띄운 앱이 같은 `session.json` 을 읽어 **같은 세션 id 로 `claude --resume` 을 다시 열어** 먼저 열려 있던 쪽을 밀어냈거나. 사용자는 자기 창이 왜 비었는지 알 방법이 없다.
+
+**띄울 때 — 세 개를 반드시 함께 준다.**
 
 ```bash
-KASATERM_AUTOQUIT_MS=10500 cargo run -p kasaterm > /tmp/kasaterm-run.log 2>&1 &
-APP=$!            # 필요하면 이 PID 만 kill $APP
+KASATERM_SESSION_FILE=/tmp/<네이름>-session.json \
+KASATERM_SETTINGS_FILE=/tmp/<네이름>-settings.json \
+KASATERM_AUTORESTORE=fresh \
+KASATERM_STUDENTS_DIR=/tmp/<네이름>-students \
+KASATERM_AUTOQUIT_MS=120000 \
+./target/debug/kasaterm > /tmp/<네이름>-app.log 2>&1 &
+APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 ```
+
+- **`KASATERM_SESSION_FILE`·`KASATERM_SETTINGS_FILE` 은 선택이 아니다.** 안 걸면 검증용 앱이 사용자의 `~/.config/kasaterm/session.json` 을 읽고, **실행 중 5초마다 자기 상태로 덮어쓴다**. 설정 파일 쪽은 사용자가 손수 적은 계정 라벨을 하네스 값으로 덮은 전례가 있다. 실데이터가 있어야 화면이 성립하면 원본을 스크래치로 **복사**해 그걸 가리켜라 — 빈 파일을 가리키면 검증하려던 UI 자체가 안 뜬다.
+- **`KASATERM_AUTORESTORE=fresh`** — 저장된 세션을 복원하지 않고 빈 창으로 뜬다. 사용자 pane 의 claude 세션과 같은 id 를 다툴 경로가 사라지고, 캡처가 복원 모달만 찍는 일도 없어진다.
+- **`KASATERM_STUDENTS_DIR`** 로 그림 폴더를 격리한다 — 업로드·삭제를 검증하면서 사용자가 실제로 쓰는 `~/.config/kasaterm/students/` 를 건드리지 않는다.
+- **포트는 지정하지 마라.** 8765 가 사용자 앱 것이므로 새 앱은 알아서 다른 포트를 고른다. 그 번호는 로그에서 읽어라:
+  `P=$(grep -o "HTTP MCP on 127.0.0.1:[0-9]*" /tmp/<네이름>-app.log | tail -1 | grep -o "[0-9]*$")`
+
+**거둘 때 — `pkill`·`killall` 을 쓰지 마라. 이름으로 죽이는 명령 자체가 금지다.** 위에서 잡아 둔 `$APP` 만 `kill` 하거나, `KASATERM_AUTOQUIT_MS` 로 스스로 끝나게 둬라. `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같은 규칙이다.
+
+**그래도 사용자 세션이 죽었다면 — 되살릴 수 있다.** 대화는 안 잃는다. `~/.config/kasaterm/session.json` 에 pane 마다 `session_id`·`model`·`effort` 가 남아 있으니, 그대로 재조립해 pane 에 다시 보내면 컨텍스트까지 그대로 이어진다(실측으로 9개 복구):
+
+```bash
+# session.json 의 leaf 를 훑어 pane 별로 한 줄씩 만든 뒤(내 pane 은 제외),
+kasaterm-cli send --surface "%N" "claude --resume <sid> --model '<model>' --effort '<effort>'"$'\n'
+```
+
+보내기 전에 `kasaterm-cli peek "%N"` 으로 그 pane 이 셸 프롬프트인지 확인해라 — claude 가 살아 있는 pane 에 보내면 그건 입력창에 글자를 밀어넣는 짓이 된다.
 
 `/tmp/tmux-501` 을 지워야 할 만큼 상태가 꼬였다면, 지우기 전에 다른 pane 이 쓰는 중인지 `kasaterm-cli board` 로 먼저 확인해라.
 
