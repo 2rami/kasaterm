@@ -352,6 +352,21 @@ impl App {
     /// claude 는 이 상태를 statusline payload 에 안 실어 준다(effort 는 low..max 뿐)
     /// → `ultracode-mark.py`(UserPromptSubmit)가 남기는 마커 파일이 유일한 신호다.
     /// **턴 단위**라 다음 프롬프트에 키워드가 없으면 훅이 지우고 테두리도 함께 꺼진다.
+    /// 바깥주소(터널) 칩 상태 — 조회에 pgrep 서브프로세스가 들어가므로 5초
+    /// 박자로만 본다(칩을 누른 손은 handler 가 낙관 반영하고 이 폴이 확정한다).
+    fn refresh_tunnel_chip(&mut self) {
+        let now = Instant::now();
+        if self
+            .statusbar
+            .tunnel_checked
+            .is_some_and(|t| now.duration_since(t).as_secs() < 5)
+        {
+            return;
+        }
+        self.statusbar.tunnel_checked = Some(now);
+        self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
+    }
+
     fn refresh_pane_ultracode(&mut self) {
         let dir = std::path::Path::new("/tmp/kasaterm-collab/ultracode");
         self.pane_ultracode = self
@@ -396,6 +411,7 @@ impl App {
         // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
         self.reap_idle_closed_panes();
         self.refresh_pane_ultracode();
+        self.refresh_tunnel_chip();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same

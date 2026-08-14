@@ -4229,6 +4229,30 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // 바깥주소(터널) 칩 — 전역이라 pane id 가 없다. 결과는 낙관
+                    // 반영하고(끄기 TERM 은 소멸이 한 박자 늦어 즉시 pgrep 하면
+                    // 아직 살아 보인다) 5초 뒤 폴이 확정한다.
+                    if self.statusbar.tunnel_rect.is_some_and(|r| sb_hit(&r)) {
+                        let want = !self.statusbar.tunnel_on.unwrap_or(false);
+                        let msg = match kasa_mcp::tunnel::set(want) {
+                            Ok(on) => {
+                                self.statusbar.tunnel_on = Some(on);
+                                if on {
+                                    match kasa_mcp::tunnel::host() {
+                                        Some(h) => format!("바깥주소 열림 — https://{h}"),
+                                        None => "바깥주소 열림".to_string(),
+                                    }
+                                } else {
+                                    "바깥주소 닫힘".to_string()
+                                }
+                            }
+                            Err(e) => e,
+                        };
+                        self.statusbar.tunnel_checked = Some(std::time::Instant::now());
+                        self.collab.toast = Some((msg, std::time::Instant::now()));
+                        window.request_redraw();
+                        return;
+                    }
                     if let Some(pid) = self
                         .statusbar.toggle_rects
                         .iter()

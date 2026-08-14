@@ -23,6 +23,7 @@ mod register;
 mod resume_visibility;
 pub mod standalone;
 pub mod team;
+pub mod tunnel;
 pub use http::{claude_bin, session_token, spawn_http_server, spawn_http_server_opts};
 pub use register::register_clients;
 

@@ -38,6 +38,13 @@ pub(crate) struct StatusbarState {
     /// 따로 되돌리지 않는다: 버퍼가 비면 `lineedit` 이 다음 조작에서 0 으로
     /// 클램프하므로 남은 값이 화면에 나올 일이 없다.
     pub(crate) menu_search_cursor: usize,
+    /// 바깥주소(터널) 칩 — **창** 우하단 고정(2026-08-15 지시). pane 소속이
+    /// 아니지만 발판 chips 와 같은 프레임에 그려지고 같은 손이 클릭을 가르므로
+    /// 여기 얹는다. `tunnel_on` 은 마지막 폴 결과(None=아직 모름), `tunnel_checked`
+    /// 는 폴 박자 게이트 — 상태 조회에 pgrep 이 들어가 매 프레임은 못 돈다.
+    pub(crate) tunnel_on: Option<bool>,
+    pub(crate) tunnel_checked: Option<std::time::Instant>,
+    pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window

@@ -6864,6 +6864,51 @@ impl App {
                         && hy <= acct_r.1 + acct_r.3;
                 }
                 self.status_account_rect = Some(acct_r);
+
+                // 바깥주소(터널) 스위치 — 이 줄의 **오른쪽 끝**(2026-08-15 지시
+                // 「하단우측」). 폰 하단바는 좁고, 문이 닫히면 폰은 접속 자체가
+                // 안 돼 스위치를 폰에 둘 이유가 없다 — 여닫는 손은 맥이다.
+                // 점이 상태다: 초록=열림, 흐림=닫힘. 누르면 handler 가 토글한다.
+                {
+                    let label = "바깥";
+                    let dot = 7.0_f32;
+                    let gap = 5.0_f32;
+                    let on = self.statusbar.tunnel_on == Some(true);
+                    let tw = g.measure_chrome_text(label, fs, false);
+                    let seg_w = dot + gap + tw;
+                    let tx = win_w - 12.0 - seg_w;
+                    round_rect(
+                        g,
+                        tx,
+                        sy + (STATUS_HEIGHT - dot) / 2.0,
+                        dot,
+                        dot,
+                        dot / 2.0,
+                        if on {
+                            theme::success()
+                        } else {
+                            theme::with_alpha(theme::text_dim(), 140)
+                        },
+                    );
+                    g.draw_text(
+                        tx + dot + gap,
+                        ty,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: if on { theme::text() } else { theme::text_dim() },
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    let r = (tx - 8.0, sy, seg_w + 20.0, STATUS_HEIGHT);
+                    {
+                        let (hx, hy) = self.cursor_px;
+                        g.hover_pointer |=
+                            hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
+                    }
+                    self.statusbar.tunnel_rect = Some(r);
+                }
             }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
             // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone
