@@ -5323,10 +5323,28 @@ impl App {
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
                     if let Some(p) = h.compact_pct {
-                        // 화면의 `▰▰▱ N%` 에서 읽은 진짜 진행률(2026-08-13 지시).
-                        // 퍼센트 행이 안 잡힌 프레임만 시간 루프로 폴백한다.
-                        g.rect(h.x, by, h.w, bar_h, theme::with_alpha(theme::accent(), 0x2e));
-                        g.rect(h.x, by, h.w * (p as f32 / 100.0), bar_h, theme::accent());
+                        // 화면의 `▰▰▱ N%` 에서 읽은 진짜 진행률(2026-08-13 지시)을
+                        // **칸이 차오르는 눈금 + 숫자**로(2026-08-15 지시 — 연속
+                        // 띠는 얼마나 남았는지 눈금이 없어 안 읽혔다). 숫자는
+                        // 오른쪽 버튼 무리를 피해 게이지 끝에 얹는다.
+                        let cf = 10.5;
+                        let label = format!("{p}%");
+                        let lw = g.measure_chrome_text(&label, cf, true);
+                        let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
+                        let track_w = (h.w - btn_zone - lw - 12.0).max(30.0);
+                        let used =
+                            draw_compact_cells(g, h.x, by, track_w, bar_h, theme::accent(), p);
+                        g.draw_text(
+                            h.x + used + 5.0,
+                            h.y + (PANE_HEADER_HEIGHT - cf) / 2.0,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: cf,
+                                color: theme::accent(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
                     } else {
                         g.compact_bar(h.x, by, h.w, bar_h, theme::accent());
                     }
@@ -5963,11 +5981,28 @@ impl App {
                             .get(fid)
                             .map_or(("", None), |a| (a.status.as_str(), a.compact_pct));
                         if st == "compacting" {
-                            g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                             if let Some(p) = pct {
-                                // 화면의 `▰▰▱ N%` 그대로 — 진짜 진행률(2026-08-13 지시).
-                                g.rect(*fx, *fy, fw * (p as f32 / 100.0), BAR_H, accent);
+                                // 화면의 `▰▰▱ N%` 그대로 — 진짜 진행률(2026-08-13
+                                // 지시)을 칸 게이지 + 숫자로(2026-08-15 지시, 헤더
+                                // pane 과 같은 형태 언어). 숫자는 게이지 아래
+                                // 오른쪽 끝 — compact 중에만 잠깐 얹힌다.
+                                let cf = 10.0;
+                                let label = format!("{p}%");
+                                let lw = g.measure_chrome_text(&label, cf, true);
+                                draw_compact_cells(g, *fx, *fy, *fw, BAR_H, accent, p);
+                                g.draw_text(
+                                    fx + fw - lw - 4.0,
+                                    fy + BAR_H + 2.0,
+                                    &label,
+                                    gpu::DrawOpts {
+                                        font_size: cf,
+                                        color: accent,
+                                        bold: true,
+                                        italic: false,
+                                    },
+                                );
                             } else {
+                                g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                                 g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
                             }
                         } else if st == "working" {
@@ -8430,3 +8465,32 @@ impl App {
     }
 }
 
+
+/// compact 진행 게이지 — 칸이 차오르는 눈금(2026-08-15 지시: 연속 띠는 얼마나
+/// 남았는지 눈금이 없어 안 읽혔다). 찬 칸은 accent 원색, 빈 칸은 흐린 트랙.
+/// 헤더 하단과 머리 없는 pane 상단이 같은 형태 언어를 쓰도록 한 손으로 그린다.
+/// 반환: 게이지가 실제로 차지한 폭(숫자를 그 오른쪽에 얹을 때 쓴다).
+fn draw_compact_cells(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    bar_h: f32,
+    accent: [u8; 4],
+    pct: u8,
+) -> f32 {
+    let seg_w = 7.0_f32;
+    let gap = 2.0_f32;
+    let n = (((w + gap) / (seg_w + gap)).floor() as usize).max(1);
+    let filled = ((pct.min(100) as f32 / 100.0) * n as f32).round() as usize;
+    for i in 0..n {
+        let sx = x + i as f32 * (seg_w + gap);
+        let col = if i < filled {
+            accent
+        } else {
+            theme::with_alpha(accent, 0x2e)
+        };
+        g.rect(sx, y, seg_w, bar_h, col);
+    }
+    n as f32 * (seg_w + gap) - gap
+}
