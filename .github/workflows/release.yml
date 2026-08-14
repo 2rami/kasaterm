@@ -39,54 +39,94 @@ jobs:
         with:
           node-version: '22'
 
-      # 로컬과 CI가 다른 조립 경로를 쓰면 학생 로스터나 UI가 한쪽에서만 빠지는
-      # 회귀를 놓치므로, payload 추출 검증까지 포함한 같은 스크립트를 호출한다.
-      - name: Build and verify Windows packages
+      # 아로나 웹뷰 정적 번들 — MSI 의 bin\arona-ui\ 로 들어간다.
+      # (mac 은 build-app.sh 가 .app Resources 에 넣는 것과 대칭.)
+      - name: Build arona-ui
         shell: pwsh
         run: |
-          $arguments = @()
-          if ($env:GITHUB_REF -like "refs/tags/v*") {
-            $arguments += @("-ExpectedVersion", $env:GITHUB_REF_NAME)
-          }
-          & .\scripts\windows\package.ps1 @arguments
+          cd web/arona-ui
+          npm ci
+          npm run build
 
-      - name: Locate Windows packages
-        id: windows_packages
+      # kasa-mcp 는 루트 Cargo.toml 에서 opt-level=0 으로 pin 돼 있다 —
+      # Windows rustc/LLVM 이 이 크레이트 최적화 시 STATUS_ACCESS_VIOLATION 으로 죽어서.
+      # kasaterm-cli 는 MSI 의 bin\ 에 exe 옆으로 실린다(main.wxs binary2) — pane
+      # 협업 RPC + statusline 담당.
+      - name: Build kasaterm (release)
+        run: |
+          cargo build --release -p kasaterm
+          cargo build --release -p kasa-socket --bin kasaterm-cli
+
+      # WinSparkle(자동 업데이트) prebuilt x64 DLL 을 빌드 산출물 옆에 둔다 —
+      # main.wxs 의 $(var.CargoTargetBinDir)\WinSparkle.dll 이 여기(target\release)를
+      # 가리키고, 런타임엔 win_sparkle.rs 의 LoadLibrary 가 exe 옆에서 찾는다.
+      - name: Bundle WinSparkle.dll
         shell: pwsh
         run: |
-          $msi = Get-ChildItem -Path dist -Filter *-windows-x86_64.msi | Select-Object -First 1
-          $zip = Get-ChildItem -Path dist -Filter *-windows-x86_64-portable.zip | Select-Object -First 1
-          if (-not $msi -or -not $zip) { throw "Windows package output is incomplete" }
-          "msi=$($msi.FullName)" >> $env:GITHUB_OUTPUT
-          "msi_hash=$($msi.FullName).sha256" >> $env:GITHUB_OUTPUT
-          "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
-          "zip_hash=$($zip.FullName).sha256" >> $env:GITHUB_OUTPUT
-          "name=kasaterm-windows-x86_64" >> $env:GITHUB_OUTPUT
+          $ver = "0.9.3"
+          Invoke-WebRequest "https://github.com/vslavik/winsparkle/releases/download/v$ver/WinSparkle-$ver.zip" -OutFile ws.zip
+          Expand-Archive ws.zip -DestinationPath ws -Force
+          Copy-Item "ws\WinSparkle-$ver\x64\Release\WinSparkle.dll" "target\release\WinSparkle.dll"
+          Write-Host "bundled WinSparkle.dll ($((Get-Item target\release\WinSparkle.dll).Length) bytes)"
+
+      # windows-latest 러너엔 WiX 3.14.1(Legacy, candle/light)이 이미 깔려 있고
+      # WIX 환경변수까지 잡혀 있다(2026-04 기준). main.wxs 도 v3 Legacy 스키마라
+      # WiX 별도 설치는 불필요. cargo-wix 서브커맨드만 있으면 된다.
+      - name: Install cargo-wix
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-wix
+
+      # arona-ui dist 를 WiX Component 로 하베스트 — main.wxs 의 AronaUiDir 아래에
+      # 붙는다(-dr, ComponentGroupRef Id=AronaUiGroup). -gg GUID 재생성은
+      # MajorUpgrade(전체 재설치) 라 릴리스 간 churn 무해.
+      - name: Harvest arona-ui (heat)
+        shell: pwsh
+        run: |
+          & "$env:WIX\bin\heat.exe" dir web\arona-ui\dist -cg AronaUiGroup -dr AronaUiDir -var var.AronaUiDir -srd -sfrag -gg -g1 -sreg -scom -nologo -out aronaui.wxs
+          if (-not (Test-Path aronaui.wxs)) { throw "heat produced no aronaui.wxs" }
+
+      # collab-hooks 번들(bin\collab-hooks\) — characters.json 로스터가 없으면
+      # Windows 에서 학생 배정이 통째로 꺼진다(테마 미설치 판정). 스크립트까지 같이
+      # 실어 mac .app Resources 와 내용 동형으로. __pycache__/문서류만 제외.
+      - name: Harvest collab-hooks (heat)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force collab-stage | Out-Null
+          Get-ChildItem app\kasaterm\collab-hooks -File | Where-Object { $_.Extension -ne '.md' } | Copy-Item -Destination collab-stage
+          & "$env:WIX\bin\heat.exe" dir collab-stage -cg CollabHooksGroup -dr CollabHooksDir -var var.CollabHooksDir -srd -sfrag -gg -g1 -sreg -scom -nologo -out collabhooks.wxs
+          if (-not (Test-Path collabhooks.wxs)) { throw "heat produced no collabhooks.wxs" }
+
+      # main.wxs 의 Source 경로가 워크스페이스 루트 기준(app\kasaterm\wix\...)이라
+      # 반드시 루트에서 실행한다. --no-build 로 위에서 만든 target\release\kasaterm.exe 재사용.
+      - name: Build MSI
+        run: cargo wix -p kasaterm --no-build --nocapture -I aronaui.wxs -I collabhooks.wxs -C "-dAronaUiDir=web\arona-ui\dist" -C "-dCollabHooksDir=collab-stage"
+
+      - name: Locate MSI
+        id: msi
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path target\wix -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "no .msi produced in target\wix" }
+          "path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($msi.Name)" >> $env:GITHUB_OUTPUT
           Write-Host "built $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
 
       # 태그 push → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
-      - name: Attach Windows packages to release
+      - name: Attach MSI to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ steps.windows_packages.outputs.msi }}
-            ${{ steps.windows_packages.outputs.msi_hash }}
-            ${{ steps.windows_packages.outputs.zip }}
-            ${{ steps.windows_packages.outputs.zip_hash }}
+          files: ${{ steps.msi.outputs.path }}
           fail_on_unmatched_files: true
 
       # 수동 실행 → artifact 로만(릴리스 불변, 빌드 검증용).
-      - name: Upload Windows package artifacts
+      - name: Upload MSI artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.windows_packages.outputs.name }}
-          path: |
-            ${{ steps.windows_packages.outputs.msi }}
-            ${{ steps.windows_packages.outputs.msi_hash }}
-            ${{ steps.windows_packages.outputs.zip }}
-            ${{ steps.windows_packages.outputs.zip_hash }}
+          name: ${{ steps.msi.outputs.name }}
+          path: ${{ steps.msi.outputs.path }}
 
   build-dmg:
     runs-on: macos-latest
