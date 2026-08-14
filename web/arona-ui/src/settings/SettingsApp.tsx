@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useTokens } from './useTokens';
 import { ThemeTab } from './ThemeTab';
+import { GeneralTab } from './GeneralTab';
 import { ShellTab } from './ShellTab';
 import { CharacterDetail } from './CharacterDetail';
 import { fetchValues, postAction } from './api';
@@ -23,7 +24,7 @@ const PORT = location.port || '8765';
 /// 좌측 nav — 네이티브와 같은 순서·같은 이름. `ready` 가 false 인 칸은 아직
 /// 네이티브에만 있다(이행 중이라는 걸 화면이 말해 준다).
 const CATS = [
-  { key: 'general', label: 'General', Icon: SlidersHorizontal, ready: false },
+  { key: 'general', label: 'General', Icon: SlidersHorizontal, ready: true },
   { key: 'appearance', label: 'Appearance', Icon: Sparkles, ready: false },
   { key: 'shell', label: 'Shell', Icon: Terminal, ready: true },
   { key: 'claude', label: 'Claude', Icon: Asterisk, ready: false },
@@ -47,6 +48,7 @@ const TITLES: Record<CatKey, { title: string; hint: string }> = {
 const TABS: Partial<
   Record<CatKey, (v: SettingsValues, reload: () => Promise<void>) => React.ReactNode>
 > = {
+  general: (v, reload) => <GeneralTab data={v.general} reload={reload} />,
   shell: (v, reload) => <ShellTab data={v.shell} reload={reload} />,
 };
 
