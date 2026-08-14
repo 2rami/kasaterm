@@ -3150,16 +3150,21 @@ pub fn write_claude_custom_theme(light: bool) {
         "name": "kasaterm",
         // 안 덮은 색은 여기서 상속된다 — 밝기가 어긋나면 그 상속분이 전부 뒤집힌다.
         "base": if light { "light" } else { "dark" },
+        // `background` 는 덮지 않는다. 이름과 달리 창 배경이 아니라 의미색이고
+        // (기본값이 청록 rgb(0,153,153) — 2026-08-15 바이너리 실측), 거기에
+        // 터미널 배경색을 넣으면 그 색을 쓰는 요소가 배경에 묻힌다. claude 는
+        // 배경을 칠하지 않고 터미널 것을 그대로 쓰므로 덮을 이유도 없다.
         "overrides": {
-            "background": hex(crate::theme::bg()),
             "text": hex(crate::theme::text()),
             "subtle": hex(crate::theme::text_mute()),
             "inactive": hex(crate::theme::text_mute()),
             "selectionBg": hex(crate::theme::surface_active()),
+            "promptBorder": hex(crate::theme::border()),
             // claude 자신을 가리키는 색과 승인 프롬프트 색이 우리 강조색을 따른다 —
             // 화면에서 「지금 이게 claude 다」를 말하는 자리라 팔레트가 가장 크게 읽힌다.
             "claude": hex(crate::theme::accent()),
             "permission": hex(crate::theme::accent()),
+            "suggestion": hex(crate::theme::accent()),
             "success": hex(crate::theme::success()),
             "error": hex(crate::theme::danger()),
             "warning": hex(crate::theme::attention()),
