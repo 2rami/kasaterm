@@ -936,21 +936,24 @@ impl App {
                 self.repaint_all();
             }
             SettingsAction::DeleteCustomTheme(slug) => {
+                // system 밝기 슬롯이 이것을 가리키는지는 **지우기 전에** 본다.
+                // 파일에 적힌 값은 옛 `"custom"` 일 수도 있어 문자열 그대로는 못
+                // 견준다 — `system_slot_theme` 이 실재 카드 키로 굳혀 준다.
+                let doomed = format!("custom:{slug}");
+                let orphaned: Vec<&str> = [("theme_system_light", true), ("theme_system_dark", false)]
+                    .into_iter()
+                    .filter(|(_, light)| theme::system_slot_theme(*light) == doomed)
+                    .map(|(k, _)| k)
+                    .collect();
                 let s = socket::read_settings();
                 let mut list = theme::custom_themes(&s);
                 list.retain(|e| theme::custom_slug(e) != slug);
                 write_custom_themes(list);
-                // system 밝기 슬롯이 방금 지운 팔레트를 가리키고 있으면 내장으로
-                // 되돌린다. 그냥 두면 팔레트는 프리셋으로 폴백해 도는데 화면의
-                // 슬롯 배지는 아무것도 안 고른 것처럼 보인다.
-                for (key, fallback) in
-                    [("theme_system_light", "light"), ("theme_system_dark", "dark")]
-                {
-                    if s.get(key).and_then(|x| x.as_str())
-                        == Some(format!("custom:{slug}").as_str())
-                    {
-                        socket::write_setting(key, serde_json::Value::String(fallback.to_string()));
-                    }
+                // 배정이 떴으면 내장으로 되돌린다. 그냥 두면 팔레트는 프리셋으로
+                // 폴백해 도는데 배정해 둔 사실만 화면에서 사라진다.
+                for key in orphaned {
+                    let fallback = if key.ends_with("light") { "light" } else { "dark" };
+                    socket::write_setting(key, serde_json::Value::String(fallback.to_string()));
                 }
                 self.settings_input = None;
                 self.begin_theme_fx();
@@ -2508,11 +2511,19 @@ fn put_web_code(key: &str, value: serde_json::Value) {
 fn theme_key_or_reject(id: &str) -> Result<String, String> {
     if let Some(slug) = theme::custom_key(id) {
         let list = theme::custom_themes(&socket::read_settings());
-        return match theme::find_custom(&list, slug) {
+        // 빈 slug(옛 `"custom"`)만 첫 항목으로 받아 준다. `find_custom` 의 폴백을
+        // 여기까지 들이면 사라진 팔레트를 골랐을 때 **다른 팔레트가 입혀지고
+        // 성공이라 답한다** — 창을 둘 띄워 한쪽에서 지우면 실제로 일어난다.
+        let found = if slug.is_empty() {
+            list.first()
+        } else {
+            list.iter().find(|e| theme::custom_slug(e) == slug)
+        };
+        return match found {
             Some(e) => Ok(format!("custom:{}", theme::custom_slug(e))),
             None => Err(reject(
                 "custom_theme_absent",
-                "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
+                "그 커스텀 팔레트가 없어요".to_string(),
             )),
         };
     }
@@ -4870,8 +4881,23 @@ fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
 /// 커스텀 팔레트 목록을 통째로 저장한다. 쓰기는 언제나 새 형식(`custom_themes`
 /// 배열)으로 나가고, 옛 `custom_theme` 오브젝트는 건드리지 않는다 — 읽기가 배열을
 /// 우선하므로 무해하고, 지우면 구버전으로 되돌아간 사람의 팔레트가 사라진다.
+///
+/// 이름이 빠진 항목(옛 오브젝트가 그대로 넘어온 첫 항목)은 여기서 채워 넣는다.
+/// 읽기 쪽 기본값과 같은 값이라 동작은 어차피 같지만, 파일을 열었을 때 첫 항목만
+/// 이름이 없으면 그게 고칠 수 있는 자리인지 알 수가 없다.
 fn write_custom_themes(list: Vec<serde_json::Value>) {
-    socket::write_setting("custom_themes", serde_json::Value::Array(list));
+    let named: Vec<serde_json::Value> = list
+        .into_iter()
+        .map(|mut e| {
+            let (slug, label) = (theme::custom_slug(&e), theme::custom_label(&e));
+            if let Some(o) = e.as_object_mut() {
+                o.entry("slug").or_insert(serde_json::Value::String(slug));
+                o.entry("label").or_insert(serde_json::Value::String(label));
+            }
+            e
+        })
+        .collect();
+    socket::write_setting("custom_themes", serde_json::Value::Array(named));
 }
 
 /// 커스텀 팔레트 `slug` 의 지금 유효값 27칸(#rrggbb) — `theme::PALETTE_KEYS` 11개

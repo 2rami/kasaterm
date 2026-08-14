@@ -507,7 +507,9 @@ export const en: Strings = {
     cwd_path_empty: 'The path can’t be empty',
     file_open_cmd_empty: 'The command can’t be empty',
     shell_path_empty: 'The shell path can’t be empty',
-    custom_theme_absent: 'You haven’t made a custom palette yet',
+    // 팔레트가 하나도 없을 때와, 고른 팔레트가 이미 치워졌을 때 둘 다 이 코드다.
+    custom_theme_absent: 'That custom palette isn’t there',
+    label_empty: 'Give it a name',
     palette_slot_missing: 'That color slot doesn’t exist',
     hex_invalid: 'Write it as #rrggbb',
     step_out_of_range: 'One step at a time',

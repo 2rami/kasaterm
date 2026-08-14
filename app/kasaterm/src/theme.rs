@@ -593,10 +593,24 @@ pub fn system_slot_theme(light: bool) -> String {
 }
 
 fn system_slot_theme_in(s: &serde_json::Value, light: bool) -> String {
-    s.get(if light { "theme_system_light" } else { "theme_system_dark" })
+    let fallback = if light { "light" } else { "dark" };
+    let raw = s
+        .get(if light { "theme_system_light" } else { "theme_system_dark" })
         .and_then(|x| x.as_str())
-        .unwrap_or(if light { "light" } else { "dark" })
-        .to_string()
+        .unwrap_or(fallback);
+    // 커스텀 배정은 **지금 실재하는 카드 키**로 굳혀 돌려준다. 설정 화면의 슬롯
+    // 배지는 카드 키와 문자열로 견주므로, 옛 `"custom"` 이나 지워진 slug 를 그대로
+    // 내보내면 어느 카드도 안 눌린 것처럼 보인다 — 배정해 둔 사실이 화면에서
+    // 사라진다. 가리키던 팔레트가 없어졌으면 내장으로 떨어지고, 이는
+    // `apply_system_palette` 의 폴백과 같은 판정이다.
+    if let Some(slug) = custom_key(raw) {
+        let list = custom_themes(s);
+        return match find_custom(&list, slug) {
+            Some(e) => format!("custom:{}", custom_slug(e)),
+            None => fallback.to_string(),
+        };
+    }
+    raw.to_string()
 }
 
 /// system 모드가 지금 이 순간 실제로 입힐 팔레트를 굳힌다 — OS 밝기가 가리키는
@@ -1601,6 +1615,27 @@ mod custom_theme_tests {
         let (slug, label) = next_custom_name(&list);
         assert_eq!((slug.as_str(), label.as_str()), ("palette-4", "Custom 4"));
         assert_eq!(next_custom_name(&[]).0, "palette-1");
+    }
+
+    /// system 밝기 슬롯은 실재하는 카드 키로 굳혀 나가야 한다 — 설정 화면이 그
+    /// 문자열을 카드 키와 견주므로, 옛 `"custom"` 이나 지워진 slug 를 그대로
+    /// 내보내면 배정해 둔 사실이 화면에서 사라진다.
+    #[test]
+    fn system_slot_normalizes_custom_keys() {
+        // 옛 값 "custom" → 첫 항목의 실제 키.
+        let s = json!({
+            "theme_system_dark": "custom",
+            "custom_themes": [{ "slug": "one", "base": "dark" }],
+        });
+        assert_eq!(system_slot_theme_in(&s, false), "custom:one");
+        // 가리키던 팔레트가 사라졌으면 내장으로 — apply_system_palette 의 폴백과
+        // 같은 판정이라 화면과 실제 색이 어긋나지 않는다.
+        let gone = json!({ "theme_system_dark": "custom:없다", "custom_themes": [] });
+        assert_eq!(system_slot_theme_in(&gone, false), "dark");
+        // 프리셋과 미설정은 그대로.
+        let preset = json!({ "theme_system_light": "schale-light" });
+        assert_eq!(system_slot_theme_in(&preset, true), "schale-light");
+        assert_eq!(system_slot_theme_in(&json!({}), true), "light");
     }
 
     /// 시드는 base 를 그대로 베끼고, 부분 항목은 빠진 키만 base 에서 채운다.
