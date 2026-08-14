@@ -4257,18 +4257,16 @@ pub(crate) struct PaneStatus {
         Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<kasa_pty::CommandBlock>>>>,
 }
 
-/// 테마 플립 때 떠 있는 claude 한 pane 을 갈아입히는 상태기계 한 칸
+/// 테마 플립 때 떠 있는 claude 한 pane 을 갈아입히는 대기표 한 장
 /// (`poll_claude_retheme`, input.rs). idle + 빈 입력줄이 될 때까지 기다렸다
-/// `/theme` 피커를 열고, 화면 셀에서 목표 항목의 번호를 읽어 누른다.
+/// `/config theme=<값>` 을 쳐 준다.
 struct RethemeState {
     /// 이 시각을 지나면 포기한다 — 영원히 바쁜 pane 에 큐가 눌러붙지 않게.
     expires: Instant,
-    /// Some(t) = `/theme` 을 보냈고 피커 렌더를 기다리는 중(t = 보낸 시각).
-    /// 일정 시간 안에 피커가 안 보이면 Esc 로 청소하고 포기한다.
-    opened: Option<Instant>,
-    /// 피커에서 고를 항목의 라벨(예: "Dark mode (colorblind-friendly)").
-    /// 플립 시점의 settings.json theme 값에서 한 번 계산해 박아 둔다.
-    label: String,
+    /// `/config theme=` 뒤에 붙일 값. 플립 시점의 settings.json theme 값을
+    /// 한 번 읽어 박아 둔다(입력줄에 그대로 타이핑되므로 토큰 검증을 통과한
+    /// 값만 온다).
+    value: String,
 }
 
 struct App {
