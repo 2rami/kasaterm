@@ -35,11 +35,13 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 MARK_DIR = pathlib.Path(os.environ.get("KASATERM_ULTRACODE_DIR") or "/tmp/kasaterm-collab/ultracode")
 STATE_DIR = MARK_DIR / ".state"
 SESSIONS_DIR = pathlib.Path(os.path.expanduser("~/.claude/sessions"))
+CACHE_V = 2  # argv 기준선 도입(2026-08-15) — 옛 캐시의 on=False 를 그대로 믿으면 안 된다
 
 CHUNK = 1 << 20
 OVERLAP = 512  # 청크 경계에 걸친 니들을 양쪽에서 다 보게 하는 여유
@@ -54,12 +56,22 @@ TS_RE = re.compile(rb'"timestamp":"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)')
 
 
 def _proc_start(sid):
-    """이 sid 를 돌리는 살아 있는 claude 의 시작 시각(epoch 초). 못 찾으면 0."""
+    """이 sid 를 돌리는 살아 있는 claude 의 (시작 시각 epoch 초, argv 에
+    `--effort ultracode` 가 있나). 못 찾으면 (0, False).
+
+    argv 를 보는 이유: kasaterm 세션 복원은 ultracode 였던 pane 을
+    `claude --resume … --effort ultracode` 로 되살리는데, 플래그 launch 는
+    transcript 에 enter attachment 를 **안 남긴다**(2026-08-15 실측 — print 로
+    켜고 뒤져도 0건). 옛 enter 마커는 아래 시작-시각 게이트가 유령으로
+    버리므로, argv 에서 기준선을 얻지 않으면 재개 첫 프롬프트에서 마커가
+    지워지고 그다음 재시작은 xhigh 로 풀린다.
+    """
     best = 0.0
+    ultra = False
     try:
         names = os.listdir(SESSIONS_DIR)
     except OSError:
-        return best
+        return best, ultra
     for name in names:
         if not name.endswith(".json"):
             continue
@@ -84,7 +96,18 @@ def _proc_start(sid):
         except OSError:
             pass
         best = max(best, started / 1000.0)
-    return best
+        try:
+            args = subprocess.run(
+                ["ps", "-o", "args=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout
+        except Exception:
+            args = ""
+        if "--effort ultracode" in args:
+            ultra = True
+    return best, ultra
 
 
 def _pick(buf, base):
@@ -159,7 +182,7 @@ def _session_on(tpath, sid, safe):
         st = os.stat(tpath)
     except OSError:
         return False
-    started = _proc_start(sid)
+    started, argv_ultra = _proc_start(sid)
     cache = STATE_DIR / f"{safe}.json"
     prev = None
     try:
@@ -169,6 +192,7 @@ def _session_on(tpath, sid, safe):
         prev = None
     warm = (
         isinstance(prev, dict)
+        and prev.get("v") == CACHE_V
         and prev.get("ino") == st.st_ino
         and prev.get("start") == started
         and isinstance(prev.get("size"), int)
@@ -179,15 +203,22 @@ def _session_on(tpath, sid, safe):
             on = bool(prev.get("on"))
             hit = _scan_forward(f, prev["size"] - OVERLAP, st.st_size)
         else:
-            on = False
+            # 마커가 하나도 없을 때의 기준선 — 이 프로세스가 `--effort ultracode`
+            # 로 떴다면 시작 시점 상태는 ON 이다(kasaterm 복원 경로).
+            on = argv_ultra
             hit = _scan_back(f, st.st_size)
         if hit:
             kind, ts = _read_marker(f, hit[0], hit[1])
-            on = kind and not (started and ts and ts < started)
+            # 유령(이 프로세스 시작 전 마커)은 판정을 못 바꾼다 — 기준선/캐시 유지.
+            # 이 프로세스 안에서 찍힌 마커만 last-wins 로 상태를 덮는다.
+            if not (started and ts and ts < started):
+                on = kind
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"ino": st.st_ino, "start": started, "size": st.st_size, "on": on}))
+        tmp.write_text(
+            json.dumps({"v": CACHE_V, "ino": st.st_ino, "start": started, "size": st.st_size, "on": on})
+        )
         os.replace(tmp, cache)
     except OSError:
         pass

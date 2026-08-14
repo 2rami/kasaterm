@@ -2473,7 +2473,20 @@ impl App {
     /// App 에 같은 맵을 하나 더 두지 않고 그때그때 떠 오는 이유는, App struct 의 필드
     /// 정의가 워커 여럿이 동시에 못 만지는 병목이기 때문이다(CLAUDE.md).
     pub(crate) fn agent_cfg_snapshot(&self) -> HashMap<String, (String, String)> {
-        self.socket_backend.as_ref().map(|b| b.agent_cfg_snapshot()).unwrap_or_default()
+        let mut cfg = self
+            .socket_backend
+            .as_ref()
+            .map(|b| b.agent_cfg_snapshot())
+            .unwrap_or_default();
+        // ultracode 는 statusline 이 xhigh 로 보고한다(claude 가 effort 페이로드에 안
+        // 실음) — 그대로 저장하면 재시작 복원이 xhigh 로 잇는다(2026-08-15 신고
+        // 「울트라코드로 이어가는거 왜안돼」). 마커 판정(pane_ultracode — 입력박스
+        // 보라 글로우와 같은 근거)이 참인 pane 은 여기서 덮는다. `--effort ultracode`
+        // 는 CLI 가 실제로 받아 켠다(print 자기보고 실측: ultracode→ON, xhigh→OFF).
+        for pane in &self.pane_ultracode {
+            cfg.entry(pane.clone()).or_default().1 = "ultracode".to_string();
+        }
+        cfg
     }
 
     pub(crate) fn session_state_json(&self) -> Option<serde_json::Value> {
