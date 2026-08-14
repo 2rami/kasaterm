@@ -1594,8 +1594,11 @@ impl Backend for PtyBackend {
         // 오래 걸릴 수 있어 여유를 더 준다. 무한 대기는 여전히 안 된다(소켓 워커가
         // 물리면 다른 명령까지 함께 멈춘다).
         match rx.recv_timeout(std::time::Duration::from_secs(20)) {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => anyhow::bail!("{e}"),
+            Ok(Ok(v)) => Ok(crate::settings::merge_web_codes(v)),
+            // 거부도 **JSON 으로** 돌려준다. `Err` 로 올려보내면 문자열 하나만 남아
+            // 문구 코드를 실을 자리가 없다(웹은 그 코드로 자기 말로 옮긴다) — 회신
+            // 형식은 HTTP 쪽이 만들던 `{ok:false, error}` 와 같다.
+            Ok(Err(e)) => Ok(crate::settings::reject_json(e)),
             Err(_) => anyhow::bail!("시간 안에 안 끝났어요"),
         }
     }

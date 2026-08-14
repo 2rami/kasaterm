@@ -1215,8 +1215,20 @@ impl App {
         // 토글은 「눌렀다」만으로는 반영을 알 수 없다 — 파일에 남은 값이 메모리와
         // 같은지로 판정한다(`toggle-persona` 와 같은 규칙).
         let saved_bool = |key: &str| socket::read_settings().get(key).and_then(|v| v.as_bool());
-        let unknown = |v: &str| format!("'{v}' 은(는) 고를 수 없는 값이에요");
-        let no_slot = |v: &str| format!("'{v}' 계정이 없어요");
+        let unknown = |v: &str| {
+            reject_with(
+                "value_not_allowed",
+                serde_json::json!({ "value": v }),
+                format!("'{v}' 은(는) 고를 수 없는 값이에요"),
+            )
+        };
+        let no_slot = |v: &str| {
+            reject_with(
+                "account_missing",
+                serde_json::json!({ "account": v }),
+                format!("'{v}' 계정이 없어요"),
+            )
+        };
         let arg = label.unwrap_or("").trim().to_string();
         match action {
             // ── 화면 데이터 ──────────────────────────────────────────────
@@ -1243,7 +1255,7 @@ impl App {
             }
             "cwd-path" => {
                 if arg.is_empty() {
-                    return Err("경로를 비울 수 없어요".to_string());
+                    return Err(reject("cwd_path_empty", "경로를 비울 수 없어요".to_string()));
                 }
                 self.set_cwd_mode = arg.clone();
                 self.settings_save();
@@ -1258,14 +1270,18 @@ impl App {
             "file-open-app" => {
                 // 빈 문자열 = OS 연결 프로그램(네이티브의 "기본 앱" 칸).
                 if !id.is_empty() && !crate::proc::open_with_apps().iter().any(|(n, _)| n == id) {
-                    return Err(format!("'{id}' 앱을 못 찾았어요"));
+                    return Err(reject_with(
+                        "app_not_found",
+                        serde_json::json!({ "app": id }),
+                        format!("'{id}' 앱을 못 찾았어요"),
+                    ));
                 }
                 self.settings_apply(SettingsAction::FileOpenApp(id.to_string()));
                 Ok(self.set_file_open_app == id)
             }
             "file-open-cmd" => {
                 if arg.is_empty() {
-                    return Err("명령을 비울 수 없어요".to_string());
+                    return Err(reject("file_open_cmd_empty", "명령을 비울 수 없어요".to_string()));
                 }
                 self.set_file_open_cmd = arg.clone();
                 self.settings_save();
@@ -1327,7 +1343,10 @@ impl App {
                     // 편집본이 없으면 고를 수 없다 — 네이티브도 그때는 카드를 아예
                     // 안 그린다. 만드는 건 `start-custom-theme` 의 몫이다.
                     if socket::read_settings().get("custom_theme").is_none() {
-                        return Err("커스텀 팔레트를 아직 만들지 않았어요".to_string());
+                        return Err(reject(
+                            "custom_theme_absent",
+                            "커스텀 팔레트를 아직 만들지 않았어요".to_string(),
+                        ));
                     }
                     "custom"
                 } else {
@@ -1335,7 +1354,13 @@ impl App {
                         .iter()
                         .find(|(k, _, _)| *k == id)
                         .map(|(k, _, _)| *k)
-                        .ok_or_else(|| format!("'{id}' 테마가 없어요"))?
+                        .ok_or_else(|| {
+                            reject_with(
+                                "theme_missing",
+                                serde_json::json!({ "theme": id }),
+                                format!("'{id}' 테마가 없어요"),
+                            )
+                        })?
                 };
                 self.settings_apply(SettingsAction::ThemeMode(key));
                 Ok(theme::theme_name() == key)
@@ -1351,10 +1376,10 @@ impl App {
             "palette-hex" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
                 if i >= theme::PALETTE_KEYS.len() + 16 {
-                    return Err("없는 색 칸이에요".to_string());
+                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
                 }
                 if theme::parse_hex(&arg).is_none() {
-                    return Err("#rrggbb 꼴로 적어 주세요".to_string());
+                    return Err(reject("hex_invalid", "#rrggbb 꼴로 적어 주세요".to_string()));
                 }
                 // 네이티브는 타이핑 버퍼(`set_palette_edit`)를 거쳐 굳힌다. 웹에는 그
                 // 버퍼가 없으니 완성된 값을 심고 같은 커밋을 태운다.
@@ -1392,7 +1417,7 @@ impl App {
             "font-size-delta" | "ui-zoom-delta" => {
                 let d: i8 = id.parse().map_err(|_| unknown(id))?;
                 if !matches!(d, -1 | 1) {
-                    return Err("한 칸씩만 움직일 수 있어요".to_string());
+                    return Err(reject("step_out_of_range", "한 칸씩만 움직일 수 있어요".to_string()));
                 }
                 let font = action == "font-size-delta";
                 let before = if font { self.font_size } else { self.ui_zoom };
@@ -1405,7 +1430,7 @@ impl App {
                 // 끝값(9..32px · 50..300%)에 닿으면 안 움직인다. 그건 고장이 아니라
                 // 더 갈 곳이 없다는 뜻이라, 조용한 실패 대신 문구로 말한다.
                 if (after - before).abs() < 0.001 {
-                    return Err("더는 못 가요".to_string());
+                    return Err(reject("step_at_limit", "더는 못 가요".to_string()));
                 }
                 Ok(true)
             }
@@ -1425,7 +1450,7 @@ impl App {
             }
             "shell-custom" => {
                 if arg.is_empty() {
-                    return Err("셸 경로를 비울 수 없어요".to_string());
+                    return Err(reject("shell_path_empty", "셸 경로를 비울 수 없어요".to_string()));
                 }
                 self.set_shell = arg.clone();
                 self.settings_input = None;
@@ -1559,7 +1584,7 @@ impl App {
             }
             "save-feedback" => {
                 if arg.is_empty() {
-                    return Err("무엇이 불편했는지 적어 주세요".to_string());
+                    return Err(reject("feedback_empty", "무엇이 불편했는지 적어 주세요".to_string()));
                 }
                 // 네이티브는 편집 버퍼를 저장한다 — 웹에는 그 버퍼가 없으니 본문을
                 // 심고 같은 저장을 태운다. 성공하면 `save_feedback` 이 버퍼를 비우므로
@@ -1573,7 +1598,11 @@ impl App {
                 self.settings_apply(SettingsAction::OpenFeedbackDir);
                 Ok(true)
             }
-            other => Err(format!("모르는 액션이에요: {other}")),
+            other => Err(reject_with(
+                "action_unknown",
+                serde_json::json!({ "action": other }),
+                format!("모르는 액션이에요: {other}"),
+            )),
         }
     }
 
@@ -1641,25 +1670,47 @@ impl App {
                 // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
                 // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
                 // 모른다고 말한다.
-                let (mut sub, kind) = match &probe {
-                    Some(p) if !p.logged_in => ("로그인 필요".to_string(), "danger"),
-                    Some(p) if !p.email.is_empty() => (p.email.clone(), "mute"),
-                    _ => ("확인 중…".to_string(), "faint"),
+                //
+                // 코드가 붙는 것은 우리가 지어낸 말 셋뿐이다. 이메일·조직명은
+                // 데이터라 옮길 것이 없다.
+                let (mut sub, kind, mut sub_code) = match &probe {
+                    Some(p) if !p.logged_in => {
+                        ("로그인 필요".to_string(), "danger", Some("account_login_required"))
+                    }
+                    Some(p) if !p.email.is_empty() => (p.email.clone(), "mute", None),
+                    _ => ("확인 중…".to_string(), "faint", Some("account_checking")),
                 };
                 if let Some(org) = probe.as_ref().and_then(|p| team_org(&p.email, &p.org)) {
                     sub = format!("{sub} · {org}");
+                    // 조직명이 붙으면 더는 통문장이 아니다 — 코드로 갈면 조직이
+                    // 사라지므로 그때는 서버 문구를 그대로 쓰게 둔다.
+                    sub_code = None;
                 }
-                let name = match idx {
-                    None => "기본".to_string(),
-                    Some(i) => account_display(&id, &label, &format!("계정 {}", i + 2)),
+                let numbered = idx.map(|i| format!("계정 {}", i + 2));
+                let name = match (&idx, &numbered) {
+                    (None, _) => "기본".to_string(),
+                    (Some(_), Some(fb)) => account_display(&id, &label, fb),
+                    (Some(_), None) => String::new(),
+                };
+                // 라벨도 이메일도 없어 번호로 부르는 경우만 옮길 말이다.
+                let name_code = match (&idx, &numbered) {
+                    (None, _) => Some("account_default"),
+                    (Some(_), Some(fb)) if *fb == name => Some("account_numbered"),
+                    _ => None,
                 };
                 let sub = match sub.strip_prefix(name.as_str()) {
                     Some(rest) => rest.trim_start_matches(" · ").to_string(),
                     None => sub,
                 };
+                if sub.is_empty() {
+                    sub_code = None;
+                }
                 serde_json::json!({
                     "id": id, "label": label, "name": name,
-                    "sub": sub, "sub_kind": kind, "slot": idx.is_some(),
+                    "name_code": name_code,
+                    "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
+                    "sub": sub, "sub_kind": kind, "sub_code": sub_code,
+                    "slot": idx.is_some(),
                 })
             })
             .collect();
@@ -1675,20 +1726,32 @@ impl App {
                 // claude 판과 달리 "확인 중" 이 없다 — 신원이 파일 하나에 들어 있어
                 // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
                 let ident = codex_identity(&id);
+                let name = match (idx, label.is_empty()) {
+                    (None, _) => "기본".to_string(),
+                    (Some(i), true) => ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2)),
+                    (Some(_), false) => label.clone(),
+                };
+                let name_code = match (idx, label.is_empty()) {
+                    (None, _) => Some("account_default"),
+                    // 이메일도 라벨도 없어 번호로 부르는 경우만 옮길 말이다.
+                    (Some(_), true) if ident.is_none() => Some("account_numbered"),
+                    _ => None,
+                };
+                let sub = if idx.is_some() && label.is_empty() && ident.is_some() {
+                    String::new()
+                } else {
+                    ident.clone().unwrap_or_else(|| "로그인 필요".to_string())
+                };
                 serde_json::json!({
                     "id": id,
                     "label": label,
-                    "name": match (idx, label.is_empty()) {
-                        (None, _) => "기본".to_string(),
-                        (Some(i), true) => ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2)),
-                        (Some(_), false) => label.clone(),
-                    },
-                    "sub": if idx.is_some() && label.is_empty() && ident.is_some() {
-                        String::new()
-                    } else {
-                        ident.clone().unwrap_or_else(|| "로그인 필요".to_string())
-                    },
+                    "name": name,
+                    "name_code": name_code,
+                    "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
+                    "sub": sub,
                     "sub_kind": if ident.is_some() { "mute" } else { "danger" },
+                    "sub_code": (ident.is_none() && !sub.is_empty())
+                        .then_some("account_login_required"),
                     "slot": idx.is_some(),
                 })
             })
@@ -2282,6 +2345,99 @@ fn publish_web_values(v: serde_json::Value) {
 /// 다음 요청이 옛 값을 받아 가, 화면이 조용히 낡는다.
 pub(crate) fn take_web_values() -> Option<serde_json::Value> {
     web_values_cell().lock().ok().and_then(|mut c| c.take())
+}
+
+/// 이번 액션이 남긴 문구 코드. 값 스냅샷과 같은 이유로 전역을 지난다 — 회신 봉투에
+/// 실을 칸이 없어서다.
+///
+/// 코드는 **문구를 대신하지 않고 곁들인다.** 웹은 코드가 있으면 자기 사전에서
+/// 문구를 만들고, 없으면 서버 문구를 그대로 쓴다(2026-08-15 형식 합의) — 그래서
+/// 코드가 안 붙은 자리도 화면이 안 깨지고, 코드화를 한 칸씩 늘려 갈 수 있다.
+fn web_codes_cell() -> &'static std::sync::Mutex<serde_json::Map<String, serde_json::Value>> {
+    static CELL: std::sync::OnceLock<
+        std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(Default::default)
+}
+
+fn put_web_code(key: &str, value: serde_json::Value) {
+    if let Ok(mut c) = web_codes_cell().lock() {
+        c.insert(key.to_string(), value);
+    }
+}
+
+/// 거부 문구와 그 코드를 한 번에 만든다. 반환값은 **사람이 읽을 문구** — 코드는
+/// 곁으로 빠져나가므로 호출부는 지금처럼 문자열만 다루면 된다.
+fn reject(code: &'static str, msg: String) -> String {
+    put_web_code("error_code", serde_json::Value::String(code.to_string()));
+    msg
+}
+
+/// 인자가 붙는 거부. 자리 인자가 아니라 **이름 붙인 객체**로 넘긴다 — 영어는 어순이
+/// 달라 자리로 맞추면 문장이 어긋난다.
+fn reject_with(code: &'static str, args: serde_json::Value, msg: String) -> String {
+    put_web_code("error_args", args);
+    reject(code, msg)
+}
+
+/// 네이티브 토스트 문구 → 코드. 문구를 만드는 자리와 같은 파일에 둬야 둘이 어긋나도
+/// 곧 눈에 띈다.
+///
+/// 표에 없는 문구는 코드 없이 나간다(웹이 서버 문구를 그대로 쓴다) — 토스트는
+/// 여기저기서 뜨므로 전수를 붙잡으려 들면 표가 늘 낡는다.
+fn toast_code(msg: &str) -> Option<&'static str> {
+    Some(match msg {
+        "재시작하면 적용돼요" => "restart_to_apply",
+        "배율 100% · 폰트 기본값" => "scale_reset",
+        "빈 브라우저 창에서 로그인하세요" => "login_in_browser",
+        "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요" => "terminal_editor_not_found",
+        "계정 폴더 경로를 만들 수 없습니다" => "account_dir_failed",
+        "피드백을 저장했어요" => "feedback_saved",
+        "저장됐어요" => "saved",
+        _ => return None,
+    })
+}
+
+/// GUI 회신에 이번 액션의 코드를 얹는다. 성공 회신이 지나는 자리.
+///
+/// `message` 가 비면 코드도 안 붙인다 — 토스트가 안 떴다는 뜻이라, 직전 액션이
+/// 남긴 코드를 여기 붙이면 화면이 엉뚱한 말을 한다.
+pub(crate) fn merge_web_codes(mut v: serde_json::Value) -> serde_json::Value {
+    let codes = web_codes_cell().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    let Some(obj) = v.as_object_mut() else { return v };
+    let has_message = obj.get("message").is_some_and(|m| !m.is_null());
+    if has_message {
+        if let Some(code) = obj.get("message").and_then(|m| m.as_str()).and_then(toast_code) {
+            obj.insert("message_code".to_string(), serde_json::Value::String(code.to_string()));
+        }
+    }
+    // 성공 회신에 error_* 가 섞이면 웹이 거부로 읽는다 — 코드는 이번 호출 것만 쓰고
+    // 나머지는 버린다.
+    for (k, val) in codes {
+        if k == "message_code" && !has_message {
+            continue;
+        }
+        if k.starts_with("error") {
+            continue;
+        }
+        obj.insert(k, val);
+    }
+    v
+}
+
+/// 거부 회신을 JSON 으로 만든다. 오류를 `Err` 로 올려보내면 문자열 하나만 남아
+/// 코드를 실을 자리가 없다 — 형식은 HTTP 쪽이 만들던 것과 같다.
+pub(crate) fn reject_json(msg: String) -> serde_json::Value {
+    let codes = web_codes_cell().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    let mut obj = serde_json::Map::new();
+    obj.insert("ok".to_string(), serde_json::Value::Bool(false));
+    obj.insert("error".to_string(), serde_json::Value::String(msg));
+    for (k, v) in codes {
+        if k.starts_with("error") {
+            obj.insert(k, v);
+        }
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// 저장된 피드백이 쌓이는 폴더. 홈을 못 찾으면 temp 로 — 빈 PathBuf 에 join 하면
