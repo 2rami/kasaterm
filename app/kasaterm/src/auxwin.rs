@@ -444,10 +444,22 @@ pub(crate) enum AuxWindowKind {
     Room { window: usize, focus: Option<String> },
 }
 
-/// 설정 화면을 웹뷰 판으로 띄우는 이행 스위치. **기본 OFF** — 네이티브가 아직
-/// 정본이고, 갈래 A 가 화면을 다 옮긴 뒤 기본을 뒤집는다. `=0` 은 명시적 OFF.
+/// 설정 화면을 웹뷰 판으로 띄우는 이행 스위치. **기본 ON** — 이제 웹뷰가 정본이고
+/// 이건 **끄는 손잡이**다(`0`·`off`·`false`·`no` 면 옛 네이티브 화면).
+///
+/// 부팅 시 env 라 앱을 껐다 켜야 바뀐다. 기본을 뒤집기 전에는 그 때문에 거노가
+/// 웹뷰 화면을 볼 방법이 없었다 — 켜려면 env 를 주고 띄워야 하는데, 앱은 Finder 나
+/// 자기 설치로 뜨지 그렇게 안 뜬다.
+///
+/// **네이티브 화면은 안 지운다.** 한 사이클 써 본 뒤에 지운다 — 지금 지우면 웹뷰가
+/// 뭔가 못 하는 게 드러났을 때 돌아갈 곳이 없다. 폴백은 이 스위치만이 아니다:
+/// `open_settings_web_window` 가 페이지에 못 닿거나 웹뷰를 못 만들면 스스로 false 를
+/// 내고, 그러면 부른 쪽이 네이티브를 연다.
 fn settings_web_enabled() -> bool {
-    std::env::var("KASATERM_SETTINGS_WEB").is_ok_and(|v| !v.is_empty() && v != "0")
+    match std::env::var("KASATERM_SETTINGS_WEB") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no"),
+        Err(_) => true,
+    }
 }
 
 /// 편집기 창의 OS 타이틀 — 파일명(+ dirty ●). doc.path 는 String 이라 Path 로 감싼다.
