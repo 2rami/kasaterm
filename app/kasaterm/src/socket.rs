@@ -1472,6 +1472,16 @@ impl Backend for PtyBackend {
         }
     }
 
+    /// 값은 GUI 스레드의 `App` 이 정본이라(UI 배율처럼 파일에 없는 값이 있다) 여기서
+    /// 파일을 직접 읽지 않는다. `values` 액션이 그 스레드에서 스냅샷을 굽고, 회신이
+    /// 돌아온 **뒤에** 그것을 집어 온다 — 액션 왕복이 동기라 이 순서가 보장된다.
+    fn settings_values(&self) -> serde_json::Value {
+        match self.settings_action("values", None, None) {
+            Ok(_) => crate::settings::take_web_values().unwrap_or(serde_json::Value::Null),
+            Err(_) => serde_json::Value::Null,
+        }
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)

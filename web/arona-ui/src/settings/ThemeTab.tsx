@@ -1,69 +1,8 @@
 import { useState } from 'react';
 import { postAction } from './api';
+import { MiniButton, Notice, Section, TabCard, Toggle } from './controls';
 import { faceUrl } from './types';
 import type { Character, SettingsCharacters, ThemeCard } from './types';
-
-/// 한 카드 안의 소제목 + 설명. 네이티브 폼의 `section` 대응 — 제목만 크게 하고
-/// 설명은 dim 으로 한 줄 아래 둔다.
-function Section({
-  title,
-  hint,
-  right,
-  children,
-}: {
-  title: string;
-  hint?: string;
-  right?: React.ReactNode;
-  children?: React.ReactNode;
-}) {
-  return (
-    <section className="mb-7 last:mb-0">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-[15px] font-semibold text-[var(--kt-text)]">{title}</h2>
-          {hint && <p className="mt-0.5 text-[13px] text-[var(--kt-text-mute)]">{hint}</p>}
-        </div>
-        {right}
-      </div>
-      {children && <div className="mt-3">{children}</div>}
-    </section>
-  );
-}
-
-/// 카드·목록에서 같은 모양으로 쓰는 작은 버튼.
-function MiniButton({
-  label,
-  onClick,
-  disabled,
-  danger,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={(e) => {
-        // 카드 자체가 「이 테마 쓰기」 라서, 막지 않으면 버튼 하나 누를 때마다
-        // 테마까지 갈아 끼워진다.
-        e.stopPropagation();
-        onClick();
-      }}
-      className="px-2 py-1 text-[11px] disabled:opacity-40"
-      style={{
-        borderRadius: 'var(--kt-radius-sm)',
-        background: 'var(--kt-surface-hover)',
-        color: danger ? 'var(--kt-danger)' : 'var(--kt-text)',
-        boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
-      }}
-    >
-      {label}
-    </button>
-  );
-}
 
 /// 테마 한 장. 미리보기 얼굴 셋 + 이름 + 「N명 · 쓰는 중」.
 ///
@@ -270,25 +209,11 @@ export function ThemeTab({
   }
 
   return (
-    <div
-      className="p-6"
-      style={{
-        borderRadius: 'var(--kt-radius-md)',
-        background: 'var(--kt-bg)',
-        boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
-      }}
-    >
+    <TabCard>
       {/* 네이티브 토스트는 웹뷰 창에서 안 보인다 — 그 문구가 갈 자리가 여기다.
           맨 위에 두는 이유는 「새로 여는 pane 부터 적용돼요」처럼 놓치면 안 되는
           말이 섞여 오기 때문이다. */}
-      {notice && (
-        <p
-          className="mb-4 text-[12px]"
-          style={{ color: notice.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger)' }}
-        >
-          {notice.msg}
-        </p>
-      )}
+      <Notice notice={notice} />
 
       <Section title="Theme" hint="폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
@@ -313,25 +238,11 @@ export function ThemeTab({
         title="Persona"
         hint="켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터"
         right={
-          <button
-            type="button"
+          <Toggle
+            on={data.persona_enabled}
             disabled={busy}
-            onClick={() => void run('toggle-persona')}
-            aria-pressed={data.persona_enabled}
-            className="relative inline-block h-[22px] w-[40px] shrink-0 disabled:opacity-40"
-            style={{
-              borderRadius: '11px',
-              background: data.persona_enabled ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',
-            }}
-          >
-            <span
-              className="absolute top-[3px] h-[16px] w-[16px] bg-white transition-all"
-              style={{
-                borderRadius: 'var(--kt-dot-radius)',
-                left: data.persona_enabled ? '21px' : '3px',
-              }}
-            />
-          </button>
+            onToggle={() => void run('toggle-persona')}
+          />
         }
       />
 
@@ -357,6 +268,6 @@ export function ThemeTab({
           ))}
         </div>
       </Section>
-    </div>
+    </TabCard>
   );
 }

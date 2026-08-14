@@ -9,8 +9,10 @@ import {
 } from 'lucide-react';
 import { useTokens } from './useTokens';
 import { ThemeTab } from './ThemeTab';
+import { ShellTab } from './ShellTab';
 import { CharacterDetail } from './CharacterDetail';
-import type { Character, SettingsCharacters } from './types';
+import { fetchValues, postAction } from './api';
+import type { Character, SettingsCharacters, SettingsValues } from './types';
 
 /// 이 페이지가 붙은 인스턴스의 포트. 웹뷰가 same-origin 으로 로드되므로
 /// `location.port` 가 곧 그 인스턴스다 — 네이티브의 `mcp_panel_port()` 는 8765
@@ -23,7 +25,7 @@ const PORT = location.port || '8765';
 const CATS = [
   { key: 'general', label: 'General', Icon: SlidersHorizontal, ready: false },
   { key: 'appearance', label: 'Appearance', Icon: Sparkles, ready: false },
-  { key: 'shell', label: 'Shell', Icon: Terminal, ready: false },
+  { key: 'shell', label: 'Shell', Icon: Terminal, ready: true },
   { key: 'claude', label: 'Claude', Icon: Asterisk, ready: false },
   { key: 'theme', label: 'Theme', Icon: Users, ready: true },
   { key: 'feedback', label: 'Feedback', Icon: MessageSquare, ready: false },
@@ -40,11 +42,21 @@ const TITLES: Record<CatKey, { title: string; hint: string }> = {
   feedback: { title: 'Feedback', hint: '쓰다가 걸린 것을 남겨 주세요' },
 };
 
+/// 값만 있으면 그려지는 탭들. Theme 은 여기 없다 — 캐릭터 상세로 화면이 통째로
+/// 바뀌는 자기 상태가 있어서 본문에서 따로 다룬다.
+const TABS: Partial<
+  Record<CatKey, (v: SettingsValues, reload: () => Promise<void>) => React.ReactNode>
+> = {
+  shell: (v, reload) => <ShellTab data={v.shell} reload={reload} />,
+};
+
 export function SettingsApp() {
   const tokens = useTokens();
   const [cat, setCat] = useState<CatKey>('theme');
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
+  const [values, setValues] = useState<SettingsValues | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [valErr, setValErr] = useState<string | null>(null);
   /// 열려 있는 캐릭터. **이름이 아니라 객체를 들고 있는다.**
   ///
   /// 이름으로 들고 로스터에서 찾으면 이름을 바꾼 직후 한 프레임 동안 그 이름이
@@ -68,11 +80,36 @@ export function SettingsApp() {
     }
   }, []);
 
+  /// 설정 값도 같은 규칙 — 액션이 끝날 때마다 다시 읽는다. 두 조회를 가른 것은
+  /// 성격이 달라서다: 로스터는 79명치라 무겁고, 값은 앱 메모리 스냅샷이라 가볍다.
+  const reloadValues = useCallback(async () => {
+    try {
+      setValues(await fetchValues());
+      setValErr(null);
+    } catch (e) {
+      setValErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   useEffect(() => {
     void reload();
-  }, [reload]);
+    void reloadValues();
+  }, [reload, reloadValues]);
+
+  // Esc 로 창 닫기. 네이티브 설정 화면은 키 핸들러가 직접 닫는데, 웹뷰 창은 키가
+  // 웹뷰로 가 그 경로에 닿지 않는다(거노 2026-08-15 "esc왜안되냐") — 여기서 잡아
+  // 액션으로 되돌린다. 입력 칸의 Esc(되돌리기)는 그 칸이 stopPropagation 하므로
+  // 여기까지 오지 않는다.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') void postAction('close-settings');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const meta = TITLES[cat];
+  const tab = TABS[cat];
 
   return (
     <div className="flex min-h-screen">
@@ -127,9 +164,14 @@ export function SettingsApp() {
         <p className="mt-1 text-[13px] text-[var(--kt-text-mute)]">{meta.hint}</p>
         <div className="my-5 h-px" style={{ background: 'var(--kt-border)' }} />
 
-        {err && (
+        {cat === 'theme' && err && (
           <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
             /settings/characters 실패: {err}
+          </p>
+        )}
+        {tab && valErr && (
+          <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
+            /settings/values 실패: {valErr}
           </p>
         )}
 
@@ -152,6 +194,12 @@ export function SettingsApp() {
             )
           ) : (
             !err && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>
+          )
+        ) : tab ? (
+          values ? (
+            tab(values, reloadValues)
+          ) : (
+            !valErr && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>
           )
         ) : (
           <p className="text-[13px] text-[var(--kt-text-mute)]">

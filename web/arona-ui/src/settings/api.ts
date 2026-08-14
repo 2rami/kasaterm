@@ -11,6 +11,20 @@ export type SettingsActionResult = {
   error?: string;
 };
 
+import type { SettingsValues } from './types';
+
+/// 캐릭터 탭 밖의 설정 값 전부. 탭마다 따로 묻지 않는 이유는 액션과 같다 — 값의
+/// 정본이 앱 한 곳이라 조회도 한 번이면 되고, 탭이 늘어도 여기 손댈 게 없다.
+export async function fetchValues(): Promise<SettingsValues> {
+  const res = await fetch('/settings/values');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const v = (await res.json()) as SettingsValues | null;
+  // 설정 개념이 없는 백엔드는 오류가 아니라 null 을 답한다 — 그걸 그대로 화면에
+  // 넘기면 탭마다 undefined 를 읽다 터지므로 여기서 한 번에 가른다.
+  if (!v) throw new Error('이 인스턴스는 설정 값을 안 알려 줘요');
+  return v;
+}
+
 export async function postAction(
   action: string,
   args?: { id?: string; label?: string }

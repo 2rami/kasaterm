@@ -1186,6 +1186,580 @@ impl App {
         }
     }
 
+    /// 웹뷰 설정 화면이 누른 컨트롤 하나 → 네이티브 액션 하나.
+    ///
+    /// `handler.rs` 의 `SocketSettingsAction` 이 Theme 탭 액션만 알고 나머지는
+    /// "모르는 액션" 으로 돌려보내던 자리에서 여기로 떨어진다. 값을 직접 쓰지 않고
+    /// `settings_apply` 를 태우는 이유는 저장이 파일 쓰기로 끝나지 않기 때문이다 —
+    /// shim 재생성 · PTY reshape · 캐시 무효화가 액션마다 짝으로 붙어 있고, 웹뷰용
+    /// 저장 경로를 따로 파면 그 뒤처리가 둘로 갈린다.
+    ///
+    /// 반환값은 「반영됐는가」. 네이티브에 없는 검사(빈 값 · 없는 프리셋)가 여기만
+    /// 붙는 것은 HTTP 가 아무 문자열이나 보낼 수 있어서다 — 네이티브에선 그려진
+    /// 칸만 눌린다.
+    pub(crate) fn settings_web_action(
+        &mut self,
+        action: &str,
+        id: &str,
+        label: Option<&str>,
+    ) -> Result<bool, String> {
+        /// 프리셋 목록에서 `&'static str` 를 되찾는다 — 액션 enum 이 `&'static str`
+        /// 를 실으므로 요청 문자열을 그대로 넣을 수 없다. 목록에 없으면 거부라, 이
+        /// 조회가 곧 화이트리스트 노릇을 한다.
+        fn pick(list: &[&'static str], want: &str) -> Option<&'static str> {
+            list.iter().copied().find(|k| *k == want)
+        }
+        // 토글은 「눌렀다」만으로는 반영을 알 수 없다 — 파일에 남은 값이 메모리와
+        // 같은지로 판정한다(`toggle-persona` 와 같은 규칙).
+        let saved_bool = |key: &str| socket::read_settings().get(key).and_then(|v| v.as_bool());
+        let unknown = |v: &str| format!("'{v}' 은(는) 고를 수 없는 값이에요");
+        let no_slot = |v: &str| format!("'{v}' 계정이 없어요");
+        let arg = label.unwrap_or("").trim().to_string();
+        match action {
+            // ── 화면 데이터 ──────────────────────────────────────────────
+            "values" => {
+                publish_web_values(self.settings_values_json());
+                Ok(true)
+            }
+            // Esc 로 창 닫기. 네이티브 설정 화면은 키 핸들러가 직접 닫는데, 웹뷰
+            // 창은 키가 WKWebView 로 가 그 경로에 닿지 않는다(거노 2026-08-15
+            // "esc왜안되냐") — 페이지가 keydown 을 잡아 이 액션으로 되돌린다.
+            "close-settings" => {
+                self.close_settings_web_window();
+                Ok(self.settings_web_window.is_none())
+            }
+
+            // ── General ──────────────────────────────────────────────────
+            "cwd-mode" => {
+                let m = pick(&["last", "home", "custom"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::CwdMode(m));
+                // custom 은 네이티브에서 경로 칸에 커서를 세운다 — 웹에는 그 커서가
+                // 없으니 걷어내야 다음 키가 엉뚱한 필드로 새지 않는다.
+                self.settings_input = None;
+                Ok(true)
+            }
+            "cwd-path" => {
+                if arg.is_empty() {
+                    return Err("경로를 비울 수 없어요".to_string());
+                }
+                self.set_cwd_mode = arg.clone();
+                self.settings_save();
+                Ok(self.set_cwd_mode == arg)
+            }
+            "file-open-mode" => {
+                let m = pick(&["builtin", "app", "terminal"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::FileOpenMode(m));
+                self.settings_input = None;
+                Ok(self.set_file_open_mode == m)
+            }
+            "file-open-app" => {
+                // 빈 문자열 = OS 연결 프로그램(네이티브의 "기본 앱" 칸).
+                if !id.is_empty() && !crate::proc::open_with_apps().iter().any(|(n, _)| n == id) {
+                    return Err(format!("'{id}' 앱을 못 찾았어요"));
+                }
+                self.settings_apply(SettingsAction::FileOpenApp(id.to_string()));
+                Ok(self.set_file_open_app == id)
+            }
+            "file-open-cmd" => {
+                if arg.is_empty() {
+                    return Err("명령을 비울 수 없어요".to_string());
+                }
+                self.set_file_open_cmd = arg.clone();
+                self.settings_save();
+                Ok(self.set_file_open_cmd == arg)
+            }
+            "toggle-file-tree" => {
+                self.settings_apply(SettingsAction::ToggleFileTree);
+                Ok(saved_bool("file_tree_default") == Some(self.set_file_tree_default))
+            }
+            "toggle-footer" => {
+                self.settings_apply(SettingsAction::ToggleFooter);
+                Ok(saved_bool("pane_footer_default") == Some(self.set_footer_default))
+            }
+            "autosave-delay" => {
+                let ms: u64 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(ms, 0 | 1000 | 3000 | 10000) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::AutosaveDelay(ms));
+                Ok(self.set_autosave.map_or(0, |d| d.as_millis() as u64) == ms)
+            }
+            "tab-position" => {
+                let p = pick(&["top", "side"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::TabPosition(p));
+                Ok(self.tabs_on_top == (p == "top"))
+            }
+            "cursor-shape" => {
+                let s = pick(&["block", "bar", "underline"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::CursorShape(s));
+                Ok(self.cursor_shape == s)
+            }
+            "cursor-thickness" => {
+                let px: u8 = id.parse().map_err(|_| unknown(id))?;
+                if !(1..=4).contains(&px) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::CursorThickness(px));
+                Ok((self.cursor_thickness - px as f32).abs() < 0.01)
+            }
+            "mouse-cursor" => {
+                let k = pick(&["arrow", "ibeam"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::MouseCursor(k));
+                Ok(self.mouse_cursor == k)
+            }
+            "wheel-gain" => {
+                let x100: u32 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(x100, 30 | 60 | 100 | 150) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::WheelPixelGain(x100));
+                Ok((self.set_wheel_pixel_gain * 100.0).round() as u32 == x100)
+            }
+
+            // ── Appearance ───────────────────────────────────────────────
+            "theme-mode" => {
+                let key = if id == "system" {
+                    "system"
+                } else if id == "custom" {
+                    // 편집본이 없으면 고를 수 없다 — 네이티브도 그때는 카드를 아예
+                    // 안 그린다. 만드는 건 `start-custom-theme` 의 몫이다.
+                    if socket::read_settings().get("custom_theme").is_none() {
+                        return Err("커스텀 팔레트를 아직 만들지 않았어요".to_string());
+                    }
+                    "custom"
+                } else {
+                    theme::THEME_PRESETS
+                        .iter()
+                        .find(|(k, _, _)| *k == id)
+                        .map(|(k, _, _)| *k)
+                        .ok_or_else(|| format!("'{id}' 테마가 없어요"))?
+                };
+                self.settings_apply(SettingsAction::ThemeMode(key));
+                Ok(theme::theme_name() == key)
+            }
+            "start-custom-theme" => {
+                self.settings_apply(SettingsAction::StartCustomTheme);
+                Ok(theme::theme_name() == "custom")
+            }
+            "reset-custom-theme" => {
+                self.settings_apply(SettingsAction::ResetCustomTheme);
+                Ok(true)
+            }
+            "palette-hex" => {
+                let i: usize = id.parse().map_err(|_| unknown(id))?;
+                if i >= theme::PALETTE_KEYS.len() + 16 {
+                    return Err("없는 색 칸이에요".to_string());
+                }
+                if theme::parse_hex(&arg).is_none() {
+                    return Err("#rrggbb 꼴로 적어 주세요".to_string());
+                }
+                // 네이티브는 타이핑 버퍼(`set_palette_edit`)를 거쳐 굳힌다. 웹에는 그
+                // 버퍼가 없으니 완성된 값을 심고 같은 커밋을 태운다.
+                self.set_palette_edit = arg.clone();
+                self.apply_palette_edit(i);
+                self.settings_input = None;
+                Ok(self.palette_hex_at(i).eq_ignore_ascii_case(&arg))
+            }
+            "accent" => {
+                let name = theme::ACCENT_PRESETS
+                    .iter()
+                    .find(|(n, _)| *n == id)
+                    .map(|(n, _)| *n)
+                    .ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::Accent(name.to_string()));
+                Ok(theme::accent_name() == name)
+            }
+            "shape" => {
+                let key = theme::SHAPE_PRESETS
+                    .iter()
+                    .find(|(k, _, _)| *k == id)
+                    .map(|(k, _, _)| *k)
+                    .ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::Shape(key));
+                Ok(theme::shape_name() == key)
+            }
+            "min-contrast" => {
+                let (l, v) = theme::CONTRAST_PRESETS
+                    .iter()
+                    .find(|(l, _)| *l == id)
+                    .ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::MinContrast(l));
+                Ok((theme::min_contrast() - v).abs() < 0.001)
+            }
+            "font-size-delta" | "ui-zoom-delta" => {
+                let d: i8 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(d, -1 | 1) {
+                    return Err("한 칸씩만 움직일 수 있어요".to_string());
+                }
+                let font = action == "font-size-delta";
+                let before = if font { self.font_size } else { self.ui_zoom };
+                self.settings_apply(if font {
+                    SettingsAction::FontSizeDelta(d)
+                } else {
+                    SettingsAction::UiZoomDelta(d)
+                });
+                let after = if font { self.font_size } else { self.ui_zoom };
+                // 끝값(9..32px · 50..300%)에 닿으면 안 움직인다. 그건 고장이 아니라
+                // 더 갈 곳이 없다는 뜻이라, 조용한 실패 대신 문구로 말한다.
+                if (after - before).abs() < 0.001 {
+                    return Err("더는 못 가요".to_string());
+                }
+                Ok(true)
+            }
+            "reset-scale" => {
+                self.settings_apply(SettingsAction::ResetScale);
+                Ok(true)
+            }
+
+            // ── Shell ────────────────────────────────────────────────────
+            "shell-preset" => {
+                // 빈 문자열 = 시스템 $SHELL. 나머지는 네이티브 칸과 같은 둘뿐이다.
+                if !matches!(id, "" | "/bin/zsh" | "/bin/bash") {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::ShellPreset(id.to_string()));
+                Ok(self.set_shell == id)
+            }
+            "shell-custom" => {
+                if arg.is_empty() {
+                    return Err("셸 경로를 비울 수 없어요".to_string());
+                }
+                self.set_shell = arg.clone();
+                self.settings_input = None;
+                self.settings_save();
+                Ok(self.set_shell == arg)
+            }
+
+            // ── Claude ───────────────────────────────────────────────────
+            "toggle-shim-inject" => {
+                self.settings_apply(SettingsAction::ToggleShimInject);
+                Ok(saved_bool("shim_inject") == Some(self.set_shim_inject))
+            }
+            "claude-model" => {
+                if !matches!(id, "" | "opus" | "sonnet" | "haiku") {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::ClaudeModel(id.to_string()));
+                Ok(self.set_claude_model == id)
+            }
+            "claude-effort" => {
+                if !matches!(id, "" | "low" | "medium" | "high" | "xhigh") {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::ClaudeEffort(id.to_string()));
+                Ok(self.set_claude_effort == id)
+            }
+            "claude-extra" => {
+                // 여기만 빈 값이 정상이다 — 붙일 플래그가 없다는 뜻이다.
+                self.set_claude_extra = arg.clone();
+                self.settings_save();
+                Ok(self.set_claude_extra == arg)
+            }
+            "claude-account" => {
+                if !id.is_empty() && !self.set_claude_accounts.iter().any(|a| a.id == id) {
+                    return Err(no_slot(id));
+                }
+                self.settings_apply(SettingsAction::ClaudeAccount(id.to_string()));
+                Ok(self.set_claude_account == id)
+            }
+            "add-claude-account" => {
+                let before = self.set_claude_accounts.len();
+                self.settings_apply(SettingsAction::AddClaudeAccount);
+                Ok(self.set_claude_accounts.len() > before)
+            }
+            "remove-claude-account" => {
+                if !self.set_claude_accounts.iter().any(|a| a.id == id) {
+                    return Err(no_slot(id));
+                }
+                self.settings_apply(SettingsAction::RemoveClaudeAccount(id.to_string()));
+                Ok(!self.set_claude_accounts.iter().any(|a| a.id == id))
+            }
+            "claude-account-label" => {
+                let i = self
+                    .set_claude_accounts
+                    .iter()
+                    .position(|a| a.id == id)
+                    .ok_or_else(|| no_slot(id))?;
+                // 라벨은 비워도 된다 — 그러면 그 슬롯의 진짜 이메일로 불린다
+                // (`account_display`). 그래서 빈 값 검사가 없다.
+                self.set_claude_accounts[i].label = arg.clone();
+                self.settings_save();
+                Ok(self.set_claude_accounts[i].label == arg)
+            }
+            "codex-account" => {
+                if !id.is_empty() && !self.set_codex_accounts.iter().any(|a| a.id == id) {
+                    return Err(no_slot(id));
+                }
+                self.settings_apply(SettingsAction::CodexAccount(id.to_string()));
+                Ok(self.set_codex_account == id)
+            }
+            "add-codex-account" => {
+                let before = self.set_codex_accounts.len();
+                self.settings_apply(SettingsAction::AddCodexAccount);
+                Ok(self.set_codex_accounts.len() > before)
+            }
+            "remove-codex-account" => {
+                if !self.set_codex_accounts.iter().any(|a| a.id == id) {
+                    return Err(no_slot(id));
+                }
+                self.settings_apply(SettingsAction::RemoveCodexAccount(id.to_string()));
+                Ok(!self.set_codex_accounts.iter().any(|a| a.id == id))
+            }
+            "codex-account-label" => {
+                let i = self
+                    .set_codex_accounts
+                    .iter()
+                    .position(|a| a.id == id)
+                    .ok_or_else(|| no_slot(id))?;
+                self.set_codex_accounts[i].label = arg.clone();
+                self.settings_save();
+                Ok(self.set_codex_accounts[i].label == arg)
+            }
+            // 로그인 수단이 갈리므로(claude 는 `claude auth login`, codex 는
+            // `CODEX_HOME=<슬롯> codex login`) 어느 쪽인지를 label 로 받는다.
+            "reauth-account" => {
+                let claude = match arg.as_str() {
+                    "claude" => true,
+                    "codex" => false,
+                    other => return Err(unknown(other)),
+                };
+                let known = if claude {
+                    self.set_claude_accounts.iter().any(|a| a.id == id)
+                } else {
+                    self.set_codex_accounts.iter().any(|a| a.id == id)
+                };
+                if !known {
+                    return Err(no_slot(id));
+                }
+                let provider =
+                    if claude { AccountProvider::Claude } else { AccountProvider::Codex };
+                self.settings_apply(SettingsAction::ReauthAccount(provider, id.to_string()));
+                Ok(true)
+            }
+            "toggle-account-autoswitch" => {
+                self.settings_apply(SettingsAction::ToggleAccountAutoswitch);
+                Ok(saved_bool("claude_account_autoswitch") == Some(self.set_account_autoswitch))
+            }
+            "autoswitch-pct" => {
+                let p: u32 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(p, 80 | 85 | 90 | 95) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::AccountAutoswitchPct(p));
+                Ok(self.set_account_autoswitch_pct.round() as u32 == p)
+            }
+
+            // ── Feedback ─────────────────────────────────────────────────
+            "toggle-feedback-diag" => {
+                self.settings_apply(SettingsAction::ToggleFeedbackDiag);
+                Ok(true)
+            }
+            "save-feedback" => {
+                if arg.is_empty() {
+                    return Err("무엇이 불편했는지 적어 주세요".to_string());
+                }
+                // 네이티브는 편집 버퍼를 저장한다 — 웹에는 그 버퍼가 없으니 본문을
+                // 심고 같은 저장을 태운다. 성공하면 `save_feedback` 이 버퍼를 비우므로
+                // 비었는지가 곧 판정이다.
+                self.feedback_body = arg;
+                self.feedback_caret = self.feedback_body.chars().count();
+                self.settings_apply(SettingsAction::SaveFeedback);
+                Ok(self.feedback_body.is_empty())
+            }
+            "open-feedback-dir" => {
+                self.settings_apply(SettingsAction::OpenFeedbackDir);
+                Ok(true)
+            }
+            other => Err(format!("모르는 액션이에요: {other}")),
+        }
+    }
+
+    /// 웹뷰 설정 화면이 그릴 값 전부 — 카테고리마다 하위 객체 하나씩이라 탭이
+    /// 늘어도 라우트는 늘지 않는다.
+    ///
+    /// 파일(`settings.json`)이 아니라 **메모리 값**을 싣는다. 둘은 대개 같지만 UI
+    /// 배율처럼 애초에 저장되지 않는 값이 있어(세션 한정), 파일에서 읽으면 그 칸이
+    /// 늘 기본값을 보여 준다.
+    ///
+    /// 계정 행의 이름·부제는 여기서 조립해 넘긴다. 그 규칙(라벨이 없으면 이메일,
+    /// 팀 조직이면 이어 붙이기, 이름과 겹치면 걷어내기)은 네이티브 폼이 이미 쥐고
+    /// 있어, 웹에서 다시 짜면 두 화면이 같은 계정을 다르게 부르게 된다.
+    fn settings_values_json(&self) -> serde_json::Value {
+        let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        let hex3 = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        let s = socket::read_settings();
+
+        // 테마 카드 한 장의 미리보기 재료. `pal` 이 없으면(custom) 지금 화면에
+        // 적용된 색으로 그린다 — 고른 상태에서는 그게 곧 그 팔레트다.
+        let card = |key: &str, label: String, pal: Option<&theme::Palette>| {
+            let ansi: Vec<String> = (1..7)
+                .map(|i| match pal {
+                    Some(p) => hex3(p.ansi[i]),
+                    None => hex3(theme::ansi16(i)),
+                })
+                .collect();
+            serde_json::json!({
+                "key": key,
+                "label": label,
+                "bg": pal.map_or_else(|| hex(theme::bg()), |p| hex(p.bg)),
+                "text": pal.map_or_else(|| hex(theme::text()), |p| hex(p.text)),
+                "dim": pal.map_or_else(|| hex(theme::text_mute()), |p| hex(p.text_mute)),
+                "ansi": ansi,
+            })
+        };
+        let sys_key = theme::system_theme_key();
+        let sys = theme::THEME_PRESETS.iter().find(|(k, _, _)| *k == sys_key);
+        let mut themes = vec![card(
+            "system",
+            match sys {
+                Some((_, l, _)) => format!("System · {l}"),
+                None => "System".to_string(),
+            },
+            sys.map(|(_, _, p)| *p),
+        )];
+        themes.extend(
+            theme::THEME_PRESETS.iter().map(|(k, l, p)| card(k, l.to_string(), Some(p))),
+        );
+        if s.get("custom_theme").is_some() {
+            themes.push(card("custom", "Custom".to_string(), None));
+        }
+
+        // 계정 한 행. 첫 행은 언제나 "기본"(슬롯이 아니라 지금 로그인)이라 지울
+        // 것도 이름 붙일 것도 없다 — `slot: false` 가 그 뜻이다.
+        let claude_rows: Vec<serde_json::Value> = std::iter::once((String::new(), String::new(), None))
+            .chain(
+                self.set_claude_accounts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
+            )
+            .map(|(id, label, idx)| {
+                let probe = auth_probe(&id);
+                // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
+                // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
+                // 모른다고 말한다.
+                let (mut sub, kind) = match &probe {
+                    Some(p) if !p.logged_in => ("로그인 필요".to_string(), "danger"),
+                    Some(p) if !p.email.is_empty() => (p.email.clone(), "mute"),
+                    _ => ("확인 중…".to_string(), "faint"),
+                };
+                if let Some(org) = probe.as_ref().and_then(|p| team_org(&p.email, &p.org)) {
+                    sub = format!("{sub} · {org}");
+                }
+                let name = match idx {
+                    None => "기본".to_string(),
+                    Some(i) => account_display(&id, &label, &format!("계정 {}", i + 2)),
+                };
+                let sub = match sub.strip_prefix(name.as_str()) {
+                    Some(rest) => rest.trim_start_matches(" · ").to_string(),
+                    None => sub,
+                };
+                serde_json::json!({
+                    "id": id, "label": label, "name": name,
+                    "sub": sub, "sub_kind": kind, "slot": idx.is_some(),
+                })
+            })
+            .collect();
+
+        let codex_rows: Vec<serde_json::Value> = std::iter::once((String::new(), String::new(), None))
+            .chain(
+                self.set_codex_accounts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
+            )
+            .map(|(id, label, idx)| {
+                // claude 판과 달리 "확인 중" 이 없다 — 신원이 파일 하나에 들어 있어
+                // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
+                let ident = codex_identity(&id);
+                serde_json::json!({
+                    "id": id,
+                    "label": label,
+                    "name": match (idx, label.is_empty()) {
+                        (None, _) => "기본".to_string(),
+                        (Some(i), true) => ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2)),
+                        (Some(_), false) => label.clone(),
+                    },
+                    "sub": if idx.is_some() && label.is_empty() && ident.is_some() {
+                        String::new()
+                    } else {
+                        ident.clone().unwrap_or_else(|| "로그인 필요".to_string())
+                    },
+                    "sub_kind": if ident.is_some() { "mute" } else { "danger" },
+                    "slot": idx.is_some(),
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "general": {
+                "cwd_mode": self.set_cwd_mode,
+                "file_open_mode": self.set_file_open_mode,
+                "file_open_app": self.set_file_open_app,
+                "file_open_cmd": self.set_file_open_cmd,
+                // 설치된 것만 뜬다. 이 목록에 없는 앱을 쓰는 사람의 탈출구가
+                // 빈 문자열(OS 연결 프로그램)이라, 그 칸은 웹이 직접 붙인다.
+                "apps": crate::proc::open_with_apps()
+                    .iter()
+                    .map(|(name, _)| serde_json::json!({
+                        "name": name, "short": crate::info::short_app_name(name),
+                    }))
+                    .collect::<Vec<_>>(),
+                "file_tree_default": self.set_file_tree_default,
+                "footer_default": self.set_footer_default,
+                "autosave_ms": self.set_autosave.map_or(0, |d| d.as_millis() as u64),
+                "tabs_on_top": self.tabs_on_top,
+                "cursor_shape": self.cursor_shape,
+                "cursor_thickness": self.cursor_thickness,
+                "mouse_cursor": self.mouse_cursor,
+                "wheel_gain_x100": (self.set_wheel_pixel_gain * 100.0).round() as u32,
+            },
+            "appearance": {
+                "theme": theme::theme_name(),
+                "themes": themes,
+                "has_custom_theme": s.get("custom_theme").is_some(),
+                "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+                "palette_hex": palette_hex_list(&s),
+                "accent": theme::accent_name(),
+                "accents": theme::ACCENT_PRESETS
+                    .iter()
+                    .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))
+                    .collect::<Vec<_>>(),
+                "shape": theme::shape_name(),
+                "shapes": theme::SHAPE_PRESETS
+                    .iter()
+                    .map(|(k, l, _)| serde_json::json!({ "key": k, "label": l }))
+                    .collect::<Vec<_>>(),
+                "min_contrast": theme::min_contrast(),
+                "contrasts": theme::CONTRAST_PRESETS
+                    .iter()
+                    .map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
+                    .collect::<Vec<_>>(),
+                "font_size": self.font_size,
+                "font_size_default": socket::DEFAULT_FONT_SIZE,
+                "ui_zoom": self.ui_zoom,
+            },
+            "shell": { "shell": self.set_shell },
+            "claude": {
+                "shim_inject": self.set_shim_inject,
+                "persona": self.set_claude_persona,
+                "accounts": claude_rows,
+                "account": self.set_claude_account,
+                "codex_accounts": codex_rows,
+                "codex_account": self.set_codex_account,
+                "autoswitch": self.set_account_autoswitch,
+                "autoswitch_pct": self.set_account_autoswitch_pct.round() as u32,
+                "model": self.set_claude_model,
+                "effort": self.set_claude_effort,
+                "extra": self.set_claude_extra,
+            },
+            "feedback": {
+                "diag": diag_line(),
+                "diag_on": self.feedback_diag,
+            },
+        })
+    }
+
     /// Route a keystroke into the focused single-line settings text field.
     /// Returns true if consumed. Full char-index caret: ←→ 이동, 중간
     /// 삽입/삭제, Home/End, host+V 붙여넣기. Enter=커밋(blur+저장 토스트),
@@ -1653,6 +2227,31 @@ impl App {
             Err(e) => self.set_toast(format!("저장 실패: {e}")),
         }
     }
+}
+
+/// 웹뷰가 가져갈 설정 값 스냅샷이 잠깐 놓이는 자리.
+///
+/// 값의 정본은 GUI 스레드의 `App` 인데(UI 배율처럼 파일에 없는 값이 있다), 그
+/// 스레드로 가는 유일한 창구인 `SocketSettingsAction` 의 회신 봉투가
+/// `{ok, message}` 로 고정돼 있어 값을 실을 칸이 없다. 그래서 액션이 여기에 굽고
+/// HTTP 쪽이 곧바로 집어 간다 — 봉투를 넓히려면 다른 pane 이 작업 중인
+/// `handler.rs` 를 더 만져야 해서, 그쪽 대신 이 우회로를 골랐다(2026-08-15).
+fn web_values_cell() -> &'static std::sync::Mutex<Option<serde_json::Value>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(Default::default)
+}
+
+fn publish_web_values(v: serde_json::Value) {
+    if let Ok(mut c) = web_values_cell().lock() {
+        *c = Some(v);
+    }
+}
+
+/// 방금 구운 스냅샷을 집어 온다. **한 번만** 나간다 — 남겨 두면 GUI 왕복이 실패한
+/// 다음 요청이 옛 값을 받아 가, 화면이 조용히 낡는다.
+pub(crate) fn take_web_values() -> Option<serde_json::Value> {
+    web_values_cell().lock().ok().and_then(|mut c| c.take())
 }
 
 /// 저장된 피드백이 쌓이는 폴더. 홈을 못 찾으면 temp 로 — 빈 PathBuf 에 join 하면

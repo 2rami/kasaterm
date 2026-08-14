@@ -693,7 +693,9 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_apply(SettingsAction::ToggleClaudePersona);
                         Ok(socket::read_claude_persona() == self.set_claude_persona)
                     }
-                    other => Err(format!("모르는 액션이에요: {other}")),
+                    // Theme 탭 밖의 컨트롤은 전부 여기로 — 판정 규칙이 위와 같아
+                    // (액션이 남긴 상태로 본다) 한 함수에 모아 뒀다.
+                    other => self.settings_web_action(other, &arg, label.as_deref()),
                 };
                 let message = match (&toast_before, &self.collab.toast) {
                     (_, None) => None,

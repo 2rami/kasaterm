@@ -1236,6 +1236,20 @@ async fn settings_characters_handler(backend: Arc<dyn Backend>) -> impl IntoResp
     )
 }
 
+/// `GET /settings/values` — 캐릭터 탭 밖의 설정 값 전부. 카테고리마다 하위 객체
+/// 하나씩이라(`general` · `appearance` · `shell` · `claude` · `feedback`) 탭이 늘어도
+/// 라우트가 늘지 않는다.
+///
+/// 값은 여기서 파일을 읽어 만들지 않는다 — 정본이 GUI 프로세스의 메모리라서다.
+/// 파일에 애초에 저장되지 않는 값(UI 배율은 세션 한정)이 섞여 있어, 파일에서 읽으면
+/// 그 칸만 늘 기본값을 보여 준다.
+async fn settings_values_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(backend.settings_values()),
+    )
+}
+
 /// `GET /character-face?slug=<slug>&theme=<id>` — 캐릭터 프사 PNG. `theme` 을 주면
 /// 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성 폴더 → 번들 순.
 ///
@@ -3788,9 +3802,13 @@ pub fn spawn_http_server_opts(
                 let git_panel_backend = backend.clone();
                 let design_tokens_backend = backend.clone();
                 let settings_chars_backend = backend.clone();
+                let settings_values_backend = backend.clone();
                 let settings_char_save_backend = backend.clone();
                 let settings_action_backend = backend.clone();
                 let character_face_backend = backend.clone();
+                let sprite_get_backend = backend.clone();
+                let sprite_status_backend = backend.clone();
+                let sprite_save_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -3936,9 +3954,31 @@ pub fn spawn_http_server_opts(
                         get(move || settings_characters_handler(settings_chars_backend.clone())),
                     )
                     .route(
+                        "/settings/values",
+                        get(move || settings_values_handler(settings_values_backend.clone())),
+                    )
+                    .route(
                         "/character-face",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             character_face_handler(character_face_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/character-sprite",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            character_sprite_handler(sprite_get_backend.clone(), q)
+                        })
+                        .post(move |body: String| {
+                            character_sprite_save_handler(sprite_save_backend.clone(), body)
+                        })
+                        // 업로드 한 벌은 axum 기본 2MB 를 넘길 수 있다 — 그 거부는
+                        // 화면에 이유 없는 실패로만 와서 원인을 못 찾는다.
+                        .layer(axum::extract::DefaultBodyLimit::max(SPRITE_UPLOAD_LIMIT)),
+                    )
+                    .route(
+                        "/character-sprite-status",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            character_sprite_status_handler(sprite_status_backend.clone(), q)
                         }),
                     )
                     .route(

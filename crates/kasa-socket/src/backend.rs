@@ -865,6 +865,17 @@ pub trait Backend: Send + Sync {
         serde_json::Value::Null
     }
 
+    /// 설정 화면의 나머지 탭이 그릴 값 전부 — 카테고리마다 하위 객체 하나씩
+    /// (`general` · `appearance` · `shell` · `claude` · `feedback`).
+    ///
+    /// 탭마다 라우트를 파지 않는 것은 `settings_action` 과 같은 이유다: 값의 정본이
+    /// GUI 한 곳이라 조회도 한 번이면 되고, 탭이 늘어도 여기 손댈 게 없다. 기본
+    /// `null` — 설정 개념이 없는 백엔드는 오류가 아니라 "없음" 을 답해야 호출부가
+    /// 항상 물어볼 수 있다.
+    fn settings_values(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     /// 캐릭터 프사 PNG 바이트. `theme` 이 있으면 **그 테마 폴더의** 그림을(카드
     /// 미리보기), 없으면 활성 스프라이트 폴더 → 번들 순으로 찾는다.
     ///
