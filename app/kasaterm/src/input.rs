@@ -639,9 +639,16 @@ impl App {
             // ② `/config theme=` 주입 큐. 값은 플립 시점에 한 번 읽는다 —
             //    sync_claude_theme 이 방금 갱신한 settings 값이라 새 세션이
             //    읽을 값과 항상 같다. auto 는 재선택이 OSC 11 재질의를 부르니
-            //    그대로 보내면 되고, custom:<slug> 도 값 그대로 통한다.
+            //    그대로 보내면 된다.
+            //
+            //    **`custom:` 은 보내지 않는다.** 그 커맨드는 표준 7종만 받고
+            //    커스텀은 거부한다("For custom themes, use /theme." — 2026-08-15
+            //    실측). 보내 봐야 세션마다 그 빨간 안내만 남는다. 커스텀을 쓰는
+            //    동안은 팔레트가 갈릴 때 `~/.claude/themes/kasaterm.json` 이 다시
+            //    구워지는 것으로 충분하다 — 그 파일은 claude 가 지켜본다.
             if let Some(value) = crate::socket::claude_theme_value()
                 .as_deref()
+                .filter(|v| !v.starts_with("custom:"))
                 .and_then(claude_theme_token)
             {
                 let now = Instant::now();
