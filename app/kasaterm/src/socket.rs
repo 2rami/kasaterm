@@ -157,6 +157,16 @@ pub struct PtyBackend {
     /// pane's transcript tail *on demand* (pull) — there is no background
     /// watcher thread filling a cache.
     bound: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// 새 pane → 그것을 쪼갠 pane. **완료 보고가 갈 주소**다.
+    ///
+    /// `surface.split` 은 부른 쪽의 id 를 이미 함께 받는데(그래야 사람이 보던 pane 이
+    /// 아니라 부른 pane 옆에 열린다) 여태 배치에만 쓰고 버렸다. 그래서 학생이
+    /// `kasaterm-cli done` 으로 보고해도 서버가 **누구에게 전할지 몰랐다** — 보고는
+    /// 쌓이는데 소환한 쪽은 모르는 상태였다(2026-08-15 지적).
+    ///
+    /// pane 이 닫혀도 항목을 지우지 않는다. 죽은 주소로 보내는 건 무해하고(전송이
+    /// 조용히 실패한다), 닫힘을 여기까지 전파하면 그 경로가 또 하나 늘어난다.
+    spawned_by: Arc<Mutex<HashMap<String, String>>>,
     /// surface_id → why it's blocked (the `Notification` hook's message, may be
     /// ""). Set by `attention`, cleared by `notify` (turn done) or when the
     /// pane's transcript grows again (claude resumed). The board's only source
@@ -352,6 +362,7 @@ impl PtyBackend {
             proxy,
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
+            spawned_by: Arc::new(Mutex::new(HashMap::new())),
             attention,
             hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
@@ -1083,6 +1094,13 @@ impl Backend for PtyBackend {
                 "split 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
             ),
         };
+        // 소환 관계를 남긴다 — 이 pane 이 나중에 `done` 으로 보고하면 여기 적힌
+        // 주소로 전한다. 사람이 손으로 쪼갠 경우(`from` 없음)는 알릴 곳이 없다.
+        if let Some(parent) = from.filter(|p| *p != id) {
+            if let Ok(mut m) = self.spawned_by.lock() {
+                m.insert(id.clone(), parent.to_string());
+            }
+        }
         Ok(SurfaceInfo {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),
@@ -2394,6 +2412,32 @@ impl Backend for PtyBackend {
                 idle_seen: false,
             },
         );
+        // 소환한 pane 에 **직접 전한다.** 여태 보고는 여기 쌓이기만 하고 아무에게도
+        // 안 갔다 — 오케스트레이터가 알려면 손으로 board 를 조회하는 수밖에 없어서,
+        // 학생은 보고했다고 하는데 시킨 쪽은 모르는 상태가 됐다(2026-08-15 지적).
+        //
+        // **부모가 claude 일 때만 보낸다.** 판정은 transcript 바인딩 유무다 — 셸이
+        // 도는 pane 에 글자를 밀어 넣으면 그건 명령줄에 섞여 들어간다. claude 는 턴
+        // 중에 들어온 입력을 다음 턴으로 큐잉하므로 작업을 끊지 않는다.
+        let parent = self.spawned_by.lock().ok().and_then(|m| m.get(surface_id).cloned());
+        if let Some(parent) = parent {
+            let is_claude = self.bound.lock().is_ok_and(|b| b.contains_key(&parent));
+            if is_claude {
+                let who = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|ws| ws.panes.get(surface_id).and_then(|p| p.character.clone()))
+                    .unwrap_or_else(|| surface_id.to_string());
+                let mark = if outcome == "succeeded" { "완료" } else { "실패" };
+                let line = if summary.is_empty() {
+                    format!("[{mark}] {who}({surface_id})")
+                } else {
+                    format!("[{mark}] {who}({surface_id}) — {summary}")
+                };
+                let _ = self.send_text(Some(&parent), &format!("{line}\n"));
+            }
+        }
         Ok(())
     }
 
