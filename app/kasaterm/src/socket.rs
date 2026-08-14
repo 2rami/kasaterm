@@ -1982,6 +1982,11 @@ impl Backend for PtyBackend {
                     }
                 }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
+                // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).
+                // 거기 없는 pane = 사용자가 닫았거나 숨겨 화면에 없다 — PTY 는
+                // 재부착 대비로 돌지만, 학생들이 그런 pane 에 새 일을 시키면 안
+                // 보이는 곳에서 작업이 돈다(거노 2026-08-15).
+                row.detached = !pane_window.contains_key(sid.as_str());
                 // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
                 // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
                 // 직후 잠깐 빌 뿐 곧 tail 에서 잡히니 여기서 읽으면 헛일이다.

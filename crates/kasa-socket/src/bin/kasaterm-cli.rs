@@ -260,7 +260,13 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                     if id == me {
                         continue; // 내 변화는 내가 이미 안다 — 노이즈 제거
                     }
-                    let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut status =
+                        e.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    // 사용자가 닫아 화면에 없는 pane — 새 일을 시키면 안 보이는
+                    // 곳에서 돈다(2026-08-15). 상태에 못 박아 사람도 필터도 잡게.
+                    if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        status = format!("{status}·화면밖");
+                    }
                     let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
                     let waiting = e.get("waiting_for").and_then(|v| v.as_str());
                     // 명시적 완료 보고 — 상태 줄에 실어 diff 가 잡게 한다: 보고가
@@ -365,7 +371,13 @@ fn run_wake_watch(
                         continue;
                     }
                     seen = true;
-                    let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut status =
+                        e.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    // 사용자가 닫아 화면에 없는 pane — 새 일을 시키면 안 보이는
+                    // 곳에서 돈다(2026-08-15). 상태에 못 박아 사람도 필터도 잡게.
+                    if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        status = format!("{status}·화면밖");
+                    }
                     let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
                     let character = e.get("character").and_then(|v| v.as_str()).unwrap_or("");
                     let who = if character.is_empty() {
@@ -373,7 +385,7 @@ fn run_wake_watch(
                     } else {
                         format!("{character}({target})")
                     };
-                    match status {
+                    match status.as_str() {
                         "working" | "busy" | "waiting" => armed = true,
                         "idle" | "success" if armed => {
                             let tail = if intent.is_empty() {

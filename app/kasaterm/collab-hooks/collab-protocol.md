@@ -18,6 +18,8 @@ kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|
 \
 **태스크 목록은 이제 pane 마다 따로다**(팀이 없어졌다). 남이 뭘 하는지는 `kasaterm-cli board` 로 본다.
 \
+⚠️ **board 의 `detached: true`(화면밖) 학생에게 새 일을 시키지 마라.** 사용자가 그 pane 을 **닫은 것**이고, PTY 만 재부착 대비로 돌고 있다 — 거기 시키면 사용자 눈에 안 보이는 곳에서 작업이 돈다(2026-08-15 지적). 명부(ListAgents)에는 닫힘이 안 보이므로 시키기 전 board 로 확인해라. 이어받을 일이 있으면 새 pane 을 쪼개거나, 사용자가 되살리기로 꺼낸 뒤에.
+\
 `kasaterm-cli tell <surface_id> "..."` 는 **SendMessage 가 안 닿을 때만** — 비-claude pane(codex 등)이나 `ListAgents` 에 안 뜨는 세션. tell 은 상대 입력창에 글자를 밀어넣는 것이라 상대가 타이핑 중이면 섞인다. ⚠️ tell 본문에 네 이름을 붙이지 마라 — 「아로나: 확인했어요」 말고 「확인했어요」만. kasaterm-cli 가 발신 마커를 붙여 네 프사·학생색으로 렌더하므로 직접 쓴 이름은 중복이 된다.
 \
 **말은 짧게.** 지시는 무엇을·어느 파일·무엇으로 끝났다고 볼지 세 줄이면 된다. 긴 브리프는 파일에 쓰고 「<절대경로> 읽고 수행」 한 줄만 보내라 — 받는 pane 은 거노가 보고 있는 화면이다.

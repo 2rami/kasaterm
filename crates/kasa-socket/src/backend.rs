@@ -330,6 +330,13 @@ pub struct PaneActivity {
     /// 보고 후 경과 초 — UI 가 "3분 전 완료" 상대 표시를 하도록 절대시각 대신 나이.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_ago_secs: Option<u64>,
+    /// **화면에 없는 pane**(사용자가 닫았거나 숨김 — PTY 는 재부착 대비로 돈다).
+    /// 사용자가 닫은 pane 은 화면에서 사라졌는데 board 에는 멀쩡히 떠서, 학생들이
+    /// 거기가 닫힌 줄 모르고 새 일을 시켰다(거노 2026-08-15 「내가 pane 닫아도
+    /// 너네한텐 안 보이고 살아있어서 거기다가 시킨다」). 참이면 **새 일을 시키지
+    /// 말 것** — 이어받으려면 사람이 되살리기로 화면에 꺼낸 뒤에.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).
