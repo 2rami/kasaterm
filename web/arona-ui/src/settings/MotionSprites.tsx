@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RotateCcw, Upload } from 'lucide-react';
+import { useT } from './lang';
+import type { Strings } from './strings';
 
 /// 한 모션의 상태 — 서버가 정본이다. 프레임 수를 여기서 받는 이유는 그게 로더의
 /// 규약(walk 만 6, 나머지 4)이라서다. 화면이 자기 상수로 칸을 그리면 로더가
@@ -13,27 +15,26 @@ type MotionStatus = {
   source: 'user' | 'bundled' | 'none';
 };
 
-/// 모션이 화면 어디서 보이는지. 규격보다 이게 먼저다 — walk 를 고치는 사람은
-/// 그게 작업 중 스피너 옆 걸음이라는 걸 알아야 어떤 그림을 그릴지 정한다.
-const MOTION_LABEL: Record<string, { title: string; when: string }> = {
-  idle: { title: '평소', when: '아무 일도 없을 때 서 있는 모습이에요. 세션 시작 배너에도 나와요.' },
-  walk: { title: '작업 중', when: 'claude 가 일하는 동안 스피너 옆에서 제자리걸음을 해요.' },
-  wave: { title: '승인 대기', when: '주황색 선택지가 떠서 대답을 기다릴 때 손을 흔들어요.' },
-  cheer: { title: '턴 완료', when: '한 턴이 끝나면 양팔을 들어요.' },
-  profile: { title: '프사', when: '사이드바와 메시지 아바타에 쓰는 얼굴이에요.' },
-  gif: { title: '대기 애니', when: '사이드바 카드에서 움직이는 얼굴이에요.' },
-};
+/// 모션 이름·설명은 사전에 있다. 여기서 하는 건 **서버가 준 모션 키를 그 사전
+/// 자리로 잇는 것**뿐 — 모르는 키가 와도 화면이 빈 글자로 뜨지 않게 키를 그대로
+/// 제목에 쓴다.
+function motionLabel(t: Strings, motion: string): { title: string; when: string } {
+  const known = t.motion[motion as 'idle' | 'walk' | 'wave' | 'cheer' | 'profile' | 'gif'];
+  return typeof known === 'object' && known !== null && 'title' in known
+    ? known
+    : { title: motion, when: '' };
+}
+
+function sourceLabel(t: Strings, source: MotionStatus['source']): string {
+  if (source === 'user') return t.motion.sourceUser;
+  if (source === 'bundled') return t.motion.sourceBundled;
+  return t.motion.sourceNone;
+}
 
 /// 미리보기 애니메이션 간격 — 네이티브(render.rs)와 같은 값이라야 "walk 일 땐
 /// 이렇게 보인다"가 실제와 같은 속도로 보인다.
 const FRAME_MS: Record<string, number> = { walk: 140 };
 const DEFAULT_FRAME_MS = 200;
-
-const SOURCE_LABEL: Record<MotionStatus['source'], string> = {
-  user: '내가 넣은 그림',
-  bundled: '기본 그림',
-  none: '그림 없음',
-};
 
 function spriteUrl(slug: string, motion: string, frame: number, ver: number): string {
   return `/character-sprite?slug=${encodeURIComponent(slug)}&motion=${motion}&frame=${frame}&v=${ver}`;
@@ -58,9 +59,14 @@ function byName(files: File[]): File[] {
 /// 지금 쓰는 프레임 한 장을 그대로 다시 올릴 수 있는 형태로 가져온다. 한 칸만
 /// 갈아 끼울 때 나머지 칸을 채우는 데 쓴다 — 저장이 벌 단위라 "이 한 장만"을
 /// 서버에 보낼 방법이 없기 때문이다.
-async function fetchFrameBase64(slug: string, motion: string, frame: number): Promise<string> {
+async function fetchFrameBase64(
+  t: Strings,
+  slug: string,
+  motion: string,
+  frame: number
+): Promise<string> {
   const res = await fetch(spriteUrl(slug, motion, frame, Date.now()));
-  if (!res.ok) throw new Error(`${frame + 1}번째 그림을 못 읽었어요`);
+  if (!res.ok) throw new Error(t.motion.errReadFrame({ index: frame + 1 }));
   return toBase64(await res.arrayBuffer());
 }
 
@@ -76,7 +82,8 @@ function imageSize(file: File): Promise<{ w: number; h: number }> {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error(`${file.name} 을 이미지로 못 읽었어요`));
+      // 파일 이름이 이미 무엇이 잘못됐는지 말한다 — 번역할 문장이 아니다.
+      reject(new Error(file.name));
     };
     img.src = url;
   });
@@ -89,6 +96,7 @@ function imageSize(file: File): Promise<{ w: number; h: number }> {
 /// 돌아간다. 그래서 한 칸만 바꾸는 조작도 나머지 칸을 함께 다시 올린다 —
 /// 사용자에게 "절반만 올라간 상태"를 만들 방법을 주지 않는다.
 export function MotionSprites({ slug }: { slug: string }) {
+  const t = useT();
   const [motions, setMotions] = useState<MotionStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 캐시버스터. 저장하면 올려서 브라우저가 옛 그림을 다시 그리지 않게 한다.
@@ -99,10 +107,14 @@ export function MotionSprites({ slug }: { slug: string }) {
       const res = await fetch(`/character-sprite-status?slug=${encodeURIComponent(slug)}`);
       const out = (await res.json()) as { motions?: MotionStatus[] } | null;
       setMotions(out?.motions ?? []);
-      setError(out?.motions ? null : '그림 상태를 못 읽었어요');
+      setError(out?.motions ? null : t.motion.statusFailed);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+    // t 를 의존성에 넣지 않는다 — 언어를 바꿀 때마다 로스터를 다시 읽을 이유가
+    // 없고, 넣으면 언어 전환이 화면 깜빡임을 부른다. 오류 문구는 다음 실패부터
+    // 새 언어로 뜬다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
   useEffect(() => {
@@ -113,15 +125,12 @@ export function MotionSprites({ slug }: { slug: string }) {
 
   return (
     <section className="mt-6">
-      <h3 className="text-[13px] font-medium text-[var(--kt-text)]">그림</h3>
-      <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">
-        모션마다 따로 바꿀 수 있어요. 한 모션은 프레임이 전부 있어야 쓰이고, 한 칸만 바꿔도
-        나머지는 지금 것 그대로 다시 저장돼요.
-      </p>
+      <h3 className="text-[13px] font-medium text-[var(--kt-text)]">{t.motion.title}</h3>
+      <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">{t.motion.hint}</p>
 
       {error && <p className="mt-3 text-[12px] text-[var(--kt-danger)]">{error}</p>}
       {!motions && !error && (
-        <p className="mt-3 text-[12px] text-[var(--kt-text-mute)]">읽는 중…</p>
+        <p className="mt-3 text-[12px] text-[var(--kt-text-mute)]">{t.common.loading}</p>
       )}
 
       <div className="mt-3 flex flex-col gap-3">
@@ -153,10 +162,11 @@ function MotionRow({
   ver: number;
   onChanged: () => void;
 }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const pick = useRef<HTMLInputElement>(null);
-  const label = MOTION_LABEL[status.motion] ?? { title: status.motion, when: '' };
+  const label = motionLabel(t, status.motion);
   const missing = status.source === 'none';
 
   async function post(body: unknown): Promise<void> {
@@ -173,10 +183,10 @@ function MotionRow({
       });
       const out = (await res.json()) as { ok: boolean; error?: string };
       if (!out.ok) {
-        setMsg({ ok: false, text: out.error || '저장에 실패했어요' });
+        setMsg({ ok: false, text: out.error || t.detail.saveFailed });
         return;
       }
-      setMsg({ ok: true, text: '바꿨어요' });
+      setMsg({ ok: true, text: t.motion.changed });
       onChanged();
     } catch (e) {
       setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
@@ -194,20 +204,20 @@ function MotionRow({
     setMsg(null);
     try {
       const wrong = picked.find((f) => !f.name.toLowerCase().endsWith(`.${status.ext}`));
-      if (wrong) throw new Error(`${status.ext.toUpperCase()} 파일만 넣을 수 있어요`);
+      if (wrong) throw new Error(t.motion.errExt({ ext: status.ext.toUpperCase() }));
       // 크기가 다르면 그 모션이 통째로 기본 도트로 돌아간다 — 올린 뒤 "왜 안
       // 바뀌지"가 되는 대신 여기서 막는다.
       const sizes = await Promise.all(picked.map(imageSize));
       const first = sizes[0];
       if (sizes.some((s) => s.w !== first.w || s.h !== first.h)) {
-        throw new Error('프레임 크기가 서로 달라요 — 같은 크기로 맞춰 주세요');
+        throw new Error(t.motion.errSizeMismatch);
       }
       const next = await Promise.all(
         Array.from({ length: status.frames }, async (_, i) => {
           const f = picked[i - at];
           if (f) return toBase64(await f.arrayBuffer());
-          if (missing) throw new Error(`${status.frames}장을 한 번에 넣어 주세요`);
-          return fetchFrameBase64(slug, status.motion, i);
+          if (missing) throw new Error(t.motion.errNeedAll({ count: status.frames }));
+          return fetchFrameBase64(t, slug, status.motion, i);
         })
       );
       await post({ slug, motion: status.motion, frames: next });
@@ -226,7 +236,7 @@ function MotionRow({
         boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
       }}
     >
-      <MotionPreview slug={slug} status={status} ver={ver} />
+      <MotionPreview t={t} slug={slug} status={status} ver={ver} />
 
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
@@ -240,12 +250,14 @@ function MotionRow({
                 status.source === 'user' ? 'var(--kt-accent)' : 'var(--kt-text-mute)',
             }}
           >
-            {SOURCE_LABEL[status.source]}
+            {sourceLabel(t, status.source)}
           </span>
           <span className="text-[11px] text-[var(--kt-text-mute)]">
-            {status.ext.toUpperCase()} {status.frames}장
+            {t.motion.spec({ ext: status.ext.toUpperCase(), count: status.frames })}
           </span>
-          {busy && <span className="text-[11px] text-[var(--kt-text-mute)]">저장 중…</span>}
+          {busy && (
+            <span className="text-[11px] text-[var(--kt-text-mute)]">{t.common.saving}</span>
+          )}
           {msg && (
             <span
               className="text-[11px]"
@@ -261,6 +273,7 @@ function MotionRow({
           {Array.from({ length: status.frames }, (_, i) => (
             <FrameSlot
               key={i}
+              t={t}
               index={i}
               src={missing ? null : spriteUrl(slug, status.motion, i, ver)}
               disabled={busy}
@@ -285,7 +298,7 @@ function MotionRow({
           />
           <SmallButton disabled={busy} onClick={() => pick.current?.click()}>
             <Upload size={12} />
-            {status.frames > 1 ? `${status.frames}장 고르기` : '고르기'}
+            {t.motion.pick({ count: status.frames })}
           </SmallButton>
           {status.source === 'user' && (
             <SmallButton
@@ -293,7 +306,7 @@ function MotionRow({
               onClick={() => void post({ slug, motion: status.motion, clear: true })}
             >
               <RotateCcw size={12} />
-              기본으로
+              {t.motion.reset}
             </SmallButton>
           )}
         </div>
@@ -308,10 +321,12 @@ function MotionRow({
 /// 매 프레임이 새로 로드되어 애니가 끊겨 보이기 때문이다. 겹쳐 두면 브라우저가
 /// 한 번만 받아 온다.
 function MotionPreview({
+  t,
   slug,
   status,
   ver,
 }: {
+  t: Strings;
   slug: string;
   status: MotionStatus;
   ver: number;
@@ -333,7 +348,7 @@ function MotionPreview({
     >
       {status.source === 'none' ? (
         <span className="absolute inset-0 flex items-center justify-center text-[11px] text-[var(--kt-text-mute)]">
-          없음
+          {t.motion.empty}
         </span>
       ) : (
         Array.from({ length: n }, (_, i) => (
@@ -354,11 +369,13 @@ function MotionPreview({
 /// 칸만, 여러 장이면 뒤 칸까지. 덕분에 "이 프레임만 다시 그렸어요"와 "한 벌
 /// 통째로"가 같은 조작으로 된다.
 function FrameSlot({
+  t,
   index,
   src,
   disabled,
   onFiles,
 }: {
+  t: Strings;
   index: number;
   src: string | null;
   disabled: boolean;
@@ -371,7 +388,7 @@ function FrameSlot({
     <button
       type="button"
       disabled={disabled}
-      title={`${index + 1}번째 프레임 — 파일을 끌어다 놓거나 눌러서 고르세요`}
+      title={t.motion.slotTitle({ index: index + 1 })}
       onClick={() => pick.current?.click()}
       onDragOver={(e) => {
         e.preventDefault();

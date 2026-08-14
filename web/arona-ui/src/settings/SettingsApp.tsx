@@ -7,6 +7,7 @@ import {
   Terminal,
   Users,
 } from 'lucide-react';
+import { useT } from './lang';
 import { useTokens } from './useTokens';
 import { ThemeTab } from './ThemeTab';
 import { GeneralTab } from './GeneralTab';
@@ -24,27 +25,22 @@ import type { Character, SettingsCharacters, SettingsValues } from './types';
 /// 어느 프로세스에 말하는지가 화면에 보여야 한다.
 const PORT = location.port || '8765';
 
-/// 좌측 nav — 네이티브와 같은 순서·같은 이름. `ready` 가 false 인 칸은 아직
-/// 네이티브에만 있다(이행 중이라는 걸 화면이 말해 준다).
+/// 좌측 nav — 네이티브와 같은 순서. `ready` 가 false 인 칸은 아직 네이티브에만
+/// 있다(이행 중이라는 걸 화면이 말해 준다).
+///
+/// 이름은 여기 없다. 칸 이름과 제목·힌트는 전부 사전에서 오고, 이 표는 **어떤
+/// 칸이 어떤 순서로 있고 아이콘이 무엇인가**만 쥔다 — 언어를 늘릴 때 고칠 자리가
+/// 사전 하나로 남는다.
 const CATS = [
-  { key: 'general', label: 'General', Icon: SlidersHorizontal, ready: true },
-  { key: 'appearance', label: 'Appearance', Icon: Sparkles, ready: true },
-  { key: 'shell', label: 'Shell', Icon: Terminal, ready: true },
-  { key: 'claude', label: 'Claude', Icon: Asterisk, ready: true },
-  { key: 'theme', label: 'Theme', Icon: Users, ready: true },
-  { key: 'feedback', label: 'Feedback', Icon: MessageSquare, ready: true },
+  { key: 'general', Icon: SlidersHorizontal, ready: true },
+  { key: 'appearance', Icon: Sparkles, ready: true },
+  { key: 'shell', Icon: Terminal, ready: true },
+  { key: 'claude', Icon: Asterisk, ready: true },
+  { key: 'theme', Icon: Users, ready: true },
+  { key: 'feedback', Icon: MessageSquare, ready: true },
 ] as const;
 
 type CatKey = (typeof CATS)[number]['key'];
-
-const TITLES: Record<CatKey, { title: string; hint: string }> = {
-  general: { title: 'General', hint: '창·작업 폴더·파일 열기' },
-  appearance: { title: 'Appearance', hint: '색·모양·글꼴' },
-  shell: { title: 'Shell', hint: '셸과 편집기' },
-  claude: { title: 'Claude', hint: '계정과 실행 방식' },
-  theme: { title: 'Theme', hint: '학생 그림과 페르소나, 캐릭터 목록' },
-  feedback: { title: 'Feedback', hint: '쓰다가 걸린 것을 남겨 주세요' },
-};
 
 /// 값만 있으면 그려지는 탭들. Theme 은 여기 없다 — 캐릭터 상세로 화면이 통째로
 /// 바뀌는 자기 상태가 있어서 본문에서 따로 다룬다.
@@ -59,6 +55,7 @@ const TABS: Partial<
 };
 
 export function SettingsApp() {
+  const t = useT();
   const tokens = useTokens();
   const [cat, setCat] = useState<CatKey>('theme');
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
@@ -116,7 +113,7 @@ export function SettingsApp() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const meta = TITLES[cat];
+  const meta = t.titles[cat];
   const tab = TABS[cat];
 
   return (
@@ -126,9 +123,9 @@ export function SettingsApp() {
         style={{ background: 'var(--kt-surface)' }}
       >
         <div className="mb-4 px-2 text-[13px] font-semibold text-[var(--kt-text-dim)]">
-          Settings
+          {t.nav.settings}
         </div>
-        {CATS.map(({ key, label, Icon, ready }) => {
+        {CATS.map(({ key, Icon, ready }) => {
           const on = key === cat;
           return (
             <button
@@ -149,12 +146,12 @@ export function SettingsApp() {
                 />
               )}
               <Icon size={15} strokeWidth={2} />
-              <span className="whitespace-nowrap">{label}</span>
+              <span className="whitespace-nowrap">{t.nav[key]}</span>
               {/* 아직 네이티브에만 있는 칸 — 눌러도 빈 화면이 나오는 이유를 여기서 알린다.
                   nowrap 이 없으면 「Appearance」 칸에서 이 라벨만 두 줄로 쪼개진다. */}
               {!ready && (
                 <span className="ml-auto whitespace-nowrap text-[11px] text-[var(--kt-text-mute)]">
-                  네이티브
+                  {t.nav.native}
                 </span>
               )}
             </button>
@@ -163,7 +160,7 @@ export function SettingsApp() {
         <div className="mt-5 px-2 text-[11px] leading-relaxed text-[var(--kt-text-mute)]">
           127.0.0.1:{PORT}
           <br />
-          이 포트의 kasaterm
+          {t.nav.portHint}
         </div>
       </nav>
 
@@ -174,12 +171,12 @@ export function SettingsApp() {
 
         {cat === 'theme' && err && (
           <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
-            /settings/characters 실패: {err}
+            {t.common.fetchFailed({ path: '/settings/characters', error: err })}
           </p>
         )}
         {tab && valErr && (
           <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
-            /settings/values 실패: {valErr}
+            {t.common.fetchFailed({ path: '/settings/values', error: valErr })}
           </p>
         )}
 
@@ -201,25 +198,30 @@ export function SettingsApp() {
               <ThemeTab data={chars} onSelect={setOpen} onChanged={reload} />
             )
           ) : (
-            !err && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>
+            !err && (
+              <p className="text-[13px] text-[var(--kt-text-mute)]">{t.common.loading}</p>
+            )
           )
         ) : tab ? (
           values ? (
             tab(values, reloadValues)
           ) : (
-            !valErr && <p className="text-[13px] text-[var(--kt-text-mute)]">읽는 중…</p>
+            !valErr && (
+              <p className="text-[13px] text-[var(--kt-text-mute)]">{t.common.loading}</p>
+            )
           )
         ) : (
-          <p className="text-[13px] text-[var(--kt-text-mute)]">
-            이 화면은 아직 네이티브 설정 창에 있어요.
-          </p>
+          <p className="text-[13px] text-[var(--kt-text-mute)]">{t.common.notWebYet}</p>
         )}
 
         {/* 토큰이 실제로 실렸는지 화면에서 보이게 — 색이 어긋나면 여기부터 본다. */}
         {tokens && (
           <p className="mt-6 text-[11px] text-[var(--kt-text-mute)]">
-            팔레트 {tokens.theme} · accent {tokens.accent_name} · 모서리{' '}
-            {tokens.shape.radius_md}px
+            {t.common.palette({
+              theme: tokens.theme,
+              accent: tokens.accent_name,
+              radius: tokens.shape.radius_md,
+            })}
           </p>
         )}
       </main>

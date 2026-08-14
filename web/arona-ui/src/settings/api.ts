@@ -9,6 +9,13 @@ export type SettingsActionResult = {
   message?: string | null;
   /// 요청 자체가 거부된 이유(모르는 액션·잘못된 이름 등).
   error?: string;
+  /// 위 두 문구의 **언어 없는 이름**. 있으면 화면이 사전에서 그 나라 말로 만들고,
+  /// 없으면 위의 한국어 문구를 그대로 쓴다(서버 쪽 코드화가 진행 중이라 둘 다
+  /// 올 수 있다 — 노아와 합의, 2026-08-15).
+  error_code?: string | null;
+  error_args?: Record<string, string | number>;
+  message_code?: string | null;
+  message_args?: Record<string, string | number>;
 };
 
 import type { SettingsValues } from './types';

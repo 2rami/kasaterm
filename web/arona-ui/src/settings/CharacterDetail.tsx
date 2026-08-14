@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import { useT } from './lang';
 import { MotionSprites } from './MotionSprites';
 import { faceUrl } from './types';
 import type { Character } from './types';
@@ -34,6 +35,7 @@ export function CharacterDetail({
   /// 로스터를 다시 읽어야 화면과 파일이 어긋나지 않는다.
   onSaved: (name: string) => void;
 }) {
+  const t = useT();
   const [name, setName] = useState(character.name);
   const [persona, setPersona] = useState(character.persona);
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -84,7 +86,7 @@ export function CharacterDetail({
         // 남아 저장된 것처럼 보이는데 파일은 옛 값 그대로다.
         setName(savedName.current);
         setPersona(savedPersona.current);
-        setToast({ ok: false, msg: out.error || '저장에 실패했어요' });
+        setToast({ ok: false, msg: out.error || t.detail.saveFailed });
         return;
       }
       // 회신의 이름을 쓴다. 성격은 됐지만 이름이 거부된 경우 `ok` 는 true 인데
@@ -96,8 +98,8 @@ export function CharacterDetail({
       if (body.persona != null) savedPersona.current = body.persona;
       setToast(
         renamed
-          ? { ok: false, msg: '이름은 못 바꿨어요 — 성격만 저장했어요' }
-          : { ok: true, msg: '저장했어요' }
+          ? { ok: false, msg: t.detail.renameRejected }
+          : { ok: true, msg: t.common.saved }
       );
       onSaved(finalName);
     } catch (e) {
@@ -150,13 +152,13 @@ export function CharacterDetail({
           }}
         >
           <ArrowLeft size={14} />
-          목록
+          {t.detail.back}
         </button>
         <span className="text-[13px] text-[var(--kt-text-mute)]">
           {character.school} · {character.slug}
         </span>
         {saving && (
-          <span className="text-[12px] text-[var(--kt-text-mute)]">저장 중…</span>
+          <span className="text-[12px] text-[var(--kt-text-mute)]">{t.common.saving}</span>
         )}
         {toast && (
           <span
@@ -189,11 +191,9 @@ export function CharacterDetail({
 
         <div className="min-w-0 flex-1">
           <label className="block text-[13px] font-medium text-[var(--kt-text)]">
-            이름
+            {t.detail.name}
           </label>
-          <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">
-            로스터의 키예요 — 성격·색·그림이 이 이름을 따라가요. 칸을 벗어날 때 저장돼요.
-          </p>
+          <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">{t.detail.nameHint}</p>
           <input
             className="kt-field mt-2 w-full max-w-[320px]"
             value={name}
@@ -212,11 +212,9 @@ export function CharacterDetail({
           />
 
           <label className="mt-6 block text-[13px] font-medium text-[var(--kt-text)]">
-            성격
+            {t.detail.persona}
           </label>
-          <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">
-            이 캐릭터로 뜨는 pane 의 claude 가 이대로 말해요 — 이미 도는 pane 은 안 바뀌어요.
-          </p>
+          <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">{t.detail.personaHint}</p>
           <textarea
             className="kt-field mt-2 min-h-[280px] w-full resize-y font-[inherit] leading-relaxed"
             value={persona}
@@ -238,7 +236,7 @@ export function CharacterDetail({
             }}
           />
           <p className="mt-1 text-[11px] text-[var(--kt-text-mute)]">
-            {persona.length}자 · 타이핑을 멈추면 저장돼요
+            {t.detail.charCount({ count: persona.length })}
           </p>
 
           {/* 그림은 이름·성격과 저장 경로가 다르다(파일 폴더 vs 로스터 json) —

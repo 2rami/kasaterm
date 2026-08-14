@@ -1581,6 +1581,18 @@ impl Backend for PtyBackend {
         id: Option<&str>,
         label: Option<&str>,
     ) -> Result<serde_json::Value> {
+        // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
+        // 화면도 없다(설정 화면 문구는 웹이 쥔다). 그래서 GUI 왕복을 타지 않는다.
+        if action == "set-language" {
+            let lang = match id {
+                Some("ko") | Some("en") => id.unwrap_or("ko"),
+                // 모르는 값을 파일에 박으면 다음 부팅에 조회가 조용히 한국어로
+                // 떨어져, 사용자는 자기 선택이 씹혔다고 읽는다. 거부하고 알린다.
+                _ => anyhow::bail!("모르는 언어예요"),
+            };
+            write_setting("language", serde_json::json!(lang));
+            return Ok(serde_json::json!({ "ok": true, "language": lang }));
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketSettingsAction(
@@ -1607,10 +1619,16 @@ impl Backend for PtyBackend {
     /// 파일을 직접 읽지 않는다. `values` 액션이 그 스레드에서 스냅샷을 굽고, 회신이
     /// 돌아온 **뒤에** 그것을 집어 온다 — 액션 왕복이 동기라 이 순서가 보장된다.
     fn settings_values(&self) -> serde_json::Value {
-        match self.settings_action("values", None, None) {
+        let mut v = match self.settings_action("values", None, None) {
             Ok(_) => crate::settings::take_web_values().unwrap_or(serde_json::Value::Null),
             Err(_) => serde_json::Value::Null,
+        };
+        // 언어는 **파일에만 있는 값**이라 GUI 스냅샷을 굽는 쪽을 거칠 이유가 없다.
+        // 여기서 얹으면 조회가 한 번으로 유지되고, 스냅샷 코드를 건드리지 않는다.
+        if let Some(o) = v.as_object_mut() {
+            o.insert("language".to_string(), serde_json::json!(read_ui_language()));
         }
+        v
     }
 
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
@@ -2947,6 +2965,16 @@ pub fn read_default_cwd_mode() -> String {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .unwrap_or_else(fallback)
+}
+
+/// 설정 화면이 쓰는 말(`ko`|`en`). 값이 없거나 모르는 값이면 **한국어** — 이 앱을
+/// 쓰는 사람이 한국어로 일한다(거노 지시 2026-08-15 「나는 한글이 기본으로」).
+/// 사람이 파일을 손으로 고칠 수 있으므로 아는 값만 통과시킨다.
+pub fn read_ui_language() -> String {
+    match read_settings().get("language").and_then(|x| x.as_str()) {
+        Some("en") => "en".to_string(),
+        _ => "ko".to_string(),
+    }
 }
 
 /// Whole `settings.json` as a JSON object (empty object if missing/invalid).

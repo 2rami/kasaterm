@@ -4,10 +4,13 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './settings.css';
+import { LangProvider } from './lang';
 import { SettingsApp } from './SettingsApp';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <SettingsApp />
+    <LangProvider>
+      <SettingsApp />
+    </LangProvider>
   </StrictMode>
 );

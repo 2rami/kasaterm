@@ -1,4 +1,6 @@
 import { Notice, Row, Segmented, TabCard, TextField, Toggle, useSettingsAction } from './controls';
+import { useLang, useT } from './lang';
+import type { Lang } from './strings';
 import type { SettingsValues } from './types';
 
 /// 저장값이 `"last"`·`"home"` 둘 중 하나가 아니면 그 문자열 자체가 사용자가 고른
@@ -23,6 +25,8 @@ export function GeneralTab({
   data: SettingsValues['general'];
   reload: () => Promise<void>;
 }) {
+  const t = useT();
+  const { lang, setLang } = useLang();
   const { busy, notice, run } = useSettingsAction(reload);
   const cwd = cwdKey(data.cwd_mode);
   const open = openKey(data.file_open_mode);
@@ -30,6 +34,24 @@ export function GeneralTab({
   return (
     <TabCard>
       <Notice notice={notice} />
+
+      {/* 언어를 맨 위에 두는 이유는 이 칸이 **다른 모든 칸을 읽는 수단**이기
+          때문이다. 말이 안 통하는 사람에게는 이 한 칸을 찾는 게 첫 일이라,
+          아래로 내리면 정작 필요한 사람이 못 찾는다.
+
+          `run` 을 안 쓰고 `setLang` 을 쓴다 — 이 값은 GUI 를 거치지 않고 파일로
+          바로 가고, 화면은 회신을 기다리지 않고 즉시 바뀌어야 한다. */}
+      <Row label={t.language.title} desc={[t.language.hint]}>
+        <Segmented
+          value={lang}
+          disabled={false}
+          options={[
+            { key: 'ko', label: t.language.ko },
+            { key: 'en', label: t.language.en },
+          ]}
+          onPick={(key) => setLang(key as Lang)}
+        />
+      </Row>
 
       <Row label="Startup folder" desc={['새 창과 탭이 열리는 위치']}>
         <Segmented

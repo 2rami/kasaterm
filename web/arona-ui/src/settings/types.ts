@@ -144,6 +144,13 @@ export type AccountRow = {
   sub_kind: string;
   /// false = 첫 행(지금 로그인). 지울 것도 이름 붙일 것도 없다.
   slot: boolean;
+  /// 위 `name`·`sub` 의 **언어 없는 이름**. 있으면 화면이 사전에서 그 나라 말로
+  /// 만들고, `null` 이면 그 자리는 옮길 말이 아니라 **데이터**다 — 사용자가 붙인
+  /// 별명, 이메일, 팀 조직명. 부제에 조직명이 이어 붙는 경우도 코드가 빠진다
+  /// (코드로 갈면 조직이 사라진다). 노아와 합의, 2026-08-15.
+  name_code?: string | null;
+  name_args?: { n: number } | null;
+  sub_code?: string | null;
 };
 
 /// 프사 URL. `theme` 을 주면 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { postAction } from './api';
 import { MiniButton, Notice, Section, TabCard, Toggle } from './controls';
+import { serverText, useT } from './lang';
 import { faceUrl } from './types';
+import type { Strings } from './strings';
 import type { Character, SettingsCharacters, ThemeCard } from './types';
 
 /// 테마 한 장. 미리보기 얼굴 셋 + 이름 + 「N명 · 쓰는 중」.
@@ -14,6 +16,7 @@ import type { Character, SettingsCharacters, ThemeCard } from './types';
 /// 안 보인다. `invisible` 로 숨기는 게 `opacity-0` 보다 맞다: 투명한 버튼은
 /// 여전히 눌리고 탭으로 잡혀서, 안 보이는 「치우기」가 카드 위에 남는다.
 function ThemeCardView({
+  t,
   card,
   active,
   busy,
@@ -23,6 +26,7 @@ function ThemeCardView({
   onRenameStart,
   onRenameEnd,
 }: {
+  t: Strings;
   card: ThemeCard;
   active: boolean;
   busy: boolean;
@@ -80,10 +84,14 @@ function ThemeCardView({
 
       {managed && !renaming && (
         <div className="invisible absolute right-3 top-3 flex gap-1 group-focus-within:visible group-hover:visible">
-          <MiniButton label="이름" disabled={busy} onClick={onRenameStart} />
-          <MiniButton label="폴더" disabled={busy} onClick={() => onAction('open-theme-dir')} />
+          <MiniButton label={t.theme.rename} disabled={busy} onClick={onRenameStart} />
           <MiniButton
-            label="치우기"
+            label={t.theme.folder}
+            disabled={busy}
+            onClick={() => onAction('open-theme-dir')}
+          />
+          <MiniButton
+            label={t.theme.remove}
             danger
             disabled={busy}
             onClick={() => onAction('delete-theme')}
@@ -117,7 +125,8 @@ function ThemeCardView({
         <div className="mt-2 text-[14px] font-medium text-[var(--kt-text)]">{card.label}</div>
       )}
       <div className="text-[12px] text-[var(--kt-text-mute)]">
-        {card.count}명{active && ' · 쓰는 중'}
+        {t.theme.members({ count: card.count })}
+        {active && ` · ${t.theme.inUse}`}
       </div>
     </div>
   );
@@ -125,7 +134,15 @@ function ThemeCardView({
 
 /// 테마를 새로 만드는 칸. 목록 밖 버튼으로 빼지 않는 이유는 네이티브와 같다 —
 /// 테마가 늘어날수록 멀어져서, 정작 만들려는 사람이 못 찾는다.
-function NewThemeCard({ busy, onClick }: { busy: boolean; onClick: () => void }) {
+function NewThemeCard({
+  t,
+  busy,
+  onClick,
+}: {
+  t: Strings;
+  busy: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
@@ -142,7 +159,7 @@ function NewThemeCard({ busy, onClick }: { busy: boolean; onClick: () => void })
         color: 'var(--kt-text-mute)',
       }}
     >
-      <span className="text-[13px]">+ 새 테마</span>
+      <span className="text-[13px]">{t.theme.newTheme}</span>
     </button>
   );
 }
@@ -184,6 +201,7 @@ export function ThemeTab({
   /// 그리면 저장 쪽에서 거부된 변경이 화면에만 남는다.
   onChanged: () => Promise<void>;
 }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
   /// 이름을 고치는 중인 테마 id. 네이티브도 카드 안에서 바로 고친다.
@@ -196,9 +214,20 @@ export function ThemeTab({
       const out = await postAction(action, args);
       // `error` 는 요청이 거부된 것(모르는 액션·못 쓰는 이름), `message` 는
       // 네이티브가 하려던 말이다 — 성공에도 온다("테마를 바꿨어요…").
-      if (out.error) setNotice({ ok: false, msg: out.error });
-      else if (out.message) setNotice({ ok: out.ok, msg: out.message });
-      else if (!out.ok) setNotice({ ok: false, msg: '안 됐어요' });
+      //
+      // 코드가 함께 오면 사전에서 만들고, 없으면 서버 문구를 그대로 쓴다 —
+      // 서버 쪽 코드화가 덜 끝난 자리도 화면이 안 깨진다.
+      if (out.error || out.error_code) {
+        setNotice({
+          ok: false,
+          msg: serverText(t, out.error_code, out.error, out.error_args),
+        });
+      } else if (out.message || out.message_code) {
+        setNotice({
+          ok: out.ok,
+          msg: serverText(t, out.message_code, out.message, out.message_args),
+        });
+      } else if (!out.ok) setNotice({ ok: false, msg: t.common.failed });
       await onChanged();
     } catch (e) {
       setNotice({ ok: false, msg: e instanceof Error ? e.message : String(e) });
@@ -215,11 +244,12 @@ export function ThemeTab({
           말이 섞여 오기 때문이다. */}
       <Notice notice={notice} />
 
-      <Section title="Theme" hint="폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다">
+      <Section title={t.theme.section} hint={t.theme.sectionHint}>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
           {data.themes.map((card) => (
             <ThemeCardView
               key={card.id || '(bundled)'}
+              t={t}
               card={card}
               active={card.id === data.active_theme}
               busy={busy}
@@ -230,13 +260,13 @@ export function ThemeTab({
               onRenameEnd={() => setRenaming(null)}
             />
           ))}
-          <NewThemeCard busy={busy} onClick={() => void run('new-theme')} />
+          <NewThemeCard t={t} busy={busy} onClick={() => void run('new-theme')} />
         </div>
       </Section>
 
       <Section
-        title="Persona"
-        hint="켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터"
+        title={t.theme.persona}
+        hint={t.theme.personaHint}
         right={
           <Toggle
             on={data.persona_enabled}
@@ -246,22 +276,32 @@ export function ThemeTab({
         }
       />
 
-      <Section
-        title="Character images"
-        hint="테마 폴더의 sprites/ 에 모션별로: idle/<slug>-0..3 · walk/<slug>-0..5 · wave/<slug>-0..3 · cheer/<slug>-0..3 · profile/<slug>.png (폴더 안 README 참고)"
-      >
+      {/* 폴더 안내를 규격 나열에서 「언제 폴더를 여는가」로 바꿨다 — 모션별 교체가
+          캐릭터 상세에 생긴 뒤로는 파일 이름 규약을 외울 일이 없다. */}
+      <Section title={t.theme.images} hint={t.theme.imagesHint}>
         <div className="flex gap-2">
           <MiniButton
-            label="이미지 폴더 열기"
+            label={t.theme.openImages}
             disabled={busy}
             onClick={() => void run('open-students-dir')}
           />
-          <MiniButton label="로스터 열기" disabled={busy} onClick={() => void run('open-roster')} />
-          <MiniButton label="새로고침" disabled={busy} onClick={() => void run('refresh-assets')} />
+          <MiniButton
+            label={t.theme.openRoster}
+            disabled={busy}
+            onClick={() => void run('open-roster')}
+          />
+          <MiniButton
+            label={t.theme.refresh}
+            disabled={busy}
+            onClick={() => void run('refresh-assets')}
+          />
         </div>
       </Section>
 
-      <Section title="Characters" hint={`${data.roster.length}명 — 캐릭터를 눌러 성격과 그림을 고치세요`}>
+      <Section
+        title={t.theme.characters}
+        hint={t.theme.charactersHint({ count: data.roster.length })}
+      >
         <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
           {data.roster.map((c) => (
             <CharacterCell key={c.name} c={c} onSelect={() => onSelect(c)} />
