@@ -3116,7 +3116,65 @@ pub(crate) fn claude_theme_value() -> Option<String> {
     Some(v.get("theme")?.as_str()?.to_string())
 }
 
+/// 우리가 관리하는 claude 커스텀 테마의 슬러그. 파일명이자 `/config theme=` 에 넣는
+/// 값의 꼬리다. **이 이름 밖은 건드리지 않는다** — 그 폴더는 사용자 것이고, 손수 만든
+/// 테마를 자동 정리가 덮으면 그게 더 나쁘다.
+const CLAUDE_THEME_SLUG: &str = "kasaterm";
+
+/// 지금 팔레트를 claude 커스텀 테마로 굽는다 — `~/.claude/themes/kasaterm.json`.
+///
+/// 여태 실행 중 claude 에 넘길 수 있던 건 `light`·`dark` 계열뿐이라, 터미널이
+/// Catppuccin 을 입고 있어도 claude 에는 「어두운 것」으로만 전해졌다(색이 안 맞는다).
+/// claude 2.x 의 커스텀 테마는 `{name, base, overrides}` 꼴이고 색은 `#rrggbb` 를
+/// 받으므로, 우리 팔레트를 그대로 실어 보낼 수 있다(2026-08-15 바이너리 실측).
+///
+/// **덮어쓰는 키는 뜻이 분명한 것만.** 그 테마 시스템은 70개가 넘는 키를 갖고 있고
+/// 모르는 키는 조용히 버려진다 — 전부 매핑하려 들면 어긋난 자리가 생기고, 어디서
+/// 어긋났는지 화면만 보고는 알 수 없다. 나머지는 `base` 에서 상속받는 편이 낫다.
+///
+/// 값(`settings.json` 의 `theme`)은 **여기서 안 건드린다.** 사용자가 한 번
+/// `custom:kasaterm` 을 고르면 그 뒤로는 팔레트를 바꿀 때마다 이 파일이 갱신돼 따라온다.
+/// 우리가 값까지 세우면 사용자가 자기 테마를 고를 자유를 뺏는다.
+pub fn write_claude_custom_theme(light: bool) {
+    if std::env::var_os("KASATERM_SETTINGS_FILE").is_some() {
+        return;
+    }
+    let Some(dir) = kasa_socket::home_dir().map(|h| h.join(".claude/themes")) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    let doc = serde_json::json!({
+        "name": "kasaterm",
+        // 안 덮은 색은 여기서 상속된다 — 밝기가 어긋나면 그 상속분이 전부 뒤집힌다.
+        "base": if light { "light" } else { "dark" },
+        "overrides": {
+            "background": hex(crate::theme::bg()),
+            "text": hex(crate::theme::text()),
+            "subtle": hex(crate::theme::text_mute()),
+            "inactive": hex(crate::theme::text_mute()),
+            "selectionBg": hex(crate::theme::surface_active()),
+            // claude 자신을 가리키는 색과 승인 프롬프트 색이 우리 강조색을 따른다 —
+            // 화면에서 「지금 이게 claude 다」를 말하는 자리라 팔레트가 가장 크게 읽힌다.
+            "claude": hex(crate::theme::accent()),
+            "permission": hex(crate::theme::accent()),
+            "success": hex(crate::theme::success()),
+            "error": hex(crate::theme::danger()),
+            "warning": hex(crate::theme::attention()),
+        },
+    });
+    if let Ok(txt) = serde_json::to_string_pretty(&doc) {
+        let _ = std::fs::write(dir.join(format!("{CLAUDE_THEME_SLUG}.json")), txt + "\n");
+    }
+}
+
 pub fn sync_claude_theme(light: bool) {
+    // 커스텀 테마 파일은 **먼저, 조건 없이** 굽는다. 아래 분기들은 `theme` 값을
+    // 만질지 말지를 가르는 것이고, 파일은 그 값과 무관하게 늘 최신이어야 한다 —
+    // 사용자가 나중에 `custom:kasaterm` 을 고르는 순간 바로 맞는 색이 나와야 한다.
+    write_claude_custom_theme(light);
     if std::env::var_os("KASATERM_SETTINGS_FILE").is_some() {
         return;
     }

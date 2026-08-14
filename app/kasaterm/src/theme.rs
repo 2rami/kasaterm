@@ -738,6 +738,10 @@ pub fn custom_theme_seed(base_key: &str) -> serde_json::Value {
 
 pub fn set_accent(name: &str) {
     S_ACCENT.store(pack(accent_color(name)), Ordering::Relaxed);
+    // 강조색은 팔레트 적용 경로(`apply_palette`)를 안 지난다 — 그래서 claude 쪽
+    // 커스텀 테마도 여기서 따로 다시 구워야 한다. 안 그러면 강조색만 바꿨을 때
+    // 터미널은 새 색인데 claude 는 옛 색으로 남는다.
+    crate::socket::write_claude_custom_theme(is_light(bg()));
 }
 
 /// Apply persisted theme + accent from settings.json at launch.
