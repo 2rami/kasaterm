@@ -71,7 +71,7 @@ function persist(key) {
   const s = sessions.get(key)
   if (!s) return
   chrome.storage.local
-    .set({ [`pane:${key}`]: { at: Date.now(), task: s.task, tabs: [...s.tabs], groups: [...s.groups], log: s.log } })
+    .set({ [`pane:${key}`]: { at: Date.now(), task: s.task, tabs: [...s.tabs], made: [...s.made], groups: [...s.groups], log: s.log } })
     .catch(() => {})
 }
 
@@ -95,6 +95,10 @@ export async function openSession(client, identity) {
     task: prev?.task ?? saved?.task ?? null,
     tabs: prev?.tabs || new Set(saved?.tabs || []),
     busy: prev?.busy || new Set(),
+    // 이 세션이 **직접 연** 탭. `tabs` 와 다르다 — 그쪽엔 markBusy 가 claim 한 「조작만 한 남의 탭」도
+    // 들어 있어서 내가 치울 몫을 세는 데 못 쓴다. 그룹 멤버십으로 대신하던 것을 여기로 옮겼다:
+    // 방 단위로 그룹을 공유하면서 같은 그룹에 남의 탭이 들어오게 됐기 때문이다.
+    made: prev?.made || new Set(saved?.made || []),
     // 이 세션이 만든 탭 그룹. 사람이 직접 만든 그룹을 건드리지 않으려면 우리 것을 알고 있어야 한다.
     groups: prev?.groups || new Set(saved?.groups || []),
     log: prev?.log || saved?.log || [],
@@ -168,7 +172,7 @@ export function forgetTab(tabId) {
   offTimers.delete(tabId)
   for (const key of owners?.keys() || []) {
     const s = sessions.get(key)
-    if (s) { s.tabs.delete(tabId); s.busy.delete(tabId) }
+    if (s) { s.tabs.delete(tabId); s.busy.delete(tabId); s.made.delete(tabId) }
   }
 }
 
@@ -470,26 +474,111 @@ export function addActivity(client, label, tabId, ok = true) {
 
 // --- 탭 그룹 --------------------------------------------------------------
 
-// 자동으로는 절대 묶지 않는다 — 사람이 열어둔 탭이 제멋대로 옮겨 다니면 탭바가 어지럽다.
-// 팝업에서 명시적으로 눌렀을 때만 이 두 함수가 돈다.
+// 묶는 대상은 **우리가 직접 연 탭**뿐이다. 사람이 열어둔 탭은 조작만 하고 그룹으로 옮기지 않는다 —
+// 열어둔 탭이 제멋대로 재배치되는 것이 claude-in-chrome 이 금지된 이유다. 팝업의 「묶기」 버튼은
+// 세션이 잡은 탭까지 한꺼번에 묶는 별개 경로다(groupTabs).
 
-// 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 우리 그룹이 있으면 거기 합친다.
+// ★그룹은 학생마다가 아니라 **방마다** 하나다(2026-08-15 지시). 방 = 같은 폴더에서 도는 pane 들.
+// 학생마다 만들면 방 하나에 다섯이 붙어 있을 때 그룹이 다섯 개 뜬다(같은 날 관측: 넷이 탭을 하나씩
+// 물고 그룹 넷을 차지하고 있었다). 방으로 묶으면 탭바에 방 수만큼만 뜬다.
+const ROOM_GROUPS_KEY = 'roomGroups'
+let roomGroups = null
+
+// storage.session 인 이유는 agentWindows 와 같다 — worker 가 죽어도 남고, 브라우저를 껐다 켜면
+// 저절로 비워진다(그룹 id 는 재사용되므로 남아 있으면 남의 그룹을 우리 것이라 가리킨다).
+async function roomGroupMap() {
+  if (roomGroups) return roomGroups
+  try {
+    const v = await chrome.storage.session.get(ROOM_GROUPS_KEY)
+    roomGroups = new Map(Object.entries(v[ROOM_GROUPS_KEY] || {}))
+  } catch { roomGroups = new Map() }
+  return roomGroups
+}
+
+function saveRoomGroups() {
+  chrome.storage.session.set({ [ROOM_GROUPS_KEY]: Object.fromEntries(roomGroups || []) }).catch(() => {})
+}
+
+// 합류 후보. 방을 알면 방 그룹을, 모르면(kasaterm 밖) 예전처럼 자기 그룹을 쓴다.
+// ⚠️세션 것만 보면 안 된다 — 먼저 연 학생이 이미 나갔어도 그 그룹에 탭이 남아 있으면 거기 합쳐야
+// 방에 그룹이 둘 생기지 않는다. 그래서 세션이 아니라 저장소를 정본으로 둔다.
+async function candidateGroups(s) {
+  const team = s.identity?.team
+  if (!team) return [...s.groups]
+  const map = await roomGroupMap()
+  return [...(map.get(team) || [])]
+}
+
+async function rememberRoomGroup(team, groupId) {
+  const map = await roomGroupMap()
+  const list = map.get(team) || []
+  if (!list.includes(groupId)) { map.set(team, [...list, groupId]); saveRoomGroups() }
+}
+
+async function forgetRoomGroup(team, groupId) {
+  const map = await roomGroupMap()
+  const list = map.get(team) || []
+  if (!list.includes(groupId)) return
+  const left = list.filter((g) => g !== groupId)
+  if (left.length) map.set(team, left)
+  else map.delete(team)
+  saveRoomGroups()
+}
+
+// 그룹 제목. 「폴더 · 이름,이름 +N」 — 2026-08-15 지시로 방 이름만 쓰지 않고 누가 붙어 있는지 함께
+// 보인다. 전부 나열하지 않는 이유는 폭이다: 다섯 명을 늘어놓으면 뒤가 통째로 잘려 몇 명인지조차
+// 안 남지만, +N 은 잘리기 전에 읽힌다. 판정은 `made` — 그 학생이 **직접 연** 탭이 이 그룹에 있는지다.
+async function roomTitleOf(room, groupId) {
+  const tabs = await new Promise((r) => chrome.tabs.query({ groupId }, r)).catch(() => [])
+  const ids = new Set(tabs.map((t) => t.id))
+  const names = []
+  for (const s of sessions.values()) {
+    const n = s.identity?.name
+    if (!n || names.includes(n)) continue
+    for (const id of s.made) if (ids.has(id)) { names.push(n); break }
+  }
+  if (!names.length) return room
+  const rest = names.length - 2
+  return rest > 0 ? `${room} · ${names.slice(0, 2).join(',')} +${rest}` : `${room} · ${names.join(',')}`
+}
+
+// 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 이 방 그룹이 있으면 거기 합친다.
 async function groupInWindow(s, windowId, tabIds) {
+  const team = s.identity?.team || null
+  const room = s.identity?.room || null
   let target = null
-  for (const gid of [...s.groups]) {
+  for (const gid of await candidateGroups(s)) {
     const g = await chrome.tabGroups.get(gid).catch(() => null)
-    if (!g) { s.groups.delete(gid); continue }
+    if (!g) { s.groups.delete(gid); if (team) await forgetRoomGroup(team, gid); continue }
     if (g.windowId === windowId) { target = gid; break }
   }
   const groupId = await chrome.tabs.group(
     target ? { tabIds, groupId: target } : { tabIds, createProperties: { windowId } },
   )
   s.groups.add(groupId)
+  if (team) await rememberRoomGroup(team, groupId)
   // 탭 그룹은 이미지를 못 받는다(글자 + 8색뿐). 아바타는 페이지 칩에 있으니 여기선 이름과 색만.
-  await chrome.tabGroups
-    .update(groupId, { title: s.identity?.name || PRODUCT, color: s.identity?.groupColor || 'grey' })
-    .catch((e) => note('group-title', e))
+  // 색은 방 이름에서 뽑은 것을 쓴다 — 학생 색을 쓰면 먼저 연 사람이 누구냐에 따라 방 색이 바뀐다.
+  const title = room ? await roomTitleOf(room, groupId) : (s.identity?.name || PRODUCT)
+  const color = (room && s.identity?.roomColor) || s.identity?.groupColor || 'grey'
+  await chrome.tabGroups.update(groupId, { title, color }).catch((e) => note('group-title', e))
   return groupId
+}
+
+// 그룹에서 탭이 빠지면 제목의 이름 목록도 달라진다. 닫기 경로에서 불러 준다 — 안 하면 이미 나간
+// 학생 이름이 탭바에 계속 남는다. 우리 그룹이 아니면 아무것도 하지 않는다.
+export async function refreshGroupTitle(groupId) {
+  if (!groupId || groupId < 0) return
+  let room = null
+  for (const s of sessions.values()) {
+    if (!s.groups.has(groupId)) continue
+    room = s.identity?.room || null
+    break
+  }
+  if (!room) return
+  const g = await chrome.tabGroups.get(groupId).catch(() => null)
+  if (!g) return
+  await chrome.tabGroups.update(groupId, { title: await roomTitleOf(room, groupId) }).catch((e) => note('group-retitle', e))
 }
 
 // new_tab/new_window 로 **내가 만든** 탭만 자기 그룹에 넣는다. 여럿이 한 브라우저를 쓸 때
@@ -501,6 +590,10 @@ export async function groupOwnTab(client, tabId) {
   if (!s) return null
   const t = await chrome.tabs.get(tabId).catch(() => null)
   if (!t) return null
+  // 묶기의 성패와 무관하게 「내가 연 탭」으로 먼저 등록한다 — 그룹이 실패해도 치울 몫은 내 것이고,
+  // 제목에 이름이 뜨려면 묶기 전에 들어 있어야 한다(제목은 이 집합을 보고 만든다).
+  s.made.add(tabId)
+  persist(clientPane.get(client))
   try {
     return await groupInWindow(s, t.windowId, [tabId])
   } catch (e) {
@@ -510,18 +603,18 @@ export async function groupOwnTab(client, tabId) {
   }
 }
 
-// 내가 **만든** 탭이 몇 개 남았나. 판정은 그룹 멤버십이다 — `s.tabs` 에는 markBusy 가 claim 한
-// 「조작만 한 남의 탭」도 들어 있어서 그걸 세면 내가 치울 몫보다 많이 나온다.
-// close_tab 이 이 값을 돌려주는 이유: 다 쓴 탭은 그때그때 닫되 작업이 끝나도 결과를 보여줄
-// 페이지 하나는 남아야 하는데, 몇 개 남았는지 모르면 그 마지막 하나까지 닫아 버린다.
+// 내가 **직접 연** 탭이 몇 개 남았나. close_tab 이 이 값을 돌려주는 이유: 다 쓴 탭은 그때그때 닫되
+// 작업이 끝나도 결과를 보여줄 페이지 하나는 남아야 하는데, 몇 개 남았는지 모르면 마지막 하나까지 닫는다.
+// ⚠️그룹 멤버십으로 세면 안 된다 — 방 단위로 그룹을 공유하면서 같은 그룹에 **남의 탭**이 들어왔다.
+// 그걸 세면 내 탭을 다 닫고도 remaining 이 남아 있어 「하나는 남겼다」고 잘못 읽는다.
 export async function ownTabCount(client) {
   const s = sessionOf(client)
-  if (!s || !s.groups.size) return 0
+  if (!s) return 0
   let n = 0
-  for (const tabId of [...s.tabs]) {
+  for (const tabId of [...s.made]) {
     const t = await chrome.tabs.get(tabId).catch(() => null)
-    if (!t) { forgetTab(tabId); continue }
-    if (s.groups.has(t.groupId)) n++
+    if (!t) { forgetTab(tabId); s.made.delete(tabId); continue }
+    n++
   }
   return n
 }
@@ -645,6 +738,9 @@ export async function listGroups() {
 export async function ungroupBeforeClose(tabIds) {
   const ours = new Set()
   for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
+  // 방 그룹은 만든 학생이 나가도 남는다. 세션 것만 보면 그 그룹의 탭을 닫을 때 빼내기를 건너뛰어
+  // 껍데기가 생긴다 — 방을 도입하면서 새로 생긴 구멍이라 저장소도 함께 본다.
+  for (const list of (await roomGroupMap()).values()) for (const g of list) ours.add(g)
   if (!ours.size) return
   const targets = []
   for (const id of tabIds) {

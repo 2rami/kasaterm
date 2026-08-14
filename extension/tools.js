@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -306,10 +306,14 @@ const handlers = {
   // 선생님께 「확인했습니다」만 남긴다. 막지는 않는다 — 0 이 되면 말로 알려줄 뿐이다.
   async close_tab({ tabId }, ctx = {}) {
     const id = await resolveTabId(tabId)
+    // 그룹은 닫기 전에 알아 둔다 — ungroupBeforeClose 가 먼저 빼내므로 그 뒤엔 어느 그룹이었는지 모른다.
+    const gid = (await chrome.tabs.get(id).catch(() => null))?.groupId ?? NO_GROUP
     await ungroupBeforeClose([id])
     await cdp.detach(id).catch(() => {})
     forgetTab(id)
     await chrome.tabs.remove(id)
+    // 방 그룹 제목은 지금 탭을 갖고 있는 학생 이름으로 만들어진다. 내가 빠졌으면 이름도 빠져야 한다.
+    if (gid !== NO_GROUP) await refreshGroupTitle(gid)
     const remaining = await ownTabCount(ctx.client)
     return {
       closed: id, remaining,
