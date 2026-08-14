@@ -6456,6 +6456,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         eprintln!("[shim] collab-hooks dir not found — claude hook shim skipped");
         return;
     };
+    // The Claude wrapper and character roster use separate crates and path
+    // resolvers. Publish the path already proven here so Windows dev builds
+    // do not lose the roster while still finding the hook scripts.
+    std::env::set_var("KASATERM_COLLAB_HOOKS_DIR", &hooks_dir);
     // Windows pane 셸은 Git bash(sh 있음) — wrapper 는 그대로 쓴다. sh 더블쿼트 안
     // 백슬래시는 케이스별로 씹히므로 경로는 슬래시로 통일(Git bash 는 C:/ 혼용 허용).
     let hd = if cfg!(windows) {
@@ -6463,10 +6467,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     } else {
         hooks_dir.display().to_string()
     };
-    // Windows 는 claude 가 훅/statusLine 커맨드를 cmd 로 돌리므로 스크립트 직접
-    // exec 이 안 된다 — 인터프리터를 명시한다. .sh 는 Git usr/bin 의 sh.exe(pane
-    // env PATH 에 있다), .py 는 python3_program(). `sh foo.py` 는 셰뱅을 무시하고
-    // 셸 스크립트로 읽어 통째로 문법오류가 난다. unix 는 종전대로 직접 exec.
+    // Windows Claude 는 훅을 네이티브 프로세스로 띄워 Git Bash 의 명령 탐색을
+    // 거치지 않는다. PATH 에 `sh` 이름이 없으면 SessionStart 가 무음 실패해 학생
+    // 배정만 사라지므로 설치된 sh.exe 절대경로를 설정에 굽는다.
+    let hook_sh = hook_shell_program();
     let cmd = |script: &str, timeout: u64| {
         let run = if cfg!(windows) {
             match script.strip_suffix(".py") {
@@ -6474,7 +6478,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
                     "{} -X utf8 \"{hd}/{script}\"",
                     python3_program().unwrap_or("python3")
                 ),
-                None => format!("sh \"{hd}/{script}\""),
+                None => format!("\"{hook_sh}\" \"{hd}/{script}\""),
             }
         } else {
             format!("\"{hd}/{script}\"")
@@ -6807,6 +6811,20 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
+    }
+    #[cfg(windows)]
+    {
+        // PowerShell does not execute the extensionless POSIX wrapper and
+        // otherwise sends it to the Windows "open with" dialog.
+        let cmd_path = shim_dir.join("claude.cmd");
+        let cmd = format!(
+            "@echo off\r\n\"{}\" \"%~dp0claude\" %*\r\n",
+            hook_shell_program().replace('/', "\\")
+        );
+        if let Err(e) = std::fs::write(&cmd_path, cmd) {
+            eprintln!("[shim] write claude.cmd wrapper failed: {e}");
+            return;
+        }
     }
     #[cfg(unix)]
     {
@@ -7387,6 +7405,23 @@ fn git_bash_path() -> Option<String> {
     None
 }
 
+fn hook_shell_program() -> String {
+    #[cfg(windows)]
+    {
+        if let Some(bash) = git_bash_path() {
+            let sh = std::path::Path::new(&bash).with_file_name("sh.exe");
+            if sh.is_file() {
+                return sh.to_string_lossy().replace('\\', "/");
+            }
+        }
+        return "sh".to_string();
+    }
+    #[cfg(not(windows))]
+    {
+        "sh".to_string()
+    }
+}
+
 /// Shells offered by the sidebar "+" picker: `(label, icon_svg name,
 /// shell command)`. Windows 전용 — 설치된 셸(PowerShell/CMD/Git Bash/WSL)만 나열,
 /// 없는 셸은 조용히 빠진다. macOS/Linux 는 빈 목록 → "+" 가 즉시 기본 셸 스폰.
@@ -7644,6 +7679,20 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn test_posix_shell() -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        {
+            return Some("sh".into());
+        }
+        #[cfg(windows)]
+        {
+            let sh = std::path::PathBuf::from(hook_shell_program());
+            return sh.is_file().then_some(sh);
+        }
+        #[allow(unreachable_code)]
+        None
+    }
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
@@ -7985,8 +8034,9 @@ mod tests {
         );
         // The behaviour the string is there for, exercised through a real shell.
         let probe = format!("{line}printf %s \"${{CLAUDE_SECURESTORAGE_CONFIG_DIR-UNSET}}\"");
+        let Some(sh) = test_posix_shell() else { return };
         let run = |env: Option<&str>| {
-            let mut c = std::process::Command::new("sh");
+            let mut c = std::process::Command::new(&sh);
             c.arg("-c").arg(&probe).env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
             if let Some(v) = env {
                 c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", v);
@@ -8126,7 +8176,30 @@ mod tests {
             // collab-hooks 미해석 환경(번들 밖 CI)이면 생성 자체가 스킵된다.
             return;
         };
-        let ok = std::process::Command::new("sh")
+        #[cfg(windows)]
+        {
+            let settings: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(dir.join("claude-hooks-settings.json")).unwrap(),
+            )
+            .unwrap();
+            let session_start = settings
+                .pointer("/hooks/SessionStart/0/hooks/0/command")
+                .and_then(|v| v.as_str())
+                .unwrap();
+            let sh = hook_shell_program();
+            assert!(
+                std::path::Path::new(&sh).is_file(),
+                "Git for Windows sh.exe must exist for Claude hooks"
+            );
+            assert!(
+                session_start.starts_with(&format!("\"{sh}\" ")),
+                "Windows hook must use the absolute sh.exe path: {session_start}"
+            );
+            let cmd = std::fs::read_to_string(dir.join("claude.cmd")).unwrap();
+            assert!(cmd.contains("sh.exe\" \"%~dp0claude\" %*"));
+        }
+        let Some(sh) = test_posix_shell() else { return };
+        let ok = std::process::Command::new(sh)
             .arg("-n")
             .arg(&wrapper)
             .status()

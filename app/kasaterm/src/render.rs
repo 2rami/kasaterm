@@ -1126,11 +1126,17 @@ impl App {
                         if let Some((ar, ac)) = approval_anchor(&composed) {
                             pet_busy = true;
                             const DOT: f32 = 40.0;
-                            let x = (body_left + (ac + 2) as f32 * scw)
-                                .min(body_left + cols_now as f32 * scw - DOT);
-                            let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
                             if student_has_sprite(slug, "wave") {
-                                waiting_slots.push((slug, (x, y, DOT, DOT)));
+                                let pane_w = cols_now as f32 * scw;
+                                let pane_h = rows_now as f32 * sch;
+                                let dot = DOT.min(pane_w).min(pane_h);
+                                if dot >= scw.min(sch) {
+                                    let x = (body_left + (ac + 2) as f32 * scw)
+                                        .clamp(body_left, body_left + pane_w - dot);
+                                    let y = (body_top + (ar + 1) as f32 * sch - dot)
+                                        .clamp(body_top, body_top + pane_h - dot);
+                                    waiting_slots.push((slug, (x, y, dot, dot)));
+                                }
                             }
                         }
                     }
@@ -1210,7 +1216,8 @@ impl App {
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
-                                let h = INPUT_STANDING_ROWS as f32 * sch;
+                                let h = (INPUT_STANDING_ROWS as f32 * sch)
+                                    .min(rows_now as f32 * sch);
                                 {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                                     // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
@@ -2255,7 +2262,8 @@ impl App {
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
         // click hit-list and the painted boxes share one source of truth.
-        // Items stack directly under the "+" button.
+        // Top tabs have room below the button, while the sidebar button lives
+        // in the bottom tray and must open upward to stay inside the window.
         let menu_open = self.shell_menu_open;
         let shell_items: Vec<(&'static str, &'static str, String)> =
             if menu_open { available_shells() } else { Vec::new() };
@@ -2263,7 +2271,12 @@ impl App {
         let menu_w_for_paint = sb_plus.2.max(210.0);
         let shell_menu_layout: Vec<(String, &'static str, &'static str, (f32, f32, f32, f32))> = {
             let (px, py, _, ph) = sb_plus;
-            let mut iy = py + ph + 4.0;
+            let menu_h = shell_items.len() as f32 * SHELL_ITEM_H;
+            let mut iy = if self.tabs_on_top {
+                py + ph + 4.0
+            } else {
+                py - menu_h - 4.0
+            };
             shell_items
                 .iter()
                 .map(|(label, icon, cmd)| {
@@ -3090,10 +3103,15 @@ impl App {
                 }
                 let (px, py, _, ph) = sb_plus;
                 let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
+                let backdrop_y = if self.tabs_on_top {
+                    py + ph
+                } else {
+                    py - backdrop_h
+                };
                 round_rect(
                     g,
                     px - 4.0,
-                    py + ph,
+                    backdrop_y,
                     menu_w_for_paint + 8.0,
                     backdrop_h,
                     theme::radius_md(),
