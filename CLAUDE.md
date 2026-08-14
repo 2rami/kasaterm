@@ -84,9 +84,9 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 산출물은 `dist/kasaterm-vX.Y.Z-windows-x86_64.msi`와 portable ZIP, 각각의 SHA-256 파일이다. 패키지에는 `kasaterm.exe`, `kasaterm-cli.exe`, `WinSparkle.dll`, `arona-ui`, `collab-hooks`가 모두 들어가야 한다. 스크립트가 MSI를 다시 추출해 `characters.json`, `statusline.py`까지 검사하므로 이 검증을 제거하지 말 것. CI의 Windows 릴리스도 같은 스크립트를 호출한다.
 
-현재 `v0.1.19` MSI는 Windows Installer 관리 설치로 69개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. 관련 커밋은 `43effc7`부터 `8f18ff8`까지의 Windows/작은 pane 수정과 패키징 커밋 `13ad934`다.
+현재 `v0.1.19` MSI는 최신 upstream `main` 위로 Windows 커밋을 rebase한 뒤 다시 만들었다. Windows Installer 관리 설치로 75개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. `cargo check -p kasaterm`과 agent/shell scrollback 복원 회귀 테스트도 통과했다.
 
-`fork/windows-port`에는 Windows 수정, 패키징, 이 인수인계까지 push했다. 아직 하지 않은 것은 upstream PR, 버전 태그 생성, GitHub Release 게시다. upstream `main`과 비교하면 이 브랜치는 2026-08-14 기준 321커밋 뒤에서 갈라져 있으므로 바로 릴리스하지 말고 최신 `origin/main` 위로 rebase하거나 새 브랜치에 Windows 커밋을 cherry-pick한 뒤 패키지 검증을 다시 해야 한다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징 완료나 fork push를 upstream 게시 완료로 오해하지 말 것.
+`fork/windows-port`는 최신 upstream보다 8커밋 앞, 0커밋 뒤인 상태로 push했고 upstream PR은 `https://github.com/2rami/kasaterm/pull/2`다. 아직 하지 않은 것은 PR 병합, 버전 태그 생성, GitHub Release 게시다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 PR 병합 뒤 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징이나 PR 생성 완료를 정식 릴리스 완료로 오해하지 말 것.
 
 ## 함정·배경·수정 주의점은 메모리에
 
