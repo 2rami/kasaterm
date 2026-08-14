@@ -1328,7 +1328,16 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn open_preview(&self, _kind: &str, path: &str, target: Option<&str>) -> Result<()> {
+    fn open_preview(&self, kind: &str, path: &str, target: Option<&str>) -> Result<()> {
+        // kind=web 은 파일이 아니라 URL — open_file 확장자 분기로 못 가고,
+        // winit 창 생성이 필요해 별도 이벤트로 GUI 에 위임한다.
+        if kind == "web" {
+            let _ = self.proxy.send_event(UserEvent::SocketOpenWeb(
+                path.to_string(),
+                target.map(|s| s.to_string()),
+            ));
+            return Ok(());
+        }
         // imgopen/mdopen 셰임·SendUserFile 훅 → 미리보기를 요청 pane 의 보조 탭으로
         // (크롬 탭처럼). `target` = 요청자의 $KASATERM_PANE_ID(=pid) — GUI 가
         // outer_for_pty 로 그 pane 을 찾아 거기 탭으로 붙인다. 별도 split 으로 띄우면

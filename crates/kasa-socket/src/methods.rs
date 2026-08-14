@@ -250,7 +250,7 @@ fn system_capabilities(id: Value) -> Response {
 fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let kind = match params.get("kind").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return param_err(id, "surface.open_preview requires `kind` (image|markdown)"),
+        None => return param_err(id, "surface.open_preview requires `kind` (image|markdown|web)"),
     };
     let path = match params.get("path").and_then(|v| v.as_str()) {
         Some(s) => s,

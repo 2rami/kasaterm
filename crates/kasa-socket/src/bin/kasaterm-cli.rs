@@ -733,6 +733,7 @@ fn print_help() {
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
+  kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
   kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
   kasaterm-cli swap  <surface_a> <surface_b>");
@@ -901,6 +902,24 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .cloned()
                 .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
             ("surface.new_tab", json!({ "outer": outer }))
+        }
+        // URL 을 요청 pane 옆 웹(브라우저) pane 으로. 개발 서버를 그 서버를
+        // 띄운 pane 곁에 두는 용도 — 어느 방 어느 pane 이 띄운 건지 화면
+        // 배치가 말해 준다.
+        "web" => {
+            let url = args
+                .iter()
+                .find(|a| !a.starts_with('%'))
+                .ok_or_else(|| anyhow!("web needs a URL (e.g. web localhost:5173)"))?;
+            let target = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            (
+                "surface.open_preview",
+                json!({ "kind": "web", "path": url, "target": target }),
+            )
         }
         // pane 을 다른 pane 옆으로 — 대상이 다른 창이면 **창을 건너뛴다**(PTY 유지).
         "move" => {

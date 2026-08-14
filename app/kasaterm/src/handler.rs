@@ -6,7 +6,8 @@ impl ApplicationHandler<UserEvent> for App {
     /// A background thread (PTY snapshot, socket) asked us to repaint.
     /// Delivered even while a WaitUntil is parked, so this is what makes
     /// committed-Hangul echo / backspace / space show up without lag.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         // window_event 와 같은 이유 — 소켓/백그라운드에서 온 변경도 자동 저장
         // 대상이다(pane 분할·세션 바인딩이 여기로 들어온다).
         self.session_touched = true;
@@ -747,6 +748,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // target = 요청자 pid($KASATERM_PANE_ID); open_file 이 그 pane 을 찾아
                 // 탭으로 붙인다(못 찾으면 active split 폴백).
                 self.open_file(std::path::PathBuf::from(path), target.clone(), true);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketOpenWeb(url, target) => {
+                // `kasaterm-cli web <url>` → 요청 pane 옆에 웹 pane split.
+                // 파일 미리보기와 달리 여기서 처리하는 이유: 자식 창 생성에
+                // ActiveEventLoop 가 필요하다.
+                self.open_web_pane(event_loop, url, target.as_deref());
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -1751,6 +1761,11 @@ impl ApplicationHandler<UserEvent> for App {
         // gpu.resize() with the panel's tiny size, shrinking the main wgpu
         // viewport uniform → everything renders ~2x zoomed; a CloseRequested
         // would exit the whole app instead of just closing the panel.
+        // 웹 pane 자식 창 — 패널들과 같은 가드(아래 주석 참조). Cmd+W 는 그
+        // 웹 pane 닫기로 해석한다(webpane.rs).
+        if self.web_host_window_event(id, &event) {
+            return;
+        }
         if self.session_panel_window.as_ref().map(|w| w.id()) == Some(id) {
             match &event {
                 WindowEvent::CloseRequested => {
@@ -5407,6 +5422,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
+        // 웹 pane 자식 창을 pane 프레임에 맞춘다 — split/리사이즈/탭 전환/줌이
+        // 어디서 일어났든 다음 턴에 여기서 따라잡는다(호스트 없으면 즉시 반환).
+        self.sync_web_hosts();
         // Windows 업데이트 체커 결과 → sticky 토스트([설치][나중에] 칩).
         // 승인 토스트 배관을 센티널 action 으로 재사용(win_sparkle.rs 참고).
         // 승인 토스트가 점유 중이면 take 하지 않고 다음 틱으로 미룬다.

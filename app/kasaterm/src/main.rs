@@ -25,6 +25,7 @@ mod session;
 mod layout;
 mod markdown;
 mod auxwin;
+mod webpane;
 mod input;
 mod lineedit;
 mod settings;
@@ -2085,6 +2086,19 @@ enum PaneContent {
     Terminal(TerminalPane),
     Image(Arc<ImagePane>),
     Markdown(MarkdownPane),
+    Web(WebPane),
+}
+
+/// 웹(브라우저) pane 의 그리드 쪽 상태 — 주소뿐이다. 실제 브라우저는 이 pane
+/// 사각형 위에 접착된 자식 OS 창(`App.web_hosts`, GUI 스레드 전용)이다:
+/// wgpu 본창 안에는 WKWebView 를 겹칠 수 없어(CAMetalLayer 가 자식 뷰를 덮음,
+/// 2026-05-25 실측) 셀 그리드 자리는 자식 창이 가리는 바탕일 뿐이다.
+/// `Workspace` 는 PTY 스레드와 공유(Send 필요)라 webview 실물을 여기 못 둔다.
+struct WebPane {
+    url: String,
+    /// `App.web_hosts` 의 키. pane/tab 이 트리를 옮겨 다녀도 이 번호로 창을
+    /// 따라붙인다.
+    host_id: u64,
 }
 
 impl Default for PaneContent {
@@ -2259,6 +2273,9 @@ impl PaneTab {
     fn image(&self) -> Option<&Arc<ImagePane>> {
         if let PaneContent::Image(i) = &self.content { Some(i) } else { None }
     }
+    fn web(&self) -> Option<&WebPane> {
+        if let PaneContent::Web(w) = &self.content { Some(w) } else { None }
+    }
 }
 
 struct PaneState {
@@ -2329,6 +2346,7 @@ impl PaneState {
         self.tabs.len() > 1
             || self.image().is_some()
             || self.markdown().is_some()
+            || self.web().is_some()
     }
     /// 셀 그리드를 아래로 미는 헤더 높이(logical px). render/layout 양쪽이
     /// 같은 값을 써야 PTY 그리드↔셀 클립이 어긋나지 않는다.
@@ -3603,6 +3621,10 @@ enum UserEvent {
     /// 탭으로(크롬 탭, 멀티뷰 빈-pane 회피), 없으면 active pane split 으로 폴백.
     /// 데몬 제거 때 빠졌던 open_preview 의 로컬 재구현. `open_file` 이 확장자로 분기.
     SocketOpenPreview(String, Option<String>),
+    /// `surface.open_preview kind=web` — URL 을 요청 pane 옆 웹 pane 으로.
+    /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
+    /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
+    SocketOpenWeb(String, Option<String>),
     /// `collab.bind_transcript`(SessionStart 훅) 위임 — (pane, 세션 id). transcript
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
     /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.
@@ -5188,6 +5210,11 @@ struct App {
     /// 편집기/파일뷰를 떼어낸 별도 OS 창들(각자 자체 wgpu GpuRenderer). 메인 창과
     /// 독립적으로 렌더/입력 라우팅되며 window id 로 handler 가 분기한다(auxwin.rs).
     aux_windows: Vec<auxwin::AuxWindow>,
+    /// 웹 pane 실물(자식 창 + webview). 키 = `WebPane.host_id`. GUI 스레드
+    /// 전용 — `Workspace` 는 PTY 스레드와 공유라 !Send 인 webview 를 못 담는다.
+    web_hosts: HashMap<u64, webpane::WebHost>,
+    /// `WebPane.host_id` 발급 시퀀스.
+    web_host_seq: u64,
 }
 
 impl App {
@@ -5541,6 +5568,8 @@ impl App {
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
             aux_windows: Vec::new(),
+            web_hosts: HashMap::new(),
+            web_host_seq: 0,
         }
     }
 
