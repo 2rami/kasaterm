@@ -4231,16 +4231,34 @@ impl GpuRenderer {
                             let lin = srgb_rgba_to_linear(fg);
                             let cx = pane.origin_px.0 + col as f32 * cell_w_px;
                             let cy = pane.origin_px.1 + r as f32 * cell_h_px;
+                            // 획 두께는 셀 크기의 비율로 적혀 있는데, 셀이 세로로
+                            // 길쭉해서(14×35px) 같은 6% 가 가로획 2.1px · 세로획
+                            // 0.84px 로 갈린다. 1px 미만은 서브픽셀에 흩어져 선이
+                            // 통째로 사라지고, 표가 가로줄만 남는다(2026-08-15 신고).
+                            // 세로획은 그 비율을 **높이**로 환산해 가로획과 같은
+                            // 물리 두께로 세운다 — 굵은 선(0.12)도 비율 그대로라
+                            // 가는 선과의 차이가 유지된다. Box Drawing 에만 건다:
+                            // Block Elements(U+2580~259F)는 칸을 채우는 도형이다.
+                            let is_line = ('\u{2500}'..='\u{257F}').contains(&ch);
                             for &(x0, y0, x1, y1, alpha) in rects {
                                 let mut c = lin;
                                 c[3] *= alpha;
+                                let (mut px, mut w) =
+                                    (cx + x0 * cell_w_px, (x1 - x0) * cell_w_px);
+                                let (py, h) =
+                                    (cy + y0 * cell_h_px, (y1 - y0) * cell_h_px);
+                                if is_line && w < h {
+                                    let want = ((x1 - x0) * cell_h_px).max(1.0);
+                                    if want > w {
+                                        // 세로획은 늘 셀 가운데라 양쪽으로 균등하게
+                                        // 넓힌다 — 한쪽으로만 밀면 위아래 칸의 획과
+                                        // 어긋나 계단이 진다.
+                                        px -= (want - w) * 0.5;
+                                        w = want;
+                                    }
+                                }
                                 self.chrome.push(CellInstance {
-                                    cell_px: [
-                                        cx + x0 * cell_w_px,
-                                        cy + y0 * cell_h_px,
-                                        (x1 - x0) * cell_w_px,
-                                        (y1 - y0) * cell_h_px,
-                                    ],
+                                    cell_px: [px, py, w, h],
                                     uv_min: Atlas::SOLID_UV,
                                     uv_max: Atlas::SOLID_UV,
                                     fg_rgba: c,

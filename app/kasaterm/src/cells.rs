@@ -161,6 +161,22 @@ pub fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
     const SHADE_25: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.25)];
     const SHADE_50: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.5)];
     const SHADE_75: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.75)];
+
+    // Junction/corner strokes. A half stroke stops at the **far** edge of the
+    // crossing stroke (0.53 light / 0.56 heavy), not at the cell centre — ending
+    // it at 0.5 leaves a notch where the two meet.
+    const H_L: (f32, f32, f32, f32, f32) = (0.0, 0.47, 1.0, 0.53, 1.0);
+    const V_L: (f32, f32, f32, f32, f32) = (0.47, 0.0, 0.53, 1.0, 1.0);
+    const HR_L: (f32, f32, f32, f32, f32) = (0.47, 0.47, 1.0, 0.53, 1.0);
+    const HL_L: (f32, f32, f32, f32, f32) = (0.0, 0.47, 0.53, 0.53, 1.0);
+    const VD_L: (f32, f32, f32, f32, f32) = (0.47, 0.47, 0.53, 1.0, 1.0);
+    const VU_L: (f32, f32, f32, f32, f32) = (0.47, 0.0, 0.53, 0.53, 1.0);
+    const H_H: (f32, f32, f32, f32, f32) = (0.0, 0.44, 1.0, 0.56, 1.0);
+    const V_H: (f32, f32, f32, f32, f32) = (0.44, 0.0, 0.56, 1.0, 1.0);
+    const HR_H: (f32, f32, f32, f32, f32) = (0.44, 0.44, 1.0, 0.56, 1.0);
+    const HL_H: (f32, f32, f32, f32, f32) = (0.0, 0.44, 0.56, 0.56, 1.0);
+    const VD_H: (f32, f32, f32, f32, f32) = (0.44, 0.44, 0.56, 1.0, 1.0);
+    const VU_H: (f32, f32, f32, f32, f32) = (0.44, 0.0, 0.56, 0.56, 1.0);
     Some(match ch {
         // Lower N/8 blocks (U+2581..U+2587) — bottom anchored.
         '\u{2581}' => &[(0.0, 7.0 / 8.0, 1.0, 1.0, 1.0)],
@@ -227,6 +243,30 @@ pub fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
             (0.40, 0.0, 0.46, 1.0, 1.0),
             (0.54, 0.0, 0.60, 1.0, 1.0),
         ],
+        // Corners and junctions. Without these the straight runs came from GPU
+        // quads while every corner fell back to the font, and the two never
+        // lined up — markdown tables read as loose horizontal rules with the
+        // frame missing (2026-08-15 신고). Mixed light/heavy junctions are left
+        // to the font: they need per-side widths, which a static rect table
+        // can't express, and they don't appear in practice.
+        '\u{250C}' => &[HR_L, VD_L],
+        '\u{2510}' => &[HL_L, VD_L],
+        '\u{2514}' => &[HR_L, VU_L],
+        '\u{2518}' => &[HL_L, VU_L],
+        '\u{251C}' => &[V_L, HR_L],
+        '\u{2524}' => &[V_L, HL_L],
+        '\u{252C}' => &[H_L, VD_L],
+        '\u{2534}' => &[H_L, VU_L],
+        '\u{253C}' => &[H_L, V_L],
+        '\u{250F}' => &[HR_H, VD_H],
+        '\u{2513}' => &[HL_H, VD_H],
+        '\u{2517}' => &[HR_H, VU_H],
+        '\u{251B}' => &[HL_H, VU_H],
+        '\u{2523}' => &[V_H, HR_H],
+        '\u{252B}' => &[V_H, HL_H],
+        '\u{2533}' => &[H_H, VD_H],
+        '\u{253B}' => &[H_H, VU_H],
+        '\u{254B}' => &[H_H, V_H],
         _ => return None,
     })
 }
