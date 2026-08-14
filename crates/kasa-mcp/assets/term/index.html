@@ -72,6 +72,29 @@
   #bar select { flex: 1 1 auto; min-width: 0; padding: 0 6px; }
   #bar button { flex: 0 0 auto; min-width: 44px; padding: 0 6px; }
   #bar button:active { background: #2c3543; }
+
+  /* 바깥주소(터널) 스위치 — 바의 오른쪽 끝. 점이 상태다: 회색=닫힘, 초록=열림.
+     자기 스타일을 온전히 갖는 이유: 데스크톱에서는 바가 숨어 이 버튼만 body 로
+     옮겨 우하단에 띄우는데, 그 순간 #bar button 규칙이 안 닿는다. */
+  #tunbtn {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 44px; padding: 0 10px; flex: 0 0 auto;
+    font: 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #c8d0d9; background: #222a35;
+    border: 1px solid #2f3846; border-radius: 8px;
+  }
+  #tunbtn[hidden] { display: none; }
+  #tunbtn:active { background: #2c3543; }
+  #tundot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #4a5568; flex: 0 0 auto;
+  }
+  #tunbtn.on #tundot { background: #4ade80; }
+  #tunbtn.busy #tundot { background: #ffd479; }
+  #tunbtn.float {
+    position: fixed; right: 10px; z-index: 10;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
 </style>
 </head>
 <body>
@@ -85,6 +108,7 @@
   <button data-seq="\x03" aria-label="Ctrl-C">^C</button>
   <button data-seq="\x1b[A" aria-label="위">↑</button>
   <button data-seq="\x1b[B" aria-label="아래">↓</button>
+  <button id="tunbtn" aria-label="바깥주소 켜고 끄기" aria-pressed="false" hidden><span id="tundot"></span>바깥</button>
 </div>
 <script src="/term/xterm.js"></script>
 <script>
@@ -209,6 +233,48 @@
     ev.preventDefault();
     fitted = !fitted;
     applyFit();
+  });
+
+  // 바깥주소(터널) 스위치 — 켜고 끄는 실제 손은 서버다(cloudflared 스폰/종료).
+  // 상태는 폴링으로만 믿는다: 스폰 직후 설정 문제로 죽을 수도, 터미널에서 딴
+  // 손이 켰을 수도 있다. 상태 조회가 실패하면(옛 바이너리) 버튼 자체를 안 꺼낸다.
+  const tunBtn = document.getElementById('tunbtn');
+  let tunOn = false;
+  const drawTun = (busy) => {
+    tunBtn.classList.toggle('on', tunOn);
+    tunBtn.classList.toggle('busy', !!busy);
+    tunBtn.setAttribute('aria-pressed', String(tunOn));
+    tunBtn.title = tunOn ? '바깥주소 열림 — 누르면 닫아요' : '바깥주소 닫힘 — 누르면 열어요';
+  };
+  const pollTun = () => fetch('/term/tunnel').then((r) => r.json()).then((j) => {
+    if (!j.ok) return;
+    tunOn = !!j.on;
+    tunBtn.hidden = false;
+    if (!tunBtn.classList.contains('busy')) drawTun(false);
+  }).catch(() => {});
+  // 데스크톱은 바가 안 뜨는데, 밖에서 켜는 길이 맥뿐이다(닫힌 문은 폰이 못
+  // 두드린다) — 이 스위치만 body 로 옮겨 우하단에 띄운다.
+  if (!touch) { tunBtn.classList.add('float'); document.body.append(tunBtn); }
+  pollTun();
+  setInterval(pollTun, 30000);
+  tunBtn.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    if (tunBtn.classList.contains('busy')) return;
+    const next = !tunOn;
+    // 터널로 들어와 있는 손이 문을 닫으면 자기 연결도 같이 끊긴다 — 한 번 묻는다.
+    const local = ['127.0.0.1', 'localhost'].includes(location.hostname);
+    if (!next && !local && !confirm('바깥주소를 닫으면 이 연결도 끊겨요. 닫을까요?')) return;
+    drawTun(true);
+    fetch('/term/tunnel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ on: next }),
+    }).then((r) => r.json()).then((j) => {
+      if (j.ok) tunOn = !!j.on;
+      else alert(j.error || '바깥주소 전환에 실패했어요');
+      drawTun(false);
+      setTimeout(pollTun, 2500);
+    }).catch(() => drawTun(false));
   });
 
   for (const b of bar.querySelectorAll('button[data-seq]')) {
