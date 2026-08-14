@@ -70,7 +70,7 @@ Windows 핵심 기능 수정은 완료됐다. 거노가 실제 Windows 앱에서
 
 작은 pane 복원 문제의 마지막 원인은 복원 시 모든 PTY를 전체 창 크기로 먼저 생성한 뒤 줄이던 순서였다. `restore_window_layout_at`이 split 트리의 leaf 크기를 먼저 계산해 각 PTY를 실제 pane 크기로 생성한다. Agent pane은 저장된 일반 scrollback을 다시 주입하지 않으며, resize 중 서로 다른 크기의 화면 업데이트를 합치지 않는다. 이 동작을 되돌리면 좁은 pane에서 171열 출력이 40열 화면에 찢어지는 회귀가 다시 생긴다.
 
-기능 수정은 병합된 PR #2에 들어갔다. 요청 범위에서 Windows 배포 패키징은 제외됐으므로 `remove-windows-packaging` 후속 브랜치가 MSI/portable ZIP 스크립트와 release workflow 변경만 되돌린다. 기능 수정은 되돌리지 말 것.
+기능 수정은 병합된 PR #2에 들어갔다. 요청 범위에서 Windows 배포 패키징은 제외됐으므로 후속 PR `https://github.com/2rami/kasaterm/pull/3`이 MSI/portable ZIP 스크립트와 release workflow 변경만 되돌린다. 기능 수정은 되돌리지 말 것.
 
 ## 함정·배경·수정 주의점은 메모리에
 
