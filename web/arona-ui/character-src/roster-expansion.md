@@ -30,10 +30,10 @@
 | 치비 초상 | `web/arona-ui/public/assets/char-<slug>.png` | 전신 누끼 | 교실 배치(정적) |
 | bust 프사 | `public/assets/char-<slug>-bust.png` | 상반신+공식무기+성격표정, 누끼 | 채팅 아바타 |
 | walk 시트 | `public/assets/sheet-<slug>.png` | 1536×1536, cell 256, idle 4f + 4방향 walk 6f, manifest | SpriteWalk 자동감지 |
-| 네이티브 도트 | `app/kasaterm/assets/students/<slug>-{0..3}.png`(idle 4) · `<slug>-walk-{0..5}.png`(walk 6) · `<slug>-profile.png`(96×96) | walk 프레임에서 발췌 | render.rs `include_bytes!`(컴파일타임 내장) |
+| 네이티브 도트 | `app/kasaterm/assets/students/` 아래 모션별 폴더 — `idle/<slug>-{0..3}.png`(4) · `walk/<slug>-{0..5}.png`(6) · `wave/`·`cheer/`(각 4) · `profile/<slug>.png`(96×96) | walk 프레임에서 발췌 | render.rs `include_bytes!`(컴파일타임 내장) |
 
 - 생성 원본 작업방: `web/arona-ui/character-src/` (`walk/<slug>/frames·gif·manifest`, `portrait/`, `_ref-*.png` 공식일러=gitignore)
-- `<slug>-profile.png` 96×96 은 bust/초상에서 얼굴 크롭+축소본으로 추정(char·bust 와 별개 파일).
+- `profile/<slug>.png` 96×96 은 bust/초상에서 얼굴 크롭+축소본으로 추정(char·bust 와 별개 파일).
 
 ### 등록부(신규 학생 추가 시 손대야 하는 곳)
 
@@ -90,7 +90,7 @@
    - **비대칭 헤어/장식은 `-nomirror`** (기존 사례: 유즈·프라나). 신규 중 시로코(사이드테일)·히마리(대형 사이드 장식)가 유력 해당 — _ref 확보 후 확정.
    - codex hang 간헐 → Monitor 감시, 한 방향 0점이면 그 방향만 `-states walk -dirs <방향>` 단독 재생성 후 PIL 로 시트 row 삽입(`/tmp/merge-north.py` 패턴, north=4·west=5 순서 유지).
 5. **승격** — `walk/<slug>/sprite-sheet.png` → `public/assets/sheet-<slug>.png`, bust → `char-<slug>-bust.png`, 초상 → `char-<slug>.png`.
-6. **네이티브 도트 발췌** — walk frames 에서 `app/kasaterm/assets/students/<slug>-{0..3}.png`(idle) + `<slug>-walk-{0..5}.png` + `<slug>-profile.png`(96×96 얼굴 크롭) 생성. **이 파일들이 없으면 render.rs match arm 추가 시 컴파일 에러** — 히나 배선과 순서 조율 필요.
+6. **네이티브 도트 발췌** — walk frames 에서 `app/kasaterm/assets/students/idle/<slug>-{0..3}.png` + `walk/<slug>-{0..5}.png` + `profile/<slug>.png`(96×96 얼굴 크롭) 생성. **이 파일들이 없으면 render.rs match arm 추가 시 컴파일 에러** — 히나 배선과 순서 조율 필요.
 7. **등록** — sprites.ts `KNOWN`·SpriteWalk/SpritePortrait `SLUG`(히마리·아루만, 예약 4명은 완료) / characters.json `members[]` / theme.rs·render.rs(히나).
 
 ### 확정 6명 학생별 생성 메모 (외형 desc 초안 · 무기 · -nomirror)

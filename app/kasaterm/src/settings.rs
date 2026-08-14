@@ -488,6 +488,11 @@ impl App {
                 Ok(n) => self.set_toast(format!("지금 그림 {n}장을 풀었어요 — 고친 뒤 새로고침")),
                 Err(e) => self.set_toast(format!("본보기를 못 풀었어요: {e}")),
             }
+        } else {
+            // 이미 그림이 든 폴더는 통째로 다시 풀지 않는다(사용자 파일을 덮는다).
+            // 그래도 사용법은 있어야 한다 — 옛 평면 구조로 채워 둔 사람이 폴더가
+            // 나뉜 걸 알 방법이 이 파일 말고 없다.
+            let _ = render::write_sprite_readme(&dir);
         }
         open_path(&dir);
     }
@@ -2851,7 +2856,8 @@ pub(crate) fn paint_settings(
             // wave·cheer 가 빠져 있었다(2026-08-13): 안내대로 idle·walk 만 넣은 사용자는
             // 승인 대기·턴 완료 때만 옛 그림이 튀어나오는 이유를 알 길이 없었다.
             y = row_wide(g, fx, y, clip, "Character images",
-                &["테마 폴더의 sprites/ 에: <slug>-0..3 · -walk-0..5 · -wave-0..3 · -cheer-0..3 · -profile.png"]);
+                &["테마 폴더의 sprites/ 에 모션별로: idle/<slug>-0..3 · walk/<slug>-0..5",
+                  "wave/<slug>-0..3 · cheer/<slug>-0..3 · profile/<slug>.png (폴더 안 README 참고)"]);
             // 액션 버튼 — 지금 쓰는 테마의 그림 폴더 / 로스터 json / 텍스처 재로드.
             // 「새 테마로 복제」는 여기 있었는데 위 격자의 `+ 새 테마` 카드와 같은
             // 동작이라 뺐다. 같은 일을 하는 입구가 한 화면에 둘이면 다른 일을 하는
@@ -4140,7 +4146,8 @@ fn student_detail(
         // 전체 규칙이 아니라 **이 캐릭터의 실제 파일명**을 적는다 — `<slug>` 를
         // 자기 이름으로 바꿔 적는 그 한 단계에서 사람은 틀린다.
         y = row_wide(g, fx, y, clip, "그림 파일 이름",
-            &[&format!("{slug}-0..3.png · {slug}-walk-0..5.png · {slug}-wave-0..3.png · {slug}-cheer-0..3.png · {slug}-profile.png")]);
+            &[&format!("idle/{slug}-0..3.png · walk/{slug}-0..5.png · wave/{slug}-0..3.png"),
+              &format!("cheer/{slug}-0..3.png · profile/{slug}.png")]);
     }
     y
 }

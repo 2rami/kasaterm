@@ -337,7 +337,7 @@ export function ThemeTab({
 
       <Section
         title="Character images"
-        hint="테마 폴더의 sprites/ 에: <slug>-0..3 · -walk-0..5 · -wave-0..3 · -cheer-0..3 · -profile.png"
+        hint="테마 폴더의 sprites/ 에 모션별로: idle/<slug>-0..3 · walk/<slug>-0..5 · wave/<slug>-0..3 · cheer/<slug>-0..3 · profile/<slug>.png (폴더 안 README 참고)"
       >
         <div className="flex gap-2">
           <MiniButton

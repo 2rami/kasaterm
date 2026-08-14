@@ -132,17 +132,21 @@ python3 scripts/theme-sprites.py install
 python3 scripts/theme-sprites.py status   # 어디까지 됐는지
 ```
 
-`frames/<state>/frame-NN.png` 를 앱이 찾는 납작한 이름으로 옮긴다. 크기가 이미
-256px 로 같아 리사이즈는 없다.
+`frames/<state>/frame-NN.png` 를 앱이 찾는 자리로 옮긴다. 크기가 이미 256px 로
+같아 리사이즈는 없다. 앱 자산 경로는 `app/kasaterm/assets/students/` 기준이다.
 
 | ppgen 산출 | 앱 자산 | 개수 |
 |---|---|---|
-| `frames/idle/frame-NN.png` | `<slug>-N.png` | 4 |
-| `frames/walk/frame-NN.png` | `<slug>-walk-N.png` | 6 |
-| `frames/wave/frame-NN.png` | `<slug>-wave-N.png` | 4 |
-| `frames/cheer/frame-NN.png` | `<slug>-cheer-N.png` | 4 |
-| `gif/idle.gif` | `<slug>-idle.gif` | 1 |
-| (idle 첫 프레임에서 잘라 만듦) | `<slug>-profile.png` | 1 |
+| `frames/idle/frame-NN.png` | `idle/<slug>-N.png` | 4 |
+| `frames/walk/frame-NN.png` | `walk/<slug>-N.png` | 6 |
+| `frames/wave/frame-NN.png` | `wave/<slug>-N.png` | 4 |
+| `frames/cheer/frame-NN.png` | `cheer/<slug>-N.png` | 4 |
+| `gif/idle.gif` | `gif/<slug>.gif` | 1 |
+| (idle 첫 프레임에서 잘라 만듦) | `profile/<slug>.png` | 1 |
+
+> 폴더는 2026-08-14 에 갈랐다. 그 전에는 1500장이 `<slug>-walk-N.png` 처럼 한
+> 자리에 평평하게 쌓여 있었다. 앱의 로더는 **옛 이름도 계속 읽는다** — 사용자가
+> 자기 그림을 넣어 둔 override 폴더가 구조 변경 하나로 죽으면 안 되기 때문이다.
 
 > ⚠️ **프로필은 알파 경계 맨 위에서 자르면 안 된다.** BA 캐릭터는 **헤일로가 머리 위에
 > 떠 있어** 경계 상단이 헤일로 꼭대기다. 거기서 자르면 얼굴이 아래 가장자리로 밀려

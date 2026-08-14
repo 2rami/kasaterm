@@ -3143,7 +3143,7 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
             match slug.trim_end_matches(".png") {
                 $($s => Some(
                     include_bytes!(concat!(
-                        "../../../app/kasaterm/assets/students/", $s, "-profile.png"
+                        "../../../app/kasaterm/assets/students/profile/", $s, ".png"
                     )).as_slice()
                 ),)*
                 _ => None,

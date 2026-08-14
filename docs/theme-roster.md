@@ -104,7 +104,7 @@ build.rs 가 슬러그 형식(`[a-z0-9_]`)·슬러그 중복·이름 중복을 �
 
 ## 프사(이미지)는 선택이다
 
-`app/kasaterm/assets/students/<slug>-profile.png` 가 있으면 사이드바 pane 목록·Info
+`app/kasaterm/assets/students/profile/<slug>.png` 가 있으면 사이드바 pane 목록·Info
 패널·macOS 알림·`/resume` 피커에 뜨고, **없으면 색 점으로 떨어진다**(`header_color`).
 79명 중 12명만 이미지가 있고 나머지는 색 점으로 도는데, 그게 정상 동작이다.
 
@@ -121,7 +121,8 @@ build.rs 가 슬러그 형식(`[a-z0-9_]`)·슬러그 중복·이름 중복을 �
 
 `characters.json` 을 새로 쓰고 `theme` 값을 바꾸면 된다. 그 외에 손댈 곳:
 
-- `app/kasaterm/assets/students/` — 프사·스프라이트(선택). 없으면 색 점
+- `app/kasaterm/assets/students/` — 프사·스프라이트(선택). 없으면 색 점.
+  모션별 폴더(`idle/` `walk/` `wave/` `cheer/` `profile/` `gif/`)로 나뉘어 있다
 - `kasa-mcp/src/http.rs` 의 `AVATAR_SLUGS` — 웹 칩 프사가 필요하면
 - `theme.rs` 의 `character_welcome` — claude 배너 인사말(선택). 없으면 원문 유지
 

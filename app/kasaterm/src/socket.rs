@@ -1385,7 +1385,10 @@ impl Backend for PtyBackend {
         if !safe_path_component(slug) {
             return None;
         }
-        let file = format!("{slug}-profile.png");
+        // 새 폴더 구조(`profile/<slug>.png`) 먼저, 옛 평면 이름이 폴백 — 상대 경로
+        // 규약은 render.rs 가 정본이라 여기서 다시 조립하지 않는다.
+        let rels =
+            [crate::render::profile_rel(slug, true), crate::render::profile_rel(slug, false)];
         // 테마를 지정했으면 그 폴더 안에서만 찾는다. 없으면 404 로 두고 번들로
         // 떨어지지 않는다 — 카드는 "이 테마의 얼굴"을 보이는 자리라, 폴백하면
         // 그 테마에 없는 그림이 그 테마 것처럼 보인다.
@@ -1394,13 +1397,14 @@ impl Backend for PtyBackend {
                 return None;
             }
             let root = kasa_mcp::character::themes_root()?;
-            return read_file_under(&root, &root.join(id).join("sprites").join(&file));
+            let sprites = root.join(id).join("sprites");
+            return rels.iter().find_map(|r| read_file_under(&root, &sprites.join(r)));
         }
         // 활성 스프라이트 폴더(테마의 sprites/ 또는 ~/.config/kasaterm/students/)가
         // 번들을 덮어쓴다 — 네이티브 로더와 같은 순서다(render.rs `user_asset_rgba`
         // 우선). 순서가 뒤집히면 사용자가 넣은 그림이 무시된다.
         if let Some(dir) = students_dir() {
-            if let Some(b) = read_file_under(&dir, &dir.join(&file)) {
+            if let Some(b) = rels.iter().find_map(|r| read_file_under(&dir, &dir.join(r))) {
                 return Some(b);
             }
         }
@@ -2757,10 +2761,12 @@ fn settings_file_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/settings.json"))
 }
 
-/// 지금 화면이 학생 그림을 찾는 폴더. `<slug>-profile.png` / `<slug>-<i>.png` /
-/// `<slug>-walk-<i>.png` / `schale-logo.png` 를 여기 넣으면 번들 도트를 대체한다
-/// (render.rs 로더). 파일이 없으면 로더가 `include_bytes!` 번들로 떨어지므로 빈
-/// 폴더는 아무것도 바꾸지 않는다.
+/// 지금 화면이 학생 그림을 찾는 폴더. 모션별 하위 폴더(`idle/<slug>-<i>.png` ·
+/// `walk/` · `wave/` · `cheer/` · `profile/<slug>.png`)와 `schale-logo.png` 를
+/// 여기 넣으면 번들 도트를 대체한다(render.rs 로더). 폴더가 나뉘기 전의 평면
+/// 이름(`<slug>-walk-<i>.png`)도 계속 읽는다 — 기존 사용자 파일이 구조 변경
+/// 하나로 죽으면 안 된다. 파일이 없으면 로더가 `include_bytes!` 번들로
+/// 떨어지므로 빈 폴더는 아무것도 바꾸지 않는다.
 ///
 /// **테마를 골랐으면 그 테마의 `sprites/` 가 이 자리다** — 테마 팩에서 로스터와
 /// 그림은 한 벌이라, 이름은 새 테마인데 그림은 옛 폴더에서 오면 짝이 어긋난다.
@@ -3131,8 +3137,12 @@ fn build_theme_rows() -> Vec<ThemeRow> {
         let faces = slugs
             .iter()
             .filter_map(|slug| {
-                let p = dir.as_ref()?.join("sprites").join(format!("{slug}-profile.png"));
-                p.is_file().then(|| (slug.clone(), Some(p)))
+                let sprites = dir.as_ref()?.join("sprites");
+                let p = [true, false]
+                    .into_iter()
+                    .map(|f| sprites.join(crate::render::profile_rel(slug, f)))
+                    .find(|p| p.is_file())?;
+                Some((slug.clone(), Some(p)))
             })
             .take(THEME_PREVIEW_FACES)
             .collect();

@@ -44,14 +44,34 @@ PPGEN = os.environ.get("PPGEN", "/tmp/ppgen")
 # `--jobs 2`(약 2.9회)에서 전부 통과했다. 병렬을 올리지 마라.
 PROVIDER = os.environ.get("THEME_PROVIDER", "codex")
 
-# 상태 → (ppgen 프리셋 이름, 앱 파일명 중간 토큰, 프레임 수).
+# 상태 → (ppgen 프리셋 이름 겸 앱 자산 폴더 이름, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
 STATES = [
-    ("idle", "", 4),
-    ("walk", "walk-", 6),
-    ("wave", "wave-", 4),
-    ("cheer", "cheer-", 4),
+    ("idle", 4),
+    ("walk", 6),
+    ("wave", 4),
+    ("cheer", 4),
 ]
+
+
+def dst_frame(slug, state, i):
+    """앱이 프레임을 읽는 자리 — 모션 폴더 안의 `<slug>-<i>.png`.
+
+    폴더가 나뉘기 전에는 한 폴더에 `<slug>-walk-<i>.png` 처럼 평평하게 쌓았다.
+    1500장이 한 자리에 섞여 있으면 사람이 자기 그림을 어디에 넣어야 하는지
+    알 수 없어서 갈랐다(2026-08-14 지시).
+    """
+    return os.path.join(DST, state, f"{slug}-{i}.png")
+
+
+def dst_profile(slug):
+    return os.path.join(DST, "profile", f"{slug}.png")
+
+
+def dst_gif(slug):
+    return os.path.join(DST, "gif", f"{slug}.gif")
+
+
 PROFILE_PX = 96
 # 검수 문턱. 멀쩡한 프레임은 예외 없이 런 2 로 나온다(정상 7명 실측). 처음엔 6 으로
 # 뒀다가 런 6 짜리 뭉갠 프레임이 문턱에 딱 걸쳐 통과했다 — 「정상과 불량 사이」가 아니라
@@ -89,7 +109,7 @@ def generated(slug):
     root = os.path.join(SRC, slug, "out")
     if not os.path.exists(os.path.join(root, "manifest.json")):
         return False
-    for state, _, count in STATES:
+    for state, count in STATES:
         for i in range(count):
             if not os.path.exists(os.path.join(root, "frames", state, f"frame-{i:02d}.png")):
                 return False
@@ -128,7 +148,7 @@ def frame_quality(path):
 def check(slug):
     """생성물이 쓸 만한지. 나쁘면 이유 문자열, 괜찮으면 빈 문자열."""
     out = os.path.join(SRC, slug, "out")
-    for state, _, count in STATES:
+    for state, count in STATES:
         for i in (0, count // 2):
             p = os.path.join(out, "frames", state, f"frame-{i:02d}.png")
             if not os.path.exists(p):
@@ -146,7 +166,7 @@ def installed(slug):
     케이가 「이미 설치됨」으로 건너뛰어져 앱에는 옛 분홍머리가 그대로 남아 있었다.
     오류가 안 나서 그리드를 눈으로 볼 때까지 몰랐다.
     """
-    dst = os.path.join(DST, f"{slug}-profile.png")
+    dst = dst_profile(slug)
     if not os.path.exists(dst):
         return False
     src = os.path.join(SRC, slug, "out", "frames", "idle", "frame-00.png")
@@ -197,32 +217,31 @@ def generate(slug, force=False, use_ref=False):
 
 
 def install(slug, force=False):
-    """생성물을 앱이 읽는 파일명으로 복사한다.
+    """생성물을 앱이 읽는 자리로 복사한다.
 
-    앱은 `<slug>-0.png`(idle) · `<slug>-walk-0.png` … 처럼 납작한 이름으로 찾는데
-    ppgen 은 `frames/<state>/frame-NN.png` 로 낸다. 크기(256px)는 이미 같아서
-    리사이즈 없이 복사만 하면 된다.
+    앱은 모션 폴더 안의 `<slug>-<i>.png` 로 찾는데 ppgen 은 `frames/<state>/
+    frame-NN.png` 로 낸다. 크기(256px)는 이미 같아서 리사이즈 없이 복사만 하면 된다.
     """
     if installed(slug) and not force:
         return slug, "skip", ""
     out = os.path.join(SRC, slug, "out")
     if not generated(slug):
         return slug, "not-generated", ""
-    os.makedirs(DST, exist_ok=True)
+    for sub in [s for s, _ in STATES] + ["profile", "gif"]:
+        os.makedirs(os.path.join(DST, sub), exist_ok=True)
 
-    for state, token, count in STATES:
+    for state, count in STATES:
         for i in range(count):
             src = os.path.join(out, "frames", state, f"frame-{i:02d}.png")
             if not os.path.exists(src):
                 return slug, "fail", f"{state} frame-{i:02d} 없음"
-            shutil.copy2(src, os.path.join(DST, f"{slug}-{token}{i}.png"))
+            shutil.copy2(src, dst_frame(slug, state, i))
 
     gif = os.path.join(out, "gif", "idle.gif")
     if os.path.exists(gif):
-        shutil.copy2(gif, os.path.join(DST, f"{slug}-idle.gif"))
+        shutil.copy2(gif, dst_gif(slug))
 
-    make_profile(os.path.join(out, "frames", "idle", "frame-00.png"),
-                 os.path.join(DST, f"{slug}-profile.png"))
+    make_profile(os.path.join(out, "frames", "idle", "frame-00.png"), dst_profile(slug))
     return slug, "ok", ""
 
 
@@ -299,7 +318,7 @@ def sheet(targets, out, cell=110):
         x0 = pad + (n % cols) * cw
         y0 = pad + (n // cols) * ch
         for i, path in enumerate(
-            [os.path.join(SRC, slug, "ref.png"), os.path.join(DST, f"{slug}-profile.png")]
+            [os.path.join(SRC, slug, "ref.png"), dst_profile(slug)]
         ):
             box = (x0 + i * cell, y0, x0 + (i + 1) * cell, y0 + cell)
             if not os.path.exists(path):
@@ -381,8 +400,8 @@ def dupes(targets, out, top=12, cell=110):
             print(f"⚠️{label}가 같다: {' '.join(v)}")
 
     # ② 그림이 닮은 쌍
-    have = [s for s in targets if os.path.exists(os.path.join(DST, f"{s}-profile.png"))]
-    h = {s: phash(os.path.join(DST, f"{s}-profile.png")) for s in have}
+    have = [s for s in targets if os.path.exists(dst_profile(s))]
+    h = {s: phash(dst_profile(s)) for s in have}
     pairs = sorted(
         (sum(x != y for x, y in zip(h[a], h[b])), a, b)
         for i, a in enumerate(sorted(have))
@@ -402,8 +421,8 @@ def dupes(targets, out, top=12, cell=110):
         y0 = pad + n * rh
         cells = [
             (os.path.join(SRC, a, "ref.png"), 0),
-            (os.path.join(DST, f"{a}-profile.png"), 1),
-            (os.path.join(DST, f"{b}-profile.png"), 2),
+            (dst_profile(a), 1),
+            (dst_profile(b), 2),
             (os.path.join(SRC, b, "ref.png"), 3),
         ]
         for path, i in cells:

@@ -9372,30 +9372,68 @@ fn user_asset_rgba_in(dir: &std::path::Path, filename: &str) -> Option<(Vec<u8>,
     Some((rgba.into_raw(), w, h))
 }
 
+/// override 폴더 안 스프라이트 한 장의 상대 경로.
+///
+/// `foldered` 면 번들과 같은 모션 폴더 구조(`walk/mika-0.png`), 아니면 옛 평면
+/// 이름(`mika-walk-0.png`)이다. 옛 이름을 계속 아는 이유는 폴더 분리 이전에
+/// 그림을 넣어 둔 사용자가 있어서다 — 구조가 바뀌었다고 그 그림이 하루아침에
+/// 무시되면, 사용자 입장에서는 앱이 자기 파일을 잃어버린 것으로 보인다.
+fn sprite_rel(slug: &str, motion: &str, i: usize, foldered: bool) -> String {
+    if foldered {
+        format!("{motion}/{slug}-{i}.png")
+    } else if motion == "idle" {
+        // 옛 규약은 idle 만 무접미(`slug-N`)였다. walk 외 모션이 이 가지로 새면
+        // override 시 wave/cheer 가 idle 프레임으로 둔갑한다.
+        format!("{slug}-{i}.png")
+    } else {
+        format!("{slug}-{motion}-{i}.png")
+    }
+}
+
+/// override 폴더 안 프사 한 장의 상대 경로 — `sprite_rel` 과 같은 우선순위 규약.
+///
+/// 웹 라우트(socket.rs `character_face`)도 이걸 쓴다. 두 벌로 두면 네이티브
+/// 화면과 웹뷰가 서로 다른 파일을 프사로 고르게 되고, 그건 오류 없이 갈린다.
+pub(crate) fn profile_rel(slug: &str, foldered: bool) -> String {
+    if foldered {
+        format!("profile/{slug}.png")
+    } else {
+        format!("{slug}-profile.png")
+    }
+}
+
+/// 모션 프레임 수 — walk 만 6, 나머지는 4.
+fn motion_frame_count(motion: &str) -> usize {
+    if motion == "walk" { STUDENT_WALK_FRAMES } else { STUDENT_IDLE_FRAMES }
+}
+
 /// 한 캐릭터·모션의 사용자 override 스프라이트 프레임 전부를 RgbaImage 로 연다.
 /// 프레임이 **하나라도** 없으면 None — 부분 교체(일부만 사용자·일부는 번들)는
 /// 애니가 튀므로 all-or-nothing 으로 전체 폴백시킨다.
+///
+/// 새 폴더 구조와 옛 평면 이름을 **벌 단위로** 가른다. 프레임마다 따로 고르면
+/// 새 폴더에 절반만 옮긴 사용자의 애니가 옛 그림과 섞여 튀는데, 그건 위 규칙이
+/// 막으려던 바로 그 증상이다.
 fn user_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>> {
-    let dir = crate::socket::students_dir()?;
-    let n = if motion == "walk" {
-        STUDENT_WALK_FRAMES
-    } else {
-        STUDENT_IDLE_FRAMES
+    user_sprite_images_in(&crate::socket::students_dir()?, slug, motion)
+}
+
+/// dir 주입 버전(테스트용) — students_dir 해석과 분리해 env 없이 검증한다.
+fn user_sprite_images_in(
+    dir: &std::path::Path,
+    slug: &str,
+    motion: &str,
+) -> Option<Vec<image::RgbaImage>> {
+    let n = motion_frame_count(motion);
+    let load = |foldered: bool| -> Option<Vec<image::RgbaImage>> {
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = dir.join(sprite_rel(slug, motion, i, foldered));
+            out.push(downscale_student(image::open(p).ok()?).to_rgba8());
+        }
+        Some(out)
     };
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        // 번들 파일명 규약과 동일: idle 만 무접미(`slug-N`), 나머지 모션은
-        // `slug-<motion>-N`. walk 외 모션이 idle 파일명으로 새면 override 시
-        // wave/cheer 가 idle 프레임으로 둔갑한다.
-        let fname = if motion == "idle" {
-            format!("{slug}-{i}.png")
-        } else {
-            format!("{slug}-{motion}-{i}.png")
-        };
-        let img = downscale_student(image::open(dir.join(&fname)).ok()?);
-        out.push(img.to_rgba8());
-    }
-    Some(out)
+    load(true).or_else(|| load(false))
 }
 
 /// 모션 이름 → GPU 텍스처 캐시 키 접두. idle 은 "f"(기존 배너 캐시와 호환),
@@ -9414,14 +9452,14 @@ fn sprite_key_prefix(motion: &str) -> &'static str {
 /// idle/wave/cheer 0..3 · walk-east 0..5). idle=대기, wave=승인 대기(한 팔
 /// 인사), cheer=턴 완료(양팔 만세), walk=working(제자리 걸음).
 fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
-    // idle/wave/cheer 공통 4프레임 — 파일명 접미사(""·"-wave"·"-cheer")만 다르다.
+    // idle/wave/cheer 공통 4프레임 — 모션 폴더만 다르고 파일명은 전부 `<slug>-N`.
     macro_rules! frames4 {
-        ($n:literal, $m:literal) => {{
+        ($n:literal, $d:literal) => {{
             const F: [&[u8]; STUDENT_IDLE_FRAMES] = [
-                include_bytes!(concat!("../assets/students/", $n, $m, "-0.png")),
-                include_bytes!(concat!("../assets/students/", $n, $m, "-1.png")),
-                include_bytes!(concat!("../assets/students/", $n, $m, "-2.png")),
-                include_bytes!(concat!("../assets/students/", $n, $m, "-3.png")),
+                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-0.png")),
+                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-1.png")),
+                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-2.png")),
+                include_bytes!(concat!("../assets/students/", $d, "/", $n, "-3.png")),
             ];
             &F[..]
         }};
@@ -9429,12 +9467,12 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
     macro_rules! walk {
         ($n:literal) => {{
             const F: [&[u8]; STUDENT_WALK_FRAMES] = [
-                include_bytes!(concat!("../assets/students/", $n, "-walk-0.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-walk-1.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-walk-2.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-walk-3.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-walk-4.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-walk-5.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-0.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-1.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-2.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-3.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-4.png")),
+                include_bytes!(concat!("../assets/students/walk/", $n, "-5.png")),
             ];
             &F[..]
         }};
@@ -9442,9 +9480,9 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
     macro_rules! student {
         ($n:literal) => {
             match motion {
-                "idle" => frames4!($n, ""),
-                "wave" => frames4!($n, "-wave"),
-                "cheer" => frames4!($n, "-cheer"),
+                "idle" => frames4!($n, "idle"),
+                "wave" => frames4!($n, "wave"),
+                "cheer" => frames4!($n, "cheer"),
                 "walk" => walk!($n),
                 _ => return None,
             }
@@ -9487,11 +9525,22 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
 /// (80명 × 18프레임이라 디코딩하면 몇 초가 사람 눈에 그대로 보인다).
 pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dir)?;
+    for sub in SPRITE_MOTION_DIRS {
+        std::fs::create_dir_all(dir.join(sub))?;
+    }
     let src = crate::socket::students_dir();
-    let copy = |name: String, bundled: Option<&'static [u8]>| -> std::io::Result<bool> {
-        let dst = dir.join(&name);
-        if let Some(p) = src.as_ref().map(|d| d.join(&name)).filter(|p| p.is_file()) {
-            std::fs::copy(p, dst)?;
+    // 첫 후보가 쓸 자리고, 뒤는 읽을 자리다 — 로더와 **같은 순서**(새 구조 →
+    // 옛 평면 → 번들)여야 복제본이 지금 화면과 같은 그림이 된다.
+    let copy = |rels: [String; 2], bundled: Option<&'static [u8]>| -> std::io::Result<bool> {
+        let dst = dir.join(&rels[0]);
+        let found =
+            src.as_ref().and_then(|d| rels.iter().map(|r| d.join(r)).find(|p| p.is_file()));
+        if let Some(p) = found {
+            // 내보낼 곳이 곧 읽을 곳인 경우가 있다(폴더 열기 seed). 같은 파일을
+            // 자기 위에 복사하면 0바이트가 되므로 그때는 이미 제자리다.
+            if p != dst {
+                std::fs::copy(p, dst)?;
+            }
             return Ok(true);
         }
         match bundled {
@@ -9507,28 +9556,89 @@ pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<u
     for (_, slug) in crate::theme::character_slugs() {
         for motion in ["idle", "wave", "cheer", "walk"] {
             let frames = student_sprite_png(slug, motion);
-            let count = if motion == "walk" { STUDENT_WALK_FRAMES } else { STUDENT_IDLE_FRAMES };
-            for i in 0..count {
-                let name = if motion == "idle" {
-                    format!("{slug}-{i}.png")
-                } else {
-                    format!("{slug}-{motion}-{i}.png")
-                };
-                if copy(name, frames.and_then(|f| f.get(i).copied()))? {
+            for i in 0..motion_frame_count(motion) {
+                let rels =
+                    [sprite_rel(slug, motion, i, true), sprite_rel(slug, motion, i, false)];
+                if copy(rels, frames.and_then(|f| f.get(i).copied()))? {
                     n += 1;
                 }
             }
         }
-        if copy(format!("{slug}-profile.png"), student_profile_png(slug))? {
+        let rels = [profile_rel(slug, true), profile_rel(slug, false)];
+        if copy(rels, student_profile_png(slug))? {
             n += 1;
         }
     }
     let logo: &'static [u8] = include_bytes!("../assets/students/schale-logo.png");
-    if copy("schale-logo.png".to_string(), Some(logo))? {
+    if copy(["schale-logo.png".to_string(), "schale-logo.png".to_string()], Some(logo))? {
         n += 1;
     }
+    write_sprite_readme(dir)?;
     Ok(n)
 }
+
+/// 그림 폴더의 하위 갈래. 모션 넷과 프사·gif — export 가 미리 만들어 두는 자리라
+/// 사용자는 빈 폴더만 보고도 무엇을 어디에 넣는지 안다.
+pub(crate) const SPRITE_MOTION_DIRS: [&str; 6] =
+    ["idle", "walk", "wave", "cheer", "profile", "gif"];
+
+/// 그림 폴더 사용법을 폴더 안에 남긴다 — **이미 있으면 건드리지 않는다**(사용자가
+/// 자기 메모를 적어 뒀을 수 있다).
+///
+/// 폴더를 열어 준 것만으로는 무엇을 언제 쓰는 그림인지 알 방법이 없다. 규격보다
+/// 먼저 "이 모션이 화면 어디서 보이는가"를 적는 이유가 그것이다 — walk 를 고치는
+/// 사람이 그게 작업 중 스피너 옆 걸음이라는 걸 알아야 어떤 그림을 그릴지 정한다.
+pub(crate) fn write_sprite_readme(dir: &std::path::Path) -> std::io::Result<()> {
+    let p = dir.join("README.md");
+    if p.exists() {
+        return Ok(());
+    }
+    std::fs::write(p, SPRITE_README)
+}
+
+const SPRITE_README: &str = r#"# 학생 그림 폴더
+
+이 폴더에 그림을 넣으면 앱에 들어 있는 기본 도트를 대체한다. 파일이 없는 자리는
+기본 도트가 그대로 보이므로, 한 명만 바꾸거나 한 모션만 바꿔도 된다.
+
+## 어떤 모션이 언제 보이나
+
+| 폴더 | 화면에서 보이는 때 | 프레임 |
+|---|---|---|
+| `idle/` | 세션 시작 배너, 그리고 아무 일도 없을 때 서 있는 모습 | `<이름>-0.png` ~ `-3.png` (4장) |
+| `walk/` | claude 가 작업하는 동안 스피너 옆에서 제자리걸음 | `<이름>-0.png` ~ `-5.png` (6장) |
+| `wave/` | 승인을 기다릴 때(주황색 선택지가 뜬 상태) 손 흔들기 | `<이름>-0.png` ~ `-3.png` (4장) |
+| `cheer/` | 턴이 끝났을 때 양팔 만세 | `<이름>-0.png` ~ `-3.png` (4장) |
+| `profile/` | 사이드바·메시지 아바타에 쓰는 얼굴 | `<이름>.png` (1장) |
+| `gif/` | (기본 제공분만 쓰는 자리 — 넣어도 지금은 안 읽는다) | `<이름>.gif` |
+
+`<이름>` 은 로스터의 영문 슬러그다(`mika`, `arona`, `yuuka` …). 설정의 로스터
+화면에서 각 학생의 슬러그를 볼 수 있다.
+
+## 규격
+
+- 256×256 PNG, **배경 투명**. 화면이 알아서 자리에 맞춰 줄이므로 정확히 이 크기일
+  필요는 없지만, 한 변이 512px 를 넘으면 자동으로 줄인다.
+- 한 모션의 프레임은 **크기가 서로 같아야 한다**. 다르면 그 모션은 통째로 기본
+  도트로 돌아간다.
+
+## 모션 단위 all-or-nothing
+
+한 모션은 프레임이 **전부 있어야** 쓰인다. `walk/` 에 6장 중 5장만 넣으면 그
+모션은 통째로 기본 도트로 돌아간다 — 절반만 바뀐 애니메이션이 튀는 것보다
+낫기 때문이다. 다른 모션은 영향받지 않는다.
+
+## 본보기 얻는 법
+
+설정 화면의 그림 폴더 열기 버튼이 **지금 쓰는 그림 전부를 이 구조 그대로** 이
+폴더에 풀어 준다. 그 파일을 열어 고치는 것이 규격을 맞추는 가장 빠른 길이다.
+
+## 옛 파일 이름
+
+폴더가 나뉘기 전에는 `mika-0.png` · `mika-walk-0.png` · `mika-profile.png` 처럼
+한 폴더에 평평하게 두었다. 그 이름도 계속 읽으므로 기존 파일을 지울 필요는 없다.
+다만 같은 그림이 양쪽에 있으면 **폴더 쪽이 이긴다**.
+"#;
 
 /// 이 학생 그림이 있나 — **슬롯을 세우기 전에** 물어야 한다.
 ///
@@ -9547,9 +9657,7 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
         return true;
     }
     let Some(dir) = crate::socket::students_dir() else { return false };
-    let first =
-        if motion == "idle" { format!("{slug}-0.png") } else { format!("{slug}-{motion}-0.png") };
-    dir.join(first).is_file()
+    [true, false].into_iter().any(|f| dir.join(sprite_rel(slug, motion, 0, f)).is_file())
 }
 
 /// 모션 프레임들을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 전 프레임
@@ -9613,7 +9721,7 @@ pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     macro_rules! profiles {
         ($($n:literal),* $(,)?) => {
             match slug {
-                $($n => include_bytes!(concat!("../assets/students/", $n, "-profile.png"))
+                $($n => include_bytes!(concat!("../assets/students/profile/", $n, ".png"))
                     as &'static [u8],)*
                 _ => return None,
             }
@@ -9635,8 +9743,12 @@ pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
 
 
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
-    if let Some(r) = user_asset_rgba(&format!("{slug}-profile.png")) {
-        return Some(r);
+    if let Some(dir) = crate::socket::students_dir() {
+        for foldered in [true, false] {
+            if let Some(r) = user_asset_rgba_in(&dir, &profile_rel(slug, foldered)) {
+                return Some(r);
+            }
+        }
     }
     let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
@@ -9814,18 +9926,18 @@ pub(crate) fn anim_phase_secs() -> f32 {
 
 fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
     Some(match slug {
-        "arona" => include_bytes!("../assets/students/arona-idle.gif"),
-        "prana" => include_bytes!("../assets/students/prana-idle.gif"),
-        "midori" => include_bytes!("../assets/students/midori-idle.gif"),
-        "momoi" => include_bytes!("../assets/students/momoi-idle.gif"),
-        "yuzu" => include_bytes!("../assets/students/yuzu-idle.gif"),
-        "arisu" => include_bytes!("../assets/students/arisu-idle.gif"),
-        "yuuka" => include_bytes!("../assets/students/yuuka-idle.gif"),
-        "shiroko" => include_bytes!("../assets/students/shiroko-idle.gif"),
-        "hoshino" => include_bytes!("../assets/students/hoshino-idle.gif"),
-        "koharu" => include_bytes!("../assets/students/koharu-idle.gif"),
-        "himari" => include_bytes!("../assets/students/himari-idle.gif"),
-        "aru" => include_bytes!("../assets/students/aru-idle.gif"),
+        "arona" => include_bytes!("../assets/students/gif/arona.gif"),
+        "prana" => include_bytes!("../assets/students/gif/prana.gif"),
+        "midori" => include_bytes!("../assets/students/gif/midori.gif"),
+        "momoi" => include_bytes!("../assets/students/gif/momoi.gif"),
+        "yuzu" => include_bytes!("../assets/students/gif/yuzu.gif"),
+        "arisu" => include_bytes!("../assets/students/gif/arisu.gif"),
+        "yuuka" => include_bytes!("../assets/students/gif/yuuka.gif"),
+        "shiroko" => include_bytes!("../assets/students/gif/shiroko.gif"),
+        "hoshino" => include_bytes!("../assets/students/gif/hoshino.gif"),
+        "koharu" => include_bytes!("../assets/students/gif/koharu.gif"),
+        "himari" => include_bytes!("../assets/students/gif/himari.gif"),
+        "aru" => include_bytes!("../assets/students/gif/aru.gif"),
         _ => return None,
     })
 }
@@ -12337,9 +12449,9 @@ mod student_asset_tests {
                 panic!("{slug} 가 로스터엔 있는데 student_profile_png 목록에 없다")
             });
             let img = image::load_from_memory(png)
-                .unwrap_or_else(|e| panic!("{slug}-profile.png 디코드 실패: {e}"));
+                .unwrap_or_else(|e| panic!("profile/{slug}.png 디코드 실패: {e}"));
             let (w, h) = (img.width(), img.height());
-            assert!(w > 0 && h > 0, "{slug}-profile.png 크기 0");
+            assert!(w > 0 && h > 0, "profile/{slug}.png 크기 0");
             with_art += 1;
         }
         assert!(with_art >= 79, "프사 있는 학생이 {with_art}명뿐");
@@ -12367,7 +12479,7 @@ mod student_asset_tests {
     fn user_asset_missing_falls_back() {
         let dir = std::env::temp_dir().join(format!("kt-noassets-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(user_asset_rgba_in(&dir, "yuuka-profile.png").is_none());
+        assert!(user_asset_rgba_in(&dir, &profile_rel("yuuka", true)).is_none());
     }
 
     // override 파일이 있으면 그걸 읽고, 과대 이미지는 MAX_STUDENT_EDGE 로 종횡비
@@ -12379,12 +12491,12 @@ mod student_asset_tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("kt-assets-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("profile")).unwrap();
+        let rel = profile_rel("yuuka", true);
         image::RgbaImage::from_pixel(640, 480, image::Rgba([10, 20, 30, 255]))
-            .save(dir.join("yuuka-profile.png"))
+            .save(dir.join(&rel))
             .unwrap();
-        let (rgba, w, h) =
-            user_asset_rgba_in(&dir, "yuuka-profile.png").expect("override read");
+        let (rgba, w, h) = user_asset_rgba_in(&dir, &rel).expect("override read");
         assert_eq!((w, h), (MAX_STUDENT_EDGE, 384));
         assert_eq!(rgba.len() as u32, w * h * 4);
         let _ = std::fs::remove_dir_all(&dir);
@@ -12405,6 +12517,66 @@ mod student_asset_tests {
         let (_, w, h) = user_asset_rgba_in(&dir, "schale-logo.png").expect("override read");
         assert_eq!((w, h), (96, 96));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// override 폴더는 모션 폴더를 먼저 보고, 없으면 폴더가 나뉘기 전의 평면
+    /// 이름으로 떨어진다 — 그리고 **두 구조를 섞지 않는다**.
+    ///
+    /// 섞이면 폴더로 절반만 옮긴 사용자의 애니가 옛 그림과 뒤섞여 튄다. 그건
+    /// all-or-nothing 규칙이 처음부터 막으려던 증상이라, 구조 사이에도 같은
+    /// 규칙이 걸려야 한다.
+    #[test]
+    fn user_sprites_prefer_folders_but_never_mix_layouts() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kt-layout-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(dir.join("walk")).unwrap();
+        let put = |rel: String, v: u8| {
+            image::RgbaImage::from_pixel(8, 8, image::Rgba([v, 0, 0, 255]))
+                .save(dir.join(rel))
+                .unwrap();
+        };
+        let red = |imgs: &[image::RgbaImage]| imgs[0].get_pixel(0, 0)[0];
+
+        // 옛 평면 이름으로 한 벌(6장)을 채워 둔 기존 사용자.
+        for i in 0..STUDENT_WALK_FRAMES {
+            put(sprite_rel("mika", "walk", i, false), 20);
+        }
+        // 새 폴더로는 절반만 옮긴 상태 — 벌이 안 차므로 아직 옛 벌이 이긴다.
+        for i in 0..3 {
+            put(sprite_rel("mika", "walk", i, true), 90);
+        }
+        let got = user_sprite_images_in(&dir, "mika", "walk").expect("옛 평면 한 벌");
+        assert_eq!(got.len(), STUDENT_WALK_FRAMES);
+        assert_eq!(red(&got), 20, "절반만 옮긴 새 폴더가 이기면 애니가 섞인다");
+
+        // 나머지를 마저 옮기면 그때부터 새 폴더가 이긴다.
+        for i in 3..STUDENT_WALK_FRAMES {
+            put(sprite_rel("mika", "walk", i, true), 90);
+        }
+        assert_eq!(
+            red(&user_sprite_images_in(&dir, "mika", "walk").expect("새 구조 한 벌")),
+            90
+        );
+
+        // 어느 구조에도 없는 모션은 None → 호출측이 번들 도트로 떨어진다.
+        assert!(user_sprite_images_in(&dir, "mika", "cheer").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 파일 이름 규약 자체를 못 박는다 — 이게 흔들리면 번들·override·내보내기가
+    /// 서로 다른 자리를 가리키고, 그 어긋남은 오류 없이 「그림이 안 바뀐다」로만
+    /// 드러난다.
+    #[test]
+    fn sprite_paths_follow_the_documented_layout() {
+        assert_eq!(sprite_rel("mika", "idle", 2, true), "idle/mika-2.png");
+        assert_eq!(sprite_rel("mika", "idle", 2, false), "mika-2.png");
+        assert_eq!(sprite_rel("mika", "walk", 5, true), "walk/mika-5.png");
+        assert_eq!(sprite_rel("mika", "walk", 5, false), "mika-walk-5.png");
+        assert_eq!(profile_rel("mika", true), "profile/mika.png");
+        assert_eq!(profile_rel("mika", false), "mika-profile.png");
     }
 }
 
