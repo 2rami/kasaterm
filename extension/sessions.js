@@ -510,6 +510,22 @@ export async function groupOwnTab(client, tabId) {
   }
 }
 
+// 내가 **만든** 탭이 몇 개 남았나. 판정은 그룹 멤버십이다 — `s.tabs` 에는 markBusy 가 claim 한
+// 「조작만 한 남의 탭」도 들어 있어서 그걸 세면 내가 치울 몫보다 많이 나온다.
+// close_tab 이 이 값을 돌려주는 이유: 다 쓴 탭은 그때그때 닫되 작업이 끝나도 결과를 보여줄
+// 페이지 하나는 남아야 하는데, 몇 개 남았는지 모르면 그 마지막 하나까지 닫아 버린다.
+export async function ownTabCount(client) {
+  const s = sessionOf(client)
+  if (!s || !s.groups.size) return 0
+  let n = 0
+  for (const tabId of [...s.tabs]) {
+    const t = await chrome.tabs.get(tabId).catch(() => null)
+    if (!t) { forgetTab(tabId); continue }
+    if (s.groups.has(t.groupId)) n++
+  }
+  return n
+}
+
 // --- 에이전트 창 ----------------------------------------------------------
 
 // 우리가 new_window 로 **만든** 창. ⚠️「우리 그룹이 있는 창」으로 판정하면 안 된다 — 사람 창에도

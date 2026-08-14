@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -301,13 +301,22 @@ const handlers = {
     }
   },
 
-  async close_tab({ tabId }) {
+  // ★남은 내 탭 수를 함께 준다. 「다 쓴 탭은 즉시 닫는다」와 「끝나도 결과 페이지 하나는 남긴다」는
+  // 둘 다 지키려면 지금 몇 개 남았는지를 알아야 하는데, 그걸 모르면 마지막 하나까지 닫아 놓고
+  // 선생님께 「확인했습니다」만 남긴다. 막지는 않는다 — 0 이 되면 말로 알려줄 뿐이다.
+  async close_tab({ tabId }, ctx = {}) {
     const id = await resolveTabId(tabId)
     await ungroupBeforeClose([id])
     await cdp.detach(id).catch(() => {})
     forgetTab(id)
     await chrome.tabs.remove(id)
-    return { closed: id }
+    const remaining = await ownTabCount(ctx.client)
+    return {
+      closed: id, remaining,
+      ...(remaining === 0
+        ? { note: '내가 연 탭이 하나도 안 남았습니다. 작업 결과로 보여줄 페이지가 있었다면 하나는 다시 열어 두세요.' }
+        : {}),
+    }
   },
 
   async set_task({ task }, ctx = {}) {
