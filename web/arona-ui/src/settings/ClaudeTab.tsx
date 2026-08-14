@@ -31,6 +31,7 @@ function AccountCard({
   onSelect,
   onRename,
   onReauth,
+  onReauthHere,
   onRemove,
 }: {
   row: AccountRow;
@@ -39,6 +40,7 @@ function AccountCard({
   onSelect: () => void;
   onRename: (label: string) => void;
   onReauth: () => void;
+  onReauthHere: () => void;
   onRemove: () => void;
 }) {
   const t = useT();
@@ -106,6 +108,8 @@ function AccountCard({
       {row.slot && !renaming && (
         <div className="invisible flex shrink-0 gap-1 group-focus-within:visible group-hover:visible">
           <MiniButton label={t.claude.rename} disabled={busy} onClick={() => setRenaming(true)} />
+          {/* 네이티브 카드와 같은 순서 — 쓰던 브라우저, 빈 창, 빼기. */}
+          <MiniButton label={t.claude.reauthHere} disabled={busy} onClick={onReauthHere} />
           <MiniButton label={t.claude.reauth} disabled={busy} onClick={onReauth} />
           <MiniButton label={t.claude.removeSlot} danger disabled={busy} onClick={onRemove} />
         </div>
@@ -145,6 +149,7 @@ export function ClaudeTab({
           onSelect={() => void run(`${provider}-account`, { id: row.id })}
           onRename={(label) => void run(`${provider}-account-label`, { id: row.id, label })}
           onReauth={() => void run('reauth-account', { id: row.id, label: provider })}
+          onReauthHere={() => void run('reauth-account-here', { id: row.id, label: provider })}
           onRemove={() => void run(`remove-${provider}-account`, { id: row.id })}
         />
       ))}
@@ -153,6 +158,10 @@ export function ClaudeTab({
         disabled={busy}
         onClick={() => void run(`add-${provider}-account`)}
       />
+      {/* 슬롯이 있을 때만 — 관리 버튼이 없는 화면에서는 설명할 것도 없다. */}
+      {rows.some((r) => r.slot) && (
+        <p className="mt-2 text-[12px] text-[var(--kt-text-mute)]">{t.claude.browserHint}</p>
+      )}
     </>
   );
 
