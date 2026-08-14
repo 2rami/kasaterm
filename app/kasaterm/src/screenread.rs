@@ -558,7 +558,58 @@ pub(crate) fn tell_wrap_continuation(row: &[GridCell]) -> bool {
     }
 }
 
-pub(crate) fn msg_blank_row(row: &[GridCell]) -> bool {
+/// 사용자가 친 프롬프트의 배경 띠 감지 — claude 는 지난 user 턴을 `❯ 본문` 행에
+/// **행 전폭 배경 띠**로 그린다(2026-08-15 실측: 라이트 테마 rgb(240,240,240)).
+/// 그 색은 claude 테마 소관이라 kasaterm 테마와 어긋난다 — 라이트에선 씻겨
+/// 보이고 다크에선 흰 띠로 뜬다(「내가 친 프롬프트 텍스트 배경 흰색되는거」).
+/// 색을 열거하지 않고 **구조**로 잡는다: 첫 non-blank 가 `❯`(col 0~1) 이고 그
+/// 행의 배경이 끝까지 균일한 non-default 색이면 프롬프트 띠다. 입력박스의 `❯`
+/// 는 배경이 없어 안 걸리고, 메뉴 선택 강조는 대개 전폭이 아니며, 픽커 화면은
+/// 호출측이 게이트한다.
+pub(crate) fn user_prompt_band(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
+    let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
+    if first > 1 || row[first].ch != '❯' {
+        return None;
+    }
+    band_bg(row)
+}
+
+/// 행 전폭이 같은 non-default 배경일 때 그 색 — 프롬프트 wrap 연속 행 판정도
+/// 이걸 쓴다(띠색이 같으면 같은 블록).
+pub(crate) fn band_bg(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
+    let bg = row.first()?.bg.clone();
+    if matches!(bg, kasa_bridge::screen::Color::Default) {
+        return None;
+    }
+    row.iter().all(|c| c.bg == bg).then_some(bg)
+}
+
+/// 프롬프트 띠 한 행을 kasaterm 디자인으로 재도색 — 띠는 **본문 폭까지만**
+/// (전폭 띠의 꼬리는 기본 배경으로 되돌린다), 바탕은 `fill`, 앞머리 `❯` 는
+/// accent 원색. 글자색은 claude 가 정한 그대로 둔다.
+pub(crate) fn restyle_user_prompt_row(
+    row: &mut [GridCell],
+    fill: &kasa_bridge::screen::Color,
+    accent: [u8; 4],
+) {
+    let last = row
+        .iter()
+        .rposition(|c| !matches!(c.ch, ' ' | '\0'))
+        .unwrap_or(0);
+    let pad_end = (last + 2).min(row.len());
+    for (i, c) in row.iter_mut().enumerate() {
+        if i < pad_end {
+            c.bg = fill.clone();
+            if i <= 1 && c.ch == '❯' {
+                c.fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+            }
+        } else {
+            c.bg = kasa_bridge::screen::Color::Default;
+        }
+    }
+}
+
+fn msg_blank_row(row: &[GridCell]) -> bool {
     row.iter().all(|c| c.ch == ' ' || c.ch == '\0')
 }
 
@@ -3167,6 +3218,44 @@ mod teammate_msg_tests {
         assert!(!tell_wrap_continuation(&row_from("⏺ 확인", 80)));
         assert!(!tell_wrap_continuation(&row_from("", 80)));
         assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
+    }
+
+    // 내가 친 프롬프트의 배경 띠: `❯` 앞머리 + 행 전폭 균일 배경만 띠다.
+    // 입력박스 `❯`(배경 없음)·코드블록(❯ 없음)·메뉴 선택(부분 폭)은 아니다.
+    #[test]
+    fn user_prompt_band_detects_full_width_only() {
+        use kasa_bridge::screen::Color;
+        let band = Color::Rgb(240, 240, 240);
+        let banded = |s: &str| {
+            let mut row = row_from(s, 60);
+            for c in row.iter_mut() {
+                c.bg = band.clone();
+            }
+            row
+        };
+        assert_eq!(user_prompt_band(&banded("❯ 내가 친 프롬프트")), Some(band.clone()));
+        assert_eq!(user_prompt_band(&row_from("❯ 입력박스 줄", 60)), None, "배경 없으면 아니다");
+        assert_eq!(user_prompt_band(&banded("  코드블록 줄")), None, "❯ 없으면 아니다");
+        let mut partial = row_from("❯ 1. 메뉴 선택", 60);
+        for c in partial.iter_mut().take(20) {
+            c.bg = band.clone();
+        }
+        assert_eq!(user_prompt_band(&partial), None, "부분 폭 강조는 아니다");
+    }
+
+    // 재도색: 본문 폭까지만 fill, 전폭 띠의 꼬리는 기본 배경으로, ❯ 는 accent.
+    #[test]
+    fn restyle_user_prompt_trims_tail_and_paints_marker() {
+        use kasa_bridge::screen::Color;
+        let mut row = row_from("❯ 질문", 40);
+        for c in row.iter_mut() {
+            c.bg = Color::Rgb(240, 240, 240);
+        }
+        let fill = Color::Rgb(30, 34, 44);
+        restyle_user_prompt_row(&mut row, &fill, [255, 128, 0, 255]);
+        assert_eq!(row[0].fg, Color::Rgb(255, 128, 0), "❯ 는 accent");
+        assert_eq!(row[3].bg, fill, "본문 구간은 fill");
+        assert_eq!(row[30].bg, Color::Default, "꼬리는 기본 배경으로");
     }
 
     // 여러 문단 SendMessage: 문단 사이 빈 행은 메시지 끝이 아니다 — 빈 행 뒤

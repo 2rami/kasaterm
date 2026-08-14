@@ -1683,6 +1683,36 @@ impl App {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
                 }
+                // 내가 친 프롬프트 띠 재도색 — claude 테마의 전폭 띠(라이트=씻긴
+                // 회백, 다크=흰 띠)를 kasaterm 테마·학생색으로(2026-08-15 지시
+                // 「색상이랑 디자인 바꾸자」). 디자인: 띠는 본문 폭까지만(전폭
+                // 꼬리는 기본 배경으로), 바탕은 학생 accent 를 테마 배경에 살짝
+                // 섞은 톤, `❯` 는 accent 원색. 픽커/목록 화면은 선택 강조가
+                // (`❯`+배경) 오탐되므로 통째로 건너뛴다.
+                if !(agents_view || resume_picker || ask_picker) {
+                    let accent = prompt_accent
+                        .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
+                    let base = theme::bg();
+                    let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
+                    let amount = if light { 0.10 } else { 0.18 };
+                    let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
+                    let mut r = 0;
+                    while r < composed.len() {
+                        let Some(band) = user_prompt_band(&composed[r]) else {
+                            r += 1;
+                            continue;
+                        };
+                        loop {
+                            restyle_user_prompt_row(&mut composed[r], &fill, accent);
+                            r += 1;
+                            if r >= composed.len()
+                                || band_bg(&composed[r]).as_ref() != Some(&band)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
