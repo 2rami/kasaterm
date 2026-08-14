@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import { MotionSprites } from './MotionSprites';
 import { faceUrl } from './types';
 import type { Character } from './types';
 
@@ -239,6 +240,12 @@ export function CharacterDetail({
           <p className="mt-1 text-[11px] text-[var(--kt-text-mute)]">
             {persona.length}자 · 타이핑을 멈추면 저장돼요
           </p>
+
+          {/* 그림은 이름·성격과 저장 경로가 다르다(파일 폴더 vs 로스터 json) —
+              그래도 같은 화면에 두는 이유는 사람이 "이 캐릭터"를 한자리에서
+              손보기 때문이다. 자기 상태는 스스로 읽어 오므로 위 저장과 섞이지
+              않는다. */}
+          <MotionSprites slug={character.slug} />
         </div>
       </div>
     </div>

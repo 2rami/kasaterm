@@ -1286,6 +1286,108 @@ async fn character_face_handler(
     }
 }
 
+/// 업로드 한 벌의 상한(base64 부풀림 포함). 프레임 6장 × 4MB 가 상한이므로 그
+/// 4/3 에 여유를 얹었다 — axum 기본 2MB 로는 큰 원본 한 장에도 요청이 통째로
+/// 거부되고, 그 거부는 화면에 이유 없이 실패로만 온다.
+const SPRITE_UPLOAD_LIMIT: usize = 48 << 20;
+
+/// `GET /character-sprite?slug=<slug>&motion=<m>&frame=<i>` — 모션 프레임 한 장.
+/// 사용자 그림이 있으면 그것, 없으면 번들(화면이 지금 쓰는 것과 같은 순서).
+///
+/// `/character-face` 와 달리 **캐시를 안 준다**. 이 라우트는 그림을 갈아 끼우는
+/// 화면 전용이라, 1분이라도 캐시되면 방금 올린 그림 대신 옛것이 보여 사용자는
+/// 업로드가 실패했다고 읽는다.
+async fn character_sprite_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+    let motion = params.get("motion").map(String::as_str).unwrap_or_default();
+    let frame = params.get("frame").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    let mime = if motion == "gif" { "image/gif" } else { "image/png" };
+    match backend.character_sprite(slug, motion, frame) {
+        Some(bytes) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            "not found",
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /character-sprite-status?slug=<slug>` — 모션별 프레임 수와 그림 출처.
+/// 화면은 이걸로 업로드 칸 수를 정하고 "기본 그림/내가 넣은 것"을 가른다.
+async fn character_sprite_status_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+    (
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(backend.character_sprite_status(slug)),
+    )
+}
+
+/// `POST /character-sprite` — 사용자 그림을 굳히거나 지운다.
+/// body(JSON): `{"slug","motion","frames":["<base64>",…]}` 또는
+/// `{"slug","motion","clear":true}`.
+///
+/// 프레임을 한 장씩 받지 않는 것은 로더가 **벌 단위 all-or-nothing** 이기
+/// 때문이다. 반쯤 올라간 폴더는 오류 없이 기본 도트로 폴백하므로, 사용자에게는
+/// 업로드가 통째로 무시된 것처럼 보인다.
+///
+/// `Content-Type` 을 보지 않는 이유는 `/settings/character` 와 같다 —
+/// `text/plain` 으로 보내면 CORS simple request 라 preflight 가 아예 안 뜬다.
+async fn character_sprite_save_handler(
+    backend: Arc<dyn Backend>,
+    body: String,
+) -> impl IntoResponse {
+    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let bad = |msg: String| (cors(), Json(serde_json::json!({ "ok": false, "error": msg })));
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return bad(format!("bad body: {e}")),
+    };
+    let slug = v.get("slug").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let motion = v.get("motion").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if slug.is_empty() || motion.is_empty() {
+        return bad("slug/motion required".to_string());
+    }
+    if v.get("clear").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return match backend.clear_character_sprite(slug, motion) {
+            Ok(v) => (cors(), Json(v)),
+            Err(e) => bad(e.to_string()),
+        };
+    }
+    let Some(arr) = v.get("frames").and_then(|x| x.as_array()) else {
+        return bad("frames required".to_string());
+    };
+    let frames: Vec<Vec<u8>> =
+        arr.iter().map(|f| crate::proxy::b64_decode(f.as_str().unwrap_or(""))).collect();
+    match backend.save_character_sprite(slug, motion, &frames) {
+        Ok(v) => (cors(), Json(v)),
+        Err(e) => bad(e.to_string()),
+    }
+}
+
 /// `POST /settings/character` — 캐릭터 한 명의 성격·이름을 굳힌다.
 /// body(JSON): `{"name": "아로나", "persona": "…", "new_name": "…"}` — `persona`·
 /// `new_name` 은 **준 것만** 바꾼다(빠뜨리면 그대로).

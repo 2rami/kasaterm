@@ -885,6 +885,46 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// 한 캐릭터·모션의 프레임 이미지 바이트. 사용자가 넣은 그림이 있으면 그것,
+    /// 없으면 번들 — **화면이 지금 쓰는 것과 같은 순서**여야 미리보기가 실제와
+    /// 어긋나지 않는다.
+    ///
+    /// `slug`·`motion` 은 경로 조각이 되므로 구현이 탈출을 막아야 한다. 기본
+    /// None = 404.
+    fn character_sprite(&self, _slug: &str, _motion: &str, _frame: usize) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 모션별 상태 — 프레임 수와 지금 쓰는 그림의 출처(`user`/`bundled`/`none`).
+    ///
+    /// 프레임 수를 화면이 아니라 여기서 주는 이유는 그 수가 로더의 규약이기
+    /// 때문이다(walk 만 6, 나머지 4). 웹이 자기 상수로 그리면 로더가 바뀔 때
+    /// 업로드 칸 수만 옛 값으로 남아, 사용자는 다 넣었는데 앱은 한 장이 없다고
+    /// 판단하는 상태가 된다.
+    fn character_sprite_status(&self, _slug: &str) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// 사용자 그림을 **벌 단위로** 저장한다. `frames` 는 그 모션의 프레임 수와
+    /// 같아야 하며, 하나라도 어긋나면 아무것도 쓰지 않는다.
+    ///
+    /// 한 장씩 받지 않는 이유는 로더가 all-or-nothing 이라서다 — 절반만 남은
+    /// 폴더는 조용히 번들로 폴백해, 사용자에겐 "업로드가 먹지 않는" 것으로 보인다.
+    fn save_character_sprite(
+        &self,
+        _slug: &str,
+        _motion: &str,
+        _frames: &[Vec<u8>],
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("save_character_sprite unsupported")
+    }
+
+    /// 사용자 그림을 지워 번들 기본으로 되돌린다. 옛 평면 이름으로 넣어 둔 것도
+    /// 함께 지운다 — 새 구조만 지우면 로더가 옛 파일로 폴백해 "되돌렸는데 그대로"가 된다.
+    fn clear_character_sprite(&self, _slug: &str, _motion: &str) -> Result<serde_json::Value> {
+        anyhow::bail!("clear_character_sprite unsupported")
+    }
+
     /// 캐릭터 한 명의 성격·이름을 굳힌다. `persona`·`new_name` 은 각각 준 것만
     /// 바꾼다(None = 그대로).
     ///

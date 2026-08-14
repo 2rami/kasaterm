@@ -526,6 +526,9 @@ impl App {
             g.drop_images_with_prefix("theme:");
             g.drop_image("schale:logo");
         }
+        // 대기 gif 는 GPU 텍스처가 아니라 **디코딩된 프레임**으로 따로 캐시된다 —
+        // 위 축출만으로는 안 걷혀, 새로 넣은 gif 가 화면에 안 온다.
+        render::invalidate_idle_anim();
         // 이 버튼의 뜻이 곧 "파일을 다시 봐라"다. 손으로 폴더를 넣거나 지운 경우는
         // 캐시가 알 길이 없으니, 목록 자체도 여기서 함께 다시 읽는다.
         socket::invalidate_theme_rows();

@@ -28,7 +28,7 @@ pub struct Turn {
 }
 
 /// base64 디코드(std 만으로 — base64 crate 의존 회피). 표준 알파벳, 패딩·개행 무시.
-fn b64_decode(s: &str) -> Vec<u8> {
+pub(crate) fn b64_decode(s: &str) -> Vec<u8> {
     let mut lut = [255u8; 256];
     for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
         lut[c as usize] = i as u8;

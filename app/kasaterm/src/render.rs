@@ -9378,7 +9378,7 @@ fn user_asset_rgba_in(dir: &std::path::Path, filename: &str) -> Option<(Vec<u8>,
 /// 이름(`mika-walk-0.png`)이다. 옛 이름을 계속 아는 이유는 폴더 분리 이전에
 /// 그림을 넣어 둔 사용자가 있어서다 — 구조가 바뀌었다고 그 그림이 하루아침에
 /// 무시되면, 사용자 입장에서는 앱이 자기 파일을 잃어버린 것으로 보인다.
-fn sprite_rel(slug: &str, motion: &str, i: usize, foldered: bool) -> String {
+pub(crate) fn sprite_rel(slug: &str, motion: &str, i: usize, foldered: bool) -> String {
     if foldered {
         format!("{motion}/{slug}-{i}.png")
     } else if motion == "idle" {
@@ -9403,7 +9403,7 @@ pub(crate) fn profile_rel(slug: &str, foldered: bool) -> String {
 }
 
 /// 모션 프레임 수 — walk 만 6, 나머지는 4.
-fn motion_frame_count(motion: &str) -> usize {
+pub(crate) fn motion_frame_count(motion: &str) -> usize {
     if motion == "walk" { STUDENT_WALK_FRAMES } else { STUDENT_IDLE_FRAMES }
 }
 
@@ -9451,7 +9451,7 @@ fn sprite_key_prefix(motion: &str) -> &'static str {
 /// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui 스프라이트의
 /// idle/wave/cheer 0..3 · walk-east 0..5). idle=대기, wave=승인 대기(한 팔
 /// 인사), cheer=턴 완료(양팔 만세), walk=working(제자리 걸음).
-fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
+pub(crate) fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
     // idle/wave/cheer 공통 4프레임 — 모션 폴더만 다르고 파일명은 전부 `<slug>-N`.
     macro_rules! frames4 {
         ($n:literal, $d:literal) => {{
@@ -9610,7 +9610,7 @@ const SPRITE_README: &str = r#"# 학생 그림 폴더
 | `wave/` | 승인을 기다릴 때(주황색 선택지가 뜬 상태) 손 흔들기 | `<이름>-0.png` ~ `-3.png` (4장) |
 | `cheer/` | 턴이 끝났을 때 양팔 만세 | `<이름>-0.png` ~ `-3.png` (4장) |
 | `profile/` | 사이드바·메시지 아바타에 쓰는 얼굴 | `<이름>.png` (1장) |
-| `gif/` | (기본 제공분만 쓰는 자리 — 넣어도 지금은 안 읽는다) | `<이름>.gif` |
+| `gif/` | 사이드바 카드의 대기 애니메이션(움직이는 얼굴) | `<이름>.gif` (1장) |
 
 `<이름>` 은 로스터의 영문 슬러그다(`mika`, `arona`, `yuuka` …). 설정의 로스터
 화면에서 각 학생의 슬러그를 볼 수 있다.
@@ -9924,7 +9924,23 @@ pub(crate) fn anim_phase_secs() -> f32 {
     EPOCH.elapsed().as_secs_f32()
 }
 
-fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
+/// override 폴더 안 대기 gif 의 상대 경로. 폴더가 나뉘기 전에는 이 자리에 아무것도
+/// 안 읽었으므로 옛 평면 이름은 없다 — `sprite_rel` 과 달리 한 가지뿐이다.
+pub(crate) fn gif_rel(slug: &str) -> String {
+    format!("gif/{slug}.gif")
+}
+
+/// 지금 쓰는 대기 gif 의 바이트 — 사용자 폴더가 번들을 덮는다.
+pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
+    if let Some(dir) = crate::socket::students_dir() {
+        if let Ok(b) = std::fs::read(dir.join(gif_rel(slug))) {
+            return Some(b);
+        }
+    }
+    student_idle_gif(slug).map(|b| b.to_vec())
+}
+
+pub(crate) fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
     Some(match slug {
         "arona" => include_bytes!("../assets/students/gif/arona.gif"),
         "prana" => include_bytes!("../assets/students/gif/prana.gif"),
@@ -9966,6 +9982,20 @@ struct IdleAnim {
     total_ms: u32,
 }
 
+type IdleAnimCache =
+    std::sync::Mutex<std::collections::HashMap<String, Option<std::sync::Arc<IdleAnim>>>>;
+static IDLE_ANIM_CACHE: std::sync::OnceLock<IdleAnimCache> = std::sync::OnceLock::new();
+
+/// 디코딩된 대기 gif 캐시를 비운다. GPU 텍스처 캐시를 비우는 것만으로는 안 걷힌다
+/// — 프레임이 여기 남아 있으면 새로 넣은 gif 파일이 화면까지 오지 못한다.
+pub(crate) fn invalidate_idle_anim() {
+    if let Some(c) = IDLE_ANIM_CACHE.get() {
+        if let Ok(mut c) = c.lock() {
+            c.clear();
+        }
+    }
+}
+
 /// idle.gif → 프레임 배열. 캐릭터당 **한 번만** 디코딩해 캐시한다.
 ///
 /// 캔버스는 256² 인데 캐릭터는 그 안에 94×208 짜리 전신 도트로 서 있다. 그걸
@@ -9975,16 +10005,14 @@ struct IdleAnim {
 ///
 /// 픽셀 아트라 축소는 Nearest 로 — 보간을 쓰면 도트가 뭉개져 흐려진다.
 fn student_idle_anim(slug: &str) -> Option<std::sync::Arc<IdleAnim>> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Option<Arc<IdleAnim>>>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    use std::sync::Arc;
+    let cache = IDLE_ANIM_CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(slug).cloned()) {
         return hit;
     }
     let built = (|| {
         use image::AnimationDecoder;
-        let bytes = student_idle_gif(slug)?;
+        let bytes = student_idle_gif_bytes(slug)?;
         let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
         let mut frames = Vec::new();
         let mut delays_ms = Vec::new();

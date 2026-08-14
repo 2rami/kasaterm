@@ -564,6 +564,22 @@ impl PtyBackend {
     pub(crate) fn agents_status(&self) -> HashMap<String, String> {
         agents_status_cached()
     }
+
+    /// 그림 파일을 바꾼 뒤 화면이 그걸 다시 읽게 한다 — 설정 화면의 "새로고침"
+    /// 버튼과 **같은 액션**이라 캐시를 비우는 규칙이 두 벌로 갈리지 않는다.
+    ///
+    /// 결과를 기다리지 않는다. 파일은 이미 바뀌었으므로 갱신이 늦거나 실패해도
+    /// 저장 자체는 성공이고, 여기서 GUI 응답을 물고 있으면 업로드 회신만 그만큼
+    /// 늦어진다.
+    fn refresh_assets_best_effort(&self) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketSettingsAction(
+            "refresh-assets".to_string(),
+            None,
+            None,
+            tx,
+        ));
+    }
 }
 
 impl Backend for PtyBackend {
@@ -1420,6 +1436,118 @@ impl Backend for PtyBackend {
         // 번들 PNG 는 **이미 바이너리에 있는 것을 재사용**한다. 여기서 다시
         // include_bytes! 하면 79장이 두 번 들어가 바이너리가 그만큼 커진다.
         crate::render::student_profile_png(slug).map(|b| b.to_vec())
+    }
+
+    fn character_sprite(&self, slug: &str, motion: &str, frame: usize) -> Option<Vec<u8>> {
+        if !safe_path_component(slug) {
+            return None;
+        }
+        let (n, _) = sprite_spec(motion)?;
+        if frame >= n {
+            return None;
+        }
+        if let Some((dir, foldered)) = user_sprite_layout(slug, motion) {
+            let p = dir.join(sprite_rel_for(slug, motion, frame, foldered));
+            if let Some(b) = read_file_under(&dir, &p) {
+                return Some(b);
+            }
+        }
+        // 번들은 **이미 바이너리에 있는 것을 재사용**한다(`character_face` 와 같은
+        // 이유 — 여기서 다시 include_bytes! 하면 그림이 두 벌 들어간다).
+        match motion {
+            "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
+            "gif" => crate::render::student_idle_gif(slug).map(<[u8]>::to_vec),
+            _ => crate::render::student_sprite_png(slug, motion)
+                .and_then(|f| f.get(frame).copied())
+                .map(<[u8]>::to_vec),
+        }
+    }
+
+    fn character_sprite_status(&self, slug: &str) -> serde_json::Value {
+        if !safe_path_component(slug) {
+            return serde_json::Value::Null;
+        }
+        let motions: Vec<serde_json::Value> = SPRITE_MOTIONS
+            .iter()
+            .map(|m| {
+                let (n, ext) = sprite_spec(m).unwrap_or((0, "png"));
+                let user = user_sprite_layout(slug, m).is_some();
+                let bundled = match *m {
+                    "profile" => crate::render::student_profile_png(slug).is_some(),
+                    "gif" => crate::render::student_idle_gif(slug).is_some(),
+                    _ => crate::render::student_sprite_png(slug, m).is_some(),
+                };
+                // `none` 은 오류가 아니다 — 번들에 gif 가 없는 캐릭터가 대부분이라,
+                // 화면이 "기본 그림 없음"을 그려야 사용자가 넣을 자리임을 안다.
+                let source = if user {
+                    "user"
+                } else if bundled {
+                    "bundled"
+                } else {
+                    "none"
+                };
+                serde_json::json!({ "motion": m, "frames": n, "ext": ext, "source": source })
+            })
+            .collect();
+        serde_json::json!({ "slug": slug, "motions": motions })
+    }
+
+    fn save_character_sprite(
+        &self,
+        slug: &str,
+        motion: &str,
+        frames: &[Vec<u8>],
+    ) -> Result<serde_json::Value> {
+        if !safe_path_component(slug) {
+            anyhow::bail!("쓸 수 없는 이름이에요");
+        }
+        let (n, ext) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
+        if frames.len() != n {
+            anyhow::bail!("{motion} 은 {n}장이 필요한데 {}장을 받았어요", frames.len());
+        }
+        for (i, f) in frames.iter().enumerate() {
+            if f.len() > MAX_SPRITE_BYTES {
+                anyhow::bail!("{}번째 그림이 너무 커요(최대 {}MB)", i + 1, MAX_SPRITE_BYTES >> 20);
+            }
+            if !image_magic_ok(f, ext) {
+                anyhow::bail!("{}번째 파일이 {ext} 가 아니에요", i + 1);
+            }
+        }
+        let dir = students_dir().ok_or_else(|| anyhow::anyhow!("그림 폴더를 못 찾았어요"))?;
+        // 새 폴더 구조로만 쓴다. 옛 평면 이름은 건드리지 않는다 — 폴더 쪽이 이기므로
+        // 덮을 필요가 없고, 남의 파일을 말없이 지우지도 않는다.
+        for (i, f) in frames.iter().enumerate() {
+            let p = dir.join(sprite_rel_for(slug, motion, i, true));
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&p, f)?;
+        }
+        // 폴더를 처음 만든 사용자에게 규격 안내를 남긴다(이미 있으면 안 건드린다).
+        let _ = crate::render::write_sprite_readme(&dir);
+        self.refresh_assets_best_effort();
+        Ok(serde_json::json!({ "ok": true, "motion": motion, "frames": n }))
+    }
+
+    fn clear_character_sprite(&self, slug: &str, motion: &str) -> Result<serde_json::Value> {
+        if !safe_path_component(slug) {
+            anyhow::bail!("쓸 수 없는 이름이에요");
+        }
+        let (n, _) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
+        let dir = students_dir().ok_or_else(|| anyhow::anyhow!("그림 폴더를 못 찾았어요"))?;
+        // 옛 평면 이름까지 함께 지운다 — 새 구조만 지우면 로더가 옛 파일로 폴백해
+        // "되돌렸는데 그대로"가 된다.
+        let mut removed = 0usize;
+        for i in 0..n {
+            for foldered in [true, false] {
+                let p = dir.join(sprite_rel_for(slug, motion, i, foldered));
+                if read_file_under(&dir, &p).is_some() && std::fs::remove_file(&p).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        self.refresh_assets_best_effort();
+        Ok(serde_json::json!({ "ok": true, "motion": motion, "removed": removed }))
     }
 
     fn save_character(
@@ -3182,6 +3310,65 @@ fn safe_path_component(s: &str) -> bool {
         && !s.contains('\0')
         && s != "."
         && s != ".."
+}
+
+/// 설정 화면이 다루는 그림 갈래 — 모션 넷과 프사·대기 gif. `SPRITE_MOTION_DIRS`
+/// (폴더를 미리 만들어 주는 쪽)와 **같은 집합이어야 한다**. 여기 빠진 갈래는
+/// 폴더는 생기는데 화면에는 안 보여, 사용자에겐 넣을 자리가 없는 것으로 읽힌다.
+const SPRITE_MOTIONS: [&str; 6] = crate::render::SPRITE_MOTION_DIRS;
+
+/// 그림 한 장의 상한. 도트는 10KB 안팎이지만 사용자가 큰 원본을 넣을 수 있어
+/// (로더가 512px 로 줄인다) 넉넉히 두되, 무한대는 아니다.
+const MAX_SPRITE_BYTES: usize = 4 << 20;
+
+/// 모션 하나의 프레임 수와 확장자. 프사·gif 는 1장이고 gif 는 확장자까지 다르다.
+fn sprite_spec(motion: &str) -> Option<(usize, &'static str)> {
+    match motion {
+        "idle" | "wave" | "cheer" | "walk" => {
+            Some((crate::render::motion_frame_count(motion), "png"))
+        }
+        "profile" => Some((1, "png")),
+        "gif" => Some((1, "gif")),
+        _ => None,
+    }
+}
+
+/// 프레임 하나의 override 상대 경로. 경로 규약의 정본은 render.rs 라 여기서
+/// 다시 조립하지 않는다 — 두 벌로 두면 네이티브와 웹이 서로 다른 파일을 보는데,
+/// 그건 오류 없이 갈린다.
+fn sprite_rel_for(slug: &str, motion: &str, frame: usize, foldered: bool) -> String {
+    match motion {
+        "profile" => crate::render::profile_rel(slug, foldered),
+        // gif 는 폴더가 나뉘기 전에 읽지 않던 갈래라 옛 평면 이름이 없다.
+        "gif" => crate::render::gif_rel(slug),
+        _ => crate::render::sprite_rel(slug, motion, frame, foldered),
+    }
+}
+
+/// 이 모션에 **쓸 수 있는** 사용자 그림 한 벌이 있나 — 있으면 그 폴더와 이름 규약.
+///
+/// 프레임마다 따로 고르지 않는 것이 핵심이다. 로더(`user_sprite_images_in`)가
+/// 벌 단위로 판정하므로, 여기서 프레임별로 고르면 "폴더에 3장·평면에 6장" 같은
+/// 상태에서 미리보기가 화면에 실제로 뜨는 것과 다른 조합을 보여 준다.
+fn user_sprite_layout(slug: &str, motion: &str) -> Option<(std::path::PathBuf, bool)> {
+    let dir = students_dir()?;
+    let (n, _) = sprite_spec(motion)?;
+    [true, false].into_iter().find_map(|foldered| {
+        (0..n)
+            .all(|i| dir.join(sprite_rel_for(slug, motion, i, foldered)).is_file())
+            .then(|| (dir.clone(), foldered))
+    })
+}
+
+/// 확장자가 말하는 형식이 맞나 — 매직 바이트로 본다. 이름만 믿으면 `.png` 로
+/// 바꾼 아무 파일이나 폴더에 들어가고, 그러면 그 모션은 조용히 기본 도트로
+/// 돌아가 사용자는 "업로드가 먹지 않는다"고 읽는다.
+fn image_magic_ok(bytes: &[u8], ext: &str) -> bool {
+    match ext {
+        "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        _ => false,
+    }
 }
 
 /// `root` 아래에 실재하는 파일만 읽는다(`arona_ui_serve` 와 같은 방어).
