@@ -127,7 +127,7 @@ cargo run -p kasaterm
 cargo run --release -p kasaterm
 ```
 
-macOS `.app` / Windows `.msi` 번들은 별도 스크립트로 빌드한다(아이콘·codesign·설치 포함). 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
+macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
 
 ### Claude Code 플러그인 (kasapane 스킬)
 
