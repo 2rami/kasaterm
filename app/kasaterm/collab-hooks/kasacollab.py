@@ -311,7 +311,7 @@ def append_msg(m):
 
 def drain_unread():
     """내게 온 미읽 메시지(to==me·from!=me·read=False)를 read=True 로 마킹하고
-    그 목록을 반환. **inbox·drain-stop·board-context 가 공유하는 단일 임계구역** —
+    그 목록을 반환. `inbox` 가 쓰는 단일 임계구역 —
     락+atomic 으로 lost-update(동시 재작성이 마킹 유실)을 구조로 막는다. 없으면 []."""
     p = msgs_path()
     if not os.path.exists(p):
@@ -413,85 +413,14 @@ def cmd_inbox(args):
         print(f"{addr_label(m.get('from', '?'))}: {m['text']}")
 
 
-def cmd_drain_stop(args):
-    # Stop hook 전용 inbox drain (munder drainForStop 이식). claude 가 턴을
-    # 끝내려 할 때 내게 온 미읽 메시지가 있으면 reason 텍스트를 stdout 으로
-    # 내고 exit 10 → Stop hook 스크립트가 {"decision":"block"} 로 멈춤을 막아
-    # claude 가 그 메시지를 처리하게 강제한다. 없으면 exit 0(그냥 멈춤).
-    #
-    # 멱등: surface 하는 즉시 read=True 마킹한다 — munder 의 cursor.json(id>
-    # lastProcessed) 대용. 우리 short_id 는 16비트 충돌+비단조라 id 비교가
-    # 불가능하므로 board-context.py 가 이미 쓰는 'read' 플래그를 멱등 키로
-    # 공유한다. 한 번 surface 된 메시지는 read=True 라 다음 Stop 에 안 잡혀
-    # 무한루프가 안 난다(+ Stop hook 스크립트의 stop_hook_active 가드로 이중).
-    # drain_unread 가 락+atomic 으로 마킹해 동시 재작성이 마킹을 유실시켜 같은
-    # 메시지가 재surface 되던 lost-update 사고(거노 실측)를 구조로 막는다.
-    mine = drain_unread()
-    if not mine:
-        sys.exit(0)
-    lines = "\n".join(f"- {addr_label(m.get('from', '?'))}: {m['text']}" for m in mine)
-    reason = (f"끝내기 전에 inbox 에 안 읽은 협업 메시지 {len(mine)}건이 있어. "
-              f"각각 확인하고 필요하면 답장(kasacollab msg <상대> \"...\")해라:\n{lines}")
-    # Stop hook 의 stdout JSON 으로 멈춤을 막는다(munder 검증 형식 — command
-    # hook 도 top-level decision:block 을 읽는다). reason 은 다음 턴 지시로 주입.
-    # json.dumps 로 개행·따옴표를 안전 인코딩 → shell 이 JSON 을 안 만져도 됨.
-    print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
-    sys.exit(10)  # 내부 신호: stop-drain.sh 가 complete 알림을 건너뛰게
-
-
-def _steer_dir():
-    d = os.path.join(base(), "steer")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _steer_enc(pane):
-    return pane.replace("%", "_pane_")
-
-
-def steer_path(pane):
-    return os.path.join(_steer_dir(), f"{_steer_enc(pane)}.txt")
-
-
-def cmd_steer(args):
-    """steer 큐 — PostToolUse additionalContext 경로로 메시지 전달.
-    tell(PTY 주입)과 달리 훅 경계에서 반드시 소비되므로 busy 에이전트에도 씹히지 않음."""
-    if not args:
-        print("kasacollab steer <pane> <text>  — steer 큐 push (1건 덮어쓰기)")
-        print("kasacollab steer drain           — 내 steer 큐 drain (stdout 후 삭제)")
-        return
-    sub = args[0]
-    if sub == "drain":
-        p = steer_path(me())
-        try:
-            with open(p) as f:
-                text = f.read()
-            os.remove(p)
-            sys.stdout.write(text)
-        except FileNotFoundError:
-            pass
-        return
-    to = sub
-    text = " ".join(args[1:])
-    if not text:
-        print("text 필요")
-        return
-    p = steer_path(to)
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, p)
-    print(f"steer → {to}: {text[:80]}")
-
-
 def main():
     a = sys.argv[1:]
     if not a:
-        print("kasacollab task|msg|inbox|steer|drain-stop")
+        print("kasacollab task|msg|inbox|steer")
         return
     {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox,
-     "steer": cmd_steer, "drain-stop": cmd_drain_stop}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|steer|drain-stop")
+     "steer": cmd_steer}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|steer")
     )(a[1:])
 
 
