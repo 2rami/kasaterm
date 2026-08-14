@@ -10,6 +10,7 @@ import {
 import { useTokens } from './useTokens';
 import { ThemeTab } from './ThemeTab';
 import { GeneralTab } from './GeneralTab';
+import { AppearanceTab } from './AppearanceTab';
 import { ShellTab } from './ShellTab';
 import { CharacterDetail } from './CharacterDetail';
 import { fetchValues, postAction } from './api';
@@ -25,7 +26,7 @@ const PORT = location.port || '8765';
 /// 네이티브에만 있다(이행 중이라는 걸 화면이 말해 준다).
 const CATS = [
   { key: 'general', label: 'General', Icon: SlidersHorizontal, ready: true },
-  { key: 'appearance', label: 'Appearance', Icon: Sparkles, ready: false },
+  { key: 'appearance', label: 'Appearance', Icon: Sparkles, ready: true },
   { key: 'shell', label: 'Shell', Icon: Terminal, ready: true },
   { key: 'claude', label: 'Claude', Icon: Asterisk, ready: false },
   { key: 'theme', label: 'Theme', Icon: Users, ready: true },
@@ -49,6 +50,7 @@ const TABS: Partial<
   Record<CatKey, (v: SettingsValues, reload: () => Promise<void>) => React.ReactNode>
 > = {
   general: (v, reload) => <GeneralTab data={v.general} reload={reload} />,
+  appearance: (v, reload) => <AppearanceTab data={v.appearance} reload={reload} />,
   shell: (v, reload) => <ShellTab data={v.shell} reload={reload} />,
 };
 

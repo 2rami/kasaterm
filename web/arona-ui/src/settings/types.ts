@@ -85,12 +85,26 @@ export type AppearanceValues = {
   accent: string;
   accents: { name: string; hex: string }[];
   shape: string;
-  shapes: { key: string; label: string }[];
+  shapes: ShapePreset[];
   min_contrast: number;
-  contrasts: { label: string; value: number }[];
+  /// `sample` 은 그 임계로 끌어올린 글자색. 대비 계산을 웹으로 옮기면 두 화면의
+  /// 판정이 갈리므로 결과만 받는다.
+  contrasts: { label: string; value: number; sample: string }[];
   font_size: number;
   font_size_default: number;
   ui_zoom: number;
+};
+
+/// 형태 프리셋 한 벌. 카드가 **자기 실루엣으로** 그려져야 고르기 전에 형태가
+/// 보이므로, 라벨만이 아니라 그리기에 필요한 값이 함께 온다.
+export type ShapePreset = {
+  key: string;
+  label: string;
+  radius_md: number;
+  border_w: number;
+  shadow_offset: number;
+  /// 점·캡슐이 원에서 사각으로 얼마나 기우는지. 1 = 정원, 0 = 사각.
+  roundness: number;
 };
 
 /// 테마 카드 한 장의 미리보기 재료. 색은 CSS hex 라 그대로 style 에 꽂힌다.

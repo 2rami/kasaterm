@@ -1694,6 +1694,26 @@ impl App {
             })
             .collect();
 
+        // 최소 대비 칸의 샘플 글자색. 카드 배경에서 글자색 쪽으로 아주 조금 민
+        // 색에서 출발한다 — 고정 회색으로 두면 다크 팔레트에선 이미 잘 보여 네 칸이
+        // 전부 같아 보인다. 끌어올린 **결과만** 넘기는 이유는 대비 계산을 웹으로
+        // 옮기면 두 화면의 판정이 갈려서다.
+        let (sf, tx) = (theme::surface(), theme::text());
+        let mut sample = [0u8, 0, 0, 0xFF];
+        for i in 0..3 {
+            sample[i] = (sf[i] as f32 + (tx[i] as f32 - sf[i] as f32) * 0.18).round() as u8;
+        }
+        let contrasts: Vec<serde_json::Value> = theme::CONTRAST_PRESETS
+            .iter()
+            .map(|(l, v)| {
+                serde_json::json!({
+                    "label": l,
+                    "value": v,
+                    "sample": hex(theme::enforce_contrast_at(sample, sf, *v)),
+                })
+            })
+            .collect();
+
         serde_json::json!({
             "general": {
                 "cwd_mode": self.set_cwd_mode,
@@ -1729,15 +1749,22 @@ impl App {
                     .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))
                     .collect::<Vec<_>>(),
                 "shape": theme::shape_name(),
+                // 카드가 **자기 실루엣으로** 그려져야 고르기 전에 형태가 눈에
+                // 보인다(네이티브 카드와 같은 재료다) — 그래서 라벨만이 아니라
+                // 모서리·테두리·그림자·둥글기를 함께 넘긴다.
                 "shapes": theme::SHAPE_PRESETS
                     .iter()
-                    .map(|(k, l, _)| serde_json::json!({ "key": k, "label": l }))
+                    .map(|(k, l, s)| serde_json::json!({
+                        "key": k,
+                        "label": l,
+                        "radius_md": s.radius_md,
+                        "border_w": s.border_w,
+                        "shadow_offset": s.shadow_offset,
+                        "roundness": s.roundness,
+                    }))
                     .collect::<Vec<_>>(),
                 "min_contrast": theme::min_contrast(),
-                "contrasts": theme::CONTRAST_PRESETS
-                    .iter()
-                    .map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
-                    .collect::<Vec<_>>(),
+                "contrasts": contrasts,
                 "font_size": self.font_size,
                 "font_size_default": socket::DEFAULT_FONT_SIZE,
                 "ui_zoom": self.ui_zoom,
