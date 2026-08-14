@@ -147,6 +147,11 @@ pub struct PtySession {
     /// 만드는 모든 경로(reader·scroll·full_snapshot)가 뷰포트 배치로 환산해
     /// ScreenUpdate 에 싣는다.
     inline_imgs: Arc<Mutex<InlineImgs>>,
+    /// 앱이 DECSET 2031(컬러스킴 변경 알림)을 켰는가 — 리더 스레드가 raw
+    /// 배치에서 `CSI ?2031h/l` 을 잡아 세운다. 구독한 앱(claude 의
+    /// `theme: auto` 등)에게만 테마 전환 때 `CSI ?997;N n` 리포트를 보낸다 —
+    /// 구독 안 한 셸에 보내면 입력줄에 이스케이프 쓰레기가 박힌다.
+    scheme_reports: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PtySession {
@@ -347,6 +352,7 @@ impl PtySession {
         }
         let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
+        let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_thread = spawn_reader_thread(
             reader,
             tx.clone(),
@@ -360,6 +366,7 @@ impl PtySession {
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
             Arc::clone(&inline_imgs),
+            Arc::clone(&scheme_reports),
         );
 
         Ok(Self {
@@ -387,7 +394,15 @@ impl PtySession {
             blocks,
             cwd_handle,
             inline_imgs,
+            scheme_reports,
         })
+    }
+
+    /// 이 pane 의 앱이 DECSET 2031(컬러스킴 변경 알림)을 켰는가. 테마 전환 때
+    /// 여기 참인 pane 에만 `CSI ?997;1n`(다크)/`;2n`(라이트) 리포트를 보낸다.
+    pub fn wants_scheme_reports(&self) -> bool {
+        self.scheme_reports
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Shared handle to this pane's command-block store. The GUI hands this Arc
@@ -1143,6 +1158,7 @@ fn spawn_reader_thread(
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
     inline_imgs: Arc<Mutex<InlineImgs>>,
+    scheme_reports: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -1349,6 +1365,17 @@ fn spawn_reader_thread(
                         *c = Some(p);
                     }
                 }
+            }
+            // DECSET 2031 — 컬러스킴 변경 알림 구독. alacritty 는 모르는 private
+            // mode 라 조용히 버리므로 raw 배치에서 직접 잡는다(claude 2.1.232
+            // 실측: 부팅 init 에 `CSI ?2031h` 가 들어 있다). 위 스니프들처럼
+            // 짧고 자기완결이라 read 경계 캐리는 두지 않는다. h 와 l 이 한
+            // 배치에 같이 오면 나중 상태인 l 이 이긴다(앱 종료 복원 시퀀스).
+            if memchr::memmem::find(processed_bytes, b"\x1b[?2031h").is_some() {
+                scheme_reports.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if memchr::memmem::find(processed_bytes, b"\x1b[?2031l").is_some() {
+                scheme_reports.store(false, std::sync::atomic::Ordering::Relaxed);
             }
 
             let update = {

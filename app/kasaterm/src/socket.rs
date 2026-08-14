@@ -2847,6 +2847,15 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
 ///   것도 안 한다: 리그는 HOME 을 공유해서, 리그의 테마 실험이 진짜 Claude
 ///   설정을 뒤집으면 안 된다. (`KASATERM_SOCKET_PATH` 는 가드로 못 쓴다 —
 ///   본 앱도 부팅하며 자기 env 에 export 한다.)
+/// ~/.claude/settings.json 의 `theme` 현재값. 실행 중 claude 재테마 주입이
+/// 피커에서 고를 항목(라벨)을 정할 때 읽는다 — `sync_claude_theme` 이 방금
+/// 갱신해 둔 값이라, 주입이 고르는 항목과 새 세션이 읽는 값이 항상 같다.
+pub(crate) fn claude_theme_value() -> Option<String> {
+    let path = kasa_socket::home_dir()?.join(".claude/settings.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(v.get("theme")?.as_str()?.to_string())
+}
+
 pub fn sync_claude_theme(light: bool) {
     if std::env::var_os("KASATERM_SETTINGS_FILE").is_some() {
         return;
@@ -2866,6 +2875,12 @@ pub fn sync_claude_theme(light: bool) {
     };
     let cur = obj.get("theme").and_then(|x| x.as_str()).unwrap_or("dark");
     if cur.starts_with("custom:") {
+        return;
+    }
+    // auto 는 claude 가 스스로 터미널을 따라간다 — 새 세션은 부팅 때 OSC 11
+    // 질의로(우리가 현재 팔레트로 답한다, kasa-pty ColorRequest), 실행 중
+    // 세션은 재테마 주입으로. light/dark 로 덮어쓰면 그 더 나은 경로가 죽는다.
+    if cur == "auto" {
         return;
     }
     let suffix = if cur.ends_with("-daltonized") {

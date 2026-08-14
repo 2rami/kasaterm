@@ -4257,6 +4257,20 @@ pub(crate) struct PaneStatus {
         Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<kasa_pty::CommandBlock>>>>,
 }
 
+/// 테마 플립 때 떠 있는 claude 한 pane 을 갈아입히는 상태기계 한 칸
+/// (`poll_claude_retheme`, input.rs). idle + 빈 입력줄이 될 때까지 기다렸다
+/// `/theme` 피커를 열고, 화면 셀에서 목표 항목의 번호를 읽어 누른다.
+struct RethemeState {
+    /// 이 시각을 지나면 포기한다 — 영원히 바쁜 pane 에 큐가 눌러붙지 않게.
+    expires: Instant,
+    /// Some(t) = `/theme` 을 보냈고 피커 렌더를 기다리는 중(t = 보낸 시각).
+    /// 일정 시간 안에 피커가 안 보이면 Esc 로 청소하고 포기한다.
+    opened: Option<Instant>,
+    /// 피커에서 고를 항목의 라벨(예: "Dark mode (colorblind-friendly)").
+    /// 플립 시점의 settings.json theme 값에서 한 번 계산해 박아 둔다.
+    label: String,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
@@ -4737,6 +4751,15 @@ struct App {
     /// 훅이 남기는 `/tmp/kasaterm-collab/ultracode/<sid>.on` 마커를 대신 읽는다.
     /// `refresh_pane_activity` 박자(300ms)로 갱신 — 매 프레임 stat 하지 않는다.
     pane_ultracode: std::collections::HashSet<String>,
+    /// 직전 틱의 팔레트 명암 — 라이트↔다크 플립을 `poll_claude_retheme` 이
+    /// 감지하는 기준값. 어느 입구로 테마가 바뀌든(설정 화면·웹뷰·system 폴링)
+    /// 전부 팔레트에 수렴하므로, 입구마다 훅을 다는 대신 결과를 비교한다.
+    theme_light_last: Option<bool>,
+    /// 테마 플립 때 「떠 있는 claude」에 /theme 피커 주입을 기다리는 pane 큐.
+    /// claude 2.1.232 는 settings.json 변경도 CSI ?997 리포트도 실행 중엔 안
+    /// 읽으므로(2026-08-14 실측 4종), 세션 안 피커를 실제로 조작하는 것이
+    /// 실행 중 세션을 바꾸는 유일한 길이다.
+    retheme_queue: HashMap<String, RethemeState>,
     /// Whether our window currently has OS focus. Drives notification
     /// suppression: a completion alert for the already-focused active pane is
     /// pointless (the user is looking right at it), so we skip the desktop
@@ -5309,6 +5332,8 @@ impl App {
             last_claude_status: None,
             pane_activity: HashMap::new(),
             pane_ultracode: std::collections::HashSet::new(),
+            theme_light_last: None,
+            retheme_queue: HashMap::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
             turn_done_panes: std::collections::HashSet::new(),

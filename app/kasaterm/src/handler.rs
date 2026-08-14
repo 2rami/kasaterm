@@ -5720,6 +5720,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.begin_theme_fx();
             self.repaint_all();
         }
+        // 라이트↔다크 플립 → 떠 있는 claude 재테마(리포트 + /theme 피커 주입).
+        // poll_system_theme 바로 뒤: OS 전환으로 방금 바뀐 팔레트도 같은 틱에 잡힌다.
+        self.poll_claude_retheme();
         self.run_pending_autozoomprobe();
         self.run_pending_autoheader();
         self.resolve_force_handle_menu();

@@ -449,6 +449,13 @@ fn is_light(bg: [u8; 4]) -> bool {
     l > 128.0
 }
 
+/// 지금 팔레트가 라이트인가 — 테마 플립 감지(실행 중 claude 재테마)가 틱마다
+/// 비교하는 값. `is_light` 판정과 같은 축을 쓰므로 `sync_claude_theme` 이 쓰는
+/// 명암과 절대 어긋나지 않는다.
+pub(crate) fn current_is_light() -> bool {
+    is_light(bg())
+}
+
 /// Accent presets offered in the settings screen; first is the default blue.
 pub const ACCENT_PRESETS: &[(&str, [u8; 4])] = &[
     ("blue", [90, 140, 230, 255]),

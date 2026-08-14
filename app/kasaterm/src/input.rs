@@ -588,6 +588,164 @@ impl App {
         bg
     }
 
+    /// 라이트↔다크 플립을 감지해 **떠 있는** claude 세션까지 갈아입힌다.
+    ///
+    /// 새 세션은 이미 맞다 — `sync_claude_theme`(theme.rs 훅)이 settings.json
+    /// 을 갱신하고, `theme: auto` 면 부팅 때 OSC 11 질의에 우리가 현재 팔레트로
+    /// 답한다(kasa-pty ColorRequest). 문제는 실행 중 세션인데, claude 2.1.232
+    /// 실측(2026-08-14)으로 그쪽 지렛대가 전부 죽어 있음을 확인했다:
+    ///   - settings.json 변경: 파일워치 없음(플립 후 출력 0B)
+    ///   - `CSI ?997;N n` 리포트: `?2031h` 를 켜 두고도 무반응(auto 에서도)
+    ///   - 리사이즈 재그리기: 부팅 때 캐시한 테마로 다시 그림
+    ///   - `/theme dark` 인자: 무시하고 피커만 연다
+    /// 남은 길은 세션 안 `/theme` 피커를 실제로 조작하는 것뿐이다. 그래서:
+    ///   ① 2031 구독 pane 에는 표준 리포트를 쏜다(무해 + claude 가 언젠가
+    ///      반응하는 순간 이 경로가 공짜로 살아난다)
+    ///   ② claude 가 도는 pane 을 큐에 넣고, idle + 빈 입력줄(❯ 단독)일 때만
+    ///      `/theme` 를 열어 화면 셀에서 목표 항목 번호를 읽어 누른다. 입력줄에
+    ///      글이 있으면 미룬다 — 주입이 초안 뒤에 붙는 사고(tell 유형)를 막는다.
+    pub(crate) fn poll_claude_retheme(&mut self) {
+        let light = crate::theme::current_is_light();
+        let prev = self.theme_light_last.replace(light);
+        let Some(prev) = prev else {
+            return; // 첫 틱 — 기준만 세운다
+        };
+        if prev != light {
+            // ① 표준 경로: 컬러스킴 변경 리포트(구독한 앱에만 — 셸에 보내면
+            //    입력줄에 이스케이프 쓰레기가 박힌다).
+            let report: &[u8] = if light { b"\x1b[?997;2n" } else { b"\x1b[?997;1n" };
+            for p in self.pty.values() {
+                if p.wants_scheme_reports() {
+                    let _ = p.send_bytes(report);
+                }
+            }
+            // ② 피커 주입 큐. 라벨은 플립 시점에 한 번 계산 — sync_claude_theme
+            //    이 방금 갱신한 settings 값이라 새 세션이 읽을 값과 항상 같다.
+            //    custom 테마 등 모르는 값이면 주입하지 않는다(None).
+            if let Some(label) = crate::socket::claude_theme_value()
+                .as_deref()
+                .and_then(claude_theme_label)
+            {
+                let now = Instant::now();
+                let ids: Vec<String> =
+                    self.ws.lock().unwrap().panes.keys().cloned().collect();
+                for id in ids {
+                    let is_claude = self.pty_for_pane(&id).is_some_and(|p| {
+                        matches!(p.active_agent(), Some(kasa_pty::AgentKind::Claude))
+                    });
+                    if is_claude {
+                        self.retheme_queue.insert(
+                            id,
+                            crate::RethemeState {
+                                expires: now + std::time::Duration::from_secs(60),
+                                opened: None,
+                                label: label.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.drive_retheme_queue();
+    }
+
+    /// `retheme_queue` 를 한 틱 진행시킨다 — pane 마다 「기다림 → 피커 열기 →
+    /// 항목 누르기」를 한 단계씩. 실패는 조용히 포기한다(Esc 청소 포함): 테마는
+    /// 다음 플립에 또 기회가 있고, 사용자 입력줄을 어지럽히는 쪽이 더 나쁘다.
+    fn drive_retheme_queue(&mut self) {
+        if self.retheme_queue.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let ids: Vec<String> = self.retheme_queue.keys().cloned().collect();
+        for id in ids {
+            let Some(p) = self.pty_for_pane(&id).cloned() else {
+                self.retheme_queue.remove(&id);
+                continue;
+            };
+            let Some(st) = self.retheme_queue.get(&id) else {
+                continue;
+            };
+            let (expires, opened, label) = (st.expires, st.opened, st.label.clone());
+            match opened {
+                None => {
+                    if now >= expires {
+                        self.retheme_queue.remove(&id);
+                        continue;
+                    }
+                    // claude 가 내렸으면(셸로 복귀 등) 주입할 곳이 없다.
+                    if !matches!(p.active_agent(), Some(kasa_pty::AgentKind::Claude)) {
+                        self.retheme_queue.remove(&id);
+                        continue;
+                    }
+                    let idle = self
+                        .pane_activity
+                        .get(&id)
+                        .map_or(false, |a| a.status == "idle");
+                    if !idle {
+                        continue;
+                    }
+                    let bare = {
+                        let ws = self.ws.lock().unwrap();
+                        ws.panes
+                            .get(&id)
+                            .and_then(|pn| pn.term())
+                            .map_or(false, |t| input_line_bare(&t.cells))
+                    };
+                    if !bare {
+                        continue;
+                    }
+                    // "/theme" 뒤 CR 은 **지연 별도 write** — 본문에 붙은 CR 은
+                    // Ink 가 제출이 아니라 개행으로 읽는다(SocketBytes 의 실측
+                    // 교훈, handler.rs). 같은 140ms 패턴을 그대로 쓴다.
+                    let _ = p.send_bytes(b"/theme");
+                    let p2 = std::sync::Arc::clone(&p);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(140));
+                        let _ = p2.send_bytes(b"\r");
+                    });
+                    if let Some(st) = self.retheme_queue.get_mut(&id) {
+                        st.opened = Some(now);
+                    }
+                }
+                Some(t) => {
+                    let scan = {
+                        let ws = self.ws.lock().unwrap();
+                        ws.panes
+                            .get(&id)
+                            .and_then(|pn| pn.term())
+                            .map(|term| theme_picker_digit(&term.cells, &label))
+                            .unwrap_or(PickerScan::NotOpen)
+                    };
+                    match scan {
+                        PickerScan::Found(digits) => {
+                            // 피커의 숫자 키는 즉시 적용된다(Enter 불요, 실측).
+                            let _ = p.send_bytes(digits.as_bytes());
+                            self.retheme_queue.remove(&id);
+                        }
+                        PickerScan::NoMatch => {
+                            // 목록에 목표 라벨이 없다(커스텀 테마로 번호가 밀렸
+                            // 거나 버전이 문구를 바꿈) — 열어 둔 피커만 청소.
+                            let _ = p.send_bytes(b"\x1b");
+                            self.retheme_queue.remove(&id);
+                        }
+                        PickerScan::NotOpen => {
+                            if now.duration_since(t)
+                                > std::time::Duration::from_millis(2500)
+                            {
+                                // 피커가 안 떴다(자동완성에 먹혔거나 상태가
+                                // 예상 밖) — 흘러 들어간 글자가 있다면 Esc 가
+                                // 입력줄을 비운다.
+                                let _ = p.send_bytes(b"\x1b");
+                                self.retheme_queue.remove(&id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// munder식 승인 프롬프트 라우팅: 오케스트레이터(또는 협업방 없는 단독 pane)의 프롬프트만
     /// 사용자를 부르고 — sticky 토스트 + 승인/거부 칩 + 데스크탑 알림 — 워커의
     /// 프롬프트는 board `waiting` 으로만 흘려 오케스트레이터가 처리하게 둔다. 프롬프트가
@@ -2938,6 +3096,95 @@ pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> Option<Option<u8>
     Some(pct)
 }
 
+/// settings.json 의 `theme` 값 → `/theme` 피커 항목 라벨. 목록은 claude
+/// 2.1.232 피커 실측(2026-08-14). 모르는 값(커스텀 테마 등)은 None — 주입하지
+/// 않는 쪽이 엉뚱한 항목을 누르는 것보다 낫다.
+fn claude_theme_label(v: &str) -> Option<&'static str> {
+    Some(match v {
+        "auto" => "Auto (match terminal)",
+        "dark" => "Dark mode",
+        "light" => "Light mode",
+        "dark-daltonized" => "Dark mode (colorblind-friendly)",
+        "light-daltonized" => "Light mode (colorblind-friendly)",
+        "dark-ansi" => "Dark mode (ANSI colors only)",
+        "light-ansi" => "Light mode (ANSI colors only)",
+        _ => return None,
+    })
+}
+
+/// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.
+/// 재테마 주입은 이게 참일 때만 연다: 반쯤 친 초안이 있으면 주입 글자가 그
+/// 뒤에 붙는다(tell 의 알려진 사고 유형). 승인 메뉴·피커가 떠 있을 때도 ❯ 는
+/// 항목에 붙어 단독 행이 아니므로 자연히 걸러진다.
+fn input_line_bare(cells: &[Vec<GridCell>]) -> bool {
+    let Some(last) = cells
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
+    else {
+        return false;
+    };
+    let start = (last + 1).saturating_sub(14);
+    cells[start..=last].iter().any(|row| {
+        let text: String = row
+            .iter()
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect();
+        text.trim() == "❯"
+    })
+}
+
+/// 열린 `/theme` 피커 판독 결과.
+#[derive(Debug, PartialEq, Eq)]
+enum PickerScan {
+    /// 번호 목록이 아직 화면에 없다(피커가 안 떴거나 렌더 전).
+    NotOpen,
+    /// 목표 라벨 행을 찾았다 — 이 숫자(들)를 누르면 즉시 적용된다.
+    Found(String),
+    /// 피커는 떴는데 목표 라벨이 없다 — 문구가 바뀌었거나 목록 구성이 다르다.
+    NoMatch,
+}
+
+/// 화면 셀에서 `/theme` 피커의 「N. <라벨>」 행을 찾아 목표 라벨의 번호를
+/// 돌려준다. 비교는 **공백 무시** — 셀→텍스트 변환에서 커서 이동이 공백을
+/// 삼키는 경우가 있어("Darkmode") 문자만 맞춘다. 앞머리 ❯(현재 항목)와 꼬리
+/// ✔(저장된 값) 장식은 걷어낸다. 번호 목록이 4행 미만이면 피커로 안 친다 —
+/// 본문 속 우연한 "1. …" 나열이 피커로 오인되지 않게.
+fn theme_picker_digit(cells: &[Vec<GridCell>], label: &str) -> PickerScan {
+    let want: String = label.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut numbered = 0usize;
+    let mut hit: Option<String> = None;
+    for row in cells {
+        let text: String = row
+            .iter()
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect();
+        let t = text.trim().trim_start_matches('❯').trim_start();
+        let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() || !t[digits.len()..].starts_with('.') {
+            continue;
+        }
+        numbered += 1;
+        let body: String = t[digits.len() + 1..]
+            .trim()
+            .trim_end_matches('✔')
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if body == want && hit.is_none() {
+            // 두 자리 번호는 숫자 키 선택이 첫 키에서 갈려 신뢰할 수 없다 —
+            // 표준 항목은 1..8 이라 실제로는 안 걸리고, 걸리면 NoMatch 취급.
+            if digits.len() == 1 {
+                hit = Some(digits);
+            }
+        }
+    }
+    match (numbered >= 4, hit) {
+        (false, _) => PickerScan::NotOpen,
+        (true, Some(d)) => PickerScan::Found(d),
+        (true, None) => PickerScan::NoMatch,
+    }
+}
+
 /// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
 ///   Menu:  claude 의 "❯ 1. Yes" 번호 메뉴(permission/AskUserQuestion). Enter=하이라이트
 ///          선택(기본 Yes), Esc=거부. 'y'/'n' 글자는 메뉴에서 무시되므로 못 쓴다.
@@ -3308,6 +3555,72 @@ mod working_scan_tests {
             row("⎿ 그 뒤에 이어진 도구 출력"),
         ];
         assert!(rows_show_compacting(&cells).is_none());
+    }
+
+    // 재테마 주입의 세 판정 — 피커 실측 화면(2026-08-14) 그대로.
+    #[test]
+    fn theme_picker_digit_reads_the_target_row() {
+        let cells = vec![
+            row("Choose the text style that looks best with your terminal"),
+            row("1. Auto (match terminal)"),
+            row("2. Dark mode"),
+            row("❯ 3. Light mode ✔"),
+            row("4. Dark mode (colorblind-friendly)"),
+            row("5. Light mode (colorblind-friendly)"),
+            row("6. Dark mode (ANSI colors only)"),
+            row("7. Light mode (ANSI colors only)"),
+            row("8. New custom theme…"),
+        ];
+        assert_eq!(
+            theme_picker_digit(&cells, "Dark mode"),
+            PickerScan::Found("2".into())
+        );
+        // 현재 항목 장식(❯·✔)이 붙어도 라벨이 맞는다.
+        assert_eq!(
+            theme_picker_digit(&cells, "Light mode"),
+            PickerScan::Found("3".into())
+        );
+        assert_eq!(
+            theme_picker_digit(&cells, "Auto (match terminal)"),
+            PickerScan::Found("1".into())
+        );
+        // 셀→텍스트 변환이 공백을 삼킨 행("Darkmode")도 맞는다.
+        let squished = vec![
+            row("1. Auto(matchterminal)"),
+            row("2. Darkmode"),
+            row("3. Lightmode"),
+            row("4. Darkmode(colorblind-friendly)"),
+        ];
+        assert_eq!(
+            theme_picker_digit(&squished, "Dark mode"),
+            PickerScan::Found("2".into())
+        );
+        // 목록이 있는데 라벨이 없으면 NoMatch — 엉뚱한 항목을 누르지 않는다.
+        assert_eq!(theme_picker_digit(&cells, "없는 테마"), PickerScan::NoMatch);
+        // 번호 행이 적으면(본문 속 우연한 나열) 피커로 안 친다.
+        let prose = vec![row("1. 첫째"), row("2. 둘째")];
+        assert_eq!(theme_picker_digit(&prose, "Dark mode"), PickerScan::NotOpen);
+    }
+
+    #[test]
+    fn bare_input_line_gates_retheme_injection() {
+        // 빈 입력줄(❯ 단독) = 주입해도 안전.
+        assert!(input_line_bare(&[row("본문 끝"), row("❯"), row("statusline")]));
+        // 반쯤 친 초안이 있으면 미룬다 — 주입이 초안 뒤에 붙는 사고 방지.
+        assert!(!input_line_bare(&[row("❯ 반쯤 친 메시지")]));
+        // 승인 메뉴의 ❯ 는 항목에 붙어 있어 단독 행이 아니다.
+        assert!(!input_line_bare(&[row("❯ 1. Yes"), row("  2. No")]));
+    }
+
+    #[test]
+    fn claude_theme_label_maps_known_values_only() {
+        assert_eq!(claude_theme_label("dark"), Some("Dark mode"));
+        assert_eq!(
+            claude_theme_label("light-daltonized"),
+            Some("Light mode (colorblind-friendly)")
+        );
+        assert_eq!(claude_theme_label("auto"), Some("Auto (match terminal)"));
+        assert_eq!(claude_theme_label("custom:mine"), None);
     }
 
     #[test]
