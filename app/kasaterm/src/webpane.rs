@@ -247,7 +247,14 @@ impl App {
         let Ok(origin) = main.inner_position() else {
             return;
         };
-        let scale = self.effective_scale();
+        // 전부 **OS 논리 포인트**로 계산해 Logical* 타입으로 넘긴다. 물리 px 로
+        // 넘기면 winit 이 "그 창의" 배율로 환산하는데, 숨겨 둔 자식 창은 아직
+        // 어느 모니터에 있는지 몰라 본창과 다른 배율을 믿을 수 있다 — 실측:
+        // 본창이 1x 모니터인데 자식이 2x 를 믿어 창 꼭대기에 반쯤 잘려 붙었다.
+        // 레이아웃 좌표(pad·cell·TITLE_HEIGHT)는 줌 이전 공간이라 ui_zoom 만
+        // 곱하면 포인트가 된다(effective_scale 은 dpi 까지 곱해 물리 px 용).
+        let origin = origin.to_logical::<f64>(main.scale_factor());
+        let zoom = (self.ui_zoom as f64).max(0.1);
         let (cols, rows) = self.window_cells();
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
         let rects = self.effective_leaf_rects(cols, rows);
@@ -306,34 +313,41 @@ impl App {
 
         for (host_id, pane_id, (x, y, w, h)) in visible {
             let header = self.pane_header_px(&pane_id);
-            let lx = pad + x as f32 * self.cell.w + WEB_INSET;
-            let ly = TITLE_HEIGHT + y as f32 * self.cell.h + header + WEB_INSET;
-            let lw = (w as f32 * self.cell.w - 2.0 * WEB_INSET).max(1.0);
-            let lh = (h as f32 * self.cell.h - header - 2.0 * WEB_INSET).max(1.0);
+            let lx = origin.x + (pad + x as f32 * self.cell.w + WEB_INSET) as f64 * zoom;
+            let ly = origin.y
+                + (TITLE_HEIGHT + y as f32 * self.cell.h + header + WEB_INSET) as f64 * zoom;
+            let lw = ((w as f32 * self.cell.w - 2.0 * WEB_INSET).max(1.0)) as f64 * zoom;
+            let lh =
+                ((h as f32 * self.cell.h - header - 2.0 * WEB_INSET).max(1.0)) as f64 * zoom;
+            // 비교용 정수 스냅(포인트) — 매 턴 같은 값이면 OS 호출을 안 한다.
             let frame = (
-                origin.x + (lx * scale).round() as i32,
-                origin.y + (ly * scale).round() as i32,
-                (lw * scale).round().max(1.0) as u32,
-                (lh * scale).round().max(1.0) as u32,
+                lx.round() as i32,
+                ly.round() as i32,
+                lw.round().max(1.0) as u32,
+                lh.round().max(1.0) as u32,
             );
             let Some(host) = self.web_hosts.get_mut(&host_id) else { continue };
             if host.last_frame.is_none() {
                 // 첫 배치 한 번만 — 헤드리스 검증이 자식 창 좌표를 읽을 유일한
                 // 창구다(오토캡처는 본창 wgpu 만 찍어 자식 창이 안 보인다).
                 eprintln!(
-                    "[webpane] place host={host_id} pane={pane_id} frame={},{} {}x{}",
+                    "[webpane] place host={host_id} pane={pane_id} pt={},{} {}x{}",
                     frame.0, frame.1, frame.2, frame.3
                 );
             }
             if host.last_frame != Some(frame) {
-                host.window
-                    .set_outer_position(winit::dpi::PhysicalPosition::new(frame.0, frame.1));
+                // **크기 먼저, 위치 나중.** AppKit 리사이즈는 창의 아래변을
+                // 고정하고 위로 자란다 — 위치를 먼저 잡으면 그 뒤 리사이즈가
+                // 위변을 화면 밖으로 밀고, constrain 이 창을 화면 꼭대기로
+                // 끌어올린다(실측: 의도 y=-1320 이 화면 상단 -1570 에 박혔다).
                 let _ = host
                     .window
-                    .request_inner_size(winit::dpi::PhysicalSize::new(frame.2, frame.3));
+                    .request_inner_size(winit::dpi::LogicalSize::new(lw, lh));
+                host.window
+                    .set_outer_position(winit::dpi::LogicalPosition::new(lx, ly));
                 let _ = host.webview.set_bounds(wry::Rect {
                     position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                    size: wry::dpi::LogicalSize::new(lw as f64, lh as f64).into(),
+                    size: wry::dpi::LogicalSize::new(lw, lh).into(),
                 });
                 host.last_frame = Some(frame);
             }
