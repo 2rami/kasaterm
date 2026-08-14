@@ -316,11 +316,18 @@ export function Notice({ notice }: { notice: { ok: boolean; msg: string } | null
 ///
 /// 끝나면 **값을 다시 읽는다**. 화면이 요청값을 그대로 믿으면 저장 쪽에서 거부된
 /// 변경이 화면에만 남는다 — 파일이 진실이다.
+///
+/// 반환값은 「반영됐는가」. 대부분의 칸은 값을 다시 읽으면 그만이라 안 봐도 되지만,
+/// 화면이 들고 있는 입력을 비우는 자리(피드백 본문)는 이걸 봐야 한다 — 실패했는데
+/// 비우면 쓰던 글이 통째로 사라진다.
 export function useSettingsAction(reload: () => Promise<void>) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  async function run(action: string, args?: { id?: string; label?: string }) {
+  async function run(
+    action: string,
+    args?: { id?: string; label?: string }
+  ): Promise<boolean> {
     setBusy(true);
     setNotice(null);
     try {
@@ -329,8 +336,10 @@ export function useSettingsAction(reload: () => Promise<void>) {
       else if (out.message) setNotice({ ok: out.ok, msg: out.message });
       else if (!out.ok) setNotice({ ok: false, msg: '안 됐어요' });
       await reload();
+      return out.ok && !out.error;
     } catch (e) {
       setNotice({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      return false;
     } finally {
       setBusy(false);
     }

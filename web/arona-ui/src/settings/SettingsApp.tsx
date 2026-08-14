@@ -13,6 +13,7 @@ import { GeneralTab } from './GeneralTab';
 import { AppearanceTab } from './AppearanceTab';
 import { ShellTab } from './ShellTab';
 import { ClaudeTab } from './ClaudeTab';
+import { FeedbackTab } from './FeedbackTab';
 import { CharacterDetail } from './CharacterDetail';
 import { fetchValues, postAction } from './api';
 import type { Character, SettingsCharacters, SettingsValues } from './types';
@@ -31,7 +32,7 @@ const CATS = [
   { key: 'shell', label: 'Shell', Icon: Terminal, ready: true },
   { key: 'claude', label: 'Claude', Icon: Asterisk, ready: true },
   { key: 'theme', label: 'Theme', Icon: Users, ready: true },
-  { key: 'feedback', label: 'Feedback', Icon: MessageSquare, ready: false },
+  { key: 'feedback', label: 'Feedback', Icon: MessageSquare, ready: true },
 ] as const;
 
 type CatKey = (typeof CATS)[number]['key'];
@@ -54,6 +55,7 @@ const TABS: Partial<
   appearance: (v, reload) => <AppearanceTab data={v.appearance} reload={reload} />,
   shell: (v, reload) => <ShellTab data={v.shell} reload={reload} />,
   claude: (v, reload) => <ClaudeTab data={v.claude} reload={reload} />,
+  feedback: (v, reload) => <FeedbackTab data={v.feedback} reload={reload} />,
 };
 
 export function SettingsApp() {
