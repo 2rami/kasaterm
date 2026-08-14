@@ -349,7 +349,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
                 // report-cwd 가 매 렌더 이 이벤트를 재발화해 bg 세션 pane_claude_sid 를
                 // 보강하므로(F/H), 이미 같은 sid 면 no-op — 무한 relabel·render 를 막는다.
-                if self.pane_claude_sid.get(pane.as_str()) == Some(&sid) {
+                let already_labeled = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|ws| ws.pane_character.get(pane.as_str()).cloned())
+                    .is_some_and(|name| !name.is_empty());
+                if self.pane_claude_sid.get(pane.as_str()) == Some(&sid) && already_labeled {
                     return;
                 }
                 self.pane_claude_sid.insert(pane.clone(), sid.clone());
@@ -1975,11 +1981,22 @@ impl ApplicationHandler<UserEvent> for App {
             // 때까지 화면이 stale — "다른 앱 보다가 돌아오면 0.5초 늦음"의 원인.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
-                self.chrome_dirty = true;
+                if focused {
+                    // A restored pane can acquire its footer after the first
+                    // PTY snapshot, making its initially assigned grid a few
+                    // rows too tall. Focus return is a reliable reconciliation
+                    // point, and same-size PTY resizes are no-ops.
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    for pane in self.pty.values() {
+                        pane.publish_full_snapshot();
+                    }
+                }
+                self.repaint_all();
                 window.request_redraw();
             }
             WindowEvent::Occluded(false) => {
-                self.chrome_dirty = true;
+                self.repaint_all();
                 window.request_redraw();
             }
             // 비-macOS 에서 OS 의 밝게/어둡게를 아는 유일한 창구. macOS 는 창
@@ -5598,6 +5615,13 @@ impl ApplicationHandler<UserEvent> for App {
         // any session (active or stashed background).
         if !self.pending_restores.is_empty() {
             let now = std::time::Instant::now();
+            if self.pending_restores.iter().any(|(_, _, at)| now >= *at) {
+                // The first shell frame has populated pane chrome by now, so
+                // size once more before starting a full-screen program. This
+                // prevents Claude from laying out against the pre-footer grid.
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+            }
             self.pending_restores.retain(|(sess, cmd, at)| {
                 if now >= *at {
                     let _ = sess.send_bytes(cmd.as_bytes());

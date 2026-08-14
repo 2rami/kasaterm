@@ -524,6 +524,7 @@ impl PtyBackend {
                     if resolved.is_none()
                         && screen.contains('\u{fffc}')
                         && !screen.contains('⟦')
+                        && statusline_can_fit_session_marker(&screen)
                     {
                         let mut nudged = self.nudged.lock().unwrap();
                         let due = nudged
@@ -3862,6 +3863,13 @@ pub(crate) fn screen_marker_sid8(text: &str) -> Option<String> {
     found
 }
 
+fn statusline_can_fit_session_marker(screen: &str) -> bool {
+    // The marker is deliberately at the far right of Claude's statusline.
+    // Narrow panes clip it by design; resizing those panes cannot reveal it
+    // and instead tears the live TUI every ten seconds.
+    screen.lines().map(|line| line.chars().count()).max().unwrap_or(0) >= 64
+}
+
 /// sid 앞 8자 → 풀 세션 id. 라이브 agents 세션에서 프리픽스 유일 매칭, 없으면
 /// transcript 파일명(projects 전수)에서 유일 매칭. 모호(2+)하면 None — 오귀속 금지.
 fn resolve_sid8(sid8: &str) -> Option<String> {
@@ -4334,6 +4342,17 @@ mod agents_view_tests {
         // 8자 미만·비hex·닫힘 없음은 무시.
         assert_eq!(screen_marker_sid8("⟦abc⟧ ⟦zzzzzzzz⟧ ⟦12345678"), None);
         assert_eq!(screen_marker_sid8("마커 없음"), None);
+    }
+
+    #[test]
+    fn stale_statusline_nudge_skips_narrow_panes() {
+        assert!(!statusline_can_fit_session_marker(
+            "\u{fffc}\u{fffc}\u{fffc}\u{fffc}\u{fffc} │ Opus 5 │ kshkj │ high"
+        ));
+        assert!(statusline_can_fit_session_marker(&format!(
+            "{}\u{fffc}\u{fffc}\u{fffc}\u{fffc}\u{fffc} │ Opus 5 │ kshkj │ high",
+            " ".repeat(64)
+        )));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 Apple Silicon은 x86_64 Windows를 네이티브로 못 돌린다 → Windows 11 **ARM64**를
 VM으로 띄우고, 그 안에서 kasaterm를 **네이티브(aarch64-pc-windows-msvc)로 소스 빌드**한다.
 
-CI(`.github/workflows/release.yml`)는 x86_64 MSI만 만든다. 그건 배포용이고,
+CI(`.github/workflows/release.yml`)는 x86_64 MSI와 portable ZIP을 만든다. 그건 배포용이고,
 여기 스크립트는 "지금 작업 중인 코드"를 VM에서 빠르게 돌려보는 용도다.
 
 ---
@@ -59,7 +59,7 @@ MSVC 빌드툴 + Rust(rustup) + Node + Git를 winget으로 깐다. 끝나면 새
 cd C:\kasaterm
 scripts\windows\build-run.ps1
 ```
-- `web/arona-ui`를 먼저 빌드해 dist를 만들고(웹뷰 콘텐츠 — MSI엔 없다),
+- `web/arona-ui`를 먼저 빌드해 dist를 만들고(개발 실행은 설치 번들 밖이므로),
 - `cargo build --release -p kasaterm` 후,
 - `KASATERM_ARONA_UI_DIR`를 잡고 exe를 실행한다.
 
@@ -94,4 +94,29 @@ windows-sys는 aarch64-windows를 정식 지원하지만, 특정 크레이트가
 rustup target add x86_64-pc-windows-msvc
 cargo build --release -p kasaterm --target x86_64-pc-windows-msvc
 # 실행 파일은 target\x86_64-pc-windows-msvc\release\kasaterm.exe
+```
+
+---
+
+## 6. x64 배포 패키지 만들기
+
+x64 Windows의 PowerShell에서 실행한다. Rust MSVC 툴체인과 Node만 미리 있으면 되고,
+WinSparkle과 WiX 3.14.1은 고정된 SHA-256을 확인한 뒤 `target\package-tools`에 받는다.
+
+```powershell
+scripts\windows\package.ps1
+```
+
+다음 네 파일이 `dist`에 생긴다.
+
+- `kasaterm-vX.Y.Z-windows-x86_64.msi`
+- `kasaterm-vX.Y.Z-windows-x86_64.msi.sha256`
+- `kasaterm-vX.Y.Z-windows-x86_64-portable.zip`
+- `kasaterm-vX.Y.Z-windows-x86_64-portable.zip.sha256`
+
+스크립트는 MSI를 다시 추출해 앱, CLI, WinSparkle, 아로나 UI, 학생 로스터와 협업 훅이
+모두 들어갔는지 확인한다. 이미 최신 release 빌드와 UI dist가 있으면 조립만 다시 할 수 있다.
+
+```powershell
+scripts\windows\package.ps1 -SkipBuild -SkipUi
 ```

@@ -674,6 +674,10 @@ impl PtySession {
         update
     }
 
+    pub fn publish_full_snapshot(&self) {
+        let _ = self.screens_tx.try_send(self.full_snapshot());
+    }
+
     /// raw PTY 바이트 스트림을 구독한다. 받는 쪽이 자기 VT 파서를 갖고 있을 때
     /// 쓴다(브라우저 xterm.js). 돌려준 `Receiver` 를 떨어뜨리면 다음 read 때
     /// reader 가 알아서 걷어내므로 해지 API 가 따로 없다.
@@ -711,6 +715,9 @@ impl PtySession {
         (rx, snap.to_ansi())
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        if self.size() == (cols, rows) {
+            return Ok(());
+        }
         // Kernel-side PTY first (child sees SIGWINCH).
         {
             let pty = self.master.lock().unwrap();
@@ -732,6 +739,10 @@ impl PtySession {
             t.resize(TermSize::new(cols as usize, rows as usize));
         }
         *self.size.lock().unwrap() = (cols, rows);
+        // A quiet full-screen TUI may emit nothing after SIGWINCH. Publish the
+        // reshaped grid ourselves so the GUI cannot keep clipping an old,
+        // larger snapshot until a wheel/key event happens to dirty the pane.
+        self.publish_full_snapshot();
         Ok(())
     }
 }
@@ -1229,6 +1240,20 @@ fn spawn_reader_thread(
                     return;
                 }
             };
+            // resize() can run while read() is blocked. Refresh the reader's
+            // local dimensions before parsing those newly arrived bytes, or
+            // the resulting snapshot is stamped with the previous grid size
+            // and can overwrite the correct resize snapshot.
+            let want = *size.lock().unwrap();
+            if want != current_size {
+                let mut t = term.lock().unwrap();
+                t.resize(TermSize::new(want.0 as usize, want.1 as usize));
+                if want.0 != current_size.0 {
+                    t.grid_mut().update_history(history_lines_for_cols(want.0));
+                }
+                drop(t);
+                current_size = want;
+            }
             // Append raw bytes (hex + escaped-printable preview) to the
             // KASATERM_PTY_LOG file so claude-code escape sequences can
             // be diffed against ghostty's `script` capture.
