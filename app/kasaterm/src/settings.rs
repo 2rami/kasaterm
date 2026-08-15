@@ -423,21 +423,15 @@ impl App {
 
         // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
         // 닫지도, pane 을 띄우지도 않는다 — 이 자리에 「로그인 중… / 취소」가 뜬다.
-        // 슬롯마다 쿠키 없는 브라우저 프로필을 갈라 주는 건 그대로다: `claude auth
-        // login` 이 기본 브라우저를 열면 지금 계정의 claude.ai 세션이 그대로 승인돼
-        // 슬롯 전부가 같은 계정이 됐다(거노: "계정추가하면 1,2 같은계정으로 되는데").
         spawn_hidden_login(
             "Claude",
             id.clone(),
             "claude auth login --claudeai".to_string(),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             dir,
-            // 새 슬롯은 **격리 고정**이다. 다시 로그인의 기본이 쓰던 브라우저로
-            // 바뀐 뒤에도 여기는 그대로다 — 여기서 쓰던 브라우저를 열면 그 창의
-            // claude.ai 세션이 그대로 승인돼, 슬롯을 새로 만든 의미가 사라진다.
-            LoginBrowser::Isolated,
+            login_browser_default(),
         );
-        self.set_toast("빈 브라우저 창에서 새 계정으로 로그인하세요".to_string());
+        self.set_toast(add_account_toast());
     }
 
     /// 같은 것의 codex 판 — 슬롯을 만들고 그 홈을 얹은 `codex login` 을 새 pane 에
@@ -473,9 +467,9 @@ impl App {
             "codex login".to_string(),
             "CODEX_HOME",
             dir,
-            LoginBrowser::Isolated,
+            login_browser_default(),
         );
-        self.set_toast("빈 브라우저 창에서 새 ChatGPT 계정으로 로그인하세요".to_string());
+        self.set_toast(add_account_toast());
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
@@ -2606,6 +2600,9 @@ fn toast_code(msg: &str) -> Option<&'static str> {
         "배율 100% · 폰트 기본값" => "scale_reset",
         "빈 브라우저 창에서 로그인하세요" => "login_in_browser",
         "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요" => "login_in_default_browser",
+        "쓰던 브라우저에서 로그인하세요 — 다른 계정이면 브라우저에서 먼저 계정을 바꾸세요" => {
+            "login_new_slot_in_default_browser"
+        }
         "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요" => "terminal_editor_not_found",
         "계정 폴더 경로를 만들 수 없습니다" => "account_dir_failed",
         "피드백을 저장했어요" => "feedback_saved",
@@ -2723,22 +2720,24 @@ pub(crate) fn paint_settings(
     g.draw_text(
         ax + 20.0,
         ay + 20.0,
-        "Settings",
+        "설정",
         gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: true, italic: false },
     );
     let cats = [
-        (SettingsCat::General, "General", "settings-2"),
-        (SettingsCat::Appearance, "Appearance", "sparkles"),
-        (SettingsCat::Shell, "Shell", "terminal"),
-        // 칸 이름은 「Agent」다 — 안에 Claude 와 Codex 로그인이 나란히 있어서, 한쪽
-        // 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 열거자 이름이
-        // `Claude` 로 남은 건 웹 설정의 키(`claude`)와 짝을 맞추기 위해서다.
+        // 칸 이름은 웹 설정과 **같은 말**이다 — 두 창구가 같은 칸을 다르게 부르면
+        // 한 제품으로 안 읽힌다(웹은 `arona-ui` 의 `nav` 사전).
+        (SettingsCat::General, "일반", "settings-2"),
+        (SettingsCat::Appearance, "모양", "sparkles"),
+        (SettingsCat::Shell, "셸", "terminal"),
+        // 「Agent」만 영문으로 둔다 — 안에 Claude 와 Codex 로그인이 나란히 있어서
+        // 한쪽 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽히고, 마땅한 우리말
+        // 대응도 없다. 열거자 이름이 `Claude` 로 남은 건 웹 키(`claude`)와 짝이라서다.
         (SettingsCat::Claude, "Agent", "claude"),
-        (SettingsCat::Theme, "Theme", "users"),
-        (SettingsCat::Feedback, "Feedback", "message-square-warning"),
+        (SettingsCat::Theme, "캐릭터", "users"),
+        (SettingsCat::Feedback, "피드백", "message-square-warning"),
     ];
     let mut cy = ay + 48.0;
-    let mut active_label = "General";
+    let mut active_label = "일반";
     for (cat, label, icon) in cats {
         let r = (ax + 10.0, cy, CAT_W - 20.0, 32.0);
         let selected = cat == ctx.cat;
@@ -2842,10 +2841,10 @@ pub(crate) fn paint_settings(
                 }
                 ny
             };
-            y = seg_row(g, &mut rects, y, "Startup folder", &["새 창과 탭이 열리는 위치"], &[
-                ("Last folder", cwd_is("last"), SettingsAction::CwdMode("last")),
-                ("Home", cwd_is("home"), SettingsAction::CwdMode("home")),
-                ("Custom", cwd_is("custom"), SettingsAction::CwdMode("custom")),
+            y = seg_row(g, &mut rects, y, "시작 폴더", &["새 창과 탭이 열리는 위치"], &[
+                ("마지막 폴더", cwd_is("last"), SettingsAction::CwdMode("last")),
+                ("홈", cwd_is("home"), SettingsAction::CwdMode("home")),
+                ("직접 지정", cwd_is("custom"), SettingsAction::CwdMode("custom")),
             ]);
             // 조건부로 딸려 나오는 필드는 폭을 다 쓰므로 그 행 아래로 내린다 —
             // 오른쪽 칸에 밀어 넣으면 라벨과 겹친다.
@@ -2859,7 +2858,7 @@ pub(crate) fn paint_settings(
                 y += 32.0 + 8.0;
             }
             {
-                let (cr, ny) = row2(g, fx, y, fw, clip, "File tree by default",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "파일 트리 기본으로 열기",
                     &["시작할 때 파일 트리 사이드바 열기"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.file_tree_default, ctx.cursor);
@@ -2868,7 +2867,7 @@ pub(crate) fn paint_settings(
                 y = ny;
             }
             {
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Pane status bar by default",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "pane 상태바 기본으로 켜기",
                     &["각 pane 아래 경로 · 브랜치 · diff 바 표시"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.footer_default, ctx.cursor);
@@ -2881,24 +2880,24 @@ pub(crate) fn paint_settings(
             // 크기가 정해져 있어 쓸 수 있는 폭이 사실상 세 칸이어서다 — 그 밖으로
             // 나가면 띠가 내용에 눌리거나 띠만 덩그러니 남는다.
             let sh = ctx.status_h.round() as u32;
-            y = seg_row(g, &mut rects, y, "Window status bar height",
+            y = seg_row(g, &mut rects, y, "창 상태바 높이",
                 &["창 맨 아래 계정 한도 줄의 높이"], &[
                 ("낮게", sh == 20, SettingsAction::StatusBarH(20)),
                 ("보통", sh == 24, SettingsAction::StatusBarH(24)),
                 ("높게", sh == 30, SettingsAction::StatusBarH(30)),
             ]);
             let pfh = ctx.pane_footer_h.round() as u32;
-            y = seg_row(g, &mut rects, y, "Pane status bar height",
+            y = seg_row(g, &mut rects, y, "pane 상태바 높이",
                 &["각 pane 아래 경로 · 브랜치 줄의 높이"], &[
                 ("낮게", pfh == 24, SettingsAction::PaneFooterH(24)),
                 ("보통", pfh == 30, SettingsAction::PaneFooterH(30)),
                 ("높게", pfh == 36, SettingsAction::PaneFooterH(36)),
             ]);
-            y = seg_row(g, &mut rects, y, "File open",
+            y = seg_row(g, &mut rects, y, "파일 열기",
                 &["파일 트리에서 파일을 열 때 무엇으로 열지"], &[
-                ("Built-in", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),
-                ("App", open_is("app"), SettingsAction::FileOpenMode("app")),
-                ("Terminal", open_is("terminal"), SettingsAction::FileOpenMode("terminal")),
+                ("내장 편집기", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),
+                ("앱", open_is("app"), SettingsAction::FileOpenMode("app")),
+                ("터미널", open_is("terminal"), SettingsAction::FileOpenMode("terminal")),
             ]);
             if open_is("app") {
                 // 설치된 것만 뜬다(`open_with_apps`). 마지막 "기본 앱" 은 OS 연결
@@ -2935,30 +2934,30 @@ pub(crate) fn paint_settings(
                 }
                 y += 16.0 + 32.0 + 8.0;
             }
-            y = seg_row(g, &mut rects, y, "Editor autosave",
+            y = seg_row(g, &mut rects, y, "편집기 자동 저장",
                 &[&format!("타자가 멎으면 조용히 저장 ({PRIMARY_MOD}+S 는 그대로)")], &[
-                ("Off", ctx.autosave_ms == 0, SettingsAction::AutosaveDelay(0)),
+                ("끔", ctx.autosave_ms == 0, SettingsAction::AutosaveDelay(0)),
                 ("1s", ctx.autosave_ms == 1000, SettingsAction::AutosaveDelay(1000)),
                 ("3s", ctx.autosave_ms == 3000, SettingsAction::AutosaveDelay(3000)),
                 ("10s", ctx.autosave_ms == 10000, SettingsAction::AutosaveDelay(10000)),
             ]);
-            y = seg_row(g, &mut rects, y, "Tab position",
+            y = seg_row(g, &mut rects, y, "탭 위치",
                 &["윈도우 탭을 타이틀바 또는 사이드바에 표시"], &[
-                ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
-                ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
+                ("위", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
+                ("옆", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
             ]);
-            y = seg_row(g, &mut rects, y, "Cursor shape",
+            y = seg_row(g, &mut rects, y, "커서 모양",
                 &["셀을 채우는 블록, Ghostty 식 세로선, 또는 밑줄"], &[
-                ("Block", ctx.cursor_shape == "block", SettingsAction::CursorShape("block")),
-                ("Bar", ctx.cursor_shape == "bar", SettingsAction::CursorShape("bar")),
-                ("Underline", ctx.cursor_shape == "underline", SettingsAction::CursorShape("underline")),
+                ("블록", ctx.cursor_shape == "block", SettingsAction::CursorShape("block")),
+                ("세로선", ctx.cursor_shape == "bar", SettingsAction::CursorShape("bar")),
+                ("밑줄", ctx.cursor_shape == "underline", SettingsAction::CursorShape("underline")),
             ]);
             // 굵기는 bar·underline 에만 쓰인다 — block 은 셀을 통째로 채우므로 고를 게
             // 없다. 줄 자체를 감추면 「왜 사라졌지」가 되므로, block 일 때도 두되 무엇에
             // 쓰이는지 곁글로 밝힌다.
-            y = seg_row(g, &mut rects, y, "Cursor thickness",
+            y = seg_row(g, &mut rects, y, "커서 굵기",
                 &[if ctx.cursor_shape == "block" {
-                    "Bar·Underline 을 고르면 적용돼요"
+                    "세로선·밑줄을 고르면 적용돼요"
                 } else {
                     "세로선·밑줄의 굵기"
                 }], &[
@@ -2967,14 +2966,14 @@ pub(crate) fn paint_settings(
                 ("3px", (ctx.cursor_thickness - 3.0).abs() < 0.01, SettingsAction::CursorThickness(3)),
                 ("4px", (ctx.cursor_thickness - 4.0).abs() < 0.01, SettingsAction::CursorThickness(4)),
             ]);
-            y = seg_row(g, &mut rects, y, "Mouse pointer",
-                &["터미널 위 마우스 포인터 모양 (입력칸 위 I-beam 은 그대로예요)"], &[
-                ("Arrow", ctx.mouse_cursor != "ibeam", SettingsAction::MouseCursor("arrow")),
-                ("I-beam", ctx.mouse_cursor == "ibeam", SettingsAction::MouseCursor("ibeam")),
+            y = seg_row(g, &mut rects, y, "마우스 포인터",
+                &["터미널 위 마우스 포인터 모양 (입력칸 위 I자 커서는 그대로예요)"], &[
+                ("화살표", ctx.mouse_cursor != "ibeam", SettingsAction::MouseCursor("arrow")),
+                ("I자", ctx.mouse_cursor == "ibeam", SettingsAction::MouseCursor("ibeam")),
             ]);
             // 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
             // 그래서 한쪽에 맞추면 다른 쪽이 어긋난다. 고르는 몫을 사람에게 넘긴다.
-            y = seg_row(g, &mut rects, y, "Scroll sensitivity",
+            y = seg_row(g, &mut rects, y, "스크롤 감도",
                 &["트랙패드 기준이 기본이에요. 휠이 굼뜨면 올리세요"], &[
                 ("트랙패드", x100 == 30, SettingsAction::WheelPixelGain(30)),
                 ("보통", x100 == 60, SettingsAction::WheelPixelGain(60)),
@@ -2988,9 +2987,9 @@ pub(crate) fn paint_settings(
             // 테마 — 프리셋 카드 그리드. 카드 하나 = 그 팔레트의 미니 프리뷰
             // (bg 칠 + 프롬프트 샘플 + ANSI 도트 + 라벨)라서 고르기 전에 색이
             // 보인다. UI 토큰과 터미널 ANSI 16색이 함께 바뀐다.
-            y = row_wide(g, fx, y, clip, "Theme",
+            y = row_wide(g, fx, y, clip, "테마",
                 &["UI + 터미널 ANSI 팔레트가 함께 바뀌어요",
-                  "System 은 OS 의 밝게/어둡게를 따라가요 — 바꾸면 알아서 넘어가요"]);
+                  "시스템은 OS 의 밝게/어둡게를 따라가요 — 바꾸면 알아서 넘어가요"]);
             let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
             let per_row = (((fw + gap) / (card_w + gap)).floor() as usize).max(1);
             let mut idx = 0usize;
@@ -3061,11 +3060,12 @@ pub(crate) fn paint_settings(
             // 고른 상태에서 그 색이 비쳐 시스템이 무엇인지 거짓말을 한다).
             let sys_key = theme::system_theme_key();
             let sys = theme::THEME_PRESETS.iter().find(|(k, _, _)| *k == sys_key);
-            // 라벨에 지금 따르는 쪽을 적는다 — 안 적으면 System 카드가 Light 카드와
-            // 똑같이 생겨서 둘의 차이가 화면에 없다.
+            // 라벨에 지금 따르는 쪽을 적는다 — 안 적으면 시스템 카드가 Light 카드와
+            // 똑같이 생겨서 둘의 차이가 화면에 없다. 뒤에 붙는 이름(Dark·Tokyo Night…)은
+            // 테마 고유명이라 그대로 둔다.
             let sys_label = match sys {
-                Some((_, l, _)) => format!("System · {l}"),
-                None => "System".to_string(),
+                Some((_, l, _)) => format!("시스템 · {l}"),
+                None => "시스템".to_string(),
             };
             card(g, &mut rects, "system", &sys_label, sys.map(|(_, _, p)| *p));
             for (key, label, pal) in theme::THEME_PRESETS {
@@ -3091,7 +3091,7 @@ pub(crate) fn paint_settings(
             // 열린다 — 프리셋 위에 직접 덧칠하게 하면 원래 색으로 돌아갈 길이
             // 없다: 프리셋은 불변, 편집은 복제본에.
             if theme::custom_key(&ctx.theme).is_some() {
-                y = row_wide(g, fx, y, clip, "Palette",
+                y = row_wide(g, fx, y, clip, "팔레트",
                     &["칸을 고르면 선택기가 열려요 — 마우스로 고르거나 #rrggbb 를 쳐도 돼요"]);
                 let n = theme::PALETTE_KEYS.len();
                 let (cw, ch, pgap) = (294.0_f32, 30.0_f32, 8.0_f32);
@@ -3183,7 +3183,7 @@ pub(crate) fn paint_settings(
                 if matches!(ctx.input, Some(SettingsInput::PaletteHex(i)) if i < n) {
                     y = picker(g, &mut rects, y);
                 }
-                y = row_wide(g, fx, y, clip, "Terminal ANSI",
+                y = row_wide(g, fx, y, clip, "터미널 ANSI",
                     &["터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)"]);
                 let sz = 30.0_f32;
                 for j in 0..16usize {
@@ -3241,7 +3241,7 @@ pub(crate) fn paint_settings(
                 }
                 y += 30.0 + 12.0;
             } else {
-                y = row_wide(g, fx, y, clip, "Palette",
+                y = row_wide(g, fx, y, clip, "팔레트",
                     &["지금 테마를 복제해 색을 한 칸씩 고칠 수 있어요 — 여러 개 만들어 둬도 돼요"]);
                 if y > clip {
                     // 이미 만들어 둔 게 있어도 이 버튼은 **새로** 만든다 — 이어서
@@ -3269,7 +3269,7 @@ pub(crate) fn paint_settings(
             // (모서리 반경 · 테두리 두께 · 그림자 · 점과 캡슐의 둥글기) — 테마
             // 카드가 팔레트를 미리 보여주는 것과 같은 규칙이라, 고르기 전에
             // 형태가 눈에 보인다.
-            y = row_wide(g, fx, y, clip, "Shape", &["모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)"]);
+            y = row_wide(g, fx, y, clip, "형태", &["모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)"]);
             if y > clip {
                 let (sw, sh) = (108.0_f32, 58.0_f32);
                 let mut sxp = fx;
@@ -3297,7 +3297,7 @@ pub(crate) fn paint_settings(
                     g.draw_text(
                         sxp + 12.0,
                         y + sh - 22.0,
-                        label,
+                        shape_label(key, label),
                         gpu::DrawOpts {
                             font_size: 11.5,
                             color: if sel { theme::text() } else { theme::text_dim() },
@@ -3310,7 +3310,7 @@ pub(crate) fn paint_settings(
                 }
             }
             y += 58.0 + 12.0;
-            y = row_wide(g, fx, y, clip, "Accent color", &["선택 영역 · 커서 · 링크 색"]);
+            y = row_wide(g, fx, y, clip, "강조색", &["선택 영역 · 커서 · 링크 색"]);
             if y > clip {
                 let mut cxp = fx;
                 for (name, col) in theme::ACCENT_PRESETS {
@@ -3336,8 +3336,8 @@ pub(crate) fn paint_settings(
             // 임계를 적용한 샘플을 그려서, 고르기 전에 그 값이 실제로 얼마나
             // 끌어올리는지 눈으로 비교된다.
             y = row_wide(
-                g, fx, y, clip, "Minimum contrast",
-                &["앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올린다 (dim 은 제외)"],
+                g, fx, y, clip, "최소 대비",
+                &["앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올려요 (dim 은 제외)"],
             );
             if y > clip {
                 let (bw, bh) = (86.0_f32, 44.0_f32);
@@ -3377,7 +3377,7 @@ pub(crate) fn paint_settings(
                         },
                     );
                     g.draw_text(
-                        bxp + 10.0, y + bh - 18.0, label,
+                        bxp + 10.0, y + bh - 18.0, contrast_label(label),
                         gpu::DrawOpts {
                             font_size: 11.0,
                             color: if sel { theme::text() } else { theme::text_dim() },
@@ -3392,7 +3392,7 @@ pub(crate) fn paint_settings(
             y += 44.0 + 12.0;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
-            y = row_wide(g, fx, y, clip, "Font size", &[&format!("터미널 셀 폰트 크기 — {PRIMARY_MOD}+/− 배율과는 별개인 기준값이에요")]);
+            y = row_wide(g, fx, y, clip, "글자 크기", &[&format!("터미널 셀 폰트 크기 — {PRIMARY_MOD}+/− 배율과는 별개인 기준값이에요")]);
             if y > clip {
                 let bs = 30.0_f32;
                 let minus = (fx, y, bs, bs);
@@ -3469,16 +3469,16 @@ pub(crate) fn paint_settings(
             let mut y = fy;
             // Preset 칸들 + 자유입력 필드로 포커스를 주는 "Custom" 칸.
             let presets: [(&str, &str); 3] =
-                [("", "System default"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
+                [("", "시스템 기본"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
             let shell_is_preset = presets.iter().any(|(v, _)| *v == ctx.shell);
             let cells = [
-                ("System default", ctx.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+                ("시스템 기본", ctx.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
                 ("zsh", ctx.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".to_string())),
                 ("bash", ctx.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".to_string())),
-                ("Custom", !shell_is_preset, SettingsAction::FocusShell),
+                ("직접 지정", !shell_is_preset, SettingsAction::FocusShell),
             ];
             let sw = seg_width(g, &cells);
-            let (cr, ny) = row2(g, fx, y, fw, clip, "Default shell",
+            let (cr, ny) = row2(g, fx, y, fw, clip, "기본 셸",
                 &["새 pane 의 셸 (비우면 시스템 $SHELL)"], (sw, SEG_H));
             if ny > clip {
                 segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
@@ -3503,7 +3503,7 @@ pub(crate) fn paint_settings(
             // dir, so claude runs vanilla (no persona/proxy/hooks). Read once at boot,
             // so a change needs a restart.
             {
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Shim injection",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "shim 주입",
                     &["끄면 순정 Claude — 페르소나 · 프록시 · 훅 없음 (재시작 필요)"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.shim_inject, ctx.cursor);
@@ -3515,7 +3515,7 @@ pub(crate) fn paint_settings(
             // (같은 `claude_persona` 를 켜고 끄는 토글 둘). 한쪽만 남긴다면 캐릭터
             // 쪽이다 — 「테마로만 쓸지, 말투까지 쓸지」는 캐릭터를 고르는 흐름의
             // 갈림길이라 그 화면에서 결정된다.
-            y = row_wide(g, fx, y, clip, "Account",
+            y = row_wide(g, fx, y, clip, "계정",
                 &["다음에 뜨는 claude 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
             // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
             // 우리가 만든 슬롯이 아니라 지울 것도, 이름 붙일 것도 없다.
@@ -3599,7 +3599,7 @@ pub(crate) fn paint_settings(
             // 기능에서 제일 흔한 오해다.
             let lone = ctx.claude_accounts.is_empty();
             {
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Auto switch",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "자동 전환",
                     &[if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
                       else { "한도가 차면 다음에 뜨는 claude 부터 다음 계정으로 — 떠난 계정은 풀릴 때까지 쉬어요" }],
                     TOGGLE);
@@ -3618,7 +3618,7 @@ pub(crate) fn paint_settings(
                     ("95%", pct == 95, SettingsAction::AccountAutoswitchPct(95)),
                 ];
                 let sw = seg_width(g, &cells);
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Switch at",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "전환 시점",
                     &["이 사용률을 넘으면 다음 계정으로 넘어가요"], (sw, SEG_H));
                 if ny > clip {
                     segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
@@ -3628,7 +3628,7 @@ pub(crate) fn paint_settings(
             // Codex(ChatGPT) 계정 — claude 슬롯 바로 아래 둔다. pane 에서 codex 를
             // 띄우는 것도 같은 손이라, 두 로그인이 설정의 다른 층에 흩어져 있으면
             // 「지금 어느 계정으로 돌고 있나」를 두 군데서 확인해야 한다.
-            y = row_wide(g, fx, y, clip, "Codex account",
+            y = row_wide(g, fx, y, clip, "Codex 계정",
                 &["다음에 뜨는 codex 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
             let codex_rows = std::iter::once((String::new(), "기본".to_string(), None))
                 .chain(
@@ -3705,13 +3705,13 @@ pub(crate) fn paint_settings(
             y += 34.0 + 12.0;
             {
                 let cells = [
-                    ("Default", ctx.claude_model.is_empty(), SettingsAction::ClaudeModel(String::new())),
+                    ("기본", ctx.claude_model.is_empty(), SettingsAction::ClaudeModel(String::new())),
                     ("opus", ctx.claude_model == "opus", SettingsAction::ClaudeModel("opus".to_string())),
                     ("sonnet", ctx.claude_model == "sonnet", SettingsAction::ClaudeModel("sonnet".to_string())),
                     ("haiku", ctx.claude_model == "haiku", SettingsAction::ClaudeModel("haiku".to_string())),
                 ];
                 let sw = seg_width(g, &cells);
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Model",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "모델",
                     &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"], (sw, SEG_H));
                 if ny > clip {
                     segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
@@ -3720,21 +3720,21 @@ pub(crate) fn paint_settings(
             }
             {
                 let cells = [
-                    ("Default", ctx.claude_effort.is_empty(), SettingsAction::ClaudeEffort(String::new())),
+                    ("기본", ctx.claude_effort.is_empty(), SettingsAction::ClaudeEffort(String::new())),
                     ("low", ctx.claude_effort == "low", SettingsAction::ClaudeEffort("low".to_string())),
                     ("medium", ctx.claude_effort == "medium", SettingsAction::ClaudeEffort("medium".to_string())),
                     ("high", ctx.claude_effort == "high", SettingsAction::ClaudeEffort("high".to_string())),
                     ("xhigh", ctx.claude_effort == "xhigh", SettingsAction::ClaudeEffort("xhigh".to_string())),
                 ];
                 let sw = seg_width(g, &cells);
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Effort",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "추론 강도",
                     &["추론 강도 — Default 는 그대로 둬요"], (sw, SEG_H));
                 if ny > clip {
                     segmented(g, &mut rects, cr.0, cr.1, &cells, ctx.cursor);
                 }
                 y = ny;
             }
-            y = row_wide(g, fx, y, clip, "Extra args", &["claude 실행에 항상 붙는 플래그 (예: --verbose)"]);
+            y = row_wide(g, fx, y, clip, "추가 인자", &["claude 실행에 항상 붙는 플래그 (예: --verbose)"]);
             if y > clip {
                 let r = (fx, y, fw.min(420.0), 34.0);
                 let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
@@ -3752,7 +3752,7 @@ pub(crate) fn paint_settings(
         SettingsCat::Theme => {
             let mut y = fy;
             // ── 테마 고르기 ──────────────────────────────────────────────
-            y = row_wide(g, fx, y, clip, "Theme",
+            y = row_wide(g, fx, y, clip, "테마",
                 &["폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다"]);
             // 카드 격자. 얼굴이 보여야 고를 수 있다 — 이름만 늘어놓은 목록은
             // "이터널리턴" 이 무슨 그림인지 켜 보기 전엔 알 수 없다.
@@ -3891,7 +3891,7 @@ pub(crate) fn paint_settings(
             {
                 // 「새로 여는 pane 부터」는 빼면 안 된다 — 이미 도는 pane 은 persona 가
                 // spawn 시 고정이라 안 바뀌는데, 그걸 안 알리면 전환이 실패한 것으로 읽힌다.
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Persona",
+                let (cr, ny) = row2(g, fx, y, fw, clip, "말투",
                     &["켜면 캐릭터 말투로 대답해요 — 새로 여는 pane 부터"], TOGGLE);
                 if ny > clip {
                     toggle(g, cr, ctx.claude_persona, ctx.cursor);
@@ -3904,7 +3904,7 @@ pub(crate) fn paint_settings(
             // 빠지면 그 모션만 번들로 떨어져 한 캐릭터가 두 그림으로 갈린다.
             // wave·cheer 가 빠져 있었다(2026-08-13): 안내대로 idle·walk 만 넣은 사용자는
             // 승인 대기·턴 완료 때만 옛 그림이 튀어나오는 이유를 알 길이 없었다.
-            y = row_wide(g, fx, y, clip, "Character images",
+            y = row_wide(g, fx, y, clip, "캐릭터 그림",
                 &["테마 폴더의 sprites/ 에 모션별로: idle/<slug>-0..3 · walk/<slug>-0..5",
                   "wave/<slug>-0..3 · cheer/<slug>-0..3 · profile/<slug>.png (폴더 안 README 참고)"]);
             // 액션 버튼 — 지금 쓰는 테마의 그림 폴더 / 로스터 json / 텍스처 재로드.
@@ -3935,7 +3935,7 @@ pub(crate) fn paint_settings(
                 }
             }
             y += 34.0 + 12.0;
-            y = row_wide(g, fx, y, clip, "Characters",
+            y = row_wide(g, fx, y, clip, "캐릭터",
                 &[&format!("{}명 — 캐릭터를 눌러 성격과 그림을 고치세요", ctx.characters.len())]);
             // 얼굴이 붙은 카드 격자. 한 줄짜리 색 점 목록이던 것을 바꾼 이유는
             // 단순하다 — 79명 중 하나를 고르는 데 이름만 읽어서는 못 찾는다.
@@ -4191,14 +4191,15 @@ fn account_card(
                 gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: v.active, italic: false },
             );
             if v.active {
-                // Orca 와 같은 자리·같은 크기의 `Active` 배지. 라디오를 뺐으니
-                // 활성 표시는 이것뿐이라 이름 바로 옆에 붙인다.
+                // Orca 와 같은 자리·같은 크기의 활성 배지. 라디오를 뺐으니 활성
+                // 표시는 이것뿐이라 이름 바로 옆에 붙인다. 말은 웹 설정과 같은
+                // 「사용 중」이다 — 두 창구가 같은 상태를 다르게 부르면 안 된다.
                 let bx = x + pad + nw + 8.0;
-                let bw = g.measure_chrome_text("Active", 10.0, true) + 12.0;
+                let bw = g.measure_chrome_text("사용 중", 10.0, true) + 12.0;
                 round_rect(g, bx, line1 - 1.0, bw, 16.0, theme::radius_sm(),
                     theme::with_alpha(theme::text(), 0x1a));
                 g.draw_text(
-                    bx + 6.0, line1 + 2.0, "Active",
+                    bx + 6.0, line1 + 2.0, "사용 중",
                     gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: true, italic: false },
                 );
             }
@@ -4361,6 +4362,29 @@ pub(crate) enum LoginBrowser {
     /// 사용자가 쓰던 기본 브라우저. CLI 가 직접 연다 — 지금 로그인된 claude.ai
     /// 세션이 그대로 승인되므로 **다른 계정을 붙일 수는 없다**.
     Default,
+}
+
+/// 로그인을 처음 시작할 때 여는 브라우저. **새 슬롯 추가도 쓰던 브라우저다**
+/// (거노 2026-08-15 「다시 로그인 말고 추가여도 그냥 쓰던 브라우저여도 되고」).
+///
+/// 여기는 원래 격리 고정이었다. 이유가 있었다 — 쓰던 브라우저를 열면 그 창의
+/// claude.ai 세션이 그대로 승인돼 슬롯 전부가 같은 계정이 됐다(거노: "계정추가하면
+/// 1,2 같은계정으로 되는데"). 그 함정을 **아는 상태의 재지시**라 뒤집는다: 대개는
+/// 브라우저에 붙은 그 계정을 추가하려는 것이고, 빈 크롬에서 비밀번호와 2단계를
+/// 처음부터 치는 값이 매번 나가는 쪽이 더 비쌌다.
+///
+/// 다른 계정을 붙이려면 두 길이 있다 — 브라우저에서 계정을 먼저 바꾸거나, 슬롯이
+/// 생긴 뒤 그 카드의 「빈 창으로」로 다시 로그인하거나. 격리 경로는 그래서 남아
+/// 있다(`LoginBrowser::Isolated`).
+fn login_browser_default() -> LoginBrowser {
+    LoginBrowser::Default
+}
+
+/// 슬롯을 새로 만들고 띄우는 토스트. claude·codex 가 같은 말을 해야 한다 —
+/// 갈리는 건 어느 서비스인가뿐이고, 사용자가 할 일은 똑같다.
+fn add_account_toast() -> String {
+    "쓰던 브라우저에서 로그인하세요 — 다른 계정이면 브라우저에서 먼저 계정을 바꾸세요"
+        .to_string()
 }
 
 /// CLI 로그인을 **터미널 없이** 돌린다. pane 을 띄워 사용자가 직접 진행하게 하던
@@ -5005,6 +5029,32 @@ fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
         out.push(theme::hex_str(c));
     }
     out
+}
+
+/// 최소 대비 프리셋의 한국어 이름. `theme::CONTRAST_PRESETS` 의 라벨은 **그 자체가
+/// 식별자**라(`SettingsAction::MinContrast` 도 웹 액션의 `id` 도 이 문자열이다) 거기서
+/// 바꾸면 누르는 것이 통째로 안 먹는다 — 화면에만 다른 말을 씌운다.
+fn contrast_label(label: &str) -> &str {
+    match label {
+        "Off" => "끔",
+        "Low" => "낮게",
+        "Default" => "기본",
+        "High" => "높게",
+        _ => label,
+    }
+}
+
+/// 형태 프리셋의 한국어 이름. 이름을 `theme::SHAPE_PRESETS` 에서 바꾸지 않는 이유는
+/// **웹 설정이 그 라벨을 그대로 받아 쓰기** 때문이다 — 거기 한국어를 박으면 영어
+/// 화면에도 한국어가 뜬다. 테마 이름(Tokyo Night 같은 고유명)과 달리 이건 옮길 말이라
+/// 화면마다 자기 말로 부른다. 모르는 키는 원래 라벨로.
+fn shape_label<'a>(key: &str, label: &'a str) -> &'a str {
+    match key {
+        "rounded" => "둥글게",
+        "sharp" => "각지게",
+        "pixel" => "픽셀",
+        _ => label,
+    }
 }
 
 /// 두 칸에 안 담기는 항목(계정 목록·긴 텍스트 필드처럼 폭을 다 쓰는 것)의 머리.

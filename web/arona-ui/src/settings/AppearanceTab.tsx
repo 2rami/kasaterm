@@ -118,7 +118,12 @@ function ShapeCard({
   disabled?: boolean;
   onPick: () => void;
 }) {
+  const t = useT();
   const dot = `${5 * preset.roundness}px`;
+  // 이름은 사전에서 — 서버가 주는 `label` 은 영어 한 벌뿐이라 화면 언어를 못 따른다
+  // (테마 이름은 Tokyo Night 같은 고유명이라 그대로 두지만, 형태는 옮길 말이다).
+  // 서버가 새 형태를 늘렸는데 사전이 아직 모르면 원래 라벨로 떨어진다.
+  const name = t.appearance.shapeNames[preset.key] ?? preset.label;
   return (
     <button
       type="button"
@@ -157,7 +162,7 @@ function ShapeCard({
           fontWeight: active ? 600 : 400,
         }}
       >
-        {preset.label}
+        {name}
       </div>
     </button>
   );
@@ -418,7 +423,9 @@ export function AppearanceTab({
                     fontWeight: on ? 600 : 400,
                   }}
                 >
-                  {c.label}
+                  {/* 라벨은 곧 식별자라(액션의 id 가 이 문자열이다) 서버에서 옮길 수
+                      없다 — 화면 이름만 사전에서 덧씌운다. */}
+                  {t.appearance.contrastNames[c.label] ?? c.label}
                 </div>
               </button>
             );

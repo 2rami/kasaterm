@@ -194,12 +194,23 @@ export const ko = {
     ansiHint: '터미널 본문 16색 — 윗줄 0..7, 아랫줄 8..15 (bright)',
     shape: '형태',
     shapeHint: '모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)',
+    /// 형태 프리셋 이름. 서버가 주는 라벨은 영어 한 벌뿐이라 여기서 다시 부른다 —
+    /// 테마 이름(Tokyo Night)은 고유명이라 서버 것을 그대로 쓰는 것과 다르다.
+    shapeNames: { rounded: '둥글게', sharp: '각지게', pixel: '픽셀' } as Record<string, string>,
     accent: '강조색',
     accentHint: '선택 영역 · 커서 · 링크 색',
     contrast: '최소 대비',
     contrastHint: '앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올려요 (dim 은 제외)',
     /// 대비 견본에 쓰는 글자. 그 언어에서 **실제로 읽는 글자**여야 대비가 눈에 온다.
     contrastSample: 'Aa 가나',
+    /// 대비 프리셋 이름. 서버가 주는 라벨은 **식별자를 겸해서** 옮길 수 없다
+    /// (`min-contrast` 액션의 id 가 그 문자열이다) — 화면 이름만 여기서 씌운다.
+    contrastNames: {
+      Off: '끔',
+      Low: '낮게',
+      Default: '기본',
+      High: '높게',
+    } as Record<string, string>,
     fontSize: '글자 크기',
     fontSizeHint: '터미널 셀 폰트 크기 — UI 배율과는 별개인 기준값이에요',
     uiZoom: 'UI 배율',
@@ -225,13 +236,16 @@ export const ko = {
     rename: '이름',
     reauth: '다시 로그인',
     reauthIsolated: '빈 창으로',
-    /// 두 버튼이 왜 갈리는지 — 기본이 쓰던 브라우저라 그 창에 붙어 있는 계정이
-    /// 그대로 승인된다. 다른 계정을 붙이려던 사람이 결과를 보고 놀라는 자리라,
-    /// 고르기 전에 결과를 말해 준다.
+    /// 왜 갈리는지 — 기본이 쓰던 브라우저라 그 창에 붙어 있는 계정이 그대로
+    /// 승인된다. 다른 계정을 붙이려던 사람이 결과를 보고 놀라는 자리라, 고르기 전에
+    /// 결과를 말해 준다. **계정 추가도 같은 규칙**이므로 한 문단이 둘 다 덮는다.
     browserHint:
-      '「다시 로그인」은 쓰던 브라우저에서 — 그 브라우저에 지금 로그인된 계정으로 붙어요. 다른 계정을 붙이려면 「빈 창으로」를 쓰세요.',
+      '「다시 로그인」도 「계정 추가」도 쓰던 브라우저에서 열려요 — 그 브라우저에 지금 로그인된 계정으로 붙습니다. 다른 계정을 붙이려면 브라우저에서 계정을 먼저 바꾸거나, 「빈 창으로」를 쓰세요.',
     removeSlot: '빼기',
-    inUse: '쓰는 중',
+    /// 활성 슬롯 표시. 「쓰는 중」이었는데 진행형이라 **로딩으로 읽혔다**
+    /// (거노 2026-08-15 「계정 쓰는중은 뭐야 로딩중도 아니고」). 테마 카드 쪽
+    /// (`theme.inUse`)은 「79명 · 쓰는 중」처럼 문장으로 읽혀 그대로 둔다.
+    inUse: '사용 중',
     labelPlaceholder: '별명 (비우면 이메일로 불러요)',
     autoSwitch: '자동 전환',
     autoSwitchHint:
@@ -450,11 +464,13 @@ export const en: Strings = {
     ansiHint: 'The terminal’s 16 colors — 0..7 on top, 8..15 (bright) below',
     shape: 'Shape',
     shapeHint: 'Silhouette of corners, dots, and toggles (its own axis, apart from the palette)',
+    shapeNames: { rounded: 'Rounded', sharp: 'Sharp', pixel: 'Pixel' },
     accent: 'Accent color',
     accentHint: 'Selection, cursor, and link color',
     contrast: 'Minimum contrast',
     contrastHint: 'Lifts app-specified colors only when they sink into the background (dim is exempt)',
     contrastSample: 'Aa Bb',
+    contrastNames: { Off: 'Off', Low: 'Low', Default: 'Default', High: 'High' },
     fontSize: 'Font size',
     fontSizeHint: 'Terminal cell font size — a base value, separate from UI zoom',
     uiZoom: 'UI zoom',
@@ -481,9 +497,9 @@ export const en: Strings = {
     reauth: 'Sign in again',
     reauthIsolated: 'Blank window',
     browserHint:
-      '“Sign in again” uses the browser you already have open — it attaches whichever account is signed in there. Use “Blank window” to attach a different account.',
+      '“Sign in again” and “Add account” both open the browser you already use — they attach whichever account is signed in there. For a different account, switch accounts in that browser first, or use “Blank window”.',
     removeSlot: 'Remove',
-    inUse: 'in use',
+    inUse: 'Active',
     labelPlaceholder: 'Nickname (empty = called by its email)',
     autoSwitch: 'Auto switch',
     autoSwitchHint:
@@ -536,6 +552,8 @@ export const en: Strings = {
     login_in_browser: 'Sign in from the blank browser window',
     login_in_default_browser:
       'Approve it in the browser you already use — it attaches whichever account is signed in there',
+    login_new_slot_in_default_browser:
+      'Sign in from the browser you already use — for a different account, switch accounts there first',
     terminal_editor_not_found:
       'Couldn’t find a terminal editor — type the command yourself',
     account_dir_failed: 'Couldn’t create the account folder',
