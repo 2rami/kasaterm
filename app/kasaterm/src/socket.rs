@@ -3910,6 +3910,15 @@ pub fn read_wheel_pixel_gain() -> f32 {
         .unwrap_or(0.3)
 }
 
+/// 두 하단 띠 높이의 상·하한(logical px). **설정 화면의 스테퍼도 이걸 쓴다** —
+/// 값을 여기 한 군데 두는 이유는, 거르는 쪽(아래 두 함수)과 올리는 쪽(스테퍼·HTTP
+/// 검증)이 각자 숫자를 들고 있으면 한쪽만 고쳐졌을 때 **저장은 되는데 다음 실행에
+/// 사라지는** 값이 생기기 때문이다.
+pub const STATUS_H_MIN: f32 = 18.0;
+pub const STATUS_H_MAX: f32 = 40.0;
+pub const PANE_FOOTER_H_MIN: f32 = 22.0;
+pub const PANE_FOOTER_H_MAX: f32 = 44.0;
+
 /// 창 맨 아래 상태줄 높이(logical px). 상·하한은 안전장치 — 그 밖으로 나가면 안에
 /// 얹힌 게이지·칩(18px)이 띠에 눌리거나 띠만 덩그러니 남는다.
 pub fn read_status_h() -> f32 {
@@ -3917,7 +3926,7 @@ pub fn read_status_h() -> f32 {
         .get("status_bar_h")
         .and_then(|x| x.as_f64())
         .map(|x| x as f32)
-        .filter(|x| (18.0..=40.0).contains(x))
+        .filter(|x| (STATUS_H_MIN..=STATUS_H_MAX).contains(x))
         .unwrap_or(crate::STATUS_HEIGHT_DEFAULT)
 }
 
@@ -3928,7 +3937,7 @@ pub fn read_pane_footer_h() -> f32 {
         .get("pane_footer_h")
         .and_then(|x| x.as_f64())
         .map(|x| x as f32)
-        .filter(|x| (22.0..=44.0).contains(x))
+        .filter(|x| (PANE_FOOTER_H_MIN..=PANE_FOOTER_H_MAX).contains(x))
         .unwrap_or(crate::PANE_FOOTER_HEIGHT_DEFAULT)
 }
 

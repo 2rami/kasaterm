@@ -1,4 +1,13 @@
-import { Notice, Row, Segmented, TabCard, TextField, Toggle, useSettingsAction } from './controls';
+import {
+  Notice,
+  Row,
+  Segmented,
+  Stepper,
+  TabCard,
+  TextField,
+  Toggle,
+  useSettingsAction,
+} from './controls';
 import { useLang, useT } from './lang';
 import type { Lang } from './strings';
 import type { SettingsValues } from './types';
@@ -17,6 +26,13 @@ function openKey(mode: string): string {
 /// 설명 문구에 박히는 주 수식키. 실제 바인딩이 이미 갈려 있는데(macOS=Cmd, 그 밖
 /// =Ctrl) 문구만 Cmd 로 고정하면 Windows 사용자에게 키보드에 없는 키를 안내한다.
 const PRIMARY_MOD = navigator.userAgent.includes('Mac') ? 'Cmd' : 'Ctrl';
+
+/// 하단 띠 높이의 [최소, 최대] px. 서버(`socket::STATUS_H_MIN` 일가)가 같은 범위로
+/// 거르므로 여기 값은 **버튼을 미리 막아 두기 위한 것**이지 안전장치가 아니다 —
+/// 범위 밖 값을 보내도 서버가 거절한다. 두 숫자가 어긋나면 눌러도 안 먹는 버튼이
+/// 생길 뿐이라 그때는 여기를 서버에 맞춘다.
+const STATUS_BAR_H: [number, number] = [18, 40];
+const PANE_FOOTER_H: [number, number] = [22, 44];
 
 export function GeneralTab({
   data,
@@ -94,31 +110,31 @@ export function GeneralTab({
         />
       </Row>
 
-      {/* 두 하단바 높이. 자유값이 아니라 프리셋인 건 안에 얹히는 것(게이지·칩)
-          크기가 정해져 있어 쓸 수 있는 폭이 사실상 세 칸이어서다. */}
+      {/* 두 하단바 높이. 낮게·보통·높게 세 칸이었는데 그걸로는 「지금보다 딱 2px
+          만」이 안 된다 — 띠 두께는 옆에 얹힌 글자·칩과의 균형이라 맞는 값이
+          사람마다 다르다(2026-08-15 지시 「더 세밀히」). 델타가 아니라 **바뀐 뒤의
+          px 를 통째로** 보내는 이유는 서버 액션이 절대값을 받기 때문이다. */}
       <Row label={t.general.windowBarH} desc={[t.general.windowBarHHint]}>
-        <Segmented
-          value={String(data.status_bar_h)}
+        <Stepper
+          text={`${Math.round(data.status_bar_h)}px`}
           disabled={busy}
-          options={[
-            { key: '20', label: t.general.barHeightLow },
-            { key: '24', label: t.general.barHeightMid },
-            { key: '30', label: t.general.barHeightHigh },
-          ]}
-          onPick={(key) => void run('status-bar-h', { id: key })}
+          atMin={data.status_bar_h <= STATUS_BAR_H[0]}
+          atMax={data.status_bar_h >= STATUS_BAR_H[1]}
+          onStep={(d) =>
+            void run('status-bar-h', { id: String(Math.round(data.status_bar_h) + d) })
+          }
         />
       </Row>
 
       <Row label={t.general.paneBarH} desc={[t.general.paneBarHHint]}>
-        <Segmented
-          value={String(data.pane_footer_h)}
+        <Stepper
+          text={`${Math.round(data.pane_footer_h)}px`}
           disabled={busy}
-          options={[
-            { key: '24', label: t.general.barHeightLow },
-            { key: '30', label: t.general.barHeightMid },
-            { key: '36', label: t.general.barHeightHigh },
-          ]}
-          onPick={(key) => void run('pane-footer-h', { id: key })}
+          atMin={data.pane_footer_h <= PANE_FOOTER_H[0]}
+          atMax={data.pane_footer_h >= PANE_FOOTER_H[1]}
+          onStep={(d) =>
+            void run('pane-footer-h', { id: String(Math.round(data.pane_footer_h) + d) })
+          }
         />
       </Row>
 

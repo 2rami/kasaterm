@@ -1119,19 +1119,29 @@ impl App {
             }
             // 높이가 바뀌면 격자에서 예약하는 띠도 달라진다 — PTY 를 다시 재지
             // 않으면 셸이 옛 행수로 그리고, 그 차이만큼 화면이 어긋난 채 남는다.
+            // 1px 스테퍼라 끝에서 계속 눌린다 — 자르고 나서 **값이 그대로면 아무
+            // 것도 하지 않는다**. 안 그러면 누를 때마다 저장·PTY 재조정이 도는데,
+            // 화면은 하나도 안 바뀌어서 그 비용이 어디서 나는지 보이지도 않는다.
             SettingsAction::StatusBarH(px) => {
-                self.set_status_h = px as f32;
-                self.settings_save();
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
-                self.chrome_dirty = true;
+                let want = (px as f32).clamp(socket::STATUS_H_MIN, socket::STATUS_H_MAX);
+                if (want - self.set_status_h).abs() > 0.01 {
+                    self.set_status_h = want;
+                    self.settings_save();
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    self.chrome_dirty = true;
+                }
             }
             SettingsAction::PaneFooterH(px) => {
-                self.set_pane_footer_h = px as f32;
-                self.settings_save();
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
-                self.chrome_dirty = true;
+                let want =
+                    (px as f32).clamp(socket::PANE_FOOTER_H_MIN, socket::PANE_FOOTER_H_MAX);
+                if (want - self.set_pane_footer_h).abs() > 0.01 {
+                    self.set_pane_footer_h = want;
+                    self.settings_save();
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    self.chrome_dirty = true;
+                }
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
@@ -1401,7 +1411,8 @@ impl App {
             // 보내는 것만 오리라고 믿으면 안 되고, 범위 밖 높이는 띠를 깨뜨린다.
             "status-bar-h" => {
                 let px: u32 = id.parse().map_err(|_| unknown(id))?;
-                if !matches!(px, 20 | 24 | 30) {
+                let f = px as f32;
+                if !(socket::STATUS_H_MIN..=socket::STATUS_H_MAX).contains(&f) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::StatusBarH(px));
@@ -1409,7 +1420,8 @@ impl App {
             }
             "pane-footer-h" => {
                 let px: u32 = id.parse().map_err(|_| unknown(id))?;
-                if !matches!(px, 24 | 30 | 36) {
+                let f = px as f32;
+                if !(socket::PANE_FOOTER_H_MIN..=socket::PANE_FOOTER_H_MAX).contains(&f) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::PaneFooterH(px));
@@ -2876,23 +2888,65 @@ pub(crate) fn paint_settings(
                 y = ny;
             }
             // 두 하단바 높이(2026-08-15 지시 「하단바 크기조절도 가능하게, pane
-            // 하단바도」). 자유값이 아니라 프리셋인 건 안에 얹히는 것(게이지·칩)
-            // 크기가 정해져 있어 쓸 수 있는 폭이 사실상 세 칸이어서다 — 그 밖으로
-            // 나가면 띠가 내용에 눌리거나 띠만 덩그러니 남는다.
-            let sh = ctx.status_h.round() as u32;
-            y = seg_row(g, &mut rects, y, "창 상태바 높이",
-                &["창 맨 아래 계정 한도 줄의 높이"], &[
-                ("낮게", sh == 20, SettingsAction::StatusBarH(20)),
-                ("보통", sh == 24, SettingsAction::StatusBarH(24)),
-                ("높게", sh == 30, SettingsAction::StatusBarH(30)),
-            ]);
-            let pfh = ctx.pane_footer_h.round() as u32;
-            y = seg_row(g, &mut rects, y, "pane 상태바 높이",
-                &["각 pane 아래 경로 · 브랜치 줄의 높이"], &[
-                ("낮게", pfh == 24, SettingsAction::PaneFooterH(24)),
-                ("보통", pfh == 30, SettingsAction::PaneFooterH(30)),
-                ("높게", pfh == 36, SettingsAction::PaneFooterH(36)),
-            ]);
+            // 하단바도」 → 같은 날 「더 세밀히」). 낮게·보통·높게 세 칸이었는데,
+            // 세 칸으로는 「지금보다 딱 2px 만」이 표현이 안 된다 — 띠 높이는 옆에
+            // 얹힌 글자·칩과의 균형이라 사람마다 맞는 값이 다르다. 1px 스테퍼로 바꾸되
+            // 범위는 로드 쪽과 **같은 상수**를 쓴다(socket::STATUS_H_MIN 참고).
+            let step_row = |g: &mut gpu::GpuRenderer,
+                            rects: &mut Vec<(SettingsAction, Rect)>,
+                            y: f32,
+                            label: &str,
+                            desc: &[&str],
+                            cur: u32,
+                            lo: u32,
+                            hi: u32,
+                            make: fn(u32) -> SettingsAction| {
+                let bs = SEG_H;
+                let num_span = 54.0_f32;
+                let (cr, ny) = row2(g, fx, y, fw, clip, label, desc, (bs * 2.0 + num_span, bs));
+                if ny > clip {
+                    for (d, glyph, bx) in
+                        [(-1i32, "minus", cr.0), (1, "plus", cr.0 + bs + num_span)]
+                    {
+                        let r = (bx, cr.1, bs, bs);
+                        // 끝에 닿은 쪽은 흐리게 두고 히트렉트도 안 만든다 — 눌러도
+                        // 아무 일 없는 버튼은 고장으로 읽힌다(UI 배율 되돌리기와 같은 규칙).
+                        if (d < 0 && cur <= lo) || (d > 0 && cur >= hi) {
+                            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface());
+                            let isz = 14.0;
+                            g.queue_icon(
+                                glyph,
+                                r.0 + (bs - isz) / 2.0,
+                                r.1 + (bs - isz) / 2.0,
+                                isz,
+                                theme::text_mute(),
+                            );
+                        } else {
+                            stepper_btn(g, r, glyph, ctx.cursor);
+                            rects.push((make((cur as i32 + d) as u32), r));
+                        }
+                    }
+                    let num = format!("{cur}px");
+                    let num_w = g.measure_chrome_text(&num, 14.0, true);
+                    g.draw_text(
+                        cr.0 + bs + (num_span - num_w) / 2.0,
+                        cr.1 + (bs - 14.0) / 2.0,
+                        &num,
+                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
+                    );
+                }
+                ny
+            };
+            y = step_row(g, &mut rects, y, "창 상태바 높이",
+                &["창 맨 아래 계정 한도 줄의 높이"],
+                ctx.status_h.round() as u32,
+                socket::STATUS_H_MIN as u32, socket::STATUS_H_MAX as u32,
+                SettingsAction::StatusBarH);
+            y = step_row(g, &mut rects, y, "pane 상태바 높이",
+                &["각 pane 아래 경로 · 브랜치 줄의 높이"],
+                ctx.pane_footer_h.round() as u32,
+                socket::PANE_FOOTER_H_MIN as u32, socket::PANE_FOOTER_H_MAX as u32,
+                SettingsAction::PaneFooterH);
             y = seg_row(g, &mut rects, y, "파일 열기",
                 &["파일 트리에서 파일을 열 때 무엇으로 열지"], &[
                 ("내장 편집기", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),

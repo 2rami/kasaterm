@@ -224,11 +224,17 @@ export function Stepper({
   text,
   onStep,
   disabled,
+  atMin,
+  atMax,
   right,
 }: {
   text: string;
   onStep: (d: -1 | 1) => void;
   disabled?: boolean;
+  /// 값이 범위 끝에 닿았을 때 그쪽 버튼만 막는다 — 눌러도 아무 일 없는 버튼은
+  /// 고장으로 읽힌다(네이티브도 그때는 히트렉트를 안 만든다).
+  atMin?: boolean;
+  atMax?: boolean;
   right?: React.ReactNode;
 }) {
   const t = useT();
@@ -242,7 +248,7 @@ export function Stepper({
     <div className="flex items-center gap-2">
       <button
         type="button"
-        disabled={disabled}
+        disabled={disabled || atMin}
         onClick={() => onStep(-1)}
         aria-label={t.common.stepDown}
         className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
@@ -255,7 +261,7 @@ export function Stepper({
       </span>
       <button
         type="button"
-        disabled={disabled}
+        disabled={disabled || atMax}
         onClick={() => onStep(1)}
         aria-label={t.common.stepUp}
         className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
