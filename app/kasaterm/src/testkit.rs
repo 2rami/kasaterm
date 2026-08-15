@@ -5819,6 +5819,41 @@ impl App {
         // 없으므로 값을 심는다. 5시간이 낮고 주간이 높은 조합인 것은 그게 정확히
         // 2026-08-05 사고의 형태이고, 「둘 다 나란히」가 그걸 막는지 보는 것이
         // 이 검증의 목적이라서다.
+        // 「전환 직후」와 「이름이 겹치는 두 슬롯」을 함께 세운다. 둘 다 실계정이
+        // 있어야 재현되는 상태라 격리 리그에서는 심을 수밖에 없다.
+        //
+        // 겹침은 **라벨로** 만든다 — 라벨이 있으면 `account_display` 가 그걸 그대로
+        // 쓰므로 `claude auth status` 를 부를 필요가 없다(리그에는 로그인이 없다).
+        // 전환 중은 배지의 `account_dir` 을 활성 슬롯과 다르게 두면 된다.
+        if step == 0 && want == "switching" {
+            self.set_claude_accounts = vec![
+                crate::socket::ClaudeAccount {
+                    id: "acct-2".to_string(),
+                    label: "goenho0613@naver.com".to_string(),
+                },
+                crate::socket::ClaudeAccount {
+                    id: "acct-3".to_string(),
+                    label: "goenho0613@gmail.com".to_string(),
+                },
+            ];
+            self.set_claude_account = "acct-3".to_string();
+            if let Ok(mut g) = self.claude_usage.lock() {
+                *g = Some(crate::UsageBadge {
+                    pct: 95.0,
+                    label: "7d",
+                    stale: false,
+                    // 떠나온 슬롯의 값 — 활성(acct-3)과 다르니 「읽는 중」이 되어야 한다.
+                    account_dir: "/tmp/kasaterm-rig-acct-2".to_string(),
+                    resets_at: None,
+                    windows: vec![("5h", 12.0), ("7d", 95.0)],
+                });
+            }
+            self.chrome_dirty = true;
+            return;
+        }
+        if want == "switching" {
+            return;
+        }
         if step == 0 && want == "account" {
             let badge = crate::UsageBadge {
                 pct: 95.0,

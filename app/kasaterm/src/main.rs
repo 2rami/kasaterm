@@ -4041,6 +4041,9 @@ pub(crate) enum SettingsCat {
 }
 
 impl SettingsCat {
+    /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
+    /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
+    #[allow(dead_code)]
     pub(crate) const ALL: [SettingsCat; 6] = [
         Self::General,
         Self::Appearance,

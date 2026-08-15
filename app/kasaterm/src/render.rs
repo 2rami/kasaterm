@@ -6960,12 +6960,26 @@ impl App {
                         theme::text()
                     }
                 };
+                // **떠나온 계정의 숫자를 이어 그리지 않는다.** 계정을 바꾸면 이름은
+                // 그 자리에서 바뀌는데 새 사용량은 1.1~2.0초(평균 1.6초) 뒤에 온다
+                // (토키 실측 2026-08-15). 그 사이 「새 계정 이름 + 옛 계정 %」가
+                // 그려지는데, 한도를 보고 계정을 고르는 기능이라 이 조합은 그냥
+                // 거짓말이다. 배지가 어느 계정에서 나온 값인지 들고 다니므로
+                // (`account_dir`) 활성 슬롯과 대조해 다르면 읽는 중으로 둔다.
+                let active_dir = crate::socket::claude_account_dir(&self.set_claude_account)
+                    .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                let switching = badge.as_ref().is_some_and(|b| b.account_dir != active_dir);
+
                 // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
                 // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
-                // 보여야 한다.
-                let wins: Vec<(&'static str, f32)> = match badge.as_ref() {
-                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b.windows.clone(),
-                    Some(b) => vec![(b.label, b.pct)],
+                // 보여야 한다. `None` 은 「읽는 중」 — 자리는 잡되 숫자는 안 말한다.
+                let wins: Vec<(&'static str, Option<f32>)> = match badge.as_ref() {
+                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b
+                        .windows
+                        .iter()
+                        .map(|(l, p)| (*l, (!switching).then_some(*p)))
+                        .collect(),
+                    Some(b) => vec![(b.label, (!switching).then_some(b.pct))],
                     None => Vec::new(),
                 };
                 if wins.is_empty() {
@@ -7011,29 +7025,34 @@ impl App {
                         // 짜리 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서
                         // 그냥 얼룩이 된다(첫 캡처에서 실제로 그랬다).
                         g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
-                        let fw = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(2.0);
-                        g.rect(x, gy, fw, GH, theme::with_alpha(theme::text(), 210));
+                        // 읽는 중이면 **트랙만**. 빈 트랙은 0% 처럼 보일 수 있지만
+                        // 옆의 숫자가 `…` 라 「모른다」로 읽힌다 — 채움을 그리면
+                        // 그 순간 옛 숫자가 되살아난다.
+                        if let Some(p) = pct {
+                            let fw = (GW * (p / 100.0).clamp(0.0, 1.0)).max(2.0);
+                            g.rect(x, gy, fw, GH, theme::with_alpha(theme::text(), 210));
+                        }
                         x += GW + 6.0;
                     }
-                    let s =
-                        if stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
+                    let (s, col) = match pct {
+                        Some(p) if stale => (format!("~{p:.0}%"), pct_col(*p)),
+                        Some(p) => (format!("{p:.0}%"), pct_col(*p)),
+                        None => ("…".to_string(), theme::text_dim()),
+                    };
                     g.draw_text(
                         x,
                         ty,
                         &s,
-                        gpu::DrawOpts {
-                            font_size: fs,
-                            color: pct_col(*pct),
-                            bold: false,
-                            italic: false,
-                        },
+                        gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
                     );
                     x += g.measure_chrome_text(&s, fs, true);
                 }
                 // 언제 풀리는지는 5시간 창에 대해서만, 그것도 아주 넓을 때만. 퍼센트가
                 // 같아도 12분 뒤면 기다리면 되고 3시간 뒤면 지금 옮겨야 한다 — 다만
                 // 두 창을 나란히 두고 나면 자리가 없어서, 좁아지면 팝오버로 물러난다.
-                if let (Some(b), true) = (badge.as_ref(), win_w >= 1100.0) {
+                // 전환 중엔 이것도 빼야 한다 — 초기화 시각은 떠나온 계정 것이라
+                // 게이지만 가리고 여기를 남기면 거짓말이 옆칸으로 옮겨갈 뿐이다.
+                if let (Some(b), true) = (badge.as_ref(), win_w >= 1100.0 && !switching) {
                     if let Some(l) = crate::resets_in_label(b.resets_at) {
                         let s = format!("· {l}");
                         g.draw_text(
@@ -7059,8 +7078,25 @@ impl App {
                 // 한 줄의 절반을 주소가 먹는다. **@ 앞만** 남긴다 — 계정을 가리는 데는
                 // 그걸로 충분하고(오늘 넷이 같은 계정인 걸 못 알아본 게 문제였지 주소
                 // 뒷부분을 몰라서가 아니다), 전체는 드롭다운에 그대로 있다.
+                //
+                // 다만 **겹치면 안 줄인다.** 슬롯 둘이 같은 아이디에 다른 도메인이면
+                // (`goenho0613@naver` · `goenho0613@gmail`) 화면에서 통째로 같은 글자가
+                // 되어, 지금 어느 계정인지 이 자리로는 알 수가 없다(토키 실측
+                // 2026-08-15). 겹칠 때만 도메인 앞머리를 붙여 가른다 — 안 겹치면
+                // 예전대로 짧게.
                 if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
-                    let short = n.split_once('@').map(|(a, _)| a).unwrap_or(n.as_str());
+                    let others: Vec<String> =
+                        std::iter::once(crate::settings::account_display("", "", "기본"))
+                            .chain(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
+                                crate::settings::account_display(
+                                    &a.id,
+                                    &a.label,
+                                    &format!("계정 {}", i + 2),
+                                )
+                            }))
+                            .collect();
+                    let short = statusbar_account_short(n, &others);
+                    let short = short.as_str();
                     g.draw_text(
                         x,
                         ty,
@@ -8837,4 +8873,50 @@ fn draw_compact_cells(
         g.rect(sx, y, seg_w, bar_h, col);
     }
     n as f32 * (seg_w + gap) - gap
+}
+
+/// 하단바에 적을 계정 이름. 라벨을 안 지은 슬롯은 이름이 이메일로 폴백되는데
+/// 통째로 적으면 한 줄의 절반을 주소가 먹는다 — 그래서 `@` 앞만 남긴다.
+///
+/// **겹치면 안 줄인다.** 슬롯 둘이 같은 아이디에 다른 도메인이면
+/// (`goenho0613@naver.com` · `goenho0613@gmail.com`) 화면에서 통째로 같은 글자가 되어,
+/// 지금 어느 계정인지 이 자리로는 알 수가 없다(토키 실측 2026-08-15). 그때만
+/// 도메인 앞머리를 붙여 가른다(`goenho0613·gmail`) — 짧은 채로 갈리는 것이 요점이라
+/// 도메인 전체는 안 쓴다.
+///
+/// `others` 는 자기 자신을 포함해도 된다(같은 문자열은 겹침으로 안 센다).
+pub(crate) fn statusbar_account_short(name: &str, others: &[String]) -> String {
+    fn local(s: &str) -> &str {
+        s.split_once('@').map(|(a, _)| a).unwrap_or(s)
+    }
+    let dup = others.iter().any(|o| o != name && local(o) == local(name));
+    match name.split_once('@') {
+        Some((a, d)) if dup => format!("{a}·{}", d.split('.').next().unwrap_or(d)),
+        Some((a, _)) => a.to_string(),
+        None => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statusbar_account_name_keeps_the_domain_only_when_slots_collide() {
+        let alone = vec!["goenho0613@gmail.com".to_string(), "2rami@sionic.ai".to_string()];
+        assert_eq!(statusbar_account_short("goenho0613@gmail.com", &alone), "goenho0613");
+
+        let clash = vec![
+            "goenho0613@naver.com".to_string(),
+            "goenho0613@gmail.com".to_string(),
+        ];
+        assert_eq!(statusbar_account_short("goenho0613@gmail.com", &clash), "goenho0613·gmail");
+        assert_eq!(statusbar_account_short("goenho0613@naver.com", &clash), "goenho0613·naver");
+
+        // 사람이 지은 라벨엔 `@` 가 없다 — 손대지 않는다.
+        assert_eq!(statusbar_account_short("사이오닉팀플랜", &clash), "사이오닉팀플랜");
+        // 라벨끼리 같아 보이는 경우도 붙일 도메인이 없으니 그대로 둔다.
+        let same = vec!["기본".to_string(), "기본".to_string()];
+        assert_eq!(statusbar_account_short("기본", &same), "기본");
+    }
 }
