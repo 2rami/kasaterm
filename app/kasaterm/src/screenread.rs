@@ -2280,6 +2280,49 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
     None
 }
 
+/// 괄호도 esc 힌트도 Tip 도 아직 없는 「턴 시작 첫 프레임」 스피너 후보 —
+/// `✢ Transmuting…` 별+줄임표뿐인 행. 실측(2026-08-15, 0.3s 간격 채집): 매 턴
+/// **첫 ~3초**가 이 모양이고 경과시간 괄호는 3초께에야 붙는다. 그동안 본판정이
+/// 거부해 학생이 매 턴 3초 늦게 붙었다(거노 「스피너 인식 바로 안 되나봐」).
+///
+/// 글자만으로는 이 모양을 인용문과 못 가른다(그 오탐을 막으려고 괄호 요구를
+/// 세웠던 것). 그래서 이 함수는 **후보만** 대고, 확정은 App 쪽 프로브가
+/// **글리프가 움직이는지**로 한다 — 진짜 스피너는 별 프레임(✢✶✽✻✳·)이 계속
+/// 바뀌고 인용문은 멈춰 있다. (행, 열, 글리프)를 돌려준다.
+pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize, char)> {
+    let last = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let start = (last + 1).saturating_sub(30);
+    for r in (start..=last).rev() {
+        let row = &rows[r];
+        let Some(first) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
+            continue;
+        };
+        if first >= 8 {
+            continue;
+        }
+        let g = row[first].ch;
+        if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
+            continue;
+        }
+        // 본판정이 잡는 행이면 프로브가 낄 자리가 아니다 — find_claude_spinner 몫.
+        if spinner_row_col(row).is_some() || spinner_tip_rescue(rows, r).is_some() {
+            return None;
+        }
+        let rest: String = row[first + 1..]
+            .iter()
+            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+            .collect();
+        if !rest.contains('…') {
+            continue;
+        }
+        // 위치 검증은 본판정과 같은 자로 — 아래에 대화 마커가 있으면 옛 본문이다.
+        return spinner_is_live(rows, r).then_some((r, first, g));
+    }
+    None
+}
+
 /// 그 스피너 행이 **지금 도는 것**인가, 아니면 스크롤백에 굳은 옛 텍스트인가.
 ///
 /// 글자만으로는 못 가른다 — 답변이 스피너 형태를 **인용**하면 진짜와 한 글자도
@@ -3169,6 +3212,28 @@ mod spinner_tests {
     // 태스크 목록 위젯은 스피너 **바로 아래** `⎿  ◻ 항목` 으로 뜬다(2026-08-15
     // 라이브 pane peek 실측). 이 ⎿ 를 대화 마커로 세면 태스크를 쓰는 working
     // pane 전부에서 스피너가 죽어 학생이 걷다 말고 입력창 위에 서 버린다.
+    // 턴 시작 첫 ~3초의 괄호 없는 스피너(0.3s 채집 실측)는 **후보**로만 잡힌다 —
+    // 확정은 프로브(글리프 변화) 몫. 본판정이 잡는 행·인용문(아래 마커)은 후보도
+    // 아니어야 한다.
+    #[test]
+    fn parenless_turn_start_spinner_is_probe_candidate_only() {
+        let boot = vec![
+            row_from("✢ Transmuting…"),
+            row_from(&"─".repeat(60)),
+            row_from(&format!("❯{}", " ".repeat(59))),
+            row_from(&"─".repeat(60)),
+        ];
+        assert_eq!(find_claude_spinner(&boot), None, "본판정은 여전히 거부해야 한다");
+        assert_eq!(unconfirmed_spinner_row(&boot).map(|(r, c, g)| (r, c, g)), Some((0, 0, '✢')));
+        // 괄호가 붙은 확정 스피너는 후보 경로가 아니라 본판정 몫이다.
+        let confirmed = vec![row_from("✻ Clauding… (3s · ↓ 7 tokens)")];
+        assert!(find_claude_spinner(&confirmed).is_some());
+        assert_eq!(unconfirmed_spinner_row(&confirmed), None);
+        // 아래에 대화 마커가 있으면 옛 본문 — 후보도 아니다.
+        let quoted = vec![row_from("✢ Transmuting…"), row_from("⏺ 답변 마커")];
+        assert_eq!(unconfirmed_spinner_row(&quoted), None);
+    }
+
     // ★회귀: 부팅·재개 직후 스피너는 경과시간 괄호 없이 `✻ Computing…` + `⎿ Tip:`
     // 만 뜬다(2026-08-15 스샷). 괄호 요구에 걸려 학생이 스피너에 안 붙었다 —
     // Tip 행이 구제 신호다.

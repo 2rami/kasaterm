@@ -461,6 +461,9 @@ impl App {
             std::collections::HashSet<String>,
             std::collections::HashMap<String, Option<u8>>,
         ) = {
+            // 프로브는 락 밖 필드라 ws 가드와 나란히 빌린다 — 메서드로 빼면 &mut self
+            // 가 통째로 필요해 가드와 충돌한다.
+            let probe = &mut self.spinner_probe;
             let ws = self.ws.lock().unwrap();
             let mut rows = Vec::with_capacity(ws.panes.len());
             let mut bg = std::collections::HashSet::new();
@@ -470,7 +473,31 @@ impl App {
             for (id, pane) in ws.panes.iter() {
                 match pane.term() {
                     Some(t) => {
-                        let busy = term_is_working(t);
+                        // 턴 시작 첫 ~3초는 스피너가 `✢ Transmuting…` 뿐이라 본판정
+                        // (경과시간 괄호 요구)이 거부한다. 글리프가 틱 사이에 바뀌면
+                        // 진짜 스피너로 확정 — 인용문은 멈춰 있다. 규칙 본문은
+                        // screenread::unconfirmed_spinner_row 주석.
+                        let strict = term_is_working(t);
+                        let boosted = if strict {
+                            probe.remove(id);
+                            false
+                        } else {
+                            match crate::render::unconfirmed_spinner_row(&t.cells) {
+                                Some((r, _c, g)) => {
+                                    let conf = matches!(
+                                        probe.get(id),
+                                        Some(&(pr, pg, pc)) if pr == r && (pc || pg != g)
+                                    );
+                                    probe.insert(id.clone(), (r, g, conf));
+                                    conf
+                                }
+                                None => {
+                                    probe.remove(id);
+                                    false
+                                }
+                            }
+                        };
+                        let busy = strict || boosted;
                         let prompt = if busy {
                             None
                         } else {

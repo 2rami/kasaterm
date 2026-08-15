@@ -1130,7 +1130,17 @@ impl App {
                     // 스피너 walk·승인대기 바운스가 뜨는 동안은 standing 도트를
                     // 숨긴다 — 같은 학생이 화면에 두 명 서 있으면 버그로 보인다.
                     let mut pet_busy = false;
-                    if let Some((sr, sc)) = find_claude_spinner(&composed) {
+                    // 본판정 + 프로브 확정 후보(턴 시작 첫 ~3초의 괄호 없는
+                    // `✢ Transmuting…`). 확정은 refresh_pane_activity 가 글리프
+                    // 변화로 세운다 — 여기서는 읽기만.
+                    let spinner_hit = find_claude_spinner(&composed).or_else(|| {
+                        self.spinner_probe
+                            .get(tab_pid.as_str())
+                            .filter(|&&(_, _, confirmed)| confirmed)
+                            .and_then(|_| unconfirmed_spinner_row(&composed))
+                            .map(|(r, c, _)| (r, c))
+                    });
+                    if let Some((sr, sc)) = spinner_hit {
                         pet_busy = true;
                         // 스피너 행 텍스트("Cerebrating… · esc to interrupt")를
                         // 학생 accent 색으로 — walk 도트 + 텍스트색이 함께

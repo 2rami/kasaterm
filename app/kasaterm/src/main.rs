@@ -4818,6 +4818,11 @@ struct App {
     /// 훅이 남기는 `/tmp/kasaterm-collab/ultracode/<sid>.on` 마커를 대신 읽는다.
     /// `refresh_pane_activity` 박자(300ms)로 갱신 — 매 프레임 stat 하지 않는다.
     pane_ultracode: std::collections::HashSet<String>,
+    /// 괄호 없는 턴-시작 스피너(`✢ Transmuting…`)의 살아있음 프로브 — pane →
+    /// (행, 마지막 글리프, 확정). 글리프가 틱 사이에 바뀌면 확정 = 진짜 스피너
+    /// (인용문은 멈춰 있다). 규칙 본문은 screenread::unconfirmed_spinner_row.
+    /// `refresh_pane_activity`(300ms)가 갱신하고 render 걷기 도트가 읽는다.
+    spinner_probe: std::collections::HashMap<String, (usize, char, bool)>,
     /// 직전 틱의 팔레트 명암 — 라이트↔다크 플립을 `poll_claude_retheme` 이
     /// 감지하는 기준값. 어느 입구로 테마가 바뀌든(설정 화면·웹뷰·system 폴링)
     /// 전부 팔레트에 수렴하므로, 입구마다 훅을 다는 대신 결과를 비교한다.
@@ -5408,6 +5413,7 @@ impl App {
             last_claude_status: None,
             pane_activity: HashMap::new(),
             pane_ultracode: std::collections::HashSet::new(),
+            spinner_probe: std::collections::HashMap::new(),
             theme_light_last: None,
             retheme_queue: HashMap::new(),
             window_focused: true,
