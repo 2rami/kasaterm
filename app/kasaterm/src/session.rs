@@ -3027,6 +3027,14 @@ impl App {
                     std::time::Instant::now(),
                 ));
             }
+            // `--effort ultracode` 로 되살린 pane 은 **transcript 에 아무 흔적을 안
+            // 남긴다**(플래그 launch 는 enter attachment 를 안 쓴다 — 훅 주석의 실측).
+            // 훅은 첫 프롬프트가 있어야 돌고 꼬리 스캔도 볼 것이 없으니, 앱이 자기가
+            // 그렇게 띄웠다는 사실만이 유일한 근거다. 안 세워 두면 복원하자마자 다시
+            // 끄는 것만으로 ultracode 가 xhigh 로 풀린다.
+            if saved_effort(rec) == Some("ultracode") {
+                self.mark_restored_ultracode(&id);
+            }
             let cmd = restore_agent_command(
                 was_agent,
                 session_id.as_deref(),
@@ -3307,9 +3315,12 @@ impl App {
     /// ★ **사람이 정한 이름이 이긴다.** 지금 제목이 우리가 마지막에 심은 값과 다르면
     /// 그 사이 누군가(`surface.rename`·`kasaspace_rename`·파일 탭)가 직접 정한 것이라
     /// 비켜선다. 처음 보는 pane 에 이미 핀이 서 있으면 그것도 남의 것이다.
+    ///
+    /// 같은 꼬리에서 **ultracode 상태**도 함께 뽑는다(`ultra_verdict_in`). 두 사실이
+    /// 같은 파일의 같은 512KB 에 있어서, 따로 읽으면 같은 바이트를 두 번 읽는다.
     pub(crate) fn sync_session_titles(&mut self) {
-        // transcript 꼬리를 읽는 일이라 프레임 박자로 돌 것이 아니다. rename 은 사람이
-        // 한 번 치는 사건이라 이 정도면 「치자마자 바뀐다」로 읽힌다.
+        // transcript 꼬리를 읽는 일이라 프레임 박자로 돌 것이 아니다. rename 도
+        // `/effort` 도 사람이 한 번 치는 사건이라 이 정도면 「치자마자」로 읽힌다.
         {
             let mut last = session_title_scan().lock().unwrap();
             if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
@@ -3323,6 +3334,7 @@ impl App {
     /// 박자를 무시한 한 바퀴 — 하네스가 한 프레임 안에서 시나리오를 이어 돌린다.
     /// 제품 경로는 언제나 `sync_session_titles` 로 들어온다.
     pub(crate) fn sync_session_titles_now(&mut self) {
+        const WINDOW: u64 = 512 * 1024;
         let panes: Vec<(String, String)> = self
             .pane_claude_sid
             .iter()
@@ -3331,53 +3343,115 @@ impl App {
             .collect();
         for (pane_id, sid) in panes {
             let Some(path) = crate::socket::transcript_path_for_session(&sid) else { continue };
-            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let meta = std::fs::metadata(&path).ok();
+            let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+            let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             {
                 let seen = session_titles().lock().unwrap();
-                // 파일이 그대로면 이름도 그대로다 — 안 읽는다. 노는 pane 은 여기서
-                // 전부 걸러지고, 읽는 것은 지금 말하고 있는 pane 뿐이다.
-                if mtime.is_some() && seen.get(&pane_id).map(|e| e.0) == Some(mtime) {
+                // 파일이 그대로면 이름도 상태도 그대로다 — 안 읽는다. 노는 pane 은
+                // 여기서 전부 걸러지고, 읽는 것은 지금 말하고 있는 pane 뿐이다.
+                if mtime.is_some()
+                    && seen.get(&pane_id).is_some_and(|e| e.mtime == mtime && e.sid == sid)
+                {
                     continue;
                 }
             }
             // 512KB — `pane_bg_active` 가 같은 파일에 쓰는 창과 같은 값이다. 두 곳이
             // 따로 읽는 건 중복이지만, 캐시를 하나로 묶으면 `struct App` 에 필드가
             // 붙는다(병렬 작업 핫스팟, CLAUDE.md). 같은 파일이라 페이지 캐시가 받는다.
-            let (tail, _) = crate::socket::read_tail(&path, 512 * 1024);
+            let (tail, _) = crate::socket::read_tail(&path, WINDOW);
             let found = tail.lines().filter_map(kasa_socket::sessions::custom_title_of_line).last();
             let mut seen = session_titles().lock().unwrap();
             let entry = seen.entry(pane_id.clone()).or_default();
-            entry.0 = mtime;
+            // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — 옛 대화의 마커를 이
+            // 세션 것으로 읽으면 안 된다.
+            if entry.sid != sid {
+                *entry = PaneTranscript { sid: sid.clone(), ..Default::default() };
+            }
+            entry.mtime = mtime;
+            // 이 세션을 처음 본 순간의 파일 크기가 기준선이다. 그 앞의 effort 마커는
+            // **지난 실행**이 남긴 것이다 — 같은 jsonl 에 `--resume` 이 이어 쓰기
+            // 때문이다. 훅(ultracode-mark.py)은 프로세스 시작 시각으로 같은 선을
+            // 긋는데, 앱은 자기가 이 세션을 언제 물었는지 아니 파일 크기로 곧장
+            // 자를 수 있다.
+            let baseline = *entry.baseline.get_or_insert(len);
+            // 기준선 이후로 자란 부분만 본다. 꼬리가 기준선보다 앞에서 시작하면 그
+            // 앞부분을 잘라낸다.
+            let tail_start = len.saturating_sub(WINDOW);
+            let cut = usize::try_from(baseline.saturating_sub(tail_start)).unwrap_or(usize::MAX);
+            if let Some(fresh) = tail.get(cut..).or_else(|| (cut >= tail.len()).then_some("")) {
+                // 마커가 없으면 이전 판정을 지운다 — 세션을 갈아탄 뒤라면 옛 상태를
+                // 물려받으면 안 된다. 마커가 있으면 그것이 훅 표식보다 최신이다.
+                entry.ultra = ultra_verdict_in(fresh);
+            }
             // 꼬리 밖으로 밀려 안 보이는 것은 「이름이 없어졌다」가 아니다 — 대화가
             // 길어지면 옛 스탬프는 512KB 밖으로 나간다. 심어 둔 이름을 걷지 않는다.
             let Some(name) = found else { continue };
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.panes.get_mut(&pane_id) else { continue };
             if pane.title.as_deref() == Some(name.as_str()) {
-                entry.1 = Some(name);
+                entry.title = Some(name);
                 continue;
             }
-            if pane.title_pinned && pane.title != entry.1 {
+            if pane.title_pinned && pane.title != entry.title {
                 continue;
             }
             pane.title = Some(name.clone());
             pane.title_pinned = true;
-            entry.1 = Some(name);
+            entry.title = Some(name);
             self.chrome_dirty = true;
         }
     }
+
+    /// 꼬리 스캔이 내린 ultracode 판정 — `refresh_pane_ultracode` 가 훅 표식과 합칠 때
+    /// 쓴다. 표가 작아(살아 있는 claude pane 수) 통째로 복제하는 편이 락을 들고
+    /// 다니는 것보다 낫다.
+    pub(crate) fn scanned_ultracode(&self) -> HashMap<String, bool> {
+        session_titles()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(pane, e)| e.ultra.map(|v| (pane.clone(), v)))
+            .collect()
+    }
+
+    /// 이 pane 을 `--effort ultracode` 로 되살렸다고 표시한다. 제품 경로는
+    /// `restore_leaf` 하나뿐이고, 하네스가 같은 문을 써야 재는 것과 도는 것이 같다.
+    pub(crate) fn mark_restored_ultracode(&self, pane: &str) {
+        restored_ultracode().lock().unwrap().insert(pane.to_string());
+    }
+
+    /// 복원이 `--effort ultracode` 로 되살린 pane 들 — 아직 아무 마커도 안 생긴
+    /// 구간의 기준선이다. 사라진 pane 은 여기서 함께 걷는다(id 는 재사용된다).
+    pub(crate) fn restored_ultracode_panes(&self) -> std::collections::HashSet<String> {
+        let mut set = restored_ultracode().lock().unwrap();
+        set.retain(|id| self.pty.contains_key(id));
+        set.clone()
+    }
 }
 
-/// pane 별 `(마지막으로 본 transcript mtime, 우리가 심은 제목)`.
+/// pane 하나에 대해 transcript 꼬리에서 알아낸 것들.
+#[derive(Default, Clone)]
+struct PaneTranscript {
+    /// 이 값이 그대로면 파일을 다시 안 읽는다.
+    mtime: Option<std::time::SystemTime>,
+    /// 우리가 마지막으로 심은 제목 — 남이 바꿨는지 가르는 기준.
+    title: Option<String>,
+    /// 이 세션을 처음 봤을 때의 파일 크기. 그 앞의 effort 마커는 지난 실행 것이다.
+    baseline: Option<u64>,
+    /// 기준선 이후 마지막 effort 마커. `None` = 이번 실행 구간엔 마커가 없다.
+    ultra: Option<bool>,
+    /// 기준선을 잡을 때의 세션 id — 바뀌면 위 값들을 통째로 버린다.
+    sid: String,
+}
+
+/// pane 별 transcript 파생 상태.
 ///
 /// `struct App` 이 아니라 모듈 static 인 이유는 그 struct 가 병렬 작업의 충돌
-/// 핫스팟이기 때문이다(CLAUDE.md). 이 캐시는 이 파일 밖에서 쓰지 않는다.
-#[allow(clippy::type_complexity)]
-fn session_titles()
--> &'static std::sync::Mutex<HashMap<String, (Option<std::time::SystemTime>, Option<String>)>> {
-    static C: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<String, (Option<std::time::SystemTime>, Option<String>)>>,
-    > = std::sync::OnceLock::new();
+/// 핫스팟이기 때문이다(CLAUDE.md).
+fn session_titles() -> &'static std::sync::Mutex<HashMap<String, PaneTranscript>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PaneTranscript>>> =
+        std::sync::OnceLock::new();
     C.get_or_init(Default::default)
 }
 
@@ -3385,6 +3459,45 @@ fn session_titles()
 fn session_title_scan() -> &'static std::sync::Mutex<Option<Instant>> {
     static C: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> = std::sync::OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// 복원이 `--effort ultracode` 로 되살린 pane 들. 훅의 argv 기준선과 같은 구실이다
+/// (`collab-hooks/ultracode-mark.py` 의 `_proc_start`) — 그쪽은 `ps` 로 argv 를 캐고
+/// 이쪽은 자기가 띄운 명령을 그냥 안다.
+fn restored_ultracode() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// 이 구간에서 **가장 뒤에 있는** effort 마커의 판정. 없으면 `None`.
+///
+/// ⚠️ **니들 셋과 last-wins 규칙은 `collab-hooks/ultracode-mark.py` 의 `NEEDLES` 와
+/// 같아야 한다.** 훅은 프롬프트를 보낼 때 돌고 이쪽은 앱이 훑는다 — 두 벌이 같은
+/// 사실을 다르게 읽으면 글로우와 저장이 갈리고, 한쪽만 고친 날 조용히 어긋난다.
+/// 훅이 python 이라 상수를 공유할 길이 없어 주석으로 못 박는다. 한쪽을 고치거든
+/// 다른 쪽도 같이.
+///
+/// `Set effort level to` 는 `/effort` 가 화면에 뱉는 줄이라 **ultracode 가 아닌 값도
+/// 잡아야 한다** — ultracode 에서 xhigh 로 내린 것도 이 줄로만 알 수 있다.
+fn ultra_verdict_in(text: &str) -> Option<bool> {
+    const ENTER: &str = r#""type":"ultra_effort_enter""#;
+    const EXIT: &str = r#""type":"ultra_effort_exit""#;
+    const CMD: &str = r#""content":"<local-command-stdout>Set effort level to "#;
+    let mut best: Option<(usize, bool)> = None;
+    let mut take = |at: Option<usize>, on: bool| {
+        if let Some(i) = at {
+            if best.is_none_or(|(b, _)| i > b) {
+                best = Some((i, on));
+            }
+        }
+    };
+    take(text.rfind(ENTER), true);
+    take(text.rfind(EXIT), false);
+    if let Some(i) = text.rfind(CMD) {
+        take(Some(i), text[i + CMD.len()..].starts_with("ultracode"));
+    }
+    best.map(|(_, on)| on)
 }
 
 /// 경로 앞의 홈을 `~` 로 접는다. 홈을 못 찾으면 원본 그대로.

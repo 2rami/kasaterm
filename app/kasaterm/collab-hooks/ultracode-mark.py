@@ -48,6 +48,11 @@ OVERLAP = 512  # 청크 경계에 걸친 니들을 양쪽에서 다 보게 하�
 MAX_SCAN = 16 << 20  # 여기까지 거슬러도 마커가 없으면 OFF. 세션당 한 번만 내는 비용이다
 LINE_TAIL = 8192  # 마커 줄에서 timestamp 까지 읽을 만큼
 
+# ⚠️ 이 셋과 last-wins 규칙은 앱 쪽 `ultra_verdict_in`(app/kasaterm/src/session.rs)
+# 과 같아야 한다. 훅은 프롬프트를 보낼 때 돌고 앱은 transcript 꼬리를 직접 훑는데,
+# 두 벌이 같은 사실을 다르게 읽으면 글로우와 저장이 갈리고 한쪽만 고친 날 조용히
+# 어긋난다. py 라 상수를 공유할 길이 없어 주석으로 못 박는다 — 한쪽을 고치거든
+# 다른 쪽도 같이.
 ENTER = b'"type":"ultra_effort_enter"'
 EXIT = b'"type":"ultra_effort_exit"'
 CMD = b'"content":"<local-command-stdout>Set effort level to '

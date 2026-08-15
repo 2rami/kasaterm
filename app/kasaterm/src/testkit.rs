@@ -28,6 +28,15 @@ const IMGTIP_N: u32 = 7;
 const TITLESYNC_CWD: &str = "/tmp/kasaterm-titlesync";
 const TITLESYNC_SID: &str = "titlesync-probe";
 
+/// `autoultrascan` 이 심는 가짜 transcript 자리.
+const ULTRASCAN_CWD: &str = "/tmp/kasaterm-ultrascan";
+const ULTRASCAN_SID: &str = "ultrascan-probe";
+/// `/effort` 가 화면에 뱉는 줄이 transcript 에 남는 모양 — 실제 레코드에서 떴다.
+const ULTRASCAN_ENTER: &str = concat!(
+    r#"{"attachment":{"type":"ultra_effort_enter","reminderType":"full"},"#,
+    r#""type":"attachment"}"#
+);
+
 const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
 슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
 \n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
@@ -1704,6 +1713,124 @@ impl App {
         std::fs::write(&jsonl, body)?;
         self.pane_claude_sid.insert(pid.to_string(), TITLESYNC_SID.to_string());
         Ok(())
+    }
+
+    /// `KASATERM_AUTOULTRASCAN_MS` — `/effort` 로 켜고 **프롬프트 없이** 끄는 구간에서
+    /// ultracode 가 살아남는지 잰다.
+    ///
+    /// 훅(`collab-hooks/ultracode-mark.py`)은 UserPromptSubmit 이라 프롬프트가 있어야
+    /// 돈다. 켜자마자 앱을 끄면 표식이 한 번도 안 써지고, 그러면 저장이 xhigh 로
+    /// 굳어 다음 실행이 ultracode 를 잃는다 — 거노가 두 번 물린 자리다. 앱이
+    /// transcript 를 직접 훑는 경로가 그 구간을 메우는지 본다.
+    ///
+    /// 판정은 **둘 다** 찍는다. 글로우(`pane_ultracode`)만 보면 화면은 맞는데 저장은
+    /// 틀린 상태를 놓치고, 실제로 이 버그가 그 모양이었다.
+    pub(crate) fn run_pending_autoultrascan(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOULTRASCAN_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autoultrascan] 미측정 — 활성 pane 이 없다");
+            return;
+        };
+        let Some(path) = Self::ultrascan_path() else {
+            eprintln!("[autoultrascan] 미측정 — 가짜 transcript 경로를 못 만든다");
+            return;
+        };
+        // 출발점은 「지난 실행이 ultracode 를 켠 채로 끝난 세션」이다. 이 마커는 우리가
+        // 이 세션을 물기 **전** 것이라 유령이고, ①이 그걸 안 믿는지를 본다 —
+        // `--resume` 이 같은 jsonl 에 이어 쓰므로 이 구별이 없으면 남의 상태를
+        // 물려받는다.
+        if std::fs::write(&path, format!("{}\n", Self::ultrascan_cmd("ultracode"))).is_err() {
+            eprintln!("[autoultrascan] 미측정 — 가짜 transcript 를 못 썼다");
+            return;
+        }
+        self.pane_claude_sid.insert(pid.clone(), ULTRASCAN_SID.to_string());
+        for (step, add) in [
+            ("① 켠 채 끝난 세션을 물려받음", None),
+            ("② /effort ultracode", Some(Self::ultrascan_cmd("ultracode"))),
+            ("③ /effort xhigh", Some(Self::ultrascan_cmd("xhigh"))),
+            ("④ ultra_effort_enter", Some(ULTRASCAN_ENTER.to_string())),
+        ] {
+            if let Some(line) = add {
+                if Self::ultrascan_append(&path, &line).is_err() {
+                    eprintln!("[autoultrascan] {step} 미측정 — append 실패");
+                    return;
+                }
+            }
+            // mtime 이 같으면 꼬리를 다시 안 읽는다 — `autotitlesync` 와 같은 이유로
+            // 걸음 사이를 벌린다.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.sync_session_titles_now();
+            self.refresh_pane_ultracode();
+            let glow = self.pane_ultracode.contains(&pid);
+            let saved = self
+                .agent_cfg_snapshot()
+                .get(&pid)
+                .map(|c| c.1.clone())
+                .unwrap_or_default();
+            eprintln!("[autoultrascan] {step} → 글로우={glow} 저장effort={saved:?}");
+        }
+        // ⑤ 복원 기준선. `--effort ultracode` 로 되살린 pane 은 transcript 에 흔적이
+        // 없어 스캔도 훅도 볼 것이 없다 — 앱이 자기가 그렇게 띄웠다는 표시만이
+        // 근거다. 여기서는 그 표시를 제품과 **같은 문**(`mark_restored_ultracode`)으로
+        // 세우고, 마커가 하나도 없는 파일에서도 저장까지 가는지 본다.
+        //
+        // ⚠️ 「복원이 그 표시를 세운다」까지는 여기서 못 잰다. 복원 리그를 세우려면
+        // 저장본에 was_agent 를 넣어야 하고, 그러면 900ms 뒤 진짜 `claude` 가 뜬다.
+        if Self::ultrascan_append(&path, "{}").is_ok() {
+            self.pane_claude_sid.remove(&pid);
+            self.mark_restored_ultracode(&pid);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.sync_session_titles_now();
+            self.refresh_pane_ultracode();
+            let glow = self.pane_ultracode.contains(&pid);
+            let saved = self
+                .agent_cfg_snapshot()
+                .get(&pid)
+                .map(|c| c.1.clone())
+                .unwrap_or_default();
+            // sid 를 일부러 뗐다 — 복원 직후엔 bind-transcript 훅이 아직 안 와서
+            // `pane_claude_sid` 가 비어 있다. 그 상태에서도 잡히는지가 이 걸음의
+            // 요점이고, 처음 짤 때 실제로 여기서 빠뜨렸다.
+            eprintln!("[autoultrascan] ⑤ 복원 기준선(sid 없음) → 글로우={glow} 저장effort={saved:?}");
+        }
+    }
+
+    /// `autoultrascan` 이 쓸 가짜 transcript 경로.
+    fn ultrascan_path() -> Option<std::path::PathBuf> {
+        let cwd = std::path::PathBuf::from(ULTRASCAN_CWD);
+        std::fs::create_dir_all(&cwd).ok()?;
+        let p = crate::socket::project_jsonl(&cwd, ULTRASCAN_SID)?;
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).ok()?;
+        }
+        Some(p)
+    }
+
+    /// `/effort <level>` 이 transcript 에 남기는 줄 — 실제 레코드에서 뜬 모양이다.
+    fn ultrascan_cmd(level: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"<local-command-stdout>Set effort level to {level}"}}}}"#
+        )
+    }
+
+    fn ultrascan_append(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(f, "{line}")
     }
 
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).

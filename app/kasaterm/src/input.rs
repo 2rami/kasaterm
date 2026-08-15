@@ -371,12 +371,25 @@ impl App {
         self.statusbar.res = sample_process_tree_usage();
     }
 
-    fn refresh_pane_ultracode(&mut self) {
+    pub(crate) fn refresh_pane_ultracode(&mut self) {
         let dir = std::path::Path::new("/tmp/kasaterm-collab/ultracode");
+        // 앱이 transcript 꼬리에서 직접 읽은 판정. 훅은 **프롬프트를 보내야** 도는데,
+        // `/effort` 로 켜고 프롬프트 없이 앱을 끄는 것이 자연스러운 사용이라 그 구간엔
+        // 표식이 아예 없었다 — 그러면 저장이 xhigh 로 굳어 다음 실행이 ultracode 를
+        // 잃는다(거노 2026-08-15 두 번째 신고). 스캔이 답을 내면 그쪽이 최신이다:
+        // 켰다면 표식이 없어도 켜고, 껐다면 표식이 남아 있어도 끈다.
+        let scanned = self.scanned_ultracode();
+        // 복원이 `--effort ultracode` 로 되살린 pane. 그 경로는 transcript 에 흔적을
+        // 안 남기므로 스캔도 훅도 볼 것이 없다 — 되살리자마자 다시 끄면 그것만으로
+        // ultracode 가 풀리던 자리다.
+        let restored = self.restored_ultracode_panes();
         self.pane_ultracode = self
             .pane_claude_sid
             .iter()
-            .filter(|(_, sid)| {
+            .filter(|(pane, sid)| {
+                if let Some(on) = scanned.get(pane.as_str()) {
+                    return *on;
+                }
                 // 훅과 **같은** 정제 규칙이어야 파일명이 어긋나지 않는다.
                 !sid.is_empty()
                     && sid
@@ -395,6 +408,15 @@ impl App {
             })
             .map(|(pane, _)| pane.clone())
             .collect();
+        // 복원 기준선은 **위 순회 밖**에서 얹는다. 저 순회는 `pane_claude_sid` 를
+        // 도는데 그 표는 bind-transcript 훅이 채우고, 그 훅은 첫 프롬프트 뒤에나
+        // 온다 — 복원 직후의 pane 은 아직 표에 없어 후보로도 안 잡힌다.
+        // 스캔이 「껐다」고 말한 pane 만 빼고 나머지는 켠다.
+        for pane in restored {
+            if scanned.get(&pane) != Some(&false) {
+                self.pane_ultracode.insert(pane);
+            }
+        }
         // 혜성 redraw 펌프(handler.rs)의 게이트 — 마커 스캔과 같은 손이 갱신해야
         // 켜짐/꺼짐이 글로우와 같은 박자로 움직인다.
         crate::render::ULTRA_COMET_ANIMATING.store(
@@ -414,10 +436,13 @@ impl App {
         // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
         // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
         self.reap_idle_closed_panes();
+        // 꼬리 스캔이 **먼저**다 — 아래 ultracode 판정이 그 결과를 읽는다. 뒤에 두면
+        // 켜고 끈 것이 한 틱 늦게 화면에 온다.
+        self.sync_session_titles();
         self.refresh_pane_ultracode();
         self.refresh_tunnel_chip();
-        self.sync_session_titles();
         self.run_pending_autotitlesync();
+        self.run_pending_autoultrascan();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same
