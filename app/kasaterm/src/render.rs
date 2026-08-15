@@ -7018,16 +7018,31 @@ impl App {
                 // 안 돼 스위치를 폰에 둘 이유가 없다 — 여닫는 손은 맥이다.
                 // 점이 상태다: 초록=열림, 흐림=닫힘. 누르면 handler 가 토글한다.
                 {
-                    let label = "바깥";
-                    let dot = 7.0_f32;
+                    // 「바깥」이었다 — 무엇이 바깥인지 말해 주지 않는 이름이라
+                    // 바꿨다(2026-08-15 지시 「바깥이라는거 좀 이상한데」). 지구본이
+                    // 뜻을 지고, 두 글자가 그걸 못 읽는 경우를 받치고, 나머지 설명은
+                    // 팝오버 제목이 한다.
+                    let label = "원격";
+                    let icon = 12.0_f32;
+                    let dot = 6.0_f32;
                     let gap = 5.0_f32;
                     let on = self.statusbar.tunnel_on == Some(true);
                     let tw = g.measure_chrome_text(label, fs, false);
-                    let seg_w = dot + gap + tw;
+                    let seg_w = icon + gap + tw + gap + dot;
                     let tx = win_w - 12.0 - seg_w;
+                    let col = if on { theme::text() } else { theme::text_dim() };
+                    g.queue_icon("globe", tx, sy + (STATUS_HEIGHT - icon) / 2.0, icon, col);
+                    g.draw_text(
+                        tx + icon + gap,
+                        ty,
+                        label,
+                        gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                    );
+                    // 점은 이름 뒤로 옮겼다 — 상태(열림/닫힘)는 이름을 읽은 **다음에**
+                    // 궁금해지는 것이고, 앞에 두면 지구본과 나란히 서서 둘 다 뜻이 흐려진다.
                     round_rect(
                         g,
-                        tx,
+                        tx + icon + gap + tw + gap,
                         sy + (STATUS_HEIGHT - dot) / 2.0,
                         dot,
                         dot,
@@ -7036,17 +7051,6 @@ impl App {
                             theme::success()
                         } else {
                             theme::with_alpha(theme::text_dim(), 140)
-                        },
-                    );
-                    g.draw_text(
-                        tx + dot + gap,
-                        ty,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: fs,
-                            color: if on { theme::text() } else { theme::text_dim() },
-                            bold: false,
-                            italic: false,
                         },
                     );
                     let r = (tx - 8.0, sy, seg_w + 20.0, STATUS_HEIGHT);
@@ -7626,7 +7630,10 @@ impl App {
                 let text_w = g.measure_chrome_text(&label, v_font, false);
                 let margin = 8.0;
                 let x = (win_w - text_w - margin).max(margin);
-                let y = win_h - v_font - margin;
+                // 상태줄 **위**로. 창 바닥에 붙이던 자리인데 그 자리는 이제 상태줄이
+                // 쓰고, 버전이 그 위에 덧그려져 자원 수치와 글자가 포개졌다(부팅 후
+                // 몇 초라 놓치기 쉽다 — 2026-08-15 캡처에서 잡았다).
+                let y = win_h - STATUS_HEIGHT - v_font - margin;
                 let a = (170.0 * v_alpha).round() as u8;
                 g.draw_text(
                     x,

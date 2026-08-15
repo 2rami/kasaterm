@@ -5811,6 +5811,26 @@ impl App {
             return;
         }
         STEP.store(step + 1, Ordering::Relaxed);
+        // 무엇을 펼칠지. 팝오버가 여럿이라 하네스를 하나 더 만드는 대신 값으로
+        // 가른다 — 캡처는 실행당 한 장이므로 어차피 두 번 돌려야 한다.
+        let want = std::env::var("KASATERM_AUTOPOPOVER").unwrap_or_default();
+        let tunnel = want.starts_with("tunnel");
+        if step == 0 && tunnel {
+            if want == "tunnel-off" {
+                // 실제로 끄지 **않는다** — 이 기계에서 진짜 터널이 돌고 있으면
+                // 검증이 그걸 내려버린다. 표시만 닫힌 것으로 세운다.
+                self.statusbar.tunnel_on = Some(false);
+                self.statusbar.tunnel_host = None;
+                self.statusbar.tunnel_checked = Some(Instant::now());
+                return;
+            }
+            // 실제로 문을 열지는 **않는다**. 켜진 화면(주소 줄·복사 버튼)을 보려고
+            // 밖으로 나가는 문을 여는 건 검증이 치를 값이 아니다.
+            self.statusbar.tunnel_on = Some(true);
+            self.statusbar.tunnel_host = Some("kasaterm-probe.example.com".to_string());
+            self.statusbar.tunnel_checked = Some(Instant::now());
+            return;
+        }
         if step == 0 {
             let row = |port: u16, pid: u32, repo: &str, site: &str, name: &str, label: &str,
                        orphan: bool, dead: bool| crate::info::PortRow {
@@ -5836,12 +5856,35 @@ impl App {
         if step == 1 {
             // 앵커는 지난 프레임이 세워 둔 칩 사각형이다 — 그게 없으면 상태줄이
             // 아직 안 그려진 것이고, 그때 억지로 열면 팝오버가 엉뚱한 자리에 뜬다.
-            match self.statusbar.port_rect {
+            let (kind, anchor) = if tunnel {
+                (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
+            } else {
+                (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect)
+            };
+            match anchor {
                 Some(r) => {
-                    self.toggle_statusbar_popover(crate::state::StatusbarPopover::Ports, r);
-                    eprintln!("[autoportpop] 열림 anchor={r:?} rows={}", self.info.view.ports.len());
+                    self.toggle_statusbar_popover(kind, r);
+                    eprintln!("[autoportpop] 열림 {kind:?} anchor={r:?}");
                 }
-                None => eprintln!("[autoportpop] FAIL — 포트 칩이 아직 안 그려졌다"),
+                None => eprintln!("[autoportpop] FAIL — 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        if tunnel {
+            // 복사 버튼 호버.
+            match self
+                .statusbar
+                .popover_hits
+                .iter()
+                .find(|(h, _)| matches!(h, crate::state::StatusbarHit::CopyTunnelHost))
+                .map(|(_, r)| *r)
+            {
+                Some(r) => {
+                    self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    self.chrome_dirty = true;
+                    eprintln!("[autoportpop] 커서 → 복사 {:?}", self.cursor_px);
+                }
+                None => eprintln!("[autoportpop] FAIL — 복사 버튼이 없다"),
             }
             return;
         }

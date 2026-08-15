@@ -44,6 +44,10 @@ pub(crate) struct StatusbarState {
     /// 는 폴 박자 게이트 — 상태 조회에 pgrep 이 들어가 매 프레임은 못 돈다.
     pub(crate) tunnel_on: Option<bool>,
     pub(crate) tunnel_checked: Option<std::time::Instant>,
+    /// 원격 주소(cloudflared config 의 hostname). 같은 5초 폴에 얹는다 — 읽는 일이
+    /// **파일 IO** 라, 팝오버가 그릴 때마다 부르면 열어 둔 동안 매 프레임
+    /// `config.yml` 을 읽게 된다.
+    pub(crate) tunnel_host: Option<String>,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어
@@ -77,6 +81,7 @@ pub(crate) struct StatusbarState {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum StatusbarPopover {
     Ports,
+    Tunnel,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.
@@ -88,6 +93,10 @@ pub(crate) enum StatusbarHit {
     KillPort(u32),
     /// 맨 윗줄 — 이 앱의 웹터미널(`/term`).
     OpenWebTerm,
+    /// 원격 접속 문을 여닫는다.
+    ToggleTunnel,
+    /// 열려 있을 때의 주소를 클립보드로.
+    CopyTunnelHost,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window

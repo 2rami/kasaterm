@@ -4243,26 +4243,12 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    if self.statusbar.tunnel_rect.is_some_and(|r| sb_hit(&r)) {
-                        let want = !self.statusbar.tunnel_on.unwrap_or(false);
-                        let msg = match kasa_mcp::tunnel::set(want) {
-                            Ok(on) => {
-                                self.statusbar.tunnel_on = Some(on);
-                                if on {
-                                    match kasa_mcp::tunnel::host() {
-                                        Some(h) => format!("바깥주소 열림 — https://{h}"),
-                                        None => "바깥주소 열림".to_string(),
-                                    }
-                                } else {
-                                    "바깥주소 닫힘".to_string()
-                                }
-                            }
-                            Err(e) => e,
-                        };
-                        self.statusbar.tunnel_checked = Some(std::time::Instant::now());
-                        self.collab.toast = Some((msg, std::time::Instant::now()));
-                        window.request_redraw();
-                        return;
+                    if let Some(r) = self.statusbar.tunnel_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Tunnel, r);
+                            window.request_redraw();
+                            return;
+                        }
                     }
                     if let Some(pid) = self
                         .statusbar.toggle_rects

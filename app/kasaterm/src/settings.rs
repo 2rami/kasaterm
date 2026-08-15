@@ -5117,7 +5117,9 @@ fn stepper_btn(g: &mut gpu::GpuRenderer, r: Rect, glyph: &str, cursor: (f32, f32
     );
 }
 
-fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
+/// 켬/끔 스위치. 설정 화면 밖(상태줄 팝오버)에서도 쓴다 — 스위치 모양이 앱 안에서
+/// 두 가지면 같은 뜻의 조작이 자리에 따라 달라 보인다.
+pub(crate) fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     let hover = inside(r, cursor);
     g.hover_pointer |= hover;
     // 꺼진 트랙은 **카드 배경보다 확실히 밝아야** 한다. `surface_active` 는 폼 카드와

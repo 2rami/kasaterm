@@ -365,6 +365,7 @@ impl App {
         }
         self.statusbar.tunnel_checked = Some(now);
         self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
+        self.statusbar.tunnel_host = kasa_mcp::tunnel::host();
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());

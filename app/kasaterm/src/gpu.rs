@@ -3703,6 +3703,7 @@ impl GpuRenderer {
             // 픽셀 세트에는 없다 — `queue_icon` 이 벡터로 폴백하므로 픽셀 테마에서도
             // 뜬다. 라이선스가 다른 세트라 원본에 없는 아이콘을 손으로 그려 넣지 않는다.
             "plug" => include_str!("../assets/icons/plug.svg"),
+            "globe" => include_str!("../assets/icons/globe.svg"),
             "sparkles" => include_str!("../assets/icons/sparkles.svg"),
             "rotate-cw" => include_str!("../assets/icons/rotate-cw.svg"),
             "maximize" => include_str!("../assets/icons/maximize.svg"),

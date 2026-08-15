@@ -43,6 +43,101 @@ pub(crate) fn paint_popover(
         state::StatusbarPopover::Ports => {
             paint_ports_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
+        state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
+    }
+}
+
+/// 원격 접속 팝오버 — 여닫는 스위치 · 주소 · 복사.
+///
+/// 예전엔 칩을 누르는 즉시 토글이었다. 되돌릴 수 있는 조작이긴 해도 **밖으로 문을
+/// 여는 일**이라 손이 스치면 열려 버렸고, 정작 열고 나면 어디로 접속하는지가 토스트
+/// 한 번 뜨고 사라져 다시 확인할 길이 없었다(2026-08-15 지시 「누르면 좌측 사용량처럼
+/// 펼쳐져서 거기서 조작하게 하자」). 조작과 주소를 같은 자리에 둔다.
+fn paint_tunnel_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    cursor: (f32, f32),
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+) {
+    let on = sb.tunnel_on == Some(true);
+    let host = on.then(|| sb.tunnel_host.clone()).flatten();
+    let w = 288.0_f32.min(win_w - 16.0);
+    // 닫혀 있으면 주소 줄이 통째로 빠진다 — 높이를 안 줄이면 그만큼이 빈 여백으로
+    // 남아 팝오버가 이유 없이 커 보인다.
+    let h = if on { 118.0 } else { 86.0 };
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+
+    // 제목이 이름을 대신 설명한다 — 칩에는 아이콘과 두 글자밖에 안 들어가서,
+    // 그것만으로 "무엇이 밖으로 열리나" 를 알 수는 없다.
+    g.draw_text(
+        x + 12.0,
+        y + 10.0,
+        "원격 접속",
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    g.draw_text(
+        x + 12.0,
+        y + 28.0,
+        "폰·다른 기기에서 이 kasaterm 에 붙는다",
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let sw = (x + w - 12.0 - 36.0, y + 10.0, 36.0, 20.0);
+    crate::settings::toggle(g, sw, on, cursor);
+    sb.popover_hits.push((state::StatusbarHit::ToggleTunnel, sw));
+
+    let line = y + 50.0;
+    g.rect(x + 12.0, line, w - 24.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+    match host {
+        Some(host) => {
+            let addr = format!("https://{host}");
+            let cr = (x + w - 12.0 - 22.0, line + 12.0, 22.0, 22.0);
+            let ch = hit(cursor, &cr);
+            g.hover_pointer |= ch;
+            if ch {
+                round_rect(g, cr.0, cr.1, cr.2, cr.3, theme::radius_sm(), theme::surface_hover());
+            }
+            g.queue_icon(
+                "copy",
+                cr.0 + 5.0,
+                cr.1 + 5.0,
+                12.0,
+                if ch { theme::text() } else { theme::text_mute() },
+            );
+            sb.popover_hits.push((state::StatusbarHit::CopyTunnelHost, cr));
+            let s = crate::info::fit_text(g, &addr, (cr.0 - x - 24.0).max(0.0), 11.0, false);
+            g.draw_text(
+                x + 12.0,
+                line + 17.0,
+                &s,
+                gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+            );
+            g.draw_text(
+                x + 12.0,
+                line + 36.0,
+                "이 주소를 아는 사람은 누구나 붙을 수 있다",
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::with_alpha(theme::text_mute(), 0xB0),
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+        None => {
+            // 켜져 있는데 주소가 없으면 아직 무는 중이다 — "닫힘" 으로 적으면
+            // 스위치와 어긋나 보인다.
+            let msg = if on { "주소를 받는 중…" } else { "닫혀 있다 — 이 기계에서만 열린다" };
+            g.draw_text(
+                x + 12.0,
+                line + 14.0,
+                msg,
+                gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+            );
+        }
     }
 }
 
@@ -260,6 +355,28 @@ impl crate::App {
             Some(state::StatusbarHit::OpenWebTerm) => {
                 if let Some(port) = self.statusbar.port.clone() {
                     self.open_url(&format!("http://127.0.0.1:{port}/term"));
+                }
+                return true;
+            }
+            Some(state::StatusbarHit::ToggleTunnel) => {
+                // 결과는 낙관 반영하고 5초 뒤 폴이 확정한다 — 끄기(TERM)는 소멸이
+                // 한 박자 늦어 즉시 되물으면 아직 살아 보인다.
+                let want = !self.statusbar.tunnel_on.unwrap_or(false);
+                let msg = match kasa_mcp::tunnel::set(want) {
+                    Ok(on) => {
+                        self.statusbar.tunnel_on = Some(on);
+                        if on { "원격 접속 열림" } else { "원격 접속 닫힘" }.to_string()
+                    }
+                    Err(e) => e,
+                };
+                self.statusbar.tunnel_checked = Some(std::time::Instant::now());
+                self.collab.toast = Some((msg, std::time::Instant::now()));
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::CopyTunnelHost) => {
+                if let Some(h) = self.statusbar.tunnel_host.clone() {
+                    self.copy_to_clipboard(format!("https://{h}"), "원격 주소 복사됨");
                 }
                 return true;
             }
