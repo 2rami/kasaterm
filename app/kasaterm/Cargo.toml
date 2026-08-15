@@ -9,6 +9,10 @@ license.workspace = true
 [dependencies]
 kasa-bridge.workspace = true
 kasa-pty = { path = "../../crates/kasa-pty" }
+# 계정 전환의 keychain 서비스명 계산 — claude 실물(2.1.233 WZ())과 같은 식으로
+# sha256(저장 경로 NFC).hex[..8] 을 접미로 쓴다. 둘 다 이미 워크스페이스에 있다.
+sha2 = "0.10"
+unicode-normalization = "0.1"
 kasa-socket = { path = "../../crates/kasa-socket" }
 kasa-ime = { path = "../../crates/kasa-ime" }
 kasa-cells = { path = "../../crates/kasa-cells" }
@@ -90,6 +94,7 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 block2 = "0.6"
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc = "0.2"
+security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
