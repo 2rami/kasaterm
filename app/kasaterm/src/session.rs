@@ -3291,6 +3291,100 @@ impl App {
         self.socket_backend = Some(backend.clone());
         self.start_socket_with(backend);
     }
+
+    /// claude 가 자기 세션에 붙인 이름(`/rename`)을 그 pane 의 제목으로 옮긴다.
+    ///
+    /// pane 제목이 읽는 것은 두 가지뿐이었다 — 터미널이 쏘는 OSC 와 그것을 따라가는
+    /// GUI 사본. claude 안에서 `/rename` 을 치면 이름은 **transcript 의 `custom-title`
+    /// 레코드**로만 남고 OSC 로는 안 나가므로, 탭에는 옛 이름이 그대로 남았다
+    /// (거노 2026-08-15 「소환할때 /rename 안되는거」). 실측으로 그 갈림을 확인했다:
+    /// `/rename` 뒤에도 OSC 는 활동 요약이었고, 새 이름은 transcript 의 마지막
+    /// custom-title 에만 있었다.
+    ///
+    /// **핀을 세워서** 옮긴다. 안 세우면 claude 가 계속 쏘는 활동 제목이 다음 프레임에
+    /// 그대로 덮어, 이름이 한 번 깜빡이고 사라진다.
+    ///
+    /// ★ **사람이 정한 이름이 이긴다.** 지금 제목이 우리가 마지막에 심은 값과 다르면
+    /// 그 사이 누군가(`surface.rename`·`kasaspace_rename`·파일 탭)가 직접 정한 것이라
+    /// 비켜선다. 처음 보는 pane 에 이미 핀이 서 있으면 그것도 남의 것이다.
+    pub(crate) fn sync_session_titles(&mut self) {
+        // transcript 꼬리를 읽는 일이라 프레임 박자로 돌 것이 아니다. rename 은 사람이
+        // 한 번 치는 사건이라 이 정도면 「치자마자 바뀐다」로 읽힌다.
+        {
+            let mut last = session_title_scan().lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        self.sync_session_titles_now();
+    }
+
+    /// 박자를 무시한 한 바퀴 — 하네스가 한 프레임 안에서 시나리오를 이어 돌린다.
+    /// 제품 경로는 언제나 `sync_session_titles` 로 들어온다.
+    pub(crate) fn sync_session_titles_now(&mut self) {
+        let panes: Vec<(String, String)> = self
+            .pane_claude_sid
+            .iter()
+            .filter(|(id, _)| self.pty.contains_key(id.as_str()))
+            .map(|(id, sid)| (id.clone(), sid.clone()))
+            .collect();
+        for (pane_id, sid) in panes {
+            let Some(path) = crate::socket::transcript_path_for_session(&sid) else { continue };
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            {
+                let seen = session_titles().lock().unwrap();
+                // 파일이 그대로면 이름도 그대로다 — 안 읽는다. 노는 pane 은 여기서
+                // 전부 걸러지고, 읽는 것은 지금 말하고 있는 pane 뿐이다.
+                if mtime.is_some() && seen.get(&pane_id).map(|e| e.0) == Some(mtime) {
+                    continue;
+                }
+            }
+            // 512KB — `pane_bg_active` 가 같은 파일에 쓰는 창과 같은 값이다. 두 곳이
+            // 따로 읽는 건 중복이지만, 캐시를 하나로 묶으면 `struct App` 에 필드가
+            // 붙는다(병렬 작업 핫스팟, CLAUDE.md). 같은 파일이라 페이지 캐시가 받는다.
+            let (tail, _) = crate::socket::read_tail(&path, 512 * 1024);
+            let found = tail.lines().filter_map(kasa_socket::sessions::custom_title_of_line).last();
+            let mut seen = session_titles().lock().unwrap();
+            let entry = seen.entry(pane_id.clone()).or_default();
+            entry.0 = mtime;
+            // 꼬리 밖으로 밀려 안 보이는 것은 「이름이 없어졌다」가 아니다 — 대화가
+            // 길어지면 옛 스탬프는 512KB 밖으로 나간다. 심어 둔 이름을 걷지 않는다.
+            let Some(name) = found else { continue };
+            let mut ws = self.ws.lock().unwrap();
+            let Some(pane) = ws.panes.get_mut(&pane_id) else { continue };
+            if pane.title.as_deref() == Some(name.as_str()) {
+                entry.1 = Some(name);
+                continue;
+            }
+            if pane.title_pinned && pane.title != entry.1 {
+                continue;
+            }
+            pane.title = Some(name.clone());
+            pane.title_pinned = true;
+            entry.1 = Some(name);
+            self.chrome_dirty = true;
+        }
+    }
+}
+
+/// pane 별 `(마지막으로 본 transcript mtime, 우리가 심은 제목)`.
+///
+/// `struct App` 이 아니라 모듈 static 인 이유는 그 struct 가 병렬 작업의 충돌
+/// 핫스팟이기 때문이다(CLAUDE.md). 이 캐시는 이 파일 밖에서 쓰지 않는다.
+#[allow(clippy::type_complexity)]
+fn session_titles()
+-> &'static std::sync::Mutex<HashMap<String, (Option<std::time::SystemTime>, Option<String>)>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (Option<std::time::SystemTime>, Option<String>)>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// 마지막으로 훑은 시각 — 꼬리 읽기의 박자를 잡는다.
+fn session_title_scan() -> &'static std::sync::Mutex<Option<Instant>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
 }
 
 /// 경로 앞의 홈을 `~` 로 접는다. 홈을 못 찾으면 원본 그대로.

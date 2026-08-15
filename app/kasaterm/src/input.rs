@@ -416,6 +416,8 @@ impl App {
         self.reap_idle_closed_panes();
         self.refresh_pane_ultracode();
         self.refresh_tunnel_chip();
+        self.sync_session_titles();
+        self.run_pending_autotitlesync();
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
         // the completion-toast path takes no further workspace lock. The same

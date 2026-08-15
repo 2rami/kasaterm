@@ -199,18 +199,8 @@ fn last_custom_title(path: &Path) -> Option<String> {
         let text = String::from_utf8_lossy(&buf);
         let mut last: Option<String> = None;
         for line in text.lines().skip(usize::from(start > 0)) {
-            if !line.contains("\"custom-title\"") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-            if v.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
-                continue;
-            }
-            if let Some(t) = v.get("customTitle").and_then(|t| t.as_str()) {
-                let t = t.trim();
-                if !t.is_empty() {
-                    last = Some(t.chars().take(80).collect());
-                }
+            if let Some(t) = custom_title_of_line(line) {
+                last = Some(t);
             }
         }
         if last.is_some() {
@@ -219,6 +209,26 @@ fn last_custom_title(path: &Path) -> Option<String> {
         end = start;
     }
     None
+}
+
+/// jsonl 한 줄이 `/rename` 레코드면 그 제목, 아니면 None.
+///
+/// 파일을 역스캔해 찾는 쪽(`last_custom_title`)과 **이미 읽어 둔 꼬리**에서 찾는
+/// 쪽(GUI 의 pane 제목 동기화)이 같은 규칙을 봐야, 한 pane 을 두고 두 화면이 서로
+/// 다른 이름을 말하지 않는다.
+///
+/// 파싱 전에 문자열로 한 번 거른다 — 에이전트 세션은 한 줄이 수백 KB 라 전부
+/// `serde_json` 에 넣으면 꼬리 훑기가 그 자체로 무거워진다.
+pub fn custom_title_of_line(line: &str) -> Option<String> {
+    if !line.contains("\"custom-title\"") {
+        return None;
+    }
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
+        return None;
+    }
+    let t = v.get("customTitle").and_then(|t| t.as_str())?.trim();
+    (!t.is_empty()).then(|| t.chars().take(80).collect())
 }
 
 /// 라벨로 부적합한 메타성 user 텍스트(슬래시 명령·시스템 주입·bash 출력 래퍼).

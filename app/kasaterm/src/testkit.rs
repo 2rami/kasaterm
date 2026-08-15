@@ -24,6 +24,10 @@ const IMGTIP_SID: &str = "imgtip-probe";
 /// 화면에 찍을 참조 번호 — 심는 jsonl 의 `imagePasteIds` 와 짝이다.
 const IMGTIP_N: u32 = 7;
 
+/// `autotitlesync` 가 심는 가짜 transcript 자리 — 위 둘과 같은 이유로 `/tmp/` 슬러그.
+const TITLESYNC_CWD: &str = "/tmp/kasaterm-titlesync";
+const TITLESYNC_SID: &str = "titlesync-probe";
+
 const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
 슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
 \n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
@@ -1593,6 +1597,115 @@ impl App {
     /// 끝나 행 좌표가 생긴 뒤) 첫 프로세스 행에 커서를 올리거나 우클릭 메뉴를
     /// 띄운다. 종료(×) 버튼과 메뉴는 호버·우클릭에만 나타나 정적 캡처로는
     /// 존재 자체를 확인할 수 없다.
+    /// `KASATERM_AUTOTITLESYNC_MS` — claude 안에서 친 `/rename` 이 pane 탭 이름까지
+    /// 닿는지, 그리고 **사람이 붙인 이름을 안 밀어내는지** 한 프레임에 잇달아 잰다.
+    ///
+    /// 사람 손을 못 흉내내는 건 하나뿐이다 — claude 가 transcript 에 남기는
+    /// `custom-title` 레코드. 그것만 가짜로 심고 나머지는 제품 경로를 그대로 태운다.
+    /// 실제 claude 를 띄워 `/rename` 을 치는 검증은 대화 하나를 실제로 소모하고,
+    /// 정작 갈리는 자리(사람 개명과 겹칠 때)는 손으로 재현하기가 더 어렵다.
+    ///
+    /// 네 걸음이 규칙 전부를 덮는다: 붙는가 · 갱신되는가 · 사람 것을 안 덮는가 ·
+    /// 그 뒤로도 안 덮는가.
+    pub(crate) fn run_pending_autotitlesync(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTITLESYNC_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autotitlesync] 미측정 — 활성 pane 이 없다");
+            return;
+        };
+        for (step, in_transcript, by_hand) in [
+            ("① claude 가 개명", "지어준이름", None),
+            ("② claude 가 또 개명", "두번째이름", None),
+            ("③ 사람이 개명", "두번째이름", Some("사람이붙인이름")),
+            ("④ 그 뒤 claude 가 또", "네번째이름", None),
+        ] {
+            if let Some(h) = by_hand {
+                // `surface.rename` 이 닿는 자리와 같은 두 칸 — 그 경로를 통째로
+                // 부르지 않는 건 소켓 왕복이 이 하네스의 관심사가 아니어서다.
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(p) = ws.panes.get_mut(&pid) {
+                    p.title = Some(h.to_string());
+                    p.title_pinned = true;
+                }
+            }
+            if let Err(e) = self.titlesync_seed(&pid, in_transcript) {
+                eprintln!("[autotitlesync] 미측정 — 가짜 transcript 를 못 썼다: {e}");
+                return;
+            }
+            // 동기화는 mtime 이 그대로면 파일을 안 읽는다. 네 걸음을 같은 밀리초에
+            // 몰면 ②부터가 「안 읽음」이 되는데, 결과만 보면 「물러섰다」와 구별이
+            // 안 된다 — 그러면 ③이 무엇을 증명했는지 말할 수 없다.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.sync_session_titles_now();
+            let ws = self.ws.lock().unwrap();
+            let (title, pinned) = ws
+                .panes
+                .get(&pid)
+                .map(|p| (p.title.clone().unwrap_or_default(), p.title_pinned))
+                .unwrap_or_default();
+            eprintln!(
+                "[autotitlesync] {step}  전사본={in_transcript:?} → 제목={title:?} 핀={pinned}"
+            );
+        }
+        // ⑤ 사람 흔적을 걷으면 다시 claude 쪽을 따라간다. 이 걸음을 마지막에 두는
+        // 이유는 캡처 때문이다 — `KASATERM_AUTOCAPTURE_MS` 를 뒤에 붙이면 그 이름이
+        // **타이틀바에 실제로 그려진 화면**이 찍힌다. 위 네 줄은 값이 맞는지만
+        // 말하고, 그 값이 사람 눈에 닿는지는 말해 주지 않는다.
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(p) = ws.panes.get_mut(&pid) {
+                p.title = None;
+                p.title_pinned = false;
+            }
+        }
+        if self.titlesync_seed(&pid, "다섯번째이름").is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.sync_session_titles_now();
+            let ws = self.ws.lock().unwrap();
+            let title = ws
+                .panes
+                .get(&pid)
+                .and_then(|p| p.title.clone())
+                .unwrap_or_default();
+            eprintln!(
+                "[autotitlesync] ⑤ 사람 이름을 걷고  전사본=\"다섯번째이름\" → 제목={title:?}"
+            );
+        }
+    }
+
+    /// `autotitlesync` 가 쓸 가짜 transcript — claude `/rename` 이 남기는 것과 같은
+    /// 모양이다. `nameSource` 가 없는 것까지 같다(그 표식은 우리 CLI 개명만 남긴다).
+    fn titlesync_seed(&mut self, pid: &str, name: &str) -> std::io::Result<()> {
+        let cwd = std::path::PathBuf::from(TITLESYNC_CWD);
+        std::fs::create_dir_all(&cwd)?;
+        let jsonl = crate::socket::project_jsonl(&cwd, TITLESYNC_SID)
+            .ok_or_else(|| std::io::Error::other("project_jsonl 이 경로를 못 만든다"))?;
+        if let Some(dir) = jsonl.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let body = format!(
+            "{{\"type\":\"custom-title\",\"customTitle\":\"{name}\",\
+             \"sessionId\":\"{TITLESYNC_SID}\"}}\n"
+        );
+        std::fs::write(&jsonl, body)?;
+        self.pane_claude_sid.insert(pid.to_string(), TITLESYNC_SID.to_string());
+        Ok(())
+    }
+
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_autoinfo(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
