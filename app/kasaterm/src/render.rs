@@ -4717,10 +4717,30 @@ impl App {
                 let list_top;
                 // Reserve the column foot for the recent-commits preview; the
                 // change list clips to what's left above it.
+                // 구역이 변경 목록을 통째로 삼키지 못하게 하는 상한. 사용자가 잡아
+                // 둔 높이에도 같은 상한을 걸어야 한다 — 안 그러면 창을 줄였을 때
+                // 화면엔 안 들어가는 높이로 커밋 수백 개를 계속 가져온다.
+                let commits_cap = (bottom - TITLE_HEIGHT) * 0.72;
+                let pinned_h = self.git.col_commits_h.map(|h| h.min(commits_cap));
+                // 폴러에게 「몇 개까지」를 건넨다. 잡아 둔 높이에 들어가는 줄 수
+                // (머리 24px + 줄당 20px)가 곧 그 수다 — 5개 고정이던 자리라, 늘려
+                // 놓고도 빈 칸만 보이면 크기조절이 아무 일도 안 한 것처럼 읽힌다.
+                self.git.col_commit_want.store(
+                    match pinned_h {
+                        Some(h) => (((h - 24.0) / 20.0).floor() as i64).clamp(1, 200) as usize,
+                        None => GIT_RECENT_COMMITS_DEFAULT,
+                    },
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let commits_h = if git_view.recent_commits.is_empty() {
                     0.0
                 } else {
-                    let mut h = 24.0 + git_view.recent_commits.len() as f32 * 20.0;
+                    // 잡아 둔 높이가 있으면 그게 정본이고, 없으면 가져온 커밋 수에
+                    // 맞춘다. 펼친 커밋의 파일 목록·diff 는 어느 쪽이든 그 위에
+                    // 더한다 — 펼침은 잠깐이라 잡아 둔 높이를 갈아치울 값이 아니고,
+                    // 안 더하면 펼치자마자 그 내용이 잘린다.
+                    let mut h = pinned_h
+                        .unwrap_or_else(|| 24.0 + git_view.recent_commits.len() as f32 * 20.0);
                     // An expanded commit grows the foot by its file list (+ any
                     // expanded file's diff), pushing the change list up.
                     if let Some(eh) = self.git.col_commit_expanded.clone() {
@@ -4744,7 +4764,7 @@ impl App {
                         }
                     }
                     // Don't let the foot swallow the whole change list.
-                    h.min((bottom - TITLE_HEIGHT) * 0.72)
+                    h.min(commits_cap)
                 };
                 let input_top = bottom - commits_h;
                 if git_view.no_repo {
@@ -5083,12 +5103,30 @@ impl App {
                     // graph style); a file row then expands its diff.
                     self.git.col_commit_rects.clear();
                     self.git.col_commit_file_rects.clear();
+                    self.git.col_commits_grip = None;
                     if !git_view.recent_commits.is_empty() {
                         let (curx, cury) = self.cursor_px;
                         let foot = bottom - 2.0;
                         let clip_r = git_col_x + git_col_w - 12.0;
                         let mut cy2 = input_top + 6.0;
-                        g.rect(gcx0, cy2 - 2.0, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
+                        // 구역 머리의 가로선이 곧 크기조절 손잡이다. 잡는 띠는 선보다
+                        // 두껍게(위아래 4px) 잡는다 — 1px 선을 정확히 맞춰 눌러야 하면
+                        // 손잡이가 있다는 걸 알아도 못 쓴다. 이 자리는 매 프레임
+                        // 변경 목록 길이·펼침에 따라 움직여서 handler 가 스스로는
+                        // 못 구한다.
+                        let grip = (git_col_x, cy2 - 6.0, git_col_w, 9.0);
+                        self.git.col_commits_grip = Some(grip);
+                        let grip_hot = self.git.col_commits_resize.is_some()
+                            || (curx >= grip.0
+                                && curx <= grip.0 + grip.2
+                                && cury >= grip.1
+                                && cury <= grip.1 + grip.3);
+                        let (line_col, line_h) = if grip_hot {
+                            (theme::accent(), 2.0)
+                        } else {
+                            (theme::with_alpha(theme::border(), 0x80), 1.0)
+                        };
+                        g.rect(gcx0, cy2 - 2.0, gcw, line_h, line_col);
                         g.draw_text(gcx0, cy2 + 4.0, "최근 커밋", gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false });
                         cy2 += 22.0;
                         for (hash, subj) in &git_view.recent_commits {

@@ -556,6 +556,14 @@ const FILE_TREE_W_MAX: f32 = 480.0;
 const GIT_COL_W: f32 = 420.0;
 const GIT_COL_W_MIN: f32 = 220.0;
 const GIT_COL_W_MAX: f32 = 720.0;
+/// 칼럼 발치 「최근 커밋」 구역이 손대기 전에 보여 주는 줄 수. 사용자가 그 구역의
+/// 경계선을 끌면 높이가 잡히고, 그때부터는 높이에 들어가는 만큼 가져온다.
+const GIT_RECENT_COMMITS_DEFAULT: usize = 5;
+/// 그 구역의 최소·최대 높이(LOGICAL px). 최소는 머리 24px + 한 줄 20px 이라 끝까지
+/// 줄여도 커밋 하나는 남는다 — 0 까지 줄면 경계선도 함께 사라져 되돌릴 손잡이가
+/// 없어진다. 최대는 창 크기에 따라 다시 좁혀지므로(`commits_cap`) 여기선 헐겁게.
+const GIT_COMMITS_H_MIN: f32 = 44.0;
+const GIT_COMMITS_H_MAX: f32 = 4000.0;
 const SCROLLBACK_MAX: usize = 5000;
 /// Min ms between wheel emits. Default 0 = pass every macOS scroll event
 /// straight through to `pty.scroll`; the try_send-based reader pipeline

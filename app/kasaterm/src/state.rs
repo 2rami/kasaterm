@@ -139,6 +139,20 @@ pub(crate) struct GitState {
     pub(crate) col_commit_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) col_commit_file_rects: Vec<(String, String, (f32, f32, f32, f32))>,
     pub(crate) last_commit_click: Option<(std::time::Instant, String)>,
+    /// 「최근 커밋」 구역에 사용자가 잡아 준 높이(LOGICAL px). `None` 이면 가져온
+    /// 커밋 수에 맞춘 자동. 구역 머리의 가로선을 위아래로 끌면 잡힌다.
+    pub(crate) col_commits_h: Option<f32>,
+    /// 그 가로선 드래그 중 — `(드래그 시작 커서 y, 시작 높이)`. 시작 높이를 함께
+    /// 쥐는 건 폭 드래그(`col_resize`)와 같은 이유다: 매 이동마다 델타를 누적하면
+    /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
+    pub(crate) col_commits_resize: Option<(f32, f32)>,
+    /// 그 가로선의 hit rect(직전 프레임). 렌더가 써 주고 마우스가 읽는다 — 자리가
+    /// 변경 목록 길이·펼침 상태에 따라 매 프레임 달라져 handler 가 자기 힘으로는
+    /// 못 구한다.
+    pub(crate) col_commits_grip: Option<(f32, f32, f32, f32)>,
+    /// 폴러에게 건네는 「커밋 몇 개까지 가져와라」. 렌더가 구역 높이에서 계산해
+    /// 쓰고 폴러 스레드가 읽는다. 0 은 「아직 안 정해짐」이라 폴러가 기본값을 쓴다.
+    pub(crate) col_commit_want: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) col_close_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,

@@ -2104,6 +2104,49 @@ impl App {
             self.git.col_diff_cache.len()
         );
     }
+    /// `KASATERM_AUTOCOMMITSDRAG="<px>"` (+ `_MS`) — 칼럼 발치 「최근 커밋」 구역의
+    /// 손잡이를 그 시각에 **실제로 잡아** 위로 `px` 만큼 끌고 놓는다(양수면 커진다).
+    ///
+    /// 높이를 직접 대입하지 않는 건 손잡이 자리 판정까지 지나야 하기 때문이다 —
+    /// rect 가 어긋나 있으면 높이는 멀쩡히 바뀌는데 실제 클릭은 그 아래 첫 커밋 행에
+    /// 먹히고, 그 어긋남은 스크린샷에 안 찍힌다.
+    ///
+    /// 늘어난 만큼 커밋이 더 오는지는 **이 함수가 끝난 뒤** 확인해야 한다. 요청 개수는
+    /// 다음 렌더가 쓰고 목록은 폴러(1.2초)가 채우므로, 캡처는 넉넉히 뒤에 걸 것.
+    pub(crate) fn run_pending_autocommitsdrag(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, f32)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let px: f32 = std::env::var("KASATERM_AUTOCOMMITSDRAG").ok()?.trim().parse().ok()?;
+            let ms: u64 = std::env::var("KASATERM_AUTOCOMMITSDRAG_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), px))
+        });
+        let Some((due, px)) = *due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(gr) = self.git.col_commits_grip else {
+            eprintln!("[autocommitsdrag] 손잡이 없음 — Git 탭이 아니거나 커밋 목록이 비었다");
+            return;
+        };
+        let (x, y) = (gr.0 + gr.2 / 2.0, gr.1 + gr.3 / 2.0);
+        let pressed = self.commits_grip_press(x, y);
+        let moved = self.commits_grip_drag(y - px);
+        let released = self.commits_grip_release();
+        // 요청 개수는 아직 옛값이다(렌더가 다음 프레임에 쓴다) — 그래서 여기선 높이만
+        // 믿을 값이고, 개수는 캡처한 그림으로 센다.
+        eprintln!(
+            "[autocommitsdrag] 손잡이=({x:.0},{y:.0}) 누름={pressed} 끌림={moved:?} 놓음={released} 높이={:?}",
+            self.git.col_commits_h
+        );
+        self.chrome_dirty = true;
+        self.render_frame();
+    }
     /// `KASATERM_FORCE_HANDLE_MENU=*` → 활성 pane 의 ⋮ 메뉴를 연다. 이 env 는
     /// 생성자에서 pane id 를 그대로 받는데(main.rs), 로컬 PTY 모드의 leaf id 는
     /// 곧 셸 pid 라 실행 전에는 알 수가 없다 — 그래서 `*` 만 여기서 한 번

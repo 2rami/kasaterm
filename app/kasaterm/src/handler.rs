@@ -1293,15 +1293,17 @@ impl ApplicationHandler<UserEvent> for App {
             let git_proxy = self.proxy.clone();
             let panel_cwd = self.git.col_cwd.clone();
             let panel_data = self.git.col_data.clone();
+            let panel_want = self.git.col_commit_want.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
                 let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
                 let Some(cwd) = cwd else { continue };
+                let want = panel_want.load(std::sync::atomic::Ordering::Relaxed);
                 // A transient git failure ('index.lock' contention while another
                 // pane commits, a half-written index, …) returns None — skip
                 // this tick and keep the last good snapshot so the column never
                 // flashes the notice mid-operation.
-                let Some(view) = fetch_git_col_view(&cwd) else { continue };
+                let Some(view) = fetch_git_col_view(&cwd, want) else { continue };
                 let mut guard = match panel_data.lock() {
                     Ok(g) => g,
                     Err(_) => break,
@@ -2285,6 +2287,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 「최근 커밋」 구역 높이 드래그. 손잡이가 구역 **머리**라 위로 끌수록
+                // 커진다 — 폭 드래그와 같은 이유로 델타는 시작점 기준이다. 셀 격자와
+                // 무관한 chrome 안쪽이라 PTY resize 는 없다.
+                if let Some(moved) = self.commits_grip_drag(self.cursor_px.1) {
+                    if moved {
+                        window.set_cursor(CursorIcon::RowResize);
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Divider drag in progress: ghostty parity — visually
                 // update on every cursor move (so the seam tracks the
                 // cursor pixel-by-pixel), AND fire `resize_backend` on
@@ -2650,7 +2662,13 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_git_edge = self.git.col_visible
                         && cy > TITLE_HEIGHT
                         && (cx - self.git_col_x()).abs() <= 3.0;
-                    let icon = if on_sidebar_edge || on_tree_edge || on_git_edge {
+                    // 「최근 커밋」 구역 손잡이 — 세로로 끄는 것이라 ColResize 가 아니다.
+                    let on_commits_grip = self.git.col_commits_grip.is_some_and(|gr| {
+                        cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3
+                    });
+                    let icon = if on_commits_grip {
+                        CursorIcon::RowResize
+                    } else if on_sidebar_edge || on_tree_edge || on_git_edge {
                         CursorIcon::ColResize
                     } else {
                         match self
@@ -3431,6 +3449,12 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    // 「최근 커밋」 구역 머리의 가로선 — 위로 끌면 구역이 커지고 그만큼
+                    // 커밋을 더 가져온다. 칼럼 클릭 경로보다 앞이어야 한다: 그 아래가
+                    // 바로 커밋 행이라, 뒤에 두면 손잡이를 눌러도 첫 행이 먼저 먹는다.
+                    if self.commits_grip_press(cx, cy) {
+                        return;
+                    }
                     // Left window-tab sidebar. Caught first — it owns the whole
                     // left strip, so a click there never falls through to the
                     // cell grid. Hit order lives in `window_strip_click`.
@@ -3975,6 +3999,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
+                                let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
                                     if stage {
                                         let _ = kasa_mcp::git::git_add_path(&cwd, &path);
@@ -3984,7 +4009,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     // Re-read status right away so the row jumps
                                     // sections immediately instead of waiting for
                                     // the 1.2s poller tick.
-                                    if let Some(view) = fetch_git_col_view(&cwd) {
+                                    if let Some(view) = fetch_git_col_view(&cwd, want) {
                                         if let Ok(mut g) = data.lock() {
                                             *g = view;
                                         }
@@ -4008,9 +4033,10 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
+                                let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
                                     let _ = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
-                                    if let Some(view) = fetch_git_col_view(&cwd) {
+                                    if let Some(view) = fetch_git_col_view(&cwd, want) {
                                         if let Ok(mut g) = data.lock() {
                                             *g = view;
                                         }
@@ -5133,6 +5159,13 @@ impl ApplicationHandler<UserEvent> for App {
                             window.set_cursor(CursorIcon::Default);
                             return;
                         }
+                        // 「최근 커밋」 구역 높이 드래그 끝 (놓는 김에 새 개수로 한 번
+                        // 바로 읽어 온다 — 원하는 개수는 렌더가 드래그 중에 써 뒀다).
+                        if self.commits_grip_release() {
+                            window.set_cursor(CursorIcon::Default);
+                            window.request_redraw();
+                            return;
+                        }
                         // End a divider drag without falling through to the
                         // selection-release path under it.
                         if let Some((path, dir)) = self.resize_drag.take() {
@@ -5796,6 +5829,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autocursor();
         self.run_pending_autoexpandclick();
         self.run_pending_autorowdrag();
+        self.run_pending_autocommitsdrag();
         self.run_pending_autotheme();
         // OS 의 밝게/어둡게가 바뀌었나 — `theme: system` 일 때만 실제로 조회한다
         // (게이트는 poll 안에 있다). 바뀐 순간에만 참이라 평소엔 아무 일도 없다.
@@ -6187,7 +6221,9 @@ fn fetch_claude_usage(port: &str, dir: &str) -> Option<(serde_json::Value, bool,
     Some((v.get("usage")?.clone(), stale, dir))
 }
 
-fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
+/// `commits` = 발치 「최근 커밋」 구역에 지금 들어가는 줄 수. 0 이면 아직 그 구역을
+/// 한 번도 안 그린 것이라(첫 tick) 기본값을 쓴다.
+pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Option<GitColView> {
     let v = kasa_mcp::git::git_status(cwd);
     if v.get("error").is_some() {
         return None;
@@ -6220,7 +6256,8 @@ fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
     }
     view.branches = kasa_mcp::git::git_branches(cwd);
     view.numstat = kasa_mcp::git::git_numstat(cwd);
-    view.recent_commits = kasa_mcp::git::git_log(cwd, 5)
+    let n = if commits == 0 { crate::GIT_RECENT_COMMITS_DEFAULT } else { commits };
+    view.recent_commits = kasa_mcp::git::git_log(cwd, n as u32)
         .as_array()
         .map(|arr| {
             arr.iter()

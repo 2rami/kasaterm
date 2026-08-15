@@ -1059,6 +1059,65 @@ impl App {
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
     }
+    /// 칼럼 발치 「최근 커밋」 구역의 크기조절 — 누르기·끌기·놓기 세 짝.
+    ///
+    /// handler 의 마우스 분기에서 뽑아 둔 건 헤드리스 하네스가 **같은 코드**를 타게
+    /// 하려고다. 손잡이 판정과 높이 계산이 두 벌로 갈리면 검증이 통과해도 실제 클릭은
+    /// 빗나갈 수 있고, 그 어긋남은 스크린샷에 안 찍힌다.
+    ///
+    /// 손잡이를 눌렀으면 참. 지금 그려져 있는 높이를 드래그 출발점으로 삼는다 —
+    /// 0 에서 출발하면 첫 픽셀에 구역이 접혔다 펴진다.
+    pub(crate) fn commits_grip_press(&mut self, cx: f32, cy: f32) -> bool {
+        let Some(gr) = self.git.col_commits_grip else { return false };
+        if !(cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3) {
+            return false;
+        }
+        let cur = self.git.col_commits_h.unwrap_or_else(|| {
+            let n = self
+                .git.col_data
+                .lock()
+                .map(|g| g.recent_commits.len())
+                .unwrap_or(crate::GIT_RECENT_COMMITS_DEFAULT);
+            24.0 + n as f32 * 20.0
+        });
+        self.git.col_commits_resize = Some((cy, cur));
+        true
+    }
+    /// 끄는 중이면 `Some(값이 움직였나)`. 손잡이가 구역 **머리**라 위로 끌수록 커진다.
+    /// 델타를 누적하지 않고 시작점에서 재는 건 폭 드래그와 같은 이유다 — 누적하면
+    /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
+    pub(crate) fn commits_grip_drag(&mut self, cy: f32) -> Option<bool> {
+        let (start_y, start_h) = self.git.col_commits_resize?;
+        let new_h = (start_h - (cy - start_y)).clamp(crate::GIT_COMMITS_H_MIN, crate::GIT_COMMITS_H_MAX);
+        let moved = self.git.col_commits_h.map_or(true, |h| (new_h - h).abs() > 0.5);
+        if moved {
+            self.git.col_commits_h = Some(new_h);
+            self.chrome_dirty = true;
+        }
+        Some(moved)
+    }
+    /// 끄는 중이었으면 참. 늘어난 자리를 폴러 tick(1.2초)까지 빈칸으로 두면 「늘려도
+    /// 안 늘어난다」로 읽히므로 여기서 한 번 바로 읽어 온다.
+    pub(crate) fn commits_grip_release(&mut self) -> bool {
+        if self.git.col_commits_resize.take().is_none() {
+            return false;
+        }
+        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
+        if let Some(cwd) = cwd {
+            let proxy = self.proxy.clone();
+            let data = self.git.col_data.clone();
+            let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
+            std::thread::spawn(move || {
+                if let Some(view) = crate::handler::fetch_git_col_view(&cwd, want) {
+                    if let Ok(mut g) = data.lock() {
+                        *g = view;
+                    }
+                }
+                let _ = proxy.send_event(crate::UserEvent::Redraw);
+            });
+        }
+        true
+    }
     /// Check out `branch` in the column's repo (off-thread). A dirty tree makes
     /// git refuse with a clear message — we don't stash/force, just let the
     /// poller repaint whatever git did. Closes the branch dropdown.
