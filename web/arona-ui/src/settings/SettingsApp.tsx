@@ -42,6 +42,23 @@ const CATS = [
 
 type CatKey = (typeof CATS)[number]['key'];
 
+/// 딥링크로 받은 시작 칸. 하단바의 「계정 관리」처럼 **특정 칸을 보려고** 여는
+/// 입구가 있는데, 웹 창은 그 뜻을 URL 로만 받는다 — 네이티브는 `SettingsCat` 을
+/// 인자로 받지만 웹뷰를 여는 경로가 그 인자를 버려서, 눌러도 늘 기본 칸(캐릭터)이
+/// 열렸다(2026-08-15). 모르는 값이면 예전대로.
+function initialCat(): CatKey {
+  const q = new URLSearchParams(location.search).get('cat');
+  return CATS.some((c) => c.key === q) ? (q as CatKey) : 'theme';
+}
+
+declare global {
+  interface Window {
+    /// 이미 떠 있는 설정 창의 칸을 바꾼다 — 네이티브가 `evaluate_script` 로 부른다.
+    /// URL 을 다시 읽히면 입력 중이던 값이 날아가므로 그 길은 안 쓴다.
+    __ktSetCat?: (key: string) => void;
+  }
+}
+
 /// 값만 있으면 그려지는 탭들. Theme 은 여기 없다 — 캐릭터 상세로 화면이 통째로
 /// 바뀌는 자기 상태가 있어서 본문에서 따로 다룬다.
 const TABS: Partial<
@@ -57,7 +74,7 @@ const TABS: Partial<
 export function SettingsApp() {
   const t = useT();
   const tokens = useTokens();
-  const [cat, setCat] = useState<CatKey>('theme');
+  const [cat, setCat] = useState<CatKey>(initialCat);
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
   const [values, setValues] = useState<SettingsValues | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -100,6 +117,18 @@ export function SettingsApp() {
     void reload();
     void reloadValues();
   }, [reload, reloadValues]);
+
+  // 이미 떠 있는 창을 딥링크가 다시 부를 때의 입구. 창이 하나뿐이라 두 번째
+  // 「계정 관리」는 창을 새로 여는 대신 이쪽으로 온다 — 모르는 값은 조용히 무시한다
+  // (네이티브가 새 칸을 추가했는데 웹이 아직 모를 때, 화면이 깨지는 것보다 낫다).
+  useEffect(() => {
+    window.__ktSetCat = (key: string) => {
+      if (CATS.some((c) => c.key === key)) setCat(key as CatKey);
+    };
+    return () => {
+      delete window.__ktSetCat;
+    };
+  }, []);
 
   // Esc 로 창 닫기. 네이티브 설정 화면은 키 핸들러가 직접 닫는데, 웹뷰 창은 키가
   // 웹뷰로 가 그 경로에 닿지 않는다(거노 2026-08-15 "esc왜안되냐") — 여기서 잡아
