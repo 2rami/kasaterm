@@ -10,12 +10,18 @@ use crate::state;
 use crate::theme;
 use crate::{hover_rect, panel_rect_outlined, round_rect};
 
-/// 팝오버 한 행의 높이 — `info::PORT_H` 와 같은 값을 쓴다(같은 행 그림을 재사용).
-const ROW_H: f32 = 32.0;
-const HEAD_H: f32 = 28.0;
-const GROUP_H: f32 = 22.0;
+/// 두 줄짜리 행. 예전 32 는 두 줄을 밀어 넣기만 했지 사이를 두지 못해, 정체와
+/// 주소가 한 덩어리로 뭉쳐 보였다(2026-08-15 「깔끔하게 뭐가 뭔지」).
+const ROW_H: f32 = 44.0;
+const HEAD_H: f32 = 38.0;
+const GROUP_H: f32 = 30.0;
 const PAD: f32 = 6.0;
-const POP_W: f32 = 320.0;
+const POP_W: f32 = 364.0;
+/// 좌우 여백. 제목·머리·행이 같은 값을 써야 세로선이 하나로 선다.
+const PADX: f32 = 14.0;
+/// 포트 번호 칼럼의 **고정** 폭. 네 자리와 다섯 자리가 섞이므로 폭을 재서 이어
+/// 붙이면 다음 칼럼이 행마다 들쭉날쭉해진다.
+const COL_PORT: f32 = 54.0;
 
 fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
     cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
@@ -266,6 +272,7 @@ fn paint_tunnel_popover(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn paint_ports_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,
@@ -291,18 +298,16 @@ fn paint_ports_popover(
     // 예전 상태줄의 `:8765` 라벨이 하던 일을 이 행이 이어받는다 — 그게 사라지면
     // 폰에서 접속할 주소를 확인할 길이 없어진다.
     let web = sb.port.clone();
-    let rows = view.ports.len()
-        + usize::from(web.is_some())
-        + groups.iter().filter(|(k, _)| !k.is_empty()).count();
+    let named = groups.iter().filter(|(k, _)| !k.is_empty()).count() as f32;
     // `+ 2.0` 은 첫 행 위 숨틈(아래 `ry` 의 시작 오프셋)이다. 이걸 빠뜨리면 그만큼
     // 마지막 행이 아래로 밀려 나가 두 줄 중 아랫줄이 잘린다.
     let body = 2.0
-        + rows as f32 * ROW_H
-        + groups.iter().filter(|(k, _)| !k.is_empty()).count() as f32 * (GROUP_H - ROW_H)
+        + (view.ports.len() + usize::from(web.is_some())) as f32 * ROW_H
+        + named * GROUP_H
         + if view.ports.is_empty() { ROW_H } else { 0.0 };
     // 화면 절반을 넘기지 않는다 — 넘치면 스크롤이 있고, 팝오버가 창을 덮으면
     // 뒤의 pane 을 못 보면서 판단하게 된다.
-    let max_h = (win_h * 0.5).max(160.0);
+    let max_h = (win_h * 0.5).max(200.0);
     let inner = body.min(max_h);
     let h = HEAD_H + inner + PAD;
     let w = POP_W.min(win_w - 16.0);
@@ -312,45 +317,28 @@ fn paint_ports_popover(
     sb.popover_rect = Some((x, y, w, h));
     panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
 
-    // ── 제목줄 ──
+    // ── 제목줄 ── 칩과 같은 그림(콘센트)을 이고 있어야 "방금 누른 그것" 으로 읽힌다.
+    g.queue_icon("plug", x + PADX, y + (HEAD_H - 13.0) / 2.0, 13.0, theme::text());
     g.draw_text(
-        x + 12.0,
-        y + 8.0,
+        x + PADX + 19.0,
+        y + (HEAD_H - 13.0) / 2.0 - 1.0,
         "포트",
-        gpu::DrawOpts {
-            font_size: 12.0,
-            color: theme::text(),
-            bold: true,
-            italic: false,
-        },
+        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false },
     );
     let sub = format!("{} 워크스페이스 · {} 외부", view.ports.len(), view.outside);
-    let sw = g.measure_chrome_text(&sub, 10.0, false);
+    let sw = g.measure_chrome_text(&sub, 11.0, false);
     g.draw_text(
-        x + w - 12.0 - sw,
-        y + 9.0,
+        x + w - PADX - sw,
+        y + (HEAD_H - 11.0) / 2.0 - 1.0,
         &sub,
-        gpu::DrawOpts {
-            font_size: 10.0,
-            color: theme::text_mute(),
-            bold: false,
-            italic: false,
-        },
+        gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
     );
     let top = y + HEAD_H;
-    g.rect(
-        x + 1.0,
-        top,
-        w - 2.0,
-        1.0,
-        theme::with_alpha(theme::border(), 0x88),
-    );
+    g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
 
     let bottom = y + h - PAD;
     sb.popover_scroll = sb.popover_scroll.clamp(0.0, (body - inner).max(0.0));
     g.push_clip(x, top, w, (bottom - top).max(0.0));
-    let x0 = x + 10.0;
-    let right = x + w - 10.0;
     let mut ry = top + 2.0 - sb.popover_scroll;
 
     if let Some(port) = web {
@@ -359,78 +347,129 @@ fn paint_ports_popover(
             hover_rect(g, r.0, r.1, r.2, r.3, 0.0);
             g.hover_pointer = true;
         }
-        round_rect(g, x0, ry + 7.0, 6.0, 6.0, 3.0, theme::accent());
-        g.draw_text(
-            x0 + 12.0,
-            ry + 2.0,
-            &port,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: theme::text(),
-                bold: true,
-                italic: false,
-            },
-        );
-        let pw = g.measure_chrome_text(&port, 12.0, true);
-        g.draw_text(
-            x0 + 12.0 + pw + 8.0,
-            ry + 4.0,
-            "이 kasaterm",
-            gpu::DrawOpts {
-                font_size: 10.0,
-                color: theme::text_mute(),
-                bold: false,
-                italic: false,
-            },
-        );
-        g.draw_text(
-            x0 + 12.0,
-            ry + 16.0,
-            "웹터미널",
-            gpu::DrawOpts {
-                font_size: 11.0,
-                color: theme::text_dim(),
-                bold: false,
-                italic: false,
-            },
-        );
+        port_row(g, x, w, ry, theme::accent(), &port, "웹터미널", "이 kasaterm", "", 0.0);
         sb.popover_hits.push((state::StatusbarHit::OpenWebTerm, r));
         ry += ROW_H;
     }
 
     if view.ports.is_empty() {
         g.draw_text(
-            x0 + 12.0,
-            ry + 9.0,
+            x + PADX,
+            ry + 10.0,
             "이 워크스페이스에서 listen 중인 포트 없음",
-            gpu::DrawOpts {
-                font_size: 11.0,
-                color: theme::text_dim(),
-                bold: false,
-                italic: false,
-            },
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
         );
     }
     for (repo, list) in &groups {
         if !repo.is_empty() {
+            // 머리를 **띠 배경**으로 깐다. 글자만 키우면 목록이 길어질수록 어디서
+            // 프로젝트가 갈리는지 눈이 매번 다시 찾는다 — 배경 한 단이 그 일을
+            // 대신한다(2026-08-15 지시 「이렇게 깔끔하게 뭐가 뭔지 알 수 있으면」).
+            g.rect(x + 1.0, ry, w - 2.0, GROUP_H, theme::surface_active());
             g.draw_text(
-                x0 + 2.0,
-                ry + 6.0,
+                x + PADX,
+                ry + (GROUP_H - 13.0) / 2.0 - 1.0,
                 repo,
+                gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false },
+            );
+            let n = list.len().to_string();
+            let nw = g.measure_chrome_text(&n, 11.0, false);
+            g.draw_text(
+                x + w - PADX - nw,
+                ry + (GROUP_H - 11.0) / 2.0 - 1.0,
+                &n,
                 gpu::DrawOpts {
-                    font_size: 10.0,
+                    font_size: 11.0,
                     color: theme::text_mute(),
-                    bold: true,
+                    bold: false,
                     italic: false,
                 },
             );
+            g.queue_icon(
+                "folder",
+                x + w - PADX - nw - 18.0,
+                ry + (GROUP_H - 12.0) / 2.0,
+                12.0,
+                theme::text_mute(),
+            );
             ry += GROUP_H;
         }
-        for p in list {
+        for (i, p) in list.iter().enumerate() {
+            let r = (x, ry, w, ROW_H);
+            let hov = hit(cursor, &r);
             if ry + ROW_H > top && ry < bottom {
-                crate::info::draw_port_row(g, cursor, &mut sb.popover_hits, p, x, w, x0, right, ry);
+                // 같은 묶음 안 행끼리는 아주 옅게만 가른다 — 묶음을 가르는 일은
+                // 위의 띠가 이미 하므로, 여기서 진하게 그으면 선이 둘이 된다.
+                if i > 0 {
+                    g.rect(
+                        x + PADX,
+                        ry,
+                        w - PADX * 2.0,
+                        1.0,
+                        theme::with_alpha(theme::border(), 0x40),
+                    );
+                }
+                if hov {
+                    hover_rect(g, r.0, r.1, r.2, r.3, 0.0);
+                    g.hover_pointer = true;
+                }
+                // 점 색이 곧 "이걸 꺼도 되나" 에 대한 답이다. 세 갈래인 것이 요점 —
+                //   파랑  = 지금 이 pane 이 돌리고 있다(셸 자손). 끄려면 그 pane 을 보라.
+                //   흐림  = 띄운 셸이 죽어 launchd 로 넘어갔지만 **주인 pane 은 살아 있다**.
+                //           pane 을 닫아도 안 죽으니 여기서 꺼야 한다.
+                //   빨강  = 띄운 pane 자체가 없다. 아무도 안 쓰는 것이므로 꺼도 된다.
+                // 예전엔 뒤의 둘이 같은 흐림이라, 주인이 사라진 서버와 학생이 방금 띄운
+                // 서버가 구별되지 않았다(거노: "죽은 학생이 생성해서 꺼도 되는지 모르겠다").
+                let dot = if p.owner_dead {
+                    theme::danger()
+                } else if p.orphan {
+                    theme::text_dim()
+                } else {
+                    theme::accent()
+                };
+                let site = if p.site.is_empty() { p.name.as_str() } else { p.site.as_str() };
+                let owner = if p.label.is_empty() {
+                    p.pane.clone().unwrap_or_default()
+                } else {
+                    p.label.clone()
+                };
+                let port_s = p.port.to_string();
+                // 호버 중엔 오른쪽 두 칸을 아이콘에 내준다 — 주인 이름은 늘 보이는
+                // 값이지만 끄기·열기는 지금 이 행을 겨눴을 때만 필요하다.
+                let tail = if hov { 44.0 } else { 0.0 };
+                port_row(g, x, w, ry, dot, &port_s, site, &owner, &p.name, tail);
+                if hov {
+                    let br = (x + w - PADX - 18.0, ry + (ROW_H - 18.0) / 2.0, 18.0, 18.0);
+                    let bhov = hit(cursor, &br);
+                    if bhov {
+                        round_rect(
+                            g,
+                            br.0,
+                            br.1,
+                            br.2,
+                            br.3,
+                            theme::radius_sm(),
+                            theme::with_alpha(theme::danger(), 0x33),
+                        );
+                    }
+                    g.queue_icon(
+                        "x",
+                        br.0 + 4.0,
+                        br.1 + 4.0,
+                        10.0,
+                        if bhov { theme::danger() } else { theme::text_mute() },
+                    );
+                    sb.popover_hits.push((state::StatusbarHit::KillPort(p.pid), br));
+                    g.queue_icon(
+                        "external-link",
+                        br.0 - 20.0,
+                        br.1 + 4.0,
+                        11.0,
+                        theme::text_dim(),
+                    );
+                }
             }
-            sb.popover_hits.push((state::StatusbarHit::OpenPort(p.port), (x, ry, w, ROW_H)));
+            sb.popover_hits.push((state::StatusbarHit::OpenPort(p.port), r));
             ry += ROW_H;
         }
     }
@@ -444,6 +483,95 @@ fn paint_ports_popover(
         None => false,
     });
     g.pop_clip();
+}
+
+/// 포트 한 줄. 칼럼 셋이다 — 점+번호 / 정체+주소 / 주인+프로세스.
+///
+/// 번호 칼럼을 **고정폭**으로 잡는 것이 이 그림의 핵심이다. 번호는 네 자리와 다섯
+/// 자리가 섞이는데(3000 · 62292), 폭을 재서 이어 붙이면 다음 칼럼이 행마다 들쭉날쭉
+/// 해져 눈이 세로로 못 훑는다. 자릿수가 칸을 넘으면 그건 포트가 아니므로 걱정이 없다.
+#[allow(clippy::too_many_arguments)]
+fn port_row(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    w: f32,
+    y: f32,
+    dot: [u8; 4],
+    port: &str,
+    site: &str,
+    owner: &str,
+    proc: &str,
+    tail: f32,
+) {
+    // 점은 행이 아니라 **번호**의 중심에 건다. 두 줄 행의 한가운데에 두면 정작
+    // 그것이 수식하는 번호보다 아래로 내려가, 무엇에 붙은 표시인지가 흐려진다.
+    crate::circle_rect(g, x + PADX, y + 12.0, 6.0, dot);
+    g.draw_text(
+        x + PADX + 14.0,
+        y + 8.0,
+        port,
+        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: true, italic: false },
+    );
+    // 오른쪽 칼럼(주인·프로세스)은 폭이 남을 때만 — 좁은 창에서는 "무엇이 떠 있나"
+    // 가 "누가 띄웠나" 보다 먼저다.
+    let right = x + w - PADX - tail;
+    let rw = if w >= 300.0 { 96.0_f32.min(w * 0.3) } else { 0.0 };
+    let cx = x + PADX + 14.0 + COL_PORT;
+    let mid = (right - rw - 8.0 - cx).max(0.0);
+    let s = crate::info::fit_text(g, site, mid, 12.0, false);
+    g.draw_text(
+        cx,
+        y + 9.0,
+        &s,
+        gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let a = crate::info::fit_text(g, &format!("127.0.0.1:{port}"), mid, 11.0, false);
+    g.draw_text(
+        cx,
+        y + 25.0,
+        &a,
+        gpu::DrawOpts {
+            font_size: 11.0,
+            color: theme::with_alpha(theme::text_dim(), 0xB0),
+            bold: false,
+            italic: false,
+        },
+    );
+    if rw <= 0.0 {
+        return;
+    }
+    if !owner.is_empty() && tail <= 0.0 {
+        let mut ox = right - rw;
+        if crate::render::draw_student_face(g, owner, ox, y + 8.0, 13.0) {
+            ox += 16.0;
+        }
+        let o = crate::info::fit_text(g, owner, (right - ox).max(0.0), 11.0, false);
+        let ow = g.measure_chrome_text(&o, 11.0, false);
+        // 얼굴이 붙으면 왼쪽 정렬(얼굴-이름이 한 덩어리라야 읽힌다), 아니면 오른쪽
+        // 정렬로 다른 행의 꼬리와 세로선을 맞춘다.
+        let tx = if ox > right - rw { ox } else { right - ow };
+        g.draw_text(
+            tx,
+            y + 9.0,
+            &o,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+        );
+    }
+    if !proc.is_empty() {
+        let p = crate::info::fit_text(g, proc, rw, 11.0, false);
+        let pw = g.measure_chrome_text(&p, 11.0, false);
+        g.draw_text(
+            right - pw,
+            y + 25.0,
+            &p,
+            gpu::DrawOpts {
+                font_size: 11.0,
+                color: theme::with_alpha(theme::text_mute(), 0x90),
+                bold: false,
+                italic: false,
+            },
+        );
+    }
 }
 
 impl crate::App {
