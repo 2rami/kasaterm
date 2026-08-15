@@ -129,7 +129,6 @@ export type ThemePreset = {
 
 export type ClaudeValues = {
   shim_inject: boolean;
-  persona: boolean;
   accounts: AccountRow[];
   account: string;
   codex_accounts: AccountRow[];

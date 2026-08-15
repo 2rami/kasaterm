@@ -13,7 +13,10 @@ export const ko = {
     general: '일반',
     appearance: '모양',
     shell: '셸',
-    claude: 'Claude',
+    /// 칸 이름은 「Agent」다 — 안에 Claude 와 Codex 로그인이 나란히 있어서, 한쪽
+    /// 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 키가 `claude` 로
+    /// 남은 건 서버 JSON 의 키라서다(네이티브 `SettingsCat::Claude` 와 짝).
+    claude: 'Agent',
     theme: '캐릭터',
     feedback: '피드백',
     /// 아직 네이티브 창에만 있는 칸에 붙는 꼬리표.
@@ -25,7 +28,7 @@ export const ko = {
     general: { title: '일반', hint: '창·작업 폴더·파일 열기' },
     appearance: { title: '모양', hint: '색·모양·글꼴' },
     shell: { title: '셸', hint: '셸과 편집기' },
-    claude: { title: 'Claude', hint: '계정과 실행 방식' },
+    claude: { title: 'Agent', hint: '계정과 실행 방식' },
     theme: { title: '캐릭터', hint: '학생 그림과 페르소나, 캐릭터 목록' },
     feedback: { title: '피드백', hint: '쓰다가 걸린 것을 남겨 주세요' },
   },
@@ -207,8 +210,6 @@ export const ko = {
   claude: {
     shim: 'shim 주입',
     shimHint: '끄면 순정 Claude — 페르소나 · 프록시 · 훅 없음 (재시작 필요)',
-    persona: '말투 주입',
-    personaHint: '이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요',
     account: '계정',
     accountHint: '다음에 뜨는 claude 부터 이 계정으로 — 돌고 있는 세션은 그대로예요',
     codexAccount: 'Codex 계정',
@@ -216,11 +217,12 @@ export const ko = {
     addAccount: (a: { provider: string }) => `+ ${a.provider} 계정 추가`,
     rename: '이름',
     reauth: '다시 로그인',
-    reauthHere: '쓰던 브라우저',
-    /// 두 버튼이 왜 갈리는지 — 「빈 창」이 불편해 보여서 누른 사람이 엉뚱한 계정을
-    /// 붙이고 놀라는 자리라, 고르기 전에 결과를 말해 준다.
+    reauthIsolated: '빈 창으로',
+    /// 두 버튼이 왜 갈리는지 — 기본이 쓰던 브라우저라 그 창에 붙어 있는 계정이
+    /// 그대로 승인된다. 다른 계정을 붙이려던 사람이 결과를 보고 놀라는 자리라,
+    /// 고르기 전에 결과를 말해 준다.
     browserHint:
-      '「다시 로그인」은 빈 창에서 — 다른 계정을 붙일 때 써요. 「쓰던 브라우저」는 그 브라우저에 지금 로그인된 계정으로 붙어요.',
+      '「다시 로그인」은 쓰던 브라우저에서 — 그 브라우저에 지금 로그인된 계정으로 붙어요. 다른 계정을 붙이려면 「빈 창으로」를 쓰세요.',
     removeSlot: '빼기',
     inUse: '쓰는 중',
     labelPlaceholder: '별명 (비우면 이메일로 불러요)',
@@ -272,7 +274,7 @@ export const en: Strings = {
     general: 'General',
     appearance: 'Appearance',
     shell: 'Shell',
-    claude: 'Claude',
+    claude: 'Agent',
     theme: 'Characters',
     feedback: 'Feedback',
     native: 'Native',
@@ -283,7 +285,7 @@ export const en: Strings = {
     general: { title: 'General', hint: 'Window, working folder, opening files' },
     appearance: { title: 'Appearance', hint: 'Colors, shape, fonts' },
     shell: { title: 'Shell', hint: 'Shell and editor' },
-    claude: { title: 'Claude', hint: 'Accounts and how it runs' },
+    claude: { title: 'Agent', hint: 'Accounts and how it runs' },
     theme: { title: 'Characters', hint: 'Student art, personas, and the roster' },
     feedback: { title: 'Feedback', hint: 'Tell us what tripped you up' },
   },
@@ -456,8 +458,6 @@ export const en: Strings = {
   claude: {
     shim: 'Shim injection',
     shimHint: 'Off means stock Claude — no persona, proxy, or hooks (needs a restart)',
-    persona: 'Persona injection',
-    personaHint: 'Adds this pane’s character to the Claude system prompt',
     account: 'Account',
     accountHint: 'From the next claude on — sessions already running keep theirs',
     codexAccount: 'Codex account',
@@ -465,9 +465,9 @@ export const en: Strings = {
     addAccount: (a) => `+ Add ${a.provider} account`,
     rename: 'Rename',
     reauth: 'Sign in again',
-    reauthHere: 'This browser',
+    reauthIsolated: 'Blank window',
     browserHint:
-      '“Sign in again” opens a clean window — use it to attach a different account. “This browser” attaches whichever account is signed in there.',
+      '“Sign in again” uses the browser you already have open — it attaches whichever account is signed in there. Use “Blank window” to attach a different account.',
     removeSlot: 'Remove',
     inUse: 'in use',
     labelPlaceholder: 'Nickname (empty = called by its email)',
@@ -520,6 +520,8 @@ export const en: Strings = {
     restart_to_apply: 'Takes effect after a restart',
     scale_reset: 'Zoom 100% · default font',
     login_in_browser: 'Sign in from the blank browser window',
+    login_in_default_browser:
+      'Approve it in the browser you already use — it attaches whichever account is signed in there',
     terminal_editor_not_found:
       'Couldn’t find a terminal editor — type the command yourself',
     account_dir_failed: 'Couldn’t create the account folder',

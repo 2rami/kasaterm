@@ -1,7 +1,7 @@
 //! Settings screen — Warp-style full view reached from the titlebar gear (and,
 //! in side-tab mode, the sidebar's "Settings" entry). Replaces the pane grid
 //! while open; the session sidebar and titlebar stay live. Left category nav
-//! (General / Appearance / Shell / Claude / Students) + a right-hand form laid
+//! (General / Appearance / Shell / Agent / Students) + a right-hand form laid
 //! out on a shared spacing rhythm. Each control writes through to
 //! `settings.json` immediately and mirrors into the in-memory `set_*` fields so
 //! `resolve_*`/`App::new` pick the value up on the next spawn/launch.
@@ -427,7 +427,8 @@ impl App {
             "claude auth login --claudeai".to_string(),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             dir,
-            // 새 슬롯은 **격리 고정**이다. 여기서 쓰던 브라우저를 열면 그 창의
+            // 새 슬롯은 **격리 고정**이다. 다시 로그인의 기본이 쓰던 브라우저로
+            // 바뀐 뒤에도 여기는 그대로다 — 여기서 쓰던 브라우저를 열면 그 창의
             // claude.ai 세션이 그대로 승인돼, 슬롯을 새로 만든 의미가 사라진다.
             LoginBrowser::Isolated,
         );
@@ -1633,8 +1634,8 @@ impl App {
             }
             // 로그인 수단이 갈리므로(claude 는 `claude auth login`, codex 는
             // `CODEX_HOME=<슬롯> codex login`) 어느 쪽인지를 label 로 받는다.
-            // `-here` 는 쿠키 없는 창 대신 **쓰던 브라우저**로 승인받는 길이다.
-            "reauth-account" | "reauth-account-here" => {
+            // 이름 없는 쪽이 기본 = **쓰던 브라우저**고, `-isolated` 가 쿠키 없는 창이다.
+            "reauth-account" | "reauth-account-isolated" => {
                 let claude = match arg.as_str() {
                     "claude" => true,
                     "codex" => false,
@@ -1650,10 +1651,10 @@ impl App {
                 }
                 let provider =
                     if claude { AccountProvider::Claude } else { AccountProvider::Codex };
-                let browser = if action.ends_with("-here") {
-                    LoginBrowser::Default
-                } else {
+                let browser = if action.ends_with("-isolated") {
                     LoginBrowser::Isolated
+                } else {
+                    LoginBrowser::Default
                 };
                 self.settings_apply(SettingsAction::ReauthAccount(
                     provider,
@@ -1958,7 +1959,6 @@ impl App {
             "shell": { "shell": self.set_shell },
             "claude": {
                 "shim_inject": self.set_shim_inject,
-                "persona": self.set_claude_persona,
                 "accounts": claude_rows,
                 "account": self.set_claude_account,
                 "codex_accounts": codex_rows,
@@ -2562,6 +2562,7 @@ fn toast_code(msg: &str) -> Option<&'static str> {
         "재시작하면 적용돼요" => "restart_to_apply",
         "배율 100% · 폰트 기본값" => "scale_reset",
         "빈 브라우저 창에서 로그인하세요" => "login_in_browser",
+        "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요" => "login_in_default_browser",
         "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요" => "terminal_editor_not_found",
         "계정 폴더 경로를 만들 수 없습니다" => "account_dir_failed",
         "피드백을 저장했어요" => "feedback_saved",
@@ -2686,7 +2687,10 @@ pub(crate) fn paint_settings(
         (SettingsCat::General, "General", "settings-2"),
         (SettingsCat::Appearance, "Appearance", "sparkles"),
         (SettingsCat::Shell, "Shell", "terminal"),
-        (SettingsCat::Claude, "Claude", "claude"),
+        // 칸 이름은 「Agent」다 — 안에 Claude 와 Codex 로그인이 나란히 있어서, 한쪽
+        // 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 열거자 이름이
+        // `Claude` 로 남은 건 웹 설정의 키(`claude`)와 짝을 맞추기 위해서다.
+        (SettingsCat::Claude, "Agent", "claude"),
         (SettingsCat::Theme, "Theme", "users"),
         (SettingsCat::Feedback, "Feedback", "message-square-warning"),
     ];
@@ -3431,8 +3435,8 @@ pub(crate) fn paint_settings(
             content_bottom = y;
         }
         SettingsCat::Claude => {
-            // Page 헤더가 이미 "Claude" 를 크게 쓰므로 별도 브랜드 워드마크는
-            // 중복이라 뺐다 — 좌측 nav 에도 claude 아이콘이 있다.
+            // Page 헤더가 이미 칸 이름을 크게 쓰므로 별도 브랜드 워드마크는 중복이라
+            // 뺐다 — 좌측 nav 에도 아이콘이 있다.
             let mut y = fy;
             // Shim injection — global. off = install_pane_shims never makes the shim
             // dir, so claude runs vanilla (no persona/proxy/hooks). Read once at boot,
@@ -3446,15 +3450,10 @@ pub(crate) fn paint_settings(
                 }
                 y = ny;
             }
-            {
-                let (cr, ny) = row2(g, fx, y, fw, clip, "Persona injection",
-                    &["이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요"], TOGGLE);
-                if ny > clip {
-                    toggle(g, cr, ctx.claude_persona, ctx.cursor);
-                    rects.push((SettingsAction::ToggleClaudePersona, cr));
-                }
-                y = ny;
-            }
+            // 말투(persona) 스위치는 여기 있었는데 캐릭터 칸에도 같은 것이 있었다
+            // (같은 `claude_persona` 를 켜고 끄는 토글 둘). 한쪽만 남긴다면 캐릭터
+            // 쪽이다 — 「테마로만 쓸지, 말투까지 쓸지」는 캐릭터를 고르는 흐름의
+            // 갈림길이라 그 화면에서 결정된다.
             y = row_wide(g, fx, y, clip, "Account",
                 &["다음에 뜨는 claude 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
             // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
@@ -3497,12 +3496,12 @@ pub(crate) fn paint_settings(
                         reauth: SettingsAction::ReauthAccount(
                             AccountProvider::Claude,
                             id.clone(),
-                            LoginBrowser::Isolated,
+                            LoginBrowser::Default,
                         ),
-                        reauth_here: SettingsAction::ReauthAccount(
+                        reauth_isolated: SettingsAction::ReauthAccount(
                             AccountProvider::Claude,
                             id.clone(),
-                            LoginBrowser::Default,
+                            LoginBrowser::Isolated,
                         ),
                         remove: SettingsAction::RemoveClaudeAccount(id.clone()),
                     });
@@ -3600,12 +3599,12 @@ pub(crate) fn paint_settings(
                         reauth: SettingsAction::ReauthAccount(
                             AccountProvider::Codex,
                             id.clone(),
-                            LoginBrowser::Isolated,
+                            LoginBrowser::Default,
                         ),
-                        reauth_here: SettingsAction::ReauthAccount(
+                        reauth_isolated: SettingsAction::ReauthAccount(
                             AccountProvider::Codex,
                             id.clone(),
-                            LoginBrowser::Default,
+                            LoginBrowser::Isolated,
                         ),
                         remove: SettingsAction::RemoveCodexAccount(id.clone()),
                     });
@@ -4054,11 +4053,11 @@ struct AcctSlot<'a> {
     /// 이름을 눌렀을 때 — 라벨 편집. Orca 엔 rename 이 없지만(이름=이메일) kasaterm 은
     /// 거노가 붙인 별명이 곧 이름이라, 그 이름을 직접 누르는 것이 가장 짧은 길이다.
     focus: SettingsAction,
-    /// 쿠키 없는 창으로 다시 로그인(`rotate-cw`).
-    reauth: SettingsAction,
-    /// 쓰던 브라우저로 다시 로그인(`external-link`) — 그 계정이 이미 브라우저에
+    /// 다시 로그인(`rotate-cw`) — **쓰던 브라우저**로 연다. 그 계정이 이미 거기
     /// 붙어 있으면 비밀번호·2단계를 다시 칠 일이 없다.
-    reauth_here: SettingsAction,
+    reauth: SettingsAction,
+    /// 쿠키 없는 빈 창으로 다시 로그인(`users`) — 이 슬롯에 **다른 계정**을 붙일 때.
+    reauth_isolated: SettingsAction,
     remove: SettingsAction,
 }
 
@@ -4099,9 +4098,9 @@ fn account_card(
     let mut right = x + w - pad;
     if let Some(s) = v.slot.as_ref() {
         // 오른쪽부터 왼쪽으로 쌓인다 — 파괴적인 것(빼기)을 끝에 두고, 자주 쓰는
-        // 「쓰던 브라우저로」가 이름 쪽에 가장 가깝게 온다.
+        // 「다시 로그인」이 이름 쪽에 가장 가깝게 온다.
         for (glyph, act) in
-            [("x", &s.remove), ("rotate-cw", &s.reauth), ("external-link", &s.reauth_here)]
+            [("x", &s.remove), ("users", &s.reauth_isolated), ("rotate-cw", &s.reauth)]
         {
             let br = (right - 24.0, y + (h - 24.0) / 2.0, 24.0, 24.0);
             let bh = inside(br, cursor);
@@ -4289,6 +4288,11 @@ pub(crate) fn cancel_login() {
 /// 안 열림」): 만료된 슬롯을 **그 계정 그대로** 되살릴 때도 빈 크롬이 떠서 비밀번호와
 /// 2단계 인증을 처음부터 다시 쳐야 했다. 반대로 쓰던 브라우저만 있으면 새 슬롯이
 /// 전부 같은 계정으로 붙는 옛 버그로 돌아간다. 그래서 고르게 둔다.
+///
+/// **다시 로그인의 기본은 `Default`(쓰던 브라우저)다**(거노 2026-08-15 「orca 처럼
+/// 기본이 쓰던 브라우저로」). 있는 슬롯을 다시 로그인하는 일은 거의 전부 「그 계정
+/// 그대로 되살리기」라, 흔한 쪽이 한 번에 끝나야 한다. `Isolated` 는 그 슬롯에 다른
+/// 계정을 붙일 때의 보조 선택지로 남는다.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoginBrowser {
     /// 쿠키 없는 크롬 프로필. URL 을 우리가 주워 그 창으로 연다.
