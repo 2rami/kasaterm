@@ -94,6 +94,34 @@ export function GeneralTab({
         />
       </Row>
 
+      {/* 두 하단바 높이. 자유값이 아니라 프리셋인 건 안에 얹히는 것(게이지·칩)
+          크기가 정해져 있어 쓸 수 있는 폭이 사실상 세 칸이어서다. */}
+      <Row label={t.general.windowBarH} desc={[t.general.windowBarHHint]}>
+        <Segmented
+          value={String(data.status_bar_h)}
+          disabled={busy}
+          options={[
+            { key: '20', label: t.general.barHeightLow },
+            { key: '24', label: t.general.barHeightMid },
+            { key: '30', label: t.general.barHeightHigh },
+          ]}
+          onPick={(key) => void run('status-bar-h', { id: key })}
+        />
+      </Row>
+
+      <Row label={t.general.paneBarH} desc={[t.general.paneBarHHint]}>
+        <Segmented
+          value={String(data.pane_footer_h)}
+          disabled={busy}
+          options={[
+            { key: '24', label: t.general.barHeightLow },
+            { key: '30', label: t.general.barHeightMid },
+            { key: '36', label: t.general.barHeightHigh },
+          ]}
+          onPick={(key) => void run('pane-footer-h', { id: key })}
+        />
+      </Row>
+
       <Row label={t.general.fileOpen} desc={[t.general.fileOpenHint]}>
         <Segmented
           value={open}

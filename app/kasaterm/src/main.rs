@@ -492,7 +492,9 @@ const PANE_HEADER_HEIGHT: f32 = 34.0;
 ///
 /// 헤더(34)보다 낮은 건 의도다 — 헤더는 탭을 이고 있고 하단바는 칩만 얹는다.
 /// 다만 예전 24 는 18px 칩에 여백이 3px 밖에 안 남아 띠가 칩에 눌려 보였다.
-const PANE_FOOTER_HEIGHT: f32 = 30.0;
+/// **기본값**이다 — 실제 높이는 설정에서 바뀌므로 `App::pane_footer_h()` 를 써라.
+/// 이 상수를 직접 참조하면 설정을 내려도 안 따라가는 자리가 하나 생긴다.
+const PANE_FOOTER_HEIGHT_DEFAULT: f32 = 30.0;
 /// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
 /// grid only when the dock is non-empty.
 const DOCK_HEIGHT: f32 = 40.0;
@@ -501,7 +503,8 @@ const DOCK_HEIGHT: f32 = 40.0;
 /// dock 과 달리 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
 /// 아니라 「지금 얼마나 남았나」라서, 접혀 있으면 그걸 확인하려고 패널을 여는 순간
 /// 이미 늦는다. Orca 하단바(24px)와 같은 높이 — 거기서 형식을 가져왔다.
-const STATUS_HEIGHT: f32 = 24.0;
+/// **기본값**이다 — 실제 높이는 설정에서 바뀌므로 `App::status_h()` 를 써라.
+const STATUS_HEIGHT_DEFAULT: f32 = 24.0;
 /// 활성 탭 상단 accent 선 두께(logical px). BORDER stroke(1px)보다 살짝 굵게.
 const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
@@ -4158,6 +4161,12 @@ pub(crate) enum SettingsAction {
     /// PixelDelta 스크롤 감도 배율 ×100. 트랙패드와 고해상도 마우스휠이 같은
     /// 델타로 와 구분이 안 되므로 사람이 고른다.
     WheelPixelGain(u32),
+    /// 창 맨 아래 상태줄 높이(logical px). 슬라이더가 아니라 프리셋인 것은 1px
+    /// 단위로 고를 값이 아니어서다 — 안에 얹힌 게이지·칩 크기가 정해져 있어,
+    /// 쓸 수 있는 폭이 사실상 세 칸이다.
+    StatusBarH(u32),
+    /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
+    PaneFooterH(u32),
     /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
     /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
     FocusClaudeAccountLabel(usize),
@@ -5027,6 +5036,8 @@ struct App {
     /// PixelDelta 스크롤 감도 배율. 기본 0.3 은 트랙패드 기준이고, 마우스휠을
     /// 쓰는 사람이 설정에서 올린다 — 둘이 같은 델타로 와 자동 구분이 안 된다.
     set_wheel_pixel_gain: f32,
+    set_status_h: f32,
+    set_pane_footer_h: f32,
     /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
     /// model/effort overrides, and free-form extra args. Invariants
     /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
@@ -5503,6 +5514,8 @@ impl App {
             set_autosave: socket::read_editor_autosave(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
             set_wheel_pixel_gain: socket::read_wheel_pixel_gain(),
+            set_status_h: socket::read_status_h(),
+            set_pane_footer_h: socket::read_pane_footer_h(),
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),
             set_palette_edit: String::new(),

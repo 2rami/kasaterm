@@ -377,12 +377,12 @@ impl App {
             self.set_footer_default
         }
     }
-    /// Logical-px footer band `id` reserves for its status bar — `PANE_FOOTER_HEIGHT`
+    /// Logical-px footer band `id` reserves for its status bar — `self.pane_footer_h()`
     /// when shown, 0 when collapsed. Mirrors the header band in `resize_backend`
     /// and the render clip so the PTY grid stops exactly above the bar.
     pub(crate) fn statusbar_px(&self, id: &str) -> f32 {
         if self.statusbar_visible(id) {
-            PANE_FOOTER_HEIGHT
+            self.pane_footer_h()
         } else {
             0.0
         }
@@ -730,6 +730,16 @@ impl App {
     /// Info 패널의 포트 칩 클릭 — 기본 브라우저로 `http://localhost:<port>`.
     /// https 를 시도하지 않는 건 로컬 dev 서버가 거의 평문이기 때문이다(TLS 인
     /// 서버는 브라우저가 리다이렉트해준다).
+    /// 창 맨 아래 상태줄 높이(logical px). 설정에서 바뀌므로 상수를 직접 읽지 마라.
+    pub(crate) fn status_h(&self) -> f32 {
+        self.set_status_h
+    }
+
+    /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
+    pub(crate) fn pane_footer_h(&self) -> f32 {
+        self.set_pane_footer_h
+    }
+
     pub(crate) fn open_localhost(&self, port: u16) {
         self.open_url(&format!("http://localhost:{port}"));
     }
@@ -1376,7 +1386,7 @@ impl App {
     /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
     /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다.
     ///
-    /// 상태줄(`STATUS_HEIGHT`)은 **조건 없이 항상** 들어간다. dock 과 달리 늘 있는
+    /// 상태줄(`self.status_h()`)은 **조건 없이 항상** 들어간다. dock 과 달리 늘 있는
     /// 띠라, 여기서 안 빼면 마지막 셀 줄 위에 그대로 덮여 그려진다 — 넘친 것이
     /// 잘리지 않고 **멀쩡해 보이는 채로 겹친다**. 시저가 생겼어도 이건 안 바뀐다:
     /// 클립은 chrome 인스턴스 버퍼를 구간으로 갈라 거는 것이라 **터미널 셀 패스에는
@@ -1389,7 +1399,7 @@ impl App {
     /// 접어 둔 별도창은 **센다**. 그건 사용자가 그 순간 직접 접은 것이라 띠가 생기는
     /// 게 결과로 읽히고, 무엇보다 되살릴 손잡이가 여기 말고는 없다.
     pub(crate) fn bottom_reserve_h(&self) -> f32 {
-        self.dock_reserve_h() + STATUS_HEIGHT
+        self.dock_reserve_h() + self.status_h()
     }
 
     /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
@@ -1418,7 +1428,7 @@ impl App {
         // 사이드바는 pane 그리드를 안 지나므로 `window_cells` 의 예약이 여기까지
         // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
         let bottom_h =
-            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
         let b = 28.0_f32;
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
         let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;

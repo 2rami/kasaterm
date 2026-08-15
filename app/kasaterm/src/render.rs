@@ -391,6 +391,11 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
+        // 두 하단바 높이는 설정값이라 프레임 내내 여러 번 읽힌다. 여기서 한 번
+        // 뽑아 두는 건 값이 도중에 바뀔 일이 없어서이기도 하지만, 아래쪽 대부분이
+        // `self.gpu` 를 빌린 안쪽이라 거기서 `&self` 메서드를 다시 못 부르기 때문이다.
+        let status_h = self.status_h();
+        let pane_footer_h = self.pane_footer_h();
         // Glyph-atlas repack, if one is pending. This is the only safe point
         // for it: from here on the frame emits quads whose UVs index the
         // current packing, so a repack mid-frame would show them whatever
@@ -1916,7 +1921,7 @@ impl App {
                 let box_y = TITLE_HEIGHT + y_cells as f32 * self.cell.h;
                 // A lone unsplit pane arrives as a (0,0,0,0) placeholder (see the
                 // clip note above), which would leave the box 0×0 and starve the
-                // footer (`fbox_h < PANE_FOOTER_HEIGHT` → skipped). Treat a 0 span
+                // footer (`fbox_h < pane_footer_h()` → skipped). Treat a 0 span
                 // as "fills the grid" so the box — and its status bar — spans the
                 // whole pane area just like a real right/bottom-edge leaf.
                 let box_w = {
@@ -4166,7 +4171,7 @@ impl App {
                     0.0
                 } else {
                     DOCK_HEIGHT
-                } + STATUS_HEIGHT;
+                } + status_h;
                 let body_visible_h = (sb_win_h - bottom_h - start_y).max(0.0);
                 self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
@@ -5243,7 +5248,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -5299,7 +5304,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -5328,7 +5333,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6242,22 +6247,22 @@ impl App {
             for (fid, fx, fy, fw, fbox_h) in &footer_slots {
                 let fvis = self.statusbar.shown.contains(fid)
                     || (!self.statusbar.hidden.contains(fid) && self.set_footer_default);
-                if !fvis || *fbox_h < PANE_FOOTER_HEIGHT + 4.0 {
+                if !fvis || *fbox_h < pane_footer_h + 4.0 {
                     continue;
                 }
-                let bar_y = fy + fbox_h - PANE_FOOTER_HEIGHT;
+                let bar_y = fy + fbox_h - pane_footer_h;
                 // 테두리를 footer 배경이 덮지 않게 좌우·하단을 그 두께만큼 안쪽으로
                 // 그린다 — 안 그러면 나중에 그려지는 footer bg 가 보더의 하단·좌우 끝을
                 // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(거노). 두께는
                 // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
                 let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
-                g.rect(fx + bt, bar_y, fw - 2.0 * bt, PANE_FOOTER_HEIGHT - bt, theme::bg());
+                g.rect(fx + bt, bar_y, fw - 2.0 * bt, pane_footer_h - bt, theme::bg());
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
                 // 글자·아이콘이었다 — 같은 화면의 사이드바(13~14)와 나란히 놓이니
                 // 하단바만 축소된 것처럼 읽혔다(거노). 본문 단과 같은 단으로 올린다.
                 let pill_h = 22.0_f32;
-                let pill_y = bar_y + (PANE_FOOTER_HEIGHT - pill_h) / 2.0;
+                let pill_y = bar_y + (pane_footer_h - pill_h) / 2.0;
                 let icon_sz = 14.0_f32;
                 let pad_x = 9.0_f32;
                 let icon_gap = 6.0_f32;
@@ -6265,7 +6270,7 @@ impl App {
                 let font = 13.0_f32;
                 let txt_y = pill_y + (pill_h - font) / 2.0;
                 let footer_hover = sb_my >= bar_y
-                    && sb_my <= bar_y + PANE_FOOTER_HEIGHT
+                    && sb_my <= bar_y + pane_footer_h
                     && sb_mx >= *fx
                     && sb_mx <= fx + fw;
                 let mut cx = fx + 8.0;
@@ -6358,11 +6363,11 @@ impl App {
                 if footer_hover {
                     let h_sz = 13.0;
                     let h_x = fx + fw - h_sz - 8.0;
-                    let h_y = bar_y + (PANE_FOOTER_HEIGHT - h_sz) / 2.0;
+                    let h_y = bar_y + (pane_footer_h - h_sz) / 2.0;
                     let h_hover = sb_mx >= h_x - 4.0
                         && sb_mx <= h_x + h_sz + 4.0
                         && sb_my >= bar_y
-                        && sb_my <= bar_y + PANE_FOOTER_HEIGHT;
+                        && sb_my <= bar_y + pane_footer_h;
                     if h_hover {
                         hover_rect(g, h_x - 4.0, h_y - 2.0, h_sz + 8.0, h_sz + 4.0,
                             theme::radius_sm());
@@ -6370,7 +6375,7 @@ impl App {
                     g.queue_icon("chevrons-down-up", h_x, h_y, h_sz,
                         if h_hover { theme::text() } else { theme::text_mute() });
                     self.statusbar.toggle_rects
-                        .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, PANE_FOOTER_HEIGHT)));
+                        .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, pane_footer_h)));
                 }
             }
             Self::paint_gpu_overlays(g, &overlay);
@@ -6828,7 +6833,7 @@ impl App {
                 // 상태줄 **위**에 앉는다 — 상태줄은 창 맨 바닥에 고정이고 dock 은
                 // 접힌 pane 이 있을 때만 나타났다 사라지는 띠라, 순서가 반대면
                 // 접을 때마다 상태줄이 위아래로 뛴다.
-                let bar_y = win_h - STATUS_HEIGHT - DOCK_HEIGHT;
+                let bar_y = win_h - status_h - DOCK_HEIGHT;
                 // Confine the dock to the pane-grid band: it must not bleed under
                 // the session-tab strip / file tree on the left or the git column
                 // on the right. Same bounds the cell grid uses in window_cells().
@@ -6895,8 +6900,8 @@ impl App {
             {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                let sy = win_h - STATUS_HEIGHT;
-                g.rect(0.0, sy, win_w, STATUS_HEIGHT, theme::panel_bg());
+                let sy = win_h - status_h;
+                g.rect(0.0, sy, win_w, status_h, theme::panel_bg());
                 g.rect(0.0, sy, win_w, 1.0, theme::border());
 
                 let badge = self.claude_usage.lock().ok().and_then(|v| v.clone());
@@ -6914,7 +6919,7 @@ impl App {
                 });
 
                 let fs = 11.0_f32;
-                let ty = sy + (STATUS_HEIGHT - fs) / 2.0 - 1.0;
+                let ty = sy + (status_h - fs) / 2.0 - 1.0;
                 let mut x = 12.0_f32;
                 let seg_x0 = x;
 
@@ -6924,7 +6929,7 @@ impl App {
                 const GW: f32 = 48.0;
                 const GH: f32 = 6.0;
                 if win_w >= 500.0 {
-                    let gy = sy + (STATUS_HEIGHT - GH) / 2.0;
+                    let gy = sy + (status_h - GH) / 2.0;
                     // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15% 짜리
                     // 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서 그냥 얼룩이
                     // 된다(첫 캡처에서 실제로 그랬다). 트랙은 은은하게, 채움은 확실하게.
@@ -6999,7 +7004,7 @@ impl App {
                 }
 
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
-                let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), STATUS_HEIGHT);
+                let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), status_h);
                 // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
                 // 생각조차 안 든다(거노 2026-08-12). 채움은 주지 않는다: 세그먼트
                 // 폭은 텍스트를 다 그린 뒤에야 확정되고, 이 렌더는 나중에 그린 것이
@@ -7031,7 +7036,7 @@ impl App {
                     let seg_w = icon + gap + tw + gap + dot;
                     let tx = win_w - 12.0 - seg_w;
                     let col = if on { theme::text() } else { theme::text_dim() };
-                    g.queue_icon("globe", tx, sy + (STATUS_HEIGHT - icon) / 2.0, icon, col);
+                    g.queue_icon("globe", tx, sy + (status_h - icon) / 2.0, icon, col);
                     g.draw_text(
                         tx + icon + gap,
                         ty,
@@ -7043,7 +7048,7 @@ impl App {
                     round_rect(
                         g,
                         tx + icon + gap + tw + gap,
-                        sy + (STATUS_HEIGHT - dot) / 2.0,
+                        sy + (status_h - dot) / 2.0,
                         dot,
                         dot,
                         dot / 2.0,
@@ -7053,7 +7058,7 @@ impl App {
                             theme::with_alpha(theme::text_dim(), 140)
                         },
                     );
-                    let r = (tx - 8.0, sy, seg_w + 20.0, STATUS_HEIGHT);
+                    let r = (tx - 8.0, sy, seg_w + 20.0, status_h);
                     {
                         let (hx, hy) = self.cursor_px;
                         g.hover_pointer |=
@@ -7091,7 +7096,7 @@ impl App {
                                 italic: false,
                             },
                         );
-                        let rr = (rx - 6.0, sy, lw + 12.0, STATUS_HEIGHT);
+                        let rr = (rx - 6.0, sy, lw + 12.0, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= rr.0
@@ -7117,14 +7122,14 @@ impl App {
                         let open =
                             matches!(self.statusbar.popover, Some((state::StatusbarPopover::Ports, _)));
                         let col = if open || n > 0 { theme::text() } else { theme::text_dim() };
-                        g.queue_icon("plug", rx, sy + (STATUS_HEIGHT - icon) / 2.0, icon, col);
+                        g.queue_icon("plug", rx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(
                             rx + icon + gap,
                             ty,
                             &label,
                             gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
                         );
-                        let pr = (rx - 6.0, sy, seg + 12.0, STATUS_HEIGHT);
+                        let pr = (rx - 6.0, sy, seg + 12.0, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= pr.0
@@ -7647,7 +7652,7 @@ impl App {
                 // 상태줄 **위**로. 창 바닥에 붙이던 자리인데 그 자리는 이제 상태줄이
                 // 쓰고, 버전이 그 위에 덧그려져 자원 수치와 글자가 포개졌다(부팅 후
                 // 몇 초라 놓치기 쉽다 — 2026-08-15 캡처에서 잡았다).
-                let y = win_h - STATUS_HEIGHT - v_font - margin;
+                let y = win_h - status_h - v_font - margin;
                 let a = (170.0 * v_alpha).round() as u8;
                 g.draw_text(
                     x,

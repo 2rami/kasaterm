@@ -2321,7 +2321,7 @@ impl App {
         // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
         let bottom_h =
-            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + STATUS_HEIGHT;
+            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
         // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
         // chevron-down 오버플로 힌트 자리.
         let avail_h = (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);

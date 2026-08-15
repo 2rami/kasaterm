@@ -3910,6 +3910,28 @@ pub fn read_wheel_pixel_gain() -> f32 {
         .unwrap_or(0.3)
 }
 
+/// 창 맨 아래 상태줄 높이(logical px). 상·하한은 안전장치 — 그 밖으로 나가면 안에
+/// 얹힌 게이지·칩(18px)이 띠에 눌리거나 띠만 덩그러니 남는다.
+pub fn read_status_h() -> f32 {
+    read_settings()
+        .get("status_bar_h")
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| (18.0..=40.0).contains(x))
+        .unwrap_or(crate::STATUS_HEIGHT_DEFAULT)
+}
+
+/// pane 하단바(경로·브랜치·diff 칩) 높이(logical px). 창 상태줄보다 높은 게 기본인
+/// 것은 여기 얹히는 칩이 더 크기 때문이다.
+pub fn read_pane_footer_h() -> f32 {
+    read_settings()
+        .get("pane_footer_h")
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| (22.0..=44.0).contains(x))
+        .unwrap_or(crate::PANE_FOOTER_HEIGHT_DEFAULT)
+}
+
 /// 한도가 차서 떠나온 계정의 "이때 전까진 돌아가지 마라" 표. id → epoch 초
 /// (기본 로그인은 `""` 키). 계정 dir 과 같은 이유로 설정 파일 옆에 둔다 —
 /// 스크래치 설정으로 도는 헤드리스 실행이 진짜 쿨다운을 밟지 않게.

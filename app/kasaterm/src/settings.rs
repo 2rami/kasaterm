@@ -93,6 +93,9 @@ pub(crate) struct SettingsCtx {
     pub ui_zoom: f32,
     /// PixelDelta 스크롤 감도 배율(트랙패드·고해상도 마우스휠 공용).
     pub wheel_pixel_gain: f32,
+    /// 창 상태줄·pane 하단바 높이(logical px).
+    pub status_h: f32,
+    pub pane_footer_h: f32,
     pub tabs_on_top: bool,
     /// 터미널 커서 모양 — `"block"` · `"bar"` · `"underline"`.
     pub cursor_shape: String,
@@ -371,6 +374,8 @@ impl App {
             "wheel_pixel_gain",
             serde_json::Value::from(self.set_wheel_pixel_gain),
         );
+        socket::write_setting("status_bar_h", serde_json::Value::from(self.set_status_h));
+        socket::write_setting("pane_footer_h", serde_json::Value::from(self.set_pane_footer_h));
         self.regen_claude_shim();
         // codex 는 래퍼를 다시 굽지 않는다 — 값이 하나도 안 박힌 정적 문자열이라
         // 다시 구울 이유가 없고, 활성 슬롯 경로만 파일로 갈아 끼우면 **이미 떠 있는
@@ -687,6 +692,8 @@ impl App {
             font_size: self.font_size,
             ui_zoom: self.ui_zoom,
             wheel_pixel_gain: self.set_wheel_pixel_gain,
+            status_h: self.set_status_h,
+            pane_footer_h: self.set_pane_footer_h,
             tabs_on_top: self.tabs_on_top,
             cursor_shape: self.cursor_shape.clone(),
             cursor_thickness: self.cursor_thickness,
@@ -1116,6 +1123,22 @@ impl App {
                 // 비워 주지 않으면 다음 스크롤까지 옛 감도로 굴러간다.
                 crate::invalidate_wheel_pixel_gain();
             }
+            // 높이가 바뀌면 격자에서 예약하는 띠도 달라진다 — PTY 를 다시 재지
+            // 않으면 셸이 옛 행수로 그리고, 그 차이만큼 화면이 어긋난 채 남는다.
+            SettingsAction::StatusBarH(px) => {
+                self.set_status_h = px as f32;
+                self.settings_save();
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+                self.chrome_dirty = true;
+            }
+            SettingsAction::PaneFooterH(px) => {
+                self.set_pane_footer_h = px as f32;
+                self.settings_save();
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+                self.chrome_dirty = true;
+            }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
             // 붙은 한도 이력이 남는다. 새로 만들었다 지우는 것과 여기가 갈린다.
@@ -1379,6 +1402,24 @@ impl App {
                 let k = pick(&["arrow", "ibeam"], id).ok_or_else(|| unknown(id))?;
                 self.settings_apply(SettingsAction::MouseCursor(k));
                 Ok(self.mouse_cursor == k)
+            }
+            // 값을 여기서 한 번 더 거르는 건 이 경로가 **HTTP** 라서다 — 화면이
+            // 보내는 것만 오리라고 믿으면 안 되고, 범위 밖 높이는 띠를 깨뜨린다.
+            "status-bar-h" => {
+                let px: u32 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(px, 20 | 24 | 30) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::StatusBarH(px));
+                Ok(self.set_status_h.round() as u32 == px)
+            }
+            "pane-footer-h" => {
+                let px: u32 = id.parse().map_err(|_| unknown(id))?;
+                if !matches!(px, 24 | 30 | 36) {
+                    return Err(unknown(id));
+                }
+                self.settings_apply(SettingsAction::PaneFooterH(px));
+                Ok(self.set_pane_footer_h.round() as u32 == px)
             }
             "wheel-gain" => {
                 let x100: u32 = id.parse().map_err(|_| unknown(id))?;
@@ -1906,6 +1947,8 @@ impl App {
                 "cursor_thickness": self.cursor_thickness,
                 "mouse_cursor": self.mouse_cursor,
                 "wheel_gain_x100": (self.set_wheel_pixel_gain * 100.0).round() as u32,
+                "status_bar_h": self.set_status_h.round() as u32,
+                "pane_footer_h": self.set_pane_footer_h.round() as u32,
             },
             "appearance": {
                 "theme": theme::theme_name(),
@@ -2833,6 +2876,24 @@ pub(crate) fn paint_settings(
                 }
                 y = ny;
             }
+            // 두 하단바 높이(2026-08-15 지시 「하단바 크기조절도 가능하게, pane
+            // 하단바도」). 자유값이 아니라 프리셋인 건 안에 얹히는 것(게이지·칩)
+            // 크기가 정해져 있어 쓸 수 있는 폭이 사실상 세 칸이어서다 — 그 밖으로
+            // 나가면 띠가 내용에 눌리거나 띠만 덩그러니 남는다.
+            let sh = ctx.status_h.round() as u32;
+            y = seg_row(g, &mut rects, y, "Window status bar height",
+                &["창 맨 아래 계정 한도 줄의 높이"], &[
+                ("낮게", sh == 20, SettingsAction::StatusBarH(20)),
+                ("보통", sh == 24, SettingsAction::StatusBarH(24)),
+                ("높게", sh == 30, SettingsAction::StatusBarH(30)),
+            ]);
+            let pfh = ctx.pane_footer_h.round() as u32;
+            y = seg_row(g, &mut rects, y, "Pane status bar height",
+                &["각 pane 아래 경로 · 브랜치 줄의 높이"], &[
+                ("낮게", pfh == 24, SettingsAction::PaneFooterH(24)),
+                ("보통", pfh == 30, SettingsAction::PaneFooterH(30)),
+                ("높게", pfh == 36, SettingsAction::PaneFooterH(36)),
+            ]);
             y = seg_row(g, &mut rects, y, "File open",
                 &["파일 트리에서 파일을 열 때 무엇으로 열지"], &[
                 ("Built-in", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),

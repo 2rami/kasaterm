@@ -73,6 +73,9 @@ export type GeneralValues = {
   cursor_thickness: number;
   mouse_cursor: string;
   wheel_gain_x100: number;
+  /// 창 맨 아래 상태줄 · pane 하단바 높이(logical px). 자유값이 아니라 프리셋이다.
+  status_bar_h: number;
+  pane_footer_h: number;
 };
 
 export type AppearanceValues = {
