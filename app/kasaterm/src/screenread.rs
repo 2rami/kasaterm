@@ -1146,6 +1146,63 @@ pub(crate) fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'st
     None
 }
 
+/// 글 흐름 안에 얹을 그림 한 장 — `[[img:<경로>:<행수>]]` 표식이 잡힌 자리.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImageBlock {
+    /// 표식이 앉은 행. 이 행부터 `rows` 행이 그림 자리다.
+    pub row: usize,
+    pub path: String,
+    /// 그림이 차지할 행 수(표식 행 포함).
+    pub rows: usize,
+}
+
+/// 글 흐름 안 그림 표식 `[[img:<경로>:<행수>]]` 을 찾는다.
+///
+/// 터미널에 「여기 그림을 그려라」를 알리는 표준 신호(OSC 1337)가 있지만 claude
+/// pane 에서는 못 쓴다 — claude code 가 도구 출력의 제어문자를 벗겨 내서 PTY 까지
+/// 닿지 않는다(2026-08-15 실측: `ESC` 가 사라진 채 `]1337;…` 만 도착). 그래서
+/// **화면에 남은 평범한 글자**를 신호로 삼는다. 그 대신 그림이 앉을 자리는 글을
+/// 쓰는 쪽이 만들어야 한다(표식 아래에 그 행 수만큼 줄을 채워 둔다) — 격자를
+/// 소유한 것은 claude code 라 우리가 줄을 밀어 낼 수 없기 때문이다.
+///
+/// 빈 줄이 아니라 점 같은 글자로 채워야 한다. 마크다운 렌더러가 연속 빈 줄을
+/// 하나로 접어서, 빈 줄로 만든 자리는 화면에 남지 않는다.
+pub(crate) fn find_image_blocks(rows: &[Vec<GridCell>]) -> Vec<ImageBlock> {
+    const HEAD: &str = "[[img:";
+    let mut out = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        // 값싼 프리체크 — 대부분의 행에는 `[[` 가 없고, 여긴 매 프레임 모든
+        // pane 의 모든 행을 지난다. 문자열을 만드는 건 그 다음이다.
+        if !row.windows(2).any(|w| w[0].ch == '[' && w[1].ch == '[') {
+            continue;
+        }
+        let (text, _) = row_text_cells(row);
+        let Some(at) = text.find(HEAD) else { continue };
+        let Some(end) = text[at..].find("]]") else { continue };
+        let body = &text[at + HEAD.len()..at + end];
+        // 경로에 `:` 가 들어갈 수 있으니 **마지막** 콜론에서 가른다.
+        let Some(cut) = body.rfind(':') else { continue };
+        let Ok(n) = body[cut + 1..].trim().parse::<usize>() else { continue };
+        let path = body[..cut].trim();
+        // 0 행은 자리가 없다는 뜻이라 그릴 데가 없고, 상한은 폭주 방지다.
+        if path.is_empty() || n == 0 || n > 200 {
+            continue;
+        }
+        out.push(ImageBlock { row: r, path: path.to_string(), rows: n });
+    }
+    out
+}
+
+/// 그림이 앉을 행들을 비운다 — 표식 글자와 자리를 채운 점이 그림 뒤로 비치지
+/// 않게. `find_sticky_prompt` 가 감지 행을 지우고 pill 을 얹는 것과 같은 수순이다.
+pub(crate) fn blank_image_block(rows: &mut [Vec<GridCell>], at: &ImageBlock) {
+    for row in rows.iter_mut().skip(at.row).take(at.rows) {
+        for cell in row.iter_mut() {
+            *cell = GridCell::blank();
+        }
+    }
+}
+
 /// 화면에 남은 첨부 이미지 자리 — claude code 는 붙인 그림을 `[Image #6]` 이라는
 /// 글자로만 표시해서, 무슨 그림이었는지 화면만 봐서는 알 수가 없다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1205,12 +1262,18 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// 키 집합은 이번 프레임에 **렌더된 pane** 기준이다 — 워크스페이스를 전환하면
 /// 그쪽 그림 텍스처가 놓였다가 돌아올 때 다시 디코드된다(전환은 드물고
 /// 디코드는 ms 급이라 캐시를 창 넘어 유지할 이유가 없다).
+/// `hug` 가 참이면 박스를 그림 비율만큼 좁혀 **왼쪽에 붙인다**. `queue_image` 의
+/// contain-fit 은 박스 안 중앙 정렬이라, 준 박스가 그림보다 넓으면 글 흐름에서
+/// 그림만 한가운데로 떨어져 나온다. OSC 1337 경로는 PTY 가 셀 수를 재어 주므로
+/// 박스가 이미 맞아 이 손질이 필요 없다.
 pub(crate) fn paint_inline_images(
     g: &mut gpu::GpuRenderer,
-    slots: &[(String, String, f32, f32, f32, f32, f32, f32)],
+    slots: &[(String, String, f32, f32, f32, f32, f32, f32, bool)],
 ) {
+    // 값은 디코드한 픽셀 크기 — `hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
+    // 실패라, 매 프레임 같은 파일을 다시 열지 않게 남겨 둔다.
     static UPLOADED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, bool>>,
+        std::sync::Mutex<std::collections::HashMap<String, Option<(u32, u32)>>>,
     > = std::sync::OnceLock::new();
     let mut up = UPLOADED.get_or_init(Default::default).lock().unwrap();
     let live: std::collections::HashSet<&str> =
@@ -1222,28 +1285,29 @@ pub(crate) fn paint_inline_images(
         }
         keep
     });
-    for (key, path, x, y, w, h, c0, c1) in slots {
-        match up.get(key) {
-            Some(true) => {}
-            Some(false) => continue,
-            None => {
-                let ok = std::fs::read(path)
-                    .ok()
-                    .and_then(|b| image::load_from_memory(&b).ok())
-                    .map(|img| {
-                        let rgba = img.to_rgba8();
-                        let (iw, ih) = rgba.dimensions();
-                        g.upload_image(key, &rgba, iw, ih);
-                    })
-                    .is_some();
-                up.insert(key.clone(), ok);
-                if !ok {
-                    continue;
-                }
-            }
+    for (key, path, x, y, w, h, c0, c1, hug) in slots {
+        if !up.contains_key(key) {
+            let dims = std::fs::read(path)
+                .ok()
+                .and_then(|b| image::load_from_memory(&b).ok())
+                .map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (iw, ih) = rgba.dimensions();
+                    g.upload_image(key, &rgba, iw, ih);
+                    (iw, ih)
+                });
+            up.insert(key.clone(), dims);
         }
-        g.push_clip(*x, *c0, *w, *c1 - *c0);
-        g.queue_image(key, *x, *y, *w, *h, 1.0, 0.0, 0.0);
+        let Some(Some((iw, ih))) = up.get(key).copied() else { continue };
+        let bw = if *hug && ih > 0 {
+            // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
+            // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
+            (h * iw as f32 / ih as f32).min(iw as f32).min(*w)
+        } else {
+            *w
+        };
+        g.push_clip(*x, *c0, bw, *c1 - *c0);
+        g.queue_image(key, *x, *y, bw, *h, 1.0, 0.0, 0.0);
         g.pop_clip();
     }
 }
@@ -4057,5 +4121,91 @@ mod image_ref_tests {
         let got = find_image_refs(&rows);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].row, 2);
+    }
+}
+
+#[cfg(test)]
+mod image_block_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    fn grid(lines: &[&str]) -> Vec<Vec<GridCell>> {
+        lines.iter().map(|l| row_from(l)).collect()
+    }
+
+    // claude code 는 답의 모든 줄 앞에 두 칸을 넣는다 — 왼쪽에 붙어 있다고 보면 안 된다.
+    #[test]
+    fn finds_an_indented_marker() {
+        let g = grid(&["  [[img:/tmp/a.png:12]]", "  .", "  ."]);
+        assert_eq!(
+            find_image_blocks(&g),
+            vec![ImageBlock { row: 0, path: "/tmp/a.png".into(), rows: 12 }]
+        );
+    }
+
+    // 경로에 콜론이 들어가도 마지막 콜론이 행 수를 가른다.
+    #[test]
+    fn splits_on_the_last_colon() {
+        let g = grid(&["[[img:/tmp/a:b/c.png:8]]"]);
+        assert_eq!(find_image_blocks(&g)[0].path, "/tmp/a:b/c.png");
+        assert_eq!(find_image_blocks(&g)[0].rows, 8);
+    }
+
+    #[test]
+    fn ignores_malformed_markers() {
+        let g = grid(&[
+            "[[img:/tmp/a.png]]",   // 행 수 없음
+            "[[img::12]]",          // 경로 없음
+            "[[img:/tmp/a.png:0]]", // 자리가 0
+            "[[img:/tmp/a.png:12",  // 안 닫힘
+            "[img:/tmp/a.png:12]",  // 대괄호 하나
+            "[[img:/tmp/a.png:많이]]",
+        ]);
+        assert!(find_image_blocks(&g).is_empty());
+    }
+
+    // 폭주 방지 상한 — 화면에 우연히 큰 숫자가 있어도 그리드를 통째로 지우지 않는다.
+    #[test]
+    fn rejects_an_absurd_height() {
+        let g = grid(&["[[img:/tmp/a.png:9999]]"]);
+        assert!(find_image_blocks(&g).is_empty());
+    }
+
+    #[test]
+    fn finds_several_blocks() {
+        let g = grid(&["[[img:a.png:2]]", ".", "글", "[[img:b.png:3]]", ".", ".", "."]);
+        let got = find_image_blocks(&g);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].row, got[1].row), (0, 3));
+    }
+
+    // 표식 행과 그 아래 자리 행이 함께 지워져야 그림 뒤로 글자가 안 비친다.
+    #[test]
+    fn blanks_the_marker_row_and_its_space() {
+        let mut g = grid(&["[[img:a.png:3]]", "....", "....", "남는 줄"]);
+        let b = find_image_blocks(&g).remove(0);
+        blank_image_block(&mut g, &b);
+        for r in 0..3 {
+            assert!(row_is_blank(&g[r]), "행 {r} 이 안 비었다");
+        }
+        assert!(!row_is_blank(&g[3]), "자리 밖 행까지 지웠다");
+    }
+
+    // 자리가 화면 끝을 넘어가도(스크롤로 잘린 그림) 패닉하지 않는다.
+    #[test]
+    fn survives_a_block_running_past_the_last_row() {
+        let mut g = grid(&["[[img:a.png:40]]", "."]);
+        let b = find_image_blocks(&g).remove(0);
+        blank_image_block(&mut g, &b);
+        assert!(g.iter().all(|r| row_is_blank(r)));
     }
 }

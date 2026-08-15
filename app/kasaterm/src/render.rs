@@ -568,9 +568,11 @@ impl App {
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
-        // 인라인 이미지(OSC 1337) 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h,
-        // clip_y0, clip_y1). 좌표는 LOGICAL px(queue_image 관례).
-        let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32)> = Vec::new();
+        // 인라인 이미지 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h, clip_y0,
+        // clip_y1, hug). 좌표는 LOGICAL px(queue_image 관례). hug=박스를 그림 비율로
+        // 좁혀 왼쪽에 붙인다(글 흐름 그림용, OSC 1337 은 박스가 이미 맞아 false).
+        let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32, bool)> =
+            Vec::new();
         // 커서가 멎은 `[Image #N]` — (pane, 번호, 그 글자의 화면 박스). 박스는
         // 툴팁을 글자 바로 옆에 붙이는 데 쓴다.
         let mut tip_hit: Option<(String, u32, (f32, f32, f32, f32))> = None;
@@ -866,7 +868,40 @@ impl App {
                             v.rows as f32 * ich,
                             clip_y0,
                             clip_y1,
+                            false,
                         ));
+                    }
+                }
+                // 글 흐름 안 그림 — `[[img:<경로>:<행수>]]` 표식이 잡은 자리에 얹는다.
+                // OSC 1337 을 못 쓰는 claude pane 을 위한 길이라(그쪽 함수 주석) 셸
+                // pane 에도 그대로 열어 둔다: `echo '[[img:a.png:12]]'` 로도 뜬다.
+                {
+                    let blocks = find_image_blocks(&composed);
+                    if !blocks.is_empty() {
+                        let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                        let (icw, ich) = (self.cell.w * fs, self.cell.h * fs);
+                        let clip_y0 = body_top;
+                        let clip_y1 = body_top + rows_now as f32 * ich;
+                        for b in &blocks {
+                            blank_image_block(&mut composed, b);
+                            let h = b.rows as f32 * ich;
+                            // 가로는 3:1 까지만 벌린다. 박스를 pane 폭으로 두면
+                            // 넓은 창에서 그림이 한가운데로 밀려(contain-fit 은 중앙
+                            // 정렬) 글 흐름에서 떨어져 보인다. 스크린샷 대부분이
+                            // 16:9(1.78) 라 이 안에 들어 왼쪽에서 시작한다.
+                            let w = (h * 3.0).min(cols_now as f32 * icw);
+                            inline_slots.push((
+                                format!("mdimg:{tab_pid}:{}", b.path),
+                                b.path.clone(),
+                                body_left,
+                                body_top + b.row as f32 * ich,
+                                w,
+                                h,
+                                clip_y0,
+                                clip_y1,
+                                true,
+                            ));
+                        }
                     }
                 }
                 // `[Image #N]` 위에 멎은 커서. 셀 역산은 이 pane 의 원점·폰트배율로
