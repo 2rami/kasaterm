@@ -87,6 +87,64 @@ impl Default for PtyOptions {
     }
 }
 
+/// claude 가 확정된 사용자 프롬프트 행 머리에 남기는 마커(U+276F).
+///
+/// ASCII `>` 는 **일부러 제외한다** — diff·인용·다른 TUI 가 행 머리에 흔히 써서,
+/// 그것까지 마커로 치면 대화와 무관한 줄이 턴 목록에 섞인다(같은 이유로
+/// `screenread::prompt_box` 도 `❯`/`›` 만 인정한다).
+const PROMPT_MARKER: char = '\u{276f}';
+
+/// 그리드 전체(스크롤백+화면)에서 프롬프트 줄을 훑는다. `PtySession::prompt_anchors`
+/// 의 알맹이이자, 시험이 살아 있는 PTY 없이 부를 수 있는 진입점이다.
+fn scan_prompt_anchors(term: &Term<PtyEventForwarder>) -> Vec<PromptAnchor> {
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
+    let grid = term.grid();
+    let cols = grid.columns();
+    let hist = grid.history_size();
+    let screen = grid.screen_lines();
+    let mut out = Vec::new();
+    for i in 0..(hist + screen) {
+        let line = i as i32 - hist as i32;
+        if grid[Point::new(Line(line), Column(0))].c != PROMPT_MARKER {
+            continue;
+        }
+        if cols > 1 && grid[Point::new(Line(line), Column(1))].c == '\u{a0}' {
+            continue;
+        }
+        let mut text = String::new();
+        for c in 1..cols {
+            let cell = &grid[Point::new(Line(line), Column(c))];
+            // wide 글리프가 차지한 **뒤칸을 건너뛴다**. 그 칸의 문자는 `\0` 이 아니라
+            // 진짜 `' '` 이고 구분은 플래그에만 있어서, 문자만 보고 거르면 한글마다
+            // 한 칸씩 벌어진 「질 문  1」이 나온다(2026-08-15 실측). 웹터미널이 같은
+            // 자리에서 물렸던 함정과 같은 것이다.
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == '\0' {
+                continue;
+            }
+            text.push(cell.c);
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(PromptAnchor { abs_line: i as i64, text });
+    }
+    out
+}
+
+/// 스크롤백에 남은 사용자 프롬프트 한 줄의 자리.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptAnchor {
+    /// 세션 시작을 0 으로 하는 절대 줄 번호. 스크롤로는 흔들리지 않지만
+    /// 히스토리가 상한에 닿아 회전하면 조용히 밀리므로, 오래 들고 있지 말고
+    /// 히스토리 길이가 바뀔 때마다 다시 스캔해서 쓴다(인라인 이미지 앵커가
+    /// 같은 이유로 회전 시 통째로 버려진다).
+    pub abs_line: i64,
+    /// 마커 뒤 본문. 헤더에 한 줄로 띄우는 것이라 감긴 뒷줄은 포함하지 않는다.
+    pub text: String,
+}
+
 pub struct PtySession {
     /// Channel the renderer consumes — one ScreenUpdate per dirty
     /// frame after VT processing landed new state.
@@ -675,6 +733,56 @@ impl PtySession {
         );
         attach_inline_views(&mut update, &t, &self.inline_imgs);
         let _ = self.screens_tx.try_send(update);
+    }
+
+    /// 뷰포트가 스크롤백 어디에 있나 — `(display_offset, history_size)`.
+    ///
+    /// 락만 잡는 싼 질의라 매 프레임 물어도 된다. 비싼 `prompt_anchors` 를 언제
+    /// 다시 돌릴지도 이 값으로 정한다(히스토리 길이가 그대로면 앵커도 그대로다).
+    pub fn view_state(&self) -> (usize, usize) {
+        let t = self.term.lock().unwrap();
+        let g = t.grid();
+        (g.display_offset(), g.history_size())
+    }
+
+    /// 스크롤백에 남은 **사용자 프롬프트 줄**을 절대 줄 번호와 함께 모은다.
+    ///
+    /// claude 는 확정된 프롬프트를 `❯ <내용>` 한 줄로 남기고, 화면 하단 입력창은
+    /// 같은 마커를 쓰되 뒤에 **NBSP**(U+00A0)를 넣는다 — 2026-08-15 살아 있는
+    /// pane 9개를 떠서 확정했다(확정된 것은 U+0020, 입력 중인 것은 U+00A0).
+    /// 그 한 글자가 「지나간 질문」과 「지금 치고 있는 것」을 가르는 유일한 표시라,
+    /// 마커만 보고 잡으면 입력창이 늘 목록 끝에 끼어든다.
+    ///
+    /// 비용을 감당하려고 **열 0 만** 훑는다. 히스토리 상한이 10만 줄이라 전 셀을
+    /// 보면 2천만 셀이지만, 마커는 반드시 행 머리에 있으므로 10만 번 인덱싱이면
+    /// 끝나고 걸린 줄만 실제로 읽는다.
+    pub fn prompt_anchors(&self) -> Vec<PromptAnchor> {
+        scan_prompt_anchors(&self.term.lock().unwrap())
+    }
+
+    /// 절대 줄 `abs` 가 뷰포트 맨 위에 오도록 **한 번에** 이동한다.
+    ///
+    /// 좌표가 확정이라 정확히 닿는다 — 휠을 한 노치씩 쏘며 목표 텍스트가 화면에
+    /// 나타나는지 지켜보던 방식(mouse-tracking TUI 용 `sticky_seek`)과 달리
+    /// 되짚기가 없다. 반환값은 이동 뒤의 display offset.
+    pub fn scroll_to_abs(&self, abs: i64) -> usize {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        let hist = t.grid().history_size() as i64;
+        let before = t.grid().display_offset();
+        let want = (hist - abs).clamp(0, hist) as usize;
+        if want == before {
+            return before;
+        }
+        t.scroll_display(alacritty_terminal::grid::Scroll::Delta(
+            want as i32 - before as i32,
+        ));
+        let after = t.grid().display_offset();
+        let mut update =
+            snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        attach_inline_views(&mut update, &t, &self.inline_imgs);
+        let _ = self.screens_tx.try_send(update);
+        after
     }
 
     /// Build a full-grid ScreenUpdate (every row) without touching the live
@@ -3899,5 +4007,88 @@ mod snapshot_fidelity_tests {
             }
         }
         assert!(bad.is_empty(), "[{what}] 그리드와 스냅샷이 어긋난다:\n{}", bad.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod prompt_anchor_tests {
+    use super::*;
+
+    /// 주어진 줄들을 그대로 그리드에 찍은 Term. 실제 PTY 없이 스캔만 검증한다.
+    fn term_with(lines: &[&str]) -> Term<PtyEventForwarder> {
+        let (cols, rows) = (60u16, 10u16);
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        proc.advance(&mut term, lines.join("\r\n").as_bytes());
+        term
+    }
+
+    /// 확정된 프롬프트와 **입력 중인 줄**을 가르는 것은 마커 뒤 한 글자뿐이다 —
+    /// claude 는 확정된 것에 일반 공백(U+0020), 화면 하단 입력창에 NBSP(U+00A0)를
+    /// 쓴다(2026-08-15 살아 있는 pane 9개 대조로 확정).
+    ///
+    /// 이 시험이 지키는 것: claude 가 렌더를 바꿔 그 규칙이 깨지면 **여기서** 터진다.
+    /// 안 그러면 「지금 치고 있는 줄」이 지나간 질문 목록 끝에 조용히 끼어드는
+    /// 형태로만 드러나고, 그건 화면을 한참 보고서야 알아챈다.
+    #[test]
+    fn input_box_line_is_not_a_past_prompt() {
+        let t = term_with(&[
+            "\u{276f} 확정된 질문",
+            "  답변 줄",
+            "\u{276f}\u{a0}지금 치고 있는 줄",
+        ]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["확정된 질문".to_string()]);
+    }
+
+    /// 위 시험의 **대조군** — 같은 문장이 NBSP 대신 일반 공백이면 잡혀야 한다.
+    /// 둘을 짝으로 둬야 「NBSP 한 글자가 유일한 차이」가 증명된다. 짝이 없으면
+    /// 판정이 엉뚱한 이유(길이·위치)로 걸러도 앞 시험만 보고 통과로 읽는다.
+    #[test]
+    fn the_same_line_with_a_plain_space_is_a_prompt() {
+        let t = term_with(&["\u{276f} 지금 치고 있는 줄"]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["지금 치고 있는 줄".to_string()]);
+    }
+
+    /// wide 글리프(한글)의 뒤칸은 `\0` 이 아니라 진짜 공백이고 구분은 플래그에만
+    /// 있다. 문자만 보고 거르면 「질 문  1」처럼 글자마다 벌어진다(실측으로 겪음).
+    #[test]
+    fn wide_glyph_spacers_do_not_leak_into_the_text() {
+        let t = term_with(&["\u{276f} 질문 1 한글이 섞인 프롬프트"]);
+        let got = scan_prompt_anchors(&t);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].text, "질문 1 한글이 섞인 프롬프트");
+    }
+
+    /// ASCII `>` 는 마커가 아니다 — diff·인용·다른 TUI 가 행 머리에 흔히 써서,
+    /// 그것까지 세면 대화와 무관한 줄이 턴 목록에 들어찬다.
+    #[test]
+    fn ascii_angle_bracket_is_not_a_marker() {
+        let t = term_with(&["> 인용문이거나 diff 한 줄", "\u{276f} 진짜 질문"]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["진짜 질문".to_string()]);
+    }
+
+    /// 마커만 있고 본문이 빈 줄(비어 있는 입력창)은 갈 곳이 못 된다.
+    #[test]
+    fn empty_prompt_line_is_skipped() {
+        let t = term_with(&["\u{276f}", "\u{276f} 내용 있는 질문"]);
+        assert_eq!(scan_prompt_anchors(&t).len(), 1);
+    }
+
+    /// 절대 줄 번호는 화면 첫 줄이 아니라 **세션 시작**부터 센다 — 스크롤 위치를
+    /// 그 번호로 되돌리는 계산(`hist - abs`)이 그 전제 위에 있다.
+    #[test]
+    fn anchor_line_numbers_count_from_the_session_start() {
+        let t = term_with(&["첫 줄", "\u{276f} 둘째 줄의 질문"]);
+        let got = scan_prompt_anchors(&t);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].abs_line, 1);
     }
 }

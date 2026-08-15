@@ -442,6 +442,36 @@ impl App {
             }
         });
     }
+    /// `KASATERM_AUTOTURNSCROLL="<줄수>"` (+ `_MS`) — 그 시각에 활성 pane 을 그만큼
+    /// **과거로** 민다(휠 위와 같은 경로: alacritty display_offset).
+    ///
+    /// 대화 턴 헤더는 스크롤백을 올려다볼 때만 뜨는데, claude pane 에서 휠은
+    /// mouse-tracking 으로 전부 TUI 쪽에 넘어가 헤드리스로는 그 상태를 만들 길이
+    /// 없었다. 줄 수는 **화면 높이의 배수가 아닌 값**을 주는 게 좋다 — 딱 떨어지면
+    /// 경계에 걸치는 경우를 못 본다.
+    pub(crate) fn schedule_autoturnscroll(&self) {
+        let Ok(spec) = std::env::var("KASATERM_AUTOTURNSCROLL") else { return };
+        let Ok(lines) = spec.parse::<i32>() else { return };
+        let ms: u64 = std::env::var("KASATERM_AUTOTURNSCROLL_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        eprintln!("[turnscroll] in {ms}ms: {lines}줄 위로");
+        let pty = self.active_pty().cloned();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let Some(p) = pty.as_ref() else {
+                eprintln!("[turnscroll] 활성 pty 없음 — NO-OP");
+                return;
+            };
+            let off = p.scroll(lines);
+            let (_, hist) = p.view_state();
+            eprintln!("[turnscroll] display_offset={off} history={hist}");
+            for a in p.prompt_anchors() {
+                eprintln!("[turnscroll] 앵커 abs={} {:?}", a.abs_line, a.text);
+            }
+        });
+    }
     /// Headless confirm-modal repro: after `KASATERM_TEST_CONFIRM_MS` fire the
     /// window-close confirm path, so a background run can screenshot the modal
     /// (pair with AUTOSEND="sleep 300" to give a pane a real foreground job).

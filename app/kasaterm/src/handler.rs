@@ -1716,6 +1716,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.open_markdown_window(p);
         }
         self.schedule_autosend();
+        self.schedule_autoturnscroll();
         self.schedule_autocapture();
         self.arm_autosplit();
         self.arm_autowindows();
@@ -1732,6 +1733,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_auto_pane_merge();
         self.arm_autoopen();
         self.arm_autoconfirm();
+        self.arm_autoturnclick();
         self.schedule_autoquit();
     }
 
@@ -3089,18 +3091,8 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     // 대화 턴 헤더 클릭 — 바는 그 질문 자리로, ↑↓ 는 앞뒤 질문으로.
-                    // 셋 다 절대 줄이 확정돼 있어 **한 번에** 닿는다(아래 sticky 는
-                    // 좌표를 몰라 휠을 쏘며 되짚는 것과 대비된다). SGR 전달보다 먼저
-                    // 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
-                    if let Some((pane_id, hit)) = crate::turnjump::turn_hit_at(cx, cy) {
-                        let abs = match hit {
-                            crate::turnjump::TurnHit::Jump(a)
-                            | crate::turnjump::TurnHit::Prev(a)
-                            | crate::turnjump::TurnHit::Next(a) => a,
-                        };
-                        if let Some(pty) = self.pty_for_pane(&pane_id) {
-                            pty.scroll_to_abs(abs);
-                        }
+                    // SGR 전달보다 먼저 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
+                    if self.turn_header_click(cx, cy) {
                         window.request_redraw();
                         return;
                     }
@@ -5832,6 +5824,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_auto_pane_merge();
         self.run_pending_autowheel();
         self.run_pending_sticky_seek();
+        self.run_pending_autoturnclick();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
         self.run_pending_autotabs();
