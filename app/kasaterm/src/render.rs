@@ -4641,11 +4641,14 @@ impl App {
             // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
             self.account_chip_rect = None;
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
-                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                // 상태줄은 늘 있으므로 dock 과 달리 조건 없이 함께 뺀다 — 안 빼면
+                // 칼럼 바닥(= 최근 커밋 목록의 마지막 줄)이 그 띠 뒤로 들어가 가려진다.
+                // 높이는 이제 설정에서 바뀌므로 상수가 아니라 `status_h` 를 쓴다.
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
                 let gcx0 = git_col_x + 14.0;
                 let gcw = (git_col_w - 28.0).max(0.0);
                 let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - dock_h).max(top);
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
                 // Background + left hairline so the column reads as its own pane.
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
@@ -7342,15 +7345,6 @@ impl App {
                         theme::text()
                     }
                 };
-                let bar_col = |pct: f32| {
-                    if pct >= 80.0 {
-                        theme::danger()
-                    } else if pct >= 60.0 {
-                        theme::syn_number()
-                    } else {
-                        theme::with_alpha(theme::text_dim(), 0x66)
-                    }
-                };
 
                 // 제공자 두 줄. **사용률 높은 순** — 옮길 곳을 고르려고 여는 목록이라
                 // 급한 쪽이 위로 와야 한다. 값이 없는 쪽(codex 는 한도 조회 경로가 아예
@@ -7528,39 +7522,7 @@ impl App {
                                 // 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가
                                 // 어디까지 갈 수 있는 것인지 알 수가 없어 그냥 얼룩이 된다.
                                 let l2 = ry + prow_h - 17.0;
-                                let lf = f - 3.0;
-                                const GW: f32 = 28.0;
-                                const GH: f32 = 5.0;
-                                let gy = l2 + (lf - GH) / 2.0;
-                                let wins: Vec<(&'static str, f32)> = if b.windows.is_empty() {
-                                    vec![(b.label, b.pct)]
-                                } else {
-                                    b.windows.clone()
-                                };
-                                let mut bx = name_x;
-                                for (label, pct) in wins {
-                                    // 넘칠 것 같으면 거기서 멈춘다 — 잘린 막대는 값을
-                                    // 잘못 읽히게 하므로 없느니만 못하다.
-                                    let need = g.measure_chrome_text(label, lf, false) + 6.0
-                                        + GW + 6.0 + g.measure_chrome_text("100%", lf, true);
-                                    if bx + need > right {
-                                        break;
-                                    }
-                                    g.draw_text(
-                                        bx, l2, label,
-                                        gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: false, italic: false },
-                                    );
-                                    let gx = bx + g.measure_chrome_text(label, lf, false) + 6.0;
-                                    g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
-                                    let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(1.5);
-                                    g.rect(gx, gy, w, GH, bar_col(pct));
-                                    let pt = format!("{pct:.0}%");
-                                    g.draw_text(
-                                        gx + GW + 6.0, l2, &pt,
-                                        gpu::DrawOpts { font_size: lf, color: pct_col(pct), bold: true, italic: false },
-                                    );
-                                    bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, lf, true) + 12.0;
-                                }
+                                draw_usage_windows(g, name_x, l2, right, f - 3.0, b);
                             }
                         }
                         // codex 는 한도 조회 경로가 없다. 그 자리에 로그인 여부를 적는다 —
@@ -7676,7 +7638,14 @@ impl App {
                     };
                     let sw = 300.0_f32;
                     let lab_h = 24.0_f32;
-                    let sh = pad * 2.0 + lab_h + row_h * rows.len() as f32 + rule + row_h;
+                    // **고르기 전에** 각 계정의 5시간·7일이 둘 다 보여야 한다(거노
+                    // 2026-08-15 「계정전환전에 5시간 7일 한도 보이게」). 누르면 그 자리서
+                    // 전환되므로 눌러 보고 판단할 수가 없다. 막대 두 벌은 이름과 한 줄에
+                    // 못 들어가니 행을 두 줄로 키운다 — 「간단히」 밀도에서는 예전처럼
+                    // 한 줄에 글자로만.
+                    let two_line = p == AccountProvider::Claude && !compact;
+                    let arow_h = if two_line { 44.0 } else { row_h };
+                    let sh = pad * 2.0 + lab_h + arow_h * rows.len() as f32 + rule + row_h;
                     // 로스터 오른쪽에 두되, 창 밖으로 나가면 왼쪽으로 접는다.
                     let sx = if mx + mw + 4.0 + sw <= win_w - 4.0 {
                         mx + mw + 4.0
@@ -7687,7 +7656,7 @@ impl App {
                     panel_rect_outlined(g, sx, sy, sw, sh, theme::radius_sm(), theme::surface_hover());
                     let mut sry = sy + pad;
                     {
-                        let t = format!("{} Account", p.label());
+                        let t = format!("{} 계정", p.label());
                         let lf = f - 2.0;
                         g.draw_text(
                             sx + pad_x, sry + (lab_h - lf) / 2.0 - 1.0, &t,
@@ -7696,15 +7665,18 @@ impl App {
                         sry += lab_h;
                     }
                     for (id, label, active) in rows {
-                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
+                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + arow_h;
                         // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 손모양도 없다.
                         g.hover_pointer |= on && !active;
                         if on && !active {
-                            round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
+                            round_rect(g, sx + pad, sry, sw - pad * 2.0, arow_h,
                                 theme::radius_sm(), theme::surface_active());
                         }
+                        // 두 줄일 때 이름은 위, 막대는 아래. 한 줄이면 예전대로 가운데.
+                        let line1 =
+                            if two_line { sry + 7.0 } else { sry + (arow_h - f) / 2.0 - 1.0 };
                         g.draw_text(
-                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, &label,
+                            sx + pad_x, line1, &label,
                             gpu::DrawOpts {
                                 font_size: f,
                                 color: if active { theme::text() } else { theme::text_dim() },
@@ -7712,42 +7684,82 @@ impl App {
                                 italic: false,
                             },
                         );
-                        // 활성 표시는 오른쪽 `Active` 배지. 체크 아이콘이나 왼쪽 막대와
-                        // 달리, 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
+                        let tf = f - 3.0;
+                        let right = sx + sw - pad_x;
+                        // 활성 표시는 오른쪽 배지. 체크 아이콘이나 왼쪽 막대와 달리,
+                        // 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
                         if active {
-                            let t = "Active";
-                            let tf = f - 3.0;
+                            let t = "사용 중";
                             let tw = g.measure_chrome_text(t, tf, true);
                             g.draw_text(
-                                sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, t,
+                                right - tw, line1 + if two_line { 0.0 } else { (f - tf) / 2.0 }, t,
                                 gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: true, italic: false },
                             );
-                        } else if p == AccountProvider::Claude {
-                            // 비활성 슬롯은 그 계정의 한도를 적는다 — 어디로 옮길지
-                            // 고르는 자리라 이름만으로는 못 정한다.
-                            if let Some(b) = usage_of(&id) {
-                                let t = usage_text(&b);
-                                let tf = f - 3.0;
-                                let tw = g.measure_chrome_text(t.as_str(), tf, true);
-                                g.draw_text(
-                                    sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, &t,
-                                    gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
-                                );
-                            }
-                        } else if crate::settings::codex_identity(&id).is_none() {
-                            let t = "Sign in";
-                            let tf = f - 3.0;
+                        } else if p == AccountProvider::Codex
+                            && crate::settings::codex_identity(&id).is_none()
+                        {
+                            let t = "로그인";
                             let tw = g.measure_chrome_text(t, tf, true);
                             g.draw_text(
-                                sx + sw - pad_x - tw, sry + (row_h - tf) / 2.0 - 1.0, t,
+                                right - tw, line1 + if two_line { 0.0 } else { (f - tf) / 2.0 }, t,
                                 gpu::DrawOpts { font_size: tf, color: theme::danger(), bold: true, italic: false },
                             );
                         }
+                        // 한도는 **활성 슬롯도 포함해** 전부 적는다 — 「지금 이만큼 썼으니
+                        // 저기로 옮긴다」를 정하는 자리라 떠날 쪽 숫자가 빠지면 비교가 안
+                        // 된다. codex 는 한도 조회 경로가 아예 없어 이 자리가 없다.
+                        if p == AccountProvider::Claude {
+                            match (usage_of(&id), two_line) {
+                                (Some(b), true) => {
+                                    draw_usage_windows(
+                                        g, sx + pad_x, sry + arow_h - 16.0, right, tf, &b,
+                                    );
+                                }
+                                (Some(b), false) => {
+                                    let t = usage_text(&b);
+                                    let tw = g.measure_chrome_text(t.as_str(), tf, true);
+                                    // 「사용 중」 배지와 겹치지 않게 그 왼쪽으로 물린다.
+                                    let bx = if active {
+                                        right - g.measure_chrome_text("사용 중", tf, true) - 8.0
+                                    } else {
+                                        right
+                                    };
+                                    g.draw_text(
+                                        bx - tw, sry + (arow_h - tf) / 2.0 - 1.0, &t,
+                                        gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
+                                    );
+                                }
+                                // 값이 없으면 **빈칸으로 두지 않는다.** 빈칸은 「여유
+                                // 있음」으로 읽혀서, 옮길지 말지를 정확히 반대로 만든다.
+                                //
+                                // 「조회 중」이라고는 안 한다 — 오래 안 쓴 슬롯은 OAuth
+                                // 토큰이 8시간쯤에 만료되고 갱신은 그 계정으로 claude 를
+                                // 돌릴 때 일어나므로, 기다려도 영영 안 온다. 곧 온다고
+                                // 말해 놓고 안 오는 것이 모른다고 말하는 것보다 나쁘다.
+                                (None, _) => {
+                                    let t = "한도 모름";
+                                    let ty2 = if two_line {
+                                        sry + arow_h - 16.0
+                                    } else {
+                                        sry + (arow_h - tf) / 2.0 - 1.0
+                                    };
+                                    let tx = if two_line {
+                                        sx + pad_x
+                                    } else {
+                                        right - g.measure_chrome_text(t, tf, false)
+                                    };
+                                    g.draw_text(
+                                        tx, ty2, t,
+                                        gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                    );
+                                }
+                            }
+                        }
                         if !active {
                             self.account_menu_hits
-                                .push((AccountMenuItem::Select(p, id), (sx, sry, sw, row_h)));
+                                .push((AccountMenuItem::Select(p, id), (sx, sry, sw, arow_h)));
                         }
-                        sry += row_h;
+                        sry += arow_h;
                     }
                     g.rect(sx + pad, sry + 2.0, sw - pad * 2.0, 1.0, theme::border());
                     sry += rule;
@@ -7759,7 +7771,7 @@ impl App {
                                 theme::radius_sm(), theme::surface_active());
                         }
                         g.draw_text(
-                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, "Manage Accounts…",
+                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, "계정 관리…",
                             gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false },
                         );
                         self.account_menu_hits
@@ -8919,4 +8931,83 @@ mod tests {
         let same = vec!["기본".to_string(), "기본".to_string()];
         assert_eq!(statusbar_account_short("기본", &same), "기본");
     }
+}
+
+/// 사용량 임계 색. 60/80 이 경계고 그 아래는 초록이 아니라 **중립**이다 — 초록은
+/// 「좋다」는 신호라 늘 켜져 있으면 아무 말도 안 하는 색이 된다.
+pub(crate) fn usage_pct_color(pct: f32) -> [u8; 4] {
+    if pct >= 80.0 {
+        theme::danger()
+    } else if pct >= 60.0 {
+        theme::syn_number()
+    } else {
+        theme::text()
+    }
+}
+
+/// 막대는 여유 구간에서 더 흐리다 — 숫자와 달리 늘 보이는 것이라, 안 급할 때까지
+/// 또렷하면 목록 전체가 얼룩덜룩해져 급한 줄이 안 튄다.
+pub(crate) fn usage_bar_color(pct: f32) -> [u8; 4] {
+    if pct >= 80.0 {
+        theme::danger()
+    } else if pct >= 60.0 {
+        theme::syn_number()
+    } else {
+        theme::with_alpha(theme::text_dim(), 0x66)
+    }
+}
+
+/// `[창 이름][막대][퍼센트]` 를 창마다 하나씩 왼쪽부터. 5시간이 앞이다 — 지금 당장
+/// 막히는 건 그쪽이고 주간은 「이번 주가 어떻게 흘러가나」라 참고에 가깝다.
+///
+/// `right` 를 넘칠 것 같으면 **그 창을 아예 안 그린다.** 잘린 막대는 값을 잘못
+/// 읽히게 하므로 없느니만 못하다. 그린 만큼의 오른쪽 끝을 돌려준다.
+///
+/// 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가 어디까지 갈 수 있는
+/// 것인지 알 수가 없어 그냥 얼룩이 된다.
+pub(crate) fn draw_usage_windows(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    right: f32,
+    font: f32,
+    b: &crate::UsageBadge,
+) -> f32 {
+    const GW: f32 = 28.0;
+    const GH: f32 = 5.0;
+    let gy = y + (font - GH) / 2.0;
+    // `windows` 가 비는 건 옛 스냅샷을 되살렸을 때다 — 그때는 가장 급한 창 하나로.
+    let wins: Vec<(&'static str, f32)> =
+        if b.windows.is_empty() { vec![(b.label, b.pct)] } else { b.windows.clone() };
+    let mut bx = x;
+    for (label, pct) in wins {
+        let need = g.measure_chrome_text(label, font, false)
+            + 6.0
+            + GW
+            + 6.0
+            + g.measure_chrome_text("100%", font, true);
+        if bx + need > right {
+            break;
+        }
+        g.draw_text(
+            bx,
+            y,
+            label,
+            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false },
+        );
+        let gx = bx + g.measure_chrome_text(label, font, false) + 6.0;
+        g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
+        let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(1.5);
+        g.rect(gx, gy, w, GH, usage_bar_color(pct));
+        // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
+        let pt = if b.stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
+        g.draw_text(
+            gx + GW + 6.0,
+            y,
+            &pt,
+            gpu::DrawOpts { font_size: font, color: usage_pct_color(pct), bold: true, italic: false },
+        );
+        bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, true) + 12.0;
+    }
+    bx
 }

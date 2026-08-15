@@ -5854,6 +5854,64 @@ impl App {
         if want == "switching" {
             return;
         }
+        // 계정 목록(서브메뉴). **고르기 전에** 각 슬롯의 5h·7일이 다 보이는지 보는
+        // 것이 목적이라, 슬롯마다 다른 값을 심고 하나는 값 자체를 비워 둔다
+        // (「한도 모름」 자리 표시가 나와야 한다 — 빈칸은 「여유 있음」으로 읽힌다).
+        // `accounts-compact` 는 「간단히」 밀도 — 행이 한 줄로 접히는 쪽을 본다.
+        if step == 0 && want.starts_with("accounts") {
+            self.set_usage_compact = want.ends_with("compact");
+            self.set_claude_accounts = vec![
+                crate::socket::ClaudeAccount {
+                    id: "acct-2".to_string(),
+                    label: "사이오닉팀플랜".to_string(),
+                },
+                crate::socket::ClaudeAccount {
+                    id: "acct-3".to_string(),
+                    label: "개인계정".to_string(),
+                },
+            ];
+            self.set_claude_account = String::new();
+            let mk = |dir: &str, w: Vec<(&'static str, f32)>, stale: bool| crate::UsageBadge {
+                pct: w.iter().map(|(_, p)| *p).fold(0.0, f32::max),
+                label: "7d",
+                stale,
+                account_dir: dir.to_string(),
+                resets_at: None,
+                windows: w,
+            };
+            let base = mk("", vec![("5h", 12.0), ("7d", 95.0)], false);
+            if let Ok(mut g) = self.claude_usage.lock() {
+                *g = Some(base.clone());
+            }
+            if let Ok(mut g) = self.claude_usage_all.lock() {
+                g.insert(String::new(), base);
+                if let Some(d) = crate::socket::claude_account_dir("acct-2") {
+                    g.insert(
+                        d.to_string_lossy().into_owned(),
+                        mk("", vec![("5h", 68.0), ("7d", 41.0)], true),
+                    );
+                }
+                // acct-3 은 일부러 안 넣는다.
+            }
+            self.chrome_dirty = true;
+            return;
+        }
+        if step == 1 && want.starts_with("accounts") {
+            match self.status_account_rect {
+                Some(r) => {
+                    self.account_menu = true;
+                    self.account_menu_anchor = Some(r);
+                    self.account_menu_provider = Some(crate::AccountProvider::Claude);
+                    self.chrome_dirty = true;
+                    eprintln!("[autoportpop] 계정 목록 anchor={r:?}");
+                }
+                None => eprintln!("[autoportpop] FAIL — 계정 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        if want.starts_with("accounts") {
+            return;
+        }
         if step == 0 && want == "account" {
             let badge = crate::UsageBadge {
                 pct: 95.0,
