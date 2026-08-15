@@ -759,7 +759,7 @@ impl App {
     pub(crate) fn apply_claude_account_switch(
         &mut self,
         to: &str,
-    ) -> (String, String, usize, usize) {
+    ) -> (String, String, usize, usize, bool) {
         let from_label = self.claude_account_display(&self.set_claude_account.clone());
         let to_label = self.claude_account_display(to);
         let target_dir = socket::claude_account_dir(to)
@@ -792,7 +792,14 @@ impl App {
         self.settings_save();
         let restarted = self.run_pending_account_restarts();
         let deferred = self.pane_account_stale.len();
-        (from_label, to_label, restarted, deferred)
+        let focused_pending = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_ref()
+            .is_some_and(|p| self.pane_account_stale.contains_key(p));
+        (from_label, to_label, restarted, deferred, focused_pending)
     }
 
     /// 「⟳ 재시작」 표시가 남은 pane 중 지금 쉬는 것을 새 계정으로 되띄운다.
@@ -800,13 +807,24 @@ impl App {
     /// 반환은 이번에 되띄운 수.
     pub(crate) fn run_pending_account_restarts(&mut self) -> usize {
         if self.pane_account_stale.is_empty() {
+            self.pane_account_quiet_since.clear();
             return 0;
         }
         let target_dir = socket::claude_account_dir(&self.set_claude_account)
             .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        // 지금 사용자가 보고 있는 pane 은 자동으로 안 끊는다. 화면 밖 pane 이 조용히
+        // 갈리는 것과, 대화하던 상대가 눈앞에서 사라지는 것은 전혀 다른 일이다
+        // (2026-08-15 "하다가 계정전환하니까 너가 없어졌어"). 표시는 남으므로 헤더
+        // 칩을 누르면 그때 갈린다 — 그 pane 만은 사용자가 시점을 고른다.
+        let focused = self.ws.lock().unwrap().active_pane.clone();
         let pending: Vec<String> = self.pane_account_stale.keys().cloned().collect();
+        let now = std::time::Instant::now();
         let mut restarted = 0usize;
         for id in pending {
+            if focused.as_deref() == Some(id.as_str()) {
+                self.pane_account_quiet_since.remove(&id);
+                continue;
+            }
             // 하네스가 이미 내려간 pane 은 계정 불일치도 없다 — 표시만 걷는다.
             let is_claude = self
                 .pty
@@ -830,6 +848,13 @@ impl App {
                     .get(&id)
                     .is_none_or(|a| a.status != "idle" || a.bg_active);
             if busy {
+                self.pane_account_quiet_since.remove(&id);
+                continue;
+            }
+            // 조용해진 지 얼마나 됐나. 스피너가 도구 결과 사이에서 한 틱 사라지는
+            // 틈은 이 문턱을 못 넘는다 — 그 틈에 끊으면 하던 턴이 통째로 죽는다.
+            let quiet_since = *self.pane_account_quiet_since.entry(id.clone()).or_insert(now);
+            if now.duration_since(quiet_since) < Self::ACCOUNT_RESTART_QUIET {
                 continue;
             }
             // 그 사이 손으로 되띄웠을 수 있다 — 죽이기 직전 실측으로 한 번 더 확인.
@@ -842,11 +867,20 @@ impl App {
             }
             if self.restart_pane_agent(&id) {
                 self.pane_account_stale.remove(&id);
+                self.pane_account_quiet_since.remove(&id);
                 restarted += 1;
             }
         }
+        // 표시가 걷힌 pane 의 조용 기록은 남길 이유가 없다.
+        self.pane_account_quiet_since
+            .retain(|k, _| self.pane_account_stale.contains_key(k));
         restarted
     }
+
+    /// 되띄우기 전에 요구하는 **연속 조용 시간**. 화면 판독은 300ms 박자라 이 값이면
+    /// 열 번 넘게 연속으로 조용한 것을 본 셈이다. 짧으면 턴 중간의 깜빡임에 걸리고,
+    /// 길면 전환이 굼떠 보인다.
+    const ACCOUNT_RESTART_QUIET: std::time::Duration = std::time::Duration::from_secs(4);
 
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
@@ -3677,12 +3711,18 @@ pub(crate) fn account_switch_toast(
     same: bool,
     restarted: usize,
     deferred: usize,
+    focused_pending: bool,
 ) -> String {
+    let tail = if focused_pending {
+        " · 지금 이 pane 은 ⟳ 를 누르면"
+    } else {
+        ""
+    };
     if restarted == 0 && deferred == 0 {
         return if same {
             format!("{to_label} 그대로예요 — 떠 있는 claude 도 전부 이 계정이에요")
         } else {
-            format!("{to_label} 로 전환했어요 (다음에 뜨는 claude 부터)")
+            format!("{to_label} 로 전환했어요 (다음에 뜨는 claude 부터){tail}")
         };
     }
     let head = if same {
@@ -3694,10 +3734,13 @@ pub(crate) fn account_switch_toast(
     if restarted > 0 {
         parts.push(format!("claude {restarted}개 대화 이어서 다시 띄움"));
     }
-    if deferred > 0 {
-        parts.push(format!("작업 중 {deferred}개는 끝나면 자동"));
+    // 보고 있는 pane 은 이 수에 들어가도 자동으로 안 돈다 — 그래서 문장 끝에서
+    // 따로 말한다. 「끝나면 자동」만 적으면 기다리다 영영 안 바뀌는 것으로 보인다.
+    let auto_deferred = deferred.saturating_sub(usize::from(focused_pending));
+    if auto_deferred > 0 {
+        parts.push(format!("작업 중 {auto_deferred}개는 끝나면 자동"));
     }
-    format!("{head} — {}", parts.join(" · "))
+    format!("{head} — {}{tail}", parts.join(" · "))
 }
 
 pub(crate) fn tilde_home(s: &str) -> String {
@@ -3992,11 +4035,14 @@ mod account_switch_tests {
     #[test]
     fn toast_covers_all_shapes() {
         // 아무것도 안 떠 있을 때 — 전환 vs 재클릭이 다른 말을 해야 한다.
-        assert!(account_switch_toast("사이오닉", false, 0, 0).contains("다음에 뜨는"));
-        assert!(account_switch_toast("사이오닉", true, 0, 0).contains("그대로"));
+        assert!(account_switch_toast("사이오닉", false, 0, 0, false).contains("다음에 뜨는"));
+        assert!(account_switch_toast("사이오닉", true, 0, 0, false).contains("그대로"));
         // 되띄운 것과 기다리는 것이 한 문장에 같이 온다.
-        let t = account_switch_toast("사이오닉", false, 2, 1);
+        let t = account_switch_toast("사이오닉", false, 2, 1, false);
         assert!(t.contains("2개") && t.contains("1개"), "{t}");
+        // 보고 있는 pane 만 남았으면 「끝나면 자동」이 아니라 눌러야 한다고 말한다.
+        let f = account_switch_toast("사이오닉", false, 2, 1, true);
+        assert!(f.contains("⟳") && !f.contains("작업 중"), "{f}");
     }
 }
 

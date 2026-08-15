@@ -837,11 +837,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // `apply_claude_account_switch`(session.rs) 하나가 한다. 수동 전환과
                 // 같은 꼬리라 두 경로의 동작이 갈릴 수 없다.
                 let same = *to == self.set_claude_account;
-                let (from_label, to_label, restarted, deferred) =
+                let (from_label, to_label, restarted, deferred, focused) =
                     self.apply_claude_account_switch(to);
                 self.set_toast(format!(
                     "{from_label} 사용량 {pct:.0}% — {}",
-                    crate::session::account_switch_toast(&to_label, same, restarted, deferred)
+                    crate::session::account_switch_toast(
+                        &to_label, same, restarted, deferred, focused
+                    )
                 ));
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -3319,10 +3321,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 match p {
                                     AccountProvider::Claude => {
                                         let same = id == self.set_claude_account;
-                                        let (_, to_label, restarted, deferred) =
+                                        let (_, to_label, restarted, deferred, focused) =
                                             self.apply_claude_account_switch(&id);
                                         self.set_toast(crate::session::account_switch_toast(
-                                            &to_label, same, restarted, deferred,
+                                            &to_label, same, restarted, deferred, focused,
                                         ));
                                     }
                                     AccountProvider::Codex => {

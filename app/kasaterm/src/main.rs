@@ -4644,6 +4644,12 @@ struct App {
     /// for `BUSY_GRACE` after the last spinner sighting so only a real stop
     /// (grace elapsed) counts as completion.
     pane_last_busy: HashMap<String, Instant>,
+    /// 계정 전환 뒤 되띄우기를 기다리는 pane 이 **언제부터 조용한가**. 스피너는 도구
+    /// 결과가 오가는 찰나에 잠깐 사라져서, 「지금 idle」 하나로 판정하면 일하는 중인
+    /// pane 을 그 틈에 끊는다 — 2026-08-15 에 사용자가 대화하던 pane 이 그렇게
+    /// 죽었다("하다가 계정전환하니까 너가 없어졌어"). 연속으로 조용한 시간을 재서
+    /// 그 틈을 건너뛴다.
+    pane_account_quiet_since: HashMap<String, Instant>,
     /// pane id → (transcript mtime, bg_active) — an mtime-gated cache for the
     /// header pulse bar. An idle pane's transcript rarely changes, so the bar's
     /// "background/Monitor running" check reads the tail only when mtime moves.
@@ -5398,6 +5404,7 @@ impl App {
             copy_toast_at: None,
             pane_busy_check: None,
             pane_last_busy: HashMap::new(),
+            pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
             sidebar_row_rects: Vec::new(),
