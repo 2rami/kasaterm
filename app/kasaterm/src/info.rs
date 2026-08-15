@@ -137,6 +137,17 @@ pub(crate) struct PaneGroup {
     /// 이 방이 별도 창으로 나가 있나. 나가 있으면 그 pane 들은 메인 화면에 없으므로,
     /// 표시가 없으면 "왜 여기 있는데 안 보이지"가 된다.
     pub(crate) undocked: bool,
+    /// 사용자가 닫은 pane 인가. 닫아도 PTY 는 되살리기 대비로 계속 도는데,
+    /// **프로세스 목록에는 안 올린다** — 화면에 없는 pane 이 목록에 남아 있으면
+    /// 「닫았는데 왜 아직 있나」가 되고, 되살리기 목록과 두 곳에서 같은 것을
+    /// 세게 된다(거노 2026-08-15 「인포 프로세스에는 없어지고 되살리기만 남아야」).
+    ///
+    /// 그래도 **수집에서 빼지는 않는다.** 포트 귀속이 이 목록에 기대고 있어서다:
+    /// ①레포 루트 목록(`roots`)이 여기서 나오는데, 거기서 못 찾은 포트는 목록에서
+    /// 통째로 사라진다 ②「주인이 죽었나」 판정이 「이 목록에 있나」다 — 빼 버리면
+    /// 멀쩡히 도는 pane 의 서버가 주인 죽은 것으로 빨갛게 뜬다. 그리는 쪽에서만
+    /// 거른다.
+    pub(crate) closed: bool,
     pub(crate) rows: Vec<ProcRow>,
 }
 
@@ -168,6 +179,8 @@ pub(crate) struct PaneTarget {
     /// 이 pane 이 붙든 claude transcript. 제목을 뽑으려면 jsonl 꼬리를 읽어야
     /// 해서 **경로만** GUI 가 넘기고 읽기는 워커가 한다.
     pub(crate) session_path: Option<std::path::PathBuf>,
+    /// 사용자가 닫은 pane — `PaneGroup::closed` 주석 참조.
+    pub(crate) closed: bool,
 }
 
 /// `ps` 한 줄에서 뽑은 원시 레코드. 좀비도 담는다 — 목록에는 안 올리지만
@@ -206,6 +219,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             window: t.window,
             window_label: t.window_label.clone(),
             undocked: t.undocked,
+            closed: t.closed,
             rows: build_rows(&table, t.shell_pid),
         })
         .collect();
@@ -329,6 +343,15 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // 다음 갱신부터 붙인다.
     probe_sites(&ports.iter().map(|p| (p.port, p.pid)).collect::<Vec<_>>(), sites);
     let outside = all_n.saturating_sub(ports.len());
+    // 닫힌 pane 은 **여기서** 뺀다 — 화면에 없는 pane 이 프로세스 목록에 남아 있으면
+    // 「닫았는데 왜 아직 있나」가 되고, 되살리기 목록과 두 곳에서 같은 것을 세게 된다
+    // (거노 2026-08-15 「인포 프로세스에는 없어지고 되살리기만 남아야 하는 거 아닌가」).
+    //
+    // 수집이 끝난 **뒤에** 빼는 것이 요점이다. 위에서 미리 빼면 포트가 깨진다:
+    // ①레포 루트 목록이 pane 목록에서 나오는데 거기서 못 찾은 포트는 목록에서 통째로
+    // 사라지고 ②포트 행의 pane 라벨도 이 목록에서 찾는다. 닫힌 pane 이 띄운 dev 서버가
+    // 정확히 「꺼도 되나」를 묻게 되는 것들이라(ae437e7) 그게 사라지면 안 된다.
+    panes.retain(|g| !g.closed);
     InfoSnap { panes, ports, outside }
 }
 
@@ -1033,6 +1056,32 @@ mod tests {
         assert_eq!((rows[1].pid, rows[1].folded), (300, 1));
     }
 
+    /// 닫은 pane 은 프로세스 목록에서 사라진다. **수집에서 빼는 게 아니라 마지막에
+    /// 거르는 것**이라, 이 테스트는 「빼는 자리를 앞으로 옮기면」 깨지지 않는다 —
+    /// 그쪽은 포트가 조용히 사라지는 회귀라 주석으로만 지킨다.
+    #[test]
+    fn closed_panes_drop_out_of_the_process_list() {
+        let sites = SiteCache::default();
+        let mk = |id: &str, closed: bool| PaneTarget {
+            id: id.to_string(),
+            // 이 테스트 프로세스 자신 — 반드시 살아 있어 `ps` 에 잡힌다.
+            shell_pid: std::process::id(),
+            closed,
+            ..Default::default()
+        };
+        let open = collect(&[mk("%901", false)], &sites);
+        if open.panes.is_empty() {
+            // `ps` 가 없는 환경(컨테이너 등)에서는 판정할 것이 없다.
+            return;
+        }
+        assert!(open.panes.iter().any(|g| g.pane == "%901"));
+        let shut = collect(&[mk("%901", true)], &sites);
+        assert!(
+            shut.panes.iter().all(|g| g.pane != "%901"),
+            "닫은 pane 이 프로세스 목록에 남았다"
+        );
+    }
+
     #[test]
     fn same_package_outside_claude_is_not_an_mcp_row() {
         let t = vec![
@@ -1327,6 +1376,7 @@ impl App {
                         .pane_claude_sid
                         .get(id)
                         .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
+                    closed: self.closed_panes.iter().any(|c| c.pane_id == *id),
                     id: id.clone(),
                     shell_pid: s.shell_pid()?,
                 })
