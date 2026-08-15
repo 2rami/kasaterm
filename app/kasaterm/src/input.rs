@@ -598,6 +598,16 @@ impl App {
             .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
         self.route_approval_prompts(&busy_now, now);
 
+        // 계정 전환 때 일하고 있어서 못 되띄운 pane — 방금 갱신한 활동 상태가
+        // idle 로 떨어졌으면 여기서 따라 돌린다(같은 300ms 박자, 표시가 없으면 공짜).
+        let switched = self.run_pending_account_restarts();
+        if switched > 0 {
+            let to = self.claude_account_display(&self.set_claude_account.clone());
+            self.set_toast(format!(
+                "작업이 끝난 claude {switched}개를 {to} 계정으로 다시 띄웠어요"
+            ));
+        }
+
         if completed.is_empty() {
             return;
         }

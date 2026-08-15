@@ -2807,10 +2807,30 @@ impl AgentKind {
 /// (board 조립·소켓 백엔드)용. 프로세스 테이블은 이미 공유 캐시라 `ps` 가 추가로
 /// 안 돈다. 판정 본체는 `agent_in_table` 하나뿐이라 `active_agent` 와 결과가 같다.
 pub fn agent_for_shell(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
-    agent_in_table(table, effective_shell_pid(table, shell_pid))
+    agent_pid_for_shell(table, shell_pid).map(|(kind, _)| kind)
 }
 
+/// `agent_for_shell` 의 pid 동반판. 계정 실측(그 프로세스의 env 를 `ps` 로 읽어
+/// 어느 자격증명 저장소로 떠 있는지 보는 것)이 이 pid 를 집는다 — 종류만 알아서는
+/// "어느 계정인가"에 답할 수 없다.
+pub fn agent_pid_for_shell(
+    table: &[(u32, u32, String)],
+    shell_pid: u32,
+) -> Option<(AgentKind, u32)> {
+    agent_pid_in_table(table, effective_shell_pid(table, shell_pid))
+}
+
+/// 판정 본체의 종류-만 어댑터 — 이제 prod 는 pid 동반판을 쓰고, 트리 판정
+/// 테스트들이 이 얇은 이름으로 남아 있다.
+#[cfg(test)]
 fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
+    agent_pid_in_table(table, shell_pid).map(|(kind, _)| kind)
+}
+
+fn agent_pid_in_table(
+    table: &[(u32, u32, String)],
+    shell_pid: u32,
+) -> Option<(AgentKind, u32)> {
     let newest_child = |parent: u32| -> Option<(u32, &str)> {
         let mut best: Option<(u32, &str)> = None;
         for (row_pid, row_ppid, name) in table.iter() {
@@ -2822,11 +2842,11 @@ fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentK
     };
     let (child_pid, child) = newest_child(shell_pid)?;
     if let Some(kind) = AgentKind::from_comm(child) {
-        return Some(kind);
+        return Some((kind, child_pid));
     }
     if is_agent_launcher(child) {
-        if let Some((_, grandchild)) = newest_child(child_pid) {
-            return AgentKind::from_comm(grandchild);
+        if let Some((grandchild_pid, grandchild)) = newest_child(child_pid) {
+            return AgentKind::from_comm(grandchild).map(|k| (k, grandchild_pid));
         }
     }
     None

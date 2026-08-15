@@ -703,6 +703,151 @@ impl App {
         }
     }
 
+    /// 그 pane 의 claude 가 **실제로 어느 계정으로 떠 있는지** 실측한다 — 프로세스
+    /// env 의 자격증명 저장소 경로를 읽는다. `Some("")` = 기본 로그인으로 떠 있음,
+    /// `None` = 실측 실패(claude 가 없거나 `ps` 가 안 되는 플랫폼).
+    ///
+    /// 전환 이벤트를 기록해 두고 추정하는 방식은 앱이 못 본 전환(재시작 전의 전환,
+    /// 손으로 띄운 claude)에서 어긋난다 — 도는 프로세스의 env 가 유일한 진실이다.
+    pub(crate) fn pane_claude_boot_account_dir(&self, pane: &str) -> Option<String> {
+        let shell = self.pty.get(pane)?.shell_pid()?;
+        let (kind, pid) =
+            kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)?;
+        if kind != kasa_pty::AgentKind::Claude {
+            return None;
+        }
+        // `ps eww` 는 유닉스 전용이고 같은 사용자 소유 프로세스의 env 를 보여준다.
+        // Windows 에서는 실패해 None — 호출부가 "어긋났을 수 있음" 으로 보수 처리한다.
+        let out = crate::proc::command("ps")
+            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() || out.stdout.is_empty() {
+            return None;
+        }
+        Some(parse_securestorage_dir(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    /// 계정 id → 화면 이름. 자동 전환 토스트가 쓰던 규칙 그대로다 — 이름 없는
+    /// 슬롯은 「계정 N」, 목록에 없는 id(기본 로그인 포함)는 기본 계정 표기.
+    pub(crate) fn claude_account_display(&self, id: &str) -> String {
+        match self.set_claude_accounts.iter().position(|a| a.id == id) {
+            Some(i) => crate::settings::account_display(
+                id,
+                &self.set_claude_accounts[i].label,
+                &format!("계정 {}", i + 2),
+            ),
+            None => crate::settings::account_display("", "", "기본 계정"),
+        }
+    }
+
+    /// 계정 전환을 **떠 있는 pane 에까지** 적용한다 — 자동·수동 전환이 같은 꼬리를 탄다.
+    ///
+    /// 도는 프로세스의 env 는 못 바꾸므로(`restart_pane_agent` doc) 반영 수단은
+    /// 재시작뿐이다. 전에는 자동 전환이 「⟳ 재시작」 칩만 띄우고 수동 전환은 그마저
+    /// 없어서, 전환해 놓고 pane 안 /status 가 옛 계정인 것을 보고 "바로 안 된다"가
+    /// 됐다(거노 2026-08-15: "재시작칩없이 나도 그렇게 되게해줘"). 이제 쉬는 pane 은
+    /// 그 자리에서 대화를 이어 재시작하고, 일하는 중인 pane 은 칩을 단 채 남겼다가
+    /// 턴이 끝나면 틱(`run_pending_account_restarts`)이 마저 돌린다 — 일하는 학생을
+    /// 중간에 끊으면 진행 중이던 턴이 통째로 죽기 때문이다.
+    ///
+    /// 대상 판정은 전환 이벤트 추정이 아니라 **pane 별 실측**이다. 그래서 같은 계정을
+    /// 다시 눌러도 「어긋난 pane 만」 맞춰 띄운다 — 앱이 못 본 전환으로 이미 어긋나
+    /// 있던 pane 도 계정 버튼 한 번으로 수습된다.
+    ///
+    /// 반환: (전환 전 계정 이름, 새 계정 이름, 즉시 재시작한 수, 끝나길 기다리는 수).
+    pub(crate) fn apply_claude_account_switch(
+        &mut self,
+        to: &str,
+    ) -> (String, String, usize, usize) {
+        let from_label = self.claude_account_display(&self.set_claude_account.clone());
+        let to_label = self.claude_account_display(to);
+        let target_dir = socket::claude_account_dir(to)
+            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        let claude_panes: Vec<String> = self
+            .pty
+            .iter()
+            .filter(|(_, p)| p.active_agent() == Some(kasa_pty::AgentKind::Claude))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in claude_panes {
+            match self.pane_claude_boot_account_dir(&id) {
+                // 이미 목표 계정으로 도는 pane — 남아 있던 표시도 걷는다(A→B→A 복귀).
+                Some(d) if d == target_dir => {
+                    self.pane_account_stale.remove(&id);
+                }
+                boot => {
+                    // 칩의 「A → B」 표기. 실측이 안 되면(다른 플랫폼) 어긋났을 수
+                    // 있다는 쪽으로 보수 판정하고, 표기는 전환 전 활성 계정으로 쓴다.
+                    let boot_label = match boot.as_deref() {
+                        Some(d) => self.claude_account_display(account_id_of_dir(d)),
+                        None => from_label.clone(),
+                    };
+                    self.pane_account_stale.insert(id, (boot_label, to_label.clone()));
+                }
+            }
+        }
+        self.set_claude_account = to.to_string();
+        // shim 재굽기가 재시작보다 **먼저**여야 새로 뜨는 claude 가 새 계정을 탄다.
+        self.settings_save();
+        let restarted = self.run_pending_account_restarts();
+        let deferred = self.pane_account_stale.len();
+        (from_label, to_label, restarted, deferred)
+    }
+
+    /// 「⟳ 재시작」 표시가 남은 pane 중 지금 쉬는 것을 새 계정으로 되띄운다.
+    /// 300ms 활동 스캔 끝에 불려, 전환 때 일하던 pane 도 턴이 끝나는 대로 따라온다.
+    /// 반환은 이번에 되띄운 수.
+    pub(crate) fn run_pending_account_restarts(&mut self) -> usize {
+        if self.pane_account_stale.is_empty() {
+            return 0;
+        }
+        let target_dir = socket::claude_account_dir(&self.set_claude_account)
+            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        let pending: Vec<String> = self.pane_account_stale.keys().cloned().collect();
+        let mut restarted = 0usize;
+        for id in pending {
+            // 하네스가 이미 내려간 pane 은 계정 불일치도 없다 — 표시만 걷는다.
+            let is_claude = self
+                .pty
+                .get(&id)
+                .is_some_and(|p| p.active_agent() == Some(kasa_pty::AgentKind::Claude));
+            if !is_claude {
+                self.pane_account_stale.remove(&id);
+                continue;
+            }
+            // 닫힌 pane 은 사용자 눈 밖에서 되띄우지 않는다 — 표시를 남겨 두면
+            // 되살렸을 때 칩이 안내한다.
+            if self.closed_panes.iter().any(|c| c.pane_id == id) {
+                continue;
+            }
+            // 일하는 중·승인 대기·백그라운드 작업 중이면 끊지 않는다 — resume 은
+            // 대화를 잇지만 진행 중이던 턴은 죽는다. 활동 기록이 아직 없는 pane 도
+            // 다음 틱(300ms)까지 미룬다.
+            let busy = self.pane_prompt_wait.contains_key(&id)
+                || self
+                    .pane_activity
+                    .get(&id)
+                    .is_none_or(|a| a.status != "idle" || a.bg_active);
+            if busy {
+                continue;
+            }
+            // 그 사이 손으로 되띄웠을 수 있다 — 죽이기 직전 실측으로 한 번 더 확인.
+            if self
+                .pane_claude_boot_account_dir(&id)
+                .is_some_and(|d| d == target_dir)
+            {
+                self.pane_account_stale.remove(&id);
+                continue;
+            }
+            if self.restart_pane_agent(&id) {
+                self.pane_account_stale.remove(&id);
+                restarted += 1;
+            }
+        }
+        restarted
+    }
+
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
     /// The new pane's PTY joins the session's shared `pty` map and runs in the
@@ -3505,6 +3650,56 @@ fn ultra_verdict_in(text: &str) -> Option<bool> {
 /// 같은 코드가 pane 라벨·상태바·미리보기에 네 벌 흩어져 있었고, 전부 `HOME` 을
 /// 직접 읽어 Windows(GUI 프로세스엔 HOME 이 없다)에서 한 곳도 안 접혔다.
 /// `home_dir()` 은 `USERPROFILE` 까지 본다.
+/// `ps eww` 한 줄에서 자격증명 저장소 경로를 뽑는다. 변수가 아예 없으면 `""`
+/// (= 기본 로그인으로 떠 있음). 공백이 든 경로는 첫 토막만 잡혀 어긋난 값이
+/// 되지만, 그건 "다르다" 쪽 판정이라 재시작으로 수습되는 무해한 방향이다.
+fn parse_securestorage_dir(ps_line: &str) -> String {
+    ps_line
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("CLAUDE_SECURESTORAGE_CONFIG_DIR="))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 저장소 경로 → 계정 id(`…/claude-accounts/<id>` 의 꼬리). `""` 는 기본 로그인이라
+/// 그대로 — `claude_account_display` 가 목록에 없는 id 를 기본 계정으로 접는다.
+fn account_id_of_dir(dir: &str) -> &str {
+    if dir.is_empty() {
+        return "";
+    }
+    dir.rsplit(['/', '\\']).next().unwrap_or(dir)
+}
+
+/// 전환 토스트 문구 — 자동·메뉴·설정창 세 진입점이 같은 문장을 쓴다.
+/// `same` 은 이미 활성인 계정을 다시 누른 경우(전환이 아니라 「맞추기」).
+pub(crate) fn account_switch_toast(
+    to_label: &str,
+    same: bool,
+    restarted: usize,
+    deferred: usize,
+) -> String {
+    if restarted == 0 && deferred == 0 {
+        return if same {
+            format!("{to_label} 그대로예요 — 떠 있는 claude 도 전부 이 계정이에요")
+        } else {
+            format!("{to_label} 로 전환했어요 (다음에 뜨는 claude 부터)")
+        };
+    }
+    let head = if same {
+        format!("{to_label} 로 맞추는 중")
+    } else {
+        format!("{to_label} 로 전환")
+    };
+    let mut parts = Vec::new();
+    if restarted > 0 {
+        parts.push(format!("claude {restarted}개 대화 이어서 다시 띄움"));
+    }
+    if deferred > 0 {
+        parts.push(format!("작업 중 {deferred}개는 끝나면 자동"));
+    }
+    format!("{head} — {}", parts.join(" · "))
+}
+
 pub(crate) fn tilde_home(s: &str) -> String {
     match kasa_socket::home_dir() {
         Some(h) => match s.strip_prefix(h.to_string_lossy().as_ref()) {
@@ -3767,6 +3962,41 @@ mod tests {
     fn returns_none_outside_any_repo() {
         // /tmp 는 레포가 아니고 홈 아래도 아니라 위로 훑어도 `.git` 이 없다.
         assert_eq!(git_repo_root(std::path::Path::new("/tmp")), None);
+    }
+}
+
+#[cfg(test)]
+mod account_switch_tests {
+    use super::{account_id_of_dir, account_switch_toast, parse_securestorage_dir};
+
+    #[test]
+    fn parses_securestorage_dir_from_ps_env_line() {
+        // ps eww 실물 모양: command 뒤에 env 가 공백으로 이어진다.
+        let line = "claude --resume abc TERM=xterm-256color \
+             CLAUDE_SECURESTORAGE_CONFIG_DIR=/Users/kasa/.config/kasaterm/claude-accounts/acct-1 \
+             HOME=/Users/kasa";
+        assert_eq!(
+            parse_securestorage_dir(line),
+            "/Users/kasa/.config/kasaterm/claude-accounts/acct-1"
+        );
+        // 변수가 없으면 기본 로그인 — 실측 실패(None)와 구분되는 확정값이다.
+        assert_eq!(parse_securestorage_dir("claude TERM=xterm HOME=/x"), "");
+    }
+
+    #[test]
+    fn account_id_comes_from_dir_tail() {
+        assert_eq!(account_id_of_dir("/a/b/claude-accounts/acct-3"), "acct-3");
+        assert_eq!(account_id_of_dir(""), "");
+    }
+
+    #[test]
+    fn toast_covers_all_shapes() {
+        // 아무것도 안 떠 있을 때 — 전환 vs 재클릭이 다른 말을 해야 한다.
+        assert!(account_switch_toast("사이오닉", false, 0, 0).contains("다음에 뜨는"));
+        assert!(account_switch_toast("사이오닉", true, 0, 0).contains("그대로"));
+        // 되띄운 것과 기다리는 것이 한 문장에 같이 온다.
+        let t = account_switch_toast("사이오닉", false, 2, 1);
+        assert!(t.contains("2개") && t.contains("1개"), "{t}");
     }
 }
 

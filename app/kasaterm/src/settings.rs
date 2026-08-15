@@ -1093,9 +1093,13 @@ impl App {
                 self.settings_input = Some(SettingsInput::ClaudeExtra);
             }
             SettingsAction::ClaudeAccount(id) => {
-                self.set_claude_account = id;
                 self.settings_input = None;
-                self.settings_save();
+                // 메뉴 전환과 같은 꼬리 — 떠 있는 pane 도 실측해 맞춰 띄운다.
+                let same = id == self.set_claude_account;
+                let (_, to_label, restarted, deferred) = self.apply_claude_account_switch(&id);
+                self.set_toast(crate::session::account_switch_toast(
+                    &to_label, same, restarted, deferred,
+                ));
             }
             SettingsAction::ToggleAccountAutoswitch => {
                 self.set_account_autoswitch = !self.set_account_autoswitch;
