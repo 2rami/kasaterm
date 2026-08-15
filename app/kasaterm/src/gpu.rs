@@ -4215,37 +4215,44 @@ impl GpuRenderer {
                     if cell.hidden {
                         continue;
                     }
-                    // Block Elements (U+2580..259F) — paint as GPU
-                    // quads instead of font glyphs. Monospace fonts
-                    // render these with seams/gaps, so claude code's
-                    // pixel-art character (built from half/quadrant
-                    // blocks) tears when shaped as glyphs. The
-                    // sub-cell rects from cells::block_rects fill the
-                    // exact regions seamlessly.
-                    {
+                    // Box Drawing(U+2500..257F)과 Block Elements(U+2580..259F)는
+                    // 폰트 글리프 대신 GPU 사각형으로 — 글리프는 advance 폭까지만
+                    // 그려서 칸이 그보다 넓으면 이웃 칸과 틈이 남는다(표 가로줄이
+                    // 점선이 되고, 반칸 블록으로 짠 학생 도트가 찢어진다). 선은
+                    // `box_line_rects`(px), 면은 `block_rects`(비율). 혼합 굵기
+                    // 교차처럼 안 다루는 글자만 폰트로 떨어진다.
+                    if ('\u{2500}'..='\u{259F}').contains(&ch) {
+                        let mut fg = cell_fg_rgba(cell, pane.default_fg);
+                        if pane.dim {
+                            fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
+                        }
+                        let lin = srgb_rgba_to_linear(fg);
+                        let cx = pane.origin_px.0 + col as f32 * cell_w_px;
+                        let cy = pane.origin_px.1 + r as f32 * cell_h_px;
+                        let chrome = &mut self.chrome;
+                        let mut put = |x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32| {
+                            let mut c = lin;
+                            c[3] *= alpha;
+                            chrome.push(CellInstance {
+                                cell_px: [cx + x0, cy + y0, x1 - x0, y1 - y0],
+                                uv_min: Atlas::SOLID_UV,
+                                uv_max: Atlas::SOLID_UV,
+                                fg_rgba: c,
+                                ..Default::default()
+                            });
+                        };
+                        if crate::cells::box_line_rects(ch, cell_w_px, cell_h_px, &mut put) {
+                            continue;
+                        }
                         if let Some(rects) = crate::cells::block_rects(ch) {
-                            let mut fg = cell_fg_rgba(cell, pane.default_fg);
-                            if pane.dim {
-                                fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
-                            }
-                            let lin = srgb_rgba_to_linear(fg);
-                            let cx = pane.origin_px.0 + col as f32 * cell_w_px;
-                            let cy = pane.origin_px.1 + r as f32 * cell_h_px;
                             for &(x0, y0, x1, y1, alpha) in rects {
-                                let mut c = lin;
-                                c[3] *= alpha;
-                                self.chrome.push(CellInstance {
-                                    cell_px: [
-                                        cx + x0 * cell_w_px,
-                                        cy + y0 * cell_h_px,
-                                        (x1 - x0) * cell_w_px,
-                                        (y1 - y0) * cell_h_px,
-                                    ],
-                                    uv_min: Atlas::SOLID_UV,
-                                    uv_max: Atlas::SOLID_UV,
-                                    fg_rgba: c,
-                                    ..Default::default()
-                                });
+                                put(
+                                    x0 * cell_w_px,
+                                    y0 * cell_h_px,
+                                    x1 * cell_w_px,
+                                    y1 * cell_h_px,
+                                    alpha,
+                                );
                             }
                             continue;
                         }
@@ -5431,9 +5438,10 @@ fn default_font_path() -> String {
         // 라틴 0.6em × 2 = 1.2em 이라 글리프가 칸의 절반도 못 채웠다. 지금은
         // 논-Mono(한글 1.0em)가 받고 shaper 가 두 칸에 맞춰 키운다.
         //
-        // 선·모서리(Box Drawing)는 폰트가 그린다 — 앱이 대신 그리지 않는다
-        // (거노 지시 2026-08-15). 그래서 표·입력창 테두리의 이음새는 이 폰트가
-        // 가진 글리프의 품질을 그대로 따라간다.
+        // 선·모서리(Box Drawing)는 렌더러가 직접 긋는다(cells::box_line_rects).
+        // 한 번 폰트에 맡겨 봤지만(2026-08-15 오전) 글리프가 advance 폭까지만
+        // 그려서 칸이 그보다 넓으면 이웃과 틈이 남아 표 가로줄이 점선이 됐다 —
+        // 폰트 선택은 이제 표·테두리 이음새에 영향이 없다.
         let home = std::env::var("HOME").unwrap_or_default();
         let jb = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
         if std::path::Path::new(&jb).exists() {
