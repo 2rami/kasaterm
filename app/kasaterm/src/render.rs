@@ -572,7 +572,13 @@ impl App {
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
-        let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
+        // (px, py, pw, ph, 텍스트, pane_id, ↑ rect, ↓ rect). 화살표 자리는 셀 폭을
+        // 아는 스캔 루프에서 미리 재 둔다 — chrome 패스에서 되재면 어긋난다.
+        type StickySlot = (
+            f32, f32, f32, f32, String, String,
+            Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>,
+        );
+        let mut sticky_pill_slots: Vec<StickySlot> = Vec::new();
         // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, 헤더 내용). logical px.
         // 화살표 rect 는 갈 곳이 있을 때만 담긴다(흐린 화살표는 눌러도 무반응).
         type TurnSlot = (
@@ -989,6 +995,11 @@ impl App {
                     // 어디를 눌러도 seek(begin_sticky_seek)가 걸린다.
                     let px = body_left;
                     let py = body_top + sticky.row as f32 * sch;
+                    let arrow_rect = |c: usize| {
+                        // 한 칸은 손가락으로 누르기 좁다 — 좌우 반 칸씩 넓혀 잡는다.
+                        (px + c as f32 * scw - scw * 0.5, py, scw * 2.0, sch)
+                    };
+                    let (a_up, a_down) = crate::turnjump::sticky_arrow_cols(ncols);
                     sticky_pill_slots.push((
                         px,
                         py,
@@ -996,6 +1007,8 @@ impl App {
                         sch,
                         sticky.text.clone(),
                         id.clone(),
+                        a_up.map(arrow_rect),
+                        a_down.map(arrow_rect),
                     ));
                     if let Some(row) = composed.get_mut(sticky.row) {
                         // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
@@ -1005,11 +1018,25 @@ impl App {
                         // 안 맞았다(거노: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭
                         // 이라 폭·자간이 원본과 정확히 일치한다. 텍스트 밖 셀은 흰
                         // 배경만 깔고 글자 잔재를 지워 pill 을 pane 양끝까지 연장한다.
+                        // pill 오른쪽 끝에 앞뒤 질문으로 건너뛰는 ↑↓ 를 얹는다.
+                        // 자리를 먼저 잡아 두고 아래 도색 루프가 그 칸을 지우지
+                        // 않게 한다(도색은 텍스트 밖을 공백으로 미는 일을 한다).
+                        let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
                         for (i, cell) in row.iter_mut().enumerate() {
                             cell.dim = false;
                             cell.inverse = false;
                             cell.fg = kasa_bridge::screen::Color::Rgb(20, 22, 28);
                             cell.bg = kasa_bridge::screen::Color::Rgb(248, 249, 251);
+                            if Some(i) == up_col {
+                                cell.ch = '↑';
+                                cell.bold = true;
+                                continue;
+                            }
+                            if Some(i) == down_col {
+                                cell.ch = '↓';
+                                cell.bold = true;
+                                continue;
+                            }
                             if i < sticky.col_start || i >= end {
                                 cell.ch = ' ';
                             }
@@ -2749,16 +2776,31 @@ impl App {
             // STICKY_PILLS 로 mouse handler·seek 에 넘긴다 — 클릭 = "그 프롬프트가
             // 화면에 들어올 때까지 위로 스크롤"(begin_sticky_seek).
             STICKY_PILLS.with(|s| s.borrow_mut().clear());
-            for (px, py, pw, ph, text, pane_id) in &sticky_pill_slots {
+            // 클릭 영역은 **여기서 한 번만** 비운다. 아래 sticky 루프와 그보다 뒤의
+            // 턴 헤더 루프가 같은 통에 담으므로, 뒤쪽에서 또 비우면 앞에서 담은
+            // 화살표가 통째로 사라진다 — 화면은 멀쩡한데 안 눌리는, 스크린샷이
+            // 절대 못 잡는 부류다(실제로 그렇게 짰다가 여기서 잡았다).
+            crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
+            for (px, py, pw, ph, text, pane_id, a_up, a_down) in &sticky_pill_slots {
                 STICKY_PILLS.with(|s| {
                     s.borrow_mut().push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
+                });
+                // pill 에 얹은 ↑↓ — 바 클릭(위로 되짚기)보다 **나중에** 담아야
+                // 겹치는 자리에서 화살표가 이긴다(조회가 역순이다).
+                crate::turnjump::TURN_HITS.with(|s| {
+                    let mut v = s.borrow_mut();
+                    if let Some(r) = a_up {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekPrev));
+                    }
+                    if let Some(r) = a_down {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekNext));
+                    }
                 });
             }
             // 대화 턴 헤더의 클릭 영역. 그림은 이미 셀로 그려졌고 여기선 자리만
             // 넘긴다. **바를 먼저, 화살표를 나중에** 담는 순서가 곧 우선순위다 —
             // 조회가 역순이라 겹치는 자리에서 화살표가 이긴다(화면에서 위에 있는
             // 것이 클릭도 가져간다).
-            crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
             for (pane_id, bar, up, down, h) in &turn_header_slots {
                 crate::turnjump::TURN_HITS.with(|s| {
                     let mut v = s.borrow_mut();

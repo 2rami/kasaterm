@@ -37,6 +37,11 @@ pub(crate) enum TurnHit {
     Jump(i64),
     Prev(i64),
     Next(i64),
+    /// claude 가 **자기 버퍼를** 스크롤하는 세계의 앞/뒤 질문. 그쪽은 좌표가 없어
+    /// 절대 줄로 말할 수가 없고, 「지금 맨 위에 붙은 질문이 바뀔 때까지 굴린다」로만
+    /// 표현된다 — 목적지는 누를 때 화면에서 읽으므로 여기 담을 것이 없다.
+    SeekPrev,
+    SeekNext,
 }
 
 thread_local! {
@@ -116,6 +121,17 @@ impl TurnJump {
     }
 }
 
+/// claude sticky pill 줄에서 ↑↓ 가 놓일 열. 줄이 너무 짧으면 `(None, None)`.
+///
+/// 헤더(`paint_header_row`)와 **같은 자리 규칙**을 쓴다 — 두 세계(터미널 스크롤백과
+/// claude 자기 버퍼)에서 화살표가 다른 자리에 있으면 같은 기능으로 안 읽힌다.
+pub(crate) fn sticky_arrow_cols(len: usize) -> (Option<usize>, Option<usize>) {
+    if len < 6 {
+        return (None, None);
+    }
+    (Some(len - 4), Some(len - 2))
+}
+
 /// 헤더 줄에서 화살표가 놓인 열 — 클릭 rect 를 그 자리에 맞추는 데 쓴다.
 /// 갈 곳이 없어 흐리게만 둔 화살표는 `None` 이라 눌러도 아무 일이 없다.
 pub(crate) struct HeaderCols {
@@ -146,9 +162,7 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
     // `↑ ↓ ` 로 넉 칸. claude 가 "Jump to bottom ↓" 에 같은 계열 글리프를 쓰고 있어
     // 폰트 폴백이 확인된 문자다.
     let (mut up_col, mut down_col) = (None, None);
-    let text_end = if row.len() >= 6 {
-        let up = row.len() - 4;
-        let down = row.len() - 2;
+    let text_end = if let (Some(up), Some(down)) = sticky_arrow_cols(row.len()) {
         let put = |row: &mut [GridCell], at: usize, ch: char, on: bool| {
             let mut c = base.clone();
             c.ch = ch;
@@ -213,14 +227,34 @@ impl crate::App {
     /// 레포에서 「같은 로직 두 벌은 한쪽만 고쳐진다」로 여러 번 물린 자리다.
     pub(crate) fn turn_header_click(&mut self, x: f32, y: f32) -> bool {
         let Some((pane_id, hit)) = turn_hit_at(x, y) else { return false };
-        let abs = match hit {
-            TurnHit::Jump(a) | TurnHit::Prev(a) | TurnHit::Next(a) => a,
-        };
-        // 좌표가 확정이라 한 번에 닿는다 — sticky 쪽이 휠을 쏘며 되짚는 것과 다르다.
-        if let Some(pty) = self.pty_for_pane(&pane_id) {
-            let off = pty.scroll_to_abs(abs);
-            if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
-                eprintln!("[turn] click {hit:?} pane={pane_id} → display_offset={off}");
+        let dbg = std::env::var_os("KASATERM_TURN_DEBUG").is_some();
+        match hit {
+            // 터미널 스크롤백 세계 — 좌표가 확정이라 한 번에 닿는다.
+            TurnHit::Jump(abs) | TurnHit::Prev(abs) | TurnHit::Next(abs) => {
+                if let Some(pty) = self.pty_for_pane(&pane_id) {
+                    let off = pty.scroll_to_abs(abs);
+                    if dbg {
+                        eprintln!("[turn] click {hit:?} pane={pane_id} → display_offset={off}");
+                    }
+                }
+            }
+            // claude 자기 버퍼 세계 — 좌표가 없어 「지금 맨 위 질문이 바뀔 때까지」
+            // 굴리는 되짚기뿐이다. 목적지는 지금 화면에 붙어 있는 그 줄이므로 여기서
+            // 읽는다. 그 줄이 없으면(이미 라이브 바닥) 할 일이 없다.
+            TurnHit::SeekPrev | TurnHit::SeekNext => {
+                let down = matches!(hit, TurnHit::SeekNext);
+                let Some(target) = crate::render::sticky_text_for(&pane_id) else {
+                    if dbg {
+                        eprintln!("[turn] seek {hit:?} pane={pane_id} — 붙은 줄이 없어 무시");
+                    }
+                    return true;
+                };
+                // wheel 을 쏠 자리는 그 pane 안이어야 한다(클릭 지점이면 늘 그렇다).
+                let cell = self.px_to_pane_cell(x, y).map(|(_, c, r)| (c, r)).unwrap_or((1, 1));
+                if dbg {
+                    eprintln!("[turn] seek {hit:?} pane={pane_id} down={down} target={target:?}");
+                }
+                crate::render::begin_sticky_seek(pane_id, target, cell, down);
             }
         }
         true
@@ -250,9 +284,13 @@ impl crate::App {
             s.borrow()
                 .iter()
                 .find(|(_, _, hit)| {
+                    // 두 세계의 같은 자리를 한 이름으로 누른다 — 하네스가 「위 화살표」
+                    // 를 말할 때 터미널 쪽인지 claude 쪽인지 알 필요가 없어야 한다.
                     matches!(
                         (spot.as_str(), hit),
-                        ("bar", TurnHit::Jump(_)) | ("up", TurnHit::Prev(_)) | ("down", TurnHit::Next(_))
+                        ("bar", TurnHit::Jump(_))
+                            | ("up", TurnHit::Prev(_) | TurnHit::SeekPrev)
+                            | ("down", TurnHit::Next(_) | TurnHit::SeekNext)
                     )
                 })
                 .map(|(_, r, hit)| (*r, *hit))

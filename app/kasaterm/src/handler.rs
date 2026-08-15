@@ -3114,7 +3114,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .px_to_pane_cell(cx, cy)
                             .map(|(_, c, r)| (c, r))
                             .unwrap_or((1, 1));
-                        crate::render::begin_sticky_seek(pane_id, target, cell);
+                        crate::render::begin_sticky_seek(pane_id, target, cell, false);
                         window.request_redraw();
                         return;
                     }

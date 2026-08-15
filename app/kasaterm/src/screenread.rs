@@ -1464,6 +1464,10 @@ thread_local! {
 pub(crate) struct StickySeek {
     pub pane_id: String,
     pub target: String,
+    /// 아래(최신)로 갈지. claude 자기 버퍼라 좌표를 모르므로 방향과 종료 조건으로만
+    /// 말할 수 있다 — 위로는 「이 줄이 바뀔 때까지」, 아래로는 그에 더해 「줄이 아예
+    /// 사라질 때까지」(=라이브 바닥에 닿아 sticky 가 걷힌다).
+    pub down: bool,
     /// wheel SGR 를 쏠 pane-local 셀(클릭 지점) — 노치마다 재사용.
     pub cell: (u16, u16),
     pub last_send: std::time::Instant,
@@ -1492,12 +1496,13 @@ pub(crate) fn sticky_text_for(pane_id: &str) -> Option<String> {
 }
 
 /// sticky 클릭 → seek 시작. target 은 클릭한 pill 텍스트, cell 은 wheel 을 쏠 위치.
-pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16)) {
+pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16), down: bool) {
     let now = std::time::Instant::now();
     STICKY_SEEK.with(|s| {
         *s.borrow_mut() = Some(StickySeek {
             pane_id,
             target,
+            down,
             cell,
             // 첫 틱에 바로 한 노치 나가게 간격만큼 과거로.
             last_send: now.checked_sub(STICKY_SEEK_INTERVAL).unwrap_or(now),
@@ -1509,7 +1514,7 @@ pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16
 /// seek 한 스텝. 다음 노치를 보내야 하면 (pane_id, col, row) 반환, 아니면 None
 /// (대기 중이거나 종료). 종료 판정: 현재 sticky 텍스트가 target 과 다르면(타깃이
 /// 뷰포트로 들어옴) 또는 없으면(최상단) 완료로 보고 상태를 지운다.
-pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16)> {
+pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16, bool)> {
     let now = std::time::Instant::now();
     STICKY_SEEK.with(|s| {
         let mut b = s.borrow_mut();
@@ -1528,7 +1533,7 @@ pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16)> {
         seek.last_send = now;
         seek.sent += 1;
         let (col, row) = seek.cell;
-        Some((seek.pane_id.clone(), col, row))
+        Some((seek.pane_id.clone(), col, row, seek.down))
     })
 }
 
@@ -3692,9 +3697,9 @@ mod sticky_seek_tests {
     #[test]
     fn first_step_emits_notch() {
         set_pills(&[("%1", "이전 프롬프트")]);
-        begin_sticky_seek("%1".into(), "이전 프롬프트".into(), (5, 7));
+        begin_sticky_seek("%1".into(), "이전 프롬프트".into(), (5, 7), false);
         assert!(sticky_seek_active());
-        assert_eq!(sticky_seek_step(), Some(("%1".to_string(), 5, 7)));
+        assert_eq!(sticky_seek_step(), Some(("%1".to_string(), 5, 7, false)));
         assert!(sticky_seek_active()); // 아직 진행 중
     }
 
@@ -3702,7 +3707,7 @@ mod sticky_seek_tests {
     #[test]
     fn throttled_between_notches() {
         set_pills(&[("%1", "T")]);
-        begin_sticky_seek("%1".into(), "T".into(), (1, 1));
+        begin_sticky_seek("%1".into(), "T".into(), (1, 1), false);
         assert!(sticky_seek_step().is_some()); // 첫 노치
         assert_eq!(sticky_seek_step(), None); // 간격 내 재호출 → 대기
         assert!(sticky_seek_active());
@@ -3712,7 +3717,7 @@ mod sticky_seek_tests {
     #[test]
     fn stops_when_target_enters_view() {
         set_pills(&[("%1", "타깃")]);
-        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1));
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false);
         set_pills(&[("%1", "더 이전 프롬프트")]); // sticky 가 이전 프롬프트로 교체됨
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
@@ -3722,7 +3727,7 @@ mod sticky_seek_tests {
     #[test]
     fn stops_when_sticky_gone() {
         set_pills(&[("%1", "타깃")]);
-        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1));
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false);
         set_pills(&[]); // 최상단 — pill 없음
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
