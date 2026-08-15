@@ -1523,7 +1523,10 @@ impl App {
         // 창 생성이 실패하면 아래 네이티브로 그대로 흐른다 — 이행 스위치가
         // 설정 화면 자체를 못 열게 만드는 단일 실패점이 되면 안 된다.
         // 딥링크(cat/student)는 웹 라우팅이 붙는 Step 4 이후에 이어진다.
-        if settings_web_enabled() && self.open_settings_web_window(event_loop) {
+        // `cat` 을 함께 넘긴다. 예전엔 여기서 버려서, 하단바의 「계정 관리」가 웹
+        // 설정을 열긴 하는데 **캐릭터 화면**으로 떨어졌다(웹의 초기 칸이 그것이다).
+        // 네이티브 경로는 멀쩡했던 터라 「가끔 엉뚱한 데로 간다」로 보였다.
+        if settings_web_enabled() && self.open_settings_web_window(event_loop, cat) {
             return;
         }
         let Some(idx) = self

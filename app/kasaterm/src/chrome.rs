@@ -2023,9 +2023,21 @@ impl App {
     /// 폼의 텍스트 편집용이다. 웹뷰에 그걸 걸면 WKWebView 가 제 IME 로 받아야 할
     /// 한글 조합을 끊어 이행의 목적을 정확히 무효화한다 — 아로나 창도 같은 이유로
     /// 안 부르고, 거기서 한글 입력이 이미 프로덕션으로 돌고 있다.
-    pub(crate) fn open_settings_web_window(&mut self, event_loop: &ActiveEventLoop) -> bool {
+    pub(crate) fn open_settings_web_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cat: Option<crate::SettingsCat>,
+    ) -> bool {
         if let Some(w) = self.settings_web_window.as_ref() {
             w.focus_window();
+            // 이미 떠 있으면 URL 을 다시 못 쓴다 — 다시 로드하면 입력 중이던 값이
+            // 날아간다. 열려 있는 화면을 그 자리에서 돌린다.
+            if let (Some(c), Some(wv)) = (cat, self.settings_web_webview.as_ref()) {
+                let _ = wv.evaluate_script(&format!(
+                    "window.__ktSetCat && window.__ktSetCat('{}')",
+                    c.web_key()
+                ));
+            }
             return true;
         }
         // 페이지가 실제로 서빙되는지 **창을 만들기 전에** 묻는다. 웹뷰는 404 를 받아도
@@ -2061,7 +2073,10 @@ impl App {
             .unwrap_or(0);
         let win_show = window.clone();
         let webview = match wry::WebViewBuilder::new()
-            .with_url(format!("http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}"))
+            .with_url(format!(
+                "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}{}",
+                cat.map(|c| format!("&cat={}", c.web_key())).unwrap_or_default()
+            ))
             .with_background_color((27, 37, 65, 255))
             .with_on_page_load_handler(move |event, _url| {
                 if matches!(event, wry::PageLoadEvent::Finished) {
