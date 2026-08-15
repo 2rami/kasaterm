@@ -762,7 +762,15 @@ impl App {
     ) -> (String, String, usize, usize, bool) {
         let from_label = self.claude_account_display(&self.set_claude_account.clone());
         let to_label = self.claude_account_display(to);
-        let target_dir = socket::claude_account_dir(to)
+        // ① 작업대를 새 계정으로 갈아 끼운다. 이것만으로 **작업대를 보고 도는 pane 은
+        // 전부** 다음 요청부터 새 계정이 된다 — 재시작도, 대화 끊김도 없다. claude 가
+        // 요청 직전마다 저장소를 다시 읽고, 자기 것과 다른 토큰이 있으면 그대로
+        // 채택하기 때문이다(claude_auth 모듈 머리말).
+        let swapped = crate::claude_auth::swap_active(to, socket::claude_account_dir);
+        // ② 재시작이 필요한 pane 은 **작업대를 안 보는** 것들뿐이다 — 이 기능이 생기기
+        // 전에 뜬 pane 은 특정 금고에 못 박혀 있어 갈아 끼우기가 안 닿는다.
+        let target_dir = crate::claude_auth::runtime_dir_for(to, to)
+            .or_else(|| socket::claude_account_dir(to))
             .map_or(String::new(), |p| p.to_string_lossy().into_owned());
         let claude_panes: Vec<String> = self
             .pty
@@ -786,6 +794,11 @@ impl App {
                     self.pane_account_stale.insert(id, (boot_label, to_label.clone()));
                 }
             }
+        }
+        if matches!(swapped, crate::claude_auth::SwapOutcome::WriteFailed) {
+            // 조용히 넘어가면 「바꿨는데 안 바뀐다」가 된다. 재시작 폴백은 그대로
+            // 도니 기능은 살지만, 왜 느린지는 로그에 남겨 둔다.
+            eprintln!("[account] 작업대 갈아 끼우기 실패 — 재시작 폴백으로만 반영된다");
         }
         self.set_claude_account = to.to_string();
         // shim 재굽기가 재시작보다 **먼저**여야 새로 뜨는 claude 가 새 계정을 탄다.

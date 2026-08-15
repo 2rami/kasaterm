@@ -1323,7 +1323,13 @@ impl ApplicationHandler<UserEvent> for App {
                     // (`claude_account_dir("") == None`) 프록시에서 빈 문자열이 곧 기본
                     // 로그인이라, 빈 문자열로 눌러 넘기면 의미가 정확히 맞는다.
                     let active_id = socket::read_claude_account();
-                    let active_dir = socket::claude_account_dir(&active_id)
+                    // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
+                    // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
+                    // 로그아웃된 채로 꺼내진다(1회용이라 되돌릴 수도 없다).
+                    crate::claude_auth::read_back(socket::claude_account_dir);
+                    // 활성 계정은 **작업대**를 본다 — 금고를 보면 이 폴러의 만료 갱신이
+                    // 도는 pane 들의 토큰을 죽인다(runtime_dir_for 주석).
+                    let active_dir = crate::claude_auth::runtime_dir_for(&active_id, &active_id)
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                     let fetched = fetch_claude_usage(&crate::mcp_panel_port(), &active_dir);
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
@@ -1394,9 +1400,12 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(b) = active_badge {
                             all.insert(b.account_dir.clone(), b);
                         }
-                        let mut dirs: Vec<String> = vec![String::new()];
+                        let mut dirs: Vec<String> = vec![crate::claude_auth::runtime_dir_for(
+                            "", &active_id,
+                        )
+                        .map_or(String::new(), |p| p.to_string_lossy().into_owned())];
                         dirs.extend(socket::read_claude_accounts().iter().filter_map(|a| {
-                            socket::claude_account_dir(&a.id)
+                            crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                 .map(|p| p.to_string_lossy().into_owned())
                         }));
                         for d in dirs {
@@ -1470,7 +1479,10 @@ impl ApplicationHandler<UserEvent> for App {
                         let limit = socket::read_account_autoswitch_pct();
                         let known: Vec<(String, std::path::PathBuf)> = socket::read_claude_accounts()
                             .iter()
-                            .filter_map(|a| socket::claude_account_dir(&a.id).map(|d| (a.id.clone(), d)))
+                            .filter_map(|a| {
+                                crate::claude_auth::runtime_dir_for(&a.id, &active_id)
+                                    .map(|d| (a.id.clone(), d))
+                            })
                             .collect();
                         if let Ok(g) = usage_all.lock() {
                             for (id, dir) in &known {
@@ -3073,6 +3085,22 @@ impl ApplicationHandler<UserEvent> for App {
                         // 사이드바 "Settings" 항목 — 설정 별도창을 열거나(이미
                         // 열려 있으면) 그 창을 포커스한다.
                         self.open_settings_window(event_loop, None, None);
+                        window.request_redraw();
+                        return;
+                    }
+                    // 대화 턴 헤더 클릭 — 바는 그 질문 자리로, ↑↓ 는 앞뒤 질문으로.
+                    // 셋 다 절대 줄이 확정돼 있어 **한 번에** 닿는다(아래 sticky 는
+                    // 좌표를 몰라 휠을 쏘며 되짚는 것과 대비된다). SGR 전달보다 먼저
+                    // 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
+                    if let Some((pane_id, hit)) = crate::turnjump::turn_hit_at(cx, cy) {
+                        let abs = match hit {
+                            crate::turnjump::TurnHit::Jump(a)
+                            | crate::turnjump::TurnHit::Prev(a)
+                            | crate::turnjump::TurnHit::Next(a) => a,
+                        };
+                        if let Some(pty) = self.pty_for_pane(&pane_id) {
+                            pty.scroll_to_abs(abs);
+                        }
                         window.request_redraw();
                         return;
                     }

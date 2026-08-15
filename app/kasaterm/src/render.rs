@@ -573,6 +573,38 @@ impl App {
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
+        // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, 헤더 내용). logical px.
+        // 화살표 rect 는 갈 곳이 있을 때만 담긴다(흐린 화살표는 눌러도 무반응).
+        type TurnSlot = (
+            String,
+            (f32, f32, f32, f32),
+            Option<(f32, f32, f32, f32)>,
+            Option<(f32, f32, f32, f32)>,
+            crate::turnjump::TurnHeader,
+        );
+        let mut turn_header_slots: Vec<TurnSlot> = Vec::new();
+        // pane 별 헤더는 **여기서** 지어 둔다. 짓는 데 `&mut self`(앵커 캐시)가 필요한데
+        // 아래 pane 루프는 ws 락을 쥔 채 돌아, 그 안에서 `pty_for_pane`(자체 락)을
+        // 부르면 같은 뮤텍스를 두 번 잡는다. 락을 잡기 전에 끝내는 것이 그 함정을
+        // 구조적으로 없앤다.
+        let turn_headers: std::collections::HashMap<String, crate::turnjump::TurnHeader> = {
+            let ids: Vec<String> = self
+                .ws
+                .lock()
+                .ok()
+                .map(|ws| ws.panes.keys().cloned().collect())
+                .unwrap_or_default();
+            self.turn.retain_panes(|id| ids.iter().any(|k| k == id));
+            let mut out = std::collections::HashMap::new();
+            for id in ids {
+                // Arc 를 복제해 self 빌림을 끊는다 — 참조를 든 채로는 캐시를 못 고친다.
+                let Some(sess) = self.pty_for_pane(&id).cloned() else { continue };
+                if let Some(h) = self.turn.header(&id, &sess) {
+                    out.insert(id, h);
+                }
+            }
+            out
+        };
         // 인라인 이미지 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h, clip_y0,
         // clip_y1, hug). 좌표는 LOGICAL px(queue_image 관례). hug=박스를 그림 비율로
         // 좁혀 왼쪽에 붙인다(글 흐름 그림용, OSC 1337 은 박스가 이미 맞아 false).
@@ -982,6 +1014,30 @@ impl App {
                                 cell.ch = ' ';
                             }
                         }
+                    }
+                }
+                // 대화 턴 헤더 — 터미널 스크롤백을 올려다볼 때만 첫 행을 덮어쓴다.
+                // 라이브 바닥이면 `turn_headers` 에 항목 자체가 없어서 평소 화면은
+                // 손대지 않는다. 바로 위 sticky pill 과 자리를 다툴 일은 없다 —
+                // 저쪽은 claude 가 **자기 버퍼를** 스크롤할 때뿐이고, 그때 터미널
+                // 쪽 offset 은 0 이라 이 헤더가 아예 안 뜬다.
+                if let Some(h) = turn_headers.get(id.as_str()) {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let (hcw, hch) = (self.cell.w * fs, self.cell.h * fs);
+                    if let Some(row) = composed.get_mut(0) {
+                        let cols = crate::turnjump::paint_header_row(row, h);
+                        let rect_at = |c: usize| {
+                            // 화살표 한 칸은 손가락으로 누르기엔 좁다 — 좌우로 반 칸씩
+                            // 넓혀 잡는다. 그래도 서로 두 칸 떨어져 있어 안 겹친다.
+                            (body_left + c as f32 * hcw - hcw * 0.5, body_top, hcw * 2.0, hch)
+                        };
+                        turn_header_slots.push((
+                            id.clone(),
+                            (body_left, body_top, cols_now as f32 * hcw, hch),
+                            cols.up.map(rect_at),
+                            cols.down.map(rect_at),
+                            h.clone(),
+                        ));
                     }
                 }
                 // agents 목록 뷰 판정 — statusline 프사 슬롯(U+FFFC)이 있으면 실제
@@ -2696,6 +2752,23 @@ impl App {
             for (px, py, pw, ph, text, pane_id) in &sticky_pill_slots {
                 STICKY_PILLS.with(|s| {
                     s.borrow_mut().push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
+                });
+            }
+            // 대화 턴 헤더의 클릭 영역. 그림은 이미 셀로 그려졌고 여기선 자리만
+            // 넘긴다. **바를 먼저, 화살표를 나중에** 담는 순서가 곧 우선순위다 —
+            // 조회가 역순이라 겹치는 자리에서 화살표가 이긴다(화면에서 위에 있는
+            // 것이 클릭도 가져간다).
+            crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
+            for (pane_id, bar, up, down, h) in &turn_header_slots {
+                crate::turnjump::TURN_HITS.with(|s| {
+                    let mut v = s.borrow_mut();
+                    v.push((pane_id.clone(), *bar, crate::turnjump::TurnHit::Jump(h.cur_abs)));
+                    if let (Some(r), Some(a)) = (up, h.prev_abs) {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Prev(a)));
+                    }
+                    if let (Some(r), Some(a)) = (down, h.next_abs) {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Next(a)));
+                    }
                 });
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
@@ -7007,8 +7080,13 @@ impl App {
                 // 그려지는데, 한도를 보고 계정을 고르는 기능이라 이 조합은 그냥
                 // 거짓말이다. 배지가 어느 계정에서 나온 값인지 들고 다니므로
                 // (`account_dir`) 활성 슬롯과 대조해 다르면 읽는 중으로 둔다.
-                let active_dir = crate::socket::claude_account_dir(&self.set_claude_account)
-                    .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                // 폴러가 조회한 자리와 **같은 규칙**으로 계산해야 한다 — 활성 계정은
+                // 작업대라, 여기서 금고 경로를 쓰면 매번 「읽는 중」으로 보인다.
+                let active_dir = crate::claude_auth::runtime_dir_for(
+                    &self.set_claude_account,
+                    &self.set_claude_account,
+                )
+                .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                 let switching = badge.as_ref().is_some_and(|b| b.account_dir != active_dir);
 
                 // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
@@ -7334,7 +7412,9 @@ impl App {
                 // ── 값 읽기 ──────────────────────────────────────────────────
                 // 슬롯별 한도표. 폴러가 계정 디렉터리를 키로 채운다.
                 let usage_of = |id: &str| -> Option<crate::UsageBadge> {
-                    let key = crate::socket::claude_account_dir(id)
+                    // 폴러가 조회한 자리가 곧 키다 — 활성 계정만 작업대라 여기서도
+                    // 같은 규칙을 써야 그 한 줄이 빈칸이 되지 않는다.
+                    let key = crate::claude_auth::runtime_dir_for(id, &self.set_claude_account)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     self.claude_usage_all.lock().ok()?.get(&key).cloned()

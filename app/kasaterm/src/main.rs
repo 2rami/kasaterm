@@ -10,6 +10,7 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
+mod claude_auth;
 mod cells;
 mod gpu;
 mod render;
@@ -40,6 +41,7 @@ mod mcpcol;
 mod sesscol;
 mod state;
 mod statusbar;
+mod turnjump;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]
@@ -5045,6 +5047,9 @@ struct App {
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
     statusbar: state::StatusbarState,
+    /// 대화 턴 헤더의 pane 별 앵커 캐시. 본체는 turnjump.rs — 여기 필드 한 줄만
+    /// 두는 것도 statusbar 와 같은 이유다(CLAUDE.md 병렬 규칙).
+    turn: turnjump::TurnJump,
     /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
     pane_cwd_check: Option<Instant>,
     /// Preview panes (image/markdown) already materialized from the daemon's
@@ -5541,6 +5546,7 @@ impl App {
                 ..Default::default()
             },
             statusbar: Default::default(),
+            turn: Default::default(),
             pane_cwd_check: None,
             show_pane_numbers: false,
             file_tree: state::FileTreeState {
@@ -6805,7 +6811,14 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // attach·agents·-p·stop/logs 에서 일부러 빠지지만, 인증이 서브커맨드마다 다른
     // 계정을 보면 그건 그냥 고장이다. 디렉터리는 여기서 만들어 둔다: macOS 는 경로를
     // 해시해 Keychain 항목명만 가르지만, 다른 OS 는 이 안에 .credentials.json 을 쓴다.
-    let account_dir = socket::claude_account_dir(&socket::read_claude_account());
+    // pane 이 가리킬 자리는 **작업대**다 — 계정마다 다른 금고를 직접 가리키면 그
+    // pane 은 뜰 때 그 계정에 못 박혀, 나중에 계정을 바꿔도 재시작 말고는 길이 없다.
+    // 작업대는 모두가 같은 한 자리를 보므로 갈아 끼우기 한 번이 전부에게 닿는다.
+    // 채우지 못하면(로그인 없는 슬롯 등) 금고를 그대로 가리키는 옛 방식으로 폴백한다 —
+    // 로그인 안 된 빈 자리를 주면 pane 이 로그인 화면으로 뜬다.
+    let account_id = socket::read_claude_account();
+    let account_dir = crate::claude_auth::ensure_active(&account_id, socket::claude_account_dir)
+        .or_else(|| socket::claude_account_dir(&account_id));
     if let Some(ref d) = account_dir {
         if let Err(e) = std::fs::create_dir_all(d) {
             eprintln!("[shim] claude account dir 생성 실패: {e}");
