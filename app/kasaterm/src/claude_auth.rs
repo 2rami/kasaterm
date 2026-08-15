@@ -133,16 +133,13 @@ fn write_stamp_in(active: &Path, account: &str, digest: &str) {
     let _ = std::fs::write(p, v.to_string());
 }
 
-fn write_stamp(account: &str, digest: &str) {
-    if let Some(a) = active_dir() {
-        write_stamp_in(&a, account, digest);
-    }
-}
-
 /// 자격증명 한 벌을 읽는다. macOS 는 keychain, 그 밖은 `<dir>/.credentials.json`.
 /// 값은 호출부 메모리에만 머문다 — 로그에도 화면에도 내보내지 않는다.
 pub(crate) fn read_credentials(dir: Option<&Path>) -> Option<Vec<u8>> {
-    #[cfg(target_os = "macos")]
+    // ⚠️ 시험은 열쇠고리를 **건드리지 않는다**(파일 경로만 탄다). 시험이 만든 항목이
+    // 남으면, 빌드가 바뀔 때마다 macOS 가 사용자에게 「kasaterm 이 비밀 정보를 쓰려
+    // 합니다」 창을 띄운다 — 2026-08-15 에 실제로 그 창이 반복해 떴다.
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         use security_framework::passwords::get_generic_password;
         if let Ok(b) = get_generic_password(&service_name(dir), &keychain_account()) {
@@ -153,12 +150,77 @@ pub(crate) fn read_credentials(dir: Option<&Path>) -> Option<Vec<u8>> {
     std::fs::read(dir?.join(".credentials.json")).ok()
 }
 
+/// ⚠️ 시험은 **사용자의 진짜 자리에 못 쓴다.** 임시 폴더 밖이면 무조건 거부한다.
+///
+/// 2026-08-15 에 전체 시험을 돌렸더니 설정 저장 경로를 타는 시험 하나가 사용자
+/// 열쇠고리에 진짜 항목(`_active`)을 만들었고, 그 뒤 빌드가 바뀔 때마다 macOS 가
+/// 「kasaterm 이 비밀 정보를 쓰려 합니다」 창을 계속 띄웠다. 시험이 실계정 자리에
+/// 손대는 길은 아예 막는다.
+#[cfg(test)]
+fn writable_in_tests(dir: Option<&Path>) -> bool {
+    dir.is_some_and(|d| d.starts_with(std::env::temp_dir()))
+}
+
 /// 자격증명 한 벌을 쓴다. 성공하면 true.
+///
+/// macOS 는 **항목을 「모든 프로그램이 열 수 있게」 만든다**(`security -A`). 이유는
+/// 이 자리를 우리와 claude 가 함께 쓰기 때문이다: 열쇠고리 항목에는 「어느 실행파일이
+/// 열 수 있나」가 붙어 있어서, 만든 쪽이 아닌 프로그램이 열려 하면 macOS 가 사용자에게
+/// 암호 창을 띄운다. 우리가 만든 자리를 claude 가 읽어야 하고 claude 는 자주 갱신돼
+/// 실행파일이 계속 바뀌므로, 열어 두지 않으면 **갱신될 때마다 창이 뜬다**(2026-08-15
+/// 에 사용자가 실제로 겪은 그 창이 정확히 이 문제였다. 거노 판단: 열어둔다).
+///
+/// 대가는 같은 사용자로 도는 다른 프로그램도 이 값을 읽을 수 있다는 것 — 리눅스·윈도의
+/// claude 는 애초에 평문 파일에 두므로 그 환경과 같은 수준이 된다.
+///
+/// `security` CLI 를 쓰는 것은 crate 에 이 손잡이(ACL)가 없어서다. 값이 잠깐 명령줄에
+/// 실리는데, 그건 **같은 사용자만** 볼 수 있고 어차피 위에서 그 사용자에게 열어 주기로
+/// 한 값이라 새로 생기는 노출이 아니다(Orca 도 같은 경로를 쓴다).
 pub(crate) fn write_credentials(dir: Option<&Path>, blob: &[u8]) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(test)]
+    if !writable_in_tests(dir) {
+        return false;
+    }
+    #[cfg(all(target_os = "macos", not(test)))]
     {
-        use security_framework::passwords::set_generic_password;
-        if set_generic_password(&service_name(dir), &keychain_account(), blob).is_ok() {
+        let secret = match std::str::from_utf8(blob) {
+            Ok(s) => s,
+            // 자격증명은 JSON 문자열이다. 아니면 우리가 아는 모양이 아니니 손대지 않는다.
+            Err(_) => return false,
+        };
+        let (svc, acct) = (service_name(dir), keychain_account());
+        let add = |update: bool| -> bool {
+            let mut c = crate::proc::command("security");
+            c.arg("add-generic-password");
+            if update {
+                c.arg("-U"); // 있으면 갱신
+            }
+            c.args(["-A", "-s", &svc, "-a", &acct, "-w", secret])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false)
+        };
+        if add(true) {
+            return true;
+        }
+        // 갱신이 막히는 경우가 있다 — claude 가 만든 항목은 「claude 만 열 수 있음」으로
+        // 잠겨 있어서다. 그때는 지우고 우리 것으로 새로 만든다. 지우기는 암호 창이 안
+        // 뜨고(실측), 값은 이미 메모리에 들고 있으며, 이마저 실패하면 아래 파일 폴백이
+        // 받아 준다 — 어느 경로로도 로그인을 잃지 않는다.
+        //
+        // ⚠️ 그 폴백이 없는 경우엔 지우지도 않는다. `dir` 이 없으면 쓸 파일 자리가 없어
+        // 「지우기는 됐는데 다시 만들기가 실패」하면 그 계정이 통째로 사라진다.
+        if dir.is_none() {
+            return false;
+        }
+        let _ = crate::proc::command("security")
+            .args(["delete-generic-password", "-s", &svc, "-a", &acct])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if add(false) {
             return true;
         }
     }
@@ -182,7 +244,7 @@ pub(crate) fn write_credentials(dir: Option<&Path>, blob: &[u8]) -> bool {
     true
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn keychain_account() -> String {
     // claude 의 `K7()` — keychain 항목의 account 필드는 로그인 사용자명이다.
     std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
@@ -294,6 +356,10 @@ fn swap_active_in(
     let Some(blob) = read_credentials(vault.as_deref()) else {
         return SwapOutcome::VaultEmpty;
     };
+    // 읽은 값을 그 자리에 그대로 다시 쓴다 — 값은 안 바뀌지만 「누가 열 수 있나」가
+    // 우리 규칙(모두 열림)으로 갈린다. claude 가 만든 금고는 처음 읽을 때 한 번
+    // 암호 창이 뜨는데, 이 한 줄이 그 창을 **계정마다 딱 한 번**으로 끝낸다.
+    write_credentials(vault.as_deref(), &blob);
     let digest = digest_of(&blob);
     if read_stamp_in(active).is_some_and(|(a, d)| a == account_id && d == digest)
         && read_credentials(Some(active)).is_some_and(|cur| digest_of(&cur) == digest)
@@ -399,16 +465,8 @@ mod tests {
     }
     impl Drop for Slots {
         fn drop(&mut self) {
-            // keychain 에 남은 임시 항목을 지운다 — 시험이 사용자 열쇠고리에
-            // 쓰레기를 쌓으면 안 된다.
-            #[cfg(target_os = "macos")]
-            for s in ["vault-a", "vault-b", "active"] {
-                use security_framework::passwords::delete_generic_password;
-                let _ = delete_generic_password(
-                    &service_name(Some(&self.root.join(s))),
-                    &keychain_account(),
-                );
-            }
+            // 지울 열쇠고리 항목이 없다 — 시험은 파일 경로만 탄다(read/write 의
+            // `not(test)` 게이트). 임시 폴더만 치운다.
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }

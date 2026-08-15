@@ -2835,6 +2835,25 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 fn refresh_slot_once(dir: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
+    // ⚠️ 임시 폴더 슬롯으로는 **절대** 띄우지 않는다. 그렇게 띄운 claude 는 그 폴더
+    // 이름으로 **키체인 항목을 새로 만들고**(`/tmp/claude-accounts/_active` →
+    // `Claude Code-credentials-e187bae6`), 그 항목은 claude 소유라 이후 우리가 읽을
+    // 때마다 macOS 가 사용자에게 암호 창을 띄운다. 2026-08-15~16 에 사용자가 반복해서
+    // 겪은 그 창이 정확히 이 경로였다 — 시험을 한 번 돌릴 때마다 하나씩 되살아났다.
+    //
+    // `cfg(test)` 로는 못 막는다. 이 crate 는 kasaterm 의 **의존성**으로 컴파일되므로
+    // kasaterm 시험이 도는 동안에도 여기의 `cfg(test)` 는 꺼져 있다.
+    if !dir.is_empty() {
+        let p = std::path::Path::new(dir);
+        let temp = std::env::temp_dir();
+        if p.starts_with(&temp)
+            || p.starts_with("/tmp")
+            || p.starts_with("/private/tmp")
+            || p.starts_with("/private/var/folders")
+        {
+            return;
+        }
+    }
     static TRIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     {
         let Ok(mut t) = TRIED.get_or_init(Default::default).lock() else {
