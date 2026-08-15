@@ -7014,13 +7014,13 @@ impl App {
                 // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
                 // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
                 // 보여야 한다. `None` 은 「읽는 중」 — 자리는 잡되 숫자는 안 말한다.
-                let wins: Vec<(&'static str, Option<f32>)> = match badge.as_ref() {
+                let wins: Vec<(String, Option<f32>)> = match badge.as_ref() {
                     Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b
                         .windows
                         .iter()
-                        .map(|(l, p)| (*l, (!switching).then_some(*p)))
+                        .map(|(l, p)| (l.clone(), (!switching).then_some(*p)))
                         .collect(),
-                    Some(b) => vec![(b.label, (!switching).then_some(b.pct))],
+                    Some(b) => vec![(b.label.clone(), (!switching).then_some(b.pct))],
                     None => Vec::new(),
                 };
                 if wins.is_empty() {
@@ -9015,10 +9015,11 @@ pub(crate) fn draw_usage_windows(
     const GH: f32 = 5.0;
     let gy = y + (font - GH) / 2.0;
     // `windows` 가 비는 건 옛 스냅샷을 되살렸을 때다 — 그때는 가장 급한 창 하나로.
-    let wins: Vec<(&'static str, f32)> =
-        if b.windows.is_empty() { vec![(b.label, b.pct)] } else { b.windows.clone() };
+    let wins: Vec<(String, f32)> =
+        if b.windows.is_empty() { vec![(b.label.clone(), b.pct)] } else { b.windows.clone() };
     let mut bx = x;
-    for (label, pct) in wins {
+    for (label, pct) in &wins {
+        let (label, pct) = (label.as_str(), *pct);
         let need = g.measure_chrome_text(label, font, false)
             + 6.0
             + GW

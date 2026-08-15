@@ -3872,8 +3872,9 @@ fn is_git_repo(p: &std::path::Path) -> bool {
 #[derive(Clone, PartialEq)]
 pub(crate) struct UsageBadge {
     pub(crate) pct: f32,
-    /// `5h`/`7d` — `socket::usage_pressure` 가 `limits[].group` 에서 고른 라벨.
-    pub(crate) label: &'static str,
+    /// `5h`/`7d`/`7d <모델>` — `socket::usage_pressure` 가 `limits[]` 에서 고른 라벨.
+    /// 모델 스코프 주간 창은 응답의 모델명이 붙어 와서 고정 문자열이 아니다.
+    pub(crate) label: String,
     /// upstream 이 막혀 마지막 성공값을 재사용한 것. 흐리게 그려 "지금 값이 아님"을
     /// 말한다 — 숨기지는 않는다(빈칸은 "한도 여유"로 오해된다).
     pub(crate) stale: bool,
@@ -3886,7 +3887,7 @@ pub(crate) struct UsageBadge {
     /// 모든 한도 창 — `(라벨, %)`, 5시간이 앞. 위의 `pct`/`label` 은 **가장 급한**
     /// 창이라 자동 전환 판정에 쓰고, 이건 화면이 5시간과 주간을 나란히 그리는 데
     /// 쓴다. 둘을 한 필드로 합치면 그 두 물음 중 하나가 반드시 틀린 답을 받는다.
-    pub(crate) windows: Vec<(&'static str, f32)>,
+    pub(crate) windows: Vec<(String, f32)>,
 }
 
 /// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).

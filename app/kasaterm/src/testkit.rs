@@ -5883,12 +5883,12 @@ impl App {
             if let Ok(mut g) = self.claude_usage.lock() {
                 *g = Some(crate::UsageBadge {
                     pct: 95.0,
-                    label: "7d",
+                    label: "7d".to_string(),
                     stale: false,
                     // 떠나온 슬롯의 값 — 활성(acct-3)과 다르니 「읽는 중」이 되어야 한다.
                     account_dir: "/tmp/kasaterm-rig-acct-2".to_string(),
                     resets_at: None,
-                    windows: vec![("5h", 12.0), ("7d", 95.0)],
+                    windows: vec![("5h".to_string(), 12.0), ("7d".to_string(), 95.0)],
                 });
             }
             self.chrome_dirty = true;
@@ -5914,13 +5914,13 @@ impl App {
                 },
             ];
             self.set_claude_account = String::new();
-            let mk = |dir: &str, w: Vec<(&'static str, f32)>, stale: bool| crate::UsageBadge {
+            let mk = |dir: &str, w: Vec<(&str, f32)>, stale: bool| crate::UsageBadge {
                 pct: w.iter().map(|(_, p)| *p).fold(0.0, f32::max),
-                label: "7d",
+                label: "7d".to_string(),
                 stale,
                 account_dir: dir.to_string(),
                 resets_at: None,
-                windows: w,
+                windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
             };
             let base = mk("", vec![("5h", 12.0), ("7d", 95.0)], false);
             if let Ok(mut g) = self.claude_usage.lock() {
@@ -5958,7 +5958,7 @@ impl App {
         if step == 0 && want == "account" {
             let badge = crate::UsageBadge {
                 pct: 95.0,
-                label: "7d",
+                label: "7d".to_string(),
                 stale: false,
                 account_dir: String::new(),
                 resets_at: Some(
@@ -5968,7 +5968,7 @@ impl App {
                         + 3 * 3600
                         + 54 * 60,
                 ),
-                windows: vec![("5h", 12.0), ("7d", 95.0)],
+                windows: vec![("5h".to_string(), 12.0), ("7d".to_string(), 95.0)],
             };
             if let Ok(mut g) = self.claude_usage.lock() {
                 *g = Some(badge.clone());

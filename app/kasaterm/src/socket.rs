@@ -4002,23 +4002,35 @@ pub fn clear_account_cooldowns() {
 /// 이고 실제 압박은 전부 `weekly_all`(95%/25%)이었다 — 화면은 한도가 코앞인데도
 /// 0% 를 보여줬고, 자동 전환만 이 함수로 옳게 판정하고 있었다. 사용자에게 "이 세션이
 /// 얼마나 남았나"와 "언제 막히나"를 갈라 보여줄 이유가 없다: 먼저 닫히는 창이 답이다.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UsagePressure {
     pub pct: f32,
     /// 그 창이 풀리는 시각(epoch 초). 없으면 쿨다운 없이 즉시 후보로 돌아온다.
     pub resets_at: Option<u64>,
     /// 어느 창인가 — 표시용 짧은 라벨. 숫자만 보여주면 5시간 창인지 주간인지 몰라
     /// "0% 인데 왜 막히나"가 된다(그게 정확히 이번 신고였다).
-    pub label: &'static str,
+    pub label: String,
 }
 
 /// `limits[].group`(`session`/`weekly`) → 화면 라벨. `kind` 가 아니라 `group` 을
 /// 보는 것은 `weekly_all`·`weekly_scoped` 가 같은 주간 창의 두 갈래라서다.
-fn usage_window_label(e: &serde_json::Value) -> &'static str {
+///
+/// 다만 두 갈래를 **같은 이름으로 두면 안 된다** — 하단바에 「7d 65% · 7d 74%」 가
+/// 나란히 떠서 어느 쪽이 전체인지 알 수 없었다(2026-08-15 라이브 확인). scoped 쪽은
+/// 특정 모델만 세는 창이고 그 대상은 계정마다 다르므로(실측: 한 계정은 Fable),
+/// 이름을 짐작하지 말고 응답의 `scope.model.display_name` 을 그대로 붙인다.
+fn usage_window_label(e: &serde_json::Value) -> String {
     match e.get("group").and_then(|g| g.as_str()) {
-        Some("session") => "5h",
-        Some("weekly") => "7d",
-        _ => "한도",
+        Some("session") => "5h".to_string(),
+        Some("weekly") => match e
+            .pointer("/scope/model/display_name")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            Some(model) => format!("7d {model}"),
+            None => "7d".to_string(),
+        },
+        _ => "한도".to_string(),
     }
 }
 
@@ -4050,10 +4062,16 @@ pub fn usage_windows(v: &serde_json::Value) -> Vec<UsagePressure> {
         .unwrap_or_default();
     // 5시간이 먼저다(2026-08-15 지시). 지금 쓸 수 있느냐를 정하는 건 그쪽이고,
     // 주간은 이번 주를 어떻게 배분할까에 답한다 — 급한 순서가 아니라 **읽는 순서**다.
-    out.sort_by_key(|p| match p.label {
-        "5h" => 0,
-        "7d" => 1,
-        _ => 2,
+    // 접두로 가르는 것은 scoped 주간 창의 라벨이 「7d Fable」 처럼 뒤에 모델명을
+    // 달기 때문이다 — 같은 접두끼리는 정렬이 안정이라 응답 순서(전체가 먼저)를 지킨다.
+    out.sort_by_key(|p| {
+        if p.label.starts_with("5h") {
+            0
+        } else if p.label.starts_with("7d") {
+            1
+        } else {
+            2
+        }
     });
     if out.is_empty() {
         if let Some(p) = usage_pressure(v) {
@@ -4084,7 +4102,7 @@ pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
     Some(UsagePressure {
         pct: five.get("utilization")?.as_f64()? as f32,
         resets_at: five.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
-        label: "5h",
+        label: "5h".to_string(),
     })
 }
 
@@ -4923,6 +4941,29 @@ mod account_autoswitch_tests {
         let p = usage_pressure(&v).expect("percent 만 있어도 판정된다");
         assert_eq!(p.pct, 42.0);
         assert_eq!(p.label, "한도");
+    }
+
+    /// 라이브에서 그대로 뜬 응답(2026-08-15) — 주간 창이 전체와 모델 스코프 둘이다.
+    /// 라벨을 `group` 만으로 찍으면 하단바에 「7d 65% · 7d 74%」 로 같은 이름이 두 번
+    /// 떠서 어느 쪽이 전체인지 알 수 없었다. 스코프 창은 응답의 모델명을 달아야 하고,
+    /// 그 이름을 짐작하면 안 된다(계정마다 Opus/Fable 로 달랐다).
+    #[test]
+    fn scoped_weekly_window_carries_its_model_name() {
+        let v = serde_json::json!({
+            "limits": [
+                { "group": "session", "kind": "session", "percent": 6 },
+                { "group": "weekly", "kind": "weekly_all", "percent": 65, "scope": null },
+                { "group": "weekly", "kind": "weekly_scoped", "percent": 74,
+                  "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null } },
+            ]
+        });
+        let labels: Vec<String> = usage_windows(&v).into_iter().map(|w| w.label).collect();
+        assert_eq!(labels, ["5h", "7d", "7d Fable"], "전체 주간이 앞, 스코프 창은 모델명");
+        // 모델명이 안 온 스코프 창에 이름을 지어 붙이지 않는다.
+        let v2 = serde_json::json!({
+            "limits": [{ "group": "weekly", "kind": "weekly_scoped", "percent": 74 }]
+        });
+        assert_eq!(usage_windows(&v2)[0].label, "7d");
     }
 
     fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {
