@@ -369,7 +369,10 @@ impl App {
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());
-        self.statusbar.res = sample_process_tree_usage();
+        if let Some((cpu, rss, top)) = sample_process_tree_usage() {
+            self.statusbar.res = Some((cpu, rss));
+            self.statusbar.usage_top = top;
+        }
     }
 
     pub(crate) fn refresh_pane_ultracode(&mut self) {
@@ -3216,22 +3219,32 @@ fn claude_theme_token(v: &str) -> Option<&str> {
 /// kasaterm 자신 + 자식 트리(PTY 셸·claude 들)의 (CPU %, RSS bytes) 합 —
 /// 하단바 리소스 표시(2026-08-15 지시). 터미널의 체감 무게는 앱 하나가 아니라
 /// 그 아래 도는 학생들까지라 트리로 합산한다. ps 한 번이라 5초 폴에 충분히 싸다.
-fn sample_process_tree_usage() -> Option<(f32, u64)> {
-    let out = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pcpu=,rss="])
-        .output()
+fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>)> {
+    // `spawn` + `wait_with_output` 인 것은 **재는 도구가 결과에 끼기 때문**이다.
+    // `ps` 는 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄
+    // 수가 없다. 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
+    let child = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pcpu=,rss=,comm="])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .ok()?;
+    let ps_pid = child.id();
+    let out = child.wait_with_output().ok()?;
     let txt = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<(u32, u32, f32, u64)> = txt
+    let rows: Vec<(u32, u32, f32, u64, String)> = txt
         .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
-            Some((
-                it.next()?.parse().ok()?,
-                it.next()?.parse().ok()?,
-                it.next()?.parse().ok()?,
-                it.next()?.parse().ok()?,
-            ))
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let cpu = it.next()?.parse().ok()?;
+            let rss = it.next()?.parse().ok()?;
+            // comm 은 경로이고 공백을 품을 수 있다(`.../Google Chrome`). 남은 걸
+            // 통째로 이어 붙인 뒤 마지막 조각만 쓴다 — 열 단위로 자르면 공백 있는
+            // 이름에서 파싱이 통째로 어긋난다.
+            let comm: String = it.collect::<Vec<_>>().join(" ");
+            let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+            Some((pid, ppid, cpu, rss, name))
         })
         .collect();
     let me = std::process::id();
@@ -3239,7 +3252,7 @@ fn sample_process_tree_usage() -> Option<(f32, u64)> {
     // ppid 순서가 임의라 고정점까지 돈다 — 트리 깊이만큼(셸→claude→도구, 얕다).
     loop {
         let before = tree.len();
-        for (pid, ppid, _, _) in &rows {
+        for (pid, ppid, _, _, _) in &rows {
             if tree.contains(ppid) {
                 tree.insert(*pid);
             }
@@ -3249,13 +3262,24 @@ fn sample_process_tree_usage() -> Option<(f32, u64)> {
         }
     }
     let (mut cpu, mut rss_kb) = (0.0f32, 0u64);
-    for (pid, _, c, r) in &rows {
-        if tree.contains(pid) {
+    // 행을 버리지 않고 남긴다 — 합계만 알면 "많이 쓴다" 까지만 알고 "무엇이" 는
+    // 모른다(2026-08-15 지시 「사용량도 펼쳐져서 보이게 뭐가 잡아먹는지」). 목록과
+    // 합계가 **같은 표본**에서 나와야 둘이 어긋나 보이지 않는다.
+    let mut top: Vec<(u32, f32, u64, String)> = Vec::new();
+    for (pid, _, c, r, name) in &rows {
+        if tree.contains(pid) && *pid != ps_pid {
             cpu += c;
             rss_kb += r;
+            top.push((*pid, *c, *r, name.clone()));
         }
     }
-    Some((cpu, rss_kb * 1024))
+    // CPU 가 먼저다 — 지금 느린 이유를 찾는 것이 이 목록의 쓸모고, 메모리는 0.1%
+    // 짜리들 사이의 순서를 정하는 데만 쓴다.
+    top.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(b.2.cmp(&a.2))
+    });
+    top.truncate(10);
+    Some((cpu, rss_kb * 1024, top))
 }
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.

@@ -48,6 +48,9 @@ pub(crate) struct StatusbarState {
     /// **파일 IO** 라, 팝오버가 그릴 때마다 부르면 열어 둔 동안 매 프레임
     /// `config.yml` 을 읽게 된다.
     pub(crate) tunnel_host: Option<String>,
+    /// 자원을 많이 쓰는 순으로 상위 몇 개 — (pid, CPU%, RSS KB, 프로세스 이름).
+    /// `res` 와 **같은 표본**이라 둘의 수치가 어긋나지 않는다.
+    pub(crate) usage_top: Vec<(u32, f32, u64, String)>,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어
@@ -57,6 +60,7 @@ pub(crate) struct StatusbarState {
     /// 리소스 사용량 — kasaterm 자신 + 자식 트리(PTY 셸·claude 들) 합.
     /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
     pub(crate) res: Option<(f32, u64)>,
+    pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
     /// 지금 펼쳐진 팝오버와 그것을 연 칩의 자리(앵커). 한 번에 하나만 — 하단바
     /// 칩들이 서로 8px 안에 붙어 있어 둘이 겹치면 어느 쪽 행을 눌렀는지 사람도
     /// 코드도 못 가른다.
@@ -82,6 +86,7 @@ pub(crate) struct StatusbarState {
 pub(crate) enum StatusbarPopover {
     Ports,
     Tunnel,
+    Usage,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.

@@ -7066,6 +7066,7 @@ impl App {
                     let mut rx = tx - 8.0;
                     // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:
                     // 이 줄의 존재 이유는 한도(왼쪽)와 조작(바깥·포트)이다.
+                    self.statusbar.res_rect = None;
                     if let (Some((cpu, rss)), true) = (self.statusbar.res, win_w >= 640.0) {
                         let gb = rss as f32 / (1024.0 * 1024.0 * 1024.0);
                         let label = if gb >= 1.0 {
@@ -7075,17 +7076,30 @@ impl App {
                         };
                         let lw = g.measure_chrome_text(&label, fs, false);
                         rx -= lw + 12.0;
+                        let open = matches!(
+                            self.statusbar.popover,
+                            Some((state::StatusbarPopover::Usage, _))
+                        );
                         g.draw_text(
                             rx,
                             ty,
                             &label,
                             gpu::DrawOpts {
                                 font_size: fs,
-                                color: theme::text_dim(),
+                                color: if open { theme::text() } else { theme::text_dim() },
                                 bold: false,
                                 italic: false,
                             },
                         );
+                        let rr = (rx - 6.0, sy, lw + 12.0, STATUS_HEIGHT);
+                        {
+                            let (hx, hy) = self.cursor_px;
+                            g.hover_pointer |= hx >= rr.0
+                                && hx <= rr.0 + rr.2
+                                && hy >= rr.1
+                                && hy <= rr.1 + rr.3;
+                        }
+                        self.statusbar.res_rect = Some(rr);
                     }
                     // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
                     // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서

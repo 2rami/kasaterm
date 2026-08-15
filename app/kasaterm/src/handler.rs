@@ -2952,7 +2952,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let (cx, cy) = self.cursor_px;
                     // 칩 자신은 통과시킨다 — 여기서 삼키면 팝오버를 연 그 칩으로
                     // 다시 닫을 수가 없다(아래에서 토글이 처리한다).
-                    let on_chip = [self.statusbar.port_rect, self.statusbar.tunnel_rect]
+                    let on_chip = [
+                        self.statusbar.port_rect,
+                        self.statusbar.tunnel_rect,
+                        self.statusbar.res_rect,
+                    ]
                         .into_iter()
                         .flatten()
                         .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
@@ -4246,6 +4250,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(r) = self.statusbar.tunnel_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Tunnel, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                    if let Some(r) = self.statusbar.res_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Usage, r);
                             window.request_redraw();
                             return;
                         }

@@ -44,6 +44,130 @@ pub(crate) fn paint_popover(
             paint_ports_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
+        state::StatusbarPopover::Usage => paint_usage_popover(g, sb, view, anchor, win_w),
+    }
+}
+
+/// 자원 팝오버 — 무엇이 잡아먹는지(2026-08-15 지시 「사용량도 펼쳐져서 보이게 뭐가
+/// 잡아먹는지」). 합계만으로는 "많이 쓴다" 까지만 알고 손 쓸 데를 모른다.
+///
+/// 목록과 제목의 합계는 **같은 표본**이다(`sample_process_tree_usage` 가 둘 다
+/// 낸다). 두 소스를 쓰면 합계 74% 옆에 12% 짜리 목록이 서서 둘 다 못 믿게 된다.
+fn paint_usage_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    view: &crate::info::InfoSnap,
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+) {
+    const UROW: f32 = 30.0;
+    let list: Vec<_> = sb.usage_top.iter().take(8).cloned().collect();
+    let w = 300.0_f32.min(win_w - 16.0);
+    let h = HEAD_H + PAD + (list.len().max(1) as f32) * UROW + PAD;
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+    g.draw_text(
+        x + 12.0,
+        y + 8.0,
+        "사용량",
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    if let Some((cpu, rss)) = sb.res {
+        let gb = rss as f32 / (1024.0 * 1024.0 * 1024.0);
+        let sub = if gb >= 1.0 {
+            format!("합계 {cpu:.0}% · {gb:.1}G")
+        } else {
+            format!("합계 {cpu:.0}% · {:.0}M", gb * 1024.0)
+        };
+        let sw = g.measure_chrome_text(&sub, 10.0, false);
+        g.draw_text(
+            x + w - 12.0 - sw,
+            y + 9.0,
+            &sub,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+    }
+    let top = y + HEAD_H;
+    g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+    if list.is_empty() {
+        g.draw_text(
+            x + 22.0,
+            top + PAD + 8.0,
+            "아직 재는 중…",
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+        );
+        return;
+    }
+    // pid 로 pane 목록을 되짚어 **누구 것인지**를 붙인다. `ps` 의 comm 은 죄다
+    // `node`·`python3` 라 그것만으로는 여덟 줄이 서로 구별되지 않는다.
+    let owner_of = |pid: u32| -> Option<(&str, &str)> {
+        view.panes.iter().find_map(|gp| {
+            gp.rows.iter().find(|r| r.pid == pid).map(|r| {
+                (if r.name.is_empty() { "" } else { r.name.as_str() }, gp.label.as_str())
+            })
+        })
+    };
+    let me = std::process::id();
+    let mut ry = top + PAD;
+    for (pid, cpu, rss_kb, comm) in &list {
+        // 이 앱 자신은 이름을 밝혀 준다 — 목록 맨 위에 `kasaterm` 이 떠 있는데
+        // 그게 나인 줄 모르면 "이게 뭐지" 로 남는다.
+        let (name, owner) = match owner_of(*pid) {
+            Some((n, o)) if !n.is_empty() => (n.to_string(), o.to_string()),
+            Some((_, o)) => (comm.clone(), o.to_string()),
+            None if *pid == me => (comm.clone(), "이 앱".to_string()),
+            None => (comm.clone(), String::new()),
+        };
+        let cpu_s = format!("{cpu:.1}%");
+        let mem_s = match rss_kb {
+            0..=1023 => format!("{rss_kb} KB"),
+            1024..=1_048_575 => format!("{} MB", rss_kb / 1024),
+            _ => format!("{:.1} GB", *rss_kb as f32 / (1024.0 * 1024.0)),
+        };
+        let cw = g.measure_chrome_text(&cpu_s, 11.0, true);
+        let mw = g.measure_chrome_text(&mem_s, 10.0, false);
+        let right = x + w - 12.0;
+        g.draw_text(
+            right - cw,
+            ry + 2.0,
+            &cpu_s,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: true, italic: false },
+        );
+        g.draw_text(
+            right - mw,
+            ry + 16.0,
+            &mem_s,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        let avail = (right - cw.max(mw) - 10.0 - (x + 12.0)).max(0.0);
+        let n = crate::info::fit_text(g, &name, avail, 11.0, false);
+        g.draw_text(
+            x + 12.0,
+            ry + 2.0,
+            &n,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+        );
+        if !owner.is_empty() {
+            let mut ox = x + 12.0;
+            if crate::render::draw_student_face(g, &owner, ox, ry + 15.0, 12.0) {
+                ox += 15.0;
+            }
+            let o = crate::info::fit_text(g, &owner, (avail - (ox - x - 12.0)).max(0.0), 10.0, false);
+            g.draw_text(
+                ox,
+                ry + 17.0,
+                &o,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::text_dim(),
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+        ry += UROW;
     }
 }
 

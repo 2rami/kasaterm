@@ -5856,10 +5856,12 @@ impl App {
         if step == 1 {
             // 앵커는 지난 프레임이 세워 둔 칩 사각형이다 — 그게 없으면 상태줄이
             // 아직 안 그려진 것이고, 그때 억지로 열면 팝오버가 엉뚱한 자리에 뜬다.
-            let (kind, anchor) = if tunnel {
-                (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
-            } else {
-                (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect)
+            let (kind, anchor) = match want.as_str() {
+                "usage" => (crate::state::StatusbarPopover::Usage, self.statusbar.res_rect),
+                w if w.starts_with("tunnel") => {
+                    (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
+                }
+                _ => (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect),
             };
             match anchor {
                 Some(r) => {
@@ -5868,6 +5870,10 @@ impl App {
                 }
                 None => eprintln!("[autoportpop] FAIL — 칩이 아직 안 그려졌다"),
             }
+            return;
+        }
+        if want == "usage" {
+            // 누를 것이 없는 팝오버라 여기서 끝난다.
             return;
         }
         if tunnel {
