@@ -129,6 +129,23 @@ pub(crate) fn overlay_ultracode_comet(rows: &mut [Vec<GridCell>], student: [u8; 
         return;
     }
     let head = (t * COMET_SPEED) % total;
+    // 혜성 꼬리가 덮는 동안만 위보더 왼쪽 대시가 「ultracode」 글자로 변하고,
+    // 지나가면 도로 대시다(2026-08-15 거노 「선 지나갈때 울트라코드 생기고
+    // 선지나가면 없어지게」 — /rename 라벨 위를 빛이 쓸고 가는 게 멋있어서).
+    // 글자 배치를 여기(페인트 앞)서 하면 아래 페인트가 다른 글리프와 똑같이
+    // 빛을 입혀 준다. 대시(─)인 칸만 바꾼다 — @칩·세션 제목 같은 실물 글자를
+    // 지우면 안 되고, 덕분에 꼬리가 떠난 칸은 자동으로 대시로 돌아간다.
+    const LABEL: &[u8] = b"ultracode";
+    const LABEL_AT: usize = 2;
+    if w_top > LABEL_AT + LABEL.len() + 2 {
+        for (i, &ch) in LABEL.iter().enumerate() {
+            let col = LABEL_AT + i;
+            let d = (head - col as f32).rem_euclid(total);
+            if d <= COMET_TAIL && rows[top][col].ch == '─' {
+                rows[top][col].ch = ch as char;
+            }
+        }
+    }
     let purple = [0xbbu8, 0x9a, 0xf7];
     let mix = |b: u8, a: u8, k: f32| (b as f32 + (a as f32 - b as f32) * k).round() as u8;
     let paint = |cell: &mut GridCell, pos: f32| {
@@ -3659,6 +3676,33 @@ mod prompt_box_tests {
                 cell
             })
             .collect()
+    }
+
+    // 혜성 꼬리가 라벨 자리를 덮는 동안 위보더 대시가 「ultracode」로 변하고,
+    // 꼬리가 떠나면 대시로 돌아온다(2026-08-15 거노 요청).
+    #[test]
+    fn comet_reveals_ultracode_label_then_restores_dashes() {
+        let mk = || {
+            vec![
+                row_from(&"─".repeat(60)),
+                row_from(&format!("❯ hi{}", " ".repeat(56))),
+                row_from(&"─".repeat(60)),
+            ]
+        };
+        // head=11: 라벨(col 2..=10) 전부가 꼬리(16칸) 안 — 글자가 드러난다.
+        let mut rows = mk();
+        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 11.0 / COMET_SPEED);
+        let text: String = rows[0][2..11].iter().map(|c| c.ch).collect();
+        assert_eq!(text, "ultracode");
+        // head=80(아래보더): 라벨 자리는 꼬리 밖 — 대시 그대로.
+        let mut rows = mk();
+        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 80.0 / COMET_SPEED);
+        assert!(rows[0][2..11].iter().all(|c| c.ch == '─'), "꼬리 밖에서는 대시여야 한다");
+        // 라벨 자리에 실물 글자(@칩 등)가 있으면 지우지 않는다.
+        let mut rows = mk();
+        rows[0][4].ch = '@';
+        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 11.0 / COMET_SPEED);
+        assert_eq!(rows[0][4].ch, '@');
     }
 
     // 진짜 claude 입력박스: 대시줄 사이 ❯ 마커행 → 감지된다(실제 composed 는
