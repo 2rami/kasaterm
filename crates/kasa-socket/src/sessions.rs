@@ -76,6 +76,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 label,
                 mtime: mtime_secs,
                 cwd: cwd_str.clone(),
+                student: String::new(),
             })
         })
         .collect()
@@ -647,7 +648,7 @@ pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
             let label = parse_session_label(&path, true)?;
             let cwd = jsonl_cwd(&path, 40).unwrap_or_default();
             let s =
-                RecentSession { harness: "claude".into(), id, label, mtime, cwd, preview: String::new() };
+                RecentSession { harness: "claude".into(), id, label, mtime, cwd, preview: String::new(), student: String::new() };
             Some((s, path))
         })
         .take(limit)
@@ -782,7 +783,7 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
         return None;
     }
     let preview = last_exchange(path, "codex");
-    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd, preview })
+    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd, preview, student: String::new() })
 }
 
 /// 최근 codex 세션. 조심할 것이 셋이다.
@@ -1164,7 +1165,7 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
                 .find_map(agy_cwd)
                 .or_else(|| ws.get(&id).cloned())
                 .unwrap_or_default();
-            RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview }
+            RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview, student: String::new() }
         })
         .collect()
 }

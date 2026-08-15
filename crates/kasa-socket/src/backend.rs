@@ -87,6 +87,12 @@ pub struct RecentSession {
     /// (웹뷰가 `preview?: string` 으로 받아 없으면 그 줄을 안 그린다).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preview: String,
+    /// 이 세션을 맡았던 학생 이름. **여기서 채우지 않는다** — 세션→캐릭터 표는
+    /// `kasa-mcp` 가 쥐고 있고 그 crate 가 이 crate 를 의존하므로, 여기서 부르면
+    /// 순환이 된다. 목록을 받은 쪽(app)이 채워 넣는 칸이고, 매핑이 없는 옛 세션은
+    /// 빈 문자열로 남는다 — 짐작해 아무나 붙이면 남의 대화가 남의 얼굴로 보인다.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub student: String,
 }
 
 /// Multi-session (tmux-style tab) state for the session panel. `count`

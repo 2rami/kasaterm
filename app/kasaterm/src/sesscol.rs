@@ -68,15 +68,29 @@ impl App {
         let proxy = self.proxy.clone();
         let scope_all = self.sessions_col.scope_all;
         std::thread::spawn(move || {
-            let next = match (scope_all, cwd.as_deref()) {
+            let mut next = match (scope_all, cwd.as_deref()) {
                 (true, _) | (false, None) => kasa_socket::sessions::recent_all_sessions(40),
                 (false, Some(p)) => kasa_socket::sessions::recent_sessions_here(p, 40),
             };
-            // RecentSession 에 PartialEq 가 없어 (하네스, id, mtime) 로 비교한다 —
-            // 목록이 그대로면 깨우지 않아야 앱이 idle 에 잠든 채로 있는다.
+            // 누가 맡았던 대화인가. 스폰이 이미 남기고 있는 세션→캐릭터 표를 그대로
+            // 읽는다 — claude 를 띄울 때 쓰는 `--session-id` 가 곧 jsonl 파일 이름이라
+            // 목록의 `id` 로 바로 조회된다(실측: 이 레포 222개 중 182개가 이미 매핑돼
+            // 있다). 그래서 기록을 새로 심지 않았다: 새 저장소를 만들면 오늘 이후
+            // 세션만 얼굴이 붙고, 이미 있는 표는 그대로 놀게 된다.
+            //
+            // 목록을 만드는 `kasa-socket` 이 아니라 여기서 채우는 건 순환 때문이다 —
+            // 표를 쥔 `kasa-mcp` 가 `kasa-socket` 을 의존한다.
+            for s in next.iter_mut() {
+                if let Some(n) = kasa_mcp::character::session_character(&s.id) {
+                    s.student = n;
+                }
+            }
+            // RecentSession 에 PartialEq 가 없어 (하네스, id, mtime, 학생) 으로 비교한다 —
+            // 목록이 그대로면 깨우지 않아야 앱이 idle 에 잠든 채로 있는다. 학생까지 보는
+            // 건 방금 시작한 세션의 바인딩이 목록보다 늦게 자리잡는 경우가 있어서다.
             let key = |v: &[kasa_socket::backend::RecentSession]| {
                 v.iter()
-                    .map(|s| (s.harness.clone(), s.id.clone(), s.mtime))
+                    .map(|s| (s.harness.clone(), s.id.clone(), s.mtime, s.student.clone()))
                     .collect::<Vec<_>>()
             };
             let changed = match snap.lock() {
@@ -204,10 +218,10 @@ pub(crate) fn draw_sessions_col(
 ) {
     let x0 = x + 14.0;
     let right = x + w - 12.0;
-    // 행 왼쪽 거터에 하네스 로고가 앉고 텍스트 세 줄은 그만큼 들여쓴다. 머리(칩
-    // 줄)와 빈 목록 안내는 로고가 없어 `x0` 을 그대로 쓴다.
+    // 행 왼쪽 거터에 학생 얼굴이 앉고 텍스트 세 줄은 그만큼 들여쓴다. 머리(칩
+    // 줄)와 빈 목록 안내는 거터가 없어 `x0` 을 그대로 쓴다.
     let icon_x = x + 9.0;
-    let text_x = x + 31.0;
+    let text_x = x + 35.0;
     let avail = (right - text_x).max(0.0);
     sc.row_rects.clear();
     sc.scope_rects.clear();
@@ -321,16 +335,42 @@ pub(crate) fn draw_sessions_col(
         if hov {
             g.rect(r.0, r.1, r.2, r.3, theme::surface_hover());
         }
-        // 하네스는 왼쪽 거터의 로고로 말한다. 텍스트 배지는 칼럼이 좁을 때 정작
-        // 읽어야 할 라벨의 자리를 먹고, 색 바 하나로는 세 하네스를 색으로만 갈라야
-        // 해서 어느 색이 무엇인지 외워야 한다(2026-08-11 지적: 로고가 있어야 한다).
-        g.queue_icon(
-            harness_icon(&s.harness),
-            icon_x,
-            y + (ROW_H - 16.0) / 2.0,
-            16.0,
-            harness_color(&s.harness),
-        );
+        // 거터는 **누가 맡았던 대화인가**를 먼저 말한다(2026-08-15 지시 「세션탭에서도
+        // 학생프사 나오게」). 목록을 훑는 눈이 찾는 게 그거라서다 — 라벨은 무엇을
+        // 시켰는지만 말하고, 같은 일을 여럿이 나눠 한 날에는 그것만으로 안 갈린다.
+        //
+        // 하네스 로고는 없애지 않고 얼굴 오른쪽 아래에 겹친다(2026-08-11 지적으로
+        // 들어온 것이라 뺄 수 없다). 나란히 두면 거터가 두 배가 되고, 이 칼럼은
+        // 좁아서 그 폭이 곧 잘리는 라벨이다.
+        let face = !s.student.is_empty()
+            && sprites::draw_student_face(g, &s.student, icon_x, y + (ROW_H - 22.0) / 2.0, 22.0);
+        if face {
+            // 얼굴 위에 그대로 얹으면 그림과 로고가 섞여 둘 다 안 읽힌다 — 밑에
+            // 판을 깔아 로고만 남긴다.
+            // 얼굴 상자 **안쪽**에 붙인다 — 밖으로 내밀면 그만큼 라벨과의 사이가
+            // 좁아지고, 이 칼럼에서 2px 는 글자 한 칸이다.
+            let bs = 13.0;
+            let bx = icon_x + 22.0 - bs;
+            let by = y + (ROW_H - 22.0) / 2.0 + 22.0 - bs;
+            round_rect(g, bx, by, bs, bs, bs / 2.0, theme::panel_bg());
+            g.queue_icon(
+                harness_icon(&s.harness),
+                bx + 1.5,
+                by + 1.5,
+                bs - 3.0,
+                harness_color(&s.harness),
+            );
+        } else {
+            // 매핑이 없는 옛 세션. 짐작해 아무 얼굴이나 붙이면 남의 대화가 남의
+            // 얼굴로 보이므로 그 자리는 비우고, 하네스 로고만 원래 크기로 둔다.
+            g.queue_icon(
+                harness_icon(&s.harness),
+                icon_x + 3.0,
+                y + (ROW_H - 16.0) / 2.0,
+                16.0,
+                harness_color(&s.harness),
+            );
+        }
 
         // 세 줄 다 `fit_text` 로 미리 자른다. `draw_text_clipped` 는 픽셀에서
         // 끊어 마지막 글자가 반쪽으로 남는데, 목록은 어차피 훑는 화면이라
