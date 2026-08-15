@@ -2147,11 +2147,54 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
     // (별+…/점자/"esc to interrupt")으로 working 행을 찾고, 그 행 첫 글리프
     // (=스피너 자리) col 을 돌려준다. 스피너가 어떤 프레임이든 위치가 고정된다.
     for r in (start..=last).rev() {
-        if let Some(c) = spinner_row_col(&rows[r]) {
+        if let Some(c) = spinner_row_col(&rows[r]).or_else(|| spinner_tip_rescue(rows, r)) {
             if spinner_is_live(rows, r) {
                 return Some((r, c));
             }
         }
+    }
+    None
+}
+
+/// `spinner_row_col` 의 경과시간-괄호 요구에 떨어진 행을, 바로 아래의 `Tip:` 행이
+/// 구제한다. 부팅·재개 직후의 스피너는 `✻ Computing…` 뒤에 괄호가 아예 없이 뜨고
+/// 그 아래 `⎿ Tip: Press …` 만 깔린다(2026-08-15 스샷 실측 — 이 상태에서 학생이
+/// 스피너에 안 붙었다). Tip 행은 살아 있는 스피너 UI 에만 붙으므로, 별+줄임표
+/// 행에 괄호가 없어도 아래 첫 non-blank 행이 Tip 이면 스피너로 본다.
+///
+/// 한국어 본문 오탐(spinner_row_col 주석의 ②를 세운 이유)이 되살아나지 않는 근거:
+/// 본문 줄이 별·점으로 시작하고 줄임표로 끝나면서 **다음 줄이 `⎿ Tip:`** 인 조합은
+/// 인용뿐이고, 인용이면 그 아래 어딘가의 대화 마커를 `spinner_is_live` 가 잡는다.
+pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usize> {
+    let row = &rows[r];
+    let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
+    if first >= 8 {
+        return None;
+    }
+    let g = row[first].ch as u32;
+    if !((0x2720..=0x274F).contains(&g) || g == '·' as u32) {
+        return None;
+    }
+    let rest: String = row[first + 1..]
+        .iter()
+        .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+        .collect();
+    if !rest.contains('…') {
+        return None;
+    }
+    // 스피너와 Tip 사이에 빈 행이 하나 끼는 변형까지만 본다 — 더 멀면 남의 줄이다.
+    for below in rows.iter().skip(r + 1).take(2) {
+        let Some(fi) = below.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
+            continue;
+        };
+        if !matches!(below[fi].ch, '⎿' | '└' | '╰') {
+            return None;
+        }
+        let t: String = below[fi + 1..]
+            .iter()
+            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+            .collect();
+        return t.contains("Tip:").then_some(first);
     }
     None
 }
@@ -3045,6 +3088,33 @@ mod spinner_tests {
     // 태스크 목록 위젯은 스피너 **바로 아래** `⎿  ◻ 항목` 으로 뜬다(2026-08-15
     // 라이브 pane peek 실측). 이 ⎿ 를 대화 마커로 세면 태스크를 쓰는 working
     // pane 전부에서 스피너가 죽어 학생이 걷다 말고 입력창 위에 서 버린다.
+    // ★회귀: 부팅·재개 직후 스피너는 경과시간 괄호 없이 `✻ Computing…` + `⎿ Tip:`
+    // 만 뜬다(2026-08-15 스샷). 괄호 요구에 걸려 학생이 스피너에 안 붙었다 —
+    // Tip 행이 구제 신호다.
+    #[test]
+    fn boot_spinner_without_elapsed_parens_is_rescued_by_tip_row() {
+        let boot = vec![
+            row_from("✻ Computing…"),
+            row_from("  ⎿  Tip: Press Shift+Tab to auto-accept"),
+        ];
+        assert_eq!(find_claude_spinner(&boot), Some((0, 0)));
+        assert!(crate::input::rows_show_working(&boot));
+        // 괄호도 Tip 도 없는 별+줄임표 행은 여전히 본문으로 본다 — 한국어 산문
+        // 오탐(2026-08-12)이 이 요구를 세운 이유였다.
+        let prose = vec![
+            row_from("✻ 설정을 정리했다… 이어서 계정 쪽을 본다"),
+            row_from("  다음 줄 본문"),
+        ];
+        assert_eq!(find_claude_spinner(&prose), None);
+        // 인용된 부팅 화면(아래에 대화 마커)은 spinner_is_live 가 걸러낸다.
+        let quoted_boot = vec![
+            row_from("✻ Computing…"),
+            row_from("  ⎿  Tip: Press Shift+Tab to auto-accept"),
+            row_from("⏺ 이건 지난 턴의 답변 마커"),
+        ];
+        assert_eq!(find_claude_spinner(&quoted_boot), None);
+    }
+
     #[test]
     fn spinner_survives_task_widget_below() {
         let with_widget = vec![
