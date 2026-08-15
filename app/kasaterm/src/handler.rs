@@ -2653,14 +2653,22 @@ impl ApplicationHandler<UserEvent> for App {
                     // Hover feedback: show a resize cursor over a seam or the
                     // sidebar's right edge so they read as draggable.
                     let (cx, cy) = self.cursor_px;
+                    // 클릭 가드와 같은 경계 — 상태줄 위에선 끌 수 없으니 끌린다는
+                    // 커서도 보이면 안 된다.
+                    let bar_top = window.inner_size().height as f32
+                        / self.effective_scale()
+                        - self.status_h();
                     let on_sidebar_edge = self.sidebar_visible
                         && cy > TITLE_HEIGHT
+                        && cy < bar_top
                         && (cx - self.sidebar_w_logical).abs() <= 3.0;
                     let on_tree_edge = self.file_tree.visible
                         && cy > TITLE_HEIGHT
+                        && cy < bar_top
                         && (cx - (self.file_tree_col_x() + self.file_tree.w_logical)).abs() <= 3.0;
                     let on_git_edge = self.git.col_visible
                         && cy > TITLE_HEIGHT
+                        && cy < bar_top
                         && (cx - self.git_col_x()).abs() <= 3.0;
                     // 「최근 커밋」 구역 손잡이 — 세로로 끄는 것이라 ColResize 가 아니다.
                     let on_commits_grip = self.git.col_commits_grip.is_some_and(|gr| {
@@ -3152,6 +3160,13 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // 창 맨 아래 상태줄은 패널보다 위의 전역 UI 다. 패널·경계 가드가
+                    // 아래 경계 없이 이 띠까지 잡으면, 우측 패널이 열린 동안 그 밑의
+                    // 포트·사용량 칩 클릭이 패널에 삼켜져 안 눌린다(2026-08-15
+                    // 「우측패널 있을때 하단바 안눌리더라」). 한 번 재서 가드마다 쓴다.
+                    let bar_top = window.inner_size().height as f32
+                        / self.effective_scale()
+                        - self.status_h();
                     // A press outside the inline new-entry row + its buttons
                     // cancels the pending creation. Falls through so the click
                     // still does its normal job (focus a pane, etc.).
@@ -3422,7 +3437,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // sidebar's right edge below the title strip. Caught
                     // before the sidebar click path so dragging the edge
                     // resizes instead of clicking the last sidebar column.
-                    if self.sidebar_visible && cy > TITLE_HEIGHT {
+                    if self.sidebar_visible && cy > TITLE_HEIGHT && cy < bar_top {
                         let edge = self.sidebar_w_logical;
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.sidebar_resize = Some((cx, self.sidebar_w_logical));
@@ -3432,7 +3447,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // File-tree column resize grip — straddles the tree's right
                     // edge. Caught before the tree click path so dragging the
                     // seam resizes instead of selecting the last row.
-                    if self.file_tree.visible && cy > TITLE_HEIGHT {
+                    if self.file_tree.visible && cy > TITLE_HEIGHT && cy < bar_top {
                         let edge = self.file_tree_col_x() + self.file_tree.w_logical;
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.file_tree.resize = Some((cx, self.file_tree.w_logical));
@@ -3442,7 +3457,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // Git column resize grip — its LEFT edge (the column is
                     // flush-right, so dragging the seam left widens it). Caught
                     // before the column click path.
-                    if self.git.col_visible && cy > TITLE_HEIGHT {
+                    if self.git.col_visible && cy > TITLE_HEIGHT && cy < bar_top {
                         let edge = self.git_col_x();
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.git.col_resize = Some((cx, self.git.col_w_logical));
@@ -3498,6 +3513,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // through to the terminal underneath.
                     if self.file_tree.visible
                         && cy > TITLE_HEIGHT
+                        && cy < bar_top
                         && cx >= self.file_tree_col_x()
                         && cx < self.file_tree_col_x() + self.file_tree.w_logical
                     {
@@ -3668,7 +3684,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // Git column — right-hand chrome. Caught before the cell
                     // grid so a click never falls through to the terminal.
-                    if self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x() {
+                    if self.git.col_visible
+                        && cy > TITLE_HEIGHT
+                        && cy < bar_top
+                        && cx >= self.git_col_x()
+                    {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
