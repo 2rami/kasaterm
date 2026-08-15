@@ -4041,6 +4041,15 @@ pub(crate) enum SettingsCat {
 }
 
 impl SettingsCat {
+    pub(crate) const ALL: [SettingsCat; 6] = [
+        Self::General,
+        Self::Appearance,
+        Self::Shell,
+        Self::Claude,
+        Self::Theme,
+        Self::Feedback,
+    ];
+
     /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
     /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
     /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
@@ -8817,6 +8826,31 @@ mod tests {
         for sock in ["/tmp/kasaterm-1.sock", "/home/u/.config/kasaterm/daemon.sock"] {
             let shell = format!("{}.mcp_port", sock.trim_end_matches(".sock"));
             assert_eq!(mcp_port_file_for(sock), std::path::PathBuf::from(shell));
+        }
+    }
+
+    /// 딥링크의 칸 이름은 Rust 가 만들고 TS 가 알아본다 — 한쪽만 고치면 예외 없이
+    /// 기본 칸으로 떨어지고, 그게 「계정 관리가 캐릭터 화면으로 간다」의 모양이었다.
+    /// 그래서 웹의 목록을 소스에서 직접 읽어 대조한다.
+    #[test]
+    fn every_settings_cat_web_key_exists_in_the_web_nav() {
+        let src = include_str!("../../../web/arona-ui/src/settings/SettingsApp.tsx");
+        let cats = src
+            .split_once("const CATS = [")
+            .expect("CATS 목록을 못 찾았다 — 웹이 이름을 바꿨으면 여기도 같이 봐라")
+            .1
+            .split_once(']')
+            .unwrap()
+            .0;
+        let keys: Vec<&str> = cats
+            .split("key: '")
+            .skip(1)
+            .filter_map(|s| s.split_once('\''))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys.len(), SettingsCat::ALL.len(), "칸 개수가 어긋난다: {keys:?}");
+        for c in SettingsCat::ALL {
+            assert!(keys.contains(&c.web_key()), "웹에 없는 칸 이름: {}", c.web_key());
         }
     }
 }
