@@ -294,11 +294,16 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     .and_then(|id| panes.iter().find(|g| g.pane == id))
                     .map(|g| g.label.clone())
                     .unwrap_or_default(),
+                // pane 경유 조회가 끊긴 서버 — 띄운 pane 이 이미 닫힌 dev 서버가
+                // 대표다 — 는 이름 없는 묶음에 깔렸는데, 정작 분류가 필요한 것이
+                // 그것들이다(2026-08-15 「포트 분류왜안했어」). 프로세스 자신의
+                // 작업 폴더에서 레포를 다시 찾는다.
                 repo: pane
                     .as_deref()
                     .and_then(|id| roots.iter().find(|(p, _)| p == id))
-                    .and_then(|(_, r)| r.file_name())
-                    .map(|s| s.to_string_lossy().into_owned())
+                    .map(|(_, r)| r.clone())
+                    .or_else(|| cwds.get(&pid).and_then(|c| crate::session::git_repo_root(c)))
+                    .and_then(|r| r.file_name().map(|s| s.to_string_lossy().into_owned()))
                     .unwrap_or_default(),
                 pane,
                 site: site_label(port, cwds.get(&pid).map(|p| p.as_path()), sites),
