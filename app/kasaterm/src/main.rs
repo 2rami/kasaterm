@@ -39,6 +39,7 @@ mod info;
 mod mcpcol;
 mod sesscol;
 mod state;
+mod statusbar;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]

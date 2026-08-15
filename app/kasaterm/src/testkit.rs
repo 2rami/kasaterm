@@ -1875,7 +1875,7 @@ impl App {
         };
         let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
         if act == "menu" {
-            self.info.ctx_menu = Some((cx, cy, crate::state::InfoTarget::Proc(pid)));
+            self.info.ctx_menu = Some((cx, cy, pid));
         }
         // hover 든 menu 든 커서는 행 위에 둔다 — menu 도 그 행이 하이라이트된
         // 상태로 찍혀야 어느 프로세스를 겨눈 메뉴인지 보인다.
@@ -5781,5 +5781,86 @@ impl App {
                 !self.info.pane_expanded.contains(&key)
             }
         );
+    }
+}
+
+impl App {
+    /// `KASATERM_AUTOPORTPOP_MS` — 포트 팝오버를 눈으로 확인하는 하네스.
+    ///
+    /// 격리 리그에는 dev 서버도 학생 pane 도 없어 실제 listen 포트가 잡히지
+    /// 않는다. 빈 목록만 찍으면 정작 봐야 할 것(레포 묶음 머리 · 세 갈래 점 색 ·
+    /// 호버 시 ×)이 하나도 안 나오므로, 스냅샷에 가짜 행을 심고 연다. 심는 값은
+    /// 세 상태를 하나씩 덮는다 — 살아 있는 pane 의 것 / 재부모화된 것 / 주인이
+    /// 사라진 것.
+    pub(crate) fn run_pending_autoportpop(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOPORTPOP_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        const AT_MS: [u64; 3] = [0, 700, 1400];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        if step == 0 {
+            let row = |port: u16, pid: u32, repo: &str, site: &str, name: &str, label: &str,
+                       orphan: bool, dead: bool| crate::info::PortRow {
+                port,
+                pid,
+                name: name.to_string(),
+                orphan,
+                pane: Some("%1".to_string()),
+                label: label.to_string(),
+                repo: repo.to_string(),
+                site: site.to_string(),
+                owner_dead: dead,
+            };
+            self.info.view.ports = vec![
+                row(5173, 111, "tmuxify", "kasaterm 웹터미널", "node", "코하루", false, false),
+                row(3000, 222, "tmuxify", "arona-ui", "npm", "코하루", true, false),
+                row(8080, 333, "mission-control", "Mission Control", "next-server", "유우카", true, true),
+                row(4000, 444, "", "(제목 없음)", "python3", "", true, false),
+            ];
+            self.info.view.outside = 22;
+            return;
+        }
+        if step == 1 {
+            // 앵커는 지난 프레임이 세워 둔 칩 사각형이다 — 그게 없으면 상태줄이
+            // 아직 안 그려진 것이고, 그때 억지로 열면 팝오버가 엉뚱한 자리에 뜬다.
+            match self.statusbar.port_rect {
+                Some(r) => {
+                    self.toggle_statusbar_popover(crate::state::StatusbarPopover::Ports, r);
+                    eprintln!("[autoportpop] 열림 anchor={r:?} rows={}", self.info.view.ports.len());
+                }
+                None => eprintln!("[autoportpop] FAIL — 포트 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        // 호버 상태(×·열기 아이콘)는 커서가 행 위에 있어야만 그려진다. 좌표를
+        // 지어내지 않고 **지난 프레임이 실제로 쌓은 히트렉트**에서 가져온다 —
+        // 손으로 계산한 좌표는 틀려도 하네스만 통과시킨다.
+        match self
+            .statusbar
+            .popover_hits
+            .iter()
+            .find(|(h, _)| matches!(h, crate::state::StatusbarHit::OpenPort(_)))
+            .map(|(_, r)| *r)
+        {
+            Some(r) => {
+                self.cursor_px = (r.0 + r.2 - 30.0, r.1 + r.3 / 2.0);
+                self.chrome_dirty = true;
+                eprintln!("[autoportpop] 커서 → {:?}", self.cursor_px);
+            }
+            None => eprintln!("[autoportpop] FAIL — 포트 행 히트렉트가 없다"),
+        }
     }
 }

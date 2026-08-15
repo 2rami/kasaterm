@@ -7083,24 +7083,30 @@ impl App {
                             },
                         );
                     }
-                    // 포트 — 클릭하면 웹터미널(/term)이 브라우저로 열린다.
+                    // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
+                    // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서
+                    // 아무것도 안 알렸다. 개수는 "지금 뭔가 떠 있나" 에 답하고, 눌러
+                    // 펼치면 그 목록이 나온다(2026-08-15 지시 「포트 하단바로」).
                     self.statusbar.port_rect = None;
-                    if let Some(port) = self.statusbar.port.clone() {
-                        let label = format!(":{port}");
+                    {
+                        let n = self.info.view.ports.len();
+                        let label = n.to_string();
+                        let icon = 12.0_f32;
+                        let gap = 4.0_f32;
                         let lw = g.measure_chrome_text(&label, fs, false);
-                        rx -= lw + 14.0;
+                        let seg = icon + gap + lw;
+                        rx -= seg + 12.0;
+                        let open =
+                            matches!(self.statusbar.popover, Some((state::StatusbarPopover::Ports, _)));
+                        let col = if open || n > 0 { theme::text() } else { theme::text_dim() };
+                        g.queue_icon("plug", rx, sy + (STATUS_HEIGHT - icon) / 2.0, icon, col);
                         g.draw_text(
-                            rx,
+                            rx + icon + gap,
                             ty,
                             &label,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: theme::text_dim(),
-                                bold: false,
-                                italic: false,
-                            },
+                            gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
                         );
-                        let pr = (rx - 6.0, sy, lw + 12.0, STATUS_HEIGHT);
+                        let pr = (rx - 6.0, sy, seg + 12.0, STATUS_HEIGHT);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= pr.0
@@ -7111,6 +7117,16 @@ impl App {
                         self.statusbar.port_rect = Some(pr);
                     }
                 }
+                // 팝오버는 상태줄 **뒤**다 — 같은 자리 위로 떠야 하고, 칩을 그린
+                // 뒤라야 앵커 사각형이 이번 프레임 값으로 서 있다.
+                crate::statusbar::paint_popover(
+                    g,
+                    &mut self.statusbar,
+                    &self.info.view,
+                    self.cursor_px,
+                    win_w,
+                    win_h,
+                );
             }
             // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
             // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone

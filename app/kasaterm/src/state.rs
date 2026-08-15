@@ -53,6 +53,41 @@ pub(crate) struct StatusbarState {
     /// 리소스 사용량 — kasaterm 자신 + 자식 트리(PTY 셸·claude 들) 합.
     /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
     pub(crate) res: Option<(f32, u64)>,
+    /// 지금 펼쳐진 팝오버와 그것을 연 칩의 자리(앵커). 한 번에 하나만 — 하단바
+    /// 칩들이 서로 8px 안에 붙어 있어 둘이 겹치면 어느 쪽 행을 눌렀는지 사람도
+    /// 코드도 못 가른다.
+    ///
+    /// 즉시 실행하던 칩(바깥 토글·포트 열기)을 전부 이 안으로 넣은 것은 거노
+    /// 지시다(2026-08-15: 「누르면 좌측 사용량처럼 펼쳐져서 거기서 조작하게
+    /// 하자」). 하단바는 좁아서 라벨이 한 낱말로 줄고, 그러면 누르기 전에 무슨
+    /// 일이 일어날지 알 수가 없다.
+    pub(crate) popover: Option<(StatusbarPopover, (f32, f32, f32, f32))>,
+    /// 팝오버 바깥 사각형 — 바깥을 눌렀을 때 닫으려면 안쪽이 어디까지인지
+    /// 알아야 한다. **닫혀 있으면 `None`** 이고, 렌더가 매 프레임 다시 채운다.
+    pub(crate) popover_rect: Option<(f32, f32, f32, f32)>,
+    /// 팝오버 안 행들의 클릭 자리. 닫히면 비운다 — 남겨 두면 안 보이는 행이
+    /// 눌린다(렌더 카탈로그의 「시저는 픽셀만 자르지 클릭은 안 자른다」와 같은
+    /// 부류인데, 여긴 아예 그려지지도 않은 행이라 더 나쁘다).
+    pub(crate) popover_hits: Vec<(StatusbarHit, (f32, f32, f32, f32))>,
+    /// 팝오버 세로 스크롤(px). 포트가 스무 개면 창 높이를 넘는다.
+    pub(crate) popover_scroll: f32,
+}
+
+/// 하단바에서 펼쳐지는 것들.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StatusbarPopover {
+    Ports,
+}
+
+/// 팝오버 행을 눌렀을 때 할 일.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum StatusbarHit {
+    /// 행 클릭 — `http://localhost:<port>`.
+    OpenPort(u16),
+    /// 호버 시 나오는 ×. 포트는 그 자체로 못 닫으니 쥔 프로세스를 죽인다.
+    KillPort(u32),
+    /// 맨 윗줄 — 이 앱의 웹터미널(`/term`).
+    OpenWebTerm,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
@@ -287,7 +322,6 @@ pub(crate) enum InfoSection {
     /// 닫아서 물러난 pane. 되살릴 게 있을 때만 나타나는 섹션이라, 다른 셋과 달리
     /// 자리를 상시 차지하지 않는다.
     Closed,
-    Ports,
 }
 
 /// Info 탭 머리의 앱 전역 진입점. 우상단 아이콘 클러스터에 흩어져 있던 것들이라
@@ -320,25 +354,6 @@ pub(crate) enum InfoMenuAction {
     ForceKill,
     CopyPid,
     CopyCmd,
-    /// 포트 전용 — 브라우저로 `http://localhost:<port>`.
-    OpenPort,
-    CopyUrl,
-}
-
-/// 우클릭 메뉴가 겨눈 대상. 포트도 결국 프로세스를 죽여서 닫으므로 pid 를 함께
-/// 들고 다닌다 — 메뉴가 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않는다.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InfoTarget {
-    Proc(u32),
-    Port(u16, u32),
-}
-
-impl InfoTarget {
-    pub(crate) fn pid(self) -> u32 {
-        match self {
-            Self::Proc(pid) | Self::Port(_, pid) => pid,
-        }
-    }
 }
 
 /// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `snap` 은 워커 스레드가
@@ -370,9 +385,10 @@ pub(crate) struct InfoState {
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
     pub(crate) closed_collapsed: bool,
-    pub(crate) ports_collapsed: bool,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
-    pub(crate) ctx_menu: Option<(f32, f32, InfoTarget)>,
+    /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
+    /// 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않게 하려는 것이다.
+    pub(crate) ctx_menu: Option<(f32, f32, u32)>,
     /// 직전 프레임에 이 패널이 차지한 영역 `(x, y, w, h)`. 커서가 여기 있는 동안은
     /// 새 스냅샷을 렌더 사본으로 옮기지 않는다 — 항목이 생기거나 사라지면 아래
     /// 행들이 밀려 **누르려던 것이 손가락 밑에서 달아나기** 때문이다. 한 프레임
@@ -405,8 +421,6 @@ pub(crate) struct InfoState {
     /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
     pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
     /// `(포트, 소유 pid, rect)` — 종료가 붙으면서 pid 없이는 행을 다룰 수 없다.
-    pub(crate) port_rects: Vec<(u16, u32, (f32, f32, f32, f32))>,
-    pub(crate) port_kill_rects: Vec<(u16, u32, (f32, f32, f32, f32))>,
     /// pane 그룹 머리 — 클릭하면 그 그룹만 접힌다.
     pub(crate) group_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) proc_rects: Vec<(u32, (f32, f32, f32, f32))>,
@@ -440,7 +454,6 @@ impl Default for InfoState {
             dir_collapsed: false,
             procs_collapsed: false,
             closed_collapsed: false,
-            ports_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),
@@ -448,8 +461,6 @@ impl Default for InfoState {
             closed_kill_rects: Vec::new(),
             last_group_click: None,
             tab_rects: Vec::new(),
-            port_rects: Vec::new(),
-            port_kill_rects: Vec::new(),
             group_rects: Vec::new(),
             proc_rects: Vec::new(),
             kill_rects: Vec::new(),

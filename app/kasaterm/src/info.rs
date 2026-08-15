@@ -110,6 +110,10 @@ pub(crate) struct PortRow {
     /// 된다. 가릴 수 있게 된 것은 귀속을 작업 폴더가 아니라 프로세스 env 로 하기
     /// 때문이다(`panes_of`).
     pub(crate) owner_dead: bool,
+    /// 이 포트를 띄운 pane 의 레포 폴더명. 목록이 열 몇 줄이 되면 포트 번호만으로는
+    /// 어느 프로젝트 것인지 못 가르므로 이걸로 묶어 머리를 세운다. pane 이 레포
+    /// 밖(홈 등)에 있으면 빈 문자열이고, 그때는 묶이지 않은 채 아래로 모인다.
+    pub(crate) repo: String,
 }
 
 /// 한 pane 과 그 셸 아래 프로세스들. pane 을 묶음으로 두는 건 목록이 전 pane
@@ -141,6 +145,10 @@ pub(crate) struct PaneGroup {
 pub(crate) struct InfoSnap {
     pub(crate) panes: Vec<PaneGroup>,
     pub(crate) ports: Vec<PortRow>,
+    /// 어느 pane 에도 귀속되지 않은 listen 포트 수. 목록에 넣지 않는 것들이라
+    /// 개수라도 밝히지 않으면 "내 3000 은 왜 없지" 와 "이 기계가 여는 게 이게
+    /// 전부인가" 를 구별할 수 없다 — 시스템·다른 앱이 쥔 것이 대부분이다.
+    pub(crate) outside: usize,
 }
 
 /// 수집할 pane 하나. GUI 스레드가 채워 워커로 넘긴다 — 워커는 `App` 을 못 보고,
@@ -228,6 +236,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // **작업 폴더가 어느 pane 의 레포 안**인 것까지 끌어온다. 폴더로 거르니
     // ControlCenter·Adobe 같은 시스템 포트는 안 딸려온다.
     let all = listening_ports();
+    let all_n = all.len();
     let mut port_pids: Vec<u32> = all.iter().map(|(_, pid)| *pid).collect();
     port_pids.sort_unstable();
     port_pids.dedup();
@@ -285,6 +294,12 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     .and_then(|id| panes.iter().find(|g| g.pane == id))
                     .map(|g| g.label.clone())
                     .unwrap_or_default(),
+                repo: pane
+                    .as_deref()
+                    .and_then(|id| roots.iter().find(|(p, _)| p == id))
+                    .and_then(|(_, r)| r.file_name())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 pane,
                 site: site_label(port, cwds.get(&pid).map(|p| p.as_path()), sites),
                 owner_dead,
@@ -308,7 +323,8 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // 제목은 이번 스냅샷엔 못 싣는다(물어보는 데 시간이 걸린다) — 캐시에 쌓아
     // 다음 갱신부터 붙인다.
     probe_sites(&ports.iter().map(|p| (p.port, p.pid)).collect::<Vec<_>>(), sites);
-    InfoSnap { panes, ports }
+    let outside = all_n.saturating_sub(ports.len());
+    InfoSnap { panes, ports, outside }
 }
 
 /// `%17` → 17. pane 목록을 사람이 세는 순서로 정렬하려고 숫자만 뽑는다 —
@@ -1135,9 +1151,13 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Redraw);
             });
         }
-        if self.info.tab != state::SideTab::Info || !self.git.col_visible {
-            return;
-        }
+        // 예전엔 Info 탭이 아니면 여기서 통째로 돌아섰다. 지금은 열린 포트
+        // **개수가 상태줄 칩에도** 뜨므로, 패널을 한 번도 안 열어도 세기는 해야
+        // 한다 — 안 그러면 칩이 영영 0 으로 앉아 거짓말을 한다. 대신 주기를
+        // 늦춘다(수집이 `ps` + `lsof` fork 라 상시 1.5초는 비싸고, 칩의 숫자는
+        // 초 단위로 맞을 이유가 없다).
+        let watching = (self.info.tab == state::SideTab::Info && self.git.col_visible)
+            || self.statusbar.popover.is_some();
         // 워커가 새 스냅샷을 올렸을 때만 렌더용 사본으로 옮긴다. 프레임마다
         // 잠그고 통째로 clone 하면 프로세스 수만큼의 String 할당이 60fps 로
         // 도는데, 정작 내용은 1.5초에 한 번 바뀐다.
@@ -1175,14 +1195,19 @@ impl App {
         }
         // 디렉터리 섹션은 파일트리와 같은 앵커를 보여준다 — 사이드바를 닫아둬도
         // 맞아야 하므로 file_tree.root 를 읽지 않고 여기서 직접 판정한다.
-        self.info.root = self.info_root();
+        // 그 섹션이 화면에 없을 때까지 매 프레임 되짚을 이유는 없다.
+        if watching {
+            self.info.root = self.info_root();
+        }
         if self.info.busy.load(Relaxed) {
             return;
         }
         let fresh = self
             .info
             .last_refresh
-            .is_some_and(|t: Instant| t.elapsed() < std::time::Duration::from_millis(1500));
+            .is_some_and(|t: Instant| {
+                t.elapsed() < std::time::Duration::from_millis(if watching { 1500 } else { 15000 })
+            });
         if fresh {
             return;
         }
@@ -1357,11 +1382,9 @@ impl App {
     pub(crate) fn run_info_menu_action(
         &mut self,
         action: state::InfoMenuAction,
-        target: state::InfoTarget,
+        pid: u32,
     ) {
         use state::InfoMenuAction as A;
-        use state::InfoTarget as T;
-        let pid = target.pid();
         match action {
             A::Terminate => self.kill_process(pid, false),
             A::ForceKill => self.kill_process(pid, true),
@@ -1383,16 +1406,6 @@ impl App {
                     });
                 if let Some(cmd) = cmd {
                     self.copy_to_clipboard(cmd, "명령 복사됨");
-                }
-            }
-            A::OpenPort => {
-                if let T::Port(port, _) = target {
-                    self.open_localhost(port);
-                }
-            }
-            A::CopyUrl => {
-                if let T::Port(port, _) = target {
-                    self.copy_to_clipboard(format!("http://localhost:{port}"), "URL 복사됨");
                 }
             }
         }
@@ -1684,8 +1697,6 @@ pub(crate) fn draw_info_col(
     // `pump_info` 가 이미 갱신될 때만 사본을 만들어 뒀다. `take` 는 빈 값과
     // 맞바꾸는 것뿐이라 할당이 없고, 끝에서 그대로 돌려놓는다.
     let snap = std::mem::take(&mut info.view);
-    info.port_rects.clear();
-    info.port_kill_rects.clear();
     info.group_rects.clear();
     info.proc_rects.clear();
     info.closed_rects.clear();
@@ -1745,13 +1756,7 @@ pub(crate) fn draw_info_col(
     } else {
         SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
-    let ports_h = match (info.ports_collapsed, snap.ports.len()) {
-        (true, _) => 0.0,
-        (false, 0) => EMPTY_H,
-        (false, n) => n as f32 * PORT_H,
-    };
-    let content =
-        HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + ports_h + 14.0;
+    let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + 14.0;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
     // 본문 전체를 시저로 가둔다. 지금까지는 섹션·행마다 `y + H > top && y < bottom`
     // 으로 걸렀는데, 그건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로
@@ -1970,27 +1975,6 @@ pub(crate) fn draw_info_col(
                 y += ROW_H;
             }
         }
-        y += SEC_GAP;
-    }
-
-    // ── 포트 ──
-    let r = draw_section(
-        g, cursor, "포트", Some(snap.ports.len()), None, info.ports_collapsed, x, w, y, bottom, top,
-    );
-    info.sec_rects.push((state::InfoSection::Ports, r));
-    y += SEC_H;
-    if !info.ports_collapsed {
-        if snap.ports.is_empty() {
-            draw_empty(g, x0, y, top, bottom, "listen 중인 포트 없음");
-            y += EMPTY_H;
-        }
-        for p in &snap.ports {
-            if y + PORT_H > top && y < bottom {
-                draw_port_row(g, cursor, info, p, x, w, x0, right, y);
-            }
-            info.port_rects.push((p.port, p.pid, (x, y, w, PORT_H)));
-            y += PORT_H;
-        }
     }
 
     // ── 히트렉트를 본문과 교집합 ──
@@ -2017,8 +2001,6 @@ pub(crate) fn draw_info_col(
     clip_rects!(info.kill_rects, 1);
     clip_rects!(info.closed_rects, 1);
     clip_rects!(info.closed_kill_rects, 1);
-    clip_rects!(info.port_rects, 2);
-    clip_rects!(info.port_kill_rects, 2);
     info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
     // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
     // 자르면 멀쩡한 버튼이 사라진다.
@@ -2602,10 +2584,10 @@ fn draw_proc_row(
 /// 아랫줄을 붙였고, 소유 pane 을 밝히는 건 목록이 전 pane 공유이기 때문이다.
 /// 행 전체가 클릭 대상이라 `http://localhost:<port>` 로 열린다.
 #[allow(clippy::too_many_arguments)]
-fn draw_port_row(
+pub(crate) fn draw_port_row(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
-    info: &mut state::InfoState,
+    hits: &mut Vec<(state::StatusbarHit, (f32, f32, f32, f32))>,
     p: &PortRow,
     x: f32,
     w: f32,
@@ -2660,7 +2642,7 @@ fn draw_port_row(
             10.0,
             if bhov { theme::danger() } else { theme::text_mute() },
         );
-        info.port_kill_rects.push((p.port, p.pid, br));
+        hits.push((state::StatusbarHit::KillPort(p.pid), br));
         rx = br.0 - 8.0;
         g.queue_icon("external-link", rx - 12.0, y + 5.0, 12.0, theme::text_dim());
         rx -= 18.0;
@@ -2736,27 +2718,15 @@ fn draw_row_menu(
     bottom: f32,
 ) {
     info.ctx_menu_rects.clear();
-    let Some((rawx, rawy, target)) = info.ctx_menu else { return };
+    let Some((rawx, rawy, _)) = info.ctx_menu else { return };
     use state::InfoMenuAction as A;
-    use state::InfoTarget as T;
     // (액션, 라벨, 위험, 앞에 구분선)
-    let items: Vec<(A, &str, bool, bool)> = match target {
-        T::Proc(_) => vec![
-            (A::Terminate, "종료 (SIGTERM)", false, false),
-            (A::ForceKill, "강제 종료 (SIGKILL)", true, false),
-            (A::CopyPid, "PID 복사", false, true),
-            (A::CopyCmd, "명령 복사", false, false),
-        ],
-        // 포트는 그 자체로 죽일 수 없다 — 쥔 프로세스를 죽이는 것이 곧 포트를
-        // 닫는 것이라, 같은 메뉴 안에서 열기와 닫기가 이어지게 둔다.
-        T::Port(..) => vec![
-            (A::OpenPort, "브라우저로 열기", false, false),
-            (A::CopyUrl, "URL 복사", false, false),
-            (A::Terminate, "포트 닫기 (SIGTERM)", false, true),
-            (A::ForceKill, "강제 종료 (SIGKILL)", true, false),
-            (A::CopyPid, "PID 복사", false, true),
-        ],
-    };
+    let items: Vec<(A, &str, bool, bool)> = vec![
+        (A::Terminate, "종료 (SIGTERM)", false, false),
+        (A::ForceKill, "강제 종료 (SIGKILL)", true, false),
+        (A::CopyPid, "PID 복사", false, true),
+        (A::CopyCmd, "명령 복사", false, false),
+    ];
     let mih = 28.0_f32;
     let sep = 7.0_f32;
     let pad = 6.0_f32;

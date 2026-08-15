@@ -731,13 +731,18 @@ impl App {
     /// https 를 시도하지 않는 건 로컬 dev 서버가 거의 평문이기 때문이다(TLS 인
     /// 서버는 브라우저가 리다이렉트해준다).
     pub(crate) fn open_localhost(&self, port: u16) {
-        let url = format!("http://localhost:{port}");
+        self.open_url(&format!("http://localhost:{port}"));
+    }
+
+    /// 기본 브라우저로 연다. 세 갈래 분기가 여기 한 곳에만 있어야 새 진입점을
+    /// 더할 때 macOS 전용 `open` 이 다시 박히지 않는다.
+    pub(crate) fn open_url(&self, url: &str) {
         #[cfg(target_os = "macos")]
-        let _ = crate::proc::command("open").arg(&url).spawn();
+        let _ = crate::proc::command("open").arg(url).spawn();
         #[cfg(target_os = "windows")]
-        let _ = crate::proc::command("cmd").args(["/C", "start", "", &url]).spawn();
+        let _ = crate::proc::command("cmd").args(["/C", "start", "", url]).spawn();
         #[cfg(all(unix, not(target_os = "macos")))]
-        let _ = crate::proc::command("xdg-open").arg(&url).spawn();
+        let _ = crate::proc::command("xdg-open").arg(url).spawn();
     }
 
     /// Expand/collapse a file's inline unified diff in the git panel. The diff

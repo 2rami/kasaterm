@@ -1299,6 +1299,23 @@ impl App {
                 self.wheel_accum_y, self.cursor_px.0, self.cursor_px.1
             );
         }
+        // 상태줄 팝오버 위 — 목록이 길면 스크롤한다. 셀 단위 양자화 전에 가로채는
+        // 건 이미지 pane 과 같은 이유로, 픽셀 스크롤이 끊기지 않게 하려는 것이다.
+        if let Some((px, py, pw, ph)) = self.statusbar.popover_rect {
+            let (cx, cy) = self.cursor_px;
+            if cx >= px && cx <= px + pw && cy >= py && cy <= py + ph {
+                let px_dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                self.statusbar.popover_scroll = (self.statusbar.popover_scroll - px_dy).max(0.0);
+                self.chrome_dirty = true;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
         // Image pane: 트랙패드 두손가락(PixelDelta)=pan, 마우스 휠(LineDelta)=
         // Preview 식 zoom. wheel_step 양자화 *전* raw delta 로 처리해야 pan 이 안
         // 끊긴다. 커서가 이미지 pane 위일 때만 가로채고, 아니면 아래로 흘려보낸다.

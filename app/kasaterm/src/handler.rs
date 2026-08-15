@@ -2072,6 +2072,14 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
+                // 팝오버 행 하이라이트·삭제 버튼은 픽셀 단위라 셀 판정으로는 못
+                // 따라온다 — 열려 있는 동안은 움직일 때마다 다시 그린다.
+                if self.statusbar.popover.is_some() {
+                    self.chrome_dirty = true;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
                 // A deferred titlebar press turns into a window move once the
                 // pointer travels past the threshold (so a stationary press
                 // stays a click and the double-click path keeps working).
@@ -2786,14 +2794,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .proc_rects
                         .iter()
                         .find(|(_, r)| inside(r))
-                        .map(|(p, _)| state::InfoTarget::Proc(*p))
-                        .or_else(|| {
-                            self.info
-                                .port_rects
-                                .iter()
-                                .find(|(_, _, r)| inside(r))
-                                .map(|(port, pid, _)| state::InfoTarget::Port(*port, *pid))
-                        });
+                        .map(|(p, _)| *p);
                     if let Some(target) = target {
                         self.info.ctx_menu = Some((cx, cy, target));
                         self.chrome_dirty = true;
@@ -2944,6 +2945,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // File-tree context menu open: a press resolves a menu item or
                 // dismisses the menu. Above every other hit-test so the overlay
                 // wins the click.
+                // 상태줄 팝오버는 창 어디로든 뻗어 있어(상태줄 밴드 밖 위쪽) 밴드
+                // 판정 안에 두면 본문 위에 뜬 행이 그 밑의 pane 에 눌린다. 열려
+                // 있는 동안은 모든 좌클릭을 여기서 먼저 본다.
+                if matches!(state, ElementState::Pressed) && self.statusbar.popover.is_some() {
+                    let (cx, cy) = self.cursor_px;
+                    // 칩 자신은 통과시킨다 — 여기서 삼키면 팝오버를 연 그 칩으로
+                    // 다시 닫을 수가 없다(아래에서 토글이 처리한다).
+                    let on_chip = [self.statusbar.port_rect, self.statusbar.tunnel_rect]
+                        .into_iter()
+                        .flatten()
+                        .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
+                    if !on_chip && self.statusbar_popover_click(cx, cy) {
+                        window.request_redraw();
+                        return;
+                    }
+                }
                 if matches!(state, ElementState::Pressed) && self.file_tree.ctx_menu.is_some() {
                     let (cx, cy) = self.cursor_px;
                     let action = self
@@ -3776,7 +3793,6 @@ impl ApplicationHandler<UserEvent> for App {
                                     state::InfoSection::Dir => &mut self.info.dir_collapsed,
                                     state::InfoSection::Procs => &mut self.info.procs_collapsed,
                                     state::InfoSection::Closed => &mut self.info.closed_collapsed,
-                                    state::InfoSection::Ports => &mut self.info.ports_collapsed,
                                 };
                                 *flag = !*flag;
                                 window.request_redraw();
@@ -3888,32 +3904,6 @@ impl ApplicationHandler<UserEvent> for App {
                             {
                                 self.kill_process(pid, false);
                                 window.request_redraw();
-                                return;
-                            }
-                            // 포트의 종료(×)도 결국 쥔 프로세스를 죽이는 것 —
-                            // 열기(행 클릭)보다 먼저 봐야 행에 삼켜지지 않는다.
-                            if let Some(pid) = self
-                                .info
-                                .port_kill_rects
-                                .iter()
-                                .find(|(_, _, r)| inside(r))
-                                .map(|(_, pid, _)| *pid)
-                            {
-                                self.kill_process(pid, false);
-                                window.request_redraw();
-                                return;
-                            }
-                            // 포트 행 → 브라우저로 localhost 열기. dev 서버를 띄운
-                            // 직후 "몇 번 포트였지"를 확인하러 스크롤백을 뒤지는
-                            // 일이 이 클릭 하나로 끝난다.
-                            if let Some(port) = self
-                                .info
-                                .port_rects
-                                .iter()
-                                .find(|(_, _, r)| inside(r))
-                                .map(|(p, _, _)| *p)
-                            {
-                                self.open_localhost(port);
                                 return;
                             }
                         }
@@ -4244,15 +4234,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // 바깥주소(터널) 칩 — 전역이라 pane id 가 없다. 결과는 낙관
                     // 반영하고(끄기 TERM 은 소멸이 한 박자 늦어 즉시 pgrep 하면
                     // 아직 살아 보인다) 5초 뒤 폴이 확정한다.
-                    // 포트 라벨 — 웹터미널을 브라우저로 연다(폰 미러 입구를
-                    // 하단바에서 바로, 2026-08-15 지시).
-                    if self.statusbar.port_rect.is_some_and(|r| sb_hit(&r)) {
-                        if let Some(port) = self.statusbar.port.clone() {
-                            let _ = std::process::Command::new("open")
-                                .arg(format!("http://127.0.0.1:{port}/term"))
-                                .spawn();
+                    // 포트 칩 — 목록을 펼친다. 팝오버가 열려 있으면 그 안쪽 클릭이
+                    // 먼저다(칩보다 위에 떠 있으므로).
+                    if let Some(r) = self.statusbar.port_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Ports, r);
+                            window.request_redraw();
+                            return;
                         }
-                        return;
                     }
                     if self.statusbar.tunnel_rect.is_some_and(|r| sb_hit(&r)) {
                         let want = !self.statusbar.tunnel_on.unwrap_or(false);
@@ -5827,6 +5816,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autostudent(event_loop);
         self.run_pending_autoboxlabel();
         self.run_pending_autoimgtip();
+        self.run_pending_autoportpop();
         self.run_pending_autoroomsplit();
         self.run_pending_autoforeignsplit();
         self.run_pending_autofacehover(event_loop);
