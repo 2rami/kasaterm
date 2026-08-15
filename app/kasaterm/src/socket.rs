@@ -4013,6 +4013,47 @@ fn usage_window_label(e: &serde_json::Value) -> &'static str {
     }
 }
 
+/// 한도 창을 **전부** 돌려준다 — 5시간이 앞, 그 뒤에 나머지(주간 등).
+///
+/// `usage_pressure` 와 나란히 두는 이유: 그쪽은 「가장 급한 창 하나」를 골라야 하고
+/// (자동 계정 전환이 그 판정을 쓴다), 화면은 두 창을 **나란히** 보여야 한다. 하나로
+/// 합치려다 `usage_pressure` 의 「최고 창을 고른다」를 흔들면, 5시간이 0%인데 주간이
+/// 95%인 상황에서 하단바가 0% 를 띄운다 — 2026-08-05 에 실제로 그랬고 거노가
+/// 「3계정 다 소진이야? info엔 다 0퍼로뜨는데」로 발견했다.
+pub fn usage_windows(v: &serde_json::Value) -> Vec<UsagePressure> {
+    let mut out: Vec<UsagePressure> = v
+        .get("limits")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    Some(UsagePressure {
+                        pct: e.get("percent").and_then(|p| p.as_f64())? as f32,
+                        resets_at: e
+                            .get("resets_at")
+                            .and_then(|s| s.as_str())
+                            .and_then(rfc3339_epoch),
+                        label: usage_window_label(e),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // 5시간이 먼저다(2026-08-15 지시). 지금 쓸 수 있느냐를 정하는 건 그쪽이고,
+    // 주간은 이번 주를 어떻게 배분할까에 답한다 — 급한 순서가 아니라 **읽는 순서**다.
+    out.sort_by_key(|p| match p.label {
+        "5h" => 0,
+        "7d" => 1,
+        _ => 2,
+    });
+    if out.is_empty() {
+        if let Some(p) = usage_pressure(v) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
     let top = v.get("limits").and_then(|l| l.as_array()).and_then(|arr| {
         arr.iter()

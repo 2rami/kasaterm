@@ -3875,6 +3875,10 @@ pub(crate) struct UsageBadge {
     /// 그 창이 풀리는 시각(epoch 초). 화면은 이걸 **남은 시간**으로 바꿔 그린다 —
     /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(거노 2026-08-07).
     pub(crate) resets_at: Option<u64>,
+    /// 모든 한도 창 — `(라벨, %)`, 5시간이 앞. 위의 `pct`/`label` 은 **가장 급한**
+    /// 창이라 자동 전환 판정에 쓰고, 이건 화면이 5시간과 주간을 나란히 그리는 데
+    /// 쓴다. 둘을 한 필드로 합치면 그 두 물음 중 하나가 반드시 틀린 답을 받는다.
+    pub(crate) windows: Vec<(&'static str, f32)>,
 }
 
 /// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).
@@ -4034,6 +4038,22 @@ pub(crate) enum SettingsCat {
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
     /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
     Feedback,
+}
+
+impl SettingsCat {
+    /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
+    /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
+    /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
+    pub(crate) fn web_key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Appearance => "appearance",
+            Self::Shell => "shell",
+            Self::Claude => "claude",
+            Self::Theme => "theme",
+            Self::Feedback => "feedback",
+        }
+    }
 }
 
 /// The two free-text fields in the settings form. Tracks which one (if any)

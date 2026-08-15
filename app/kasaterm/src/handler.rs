@@ -1366,6 +1366,10 @@ impl ApplicationHandler<UserEvent> for App {
                             stale: *stale,
                             account_dir: dir.clone(),
                             resets_at: p.resets_at,
+                            windows: socket::usage_windows(u)
+                                .into_iter()
+                                .map(|w| (w.label, w.pct))
+                                .collect(),
                         })
                     });
                     // 아래 계정별 표에서 다시 쓴다 — 활성 계정을 두 번 조회하지 않게.
@@ -1445,6 +1449,10 @@ impl ApplicationHandler<UserEvent> for App {
                                         stale,
                                         account_dir: dir,
                                         resets_at: p.resets_at,
+                                        windows: socket::usage_windows(&u)
+                                            .into_iter()
+                                            .map(|w| (w.label, w.pct))
+                                            .collect(),
                                     },
                                 );
                             }

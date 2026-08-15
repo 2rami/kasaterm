@@ -6936,59 +6936,121 @@ impl App {
                 // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
                 // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
                 // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
-                const GW: f32 = 48.0;
+                // 한도 — **5시간이 먼저고 주간이 그 옆**이다(2026-08-15 지시
+                // 「5시간 한도 먼저 보여주고 7일 한도는 눌렀을 때만」).
+                //
+                // 「눌렀을 때만」을 곧이곧대로 주간을 **숨기는** 것으로 읽으면 2026-08-05
+                // 사고가 되돌아온다: 그때 5시간이 0%, 주간이 95% 였는데 하단바가 0% 를
+                // 띄워 「3계정 다 소진이야? info엔 다 0퍼로뜨는데」가 됐다. 그래서 둘을
+                // 나란히 두고, 폭이 모자랄 때만 급한 쪽을 남긴다 — 요청도 지켜지고
+                // 그 사고도 안 돌아온다(거노 확정: 「둘 다 나란히」).
+                //
+                // 게이지는 Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
+                // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
+                // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
+                const GW: f32 = 40.0;
                 const GH: f32 = 6.0;
-                if win_w >= 500.0 {
-                    let gy = sy + (status_h - GH) / 2.0;
-                    // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15% 짜리
-                    // 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서 그냥 얼룩이
-                    // 된다(첫 캡처에서 실제로 그랬다). 트랙은 은은하게, 채움은 확실하게.
-                    g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
-                    if let Some(b) = badge.as_ref() {
-                        let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(2.0);
-                        g.rect(x, gy, w, GH, theme::with_alpha(theme::text(), 210));
+                let gy = sy + (status_h - GH) / 2.0;
+                let pct_col = |p: f32| {
+                    if p >= 90.0 {
+                        theme::danger()
+                    } else if p >= 70.0 {
+                        theme::syn_number()
+                    } else {
+                        theme::text()
                     }
-                    x += GW + 8.0;
-                }
-
-                // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
-                // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
-                let (head, col) = match badge.as_ref() {
-                    Some(b) => {
-                        let mut s = if b.stale {
-                            format!("~{:.0}%", b.pct)
-                        } else {
-                            format!("{:.0}%", b.pct)
-                        };
-                        // 폭이 넉넉할 때만 창 이름(`5h`/`7d`)과 리셋까지 적는다.
-                        if win_w >= 900.0 {
-                            s = format!("{} {}", b.label, s);
-                            if let Some(l) = crate::resets_in_label(b.resets_at) {
-                                s = format!("{s} · {l}");
-                            }
-                        } else if win_w >= 720.0 {
-                            if let Some(l) = crate::resets_in_label(b.resets_at) {
-                                s = format!("{s} · {l}");
-                            }
-                        }
-                        let c = if b.pct >= 90.0 {
-                            theme::danger()
-                        } else if b.pct >= 70.0 {
-                            theme::syn_number()
-                        } else {
-                            theme::text()
-                        };
-                        (s, c)
-                    }
-                    None => ("—".to_string(), theme::text_dim()),
                 };
-                g.draw_text(
-                    x,
-                    ty,
-                    &head,
-                    gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
-                );
-                x += g.measure_chrome_text(head.as_str(), fs, true) + 10.0;
+                // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
+                // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
+                // 보여야 한다.
+                let wins: Vec<(&'static str, f32)> = match badge.as_ref() {
+                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b.windows.clone(),
+                    Some(b) => vec![(b.label, b.pct)],
+                    None => Vec::new(),
+                };
+                if wins.is_empty() {
+                    // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
+                    // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
+                    g.draw_text(
+                        x,
+                        ty,
+                        "—",
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    x += g.measure_chrome_text("—", fs, true) + 10.0;
+                }
+                let stale = badge.as_ref().is_some_and(|b| b.stale);
+                for (i, (label, pct)) in wins.iter().enumerate() {
+                    if i > 0 {
+                        x += 12.0;
+                    }
+                    // 창 이름은 둘을 나란히 둘 때 **반드시** 있어야 한다 — 없으면
+                    // 12% 와 95% 중 어느 쪽이 5시간인지 알 길이 없다. 하나만 그릴
+                    // 때는 좁은 창이라 접는다(그때는 급한 쪽이라는 것만 알면 된다).
+                    if wins.len() > 1 || win_w >= 900.0 {
+                        g.draw_text(
+                            x,
+                            ty,
+                            label,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        x += g.measure_chrome_text(label, fs, true) + 5.0;
+                    }
+                    if win_w >= 500.0 {
+                        // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15%
+                        // 짜리 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서
+                        // 그냥 얼룩이 된다(첫 캡처에서 실제로 그랬다).
+                        g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
+                        let fw = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(2.0);
+                        g.rect(x, gy, fw, GH, theme::with_alpha(theme::text(), 210));
+                        x += GW + 6.0;
+                    }
+                    let s =
+                        if stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
+                    g.draw_text(
+                        x,
+                        ty,
+                        &s,
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: pct_col(*pct),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    x += g.measure_chrome_text(&s, fs, true);
+                }
+                // 언제 풀리는지는 5시간 창에 대해서만, 그것도 아주 넓을 때만. 퍼센트가
+                // 같아도 12분 뒤면 기다리면 되고 3시간 뒤면 지금 옮겨야 한다 — 다만
+                // 두 창을 나란히 두고 나면 자리가 없어서, 좁아지면 팝오버로 물러난다.
+                if let (Some(b), true) = (badge.as_ref(), win_w >= 1100.0) {
+                    if let Some(l) = crate::resets_in_label(b.resets_at) {
+                        let s = format!("· {l}");
+                        g.draw_text(
+                            x + 8.0,
+                            ty,
+                            &s,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        x += 8.0 + g.measure_chrome_text(&s, fs, true);
+                    }
+                }
+                x += 10.0;
 
                 // 계정 이름은 가장 먼저 버린다 — 한도 숫자가 이 줄의 존재 이유고,
                 // 이름은 드롭다운을 열면 어차피 맨 위에 있다.
@@ -7205,17 +7267,17 @@ impl App {
                 let claude_badge = usage_of(&self.set_claude_account)
                     .or_else(|| self.claude_usage.lock().ok().and_then(|v| v.clone()));
 
-                // `62% used 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
+                // `62% 씀 · 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
                 // 를 먼저 읽는데, 정작 판단을 가르는 건 숫자다.
                 let usage_text = |b: &crate::UsageBadge| -> String {
                     let head = if b.stale {
-                        format!("~{:.0}% used", b.pct)
+                        format!("~{:.0}% 씀", b.pct)
                     } else {
-                        format!("{:.0}% used", b.pct)
+                        format!("{:.0}% 씀", b.pct)
                     };
                     format!("{head} {}", b.label)
                 };
-                // `Resets in 3h 54m`. 90% 라도 12분 뒤면 기다리면 되고 3시간 뒤면 지금
+                // `3시간 54분 뒤 초기화`. 90% 라도 12분 뒤면 기다리면 되고 3시간 뒤면 지금
                 // 옮겨야 한다 — 퍼센트만으로는 그 둘이 구별되지 않는다.
                 let resets_text = |b: &crate::UsageBadge| -> Option<String> {
                     let at = b.resets_at?;
@@ -7224,13 +7286,13 @@ impl App {
                         .map_or(0, |d| d.as_secs());
                     let left = at.saturating_sub(now);
                     if left == 0 {
-                        return Some("Resets now".to_string());
+                        return Some("곧 초기화".to_string());
                     }
                     let (h, m) = (left / 3600, (left % 3600) / 60);
                     Some(match (h, m) {
-                        (0, m) => format!("Resets in {m}m"),
-                        (h, 0) => format!("Resets in {h}h"),
-                        (h, m) => format!("Resets in {h}h {m}m"),
+                        (0, m) => format!("{m}분 뒤 초기화"),
+                        (h, 0) => format!("{h}시간 뒤 초기화"),
+                        (h, m) => format!("{h}시간 {m}분 뒤 초기화"),
                     })
                 };
                 // 임계는 60/80. 그 아래는 초록이 아니라 **중립**이다 — 초록은 "좋다"는
@@ -7299,11 +7361,13 @@ impl App {
                 g.draw_text(
                     mx + pad_x,
                     ry + (head_h - f) / 2.0 - 1.0,
-                    "Usage",
+                    "사용량",
                     gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false },
                 );
                 {
-                    let sub = "all agents";
+                    // 「이 앱에서 도는 학생 전부의 합」이라는 뜻 — 계정 하나를 여러
+                    // pane 이 나눠 쓰므로, 이 숫자가 내 pane 것이 아님을 밝혀야 한다.
+                    let sub = "학생 전체";
                     let sf = f - 2.0;
                     let sw = g.measure_chrome_text(sub, sf, false);
                     g.draw_text(
@@ -7330,7 +7394,7 @@ impl App {
                 // ── 밀도 선택 ───────────────────────────────────────────────
                 {
                     let cw = (mw - pad_x * 2.0) / 2.0;
-                    for (i, (label, want)) in [("Detailed", false), ("Compact", true)]
+                    for (i, (label, want)) in [("자세히", false), ("간단히", true)]
                         .into_iter()
                         .enumerate()
                     {
@@ -7421,29 +7485,46 @@ impl App {
                                         gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
                                     );
                                 }
-                                // 둘째 줄: [창 이름][막대][퍼센트]. 막대는 트랙을 함께
-                                // 그린다 — 채움만 있으면 15% 짜리가 어디까지 갈 수 있는
-                                // 것인지 알 수가 없어 그냥 얼룩이 된다.
+                                // 둘째 줄: [창 이름][막대][퍼센트] — **창마다 하나씩**.
+                                // 하단바는 좁아서 급할 땐 한 창으로 접히므로, 펼친
+                                // 여기서는 5시간과 주간이 **둘 다** 보여야 한다
+                                // (2026-08-15 지시 「7일 한도는 눌렀을 때만」의 그 자리).
+                                // 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가
+                                // 어디까지 갈 수 있는 것인지 알 수가 없어 그냥 얼룩이 된다.
                                 let l2 = ry + prow_h - 17.0;
                                 let lf = f - 3.0;
-                                let bx = name_x;
-                                g.draw_text(
-                                    bx, l2, &b.label,
-                                    gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: false, italic: false },
-                                );
-                                let lw = g.measure_chrome_text(&b.label, lf, false);
-                                let gx = bx + lw + 6.0;
                                 const GW: f32 = 28.0;
                                 const GH: f32 = 5.0;
                                 let gy = l2 + (lf - GH) / 2.0;
-                                g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
-                                let w = (GW * (b.pct / 100.0).clamp(0.0, 1.0)).max(1.5);
-                                g.rect(gx, gy, w, GH, bar_col(b.pct));
-                                let pt = format!("{:.0}%", b.pct);
-                                g.draw_text(
-                                    gx + GW + 6.0, l2, &pt,
-                                    gpu::DrawOpts { font_size: lf, color: pct_col(b.pct), bold: true, italic: false },
-                                );
+                                let wins: Vec<(&'static str, f32)> = if b.windows.is_empty() {
+                                    vec![(b.label, b.pct)]
+                                } else {
+                                    b.windows.clone()
+                                };
+                                let mut bx = name_x;
+                                for (label, pct) in wins {
+                                    // 넘칠 것 같으면 거기서 멈춘다 — 잘린 막대는 값을
+                                    // 잘못 읽히게 하므로 없느니만 못하다.
+                                    let need = g.measure_chrome_text(label, lf, false) + 6.0
+                                        + GW + 6.0 + g.measure_chrome_text("100%", lf, true);
+                                    if bx + need > right {
+                                        break;
+                                    }
+                                    g.draw_text(
+                                        bx, l2, label,
+                                        gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: false, italic: false },
+                                    );
+                                    let gx = bx + g.measure_chrome_text(label, lf, false) + 6.0;
+                                    g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
+                                    let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(1.5);
+                                    g.rect(gx, gy, w, GH, bar_col(pct));
+                                    let pt = format!("{pct:.0}%");
+                                    g.draw_text(
+                                        gx + GW + 6.0, l2, &pt,
+                                        gpu::DrawOpts { font_size: lf, color: pct_col(pct), bold: true, italic: false },
+                                    );
+                                    bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, lf, true) + 12.0;
+                                }
                             }
                         }
                         // codex 는 한도 조회 경로가 없다. 그 자리에 로그인 여부를 적는다 —
@@ -7451,9 +7532,9 @@ impl App {
                         // 계정과 구별이 안 된다.
                         (None, AccountProvider::Codex) => {
                             let (t, col) = if codex_signed_in {
-                                ("No usage data", theme::text_mute())
+                                ("기록 없음", theme::text_mute())
                             } else {
-                                ("not signed in", theme::danger())
+                                ("로그인 안 됨", theme::danger())
                             };
                             let tf = f - 2.0;
                             let tw = g.measure_chrome_text(t, tf, false);
@@ -7463,7 +7544,7 @@ impl App {
                             );
                         }
                         (None, AccountProvider::Claude) => {
-                            let t = "No usage data";
+                            let t = "기록 없음";
                             let tf = f - 2.0;
                             let tw = g.measure_chrome_text(t, tf, false);
                             g.draw_text(
@@ -7484,8 +7565,8 @@ impl App {
                 g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
                 ry += rule;
                 for (item, label) in [
-                    (AccountMenuItem::UsageDetails, "Usage details & history"),
-                    (AccountMenuItem::ManageAccounts, "Manage Accounts…"),
+                    (AccountMenuItem::UsageDetails, "사용 내역 자세히"),
+                    (AccountMenuItem::ManageAccounts, "계정 관리…"),
                 ] {
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + row_h;
                     g.hover_pointer |= on;

@@ -5815,6 +5815,49 @@ impl App {
         // 가른다 — 캡처는 실행당 한 장이므로 어차피 두 번 돌려야 한다.
         let want = std::env::var("KASATERM_AUTOPOPOVER").unwrap_or_default();
         let tunnel = want.starts_with("tunnel");
+        // 계정 게이지·드롭다운은 실제 한도 응답이 있어야 그려진다 — 격리 리그에는
+        // 없으므로 값을 심는다. 5시간이 낮고 주간이 높은 조합인 것은 그게 정확히
+        // 2026-08-05 사고의 형태이고, 「둘 다 나란히」가 그걸 막는지 보는 것이
+        // 이 검증의 목적이라서다.
+        if step == 0 && want == "account" {
+            let badge = crate::UsageBadge {
+                pct: 95.0,
+                label: "7d",
+                stale: false,
+                account_dir: String::new(),
+                resets_at: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs())
+                        + 3 * 3600
+                        + 54 * 60,
+                ),
+                windows: vec![("5h", 12.0), ("7d", 95.0)],
+            };
+            if let Ok(mut g) = self.claude_usage.lock() {
+                *g = Some(badge.clone());
+            }
+            if let Ok(mut g) = self.claude_usage_all.lock() {
+                g.insert(String::new(), badge);
+            }
+            self.chrome_dirty = true;
+            return;
+        }
+        if step == 1 && want == "account" {
+            match self.status_account_rect {
+                Some(r) => {
+                    self.account_menu = true;
+                    self.account_menu_anchor = Some(r);
+                    self.chrome_dirty = true;
+                    eprintln!("[autoportpop] 계정 드롭다운 anchor={r:?}");
+                }
+                None => eprintln!("[autoportpop] FAIL — 계정 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        if want == "account" {
+            return;
+        }
         if step == 0 && tunnel {
             if want == "tunnel-off" {
                 // 실제로 끄지 **않는다** — 이 기계에서 진짜 터널이 돌고 있으면
