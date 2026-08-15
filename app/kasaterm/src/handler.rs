@@ -2060,6 +2060,18 @@ impl ApplicationHandler<UserEvent> for App {
                         });
                     }
                 }
+                // `[Image #N]` 썸네일 툴팁 — 커서가 셀을 옮겼을 때만 chrome 을
+                // 다시 짓는다. 그 글자 위인지는 그리드를 읽는 렌더가 판정한다.
+                {
+                    let cell = self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1);
+                    if cell != self.image_hover_cell {
+                        self.image_hover_cell = cell;
+                        self.chrome_dirty = true;
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                }
                 // A deferred titlebar press turns into a window move once the
                 // pointer travels past the threshold (so a stationary press
                 // stays a click and the double-click path keeps working).
@@ -5455,6 +5467,18 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.autosave_session();
         }
+        // `[Image #N]` 썸네일은 커서가 **멎어 있을 때** 뜬다 — 그동안 이벤트가
+        // 없으니 만기에 스스로 깨어나 한 프레임 더 돌지 않으면 영영 안 뜬다.
+        if self
+            .image_tip
+            .as_ref()
+            .is_some_and(|t| !t.looked && t.since.elapsed() >= crate::IMAGE_TIP_DELAY)
+        {
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
@@ -5802,6 +5826,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotearroom(event_loop);
         self.run_pending_autostudent(event_loop);
         self.run_pending_autoboxlabel();
+        self.run_pending_autoimgtip();
         self.run_pending_autoroomsplit();
         self.run_pending_autoforeignsplit();
         self.run_pending_autofacehover(event_loop);
@@ -6006,6 +6031,14 @@ impl ApplicationHandler<UserEvent> for App {
                 .then(|| self.session_saved_at + crate::SESSION_AUTOSAVE_PERIOD)
                 .into_iter()
                 .chain(autosave_due)
+                // 툴팁 지연도 "조용해진 직후"가 중요한 만기다 — 커서가 멎어 있는
+                // 동안은 이 만기 말고 루프를 깨울 것이 없다.
+                .chain(
+                    self.image_tip
+                        .as_ref()
+                        .filter(|t| !t.looked)
+                        .map(|t| t.since + crate::IMAGE_TIP_DELAY),
+                )
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),

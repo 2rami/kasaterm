@@ -571,6 +571,9 @@ impl App {
         // 인라인 이미지(OSC 1337) 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h,
         // clip_y0, clip_y1). 좌표는 LOGICAL px(queue_image 관례).
         let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32)> = Vec::new();
+        // 커서가 멎은 `[Image #N]` — (pane, 번호, 그 글자의 화면 박스). 박스는
+        // 툴팁을 글자 바로 옆에 붙이는 데 쓴다.
+        let mut tip_hit: Option<(String, u32, (f32, f32, f32, f32))> = None;
         // working 스피너(✻/braille) 자리 학생 도트(제자리 걸음): 같은 형태.
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
@@ -864,6 +867,38 @@ impl App {
                             clip_y0,
                             clip_y1,
                         ));
+                    }
+                }
+                // `[Image #N]` 위에 멎은 커서. 셀 역산은 이 pane 의 원점·폰트배율로
+                // 하고 행·열 범위로 잘라 낸다 — 옆 pane 위의 커서는 이 pane 의 셀
+                // 범위를 넘어서므로 여기서 걸러진다. 참조 탐색은 커서가 이 pane 의
+                // 셀 안에 있을 때만 돈다(그리드 전수 스캔이라 매 프레임 모든 pane
+                // 에 돌릴 일이 아니다).
+                // 게이트가 claude 여부가 아니라 **세션이 묶였나**인 이유: 그림은
+                // 그 세션의 transcript 에만 있어서, sid 가 없으면 찾아 봐야 없다.
+                if tip_hit.is_none() && self.pane_claude_sid.contains_key(id.as_str()) {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let (icw, ich) = (self.cell.w * fs, self.cell.h * fs);
+                    let (rx, ry) = (self.cursor_px.0 - body_left, self.cursor_px.1 - body_top);
+                    if rx >= 0.0 && ry >= 0.0 && icw > 0.0 && ich > 0.0 {
+                        let (cc, cr) = ((rx / icw) as usize, (ry / ich) as usize);
+                        if composed.get(cr).is_some_and(|row| cc < row.len()) {
+                            if let Some(r) = find_image_refs(&composed)
+                                .into_iter()
+                                .find(|r| r.row == cr && (r.col0..=r.col1).contains(&cc))
+                            {
+                                tip_hit = Some((
+                                    id.clone(),
+                                    r.n,
+                                    (
+                                        body_left + r.col0 as f32 * icw,
+                                        body_top + r.row as f32 * ich,
+                                        (r.col1 - r.col0 + 1) as f32 * icw,
+                                        ich,
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
                 // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. mouse-tracking
@@ -2558,6 +2593,11 @@ impl App {
             !banner_slots.is_empty() || !waiting_slots.is_empty() || !standing_slots.is_empty(),
             std::sync::atomic::Ordering::Relaxed,
         );
+        // `[Image #N]` 썸네일 — transcript 를 읽는 일이라 gpu 를 빌리기 전에 끝낸다.
+        let tip_box = tip_hit.as_ref().map(|(_, _, b)| *b);
+        let image_tip = self
+            .pump_image_tip(tip_hit.map(|(pane, n, _)| (pane, n)))
+            .zip(tip_box);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -2762,6 +2802,9 @@ impl App {
             {
                 Self::draw_hover_tip(g, &tip, hx, hy, win_px.0 / scale, win_px.1 / scale);
             }
+            // `[Image #N]` 썸네일 — 같은 이유로 pane 을 다 그린 뒤다. 텍스처를
+            // 놓는 일이 있어 툴팁이 없는 프레임에도 부른다.
+            Self::paint_image_tip(g, image_tip, win_px.0 / scale, win_px.1 / scale);
             // 크롬 판 — 위 스트립과 사이드바 칼럼이 이어진 ㄴ 자다. 본문보다 한 톤
             // 들려 있어 터미널이 그 위에 얹힌 것처럼 읽힌다.
             //
@@ -8088,6 +8131,80 @@ impl App {
     /// 호버 툴팁 — 마우스 아래에 뜨는 작은 상자. rust-analyzer 는 타입에 문서
     /// 전체를 붙여 주기도 해서 가로·세로 둘 다 자른다: 화면 절반을 덮는 툴팁은
     /// 정보가 아니라 방해다.
+    /// `[Image #N]` 글자 옆에 그 그림의 썸네일을 띄운다.
+    ///
+    /// 텍스처 키는 픽셀 버퍼의 주소라, 툴팁이 다른 그림으로 바뀌면 키도 바뀐다 —
+    /// 앞 키를 놓지 않으면 호버할 때마다 GPU 메모리가 는다. 그래서 툴팁이 없는
+    /// 프레임(`tip` = `None`)에도 불러 정리할 기회를 준다.
+    fn paint_image_tip(
+        g: &mut gpu::GpuRenderer,
+        tip: Option<((Arc<Vec<u8>>, u32, u32), (f32, f32, f32, f32))>,
+        win_w: f32,
+        win_h: f32,
+    ) {
+        thread_local! {
+            static LAST_KEY: std::cell::RefCell<Option<String>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let Some(((rgba, iw, ih), (ax, ay, _aw, ah))) = tip else {
+            LAST_KEY.with(|l| {
+                if let Some(old) = l.borrow_mut().take() {
+                    g.drop_image(&old);
+                }
+            });
+            return;
+        };
+        if iw == 0 || ih == 0 {
+            return;
+        }
+        let key = format!("imgtip:{:x}:{}", Arc::as_ptr(&rgba) as usize, rgba.len());
+        LAST_KEY.with(|l| {
+            let mut l = l.borrow_mut();
+            if l.as_deref() != Some(key.as_str()) {
+                if let Some(old) = l.take() {
+                    g.drop_image(&old);
+                }
+                g.upload_image(&key, &rgba, iw, ih);
+                *l = Some(key.clone());
+            }
+        });
+        // 액자. 확대는 하지 않는다 — 작은 그림을 늘리면 흐려지기만 한다.
+        const MAX_W: f32 = 320.0;
+        const PAD: f32 = 5.0;
+        let s = (MAX_W / iw as f32)
+            .min((win_h * 0.5).max(120.0) / ih as f32)
+            .min(1.0);
+        let (dw, dh) = (iw as f32 * s, ih as f32 * s);
+        let (w, h) = (dw + PAD * 2.0, dh + PAD * 2.0);
+        // 글자 바로 아래가 기본 — 그 위는 방금 읽은 프롬프트라 덮으면 안 된다.
+        // 아래가 모자라면 위로 뒤집고, 오른쪽으로 넘치면 왼쪽으로 민다.
+        let x = ax.min(win_w - w - 4.0).max(4.0);
+        let y = if ay + ah + 6.0 + h < win_h {
+            ay + ah + 6.0
+        } else {
+            (ay - 6.0 - h).max(4.0)
+        };
+        let r = theme::radius_sm();
+        // 뒷판을 한 겹 넓게 깔아 터미널 글자 위에서 액자가 떠 보이게 한다 —
+        // 이 렌더러엔 그림자가 없다.
+        g.round_rect_fill(
+            x - 2.0,
+            y - 1.0,
+            w + 4.0,
+            h + 5.0,
+            r + 2.0,
+            theme::with_alpha(theme::bg(), 0x66),
+        );
+        g.round_rect_fill(x, y, w, h, r, theme::surface());
+        let edge = theme::border();
+        g.rect(x, y, w, 1.0, edge);
+        g.rect(x, y + h - 1.0, w, 1.0, edge);
+        g.rect(x, y, 1.0, h, edge);
+        g.rect(x + w - 1.0, y, 1.0, h, edge);
+        // icon 패스라 방금 깐 액자 위에 온다.
+        g.queue_image_above(&key, x + PAD, y + PAD, dw, dh);
+    }
+
     fn draw_hover_tip(
         g: &mut gpu::GpuRenderer,
         text: &str,

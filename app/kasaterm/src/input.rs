@@ -608,6 +608,76 @@ impl App {
         bg
     }
 
+    /// 커서가 멎은 `[Image #N]` 참조를 받아 툴팁 상태를 옮기고, 이번 프레임에
+    /// 그릴 썸네일을 돌려준다. `hit` 이 `None`(참조 밖) 이면 툴팁을 접는다.
+    ///
+    /// 캐시를 두지 않는다 — 번호는 claude 를 다시 켤 때마다 1부터 다시 매겨져
+    /// 같은 `(pane, 번호)` 가 나중에 다른 그림을 가리킨다. 커서가 옮겨갈 때마다
+    /// 한 번 읽는 편이 무효화 규칙을 세우는 것보다 단순하고 항상 최신이다.
+    pub(crate) fn pump_image_tip(
+        &mut self,
+        hit: Option<(String, u32)>,
+    ) -> Option<(Arc<Vec<u8>>, u32, u32)> {
+        let Some(at) = hit else {
+            let had = self.image_tip.take().is_some_and(|t| t.thumb.is_some());
+            if had {
+                self.chrome_dirty = true;
+            }
+            return None;
+        };
+        if self.image_tip.as_ref().is_none_or(|t| t.at != at) {
+            self.image_tip = Some(crate::ImageTip {
+                at: at.clone(),
+                since: std::time::Instant::now(),
+                thumb: None,
+                looked: false,
+            });
+        }
+        let tip = self.image_tip.as_ref()?;
+        if tip.thumb.is_none() {
+            if tip.looked || tip.since.elapsed() < crate::IMAGE_TIP_DELAY {
+                return None;
+            }
+            let thumb = self.image_tip_thumb(&at.0, at.1);
+            let tip = self.image_tip.as_mut()?;
+            tip.looked = true;
+            tip.thumb = thumb;
+            self.chrome_dirty = true;
+        }
+        self.image_tip.as_ref()?.thumb.clone()
+    }
+
+    /// 그 pane 의 transcript 에서 `#n` 그림을 찾아 툴팁 크기로 줄인 RGBA.
+    fn image_tip_thumb(&self, pane_id: &str, n: u32) -> Option<(Arc<Vec<u8>>, u32, u32)> {
+        let sid = self.pane_claude_sid.get(pane_id)?;
+        let path = crate::socket::transcript_path_for_session(sid)?;
+        // 실측(2026-08-15, 56MB 세션): 가장 최근 그림이 파일 끝에서 0.7MB, 그
+        // 앞의 것들이 5~8MB. 화면에 떠 있는 참조는 거의 최근 프롬프트라 4MB 로
+        // 대개 잡힌다. 못 잡으면 한 번만 넓혀 본다 — 두 번째도 실패면 그 번호는
+        // 아직 제출 안 된 프롬프트라 어디에도 없다.
+        let mut bytes = None;
+        for cap in [4u64, 24] {
+            let (tail, _) = crate::socket::read_tail(&path, cap * 1024 * 1024);
+            bytes = crate::transcript::image_paste_bytes(&tail, n);
+            // 꼬리가 상한보다 짧으면 파일을 통째로 본 것이라 더 넓혀도 같다.
+            if bytes.is_some() || (tail.len() as u64) < cap * 1024 * 1024 {
+                break;
+            }
+        }
+        let img = image::load_from_memory(&bytes?).ok()?;
+        // 툴팁은 로지컬 320px 인데 Retina 는 2배로 그린다 — 640 아래로 줄이면
+        // 화면에서 흐려진다. 원본이 더 작으면 확대하지 않는다.
+        const MAX_PX: u32 = 640;
+        let img = if img.width().max(img.height()) > MAX_PX {
+            img.thumbnail(MAX_PX, MAX_PX)
+        } else {
+            img
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some((Arc::new(rgba.into_raw()), w, h))
+    }
+
     /// 라이트↔다크 플립을 감지해 **떠 있는** claude 세션까지 갈아입힌다.
     ///
     /// 새 세션은 이미 맞다 — `sync_claude_theme`(theme.rs 훅)이 settings.json

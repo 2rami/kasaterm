@@ -1146,6 +1146,56 @@ pub(crate) fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'st
     None
 }
 
+/// 화면에 남은 첨부 이미지 자리 — claude code 는 붙인 그림을 `[Image #6]` 이라는
+/// 글자로만 표시해서, 무슨 그림이었는지 화면만 봐서는 알 수가 없다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImageRef {
+    pub row: usize,
+    /// 참조가 차지한 셀 구간(양끝 포함) — 호버 히트 박스.
+    pub col0: usize,
+    pub col1: usize,
+    /// `#` 뒤 번호. transcript jsonl 의 `imagePasteIds` 와 같은 값이라(실측
+    /// 2026-08-15) 이 숫자 하나로 원본 base64 를 되찾을 수 있다.
+    pub n: u32,
+}
+
+/// 그리드에서 `[Image #N]` 참조를 전부 찾는다.
+///
+/// 한 행 안에서만 찾는다 — 좁은 pane 에서 랩되어 `[Image` 와 `#6]` 이 두 행에
+/// 걸리면 놓친다. 이어 붙여 찾으면 본문에 우연히 인접한 두 조각까지 걸리는데,
+/// 11자 참조가 랩 경계에 정확히 걸릴 일보다 그 오탐이 더 잦다.
+pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
+    const HEAD: &str = "[Image #";
+    let mut out = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        let (text, cols) = row_text_cells(row);
+        let bytes = text.as_bytes();
+        let mut from = 0usize;
+        while let Some(rel) = text[from..].find(HEAD) {
+            let start = from + rel;
+            let mut i = start + HEAD.len();
+            let digits = i;
+            while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            // `[Image #]` (숫자 없음)과 닫히지 않은 것은 참조가 아니다.
+            if i > digits && bytes.get(i) == Some(&b']') {
+                if let Ok(n) = text[digits..i].parse::<u32>() {
+                    // find 는 바이트 오프셋, cols 는 char 인덱스 — HEAD 앞이 한글이면
+                    // 둘이 어긋나므로 char 로 환산해서 셀을 짚는다.
+                    let c_start = text[..start].chars().count();
+                    let c_end = text[..=i].chars().count() - 1;
+                    if let (Some(&col0), Some(&col1)) = (cols.get(c_start), cols.get(c_end)) {
+                        out.push(ImageRef { row: r, col0, col1, n });
+                    }
+                }
+            }
+            from = i.max(start + 1);
+        }
+    }
+    out
+}
+
 /// 인라인 이미지(OSC 1337)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로
 /// 올리고, 이번 프레임 배치에 없는 키는 텍스처를 놓는다. PTY 쪽이 뷰포트에
 /// 겹치는 그림만 보내므로, 스크롤로 벗어난 그림의 GPU 메모리가 여기서 함께
@@ -3859,3 +3909,83 @@ This came from another Claude session";
     }
 }
 
+
+#[cfg(test)]
+mod image_ref_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    /// 와이드 문자 뒤에 스페이서 셀이 끼는 실제 그리드 모양.
+    fn row_wide(s: &str, spacer: char) -> Vec<GridCell> {
+        let mut out = Vec::new();
+        for c in s.chars() {
+            let mut cell = GridCell::blank();
+            cell.ch = c;
+            out.push(cell);
+            if (c as u32) >= 0x1100 {
+                let mut sp = GridCell::blank();
+                sp.ch = spacer;
+                out.push(sp);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn finds_a_plain_reference() {
+        let rows = vec![row_from("> [Image #6] 그리고 표 아직 이상해")];
+        let got = find_image_refs(&rows);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].n, 6);
+        assert_eq!((got[0].row, got[0].col0, got[0].col1), (0, 2, 11));
+    }
+
+    #[test]
+    fn finds_several_on_one_row_and_two_digit_numbers() {
+        let rows = vec![row_from("[Image #1] vs [Image #12]")];
+        let got = find_image_refs(&rows);
+        assert_eq!(got.iter().map(|r| r.n).collect::<Vec<_>>(), vec![1, 12]);
+        assert_eq!((got[1].col0, got[1].col1), (14, 24));
+    }
+
+    // 앞에 한글이 있으면 char 인덱스와 셀 col 이 스페이서만큼 어긋난다 — 히트
+    // 박스는 셀 기준이라 이게 틀리면 툴팁이 엉뚱한 자리에서 뜬다.
+    #[test]
+    fn columns_account_for_wide_char_spacers() {
+        for spacer in ['\0', ' '] {
+            let rows = vec![row_wide("사진 [Image #3]", spacer)];
+            let got = find_image_refs(&rows);
+            assert_eq!(got.len(), 1, "spacer {spacer:?}");
+            // "사진 " = 셀 5칸(한글 2×2 + 공백) → 참조는 col 5 에서 시작.
+            assert_eq!((got[0].col0, got[0].col1), (5, 14), "spacer {spacer:?}");
+        }
+    }
+
+    #[test]
+    fn ignores_malformed_or_unrelated_text() {
+        let rows = vec![
+            row_from("[Image #] 번호 없음"),
+            row_from("[Image #7 닫히지 않음"),
+            row_from("Image #7] 여는 괄호 없음"),
+            row_from("[image #7] 소문자"),
+        ];
+        assert!(find_image_refs(&rows).is_empty());
+    }
+
+    #[test]
+    fn reports_the_row_it_sat_on() {
+        let rows = vec![row_from("첫 줄"), row_from(""), row_from("[Image #2]")];
+        let got = find_image_refs(&rows);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].row, 2);
+    }
+}

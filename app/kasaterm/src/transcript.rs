@@ -1342,3 +1342,142 @@ mod agy_snapshot_tests {
         assert_eq!(agy_snapshot("%9", line, false).model, "Claude Opus 4.6 (Thinking)");
     }
 }
+
+/// `[Image #N]` 이 가리키는 원본 이미지 바이트를 transcript 꼬리에서 되찾는다.
+///
+/// claude code 는 붙인 그림을 프롬프트에 `[Image #6]` 이라는 **글자로만** 남기고,
+/// 진짜 픽셀은 jsonl 에 base64 로 따로 적는다. 그 둘을 잇는 것이 `imagePasteIds`
+/// 다 — 화면의 `#6` 과 같은 값이 배열로 적혀 있고, 같은 줄의 image 블록과 순서로
+/// 대응한다(실측 2026-08-15: 138건 전부 개수 일치, 다중 20건).
+///
+/// 줄 모양이 두 가지라 둘 다 본다: 곧바로 보낸 프롬프트는 `type:"user"` 줄의
+/// 최상위 `imagePasteIds` + `message.content`, 큐에 넣은 것은 `type:"attachment"`
+/// 줄의 `attachment.imagePasteIds` + `attachment.prompt` 에 들어간다.
+///
+/// **뒤에서부터** 찾는다. 번호는 claude code 를 다시 켤 때마다 1부터 다시 매겨져
+/// 한 세션 파일 안에서도 같은 `#1` 이 여러 그림을 가리킨다(실측: 8/12 와 8/13 의
+/// `[Image #1]` 이 서로 다른 그림). 화면에 떠 있는 것은 언제나 최근 쪽이다.
+pub fn image_paste_bytes(tail: &str, n: u32) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    for line in tail.lines().rev() {
+        // 값싼 프리체크 — 이 꼬리는 수 MB 고 그중 이미지 줄은 몇 개뿐이라,
+        // 전 줄을 serde 에 넣으면 호버 한 번이 수백 ms 가 된다.
+        if !line.contains("imagePasteIds") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue; // 꼬리 첫 줄은 중간에서 잘려 있다
+        };
+        let (ids, blocks) = match v.get("imagePasteIds") {
+            Some(ids) => (ids, v.pointer("/message/content")),
+            None => (
+                v.pointer("/attachment/imagePasteIds")?,
+                v.pointer("/attachment/prompt"),
+            ),
+        };
+        let Some(at) = ids
+            .as_array()
+            .and_then(|a| a.iter().position(|v| v.as_u64() == Some(n as u64)))
+        else {
+            continue;
+        };
+        let data = blocks
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"))
+            .nth(at)
+            .and_then(|b| b.pointer("/source/data"))
+            .and_then(|d| d.as_str());
+        // 번호는 맞는데 픽셀이 없는 줄(파일 참조 등)에서 멈추면 뒤로 더 못 간다 —
+        // 계속 훑어 진짜 데이터가 있는 줄을 찾는다.
+        if let Some(bytes) = data
+            .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+            .filter(|b| !b.is_empty())
+        {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod image_paste_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// 곧바로 보낸 프롬프트 줄(type:"user").
+    fn user_line(ids: &[u32], payloads: &[&[u8]]) -> String {
+        let blocks: Vec<String> = payloads
+            .iter()
+            .map(|p| {
+                format!(
+                    r#"{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{}"}}}}"#,
+                    b64(p)
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"type":"user","imagePasteIds":{:?},"message":{{"role":"user","content":[{{"type":"text","text":"보기"}},{}]}}}}"#,
+            ids,
+            blocks.join(",")
+        )
+    }
+
+    /// 큐에 넣은 프롬프트 줄(type:"attachment").
+    fn queued_line(ids: &[u32], payload: &[u8]) -> String {
+        format!(
+            r#"{{"type":"attachment","attachment":{{"type":"queued_command","imagePasteIds":{:?},"prompt":[{{"type":"text","text":"보기"}},{{"type":"image","source":{{"type":"base64","data":"{}"}}}}]}}}}"#,
+            ids,
+            b64(payload)
+        )
+    }
+
+    #[test]
+    fn finds_a_typed_prompts_image() {
+        let tail = user_line(&[1], &[b"PNGDATA"]);
+        assert_eq!(image_paste_bytes(&tail, 1).as_deref(), Some(&b"PNGDATA"[..]));
+        assert_eq!(image_paste_bytes(&tail, 2), None);
+    }
+
+    #[test]
+    fn finds_a_queued_prompts_image() {
+        let tail = queued_line(&[6], b"QUEUED");
+        assert_eq!(image_paste_bytes(&tail, 6).as_deref(), Some(&b"QUEUED"[..]));
+    }
+
+    // 한 줄에 여러 장이면 `imagePasteIds` 의 자리와 image 블록의 자리가 짝이다.
+    #[test]
+    fn maps_each_id_to_its_own_block() {
+        let tail = user_line(&[3, 4], &[b"THREE", b"FOUR"]);
+        assert_eq!(image_paste_bytes(&tail, 3).as_deref(), Some(&b"THREE"[..]));
+        assert_eq!(image_paste_bytes(&tail, 4).as_deref(), Some(&b"FOUR"[..]));
+    }
+
+    // 번호는 claude 를 다시 켤 때마다 1부터라, 같은 파일에 같은 번호가 또 나온다.
+    #[test]
+    fn later_lines_win_for_a_reused_number() {
+        let tail = format!("{}\n{}", user_line(&[1], &[b"OLD"]), user_line(&[1], &[b"NEW"]));
+        assert_eq!(image_paste_bytes(&tail, 1).as_deref(), Some(&b"NEW"[..]));
+    }
+
+    // 꼬리를 바이트로 자르면 첫 줄은 반드시 깨져 있다.
+    #[test]
+    fn survives_a_truncated_first_line() {
+        let tail = format!("Ids\":[9],\"message\":...\n{}", user_line(&[2], &[b"OK"]));
+        assert_eq!(image_paste_bytes(&tail, 2).as_deref(), Some(&b"OK"[..]));
+        assert_eq!(image_paste_bytes(&tail, 9), None);
+    }
+
+    // 번호만 맞고 픽셀이 없는 줄에서 멈추면 그 뒤(더 오래된 진짜 데이터)를 못 본다.
+    #[test]
+    fn keeps_looking_past_a_pixelless_line() {
+        let empty = r#"{"type":"user","imagePasteIds":[5],"message":{"content":[{"type":"text","text":"없음"}]}}"#;
+        let tail = format!("{}\n{}", user_line(&[5], &[b"REAL"]), empty);
+        assert_eq!(image_paste_bytes(&tail, 5).as_deref(), Some(&b"REAL"[..]));
+    }
+}

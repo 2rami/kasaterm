@@ -17,6 +17,13 @@ static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 const BOXLABEL_CWD: &str = "/tmp/kasaterm-boxlabel";
 const BOXLABEL_SID: &str = "boxlabel-probe";
 
+/// `autoimgtip` 이 심는 가짜 transcript 자리 — `boxlabel` 과 같은 이유로 `/tmp/`
+/// 슬러그를 써서 거노 실제 프로젝트 폴더와 안 겹치게 한다.
+const IMGTIP_CWD: &str = "/tmp/kasaterm-imgtip";
+const IMGTIP_SID: &str = "imgtip-probe";
+/// 화면에 찍을 참조 번호 — 심는 jsonl 의 `imagePasteIds` 와 짝이다.
+const IMGTIP_N: u32 = 7;
+
 const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
 슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
 \n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
@@ -3828,6 +3835,186 @@ impl App {
         self.chrome_dirty = true;
         self.render_frame();
         eprintln!("[autoboxlabel] pane={pid} 가짜 jsonl 심었다 — 타이핑 기다리는 중");
+    }
+
+    /// `[Image #N]` 썸네일 툴팁 하네스 — `KASATERM_AUTOIMGTIP_MS`.
+    ///
+    /// 붙여넣기를 자동화할 수 없어서(클립보드 → claude 입력창) 반대편에서 접근한다:
+    /// 그림 한 장이 든 가짜 transcript 를 심고, pane 화면에 그 참조 글자를 찍고,
+    /// 커서를 그 글자 위에 놓는다. 실제 경로(그리드 판독 → transcript 조회 →
+    /// base64 디코드 → 텍스처 업로드)가 그대로 돈다.
+    ///
+    /// 세 단계인 이유: 셸이 글자를 뱉는 데 한 틱, 커서를 놓고 나서 툴팁이 뜨기까지
+    /// `IMAGE_TIP_DELAY` 가 또 필요하다. 한 번에 하면 「아직 안 뜰 시각」을 찍고
+    /// 「안 그린다」로 읽는다.
+    pub(crate) fn run_pending_autoimgtip(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOIMGTIP_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        const AT_MS: [u64; 4] = [0, 900, 1800, 2400];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autoimgtip] FAIL — 활성 pane 이 없다");
+            return;
+        };
+        match step {
+            0 => {
+                if let Err(e) = self.imgtip_seed(&pid) {
+                    eprintln!("[autoimgtip] FAIL — 가짜 transcript 를 못 심었다: {e}");
+                    return;
+                }
+                // 프롬프트가 함께 남으면 참조가 몇 행에 앉을지 모르는데, 어차피
+                // 그리드에서 찾아 쓸 것이라 상관없다.
+                if let Some(pty) = self.pty.get(&pid) {
+                    let _ = pty.send_bytes(format!("printf '[Image #{IMGTIP_N}]\\n'\n").as_bytes());
+                }
+                eprintln!("[autoimgtip] pane={pid} 참조를 찍고 셸 출력을 기다린다");
+            }
+            1 => {
+                // 참조가 실제로 앉은 셀을 그리드에서 읽는다 — 좌표를 손으로
+                // 계산하면 그 계산이 검사 대상과 같은 코드가 된다.
+                let found = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes.get(&pid).and_then(|p| p.term()).and_then(|t| {
+                        let rows: Vec<Vec<crate::GridCell>> = t.cells.clone();
+                        crate::render::find_image_refs(&rows).into_iter().next()
+                    })
+                };
+                let Some(r) = found else {
+                    eprintln!("[autoimgtip] FAIL — 화면에 [Image #{IMGTIP_N}] 이 안 보인다");
+                    return;
+                };
+                let mid = ((r.col0 + r.col1) / 2) as u16;
+                let Some(px) = self.hover_cell_px(&pid, mid, r.row as u16) else {
+                    eprintln!("[autoimgtip] FAIL — 셀 ({},{}) 로 커서를 못 옮겼다", r.row, mid);
+                    return;
+                };
+                // `autohover` 를 세워 두면 실제 마우스 이벤트가 이 자리를 안 덮는다.
+                self.autohover = Some(px);
+                self.cursor_px = px;
+                self.chrome_dirty = true;
+                self.render_frame();
+                eprintln!(
+                    "[autoimgtip] 참조 행={} 칸={}~{} → 커서 ({:.1},{:.1})",
+                    r.row, r.col0, r.col1, px.0, px.1
+                );
+            }
+            2 => {
+                self.chrome_dirty = true;
+                if let Some(g) = self.gpu.as_mut() {
+                    if let Ok(path) = std::env::var("KASATERM_AUTOIMGTIP_CAP") {
+                        g.capture_next = Some(path);
+                    }
+                }
+                self.render_frame();
+                let drew = self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|g| g.drawn_image_keys().any(|k| k.starts_with("imgtip:")));
+                let thumb = self
+                    .image_tip
+                    .as_ref()
+                    .and_then(|t| t.thumb.as_ref().map(|(_, w, h)| (*w, *h)));
+                eprintln!("[autoimgtip] {} — 썸네일={thumb:?} 그림그림={drew}",
+                    if drew { "PASS" } else { "FAIL" });
+            }
+            // 커서를 치우면 접힌다. 그림이 뜬 것만 재고 여기서 멈추면 "한 번 뜨면
+            // 안 사라지는" 툴팁을 통과시킨다.
+            _ => {
+                let away = (4.0, 4.0);
+                self.autohover = Some(away);
+                self.cursor_px = away;
+                self.chrome_dirty = true;
+                self.render_frame();
+                let drew = self
+                    .gpu
+                    .as_ref()
+                    .is_none_or(|g| g.drawn_image_keys().any(|k| k.starts_with("imgtip:")));
+                eprintln!(
+                    "[autoimgtip] 접힘 {} — 남은그림={drew} 상태={}",
+                    if !drew { "PASS" } else { "FAIL" },
+                    if self.image_tip.is_none() { "비었다" } else { "남았다" }
+                );
+            }
+        }
+    }
+
+    /// 목표 셀의 화면 좌표(logical px). 원점 계산을 복제하지 않고 렌더·마우스와
+    /// **같은 함수**(`px_to_pane_cell`)로 되물어 가며 맞춘다 — 복제한 좌표는 틀려도
+    /// 하네스만 통과시키고 화면은 안 맞는다.
+    fn hover_cell_px(&mut self, pid: &str, col: u16, row: u16) -> Option<(f32, f32)> {
+        let fs = self.pane_font_scales.get(pid).copied().unwrap_or(1.0).max(0.1);
+        let (cw, ch) = (self.cell.w * fs, self.cell.h * fs);
+        let (w, h) = self.window.as_ref().map(|w| {
+            let s = self.effective_scale();
+            let sz = w.inner_size();
+            (sz.width as f32 / s, sz.height as f32 / s)
+        })?;
+        let mut p = (w * 0.5, h * 0.5);
+        for _ in 0..5 {
+            let (id, c, r) = self.px_to_pane_cell(p.0, p.1)?;
+            if id != pid {
+                return None;
+            }
+            if c == col && r == row {
+                return Some(p);
+            }
+            p = (
+                p.0 + (col as f32 - c as f32) * cw,
+                p.1 + (row as f32 - r as f32) * ch,
+            );
+        }
+        None
+    }
+
+    /// `autoimgtip` 이 쓸 가짜 transcript — 그림 한 장이 `[Image #7]` 로 붙은 프롬프트.
+    fn imgtip_seed(&mut self, pid: &str) -> std::io::Result<()> {
+        use base64::Engine as _;
+        let cwd = std::path::PathBuf::from(IMGTIP_CWD);
+        std::fs::create_dir_all(&cwd)?;
+        let jsonl = crate::socket::project_jsonl(&cwd, IMGTIP_SID).ok_or_else(|| {
+            std::io::Error::other("project_jsonl 이 경로를 못 만든다")
+        })?;
+        if let Some(dir) = jsonl.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // 눈으로 바로 갈리는 그림 — 주황 바탕에 흰 대각선. 세로가 짧아서 액자
+        // 비율이 원본을 따라가는지도 캡처에서 함께 보인다.
+        let img = image::RgbaImage::from_fn(240, 150, |x, y| {
+            let on_diag = (x as i32 * 150 / 240 - y as i32).abs() < 6;
+            if on_diag {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([235, 120, 40, 255])
+            }
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(std::io::Error::other)?;
+        let body = format!(
+            "{{\"type\":\"user\",\"imagePasteIds\":[{IMGTIP_N}],\"message\":{{\"role\":\"user\",\
+             \"content\":[{{\"type\":\"text\",\"text\":\"[Image #{IMGTIP_N}] 이거 뭐야\"}},\
+             {{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\
+             \"data\":\"{}\"}}}}]}}}}\n",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        std::fs::write(&jsonl, body)?;
+        self.pane_claude_sid.insert(pid.to_string(), IMGTIP_SID.to_string());
+        Ok(())
     }
 
     /// `autoboxlabel` 이 pane 을 가짜 transcript 로 가리키게 한다.

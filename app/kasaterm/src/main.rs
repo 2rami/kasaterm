@@ -2032,6 +2032,28 @@ struct HoverState {
     text: Option<String>,
 }
 
+/// 커서가 `[Image #N]` 위에 멎고부터 썸네일을 찾아 나서기까지. 사람이 "이게
+/// 뭐지" 하고 멈추는 시간 — 지나가는 커서마다 그림이 튀면 화면이 소란스럽고,
+/// 여기서 transcript 를 수 MB 읽으므로 스쳐 가는 셀마다 읽을 일도 아니다.
+const IMAGE_TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// `[Image #N]` 썸네일 툴팁의 상태.
+///
+/// claude pane 은 붙인 그림을 그 글자로만 남겨서, 무슨 그림이었는지 화면만 봐서는
+/// 알 수가 없다. 커서가 그 위에 멎으면 원본을 transcript 에서 되찾아 띄운다.
+struct ImageTip {
+    /// 커서가 멎은 참조 — (pane id, `#` 뒤 번호).
+    at: (String, u32),
+    /// 멎은 시각. 지나가다 툴팁이 튀지 않게 잠깐 기다렸다 읽는다.
+    since: std::time::Instant,
+    /// 디코드한 썸네일(RGBA, 픽셀 폭·높이). 업로드가 첫 프레임에만 필요해
+    /// `Arc` 로 들고 그 뒤 프레임은 참조만 복사한다.
+    thumb: Option<(Arc<Vec<u8>>, u32, u32)>,
+    /// transcript 를 이미 뒤졌나. 못 찾은 참조(아직 제출 안 한 프롬프트 등)를
+    /// 매 프레임 다시 뒤지면 커서가 멎어 있는 동안 내내 수 MB 를 읽는다.
+    looked: bool,
+}
+
 /// Clickable control on the find bar. Every one has a keyboard equivalent —
 /// the mouse is for the hand that's already there, not the only way in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -4311,6 +4333,12 @@ struct App {
     lsp: Option<lsp::LspClient>,
     /// 마우스가 편집기 위에 멎어 있는 자리. 없으면 툴팁도 없다.
     hover: Option<HoverState>,
+    /// 마우스가 `[Image #N]` 글자 위에 멎어 있을 때의 썸네일 툴팁.
+    image_tip: Option<ImageTip>,
+    /// 커서가 마지막으로 있던 (pane, 열, 행). 툴팁 후보가 바뀌었는지는 그리드를
+    /// 봐야 아는데 그건 렌더만 안다 — 셀이 바뀐 프레임에만 다시 그려, 픽셀마다
+    /// chrome 을 재구성하는 일을 막는다.
+    image_hover_cell: Option<(String, u16, u16)>,
     /// 답을 기다리는 정의 이동 요청 id. 응답은 왕복이라 클릭한 그 자리에서
     /// 기다릴 수 없어, 틱이 `lsp_goto_pump` 로 받아 파일을 연다.
     lsp_goto: Option<i64>,
@@ -5233,6 +5261,8 @@ impl App {
             gpu: None,
             lsp: None,
             hover: None,
+            image_tip: None,
+            image_hover_cell: None,
             lsp_goto: None,
             tmux: None,
             pty: HashMap::new(),
