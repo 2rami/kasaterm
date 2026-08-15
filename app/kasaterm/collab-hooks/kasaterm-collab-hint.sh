@@ -10,6 +10,7 @@ read -r -d '' CTX <<'EOF'
 
 - 같은 파일을 동시에 만지려 하면 conflict-guard가 자동으로 막고, 상대가 뭐 하는지 + 합류/회피 옵션을 알려준다.
 - 다른 pane이 뭐 하는지 보려면: kasaterm-cli board (제목·시킨일·최근답변·도구), peek %N (화면), transcript %N (대화). board는 호출 시점 pull이라 항상 최신이다.
+- 사용자가 닫은 pane은 화면에 없는데도 그 안의 claude는 계속 돈다. 명부(ListAgents)에는 닫힘이 안 보이므로 board의 detached(화면밖)로만 알 수 있다 — 거기 새 일을 시키면 사용자가 못 보는 곳에서 작업이 돈다. 잊고 보내도 SendMessage 직전에 자동으로 막히니, 막히면 새 pane을 쪼개거나 사용자에게 되살리기를 부탁해라.
 - 전체를 계속 감시하려면(팀장/오케스트레이터): Monitor 도구로 `kasaterm-cli board-watch 3` 를 persistent로 걸면 pane 상태가 바뀔 때마다(working↔idle↔building, 합류/종료) 알림이 온다.
 
 네가 능동적으로 할 것:

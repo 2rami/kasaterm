@@ -6665,8 +6665,14 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // 표현이 안 되고, 스크립트가 첫 줄에서 bash 만으로 관심 밖을 쳐낸다.
             // timeout 은 초 단위라 5 초 — 표시가 한 번 빠지는 것이 도구 호출이
             // 늦어지는 것보다 낫다(옆의 5000 은 사실상 무제한이다).
+            // 닫힌 pane 으로 가는 SendMessage 를 그 자리서 막는다. 사용자가 닫아도
+            // 그 안의 claude 는 계속 도는데 **명부(ListAgents)에는 닫힘이 안 보여서**,
+            // 학생이 멀쩡한 줄 알고 일을 시키고 그 작업이 사용자 눈 밖에서 돌았다
+            // (거노 2026-08-15). board 의 `detached` 로 이미 알 수 있지만 그건 보러
+            // 가야 보이고, 안 보고 보내는 것이 사고의 형태다.
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
+                { "matcher": "SendMessage", "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
             "PostToolUse": [
@@ -8312,6 +8318,58 @@ mod tests {
         )));
         // 애초에 없으면 지울 것도 없다.
         assert!(!rename_cmd_is_ours(None));
+    }
+
+    /// 설정에 적힌 훅 스크립트가 **실제로 있는지**. 이름을 잘못 적으면 claude 는
+    /// 그 훅을 조용히 건너뛴다 — 오류도 안 나고, 막으려던 것이 안 막히는데 화면은
+    /// 평소와 똑같다. 가드류 훅은 그 침묵이 곧 통과라 특히 위험하다.
+    #[test]
+    fn every_hook_script_named_in_the_settings_exists() {
+        let dir = std::env::temp_dir().join(format!("kt-shim-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        install_claude_hook_shim(&dir);
+        let Ok(raw) = std::fs::read(dir.join("claude-hooks-settings.json")) else {
+            // collab-hooks 미해석 환경(번들 밖 CI)이면 생성 자체가 스킵된다.
+            return;
+        };
+        let settings: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let mut seen = 0usize;
+        let mut walk = |v: &serde_json::Value| {
+            let Some(c) = v.as_str() else { return };
+            for tok in c.split('"') {
+                if !(tok.ends_with(".py") || tok.ends_with(".sh")) {
+                    continue;
+                }
+                // 인터프리터 앞머리(`python3 -X utf8 `)가 붙은 형태도 있어 마지막
+                // 조각만 본다. 대조는 **레포의** collab-hooks 로 한다 — 설정이 가리키는
+                // 것은 설치된 번들이고, 그쪽이 낡은 건 다시 구우면 되는 별개 문제다.
+                // 여기서 잡으려는 것은 이름 오타 하나로 훅이 통째로 안 도는 쪽이다.
+                let path = tok.rsplit(' ').next().unwrap_or(tok);
+                let name = path.rsplit('/').next().unwrap_or(path);
+                seen += 1;
+                let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("collab-hooks")
+                    .join(name);
+                assert!(src.is_file(), "설정이 가리키는 훅 스크립트가 레포에 없다: {name}");
+            }
+        };
+        for group in ["SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "Notification"] {
+            let Some(entries) = settings.pointer(&format!("/hooks/{group}")).and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            for e in entries {
+                let Some(hooks) = e.get("hooks").and_then(|v| v.as_array()) else { continue };
+                for h in hooks {
+                    if let Some(c) = h.get("command") {
+                        walk(c);
+                    }
+                }
+            }
+        }
+        walk(settings.pointer("/statusLine/command").unwrap_or(&serde_json::Value::Null));
+        assert!(seen >= 5, "훅 경로를 하나도 못 읽었다 — 설정 모양이 바뀌었나 ({seen})");
     }
 
     #[test]
