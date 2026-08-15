@@ -3276,6 +3276,17 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     let chip_hit = chip_hit || status_hit;
                     if self.account_menu {
+                        // 히트박스는 **다음 프레임의 render 가** 채운다. 그 전에 온
+                        // 클릭은 어느 항목에도 안 맞아 「메뉴 밖」으로 판정되고, 메뉴가
+                        // 열리자마자 닫힌다(토키 2026-08-15). 사람 손엔 잘 안 걸리지만
+                        // 자동화와 빠른 손에는 걸리고, 걸렸을 때 「눌렀는데 아무 일도
+                        // 안 일어났다」로 보여 원인을 못 찾는다. 아직 한 번도 안 그려진
+                        // 메뉴는 클릭을 삼키고 그리기를 기다린다 — 손잡이를 다시 누른
+                        // 것만 예외다(닫으려는 뜻이 분명하다).
+                        if self.account_menu_hits.is_empty() && !chip_hit {
+                            window.request_redraw();
+                            return;
+                        }
                         let pick = self
                             .account_menu_hits
                             .iter()

@@ -584,6 +584,14 @@ impl crate::App {
         if self.statusbar.popover.is_none() {
             return false;
         }
+        // 아직 한 번도 안 그려졌으면 **삼키고 기다린다.** 히트박스도 바깥 판정용
+        // 사각형도 render 가 채우는데, 여는 클릭과 다음 프레임 사이에 클릭이 하나
+        // 더 오면 「아무것도 안 맞음 = 밖」이 되어 열리자마자 닫힌다(계정 메뉴에서
+        // 실제로 관측됐다 — 토키 2026-08-15). 칩 자체를 다시 누른 경우는 부르는
+        // 쪽에서 이미 걸러 온다.
+        if self.statusbar.popover_rect.is_none() {
+            return true;
+        }
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
         // 죽이기(×)를 열기(행)보다 먼저 — 둘이 겹쳐 있어 순서가 뒤집히면 ×가
