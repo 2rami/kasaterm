@@ -1096,10 +1096,10 @@ impl App {
                 self.settings_input = None;
                 // 메뉴 전환과 같은 꼬리 — 떠 있는 pane 도 실측해 맞춰 띄운다.
                 let same = id == self.set_claude_account;
-                let (_, to_label, restarted, deferred, focused) =
+                let (_, to_label, restarted, deferred, focused, live) =
                     self.apply_claude_account_switch(&id);
                 self.set_toast(crate::session::account_switch_toast(
-                    &to_label, same, restarted, deferred, focused,
+                    &to_label, same, restarted, deferred, focused, live,
                 ));
             }
             SettingsAction::ToggleAccountAutoswitch => {
@@ -1815,9 +1815,16 @@ impl App {
             )
         }));
 
-        // 계정 한 행. 첫 행은 언제나 "기본"(슬롯이 아니라 지금 로그인)이라 지울
-        // 것도 이름 붙일 것도 없다 — `slot: false` 가 그 뜻이다.
-        let claude_rows: Vec<serde_json::Value> = std::iter::once((String::new(), String::new(), None))
+        // 계정 한 행. "기본" 행(슬롯 아님, `slot: false`)은 **계정을 아직 안
+        // 골랐을 때만** — 작업대 시대에는 기본 자리가 곧 활성 계정의 작업대라,
+        // 슬롯이 활성인 동안 이 행을 주면 같은 로그인이 두 줄로 떠 계정이 하나
+        // 더 있는 것처럼 읽힌다(2026-08-17 「왜 다섯개로 떠」 — 네이티브 카드
+        // 목록·상태바 서브메뉴와 같은 규칙).
+        let claude_rows: Vec<serde_json::Value> = self
+            .set_claude_account
+            .is_empty()
+            .then(|| (String::new(), String::new(), None))
+            .into_iter()
             .chain(
                 self.set_claude_accounts
                     .iter()
@@ -3575,10 +3582,16 @@ pub(crate) fn paint_settings(
             // 쪽이다 — 「테마로만 쓸지, 말투까지 쓸지」는 캐릭터를 고르는 흐름의
             // 갈림길이라 그 화면에서 결정된다.
             y = row_wide(g, fx, y, clip, "계정",
-                &["다음에 뜨는 claude 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
-            // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
-            // 우리가 만든 슬롯이 아니라 지울 것도, 이름 붙일 것도 없다.
-            let acct_rows = std::iter::once((String::new(), "기본".to_string(), None))
+                &["행을 누르면 그 자리에서 전환 — 떠 있는 claude 도 다음 메시지부터예요"]);
+            // "기본" 행(id `""` = env 미설정 자리)은 **계정을 아직 안 골랐을 때만**
+            // 보인다. 작업대 시대에는 기본 자리가 곧 활성 계정의 작업대라, 슬롯이
+            // 활성인 동안 이 행을 그리면 같은 로그인이 두 줄로 떠 계정이 하나 더
+            // 있는 것처럼 읽힌다(2026-08-17 「왜 다섯개로 떠」 — 4계정 + 기본).
+            let acct_rows = ctx
+                .claude_account
+                .is_empty()
+                .then(|| (String::new(), "기본".to_string(), None))
+                .into_iter()
                 .chain(
                     ctx.claude_accounts
                         .iter()

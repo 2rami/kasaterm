@@ -7806,11 +7806,18 @@ impl App {
                 if let Some((p, py)) = sub_anchor {
                     let rows: Vec<(String, String, bool)> = match p {
                         AccountProvider::Claude => {
-                            let mut v = vec![(
-                                String::new(),
-                                crate::settings::account_display("", "", "기본"),
-                                self.set_claude_account.is_empty(),
-                            )];
+                            // "기본" 행은 계정 미선택일 때만 — 슬롯이 활성이면 기본
+                            // 자리가 곧 그 계정의 작업대라 같은 로그인이 두 줄로 떠
+                            // 계정이 하나 더 있는 것처럼 읽힌다(2026-08-17 「왜
+                            // 다섯개로 떠」, 설정 화면 카드 목록과 같은 규칙).
+                            let mut v = Vec::new();
+                            if self.set_claude_account.is_empty() {
+                                v.push((
+                                    String::new(),
+                                    crate::settings::account_display("", "", "기본"),
+                                    true,
+                                ));
+                            }
                             v.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
                                 (
                                     a.id.clone(),

@@ -769,11 +769,12 @@ impl App {
     /// 다시 눌러도 「어긋난 pane 만」 맞춰 띄운다 — 앱이 못 본 전환으로 이미 어긋나
     /// 있던 pane 도 계정 버튼 한 번으로 수습된다.
     ///
-    /// 반환: (전환 전 계정 이름, 새 계정 이름, 즉시 재시작한 수, 끝나길 기다리는 수).
+    /// 반환: (전환 전 계정 이름, 새 계정 이름, 즉시 재시작한 수, 끝나길 기다리는 수,
+    /// 보는 pane 이 대기 중인가, 작업대 갈아 끼우기 성공 여부).
     pub(crate) fn apply_claude_account_switch(
         &mut self,
         to: &str,
-    ) -> (String, String, usize, usize, bool) {
+    ) -> (String, String, usize, usize, bool, bool) {
         let from_label = self.claude_account_display(&self.set_claude_account.clone());
         let to_label = self.claude_account_display(to);
         // ① 작업대를 새 계정으로 갈아 끼운다. 이것만으로 **작업대를 보고 도는 pane 은
@@ -840,7 +841,12 @@ impl App {
             .active_pane
             .as_ref()
             .is_some_and(|p| self.pane_account_stale.contains_key(p));
-        (from_label, to_label, restarted, deferred, focused_pending)
+        let live = !matches!(
+            swapped,
+            crate::claude_auth::SwapOutcome::VaultEmpty
+                | crate::claude_auth::SwapOutcome::WriteFailed
+        );
+        (from_label, to_label, restarted, deferred, focused_pending, live)
     }
 
     /// 「⟳ 재시작」 표시가 남은 pane 중 지금 쉬는 것을 새 계정으로 되띄운다.
@@ -3752,12 +3758,17 @@ fn account_id_of_dir(dir: &str) -> &str {
 
 /// 전환 토스트 문구 — 자동·메뉴·설정창 세 진입점이 같은 문장을 쓴다.
 /// `same` 은 이미 활성인 계정을 다시 누른 경우(전환이 아니라 「맞추기」).
+/// `live` 는 작업대 갈아 끼우기가 성공한 경우 — 떠 있는 pane 이 **다음
+/// 메시지부터** 새 계정이므로 「다음에 뜨는 claude 부터」라고 말하면 거짓말이
+/// 된다(2026-08-17 「토스트에 다음세션부터라고 뜨는데」). 실패(금고 비었음·
+/// 쓰기 실패)일 때만 재시작 폴백이 전부라 옛 문장이 맞다.
 pub(crate) fn account_switch_toast(
     to_label: &str,
     same: bool,
     restarted: usize,
     deferred: usize,
     focused_pending: bool,
+    live: bool,
 ) -> String {
     let tail = if focused_pending {
         " · 지금 이 pane 은 ⟳ 를 누르면"
@@ -3767,6 +3778,8 @@ pub(crate) fn account_switch_toast(
     if restarted == 0 && deferred == 0 {
         return if same {
             format!("{to_label} 그대로예요 — 떠 있는 claude 도 전부 이 계정이에요")
+        } else if live {
+            format!("{to_label} 로 전환했어요 — 떠 있는 claude 도 다음 메시지부터예요{tail}")
         } else {
             format!("{to_label} 로 전환했어요 (다음에 뜨는 claude 부터){tail}")
         };
@@ -4080,14 +4093,17 @@ mod account_switch_tests {
 
     #[test]
     fn toast_covers_all_shapes() {
-        // 아무것도 안 떠 있을 때 — 전환 vs 재클릭이 다른 말을 해야 한다.
-        assert!(account_switch_toast("사이오닉", false, 0, 0, false).contains("다음에 뜨는"));
-        assert!(account_switch_toast("사이오닉", true, 0, 0, false).contains("그대로"));
+        // 작업대 전환이 성공하면 도는 pane 도 즉시 따라온다 — 「다음에 뜨는」이라고
+        // 말하면 거짓말이다(2026-08-17 「토스트에 다음세션부터라고 뜨는데」).
+        assert!(account_switch_toast("사이오닉", false, 0, 0, false, true).contains("다음 메시지부터"));
+        // 작업대 실패(금고 비었음 등)면 재시작 폴백뿐이라 옛 문장이 맞다.
+        assert!(account_switch_toast("사이오닉", false, 0, 0, false, false).contains("다음에 뜨는"));
+        assert!(account_switch_toast("사이오닉", true, 0, 0, false, true).contains("그대로"));
         // 되띄운 것과 기다리는 것이 한 문장에 같이 온다.
-        let t = account_switch_toast("사이오닉", false, 2, 1, false);
+        let t = account_switch_toast("사이오닉", false, 2, 1, false, true);
         assert!(t.contains("2개") && t.contains("1개"), "{t}");
         // 보고 있는 pane 만 남았으면 「끝나면 자동」이 아니라 눌러야 한다고 말한다.
-        let f = account_switch_toast("사이오닉", false, 2, 1, true);
+        let f = account_switch_toast("사이오닉", false, 2, 1, true, true);
         assert!(f.contains("⟳") && !f.contains("작업 중"), "{f}");
     }
 }
