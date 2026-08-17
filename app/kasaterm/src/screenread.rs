@@ -106,21 +106,34 @@ pub(crate) fn ultracode_accent(t: f32) -> [u8; 4] {
     out
 }
 
-/// ultracode 입력박스의 「ultracode」 라벨 — 위보더 왼쪽 대시가 숨이 밝은 반주기
-/// 동안 글자로 변하고, 어두워지면 도로 대시다. 원래는 혜성 꼬리가 지나갈 때
-/// 드러났는데(2026-08-15 「선 지나갈때 울트라코드 생기고」), 효과가 보라 숨쉬기로
-/// 바뀌며(2026-08-16 「울트라 코드 효과 보라색 숨쉬기로바꾸자」) 드러나는 박자도
-/// 숨에 실었다 — 위상은 `ultracode_accent` 와 같은 sin 이라 밝아질 때 나타난다.
+/// ultracode 숨쉬기 색 한 프레임 — 학생색이 있으면 **학생색↔보라 순환**(골=학생색
+/// 그대로, 마루=보라. 2026-08-17 「학생색 유지되면서 순환하는 형식으로」), 미배정
+/// pane 은 보라 밝기 숨쉬기(`ultracode_accent`)다. 입력박스 보더·「ultracode」
+/// 라벨·/rename 세션명 테두리(2026-08-17 「리네임되는 부분 테두리도 같이」)가
+/// 전부 이 하나를 불러 같은 sin 위상으로 함께 숨쉰다.
+pub(crate) fn ultracode_breath(accent: Option<[u8; 4]>, t: f32) -> [u8; 4] {
+    match accent {
+        Some(a) => {
+            let purple = [0xbbu8, 0x9a, 0xf7];
+            let k = 0.5 + 0.5 * (t * 2.2).sin();
+            let mix = |s: u8, p: u8| (s as f32 + (p as f32 - s as f32) * k).round() as u8;
+            [mix(a[0], purple[0]), mix(a[1], purple[1]), mix(a[2], purple[2]), 255]
+        }
+        None => ultracode_accent(t),
+    }
+}
+
+/// ultracode 입력박스의 「ultracode」 라벨 — 위보더 왼쪽 대시를 글자로 바꾼다.
+/// **항상 떠 있다**: 혜성 시절엔 꼬리가 지나갈 때만, 보라 숨쉬기 시절엔 밝은
+/// 반주기에만 드러났는데, 깜빡임이 거슬려 상시로 바꿨다(2026-08-17 「울트라코드
+/// 텍스트 숨쉬기할때 그냥 안없어지게」). 색은 뒤 페인트가 입히므로 보더와 함께
+/// 숨쉰다 — 글자 자체는 사라지지 않는다.
 ///
 /// `style_prompt_box` **앞에** 부를 것 — 글자를 먼저 심어야 뒤 페인트가 보더와
 /// 같은 색을 입혀 준다. 대시(─)인 칸만 바꾼다 — @칩·세션 제목 같은 실물 글자를
 /// 지우면 안 된다.
-pub(crate) fn overlay_ultracode_label(rows: &mut [Vec<GridCell>], t: f32) {
+pub(crate) fn overlay_ultracode_label(rows: &mut [Vec<GridCell>]) {
     let Some(PromptBox::Bordered { top, .. }) = prompt_box(rows) else { return };
-    // ultracode_accent 의 숨 위상. 0.5 위 = 밝은 반주기.
-    if 0.5 + 0.5 * (t * 2.2).sin() < 0.5 {
-        return;
-    }
     const LABEL: &[u8] = b"ultracode";
     const LABEL_AT: usize = 2;
     let w_top = rows[top].len();
@@ -3707,10 +3720,10 @@ mod prompt_box_tests {
             .collect()
     }
 
-    // 숨이 밝은 반주기 동안 위보더 대시가 「ultracode」로 변하고, 어두운 반주기엔
-    // 대시로 돌아온다(2026-08-15 「생겼다 없어지게」 요청을 숨쉬기 박자로 이식).
+    // 「ultracode」 라벨은 숨 위상과 무관하게 항상 위보더에 박힌다(2026-08-17
+    // 「숨쉬기할때 그냥 안없어지게」 — 반주기마다 깜빡이던 옛 동작 반려).
     #[test]
-    fn breath_reveals_ultracode_label_then_restores_dashes() {
+    fn ultracode_label_is_always_inlaid() {
         let mk = || {
             vec![
                 row_from(&"─".repeat(60)),
@@ -3718,20 +3731,28 @@ mod prompt_box_tests {
                 row_from(&"─".repeat(60)),
             ]
         };
-        // sin(t*2.2) > 0: 밝은 반주기 — t=0.5 (sin(1.1)≈0.89).
         let mut rows = mk();
-        overlay_ultracode_label(&mut rows, 0.5);
+        overlay_ultracode_label(&mut rows);
         let text: String = rows[0][2..11].iter().map(|c| c.ch).collect();
         assert_eq!(text, "ultracode");
-        // 어두운 반주기 — t=2.0 (sin(4.4)≈-0.95): 대시 그대로.
-        let mut rows = mk();
-        overlay_ultracode_label(&mut rows, 2.0);
-        assert!(rows[0][2..11].iter().all(|c| c.ch == '─'), "어두울 땐 대시여야 한다");
         // 라벨 자리에 실물 글자(@칩 등)가 있으면 지우지 않는다.
         let mut rows = mk();
         rows[0][4].ch = '@';
-        overlay_ultracode_label(&mut rows, 0.5);
+        overlay_ultracode_label(&mut rows);
         assert_eq!(rows[0][4].ch, '@');
+    }
+
+    // 숨쉬기 색: 골(sin=-1)에서 학생색 그대로, 마루(sin=+1)에서 보라 — 학생색을
+    // 잃지 않는 순환이 규칙이다(2026-08-17). 미배정 pane 은 보라 밝기 숨쉬기.
+    #[test]
+    fn breath_cycles_between_student_color_and_purple() {
+        let student = [0x10u8, 0x20, 0x30, 255];
+        // sin(t*2.2) = -1 근처: t = (3π/2)/2.2
+        let trough = (3.0 * std::f32::consts::PI / 2.0) / 2.2;
+        let peak = (std::f32::consts::PI / 2.0) / 2.2;
+        assert_eq!(ultracode_breath(Some(student), trough), student);
+        assert_eq!(ultracode_breath(Some(student), peak), [0xbb, 0x9a, 0xf7, 255]);
+        assert_eq!(ultracode_breath(None, peak), ultracode_accent(peak));
     }
 
     // 진짜 claude 입력박스: 대시줄 사이 ❯ 마커행 → 감지된다(실제 composed 는
