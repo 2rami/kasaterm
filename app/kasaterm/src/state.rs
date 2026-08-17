@@ -51,6 +51,9 @@ pub(crate) struct StatusbarState {
     /// 자원을 많이 쓰는 순으로 상위 몇 개 — (pid, CPU%, RSS KB, 프로세스 이름).
     /// `res` 와 **같은 표본**이라 둘의 수치가 어긋나지 않는다.
     pub(crate) usage_top: Vec<(u32, f32, u64, String)>,
+    /// 표본에 든 프로세스 수 전체 — `usage_top` 은 상위 몇 개뿐이라, 팝오버의
+    /// 「그 외 N개」 줄이 이 값으로 나머지를 센다.
+    pub(crate) usage_rows: usize,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어

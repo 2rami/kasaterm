@@ -68,8 +68,20 @@ fn paint_usage_popover(
 ) {
     const UROW: f32 = 30.0;
     let list: Vec<_> = sb.usage_top.iter().take(8).cloned().collect();
+    // 목록 밖에 남은 것들 — 합계는 트리 전체 합이라, 이 줄이 없으면 「다 더해도
+    // 합계가 안 나온다」가 된다(2026-08-16 「3.1G가 다 더하면 아니지않나」).
+    let rest_n = sb.usage_rows.saturating_sub(list.len());
+    let rest = (rest_n > 0)
+        .then(|| {
+            let (tc, tr) = sb.res?;
+            let lc: f32 = list.iter().map(|(_, c, _, _)| *c).sum();
+            let lr: u64 = list.iter().map(|(_, _, r, _)| *r * 1024).sum();
+            Some((rest_n, (tc - lc).max(0.0), tr.saturating_sub(lr)))
+        })
+        .flatten();
     let w = 300.0_f32.min(win_w - 16.0);
-    let h = HEAD_H + PAD + (list.len().max(1) as f32) * UROW + PAD;
+    let rows = list.len().max(1) + usize::from(rest.is_some());
+    let h = HEAD_H + PAD + rows as f32 * UROW + PAD;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -175,6 +187,27 @@ fn paint_usage_popover(
         }
         ry += UROW;
     }
+    if let Some((n, c, r)) = rest {
+        let cpu_s = format!("{c:.1}%");
+        let gb = r as f32 / (1024.0 * 1024.0 * 1024.0);
+        let mem_s = if gb >= 1.0 {
+            format!("{gb:.1} GB")
+        } else {
+            format!("{:.0} MB", gb * 1024.0)
+        };
+        let cw = g.measure_chrome_text(&cpu_s, 11.0, true);
+        let mw = g.measure_chrome_text(&mem_s, 10.0, false);
+        let right = x + w - 12.0;
+        let dim = gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false };
+        g.draw_text(right - cw, ry + 2.0, &cpu_s, dim.clone());
+        g.draw_text(
+            right - mw,
+            ry + 16.0,
+            &mem_s,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        g.draw_text(x + 12.0, ry + 8.0, &format!("그 외 {n}개"), dim);
+    }
 }
 
 /// 원격 접속 팝오버 — 여닫는 스위치 · 주소 · 복사.
@@ -223,7 +256,15 @@ fn paint_tunnel_popover(
     g.rect(x + 12.0, line, w - 24.0, 1.0, theme::with_alpha(theme::border(), 0x88));
     match host {
         Some(host) => {
-            let addr = format!("https://{host}");
+            // 토큰까지 붙인 **완성 주소**를 준다. 호스트만 주면 그 주소는 문전에서
+            // 「remote access requires a valid token」에 막힌다 — 사용자가 폰으로
+            // 열어 보고 정확히 그 화면을 만났다(2026-08-16 「원격주소 제대로나오게」).
+            // 토큰은 어차피 이 화면 주인의 것이고, 복사·표시 둘 다 같은 주소여야
+            // 「복사한 것이 열리는 것」이 성립한다.
+            let addr = match kasa_mcp::remote_token() {
+                Some(t) => format!("https://{host}/term?t={t}"),
+                None => format!("https://{host}/term"),
+            };
             let cr = (x + w - 12.0 - 22.0, line + 12.0, 22.0, 22.0);
             let ch = hit(cursor, &cr);
             g.hover_pointer |= ch;
@@ -347,7 +388,7 @@ fn paint_ports_popover(
             hover_rect(g, r.0, r.1, r.2, r.3, 0.0);
             g.hover_pointer = true;
         }
-        port_row(g, x, w, ry, theme::accent(), &port, "웹터미널", "이 kasaterm", "", 0.0);
+        port_row(g, x, w, ry, theme::accent(), "globe", &port, "웹터미널", "이 kasaterm", "", 0.0);
         sb.popover_hits.push((state::StatusbarHit::OpenWebTerm, r));
         ry += ROW_H;
     }
@@ -437,7 +478,7 @@ fn paint_ports_popover(
                 // 호버 중엔 오른쪽 두 칸을 아이콘에 내준다 — 주인 이름은 늘 보이는
                 // 값이지만 끄기·열기는 지금 이 행을 겨눴을 때만 필요하다.
                 let tail = if hov { 44.0 } else { 0.0 };
-                port_row(g, x, w, ry, dot, &port_s, site, &owner, &p.name, tail);
+                port_row(g, x, w, ry, dot, p.kind, &port_s, site, &owner, &p.name, tail);
                 if hov {
                     let br = (x + w - PADX - 18.0, ry + (ROW_H - 18.0) / 2.0, 18.0, 18.0);
                     let bhov = hit(cursor, &br);
@@ -497,6 +538,7 @@ fn port_row(
     w: f32,
     y: f32,
     dot: [u8; 4],
+    kind: &str,
     port: &str,
     site: &str,
     owner: &str,
@@ -516,7 +558,14 @@ fn port_row(
     // 가 "누가 띄웠나" 보다 먼저다.
     let right = x + w - PADX - tail;
     let rw = if w >= 300.0 { 96.0_f32.min(w * 0.3) } else { 0.0 };
-    let cx = x + PADX + 14.0 + COL_PORT;
+    let mut cx = x + PADX + 14.0 + COL_PORT;
+    // 정체 아이콘 — 번호 다음, 이름 앞. 「웹이면 열어 본다 / DB 면 안 건드린다」
+    // 판단이 이름을 읽기 전에 서게 한다(2026-08-16 「웹인지 백엔드뭐시긴지
+    // 아이콘으로」).
+    if !kind.is_empty() {
+        g.queue_icon(kind, cx, y + 8.0, 13.0, theme::text_dim());
+        cx += 19.0;
+    }
     let mid = (right - rw - 8.0 - cx).max(0.0);
     let s = crate::info::fit_text(g, site, mid, 12.0, false);
     g.draw_text(
@@ -636,7 +685,13 @@ impl crate::App {
             }
             Some(state::StatusbarHit::CopyTunnelHost) => {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
-                    self.copy_to_clipboard(format!("https://{h}"), "원격 주소 복사됨");
+                    // 표시와 같은 **완성 주소**(토큰 포함) — 호스트만 복사하면 붙는
+                    // 순간 토큰 관문에 막힌다.
+                    let url = match kasa_mcp::remote_token() {
+                        Some(t) => format!("https://{h}/term?t={t}"),
+                        None => format!("https://{h}/term"),
+                    };
+                    self.copy_to_clipboard(url, "원격 주소 복사됨");
                 }
                 return true;
             }

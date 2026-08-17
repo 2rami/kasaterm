@@ -24,7 +24,7 @@ mod resume_visibility;
 pub mod standalone;
 pub mod team;
 pub mod tunnel;
-pub use http::{claude_bin, session_token, spawn_http_server, spawn_http_server_opts};
+pub use http::{claude_bin, remote_token, session_token, spawn_http_server, spawn_http_server_opts};
 pub use register::register_clients;
 
 /// `Command` with the console window suppressed on Windows. kasaterm is a GUI

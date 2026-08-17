@@ -6045,6 +6045,7 @@ impl App {
                        orphan: bool, dead: bool| crate::info::PortRow {
                 port,
                 pid,
+                kind: crate::info::port_kind(port, name),
                 name: name.to_string(),
                 orphan,
                 pane: Some("%1".to_string()),

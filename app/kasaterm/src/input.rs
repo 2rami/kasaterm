@@ -370,9 +370,10 @@ impl App {
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());
-        if let Some((cpu, rss, top)) = sample_process_tree_usage() {
+        if let Some((cpu, rss, top, rows)) = sample_process_tree_usage() {
             self.statusbar.res = Some((cpu, rss));
             self.statusbar.usage_top = top;
+            self.statusbar.usage_rows = rows;
         }
     }
 
@@ -3257,7 +3258,11 @@ fn claude_theme_token(v: &str) -> Option<&str> {
 /// kasaterm 자신 + 자식 트리(PTY 셸·claude 들)의 (CPU %, RSS bytes) 합 —
 /// 하단바 리소스 표시(2026-08-15 지시). 터미널의 체감 무게는 앱 하나가 아니라
 /// 그 아래 도는 학생들까지라 트리로 합산한다. ps 한 번이라 5초 폴에 충분히 싸다.
-fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>)> {
+/// 반환: (cpu 합, rss 합(bytes), 상위 목록, **트리 전체 프로세스 수**). 마지막 값이
+/// 있어야 팝오버가 「그 외 N개」를 셀 수 있다 — 목록은 상위 몇 개뿐이라, 합계와
+/// 목록 합이 어긋나 보이는 것을 그 한 줄이 설명한다(2026-08-16 「3.1G가 다 더하면
+/// 아니지않나」).
+fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>, usize)> {
     // `spawn` + `wait_with_output` 인 것은 **재는 도구가 결과에 끼기 때문**이다.
     // `ps` 는 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄
     // 수가 없다. 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
@@ -3316,8 +3321,9 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
     top.sort_by(|a, b| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(b.2.cmp(&a.2))
     });
+    let total_rows = top.len();
     top.truncate(10);
-    Some((cpu, rss_kb * 1024, top))
+    Some((cpu, rss_kb * 1024, top, total_rows))
 }
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.

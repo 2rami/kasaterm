@@ -85,6 +85,10 @@ pub(crate) struct PortRow {
     pub(crate) pid: u32,
     /// 소유 프로세스의 표시 이름. 못 찾으면 빈 문자열.
     pub(crate) name: String,
+    /// 무엇의 문인지 — 아이콘 이름("globe"=웹 화면 / "database"=DB / "server"=백엔드).
+    /// 포트 번호만으로는 웹인지 백엔드인지 못 가른다(2026-08-16 「포트도 웹인지
+    /// 백엔드뭐시긴지 아이콘으로」).
+    pub(crate) kind: &'static str,
     /// 어느 pane 의 셸 자손도 **아니고** 작업 폴더가 같아서 딸려온 것. 띄운 셸이
     /// 죽어 launchd 밑으로 넘어간 dev 서버가 대부분이라, pane 이 지금 돌리는
     /// 것처럼 보이면 안 된다(끄려고 pane 을 닫아도 안 죽는다).
@@ -295,13 +299,15 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     }
                 },
             };
+            let name = by_pid
+                .get(&pid)
+                .map(|r| classify(&r.args, ProcKind::Plain).0)
+                .unwrap_or_default();
             Some(PortRow {
                 port,
                 pid,
-                name: by_pid
-                    .get(&pid)
-                    .map(|r| classify(&r.args, ProcKind::Plain).0)
-                    .unwrap_or_default(),
+                kind: port_kind(port, &name),
+                name,
                 orphan,
                 label: pane
                     .as_deref()
@@ -442,6 +448,23 @@ fn well_known(port: u16) -> Option<&'static str> {
         27017 => "mongodb",
         _ => return None,
     })
+}
+
+/// 포트의 정체 아이콘. 확실한 것부터 — DB 는 표준 포트가 말하고, 웹은 프로세스
+/// 이름(js 런타임·번들러는 사실상 전부 dev 서버)이 말한다. 나머지는 백엔드로
+/// 뭉뚱그린다 — 셋이면 「열어 볼 것 / 데이터 / 그 밖의 서버」 판단에는 충분하고,
+/// 더 가르려면 포트마다 프로토콜을 찔러야 해서 값이 비싸진다.
+pub(crate) fn port_kind(port: u16, name: &str) -> &'static str {
+    if matches!(port, 1433 | 3306 | 5432 | 5672 | 6379 | 9092 | 11211 | 27017) {
+        return "database";
+    }
+    let n = name.to_ascii_lowercase();
+    const WEB: [&str; 9] =
+        ["node", "bun", "deno", "vite", "next", "webpack", "npm", "pnpm", "yarn"];
+    if WEB.iter().any(|w| n.starts_with(w) || n.contains(&format!(" {w}"))) {
+        return "globe";
+    }
+    "server"
 }
 
 /// 아직 안 물어본 포트에 한 번씩 HTTP 로 제목을 물어본다. 워커 스레드에서
