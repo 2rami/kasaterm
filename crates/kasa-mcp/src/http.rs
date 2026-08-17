@@ -3681,7 +3681,7 @@ async fn term_ws_run(
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
     // (레지스트리 키 충돌) — 웹 전용 접두사를 붙인다.
-    let (sess, mirrored) = if pane.is_empty() {
+    let (sess, mirrored, self_id) = if pane.is_empty() {
         let id = format!("web-{}", uuid::Uuid::new_v4());
         let opts = kasa_pty::PtyOptions {
             cwd: cwd.or_else(|| std::env::var("HOME").ok()),
@@ -3697,7 +3697,7 @@ async fn term_ws_run(
                 // 탭을 닫는 순간 셸이 죽어서 폰을 덮었다 열면 처음부터다.
                 kasa_pty::register_session(&id, &sess);
                 kasa_pty::keep_session(&id, sess.clone());
-                (sess, false)
+                (sess, false, id)
             }
             Err(e) => {
                 eprintln!("[term-ws] 셸을 못 띄웠습니다: {e}");
@@ -3706,13 +3706,16 @@ async fn term_ws_run(
         }
     } else {
         // 디코딩된 값 → 원문 순으로 본다(`raw_pane_param` 주석 참고).
-        match kasa_pty::lookup_session(&pane).or_else(|| {
-            pane_raw
-                .as_deref()
-                .filter(|r| *r != pane)
-                .and_then(kasa_pty::lookup_session)
-        }) {
-            Some(s) => (s, true),
+        let hit = kasa_pty::lookup_session(&pane)
+            .map(|s| (s, pane.clone()))
+            .or_else(|| {
+                pane_raw
+                    .as_deref()
+                    .filter(|r| *r != pane)
+                    .and_then(|r| kasa_pty::lookup_session(r).map(|s| (s, r.to_string())))
+            });
+        match hit {
+            Some((s, id)) => (s, true, id),
             None => {
                 eprintln!("[term-ws] 그런 pane 이 없습니다: {pane}");
                 return;
@@ -3726,9 +3729,15 @@ async fn term_ws_run(
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
     let (c, r) = sess.size();
+    // `id` 는 이 연결이 실제로 붙은 세션 — 새 셸은 서버가 지은 web-uuid 라 클라가
+    // 이걸 받아야 목록에서 자기 행(「보는 중」)을 안다.
     let _ = ws_tx
         .send(Message::Text(
-            format!(r#"{{"t":"size","cols":{c},"rows":{r},"mirror":{mirrored}}}"#).into(),
+            serde_json::json!({
+                "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
+            })
+            .to_string()
+            .into(),
         ))
         .await;
     // 이어서 현재 화면. 크기를 먼저 알린 뒤라야 클라가 격자를 맞춘 상태에서 그린다.
