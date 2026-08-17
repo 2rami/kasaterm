@@ -117,6 +117,28 @@ impl App {
         self.chrome_dirty = true;
         eprintln!("[autocursor] ({x:.0},{y:.0})");
     }
+    /// `KASATERM_AUTONOTIFY_MS` — 그 시각에 데스크톱 알림을 한 발 쏜다.
+    ///
+    /// 실물 알림은 학생 턴 완료·승인 대기 같은 실제 사건에서만 나가, 「알림이
+    /// 어느 경로(native/osascript)로 갔고 아이콘이 무엇으로 떴나」를 헤드리스로
+    /// 재현할 길이 없었다(2026-08-17 「os알림 아직도 기본아이콘인데」 조사).
+    /// 격리 인스턴스에서 이 훅으로 쏘고 stderr 의 `[notify]` 줄과 화면을 본다.
+    pub(crate) fn run_pending_autonotify(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let ms: u64 = std::env::var("KASATERM_AUTONOTIFY_MS").ok()?.parse().ok()?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(at) = *due else { return };
+        if Instant::now() < at || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("[autonotify] 데스크톱 알림 발사");
+        crate::chrome::notify_desktop("아리스 프로브", "알림 아이콘 경로 확인", None, None, None);
+    }
     /// `KASATERM_AUTOEXPANDCLICK="<방idx>"` (+ `_MS`) — 그 방의 **펼치기 버튼**을
     /// 진짜로 누른다. `"2:body"` 는 같은 카드의 이름줄, `"2:dots"` 는 버튼 바로
     /// 오른쪽 상태 점 자리 — 둘 다 방 전환으로 흘러야 하는 곳이다.

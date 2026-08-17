@@ -5858,6 +5858,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autostash();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
+        self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
         // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.
         self.run_pending_autocolscroll();
