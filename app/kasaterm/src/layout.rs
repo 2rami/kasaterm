@@ -1634,6 +1634,24 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
     /// Cycle focus to the previous (delta=-1) or next (delta=+1) pane
     /// in document order. No-op when there's only one pane.
+    /// N번째 pane 으로 바로 점프(Ctrl+1..9). 순서는 `cycle_focus` 와 같은 문서
+    /// 순서다 — 두 손이 다른 순서를 세면 「⌘] 로 두 번 = Ctrl+3」이 안 맞아
+    /// 어느 쪽도 못 믿게 된다. 범위 밖 번호는 조용히 무시(마지막으로 접지 않는다 —
+    /// 4번을 눌렀는데 3번으로 가면 오타가 이동으로 굳는다).
+    pub(crate) fn focus_pane_at(&self, idx: usize) {
+        let Some(tree) = self.pty_layout.as_ref() else { return };
+        let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();
+        let Some(target) = leaves.get(idx) else { return };
+        let mut ws = self.ws.lock().unwrap();
+        if ws.active_pane.as_deref() == Some(target.as_str()) {
+            return;
+        }
+        ws.active_pane = Some(target.clone());
+        drop(ws);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     pub(crate) fn cycle_focus(&self, delta: i32) {
         let Some(tree) = self.pty_layout.as_ref() else { return; };
         let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();

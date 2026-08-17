@@ -2723,6 +2723,31 @@ impl App {
                 // shortcuts on Windows/Linux don't double-fire as both a
                 // shortcut and a control byte.
                 if ctrl && !host {
+                    // Ctrl+1..9 → 그 번호 pane 으로 점프. 번호는 ⌘[·⌘] 순환과 같은
+                    // 문서 순서다. Ctrl+숫자를 골라 잡은 이유: 터미널 세계에 이 조합의
+                    // 인코딩이 아예 없어(죽은 키) 셸·TUI 가 잃는 것이 없다 — 옵션+숫자는
+                    // 특수문자·zsh 반복 인자 입력을 뺏는다(2026-08-17 「옵션키 번호로
+                    // 할까 컨트롤키 번호로 할까」에 대한 답). ⌘+숫자는 방(윈도우) 전환에
+                    // 이미 쓰고 있다. Shift·Alt 가 섞이면 우리 것이 아니다 — Windows 의
+                    // host chord(Ctrl+Shift)와도 그 조건으로 갈린다.
+                    if !self.modifiers.shift_key() && !self.modifiers.alt_key() && !event.repeat {
+                        let pane_digit = match code {
+                            KeyCode::Digit1 | KeyCode::Numpad1 => Some(0),
+                            KeyCode::Digit2 | KeyCode::Numpad2 => Some(1),
+                            KeyCode::Digit3 | KeyCode::Numpad3 => Some(2),
+                            KeyCode::Digit4 | KeyCode::Numpad4 => Some(3),
+                            KeyCode::Digit5 | KeyCode::Numpad5 => Some(4),
+                            KeyCode::Digit6 | KeyCode::Numpad6 => Some(5),
+                            KeyCode::Digit7 | KeyCode::Numpad7 => Some(6),
+                            KeyCode::Digit8 | KeyCode::Numpad8 => Some(7),
+                            KeyCode::Digit9 | KeyCode::Numpad9 => Some(8),
+                            _ => None,
+                        };
+                        if let Some(idx) = pane_digit {
+                            self.focus_pane_at(idx);
+                            return;
+                        }
+                    }
                     let letter = match code {
                         KeyCode::KeyA => Some(b'\x01'),
                         KeyCode::KeyB => Some(b'\x02'),
