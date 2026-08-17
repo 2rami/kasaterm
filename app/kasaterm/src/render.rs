@@ -4908,20 +4908,34 @@ impl App {
                     let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
                     // While a git op runs, the button shows a spinner + "Pushing…"
                     // and ignores clicks. No uncommitted changes but commits to
-                    // push → the primary button becomes "↑ Push N" (GitHub-Desktop
-                    // style); with changes it's Commit. The caret dropdown always
-                    // offers the full set (Commit / Push / Pull / Create PR).
-                    let push_mode = busy.is_none() && !can_commit && git_view.ahead > 0;
-                    let can_drop = busy.is_none() && (can_commit || git_view.ahead > 0);
-                    let main_active = busy.is_none() && (can_commit || push_mode);
+                    // sync → the primary button becomes the sync action
+                    // (GitHub-Desktop style); with changes it's Commit. 당길 것이
+                    // 있으면 **Pull 이 Push 보다 먼저**다(2026-08-16 「풀있을때 풀먼저
+                    // 뜨게」) — 당기기 전의 Push 는 어차피 원격이 거절한다. The caret
+                    // dropdown always offers the full set (Commit / Push / Pull /
+                    // Create PR).
+                    let pull_mode = busy.is_none() && !can_commit && git_view.behind > 0;
+                    let push_mode =
+                        busy.is_none() && !can_commit && !pull_mode && git_view.ahead > 0;
+                    let can_drop = busy.is_none()
+                        && (can_commit || git_view.ahead > 0 || git_view.behind > 0);
+                    let main_active = busy.is_none() && (can_commit || push_mode || pull_mode);
                     let main_label = if let Some(op) = busy {
                         format!("{op}…")
+                    } else if pull_mode {
+                        format!("Pull  {}", git_view.behind)
                     } else if push_mode {
                         format!("Push  {}", git_view.ahead)
                     } else {
                         "Commit".to_string()
                     };
-                    let main_icon = if push_mode { "arrow-up" } else { "git-commit-horizontal" };
+                    let main_icon = if pull_mode {
+                        "arrow-down"
+                    } else if push_mode {
+                        "arrow-up"
+                    } else {
+                        "git-commit-horizontal"
+                    };
                     let lw = g.measure_chrome_text(&main_label, 12.0, true);
                     let main_w = 24.0 + lw + 10.0;
                     let total_w = main_w + caret_w;
@@ -5392,10 +5406,23 @@ impl App {
                         } else {
                             "Pull".to_string()
                         };
+                        // 당길 것이 있으면 Pull 을 Push 위로 — 기본 버튼과 같은 우선
+                        // 순위(당기기 전의 Push 는 원격이 거절한다).
+                        let (sync_a, sync_b) = if git_view.behind > 0 {
+                            (
+                                ("arrow-down", pull_label, GitCommitAction::Pull),
+                                ("arrow-up", push_label, GitCommitAction::Push),
+                            )
+                        } else {
+                            (
+                                ("arrow-up", push_label, GitCommitAction::Push),
+                                ("arrow-down", pull_label, GitCommitAction::Pull),
+                            )
+                        };
                         let items: [(&str, String, GitCommitAction); 4] = [
                             ("git-commit-horizontal", "Commit".to_string(), GitCommitAction::Commit),
-                            ("arrow-up", push_label, GitCommitAction::Push),
-                            ("arrow-down", pull_label, GitCommitAction::Pull),
+                            sync_a,
+                            sync_b,
                             ("github", "Create PR".to_string(), GitCommitAction::CreatePr),
                         ];
                         let iw = 190.0_f32;

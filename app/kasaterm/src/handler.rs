@@ -3984,17 +3984,22 @@ impl ApplicationHandler<UserEvent> for App {
                         // Commit split button: main → modal, caret → dropdown.
                         if self.git.commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
                             // Matches the render: with no changes but commits to
-                            // push, the primary button is Push, not Commit.
-                            let push_mode = self
-                                .git.col_data
+                            // sync, the primary button is the sync action — 당길
+                            // 것이 있으면 Pull 이 먼저다(render 의 pull_mode 와 같은
+                            // 우선순위여야 「보이는 버튼」과 「눌리는 동작」이 안
+                            // 갈린다).
+                            let sync = self
+                                .git
+                                .col_data
                                 .lock()
                                 .ok()
-                                .map(|g| g.staged.is_empty() && g.unstaged.is_empty() && g.ahead > 0)
-                                .unwrap_or(false);
-                            if push_mode {
-                                self.run_git_col_action(crate::GitColBtn::Push);
-                            } else {
-                                self.open_commit_modal();
+                                .filter(|g| g.staged.is_empty() && g.unstaged.is_empty())
+                                .map(|g| (g.behind > 0, g.ahead > 0))
+                                .unwrap_or((false, false));
+                            match sync {
+                                (true, _) => self.run_git_col_action(crate::GitColBtn::Pull),
+                                (false, true) => self.run_git_col_action(crate::GitColBtn::Push),
+                                _ => self.open_commit_modal(),
                             }
                             window.request_redraw();
                             return;
