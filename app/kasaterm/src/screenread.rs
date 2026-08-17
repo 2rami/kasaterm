@@ -80,9 +80,9 @@ impl PromptBox {
     }
 }
 
-/// ultracode 턴, **미배정** pane 의 입력박스 accent — 학생 색이 없는 pane 만
-/// 이걸 `style_prompt_box` 에 넘긴다(학생색 pane 은 학생색을 유지하고
-/// `overlay_ultracode_comet` 이 위를 지나간다 — 2026-08-12 지시).
+/// ultracode 턴의 입력박스 accent — 보라 숨쉬기. 학생 배정과 무관하게 모든
+/// ultracode pane 이 이걸 쓴다(2026-08-16 「보라색 숨쉬기로」 — 한때는 학생색
+/// 보더 위를 혜성이 돌았다). 누구 pane 인지는 pane 테두리 학생색이 계속 말한다.
 ///
 /// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
 /// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
@@ -106,73 +106,32 @@ pub(crate) fn ultracode_accent(t: f32) -> [u8; 4] {
     out
 }
 
-/// 혜성 속도(셀/초)와 꼬리 길이(셀). 전폭 pane(둘레 ~360셀) 기준 한 바퀴 ~8.5초 —
-/// 시선을 끌 만큼은 움직이되 타이핑을 방해할 만큼 바쁘지 않은 지점.
-pub(crate) const COMET_SPEED: f32 = 42.0;
-pub(crate) const COMET_TAIL: f32 = 16.0;
-
-/// ultracode 가 켜진 **학생색** pane 의 입력박스 — 보더는 학생색 그대로 두고,
-/// 그 위를 보라 혜성이 돈다(2026-08-12 지시 「학생색이 있는 프롬프트창은 보이게,
-/// 보라 효과가 지나다니게」— 통보라 도색은 누구 pane 인지를 지웠다).
+/// ultracode 입력박스의 「ultracode」 라벨 — 위보더 왼쪽 대시가 숨이 밝은 반주기
+/// 동안 글자로 변하고, 어두워지면 도로 대시다. 원래는 혜성 꼬리가 지나갈 때
+/// 드러났는데(2026-08-15 「선 지나갈때 울트라코드 생기고」), 효과가 보라 숨쉬기로
+/// 바뀌며(2026-08-16 「울트라 코드 효과 보라색 숨쉬기로바꾸자」) 드러나는 박자도
+/// 숨에 실었다 — 위상은 `ultracode_accent` 와 같은 sin 이라 밝아질 때 나타난다.
 ///
-/// 궤도는 위 보더 좌→우, 아래 보더 우→좌의 순환 — claude 입력박스는 세로 보더가
-/// 없어서 이게 「둘레를 돈다」로 읽히는 유일한 경로다. 머리는 흰빛을 한 줌 얹은
-/// 보라(bb9af7), 꼬리는 학생색으로 사그라든다. 반드시 `style_prompt_box` **뒤에**
-/// 부를 것 — 앞이면 그 호출이 학생색으로 덮는다(ultracode_accent 와 같은 함정).
-pub(crate) fn overlay_ultracode_comet(rows: &mut [Vec<GridCell>], student: [u8; 4], t: f32) {
-    let Some(PromptBox::Bordered { top, bottom, .. }) = prompt_box(rows) else { return };
-    let (w_top, w_bot) = (rows[top].len(), rows[bottom].len());
-    let total = (w_top + w_bot) as f32;
-    // 둘레가 꼬리보다 짧으면 혜성이 자기 꼬리를 물어 통보라가 된다 — 그 폭에선
-    // 학생색을 지키는 게 목적에 맞다.
-    if total < COMET_TAIL * 2.0 {
+/// `style_prompt_box` **앞에** 부를 것 — 글자를 먼저 심어야 뒤 페인트가 보더와
+/// 같은 색을 입혀 준다. 대시(─)인 칸만 바꾼다 — @칩·세션 제목 같은 실물 글자를
+/// 지우면 안 된다.
+pub(crate) fn overlay_ultracode_label(rows: &mut [Vec<GridCell>], t: f32) {
+    let Some(PromptBox::Bordered { top, .. }) = prompt_box(rows) else { return };
+    // ultracode_accent 의 숨 위상. 0.5 위 = 밝은 반주기.
+    if 0.5 + 0.5 * (t * 2.2).sin() < 0.5 {
         return;
     }
-    let head = (t * COMET_SPEED) % total;
-    // 혜성 꼬리가 덮는 동안만 위보더 왼쪽 대시가 「ultracode」 글자로 변하고,
-    // 지나가면 도로 대시다(2026-08-15 거노 「선 지나갈때 울트라코드 생기고
-    // 선지나가면 없어지게」 — /rename 라벨 위를 빛이 쓸고 가는 게 멋있어서).
-    // 글자 배치를 여기(페인트 앞)서 하면 아래 페인트가 다른 글리프와 똑같이
-    // 빛을 입혀 준다. 대시(─)인 칸만 바꾼다 — @칩·세션 제목 같은 실물 글자를
-    // 지우면 안 되고, 덕분에 꼬리가 떠난 칸은 자동으로 대시로 돌아간다.
     const LABEL: &[u8] = b"ultracode";
     const LABEL_AT: usize = 2;
-    if w_top > LABEL_AT + LABEL.len() + 2 {
-        for (i, &ch) in LABEL.iter().enumerate() {
-            let col = LABEL_AT + i;
-            let d = (head - col as f32).rem_euclid(total);
-            if d <= COMET_TAIL && rows[top][col].ch == '─' {
-                rows[top][col].ch = ch as char;
-            }
-        }
+    let w_top = rows[top].len();
+    if w_top <= LABEL_AT + LABEL.len() + 2 {
+        return;
     }
-    let purple = [0xbbu8, 0x9a, 0xf7];
-    let mix = |b: u8, a: u8, k: f32| (b as f32 + (a as f32 - b as f32) * k).round() as u8;
-    let paint = |cell: &mut GridCell, pos: f32| {
-        if matches!(cell.ch, ' ' | '\0') {
-            return;
+    for (i, &ch) in LABEL.iter().enumerate() {
+        let cell = &mut rows[top][LABEL_AT + i];
+        if cell.ch == '─' {
+            cell.ch = ch as char;
         }
-        let d = (head - pos).rem_euclid(total);
-        if d > COMET_TAIL {
-            return;
-        }
-        // 제곱 감쇠 — 선형이면 균일한 띠로 보여 「지나가는 빛」이 안 된다.
-        let s = (1.0 - d / COMET_TAIL) * (1.0 - d / COMET_TAIL);
-        let mut rgb = [0u8; 3];
-        for i in 0..3 {
-            rgb[i] = mix(student[i], purple[i], s);
-        }
-        let lift = 0.3 * s * s;
-        for c in rgb.iter_mut() {
-            *c = mix(*c, 0xff, lift);
-        }
-        cell.fg = kasa_bridge::screen::Color::Rgb(rgb[0], rgb[1], rgb[2]);
-    };
-    for (col, cell) in rows[top].iter_mut().enumerate() {
-        paint(cell, col as f32);
-    }
-    for (col, cell) in rows[bottom].iter_mut().enumerate() {
-        paint(cell, (w_top + (w_bot - 1 - col)) as f32);
     }
 }
 
@@ -3748,10 +3707,10 @@ mod prompt_box_tests {
             .collect()
     }
 
-    // 혜성 꼬리가 라벨 자리를 덮는 동안 위보더 대시가 「ultracode」로 변하고,
-    // 꼬리가 떠나면 대시로 돌아온다(2026-08-15 거노 요청).
+    // 숨이 밝은 반주기 동안 위보더 대시가 「ultracode」로 변하고, 어두운 반주기엔
+    // 대시로 돌아온다(2026-08-15 「생겼다 없어지게」 요청을 숨쉬기 박자로 이식).
     #[test]
-    fn comet_reveals_ultracode_label_then_restores_dashes() {
+    fn breath_reveals_ultracode_label_then_restores_dashes() {
         let mk = || {
             vec![
                 row_from(&"─".repeat(60)),
@@ -3759,19 +3718,19 @@ mod prompt_box_tests {
                 row_from(&"─".repeat(60)),
             ]
         };
-        // head=11: 라벨(col 2..=10) 전부가 꼬리(16칸) 안 — 글자가 드러난다.
+        // sin(t*2.2) > 0: 밝은 반주기 — t=0.5 (sin(1.1)≈0.89).
         let mut rows = mk();
-        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 11.0 / COMET_SPEED);
+        overlay_ultracode_label(&mut rows, 0.5);
         let text: String = rows[0][2..11].iter().map(|c| c.ch).collect();
         assert_eq!(text, "ultracode");
-        // head=80(아래보더): 라벨 자리는 꼬리 밖 — 대시 그대로.
+        // 어두운 반주기 — t=2.0 (sin(4.4)≈-0.95): 대시 그대로.
         let mut rows = mk();
-        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 80.0 / COMET_SPEED);
-        assert!(rows[0][2..11].iter().all(|c| c.ch == '─'), "꼬리 밖에서는 대시여야 한다");
+        overlay_ultracode_label(&mut rows, 2.0);
+        assert!(rows[0][2..11].iter().all(|c| c.ch == '─'), "어두울 땐 대시여야 한다");
         // 라벨 자리에 실물 글자(@칩 등)가 있으면 지우지 않는다.
         let mut rows = mk();
         rows[0][4].ch = '@';
-        overlay_ultracode_comet(&mut rows, [0, 0, 0, 255], 11.0 / COMET_SPEED);
+        overlay_ultracode_label(&mut rows, 0.5);
         assert_eq!(rows[0][4].ch, '@');
     }
 
@@ -3818,52 +3777,6 @@ mod prompt_box_tests {
         }
         // 실제로 숨쉬어야 한다 — 상수면 정적인 테두리와 구분이 안 된다.
         assert!(seen_dim && seen_bright, "밝기가 오르내리지 않는다");
-    }
-
-    // ultracode 혜성 — 보더 대부분은 학생색 그대로(창이 「보인다」)이고, 혜성
-    // 구간만 보라 쪽으로 물들며, 시간이 흐르면 그 자리가 이동한다(2026-08-12 지시
-    // 「학생색이 있는 프롬프트창은 보이게, 보라 효과가 지나다니게」).
-    #[test]
-    fn ultracode_comet_roams_over_student_border() {
-        let student = [0xd5u8, 0x55, 0x80, 255];
-        let build = || {
-            vec![
-                row_from(&"─".repeat(60)),
-                row_from(&format!("❯ hi{}", " ".repeat(56))),
-                row_from(&"─".repeat(60)),
-            ]
-        };
-        // 학생색 그대로가 아닌 보더 대시 = 혜성이 지나는 자리.
-        let comet_cells = |rows: &[Vec<GridCell>]| -> Vec<(usize, usize)> {
-            let mut v = Vec::new();
-            for (ri, row) in rows.iter().enumerate() {
-                for (ci, c) in row.iter().enumerate() {
-                    if c.ch != '─' {
-                        continue;
-                    }
-                    if let kasa_bridge::screen::Color::Rgb(r, g, b) = c.fg {
-                        if [r, g, b] != [student[0], student[1], student[2]] {
-                            // 보라 쪽으로 물든다 — B 가 학생색보다 오른다.
-                            assert!(b > student[2], "보라가 아니다: {r},{g},{b}");
-                            v.push((ri, ci));
-                        }
-                    }
-                }
-            }
-            v
-        };
-        let mut a = build();
-        style_prompt_box(&mut a, student);
-        overlay_ultracode_comet(&mut a, student, 0.3);
-        let ca = comet_cells(&a);
-        assert!(!ca.is_empty(), "혜성이 안 칠해졌다");
-        // 꼬리 길이 언저리만 물들어야 학생색 보더가 남는다 — 전부 물들면
-        // 통보라 도색과 다를 게 없다.
-        assert!(ca.len() <= COMET_TAIL as usize + 2, "너무 넓다: {}", ca.len());
-        let mut b = build();
-        style_prompt_box(&mut b, student);
-        overlay_ultracode_comet(&mut b, student, 1.3);
-        assert_ne!(ca, comet_cells(&b), "혜성이 움직이지 않는다");
     }
 
     // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).

@@ -1851,19 +1851,13 @@ impl App {
                         .is_some();
                 if ultra {
                     let t = self.version_anim_start.elapsed().as_secs_f32();
-                    if let Some(accent) = prompt_accent {
-                        // 학생색 보더는 그대로 두고 그 위를 보라 혜성이 돈다 —
-                        // 통보라 도색은 누구 pane 인지를 지웠다(2026-08-12 지시
-                        // 「학생색이 있는 프롬프트창은 보이게, 보라 효과가
-                        // 지나다니게」). 혜성은 style_prompt_box **뒤**여야 한다 —
-                        // 앞이면 그 호출이 학생색으로 덮는다.
-                        style_prompt_box(&mut composed, accent);
-                        overlay_ultracode_comet(&mut composed, accent, t);
-                    } else {
-                        // 미배정 pane 은 지킬 학생색이 없다 — 보라 숨쉬기 유지
-                        // (거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
-                        style_prompt_box(&mut composed, ultracode_accent(t));
-                    }
+                    // 학생 배정과 무관하게 **보라 숨쉬기 하나**다(2026-08-16 「울트라
+                    // 코드 효과 보라색 숨쉬기로바꾸자」 — 혜성을 이걸로 대체). 학생색은
+                    // pane 테두리가 계속 말하고 있어 입력박스가 보라여도 누구 pane 인지
+                    // 잃지 않는다. 라벨 심기가 페인트보다 먼저다 — 글자를 먼저 놓아야
+                    // style_prompt_box 가 보더와 같은 숨쉬는 색을 입혀 준다.
+                    overlay_ultracode_label(&mut composed, t);
+                    style_prompt_box(&mut composed, ultracode_accent(t));
                 } else if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
