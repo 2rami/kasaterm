@@ -94,7 +94,6 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 block2 = "0.6"
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc = "0.2"
-security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

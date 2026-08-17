@@ -139,11 +139,36 @@ pub(crate) fn read_credentials(dir: Option<&Path>) -> Option<Vec<u8>> {
     // ⚠️ 시험은 열쇠고리를 **건드리지 않는다**(파일 경로만 탄다). 시험이 만든 항목이
     // 남으면, 빌드가 바뀔 때마다 macOS 가 사용자에게 「kasaterm 이 비밀 정보를 쓰려
     // 합니다」 창을 띄운다 — 2026-08-15 에 실제로 그 창이 반복해 떴다.
+    //
+    // 읽기는 **Security 프레임워크가 아니라 `security` CLI 로 간다.** 금고 항목의
+    // 주인은 claude 고, claude 는 `security` CLI 로 항목을 만든다 — 그 항목을 우리
+    // 실행파일이 프레임워크로 직접 열면 「만든 프로그램이 아님」이라 macOS 가 매번
+    // 승인 창을 띄운다. 폴러가 주기마다 전 금고를 읽으니 앱을 켤 때마다 계정 수만큼
+    // 창이 쏟아졌다(2026-08-16 실사용 보고). 같은 CLI 로 읽으면 조용하다 — 쓰기가
+    // 이미 이 길을 쓰는 이유이기도 하다.
     #[cfg(all(target_os = "macos", not(test)))]
     {
-        use security_framework::passwords::get_generic_password;
-        if let Ok(b) = get_generic_password(&service_name(dir), &keychain_account()) {
-            return Some(b);
+        let out = crate::proc::command("security")
+            .args([
+                "find-generic-password",
+                "-w",
+                "-s", &service_name(dir),
+                "-a", &keychain_account(),
+            ])
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                let mut b = o.stdout;
+                // `-w` 는 값 뒤에 개행을 붙인다. 그대로 두면 digest 가 우리가 쓴
+                // 원문과 어긋나 read_back 이 매 주기 「바뀌었다」로 읽는다.
+                while b.last().is_some_and(|c| *c == b'\n' || *c == b'\r') {
+                    b.pop();
+                }
+                if !b.is_empty() {
+                    return Some(b);
+                }
+            }
         }
     }
     // keychain 항목이 없으면 평문 파일이 정본이다(claude 도 같은 순서로 폴백한다).
