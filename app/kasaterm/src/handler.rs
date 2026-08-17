@@ -1327,6 +1327,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
                     // 로그아웃된 채로 꺼내진다(1회용이라 되돌릴 수도 없다).
                     crate::claude_auth::read_back(socket::claude_account_dir);
+                    // 반대 방향도 맞춘다 — 금고가 작업대보다 새로워졌으면(옛 배선의
+                    // claude·데스크톱 앱이 금고를 직접 갱신한 경우, 2026-08-17 실측:
+                    // 이틀 묵은 고아 앱이 acct-1 금고를 돌려 작업대 사본의 refresh
+                    // token 을 죽은 값으로 만들었다) 작업대를 금고의 최신으로 다시
+                    // 채운다. ensure_active 는 지문·내용이 같으면 아무것도 안 하는
+                    // 멱등이라 매 사이클 불러도 싸다.
+                    if !active_id.is_empty() {
+                        let _ = crate::claude_auth::ensure_active(
+                            &active_id,
+                            socket::claude_account_dir,
+                        );
+                    }
                     // 활성 계정은 **작업대**를 본다 — 금고를 보면 이 폴러의 만료 갱신이
                     // 도는 pane 들의 토큰을 죽인다(runtime_dir_for 주석).
                     let active_dir = crate::claude_auth::runtime_dir_for(&active_id, &active_id)
