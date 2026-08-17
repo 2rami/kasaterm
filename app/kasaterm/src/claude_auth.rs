@@ -455,11 +455,25 @@ pub(crate) fn adopt_oauth_account_cache(port: String, vault_dir: Option<PathBuf>
             })
             .collect();
         let url = format!("http://127.0.0.1:{port}/claude-identity?dir={enc}");
-        let Ok(out) = crate::proc::command("curl").args(["-s", "--max-time", "8", &url]).output()
-        else {
-            return;
+        // 부팅 직후에도 불린다 — 신원 서버가 아직 안 떠 있을 수 있어 몇 번 되묻는다.
+        // 끝내 못 물으면 캐시를 안 바꾼다(표시가 낡는 쪽이 지어내는 쪽보다 낫다).
+        let mut tries = 0;
+        let v = loop {
+            tries += 1;
+            let out =
+                crate::proc::command("curl").args(["-s", "--max-time", "8", &url]).output();
+            if let Ok(o) = out {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                    if v.get("account").is_some_and(|a| a.is_object()) {
+                        break v;
+                    }
+                }
+            }
+            if tries >= 5 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
         };
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return };
         let Some(account) = v.get("account").filter(|a| a.is_object()) else { return };
         if account.pointer("/emailAddress").and_then(|e| e.as_str()).is_none() {
             return;

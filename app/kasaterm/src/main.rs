@@ -6840,6 +6840,18 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         "KASATERM_CLAUDE_ACCOUNT_DIR",
         account_dir.as_deref().map_or(String::new(), |d| d.display().to_string()),
     );
+    // /status 의 Email/Organization 은 `~/.claude.json` 캐시다 — 작업대를 채워도
+    // 캐시가 옛 계정이면 pane 은 새 계정으로 돌면서 /status 는 옛말을 한다. 전환
+    // 때만 갱신하고 부팅 재구성 때는 안 갱신해, 표시가 하루 넘게 낡은 실사고가
+    // 있었다(2026-08-17: 실물은 사이오닉인데 /status 는 gmail). 여기서 맞춘다.
+    if !account_id.is_empty()
+        && account_dir.as_ref().is_some_and(|d| d.as_os_str().is_empty())
+    {
+        crate::claude_auth::adopt_oauth_account_cache(
+            crate::mcp_panel_port(),
+            socket::claude_account_dir(&account_id),
+        );
+    }
     let account_block = claude_account_export_line(account_dir.as_deref());
     // teammate 트리플 자동 부착 — pane 의 claude 를 전부 팀원으로 부팅해 SendMessage 를
     // 상시 연다. 인박스 폴러는 트리플만으로 arm 되고 config.json 은 필요 없다.
