@@ -450,20 +450,43 @@ const handlers = {
   // 찍는 것이라, 에이전트가 페이지 위에 얹은 것이 함께 박히면 그 그림은 쓸 수 없다 — 촬영을
   // 에이전트가 하는 이상 치우는 것도 에이전트 몫이고, 사람이 미리 껐다 켤 일이 아니다.
   // overlay:true 로 남길 수 있다. 오버레이 자체가 잘 그려지는지 확인할 때가 그 경우다.
-  async screenshot({ tabId, fullPage = false, format = 'png', quality, overlay = false }) {
+  async screenshot({ tabId, ref, padding = 0, fullPage = false, format = 'png', quality, overlay = false }) {
     const id = await resolveTabId(tabId)
+    // 둘 다 주면 무엇을 원한 건지 알 수 없다. 조용히 하나를 고르면 엉뚱한 그림이 나간다.
+    if (ref && fullPage) throw new Error('ref 와 fullPage 는 함께 쓸 수 없습니다 — 요소 하나를 찍을지 문서 전체를 찍을지 하나만 고르세요.')
+
+    // 요소 스샷은 찍을 영역을 먼저 재야 한다. clip 은 CDP 만 받으므로 아래에서 경로가 갈린다.
+    let clip = null
+    let target = null
+    if (ref) {
+      const m = await page(id, 'rect', { ref })
+      const pad = Math.max(0, padding)
+      const x = Math.max(0, m.rect.x - pad)
+      const y = Math.max(0, m.rect.y - pad)
+      clip = {
+        x, y,
+        // 문서 밖까지 요청하면 그만큼 검게 찍히므로 문서 크기로 자른다
+        width: Math.min(m.rect.width + pad * 2, Math.max(1, m.docSize.width - x)),
+        height: Math.min(m.rect.height + pad * 2, Math.max(1, m.docSize.height - y)),
+      }
+      // ★무엇을 찍었는지 되돌려준다. ref 가 엉뚱한 요소를 가리켰을 때 부르는 쪽이
+      // 알아챌 수 있는 유일한 단서다(ref 를 받아놓고 다른 걸 집던 upload_file 사고를 되풀이하지 않는다).
+      target = { ref, name: m.name, role: m.role, clip: { ...clip } }
+    }
+
     const tab = await chrome.tabs.get(id)
     const hidden = overlay ? false : await hideForShot(id)
     try {
       // captureVisibleTab 은 배너가 안 뜨지만 활성 탭의 보이는 영역만 찍는다. 나머지는 CDP 가 필요하다.
-      if (!fullPage && tab.active) {
+      // 영역을 지정할 방법이 없으므로 ref 가 있으면 이 길로 가지 않는다.
+      if (!fullPage && !clip && tab.active) {
         try {
           const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, ...(quality ? { quality } : {}) })
           return { data: dataUrl.split(',')[1], format, via: 'captureVisibleTab', overlayHidden: hidden }
         } catch { /* 권한·타이밍 문제면 CDP 로 내려간다 */ }
       }
-      const data = await cdp.screenshot(id, { fullPage, format, quality })
-      return { data, format, via: 'cdp', overlayHidden: hidden }
+      const data = await cdp.screenshot(id, { fullPage, format, quality, clip })
+      return { data, format, via: 'cdp', overlayHidden: hidden, ...(target ? { target } : {}) }
     } finally {
       // ⚠️반드시 되돌린다. 던지고 나가는 길에 그냥 두면 그 탭은 담당 표시가 없는 채로 남는다.
       // content 쪽에도 자동 복구 타이머가 있지만 그건 이 줄이 못 돌았을 때의 안전망이다.

@@ -192,6 +192,28 @@ if (!window.__ccInjected) {
     return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width), h: Math.round(r.height) }
   }
 
+  // 요소 하나만 잘라 찍기 위한 사각형.
+  // ⚠️centerOf 와 달리 **문서 좌표**로 돌려준다 — CDP 의 Page.captureScreenshot clip 이
+  // 문서 원점 기준이라, 뷰포트 좌표를 그대로 넘기면 스크롤한 만큼 엉뚱한 자리가 찍힌다.
+  function rectOf(el) {
+    const r = el.getBoundingClientRect()
+    const doc = document.documentElement
+    return {
+      rect: {
+        x: r.x + window.scrollX,
+        y: r.y + window.scrollY,
+        width: r.width,
+        height: r.height,
+      },
+      // clip 을 문서 밖으로 넘기면 그만큼 빈 영역이 검게 찍히므로 자를 기준을 함께 준다
+      docSize: {
+        width: Math.max(doc.scrollWidth, window.innerWidth),
+        height: Math.max(doc.scrollHeight, window.innerHeight),
+      },
+      devicePixelRatio: window.devicePixelRatio,
+    }
+  }
+
   // React·Vue 는 value 프로퍼티를 가로채므로 네이티브 setter 로 써야 상태가 따라온다.
   function setNativeValue(el, value) {
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
@@ -497,6 +519,17 @@ if (!window.__ccInjected) {
     box: (a) => {
       const el = resolve(a.ref)
       return { box: centerOf(el), name: nameOf(el), role: roleOf(el) }
+    },
+    // 요소 스샷 전용. name·role 을 함께 주는 이유는 응답에 "무엇을 찍었는지"를 남겨야
+    // ref 가 엉뚱한 요소를 가리켰을 때 부르는 쪽이 알아챌 수 있기 때문이다.
+    rect: (a) => {
+      const el = resolve(a.ref)
+      if (a.scrollIntoView !== false) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' })
+      const out = rectOf(el)
+      if (out.rect.width < 1 || out.rect.height < 1) {
+        throw new Error(`EMPTY_RECT: ${a.ref} 은 크기가 0 입니다(숨겨졌거나 아직 안 그려짐). 찍을 영역이 없습니다.`)
+      }
+      return { ...out, name: nameOf(el), role: roleOf(el), visibilityState: document.visibilityState }
     },
     text: (a) => ({
       visibilityState: document.visibilityState,

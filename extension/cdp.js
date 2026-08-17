@@ -291,12 +291,16 @@ export async function pressKey(tabId, key, modifiers = 0) {
   return { pressed: key }
 }
 
-export async function screenshot(tabId, { fullPage = false, format = 'png', quality } = {}) {
+export async function screenshot(tabId, { fullPage = false, format = 'png', quality, clip } = {}) {
   await attach(tabId)
   await ensureDomain(tabId, 'Page')
-  const params = { format, captureBeyondViewport: fullPage }
+  // clip 을 줄 때도 captureBeyondViewport 가 필요하다 — 요소가 스크롤 아래에 있으면
+  // 그것 없이는 뷰포트에 걸린 부분만 찍히고 나머지가 잘린다.
+  const params = { format, captureBeyondViewport: fullPage || !!clip }
   if (format === 'jpeg' && quality) params.quality = quality
-  if (fullPage) {
+  if (clip) {
+    params.clip = { ...clip, scale: 1 }
+  } else if (fullPage) {
     const { cssContentSize } = await send(tabId, 'Page.getLayoutMetrics')
     if (cssContentSize) {
       params.clip = { x: 0, y: 0, width: cssContentSize.width, height: cssContentSize.height, scale: 1 }

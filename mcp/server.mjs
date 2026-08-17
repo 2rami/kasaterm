@@ -157,8 +157,10 @@ tool('browser_get_text', 'Plain innerText of the page. Cheaper than read_page wh
 tool('browser_find', 'Find elements by role/name/placeholder text and get their refs plus viewport coordinates.', { tabId, query: z.string() },
   async (a) => text(await call('find', a)))
 
-tool('browser_screenshot', 'Screenshot a tab. The agent overlay — presence chip, operating border, avatar cursor — is taken down for the shot and put back after, so the image is the page alone and is safe to hand to a human or drop into a doc; pass overlay:true only when the overlay itself is what you are checking. Pass `path` (absolute) when the file itself is the deliverable — a release shot, an attachment, anything you will hand over rather than look at: the PNG is written there and you get back the path instead of the image, so it never enters your context. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
+tool('browser_screenshot', 'Screenshot a tab, or just one element with `ref`. The agent overlay — presence chip, operating border, avatar cursor — is taken down for the shot and put back after, so the image is the page alone and is safe to hand to a human or drop into a doc; pass overlay:true only when the overlay itself is what you are checking. Pass `path` (absolute) when the file itself is the deliverable — a release shot, an attachment, anything you will hand over rather than look at: the PNG is written there and you get back the path instead of the image, so it never enters your context. Visible-area capture of the active tab uses a quiet path with no debugging banner; fullPage or background tabs go through CDP. Do not reach for fullPage to check a fixed header or bottom bar: `position: fixed` is relative to the viewport, so in a whole-document capture those elements land wherever the first screenful ended — a bottom nav shows up stranded in the middle of the image with content continuing past it, which reads as "the bottom bar is missing".', {
   tabId, fullPage: z.boolean().optional(), format: z.enum(['png', 'jpeg']).optional(), quality: z.number().int().optional(),
+  ref: z.string().optional().describe('Element ref from read_page/find — shoot only that element, cropped to its box. Scrolls it into view first, and works even when it sits below the fold. Cannot be combined with fullPage. Prefer this over a whole-viewport shot when you only need one card, panel, or chart: the crop is a fraction of the tokens and nothing around it competes for attention. The result reports back the element name and the exact box it captured — check them, since a stale or mistaken ref otherwise yields a confident picture of the wrong thing.'),
+  padding: z.number().optional().describe('Extra CSS px around the element when ref is set (default 0). A little air keeps borders and shadows from being shaved off.'),
   overlay: z.boolean().optional().describe('Keep the agent overlay in the picture. Default false — it is hidden for the shot.'),
   path: z.string().optional().describe('Absolute path to write the image to (~ is expanded, parent dirs are created). Returns the path, not the image — the picture never lands in your context. A .jpg/.jpeg extension selects jpeg unless format says otherwise.'),
 }, async (a) => {
@@ -174,6 +176,15 @@ tool('browser_screenshot', 'Screenshot a tab. The agent overlay — presence chi
   const r = await call('screenshot', shot, 45000)
   // 걷고 찍었다는 사실을 밝힌다. 안 그러면 오버레이를 확인하려고 찍은 사람이 "왜 칩이 없지" 로 헛돈다.
   const note = r.overlayHidden ? [{ type: 'text', text: 'Agent overlay (chip, border, cursor) was hidden for this shot — pass overlay:true to keep it.' }] : []
+  // ★무엇을 찍었는지 되돌려준다. ref 로 요소를 집을 때 그게 정말 의도한 요소였는지 확인할
+  // 유일한 단서다 — 잘린 그림만 보면 엉뚱한 요소도 그럴듯해 보인다.
+  if (r.target) {
+    const { name, role, clip } = r.target
+    note.push({
+      type: 'text',
+      text: `Cropped to ${r.target.ref} (${role || 'element'}${name ? ` "${name}"` : ''}) at ${Math.round(clip.width)}x${Math.round(clip.height)} from document position ${Math.round(clip.x)},${Math.round(clip.y)}. If that is not the element you meant, re-grab the ref with find or read_page.`,
+    })
+  }
   if (out) {
     const buf = Buffer.from(r.data, 'base64')
     await mkdir(dirname(out), { recursive: true })
