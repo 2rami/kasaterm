@@ -1274,6 +1274,23 @@ impl App {
                                 let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
                                 cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
                             }
+                            // 꼬리("(49s · thinking some more…)")도 학생 색 언어로 —
+                            // glow 는 여전히 문구까지만(거노: 문구만 glow)이고, 꼬리는
+                            // accent 를 테마 배경에 눕힌 차분한 톤. claude 가 제 주황을
+                            // 남겨 두면 학생색 줄 한가운데 남의 색이 선다(2026-08-16
+                            // 「almost done thinking 같은 거도 색 바꿔줘」).
+                            let bg = theme::bg();
+                            let tail = crate::screenread::tint_toward(
+                                [bg[0], bg[1], bg[2]],
+                                [a[0], a[1], a[2], 255],
+                                0.6,
+                            );
+                            for cell in composed[sr].iter_mut().skip(end) {
+                                if matches!(cell.ch, ' ' | '\0') {
+                                    continue;
+                                }
+                                cell.fg = tail.clone();
+                            }
                         }
                         // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수
                         // 있을 때만. 못 세우면 도는 표시가 통째로 없어진다.
