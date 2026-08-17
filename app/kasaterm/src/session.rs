@@ -660,6 +660,12 @@ impl App {
         });
         let cwd = self.pane_cwd_cache.get(pane).map(|p| p.to_string_lossy().into_owned());
         let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+        // 끄기 직전 이 pane 이 쓰던 모델·effort — 되띄울 때 그대로 잇는다. 안 실으면
+        // shim 기본 모델로 떨어져 사용자가 /model·/effort 를 다시 쳐야 했다(2026-08-16
+        // 「모델이랑 에포트도 안됐었어」). 세션 저장이 leaf 에 싣는 것과 같은 스냅샷
+        // 이고, 옛 PTY 를 지우기 전에 떠야 값이 남아 있다.
+        let (model, effort) =
+            self.agent_cfg_snapshot().get(pane).cloned().unwrap_or_default();
         let (cols, rows) = self.window_cells();
         // 옛 PTY 종료 — 여기서 옛 계정 토큰을 문 프로세스가 사라진다. pump 스레드는
         // EOF 로 빠진다.
@@ -686,9 +692,17 @@ impl App {
                 // 옛 PTY 의 EOF 가 이 id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // 되띄웠으니 지운다(swap_character 와 같은 이유).
                 self.dead_panes.lock().unwrap().retain(|x| x != pane);
-                let cmd = restore_agent_command(Some(agent), sid.as_deref(), resumable, None, None);
+                // 빈 값 거르기는 restore_agent_command 몫이다(빈 문자열이면 플래그를
+                // 아예 안 붙인다). 명령 끝 '\r' 도 거기서 이미 붙는다.
+                let cmd = restore_agent_command(
+                    Some(agent),
+                    sid.as_deref(),
+                    resumable,
+                    Some(model.as_str()),
+                    Some(effort.as_str()),
+                );
                 let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
-                self.pending_restores.push((sess, format!("{cmd}\r"), at));
+                self.pending_restores.push((sess, cmd, at));
                 self.resize_backend(cols, rows);
                 self.publish_pty_layout();
                 if let Some(w) = self.window.as_ref() {
