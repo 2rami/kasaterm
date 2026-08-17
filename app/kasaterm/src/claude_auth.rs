@@ -434,6 +434,61 @@ fn swap_active_in(
     SwapOutcome::Swapped
 }
 
+/// 전환 뒤 `~/.claude.json` 의 `oauthAccount` 캐시를 새 계정 것으로 갈아 끼운다.
+/// `/status` 의 Email/Organization 은 토큰이 아니라 **이 캐시**를 보여주므로(파일만
+/// 바꿔도 도는 pane 의 /status 가 즉시 따라오는 것을 실측), 저장소만 바꾸면 과금은
+/// 새 계정인데 /status 는 옛말을 한다 — 사용자의 첫 신고가 정확히 그 증상이었다.
+///
+/// 신원은 로컬 kasa-mcp 의 `/claude-identity` 가 금고 토큰으로 프로필 API 를 물어
+/// 만들어 준다(oauthAccount 와 같은 모양). 네트워크가 없으면 캐시를 안 바꾼다 —
+/// 표시가 낡는 것이 틀린 값을 지어내는 것보다 낫다. GUI 를 막지 않게 스레드로 돈다.
+pub(crate) fn adopt_oauth_account_cache(port: String, vault_dir: Option<PathBuf>) {
+    std::thread::spawn(move || {
+        let dir = vault_dir.map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        let enc: String = dir
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        let url = format!("http://127.0.0.1:{port}/claude-identity?dir={enc}");
+        let Ok(out) = crate::proc::command("curl").args(["-s", "--max-time", "8", &url]).output()
+        else {
+            return;
+        };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return };
+        let Some(account) = v.get("account").filter(|a| a.is_object()) else { return };
+        if account.pointer("/emailAddress").and_then(|e| e.as_str()).is_none() {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        else {
+            return;
+        };
+        let path = PathBuf::from(home).join(".claude.json");
+        // 이 파일은 모든 claude 세션이 함께 쓴다 — 읽고-고쳐-쓰는 사이에 남이
+        // 쓰면 그 기록을 지운다(mcpcol 의 set_claude_mcp_enabled 와 같은 방어).
+        // 쓰기 직전 mtime 을 재확인하고, 그 사이 바뀌었으면 포기한다 — 캐시가
+        // 낡는 쪽이 남의 세션 기록을 지우는 쪽보다 낫다.
+        let Ok(before) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+        let Some(obj) = root.as_object_mut() else { return };
+        if obj.get("oauthAccount") == Some(account) {
+            return;
+        }
+        obj.insert("oauthAccount".to_string(), account.clone());
+        if std::fs::metadata(&path).and_then(|m| m.modified()).ok() != Some(before) {
+            return;
+        }
+        let Ok(body) = serde_json::to_string(&root) else { return };
+        let _ = std::fs::write(&path, body);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

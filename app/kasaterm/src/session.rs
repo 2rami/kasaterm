@@ -781,6 +781,20 @@ impl App {
         // 요청 직전마다 저장소를 다시 읽고, 자기 것과 다른 토큰이 있으면 그대로
         // 채택하기 때문이다(claude_auth 모듈 머리말).
         let swapped = crate::claude_auth::swap_active(to, socket::claude_account_dir);
+        // /status 가 보여주는 신원 캐시(~/.claude.json oauthAccount)도 함께 갈아
+        // 끼운다 — 저장소만 바꾸면 과금은 새 계정인데 /status 는 옛말을 한다.
+        // AlreadyActive 여도 부른다: 캐시는 다른 로그인(밖에서 친 claude /login)이
+        // 언제든 덮을 수 있어, 「맞추기」 클릭이 그걸 바로잡는 손이 된다.
+        if !matches!(
+            swapped,
+            crate::claude_auth::SwapOutcome::VaultEmpty
+                | crate::claude_auth::SwapOutcome::WriteFailed
+        ) {
+            crate::claude_auth::adopt_oauth_account_cache(
+                crate::mcp_panel_port(),
+                socket::claude_account_dir(to),
+            );
+        }
         // ② 재시작이 필요한 pane 은 **작업대를 안 보는** 것들뿐이다 — 이 기능이 생기기
         // 전에 뜬 pane 은 특정 금고에 못 박혀 있어 갈아 끼우기가 안 닿는다.
         let target_dir = crate::claude_auth::runtime_dir_for(to, to)

@@ -2951,7 +2951,30 @@ async fn claude_identity_handler(
     };
     let email = pick(&["/account/email_address", "/account/email", "/email_address", "/email"]);
     let org = pick(&["/organization/name", "/account/organization_name", "/organization_name"]);
-    let out = serde_json::json!({ "ok": email.is_some(), "email": email, "org": org });
+    // `~/.claude.json` 의 oauthAccount 와 같은 모양(camelCase)으로도 내보낸다 —
+    // 계정 전환이 저장소와 함께 이 캐시를 갈아 끼우는 데 쓴다. /status 의
+    // Email/Organization 은 토큰이 아니라 이 캐시를 보여주므로(2026-08-16 실측:
+    // 파일만 바꿔도 도는 pane 의 /status 가 즉시 따라왔다), 캐시를 안 바꾸면
+    // 과금은 새 계정인데 /status 는 옛말을 한다. organizationRole/workspaceRole
+    // 은 프로필 응답에 없어 못 채운다 — 표시용 캐시라 비어도 동작엔 지장 없다.
+    let account = (email.is_some()).then(|| {
+        let g = |p: &str| body.pointer(p).cloned().unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "accountUuid": g("/account/uuid"),
+            "emailAddress": email.clone(),
+            "displayName": g("/account/display_name"),
+            "accountCreatedAt": g("/account/created_at"),
+            "organizationUuid": g("/organization/uuid"),
+            "organizationName": org.clone(),
+            "organizationType": g("/organization/organization_type"),
+            "billingType": g("/organization/billing_type"),
+            "organizationRateLimitTier": g("/organization/rate_limit_tier"),
+            "seatTier": g("/organization/seat_tier"),
+            "hasExtraUsageEnabled": g("/organization/has_extra_usage_enabled"),
+            "subscriptionCreatedAt": g("/organization/subscription_created_at"),
+        })
+    });
+    let out = serde_json::json!({ "ok": email.is_some(), "email": email, "org": org, "account": account });
     if out["ok"] == serde_json::Value::Bool(true) {
         if let Ok(mut m) = cache.lock() {
             m.insert(dir, (Instant::now(), out.clone()));
