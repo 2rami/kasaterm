@@ -837,8 +837,13 @@ impl App {
             self.pane_account_quiet_since.clear();
             return 0;
         }
-        let target_dir = socket::claude_account_dir(&self.set_claude_account)
-            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        // 전환 판정과 같은 규칙 — 활성 계정이 작업대에 실려 있으면 목표는 빈 경로
+        // (기본 자리)다. 금고 경로와 비교하면 이미 맞게 뜬 pane 을 또 되띄운다.
+        let target_dir = crate::claude_auth::runtime_dir_for(
+            &self.set_claude_account,
+            &self.set_claude_account,
+        )
+        .map_or(String::new(), |p| p.to_string_lossy().into_owned());
         // 지금 사용자가 보고 있는 pane 은 자동으로 안 끊는다. 화면 밖 pane 이 조용히
         // 갈리는 것과, 대화하던 상대가 눈앞에서 사라지는 것은 전혀 다른 일이다
         // (2026-08-15 "하다가 계정전환하니까 너가 없어졌어"). 표시는 남으므로 헤더

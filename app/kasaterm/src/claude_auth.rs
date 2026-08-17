@@ -17,15 +17,27 @@
 //! 붙는다. 실측으로 확인: `~/.config/kasaterm/claude-accounts/acct-1` → `77d5ac7d`,
 //! `acct-2` → `2d12f0b3` … 다섯 슬롯이 사용자 keychain 의 항목명과 정확히 일치했다.
 //!
-//! ## 구조 — 금고와 작업대를 가른다
+//! ## 구조 — 금고와 작업대를 가른다 (Orca 와 같은 규칙)
 //!
 //! - **금고**(vault): 계정마다 하나. `claude-accounts/acct-N` 슬롯. 정본이다.
-//! - **작업대**(active): `claude-accounts/_active` 슬롯 하나. pane 의 claude 는 전부
-//!   여기를 보고 돈다. 전환 = 금고에서 작업대로 옮겨 담기.
+//! - **작업대**: claude 의 **기본 자리**(env 없이 뜰 때 쓰는 접미 없는 keychain
+//!   항목 / `~/.claude/.credentials.json`). pane 의 claude 는 env 없이 떠서 전부
+//!   여기를 보고 돈다. 전환 = 금고에서 기본 자리로 옮겨 담기. Orca 가 정확히
+//!   이렇게 한다(선택한 계정을 공유 기본 위치로 실어 나른다).
 //!
-//! 작업대를 따로 두는 이유는 두 가지다. ①사용자의 원래 로그인(kasaterm 밖에서 그냥
-//! `claude` 를 칠 때 쓰는 기본 슬롯)을 건드리지 않는다 ②모든 pane 이 **같은 한 자리**를
-//! 보므로 갈아 끼우기 한 번이 전부에게 닿는다.
+//! **작업대가 왜 기본 자리여야 하나 (2026-08-16 실측).** 처음엔 전용 슬롯
+//! `_active` 를 만들었는데, 그 keychain 항목은 우리가 `security` CLI 로 만든
+//! 것이라 파티션이 `apple-tool:` 뿐이다. claude 는 Security **프레임워크**
+//! (`SecItemCopyMatching`, 바이너리에서 확인)로 여는데, CLI 가 만든 항목을
+//! 프레임워크로 열면 macOS 가 암호 창을 띄운다 — 앱을 켤 때마다 사용자가 암호를
+//! 쳐야 했다. `-A`(모든 앱 허용) ACL 로도 못 재운다(프레임워크 읽기로 실측 —
+//! 파티션 검사가 ACL 보다 먼저다). 파티션은 keychain 암호 없이는 CLI 로 못
+//! 바꾼다. 유일하게 전 조합이 조용한 자리가 **claude 자신이 로그인 때 만든 기본
+//! 항목**이다: claude(프레임워크)는 제 항목이라 조용하고, 우리(CLI)는 apple-tool
+//! 파티션이라 조용하다 — 읽기·`-U` 갱신 둘 다 같은 값 재기록으로 실측했다.
+//!
+//! 기본 자리에 원래 있던 로그인은 처음 한 번 `claude-accounts/_default-backup`
+//! 금고로 떠 둔다 — 등록 안 된 계정이었어도 전환 한 번에 유실되지 않는다.
 //!
 //! ## refresh token 은 1회용이다 — 되받기가 없으면 계정이 죽는다
 //!
@@ -39,9 +51,26 @@
 
 use std::path::{Path, PathBuf};
 
-/// 작업대 슬롯의 폴더 이름. 계정 id 로는 못 쓰는 이름이라(슬롯 id 는 `acct-N`)
-/// 실제 계정과 충돌하지 않는다.
+/// 지문 파일이 사는 폴더 이름. 계정 id 로는 못 쓰는 이름이라(슬롯 id 는 `acct-N`)
+/// 실제 계정과 충돌하지 않는다. 자격증명은 여기 살지 않는다 — 작업대는 claude 의
+/// 기본 자리다(모듈 머리말).
 pub(crate) const ACTIVE_SLOT: &str = "_active";
+
+/// 처음 전환하기 전에 기본 자리에 있던 로그인을 떠 두는 금고. 등록 안 된 계정이라도
+/// 전환 한 번에 유실되지 않게 — 복구는 이 슬롯을 읽으면 된다.
+const DEFAULT_BACKUP_SLOT: &str = "_default-backup";
+
+/// 작업대의 실제 저장소 — claude 가 env 없이 뜰 때 쓰는 기본 자리. macOS 는 접미
+/// 없는 keychain 항목(`None`), 그 밖은 `~/.claude/.credentials.json`.
+fn workbench_store() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        None
+    } else {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join(".claude"))
+    }
+}
 
 /// keychain 서비스 접두 — claude 의 `WZ()` 가 만드는 이름과 같아야 한다.
 const SERVICE_BASE: &str = "Claude Code-credentials";
@@ -63,20 +92,20 @@ pub(crate) fn service_name(dir: Option<&Path>) -> String {
     format!("{SERVICE_BASE}-{}", &hex[..8])
 }
 
-/// 작업대 슬롯 경로. `settings.json` 이 있는 폴더 아래라 헤드리스 검증이 스크래치
-/// 설정을 가리키면 작업대도 스크래치로 따라간다(계정 폴더와 같은 규칙).
+/// 지문이 사는 폴더. `settings.json` 이 있는 폴더 아래라 헤드리스 검증이 스크래치
+/// 설정을 가리키면 지문도 스크래치로 따라간다(계정 폴더와 같은 규칙).
 pub(crate) fn active_dir() -> Option<PathBuf> {
     crate::socket::claude_account_dir(ACTIVE_SLOT)
 }
 
 /// 지문 파일 — 「우리가 작업대에 마지막으로 써 넣은 것」의 해시와 그때의 계정 id.
 /// 이 둘이 있어야 「도는 세션이 갱신한 것」과 「우리가 방금 넣은 것」을 가른다.
+/// 파일명이 곧 판 구분이다. `_active` 전용 슬롯 시절의 지문(`active-stamp.json`)을
+/// 그대로 읽으면, 기본 자리에 아직 옛 로그인이 있는데 지문은 「계정 X 가 작업대에
+/// 있다」고 우겨 pane 이 엉뚱한 계정으로 돈다 — 새 이름이라 옛 지문은 자연히
+/// 무시되고 첫 전환이 작업대를 새로 채운다.
 fn stamp_path_in(active: &Path) -> PathBuf {
-    active.join("active-stamp.json")
-}
-
-fn stamp_path() -> Option<PathBuf> {
-    Some(stamp_path_in(&active_dir()?))
+    active.join("workbench-stamp.json")
 }
 
 /// 자격증명 한 벌의 **만료 시각**(epoch ms). 어느 쪽이 최신인지 가르는 유일한 단서라
@@ -108,15 +137,6 @@ fn digest_of(blob: &[u8]) -> String {
 
 fn read_stamp_in(active: &Path) -> Option<(String, String)> {
     let raw = std::fs::read_to_string(stamp_path_in(active)).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    Some((
-        v.get("account")?.as_str()?.to_string(),
-        v.get("digest")?.as_str()?.to_string(),
-    ))
-}
-
-fn read_stamp() -> Option<(String, String)> {
-    let raw = std::fs::read_to_string(stamp_path()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     Some((
         v.get("account")?.as_str()?.to_string(),
@@ -283,15 +303,18 @@ fn keychain_account() -> String {
 /// token 은 1회용이라, 활성 계정을 금고에서 갱신해 버리면 같은 계정을 작업대에서 쓰는
 /// 도는 pane 들의 토큰이 그 순간 죽은 값이 된다 — 세션 전부가 로그아웃된다. 살아 있는
 /// 신원 하나당 자리도 하나여야 한다.
+/// 반환의 빈 경로(`PathBuf::new()`)가 곧 작업대다 — 문자열로 펴면 `""` 가 되고,
+/// 그 빈 문자열이 이 앱 전체에서 「기본 자리」를 뜻하는 관례라(프록시 쿼리·env·
+/// 사용량 표 키) 호출부는 아무것도 바꿀 것이 없다.
 pub(crate) fn runtime_dir_for(account_id: &str, active_account: &str) -> Option<PathBuf> {
     if account_id == active_account {
-        if let Some(a) = active_dir() {
+        if let Some(stamp_home) = active_dir() {
             // 작업대가 정말 이 계정 것으로 채워져 있을 때만. 아직 못 채웠으면 금고가
             // 정본이고, 그때는 pane 도 금고를 보고 있다(shim 폴백과 같은 판정).
-            if read_stamp().is_some_and(|(acct, _)| acct == account_id)
-                && read_credentials(Some(&a)).is_some()
+            if read_stamp_in(&stamp_home).is_some_and(|(acct, _)| acct == account_id)
+                && read_credentials(workbench_store().as_deref()).is_some()
             {
-                return Some(a);
+                return Some(PathBuf::new());
             }
         }
     }
@@ -317,16 +340,20 @@ pub(crate) enum SwapOutcome {
 ///
 /// 반환: 되받았으면 true.
 pub(crate) fn read_back(vault_dir_of: impl Fn(&str) -> Option<PathBuf>) -> bool {
-    let Some(active) = active_dir() else { return false };
-    read_back_in(&active, vault_dir_of)
+    let Some(stamp_home) = active_dir() else { return false };
+    read_back_in(&stamp_home, workbench_store().as_deref(), vault_dir_of)
 }
 
-fn read_back_in(active: &Path, vault_dir_of: impl Fn(&str) -> Option<PathBuf>) -> bool {
-    let Some((stamped_account, stamped_digest)) = read_stamp_in(active) else {
+fn read_back_in(
+    stamp_home: &Path,
+    store: Option<&Path>,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+) -> bool {
+    let Some((stamped_account, stamped_digest)) = read_stamp_in(stamp_home) else {
         // 아직 한 번도 우리가 쓴 적 없는 작업대 — 되받을 정본이 없다.
         return false;
     };
-    let Some(now) = read_credentials(Some(active)) else { return false };
+    let Some(now) = read_credentials(store) else { return false };
     let digest = digest_of(&now);
     if digest == stamped_digest {
         return false; // 우리가 넣은 그대로다.
@@ -343,7 +370,7 @@ fn read_back_in(active: &Path, vault_dir_of: impl Fn(&str) -> Option<PathBuf>) -
     if !write_credentials(vault.as_deref(), &now) {
         return false;
     }
-    write_stamp_in(active, &stamped_account, &digest);
+    write_stamp_in(stamp_home, &stamped_account, &digest);
     true
 }
 
@@ -356,7 +383,8 @@ pub(crate) fn ensure_active(
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     match swap_active(account_id, vault_dir_of) {
-        SwapOutcome::Swapped | SwapOutcome::AlreadyActive => active_dir(),
+        // 빈 경로 = 작업대(기본 자리). shim 은 이 경우 env 를 아예 안 붙인다.
+        SwapOutcome::Swapped | SwapOutcome::AlreadyActive => Some(PathBuf::new()),
         SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed => None,
     }
 }
@@ -366,35 +394,43 @@ pub(crate) fn swap_active(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> SwapOutcome {
-    let Some(active) = active_dir() else { return SwapOutcome::WriteFailed };
-    swap_active_in(&active, account_id, vault_dir_of)
+    let Some(stamp_home) = active_dir() else { return SwapOutcome::WriteFailed };
+    swap_active_in(&stamp_home, workbench_store().as_deref(), account_id, vault_dir_of)
 }
 
 fn swap_active_in(
-    active: &Path,
+    stamp_home: &Path,
+    store: Option<&Path>,
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> SwapOutcome {
+    // 지문이 아직 없다 = 작업대를 한 번도 우리 것으로 채운 적이 없다. 기본 자리에
+    // 있던 원래 로그인을 먼저 떠 둔다 — 등록 안 된 계정이었으면 이 백업이 유일한
+    // 사본이 된다. 백업 금고가 이미 차 있으면 안 덮는다(첫 백업이 원본이다).
+    if read_stamp_in(stamp_home).is_none() {
+        if let Some(original) = read_credentials(store) {
+            let backup = vault_dir_of(DEFAULT_BACKUP_SLOT);
+            if backup.is_some() && read_credentials(backup.as_deref()).is_none() {
+                write_credentials(backup.as_deref(), &original);
+            }
+        }
+    }
     // 먼저 되받는다 — 지금 작업대에 있는 것이 떠나는 계정의 최신 토큰일 수 있다.
-    read_back_in(active, &vault_dir_of);
+    read_back_in(stamp_home, store, &vault_dir_of);
     let vault = vault_dir_of(account_id);
     let Some(blob) = read_credentials(vault.as_deref()) else {
         return SwapOutcome::VaultEmpty;
     };
-    // 읽은 값을 그 자리에 그대로 다시 쓴다 — 값은 안 바뀌지만 「누가 열 수 있나」가
-    // 우리 규칙(모두 열림)으로 갈린다. claude 가 만든 금고는 처음 읽을 때 한 번
-    // 암호 창이 뜨는데, 이 한 줄이 그 창을 **계정마다 딱 한 번**으로 끝낸다.
-    write_credentials(vault.as_deref(), &blob);
     let digest = digest_of(&blob);
-    if read_stamp_in(active).is_some_and(|(a, d)| a == account_id && d == digest)
-        && read_credentials(Some(active)).is_some_and(|cur| digest_of(&cur) == digest)
+    if read_stamp_in(stamp_home).is_some_and(|(a, d)| a == account_id && d == digest)
+        && read_credentials(store).is_some_and(|cur| digest_of(&cur) == digest)
     {
         return SwapOutcome::AlreadyActive;
     }
-    if !write_credentials(Some(active), &blob) {
+    if !write_credentials(store, &blob) {
         return SwapOutcome::WriteFailed;
     }
-    write_stamp_in(active, account_id, &digest);
+    write_stamp_in(stamp_home, account_id, &digest);
     SwapOutcome::Swapped
 }
 
@@ -476,13 +512,18 @@ mod tests {
             let root = std::env::temp_dir()
                 .join(format!("kasaterm-auth-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
-            for s in ["vault-a", "vault-b", "active"] {
+            for s in ["vault-a", "vault-b", "active", "workbench"] {
                 std::fs::create_dir_all(root.join(s)).unwrap();
             }
             Slots { root }
         }
         fn dir(&self, name: &str) -> PathBuf {
             self.root.join(name)
+        }
+        /// (지문 폴더, 작업대 저장소) — 실물에서는 (claude-accounts/_active,
+        /// claude 기본 자리)에 해당한다. 시험은 둘 다 임시 폴더다.
+        fn bench(&self) -> (PathBuf, PathBuf) {
+            (self.dir("active"), self.dir("workbench"))
         }
         fn vault_of(&self) -> impl Fn(&str) -> Option<PathBuf> + '_ {
             move |id: &str| Some(self.root.join(format!("vault-{id}")))
@@ -505,21 +546,57 @@ mod tests {
     #[test]
     fn swap_moves_vault_into_active_and_is_idempotent() {
         let s = Slots::new("swap");
-        let active = s.dir("active");
+        let (stamp, bench) = s.bench();
         assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1000, "a")));
         assert!(write_credentials(Some(&s.dir("vault-b")), &creds(1000, "b")));
 
-        assert_eq!(swap_active_in(&active, "a", s.vault_of()), SwapOutcome::Swapped);
-        assert_eq!(read_credentials(Some(&active)).unwrap(), creds(1000, "a"));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), creds(1000, "a"));
         // 같은 계정을 또 골라도 덮지 않는다.
-        assert_eq!(swap_active_in(&active, "a", s.vault_of()), SwapOutcome::AlreadyActive);
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::AlreadyActive
+        );
         // 다른 계정으로 갈아 끼우기.
-        assert_eq!(swap_active_in(&active, "b", s.vault_of()), SwapOutcome::Swapped);
-        assert_eq!(read_credentials(Some(&active)).unwrap(), creds(1000, "b"));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "b", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), creds(1000, "b"));
         // 로그인 없는 슬롯은 작업대를 건드리지 않는다 — 빈 자리를 주면 pane 이
         // 로그인 화면으로 뜬다.
-        assert_eq!(swap_active_in(&active, "zzz", s.vault_of()), SwapOutcome::VaultEmpty);
-        assert_eq!(read_credentials(Some(&active)).unwrap(), creds(1000, "b"));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "zzz", s.vault_of()),
+            SwapOutcome::VaultEmpty
+        );
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), creds(1000, "b"));
+    }
+
+    /// 첫 전환은 기본 자리에 있던 원래 로그인을 백업 금고로 먼저 떠 둔다 — 등록 안
+    /// 된 계정이었으면 이 백업이 유일한 사본이다. 두 번째 전환부터는 덮지 않는다.
+    #[test]
+    fn first_swap_backs_up_the_original_default_login() {
+        let s = Slots::new("backup");
+        let (stamp, bench) = s.bench();
+        // 기본 자리에 kasaterm 이 모르는 로그인이 살고 있었다.
+        assert!(write_credentials(Some(&bench), &creds(500, "original")));
+        assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1000, "a")));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        let backup = s.vault_of()(DEFAULT_BACKUP_SLOT).unwrap();
+        assert_eq!(read_credentials(Some(&backup)).unwrap(), creds(500, "original"));
+        // 이후 전환은 백업을 덮지 않는다 — 첫 백업이 원본이다.
+        assert!(write_credentials(Some(&s.dir("vault-b")), &creds(1000, "b")));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "b", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(read_credentials(Some(&backup)).unwrap(), creds(500, "original"));
     }
 
     /// **계정이 죽지 않는 이유**: 도는 세션이 작업대에서 토큰을 갱신하면 그 값을
@@ -528,22 +605,31 @@ mod tests {
     #[test]
     fn live_refresh_is_carried_back_into_the_vault() {
         let s = Slots::new("readback");
-        let active = s.dir("active");
+        let (stamp, bench) = s.bench();
         assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1000, "a")));
-        assert_eq!(swap_active_in(&active, "a", s.vault_of()), SwapOutcome::Swapped);
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
 
         // 도는 claude 가 갱신했다 — 작업대에만 새 토큰이 있다.
-        assert!(write_credentials(Some(&active), &creds(9000, "a2")));
-        assert!(read_back_in(&active, s.vault_of()), "되받아야 한다");
+        assert!(write_credentials(Some(&bench), &creds(9000, "a2")));
+        assert!(read_back_in(&stamp, Some(&bench), s.vault_of()), "되받아야 한다");
         assert_eq!(read_credentials(Some(&s.dir("vault-a"))).unwrap(), creds(9000, "a2"));
         // 두 번째 호출은 할 일이 없다.
-        assert!(!read_back_in(&active, s.vault_of()));
+        assert!(!read_back_in(&stamp, Some(&bench), s.vault_of()));
 
         // 그 뒤 다른 계정으로 갔다가 돌아와도 **갱신된** 토큰이 나온다.
         assert!(write_credentials(Some(&s.dir("vault-b")), &creds(1000, "b")));
-        assert_eq!(swap_active_in(&active, "b", s.vault_of()), SwapOutcome::Swapped);
-        assert_eq!(swap_active_in(&active, "a", s.vault_of()), SwapOutcome::Swapped);
-        assert_eq!(read_credentials(Some(&active)).unwrap(), creds(9000, "a2"));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "b", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), creds(9000, "a2"));
     }
 
     /// 낡은 값으로 금고를 덮지 않는다 — 옛 방식으로 묶인 pane 이 금고를 먼저 갱신한
@@ -551,14 +637,20 @@ mod tests {
     #[test]
     fn read_back_never_overwrites_a_newer_vault() {
         let s = Slots::new("newer");
-        let active = s.dir("active");
+        let (stamp, bench) = s.bench();
         assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1000, "a")));
-        assert_eq!(swap_active_in(&active, "a", s.vault_of()), SwapOutcome::Swapped);
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
         // 금고 쪽이 더 새것이 됐다(옛 pane 이 갱신).
         assert!(write_credentials(Some(&s.dir("vault-a")), &creds(9000, "vault-new")));
         // 작업대에는 그보다 낡은 값이 들어온다.
-        assert!(write_credentials(Some(&active), &creds(2000, "active-old")));
-        assert!(!read_back_in(&active, s.vault_of()), "낡은 값으로 덮으면 안 된다");
+        assert!(write_credentials(Some(&bench), &creds(2000, "active-old")));
+        assert!(
+            !read_back_in(&stamp, Some(&bench), s.vault_of()),
+            "낡은 값으로 덮으면 안 된다"
+        );
         assert_eq!(
             read_credentials(Some(&s.dir("vault-a"))).unwrap(),
             creds(9000, "vault-new")
