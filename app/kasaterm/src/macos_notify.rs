@@ -100,6 +100,14 @@ mod tests {
     }
 }
 
+// ⚠️ 구식(NSUserNotification) 경로는 시도했고 **막혀 있다** — 다시 시도하지 말 것.
+// 새 체계(UN)는 자체 서명 'kasaterm-dev' 번들의 등록 요청을 "Notifications are
+// not allowed for this application" 으로 거절하고(2026-08-17 격리 인스턴스 +
+// KASATERM_AUTONOTIFY_MS 실측), 구식 센터의 deliverNotification 은 같은 검문에
+// **예외도 오류도 없이 조용히 버려진다**(알림 DB 그룹컨테이너 db2 에 기록이 안
+// 남는 것으로 실측 — osascript 배달은 scripteditor2 명의로 남는다). 앱 아이콘을
+// 알림에 실으려면 애플 발급 인증서 서명 또는 자체 배너 창뿐이다.
+
 /// 알림 클릭 핸들러를 건다. 프로세스당 한 번.
 ///
 /// **알림이 배달되기 전에** 걸려야 한다 — delegate 가 없는 동안 눌린 알림은 그냥

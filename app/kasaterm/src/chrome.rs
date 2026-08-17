@@ -3022,14 +3022,31 @@ fn notify_native(
         UNNotificationSound, UNUserNotificationCenter,
     };
     ensure_notification_authorization();
-    // 거부가 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서 돌린다.
+    // Unique id per request so rapid completions don't replace each other.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // 눌렀을 때 갈 자리를 **identifier 에 실어** 보낸다. `userInfo`(NSDictionary)를
+    // 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야 하는데, 여기
+    // 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
+    // 형식: `kasaterm-notify-{seq}|{pane}|{sid}` — pane id(`%116`)도 uuid 도 `|` 를
+    // 안 쓴다. 받는 쪽은 `macos_notify::route_from_identifier`(UN·구식 공용).
+    let route_ident = match route {
+        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
+        None => format!("kasaterm-notify-{seq}"),
+    };
+    // 거부·미등록이 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서
+    // osascript 로 돌린다. 자체 서명 'kasaterm-dev' 번들은 등록 요청이
+    // "Notifications are not allowed for this application" 으로 거절되므로
+    // (2026-08-17 실측) 배포 실물에서는 사실상 늘 이 길이고, 그래서 배너에
+    // 스크립트 편집기 아이콘이 붙는다. 구식 센터(NSUserNotification)로 앱
+    // 아이콘을 실어 보려 했지만 **같은 검문에 조용히 버려졌다**(배달 예외도
+    // 오류도 없이 알림 DB 에 기록이 안 남는 것을 격리 인스턴스 + 알림 DB 로
+    // 실측) — 조용한 유실은 아이콘보다 나쁘므로 걷어냈다. 앱 아이콘을 실으려면
+    // 애플 발급 인증서로 서명하거나 자체 배너 창을 그려야 한다.
     if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
         notify_osascript(title, body);
         return;
     }
-    // Unique id per request so rapid completions don't replace each other.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
@@ -3048,16 +3065,7 @@ fn notify_native(
             content.setAttachments(&NSArray::from_retained_slice(&[att]));
         }
     }
-    // 눌렀을 때 갈 자리를 **identifier 에 실어** 보낸다. `userInfo`(NSDictionary)를
-    // 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야 하는데, 여기
-    // 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
-    // 형식: `kasaterm-notify-{seq}|{pane}|{sid}` — pane id(`%116`)도 uuid 도 `|` 를
-    // 안 쓴다. 받는 쪽은 `macos_notify::route_from_identifier`.
-    let ident = match route {
-        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
-        None => format!("kasaterm-notify-{seq}"),
-    };
-    let ident = NSString::from_str(&ident);
+    let ident = NSString::from_str(&route_ident);
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
