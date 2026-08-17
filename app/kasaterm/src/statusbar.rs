@@ -280,12 +280,21 @@ fn paint_tunnel_popover(
             );
             sb.popover_hits.push((state::StatusbarHit::CopyTunnelHost, cr));
             let s = crate::info::fit_text(g, &addr, (cr.0 - x - 24.0).max(0.0), 11.0, false);
+            let ar = (x + 8.0, line + 10.0, cr.0 - x - 16.0, 20.0);
+            let ah = hit(cursor, &ar);
+            g.hover_pointer |= ah;
+            if ah {
+                hover_rect(g, ar.0, ar.1, ar.2, ar.3, theme::radius_sm());
+            }
             g.draw_text(
                 x + 12.0,
                 line + 17.0,
                 &s,
                 gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
             );
+            // 주소를 누르면 바로 연다 — 폰으로 보내기 전에 맥에서 먼저 열어 확인하는
+            // 손이 복사보다 잦다. 복사 버튼은 그대로 옆에 있다(둘 다).
+            sb.popover_hits.push((state::StatusbarHit::OpenTunnelUrl, ar));
             g.draw_text(
                 x + 12.0,
                 line + 36.0,
@@ -681,6 +690,16 @@ impl crate::App {
                 self.statusbar.tunnel_checked = Some(std::time::Instant::now());
                 self.collab.toast = Some((msg, std::time::Instant::now()));
                 self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::OpenTunnelUrl) => {
+                if let Some(h) = self.statusbar.tunnel_host.clone() {
+                    let url = match kasa_mcp::remote_token() {
+                        Some(t) => format!("https://{h}/term?t={t}"),
+                        None => format!("https://{h}/term"),
+                    };
+                    self.open_url(&url);
+                }
                 return true;
             }
             Some(state::StatusbarHit::CopyTunnelHost) => {

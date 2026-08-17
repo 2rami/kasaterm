@@ -105,6 +105,9 @@ pub(crate) enum StatusbarHit {
     ToggleTunnel,
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,
+    /// 주소 줄 클릭 — 완성 주소(토큰 포함)를 기본 브라우저로 연다. 복사와 열기
+    /// 둘 다 있다(2026-08-17 「누르면 바로 열리게, 복사버튼도 괜찮은데 둘다」).
+    OpenTunnelUrl,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
