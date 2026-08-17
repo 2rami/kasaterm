@@ -1851,13 +1851,27 @@ impl App {
                         .is_some();
                 if ultra {
                     let t = self.version_anim_start.elapsed().as_secs_f32();
-                    // 학생 배정과 무관하게 **보라 숨쉬기 하나**다(2026-08-16 「울트라
-                    // 코드 효과 보라색 숨쉬기로바꾸자」 — 혜성을 이걸로 대체). 학생색은
-                    // pane 테두리가 계속 말하고 있어 입력박스가 보라여도 누구 pane 인지
-                    // 잃지 않는다. 라벨 심기가 페인트보다 먼저다 — 글자를 먼저 놓아야
-                    // style_prompt_box 가 보더와 같은 숨쉬는 색을 입혀 준다.
+                    // 학생색 ↔ 보라 **순환** 숨쉬기(2026-08-17 「학생색 유지되면서
+                    // 순환하는 형식으로」 — 통보라 숨쉬기는 누구 pane 인지 잃어서
+                    // 이상했다). 골에서는 학생색 그대로, 마루에서 보라로 씻겼다가
+                    // 돌아온다. 위상은 라벨(overlay_ultracode_label)과 같은 sin 이라
+                    // 「ultracode」 글자는 보라로 씻긴 반주기에 나타난다. 미배정
+                    // pane 은 지킬 학생색이 없으니 보라 밝기 숨쉬기 그대로다.
+                    // 라벨 심기가 페인트보다 먼저다 — 글자를 먼저 놓아야
+                    // style_prompt_box 가 보더와 같은 색을 입혀 준다.
                     overlay_ultracode_label(&mut composed, t);
-                    style_prompt_box(&mut composed, ultracode_accent(t));
+                    let breath = match prompt_accent {
+                        Some(a) => {
+                            let purple = [0xbbu8, 0x9a, 0xf7];
+                            let k = 0.5 + 0.5 * (t * 2.2).sin();
+                            let mix = |s: u8, p: u8| {
+                                (s as f32 + (p as f32 - s as f32) * k).round() as u8
+                            };
+                            [mix(a[0], purple[0]), mix(a[1], purple[1]), mix(a[2], purple[2]), 255]
+                        }
+                        None => ultracode_accent(t),
+                    };
+                    style_prompt_box(&mut composed, breath);
                 } else if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
