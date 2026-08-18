@@ -3663,6 +3663,16 @@ enum UserEvent {
     /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
     /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
     SocketOpenWeb(String, Option<String>),
+    /// `web.drive` — 열린 웹 pane 을 조종한다(eval/text/shot/url). 웹뷰는 GUI
+    /// 스레드 소유(!Send)라 소켓 스레드가 reply 채널로 결과를 기다린다
+    /// (`SocketSpawnStudent` 와 같은 패턴). eval 의 답은 wry 콜백에서 오므로
+    /// Sender 가 콜백 안까지 들어간다.
+    SocketWebDrive {
+        op: String,
+        arg: String,
+        surface: Option<String>,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    },
     /// `collab.bind_transcript`(SessionStart 훅) 위임 — (pane, 세션 id). transcript
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
     /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.

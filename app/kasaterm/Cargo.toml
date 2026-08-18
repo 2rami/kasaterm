@@ -83,14 +83,17 @@ tree-sitter-yaml = "0.7.2"
 # ghostty's trick — same gravity, no presentsWithTransaction needed.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "objc2-core-services"] }
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "objc2-core-services"] }
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 # UNNotificationAttachment 는 알림 오른쪽 썸네일 — pane 마다 그 학생 프사를 붙인다.
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound"] }
 # Dock tile badge (unread-notification count) via NSApplication.dockTile,
 # 그리고 창마다 NSWindow.tabbingMode 를 끄는 데 NSWindow/NSView 가 필요하다.
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
+# 웹 pane 스크린샷(web-shot) — WKWebView 자체 스냅샷이라 화면 녹화 권한이 필요 없다.
+# 버전은 wry 0.55 가 쓰는 것과 같아야 타입이 이어진다(WryWebView → WKWebView deref).
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
 block2 = "0.6"
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc = "0.2"

@@ -361,6 +361,160 @@ impl App {
 }
 
 impl App {
+    /// 조종 대상 웹 pane 을 고른다. `surface` 를 주면 그 pane 의 웹 탭(활성 탭
+    /// 우선), 안 주면 **살아 있는 웹 pane 이 하나일 때만** 그것 — 여럿이면
+    /// 후보를 나열해 돌려준다(에이전트가 다음 호출에 %id 를 실을 수 있게).
+    fn resolve_web_host(&self, surface: Option<&str>) -> std::result::Result<u64, String> {
+        let ws = self.ws.lock().unwrap();
+        if let Some(sid) = surface {
+            let p = ws.panes.get(sid).ok_or_else(|| format!("{sid}: 그런 pane 이 없다"))?;
+            return p
+                .tabs
+                .get(p.active_tab)
+                .and_then(|t| t.web())
+                .or_else(|| p.tabs.iter().find_map(|t| t.web()))
+                .map(|w| w.host_id)
+                .filter(|h| self.web_hosts.contains_key(h))
+                .ok_or_else(|| format!("{sid} 는 웹 pane 이 아니다"));
+        }
+        let mut hosts: Vec<(u64, String, String)> = Vec::new();
+        for (id, p) in ws.panes.iter() {
+            for t in &p.tabs {
+                if let Some(w) = t.web() {
+                    if self.web_hosts.contains_key(&w.host_id) {
+                        hosts.push((w.host_id, id.clone(), w.url.clone()));
+                    }
+                }
+            }
+        }
+        match hosts.len() {
+            0 => Err("열린 웹 pane 이 없다 — 먼저 `kasaterm-cli web <url>`".to_string()),
+            1 => Ok(hosts[0].0),
+            _ => Err(format!(
+                "웹 pane 이 여럿이다 — %surface 로 골라라: {}",
+                hosts
+                    .iter()
+                    .map(|(_, p, u)| format!("{p}({u})"))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            )),
+        }
+    }
+
+    /// 웹 pane 조종 한 판. 답은 `reply` 로 — eval/text 는 wry 콜백, shot 은
+    /// WebKit 스냅샷 완료 핸들러에서 늦게 온다(둘 다 메인 스레드 콜백이라
+    /// GUI 를 세우지 않는다). 소켓 쪽 recv_timeout(10초)이 상한을 쥔다.
+    pub(crate) fn web_drive(
+        &mut self,
+        op: &str,
+        arg: &str,
+        surface: Option<&str>,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ) {
+        let host_id = match self.resolve_web_host(surface) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let Some(host) = self.web_hosts.get(&host_id) else {
+            let _ = reply.send(Err("웹 pane 창이 이미 닫혔다".to_string()));
+            return;
+        };
+        match op {
+            "url" => {
+                let _ = reply.send(host.webview.url().map_err(|e| e.to_string()));
+            }
+            "eval" | "text" => {
+                // text 는 eval 의 고정 스크립트일 뿐이다 — 본문 확인이 제일 잦은
+                // 용도라 JS 없이 부를 수 있게 이름을 따로 냈다.
+                let js = if op == "text" {
+                    "document.body ? document.body.innerText : ''"
+                } else {
+                    arg
+                };
+                let cb = reply.clone();
+                // 콜백 인자가 스크립트 결과의 JSON 직렬화다(직렬화 불가면 빈 값).
+                if let Err(e) = host
+                    .webview
+                    .evaluate_script_with_callback(js, move |res| {
+                        let _ = cb.send(Ok(res));
+                    })
+                {
+                    let _ = reply.send(Err(format!("스크립트 실행 실패: {e}")));
+                }
+            }
+            "shot" => self.web_shot(host_id, arg, reply),
+            other => {
+                let _ = reply.send(Err(format!("{other}: 모르는 op (eval|text|shot|url)")));
+            }
+        }
+    }
+
+    /// 웹뷰 화면을 PNG 로 `path` 에 저장한다. WKWebView 자체 스냅샷이라 화면
+    /// 녹화 권한이 필요 없다(macOS `screencapture` 는 권한에 막힌다 — 이 앱의
+    /// 오토캡처가 자체 렌더를 읽는 것과 같은 이유). 웹뷰 콘텐츠만 찍힌다.
+    #[cfg(target_os = "macos")]
+    fn web_shot(
+        &self,
+        host_id: u64,
+        path: &str,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ) {
+        use wry::WebViewExtMacOS;
+        if !std::path::Path::new(path).is_absolute() {
+            let _ = reply.send(Err(format!("{path}: 절대 경로여야 한다")));
+            return;
+        }
+        let Some(host) = self.web_hosts.get(&host_id) else {
+            let _ = reply.send(Err("웹 pane 창이 이미 닫혔다".to_string()));
+            return;
+        };
+        let path = path.to_string();
+        let wk = host.webview.webview();
+        let done = block2::RcBlock::new(
+            move |img: *mut objc2_app_kit::NSImage, err: *mut objc2_foundation::NSError| {
+                let out = (|| -> std::result::Result<String, String> {
+                    if let Some(e) = unsafe { err.as_ref() } {
+                        return Err(e.localizedDescription().to_string());
+                    }
+                    let img = unsafe { img.as_ref() }.ok_or("스냅샷이 비었다")?;
+                    let tiff = img.TIFFRepresentation().ok_or("이미지 변환 실패")?;
+                    let rep = objc2_app_kit::NSBitmapImageRep::imageRepWithData(&tiff)
+                        .ok_or("비트맵 해석 실패")?;
+                    let png = unsafe {
+                        rep.representationUsingType_properties(
+                            objc2_app_kit::NSBitmapImageFileType::PNG,
+                            &objc2_foundation::NSDictionary::new(),
+                        )
+                    }
+                    .ok_or("PNG 인코딩 실패")?;
+                    if png.writeToFile_atomically(
+                        &objc2_foundation::NSString::from_str(&path),
+                        true,
+                    ) {
+                        Ok(path.clone())
+                    } else {
+                        Err(format!("{path}: 파일 쓰기 실패"))
+                    }
+                })();
+                let _ = reply.send(out);
+            },
+        );
+        unsafe { wk.takeSnapshotWithConfiguration_completionHandler(None, &done) };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn web_shot(
+        &self,
+        _host_id: u64,
+        _path: &str,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ) {
+        let _ = reply.send(Err("web-shot 은 아직 macOS 전용이다".to_string()));
+    }
+
     /// 웹 자식 창의 winit 이벤트를 삼킨다(소비했으면 true). 패널 창들과 같은
     /// 이유의 가드다 — 자식 창의 Resized/ScaleFactorChanged 가 본창 로직으로
     /// 흘러들면 gpu.resize 가 자식 크기로 불려 화면이 확대되고, CloseRequested

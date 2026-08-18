@@ -1386,6 +1386,29 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// 웹 pane 조종 — 웹뷰가 GUI 스레드 소유(!Send)라 위임하고 reply 채널로
+    /// 결과를 기다린다(`spawn_student` 패턴). 10초 상한: eval 은 페이지 JS 가
+    /// 안 돌아오면(무한루프·탭 죽음) 영영 안 오는데, 소켓 스레드를 그보다 오래
+    /// 세워 두면 다른 CLI 호출까지 밀린다.
+    fn web_drive(&self, op: &str, arg: &str, surface: Option<&str>) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketWebDrive {
+                op: op.to_string(),
+                arg: arg.to_string(),
+                surface: surface.map(|s| s.to_string()),
+                reply: tx,
+            })
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => anyhow::bail!(e),
+            Err(_) => anyhow::bail!(
+                "웹 pane 이 10초 안에 답하지 않았다 — 페이지가 멈췄거나 pane 이 닫혔을 수 있다"
+            ),
+        }
+    }
+
     /// 살아 있는 토큰을 그대로 읽는다 — atomic 슬롯 로드뿐이라 GUI 스레드에
     /// 위임(`EventLoopProxy`)할 필요가 없다. `App` 상태를 안 만지는 몇 안 되는
     /// 창구다.

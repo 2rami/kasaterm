@@ -846,6 +846,14 @@ pub trait Backend: Send + Sync {
     fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
+    /// 웹(브라우저) pane 조종 — 에이전트가 내장 브라우저를 확인 도구로 쓰는
+    /// 손잡이(2026-08-18 「손잡이 뚫어줘」). `op` 는 `eval`(JS 실행, 결과를
+    /// JSON 문자열로) · `text`(본문 innerText) · `shot`(PNG 를 `arg` 절대경로에
+    /// 저장) · `url`(현재 주소). `surface` 를 안 주면 열린 웹 pane 이 하나일
+    /// 때만 그걸 잡는다 — 여럿이면 후보를 나열한 오류가 돌아온다.
+    fn web_drive(&self, _op: &str, _arg: &str, _surface: Option<&str>) -> Result<String> {
+        anyhow::bail!("web_drive not supported")
+    }
     /// Show/hide the *main terminal* window. The arona classroom window calls
     /// this so entering the classroom can take the screen over and its
     /// red-pill button can bring the terminal back. `focus_pane` additionally

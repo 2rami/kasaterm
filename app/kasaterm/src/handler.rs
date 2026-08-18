@@ -763,6 +763,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketWebDrive { op, arg, surface, reply } => {
+                // `kasaterm-cli web-eval/-text/-shot/-url` — 답은 reply 채널로
+                // 소켓 스레드에 돌아간다(eval/shot 은 wry·WebKit 콜백에서 늦게).
+                self.web_drive(op, arg, surface.as_deref(), reply.clone());
+                return;
+            }
             UserEvent::OpenMarkdownWindow(path) => {
                 // macOS `.md` 더블클릭(odoc)/argv → 새 워크스페이스에 마크다운 풀.
                 // cold-launch(앱 꺼진 채)면 window·pty_layout 이 아직 없어 디퍼했다가

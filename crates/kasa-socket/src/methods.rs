@@ -100,6 +100,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
+        "web.drive" => web_drive(backend, id, &req.params),
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
             // what board-watch polling wants), but an orchestrator pane can
@@ -225,6 +226,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.scroll",
                 "surface.peek",
                 "surface.open_preview",
+                "web.drive",
                 "surface.capture",
                 "surface.dock",
                 "surface.undock",
@@ -245,6 +247,21 @@ fn system_capabilities(id: Value) -> Response {
             ],
         }),
     )
+}
+
+/// 웹 pane 조종(backend.rs `web_drive` 참조). `arg` 는 op 마다 뜻이 다르다 —
+/// eval 은 JS 원문, shot 은 저장할 절대경로, text/url 은 무시.
+fn web_drive(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let op = match params.get("op").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "web.drive requires `op` (eval|text|shot|url)"),
+    };
+    let arg = params.get("arg").and_then(|v| v.as_str()).unwrap_or("");
+    let surface = params.get("surface").and_then(|v| v.as_str());
+    match backend.web_drive(op, arg, surface) {
+        Ok(v) => Response::success(id, json!({ "value": v })),
+        Err(e) => backend_err(id, e),
+    }
 }
 
 fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Response {

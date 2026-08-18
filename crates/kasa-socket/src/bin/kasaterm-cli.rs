@@ -746,6 +746,10 @@ fn print_help() {
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
   kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
+  kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
+  kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
+  kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
+  kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
   kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
   kasaterm-cli swap  <surface_a> <surface_b>");
@@ -931,6 +935,26 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.open_preview",
                 json!({ "kind": "web", "path": url, "target": target }),
+            )
+        }
+        // 웹 pane 조종 — 열어 둔 내장 브라우저를 확인 도구로 쓴다. %surface 를
+        // 안 주면 열린 웹 pane 이 하나일 때만 그걸 잡는다(여럿이면 후보 나열
+        // 오류). eval 결과는 JSON 직렬화 문자열이다.
+        "web-eval" | "web-text" | "web-shot" | "web-url" => {
+            let op = &cmd[4..]; // "web-eval" → "eval"
+            let surface = args.iter().find(|a| a.starts_with('%')).cloned();
+            let arg = args.iter().find(|a| !a.starts_with('%')).cloned();
+            match (op, &arg) {
+                ("eval", None) => anyhow::bail!("web-eval needs JS (e.g. web-eval 'document.title')"),
+                ("shot", Some(p)) if !p.starts_with('/') => {
+                    anyhow::bail!("web-shot needs an absolute path (got {p})")
+                }
+                ("shot", None) => anyhow::bail!("web-shot needs an absolute .png path"),
+                _ => {}
+            }
+            (
+                "web.drive",
+                json!({ "op": op, "arg": arg.unwrap_or_default(), "surface": surface }),
             )
         }
         // pane 을 다른 pane 옆으로 — 대상이 다른 창이면 **창을 건너뛴다**(PTY 유지).
