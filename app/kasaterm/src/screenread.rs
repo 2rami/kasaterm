@@ -797,6 +797,12 @@ pub(crate) fn extract_tagged_msg(
 /// jsonl 한 줄의 user 턴 텍스트 — content 가 문자열이면 그대로, 배열이면
 /// text 블록들을 이어붙인다(팀메시지는 둘 다로 도착할 수 있다).
 pub(crate) fn jsonl_user_text(v: &serde_json::Value) -> Option<String> {
+    // 배달 attachment 는 본문이 여기 있다(위 게이트 주석 참고). `message` 필드가
+    // 아예 없는 줄이라 아래 pointer 는 무조건 None 이 된다 — 폴백이 없으면 태그가
+    // 눈앞에 있는데도 못 읽는다.
+    if let Some(p) = v.pointer("/attachment/prompt").and_then(|p| p.as_str()) {
+        return Some(p.to_string());
+    }
     let c = v.pointer("/message/content")?;
     if let Some(s) = c.as_str() {
         return Some(s.to_string());
@@ -843,7 +849,15 @@ pub(crate) fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Optio
         // <cross-session-message>에는 머리말만…" 같은 수신 확인) 역스캔이 그
         // 턴을 최신 메시지로 잡아 진짜 배달을 가린다(2026-08-12 실측: 그 인용
         // 하나로 7차 배달의 테마가 통째로 안 걸렸다).
-        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+        // ⚠️ claude 2.1.234 는 cross-session 배달을 `type:"user"` 가 아니라
+        // **`type:"attachment"` + `attachment.type:"queued_command"`** 로 적는다
+        // (그 줄엔 `message` 필드 자체가 없다). 이 게이트가 그걸 통째로 떨어뜨려
+        // 발신자 되짚기·프사·학생색이 라이브에서 안 걸렸다(2026-08-18 실측).
+        // 게이트의 목적은 **assistant 가 프로즈에 태그를 인용한 턴**을 막는 것이라,
+        // 배달 attachment 를 통과시켜도 그 보호는 그대로다.
+        let queued_delivery = v.get("type").and_then(|t| t.as_str()) == Some("attachment")
+            && v.pointer("/attachment/type").and_then(|t| t.as_str()) == Some("queued_command");
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") && !queued_delivery {
             return None;
         }
         extract_teammate_msg(&jsonl_user_text(&v)?, sender)
@@ -3922,6 +3936,35 @@ This came from another Claude session";
             .expect("cross-session 줄이 프리필터에서 걸러졌다");
         assert_eq!(m.body, "ROUNDTRIP-OK");
         assert_eq!(m.from_label.as_deref(), Some("타이틀 생성 푸시"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ★2026-08-18 실측 회귀 — claude 2.1.234 는 cross-session 배달을
+    /// `type:"user"` + `message.content` 가 아니라 **`type:"attachment"` +
+    /// `attachment.prompt`** 로 적는다(그 줄엔 `message` 필드가 아예 없다).
+    /// 두 게이트가 나란히 떨어뜨려 SendMessage 의 프사·학생색이 통째로 안 붙었다.
+    /// 검체는 실제 transcript 에서 그대로 떴다 — 축약하면 다음 형식 변경도 또 놓친다.
+    #[test]
+    fn latest_teammate_msg_passes_queued_command_attachments() {
+        let dir = std::env::temp_dir().join("kasaterm-attach-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("t.jsonl");
+        let line = serde_json::json!({
+            "type": "attachment",
+            "userType": "external",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/13455.sock\" from-name=\"yuuka-p18-ly2\" from-mode=\"bypass\">\n두번째확인\n</cross-session-message>",
+                "origin": { "kind": "peer", "name": "yuuka-p18-ly2" }
+            }
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let m = latest_teammate_msg(&path, PEER_LABEL)
+            .expect("배달 attachment 가 프리필터에서 걸러졌다 — 테마가 통째로 안 붙는다");
+        assert_eq!(m.body, "두번째확인");
+        // 화면 라벨(`@ yuuka-p18-ly2❯`)과 대조되는 값 — 이게 비면 label_hit 가 실패해
+        // 파싱이 됐어도 렌더가 그 줄을 건너뛴다.
+        assert_eq!(m.from_label.as_deref(), Some("yuuka-p18-ly2"));
         let _ = std::fs::remove_file(&path);
     }
 
