@@ -222,6 +222,18 @@ fn writable_in_tests(dir: Option<&Path>) -> bool {
 /// CLI 는 전 조합이 조용해서다(read_credentials 와 같은 근거). 값이 잠깐 명령줄에
 /// 실리는데 그건 **같은 사용자만** 볼 수 있다(Orca 도 같은 경로를 쓴다).
 pub(crate) fn write_credentials(dir: Option<&Path>, blob: &[u8]) -> bool {
+    let ok = write_credentials_inner(dir, blob);
+    if ok {
+        // 작업대의 내용물이 바뀌었을 수 있다 — 렌더가 보는 캐시를 그 자리에서
+        // 버려야 전환이 다음 프레임에 반영된다(TTL 을 기다리면 최대 2초 늦다).
+        // 금고에 쓴 경우도 함께 버린다: 헛되이 한 번 더 읽을 뿐이고, 어느 쪽에
+        // 썼는지 여기서 가르려 들면 판정이 두 벌이 된다.
+        bump_workbench_generation();
+    }
+    ok
+}
+
+fn write_credentials_inner(dir: Option<&Path>, blob: &[u8]) -> bool {
     #[cfg(test)]
     if !writable_in_tests(dir) {
         return false;
@@ -319,6 +331,65 @@ pub(crate) fn runtime_dir_for(account_id: &str, active_account: &str) -> Option<
         }
     }
     crate::socket::claude_account_dir(account_id)
+}
+
+/// 렌더 경로 전용 — `runtime_dir_for` 와 같은 답을 주되 **프로세스를 안 띄운다**.
+///
+/// 원본은 활성 계정을 물었을 때 `read_credentials` 를 타고, macOS 에서 그건
+/// `security` CLI 를 **자식 프로세스로 띄워** 출력을 기다린다(1회 14ms 실측).
+/// 상태줄 사용량 게이지가 이 함수를 프레임마다 불러서, pane 여러 개가 동시에
+/// 출력해 프레임이 쉼 없이 뜨는 동안 그 14ms 가 매 프레임 메인 스레드를 세웠다
+/// — 5초 스택 샘플에서 메인 스레드의 88%(3045/3468 프레임)가 이 한 자리의
+/// 자식 프로세스 대기였다(2026-08-18 실측). GPU 패스는 같은 샘플에서 88이다.
+/// 학생이 하나일 땐 프레임이 드물어 안 보이고, 여럿이면 상시 렉이 된다.
+///
+/// 답이 바뀌는 계기는 **작업대의 내용물이 바뀔 때뿐**이고 그 길은 전부
+/// `write_credentials` 를 지난다 — 거기서 무효화하므로 전환은 즉시 반영된다.
+/// TTL 은 우리를 안 거치고 바뀌는 경우(사용자가 직접 `claude logout`)의
+/// 안전벨트다. 같은 이유로 **오래 들고 있어도 되는 값이 아니다** — 자격증명
+/// 자체는 캐시하지 않는다(경로만 남긴다).
+pub(crate) fn runtime_dir_for_cached(
+    account_id: &str,
+    active_account: &str,
+) -> Option<PathBuf> {
+    // 활성 계정이 아니면 원본도 순수 경로 파생이라 프로세스를 안 띄운다. 캐시를
+    // 태울 이유가 없고, 태우면 계정이 늘어날수록 맵만 커진다.
+    if account_id != active_account {
+        return runtime_dir_for(account_id, active_account);
+    }
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    let now = std::time::Instant::now();
+    let mut c = runtime_dir_cache().lock().unwrap();
+    if let Some((at, gen, hit)) = c.as_ref() {
+        if *gen == workbench_generation() && now.duration_since(*at) < TTL && hit.0 == account_id {
+            return hit.1.clone();
+        }
+    }
+    let v = runtime_dir_for(account_id, active_account);
+    *c = Some((now, workbench_generation(), (account_id.to_string(), v.clone())));
+    v
+}
+
+type RuntimeDirCache = std::sync::Mutex<
+    Option<(std::time::Instant, u64, (String, Option<PathBuf>))>,
+>;
+
+fn runtime_dir_cache() -> &'static RuntimeDirCache {
+    static C: std::sync::OnceLock<RuntimeDirCache> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 작업대가 바뀔 때마다 오른다. 캐시는 이 값이 그대로일 때만 유효하다 — 시각
+/// 비교만으로는 전환 직후 최대 TTL 만큼 옛 답이 남는다.
+fn workbench_generation() -> u64 {
+    WORKBENCH_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static WORKBENCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 작업대의 내용물을 바꿨다고 알린다. `write_credentials` 가 성공했을 때 부른다.
+fn bump_workbench_generation() {
+    WORKBENCH_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 전환 한 판. 반환은 「무엇이 실제로 일어났나」.
@@ -523,6 +594,61 @@ mod tests {
                 service_name(Some(Path::new(dir))),
                 format!("Claude Code-credentials-{want}"),
                 "{dir}"
+            );
+        }
+    }
+
+    /// 캐시판은 원본과 **같은 답**을 준다. 어긋나면 상태줄이 활성 계정을 못 알아보고
+    /// 숫자를 「읽는 중」에 굳히거나, 떠나온 계정의 사용률을 새 계정 이름 옆에 그린다.
+    ///
+    /// 「자식 프로세스를 안 띄운다」는 여기서 못 잰다 — 시험 빌드는 keychain 경로를
+    /// 통째로 건너뛰어 원본도 프로세스를 안 띄운다. 그건 실행 중인 앱의 스택 샘플로
+    /// 쟀다(2026-08-18: render_frame 4024 샘플 중 3550 → 0).
+    #[test]
+    fn cached_runtime_dir_agrees_with_source() {
+        // 활성이 아닌 계정 — 캐시를 안 타는 길(원본도 순수 경로 파생이라 싸다).
+        assert_eq!(
+            runtime_dir_for_cached("acct-9", "acct-1"),
+            runtime_dir_for("acct-9", "acct-1"),
+        );
+        // 활성 계정 — 캐시를 타는 길. 두 번 불러도 답이 흔들리지 않는다.
+        let a = runtime_dir_for_cached("acct-1", "acct-1");
+        let b = runtime_dir_for_cached("acct-1", "acct-1");
+        assert_eq!(a, b, "같은 인자에 두 답이 나오면 화면이 프레임마다 떤다");
+        assert_eq!(a, runtime_dir_for("acct-1", "acct-1"));
+    }
+
+    /// 작업대에 쓰면 캐시를 **그 자리에서** 버린다. TTL 만 믿으면 계정을 바꾼 뒤
+    /// 최대 2초 동안 옛 계정 기준으로 그려진다.
+    #[test]
+    fn workbench_write_bumps_generation() {
+        let before = workbench_generation();
+        let _ = runtime_dir_for_cached("acct-1", "acct-1");
+        bump_workbench_generation();
+        assert!(workbench_generation() > before, "세대가 안 오르면 캐시가 안 버려진다");
+        assert_eq!(
+            runtime_dir_for_cached("acct-1", "acct-1"),
+            runtime_dir_for("acct-1", "acct-1"),
+        );
+    }
+
+    /// ⚠️ **렌더 경로는 원본을 직접 부르면 안 된다.** 부르는 순간 프레임마다
+    /// `security` 자식 프로세스가 뜨고, pane 여럿이 동시에 출력하면 메인 스레드가
+    /// 거기서 88%를 쓴다 — 2026-08-18 에 잡은 렉이 정확히 이것이었고, 원인이
+    /// 렌더 코드가 아니라 계정 코드에 있어서 눈으로는 안 보였다. 리뷰가 놓쳐도
+    /// 여기서 걸린다.
+    #[test]
+    fn render_path_never_calls_uncached_runtime_dir() {
+        for (i, line) in include_str!("render.rs").lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            assert!(
+                !line.contains("claude_auth::runtime_dir_for("),
+                "render.rs:{} 가 캐시 없는 runtime_dir_for 를 부른다 — \
+                 프레임마다 security 프로세스가 뜬다. runtime_dir_for_cached 를 써라.\n{}",
+                i + 1,
+                line.trim()
             );
         }
     }

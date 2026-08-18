@@ -7177,7 +7177,12 @@ impl App {
                 // (`account_dir`) 활성 슬롯과 대조해 다르면 읽는 중으로 둔다.
                 // 폴러가 조회한 자리와 **같은 규칙**으로 계산해야 한다 — 활성 계정은
                 // 작업대라, 여기서 금고 경로를 쓰면 매번 「읽는 중」으로 보인다.
-                let active_dir = crate::claude_auth::runtime_dir_for(
+                // ⚠️`runtime_dir_for` 를 그대로 부르면 안 된다 — 활성 계정을 물으면
+                // 자격증명을 읽느라 `security` 를 자식 프로세스로 띄우고(14ms),
+                // 이 자리는 상태줄이라 **프레임마다** 돈다. pane 여럿이 동시에
+                // 출력해 프레임이 쉼 없이 뜨는 동안 메인 스레드의 88%가 그
+                // 대기였다(2026-08-18 실측). 캐시판은 답이 같고 전환 때 무효화된다.
+                let active_dir = crate::claude_auth::runtime_dir_for_cached(
                     &self.set_claude_account,
                     &self.set_claude_account,
                 )
@@ -7509,7 +7514,9 @@ impl App {
                 let usage_of = |id: &str| -> Option<crate::UsageBadge> {
                     // 폴러가 조회한 자리가 곧 키다 — 활성 계정만 작업대라 여기서도
                     // 같은 규칙을 써야 그 한 줄이 빈칸이 되지 않는다.
-                    let key = crate::claude_auth::runtime_dir_for(id, &self.set_claude_account)
+                    // 메뉴가 열려 있는 동안 계정 수만큼 **매 프레임** 돈다 —
+                    // 활성 계정 차례에서 프로세스를 띄우므로 캐시판을 쓴다.
+                    let key = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     self.claude_usage_all.lock().ok()?.get(&key).cloned()
