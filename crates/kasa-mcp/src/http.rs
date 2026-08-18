@@ -2835,6 +2835,28 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 fn refresh_slot_once(dir: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
+    // ⚠️ **활성 계정의 금고는 절대 refresh 하지 않는다.** 활성 계정의 정본은
+    // 작업대(기본 keychain 자리)이고 금고는 그 사본이다 — refresh token 은 1회용이라
+    // 여기서 금고 쪽 사본을 소비하면 작업대의 것이 그 순간 죽은 값이 되고, 도는
+    // pane 들은 access token 으로 버티다 재시작 때 전부 로그아웃된다(2026-08-18
+    // 22:04 실측 — 재시작하자마자 전 pane 이 /login 을 요구했다). 어느 계정이
+    // 활성인지는 작업대 지문(workbench-stamp.json)이 말한다. kasaterm 쪽
+    // runtime_dir_for 도 같은 이유로 금고 폴백을 막지만, 이 프록시는 아로나 UI 등
+    // 다른 클라이언트도 부르므로 여기 자체 가드가 이중 방어다.
+    if !dir.is_empty() {
+        let p = std::path::Path::new(dir);
+        if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+            let stamp = parent.join("_active").join("workbench-stamp.json");
+            let active = std::fs::read_to_string(&stamp)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("account").and_then(|a| a.as_str().map(str::to_string)));
+            if active.as_deref() == name.to_str() {
+                eprintln!("[usage] 활성 계정 금고 refresh 거부 — 작업대가 정본이다");
+                return;
+            }
+        }
+    }
     // ⚠️ 임시 폴더 슬롯으로는 **절대** 띄우지 않는다. 그렇게 띄운 claude 는 그 폴더
     // 이름으로 **키체인 항목을 새로 만들고**(`/tmp/claude-accounts/_active` →
     // `Claude Code-credentials-e187bae6`), 그 항목은 claude 소유라 이후 우리가 읽을

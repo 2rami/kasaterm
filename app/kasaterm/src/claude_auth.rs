@@ -323,9 +323,22 @@ pub(crate) fn runtime_dir_for(account_id: &str, active_account: &str) -> Option<
         if let Some(stamp_home) = active_dir() {
             // 작업대가 정말 이 계정 것으로 채워져 있을 때만. 아직 못 채웠으면 금고가
             // 정본이고, 그때는 pane 도 금고를 보고 있다(shim 폴백과 같은 판정).
-            if read_stamp_in(&stamp_home).is_some_and(|(acct, _)| acct == account_id)
-                && read_credentials(workbench_store().as_deref()).is_some()
-            {
+            if read_stamp_in(&stamp_home).is_some_and(|(acct, _)| acct == account_id) {
+                // ⚠️ 지문이 「이 계정이 작업대에 있다」고 말하면 **작업대 읽기가
+                // 실패해도 금고로 떨어지지 않는다.** `read_credentials` 는 macOS 에서
+                // `security` 자식 프로세스라 일시 실패가 있고, 그 한 번이 금고 경로를
+                // 폴러에 흘리면 사용량 조회 실패 → `refresh_slot_once(금고)` → 활성
+                // 계정 금고가 따로 갱신되며 **작업대의 refresh token 이 소비된 죽은
+                // 값이 된다**(1회용). 도는 pane 들은 access token 으로 버텨 멀쩡해
+                // 보이다가, 재시작하면 새 claude 들이 refresh 를 시도해 전부
+                // 로그아웃된다 — 2026-08-18 22:04 재시작에서 실제로 일어났고, 금고
+                // (만료 06:20)가 작업대(06:05)보다 새것인 상태가 그 지문이었다.
+                // 사용량 한 사이클을 놓치는 것 < 전 세션 로그아웃.
+                if read_credentials(workbench_store().as_deref()).is_none() {
+                    eprintln!(
+                        "[account] 작업대 읽기 일시 실패 — 금고 폴백 대신 작업대 유지 ({account_id})"
+                    );
+                }
                 return Some(PathBuf::new());
             }
         }
@@ -492,16 +505,43 @@ fn swap_active_in(
     let Some(blob) = read_credentials(vault.as_deref()) else {
         return SwapOutcome::VaultEmpty;
     };
+    // 만료 시각이 없거나 0 이면 로그인 안 된 껍데기다(실측: acct-1 금고가
+    // `expiresAt: 0` 으로 저장돼 있었다). 이걸 작업대에 덮으면 「전환했더니
+    // 로그아웃」이 된다 — 전환을 거부하고 빈 금고 취급하면, 재시작 폴백이 그
+    // 계정의 로그인 화면을 자연스럽게 띄우고 /login 후 read_back 이 금고를 채운다.
+    if expires_at(&blob).is_none_or(|e| e <= 0) {
+        eprintln!("[account] {account_id} 금고가 로그인 안 된 껍데기(만료 없음) — 전환 거부");
+        return SwapOutcome::VaultEmpty;
+    }
     let digest = digest_of(&blob);
     if read_stamp_in(stamp_home).is_some_and(|(a, d)| a == account_id && d == digest)
         && read_credentials(store).is_some_and(|cur| digest_of(&cur) == digest)
     {
         return SwapOutcome::AlreadyActive;
     }
+    // 같은 계정을 다시 적용하는데 작업대 쪽이 더 새것이면 덮지 않는다 — read_back
+    // 이 어긋난 상태(지문 유실·일시 실패)에서 금고의 옛 blob 로 최신 작업대를
+    // 밀면 refresh token 사슬이 끊겨 로그아웃된다. 다른 계정으로의 명시적 전환은
+    // 만료 비교가 무의미하므로(계정이 다르면 시각이 달라도 당연) 제외.
+    if read_stamp_in(stamp_home).is_some_and(|(a, _)| a == account_id) {
+        if let Some(cur) = read_credentials(store) {
+            if is_newer(&blob, &cur) {
+                eprintln!(
+                    "[account] {account_id} 재적용 — 작업대가 금고보다 새것이라 덮지 않음"
+                );
+                return SwapOutcome::AlreadyActive;
+            }
+        }
+    }
     if !write_credentials(store, &blob) {
         return SwapOutcome::WriteFailed;
     }
     write_stamp_in(stamp_home, account_id, &digest);
+    eprintln!(
+        "[account] 작업대 ← {account_id} 금고 (digest {}.., 만료 {:?})",
+        &digest[..8],
+        expires_at(&blob)
+    );
     SwapOutcome::Swapped
 }
 
@@ -739,6 +779,46 @@ mod tests {
     /// 전환의 본체 — 금고에서 작업대로 옮겨 담기고, 두 번째로 같은 계정을 눌러도
     /// 다시 쓰지 않는다(그 자리에 도는 세션의 최신 토큰이 있을 수 있다).
     #[test]
+    /// ★2026-08-18 재시작 전-pane 로그아웃의 안전벨트들.
+    ///
+    /// ① 만료 시각이 없거나 0 인 금고(로그인 안 된 껍데기 — acct-1 실측)로는
+    ///    전환하지 않는다. 작업대에 덮으면 「전환했더니 로그아웃」이 된다.
+    /// ② 같은 계정 재적용에서 작업대가 금고보다 새것이면 덮지 않는다 — 지문이
+    ///    어긋난 상태에서 옛 blob 로 밀면 refresh token 사슬이 끊긴다(1회용).
+    #[test]
+    fn swap_never_installs_dead_or_older_blob_over_newer_workbench() {
+        let s = Slots::new("guard");
+        let (stamp, bench) = s.bench();
+        // ① 죽은 껍데기 — expiresAt 0.
+        assert!(write_credentials(Some(&s.dir("vault-a")), &creds(0, "dead")));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::VaultEmpty,
+            "만료 0 blob 이 작업대에 실리면 그 순간 로그아웃이다"
+        );
+        assert!(read_credentials(Some(&bench)).is_none(), "작업대는 손대지 않는다");
+
+        // 정상 전환으로 작업대를 채운다.
+        assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1000, "old")));
+        assert_eq!(
+            swap_active_in(&stamp, Some(&bench), "a", s.vault_of()),
+            SwapOutcome::Swapped
+        );
+        // ② 도는 세션이 작업대를 갱신했는데(더 새것) 지문 갱신이 어긋난 상황을
+        //    재현: 작업대만 새 값으로 바꾸고 지문은 옛 digest 그대로 둔 채, 금고를
+        //    다른 옛 값으로 바꿔 read_back 의 digest 일치 경로를 막는다.
+        assert!(write_credentials(Some(&bench), &creds(2000, "fresh")));
+        assert!(write_credentials(Some(&s.dir("vault-a")), &creds(1500, "stale")));
+        // read_back 은 vault(1500) 가 bench(2000) 보다 옛것이라 bench 를 되받고,
+        // 어떤 경로로든 **작업대의 2000 이 1500 으로 내려가면 안 된다**.
+        let out = swap_active_in(&stamp, Some(&bench), "a", s.vault_of());
+        let bench_now = read_credentials(Some(&bench)).unwrap();
+        assert!(
+            expires_at(&bench_now).unwrap() >= 2000,
+            "작업대가 옛 blob({out:?})로 덮였다 — 로그아웃 경로"
+        );
+    }
+
     fn swap_moves_vault_into_active_and_is_idempotent() {
         let s = Slots::new("swap");
         let (stamp, bench) = s.bench();
