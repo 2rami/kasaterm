@@ -172,6 +172,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>kasaterm 이 문서 폴더의 파일에 접근해 명령을 실행하고 프로젝트를 엽니다.</string>
     <key>NSDownloadsFolderUsageDescription</key>
     <string>kasaterm 이 다운로드 폴더의 파일에 접근해 명령을 실행하고 프로젝트를 엽니다.</string>
+    <!-- 이게 없으면 pane 안의 녹음 도구가 조용히 실패한다(2026-08-18 실측: sox 는
+         정상 크기의 무음 wav, ffmpeg avfoundation 은 SIGABRT). 권한 팝업도 안 뜨고
+         시스템 설정 마이크 목록에 앱이 아예 안 나타나 사용자가 켤 방법조차 없다. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>kasaterm 이 회의 녹음과 음성 입력을 위해 마이크를 사용합니다.</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
     <key>SUFeedURL</key>
