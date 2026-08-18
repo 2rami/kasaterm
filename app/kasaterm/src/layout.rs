@@ -345,6 +345,16 @@ impl App {
                     }
                 }
             }
+            // 보조 탭 pid 도 화면 안이다 — 탭은 바깥 pane 자리에 살고 사용자가 탭바로
+            // 언제든 본다. leaf 만 실으면 collab_board 가 탭 학생을 전부 detached
+            // (화면밖)로 찍고, SendMessage 의 닫힌-pane 가드가 「사용자가 닫았거나
+            // 숨긴 자리」라며 차단했다(거노 2026-08-18: 탭에 넣으면 인식을 못 한다).
+            // 바깥 pane 이 pw 에 없으면(숨김·stash) 탭도 안 싣는다 — 그건 진짜 화면밖.
+            for (pid, outer) in &ws.pid_to_pane {
+                if let Some(i) = pw.get(outer).copied() {
+                    pw.entry(pid.clone()).or_insert(i);
+                }
+            }
             ws.pane_window = pw;
         }
         // Keep the socket snapshot in lockstep with the renderer view —
@@ -835,6 +845,9 @@ impl App {
                 pane.dirty = true;
             }
         }
+        // 탭은 트리를 안 바꾸지만 pane_window 미러는 pid_to_pane 을 함께 싣는다 —
+        // 안 밀어주면 다음 레이아웃 변경까지 board 가 이 학생을 화면밖으로 찍는다.
+        self.publish_pty_layout();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -934,19 +947,23 @@ impl App {
         // Preview tab removal is immediate via the ws.panes mutation below;
         // with no daemon there's no broadcast to resurrect it.
         let _ = preview_opt;
-        let mut ws = self.ws.lock().unwrap();
-        if let Some(pane) = ws.panes.get_mut(outer) {
-            if idx < pane.tabs.len() {
-                pane.tabs.remove(idx);
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(pane) = ws.panes.get_mut(outer) {
+                if idx < pane.tabs.len() {
+                    pane.tabs.remove(idx);
+                }
+                if idx < pane.active_tab {
+                    pane.active_tab -= 1;
+                }
+                if pane.active_tab >= pane.tabs.len() {
+                    pane.active_tab = pane.tabs.len() - 1;
+                }
+                pane.dirty = true;
             }
-            if idx < pane.active_tab {
-                pane.active_tab -= 1;
-            }
-            if pane.active_tab >= pane.tabs.len() {
-                pane.active_tab = pane.tabs.len() - 1;
-            }
-            pane.dirty = true;
         }
+        // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).
+        self.publish_pty_layout();
     }
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
     /// Called on the main thread from `about_to_wait` so the mutation
