@@ -11,6 +11,8 @@
 #   meeting stop           둘 다 정지
 #   meeting status         상태·마지막 발언
 #   meeting open           회의록 열기
+#   meeting recent [분]     최근 N분 발언만 (기본 5) — 에이전트에게 물을 때 이걸 쓴다
+#   meeting path           회의록 파일 경로만 출력
 #   meeting clean [이름]    끝난 회의의 wav 삭제(회의록은 남긴다)
 set -uo pipefail
 
@@ -93,6 +95,7 @@ CMDEOF
   echo
   echo "회의록: $dir/회의록.md"
   echo "  실시간으로 보려면:  tail -f '$dir/회의록.md'"
+  echo "  에이전트에게 물으려면: meeting recent 5   (최근 5분만 — 통째로 읽히면 창이 찬다)"
   echo "  끝내려면:           meeting stop"
 }
 
@@ -251,6 +254,34 @@ cmd_status() {
   grep -vE '^(#|$)' "$dir/회의록.md" 2>/dev/null | tail -3 | sed 's/^/    /'
 }
 
+# 회의록 파일 경로. 도는 회의가 있으면 그것, 없으면 마지막 회의.
+# 에이전트가 「지금 회의 뭐라고 했어」에 답할 때 첫 걸음이다.
+meeting_log_path() {
+  local dir
+  if [ -f "$CUR" ]; then dir=$(cat "$CUR"); else dir=$(ls -td "$ROOT"/*/ 2>/dev/null | head -1); fi
+  [ -n "${dir:-}" ] || return 1
+  echo "${dir%/}/회의록.md"
+}
+
+cmd_path() { meeting_log_path || die "회의록이 없다"; }
+
+# 최근 N분 발언만. **회의록을 통째로 읽지 마라** — 한 시간이면 수만 자라 에이전트
+# 컨텍스트가 그걸로 다 찬다. 물어보는 건 대개 「방금 뭐랬지」라 최근 몇 분이면 된다.
+cmd_recent() {
+  local mins="${1:-5}" log
+  log=$(meeting_log_path) || die "회의록이 없다"
+  # 시각 헤딩(`### HH:MM:SS`)을 문자열로 비교한다. ⚠️ 자정을 넘긴 회의는 이 비교가
+  # 뒤집히므로 그때는 그냥 전체가 나온다 — 틀린 구간을 보여주는 것보다 낫다.
+  local since; since=$(date -v-"${mins}"M '+%H:%M:%S' 2>/dev/null) || since=""
+  if [ -z "$since" ]; then
+    tail -40 "$log"; return
+  fi
+  awk -v since="$since" '
+    /^### /{ t = $2; show = (t >= since); next }
+    show && NF
+  ' "$log"
+}
+
 cmd_open() {
   local dir
   if [ -f "$CUR" ]; then dir=$(cat "$CUR"); else dir=$(ls -td "$ROOT"/*/ 2>/dev/null | head -1); fi
@@ -274,6 +305,8 @@ case "${1:-}" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   open)    cmd_open ;;
+  recent)  shift; cmd_recent "$@" ;;
+  path)    cmd_path ;;
   clean)   shift; cmd_clean "$@" ;;
   _record) shift; cmd_record "$@" ;;       # 내부용 — 직접 부르지 마라
   _transcribe) shift; cmd_transcribe "$@" ;;
