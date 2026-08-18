@@ -5661,7 +5661,7 @@ impl App {
         let active = self.ws.lock().unwrap().active_pane.clone();
         if let Some(outer) = active {
             for i in 1..=n {
-                if self.spawn_new_tab(&outer).is_err() {
+                if self.spawn_new_tab(&outer, true).is_err() {
                     if let Some(pane) = self.ws.lock().unwrap().panes.get_mut(&outer) {
                         let mut t = PaneTab::default();
                         t.title = Some(format!("탭 {}", i + 1));

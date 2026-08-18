@@ -92,8 +92,22 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.move" => surface_move(backend, id, &req.params),
         "surface.new_tab" => match backend.new_tab(
             req.params.get("outer").and_then(|v| v.as_str()),
+            // 기본 no-focus: 자동화가 자기 pane 탭에 서브에이전트를 띄울 때 부모
+            // 화면(사람이 보던 대화)을 덮지 않는다. `focus:true` 는 CLI --focus.
+            req.params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false),
         ) {
-            Ok(s) => Response::success(id, json!({ "surface": s })),
+            Ok(s) => {
+                // split 과 같은 이유로 학생 이름을 **여기서** 준다 — 탭으로 띄워도
+                // 다음 할 일은 SendMessage 라, 이름이 없으면 board 를 되짚는
+                // 왕복이 생긴다.
+                let agent = backend.pane_agent(&s.id);
+                let mut body = json!({"surface": s});
+                if let (Some((a, t)), Some(o)) = (agent, body.as_object_mut()) {
+                    o.insert("agent".into(), json!(a));
+                    o.insert("team".into(), json!(t));
+                }
+                Response::success(id, body)
+            }
             Err(e) => backend_err(id, e),
         },
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),

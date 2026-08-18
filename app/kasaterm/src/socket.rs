@@ -1240,10 +1240,15 @@ impl Backend for PtyBackend {
 
     /// 부른 pane **안에 새 탭**. 쪼개지 않으므로 화면이 안 줄어든다 — 학생을 하나 더
     /// 띄울 때마다 split 하면 네 번째쯤에서 다 종잇장이 된다(거노 2026-08-05).
-    fn new_tab(&self, outer: Option<&str>) -> Result<SurfaceInfo> {
+    ///
+    /// `focus=false`(기본)면 새 탭이 활성탭을 뺏지 않는다 — 서브에이전트를 자기
+    /// pane 탭에 띄우는 것이 이 경로의 주 용도라, 부모가 보이던 화면이 그대로 남아야
+    /// 한다(거노 2026-08-18).
+    fn new_tab(&self, outer: Option<&str>, focus: bool) -> Result<SurfaceInfo> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketNewTab(
             outer.map(str::to_string),
+            focus,
             tx,
         ));
         // 타임아웃·자리표시자 정책은 split 과 같다 — 못 만들었으면 못 만들었다고
@@ -1256,6 +1261,13 @@ impl Backend for PtyBackend {
                 "탭 생성 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
             ),
         };
+        // 소환 관계 — split 과 같다. 이게 없으면 탭으로 띄운 학생의 `done` 보고가
+        // 갈 곳을 몰라 조용히 사라진다(탭의 부모 = 그 탭이 사는 pane 의 claude).
+        if let Some(parent) = outer.filter(|p| *p != id) {
+            if let Ok(mut m) = self.spawned_by.lock() {
+                m.insert(id.clone(), parent.to_string());
+            }
+        }
         Ok(SurfaceInfo {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),

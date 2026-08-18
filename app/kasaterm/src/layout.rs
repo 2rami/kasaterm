@@ -780,12 +780,15 @@ impl App {
     /// Stage-3 in-pane tab spawn. Creates a fresh PtySession with its own
     /// pid, registers it in `pid_to_pane` so output streams find the right
     /// (outer pane, tab) pair, and appends a `PaneTab` whose `pid` points at
-    /// the new shell. The new tab becomes active. Outer pane id and layout
-    /// don't change — adding a tab never reshapes the BSP tree.
+    /// the new shell. Outer pane id and layout don't change — adding a tab
+    /// never reshapes the BSP tree.
     /// 새 탭의 pane id 를 돌려준다 — 부른 쪽이 거기에 명령을 실어야 하기 때문이다.
     /// 예전엔 `()` 라 소켓으로 탭을 만들면 대상이 뭔지 알 방법이 없었다(split 이
     /// 자리표시자를 돌려주던 것과 같은 함정).
-    pub(crate) fn spawn_new_tab(&mut self, outer: &str) -> Result<String> {
+    ///
+    /// `activate`: 사람이 탭바 + 를 누른 경우만 true. 소켓 스폰(false)이 활성탭을
+    /// 뺏으면 오케스트레이터 pane 을 보던 사람 화면이 서브에이전트 부팅으로 덮인다.
+    pub(crate) fn spawn_new_tab(&mut self, outer: &str, activate: bool) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
         }
@@ -826,7 +829,9 @@ impl App {
                 let mut tab = PaneTab::default();
                 tab.pid = Some(new_pid.clone());
                 pane.tabs.push(tab);
-                pane.active_tab = pane.tabs.len() - 1;
+                if activate {
+                    pane.active_tab = pane.tabs.len() - 1;
+                }
                 pane.dirty = true;
             }
         }
@@ -917,7 +922,13 @@ impl App {
                 // the pid_to_pane entry gone the reap pass routes through
                 // remove_pane(pid) which is a no-op (pty already gone). Fine.
                 self.pty.remove(pid);
-                self.ws.lock().unwrap().pid_to_pane.remove(pid);
+                // 탭도 학생을 담는다(서브에이전트 스폰) — pane 과 같은 마커 정리를
+                // 안 하면 닫힌 탭의 캐릭터 바인딩이 남아 board 가 유령을 센다.
+                let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
+                Self::cleanup_collab_markers(pid, closed_cwd.as_deref());
+                let mut ws = self.ws.lock().unwrap();
+                ws.pid_to_pane.remove(pid);
+                ws.pane_character.remove(pid);
             }
         }
         // Preview tab removal is immediate via the ws.panes mutation below;
@@ -1591,6 +1602,31 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 되어 안 닫히던 것 → 새 tty 셸로 교체). Otherwise just remove it.
     pub(crate) fn close_pane(&mut self, pid: &str) {
         if self.tmux.is_some() {
+            return;
+        }
+        // 보조 탭 pid(`surface.new_tab` 이 준 id)는 탭 닫기 경로로 — pane 경로는
+        // 트리·stash 만 보므로 PTY 는 죽여도 바깥 pane 의 tabs 항목이 남아, 죽은
+        // 셸을 문 유령 탭이 탭바에 계속 떠 있었다(dismiss 로 탭 학생을 걷을 때).
+        let tab_slot: Option<(String, usize)> = {
+            let ws = self.ws.lock().unwrap();
+            ws.pid_to_pane
+                .get(pid)
+                .filter(|outer| outer.as_str() != pid)
+                .and_then(|outer| {
+                    ws.panes.get(outer).and_then(|p| {
+                        p.tabs
+                            .iter()
+                            .position(|t| t.pid.as_deref() == Some(pid))
+                            .map(|idx| (outer.clone(), idx))
+                    })
+                })
+        };
+        if let Some((outer, idx)) = tab_slot {
+            self.close_tab(&outer, idx);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         // stash 윈도우·백그라운드 세션 pane(CLI close)은 active 트리와 무관 —

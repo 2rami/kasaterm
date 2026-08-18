@@ -750,7 +750,7 @@ fn print_help() {
   kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
-  kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
+  kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
   kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
@@ -911,13 +911,16 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
         "window-new" => ("window.new", json!({})),
         // 쪼개지 않고 **이 pane 안에** 새 탭. 학생을 더 띄워도 화면이 안 줄어든다.
+        // 기본은 no-focus — 부모(부른 쪽) 화면이 그대로 남는다. --focus 만 새 탭을
+        // 앞으로 올린다(split 의 --focus 와 같은 규약).
         "tab" => {
+            let focus = args.iter().any(|a| a == "--focus");
             let outer = args
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
                 .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
-            ("surface.new_tab", json!({ "outer": outer }))
+            ("surface.new_tab", json!({ "outer": outer, "focus": focus }))
         }
         // URL 을 요청 pane 옆 웹(브라우저) pane 으로. 개발 서버를 그 서버를
         // 띄운 pane 곁에 두는 용도 — 어느 방 어느 pane 이 띄운 건지 화면

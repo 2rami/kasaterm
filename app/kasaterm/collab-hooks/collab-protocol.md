@@ -27,11 +27,14 @@ kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|
 [협업 — 학생 스폰]
 **두 줄이면 끝난다. 브리프는 SendMessage 로 보낸다 — 파일도 tell 도 쓰지 마라.**
 ```
-kasaterm-cli split <방향>        # 부른 pane(=네 자리)을 쪼갠다. 거노가 보는 창이 아니다
-kasaterm-cli send --surface <새 pane> $'cd <레포> && claude\n'
-SendMessage(to: <split 이 알려준 agent>, message: 브리프)
+kasaterm-cli tab                 # 네 pane 안에 새 탭 — 화면이 안 쪼개진다. 서브에이전트는 기본 이거다
+kasaterm-cli send --surface <새 pane> $'cd <레포> && glm claude --dangerously-skip-permissions\n'
+SendMessage(to: <응답의 agent>, message: 브리프)
 ```
-- **`split` 응답이 그 pane 의 `agent` 와 `team` 을 준다** — 학생은 pane 이 생길 때 배정되므로 부팅 전에 이미 정해져 있다. **기다리지도, board 를 되짚지도, 이름을 짐작하지도 마라.** `--count N` 이면 `agents` 배열로 온다.
+- **서브에이전트(glm·kimi 정찰, 짧은 심부름)는 `tab` 으로 네 탭 안에 띄워라**(거노 지시 2026-08-18). split 으로 띄우면 화면이 계속 갈라져 종잇장이 된다. 탭은 자리를 안 뺏고, 탭바에 학생 하나가 더 생길 뿐이다 — 부모(네) 화면도 그대로 남는다(새 탭은 앞으로 안 나온다. 앞으로 올리려면 `--focus`).
+- **`split <방향>` 은 거노가 지켜볼 화면일 때만** — 나란히 두고 비교할 것, 오래 도는 동급 학생, 거노가 직접 대화할 pane. 이때도 응답 형태는 같다.
+- **`tab`/`split` 응답이 그 pane 의 `agent` 와 `team` 을 준다** — 학생은 pane 이 생길 때 배정되므로 부팅 전에 이미 정해져 있다. **기다리지도, board 를 되짚지도, 이름을 짐작하지도 마라.** split `--count N` 이면 `agents` 배열로 온다.
+- 탭 학생도 `done` 보고·`dismiss` 가 그대로 통한다 — 일이 끝나면 `kasaterm-cli dismiss <탭 pane id>` 로 걷어라(탭만 닫히고 네 화면은 그대로다).
 - **부팅을 기다릴 필요가 없다.** 인박스 파일은 셰임이 `[ -f ] ||` 로 만들어 먼저 넣어 둔 것을 안 덮는다 — claude 가 뜨자마자 읽는다. 거노: "claude 켜면 바로 켜지는데, 바로 SendMessage 하면 되는데".
 - **부팅 커맨드에 브리프를 싣지 마라.** 인자로 실으면 그 텍스트가 프롬프트 한 줄로 박혀 긴 브리프가 화면을 덮고, 파일 경로로 우회하면 학생이 읽는 왕복이 하나 더 는다. 인박스가 정본이다.
 - **tell 은 SendMessage 가 안 닿을 때만** — 다른 방(팀이 다름), codex pane, 비-claude pane. tell 은 상대 입력창에 글자를 밀어넣는 것이라 화면이 지저분해지고 타이핑 중이면 섞인다.
@@ -76,7 +79,7 @@ kasaterm-cli web-url   [%surface]   # 현재 주소
 [브라우저 — 로그인 낀 실사이트만 값싼 창에 넘긴다]
 내장 웹 pane 은 자기 쿠키 창고라 **로그인이 백지**다. 슬랙·구글 같은 실서비스(평소 크롬의 로그인 상태가 필요한 일)는 카사크롬(`browser_*`)이 필요하고, 그건 **glm·kimi 학생을 띄워 시켜라**(거노 지시 2026-08-15) — 스샷 한 장이 글자 수천 자만큼 창을 먹고, 그 창을 태우면 정작 판단할 자리가 안 남는다. 네가 glm·kimi 면 넘길 데가 없으니 직접 쓴다.
 
-넘기는 법은 학생 스폰과 같다: pane 을 쪼개 `cd <레포> && glm claude --dangerously-skip-permissions` 를 띄우고 브리프는 SendMessage 로. 브리프에 **①어느 주소 ②무엇을 확인할지 ③무엇을 돌려줄지** 를 적고, 돌아오는 것은 **텍스트 결론만**이다. 넘겨받은 쪽이 지킬 것(브리프에 함께 적어 줘라):
+넘기는 법은 학생 스폰과 같다: `kasaterm-cli tab` 으로 네 탭 안에 `cd <레포> && glm claude --dangerously-skip-permissions` 를 띄우고 브리프는 SendMessage 로. 브리프에 **①어느 주소 ②무엇을 확인할지 ③무엇을 돌려줄지** 를 적고, 돌아오는 것은 **텍스트 결론만**이다. 넘겨받은 쪽이 지킬 것(브리프에 함께 적어 줘라):
 - 내용은 스샷 말고 `browser_get_text`(본문) · `browser_read_page`(접근성 트리 + ref)로 읽어라. 클릭할 것도 `browser_find` 가 ref 와 좌표를 준다.
 - 스샷은 픽셀로만 판단되는 것에, **화면당 한 장**만 — 「일단 보고 판단」은 그 한 장이 열 장이 된다.
 - 그 창도 200k 라 Claude 의 1/5 다. 다 본 화면은 다시 열지 말고, 안 쓰는 탭은 `browser_close_tab` 으로 닫아라.

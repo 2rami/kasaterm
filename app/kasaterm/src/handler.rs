@@ -54,7 +54,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketNewWindow => self.new_window(),
-            UserEvent::SocketNewTab(from, reply) => {
+            UserEvent::SocketNewTab(from, focus, reply) => {
                 let outer = from
                     .clone()
                     .or_else(|| self.ws.lock().unwrap().active_pane.clone());
@@ -64,7 +64,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(o) if self.window_of_pane(&o).is_none() => {
                         Err(format!("탭을 열 pane {o} 이 없다"))
                     }
-                    Some(o) => self.spawn_new_tab(&o).map_err(|e| format!("{e:#}")),
+                    Some(o) => self.spawn_new_tab(&o, *focus).map_err(|e| format!("{e:#}")),
                     None => Err("활성 pane 이 없다".to_string()),
                 };
                 let _ = reply.send(outcome);
@@ -4172,7 +4172,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
                                 ActionKind::ToggleZoom => self.toggle_pane_zoom(&menu_pid),
                                 ActionKind::NewTab => {
-                                    let _ = self.spawn_new_tab(&menu_pid);
+                                    let _ = self.spawn_new_tab(&menu_pid, true);
                                 }
                                 ActionKind::Close => self.close_pane(&menu_pid),
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
@@ -4255,7 +4255,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.close_pane(&pid);
                             }
                             ActionKind::NewTab => {
-                                let _ = self.spawn_new_tab(&pid);
+                                let _ = self.spawn_new_tab(&pid, true);
                             }
                             ActionKind::ToggleHeader => {
                                 self.toggle_pane_header(&pid);
@@ -4447,7 +4447,7 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         // Stage 3: spawn a real PTY-backed tab. spawn_new_tab
                         // pushes a PaneTab with its own pid and sets active.
-                        if let Err(e) = self.spawn_new_tab(&pid) {
+                        if let Err(e) = self.spawn_new_tab(&pid, true) {
                             eprintln!("[spawn_new_tab] {e}");
                         }
                         window.request_redraw();
