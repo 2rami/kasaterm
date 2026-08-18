@@ -80,7 +80,9 @@ cmd_start() {
 # 이 창이 녹음 주체다. 창을 닫으면 녹음이 멈춘다.
 echo "회의 녹음 중 — 이 창을 닫으면 멈춥니다."
 echo "저장 위치: $dir"
-exec "$0" _record "$dir"
+# tee 로 창과 파일 양쪽에 남긴다 — 이 경로에선 stdout 이 창으로만 가서 음량 기록이
+# 파일에 안 쌓였고, 그러면 status 의 무음 진단이 눈뜬장님이 된다.
+"$0" _record "$dir" 2>&1 | tee -a "$dir/녹음.log"
 CMDEOF
     chmod +x "$cmdf"
     open -a Terminal "$cmdf"
@@ -117,16 +119,56 @@ cmd_record() {
 # 실측: 「오늘의 주인공은 오늘의 주인공입니다.」 5줄 연속 뒤에 진짜 발언이 이어졌다.
 # 그래서 청크를 통째로 버리면 안 되고 **줄 단위**여야 한다.
 fold_repeats() {
-  awk '
-    function flush() {
-      if (n == 0) return
-      if (n >= 3) print prev "   ⟨×" n " 반복 — 환각 의심⟩"
-      else for (k = 0; k < n; k++) print prev
-      n = 0
-    }
-    { if ($0 == prev) n++; else { flush(); prev = $0; n = 1 } }
-    END { flush() }
-  '
+  # 환각 두 종류를 접는다. **awk 로 쓰지 마라** — macOS awk 는 문자열을 바이트로
+  # 다뤄서(`length("다만 저희의")==16`) 한글 줄을 중간에서 자르고, 주기 검출도 바이트
+  # 단위로 돌아 엉뚱하게 걸린다. 실측: 1회뿐인 정상 발언 두 줄이 깨진 채 사라졌다.
+  # python3 는 mlx_whisper 때문에 어차피 필수라 의존성이 늘지 않는다.
+  python3 -c '
+import sys
+
+MINLEN = 60   # 이 아래 줄은 줄 내부 검사를 안 한다 — 짧은 정상 발화가 우연히 주기를
+              # 만족할 수 있고, 오탐은 회의록을 훼손한다.
+REP = 3       # 반복 몇 회부터 환각으로 볼지
+
+def fold_inline(s):
+    """한 줄 **안에서** 같은 구절이 반복되는 환각. 줄 단위만 보던 필터를 실사용에서
+    그대로 뚫었다(「다 먹었을 때, 」가 한 줄에 37번). 끝이 잘려 있어도 s[i]==s[i-p]
+    는 성립하므로 부분 반복까지 잡힌다."""
+    n = len(s)
+    if n < MINLEN:
+        return s
+    for p in range(1, n // REP + 1):
+        if all(s[i] == s[i - p] for i in range(p, n)):
+            rep = n // p
+            if rep >= REP:
+                return s[:p] + "   ⟨×%d 반복 — 환각 의심⟩" % rep
+            return s
+    return s
+
+prev, n = None, 0
+out = []
+def flush():
+    global n
+    if n == 0:
+        return
+    # 지우지 않고 접는다 — 진짜로 세 번 말했을 수도 있어서, 판단 근거까지 지우면
+    # 나중에 되짚을 수가 없다.
+    if n >= REP:
+        out.append(prev + "   ⟨×%d 반복 — 환각 의심⟩" % n)
+    else:
+        out.extend([prev] * n)
+    n = 0
+
+for line in sys.stdin.read().splitlines():
+    line = fold_inline(line)
+    if line == prev:
+        n += 1
+    else:
+        flush()
+        prev, n = line, 1
+flush()
+print("\n".join(out))
+'
 }
 
 cmd_transcribe() {
@@ -195,7 +237,10 @@ cmd_status() {
   local n done_ skip
   n=$(ls "$dir"/chunks/*.wav 2>/dev/null | wc -l | tr -d ' ')
   done_=$(ls "$dir"/chunks/*.txt_done 2>/dev/null | wc -l | tr -d ' ')
-  skip=$(grep -c '^\[skip\]' "$dir/전사.log" 2>/dev/null || echo 0)
+  # ⚠️ `grep -c ... || echo 0` 로 쓰지 마라 — grep 은 0건일 때도 "0" 을 찍고 exit 1 이라
+  # 뒤의 echo 가 줄을 하나 더 붙여 "0\n0" 이 되고 아래 정수 비교가 터진다(실측).
+  skip=$(grep -c '^\[skip\]' "$dir/전사.log" 2>/dev/null) || true
+  skip=${skip:-0}
   echo "진행 중: $dir"
   echo "  청크 $n 개 · 전사 $done_ 개 · 무음으로 건너뜀 $skip 개"
   # 무음이 계속 쌓이면 녹음이 실패하고 있다는 뜻이다. 조용히 두면 빈 회의록이 남는다.
@@ -203,7 +248,7 @@ cmd_status() {
     echo "  ⚠️ 무음 청크가 많다 — 마이크 권한을 확인해라(설정 → 개인정보 보호 → 마이크)"
   fi
   echo "  최근 발언:"
-  grep -v '^###' "$dir/회의록.md" 2>/dev/null | grep -v '^$' | tail -3 | sed 's/^/    /'
+  grep -vE '^(#|$)' "$dir/회의록.md" 2>/dev/null | tail -3 | sed 's/^/    /'
 }
 
 cmd_open() {
