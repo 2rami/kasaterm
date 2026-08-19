@@ -4777,7 +4777,17 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
         prev
     };
     let key = id.to_string();
-    let dir = socket::claude_account_dir(id);
+    // ⚠️ 활성 계정은 금고가 아니라 **작업대**를 물어야 한다(env 를 안 붙인다).
+    // 금고 env 로 `claude auth status` 를 띄우면 그 claude 가 금고에 고정돼,
+    // 만료 상태면 금고 사본으로 refresh 를 시도해 **작업대와 공유하는 1회용
+    // refresh token 을 소비**한다 — 재시작 전-pane 로그아웃(2026-08-18 22:04)의
+    // 1순위 방아쇠가 이 프로브였다(부팅 +23초에 금고가 쓰인 keychain 기록).
+    // 활성 계정의 로그인 상태는 작업대가 정본이라 표시도 이쪽이 정확하다.
+    let dir = if crate::claude_auth::workbench_account().as_deref() == Some(id) {
+        None
+    } else {
+        socket::claude_account_dir(id)
+    };
     std::thread::spawn(move || {
         // pane 과 같은 PATH 를 보려면 로그인 셸을 거쳐야 한다 — Finder 로 뜬 .app 의
         // PATH 에는 claude 가 없어서 직접 spawn 하면 항상 실패한다.

@@ -307,6 +307,13 @@ fn keychain_account() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
 }
 
+/// 작업대 지문이 말하는 **활성 계정 id**. 지문이 없으면(작업대를 한 번도 우리가
+/// 채운 적 없음) None. `claude auth status` 프로브처럼 「이 계정을 어느 자리로
+/// 물어야 하나」를 정할 때 쓴다 — 활성 계정은 금고가 아니라 작업대가 정본이다.
+pub(crate) fn workbench_account() -> Option<String> {
+    read_stamp_in(&active_dir()?).map(|(a, _)| a)
+}
+
 /// 그 계정을 **지금 실제로 읽어야 하는 자리**. 활성 계정은 작업대(도는 pane 들이 보는
 /// 자리), 나머지는 각자 금고다.
 ///
@@ -524,11 +531,22 @@ fn swap_active_in(
     // 밀면 refresh token 사슬이 끊겨 로그아웃된다. 다른 계정으로의 명시적 전환은
     // 만료 비교가 무의미하므로(계정이 다르면 시각이 달라도 당연) 제외.
     if read_stamp_in(stamp_home).is_some_and(|(a, _)| a == account_id) {
-        if let Some(cur) = read_credentials(store) {
-            if is_newer(&blob, &cur) {
-                eprintln!(
-                    "[account] {account_id} 재적용 — 작업대가 금고보다 새것이라 덮지 않음"
-                );
+        match read_credentials(store) {
+            Some(cur) => {
+                if is_newer(&blob, &cur) {
+                    eprintln!(
+                        "[account] {account_id} 재적용 — 작업대가 금고보다 새것이라 덮지 않음"
+                    );
+                    return SwapOutcome::AlreadyActive;
+                }
+            }
+            // 같은 계정 재적용인데 작업대를 못 읽었다 — 정말 비었는지 `security`
+            // 일시 실패인지 여기선 구분할 수 없다. 덮으면 일시 실패 쪽에서 최신
+            // 작업대가 옛 금고로 밀려 로그아웃이므로 이번 사이클은 그냥 넘어간다.
+            // 폴러가 매 사이클 다시 부르니 진짜 비어 있어도 복구 기회는 계속 있고,
+            // 정말 비어 있는 경우는 pane 의 /login 이 정도(正道)다.
+            None => {
+                eprintln!("[account] {account_id} 재적용 보류 — 작업대 읽기 실패(일시일 수 있음)");
                 return SwapOutcome::AlreadyActive;
             }
         }

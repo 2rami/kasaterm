@@ -2745,6 +2745,15 @@ fn slot_has_live_claude(dir: &str) -> bool {
 /// 먼저 쓴 쪽만 살고 나머지는 `invalid_grant` 로 죽는다 — 그 슬롯 세션이 통째로
 /// 로그아웃된다. 그래서 살아 있는 슬롯은 건드리지 않는다(어차피 CLI 가 갱신해 준다).
 async fn refresh_claude_token(dir: &str) -> Option<String> {
+    // ⚠️ 활성 계정의 금고 토큰은 여기서 회전시키지 않는다 — 이 함수는 refresh
+    // token 을 **직접 소비**하므로(OAuth POST) 활성 금고에 돌면 작업대의 사슬이
+    // 그 자리에서 죽는다. slot_has_live_claude 는 env 문자열만 봐서 env 없이
+    // 작업대를 쓰는 활성 pane 들을 못 보고, 그래서 활성 금고를 늘 「안 쓰는
+    // 슬롯」으로 판정한다 — 그 게이트만으론 못 막는다(2026-08-19 조사 확정).
+    if is_active_vault_dir(dir) {
+        eprintln!("[claude-token] 활성 계정 금고 회전 거부 — 작업대가 정본이다");
+        return None;
+    }
     let (mut creds, src) = read_claude_credentials(Some(dir))?;
     let oauth = creds.get("claudeAiOauth")?.as_object()?;
     let expires_at = oauth.get("expiresAt")?.as_u64()?;
@@ -2832,30 +2841,35 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 /// 가드가 없으면 로그인이 진짜로 죽은 슬롯 하나가 초당 수십 개의 claude 를 낳는다.
 /// 실패해도 다시 시도하지 않는 건 그래서다 — 진짜 죽은 슬롯은 사람이 다시 로그인해야
 /// 하지 반복 실행으로는 안 살아난다.
+/// 이 금고 dir 이 **활성 계정**의 것인가 — 작업대 지문(workbench-stamp.json)이
+/// 정본이다. 활성 계정의 refresh token 사슬은 작업대와 공유(1회용)라, 금고 쪽에서
+/// 소비하면 도는 pane 전체가 다음 refresh 에 로그아웃된다(2026-08-18 22:04 실측 —
+/// 재시작하자마자 전 pane 이 /login 을 요구했다).
+fn is_active_vault_dir(dir: &str) -> bool {
+    if dir.is_empty() {
+        return false; // 빈 dir = 작업대 자신. 금고가 아니다.
+    }
+    let p = std::path::Path::new(dir);
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        return false;
+    };
+    let stamp = parent.join("_active").join("workbench-stamp.json");
+    let active = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("account").and_then(|a| a.as_str().map(str::to_string)));
+    active.as_deref() == name.to_str()
+}
+
 fn refresh_slot_once(dir: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
-    // ⚠️ **활성 계정의 금고는 절대 refresh 하지 않는다.** 활성 계정의 정본은
-    // 작업대(기본 keychain 자리)이고 금고는 그 사본이다 — refresh token 은 1회용이라
-    // 여기서 금고 쪽 사본을 소비하면 작업대의 것이 그 순간 죽은 값이 되고, 도는
-    // pane 들은 access token 으로 버티다 재시작 때 전부 로그아웃된다(2026-08-18
-    // 22:04 실측 — 재시작하자마자 전 pane 이 /login 을 요구했다). 어느 계정이
-    // 활성인지는 작업대 지문(workbench-stamp.json)이 말한다. kasaterm 쪽
-    // runtime_dir_for 도 같은 이유로 금고 폴백을 막지만, 이 프록시는 아로나 UI 등
-    // 다른 클라이언트도 부르므로 여기 자체 가드가 이중 방어다.
-    if !dir.is_empty() {
-        let p = std::path::Path::new(dir);
-        if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
-            let stamp = parent.join("_active").join("workbench-stamp.json");
-            let active = std::fs::read_to_string(&stamp)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|v| v.get("account").and_then(|a| a.as_str().map(str::to_string)));
-            if active.as_deref() == name.to_str() {
-                eprintln!("[usage] 활성 계정 금고 refresh 거부 — 작업대가 정본이다");
-                return;
-            }
-        }
+    // ⚠️ **활성 계정의 금고는 절대 refresh 하지 않는다**(is_active_vault_dir 주석).
+    // kasaterm 쪽 runtime_dir_for 도 같은 이유로 금고 폴백을 막지만, 이 프록시는
+    // 아로나 UI 등 다른 클라이언트도 부르므로 여기 자체 가드가 이중 방어다.
+    if is_active_vault_dir(dir) {
+        eprintln!("[usage] 활성 계정 금고 refresh 거부 — 작업대가 정본이다");
+        return;
     }
     // ⚠️ 임시 폴더 슬롯으로는 **절대** 띄우지 않는다. 그렇게 띄운 claude 는 그 폴더
     // 이름으로 **키체인 항목을 새로 만들고**(`/tmp/claude-accounts/_active` →
