@@ -20,14 +20,16 @@
     font-display: swap;
   }
   html, body { margin: 0; height: 100%; background: #12161c; }
-  /* 데이터(터미널)가 0px 에서 시작한다 — 조작부는 전부 아래로 내렸다.
-     100dvh: 주소창이 접힐 때 100vh 는 화면을 넘는다. */
+  /* 헤더(44px) 바로 아래에서 데이터가 시작한다 — 300px 룰 안이고, 헤더가 자리를
+     가져야 터미널 첫 줄과 겹치지 않는다. safe-area-top: 노치 기기에서 첫 줄이
+     노치 뒤로 숨는 것을 막는다. */
   #term {
     position: absolute;
-    inset: 8px 8px calc(var(--bar) + env(safe-area-inset-bottom, 0px)) 8px;
+    inset: calc(50px + env(safe-area-inset-top, 0px)) 8px
+      calc(var(--bar) + env(safe-area-inset-bottom, 0px)) 8px;
   }
   :root { --bar: 8px; }
-  body.has-bar { --bar: 52px; }
+  body.has-bar { --bar: 58px; }
 
   /* xterm 기본 스크롤바는 밝은 톤이라 어두운 터미널 위에서 흰 띠로 튄다. */
   .xterm-viewport::-webkit-scrollbar { width: 10px; }
@@ -35,28 +37,39 @@
   .xterm-viewport::-webkit-scrollbar-thumb { background: #2c3543; border-radius: 5px; }
   .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
 
-  /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다 — 11px 회색으로 흘리면
-     격자가 작아진 화면에서 그대로 묻힌다. kasaterm pane 헤더처럼 프사 붙은 칩으로.
-     이 칩이 곧 세션 전환 손잡이다(누르면 아래 시트) — 화면 요소를 늘리지 않고
-     이미 있는 신원 표시에 전환을 얹는다(2026-08-17 「전환 ui 직접구축」). */
+  /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다. 우상단 칩은 터미널 첫 줄과
+     겹쳐 뒤 글자가 비쳤다 — kasaterm pane 헤더처럼 **자기 자리를 가진 상단 바**로
+     둔다(좌측 프사+이름, 데스크톱과 같은 문법). 바 전체가 세션 전환 손잡이다
+     (누르면 아래 시트, 2026-08-17 「전환 ui 직접구축」). min-height 44 = 터치 타깃. */
   #status {
-    position: absolute; right: 10px; top: 6px; z-index: 5;
-    display: none; align-items: center; gap: 6px;
-    font: 12px/1 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #9aa6b4; background: rgba(23, 28, 36, .88);
-    border: 1px solid #2a323e; border-radius: 6px;
-    padding: 4px 8px 4px 4px; max-width: 60vw; cursor: pointer;
+    position: absolute; left: 0; right: 0; top: 0; z-index: 5;
+    display: none; align-items: center; gap: 8px; min-height: 44px;
+    box-sizing: border-box;
+    font: 13px/1 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #c8d0d9; background: #161b23;
+    border-bottom: 1px solid #232b36;
+    padding: 0 14px 0 12px;
+    padding-top: env(safe-area-inset-top, 0px); cursor: pointer;
   }
   #status.on { display: flex; }
-  #status.waiting { color: #ffd479; border-color: #5a4a24; }
-  #status:active { background: rgba(44, 53, 67, .92); }
-  /* 칩을 시각적으로 키우지 않고 닿는 면만 44px 로 — 겉보기 28px 에 사방 8px. */
-  #status::after { content: ''; position: absolute; inset: -8px; }
-  #who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #chev { flex: 0 0 auto; opacity: .6; font-size: 9px; }
+  #status.waiting { color: #ffd479; border-bottom-color: #5a4a24; }
+  #status:active { background: #1d242e; }
+  #who { flex: 0 0 auto; }
+  /* 작업 제목(claude) 또는 경로(셸) — 이름 옆에 흐리게, 남는 폭만 쓴다. */
+  #whot {
+    flex: 0 1 auto; min-width: 0; font-size: 11px; color: #8fa0b3;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #chev { flex: 0 0 auto; margin-left: auto; opacity: .5; font-size: 10px; }
   #avatar {
-    width: 20px; height: 20px; border-radius: 50%;
+    width: 22px; height: 22px; border-radius: 50%;
     object-fit: cover; flex: 0 0 auto; display: none;
+  }
+  /* 프사 없는 pane 도 헤더 왼쪽이 비지 않게 — 시트의 .hole 과 같은 문법. */
+  #ahole {
+    width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto;
+    background: #222a35; color: #6b7a8d; display: flex;
+    align-items: center; justify-content: center; font-size: 11px;
   }
 
   /* ── 세션 시트 — 칩을 누르면 아래에서 올라온다 ─────────────────────────
@@ -70,7 +83,7 @@
     background: #171c24; border-top: 1px solid #2a323e;
     border-radius: 14px 14px 0 0;
     max-height: 78dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
-    padding: 6px 8px calc(8px + env(safe-area-inset-bottom, 0px)) 8px;
+    padding: 6px 10px calc(10px + env(safe-area-inset-bottom, 0px)) 10px;
     transform: translateY(102%); transition: transform .2s ease-out;
   }
   body.sheet-open #sheet { transform: translateY(0); }
@@ -85,8 +98,9 @@
   }
   /* ── 방(윈도우) 구획 — 데스크톱 좌측 사이드바의 「목록」 모드를 따른다:
      방 이름 헤더 + pane 줄 + 활성 방은 채움이 아니라 accent 아웃라인. */
-  .sect { margin: 4px 0 2px; padding: 2px 4px 4px; border-radius: 10px; }
-  .sect.active { box-shadow: inset 0 0 0 1.5px #7aa2f7; }
+  .sect { margin: 6px 0 4px; padding: 2px 4px 4px; border-radius: 10px; }
+  /* 활성 방 아웃라인 — 원색 1.5px 는 시트 전폭에서 너무 앞으로 나온다. */
+  .sect.active { box-shadow: inset 0 0 0 1px rgba(122, 162, 247, .5); }
   .shead {
     display: flex; align-items: baseline; gap: 8px; padding: 6px 8px 4px;
     font: 700 13px/1.2 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -123,11 +137,13 @@
   @keyframes dotblink { 50% { opacity: .15; } }
   @media (prefers-reduced-motion: reduce) { .dot.wait { animation: none; } }
   .srow img { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
-  /* 프사 없는 pane(웹 셸 등)도 줄이 안 흔들리게 같은 크기의 빈 원을 채운다. */
+  /* 프사 없는 pane(셸 pane)도 줄이 안 흔들리게 같은 크기의 원을 채운다 —
+     글리프는 KasaTerm 의 프롬프트 화살표라 「터미널」이라고 스스로 말한다. */
   .srow .hole {
     width: 26px; height: 26px; border-radius: 50%; flex: 0 0 auto;
     background: #222a35; color: #6b7a8d; display: flex;
-    align-items: center; justify-content: center; font-size: 13px;
+    align-items: center; justify-content: center; font-size: 12px;
+    font-family: 'KasaTerm', ui-monospace, monospace;
   }
   .srow .txt { flex: 1 1 auto; min-width: 0; }
   .srow .t1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -137,32 +153,33 @@
   }
   .srow .tag { flex: 0 0 auto; font-size: 11px; color: #7aa2f7; }
   .srow .tag.wait { color: #ffd479; }
-  .srow.newshell { border-top: 1px solid #232b36; border-radius: 0 0 10px 10px; color: #9aa6b4; }
 
   /* 하단 바 — 소프트 키보드가 올라오면 visualViewport 로 그 위에 얹는다.
      transform 으로만 움직인다(§④): position 을 바꾸면 터미널이 뛴다. */
   #bar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-    display: none; gap: 6px; align-items: center;
-    padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)) 8px;
-    background: #171c24; border-top: 1px solid #232b36;
+    display: none; gap: 8px; align-items: center;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px)) 10px;
+    background: #161b23; border-top: 1px solid #232b36;
     will-change: transform;
   }
   body.has-bar #bar { display: flex; }
   #bar button {
     min-height: 44px;                    /* iOS HIG 터치 타깃 */
     font: 16px/1 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;  /* 16px 미만이면 iOS 가 확대한다 */
-    color: #c8d0d9; background: #222a35;
-    border: 1px solid #2f3846; border-radius: 8px;
+    color: #aeb9c6; background: #1d242e;
+    border: 1px solid #29313d; border-radius: 10px;
     flex: 1 1 0; min-width: 44px; padding: 0 6px;
   }
-  #bar button:active { background: #2c3543; }
+  #bar button:active { background: #2c3543; color: #dde3ea; }
+  /* 격자 전환은 성격이 다른 버튼 — 키가 아니라 모드다. accent 로 가른다. */
+  #fitbtn { flex: 0 0 52px; color: #7aa2f7; border-color: rgba(122, 162, 247, .35); }
 </style>
 </head>
 <body>
 <div id="term"></div>
 <div id="status" role="button" aria-haspopup="dialog" aria-expanded="false" aria-label="세션 전환">
-  <img id="avatar" alt=""><span id="who"></span><span id="chev">▼</span>
+  <img id="avatar" alt=""><span id="ahole">❯</span><span id="who"></span><span id="whot"></span><span id="chev">▼</span>
 </div>
 <div id="dim"></div>
 <div id="sheet" role="dialog" aria-label="세션 목록"><div id="rows"></div></div>
@@ -176,16 +193,35 @@
 </div>
 <script src="/term/xterm.js"></script>
 <script>
-(() => {
+(async () => {
   // pane id 는 `%151` 처럼 생겼는데, URLSearchParams 는 그 `%15` 를 퍼센트 인코딩으로
   // 읽어 0x15 로 디코딩한다 — 남는 건 제어문자+`1` 이라 목록 매칭도 칩도 조용히 깨진다.
   // (오류가 안 나서 「이름이 원래 안 뜨나 보다」로 보인다.) raw 쿼리에서 직접 꺼낸다.
-  const paneId = (() => {
+  let paneId = (() => {
     const hit = location.search.slice(1).split('&').find((s) => s.startsWith('pane='));
     return hit ? hit.slice(5) : '';
   })();
-  // 이 연결이 실제로 붙은 세션 id. 새 셸은 주소에 없고 서버가 size 메시지로
-  // 알려 준다 — 목록에서 「보는 중」을 제 행에 붙이는 근거다.
+  // 주소에 pane 이 없으면 kasaterm 의 pane 으로 **자동 연결**한다(활성 방 우선) —
+  // 폰의 쓸모는 웹 전용 셸이 아니라 데스크톱 화면을 그대로 보는 것이다(2026-08-20
+  // 지시). 목록을 못 얻거나 pane 이 하나도 없을 때만 서버의 셸 스폰에 떨어진다.
+  if (!paneId) {
+    try {
+      const [list, sess] = await Promise.all([
+        fetch('/term/panes').then((r) => r.json()),
+        fetch('/sessions').then((r) => r.json()).catch(() => null),
+      ]);
+      const real = list.filter((p) => !p.id.startsWith('web-'));
+      const inActive = sess ? real.filter((p) => p.window === sess.active) : [];
+      const pick = inActive[0] || real[0];
+      if (pick) {
+        paneId = pick.id;
+        // 주소도 따라간다 — 새로고침이 같은 pane 을 가리키게. 토큰은 이미 쿠키다.
+        history.replaceState(null, '', `?pane=${encodeURIComponent(paneId)}`);
+      }
+    } catch {}
+  }
+  // 이 연결이 실제로 붙은 세션 id. 서버가 size 메시지로 확정해 준다 —
+  // 목록에서 「보는 중」을 제 행에 붙이는 근거다.
   let selfId = paneId;
   // 웹 셸의 uuid 는 사람이 읽을 이름이 아니다 — 「웹 셸 · e0de」로 접는다.
   const prettyId = (id) =>
@@ -193,16 +229,20 @@
   const statusEl = document.getElementById('status');
   const whoEl = document.getElementById('who');
   const avatarEl = document.getElementById('avatar');
-  // 칩은 항상 떠 있다 — 세션 전환 손잡이를 겸하므로, 새 셸이거나 연결이 죽어도
-  // 다른 세션으로 갈 길이 남아야 한다. text 가 비면 「새 셸」로 부른다.
-  const setWho = (text, slug) => {
-    whoEl.textContent = text || '새 셸';
+  // 헤더는 항상 떠 있다 — 세션 전환 손잡이를 겸하므로, 연결이 죽어도 다른
+  // pane 으로 갈 길이 남아야 한다.
+  const setWho = (text, slug, title) => {
+    whoEl.textContent = text || '셸';
+    document.getElementById('whot').textContent = title || '';
     statusEl.classList.add('on');
+    const hole = document.getElementById('ahole');
     if (slug) {
       avatarEl.src = `/term/avatar/${encodeURIComponent(slug)}.png`;
       avatarEl.style.display = 'block';
+      hole.style.display = 'none';
     } else {
       avatarEl.style.display = 'none';
+      hole.style.display = 'flex';
     }
   };
   const bar = document.getElementById('bar');
@@ -264,8 +304,8 @@
         if (!orig) orig = { cols: m.cols, rows: m.rows };
         term.resize(m.cols, m.rows);
         fitFontToCols();
-        // 이름은 /term/panes 가 오면 덮어쓴다. 그 전까지는 id 라도 띄워 둔다.
-        if (mirror && !named) setWho(paneId);
+        // 이름은 /term/panes 가 오면 덮어쓴다. id 는 사람 말이 아니니 안 보여준다.
+        if (mirror && !named) setWho('');
         // 새 셸은 이미 우리 크기로 뜨므로 맞출 것이 없다.
         if (!mirror) { setWho(''); fitBtn.style.display = 'none'; }
         // 폰에서는 pane 격자(196열)가 축소로 안 들어간다 — 폭을 맞추면 글자가 5px 라
@@ -301,7 +341,7 @@
       fitFontToCols();
     }
     fitBtn.setAttribute('aria-pressed', String(fitted));
-    fitBtn.style.background = fitted ? '#2f4a6b' : '';
+    fitBtn.style.background = fitted ? 'rgba(122, 162, 247, .28)' : '';
   };
   fitBtn.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
@@ -324,7 +364,7 @@
   // pane id 의 `%` 가 encodeURIComponent 로 `%25` 가 되어야 서버의 raw 폴백이
   // 원문을 되찾는다. 토큰은 쿠키에 있으므로 주소에 다시 실을 필요가 없다.
   const goTo = (id) => {
-    location.search = id ? `?pane=${encodeURIComponent(id)}` : '';
+    location.search = `?pane=${encodeURIComponent(id)}`;
   };
   const closeSheet = () => {
     document.body.classList.remove('sheet-open');
@@ -374,14 +414,15 @@
   // 이름도) — 방(윈도우)별 구획 + 방 이름 헤더 + pane 줄 + 학생색 이름 + 상태 점.
   // 정렬은 방/트리 순서 그대로다(사이드바와 같은 순서를 눈이 기억한다). 답을
   // 기다리는 pane 은 노랑 점이 숨쉬어 훑으면 바로 보인다.
+  // 웹 전용 셸은 목록에서 뺀다 — 이 화면의 쓸모는 kasaterm 연동이다(2026-08-20).
   const fillSheet = (list, sess) => {
     rowsEl.replaceChildren();
     const labels = (sess && sess.labels) || [];
     const activeWin = sess ? sess.active : -1;
-    // 방별 그룹. 웹 셸(web-…)은 방이 없어 따로 묶는다.
     const groups = new Map();
     for (const p of list) {
-      const k = p.id.startsWith('web-') ? 'web' : (p.window ?? 'etc');
+      if (p.id.startsWith('web-')) continue;
+      const k = p.window ?? 'etc';
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(p);
     }
@@ -389,7 +430,6 @@
       .filter((k) => typeof k === 'number')
       .sort((a, b) => a - b);
     if (groups.has('etc')) keys.push('etc');
-    if (groups.has('web')) keys.push('web');
     for (const k of keys) {
       const sect = document.createElement('div');
       sect.className = 'sect' + (k === activeWin ? ' active' : '');
@@ -397,8 +437,7 @@
       head.className = 'shead';
       let nm = '';
       let cwd = '';
-      if (k === 'web') nm = '웹 셸';
-      else if (k === 'etc') nm = '기타';
+      if (k === 'etc') nm = '기타';
       else {
         // /sessions 라벨은 "이름 · cwd" 꼴 — 사이드바 방 헤더처럼 가른다.
         const cut = (labels[k] || `방 ${k + 1}`).split(' · ');
@@ -426,8 +465,8 @@
           : p.status === 'waiting' ? badge('● 대기', true) : null;
         const r = row(
           cur ? 'cur' : '',
-          face(p.slug, '>'),
-          p.name || prettyId(p.id),
+          face(p.slug, '❯'),
+          p.name || '셸',
           p.title || '',
           tag,
           () => { if (cur) closeSheet(); else goTo(p.id); },
@@ -445,10 +484,6 @@
       }
       rowsEl.append(sect);
     }
-    rowsEl.append(row(
-      'newshell', face(null, '＋'), '새 셸', '', null,
-      () => { if (paneId) goTo(''); else closeSheet(); },
-    ));
   };
   const openSheet = () => {
     document.body.classList.add('sheet-open');
@@ -485,7 +520,11 @@
     const me = (paneList || []).find((p) => p.id === selfId);
     if (me) {
       named = true;
-      setWho(me.name || prettyId(me.id), me.slug);
+      setWho(
+        me.name || (me.id.startsWith('web-') ? prettyId(me.id) : ''),
+        me.slug,
+        me.title || '',
+      );
       statusEl.classList.toggle('waiting', me.status === 'waiting');
     }
   };
@@ -528,9 +567,9 @@
     lift();
   }
 
-  // 칩은 지우지 않는다 — 연결이 죽어도 칩이 곧 다른 세션으로 가는 길이다.
+  // 헤더는 지우지 않는다 — 연결이 죽어도 헤더가 곧 다른 pane 으로 가는 길이다.
   ws.onclose = () => {
-    term.write('\r\n\x1b[31m● 연결이 끊겼습니다 — 위 칩으로 다른 세션에 붙을 수 있습니다\x1b[0m\r\n');
+    term.write('\r\n\x1b[31m● 연결이 끊겼습니다 — 위 이름을 눌러 다른 pane 에 붙을 수 있습니다\x1b[0m\r\n');
   };
   ws.onerror = () => { setWho('연결 오류'); };
 })();
