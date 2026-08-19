@@ -290,6 +290,21 @@ impl App {
                 .keys()
                 .chain(ws.pane_character.keys())
                 .filter(|p| p.as_str() != id)
+                // 「이 방」= rslug(프로젝트 cwd + 명시 room)다. `pane_character` 는
+                // 앱 전역 맵이라 거르지 않으면 다른 방 학생까지 here 에 들어와,
+                // ①첫 pane 이어도 here 가 안 비어 prefer_fresh_school 이 영영 안
+                // 불리고 ②prefer_same_school 이 남의 방 학원으로 끌어당겨 **앱
+                // 전체가 최초 학원 하나로 수렴**했다(2026-08-19 실측: 서로 다른 방
+                // 다섯의 학생 5명 전원 밀레니엄 — 우연 확률 ≈0.9%. 방마다 학원을
+                // 가르는 c999e10 의 절반이 이 스코프 누락으로 죽어 있었다).
+                // cwd 를 아직 모르는 pane 은 같은 방으로 친다 — 같은 방을 놓쳐
+                // 같은 얼굴이 나란히 서는 쪽이, 다른 방과 학원이 뭉치는 쪽보다 나쁘다.
+                .filter(|p| {
+                    self.pane_cwd_cache.get(p.as_str()).is_none_or(|c| {
+                        let room = ws.pane_room.get(p.as_str()).cloned();
+                        kasa_mcp::character::rslug(c, room.as_deref()) == rslug
+                    })
+                })
                 .filter_map(|p| {
                     ws.pane_character
                         .get(p)
