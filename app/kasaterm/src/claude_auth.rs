@@ -794,9 +794,6 @@ mod tests {
         format!(r#"{{"claudeAiOauth":{{"expiresAt":{expires},"tag":"{tag}"}}}}"#).into_bytes()
     }
 
-    /// 전환의 본체 — 금고에서 작업대로 옮겨 담기고, 두 번째로 같은 계정을 눌러도
-    /// 다시 쓰지 않는다(그 자리에 도는 세션의 최신 토큰이 있을 수 있다).
-    #[test]
     /// ★2026-08-18 재시작 전-pane 로그아웃의 안전벨트들.
     ///
     /// ① 만료 시각이 없거나 0 인 금고(로그인 안 된 껍데기 — acct-1 실측)로는
@@ -837,6 +834,9 @@ mod tests {
         );
     }
 
+    /// 전환의 본체 — 금고에서 작업대로 옮겨 담기고, 두 번째로 같은 계정을 눌러도
+    /// 다시 쓰지 않는다(그 자리에 도는 세션의 최신 토큰이 있을 수 있다).
+    #[test]
     fn swap_moves_vault_into_active_and_is_idempotent() {
         let s = Slots::new("swap");
         let (stamp, bench) = s.bench();
