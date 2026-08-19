@@ -26,6 +26,9 @@ pub(crate) struct WebHost {
     last_frame: Option<(i32, i32, u32, u32)>,
     /// 지금 화면에 붙어(orderFront + child 접착) 있는가.
     visible: bool,
+    /// 마지막 주소 폴링 시각 — 매 루프 턴 도는 sync 가 ObjC 왕복을 반복하지
+    /// 않게 500ms 로 죈다. 페이지 이동을 따라 라벨·WebPane.url 을 갱신하는 용.
+    last_url_poll: std::time::Instant,
 }
 
 /// pane 상자 가장자리에서 webview 를 들이는 논리 px — 포커스 테두리(렌더가
@@ -67,6 +70,18 @@ fn ns_window_of(
         let view: &objc2_app_kit::NSView = h.ns_view.cast().as_ref();
         view.window()
     }
+}
+
+/// OS 기본 브라우저로 연다 — 내장 웹뷰는 쿠키 창고가 따로라 로그인·확장이
+/// 필요해지면 여기로 탈출한다.
+fn open_external(url: &str) -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
+    spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// 자식 창을 본창에 접착한다. 이후 본창 드래그에 AppKit 이 자식을 함께 옮긴다.
@@ -201,7 +216,13 @@ impl App {
         self.web_host_seq += 1;
         self.web_hosts.insert(
             host_id,
-            WebHost { webview, window, last_frame: None, visible: false },
+            WebHost {
+                webview,
+                window,
+                last_frame: None,
+                visible: false,
+                last_url_poll: std::time::Instant::now(),
+            },
         );
 
         // 그리드 쪽 자리: PTY 없는 pane(이미지 split 과 같은 선례 — pid None,
@@ -311,6 +332,8 @@ impl App {
             }
         }
 
+        // 이동한 host 의 새 주소 — 루프 안에서 모아 ws 잠금은 아래서 한 번만.
+        let mut url_updates: Vec<(String, u64, String)> = Vec::new();
         for (host_id, pane_id, (x, y, w, h)) in visible {
             let header = self.pane_header_px(&pane_id);
             let lx = origin.x + (pad + x as f32 * self.cell.w + WEB_INSET) as f64 * zoom;
@@ -327,6 +350,16 @@ impl App {
                 lh.round().max(1.0) as u32,
             );
             let Some(host) = self.web_hosts.get_mut(&host_id) else { continue };
+            // 페이지 이동(링크·리다이렉트)을 따라간다 — WebPane.url 을 열 때
+            // 주소로 박제해 두면 탭 라벨과 중복-포커스 판정이 거짓말한다.
+            if host.last_url_poll.elapsed() >= std::time::Duration::from_millis(500) {
+                host.last_url_poll = std::time::Instant::now();
+                if let Ok(cur) = host.webview.url() {
+                    if !cur.is_empty() {
+                        url_updates.push((pane_id.clone(), host_id, cur));
+                    }
+                }
+            }
             if host.last_frame.is_none() {
                 // 첫 배치 한 번만 — 헤드리스 검증이 자식 창 좌표를 읽을 유일한
                 // 창구다(오토캡처는 본창 wgpu 만 찍어 자식 창이 안 보인다).
@@ -355,6 +388,28 @@ impl App {
                 host.window.set_visible(true);
                 attach_child(&main, &host.window);
                 host.visible = true;
+            }
+        }
+        if !url_updates.is_empty() {
+            let mut changed = false;
+            {
+                let mut ws = self.ws.lock().unwrap();
+                for (pid, host_id, cur) in url_updates {
+                    let Some(p) = ws.panes.get_mut(&pid) else { continue };
+                    for t in &mut p.tabs {
+                        let PaneContent::Web(w) = &mut t.content else { continue };
+                        if w.host_id == host_id && w.url != cur {
+                            w.url = cur.clone();
+                            t.title = Some(short_label(&cur));
+                            p.dirty = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                self.chrome_dirty = true;
+                main.request_redraw();
             }
         }
     }
@@ -398,6 +453,43 @@ impl App {
                     .collect::<Vec<_>>()
                     .join(" · ")
             )),
+        }
+    }
+
+    /// 헤더 브라우저 컨트롤(ActionKind::Web*) 실행. 뒤/앞은 wry 에 네이티브
+    /// API 가 없어 history JS 로 간다 — 같은 웹뷰 안이라 권한 차이가 없다.
+    pub(crate) fn web_nav(&mut self, pane_id: &str, op: &str) {
+        let host_id = match self.resolve_web_host(Some(pane_id)) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[webpane] nav {op}: {e}");
+                return;
+            }
+        };
+        let Some(host) = self.web_hosts.get(&host_id) else { return };
+        let r = match op {
+            "back" => host
+                .webview
+                .evaluate_script("history.back()")
+                .map_err(|e| e.to_string()),
+            "forward" => host
+                .webview
+                .evaluate_script("history.forward()")
+                .map_err(|e| e.to_string()),
+            "reload" => host.webview.reload().map_err(|e| e.to_string()),
+            "external" => {
+                // 저장된 WebPane.url 이 아니라 웹뷰의 지금 주소 — 이동했으면
+                // 사용자가 보고 있는 그 페이지를 열어야 한다.
+                match host.webview.url() {
+                    Ok(u) if !u.is_empty() => open_external(&u),
+                    Ok(_) => Err("주소가 비어 있다".to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            other => Err(format!("{other}: 모르는 nav")),
+        };
+        if let Err(e) = r {
+            eprintln!("[webpane] nav {op}: {e}");
         }
     }
 

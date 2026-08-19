@@ -4229,12 +4229,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 ActionKind::Undock => {
                                     self.undock_pane_terminal(&menu_pid, event_loop, None)
                                 }
-                                // md 토글은 헤더 세그먼트 전용이라 ⋮ 메뉴엔 없다.
+                                // md 토글·웹 컨트롤은 헤더 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
                                 // 하고 끝난다(ToggleHeader·ToggleZoom 이 실제로
                                 // 그랬다) — 컴파일 에러로 잡히게 남김없이 적는다.
-                                ActionKind::MdRender | ActionKind::MdRaw => {}
+                                ActionKind::MdRender
+                                | ActionKind::MdRaw
+                                | ActionKind::WebBack
+                                | ActionKind::WebForward
+                                | ActionKind::WebReload
+                                | ActionKind::WebOpenExternal => {}
                             }
                             self.handle_menu = None;
                             self.chrome_dirty = true;
@@ -4319,6 +4324,10 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::Undock => {
                                 self.undock_pane_terminal(&pid, event_loop, None);
                             }
+                            ActionKind::WebBack => self.web_nav(&pid, "back"),
+                            ActionKind::WebForward => self.web_nav(&pid, "forward"),
+                            ActionKind::WebReload => self.web_nav(&pid, "reload"),
+                            ActionKind::WebOpenExternal => self.web_nav(&pid, "external"),
                         }
                         window.request_redraw();
                         return;

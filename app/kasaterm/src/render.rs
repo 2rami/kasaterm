@@ -471,6 +471,9 @@ impl App {
             md_raw_mode: bool,
             /// Image panes get zoom/rotate buttons instead of the terminal-action cluster.
             is_image: bool,
+            /// Web panes get back/forward/reload/open-external instead of the
+            /// terminal cluster — split/statusbar buttons don't fit a browser.
+            is_web: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
             /// Per-tab "is this a file tab (markdown/text editor, not a shell)"
@@ -2228,6 +2231,7 @@ impl App {
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                         is_image: pane.image().is_some(),
+                        is_web: pane.web().is_some(),
                         // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
                         // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
                         // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
@@ -5756,7 +5760,7 @@ impl App {
                 // keep the 4-button zoom/rotate set.
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
-                let n_btn: f32 = if h.is_image { 4.0 } else { 3.0 };
+                let n_btn: f32 = if h.is_image || h.is_web { 4.0 } else { 3.0 };
                 // Markdown panes show a "Rendered | Raw" segmented toggle instead
                 // of an icon cluster; reserve its measured width on the right.
                 let seg_font = 11.0_f32;
@@ -6074,6 +6078,15 @@ impl App {
                         ("plus", Some(ImageBtn::ZoomIn), None),
                         ("rotate-cw", Some(ImageBtn::Rotate), None),
                         ("maximize", Some(ImageBtn::Reset), None),
+                    ]
+                } else if h.is_web {
+                    // 브라우저 컨트롤 — 뒤로/앞으로/새로고침/기본 브라우저로 열기.
+                    // split·상태바 버튼은 웹 pane 에 안 맞아 통째로 갈아 끼운다.
+                    vec![
+                        ("chevron-left", None, Some(ActionKind::WebBack)),
+                        ("chevron-right", None, Some(ActionKind::WebForward)),
+                        ("rotate-cw", None, Some(ActionKind::WebReload)),
+                        ("external-link", None, Some(ActionKind::WebOpenExternal)),
                     ]
                 } else if h.is_markdown {
                     // Markdown panes use a text "Rendered | Raw" segmented
