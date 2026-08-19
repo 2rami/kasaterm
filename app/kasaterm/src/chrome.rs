@@ -2527,7 +2527,18 @@ impl App {
                 // 생길 때까지 `ws.panes` 에 안 들어간다(main.rs `pane_font_scales` 주석이
                 // 같은 사실을 말한다). 여기서 return 하면 그런 pane 은 Cmd+W 가 통째로
                 // 죽는다(거노: "커맨드 W 해도 무반응"). 항목이 없다 = 탭 하나짜리 pane.
-                None => (1, None),
+                //
+                // ⚠️ pid 를 `None` 으로 두면 안 된다 — 아래 바쁨 검사가 `and_then` 이라
+                // 통째로 건너뛰어져 **claude 가 도는 pane 이 확인 없이 닫힌다**
+                // (2026-08-18 "pane닫기도 클로드켜져있는데 그냥닫혀버려"). 그리고 학생
+                // pane 은 대개 split 으로 만들어 첫 출력 전까지 여기 없으므로, 하필
+                // 가장 자주 닫는 pane 들이 전부 무방비였다.
+                //
+                // **leaf id 자체가 그 pane 의 primary pid 다**(layout.rs `leaf_cells`
+                // 주석과 같은 근거) — ws.panes 를 안 거쳐도 알 수 있다. 같은 함정을
+                // resize 가 먼저 밟아 leaf_cells 기반으로 고쳤는데, 닫기 쪽엔 그대로
+                // 남아 있었다.
+                None => (1, Some(pane.to_string())),
             }
         };
         let action = if tabs_len > 1 {

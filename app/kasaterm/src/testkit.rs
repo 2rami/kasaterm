@@ -562,6 +562,74 @@ impl App {
             }),
         );
     }
+    /// Headless 회귀: **split 으로 만든 pane 에서 바쁜 프로세스가 도는데 닫으면
+    /// 확인이 뜨는가.** `KASATERM_AUTOBUSYCLOSE_MS` 뒤에 split → `sleep` 실행 →
+    /// 2초 뒤 그 pane 닫기를 시도하고 `confirm_raised` 를 찍는다.
+    ///
+    /// 이 자리가 하네스 없이는 **안 보인다**: 조용히 닫히는 것과 정상 동작이
+    /// 화면상 구분이 안 되고, 잃는 것은 도는 claude 세션이라 알아챘을 땐 이미
+    /// 닫힌 뒤다(2026-08-18 "pane닫기도 클로드켜져있는데 그냥닫혀버려").
+    ///
+    /// ⚠️ split 으로 만든 pane 이어야 한다 — 그게 `ws.panes` 에 없는 경로이고
+    /// 버그가 살던 자리다. 이미 출력이 있는 pane 으로 재면 통과해 버린다.
+    pub(crate) fn run_pending_autobusyclose(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        static STAGE: AtomicU8 = AtomicU8::new(0);
+        static DUE: std::sync::OnceLock<Option<Instant>> = std::sync::OnceLock::new();
+        static CLOSE_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOBUSYCLOSE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let now = Instant::now();
+        match STAGE.load(Ordering::Relaxed) {
+            0 => {
+                if now < *due {
+                    return;
+                }
+                STAGE.store(1, Ordering::Relaxed);
+                let target = match self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("[autobusyclose] split 실패: {e}");
+                        STAGE.store(9, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                // 셸이 아닌 전경 프로세스 — `is_shell_name` 이 걸러내지 않는 것이면
+                // 무엇이든 된다. 프로세스 테이블에 뜨기까지 시간이 걸리므로 2초 준다.
+                // split 직후 새 pane 이 활성이라 `send_bytes` 가 그리로 간다.
+                self.send_bytes(b"sleep 300\n");
+                *CLOSE_AT.lock().unwrap() =
+                    Some(now + std::time::Duration::from_millis(2000));
+                eprintln!("[autobusyclose] split={target} 에 sleep 실행, 2초 뒤 닫기");
+            }
+            1 => {
+                let at = *CLOSE_AT.lock().unwrap();
+                let Some(at) = at else { return };
+                if now < at {
+                    return;
+                }
+                STAGE.store(2, Ordering::Relaxed);
+                let target = self.ws.lock().unwrap().active_pane.clone();
+                let Some(target) = target else { return };
+                // 이 pane 이 `ws.panes` 에 있는지 함께 찍는다 — 없는 상태로 통과해야
+                // 진짜 회귀 검사다(있으면 옛 코드도 통과한다).
+                let in_panes = self.ws.lock().unwrap().panes.contains_key(&target);
+                let busy = self.pid_busy(&target);
+                self.confirm_or_close_tab(&target, 0);
+                eprintln!(
+                    "[autobusyclose] pane={target} in_ws_panes={in_panes} busy={busy:?} confirm_raised={}",
+                    self.confirm_close.is_some()
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Headless Cmd+W repro: `KASATERM_AUTOLASTCLOSE_MS` 뒤에 방을 둘로 만들고
     /// **pane 이 하나인 상태에서** `close_active_tab`(Cmd+W 가 부르는 그 함수)을 친다.
     ///
