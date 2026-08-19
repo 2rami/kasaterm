@@ -985,12 +985,15 @@ impl App {
                 // 원본 흐릿한 텍스트를 지우고, 그 자리에 pill 을 얹는다. 클릭 rect 는
                 // 아래 chrome 패스에서 STICKY_PILLS 로 mouse handler 에 넘긴다.
                 //
-                // pill 이 앉은 행은 아래 프롬프트 띠 재도색이 건너뛰어야 한다 — pill
-                // 은 「col0 의 ❯ + 전폭 균일 배경」이라 user_prompt_band 를 정확히
-                // 만족해, 재도색이 흰 pill 을 어두운 띠로 갈아치우고 pill 이 박아 둔
-                // 검은 글자만 남아 **클릭 타깃이 시야에서 사라졌다**(2026-08-19 확정:
-                // b74292b(08-15 재도색 도입)가 f7acf94(07-21 pill)를 매 프레임 덮은
-                // 회귀. 클릭·seek 경로는 멀쩡했고 보이지만 않았다).
+                // pill 은 **프롬프트 띠 재도색과 같은 테마 스타일**로 칠한다 — 흰
+                // pill 은 없애기로 했다(거노 2026-08-19: "흰색없애기로했었는데 클릭은
+                // 되게하면서"). 08-15 재도색이 흰 pill 을 덮으면서 pill 이 박아 둔
+                // 검은 글자만 남아 줄이 통째로 안 보였는데, 그 답은 흰색 복원이
+                // 아니라 pill 자체를 테마 띠로 그리는 것이다. 클릭 rect·↑↓·seek 는
+                // 색과 무관하게 그대로 산다.
+                //
+                // 재도색 스캔은 이 행을 건너뛴다 — pill 이 여기서 fg 까지 완성하므로
+                // (재도색은 fg 를 ❯ 만 만진다) 다시 칠하면 이 선명화가 무너진다.
                 let mut sticky_pill_row: Option<usize> = None;
                 if let Some(sticky) = find_sticky_prompt(&composed) {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
@@ -1021,21 +1024,46 @@ impl App {
                     ));
                     if let Some(row) = composed.get_mut(sticky.row) {
                         // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
-                        // 한다 — 흐릿(dim) 제거 + 흰 배경·검정 글자. draw_text
-                        // (proportional)로 다시 그리던 옛 방식은 한글 wide glyph 를
-                        // ink 폭으로 tighten 해 자간이 어긋나고 배경 폭도 텍스트와
-                        // 안 맞았다(거노: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭
-                        // 이라 폭·자간이 원본과 정확히 일치한다. 텍스트 밖 셀은 흰
-                        // 배경만 깔고 글자 잔재를 지워 pill 을 pane 양끝까지 연장한다.
-                        // pill 오른쪽 끝에 앞뒤 질문으로 건너뛰는 ↑↓ 를 얹는다.
-                        // 자리를 먼저 잡아 두고 아래 도색 루프가 그 칸을 지우지
-                        // 않게 한다(도색은 텍스트 밖을 공백으로 미는 일을 한다).
+                        // 한다 — draw_text(proportional)로 다시 그리던 옛 방식은
+                        // 한글 wide glyph 를 ink 폭으로 tighten 해 자간이 어긋났다
+                        // (거노: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭이라
+                        // 폭·자간이 원본과 정확히 일치한다.
+                        //
+                        // 색은 프롬프트 띠 재도색과 **같은 공식**(테마 배경에 학생
+                        // accent 를 살짝 섞은 fill + accent ❯) — sticky 는 「내가
+                        // 친 프롬프트 줄」의 대리이니 같은 시각 언어여야 하고, 흰
+                        // pill 은 없애기로 했다(위 주석). 본문 글자만 테마 텍스트색
+                        // 으로 밝힌다 — claude 원본은 흐릿한 회색이라 띠 위에서
+                        // 안 읽힌다. ↑↓(앞뒤 질문 건너뛰기)는 accent 로 세워 이
+                        // 줄이 일반 띠가 아니라 조작 가능한 pill 임을 말한다.
+                        let accent = self
+                            .display_pane_char(&ws, &id)
+                            .as_deref()
+                            .or(pane.character.as_deref())
+                            .and_then(|n| {
+                                theme::character_accent_n(
+                                    n,
+                                    theme::character_ordinal(&ws.pane_character, &tab_pid),
+                                )
+                            })
+                            .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
+                        let base = theme::bg();
+                        let light =
+                            base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
+                        let amount = if light { 0.10 } else { 0.18 };
+                        let fill =
+                            tint_toward([base[0], base[1], base[2]], accent, amount);
+                        let text = theme::text();
                         let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
                         for (i, cell) in row.iter_mut().enumerate() {
                             cell.dim = false;
                             cell.inverse = false;
-                            cell.fg = kasa_bridge::screen::Color::Rgb(20, 22, 28);
-                            cell.bg = kasa_bridge::screen::Color::Rgb(248, 249, 251);
+                            cell.bg = fill.clone();
+                            cell.fg = if cell.ch == '❯' || Some(i) == up_col || Some(i) == down_col {
+                                kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
+                            } else {
+                                kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
+                            };
                             if Some(i) == up_col {
                                 cell.ch = '↑';
                                 cell.bold = true;
