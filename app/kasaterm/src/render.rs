@@ -984,12 +984,21 @@ impl App {
                 // 게이트한다(find_sticky_prompt). 감지 행 셀은 스냅샷에서 blank 처리해
                 // 원본 흐릿한 텍스트를 지우고, 그 자리에 pill 을 얹는다. 클릭 rect 는
                 // 아래 chrome 패스에서 STICKY_PILLS 로 mouse handler 에 넘긴다.
+                //
+                // pill 이 앉은 행은 아래 프롬프트 띠 재도색이 건너뛰어야 한다 — pill
+                // 은 「col0 의 ❯ + 전폭 균일 배경」이라 user_prompt_band 를 정확히
+                // 만족해, 재도색이 흰 pill 을 어두운 띠로 갈아치우고 pill 이 박아 둔
+                // 검은 글자만 남아 **클릭 타깃이 시야에서 사라졌다**(2026-08-19 확정:
+                // b74292b(08-15 재도색 도입)가 f7acf94(07-21 pill)를 매 프레임 덮은
+                // 회귀. 클릭·seek 경로는 멀쩡했고 보이지만 않았다).
+                let mut sticky_pill_row: Option<usize> = None;
                 if let Some(sticky) = find_sticky_prompt(&composed) {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
                     let ncols = composed.get(sticky.row).map_or(0, |r| r.len());
                     let end = sticky.col_end.min(ncols);
+                    sticky_pill_row = Some(sticky.row);
                     // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(거노: "흰색
                     // 바탕 pane 양끝으로 다 채워"). 클릭 rect 도 행 전체 폭 — 흰 바탕
                     // 어디를 눌러도 seek(begin_sticky_seek)가 걸린다.
@@ -1885,6 +1894,11 @@ impl App {
                     let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
                     let mut r = 0;
                     while r < composed.len() {
+                        // sticky pill 행은 재도색 금지 — 위 sticky 블록 주석 참고.
+                        if Some(r) == sticky_pill_row {
+                            r += 1;
+                            continue;
+                        }
                         let Some(band) = user_prompt_band(&composed[r]) else {
                             r += 1;
                             continue;
