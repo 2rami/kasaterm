@@ -39,12 +39,62 @@ impl ApplicationHandler<UserEvent> for App {
                         if !submit.is_empty() {
                             let p2 = Arc::clone(p);
                             let submit = submit.to_vec();
+                            // 본문 꼬리 몇 글자 — 에코 확인용. paste 마커·컨트롤은
+                            // 화면에 안 실리므로 벗기고, wrap 경계를 타도 매칭되게
+                            // 공백 없는 글자만 뽑는다.
+                            let probe: String = String::from_utf8_lossy(body)
+                                .chars()
+                                .filter(|c| !c.is_whitespace() && !c.is_control())
+                                .filter(|c| !matches!(c, '\u{1b}' | '[' | ']' | '~'))
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .take(24)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
                             std::thread::spawn(move || {
-                                // 140ms: bracketed paste needs this gap so Ink
-                                // finishes processing \x1b[200~…\x1b[201~ before
-                                // the CR arrives (munder pattern). 50ms was enough
-                                // for idle panes but too tight for menu state.
-                                std::thread::sleep(std::time::Duration::from_millis(140));
+                                use std::time::{Duration, Instant};
+                                // 고정 140ms 는 「Ink 가 paste 처리를 끝냈다」의
+                                // 대역이었다(50ms 는 메뉴 상태에서 CR 이 먹혔던
+                                // 실측으로 상향). 그런데 이 140ms 를 소켓으로 오는
+                                // **모든** 프롬프트(tell·아로나 지시·디스패처)가
+                                // 먹어, 제출까지 0.15~0.17초의 「맨 상태」 공백이
+                                // 보였다(2026-08-19 실측 — 렌더는 같은 프레임이고
+                                // 이 대기가 지연의 전부다). 처리 완료의 직접 신호는
+                                // **본문이 화면에 에코된 것**이므로 그걸 확인하는
+                                // 즉시 CR 을 보낸다. 못 찾으면(긴 본문은 Ink 가
+                                // "[Pasted text #N]" 으로 접어 꼬리가 화면에 없다)
+                                // 기존 140ms 폴백 — 나빠지는 경우가 없다.
+                                //
+                                // 최소 40ms 는 지킨다: CR 이 body 와 같은 read 로
+                                // 병합되는 것을 막는 원래 목적과, 화면에 이미 있던
+                                // 같은 텍스트(재전송)에 이르게 매칭되는 것을 함께
+                                // 눌러 둔다.
+                                let t0 = Instant::now();
+                                std::thread::sleep(Duration::from_millis(40));
+                                if probe.chars().count() >= 8 {
+                                    while t0.elapsed() < Duration::from_millis(140) {
+                                        // 화면 **전체**를 읽는다 — claude 입력박스는
+                                        // 하단이지만 셸 프롬프트는 상단이라, 꼬리 몇
+                                        // 행만 보면 셸 pane 의 에코를 영영 못 본다
+                                        // (실측: 6행만 볼 때 폴백으로만 갔다).
+                                        let tail: String = p2
+                                            .visible_text(500)
+                                            .chars()
+                                            .filter(|c| !c.is_whitespace())
+                                            .collect();
+                                        if tail.contains(&probe) {
+                                            break;
+                                        }
+                                        std::thread::sleep(Duration::from_millis(12));
+                                    }
+                                } else {
+                                    // 꼬리가 너무 짧으면 우연 매칭 위험이 커서
+                                    // 확인 없이 원래 대기로 간다.
+                                    std::thread::sleep(Duration::from_millis(100));
+                                }
                                 let _ = p2.send_bytes(&submit);
                             });
                         }
@@ -5855,6 +5905,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
         self.run_pending_autolastclose();
+        self.run_pending_autobusyclose();
         self.run_pending_autowinreorder();
         self.run_pending_autoroomrename();
         self.run_pending_autoftrename();
