@@ -359,6 +359,15 @@ pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// 캐릭터의 header_color(hex) — 웹텀 pane 목록이 학생 이름을 학생색으로 칠하는
+/// 용. GUI 의 `theme::character_accent` 가 읽는 것과 같은 필드다.
+pub fn header_color_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("header_color").and_then(|x| x.as_str()))
+        .filter(|c| !c.is_empty())
+        .map(String::from)
+}
+
 /// 편집용 원본 persona — persona_for 와 달리 COLLAB_PROTOCOL 을 붙이지 않는다.
 /// 설정 폼은 사용자가 실제로 쓴 텍스트만 로드/저장해야 하므로(규약은 주입 시 자동
 /// 부착), 편집 왕복에서 규약이 중복 누적되지 않게 한다.

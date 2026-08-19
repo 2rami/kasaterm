@@ -3380,6 +3380,14 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
 /// 그대로 보여 준다.
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let board = backend.collab_board().unwrap_or_default();
+    // 방별 그룹핑(폰 목록을 사이드바처럼) — board 는 claude 바인딩 pane 만 담아
+    // 순수 셸이 빠지므로, 트리 전체를 아는 pane_windows 가 정본이다.
+    let pane_windows: std::collections::HashMap<String, usize> =
+        backend.pane_windows().into_iter().collect();
+    // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
+    // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
+    // 중복시키지 않고 여기서 hex 로 얹는다.
+    let chars = crate::character::characters_json();
     let rows: Vec<serde_json::Value> = kasa_pty::live_sessions()
         .into_iter()
         .map(|id| {
@@ -3390,6 +3398,17 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
                 "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
                 "slug": b.and_then(|p| p.agent_name.as_deref()).and_then(avatar_slug),
+                "window": pane_windows
+                    .get(&id)
+                    .copied()
+                    .or_else(|| b.map(|p| p.window_idx)),
+                "color": b
+                    .and_then(|p| p.character.as_deref())
+                    .and_then(|n| {
+                        chars
+                            .as_ref()
+                            .and_then(|c| crate::character::header_color_for(c, n))
+                    }),
             })
         })
         .collect();

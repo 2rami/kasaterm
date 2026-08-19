@@ -630,6 +630,14 @@ impl Backend for PtyBackend {
         }
     }
 
+    /// pane → 방 인덱스. 정본은 GUI 가 publish_pty_layout 때 ws 로 미러해 둔
+    /// `pane_window`(collab_board 가 쓰는 것과 같은 맵) — board 와 달리 claude
+    /// 없는 순수 셸 pane 까지 전부 담겨 웹텀 목록의 방별 그룹핑이 빠짐없다.
+    fn pane_windows(&self) -> Vec<(String, usize)> {
+        let ws = self.ws.lock().unwrap();
+        ws.pane_window.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
     /// `POST /session-switch?idx=N` — 방=윈도우 전환을 GUI 스레드에 위임.
     fn switch_session(&self, idx: usize) -> Result<()> {
         self.proxy

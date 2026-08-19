@@ -42,7 +42,7 @@
   #status {
     position: absolute; right: 10px; top: 6px; z-index: 5;
     display: none; align-items: center; gap: 6px;
-    font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font: 12px/1 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #9aa6b4; background: rgba(23, 28, 36, .88);
     border: 1px solid #2a323e; border-radius: 6px;
     padding: 4px 8px 4px 4px; max-width: 60vw; cursor: pointer;
@@ -69,7 +69,7 @@
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
     background: #171c24; border-top: 1px solid #2a323e;
     border-radius: 14px 14px 0 0;
-    max-height: 60dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    max-height: 78dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
     padding: 6px 8px calc(8px + env(safe-area-inset-bottom, 0px)) 8px;
     transform: translateY(102%); transition: transform .2s ease-out;
   }
@@ -83,14 +83,45 @@
     content: ''; display: block; width: 36px; height: 4px; margin: 4px auto 8px;
     border-radius: 2px; background: #2f3846;
   }
+  /* ── 방(윈도우) 구획 — 데스크톱 좌측 사이드바의 「목록」 모드를 따른다:
+     방 이름 헤더 + pane 줄 + 활성 방은 채움이 아니라 accent 아웃라인. */
+  .sect { margin: 4px 0 2px; padding: 2px 4px 4px; border-radius: 10px; }
+  .sect.active { box-shadow: inset 0 0 0 1.5px #7aa2f7; }
+  .shead {
+    display: flex; align-items: baseline; gap: 8px; padding: 6px 8px 4px;
+    font: 700 13px/1.2 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #dde3ea;
+  }
+  .shead .cwd {
+    font-weight: 400; font-size: 11px; color: #8fa0b3; flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .shead .cnt { font-weight: 400; font-size: 11px; color: #6b7a8d; flex: 0 0 auto; }
   .srow {
+    position: relative;
     display: flex; align-items: center; gap: 10px; width: 100%;
     min-height: 52px; padding: 6px 10px; border: 0; border-radius: 10px;
     background: none; text-align: left; cursor: pointer;
-    font: 14px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; color: #dde3ea;
+    font: 14px/1.3 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #dde3ea;
   }
+  /* 줄 사이 1px 실선 — 사이드바 목록과 같은 결(theme::border 50%). */
+  .sect .srow + .srow { border-top: 1px solid rgba(42, 50, 62, .5); border-radius: 0; }
   .srow:active { background: #222a35; }
   .srow.cur { background: rgba(122, 162, 247, .12); }
+  /* 보는 중 = 왼쪽 2px accent 띠(사이드바 활성 pane 표기). */
+  .srow.cur::before {
+    content: ''; position: absolute; left: 0; top: 8px; bottom: 8px;
+    width: 2px; border-radius: 1px; background: #7aa2f7;
+  }
+  /* 줄 끝 상태 점 — 대기(내 손 필요)만 0.9s 로 숨쉰다(데스크톱 blink_dot 규칙).
+     busy 는 점을 밝힐 뿐 파랗게 칠하지 않는다(온통 파래짐 방지 — 같은 규칙). */
+  .dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+    background: rgba(154, 166, 180, .35); }
+  .dot.busy { background: #9aa6b4; }
+  .dot.wait { background: #ffd479; animation: dotblink .9s steps(1) infinite; }
+  @keyframes dotblink { 50% { opacity: .15; } }
+  @media (prefers-reduced-motion: reduce) { .dot.wait { animation: none; } }
   .srow img { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
   /* 프사 없는 pane(웹 셸 등)도 줄이 안 흔들리게 같은 크기의 빈 원을 채운다. */
   .srow .hole {
@@ -120,7 +151,7 @@
   body.has-bar #bar { display: flex; }
   #bar button {
     min-height: 44px;                    /* iOS HIG 터치 타깃 */
-    font: 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;  /* 16px 미만이면 iOS 가 확대한다 */
+    font: 16px/1 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;  /* 16px 미만이면 iOS 가 확대한다 */
     color: #c8d0d9; background: #222a35;
     border: 1px solid #2f3846; border-radius: 8px;
     flex: 1 1 0; min-width: 44px; padding: 0 6px;
@@ -339,24 +370,80 @@
     s.textContent = text;
     return s;
   };
-  const fillSheet = (list) => {
+  // 데스크톱 좌측 사이드바의 「목록」 모드를 폰에 옮긴 것(거노: 목록으로 똑같이,
+  // 이름도) — 방(윈도우)별 구획 + 방 이름 헤더 + pane 줄 + 학생색 이름 + 상태 점.
+  // 정렬은 방/트리 순서 그대로다(사이드바와 같은 순서를 눈이 기억한다). 답을
+  // 기다리는 pane 은 노랑 점이 숨쉬어 훑으면 바로 보인다.
+  const fillSheet = (list, sess) => {
     rowsEl.replaceChildren();
-    // 보는 중 → 답을 기다리는 것 → 나머지. 폰을 여는 이유 순서다. sort 는
-    // stable 이라 같은 급 안에서는 서버가 준 순서(화면 배치 순)가 남는다.
-    const rank = (p) => (p.id === selfId ? 0 : p.status === 'waiting' ? 1 : 2);
-    for (const p of [...list].sort((a, b) => rank(a) - rank(b))) {
-      const cur = p.id === selfId;
-      const tag = cur
-        ? badge('보는 중', false)
-        : p.status === 'waiting' ? badge('● 대기', true) : null;
-      rowsEl.append(row(
-        cur ? 'cur' : '',
-        face(p.slug, '>'),
-        p.name || prettyId(p.id),
-        p.title || '',
-        tag,
-        () => { if (cur) closeSheet(); else goTo(p.id); },
-      ));
+    const labels = (sess && sess.labels) || [];
+    const activeWin = sess ? sess.active : -1;
+    // 방별 그룹. 웹 셸(web-…)은 방이 없어 따로 묶는다.
+    const groups = new Map();
+    for (const p of list) {
+      const k = p.id.startsWith('web-') ? 'web' : (p.window ?? 'etc');
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(p);
+    }
+    const keys = [...groups.keys()]
+      .filter((k) => typeof k === 'number')
+      .sort((a, b) => a - b);
+    if (groups.has('etc')) keys.push('etc');
+    if (groups.has('web')) keys.push('web');
+    for (const k of keys) {
+      const sect = document.createElement('div');
+      sect.className = 'sect' + (k === activeWin ? ' active' : '');
+      const head = document.createElement('div');
+      head.className = 'shead';
+      let nm = '';
+      let cwd = '';
+      if (k === 'web') nm = '웹 셸';
+      else if (k === 'etc') nm = '기타';
+      else {
+        // /sessions 라벨은 "이름 · cwd" 꼴 — 사이드바 방 헤더처럼 가른다.
+        const cut = (labels[k] || `방 ${k + 1}`).split(' · ');
+        nm = cut[0] || `방 ${k + 1}`;
+        cwd = cut.slice(1).join(' · ');
+      }
+      const n1 = document.createElement('span');
+      n1.textContent = nm;
+      head.append(n1);
+      if (cwd) {
+        const c = document.createElement('span');
+        c.className = 'cwd';
+        c.textContent = cwd;
+        head.append(c);
+      }
+      const cnt = document.createElement('span');
+      cnt.className = 'cnt';
+      cnt.textContent = String(groups.get(k).length);
+      head.append(cnt);
+      sect.append(head);
+      for (const p of groups.get(k)) {
+        const cur = p.id === selfId;
+        const tag = cur
+          ? badge('보는 중', false)
+          : p.status === 'waiting' ? badge('● 대기', true) : null;
+        const r = row(
+          cur ? 'cur' : '',
+          face(p.slug, '>'),
+          p.name || prettyId(p.id),
+          p.title || '',
+          tag,
+          () => { if (cur) closeSheet(); else goTo(p.id); },
+        );
+        // 학생색(characters.json header_color) — 이름을 그 학생 색으로.
+        if (p.color) r.querySelector('.t1').style.color = p.color;
+        // 태그가 없는 줄은 끝에 상태 점 — idle 흐림 / busy 밝음.
+        if (!tag) {
+          const d = document.createElement('span');
+          const busy = p.status && p.status !== 'idle' && p.status !== 'waiting';
+          d.className = 'dot' + (busy ? ' busy' : '');
+          r.append(d);
+        }
+        sect.append(r);
+      }
+      rowsEl.append(sect);
     }
     rowsEl.append(row(
       'newshell', face(null, '＋'), '새 셸', '', null,
@@ -368,7 +455,15 @@
     statusEl.setAttribute('aria-expanded', 'true');
     // 열 때마다 새로 묻는다 — pane 은 수시로 생기고 닫힌다. 옛 목록이라도 먼저
     // 보여야 손맛이 살므로, 이전 내용은 응답이 와서 갈릴 때까지 남겨 둔다.
-    fetch('/term/panes').then((r) => r.json()).then(fillSheet).catch(() => {});
+    // 방 이름(/sessions)은 못 얻어도 목록은 뜬다(서수 폴백).
+    Promise.all([
+      fetch('/term/panes').then((r) => r.json()),
+      fetch('/sessions').then((r) => r.json()).catch(() => null),
+    ]).then(([list, sess]) => {
+      paneList = list;
+      fillSheet(list, sess);
+      refreshChip();
+    }).catch(() => {});
   };
   statusEl.addEventListener('click', () => {
     if (document.body.classList.contains('sheet-open')) closeSheet();

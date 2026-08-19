@@ -758,6 +758,12 @@ pub trait Backend: Send + Sync {
     fn sessions(&self) -> SessionsInfo {
         SessionsInfo::default()
     }
+    /// pane(surface id) → 방(윈도우) 인덱스. 웹텀 `/term/panes` 가 방별 그룹핑에
+    /// 쓴다 — board 는 claude 가 바인딩된 pane 만 담아 순수 셸이 빠지므로, 트리
+    /// 전체를 아는 이 맵이 따로 필요하다. 기본은 빈 목록(방 개념 없는 백엔드).
+    fn pane_windows(&self) -> Vec<(String, usize)> {
+        Vec::new()
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")
