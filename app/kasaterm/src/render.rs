@@ -478,6 +478,12 @@ impl App {
             /// Web panes get back/forward/reload/open-external instead of the
             /// terminal cluster — split/statusbar buttons don't fit a browser.
             is_web: bool,
+            /// 웹 pane 의 현재 주소(활성 탭) — 헤더 주소 pill 표시용. 페이지
+            /// 이동을 따라간다(webpane 의 500ms 주소 폴링이 WebPane.url 갱신).
+            web_url: Option<String>,
+            /// 웹 pane 페이지 로딩 중 — 헤더 작업 바를 켜고 리로드 버튼을
+            /// ×(정지)로 바꾼다.
+            web_loading: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
             /// Per-tab "is this a file tab (markdown/text editor, not a shell)"
@@ -2199,6 +2205,13 @@ impl App {
                         Some(t) => format!("{label}  ·  {t}"),
                         None => label,
                     };
+                    // 웹 pane 로딩 상태 — host 실물(web_hosts)이 쥔다. 헤더 작업
+                    // 바(busy)와 리로드↔정지 아이콘이 읽는다.
+                    let web_loading = pane
+                        .web()
+                        .and_then(|w| self.web_hosts.get(&w.host_id))
+                        .map(|h| h.loading)
+                        .unwrap_or(false);
                     headers.push(HeaderInfo {
                         id: id.clone(),
                         x: box_x,
@@ -2215,7 +2228,8 @@ impl App {
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         // Busy = the daemon's transcript watcher sees this pane
                         // working (cross-window). Drives the header working bar.
-                        busy: self.pane_is_busy(&id),
+                        // 웹 pane 은 페이지 로딩이 곧 「작업 중」이다.
+                        busy: self.pane_is_busy(&id) || web_loading,
                         // A background shell / Monitor is running with no spinner —
                         // drives the slower header pulse bar when not busy.
                         bg_active: self
@@ -2236,6 +2250,8 @@ impl App {
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                         is_image: pane.image().is_some(),
                         is_web: pane.web().is_some(),
+                        web_url: pane.web().map(|w| w.url.clone()),
+                        web_loading,
                         // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
                         // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
                         // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
@@ -5811,6 +5827,18 @@ impl App {
                 } else {
                     abw * n_btn + agap * (n_btn - 1.0) + 12.0
                 };
+                // ── 웹 pane 주소 pill 자리 예약 ── 탭 pill 과 우측 버튼 사이.
+                // btn_cluster 에 얹어 아래 tabs_area 계산이 그대로 따라온다.
+                // 탭에 최소 140px 을 남기고 남는 만큼(상한 420px)만 가진다 —
+                // 좁은 pane(주소폭 70px 미만)에선 아예 접는다(탭·버튼이 먼저다).
+                let plus_w_early = icon_size;
+                let addr_w = if h.is_web {
+                    (h.w - 8.0 - btn_cluster - plus_w_early - 16.0 - 140.0).clamp(0.0, 420.0)
+                } else {
+                    0.0
+                };
+                let addr_vis = addr_w >= 70.0;
+                let btn_cluster = btn_cluster + if addr_vis { addr_w + 6.0 } else { 0.0 };
                 // ── In-pane tab bar ── empty tabs = single tab from `label`.
                 let tab_list: Vec<&str> = if h.tabs.is_empty() {
                     vec![h.label.as_str()]
@@ -6114,10 +6142,13 @@ impl App {
                 } else if h.is_web {
                     // 브라우저 컨트롤 — 뒤로/앞으로/새로고침/기본 브라우저로 열기.
                     // split·상태바 버튼은 웹 pane 에 안 맞아 통째로 갈아 끼운다.
+                    // 로딩 중엔 리로드가 ×(정지)가 된다 — web_nav("reload") 가
+                    // loading 을 보고 window.stop() 으로 간다(브라우저 관례).
+                    let reload_icon = if h.web_loading { "x" } else { "rotate-cw" };
                     vec![
                         ("chevron-left", None, Some(ActionKind::WebBack)),
                         ("chevron-right", None, Some(ActionKind::WebForward)),
-                        ("rotate-cw", None, Some(ActionKind::WebReload)),
+                        (reload_icon, None, Some(ActionKind::WebReload)),
                         ("external-link", None, Some(ActionKind::WebOpenExternal)),
                     ]
                 } else if h.is_markdown {
@@ -6164,6 +6195,148 @@ impl App {
                         pane_action_hits.push((h.id.clone(), a, (chip_x, chip_y, chip_size, chip_size)));
                     }
                     bx += abw + agap;
+                }
+                // ── 웹 pane 주소 pill ── 버튼 클러스터 왼쪽. 평소엔 현재 주소를
+                // 흐리게 보여 주고, 클릭(또는 Cmd+L)하면 그 자리에서 인라인 편집
+                // — 빈 버퍼 동안은 현재 주소가 자리표시자다(App.web_addr 주석).
+                if addr_vis {
+                    let ah = icon_size + 6.0;
+                    let ay = h.y + (PANE_HEADER_HEIGHT - ah) / 2.0;
+                    let ax = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0)) - 6.0
+                        - addr_w;
+                    let afont = 11.0_f32;
+                    let tx = ax + 8.0;
+                    let ty = ay + (ah - afont) / 2.0;
+                    let clip_r = ax + addr_w - 8.0;
+                    // 찾기 칸이 주소 pill 자리를 빌린다(서로 배타) — 접두 라벨과
+                    // 자리표시자만 다르고 캐럿·클립 처리는 같다.
+                    let finding = self
+                        .web_find
+                        .as_ref()
+                        .filter(|e| e.pane == h.id)
+                        .map(|e| (e.text.clone(), e.cursor));
+                    let editing = if finding.is_some() {
+                        None
+                    } else {
+                        self.web_addr
+                            .as_ref()
+                            .filter(|e| e.pane == h.id)
+                            .map(|e| (e.text.clone(), e.cursor))
+                    };
+                    if let Some((text, cursor)) = finding {
+                        round_rect(g, ax, ay, addr_w, ah, theme::radius_sm(), theme::bg());
+                        let px = g.draw_text(
+                            tx,
+                            ty,
+                            "찾기",
+                            gpu::DrawOpts {
+                                font_size: afont,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        ) + 6.0;
+                        let (mut head, tail) = crate::lineedit::split(&text, cursor);
+                        if self.in_preedit {
+                            head.push_str(&self.preedit);
+                        }
+                        let caret_x = px + g.measure_chrome_text(&head, afont, false);
+                        let shown = format!("{head}{tail}");
+                        g.draw_text_clipped(
+                            px,
+                            ty,
+                            &shown,
+                            gpu::DrawOpts {
+                                font_size: afont,
+                                color: theme::text(),
+                                bold: false,
+                                italic: false,
+                            },
+                            px,
+                            clip_r,
+                        );
+                        if commit_caret_on {
+                            g.rect(
+                                caret_x.min(clip_r),
+                                ay + (ah - afont - 2.0) / 2.0,
+                                1.5,
+                                afont + 2.0,
+                                theme::text(),
+                            );
+                        }
+                    } else if let Some((text, cursor)) = editing {
+                        // 편집 중: bg 로 가라앉혀 입력칸임을 보이고 캐럿을 세운다.
+                        round_rect(g, ax, ay, addr_w, ah, theme::radius_sm(), theme::bg());
+                        let (mut head, tail) = crate::lineedit::split(&text, cursor);
+                        if self.in_preedit {
+                            head.push_str(&self.preedit);
+                        }
+                        let caret_x = tx + g.measure_chrome_text(&head, afont, false);
+                        let shown = format!("{head}{tail}");
+                        if shown.is_empty() {
+                            g.draw_text_clipped(
+                                tx,
+                                ty,
+                                h.web_url.as_deref().unwrap_or(""),
+                                gpu::DrawOpts {
+                                    font_size: afont,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                                tx,
+                                clip_r,
+                            );
+                        } else {
+                            g.draw_text_clipped(
+                                tx,
+                                ty,
+                                &shown,
+                                gpu::DrawOpts {
+                                    font_size: afont,
+                                    color: theme::text(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                                tx,
+                                clip_r,
+                            );
+                        }
+                        if commit_caret_on {
+                            g.rect(
+                                caret_x.min(clip_r),
+                                ay + (ah - afont - 2.0) / 2.0,
+                                1.5,
+                                afont + 2.0,
+                                theme::text(),
+                            );
+                        }
+                    } else {
+                        let hover = inside(ax, ay, addr_w, ah);
+                        g.hover_pointer |= hover;
+                        round_rect(g, ax, ay, addr_w, ah, theme::radius_sm(), theme::surface());
+                        if hover {
+                            hover_rect(g, ax, ay, addr_w, ah, theme::radius_sm());
+                        }
+                        g.draw_text_clipped(
+                            tx,
+                            ty,
+                            h.web_url.as_deref().unwrap_or(""),
+                            gpu::DrawOpts {
+                                font_size: afont,
+                                color: if hover { theme::text() } else { theme::text_dim() },
+                                bold: false,
+                                italic: false,
+                            },
+                            tx,
+                            clip_r,
+                        );
+                    }
+                    pane_action_hits.push((
+                        h.id.clone(),
+                        ActionKind::WebAddress,
+                        (ax, ay, addr_w, ah),
+                    ));
                 }
                 // ── Markdown "Rendered | Raw" segmented toggle ── outer pill
                 // with the active half filled; each half is its own hit rect so

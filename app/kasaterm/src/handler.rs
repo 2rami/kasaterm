@@ -813,6 +813,37 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::WebPaneCmd { host_id, cmd } => {
+                // 웹뷰 안에서 친 앱 단축키(WEB_CHORD_JS → IPC). 자식 창이 key 인
+                // 동안 winit 키 이벤트가 앱에 안 오므로 이 경로가 유일하다.
+                self.web_pane_cmd(*host_id, cmd);
+                return;
+            }
+            UserEvent::WebTitleChanged { host_id, title } => {
+                self.web_title_changed(*host_id, title.clone());
+                return;
+            }
+            UserEvent::WebLoadState { host_id, loading } => {
+                self.web_load_state(*host_id, *loading);
+                return;
+            }
+            UserEvent::WebPopup { host_id, url } => {
+                // window.open/target=_blank → 그 pane 옆에 새 웹 pane.
+                self.web_popup(event_loop, *host_id, url);
+                return;
+            }
+            UserEvent::WebDownloadDone { path, ok } => {
+                if *ok {
+                    self.set_toast(format!("다운로드 완료: {path}"));
+                } else {
+                    self.set_toast("다운로드 실패".to_string());
+                }
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
             UserEvent::SocketWebDrive { op, arg, surface, reply } => {
                 // `kasaterm-cli web-eval/-text/-shot/-url` — 답은 reply 채널로
                 // 소켓 스레드에 돌아간다(eval/shot 은 wry·WebKit 콜백에서 늦게).
@@ -3144,6 +3175,22 @@ impl ApplicationHandler<UserEvent> for App {
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
+                    // 웹 pane 주소창 편집 중 그 pill 밖을 누르면 blur(취소).
+                    // git 커밋 칸과 같은 규칙 — 클릭은 이후 제 몫을 계속한다.
+                    // **가장 이른 Pressed 블록에 둔다** — 아래 sticky pill·설정
+                    // 버튼처럼 자기 일만 하고 return 하는 경로 뒤에 두면, 그리로
+                    // 나간 클릭이 blur 를 건너뛰어 보이지 않는 편집이 키보드를
+                    // 계속 삼킨다(리뷰 지적). pill 자기 클릭은 pane_action_hits
+                    // 매칭이 편집 유지로 처리한다.
+                    if self.web_addr.is_some() || self.web_find.is_some() {
+                        let on_addr = self.pane_action_hits.iter().any(|(_, a, r)| {
+                            matches!(a, ActionKind::WebAddress) && hit(*r)
+                        });
+                        if !on_addr {
+                            self.cancel_web_addr();
+                            self.cancel_web_find();
+                        }
+                    }
                     if hit(self.feedback_btn_rect) {
                         // 트레이 말풍선 — 설정 창을 Feedback 페이지로 바로 연다.
                         // 쓰다 만 본문은 App 에 남아 있어 다시 열면 그대로다.
@@ -4239,7 +4286,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 | ActionKind::WebBack
                                 | ActionKind::WebForward
                                 | ActionKind::WebReload
-                                | ActionKind::WebOpenExternal => {}
+                                | ActionKind::WebOpenExternal
+                                | ActionKind::WebAddress => {}
                             }
                             self.handle_menu = None;
                             self.chrome_dirty = true;
@@ -4328,6 +4376,18 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::WebForward => self.web_nav(&pid, "forward"),
                             ActionKind::WebReload => self.web_nav(&pid, "reload"),
                             ActionKind::WebOpenExternal => self.web_nav(&pid, "external"),
+                            ActionKind::WebAddress => {
+                                // 찾기 칸이 이 pill 자리를 빌려 쓰는 동안의 클릭은
+                                // 찾기 유지 — 칸 안 클릭이 주소 편집으로 둔갑하면
+                                // 반쯤 친 검색어가 날아간다.
+                                if !self
+                                    .web_find
+                                    .as_ref()
+                                    .is_some_and(|e| e.pane == pid)
+                                {
+                                    self.begin_web_addr_edit(&pid);
+                                }
+                            }
                         }
                         window.request_redraw();
                         return;
@@ -5621,6 +5681,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.sync_dock_badge();
         // 웹 pane 자식 창을 pane 프레임에 맞춘다 — split/리사이즈/탭 전환/줌이
         // 어디서 일어났든 다음 턴에 여기서 따라잡는다(호스트 없으면 즉시 반환).
+        // 세션 복원이 미룬 웹 자식 창 생성 — 복원 경로엔 ActiveEventLoop 가
+        // 없어서 여기(첫 루프 턴)로 넘어온다. sync 보다 먼저 만들어야 같은
+        // 턴에 배치까지 끝난다.
+        self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
         // Windows 업데이트 체커 결과 → sticky 토스트([설치][나중에] 칩).
         // 승인 토스트 배관을 센티널 action 으로 재사용(win_sparkle.rs 참고).

@@ -2860,6 +2860,20 @@ impl App {
                     .get(pane_id)
                     .map(|s| socket::pane_record(s))
                     .unwrap_or(serde_json::Value::Null);
+                // 웹 pane 은 PTY 가 없어 record 가 Null 로 떨어져 재시작하면
+                // 그 자리가 통째로 증발했다(복원이 Null leaf 를 버린다). 주소만
+                // 있으면 되살릴 수 있으니 web_url 을 실은 최소 record 를 만든다
+                // — 복원 쪽 분기는 restore_leaf 의 web_url 가지.
+                if rec.is_null() {
+                    if let Some(url) = ws
+                        .panes
+                        .get(pane_id)
+                        .and_then(|p| p.tabs.iter().find_map(|t| t.web()))
+                        .map(|w| w.url.clone())
+                    {
+                        rec = serde_json::json!({ "web_url": url });
+                    }
+                }
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
                 if let Some(obj) = rec.as_object_mut() {
@@ -3170,6 +3184,27 @@ impl App {
         let used = self.used_pane_ids();
         let id = pick_restore_id(saved, |s| used.contains(s))
             .unwrap_or_else(|| next_free_pane_id(&used));
+        // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
+        // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
+        // 창을 만들 수 없다(about_to_wait 의 drain 이 다음 턴에 만든다).
+        if let Some(url) = rec.get("web_url").and_then(|v| v.as_str()) {
+            let host_id = self.alloc_web_host_id();
+            let mut tab = crate::PaneTab::default();
+            tab.content =
+                crate::PaneContent::Web(crate::WebPane { url: url.to_string(), host_id });
+            tab.title = Some(
+                rec.get("title")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::webpane::short_label(url)),
+            );
+            tab.title_pinned = true;
+            let ps = crate::PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
+            self.ws.lock().unwrap().panes.insert(id.clone(), ps);
+            self.pending_web_hosts.push((host_id, url.to_string()));
+            return Some(id);
+        }
         let cwd = rec
             .get("cwd")
             .and_then(|c| c.as_str())

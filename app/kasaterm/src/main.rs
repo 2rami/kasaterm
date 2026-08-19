@@ -1712,6 +1712,9 @@ enum ActionKind {
     /// 현재 주소를 OS 기본 브라우저로 연다 — 로그인·개발자도구가 필요해지면
     /// 내장 웹뷰에서 갈아탈 탈출구.
     WebOpenExternal,
+    /// 웹 pane 헤더의 주소 pill — 클릭하면 인라인 주소 편집(`App.web_addr`)로
+    /// 들어간다. Enter 로 그 주소를 연다.
+    WebAddress,
 }
 
 /// 타이틀바 사용량 pill 드롭다운의 한 줄.
@@ -2145,6 +2148,18 @@ struct WebPane {
     /// `App.web_hosts` 의 키. pane/tab 이 트리를 옮겨 다녀도 이 번호로 창을
     /// 따라붙인다.
     host_id: u64,
+}
+
+/// 웹 pane 헤더 주소창의 인라인 편집 상태(`App.web_addr`). 버퍼는 **빈 채로**
+/// 시작한다 — lineedit 엔 선택이 없어 기존 주소를 지우고 다시 치게 하는 것보다,
+/// 현재 주소를 흐린 자리표시자로 깔고 새 주소를 바로 치게 하는 편이 빠르다
+/// (빈 채 Enter = 그대로 두기).
+struct WebAddrEdit {
+    /// 편집 대상 pane(outer id).
+    pane: String,
+    text: String,
+    /// 문자 단위 커서(lineedit 규약).
+    cursor: usize,
 }
 
 impl Default for PaneContent {
@@ -3677,6 +3692,23 @@ enum UserEvent {
     /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
     /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
     SocketOpenWeb(String, Option<String>),
+    /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
+    /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
+    /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
+    /// `cmd` 는 "split-h"/"close"/"focus-left" 같은 동작 이름(webpane::web_pane_cmd).
+    WebPaneCmd { host_id: u64, cmd: String },
+    /// 웹 pane 의 문서 제목 변경(wry document_title_changed) — 탭 라벨이 host
+    /// 대신 페이지 제목을 쓰게 한다(Orca 탭 제목 규칙).
+    WebTitleChanged { host_id: u64, title: String },
+    /// 웹 pane 로딩 시작/끝(wry PageLoadEvent) — 헤더 작업 바와 리로드↔정지
+    /// 버튼 토글이 읽는다.
+    WebLoadState { host_id: u64, loading: bool },
+    /// 웹뷰의 window.open/target=_blank — 그 pane 옆에 새 웹 pane 으로 받는다.
+    /// (전엔 소리 없이 무동작이라 OAuth 팝업·새 탭 링크가 죽은 버튼이었다.)
+    WebPopup { host_id: u64, url: String },
+    /// 웹뷰 다운로드 완료 — 토스트로 알린다. `path` 는 시작 때 우리가 정한
+    /// 목적지(macOS 완료 콜백의 path 는 항상 비어서 못 쓴다).
+    WebDownloadDone { path: String, ok: bool },
     /// `web.drive` — 열린 웹 pane 을 조종한다(eval/text/shot/url). 웹뷰는 GUI
     /// 스레드 소유(!Send)라 소켓 스레드가 reply 채널로 결과를 기다린다
     /// (`SocketSpawnStudent` 와 같은 패턴). eval 의 답은 wry 콜백에서 오므로
@@ -4023,6 +4055,11 @@ pub(crate) enum ImeFocus {
     TreeSearch,
     TreeNew,
     Settings,
+    /// 웹 pane 헤더 주소창(한 번에 하나만 열리므로 pane id 는 `App.web_addr` 가
+    /// 쥔다 — variant 에 중복으로 싣지 않는다).
+    WebAddr,
+    /// 웹 pane 페이지 내 찾기 칸(`App.web_find`) — WebAddr 와 같은 규칙.
+    WebFind,
 }
 
 /// Action buttons at the foot of the git column. `Commit` hands the commit to
@@ -5345,6 +5382,16 @@ struct App {
     web_hosts: HashMap<u64, webpane::WebHost>,
     /// `WebPane.host_id` 발급 시퀀스.
     web_host_seq: u64,
+    /// 웹 pane 헤더 주소창의 인라인 편집(한 번에 하나). None = 편집 아님.
+    web_addr: Option<WebAddrEdit>,
+    /// 웹 pane 페이지 내 찾기(Cmd+F, 한 번에 하나). 주소창과 같은 버퍼 꼴을
+    /// 쓰고 헤더의 같은 pill 자리에 그린다 — 서로 배타(한쪽 begin 이 다른쪽
+    /// cancel).
+    web_find: Option<WebAddrEdit>,
+    /// 세션 복원이 앉힌 웹 pane 의 자식 창 대기열 `(host_id, url)` — 복원
+    /// 경로엔 ActiveEventLoop 가 없어 창을 못 만든다. about_to_wait 가 다음
+    /// 턴에 걷어 spawn_web_host 로 실물을 만든다.
+    pending_web_hosts: Vec<(u64, String)>,
 }
 
 impl App {
@@ -5707,6 +5754,9 @@ impl App {
             aux_windows: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,
+            web_addr: None,
+            web_find: None,
+            pending_web_hosts: Vec::new(),
         }
     }
 

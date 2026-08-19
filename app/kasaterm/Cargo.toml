@@ -45,7 +45,9 @@ kasa-mcp = { version = "0.1.0", path = "../../crates/kasa-mcp" }
 # Git-status panel webview. Separate OS window so it can't touch the wgpu
 # surface the terminal renders into — wry runs WKWebView/WebView2/WebKitGTK
 # in its own layer. raw-window-handle 0.6 matches the workspace's winit 0.30.
-wry = "0.55"
+# devtools: 웹 pane 의 인스펙터(Cmd+Opt+I). 이 feature 없이는 release 빌드에서
+# open_devtools 심볼 자체가 사라진다(debug_assertions 게이트).
+wry = { version = "0.55", features = ["devtools"] }
 muda = "0.19.2"
 # Encode image bytes into a self-contained data: URI for the preview
 # window's <img> (the webview loads via with_html / null origin, so a

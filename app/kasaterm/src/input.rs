@@ -1952,6 +1952,8 @@ impl App {
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
             crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
             crate::ImeFocus::Settings => self.settings_insert_text(&text),
+            crate::ImeFocus::WebAddr => self.web_addr_insert(&text),
+            crate::ImeFocus::WebFind => self.web_find_insert(&text),
         }
     }
     /// Commit-input key entry with Hangul composition, mirroring
@@ -2241,6 +2243,20 @@ impl App {
         // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
         // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
         if self.room_rename_key(event) {
+            return;
+        }
+        // 웹 pane 주소창 편집도 같은 규칙 — 주소를 치다 셸에 새면 안 된다.
+        if self.web_addr_key(event) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // 웹 pane 페이지 내 찾기 칸도 같은 규칙.
+        if self.web_find_key(event) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         // Touch the input timer so the cursor stays solid for a beat and
@@ -2599,6 +2615,23 @@ impl App {
                     if code == KeyCode::KeyW {
                         self.close_active_tab();
                         return;
+                    }
+                    // Cmd+L → 활성 웹 pane 의 주소창(브라우저 관례). 웹 pane 이
+                    // 아니면 흘려보낸다 — 터미널의 Cmd+L 은 원래 무동작이라
+                    // 뺏는 것이 없다. 웹뷰가 key 일 때의 Cmd+L 은 WEB_CHORD_JS
+                    // 가 같은 곳으로 보낸다.
+                    if code == KeyCode::KeyL && !self.modifiers.shift_key() {
+                        if let Some(pid) = self.active_web_pane() {
+                            self.begin_web_addr_edit(&pid);
+                            return;
+                        }
+                    }
+                    // Cmd+F → 활성 웹 pane 의 페이지 내 찾기. 같은 게이트.
+                    if code == KeyCode::KeyF && !self.modifiers.shift_key() {
+                        if let Some(pid) = self.active_web_pane() {
+                            self.begin_web_find(&pid);
+                            return;
+                        }
                     }
                     // Cmd+T → new window in the current session (PTY backend
                     // only; tmux owns its own windows). Cmd+1..9 switch to
