@@ -25,6 +25,10 @@ struct SidebarRowInfo {
     /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
     /// 그려 「없는 것」이 아니라 「치워 둔 것」임을 말한다.
     stashed: bool,
+    /// 학생 얼굴이 없을 때 칸이 무엇인지 말하는 아이콘 — 웹 pane 은 globe,
+    /// 이미지는 image, md 는 file-text, 그 외 terminal. 이게 없으면 미니맵이
+    /// 웹 pane 도 터미널이라고 거짓말한다.
+    icon: &'static str,
 }
 
 impl App {
@@ -2631,8 +2635,23 @@ impl App {
                     .then(|| self.pane_character_if_known(id))
                     .flatten()
                     .unwrap_or_default();
-                let is_cur =
-                    self.ws.lock().unwrap().active_pane.as_deref() == Some(id.as_str());
+                let (is_cur, icon) = {
+                    let ws = self.ws.lock().unwrap();
+                    let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
+                    // 활성 탭 기준(Deref) — 칸/줄은 pane 하나를 대표하므로
+                    // 보이는 탭이 말하는 게 맞다.
+                    let icon = ws
+                        .panes
+                        .get(id)
+                        .map(|p| match &p.content {
+                            PaneContent::Web(_) => "globe",
+                            PaneContent::Image(_) => "image",
+                            PaneContent::Markdown(_) => "file-text",
+                            _ => "terminal",
+                        })
+                        .unwrap_or("terminal");
+                    (is_cur, icon)
+                };
                 let label = self.pane_row_label(id);
                 let waiting = self.pane_needs_you(id);
                 // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
@@ -2660,6 +2679,7 @@ impl App {
                         .closed_panes
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == *id),
+                    icon,
                 }
             }
         };
@@ -3975,11 +3995,11 @@ impl App {
                     let walked = info.busy
                         && draw_student_walk(g, &info.who, fx - 2.0, fy - 2.0, face + 4.0, anim_phase_secs());
                     if !walked && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs()) {
-                        // 학생이 없는 자리(셸만 도는 pane) — 빈 칸으로 두면 "여긴
-                        // 뭐지"가 되므로 터미널이라고 말해 둔다.
+                        // 학생이 없는 자리 — 빈 칸으로 두면 "여긴 뭐지"가 되므로
+                        // 그 칸이 무엇인지 말해 둔다(웹=globe · 이미지 · md · 터미널).
                         let isz = face.min(16.0);
                         g.queue_icon(
-                            "terminal",
+                            info.icon,
                             mx + (mw - isz) / 2.0,
                             my + (mh - isz) / 2.0,
                             isz,
@@ -4026,7 +4046,19 @@ impl App {
                             g, who, rx + 7.0, ry + 3.0, face, anim_phase_secs(),
                         );
                     if !has_face {
-                        circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, *col);
+                        if info.icon != "terminal" {
+                            // 웹·이미지·md pane 줄 — 상태 점 대신 종류 아이콘.
+                            // 상태는 줄 끝 점이 이미 말한다.
+                            g.queue_icon(
+                                info.icon,
+                                rx + 7.0,
+                                ry + (rh - 12.0) / 2.0,
+                                12.0,
+                                theme::text_dim(),
+                            );
+                        } else {
+                            circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, *col);
+                        }
                     }
                     let name_x = rx + 7.0 + face + 6.0;
                     let budget = (rx + rw - 14.0 - name_x).max(0.0);
