@@ -40,7 +40,10 @@ impl App {
         };
         pane.character = pane_char;
         let tab = &mut pane.tabs[tab_idx];
-        let tp = tab.term_mut().expect("pty pane must be terminal");
+        // pid 라우팅이 터미널 아닌 탭(이미지/md 미리보기)에 떨어질 수 있다 — 여기서
+        // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
+        // 번진다. 프레임 하나를 버리는 쪽이 맞다.
+        let Some(tp) = tab.term_mut() else { return };
         let resized = tp.cols != update.cols
             || tp.rows != update.rows
             || tp.cells.len() != update.rows as usize;

@@ -5947,13 +5947,24 @@ fn arm_self_install() {
         return;
     }
     let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
+    // 설치 직전 재확인 두 개는 arm 시점 검사와 별개로 필요하다. 헬퍼는 pid 가
+    // 사라지길 기다리는데, 그 pid 가 다른 장수 프로세스로 재사용되면 며칠 뒤에야
+    // 발화할 수 있고, 사람이 끄자마자 다시 켜면 새 인스턴스가 이미 떠 있을 수도
+    // 있다. 그 상태로 `rm -rf` 를 하면 도는 앱의 서명 페이지가 무효가 되어 macOS
+    // 가 앱을 SIGKILL 한다 — 그래서 (1) dist 가 지금도 더 새것인지, (2) 설치본을
+    // 도는 프로세스가 없는지 를 발화 시점에 다시 본다.
     let script = format!(
         "while kill -0 {pid} 2>/dev/null; do sleep 0.3; done\n\
+         [ '{fresh}' -nt '{run}' ] || {{ echo \"skipped: dist not newer $(date)\"; exit 0; }}\n\
+         ! /usr/bin/pgrep -f '{run}' >/dev/null 2>&1 \
+         || {{ echo \"skipped: app running $(date)\"; exit 0; }}\n\
          rm -rf '{inst}' && cp -R '{dist}' '{inst}' && touch '{inst}' \
          && echo \"installed $(date)\" || echo \"install FAILED $(date)\"\n",
         pid = std::process::id(),
         inst = installed.display(),
         dist = dist.display(),
+        fresh = fresh.display(),
+        run = running.display(),
     );
     let Ok(out) = std::fs::File::create(&log) else { return };
     let Ok(err) = out.try_clone() else { return };
@@ -5997,7 +6008,36 @@ fn scrub_inherited_claude_markers() {
     }
 }
 
+/// 패닉을 파일로 남긴다 — Finder 로 뜬 앱은 stderr 가 버려져서, 패닉으로 죽으면
+/// 크래시 리포트도 로그도 없이 사라진다(정상 종료가 아니라 `exiting` 도 안 돌아
+/// 자기설치 로그조차 안 갱신된다). "왜 꺼졌는지" 를 알 유일한 증거를 남긴 뒤
+/// 기본 훅에 넘긴다. GUI 스레드 패닉(즉사)과 작업 스레드 패닉(Mutex poison 으로
+/// 지연 폭발) 둘 다 여기를 지나므로, 죽음의 첫 원인이 항상 파일 맨 위에 남는다.
+fn install_panic_logger() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let log = std::env::temp_dir().join("kasaterm-panic.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let thread = std::thread::current();
+            let _ = writeln!(
+                f,
+                "==== panic epoch={ts} pid={} thread={} ====\n{info}\n{}\n",
+                std::process::id(),
+                thread.name().unwrap_or("?"),
+                std::backtrace::Backtrace::force_capture(),
+            );
+        }
+        prev(info);
+    }));
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    install_panic_logger();
     scrub_inherited_claude_markers();
     // `open`(1) doesn't forward shell env to the launched .app, but the
     // .app's screen-recording TCC permission only applies when launched
