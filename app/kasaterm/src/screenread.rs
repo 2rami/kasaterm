@@ -565,12 +565,18 @@ pub(crate) fn done_report_line(row: &[GridCell]) -> Option<String> {
 }
 
 /// tell 마커 행의 wrap 연속 행 판정 — claude TUI 는 긴 user 턴을 2칸 들여쓰기
-/// 행으로 wrap 한다. 들여쓰기가 정확히 2 이고 첫 글자가 TUI 구조 글리프가
+/// 행으로 wrap 한다. 들여쓰기가 2 **이상**이고 첫 글자가 TUI 구조 글리프가
 /// 아니면 같은 메시지의 연속으로 본다(⎿·⏺ 등 다음 블록에서 끊김).
+///
+/// ⚠️ 「정확히 2」로 가두면 안 된다 — 목록 항목("- …"·"1. …")의 wrap 은 4~5칸
+/// 들여쓰기로 떨어지고, 거기서 걸음이 끊기면 **그 아래 문단 전체가 무테마**로
+/// 남는다(2026-08-20 거노 스샷: 사오리 브리프가 셋째 줄부터 흰색). 걸음은
+/// 헤더부터 연속 행만 따라가므로, 다음 블록(⏺ col0·입력박스 보더)에서 어차피
+/// 멈춘다 — 깊은 들여쓰기를 받아도 남의 출력까지 번지지 않는다.
 pub(crate) fn tell_wrap_continuation(row: &[GridCell]) -> bool {
     match row.iter().position(|c| c.ch != ' ' && c.ch != '\0') {
-        Some(2) => !matches!(
-            row[2].ch,
+        Some(n) if n >= 2 => !matches!(
+            row[n].ch,
             '⏺' | '✻' | '⎿' | '│' | '⎢' | '❯' | '─' | '═' | '╌' | '⏵' | '·'
         ),
         _ => false,
@@ -1858,6 +1864,70 @@ pub(crate) fn replace_banner_title(
         }
         return; // 타이틀은 배너당 한 줄
     }
+    // 2.1.23x 박스형 웰컴: 타이틀이 아트 옆이 아니라 **상단 보더 줄**에 있다
+    // ("╭─── Claude Code v2.1.237 ───…" — 2026-08-20 peek 실측). 아트 위
+    // 최대 4행에서 첫 비공백이 ╭/┌ 인 줄만 골라 같은 치환을 하되,
+    // - 버전 꼬리는 보더 대시가 다시 시작되기 전까지만 당기고,
+    // - 당겨서 남는 칸은 blank 가 아니라 '─' 로 메운다 — 보더 줄의 빈칸은
+    //   선이 끊긴 것으로 보이고, blank 를 쓰면 우측 ╮ 열이 밀려 박스가 깨진다.
+    let is_box = |ch: char| (0x2500u32..=0x257F).contains(&(ch as u32));
+    let lo = (br - 4).max(0) as usize;
+    let hi = br.clamp(0, rows.len() as isize) as usize;
+    for row in rows[lo..hi].iter_mut() {
+        let Some(first) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
+            continue;
+        };
+        if !matches!(row[first].ch, '╭' | '┌') {
+            continue;
+        }
+        let Some(tc) = (first..row.len().saturating_sub(title.len().saturating_sub(1)))
+            .find(|&c| title.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
+        else {
+            continue;
+        };
+        let mut style = row[tc].clone();
+        if let Some([r, g, b, _]) = accent {
+            style.fg = kasa_bridge::screen::Color::Rgb(r, g, b);
+        }
+        let mut repl: Vec<GridCell> = Vec::with_capacity(title.len());
+        for ch in name.chars() {
+            let mut cell = style.clone();
+            cell.ch = ch;
+            repl.push(cell);
+            let mut sp = style.clone();
+            sp.ch = ' ';
+            repl.push(sp);
+        }
+        if repl.len() > title.len() {
+            return; // 로스터 이름은 최대 3자(6칸) — 넘치면 원문 유지
+        }
+        // 버전 꼬리("v2.1.237")와 그 뒤 공백까지, 보더 대시가 다시 시작되기
+        // 전 구간을 통째로 당긴다 — 공백을 남기면 「대시·공백·대시」로 선이
+        // 끊긴 자리가 생긴다.
+        let mut probe = tc + title.len();
+        while probe < row.len() && !is_box(row[probe].ch) {
+            probe += 1;
+        }
+        let dash = row
+            .get(probe)
+            .filter(|c| is_box(c.ch))
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut d = row[tc].clone();
+                d.ch = '─';
+                d
+            });
+        let tail: Vec<GridCell> = row[tc + title.len()..probe].to_vec();
+        let mut w = tc;
+        for cell in repl.into_iter().chain(tail) {
+            row[w] = cell;
+            w += 1;
+        }
+        for cell in row[w..probe].iter_mut() {
+            *cell = dash.clone();
+        }
+        return; // 타이틀은 배너당 한 줄
+    }
 }
 
 /// claude 웰컴 배너("Welcome back <user>!") → 배정 학생 인사말. Clawd 아트(=학생
@@ -1962,12 +2032,9 @@ pub(crate) fn replace_welcome_greeting(
                 row[c] = GridCell::blank();
             }
         }
-        // 배너 박스 보더(╭─╮│╰╯)도 학생색 — 타이틀·인사말과 색 언어 통일
-        // (거노: "색상도 학생색상으로", 배너 전체가 학생색인 게 의도).
-        if let Some(acc) = accent {
-            let art_bottom = (br + CLAWD_ROWS as isize).max(0) as usize;
-            tint_welcome_box(rows, r, art_bottom, acc);
-        }
+        // 보더 색칠은 여기서 하지 않는다 — 호출부(render.rs)가 인사말 성공
+        // 여부와 무관하게 tint_welcome_box 를 부른다. 이 안에 뒀던 동안
+        // 인사말 로스터에 없던 학생은 테두리까지 파랑으로 남았다(2026-08-20).
         return; // 웰컴 인사말은 배너당 한 줄
     }
 }
@@ -2990,6 +3057,52 @@ mod clawd_banner_tests {
         assert_eq!(rows, before);
     }
 
+    // 2.1.23x 박스형 웰컴: 타이틀이 아트 옆이 아니라 **상단 보더 줄**에 있다
+    // (2026-08-20 peek 실측 "╭─── Claude Code v2.1.237 ───…"). 이름 치환 뒤에도
+    // 우측 ╮ 열이 제자리고, 당겨서 남는 칸은 blank 가 아니라 ─ 로 메워져
+    // 보더 선이 끊기지 않는다.
+    #[test]
+    fn banner_title_on_top_border_row() {
+        let top = "╭─── Claude Code v2.1.237 ─────╮";
+        let mut rows = vec![
+            row_from(top),
+            row_from("│                             │"),
+            row_from("│        ▐▛███▛█             │"),
+            row_from("│       ▝▜██████▀            │"),
+            row_from("│         ▝▝ ▝▝              │"),
+            row_from("╰─────────────────────────────╯"),
+        ];
+        let corner = top.chars().count() - 1;
+        replace_banner_title(
+            &mut rows, 2, 8, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE, "히나",
+            Some([255, 128, 0, 255]),
+        );
+        let line: String = rows[0].iter().map(|c| c.ch).collect();
+        assert!(line.contains('히') && line.contains('나'), "이름 치환: {line}");
+        assert!(line.contains("v2.1.237"), "버전 꼬리 유지: {line}");
+        assert!(!line.contains("Claude Code"), "원 타이틀 제거: {line}");
+        assert_eq!(rows[0][corner].ch, '╮', "우측 코너 제자리");
+        // 버전 뒤 원래의 한 칸 공백을 지나면 코너까지 전부 대시 — 빈칸이 남으면
+        // 보더 선이 끊긴 것. (str::find 는 바이트 오프셋이라 와이드 글자가 섞인
+        // 줄에선 문자 인덱스와 어긋난다 — 문자 벡터에서 직접 찾는다.)
+        let seg: Vec<char> = line.chars().collect();
+        let pat: Vec<char> = "v2.1.237".chars().collect();
+        let ver_end = seg
+            .windows(pat.len())
+            .position(|w| w == pat.as_slice())
+            .unwrap()
+            + pat.len();
+        assert!(
+            seg[ver_end + 1..corner].iter().all(|&c| c == '─'),
+            "보더 대시 연속: {line}"
+        );
+        assert_eq!(
+            rows[0][5].fg,
+            kasa_bridge::screen::Color::Rgb(255, 128, 0),
+            "이름 accent",
+        );
+    }
+
     const ALL_SLUGS: [&str; 12] = [
         "arona", "prana", "midori", "momoi", "yuzu", "arisu", "yuuka", "shiroko", "hoshino",
         "koharu", "himari", "aru",
@@ -3130,16 +3243,25 @@ mod clawd_banner_tests {
         assert_eq!(rows, before, "웰컴 행 없으면 무변경");
     }
 
-    // 로스터 밖 이름이면 배너 원문 유지.
+    // 개별 인사말이 없는 로스터 학생도 범용 존대 한 줄로 치환된다 — 12명만
+    // 알고 None 을 돌려보내던 동안 그 학생 pane 은 테두리 학생색까지 통째로
+    // 빠졌다(2026-08-20 히나 pane 실측).
     #[test]
-    fn welcome_greeting_unknown_character_noop() {
-        let mut rows = vec![wide_row("Welcome back 건호!"), row_from(" ▐▛███▜▌")];
-        let before = rows.clone();
-        replace_welcome_greeting(&mut rows, 1, "없는이름", None);
-        assert_eq!(rows, before);
+    fn welcome_greeting_fallback_for_unlisted_student() {
+        let pad = " ".repeat(40);
+        let mut rows = vec![
+            wide_row(&format!("  Welcome back 건호!{pad}")),
+            row_from(" ▐▛███▛█"),
+        ];
+        replace_welcome_greeting(&mut rows, 1, "히나", Some([200, 50, 50, 255]));
+        let line = row_text(&rows[0]);
+        assert!(line.contains("어서 오세요"), "범용 인사말 치환: {line}");
+        assert!(line.contains("건호"), "이름 추출·삽입: {line}");
+        assert!(!line.contains("Welcome back"), "원문 제거: {line}");
     }
 
     // 배너 박스 보더가 학생 accent 로 틴트되고, 범위 밖 다른 박스는 오염 안 된다.
+    // 호출 순서는 render.rs 와 같다 — 인사말 치환과 무관하게 tint 를 따로 부른다.
     #[test]
     fn welcome_box_border_tinted() {
         let acc = [80, 160, 240, 255];
@@ -3153,6 +3275,7 @@ mod clawd_banner_tests {
             row_from("╭─ other box ─╮"),
         ];
         replace_welcome_greeting(&mut rows, 2, "코하루", Some(acc));
+        tint_welcome_box(&mut rows, 2, 5, acc);
         let want = kasa_bridge::screen::Color::Rgb(80, 160, 240);
         assert_eq!(rows[0][0].fg, want, "상단 보더 ╭ 틴트");
         assert_eq!(rows[5][0].fg, want, "하단 보더 ╰ 틴트");
@@ -3162,6 +3285,30 @@ mod clawd_banner_tests {
             kasa_bridge::screen::Color::Default,
             "범위 밖 다른 박스 미오염",
         );
+    }
+
+    // 2.1.23x 박스형 웰컴: 인사말 로스터에 없는 학생이어도 보더 틴트는 된다 —
+    // 실물 레이아웃(2026-08-20 peek) 축약본으로 render.rs 호출 순서를 재현.
+    #[test]
+    fn box_welcome_tints_even_when_greeting_unlisted() {
+        let acc = [120, 90, 200, 255];
+        let mut rows = vec![
+            row_from("╭─── Claude Code v2.1.237 ─────────────╮"),
+            wide_row("│      Welcome back SIONIC AI!         │"),
+            row_from("│                                      │"),
+            row_from("│        ▐▛███▛█                       │"),
+            row_from("│       ▝▜██████▀                      │"),
+            row_from("│         ▝▝ ▝▝                        │"),
+            row_from("╰──────────────────────────────────────╯"),
+        ];
+        let br = 3isize; // 아트 머리 행
+        replace_welcome_greeting(&mut rows, br, "히나", Some(acc));
+        tint_welcome_box(&mut rows, br as usize, (br + 3) as usize, acc);
+        let want = kasa_bridge::screen::Color::Rgb(120, 90, 200);
+        assert_eq!(rows[0][0].fg, want, "상단 보더 틴트");
+        assert_eq!(rows[6][0].fg, want, "하단 보더 틴트");
+        let line = row_text(&rows[1]);
+        assert!(line.contains("어서 오세요"), "범용 인사말: {line}");
     }
 }
 
@@ -3555,14 +3702,20 @@ mod teammate_msg_tests {
         assert_eq!(row[2].ch, '본', "{}", row_text(&row));
     }
 
-    // wrap 연속 행: 2칸 들여쓰기 본문만 연속, TUI 구조 글리프(⎿·⏺)·빈 행에서 끊김.
+    // wrap 연속 행: 2칸 **이상** 들여쓰기 본문은 연속, TUI 구조 글리프(⎿·⏺)·
+    // 빈 행에서 끊김. 목록 항목 wrap 은 4~5칸으로 떨어진다 — 「정확히 2」로
+    // 가두면 그 행에서 걸음이 끊겨 아래 문단 전체가 무테마(2026-08-20 스샷).
     #[test]
     fn tell_wrap_continuation_bounds() {
         assert!(tell_wrap_continuation(&row_from("  짧게 답해줘.", 80)));
+        assert!(tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
+        assert!(tell_wrap_continuation(&row_from("    남아있음.", 80)));
+        assert!(tell_wrap_continuation(&row_from("     view 772, gh pr diff", 80)));
         assert!(!tell_wrap_continuation(&row_from("  ⎿  4 skills available", 80)));
+        assert!(!tell_wrap_continuation(&row_from("    ⎿ 깊은 구조 글리프도 끊김", 80)));
         assert!(!tell_wrap_continuation(&row_from("⏺ 확인", 80)));
         assert!(!tell_wrap_continuation(&row_from("", 80)));
-        assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
+        assert!(!tell_wrap_continuation(&row_from(" 들여쓰기 1", 80)));
     }
 
     // 내가 친 프롬프트의 배경 띠: `❯` 앞머리 + 행 전폭 균일 배경만 띠다.

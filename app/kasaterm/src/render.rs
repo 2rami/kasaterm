@@ -1244,6 +1244,21 @@ impl App {
                         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
                         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
                         replace_welcome_greeting(&mut composed, br, name, accent);
+                        // 배너 박스 보더도 학생색 — 인사말 치환과 **분리**해서
+                        // 무조건 부른다. 인사말 함수 안에 뒀던 동안 인사말
+                        // 로스터에 없는 학생 pane 은 치환이 조기 반환하며
+                        // 테두리까지 파랑으로 남았다(2026-08-20 거노 스샷).
+                        // 박스 코너가 없는 launcher 화면에선 자연 no-op.
+                        if let Some(acc) = accent {
+                            let art_bottom =
+                                (br + lrows as isize).max(0) as usize;
+                            tint_welcome_box(
+                                &mut composed,
+                                br.max(0) as usize,
+                                art_bottom,
+                                acc,
+                            );
+                        }
                     }
                     // codex 시작 패널: 세울 아트가 없어 이름표만 바꾼다. 도트 유무와
                     // 무관하니 위 로고 루프 밖이고, codex pane 일 때만 훑는다 —
