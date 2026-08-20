@@ -2543,7 +2543,22 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     let tail = rest.split_once('…')?.1;
     let inside = tail.split_once('(')?.1;
     let head = inside.split_once(')').map_or(inside, |(h, _)| h);
-    (head.starts_with(|c: char| c.is_ascii_digit()) && head.contains('s')).then_some(first)
+    // 경과시간은 괄호 **어딘가에** 있으면 된다 — 맨 앞이어야 한다고 못 박았더니
+    // 토큰이 먼저 오는 변종 `(↓ 1.2k tokens · 3s)` 을 통째로 놓쳤다. 턴이 막
+    // 시작해 경과시간이 아직 안 붙은 프레임이 이 꼴로 뜨는데, 그게 거노가 말한
+    // 「바로 안 붙을 때도 있어」(2026-08-20)의 한 갈래다. 앞머리 글리프가 그 행의
+    // **첫** non-blank(col<8)여야 한다는 관문은 그대로라 본문 오탐은 안 늘어난다.
+    has_elapsed(head).then_some(first)
+}
+
+/// `3s` · `8m 18s` 같은 경과시간 토막이 들어 있나. 숫자 바로 뒤에 `s`/`m` 이
+/// 붙은 조각을 찾는다 — `27.4k tokens` 의 `tokens` 처럼 **글자 뒤에 오는 s** 는
+/// 세지 않는다(그걸 세면 토큰만 있는 괄호가 시간으로 읽혀 관문이 무의미해진다).
+fn has_elapsed(head: &str) -> bool {
+    let b = head.as_bytes();
+    b.iter().enumerate().any(|(i, c)| {
+        matches!(c, b's' | b'm') && i > 0 && b[i - 1].is_ascii_digit()
+    })
 }
 
 /// 승인 대기 도트가 설 자리 — 질문 헤더 행("Do you want to proceed", 없으면 첫
@@ -3343,6 +3358,23 @@ mod spinner_tests {
     fn spinner_detects_dot_frame_without_esc_hint() {
         let rows = vec![row_from("· Caramelizing… (3m 39s · ↓ 9.7k tokens)")];
         assert_eq!(find_claude_spinner(&rows), Some((0, 0)));
+    }
+
+    /// 경과시간이 괄호 **맨 앞**이 아닌 변종. 토큰이 먼저 오는 프레임을 놓쳐
+    /// 학생 색이 늦게 붙던 것(거노 2026-08-20 「바로 안 붙을 때도 있어」).
+    #[test]
+    fn spinner_detects_elapsed_after_tokens() {
+        let rows = vec![row_from("✶ Skedaddling… (↓ 1.2k tokens · 3s)")];
+        assert_eq!(find_claude_spinner(&rows), Some((0, 0)));
+    }
+
+    /// 그 완화가 관문을 무의미하게 만들면 안 된다 — 시간 없이 토큰만 있는 꼬리는
+    /// 여전히 스피너가 아니다(`tokens` 의 s 는 앞이 글자라 시간으로 안 센다).
+    /// 이쪽은 `spinner_probe`·제출 직후 신뢰 창이 따로 구제하는 몫이다.
+    #[test]
+    fn spinner_rejects_tokens_without_elapsed() {
+        let rows = vec![row_from("✶ Skedaddling… (↓ 1.2k tokens)")];
+        assert_eq!(find_claude_spinner(&rows), None);
     }
 
     #[test]
