@@ -15,11 +15,23 @@
 생성은 1명당 2분 남짓(호출 5회)이라 `--jobs` 로 병렬로 돌린다. 중간에 끊겨도 다시
 부르면 이어서 한다 — 판정은 모든 상태의 프레임이 다 있는지다(`generated`).
 
-⚠️ **OpenGateway 로는 못 굽는다.** 동작 프레임은 base 캐릭터를 참조 이미지로 넘겨
-그리는데 게이트웨이엔 그 경로(`/images/edits`)가 없다. 참조 이미지를 실어 보내도
-오류 없이 **무시하고 새 그림을 준다** — 필드 검증이 아예 없어서다(2026-08-11 실측).
-그래서 프로바이더는 codex(구독 OAuth, 무과금) · openai(종량) · fal(종량) 중에서 쓴다.
+프로바이더는 codex(구독 OAuth, 무과금) · openai(종량) · fal(종량) 중에서 쓴다.
 키는 ppgen 이 설정에서 읽는다(`~/Library/Application Support/perfectpixel/config.json`).
+
+OpenAI 호환 게이트웨이로도 굽는다(2026-08-20부터): `THEME_PROVIDER=openai` 에
+`OPENAI_BASE_URL`(끝에 /v1 포함) · `THEME_KEY` · `THEME_MODEL`(게이트웨이가 요구하는
+모델 표기 그대로, 예: `openai/gpt-image-2`) 을 얹으면 된다. 옛 주석에 있던
+「게이트웨이는 /images/edits 가 없어 참조를 조용히 무시한다」(2026-08-11 실측)는
+게이트웨이에 그 경로가 생기면서 해소됐다 — 참조 반영을 실측으로 확인했다.
+키를 여기 하드코딩하지 마라(공개 레포다).
+
+걷기 프레임은 `-dirset walk -dirs east` 로 **옆모습(동향)** 을 굽는다. walk 를
+`-states` 로 구우면 프리셋이 정면 걷기를 명시해 render.rs 의 walk-east 의도와
+어긋난다(2026-08-13 지적 「걷는것도 옆모습이 아니야」). 그래서 생성물 폴더는
+`frames/walk-east/` 고, 설치할 때 `walk/` 자리로 옮긴다 — 옛 `frames/walk/`
+생성물은 이 스크립트 기준 「미생성」이 된다(정면 걷기라 다시 굽는 게 맞다).
+등신은 `-style pixel-chibi`(THEME_STYLE 로 변경 가능) — pixel 프리셋만 쓰면 등신
+지시가 없어 원본 8등신에 끌린 것이 「비율이 너무 길다」의 원인이었다.
 """
 import argparse
 import json
@@ -43,6 +55,16 @@ PPGEN = os.environ.get("PPGEN", "/tmp/ppgen")
 # 이게 처리량 상한이 된다 — `--jobs 4` 는 분당 약 5.8회라 429 로 절반이 떨어졌고
 # `--jobs 2`(약 2.9회)에서 전부 통과했다. 병렬을 올리지 마라.
 PROVIDER = os.environ.get("THEME_PROVIDER", "codex")
+# 게이트웨이/모델 오버라이드. MODEL 은 프로바이더가 요구하는 표기 그대로 넘긴다.
+# KEY 를 CLI 인자로 넘기는 이유: ppgen 은 config.json 이 환경변수를 이기므로,
+# 설정 파일에 개인 OpenAI 키가 저장돼 있으면 env 만으로는 게이트웨이 키로 못 바꾼다.
+MODEL = os.environ.get("THEME_MODEL", "")
+# 2단 구성: 베이스는 이 모델로 따로 굽고(-baseonly), 상태는 MODEL 로 그 베이스를
+# 복사한다(-base). 베이스엔 입력 충실도가 낮아 등신 재해석이 되는 모델을, 상태엔
+# 충실도가 높아 베이스를 그대로 따라 그리는 모델을 쓰라고 나눈 것이다.
+BASE_MODEL = os.environ.get("THEME_BASE_MODEL", "")
+KEY = os.environ.get("THEME_KEY", "")
+STYLE = os.environ.get("THEME_STYLE", "pixel-chibi")
 
 # 상태 → (ppgen 프리셋 이름 겸 앱 자산 폴더 이름, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
@@ -52,6 +74,15 @@ STATES = [
     ("wave", 4),
     ("cheer", 4),
 ]
+
+
+def out_state(state):
+    """앱 자산 폴더 이름 → ppgen 생성물 폴더 이름.
+
+    walk 만 어긋난다 — 옆모습을 얻으려면 dirset 으로 구워야 해서 생성물이
+    `walk-east` 로 나온다(모듈 docstring 참조).
+    """
+    return "walk-east" if state == "walk" else state
 
 
 def dst_frame(slug, state, i):
@@ -111,7 +142,7 @@ def generated(slug):
         return False
     for state, count in STATES:
         for i in range(count):
-            if not os.path.exists(os.path.join(root, "frames", state, f"frame-{i:02d}.png")):
+            if not os.path.exists(os.path.join(root, "frames", out_state(state), f"frame-{i:02d}.png")):
                 return False
     return True
 
@@ -150,7 +181,7 @@ def check(slug):
     out = os.path.join(SRC, slug, "out")
     for state, count in STATES:
         for i in (0, count // 2):
-            p = os.path.join(out, "frames", state, f"frame-{i:02d}.png")
+            p = os.path.join(out, "frames", out_state(state), f"frame-{i:02d}.png")
             if not os.path.exists(p):
                 return f"{state}/frame-{i:02d} 없음"
             colors, run = frame_quality(p)
@@ -190,22 +221,48 @@ def generate(slug, force=False, use_ref=False):
     if not desc:
         return slug, "no-desc", ""
     out = os.path.join(SRC, slug, "out")
-    cmd = [
-        PPGEN,
-        "-provider", PROVIDER,
-        "-desc", desc,
-        "-states", ",".join(s[0] for s in STATES),
-        "-out", out,
+
+    def base_cmd(common):
+        """1단: 베이스만. BASE_MODEL 이 있을 때만 쓴다 — 입력 충실도가 낮은 모델로
+        등신을 재해석시키기 위해서다(충실도 높은 모델은 참조의 8등신을 못 놓는다)."""
+        c = common + ["-baseonly"]
+        if BASE_MODEL:
+            c += ["-model", BASE_MODEL]
+        return c
+
+    common = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", STYLE, "-out", out]
+    if KEY:
+        common += ["-key", KEY]
+    states_cmd = common + [
+        "-states", ",".join(s for s, _ in STATES if s != "walk"),
+        "-dirset", "walk",
+        "-dirs", "east",
     ]
+    if MODEL:
+        states_cmd += ["-model", MODEL]
     if use_ref:
         ref = os.path.join(SRC, slug, "ref.png")
         if not os.path.exists(ref):
             return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
-        cmd[3:3] = ["-ref", ref]
+        # states_cmd 는 common 의 복사본이라 둘 다 따로 붙인다. -base 가 붙는 상태
+        # 실행에서 -ref 는 무시되지만(베이스 생성 전용) 붙여 둬도 해가 없다.
+        common += ["-ref", ref]
+        states_cmd += ["-ref", ref]
+
     why = ""
     for attempt in range(ATTEMPTS):
         shutil.rmtree(out, ignore_errors=True)
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if BASE_MODEL:
+            r = subprocess.run(base_cmd(common), capture_output=True, text=True, timeout=1800)
+            base_png = os.path.join(out, "base.png")
+            if r.returncode != 0 or not os.path.exists(base_png):
+                tail = (r.stdout + r.stderr).strip().splitlines()
+                why = tail[-1] if tail else f"base exit {r.returncode}"
+                continue
+            run_cmd = states_cmd + ["-base", base_png]
+        else:
+            run_cmd = states_cmd
+        r = subprocess.run(run_cmd, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0 or not generated(slug):
             tail = (r.stdout + r.stderr).strip().splitlines()
             why = tail[-1] if tail else f"exit {r.returncode}"
@@ -232,7 +289,7 @@ def install(slug, force=False):
 
     for state, count in STATES:
         for i in range(count):
-            src = os.path.join(out, "frames", state, f"frame-{i:02d}.png")
+            src = os.path.join(out, "frames", out_state(state), f"frame-{i:02d}.png")
             if not os.path.exists(src):
                 return slug, "fail", f"{state} frame-{i:02d} 없음"
             shutil.copy2(src, dst_frame(slug, state, i))
