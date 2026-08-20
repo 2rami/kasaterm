@@ -757,7 +757,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
-    eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
+    eprintln!("  kasaterm-cli tell  [--force] <surface_id> <text>  # send + submit (codex 등 SendMessage 밖 전용 — claude pane 은 거부, 비상시 --force)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
@@ -1055,6 +1055,10 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         "tell" => {
             // send + submit in one shot, so an idle claude in the target pane
             // wakes and acts on the message:  tell <surface_id> <text>
+            // SendMessage 로 닿는 claude pane 은 서버가 거부한다(SM·tell 이중 발송
+            // 차단) — 인박스가 정말 죽었을 때만 --force 로 강행.
+            let force = args.first().is_some_and(|a| a == "--force");
+            let args = if force { &args[1..] } else { &args[..] };
             let surface = args
                 .first()
                 .filter(|a| a.starts_with('%'))
@@ -1102,6 +1106,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 // plain 도 마커 포함 — 웹뷰 senderOf 가 transcript 정확대조라 마커가
                 // 한쪽에만 있으면 발신자 버블 매칭이 깨진다.
                 params["plain"] = json!(marked);
+                if force {
+                    params["force"] = json!(true);
+                }
             }
             ("surface.send_text", params)
         }

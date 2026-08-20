@@ -766,6 +766,15 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         params.get("plain").and_then(|v| v.as_str()),
     ) {
         if let Some(to) = target {
+            // pane 발 tell(메타 동봉) 이 claude pane 을 겨누면 거부 — 지침(「SM 과
+            // tell 을 같이 보내지 마라」, 2026-08-18)만으로는 학생들이 계속 겹쳐
+            // 보냈다(2026-08-20 재발). 기계적으로 막아야 한 통만 남는다.
+            let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !force {
+                if let Some(msg) = tell_into_claude_pane(backend, to) {
+                    return param_err(id, &msg);
+                }
+            }
             log_agent_tell(backend, from, to, plain);
         }
     }
@@ -815,6 +824,28 @@ fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str
         "{target} 에는 이미 {who} 가 돌고 있다 — 부팅 커맨드를 보내면 그 입력창에 \
          텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
          이 pane 에 지시할 거라면 {how}."
+    ))
+}
+
+/// pane 발 tell 이 **SendMessage 로 닿는 claude pane** 을 겨누면 거부 사유를 돌려준다.
+///
+/// tell 은 입력창 주입이라, SendMessage 와 겹쳐 보내면 받는 화면에 같은 말이 두 번
+/// 뜨고 상대가 두 번 깨어난다. codex(인박스 없음)와 명부에 안 오른 claude(agent_name
+/// 없음)는 tell 이 유일한 경로라 통과. 인박스가 실제로 죽은 비상시엔 `--force`.
+fn tell_into_claude_pane(backend: &dyn Backend, target: &str) -> Option<String> {
+    let row = backend
+        .collab_board()
+        .ok()?
+        .into_iter()
+        .find(|r| r.surface_id == target)?;
+    if row.harness.as_deref() != Some("claude") {
+        return None;
+    }
+    let agent = row.agent_name?;
+    Some(format!(
+        "{target} 의 claude 에는 SendMessage(to: \"{agent}\") 로 보내라 — tell 은 입력창 \
+         주입이라 SM 과 겹치면 같은 말이 두 번 뜬다(둘 중 하나만, 기본은 SendMessage). \
+         인박스가 죽어 SendMessage 가 정말 안 닿을 때만 tell --force."
     ))
 }
 
@@ -1273,6 +1304,111 @@ mod tests {
         assert!(!msg.contains("SendMessage"), "codex 엔 인박스가 없다: {msg}");
         assert!(msg.contains("codex"), "무엇이 돌고 있는지 밝혀야 한다: {msg}");
         assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    /// 학생이 SM 과 tell 을 겹쳐 보내는 이중 발송 — 지침은 두 번 어겨졌으니(08-18,
+    /// 08-20) 서버가 막는다. SendMessage 로 닿는 claude pane 이 과녁이면 거부하고
+    /// 정답(agent 이름)을 알려준다.
+    #[test]
+    fn tell_into_claude_pane_is_refused_with_sendmessage_answer() {
+        let backend = FakeBackend {
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-3".into(),
+                harness: Some("claude".into()),
+                agent_name: Some("midori-p4-v32".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-3", "from_pane": "%9",
+                       "plain": "판독 끝", "text": "\u{15}\u{1b}[200~판독 끝\u{1b}[201~\r"}),
+            ),
+        );
+        assert!(!r.ok);
+        let msg = r.error.unwrap().message;
+        assert!(msg.contains("SendMessage"), "정답 경로를 알려줘야 한다: {msg}");
+        assert!(msg.contains("midori-p4-v32"), "to 에 넣을 이름까지 줘야 한다: {msg}");
+        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    /// 인박스가 죽은 비상시의 탈출구 — force 가 오면 같은 과녁이라도 통과한다.
+    #[test]
+    fn tell_force_overrides_claude_pane_guard() {
+        let fake_cwd =
+            std::env::temp_dir().join(format!("kasa-tell-force-{}", std::process::id()));
+        let backend = FakeBackend {
+            cwd: Some(fake_cwd.clone()),
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-3".into(),
+                harness: Some("claude".into()),
+                agent_name: Some("midori-p4-v32".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-3", "from_pane": "%9", "force": true,
+                       "plain": "비상", "text": "비상\r"}),
+            ),
+        );
+        assert!(r.ok);
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        let slug: String = fake_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
+    }
+
+    /// tell 이 유일한 경로인 곳은 그대로 열려 있어야 한다 — codex pane 과,
+    /// 명부에 안 오른 claude(agent_name 없음).
+    #[test]
+    fn tell_still_reaches_codex_and_unlisted_claude() {
+        let fake_cwd =
+            std::env::temp_dir().join(format!("kasa-tell-open-{}", std::process::id()));
+        let backend = FakeBackend {
+            cwd: Some(fake_cwd.clone()),
+            board: vec![
+                crate::backend::PaneActivity {
+                    surface_id: "surf-9".into(),
+                    harness: Some("codex".into()),
+                    ..Default::default()
+                },
+                crate::backend::PaneActivity {
+                    surface_id: "surf-10".into(),
+                    harness: Some("claude".into()),
+                    agent_name: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        for surf in ["surf-9", "surf-10"] {
+            let r = dispatch(
+                &backend,
+                req(
+                    "surface.send_text",
+                    json!({"surface_id": surf, "from_pane": "%9",
+                           "plain": "이어서", "text": "이어서\r"}),
+                ),
+            );
+            assert!(r.ok, "{surf} 는 tell 이 유일한 경로다");
+        }
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 2);
+        let slug: String = fake_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
     }
 
     /// done 의 outcome 은 두 값뿐 — status 칸에서 겪은 "free text 라더니 소비부는
