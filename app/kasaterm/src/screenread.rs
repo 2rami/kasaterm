@@ -534,6 +534,36 @@ pub(crate) fn tint_row(row: &mut [GridCell], accent: [u8; 4]) {
     }
 }
 
+/// 학생 완료 보고 줄 감지 — `[완료] 미도리(%4) — …` / `[실패] …`. socket.rs
+/// `pane_done` 이 부모 pane 입력창에 주입해 제출되는 형식이다. 큐잉(>)·제출(❯)
+/// 프롬프트 마커 뒤에 올 수 있고, `(%N)` 괄호까지 요구해 사용자가 우연히 친
+/// `[완료]` 텍스트 오탐을 줄인다. 반환: 보고한 캐릭터명.
+pub(crate) fn done_report_line(row: &[GridCell]) -> Option<String> {
+    // wide 글리프 스페이서는 경로 따라 '\0'(kasa-bridge) 또는 ' '(alacritty
+    // composed, 실측) — 구분할 방법이 없으니 **공백까지 전부 지운** 문자열로
+    // 본다. 안 지우면 "[완료]" 가 "완 료" 로 갈라져 prefix 매칭이 깨진다.
+    // 이름(캐릭터명)엔 원래 공백이 없어 잃는 것이 없다.
+    let flat: String = row
+        .iter()
+        .map(|c| c.ch)
+        .filter(|&c| c != '\0' && c != ' ')
+        .collect();
+    let rest = flat
+        .strip_prefix('❯')
+        .or_else(|| flat.strip_prefix('>'))
+        .unwrap_or(&flat);
+    let tail = rest
+        .strip_prefix("[완료]")
+        .or_else(|| rest.strip_prefix("[실패]"))?;
+    let open = tail.find('(')?;
+    let close = tail[open..].find(')')? + open;
+    if !tail[open + 1..close].starts_with('%') {
+        return None;
+    }
+    let name = &tail[..open];
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// tell 마커 행의 wrap 연속 행 판정 — claude TUI 는 긴 user 턴을 2칸 들여쓰기
 /// 행으로 wrap 한다. 들여쓰기가 정확히 2 이고 첫 글자가 TUI 구조 글리프가
 /// 아니면 같은 메시지의 연속으로 본다(⎿·⏺ 등 다음 블록에서 끊김).
@@ -636,6 +666,24 @@ pub(crate) fn teammate_sender_slug(name: &str) -> Option<&'static str> {
 /// 형식이 다 걸린다.
 pub(crate) fn sender_roman_head(name: &str) -> &str {
     name.split_once('-').map(|(a, _)| a).unwrap_or(name)
+}
+
+/// `@ <라벨>❯` 의 라벨이 로스터 학생의 agent 이름꼴(`<슬러그>-p<번호>…`)인지.
+///
+/// transcript 대조가 불가능한 헤더의 보조 관문 — 발신 pane 을 dismiss 하면 명부
+/// 파일(`~/.claude/sessions/<pid>.json`)이 사라져 발신자 복원이 통째로 실패하고,
+/// 옛 메시지는 tail(256KB) 밖으로 밀려나 대조 자체가 안 된다. 둘 다 화면에는
+/// 라벨이 그대로 남아 있으니 이름꼴로 판정한다(2026-08-20 거노 스샷:
+/// `@ midori-p4-v32❯` 가 무테마로 남았다). `-p<번호>` 토막까지 요구해 사용자가
+/// 우연히 친 텍스트("midori-chan" 등)는 안 걸린다.
+pub(crate) fn label_is_roster_agent(label: &str) -> bool {
+    let Some((head, rest)) = label.split_once('-') else {
+        return false;
+    };
+    theme::slug_character(head).is_some()
+        && rest.split('-').next().is_some_and(|p| {
+            p.len() > 1 && p.starts_with('p') && p[1..].chars().all(|c| c.is_ascii_digit())
+        })
 }
 
 pub(crate) fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
@@ -1654,10 +1702,26 @@ pub(crate) fn fit_sprite_box(cols: usize, rows: usize, cw: f32, ch: f32) -> (f32
 }
 
 pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
-    const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
-    const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
-    // 발 행: 배너 좌단 기준 2칸 들여쓰기 `▘▘ ▝▝`, 양옆은 공백(2.1.212 실측).
-    const FEET: [char; 5] = ['▘', '▘', ' ', '▝', '▝'];
+    // 세대별 (머리, 몸통, 발) — claude 는 배너 도트를 바꾼다. 2.1.23x 에서
+    // 눈 요철이 생긴 새 아트로 갈렸는데 옛 글리프만 알던 동안 **새 배너가
+    // 통째로 안 잡혀** 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 거노
+    // 스샷 + 격리 리그 실측: 컴팩트·박스형 웰컴 둘 다 같은 3행 아트).
+    // 옛 버전으로 도는 pane 도 있을 수 있어 두 세대를 다 훑는다.
+    const GENS: [(&[char], &[char], &[char]); 2] = [
+        // 2.1.23x — 눈 달린 아트(2026-08-20 peek 실측).
+        (
+            &['▐', '▛', '█', '█', '█', '▛', '█'],
+            &['▝', '▜', '█', '█', '█', '█', '█', '█', '▀'],
+            // 발 행: 배너 좌단 기준 2칸 들여쓰기, 양옆은 공백.
+            &['▝', '▝', ' ', '▝', '▝'],
+        ),
+        // ~2.1.212 — 민짜 아트.
+        (
+            &['▐', '▛', '█', '█', '█', '▜', '▌'],
+            &['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'],
+            &['▘', '▘', ' ', '▝', '▝'],
+        ),
+    ];
     let blank = |cell: &GridCell| matches!(cell.ch, ' ' | '\0');
     let matches_at = |row: &[GridCell], at: usize, pat: &[char]| {
         at + pat.len() <= row.len()
@@ -1665,56 +1729,58 @@ pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> 
     };
     let mut out = Vec::new();
     let n = rows.len();
-    for r in 0..n {
-        let row = &rows[r];
-        let mut c = 0usize;
-        while c + BODY.len() <= row.len() {
-            if matches_at(row, c, &BODY) {
-                if r == 0 {
-                    // 몸통이 최상단 행 = 머리가 위로 잘림. 몸통 9글리프
-                    // 단독으로도 일반 텍스트 오탐 여지가 사실상 없다.
-                    out.push((-1, c));
-                    c += BODY.len();
-                    continue;
+    for (head, body, feet) in GENS {
+        for r in 0..n {
+            let row = &rows[r];
+            let mut c = 0usize;
+            while c + body.len() <= row.len() {
+                if matches_at(row, c, body) {
+                    if r == 0 {
+                        // 몸통이 최상단 행 = 머리가 위로 잘림. 몸통 9글리프
+                        // 단독으로도 일반 텍스트 오탐 여지가 사실상 없다.
+                        out.push((-1, c));
+                        c += body.len();
+                        continue;
+                    }
+                    if matches_at(&rows[r - 1], c + 1, head) {
+                        out.push((r as isize - 1, c));
+                        c += body.len();
+                        continue;
+                    }
                 }
-                if matches_at(&rows[r - 1], c + 1, &HEAD) {
-                    out.push((r as isize - 1, c));
-                    c += BODY.len();
-                    continue;
-                }
-            }
-            c += 1;
-        }
-    }
-    // 위로 2행 잘림: 최상단에 발만 남은 경우. 발 글리프는 짧아 양옆
-    // 공백(배너 폭 9칸 확보)까지 요구해 오탐을 줄인다.
-    if let Some(row) = rows.first() {
-        let mut p = 2usize;
-        while p + FEET.len() + 2 <= row.len() {
-            if matches_at(row, p, &FEET)
-                && blank(&row[p - 2])
-                && blank(&row[p - 1])
-                && blank(&row[p + 5])
-                && blank(&row[p + 6])
-            {
-                out.push((-2, p - 2));
-                p += FEET.len();
-            } else {
-                p += 1;
+                c += 1;
             }
         }
-    }
-    // 아래에서 진입: 최하단에 머리만 보이는 경우(몸통·발은 화면 밖).
-    // 머리 7글리프 + 양옆 공백. 몸통행이 화면 안에 있으면 위 몸통 스캔이
-    // 이미 잡으므로 마지막 행만 본다.
-    if let Some(row) = rows.last().filter(|_| n >= 2) {
-        let mut p = 1usize;
-        while p + HEAD.len() + 1 <= row.len() {
-            if matches_at(row, p, &HEAD) && blank(&row[p - 1]) && blank(&row[p + 7]) {
-                out.push((n as isize - 1, p - 1));
-                p += HEAD.len();
-            } else {
-                p += 1;
+        // 위로 2행 잘림: 최상단에 발만 남은 경우. 발 글리프는 짧아 양옆
+        // 공백(배너 폭 9칸 확보)까지 요구해 오탐을 줄인다.
+        if let Some(row) = rows.first() {
+            let mut p = 2usize;
+            while p + feet.len() + 2 <= row.len() {
+                if matches_at(row, p, feet)
+                    && blank(&row[p - 2])
+                    && blank(&row[p - 1])
+                    && blank(&row[p + 5])
+                    && blank(&row[p + 6])
+                {
+                    out.push((-2, p - 2));
+                    p += feet.len();
+                } else {
+                    p += 1;
+                }
+            }
+        }
+        // 아래에서 진입: 최하단에 머리만 보이는 경우(몸통·발은 화면 밖).
+        // 머리 7글리프 + 양옆 공백. 몸통행이 화면 안에 있으면 위 몸통 스캔이
+        // 이미 잡으므로 마지막 행만 본다.
+        if let Some(row) = rows.last().filter(|_| n >= 2) {
+            let mut p = 1usize;
+            while p + head.len() + 1 <= row.len() {
+                if matches_at(row, p, head) && blank(&row[p - 1]) && blank(&row[p + 7]) {
+                    out.push((n as isize - 1, p - 1));
+                    p += head.len();
+                } else {
+                    p += 1;
+                }
             }
         }
     }
@@ -2640,6 +2706,28 @@ mod clawd_banner_tests {
         "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/tmuxify",
         "  ▄▀▀      ▀▀▄",
     ];
+
+    /// 2.1.23x 의 눈 달린 새 아트 — 옛 글리프만 알던 동안 새 배너가 통째로
+    /// 안 잡혀 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 거노 스샷).
+    /// 컴팩트·박스형 웰컴 둘 다 이 3행이다(격리 리그 peek 실측).
+    #[test]
+    fn new_gen_clawd_banner_detected() {
+        let rows = vec![
+            row_from(" ▐▛███▛█   Claude Code v2.1.237"),
+            row_from("▝▜██████▀  Fable 5 with xhigh effort · Claude Max"),
+            row_from("  ▝▝ ▝▝    ~/Desktop"),
+        ];
+        assert_eq!(find_clawd_banners(&rows), vec![(0, 0)]);
+        // 박스형 웰컴(테두리 │ 안, 들여쓰기) — 같은 아트가 안쪽에 앉는다.
+        let boxed = vec![
+            row_from("│               Welcome back SIONIC AI!    │"),
+            row_from("│                                          │"),
+            row_from("│                ▐▛███▛█                   │"),
+            row_from("│               ▝▜██████▀                  │"),
+            row_from("│                 ▝▝ ▝▝                    │"),
+        ];
+        assert_eq!(find_clawd_banners(&boxed), vec![(2, 16)]);
+    }
 
     #[test]
     fn agy_logo_detected() {
@@ -4061,6 +4149,58 @@ This came from another Claude session";
         assert!(
             peer_native_header_line(&row_from("@ 제목❯ 이어지는 말", 40)).is_none()
         );
+    }
+
+    /// 완료 보고 줄(`[완료] 미도리(%4) — …`)은 두 스페이서 경로('\0'/' ') 모두에서
+    /// 캐릭터명을 뽑아야 한다 — 색칠이 이 이름으로 학생을 찾는다.
+    #[test]
+    fn done_report_line_survives_wide_spacers() {
+        // 실제 그리드처럼 wide 글리프 뒤에 스페이서 셀을 끼운 행.
+        let wide = |s: &str, spacer: char| -> Vec<GridCell> {
+            let mut out = Vec::new();
+            for c in s.chars() {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                out.push(cell);
+                if (c as u32) >= 0x1100 {
+                    let mut sp = GridCell::blank();
+                    sp.ch = spacer;
+                    out.push(sp);
+                }
+            }
+            out
+        };
+        for spacer in ['\0', ' '] {
+            let row = wide("[완료] 미도리(%4) — 판독 24장 완료", spacer);
+            assert_eq!(done_report_line(&row).as_deref(), Some("미도리"), "spacer {spacer:?}");
+        }
+        // 큐잉(>)·제출(❯) 마커 뒤에서도, 요약이 없어도 잡힌다.
+        assert_eq!(done_report_line(&row_from("❯ [완료] 유즈(%12)", 40)).as_deref(), Some("유즈"));
+        assert_eq!(done_report_line(&row_from("> [실패] 아루(%3) — 빌드 깨짐", 40)).as_deref(), Some("아루"));
+        // 캐릭터 없이 pane id 만 남은 옛 형식 — 이름이 %4 로 나온다(색칠부가
+        // 로스터 조회 실패로 원색 유지).
+        assert_eq!(done_report_line(&row_from("[완료] %4(%4) — x", 40)).as_deref(), Some("%4"));
+        // 오탐 방지 — (%N) 괄호가 없거나 [완료] 로 안 시작하면 안 잡는다.
+        assert_eq!(done_report_line(&row_from("[완료] 미도리 — 괄호 없음", 40)), None);
+        assert_eq!(done_report_line(&row_from("[완료] 미도리(4번) — % 없음", 40)), None);
+        assert_eq!(done_report_line(&row_from("완료했어요 미도리(%4)", 40)), None);
+    }
+
+    /// transcript 대조가 불가능한(발신 pane dismiss·tail 밖) 헤더의 보조 관문 —
+    /// 로스터 슬러그 + `-p<번호>` 이름꼴만 통과한다(2026-08-20 거노 스샷 재발 방지).
+    #[test]
+    fn roster_agent_label_shape_is_narrow() {
+        assert!(label_is_roster_agent("midori-p4-v32"));
+        assert!(label_is_roster_agent("yuuka-p18-ly2"));
+        assert!(label_is_roster_agent("momoi-p98"));
+        // 로스터 밖 머리, p<번호> 없음, 사용자가 칠 법한 텍스트 — 전부 거부.
+        assert!(!label_is_roster_agent("team-lead"));
+        assert!(!label_is_roster_agent("midori-abbb"));
+        assert!(!label_is_roster_agent("midori-chan"));
+        assert!(!label_is_roster_agent("midori"));
+        assert!(!label_is_roster_agent("미도리"));
+        assert!(!label_is_roster_agent("mcp, skill사이드바"));
+        assert!(!label_is_roster_agent("midori-p"));
     }
 
     #[test]

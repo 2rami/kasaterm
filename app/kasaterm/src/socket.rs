@@ -2471,11 +2471,21 @@ impl Backend for PtyBackend {
         if let Some(parent) = parent {
             let is_claude = self.bound.lock().is_ok_and(|b| b.contains_key(&parent));
             if is_claude {
+                // 캐릭터는 `pane_character`(탭 pid 키)가 정본이다 — `ws.panes` 는
+                // pane 컨테이너 키라 **탭 학생이 안 걸려** 보고가 `[완료] %4(%4)` 로
+                // 떴다(2026-08-20 거노 스샷). 이름이 잡혀야 화면 색칠도 학생을 안다.
                 let who = self
                     .ws
                     .lock()
                     .ok()
-                    .and_then(|ws| ws.panes.get(surface_id).and_then(|p| p.character.clone()))
+                    .and_then(|ws| {
+                        ws.pane_character
+                            .get(surface_id)
+                            .cloned()
+                            .or_else(|| {
+                                ws.panes.get(surface_id).and_then(|p| p.character.clone())
+                            })
+                    })
                     .unwrap_or_else(|| surface_id.to_string());
                 let mark = if outcome == "succeeded" { "완료" } else { "실패" };
                 let line = if summary.is_empty() {

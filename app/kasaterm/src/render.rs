@@ -1739,12 +1739,9 @@ impl App {
                         else {
                             continue;
                         };
-                        let Some(msg) = msg_path
+                        let msg = msg_path
                             .as_deref()
-                            .and_then(|p| latest_teammate_msg(p, PEER_LABEL))
-                        else {
-                            continue;
-                        };
+                            .and_then(|p| latest_teammate_msg(p, PEER_LABEL));
                         // 와이드 글리프 스페이서가 공백으로 섞이므로 공백 무시 대조.
                         let norm = |s: &str| -> String {
                             s.chars().filter(|c| !c.is_whitespace()).collect()
@@ -1752,23 +1749,30 @@ impl App {
                         // from-name 은 발신 세션에 제목이 없으면 통째로 빠진다(신생
                         // pane 첫 메시지, 2026-08-12 실측) — 그때 claude 는 소켓
                         // pid 를 라벨로 그리므로(`@ 12889❯`) pid 대조를 함께 받는다.
-                        let label_hit = msg.from_label.as_deref().map(&norm)
-                            == Some(norm(&label))
-                            || msg.from_pid.as_deref().map(&norm) == Some(norm(&label));
-                        if !label_hit {
+                        let label_hit = msg.as_ref().is_some_and(|m| {
+                            m.from_label.as_deref().map(&norm) == Some(norm(&label))
+                                || m.from_pid.as_deref().map(&norm) == Some(norm(&label))
+                        });
+                        // 대조되는 것은 **최신 메시지 하나**뿐이라, 스크롤백의 옛
+                        // 메시지·tail(256KB) 밖 메시지는 대조가 영영 안 된다 — 라벨이
+                        // 로스터 학생의 agent 이름꼴이면 그것만으로 남의 메시지로
+                        // 인정한다(2026-08-20 거노 스샷: dismiss 된 미도리의 메시지가
+                        // 무테마로 남았다).
+                        if !label_hit && !label_is_roster_agent(&label) {
                             continue;
                         }
-                        let sender = msg
-                            .sender
-                            .clone()
+                        let sender = label_hit
+                            .then(|| msg.as_ref().and_then(|m| m.sender.clone()))
+                            .flatten()
                             .unwrap_or_else(|| PEER_LABEL.to_string());
                         // 이름이 학생을 안 알려 주면 세션 id 로 pane 을 되짚는다 —
                         // 접힌 경로와 같은 규칙(⚠️pane_character_if_known 금지, 위 주석).
                         let sender = if teammate_sender_slug(&sender).is_some() {
                             sender
                         } else {
-                            msg.peer_sid
-                                .as_deref()
+                            msg.as_ref()
+                                .filter(|_| label_hit)
+                                .and_then(|m| m.peer_sid.as_deref())
                                 .and_then(|sid| {
                                     self.pane_claude_sid
                                         .iter()
@@ -1778,8 +1782,21 @@ impl App {
                                 .and_then(|key| ws.pane_character.get(&key).cloned())
                                 .unwrap_or(sender)
                         };
-                        let accent =
-                            teammate_sender_accent(&sender, msg.color.as_deref());
+                        // 명부까지 죽었으면(발신 pane dismiss) 여기 와서도 `peer` 다 —
+                        // 라벨의 로마자 머리가 로스터를 안다(midori-p4-v32 → 미도리).
+                        let sender = if teammate_sender_slug(&sender).is_none()
+                            && label_is_roster_agent(&label)
+                        {
+                            label.clone()
+                        } else {
+                            sender
+                        };
+                        let accent = teammate_sender_accent(
+                            &sender,
+                            msg.as_ref()
+                                .filter(|_| label_hit)
+                                .and_then(|m| m.color.as_deref()),
+                        );
                         let slug = teammate_sender_slug(&sender);
                         // 학생을 알면 긴 발신 라벨을 이름으로 갈아끼운다 — 라벨은
                         // 발신 세션의 자동 제목이라 「sendmessage로 7유저에게…」 같은
@@ -1866,6 +1883,28 @@ impl App {
                             }
                         }
                         r += 1;
+                    }
+                }
+                // 학생 완료 보고 줄(`[완료] 미도리(%4) — …`, socket.rs pane_done
+                // 주입)도 보고한 학생색으로 — 어느 학생의 보고인지 색으로 읽힌다
+                // (거노 2026-08-20 「이왕하는거면 학생테마에 맞게 색상 다 해」).
+                // 캐릭터를 모르는 옛 형식(`[완료] %4(%4)`)은 원색 유지 — 엉뚱한
+                // 색보다 낫다.
+                {
+                    let mut r = 0;
+                    while r < composed.len() {
+                        let accent = done_report_line(&composed[r])
+                            .and_then(|n| theme::character_accent(&n));
+                        let Some(accent) = accent else {
+                            r += 1;
+                            continue;
+                        };
+                        tint_row(&mut composed[r], accent);
+                        r += 1;
+                        while r < composed.len() && tell_wrap_continuation(&composed[r]) {
+                            tint_row(&mut composed[r], accent);
+                            r += 1;
+                        }
                     }
                 }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
