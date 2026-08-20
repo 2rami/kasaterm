@@ -16,6 +16,24 @@ fn format_attention_toast(character: Option<&str>, reason: &str) -> String {
     }
 }
 
+/// 오토메모리 볼트 폴더. `KASATERM_MEMORY_DIR` 이 이기고, 없으면 알려진 자리를
+/// 차례로 본다 — 구글 드라이브 마운트는 시스템 언어에 따라 이름이 갈린다(한국어
+/// 「내 드라이브」/영어 「My Drive」). 어느 것도 없으면 None 이고, 그러면 빠른 파일에
+/// 그 줄이 아예 안 선다(없는 파일을 걸어 두면 눌렀을 때 빈 편집기가 열린다).
+fn memory_vault_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_MEMORY_DIR") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let home = kasa_socket::home_dir()?;
+    ["내 드라이브/MEMORY", "My Drive/MEMORY", "MEMORY"]
+        .iter()
+        .map(|s| home.join(s))
+        .find(|p| p.is_dir())
+}
+
 impl App {
     /// pane 의 표시용 학생 — "터미널은 파싱만"(거노): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
@@ -2331,6 +2349,29 @@ impl App {
             let mem = root.join(".memory/MEMORY.md");
             if mem.exists() {
                 out.push(("프로젝트 메모리", mem, "braces"));
+            }
+        }
+        // 오토메모리 볼트 — 세션마다 자동으로 실리는 **루트 인덱스**와, 지금 열어 둔
+        // 프로젝트의 **폴더 인덱스**. 루트는 상한이 있어 폴더 목록만 담고 토픽 훅은
+        // 폴더 인덱스에 있으므로, 둘을 같이 걸어야 실제로 읽을 것이 손에 닿는다.
+        // 폴더 이름은 프로젝트 폴더 이름과 같을 때만 맞춘다 — 추측해서 엉뚱한 폴더를
+        // 걸면 「내 메모리가 아닌 것」이 열려 더 나쁘다.
+        if let Some(vault) = memory_vault_dir() {
+            let root_idx = vault.join("MEMORY.md");
+            if root_idx.exists() {
+                out.push(("오토메모리", root_idx, "braces"));
+            }
+            if let Some(name) = self
+                .file_tree
+                .root
+                .as_ref()
+                .and_then(|r| r.file_name())
+                .and_then(|s| s.to_str())
+            {
+                let folder_idx = vault.join(name).join(format!("{name}.md"));
+                if folder_idx.exists() {
+                    out.push(("오토메모리 · 이 프로젝트", folder_idx, "braces"));
+                }
             }
         }
         out
