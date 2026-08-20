@@ -187,13 +187,106 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <true/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.kasa.tsx</string>
+        <key>UTTypeDescription</key>
+        <string>TypeScript JSX File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.source-code</string>
+          <string>public.text</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>tsx</string>
+          </array>
+        </dict>
+      </dict>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.kasa.jsx</string>
+        <key>UTTypeDescription</key>
+        <string>JSX File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.source-code</string>
+          <string>public.text</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>jsx</string>
+          </array>
+        </dict>
+      </dict>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.kasa.rust</string>
+        <key>UTTypeDescription</key>
+        <string>Rust Source File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.source-code</string>
+          <string>public.text</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>rs</string>
+          </array>
+        </dict>
+      </dict>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.kasa.go</string>
+        <key>UTTypeDescription</key>
+        <string>Go Source File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.source-code</string>
+          <string>public.text</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>go</string>
+          </array>
+        </dict>
+      </dict>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.kasa.toml</string>
+        <key>UTTypeDescription</key>
+        <string>TOML File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.source-code</string>
+          <string>public.text</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>toml</string>
+          </array>
+        </dict>
+      </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>
         <key>CFBundleTypeName</key>
         <string>Markdown Document</string>
         <key>CFBundleTypeRole</key>
-        <string>Viewer</string>
+        <string>Editor</string>
         <key>LSHandlerRank</key>
         <string>Alternate</string>
         <key>LSItemContentTypes</key>
@@ -206,6 +299,87 @@ cat > "$APP/Contents/Info.plist" <<PLIST
           <string>markdown</string>
           <string>mdown</string>
           <string>mkd</string>
+        </array>
+      </dict>
+      <dict>
+        <key>CFBundleTypeName</key>
+        <string>Source Code</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Default</string>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+          <string>ts</string>
+          <string>tsx</string>
+          <string>js</string>
+          <string>jsx</string>
+          <string>mjs</string>
+          <string>cjs</string>
+          <string>json</string>
+          <string>json5</string>
+          <string>jsonc</string>
+          <string>py</string>
+          <string>pyi</string>
+          <string>rb</string>
+          <string>go</string>
+          <string>rs</string>
+          <string>c</string>
+          <string>h</string>
+          <string>cpp</string>
+          <string>cc</string>
+          <string>cxx</string>
+          <string>hpp</string>
+          <string>hxx</string>
+          <string>cs</string>
+          <string>java</string>
+          <string>kt</string>
+          <string>swift</string>
+          <string>scala</string>
+          <string>lua</string>
+          <string>php</string>
+          <string>pl</string>
+          <string>sh</string>
+          <string>bash</string>
+          <string>zsh</string>
+          <string>fish</string>
+          <string>ps1</string>
+          <string>css</string>
+          <string>scss</string>
+          <string>sass</string>
+          <string>less</string>
+          <string>html</string>
+          <string>htm</string>
+          <string>xml</string>
+          <string>svg</string>
+          <string>vue</string>
+          <string>svelte</string>
+          <string>yaml</string>
+          <string>yml</string>
+          <string>toml</string>
+          <string>ini</string>
+          <string>conf</string>
+          <string>env</string>
+          <string>txt</string>
+          <string>log</string>
+          <string>csv</string>
+          <string>tsv</string>
+          <string>sql</string>
+          <string>graphql</string>
+          <string>gql</string>
+          <string>proto</string>
+          <string>dart</string>
+          <string>ex</string>
+          <string>exs</string>
+          <string>erl</string>
+          <string>hs</string>
+          <string>clj</string>
+          <string>cljs</string>
+          <string>vim</string>
+          <string>dockerfile</string>
+          <string>gitignore</string>
+          <string>makefile</string>
+          <string>cmake</string>
         </array>
       </dict>
     </array>
