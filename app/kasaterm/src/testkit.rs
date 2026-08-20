@@ -1036,6 +1036,83 @@ impl App {
         );
     }
 
+    /// Headless 미리보기 탭 닫기→되살리기 repro: `KASATERM_AUTOPREVIEWREOPEN` 에
+    /// 파일 경로를 주면 `_MS`(기본 4000) 뒤에 그 파일을 활성 pane 의 보조 탭으로
+    /// 열고, 닫고, 닫힘 스택을 찍고, ⌘⇧T 경로(`reopen_closed_pane`)로 되살린다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autopreviewreopen(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, std::path::PathBuf)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let path = std::env::var("KASATERM_AUTOPREVIEWREOPEN").ok()?;
+            let ms = std::env::var("KASATERM_AUTOPREVIEWREOPEN_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(4000);
+            Some((
+                Instant::now() + std::time::Duration::from_millis(ms),
+                std::path::PathBuf::from(path),
+            ))
+        });
+        let Some((due, path)) = due.clone() else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // (pane id, 탭 인덱스, 그 pane 의 활성 탭) — 미리보기 탭이 어디 붙었는지.
+        let find = |app: &App| -> Option<(String, usize, usize)> {
+            let ws = app.ws.lock().unwrap();
+            ws.panes.iter().find_map(|(id, p)| {
+                p.tabs
+                    .iter()
+                    .position(|t| t.preview_path.as_deref() == Some(path.as_path()))
+                    .map(|i| (id.clone(), i, p.active_tab))
+            })
+        };
+        let stack = |app: &App| -> Vec<String> {
+            app.closed_panes
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}({})",
+                        c.pane_id,
+                        if c.preview.is_some() { "미리보기" } else { "pane" }
+                    )
+                })
+                .collect()
+        };
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        self.open_file(path.clone(), active, true);
+        self.render_frame();
+        let Some((outer, idx, _)) = find(self) else {
+            eprintln!("[autopreviewreopen] 실패 — 미리보기 탭이 안 생겼다");
+            return;
+        };
+        eprintln!("[autopreviewreopen] 열림: pane={outer} 탭={idx}");
+        self.close_tab(&outer, idx);
+        self.render_frame();
+        eprintln!(
+            "[autopreviewreopen] 닫음 → 탭남음={:?} 스택={:?}",
+            find(self),
+            stack(self)
+        );
+        self.reopen_closed_pane();
+        self.render_frame();
+        let back = find(self);
+        let fronted = back.as_ref().is_some_and(|(id, i, at)| {
+            i == at && self.ws.lock().unwrap().active_pane.as_deref() == Some(id.as_str())
+        });
+        eprintln!(
+            "[autopreviewreopen] 되살린 뒤: 탭={back:?} 앞탭됨={fronted} 스택={:?}",
+            stack(self)
+        );
+        eprintln!(
+            "[autopreviewreopen] 기대: 닫으면 스택에 (미리보기) 항목 · 되살리면 같은 파일 탭이 다시 생기고 앞탭됨=true · 스택 비움"
+        );
+    }
+
     /// Headless pane 숨기기 repro: `KASATERM_AUTOSTASH_MS` 뒤에 사이드바를 켜고 pane 을
     /// 셋으로 쪼갠 다음, 한 줄을 **진짜로 우클릭**해 「숨기기」를 고른다.
     ///

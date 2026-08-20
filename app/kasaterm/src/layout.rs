@@ -920,12 +920,17 @@ impl App {
     /// the slot. The primary tab (index 0, pid == outer pane id) can't be
     /// closed this way — callers fall through to `remove_pane` for that.
     pub(crate) fn close_tab(&mut self, outer: &str, idx: usize) {
-        let (pid_opt, preview_opt): (Option<String>, Option<String>) = {
+        let (pid_opt, preview_opt, preview_path): (
+            Option<String>,
+            Option<String>,
+            Option<std::path::PathBuf>,
+        ) = {
             let ws = self.ws.lock().unwrap();
             let tab = ws.panes.get(outer).and_then(|p| p.tabs.get(idx));
             (
                 tab.and_then(|t| t.pid.clone()),
                 tab.and_then(|t| t.preview_id.clone()),
+                tab.and_then(|t| t.preview_path.clone()),
             )
         };
         if let Some(pid) = pid_opt.as_deref() {
@@ -960,6 +965,38 @@ impl App {
                     pane.active_tab = pane.tabs.len() - 1;
                 }
                 pane.dirty = true;
+            }
+        }
+        // 이미지·마크다운 미리보기 탭은 닫아도 ⌘⇧T 로 되살릴 수 있게 경로를
+        // 남긴다 — pane 닫기와 같은 스택이라 인포의 닫힘 줄에도 함께 뜬다
+        // (2026-08-20 지시). PTY 탭(pid 있음)은 종전대로 기록 없이 죽는다.
+        if pid_opt.is_none() {
+            if let Some(path) = preview_path {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("preview")
+                    .to_string();
+                let folder = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let window = self.window_of_pane(outer).unwrap_or(self.active_window);
+                self.push_closed_pane(crate::ClosedPane {
+                    rec: serde_json::Value::Null,
+                    pane_id: name,
+                    character: String::new(),
+                    folder,
+                    neighbor: None,
+                    window,
+                    alive: false,
+                    stashed: false,
+                    idle_since: None,
+                    preview: Some((outer.to_string(), path)),
+                });
+                self.chrome_dirty = true;
             }
         }
         // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).

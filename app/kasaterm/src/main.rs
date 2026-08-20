@@ -1837,6 +1837,11 @@ pub(crate) struct ClosedPane {
     /// 놀기 시작한 시각 — 여기서부터 `CLOSED_PANE_IDLE_REAP` 을 세다 넘으면 놓는다.
     /// 다시 일하기 시작하면 `None` 으로 풀려 처음부터 다시 센다.
     pub(crate) idle_since: Option<Instant>,
+    /// 이미지·마크다운 미리보기 **탭**이었나 — `(붙어 있던 pane, 파일 경로)`.
+    /// 참이면 되살리기는 `restore_leaf` 가 아니라 `open_file` 재호출이고 `rec` 는
+    /// Null 이다. pane 닫기와 같은 스택을 쓰므로 ⌘⇧T 의 「가장 최근에 닫은 것」
+    /// 순서에 미리보기 탭도 함께 선다.
+    pub(crate) preview: Option<(String, std::path::PathBuf)>,
 }
 
 /// 닫은 pane 을 몇 개까지 들고 있을지. 레코드마다 스크롤백이 통째 붙어 있어

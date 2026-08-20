@@ -1199,7 +1199,7 @@ impl App {
             .and_then(|s| s.rsplit('/').find(|t| !t.is_empty()).map(|t| t.to_string()))
             .unwrap_or_default();
         let window = self.window_of_pane(pane).unwrap_or(self.active_window);
-        self.closed_panes.push(crate::ClosedPane {
+        self.push_closed_pane(crate::ClosedPane {
             rec,
             pane_id: pane.to_string(),
             character,
@@ -1211,12 +1211,21 @@ impl App {
             // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
             // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
             idle_since: None,
+            preview: None,
         });
-        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
-        // 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
-        // 무한정 쌓인다.
-        // 상한은 **정리 대상만** 센다. 숨긴 것(`stashed`)은 세지도 놓지도 않는다 —
-        // 숨겨 둔 학생 여럿 때문에 방금 닫은 pane 이 밀려 죽으면 안 된다.
+        self.chrome_dirty = true;
+    }
+
+    /// 닫힘 스택에 넣고 상한을 정리한다 — pane 닫기와 미리보기 탭 닫기가 같은
+    /// 스택을 쓰므로 ⌘⇧T 가 「가장 최근에 닫은 것」 순서를 하나로 지킨다.
+    ///
+    /// 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
+    /// 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
+    /// 무한정 쌓인다.
+    /// 상한은 **정리 대상만** 센다. 숨긴 것(`stashed`)은 세지도 놓지도 않는다 —
+    /// 숨겨 둔 학생 여럿 때문에 방금 닫은 pane 이 밀려 죽으면 안 된다.
+    pub(crate) fn push_closed_pane(&mut self, c: crate::ClosedPane) {
+        self.closed_panes.push(c);
         while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {
             let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else { break };
             let c = self.closed_panes.remove(i);
@@ -1224,7 +1233,6 @@ impl App {
                 self.kill_hidden_pane(&c.pane_id);
             }
         }
-        self.chrome_dirty = true;
     }
 
     /// 닫아 둔 pane 중 **잊힌 것**을 놓는다 — 내리 노는 상태가 `CLOSED_PANE_IDLE_REAP`
@@ -1331,6 +1339,35 @@ impl App {
             && !self.window_is_undocked(c.window)
         {
             self.switch_window(c.window);
+        }
+        // 미리보기 탭 레코드 — pane 이 아니라 보조 탭이었으니 `open_file` 로 다시
+        // 연다. 원래 붙어 있던 pane 이 사라졌으면 open_file 이 활성 pane 으로 폴백.
+        if let Some((outer, path)) = c.preview.clone() {
+            self.open_file(path.clone(), Some(outer), true);
+            // `as_tab` 은 배경 탭 규약이지만 ⌘⇧T 는 「다시 보여 달라」다 —
+            // 되살린 탭을 앞으로 끌어낸다.
+            {
+                let mut ws = self.ws.lock().unwrap();
+                let found = ws.panes.iter().find_map(|(id, p)| {
+                    p.tabs
+                        .iter()
+                        .position(|t| t.preview_path.as_deref() == Some(path.as_path()))
+                        .map(|i| (id.clone(), i))
+                });
+                if let Some((id, i)) = found {
+                    if let Some(p) = ws.panes.get_mut(&id) {
+                        p.active_tab = i;
+                        p.dirty = true;
+                    }
+                    ws.active_pane = Some(id);
+                }
+            }
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            eprintln!("[reopen] 미리보기 {} 되살림", path.display());
+            return;
         }
         // 아직 돌고 있으면 새로 띄우지 않는다 — 그 pane 은 화면에서만 빠져 있었을
         // 뿐 셸도 claude 도 그대로다. `--resume` 으로 대화를 되감으면 오히려 하던
