@@ -152,6 +152,11 @@ pub(crate) struct PaneGroup {
     /// 멀쩡히 도는 pane 의 서버가 주인 죽은 것으로 빨갛게 뜬다. 그리는 쪽에서만
     /// 거른다.
     pub(crate) closed: bool,
+    /// 이 pane 이 보고 있는 작업 경로. 홈은 `~` 로 줄인 **전체** 경로다 —
+    /// 끝 조각만 담아 두면 `~/work/api` 와 `~/toy/api` 가 목록에서 같은 줄이
+    /// 되어, 정작 "어느 것을 켠 건가" 를 못 가른다. 줄이는 건 폭이 모자랄 때
+    /// 그리는 쪽에서 한다(`draw_group_head`).
+    pub(crate) cwd: String,
     pub(crate) rows: Vec<ProcRow>,
 }
 
@@ -224,6 +229,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             window_label: t.window_label.clone(),
             undocked: t.undocked,
             closed: t.closed,
+            cwd: t.cwd.as_deref().map(tilde_path).unwrap_or_default(),
             rows: build_rows(&table, t.shell_pid),
         })
         .collect();
@@ -398,6 +404,30 @@ fn session_title(path: &std::path::Path) -> String {
 /// 프로세스가 물려받으면 옛 제목이 거짓이 되기 때문이다. 값이 빈 문자열이면
 /// "물어봤지만 답이 없었다" — 키가 있다는 사실 자체가 재시도를 막는다.
 pub(crate) type SiteCache = std::sync::Arc<std::sync::Mutex<HashMap<(u16, u32), String>>>;
+
+/// 홈 아래 경로의 앞머리를 `~` 로 줄인다. 이 기계의 홈은 어느 pane 이든 같아서
+/// 전부 적어봐야 목록에서 겹치기만 하고, 정작 pane 을 가르는 건 그 뒤쪽이다.
+fn tilde_path(p: &std::path::Path) -> String {
+    match kasa_socket::home_dir() {
+        Some(home) => tilde_under(p, &home),
+        None => p.to_string_lossy().into_owned(),
+    }
+}
+
+/// 홈을 인자로 받는 쪽 — 실제 홈에 기대면 테스트가 이 기계에서만 맞는 말이 된다.
+fn tilde_under(p: &std::path::Path, home: &std::path::Path) -> String {
+    let full = p.to_string_lossy();
+    let home = home.to_string_lossy();
+    if full == home {
+        return "~".to_string();
+    }
+    // 구분자까지 함께 봐야 `/Users/kasa2` 가 `/Users/kasa` 로 잘못 걸리지 않는다.
+    let sep = std::path::MAIN_SEPARATOR;
+    match full.strip_prefix(&format!("{home}{sep}")) {
+        Some(rest) => format!("~{sep}{rest}"),
+        None => full.into_owned(),
+    }
+}
 
 /// 포트 번호만 보고는 며칠 전 띄워둔 서버가 뭔지 알 수 없다. 알아낼 수 있는
 /// 것을 싼 순서로 붙인다: 표준 서비스 → 작업 폴더 이름 → 서버가 응답한 제목.
@@ -2279,7 +2309,8 @@ fn draw_window_head(
     );
 }
 
-/// pane 그룹 머리 — `▾ ● %17 프라나  info 최적화   zsh 75941  [5]`. 점 색은 그
+/// pane 그룹 머리 — `▾ ● %17 프라나  info 최적화  ~/Desktop/tmuxify  zsh 75941  [5]`.
+/// 점 색은 그
 /// pane 의 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은
 /// 어디서든 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane
 /// 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
@@ -2357,7 +2388,25 @@ fn draw_group_head(
     // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
     // 전부 가져간다 — 그때는 pid 보다 "무엇을" 이 먼저다.
     let shell_w = g.measure_chrome_text(&shell, 10.0, false) + 8.0;
-    let title_budget = if budget > shell_w + 60.0 { budget - shell_w } else { budget };
+    // 작업 경로도 몫을 떼지만 **끝 조각만큼만** 뗀다. 전체 경로 폭으로 예약하면
+    // 깊은 경로 하나가 제목을 통째로 밀어내는데, 정작 pane 을 고르는 단서는
+    // 제목 쪽이다.
+    let sep = std::path::MAIN_SEPARATOR;
+    let tail = gp.cwd.rsplit(sep).next().unwrap_or_default();
+    let tail_w =
+        if gp.cwd.is_empty() { 0.0 } else { g.measure_chrome_text(tail, 10.0, false) + 8.0 };
+    // 좁아질 때 물러나는 순서는 **경로 → 셸·pid → 세션 제목 → pane 이름** 이다.
+    // 경로가 맨 먼저인 건 전체 → 끝 조각으로 줄어들 여지가 있어 사라지기 전에
+    // 한 번 작아지고, 방이 둘 이상이면 방 머리가 작업 폴더 이름을 대신 말해 주기
+    // 때문이다. 셸 pid 가 그다음인 건 여기 말고는 나오는 데가 없어서다 — 셸
+    // 자신은 프로세스 목록에서 빠진다(`build_rows`).
+    let title_budget = if budget > shell_w + tail_w + 60.0 {
+        budget - shell_w - tail_w
+    } else if budget > shell_w + 60.0 {
+        budget - shell_w
+    } else {
+        budget
+    };
     if !gp.session.is_empty() && title_budget > 40.0 {
         let s = fit_text(g, &gp.session, title_budget, 10.5, false);
         let sw = g.measure_chrome_text(&s, 10.5, false);
@@ -2369,6 +2418,40 @@ fn draw_group_head(
         );
         cx += sw + 8.0;
         budget -= sw + 8.0;
+    }
+    // 그 다음이 **작업 경로**다(거노 2026-08-20 「인포에 어느 경로에서 켰는지
+    // 나오게 해줘」). 폭이 모자라면 말줄임으로 꼬리를 자르지 않고 `…/tmuxify` 로
+    // **앞을** 줄인다 — 경로는 구분되는 자리가 뒤쪽이라, 앞에서 채우고 꼬리를
+    // 자르면 남는 게 `~/Desk…` 처럼 어느 pane 이든 같은 글자가 된다.
+    // 재는 폭은 남은 폭 전부가 아니라 **셸 몫을 뗀 나머지**다. 그러지 않으면 깊은
+    // 경로 하나가 `zsh 35776` 을 지우는데, 그건 긴 제목이 pid 를 지웠던 위의 실측과
+    // 같은 사고다 — 셸 pid 는 여기 말고 나오는 데가 없다.
+    let room = if budget > shell_w + 40.0 { budget - shell_w } else { budget };
+    if !gp.cwd.is_empty() && room > 40.0 {
+        let full = g.measure_chrome_text(&gp.cwd, 10.0, false);
+        let text = if full + 8.0 <= room || tail == gp.cwd {
+            gp.cwd.clone()
+        } else {
+            format!("…{sep}{tail}")
+        };
+        let pw = g.measure_chrome_text(&text, 10.0, false);
+        // 끝 조각조차 안 들어가면 아무것도 안 그린다 — 잘린 경로 한 조각은
+        // 폭만 먹고 알려주는 게 없다.
+        if pw + 8.0 <= room {
+            g.draw_text(
+                cx,
+                y + 6.0,
+                &text,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::text_mute(),
+                    bold: false,
+                    italic: false,
+                },
+            );
+            cx += pw + 8.0;
+            budget -= pw + 8.0;
+        }
     }
     // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
     if budget > 40.0 {
@@ -2808,6 +2891,25 @@ pub(crate) fn fit_text(
         }
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod tilde_tests {
+    use super::tilde_under;
+    use std::path::Path;
+
+    /// 홈 축약이 **구분자 경계**를 지키는지. `/Users/kasa2` 는 `/Users/kasa` 의
+    /// 아래가 아닌데 접두어로만 보면 걸린다 — 그러면 남의 홈 경로가 `~2/...` 라는
+    /// 있지도 않은 자리로 표시된다.
+    #[test]
+    fn tilde_stops_at_the_separator() {
+        let home = Path::new("/Users/kasa");
+        assert_eq!(tilde_under(Path::new("/Users/kasa"), home), "~");
+        assert_eq!(tilde_under(Path::new("/Users/kasa/Desktop/x"), home), "~/Desktop/x");
+        // 홈이 아닌 형제 폴더는 그대로 둔다.
+        assert_eq!(tilde_under(Path::new("/Users/kasa2/x"), home), "/Users/kasa2/x");
+        assert_eq!(tilde_under(Path::new("/opt/homebrew"), home), "/opt/homebrew");
+    }
 }
 
 #[cfg(test)]
