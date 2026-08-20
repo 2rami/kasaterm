@@ -181,8 +181,13 @@ impl App {
     /// 호출부는 hook 정보만으로 폴백(토스트를 드롭하지 않는다).
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
-        let known = ws.panes.contains_key(id) || self.pty.contains_key(id);
         let key = ws.active_tab_pid(id);
+        // 현존만으로는 모자란다 — 캐릭터는 spawn 때 **모든** pane 에 배정되므로
+        // (`assign_character_env`) 셸 pane 도 이름을 물고 나온다. 위 주석의 「순정
+        // pane 이면 None」 이 실제로 성립하려면 에이전트 관문이 함께 있어야 한다.
+        let known = (ws.panes.contains_key(id) || self.pty.contains_key(id))
+            && (self.pane_claude_sid.contains_key(key.as_str())
+                || self.pty.get(key.as_str()).and_then(|p| p.active_agent()).is_some());
         known.then(|| ws.pane_character.get(&key).cloned()).flatten()
     }
 

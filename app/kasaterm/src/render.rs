@@ -2220,7 +2220,7 @@ impl App {
                             Some(t) => format!("샬레 · {t}"),
                             None => "샬레".to_string(),
                         }
-                    } else if let Some(c) = true_char.as_ref() {
+                    } else if let Some(c) = true_char.as_ref().filter(|_| runs_claude) {
                         // 헤더 학생명은 `display_pane_char`(=true_char) 정본을 쓴다 —
                         // raw pane.character 만 보면 claude agents 로 이어받은 백그라운드
                         // 세션은 ws.pane_character 가 비어(attach 스폰이 캐릭터 미배정)
