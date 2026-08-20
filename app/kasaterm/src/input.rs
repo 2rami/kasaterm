@@ -1108,22 +1108,28 @@ impl App {
     /// 「✳ Claude Code」를 보낸다) 프로세스 이름이 폴백이다. 즉 **이름을 안 붙인
     /// pane 의 그림은 하나도 안 바뀐다.**
     pub(crate) fn pane_row_label(&self, id: &str) -> String {
-        let pinned = {
+        // 고정 제목은 pane(leaf) 것이고 OSC 제목·프로세스 이름은 **PTY(=탭 pid)**
+        // 것이다. 같은 락 통행에서 탭 pid 도 꺼내 아래 두 조회에 쓴다 — 접지 않으면
+        // 탭으로 띄운 pane 의 줄이 자기 탭 대신 폴백 이름으로 떨어진다(얼굴이
+        // 사라지던 `pane_claude_ready` 와 같은 병).
+        let (pinned, tab) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
+            let pinned = ws
+                .panes
                 .get(id)
                 .filter(|p| p.title_pinned)
                 .and_then(|p| p.title.clone())
-                .filter(|s| !s.trim().is_empty())
+                .filter(|s| !s.trim().is_empty());
+            (pinned, ws.active_tab_pid(id))
         };
         if let Some(name) = pinned {
             return name;
         }
         self.pty
-            .get(id)
+            .get(tab.as_str())
             .and_then(|p| p.osc_title())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, id, None))
+            .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, &tab, None))
     }
     pub(crate) fn resolve_pane_label(
         pty: &HashMap<String, Arc<kasa_pty::PtySession>>,

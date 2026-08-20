@@ -228,8 +228,23 @@ impl App {
     }
 
     /// 이 pane 에 학생 얼굴을 내보여도 되나 — claude 를 한 번이라도 띄웠는가.
+    ///
+    /// **탭을 접는다.** 자격은 `note_claude_panes` 가 `self.pty` 를 훑어 넣으므로
+    /// 키가 **PTY id(=pid)** 인데, 부르는 쪽(사이드바 줄·미니맵 칸)은 **BSP leaf** 를
+    /// 든다. 탭으로 띄운 학생은 그 둘이 달라 조회가 영영 빗나갔고, 그래서 탭 안의
+    /// 학생은 미니맵에 얼굴이 아예 안 떴다(거노 2026-08-20 「탭 안에 소환돼서 꺼내면
+    /// 미니맵에 학생 표시 없는 버그」). 같은 병을 `display_pane_char`·`pane_accent`
+    /// 는 이미 접어서 피하고 있었다 — 접는 자리와 안 접는 자리가 갈려 한 pane 이
+    /// 화면 자리마다 다른 얼굴을 갖던 계열의 마지막 하나다.
+    ///
+    /// leaf 를 **먼저** 보는 건 탭이 없는 보통 pane 에서 ws 락을 아예 안 잡기
+    /// 위해서다(매 프레임 pane 수만큼 불린다).
     pub(crate) fn pane_claude_ready(&self, id: &str) -> bool {
-        self.pane_claude_seen.contains(id)
+        if self.pane_claude_seen.contains(id) {
+            return true;
+        }
+        let tab = self.ws.lock().unwrap().active_tab_pid(id);
+        tab != id && self.pane_claude_seen.contains(tab.as_str())
     }
 
     /// Drop the focused pane from the unread set (the user is now looking at

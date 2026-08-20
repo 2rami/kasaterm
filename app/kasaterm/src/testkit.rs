@@ -3470,8 +3470,15 @@ impl App {
             .as_ref()
             .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
+        // 얼굴 자격은 두 키로 갈라 찍는다 — 기록은 PTY id(=탭 pid)로 들어가는데
+        // 사이드바·미니맵은 leaf 로 묻는다. 둘이 어긋나면 「이름은 나오는데 얼굴만
+        // 없다」가 되고, 합쳐 찍으면 그 어긋남이 안 보인다. `pane_claude_ready` 를
+        // 직접 부르면 안 된다 — 그 안에서 ws 를 다시 잠가 여기서 멈춘다.
+        let seen_leaf = self.pane_claude_seen.contains(pid);
+        let seen_tab = self.pane_claude_seen.contains(tab_pid.as_str());
         eprintln!(
             "[undock/{when}] pane={pid} tab_pid={tab_pid} agent={runs:?} \
+             seen(leaf/tab)={seen_leaf}/{seen_tab} \
              char={:?} display={:?} sid={:?} room={:?} 트리leaf={leaves:?} 활성={:?}",
             ws.pane_character.get(pid),
             self.display_pane_char(&ws, pid),
