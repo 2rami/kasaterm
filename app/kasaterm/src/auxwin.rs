@@ -2439,8 +2439,24 @@ impl App {
         }
         // working 스피너 → 제자리 걸음. 스피너가 도는 동안은 standing 을 세우지
         // 않는다 — 같은 학생이 화면에 둘이면 버그로 보인다(메인과 같은 규칙).
+        // 턴 시작의 괄호-없는 후보도 메인 창과 같은 규칙으로 신뢰한다(확정 프로브
+        // 또는 방금 제출) — 여기만 본판정뿐이면 분리창 학생만 매 턴 3초 늦게 걷는다.
         let mut busy = false;
-        if let Some((sr, sc)) = crate::render::find_claude_spinner(cells) {
+        if let Some((sr, sc)) = crate::render::find_claude_spinner(cells).or_else(|| {
+            let trusted = self
+                .spinner_probe
+                .get(pane_id)
+                .is_some_and(|&(_, _, confirmed, _)| confirmed)
+                || self
+                    .pty
+                    .get(pane_id)
+                    .and_then(|p| p.last_submit())
+                    .is_some_and(|s| s.elapsed() < Self::SUBMIT_TRUST);
+            trusted
+                .then(|| crate::render::unconfirmed_spinner_row(cells))
+                .flatten()
+                .map(|(r, c, _)| (r, c))
+        }) {
             busy = true;
             // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수 있을 때만.
             if crate::render::student_has_sprite(slug, "walk") {

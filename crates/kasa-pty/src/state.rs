@@ -210,6 +210,11 @@ pub struct PtySession {
     /// `theme: auto` 등)에게만 테마 전환 때 `CSI ?997;N n` 리포트를 보낸다 —
     /// 구독 안 한 셸에 보내면 입력줄에 이스케이프 쓰레기가 박힌다.
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
+    /// 마지막으로 CR/LF 가 이 PTY 로 들어간 시각 — 「방금 제출됐다」 신호.
+    /// GUI 의 스피너 즉시-신뢰(턴 시작 첫 프레임부터 학생 테마)가 읽는다.
+    /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
+    /// 하나로 모이므로 여기가 정본이다.
+    last_submit: Mutex<Option<Instant>>,
 }
 
 impl PtySession {
@@ -453,6 +458,7 @@ impl PtySession {
             cwd_handle,
             inline_imgs,
             scheme_reports,
+            last_submit: Mutex::new(None),
         })
     }
 
@@ -607,17 +613,31 @@ impl PtySession {
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
-        let mut w = self.writer.lock().unwrap();
-        w.write_all(bytes).context("pty write")?;
-        // Flush immediately. Without this, a one-shot write that isn't
-        // followed by another (a committed Hangul syllable — the next
-        // keystroke only updates the preedit overlay, not the PTY) sits
-        // in the writer buffer until something else flushes it, so the
-        // shell echoes "안" ~0.2s late and the user sees only the preedit
-        // "ㄴ" until then. ASCII typing hid this because each keystroke's
-        // write flushed the previous one.
-        w.flush().context("pty flush")?;
+        {
+            let mut w = self.writer.lock().unwrap();
+            w.write_all(bytes).context("pty write")?;
+            // Flush immediately. Without this, a one-shot write that isn't
+            // followed by another (a committed Hangul syllable — the next
+            // keystroke only updates the preedit overlay, not the PTY) sits
+            // in the writer buffer until something else flushes it, so the
+            // shell echoes "안" ~0.2s late and the user sees only the preedit
+            // "ㄴ" until then. ASCII typing hid this because each keystroke's
+            // write flushed the previous one.
+            w.flush().context("pty flush")?;
+        }
+        if bytes.iter().any(|b| matches!(b, b'\r' | b'\n')) {
+            *self.last_submit.lock().unwrap() = Some(Instant::now());
+            // Enter 는 「새 전경 프로세스가 곧 뜬다」의 가장 이른 신호이기도 하다 —
+            // 테이블을 앞당겨 읽어 두면 `claude` 를 친 pane 이 배너 첫 프레임부터
+            // 에이전트로 판정된다(process_table_poke 머리말).
+            process_table_poke();
+        }
         Ok(())
+    }
+
+    /// 마지막 CR/LF 가 이 PTY 로 들어간 시각 — 없으면 아직 아무 제출도 없었다.
+    pub fn last_submit(&self) -> Option<Instant> {
+        *self.last_submit.lock().unwrap()
     }
 
     /// Scroll the view through alacritty's scrollback by `lines`
@@ -3110,20 +3130,57 @@ pub type ProcessTable = std::sync::Arc<Vec<(u32, u32, String)>>;
 /// 같은 캐시를 **복사 없이** 빌려준다. 렌더처럼 pane 마다 매 프레임 부르는 쪽은
 /// 이걸 써야 한다 — `process_table()` 은 히트할 때도 테이블을 통째로 clone 해서
 /// 프로세스 수백 개면 프레임마다 그만큼의 String 할당이 돈다.
-pub fn process_table_shared() -> ProcessTable {
-    struct Cached {
-        at: Instant,
-        table: ProcessTable,
-        refreshing: bool,
-    }
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cached>> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        std::sync::Mutex::new(Cached {
+struct CachedTable {
+    at: Instant,
+    table: ProcessTable,
+    refreshing: bool,
+}
+
+fn table_cache() -> &'static std::sync::Mutex<CachedTable> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<CachedTable>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(CachedTable {
             at: Instant::now() - std::time::Duration::from_secs(1),
             table: Default::default(),
             refreshing: false,
         })
+    })
+}
+
+/// Enter 직후 프로세스 테이블을 앞당겨 읽는다 — 300ms TTL + 백그라운드 갱신
+/// 구조에서는 방금 exec 된 claude 가 테이블에 실리기까지 최악 ~600ms 가 비고,
+/// 그동안 배너·헤더가 학생 테마 없이 그려졌다(거노 2026-08-20 「처음 클로드코드
+/// 켜면 캐릭터 학생테마 적용안돼」). Enter 는 「새 전경 프로세스가 곧 뜬다」의
+/// 가장 이른 신호지만 exec 사슬이 끝나기 전에 읽으면 헛스캔이 `at` 시계만
+/// 되돌려 오히려 다음 정기 갱신을 늦춘다 — 그래서 사슬이 끝났을 100ms 뒤와,
+/// 느린 런처(래퍼 스크립트→node) 대비 400ms 뒤 두 번 읽는다.
+fn process_table_poke() {
+    std::thread::spawn(|| {
+        let mut slept = 0u64;
+        for at in [100u64, 400] {
+            std::thread::sleep(std::time::Duration::from_millis(at - slept));
+            slept = at;
+            {
+                let Ok(mut g) = table_cache().lock() else { return };
+                if g.refreshing {
+                    continue;
+                }
+                g.refreshing = true;
+            }
+            let fresh = process_table_raw();
+            if let Ok(mut g) = table_cache().lock() {
+                if !fresh.is_empty() {
+                    g.at = Instant::now();
+                    g.table = std::sync::Arc::new(fresh);
+                }
+                g.refreshing = false;
+            }
+        }
     });
+}
+
+pub fn process_table_shared() -> ProcessTable {
+    let cache = table_cache();
     let Ok(mut g) = cache.lock() else {
         return std::sync::Arc::new(process_table_raw());
     };

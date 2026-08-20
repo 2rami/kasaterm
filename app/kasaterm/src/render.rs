@@ -1266,11 +1266,25 @@ impl App {
                     // 본판정 + 프로브 확정 후보(턴 시작 첫 ~3초의 괄호 없는
                     // `✢ Transmuting…`). 확정은 refresh_pane_activity 가 글리프
                     // 변화로 세운다 — 여기서는 읽기만.
+                    // 프로브 확정 전이라도 이 pane 에 방금 제출(Enter)이 있었으면
+                    // 후보를 그 프레임부터 신뢰한다 — refresh 틱(100~300ms)을
+                    // 기다리는 동안 claude 원색 스피너가 그대로 보이던 마지막
+                    // 깜빡임 조각(거노 2026-08-20 「치자마자 0.1초동안
+                    // 적용안되는거」). runs_claude 게이트 안이라 셸 출력 오탐
+                    // 걱정은 없다.
                     let spinner_hit = find_claude_spinner(&composed).or_else(|| {
-                        self.spinner_probe
+                        let trusted = self
+                            .spinner_probe
                             .get(tab_pid.as_str())
-                            .filter(|&&(_, _, confirmed)| confirmed)
-                            .and_then(|_| unconfirmed_spinner_row(&composed))
+                            .is_some_and(|&(_, _, confirmed, _)| confirmed)
+                            || self
+                                .pty
+                                .get(tab_pid.as_str())
+                                .and_then(|p| p.last_submit())
+                                .is_some_and(|s| s.elapsed() < Self::SUBMIT_TRUST);
+                        trusted
+                            .then(|| unconfirmed_spinner_row(&composed))
+                            .flatten()
                             .map(|(r, c, _)| (r, c))
                     });
                     if let Some((sr, sc)) = spinner_hit {

@@ -348,6 +348,14 @@ impl App {
     /// Shared by the busy loop and the approval-prompt router below.
     const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
 
+    /// Enter 가 들어간 지 이 시간 안이면 괄호-없는 스피너 후보를 글리프-변화
+    /// 확정 없이 신뢰한다 — 제출이라는 사건 자체가 「이건 진짜 스피너다」의
+    /// 확정보다 강한 근거라, 타이핑 턴은 첫 프레임부터 학생 테마가 붙는다
+    /// (거노 2026-08-20 「학생테마 치자마자 0.1초동안 적용안되는거」).
+    /// 경과시간 괄호는 ~3초에야 붙으므로(unconfirmed_spinner_row 주석), 그
+    /// 구간의 행 이동이 확정을 되돌리는 것까지 덮게 4초.
+    pub(crate) const SUBMIT_TRUST: std::time::Duration = std::time::Duration::from_secs(4);
+
     /// ultracode 가 켜진 pane 을 훑는다 — 입력박스 테두리를 보라색으로 두르는 근거.
     ///
     /// claude 는 이 상태를 statusline payload 에 안 실어 준다(effort 는 low..max 뿐)
@@ -434,7 +442,15 @@ impl App {
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
-            if now.duration_since(t).as_millis() < 300 {
+            // 미확정 스피너 후보가 살아 있는 동안은 박자를 100ms 로 좁힌다 —
+            // 확정이 글리프 변화(≈스피너 주기)를 기다리는 동안 300ms 틱 두 번
+            // (최악 0.6초)이 무테마로 새는 것을 줄인다. Enter 없는 턴 시작
+            // (인박스 주입 등)이 이 경로의 수혜자다. 인용문 후보는 영영 확정이
+            // 안 되므로 후보별 목격 시각 1.2초로 자른다.
+            let hot = self.spinner_probe.values().any(|&(_, _, conf, seen)| {
+                !conf && now.duration_since(seen).as_millis() < 1200
+            });
+            if now.duration_since(t).as_millis() < if hot { 100 } else { 300 } {
                 return;
             }
         }
@@ -486,11 +502,26 @@ impl App {
                         } else {
                             match crate::render::unconfirmed_spinner_row(&t.cells) {
                                 Some((r, _c, g)) => {
-                                    let conf = matches!(
-                                        probe.get(id),
-                                        Some(&(pr, pg, pc)) if pr == r && (pc || pg != g)
-                                    );
-                                    probe.insert(id.clone(), (r, g, conf));
+                                    // 방금 Enter 가 들어간 에이전트 pane 은 후보를 즉시
+                                    // 신뢰한다(SUBMIT_TRUST 머리말). 에이전트 pane 한정 —
+                                    // 셸 명령 출력이 우연히 이 모양이면 Enter 마다 4초씩
+                                    // busy 로 오르는 것을 막는다.
+                                    let submitted = self
+                                        .pty
+                                        .get(ws.active_tab_pid(id).as_str())
+                                        .is_some_and(|p| {
+                                            p.active_agent().is_some()
+                                                && p.last_submit().is_some_and(|s| {
+                                                    now.duration_since(s) < Self::SUBMIT_TRUST
+                                                })
+                                        });
+                                    let (conf, seen) = match probe.get(id) {
+                                        Some(&(pr, pg, pc, ps)) if pr == r => {
+                                            (submitted || pc || pg != g, ps)
+                                        }
+                                        _ => (submitted, now),
+                                    };
+                                    probe.insert(id.clone(), (r, g, conf, seen));
                                     conf
                                 }
                                 None => {
