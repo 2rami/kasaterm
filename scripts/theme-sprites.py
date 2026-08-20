@@ -210,6 +210,23 @@ def frame_quality(path):
     return colors, (statistics.median(runs) if runs else 999)
 
 
+def opaque_frac(path):
+    """캐릭터 바운딩박스 안 불투명 비율. 키잉이 몸을 파먹으면 뚝 떨어진다.
+
+    모델이 키 색 캔버스 지시를 무시하고 흰 배경에 그리면, 배경 감지 폴백이 흰색을
+    키로 잡아 흰 머리·흰 옷까지 지운다 — 케이 15%·토키 2% 실측(정상은 46~66%).
+    그림 조각은 남아 bbox 는 멀쩡하고 frame_quality 로도 안 걸리므로 따로 잰다.
+    """
+    from PIL import Image
+
+    a = Image.open(path).convert("RGBA").getchannel("A")
+    bbox = a.getbbox()
+    if not bbox:
+        return 0.0
+    px = list(a.crop(bbox).getdata())
+    return sum(1 for v in px if v > 128) / len(px)
+
+
 def check(slug):
     """생성물이 쓸 만한지. 나쁘면 이유 문자열, 괜찮으면 빈 문자열."""
     out = os.path.join(SRC, slug, "out")
@@ -296,6 +313,10 @@ def generate(slug, force=False, use_ref=False):
             if r.returncode != 0 or not os.path.exists(base_png):
                 tail = (r.stdout + r.stderr).strip().splitlines()
                 why = tail[-1] if tail else f"base exit {r.returncode}"
+                continue
+            frac = opaque_frac(base_png)
+            if frac < 0.40:
+                why = f"base 파먹힘(불투명 {frac:.0%})"
                 continue
             run_cmd = states_cmd + ["-base", base_png]
         else:
@@ -396,6 +417,12 @@ def gen_profile(slug, force=False):
         box = Image.open(psrc).convert("RGBA").getchannel("A").getbbox()
         if not box or min(box[2] - box[0], box[3] - box[1]) < 256:
             why = f"초상 경계 이상 {box}"
+            os.remove(psrc)
+            continue
+        frac = opaque_frac(psrc)
+        if frac < 0.40:
+            # bbox 는 조각만 남아도 크게 잡히므로 파먹힘은 이 비율로만 걸린다
+            why = f"초상 파먹힘(불투명 {frac:.0%})"
             os.remove(psrc)
             continue
         return slug, "ok", ""
