@@ -405,8 +405,17 @@ def gen_profile(slug, force=False):
     ref = os.path.join(SRC, slug, "ref.png")
     if not os.path.exists(ref):
         return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
+    # 프사엔 무기를 넣는다(2026-08-20 거노 지시) — 기존 12명 프사가 전부 공식
+    # 무기를 든 구도라서다. 스프라이트 묘사의 「무기 금지」를 걷어내되, 무기의
+    # 종류·색은 글로 추측하지 않고 원화(ref)에서 그대로 가져오게 한다(옛 교훈:
+    # 추측하면 엉뚱한 무기가 나온다 — 원화에 무기가 없으면 없이 그린다).
+    pdesc = desc.replace("No weapon.", "").strip()
+    pdesc += (" She holds her signature weapon exactly as it appears in the identity"
+              " reference artwork — same type, shape and colors — angled across her"
+              " chest like a game profile portrait. If the reference artwork shows"
+              " no weapon, draw her without one.")
     outdir = os.path.dirname(psrc)
-    cmd = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", PROFILE_STYLE,
+    cmd = [PPGEN, "-provider", PROVIDER, "-desc", pdesc, "-style", PROFILE_STYLE,
            "-portrait", "-ref", ref, "-out", outdir, "-chroma", pick_chroma(slug)]
     if KEY:
         cmd += ["-key", KEY]
