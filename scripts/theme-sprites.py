@@ -8,6 +8,7 @@
     theme-sprites.py gen               # desc.txt 있는 학생 전부 생성 (이미 된 건 건너뜀)
     theme-sprites.py gen kei rio       # 일부만
     theme-sprites.py gen --ref         # 공식 포트레이트를 정체성 참조로 함께 넘긴다
+    theme-sprites.py profile           # 프사용 버스트 초상 생성 (ppgen -portrait)
     theme-sprites.py install           # 생성물을 앱 자산 자리로 복사
     theme-sprites.py status            # 어디까지 됐는지
     theme-sprites.py sheet             # 원본↔생성물 대조 시트 한 장(눈으로 검수)
@@ -65,6 +66,14 @@ MODEL = os.environ.get("THEME_MODEL", "")
 BASE_MODEL = os.environ.get("THEME_BASE_MODEL", "")
 KEY = os.environ.get("THEME_KEY", "")
 STYLE = os.environ.get("THEME_STYLE", "pixel-chibi")
+# 프사는 스프라이트 크롭이 아니라 전용 버스트 초상으로 굽는다(ppgen -portrait).
+# 기존 12명 프사는 옛 8등신 스프라이트의 상반신 크롭이라 버스트+소품이 담겼는데,
+# 치비 스프라이트는 머리가 절반이라 같은 크롭이 얼굴 조각만 남긴다(네루·케이 실측).
+# 스타일이 pixel(치비 아님)인 이유: 버스트엔 등신 계약이 무의미하고, 기존 프사의
+# 정밀한 도트 느낌은 pixel 프리셋이 맞는다. 모델이 gpt-image-2 인 이유: 얼굴은
+# 정체성 충실도가 높아야 해서다(등신 재해석이 필요한 base 와 반대).
+PROFILE_MODEL = os.environ.get("THEME_PROFILE_MODEL", MODEL)
+PROFILE_STYLE = os.environ.get("THEME_PROFILE_STYLE", "pixel")
 
 # 상태 → (ppgen 프리셋 이름 겸 앱 자산 폴더 이름, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
@@ -101,6 +110,11 @@ def dst_profile(slug):
 
 def dst_gif(slug):
     return os.path.join(DST, "gif", f"{slug}.gif")
+
+
+def profile_src(slug):
+    """전용 초상 생성물 자리. 있으면 install 이 스프라이트 크롭 대신 이걸 쓴다."""
+    return os.path.join(SRC, slug, "out-profile", "base.png")
 
 
 PROFILE_PX = 96
@@ -203,6 +217,9 @@ def installed(slug):
     src = os.path.join(SRC, slug, "out", "frames", "idle", "frame-00.png")
     if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(dst):
         return False
+    psrc = profile_src(slug)
+    if os.path.exists(psrc) and os.path.getmtime(psrc) > os.path.getmtime(dst):
+        return False
     return True
 
 
@@ -298,8 +315,70 @@ def install(slug, force=False):
     if os.path.exists(gif):
         shutil.copy2(gif, dst_gif(slug))
 
-    make_profile(os.path.join(out, "frames", "idle", "frame-00.png"), dst_profile(slug))
+    psrc = profile_src(slug)
+    if os.path.exists(psrc):
+        fit_profile(psrc, dst_profile(slug))
+    else:
+        make_profile(os.path.join(out, "frames", "idle", "frame-00.png"), dst_profile(slug))
     return slug, "ok", ""
+
+
+def fit_profile(src, dst):
+    """전용 초상을 알파 경계로 잘라 정사각에 통째로 맞춘다.
+
+    폭 기준 타이트 크롭(얼굴 확대)도 시험했지만 헤일로가 잘리고 구도가 어긋났다 —
+    기존 12명 프사처럼 **버스트 전체 + 헤일로가 프레임 안에** 들어가는 쪽이 기준이다
+    (네루 실측 대조, 2026-08-20).
+    """
+    from PIL import Image
+
+    im = Image.open(src).convert("RGBA")
+    box = im.getchannel("A").getbbox()
+    if box:
+        im = im.crop(box)
+    w, h = im.size
+    side = max(w, h)
+    sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    sq.paste(im, ((side - w) // 2, (side - h) // 2), im)
+    sq.resize((PROFILE_PX, PROFILE_PX), Image.LANCZOS).save(dst)
+
+
+def gen_profile(slug, force=False):
+    """프사용 버스트 초상을 out-profile/base.png 로 굽는다 (모듈 상수 주석 참조)."""
+    psrc = profile_src(slug)
+    if os.path.exists(psrc) and not force:
+        return slug, "skip", ""
+    desc = desc_of(slug)
+    if not desc:
+        return slug, "no-desc", ""
+    ref = os.path.join(SRC, slug, "ref.png")
+    if not os.path.exists(ref):
+        return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
+    outdir = os.path.dirname(psrc)
+    cmd = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", PROFILE_STYLE,
+           "-portrait", "-ref", ref, "-out", outdir]
+    if KEY:
+        cmd += ["-key", KEY]
+    if PROFILE_MODEL:
+        cmd += ["-model", PROFILE_MODEL]
+
+    why = ""
+    for _ in range(ATTEMPTS):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0 or not os.path.exists(psrc):
+            tail = (r.stdout + r.stderr).strip().splitlines()
+            why = tail[-1] if tail else f"exit {r.returncode}"
+            continue
+        # 키잉이 통째로 실패하면 알파 경계가 없거나 조각만 남는다 — 그것만 거른다.
+        from PIL import Image
+
+        box = Image.open(psrc).convert("RGBA").getchannel("A").getbbox()
+        if not box or min(box[2] - box[0], box[3] - box[1]) < 256:
+            why = f"초상 경계 이상 {box}"
+            os.remove(psrc)
+            continue
+        return slug, "ok", ""
+    return slug, "fail", why
 
 
 def make_profile(src, dst):
@@ -508,7 +587,7 @@ def dupes(targets, out, top=12, cell=110):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["gen", "install", "status", "sheet", "dupes"])
+    ap.add_argument("cmd", choices=["gen", "profile", "install", "status", "sheet", "dupes"])
     ap.add_argument("slugs", nargs="*")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--force", action="store_true")
@@ -535,10 +614,12 @@ def main():
         return sheet(targets, a.out)
     if a.cmd == "dupes":
         return dupes(targets, a.out, a.top)
-    if a.cmd == "gen":
+    if a.cmd in ("gen", "profile"):
         if not os.path.exists(PPGEN):
             print(f"ppgen 이 없다: {PPGEN} (PPGEN 환경변수로 지정)", file=sys.stderr)
             return 2
+        if a.cmd == "profile":
+            return run(gen_profile, targets, a.jobs, a.force)
         return run(generate, targets, a.jobs, a.force, use_ref=a.ref)
     return run(install, targets, a.jobs, a.force)
 
