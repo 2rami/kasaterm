@@ -143,6 +143,26 @@ def desc_of(slug):
     return " ".join(t.split()) or None
 
 
+def pick_chroma(slug):
+    """키잉 배경 색을 캐릭터별로 고른다 (magenta | green).
+
+    magenta 키의 캔버스 계약은 키가 안 먹히게 **피사체의 분홍·보라까지 금지**한다.
+    그래서 분홍이 정체성인 캐릭터는 모델이 순순히 색을 바꿔 그린다 — 유즈의 연분홍
+    머리가 검정으로, 모모이의 네온핑크 헤드셋·후드가 무채색으로 나왔다(2026-08-20
+    실측). 그런 캐릭터는 green 키로 돌려 충돌 자체를 없앤다.
+
+    판정은 **desc 단어**다 — 충돌의 본질이 「desc 가 pink 라 말하는데 캔버스 계약이
+    pink 를 금지」라서, 모델이 실제로 읽는 desc 텍스트가 곧 판정 기준이다. 처음엔
+    ref 픽셀의 HSV 로 재 봤지만 살색·붉은 하이라이트가 분홍으로 잡혀 77명 중 63명이
+    green 판정이 나는 오탐이었다(연보라 머리 히마리는 채도가 낮아 거꾸로 놓쳤다).
+    """
+    desc = (desc_of(slug) or "").lower()
+    pink_w = sum(desc.count(w) for w in (
+        "pink", "magenta", "purple", "violet", "lavender", "fuchsia", "lilac"))
+    green_w = sum(desc.count(w) for w in ("green", "lime", "mint", "emerald", "olive"))
+    return "green" if pink_w > green_w else "magenta"
+
+
 def generated(slug):
     """**모든 상태의 프레임이 다 있는가.**
 
@@ -247,7 +267,8 @@ def generate(slug, force=False, use_ref=False):
             c += ["-model", BASE_MODEL]
         return c
 
-    common = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", STYLE, "-out", out]
+    common = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", STYLE, "-out", out,
+              "-chroma", pick_chroma(slug)]
     if KEY:
         common += ["-key", KEY]
     states_cmd = common + [
@@ -356,7 +377,7 @@ def gen_profile(slug, force=False):
         return slug, "no-ref", "theme-wiki.py 로 포트레이트를 먼저 받아라"
     outdir = os.path.dirname(psrc)
     cmd = [PPGEN, "-provider", PROVIDER, "-desc", desc, "-style", PROFILE_STYLE,
-           "-portrait", "-ref", ref, "-out", outdir]
+           "-portrait", "-ref", ref, "-out", outdir, "-chroma", pick_chroma(slug)]
     if KEY:
         cmd += ["-key", KEY]
     if PROFILE_MODEL:
