@@ -2487,6 +2487,27 @@ impl App {
             Some(decorate_process_name(&name))
         }
     }
+
+    /// 그 pane 을 **통째로** 닫을 때 걸리는 작업 — 탭 하나가 아니라 전부를 본다.
+    ///
+    /// `pid_busy` 를 탭 하나에만 물으면 두 가지를 놓친다. ①옆 탭에서 도는 claude
+    /// ②`pid` 가 비어 있는 탭 — 이미지·마크다운 탭의 `pid` 는 `None` 이고, 호출부가
+    /// `and_then` 이라 그러면 바쁨 검사가 통째로 건너뛰어져 **확인 없이 닫힌다**.
+    /// 2026-08-18 에 `ws.panes` 항목 자체가 없는 케이스는 막았는데, 항목은 있고
+    /// `pid` 만 비는 이 케이스가 같은 구멍으로 남아 있었다.
+    ///
+    /// **leaf id 자체가 그 pane 의 primary pid** 라 탭 목록이 비어도 판정이 선다
+    /// (`confirm_or_close_tab` 의 `None` 분기·layout.rs `leaf_cells` 와 같은 근거).
+    pub(crate) fn pane_busy(&self, pane: &str) -> Option<String> {
+        let mut pids: Vec<String> = vec![pane.to_string()];
+        {
+            let ws = self.ws.lock().unwrap();
+            if let Some(p) = ws.panes.get(pane) {
+                pids.extend(p.tabs.iter().filter_map(|t| t.pid.clone()));
+            }
+        }
+        pids.iter().find_map(|p| self.pid_busy(p))
+    }
     /// First running job across every pane/tab — drives the window-close
     /// confirmation ("close the whole app while claude is mid-run?").
     fn any_pane_busy(&self) -> Option<String> {
@@ -2574,7 +2595,33 @@ impl App {
         if self.guard_dirty(&action) {
             return;
         }
-        match pid.as_deref().and_then(|p| self.pid_busy(p)) {
+        // 탭 하나를 닫는 건 그 탭만 걸리지만, pane 으로 승격됐으면 그 안의 탭이
+        // 전부 걸린다 — 그걸 탭 하나로 판정하면 옆 탭에서 도는 claude 를 놓친다.
+        let busy = match &action {
+            PendingClose::Pane { pane } => self.pane_busy(pane),
+            _ => pid.as_deref().and_then(|p| self.pid_busy(p)),
+        };
+        match busy {
+            Some(proc) => self.open_confirm_close(proc, action),
+            None => self.do_close(action),
+        }
+    }
+
+    /// ⋮ 메뉴의 × — **pane 을 통째로** 닫는다. ⌘W(`confirm_or_close_tab`)와 달리
+    /// 탭 단위가 아니라서 승격 로직 없이 바로 `PendingClose::Pane` 이고, 바쁨 판정도
+    /// pane 전체(`pane_busy`)다.
+    ///
+    /// 이 경로는 `close_pane` 직행이라 **확인이 통째로 없었다**(거노 2026-08-20
+    /// 「pane 종료할 때도 바로 꺼지네, 안 물어보고. 클로드 도는데」). 헤더 우측
+    /// 클러스터엔 × 가 없어서 **헤더 없는 split pane 의 유일한 닫기 버튼이 이
+    /// 무방비 경로**였고, 학생 pane 은 대개 헤더 없는 split 이라 하필 가장 자주 쓰는
+    /// 닫기가 무방비였다. ⌘W 로 시험하면 멀쩡히 물어봐서 여태 안 드러났다.
+    pub(crate) fn confirm_or_close_pane(&mut self, pane: &str) {
+        let action = PendingClose::Pane { pane: pane.to_string() };
+        if self.guard_dirty(&action) {
+            return;
+        }
+        match self.pane_busy(pane) {
             Some(proc) => self.open_confirm_close(proc, action),
             None => self.do_close(action),
         }

@@ -8517,11 +8517,16 @@ impl App {
                 let win_h = win_px.1 / scale;
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
                 let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
+                // pane 통째 닫기(⋮ ×)를 「탭」이라 부르면 무엇이 사라지는지가
+                // 어긋난다 — 그건 그 pane 의 탭을 전부 걷는다. 와일드카드를 안 쓰는
+                // 이유는 `ActionKind` 디스패치와 같다: variant 가 늘었을 때 문구가
+                // 조용히 엉뚱한 쪽으로 접히지 않고 컴파일에서 걸리게.
                 let what = match dlg.action {
                     crate::PendingClose::Window => "앱을",
                     crate::PendingClose::Session(_) => "이 세션을",
                     crate::PendingClose::AuxEditor(_) => "이 창을",
-                    _ => "이 탭을",
+                    crate::PendingClose::Pane { .. } => "이 pane 을",
+                    crate::PendingClose::Tab { .. } => "이 탭을",
                 };
                 let (title, subtitle) = match &dlg.why {
                     crate::CloseWhy::Busy(proc) => (

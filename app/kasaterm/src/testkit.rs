@@ -620,9 +620,20 @@ impl App {
                 // 진짜 회귀 검사다(있으면 옛 코드도 통과한다).
                 let in_panes = self.ws.lock().unwrap().panes.contains_key(&target);
                 let busy = self.pid_busy(&target);
-                self.confirm_or_close_tab(&target, 0);
+                // `KASATERM_AUTOBUSYCLOSE_VIA=pane` 이면 ⋮ 메뉴의 ×(pane 통째)를,
+                // 아니면 ⌘W(탭 단위)를 태운다. 두 경로가 갈라져 있어서 한쪽만
+                // 재면 다른 쪽 구멍이 안 보인다 — 실제로 ⌘W 는 물어보는데 ⋮ × 만
+                // 조용히 닫히던 것이 2026-08-20 지적이었다.
+                let via_pane =
+                    std::env::var("KASATERM_AUTOBUSYCLOSE_VIA").as_deref() == Ok("pane");
+                if via_pane {
+                    self.confirm_or_close_pane(&target);
+                } else {
+                    self.confirm_or_close_tab(&target, 0);
+                }
                 eprintln!(
-                    "[autobusyclose] pane={target} in_ws_panes={in_panes} busy={busy:?} confirm_raised={}",
+                    "[autobusyclose] via={} pane={target} in_ws_panes={in_panes} busy={busy:?} confirm_raised={}",
+                    if via_pane { "pane" } else { "tab" },
                     self.confirm_close.is_some()
                 );
             }

@@ -4271,7 +4271,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 ActionKind::NewTab => {
                                     let _ = self.spawn_new_tab(&menu_pid, true);
                                 }
-                                ActionKind::Close => self.close_pane(&menu_pid),
+                                ActionKind::Close => self.confirm_or_close_pane(&menu_pid),
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
                                 ActionKind::Undock => {
                                     self.undock_pane_terminal(&menu_pid, event_loop, None)
@@ -4355,7 +4355,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.set_md_mode(&pid, true);
                             }
                             ActionKind::Close => {
-                                self.close_pane(&pid);
+                                self.confirm_or_close_pane(&pid);
                             }
                             ActionKind::NewTab => {
                                 let _ = self.spawn_new_tab(&pid, true);
@@ -6304,8 +6304,7 @@ impl App {
                     }
                 }
                 PendingClose::Tab { pane, idx } => self.confirm_or_close_tab(&pane, idx),
-                // 단일 탭 pane 은 confirm_or_close_tab 이 Pane 으로 승격시킨다.
-                PendingClose::Pane { pane } => self.confirm_or_close_tab(&pane, 0),
+                PendingClose::Pane { pane } => self.confirm_or_close_pane(&pane),
                 PendingClose::Session(i) => self.confirm_or_close_session(i),
                 other @ PendingClose::AuxEditor(_) => self.do_close(other),
             }
