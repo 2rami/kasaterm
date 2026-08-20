@@ -29,6 +29,21 @@ struct SidebarRowInfo {
     /// 이미지는 image, md 는 file-text, 그 외 terminal. 이게 없으면 미니맵이
     /// 웹 pane 도 터미널이라고 거짓말한다.
     icon: &'static str,
+    /// pane **안의 탭 수**. 배치도 칸은 pane 하나당 하나뿐이고 활성 탭만
+    /// 대표하므로, 이게 없으면 한 pane 에 학생이 셋 들어 있어도 화면 어디에도
+    /// 흔적이 없다(거노 2026-08-20 「탭 안에 있으면 … 미니맵에 겹친다든지」).
+    /// 1 이면 지금까지와 완전히 같은 그림 — 거의 모든 pane 이 그렇다.
+    ///
+    /// **탭 수만 센다.** 탭의 pid 를 거쳐 접으면(`and_then`) 이미지·md 탭은
+    /// pid 가 None 이라 조용히 빠져 개수가 틀어진다.
+    tabs: usize,
+    /// 눈에 보이는 일은 없는데 백그라운드 셸·Monitor 가 도는 중.
+    /// **`busy` 와 배타적이다** — `refresh_pane_activity` 가 `busy` 면 아예
+    /// false 를 넣는다. 그래서 이걸 배치도 칸에 그려도 걷기와 겹칠 수가 없다.
+    bg_active: bool,
+    /// compact 진행률(%). 걷기로는 「얼마나 남았나」가 절대 안 읽히므로
+    /// 이것만은 걷는 칸에도 함께 그린다 — 되풀이가 아니라 걷기가 못 하는 말이다.
+    compact_pct: Option<u8>,
 }
 
 impl App {
@@ -2728,7 +2743,7 @@ impl App {
                     .then(|| self.pane_character_if_known(id))
                     .flatten()
                     .unwrap_or_default();
-                let (is_cur, icon) = {
+                let (is_cur, icon, tabs) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
                     // 활성 탭 기준(Deref) — 칸/줄은 pane 하나를 대표하므로
@@ -2743,10 +2758,14 @@ impl App {
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
-                    (is_cur, icon)
+                    // 배치도 칸이 「뒤에 더 있다」를 말할 재료. 이미 잡은 락 통행에서
+                    // 같이 꺼낸다 — 칸마다 다시 잠그면 매 프레임 pane 수만큼 늘어난다.
+                    let tabs = ws.panes.get(id).map(|p| p.tabs.len()).unwrap_or(1);
+                    (is_cur, icon, tabs)
                 };
                 let label = self.pane_row_label(id);
                 let waiting = self.pane_needs_you(id);
+                let act = self.pane_activity.get(id);
                 // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
                 // 부르면 두 신호가 서로를 부정한다.
@@ -2773,6 +2792,12 @@ impl App {
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == *id),
                     icon,
+                    tabs,
+                    // ⚠️ `pane_activity` 의 키는 **leaf id** 다(`refresh_pane_activity`
+                    // 가 `ws.panes` 순회로 채운다). 얼굴·라벨과 달리 여기서 탭 pid 로
+                    // 접으면 **오히려 어긋난다** — 함정이 반대 방향이다.
+                    bg_active: act.map(|a| a.bg_active).unwrap_or(false),
+                    compact_pct: act.and_then(|a| a.compact_pct),
                 }
             }
         };
@@ -4019,13 +4044,76 @@ impl App {
                 // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
                 // 목록은 "누가 있나"만 말하고 어느 칸이 화면 어디인지는 못 말한다.
                 for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
-                    let (mx, my, mw, mh) = *r;
+                    let (mx, mut my, mut mw, mut mh) = *r;
                     let cur = sb_active_pane.as_deref() == Some(id.as_str());
+                    // 히트 판정은 **레이아웃이 준 칸 그대로** 본다 — 아래에서 덱만큼
+                    // 줄이는 건 그림일 뿐이고, 클릭/드래그는 `sb_hits` 에 들어간 원래
+                    // 사각으로 판정된다. 여기만 줄이면 손과 눈이 어긋난다.
                     let hov = sb_cursor.0 >= mx
                         && sb_cursor.0 <= mx + mw
                         && sb_cursor.1 >= my
                         && sb_cursor.1 <= my + mh;
                     g.hover_pointer |= hov;
+                    // 탭이 여럿인 pane 은 칸을 **카드 덱**으로 그린다(거노 2026-08-20
+                    // 「탭 안에 있으면 … 미니맵에 겹친다든지」). 배치도 칸은 pane 하나당
+                    // 하나뿐이고 그 칸은 활성 탭만 대표한다 — 그래서 한 pane 안에
+                    // 학생이 셋 들어 있어도 배치도에는 하나로만 보이고 나머지는 화면
+                    // 어디에도 흔적이 없었다.
+                    //
+                    // 뒷장은 칸 **안쪽** 우상단으로 계단진다. 바깥으로 밀면 옆 칸을
+                    // 침범한다 — 칸 사이는 1px 밖에 안 띄어 놔서(`leaf_rects` 에서
+                    // 깎는 그 1px) 바로 남의 자리에 얹힌다. 대신 앞장이 그만큼 좌하단
+                    // 으로 줄고, 아래 그림 전부(테두리·활성 판·숨쉬기·얼굴)가 좌표만
+                    // 바뀐 채 따라온다 — 덱을 위해 따로 손볼 자리가 없다.
+                    //
+                    // 탭이 하나면 `back == 0` 이라 **지금까지와 완전히 같은 그림**이다.
+                    // 거의 모든 pane 이 그쪽이고, 거기에 장식이 붙으면 배치도가 통째로
+                    // 시끄러워진다.
+                    let back = if mw > 12.0 && mh > 12.0 {
+                        info.tabs.saturating_sub(1).min(3)
+                    } else {
+                        // 칸이 이만 못하면 계단이 칸을 다 먹는다. 얼굴도 못 들어가는
+                        // 크기라 여기서 포기하는 게 낫다.
+                        0
+                    };
+                    if back > 0 {
+                        // 계단은 **칸에 비례하되 덱 전체가 칸의 30% 안에** 들어오게
+                        // 나눠 갖는다. 고정폭으로 두면 탭이 넷일 때 앞장이 얼굴도 못
+                        // 담을 만큼 깎이고, 비례만 두면 큰 칸에서 계단이 벌어져 덱이
+                        // 아니라 어긋난 사각 셋으로 읽힌다.
+                        let step = ((mw.min(mh) * 0.34) / back as f32).clamp(1.5, 4.5);
+                        let inset = step * back as f32;
+                        let (cw, ch) = (mw - inset, mh - inset);
+                        // 카드는 **통짜로** 칠한다 — 비활성 칸이 원래 통짜라(아래
+                        // `round_rect` 한 방이 칸을 통째로 채운다) 뒷장만 속을 파면
+                        // 「빈 액자」가 되어 다른 종류로 읽히고, 그 윤곽선은 실제
+                        // 크기에서 배경에 묻혀 아예 사라진다(실측 캡처에서 확대해야만
+                        // 보였다). 대신 카드마다 **한 겹 큰 배경색 테**를 먼저 깔아
+                        // 장을 가른다 — 같은 색 통짜가 겹치면 한 덩어리가 되고, 그러면
+                        // 「여러 개다」는 말해도 「몇 개나」는 못 말한다.
+                        let gap = |g: &mut _, x: f32, y: f32| {
+                            round_rect(g, x - 0.7, y - 0.7, cw + 1.4, ch + 1.4, 2.2, theme::panel_bg());
+                        };
+                        // 뒤에서 앞으로. k 가 클수록 우상단이고, k == 0 이 아래 코드가
+                        // 이어서 그리는 앞장(= 활성 탭)이다.
+                        for k in (1..=back).rev() {
+                            let (x, y) =
+                                (mx + step * k as f32, my + step * (back - k) as f32);
+                            gap(g, x, y);
+                            // 옆 칸(비활성 = `border` 0x66)보다 **한 단 어둡게**. 같은
+                            // 값으로 뒀더니 뒷장이 위 칸과 색이 붙어 「남의 칸이 여기까지
+                            // 온 것」처럼 읽혔다(실측). 어두우면 뒤로 물러나 보이는 덤도
+                            // 있고, 앞장이 주인공 자리를 지킨다.
+                            round_rect(g, x, y, cw, ch, 2.0, theme::with_alpha(theme::border(), 0x4a));
+                        }
+                        // 앞장 자리의 테. 이게 없으면 앞장과 바로 뒷장이 붙어 버린다
+                        // — 활성 칸은 테두리가 accent 라 저절로 갈리지만, 비활성 칸은
+                        // 둘 다 같은 회색이라 두 장이 한 장으로 보인다.
+                        gap(g, mx, my + inset);
+                        my += inset;
+                        mw = cw;
+                        mh = ch;
+                    }
                     // 손이 필요한 칸은 **칸째 숨쉰다**(2026-08-11 지시: "점 말고 칸이
                     // 빛나게"). 모서리 점으로도 말해 봤는데 6px 짜리가 얼굴 옆에 붙으니
                     // 칸이 작을수록 얼룩처럼 읽혔고, 좁은 칸에서는 아예 그려지지도
@@ -4098,6 +4186,46 @@ impl App {
                             isz,
                             theme::text_dim(),
                         );
+                    }
+                    // 진행 바 — 칸 바닥의 2px 띠. **걷기가 이미 말하는 것을 되풀이하지
+                    // 않는** 세 갈래만 그린다(거노 2026-08-20 「미니맵에도 프로세스 바
+                    // 하자」). 이 파일에는 같은 뜻을 두 겹으로 칠했다 되돌린 기록이 두
+                    // 군데 있고(줄 vs 카드 머리 · 칸 vs 머리 점), 여기가 그 세 번째가
+                    // 되기 딱 좋은 자리다.
+                    //
+                    // ① compact — 걷기로는 「얼마나 남았나」가 절대 안 읽힌다. 그래서
+                    //    이것만은 걷는 칸에도 함께 그린다(되풀이가 아니라 걷기가 못
+                    //    하는 말이다). busy 보다 **먼저** 본다 — compact 중에도 스피너가
+                    //    돌아 busy 가 함께 참이라, 순서가 뒤면 늘 쓸림바가 이긴다.
+                    //    헤더가 같은 순서로 갈라 놨다.
+                    // ② 걸을 그림이 없는 busy — 셸·웹·이미지 칸은 학생이 없어 지금 도는
+                    //    중을 말할 방법이 **아무것도 없었다**. 걷기가 못 닿는 자리라
+                    //    되풀이가 아니라 유일한 답이다.
+                    // ③ bg_active — `refresh_pane_activity` 가 `busy` 면 이걸 아예
+                    //    false 로 넣는다(input.rs). 즉 걷는 칸에는 절대 안 서므로 두 겹이
+                    //    **원천적으로 불가능**하다. 헤더가 이걸 느린 펄스로 갈라 말하는데
+                    //    배치도만 안 갈라 말하고 있었다.
+                    //
+                    // 대기 중(`waiting`)은 일부러 뺐다 — 그건 도는 게 아니라 멈춘 것이고,
+                    // 바가 차오르면 「일하는 줄」 알고 지나치게 된다(2026-08-11 에 갈라
+                    // 놓은 규칙이다). 칸이 통째로 숨쉬는 것이 이미 그 말을 하고 있다.
+                    //
+                    // 모양은 헤더와 **같은 한 벌**을 쓴다(`working_bar`·`pulse_bar`) —
+                    // 배치도만 다른 리듬으로 흔들리면 같은 pane 이 자리마다 다른 말을 한다.
+                    if mw > 10.0 && mh > 14.0 {
+                        let bar_h = 2.0;
+                        let (bx, by, bw) = (mx + 2.0, my + mh - bar_h - 2.0, mw - 4.0);
+                        if let Some(pct) = info.compact_pct {
+                            g.rect(bx, by, bw, bar_h, theme::with_alpha(theme::accent(), 0x3a));
+                            let done = bw * (pct as f32 / 100.0).clamp(0.0, 1.0);
+                            if done > 0.5 {
+                                g.rect(bx, by, done, bar_h, theme::accent());
+                            }
+                        } else if info.busy && !walked {
+                            g.working_bar(bx, by, bw, bar_h, theme::accent());
+                        } else if info.bg_active {
+                            g.pulse_bar(bx, by, bw, bar_h, theme::accent());
+                        }
                     }
                 }
                 for (k, ((wi, _, r), info)) in
