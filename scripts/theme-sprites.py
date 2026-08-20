@@ -74,6 +74,12 @@ STYLE = os.environ.get("THEME_STYLE", "pixel-chibi")
 # 정체성 충실도가 높아야 해서다(등신 재해석이 필요한 base 와 반대).
 PROFILE_MODEL = os.environ.get("THEME_PROFILE_MODEL", MODEL)
 PROFILE_STYLE = os.environ.get("THEME_PROFILE_STYLE", "pixel")
+# 스타일 앵커: 기존 세트의 완성 그림을 ppgen -styleref 로 물려 등신·화풍을 그
+# 그림에 맞춘다. 옛 학생들이 전원 같은 비율로 나온 비법이 이것이다 — 텍스트
+# 스타일 계약만으로는 배치마다 등신이 따로 논다(2026-08-20 실측, 원조는
+# 2026-06 char-arona 앵커 체인). 베이스용(전신)과 프사용(버스트)을 따로 받는다.
+STYLE_REF = os.environ.get("THEME_STYLE_REF", "")
+PROFILE_STYLE_REF = os.environ.get("THEME_PROFILE_STYLE_REF", "")
 
 # 상태 → (ppgen 프리셋 이름 겸 앱 자산 폴더 이름, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
@@ -288,6 +294,9 @@ def generate(slug, force=False, use_ref=False):
               "-chroma", pick_chroma(slug)]
     if KEY:
         common += ["-key", KEY]
+    if STYLE_REF:
+        # 베이스 생성에만 쓰인다 — -base 가 붙는 상태 실행에서는 ppgen 이 무시한다.
+        common += ["-styleref", STYLE_REF]
     states_cmd = common + [
         "-states", ",".join(s for s, _ in STATES if s != "walk"),
         "-dirset", "walk",
@@ -403,6 +412,8 @@ def gen_profile(slug, force=False):
         cmd += ["-key", KEY]
     if PROFILE_MODEL:
         cmd += ["-model", PROFILE_MODEL]
+    if PROFILE_STYLE_REF:
+        cmd += ["-styleref", PROFILE_STYLE_REF]
 
     why = ""
     for _ in range(ATTEMPTS):
