@@ -852,12 +852,21 @@ impl PtySession {
     pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
+        let hist = history_ansi(&t, cols, rows);
         let snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
         let (tx, rx) = crossbeam_channel::bounded(64);
         self.byte_taps.lock().unwrap().push(tx);
-        (rx, snap.to_ansi())
+        // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
+        // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
+        let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
+        bytes.extend_from_slice(&snap.to_ansi());
+        (rx, bytes)
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        // alacritty 격자 하한(MIN_COLUMNS=2) 밑을 부르면 wide 글자(한글) reflow 가
+        // upstream 이 한 번도 안 밟는 경로로 들어간다 — 호출자(GUI floor 1열·
+        // auxwin·웹텀)가 최소를 제각각 계산하므로 여기서 한 번에 막는다.
+        let (cols, rows) = (cols.max(2), rows.max(1));
         if self.size() == (cols, rows) {
             return Ok(());
         }
@@ -1677,6 +1686,43 @@ impl Utf8Buffer {
         self.leftover.drain(..cut);
         out
     }
+}
+
+/// 스크롤백을 접속 스냅샷에 싣는 ANSI. 히스토리 줄을 보통 출력처럼 위에서부터
+/// 흘리고, 화면에 걸쳐 남은 꼬리를 바닥 행 개행으로 밀어낸 뒤(바닥에서의 개행만
+/// 스크롤을 만든다) 이어지는 `to_ansi` 가 화면을 다시 그린다 — 그러면 받는 쪽
+/// xterm 은 히스토리를 자기 스크롤백으로 쌓는다. 이게 없으면 미러는 뷰포트만
+/// 받아서 폰에서 스와이프해도 올라갈 데가 없다(2026-08-20 확정).
+///
+/// xterm 기본 스크롤백 상한(1000줄)만큼만 싣는다 — 더 보내도 버려진다.
+fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8> {
+    const CAP: usize = 1000;
+    let hist = term.grid().history_size().min(CAP);
+    if hist == 0 {
+        return Vec::new();
+    }
+    let grid = term.grid();
+    let grid_cols = grid.columns().min(cols as usize);
+    let mut out = String::new();
+    for line in -(hist as i32)..0 {
+        let mut row: Row = Vec::with_capacity(grid_cols);
+        for c in 0..grid_cols {
+            let point = Point::new(
+                alacritty_terminal::index::Line(line),
+                alacritty_terminal::index::Column(c),
+            );
+            row.push(convert_cell(&grid[point]));
+        }
+        if let Some(body) = kasa_bridge::screen::row_ansi(&row) {
+            out.push_str(&body);
+        }
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("\x1b[{};1H", rows.max(1)));
+    for _ in 0..hist.min(rows as usize) {
+        out.push('\n');
+    }
+    out.into_bytes()
 }
 
 fn snapshot(
@@ -3611,6 +3657,26 @@ mod snapshot_tap_tests {
         let sess = sh("test-snap");
         sess.send_bytes(b"printf 'HELLO-SNAP\\n'\n").unwrap();
         wait_on_screen(&sess, "HELLO-SNAP");
+    }
+
+    /// 화면 밖으로 밀려난 줄(스크롤백)도 접속 스냅샷에 실려야 한다 — 폰 미러가
+    /// 스와이프로 올라갈 재료다. 뷰포트만 보내던 시절엔 이 테스트가 실패한다.
+    #[test]
+    fn tap_snapshot_carries_scrollback_history() {
+        let sess = sh("test-hist");
+        sess.send_bytes(
+            b"i=1; while [ $i -le 30 ]; do echo HIST-$i; i=$((i+1)); done\n",
+        )
+        .unwrap();
+        wait_on_screen(&sess, "HIST-30");
+        let (_rx, ansi) = sess.tap_bytes_with_snapshot();
+        let s = String::from_utf8_lossy(&ansi);
+        // 행 직렬화는 항상 `\x1b[0m` 로 닫히므로 HIST-1 뒤에 이스케이프가 오는
+        // 꼴만 정확히 HIST-1 행이다(HIST-10~ 과 구분).
+        assert!(
+            s.contains("HIST-1\x1b"),
+            "10행 화면에서 30줄을 찍었으면 HIST-1 은 스크롤백으로 와야 한다"
+        );
     }
 
     /// 붙는 순간 이미 화면에 있던 출력은 스냅샷으로만, 그 뒤의 출력은 tap 으로만

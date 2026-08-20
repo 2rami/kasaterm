@@ -205,41 +205,11 @@ impl ScreenUpdate {
         out.push_str("\x1b[H\x1b[2J");
 
         for (row, cells) in &self.dirty {
-            let end = cells
-                .iter()
-                .rposition(|c| !c.is_trailing_blank())
-                .map_or(0, |i| i + 1);
-            if end == 0 {
+            let Some(body) = row_ansi(cells) else {
                 continue;
-            }
+            };
             out.push_str(&format!("\x1b[{};1H", row + 1));
-            let mut style: Option<String> = None;
-            // 와이드 글자가 먹은 뒷칸을 건너뛰기 위한 표시.
-            let mut spacer = false;
-            for cell in &cells[..end] {
-                // 와이드 글자(한글·CJK)는 두 칸을 차지하고 뒷칸은 스페이서다. 그 칸을
-                // 또 쓰면 글자마다 한 칸씩 밀려 자간이 벌어진다.
-                //
-                // ⚠️ 스페이서를 **문자로는 못 가려낸다** — `convert_cell` 이 alacritty 의
-                // `'\0'` 을 공백으로 바꿔 넘기기 때문에 진짜 공백과 똑같이 생겼다. 대신
-                // 앞 글자의 폭으로 판정한다: 그리드에서 와이드 글자 다음 칸은 반드시
-                // 스페이서이므로(터미널 그리드의 불변식) 이 추론은 항상 맞다.
-                if spacer {
-                    spacer = false;
-                    continue;
-                }
-                if cell.ch == '\0' {
-                    continue;
-                }
-                let sgr = cell.sgr();
-                if style.as_deref() != Some(sgr.as_str()) {
-                    out.push_str(&sgr);
-                    style = Some(sgr);
-                }
-                out.push(cell.ch);
-                spacer = UnicodeWidthChar::width(cell.ch).unwrap_or(1) > 1;
-            }
-            out.push_str("\x1b[0m");
+            out.push_str(&body);
         }
 
         out.push_str(&format!(
@@ -254,6 +224,48 @@ impl ScreenUpdate {
         });
         out.into_bytes()
     }
+}
+
+/// 한 행을 SGR 포함 ANSI 로 굽는다(끝은 `\x1b[0m`). 커서 이동은 호출자 몫이라
+/// 화면 행(`to_ansi`)과 스크롤백 행(연속 출력으로 흘리는 쪽) 이 같이 쓴다.
+/// 잘라내도 화면이 같은 꼬리 공백을 걷어낸 뒤 전부 빈 행이면 None.
+pub fn row_ansi(cells: &[Cell]) -> Option<String> {
+    let end = cells
+        .iter()
+        .rposition(|c| !c.is_trailing_blank())
+        .map_or(0, |i| i + 1);
+    if end == 0 {
+        return None;
+    }
+    let mut out = String::new();
+    let mut style: Option<String> = None;
+    // 와이드 글자가 먹은 뒷칸을 건너뛰기 위한 표시.
+    let mut spacer = false;
+    for cell in &cells[..end] {
+        // 와이드 글자(한글·CJK)는 두 칸을 차지하고 뒷칸은 스페이서다. 그 칸을
+        // 또 쓰면 글자마다 한 칸씩 밀려 자간이 벌어진다.
+        //
+        // ⚠️ 스페이서를 **문자로는 못 가려낸다** — `convert_cell` 이 alacritty 의
+        // `'\0'` 을 공백으로 바꿔 넘기기 때문에 진짜 공백과 똑같이 생겼다. 대신
+        // 앞 글자의 폭으로 판정한다: 그리드에서 와이드 글자 다음 칸은 반드시
+        // 스페이서이므로(터미널 그리드의 불변식) 이 추론은 항상 맞다.
+        if spacer {
+            spacer = false;
+            continue;
+        }
+        if cell.ch == '\0' {
+            continue;
+        }
+        let sgr = cell.sgr();
+        if style.as_deref() != Some(sgr.as_str()) {
+            out.push_str(&sgr);
+            style = Some(sgr);
+        }
+        out.push(cell.ch);
+        spacer = UnicodeWidthChar::width(cell.ch).unwrap_or(1) > 1;
+    }
+    out.push_str("\x1b[0m");
+    Some(out)
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

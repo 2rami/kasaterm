@@ -3309,10 +3309,19 @@ async fn term_asset_css() -> impl IntoResponse {
     )
 }
 
-/// 프사가 있는 학생 슬러그. `AVATARS` 와 짝이므로 여기 없는 이름은 프사도 없다.
+/// 프사가 있는 학생 슬러그. `term_avatar` 의 목록과 짝이므로 여기 없는 이름은
+/// 프사도 없다 — 둘 다 `assets/students/profile/*.png` 전체와 맞춘다. 12명만
+/// 있던 시절엔 로스터의 세나·이치카·하루나가 전부 탈락해 폰 목록이 무프사였다.
 const AVATAR_SLUGS: &[&str] = &[
-    "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana", "shiroko",
-    "yuuka", "yuzu",
+    "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
+    "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
+    "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
+    "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
+    "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+    "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
+    "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
+    "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi", "utaha",
+    "wakamo", "yukari", "yuuka", "yuzu",
 ];
 
 /// agent 이름(`aru-p151-1uc`)의 앞 토막이 캐릭터 슬러그다.
@@ -3345,8 +3354,15 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
         };
     }
     let png = avatars!(
-        "arisu", "arona", "aru", "himari", "hoshino", "koharu", "midori", "momoi", "prana",
-        "shiroko", "yuuka", "yuzu",
+        "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
+        "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
+        "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
+        "iori", "iroha", "izuna", "kaho", "kanna", "karin", "kasumi", "kayoko", "kazusa", "kei",
+        "kirino", "koharu", "konoka", "kotama", "kotori", "koyuki", "maki", "makoto", "mari",
+        "mashiro", "michiru", "midori", "mika", "misaki", "momoi", "mutsuki", "nagisa", "neru",
+        "niya", "noa", "nonomi", "prana", "rio", "sakurako", "saori", "satsuki", "seia", "sena",
+        "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi",
+        "utaha", "wakamo", "yukari", "yuuka", "yuzu",
     );
     match png {
         Some(b) => (
@@ -3821,12 +3837,23 @@ async fn term_ws_run(
     // ⚠️ 되돌리는 건 **내가 바꿔 놓은 그 크기가 아직 그대로일 때만**이다. 미러가 둘
     // 붙어 있으면 남이 그 사이 또 바꿨을 수 있는데, 그때 내 원본을 밀어 넣으면 보고
     // 있는 쪽 화면을 내가 깨뜨린다.
-    let restore_to = mirrored.then_some((c, r));
+    // ⚠️ 접속 시점 고정값이 아니다 — 내가 force 한 뒤 남(kasaterm divider·다른
+    // 미러)이 격자를 바꿨으면 그쪽이 새 원본이라, 끊길 때 낡은 접속 시점 크기를
+    // 밀어 넣으면 kasaterm 의 새 레이아웃을 되레 덮는다. force 직전마다 갱신한다.
+    let restore = std::sync::Arc::new(std::sync::Mutex::new(mirrored.then_some((c, r))));
+    let restore_in = restore.clone();
     // (cols<<16 | rows). 0 = 이 연결은 격자를 건드린 적이 없다.
     let forced = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let forced_in = forced.clone();
+    // 브라우저가 Ping 에 자동으로 돌려주는 Pong 의 마지막 시각. 폰 탭이
+    // 백그라운드로 잠들면 TCP 는 한참 살아 있어서, 이걸 봐야 끊김-복원(아래)이
+    // 언젠가는 돈다 — 안 보면 폰을 주머니에 넣은 것만으로 pane 이 좁은 채 남는다.
+    let last_pong = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let pong_in = last_pong.clone();
 
     let sess_in = sess.clone();
+    let sess_sz = sess.clone();
+    let mut last_size = (c, r);
     let mut to_browser = tokio::spawn(async move {
         loop {
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
@@ -3834,12 +3861,36 @@ async fn term_ws_run(
             // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
             match tokio::time::timeout(std::time::Duration::from_secs(30), brx.recv()).await {
                 Ok(Some(chunk)) => {
+                    // PTY 격자가 바뀌었으면(divider·⤢·다른 미러) 바이트보다 먼저
+                    // 알린다 — 미러 xterm 이 낡은 격자로 새 바이트를 그리면 글자가
+                    // 한 자씩 세로로 꺾이는 그 화면이 된다. 크기 변경은 반드시
+                    // full snapshot 출력을 동반하므로(chunk) 여기서 보면 놓치지 않는다.
+                    let now = sess_sz.size();
+                    if now != last_size {
+                        last_size = now;
+                        let msg = serde_json::json!({
+                            "t": "size", "cols": now.0, "rows": now.1, "mirror": mirrored,
+                        })
+                        .to_string();
+                        if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
                     if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
                         break;
                     }
                 }
                 Ok(None) => break, // tap 스레드가 끝났다(PTY 종료)
                 Err(_) => {
+                    // Pong 이 두 주기 넘게 없으면 피어가 잠든 것 — TCP 가 안 끊겨도
+                    // 우리가 접어야 아래 복원이 돌아 pane 크기가 돌아온다.
+                    let stale = pong_in
+                        .lock()
+                        .map(|t| t.elapsed() > std::time::Duration::from_secs(75))
+                        .unwrap_or(false);
+                    if stale {
+                        break;
+                    }
                     if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }
@@ -3847,6 +3898,7 @@ async fn term_ws_run(
             }
         }
     });
+    let pong_shell = last_pong.clone();
     let mut to_shell = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             match msg {
@@ -3869,6 +3921,20 @@ async fn term_ws_run(
                             let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                             let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
                             let (c, r) = (c.max(20), r.max(5));
+                            // 내 직전 force 이후 격자가 남의 손으로 바뀌어 있으면
+                            // 그 크기가 새 원본이다 — 복원 목표를 거기로 옮긴다.
+                            let packed =
+                                forced_in.load(std::sync::atomic::Ordering::Relaxed);
+                            if mirrored && packed != 0 {
+                                let mine =
+                                    ((packed >> 16) as u16, (packed & 0xffff) as u16);
+                                let cur = sess_in.size();
+                                if cur != mine {
+                                    if let Ok(mut g) = restore_in.lock() {
+                                        *g = Some(cur);
+                                    }
+                                }
+                            }
                             if sess_in.resize(c, r).is_ok() && mirrored {
                                 forced_in.store(
                                     (c as u32) << 16 | r as u32,
@@ -3879,6 +3945,13 @@ async fn term_ws_run(
                     }
                 }
                 Message::Close(_) => break,
+                // 브라우저 네트워크 스택이 우리 Ping 에 자동으로 돌려주는 응답 —
+                // 이 시각이 to_browser 의 잠든-피어 판정 재료다.
+                Message::Pong(_) => {
+                    if let Ok(mut t) = pong_shell.lock() {
+                        *t = std::time::Instant::now();
+                    }
+                }
                 _ => {}
             }
         }
@@ -3893,6 +3966,7 @@ async fn term_ws_run(
 
     // 폰이 줄여 놓은 격자를 돌려준다. 안 하면 폰 탭을 닫은 뒤에도 kasaterm pane 이
     // 좁아진 채로 남아, 「폰으로 잠깐 봤더니 내 화면이 줄었다」가 된다.
+    let restore_to = restore.lock().ok().and_then(|g| *g);
     if let Some((oc, or)) = restore_to {
         let packed = forced.load(std::sync::atomic::Ordering::Relaxed);
         if packed != 0 {
