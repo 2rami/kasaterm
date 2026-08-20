@@ -2068,14 +2068,65 @@ pub(crate) fn tint_welcome_box(
     }
 }
 
-/// claude agents 목록 화면인지 화면 텍스트로 감지. argv(`is_claude_agents`)는 `claude
-/// agents` **명령**만 잡고, 세션 안에서 "← for agents"로 여는 목록 뷰는 같은 프로세스라
-/// argv 가 안 바뀌어 못 잡는다(거노: agents view 로고 안 뜸). 목록 상단 통계줄
-/// "N awaiting input · N working · N completed" 의 고유 문구를 신호로 쓴다 — 일반
-/// 대화엔 statusline(U+FFFC)이 있어 호출부에서 `!has_profile_slot` 로 이미 걸러진다.
-pub(crate) fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
+/// 화면 전체를 한 줄로 접는다 — 공백류·U+0000 을 한 칸으로 눌러 wrap 에 무관하게
+/// 매칭하기 위한 정규화. 좁은 창에선 한 문구가 여러 셀 행으로 갈리고 사이에 행끝
+/// 패딩이 껴 직접 매칭이 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발).
+fn squash_screen(rows: &[Vec<GridCell>]) -> String {
     let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
-    full.contains("awaiting input") && full.contains("completed")
+    full.split(|c: char| c.is_whitespace() || c == '\0')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 조각들이 이 순서로, 각 조각이 직전 조각 끝에서 `gap` 자 이내에 오는지.
+///
+/// 화면 전체에서 낱말을 따로 `contains` 하면 대화 본문에 우연히 흩어져 있어도
+/// 참이 된다. "한 줄에 나란히"가 진짜 조건인데 행 단위로 보면 wrap 에 깨지므로,
+/// squash 한 문자열에서의 **근접**으로 근사한다. 첫 조각이 여러 번 나올 수 있어
+/// (본문에 한 번, 통계줄에 한 번) 모든 등장 위치에서 시도한다.
+fn seq_near(hay: &str, parts: &[&str], gap: usize) -> bool {
+    let Some((first, rest)) = parts.split_first() else {
+        return true;
+    };
+    let mut from = 0usize;
+    while let Some(pos) = hay[from..].find(first) {
+        let mut at = from + pos + first.len();
+        // 다음 후보 시작점 — 매칭 길이만큼 건너뛴다(UTF-8 경계 보장).
+        from = at;
+        if rest.iter().all(|p| match hay[at..].find(p) {
+            Some(off) if off <= gap => {
+                at += off + p.len();
+                true
+            }
+            _ => false,
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// claude agents 목록 화면(FleetView)인지 화면 텍스트로 감지. argv(`is_claude_agents`)는
+/// `claude agents` **명령**만 잡고, 세션 안에서 "← for agents"로 여는 목록 뷰는 같은
+/// 프로세스라 argv 가 안 바뀌어 못 잡는다(거노: agents view 로고 안 뜸).
+///
+/// 신호는 목록 상단 통계줄 "N awaiting input · N working · N completed" 다. 세 조각이
+/// **구분자로 붙어 한 줄**을 이루는 것이 이 화면 고유고, 조건부 렌더가 아니라 0 이어도
+/// 생략되지 않으므로 목록이 비어 있어도 잡힌다(실측 2.1.237).
+///
+/// ⚠️ 예전엔 `contains("awaiting input") && contains("completed")` 였다. 그건 화면
+/// **어디든** 두 낱말이 있으면 참이라, 그 두 단어가 스치는 대화 본문(에이전트 상태를
+/// 설명하는 문서 등 — claude 번들 안에도 그런 문구가 여럿 있다)에서 오탐한다. 당시엔
+/// 호출부의 `!has_profile_slot` 이 그 오탐을 가려 주고 있었을 뿐이고, 그 안전판을 떼려면
+/// (세션 안에서 연 목록은 statusline 이 남아 그 조건에 걸려 판정 자체가 꺼졌다)
+/// 판독이 먼저 홀로 서야 한다. 그래서 낱말 존재가 아니라 **인접 순서**로 본다.
+pub(crate) fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
+    let squashed = squash_screen(rows);
+    // 구분자와 개수를 사이에 두므로 gap 은 " · 9999 " 를 덮을 만큼만.
+    seq_near(&squashed, &["awaiting input", "working", "completed"], 16)
+        // 통계줄이 아직 안 그려진 첫 프레임 폴백 — 목록 자리 빈 상태 안내.
+        || squashed.contains("Nothing running in the background.")
 }
 
 /// claude `--resume` 세션 피커 화면인지 감지. "Resume session (N of M)" 헤더가
@@ -2084,7 +2135,6 @@ pub(crate) fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
 /// 빈 초록 사각형이 그려졌다(거노). 일반 대화엔 statusline(U+FFFC)이 있어 호출부에서
 /// !has_profile_slot 로 이미 걸러진다.
 pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
-    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
     // "Resume session (N of M)" 헤더가 피커 고유 — 단순 "Resume session" 은
     // 대화 본문에 우연히 나올 수 있어 여는 괄호까지 확인한다. 피커도 맨 아래
     // statusline(U+FFFC) 한 줄이 남아 has_profile_slot 으로는 못 거른다
@@ -2092,14 +2142,8 @@ pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
     //
     // 좁은 창에선 "Resume session" 과 "(N of M)" 이 다른 셀 행으로 wrap 되며
     // 사이에 행끝 패딩(스페이스·U+0000)이 껴 "Resume session (" 직접 매칭이
-    // 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발). 공백류·null 을 한 칸
-    // 으로 접어 wrap 여부와 무관하게 매칭한다.
-    let squashed: String = full
-        .split(|c: char| c.is_whitespace() || c == '\0')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    squashed.contains("Resume session (")
+    // 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발) — squash_screen 이 그걸 접는다.
+    squash_screen(rows).contains("Resume session (")
 }
 
 /// AskUserQuestion picker 감지 — `❯ 1. …` 옵션 목록 + 하단 힌트 박스가 학생
@@ -2109,12 +2153,7 @@ pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
 /// 대화 본문 우연 등장을 힌트 AND 로 한 번 더 거른다. resume 와 같은 squash
 /// 정규화로 wrap·다중 공백에 강건하게 매칭한다.
 pub(crate) fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
-    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
-    let squashed: String = full
-        .split(|c: char| c.is_whitespace() || c == '\0')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let squashed = squash_screen(rows);
     squashed.contains("Chat about this")
         && (squashed.contains("Esc to cancel") || squashed.contains("Enter to select"))
 }
@@ -2741,6 +2780,56 @@ mod picker_tag_tests {
         assert!(!screen_is_ask_picker(&[row_from(
             "We could Chat about this later"
         )]));
+    }
+
+    // agents 목록(FleetView)은 상단 통계줄로 감지한다 — 세 조각이 구분자로 붙어
+    // 한 줄을 이루는 것이 이 화면 고유고, 개수가 0 이어도 생략되지 않는다.
+    // 실측 화면(2.1.237): "  ▝▝ ▝▝    3 awaiting input · 0 working · 4 completed"
+    #[test]
+    fn agents_list_detected_by_stats_line() {
+        assert!(screen_is_agents_list(&[
+            row_from("▐▛███▛█   Claude Code v2.1.237"),
+            row_from("  ▝▝ ▝▝    3 awaiting input · 0 working · 4 completed"),
+            row_from("Needs input"),
+        ]));
+        // 전부 0 인 빈 목록도 통계줄은 그대로 렌더된다.
+        assert!(screen_is_agents_list(&[row_from(
+            "0 awaiting input · 0 working · 0 completed"
+        )]));
+        // 좁은 창서 통계줄이 wrap + 행끝 패딩(스페이스/\0)이 껴도 잡힌다.
+        assert!(screen_is_agents_list(&[
+            row_from("3 awaiting input · 0   "),
+            row_from("working · 4 completed"),
+        ]));
+        assert!(screen_is_agents_list(&[
+            row_from("12 awaiting input\0\0\0"),
+            row_from("· 7 working · 132 completed"),
+        ]));
+        // 백그라운드가 하나도 없을 때의 안내도 이 화면 고유.
+        assert!(screen_is_agents_list(&[row_from(
+            "Nothing running in the background."
+        )]));
+    }
+
+    // ★회귀 방어: 예전 판정은 `contains("awaiting input") && contains("completed")`
+    // 라 화면 **어디든** 두 낱말이 있으면 참이었다. 호출부의 `!has_profile_slot` 이
+    // 그 오탐을 가려 주고 있었을 뿐이라, 그 안전판을 뗀 지금은 여기서 막아야 한다 —
+    // 안 막으면 두 단어가 스치는 멀쩡한 대화에서 학생이 통째로 사라진다.
+    #[test]
+    fn agents_list_ignores_scattered_words_in_conversation() {
+        // claude 문서를 대화에서 읽는 화면(번들 안에도 이런 문구가 여럿 있다).
+        assert!(!screen_is_agents_list(&[
+            row_from("Thread is awaiting input — or paused at the shared budget."),
+            row_from("The migration completed without errors."),
+        ]));
+        // 순서가 맞아도 사이가 멀면(한 줄이 아니면) 아니다.
+        assert!(!screen_is_agents_list(&[row_from(
+            "awaiting input from the user, and once the long running job is working \
+             through its queue we can call the task completed"
+        )]));
+        // 한 조각만 있는 경우.
+        assert!(!screen_is_agents_list(&[row_from("2 completed · 1 working")]));
+        assert!(!screen_is_agents_list(&[row_from("awaiting input")]));
     }
 
     // PR 번호(`repo#12`)의 '#' 는 이름 검증에서 떨어지고, 뒤의 진짜 태그가 잡힌다.

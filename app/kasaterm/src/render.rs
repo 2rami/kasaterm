@@ -1117,22 +1117,31 @@ impl App {
                         ));
                     }
                 }
-                // agents 목록 뷰 판정 — statusline 프사 슬롯(U+FFFC)이 있으면 실제
-                // 대화 세션, 없고 argv 가 claude agents 면 관리 화면(목록 뷰). 세션에
-                // 진입하면 statusline 이 붙어 자동으로 학생 표시로 넘어간다(argv 는
-                // 진입해도 그대로 agents 라 단독으론 못 가름). 목록 뷰면 아래 학생
-                // 스프라이트(배너·스피너·standing)·본문 틴트를 모두 건너뛰고 SCHALE
-                // 조직 정체성(타이틀·테두리)만 준다.
+                // agents 목록 뷰 판정. 목록 뷰면 아래 학생 스프라이트(배너·스피너·
+                // standing)·본문 틴트를 모두 건너뛰고 SCHALE 조직 정체성(타이틀·
+                // 테두리)만 준다.
+                //
+                // 화면 신호(`screen_is_agents_list`)가 정본이고 statusline 프사 슬롯
+                // (U+FFFC) 유무는 보지 않는다. 세션 **안에서** `← for agents` 로 여는
+                // 목록은 맨 아래 statusline 한 칸이 남아, 예전처럼 `!has_profile_slot`
+                // 을 AND 로 걸면 화면 신호가 잡혀도 판정이 꺼졌다 → 학생 그림이 목록
+                // 위에 그대로 그려져 내용을 덮었다(거노 2026-08-20 「claude agents 치면
+                // 사진이 내용을 다가려」).
+                //
+                // argv(`is_claude_agents`)는 화면 신호가 아직 안 그려진 프레임을 메우는
+                // 폴백으로만 남는다. 이쪽엔 `!has_profile_slot` 이 여전히 필요하다 —
+                // argv 는 목록에서 세션으로 **진입해도 그대로 agents** 라, 그 조건이
+                // 없으면 대화 화면까지 관리 화면으로 오인해 학생 표시가 영영 안 돌아온다.
                 let has_profile_slot = composed
                     .iter()
                     .any(|row| row.iter().any(|c| c.ch == '\u{fffc}'));
-                let agents_view = !has_profile_slot
-                    && (self
-                        .pty
-                        .get(id.as_str())
-                        .map(|p| p.is_claude_agents())
-                        .unwrap_or(false)
-                        || screen_is_agents_list(&composed));
+                let agents_view = screen_is_agents_list(&composed)
+                    || (!has_profile_slot
+                        && self
+                            .pty
+                            .get(id.as_str())
+                            .map(|p| p.is_claude_agents())
+                            .unwrap_or(false));
                 if agents_view {
                     agents_view_panes.insert(id.clone());
                     // 관리 화면 = SCHALE 조직 정체성. claude 캐릭터(Clawd) 자리에 SCHALE
