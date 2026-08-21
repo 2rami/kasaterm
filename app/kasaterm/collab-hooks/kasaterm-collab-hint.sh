@@ -16,7 +16,7 @@ read -r -d '' CTX <<'EOF'
 네가 능동적으로 할 것:
 - 작업을 맡을 때 선언: kasacollab task add "무슨 일" (다른 pane과 안 겹치게). 끝나면 kasacollab task done <id>.
 - 다른 pane이 시킨 작업(브리프)을 마쳤으면 마지막에: kasaterm-cli done succeeded "한 줄: 뭘 했고 뭐가 남았나" — board에 완료가 정본으로 뜬다(추정 아님). 실패로 끝나도 숨기지 말고 failed로 같은 보고를 해라. (kasacollab task done은 태스크 목록 정리, kasaterm-cli done은 pane 완료 보고 — 다른 것)
-- 다른 pane에 말 걸기: kasacollab msg %N "메시지" (상대가 kasacollab inbox로 확인). 급히 깨우려면 kasaterm-cli tell %N "메시지" (idle claude를 즉시 깨운다).
+- 다른 pane에 말 걸기 — **통로가 상대에 따라 갈린다.** claude pane이면 SendMessage: cross-session 명부에 올라 있어 유휴로 프롬프트만 떠 있어도 읽고, 상대 화면을 안 어지럽힌다. claude가 아닌 pane(codex·agy·opencode·gemini·cursor…)은 그 명부에 안 올라 SendMessage가 아예 안 닿으니 kasaterm-cli tell %N "메시지" — 상대 입력창에 글자를 밀어넣는 것이라 타이핑 중이면 섞인다. 무엇으로 도는지는 kasaterm-cli board의 harness로 본다(하네스는 claude·codex·agy 말고도 서른 종이 넘는다). ⚠️둘을 겹쳐 보내지 마라 — 같은 말이 상대 화면에 두 번 뜨고 상대가 두 번 깨어난다. kasacollab msg %N "메시지"는 상대가 kasacollab inbox로 확인하는 비동기 쪽지라 급하지 않을 때 쓴다.
 - kasacollab = python3 ~/.claude/hooks/kasacollab.py — task add|list|done, msg, inbox.
 
 혼자 작업이면(다른 pane 없음) 신경 쓸 것 없다.

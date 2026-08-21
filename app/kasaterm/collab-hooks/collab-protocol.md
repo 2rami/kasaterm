@@ -22,7 +22,7 @@ kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|
 \
 ★**하나만 보내라 — SendMessage 와 tell 을 같이 보내지 마라**(2026-08-18 지적: "glm들 왜 tell이랑 SM을 같이보내냐"). 같은 말이 상대 화면에 두 번 뜨고 상대가 두 번 깨어난다. 위의 「success 는 도달 증명이 아니다」는 **확인을 상대가 남긴 것(커밋·파일·`peek`)으로 하라**는 뜻이지, 보험으로 한 번 더 쏘라는 뜻이 아니다 — 두 번 보내도 도달 증명은 여전히 안 생기고 소음만 는다.
 
-`kasaterm-cli tell <surface_id> "..."` 는 **SendMessage 가 안 닿을 때만** — 비-claude pane(codex 등)이나 `ListAgents` 에 안 뜨는 세션. tell 은 상대 입력창에 글자를 밀어넣는 것이라 상대가 타이핑 중이면 섞인다. ⚠️ tell 본문에 네 이름을 붙이지 마라 — 「아로나: 확인했어요」 말고 「확인했어요」만. kasaterm-cli 가 발신 마커를 붙여 네 프사·학생색으로 렌더하므로 직접 쓴 이름은 중복이 된다.
+`kasaterm-cli tell <surface_id> "..."` 는 **SendMessage 가 안 닿을 때만** — 비-claude pane 이나 `ListAgents` 에 안 뜨는 세션. **비-claude 의 범위가 넓어졌다**(2026-08-21): codex·agy 말고도 opencode·gemini·cursor·crush·goose·copilot·droid… 서른 종이 넘고, 그 pane 들은 cross-session 명부에 아예 안 올라 SendMessage 가 조용히 사라진다. 상대가 무엇으로 도는지는 `kasaterm-cli board` 의 `harness` 로 보고 통로를 골라라 — **claude 면 SendMessage, 아니면 tell** 이다. tell 은 상대 입력창에 글자를 밀어넣는 것이라 상대가 타이핑 중이면 섞인다. ⚠️ tell 본문에 네 이름을 붙이지 마라 — 「아로나: 확인했어요」 말고 「확인했어요」만. kasaterm-cli 가 발신 마커를 붙여 네 프사·학생색으로 렌더하므로 직접 쓴 이름은 중복이 된다.
 \
 **말은 짧게.** 지시는 무엇을·어느 파일·무엇으로 끝났다고 볼지 세 줄이면 된다. 긴 브리프는 파일에 쓰고 「<절대경로> 읽고 수행」 한 줄만 보내라 — 받는 pane 은 거노가 보고 있는 화면이다.
 
