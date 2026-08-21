@@ -39,7 +39,7 @@ pub(crate) enum ProcKind {
 
 /// Info 목록의 한 행. `depth` 는 셸 바로 아래 자식이 0 이고, 렌더가 들여쓰기에
 /// 쓴다. 셸 자신은 목록이 아니라 pane 그룹 머리에 따로 뜬다.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ProcRow {
     pub(crate) pid: u32,
     pub(crate) depth: u8,
@@ -123,7 +123,7 @@ pub(crate) struct PortRow {
 /// 한 pane 과 그 셸 아래 프로세스들. pane 을 묶음으로 두는 건 목록이 전 pane
 /// 공유로 바뀌었기 때문이다 — 평면으로 늘어놓으면 어느 pane 것인지가 행마다
 /// 반복돼 정작 계보가 안 읽힌다.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PaneGroup {
     /// surface id(`%17`).
     pub(crate) pane: String,
@@ -173,7 +173,7 @@ pub(crate) struct PaneGroup {
 /// 필드가 `PaneGroup` 과 겹치는 건 같은 것을 담기 때문이다. 그런데도 재귀
 /// 타입(`Vec<PaneGroup>`)으로 두지 않은 건 **탭은 탭을 가질 수 없어서**다 —
 /// 재귀로 두면 있지도 않은 깊이를 렌더가 매번 방어해야 한다.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TabRow {
     /// 탭의 PTY id(`%18`). 이미지·마크다운 탭은 셸이 없어 빈 문자열이다.
     pub(crate) pane: String,
@@ -3313,6 +3313,24 @@ mod session_title_tests {
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
+    /// 캐시 열쇠는 파일 크기다 — transcript 가 자라면(rename 이 append 된다) 반드시
+    /// 다시 읽어야 한다. 여기서 옛 제목이 나오면 pane 머리가 영영 안 바뀐다.
+    #[test]
+    fn reread_after_the_transcript_grows() {
+        let p = tmp_jsonl("grow", "{\"type\":\"ai-title\",\"aiTitle\":\"처음\"}\n");
+        assert_eq!(session_title(&p), "처음");
+        let mut body = std::fs::read_to_string(&p).unwrap();
+        body.push_str("{\"type\":\"custom-title\",\"customTitle\":\"이름 바꿈\"}\n");
+        std::fs::write(&p, body).unwrap();
+        assert_eq!(session_title(&p), "이름 바꿈");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod fold_tabs_tests {
+    use super::*;
+
     fn grp(id: &str) -> PaneGroup {
         PaneGroup { pane: id.to_string(), ..Default::default() }
     }
@@ -3383,16 +3401,23 @@ mod session_title_tests {
         );
     }
 
-    /// 캐시 열쇠는 파일 크기다 — transcript 가 자라면(rename 이 append 된다) 반드시
-    /// 다시 읽어야 한다. 여기서 옛 제목이 나오면 pane 머리가 영영 안 바뀐다.
+    /// 탭을 **접은 사이클에서도** 곁의 pane 은 통째로 그대로다.
+    ///
+    /// 위 `a_lone_tab_leaves_the_list_untouched` 가 보는 건 접을 게 하나도 없어
+    /// 함수가 첫 줄에서 빠져나가는 경우다. 실제 창은 거의 언제나 이쪽이 아니라
+    /// **섞인 쪽**이다 — 탭을 쓰는 pane 하나 곁에 탭 없는 pane 여럿. 그 경로는
+    /// 루프를 끝까지 도므로 `rows` 를 `mem::take` 로 뺏길 자리가 실재하고,
+    /// 필드가 하나라도 움직이면 목록 전체가 바뀐 것으로 보인다.
     #[test]
-    fn reread_after_the_transcript_grows() {
-        let p = tmp_jsonl("grow", "{\"type\":\"ai-title\",\"aiTitle\":\"처음\"}\n");
-        assert_eq!(session_title(&p), "처음");
-        let mut body = std::fs::read_to_string(&p).unwrap();
-        body.push_str("{\"type\":\"custom-title\",\"customTitle\":\"이름 바꿈\"}\n");
-        std::fs::write(&p, body).unwrap();
-        assert_eq!(session_title(&p), "이름 바꿈");
-        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    fn folding_one_pane_leaves_its_neighbours_untouched() {
+        let mut solo = grp("%3");
+        solo.label = "이로하".into();
+        solo.cwd = "~/work".into();
+        solo.rows = vec![ProcRow { pid: 42, ..Default::default() }];
+        let mut panes = vec![grp("%0"), grp("%1"), solo.clone()];
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%1", Some("%0"), 1), tgt("%3", None, 0)]);
+        // 접기가 실제로 일어난 사이클인가 — 이게 없으면 early return 을 재는 셈이다.
+        assert_eq!(panes[0].tabs.len(), 2);
+        assert_eq!(panes.iter().find(|g| g.pane == "%3"), Some(&solo));
     }
 }
