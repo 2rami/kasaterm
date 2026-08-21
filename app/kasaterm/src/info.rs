@@ -1497,7 +1497,7 @@ impl App {
 
     /// 수집 대상 pane 전부. 프로세스·포트를 pane 별로 갈라 보여주려면 GUI 만 아는
     /// 것(누가 어느 학생인지, 어느 pane 이 활성인지)을 여기서 실어 보내야 한다.
-    fn info_targets(&self) -> Vec<PaneTarget> {
+    pub(crate) fn info_targets(&self) -> Vec<PaneTarget> {
         let Ok(ws) = self.ws.lock() else {
             return Vec::new();
         };
@@ -1506,18 +1506,6 @@ impl App {
             .pty
             .iter()
             .filter_map(|(id, s)| {
-                // 숨긴 pane 은 어느 트리에도 없어 `pane_window` 에 안 잡히는데, 폴백이
-                // **활성 방**이라 치워 둔 pane 이 지금 보고 있는 방에 붙어 버린다(실측:
-                // 방 1 에서 숨긴 %4 가 방 2 밑에 섰다). 치운 자리를 기억하는 곳이
-                // `closed_panes.window` 이므로 그걸 먼저 본다.
-                let window = ws
-                    .pane_window
-                    .get(id)
-                    .copied()
-                    .or_else(|| {
-                        self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
-                    })
-                    .unwrap_or(self.active_window);
                 // `self.pty` 의 키는 BSP leaf 가 아니라 **PTY id** 다 — 탭도 자기
                 // PTY 를 가지므로 여기서 함께 걸린다. 어느 pane 의 몇 번째 탭인지를
                 // 실어 보내야 `collect` 이 마지막에 바깥 그룹으로 접어 넣는다.
@@ -1525,9 +1513,36 @@ impl App {
                 // 첫 탭은 pid 가 바깥 pane id 와 같아서 `pid_to_pane` 에 자기 자신을
                 // 가리키며 들어 있다(`rebuild_pid_map`). 거르지 않으면 자기 밑으로
                 // 접히는 고리가 생겨 pane 이 목록에서 통째로 사라진다.
-                let outer =
-                    ws.pid_to_pane.get(id).filter(|o| o.as_str() != id.as_str()).cloned();
-                let host = outer.as_deref().unwrap_or(id.as_str());
+                let host_of = ws.pid_to_pane.get(id).filter(|o| o.as_str() != id.as_str());
+                // 그리고 **탭이 하나뿐인 pane 은 접을 것이 없다** — 그 PTY 가 곧 pane
+                // 자신이라, 바깥 이름(BSP leaf)으로 갈아입혀 최상위에 세운다. 보통은
+                // leaf 와 pid 가 같아 이 갈림이 안 보이지만 탭을 꺼내 독립 pane 으로
+                // 만들면 `drop_tab_into_body` 가 새 leaf 를 발급해 둘이 갈린다. 그때
+                // 갈아입히지 않으면 인포만 그 pane 을 옛 PTY id 로 부르고(배치도·헤더는
+                // leaf 를 쓴다), 게다가 바깥이 목록에 없어 `fold_tabs` 가 접지 못해
+                // 최상위에 **고아**로 선다(실측: 배치도가 `%3` 이라 부르는 pane 이
+                // 인포에선 `%2` 로 형제처럼 나란히 섰다).
+                let tabbed = host_of
+                    .and_then(|o| ws.panes.get(o.as_str()))
+                    .is_some_and(|p| p.tabs.len() > 1);
+                let outer = if tabbed { host_of.cloned() } else { None };
+                let leaf = match host_of {
+                    Some(o) if !tabbed => o.clone(),
+                    _ => id.clone(),
+                };
+                let host = outer.as_deref().unwrap_or(leaf.as_str());
+                // 숨긴 pane 은 어느 트리에도 없어 `pane_window` 에 안 잡히는데, 폴백이
+                // **활성 방**이라 치워 둔 pane 이 지금 보고 있는 방에 붙어 버린다(실측:
+                // 방 1 에서 숨긴 %4 가 방 2 밑에 섰다). 치운 자리를 기억하는 곳이
+                // `closed_panes.window` 이므로 그걸 먼저 본다.
+                let window = ws
+                    .pane_window
+                    .get(&leaf)
+                    .copied()
+                    .or_else(|| {
+                        self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
+                    })
+                    .unwrap_or(self.active_window);
                 let (tab_title, tab_active, tab_index) = ws
                     .panes
                     .get(host)
@@ -1559,7 +1574,7 @@ impl App {
                         .get(id)
                         .or_else(|| self.pane_cwd_cache.get(id))
                         .cloned(),
-                    active: active.as_deref() == Some(id.as_str()),
+                    active: active.as_deref() == Some(leaf.as_str()),
                     window,
                     // `window_labels.0` 은 안 쓴다 — 그 자리는 대표 pane 의 OSC
                     // 타이틀이라 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다(실측).
@@ -1584,7 +1599,7 @@ impl App {
                         .get(id)
                         .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
                     closed: self.closed_panes.iter().any(|c| c.pane_id == *id),
-                    id: id.clone(),
+                    id: leaf,
                     shell_pid: s.shell_pid()?,
                     outer,
                     tab_title,
