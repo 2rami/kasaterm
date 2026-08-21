@@ -406,7 +406,50 @@ pub(crate) fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
 }
 
 
+/// 프사에서 **얼굴 칸용 상단 정사각**이 차지하는 세로 비율.
+///
+/// 실측으로 고른 값이다(2026-08-21, 학생 6명 × 3비율을 실제 칸 크기로 축소해
+/// 대조). `1.0`(자르지 않음)은 얼굴이 뭉개져 누구인지 안 읽히고, `0.5`는 정수리
+/// ─ 머리 장식이 캐릭터 식별의 절반이다 ─ 가 잘려 나간다.
+const PROFILE_FACE_RATIO: f32 = 0.62;
+
+/// 프사 한 장에서 얼굴 쪽 정사각만 도려내고 원래 변으로 되돌린다.
+///
+/// 프사가 쓰이는 자리는 전부 작다 — statusbar 12~13px, 세션 열 22px, tell·
+/// SendMessage 는 논리 14×17.5px 다. 96² 전신 bust 를 그런 칸에 통째로 넣으면
+/// 얼굴이 3~8px 이 되어 사람인지도 안 보인다. **거노 2026-08-21 「학생 프사 tell
+/// 에 안 나와」의 실체가 이것이다 — 안 그려진 게 아니라 안 읽히는 것이다.**
+///
+/// GIF 경로는 같은 문제를 이미 같은 방식으로 풀고 있다(`student_idle_anim` 이
+/// 알파 bbox 로 어깨 위 정사각을 도려낸다). 정적 프사에 그 방식을 그대로 쓸 수는
+/// 없다 — 이쪽은 96² 에 여백 없이 꽉 찬 에셋이라 알파 bbox 가 그림 전체이고,
+/// 그래서 아무것도 안 잘린다(실측). 세로 비율로 자르는 이유가 그것이다.
+///
+/// 자른 뒤 **원래 변으로 되돌리는** 것은 큰 칸(설정 화면 학생 고르기) 때문이다.
+/// 잘린 크기 그대로 두면 그런 자리에서 업스케일이 되어 흐려진다.
+fn crop_profile_face(rgba: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let edge = w.min(h);
+    let side = (edge as f32 * PROFILE_FACE_RATIO).round() as u32;
+    // 이미 얼굴만 담긴 작은 에셋이거나 비율이 무의미하면 그대로 — 두 번 자르면
+    // 눈만 남는다.
+    if side == 0 || side >= edge {
+        return Some((rgba, w, h));
+    }
+    let img = image::RgbaImage::from_raw(w, h, rgba)?;
+    // 가로는 가운데, 세로는 위 — 캐릭터는 캔버스 가운데 서 있고 얼굴은 위에 있다.
+    let face = image::imageops::crop_imm(&img, (w - side) / 2, 0, side, side).to_image();
+    let out =
+        image::imageops::resize(&face, edge, edge, image::imageops::FilterType::Lanczos3);
+    Some((out.into_raw(), edge, edge))
+}
+
 pub(crate) fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let (rgba, w, h) = student_profile_rgba_full(slug)?;
+    crop_profile_face(rgba, w, h)
+}
+
+/// 자르기 전 프사 원본 — override 우선, 없으면 번들.
+fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     if let Some(dir) = crate::socket::students_dir() {
         for foldered in [true, false] {
             if let Some(r) = user_asset_rgba_in(&dir, &profile_rel(slug, foldered)) {
@@ -1015,6 +1058,36 @@ mod student_asset_tests {
         assert_eq!(sprite_rel("mika", "walk", 5, false), "mika-walk-5.png");
         assert_eq!(profile_rel("mika", true), "profile/mika.png");
         assert_eq!(profile_rel("mika", false), "mika-profile.png");
+    }
+
+    // 얼굴 크롭은 **위쪽**을 담는다 — 아래를 담으면 몸통만 남아 누구인지 사라진다.
+    // 위 절반이 빨강, 아래 절반이 파랑인 판을 넣어 결과가 순수 빨강인지로 잰다.
+    #[test]
+    fn profile_face_crop_keeps_the_top() {
+        let mut img = image::RgbaImage::from_pixel(100, 100, image::Rgba([0, 0, 255, 255]));
+        for y in 0..62 {
+            for x in 0..100 {
+                img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        let (rgba, w, h) = crop_profile_face(img.into_raw(), 100, 100).expect("crop");
+        // 변은 원래대로 되돌아온다(큰 칸에서 업스케일로 흐려지지 않게).
+        assert_eq!((w, h), (100, 100));
+        let out = image::RgbaImage::from_raw(w, h, rgba).unwrap();
+        // 자른 62% 안은 전부 빨강이었으므로 리샘플 뒤에도 파랑이 섞이면 안 된다.
+        for p in out.pixels() {
+            assert!(p[0] > 200 && p[2] < 60, "아래쪽(파랑)이 섞였다: {p:?}");
+        }
+    }
+
+    // 이미 얼굴만 담긴 작은 에셋은 다시 자르지 않는다 — 두 번 자르면 눈만 남는다.
+    #[test]
+    fn profile_face_crop_skips_when_ratio_is_moot() {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+        let raw = img.into_raw();
+        let n = raw.len();
+        let (rgba, w, h) = crop_profile_face(raw, 4, 4).expect("crop");
+        assert_eq!((w, h, rgba.len()), (4, 4, n));
     }
 }
 
