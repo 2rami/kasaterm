@@ -2937,6 +2937,74 @@ fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
 /// Windows 프로세스명은 "claude.exe" — active_process_name 호출자들은 "claude" /
 /// "bash" 같은 bare 이름과 정확 일치 비교하므로 여기서 확장자를 벗겨 플랫폼
 /// 균질화한다. Unix 는 no-op.
+/// 표에 실린 하네스 한 줄. `AgentKind::Other` 가 이 정적 표의 원소를 가리킨다 —
+/// 종류가 서른을 넘어 enum 변종으로 세면 `match` 가 호출처마다 폭발하는데,
+/// 정작 이들에게 필요한 것은 「이름이 무엇이고 프로세스가 무엇인가」뿐이다.
+/// claude·codex·agy 만 변종으로 남긴 이유는 그 셋에만 고유 분기가 실재하기
+/// 때문이다(claude=SendMessage·transcript, codex=입력박스 판독, agy=배너).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AgentSpec {
+    /// 저장·전송용 id. Orca 의 `TuiAgent` 키와 같은 문자열을 쓴다.
+    pub id: &'static str,
+    /// 사람에게 보이는 이름(헤더 이름표·info).
+    pub label: &'static str,
+    /// 이 하네스로 인정할 프로세스 이름들. 첫 원소가 대표.
+    pub procs: &'static [&'static str],
+    /// comm 이 `node`·`Python` 같은 런처로 **숨을 때** 명령줄에서 찾을 조각.
+    ///
+    /// 이게 왜 필요한지는 실측이 말해 준다(2026-08-21, 이 컴퓨터에서 직접 띄움):
+    /// gemini 는 셸의 자식도 손자도 comm 이 `node` 고, hermes 는 `Python` 이며,
+    /// cursor-agent 는 `…/cursor-agent/versions/<판>/node` 라 파일명만 떼면 역시
+    /// `node` 다. 이름만 보는 판정으로는 **셋 다 영영 안 잡힌다** — 표를 옮겨
+    /// 놓고도 학생이 안 서는 조용한 실패라 알아채기 어렵다.
+    pub argv_hints: &'static [&'static str],
+}
+
+/// 하네스 표. 출처는 Orca(`src/shared/tui-agent-config.ts` +
+/// `tui-agent-display-names.ts`)이고 2026-08-21 에 기계적으로 옮겼다 — 손으로
+/// 늘리면 이름 하나가 어긋나 조용히 안 잡히므로, 갱신할 때도 그 두 파일에서
+/// 다시 뽑아라.
+///
+/// 셋은 일부러 뺐다: `claude`·`codex`·`antigravity` 는 아래 enum 변종이고,
+/// `claude-agent-teams` 는 Orca 전용 런치 모드라 우리 쪽에 대응물이 없으며,
+/// `kimi` 는 이 컴퓨터에서 **거노의 자작 런처 이름**이다(claude 를 다른 모델로
+/// 띄우는 zsh 스크립트) — 문샷의 Kimi CLI 와 이름이 같아 넣으면 오판한다.
+pub static AGENT_TABLE: &[AgentSpec] = &[
+    AgentSpec { id: "aider", label: "Aider", procs: &["aider"], argv_hints: &[] },
+    AgentSpec { id: "amp", label: "Amp", procs: &["amp"], argv_hints: &["@sourcegraph/amp/"] },
+    AgentSpec { id: "ante", label: "Ante", procs: &["ante"], argv_hints: &[] },
+    AgentSpec { id: "aug", label: "Auggie", procs: &["auggie"], argv_hints: &[] },
+    AgentSpec { id: "autohand", label: "Autohand Code", procs: &["autohand"], argv_hints: &[] },
+    AgentSpec { id: "cline", label: "Cline", procs: &["cline"], argv_hints: &[] },
+    AgentSpec { id: "codebuff", label: "Codebuff", procs: &["codebuff"], argv_hints: &[] },
+    AgentSpec { id: "command-code", label: "Command Code", procs: &["command-code"], argv_hints: &[] },
+    AgentSpec { id: "continue", label: "Continue", procs: &["cn"], argv_hints: &[] },
+    AgentSpec { id: "copilot", label: "GitHub Copilot", procs: &["copilot"], argv_hints: &[] },
+    AgentSpec { id: "crush", label: "Charm", procs: &["crush"], argv_hints: &[] },
+    AgentSpec { id: "cursor", label: "Cursor", procs: &["cursor-agent"], argv_hints: &["cursor-agent/versions/"] },
+    AgentSpec { id: "devin", label: "Devin", procs: &["devin"], argv_hints: &[] },
+    AgentSpec { id: "droid", label: "Droid", procs: &["droid"], argv_hints: &[] },
+    // 힌트가 둘인 이유: 설치 방식마다 명령줄이 다르다. npm 전역이면
+    // `node …/npm-global/bin/gemini`(이 컴퓨터 실측)이고, 패키지를 직접 가리키면
+    // Orca 가 쓰는 `node_modules/@google/gemini-cli/…` 가 된다.
+    AgentSpec { id: "gemini", label: "Gemini", procs: &["gemini"], argv_hints: &["node_modules/@google/gemini-cli/", "/bin/gemini"] },
+    AgentSpec { id: "goose", label: "Goose", procs: &["goose"], argv_hints: &[] },
+    AgentSpec { id: "grok", label: "Grok", procs: &["grok"], argv_hints: &[] },
+    AgentSpec { id: "hermes", label: "Hermes", procs: &["hermes"], argv_hints: &[".hermes/hermes-agent/"] },
+    AgentSpec { id: "kilo", label: "Kilocode", procs: &["kilo"], argv_hints: &[] },
+    AgentSpec { id: "kiro", label: "Kiro", procs: &["kiro-cli"], argv_hints: &[] },
+    AgentSpec { id: "mimo-code", label: "MiMo Code", procs: &["mimo"], argv_hints: &[] },
+    AgentSpec { id: "mistral-vibe", label: "Mistral Vibe", procs: &["vibe", "mistral-vibe"], argv_hints: &[] },
+    AgentSpec { id: "omp", label: "OMP", procs: &["omp"], argv_hints: &[] },
+    AgentSpec { id: "openclaude", label: "OpenClaude", procs: &["openclaude"], argv_hints: &[] },
+    AgentSpec { id: "openclaw", label: "OpenClaw", procs: &["openclaw"], argv_hints: &[] },
+    AgentSpec { id: "opencode", label: "OpenCode", procs: &["opencode"], argv_hints: &[] },
+    AgentSpec { id: "pi", label: "Pi", procs: &["pi"], argv_hints: &["pi-coding-agent/dist/cli.js"] },
+    AgentSpec { id: "qwen-code", label: "Qwen Code", procs: &["qwen"], argv_hints: &[] },
+    AgentSpec { id: "rovo", label: "Rovo Dev", procs: &["rovo"], argv_hints: &[] },
+    AgentSpec { id: "trae", label: "Trae", procs: &["traecli"], argv_hints: &[] },
+];
+
 /// pane 에서 도는 에이전트 종류. 학생 대접(보더 학생색·타이틀바·얼굴·탭칩)은
 /// claude 전용이 아니라 **이 값이 Some 이면** 붙는다(거노 2026-08-05: codex 도 학생).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2944,6 +3012,8 @@ pub enum AgentKind {
     Claude,
     Codex,
     Agy,
+    /// 표의 한 줄. 얼굴·이름·색만 받는 하네스들이 전부 여기로 온다.
+    Other(&'static AgentSpec),
 }
 
 impl AgentKind {
@@ -2954,6 +3024,30 @@ impl AgentKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Agy => "agy",
+            Self::Other(spec) => spec.id,
+        }
+    }
+
+    /// 사람에게 보이는 이름. 헤더 이름표·info 가 이걸 그린다 — `as_str` 은
+    /// 저장·전송용이라 소문자 id 고, 이쪽은 표기용이라 갈라 둔다.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+            Self::Agy => "Antigravity",
+            Self::Other(spec) => spec.label,
+        }
+    }
+
+    /// `as_str` 의 역함수. 저장된 `was_agent`·소켓의 `harness` 를 되읽는 자리가
+    /// 각자 하드코딩 match 를 갖고 있었는데, 종류가 서른이 되면 그 사본들이
+    /// 곧바로 갈린다.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "agy" => Some(Self::Agy),
+            other => AGENT_TABLE.iter().find(|s| s.id == other).map(Self::Other),
         }
     }
 
@@ -2968,7 +3062,10 @@ impl AgentKind {
             // shim 래퍼도 `agy` 라는 이름의 sh 스크립트지만 마지막에 `exec` 로
             // 진짜 바이너리가 그 자리를 차지하므로, 여기 걸리는 건 늘 진짜다.
             "agy" => Some(Self::Agy),
-            _ => None,
+            other => AGENT_TABLE
+                .iter()
+                .find(|spec| spec.procs.contains(&other))
+                .map(Self::Other),
         }
     }
 }
@@ -2991,7 +3088,100 @@ pub fn agent_pid_for_shell(
     table: &[(u32, u32, String)],
     shell_pid: u32,
 ) -> Option<(AgentKind, u32)> {
-    agent_pid_in_table(table, effective_shell_pid(table, shell_pid))
+    let eff = effective_shell_pid(table, shell_pid);
+    if let Some(hit) = agent_pid_in_table(table, eff) {
+        return Some(hit);
+    }
+    agent_pid_by_argv(table, eff)
+}
+
+/// 이름으로 못 잡은 pane 을 **명령줄로** 한 번 더 본다 — comm 이 `node`·`Python`
+/// 인 하네스들(gemini·cursor·hermes·amp)이 여기서만 잡힌다.
+///
+/// ⚠️ 순서가 곧 비용이다. `process_cmdline` 은 pid 하나마다 `ps` 를 부르는데
+/// 캐시가 없어서, 이름 판정보다 **먼저** 놓으면 학생이 아닌 셸 pane 까지 매
+/// 프레임 ps 를 돌린다. 그래서 ①이름 판정이 실패하고 ②그 자식이 실제로
+/// 런처류일 때만 여기까지 온다. 결과는 아래 캐시가 1초 잡아 둔다.
+fn agent_pid_by_argv(
+    table: &[(u32, u32, String)],
+    shell_pid: u32,
+) -> Option<(AgentKind, u32)> {
+    let newest_child = |parent: u32| -> Option<(u32, &str)> {
+        let mut best: Option<(u32, &str)> = None;
+        for (row_pid, row_ppid, name) in table.iter() {
+            if *row_ppid == parent && best.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                best = Some((*row_pid, name.as_str()));
+            }
+        }
+        best
+    };
+    let (child_pid, child) = newest_child(shell_pid)?;
+    // 런처가 아니면 이름이 이미 진실을 말한 것이다 — 그걸로 못 잡았으면
+    // 하네스가 아니라는 뜻이므로 ps 를 부를 이유가 없다.
+    if !is_argv_probe_launcher(child) {
+        return None;
+    }
+    // 자식과 손자 둘 다 본다. gemini 는 node 아래 node 로 한 겹 더 들어간다.
+    let grandchild = newest_child(child_pid).map(|(p, _)| p);
+    for pid in [Some(child_pid), grandchild].into_iter().flatten() {
+        if let Some(spec) = agent_spec_by_argv_cached(pid) {
+            return Some((AgentKind::Other(spec), pid));
+        }
+    }
+    None
+}
+
+/// argv 를 들여다볼 가치가 있는 런처 — 이름 판정용 `is_agent_launcher` 보다 넓다.
+///
+/// python 을 **여기에만** 넣는 이유: 이름으로 한 세대 내려가는 판정에 python 을
+/// 넣으면 `python train.py` 처럼 자기가 곧 작업인 흔한 경우에 엉뚱한 자식 이름을
+/// 집는다. 반면 argv 폴백은 표의 힌트 문자열과 정확히 맞을 때만 인정하므로 그
+/// 위험이 없다. hermes 가 실측에서 comm=`Python`(macOS 프레임워크 번들이라 대문자)
+/// 이었고, 이 문이 닫혀 있어 표가 맞는데도 안 잡혔다(2026-08-21).
+fn is_argv_probe_launcher(comm: &str) -> bool {
+    if is_agent_launcher(comm) {
+        return true;
+    }
+    let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    let base = strip_exe_suffix(base.to_string()).to_ascii_lowercase();
+    base == "python" || base.strip_prefix("python").is_some_and(|v| {
+        !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+    })
+}
+
+/// pid → argv 판정 결과, 1초 캐시. `process_cmdline` 이 `ps` 한 번씩이라
+/// 캐시 없이는 gemini pane 하나가 매 프레임 프로세스를 띄운다.
+///
+/// pid 는 재사용되지만 TTL 이 1초라 남의 결과를 물려받을 창이 사실상 없다 —
+/// 그 사이에 pid 가 한 바퀴 돌려면 초당 수만 개가 떠야 한다.
+fn agent_spec_by_argv_cached(pid: u32) -> Option<&'static AgentSpec> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<u32, (Instant, Option<&'static AgentSpec>)>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let now = Instant::now();
+    if let Ok(mut map) = cache.lock() {
+        if let Some((at, val)) = map.get(&pid) {
+            if now.duration_since(*at).as_millis() < 1000 {
+                return *val;
+            }
+        }
+        let args = process_cmdline(pid).unwrap_or_default();
+        let hit = (!args.is_empty())
+            .then(|| {
+                AGENT_TABLE
+                    .iter()
+                    .find(|spec| spec.argv_hints.iter().any(|h| args.contains(h)))
+            })
+            .flatten();
+        // 실패도 캐시한다 — 셸 pane 은 늘 실패하는데 그때마다 ps 를 부르면
+        // 캐시를 둔 의미가 없다.
+        map.retain(|_, (at, _)| now.duration_since(*at).as_secs() < 5);
+        map.insert(pid, (now, hit));
+        return hit;
+    }
+    None
 }
 
 /// 판정 본체의 종류-만 어댑터 — 이제 prod 는 pid 동반판을 쓰고, 트리 판정
@@ -3557,6 +3747,97 @@ mod scrollback_probe {
             history_lines_for_cols(cols),
             before, rss()
         );
+    }
+}
+
+#[cfg(test)]
+mod 하네스_표_tests {
+    use super::*;
+
+    fn row(pid: u32, ppid: u32, name: &str) -> (u32, u32, String) {
+        (pid, ppid, name.to_string())
+    }
+
+    /// 표에 실린 하네스는 이름만으로 잡혀야 한다 — opencode 는 실측에서 comm 이
+    /// `/Users/…/.opencode/bin/opencode` 라 경로가 붙어 온다(2026-08-21).
+    #[test]
+    fn 표에_실린_하네스는_이름으로_잡힌다() {
+        let t = vec![
+            row(100, 1, "zsh"),
+            row(200, 100, "/Users/kasa/.opencode/bin/opencode"),
+        ];
+        let got = agent_in_table(&t, 100).expect("opencode 를 못 잡았다");
+        assert_eq!(got.as_str(), "opencode");
+        assert_eq!(got.label(), "OpenCode");
+    }
+
+    /// ⚠️ 표의 프로세스 이름이 enum 변종 셋과 겹치면, 겹친 쪽이 `Other` 로
+    /// 잡혀 claude 전용 분기(SendMessage·transcript·입력 판독)가 통째로 빠진다.
+    /// match 가 먼저라 실제로는 변종이 이기지만, 표에 그 이름이 있다는 것
+    /// 자체가 "표를 고치면 하네스가 바뀐다"는 함정이므로 아예 금지한다.
+    #[test]
+    fn 표가_내장_변종을_가리지_않는다() {
+        for spec in AGENT_TABLE {
+            for p in spec.procs {
+                assert!(
+                    !matches!(*p, "claude" | "codex" | "agy"),
+                    "{}: 프로세스 이름 {p:?} 가 내장 변종과 겹친다",
+                    spec.id
+                );
+            }
+            assert!(
+                !matches!(spec.id, "claude" | "codex" | "agy"),
+                "{}: id 가 내장 변종과 겹친다",
+                spec.id
+            );
+        }
+    }
+
+    /// 같은 프로세스 이름이 두 줄에 있으면 먼저 쓰인 쪽이 늘 이겨, 뒤엣것은
+    /// 영영 안 잡히면서도 컴파일은 통과한다.
+    #[test]
+    fn 표에_같은_프로세스_이름이_두_번_없다() {
+        let mut seen = std::collections::HashMap::new();
+        for spec in AGENT_TABLE {
+            for p in spec.procs {
+                if let Some(prev) = seen.insert(*p, spec.id) {
+                    panic!("프로세스 이름 {p:?} 가 {prev} 와 {} 에 겹친다", spec.id);
+                }
+            }
+        }
+    }
+
+    /// `as_str` → `from_id` 왕복. 저장된 `was_agent` 를 되읽는 경로가 이걸 탄다 —
+    /// 깨지면 재시작 때 그 pane 이 셸로 되살아난다.
+    #[test]
+    fn id_는_왕복한다() {
+        for spec in AGENT_TABLE {
+            let k = AgentKind::from_id(spec.id).expect("표에 있는 id 를 못 되읽었다");
+            assert_eq!(k.as_str(), spec.id);
+            assert_eq!(k, AgentKind::Other(spec));
+        }
+        for k in [AgentKind::Claude, AgentKind::Codex, AgentKind::Agy] {
+            assert_eq!(AgentKind::from_id(k.as_str()), Some(k));
+        }
+        assert_eq!(AgentKind::from_id("없는하네스"), None);
+    }
+
+    /// comm 이 런처가 아니면 argv 를 볼 이유가 없다 — 그 문을 열어 두면 셸
+    /// pane 마다 매 프레임 `ps` 가 돈다(`process_cmdline` 은 캐시가 없다).
+    #[test]
+    fn 런처가_아니면_명령줄을_안_읽는다() {
+        let t = vec![row(100, 1, "zsh"), row(200, 100, "vim")];
+        assert_eq!(agent_pid_by_argv(&t, 100), None);
+    }
+
+    /// argv 힌트를 단 하네스는 이름 판정으로는 못 잡히는 것들이다(실측). 힌트가
+    /// 빈 채로 남으면 그 줄은 표에 있어도 영영 안 선다.
+    #[test]
+    fn 이름에_숨는_하네스는_명령줄_힌트를_갖는다() {
+        for id in ["gemini", "cursor", "hermes", "amp"] {
+            let spec = AGENT_TABLE.iter().find(|s| s.id == id).expect("표에 없다");
+            assert!(!spec.argv_hints.is_empty(), "{id}: argv 힌트가 비었다");
+        }
     }
 }
 

@@ -3960,16 +3960,21 @@ fn restored_scrollback(rec: &serde_json::Value, restarting_agent: bool) -> Vec<S
 /// 않게 한다.
 /// 저장된 leaf 가 어떤 하네스로 돌던 pane 인지 — 없으면 순수 셸.
 ///
-/// 정본 키는 `was_agent`("claude"|"codex"|"agy"). 그 전 포맷은 `was_claude: true` 뿐이라
-/// **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던 학생
-/// pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
+/// 정본 키는 `was_agent`(`AgentKind::as_str` 이 쓴 id). 그 전 포맷은 `was_claude: true`
+/// 뿐이라 **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던
+/// 학생 pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
 /// 언젠가 갈린다).
+///
+/// 되읽기를 `AgentKind::from_id` 하나로 모은 이유: 예전엔 여기가 세 종류를 손으로
+/// 나열했는데, 하네스가 서른이 된 지금 그 사본을 두면 표에만 있고 여기엔 없는
+/// 하네스가 **재시작 한 번에 셸로 되살아난다**(학생·대화 이어가기가 통째로 빠진다).
 fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
-    match rec.get("was_agent").and_then(|v| v.as_str()) {
-        Some("codex") => return Some("codex"),
-        Some("claude") => return Some("claude"),
-        Some("agy") => return Some("agy"),
-        _ => {}
+    if let Some(kind) = rec
+        .get("was_agent")
+        .and_then(|v| v.as_str())
+        .and_then(kasa_pty::AgentKind::from_id)
+    {
+        return Some(kind.as_str());
     }
     rec.get("was_claude")
         .and_then(|b| b.as_bool())

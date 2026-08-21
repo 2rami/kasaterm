@@ -19,6 +19,7 @@ pub use state::{
     agent_for_shell, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session, process_cmdline,
     process_env_var, release_session,
     process_env_vars, process_table, process_table_shared,
-    register_session, set_host_colors, AgentKind, CommandBlock, PromptAnchor, PtyOptions,
+    register_session, set_host_colors, AgentKind, AgentSpec, CommandBlock, PromptAnchor, PtyOptions,
+    AGENT_TABLE,
     PtySession,
 };
