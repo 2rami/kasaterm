@@ -108,6 +108,9 @@ impl App {
                 ..Default::default()
             });
         self.notify_flash.insert(surface_id.to_string(), now);
+        // 턴이 끝났다 = 사용량이 방금 움직였다. 폴러를 깨워 남은 잠을 건너뛰게 한다
+        // (`usage_poke`) — 그러지 않으면 방금 쓴 몫이 최대 1분 뒤에야 표에 뜬다.
+        crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
         // A pane in a *background* window finished — pulse that window's sidebar
         // tab until the user switches to it (switch_window clears the entry).
         if let Some(wi) = self.window_of_pane(surface_id) {

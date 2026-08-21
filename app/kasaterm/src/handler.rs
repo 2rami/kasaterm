@@ -1386,9 +1386,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
-                // 비활성 계정 조회까지 남은 사이클 수(0 이면 이번에 친다). 60초 주기라
-                // 5 = 5분. 첫 바퀴는 0 이라 창을 열자마자 표가 찬다.
-                let mut others_due = 0u8;
+                // 비활성 계정을 마지막으로 친 시각. `None` 이면 아직 안 쳤다는
+                // 뜻이라 창을 열자마자 표가 찬다.
+                //
+                // 사이클 **수**를 세다 시각으로 바꾼 건 아래 poke 때문이다. 턴이 끝날
+                // 때마다 깨우면 사이클이 훨씬 자주 도는데, 카운터로 세면 그만큼 5분이
+                // 짧아져 비활성 슬롯 조회가 덩달아 잦아진다 — 정작 upstream 부담을
+                // 아끼려고 둔 간격이 조용히 무너진다. 시각으로 재면 몇 번을 깨우든
+                // 비활성은 5분에 한 번이다.
+                let mut others_at: Option<std::time::Instant> = None;
+                const OTHERS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
                 loop {
                     // 조회할 슬롯을 **매 사이클 설정에서 다시 읽어 URL 에 못 박는다.**
                     //
@@ -1481,7 +1488,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // 굳어 있었다 — 계정을 눌러 전환할 때만 움직이는 것처럼 보인 이유다
                     // (거노 2026-08-07: "전환해야만 사용량 갱신되는데"). 비활성 슬롯은
                     // 아래 5분 주기 그대로다(만료 토큰에 헛 curl, upstream 레이트리밋 공유).
-                    if others_due != 0 {
+                    let others_now =
+                        others_at.is_none_or(|t: std::time::Instant| t.elapsed() >= OTHERS_EVERY);
+                    if !others_now {
                         if let Some(b) = active_badge.clone() {
                             if let Ok(mut g) = usage_all.lock() {
                                 if g.get(&b.account_dir) != Some(&b) {
@@ -1494,7 +1503,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    if others_due == 0 {
+                    if others_now {
                         let mut all: HashMap<String, crate::UsageBadge> = HashMap::new();
                         if let Some(b) = active_badge {
                             all.insert(b.account_dir.clone(), b);
@@ -1507,13 +1516,38 @@ impl ApplicationHandler<UserEvent> for App {
                             crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                 .map(|p| p.to_string_lossy().into_owned())
                         }));
-                        for d in dirs {
-                            if all.contains_key(&d) {
-                                continue;
-                            }
-                            let Some((u, stale, dir)) =
-                                fetch_claude_usage(&crate::mcp_panel_port(), &d)
-                            else {
+                        // 이번에 물어본 슬롯 전부 — 성패와 무관하다. 아래에서 표를
+                        // 합칠 때 「설정에서 사라진 슬롯」과 「이번에 실패한 슬롯」을
+                        // 갈라내는 근거다.
+                        let asked: std::collections::HashSet<String> =
+                            dirs.iter().cloned().collect();
+                        // 슬롯을 **한꺼번에** 친다. 순차로 돌면 슬롯 수만큼 시간이 쌓이고
+                        // (curl 하나가 최대 5초, 토큰이 만료된 슬롯은 프록시가 되살리는
+                        // 동안 그 상한을 다 쓴다), 표는 전부 모여야 한 벌로 읽히므로 그
+                        // 합이 그대로 「사용량이 늦게 뜬다」였다. 슬롯 다섯이면 최대 25초.
+                        //
+                        // **호출 총량은 한 톨도 안 늘어난다** — 같은 슬롯을 같은 횟수로
+                        // 칠 뿐 순서만 겹친다. upstream 레이트리밋과 무관한 이유고, 그래서
+                        // 주기를 건드리는 쪽보다 먼저 손대는 자리다.
+                        let port = crate::mcp_panel_port();
+                        // 같은 경로를 두 번 치지 않는다. 활성 계정이 작업대에 올라와
+                        // 있으면 그 슬롯도 기본 로그인과 똑같이 빈 문자열로 떨어져
+                        // (`runtime_dir_for`) 목록에 두 번 실린다 — 순차일 때는 앞의
+                        // 성공이 `all` 에 들어가 뒤가 걸러졌지만, 한꺼번에 띄우면 둘 다
+                        // 나가 같은 답을 두 번 받는다.
+                        let mut seen = std::collections::HashSet::new();
+                        let jobs: Vec<_> = dirs
+                            .into_iter()
+                            .filter(|d| !all.contains_key(d) && seen.insert(d.clone()))
+                            .map(|d| {
+                                let port = port.clone();
+                                std::thread::spawn(move || fetch_claude_usage(&port, &d))
+                            })
+                            .collect();
+                        for j in jobs {
+                            // 스레드가 패닉했으면 그 슬롯만 건너뛴다 — 한 슬롯의 사고가
+                            // 나머지 표를 통째로 못 가져오게 두면 병렬화가 손해가 된다.
+                            let Ok(Some((u, stale, dir))) = j.join() else {
                                 continue;
                             };
                             if let Some(p) = socket::usage_pressure(&u) {
@@ -1535,11 +1569,23 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // 조회가 통째로 실패한 사이클엔 옛 표를 지우지 않는다 — 빈칸은
                         // "한도 여유"로 읽혀서, 낡은 숫자보다 나쁘다.
+                        //
+                        // **일부만 실패한 사이클도 같다.** 전에는 성공분으로 표를 통째
+                        // 갈아치워, 슬롯 하나가 일시 실패하면 그 슬롯이 표에서 사라졌다
+                        // — 위 규칙이 막으려던 바로 그 빈칸이 한 칸씩 생기고 있었다.
+                        // 동시에 치면 그중 하나가 실패할 자리가 그만큼 늘어나므로 이
+                        // 자리를 함께 닫는다. 실패한 슬롯은 옛 값을 그대로 둔다.
+                        //
+                        // 대신 **이번에 물어보지도 않은** dir 은 지운다. 그게 설정에서
+                        // 빠진 계정이고, 안 지우면 지운 계정이 표에 영영 남는다.
                         if !all.is_empty() {
                             match usage_all.lock() {
                                 Ok(mut g) => {
-                                    if *g != all {
-                                        *g = all;
+                                    let mut next = g.clone();
+                                    next.retain(|k, _| asked.contains(k));
+                                    next.extend(all);
+                                    if *g != next {
+                                        *g = next;
                                         drop(g);
                                         if usage_proxy.send_event(UserEvent::Redraw).is_err() {
                                             break;
@@ -1549,9 +1595,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 Err(_) => break,
                             }
                         }
-                        others_due = 5;
-                    } else {
-                        others_due -= 1;
+                        others_at = Some(std::time::Instant::now());
                     }
                     // 한도 자동 계정 전환. 판정은 여기(폴러)서 하고 실제 전환은 GUI
                     // 스레드가 한다 — 설정 저장이 shim 을 다시 까는 일이라 App 이 필요하다.
@@ -1656,6 +1700,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // shim env 를 함께 갱신하므로 이 신호로 충분하다.
                     for _ in 0..12 {
                         std::thread::sleep(std::time::Duration::from_secs(5));
+                        // 턴이 끝났으면 남은 잠을 건너뛴다(`usage_poke`).
+                        if usage_poke().swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let now = socket::read_claude_account();
                         if now != seen_account {
                             seen_account = now;
@@ -6360,6 +6408,26 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// 턴이 끝났다는 깃발. claude 의 Stop hook 이 `kasaterm-cli notify` 로 들어오면
+/// GUI(`handle_notify`)가 여기 세우고, 사용량 폴러가 5초 슬라이스마다 보고 **자던
+/// 나머지를 건너뛴다**.
+///
+/// 사용량이 실제로 움직이는 계기는 턴이 끝날 때뿐이다. 그런데 폴러는 그와 무관하게
+/// 60초를 세고 있어서, 턴이 끝난 직후에 본 숫자가 최대 1분 낡은 값이었다 — 거노
+/// 2026-08-21 「다 로그인하면 세션 사용량 실시간으로 떠야 되는데 왤케 느려」의 본체가
+/// 이쪽이다(슬롯 순차 조회는 그 위에 얹힌 두 번째 몫이었다).
+///
+/// **이 깨움이 upstream 호출을 늘리지 않는다.** 프록시가 슬롯별로 60초 TTL 캐시를
+/// 쥐고 있어(kasa-mcp/http.rs `claude_usage_handler`), 그보다 자주 물으면 캐시가
+/// 답하고 upstream 은 안 나간다. 즉 호출 상한은 여기가 아니라 그 캐시가 정한다.
+///
+/// 깃발이 하나라 여러 pane 이 동시에 끝나도 한 번으로 합쳐진다 — 연타 방지를 따로
+/// 둘 필요가 없다. `swap` 으로 읽으므로 소비도 정확히 한 번이다.
+pub(crate) fn usage_poke() -> &'static std::sync::atomic::AtomicBool {
+    static POKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &POKE
 }
 
 /// `dir` 은 조회할 **계정 저장소 경로** — 빈 문자열이 기본 로그인이다.
