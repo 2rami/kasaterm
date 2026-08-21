@@ -119,10 +119,16 @@ impl App {
             }
         };
         window.set_ime_allowed(false);
-        // ⚠️ 셀 폰트 크기는 **다른 창과 같은 `FONT_SIZE`** 여야 한다. 여기만 13.0 을
-        // 줬더니 한글 자간이 불규칙하게 벌어졌다(「학 생 이끝났 습 니다」) — 이 값이
-        // 격자와 폴백 글리프 메트릭의 기준이라, 배너가 chrome 텍스트만 그리는데도
-        // 어긋난다. 배너 글자 크기는 `draw_text` 의 `font_size` 로 따로 정한다.
+        // 셀 폰트 크기는 다른 창과 같은 `FONT_SIZE` 로 둔다. 배너 글자 크기는
+        // `draw_text` 의 `font_size` 로 따로 정한다.
+        //
+        // ⚠️ 한때 이 값을 13.0 으로 줬다가 「한글 자간이 그래서 벌어진다」고 적었는데
+        // **그건 틀린 인과였다.** 두 캡처의 문장이 서로 달라 비교가 공평하지 않았고,
+        // 값을 되돌려 다시 찍으니 그림이 바이트까지 같았다. 진짜 규칙은
+        // `gpu::pen_step` 이다 — 와이드 글자는 `잉크 폭 + size*0.18` 로 미는데, 잉크
+        // 폭이 글자마다 다르므로(「학」은 넓고 「이」는 좁다) 틈이 불규칙해진다.
+        // **앱 전체 공통이라 인포 패널의 「프로 젝트 디렉터리」도 똑같이 벌어진다** —
+        // 배너만 튀는 것이 아니고, 여기서 고칠 수 있는 자리도 아니다.
         let gpu = match gpu::GpuRenderer::new(window.clone(), crate::FONT_SIZE) {
             Ok(g) => g,
             Err(e) => {
@@ -146,7 +152,18 @@ impl App {
     pub(crate) fn draw_banner(&mut self, idx: usize) {
         let Some(b) = self.banners.get_mut(idx) else { return };
         let scale = b.window.scale_factor() as f32;
+        // ⚠️ **`set_scale` 만으로는 칸 폭이 안 따라온다.** 그건 scale 과 아틀라스만
+        // 갈고 `cell_w`/`cell_h` 는 `set_font_size` 가 정한다 — 즉 칸 폭은 창을 만들
+        // 때의 scale 로 굳는데, `GpuRenderer::new` 는 아직 화면에 안 붙은 창의
+        // `scale_factor()` 를 읽는다. auxwin 이 네 자리 모두에서 이 둘을 **붙여
+        // 부르는** 이유가 이것이다.
+        //
+        // 지금 배너는 chrome 텍스트만 그려서 칸 폭을 안 쓴다 — 이 줄이 눈에 보이는
+        // 것을 바꾸지는 않는다. 그래도 붙여 두는 건 칸이 실제 배율과 어긋난 채로
+        // 굳어 있는 상태 자체가 함정이기 때문이다(셀을 한 줄이라도 그리게 되는
+        // 순간 조용히 틀린다).
         b.gpu.set_scale(scale);
+        b.gpu.set_font_size(crate::FONT_SIZE);
         let (pw, ph) = b.gpu.surface_size();
         if pw == 0 || ph == 0 {
             return;
