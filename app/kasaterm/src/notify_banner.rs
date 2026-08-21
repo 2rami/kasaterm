@@ -187,6 +187,7 @@ impl App {
             .unwrap_or_else(theme::accent);
         let title = b.title.clone();
         let body = b.body.clone();
+        let face_name = b.character.clone();
 
         b.gpu.clear_chrome();
         // 창을 투명으로 띄웠으므로 배경을 안 칠하면 **판 바깥이 그대로 비친다** —
@@ -196,14 +197,31 @@ impl App {
         // 왼쪽 색띠 — 알림 여럿이 쌓였을 때 누구 것인지 글자보다 먼저 읽힌다.
         b.gpu.round_rect_fill(0.0, 0.0, 4.0, h, 2.0, accent);
 
-        let x0 = 18.0;
-        b.gpu.draw_text(
+        // 학생 얼굴. 색띠가 색으로 말하는 「누구」를 그림으로 한 번 더 말한다 —
+        // 배너는 다른 앱을 보던 중에 시야 가장자리로 들어오는 물건이라, 글자를
+        // 읽기 전에 누구인지가 먼저 닿아야 값이 있다(거노 2026-08-21 「알림 배너에
+        // 학생 프사도 이번에 뽑은 거 붙이자」).
+        //
+        // `draw_student_face` 를 그대로 쓴다 — 사이드바·statusline·tell 과 **같은
+        // 함수·같은 이미지 키**라, 자리마다 다른 얼굴이 뜰 수가 없다. 학생이 없는
+        // 알림이면 `false` 라 얼굴 없이 옛 여백 그대로 간다.
+        const FACE: f32 = 48.0;
+        let has_face = face_name.as_deref().is_some_and(|n| {
+            crate::render::draw_student_face(&mut b.gpu, n, 14.0, (h - FACE) / 2.0, FACE)
+        });
+        let x0 = if has_face { 14.0 + FACE + 14.0 } else { 18.0 };
+        // 얼굴이 폭을 가져간 만큼 글자가 설 자리가 좁아진다. 넘치면 판 밖으로
+        // 흘러 옆 창 위에 글자만 떠 있는 꼴이 되므로 오른쪽 여백에서 자른다.
+        let clip_r = w - 14.0;
+        b.gpu.draw_text_clipped(
             x0,
             16.0,
             &title,
             gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false },
+            x0,
+            clip_r,
         );
-        b.gpu.draw_text(
+        b.gpu.draw_text_clipped(
             x0,
             40.0,
             &body,
@@ -213,6 +231,8 @@ impl App {
                 bold: false,
                 italic: false,
             },
+            x0,
+            clip_r,
         );
         // 헤드리스 검증: 배너는 **별도 창**이라 메인 창을 찍는 `KASATERM_AUTOCAPTURE`
         // 로는 안 잡힌다. auxwin 이 자기 gpu 로 따로 readback 하는 것과 같은 이유다.
