@@ -3936,7 +3936,20 @@ impl App {
                         // 이 하네스가 검증하려는 어긋남 자체가 사라진다.
                         self.ws.lock().unwrap().pane_character.insert(pid.clone(), who);
                         if let Some(pty) = self.pty.get(&pid) {
-                            let _ = pty.send_bytes(FAKE_CLAUDE_SCRIPT.as_bytes());
+                            // 이 탭에만 OSC 제목을 단다 — 앞에 별표(U+2733)를 붙여
+                            // **진짜 claude 가 보내는 꼴**(`✳ 작업명`)을 만든다. 가짜
+                            // claude 는 제목을 안 달아서, 이걸 안 심으면 탭 라벨의
+                            // 접두 벗기기 경로가 통째로 안 돌고도 통과해 버린다.
+                            // 덤으로 형제 탭과 이름이 갈려 「둘 다 미도리」가 아니게 된다.
+                            // ⚠️두 번에 나눠 보내면 안 된다 — 셸이 첫 줄을 아직
+                            // exec 하기 전이라 둘째가 **그 명령줄 안으로 빨려 들어가고**,
+                            // 화면엔 printf 만 에코된 채 아무것도 안 돈다(실측).
+                            let _ = pty.send_bytes(
+                                format!(
+                                    "printf '\\033]0;\\342\\234\\263 탭작업\\007'; {FAKE_CLAUDE_SCRIPT}"
+                                )
+                                .as_bytes(),
+                            );
                         }
                         self.pane_claude_seen.insert(pid);
                     }
@@ -4052,7 +4065,6 @@ impl App {
             .as_ref()
             .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
-        let targets = self.info_targets();
         let mut out = String::new();
         for leaf in &leaves {
             let (tabs, tab_pid, ch) = {

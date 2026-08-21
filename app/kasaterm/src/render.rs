@@ -2357,20 +2357,50 @@ impl App {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, t)| {
-                                    let name = t
+                                    // 탭 이름도 헤더와 같은 규칙으로 짓는다 — 여기만
+                                    // OSC 제목을 **날것 그대로** 실어, claude 탭이
+                                    // `✳ Claude Code` 로 떴다(거노 2026-08-21: "탭 안에
+                                    // 있을 때 claude code 랑 무슨 유니코드 이모지 나오는데
+                                    // 그것도 이쁘게"). 헤더는 진작 학생 이름을 쓰고 있어서
+                                    // **같은 pane 인데 헤더와 탭이 서로 다른 것을 부르는**
+                                    // 상태이기도 했다.
+                                    let sess =
+                                        t.pid.as_deref().and_then(|p| self.pty.get(p));
+                                    // 작업명 — 스피너·별표 접두를 벗긴다. 벗기는 일은
+                                    // `strip_activity_prefix` 계약대로 **접두만**이고,
+                                    // 「Claude Code」 같은 기본 제목을 따로 거르지는 않는다:
+                                    // 그건 claude 쪽 문구라 바뀌면 조용히 어긋난다.
+                                    let task = t
                                         .title
-                                        .clone()
-                                        .filter(|s| !s.is_empty())
-                                        .or_else(|| {
-                                            // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
-                                            t.pid
-                                                .as_deref()
-                                                .and_then(|p| self.pty.get(p))
-                                                .and_then(|s| Self::smart_pane_label(s))
-                                        })
-                                        .unwrap_or_else(|| {
-                                            if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
-                                        });
+                                        .as_deref()
+                                        .map(|s| crate::strip_activity_prefix(s).trim().to_string())
+                                        .filter(|s| !s.is_empty());
+                                    // 학생 관문은 헤더(`true_char` + `runs_claude`)와 같은
+                                    // 것을 **탭 pid 로** 묻는다. pane 이 아니라 탭마다
+                                    // 물어야 하는 건, 한 pane 의 탭들이 각각 다른 학생일
+                                    // 수 있어서다.
+                                    let student = sess
+                                        .filter(|s| s.active_agent().is_some())
+                                        .and(t.pid.as_deref())
+                                        .and_then(|p| self.display_pane_char(&ws, p));
+                                    let name = match (student, task) {
+                                        // pane id 는 안 붙인다 — 헤더가 이미 들고 있고,
+                                        // 한 pane 의 탭끼리는 그 값이 전부 같아 구분에
+                                        // 보탬이 안 되면서 좁은 자리만 먹는다.
+                                        (Some(c), Some(t)) => format!("{c} · {t}"),
+                                        (Some(c), None) => c,
+                                        (None, Some(t)) => t,
+                                        // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
+                                        (None, None) => sess
+                                            .and_then(|s| Self::smart_pane_label(s))
+                                            .unwrap_or_else(|| {
+                                                if i == 0 {
+                                                    id.clone()
+                                                } else {
+                                                    format!("탭 {}", i + 1)
+                                                }
+                                            }),
+                                    };
                                     // 탭별 ● 미저장 도트 — 멀티탭 pane 에서 어느
                                     // 파일이 저장 안 됐는지 탭 단위로 보이게.
                                     if t.markdown().map_or(false, |m| m.modified) {
@@ -6145,6 +6175,12 @@ impl App {
                     let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
                     let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
                     let budget = (per_tab - x_reserve - 14.0).max(0.0);
+                    // 자를 땐 **뒤**를 자른다. 여기 오는 라벨은 전부 앞이 정체다 —
+                    // 학생 이름(`미도리 · 작업명`), 폴더명 한 조각, 프로세스명. 앞을
+                    // 자르면 그 정체가 먼저 사라져 탭들이 다 `…작업명` 이 된다.
+                    // 앞자르기가 옳은 건 경로 전체를 실을 때인데, 셸 탭이 받는 값은
+                    // `smart_pane_label` → `cwd_basename`, 즉 경로가 아니라 마지막
+                    // 폴더명 하나다(경로를 줄이는 `shorten_cwd` 는 이 자리를 안 탄다).
                     let mut label = tab.to_string();
                     let mut lw = g.measure_chrome_text(&label, chrome_font, active);
                     if lw > budget {
