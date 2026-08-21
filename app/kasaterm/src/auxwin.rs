@@ -2767,7 +2767,10 @@ impl App {
         let label = match &what {
             crate::HiddenAuxKind::Terminal { pane_id, .. } => {
                 let ws = self.ws.lock().unwrap();
-                match ws.pane_character.get(pane_id) {
+                // `ws.pane_character` 를 날로 읽던 자리(2026-08-22). 관문이 없어
+                // 셸만 도는 pane 을 접으면 칩에 남의 학생이 붙었고, **탭 접기도
+                // 안 해서** 탭에서 도는 학생은 반대로 칩에서 사라졌다.
+                match self.display_pane_char(&ws, pane_id) {
                     Some(name) => format!("{name} · {pane_id}"),
                     None => pane_id.clone(),
                 }

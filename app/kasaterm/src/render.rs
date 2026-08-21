@@ -2964,6 +2964,22 @@ impl App {
         let image_tip = self
             .pump_image_tip(tip_hit.map(|(pane, n, _)| (pane, n)))
             .zip(tip_box);
+        // 헤더 드래그 pill 의 라벨 — `display_pane_char`(관문 有)를 gpu 를 빌리기
+        // **전에** 떠 둔다. 아래 블록은 `g(=&mut self.gpu)` 를 잡고 있어 `&self`
+        // 메서드를 못 부르는데, 그걸 인라인 사본으로 우회하던 동안 관문만 빠져
+        // 셸 pane 을 끌어도 pill 에 남의 학생 이름이 따라왔다(2026-08-22). 사본을
+        // 다시 만드는 대신 `footer_slots`·`claude_panes` 와 같은 스냅샷 방식으로.
+        let drag_label: Option<String> = {
+            let dragging = self
+                .header_drag
+                .as_ref()
+                .filter(|hd| hd.active)
+                .map(|hd| hd.pane.clone());
+            dragging.map(|pane_id| {
+                let ws = self.ws.lock().unwrap();
+                self.display_pane_char(&ws, &pane_id).unwrap_or(pane_id)
+            })
+        };
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -8954,33 +8970,10 @@ impl App {
             // 없으면 pane id). update_live_drag(라이브 재배치)와 별개의 최상단 층이라
             // 미리보기 무손상 — 커서가 사이드바로 나가 자리 프리뷰가 원위치로 돌아가도
             // 이 pill 은 계속 커서를 따라와 무엇을 어디로 옮기는지 보여준다.
-            if self.header_drag.as_ref().is_some_and(|hd| hd.active) {
-                let pane_id = self.header_drag.as_ref().unwrap().pane.clone();
-                // display_pane_char 를 인라인 — g(self 가변 빌림)가 살아있어 &self
-                // 메서드는 못 부르고 필드 직접 접근만 된다(파일트리 ghost 와 동일 제약).
-                let label = self
-                    .pane_claude_sid
-                    .get(&pane_id)
-                    .and_then(|sid| kasa_mcp::character::session_character(sid))
-                    .or_else(|| {
-                        let agents = self
-                            .pty
-                            .get(&pane_id)
-                            .map(|p| p.is_claude_agents())
-                            .unwrap_or(false);
-                        if agents {
-                            None
-                        } else {
-                            self.ws
-                                .lock()
-                                .ok()
-                                .and_then(|ws| ws.pane_character.get(&pane_id).cloned())
-                        }
-                    })
-                    .unwrap_or(pane_id);
+            if let Some(label) = drag_label.as_deref() {
                 let (cx, cy) = self.cursor_px;
                 let gf = 12.0_f32;
-                let tw = g.measure_chrome_text(&label, gf, true);
+                let tw = g.measure_chrome_text(label, gf, true);
                 let pill_w = 14.0 + tw + 14.0;
                 let pill_h = 22.0_f32;
                 let gx = cx + 12.0;
@@ -8998,7 +8991,7 @@ impl App {
                 g.draw_text(
                     gx + 14.0,
                     gy + (pill_h - gf) / 2.0,
-                    &label,
+                    label,
                     gpu::DrawOpts { font_size: gf, color: theme::accent(), bold: true, italic: false },
                 );
             }
