@@ -6082,10 +6082,15 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoauxtree();
         // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
         // 수명이 다한 것을 걷는다.
-        if !self.banner_queue.is_empty() {
-            for (title, body, who, route) in std::mem::take(&mut self.banner_queue) {
-                self.push_notify_banner(event_loop, &title, &body, who, route);
-            }
+        // 알림은 전부 `notify_desktop` 을 지나 `banner_inbox` 에 줄 선다. 창을
+        // 만들려면 `ActiveEventLoop` 가 필요해 그 자리에서 바로 못 띄우고, 여기가
+        // 그걸 쥔 첫 자리다.
+        let pending: Vec<_> = crate::chrome::banner_inbox()
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for (title, body, who, route) in pending {
+            self.push_notify_banner(event_loop, &title, &body, who, route);
         }
         self.expire_banners();
         self.run_pending_autoteardrag(event_loop);

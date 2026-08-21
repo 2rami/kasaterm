@@ -161,11 +161,11 @@ impl App {
             None,
             Some((surface_id, sid.as_deref())),
         );
-        // 우리가 그리는 배너도 **여기서** 줄 세운다. 위 `unread_panes`·Dock 배지와
-        // 같은 자리라 판정이 한 벌로 남는다 — 따로 두면 배너는 떴는데 배지는 안
-        // 서는 식으로 갈린다(notify_banner 모듈 doc).
-        let route = Some((surface_id.to_string(), sid.clone()));
-        self.banner_queue.push((titled, body.to_string(), who, route));
+        // 배너는 `notify_desktop` 이 줄 세운다 — 한때 여기서 따로 push 했는데,
+        // 그러면 **배너가 서는 자리와 안 서는 자리가 갈린다.** 실제로 승인 대기·
+        // 계정 한도는 `notify_desktop` 만 부르고 있어서, OS 알림을 끄는 순간 그
+        // 둘은 알림이 통째로 사라질 참이었다(2026-08-21 실측). 발사구를 하나로
+        // 두면 중복 방지 열쇠(`dedup`)도 배너에 그대로 걸린다.
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
@@ -3063,6 +3063,39 @@ fn notify_dedup_passes(key: &str) -> bool {
 /// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
 /// `route` 는 배너를 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
 /// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
+/// 배너를 만들 `ActiveEventLoop` 가 없는 자리에서 줄을 서는 곳.
+///
+/// `notify_desktop` 은 자유 함수라 `App` 에 직접 못 닿는다. 그렇다고 호출부마다
+/// 배너를 따로 세우면 **서는 자리와 안 서는 자리가 갈린다** — 그게 실제로 이
+/// 앱에서 벌어지고 있던 일이다(완료만 배너가 서고 승인 대기·계정 한도는 OS
+/// 알림뿐이었다). 그래서 알림은 전부 이 큐 하나로 모으고, `handler` 가 매 틱
+/// `ActiveEventLoop` 를 쥔 자리에서 걷어 창으로 만든다.
+pub(crate) fn banner_inbox() -> &'static std::sync::Mutex<Vec<crate::notify_banner::BannerReq>> {
+    static Q: std::sync::OnceLock<std::sync::Mutex<Vec<crate::notify_banner::BannerReq>>> =
+        std::sync::OnceLock::new();
+    Q.get_or_init(Default::default)
+}
+
+/// OS 알림(macOS 알림 센터)을 함께 쏠지 — **기본은 끔**이다.
+///
+/// 자체 서명 번들이라 `UNUserNotificationCenter` 등록이 거절되고
+/// (`Notifications are not allowed for this application`), 그래서 osascript 로
+/// 떨어지면 배너에 **스크립트 편집기 아이콘**이 붙는다. 우리 코드가 원인이
+/// 아니라는 것까지 배제 실측으로 확인했다(`98b6502`: 53KB 최소 ObjC 앱도 같은
+/// 오류). 거노 2026-08-21 「그럼 기본 알림은 꺼줘」 — 자체 배너가 같은 자리에서
+/// 뜨므로 OS 알림은 중복이고, 게다가 남의 아이콘을 달고 뜬다.
+///
+/// **지우지 않고 끈 이유**: 지금 못 고치는 것이지 영영 아닌 게 아니다. 애플
+/// 개발자 인증서가 생기면 아이콘·알림센터 누적·클릭 라우팅이 전부 제대로 서고,
+/// 그때는 되살리는 것이 맞다. `KASATERM_OS_NOTIFY=1` 로 그 자리에서 켠다.
+///
+/// **끄면서 잃는 것**: 알림센터에 안 쌓이고 방해금지 연동이 없다. 그 자리는
+/// 이미 다른 것들이 메운다 — `unread_panes`(못 본 완료)·Dock 배지·사이드바
+/// 숨쉬기, 그리고 자체 배너. 넷 다 `handle_notify` 한 자리에서 함께 선다.
+fn os_notify_enabled() -> bool {
+    std::env::var("KASATERM_OS_NOTIFY").is_ok_and(|v| v == "1" || v == "true")
+}
+
 pub(crate) fn notify_desktop(
     title: &str,
     body: &str,
@@ -3071,6 +3104,17 @@ pub(crate) fn notify_desktop(
     route: Option<(&str, Option<&str>)>,
 ) {
     if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+        return;
+    }
+    // 자체 배너가 정본이다. 여기가 모든 알림이 지나는 한 자리라, 이 줄 하나로
+    // 완료·승인 대기·계정 한도가 전부 같은 모양으로 뜬다.
+    banner_inbox().lock().unwrap().push((
+        title.to_string(),
+        body.to_string(),
+        character.map(str::to_string),
+        route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
+    ));
+    if !os_notify_enabled() {
         return;
     }
     #[cfg(target_os = "macos")]
