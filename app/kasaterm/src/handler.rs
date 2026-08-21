@@ -3023,7 +3023,17 @@ impl ApplicationHandler<UserEvent> for App {
                     .find(|(_, _, r)| inside(r))
                     .map(|(id, idx, _)| (id.clone(), *idx));
                 if let Some((id, idx)) = pane_tab {
-                    self.close_tab(&id, idx);
+                    // ⌘W·× 와 **같은 문**으로 보낸다. 직접 `close_tab` 을 부르던
+                    // 시절엔 탭이 하나뿐인 pane 의 마지막 탭도 그냥 지워져
+                    // `tabs` 가 비고 다음 프레임에 앱이 죽었다(2026-08-22).
+                    // 헤더가 뜨는 단일탭 pane — 이미지·마크다운·웹, ⋮ 로 제목띠를
+                    // 켠 터미널 — 은 전부 알약이 하나 그려지므로 휠 클릭 한 번이면
+                    // 닿았다.
+                    //
+                    // 2026-08-21 에 닫기 경로를 훑어 ⋮ 메뉴의 × 를 이 문으로
+                    // 보냈는데(53c3c5e), 가운데 클릭은 그 조사에서 빠진 길이었다.
+                    // 덤으로 「claude 도는데 확인 없이 닫힘」도 여기서 막힌다.
+                    self.confirm_or_close_tab(&id, idx);
                     return;
                 }
                 let in_strip = (self.sidebar_visible && cx < self.sidebar_w_logical)

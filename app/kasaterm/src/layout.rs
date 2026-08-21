@@ -920,6 +920,29 @@ impl App {
     /// the slot. The primary tab (index 0, pid == outer pane id) can't be
     /// closed this way — callers fall through to `remove_pane` for that.
     pub(crate) fn close_tab(&mut self, outer: &str, idx: usize) {
+        // 마지막 탭이 나가면 `tabs` 가 비고, 그러면 `PaneState` 의 `Deref` 가
+        // 가리킬 곳을 잃어 **다음 프레임에 앱이 통째로 죽는다**(2026-08-22 실측:
+        // 탭 하나짜리 pane 의 알약을 휠 클릭 → 렌더 패닉). 위 독스가 「호출자가
+        // remove_pane 으로 간다」고 적어 두고도 **코드가 강제하지 않아서** 새
+        // 호출자가 생길 때마다 밟는 구조였다 — 가운데 클릭이 그 여섯 번째 길이다.
+        // 기본값이 안전해야 하므로 판정을 호출부에서 이 함수 안으로 옮긴다.
+        //
+        // ⚠️ 위임은 **PTY 를 문 primary 탭일 때만**이다. `remove_pane` 은
+        // `record_closed_pane` 첫 줄(`pty.contains_key`)에서 PTY 없는 pane 을
+        // 통째로 건너뛰므로, 미리보기 전용 pane 을 그리로 보내면 아래 ⌘⇧T
+        // 기록이 조용히 사라진다. 그쪽은 본체가 제 기록을 남기게 두고 **함수
+        // 끝에서 빈 껍데기만** 걷는다.
+        let last_primary = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(outer).is_some_and(|p| {
+                p.tabs.len() <= 1
+                    && p.tabs.first().is_some_and(|t| t.pid.as_deref() == Some(outer))
+            })
+        };
+        if last_primary {
+            self.remove_pane(outer);
+            return;
+        }
         let (pid_opt, preview_opt, preview_path): (
             Option<String>,
             Option<String>,
@@ -962,7 +985,9 @@ impl App {
                     pane.active_tab -= 1;
                 }
                 if pane.active_tab >= pane.tabs.len() {
-                    pane.active_tab = pane.tabs.len() - 1;
+                    // 빈 벡터에서 `len() - 1` 은 `usize::MAX` 다 — 위 가드가
+                    // 막지만, 언더플로우 자체를 남겨 두면 다음에 또 샌다.
+                    pane.active_tab = pane.tabs.len().saturating_sub(1);
                 }
                 pane.dirty = true;
             }
@@ -998,6 +1023,17 @@ impl App {
                 });
                 self.chrome_dirty = true;
             }
+        }
+        // 탭이 다 나갔으면 빈 껍데기를 남기지 않는다 — 그 pane 을 그리는 순간
+        // `Deref` 가 갈 곳을 잃는다. `remove_pane` 이 아니라 레이아웃만 걷는
+        // 쪽인 이유는 위 미리보기 기록과 같다(PTY 도 이미지 텍스처도 이 pane
+        // 것이 아니거나 되살리기가 다시 쓴다).
+        let emptied = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(outer).is_some_and(|p| p.tabs.is_empty())
+        };
+        if emptied {
+            self.collapse_layout_only(outer);
         }
         // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).
         self.publish_pty_layout();
@@ -1182,11 +1218,14 @@ impl App {
                 return false;
             }
             let Some(s) = ws.panes.get_mut(src) else { return false };
+            // 비었는지 **비우기 전에** 본다. 순서가 반대면 빈 소스를 만났을 때
+            // 이미 `take` 로 비워 놓고 early return 으로 나가, 탭 없는 껍데기가
+            // `ws.panes` 에 남는다 — 그 pane 을 그리는 순간 앱이 죽는다.
+            if s.tabs.is_empty() {
+                return false;
+            }
             std::mem::take(&mut s.tabs)
         };
-        if moved.is_empty() {
-            return false;
-        }
         {
             let mut ws = self.ws.lock().unwrap();
             // 옮긴 탭들의 pid → dst 재바인딩. 이걸 빼먹으면 앞으로 오는

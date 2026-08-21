@@ -2430,21 +2430,47 @@ impl PaneState {
         self.tabs
             .iter()
             .find(|t| t.pid.as_deref() == Some(pid))
-            .unwrap_or_else(|| &self.tabs[self.active_tab.min(self.tabs.len() - 1)])
+            .unwrap_or_else(|| self.active())
+    }
+    /// 활성 탭. **`tabs` 가 비어도 패닉하지 않는다** — 화면이 통째로 죽는 것보다
+    /// 빈 탭 한 장을 그리는 편이 낫다.
+    ///
+    /// 전에는 `&self.tabs[self.active_tab.min(self.tabs.len() - 1)]` 이었고, 빈
+    /// 벡터에서 `len() - 1` 이 `usize::MAX` 로 언더플로우해 인덱스가 그대로
+    /// 터졌다(2026-08-22 실측, 실제로 앱이 죽었다). ⚠️ 그때 패닉 로그가 가리킨
+    /// 줄은 `Deref` 가 아니라 **위 `tab_for_pid` 의 fallback** 이었는데, 그건
+    /// 릴리스 빌드가 **토씨 하나 안 틀리게 같은 두 표현식을 하나로 합쳐** 먼저
+    /// 나온 쪽 줄번호를 찍었기 때문이다 — `tab_for_pid` 는 socket peek 에서만
+    /// 불려 render 경로엔 없다. **패닉 로그의 행 번호는 호출 사슬과 대조하기
+    /// 전까지 사실이 아니다.**
+    ///
+    /// 비는 경로는 각각 막았지만(`close_tab` 의 마지막 탭 가드,
+    /// `merge_pane_into_tabs` 의 take 순서), `Deref` 는 `PaneState` 를 쓰는
+    /// **모든** 자리가 지나므로 불변식이 또 깨질 때를 위한 그물을 남긴다.
+    pub(crate) fn active(&self) -> &PaneTab {
+        static EMPTY: std::sync::OnceLock<PaneTab> = std::sync::OnceLock::new();
+        self.tabs
+            .get(self.active_tab.min(self.tabs.len().saturating_sub(1)))
+            .unwrap_or_else(|| EMPTY.get_or_init(PaneTab::default))
     }
 }
 
 impl std::ops::Deref for PaneState {
     type Target = PaneTab;
     fn deref(&self) -> &PaneTab {
-        // `tabs` is always non-empty (constructed via Default with 1 tab,
-        // close keeps the last tab) — index is clamped on tab mutations.
-        &self.tabs[self.active_tab.min(self.tabs.len() - 1)]
+        self.active()
     }
 }
 
 impl std::ops::DerefMut for PaneState {
     fn deref_mut(&mut self) -> &mut PaneTab {
+        // 읽기 쪽(`active`)은 `&self` 라 정적 기본 탭을 가리킬 수밖에 없지만,
+        // 여기는 `&mut self` 라 **불변식을 그 자리에서 되돌릴 수 있다** — 빈
+        // 껍데기가 계속 빈 채로 돌아다니지 않게 기본 탭을 세운다.
+        if self.tabs.is_empty() {
+            self.tabs.push(PaneTab::default());
+            self.active_tab = 0;
+        }
         let i = self.active_tab.min(self.tabs.len() - 1);
         &mut self.tabs[i]
     }
@@ -8025,6 +8051,50 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    /// 빈 `tabs` 로 프레임을 그려도 죽지 않는다.
+    ///
+    /// 2026-08-22: 탭 하나짜리 pane 의 알약을 휠 클릭하면 마지막 탭이 지워져
+    /// `tabs` 가 비었고, 다음 프레임의 `Deref` 가 `len() - 1` 을 언더플로우해
+    /// (`usize::MAX`) 인덱스가 터지면서 **앱이 통째로 죽었다**. 비게 만드는
+    /// 경로는 각각 막았지만 `Deref` 는 `PaneState` 를 쓰는 **모든** 자리가
+    /// 지나는 길이라, 불변식이 또 깨져도 렌더가 살아남는지를 여기서 못 박는다.
+    #[test]
+    fn empty_tabs_never_panic_the_render() {
+        let mut ps = PaneState::default();
+        ps.tabs.clear();
+        // 옛 코드가 실제로 만들어 낸 값(`close_tab` 의 `len() - 1`). `min()` 으로
+        // 못 막는다 — 비교 상대인 `len() - 1` 자체가 `usize::MAX` 라서다.
+        ps.active_tab = usize::MAX;
+
+        // 읽기 세 갈래 — 전부 정적 기본 탭으로 떨어진다.
+        assert!(ps.active().pid.is_none(), "active()");
+        assert!(ps.title.is_none(), "Deref");
+        assert!(ps.tab_for_pid("%99").pid.is_none(), "tab_for_pid fallback");
+        // 렌더가 프레임마다 묻는 것들도 같은 길을 지난다.
+        assert!(!ps.has_header(), "has_header");
+        assert!(ps.image().is_none() && ps.markdown().is_none() && ps.web().is_none());
+
+        // 쓰기 쪽은 `&mut self` 라 불변식을 그 자리에서 되돌린다.
+        ps.title = Some("복구".into());
+        assert_eq!(ps.tabs.len(), 1, "DerefMut 이 기본 탭을 세운다");
+        assert_eq!(ps.active_tab, 0, "active_tab 도 함께 눕는다");
+        assert_eq!(ps.title.as_deref(), Some("복구"));
+    }
+
+    /// 탭 하나를 지워 비더라도 `active_tab` 이 `usize::MAX` 로 넘어가지 않는다
+    /// — `close_tab` 이 쓰는 보정식 그대로. 위 그물이 있어도 언더플로우한 값이
+    /// 상태에 남으면 저장·복원을 타고 다음 세션까지 따라간다.
+    #[test]
+    fn active_tab_never_underflows_when_tabs_empty() {
+        let mut tabs: Vec<PaneTab> = vec![PaneTab::default()];
+        let mut active_tab = 0usize;
+        tabs.remove(0);
+        if active_tab >= tabs.len() {
+            active_tab = tabs.len().saturating_sub(1);
+        }
+        assert_eq!(active_tab, 0, "빈 벡터에서도 0 — usize::MAX 가 아니다");
     }
 
     #[test]
