@@ -158,6 +158,45 @@ pub(crate) struct PaneGroup {
     /// 그리는 쪽에서 한다(`draw_group_head`).
     pub(crate) cwd: String,
     pub(crate) rows: Vec<ProcRow>,
+    /// 이 pane 안의 탭들. **둘 이상일 때만** 채운다 — 탭 하나뿐인 pane 은 바깥
+    /// pane 과 완전히 같은 것이라, 담으면 목록이 통째로 한 단계 깊어지는데
+    /// 거의 모든 pane 이 그 경우다. 첫 탭도 여기 포함된다(바깥 pane id 와 같은
+    /// 줄이 되지만, 형제 탭이 있는 한 그 사실 자체가 보여야 할 정보다).
+    pub(crate) tabs: Vec<TabRow>,
+}
+
+/// pane 하나 안의 탭. 탭은 **바깥 pane 자리에 겹쳐 사는 또 하나의 셸**이라,
+/// 평면으로 늘어놓으면 pane 하나가 여럿으로 보인다 — 실측(2026-08-20)에서
+/// 탭 셋짜리 pane 하나가 `%0`·`%1`·`%2` 세 그룹으로 서고 요약 머리까지
+/// `pane 3` 이라 셌다. 화면의 pane 은 하나였다.
+///
+/// 필드가 `PaneGroup` 과 겹치는 건 같은 것을 담기 때문이다. 그런데도 재귀
+/// 타입(`Vec<PaneGroup>`)으로 두지 않은 건 **탭은 탭을 가질 수 없어서**다 —
+/// 재귀로 두면 있지도 않은 깊이를 렌더가 매번 방어해야 한다.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct TabRow {
+    /// 탭의 PTY id(`%18`). 이미지·마크다운 탭은 셸이 없어 빈 문자열이다.
+    pub(crate) pane: String,
+    /// 학생 이름. 빈 문자열이면 렌더가 셸 이름으로 대신한다.
+    pub(crate) label: String,
+    /// claude 세션 제목(`/rename` > aiTitle).
+    pub(crate) session: String,
+    /// 탭바에 적힌 이름. 세션 제목이 없는 셸 탭에서 유일한 단서라 함께 담는다.
+    pub(crate) title: String,
+    pub(crate) shell: String,
+    pub(crate) shell_pid: u32,
+    /// 바깥 pane 이 **지금 보여 주는** 탭인가. 이게 없으면 같은 얼굴 둘을 두고
+    /// "왜 두 개지"가 된다 — 탭은 한 자리를 번갈아 쓰는 것이라 지금 앞에 있는
+    /// 것이 어느 쪽인지가 곧 "내가 보고 있는 화면"이다.
+    pub(crate) active: bool,
+    /// 탭바에서의 차례(0-based). 학생이 배정 안 된 탭의 이름을 `탭 2` 로 대신할
+    /// 때 쓴다 — 담긴 순서를 세지 않는 건 셸 없는 탭(이미지·마크다운)이 애초에
+    /// 수집 대상이 아니라, 중간에 하나 끼면 번호가 탭바와 어긋나기 때문이다.
+    pub(crate) index: usize,
+    /// 이 탭이 보고 있는 경로. 바깥 pane 과 **다를 때만** 그린다 — 같은 경로를
+    /// 탭 수만큼 반복하면 정작 다른 곳을 보는 탭이 안 튄다.
+    pub(crate) cwd: String,
+    pub(crate) rows: Vec<ProcRow>,
 }
 
 /// 한 번의 수집 결과.
@@ -190,6 +229,21 @@ pub(crate) struct PaneTarget {
     pub(crate) session_path: Option<std::path::PathBuf>,
     /// 사용자가 닫은 pane — `PaneGroup::closed` 주석 참조.
     pub(crate) closed: bool,
+    /// 이 pane 이 **다른 pane 안의 탭**이면 그 바깥 pane id. `collect` 이 맨
+    /// 마지막에 이걸 보고 바깥 그룹 안으로 접는다.
+    ///
+    /// 채우는 쪽(`info_targets`)이 `self.pty` 를 순회하는데 **그 키는 BSP leaf 가
+    /// 아니라 PTY id** 라, 탭 pid 가 전부 최상위 후보로 들어온다. 게다가
+    /// `publish_pty_layout` 이 방 미러에 탭 pid 도 실어 방 귀속까지 맞으니,
+    /// 표시가 없으면 탭이 바깥 pane 과 **형제로** 번호순에 섞여 선다.
+    pub(crate) outer: Option<String>,
+    /// 탭바에 적힌 이름. 바깥 pane(=첫 탭)도 자기 이름을 갖는다.
+    pub(crate) tab_title: String,
+    /// 바깥 pane 이 지금 보여 주는 탭인가.
+    pub(crate) tab_active: bool,
+    /// 탭바에서의 차례. 접을 때 이 순서로 세운다 — pid 순으로 세우면 탭을 옮긴
+    /// 뒤 목록과 탭바가 어긋난다.
+    pub(crate) tab_index: usize,
 }
 
 /// `ps` 한 줄에서 뽑은 원시 레코드. 좀비도 담는다 — 목록에는 안 올리지만
@@ -231,6 +285,9 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             closed: t.closed,
             cwd: t.cwd.as_deref().map(tilde_path).unwrap_or_default(),
             rows: build_rows(&table, t.shell_pid),
+            // 여기선 늘 빈 값이다 — 탭 접기는 포트 귀속이 끝난 **맨 뒤**에서 한다
+            // (`fold_tabs`).
+            tabs: Vec::new(),
         })
         .collect();
     // 방이 먼저, 그 안에서 pane 번호순. 방을 1차 키로 두어야 같은 방의 pane 이
@@ -363,8 +420,82 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // ①레포 루트 목록이 pane 목록에서 나오는데 거기서 못 찾은 포트는 목록에서 통째로
     // 사라지고 ②포트 행의 pane 라벨도 이 목록에서 찾는다. 닫힌 pane 이 띄운 dev 서버가
     // 정확히 「꺼도 되나」를 묻게 되는 것들이라(ae437e7) 그게 사라지면 안 된다.
+    // 탭도 **같은 이유로 여기서** 접는다. 탭은 자기 PTY 를 갖는 탓에 수집 대상이
+    // 될 때 바깥 pane 과 형제로 올라오는데(`PaneTarget::outer`), 미리 접으면 위
+    // `closed` 와 똑같이 포트가 깨진다 — 레포 루트 목록과 owner 역인덱스가 이
+    // 평면 목록에서 나오므로, 탭이 띄운 dev 서버가 통째로 사라진다.
+    //
+    // `closed` retain 보다 **앞**이어야 한다. 순서를 바꾸면 닫힌 바깥 pane 이 먼저
+    // 사라지고 그 탭만 최상위에 고아로 남는다.
+    fold_tabs(&mut panes, targets);
     panes.retain(|g| !g.closed);
     InfoSnap { panes, ports, outside }
+}
+
+/// 탭 그룹을 바깥 pane 그룹 **안으로** 옮겨 담는다.
+///
+/// 탭이 하나뿐인 pane 은 손대지 않는다 — 거의 모든 pane 이 그쪽이고, 거기에 트리
+/// 한 단계가 붙으면 목록 전체가 시끄러워진다. 그래서 이 함수가 하는 일이 없을 때는
+/// `panes` 가 **비트 하나 안 바뀐 채로** 나간다.
+///
+/// 옮길 때 바깥 그룹의 `rows` 는 첫 탭이 가져간다. 두 곳에 같은 프로세스를 두면
+/// 세는 쪽(`proc_total`)과 그리는 쪽 중 하나가 반드시 두 번 세기 때문이고, 그렇게
+/// 두면 `rows`(탭 구분이 필요 없는 pane)와 `tabs`(탭별)가 배타적이라 세기 쉽다.
+fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
+    let by_id: HashMap<&str, &PaneTarget> = targets.iter().map(|t| (t.id.as_str(), t)).collect();
+    let host_of = |t: &PaneTarget| t.outer.clone().unwrap_or_else(|| t.id.clone());
+    // 바깥 pane 별로 **인포에 설 줄**이 몇 개인가. 이미지·마크다운 탭은 셸이 없어
+    // 애초에 수집 대상이 아니므로 여기서도 안 세어진다 — 그게 맞다. 판정 기준은
+    // "탭이 몇 개인가"가 아니라 "이 목록이 몇 줄로 갈리는가"다.
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for t in targets.iter().filter(|t| !t.closed) {
+        *n.entry(host_of(t)).or_default() += 1;
+    }
+    // 접을 것이 없으면 여기서 끝 — 대부분의 창이 이 줄에서 빠져나간다.
+    if n.values().all(|&c| c < 2) {
+        return;
+    }
+    // 바깥이 목록에 실재할 때만 접는다. 첫 탭이 아직 pid 를 못 받아 바깥 그룹이
+    // 없는 순간이 있는데(`active_tab_pid` 의 폴백과 같은 창), 확인 없이 옮기면
+    // 받을 데가 없어 그 탭들이 **화면에서 통째로 사라진다**.
+    let hosts: std::collections::HashSet<String> =
+        panes.iter().map(|g| g.pane.clone()).collect();
+    let mut moved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut tabs: HashMap<String, Vec<(usize, TabRow)>> = HashMap::new();
+    for g in panes.iter_mut() {
+        let Some(t) = by_id.get(g.pane.as_str()) else { continue };
+        let host = host_of(t);
+        if t.closed || n.get(&host).copied().unwrap_or(0) < 2 || !hosts.contains(&host) {
+            continue;
+        }
+        if t.outer.is_some() {
+            moved.insert(g.pane.clone());
+        }
+        tabs.entry(host).or_default().push((
+            t.tab_index,
+            TabRow {
+                pane: g.pane.clone(),
+                label: g.label.clone(),
+                session: g.session.clone(),
+                title: t.tab_title.clone(),
+                shell: g.shell.clone(),
+                shell_pid: g.shell_pid,
+                active: t.tab_active,
+                index: t.tab_index,
+                cwd: g.cwd.clone(),
+                rows: std::mem::take(&mut g.rows),
+            },
+        ));
+    }
+    for (host, mut rows) in tabs {
+        // 탭바와 같은 차례로 세운다. pid 순으로 세우면 탭을 옮긴 뒤 목록과 탭바가
+        // 어긋나, 같은 것을 두 화면에서 다르게 세게 된다.
+        rows.sort_by_key(|(i, _)| *i);
+        if let Some(g) = panes.iter_mut().find(|g| g.pane == host) {
+            g.tabs = rows.into_iter().map(|(_, r)| r).collect();
+        }
+    }
+    panes.retain(|g| !moved.contains(&g.pane));
 }
 
 /// `%17` → 17. pane 목록을 사람이 세는 순서로 정렬하려고 숫자만 뽑는다 —
@@ -1387,6 +1518,29 @@ impl App {
                         self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
                     })
                     .unwrap_or(self.active_window);
+                // `self.pty` 의 키는 BSP leaf 가 아니라 **PTY id** 다 — 탭도 자기
+                // PTY 를 가지므로 여기서 함께 걸린다. 어느 pane 의 몇 번째 탭인지를
+                // 실어 보내야 `collect` 이 마지막에 바깥 그룹으로 접어 넣는다.
+                //
+                // 첫 탭은 pid 가 바깥 pane id 와 같아서 `pid_to_pane` 에 자기 자신을
+                // 가리키며 들어 있다(`rebuild_pid_map`). 거르지 않으면 자기 밑으로
+                // 접히는 고리가 생겨 pane 이 목록에서 통째로 사라진다.
+                let outer =
+                    ws.pid_to_pane.get(id).filter(|o| o.as_str() != id.as_str()).cloned();
+                let host = outer.as_deref().unwrap_or(id.as_str());
+                let (tab_title, tab_active, tab_index) = ws
+                    .panes
+                    .get(host)
+                    .and_then(|p| {
+                        let i =
+                            p.tabs.iter().position(|t| t.pid.as_deref() == Some(id.as_str()))?;
+                        Some((p.tabs[i].title.clone().unwrap_or_default(), p.active_tab == i, i))
+                    })
+                    // 첫 탭은 첫 ScreenUpdate 전까지 `pid` 가 비어 있어 위 검색에
+                    // 안 걸린다(`active_tab_pid` 가 outer 를 그대로 돌려주는 것과 같은
+                    // 구멍). 그때 바깥 pane 을 비활성으로 두면 탭이 둘 이상인 pane 에서
+                    // **활성 탭이 하나도 없는** 목록이 나온다.
+                    .unwrap_or_else(|| (String::new(), outer.is_none(), 0));
                 Some(PaneTarget {
                     // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
                     // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
@@ -1432,6 +1586,10 @@ impl App {
                     closed: self.closed_panes.iter().any(|c| c.pane_id == *id),
                     id: id.clone(),
                     shell_pid: s.shell_pid()?,
+                    outer,
+                    tab_title,
+                    tab_active,
+                    tab_index,
                 })
             })
             .collect();
@@ -1830,7 +1988,9 @@ pub(crate) fn draw_info_col(
     } else {
         path_lines.len() as f32 * PATH_LINE_H + 8.0 + BTN_H + 10.0
     };
-    let proc_total: usize = snap.panes.iter().map(|g| g.rows.len()).sum();
+    // 탭 안의 프로세스도 센다. 접힌 pane 의 것까지 세는 건 이 숫자가 「지금 보이는
+    // 줄 수」가 아니라 「이 기계에서 도는 것」이기 때문이다.
+    let proc_total: usize = snap.panes.iter().map(|g| all_rows(g).count()).sum();
     // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
     // 차지하면서 알려주는 게 없다.
     let show_windows = snap.panes.iter().any(|g| g.window != snap.panes[0].window);
@@ -2042,6 +2202,30 @@ pub(crate) fn draw_info_col(
                 info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
                 y += ROW_H;
             }
+            // 탭이 여럿인 pane 만 이 경로로 온다(`fold_tabs`). 탭 줄을 세우고 그
+            // 탭의 프로세스를 한 단계 더 들여쓴다 — 프로세스 트리가 이미 쓰는
+            // 계보선을 그대로 빌리므로 목록이 한 벌로 읽힌다.
+            //
+            // **접혀 있어도 탭 줄은 그린다.** 접기는 「프로세스 목록을 줄이자」는
+            // 뜻이지 pane 의 생김새까지 감추자는 게 아니다 — 접었다고 탭을 숨기면
+            // 그룹 머리 한 줄이 학생 셋을 대표하게 되고, 그건 목록이 하는 거짓말
+            // 중에 제일 나쁜 종류다(애초에 이 작업이 그걸 고치러 왔다). 접힌 그룹이
+            // 포트를 쥔 줄만은 남기는 것과 같은 규칙이다.
+            let n = gp.tabs.len();
+            for (i, t) in gp.tabs.iter().enumerate() {
+                let last = i + 1 == n;
+                if y + ROW_H > top && y < bottom {
+                    draw_tab_row(g, t, &gp.cwd, last, x, w, x0, right, y);
+                }
+                y += ROW_H;
+                for p in &tab_proc_rows(!collapsed, t, last) {
+                    if y + ROW_H > top && y < bottom {
+                        draw_proc_row(g, cursor, info, p, x, w, x0, right, y);
+                    }
+                    info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
+                    y += ROW_H;
+                }
+            }
         }
     }
     let d_dir = match (t_a, t_procs) {
@@ -2208,11 +2392,55 @@ fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, 
 /// 이 학생 그룹에서 지금 보일 프로세스 행 수. 높이 계산과 그리기가 같은 판정을
 /// 봐야 목록이 제 높이만큼만 스크롤된다.
 fn visible_row_count(info: &state::InfoState, gp: &PaneGroup) -> usize {
-    if info.pane_expanded.contains(&gp.pane) {
+    let expanded = info.pane_expanded.contains(&gp.pane);
+    if !gp.tabs.is_empty() {
+        // 탭 줄 자신도 한 줄씩 차지한다.
+        return gp.tabs.len()
+            + gp
+                .tabs
+                .iter()
+                .map(|t| if expanded { t.rows.len() } else { t.rows.iter().filter(|r| !r.ports.is_empty()).count() })
+                .sum::<usize>();
+    }
+    if expanded {
         gp.rows.len()
     } else {
         gp.rows.iter().filter(|r| !r.ports.is_empty()).count()
     }
+}
+
+/// 이 pane 에 딸린 **모든** 프로세스 행 — 탭에 든 것까지. `rows` 와 `tabs` 는
+/// 배타적이라(`fold_tabs`) 이어 붙여도 두 번 세지 않는다.
+fn all_rows(gp: &PaneGroup) -> impl Iterator<Item = &ProcRow> {
+    gp.rows.iter().chain(gp.tabs.iter().flat_map(|t| t.rows.iter()))
+}
+
+/// 탭 아래에 붙일 프로세스 행. 접혀 있으면 포트를 쥔 줄만 남는다 — 그룹 접기와
+/// 똑같은 규칙이라, 탭이 있고 없고에 따라 접기가 다르게 동작하지 않는다.
+///
+/// 남은 줄은 계보를 한 단계 밀어 탭 줄의 자식으로 만든다. 새로 생긴 조상 열
+/// (비트 0)은 **탭 줄** 자리라, 뒤에 형제 탭이 남았을 때만 세로선이 이어진다 —
+/// 무조건 세우면 마지막 탭 아래로 선이 흘러 「아직 더 있다」는 거짓말이 된다.
+fn tab_proc_rows(expanded: bool, t: &TabRow, last_tab: bool) -> Vec<ProcRow> {
+    let mut rows: Vec<ProcRow> = if expanded {
+        t.rows.clone()
+    } else {
+        let mut shown: Vec<ProcRow> =
+            t.rows.iter().filter(|r| !r.ports.is_empty()).cloned().collect();
+        // 중간 가지만 뽑아 두면 부모 없는 선이 허공에서 시작한다 — 다시 매긴다.
+        let n = shown.len();
+        for (i, r) in shown.iter_mut().enumerate() {
+            r.depth = 0;
+            r.spine = 0;
+            r.last = i + 1 == n;
+        }
+        shown
+    };
+    for r in &mut rows {
+        r.spine = (r.spine << 1) | u32::from(!last_tab);
+        r.depth = r.depth.saturating_add(1);
+    }
+    rows
 }
 
 /// 그 행들의 실제 목록. 접었으면 **포트를 쥔 줄만** 남는다 — 접는 건 목록을 줄이려는
@@ -2221,6 +2449,12 @@ fn visible_row_count(info: &state::InfoState, gp: &PaneGroup) -> usize {
 /// 남은 줄은 계보선을 다시 매긴다. 원래 `depth`/`spine` 은 프로세스 나무에서의
 /// 자리라, 중간 가지만 뽑아 두면 부모 없는 선이 허공에서 시작한다.
 fn visible_rows(info: &state::InfoState, gp: &PaneGroup) -> Vec<ProcRow> {
+    // 탭이 있으면 프로세스는 **탭 줄 아래**에 붙는다 — 접힘 여부와 무관하게 그리는
+    // 쪽이 그 경로를 따로 돈다(`tab_proc_rows`). 여기서 또 내보내면 같은 프로세스가
+    // 두 번 그려진다.
+    if !gp.tabs.is_empty() {
+        return Vec::new();
+    }
     if info.pane_expanded.contains(&gp.pane) {
         return gp.rows.clone();
     }
@@ -2354,7 +2588,9 @@ fn draw_group_head(
     }
     // 개수 배지가 오른쪽 끝을 먼저 잡는다 — 접힌 그룹에서 유일한 내용물이라
     // 이름에 밀려 사라지면 안 된다.
-    let n = gp.rows.len().to_string();
+    // 탭이 있는 그룹은 프로세스가 탭 쪽으로 넘어가 `rows` 가 비어 있다(`fold_tabs`).
+    // 그대로 세면 학생 셋이 도는 pane 이 `0` 으로 뜬다.
+    let n = all_rows(gp).count().to_string();
     let nw = g.measure_chrome_text(&n, 10.0, true);
     g.draw_text(
         right - nw,
@@ -2466,6 +2702,135 @@ fn draw_group_head(
                 bold: false,
                 italic: false,
             },
+        );
+    }
+}
+
+/// 탭 한 줄 — `├─ ● 미도리  세션 제목            zsh 76016`.
+///
+/// pane 하나가 탭을 여럿 품으면 그 셸들은 **한 자리를 번갈아 쓴다**. 평면으로
+/// 늘어놓으면 pane 이 여럿인 것처럼 보이므로(실측: 탭 셋짜리 pane 이 `pane 3`
+/// 으로 셌다) 바깥 그룹 아래로 들여쓰고, 계보선은 프로세스 줄이 이미 쓰는 것을
+/// 그대로 빌린다 — 표기를 새로 만들면 같은 목록에 트리가 두 벌이 된다.
+///
+/// **누를 수 없다.** 호버 하이라이트도 일부러 안 그린다 — 탭 전환은 이 파일이
+/// 할 수 있는 일이 아니라서, 눌릴 것처럼 보이면 「눌었는데 아무 일도 없다」가 된다.
+#[allow(clippy::too_many_arguments)]
+fn draw_tab_row(
+    g: &mut gpu::GpuRenderer,
+    t: &TabRow,
+    host_cwd: &str,
+    last: bool,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    // 지금 바깥 pane 이 보여 주는 탭이면 옅은 밴드를 깐다. 같은 얼굴 둘이 나란히
+    // 섰을 때 「어느 쪽이 지금 화면인가」에 답하는 자리라, 글자 밝기 하나로만
+    // 가르면 얼굴이 시선을 먼저 가져가 안 읽힌다. 방 머리와 같은 밴드 값이다.
+    if t.active {
+        let bx = x0 + 8.0;
+        round_rect(
+            g,
+            bx,
+            y + 1.0,
+            (x + w - bx).max(0.0) - 2.0,
+            ROW_H - 2.0,
+            theme::radius_sm(),
+            theme::with_alpha(theme::surface(), 0x80),
+        );
+    }
+    // ── 계보선 ── `draw_proc_row` 의 depth 0 자리와 픽셀이 같아야 두 종류의 줄이
+    // 한 나무로 읽힌다.
+    let line = theme::with_alpha(theme::border(), 0xDD);
+    let tick = x0 + 2.0;
+    let mid = (y + ROW_H * 0.5).round();
+    g.rect(tick, y, 1.0, if last { mid - y } else { ROW_H }, line);
+    g.rect(tick, mid, 6.0, 1.0, line);
+
+    let cx = x0 + 12.0;
+    const FACE: f32 = ROW_H - 6.0;
+    let tint = theme::character_accent(&t.label).unwrap_or_else(theme::text_mute);
+    // 그룹 머리와 같은 규칙 — 배정된 학생이면 얼굴, 아니면 색 점. 셸만 도는 탭은
+    // 이름이 비어 있어 늘 점이 된다.
+    let has_face = crate::render::draw_student_face(g, &t.label, cx, y + 3.0, FACE);
+    if !has_face {
+        circle_rect(g, cx + 3.0, y + 8.0, 6.0, tint);
+    }
+    let nx = cx + if has_face { FACE + 4.0 } else { 15.0 };
+
+    // 셸·pid 가 오른쪽 끝을 먼저 잡는다. 탭은 바깥 pane 과 pid 가 달라서, 여기
+    // 말고는 그 번호가 나오는 데가 없다.
+    let mut rx = right;
+    let shell = if t.shell.is_empty() {
+        String::new()
+    } else {
+        format!("{} {}", t.shell, t.shell_pid)
+    };
+    if !shell.is_empty() {
+        let sw = g.measure_chrome_text(&shell, 10.0, false);
+        if rx - sw - 8.0 - nx > 48.0 {
+            rx -= sw;
+            g.draw_text(
+                rx,
+                y + 6.0,
+                &shell,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::with_alpha(theme::text_mute(), 0xA0),
+                    bold: false,
+                    italic: false,
+                },
+            );
+            rx -= 8.0;
+        }
+    }
+
+    // 이름은 학생, 없으면 탭 번호. **pane id 를 쓰지 않는다** — 첫 탭은 id 가 바깥
+    // pane 과 같아서(leaf id == 첫 탭 pid) `%0` 이 두 줄 연속으로 떴고, 그게 중복
+    // 표시로 읽혔다(실측). 번호는 탭바와 대응되고, 식별용 pid 는 오른쪽에 있다.
+    let name =
+        if t.label.is_empty() { format!("탭 {}", t.index + 1) } else { t.label.clone() };
+    let name = fit_text(g, &name, (rx - nx).max(0.0), 11.5, true);
+    let nw = g.measure_chrome_text(&name, 11.5, true);
+    g.draw_text(
+        nx,
+        y + 5.0,
+        &name,
+        gpu::DrawOpts {
+            font_size: 11.5,
+            color: if t.active { theme::text() } else { theme::text_dim() },
+            bold: true,
+            italic: false,
+        },
+    );
+    // 제목은 세션 제목이 먼저다 — 그룹 머리와 같은 순서. 탭바 이름(OSC)은 셸
+    // 탭에서 cwd 로 채워져 형제 탭끼리 전부 같은 글자가 되기 쉽고, 그러면 정작
+    // 무엇이 도는지를 못 가른다.
+    //
+    // 셸 탭은 둘 다 비는 게 보통이라(탭바에 뜨는 이름은 OSC 가 아니라 그리는 쪽의
+    // 폴백이다) 마지막으로 작업 경로를 쓴다. 바깥 pane 과 같은 경로면 안 쓴다 —
+    // 그건 이미 그룹 머리에 한 번 적혀 있고, 탭 수만큼 반복되면 정작 다른 데를
+    // 보는 탭이 안 튄다.
+    let sub = if !t.session.is_empty() {
+        t.session.as_str()
+    } else if !t.title.is_empty() {
+        t.title.as_str()
+    } else if t.cwd != host_cwd {
+        t.cwd.as_str()
+    } else {
+        ""
+    };
+    let sx = nx + nw + 6.0;
+    if !sub.is_empty() && rx - sx > 40.0 {
+        let s = fit_text(g, sub, rx - sx, 10.5, false);
+        g.draw_text(
+            sx,
+            y + 6.0,
+            &s,
+            gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
         );
     }
 }
@@ -2946,6 +3311,76 @@ mod session_title_tests {
         let p = tmp_jsonl("ai", "{\"type\":\"ai-title\",\"aiTitle\":\"하이쿠 요약\"}\n");
         assert_eq!(session_title(&p), "하이쿠 요약");
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    fn grp(id: &str) -> PaneGroup {
+        PaneGroup { pane: id.to_string(), ..Default::default() }
+    }
+    fn tgt(id: &str, outer: Option<&str>, index: usize) -> PaneTarget {
+        PaneTarget {
+            id: id.to_string(),
+            outer: outer.map(str::to_string),
+            tab_index: index,
+            ..Default::default()
+        }
+    }
+
+    /// 탭이 하나뿐인 pane 은 **한 비트도 안 바뀐다**. 거의 모든 pane 이 그쪽이라,
+    /// 여기서 뭔가 달라지면 목록이 통째로 바뀐 것처럼 보인다.
+    #[test]
+    fn a_lone_tab_leaves_the_list_untouched() {
+        let mut panes = vec![grp("%0"), grp("%3")];
+        let before = panes.clone();
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%3", None, 0)]);
+        assert_eq!(panes, before);
+    }
+
+    /// 탭은 바깥 pane 안으로 들어가고 최상위에서는 사라진다 — pane 하나가 여럿으로
+    /// 세어지던 것(실측: 탭 셋짜리 pane 이 `pane 3`)이 이걸로 닫힌다.
+    #[test]
+    fn tabs_fold_into_their_outer_pane() {
+        let mut panes = vec![grp("%0"), grp("%1"), grp("%2"), grp("%3")];
+        fold_tabs(
+            &mut panes,
+            &[
+                tgt("%0", None, 0),
+                // 일부러 탭바 차례와 반대로 넣는다 — 정렬 근거가 pid 가 아니라
+                // `tab_index` 임을 고정한다.
+                tgt("%2", Some("%0"), 2),
+                tgt("%1", Some("%0"), 1),
+                tgt("%3", None, 0),
+            ],
+        );
+        assert_eq!(panes.iter().map(|g| g.pane.as_str()).collect::<Vec<_>>(), ["%0", "%3"]);
+        assert_eq!(
+            panes[0].tabs.iter().map(|t| t.pane.as_str()).collect::<Vec<_>>(),
+            ["%0", "%1", "%2"]
+        );
+        // 탭이 없는 pane 은 그대로 — 접기가 옆 pane 으로 번지지 않는다.
+        assert!(panes[1].tabs.is_empty());
+    }
+
+    /// 바깥 그룹이 목록에 없으면 **옮기지 않는다**. 받을 데가 없는데 최상위에서
+    /// 빼면 그 탭들이 화면에서 통째로 사라진다 — 첫 탭이 아직 pid 를 못 받아
+    /// 바깥 그룹이 없는 순간이 실제로 있다.
+    #[test]
+    fn orphan_tabs_stay_visible() {
+        let mut panes = vec![grp("%1"), grp("%2")];
+        fold_tabs(&mut panes, &[tgt("%1", Some("%0"), 1), tgt("%2", Some("%0"), 2)]);
+        assert_eq!(panes.iter().map(|g| g.pane.as_str()).collect::<Vec<_>>(), ["%1", "%2"]);
+    }
+
+    /// 닫은 탭은 담지 않는다. 담으면 「닫았는데 왜 아직 있나」가 되고, 되살리기
+    /// 목록과 두 곳에서 같은 것을 세게 된다(`PaneGroup::closed` 와 같은 규칙).
+    #[test]
+    fn a_closed_tab_is_not_folded_in() {
+        let mut panes = vec![grp("%0"), grp("%1"), grp("%2")];
+        let shut = PaneTarget { closed: true, ..tgt("%2", Some("%0"), 2) };
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%1", Some("%0"), 1), shut]);
+        assert_eq!(
+            panes[0].tabs.iter().map(|t| t.pane.as_str()).collect::<Vec<_>>(),
+            ["%0", "%1"]
+        );
     }
 
     /// 캐시 열쇠는 파일 크기다 — transcript 가 자라면(rename 이 append 된다) 반드시
