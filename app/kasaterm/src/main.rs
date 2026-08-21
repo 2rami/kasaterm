@@ -5393,7 +5393,7 @@ struct App {
     /// 아직 창을 못 만든 배너 요청 `(제목, 본문, 학생)`. 창 생성은 `ActiveEventLoop`
     /// 가 있어야 하는데 알림이 오는 자리(`handle_notify`)엔 그게 없다 — 거기서
     /// 줄을 세우고 `about_to_wait` 에서 만든다.
-    banner_queue: Vec<(String, String, Option<String>)>,
+    banner_queue: Vec<notify_banner::BannerReq>,
     /// 웹 pane 실물(자식 창 + webview). 키 = `WebPane.host_id`. GUI 스레드
     /// 전용 — `Workspace` 는 PTY 스레드와 공유라 !Send 인 webview 를 못 담는다.
     web_hosts: HashMap<u64, webpane::WebHost>,

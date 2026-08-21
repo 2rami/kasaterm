@@ -47,6 +47,9 @@ const LIFE: Duration = Duration::from_millis(4500);
 /// 학생이 여럿 끝나는 순간 화면이 배너로 덮이고, 그건 알림이 아니라 방해다.
 const MAX: usize = 3;
 
+/// 아직 창을 못 만든 배너 한 장 — `(제목, 본문, 학생, 갈 자리)`.
+pub(crate) type BannerReq = (String, String, Option<String>, Option<(String, Option<String>)>);
+
 pub(crate) struct Banner {
     /// 자체 wgpu 렌더러. `window` 보다 먼저 드롭돼야 한다(auxwin 과 같은 규약).
     pub(crate) gpu: gpu::GpuRenderer,
@@ -55,6 +58,11 @@ pub(crate) struct Banner {
     body: String,
     /// 학생 이름 — 있으면 색으로 「누구」를 말한다.
     character: Option<String>,
+    /// 눌렀을 때 갈 자리 `(pane id, 그때의 claude 세션 id)`. 세션까지 싣는 이유는
+    /// surface id 가 재사용되기 때문이다 — 알림이 뜬 뒤 그 pane 이 닫히고 번호가
+    /// 새 셸에 넘어가면 엉뚱한 자리로 간다(`macos_notify` 와 같은 규약). 못 맞추면
+    /// **아무 데도 안 간다** — 엉뚱한 pane 으로 끌려가는 것보다 낫다.
+    route: Option<(String, Option<String>)>,
     /// 이 시각이 지나면 걷는다.
     pub(crate) until: Instant,
 }
@@ -68,6 +76,7 @@ impl App {
         title: &str,
         body: &str,
         character: Option<String>,
+        route: Option<(String, Option<String>)>,
     ) {
         // 오래된 것부터 걷어 자리를 낸다.
         while self.banners.len() >= MAX {
@@ -142,6 +151,7 @@ impl App {
             title: title.to_string(),
             body: body.to_string(),
             character,
+            route,
             until: Instant::now() + LIFE,
         });
         let n = self.banners.len() - 1;
@@ -253,6 +263,19 @@ impl App {
         match event {
             WindowEvent::RedrawRequested => {
                 self.draw_banner(idx);
+                true
+            }
+            // 눌렀다 = 「그리로 가겠다」는 뜻이다. 여기서 앱이 앞으로 나오는 것은
+            // 원하는 동작이라 막지 않는다 — 막아야 하는 건 **안 눌렀는데** 뺏기는
+            // 쪽이고, 그건 `with_active(false)` 가 이미 막는다.
+            WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
+                if let Some(b) = self.banners.get(idx) {
+                    if let Some((pane, sid)) = b.route.clone() {
+                        let _ = self.proxy.send_event(UserEvent::NotifyFocus { pane, sid });
+                    }
+                }
+                self.banners.remove(idx);
+                self.reflow_banners();
                 true
             }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {

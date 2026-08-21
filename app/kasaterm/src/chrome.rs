@@ -145,7 +145,8 @@ impl App {
         // 우리가 그리는 배너도 **여기서** 줄 세운다. 위 `unread_panes`·Dock 배지와
         // 같은 자리라 판정이 한 벌로 남는다 — 따로 두면 배너는 떴는데 배지는 안
         // 서는 식으로 갈린다(notify_banner 모듈 doc).
-        self.banner_queue.push((titled, body.to_string(), who));
+        let route = Some((surface_id.to_string(), sid.clone()));
+        self.banner_queue.push((titled, body.to_string(), who, route));
     }
 
     /// A pane's claude is blocked on a permission / input prompt (its
