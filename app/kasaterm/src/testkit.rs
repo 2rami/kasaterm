@@ -75,6 +75,26 @@ pub(crate) fn mdscript_pending() -> bool {
 /// `struct App` 을 늘리지 않는다(병렬 작업 충돌 핫스팟).
 static LAYERGEOM_DUE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 
+/// `autostudent`·`autotabcycle` 이 함께 쓰는 가짜 claude 한 벌. 셸의 직속 자식
+/// 이름이 `claude` 여야 `runs_claude` 관문이 열리므로 **그 이름의 실제 바이너리를
+/// rustc 로 굽고**, 그 앞에 claude 입력박스(앵커 빈 줄·테두리·statusline)를 찍어
+/// 프사와 전신이 설 자리를 만든다. 규칙은 `run_pending_autostudent` 주석에 있다.
+///
+/// 두 하네스가 각자 한 벌씩 갖고 있으면 한쪽만 고쳐져 「여기선 뜨는데 저기선
+/// 안 뜬다」가 되므로 한 자리에 둔다.
+pub(crate) const FAKE_CLAUDE_SCRIPT: &str = concat!(
+        "d=\"$TMPDIR/kasaterm-student-probe\"; mkdir -p \"$d\"; ",
+        "[ -x \"$d/claude\" ] || { ",
+        "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
+        "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
+        "R(){ printf \"\\342\\224\\200%.0s\" $(seq 1 \"$1\"); }; ",
+        "echo; R 40; printf ' 대시보드 '; R 2; echo; ",
+        "printf \"\\342\\235\\257 \\n\"; ",
+        "R 60; echo; ",
+        "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
+        "\"$d/claude\"\n",
+);
+
 impl App {
     /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
     /// background run exercises the save-on-exit path (and thus the next
@@ -3809,6 +3829,277 @@ impl App {
             }
         }
     }
+    /// Headless **탭 전이** 검증: `KASATERM_AUTOTABCYCLE_MS` 뒤에 탭을 소환→전환→
+    /// 꺼내기→합치기→닫기 순으로 밟으며, 단계마다 미니맵과 인포가 **실제로 읽는
+    /// 재료**를 갈라 찍는다.
+    ///
+    /// 이 계열 버그가 나는 자리는 정해져 있다 — pane 식별자가 둘이라서다. **BSP
+    /// leaf**(`ws.panes`·`pane_activity` 의 키)와 **PTY id**(`self.pty`·
+    /// `pane_claude_seen` 의 키)는 탭이 없을 때만 같고, 탭이 생기는 순간 갈렸다가
+    /// 탭을 꺼내면 다시 붙는다. 정지 화면은 어느 쪽으로 물어도 맞아 보이므로,
+    /// 갈렸다 붙는 **전이**를 밟지 않으면 어긋남이 드러나지 않는다.
+    ///
+    /// 실제 claude 는 띄우지 않는다 — 그건 `autostudent` 담당이고, rustc 빌드와
+    /// 프로세스 표 캐시로 단계마다 수 초가 든다. 여기서 보는 것은 **키 정합성**이라
+    /// 얼굴 자격(`pane_claude_seen`)을 실제 경로와 같은 키(PTY id)로 심어 두면 충분하다.
+    ///
+    /// `KASATERM_AUTOTABCYCLE_CAP` 에 접두를 주면 단계마다 `<접두>-N.png` 를 찍는다.
+    pub(crate) fn run_pending_autotabcycle(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        static HOST: OnceLock<String> = OnceLock::new();
+        static NEIGHBOR: OnceLock<String> = OnceLock::new();
+        static TORN: OnceLock<String> = OnceLock::new();
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOTABCYCLE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            let who = std::env::var("KASATERM_AUTOTABCYCLE_STUDENT")
+                .unwrap_or_else(|_| "미도리".to_string());
+            Some((Instant::now() + std::time::Duration::from_millis(ms), who))
+        });
+        let Some((due, who)) = due else { return };
+        let who = who.clone();
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 6 {
+            return;
+        }
+        // 단계마다 2500ms. 가짜 claude 가 rustc 로 구워지고 프로세스 표 캐시(300ms)와
+        // pty 의 proc 캐시(500ms)가 한 바퀴 돌아야 `runs_claude` 가 참이 되며, 인포는
+        // 워커가 만든 스냅샷을 그리므로 그쪽도 한 번은 돌아야 한다 — 좁히면 「아직 안
+        // 들어온 것」을 「빠진 것」으로 오독한다(700ms 로 두었다가 인포가 pane 을 하나로
+        // 세는 화면을 찍었다).
+        if Instant::now() < *due + std::time::Duration::from_millis(2500 * step as u64) {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let leaves = |app: &Self| -> Vec<String> {
+            app.pty_layout
+                .as_ref()
+                .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        };
+        match step {
+            // 1) claude pane 하나 + 이웃 하나. 이웃이 있어야 꺼내기가 갈 곳이 생긴다.
+            0 => {
+                // 볼 화면을 먼저 연다 — 배치도는 **펼친 방 카드** 안에만 그려지고
+                // (`sidebar_row_rects` 가 거기서 실린다) 인포 트리는 우측 칼럼 Info
+                // 탭에만 있다. 안 열면 단계별 캡처가 빈 터미널만 찍는다.
+                if !self.sidebar_visible {
+                    self.toggle_sidebar();
+                }
+                if !self.expanded_windows.contains(&self.active_window) {
+                    self.toggle_window_expand(self.active_window);
+                }
+                if !self.git.col_visible {
+                    self.toggle_git_col();
+                }
+                self.info.tab = crate::state::SideTab::Info;
+                // 펼침은 애니메이션이라 첫 프레임엔 카드가 납작해 칸 rect 가 하나도
+                // 안 실린다 — 다 펴질 때까지 프레임을 돌린다(autostash 와 같은 이유).
+                for _ in 0..40 {
+                    self.render_frame();
+                    if !self.sidebar_row_rects.is_empty() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                if leaves(self).len() < 2 {
+                    let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+                }
+                let ls = leaves(self);
+                if ls.len() < 2 {
+                    eprintln!("[tabcycle] FAIL — pane 둘을 못 만들었다: {ls:?}");
+                    STEP.store(7, Ordering::Relaxed);
+                    return;
+                }
+                let host = HOST.get_or_init(|| ls[0].clone()).clone();
+                NEIGHBOR.get_or_init(|| ls[1].clone());
+                self.ws.lock().unwrap().pane_character.insert(host.clone(), who);
+                // 얼굴·테두리는 `pane_accent` 가 **실제로 도는 에이전트**를 요구한다
+                // (`active_agent()`). 자격 집합만 손으로 심으면 키 정합은 봐도 화면은
+                // 못 보므로, autostudent 와 같은 가짜 claude 를 실제로 띄운다.
+                if let Some(pty) = self.pty.get(&host) {
+                    let _ = pty.send_bytes(FAKE_CLAUDE_SCRIPT.as_bytes());
+                }
+                self.pane_claude_seen.insert(host);
+            }
+            // 2) 같은 pane 에 탭으로 학생을 하나 더. 여기서 leaf 와 PTY id 가 갈린다.
+            1 => {
+                let Some(host) = HOST.get().cloned() else { return };
+                match self.spawn_new_tab(&host, true) {
+                    Ok(pid) => {
+                        // 자격은 실제 경로와 **같은 키**로 심는다 — `note_claude_panes`
+                        // 는 `self.pty` 를 훑으므로 PTY id 로 들어간다. leaf 로 심으면
+                        // 이 하네스가 검증하려는 어긋남 자체가 사라진다.
+                        self.ws.lock().unwrap().pane_character.insert(pid.clone(), who);
+                        if let Some(pty) = self.pty.get(&pid) {
+                            let _ = pty.send_bytes(FAKE_CLAUDE_SCRIPT.as_bytes());
+                        }
+                        self.pane_claude_seen.insert(pid);
+                    }
+                    Err(e) => eprintln!("[tabcycle] FAIL — 탭 소환 실패: {e}"),
+                }
+            }
+            // 3) 앞 탭으로 전환 — 활성 표시가 양쪽 화면에서 따라오는가.
+            2 => {
+                let Some(host) = HOST.get().cloned() else { return };
+                if let Some(p) = self.ws.lock().unwrap().panes.get_mut(&host) {
+                    p.active_tab = 0;
+                    p.dirty = true;
+                }
+            }
+            // 4) 꺼내기 — 탭을 이웃 pane 의 **가장자리**에 떨구면 split 되어 독립
+            //    pane 이 된다(`drop_tab_into_body`). 중앙에 놓는 합치기와 짝인 경로다.
+            3 => {
+                let (Some(host), Some(nb)) = (HOST.get().cloned(), NEIGHBOR.get().cloned())
+                else {
+                    return;
+                };
+                let tabs = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .panes
+                    .get(&host)
+                    .map(|p| p.tabs.len())
+                    .unwrap_or(0);
+                if tabs < 2 {
+                    eprintln!("[tabcycle] FAIL — 꺼낼 탭이 없다(tabs={tabs})");
+                    STEP.store(7, Ordering::Relaxed);
+                    return;
+                }
+                let td = TabDrag {
+                    pane: host,
+                    from: 1,
+                    start: (0.0, 0.0),
+                    active: true,
+                    target: 0,
+                    drop_pane: nb.clone(),
+                };
+                self.drop_tab_into_body(&td, &nb, DropZone::Right);
+                // 꺼낸 pane 이 곧 새 활성 pane 이다(`drop_tab_into_body` 마지막 줄).
+                if let Some(new) = self.ws.lock().unwrap().active_pane.clone() {
+                    TORN.get_or_init(|| new);
+                }
+            }
+            // 5) 다시 탭으로 합치기 — 2번 상태로 정확히 돌아오는가.
+            4 => {
+                let (Some(host), Some(torn)) = (HOST.get().cloned(), TORN.get().cloned())
+                else {
+                    return;
+                };
+                if !self.merge_pane_into_tabs(&torn, &host) {
+                    eprintln!("[tabcycle] FAIL — 합치기 거부됨({torn}→{host})");
+                }
+            }
+            // 6) 탭 닫기 — 덱·트리가 사라지고 원래 모습으로 돌아오는가.
+            5 => {
+                let Some(host) = HOST.get().cloned() else { return };
+                self.close_tab(&host, 1);
+            }
+            // 7) claude 가 내려가 셸만 남은 pane — 얼굴·이름이 빠지는가(5c761f6 회귀).
+            _ => {
+                let Some(host) = HOST.get().cloned() else { return };
+                self.pane_claude_seen.remove(&host);
+                self.ws.lock().unwrap().pane_character.remove(&host);
+            }
+        }
+        // 판정은 **그린 뒤**에 한다. 배치도 칸(`sidebar_row_rects`)은 렌더가 채우는
+        // 값이라, 액션 직후에 읽으면 한 단계 전 화면을 현재로 착각한다 — 실측에서
+        // 꺼내기·합치기 두 칸이 정확히 한 단계씩 밀려 「칸이 안 따라온다」로 보였다.
+        self.chrome_dirty = true;
+        let cap = std::env::var("KASATERM_AUTOTABCYCLE_CAP").ok();
+        if let (Some(pre), Some(g)) = (cap.as_ref(), self.gpu.as_mut()) {
+            g.capture_next = Some(format!("{pre}-{}.png", step + 1));
+        }
+        // 인포는 1.5초 게이트를 지나 **별도 스레드**가 만든 스냅샷을 그린다. 액션 직후에
+        // 판정하면 한 단계 전 화면을 현재로 착각한다 — 실측에서 탭을 도로 합친 뒤에도
+        // 화면은 `pane 3` 에 탭이 형제로 선 그림이었고, 즉시값(`info_targets`)만 보던
+        // 판정은 그걸 통과시켰다. 게이트를 풀어 워커를 띄우고, 끝나면 한 번 더 불러
+        // 완성된 스냅샷을 `view` 로 당긴다.
+        self.info.last_refresh = None;
+        self.pump_info();
+        for _ in 0..100 {
+            if !self.info.busy.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.pump_info();
+        self.render_frame();
+        const LABELS: [&str; 7] = [
+            "1-claude pane",
+            "2-탭소환",
+            "3-탭전환",
+            "4-꺼내기",
+            "5-합치기",
+            "6-탭닫기",
+            "7-셸만",
+        ];
+        self.dump_tabcycle(LABELS[step as usize]);
+    }
+    /// `autotabcycle` 의 한 줄 판정. 미니맵과 인포는 **출처가 다르다** — 미니맵은
+    /// `ws.panes` 의 탭 배열을 세고, 인포는 `self.pty` 를 훑어 `outer` 로 되짚는다.
+    /// 그래서 합쳐 찍으면 어긋남이 그대로 묻히고, 갈라 찍어야 어느 쪽이 틀렸는지가
+    /// 보인다. `고아탭` = 인포에서 host 아래로 접히지 못하고 최상위에 남은 탭(=한
+    /// pane 이 여럿으로 보이던 3b294d6 의 증상).
+    fn dump_tabcycle(&self, step: &str) {
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        let targets = self.info_targets();
+        let mut out = String::new();
+        for leaf in &leaves {
+            let (tabs, tab_pid, ch) = {
+                let ws = self.ws.lock().unwrap();
+                let tabs = ws.panes.get(leaf).map(|p| p.tabs.len()).unwrap_or(0);
+                let tab_pid = ws.active_tab_pid(leaf);
+                let ch = self.display_pane_char(&ws, leaf).unwrap_or_default();
+                (tabs, tab_pid, ch)
+            };
+            // 인포는 **화면이 그리는 것**(`info.view`)으로 센다. 즉시값(`info_targets`)을
+            // 보면 「코드상 맞는데 화면은 틀린」 것을 통과시킨다. 탭이 하나인 pane 은
+            // 접지 않아 `tabs` 가 비고 그룹 자신이 한 줄이다(`fold_tabs` 계약).
+            let info_rows = self
+                .info
+                .view
+                .panes
+                .iter()
+                .find(|g| g.pane == *leaf)
+                .map(|g| g.tabs.len().max(1))
+                .unwrap_or(0);
+            let ready = self.pane_claude_ready(leaf);
+            let status = self
+                .pane_activity
+                .get(leaf)
+                .map(|a| a.status.clone())
+                .unwrap_or_else(|| "-".to_string());
+            out.push_str(&format!(
+                " {leaf}[탭{tabs} 인포{info_rows} 얼굴{} 이름{ch:?} {status} tabpid={tab_pid}]",
+                if ready { "O" } else { "X" }
+            ));
+        }
+        // 고아탭 = 화면에 **최상위 그룹으로 섰는데 배치 트리엔 없는** pane. 탭이
+        // host 아래로 접히지 못하면 정확히 이 모양이 된다(pane 하나가 여럿으로 보이던
+        // 3b294d6 의 증상).
+        let stray: Vec<&str> = self
+            .info
+            .view
+            .panes
+            .iter()
+            .filter(|g| !leaves.contains(&g.pane))
+            .map(|g| g.pane.as_str())
+            .collect();
+        eprintln!(
+            "[tabcycle/{step}]{out} 고아탭={stray:?} 배치도칸={}",
+            self.sidebar_row_rects.len()
+        );
+    }
     /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
     /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
     /// static(병렬 작업 규칙: struct App 무접촉).
@@ -4164,18 +4455,7 @@ impl App {
             //   ❯                        ← 입력 영역
             //   ──────────────           ← 아래 테두리(순수 '─')
             //   FFFC×4 ctx 42%           ← statusline = face_row
-            let script = concat!(
-                "d=\"$TMPDIR/kasaterm-student-probe\"; mkdir -p \"$d\"; ",
-                "[ -x \"$d/claude\" ] || { ",
-                "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
-                "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
-                "R(){ printf \"\\342\\224\\200%.0s\" $(seq 1 \"$1\"); }; ",
-                "echo; R 40; printf ' 대시보드 '; R 2; echo; ",
-                "printf \"\\342\\235\\257 \\n\"; ",
-                "R 60; echo; ",
-                "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
-                "\"$d/claude\"\n",
-            );
+            let script = crate::testkit::FAKE_CLAUDE_SCRIPT;
             if let Some(pty) = self.pty.get(&pid) {
                 let _ = pty.send_bytes(script.as_bytes());
             }
