@@ -1064,10 +1064,14 @@ impl App {
                         // 으로 밝힌다 — claude 원본은 흐릿한 회색이라 띠 위에서
                         // 안 읽힌다. ↑↓(앞뒤 질문 건너뛰기)는 accent 로 세워 이
                         // 줄이 일반 띠가 아니라 조작 가능한 pill 임을 말한다.
+                        // ⚠️`pane.character` 로 폴백하지 마라 — 그 필드는 매 화면
+                        // 업데이트마다 `ws.pane_character` 를 **날것으로 복사**한
+                        // 것이라(session.rs), 폴백하는 순간 바로 윗줄에서 지난
+                        // 관문이 무효가 된다(2026-08-22). 셸 pane 에 남의 학생색이
+                        // 둘리면 「저기 누가 있다」로 잘못 읽힌다(pane_accent 주석).
                         let accent = self
                             .display_pane_char(&ws, &id)
                             .as_deref()
-                            .or(pane.character.as_deref())
                             .and_then(|n| {
                                 theme::character_accent_n(
                                     n,
@@ -1562,12 +1566,13 @@ impl App {
                     let col = pane
                         .color
                         .or_else(|| {
-                            // `pane.character` 는 pane 단위 필드라 탭이 둘이면 **마지막에
-                            // 출력한 탭**이 이긴다. 접힌 `true_char` 를 앞에 세워 지금
-                            // 보이는 탭의 학생을 쓴다.
+                            // `true_char` 하나만 쓴다. `pane.character` 폴백이 있던
+                            // 동안 둘이 어긋났다 — 그 필드는 pane 단위라 탭이 둘이면
+                            // **마지막에 출력한 탭**이 이기고, 게다가 관문을 안 지난
+                            // 날것이라(session.rs 가 매 업데이트 복사) 셸 pane 에도
+                            // 색이 둘렸다(2026-08-22).
                             true_char
                                 .as_deref()
-                                .or(pane.character.as_deref())
                                 .and_then(|n| {
                                     theme::character_accent_n(
                                         n,
@@ -1971,9 +1976,11 @@ impl App {
                 let prompt_accent = if agents_view || resume_picker || ask_picker {
                     None
                 } else {
+                    // 관문은 아래 `filter`(active_agent)가 이미 지고 있다. 폴백만
+                    // 걷어낸 이유는 정확도다 — `pane.character` 는 pane 단위라 탭이
+                    // 둘이면 마지막 출력 탭이 이겨, 접힌 `true_char` 와 색이 갈렸다.
                     true_char
                         .as_deref()
-                        .or(pane.character.as_deref())
                         .and_then(|n| {
                             theme::character_accent_n(
                                 n,
