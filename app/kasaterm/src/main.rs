@@ -28,6 +28,7 @@ mod session;
 mod layout;
 mod markdown;
 mod auxwin;
+mod notify_banner;
 mod webpane;
 mod input;
 mod lineedit;
@@ -5386,6 +5387,13 @@ struct App {
     /// 편집기/파일뷰를 떼어낸 별도 OS 창들(각자 자체 wgpu GpuRenderer). 메인 창과
     /// 독립적으로 렌더/입력 라우팅되며 window id 로 handler 가 분기한다(auxwin.rs).
     aux_windows: Vec<auxwin::AuxWindow>,
+    /// 떠 있는 완료 알림 배너들(가장 오래된 것이 앞). macOS 알림 센터를 자체 서명
+    /// 번들이 못 쓰기 때문에 우리가 그린다 — 사연은 `notify_banner` 모듈 doc.
+    banners: Vec<notify_banner::Banner>,
+    /// 아직 창을 못 만든 배너 요청 `(제목, 본문, 학생)`. 창 생성은 `ActiveEventLoop`
+    /// 가 있어야 하는데 알림이 오는 자리(`handle_notify`)엔 그게 없다 — 거기서
+    /// 줄을 세우고 `about_to_wait` 에서 만든다.
+    banner_queue: Vec<(String, String, Option<String>)>,
     /// 웹 pane 실물(자식 창 + webview). 키 = `WebPane.host_id`. GUI 스레드
     /// 전용 — `Workspace` 는 PTY 스레드와 공유라 !Send 인 webview 를 못 담는다.
     web_hosts: HashMap<u64, webpane::WebHost>,
@@ -5761,6 +5769,8 @@ impl App {
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
             aux_windows: Vec::new(),
+            banners: Vec::new(),
+            banner_queue: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,
             web_addr: None,

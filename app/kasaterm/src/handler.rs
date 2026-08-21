@@ -1981,6 +1981,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
         // 창의 surface·터미널 로직과 완전히 격리 — 이벤트를 kind 별 라우팅에 위임한다.
+        if let Some(pos) = self.banners.iter().position(|b| b.window.id() == id) {
+            self.banner_window_event(pos, &event);
+            return;
+        }
         if let Some(pos) = self.aux_windows.iter().position(|a| a.window.id() == id) {
             self.aux_window_event(pos, event, event_loop);
             return;
@@ -6076,9 +6080,18 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock_scroll();
         self.run_pending_autoundock_dock();
         self.run_pending_autoauxtree();
+        // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
+        // 수명이 다한 것을 걷는다.
+        if !self.banner_queue.is_empty() {
+            for (title, body, who) in std::mem::take(&mut self.banner_queue) {
+                self.push_notify_banner(event_loop, &title, &body, who);
+            }
+        }
+        self.expire_banners();
         self.run_pending_autoteardrag(event_loop);
         self.run_pending_autotearroom(event_loop);
         self.run_pending_autostudent(event_loop);
+        self.run_pending_autotabcycle();
         self.run_pending_autoboxlabel();
         self.run_pending_autoimgtip();
         self.run_pending_autoportpop();
