@@ -3165,6 +3165,28 @@ fn notify_native(
     // 오류도 없이 알림 DB 에 기록이 안 남는 것을 격리 인스턴스 + 알림 DB 로
     // 실측) — 조용한 유실은 아이콘보다 나쁘므로 걷어냈다. 앱 아이콘을 실으려면
     // 애플 발급 인증서로 서명하거나 자체 배너 창을 그려야 한다.
+    //
+    // ★2026-08-21 재조사(같은 지적이 세 번째라 판정을 다시 쟀다). **원인이
+    // 우리 쪽에 없다는 것까지 확인했다** — 다음 다섯을 하나씩 배제했으므로
+    // 네 번째 조사는 이 목록을 지나 곧장 「서명」으로 가면 된다:
+    //   ①실행 방식 — 번들 실행파일 직접 exec 도, `open` 으로 LaunchServices 를
+    //     제대로 거친 것도 같은 오류(직접 exec 는 프로세스가 앱으로 등록되지
+    //     않아 흔히 의심되는 자리인데, 여기선 범인이 아니다)
+    //   ②번들 id 오염 — 같은 `com.kasa.kasaterm` 이 여섯 경로에 등록돼 있어
+    //     유력해 보였지만, 번들 id 만 바꾼 사본도 똑같이 거절당했다
+    //   ③서명 무결성 — `codesign --verify --deep --strict` 가 중첩
+    //     Sparkle.framework·XPC·kasaterm-cli 까지 전부 통과한다(valid on disk,
+    //     satisfies its Designated Requirement). 깨진 중첩 서명이 이 오류의
+    //     흔한 원인이라 재 봤다
+    //   ④요청 시점 — `resumed`(=applicationDidFinishLaunching)라 이미 정석이다
+    //   ⑤TCC 잔재 — 한 번도 등록된 적이 없다(`ncprefs` 91개 중 kasaterm 없음).
+    //     새 번들 id 는 기록 자체가 없는데도 같은 오류다
+    // 결정타: **53KB 짜리 순수 ObjC 최소 앱**(NSApplication + delegate +
+    // requestAuthorization 뿐, 같은 자체 서명, 새 id, `open` 실행)도 글자 그대로
+    // 같은 오류를 받는다. 남은 변수는 TeamIdentifier(애플 발급 인증서) 하나뿐이다.
+    // ⇒ 코드로 넘을 수 있는 벽이 아니다. 길은 둘: 애플 개발자 인증서로 서명하거나
+    // (알림센터 누적·클릭 라우팅·아이콘을 통째로 되찾는다), 자체 배너 창을 그린다
+    // (아이콘은 자유지만 알림센터에 안 쌓이고 방해금지 같은 OS 통합을 잃는다).
     if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
         notify_osascript(title, body);
         return;
