@@ -18,6 +18,7 @@ pub mod character;
 pub mod dispatch;
 pub mod git;
 mod http;
+pub mod persona;
 mod proxy;
 mod register;
 mod resume_visibility;

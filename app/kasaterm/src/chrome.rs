@@ -411,7 +411,114 @@ impl App {
     /// on the left. Folded into `window_cells` so the cell grid reflows and no
     /// pane ever overlaps the column.
     pub(crate) fn effective_right_chrome_w(&self) -> f32 {
-        self.git_col_w()
+        self.git_col_w() + self.persona_col_w()
+    }
+    /// 페르소나 칼럼 폭(숨김이면 0).
+    pub(crate) fn persona_col_w(&self) -> f32 {
+        if self.persona.col_visible {
+            self.persona.col_w_logical
+        } else {
+            0.0
+        }
+    }
+    /// 페르소나 칼럼의 왼쪽 모서리 — git 칼럼 **안쪽**에 선다. git 이 창 오른쪽
+    /// 끝에 붙어 있어서(`git_col_x`), 뒤에 온 이쪽이 자리를 비켜야 둘이 안 겹친다.
+    pub(crate) fn persona_col_x(&self) -> f32 {
+        let w = self.persona_col_w();
+        self.window.as_ref().map_or(0.0, |win| {
+            let scale = self.effective_scale();
+            win.inner_size().width as f32 / scale - self.git_col_w() - w
+        })
+    }
+    /// 페르소나 칼럼이 차지할 사각형(logical) — 타이틀 띠 아래 전체 높이.
+    fn persona_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let win = self.window.as_ref()?;
+        if !self.persona.col_visible {
+            return None;
+        }
+        let scale = self.effective_scale();
+        let h = win.inner_size().height as f32 / scale - TITLE_HEIGHT;
+        Some((self.persona_col_x(), TITLE_HEIGHT, self.persona_col_w(), h.max(0.0)))
+    }
+    /// 웹뷰를 지금 창 크기에 맞춘다. 창이 리사이즈돼도 자식 웹뷰는 스스로 안 따라오고,
+    /// 매 프레임 밀면 깜빡여서 — 사각형이 실제로 달라졌을 때만 민다.
+    pub(crate) fn sync_persona_bounds(&mut self) {
+        let Some(rect) = self.persona_rect() else { return };
+        if self.persona.last_rect == Some(rect) {
+            return;
+        }
+        if let Some(wv) = self.persona.webview.as_ref() {
+            let _ = wv.set_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
+                size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
+            });
+            self.persona.last_rect = Some(rect);
+        }
+    }
+    /// 우측 페르소나 패널을 연다. 메인 창의 **자식** 웹뷰라 별도 OS 창이 뜨지 않는다
+    /// — 참조 배치(터미널 옆에 늘 서 있는 한 칸)가 그래야 성립한다.
+    pub(crate) fn open_persona_col(&mut self) {
+        if self.persona.webview.is_some() {
+            self.persona.col_visible = true;
+            return;
+        }
+        let Some(window) = self.window.clone() else { return };
+        self.persona.col_visible = true;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        let rect = match self.persona_rect() {
+            Some(r) => r,
+            None => return,
+        };
+        let port = mcp_panel_port();
+        // launch 별 캐시버스트 — WKWebView 가 옛 persona.html 을 물고 있으면 고친 것이
+        // 화면에 안 온다(설정 웹뷰가 같은 이유로 붙인다).
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(format!("http://127.0.0.1:{port}/arona-ui/persona.html?v={cb}"))
+            .with_background_color((16, 22, 42, 255))
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
+                size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                // 웹뷰가 안 서면 칼럼도 접는다 — 안 그러면 터미널만 좁아진 빈칸이 남는다.
+                eprintln!("[persona] webview build failed: {e}");
+                self.persona.col_visible = false;
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+                return;
+            }
+        };
+        self.persona.webview = Some(webview);
+        self.persona.last_rect = Some(rect);
+        self.chrome_dirty = true;
+        window.request_redraw();
+    }
+    /// 패널을 접는다. 웹뷰를 살려 두면 숨은 채로 계속 폴링해 토큰을 태우므로 통째로 떨군다.
+    pub(crate) fn close_persona_col(&mut self) {
+        self.persona.webview = None;
+        self.persona.last_rect = None;
+        self.persona.col_visible = false;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    pub(crate) fn toggle_persona_col(&mut self) {
+        if self.persona.col_visible {
+            self.close_persona_col();
+        } else {
+            self.open_persona_col();
+        }
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {

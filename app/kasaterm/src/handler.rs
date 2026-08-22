@@ -1044,6 +1044,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다(session/board 패널과 같은 이유).
+        self.persona.webview = None;
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
         self.save_session_state();
@@ -2063,6 +2065,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => {
                 self.window_frame_save_due =
                     Some(Instant::now() + std::time::Duration::from_millis(1000));
+                // 자식 웹뷰는 부모 창 리사이즈를 스스로 따라오지 않는다 — 안 밀면
+                // 창을 넓혔을 때 페르소나 칼럼만 옛 자리에 남아 터미널을 덮는다.
+                self.sync_persona_bounds();
                 gpu::remember_unzoomed_frame(&window, &mut self.saved_window_frame);
                 if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
                     eprintln!(
@@ -5710,6 +5715,12 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 켜져 있어야 하는데 아직 웹뷰가 없으면 여기서 세운다. `resumed` 에서 바로
+        // 열지 않는 이유는 MCP HTTP 서버가 그 시점엔 아직 포트를 안 잡았을 수 있어서다
+        // — 페이지가 same-origin 으로 API 를 부르므로 포트가 틀리면 빈 화면이 된다.
+        if self.persona.col_visible && self.persona.webview.is_none() && self.window.is_some() {
+            self.open_persona_col();
+        }
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
         // 타이머(WaitUntil)로 주기 호출되니 별도 타이머가 필요 없다.

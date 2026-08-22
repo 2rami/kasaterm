@@ -1699,6 +1699,71 @@ async fn persona_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
 }
 
+/// `GET /persona-portrait?name=<이름>` — 우측 패널에 세울 전신 원화.
+///
+/// 도트 스프라이트(`/character-sprite`)와 달리 위키 원본이라 세로로 긴 패널에서
+/// 사람 크기로 선다. 원화는 레포에 없으므로(gitignore) 못 찾으면 404 를 주고,
+/// 프론트가 스프라이트로 떨어진다 — 남의 머신에서 패널이 빈칸이 되지 않게.
+async fn persona_portrait_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let name = params.get("name").cloned().unwrap_or_default();
+    let slug = params
+        .get("slug")
+        .cloned()
+        .or_else(|| crate::persona::slug_for(&crate::persona::character_name(&name)))
+        .unwrap_or_default();
+    match crate::persona::portrait(&slug) {
+        Some((bytes, mime)) => (
+            [
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            Vec::<u8>::new(),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /persona-who` — 지금 우측에 앉아 있는 마스코트가 누구인지(이름·slug·색).
+async fn persona_who_handler() -> impl IntoResponse {
+    let name = crate::persona::character_name("");
+    let slug = crate::persona::slug_for(&name).unwrap_or_default();
+    let has_portrait = crate::persona::portrait(&slug).is_some();
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({
+            "name": name,
+            "slug": slug,
+            "has_portrait": has_portrait,
+        })),
+    )
+}
+
+/// `POST /persona-chat` — 말상대에게 한 번 묻는다. board 를 여기서 읽어 프롬프트에
+/// 실으므로 프론트는 현황을 알 필요가 없다.
+async fn persona_chat_handler(
+    backend: Arc<dyn Backend>,
+    Json(req): Json<crate::persona::ChatReq>,
+) -> impl IntoResponse {
+    let board = backend.collab_board().unwrap_or_default();
+    let (text, ok) = match crate::persona::chat(&req, &board).await {
+        Ok(t) => (t, true),
+        Err(e) => (e, false),
+    };
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": ok, "text": text })),
+    )
+}
+
 /// `GET /character?sid=<sid>` — 세션→캐릭터 바인딩의 정본 캐릭터명(없으면 빈 응답).
 /// claude shim 이 --resume/--session-id 부팅 때 pane 상속 캐릭터 대신 이걸로
 /// teammate 트리플·persona 를 짓는다(거노: 모모이 세션이 프라나 배지로 부팅).
@@ -4063,6 +4128,7 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
@@ -4329,6 +4395,12 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/teamname", get(teamname_handler))
                     .route("/persona", get(persona_handler))
+                    .route("/persona-portrait", get(persona_portrait_handler))
+                    .route("/persona-who", get(persona_who_handler))
+                    .route(
+                        "/persona-chat",
+                        post(move |body| persona_chat_handler(persona_backend.clone(), body)),
+                    )
                     .route("/character", get(character_binding_handler))
                     .route(
                         "/session-restore",

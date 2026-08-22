@@ -527,6 +527,10 @@ const PANE_INNER_Y: f32 = 0.0;
 // Every `col`/`origin_x` calc already adds `WINDOW_PADDING + SIDEBAR_W`,
 // so bumping this off 0 shifts the whole cell grid right automatically.
 const SIDEBAR_W: f32 = 200.0;
+
+/// 우측 페르소나 칼럼의 기본 폭(logical px). 원화가 세로로 긴 전신(598x1171)이라
+/// 이보다 좁으면 얼굴이 손톱만 해지고, 넓히면 터미널이 먹힌다.
+const PERSONA_COL_W: f32 = 260.0;
 /// Sidebar layout (logical px), Warp-style. Non-selected tabs are flat
 /// (icon + two text lines, no box); the selected tab gets a subtle rounded
 /// highlight inset from the strip edges. Tabs sit close together.
@@ -5131,6 +5135,7 @@ struct App {
     /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
     /// the file-tree `git_ignore_*` stay separate — different domains.)
     git: state::GitState,
+    persona: state::PersonaState,
     /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
     /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
     info: state::InfoState,
@@ -5613,6 +5618,14 @@ impl App {
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            persona: state::PersonaState {
+                col_w_logical: PERSONA_COL_W,
+                // 기본은 꺼짐 — 켜는 순간 터미널이 260px 좁아지므로 사용자가 고를 일이다.
+                col_visible: std::env::var("KASATERM_PERSONA")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false),
+                ..Default::default()
+            },
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
