@@ -117,14 +117,17 @@ pub(crate) enum StatusbarHit {
 /// 차지하나」와 그 뷰 핸들뿐이고, 내용은 전부 `/arona-ui/persona.html` 쪽이다.
 #[derive(Default)]
 pub(crate) struct PersonaState {
-    pub(crate) col_visible: bool,
-    pub(crate) col_w_logical: f32,
     /// 메인 창의 자식 웹뷰. 창보다 **먼저** 떨궈야 한다 — 부모 NSView 가 사라진 뒤
     /// 드롭되면 use-after-free 다(session/board 패널이 같은 이유로 명시 드롭한다).
     pub(crate) webview: Option<wry::WebView>,
-    /// 직전에 맞춰 둔 사각형(logical). 창 크기가 안 변했는데 매 프레임 bounds 를
-    /// 다시 밀면 웹뷰가 깜빡인다.
+    /// 웹뷰가 덮을 자리 — 렌더 패스가 탭 머리를 그리고 나서 남은 본문 사각형을
+    /// 여기 적어 둔다(`git.col_close_rect` 와 같은 방식). 그 y 는 탭 글자 폭까지
+    /// 계산해야 나오는 값이라 렌더 밖에서는 알 수 없다.
+    pub(crate) body_rect: Option<(f32, f32, f32, f32)>,
+    /// 직전에 맞춘 사각형. 매 프레임 bounds 를 다시 밀면 웹뷰가 깜빡인다.
     pub(crate) last_rect: Option<(f32, f32, f32, f32)>,
+    /// 지금 웹뷰가 보이는 상태인지 — 탭을 오갈 때마다 같은 값을 다시 밀지 않으려고.
+    pub(crate) shown: bool,
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
@@ -215,6 +218,9 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
+    /// 상주 페르소나 — 지금 pane 들 상황을 아는 말상대. 본문이 셀 렌더가 아니라
+    /// wry 웹뷰라, 이 탭일 때만 그 사각형 위로 OS 뷰가 올라온다.
+    Persona,
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.

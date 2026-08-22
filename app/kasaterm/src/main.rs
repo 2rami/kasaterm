@@ -528,9 +528,6 @@ const PANE_INNER_Y: f32 = 0.0;
 // so bumping this off 0 shifts the whole cell grid right automatically.
 const SIDEBAR_W: f32 = 200.0;
 
-/// 우측 페르소나 칼럼의 기본 폭(logical px). 원화가 세로로 긴 전신(598x1171)이라
-/// 이보다 좁으면 얼굴이 손톱만 해지고, 넓히면 터미널이 먹힌다.
-const PERSONA_COL_W: f32 = 260.0;
 /// Sidebar layout (logical px), Warp-style. Non-selected tabs are flat
 /// (icon + two text lines, no box); the selected tab gets a subtle rounded
 /// highlight inset from the strip edges. Tabs sit close together.
@@ -5618,14 +5615,7 @@ impl App {
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            persona: state::PersonaState {
-                col_w_logical: PERSONA_COL_W,
-                // 기본은 꺼짐 — 켜는 순간 터미널이 260px 좁아지므로 사용자가 고를 일이다.
-                col_visible: std::env::var("KASATERM_PERSONA")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
-                ..Default::default()
-            },
+            persona: state::PersonaState::default(),
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -5646,6 +5636,8 @@ impl App {
                     state::SideTab::Info
                 } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
                     state::SideTab::Sessions
+                } else if std::env::var("KASATERM_PERSONA").is_ok() {
+                    state::SideTab::Persona
                 } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
                     state::SideTab::Mcp
                 } else {

@@ -209,6 +209,7 @@ function worstStatus(board) {
 }
 
 async function pollBoard() {
+  if (window.__paused) return;
   try {
     const r = await fetch('/board');
     const j = await r.json();
@@ -232,7 +233,8 @@ async function pollBoard() {
 // 8분에 한 번, 그것도 사용자가 창을 보고 있을 때만.
 async function idleChat() {
   if (state.busy) return;
-  if (document.hidden) return;
+  // document.hidden 은 자식 웹뷰에서 안 바뀐다 — 앱이 세워 주는 __paused 가 정본이다.
+  if (window.__paused || document.hidden) return;
   if (Date.now() - state.lastSpokeAt < 8 * 60_000) return;
   speak('', true);
 }

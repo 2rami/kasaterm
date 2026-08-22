@@ -5805,6 +5805,31 @@ impl App {
                     }
                 }
             }
+            // 페르소나 탭 — 배경과 탭 머리까지만 셀 렌더로 그리고, 본문 사각형은
+            // 자식 웹뷰에게 넘긴다. 여기서 자리를 적어 두지 않으면 웹뷰가 어디에
+            // 앉을지 알 수 없다(탭 머리 높이는 탭 글자 폭까지 재야 나온다).
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Persona {
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                self.persona.body_rect = Some((
+                    git_col_x + 1.0,
+                    body_top,
+                    (git_col_w - 1.0).max(0.0),
+                    (bottom - body_top).max(0.0),
+                ));
+            }
             // Info 탭 — 같은 칼럼, 같은 머리, 본문만 다르다. git 본문과 형제
             // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.
