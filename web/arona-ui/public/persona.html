@@ -116,6 +116,38 @@
   }
   #send:disabled { opacity: .4; cursor: default; }
   #send svg { width: 16px; height: 16px; }
+
+  #name { cursor: pointer; }
+  #name:hover { color: var(--accent); }
+  /* 로스터는 패널을 통째로 덮는다 — 좁은 칸에서 드롭다운을 띄우면 이름 두 개가
+     보이고 나머지는 잘린다. */
+  #roster {
+    position: absolute; inset: 0; z-index: 9;
+    background: rgba(10,14,26,.97); backdrop-filter: blur(12px);
+    display: none; flex-direction: column;
+  }
+  #roster.on { display: flex; }
+  #rosterTop { padding: 10px 10px 8px 10px; display: flex; gap: 6px; }
+  #rosterQ {
+    flex: 1; padding: 7px 10px; border-radius: 10px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.05);
+    color: var(--ink); font: inherit; font-size: 12px; outline: none;
+    -webkit-user-select: text; user-select: text;
+  }
+  #rosterQ:focus { border-color: var(--accent); }
+  #rosterX {
+    width: 30px; border-radius: 10px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink-dim); cursor: pointer; font-size: 15px;
+  }
+  #rosterList { flex: 1; overflow-y: auto; padding: 0 6px 10px 6px; }
+  .rosterItem {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px; border-radius: 9px; cursor: pointer; font-size: 12.5px;
+  }
+  .rosterItem:hover { background: rgba(255,255,255,.07); }
+  .rosterItem.cur { background: rgba(255,255,255,.1); font-weight: 600; }
+  .rosterDot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+  .rosterSchool { margin-left: auto; font-size: 10.5px; color: var(--ink-dim); }
 </style>
 </head>
 <body>
@@ -127,6 +159,13 @@
   </div>
   <div id="bubbleWrap"><div id="bubble"></div></div>
   <div id="spacer"></div>
+  <div id="roster">
+    <div id="rosterTop">
+      <input id="rosterQ" placeholder="이름으로 찾기" />
+      <button id="rosterX" title="닫기">&times;</button>
+    </div>
+    <div id="rosterList"></div>
+  </div>
   <div id="bar">
     <textarea id="input" rows="1" placeholder="말 걸어보세요..."></textarea>
     <button id="send" title="보내기">
@@ -269,6 +308,68 @@ async function speak(message, unprompted) {
     $('send').disabled = false;
   }
 }
+
+// 로스터 — 이름을 눌러 마스코트를 바꾼다. 「한 명 고정」이라 여기서 고른 하나가
+// 앱 전체의 그 자리다.
+let roster = [];
+async function openRoster() {
+  $('roster').classList.add('on');
+  $('rosterQ').value = '';
+  $('rosterQ').focus();
+  if (!roster.length) {
+    try {
+      const j = await (await fetch('/characters')).json();
+      roster = [].concat(j.leaders || [], j.members || []);
+    } catch (e) { /* 다음 열 때 다시 시도한다 */ }
+  }
+  drawRoster('');
+}
+function drawRoster(q) {
+  const list = $('rosterList');
+  list.innerHTML = '';
+  const needle = q.trim().toLowerCase();
+  for (const m of roster) {
+    if (needle && !(m.name || '').toLowerCase().includes(needle)
+      && !(m.slug || '').toLowerCase().includes(needle)) continue;
+    const row = document.createElement('div');
+    row.className = 'rosterItem' + (m.name === state.name ? ' cur' : '');
+    const dot = document.createElement('span');
+    dot.className = 'rosterDot';
+    dot.style.background = m.header_color || '#8aa6c8';
+    const nm = document.createElement('span');
+    nm.textContent = m.name;
+    const sc = document.createElement('span');
+    sc.className = 'rosterSchool';
+    sc.textContent = m.school || '';
+    row.append(dot, nm, sc);
+    row.addEventListener('click', () => pickCharacter(m.name));
+    list.appendChild(row);
+  }
+}
+async function pickCharacter(name) {
+  $('roster').classList.remove('on');
+  if (name === state.name) return;
+  try {
+    const j = await (await fetch('/persona-who', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ character: name }),
+    })).json();
+    if (!j.ok) { setBubble(j.error || '못 바꿨어요.', { err: true }); return; }
+  } catch (e) { setBubble('못 바꿨어요 — ' + e, { err: true }); return; }
+  // 사람이 바뀌면 말투도 기억도 그 사람 것이어야 한다 — 앞 대화를 넘기면 새 캐릭터가
+  // 남의 말을 자기가 한 것처럼 이어받는다.
+  state.history = [];
+  state.lastSpokeAt = 0;
+  $('art').classList.remove('on');
+  await loadWho();
+  speak('', true);
+}
+$('name').addEventListener('click', openRoster);
+$('rosterX').addEventListener('click', () => $('roster').classList.remove('on'));
+$('rosterQ').addEventListener('input', function () { drawRoster(this.value); });
+$('rosterQ').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('roster').classList.remove('on');
+});
 
 function submit() {
   const t = $('input').value.trim();

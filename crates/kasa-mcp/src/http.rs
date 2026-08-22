@@ -1747,6 +1747,23 @@ async fn persona_who_handler() -> impl IntoResponse {
     )
 }
 
+/// `POST /persona-who` — 마스코트를 바꾼다. 「한 명 고정」이라 앱에 하나뿐이다.
+async fn persona_who_set_handler(
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = body.get("character").and_then(|c| c.as_str()).unwrap_or("");
+    match crate::persona::set_character(name) {
+        Ok(slug) => (
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            Json(serde_json::json!({ "ok": true, "name": name, "slug": slug })),
+        ),
+        Err(e) => (
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        ),
+    }
+}
+
 /// `POST /persona-chat` — 말상대에게 한 번 묻는다. board 를 여기서 읽어 프롬프트에
 /// 실으므로 프론트는 현황을 알 필요가 없다.
 async fn persona_chat_handler(
@@ -4396,7 +4413,10 @@ pub fn spawn_http_server_opts(
                     .route("/teamname", get(teamname_handler))
                     .route("/persona", get(persona_handler))
                     .route("/persona-portrait", get(persona_portrait_handler))
-                    .route("/persona-who", get(persona_who_handler))
+                    .route(
+                        "/persona-who",
+                        get(persona_who_handler).post(persona_who_set_handler),
+                    )
                     .route(
                         "/persona-chat",
                         post(move |body| persona_chat_handler(persona_backend.clone(), body)),

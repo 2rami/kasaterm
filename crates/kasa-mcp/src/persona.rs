@@ -166,14 +166,45 @@ pub struct ChatReq {
     pub unprompted: bool,
 }
 
+/// 고른 마스코트가 적히는 자리. 「한 명 고정」이라 pane 이나 세션이 아니라 앱 하나에
+/// 하나뿐이고, 그래서 세션 파일이 아닌 설정 옆에 둔다.
+fn choice_path() -> Option<PathBuf> {
+    Some(home()?.join(".config/kasaterm/persona.json"))
+}
+
 pub fn character_name(req_name: &str) -> String {
     if !req_name.trim().is_empty() {
         return req_name.trim().to_string();
+    }
+    if let Some(n) = choice_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("character").and_then(|c| c.as_str()).map(|s| s.to_string()))
+        .filter(|s| !s.trim().is_empty())
+    {
+        return n;
     }
     std::env::var("KASATERM_PERSONA_CHARACTER")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "아로나".into())
+}
+
+/// 마스코트를 바꾼다. 로스터에 없는 이름은 거절한다 — 오타 하나로 그림도 말투도
+/// 없는 유령이 서면 화면만 비고 원인이 안 보인다.
+pub fn set_character(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("이름이 비어 있어요.".into());
+    }
+    let slug = slug_for(name).ok_or_else(|| format!("{name} 은 로스터에 없어요."))?;
+    let p = choice_path().ok_or_else(|| "설정 폴더를 못 찾았어요.".to_string())?;
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    std::fs::write(&p, serde_json::json!({ "character": name }).to_string())
+        .map_err(|e| format!("저장을 못 했어요 — {e}"))?;
+    Ok(slug)
 }
 
 fn system_prompt(name: &str, digest: &str, unprompted: bool) -> String {
