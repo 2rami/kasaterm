@@ -143,8 +143,21 @@ ATTEMPTS = 3
 
 
 def members():
+    """로스터의 전원 — leader·leaders 까지 담는다.
+
+    앱(socket.rs `roster_slugs`)이 셋을 모두 훑으므로 여기서 `members` 만 보면
+    비서 캐릭터의 그림이 **조용히 빠진다**. 오류가 안 나고 화면에서 그 한 명만
+    번들 그림으로 떨어지므로 눈으로 볼 때까지 모른다.
+    """
     d = json.load(open(ROSTER, encoding="utf-8"))
-    return [m for m in d["members"] if m.get("slug")]
+    pool = [d.get("leader")] + list(d.get("leaders") or []) + list(d.get("members") or [])
+    out, seen = [], set()
+    for m in pool:
+        slug = (m or {}).get("slug")
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append(m)
+    return out
 
 
 def slugs():
