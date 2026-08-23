@@ -2070,13 +2070,25 @@ impl Backend for PtyBackend {
                 // (permission-prompt) override below.
                 let stem = path.file_stem().and_then(|s| s.to_str());
                 let official = stem.and_then(|s| agents.get(s)).map(|s| s.as_str());
+                // 어느 하네스인지 — codex 는 인박스가 없어 agent/team 칸이 영영 비고,
+                // 그것만으론 "트리플 없이 뜬 claude" 와 구별이 안 된다. 종류를 밝혀야
+                // 오케스트레이터가 SendMessage 대신 tell 을 고른다. reach 판정이 이
+                // 값을 쓰므로 agent/team 대입부보다 앞에서 구한다.
+                row.harness = pane_shell_pid
+                    .get(sid.as_str())
+                    .and_then(|&pid| kasa_pty::agent_for_shell(&ptable, pid))
+                    .map(|k| k.as_str().to_string());
                 // 같은 stem(=sessionId)으로 명부를 조회한다. **이름으로 잇지 않는 게
                 // 핵심이다** — 명부의 name 은 /rename 으로 바뀌고(pane 은
                 // arisu-p116 인데 명부엔 "agy code") 같은 캐릭터가 여러 pane 에 뜨면
                 // 겹친다. sessionId 만 안 흔들린다.
                 let peer = stem.and_then(|s| peers.get(s));
                 let peer_alive = peer.map(|p| live_pids.contains(&p.pid)).unwrap_or(false);
-                row.reach = kasa_socket::peers::reach_of(peer, peer_alive).as_str().to_string();
+                // 하네스가 죽은 pane 은 명부에서 엔트리째 지워져 peer 가 None 이 된다 —
+                // 그걸 tell 로 넘기면 pane 이 이미 셸이라 문장이 명령으로 실행된다.
+                row.reach = kasa_socket::peers::reach_of(peer, peer_alive, row.harness.is_some())
+                    .as_str()
+                    .to_string();
                 row.peer_name = peer.map(|p| p.name.clone()).filter(|n| !n.is_empty());
                 let effectively_idle = match official {
                     Some("busy") => {
@@ -2198,13 +2210,6 @@ impl Backend for PtyBackend {
                     row.agent_name = Some(a.clone());
                     row.team = Some(t.clone());
                 }
-                // 어느 하네스인지 — codex 는 인박스가 없어 위 두 칸이 영영 비고,
-                // 그것만으론 "트리플 없이 뜬 claude" 와 구별이 안 된다. 종류를 밝혀야
-                // 오케스트레이터가 SendMessage 대신 tell 을 고른다.
-                row.harness = pane_shell_pid
-                    .get(sid.as_str())
-                    .and_then(|&pid| kasa_pty::agent_for_shell(&ptable, pid))
-                    .map(|k| k.as_str().to_string());
                 row.character = retained
                     .clone()
                     .or(env_char)

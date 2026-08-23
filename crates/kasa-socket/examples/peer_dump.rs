@@ -28,7 +28,9 @@ fn main() {
     println!("명부 {}개  (살아있는 pid {}개)\n", peers.len(), alive.len());
     println!("  {:<26} {:>7}  {:<8} {}", "name", "pid", "reach", "sessionId");
     for p in &peers {
-        let r = reach_of(Some(p), alive.contains(&p.pid));
+        // 명부를 훑는 도구라 peer 는 항상 Some 이다 — 그 경로에선 하네스
+        // 유무가 판정을 안 바꾸므로 true 를 고정으로 넘긴다.
+        let r = reach_of(Some(p), alive.contains(&p.pid), true);
         println!(
             "  {:<26} {:>7}  {:<8} {}",
             p.name,

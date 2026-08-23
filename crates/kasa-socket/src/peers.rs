@@ -103,8 +103,16 @@ pub fn by_session_id() -> HashMap<String, Peer> {
 /// `peer` 는 명부 조회 결과(없으면 None), `pid_alive` 는 호출부가 이미 들고 있는
 /// 프로세스 표로 판정한 값이다 — 여기서 `ps` 를 또 부르지 않으려는 것이다.
 /// 소켓 파일만 보고 살아 있다고 하면 안 된다: 프로세스가 죽어도 파일은 남는다.
-pub fn reach_of(peer: Option<&Peer>, pid_alive: bool) -> Reach {
-    let Some(p) = peer else { return Reach::Tell };
+///
+/// `harness_running` = pane 셸 아래에 에이전트 프로세스가 실제로 도는가. 명부에
+/// 없는 이유가 둘이라서 필요하다(2026-08-24 지시): ①애초에 등록을 안 하는 하네스
+/// (codex·비-claude)는 `tell` 이 유일한 통로다 ②등록됐다가 죽어 지워진 claude 는
+/// pane 이 셸 프롬프트로 돌아간 상태라, 거기 `tell` 하면 보내려던 문장이 그대로
+/// **셸 명령으로 실행된다**. 명부만 보면 둘이 똑같이 None 이라 구별할 길이 없다.
+pub fn reach_of(peer: Option<&Peer>, pid_alive: bool, harness_running: bool) -> Reach {
+    let Some(p) = peer else {
+        return if harness_running { Reach::Tell } else { Reach::Stale };
+    };
     let socket_ok = !p.socket_path.as_os_str().is_empty() && p.socket_path.exists();
     if socket_ok && pid_alive { Reach::Message } else { Reach::Stale }
 }
@@ -123,9 +131,22 @@ mod tests {
     }
 
     #[test]
-    fn no_registry_entry_means_tell_only() {
+    fn no_registry_entry_but_harness_running_means_tell_only() {
         // 명부에 없다고 죽은 게 아니다 — codex pane 이나 등록을 못 한 세션이다.
-        assert_eq!(reach_of(None, true), Reach::Tell);
+        // 셸 아래에서 하네스가 돌고 있으니 입력창에 밀어넣는 tell 이 성립한다.
+        assert_eq!(reach_of(None, true, true), Reach::Tell);
+    }
+
+    #[test]
+    fn dead_harness_is_stale_not_tell() {
+        // claude 가 끝나면 명부 엔트리째 지워져 peer 가 None 이 된다. 여기서
+        // tell 을 주면 pane 은 이미 셸 프롬프트라 보내려던 문장이 명령으로
+        // 실행된다 — 명부 밖이라는 사실만으론 codex 와 구별되지 않으므로
+        // 셸 아래 하네스 유무로 가른다(2026-08-24 실측: 앱의 살아있는 claude
+        // 목록과 board 의 harness 칸이 정확히 일치했고, 나머지 pane 셋은
+        // 프로세스 표에 없었다).
+        assert_eq!(reach_of(None, true, false), Reach::Stale);
+        assert_eq!(reach_of(None, false, false), Reach::Stale);
     }
 
     #[test]
@@ -134,7 +155,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("live.sock");
         std::fs::write(&sock, b"").unwrap();
-        assert_eq!(reach_of(Some(&peer(sock.to_str().unwrap())), true), Reach::Message);
+        assert_eq!(reach_of(Some(&peer(sock.to_str().unwrap())), true, true), Reach::Message);
         let _ = std::fs::remove_file(&sock);
     }
 
@@ -146,13 +167,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("orphan.sock");
         std::fs::write(&sock, b"").unwrap();
-        assert_eq!(reach_of(Some(&peer(sock.to_str().unwrap())), false), Reach::Stale);
+        assert_eq!(reach_of(Some(&peer(sock.to_str().unwrap())), false, true), Reach::Stale);
         let _ = std::fs::remove_file(&sock);
     }
 
     #[test]
     fn registered_without_socket_is_stale() {
-        assert_eq!(reach_of(Some(&peer("")), true), Reach::Stale);
-        assert_eq!(reach_of(Some(&peer("/nonexistent/x.sock")), true), Reach::Stale);
+        assert_eq!(reach_of(Some(&peer("")), true, true), Reach::Stale);
+        assert_eq!(reach_of(Some(&peer("/nonexistent/x.sock")), true, true), Reach::Stale);
     }
 }
