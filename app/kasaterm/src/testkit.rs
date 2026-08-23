@@ -1344,13 +1344,15 @@ impl App {
         }
     }
 
-    /// Headless 뷰 전환 검증: `KASATERM_AUTOVIEW_MS` 뒤에 방을 쪼개 펼치고, 카드 머리의
-    /// 전환 배지를 **실제 좌표 판정으로** 눌러 배치도↔목록을 왕복한다.
+    /// Headless 펼친 방 검증: `KASATERM_AUTOVIEW_MS` 뒤에 방을 pane 넷으로 쪼개
+    /// 펼치고, 배치도 칸이 leaf 수만큼 섰는지 센다.
     ///
     /// 세는 건 `sidebar_row_rects` 가 아니다 — 거기엔 칸과 줄이 한 벡터에 섞여 있어
     /// 넷이 넷으로 바뀌면 아무것도 안 바뀐 것과 구별이 안 된다. 레이아웃을 직접 불러
-    /// 줄과 칸을 갈라 센다. 통과 모양은 `칸4/줄0` ↔ `칸0/줄4` 다.
-    /// `_HOLD=1` 이면 목록 모드에서 멈춘다(캡처로 눈으로 보려는 자리).
+    /// 칸과 꼬리 줄을 갈라 센다. 통과 모양은 `칸N/줄0` 이다(꼬리 줄은 숨긴 pane 몫).
+    ///
+    /// 배치도↔목록 왕복은 뺐다 — 목록 뷰 자체가 없어졌다(2026-08-24 지시:
+    /// "목록표시는 info에서 보면되고").
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_autoview(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1399,16 +1401,6 @@ impl App {
             (mini.len(), rows.len())
         };
         let wi = self.active_window;
-        let press = |app: &mut App| -> bool {
-            let Some(tab) = app.window_tab_rects.iter().find(|(i, _)| *i == wi).map(|(_, r)| *r)
-            else {
-                return false;
-            };
-            let Some(vr) = app.window_view_rect(wi, tab) else { return false };
-            let hit = app.window_strip_click(vr.0 + vr.2 / 2.0, vr.1 + vr.3 / 2.0);
-            app.render_frame();
-            hit
-        };
         // `_WAIT=1` — 배치도 칸이 **신호를 받았을 때** 어떻게 보이나. 판정이 아니라
         // 그림을 보려는 것이라, 트랜스크립트 감시기가 쓰는 자리(`pane_activity` ·
         // `unread_panes`)에 같은 값을 직접 심는다. 진짜 claude 를 띄워 대기 상태를
@@ -1452,27 +1444,9 @@ impl App {
             return;
         }
         let n_leaf = self.window_leaves(wi).len();
-        let before = counts(self);
-        let hit1 = press(self);
-        let after = counts(self);
-        eprintln!(
-            "[autoview] leaf={n_leaf} · 배치도(칸{}/줄{}) --누름{}--> 목록(칸{}/줄{})",
-            before.0, before.1, if hit1 { "" } else { "실패" }, after.0, after.1
-        );
-        if std::env::var("KASATERM_AUTOVIEW_HOLD").is_ok() {
-            eprintln!("[autoview] hold — 목록 모드에서 멈춤");
-            return;
-        }
-        let hit2 = press(self);
-        let back = counts(self);
-        eprintln!(
-            "[autoview] --누름{}--> 배치도(칸{}/줄{}) 왕복복귀={}",
-            if hit2 { "" } else { "실패" },
-            back.0,
-            back.1,
-            back == before
-        );
-        eprintln!("[autoview] 기대: 칸N/줄0 ↔ 칸0/줄N (한쪽이 늘 0 이 아니면 두 뷰가 같이 떠 있는 것)");
+        let (cells, rows) = counts(self);
+        eprintln!("[autoview] leaf={n_leaf} · 배치도(칸{cells}/꼬리줄{rows})");
+        eprintln!("[autoview] 기대: 칸=leaf 수 · 꼬리줄=숨긴 pane 수(없으면 0)");
     }
 
     /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어

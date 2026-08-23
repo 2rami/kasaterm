@@ -2804,16 +2804,6 @@ impl App {
                     .and_then(|(_, r)| self.window_expand_rect(i, *r))
             })
             .collect();
-        // 뷰 전환 배지도 같은 이유로 미리 늘어놓는다. `(사각, 목록모드인가)`.
-        let sb_view: Vec<Option<((f32, f32, f32, f32), bool)>> = (0..sb_labels.len())
-            .map(|i| {
-                sb_tabs
-                    .iter()
-                    .find(|(ti, _)| *ti == i)
-                    .and_then(|(_, r)| self.window_view_rect(i, *r))
-                    .map(|r| (r, self.list_view_windows.contains(&i)))
-            })
-            .collect();
         // 펼친 방의 pane 한 줄씩 — 이름·색을 여기서 뽑아 둔다. `pane_character_if_known`
         // 이 `ws` 를 잠그므로 GPU 를 빌린 페인트 루프 안에서 부르면 그 자리에서 멈춘다.
         // 줄에 적는 건 **그 pane 이 무엇을 하고 있나**(claude · zsh · 편집기…)다.
@@ -3933,28 +3923,22 @@ impl App {
                         let ly = (ty + th + SIDEBAR_TAB_GAP / 2.0).round();
                         g.rect(tx + 10.0, ly, tw - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
                     }
-                    // Icon chip: small rounded square with a glyph.
                     let (name, cwd) = sb_labels
                         .get(*i)
                         .cloned()
                         .unwrap_or_else(|| (format!("win {}", i + 1), String::new()));
-                    // 채운 원형 칩이었다가 윤곽 글리프만 남겼다. 목록에서 세션을
-                    // 가르는 건 이름인데, 칩이 행마다 하나씩 박히면 같은 크기·같은
-                    // 색의 원들이 먼저 읽혀 정작 이름이 뒤로 밀린다.
-                    let icon = 22.0_f32;
-                    let icon_x = *tx + 12.0;
-                    // 카드 **머리** 기준으로 가운데다. 카드 높이(`th`)로 재면 방을
-                    // 펼친 순간 카드가 pane 줄만큼 길어져, 칩이 이름 두 줄을 떠나
-                    // 목록 한가운데로 흘러내렸다.
-                    let icon_y = *ty + (SIDEBAR_TAB_H - icon) / 2.0;
-                    let glyph = 17.0_f32;
-                    g.queue_icon(
-                        tab_icon_glyph(&name),
-                        icon_x + (icon - glyph) / 2.0,
-                        icon_y + (icon - glyph) / 2.0,
-                        glyph,
-                        if is_active { theme::text() } else { theme::text_dim() },
-                    );
+                    // 이름 왼쪽은 **상태 점 한 칸**이다. 예전엔 여기 터미널 글리프가
+                    // 있었는데 `tab_icon_glyph` 은 이름이 `.md` 로 끝날 때만 갈리고
+                    // 방 이름은 폴더명이라 그럴 일이 없어서, 모든 방이 같은 글리프를
+                    // 달고 있었다 — 아무것도 안 가르면서 이름을 32px 밀었다
+                    // (2026-08-24 지시: "방에서 >_ 이표시는 없어도되지않아?").
+                    //
+                    // 점이 없어도 이 칸은 비워 둔다. 점이 뜬 카드만 이름이 밀리면
+                    // 목록의 왼쪽 정렬이 흔들리고, 방 목록은 훑는 화면이라 그 흔들림이
+                    // 곧 읽는 속도다.
+                    let dot_x = *tx + 12.0;
+                    let dot_y = *ty + 13.0;
+                    let dsz = 9.0_f32;
                     // 상태 동그라미 **하나**. 예전엔 칩의 두 모서리에 점이 따로
                     // 있었다 — 작업 중은 오른쪽 위, 방금 끝남은 오른쪽 아래. 상태가
                     // 바뀔 때마다 점이 두 모서리를 오갔고, 그 움직임이 정작 무엇이
@@ -3981,18 +3965,10 @@ impl App {
                         } else {
                             (theme::accent(), 1.6)
                         };
-                        let dsz = 9.0_f32;
-                        blink_dot(
-                            g,
-                            icon_x + icon - dsz + 3.0,
-                            icon_y - 3.0,
-                            dsz,
-                            c,
-                            period,
-                        );
+                        blink_dot(g, dot_x, dot_y, dsz, c, period);
                     }
-                    // Two-line label to the right of the icon.
-                    let text_x = icon_x + icon + 10.0;
+                    // 두 줄짜리 라벨 — 상태 점 칸 오른쪽.
+                    let text_x = dot_x + dsz + 5.0;
                     let name_fg: [u8; 4] = if is_active {
                         theme::text()
                     } else {
@@ -4151,35 +4127,6 @@ impl App {
                             er.1 + 5.0,
                             &n,
                             gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
-                        );
-                    }
-                    // 뷰 전환 — 펼치기 배지와 같은 칩으로 그려 "여기도 버튼"이 한눈에
-                    // 읽히게 한다. 아이콘은 **누르면 갈 곳**이다(지금 모드가 아니라):
-                    // 지금 뭘 보고 있는지는 바로 아래 카드 본문이 이미 말하고 있어,
-                    // 버튼까지 그걸 되풀이하면 정작 무엇이 일어날지는 아무도 안 말한다.
-                    if let Some((vr, list_view)) = sb_view.get(*i).copied().flatten() {
-                        let hov = sb_cursor.0 >= vr.0
-                            && sb_cursor.0 <= vr.0 + vr.2
-                            && sb_cursor.1 >= vr.1
-                            && sb_cursor.1 <= vr.1 + vr.3;
-                        g.hover_pointer |= hov;
-                        let base = if is_active {
-                            theme::surface_active()
-                        } else if is_hover {
-                            theme::surface_hover()
-                        } else {
-                            theme::panel_bg()
-                        };
-                        round_rect(g, vr.0 - 1.0, vr.1 - 1.0, vr.2 + 2.0, vr.3 + 2.0,
-                            theme::radius_sm(), theme::border());
-                        round_rect(g, vr.0, vr.1, vr.2, vr.3, theme::radius_sm(),
-                            theme::raised_on(base, hov));
-                        g.queue_icon(
-                            if list_view { "columns-2" } else { "rows-2" },
-                            vr.0 + (vr.2 - 12.0) / 2.0,
-                            vr.1 + (vr.3 - 12.0) / 2.0,
-                            12.0,
-                            if hov { theme::text() } else { theme::text_dim() },
                         );
                     }
                     // × close — only on the active or hovered tab (where the
@@ -4570,10 +4517,9 @@ impl App {
                         }
                     }
                     let name_x = rx + 7.0 + face + 6.0;
-                    // 경과 시간 — 상태 점 왼쪽. 목록과 배치도는 **한 번에 한 쪽만**
-                    // 뜨므로(`sidebar_layout` 의 `list_view`) 여기 없으면 목록으로
-                    // 보는 동안에는 이 정보가 화면 어디에도 없다. 같은 것을 두 겹으로
-                    // 칠하는 게 아니라, 다른 뷰에 같은 말을 한 번씩 두는 것이다.
+                    // 경과 시간 — 상태 점 왼쪽. 이 줄에 오는 건 이제 **숨긴 pane**
+                    // 뿐이다(목록 뷰가 없어졌다). 숨긴 pane 은 트리에 없어 배치도
+                    // 칸이 아예 없으므로, 여기서 안 말하면 화면 어디에도 없다.
                     let elapsed = info
                         .busy_secs
                         .filter(|_| info.busy || info.bg_active)

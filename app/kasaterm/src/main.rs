@@ -5039,14 +5039,6 @@ struct App {
     expanded_windows: std::collections::HashSet<usize>,
     /// 펼친 카드를 **목록**으로 보는 방. 기본(비어 있음)은 배치도다.
     ///
-    /// 배치도와 목록은 같은 pane 을 서로 다른 축으로 말한다 — 지도는 "어느 칸이
-    /// 화면 어디인지", 목록은 "무엇을 돌리고 있는지"(claude·zsh·편집기). 둘을 한
-    /// 카드에 같이 두면 카드가 두 배로 길어지면서도 어느 쪽도 온전하지 못해, 한
-    /// 번에 하나만 띄우고 카드 머리에서 갈아 끼운다(2026-08-11 지시).
-    ///
-    /// `expanded_windows` 와 같은 이유로 방 인덱스가 키다 — `reorder_window` 의
-    /// remap 을 반드시 지나야 방을 끌어 옮겨도 뷰가 따라간다.
-    list_view_windows: std::collections::HashSet<usize>,
     /// 지금 펴지거나 접히는 중인 방 — `(방, 펴는 중인가, 시작 시각)`.
     ///
     /// 한 번에 하나만 담는다. 다른 방을 토글하면 앞엣것은 그 자리에서 끝난 것으로
@@ -5626,7 +5618,6 @@ impl App {
             turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
             expanded_windows: std::collections::HashSet::new(),
-            list_view_windows: std::collections::HashSet::new(),
             expand_anim: None,
             sidebar_row_drag: None,
             window_dock_rects: Vec::new(),

@@ -1120,8 +1120,6 @@ impl App {
         self.window_alert = alerts.into_iter().map(remap).collect();
         let expanded = std::mem::take(&mut self.expanded_windows);
         self.expanded_windows = expanded.into_iter().map(remap).collect();
-        let list_view = std::mem::take(&mut self.list_view_windows);
-        self.list_view_windows = list_view.into_iter().map(remap).collect();
         // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
         // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
         // 지나야 다음 사람이 이 목록을 믿는다.
@@ -2662,16 +2660,12 @@ impl App {
             // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
             // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
             let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
-            // 펼친 카드는 **한 번에 한 뷰**다 — 배치도(기본)거나 목록이거나. 둘을 같이
-            // 두면 같은 pane 을 두 번 말하면서 카드만 두 배로 길어진다(2026-08-11 지시).
-            // 지도 모드에선 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 —
-            // 여섯 칸을 46px 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
-            let list_view = self.list_view_windows.contains(&i);
-            let body_h = if list_view {
-                leaves.len() as f32 * SIDEBAR_ROW_H
-            } else {
-                (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
-            };
+            // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,
+            // 그 목록은 info 탭이 방→pane→탭→프로세스로 이미 그리는 것의 얕은
+            // 사본이었다(2026-08-24 지시: "목록표시는 info에서 보면되고").
+            // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
+            // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
+            let body_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
             let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
             let list_h = (full_h * t).round();
             let h = SIDEBAR_TAB_H + list_h;
@@ -2694,7 +2688,7 @@ impl App {
                 // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
                 // 이미 풀어 주므로 여기서 재귀할 것이 없다.
                 let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
-                if !list_view && ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
+                if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
                     // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
                     // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
                     let tree = if i == self.active_window {
@@ -2721,15 +2715,12 @@ impl App {
                         ));
                     }
                 }
-                // 목록 모드면 트리 pane 이 여기서 줄이 되고, 지도 모드면 지도 아래
-                // 꼬리에 숨긴 pane 만 남는다 — 숨긴 것은 트리에 없어 칸이 없으므로
-                // 지도로는 말할 방법이 아예 없다.
-                let head = if list_view { 0.0 } else { body_h };
-                let tree_rows: &[String] = if list_view { &leaves } else { &[] };
-                for (k, id) in tree_rows.iter().chain(hidden.iter()).enumerate() {
+                // 배치도 아래 꼬리에는 숨긴 pane 만 줄로 남는다 — 숨긴 것은 트리에
+                // 없어 칸이 없으므로 배치도로는 말할 방법이 아예 없다.
+                for (k, id) in hidden.iter().enumerate() {
                     let ry = y
                         + SIDEBAR_TAB_H
-                        + head
+                        + body_h
                         + SIDEBAR_ROW_PAD / 2.0
                         + k as f32 * SIDEBAR_ROW_H;
                     if ry + SIDEBAR_ROW_H > bottom {
