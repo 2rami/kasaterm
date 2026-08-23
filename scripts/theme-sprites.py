@@ -90,6 +90,12 @@ PROFILE_FIT = os.environ.get("THEME_PROFILE_FIT", "face")
 # 2026-06 char-arona 앵커 체인). 베이스용(전신)과 프사용(버스트)을 따로 받는다.
 STYLE_REF = os.environ.get("THEME_STYLE_REF", "")
 PROFILE_STYLE_REF = os.environ.get("THEME_PROFILE_STYLE_REF", "")
+# 프사에 무기를 들릴지. 블루아카는 전원 총기가 정체성이라 기본이 켜짐이다.
+# ⚠️ 원작에 무기가 없는 작품에는 반드시 꺼라 — 「원화에 무기가 없으면 없이
+# 그린다」는 단서만으로는 못 막는다(2026-08-24 단간론파 5인이 전원 있지도 않은
+# 갈색 곤봉을 든 채 나왔다). 묘사 끝의 "No weapon." 으로 갈라낼 수도 없다,
+# 블루아카 묘사도 똑같이 그 문장으로 끝난다(스프라이트에선 무기를 빼야 해서다).
+PROFILE_WEAPON = os.environ.get("THEME_PROFILE_WEAPON", "1") != "0"
 
 # 상태 → (ppgen 프리셋 이름 겸 앱 자산 폴더 이름, 프레임 수).
 # 프레임 수는 기존 12명의 자산과 같다 — ppgen 프리셋이 주는 수와 이미 일치한다.
@@ -441,10 +447,15 @@ def gen_profile(slug, force=False):
     # 종류·색은 글로 추측하지 않고 원화(ref)에서 그대로 가져오게 한다(옛 교훈:
     # 추측하면 엉뚱한 무기가 나온다 — 원화에 무기가 없으면 없이 그린다).
     pdesc = desc.replace("No weapon.", "").strip()
-    pdesc += (" She holds her signature weapon exactly as it appears in the identity"
-              " reference artwork — same type, shape and colors — angled across her"
-              " chest like a game profile portrait. If the reference artwork shows"
-              " no weapon, draw her without one.")
+    if PROFILE_WEAPON:
+        pdesc += (" The character holds their signature weapon exactly as it appears in"
+                  " the identity reference artwork — same type, shape and colors —"
+                  " angled across the chest like a game profile portrait. If the"
+                  " reference artwork shows no weapon, draw them without one.")
+    else:
+        pdesc += (" Bust framing like a game profile portrait. Both hands are empty:"
+                  " no weapon, no stick, no baton, no tool, no prop of any kind"
+                  " anywhere in the image.")
     outdir = os.path.dirname(psrc)
     cmd = [PPGEN, "-provider", PROVIDER, "-desc", pdesc, "-style", PROFILE_STYLE,
            "-portrait", "-ref", ref, "-out", outdir, "-chroma", pick_chroma(slug)]
