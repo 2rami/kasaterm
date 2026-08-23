@@ -110,9 +110,14 @@ pub fn by_session_id() -> HashMap<String, Peer> {
 /// pane 이 셸 프롬프트로 돌아간 상태라, 거기 `tell` 하면 보내려던 문장이 그대로
 /// **셸 명령으로 실행된다**. 명부만 보면 둘이 똑같이 None 이라 구별할 길이 없다.
 pub fn reach_of(peer: Option<&Peer>, pid_alive: bool, harness_running: bool) -> Reach {
-    let Some(p) = peer else {
-        return if harness_running { Reach::Tell } else { Reach::Stale };
-    };
+    // 셸 아래에 아무도 없으면 명부를 볼 것도 없다. 명부는 sessionId 로 찾는데, 같은
+    // 대화를 새 pane 이 --resume 으로 이어받으면 **두 pane 이 같은 id 를 가리켜** 죽은
+    // 쪽이 산 쪽의 엔트리를 주워 Message 로 뜬다(2026-08-24 실측: 새 칸으로 복구한
+    // 직후 시체 두 pane 이 그렇게 됐다).
+    if !harness_running {
+        return Reach::Stale;
+    }
+    let Some(p) = peer else { return Reach::Tell };
     let socket_ok = !p.socket_path.as_os_str().is_empty() && p.socket_path.exists();
     if socket_ok && pid_alive { Reach::Message } else { Reach::Stale }
 }
@@ -147,6 +152,19 @@ mod tests {
         // 프로세스 표에 없었다).
         assert_eq!(reach_of(None, true, false), Reach::Stale);
         assert_eq!(reach_of(None, false, false), Reach::Stale);
+    }
+
+    #[test]
+    fn dead_pane_borrowing_a_live_entry_is_still_stale() {
+        // 같은 대화를 새 pane 이 --resume 으로 이어받으면 두 pane 이 같은 sessionId 를
+        // 가리킨다. 명부 조회는 그 id 로 하므로 죽은 쪽도 산 쪽의 엔트리를 얻어
+        // 소켓·pid 검사를 통과해 버린다 — 셸 아래가 비었다는 사실이 그보다 세다.
+        let dir = std::env::temp_dir().join("kasaterm-peers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("borrowed.sock");
+        std::fs::write(&sock, b"").unwrap();
+        assert_eq!(reach_of(Some(&peer(sock.to_str().unwrap())), true, false), Reach::Stale);
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[test]
