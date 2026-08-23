@@ -610,17 +610,25 @@ impl App {
             } else {
                 bg_tab_busy.contains(id) || self.pane_bg_active(id)
             };
+            // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접
+            // 일하는 것과 뒤에서 도는 것을 함께 센다 — 그림 굽는 배치는 claude 가
+            // 「끝났나」로 되물으며 기다리는 사이 status 가 오가지만, 사람이 알고
+            // 싶은 것은 그 일이 시작된 뒤로 흐른 시간이다.
+            let running = bg_active || (status != "idle" && !crate::chrome::status_needs_you(status));
+            let now = std::time::Instant::now();
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
                     a.status = status.to_string();
                     a.bg_active = bg_active;
                     a.compact_pct = compact_pct;
+                    a.busy_since = running.then(|| a.busy_since.unwrap_or(now));
                 })
                 .or_insert_with(|| crate::stream::PaneStatusView {
                     status: status.to_string(),
                     bg_active,
                     compact_pct,
+                    busy_since: running.then_some(now),
                     ..Default::default()
                 });
         }

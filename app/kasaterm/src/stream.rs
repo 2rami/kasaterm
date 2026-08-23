@@ -30,6 +30,12 @@ pub struct PaneStatusView {
     /// from the transcript tail, not the glyph scan.
     #[serde(default)]
     pub bg_active: bool,
+    /// 이 pane 이 **쉬지 않고 돈 지 얼마나 됐나**의 기준점. 배치도 칸이 「14분째」를
+    /// 그리는 값이고, 도는 것이 멈추면 지운다. 오래 도는 일과 잠깐 도는 일이 화면에서
+    /// 똑같이 보이던 것을 가른다(2026-08-24 지시). 직렬화 대상이 아니다 — 시각은
+    /// 이 프로세스 안에서만 뜻이 있다.
+    #[serde(skip)]
+    pub busy_since: Option<std::time::Instant>,
     /// compact 진행률 — claude 가 화면에 찍는 `▰▰▱ N%` 를 파싱한 값(0..=100).
     /// claude 는 이 값을 화면에만 내놓고 API 로 주지 않으므로 글자에서 읽는 수밖에
     /// 없다. None = compact 중이 아니거나 퍼센트 행이 안 보임(그땐 바가 시간 루프로
