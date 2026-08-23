@@ -1551,25 +1551,22 @@ impl App {
                 layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
             };
             let repr = leaves.first().cloned();
-            // 방을 대표하는 cwd — 첫 leaf 가 아니라 **방 전체의 최빈값**이다. 첫
-            // pane 하나로 이름을 지으면 그 pane 이 뭘 띄웠는지에 따라 방 이름이
+            // 방을 대표하는 cwd — 첫 leaf 가 아니라 **학생이 앉은 곳의 최빈값**이다.
+            // 첫 pane 하나로 이름을 지으면 그 pane 이 뭘 띄웠는지에 따라 방 이름이
             // 흔들려, 사이드바에서 자리로 방을 찾던 눈이 매번 다시 읽어야 했다.
-            // 방은 대개 한 프로젝트라 최빈 cwd 가 곧 그 방의 정체다(거노 확인).
-            let home = leaves
+            // 좁히는 규칙은 `room_home_cwd` 에 있다.
+            let cwds: Vec<(std::path::PathBuf, bool)> = leaves
                 .iter()
-                .filter_map(|id| self.pane_current_cwd(id))
-                .fold(Vec::<(std::path::PathBuf, usize)>::new(), |mut acc, p| {
-                    match acc.iter_mut().find(|(q, _)| *q == p) {
-                        Some((_, c)) => *c += 1,
-                        None => acc.push((p, 1)),
-                    }
-                    acc
+                .filter_map(|id| {
+                    // 학생 판정은 `pane_record` 가 쓰는 기준과 같다 — 바인딩된 세션
+                    // id 도 함께 봐서, claude 가 잠시 내려간 pane 이 셸로 강등돼
+                    // 방 이름이 흔들리는 일이 없다.
+                    let agent = self.pane_claude_sid.contains_key(id)
+                        || self.pty.get(id).and_then(|p| p.active_agent()).is_some();
+                    self.pane_current_cwd(id).map(|p| (p, agent))
                 })
-                .into_iter()
-                // 동률이면 먼저 나온 것(첫 leaf 쪽)을 남긴다 — leaves 순서가
-                // 고정이라 같은 방이 늘 같은 이름을 얻는다.
-                .reduce(|a, b| if b.1 > a.1 { b } else { a })
-                .map(|(p, _)| p);
+                .collect();
+            let home = room_home_cwd(&cwds);
             // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
             // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
@@ -3992,6 +3989,70 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
         .then_some("claude")
 }
 
+/// 임시 디렉토리 아래인가. 방 이름 후보에서 밀어내는 데 쓴다 — claude 가 pane 마다
+/// 파는 `…/scratchpad/<슬러그>` 는 프로젝트가 아니라 세션 부산물이라, 그게 방
+/// 이름이 되면 방이 무슨 일을 하는 곳인지 알려주지 못한다. 게다가 여러 방이 같은
+/// 슬러그를 쓰면 사이드바에서 방끼리 구별되지 않는다(2026-08-24 지적: 서로 다른 두
+/// 방이 나란히 `dogfood8-run3` 로 떴다).
+fn is_temp_path(p: &std::path::Path) -> bool {
+    // macOS 는 `/tmp`·`/var` 가 `/private` 아래 실경로를 갖는다 — cwd 를 `lsof` 로
+    // 캐면 그 실경로로 돌아오므로 양쪽을 다 적는다.
+    const ROOTS: &[&str] = &[
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    ];
+    if ROOTS.iter().any(|r| p.starts_with(r)) {
+        return true;
+    }
+    // 위 목록에 없는 플랫폼 임시 루트(Windows 의 `%TEMP%`).
+    let t = std::env::temp_dir();
+    t.parent().is_some() && p.starts_with(&t)
+}
+
+/// 방을 대표하는 cwd — 사이드바 방 이름·부제의 원본. `panes` 는 leaf 순서대로
+/// `(cwd, 학생이 앉은 pane 인가)`.
+///
+/// **방의 정체는 학생이 앉은 프로젝트다.** 곁다리 셸 하나가 다른 폴더에 있다고 방
+/// 이름이 그리로 끌려가면, 사이드바에서 자리로 방을 찾던 눈이 매번 다시 읽어야
+/// 한다(2026-08-24 지적: recall 방이 곁다리 셸 하나 때문에 임시폴더 이름을
+/// 뒤집어썼다). 그래서 최빈값을 세기 전에 후보를 두 번 좁힌다.
+///
+/// ① 학생이 앉은 pane 이 하나라도 있으면 후보를 그 pane 들로 좁힌다 — 셸은 학생이
+/// 하나도 없는 방(사람이 직접 쓰는 터미널 방)에서만 이름을 짓는다.
+/// ② 그중 프로젝트 경로가 하나라도 있으면 임시 경로를 뺀다. **전부 임시면 남긴다** —
+/// 스크래치패드에서만 도는 방은 그게 유일한 정체다.
+///
+/// 좁히고 남은 것의 최빈값, 동률이면 leaf 순서가 먼저인 쪽. leaves 순서가 고정이라
+/// 같은 방이 늘 같은 이름을 얻는다.
+fn room_home_cwd(panes: &[(std::path::PathBuf, bool)]) -> Option<std::path::PathBuf> {
+    let agents: Vec<&std::path::PathBuf> =
+        panes.iter().filter(|(_, a)| *a).map(|(p, _)| p).collect();
+    let pool: Vec<&std::path::PathBuf> = if agents.is_empty() {
+        panes.iter().map(|(p, _)| p).collect()
+    } else {
+        agents
+    };
+    let named: Vec<&std::path::PathBuf> =
+        pool.iter().copied().filter(|p| !is_temp_path(p)).collect();
+    let pool = if named.is_empty() { pool } else { named };
+
+    pool.into_iter()
+        .fold(Vec::<(&std::path::PathBuf, usize)>::new(), |mut acc, p| {
+            match acc.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, c)) => *c += 1,
+                None => acc.push((p, 1)),
+            }
+            acc
+        })
+        .into_iter()
+        .reduce(|a, b| if b.1 > a.1 { b } else { a })
+        .map(|(p, _)| p.clone())
+}
+
 /// 저장된 leaf 가 쓰던 모델 — 없으면 `None`(복원 명령에 플래그를 안 붙인다).
 ///
 /// 옛 저장본엔 이 키가 없다. 그때 빈 문자열이 아니라 `None` 이어야 하는 이유는,
@@ -4313,5 +4374,110 @@ mod agy_restore_tests {
         // 옛 저장본 — 이게 깨지면 판올림 한 번에 학생 pane 이 전부 셸이 된다.
         assert_eq!(saved_agent(&j(r#"{"was_claude":true}"#)), Some("claude"));
         assert_eq!(saved_agent(&j(r#"{}"#)), None);
+    }
+}
+
+/// 사이드바 방 이름 판정 — 어떤 cwd 가 방을 대표하는가.
+#[cfg(test)]
+mod room_name_tests {
+    use super::{is_temp_path, room_home_cwd};
+
+    /// 방 이름 판정. `(cwd, 학생이 앉았나)` 를 leaf 순서대로 준다.
+    fn room(panes: &[(&str, bool)]) -> Option<String> {
+        let v: Vec<(std::path::PathBuf, bool)> = panes
+            .iter()
+            .map(|(p, a)| (std::path::PathBuf::from(p), *a))
+            .collect();
+        room_home_cwd(&v).map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+    }
+    const SCRATCH: &str =
+        "/private/tmp/claude-501/-Users-kasa-repo/0e7ab2f6/scratchpad/dogfood8-run3";
+
+    #[test]
+    fn room_name_takes_the_most_common_cwd() {
+        assert_eq!(
+            room(&[("/a/recall", true), ("/a/branding", true), ("/a/recall", true)]),
+            Some("recall".into())
+        );
+        assert_eq!(room(&[]), None);
+    }
+
+    /// 동률이면 leaf 순서가 먼저인 쪽 — 순서가 고정이라 같은 방이 늘 같은 이름을 얻는다.
+    #[test]
+    fn room_name_breaks_a_tie_by_leaf_order() {
+        assert_eq!(
+            room(&[("/a/recall", true), ("/a/branding", true)]),
+            Some("recall".into())
+        );
+        assert_eq!(
+            room(&[("/a/branding", true), ("/a/recall", true)]),
+            Some("branding".into())
+        );
+    }
+
+    /// 2026-08-24 지적의 재현. 곁다리 셸이 임시 폴더에 앉아 있어도 방 이름은
+    /// 학생이 보는 프로젝트다 — 이게 깨지면 recall 방이 `dogfood8-run3` 가 된다.
+    #[test]
+    fn room_name_ignores_a_stray_shell_in_a_temp_dir() {
+        // leaf 순서상 셸이 **먼저**다 — 옛 규칙은 동률에서 이쪽이 이겼다.
+        assert_eq!(
+            room(&[(SCRATCH, false), ("/a/recall", true)]),
+            Some("recall".into())
+        );
+    }
+
+    /// 셸이 다수여도 학생 쪽이 이긴다 — 방의 정체는 학생이 앉은 프로젝트다.
+    #[test]
+    fn room_name_prefers_agent_panes_over_a_shell_majority() {
+        assert_eq!(
+            room(&[
+                ("/a/Downloads", false),
+                ("/a/Downloads", false),
+                ("/a/recall", true),
+            ]),
+            Some("recall".into())
+        );
+    }
+
+    /// 학생이 하나도 없는 방(사람이 직접 쓰는 터미널)은 셸 cwd 로 이름이 지어진다.
+    #[test]
+    fn room_name_falls_back_to_shells_when_no_agent_sits_there() {
+        assert_eq!(
+            room(&[("/a/Downloads", false), ("/a/Downloads", false), ("/a/recall", false)]),
+            Some("Downloads".into())
+        );
+    }
+
+    /// 방 전체가 임시 폴더면 그게 유일한 정체다 — 밀어내면 이름이 없어진다.
+    #[test]
+    fn room_name_keeps_a_temp_dir_when_thats_all_there_is() {
+        assert_eq!(room(&[(SCRATCH, true)]), Some("dogfood8-run3".into()));
+        assert_eq!(
+            room(&[(SCRATCH, false), ("/tmp/scratch", false)]),
+            Some("dogfood8-run3".into())
+        );
+    }
+
+    /// 학생만 남긴 뒤에도 임시 제외가 걸린다 — 학생 둘이 각각 프로젝트/스크래치면
+    /// 프로젝트 쪽이다.
+    #[test]
+    fn room_name_drops_temp_after_narrowing_to_agents() {
+        assert_eq!(
+            room(&[(SCRATCH, true), ("/a/recall", true)]),
+            Some("recall".into())
+        );
+    }
+
+    #[test]
+    fn temp_paths_cover_both_macos_spellings() {
+        use std::path::Path;
+        assert!(is_temp_path(Path::new(SCRATCH)));
+        assert!(is_temp_path(Path::new("/tmp/x")));
+        assert!(is_temp_path(Path::new("/var/folders/ab/cd/T/x")));
+        assert!(is_temp_path(Path::new("/private/var/folders/ab/cd/T/x")));
+        assert!(!is_temp_path(Path::new("/Users/kasa/Desktop/repo")));
+        // 이름이 임시 루트로 시작할 뿐인 경로는 임시가 아니다.
+        assert!(!is_temp_path(Path::new("/tmpfs/repo")));
+        assert!(!is_temp_path(Path::new("/Users/kasa/tmp/repo")));
     }
 }
