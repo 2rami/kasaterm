@@ -7,6 +7,19 @@ pub(crate) use crate::sprites::*;
 /// 펼친 방의 pane 줄 하나를 그리는 데 필요한 것 전부 — 페인트 루프가 `g`
 /// (=&mut self.gpu) 를 잡고 있어 `self` 를 다시 읽을 수 없으므로 미리 뜬 스냅샷이다.
 /// 튜플로 두다 필드가 여섯이 되면서 `.3`/`.4` 가 무엇인지 호출부에서 안 읽혀 이름을 달았다.
+/// 카드 덱 한 장이 **누구의 무슨 자리**인지. 덱은 지금까지 장 수만 말하고 누가
+/// 들어있는지는 못 말했다(2026-08-24 지시). 계단이 1.5~4.5px 라 얼굴은 못 넣고
+/// 색만 들어가므로, 이름은 마우스를 올렸을 때 목록으로 편다.
+#[derive(Clone)]
+struct TabPeek {
+    /// 그 탭의 학생. claude 가 실제로 도는 탭만 갖는다(`display_tab_char` 관문).
+    who: Option<String>,
+    /// 그 탭의 이름 — 붙인 제목, 없으면 OSC, 없으면 프로세스 이름.
+    label: String,
+    /// 지금 보이는 탭. 덱의 앞장이자 목록에서 표시할 줄.
+    active: bool,
+}
+
 struct SidebarRowInfo {
     /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
     who: String,
@@ -34,9 +47,10 @@ struct SidebarRowInfo {
     /// 흔적이 없다(거노 2026-08-20 「탭 안에 있으면 … 미니맵에 겹친다든지」).
     /// 1 이면 지금까지와 완전히 같은 그림 — 거의 모든 pane 이 그렇다.
     ///
-    /// **탭 수만 센다.** 탭의 pid 를 거쳐 접으면(`and_then`) 이미지·md 탭은
-    /// pid 가 None 이라 조용히 빠져 개수가 틀어진다.
-    tabs: usize,
+    /// **모든 탭이 한 자리씩 차지한다.** 학생을 못 찾는 탭(이미지·md·웹, 아직
+    /// claude 가 안 뜬 자리)도 `who: None` 으로 남는다 — 빼면 장 수가 틀어지고,
+    /// 덱은 장 수부터 말하는 그림이다.
+    tab_peeks: Vec<TabPeek>,
     /// 눈에 보이는 일은 없는데 백그라운드 셸·Monitor 가 도는 중.
     /// **`busy` 와 배타적이다** — `refresh_pane_activity` 가 `busy` 면 아예
     /// false 를 넣는다. 그래서 이걸 배치도 칸에 그려도 걷기와 겹칠 수가 없다.
@@ -2819,7 +2833,7 @@ impl App {
                     .then(|| self.pane_character_if_known(id))
                     .flatten()
                     .unwrap_or_default();
-                let (is_cur, icon, tabs) = {
+                let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
                     // 활성 탭 기준(Deref) — 칸/줄은 pane 하나를 대표하므로
@@ -2834,10 +2848,47 @@ impl App {
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
-                    // 배치도 칸이 「뒤에 더 있다」를 말할 재료. 이미 잡은 락 통행에서
-                    // 같이 꺼낸다 — 칸마다 다시 잠그면 매 프레임 pane 수만큼 늘어난다.
-                    let tabs = ws.panes.get(id).map(|p| p.tabs.len()).unwrap_or(1);
-                    (is_cur, icon, tabs)
+                    // 배치도 칸이 「뒤에 누가 더 있다」를 말할 재료. 이미 잡은 락
+                    // 통행에서 같이 꺼낸다 — 칸마다 다시 잠그면 매 프레임 pane 수만큼
+                    // 늘어난다.
+                    let tab_peeks = ws
+                        .panes
+                        .get(id)
+                        .map(|p| {
+                            let at = p.active_tab.min(p.tabs.len().saturating_sub(1));
+                            p.tabs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| {
+                                    let pid = t.pid.as_deref();
+                                    // 이름은 탭 알약과 같은 사슬이다(붙인 제목 →
+                                    // OSC → 프로세스). 여기만 다른 규칙을 쓰면 같은
+                                    // 탭이 자리마다 다른 이름으로 불린다.
+                                    let label = t
+                                        .title
+                                        .clone()
+                                        .filter(|s| !s.trim().is_empty())
+                                        .or_else(|| {
+                                            pid.and_then(|q| self.pty.get(q))
+                                                .and_then(|p| p.osc_title())
+                                                .filter(|s| !s.is_empty())
+                                        })
+                                        .unwrap_or_else(|| {
+                                            pid.map(|q| {
+                                                Self::resolve_pane_label(&self.pty, q, None)
+                                            })
+                                            .unwrap_or_default()
+                                        });
+                                    TabPeek {
+                                        who: pid.and_then(|q| self.display_tab_char(&ws, q)),
+                                        label,
+                                        active: i == at,
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (is_cur, icon, tab_peeks)
                 };
                 let label = self.pane_row_label(id);
                 let waiting = self.pane_needs_you(id);
@@ -2869,7 +2920,7 @@ impl App {
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == *id),
                     icon,
-                    tabs,
+                    tab_peeks,
                     // ⚠️ `pane_activity` 의 키는 **leaf id** 다(`refresh_pane_activity`
                     // 가 `ws.panes` 순회로 채운다). 얼굴·라벨과 달리 여기서 탭 pid 로
                     // 접으면 **오히려 어긋난다** — 함정이 반대 방향이다.
@@ -4163,6 +4214,9 @@ impl App {
                 // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
                 // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
                 // 목록은 "누가 있나"만 말하고 어느 칸이 화면 어디인지는 못 말한다.
+                // 덱 위에 마우스가 있을 때 펼 명단. 루프 **밖에서** 그린다 — 안에서
+                // 그리면 뒤에 오는 칸이 위에 얹혀 팝업이 잘린다.
+                let mut deck_tip: Option<(f32, f32, Vec<TabPeek>)> = None;
                 for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
                     let (mx, mut my, mut mw, mut mh) = *r;
                     let cur = sb_active_pane.as_deref() == Some(id.as_str());
@@ -4174,6 +4228,16 @@ impl App {
                         && sb_cursor.1 >= my
                         && sb_cursor.1 <= my + mh;
                     g.hover_pointer |= hov;
+                    // 색은 「누가 있나」를 한눈에, 명단은 「누가 뭘 하나」를 정확히.
+                    // 계단에 글자가 안 들어가서 이름은 이쪽으로 뺐다(2026-08-24 지시).
+                    // 마우스를 못 움직이는 헤드리스 검증에서 이 팝업만은 찍을 길이
+                    // 없어, env 로 첫 덱 칸의 명단을 펴 둔다(검증 전용).
+                    static FORCE_TIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    let force_tip = *FORCE_TIP
+                        .get_or_init(|| std::env::var("KASATERM_AUTODECKTIP").is_ok());
+                    if (hov || (force_tip && deck_tip.is_none())) && info.tab_peeks.len() > 1 {
+                        deck_tip = Some((mx + mw + 6.0, my, info.tab_peeks.clone()));
+                    }
                     // 탭이 여럿인 pane 은 칸을 **카드 덱**으로 그린다(거노 2026-08-20
                     // 「탭 안에 있으면 … 미니맵에 겹친다든지」). 배치도 칸은 pane 하나당
                     // 하나뿐이고 그 칸은 활성 탭만 대표한다 — 그래서 한 pane 안에
@@ -4190,7 +4254,7 @@ impl App {
                     // 거의 모든 pane 이 그쪽이고, 거기에 장식이 붙으면 배치도가 통째로
                     // 시끄러워진다.
                     let back = if mw > 12.0 && mh > 12.0 {
-                        info.tabs.saturating_sub(1).min(3)
+                        info.tab_peeks.len().saturating_sub(1).min(3)
                     } else {
                         // 칸이 이만 못하면 계단이 칸을 다 먹는다. 얼굴도 못 들어가는
                         // 크기라 여기서 포기하는 게 낫다.
@@ -4214,17 +4278,35 @@ impl App {
                         let gap = |g: &mut _, x: f32, y: f32| {
                             round_rect(g, x - 0.7, y - 0.7, cw + 1.4, ch + 1.4, 2.2, theme::panel_bg());
                         };
+                        // 앞장은 활성 탭이므로 뒷장은 **나머지를 순서대로** 맡는다.
+                        // k == 1 이 앞장 바로 뒤이고 k 가 클수록 더 뒤다.
+                        let others: Vec<&TabPeek> =
+                            info.tab_peeks.iter().filter(|t| !t.active).collect();
                         // 뒤에서 앞으로. k 가 클수록 우상단이고, k == 0 이 아래 코드가
                         // 이어서 그리는 앞장(= 활성 탭)이다.
                         for k in (1..=back).rev() {
                             let (x, y) =
                                 (mx + step * k as f32, my + step * (back - k) as f32);
                             gap(g, x, y);
-                            // 옆 칸(비활성 = `border` 0x66)보다 **한 단 어둡게**. 같은
-                            // 값으로 뒀더니 뒷장이 위 칸과 색이 붙어 「남의 칸이 여기까지
-                            // 온 것」처럼 읽혔다(실측). 어두우면 뒤로 물러나 보이는 덤도
-                            // 있고, 앞장이 주인공 자리를 지킨다.
-                            round_rect(g, x, y, cw, ch, 2.0, theme::with_alpha(theme::border(), 0x4a));
+                            // 장마다 **그 탭 학생의 색**으로 칠한다 — 덱이 장 수는
+                            // 말하면서 누구인지는 못 말했다(2026-08-24 지시). 계단이
+                            // 1.5~4.5px 라 얼굴도 글자도 못 들어가고 색만 들어간다.
+                            //
+                            // 학생이 없는 장(이미지·md·웹, 아직 claude 가 안 뜬 자리)은
+                            // 옆 칸(비활성 = `border` 0x66)보다 **한 단 어두운** 원래
+                            // 회색이다. 같은 값으로 뒀더니 뒷장이 위 칸과 색이 붙어
+                            // 「남의 칸이 여기까지 온 것」처럼 읽혔다(실측).
+                            //
+                            // 학생색도 그 어두운 규칙을 따라 알파를 눌러 둔다. 원색
+                            // 그대로면 뒷장이 앞장보다 밝아 덱의 앞뒤가 뒤집힌다 —
+                            // 뒤로 물러나 보이는 것이 이 그림의 뼈대다.
+                            let col = others
+                                .get(k - 1)
+                                .and_then(|t| t.who.as_deref())
+                                .and_then(theme::character_accent)
+                                .map(|c| [c[0], c[1], c[2], 0xa8])
+                                .unwrap_or_else(|| theme::with_alpha(theme::border(), 0x4a));
+                            round_rect(g, x, y, cw, ch, 2.0, col);
                         }
                         // 앞장 자리의 테. 이게 없으면 앞장과 바로 뒷장이 붙어 버린다
                         // — 활성 칸은 테두리가 accent 라 저절로 갈리지만, 비활성 칸은
@@ -4381,6 +4463,57 @@ impl App {
                         } else if info.bg_active {
                             g.pulse_bar(bx, by, bw, bar_h, theme::accent());
                         }
+                    }
+                }
+                if let Some((tx, ty, peeks)) = deck_tip {
+                    let fs = 11.0;
+                    let (pad, line, dot) = (7.0, fs + 5.0, 5.0);
+                    let name_w = peeks
+                        .iter()
+                        .map(|t| g.measure_chrome_text(t.who.as_deref().unwrap_or("-"), fs, true))
+                        .fold(0.0_f32, f32::max);
+                    let label_w = peeks
+                        .iter()
+                        .map(|t| g.measure_chrome_text(&t.label, fs, false))
+                        .fold(0.0_f32, f32::max);
+                    let bw = pad * 2.0 + dot + 5.0 + name_w + 8.0 + label_w;
+                    let bh = pad * 2.0 + line * peeks.len() as f32;
+                    // 사이드바가 왼쪽이라 칸 오른쪽이 기본 자리지만, 창이 좁으면 팝업이
+                    // 화면 밖으로 나간다. 그땐 칸 왼쪽으로 접고, 아래로 넘치면 끌어올린다.
+                    let (vw, vh) = (win_px.0 / scale, win_px.1 / scale);
+                    let bx = if tx + bw + 4.0 > vw { (tx - bw - 12.0).max(4.0) } else { tx };
+                    let by = ty.min((vh - bh - 4.0).max(4.0));
+                    round_rect(g, bx, by, bw, bh, theme::radius_md(), theme::panel_bg());
+                    for (i, t) in peeks.iter().enumerate() {
+                        let ly = by + pad + line * i as f32;
+                        let who = t.who.as_deref();
+                        // 점은 배치도 칸의 그 장과 **같은 색**이다. 둘을 잇는 것이 이
+                        // 명단의 값이고, 색이 어긋나면 두 그림이 딴 말을 한다.
+                        if let Some(c) = who.and_then(theme::character_accent) {
+                            circle_rect(g, bx + pad, ly + fs / 2.0 - dot / 2.0, dot, c);
+                        }
+                        let (name_col, bold) = if t.active {
+                            (theme::text(), true)
+                        } else {
+                            (theme::text_dim(), false)
+                        };
+                        g.draw_text(
+                            bx + pad + dot + 5.0,
+                            ly,
+                            who.unwrap_or("-"),
+                            gpu::DrawOpts { font_size: fs, color: name_col, bold, italic: false },
+                        );
+                        g.draw_text(
+                            bx + pad + dot + 5.0 + name_w + 8.0,
+                            ly,
+                            &t.label,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                     }
                 }
                 for (k, ((wi, _, r), info)) in

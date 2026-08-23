@@ -5830,7 +5830,9 @@ impl App {
             // Default closed — single-pane, no chrome reads as a plain
             // terminal at first launch. User toggles via the title-bar
             // button or the "보기 → 세션 패널" menu item.
-            sidebar_visible: false,
+            // 카드 덱 호버 명단은 사이드바 배치도 위에서만 뜬다. 헤드리스는
+            // 마우스를 못 움직이니 AUTODECKTIP 일 때만 열어 둔 채 띄운다.
+            sidebar_visible: std::env::var_os("KASATERM_AUTODECKTIP").is_some(),
             // 기본은 side(사이드바 탭) — read_tab_position 이 "top" 만 top 으로,
             // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",

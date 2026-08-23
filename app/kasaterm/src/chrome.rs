@@ -60,20 +60,26 @@ impl App {
     /// 다르고, 후자까지 막으면 되살리기 목록처럼 PTY 가 이미 사라진 화면에서 이름이
     /// 통째로 없어진다.
     pub(crate) fn display_pane_char(&self, ws: &Workspace, id: &str) -> Option<String> {
-        let id = &ws.active_tab_pid(id);
-        if let Some(p) = self.pty.get(id.as_str()) {
+        self.display_tab_char(ws, &ws.active_tab_pid(id))
+    }
+
+    /// 그 **탭 하나**의 학생. 위가 활성 탭으로 접어 부르는 겉옷이고 이쪽이 알맹이다.
+    /// 카드 덱이 장마다 다른 사람을 말하려면 접기 **전** 값이 필요하다(2026-08-24
+    /// 지시: 탭 겹친 pane 에서 「어떤 학생인지 모른다」). 관문은 같다 — claude 가
+    /// 실제로 도는 탭만 학생을 갖는다.
+    pub(crate) fn display_tab_char(&self, ws: &Workspace, tab: &str) -> Option<String> {
+        if let Some(p) = self.pty.get(tab) {
             p.active_agent()?;
         }
         self.pane_claude_sid
-            .get(id)
+            .get(tab)
             .and_then(|sid| kasa_mcp::character::session_character(sid))
             .or_else(|| {
-                let view =
-                    self.pty.get(id).map(|p| p.is_claude_agents()).unwrap_or(false);
+                let view = self.pty.get(tab).map(|p| p.is_claude_agents()).unwrap_or(false);
                 if view {
                     None
                 } else {
-                    ws.pane_character.get(id).cloned()
+                    ws.pane_character.get(tab).cloned()
                 }
             })
     }
