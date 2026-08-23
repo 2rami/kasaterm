@@ -279,6 +279,99 @@ pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
         .map(|p| format!("{p}{}", collab_protocol()))
 }
 
+/// 이 학생이 뜰 때 붙일 `--model` 값. `claude-opus-5[1m]` 처럼 CLI 가 그대로
+/// 받는 자유 문자열이라 이 자리에서 후보를 좁히지 않는다 — 2026-08-24 지시로
+/// 커스텀 모델을 로스터 파일에 직접 적을 수 있어야 해서다. 비었거나 없으면
+/// 설정창의 전역 모델로 떨어진다.
+pub fn model_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("model").and_then(|x| x.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// 이 학생을 띄울 실행 통로 — `kimi`·`glm` 처럼 claude 를 감싸 게이트웨이로
+/// 보내는 런처 이름이다.
+///
+/// `model` 과 축이 다르므로 한 필드에 못 섞는다: 게이트웨이 모델은 `--model`
+/// 로는 못 닿고 래퍼가 환경(프록시 주소·키)을 씌워야만 붙는다. 반대로 래퍼를
+/// 쓰면서 그 안에서 다시 모델을 고를 수도 있어, 둘은 곱해지는 관계다.
+pub fn backend_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("backend").and_then(|x| x.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // 실행 파일 이름이 되어 셸에 그대로 넘어가는 값이다 — 경로 구분자나
+        // 공백이 섞이면 임의 명령이 되므로 한 낱말만 통과시킨다.
+        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .map(String::from)
+}
+
+/// 설정창 드롭다운이 늘어놓을 모델 후보 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// 화면에 뜨는 이름.
+    pub label: String,
+    /// `--model` 값. 비면 안 붙인다.
+    pub model: String,
+    /// 실행 래퍼 이름. 비면 순정 claude.
+    pub backend: String,
+}
+
+/// 내장 후보 — 로스터 파일에 `models` 가 없을 때의 기본값.
+fn builtin_model_choices() -> Vec<ModelChoice> {
+    let m = |label: &str, model: &str, backend: &str| ModelChoice {
+        label: label.to_string(),
+        model: model.to_string(),
+        backend: backend.to_string(),
+    };
+    vec![
+        m("기본", "", ""),
+        m("Opus 5 (1M)", "claude-opus-5[1m]", ""),
+        m("Sonnet 5 (1M)", "claude-sonnet-5[1m]", ""),
+        m("Haiku", "haiku", ""),
+        m("Kimi", "", "kimi"),
+        m("GLM", "", "glm"),
+    ]
+}
+
+/// 드롭다운 후보 목록. 로스터 파일 최상위 `models` 배열을 읽으므로 원본을 고쳐
+/// 커스텀 모델을 늘릴 수 있다(2026-08-24 지시: 커스텀 모델은 json/yaml 로 설정
+/// 가능하게). 배열이 없거나 쓸 만한 항목이 하나도 없으면 내장 목록으로 간다.
+///
+/// 첫 칸은 늘 "안 고름"이어야 한다 — 목록이 사용자 것으로 통째로 바뀌어도 전역
+/// 기본으로 되돌릴 길이 사라지면 안 되므로, 빈 항목이 없으면 앞에 끼워 넣는다.
+pub fn model_choices(chars: &Value) -> Vec<ModelChoice> {
+    let mut out: Vec<ModelChoice> = Vec::new();
+    if let Some(arr) = chars.get("models").and_then(|x| x.as_array()) {
+        for it in arr {
+            let get = |k: &str| {
+                it.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
+            };
+            let (model, backend) = (get("model"), get("backend"));
+            // label 이 없으면 값으로 대신 부른다 — 이름 없는 칸은 고를 수가 없다.
+            let label = match get("label") {
+                l if !l.is_empty() => l,
+                _ if !model.is_empty() => model.clone(),
+                _ if !backend.is_empty() => backend.clone(),
+                _ => "기본".to_string(),
+            };
+            out.push(ModelChoice { label, model, backend });
+        }
+    }
+    if out.is_empty() {
+        return builtin_model_choices();
+    }
+    if !out.iter().any(|c| c.model.is_empty() && c.backend.is_empty()) {
+        out.insert(
+            0,
+            ModelChoice { label: "기본".into(), model: String::new(), backend: String::new() },
+        );
+    }
+    out
+}
+
 /// 협업 규약 파일이 놓일 자리 — 읽기는 `characters.json` 과 **같은 우선순위**다
 /// (테마 → 사용자 override → 번들 → 개발 트리). 로스터와 규약을 한 벌로 갈아끼울
 /// 수 있어야 테마가 자기 규칙을 들고 올 수 있다.
@@ -377,6 +470,122 @@ pub fn raw_persona_for(chars: &Value, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// 학생 정의 한 명을 사람이 고칠 수 있는 YAML 로 편다.
+///
+/// **범용 YAML 직렬화가 아니다.** 우리가 내는 형태 — 값이 스칼라뿐인 평평한
+/// map — 만 다루고, 중첩 map 이나 배열을 만나면 그 값은 JSON 표기로 그대로
+/// 적는다(왕복은 여전히 성립한다). 범용 파서를 새 의존성으로 들이는 대신 좁게
+/// 가는 쪽을 골랐다: 여기서 다루는 값의 형태를 우리가 통제하고, 못 읽을 때
+/// 조용히 뭉개는 대신 저장을 거부하면 정의가 깨질 길이 없다.
+pub fn member_to_yaml(v: &Value) -> String {
+    let Some(map) = v.as_object() else { return String::new() };
+    let mut out = String::new();
+    for (k, val) in map {
+        match val {
+            Value::String(s) if s.contains('\n') => {
+                // 여러 줄은 블록 스칼라로. `|-` 로 끝 개행을 지우지 않는 이유는
+                // 원문에 있던 마지막 개행까지 그대로 살리기 위해서다 — `|` 는
+                // 끝 개행 하나를 남기므로, 원문이 개행으로 안 끝나면 그만큼
+                // 어긋난다. 그래서 원문 기준으로 골라 준다.
+                let chomp = if s.ends_with('\n') { "|" } else { "|-" };
+                out.push_str(&format!("{k}: {chomp}\n"));
+                for line in s.trim_end_matches('\n').split('\n') {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+            Value::String(s) => {
+                out.push_str(&format!("{k}: {}\n", yaml_scalar(s)));
+            }
+            other => {
+                // 스칼라가 아니거나 문자열이 아닌 값 — JSON 표기가 곧 YAML 의
+                // 흐름 표기라 그대로 통한다.
+                out.push_str(&format!("{k}: {other}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// 한 줄 문자열을 YAML 스칼라로. 따옴표 없이 두면 다른 타입으로 읽히거나
+/// 문법이 깨지는 값만 감싼다.
+fn yaml_scalar(s: &str) -> String {
+    let plain_ok = !s.is_empty()
+        && s.trim() == s
+        && !s.contains(['#', ':', '"', '\'', '\\', '\t'])
+        && !s.starts_with(['-', '?', '&', '*', '!', '|', '>', '%', '@', '`', '[', '{'])
+        // 따옴표 없이 두면 불리언·널·숫자로 읽혀 문자열이 아니게 되는 값들.
+        && !matches!(s, "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "~")
+        && s.parse::<f64>().is_err();
+    if plain_ok {
+        s.to_string()
+    } else {
+        Value::String(s.to_string()).to_string()
+    }
+}
+
+/// `member_to_yaml` 이 낸 것을 되돌린다. 우리가 내는 문법만 받는다 — 앵커·흐름
+/// map·다중 문서 같은 건 오류로 돌려보내 저장을 막는다.
+pub fn member_from_yaml(src: &str) -> Result<Value, String> {
+    let mut map = serde_json::Map::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            i += 1;
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            return Err(format!("{}번째 줄이 들여쓰기로 시작해요 — 키가 없어요", i + 1));
+        }
+        let Some((k, rest)) = line.split_once(':') else {
+            return Err(format!("{}번째 줄에 `키: 값` 의 콜론이 없어요", i + 1));
+        };
+        let key = k.trim().to_string();
+        if key.is_empty() {
+            return Err(format!("{}번째 줄의 키가 비었어요", i + 1));
+        }
+        let rest = rest.trim();
+        if rest == "|" || rest == "|-" {
+            // 블록 스칼라 — 들여쓴 줄을 전부 모은다. 빈 줄은 본문의 일부이므로
+            // 들여쓰기가 없어도 이어 간다(끊으면 문단이 통째로 잘린다).
+            let mut body: Vec<String> = Vec::new();
+            i += 1;
+            while i < lines.len() {
+                let l = lines[i];
+                if l.trim().is_empty() {
+                    body.push(String::new());
+                    i += 1;
+                    continue;
+                }
+                let Some(stripped) = l.strip_prefix("  ") else { break };
+                body.push(stripped.to_string());
+                i += 1;
+            }
+            while body.last().is_some_and(String::is_empty) {
+                body.pop();
+            }
+            let mut text = body.join("\n");
+            if rest == "|" {
+                text.push('\n');
+            }
+            map.insert(key, Value::String(text));
+            continue;
+        }
+        // 한 줄 값. JSON 으로 읽히면 그 타입(따옴표 친 문자열·숫자·불리언),
+        // 아니면 평문 문자열이다.
+        let val = serde_json::from_str::<Value>(rest).unwrap_or_else(|_| {
+            if rest.is_empty() { Value::String(String::new()) } else { Value::String(rest.to_string()) }
+        });
+        map.insert(key, val);
+        i += 1;
+    }
+    if map.is_empty() {
+        return Err("내용이 비었어요".to_string());
+    }
+    Ok(Value::Object(map))
+}
+
 /// 설정 폼이 persona·색을 저장할 파일 — `candidate_paths` 의 최우선 슬롯과 **같은
 /// 자리여야 한다**. 활성 테마가 있으면 그 테마의 `theme.json`, 없으면 기존
 /// `~/.config/kasaterm/characters.json`.
@@ -443,6 +652,61 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
     let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, &path)
+}
+
+/// 로스터에서 `name` 캐릭터의 **정의 전체**를 새 것으로 갈아 끼운다(원본 편집 저장).
+///
+/// `update_member` 와 갈라 두는 이유는 키 삭제 때문이다 — 원본에서 한 줄을 지우면
+/// 그 필드가 없어져야 하는데, 키 하나씩 덮는 경로로는 지운 것이 그대로 남는다.
+///
+/// ⚠️ `update_member` 와 같은 함정을 공유한다: **같은 이름이 여러 군데 적혀 있으면
+/// 전부 갈아야 한다.** `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드라
+/// 리더는 늘 두 번 적혀 있는데, 한쪽만 갈고 이름까지 바꾸면 두 이름이 갈려 로스터에
+/// 유령이 하나 는다(로스터 빌드가 **이름으로** 접기 때문).
+pub fn replace_member(name: &str, def: &Value) -> std::io::Result<()> {
+    if !def.is_object() {
+        return Err(std::io::Error::other("정의가 map 이 아님"));
+    }
+    let path = user_characters_path().ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    } else {
+        characters_json()
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+
+    let mut applied = false;
+    if let Some(l) = root.get_mut("leader") {
+        if l.get("name").and_then(|n| n.as_str()) == Some(name) {
+            *l = def.clone();
+            applied = true;
+        }
+    }
+    for arr_key in ["leaders", "members"] {
+        if let Some(arr) = root.get_mut(arr_key).and_then(|x| x.as_array_mut()) {
+            for m in arr.iter_mut() {
+                if m.get("name").and_then(|n| n.as_str()) == Some(name) {
+                    *m = def.clone();
+                    applied = true;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Err(std::io::Error::other(format!("로스터에 '{name}' 이 없음")));
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// 로스터에서 한 명의 정의를 그대로 떠 온다(원본 뷰가 보여 줄 것).
+pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
+    find_character(chars, name).cloned()
 }
 
 /// 협업 규약의 **정본은 코드가 아니라 `collab-hooks/collab-protocol.md`** 이고,
@@ -1160,5 +1424,48 @@ mod collab_protocol_tests {
             return; // HOME 없음 — CI 컨테이너
         };
         assert_eq!(Some(&save), protocol_candidate_paths().first());
+    }
+
+    /// 원본 뷰의 왕복 — 여기가 깨지면 사용자가 YAML 로 한 번 보기만 해도 학생
+    /// 정의가 조용히 변형된다. 실제 로스터에 있는 값의 모양을 그대로 담았다.
+    #[test]
+    fn yaml_roundtrip_keeps_every_value() {
+        let src = serde_json::json!({
+            "name": "미도리",
+            "slug": "midori",
+            "school": "밀레니엄",
+            // `#` 로 시작 — 따옴표를 안 씌우면 YAML 주석이 되어 값이 통째로 사라진다.
+            "header_color": "#6BCF7F",
+            "model": "claude-opus-5[1m]",
+            // 빈 문자열 — 평문으로 두면 null 로 읽힌다.
+            "backend": "",
+            // 여러 줄 — 블록 스칼라로 나가야 한다.
+            "persona": "너는 미도리.\n차분한 존댓말로 말한다.\n\n보고는 결과 위주.",
+        });
+        let y = member_to_yaml(&src);
+        assert!(y.contains("persona: |-"), "여러 줄은 블록 스칼라로: {y}");
+        assert!(y.contains("header_color: \"#6BCF7F\""), "# 값은 따옴표로: {y}");
+        let back = member_from_yaml(&y).expect("되읽기");
+        assert_eq!(src, back, "왕복에서 값이 바뀌었다\n--- yaml ---\n{y}");
+    }
+
+    /// 문자열로 남아야 할 값이 다른 타입으로 읽히지 않는지. `"true"` 가 불리언이
+    /// 되면 로스터를 쓰는 쪽이 문자열을 기대하다 조용히 빈 값을 본다.
+    #[test]
+    fn yaml_keeps_stringy_looking_values_as_strings() {
+        for v in ["true", "false", "null", "no", "123", "1.5", "~", "- 하이픈"] {
+            let src = serde_json::json!({ "k": v });
+            let back = member_from_yaml(&member_to_yaml(&src)).expect(v);
+            assert_eq!(back["k"], serde_json::json!(v), "{v} 가 문자열로 안 돌아왔다");
+        }
+    }
+
+    /// 문법이 틀리면 **저장을 거부**해야 한다 — 조용히 일부만 읽어 저장하면
+    /// 지워지지 않았어야 할 필드가 사라진다.
+    #[test]
+    fn yaml_rejects_broken_input() {
+        assert!(member_from_yaml("콜론이 없는 줄").is_err());
+        assert!(member_from_yaml("  들여쓰기로 시작").is_err());
+        assert!(member_from_yaml("").is_err());
     }
 }

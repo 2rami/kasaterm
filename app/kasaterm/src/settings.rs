@@ -140,6 +140,15 @@ pub(crate) struct SettingsCtx {
     /// 상세 화면의 이름 편집 버퍼. `student_selected` 는 **저장된** 이름이라
     /// 타이핑 중에는 둘이 어긋난다 — 그림·persona 조회는 저장된 쪽을 쓴다.
     pub student_name: String,
+    /// 열려 있는 캐릭터의 `--model` 값과 실행 통로. 편집 버퍼가 아니라 저장된
+    /// 값 그대로다 — 고르는 즉시 저장하므로 중간 상태가 없다.
+    pub student_model: String,
+    pub student_backend: String,
+    /// 「원본」 뷰 상태 — 열림/형식/버퍼를 통째로 복사해 온다.
+    pub student_raw: crate::StudentRawEdit,
+    /// 모델 칸이 늘어놓을 후보. 로스터 파일의 `models` 에서 오므로 원본을 고쳐
+    /// 늘릴 수 있다(2026-08-24 지시: 커스텀 모델은 json/yaml 로).
+    pub model_choices: Vec<kasa_mcp::character::ModelChoice>,
     /// Feedback 본문 버퍼·캐럿·진단 첨부 스위치.
     pub feedback_body: String,
     pub feedback_caret: usize,
@@ -326,9 +335,16 @@ impl App {
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane
     /// picks up a knob change on its next `claude` run (the shim path is stable
     /// for the process lifetime, so overwriting the file is enough — no relaunch).
-    fn regen_claude_shim(&self) {
+    /// 로스터·클로드 노브가 바뀌면 pane PATH 의 셰임을 다시 굽는다.
+    ///
+    /// 학생 이름 셰임(`시로코`)까지 함께 굽는 것이 중요하다 — 그 스크립트에는
+    /// 그 학생의 성격과 모델이 **구워져** 있어서, 클로드 셰임만 다시 만들면
+    /// 설정에서 고친 값이 이름 명령으로 뜬 pane 에는 영영 안 붙는다.
+    fn regen_pane_shims(&self) {
         if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
-            install_claude_hook_shim(std::path::Path::new(&dir));
+            let dir = std::path::Path::new(&dir);
+            install_claude_hook_shim(dir);
+            install_student_shims(dir);
         }
     }
 
@@ -376,7 +392,7 @@ impl App {
         );
         socket::write_setting("status_bar_h", serde_json::Value::from(self.set_status_h));
         socket::write_setting("pane_footer_h", serde_json::Value::from(self.set_pane_footer_h));
-        self.regen_claude_shim();
+        self.regen_pane_shims();
         // codex 는 래퍼를 다시 굽지 않는다 — 값이 하나도 안 박힌 정적 문자열이라
         // 다시 구울 이유가 없고, 활성 슬롯 경로만 파일로 갈아 끼우면 **이미 떠 있는
         // pane 도 다음 codex 실행부터** 그 계정으로 뜬다.
@@ -658,6 +674,10 @@ impl App {
     /// this stays a pure `&self` snapshot taken outside any gpu borrow.
     pub(crate) fn settings_snapshot(&self, area: Rect, cursor: (f32, f32)) -> SettingsCtx {
         let s = socket::read_settings();
+        // 로스터는 한 번만 읽는다 — 설정 화면이 열려 있는 동안 매 프레임 도는
+        // 자리라, 칸마다 부르면 같은 파일을 프레임당 여러 번 읽는다.
+        let roster = kasa_mcp::character::characters_json();
+        let sel = self.students_selected.as_deref();
         SettingsCtx {
             area,
             cat: self.settings_cat,
@@ -703,9 +723,10 @@ impl App {
             codex_account: self.set_codex_account.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
-            characters: kasa_mcp::character::characters_json()
+            characters: roster
+                .as_ref()
                 .map(|c| {
-                    kasa_mcp::character::member_names(&c)
+                    kasa_mcp::character::member_names(c)
                         .into_iter()
                         .map(|n| {
                             let slug = theme::character_slug(&n);
@@ -722,6 +743,21 @@ impl App {
             student_persona: self.students_persona.clone(),
             student_caret: self.students_caret,
             student_name: self.students_name.clone(),
+            student_raw: self.students_raw.clone(),
+            student_model: roster
+                .as_ref()
+                .zip(sel)
+                .and_then(|(c, n)| kasa_mcp::character::model_for(c, n))
+                .unwrap_or_default(),
+            student_backend: roster
+                .as_ref()
+                .zip(sel)
+                .and_then(|(c, n)| kasa_mcp::character::backend_for(c, n))
+                .unwrap_or_default(),
+            model_choices: roster
+                .as_ref()
+                .map(kasa_mcp::character::model_choices)
+                .unwrap_or_default(),
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
@@ -1261,6 +1297,37 @@ impl App {
                 let dir = feedback_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 open_path(&dir);
+            }
+            SettingsAction::ToggleStudentRaw(on) => {
+                self.students_raw.open = on;
+                self.settings_input = None;
+                if on {
+                    self.reload_student_raw();
+                }
+            }
+            SettingsAction::StudentRawFormat(yaml) => {
+                if self.students_raw.yaml != yaml {
+                    self.students_raw.yaml = yaml;
+                    self.reload_student_raw();
+                }
+            }
+            SettingsAction::FocusStudentRaw => {
+                self.settings_input = Some(SettingsInput::StudentRaw);
+            }
+            SettingsAction::SaveStudentRaw => {
+                self.settings_input = None;
+                self.save_student_raw();
+            }
+            SettingsAction::StudentModel(model, backend) => {
+                let Some(name) = self.students_selected.clone() else { return };
+                // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
+                // "지정 없음"으로 걸러내므로 결과가 같고, 삭제 경로를 따로 두면
+                // 로스터가 테마 파일일 때와 홈 override 일 때 두 곳을 맞춰야 한다.
+                let _ = kasa_mcp::character::update_member(
+                    &name, "model", serde_json::Value::String(model.clone()));
+                let _ = kasa_mcp::character::update_member(
+                    &name, "backend", serde_json::Value::String(backend.clone()));
+                self.regen_pane_shims();
             }
             SettingsAction::FocusStudentPersona => {
                 // 캐럿 저장소를 단일라인 필드와 공유하므로, 다른 필드가 만졌을 수
@@ -2045,7 +2112,7 @@ impl App {
         use winit::event::ElementState;
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
         let Some(field) = self.settings_input else { return false };
-        if matches!(field, SettingsInput::StudentPersona | SettingsInput::FeedbackBody) {
+        if Self::is_multiline(field) {
             return self.multiline_key(field, event);
         }
         if event.state != ElementState::Pressed {
@@ -2094,7 +2161,9 @@ impl App {
                     None => return true,
                 },
                 SettingsInput::StudentName => &mut self.students_name,
-                SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
+                SettingsInput::StudentPersona
+                | SettingsInput::FeedbackBody
+                | SettingsInput::StudentRaw => {
                     unreachable!("multiline_key 가 먼저 가로챈다")
                 }
             };
@@ -2178,6 +2247,32 @@ impl App {
     /// Esc 는 blur 인데 뒤처리가 필드마다 다르다 — persona 는 blur 가 곧 저장이라
     /// characters.json 을 쓰고(매 키가 아니라 여기서만), 피드백은 저장 버튼이
     /// 따로 있으니 버퍼만 남긴다. 그래서 Esc 만 borrow 전에 먼저 처리한다.
+    /// 이 필드가 멀티라인 편집기인가. 단일라인 경로가 여기서 갈린다.
+    fn is_multiline(field: SettingsInput) -> bool {
+        matches!(
+            field,
+            SettingsInput::StudentPersona | SettingsInput::FeedbackBody | SettingsInput::StudentRaw
+        )
+    }
+
+    /// 멀티라인 필드의 버퍼와 캐럿.
+    ///
+    /// 세 자리(키·붙여넣기·IME 삽입)가 각자 분기하던 것을 하나로 모았다 — 필드가
+    /// 늘 때 한 곳을 빠뜨리면 그 필드만 엉뚱한 버퍼에 타이핑돼, 고치는 화면과
+    /// 글자가 들어가는 곳이 갈린다.
+    fn multiline_buf(&mut self, field: SettingsInput) -> Option<(&mut String, &mut usize)> {
+        match field {
+            SettingsInput::FeedbackBody => Some((&mut self.feedback_body, &mut self.feedback_caret)),
+            SettingsInput::StudentPersona => {
+                Some((&mut self.students_persona, &mut self.students_caret))
+            }
+            SettingsInput::StudentRaw => {
+                Some((&mut self.students_raw.text, &mut self.students_raw.caret))
+            }
+            _ => None,
+        }
+    }
+
     fn multiline_key(&mut self, field: SettingsInput, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, NamedKey};
@@ -2195,11 +2290,7 @@ impl App {
             }
             return true;
         }
-        let (buf, caret) = if field == SettingsInput::FeedbackBody {
-            (&mut self.feedback_body, &mut self.feedback_caret)
-        } else {
-            (&mut self.students_persona, &mut self.students_caret)
-        };
+        let Some((buf, caret)) = self.multiline_buf(field) else { return true };
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => textedit::insert(buf, caret, '\n'),
             Key::Named(NamedKey::Backspace) => textedit::backspace(buf, caret),
@@ -2288,7 +2379,7 @@ impl App {
         theme::invalidate_roster();
         socket::invalidate_theme_rows();
         self.students_selected = Some(new);
-        self.regen_claude_shim();
+        self.regen_pane_shims();
         self.repaint_all();
     }
 
@@ -2321,12 +2412,8 @@ impl App {
 
     pub(crate) fn settings_insert_text(&mut self, text: &str) {
         let Some(field) = self.settings_input else { return };
-        if matches!(field, SettingsInput::StudentPersona | SettingsInput::FeedbackBody) {
-            let (buf, caret) = if field == SettingsInput::FeedbackBody {
-                (&mut self.feedback_body, &mut self.feedback_caret)
-            } else {
-                (&mut self.students_persona, &mut self.students_caret)
-            };
+        if Self::is_multiline(field) {
+            let Some((buf, caret)) = self.multiline_buf(field) else { return };
             for ch in text.chars() {
                 textedit::insert(buf, caret, ch);
             }
@@ -2353,7 +2440,9 @@ impl App {
                 None => return,
             },
             SettingsInput::StudentName => &mut self.students_name,
-            SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
+            SettingsInput::StudentPersona
+            | SettingsInput::FeedbackBody
+            | SettingsInput::StudentRaw => {
                 unreachable!("multiline_key 가 먼저 가로챈다")
             }
         };
@@ -2464,6 +2553,60 @@ impl App {
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로
     /// 바뀌었을 때만). blur·선택 변경·설정 닫기 시 호출. 저장 후 shim 을 재생성해
     /// 그 캐릭터 pane 의 다음 claude 실행이 새 persona 를 집게 한다.
+    /// 「원본」 버퍼를 저장된 정의로 다시 채운다(뷰를 열 때·형식을 바꿀 때).
+    pub(crate) fn reload_student_raw(&mut self) {
+        // 폼에서 고치던 성격이 아직 파일에 안 갔을 수 있다 — 먼저 굳히지 않으면
+        // 원본 뷰가 옛 성격을 보여 주고, 그걸 저장하는 순간 방금 친 글이 날아간다.
+        self.flush_student_persona();
+        let Some(name) = self.students_selected.clone() else { return };
+        let def = kasa_mcp::character::characters_json()
+            .and_then(|c| kasa_mcp::character::member_def(&c, &name));
+        self.students_raw.text = match def {
+            Some(d) if self.students_raw.yaml => kasa_mcp::character::member_to_yaml(&d),
+            Some(d) => serde_json::to_string_pretty(&d).unwrap_or_default(),
+            None => String::new(),
+        };
+        self.students_raw.caret = 0;
+        self.students_raw.err = None;
+    }
+
+    /// 「원본」 버퍼를 로스터에 굳힌다. 형식이 틀리면 저장하지 않고 이유를 남긴다 —
+    /// 반쯤 읽어 저장하면 적지 않은 필드가 통째로 사라진다.
+    pub(crate) fn save_student_raw(&mut self) {
+        let Some(name) = self.students_selected.clone() else { return };
+        let parsed = if self.students_raw.yaml {
+            kasa_mcp::character::member_from_yaml(&self.students_raw.text)
+        } else {
+            serde_json::from_str::<serde_json::Value>(&self.students_raw.text)
+                .map_err(|e| e.to_string())
+        };
+        let def = match parsed {
+            Ok(d) => d,
+            Err(e) => {
+                self.students_raw.err = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = kasa_mcp::character::replace_member(&name, &def) {
+            self.students_raw.err = Some(e.to_string());
+            return;
+        }
+        // 원본에서 이름을 고쳤으면 선택도 따라가야 한다 — 안 그러면 옛 이름으로
+        // 조회해 상세가 빈 화면이 된다.
+        if let Some(n) = def.get("name").and_then(|x| x.as_str()) {
+            self.students_selected = Some(n.to_string());
+            self.students_name = n.to_string();
+        }
+        // 폼 버퍼도 새 정의로 맞춘다. 안 맞추면 폼으로 돌아가 편집기를 벗어나는
+        // 순간 옛 성격이 다시 저장돼, 원본에서 고친 것이 조용히 되돌아간다.
+        self.students_persona =
+            def.get("persona").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        self.students_caret = 0;
+        self.students_raw.err = None;
+        self.regen_pane_shims();
+        self.set_toast("원본을 저장했어요".to_string());
+    }
+
     pub(crate) fn flush_student_persona(&mut self) {
         let Some(name) = self.students_selected.clone() else { return };
         let cur = kasa_mcp::character::characters_json()
@@ -2477,7 +2620,7 @@ impl App {
             "persona",
             serde_json::Value::String(self.students_persona.clone()),
         );
-        self.regen_claude_shim();
+        self.regen_pane_shims();
     }
 
     /// 피드백 본문을 `~/.config/kasaterm/feedback/` 에 마크다운 한 장으로 굳힌다.
@@ -5219,6 +5362,50 @@ const SEG_CELL_PAD: f32 = 12.0;
 
 /// 세그먼트가 차지할 폭. `row2` 는 컨트롤 크기를 미리 알아야 오른쪽 정렬을 할 수
 /// 있는데, 세그먼트 폭은 라벨 길이로 정해지므로 그리기 전에 한 번 재야 한다.
+/// 후보가 많아 한 줄에 안 들어갈 때 줄을 접어 그리는 세그먼트 컨트롤. 자란
+/// 높이를 돌려주므로 호출부는 `y += segmented_wrap(..)` 로 다음 요소를 민다.
+///
+/// 칸 수가 고정인 다른 노브와 달리 모델 후보는 사용자가 원본에 적어 늘릴 수
+/// 있다(2026-08-24 지시). 한 줄로 두면 하나 넣는 순간 오른쪽이 폼 밖으로 나가
+/// **고를 수가 없어진다** — 렌더러에 시저가 없어 잘리지도 않고 그냥 겹친다.
+fn segmented_wrap(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    (x, y, max_w): (f32, f32, f32),
+    clip: f32,
+    cells: &[(String, bool, SettingsAction)],
+    cursor: (f32, f32),
+) -> f32 {
+    if cells.is_empty() {
+        return 0.0;
+    }
+    let row_gap = 6.0;
+    let mut rows: Vec<Vec<(&str, bool, SettingsAction)>> = vec![Vec::new()];
+    let mut row_w = SEG_PAD * 2.0;
+    for (label, on, act) in cells {
+        let cw = g.measure_chrome_text(label, 13.0, true) + SEG_CELL_PAD * 2.0;
+        // 첫 칸은 아무리 넓어도 그 줄에 남긴다 — 빈 줄을 만들고 다음 줄에서
+        // 또 넘치면 영영 못 그린다.
+        if !rows.last().map_or(true, Vec::is_empty) && row_w + cw > max_w {
+            rows.push(Vec::new());
+            row_w = SEG_PAD * 2.0;
+        }
+        row_w += cw;
+        rows.last_mut().unwrap().push((label.as_str(), *on, act.clone()));
+    }
+    let mut h = 0.0;
+    for row in &rows {
+        let ry = y + h;
+        // 위쪽을 기준으로 클립한다 — 폼 전체의 규약이다(바닥으로 재면 반쯤
+        // 걸친 줄이 통째로 그려져 헤더 위로 삐져나온다).
+        if ry > clip {
+            segmented(g, rects, x, ry, row, cursor);
+        }
+        h += SEG_H + row_gap;
+    }
+    h - row_gap
+}
+
 fn seg_width(g: &mut gpu::GpuRenderer, cells: &[(&str, bool, SettingsAction)]) -> f32 {
     SEG_PAD * 2.0
         + cells
@@ -5361,6 +5548,22 @@ fn student_detail(
     }
     y += 34.0 + 18.0;
 
+    // 렌더링된 폼 ↔ 원본 전환. 상세의 맨 위에 둔다 — 어느 쪽을 보고 있는지가
+    // 화면의 성격을 통째로 바꾸므로 스크롤 없이 늘 보여야 한다.
+    {
+        let cells = [
+            ("렌더링됨", !ctx.student_raw.open, SettingsAction::ToggleStudentRaw(false)),
+            ("원본", ctx.student_raw.open, SettingsAction::ToggleStudentRaw(true)),
+        ];
+        if y > clip {
+            segmented(g, rects, fx, y, &cells, ctx.cursor);
+        }
+        y += SEG_H + 20.0;
+    }
+    if ctx.student_raw.open {
+        return student_raw_view(g, rects, ctx, fx, y, fw, clip);
+    }
+
     let slug = ctx
         .characters
         .iter()
@@ -5407,6 +5610,46 @@ fn student_detail(
     }
     y += face + 22.0;
 
+    // 모델은 성격보다 앞에 둔다 — 성격 편집기는 높이가 글 길이만큼 자라서,
+    // 뒤에 놓으면 긴 성격을 가진 학생에서 모델 칸이 스크롤 한참 아래로 밀린다.
+    y = row_wide(g, fx, y, clip, "모델",
+        &["이 학생으로 뜨는 claude 가 쓸 모델 — 「Agent」 탭의 전역 설정보다 앞섭니다",
+          "지금 도는 pane 은 그대로고, 새로 뜨는 pane 부터 이 모델로 떠요"]);
+    {
+        let cells: Vec<(String, bool, SettingsAction)> = ctx
+            .model_choices
+            .iter()
+            .map(|c| {
+                let on = ctx.student_model == c.model && ctx.student_backend == c.backend;
+                (c.label.clone(), on, SettingsAction::StudentModel(c.model.clone(), c.backend.clone()))
+            })
+            .collect();
+        y += segmented_wrap(g, rects, (fx, y, fw.min(560.0)), clip, &cells, ctx.cursor);
+        // 저장된 값이 후보 어디에도 없으면 — 원본에서 손으로 적은 커스텀 모델이다.
+        // 칸으로는 표현할 수 없으니 무엇이 걸려 있는지 글로 알린다. 이게 없으면
+        // 아무 칸도 안 켜져 "설정 안 됨"으로 읽힌다.
+        let known = ctx
+            .model_choices
+            .iter()
+            .any(|c| ctx.student_model == c.model && ctx.student_backend == c.backend);
+        if !known {
+            y += 8.0;
+            let cur = match (ctx.student_model.as_str(), ctx.student_backend.as_str()) {
+                ("", b) => format!("통로 {b}"),
+                (m, "") => m.to_string(),
+                (m, b) => format!("{m} · 통로 {b}"),
+            };
+            if y > clip {
+                g.draw_text(
+                    fx, y, &format!("원본에 적은 값: {cur}"),
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+                );
+            }
+            y += 18.0;
+        }
+        y += 22.0;
+    }
+
     y = row_wide(g, fx, y, clip, "성격",
         &["말투·성격을 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
     y += multiline_field(
@@ -5422,6 +5665,57 @@ fn student_detail(
         y = row_wide(g, fx, y, clip, "그림 파일 이름",
             &[&format!("idle/{slug}-0..3.png · walk/{slug}-0..5.png · wave/{slug}-0..3.png"),
               &format!("cheer/{slug}-0..3.png · profile/{slug}.png")]);
+    }
+    y
+}
+
+/// 캐릭터 상세의 「원본」 뷰 — 그 학생 하나의 정의를 글로 보고 고친다.
+///
+/// 로스터 전체가 아니라 **한 명분**만 다룬다. 77명을 통째로 편집기에 올리면
+/// 오타 하나가 전원을 날리고, 매 프레임 줄바꿈을 다시 재느라 화면도 무거워진다.
+#[allow(clippy::too_many_arguments)]
+fn student_raw_view(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    ctx: &SettingsCtx,
+    fx: f32,
+    fy: f32,
+    fw: f32,
+    clip: f32,
+) -> f32 {
+    let mut y = fy;
+    y = row_wide(g, fx, y, clip, "정의",
+        &["칸에 없는 모델도 여기 `model` 에 직접 적으면 그대로 붙습니다",
+          "`backend` 는 kimi·glm 처럼 게이트웨이로 보내는 실행 통로예요 (비우면 순정)"]);
+    {
+        let cells = [
+            ("JSON", !ctx.student_raw.yaml, SettingsAction::StudentRawFormat(false)),
+            ("YAML", ctx.student_raw.yaml, SettingsAction::StudentRawFormat(true)),
+        ];
+        let sw = seg_width(g, &cells);
+        if y > clip {
+            segmented(g, rects, fx, y, &cells, ctx.cursor);
+            // 저장은 손으로 누른다 — 형식이 깨진 중간 상태가 매 글자마다 파일에
+            // 닿으면 안 되므로, 성격 칸처럼 포커스가 빠질 때 굳히지 않는다.
+            let r = chip(g, fx + sw + 10.0, y - 3.0, "저장", ctx.cursor);
+            rects.push((SettingsAction::SaveStudentRaw, r));
+        }
+        y += SEG_H + 16.0;
+    }
+    y += multiline_field(
+        g, rects, ctx, (fx, y, fw.min(560.0)), &ctx.student_raw.text,
+        ctx.student_raw.caret, SettingsInput::StudentRaw,
+        SettingsAction::FocusStudentRaw, clip,
+    );
+    if let Some(e) = &ctx.student_raw.err {
+        y += 12.0;
+        if y > clip {
+            g.draw_text(
+                fx, y, &format!("저장 못 했어요 — {e}"),
+                gpu::DrawOpts { font_size: 12.0, color: theme::attention(), bold: false, italic: false },
+            );
+        }
+        y += 18.0;
     }
     y
 }

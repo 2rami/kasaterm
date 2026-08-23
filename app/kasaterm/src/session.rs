@@ -389,6 +389,16 @@ impl App {
         if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
             env.push(("KASATERM_PERSONA".to_string(), p));
         }
+        // 학생별 모델·실행 통로 — claude shim 이 전역 노브보다 이것을 먼저 본다
+        // (2026-08-24 지시: 학생 한 명당 모델 선택). shim 은 부팅 1회 생성이라
+        // 학생마다 다른 값을 구워 넣을 수가 없다. env 로 내려서 shim 안에서
+        // 참조하는 것이 유일한 길이고, 그래서 이 자리가 정본이다.
+        if let Some(m) = kasa_mcp::character::model_for(&chars, &name) {
+            env.push(("KASATERM_MODEL".to_string(), m));
+        }
+        if let Some(b) = kasa_mcp::character::backend_for(&chars, &name) {
+            env.push(("KASATERM_BACKEND".to_string(), b));
+        }
         env
     }
 

@@ -2695,6 +2695,18 @@ impl App {
             // 파일 쓰기만 부르지 않고 UI 액션을 그대로 태운다 — 복제는 만든 뒤
             // 이름 칸에 포커스를 옮기는 것까지가 한 동작이라, `create_theme` 만
             // 부르면 정작 사람이 겪는 절반을 안 지나간다.
+            // 원본 뷰는 전환을 눌러야 열린다. 상태만 켜지 않고 액션을 그대로
+            // 태우는 이유는 버퍼 채우기(reload_student_raw)가 그 액션 안에 있어서다
+            // — 플래그만 세우면 빈 편집기를 찍고는 "잘 뜬다"고 읽게 된다.
+            "student-raw" => {
+                eprintln!("[autosettings] 원본 뷰 열기");
+                self.settings_apply(SettingsAction::ToggleStudentRaw(true));
+            }
+            "student-raw-yaml" => {
+                eprintln!("[autosettings] 원본 뷰 열기(YAML)");
+                self.settings_apply(SettingsAction::ToggleStudentRaw(true));
+                self.settings_apply(SettingsAction::StudentRawFormat(true));
+            }
             "export-theme" => {
                 eprintln!("[autosettings] 새 테마 만들기");
                 self.settings_apply(SettingsAction::ExportTheme);

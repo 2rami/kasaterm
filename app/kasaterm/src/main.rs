@@ -4173,6 +4173,25 @@ impl SettingsCat {
     }
 }
 
+/// 캐릭터 상세의 「원본」 뷰 상태 — 폼 대신 정의를 글로 보고 고치는 화면.
+///
+/// 낱개 필드로 흩지 않고 한 덩어리로 묶은 것은 `App` 이 세 층에 걸친 평면
+/// struct 라 필드를 늘릴 때마다 병렬 작업이 같은 줄에서 충돌해서다 — 묶으면
+/// 여기 한 줄만 는다.
+#[derive(Default, Clone)]
+pub(crate) struct StudentRawEdit {
+    /// 원본 뷰가 열려 있나. 꺼져 있으면 렌더링된 폼.
+    pub open: bool,
+    /// YAML 로 보나(false = JSON).
+    pub yaml: bool,
+    /// 편집 버퍼. 뷰를 열 때·형식을 바꿀 때 저장된 정의로 다시 채운다.
+    pub text: String,
+    pub caret: usize,
+    /// 마지막 저장이 실패한 이유. 있으면 편집기 아래에 뜬다 — 형식이 틀린 채로
+    /// 저장하면 조용히 무시되는 대신 무엇이 틀렸는지 보여야 한다.
+    pub err: Option<String>,
+}
+
 /// The two free-text fields in the settings form. Tracks which one (if any)
 /// has keyboard focus so keystrokes route to its buffer.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4184,6 +4203,9 @@ pub(crate) enum SettingsInput {
     ClaudeExtra,
     /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
     StudentPersona,
+    /// 캐릭터 상세의 「원본」 편집기. persona 와 같은 멀티라인 경로를 타지만
+    /// 버퍼가 따로라, 원본을 고치다 폼으로 돌아가도 성격 글이 안 덮인다.
+    StudentRaw,
     /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
     /// 들고 있다 — 상세는 한 번에 한 명뿐이라 여기 실을 것이 없다.
     StudentName,
@@ -4343,6 +4365,21 @@ pub(crate) enum SettingsAction {
     FocusStudentPersona,
     /// 상세 화면의 이름 칸에 포커스.
     FocusStudentName,
+    /// 상세를 「렌더링됨 ↔ 원본」으로 전환한다.
+    ToggleStudentRaw(bool),
+    /// 원본 뷰의 표기를 JSON ↔ YAML 로 바꾼다. 버퍼를 저장된 정의로 다시 채우므로
+    /// 고치던 것은 사라진다 — 형식만 바꾸면서 편집 상태까지 옮기려면 한쪽으로
+    /// 파싱해 다른 쪽으로 다시 쓰는 왕복이 필요한데, 문법이 깨진 중간 상태에서는
+    /// 그게 불가능하다. 사라지는 쪽이 조용히 어긋나는 것보다 낫다.
+    StudentRawFormat(bool),
+    /// 원본 편집기에 포커스.
+    FocusStudentRaw,
+    /// 원본 버퍼를 로스터에 저장한다.
+    SaveStudentRaw,
+    /// 열려 있는 캐릭터가 쓸 모델을 고른다 — `(--model 값, 실행 통로)`. 둘을 함께
+    /// 나르는 이유는 축이 달라서다: 게이트웨이 모델은 `--model` 로 못 닿고 래퍼가
+    /// 환경을 씌워야 하므로, 한 칸을 골라도 저장할 필드가 둘이다.
+    StudentModel(String, String),
     /// 피드백 본문 편집기에 포커스.
     FocusFeedbackBody,
     /// 진단 정보(버전·OS·창 구성)를 같이 남길지. 기본 켬 — 없으면 대부분의
@@ -5245,6 +5282,8 @@ struct App {
     /// 유지한다 — 타이핑 도중의 반쯤 지운 이름으로 persona·그림을 조회하면
     /// 한 글자 지울 때마다 화면이 빈 캐릭터로 튄다.
     students_name: String,
+    /// 상세 화면의 「원본」 뷰 — 열림/형식/버퍼를 한 덩어리로.
+    students_raw: StudentRawEdit,
     /// 이름을 고치는 중인 테마 — `(폴더 id, 편집 버퍼)`. 캐럿은 `settings_caret`
     /// 을 같이 쓴다(한 번에 한 칸만 포커스). 버퍼를 파일과 따로 두는 건 타이핑
     /// 도중의 반쯤 지운 이름이 목록에 그대로 새어 나가지 않게 하려는 것이다.
@@ -5666,7 +5705,9 @@ impl App {
             statusbar: Default::default(),
             turn: Default::default(),
             pane_cwd_check: None,
-            show_pane_numbers: false,
+            // Alt 를 누르는 동안만 뜨는 오버레이라 헤드리스로는 찍을 길이 없다.
+            // 이 env 로 켠 채 띄우면 자동 캡처가 그 화면을 잡는다(검증 전용).
+            show_pane_numbers: std::env::var("KASATERM_AUTOPANENUM").is_ok(),
             file_tree: state::FileTreeState {
                 // Headless test override (KASATERM_TEST_FILETREE) forces the
                 // sidebar open at launch so quick-files/tree captures render
@@ -5724,6 +5765,7 @@ impl App {
                 })
                 .unwrap_or_default(),
             students_caret: 0,
+            students_raw: StudentRawEdit::default(),
             students_name: std::env::var("KASATERM_TEST_STUDENT").unwrap_or_default(),
             theme_label_edit: None,
             settings_caret: 0,
@@ -6928,16 +6970,39 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     } else {
         String::new()
     };
-    let model_line = if model.is_empty() {
-        String::new()
-    } else {
-        // 모델 문자열은 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이
-        // zsh 글롭이라 무인용이면 "no matches found" 로 set 이 통째 실패해
-        // --model 이 아예 안 붙고 claude 가 기본 모델(구세대 Opus)로 떨어졌다
-        // (거노 2026-07-27 실사고: 학생이 전부 4.8). 작은따옴표 이스케이프로
-        // 임의 모델 문자열도 안전하게 리터럴 전달한다.
+    // 학생별 실행 통로(`KASATERM_BACKEND`) — kimi·glm 처럼 claude 를 감싸 게이트웨이로
+    // 보내는 런처다. 이 줄이 persona 블록의 **맨 앞**인 것이 설계의 핵심이다: 런처는
+    // 환경을 씌운 뒤 다시 PATH 의 claude(= 이 shim)를 부르므로, 플래그를 붙인 다음에
+    // 넘기면 재진입에서 한 번 더 붙어 persona 와 --settings 가 두 벌이 된다. 원본
+    // 인자를 그대로 넘기고 주입은 재진입 쪽에 맡기면 정확히 한 번만 붙는다.
+    //
+    // 재귀 가드(`KASATERM_VIA_BACKEND`)가 없으면 무한루프다 — 런처가 `command claude`
+    // 로 부르는데 `command` 는 함수·별칭만 건너뛸 뿐 PATH 는 그대로 타서 이 shim 으로
+    // 되돌아온다. 런처가 PATH 에 없으면 줄 전체가 조용히 통과해 순정 claude 로 뜬다.
+    let backend_line = "[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_BACKEND\" ] \
+&& [ -z \"$KASATERM_VIA_BACKEND\" ] && command -v \"$KASATERM_BACKEND\" >/dev/null 2>&1 \
+&& { KASATERM_VIA_BACKEND=1; export KASATERM_VIA_BACKEND; exec \"$KASATERM_BACKEND\" claude \"$@\"; }\n"
+        .to_string();
+    // 학생별 모델(`KASATERM_MODEL`)이 설정창 전역 노브를 이긴다(2026-08-24 지시:
+    // 학생 한 명당 모델 선택). 전역이 비어 있어도 줄을 굽는다 — 학생 값이 들어올
+    // 자리를 남겨야 하고, 둘 다 비면 셸에서 걸러져 `--model` 이 안 붙는다.
+    //
+    // 게이트웨이 런처를 거쳐 돌아온 경우엔 손대지 않는다: 그 런처가 이미 자기
+    // `--model` 을 붙였으므로 여기서 덧붙이면 플래그가 두 번이 되어, 게이트웨이가
+    // 모르는 이름이 이겨 엉뚱한 모델로 붙을 수 있다.
+    let model_line = {
+        // 전역값만 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라
+        // 무인용이면 "no matches found" 로 대입이 통째 실패해 --model 이 아예 안 붙고
+        // claude 가 기본 모델(구세대 Opus)로 떨어졌다(거노 2026-07-27 실사고: 학생이
+        // 전부 4.8). env 쪽은 큰따옴표 확장이라 글롭을 안 탄다.
         let q = model.replace('\'', "'\\''");
-        format!("[ -n \"$PERSONA_OK\" ] && set -- --model '{q}' \"$@\"\n")
+        format!(
+            "if [ -n \"$PERSONA_OK\" ] && [ -z \"$KASATERM_VIA_BACKEND\" ]; then\n\
+             _KTM=\"$KASATERM_MODEL\"\n\
+             [ -z \"$_KTM\" ] && _KTM='{q}'\n\
+             [ -n \"$_KTM\" ] && set -- --model \"$_KTM\" \"$@\"\n\
+             fi\n"
+        )
     };
     let effort_line = if effort.is_empty() {
         String::new()
@@ -6949,7 +7014,8 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     } else {
         format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
     };
-    let persona_block = format!("{persona_line}{model_line}{effort_line}{extra_line}");
+    let persona_block =
+        format!("{backend_line}{persona_line}{model_line}{effort_line}{extra_line}");
     // MCP 자동 주입. 위 노브들과 달리 **prepend 가 아니라 append** 라서 블록이 따로다 —
     // `--mcp-config` 는 variadic 이라 뒤따르는 non-flag 를 값으로 삼켜, 앞에 두면 사용자
     // 프롬프트가 통째로 사라진다. 반복 지정은 누적되므로 사용자가 자기 것을 줘도 안 부딪힌다.
@@ -7153,6 +7219,11 @@ OVP=\"$SELF_DIR/repersona-${{KASATERM_PANE_ID}}.persona\"\n\
 if [ -n \"$KASATERM_PANE_ID\" ] && [ -f \"$OVP\" ]; then\n\
   KASATERM_PERSONA=$(cat \"$OVP\")\n\
   [ -f \"${{OVP%.persona}}.character\" ] && export KASATERM_CHARACTER=\"$(cat \"${{OVP%.persona}}.character\")\"\n\
+  # 모델·통로도 새 학생 것으로 갈아탄다 — 안 그러면 이름과 얼굴만 바뀌고 앞
+  # 학생의 모델로 계속 돈다. 파일이 있으면 빈 내용도 존중한다(= 지정 없음 →\n\
+  # 전역 기본). 재배정을 안 한 pane 은 파일이 없어 spawn 때의 env 그대로다.\n\
+  [ -f \"${{OVP%.persona}}.model\" ] && KASATERM_MODEL=$(cat \"${{OVP%.persona}}.model\")\n\
+  [ -f \"${{OVP%.persona}}.backend\" ] && KASATERM_BACKEND=$(cat \"${{OVP%.persona}}.backend\")\n\
 fi\n\
 {tblk}\
 {pblk}\
@@ -7558,7 +7629,7 @@ exec "$REAL" "$@"
 /// `/repersona` 엔드포인트가 갱신한다. 중복 허용 — 같은 학생 pane 은 색 변주
 /// (theme::accent_variant)로 구분. characters.json 기준 부팅 1회 생성(다른 shim
 /// 노브와 동일하게 변경은 재시작 후 적용).
-fn install_student_shims(shim_dir: &std::path::Path) {
+pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
     // POSIX sh 스크립트 — Windows pane 셸도 Git bash 라 그대로 동작(curl 포함).
     let Some(chars) = kasa_mcp::character::characters_json() else {
         return;
@@ -7566,6 +7637,10 @@ fn install_student_shims(shim_dir: &std::path::Path) {
     let sq = |s: &str| s.replace('\'', "'\\''");
     for name in kasa_mcp::character::member_names(&chars) {
         let persona = kasa_mcp::character::persona_for(&chars, &name).unwrap_or_default();
+        // 이 학생의 모델·통로를 스크립트에 굽는다. claude shim 과 달리 여기서는
+        // 학생이 이미 정해져 있으므로 값을 직접 실을 수 있다.
+        let model = kasa_mcp::character::model_for(&chars, &name).unwrap_or_default();
+        let backend = kasa_mcp::character::backend_for(&chars, &name).unwrap_or_default();
         let script = format!(
             "#!/bin/sh\n\
 # kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 하네스 실행.\n\
@@ -7573,6 +7648,8 @@ SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
 if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
   printf '%s' '{persona_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.persona\"\n\
   printf '%s' '{name_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.character\"\n\
+  printf '%s' '{model_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.model\"\n\
+  printf '%s' '{backend_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.backend\"\n\
   curl -s --get --data-urlencode \"surface=$KASATERM_PANE_ID\" \\\n\
     --data-urlencode \"character={name_sq}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
@@ -7587,10 +7664,14 @@ case \"$1\" in\n\
   claude|codex|agy) H=$1; shift ;;\n\
   kimi|glm) M=$1; shift; case \"$1\" in claude|codex|agy) H=$1; shift ;; esac ;;\n\
 esac\n\
-[ -n \"$M\" ] && exec \"$M\" \"$H\" \"$@\"\n\
+# 손으로 통로를 지정했으면(`{name} kimi`) 재귀 가드를 세우고 나간다 — 방금 쓴\n\
+# .backend 파일 때문에 claude shim 이 런처를 한 번 더 태우는 것을 막는다.\n\
+[ -n \"$M\" ] && {{ KASATERM_VIA_BACKEND=1; export KASATERM_VIA_BACKEND; exec \"$M\" \"$H\" \"$@\"; }}\n\
 exec \"$H\" \"$@\"\n",
             name_sq = sq(&name),
             persona_sq = sq(&persona),
+            model_sq = sq(&model),
+            backend_sq = sq(&backend),
         );
         // 한글 정식 이름 + 로마자 슬러그 별칭(IME 전환 없이도 실행) 둘 다 스테이징.
         let mut cmd_names: Vec<String> = vec![name.clone()];
