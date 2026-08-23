@@ -442,6 +442,31 @@ pub struct WindowOverview {
 /// Plug point for terminal operations. Host apps implement this on a
 /// type that already owns the tmux session / portable-pty handle and
 /// the renderer state.
+/// 캐릭터 한 명을 저장하라는 요청. **준 것만** 바꾼다(빠뜨린 필드는 그대로).
+///
+/// 인자를 늘어놓지 않고 묶은 것은 이 요청이 다섯 자리(웹 핸들러 → trait → GUI
+/// 구현 → 이벤트 → 처리부)를 그대로 통과해서다 — 필드를 하나 더할 때마다 다섯
+/// 군데의 시그니처를 맞춰야 하고, 하나를 빠뜨리면 그 값만 조용히 안 넘어간다.
+#[derive(Debug, Default, Clone)]
+pub struct CharacterSave {
+    pub name: String,
+    pub persona: Option<String>,
+    pub new_name: Option<String>,
+    /// `--model` 값. 빈 문자열은 "지정 없음"이라 전역 설정으로 떨어진다.
+    pub model: Option<String>,
+    /// 실행 통로(kimi·glm). 빈 문자열이면 순정 claude.
+    pub backend: Option<String>,
+    /// 정의 전체를 적은 글 — 원본 뷰 저장. 있으면 위 낱개 필드 대신 이것으로
+    /// 통째 갈아 끼운다(원본에서 지운 줄이 사라지려면 통째 교체여야 한다).
+    ///
+    /// 파싱된 map 이 아니라 **글자 그대로** 받는 이유는 YAML 때문이다. 파싱을
+    /// 부르는 쪽에 맡기면 화면마다 다른 파서를 쓰게 되고, 그러면 같은 글이
+    /// 화면에 따라 다르게 저장된다.
+    pub raw: Option<String>,
+    /// `raw` 가 YAML 인가(false = JSON).
+    pub raw_yaml: bool,
+}
+
 pub trait Backend: Send + Sync {
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>>;
@@ -963,12 +988,7 @@ pub trait Backend: Send + Sync {
     /// 반환값은 `{ok, name}` — 이름 변경이 거부되면 `ok: false` 에 **저장된**
     /// 이름이 실린다. 부른 쪽이 화면을 요청값으로 그려 두면 파일과 어긋나므로,
     /// 회신의 이름을 써야 한다.
-    fn save_character(
-        &self,
-        _name: &str,
-        _persona: Option<&str>,
-        _new_name: Option<&str>,
-    ) -> Result<serde_json::Value> {
+    fn save_character(&self, _req: CharacterSave) -> Result<serde_json::Value> {
         anyhow::bail!("save_character unsupported")
     }
 

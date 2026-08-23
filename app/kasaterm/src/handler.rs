@@ -605,7 +605,52 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketSaveCharacter(name, persona, new_name, reply) => {
+            UserEvent::SocketSaveCharacter(req, reply) => {
+                let kasa_socket::backend::CharacterSave {
+                    name, persona, new_name, model, backend, raw, raw_yaml,
+                } = req;
+                // 정의를 통째로 받은 경우(원본 뷰 저장)는 낱개 필드와 섞지 않는다 —
+                // 통째 교체가 낱개를 이미 포함하므로, 둘을 겹쳐 태우면 어느 쪽이
+                // 이겼는지가 순서에 달리게 된다.
+                if let Some(raw) = raw {
+                    self.settings_apply(SettingsAction::SelectStudent(name.clone()));
+                    self.students_raw.yaml = *raw_yaml;
+                    self.students_raw.text = raw.clone();
+                    self.save_student_raw();
+                    let err = self.students_raw.err.clone();
+                    let saved = self.students_selected.clone().unwrap_or_else(|| name.clone());
+                    let _ = reply.send(Ok(serde_json::json!({
+                        "ok": err.is_none(),
+                        "name": saved,
+                        "error": err,
+                    })));
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                    return;
+                }
+                // 모델·통로는 하나만 와도 다른 하나가 빈 값으로 덮이면 안 된다 —
+                // 안 준 쪽은 저장된 값을 그대로 다시 쓴다.
+                if model.is_some() || backend.is_some() {
+                    let cur = kasa_mcp::character::characters_json();
+                    let keep = |f: fn(&serde_json::Value, &str) -> Option<String>| {
+                        cur.as_ref().and_then(|c| f(c, &name)).unwrap_or_default()
+                    };
+                    let m = model.clone().unwrap_or_else(|| keep(kasa_mcp::character::model_for));
+                    let b =
+                        backend.clone().unwrap_or_else(|| keep(kasa_mcp::character::backend_for));
+                    self.settings_apply(SettingsAction::SelectStudent(name.clone()));
+                    self.settings_apply(SettingsAction::StudentModel(m, b));
+                    if persona.is_none() && new_name.is_none() {
+                        // 열어 둔 편집 상태를 닫는다 — 웹이 부른 것이라 네이티브
+                        // 화면에는 아무도 없는데, 안 닫으면 선택이 남아 다음에
+                        // 그 화면을 열었을 때 엉뚱한 사람이 펼쳐져 있다.
+                        self.settings_apply(SettingsAction::CloseStudent);
+                        let _ = reply.send(Ok(serde_json::json!({ "ok": true, "name": name })));
+                        self.chrome_dirty = true;
+                        self.render_frame();
+                        return;
+                    }
+                }
                 // 네이티브가 사람 손으로 하는 3단을 그대로 태운다. 이유는
                 // `SocketSaveCharacter` 주석에 있다 — 요약하면 순서와 뒤처리가
                 // 이 두 액션에 묶여 있어서다.

@@ -214,6 +214,7 @@ export function SettingsApp() {
             open ? (
               <CharacterDetail
                 character={open}
+                models={chars.models}
                 onBack={() => setOpen(null)}
                 onSaved={(name) => {
                   // 이름만 갱신하고 객체는 그대로 둔다 — 상세는 자기가 유일한

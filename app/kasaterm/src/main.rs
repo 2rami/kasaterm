@@ -3791,11 +3791,9 @@ enum UserEvent {
     /// `close_student_edit` 에 묶여 있다.
     ///
     /// **저장이 끝난 뒤** 회신한다 — 위임만 하고 바로 답하면 부른 쪽이 아직
-    /// 안 써진 파일을 다시 읽는다. `(이름, 새 성격, 새 이름, 회신)`.
+    /// 안 써진 파일을 다시 읽는다. `(저장 요청, 회신)`.
     SocketSaveCharacter(
-        String,
-        Option<String>,
-        Option<String>,
+        kasa_socket::backend::CharacterSave,
         std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
     ),
     /// `POST /settings/action` 위임 — 웹뷰 설정의 버튼 하나를 네이티브 액션으로 태운다.

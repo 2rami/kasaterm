@@ -23,6 +23,7 @@ export type SettingsCharacters = {
   persona_enabled: boolean;
   themes: ThemeCard[];
   roster: Character[];
+  models: ModelChoice[];
 };
 
 export type ThemeCard = {
@@ -41,6 +42,19 @@ export type Character = {
   school: string;
   header_color: string;
   persona: string;
+  /// 이 학생으로 뜨는 claude 가 쓸 `--model` 값. 비면 전역 설정으로 떨어진다.
+  model: string;
+  /// 실행 통로(kimi·glm). 비면 순정 claude. `model` 과 축이 달라 따로 둔다 —
+  /// 게이트웨이 모델은 플래그로 못 닿고 래퍼가 환경을 씌워야 붙는다.
+  backend: string;
+};
+
+/// 모델 칸이 늘어놓을 후보 하나. 목록이 로스터 파일에서 오므로 화면이
+/// 하드코딩하지 않는다 — 커스텀 모델을 원본에 적으면 칸이 는다.
+export type ModelChoice = {
+  label: string;
+  model: string;
+  backend: string;
 };
 
 /// `GET /settings/values` 응답 — 캐릭터 탭 밖의 설정 값 전부.

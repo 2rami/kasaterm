@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kasa_socket::backend::Backend;
+use kasa_socket::backend::{Backend, CharacterSave};
 use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -1388,9 +1388,38 @@ async fn character_sprite_save_handler(
     }
 }
 
+/// `GET /settings/character-raw?name=<이름>&format=json|yaml` — 캐릭터 한 명의
+/// 정의를 글로 편다(원본 뷰가 읽는 것).
+///
+/// 변환을 서버가 하는 이유는 화면마다 다른 파서를 쓰지 않게 하려는 것이다.
+/// 저장도 같은 짝의 함수로 되돌리므로 왕복이 어긋날 자리가 없다 — 웹에서 YAML
+/// 라이브러리를 따로 들이면 두 화면이 같은 글을 다르게 저장하게 된다.
+///
+/// GUI 왕복을 안 타는 것은 로스터가 파일이기 때문이다(메모리에 정본이 있는
+/// 설정 값들과 다르다).
+async fn settings_character_raw_handler(name: String, want_yaml: bool) -> impl IntoResponse {
+    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let Some(chars) = crate::character::characters_json() else {
+        return (cors(), Json(serde_json::json!({ "ok": false, "error": "로스터를 못 읽었어요" })));
+    };
+    let Some(def) = crate::character::member_def(&chars, name.trim()) else {
+        return (
+            cors(),
+            Json(serde_json::json!({ "ok": false, "error": format!("{name} 은(는) 로스터에 없어요") })),
+        );
+    };
+    let text = if want_yaml {
+        crate::character::member_to_yaml(&def)
+    } else {
+        serde_json::to_string_pretty(&def).unwrap_or_default()
+    };
+    (cors(), Json(serde_json::json!({ "ok": true, "text": text })))
+}
+
 /// `POST /settings/character` — 캐릭터 한 명의 성격·이름을 굳힌다.
-/// body(JSON): `{"name": "아로나", "persona": "…", "new_name": "…"}` — `persona`·
-/// `new_name` 은 **준 것만** 바꾼다(빠뜨리면 그대로).
+/// body(JSON): `{"name": "아로나", "persona": "…", "new_name": "…", "model": "…",
+/// "backend": "…", "raw": "…", "format": "json"|"yaml"}` — **준 것만** 바꾼다.
+/// `raw` 는 정의 전체 교체(원본 뷰 저장)라 오면 낱개 필드보다 우선한다.
 ///
 /// body 를 `String` 으로 받아 직접 파싱하는 건 관례를 따른 것이다(`/task-add` 등).
 /// 덤으로 `Content-Type` 을 안 보므로 `text/plain` 으로 보낼 수 있고, 그러면 이
@@ -1447,10 +1476,30 @@ async fn settings_character_handler(
         }
         None => None,
     };
-    if persona.is_none() && new_name.is_none() {
+    let model = v.get("model").and_then(|x| x.as_str());
+    let backend_name = v.get("backend").and_then(|x| x.as_str());
+    // 정의 통째 교체(원본 뷰). map 이 아닌 것을 받으면 저장 쪽이 거부하지만,
+    // 여기서 먼저 걸러야 웹이 이유를 바로 본다.
+    let raw = v.get("raw").and_then(|x| x.as_str()).map(str::to_string);
+    let raw_yaml = v.get("format").and_then(|x| x.as_str()) == Some("yaml");
+    if persona.is_none()
+        && new_name.is_none()
+        && model.is_none()
+        && backend_name.is_none()
+        && raw.is_none()
+    {
         return bad("바꿀 게 없어요".to_string());
     }
-    match backend.save_character(name, persona, new_name) {
+    let req = CharacterSave {
+        name: name.to_string(),
+        persona: persona.map(str::to_string),
+        new_name: new_name.map(str::to_string),
+        model: model.map(str::to_string),
+        backend: backend_name.map(str::to_string),
+        raw,
+        raw_yaml,
+    };
+    match backend.save_character(req) {
         Ok(v) => (cors(), Json(v)),
         Err(e) => bad(e.to_string()),
     }
@@ -4324,6 +4373,14 @@ pub fn spawn_http_server_opts(
                         "/arona-ui/{*path}",
                         get(|axum::extract::Path(p): axum::extract::Path<String>| {
                             arona_ui_serve(p)
+                        }),
+                    )
+                    .route(
+                        "/settings/character-raw",
+                        get(|q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+                            let name = q.get("name").cloned().unwrap_or_default();
+                            let yaml = q.get("format").map(String::as_str) == Some("yaml");
+                            settings_character_raw_handler(name, yaml)
                         }),
                     )
                     .route(

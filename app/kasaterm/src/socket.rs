@@ -1465,6 +1465,17 @@ impl Backend for PtyBackend {
             "persona_enabled": read_claude_persona(),
             "themes": themes,
             "roster": roster,
+            // 모델 후보 — 로스터 파일의 `models` 에서 온다. 화면이 하드코딩하지
+            // 않는 이유는 커스텀 모델을 원본에 적어 늘릴 수 있어야 해서다.
+            "models": kasa_mcp::character::characters_json()
+                .as_ref()
+                .map(kasa_mcp::character::model_choices)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| serde_json::json!({
+                    "label": c.label, "model": c.model, "backend": c.backend,
+                }))
+                .collect::<Vec<_>>(),
         })
     }
 
@@ -1614,18 +1625,11 @@ impl Backend for PtyBackend {
 
     fn save_character(
         &self,
-        name: &str,
-        persona: Option<&str>,
-        new_name: Option<&str>,
+        req: kasa_socket::backend::CharacterSave,
     ) -> Result<serde_json::Value> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
-            .send_event(UserEvent::SocketSaveCharacter(
-                name.to_string(),
-                persona.map(str::to_string),
-                new_name.map(str::to_string),
-                tx,
-            ))
+            .send_event(UserEvent::SocketSaveCharacter(req, tx))
             .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
         // 파일 두 번 쓰기(성격·이름)와 shim 재생성이 끝나야 답이 온다 — 밀리초
         // 단위지만 GUI 가 프레임을 그리는 중이면 그 뒤로 밀린다. 무한 대기는 안
@@ -3636,6 +3640,10 @@ fn roster_entries(v: &serde_json::Value) -> Vec<serde_json::Value> {
             "school": field("school"),
             "header_color": field("header_color"),
             "persona": field("persona"),
+            // 웹 설정의 모델 칸이 지금 값을 알아야 어느 칸을 켤지 정한다 —
+            // 안 실으면 늘 "기본"으로 보여 화면이 거짓말을 한다.
+            "model": field("model"),
+            "backend": field("backend"),
         }));
     };
     if let Some(l) = v.get("leader") {

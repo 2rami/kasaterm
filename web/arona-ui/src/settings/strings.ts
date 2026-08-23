@@ -86,6 +86,16 @@ export const ko = {
     charCount: (a: { count: number }) => `${a.count}자 · 타이핑을 멈추면 저장돼요`,
     renameRejected: '이름은 못 바꿨어요 — 성격만 저장했어요',
     saveFailed: '저장에 실패했어요',
+    rendered: '렌더링됨',
+    raw: '원본',
+    model: '모델',
+    modelHint: '이 학생으로 뜨는 claude 가 쓸 모델이에요 — 「Agent」 탭의 전역 설정보다 앞서요.',
+    modelHint2: '지금 도는 pane 은 그대로고, 새로 뜨는 pane 부터 이 모델로 떠요.',
+    modelCustom: (a: { value: string }) => `원본에 적은 값: ${a.value}`,
+    rawTitle: '정의',
+    rawHint: '칸에 없는 모델도 여기 model 에 직접 적으면 그대로 붙어요.',
+    rawHint2: 'backend 는 kimi·glm 처럼 게이트웨이로 보내는 실행 통로예요 (비우면 순정).',
+    rawSave: '저장',
   },
 
   motion: {
@@ -361,6 +371,16 @@ export const en: Strings = {
     charCount: (a) => `${a.count} characters · saved when you stop typing`,
     renameRejected: "Couldn't rename — saved the persona only",
     saveFailed: "Couldn't save",
+    rendered: 'Rendered',
+    raw: 'Source',
+    model: 'Model',
+    modelHint: 'The model claude uses in panes opened as this character — it wins over the global setting in the Agent tab.',
+    modelHint2: 'Panes already running keep theirs; this applies to newly opened panes.',
+    modelCustom: (a) => `Set in the source: ${a.value}`,
+    rawTitle: 'Definition',
+    rawHint: 'A model that is not in the row still works — write it into `model` here.',
+    rawHint2: '`backend` is the launcher that routes through a gateway (kimi, glm). Leave it empty for plain claude.',
+    rawSave: 'Save',
   },
 
   motion: {
