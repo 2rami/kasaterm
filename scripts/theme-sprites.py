@@ -43,9 +43,13 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, "theme-src")
-DST = os.path.join(ROOT, "app/kasaterm/assets/students")
-ROSTER = os.path.join(ROOT, "app/kasaterm/collab-hooks/characters.json")
+# 작품(테마)마다 수집물·로스터·설치 자리가 다르다 — 블루아카 77명과 새 작품을 한
+# 폴더에 섞으면 슬러그가 겹치지 않아도 어느 그림이 어느 작품 것인지 사람이 못 가른다.
+SRC = os.environ.get("THEME_SRC") or os.path.join(ROOT, "theme-src")
+DST = os.environ.get("THEME_DST") or os.path.join(ROOT, "app/kasaterm/assets/students")
+ROSTER = os.environ.get("THEME_ROSTER") or os.path.join(
+    ROOT, "app/kasaterm/collab-hooks/characters.json"
+)
 PPGEN = os.environ.get("PPGEN", "/tmp/ppgen")
 # 생성 백엔드. `codex` 는 ChatGPT 구독 OAuth 로 도는 CLI 라 호출당 요금이 없고,
 # 참조 이미지(-i)를 받아 편집도 된다 — 그래서 기본값이다. `fal` 은 종량 과금이고,
@@ -74,6 +78,12 @@ STYLE = os.environ.get("THEME_STYLE", "pixel-chibi")
 # 정체성 충실도가 높아야 해서다(등신 재해석이 필요한 base 와 반대).
 PROFILE_MODEL = os.environ.get("THEME_PROFILE_MODEL", MODEL)
 PROFILE_STYLE = os.environ.get("THEME_PROFILE_STYLE", "pixel")
+# 프사를 만드는 방식. `face` 는 idle 첫 프레임의 머리~어깨를 잘라 확대하고,
+# `full` 은 전신을 자르지 않고 정사각에 통째로 넣는다. 원작이 이미 2등신인 작품
+# (치이카와)은 몸 전체가 얼굴만 하다 — 거기에 얼굴 크롭을 걸면 눈·볼만 남아
+# 프레임을 넘고 귀가 잘린다(치이카와 실측). 그런 작품은 전신이 곧 초상이라
+# 전용 프사를 따로 구울 필요도 없어진다.
+PROFILE_FIT = os.environ.get("THEME_PROFILE_FIT", "face")
 # 스타일 앵커: 기존 세트의 완성 그림을 ppgen -styleref 로 물려 등신·화풍을 그
 # 그림에 맞춘다. 옛 학생들이 전원 같은 비율로 나온 비법이 이것이다 — 텍스트
 # 스타일 계약만으로는 배치마다 등신이 따로 논다(2026-08-20 실측, 원조는
@@ -367,10 +377,13 @@ def install(slug, force=False):
         shutil.copy2(gif, dst_gif(slug))
 
     psrc = profile_src(slug)
+    idle0 = os.path.join(out, "frames", "idle", "frame-00.png")
     if os.path.exists(psrc):
         fit_profile(psrc, dst_profile(slug))
+    elif PROFILE_FIT == "full":
+        fit_profile(idle0, dst_profile(slug))
     else:
-        make_profile(os.path.join(out, "frames", "idle", "frame-00.png"), dst_profile(slug))
+        make_profile(idle0, dst_profile(slug))
     return slug, "ok", ""
 
 
