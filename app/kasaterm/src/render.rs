@@ -2987,13 +2987,28 @@ impl App {
                 self.display_pane_char(&ws, &pane_id).unwrap_or(pane_id)
             })
         };
-        // Alt 오버레이의 학생 이름도 같은 이유로 여기서 뜬다(위 주석 참고).
+        // Alt 오버레이의 부제도 같은 이유로 여기서 뜬다(위 주석 참고).
         // 켜져 있을 때만 훑는다 — 평소 프레임에서 전 pane 을 도는 값이 아깝다.
-        let pane_number_names: HashMap<String, String> = if self.show_pane_numbers {
+        //
+        // 부제는 **사람이 붙인 제목**이 정본이다. 번호 아래에서 알고 싶은 것은
+        // 「그 창이 무슨 일을 하는가」지 누가 앉아 있는가가 아니다(2026-08-24
+        // 지시). 학생 이름은 제목이 아직 없을 때의 폴백 — 그것도 없는 것보다는
+        // 창을 가른다.
+        let pane_number_subs: HashMap<String, String> = if self.show_pane_numbers {
             let ws = self.ws.lock().unwrap();
             let ids: Vec<String> = ws.panes.keys().cloned().collect();
             ids.into_iter()
-                .filter_map(|id| self.display_pane_char(&ws, &id).map(|n| (id, n)))
+                .filter_map(|id| {
+                    let pinned = ws
+                        .panes
+                        .get(&id)
+                        .filter(|p| p.title_pinned)
+                        .and_then(|p| p.title.clone())
+                        .filter(|s| !s.trim().is_empty());
+                    pinned
+                        .or_else(|| self.display_pane_char(&ws, &id))
+                        .map(|n| (id, n))
+                })
                 .collect()
         } else {
             HashMap::new()
@@ -7512,11 +7527,9 @@ impl App {
                         .get(id)
                         .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
                         .unwrap_or_else(|| id.clone());
-                    // 번호만으로는 어느 pane 이 누구였는지 안 떠올라, 그 pane 의
-                    // 학생 이름을 번호 아래 작게 얹는다. `display_pane_char` 는
-                    // claude 가 실제로 도는 pane 에만 이름을 주므로 셸 pane 에는
-                    // 아무것도 안 붙는다(2026-08-24 지시).
-                    let sub = pane_number_names.get(id);
+                    // 번호만으로는 어느 창이 무슨 일이었는지 안 떠올라, 그
+                    // pane 의 제목(없으면 학생 이름)을 번호 아래 작게 얹는다.
+                    let sub = pane_number_subs.get(id);
                     let font = (rh * 0.4).clamp(24.0, 72.0);
                     let sub_font = (font * 0.34).clamp(11.0, 22.0);
                     let tw = g.measure_chrome_text(&shown, font, true);
