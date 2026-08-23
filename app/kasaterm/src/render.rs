@@ -44,6 +44,45 @@ struct SidebarRowInfo {
     /// compact 진행률(%). 걷기로는 「얼마나 남았나」가 절대 안 읽히므로
     /// 이것만은 걷는 칸에도 함께 그린다 — 되풀이가 아니라 걷기가 못 하는 말이다.
     compact_pct: Option<u8>,
+    /// 지금 도는 일이 시작된 뒤로 흐른 초(`busy_since`, input.rs 가 잡는다).
+    /// 걷기·쓸림바는 **도는 중이라는 사실**만 말해서, 2분짜리와 40분짜리가
+    /// 화면에서 완전히 같아 보였다(거노 2026-08-24). 기다리는 중은 여기 안 든다
+    /// — 그건 멈춘 것이고, 멈춘 시간이 차오르면 「일하는 줄」 알고 지나친다.
+    ///
+    /// Instant 가 아니라 **초로 접어** 싣는다. 이 구조체는 페인트 직전 스냅샷이라
+    /// 한 프레임 안에서 두 번 재면 두 값이 나오고, 그러면 같은 pane 의 칸과 줄이
+    /// 서로 다른 시간을 말할 수 있다.
+    busy_secs: Option<u64>,
+}
+
+/// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
+/// 붙으면 배치도가 시계판이 되고, 정작 갈라 보이고 싶던 「오래 도는 것」이 그 숫자들
+/// 사이에 묻힌다(거노 2026-08-24 「오래 걸릴수록 눈에 띄게」).
+///
+/// **두 시간까지 분으로 버틴다.** 「90분」이 「1시간」보다 정보가 많고, 무엇보다
+/// 한 시간에서 단위를 갈면 99분 다음이 「1시간」이 되어 **화면의 숫자가 거꾸로
+/// 간다** — 오래 도는 것을 갈라 보려고 붙인 표시가 정작 그 자리에서 뒤집힌다.
+/// 두 시간에서 갈면 「119분 → 2시간」이라 값이 줄지 않는다.
+///
+/// 시간대는 내림이다(올림하면 2시간 1분이 「3시간」이 되어 실제보다 오래 도는
+/// 것처럼 읽힌다).
+fn elapsed_label(secs: u64) -> Option<String> {
+    match secs {
+        s if s < 60 => None,
+        s if s < 7200 => Some(format!("{}분", s / 60)),
+        s => Some(format!("{}시간", s / 3600)),
+    }
+}
+
+/// 오래 도는 것일수록 눈에 띄게 — 색과 굵기로 세 단(거노 2026-08-24 조건).
+/// 흐린 회색으로 시작해 accent 굵은 글씨로 끝난다. 크기를 키우는 길도 있었지만
+/// 칸이 40px 대라 한 단만 키워도 얼굴을 밀어낸다.
+fn elapsed_style(secs: u64) -> ([u8; 4], bool) {
+    match secs {
+        s if s < 600 => (theme::text_mute(), false),
+        s if s < 1800 => (theme::text_dim(), false),
+        _ => (theme::accent(), true),
+    }
 }
 
 impl App {
@@ -2807,6 +2846,7 @@ impl App {
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
                 // 부르면 두 신호가 서로를 부정한다.
                 let busy = self.pane_is_busy(id);
+                let busy_secs = act.and_then(|a| a.busy_since).map(|t| t.elapsed().as_secs());
                 SidebarRowInfo {
                     who,
                     label,
@@ -2835,6 +2875,7 @@ impl App {
                     // 접으면 **오히려 어긋난다** — 함정이 반대 방향이다.
                     bg_active: act.map(|a| a.bg_active).unwrap_or(false),
                     compact_pct: act.and_then(|a| a.compact_pct),
+                    busy_secs,
                 }
             }
         };
@@ -4293,7 +4334,42 @@ impl App {
                     // 배치도만 다른 리듬으로 흔들리면 같은 pane 이 자리마다 다른 말을 한다.
                     if mw > 10.0 && mh > 14.0 {
                         let bar_h = 2.0;
-                        let (bx, by, bw) = (mx + 2.0, my + mh - bar_h - 2.0, mw - 4.0);
+                        let (bx, by, mut bw) = (mx + 2.0, my + mh - bar_h - 2.0, mw - 4.0);
+                        // 경과 시간 — 바 오른쪽 끝을 내주고 바가 그만큼 짧아진다
+                        // (거노 2026-08-24: 도는 것끼리 오래된 순서가 안 보인다).
+                        // 걷기·쓸림바는 「도는 중」만 말하지 「얼마나째」는 못 말하고,
+                        // 그건 compact 바에 % 를 붙인 것과 같은 종류의 부족함이다.
+                        //
+                        // **바를 밀어내지 않고 얹을 자리가 있을 때만** 그린다. 두 가지
+                        // 를 함께 본다 — ①바가 최소 10px 는 남아야 띠로 읽힌다(그 아래
+                        // 로는 점 두 개가 되어 무슨 표시인지 알 수 없다) ②글자가 얼굴
+                        // 오른쪽 밖에서 시작해야 한다. 칸은 5px 까지 작아지므로 좁은
+                        // 칸에서는 조용히 생략된다 — 거기서는 걷기와 바가 이미 「돈다」를
+                        // 말하고 있고, 시간까지 우겨넣으면 얼굴 위에 숫자가 겹친다.
+                        if let Some(txt) =
+                            info.busy_secs.filter(|_| info.busy || info.bg_active).and_then(elapsed_label)
+                        {
+                            let fs = 9.0;
+                            let (col, bold) = elapsed_style(info.busy_secs.unwrap_or(0));
+                            let lw = g.measure_chrome_text(&txt, fs, bold);
+                            let lx = bx + bw - lw;
+                            if bw - lw - 3.0 >= 10.0 && lx >= fx + face + 2.0 {
+                                g.draw_text(
+                                    lx,
+                                    // 바 위에 앉힌다 — 바와 세로 중앙을 맞추면 글자
+                                    // 아래가 칸 밖으로 나간다(바가 이미 바닥에서 2px).
+                                    by - fs + 2.0,
+                                    &txt,
+                                    gpu::DrawOpts {
+                                        font_size: fs,
+                                        color: col,
+                                        bold,
+                                        italic: false,
+                                    },
+                                );
+                                bw -= lw + 3.0;
+                            }
+                        }
                         if let Some(pct) = info.compact_pct {
                             g.rect(bx, by, bw, bar_h, theme::with_alpha(theme::accent(), 0x3a));
                             let done = bw * (pct as f32 / 100.0).clamp(0.0, 1.0);
@@ -4361,7 +4437,38 @@ impl App {
                         }
                     }
                     let name_x = rx + 7.0 + face + 6.0;
-                    let budget = (rx + rw - 14.0 - name_x).max(0.0);
+                    // 경과 시간 — 상태 점 왼쪽. 목록과 배치도는 **한 번에 한 쪽만**
+                    // 뜨므로(`sidebar_layout` 의 `list_view`) 여기 없으면 목록으로
+                    // 보는 동안에는 이 정보가 화면 어디에도 없다. 같은 것을 두 겹으로
+                    // 칠하는 게 아니라, 다른 뷰에 같은 말을 한 번씩 두는 것이다.
+                    let elapsed = info
+                        .busy_secs
+                        .filter(|_| info.busy || info.bg_active)
+                        .and_then(elapsed_label)
+                        .map(|t| {
+                            let (col, bold) = elapsed_style(info.busy_secs.unwrap_or(0));
+                            (t, col, bold)
+                        });
+                    // 이름 예산을 시간만큼 내준다 — 안 빼면 긴 제목이 시간 위로
+                    // 그려져 두 글자가 겹친 채 읽힌다(`clip_px` 는 자기 예산만 안다).
+                    let elapsed_w = elapsed
+                        .as_ref()
+                        .map(|(t, _, b)| g.measure_chrome_text(t, 10.0, *b) + 5.0)
+                        .unwrap_or(0.0);
+                    if let Some((t, col, bold)) = &elapsed {
+                        g.draw_text(
+                            rx + rw - 14.0 - (elapsed_w - 5.0),
+                            ry + (rh - 10.0) / 2.0,
+                            t,
+                            gpu::DrawOpts {
+                                font_size: 10.0,
+                                color: *col,
+                                bold: *bold,
+                                italic: false,
+                            },
+                        );
+                    }
+                    let budget = (rx + rw - 14.0 - elapsed_w - name_x).max(0.0);
                     let txt = clip_px(g, label, 11.0, false, budget);
                     g.draw_text(
                         name_x,
@@ -9816,4 +9923,44 @@ pub(crate) fn draw_usage_windows(
         bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, true) + 12.0;
     }
     bx
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::{elapsed_label, elapsed_style};
+
+    #[test]
+    fn 짧게_도는_일은_숫자를_안_단다() {
+        assert_eq!(elapsed_label(0), None);
+        assert_eq!(elapsed_label(59), None);
+        assert_eq!(elapsed_label(60).as_deref(), Some("1분"));
+    }
+
+    #[test]
+    fn 단위가_바뀌어도_숫자가_거꾸로_가지_않는다() {
+        // 한 시간에서 갈면 「99분 → 1시간」이라 값이 줄어 보인다. 두 시간에서
+        // 갈아야 「119분 → 2시간」으로 이어진다.
+        assert_eq!(elapsed_label(7199).as_deref(), Some("119분"));
+        assert_eq!(elapsed_label(7200).as_deref(), Some("2시간"));
+        assert_eq!(elapsed_label(3600).as_deref(), Some("60분"));
+    }
+
+    #[test]
+    fn 시간대는_내림이다() {
+        // 올림하면 2시간 1분이 「3시간」이 되어 실제보다 오래 도는 것처럼 읽힌다.
+        assert_eq!(elapsed_label(7260).as_deref(), Some("2시간"));
+        assert_eq!(elapsed_label(10799).as_deref(), Some("2시간"));
+        assert_eq!(elapsed_label(10800).as_deref(), Some("3시간"));
+    }
+
+    #[test]
+    fn 오래_걸릴수록_눈에_띈다() {
+        // 세 단이 각자 다른 값이어야 한다 — 같은 색이 겹치면 단을 나눈 뜻이 없다.
+        let (c1, b1) = elapsed_style(599);
+        let (c2, b2) = elapsed_style(600);
+        let (c3, b3) = elapsed_style(1800);
+        assert_ne!(c1, c2);
+        assert_ne!(c2, c3);
+        assert!(!b1 && !b2 && b3);
+    }
 }
