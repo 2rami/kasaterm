@@ -2987,6 +2987,17 @@ impl App {
                 self.display_pane_char(&ws, &pane_id).unwrap_or(pane_id)
             })
         };
+        // Alt 오버레이의 학생 이름도 같은 이유로 여기서 뜬다(위 주석 참고).
+        // 켜져 있을 때만 훑는다 — 평소 프레임에서 전 pane 을 도는 값이 아깝다.
+        let pane_number_names: HashMap<String, String> = if self.show_pane_numbers {
+            let ws = self.ws.lock().unwrap();
+            let ids: Vec<String> = ws.panes.keys().cloned().collect();
+            ids.into_iter()
+                .filter_map(|id| self.display_pane_char(&ws, &id).map(|n| (id, n)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -7501,11 +7512,21 @@ impl App {
                         .get(id)
                         .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
                         .unwrap_or_else(|| id.clone());
+                    // 번호만으로는 어느 pane 이 누구였는지 안 떠올라, 그 pane 의
+                    // 학생 이름을 번호 아래 작게 얹는다. `display_pane_char` 는
+                    // claude 가 실제로 도는 pane 에만 이름을 주므로 셸 pane 에는
+                    // 아무것도 안 붙는다(2026-08-24 지시).
+                    let sub = pane_number_names.get(id);
                     let font = (rh * 0.4).clamp(24.0, 72.0);
+                    let sub_font = (font * 0.34).clamp(11.0, 22.0);
                     let tw = g.measure_chrome_text(&shown, font, true);
+                    let sw = sub
+                        .map(|s| g.measure_chrome_text(s, sub_font, false))
+                        .unwrap_or(0.0);
                     let pad = font * 0.4;
-                    let box_w = tw + pad * 2.0;
-                    let box_h = font + pad * 2.0;
+                    let sub_h = if sub.is_some() { sub_font * 1.3 } else { 0.0 };
+                    let box_w = tw.max(sw) + pad * 2.0;
+                    let box_h = font + sub_h + pad * 2.0;
                     let bx = rx + (rw - box_w) / 2.0;
                     let by = ry + (rh - box_h) / 2.0;
                     round_rect(
@@ -7518,7 +7539,7 @@ impl App {
                         theme::with_alpha(theme::accent(), 0xE6),
                     );
                     g.draw_text(
-                        bx + pad,
+                        bx + (box_w - tw) / 2.0,
                         by + pad,
                         &shown,
                         gpu::DrawOpts {
@@ -7528,6 +7549,19 @@ impl App {
                             italic: false,
                         },
                     );
+                    if let Some(name) = sub {
+                        g.draw_text(
+                            bx + (box_w - sw) / 2.0,
+                            by + pad + font + sub_font * 0.2,
+                            name,
+                            gpu::DrawOpts {
+                                font_size: sub_font,
+                                color: [0xFF, 0xFF, 0xFF, 0xCC],
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
                 }
             }
             // Bottom dock bar: chips for panes folded out of the layout
