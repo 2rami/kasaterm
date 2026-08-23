@@ -133,7 +133,25 @@ python3 scripts/theme-sprites.py status   # 어디까지 됐는지
 ```
 
 `frames/<state>/frame-NN.png` 를 앱이 찾는 자리로 옮긴다. 크기가 이미 256px 로
-같아 리사이즈는 없다. 앱 자산 경로는 `app/kasaterm/assets/students/` 기준이다.
+같아 리사이즈는 없다.
+
+⚠️ **기본 목적지는 번들(`app/kasaterm/assets/students/`)이다 — 런타임 테마 자리가
+아니다.** 번들은 빌드에 박혀 나가는 기본 세트(블루 아카이브)고, 새로 구운 작품은
+거기가 아니라 사용자 설정 폴더로 가야 한다. 그냥 `install` 을 돌리면 기본 세트를
+덮어쓴다. 목적지는 `THEME_DST` 로 지정한다:
+
+```bash
+THEME_SRC=theme-src-<작품> \
+THEME_DST=~/.config/kasaterm/themes/<작품>/sprites \
+THEME_ROSTER=theme-src-<작품>/roster.json \
+  python3 scripts/theme-sprites.py install
+cp theme-src-<작품>/roster.json ~/.config/kasaterm/themes/<작품>/theme.json
+```
+
+**`theme.json` 이 없으면 그 폴더는 없는 것과 같다** — `active_theme_dir_in`
+(`crates/kasa-mcp/src/character.rs`)이 `theme.json` 이 실재할 때만 폴더를 돌려주고,
+없으면 오류 없이 번들로 떨어진다. 스프라이트만 넣고 화면이 안 바뀌면 여기를 보라.
+`roster.json` 과 `theme.json` 은 스키마가 같아 그대로 복사하면 된다.
 
 | ppgen 산출 | 앱 자산 | 개수 |
 |---|---|---|
@@ -173,13 +191,32 @@ curl "http://127.0.0.1:8765/open-image?path=/tmp/theme-sheet.png&pane=$KASATERM_
 
 ## 테마를 통째로 바꾼다는 것
 
-지금 구조에서 캐릭터 세트를 정하는 것은 **`characters.json` 하나**다. `build.rs` 가
-거기서 `CHARACTER_SLUGS` 를 생성하므로 이름↔슬러그 표가 두 벌이 될 수 없고, 슬러그
-중복·형식 위반은 **빌드가 거부한다**. 그래서 새 테마는 이 JSON 과 `assets/students/`
-자산만 갈아끼우면 된다.
+**폴더 하나 = 테마 하나다.** `~/.config/kasaterm/themes/<id>/` 아래 `theme.json`
+(로스터·팔레트)과 `sprites/`(그림)가 있으면 그게 한 벌이고, 폴더째 주고받으면 그게
+곧 배포다. 경로는 `KASATERM_THEMES_DIR` 로 옮길 수 있다.
 
-**아직 없는 것**: 런타임 전환. 지금은 빌드 시점에 한 세트가 박히므로 테마를 바꾸려면
-다시 굽는다. 설정 화면에서 고르게 하려면 `themes/<name>/` 아래로 JSON 과 자산을 옮기고
-`CHARACTER_SLUGS` 를 빌드 상수에서 런타임 로딩으로 바꿔야 한다 — 그때 `build.rs` 의
-검증(중복·형식)은 로딩 시점 검증으로 함께 옮겨야 한다. 그 검증이 없으면 두 학생이 같은
-inbox 를 쓰는 일이 **오류 없이** 생긴다.
+고르는 것은 **설정 화면**이다 — 목록은 `theme.json` 이 있는 폴더만 잡고(`list_themes`),
+카드에 로스터 인원수와 미리보기 얼굴 셋(`sprites/profile/<slug>.png`)을 띄운다.
+고르면 `settings.json` 의 `character_theme` 에 폴더 이름이 적히고, 그 뒤 그림을 찾는
+곳이 `<테마>/sprites` 로 바뀐다(`students_dir`, `app/kasaterm/src/socket.rs`). 빈
+문자열이면 번들이다. 환경변수 `KASATERM_CHARACTER_THEME` 가 설정보다 세다.
+
+빌드 상수 `CHARACTER_SLUGS`(`build.rs` 가 `characters.json` 에서 생성)는 **번들
+전용 폴백으로 남아 있다.** 활성 로스터는 런타임에 굽고(`theme.rs` 의 `build_roster`),
+쓸 만한 항목이 하나도 없으면 번들로 떨어진다. 테마를 갈아 끼운 뒤에는
+`invalidate_roster()` 를 불러야 다음 조회가 새 로스터를 본다.
+
+## 구운 그림은 레포에 넣지 않는다
+
+`.gitignore` 가 원화(`theme-src-*/*/ref.png`)와 생성 프레임(`theme-src-*/*/out*/`)을
+배제한다. 커밋하는 것은 **묘사(`desc.txt`)와 로스터(`roster.json`)뿐**이고, 완성된
+스프라이트도 레포 밖(`~/.config/kasaterm/themes/`)에 둔다. 이유 셋:
+
+- **이 레포는 공개다.** 네 작품 모두 타사 IP 의 2차 창작물이다.
+- 작품당 400장 · 3~5MB 이고 png 는 delta 가 안 먹는다. 다시 구울 때마다 히스토리에
+  통째로 쌓인다.
+- 배포 단위가 폴더라 레포에 있을 이유가 없다 — 건넬 때는 폴더를 zip 으로 묶는다.
+
+⚠️ **대신 그림은 잃으면 못 되돌린다.** ppgen 은 비결정적이라 같은 묘사로 다시 구워도
+다른 그림이 나온다. 재생성 가능한 산출물이 아니라 일회성 결과물로 다뤄야 한다 —
+`/tmp` 에 두지 말고, 백업은 폴더째 zip 으로.
