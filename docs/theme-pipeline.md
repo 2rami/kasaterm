@@ -124,6 +124,16 @@ PPGEN=/tmp/ppgen THEME_SRC=theme-src-<id> THEME_ROSTER=theme-src-<id>/roster.jso
 - ⚠️**진행 확인에 `pgrep -fl`·`ps` 로 명령줄을 찍지 마라** — argv 에 게이트웨이 키가
   그대로 들어 있어 화면과 대화기록에 값이 남는다. 존재만 보려면
   `pgrep -f "[p]pgen" > /dev/null; echo $?`.
+- ⚠️**환경변수로 키를 넘기면 조용히 무시될 수 있다.** ppgen 의 `config.Load()` 는
+  `config.json` 의 `apiKey` 가 **비어 있을 때에만** 환경변수를 본다
+  (`internal/config/config.go`: `if s.OpenAI.APIKey == "" { ... env }`). 그 파일
+  (`~/Library/Application Support/perfectpixel/config.json`)에 옛 키가 남아 있으면
+  그게 이기고 **401 이 난다** — 키가 멀쩡한데도 그렇다(2026-08-24 실측, 게이트웨이
+  `/v1/models` 는 같은 키로 200 이었다). 우선순위는 `-key` 인자 > config.json > 환경변수다.
+  argv 에 키를 안 싣고 싶으면 **임시 HOME 을 만들어 그 안에 우리 `config.json` 만
+  0600 으로 두고 `HOME` 을 바꿔 실행해라** — Go 의 `os.UserConfigDir()` 이 macOS 에서
+  `$HOME/Library/Application Support` 를 보므로 HOME 하나로 갈린다. 단 `codex`
+  프로바이더는 키가 아니라 `~/.codex` 의 OAuth 를 쓰므로 HOME 을 바꾸면 인증을 못 찾는다.
 
 대안 프로바이더: `codex`(ChatGPT 구독 인증, 과금 별개 — 단 구독 사용량 한도가 있다.
 2026-08-24 소진돼 9/10 까지 막힌 적이 있다) · `openai` 는 api.openai.com 직결이라 위
