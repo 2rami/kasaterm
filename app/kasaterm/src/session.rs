@@ -824,6 +824,12 @@ impl App {
     pub(crate) fn claude_account_switch_now(&mut self, id: &str) {
         self.settings_input = None;
         let same = id == self.set_claude_account;
+        // 바뀐 자리를 반짝여 준다 — 우상단 토스트만으로는 정작 계정 칩이 아무 변화
+        // 없이 그대로라 「바뀐 줄 모르겠다」가 된다. 같은 계정을 다시 누른 경우엔
+        // 켜지 않는다(아무것도 안 바뀌었는데 축포를 터뜨리는 꼴이다).
+        if !same {
+            self.account_flash = Some(std::time::Instant::now());
+        }
         let (_, to_label, restarted, deferred, focused, live) =
             self.apply_claude_account_switch(id);
         self.set_toast(crate::session::account_switch_toast(

@@ -4,6 +4,20 @@ use super::*;
 /// How long a completion notification pulses a pane header / sidebar done-dot.
 const NOTIFY_FLASH_MS: u128 = 1800;
 
+/// 계정이 바뀐 순간 계정 칩 둘레가 반짝이는 시간. 짧게 두는 이유는 이것이 「무슨
+/// 일이 있었다」를 알리는 것이지 읽을 정보가 아니어서다 — 눈이 그리로 한 번 가면
+/// 목적은 끝난다(거노 2026-08-25 "바뀐지도 잘모르겠는데").
+const ACCOUNT_FLASH_MS: u128 = 900;
+
+/// 위 진행도의 자유함수판. 렌더가 `g`(=`self.gpu`)를 대여한 채로 불러야 해서
+/// `&self` 메서드로는 안 된다 — 필드 하나만 받으면 disjoint borrow 로 통과한다.
+pub(crate) fn account_flash_k(at: Option<std::time::Instant>) -> Option<f32> {
+    at.and_then(|t| {
+        let age = t.elapsed().as_millis();
+        (age < ACCOUNT_FLASH_MS).then(|| 1.0 - age as f32 / ACCOUNT_FLASH_MS as f32)
+    })
+}
+
 /// 권한 대기 토스트 — 완료 토스트와 같은 원칙(캐릭터 고정값 + hook reason,
 /// 미현존이면 reason 만). Notification hook 경로.
 fn format_attention_toast(character: Option<&str>, reason: &str) -> String {
@@ -354,6 +368,12 @@ impl App {
         self.pane_activity
             .get(id)
             .is_some_and(|a| status_needs_you(&a.status))
+    }
+
+    /// 계정 전환 반짝임의 진행도 `1.0 → 0.0`. 끝났으면 `None` — 호출부가 그걸로
+    /// 그리기와 프레임 펌프를 함께 끊는다.
+    pub(crate) fn account_flash_factor(&self) -> Option<f32> {
+        account_flash_k(self.account_flash)
     }
 
     pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {

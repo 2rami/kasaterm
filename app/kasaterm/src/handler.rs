@@ -972,6 +972,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // `apply_claude_account_switch`(session.rs) 하나가 한다. 수동 전환과
                 // 같은 꼬리라 두 경로의 동작이 갈릴 수 없다.
                 let same = *to == self.set_claude_account;
+                if !same {
+                    self.account_flash = Some(std::time::Instant::now());
+                }
                 let (from_label, to_label, restarted, deferred, focused, live) =
                     self.apply_claude_account_switch(to);
                 self.set_toast(format!(
@@ -6250,6 +6253,9 @@ impl ApplicationHandler<UserEvent> for App {
             if self.any_notify_flash() {
                 why.push("notify_flash");
             }
+            if self.account_flash_factor().is_some() {
+                why.push("account_flash");
+            }
             // 아래 실제 조건과 같게 **보이는** pane 만 센다 — 좁힌 쪽과 어긋나면
             // 로그가 「pane_working 이라 펌프한다」고 하는데 실제론 안 걸린다.
             if {
@@ -6348,6 +6354,8 @@ impl ApplicationHandler<UserEvent> for App {
             // pumping 30fps the whole time would burn battery for nothing.)
             || (self.collab_toast_alpha() > 0.0 && self.collab.toast_action.is_none())
             || self.any_notify_flash()
+            // 계정 전환 반짝임(0.9초). 끝나면 factor 가 None 이 되어 저절로 멎는다.
+            || self.account_flash_factor().is_some()
             // A busy pane's header working bar sweeps every frame — pump ~30fps
             // so the bar animates and the working→idle flip is caught promptly.
             // `blocked`/`waiting` (approval prompt) are static states: no pump.
@@ -6398,9 +6406,12 @@ impl ApplicationHandler<UserEvent> for App {
             // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —
             // 0.4초짜리라 30fps 면 열두 장뿐이고, 그러면 블록이 퍼지는 게 아니라
             // 뚝뚝 끊겨 보인다. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
+            // 0.9초짜리 반짝임은 33ms(30fps)면 27장뿐이라 별이 튀듯 끊긴다 —
+            // 테마 디졸브가 8ms 쪽에 있는 것과 같은 이유다.
             let period = if self.md_scroll_anim.is_empty()
                 && self.theme_fx.is_none()
                 && self.expand_anim.is_none()
+                && self.account_flash_factor().is_none()
             {
                 33
             } else {

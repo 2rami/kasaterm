@@ -8196,6 +8196,12 @@ impl App {
                         && hy <= acct_r.1 + acct_r.3;
                 }
                 self.status_account_rect = Some(acct_r);
+                // 계정이 바뀐 직후 잠깐 반짝인다 — 우상단 토스트만으로는 정작 이
+                // 칩이 그대로라 「바뀐 줄 모르겠다」가 된다(거노 2026-08-25).
+                // 칩을 그리는 이 자리에서 함께 그려야 층이 안 어긋난다.
+                if let Some(k) = crate::chrome::account_flash_k(self.account_flash) {
+                    paint_account_flash(g, acct_r, k);
+                }
 
                 // 바깥주소(터널) 스위치 — 이 줄의 **오른쪽 끝**(2026-08-15 지시
                 // 「하단우측」). 폰 하단바는 좁고, 문이 닫히면 폰은 접속 자체가
@@ -8790,8 +8796,25 @@ impl App {
                         if p == AccountProvider::Claude {
                             match (usage_of(&id), two_line) {
                                 (Some(b), true) => {
+                                    // 「언제 풀리나」는 옮길지 말지를 정하는 자리에
+                                    // 있어야 한다 — 90% 라도 12분 뒤면 기다리면 되고
+                                    // 3시간 뒤면 지금 옮겨야 한다(거노 2026-08-25).
+                                    // 하단 상태줄·인포 패널과 **같은 함수**를 써서 세
+                                    // 자리의 표기가 갈리지 않게 한다.
+                                    let mut bar_right = right;
+                                    if let Some(t) = crate::resets_in_label(b.resets_at) {
+                                        let tw = g.measure_chrome_text(&t, tf, false);
+                                        g.draw_text(
+                                            right - tw, sry + arow_h - 16.0, &t,
+                                            gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                        );
+                                        // 막대가 그 자리를 침범하지 않게 폭을 미리
+                                        // 빼서 넘긴다 — `draw_usage_windows` 는 폭이
+                                        // 모자라면 창을 통째로 접는다.
+                                        bar_right = right - tw - 8.0;
+                                    }
                                     draw_usage_windows(
-                                        g, sx + pad_x, sry + arow_h - 16.0, right, tf, &b,
+                                        g, sx + pad_x, sry + arow_h - 16.0, bar_right, tf, &b,
                                     );
                                 }
                                 (Some(b), false) => {
@@ -9855,6 +9878,9 @@ impl App {
         let rebuild = pty_dirty
             || self.chrome_dirty
             || blink_changed
+            // 계정 전환 반짝임 — 펌프가 깨워도 여기 사유가 없으면 GPU 패스를 건너뛰어
+            // 커서 blink(530ms)에나 얹혀 그려진다(혜성이 순간이동으로 보이던 그 함정).
+            || self.account_flash_factor().is_some()
             || version_animating
             || toast_animating
             || git_op_animating
@@ -10043,6 +10069,45 @@ pub(crate) fn usage_bar_color(pct: f32) -> [u8; 4] {
 ///
 /// 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가 어디까지 갈 수 있는
 /// 것인지 알 수가 없어 그냥 얼룩이 된다.
+/// 계정이 바뀐 자리를 잠깐 반짝인다 — 칩을 한 번 물들이고 둘레로 별이 퍼진다.
+///
+/// `k` 는 `1.0 → 0.0` 진행도. 입자 배치에 **난수를 쓰지 않는다**: 프레임마다 같은
+/// 답이 나와야 별이 제자리에서 사그라든다(난수면 매 프레임 다른 곳에 튀어 지직거린다).
+fn paint_account_flash(g: &mut gpu::GpuRenderer, r: (f32, f32, f32, f32), k: f32) {
+    let k = k.clamp(0.0, 1.0);
+    let (x, y, w, h) = r;
+    // 칩 자체를 물들인다 — 별만 있으면 「무엇이」 바뀌었는지 안 짚어진다.
+    round_rect(
+        g, x, y, w, h, theme::radius_sm(),
+        theme::with_alpha(theme::accent(), (k * 70.0) as u8),
+    );
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    // 퍼짐은 빠르게 시작해 느려진다(1-k 를 제곱근으로) — 튀어나오는 인상이 난다.
+    let spread = (1.0 - k).sqrt();
+    // 세로로는 거의 안 퍼진다 — 이 칩이 앉는 하단바는 24px 라, 위아래로 퍼뜨리면
+    // 별이 바 밖으로 잘려 반쪽만 보인다. 납작한 타원으로 옆으로만 번지게 한다.
+    let rx = w / 2.0 + 6.0 + spread * 14.0;
+    let ry = h / 2.0 + spread * 3.0;
+    for i in 0..6 {
+        let ang = (i as f32 / 6.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        // 별마다 조금씩 늦게 뜨고 늦게 진다 — 여섯이 한 몸으로 깜빡이면 별이
+        // 아니라 테두리 한 겹으로 보인다.
+        let lag = (i as f32) * 0.06;
+        let a = ((k - lag) / (1.0 - lag).max(0.001)).clamp(0.0, 1.0);
+        if a <= 0.01 {
+            continue;
+        }
+        let size = 6.0 + a * 2.0;
+        g.queue_icon(
+            "sparkles",
+            cx + ang.cos() * rx - size / 2.0,
+            cy + ang.sin() * ry - size / 2.0,
+            size,
+            theme::with_alpha(theme::accent(), (a * 235.0) as u8),
+        );
+    }
+}
+
 /// 계정 전환 확인 카드 — 스크림 + 가운데 카드 + 버튼 둘. 히트박스를 돌려준다.
 ///
 /// **자유함수인 이유**: 전환을 거는 자리가 두 창에 흩어져 있다(설정 별도창의 계정

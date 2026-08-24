@@ -557,6 +557,16 @@ impl App {
             Ok("settings") => crate::session::ConfirmSurface::Settings,
             _ => crate::session::ConfirmSurface::Main,
         };
+        // `_FLASH=1` 이면 카드 대신 반짝임만 켠다 — 헤드리스에는 전환할 계정이 없어
+        // 실제 경로로는 그 효과를 볼 수 없다.
+        if std::env::var_os("KASATERM_AUTOACCOUNTCONFIRM_FLASH").is_some() {
+            self.account_flash = Some(Instant::now());
+            eprintln!("[autoacctconfirm] flash");
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
         if let Ok(to) = std::env::var("KASATERM_AUTOACCOUNTCONFIRM_TO") {
             self.ask_or_switch_claude_account(&to, surface);
             let shown = self.account_switch_confirm.is_some();
@@ -6545,15 +6555,23 @@ impl App {
                 },
             ];
             self.set_claude_account = String::new();
-            let mk = |dir: &str, w: Vec<(&str, f32)>, stale: bool| crate::UsageBadge {
-                pct: w.iter().map(|(_, p)| *p).fold(0.0, f32::max),
-                label: "7d".to_string(),
-                stale,
-                account_dir: dir.to_string(),
-                resets_at: None,
-                windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
+            // 리셋 시각을 심는다 — 이 목록은 「지금 옮길까 기다릴까」를 정하는
+            // 자리라, 퍼센트만 있으면 90% 가 12분 뒤 풀리는 것인지 3시간 뒤인지
+            // 구별이 안 된다(거노 2026-08-25).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let mk = |dir: &str, w: Vec<(&str, f32)>, stale: bool, in_secs: u64| {
+                crate::UsageBadge {
+                    pct: w.iter().map(|(_, p)| *p).fold(0.0, f32::max),
+                    label: "7d".to_string(),
+                    stale,
+                    account_dir: dir.to_string(),
+                    resets_at: Some(now + in_secs),
+                    windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
+                }
             };
-            let base = mk("", vec![("5h", 12.0), ("7d", 95.0)], false);
+            let base = mk("", vec![("5h", 12.0), ("7d", 95.0)], false, 7980);
             if let Ok(mut g) = self.claude_usage.lock() {
                 *g = Some(base.clone());
             }
@@ -6562,7 +6580,7 @@ impl App {
                 if let Some(d) = crate::socket::claude_account_dir("acct-2") {
                     g.insert(
                         d.to_string_lossy().into_owned(),
-                        mk("", vec![("5h", 68.0), ("7d", 41.0)], true),
+                        mk("", vec![("5h", 68.0), ("7d", 41.0)], true, 2820),
                     );
                 }
                 // acct-3 은 일부러 안 넣는다.

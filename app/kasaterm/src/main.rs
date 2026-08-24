@@ -5042,6 +5042,9 @@ struct App {
     /// Pane id → instant a completion notification flashed its header, so the
     /// render pass can pulse it for a beat then let it settle.
     notify_flash: HashMap<String, std::time::Instant>,
+    /// 계정이 바뀐 순간 — 계정 칩 둘레가 잠깐 반짝인다. 끝나면 `None` 으로 걷어야
+    /// 프레임 펌프가 멎는다(안 걷으면 창 하나가 상시 8ms 로 돈다).
+    account_flash: Option<std::time::Instant>,
     /// Panes whose last turn finished and the user hasn't typed into since —
     /// drives the student's cheer (arms-up) standing pose. Set on turn
     /// completion, cleared on the next `forward_key` into that pane, so the
@@ -5643,6 +5646,7 @@ impl App {
             retheme_queue: HashMap::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
+            account_flash: None,
             turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
             expanded_windows: std::collections::HashSet::new(),
