@@ -3271,6 +3271,14 @@ async fn claude_usage_handler(
     const TTL: Duration = Duration::from_secs(60);
     let cache = CACHE.get_or_init(Default::default);
 
+    // 슬롯별 「이 시각까지는 upstream 을 치지 마라」. 429 를 맞고도 60초마다 계속
+    // 두드리면 한도 창이 두드릴 때마다 갱신돼 **영영 안 풀린다** — 실측으로 활성
+    // 슬롯이 6일째 429 였고, 그 사이 화면은 내내 빈칸이었다(거노 2026-08-24
+    // "하나도안돼"). 한 번 막히면 물러나 있어야 창이 닫힌다.
+    static BACKOFF: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    const BACKOFF_FOR: Duration = Duration::from_secs(15 * 60);
+    let backoff = BACKOFF.get_or_init(Default::default);
+
     // 조회 대상 슬롯: `?dir=` 이 있으면 그것, 없으면 활성 계정(kasaterm 이 shim 을
     // 깔 때마다 `KASATERM_CLAUDE_ACCOUNT_DIR` 로 알려 준다). 빈 문자열 = 기본 로그인.
     let dir = params
@@ -3316,7 +3324,20 @@ async fn claude_usage_handler(
         Some(t) => Some(t),
         None => read_claude_token_from(Some(dir.as_str())),
     };
+    // 왜 못 읽었는지를 남긴다. 전에는 어떤 실패든 「rate-limited」 한 문구라, 정작
+    // 로그아웃된 슬롯도 「한도 초과」로 보여 사용자가 기다리면 될 줄 알았다.
+    let mut why = if token.is_some() { "usage_unavailable" } else { "logged_out" };
+    let backed_off = backoff
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&dir).copied())
+        .is_some_and(|until| Instant::now() < until);
     let fresh: Option<serde_json::Value> = match token {
+        // 막힌 동안은 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
+        Some(_) if backed_off => {
+            why = "rate_limited";
+            None
+        }
         Some(token) => {
             let resp = reqwest::Client::new()
                 .get("https://api.anthropic.com/api/oauth/usage")
@@ -3325,12 +3346,36 @@ async fn claude_usage_handler(
                 .send()
                 .await;
             match resp {
-                Ok(r) if r.status().is_success() => r
-                    .text()
-                    .await
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-                _ => None,
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(mut g) = backoff.lock() {
+                        g.remove(&dir);
+                    }
+                    r.text()
+                        .await
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                }
+                Ok(r) => {
+                    let code = r.status().as_u16();
+                    why = match code {
+                        429 => "rate_limited",
+                        401 | 403 => "token_rejected",
+                        _ => "usage_unavailable",
+                    };
+                    if code == 429 {
+                        if let Ok(mut g) = backoff.lock() {
+                            g.insert(dir.clone(), Instant::now() + BACKOFF_FOR);
+                        }
+                    }
+                    // 상태만 남긴다(토큰은 절대). 조용한 실패는 현장에서 못 가른다.
+                    eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
+                    None
+                }
+                Err(e) => {
+                    why = "network";
+                    eprintln!("[claude-usage] 요청 실패: {e}");
+                    None
+                }
             }
         }
         None => None,
@@ -3352,10 +3397,27 @@ async fn claude_usage_handler(
             return (cors, Json(ok(v, true)));
         }
     }
+    let msg = match why {
+        "rate_limited" => "한도 조회가 잠시 막혔어요 — 곧 다시 시도해요",
+        "token_rejected" => "로그인이 만료됐어요 — 다시 로그인해 주세요",
+        "logged_out" => "로그인이 풀렸어요 — 다시 로그인해 주세요",
+        "network" => "네트워크가 닿지 않아요",
+        _ => "한도를 못 읽었어요",
+    };
     (
         cors,
-        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)", "account_dir": dir })),
+        Json(serde_json::json!({
+            "ok": false, "error": msg, "reason": why, "account_dir": dir,
+        })),
     )
+}
+
+/// 로그에 쓸 슬롯 이름. 경로 전체는 홈 디렉터리가 통째로 찍혀 길기만 하다.
+fn slot_label(dir: &str) -> &str {
+    if dir.is_empty() {
+        return "(작업대)";
+    }
+    dir.rsplit('/').next().unwrap_or(dir)
 }
 
 /// `~/.config/kasaterm/usage-cache.json` — 계정 저장소별 마지막 성공 스냅샷 한 파일.
@@ -3366,14 +3428,21 @@ fn usage_cache_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/usage-cache.json"))
 }
 
-/// 스냅샷 문서에서 `dir` 슬롯의 usage 본문을 꺼낸다 — 6시간 이내 기록만(5시간 창이
-/// 만료됐으면 폐기). 파일 IO 를 밖에 두는 이유는 이 판정이 **한 계정의 숫자를 다른
-/// 계정에 붙이지 않는가**를 결정하는 자리라, HOME 을 흔들지 않고 검증돼야 해서다.
+/// 스냅샷에서 `dir` 슬롯의 usage 본문을 꺼낸다 — **하루 이내** 기록만.
+///
+/// 처음엔 6시간이었다(5시간 창이 만료되면 폐기). 그런데 upstream 이 오래 막히면
+/// 그 규칙이 화면을 통째로 비운다 — 낡은 「~71% 씀」이 **아무것도 없는 것보다**
+/// 훨씬 낫다(2026-08-24: 활성 슬롯이 6일째 429 라 게이지가 내내 빈칸이었고, 그게
+/// 「기능이 하나도 안 된다」로 읽혔다). 호출부가 `stale` 을 함께 받아 `~` 를 붙이니
+/// 사용자도 옛 값인 줄 안다.
+///
+/// 파일 IO 를 밖에 두는 이유는 이 판정이 **한 계정의 숫자를 다른 계정에 붙이지
+/// 않는가**를 결정하는 자리라, HOME 을 흔들지 않고 검증돼야 해서다.
 fn usage_from_snapshot(json: &str, dir: &str, now: u64) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let fresh = |e: &serde_json::Value| -> Option<serde_json::Value> {
         let ts = e.get("ts")?.as_u64()?;
-        (now.saturating_sub(ts) <= 6 * 3600).then(|| e.get("usage").cloned())?
+        (now.saturating_sub(ts) <= 24 * 3600).then(|| e.get("usage").cloned())?
     };
     // 새 형식: { slots: { "<dir>": {ts, usage} } }. 옛 형식({ts, usage})은 어느 계정
     // 것인지 기록이 없으므로 **기본 슬롯(빈 dir)일 때만** 받아들인다 — 그러지 않으면
@@ -4904,12 +4973,16 @@ mod tests {
         assert_eq!(usage_from_snapshot(&doc, "/slots/acct-2", now), None);
     }
 
+    /// 낡은 값이라도 하루까지는 살린다 — upstream 이 오래 막혔을 때 빈칸보다
+    /// 「~71% 씀」이 낫다. 다만 무한정은 아니다: 며칠 전 숫자를 지금 것처럼
+    /// 그리면 옮길 곳을 고르는 판단이 통째로 틀어진다.
     #[test]
-    fn usage_snapshot_expires_after_six_hours() {
+    fn usage_snapshot_survives_a_day_then_expires() {
         let saved_at = 1_785_000_000u64;
         let doc = merge_usage_snapshot(None, "", &serde_json::json!({ "x": 1 }), saved_at);
-        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600).is_some(), "6시간 경계는 유효");
-        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600 + 1).is_none(), "그 뒤는 폐기");
+        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600).is_some(), "6시간은 당연히 유효");
+        assert!(usage_from_snapshot(&doc, "", saved_at + 24 * 3600).is_some(), "하루 경계는 유효");
+        assert!(usage_from_snapshot(&doc, "", saved_at + 24 * 3600 + 1).is_none(), "그 뒤는 폐기");
     }
 
     /// 업그레이드 경로 — 옛 형식(`{ts, usage}`)은 어느 계정 것인지 기록이 없다.
