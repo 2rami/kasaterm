@@ -30,3 +30,9 @@ theme-src/*/ref.png
 theme-src-*/*/ref.png
 theme-src/*/out*/
 theme-src-*/*/out*/
+# 새 작품 폴더(theme-src-<id>)의 위키 사본은 커밋하지 않는다 — 스크립트가 다시
+# 받는 타사 텍스트라 공개 레포에 쌓을 이유가 없고, `git add theme-src-<id>` 통째
+# 커밋이 실어 가는 사고를 막는다(2026-08-24 시사 지적). 위 BA 용 theme-src/ 의
+# 78개는 이미 추적 중이라 그대로 둔다(ignore 는 추적 파일에 안 먹는다).
+theme-src-*/*/wiki.json
+theme-src-*/_index.json
