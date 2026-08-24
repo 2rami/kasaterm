@@ -626,6 +626,9 @@ impl App {
                     self.settings_input = None;
                 }
                 kasa_mcp::character::invalidate_active_theme();
+                // 활성이 아닌 테마를 치웠으면 위 `select_theme` 갈래를 안 타므로 이름·그림
+                // 합집합이 안 비워진다 — 치운 테마의 캐릭터가 계속 조회에 잡힌다.
+                theme::invalidate_roster();
                 let where_to = dest.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str())
                     .unwrap_or("_trash").to_string();
                 self.set_toast(format!("치웠어요 — 지운 건 아니고 {where_to}/ 에 있어요"));

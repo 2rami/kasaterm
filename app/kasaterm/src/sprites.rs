@@ -22,6 +22,85 @@ pub(crate) fn downscale_student(img: image::DynamicImage) -> image::DynamicImage
     }
 }
 
+/// 활성 밖 설치 테마들의 `sprites/` — 에셋 찾기 **3단의 마지막 칸**.
+///
+/// 이름 조회를 합집합으로 넓힌 뒤(2026-08-24) 생긴 구멍을 메운다. 이름은
+/// 알아보는데 그림은 활성·번들만 뒤지면 **아는 학생인데 얼굴이 빈 칸**이 된다.
+///
+/// 활성 폴더는 뺀다 — `students_dir()` 이 이미 첫 칸으로 주므로 남겨 두면 같은
+/// 폴더를 두 번 뒤진다. 그래서 방향이 대칭이 된다: 테마를 골랐으면 그것만 빠지고
+/// 나머지(번들 포함)가 뒤에 서고, **안 골랐으면 뺄 것이 없어 설치본 전부**가 선다.
+static OTHER_SPRITE_DIRS: std::sync::RwLock<Option<&'static [std::path::PathBuf]>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn other_theme_sprite_dirs() -> &'static [std::path::PathBuf] {
+    if let Some(d) = *OTHER_SPRITE_DIRS.read().unwrap() {
+        return d;
+    }
+    let mut w = OTHER_SPRITE_DIRS.write().unwrap();
+    // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 훑었을 수 있다.
+    if let Some(d) = *w {
+        return d;
+    }
+    let built = build_other_sprite_dirs();
+    *w = Some(built);
+    built
+}
+
+/// 테마를 갈아 끼우거나 지운 뒤 부른다. `theme::invalidate_roster()` 가 대신
+/// 불러 주므로 직접 부를 일은 없다 — 이름 캐시와 **짝**이어야 해서 묶어 뒀다.
+pub(crate) fn invalidate_theme_sprite_dirs() {
+    *OTHER_SPRITE_DIRS.write().unwrap() = None;
+}
+
+fn build_other_sprite_dirs() -> &'static [std::path::PathBuf] {
+    // 테스트는 이 컴퓨터에 무엇이 깔려 있든 같은 답이어야 한다.
+    if cfg!(test) {
+        return &[];
+    }
+    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
+    let active = crate::socket::students_dir();
+    Box::leak(other_sprite_dirs_in(&root, active.as_deref()).into_boxed_slice())
+}
+
+/// 주입 갈래 — 폴더 해석과 갈라 놔야 사용자 홈 없이 검증할 수 있다.
+///
+/// 정렬해서 돌려준다. `read_dir` 순서는 파일시스템이 정하므로, 같은 슬러그를 가진
+/// 테마가 둘이면 그냥 두었을 때 **어느 그림이 이기는지가 실행마다 달라진다**.
+pub(crate) fn other_sprite_dirs_in(
+    root: &std::path::Path,
+    active: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for e in rd.flatten() {
+        // `theme.json` 이 테마라는 표식이다 — `_trash/`·낱장 파일은 여기서 걸린다.
+        let dir = e.path();
+        if !dir.join("theme.json").is_file() {
+            continue;
+        }
+        let sprites = dir.join("sprites");
+        if sprites.is_dir() && Some(sprites.as_path()) != active {
+            out.push(sprites);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 그 폴더들을 차례로 뒤져 처음 걸리는 것. 3단의 마지막 칸을 부르는 공통 문.
+fn in_other_themes<T>(f: impl Fn(&std::path::Path) -> Option<T>) -> Option<T> {
+    other_theme_sprite_dirs().iter().find_map(|d| f(d))
+}
+
+/// 다른 테마에 이 슬러그의 프사가 있나 — **파일 존재만** 본다(디코딩 없음).
+/// 자리를 비우기 전에 묻는 게이트(`face_ready`)가 이걸 쓴다.
+pub(crate) fn other_theme_has_profile(slug: &str) -> bool {
+    other_theme_sprite_dirs()
+        .iter()
+        .any(|d| [true, false].into_iter().any(|f| d.join(profile_rel(slug, f)).is_file()))
+}
+
 /// `~/.config/kasaterm/students/<filename>` 을 RGBA 로 읽는다(프사·로고처럼
 /// 단일 이미지용). 파일/디렉토리가 없으면 None → 호출측이 번들 기본으로 폴백.
 pub(crate) fn user_asset_rgba(filename: &str) -> Option<(Vec<u8>, u32, u32)> {
@@ -98,6 +177,17 @@ pub(crate) fn user_sprite_images_in(
         Some(out)
     };
     load(true).or_else(|| load(false))
+}
+
+/// 번들 내장 프레임 전부를 디코딩한다. **한 장이라도** 못 열면 None — 반쪽짜리
+/// 벌로 애니를 돌리면 프레임이 튀는데, 그건 아예 폴백하느니만 못하다.
+fn bundled_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>> {
+    let frames = student_sprite_png(slug, motion)?;
+    let d: Vec<_> = frames
+        .iter()
+        .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
+        .collect();
+    (d.len() == frames.len()).then_some(d)
 }
 
 /// 모션 이름 → GPU 텍스처 캐시 키 접두. idle 은 "f"(기존 배너 캐시와 호환),
@@ -320,8 +410,15 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
     if student_sprite_png(slug, motion).is_some() {
         return true;
     }
-    let Some(dir) = crate::socket::students_dir() else { return false };
-    [true, false].into_iter().any(|f| dir.join(sprite_rel(slug, motion, 0, f)).is_file())
+    let first = |d: &std::path::Path| {
+        [true, false].into_iter().any(|f| d.join(sprite_rel(slug, motion, 0, f)).is_file())
+    };
+    if crate::socket::students_dir().is_some_and(|d| first(&d)) {
+        return true;
+    }
+    // 다른 테마 학생이 여기서 false 면 스프라이트 슬롯 자체가 안 서서, 넓힌 이름이
+    // 이름만 넓어지고 화면에는 아무것도 안 온다.
+    other_theme_sprite_dirs().iter().any(|d| first(d))
 }
 
 /// 모션 프레임들을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 전 프레임
@@ -329,20 +426,13 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
 /// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
 /// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
 pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
-    // 사용자 override(students_dir) 전 프레임이 있으면 그걸, 없으면 번들 내장.
+    // 활성 override(students_dir) → 번들 내장 → 다른 설치 테마.
     let decoded: Vec<image::RgbaImage> = match user_sprite_images(slug, motion) {
         Some(imgs) => imgs,
-        None => {
-            let frames = student_sprite_png(slug, motion)?;
-            let d: Vec<_> = frames
-                .iter()
-                .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
-                .collect();
-            if d.len() != frames.len() {
-                return None;
-            }
-            d
-        }
+        None => match bundled_sprite_images(slug, motion) {
+            Some(imgs) => imgs,
+            None => in_other_themes(|d| user_sprite_images_in(d, slug, motion))?,
+        },
     };
     let (w, h) = decoded[0].dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
@@ -448,18 +538,26 @@ pub(crate) fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     crop_profile_face(rgba, w, h)
 }
 
-/// 자르기 전 프사 원본 — override 우선, 없으면 번들.
+/// 자르기 전 프사 원본 — 활성 → 번들 → 다른 설치 테마.
 fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
-    if let Some(dir) = crate::socket::students_dir() {
-        for foldered in [true, false] {
-            if let Some(r) = user_asset_rgba_in(&dir, &profile_rel(slug, foldered)) {
-                return Some(r);
-            }
-        }
+    if let Some(r) = crate::socket::students_dir().and_then(|d| profile_rgba_in(&d, slug)) {
+        return Some(r);
     }
-    let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
-    Some((img.into_raw(), w, h))
+    if let Some(r) = student_profile_png(slug)
+        .and_then(|b| image::load_from_memory(b).ok())
+        .map(|i| {
+            let img = i.to_rgba8();
+            let (w, h) = img.dimensions();
+            (img.into_raw(), w, h)
+        })
+    {
+        return Some(r);
+    }
+    in_other_themes(|d| profile_rgba_in(d, slug))
+}
+
+fn profile_rgba_in(dir: &std::path::Path, slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    [true, false].into_iter().find_map(|f| user_asset_rgba_in(dir, &profile_rel(slug, f)))
 }
 
 /// 테마 목록의 미리보기 얼굴 — **지정한 그림 하나**를 그린다.
@@ -559,7 +657,7 @@ pub(crate) fn draw_student_face(
     y: f32,
     size: f32,
 ) -> bool {
-    let Some(slug) = theme::character_slug(name) else {
+    let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };
     let key = format!("student:{slug}:profile");
@@ -637,14 +735,16 @@ pub(crate) fn gif_rel(slug: &str) -> String {
     format!("gif/{slug}.gif")
 }
 
-/// 지금 쓰는 대기 gif 의 바이트 — 사용자 폴더가 번들을 덮는다.
+/// 지금 쓰는 대기 gif 의 바이트 — 활성 폴더가 번들을 덮고, 둘 다 없으면 다른 테마.
 pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
-    if let Some(dir) = crate::socket::students_dir() {
-        if let Ok(b) = std::fs::read(dir.join(gif_rel(slug))) {
-            return Some(b);
-        }
+    if let Some(b) = crate::socket::students_dir().and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
+    {
+        return Some(b);
     }
-    student_idle_gif(slug).map(|b| b.to_vec())
+    if let Some(b) = student_idle_gif(slug) {
+        return Some(b.to_vec());
+    }
+    in_other_themes(|d| std::fs::read(d.join(gif_rel(slug))).ok())
 }
 
 pub(crate) fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
@@ -771,7 +871,7 @@ pub(crate) fn draw_student_face_anim(
     size: f32,
     phase: f32,
 ) -> bool {
-    let Some(slug) = theme::character_slug(name) else {
+    let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };
     let Some(anim) = student_idle_anim(slug) else {
@@ -812,7 +912,7 @@ pub(crate) fn draw_student_walk(
     size: f32,
     phase: f32,
 ) -> bool {
-    let Some(slug) = theme::character_slug(name) else {
+    let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };
     let idx = ((phase * 1000.0 / STUDENT_WALK_FRAME_MS) as usize) % STUDENT_WALK_FRAMES;
@@ -863,6 +963,80 @@ pub(crate) fn schale_classroom_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
+
+#[cfg(test)]
+mod theme_sprite_dir_tests {
+    use super::*;
+
+    fn theme_at(root: &std::path::Path, id: &str, sprites: bool) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("theme.json"), b"{}").unwrap();
+        if sprites {
+            std::fs::create_dir_all(dir.join("sprites")).unwrap();
+        }
+    }
+
+    /// 활성 폴더를 빼고 나머지를 준다 — 3단이 같은 폴더를 두 번 뒤지지 않게.
+    /// 그리고 **활성이 없으면(테마 미선택) 전부** 준다: 그게 「번들이 활성일 때
+    /// 설치 테마 캐릭터도 그림이 나온다」의 배선이다(2026-08-24 지시, 방향 대칭).
+    #[test]
+    fn other_dirs_skip_active_and_non_themes() {
+        let root = std::env::temp_dir().join(format!("kt-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        theme_at(&root, "chiikawa", true);
+        theme_at(&root, "danganronpa", true);
+        // theme.json 이 없으면 테마가 아니다 — 치운 것들이 들어오는 자리다.
+        std::fs::create_dir_all(root.join("_trash/chiikawa/sprites")).unwrap();
+        // sprites 폴더가 없는 테마는 뒤질 것이 없다.
+        theme_at(&root, "myeongjo", false);
+        // 폴더가 아닌 항목도 같은 검사로 걸린다.
+        std::fs::write(root.join("sheets.html"), b"x").unwrap();
+
+        let active = root.join("chiikawa/sprites");
+        assert_eq!(
+            other_sprite_dirs_in(&root, Some(&active)),
+            vec![root.join("danganronpa/sprites")],
+            "활성·비테마·그림 없는 테마가 걸러져야 한다"
+        );
+
+        // 테마 미선택 — 활성이 없으니 설치본 전부가 선다.
+        assert_eq!(
+            other_sprite_dirs_in(&root, None),
+            vec![root.join("chiikawa/sprites"), root.join("danganronpa/sprites")],
+            "번들이 활성일 때 설치 테마 그림이 통째로 빠진다"
+        );
+
+        // 읽을 수 없는 경로는 빈 목록 — best-effort 다(패닉하면 앱이 통째로 죽는다).
+        assert!(other_sprite_dirs_in(&root.join("없음"), None).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 순서가 **파일시스템 순서를 타면** 같은 슬러그를 가진 테마가 둘일 때 어느
+    /// 그림이 이기는지가 실행마다 달라진다. 정렬이 그걸 못 박는다.
+    #[test]
+    fn other_dirs_are_sorted() {
+        let root = std::env::temp_dir().join(format!("kt-themes-sort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for id in ["zzz", "aaa", "mmm"] {
+            theme_at(&root, id, true);
+        }
+        let got = other_sprite_dirs_in(&root, None);
+        let mut want = got.clone();
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 테스트에서는 이 컴퓨터에 무엇이 깔려 있든 빈 목록이어야 한다 — 그게 아니면
+    /// 테마를 깐 기계에서만 결과가 갈린다(2026-08-24 격리와 같은 이유).
+    #[test]
+    fn lookup_is_isolated_under_test() {
+        assert!(other_theme_sprite_dirs().is_empty());
+        assert!(!other_theme_has_profile("hachiware"));
+    }
+}
 
 #[cfg(test)]
 mod student_asset_tests {

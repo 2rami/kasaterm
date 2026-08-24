@@ -445,14 +445,20 @@ pub(crate) fn restyle_peer_native_header(
 /// 이 슬러그로 프사를 실제로 그릴 수 있는가.
 ///
 /// 활성 명부의 슬러그는 통과시킨다 — 그림은 활성 자산 경로(`students_dir()`)가
-/// 댄다. **넓힌 몫**(다른 테마·번들에서 온 이름)은 그 테마의 그림이 거기 없으므로
-/// 기댈 것이 컴파일 내장 프사뿐이고, 그 존재로 가른다(match 하나라 IO 0).
+/// 댄다. **넓힌 몫**(다른 테마·번들에서 온 이름)은 그 그림이 거기 없으므로 뒤 두
+/// 칸으로 가른다: 컴파일 내장 프사(match 하나라 IO 0), 그리고 다른 설치 테마의
+/// `sprites/`(파일 존재만 — 앞 둘이 다 빗나간 이름에만 오므로 흔치 않다).
+///
+/// 세 칸의 순서가 `student_profile_rgba_full` 의 3단과 **같아야** 한다. 어긋나면
+/// 여기서는 통과시킨 슬러그를 로더가 못 찾아 자리만 비고 그림이 안 온다.
 ///
 /// 게이트가 필요한 이유: 프사를 그리는 자리들은 **먼저 자리를 비운다**(tell 은 2칸,
 /// 피커는 `#이름` 태그를 통째로). 슬러그만 믿고 자리를 비웠는데 그림이 없으면
 /// 지운 자리에 아무것도 안 들어와 **빈 칸으로 남는다**.
 pub(crate) fn face_ready(slug: &str) -> bool {
-    theme::slug_character(slug).is_some() || crate::sprites::student_profile_png(slug).is_some()
+    theme::slug_character(slug).is_some()
+        || crate::sprites::student_profile_png(slug).is_some()
+        || crate::sprites::other_theme_has_profile(slug)
 }
 
 /// 이름 → 프사에 쓸 슬러그. tell·피커·팀메시지가 **이 하나를** 쓴다 — 판정이 두
