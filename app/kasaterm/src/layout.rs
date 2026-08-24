@@ -134,10 +134,18 @@ impl App {
                     return None;
                 }
                 let fs = self.pane_font_scales.get(z).copied().unwrap_or(1.0).max(0.1);
-                let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0)
-                    / (self.cell.w * fs))
-                    .floor() as u16;
-                let lr = ((py - TITLE_HEIGHT - pane.header_px() - PANE_INNER_Y).max(0.0)
+                // 줌 pane 은 「떠 있는 카드」라 가장자리에서 zoom_inset_cells 만큼
+                // 들여 그려진다(render_frame_gpu·effective_leaf_rects 와 같은 함수).
+                // 그 원점을 안 빼면 클릭·드래그 선택이 inset 셀수(가로 ~2·세로 1)
+                // 만큼 오른쪽 아래 글자를 집는다(거노: "확대하면 드래그 위치가
+                // 정확히 안 맞아").
+                let (gc, gr) = self.window_cells();
+                let (ix, iy) = self.zoom_inset_cells(gc, gr);
+                let box_left = sb + WINDOW_PADDING + ix as f32 * self.cell.w;
+                let box_top = TITLE_HEIGHT + iy as f32 * self.cell.h;
+                let lc =
+                    ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs)).floor() as u16;
+                let lr = ((py - box_top - pane.header_px() - PANE_INNER_Y).max(0.0)
                     / (self.cell.h * fs))
                     .floor() as u16;
                 return Some((z.to_string(), lc.min(t.cols - 1), lr.min(t.rows - 1)));
