@@ -1,0 +1,165 @@
+{
+  "theme": "zzz",
+  "label": "젠레스 존 제로",
+  "user_title": "프록시",
+  "leader": {
+    "name": "페어리",
+    "slug": "fairy",
+    "school": "AI 어시스턴트",
+    "claude_color": "cyan",
+    "header_color": "#99DDCC",
+    "greeting": "프록시. 시스템 온라인. 오늘의 의뢰를 정리해 드릴까요?"
+  },
+  "members": [
+    {
+      "name": "앤비",
+      "slug": "anby",
+      "school": "교리단",
+      "claude_color": "blue",
+      "header_color": "#7788AA"
+    },
+    {
+      "name": "니콜",
+      "slug": "nicole",
+      "school": "교리단",
+      "claude_color": "yellow",
+      "header_color": "#DDBB44"
+    },
+    {
+      "name": "빌리",
+      "slug": "billy",
+      "school": "교리단",
+      "claude_color": "red",
+      "header_color": "#DD5555"
+    },
+    {
+      "name": "네코미야",
+      "slug": "nekomiya",
+      "school": "교리단",
+      "claude_color": "pink",
+      "header_color": "#FF7788"
+    },
+    {
+      "name": "코린",
+      "slug": "corin",
+      "school": "빅토리아 하우스키핑",
+      "claude_color": "green",
+      "header_color": "#AABB88"
+    },
+    {
+      "name": "엘렌",
+      "slug": "ellen",
+      "school": "빅토리아 하우스키핑",
+      "claude_color": "blue",
+      "header_color": "#6688BB"
+    },
+    {
+      "name": "리카온",
+      "slug": "lycaon",
+      "school": "빅토리아 하우스키핑",
+      "claude_color": "cyan",
+      "header_color": "#8899AA"
+    },
+    {
+      "name": "주연",
+      "slug": "zhuyuan",
+      "school": "형사 특수수사반",
+      "claude_color": "blue",
+      "header_color": "#5577DD"
+    },
+    {
+      "name": "청이",
+      "slug": "qingyi",
+      "school": "형사 특수수사반",
+      "claude_color": "green",
+      "header_color": "#88CCAA"
+    },
+    {
+      "name": "제인",
+      "slug": "jane",
+      "school": "형사 특수수사반",
+      "claude_color": "magenta",
+      "header_color": "#886699"
+    },
+    {
+      "name": "시저",
+      "slug": "caesar",
+      "school": "칼리돈의 아이들",
+      "claude_color": "yellow",
+      "header_color": "#CC9944"
+    },
+    {
+      "name": "버니스",
+      "slug": "burnice",
+      "school": "칼리돈의 아이들",
+      "claude_color": "orange",
+      "header_color": "#DD6633"
+    },
+    {
+      "name": "라이터",
+      "slug": "lighter",
+      "school": "칼리돈의 아이들",
+      "claude_color": "orange",
+      "header_color": "#CC7733"
+    },
+    {
+      "name": "루시",
+      "slug": "lucy",
+      "school": "칼리돈의 아이들",
+      "claude_color": "orange",
+      "header_color": "#FFAA66"
+    },
+    {
+      "name": "파이퍼",
+      "slug": "piper",
+      "school": "칼리돈의 아이들",
+      "claude_color": "yellow",
+      "header_color": "#BB8866"
+    },
+    {
+      "name": "그레이스",
+      "slug": "grace",
+      "school": "벨로보그 중공업",
+      "claude_color": "cyan",
+      "header_color": "#77AACC"
+    },
+    {
+      "name": "미야비",
+      "slug": "miyabi",
+      "school": "특무과 6과",
+      "claude_color": "purple",
+      "header_color": "#9988CC"
+    },
+    {
+      "name": "야나기",
+      "slug": "yanagi",
+      "school": "특무과 6과",
+      "claude_color": "green",
+      "header_color": "#7FAF9F"
+    },
+    {
+      "name": "하루마사",
+      "slug": "harumasa",
+      "school": "특무과 6과",
+      "claude_color": "blue",
+      "header_color": "#66AADD"
+    },
+    {
+      "name": "이블린",
+      "slug": "evelyn",
+      "school": "스타즈 오브 리라",
+      "claude_color": "red",
+      "header_color": "#DD4466"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "페어리",
+      "slug": "fairy",
+      "school": "AI 어시스턴트",
+      "claude_color": "cyan",
+      "header_color": "#99DDCC",
+      "greeting": "프록시. 시스템 온라인. 오늘의 의뢰를 정리해 드릴까요?"
+    }
+  ]
+}

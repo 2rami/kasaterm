@@ -1,0 +1,123 @@
+{
+  "theme": "endfield",
+  "label": "명일방주: 엔드필드",
+  "user_title": "관리인",
+  "leader": {
+    "name": "펠리카",
+    "slug": "perlica",
+    "school": "엔드필드 공업",
+    "claude_color": "cyan",
+    "header_color": "#7FC8C8",
+    "greeting": "관리인님, 통신 연결됐습니다. 오늘 작업 우선순위부터 정리하죠."
+  },
+  "members": [
+    {
+      "name": "레바테인",
+      "slug": "laevatain",
+      "school": "엔드필드 공업",
+      "claude_color": "red",
+      "header_color": "#DD5533"
+    },
+    {
+      "name": "베르타",
+      "slug": "berta",
+      "school": "엔드필드 공업",
+      "claude_color": "blue",
+      "header_color": "#88AACC"
+    },
+    {
+      "name": "아델리아",
+      "slug": "adelia",
+      "school": "엔드필드 공업",
+      "claude_color": "green",
+      "header_color": "#99CC88"
+    },
+    {
+      "name": "이본",
+      "slug": "yvonne",
+      "school": "엔드필드 공업",
+      "claude_color": "orange",
+      "header_color": "#CC8844"
+    },
+    {
+      "name": "라스트 라이트",
+      "slug": "lastlight",
+      "school": "엔드필드 공업",
+      "claude_color": "blue",
+      "header_color": "#7788BB"
+    },
+    {
+      "name": "포그라니치니크",
+      "slug": "pogranichnik",
+      "school": "엔드필드 공업",
+      "claude_color": "cyan",
+      "header_color": "#7A8899"
+    },
+    {
+      "name": "엠버",
+      "slug": "ember",
+      "school": "엔드필드 공업",
+      "claude_color": "orange",
+      "header_color": "#DD7744"
+    },
+    {
+      "name": "아비웨나",
+      "slug": "avywenna",
+      "school": "엔드필드 공업",
+      "claude_color": "cyan",
+      "header_color": "#77BBCC"
+    },
+    {
+      "name": "안탈",
+      "slug": "antal",
+      "school": "엔드필드 공업",
+      "claude_color": "yellow",
+      "header_color": "#AA8866"
+    },
+    {
+      "name": "스노우샤인",
+      "slug": "snowshine",
+      "school": "엔드필드 공업",
+      "claude_color": "blue",
+      "header_color": "#BBDDEE"
+    },
+    {
+      "name": "리펑",
+      "slug": "lifeng",
+      "school": "엔드필드 공업",
+      "claude_color": "green",
+      "header_color": "#66BB99"
+    },
+    {
+      "name": "플루라이트",
+      "slug": "fluorite",
+      "school": "엔드필드 공업",
+      "claude_color": "purple",
+      "header_color": "#CC99DD"
+    },
+    {
+      "name": "질베르",
+      "slug": "gilberta",
+      "school": "엔드필드 공업",
+      "claude_color": "blue",
+      "header_color": "#8899BB"
+    },
+    {
+      "name": "울프가드",
+      "slug": "wulfgard",
+      "school": "엔드필드 공업",
+      "claude_color": "yellow",
+      "header_color": "#997755"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "펠리카",
+      "slug": "perlica",
+      "school": "엔드필드 공업",
+      "claude_color": "cyan",
+      "header_color": "#7FC8C8",
+      "greeting": "관리인님, 통신 연결됐습니다. 오늘 작업 우선순위부터 정리하죠."
+    }
+  ]
+}

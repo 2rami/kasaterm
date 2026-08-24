@@ -1,0 +1,165 @@
+{
+  "theme": "project-sekai",
+  "label": "프로젝트 세카이",
+  "user_title": "프로듀서",
+  "leader": {
+    "name": "미쿠",
+    "slug": "miku",
+    "school": "세카이",
+    "claude_color": "cyan",
+    "header_color": "#33CCBB",
+    "greeting": "프로듀서! 세카이가 열렸어요. 오늘은 어떤 마음을 노래로 만들까요?"
+  },
+  "members": [
+    {
+      "name": "이치카",
+      "slug": "ichika",
+      "school": "Leo/need",
+      "claude_color": "blue",
+      "header_color": "#33AAEE"
+    },
+    {
+      "name": "사키",
+      "slug": "saki",
+      "school": "Leo/need",
+      "claude_color": "yellow",
+      "header_color": "#FFD54F"
+    },
+    {
+      "name": "호나미",
+      "slug": "honami",
+      "school": "Leo/need",
+      "claude_color": "red",
+      "header_color": "#EE6666"
+    },
+    {
+      "name": "시호",
+      "slug": "shiho",
+      "school": "Leo/need",
+      "claude_color": "green",
+      "header_color": "#BBDD44"
+    },
+    {
+      "name": "미노리",
+      "slug": "minori",
+      "school": "MORE MORE JUMP!",
+      "claude_color": "orange",
+      "header_color": "#FFCDA5"
+    },
+    {
+      "name": "하루카",
+      "slug": "haruka",
+      "school": "MORE MORE JUMP!",
+      "claude_color": "blue",
+      "header_color": "#99CCFF"
+    },
+    {
+      "name": "아이리",
+      "slug": "airi",
+      "school": "MORE MORE JUMP!",
+      "claude_color": "pink",
+      "header_color": "#FFAACC"
+    },
+    {
+      "name": "시즈쿠",
+      "slug": "shizuku",
+      "school": "MORE MORE JUMP!",
+      "claude_color": "cyan",
+      "header_color": "#99EEDD"
+    },
+    {
+      "name": "코하네",
+      "slug": "kohane",
+      "school": "Vivid BAD SQUAD",
+      "claude_color": "pink",
+      "header_color": "#FF6699"
+    },
+    {
+      "name": "안",
+      "slug": "an",
+      "school": "Vivid BAD SQUAD",
+      "claude_color": "cyan",
+      "header_color": "#00BBDD"
+    },
+    {
+      "name": "아키토",
+      "slug": "akito",
+      "school": "Vivid BAD SQUAD",
+      "claude_color": "orange",
+      "header_color": "#FF7722"
+    },
+    {
+      "name": "토우야",
+      "slug": "toya",
+      "school": "Vivid BAD SQUAD",
+      "claude_color": "blue",
+      "header_color": "#0077DD"
+    },
+    {
+      "name": "츠카사",
+      "slug": "tsukasa",
+      "school": "원더랜즈×쇼타임",
+      "claude_color": "yellow",
+      "header_color": "#FFBB00"
+    },
+    {
+      "name": "에무",
+      "slug": "emu",
+      "school": "원더랜즈×쇼타임",
+      "claude_color": "pink",
+      "header_color": "#FF66BB"
+    },
+    {
+      "name": "네네",
+      "slug": "nene",
+      "school": "원더랜즈×쇼타임",
+      "claude_color": "green",
+      "header_color": "#33DD99"
+    },
+    {
+      "name": "루이",
+      "slug": "rui",
+      "school": "원더랜즈×쇼타임",
+      "claude_color": "purple",
+      "header_color": "#BB88EE"
+    },
+    {
+      "name": "카나데",
+      "slug": "kanade",
+      "school": "25시, 나이트 코드에서.",
+      "claude_color": "magenta",
+      "header_color": "#BB6688"
+    },
+    {
+      "name": "마후유",
+      "slug": "mafuyu",
+      "school": "25시, 나이트 코드에서.",
+      "claude_color": "purple",
+      "header_color": "#8888CC"
+    },
+    {
+      "name": "에나",
+      "slug": "ena",
+      "school": "25시, 나이트 코드에서.",
+      "claude_color": "yellow",
+      "header_color": "#CCAA77"
+    },
+    {
+      "name": "미즈키",
+      "slug": "mizuki",
+      "school": "25시, 나이트 코드에서.",
+      "claude_color": "pink",
+      "header_color": "#DDAACC"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "미쿠",
+      "slug": "miku",
+      "school": "세카이",
+      "claude_color": "cyan",
+      "header_color": "#33CCBB",
+      "greeting": "프로듀서! 세카이가 열렸어요. 오늘은 어떤 마음을 노래로 만들까요?"
+    }
+  ]
+}

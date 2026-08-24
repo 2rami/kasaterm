@@ -1,0 +1,165 @@
+{
+  "theme": "genshin",
+  "label": "원신",
+  "user_title": "여행자",
+  "leader": {
+    "name": "페이몬",
+    "slug": "paimon",
+    "school": "길동무",
+    "claude_color": "blue",
+    "header_color": "#B8C8EE",
+    "greeting": "여행자! 페이몬이 다 안내해줄게. 오늘은 어디부터 갈까?"
+  },
+  "members": [
+    {
+      "name": "벤티",
+      "slug": "venti",
+      "school": "몬드",
+      "claude_color": "cyan",
+      "header_color": "#33CCAA"
+    },
+    {
+      "name": "다이루크",
+      "slug": "diluc",
+      "school": "몬드",
+      "claude_color": "red",
+      "header_color": "#CC3322"
+    },
+    {
+      "name": "클레",
+      "slug": "klee",
+      "school": "몬드",
+      "claude_color": "red",
+      "header_color": "#FF6644"
+    },
+    {
+      "name": "종려",
+      "slug": "zhongli",
+      "school": "리월",
+      "claude_color": "orange",
+      "header_color": "#D4AF6A"
+    },
+    {
+      "name": "각청",
+      "slug": "keqing",
+      "school": "리월",
+      "claude_color": "purple",
+      "header_color": "#AA77CC"
+    },
+    {
+      "name": "감우",
+      "slug": "ganyu",
+      "school": "리월",
+      "claude_color": "blue",
+      "header_color": "#7FB2D8"
+    },
+    {
+      "name": "호두",
+      "slug": "hutao",
+      "school": "리월",
+      "claude_color": "red",
+      "header_color": "#CC3333"
+    },
+    {
+      "name": "라이덴",
+      "slug": "raiden",
+      "school": "이나즈마",
+      "claude_color": "purple",
+      "header_color": "#9966CC"
+    },
+    {
+      "name": "아야카",
+      "slug": "ayaka",
+      "school": "이나즈마",
+      "claude_color": "blue",
+      "header_color": "#AACCEE"
+    },
+    {
+      "name": "요이미야",
+      "slug": "yoimiya",
+      "school": "이나즈마",
+      "claude_color": "orange",
+      "header_color": "#FF8833"
+    },
+    {
+      "name": "타르탈리아",
+      "slug": "tartaglia",
+      "school": "파투스",
+      "claude_color": "blue",
+      "header_color": "#4499DD"
+    },
+    {
+      "name": "아를레키노",
+      "slug": "arlecchino",
+      "school": "파투스",
+      "claude_color": "magenta",
+      "header_color": "#AA4455"
+    },
+    {
+      "name": "나히다",
+      "slug": "nahida",
+      "school": "수메르",
+      "claude_color": "green",
+      "header_color": "#66CC66"
+    },
+    {
+      "name": "푸리나",
+      "slug": "furina",
+      "school": "폰타인",
+      "claude_color": "blue",
+      "header_color": "#66AADD"
+    },
+    {
+      "name": "느비예트",
+      "slug": "neuvillette",
+      "school": "폰타인",
+      "claude_color": "cyan",
+      "header_color": "#5599BB"
+    },
+    {
+      "name": "나비아",
+      "slug": "navia",
+      "school": "폰타인",
+      "claude_color": "yellow",
+      "header_color": "#DDBB55"
+    },
+    {
+      "name": "마비카",
+      "slug": "mavuika",
+      "school": "나타",
+      "claude_color": "red",
+      "header_color": "#FF5533"
+    },
+    {
+      "name": "시틀라리",
+      "slug": "citlali",
+      "school": "나타",
+      "claude_color": "cyan",
+      "header_color": "#88BBDD"
+    },
+    {
+      "name": "키니치",
+      "slug": "kinich",
+      "school": "나타",
+      "claude_color": "green",
+      "header_color": "#55AA66"
+    },
+    {
+      "name": "무알라니",
+      "slug": "mualani",
+      "school": "나타",
+      "claude_color": "pink",
+      "header_color": "#FF88AA"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "페이몬",
+      "slug": "paimon",
+      "school": "길동무",
+      "claude_color": "blue",
+      "header_color": "#B8C8EE",
+      "greeting": "여행자! 페이몬이 다 안내해줄게. 오늘은 어디부터 갈까?"
+    }
+  ]
+}

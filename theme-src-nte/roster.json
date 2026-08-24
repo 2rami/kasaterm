@@ -1,0 +1,130 @@
+{
+  "theme": "nte",
+  "label": "이환",
+  "user_title": "소장",
+  "leader": {
+    "name": "나나리",
+    "slug": "nanali",
+    "school": "특이현상 관리",
+    "claude_color": "blue",
+    "header_color": "#88AADD",
+    "greeting": "소장님, 오늘도 이상현상이 잔뜩이에요. 어디부터 정리할까요?"
+  },
+  "members": [
+    {
+      "name": "사키리",
+      "slug": "sakiri",
+      "school": "특이현상 관리",
+      "claude_color": "yellow",
+      "header_color": "#DDAA55"
+    },
+    {
+      "name": "구원",
+      "slug": "guwon",
+      "school": "특이현상 관리",
+      "claude_color": "cyan",
+      "header_color": "#77CCBB"
+    },
+    {
+      "name": "다포딜",
+      "slug": "daffodil",
+      "school": "특이현상 관리",
+      "claude_color": "purple",
+      "header_color": "#9977BB"
+    },
+    {
+      "name": "백장",
+      "slug": "baekjang",
+      "school": "특이현상 관리",
+      "claude_color": "yellow",
+      "header_color": "#CCBB88"
+    },
+    {
+      "name": "하토르",
+      "slug": "hathor",
+      "school": "특이현상 관리",
+      "claude_color": "pink",
+      "header_color": "#DD7788"
+    },
+    {
+      "name": "파디아",
+      "slug": "fadia",
+      "school": "특이현상 관리",
+      "claude_color": "blue",
+      "header_color": "#8899CC"
+    },
+    {
+      "name": "치즈",
+      "slug": "cheese",
+      "school": "특이현상 관리",
+      "claude_color": "yellow",
+      "header_color": "#FFCC66"
+    },
+    {
+      "name": "호토리",
+      "slug": "hotori",
+      "school": "특이현상 관리",
+      "claude_color": "yellow",
+      "header_color": "#EEDD77"
+    },
+    {
+      "name": "라크리모사",
+      "slug": "lacrimosa",
+      "school": "특이현상 관리",
+      "claude_color": "purple",
+      "header_color": "#9977AA"
+    },
+    {
+      "name": "민트",
+      "slug": "mint_n",
+      "school": "특이현상 관리",
+      "claude_color": "green",
+      "header_color": "#77DDAA"
+    },
+    {
+      "name": "스키아",
+      "slug": "skia",
+      "school": "특이현상 관리",
+      "claude_color": "purple",
+      "header_color": "#8877AA"
+    },
+    {
+      "name": "아들러",
+      "slug": "adler",
+      "school": "특이현상 관리",
+      "claude_color": "orange",
+      "header_color": "#BB9966"
+    },
+    {
+      "name": "하니엘",
+      "slug": "haniel",
+      "school": "특이현상 관리",
+      "claude_color": "pink",
+      "header_color": "#DD99BB"
+    },
+    {
+      "name": "에드가",
+      "slug": "edgar",
+      "school": "특이현상 관리",
+      "claude_color": "yellow",
+      "header_color": "#EECC88"
+    },
+    {
+      "name": "우미츠키",
+      "slug": "umitsuki",
+      "school": "특이현상 관리",
+      "claude_color": "cyan",
+      "header_color": "#66AACC"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "나나리",
+      "slug": "nanali",
+      "school": "특이현상 관리",
+      "claude_color": "blue",
+      "header_color": "#88AADD",
+      "greeting": "소장님, 오늘도 이상현상이 잔뜩이에요. 어디부터 정리할까요?"
+    }
+  ]
+}

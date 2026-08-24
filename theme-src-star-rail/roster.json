@@ -1,0 +1,165 @@
+{
+  "theme": "star-rail",
+  "label": "붕괴: 스타레일",
+  "user_title": "개척자",
+  "leader": {
+    "name": "팜팜",
+    "slug": "pompom",
+    "school": "은하열차",
+    "claude_color": "cyan",
+    "header_color": "#88CCBB",
+    "greeting": "개척자! 열차 정비 끝났어요. 다음 정거장은 어디로 할까요?"
+  },
+  "members": [
+    {
+      "name": "히메코",
+      "slug": "himeko",
+      "school": "은하열차",
+      "claude_color": "red",
+      "header_color": "#DD5544"
+    },
+    {
+      "name": "웰트",
+      "slug": "welt",
+      "school": "은하열차",
+      "claude_color": "blue",
+      "header_color": "#556688"
+    },
+    {
+      "name": "삼칠이",
+      "slug": "march7",
+      "school": "은하열차",
+      "claude_color": "pink",
+      "header_color": "#88CCEE"
+    },
+    {
+      "name": "단헝",
+      "slug": "danheng",
+      "school": "은하열차",
+      "claude_color": "cyan",
+      "header_color": "#55AACC"
+    },
+    {
+      "name": "카프카",
+      "slug": "kafka",
+      "school": "스텔라론 헌터",
+      "claude_color": "purple",
+      "header_color": "#AA88BB"
+    },
+    {
+      "name": "은랑",
+      "slug": "silverwolf",
+      "school": "스텔라론 헌터",
+      "claude_color": "purple",
+      "header_color": "#AABBDD"
+    },
+    {
+      "name": "블레이드",
+      "slug": "blade",
+      "school": "스텔라론 헌터",
+      "claude_color": "cyan",
+      "header_color": "#8899AA"
+    },
+    {
+      "name": "반디",
+      "slug": "firefly",
+      "school": "스텔라론 헌터",
+      "claude_color": "green",
+      "header_color": "#88DD99"
+    },
+    {
+      "name": "제레",
+      "slug": "seele",
+      "school": "야릴로-VI",
+      "claude_color": "purple",
+      "header_color": "#9977CC"
+    },
+    {
+      "name": "브로냐",
+      "slug": "bronya",
+      "school": "야릴로-VI",
+      "claude_color": "blue",
+      "header_color": "#8899CC"
+    },
+    {
+      "name": "경류",
+      "slug": "jingliu",
+      "school": "선주 연맹",
+      "claude_color": "blue",
+      "header_color": "#77AADD"
+    },
+    {
+      "name": "나찰",
+      "slug": "luocha",
+      "school": "순행 상인",
+      "claude_color": "yellow",
+      "header_color": "#C8B89A"
+    },
+    {
+      "name": "부현",
+      "slug": "fuxuan",
+      "school": "선주 연맹",
+      "claude_color": "pink",
+      "header_color": "#DD99BB"
+    },
+    {
+      "name": "백로",
+      "slug": "bailu",
+      "school": "선주 연맹",
+      "claude_color": "cyan",
+      "header_color": "#77CCDD"
+    },
+    {
+      "name": "아케론",
+      "slug": "acheron",
+      "school": "낭인",
+      "claude_color": "magenta",
+      "header_color": "#BB77CC"
+    },
+    {
+      "name": "로빈",
+      "slug": "robin",
+      "school": "페나코니",
+      "claude_color": "pink",
+      "header_color": "#FF99BB"
+    },
+    {
+      "name": "어벤츄린",
+      "slug": "aventurine",
+      "school": "IPC",
+      "claude_color": "yellow",
+      "header_color": "#DDBB55"
+    },
+    {
+      "name": "토파즈",
+      "slug": "topaz",
+      "school": "IPC",
+      "claude_color": "orange",
+      "header_color": "#DD8844"
+    },
+    {
+      "name": "레이시오",
+      "slug": "ratio",
+      "school": "지식학회",
+      "claude_color": "blue",
+      "header_color": "#5577AA"
+    },
+    {
+      "name": "카스토리체",
+      "slug": "castorice",
+      "school": "암표국",
+      "claude_color": "purple",
+      "header_color": "#AACCDD"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "팜팜",
+      "slug": "pompom",
+      "school": "은하열차",
+      "claude_color": "cyan",
+      "header_color": "#88CCBB",
+      "greeting": "개척자! 열차 정비 끝났어요. 다음 정거장은 어디로 할까요?"
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "theme": "vocaloid",
+  "label": "보컬로이드",
+  "user_title": "마스터",
+  "leader": {
+    "name": "하츠네 미쿠",
+    "slug": "hatsune_miku",
+    "school": "크립톤",
+    "claude_color": "cyan",
+    "header_color": "#39C5BB",
+    "greeting": "마스터! 목소리 준비됐어요. 오늘은 무엇을 함께 만들까요?"
+  },
+  "members": [
+    {
+      "name": "린",
+      "slug": "rin",
+      "school": "크립톤",
+      "claude_color": "yellow",
+      "header_color": "#FFCC11"
+    },
+    {
+      "name": "렌",
+      "slug": "len",
+      "school": "크립톤",
+      "claude_color": "yellow",
+      "header_color": "#FFE211"
+    },
+    {
+      "name": "루카",
+      "slug": "luka",
+      "school": "크립톤",
+      "claude_color": "pink",
+      "header_color": "#FFBBCC"
+    },
+    {
+      "name": "메이코",
+      "slug": "meiko",
+      "school": "크립톤",
+      "claude_color": "red",
+      "header_color": "#DD4444"
+    },
+    {
+      "name": "카이토",
+      "slug": "kaito_v",
+      "school": "크립톤",
+      "claude_color": "blue",
+      "header_color": "#3366CC"
+    },
+    {
+      "name": "구미",
+      "slug": "gumi",
+      "school": "인터넷",
+      "claude_color": "green",
+      "header_color": "#88CC33"
+    },
+    {
+      "name": "가쿠포",
+      "slug": "gakupo",
+      "school": "인터넷",
+      "claude_color": "purple",
+      "header_color": "#AA66CC"
+    },
+    {
+      "name": "IA",
+      "slug": "ia",
+      "school": "1st PLACE",
+      "claude_color": "pink",
+      "header_color": "#F4AACC"
+    },
+    {
+      "name": "시유",
+      "slug": "seeu",
+      "school": "SBS A&T",
+      "claude_color": "orange",
+      "header_color": "#FFCC66"
+    },
+    {
+      "name": "유카리",
+      "slug": "yukari",
+      "school": "VOCALOMAKETS",
+      "claude_color": "purple",
+      "header_color": "#BB99DD"
+    },
+    {
+      "name": "테토",
+      "slug": "teto",
+      "school": "트윈드릴",
+      "claude_color": "magenta",
+      "header_color": "#DD3366"
+    },
+    {
+      "name": "후카세",
+      "slug": "fukase",
+      "school": "야마하",
+      "claude_color": "red",
+      "header_color": "#FF4444"
+    },
+    {
+      "name": "플라워",
+      "slug": "flower",
+      "school": "gynoid",
+      "claude_color": "purple",
+      "header_color": "#AAAACC"
+    },
+    {
+      "name": "올리버",
+      "slug": "oliver",
+      "school": "PowerFX",
+      "claude_color": "yellow",
+      "header_color": "#FFDD88"
+    },
+    {
+      "name": "미키",
+      "slug": "miki",
+      "school": "AHS",
+      "claude_color": "red",
+      "header_color": "#FF6666"
+    },
+    {
+      "name": "유키",
+      "slug": "yuki",
+      "school": "AHS",
+      "claude_color": "pink",
+      "header_color": "#FF9999"
+    },
+    {
+      "name": "키요테루",
+      "slug": "kiyoteru",
+      "school": "AHS",
+      "claude_color": "blue",
+      "header_color": "#5588BB"
+    },
+    {
+      "name": "이로하",
+      "slug": "iroha",
+      "school": "AHS",
+      "claude_color": "pink",
+      "header_color": "#FF7799"
+    },
+    {
+      "name": "우나",
+      "slug": "una",
+      "school": "인터넷",
+      "claude_color": "cyan",
+      "header_color": "#66CCDD"
+    }
+  ],
+  "leaders": [
+    {
+      "name": "하츠네 미쿠",
+      "slug": "hatsune_miku",
+      "school": "크립톤",
+      "claude_color": "cyan",
+      "header_color": "#39C5BB",
+      "greeting": "마스터! 목소리 준비됐어요. 오늘은 무엇을 함께 만들까요?"
+    }
+  ]
+}
