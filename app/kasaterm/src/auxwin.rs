@@ -1679,9 +1679,37 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => self.aux_settings_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_settings_key(idx, &event),
             WindowEvent::Ime(ime) => self.aux_settings_ime(idx, ime),
+            WindowEvent::DroppedFile(path) => self.aux_settings_drop(idx, path),
             WindowEvent::RedrawRequested => self.aux_render(idx),
             _ => {}
         }
+    }
+
+    /// 설정 창에 떨어뜨린 이미지 → 열려 있는 캐릭터의 참조 그림(그림 생성용).
+    /// 캐릭터 상세가 안 열려 있으면 무시한다 — 어느 캐릭터 것인지 정할 길이 없다.
+    /// 이미지가 아닌 파일은 place 쪽 디코드가 거르고 사유가 토스트로 뜬다.
+    fn aux_settings_drop(&mut self, idx: usize, path: std::path::PathBuf) {
+        if self.settings_cat != crate::SettingsCat::Theme {
+            return;
+        }
+        let Some(slug) = self
+            .students_selected
+            .as_deref()
+            .and_then(crate::theme::character_slug)
+        else {
+            return;
+        };
+        let theme_id = crate::socket::read_character_theme();
+        if theme_id.is_empty() {
+            self.set_toast("기본 테마에는 못 구워요 — 새 테마로 복제한 뒤에 놓아 주세요".into());
+            return;
+        }
+        let Some(root) = kasa_mcp::character::themes_root() else { return };
+        match crate::place_themegen_ref(&root.join(&theme_id), slug, &path) {
+            Ok(_) => self.set_toast("참조 그림을 놓았어요".into()),
+            Err(e) => self.set_toast(format!("그림을 못 놓았어요 — {e}")),
+        }
+        self.aux_redraw(idx);
     }
 
     fn aux_settings_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {

@@ -33,6 +33,10 @@ mod webpane;
 mod input;
 mod lineedit;
 mod settings;
+mod themegen;
+// settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
+// 않으려고 여기서 한 번 재수출한다.
+pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
 mod syntax;
 mod lsp;
 mod links;
@@ -4224,6 +4228,9 @@ pub(crate) enum SettingsInput {
     /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
     /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
     PaletteHex(usize),
+    /// 나노바나나(gemini) API 키 칸. 버퍼는 `App.themegen.key_edit` — 값의
+    /// 정본은 settings.json 의 `gemini_api_key` 고 매 키마다 거기 굳힌다.
+    GeminiKey,
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -4387,6 +4394,19 @@ pub(crate) enum SettingsAction {
     SaveFeedback,
     /// 쌓인 피드백 폴더를 파일 관리자로 연다.
     OpenFeedbackDir,
+    /// 그림 생성 엔진을 고른다 — `"opengateway"` · `"codex"` · `"nanobanana"`.
+    /// 정본은 settings.json 의 `theme_gen_provider`.
+    ThemeGenProvider(String),
+    /// 나노바나나 API 키 칸에 포커스.
+    FocusGeminiKey,
+    /// 참조 그림을 파일 선택으로 고른다 — 고른 파일을 열려 있는 캐릭터의
+    /// `themes/<id>/gen/<slug>/ref.png` 자리로 복사한다(생성은 따로 누른다).
+    ThemeGenPickRef,
+    /// 참조 그림으로 스프라이트 생성을 시작한다(열려 있는 캐릭터 대상).
+    ThemeGenStart,
+    /// 캐릭터 격자의 「+ 새 캐릭터」 — 참조 그림을 고르면 파일명에서 slug 를
+    /// 유도해 테마 로스터에 추가하고 상세로 들어간다.
+    ThemeGenNewStudent,
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -5465,6 +5485,10 @@ struct App {
     /// 경로엔 ActiveEventLoop 가 없어 창을 못 만든다. about_to_wait 가 다음
     /// 턴에 걷어 spawn_web_host 로 실물을 만든다.
     pending_web_hosts: Vec<(u64, String)>,
+    /// 참조 그림 한 장으로 테마 캐릭터를 굽는 잡·프로바이더 감지 캐시. 정의 본체는
+    /// `themegen.rs` 에 있다 — 이 struct 에 필드를 평평하게 늘리면 서로 다른 기능을
+    /// 만지는 작업끼리 같은 정의 줄에서 충돌한다.
+    themegen: themegen::ThemeGenState,
 }
 
 impl App {
@@ -5838,6 +5862,7 @@ impl App {
             web_addr: None,
             web_find: None,
             pending_web_hosts: Vec::new(),
+            themegen: Default::default(),
         }
     }
 

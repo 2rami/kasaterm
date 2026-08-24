@@ -149,6 +149,17 @@ pub(crate) struct SettingsCtx {
     /// 모델 칸이 늘어놓을 후보. 로스터 파일의 `models` 에서 오므로 원본을 고쳐
     /// 늘릴 수 있다(2026-08-24 지시: 커스텀 모델은 json/yaml 로).
     pub model_choices: Vec<kasa_mcp::character::ModelChoice>,
+    /// 그림 생성 엔진 — 고른 것("opengateway"·"codex"·"nanobanana")과 감지 결과.
+    pub themegen_provider: String,
+    pub themegen_providers: Vec<crate::themegen::ProviderStatus>,
+    /// 열려 있는 캐릭터의 진행 중 생성 잡(없으면 None).
+    pub themegen_job: Option<crate::themegen::GenJobView>,
+    /// 열려 있는 캐릭터의 참조 그림 `(경로, mtime초)` — mtime 은 미리보기 텍스처
+    /// 캐시 키에 들어가, 그림을 갈아 끼우면 키가 바뀌어 저절로 새로 로드된다.
+    pub themegen_ref: Option<(std::path::PathBuf, u64)>,
+    /// 나노바나나 키 칸에 **보여줄** 값 — 포커스 중엔 편집 버퍼 그대로, 아니면
+    /// 마스킹(`••••` + 뒤 4자). 정본은 settings.json 의 `gemini_api_key`.
+    pub gemini_key_shown: String,
     /// Feedback 본문 버퍼·캐럿·진단 첨부 스위치.
     pub feedback_body: String,
     pub feedback_caret: usize,
@@ -671,6 +682,52 @@ impl App {
         kasa_mcp::character::list_themes()
     }
 
+    /// 열려 있는 캐릭터의 참조 그림을 파일 선택으로 고른다. 대화상자는 고를 때까지
+    /// 블록되므로 스레드에서 띄우고, 결과는 GUI 에 돌려주는 대신 **ref 자리에 파일로
+    /// 남긴다** — 스냅샷이 매 프레임 그 자리를 stat 하니 다음 프레임에 저절로 보인다.
+    fn themegen_pick_ref(&mut self) {
+        let theme_id = socket::read_character_theme();
+        let Some(slug) = self
+            .students_selected
+            .as_deref()
+            .and_then(theme::character_slug)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some(root) = kasa_mcp::character::themes_root() else { return };
+        if theme_id.is_empty() {
+            return;
+        }
+        let dir = root.join(&theme_id);
+        std::thread::spawn(move || {
+            if let Some(src) = choose_image_file() {
+                let _ = place_themegen_ref(&dir, &slug, &src);
+            }
+        });
+    }
+
+    /// 캐릭터 격자의 「+ 새 캐릭터」 — 참조 그림을 고르면 파일명에서 slug 를 유도해
+    /// 로스터(theme.json)에 추가하고 ref 를 놓는다. 상세 자동 진입은 없다 — 추가는
+    /// 스레드에서 끝나는데 App 상태(students_selected)는 GUI 스레드 것이라서다.
+    /// 캐시를 비워 두면 다음 프레임 격자에 새 카드가 뜨고, 사용자가 그걸 누른다.
+    fn themegen_new_student(&mut self) {
+        let theme_id = socket::read_character_theme();
+        let Some(root) = kasa_mcp::character::themes_root() else { return };
+        if theme_id.is_empty() {
+            return;
+        }
+        let dir = root.join(&theme_id);
+        std::thread::spawn(move || {
+            let Some(src) = choose_image_file() else { return };
+            let Some(slug) = add_theme_member(&dir, &src) else { return };
+            let _ = place_themegen_ref(&dir, &slug, &src);
+            kasa_mcp::character::invalidate_active_theme();
+            theme::invalidate_roster();
+            socket::invalidate_theme_rows();
+        });
+    }
+
     /// Build the render snapshot for the settings paint. `area` is the logical
     /// rect the form draws into (the whole aux settings-window client area) and
     /// `cursor` is that window's local cursor — both supplied by the caller so
@@ -761,6 +818,23 @@ impl App {
                 .as_ref()
                 .map(kasa_mcp::character::model_choices)
                 .unwrap_or_default(),
+            themegen_provider: s
+                .get("theme_gen_provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("opengateway")
+                .to_string(),
+            themegen_providers: self.themegen_providers(),
+            themegen_job: sel
+                .and_then(theme::character_slug)
+                .and_then(|slug| self.themegen_view(slug)),
+            themegen_ref: sel
+                .and_then(theme::character_slug)
+                .and_then(|slug| themegen_ref_info(&socket::read_character_theme(), slug)),
+            gemini_key_shown: if self.settings_input == Some(SettingsInput::GeminiKey) {
+                self.themegen.key_edit.clone()
+            } else {
+                mask_key(s.get("gemini_api_key").and_then(|v| v.as_str()).unwrap_or(""))
+            },
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
@@ -1338,6 +1412,36 @@ impl App {
                 self.students_caret = self.students_persona.chars().count();
                 self.settings_input = Some(SettingsInput::StudentPersona);
             }
+            SettingsAction::ThemeGenProvider(p) => {
+                socket::write_setting("theme_gen_provider", serde_json::Value::String(p));
+                self.settings_input = None;
+            }
+            SettingsAction::FocusGeminiKey => {
+                // 정본(settings.json)을 버퍼로 불러와 이어서 고친다 — 빈 버퍼로
+                // 시작하면 한 글자만 쳐도 저장된 키가 그 한 글자로 바뀐다.
+                self.themegen.key_edit = socket::read_settings()
+                    .get("gemini_api_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.settings_caret = self.themegen.key_edit.chars().count();
+                self.settings_input = Some(SettingsInput::GeminiKey);
+            }
+            SettingsAction::ThemeGenPickRef => self.themegen_pick_ref(),
+            SettingsAction::ThemeGenStart => {
+                let theme_id = socket::read_character_theme();
+                let slug = self
+                    .students_selected
+                    .as_deref()
+                    .and_then(theme::character_slug)
+                    .map(str::to_string);
+                if let Some(slug) = slug {
+                    if let Some((path, _)) = themegen_ref_info(&theme_id, &slug) {
+                        self.themegen_start(&theme_id, &slug, &path, None);
+                    }
+                }
+            }
+            SettingsAction::ThemeGenNewStudent => self.themegen_new_student(),
         }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -2157,6 +2261,7 @@ impl App {
                     None => return true,
                 },
                 SettingsInput::PaletteHex(_) => &mut self.set_palette_edit,
+                SettingsInput::GeminiKey => &mut self.themegen.key_edit,
                 // 계정 라벨과 같은 이유로 대상이 사라졌을 수 있다(다른 곳에서
                 // 테마를 지웠거나 폴더가 없어졌거나) — 그땐 키를 삼키고 흘린다.
                 SettingsInput::ThemeLabel => match self.theme_label_edit.as_mut() {
@@ -2223,6 +2328,12 @@ impl App {
             // 아니라서 저장할 곳이 custom_theme 쪽이고, 완성된 값만 나간다.
             if let SettingsInput::PaletteHex(i) = field {
                 self.apply_palette_edit(i);
+            } else if field == SettingsInput::GeminiKey {
+                // 버퍼가 App 설정 필드가 아니라 settings_save 가 모른다 — 직접 굳힌다.
+                socket::write_setting(
+                    "gemini_api_key",
+                    serde_json::Value::String(self.themegen.key_edit.clone()),
+                );
             } else if field != SettingsInput::ThemeLabel {
                 // 테마 이름만 여기서 빠진다 — 그 값은 settings.json 이 아니라 79명치
                 // 로스터가 든 theme.json 에 사는데, 매 키마다 그 파일을 통째로 읽고
@@ -2438,6 +2549,7 @@ impl App {
                 None => return,
             },
             SettingsInput::PaletteHex(_) => &mut self.set_palette_edit,
+            SettingsInput::GeminiKey => &mut self.themegen.key_edit,
             SettingsInput::ThemeLabel => match self.theme_label_edit.as_mut() {
                 Some((_, buf)) => buf,
                 None => return,
@@ -2457,6 +2569,12 @@ impl App {
         }
         if let SettingsInput::PaletteHex(i) = field {
             self.apply_palette_edit(i);
+        } else if field == SettingsInput::GeminiKey {
+            // settings_key 의 GeminiKey 특례와 같은 이유 — App 설정 필드가 아니다.
+            socket::write_setting(
+                "gemini_api_key",
+                serde_json::Value::String(self.themegen.key_edit.clone()),
+            );
         } else if !matches!(field, SettingsInput::ThemeLabel | SettingsInput::StudentName) {
             // 이 둘은 settings.json 이 아니라 로스터에 산다 — 키 입력 경로와 같은
             // 이유로 blur·Enter 때 한 번만 굳힌다.
@@ -2822,6 +2940,54 @@ pub(crate) fn reject_json(msg: String) -> serde_json::Value {
     }
     serde_json::Value::Object(obj)
 }
+
+/// 캐릭터의 참조 그림 자리 — `themes/<id>/gen/<slug>/ref.png`. 번들(id 빈 문자열)은
+/// 폴더가 없어 생성 대상이 아니다. 이 규약은 themegen(전처리·굽기)과 공유한다.
+fn themegen_ref_path(theme_id: &str, slug: &str) -> Option<std::path::PathBuf> {
+    if theme_id.is_empty() || slug.is_empty() {
+        return None;
+    }
+    Some(
+        kasa_mcp::character::themes_root()?
+            .join(theme_id)
+            .join("gen")
+            .join(slug)
+            .join("ref.png"),
+    )
+}
+
+/// 참조 그림의 `(경로, mtime초)` — mtime 이 미리보기 텍스처 캐시 키에 들어가므로
+/// 그림을 갈아 끼우면 키가 바뀌어 낡은 그림이 화면에 눌어붙지 않는다.
+fn themegen_ref_info(theme_id: &str, slug: &str) -> Option<(std::path::PathBuf, u64)> {
+    let p = themegen_ref_path(theme_id, slug)?;
+    let t = std::fs::metadata(&p)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((p, t))
+}
+
+/// macOS 파일 선택 대화상자. 고를 때까지 **블록**되므로 GUI 스레드에서 부르면
+/// 화면이 통째로 멎는다 — 반드시 스레드에서. 취소하면 osascript 가 비정상 종료해
+/// stdout 이 비고, 그대로 None 이 된다.
+fn choose_image_file() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            r#"POSIX path of (choose file of type {"public.image"} with prompt "참조 그림 고르기")"#,
+        ])
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then(|| std::path::PathBuf::from(p))
+}
+
+// place_themegen_ref(PNG 재인코딩) · add_theme_member(로스터 등록) · mask_key 는
+// themegen.rs 것을 쓴다(crate root 재수출) — 규약의 정본이 굽는 쪽에 있어야
+// 전처리·설치가 같은 자리를 본다.
 
 /// 저장된 피드백이 쌓이는 폴더. 홈을 못 찾으면 temp 로 — 빈 PathBuf 에 join 하면
 /// **상대경로**가 되어 피드백이 그때그때의 cwd 에 흩뿌려진다(Windows GUI 프로세스는
@@ -4118,6 +4284,77 @@ pub(crate) fn paint_settings(
                 y = ny;
             }
 
+            // ── 그림 생성 엔진 ──────────────────────────────────────────
+            // 캐릭터 상세의 「그림 생성」이 쓸 백엔드. 엔진마다 준비물(키·CLI)이
+            // 달라 감지 결과를 함께 보인다 — 안 되는 것을 고를 수는 있게 두되,
+            // 왜 안 되는지를 그 자리에서 말한다(버튼이 조용히 죽어 보이지 않게).
+            y = row_wide(g, fx, y, clip, "그림 생성 엔진",
+                &["캐릭터 상세에서 참조 그림으로 스프라이트를 구울 때 쓸 엔진"]);
+            if ctx.themegen_providers.is_empty() {
+                if y > clip {
+                    g.draw_text(
+                        fx, y, "엔진을 찾는 중이에요…",
+                        gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                }
+                y += 18.0 + 22.0;
+            } else {
+                let cells: Vec<(String, bool, SettingsAction)> = ctx
+                    .themegen_providers
+                    .iter()
+                    .map(|p| {
+                        let label = if p.available {
+                            p.label.clone()
+                        } else {
+                            format!("{} (준비 안 됨)", p.label)
+                        };
+                        (
+                            label,
+                            ctx.themegen_provider == p.kind,
+                            SettingsAction::ThemeGenProvider(p.kind.to_string()),
+                        )
+                    })
+                    .collect();
+                y += segmented_wrap(g, &mut rects, (fx, y, fw.min(560.0)), clip, &cells, ctx.cursor);
+                if let Some(p) = ctx
+                    .themegen_providers
+                    .iter()
+                    .find(|p| p.kind == ctx.themegen_provider)
+                    .filter(|p| !p.available)
+                {
+                    y += 8.0;
+                    if y > clip {
+                        g.draw_text(
+                            fx, y, &format!("지금은 못 써요 — {}", p.why),
+                            gpu::DrawOpts { font_size: 12.0, color: theme::attention(), bold: false, italic: false },
+                        );
+                    }
+                    y += 18.0;
+                }
+                if ctx.themegen_provider == "nanobanana" {
+                    y += 10.0;
+                    if y > clip {
+                        g.draw_text(
+                            fx, y, "Gemini API 키",
+                            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+                        );
+                    }
+                    y += 20.0;
+                    let r = (fx, y, fw.min(360.0), 34.0);
+                    let focused = ctx.input == Some(SettingsInput::GeminiKey);
+                    if y > clip {
+                        text_field(
+                            g, r, &ctx.gemini_key_shown, ctx.settings_caret, focused, ctx.caret_on,
+                            ctx.cursor,
+                            if focused { &ctx.preedit } else { "" },
+                        );
+                        rects.push((SettingsAction::FocusGeminiKey, r));
+                    }
+                    y += 34.0;
+                }
+                y += 22.0;
+            }
+
             // 파일명은 줄일 수 없다 — 이걸 안 보고 맞출 방법이 없고, 한 모션이라도
             // 빠지면 그 모션만 번들로 떨어져 한 캐릭터가 두 그림으로 갈린다.
             // wave·cheer 가 빠져 있었다(2026-08-13): 안내대로 idle·walk 만 넣은 사용자는
@@ -4202,6 +4439,37 @@ pub(crate) fn paint_settings(
                     gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
                 );
                 rects.push((SettingsAction::SelectStudent(name.clone()), card));
+            }
+            // 「+ 새 캐릭터」 — 격자의 마지막 한 칸. 커스텀 테마에서만 준다(번들은
+            // 폴더가 없어 그림을 놓을 자리부터 없다). 참조 그림을 고르면 파일명으로
+            // 로스터에 오르고, 새로 뜬 카드를 눌러 상세에서 굽는다.
+            if !ctx.theme_active.is_empty() {
+                let i = ctx.characters.len();
+                let cx0 = fx + (i % scols) as f32 * (scw + STU_GAP);
+                let cy0 = srow_top + (i / scols) as f32 * (STU_CARD_H + STU_GAP);
+                y = y.max(cy0 + STU_CARD_H);
+                if cy0 + STU_CARD_H > clip {
+                    let card = (cx0, cy0, scw, STU_CARD_H);
+                    let hover = inside(card, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    round_rect(
+                        g, card.0, card.1, card.2, card.3, theme::radius_md(),
+                        if hover { theme::surface_hover() } else { theme::panel_bg() },
+                    );
+                    let label = "+ 새 캐릭터";
+                    let lw = g.measure_chrome_text(label, 13.0, true);
+                    g.draw_text(
+                        cx0 + (scw - lw) * 0.5, cy0 + STU_CARD_H * 0.5 - 16.0, label,
+                        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false },
+                    );
+                    let hint = "참조 그림으로 시작";
+                    let hw = g.measure_chrome_text(hint, 10.0, false);
+                    g.draw_text(
+                        cx0 + (scw - hw) * 0.5, cy0 + STU_CARD_H * 0.5 + 4.0, hint,
+                        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                    rects.push((SettingsAction::ThemeGenNewStudent, card));
+                }
             }
             content_bottom = y;
         }
@@ -5661,6 +5929,9 @@ fn student_detail(
         SettingsAction::FocusStudentPersona, clip,
     );
 
+    y += 14.0;
+    y = student_gen_section(g, rects, ctx, fx, y, clip, slug);
+
     if !slug.is_empty() {
         y += 14.0;
         // 전체 규칙이 아니라 **이 캐릭터의 실제 파일명**을 적는다 — `<slug>` 를
@@ -5668,6 +5939,130 @@ fn student_detail(
         y = row_wide(g, fx, y, clip, "그림 파일 이름",
             &[&format!("idle/{slug}-0..3.png · walk/{slug}-0..5.png · wave/{slug}-0..3.png"),
               &format!("cheer/{slug}-0..3.png · profile/{slug}.png")]);
+    }
+    y
+}
+
+/// 캐릭터 상세의 「그림 생성」 — 참조 그림을 놓고 스프라이트를 굽는 자리.
+/// 손으로 그림을 넣는 기존 경로(폴더에 파일 복사)와 별개의 지름길이다.
+fn student_gen_section(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    ctx: &SettingsCtx,
+    fx: f32,
+    mut y: f32,
+    clip: f32,
+    slug: &str,
+) -> f32 {
+    // 번들 테마는 폴더가 없어 생성물을 놓을 자리도 없다 — 버튼을 회색으로 죽이는
+    // 대신 갈 길을 말한다(테마 복제가 그 길이다).
+    if ctx.theme_active.is_empty() {
+        return row_wide(g, fx, y, clip, "그림 생성",
+            &["기본 테마에는 못 구워요 — 위 테마 목록의 「+ 새 테마」로 복제하면 쓸 수 있어요"]);
+    }
+    if slug.is_empty() {
+        // slug 없는 캐릭터는 그림 파일명 자체가 못 정해진다 — 상세 위쪽 안내와 같은 상황.
+        return y;
+    }
+    y = row_wide(g, fx, y, clip, "그림 생성",
+        &["참조 그림 한 장으로 전 모션 스프라이트와 프사를 구워요 — 몇 분 걸려요"]);
+
+    // 참조 그림 자리 — 있으면 미리보기, 없으면 고르기.
+    match &ctx.themegen_ref {
+        Some((path, mtime)) => {
+            let side = 72.0;
+            if y > clip {
+                // 캐시 키에 mtime 이 들어가므로 그림을 갈아 끼우면 저절로 새로 뜬다.
+                render::draw_theme_face(
+                    g, &format!("genref{mtime}"), slug, Some(path), fx, y, side, side,
+                );
+                let r = chip(g, fx + side + 12.0, y + (side - 34.0) * 0.5, "다른 그림", ctx.cursor);
+                rects.push((SettingsAction::ThemeGenPickRef, r));
+            }
+            y += side + 12.0;
+        }
+        None => {
+            if y > clip {
+                let r = chip(g, fx, y, "참조 그림 고르기", ctx.cursor);
+                g.draw_text(
+                    fx + r.2 + 12.0, y + 9.0, "이미지 파일을 이 창에 끌어다 놓아도 돼요",
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+                );
+                rects.push((SettingsAction::ThemeGenPickRef, r));
+            }
+            y += 34.0 + 12.0;
+        }
+    }
+
+    // 진행 중 → 문구 / 실패 → 사유 + 다시 / 그 외 → 시작 버튼.
+    if let Some(job) = &ctx.themegen_job {
+        if let Some(reason) = &job.failed_reason {
+            if y > clip {
+                g.draw_text(
+                    fx, y, &format!("못 구웠어요 — {reason}"),
+                    gpu::DrawOpts { font_size: 12.0, color: theme::attention(), bold: false, italic: false },
+                );
+            }
+            y += 22.0;
+        } else if !matches!(job.phase, crate::themegen::GenPhase::Done) {
+            if y > clip {
+                // 경과를 함께 보인다 — 한 명에 몇 분짜리 작업이라, 시계가 없으면
+                // 멈춘 것인지 도는 것인지 화면만 봐서는 모른다.
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0)
+                    .saturating_sub(job.started_ms)
+                    / 1000;
+                let mut msg = format!("{} — {}", job.provider, job.phase_label);
+                if !job.detail.is_empty() {
+                    msg.push_str(&format!(" · {}", job.detail));
+                }
+                msg.push_str(&format!(" · {}분 {:02}초", secs / 60, secs % 60));
+                g.draw_text(
+                    fx, y, &msg,
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false },
+                );
+            }
+            y += 22.0;
+            return y; // 도는 중엔 시작 버튼을 또 주지 않는다
+        } else {
+            if y > clip {
+                g.draw_text(
+                    fx, y, "다 구워졌어요 — 위 그림이 새 스프라이트로 바뀌어 있을 거예요",
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+                );
+            }
+            y += 22.0;
+        }
+    }
+
+    let prov = ctx
+        .themegen_providers
+        .iter()
+        .find(|p| p.kind == ctx.themegen_provider);
+    let prov_ok = prov.is_some_and(|p| p.available);
+    if ctx.themegen_ref.is_some() && prov_ok {
+        if y > clip {
+            let label = if ctx.themegen_job.is_some() { "다시 굽기" } else { "그림 생성" };
+            let r = chip(g, fx, y, label, ctx.cursor);
+            rects.push((SettingsAction::ThemeGenStart, r));
+        }
+        y += 34.0;
+    } else if y > clip {
+        let why = if ctx.themegen_ref.is_none() {
+            "참조 그림을 먼저 골라 주세요".to_string()
+        } else {
+            match prov {
+                Some(p) => format!("엔진이 준비 안 됐어요 — {}", p.why),
+                None => "위 「그림 생성 엔진」에서 엔진을 골라 주세요".to_string(),
+            }
+        };
+        g.draw_text(
+            fx, y, &why,
+            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        y += 18.0;
     }
     y
 }
