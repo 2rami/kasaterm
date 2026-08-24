@@ -1717,7 +1717,7 @@ impl App {
                                     continue;
                                 };
                                 let Some(slug) = kasa_mcp::character::session_character(sid)
-                                    .and_then(|c| theme::character_slug(&c))
+                                    .and_then(|c| student_face_slug(&c))
                                 else {
                                     continue;
                                 };
@@ -1812,9 +1812,10 @@ impl App {
                         );
                         // 발신 학생 프사 — tell 과 같은 이미지 패스·같은 자리(첫 줄
                         // 왼쪽 여백 2칸). 셀이 세로 2:1 이라 2칸×1행이 정사각.
-                        if let (Some(fc), Some(slug)) =
-                            (face_col, teammate_sender_slug(&sender))
-                        {
+                        if let (Some(fc), Some(slug)) = (
+                            face_col,
+                            teammate_sender_slug(&sender).filter(|s| face_ready(s)),
+                        ) {
                             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                             let scw = self.cell.w * fs;
                             let sch = self.cell.h * fs;
@@ -1900,7 +1901,7 @@ impl App {
                         // 소음이다. 표시는 한글 이름으로(agent 명 "kanna-p1-qpo" 를
                         // 그대로 쓰면 로마자 꼬리표가 남는다). 못 찾으면 원문 유지(색만).
                         if let Some(slug) = slug {
-                            let display = theme::slug_character(slug).unwrap_or(&sender);
+                            let display = theme::slug_character_any(slug).unwrap_or(&sender);
                             restyle_peer_native_header(
                                 &mut composed[r], c0, qcol, display, accent,
                             );
@@ -1921,7 +1922,9 @@ impl App {
                         }
                         // 프사 — tell 과 같은 관례: 본문 행 왼쪽 여백(들여쓰기 2칸)에
                         // 본문과 같은 행으로. 본문이 없으면(헤더뿐) 포기하고 색만.
-                        if let (Some(fr), Some(slug)) = (face_row, slug) {
+                        // 게이트는 **프사 자리에서만** — 위 이름 표시는 그림이 없어도
+                        // 되어야 한다(모르는 사람 취급이 되면 라벨이 소음으로 남는다).
+                        if let (Some(fr), Some(slug)) = (face_row, slug.filter(|s| face_ready(s))) {
                             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                             let scw = self.cell.w * fs;
                             let sch = self.cell.h * fs;
@@ -1959,7 +1962,7 @@ impl App {
                                     &name,
                                     accent,
                                 );
-                                if let (Some(c0), Some(slug)) = (face_col, tell_face_slug(&name))
+                                if let (Some(c0), Some(slug)) = (face_col, student_face_slug(&name))
                                 {
                                     // 프사는 본문 왼쪽 여백(`❯` 자리, 2칸)에 같은
                                     // 행으로 — 셀은 세로 2:1 이라 2칸×1행이 정사각.

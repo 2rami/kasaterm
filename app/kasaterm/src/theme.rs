@@ -1477,6 +1477,23 @@ pub fn slug_character(slug: &str) -> Option<&'static str> {
     roster().slugs.iter().find(|(_, s)| *s == slug).map(|(n, _)| *n)
 }
 
+/// `slug_character` 의 합집합 판 — agent 이름(`midori-p4-v32`)의 로마자 머리로
+/// 학생을 되짚는 자리들이 쓴다.
+///
+/// 이 역매핑이 활성 명부만 보면, 테마를 바꾼 순간 옛 이름 pane 이 보낸 메시지의
+/// 발신자가 통째로 「모르는 사람」이 된다 — 학생색·프사·이름 표시가 한꺼번에 빠지는
+/// 실사고가 이미 한 번 있었다(2026-08-20, 발신 pane dismiss 로 명부가 사라진 경우).
+pub fn slug_character_any(slug: &str) -> Option<&'static str> {
+    slug_character(slug).or_else(|| name_beyond_active(slug, other_rosters()))
+}
+
+/// `slug_beyond_active` 의 역방향 — 같은 이유로 명부를 주입받는다.
+fn name_beyond_active(slug: &str, extra: &[Roster]) -> Option<&'static str> {
+    CHARACTER_SLUGS.iter().find(|(_, s)| *s == slug).map(|(n, _)| *n).or_else(|| {
+        extra.iter().find_map(|r| r.slugs.iter().find(|(_, s)| *s == slug).map(|(n, _)| *n))
+    })
+}
+
 /// claude 시작 배너의 "Welcome back <user>!" 를 대체할 배정 학생 인사말 —
 /// 각 캐릭터 페르소나 말투로. `user` 는 원 배너에서 추출한 사용자 이름(하드코딩
 /// 금지, characters.json 의 user_title="선생님" 을 뒤에 붙인다).
@@ -1694,12 +1711,18 @@ mod roster_tests {
         let extra = [roster_from(&themed).expect("테마 명부")];
         assert_eq!(accent_beyond_active("하치와레", &extra), Some([0x4a, 0x90, 0xd9, 255]));
         assert_eq!(slug_beyond_active("하치와레", &extra), Some("hachiware"));
+        // 역방향도 같은 범위여야 한다 — agent 이름(`hachiware-p2-1uc`)의 로마자
+        // 머리로 학생을 되짚는 자리가 이걸 쓴다.
+        assert_eq!(name_beyond_active("hachiware", &extra), Some("하치와레"));
+        assert_eq!(name_beyond_active("midori", &[]), Some("미도리"));
 
         // 어느 명부에도 없으면 None — **이 None 이 가짜 마커 문지기다.** 사람이
         // 본문에 친 `⟦메모⟧` 까지 걷어내면 화면 내용을 조용히 바꾸는 셈이 된다.
         assert!(accent_beyond_active("없는캐릭", &extra).is_none());
         assert!(character_accent_any("없는캐릭").is_none());
         assert!(character_slug_any("없는캐릭").is_none());
+        assert!(name_beyond_active("없는슬러그", &extra).is_none());
+        assert!(slug_character_any("없는슬러그").is_none());
     }
 
     /// 합집합이어도 **활성이 먼저다** — 같은 이름을 두 명부가 다른 색으로 가지면

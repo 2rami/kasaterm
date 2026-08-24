@@ -442,22 +442,23 @@ pub(crate) fn restyle_peer_native_header(
     }
 }
 
-/// tell 프사에 실제로 쓸 수 있는 슬러그 — 이름을 합집합에서 찾되 **그림이 실재할
-/// 때만**.
+/// 이 슬러그로 프사를 실제로 그릴 수 있는가.
 ///
-/// 활성 명부는 그대로 통과시키고(기존 동작), **넓힌 몫에만** 그림 확인을 건다.
-/// 비활성 테마의 이름은 슬러그가 나와도 그 테마의 그림이 활성 자산 경로에 없어서,
-/// 슬러그만 믿으면 `restyle_tell_line` 이 프사 자리 2칸을 비워 둔 채 아무것도 안
-/// 그려져 **빈 칸이 남는다**. 넓힌 몫이 기댈 수 있는 건 컴파일 내장 프사뿐이라
-/// 그 존재로 가른다(match 하나라 IO 도 0).
+/// 활성 명부의 슬러그는 통과시킨다 — 그림은 활성 자산 경로(`students_dir()`)가
+/// 댄다. **넓힌 몫**(다른 테마·번들에서 온 이름)은 그 테마의 그림이 거기 없으므로
+/// 기댈 것이 컴파일 내장 프사뿐이고, 그 존재로 가른다(match 하나라 IO 0).
 ///
-/// restyle 과 렌더가 **이 하나를** 쓴다 — 판정이 두 벌이면 한쪽은 자리를 비우고
-/// 다른 쪽은 안 그리는 어긋남이 그대로 빈 칸이 된다.
-pub(crate) fn tell_face_slug(name: &str) -> Option<&'static str> {
-    if let Some(s) = theme::character_slug(name) {
-        return Some(s);
-    }
-    theme::character_slug_any(name).filter(|s| crate::sprites::student_profile_png(s).is_some())
+/// 게이트가 필요한 이유: 프사를 그리는 자리들은 **먼저 자리를 비운다**(tell 은 2칸,
+/// 피커는 `#이름` 태그를 통째로). 슬러그만 믿고 자리를 비웠는데 그림이 없으면
+/// 지운 자리에 아무것도 안 들어와 **빈 칸으로 남는다**.
+pub(crate) fn face_ready(slug: &str) -> bool {
+    theme::slug_character(slug).is_some() || crate::sprites::student_profile_png(slug).is_some()
+}
+
+/// 이름 → 프사에 쓸 슬러그. tell·피커·팀메시지가 **이 하나를** 쓴다 — 판정이 두
+/// 벌이면 한쪽은 자리를 비우고 다른 쪽은 안 그리는 어긋남이 그대로 빈 칸이 된다.
+pub(crate) fn student_face_slug(name: &str) -> Option<&'static str> {
+    theme::character_slug_any(name).filter(|s| face_ready(s))
 }
 
 pub(crate) fn restyle_tell_line(
@@ -470,7 +471,7 @@ pub(crate) fn restyle_tell_line(
     use unicode_width::UnicodeWidthChar;
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let end = marker_end.min(row.len());
-    if tell_face_slug(name).is_some() {
+    if student_face_slug(name).is_some() {
         // 마커 뒤 본문을 마커 시작 col 로 당긴다(claude 의 `❯ ` 폭 = 2 = wrap
         // 들여쓰기라 첫 줄과 연속 줄이 같은 col 에 선다).
         let body_start = row[end..]
@@ -674,11 +675,16 @@ pub(crate) fn msg_paragraph_gap(rows: &[Vec<GridCell>], at: usize) -> bool {
 /// 명 → 그것도 없으면 테마 accent.
 /// 팀메시지 발신자 이름 → 학생 슬러그(프사 에셋 키). `from` 이 한글 표시명
 /// ("프라나")인 경우와 agent-name 꼬리표가 붙은 슬러그("midori-2535") 둘 다 받는다.
+///
+/// ⚠️ **프사 게이트를 걸지 마라.** 이 함수는 「아는 발신자인가」 판정에도 쓰인다
+/// (render.rs 의 세션 역추적 갈래) — 그림 없는 학생이 여기서 None 이 되면 아는
+/// 사람인데 모르는 사람 취급을 받아 엉뚱한 폴백을 탄다. 프사 자리에서는 결과에
+/// `face_ready` 를 따로 건다.
 pub(crate) fn teammate_sender_slug(name: &str) -> Option<&'static str> {
-    if let Some(s) = theme::character_slug(name) {
+    if let Some(s) = theme::character_slug_any(name) {
         return Some(s);
     }
-    theme::slug_character(sender_roman_head(name)).and_then(theme::character_slug)
+    theme::slug_character_any(sender_roman_head(name)).and_then(theme::character_slug_any)
 }
 
 /// agent 이름에서 로스터가 아는 로마자 부분만. **첫 토막**이다.
@@ -704,7 +710,7 @@ pub(crate) fn label_is_roster_agent(label: &str) -> bool {
     let Some((head, rest)) = label.split_once('-') else {
         return false;
     };
-    theme::slug_character(head).is_some()
+    theme::slug_character_any(head).is_some()
         && rest.split('-').next().is_some_and(|p| {
             p.len() > 1 && p.starts_with('p') && p[1..].chars().all(|c| c.is_ascii_digit())
         })
@@ -714,10 +720,11 @@ pub(crate) fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8
     // 발신자가 한글 캐릭터 표시명인 경우(F-2 인박스 규칙의 `from` = 발신 캐릭터명)
     // 를 먼저 본다 — 슬러그 경로만 타면 "프라나" 같은 이름이 매칭에 실패해 학생색
     // 대신 tag_color 폴백으로 떨어졌다(거노 2026-07-27: SendMessage 도 학생 테마).
-    if let Some(c) = theme::character_accent(name) {
+    if let Some(c) = theme::character_accent_any(name) {
         return c;
     }
-    if let Some(c) = theme::slug_character(sender_roman_head(name)).and_then(theme::character_accent)
+    if let Some(c) =
+        theme::slug_character_any(sender_roman_head(name)).and_then(theme::character_accent_any)
     {
         return c;
     }
@@ -1214,7 +1221,9 @@ pub(crate) fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'st
                 }
             }
         }
-        if let Some(slug) = theme::character_slug(&name) {
+        // 프사 게이트를 여기서 건다 — 호출부가 태그 글자를 통째로 지우고 그 자리에
+        // 얼굴을 그리므로, 그림이 없으면 `#이름` 만 사라지고 빈 자리가 남는다.
+        if let Some(slug) = student_face_slug(&name) {
             return Some((c0, end, slug));
         }
     }
@@ -3813,15 +3822,28 @@ mod teammate_msg_tests {
     }
 
     /// 프사 자리를 세울지 가르는 판정 — 활성 명부는 그대로, 넓힌 몫은 그림이
-    /// 있을 때만. 없으면 None 이어야 `restyle_tell_line` 이 인라인 `이름 ›` 갈래로
-    /// 떨어져 **빈 2칸이 안 생긴다**.
+    /// 있을 때만. 없으면 None 이어야 호출부가 자리를 안 비운다(tell 은 인라인
+    /// `이름 ›` 갈래로, 피커·agents 뷰는 태그를 그대로 둔다).
     #[test]
-    fn tell_face_slug_needs_a_real_picture() {
-        assert_eq!(tell_face_slug("미도리"), Some("midori"));
-        assert!(tell_face_slug("없는캐릭").is_none());
-        // 이름이 명부에 있어도 그림이 없으면 프사 자리를 세우지 않는다 —
-        // 판정의 두 번째 조건이 실제로 걸리는지(슬러그만 보고 통과시키지 않는지).
-        assert!(crate::sprites::student_profile_png("존재하지않는슬러그").is_none());
+    fn student_face_slug_needs_a_real_picture() {
+        assert_eq!(student_face_slug("미도리"), Some("midori"));
+        assert!(student_face_slug("없는캐릭").is_none());
+        // 활성 명부 슬러그는 그림 확인 없이 통과 — 그림은 활성 자산 경로가 댄다.
+        assert!(face_ready("midori"), "활성 명부 슬러그가 막히면 기존 프사가 전멸한다");
+        // 어느 쪽으로도 그림을 못 찾으면 막는다.
+        assert!(!face_ready("존재하지않는슬러그"));
+    }
+
+    /// 팀메시지 발신자 조회에 **프사 게이트를 걸면 안 된다** — 이 함수는 「아는
+    /// 발신자인가」 판정에도 쓰여, 그림 없는 학생이 None 이 되면 아는 사람인데
+    /// 모르는 사람 취급을 받아 엉뚱한 폴백(세션 역추적)을 탄다. 그림 유무는
+    /// 그리는 자리에서 `face_ready` 로 따로 본다.
+    #[test]
+    fn sender_slug_is_not_gated_by_the_picture() {
+        assert_eq!(teammate_sender_slug("미도리"), Some("midori"));
+        assert_eq!(teammate_sender_slug("midori-p4-v32"), Some("midori"));
+        // 로스터 밖은 여전히 None — 이름을 바꾼 세션은 이름만으로 알 길이 없다.
+        assert!(teammate_sender_slug("모바일").is_none());
     }
 
     /// 마커가 걷히는 것과 프사가 붙는 것은 **다른 조건**이다. 그림 없는 이름도
