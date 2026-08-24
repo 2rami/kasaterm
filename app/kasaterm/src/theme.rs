@@ -1281,11 +1281,21 @@ pub fn character_slugs() -> &'static [(&'static str, &'static str)] {
 }
 
 fn build_roster() -> Roster {
+    // 테스트에서는 사용자 파일을 아예 안 읽는다. 활성 로스터는 이 컴퓨터의
+    // `~/.config/kasaterm`(고른 테마 → characters.json override)에서 오는데, 테스트는
+    // 번들 이름("아로나"·"히마리")으로 조회한다 — 사용자가 테마를 고르는 순간 그 조회가
+    // 전부 None 이 되어 **그 컴퓨터에서만** 테스트가 깨진다(2026-08-24 실측: 치이카와
+    // 테마를 켜자 theme·screenread·sprites 12개 실패). 코드 회귀가 아닌 것이 회귀처럼
+    // 보이는 쪽이 훨씬 비싸다.
+    let chars = (!cfg!(test)).then(kasa_mcp::character::characters_json).flatten();
+    roster_of(chars.as_ref())
+}
+
+/// 소스 주입 버전 — 「테마가 있으면 그것, 없거나 깨졌으면 번들」 배선만 떼어 놓은 것.
+/// `build_roster` 가 파일을 읽는 한 이 갈래는 사용자 환경 없이 검증할 수 없었다.
+fn roster_of(chars: Option<&serde_json::Value>) -> Roster {
     let bundled = Roster { slugs: CHARACTER_SLUGS, accents: CHARACTER_ACCENTS };
-    match kasa_mcp::character::characters_json() {
-        Some(chars) => roster_from(&chars).unwrap_or(bundled),
-        None => bundled,
-    }
+    chars.and_then(roster_from).unwrap_or(bundled)
 }
 
 /// JSON 주입 버전(테스트용) — 활성 로스터 해석과 분리해 파일 없이 검증한다.
@@ -1520,6 +1530,27 @@ mod roster_tests {
         assert!(roster_from(&serde_json::json!({ "members": [] })).is_none());
         // 이름만 있고 슬러그가 없는 항목은 그림도 인박스도 없어 쓸 수 없다.
         assert!(roster_from(&serde_json::json!({ "members": [{ "name": "이름만" }] })).is_none());
+    }
+
+    /// 쓸 게 없으면 **실제로 번들이 서는지**. 위 테스트는 `roster_from` 이 None 을
+    /// 준다는 데까지고, 그 None 이 번들로 이어지는 배선은 파일을 읽는 `build_roster`
+    /// 안에 묻혀 있어 사용자 환경 없이는 검증할 수 없었다.
+    #[test]
+    fn roster_of_falls_back_to_bundled() {
+        assert_eq!(roster_of(None).slugs, CHARACTER_SLUGS);
+        assert_eq!(roster_of(Some(&serde_json::json!({ "members": [] }))).slugs, CHARACTER_SLUGS);
+        let themed = serde_json::json!({ "members": [{ "name": "가", "slug": "ga" }] });
+        assert_eq!(roster_of(Some(&themed)).slugs, &[("가", "ga")]);
+    }
+
+    /// **테스트는 이 컴퓨터의 `~/.config/kasaterm` 과 무관해야 한다.** 이게 깨졌다면
+    /// 활성 로스터가 다시 사용자 설정을 타는 것이고, 그러면 테마를 고른 컴퓨터에서만
+    /// 번들 이름으로 조회하는 테스트 십수 개가 한꺼번에 무너진다 — 코드 회귀가 아닌데
+    /// 회귀로 보이므로 원인을 찾는 데 그만큼이 든다.
+    #[test]
+    fn active_roster_is_bundled_under_test() {
+        assert_eq!(roster().slugs, CHARACTER_SLUGS, "테스트가 사용자 로스터를 읽고 있다");
+        assert_eq!(roster().accents, CHARACTER_ACCENTS);
     }
 
     /// 색이 어긋난 캐릭터 하나가 로스터 전체를 번들로 되돌리면 안 된다 — 색 하나가
