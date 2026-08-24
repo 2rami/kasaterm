@@ -928,6 +928,30 @@ pub trait Backend: Send + Sync {
         serde_json::Value::Null
     }
 
+    /// 테마 캐릭터 생성 화면이 2초마다 묻는 상태 — 엔진 목록·선택값·마스킹한 키·
+    /// 활성 테마·돌고 있는 잡.
+    ///
+    /// 값 조회(`settings_values`)와 달리 **GUI 왕복을 안 태운다**. 폴링이라 왕복을
+    /// 태우면 굽는 동안 프레임마다 한 번씩 GUI 를 물게 되고, 하필 그때가 화면이
+    /// 가장 바쁜 시점이다. 기본 `null` — 생성 개념이 없는 백엔드의 답.
+    fn themegen_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// 한 캐릭터의 생성 참조 그림(원본 그대로). 기본 None = 404.
+    ///
+    /// `slug` 는 경로 조각이 되므로 구현이 탈출을 막아야 한다.
+    fn themegen_ref(&self, _slug: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// 참조 그림을 놓는다. `slug` 가 비어 있으면 `name`(원본 파일명)에서 이름을
+    /// 유도해 **새 캐릭터로 등록**하고, 그때 정해진 slug 를 돌려준다 — 파일명이
+    /// 어떻게 다듬어졌는지 화면이 알아야 그 캐릭터를 이어서 열 수 있다.
+    fn themegen_put_ref(&self, _slug: &str, _name: &str, _bytes: &[u8]) -> Result<String, String> {
+        Err("이 인스턴스는 캐릭터 생성을 몰라요".to_string())
+    }
+
     /// 캐릭터 프사 PNG 바이트. `theme` 이 있으면 **그 테마 폴더의** 그림을(카드
     /// 미리보기), 없으면 활성 스프라이트 폴더 → 번들 순으로 찾는다.
     ///

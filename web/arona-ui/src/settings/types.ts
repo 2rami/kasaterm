@@ -185,3 +185,34 @@ export function faceUrl(slug: string, theme?: string): string {
   if (theme) q.set('theme', theme);
   return `/character-face?${q}`;
 }
+
+/// `GET /settings/themegen/state` — 그림 생성(참조 → 스프라이트)의 지금 상태 전부.
+/// 엔진 목록·선택·키 마스킹·도는 잡들. 잡이 도는 동안 화면이 이걸 폴링한다.
+export type ThemeGenProviderInfo = {
+  kind: string;
+  label: string;
+  available: boolean;
+  /// 못 쓰는 사유 한글 한 줄. 가용이면 빈 문자열.
+  why: string;
+};
+
+export type ThemeGenJob = {
+  phase: string;
+  /// 그대로 그리면 되는 진행 문구.
+  phase_label: string;
+  /// 부가 문구("2/3 번째 시도"). 없으면 빈 문자열.
+  detail: string;
+  failed_reason: string | null;
+  provider: string;
+  /// 시작 시각(epoch ms) — 경과 표시용.
+  started_ms: number;
+};
+
+export type ThemeGenState = {
+  providers: ThemeGenProviderInfo[];
+  provider: string;
+  gemini_key_masked: string;
+  /// 활성 테마 폴더 이름. 번들(빈 문자열)이면 생성 불가.
+  active_theme: string;
+  jobs: Record<string, ThemeGenJob>;
+};

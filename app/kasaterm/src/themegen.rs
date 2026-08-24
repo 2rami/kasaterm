@@ -24,12 +24,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::*;
 
 /// 굽기에 쓸 수 있는 경로. UI 가 목록으로 그린다.
+#[derive(Clone)]
 pub(crate) struct ProviderStatus {
     pub kind: &'static str,
     pub label: String,
@@ -84,6 +85,20 @@ pub(crate) enum GenPhase {
     Failed,
 }
 
+impl GenPhase {
+    /// 웹이 읽는 **언어 없는** 이름. 화면 문구는 프론트가 자기 사전에서 만들고,
+    /// 네이티브는 `phase_label` 의 한글을 쓴다 — 같은 값을 두 말로 보내지 않는다.
+    fn wire(self) -> &'static str {
+        match self {
+            GenPhase::Describing => "describing",
+            GenPhase::Generating => "generating",
+            GenPhase::Installing => "installing",
+            GenPhase::Done => "done",
+            GenPhase::Failed => "failed",
+        }
+    }
+}
+
 /// 백그라운드 스레드와 GUI 가 함께 보는 잡 상태.
 struct Job {
     theme_id: String,
@@ -117,9 +132,89 @@ impl Job {
 pub(crate) struct ThemeGenState {
     /// 나노바나나 키 입력 버퍼. 설정 화면이 직접 읽고 쓴다.
     pub key_edit: String,
-    providers: Vec<ProviderStatus>,
-    detected_at: Option<Instant>,
-    jobs: HashMap<String, Arc<Mutex<Job>>>,
+}
+
+/// 잡 저장소와 감지 캐시는 **전역**이다. `App` 에 두면 GUI 스레드만 읽을 수 있는데,
+/// 웹 설정 화면이 2초마다 진행을 물어보고 그 요청은 HTTP 스레드에서 온다. GUI 왕복
+/// 채널로 우회할 수도 있지만 폴링 한 번마다 GUI 프레임을 물게 된다.
+///
+/// **상태만 전역이고 상태를 보고 움직이는 쪽은 하나다** — 설치(파일 이동·로스터 등록·
+/// 캐시 무효화)는 여전히 GUI 의 `themegen_poll` 몫이다. 두 스레드가 같은 잡을 설치하면
+/// 스프라이트 폴더가 반쯤 겹쳐 쓰인다.
+static JOBS: LazyLock<RwLock<HashMap<String, Arc<Mutex<Job>>>>> = LazyLock::new(Default::default);
+static PROVIDERS: LazyLock<RwLock<ProviderCache>> = LazyLock::new(Default::default);
+
+#[derive(Default)]
+struct ProviderCache {
+    list: Vec<ProviderStatus>,
+    at: Option<Instant>,
+}
+
+/// 웹 설정 화면이 폴링하는 `GET /settings/themegen/state` 의 본문.
+///
+/// GUI 를 거치지 않는다 — 잡은 전역이고 나머지(선택된 엔진·키·활성 테마)는 전부
+/// 파일에 있다. 그래서 굽는 동안 화면이 아무리 바빠도 진행 표시가 안 밀린다.
+pub(crate) fn themegen_state_json() -> serde_json::Value {
+    let providers: Vec<_> = providers_cached()
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "kind": p.kind, "label": p.label,
+                "available": p.available, "why": p.why,
+            })
+        })
+        .collect();
+    let settings = socket::read_settings();
+    let pick = settings
+        .get("theme_gen_provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("opengateway")
+        .to_string();
+    let key_masked = settings
+        .get("gemini_api_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(mask_key)
+        .unwrap_or_default();
+
+    let mut jobs = serde_json::Map::new();
+    for (slug, job) in JOBS.read().unwrap().iter() {
+        let j = job.lock().unwrap();
+        jobs.insert(
+            slug.clone(),
+            serde_json::json!({
+                "phase": j.phase.wire(),
+                "phase_label": j.phase_label(),
+                "detail": j.detail,
+                "failed_reason": j.failed,
+                "provider": j.provider,
+                "started_ms": j.started_ms,
+            }),
+        );
+    }
+
+    serde_json::json!({
+        "providers": providers,
+        "provider": pick,
+        "gemini_key_masked": key_masked,
+        "active_theme": socket::read_character_theme(),
+        "jobs": jobs,
+    })
+}
+
+/// 감지 결과. 오래됐으면 새로 훑고, 아니면 캐시 그대로.
+fn providers_cached() -> Vec<ProviderStatus> {
+    {
+        let c = PROVIDERS.read().unwrap();
+        if c.at.is_some_and(|t| t.elapsed() < DETECT_EVERY) {
+            return c.list.clone();
+        }
+    }
+    let list = detect_providers();
+    let mut c = PROVIDERS.write().unwrap();
+    c.list = list.clone();
+    c.at = Some(Instant::now());
+    list
 }
 
 fn now_ms() -> u64 {
@@ -920,6 +1015,77 @@ pub(crate) fn mask_key(s: &str) -> String {
 ///
 /// 확장자만 바꿔 복사하지 않는다 — jpg 를 `ref.png` 로 이름만 바꾸면 파일 내용과
 /// 이름이 어긋나, 나중에 이 그림을 여는 쪽이 확장자를 믿었다가 깨진다.
+/// 굽기 대상 테마. 번들(빈 값)이면 참조를 놓을 자리가 없다 — 번들 폴더는 앱 안에
+/// 있어서 쓰기가 막히고, 써지더라도 앱을 새로 깔면 사라진다.
+fn writable_theme() -> Result<(String, PathBuf), String> {
+    let id = socket::read_character_theme();
+    if id.trim().is_empty() {
+        return Err("기본 테마에는 못 넣는다 — 테마를 하나 복제해서 그 안에 만들어라".into());
+    }
+    let dir = socket::theme_dir(&id).ok_or("그 테마 폴더가 없다")?;
+    Ok((id, dir))
+}
+
+/// `GET /settings/themegen/ref?slug=` — 화면에 띄울 원본 그대로.
+pub(crate) fn themegen_ref_bytes(slug: &str) -> Option<Vec<u8>> {
+    let dir = socket::theme_dir(&socket::read_character_theme())?;
+    std::fs::read(dir.join("gen").join(slug).join("ref.png")).ok()
+}
+
+/// `POST /settings/themegen/ref` — 웹이 올린 그림을 참조 자리에 놓는다.
+///
+/// `slug` 가 있으면 그 캐릭터의 참조를 갈고, 없으면 `name`(원본 파일명)에서 이름을
+/// 유도해 로스터에 새로 등록한다. 돌려주는 것은 **실제로 쓰인 slug** 다 — 파일명이
+/// 어떻게 다듬어졌는지 화면이 알아야 그 캐릭터를 이어서 열 수 있다.
+pub(crate) fn themegen_put_ref(
+    slug: Option<&str>,
+    name: Option<&str>,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("빈 파일이다".into());
+    }
+    let (_, dir) = writable_theme()?;
+
+    // 바이트를 먼저 그림으로 읽어 본다 — 확장자만 믿고 놓으면 깨진 파일이 참조로
+    // 앉아 굽기가 시작된 뒤에야 실패한다.
+    image::load_from_memory(bytes).map_err(|e| format!("그림이 아니다: {e}"))?;
+
+    let fname = name.filter(|n| !n.trim().is_empty()).unwrap_or("ref.png");
+    let tmp = std::env::temp_dir().join(format!("kasaterm-ref-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("임시 폴더 실패: {e}"))?;
+    let staged = tmp.join(sanitize_name(fname));
+    std::fs::write(&staged, bytes).map_err(|e| format!("임시 저장 실패: {e}"))?;
+
+    let out = (|| {
+        let slug = match slug.filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => add_theme_member(&dir, &staged).ok_or("이름을 못 정했다")?.to_string(),
+        };
+        place_themegen_ref(&dir, &slug, &staged)?;
+        Ok::<String, String>(slug)
+    })();
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    out
+}
+
+/// 업로드 파일명에서 경로를 걷어낸다. 웹이 보내는 값이라 `../` 가 섞여 올 수 있고,
+/// 그대로 이으면 임시 폴더 밖에 파일이 생긴다.
+fn sanitize_name(n: &str) -> String {
+    let base = n.rsplit(['/', '\\']).next().unwrap_or(n);
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !matches!(c, '\0' | ':'))
+        .take(120)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "ref.png".to_string()
+    } else {
+        cleaned
+    }
+}
+
 pub(crate) fn place_themegen_ref(theme_dir: &Path, slug: &str, src: &Path) -> Result<PathBuf, String> {
     let dir = theme_dir.join("gen").join(slug);
     std::fs::create_dir_all(&dir).map_err(|e| format!("폴더 실패: {e}"))?;
@@ -956,16 +1122,7 @@ impl App {
     /// 감지 스냅샷. `themegen_poll` 이 채운 캐시를 읽기만 한다 — 설정 화면이 매
     /// 프레임 부르는 자리라 여기서 디스크를 돌면 안 된다.
     pub(crate) fn themegen_providers(&self) -> Vec<ProviderStatus> {
-        self.themegen
-            .providers
-            .iter()
-            .map(|p| ProviderStatus {
-                kind: p.kind,
-                label: p.label.clone(),
-                available: p.available,
-                why: p.why.clone(),
-            })
-            .collect()
+        providers_cached()
     }
 
     /// 한 명 굽기를 시작한다. `ref_path` 는 UI 가 이미 놓아 둔 원본이다.
@@ -980,9 +1137,9 @@ impl App {
             self.set_toast("테마와 이름이 있어야 굽는다".to_string());
             return;
         }
-        if self
-            .themegen
-            .jobs
+        if JOBS
+            .read()
+            .unwrap()
             .get(slug)
             .is_some_and(|j| !matches!(j.lock().unwrap().phase, GenPhase::Done | GenPhase::Failed))
         {
@@ -1021,7 +1178,7 @@ impl App {
             started_ms: now_ms(),
             ready: None,
         }));
-        self.themegen.jobs.insert(slug.to_string(), job.clone());
+        JOBS.write().unwrap().insert(slug.to_string(), job.clone());
 
         let ref_png = ref_path.to_path_buf();
         std::thread::spawn(move || match bake(&job, gen_dir, ref_png) {
@@ -1040,19 +1197,14 @@ impl App {
 
     /// 프레임마다 한 번. 감지 캐시를 갱신하고, 다 구운 잡을 설치한다.
     pub(crate) fn themegen_poll(&mut self) {
-        let stale = self
-            .themegen
-            .detected_at
-            .is_none_or(|t| t.elapsed() >= DETECT_EVERY);
-        if stale {
-            self.themegen.providers = detect_providers();
-            self.themegen.detected_at = Some(Instant::now());
-        }
+        // 감지 캐시는 전역이라 여기서 굳이 안 훑어도 웹 폴링이 갱신한다. 다만
+        // 웹을 한 번도 안 연 사용자를 위해 네이티브 틱에서도 한 번씩 태운다.
+        let _ = providers_cached();
 
         // 설치를 기다리는 잡을 걷는다. 잠금을 들고 설치하면 UI 가 그 프레임 내내
         // 멈추므로, 필요한 것만 꺼내고 바로 놓는다.
         let mut pending: Vec<(String, String, PathBuf)> = Vec::new();
-        for job in self.themegen.jobs.values() {
+        for job in JOBS.read().unwrap().values() {
             let mut j = job.lock().unwrap();
             if j.phase == GenPhase::Installing {
                 if let Some(out) = j.ready.take() {
@@ -1070,7 +1222,7 @@ impl App {
                 .and_then(|dir| install(&dir, &slug, &out).map(|_| dir))
                 .and_then(|dir| ensure_roster(&dir, &slug).map(|_| ()));
 
-            if let Some(job) = self.themegen.jobs.get(&slug) {
+            if let Some(job) = JOBS.read().unwrap().get(&slug) {
                 let mut j = job.lock().unwrap();
                 match &result {
                     Ok(()) => j.phase = GenPhase::Done,
@@ -1094,7 +1246,8 @@ impl App {
     }
 
     pub(crate) fn themegen_view(&self, slug: &str) -> Option<GenJobView> {
-        let j = self.themegen.jobs.get(slug)?.lock().unwrap();
+        let jobs = JOBS.read().unwrap();
+        let j = jobs.get(slug)?.lock().unwrap();
         Some(GenJobView {
             phase: j.phase,
             phase_label: j.phase_label().to_string(),
@@ -1109,6 +1262,30 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 업로드 파일명은 웹이 보내는 값이라 경로가 섞여 올 수 있다. 그대로 이으면
+    /// 임시 폴더 밖에 파일이 생긴다.
+    #[test]
+    fn an_uploaded_name_never_escapes_its_folder() {
+        assert_eq!(sanitize_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_name("a/b/c/Miku.png"), "Miku.png");
+        assert_eq!(sanitize_name("..\\..\\windows\\evil.png"), "evil.png");
+        // 걷어내고 나면 아무것도 안 남는 이름도 있다 — 빈 파일명으로 저장을
+        // 시도하면 그 실패가 「그림이 아니다」로 잘못 보고된다.
+        assert_eq!(sanitize_name("   "), "ref.png");
+        assert_eq!(sanitize_name("/"), "ref.png");
+    }
+
+    /// 진행 단계 이름은 프론트가 자기 사전에서 문구로 옮기는 **키**다. 여기 값이
+    /// 바뀌면 화면이 그 단계만 못 알아본다.
+    #[test]
+    fn phase_names_stay_language_free() {
+        assert_eq!(GenPhase::Describing.wire(), "describing");
+        assert_eq!(GenPhase::Generating.wire(), "generating");
+        assert_eq!(GenPhase::Installing.wire(), "installing");
+        assert_eq!(GenPhase::Done.wire(), "done");
+        assert_eq!(GenPhase::Failed.wire(), "failed");
+    }
 
     #[test]
     fn chroma_follows_desc_words_not_pixels() {

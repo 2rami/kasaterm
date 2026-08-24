@@ -1923,6 +1923,47 @@ impl App {
                 self.settings_apply(SettingsAction::OpenFeedbackDir);
                 Ok(true)
             }
+            // ── 캐릭터 생성 ───────────────────────────────────────────────
+            "theme-gen-provider" => {
+                let k = pick(&["opengateway", "codex", "nanobanana"], id)
+                    .ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::ThemeGenProvider(k.to_string()));
+                Ok(socket::read_settings().get("theme_gen_provider").and_then(|v| v.as_str())
+                    == Some(k))
+            }
+            "theme-gen-start" => {
+                let slug = id.trim();
+                if slug.is_empty() {
+                    return Err(reject("slug_empty", "누구를 구울지 골라 주세요".to_string()));
+                }
+                // 이미 도는 잡을 「눌렸다」고 답하면 안 된다 — 화면은 새로 시작된 줄
+                // 알고 진행을 처음부터 다시 그린다.
+                if self.themegen_view(slug).is_some_and(|v| {
+                    !matches!(v.phase, themegen::GenPhase::Done | themegen::GenPhase::Failed)
+                }) {
+                    return Err(reject("themegen_busy", "이미 굽는 중이에요".to_string()));
+                }
+                let theme_id = socket::read_character_theme();
+                // 참조 그림이 있어야 굽는다. 없을 때 조용히 실패하면 화면은 눌리긴
+                // 눌렀는데 아무 일도 안 나는 상태로 남는다.
+                let Some((path, _)) = themegen_ref_info(&theme_id, slug) else {
+                    return Err(reject(
+                        "themegen_ref_missing",
+                        "참조 그림을 먼저 넣어 주세요".to_string(),
+                    ));
+                };
+                self.themegen_start(&theme_id, slug, &path, None);
+                Ok(self.themegen_view(slug).is_some())
+            }
+            "gemini-key" => {
+                // 정본은 settings.json 이고 네이티브도 blur 때 거기 굳힌다 — 버퍼를
+                // 함께 맞춰 둬야 설정 창을 네이티브로 열었을 때 옛 값이 안 보인다.
+                self.themegen.key_edit = arg.clone();
+                socket::write_setting("gemini_api_key", serde_json::Value::String(arg.clone()));
+                Ok(socket::read_settings().get("gemini_api_key").and_then(|v| v.as_str())
+                    == Some(arg.as_str()))
+            }
+
             other => Err(reject_with(
                 "action_unknown",
                 serde_json::json!({ "action": other }),

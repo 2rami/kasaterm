@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { postAction } from './api';
 import { MiniButton, Notice, Section, TabCard, Toggle } from './controls';
 import { serverText, useT } from './lang';
+import { NewStudentCard, ThemeGenEngine } from './ThemeGen';
 import { faceUrl } from './types';
 import type { Strings } from './strings';
 import type { Character, SettingsCharacters, ThemeCard } from './types';
@@ -276,6 +277,8 @@ export function ThemeTab({
         }
       />
 
+      <ThemeGenEngine />
+
       {/* 폴더 안내를 규격 나열에서 「언제 폴더를 여는가」로 바꿨다 — 모션별 교체가
           캐릭터 상세에 생긴 뒤로는 파일 이름 규약을 외울 일이 없다. */}
       <Section title={t.theme.images} hint={t.theme.imagesHint}>
@@ -306,6 +309,15 @@ export function ThemeTab({
           {data.roster.map((c) => (
             <CharacterCell key={c.name} c={c} onSelect={() => onSelect(c)} />
           ))}
+          {/* 번들은 폴더가 없어 그림을 놓을 자리부터 없다 — 카드 자체를 안 준다. */}
+          {data.active_theme !== '' && (
+            <NewStudentCard
+              onAdded={(msg) => {
+                setNotice({ ok: true, msg });
+                void onChanged();
+              }}
+            />
+          )}
         </div>
       </Section>
     </TabCard>

@@ -1273,6 +1273,83 @@ async fn settings_values_handler(backend: Arc<dyn Backend>) -> impl IntoResponse
     )
 }
 
+/// `GET /settings/themegen/state` — 캐릭터 생성 화면이 2초마다 묻는 진행 상태.
+///
+/// 캐시를 안 준다. 이 라우트의 존재 이유가 「지금 몇 번째 프레임인가」라서, 1초만
+/// 캐시돼도 화면이 멈춘 것처럼 보인다.
+async fn themegen_state_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    (
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(backend.themegen_state()),
+    )
+}
+
+/// 참조 그림 한 장의 상한. 화면이 512px 로 줄여 보내는 게 정상 경로지만, 원본을
+/// 그대로 던지는 경로(드래그 놓기)도 있어 여유를 둔다.
+const THEMEGEN_REF_LIMIT: usize = 32 << 20;
+
+/// `GET /settings/themegen/ref?slug=<slug>` — 참조 그림 원본.
+///
+/// 캐시를 안 준다 — 사용자가 그림을 갈아 끼우는 화면이라, 캐시되면 방금 올린 것
+/// 대신 옛것이 보여 업로드가 실패했다고 읽는다(`/character-sprite` 와 같은 이유).
+async fn themegen_ref_get_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+    match backend.themegen_ref(slug) {
+        Some(bytes) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            "not found",
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /settings/themegen/ref?slug=<slug>` — 참조 그림을 놓는다. 본문은 이미지
+/// 바이트 그대로(base64 로 부풀리지 않는다).
+///
+/// `slug` 없이 `name=<파일명>` 으로 오면 새 캐릭터다 — 응답의 `slug` 가 실제로
+/// 정해진 이름이라, 화면은 그걸로 상세를 이어서 연다.
+async fn themegen_ref_put_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+    let name = params.get("name").map(String::as_str).unwrap_or_default();
+    let body = match backend.themegen_put_ref(slug, name, &body) {
+        Ok(slug) => serde_json::json!({ "ok": true, "slug": slug }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    (
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(body),
+    )
+}
+
 /// `GET /character-face?slug=<slug>&theme=<id>` — 캐릭터 프사 PNG. `theme` 을 주면
 /// 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성 폴더 → 번들 순.
 ///
@@ -4270,6 +4347,9 @@ pub fn spawn_http_server_opts(
                 let sprite_get_backend = backend.clone();
                 let sprite_status_backend = backend.clone();
                 let sprite_save_backend = backend.clone();
+                let themegen_state_backend = backend.clone();
+                let themegen_ref_get_backend = backend.clone();
+                let themegen_ref_put_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -4430,6 +4510,24 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/settings/values",
                         get(move || settings_values_handler(settings_values_backend.clone())),
+                    )
+                    .route(
+                        "/settings/themegen/state",
+                        get(move || themegen_state_handler(themegen_state_backend.clone())),
+                    )
+                    .route(
+                        "/settings/themegen/ref",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            themegen_ref_get_handler(themegen_ref_get_backend.clone(), q)
+                        })
+                        .post(
+                            move |q: Query<std::collections::HashMap<String, String>>,
+                                  body: axum::body::Bytes| {
+                                themegen_ref_put_handler(themegen_ref_put_backend.clone(), q, body)
+                            },
+                        )
+                        // 원본을 그대로 던지는 경로가 있어 axum 기본 2MB 로는 모자라다.
+                        .layer(axum::extract::DefaultBodyLimit::max(THEMEGEN_REF_LIMIT)),
                     )
                     .route(
                         "/character-face",

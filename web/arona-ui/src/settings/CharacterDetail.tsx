@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { useT } from './lang';
 import { MotionSprites } from './MotionSprites';
+import { ThemeGenSection } from './ThemeGen';
 import { faceUrl } from './types';
 import type { Character, ModelChoice } from './types';
 
@@ -483,6 +484,7 @@ export function CharacterDetail({
               그래도 같은 화면에 두는 이유는 사람이 "이 캐릭터"를 한자리에서
               손보기 때문이다. 자기 상태는 스스로 읽어 오므로 위 저장과 섞이지
               않는다. */}
+          <ThemeGenSection slug={character.slug} />
           <MotionSprites slug={character.slug} />
         </div>
       </div>

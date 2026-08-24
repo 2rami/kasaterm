@@ -1697,6 +1697,38 @@ impl Backend for PtyBackend {
         v
     }
 
+    /// 캐릭터 생성 상태. **GUI 를 안 거친다** — 잡 저장소가 전역이고 나머지(선택된
+    /// 엔진·키·활성 테마)는 파일에 있어서다. 2초 폴링이라 왕복을 태우면 굽는 동안
+    /// 프레임마다 GUI 를 한 번씩 물게 되는데, 하필 그때가 화면이 가장 바쁘다.
+    fn themegen_state(&self) -> serde_json::Value {
+        crate::themegen::themegen_state_json()
+    }
+
+    fn themegen_ref(&self, slug: &str) -> Option<Vec<u8>> {
+        if !safe_path_component(slug) {
+            return None;
+        }
+        crate::themegen::themegen_ref_bytes(slug)
+    }
+
+    fn themegen_put_ref(&self, slug: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
+        let slug = slug.trim();
+        if !slug.is_empty() && !safe_path_component(slug) {
+            return Err("쓸 수 없는 이름이에요".to_string());
+        }
+        let placed = crate::themegen::themegen_put_ref(
+            (!slug.is_empty()).then_some(slug),
+            (!name.trim().is_empty()).then_some(name),
+            bytes,
+        )?;
+        // 새 캐릭터면 로스터가 늘었다 — 화면이 다음에 그릴 때 그 사람이 보이려면
+        // 캐시를 걷어야 한다. GUI 프레임을 기다리면 방금 올린 캐릭터가 한동안
+        // 목록에 없어서, 사용자는 업로드가 실패했다고 읽는다.
+        invalidate_theme_rows();
+        crate::theme::invalidate_roster();
+        Ok(placed)
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)

@@ -77,6 +77,33 @@ export const ko = {
       `${a.count}명 — 캐릭터를 눌러 성격과 그림을 고치세요`,
   },
 
+  /// 그림 생성(참조 그림 → 스프라이트 굽기). 엔진 고르기는 테마 탭에, 굽기는
+  /// 캐릭터 상세에 있다.
+  themegen: {
+    engine: '그림 생성 엔진',
+    engineHint: '캐릭터 상세에서 참조 그림으로 스프라이트를 구울 때 쓸 엔진',
+    notReadyTag: '준비 안 됨',
+    notReady: (a: { why: string }) => `지금은 못 써요 — ${a.why}`,
+    geminiKey: 'Gemini API 키',
+    geminiKeyHint: '나노바나나로 구우려면 필요해요 — 붙여 넣고 칸을 벗어나면 저장돼요',
+    section: '그림 생성',
+    sectionHint: '참조 그림 한 장으로 전 모션 스프라이트와 프사를 구워요 — 몇 분 걸려요',
+    bundledNo: '기본 테마에는 못 구워요 — 테마 탭의 「+ 새 테마」로 복제하면 쓸 수 있어요',
+    pickRef: '참조 그림 고르기',
+    repickRef: '다른 그림',
+    uploading: '그림 올리는 중…',
+    start: '그림 생성',
+    restart: '다시 굽기',
+    needRef: '참조 그림을 먼저 골라 주세요',
+    engineNotReady: (a: { why: string }) => `엔진이 준비 안 됐어요 — ${a.why}`,
+    done: '다 구워졌어요 — 그림이 새 스프라이트로 바뀌어 있을 거예요',
+    failed: (a: { reason: string }) => `못 구웠어요 — ${a.reason}`,
+    elapsed: (a: { min: number; sec: string }) => `${a.min}분 ${a.sec}초`,
+    newStudent: '+ 새 캐릭터',
+    newStudentHint: '참조 그림 한 장으로 시작해요 — 이름은 나중에 고치면 돼요',
+    newStudentAdded: (a: { name: string }) => `${a.name} 를 명부에 올렸어요 — 카드를 눌러 구우세요`,
+  },
+
   detail: {
     back: '목록',
     name: '이름',
@@ -360,6 +387,31 @@ export const en: Strings = {
     charactersHint: (a) => `${a.count} in the roster — click one to edit persona and art`,
   },
 
+  themegen: {
+    engine: 'Art generation engine',
+    engineHint: 'Used when baking sprites from a reference image in character detail',
+    notReadyTag: 'not ready',
+    notReady: (a) => `Not usable right now — ${a.why}`,
+    geminiKey: 'Gemini API key',
+    geminiKeyHint: 'Needed for Nano Banana — paste it and leave the field to save',
+    section: 'Generate art',
+    sectionHint: 'One reference image bakes every motion sprite plus the profile — takes a few minutes',
+    bundledNo: 'The bundled theme cannot be baked into — duplicate it with “+ New theme” first',
+    pickRef: 'Choose reference',
+    repickRef: 'Change image',
+    uploading: 'Uploading…',
+    start: 'Generate',
+    restart: 'Bake again',
+    needRef: 'Choose a reference image first',
+    engineNotReady: (a) => `Engine not ready — ${a.why}`,
+    done: 'All baked — the art above should now show the new sprites',
+    failed: (a) => `Baking failed — ${a.reason}`,
+    elapsed: (a) => `${a.min}m ${a.sec}s`,
+    newStudent: '+ New character',
+    newStudentHint: 'Start from one reference image — rename later',
+    newStudentAdded: (a) => `Added ${a.name} to the roster — click the card to bake`,
+  },
+
   detail: {
     back: 'Roster',
     name: 'Name',
@@ -580,6 +632,11 @@ export const en: Strings = {
     account_numbered: (a) => `Account ${a.n}`,
     account_checking: 'Checking…',
     account_login_required: 'Sign-in needed',
+
+    // 그림 생성(theme-gen-start 거부 사유)
+    slug_empty: 'Pick who to bake first',
+    themegen_busy: 'Already baking this one',
+    themegen_ref_missing: 'Drop in a reference image first',
   },
 };
 
