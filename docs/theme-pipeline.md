@@ -89,14 +89,33 @@ low $1.5 · medium $6 · high $24, `-attempts`(기본 3) 재시도가 붙으면 
 크레딧으로 나가는지 확인할 것. 2026-08-11 에 확인 없이 151회를 쏴서 개인 OpenAI
 크레딧을 다 태웠다.
 
-**프로바이더는 `codex` 를 기본으로 쓴다**(ChatGPT 구독 인증이라 위 과금과 별개).
-`openai` 는 api.openai.com 직결이라 위 표대로 돈이 나간다.
+**프로바이더는 사내 OpenGateway 를 기본으로 쓴다**(거노 확정 2026-08-24 「og로
+하잖아」 — 과금이 개인 크레딧이 아니라 회사 게이트웨이로 나간다):
 
-⚠️ **사내 OpenGateway 로는 못 굽는다.** `/v1/images/generations` 만 있고
-`/v1/images/edits` 가 없어 **동작 프레임을 못 만든다** — 동작은 base 를 참조 이미지로
-넘겨 그리므로 편집 경로가 필수다. 게다가 게이트웨이는 **필드 검증을 전혀 안 해서**
-참조를 실어 보내도 200 을 주면서 조용히 무시하고 딴 그림을 준다. 404 로 막히는 게
-아니라 그럴듯한 결과가 와서 **눈으로 보기 전엔 모른다.**
+```bash
+THEME_PROVIDER=openai \
+OPENAI_BASE_URL=https://apis.opengateway.ai/v1 \
+THEME_KEY=$(cat ~/.config/opengateway.key) \
+THEME_MODEL=openai/gpt-image-2 \
+PPGEN=/tmp/ppgen THEME_SRC=theme-src-<id> THEME_ROSTER=theme-src-<id>/roster.json \
+  python3 scripts/theme-sprites.py gen --jobs 4
+```
+
+- ⚠️**키 값을 커밋·로그·화면에 찍지 마라** — 공개 레포다. 키 파일은 `~/.config/opengateway.key`.
+- `input_fidelity` 는 보내지 마라 — `gpt-image-2` 가 400 을 준다(항상 high fidelity).
+- `--ref` 를 쓸 때만: 게이트웨이 업로드 상한 때문에 1024px PNG 는 413 이다 — 참조는
+  **512px·100KB 이하 JPEG** 로 줄여 보낸다(2026-08-20 실측).
+
+대안 프로바이더: `codex`(ChatGPT 구독 인증, 과금 별개 — 단 구독 사용량 한도가 있다.
+2026-08-24 소진돼 9/10 까지 막힌 적이 있다) · `openai` 는 api.openai.com 직결이라 위
+표대로 개인 돈이 나간다 — 쓰기 전에 반드시 확인.
+
+> **「OpenGateway 로는 못 굽는다」는 옛 문장이다(2026-08-11 실측).** 당시엔
+> `/v1/images/edits` 가 없어 동작 프레임(편집 경로 필수)을 못 만들었고, 참조를 실어도
+> 200 과 함께 조용히 무시됐다. 그 뒤 게이트웨이에 편집 경로가 정식 배포됐고 참조
+> 반영도 실측으로 확인됐다(`theme-sprites.py` docstring 2026-08-20, live 415 응답
+> 2026-08-24 — **404=엔드포인트 없음 / 415=있는데 형식 문제**로 가른다). 이 문서만
+> 낡은 채 남아 2026-08-24 에 두 학생이 「OG 불가」로 오판하고 굽기를 통째로 세웠다.
 
 > ⚠️ **키는 `~/Library/Application Support/perfectpixel/config.json` 이 최우선**이다.
 > macOS 의 `os.UserConfigDir()` 은 `~/.config` 가 아니다 — ppgen 문서의 경로는 리눅스
