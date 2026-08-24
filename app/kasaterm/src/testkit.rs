@@ -1144,6 +1144,88 @@ impl App {
         );
     }
 
+    /// Headless 유령 pane repro: `KASATERM_AUTOGHOST_MS` 뒤에, 숨긴 pane 의 셸이
+    /// 스스로 끝난 상황을 만들어 **낡은 되살리기 레코드가 산 pane 을 죽이는지**와
+    /// **자원 없는 leaf 가 검은 사각형으로 남는지**를 잰다.
+    ///
+    /// 2026-08-24 에 거노가 두 번 목격한 사고다. pane 을 숨기면 레코드가 `alive`
+    /// 로 스택에 남는데, 그 셸이 그 뒤에 죽으면 플래그가 낡는다. 그때 같은 번호를
+    /// 새 pane 이 물려받으면 레코드 정리(개수 상한·15분 idle·인포의 ×)가 **남의
+    /// 살아 있는 셸**을 끄고, 트리는 안 걷어 클릭도 안 되는 빈 칸이 남았다.
+    ///
+    /// 화면으로는 영영 안 보이는 종류라 세 관문을 로그로 못 박는다:
+    ///   ① 새 pane 이 낡은 레코드의 번호를 물려받지 않는다(`used_pane_ids`)
+    ///   ② 낡은 레코드를 정리해도 트리에 있는 pane 은 안 죽는다(`kill_hidden_pane`)
+    ///   ③ 그래도 자원이 놓인 leaf 가 생기면 그 자리는 즉시 접힌다
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoghost(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOGHOST_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let leaves = |app: &App| -> Vec<String> {
+            app.pty_layout
+                .as_ref()
+                .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        self.render_frame();
+        let Some(victim) = leaves(self).last().cloned() else {
+            eprintln!("[autoghost] split 실패 — 잴 것이 없다");
+            return;
+        };
+        // ① 숨긴다 → 레코드가 `alive` 로 스택에 남는다.
+        self.hide_pane(&victim);
+        self.render_frame();
+        let hidden_ok = self
+            .closed_panes
+            .iter()
+            .any(|c| c.pane_id == victim && c.alive);
+        // 그 셸이 스스로 끝난다 — 숨긴 pane 의 EOF 는 `reap_dead_panes` 를 거쳐
+        // 자원을 놓으므로(PTY 도 그리드도), 실제 사고와 같은 자리를 만들려면 그
+        // 한 줄을 그대로 쓴다. 레코드의 `alive` 는 여기서 낡는다.
+        self.drop_pane_resources(&victim);
+        self.render_frame();
+        // ② 새 pane 이 그 번호를 물려받으면 안 된다.
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        self.render_frame();
+        let fresh = leaves(self).last().cloned().unwrap_or_default();
+        let reused = fresh == victim;
+        // ③ 낡은 레코드를 정리해도 트리에 있는 pane 은 안 죽는다. 번호가 갈렸으니
+        // 이미 무해하지만, 가드가 살아 있는지는 **일부러 그 번호를 겨눠** 잰다.
+        let live_before = self.pty.contains_key(&fresh);
+        self.kill_hidden_pane(&fresh);
+        let live_after = self.pty.contains_key(&fresh);
+        // ④ 그래도 자원이 놓인 leaf 가 생기면 즉시 접혀야 한다. 트리에 있는 pane 의
+        // 자원을 직접 놓아(사고와 같은 상태) 그 자리가 남는지 본다.
+        self.drop_pane_resources(&fresh);
+        self.render_frame();
+        let ghost_left = leaves(self).iter().any(|l| *l == fresh);
+        eprintln!(
+            "[autoghost] 숨김레코드={hidden_ok} · 숨긴={victim} 새pane={fresh} 번호재사용={reused} \
+             · 가드전PTY={live_before} 가드후PTY={live_after} · 유령leaf={ghost_left} \
+             · leaves={:?}",
+            leaves(self)
+        );
+        eprintln!(
+            "[autoghost] 기대: 숨김레코드=true · 번호재사용=false · 가드전PTY=true 가드후PTY=true · 유령leaf=false"
+        );
+        let pass = hidden_ok && !reused && live_before && live_after && !ghost_left;
+        eprintln!("[autoghost] {}", if pass { "PASS" } else { "FAIL" });
+    }
+
     /// Headless pane 숨기기 repro: `KASATERM_AUTOSTASH_MS` 뒤에 사이드바를 켜고 pane 을
     /// 셋으로 쪼갠 다음, 한 줄을 **진짜로 우클릭**해 「숨기기」를 고른다.
     ///

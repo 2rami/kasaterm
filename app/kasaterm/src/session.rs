@@ -414,6 +414,22 @@ impl App {
         for l in self.windows.iter().flatten().chain(self.pty_layout.as_ref()) {
             used.extend(l.leaves().into_iter().map(str::to_string));
         }
+        // 되살리기 목록에서 **아직 도는 것**의 번호도 쓰는 중이다. 레코드는 pane
+        // 번호로 프로세스를 가리키는데, 그 번호를 새 pane 이 물려받으면 레코드가
+        // 정리될 때(개수 상한·15분 idle·인포의 ×) 남의 살아 있는 셸을 끈다 —
+        // 2026-08-24 에 거노가 두 번 목격한 「검은 빈칸」이 그것이다.
+        //
+        // `alive` 만 세는 것이 요점이다. 이미 죽은 레코드는 정리해도 아무것도 안
+        // 놓으므로(세 정리 경로가 모두 `c.alive` 로 거른다) 번호를 잡을 이유가
+        // 없고, 잡으면 닫은 번호를 되쓰는 성질이 죽어 하루 쓰면 `%116` 이 된다.
+        // 위험한 건 「살아 있다고 적혔는데 실은 죽은」 레코드뿐인데, 그건 여기
+        // 걸린다.
+        used.extend(
+            self.closed_panes
+                .iter()
+                .filter(|c| c.alive)
+                .map(|c| c.pane_id.clone()),
+        );
         used
     }
     /// 지금 안 쓰는 **가장 작은** pane 번호. 예전엔 단조 증가 카운터라 열고 닫기를

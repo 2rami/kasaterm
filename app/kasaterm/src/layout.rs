@@ -1497,7 +1497,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// pane 이 쥐고 있던 자원을 놓는다 — PTY(**여기서 셸과 claude 가 죽는다**)·보조
     /// 탭 셸·협업 마커·GPU 텍스처·마크다운 캐시·화면 상태. 트리는 건드리지 않으므로
     /// 트리에서 이미 빠진 pane(숨긴 것)에도 그대로 쓴다.
-    fn drop_pane_resources(&mut self, target: &str) {
+    pub(crate) fn drop_pane_resources(&mut self, target: &str) {
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
         self.pty.remove(target);
@@ -1522,9 +1522,40 @@ for p in glob.glob(os.path.join(d, '*.json')):
         for pid in &secondary_pids {
             self.pty.remove(pid);
         }
-        let mut ws = self.ws.lock().unwrap();
-        ws.panes.remove(target);
-        ws.rebuild_pid_map();
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.panes.remove(target);
+            ws.rebuild_pid_map();
+        }
+        // 자원을 놓았는데 트리에 leaf 가 남으면 그 자리는 **도달 불가능한 검은
+        // 사각형**이 된다 — 셸도 그리드도 없어 클릭할 것이 없고, 사용자가 치울
+        // 방법조차 없다. 어느 죽음 경로로 왔든 자원을 놓는 지점은 여기 하나이므로,
+        // 유령이 태어날 수 있는 자리도 여기 하나다.
+        self.collapse_orphan_leaf(target);
+    }
+
+    /// 자원이 이미 없는 leaf 를 **트리에서만** 걷는다. `remove_pane` 과 달리 자원을
+    /// 안 건드리므로 `drop_pane_resources` 안에서 불러도 재귀가 나지 않는다.
+    fn collapse_orphan_leaf(&mut self, target: &str) {
+        let has_grid = self.ws.lock().unwrap().panes.contains_key(target);
+        if !leaf_is_orphan(self.pty.contains_key(target), has_grid) {
+            return;
+        }
+        let in_active = self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().iter().any(|l| *l == target));
+        if in_active {
+            self.collapse_layout_only(target);
+        } else if self.leaf_lingers_anywhere(target) {
+            self.remove_pane_stashed(target);
+        } else {
+            return;
+        }
+        // 소리 없이 사라지면 사용자는 학생이 어떻게 된 건지 알 방법이 없다
+        // (거노가 두 번 물었다). 되살리기 목록엔 이미 레코드가 있으므로 그리로
+        // 안내한다.
+        self.set_toast(format!("{target} 이 끝나 자리를 접었다 — ⌘⇧T 로 되살린다"));
     }
 
     /// 사용자가 닫은 pane — **죽이지 않고 화면에서만 뗀다.** BSP 트리에서 leaf 를
@@ -1613,6 +1644,14 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 숨겨 둔 pane 을 정말 끈다 — 트리 밖이라 레이아웃 조작이 필요 없고, 자원만
     /// 놓으면 된다. `remove_pane` 을 쓰면 되살리기 기록이 한 번 더 쌓인다.
     pub(crate) fn kill_hidden_pane(&mut self, target: &str) {
+        // 트리에 아직 leaf 가 있으면 그건 **숨긴 pane 이 아니다** — 화면에 떠 있는
+        // 남의 pane 이고, 이 호출은 같은 번호를 물려받은 낡은 레코드에서 왔다.
+        // 그대로 진행하면 그 pane 의 셸과 claude 를 끄면서 트리는 안 걷어, 클릭도
+        // 안 되는 검은 사각형만 남는다. 번호 재사용은 `used_pane_ids` 가 이미
+        // 막지만, 앱을 껐다 켜 레코드만 복원된 자리 같은 틈은 여기서 닫는다.
+        if self.leaf_lingers_anywhere(target) {
+            return;
+        }
         self.drop_pane_resources(target);
         self.chrome_dirty = true;
     }
@@ -2383,6 +2422,15 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
 }
 
+/// leaf 가 유령인가 — **자원이 둘 다 없어야** 참이다.
+///
+/// 한쪽만 보고 판정하면 멀쩡한 pane 을 걷는다. PTY 만 있는 것은 갓 split 해 첫
+/// 화면이 아직 안 온 pane 이고, 그리드만 있는 것은 이미지·마크다운·웹 pane 이라
+/// 셸이 원래 없다(`resize_backend` 도 `self.pty` 미스로 그냥 건너뛴다).
+fn leaf_is_orphan(has_pty: bool, has_grid: bool) -> bool {
+    !has_pty && !has_grid
+}
+
 #[cfg(test)]
 mod auto_split_tests {
     use super::*;
@@ -2517,5 +2565,23 @@ mod drop_zone_tests {
         assert!(slot.is_none());
         assert!(!App::stashed_leaf_exists(&slot, "%1"));
         assert!(!App::remove_stashed_leaf(&mut slot, "%1"));
+    }
+}
+
+#[cfg(test)]
+mod orphan_leaf_tests {
+    use super::leaf_is_orphan;
+
+    /// 2026-08-24: 숨긴 pane 의 낡은 레코드가 같은 번호를 물려받은 **산 pane** 의
+    /// 자원을 놓으면서 트리는 안 걷어, 클릭도 안 되는 검은 사각형이 남았다.
+    /// 그 자리를 걷는 판정이 이것 — 한쪽만 보도록 되돌리면 여기서 깨진다.
+    #[test]
+    fn only_a_leaf_with_neither_shell_nor_grid_is_a_ghost() {
+        assert!(leaf_is_orphan(false, false), "셸도 그리드도 없으면 유령이다");
+        // 갓 split 한 pane — PTY 는 붙었고 첫 ScreenUpdate 가 아직 안 왔다.
+        assert!(!leaf_is_orphan(true, false), "갓 태어난 pane 을 걷으면 안 된다");
+        // 이미지·마크다운·웹 pane — 셸이 원래 없다.
+        assert!(!leaf_is_orphan(false, true), "PTY 없는 파일 pane 을 걷으면 안 된다");
+        assert!(!leaf_is_orphan(true, true), "평범한 셸 pane");
     }
 }

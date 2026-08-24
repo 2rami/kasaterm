@@ -6103,6 +6103,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoclosereopen();
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
+        self.run_pending_autoghost();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_autonotify();
