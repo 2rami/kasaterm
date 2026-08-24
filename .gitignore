@@ -36,3 +36,5 @@ theme-src-*/*/out*/
 # 78개는 이미 추적 중이라 그대로 둔다(ignore 는 추적 파일에 안 먹는다).
 theme-src-*/*/wiki.json
 theme-src-*/_index.json
+# ref 후보로 받아 둔 위키 원화들 — ref.png 와 같은 이유(타사 저작물)로 제외.
+theme-src-*/*/cand*.png
