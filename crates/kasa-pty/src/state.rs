@@ -133,6 +133,31 @@ fn scan_prompt_anchors(term: &Term<PtyEventForwarder>) -> Vec<PromptAnchor> {
     out
 }
 
+/// 뷰포트 바로 위 스크롤백 행들 — `PtySession::rows_above` 의 알맹이이자, 시험이
+/// 살아 있는 PTY 없이 부를 수 있는 진입점(`scan_prompt_anchors` 와 같은 모양).
+/// 뷰포트 첫 행은 그리드 줄 `-display_offset` 이므로(스냅샷과 같은 셈) 그 위는
+/// `-display_offset - 1` 부터 `-history_size` 까지, 가까운 순으로 담는다.
+fn read_rows_above(term: &Term<PtyEventForwarder>, n: usize) -> Vec<Row> {
+    let g = term.grid();
+    let cols = g.columns();
+    let bottom = -(g.history_size() as i32);
+    let mut line = -(g.display_offset() as i32) - 1;
+    let mut out = Vec::new();
+    while line >= bottom && out.len() < n {
+        let mut row: Row = Vec::with_capacity(cols);
+        for c in 0..cols {
+            let point = Point::new(
+                alacritty_terminal::index::Line(line),
+                alacritty_terminal::index::Column(c),
+            );
+            row.push(convert_cell(&g[point]));
+        }
+        out.push(row);
+        line -= 1;
+    }
+    out
+}
+
 /// 스크롤백에 남은 사용자 프롬프트 한 줄의 자리.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptAnchor {
@@ -763,6 +788,17 @@ impl PtySession {
         let t = self.term.lock().unwrap();
         let g = t.grid();
         (g.display_offset(), g.history_size())
+    }
+
+    /// 뷰포트 바로 위 스크롤백 행들 — 가까운 순([0] = 뷰포트 위 1줄), 최대 `n` 개.
+    ///
+    /// 긴 팀메시지를 스크롤해 내려가면 헤더가 화면 위로 나가, 렌더러가 화면에
+    /// 남은 본문을 그 메시지로 이어 붙이려면 위를 올려다볼 창이 필요하다.
+    /// 스냅샷에 태워 보내지 않는 이유: 스냅샷은 PTY 출력마다 도는 자리라 상시
+    /// 비용이 되는데 이 행들은 대부분의 프레임에 쓸모가 없다 — 필요할 때만
+    /// 락 잡고 읽는다.
+    pub fn rows_above(&self, n: usize) -> Vec<Row> {
+        read_rows_above(&self.term.lock().unwrap(), n)
     }
 
     /// 스크롤백에 남은 **사용자 프롬프트 줄**을 절대 줄 번호와 함께 모은다.
@@ -4384,6 +4420,38 @@ mod snapshot_fidelity_tests {
             &["L27", "L28", "L29", "L30", "L31", "L32", "L33", "L34", "L35", "L36"],
             "위로 올린 화면에 히스토리가 안 보인다"
         );
+    }
+
+    /// 뷰포트 위 행 읽기 — 가까운 순이고, 스크롤을 따라가며, 히스토리 바닥에서
+    /// 캡된다. 렌더러의 팀메시지 이어칠하기(헤더가 화면 위로 나간 본문)가 이
+    /// 순서를 전제로 위로 걷는다.
+    #[test]
+    fn rows_above_walks_history_nearest_first() {
+        let (cols, rows) = (40u16, 10u16);
+        let listener = PtyEventForwarder {
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        let mut feed = String::new();
+        for i in 1..=40 {
+            feed.push_str(&format!("L{i}\r\n"));
+        }
+        proc.advance(&mut term, feed.as_bytes());
+        let texts = |rows: &[Row]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+                .collect()
+        };
+        // 라이브 바닥: 화면 첫 줄이 L32 이므로 그 위는 L31 부터 가까운 순.
+        assert_eq!(texts(&read_rows_above(&term, 3)), ["L31", "L30", "L29"]);
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+        assert_eq!(texts(&read_rows_above(&term, 3)), ["L26", "L25", "L24"]);
+        // 히스토리 바닥 캡 — 남은 것보다 많이 달라면 있는 만큼만
+        // (히스토리 L1~L31 = 31행, 스크롤 5 를 빼면 26행).
+        assert_eq!(read_rows_above(&term, 1000).len(), 26);
     }
 
     fn grid_rows(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<String> {

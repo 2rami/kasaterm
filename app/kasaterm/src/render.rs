@@ -88,6 +88,33 @@ fn elapsed_label(secs: u64) -> Option<String> {
     }
 }
 
+/// 배치도 칸 바닥의 진행 띠 — 높이와 그 아래 여백.
+const MINI_BAR_H: f32 = 2.0;
+const MINI_BAR_PAD: f32 = 2.0;
+/// 걷는 학생 상자가 얼굴보다 큰 몫(위 2 + 아래 2). 원본이 정사각 전신이라
+/// `draw_student_walk` 은 얼굴 상자를 4px 키워 그린다 — 자리를 셈할 때도 그만큼 본다.
+const MINI_WALK_PAD: f32 = 4.0;
+
+/// 그 칸에 띠를 그릴 수 있나. **얼굴 배치와 띠 그리기가 같은 답을 써야 한다** —
+/// 갈리면 자리를 안 비운 칸에 띠가 서거나(발밑에 겹친다) 빈 자리에 아무것도 안 온다.
+///
+/// 높이 하한이 띠·여백·걷기 상자(얼굴 최소 10 + 4)의 합이다. 그보다 좁은 칸은
+/// 띠를 포기한다 — 2px 띠를 우겨넣느니 학생이 온전한 쪽이 낫고, 그런 칸은 얼굴이
+/// 이미 칸을 꽉 채워 띠가 읽히지도 않는다.
+pub(crate) fn minimap_has_bar(mw: f32, mh: f32) -> bool {
+    mw > 10.0 && mh > MINI_BAR_H + MINI_BAR_PAD + 10.0 + MINI_WALK_PAD
+}
+
+/// 칸 안 얼굴 상자 `(x, y, 변)` — 띠 자리를 뺀 나머지의 중앙.
+///
+/// 띠가 **실제로 서는 동안만** 자리를 빼면 걷기 시작·끝마다 얼굴이 튀므로, 띠를
+/// 그릴 수 있는 칸이면 도는 중이든 아니든 늘 뺀다.
+pub(crate) fn minimap_face_box(mx: f32, my: f32, mw: f32, mh: f32) -> (f32, f32, f32) {
+    let room = if minimap_has_bar(mw, mh) { MINI_BAR_H + MINI_BAR_PAD } else { 0.0 };
+    let face = (mw.min(mh - room) - 8.0).clamp(10.0, 26.0);
+    (mx + (mw - face) / 2.0, my + (mh - room - face) / 2.0, face)
+}
+
 /// 오래 도는 것일수록 눈에 띄게 — 색과 굵기로 세 단(거노 2026-08-24 조건).
 /// 흐린 회색으로 시작해 accent 굵은 글씨로 끝난다. 크기를 키우는 길도 있었지만
 /// 칸이 40px 대라 한 단만 키워도 얼굴을 밀어낸다.
@@ -1760,6 +1787,66 @@ impl App {
                             .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
                         crate::socket::project_jsonl(cwd, sid)
                     });
+                    // 긴 팀메시지를 스크롤하면 헤더가 화면 위로 나가 아래 본문이
+                    // 무테마로 남는다(2026-08-24 거노 스샷: 「위에는 적용되는데
+                    // 밑에는 sm인지 모르니까 적용안되는데」). 화면 첫 행이 wrap
+                    // 연속이면 스크롤백을 올려다 헤더를 찾아 같은 색으로 잇는다.
+                    // runs_claude 게이트: 셸 pane 의 들여쓴 출력(로그 등)이 첫 행에
+                    // 걸릴 때마다 스크롤백을 읽는 낭비·오탐을 막는다.
+                    if runs_claude
+                        && (composed.first().is_some_and(|r| tell_wrap_continuation(r))
+                            || (!composed.is_empty() && msg_paragraph_gap(&composed, 0)))
+                    {
+                        let above = self
+                            .pty
+                            .get(tab_pid.as_str())
+                            .map(|p| p.rows_above(240))
+                            .unwrap_or_default();
+                        let accent = match carried_message_header(&above) {
+                            Some(CarriedHeader::Tell(name)) => {
+                                theme::character_accent_any(&name)
+                            }
+                            Some(CarriedHeader::Native(label)) => {
+                                // 인정 규칙은 화면 안 헤더와 동일 — transcript 최신
+                                // 태그와 라벨 대조, 아니면 로스터 agent 이름꼴만.
+                                let msg = msg_path
+                                    .as_deref()
+                                    .and_then(|p| latest_teammate_msg(p, PEER_LABEL));
+                                let norm = |s: &str| -> String {
+                                    s.chars().filter(|c| !c.is_whitespace()).collect()
+                                };
+                                let label_hit = msg.as_ref().is_some_and(|m| {
+                                    m.from_label.as_deref().map(&norm) == Some(norm(&label))
+                                        || m.from_pid.as_deref().map(&norm)
+                                            == Some(norm(&label))
+                                });
+                                (label_hit || label_is_roster_agent(&label)).then(|| {
+                                    native_sender_accent(
+                                        &label,
+                                        label_hit,
+                                        msg.as_ref(),
+                                        &self.pane_claude_sid,
+                                        &ws,
+                                    )
+                                    .1
+                                })
+                            }
+                            None => None,
+                        };
+                        if let Some(accent) = accent {
+                            let mut r = 0;
+                            while r < composed.len() {
+                                if tell_wrap_continuation(&composed[r]) {
+                                    tint_row(&mut composed[r], accent);
+                                    r += 1;
+                                } else if msg_paragraph_gap(&composed, r) {
+                                    r += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     for r in 0..composed.len() {
                         let Some((c0, _count, sender)) = teammate_collapsed_line(&composed[r])
                         else {
@@ -1859,41 +1946,15 @@ impl App {
                         if !label_hit && !label_is_roster_agent(&label) {
                             continue;
                         }
-                        let sender = label_hit
-                            .then(|| msg.as_ref().and_then(|m| m.sender.clone()))
-                            .flatten()
-                            .unwrap_or_else(|| PEER_LABEL.to_string());
-                        // 이름이 학생을 안 알려 주면 세션 id 로 pane 을 되짚는다 —
-                        // 접힌 경로와 같은 규칙(⚠️pane_character_if_known 금지, 위 주석).
-                        let sender = if teammate_sender_slug(&sender).is_some() {
-                            sender
-                        } else {
-                            msg.as_ref()
-                                .filter(|_| label_hit)
-                                .and_then(|m| m.peer_sid.as_deref())
-                                .and_then(|sid| {
-                                    self.pane_claude_sid
-                                        .iter()
-                                        .find(|(_, s)| s.as_str() == sid)
-                                        .map(|(p, _)| ws.active_tab_pid(p))
-                                })
-                                .and_then(|key| ws.pane_character.get(&key).cloned())
-                                .unwrap_or(sender)
-                        };
-                        // 명부까지 죽었으면(발신 pane dismiss) 여기 와서도 `peer` 다 —
-                        // 라벨의 로마자 머리가 로스터를 안다(midori-p4-v32 → 미도리).
-                        let sender = if teammate_sender_slug(&sender).is_none()
-                            && label_is_roster_agent(&label)
-                        {
-                            label.clone()
-                        } else {
-                            sender
-                        };
-                        let accent = teammate_sender_accent(
-                            &sender,
-                            msg.as_ref()
-                                .filter(|_| label_hit)
-                                .and_then(|m| m.color.as_deref()),
+                        // 발신자·색 해석은 헤더가 스크롤로 밀려난 이어칠하기(위
+                        // carried 블록)와 공유 — 접힌 경로와 같은 되짚기 규칙
+                        // (⚠️pane_character_if_known 금지, 위 주석).
+                        let (sender, accent) = native_sender_accent(
+                            &label,
+                            label_hit,
+                            msg.as_ref(),
+                            &self.pane_claude_sid,
+                            &ws,
                         );
                         let slug = teammate_sender_slug(&sender);
                         // 학생을 알면 긴 발신 라벨을 이름으로 갈아끼운다 — 라벨은
@@ -4324,9 +4385,10 @@ impl App {
                     // 칸이 **누구 자리인지** 말한다. 목록을 걷어낸 이상 얼굴이 여기
                     // 없으면 사이드바 어디에도 학생이 없다(거노 2026-08-11: "미니맵은
                     // 학생뭔지 보여야해"). 도는 중이면 줄에서 그랬듯 걷는다.
-                    let face = (mw.min(mh) - 8.0).clamp(10.0, 26.0);
-                    let fx = mx + (mw - face) / 2.0;
-                    let fy = my + (mh - face) / 2.0;
+                    // 상자는 바닥 띠 자리를 비우고 잡는다 — 걷기와 띠를 함께 그리기로
+                    // 한 이상(아래 진행 바 참고), 안 비우면 세로로 갈린 칸에서 발밑에
+                    // 띠가 파고든다(칸 31 · 얼굴 23 이면 2px).
+                    let (fx, fy, face) = minimap_face_box(mx, my, mw, mh);
                     let walked = info.busy
                         && draw_student_walk(g, &info.who, fx - 2.0, fy - 2.0, face + 4.0, anim_phase_secs());
                     if !walked && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs()) {
@@ -4341,24 +4403,22 @@ impl App {
                             theme::text_dim(),
                         );
                     }
-                    // 진행 바 — 칸 바닥의 2px 띠. **걷기가 이미 말하는 것을 되풀이하지
-                    // 않는** 세 갈래만 그린다(거노 2026-08-20 「미니맵에도 프로세스 바
-                    // 하자」). 이 파일에는 같은 뜻을 두 겹으로 칠했다 되돌린 기록이 두
-                    // 군데 있고(줄 vs 카드 머리 · 칸 vs 머리 점), 여기가 그 세 번째가
-                    // 되기 딱 좋은 자리다.
+                    // 진행 바 — 칸 바닥의 2px 띠. 도는 칸에는 **걷기와 함께** 그린다
+                    // (거노 2026-08-24 「미니맵에서 진행중이면 걷기나 프로세스바가
+                    // 아니라 둘다 나오게」).
                     //
-                    // ① compact — 걷기로는 「얼마나 남았나」가 절대 안 읽힌다. 그래서
-                    //    이것만은 걷는 칸에도 함께 그린다(되풀이가 아니라 걷기가 못
-                    //    하는 말이다). busy 보다 **먼저** 본다 — compact 중에도 스피너가
-                    //    돌아 busy 가 함께 참이라, 순서가 뒤면 늘 쓸림바가 이긴다.
-                    //    헤더가 같은 순서로 갈라 놨다.
-                    // ② 걸을 그림이 없는 busy — 셸·웹·이미지 칸은 학생이 없어 지금 도는
-                    //    중을 말할 방법이 **아무것도 없었다**. 걷기가 못 닿는 자리라
-                    //    되풀이가 아니라 유일한 답이다.
-                    // ③ bg_active — `refresh_pane_activity` 가 `busy` 면 이걸 아예
-                    //    false 로 넣는다(input.rs). 즉 걷는 칸에는 절대 안 서므로 두 겹이
-                    //    **원천적으로 불가능**하다. 헤더가 이걸 느린 펄스로 갈라 말하는데
-                    //    배치도만 안 갈라 말하고 있었다.
+                    // 처음 넣을 때는(2026-08-20) 걷는 칸에서 바를 뺐다 — 같은 뜻을 두
+                    // 겹으로 칠했다 되돌린 기록이 이 파일에 두 군데 있어서다(줄 vs 카드
+                    // 머리 · 칸 vs 머리 점). 그 판단이 뒤집혔고, 되풀이가 아닌 이유는
+                    // 둘이 닿는 거리가 다르기 때문이다: 걷기는 그 칸을 **들여다볼 때**
+                    // 읽히고, 칸 폭을 다 쓰는 띠는 **곁눈으로도** 잡힌다. 얼굴이 10px
+                    // 까지 작아지는 칸에서 걷는 다리는 사실상 안 보인다.
+                    //
+                    // 순서는 그대로다. compact 를 busy 보다 **먼저** 본다 — compact
+                    // 중에도 스피너가 돌아 busy 가 함께 참이라, 뒤로 미루면 늘 쓸림바가
+                    // 이겨 「얼마나 남았나」가 사라진다. 헤더가 같은 순서로 갈라 놨다.
+                    // `bg_active` 는 `refresh_pane_activity` 가 busy 일 때 false 로 넣으니
+                    // (input.rs) busy 와 겹칠 일이 애초에 없다.
                     //
                     // 대기 중(`waiting`)은 일부러 뺐다 — 그건 도는 게 아니라 멈춘 것이고,
                     // 바가 차오르면 「일하는 줄」 알고 지나치게 된다(2026-08-11 에 갈라
@@ -4366,9 +4426,9 @@ impl App {
                     //
                     // 모양은 헤더와 **같은 한 벌**을 쓴다(`working_bar`·`pulse_bar`) —
                     // 배치도만 다른 리듬으로 흔들리면 같은 pane 이 자리마다 다른 말을 한다.
-                    if mw > 10.0 && mh > 14.0 {
-                        let bar_h = 2.0;
-                        let (bx, by, mut bw) = (mx + 2.0, my + mh - bar_h - 2.0, mw - 4.0);
+                    if minimap_has_bar(mw, mh) {
+                        let bar_h = MINI_BAR_H;
+                        let (bx, by, mut bw) = (mx + 2.0, my + mh - bar_h - MINI_BAR_PAD, mw - 4.0);
                         // 경과 시간 — 바 오른쪽 끝을 내주고 바가 그만큼 짧아진다
                         // (거노 2026-08-24: 도는 것끼리 오래된 순서가 안 보인다).
                         // 걷기·쓸림바는 「도는 중」만 말하지 「얼마나째」는 못 말하고,
@@ -4410,7 +4470,7 @@ impl App {
                             if done > 0.5 {
                                 g.rect(bx, by, done, bar_h, theme::accent());
                             }
-                        } else if info.busy && !walked {
+                        } else if info.busy {
                             g.working_bar(bx, by, bw, bar_h, theme::accent());
                         } else if info.bg_active {
                             g.pulse_bar(bx, by, bw, bar_h, theme::accent());
@@ -10007,6 +10067,56 @@ pub(crate) fn draw_usage_windows(
         bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, true) + 12.0;
     }
     bx
+}
+
+#[cfg(test)]
+mod minimap_box_tests {
+    use super::*;
+
+    /// 도는 칸에는 걷기와 띠가 **함께** 선다(거노 2026-08-24). 그러면 둘이 자리를
+    /// 다투는데, 화면으로는 잡기 어렵다 — 겹치는 건 세로로 갈린 좁은 칸뿐이고
+    /// 스프라이트 하단이 발이라 「좀 지저분하다」로만 보인다. 산술로 못 박는다.
+    ///
+    /// 방 카드 높이는 `36 + 13*pane수` 를 46..150 으로 조인 값이고(session.rs),
+    /// 칸은 그것을 split 트리로 나눈 조각이다 — 아래 치수가 그 범위다.
+    #[test]
+    fn walking_student_never_touches_the_bar() {
+        for (mw, mh) in [
+            (200.0, 31.0),  // 세로 2분할 — 자리를 안 비우면 여기서 2px 겹쳤다
+            (200.0, 19.0),  // 띠가 서는 가장 좁은 칸
+            (100.0, 62.0),  // 가로 2분할
+            (60.0, 25.0),
+            (200.0, 150.0), // 가장 큰 카드
+        ] {
+            assert!(minimap_has_bar(mw, mh), "{mw}x{mh}: 이 칸엔 띠가 서야 한다");
+            let (_, fy, face) = minimap_face_box(0.0, 0.0, mw, mh);
+            // `draw_student_walk` 는 얼굴 상자를 위로 2px 올리고 4px 키워 그린다.
+            let walk_bottom = fy - MINI_WALK_PAD / 2.0 + face + MINI_WALK_PAD;
+            let bar_top = mh - MINI_BAR_H - MINI_BAR_PAD;
+            assert!(
+                walk_bottom <= bar_top,
+                "{mw}x{mh}: 걷기 하단 {walk_bottom} 이 띠 {bar_top} 를 파고든다"
+            );
+            assert!(fy >= 0.0, "{mw}x{mh}: 얼굴이 칸 위로 넘쳤다");
+        }
+    }
+
+    /// 띠가 안 서는 칸은 자리를 안 뺀다 — 뺐다면 그 칸만 얼굴이 이유 없이 작아진다.
+    #[test]
+    fn tiny_cells_give_the_whole_box_to_the_face() {
+        for (mw, mh) in [(8.0, 40.0), (200.0, 15.0), (5.0, 5.0)] {
+            assert!(!minimap_has_bar(mw, mh));
+            let (_, fy, face) = minimap_face_box(0.0, 0.0, mw, mh);
+            assert_eq!(fy, (mh - face) / 2.0, "{mw}x{mh}: 안 그릴 띠 자리를 뺐다");
+        }
+    }
+
+    /// 얼굴은 칸 가운데다 — 세로만 띠 쪽으로 치우친다.
+    #[test]
+    fn face_is_centered_horizontally() {
+        let (fx, _, face) = minimap_face_box(10.0, 0.0, 100.0, 62.0);
+        assert_eq!(fx, 10.0 + (100.0 - face) / 2.0);
+    }
 }
 
 #[cfg(test)]

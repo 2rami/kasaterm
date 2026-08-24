@@ -676,6 +676,79 @@ pub(crate) fn msg_paragraph_gap(rows: &[Vec<GridCell>], at: usize) -> bool {
             .is_some_and(|r| tell_wrap_continuation(r))
 }
 
+/// 뷰포트 위 스크롤백에서 찾은 팀메시지 헤더 — 화면 첫 행이 wrap 연속일 때
+/// 그 본문이 누구 메시지인지의 답.
+pub(crate) enum CarriedHeader {
+    /// 크로스-방 tell 마커 `⟦캐릭터⟧` — 이름이 곧 유효 캐릭터다.
+    Tell(String),
+    /// 펼친 `@ 라벨❯` 헤더 — 라벨 인정(transcript 대조·로스터꼴)은 호출부 몫.
+    Native(String),
+}
+
+/// 뷰포트 첫 행이 팀메시지 wrap 연속일 때, 화면 위(스크롤백)로 올라가 그 메시지의
+/// 헤더를 찾는다 — 긴 SendMessage 를 스크롤해 내려가면 헤더가 화면 밖으로 나가
+/// 본문 아래쪽이 「팀메시지인지 모르는」 무테마로 남았다(2026-08-24 거노 스샷:
+/// 「위에는 적용되는데 밑에는 sm인지 모르니까 적용안되는데」). `above` 는 뷰포트
+/// 바로 위 행부터 위로(가까운 순). 연속 행·빈 행(문단 구분)만 건너뛰고, 처음
+/// 만나는 다른 행이 헤더일 때만 발신자를 돌려준다 — 다른 무엇이면 화면 첫 행은
+/// 그냥 들여쓴 일반 출력이다. 접힌 줄(`› Message from @…`)은 본문이 화면에 없다는
+/// 뜻이라 여기서 만나면 남의 본문이다 → None.
+pub(crate) fn carried_message_header(above: &[Vec<GridCell>]) -> Option<CarriedHeader> {
+    for row in above {
+        if msg_blank_row(row) || tell_wrap_continuation(row) {
+            continue;
+        }
+        if let Some((_, _, name)) = tell_marker_line(row) {
+            return Some(CarriedHeader::Tell(name));
+        }
+        if let Some((_, _, label)) = peer_native_header_line(row) {
+            return Some(CarriedHeader::Native(label));
+        }
+        return None;
+    }
+    None
+}
+
+/// `@ 라벨❯` 헤더의 라벨 → (발신자 이름, 학생색). transcript 최신 태그와 대조된
+/// 라벨(label_hit)은 태그의 발신자·색 힌트를 쓰고, 그 이름으로 학생을 못 찾으면
+/// 세션 id 로 발신 pane 을 되짚는다 — 명부의 이름은 세션 자동 제목에 덮인다
+/// (거노 2026-08-11 "sm테마는 왜 안됐어"). 그마저 안 되면 로스터 agent 이름꼴
+/// 라벨 자체를 이름으로. 화면 안 헤더 색칠과 헤더가 스크롤로 밀려난 본문
+/// 이어칠하기가 **같은 규칙**을 타야 스크롤 중에 색이 변하지 않는다 — 그래서
+/// 한 함수다.
+pub(crate) fn native_sender_accent(
+    label: &str,
+    label_hit: bool,
+    msg: Option<&TeammateMsg>,
+    pane_claude_sid: &std::collections::HashMap<String, String>,
+    ws: &crate::Workspace,
+) -> (String, [u8; 4]) {
+    let msg = msg.filter(|_| label_hit);
+    let sender = msg
+        .and_then(|m| m.sender.clone())
+        .unwrap_or_else(|| PEER_LABEL.to_string());
+    let sender = if teammate_sender_slug(&sender).is_some() {
+        sender
+    } else {
+        msg.and_then(|m| m.peer_sid.as_deref())
+            .and_then(|sid| {
+                pane_claude_sid
+                    .iter()
+                    .find(|(_, s)| s.as_str() == sid)
+                    .map(|(p, _)| ws.active_tab_pid(p))
+            })
+            .and_then(|key| ws.pane_character.get(&key).cloned())
+            .unwrap_or(sender)
+    };
+    let sender = if teammate_sender_slug(&sender).is_none() && label_is_roster_agent(label) {
+        label.to_string()
+    } else {
+        sender
+    };
+    let accent = teammate_sender_accent(&sender, msg.and_then(|m| m.color.as_deref()));
+    (sender, accent)
+}
+
 /// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
 /// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
 /// 명 → 그것도 없으면 테마 accent.
@@ -3825,6 +3898,41 @@ mod teammate_msg_tests {
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
+    }
+
+    /// 헤더가 스크롤로 화면 위에 나갔을 때의 발신자 되찾기 — `above` 는 뷰포트
+    /// 바로 위부터 가까운 순. 연속·빈 행만 건너 처음 만나는 행이 헤더여야 하고,
+    /// 다른 무엇이면(일반 출력·접힌 줄) 화면 첫 행은 남의 본문이다.
+    #[test]
+    fn carried_header_walks_up_through_continuations() {
+        let above = vec![
+            row_from("  본문 마지막 문단", 80),
+            row_from("", 80),
+            row_from("  본문 첫 문단", 80),
+            row_from("⟦미도리⟧ 브리프 간다", 80),
+            row_from("⏺ 이전 어시스턴트 출력", 80),
+        ];
+        match carried_message_header(&above) {
+            Some(CarriedHeader::Tell(name)) => assert_eq!(name, "미도리"),
+            _ => panic!("tell 마커 헤더를 찾아야 한다"),
+        }
+        let native = vec![row_from("  들여쓴 본문", 80), row_from("@ midori-p4-v32❯", 80)];
+        match carried_message_header(&native) {
+            Some(CarriedHeader::Native(label)) => assert_eq!(label, "midori-p4-v32"),
+            _ => panic!("펼친 `@ 라벨❯` 헤더를 찾아야 한다"),
+        }
+        // 연속 행을 다 건너 만난 것이 헤더가 아니면 — 그냥 들여쓴 일반 출력.
+        let plain = vec![row_from("  들여쓴 로그", 80), row_from("⏺ Bash(cargo test)", 80)];
+        assert!(carried_message_header(&plain).is_none());
+        // 접힌 줄은 본문이 화면에 없다는 뜻 — 아래 연속 행은 그 메시지가 아니다.
+        let collapsed = vec![
+            row_from("  남의 본문", 80),
+            row_from("› Message from @midori-p4-v32", 80),
+        ];
+        assert!(carried_message_header(&collapsed).is_none());
+        // 위가 전부 연속/빈 행이면(240행 캡 안에 헤더가 안 들어옴) 못 찾은 것.
+        let unbounded = vec![row_from("  본문", 80), row_from("", 80)];
+        assert!(carried_message_header(&unbounded).is_none());
     }
 
     /// 프사 자리를 세울지 가르는 판정 — 활성 명부는 그대로, 넓힌 몫은 그림이
