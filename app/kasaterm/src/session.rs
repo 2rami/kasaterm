@@ -263,7 +263,15 @@ impl App {
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
         // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(거노
         // 2026-07-13): 아로나·프라나도 특별 클래스 없이 동등하게 랜덤 배정.
-        let members = kasa_mcp::character::member_names(&chars);
+        // 배정 풀 — 골라 둔 명단이 있으면 그것만, 없으면 전원(지금까지의 동작).
+        let members = kasa_mcp::character::assignable_names(&chars);
+        // `KASATERM_ASSIGN_DEBUG=1` — 풀이 왜 그 크기인지 찍는다. 「골랐는데 안 고른
+        // 애가 나온다」는 신고가 왔을 때 설정을 읽었는지부터 갈라야 하는데, 그걸
+        // 밖에서 볼 방법이 이것 말고 없다.
+        if std::env::var_os("KASATERM_ASSIGN_DEBUG").is_some() {
+            let all = kasa_mcp::character::member_names(&chars).len();
+            eprintln!("[assign] pool={} / roster={all} — {:?}", members.len(), members);
+        }
         // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
         // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
         // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
@@ -546,7 +554,7 @@ impl App {
                         } else if let Some(chars) = kasa_mcp::character::characters_json() {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
                             // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
-                            let members = kasa_mcp::character::member_names(&chars);
+                            let members = kasa_mcp::character::assignable_names(&chars);
                             let taken: std::collections::HashSet<String> = self
                                 .ws
                                 .lock()

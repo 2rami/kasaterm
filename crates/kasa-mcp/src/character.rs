@@ -19,12 +19,7 @@ fn home() -> Option<PathBuf> {
 /// 왔다. `KASATERM_SETTINGS_FILE` 을 빠뜨렸더니 설정 화면은 이 파일을, 로더는 저
 /// 파일을 읽어 「테마를 바꿨는데 아무 일도 안 일어나는」 상태가 됐다(2026-08-13 실측).
 fn read_setting_str(key: &str) -> Option<String> {
-    let p = match std::env::var("KASATERM_SETTINGS_FILE") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => home()?.join(".config/kasaterm/settings.json"),
-    };
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    v.get(key)?.as_str().map(String::from)
+    read_setting_value(key)?.as_str().map(String::from)
 }
 
 /// 테마 팩 루트 — `~/.config/kasaterm/themes/`. **폴더 하나가 테마 하나**다:
@@ -254,6 +249,142 @@ pub fn member_names(chars: &Value) -> Vec<String> {
         }
     }
     v
+}
+
+/// 번들(테마 폴더 없음) 로스터를 가리키는 예약 키. `theme_roster_handler` 가 이미
+/// 같은 이름을 쓴다 — 번들은 테마 id 가 빈 문자열이라 그대로 키로 쓰면 안 된다.
+pub const BASE_THEME_KEY: &str = "__base";
+
+/// settings.json 의 `character_picks` — `{"<테마 id|__base>": ["이름", …]}`.
+///
+/// **테마를 가로지르는 한 명단**이라 어느 한 `theme.json` 에도 적을 수 없고, 여기 두면
+/// 번들 로스터를 사용자 홈으로 포크시키지도 않는다(`update_member` 가 파일이 없으면
+/// 번들을 seed 로 홈에 사본을 만드는데, 그 사본은 그 뒤 앱 업데이트의 로스터 변경을
+/// 영영 못 받는다).
+fn read_character_picks() -> Vec<(String, Vec<String>)> {
+    let Some(v) = read_setting_value("character_picks") else { return Vec::new() };
+    let Some(obj) = v.as_object() else { return Vec::new() };
+    obj.iter()
+        .map(|(k, names)| {
+            let names = names
+                .as_array()
+                .map(|a| {
+                    a.iter().filter_map(|n| n.as_str()).map(String::from).collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (k.clone(), names)
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect()
+}
+
+/// settings.json 의 값 하나(문자열이 아닌 것도). `read_setting_str` 과 같은 경로 규칙.
+fn read_setting_value(key: &str) -> Option<Value> {
+    let p = settings_path()?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    v.get(key).cloned()
+}
+
+fn settings_path() -> Option<PathBuf> {
+    match std::env::var("KASATERM_SETTINGS_FILE") {
+        Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
+        _ => Some(home()?.join(".config/kasaterm/settings.json")),
+    }
+}
+
+/// 골라 둔 이름들 — 테마를 가로질러 모으고 **그 테마에 실재하는 것만** 남긴다.
+///
+/// 실재 확인을 하는 이유: 테마를 지웠거나 이름을 바꾸면 목록에 유령이 남는데, 그걸
+/// 배정하면 이름은 뜨는데 그림·색이 없는 pane 이 된다. 없는 id 를 조용히 접는
+/// `read_claude_account` 와 같은 방어다.
+fn picked_names_from(
+    picks: &[(String, Vec<String>)],
+    load: impl Fn(&str) -> Option<Value>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (theme, wanted) in picks {
+        let Some(chars) = load(theme) else { continue };
+        let have = member_names(&chars);
+        for n in wanted {
+            // 이름이 두 테마에 겹쳐도 한 번만 — 배정은 이름을 키로 쓰므로 둘을 구별
+            // 못 하고, 중복이 있으면 그 이름만 뽑힐 확률이 두 배가 된다.
+            if have.contains(n) && !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 로스터를 실제로 읽는 판.
+fn picked_names_uncached(picks: &[(String, Vec<String>)]) -> Vec<String> {
+    picked_names_from(picks, |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+/// 위의 캐시판. 배정은 pane 이 뜰 때마다 도는데 `read_character_picks` 는 매번 디스크를
+/// 읽고 테마 파일까지 훑는다 — settings.json 의 mtime 이 그대로면 재사용한다.
+#[allow(clippy::type_complexity)]
+static PICKED: std::sync::OnceLock<
+    std::sync::Mutex<Option<(Option<(std::time::SystemTime, u64)>, Vec<String>)>>,
+> = std::sync::OnceLock::new();
+
+fn picked_names() -> Vec<String> {
+    let stamp = settings_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    let cell = PICKED.get_or_init(Default::default);
+    let Ok(mut g) = cell.lock() else {
+        return picked_names_uncached(&read_character_picks());
+    };
+    if let Some((s, names)) = g.as_ref() {
+        // stat 이 실패하면(파일 없음) 언제 무효화할지 모르니 캐시를 안 믿는다.
+        if stamp.is_some() && *s == stamp {
+            return names.clone();
+        }
+    }
+    let names = picked_names_uncached(&read_character_picks());
+    *g = Some((stamp, names.clone()));
+    names
+}
+
+/// 고른 목록이 바뀐 뒤 부른다. `theme::invalidate_roster()`·`invalidate_active_theme()`
+/// 과 **짝으로** — settings.json 을 바로 다시 써서 mtime 이 같은 초에 머무는 경우가
+/// 있어 stat 만으로는 갱신을 못 잡는다.
+pub fn invalidate_character_picks() {
+    if let Some(c) = PICKED.get() {
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
+    }
+}
+
+/// **배정에 쓸** 이름들. 고른 것이 없으면 `member_names` 그대로(=지금까지의 동작)고,
+/// 있으면 테마를 가로질러 그 이름들만 돌려준다.
+///
+/// `member_names` 를 그대로 필터하지 않는 이유: 그 함수는 배정 말고도 셸 런처 생성
+/// (`시로코` 명령)·agy persona 파일·설정 화면 캐릭터 격자가 쓴다. 거기까지 걸러 버리면
+/// 안 고른 캐릭터의 **런처 명령이 사라진다** — 고르기는 「누가 배정되나」의 문제지
+/// 「무엇이 존재하나」의 문제가 아니다.
+///
+/// 결과가 비면 반드시 `member_names` 로 돌아간다. 전원을 끄거나 고른 이름이 전부
+/// 사라졌을 때 빈 목록을 주면 배정이 통째로 죽어 캐릭터 없는 pane 이 뜬다.
+pub fn assignable_names(chars: &Value) -> Vec<String> {
+    assignable_names_with(chars, &picked_names())
+}
+
+/// 위의 순수부 — 고른 목록을 이미 손에 들고 있을 때. 폴백 규칙이 여기 한 줄로 모여
+/// 있어야 「빈 목록이 배정을 굶기는가」를 파일 없이 시험할 수 있다.
+fn assignable_names_with(chars: &Value, picked: &[String]) -> Vec<String> {
+    if picked.is_empty() {
+        return member_names(chars);
+    }
+    picked.to_vec()
 }
 
 /// 방 학교 판정에서 빼는 소속 — 학원이 아니라 소속 기관이고 인원도 둘뿐이라,
@@ -1252,6 +1383,84 @@ mod least_used_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn roster(names: &[&str]) -> Value {
+        serde_json::json!({
+            "leader": { "name": names.first().copied().unwrap_or("리더") },
+            "leaders": [{ "name": names.first().copied().unwrap_or("리더") }],
+            "members": names.iter().skip(1).map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>(),
+        })
+    }
+
+    fn picks(v: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        v.iter()
+            .map(|(t, ns)| (t.to_string(), ns.iter().map(|n| n.to_string()).collect()))
+            .collect()
+    }
+
+    /// 고른 것이 없으면 지금까지의 동작 그대로 — 전원이 후보다.
+    #[test]
+    fn picking_nothing_keeps_every_character_assignable() {
+        let chars = roster(&["아로나", "시로코", "호시노"]);
+        assert_eq!(picked_names_from(&[], |_| None), Vec::<String>::new());
+        assert_eq!(assignable_names_with(&chars, &[]), member_names(&chars));
+    }
+
+    /// 테마를 가로질러 모인다 — 이게 이 기능의 핵심이다.
+    #[test]
+    fn picks_are_gathered_across_themes() {
+        let base = roster(&["아로나", "시로코"]);
+        let genshin = roster(&["푸리나", "나히다"]);
+        let got = picked_names_from(
+            &picks(&[(BASE_THEME_KEY, &["시로코"]), ("genshin", &["푸리나", "나히다"])]),
+            |t| match t {
+                BASE_THEME_KEY => Some(base.clone()),
+                "genshin" => Some(genshin.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(got, vec!["시로코", "푸리나", "나히다"]);
+    }
+
+    /// 지운 테마·바뀐 이름은 유령으로 남는다. 그대로 배정하면 이름은 뜨는데 그림도
+    /// 색도 없는 pane 이 되므로 조용히 뺀다.
+    #[test]
+    fn names_that_no_longer_exist_are_dropped() {
+        let base = roster(&["아로나", "시로코"]);
+        let got = picked_names_from(
+            &picks(&[(BASE_THEME_KEY, &["시로코", "없는애"]), ("지운테마", &["누구"])]),
+            |t| (t == BASE_THEME_KEY).then(|| base.clone()),
+        );
+        assert_eq!(got, vec!["시로코"]);
+    }
+
+    /// 같은 이름이 두 테마에 있어도 한 번만 — 배정은 이름을 키로 쓰므로 둘을 구별
+    /// 못 하고, 중복이 있으면 그 이름만 뽑힐 확률이 두 배가 된다.
+    #[test]
+    fn a_name_in_two_themes_is_listed_once() {
+        let a = roster(&["아로나", "겹침"]);
+        let b = roster(&["푸리나", "겹침"]);
+        let got = picked_names_from(
+            &picks(&[("a", &["겹침"]), ("b", &["겹침", "푸리나"])]),
+            |t| match t {
+                "a" => Some(a.clone()),
+                "b" => Some(b.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(got, vec!["겹침", "푸리나"]);
+    }
+
+    /// ⚠️ 전원을 끄거나 고른 이름이 전부 사라져도 **빈 목록을 주면 안 된다** —
+    /// 배정이 통째로 죽어 캐릭터 없는 pane 이 뜬다.
+    #[test]
+    fn an_empty_pick_never_starves_assignment() {
+        let chars = roster(&["아로나", "시로코"]);
+        // 고른 이름이 전부 유령인 경우
+        let ghosts = picked_names_from(&picks(&[("지운테마", &["누구"])]), |_| None);
+        assert!(ghosts.is_empty());
+        assert_eq!(assignable_names_with(&chars, &ghosts), member_names(&chars));
+    }
 
     /// 테마 폴더 판정은 `theme.json` 의 **실재**로만 한다.
     ///

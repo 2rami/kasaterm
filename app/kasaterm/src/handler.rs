@@ -499,7 +499,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(거노).
                 let resolved = resolved.or_else(|| {
                     let members = kasa_mcp::character::characters_json()
-                        .map(|c| kasa_mcp::character::member_names(&c))
+                        .map(|c| kasa_mcp::character::assignable_names(&c))
                         .unwrap_or_default();
                     let taken: std::collections::HashSet<String> = {
                         let ws = self.ws.lock().unwrap();

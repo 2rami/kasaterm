@@ -2298,7 +2298,7 @@ impl Backend for PtyBackend {
                         .filter(|c| valid_members.contains(c));
                     let name = anchored.or(inherited).or(own).or_else(|| {
                         kasa_mcp::character::characters_json().and_then(|chars| {
-                            let members = kasa_mcp::character::member_names(&chars);
+                            let members = kasa_mcp::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
                             // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
                             let taken: std::collections::HashSet<&String> =

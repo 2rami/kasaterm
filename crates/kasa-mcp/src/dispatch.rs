@@ -676,7 +676,7 @@ fn pick_character(cfg: &DispatchConfig, taken: &HashSet<String>, cursor: &mut us
         cfg.characters.clone()
     } else {
         crate::character::characters_json()
-            .map(|v| crate::character::member_names(&v))
+            .map(|v| crate::character::assignable_names(&v))
             .unwrap_or_default()
     };
     if pool.is_empty() {
