@@ -28,11 +28,30 @@ import urllib.request
 
 WIKI = os.environ.get("THEME_WIKI_API", "https://bluearchive.fandom.com/api.php")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROSTER = os.path.join(ROOT, "app/kasaterm/collab-hooks/characters.json")
-OUT = os.path.join(ROOT, "theme-src")
+# 로스터·출력 자리는 `theme-sprites.py` 와 **같은 환경변수**를 쓴다. 두 스크립트가
+# 한 파이프라인의 앞뒤인데 이쪽만 번들 고정이면, 새 테마를 조사하라고 불러도 조용히
+# 블루아카 명부를 읽고 `theme-src/` 에 쌓는다(오류가 안 난다).
+ROSTER = os.environ.get("THEME_ROSTER") or os.path.join(
+    ROOT, "app/kasaterm/collab-hooks/characters.json"
+)
+OUT = os.environ.get("THEME_SRC") or os.path.join(ROOT, "theme-src")
 INDEX = os.path.join(OUT, "_index.json")
 # 문서 하나에 관심 있는 절만. 나머지(전투 수치·스토리)는 프롬프트에 쓸모가 없다.
-SECTIONS = ("Appearance", "Halo", "Uniform", "Personality")
+# 절 이름도 위키마다 다르다 — BA 는 `Halo`/`Uniform`, 프로젝트 세카이는
+# `Casual Outfit`/`Unit Outfit` 이다. 없는 절은 조용히 건너뛰므로 넉넉히 적어 둔다.
+SECTIONS = tuple(
+    s.strip()
+    for s in os.environ.get(
+        "THEME_WIKI_SECTIONS",
+        "Appearance,Halo,Uniform,Personality,Casual Outfit,Unit Outfit",
+    ).split(",")
+    if s.strip()
+)
+# 현지화 이름이 담긴 인포박스 필드 — 위키마다 이름이 다르다(BA `name_kr`,
+# 프로젝트 세카이 `hangul`). 먼저 맞는 것을 쓴다.
+KR_FIELDS = ("name_kr", "hangul")
+# 캐릭터 문서를 모아 둔 카테고리. BA 는 `Students`, 다른 작품은 대개 `Characters` 다.
+CATEGORY = os.environ.get("THEME_WIKI_CATEGORY", "Category:Students")
 
 
 def api(**params):
@@ -51,8 +70,21 @@ def api(**params):
 
 
 def roster():
+    """전원 — `leader`·`leaders` 까지. `theme-sprites.py members()` 와 같은 규칙이다.
+
+    `members` 만 보면 비서 캐릭터가 조사에서 빠지고, 그러면 그 한 명만 묘사도
+    참조 그림도 없이 남는다. 그림 쪽은 저쪽 주석이 이미 같은 함정을 막아 뒀는데
+    조사 쪽만 안 따라와 있었다.
+    """
     d = json.load(open(ROSTER, encoding="utf-8"))
-    return [m for m in d["members"] if m.get("slug")]
+    pool = [d.get("leader")] + list(d.get("leaders") or []) + list(d.get("members") or [])
+    out, seen = [], set()
+    for m in pool:
+        slug = (m or {}).get("slug")
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append(m)
+    return out
 
 
 def claim(index, key, title, kr, variant):
@@ -73,8 +105,26 @@ def claim(index, key, title, kr, variant):
         index[key] = (title, rank)
 
 
-def build_index(category="Category:Students"):
+def kr_name(text):
+    """인포박스에서 현지화 이름을 뽑는다.
+
+    필드 이름이 위키마다 다르다 — 블루아카는 `name_kr`, 프로젝트 세카이는 `hangul`
+    이다. 그리고 값에 로마자가 괄호로 따라붙는 위키가 있다(`호시노 이치카 (Hoshino
+    Ichika)`). 그대로 키로 쓰면 로스터의 「이치카」와 영영 안 만나므로 괄호를 턴다.
+    """
+    for f in KR_FIELDS:
+        m = re.search(r"\|\s*" + f + r"\s*=\s*([^\n|]+)", text)
+        if not m:
+            continue
+        kr = re.sub(r"\s*\(.*$", "", m.group(1)).strip()
+        if kr:
+            return kr
+    return None
+
+
+def build_index(category=None):
     """위키 전체를 훑어 한글 이름 → 문서 제목 표를 만든다."""
+    category = category or CATEGORY
     members = api(
         action="query", list="categorymembers", cmtitle=category, cmlimit=500
     )["query"]["categorymembers"]
@@ -99,10 +149,7 @@ def build_index(category="Category:Students"):
                 c["title"] == "Category:Variant" for c in p.get("categories", [])
             )
             text = p["revisions"][0]["slots"]["main"]["content"]
-            m = re.search(r"\|\s*name_kr\s*=\s*([^\n|]+)", text)
-            if not m:
-                continue
-            kr = m.group(1).strip()
+            kr = kr_name(text)
             if not kr:
                 continue
             # 「텐도 케이」와 「케이」 둘 다 키로 넣는다 — 로스터는 이름만 쓴다.
@@ -147,9 +194,20 @@ def sections(text):
 
 
 def portrait_url(title):
-    """문서의 대표 이미지 URL. `<이름> Portrait.png` 규칙을 먼저 시도한다."""
+    """문서의 대표 이미지 URL.
+
+    파일명 규칙이 위키마다 다르다 — BA 는 `<이름> Portrait.png`, 프로젝트 세카이는
+    `<이름>.png` 와 `<이름> (icon).png` 다. 후보를 한 번에 물어보고 **가장 큰 것**을
+    고른다(작은 아이콘보다 전신 아트가 정체성 참조로 낫다). 없는 후보는 응답에서
+    빠질 뿐이라 넉넉히 넣어도 비용이 같다.
+    """
     short = title.split()[-1]
-    cands = [f"File:{short} Portrait.png", f"File:{short} Icon.png"]
+    cands = [
+        f"File:{short} Portrait.png",
+        f"File:{short} Icon.png",
+        f"File:{short}.png",
+        f"File:{short} (icon).png",
+    ]
     d = api(action="query", titles="|".join(cands), prop="imageinfo", iiprop="url|size")
     best = None
     for p in d.get("query", {}).get("pages", []):
