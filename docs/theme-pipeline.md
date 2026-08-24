@@ -105,6 +105,13 @@ PPGEN=/tmp/ppgen THEME_SRC=theme-src-<id> THEME_ROSTER=theme-src-<id>/roster.jso
 - `input_fidelity` 는 보내지 마라 — `gpt-image-2` 가 400 을 준다(항상 high fidelity).
 - `--ref` 를 쓸 때만: 게이트웨이 업로드 상한 때문에 1024px PNG 는 413 이다 — 참조는
   **512px·100KB 이하 JPEG** 로 줄여 보낸다(2026-08-20 실측).
+- ⚠️**진행률은 로그가 아니라 산출물 개수로 봐라.** stdout 을 파일로 받아도 0바이트로
+  끝날 때가 있다(2026-08-24 보컬로이드 20명이 전부 정상으로 구워졌는데 로그는 빈 채였다).
+  로그의 `fail` 을 지켜보는 감시는 그럴 때 실패도 완료도 못 잡는다. 정본은
+  `ls theme-src-<id>/*/out/sprite-sheet.png | wc -l` 이다.
+- ⚠️**진행 확인에 `pgrep -fl`·`ps` 로 명령줄을 찍지 마라** — argv 에 게이트웨이 키가
+  그대로 들어 있어 화면과 대화기록에 값이 남는다. 존재만 보려면
+  `pgrep -f "[p]pgen" > /dev/null; echo $?`.
 
 대안 프로바이더: `codex`(ChatGPT 구독 인증, 과금 별개 — 단 구독 사용량 한도가 있다.
 2026-08-24 소진돼 9/10 까지 막힌 적이 있다) · `openai` 는 api.openai.com 직결이라 위
