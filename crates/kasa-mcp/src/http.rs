@@ -3076,6 +3076,39 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 /// 정본이다. 활성 계정의 refresh token 사슬은 작업대와 공유(1회용)라, 금고 쪽에서
 /// 소비하면 도는 pane 전체가 다음 refresh 에 로그아웃된다(2026-08-18 22:04 실측 —
 /// 재시작하자마자 전 pane 이 /login 을 요구했다).
+/// 작업대가 429 를 맞았을 때 **대신 물어볼 같은 계정의 금고** 경로.
+///
+/// 작업대 토큰은 도는 pane 의 claude 들이 다 함께 쓴다 — 각자 한도를 조회하니
+/// 호출이 몰려 429 를 맞기 쉽고, 한 번 막히면 화면이 통째로 빈칸이 된다(2026-08-24
+/// 실측: 활성 슬롯이 6일째 429). 금고는 **같은 계정의 다른 토큰**이라 한도가 따로
+/// 돌고, 돌아오는 숫자는 어차피 같은 계정 것이다.
+///
+/// ⚠️ **이 폴백은 refresh 를 못 탄다.** `refresh_claude_token` 이 활성 금고를 맨
+/// 앞에서 거부하므로(`is_active_vault_dir`) 여기서 나온 경로는 읽기 전용이다. 그게
+/// 중요한 이유: 활성 금고를 회전시키면 1회용 refresh token 이 소비돼 **작업대의
+/// 사슬이 죽고**, 재시작 때 전 pane 이 로그아웃된다(2026-08-19 실사고). 읽기만
+/// 하는 한 그 경로는 열리지 않는다.
+fn active_vault_dir() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let root = std::path::PathBuf::from(home).join(".config/kasaterm/claude-accounts");
+    let raw = std::fs::read_to_string(root.join("_active/workbench-stamp.json")).ok()?;
+    active_vault_in(&root, &raw)
+}
+
+/// 위의 순수부 — 루트와 지문 본문만 받는다. HOME 을 흔들지 않고 검증되어야 하는
+/// 이유는 이 함수가 **refresh 금지 규약과 맞물려** 있어서다: 여기서 나온 경로는
+/// `is_active_vault_dir` 이 반드시 활성 금고로 알아봐야 하고, 그래야
+/// `refresh_claude_token` 이 그 경로를 거부한다. 둘이 어긋나면 조회 폴백이
+/// 회전 경로로 새고, 그게 전 세션 로그아웃으로 이어진다.
+fn active_vault_in(root: &std::path::Path, stamp_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stamp_json).ok()?;
+    let acct = v.get("account")?.as_str()?;
+    if acct.is_empty() {
+        return None;
+    }
+    Some(root.join(acct).to_string_lossy().into_owned())
+}
+
 fn is_active_vault_dir(dir: &str) -> bool {
     if dir.is_empty() {
         return false; // 빈 dir = 작업대 자신. 금고가 아니다.
@@ -3332,13 +3365,22 @@ async fn claude_usage_handler(
         .ok()
         .and_then(|g| g.get(&dir).copied())
         .is_some_and(|until| Instant::now() < until);
-    let fresh: Option<serde_json::Value> = match token {
-        // 막힌 동안은 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
-        Some(_) if backed_off => {
-            why = "rate_limited";
-            None
+    // 토큰 후보. 작업대(빈 dir)가 429 면 같은 계정의 금고로 한 번 더 묻는다 —
+    // 다른 토큰이라 한도가 따로 돌고, 숫자는 어차피 같은 계정 것이다.
+    let mut tokens: Vec<String> = token.into_iter().collect();
+    if dir.is_empty() {
+        if let Some(vault) = active_vault_dir().and_then(|d| read_claude_token_from(Some(&d))) {
+            if !tokens.contains(&vault) {
+                tokens.push(vault);
+            }
         }
-        Some(token) => {
+    }
+    let mut fresh: Option<serde_json::Value> = None;
+    // 막힌 동안은 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
+    if backed_off && !tokens.is_empty() {
+        why = "rate_limited";
+    } else {
+        for token in &tokens {
             let resp = reqwest::Client::new()
                 .get("https://api.anthropic.com/api/oauth/usage")
                 .header("authorization", format!("Bearer {token}"))
@@ -3350,10 +3392,14 @@ async fn claude_usage_handler(
                     if let Ok(mut g) = backoff.lock() {
                         g.remove(&dir);
                     }
-                    r.text()
+                    fresh = r
+                        .text()
                         .await
                         .ok()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                    if fresh.is_some() {
+                        break;
+                    }
                 }
                 Ok(r) => {
                     let code = r.status().as_u16();
@@ -3362,24 +3408,23 @@ async fn claude_usage_handler(
                         401 | 403 => "token_rejected",
                         _ => "usage_unavailable",
                     };
-                    if code == 429 {
-                        if let Ok(mut g) = backoff.lock() {
-                            g.insert(dir.clone(), Instant::now() + BACKOFF_FOR);
-                        }
-                    }
+                    // 백오프는 **후보를 다 써 보고** 건다 — 첫 토큰이 막혔다고 바로
+                    // 걸면 멀쩡한 두 번째 토큰을 15분 동안 안 쓰게 된다.
                     // 상태만 남긴다(토큰은 절대). 조용한 실패는 현장에서 못 가른다.
                     eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
-                    None
                 }
                 Err(e) => {
                     why = "network";
                     eprintln!("[claude-usage] 요청 실패: {e}");
-                    None
                 }
             }
         }
-        None => None,
-    };
+        if fresh.is_none() && why == "rate_limited" {
+            if let Ok(mut g) = backoff.lock() {
+                g.insert(dir.clone(), Instant::now() + BACKOFF_FOR);
+            }
+        }
+    }
 
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
@@ -4976,6 +5021,36 @@ mod tests {
     /// 낡은 값이라도 하루까지는 살린다 — upstream 이 오래 막혔을 때 빈칸보다
     /// 「~71% 씀」이 낫다. 다만 무한정은 아니다: 며칠 전 숫자를 지금 것처럼
     /// 그리면 옮길 곳을 고르는 판단이 통째로 틀어진다.
+    /// 조회 폴백이 만드는 경로는 **반드시** 활성 금고로 인식돼야 한다 — 그래야
+    /// `refresh_claude_token` 이 첫 줄에서 거부하고, 폴백이 회전 경로로 새지 않는다.
+    /// 이 대칭이 깨지면 활성 금고의 1회용 refresh token 이 소비돼 작업대 사슬이
+    /// 죽고, 재시작 때 전 pane 이 로그아웃된다(2026-08-19 실사고).
+    #[test]
+    fn the_usage_fallback_path_is_always_refresh_forbidden() {
+        let tmp = std::env::temp_dir().join(format!("kasa-vault-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("_active")).unwrap();
+        let stamp = r#"{"account":"acct-5","digest":"deadbeef"}"#;
+        std::fs::write(tmp.join("_active/workbench-stamp.json"), stamp).unwrap();
+
+        let vault = active_vault_in(&tmp, stamp).expect("지문이 계정을 말하면 경로가 나온다");
+        assert!(vault.ends_with("acct-5"));
+        assert!(
+            is_active_vault_dir(&vault),
+            "폴백 경로가 활성 금고로 안 보이면 refresh 거부를 통과해 버린다"
+        );
+
+        // 다른 슬롯은 활성이 아니다 — 그쪽은 회전해도 작업대와 무관하다.
+        let other = tmp.join("acct-1").to_string_lossy().into_owned();
+        assert!(!is_active_vault_dir(&other));
+
+        // 지문에 계정이 없으면 폴백 자체가 없다(빈 경로를 만들어 기본 슬롯을
+        // 두 번 치는 일이 없어야 한다).
+        assert_eq!(active_vault_in(&tmp, r#"{"account":""}"#), None);
+        assert_eq!(active_vault_in(&tmp, "{}"), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn usage_snapshot_survives_a_day_then_expires() {
         let saved_at = 1_785_000_000u64;
