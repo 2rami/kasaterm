@@ -380,7 +380,7 @@ pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String
         .iter()
         .filter(|&&c| c != ' ' && c != '\0')
         .collect();
-    theme::character_accent(&name)?;
+    theme::character_accent_any(&name)?;
     Some((first, first + 1 + close_rel + 1, name))
 }
 
@@ -442,6 +442,24 @@ pub(crate) fn restyle_peer_native_header(
     }
 }
 
+/// tell 프사에 실제로 쓸 수 있는 슬러그 — 이름을 합집합에서 찾되 **그림이 실재할
+/// 때만**.
+///
+/// 활성 명부는 그대로 통과시키고(기존 동작), **넓힌 몫에만** 그림 확인을 건다.
+/// 비활성 테마의 이름은 슬러그가 나와도 그 테마의 그림이 활성 자산 경로에 없어서,
+/// 슬러그만 믿으면 `restyle_tell_line` 이 프사 자리 2칸을 비워 둔 채 아무것도 안
+/// 그려져 **빈 칸이 남는다**. 넓힌 몫이 기댈 수 있는 건 컴파일 내장 프사뿐이라
+/// 그 존재로 가른다(match 하나라 IO 도 0).
+///
+/// restyle 과 렌더가 **이 하나를** 쓴다 — 판정이 두 벌이면 한쪽은 자리를 비우고
+/// 다른 쪽은 안 그리는 어긋남이 그대로 빈 칸이 된다.
+pub(crate) fn tell_face_slug(name: &str) -> Option<&'static str> {
+    if let Some(s) = theme::character_slug(name) {
+        return Some(s);
+    }
+    theme::character_slug_any(name).filter(|s| crate::sprites::student_profile_png(s).is_some())
+}
+
 pub(crate) fn restyle_tell_line(
     row: &mut [GridCell],
     marker_start: usize,
@@ -452,7 +470,7 @@ pub(crate) fn restyle_tell_line(
     use unicode_width::UnicodeWidthChar;
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let end = marker_end.min(row.len());
-    if theme::character_slug(name).is_some() {
+    if tell_face_slug(name).is_some() {
         // 마커 뒤 본문을 마커 시작 col 로 당긴다(claude 의 `❯ ` 폭 = 2 = wrap
         // 들여쓰기라 첫 줄과 연속 줄이 같은 col 에 선다).
         let body_start = row[end..]
@@ -3792,6 +3810,30 @@ mod teammate_msg_tests {
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
+    }
+
+    /// 프사 자리를 세울지 가르는 판정 — 활성 명부는 그대로, 넓힌 몫은 그림이
+    /// 있을 때만. 없으면 None 이어야 `restyle_tell_line` 이 인라인 `이름 ›` 갈래로
+    /// 떨어져 **빈 2칸이 안 생긴다**.
+    #[test]
+    fn tell_face_slug_needs_a_real_picture() {
+        assert_eq!(tell_face_slug("미도리"), Some("midori"));
+        assert!(tell_face_slug("없는캐릭").is_none());
+        // 이름이 명부에 있어도 그림이 없으면 프사 자리를 세우지 않는다 —
+        // 판정의 두 번째 조건이 실제로 걸리는지(슬러그만 보고 통과시키지 않는지).
+        assert!(crate::sprites::student_profile_png("존재하지않는슬러그").is_none());
+    }
+
+    /// 마커가 걷히는 것과 프사가 붙는 것은 **다른 조건**이다. 그림 없는 이름도
+    /// 마커는 사라지고 `이름 ›` 인라인으로 남아야 한다 — 내부 표식이 사용자
+    /// 화면에 새는 것이 이번 수리의 본체다.
+    #[test]
+    fn marker_is_always_consumed_even_without_a_face() {
+        let mut row = row_from("⟦미도리⟧ 본문", 80);
+        let (s0, e0, name) = tell_marker_line(&row).expect("마커");
+        restyle_tell_line(&mut row, s0, e0, &name, [107, 207, 127, 255]);
+        let text = row_text(&row);
+        assert!(!text.contains('⟦') && !text.contains('⟧'), "마커가 화면에 남았다: {text:?}");
     }
 
     // 프사 캐릭터: 아바타는 본문 위 행으로 올라가고(반환 col 이 그 x 기준) 본문은

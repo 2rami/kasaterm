@@ -1183,6 +1183,53 @@ pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     roster().accents.iter().find(|(n, _)| *n == name).map(|(_, rgb)| unpack((rgb << 8) | 0xff))
 }
 
+/// 활성·번들·설치 테마를 통틀어 이름을 찾는다 — 색은 **활성 명부 우선**.
+///
+/// tell 마커(`⟦이름⟧`)는 **발신 pane 의 테마**로 찍히는데 받는 쪽은 자기 명부를
+/// 본다. 둘이 다르면 이름이 안 걸려 마커가 걷히지 않고 날것으로 화면에 남았다
+/// (2026-08-24 실측: 치이카와 활성 + 블루아카 이름 pane 이 공존하는 화면).
+///
+/// **아무 이름이나 받아 주면 안 되는 이유**: 이 조회는 가짜 마커 문지기를 겸한다 —
+/// 사람이 본문에 친 `⟦메모⟧` 까지 걷어내면 화면 내용을 조용히 바꾸는 셈이다.
+/// 마커는 kasaterm 의 tell 경로만 찍고 그 이름은 반드시 어느 명부엔가 있으므로,
+/// **아는 명부의 합집합**이 오탐 억제력을 유지하는 경계다.
+pub fn character_accent_any(name: &str) -> Option<[u8; 4]> {
+    character_accent(name).or_else(|| accent_beyond_active(name, other_rosters()))
+}
+
+/// 활성 밖 갈래 — 번들 정적, 그다음 주어진 명부들. **명부 주입 버전인 이유**는
+/// 이 갈래가 활성 테마와 설치 상태에 따라서만 갈리기 때문이다. 실제 파일에
+/// 기대면 테마를 고른 컴퓨터에서만 도는 검증이 되고, 그건 이 파일이 방금 한 번
+/// 겪은 병이다(`build_roster` 주석).
+fn accent_beyond_active(name: &str, extra: &[Roster]) -> Option<[u8; 4]> {
+    // 번들은 컴파일 내장이라 IO 가 0 이고, 지금 화면의 흔한 방향(테마 활성 +
+    // 옛 이름)이 대개 여기서 닫힌다 — 파일에서 온 명부를 훑기 전에 본다.
+    CHARACTER_ACCENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+        .or_else(|| {
+            extra.iter().find_map(|r| r.accents.iter().find(|(n, _)| *n == name).map(|(_, c)| *c))
+        })
+        .map(|rgb| unpack((rgb << 8) | 0xff))
+}
+
+/// 합집합 슬러그 — `character_accent_any` 와 같은 범위를 슬러그로. 활성 우선.
+///
+/// ⚠️ **슬러그가 나왔다고 그림이 있는 건 아니다.** 비활성 테마의 그림은 활성 자산
+/// 경로(`students_dir()`)에 없다 — 프사 자리를 세우기 전에 그림 실재를 따로
+/// 확인해야 한다(`screenread::tell_face_slug`).
+pub fn character_slug_any(name: &str) -> Option<&'static str> {
+    character_slug(name).or_else(|| slug_beyond_active(name, other_rosters()))
+}
+
+/// `accent_beyond_active` 의 슬러그 짝 — 같은 이유로 명부를 주입받는다.
+fn slug_beyond_active(name: &str, extra: &[Roster]) -> Option<&'static str> {
+    CHARACTER_SLUGS.iter().find(|(n, _)| *n == name).map(|(_, s)| *s).or_else(|| {
+        extra.iter().find_map(|r| r.slugs.iter().find(|(n, _)| *n == name).map(|(_, s)| *s))
+    })
+}
+
 /// 같은 학생이 여러 pane 에 떠 있을 때 n번째(0-기준) 인스턴스의 accent 변주 —
 /// 학생 지정 스폰이 중복을 허용하므로 색으로 인스턴스를 구분한다(거노).
 /// 0=원색, 이후 파스텔↔딥톤 교대 사다리. hue 는 유지해 학생 정체성과 타 학생
@@ -1273,6 +1320,52 @@ fn roster() -> Roster {
 /// 테마를 갈아 끼운 뒤 부른다 — 다음 조회가 새 로스터를 굽는다.
 pub fn invalidate_roster() {
     *ROSTER.write().unwrap() = None;
+    // 합집합 캐시도 **함께** 비운다. 한쪽만 비우면 새 테마의 이름이 「다른 테마」
+    // 목록에 옛 채로 남아, 활성과 합집합이 같은 이름을 두 색으로 답한다.
+    *OTHER_ROSTERS.write().unwrap() = None;
+}
+
+/// 설치된 나머지 테마들의 명부 — 활성에도 번들에도 없는 이름의 마지막 보루.
+///
+/// 파일 IO 라 캐시가 필수다(조회가 렌더 경로에서 온다). 위 `invalidate_roster` 가
+/// 활성 로스터와 짝으로 비운다.
+static OTHER_ROSTERS: std::sync::RwLock<Option<&'static [Roster]>> =
+    std::sync::RwLock::new(None);
+
+fn other_rosters() -> &'static [Roster] {
+    if let Some(r) = *OTHER_ROSTERS.read().unwrap() {
+        return r;
+    }
+    let mut w = OTHER_ROSTERS.write().unwrap();
+    // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 구웠을 수 있다.
+    if let Some(r) = *w {
+        return r;
+    }
+    let r = build_other_rosters();
+    *w = Some(r);
+    r
+}
+
+/// 테마 폴더를 훑어 **파싱되는 것만** 모은다 — best-effort. 폴더가 없거나 깨진
+/// `theme.json` 하나 때문에 나머지 조회를 포기할 이유가 없다.
+fn build_other_rosters() -> &'static [Roster] {
+    // 테스트는 이 컴퓨터의 테마 폴더와 무관해야 한다 — `build_roster` 와 같은 이유.
+    if cfg!(test) {
+        return &[];
+    }
+    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
+    let Ok(rd) = std::fs::read_dir(root) else { return &[] };
+    let mut out: Vec<Roster> = Vec::new();
+    for e in rd.flatten() {
+        let Ok(raw) = std::fs::read_to_string(e.path().join("theme.json")) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        // 파싱은 활성 로스터와 **같은 갈래**를 탄다 — 파서가 둘이 되면 같은
+        // theme.json 을 두 벌로 해석하고, 어긋나도 오류가 안 난다.
+        if let Some(r) = roster_from(&v) {
+            out.push(r);
+        }
+    }
+    Box::leak(out.into_boxed_slice())
 }
 
 /// 활성 로스터의 이름↔슬러그 전부 — 전 캐릭터를 훑어야 하는 곳(테마 복제)용.
@@ -1576,6 +1669,48 @@ mod roster_tests {
         let v = serde_json::json!({ "leader": one, "leaders": [one], "members": [] });
         let r = roster_from(&v).unwrap();
         assert_eq!(r.slugs, &[("아로나", "arona")]);
+    }
+
+    /// 합집합 조회 — 활성 밖 갈래가 **양방향**을 다 닫는가.
+    ///
+    /// tell 마커는 발신 pane 의 테마로 찍히므로 두 방향이 다 생긴다: 테마를 켠
+    /// 화면의 옛 이름(번들), 번들 화면의 새 테마 이름(설치 테마). 한쪽만 닫으면
+    /// 반대 방향에서 마커가 그대로 노출된다.
+    #[test]
+    fn accent_beyond_active_covers_both_directions() {
+        // 활성 밖 + 번들 안. 색까지 번들 표와 같아야 한다 — 되는대로 아무 색이나
+        // 칠하면 「색이 곧 학생」이 깨진다.
+        let midori = CHARACTER_ACCENTS.iter().find(|(n, _)| *n == "미도리").map(|(_, c)| *c);
+        assert_eq!(
+            accent_beyond_active("미도리", &[]),
+            midori.map(|rgb| unpack((rgb << 8) | 0xff)),
+            "테마를 켠 화면의 옛 이름이 안 닫힌다"
+        );
+
+        // 활성 밖 + 설치 테마 안.
+        let themed = serde_json::json!({
+            "members": [{ "name": "하치와레", "slug": "hachiware", "header_color": "#4A90D9" }]
+        });
+        let extra = [roster_from(&themed).expect("테마 명부")];
+        assert_eq!(accent_beyond_active("하치와레", &extra), Some([0x4a, 0x90, 0xd9, 255]));
+        assert_eq!(slug_beyond_active("하치와레", &extra), Some("hachiware"));
+
+        // 어느 명부에도 없으면 None — **이 None 이 가짜 마커 문지기다.** 사람이
+        // 본문에 친 `⟦메모⟧` 까지 걷어내면 화면 내용을 조용히 바꾸는 셈이 된다.
+        assert!(accent_beyond_active("없는캐릭", &extra).is_none());
+        assert!(character_accent_any("없는캐릭").is_none());
+        assert!(character_slug_any("없는캐릭").is_none());
+    }
+
+    /// 합집합이어도 **활성이 먼저다** — 같은 이름을 두 명부가 다른 색으로 가지면
+    /// 화면은 지금 고른 테마의 색을 보여야 한다. 그리고 로스터 밖 특례(샬레)가
+    /// 합집합 경로에서도 살아 있어야 한다(에이전트 목록 뷰의 조직색).
+    #[test]
+    fn accent_any_prefers_active_and_keeps_schale() {
+        let active = character_accent("미도리").expect("번들 활성");
+        assert_eq!(character_accent_any("미도리"), Some(active));
+        assert_eq!(character_accent_any("샬레"), character_accent("샬레"));
+        assert!(character_accent_any("샬레").is_some());
     }
 
     /// 캐시를 비우고 다시 부르면 새로 굽는다.

@@ -1951,7 +1951,7 @@ impl App {
                         if let Some((marker_start, marker_end, name)) =
                             tell_marker_line(&composed[r])
                         {
-                            if let Some(accent) = theme::character_accent(&name) {
+                            if let Some(accent) = theme::character_accent_any(&name) {
                                 let face_col = restyle_tell_line(
                                     &mut composed[r],
                                     marker_start,
@@ -1959,8 +1959,7 @@ impl App {
                                     &name,
                                     accent,
                                 );
-                                if let (Some(c0), Some(slug)) =
-                                    (face_col, theme::character_slug(&name))
+                                if let (Some(c0), Some(slug)) = (face_col, tell_face_slug(&name))
                                 {
                                     // 프사는 본문 왼쪽 여백(`❯` 자리, 2칸)에 같은
                                     // 행으로 — 셀은 세로 2:1 이라 2칸×1행이 정사각.
@@ -1986,12 +1985,15 @@ impl App {
                 // 주입)도 보고한 학생색으로 — 어느 학생의 보고인지 색으로 읽힌다
                 // (거노 2026-08-20 「이왕하는거면 학생테마에 맞게 색상 다 해」).
                 // 캐릭터를 모르는 옛 형식(`[완료] %4(%4)`)은 원색 유지 — 엉뚱한
-                // 색보다 낫다.
+                // 색보다 낫다. 반면 **이름은 아는데 명부만 다른** 경우(테마를 바꾼
+                // 뒤 옛 이름 pane 의 보고)는 그 이름의 색이 실재하므로 합집합으로
+                // 찾아 칠한다 — 그쪽까지 원색으로 두면 색이 곧 학생이라는 규칙이
+                // 화면 절반에서만 성립한다.
                 {
                     let mut r = 0;
                     while r < composed.len() {
                         let accent = done_report_line(&composed[r])
-                            .and_then(|n| theme::character_accent(&n));
+                            .and_then(|n| theme::character_accent_any(&n));
                         let Some(accent) = accent else {
                             r += 1;
                             continue;
