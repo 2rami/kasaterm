@@ -812,51 +812,63 @@ pub(crate) fn invalidate_idle_anim() {
 ///
 /// 픽셀 아트라 축소는 Nearest 로 — 보간을 쓰면 도트가 뭉개져 흐려진다.
 pub(crate) fn student_idle_anim(slug: &str) -> Option<std::sync::Arc<IdleAnim>> {
-    use std::sync::Arc;
     let cache = IDLE_ANIM_CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(slug).cloned()) {
         return hit;
     }
-    let built = (|| {
-        use image::AnimationDecoder;
-        let bytes = student_idle_gif_bytes(slug)?;
-        let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-        let mut frames = Vec::new();
-        let mut delays_ms = Vec::new();
-        let mut crop: Option<(u32, u32, u32)> = None;
-        for f in dec.into_frames().collect_frames().ok()? {
-            let (num, den) = f.delay().numer_denom_ms();
-            // 0ms 프레임은 브라우저 관행대로 100ms 로 — 그대로 두면 루프 길이가
-            // 0 이 되어 나눗셈이 터진다.
-            let ms = if den == 0 { 100 } else { (num / den.max(1)).max(20) };
-            let mut buf = f.into_buffer();
-            // 자를 자리는 **첫 프레임에서 한 번만** 잡는다. 프레임마다 다시 재면
-            // 팔이 오르내릴 때 사각이 따라 흔들려 얼굴이 칸 안에서 덜컹거린다.
-            let (cx, cy, cs) = *crop.get_or_insert_with(|| {
-                let (bx, by, bw, _bh) = alpha_bbox(&buf);
-                (bx, by, bw.max(1))
-            });
-            let cs = cs.min(buf.width().saturating_sub(cx)).min(buf.height().saturating_sub(cy));
-            if cs == 0 {
-                return None;
-            }
-            let face = image::imageops::crop(&mut buf, cx, cy, cs, cs).to_image();
-            // 쓰는 자리가 16~22px 이라 32² 면 충분하고, 프레임 수만큼 곱해도 가볍다.
-            const OUT: u32 = 32;
-            let small =
-                image::imageops::resize(&face, OUT, OUT, image::imageops::FilterType::Nearest);
-            frames.push((small.into_raw(), OUT, OUT));
-            delays_ms.push(ms);
-        }
-        (!frames.is_empty()).then(|| {
-            let total_ms = delays_ms.iter().sum::<u32>().max(1);
-            Arc::new(IdleAnim { frames, delays_ms, total_ms })
-        })
-    })();
+    let built = student_idle_gif_bytes(slug).and_then(idle_anim_from_gif);
     if let Ok(mut c) = cache.lock() {
         c.insert(slug.to_string(), built.clone());
     }
     built
+}
+
+/// gif 바이트 → 얼굴 정사각 프레임들. `student_idle_anim` 의 알맹이이자, 시험이
+/// 합성 gif 로 크롭을 검증할 수 있는 진입점.
+fn idle_anim_from_gif(bytes: Vec<u8>) -> Option<std::sync::Arc<IdleAnim>> {
+    use image::AnimationDecoder;
+    let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let all = dec.into_frames().collect_frames().ok()?;
+    // 자를 자리는 **전 프레임 합집합 bbox 로 한 번만** 잡는다. 프레임마다 다시
+    // 재면 팔이 오르내릴 때 사각이 따라 흔들려 얼굴이 칸 안에서 덜컹거리고,
+    // 첫 프레임만 보면 통통 튀는 애니에서 머리가 그 위로 올라간 프레임의
+    // 정수리가 잘린다(2026-08-24 거노 「미니맵에서 얼굴 잘리는 학생 있어」 —
+    // 실측 모몽가 8px·하루나 4px 등 43명). `student_sprite_frames` 가 같은
+    // 이유로 이미 합집합을 쓴다.
+    let (mut ux, mut uy, mut ur) = (u32::MAX, u32::MAX, 0u32);
+    for f in &all {
+        let (bx, by, bw, _bh) = alpha_bbox(f.buffer());
+        ux = ux.min(bx);
+        uy = uy.min(by);
+        ur = ur.max(bx + bw);
+    }
+    if ux == u32::MAX {
+        return None;
+    }
+    let side = ur.saturating_sub(ux).max(1);
+    let mut frames = Vec::new();
+    let mut delays_ms = Vec::new();
+    for f in all {
+        let (num, den) = f.delay().numer_denom_ms();
+        // 0ms 프레임은 브라우저 관행대로 100ms 로 — 그대로 두면 루프 길이가
+        // 0 이 되어 나눗셈이 터진다.
+        let ms = if den == 0 { 100 } else { (num / den.max(1)).max(20) };
+        let mut buf = f.into_buffer();
+        let cs = side.min(buf.width().saturating_sub(ux)).min(buf.height().saturating_sub(uy));
+        if cs == 0 {
+            return None;
+        }
+        let face = image::imageops::crop(&mut buf, ux, uy, cs, cs).to_image();
+        // 쓰는 자리가 16~22px 이라 32² 면 충분하고, 프레임 수만큼 곱해도 가볍다.
+        const OUT: u32 = 32;
+        let small = image::imageops::resize(&face, OUT, OUT, image::imageops::FilterType::Nearest);
+        frames.push((small.into_raw(), OUT, OUT));
+        delays_ms.push(ms);
+    }
+    (!frames.is_empty()).then(|| {
+        let total_ms = delays_ms.iter().sum::<u32>().max(1);
+        std::sync::Arc::new(IdleAnim { frames, delays_ms, total_ms })
+    })
 }
 
 /// 캐릭터 자리에 **움직이는** 얼굴을 그린다 — `phase` 는 앱이 켜진 뒤 흐른 초.
@@ -963,6 +975,47 @@ pub(crate) fn schale_classroom_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
+
+#[cfg(test)]
+mod idle_anim_tests {
+    use super::*;
+
+    /// 통통 튀는 gif — 둘째 프레임에서 몸이 첫 프레임 bbox 위로 올라간다. 크롭을
+    /// 첫 프레임에 고정하면 그 프레임의 정수리가 잘린다(미니맵 얼굴 잘림의 원인,
+    /// 실측 모몽가 8px). 합집합 bbox 크롭은 정수리(초록 표시)를 남겨야 한다.
+    #[test]
+    fn bouncing_head_survives_the_fixed_crop() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Frame, Rgba, RgbaImage};
+        let mut f1 = RgbaImage::new(64, 64);
+        for y in 20..40 {
+            for x in 27..37 {
+                f1.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        // 둘째 프레임: 같은 몸이 6px 위로 — 정수리 한 줄을 초록으로 표시해 둔다.
+        let mut f2 = RgbaImage::new(64, 64);
+        for x in 27..37 {
+            f2.put_pixel(x, 14, Rgba([0, 255, 0, 255]));
+        }
+        for y in 15..34 {
+            for x in 27..37 {
+                f2.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut bytes);
+            enc.encode_frame(Frame::new(f1)).unwrap();
+            enc.encode_frame(Frame::new(f2)).unwrap();
+        }
+        let anim = idle_anim_from_gif(bytes).expect("합성 gif 디코딩");
+        assert_eq!(anim.frames.len(), 2);
+        let (rgba, _, _) = &anim.frames[1];
+        let has_green = rgba.chunks(4).any(|p| p[1] > 200 && p[0] < 60 && p[3] > 8);
+        assert!(has_green, "뛴 프레임의 정수리가 크롭 밖으로 잘렸다");
+    }
+}
 
 #[cfg(test)]
 mod theme_sprite_dir_tests {
