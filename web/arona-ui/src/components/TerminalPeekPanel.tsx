@@ -1194,6 +1194,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const [confirm, setConfirm] = useState<{ msg: string; sub?: string; danger?: boolean; yes: string; onYes: () => void } | null>(null);
   const [charPicker, setCharPicker] = useState(false); // 캐릭터 변경 팝업(헤더 버튼)
   const [actionMenu, setActionMenu] = useState(false); // 헤더 우측 ⋯ 더보기(눈·캐릭터·종료·닫기 통합)
+  // 패널 아무 데나 우클릭 → ⋯ 와 같은 메뉴를 마우스 자리에(거노: ⋯ 가 눈에 안 띄어
+  // 「캐릭터 변경」을 못 찾았다). 좌표는 패널-로컬(루트가 position:relative).
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [titleHover, setTitleHover] = useState(false); // 제목 더블클릭 줌 — hover 시 인터랙션 힌트
   const [atTop, setAtTop] = useState(true); // 스크롤 맨위 — true 면 ↑ 버튼 숨김
   const [atBottom, setAtBottom] = useState(true); // 스크롤 맨아래 — true 면 ↓ 버튼 숨김
@@ -1723,8 +1726,32 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     return out;
   }, [items, streaming, subInFlight, pendingChoices, isSub, parentAvatarChar, avatarChar]);
 
+  // ⋯ 드롭다운과 우클릭 메뉴가 같은 항목을 그린다 — 한쪽에만 항목을 더하면
+  // 두 입구가 다른 메뉴가 되므로 여기 한 곳에서만 고칠 것.
+  const actionItems = (close: () => void) => (
+    <>
+      <MenuItem label={footerHidden ? '하단바 보이기' : '하단바 숨기기'} onClick={() => { setFooterHidden((h) => { const n = !h; try { localStorage.setItem('schale-footer-hidden', n ? '1' : '0'); } catch { /* sandbox */ } return n; }); close(); }} />
+      <MenuItem label="캐릭터 변경" onClick={() => { setCharPicker(true); close(); }} />
+      <MenuItem label="대화 닫기" onClick={() => { onClose(); close(); }} />
+      <div style={{ height: 1, background: 'var(--cth-cream-200)', margin: '2px 4px' }} />
+      <MenuItem label="학생 종료" danger onClick={() => { void onKill(); close(); }} />
+    </>
+  );
+
   return (
     <div
+      onContextMenu={(e) => {
+        // offline/sub 는 액션이 닫기뿐이라 우클릭 메뉴를 안 연다(⋯ 와 같은 게이트).
+        if (offline || isSub) return;
+        e.preventDefault();
+        const r = e.currentTarget.getBoundingClientRect();
+        setActionMenu(false);
+        // 패널 가장자리 근처에서도 메뉴가 잘리지 않게 안쪽으로 민다(메뉴 ~158x150).
+        setCtxMenu({
+          x: Math.max(0, Math.min(e.clientX - r.left, r.width - 170)),
+          y: Math.max(0, Math.min(e.clientY - r.top, r.height - 160)),
+        });
+      }}
       style={{
       width: embedded ? '100%' : 340, flex: embedded ? 1 : undefined,
       flexShrink: 0, height: '100%', position: 'relative', // 확인 모달 기준
@@ -1832,11 +1859,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               <>
                 <div onClick={() => setActionMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
                 <div style={{ position: 'absolute', top: 'calc(100% + 5px)', right: 0, zIndex: 41, minWidth: 158, padding: 4, borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 6px 20px rgba(21,41,74,0.18)', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <MenuItem label={footerHidden ? '하단바 보이기' : '하단바 숨기기'} onClick={() => { setFooterHidden((h) => { const n = !h; try { localStorage.setItem('schale-footer-hidden', n ? '1' : '0'); } catch { /* sandbox */ } return n; }); setActionMenu(false); }} />
-                  <MenuItem label="캐릭터 변경" onClick={() => { setCharPicker(true); setActionMenu(false); }} />
-                  <MenuItem label="대화 닫기" onClick={() => { onClose(); setActionMenu(false); }} />
-                  <div style={{ height: 1, background: 'var(--cth-cream-200)', margin: '2px 4px' }} />
-                  <MenuItem label="학생 종료" danger onClick={() => { void onKill(); setActionMenu(false); }} />
+                  {actionItems(() => setActionMenu(false))}
                 </div>
               </>
             )}
@@ -2428,6 +2451,18 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             </div>
           </div>
         </div>
+      )}
+      {ctxMenu && (
+        <>
+          <div
+            onClick={() => setCtxMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}
+            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+          />
+          <div style={{ position: 'absolute', left: ctxMenu.x, top: ctxMenu.y, zIndex: 41, minWidth: 158, padding: 4, borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 6px 20px rgba(21,41,74,0.18)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {actionItems(() => setCtxMenu(null))}
+          </div>
+        </>
       )}
       {charPicker && (
         <CharacterPicker
