@@ -3077,6 +3077,11 @@ impl App {
         // so a stale rect can't outlive its glyph after a layout change.
         let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
         let mut confirm_btn_hits: Vec<(ConfirmBtn, (f32, f32, f32, f32))> = Vec::new();
+        // `g` 대여가 끝난 뒤에 대기 상태로 되쓴다 — 그리는 동안은 `&self` 만 잡는다.
+        let mut account_confirm_hits: Vec<(
+            crate::session::AccountSwitchBtn,
+            (f32, f32, f32, f32),
+        )> = Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
         // Settings entry lives in its own wgpu window now (auxwin.rs); the main
         // frame only draws the sidebar "Settings" entry rect for hit-testing.
@@ -9263,6 +9268,18 @@ impl App {
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
+            // 계정 전환 확인 — 확인 모달·복원 프롬프트와 같은 층. 설정 별도창에서
+            // 누른 것은 그 창이 그리므로 여기서는 메인 몫만 본다.
+            if let Some(p) = self.account_switch_confirm.as_ref() {
+                if p.surface == crate::session::ConfirmSurface::Main {
+                    account_confirm_hits = paint_account_switch_confirm(
+                        g,
+                        (win_px.0 / scale, win_px.1 / scale),
+                        self.cursor_px,
+                        p,
+                    );
+                }
+            }
             // File-tree drag ghost — a small pill trailing the cursor with the
             // dragged item's name, drawn last so it floats over everything.
             if let Some(drag) = self.file_tree.drag.as_ref() {
@@ -9346,6 +9363,11 @@ impl App {
             }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
+            }
+        }
+        if let Some(p) = self.account_switch_confirm.as_mut() {
+            if !account_confirm_hits.is_empty() {
+                p.rects = account_confirm_hits;
             }
         }
         self.confirm_btn_rects = confirm_btn_hits;
@@ -10021,6 +10043,97 @@ pub(crate) fn usage_bar_color(pct: f32) -> [u8; 4] {
 ///
 /// 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가 어디까지 갈 수 있는
 /// 것인지 알 수가 없어 그냥 얼룩이 된다.
+/// 계정 전환 확인 카드 — 스크림 + 가운데 카드 + 버튼 둘. 히트박스를 돌려준다.
+///
+/// **자유함수인 이유**: 전환을 거는 자리가 두 창에 흩어져 있다(설정 별도창의 계정
+/// 카드 · 메인 창의 드롭다운). 카드를 눌렀는데 확인이 뒤 창에 뜨면 그건 확인이
+/// 아니므로, 누른 창이 자기 손으로 같은 카드를 그린다.
+pub(crate) fn paint_account_switch_confirm(
+    g: &mut gpu::GpuRenderer,
+    win: (f32, f32),
+    cursor: (f32, f32),
+    p: &crate::session::PendingAccountSwitch,
+) -> Vec<(crate::session::AccountSwitchBtn, (f32, f32, f32, f32))> {
+    use crate::session::AccountSwitchBtn;
+    let (win_w, win_h) = win;
+    g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+
+    let (title, lines) = crate::session::account_switch_confirm_text(&p.to_label, &p.impact);
+    let pad = 24.0_f32;
+    let line_h = 20.0_f32;
+    let title_w = g.measure_chrome_text(&title, 15.0, true);
+    let body_w = lines
+        .iter()
+        .map(|l| g.measure_chrome_text(l, 13.0, false))
+        .fold(0.0_f32, f32::max);
+    let card_w = (title_w.max(body_w) + pad * 2.0).clamp(380.0, (win_w - 48.0).max(380.0));
+    let card_h = 104.0 + lines.len() as f32 * line_h;
+    let cx0 = ((win_w - card_w) / 2.0).round();
+    let cy0 = ((win_h - card_h) / 2.0).round();
+    panel_rect_outlined(g, cx0, cy0, card_w, card_h, theme::radius_md(), theme::surface_active());
+    g.draw_text(
+        cx0 + pad,
+        cy0 + 28.0,
+        &title,
+        gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+    );
+    for (i, l) in lines.iter().enumerate() {
+        g.draw_text(
+            cx0 + pad,
+            cy0 + 56.0 + i as f32 * line_h,
+            l,
+            gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+        );
+    }
+
+    let (mx, my) = cursor;
+    let bf = 13.0_f32;
+    let bpad = 18.0_f32;
+    let btn_h = 34.0_f32;
+    let btn_y = cy0 + card_h - 20.0 - btn_h;
+    let mut right = cx0 + card_w - pad;
+    let mut hits: Vec<(AccountSwitchBtn, (f32, f32, f32, f32))> = Vec::new();
+    let mut button = |g: &mut gpu::GpuRenderer,
+                      hits: &mut Vec<(AccountSwitchBtn, (f32, f32, f32, f32))>,
+                      label: &str,
+                      btn: AccountSwitchBtn,
+                      tone: Option<[u8; 4]>| {
+        let w = g.measure_chrome_text(label, bf, tone.is_some()) + bpad * 2.0;
+        let x = right - w;
+        right = x - 10.0;
+        let hot = mx >= x && mx <= x + w && my >= btn_y && my <= btn_y + btn_h;
+        g.hover_pointer |= hot;
+        let (fill, fg, bold) = match tone {
+            Some(c) => (
+                theme::with_alpha(c, if hot { 0xFF } else { 0xDD }),
+                [0xFF, 0xFF, 0xFF, 0xFF],
+                true,
+            ),
+            None => (theme::raised_on(theme::surface_active(), hot), theme::text(), false),
+        };
+        // 무채색 쪽은 테두리로 선다 — 확인 모달과 같은 규칙(흑백에서도 어느 쪽이
+        // 기본인지 형태로 읽혀야 한다).
+        if tone.is_some() {
+            panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
+        } else {
+            panel_rect_outlined(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
+        }
+        g.draw_text(
+            x + bpad,
+            btn_y + (btn_h - bf) / 2.0,
+            label,
+            gpu::DrawOpts { font_size: bf, color: fg, bold, italic: false },
+        );
+        hits.push((btn, (x, btn_y, w, btn_h)));
+    };
+    // 채움색이 곧 뜻이다 — 이어붙일 대화가 없는 pane 이 섞여 있으면 그 전환은
+    // 되돌릴 수 없으므로 빨강. 아니면 대화가 이어지니 기본 accent.
+    let tone = if p.impact.fresh > 0 { theme::danger() } else { theme::accent() };
+    button(g, &mut hits, "전환", AccountSwitchBtn::Switch, Some(tone));
+    button(g, &mut hits, "취소", AccountSwitchBtn::Cancel, None);
+    hits
+}
+
 pub(crate) fn draw_usage_windows(
     g: &mut gpu::GpuRenderer,
     x: f32,

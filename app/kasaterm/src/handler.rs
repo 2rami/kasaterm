@@ -959,6 +959,9 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::ClaudeAccountAutoswitch { to, cooldown_until, pct } => {
+                // 사람에게 물어보려고 띄워 둔 확인은 버린다 — 그 숫자는 이미 낡았고,
+                // 자동 전환은 사람이 없는 사이에도 돌아야 해서 확인을 안 탄다.
+                self.account_switch_confirm = None;
                 // 떠나는 계정을 먼저 잠근다 — 저장 순서가 반대면 그 사이 폴러가
                 // 한 번 더 판정해 방금 소진한 계정으로 되돌아갈 수 있다.
                 if let Some(until) = *cooldown_until {
@@ -3242,6 +3245,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 계정 전환 확인 — 위 둘과 같은 「모든 클릭을 삼키는」 모달.
+                // 설정 별도창에 뜬 카드는 그 창의 라우터가 잡으므로 여기서는
+                // 메인 몫만 본다.
+                if self
+                    .account_switch_confirm
+                    .as_ref()
+                    .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Main)
+                {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        let hit = self.account_switch_confirm.as_ref().and_then(|p| {
+                            p.rects
+                                .iter()
+                                .find(|(_, r)| {
+                                    cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                                })
+                                .map(|(b, _)| *b)
+                        });
+                        if let Some(btn) = hit {
+                            self.account_switch_pick(btn);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // Commit modal is a full-window dialog — handled before the git
                 // column (and everything else) so clicks outside the column
                 // still hit its buttons, and the scrim swallows the rest.
@@ -3565,12 +3593,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.account_menu_provider = None;
                                 match p {
                                     AccountProvider::Claude => {
-                                        let same = id == self.set_claude_account;
-                                        let (_, to_label, restarted, deferred, focused, live) =
-                                            self.apply_claude_account_switch(&id);
-                                        self.set_toast(crate::session::account_switch_toast(
-                                            &to_label, same, restarted, deferred, focused, live,
-                                        ));
+                                        self.ask_or_switch_claude_account(
+                                            &id,
+                                            crate::session::ConfirmSurface::Main,
+                                        );
                                     }
                                     AccountProvider::Codex => {
                                         self.set_codex_account = id;
@@ -5644,6 +5670,28 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 계정 전환 확인: Enter = 전환, Esc = 취소. 나머지 키는 삼킨다 —
+                // 스크림 뒤 pane 으로 새면 확인 중에 글자가 들어간다.
+                if self
+                    .account_switch_confirm
+                    .as_ref()
+                    .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Main)
+                {
+                    if matches!(event.state, ElementState::Pressed) {
+                        use winit::keyboard::{Key, NamedKey};
+                        match event.logical_key {
+                            Key::Named(NamedKey::Enter) => {
+                                self.account_switch_pick(crate::session::AccountSwitchBtn::Switch);
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                self.account_switch_pick(crate::session::AccountSwitchBtn::Cancel);
+                            }
+                            _ => {}
+                        }
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // KASATERM_KEY_DEBUG=1 → dump every key event with its
                 // modifier snapshot. Used to debug "Cmd+= doesn't zoom"
                 // class issues where it's unclear whether the OS even
@@ -6096,6 +6144,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
+        self.run_pending_account_confirm();
         self.run_pending_autowinclose();
         self.run_pending_autolastclose();
         self.run_pending_autobusyclose();

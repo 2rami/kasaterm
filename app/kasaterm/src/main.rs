@@ -5387,6 +5387,10 @@ struct App {
     /// `open_settings_window` 하나라 거기서 갈린다. 이행이 끝나면 네이티브
     /// 쪽이 지워지고 이 필드만 남는다. webview 가 window 를 빌리므로 같이 소유.
     settings_web_window: Option<Arc<Window>>,
+    /// 대기 중인 계정 전환 확인. `Some` 인 동안 그 창이 스크림을 깔고 입력을 삼킨다.
+    /// **여기 담긴 것 말고는 아무 상태도 미리 안 바뀐다** — 작업대 갈아 끼우기·설정
+    /// 저장·pane 재시작은 [전환] 을 눌러야 그때 돈다.
+    account_switch_confirm: Option<session::PendingAccountSwitch>,
     settings_web_webview: Option<wry::WebView>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
@@ -5825,6 +5829,7 @@ impl App {
             arona_panel_window: None,
             arona_panel_webview: None,
             settings_web_window: None,
+            account_switch_confirm: None,
             settings_web_webview: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),

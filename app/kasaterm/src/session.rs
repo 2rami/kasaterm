@@ -820,6 +820,119 @@ impl App {
     ///
     /// 반환: (전환 전 계정 이름, 새 계정 이름, 즉시 재시작한 수, 끝나길 기다리는 수,
     /// 보는 pane 이 대기 중인가, 작업대 갈아 끼우기 성공 여부).
+    /// 확인 없이 지금 바꾼다. 옛 `SettingsAction::ClaudeAccount` 팔의 본문 그대로다.
+    pub(crate) fn claude_account_switch_now(&mut self, id: &str) {
+        self.settings_input = None;
+        let same = id == self.set_claude_account;
+        let (_, to_label, restarted, deferred, focused, live) =
+            self.apply_claude_account_switch(id);
+        self.set_toast(crate::session::account_switch_toast(
+            &to_label, same, restarted, deferred, focused, live,
+        ));
+    }
+
+    /// 다시 뜰 pane 이 있으면 물어보고, 없으면 지금 바꾼다.
+    ///
+    /// 영향이 0이면 **옛 경로와 완전히 같다** — 작업대로 뜬 pane 은 재시작이 필요
+    /// 없고 갈아 끼우기만으로 다음 요청부터 새 계정이 되므로, 그게 보통의 경우다.
+    pub(crate) fn ask_or_switch_claude_account(&mut self, to: &str, surface: ConfirmSurface) {
+        let impact = self.preview_claude_account_switch(to);
+        if !impact.needs_confirm() {
+            self.claude_account_switch_now(to);
+            return;
+        }
+        // 그릴 창이 없으면(헤드리스·단축키가 설정창 없이 부른 경우) 메인으로 접는다 —
+        // 안 그러면 취소할 손도 없는 확인이 뜬다.
+        let has_settings_window = self
+            .aux_windows
+            .iter()
+            .any(|a| matches!(a.kind, crate::auxwin::AuxWindowKind::Settings));
+        let surface = match surface {
+            ConfirmSurface::Settings if !has_settings_window => ConfirmSurface::Main,
+            s => s,
+        };
+        self.account_switch_confirm = Some(PendingAccountSwitch {
+            to_label: self.claude_account_display(to),
+            to: to.to_string(),
+            impact,
+            surface,
+            rects: Vec::new(),
+        });
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 확인 카드에서 고른 결과. 취소는 **아무 일도 안 한다**.
+    pub(crate) fn account_switch_pick(&mut self, btn: AccountSwitchBtn) {
+        let Some(p) = self.account_switch_confirm.take() else { return };
+        if btn == AccountSwitchBtn::Switch {
+            self.claude_account_switch_now(&p.to);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 전환 **뒤** 목표 저장소 경로. `apply` 안에 인라인돼 있던 계산을 들어낸 것이라
+    /// 동작은 그대로다.
+    pub(crate) fn claude_target_dir(&self, to: &str) -> String {
+        crate::claude_auth::runtime_dir_for(to, to)
+            .or_else(|| socket::claude_account_dir(to))
+            .map_or(String::new(), |p| p.to_string_lossy().into_owned())
+    }
+
+    /// 전환 **전** 예측 — `swap_active` 를 안 돌리고 같은 답을 낸다(`predicted_target_dir`).
+    pub(crate) fn predict_claude_target_dir(&self, to: &str) -> String {
+        predicted_target_dir(
+            to,
+            crate::claude_auth::active_dir().is_some(),
+            crate::claude_auth::vault_ready(to, socket::claude_account_dir),
+            socket::claude_account_dir(to).as_deref(),
+        )
+    }
+
+    /// 지금 떠 있는 claude pane 들의 판정 재료. `ps` 를 pane 마다 한 번 도므로
+    /// **클릭에서만** 부른다(프레임마다 부르면 안 된다).
+    pub(crate) fn claude_pane_facts(&mut self) -> Vec<PaneAccountFact> {
+        let focused = self.ws.lock().unwrap().active_pane.clone();
+        let ids: Vec<String> = self
+            .pty
+            .iter()
+            .filter(|(_, p)| p.active_agent() == Some(kasa_pty::AgentKind::Claude))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .map(|id| {
+                let boot_dir = self.pane_claude_boot_account_dir(&id);
+                let resumable = self
+                    .pane_claude_sid
+                    .get(&id)
+                    .is_some_and(|s| socket::transcript_path_for_session(s).is_some());
+                PaneAccountFact {
+                    focused: focused.as_deref() == Some(id.as_str()),
+                    closed: self.closed_panes.iter().any(|c| c.pane_id == id),
+                    busy: account_restart_busy(
+                        self.pane_prompt_wait.contains_key(&id),
+                        self.pane_activity.get(&id).map(|a| (a.status.as_str(), a.bg_active)),
+                    ),
+                    boot_dir,
+                    resumable,
+                    id,
+                }
+            })
+            .collect()
+    }
+
+    /// 「이 전환을 누르면 무슨 일이 일어나나」 — 아무것도 바꾸지 않고 세기만 한다.
+    pub(crate) fn preview_claude_account_switch(&mut self, to: &str) -> AccountSwitchImpact {
+        let target = self.predict_claude_target_dir(to);
+        let facts = self.claude_pane_facts();
+        account_switch_impact(&facts, &target)
+    }
+
     pub(crate) fn apply_claude_account_switch(
         &mut self,
         to: &str,
@@ -847,31 +960,22 @@ impl App {
         }
         // ② 재시작이 필요한 pane 은 **작업대를 안 보는** 것들뿐이다 — 이 기능이 생기기
         // 전에 뜬 pane 은 특정 금고에 못 박혀 있어 갈아 끼우기가 안 닿는다.
-        let target_dir = crate::claude_auth::runtime_dir_for(to, to)
-            .or_else(|| socket::claude_account_dir(to))
-            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-        let claude_panes: Vec<String> = self
-            .pty
-            .iter()
-            .filter(|(_, p)| p.active_agent() == Some(kasa_pty::AgentKind::Claude))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in claude_panes {
-            match self.pane_claude_boot_account_dir(&id) {
+        let target_dir = self.claude_target_dir(to);
+        // 칩을 달지 말지는 **확인 카드가 세는 것과 같은 함수**로 가른다 — 두 곳에
+        // 따로 판정하면 「3개가 다시 떠요」라고 물어 놓고 5개가 뜨는 일이 생긴다.
+        for f in self.claude_pane_facts() {
+            if pane_account_fate(&f, &target_dir) == PaneAccountFate::Unchanged {
                 // 이미 목표 계정으로 도는 pane — 남아 있던 표시도 걷는다(A→B→A 복귀).
-                Some(d) if d == target_dir => {
-                    self.pane_account_stale.remove(&id);
-                }
-                boot => {
-                    // 칩의 「A → B」 표기. 실측이 안 되면(다른 플랫폼) 어긋났을 수
-                    // 있다는 쪽으로 보수 판정하고, 표기는 전환 전 활성 계정으로 쓴다.
-                    let boot_label = match boot.as_deref() {
-                        Some(d) => self.claude_account_display(account_id_of_dir(d)),
-                        None => from_label.clone(),
-                    };
-                    self.pane_account_stale.insert(id, (boot_label, to_label.clone()));
-                }
+                self.pane_account_stale.remove(&f.id);
+                continue;
             }
+            // 칩의 「A → B」 표기. 실측이 안 되면(다른 플랫폼) 어긋났을 수 있다는
+            // 쪽으로 보수 판정하고, 표기는 전환 전 활성 계정으로 쓴다.
+            let boot_label = match f.boot_dir.as_deref() {
+                Some(d) => self.claude_account_display(account_id_of_dir(d)),
+                None => from_label.clone(),
+            };
+            self.pane_account_stale.insert(f.id, (boot_label, to_label.clone()));
         }
         if matches!(swapped, crate::claude_auth::SwapOutcome::WriteFailed) {
             // 조용히 넘어가면 「바꿨는데 안 바뀐다」가 된다. 재시작 폴백은 그대로
@@ -943,11 +1047,10 @@ impl App {
             // 일하는 중·승인 대기·백그라운드 작업 중이면 끊지 않는다 — resume 은
             // 대화를 잇지만 진행 중이던 턴은 죽는다. 활동 기록이 아직 없는 pane 도
             // 다음 틱(300ms)까지 미룬다.
-            let busy = self.pane_prompt_wait.contains_key(&id)
-                || self
-                    .pane_activity
-                    .get(&id)
-                    .is_none_or(|a| a.status != "idle" || a.bg_active);
+            let busy = account_restart_busy(
+                self.pane_prompt_wait.contains_key(&id),
+                self.pane_activity.get(&id).map(|a| (a.status.as_str(), a.bg_active)),
+            );
             if busy {
                 self.pane_account_quiet_since.remove(&id);
                 continue;
@@ -3881,6 +3984,208 @@ fn account_id_of_dir(dir: &str) -> &str {
 /// 메시지부터** 새 계정이므로 「다음에 뜨는 claude 부터」라고 말하면 거짓말이
 /// 된다(2026-08-17 「토스트에 다음세션부터라고 뜨는데」). 실패(금고 비었음·
 /// 쓰기 실패)일 때만 재시작 폴백이 전부라 옛 문장이 맞다.
+/// 확인 카드를 **어느 창에 그리는가**. 카드를 눌렀는데 뒤 창에 확인이 뜨면 그건
+/// 확인이 아니다 — 설정 별도창에서 누른 것은 그 창에 그린다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ConfirmSurface {
+    Main,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AccountSwitchBtn {
+    Cancel,
+    Switch,
+}
+
+/// 대기 중인 계정 전환 확인.
+///
+/// **여기 담긴 것 말고는 아무 상태도 미리 바뀌지 않는다** — 작업대 갈아 끼우기·신원
+/// 캐시·⟳ 칩·설정 저장·재시작은 [전환] 을 눌러야 그때 돈다. 취소하면 이 값을
+/// 버리는 것으로 끝이다.
+pub(crate) struct PendingAccountSwitch {
+    pub to: String,
+    pub to_label: String,
+    pub impact: AccountSwitchImpact,
+    pub surface: ConfirmSurface,
+    /// 그 창의 render 가 매 프레임 채운다. hit rect 를 별도 App 필드로 두는 것이
+    /// 레포 관례지만, `struct App` 정의는 병렬 작업 충돌 핫스팟이라 여기 담아 필드
+    /// 하나로 줄였다(CLAUDE.md 병렬 규칙).
+    pub rects: Vec<(AccountSwitchBtn, (f32, f32, f32, f32))>,
+}
+
+/// 계정 전환이 pane 하나에 무엇을 하는지 정하는 데 필요한 **사실만**. `App` 을 안
+/// 들고 다니므로 테스트가 된다.
+pub(crate) struct PaneAccountFact {
+    pub id: String,
+    /// `ps` 로 실측한 부팅 저장소. `None` = 실측 실패(claude 가 아니거나 Windows) —
+    /// 어긋났을 수 있다는 쪽으로 보수 판정한다.
+    pub boot_dir: Option<String>,
+    pub focused: bool,
+    pub closed: bool,
+    pub busy: bool,
+    /// `--resume` 할 transcript 가 실재하나. false 면 대화를 잃고 새로 뜬다.
+    pub resumable: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PaneAccountFate {
+    /// 이미 목표 계정 — 아무 일도 안 일어난다.
+    Unchanged,
+    /// 쉬는 pane — 조용해진 지 4초가 지나면 되띄운다.
+    RestartWhenQuiet,
+    /// 일하는 중 — 턴이 끝난 뒤에 되띄운다.
+    RestartAfterTurn,
+    /// 보고 있는 pane — 자동으로 안 끊고 ⟳ 칩만 단다.
+    ChipFocused,
+    /// 닫힌 pane — 되살릴 때 칩이 안내한다.
+    ChipClosed,
+}
+
+/// ⚠️ **판정 순서가 `run_pending_account_restarts` 와 같아야 한다.** 어긋나면 물어본
+/// 내용과 실제로 벌어지는 일이 갈린다 — 「3개가 다시 떠요」라고 해 놓고 5개가 뜨는 식.
+pub(crate) fn pane_account_fate(f: &PaneAccountFact, target_dir: &str) -> PaneAccountFate {
+    if f.boot_dir.as_deref() == Some(target_dir) {
+        return PaneAccountFate::Unchanged;
+    }
+    if f.focused {
+        return PaneAccountFate::ChipFocused;
+    }
+    if f.closed {
+        return PaneAccountFate::ChipClosed;
+    }
+    if f.busy {
+        return PaneAccountFate::RestartAfterTurn;
+    }
+    PaneAccountFate::RestartWhenQuiet
+}
+
+/// 되띄우기를 미뤄야 하는 pane 인가. 러너와 계산기가 **같은 이 함수**를 쓴다.
+///
+/// 활동 기록이 아직 없는 pane(`None`)도 바쁜 것으로 친다 — 방금 뜬 pane 을 그 자리에서
+/// 끊지 않으려는 기존 규칙 그대로다.
+pub(crate) fn account_restart_busy(
+    prompt_wait: bool,
+    activity: Option<(&str, bool)>,
+) -> bool {
+    prompt_wait || activity.is_none_or(|(status, bg)| status != "idle" || bg)
+}
+
+/// 전환 한 번이 지금 떠 있는 pane 들에 하는 일의 총계.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct AccountSwitchImpact {
+    pub unchanged: usize,
+    pub restart_when_quiet: usize,
+    pub restart_after_turn: usize,
+    pub chip_focused: usize,
+    pub chip_closed: usize,
+    /// 위 재시작 대상 중 **이어붙일 대화가 없어** 새로 뜨는 수.
+    pub fresh: usize,
+    /// 어느 계정으로 떴는지 실측이 안 된 수(Windows 등).
+    pub unmeasured: usize,
+}
+
+impl AccountSwitchImpact {
+    /// 실제로 뜯겼다 다시 뜨는 pane 수.
+    pub fn torn_down(&self) -> usize {
+        self.restart_when_quiet + self.restart_after_turn
+    }
+
+    /// 물어봐야 하는가. **보고 있는 pane 과 닫힌 pane 은 세지 않는다** — 둘 다 자동으로
+    /// 아무 일도 안 당하고, 보고 있는 pane 은 ⟳ 칩 자체가 이미 확인이라 게이트에 넣으면
+    /// 한 가지를 두 번 묻는 꼴이 된다.
+    pub fn needs_confirm(&self) -> bool {
+        self.torn_down() > 0
+    }
+}
+
+pub(crate) fn account_switch_impact(
+    facts: &[PaneAccountFact],
+    target_dir: &str,
+) -> AccountSwitchImpact {
+    let mut i = AccountSwitchImpact::default();
+    for f in facts {
+        let fate = pane_account_fate(f, target_dir);
+        match fate {
+            PaneAccountFate::Unchanged => i.unchanged += 1,
+            PaneAccountFate::RestartWhenQuiet => i.restart_when_quiet += 1,
+            PaneAccountFate::RestartAfterTurn => i.restart_after_turn += 1,
+            PaneAccountFate::ChipFocused => i.chip_focused += 1,
+            PaneAccountFate::ChipClosed => i.chip_closed += 1,
+        }
+        // 대화를 잃는 것은 **되띄우는 pane** 에서만 일어난다. 칩만 다는 pane 을 세면
+        // 「대화가 날아간다」는 경고가 아무 일도 안 당하는 pane 때문에 켜진다.
+        let restarting = matches!(
+            fate,
+            PaneAccountFate::RestartWhenQuiet | PaneAccountFate::RestartAfterTurn
+        );
+        if restarting && !f.resumable {
+            i.fresh += 1;
+        }
+        if restarting && f.boot_dir.is_none() {
+            i.unmeasured += 1;
+        }
+    }
+    i
+}
+
+/// 확인 카드 문구 — (제목, 부제).
+///
+/// ⚠️ **「진행 중인 작업이 끊겨요」라고 쓰지 마라. 거짓말이다.**
+/// `run_pending_account_restarts` 가 일하는 pane 을 일곱 겹으로 걸러 턴이 끝난 뒤에만
+/// 되띄운다. 실제로 잃는 것은 셋뿐이다 — 그 pane 의 **화면(스크롤백)**, 입력창에 쳐
+/// 놓고 안 보낸 글, 그리고 이어붙일 대화가 없는 pane 의 **대화 전체**.
+pub(crate) fn account_switch_confirm_text(
+    to_label: &str,
+    i: &AccountSwitchImpact,
+) -> (String, Vec<String>) {
+    let title = format!("claude {}개가 다시 떠요", i.torn_down());
+    // 절을 가운뎃점으로 잇지 않고 **줄로 나눈다** — 사정이 셋만 겹쳐도 한 줄이
+    // 카드 밖으로 나가고, 그러면 정작 읽어야 할 마지막 절이 잘린다.
+    let mut lines =
+        vec![format!("{to_label} 로 바꾸면 대화는 이어지지만 그 pane 화면은 비워져요")];
+    if i.restart_after_turn > 0 {
+        lines.push(format!("작업 중 {}개는 턴이 끝난 뒤에 떠요", i.restart_after_turn));
+    }
+    if i.fresh > 0 {
+        lines.push(format!("{}개는 이어붙일 대화가 없어 새로 떠요", i.fresh));
+    }
+    if i.chip_focused > 0 {
+        lines.push("지금 보는 pane 은 ⟳ 를 눌러야 바뀌어요".to_string());
+    }
+    if i.unmeasured > 0 {
+        lines.push(format!("{}개는 어느 계정인지 확인이 안 돼 함께 띄워요", i.unmeasured));
+    }
+    (title, lines)
+}
+
+/// 전환 **전에** 목표 저장소 경로를 예측한다.
+///
+/// `runtime_dir_for(to, to)` 를 그냥 부르면 안 되는 이유: 그 함수는 지문이 이미 `to` 를
+/// 가리킬 때만 빈 경로(작업대)를 준다. 전환 전에는 지문이 아직 옛 계정이라 금고 경로가
+/// 나오고, 그러면 작업대로 뜬 pane 이 **전부** 어긋남으로 잡혀 영향 수가 과대계상된다.
+///
+/// 예측이 틀릴 때는 **많이 세는 쪽**으로 틀린다 — 더 물어보는 것은 안전하고, 덜 묻는
+/// 것은 사고다.
+pub(crate) fn predicted_target_dir(
+    to: &str,
+    workbench_live: bool,
+    vault_ready: bool,
+    vault_dir: Option<&std::path::Path>,
+) -> String {
+    let vault = || vault_dir.map_or(String::new(), |p| p.to_string_lossy().into_owned());
+    if to.is_empty() {
+        // 기본 슬롯은 금고 경로 자체가 없다 — 작업대가 곧 그 자리다.
+        return String::new();
+    }
+    if !workbench_live || !vault_ready {
+        // `swap_active` 가 WriteFailed / VaultEmpty 로 물러날 자리 — 작업대는 안 갈리고
+        // 재시작 폴백만 돈다.
+        return vault();
+    }
+    String::new()
+}
+
 pub(crate) fn account_switch_toast(
     to_label: &str,
     same: bool,
@@ -4182,9 +4487,144 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        editor_command_line, git_repo_root, next_free_pane_id, pick_restore_id,
-        restored_scrollback,
+        account_restart_busy, account_switch_confirm_text, account_switch_impact,
+        editor_command_line, git_repo_root, next_free_pane_id, pane_account_fate,
+        pick_restore_id, predicted_target_dir, restored_scrollback, AccountSwitchImpact,
+        PaneAccountFact, PaneAccountFate,
     };
+
+    fn fact(boot: Option<&str>) -> PaneAccountFact {
+        PaneAccountFact {
+            id: "%1".into(),
+            boot_dir: boot.map(str::to_string),
+            focused: false,
+            closed: false,
+            busy: false,
+            resumable: true,
+        }
+    }
+
+    /// 판정 순서가 `run_pending_account_restarts` 와 같아야 한다. 어긋나면 물어본
+    /// 내용과 실제로 벌어지는 일이 갈린다.
+    #[test]
+    fn a_pane_already_on_the_target_is_left_alone() {
+        assert_eq!(pane_account_fate(&fact(Some("")), ""), PaneAccountFate::Unchanged);
+        assert_eq!(
+            pane_account_fate(&fact(Some("/v/acct-2")), ""),
+            PaneAccountFate::RestartWhenQuiet
+        );
+        // 맞는 계정이면 보고 있어도 칩조차 안 뜬다 — Unchanged 가 focused 를 이긴다.
+        let mut f = fact(Some(""));
+        f.focused = true;
+        assert_eq!(pane_account_fate(&f, ""), PaneAccountFate::Unchanged);
+    }
+
+    /// 실측이 안 된 pane 을 「그대로다」로 읽으면, 실제로는 재시작되는데 아무 말도
+    /// 안 하고 넘어간다. 모를 때는 어긋난 쪽으로 센다.
+    #[test]
+    fn an_unmeasured_pane_is_never_counted_as_unchanged() {
+        assert_ne!(pane_account_fate(&fact(None), ""), PaneAccountFate::Unchanged);
+        let i = account_switch_impact(&[fact(None)], "");
+        assert_eq!(i.unmeasured, 1);
+        assert!(i.needs_confirm());
+    }
+
+    /// 보고 있는 pane 은 ⟳ 칩만 달리고 자동으로 안 끊긴다 — busy 여부보다 먼저다.
+    #[test]
+    fn the_pane_you_are_watching_is_only_chipped() {
+        let mut f = fact(Some("/v/acct-2"));
+        f.focused = true;
+        f.busy = true;
+        assert_eq!(pane_account_fate(&f, ""), PaneAccountFate::ChipFocused);
+        let mut c = fact(Some("/v/acct-2"));
+        c.closed = true;
+        c.busy = true;
+        assert_eq!(pane_account_fate(&c, ""), PaneAccountFate::ChipClosed);
+    }
+
+    /// 칩만 다는 pane 으로는 묻지 않는다 — 아무 일도 안 당하므로 물으면 한 가지를
+    /// 두 번 묻는 꼴이다.
+    #[test]
+    fn only_panes_that_actually_restart_trigger_the_question() {
+        let mut focused = fact(Some("/v/acct-2"));
+        focused.focused = true;
+        let mut closed = fact(Some("/v/acct-2"));
+        closed.closed = true;
+        assert!(!account_switch_impact(&[focused, closed], "").needs_confirm());
+
+        assert!(!account_switch_impact(&[fact(Some(""))], "").needs_confirm());
+
+        let mut busy = fact(Some("/v/acct-2"));
+        busy.busy = true;
+        assert!(account_switch_impact(&[busy], "").needs_confirm());
+    }
+
+    /// 「대화가 날아간다」 경고는 **되띄우는 pane** 에서만 켜져야 한다. 칩만 다는
+    /// pane 이 그걸 켜면 아무 일도 안 당하는 pane 때문에 빨간 버튼이 뜬다.
+    #[test]
+    fn losing_the_conversation_is_counted_only_where_it_happens() {
+        let mut chipped = fact(Some("/v/acct-2"));
+        chipped.focused = true;
+        chipped.resumable = false;
+        assert_eq!(account_switch_impact(&[chipped], "").fresh, 0);
+
+        let mut restarting = fact(Some("/v/acct-2"));
+        restarting.resumable = false;
+        assert_eq!(account_switch_impact(&[restarting], "").fresh, 1);
+    }
+
+    /// ⚠️ 문구가 사실과 갈리는 것을 막는 자물쇠. 일하는 pane 은 턴이 끝난 뒤에
+    /// 되띄우므로 「작업이 끊긴다」는 **거짓말**이다.
+    #[test]
+    fn the_confirm_text_never_claims_work_gets_killed() {
+        let i = AccountSwitchImpact { restart_when_quiet: 3, ..Default::default() };
+        let (title, lines) = account_switch_confirm_text("지메일", &i);
+        let sub = lines.join(" ");
+        assert!(title.contains('3'));
+        for lie in ["끊겨", "끊깁", "중단", "죽"] {
+            assert!(!sub.contains(lie), "사실과 다른 문구: {sub}");
+        }
+        assert!(sub.contains("대화는 이어지지만"));
+        // 없는 사정은 말하지 않는다.
+        assert!(!sub.contains("새로 떠요"));
+        assert!(!sub.contains("⟳"));
+
+        let full = AccountSwitchImpact {
+            restart_when_quiet: 1,
+            restart_after_turn: 2,
+            chip_focused: 1,
+            fresh: 1,
+            unmeasured: 1,
+            ..Default::default()
+        };
+        let sub = account_switch_confirm_text("팀", &full).1.join(" ");
+        assert!(sub.contains("턴이 끝난 뒤에"));
+        assert!(sub.contains("새로 떠요"));
+        assert!(sub.contains("⟳"));
+        assert!(sub.contains("확인이 안 돼"));
+    }
+
+    /// 예측이 틀릴 때는 **많이 세는 쪽**으로 틀려야 한다 — 더 묻는 것은 안전하고
+    /// 덜 묻는 것은 사고다.
+    #[test]
+    fn the_target_prediction_errs_toward_asking() {
+        let vault = std::path::Path::new("/v/acct-2");
+        assert_eq!(predicted_target_dir("", true, true, None), "");
+        assert_eq!(predicted_target_dir("acct-2", true, true, Some(vault)), "");
+        // 작업대를 못 쓰거나 금고가 껍데기면 갈아 끼우기가 안 되고 재시작으로만 반영된다.
+        assert_eq!(predicted_target_dir("acct-2", false, true, Some(vault)), "/v/acct-2");
+        assert_eq!(predicted_target_dir("acct-2", true, false, Some(vault)), "/v/acct-2");
+    }
+
+    /// 러너와 계산기가 같은 판정을 쓰는지. 활동 기록이 없는 pane 도 바쁜 것으로 친다.
+    #[test]
+    fn a_pane_with_no_activity_yet_is_treated_as_busy() {
+        assert!(account_restart_busy(true, Some(("idle", false))));
+        assert!(account_restart_busy(false, None));
+        assert!(account_restart_busy(false, Some(("running", false))));
+        assert!(account_restart_busy(false, Some(("idle", true))));
+        assert!(!account_restart_busy(false, Some(("idle", false))));
+    }
 
     /// 닫힌 번호를 되쓰는 것이 요점이다 — 안 그러면 하루 쓰면 `%116` 이 된다.
     #[test]

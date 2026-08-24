@@ -114,6 +114,26 @@ fn stamp_path_in(active: &Path) -> PathBuf {
 /// 두 자리(금고·작업대)가 잠깐 공존하는 구간이 있고, refresh token 은 1회용이라
 /// **오래된 쪽으로 덮으면 그 계정이 로그아웃된다.** 그래서 되받기는 언제나 「더 새것이
 /// 이긴다」로 판정한다.
+/// 그 blob 이 **쓸 만한 로그인**인가. 만료 시각이 없거나 0 이면 로그인 안 된
+/// 껍데기다(실측: 금고 하나가 `expiresAt: 0` 으로 저장돼 있었다).
+///
+/// 판정을 여기 한 곳에 두는 이유: `swap_active` 가 이걸로 `VaultEmpty` 를 정하고,
+/// 전환 **전** 미리보기(`vault_ready`)가 같은 답을 내야 「물어본 내용」과 「실제로
+/// 벌어지는 일」이 안 갈린다. 두 곳에 같은 식을 쓰면 언젠가 한쪽만 고쳐진다.
+fn blob_alive(blob: &[u8]) -> bool {
+    expires_at(blob).is_some_and(|e| e > 0)
+}
+
+/// 그 계정 금고에 쓸 만한 로그인이 들어 있나 — `swap_active` 가 `VaultEmpty` 로
+/// 물러나는 조건과 **같은 판정**이다. 읽기만 하므로 전환 전에 불러도 안전하다.
+pub(crate) fn vault_ready(
+    account_id: &str,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+) -> bool {
+    let vault = vault_dir_of(account_id);
+    read_credentials(vault.as_deref()).is_some_and(|b| blob_alive(&b))
+}
+
 fn expires_at(blob: &[u8]) -> Option<i64> {
     let v: serde_json::Value = serde_json::from_slice(blob).ok()?;
     v.pointer("/claudeAiOauth/expiresAt")
@@ -516,7 +536,7 @@ fn swap_active_in(
     // `expiresAt: 0` 으로 저장돼 있었다). 이걸 작업대에 덮으면 「전환했더니
     // 로그아웃」이 된다 — 전환을 거부하고 빈 금고 취급하면, 재시작 폴백이 그
     // 계정의 로그인 화면을 자연스럽게 띄우고 /login 후 read_back 이 금고를 채운다.
-    if expires_at(&blob).is_none_or(|e| e <= 0) {
+    if !blob_alive(&blob) {
         eprintln!("[account] {account_id} 금고가 로그인 안 된 껍데기(만료 없음) — 전환 거부");
         return SwapOutcome::VaultEmpty;
     }

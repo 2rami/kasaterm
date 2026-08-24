@@ -1017,8 +1017,22 @@ impl App {
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
         let (rects, content_h) = settings::paint_settings(&mut a.gpu, &ctx);
+        // 계정 전환 확인은 **누른 창에** 그린다 — 설정 카드를 눌렀는데 뒤에 깔린
+        // 메인 창에 확인이 뜨면 그건 확인이 아니다.
+        let mut confirm_hits = Vec::new();
+        if let Some(p) = self.account_switch_confirm.as_ref() {
+            if p.surface == crate::session::ConfirmSurface::Settings {
+                confirm_hits =
+                    crate::render::paint_account_switch_confirm(&mut a.gpu, (w, h), cursor, p);
+            }
+        }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
+        if let Some(p) = self.account_switch_confirm.as_mut() {
+            if !confirm_hits.is_empty() {
+                p.rects = confirm_hits;
+            }
+        }
         self.settings_rects = rects;
         // 휠 스크롤 상한: content 높이 − 보이는 폼 밴드(84px 페이지 헤더 제외) + 여유.
         let view_h = (h - 84.0).max(0.0);
@@ -1609,6 +1623,15 @@ impl App {
     }
 
     pub(crate) fn close_settings_window(&mut self, idx: usize) {
+        // 이 창에 뜬 확인은 함께 버린다 — 안 버리면 그릴 창도 취소할 손도 없는
+        // 대기 상태가 남아, 다음 전환이 조용히 막힌다.
+        if self
+            .account_switch_confirm
+            .as_ref()
+            .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
+        {
+            self.account_switch_confirm = None;
+        }
         self.flush_student_persona();
         self.settings_input = None;
         self.settings_open = false;
@@ -1665,6 +1688,27 @@ impl App {
             } => {
                 self.last_input_at = Instant::now();
                 let (cx, cy) = self.aux_windows.get(idx).map(|a| a.cursor_px).unwrap_or((0.0, 0.0));
+                // 계정 전환 확인이 이 창에 떠 있으면 **모든 클릭을 삼킨다** — 스크림
+                // 뒤 설정 컨트롤이 눌리면 안 된다.
+                if self
+                    .account_switch_confirm
+                    .as_ref()
+                    .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
+                {
+                    let hit = self.account_switch_confirm.as_ref().and_then(|p| {
+                        p.rects
+                            .iter()
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
+                            .map(|(b, _)| *b)
+                    });
+                    if let Some(btn) = hit {
+                        self.account_switch_pick(btn);
+                    }
+                    self.aux_redraw(idx);
+                    return;
+                }
                 // rects 는 area=(0,0,w,h) 좌표계라 창 로컬 커서를 그대로 넘긴다.
                 self.settings_click(cx, cy);
                 self.aux_redraw(idx);
@@ -1731,6 +1775,25 @@ impl App {
         }
         self.last_input_at = Instant::now();
         if crate::input::is_modifier_key(event) {
+            return;
+        }
+        // 계정 전환 확인이 이 창에 떠 있으면 Enter/Esc 만 받고 나머지는 삼킨다 —
+        // 확인 중에 뒤 설정 필드로 글자가 들어가면 안 된다.
+        if self
+            .account_switch_confirm
+            .as_ref()
+            .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
+        {
+            match event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    self.account_switch_pick(crate::session::AccountSwitchBtn::Switch);
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.account_switch_pick(crate::session::AccountSwitchBtn::Cancel);
+                }
+                _ => {}
+            }
+            self.aux_redraw(idx);
             return;
         }
         self.ime_retarget(crate::ImeFocus::Settings);

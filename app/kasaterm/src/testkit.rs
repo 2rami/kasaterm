@@ -531,6 +531,59 @@ impl App {
         let raised = self.confirm_or_close_window();
         eprintln!("[autoconfirm] confirm_or_close_window -> raised={raised}");
     }
+    /// Headless 계정 전환 확인 repro: `KASATERM_AUTOACCOUNTCONFIRM_MS` 뒤에 확인
+    /// 카드를 띄운다. `_TO=<계정id>` 를 주면 **실제 경로**(`ask_or_switch_claude_account`)
+    /// 를 태우고, 안 주면 가짜 영향으로 카드만 세운다 — 헤드리스에는 claude pane 이
+    /// 없어 영향이 늘 0이라 실제 경로만으로는 카드를 볼 수 없다.
+    ///
+    /// `_SURFACE=settings` 면 설정 별도창 몫으로 세운다(그 창이 그리는지 확인용).
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_account_confirm(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = *DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOACCOUNTCONFIRM_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let surface = match std::env::var("KASATERM_AUTOACCOUNTCONFIRM_SURFACE").as_deref() {
+            Ok("settings") => crate::session::ConfirmSurface::Settings,
+            _ => crate::session::ConfirmSurface::Main,
+        };
+        if let Ok(to) = std::env::var("KASATERM_AUTOACCOUNTCONFIRM_TO") {
+            self.ask_or_switch_claude_account(&to, surface);
+            let shown = self.account_switch_confirm.is_some();
+            eprintln!("[autoacctconfirm] real to={to} shown={shown}");
+            return;
+        }
+        let impact = crate::session::AccountSwitchImpact {
+            restart_when_quiet: 2,
+            restart_after_turn: 1,
+            chip_focused: 1,
+            fresh: 1,
+            ..Default::default()
+        };
+        eprintln!("[autoacctconfirm] fake torn_down={}", impact.torn_down());
+        self.account_switch_confirm = Some(crate::session::PendingAccountSwitch {
+            to: "acct-1".to_string(),
+            to_label: "지메일".to_string(),
+            impact,
+            surface,
+            rects: Vec::new(),
+        });
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Headless 사이드바 창-닫기 repro: `KASATERM_AUTOWINCLOSE_MS` 뒤에 사이드바
     /// 창 탭의 ×를 **실제 hit-test 경로**(`window_strip_click`)로 누른다.
     ///

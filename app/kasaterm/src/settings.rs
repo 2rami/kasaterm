@@ -1206,14 +1206,8 @@ impl App {
                 self.settings_input = Some(SettingsInput::ClaudeExtra);
             }
             SettingsAction::ClaudeAccount(id) => {
-                self.settings_input = None;
-                // 메뉴 전환과 같은 꼬리 — 떠 있는 pane 도 실측해 맞춰 띄운다.
-                let same = id == self.set_claude_account;
-                let (_, to_label, restarted, deferred, focused, live) =
-                    self.apply_claude_account_switch(&id);
-                self.set_toast(crate::session::account_switch_toast(
-                    &to_label, same, restarted, deferred, focused, live,
-                ));
+                // 다시 뜰 pane 이 있으면 먼저 묻는다. 없으면 옛 경로 그대로 즉시 전환.
+                self.ask_or_switch_claude_account(&id, crate::session::ConfirmSurface::Settings);
             }
             SettingsAction::ToggleAccountAutoswitch => {
                 self.set_account_autoswitch = !self.set_account_autoswitch;
@@ -1802,7 +1796,12 @@ impl App {
                 if !id.is_empty() && !self.set_claude_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
-                self.settings_apply(SettingsAction::ClaudeAccount(id.to_string()));
+                // ⚠️ 확인 카드를 태우지 않는다. 이 반환은 「반영됐는가」라서, 확인이
+                // 뜬 채로 돌아오면 `Ok(false)` 가 되어 웹 화면이 조용히 실패로 읽는다.
+                // 게다가 HTTP 요청이 네이티브 창을 모달로 잠글 수 있게 된다 — 웹은
+                // 자기 화면에서 자기 확인을 띄우는 것이 맞다(그때 쓸 숫자는
+                // `preview_claude_account_switch` 가 준다).
+                self.claude_account_switch_now(id);
                 Ok(self.set_claude_account == id)
             }
             "add-claude-account" => {
