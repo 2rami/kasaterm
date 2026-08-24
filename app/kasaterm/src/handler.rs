@@ -788,6 +788,22 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_apply(SettingsAction::ToggleClaudePersona);
                         Ok(socket::read_claude_persona() == self.set_claude_persona)
                     }
+                    // 캐릭터 하나 켜기/끄기 — id = 테마(`__base` 포함), label = 이름.
+                    //
+                    // 켬/끔을 **액션 이름으로** 가르는 이유: 이 라우트는 id 에 `/` 가
+                    // 있으면 경로 탈출로 보고 거부한다(정당한 방어라 우회하면 안 된다).
+                    // 그래서 `<테마>/<이름>` 을 한 값에 못 싣고, 문자열 자리 둘을
+                    // 테마·이름에 내주고 켬/끔은 접미로 뺐다(`reauth-account-isolated`
+                    // 와 같은 규약).
+                    "character-pick" | "character-pick-off" => self.apply_character_pick(
+                        &arg,
+                        label.as_deref(),
+                        !action.ends_with("-off"),
+                    ),
+                    // 테마 통째로.
+                    "theme-pick-all" | "theme-pick-none" => {
+                        self.apply_theme_pick_all(&arg, action.ends_with("-all"))
+                    }
                     // Theme 탭 밖의 컨트롤은 전부 여기로 — 판정 규칙이 위와 같아
                     // (액션이 남긴 상태로 본다) 한 함수에 모아 뒀다.
                     other => self.settings_web_action(other, &arg, label.as_deref()),

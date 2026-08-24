@@ -2905,7 +2905,7 @@ fn theme_key_or_reject(id: &str) -> Result<String, String> {
         })
 }
 
-fn reject(code: &'static str, msg: String) -> String {
+pub(crate) fn reject(code: &'static str, msg: String) -> String {
     put_web_code("error_code", serde_json::Value::String(code.to_string()));
     msg
 }

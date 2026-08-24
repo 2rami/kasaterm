@@ -828,6 +828,83 @@ impl App {
     ///
     /// 반환: (전환 전 계정 이름, 새 계정 이름, 즉시 재시작한 수, 끝나길 기다리는 수,
     /// 보는 pane 이 대기 중인가, 작업대 갈아 끼우기 성공 여부).
+    /// `character-pick` — 캐릭터 하나를 명단에 넣거나 뺀다.
+    ///
+    /// 반환은 「반영됐는가」 — 저장 뒤 파일을 다시 읽어 확인한다. 토글이라 「눌렀다」
+    /// 만으로는 알 수 없다는 기존 규칙 그대로다.
+    pub(crate) fn apply_character_pick(
+        &mut self,
+        theme: &str,
+        name: Option<&str>,
+        on: bool,
+    ) -> Result<bool, String> {
+        let name = name.map(str::trim).unwrap_or_default();
+        if theme.is_empty() || name.is_empty() {
+            return Err(crate::settings::reject(
+                "character_pick_bad_id",
+                "어느 테마의 누구인지 알 수 없어요".to_string(),
+            ));
+        }
+        let mut picks = kasa_mcp::character::all_picks();
+        let slot = match picks.iter_mut().find(|(k, _)| k == theme) {
+            Some(s) => s,
+            None => {
+                picks.push((theme.to_string(), Vec::new()));
+                picks.last_mut().expect("just pushed")
+            }
+        };
+        // 아무도 안 고른 테마를 처음 건드릴 때 「끄기」로 들어오면, 지금 전원이
+        // 후보인 상태에서 한 명만 빼는 뜻이 된다 — 그러려면 나머지를 전부 켜 둬야
+        // 한다. 안 그러면 명단이 빈 채로 남아 다시 전원 후보가 되어 아무 일도
+        // 안 일어난 것처럼 보인다.
+        if !on && slot.1.is_empty() {
+            slot.1 = theme_roster_names(theme);
+        }
+        slot.1.retain(|n| n != name);
+        if on && !slot.1.iter().any(|n| n == name) {
+            slot.1.push(name.to_string());
+        }
+        socket::write_character_picks(&picks);
+        self.invalidate_character_view();
+        Ok(kasa_mcp::character::picks_of_theme(theme).iter().any(|n| n == name) == on)
+    }
+
+    /// `theme-pick-all` — 테마 하나를 통째로 켜거나 끈다.
+    pub(crate) fn apply_theme_pick_all(&mut self, theme: &str, on: bool) -> Result<bool, String> {
+        if theme.is_empty() {
+            return Err(crate::settings::reject(
+                "character_pick_bad_id",
+                "어느 테마인지 알 수 없어요".to_string(),
+            ));
+        }
+        let names = theme_roster_names(theme);
+        if names.is_empty() {
+            return Err(crate::settings::reject(
+                "theme_roster_missing",
+                "그 테마의 명단을 못 읽었어요".to_string(),
+            ));
+        }
+        let mut picks = kasa_mcp::character::all_picks();
+        picks.retain(|(k, _)| k != theme);
+        if on {
+            picks.push((theme.to_string(), names));
+        }
+        // 끄기는 키를 빼는 것으로 끝난다 — 빈 배열은 저장 때 어차피 걷힌다.
+        socket::write_character_picks(&picks);
+        self.invalidate_character_view();
+        Ok(kasa_mcp::character::picks_of_theme(theme).is_empty() != on)
+    }
+
+    /// 명단이 바뀐 뒤 화면 쪽 캐시를 걷는다. 배정 캐시는 `write_character_picks` 가
+    /// 이미 비웠다 — 여기는 그림·색·테마 카드 몫이라 **짝으로** 불러야 한다.
+    fn invalidate_character_view(&mut self) {
+        crate::theme::invalidate_roster();
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// 확인 없이 지금 바꾼다. 옛 `SettingsAction::ClaudeAccount` 팔의 본문 그대로다.
     pub(crate) fn claude_account_switch_now(&mut self, id: &str) {
         self.settings_input = None;
@@ -4198,6 +4275,16 @@ pub(crate) fn predicted_target_dir(
         return vault();
     }
     String::new()
+}
+
+/// 그 테마의 전원 이름. `__base` 는 번들(활성 테마를 뺀 기본) 로스터다.
+fn theme_roster_names(theme: &str) -> Vec<String> {
+    let chars = if theme == kasa_mcp::character::BASE_THEME_KEY {
+        kasa_mcp::character::base_characters_json()
+    } else {
+        kasa_mcp::character::theme_characters_json(theme)
+    };
+    chars.as_ref().map(kasa_mcp::character::member_names).unwrap_or_default()
 }
 
 pub(crate) fn account_switch_toast(

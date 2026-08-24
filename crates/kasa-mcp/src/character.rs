@@ -292,6 +292,21 @@ fn settings_path() -> Option<PathBuf> {
     }
 }
 
+/// 테마 하나에서 고른 이름들(있는 그대로 — 실재 확인 안 함). 화면이 체크 표시를
+/// 그리는 데 쓴다.
+pub fn picks_of_theme(theme: &str) -> Vec<String> {
+    read_character_picks()
+        .into_iter()
+        .find(|(k, _)| k == theme)
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+/// 고른 명단 전체 — `{테마: [이름…]}`. 저장 전에 읽어 고치는 쪽이 쓴다.
+pub fn all_picks() -> Vec<(String, Vec<String>)> {
+    read_character_picks()
+}
+
 /// 골라 둔 이름들 — 테마를 가로질러 모으고 **그 테마에 실재하는 것만** 남긴다.
 ///
 /// 실재 확인을 하는 이유: 테마를 지웠거나 이름을 바꾸면 목록에 유령이 남는데, 그걸

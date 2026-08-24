@@ -1444,11 +1444,20 @@ impl Backend for PtyBackend {
         let themes: Vec<serde_json::Value> = theme_rows()
             .into_iter()
             .map(|r| {
+                // 고른 이름은 **그 테마 것만** 싣는다. 명단 전체(11테마 300명)를
+                // 실으면 설정 화면을 열 때마다 그만큼이 오가는데, 화면은 접힌
+                // 상태에서 「n/m」만 있으면 되고 펼칠 때 `/theme-roster` 로 받는다.
+                let picked = kasa_mcp::character::picks_of_theme(if r.id.is_empty() {
+                    kasa_mcp::character::BASE_THEME_KEY
+                } else {
+                    &r.id
+                });
                 serde_json::json!({
                     "id": r.id,
                     "label": r.label,
                     "count": r.count,
                     "faces": r.faces.into_iter().map(|(slug, _)| slug).collect::<Vec<_>>(),
+                    "picked": picked,
                 })
             })
             .collect();
@@ -3525,6 +3534,25 @@ pub fn theme_rows() -> Vec<ThemeRow> {
     let v = build_theme_rows();
     *w = Some(v.clone());
     v
+}
+
+/// 고른 명단을 통째로 저장한다 — `{테마: [이름…]}`. 빈 배열인 테마는 키째 뺀다
+/// (「아무도 안 골랐다」와 「그 테마를 안 건드렸다」가 같은 뜻이라, 남겨 두면 설정
+/// 파일에 의미 없는 빈 키가 쌓인다).
+///
+/// 저장 뒤 캐시 셋을 **짝으로** 비운다 — 한쪽만 비우면 배정은 새 명단인데 화면은
+/// 옛 숫자를 보여 준다.
+pub fn write_character_picks(picks: &[(String, Vec<String>)]) {
+    let mut obj = serde_json::Map::new();
+    for (theme, names) in picks {
+        if names.is_empty() {
+            continue;
+        }
+        obj.insert(theme.clone(), serde_json::json!(names));
+    }
+    write_setting("character_picks", serde_json::Value::Object(obj));
+    kasa_mcp::character::invalidate_character_picks();
+    invalidate_theme_rows();
 }
 
 pub fn invalidate_theme_rows() {
