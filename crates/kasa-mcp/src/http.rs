@@ -3014,14 +3014,18 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
     if !resp.status().is_success() {
         // 상태만 남긴다(토큰은 절대). 400/401=죽은 refresh token, 429=스로틀 —
         // 조용한 None 은 성공과 구분이 안 돼 현장에서 진단이 불가능하다.
-        eprintln!(
-            "[claude-token] 갱신 거부 {} · slot={dir}",
-            resp.status().as_u16()
-        );
+        let code = resp.status().as_u16();
+        eprintln!("[claude-token] 갱신 거부 {code} · slot={dir}");
+        if let (400 | 401 | 403, Ok(mut g)) = (code, dead_refresh().lock()) {
+            g.insert(dir.to_string());
+        }
         return None;
     }
     // `.json()` 은 reqwest 의 json feature 가 필요한데 이 크레이트는 안 켰다 —
     // 본문을 받아 직접 파싱한다(의존성 하나를 아끼려고).
+    if let Ok(mut g) = dead_refresh().lock() {
+        g.remove(dir);
+    }
     let data: serde_json::Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
     let access = data.get("access_token")?.as_str()?.to_string();
     let o = creds.get_mut("claudeAiOauth")?.as_object_mut()?;
@@ -3304,11 +3308,15 @@ async fn claude_usage_handler(
     const TTL: Duration = Duration::from_secs(60);
     let cache = CACHE.get_or_init(Default::default);
 
-    // 슬롯별 「이 시각까지는 upstream 을 치지 마라」. 429 를 맞고도 60초마다 계속
+    // **토큰별** 「이 시각까지는 이 토큰으로 치지 마라」. 429 를 맞고도 60초마다 계속
     // 두드리면 한도 창이 두드릴 때마다 갱신돼 **영영 안 풀린다** — 실측으로 활성
     // 슬롯이 6일째 429 였고, 그 사이 화면은 내내 빈칸이었다(거노 2026-08-24
     // "하나도안돼"). 한 번 막히면 물러나 있어야 창이 닫힌다.
-    static BACKOFF: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    //
+    // ⚠️ 키가 **슬롯이 아니라 토큰**인 것이 중요하다. 슬롯으로 걸면 작업대가 막힌
+    // 15분 동안 아래 금고 폴백까지 함께 막혀, 폴백을 넣은 의미가 사라진다(실측:
+    // 폴백을 넣고도 화면이 여전히 빈칸이었다). 막힌 건 그 토큰이지 계정이 아니다.
+    static BACKOFF: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
     const BACKOFF_FOR: Duration = Duration::from_secs(15 * 60);
     let backoff = BACKOFF.get_or_init(Default::default);
 
@@ -3360,11 +3368,6 @@ async fn claude_usage_handler(
     // 왜 못 읽었는지를 남긴다. 전에는 어떤 실패든 「rate-limited」 한 문구라, 정작
     // 로그아웃된 슬롯도 「한도 초과」로 보여 사용자가 기다리면 될 줄 알았다.
     let mut why = if token.is_some() { "usage_unavailable" } else { "logged_out" };
-    let backed_off = backoff
-        .lock()
-        .ok()
-        .and_then(|g| g.get(&dir).copied())
-        .is_some_and(|until| Instant::now() < until);
     // 토큰 후보. 작업대(빈 dir)가 429 면 같은 계정의 금고로 한 번 더 묻는다 —
     // 다른 토큰이라 한도가 따로 돌고, 숫자는 어차피 같은 계정 것이다.
     let mut tokens: Vec<String> = token.into_iter().collect();
@@ -3376,56 +3379,60 @@ async fn claude_usage_handler(
         }
     }
     let mut fresh: Option<serde_json::Value> = None;
-    // 막힌 동안은 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
-    if backed_off && !tokens.is_empty() {
-        why = "rate_limited";
-    } else {
-        for token in &tokens {
-            let resp = reqwest::Client::new()
-                .get("https://api.anthropic.com/api/oauth/usage")
-                .header("authorization", format!("Bearer {token}"))
-                .header("anthropic-beta", "oauth-2025-04-20")
-                .send()
-                .await;
-            match resp {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(mut g) = backoff.lock() {
-                        g.remove(&dir);
-                    }
-                    fresh = r
-                        .text()
-                        .await
-                        .ok()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-                    if fresh.is_some() {
-                        break;
-                    }
+    for token in &tokens {
+        // 막힌 동안은 이 토큰으로 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
+        // 다음 후보는 다른 토큰이라 그대로 시도한다.
+        let key = token_key(token);
+        let blocked = backoff
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&key).copied())
+            .is_some_and(|until| Instant::now() < until);
+        if blocked {
+            why = "rate_limited";
+            continue;
+        }
+        let resp = reqwest::Client::new()
+            .get("https://api.anthropic.com/api/oauth/usage")
+            .header("authorization", format!("Bearer {token}"))
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(mut g) = backoff.lock() {
+                    g.remove(&key);
                 }
-                Ok(r) => {
-                    let code = r.status().as_u16();
-                    why = match code {
-                        429 => "rate_limited",
-                        401 | 403 => "token_rejected",
-                        _ => "usage_unavailable",
-                    };
-                    // 백오프는 **후보를 다 써 보고** 건다 — 첫 토큰이 막혔다고 바로
-                    // 걸면 멀쩡한 두 번째 토큰을 15분 동안 안 쓰게 된다.
-                    // 상태만 남긴다(토큰은 절대). 조용한 실패는 현장에서 못 가른다.
-                    eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
-                }
-                Err(e) => {
-                    why = "network";
-                    eprintln!("[claude-usage] 요청 실패: {e}");
+                fresh = r
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                if fresh.is_some() {
+                    break;
                 }
             }
-        }
-        if fresh.is_none() && why == "rate_limited" {
-            if let Ok(mut g) = backoff.lock() {
-                g.insert(dir.clone(), Instant::now() + BACKOFF_FOR);
+            Ok(r) => {
+                let code = r.status().as_u16();
+                why = match code {
+                    429 => "rate_limited",
+                    401 | 403 => "token_rejected",
+                    _ => "usage_unavailable",
+                };
+                if code == 429 {
+                    if let Ok(mut g) = backoff.lock() {
+                        g.insert(key, Instant::now() + BACKOFF_FOR);
+                    }
+                }
+                // 상태만 남긴다(토큰은 절대). 조용한 실패는 현장에서 못 가른다.
+                eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
+            }
+            Err(e) => {
+                why = "network";
+                eprintln!("[claude-usage] 요청 실패: {e}");
             }
         }
     }
-
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
             g.insert(dir.clone(), (Some(Instant::now()), v.clone()));
@@ -3442,6 +3449,10 @@ async fn claude_usage_handler(
             return (cors, Json(ok(v, true)));
         }
     }
+    // 갱신이 죽은 슬롯은 429 를 맞았더라도 **로그인 문제**다 — 기다려서 안 풀린다.
+    if dead_refresh().lock().is_ok_and(|g| g.contains(&dir)) {
+        why = "token_rejected";
+    }
     let msg = match why {
         "rate_limited" => "한도 조회가 잠시 막혔어요 — 곧 다시 시도해요",
         "token_rejected" => "로그인이 만료됐어요 — 다시 로그인해 주세요",
@@ -3455,6 +3466,28 @@ async fn claude_usage_handler(
             "ok": false, "error": msg, "reason": why, "account_dir": dir,
         })),
     )
+}
+
+/// 갱신이 **400/401 로 거부된** 슬롯. 그건 refresh token 이 죽었다는 뜻이라
+/// 기다려서 풀리지 않는다 — 다시 로그인해야만 산다.
+///
+/// 이걸 따로 기억하는 이유: 그 뒤 usage 호출이 429 를 맞으면 표시가 「한도 조회가
+/// 막혔어요」가 되어 **기다리면 될 것처럼 보인다**(2026-08-25 실측: 네이버 슬롯이
+/// 정확히 그 모양이었다 — 갱신 400 인데 화면은 한도 초과라고 말했다). 죽은 로그인이
+/// 429 뒤에 숨지 않게, 이쪽을 먼저 말한다.
+fn dead_refresh() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DEAD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DEAD.get_or_init(Default::default)
+}
+
+/// 백오프 맵의 키. 토큰 문자열을 그대로 키로 두면 값이 맵에 오래 남으므로 지문만
+/// 쓴다 — 같은 토큰인지만 알면 되고, 되돌릴 필요가 없다.
+fn token_key(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    h.finish()
 }
 
 /// 로그에 쓸 슬롯 이름. 경로 전체는 홈 디렉터리가 통째로 찍혀 길기만 하다.
