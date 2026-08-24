@@ -443,6 +443,69 @@ fn feed_sse_bytes(conv: &mut PaneConv, bytes: &[u8]) {
     }
 }
 
+/// 업스트림 오류 본문에 「게이트웨이는 무죄」 표식. claude 는 `ANTHROPIC_BASE_URL` 이
+/// 설정돼 있기만 하면 오류 종류를 안 가리고 "check your inference gateway" 를 붙인다
+/// (바이너리 소관이라 문구를 못 지운다) — 2026-08-24 Anthropic 인시던트 때 그 문구
+/// 탓에 세 사람이 로컬 게이트웨이를 오진했다. 상태코드와 `error.type` 은 claude 의
+/// 재시도 로직이 보므로 건드리지 않고 message 문자열에만 덧붙인다. 모양이 다르면
+/// None — 원문 그대로 흘린다(표식은 best-effort).
+fn annotate_upstream_error(body: &[u8]) -> Option<Vec<u8>> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let msg = v.get_mut("error")?.get_mut("message")?;
+    let s = msg.as_str()?;
+    *msg = serde_json::Value::String(format!("{s} (upstream: api.anthropic.com — gateway OK)"));
+    serde_json::to_vec(&v).ok()
+}
+
+/// epoch 초 → ISO UTC. chrono 없이 civil_from_days(Hinnant) 손계산 — 로그 한 줄을
+/// 위해 날짜 crate 를 들이지 않는다.
+fn iso_utc(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60
+    )
+}
+
+/// 게이트웨이 요청 로그 — 오진 사건(2026-08-24)의 재발 방지책. 그날은 기록이 0이라
+/// 실사격 curl 로 손수 갈랐다; 이 한 줄이 있으면 tail 한 번으로 끝난다. 로그가
+/// 중계를 깨면 본말전도라 모든 실패를 조용히 삼킨다. 5MB 넘으면 .1 로 한 단 밀기.
+fn gateway_log(pane: &str, method: &str, rest: &str, status: &str, ms: u128) {
+    static GATE: Mutex<()> = Mutex::new(());
+    let Some(home) =
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(home).join(".config/kasaterm");
+    let path = dir.join("gateway.log");
+    let _g = GATE.lock();
+    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let old = dir.join("gateway.log.1");
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(&path, &old);
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} | %{} | {} /{} | {} | {}ms", iso_utc(secs), pane, method, rest, status, ms);
+    }
+}
+
 /// `/p/{pane}/{*rest}` — claude 의 Anthropic API 호출 가로채기. 캡처(side-effect) 후
 /// api.anthropic.com 으로 투명 포워드, 응답 스트림 tee.
 pub async fn proxy_handler(
@@ -509,6 +572,7 @@ pub async fn proxy_handler(
     }
 
     // 포워드. host/content-length 는 reqwest 가 재설정하므로 제외.
+    let method_s = method.to_string();
     let url = format!("{ANTHROPIC}/{rest}");
     let mut rb = client.request(method, &url);
     for (k, val) in headers.iter() {
@@ -525,21 +589,31 @@ pub async fn proxy_handler(
         rb = rb.header(k.as_str(), val.as_bytes());
     }
     rb = rb.header(axum::http::header::ACCEPT_ENCODING, "identity");
+    let t0 = std::time::Instant::now();
     let upstream = match rb.body(body.to_vec()).send().await {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, format!("proxy upstream error: {e}")).into_response()
+            // 여기 걸렸을 때만 게이트웨이 책임이다 — 응답이 아예 없었다는 뜻.
+            gateway_log(&pane, &method_s, &rest, &format!("CONNFAIL: {e}"), t0.elapsed().as_millis());
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("kasaterm gateway could not reach api.anthropic.com: {e}"),
+            )
+                .into_response();
         }
     };
 
     let status = upstream.status();
+    // 소요는 첫 응답(상태코드)까지 — SSE 는 스트림이 분 단위라 완료까지 재면 로그가
+    // 한참 늦게 찍힌다.
+    gateway_log(&pane, &method_s, &rest, &status.as_u16().to_string(), t0.elapsed().as_millis());
+    let upstream_is_sse = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|c| c.to_str().ok())
+        .is_some_and(|c| c.contains("event-stream"));
     // 응답 SSE 누적은 메인 대화(capture) 호출일 때만 — 유틸 호출 응답은 대화에 안 섞는다.
-    let is_sse = capture
-        && upstream
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|c| c.to_str().ok())
-            .is_some_and(|c| c.contains("event-stream"));
+    let is_sse = capture && upstream_is_sse;
     if std::env::var_os("KASATERM_PROXY_DIAG").is_some() {
         eprintln!(
             "[proxy-diag] resp capture={capture} is_sse={is_sse} status={}",
@@ -554,6 +628,17 @@ pub async fn proxy_handler(
             continue;
         }
         out = out.header(k.as_str(), val.as_bytes());
+    }
+
+    // 오류 응답은 통짜로 받아 표식을 붙인다 — 스트리밍이 필요한 건 2xx SSE 뿐이고
+    // 오류 본문은 작다. 529 가 정확히 이 모양(통짜 JSON)이다. content-length 헤더는
+    // 위에서 이미 걸러졌으므로 재계산 충돌이 없다.
+    if status.as_u16() >= 400 && !upstream_is_sse {
+        let raw = upstream.bytes().await.unwrap_or_default();
+        let body_out = annotate_upstream_error(&raw).unwrap_or_else(|| raw.to_vec());
+        return out
+            .body(Body::from(body_out))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
     let store2 = store.clone();
@@ -575,6 +660,35 @@ pub async fn proxy_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotates_overloaded_error_message_only() {
+        let body = br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let out = annotate_upstream_error(body).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["error"]["message"],
+            "Overloaded (upstream: api.anthropic.com — gateway OK)"
+        );
+        // 재시도 로직이 보는 필드는 그대로여야 한다.
+        assert_eq!(v["error"]["type"], "overloaded_error");
+        assert_eq!(v["type"], "error");
+    }
+
+    #[test]
+    fn annotate_passes_through_unknown_shapes() {
+        // 깨진 JSON / error.message 없음 / message 가 문자열 아님 — 전부 원문 유지 쪽.
+        assert!(annotate_upstream_error(b"not json").is_none());
+        assert!(annotate_upstream_error(br#"{"error":{"type":"x"}}"#).is_none());
+        assert!(annotate_upstream_error(br#"{"error":{"message":42}}"#).is_none());
+    }
+
+    #[test]
+    fn iso_utc_matches_known_instants() {
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
+        // date -u -r 1787550000 → 2026-08-24T05:40:00Z (이번 인시던트 당일)
+        assert_eq!(iso_utc(1_787_550_000), "2026-08-24T05:40:00Z");
+    }
 
     #[test]
     fn extracts_text_turns_skips_tool_noise() {
