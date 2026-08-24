@@ -192,8 +192,15 @@ cp theme-src-<작품>/roster.json ~/.config/kasaterm/themes/<작품>/theme.json
 ## ⑧ 대조 — `theme-sprites.py sheet`
 
 ```bash
-python3 scripts/theme-sprites.py sheet --out /tmp/theme-sheet.png
+THEME_SRC=theme-src-<작품> \
+THEME_DST=~/.config/kasaterm/themes/<작품>/sprites \
+THEME_ROSTER=theme-src-<작품>/roster.json \
+  python3 scripts/theme-sprites.py sheet --out /tmp/theme-sheet.png
 ```
+
+⚠️ **`THEME_DST` 를 ⑦ 과 똑같이 줘야 한다.** 안 주면 기본값인 번들을 읽어 **오른쪽
+「구운 프로필」 칸이 전원 빈 채로** 나온다 — 설치는 멀쩡히 됐는데 시트만 비어서, 설치가
+실패한 것처럼 읽힌다(2026-08-24 프로세카에서 실제로 한 번 헛돌았다).
 
 **왼쪽 위키 원본 / 오른쪽 구운 프로필**을 한 줄에 6명씩 붙여 한 장으로 만든다.
 「누가 안 닮았나」는 한 명씩 열어 보면 기준이 흔들려서 못 고른다 — 나란히 놓고 훑어야
@@ -202,6 +209,10 @@ python3 scripts/theme-sprites.py sheet --out /tmp/theme-sheet.png
 ```bash
 curl "http://127.0.0.1:8765/open-image?path=/tmp/theme-sheet.png&pane=$KASATERM_PANE_ID"
 ```
+
+프로필 배경이 통째로 한 색으로 보여도 알파 문제가 아닐 때가 많다 — 트윈테일처럼 머리가
+96×96 을 꽉 채우면 그렇게 보인다. 의심되면 투명을 자홍으로 합성해 한 번 확인하고,
+번들과 모서리 알파를 비교하는 식으로는 가르지 마라(번들은 크롭이 더 여유로워 0장이다).
 
 ⚠️ 이 시트는 **디스크에 있는 것을 그린다** — 다시 구운 학생과 옛 그림이 섞여 있어도
 구분해 주지 않는다. 화풍이 튀는 칸이 보이면 `stat` 으로 날짜를 확인할 것.
