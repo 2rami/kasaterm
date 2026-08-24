@@ -1005,6 +1005,29 @@ async fn characters_handler() -> impl IntoResponse {
     (status, [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /theme-roster?id=<테마id|__base>` — 그 테마의 로스터를 `/characters` 와
+/// 같은 형태로. `__base` 는 활성 테마를 뺀 기본(번들) 로스터다. 진행 중 pane 의
+/// 캐릭터 피커가 활성 밖 테마의 학생까지 묶음으로 보여 주는 데 쓴다(2026-08-24
+/// 지시: 어느 테마가 활성이어도 다른 테마 캐릭터로 바꿀 수 있어야 한다).
+async fn theme_roster_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = params.get("id").map(String::as_str).unwrap_or_default();
+    let body = if id == "__base" {
+        crate::character::base_characters_json()
+    } else {
+        crate::character::theme_characters_json(id)
+    };
+    let (status, body) = match body {
+        Some(v) => (axum::http::StatusCode::OK, v),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "theme roster not found" }),
+        ),
+    };
+    (status, [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// SKILL.md / commands/*.md frontmatter("--- … ---" 사이)의 description 추출.
 fn frontmatter_desc(path: &std::path::Path) -> Option<String> {
     let s = std::fs::read_to_string(path).ok()?;
@@ -4328,6 +4351,7 @@ pub fn spawn_http_server_opts(
                         get(move || layout_handler(layout_backend.clone())),
                     )
                     .route("/characters", get(characters_handler))
+                    .route("/theme-roster", get(theme_roster_handler))
                     // 웹 터미널 — 브라우저에서 독립으로 여는 셸.
                     .route("/term", get(term_page_handler))
                     .route("/term/xterm.js", get(term_asset_js))

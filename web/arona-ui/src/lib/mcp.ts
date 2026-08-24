@@ -232,6 +232,8 @@ export function startBoardPolling(intervalMs = 1000): () => void {
 
 export interface CharacterDef {
   name: string;
+  /** 프사·스프라이트 파일명 조각 — 피커가 /character-face URL 을 만드는 데 쓴다. */
+  slug?: string;
   claude_color?: string;
   header_color?: string;
   persona?: string;
@@ -378,15 +380,48 @@ export async function spawnStudent(character: string): Promise<boolean> {
   }
 }
 
-/** POST /swap-character?surface=<id>&character=<name> — pane 캐릭터 교체(PTY respawn,
- *  대화 리셋). persona 가 셸 spawn 시 고정이라 그 pane 을 새 persona 로 다시 띄운다. */
-export async function swapCharacter(surface: string, character: string): Promise<boolean> {
+/** GET /repersona?surface=<id>&character=<name> — 진행 중 pane 의 캐릭터 재배정.
+ *  respawn 없음: 대화·PTY 그대로, 헤더·프사·색·세션 바인딩만 새 캐릭터로. 다른
+ *  테마의 이름도 받는다(백엔드가 합집합으로 검증, 2026-08-24 지시). */
+export async function repersona(surface: string, character: string): Promise<boolean> {
   try {
-    const r = await fetch(`${BASE}/swap-character?surface=${encodeURIComponent(surface)}&character=${encodeURIComponent(character)}`, { method: 'POST' });
+    const r = await fetch(`${BASE}/repersona?surface=${encodeURIComponent(surface)}&character=${encodeURIComponent(character)}`);
     return r.ok;
   } catch {
     return false;
   }
+}
+
+/** GET /theme-roster?id=<테마id|__base> — 그 테마의 로스터(/characters 와 같은 형태).
+ *  `__base` = 활성 테마를 뺀 기본(번들) 로스터. */
+export async function fetchThemeRoster(id: string): Promise<Characters | null> {
+  try {
+    const r = await fetch(`${BASE}/theme-roster?id=${encodeURIComponent(id)}`);
+    if (!r.ok) return null;
+    return (await r.json()) as Characters;
+  } catch {
+    return null;
+  }
+}
+
+/** GET /settings/characters 에서 테마 카드 목록만 — 피커의 묶음 머리에 쓴다. */
+export async function fetchThemesList(): Promise<{ active: string | null; themes: { id: string; label: string }[] }> {
+  try {
+    const r = await fetch(`${BASE}/settings/characters`);
+    if (!r.ok) return { active: null, themes: [] };
+    const j = await r.json() as { active_theme?: string | null; themes?: { id: string; label: string }[] };
+    return { active: j.active_theme ?? null, themes: j.themes ?? [] };
+  } catch {
+    return { active: null, themes: [] };
+  }
+}
+
+/** 캐릭터 프사 URL — theme 을 주면 그 테마 폴더의 그림(피커의 비활성 테마 묶음),
+ *  안 주면 활성 폴더 → 번들 순(백엔드 /character-face 규약 그대로). */
+export function characterFaceUrl(slug: string, theme?: string): string {
+  const q = new URLSearchParams({ slug });
+  if (theme) q.set('theme', theme);
+  return `${BASE}/character-face?${q}`;
 }
 
 /** `character` = 세션→학생 영속 바인딩(백엔드가 session_characters.json 에서 얹음).

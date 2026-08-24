@@ -182,6 +182,52 @@ pub fn characters_json() -> Option<Value> {
     None
 }
 
+/// 활성 테마 항목을 뺀 기본 로스터 — 테마를 안 골랐을 때와 같은 것. 진행 중
+/// pane 을 기본(번들) 학생으로 바꾸는 피커의 「기본」 묶음이 쓴다(2026-08-24
+/// 지시: 어느 테마가 활성이어도 다른 테마 캐릭터로 바꿀 수 있어야 한다).
+pub fn base_characters_json() -> Option<Value> {
+    let skip = active_theme_dir().map(|d| d.join("theme.json"));
+    for p in candidate_paths() {
+        if skip.as_deref() == Some(p.as_path()) {
+            continue;
+        }
+        let Ok(s) = std::fs::read_to_string(&p) else { continue };
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 설치 테마 하나의 로스터(theme.json). id 는 경로 조각이 되므로 구분자를 거부한다.
+pub fn theme_characters_json(id: &str) -> Option<Value> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return None;
+    }
+    let s = std::fs::read_to_string(themes_root()?.join(id).join("theme.json")).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// persona 합집합 조회 — 활성 → 기본(번들) → 설치 테마 전부. 진행 중 pane 이
+/// 다른 테마 캐릭터로 재배정된 뒤 재시작·resume 할 때, 활성 로스터에 없는
+/// 이름이라도 원 소속 테마의 말투를 찾아 입힌다.
+pub fn persona_for_any(name: &str) -> Option<String> {
+    for chars in [characters_json(), base_characters_json()].into_iter().flatten() {
+        if let Some(p) = persona_for(&chars, name) {
+            return Some(p);
+        }
+    }
+    let root = themes_root()?;
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let Ok(s) = std::fs::read_to_string(e.path().join("theme.json")) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
+        if let Some(p) = persona_for(&v, name) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn names_of(arr: Option<&Value>) -> Vec<String> {
     arr.and_then(|a| a.as_array())
         .map(|a| {

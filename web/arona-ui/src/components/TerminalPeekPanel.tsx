@@ -1,5 +1,5 @@
 import { Fragment, type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscriptChunk, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, fetchMessages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, resumeCommand, revealTerminal, closeAgent, swapCharacter, type Harness, type Turn, type MessageEntry } from '@/lib/mcp';
+import { fetchConversation, fetchTranscriptChunk, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, fetchMessages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, resumeCommand, revealTerminal, closeAgent, repersona, type Harness, type Turn, type MessageEntry } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { CharacterPicker } from './CharacterPicker';
 import { Markdown } from './Markdown';
@@ -2432,8 +2432,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       {charPicker && (
         <CharacterPicker
           title="캐릭터 변경"
-          note={`${avatarChar} → 바꾸면 이 학생의 claude 대화가 리셋돼요.`}
-          onPick={(name) => { void swapCharacter(surfaceId, name); setCharPicker(false); }}
+          note={`${avatarChar} → 대화는 그대로 두고 모습·이름만 바뀌어요. 말투는 다음 재시작부터.`}
+          onPick={(name) => { void repersona(surfaceId, name); setCharPicker(false); }}
           onClose={() => setCharPicker(false)}
         />
       )}

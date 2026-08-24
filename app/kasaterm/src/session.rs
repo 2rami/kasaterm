@@ -386,7 +386,11 @@ impl App {
             // teammate 이름 꼬리 — 셰임이 `<슬러그>-p<번호>` 뒤에 그대로 붙인다.
             ("KASATERM_AGENT_SUFFIX".to_string(), crate::agent_name_suffix()),
         ];
-        if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
+        // 활성 로스터에 없는 이름(재배정·resume 으로 온 다른 테마 학생)은 합집합
+        // 조회로 원 소속 테마의 말투를 찾는다 — 없으면 이름만 남고 말투가 빈다.
+        if let Some(p) = kasa_mcp::character::persona_for(&chars, &name)
+            .or_else(|| kasa_mcp::character::persona_for_any(&name))
+        {
             env.push(("KASATERM_PERSONA".to_string(), p));
         }
         // 학생별 모델·실행 통로 — claude shim 이 전역 노브보다 이것을 먼저 본다
@@ -601,9 +605,10 @@ impl App {
             return;
         }
         // 로스터 밖 이름 가드 — 엔드포인트로 들어오는 자유 문자열이 헤더/마커를
-        // 오염하지 않게. 래퍼는 characters.json 기준으로만 설치되니 정상 경로는 통과.
-        let Some(chars) = kasa_mcp::character::characters_json() else { return };
-        if !kasa_mcp::character::member_names(&chars).iter().any(|n| n == character) {
+        // 오염하지 않게. 활성만 보면 진행 중 pane 을 다른 테마 학생으로 바꾸는
+        // 기능(2026-08-24 지시)이 죽으므로, 아는 명부의 합집합(활성∪번들∪설치
+        // 테마)으로 본다 — 렌더 쪽 이름 조회와 같은 경계다.
+        if crate::theme::character_slug_any(character).is_none() {
             eprintln!("[repersona] unknown character '{character}' — ignored");
             return;
         }
