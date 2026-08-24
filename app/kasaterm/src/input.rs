@@ -2607,6 +2607,37 @@ impl App {
                         self.copy_selection();
                         return;
                     }
+                    // Cmd+A → 활성 pane 화면 전체 선택. 터미널 입력줄엔 「전체
+                    // 선택」이 없으니 macOS 관례가 기대하는 대상은 화면 텍스트다
+                    // — 이어지는 Cmd+C 가 위의 copy_selection 으로 떨어진다.
+                    if code == KeyCode::KeyA && !self.modifiers.shift_key() {
+                        let extent = self
+                            .ws
+                            .lock()
+                            .unwrap()
+                            .active()
+                            .and_then(|p| p.term())
+                            .map(|t| (t.cols, t.rows));
+                        if let Some((cols, rows)) = extent {
+                            if cols > 0 && rows > 0 {
+                                self.selection = Some(Selection {
+                                    anchor: (0, 0),
+                                    end: (cols - 1, rows - 1),
+                                });
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    // Cmd+Z → 셸 undo. ^_ 는 zsh/bash emacs 모드 기본
+                    // 바인딩(undo)이고 TUI 에선 사실상 무동작이라 안전하다.
+                    // Shift(redo)는 셸에 기본 위젯이 없어 흘려보낸다.
+                    if code == KeyCode::KeyZ && !self.modifiers.shift_key() {
+                        self.send_bytes(b"\x1f");
+                        return;
+                    }
                     if code == KeyCode::KeyV {
                         // Pasted text bypasses our key path, so we can't
                         // mirror it into input_buf — drop the suggestion
@@ -3023,12 +3054,30 @@ impl App {
                 };
                 // Carry modifiers so claude code (Ink) / zsh see word-wise
                 // and line-wise motion instead of a bare one-cell arrow.
-                //   Option(Alt)+←/→ → CSI modifier 3 = backward/forward-word
-                //   Cmd(super)+←/→  → Home / End  = line start/end
+                //   Option(Alt)+←/→ → ESC b / ESC f = backward/forward-word
+                //   Cmd(super)+←/→  → ^A / ^E      = line start/end
                 // Cmd+Option+arrow never reaches here — it's consumed above
                 // as the pane-focus shortcut.
+                //
+                // 셸에는 readline 제어문자로 보내야 한다 — 전에 쓰던 CSI
+                // 인코딩(`\x1b[H`/`\x1b[F`·`\x1b[1;3C`)은 zsh 기본 bindkey 에
+                // 아예 없어서(실측: `^A`/`^E`·`^[b`/`^[f`·`^[OH` 만 있다)
+                // 셸 프롬프트에서 조용히 무시됐다(거노: "터미널에서 커맨드
+                // 이동·옵션 단어 이동이 안 돼"). alt-screen TUI(vim·less)는
+                // 반대로 CSI 를 이해하고 ^A 가 딴 뜻(숫자 증가)이라, 화면
+                // 상태로 인코딩을 가른다. DECCKM 도 같은 스냅샷에서 읽는다.
+                let (app_cursor, alt_screen) = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .active()
+                    .and_then(|p| p.term())
+                    .map(|t| (t.app_cursor, t.alt_screen))
+                    .unwrap_or((false, false));
                 if self.modifiers.super_key() {
                     match letter {
+                        'D' if !alt_screen => b"\x01".to_vec(),
+                        'C' if !alt_screen => b"\x05".to_vec(),
                         'D' => b"\x1b[H".to_vec(),
                         'C' => b"\x1b[F".to_vec(),
                         _ => format!("\x1b[{letter}").into_bytes(),
@@ -3039,7 +3088,12 @@ impl App {
                     // readline, and Ink all read this as forward/backward-word.
                     format!("\x1b[1;5{letter}").into_bytes()
                 } else if self.modifiers.alt_key() {
-                    format!("\x1b[1;3{letter}").into_bytes()
+                    // 위아래(Option+↑/↓)는 셸에 대응 위젯이 없어 CSI 그대로.
+                    match letter {
+                        'D' if !alt_screen => b"\x1bb".to_vec(),
+                        'C' if !alt_screen => b"\x1bf".to_vec(),
+                        _ => format!("\x1b[1;3{letter}").into_bytes(),
+                    }
                 } else {
                     // Plain arrow: honor the active pane's DECCKM. When the
                     // inner app (claude code / vim / readline) set
@@ -3047,14 +3101,6 @@ impl App {
                     // sending CSI (`ESC [ A`) there silently fails, which
                     // is why up/down line-navigation in the prompt did
                     // nothing while modified arrows still worked.
-                    let app_cursor = self
-                        .ws
-                        .lock()
-                        .unwrap()
-                        .active()
-                        .and_then(|p| p.term())
-                        .map(|t| t.app_cursor)
-                        .unwrap_or(false);
                     if app_cursor {
                         format!("\x1bO{letter}").into_bytes()
                     } else {
