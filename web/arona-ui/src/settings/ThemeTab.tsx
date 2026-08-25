@@ -189,25 +189,41 @@ function CharacterCell({
   /// 프사를 받을 폴더. 활성 테마면 빈 값이라 활성 → 번들 순으로 찾는다.
   theme?: string;
   picked: boolean;
-  /// 카드 본체를 눌렀을 때 상세로 가는지(활성 테마만 true).
+  /// 이 테마가 지금 쓰는 테마인가. 상세로 갈 수 있는지를 가른다 — 프사·성격 편집은
+  /// 그 테마가 설치돼 있어야 한다.
   detail: boolean;
   disabled: boolean;
   onSelect: () => void;
   onTogglePick: () => void;
 }) {
-  const body = () => (detail ? onSelect() : onTogglePick());
+  // 클릭=고르기, 더블클릭=캐릭터 설정(거노 2026-08-25). 예전엔 쓰는 테마에서만
+  // 클릭이 상세로 갔는데, 그러면 **같은 동작이 테마에 따라 딴 일을 해서** 어느
+  // 테마를 보고 있는지 먼저 확인해야 눌 수 있었다. 이제 어디서나 클릭은 고르기다.
+  //
+  // 더블클릭이 오면 앞선 한 번의 클릭(=고르기)이 이미 나갔으므로 되돌린 뒤 상세로
+  // 간다. 타이머로 클릭을 미루지 않는 이유는, 고르기는 **즉시 반응해야** 하는 조작이라
+  // 300ms 를 기다리면 화면이 굼떠 보이기 때문이다.
+  const openDetail = () => {
+    if (!detail) return;
+    onTogglePick();
+    onSelect();
+  };
   return (
     <div
       // 카드를 `<button>` 으로 못 만든다 — 안에 켬/끔 버튼이 들어가고 버튼 중첩은
       // 잘못된 HTML 이다. ThemeCardView 와 같은 방식으로 조작만 준다.
       role="button"
       tabIndex={0}
-      aria-pressed={detail ? undefined : picked}
-      onClick={body}
+      aria-pressed={picked}
+      title={detail ? `${c.name} — 두 번 누르면 설정` : c.name}
+      // 저장이 도는 동안은 안 받는다 — 켬/끔이 서버 왕복이라, 연달아 누르면 마지막
+      // 응답이 앞선 것을 덮어 화면과 저장이 어긋난다.
+      onClick={() => !disabled && onTogglePick()}
+      onDoubleClick={() => !disabled && openDetail()}
       onKeyDown={(e) => {
         if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
           e.preventDefault();
-          body();
+          if (!disabled) onTogglePick();
         }
       }}
       className="relative flex flex-col items-center gap-1 px-2 py-3"
@@ -218,24 +234,9 @@ function CharacterCell({
         opacity: picked ? 1 : 0.38,
       }}
     >
-      <button
-        type="button"
-        disabled={disabled}
-        aria-pressed={picked}
-        title={c.name}
-        // 카드가 상세로 가는 활성 테마에서만 따로 필요하다. 다른 테마는 카드
-        // 전체가 같은 일을 하므로 동그라미를 겹쳐 두면 판정만 헷갈린다.
-        className={`absolute right-1.5 top-1.5 h-[15px] w-[15px] ${detail ? '' : 'hidden'}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onTogglePick();
-        }}
-        style={{
-          borderRadius: 'var(--kt-dot-radius)',
-          background: picked ? 'var(--kt-accent)' : 'transparent',
-          boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
-        }}
-      />
+      {/* 켬/끔 동그라미를 없앴다 — 이제 카드 전체가 고르기라 같은 일을 하는 표적이
+          둘이 되고, 작은 동그라미를 빗맞히면 「눌렀는데 딴 게 됐다」가 된다.
+          켜짐은 카드 밝기와 이름 옆 색점으로 이미 보인다. */}
       <img className="kt-face h-[64px] w-auto" src={faceUrl(c.slug, theme)} alt="" />
       <div className="flex items-center gap-1.5">
         <span
@@ -373,6 +374,16 @@ function CharacterGroup({
               <span className="ml-auto text-[11px] text-[var(--kt-text-mute)]">
                 {on === 0 ? t.theme.pickNone : t.theme.pickCount({ on, total })}
               </span>
+              {/* 보고 있는 테마를 그 자리에서 쓸 수 있게 — 예전에는 위쪽 테마 격자로
+                  올라가야 했다. 아무도 안 골랐을 때의 폴백이 「쓰는 테마 전원」이라,
+                  어느 테마를 쓰는지가 고르기 화면에서도 뜻이 있다. */}
+              {!active && (
+                <MiniButton
+                  label={t.theme.useTheme}
+                  disabled={busy}
+                  onClick={() => onAction('select-theme', { id: card.id })}
+                />
+              )}
               <MiniButton
                 label={t.theme.pickAll}
                 disabled={busy}
