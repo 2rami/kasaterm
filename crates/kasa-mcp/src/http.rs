@@ -1940,10 +1940,25 @@ async fn character_binding_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sid = params.get("sid").map(|s| s.as_str()).unwrap_or("");
+    // 고른 명단 밖 이름은 **안 돌려준다**. 이 답을 쓰는 곳은 shim 의 resume 부팅
+    // 교정인데(`--resume <sid>` 로 뜬 pane 이 옛 대화의 학생으로 정체성을 되찾는
+    // 자리다), 명단을 바꾼 뒤 재배정된 pane 이 resume 되면 그 교정이 **명단 밖
+    // 학생을 되살린다**. 빈 답이면 shim 이 pane env 를 그대로 쓰고, 그 env 는 이미
+    // 명단 안에서 새로 배정된 이름이다.
+    //
+    // 2026-08-25 실측: 명단을 바꾸고 처음 재시작했더니 pane 여섯이 화면(인포·board)
+    // 은 새 학생인데 이름표·말투만 옛 학생이었다. 배정·저장 계층은 전부 새 이름으로
+    // 옳게 갔고, 이 엔드포인트만 옛 이름을 되돌려주고 있었다.
+    //
+    // 명단을 안 고른 사용자는 영향이 없다 — `is_assignable` 은 명단이 비면 전부
+    // 통과시킨다. 「모모이 세션이 프라나로 부팅」 회귀도 그대로 막힌다: 모모이가
+    // 명단 안이면 여기를 그냥 지난다.
     let body = if sid.is_empty() {
         String::new()
     } else {
-        crate::character::session_character(sid).unwrap_or_default()
+        crate::character::session_character(sid)
+            .filter(|c| crate::character::is_assignable(c))
+            .unwrap_or_default()
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
 }
