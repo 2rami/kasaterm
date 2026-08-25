@@ -396,10 +396,18 @@ impl App {
         ];
         // 활성 로스터에 없는 이름(재배정·resume 으로 온 다른 테마 학생)은 합집합
         // 조회로 원 소속 테마의 말투를 찾는다 — 없으면 이름만 남고 말투가 빈다.
-        if let Some(p) = kasa_mcp::character::persona_for(&chars, &name)
-            .or_else(|| kasa_mcp::character::persona_for_any(&name))
-        {
-            env.push(("KASATERM_PERSONA".to_string(), p));
+        //
+        // ⚠️ 「말투」 토글이 꺼져 있으면 **env 자체를 안 넣는다.** 소비하는 쪽이 셋이라
+        // (claude shim 의 `--append-system-prompt`, codex 의 `AGENTS.md`, agy 의 agent
+        // 파일) 각자 게이트를 달면 언젠가 한 곳이 빠진다 — 실제로 codex 쪽엔 없었고,
+        // 그 래퍼는 정적 문자열이라 Rust 값을 박을 자리도 없다. 근원에서 한 번 막는다.
+        // 캐릭터 이름·색·그림은 그대로다 — 토글의 뜻은 「말투만 끄기」다.
+        if socket::read_claude_persona() {
+            if let Some(p) = kasa_mcp::character::persona_for(&chars, &name)
+                .or_else(|| kasa_mcp::character::persona_for_any(&name))
+            {
+                env.push(("KASATERM_PERSONA".to_string(), p));
+            }
         }
         // 학생별 모델·실행 통로 — claude shim 이 전역 노브보다 이것을 먼저 본다
         // (2026-08-24 지시: 학생 한 명당 모델 선택). shim 은 부팅 1회 생성이라

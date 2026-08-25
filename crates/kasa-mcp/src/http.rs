@@ -1834,7 +1834,10 @@ async fn persona_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sid = params.get("sid").map(|s| s.as_str()).unwrap_or("");
-    let body = if sid.is_empty() {
+    // ⚠️ 「말투」 토글을 여기서도 본다. shim 의 `--append-system-prompt` 만 막으면
+    // **이 재주입 경로로 그대로 새어 들어간다** — 토글을 꺼도 말투가 계속 붙던 것이
+    // 그 때문이다(거노 2026-08-25 "토글꺼도 적용안되던데").
+    let body = if sid.is_empty() || !crate::character::persona_enabled() {
         String::new()
     } else {
         crate::character::session_character(sid)

@@ -7563,13 +7563,18 @@ fn install_agy_hook_shim(shim_dir: &std::path::Path) {
     // `--agent` 인자에 한글이 들어가는 건 확인하지 않았고, 확인 안 한 것을
     // 기본 경로에 두지 않는다.
     let mut arms = String::new();
+    // 「말투」 토글이 꺼져 있으면 agent 파일을 아예 안 만든다.
+    let persona_on = socket::read_claude_persona();
     for name in kasa_mcp::character::member_names(&chars) {
         let Some(slug) = theme::character_slug(&name) else {
             // 로스터 밖 캐릭터 — 슬러그가 없으면 스프라이트도 없다. 페르소나만
             // 따로 주면 화면과 어긋나므로 여기서도 뺀다.
             continue;
         };
-        let Some(persona) = kasa_mcp::character::persona_for(&chars, &name) else {
+        // 토글이 꺼져 있으면 agent 파일 자체를 안 만든다 — 남겨 두면 agy 가 그걸
+        // 그대로 읽어 말투가 붙는다.
+        let Some(persona) = persona_on.then(|| kasa_mcp::character::persona_for(&chars, &name)).flatten()
+        else {
             continue;
         };
         let body = format!(
@@ -7660,8 +7665,13 @@ pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
         return;
     };
     let sq = |s: &str| s.replace('\'', "'\\''");
+    // 「말투」 토글이 꺼져 있으면 런처도 말투를 안 싣는다 — 이름·얼굴만 갈아 끼운다.
+    let persona_on = socket::read_claude_persona();
     for name in kasa_mcp::character::member_names(&chars) {
-        let persona = kasa_mcp::character::persona_for(&chars, &name).unwrap_or_default();
+        let persona = persona_on
+            .then(|| kasa_mcp::character::persona_for(&chars, &name))
+            .flatten()
+            .unwrap_or_default();
         // 이 학생의 모델·통로를 스크립트에 굽는다. claude shim 과 달리 여기서는
         // 학생이 이미 정해져 있으므로 값을 직접 실을 수 있다.
         let model = kasa_mcp::character::model_for(&chars, &name).unwrap_or_default();

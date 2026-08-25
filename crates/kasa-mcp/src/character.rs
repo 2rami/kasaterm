@@ -251,6 +251,14 @@ pub fn member_names(chars: &Value) -> Vec<String> {
     v
 }
 
+/// 설정의 「말투」 토글. 꺼져 있으면 persona 를 **어느 경로로도** 안 붙인다.
+///
+/// 앱 쪽 `socket::read_claude_persona` 와 같은 값을 봐야 한다 — kasa-mcp → app 은 없는
+/// 의존 방향이라 부를 수 없어 키 이름과 기본값(없으면 켬)만 옮겨 왔다.
+pub fn persona_enabled() -> bool {
+    read_setting_value("claude_persona").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
 /// 번들(테마 폴더 없음) 로스터를 가리키는 예약 키. `theme_roster_handler` 가 이미
 /// 같은 이름을 쓴다 — 번들은 테마 id 가 빈 문자열이라 그대로 키로 쓰면 안 된다.
 pub const BASE_THEME_KEY: &str = "__base";
