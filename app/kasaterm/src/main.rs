@@ -37,6 +37,7 @@ mod themegen;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
 // 않으려고 여기서 한 번 재수출한다.
 pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
+mod gitdiff;
 mod syntax;
 mod lsp;
 mod links;
@@ -2033,6 +2034,21 @@ struct MarkdownPane {
     /// 이 정수 하나로 판정한다 — 매 틱 5천 줄을 이어 붙여 해시하면 그 자체가
     /// 프레임 예산이고, 저장 플래그(`dirty`)는 Cmd+S 에 꺼져서 못 쓴다.
     edit_gen: u64,
+    /// HEAD 대비 변경 표시(거터의 색 바). `None` = 그릴 게 없다 — 레포 밖 파일,
+    /// 미추적 파일, 아직 한 번도 안 뜬 상태가 전부 여기다. 접힘·보조커서와 같은
+    /// 규율으로, 비어 있으면 거터 루프 비용이 정확히 0 이다.
+    ///
+    /// 이 필드가 `MarkdownPane` 에 있는 것이 배선의 핵심이다 —
+    /// `AuxWindowKind::Editor` 가 pane 을 **소유**하므로(auxwin.rs), 한 자리에 두면
+    /// 메인 그리드·별도창 편집기·별도창 md 탭 셋이 같은 값을 본다.
+    diff: Option<crate::gitdiff::BufferDiff>,
+    /// 거터 바를 눌러 펼친 헝크가 덮는 버퍼 줄. 패널은 그 줄 아래에 뜬다.
+    /// 편집으로 줄이 밀리면 다음 diff 갱신 때 자리를 잃으므로 그때 닫는다.
+    diff_peek: Option<usize>,
+    /// diff 의 왼쪽 — HEAD 시점의 이 파일 본문. `git show` 는 프로세스를 하나
+    /// 띄우므로 타자마다 못 부른다. 여기 붙들어 두고 커밋·스테이지로 HEAD 가
+    /// 움직였을 때만 비운다(`invalidate_git_diffs`).
+    diff_head: Option<crate::gitdiff::HeadText>,
 }
 
 /// 자동완성 팝업 상태.
@@ -7978,19 +7994,35 @@ fn socket_path_hint() -> String {
 /// instance's panes. Kept because a panel with no port at all just hangs, but
 /// it is a wrong answer, not a neutral one.
 pub(crate) fn mcp_panel_port() -> String {
+    mcp_panel_port_certain().0
+}
+
+/// 포트와 **그 포트가 이 인스턴스의 것이 확실한가**.
+///
+/// env 나 이 인스턴스의 포트 파일에서 나왔으면 확실하다. 둘 다 없어 `8765` 로
+/// 떨어지면 **남의 프로세스**일 수 있다 — 멀티 인스턴스에서 그 번호는 먼저 뜬 앱
+/// 것이고, 설정 화면은 파일을 쓰므로 남의 설정을 고치게 된다.
+///
+/// 확실성을 따로 돌려주는 이유는 경고를 **필요할 때만** 띄우기 위해서다. 설정 창
+/// 제목에 주소를 늘 박아 두면 평소엔 지저분하기만 하고(거노 2026-08-25 「그거
+/// 주소안나오게해봐」), 정작 위험한 순간에도 늘 있던 글자라 눈에 안 띈다.
+pub(crate) fn mcp_panel_port_certain() -> (String, bool) {
     let trimmed_nonempty = |s: String| {
         let s = s.trim().to_string();
         (!s.is_empty()).then_some(s)
     };
-    std::env::var("KASASPACE_MCP_PORT")
+    let known = std::env::var("KASASPACE_MCP_PORT")
         .ok()
         .and_then(trimmed_nonempty)
         .or_else(|| {
             std::fs::read_to_string(mcp_port_file_for(&socket_path_hint()))
                 .ok()
                 .and_then(trimmed_nonempty)
-        })
-        .unwrap_or_else(|| "8765".to_string())
+        });
+    match known {
+        Some(p) => (p, true),
+        None => ("8765".to_string(), false),
+    }
 }
 
 /// 부팅 시 temp_dir 의 죽은 `kasaterm-<pid>.sock` 잔재를 청소한다. 소켓 경로가

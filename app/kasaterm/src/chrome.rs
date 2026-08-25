@@ -1077,6 +1077,9 @@ impl App {
     pub(crate) fn invalidate_git_diffs(&mut self) {
         self.git.col_expanded.clear();
         self.git.col_diff_cache.clear();
+        // 편집기 거터도 같은 HEAD 를 기준으로 삼는다 — 여기서 안 버리면 방금
+        // 커밋한 변경이 거터에 그대로 남아, 고치지도 않은 줄이 파랗게 보인다.
+        self.invalidate_editor_diffs();
     }
     /// Open the git column for pane `id`'s repo (status-bar diff chip click).
     /// Focuses that pane so the column follows it (auto-track), then opens the
@@ -2326,12 +2329,19 @@ impl App {
             eprintln!("[settings-web] 페이지에 못 닿는다 — 네이티브 설정으로 간다");
             return false;
         }
-        // 포트를 제목에 박는다 — `mcp_panel_port()` 는 8765 폴백을 가지고 있어
-        // 멀티 인스턴스에서 **남의 프로세스**를 가리킬 수 있다. 아로나는 읽기만
-        // 해서 넘어갔지만 설정은 파일을 쓴다. 어디에 말하는지 보여야 한다.
-        let port = mcp_panel_port();
+        // 포트가 **확실하지 않을 때만** 제목에 박는다. `mcp_panel_port` 은 8765 폴백을
+        // 가지고 있어 멀티 인스턴스에서 남의 프로세스를 가리킬 수 있고, 설정은 파일을
+        // 쓰므로 그때는 어디에 말하는지 보여야 한다. 다만 늘 띄우면 평소에 지저분하고
+        // (거노 2026-08-25 「그거 주소안나오게해봐」) 정작 위험한 순간에도 늘 있던
+        // 글자라 눈에 안 띈다 — 경고는 드물어야 경고다.
+        let (port, certain) = crate::mcp_panel_port_certain();
+        let title = if certain {
+            "설정".to_string()
+        } else {
+            format!("설정 — 127.0.0.1:{port} (포트 불확실)")
+        };
         let attrs = WindowAttributes::default()
-            .with_title(format!("설정 — 127.0.0.1:{port}"))
+            .with_title(title)
             .with_theme(Some(Theme::Dark))
             .with_visible(true)
             // 네이티브 설정창과 같은 치수 — 나란히 스샷 비교(Step 4)가 목적이다.
