@@ -4,6 +4,12 @@ import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { resolve } from 'node:path';
 
+// dev 프록시가 실서버로 넘길 때 Origin 도 함께 바꾼다. 안 바꾸면 브라우저가 붙인
+// `http://localhost:<vite>` 가 그대로 가고, 서버의 `ws_origin_ok` 는 Origin 이 Host 와
+// **정확히** 같기를 요구해서 POST 가 전부 403 이 된다(2026-08-25: 입력줄이 dev 에서만
+// 「보내지 못했어요」였다 — 실서버는 same-origin 이라 멀쩡하다).
+const MCP_TARGET = process.env.VITE_MCP_TARGET || 'http://127.0.0.1:8765';
+
 // 정적 번들: build-app.sh 가 dist/ 를 Resources/arona-ui 로 복사해 kasaterm 이
 // 로컬 파일/웹뷰로 띄운다. base: './' 라 어느 경로에 놓여도 상대 참조로 로드된다.
 export default defineConfig({
@@ -34,9 +40,14 @@ export default defineConfig({
   // 빠뜨리면 dev 에서만, 그것도 404 가 아니라 200 HTML 로 돌아와서 "JSON 인 줄 알고
   // 파싱하다 죽는" 모양이 된다. 실서버는 멀쩡하니 원인을 프런트에서 찾게 된다.
   server: {
+    // ⚠️ 여기 없는 경로는 vite 가 **SPA 껍데기(index.html)를 200 으로** 돌려준다.
+    // 404 가 아니라 200 이라 `r.ok` 검사를 통과하고 `r.json()` 에서야 터지는데,
+    // 호출부가 대개 catch 로 null 을 삼켜서 「조용히 아무 일도 안 일어남」이 된다
+    // (2026-08-25: theme-roster 가 빠져 있어 다른 테마 학생 프사가 다 이니셜로 떴다).
+    // mcp.ts 에 새 엔드포인트를 만들면 이 목록에도 넣을 것.
     proxy: {
-      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|peek|transcript|transcript-raw|conversation|pane-tasks|schale-state|git-status|git-panel|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|schedule|slash-commands|spawn-student|focus|send|design-tokens|settings|character-face|character-sprite|character-sprite-status)(/|$|\\?)':
-        { target: process.env.VITE_MCP_TARGET || 'http://127.0.0.1:8765', changeOrigin: true }
+      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|background-kill|peek|transcript|transcript-raw|conversation|session-transcript-raw|subagent-transcript-raw|pane-tasks|schale-state|git-status|git-panel|git-commit|git-push|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|session-save|room-cd|close-pane|schedule|schedule-delete|slash-commands|spawn-student|repersona|focus|send|terminal-reveal|paste-active|paste-image|sent-images|image-file|open-file|list-dir|design-tokens|settings|theme-roster|character-face|character-sprite|character-sprite-status)(/|$|\\?)':
+        { target: MCP_TARGET, changeOrigin: true, headers: { origin: MCP_TARGET } }
     }
   }
 });
