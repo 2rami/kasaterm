@@ -210,6 +210,34 @@ fn paint_usage_popover(
     }
 }
 
+/// 터널 주소 한 벌. 표시·열기·복사가 각자 문자열을 조립하면 한 곳만 고쳤을 때
+/// 「복사한 것과 열리는 것이 다른」 상태가 된다 — 실제로 `/term` → `/term/grid` 로
+/// 옮길 때 세 자리를 따로 고쳐야 했다(2026-08-25).
+fn tunnel_url(host: &str, path: &str) -> String {
+    match kasa_mcp::remote_token() {
+        Some(t) => format!("https://{host}{path}?t={t}"),
+        None => format!("https://{host}{path}"),
+    }
+}
+
+/// 팝오버에 **보일** 짧은 주소. 스킴과 토큰을 떼고, 넘치면 호스트를 줄인다.
+///
+/// 기본 우측 잘림에 맡기면 안 된다 — 두 줄을 가르는 것은 경로(`/term/grid` ·
+/// `/arona-ui/`)뿐인데 그게 맨 뒤라, 288px 안에서 두 줄이 `https://kasaterm-…`
+/// 으로 글자 하나까지 똑같아진다(실측). 호스트는 두 줄이 어차피 같으니 그쪽을 깎는다.
+///
+/// 여는 것·복사하는 것은 위 `tunnel_url` 의 완성 주소 그대로다. 표시만 짧다.
+fn fit_addr(g: &mut gpu::GpuRenderer, host: &str, path: &str, avail: f32) -> String {
+    const SIZE: f32 = 11.0;
+    let full = format!("{host}{path}");
+    if g.measure_chrome_text(&full, SIZE, false) <= avail {
+        return full;
+    }
+    let path_w = g.measure_chrome_text(path, SIZE, false);
+    let head = crate::info::fit_text(g, host, (avail - path_w).max(0.0), SIZE, false);
+    format!("{head}{path}")
+}
+
 /// 원격 접속 팝오버 — 여닫는 스위치 · 주소 · 복사.
 ///
 /// 예전엔 칩을 누르는 즉시 토글이었다. 되돌릴 수 있는 조작이긴 해도 **밖으로 문을
@@ -227,8 +255,8 @@ fn paint_tunnel_popover(
     let host = on.then(|| sb.tunnel_host.clone()).flatten();
     let w = 288.0_f32.min(win_w - 16.0);
     // 닫혀 있으면 주소 줄이 통째로 빠진다 — 높이를 안 줄이면 그만큼이 빈 여백으로
-    // 남아 팝오버가 이유 없이 커 보인다.
-    let h = if on { 118.0 } else { 86.0 };
+    // 남아 팝오버가 이유 없이 커 보인다. 열려 있으면 라벨+주소 두 벌이 들어간다.
+    let h = if on { 150.0 } else { 86.0 };
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -261,43 +289,70 @@ fn paint_tunnel_popover(
             // 열어 보고 정확히 그 화면을 만났다(2026-08-16 「원격주소 제대로나오게」).
             // 토큰은 어차피 이 화면 주인의 것이고, 복사·표시 둘 다 같은 주소여야
             // 「복사한 것이 열리는 것」이 성립한다.
-            let addr = match kasa_mcp::remote_token() {
-                Some(t) => format!("https://{host}/term?t={t}"),
-                None => format!("https://{host}/term"),
-            };
-            let cr = (x + w - 12.0 - 22.0, line + 12.0, 22.0, 22.0);
-            let ch = hit(cursor, &cr);
-            g.hover_pointer |= ch;
-            if ch {
-                round_rect(g, cr.0, cr.1, cr.2, cr.3, theme::radius_sm(), theme::surface_hover());
-            }
-            g.queue_icon(
-                "copy",
-                cr.0 + 5.0,
-                cr.1 + 5.0,
-                12.0,
-                if ch { theme::text() } else { theme::text_mute() },
-            );
-            sb.popover_hits.push((state::StatusbarHit::CopyTunnelHost, cr));
-            let s = crate::info::fit_text(g, &addr, (cr.0 - x - 24.0).max(0.0), 11.0, false);
-            let ar = (x + 8.0, line + 10.0, cr.0 - x - 16.0, 20.0);
-            let ah = hit(cursor, &ar);
-            g.hover_pointer |= ah;
-            if ah {
-                hover_rect(g, ar.0, ar.1, ar.2, ar.3, theme::radius_sm());
+            //
+            // 두 줄인 이유: 폰에서 하는 일이 갈린다 — 타자는 터미널, 대화 읽기와
+            // 학생 전환은 아로나다. 라벨 없이 주소만 두 개면 어느 게 무엇인지 모른다.
+            let rows: [(&str, &str, state::StatusbarHit, state::StatusbarHit); 2] = [
+                (
+                    "터미널 — 직접 타자",
+                    "/term/grid",
+                    state::StatusbarHit::OpenTunnelUrl,
+                    state::StatusbarHit::CopyTunnelHost,
+                ),
+                (
+                    "아로나 — 대화 읽기",
+                    "/arona-ui/",
+                    state::StatusbarHit::OpenAronaUrl,
+                    state::StatusbarHit::CopyAronaUrl,
+                ),
+            ];
+            for (i, (label, path, open_hit, copy_hit)) in rows.into_iter().enumerate() {
+                let top = line + i as f32 * 42.0;
+                g.draw_text(
+                    x + 12.0,
+                    top + 4.0,
+                    label,
+                    gpu::DrawOpts {
+                        font_size: 10.0,
+                        color: theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                let cr = (x + w - 12.0 - 22.0, top + 20.0, 22.0, 22.0);
+                let ch = hit(cursor, &cr);
+                g.hover_pointer |= ch;
+                if ch {
+                    round_rect(g, cr.0, cr.1, cr.2, cr.3, theme::radius_sm(), theme::surface_hover());
+                }
+                g.queue_icon(
+                    "copy",
+                    cr.0 + 5.0,
+                    cr.1 + 5.0,
+                    12.0,
+                    if ch { theme::text() } else { theme::text_mute() },
+                );
+                sb.popover_hits.push((copy_hit, cr));
+                let s = fit_addr(g, &host, path, (cr.0 - x - 24.0).max(0.0));
+                let ar = (x + 8.0, top + 18.0, cr.0 - x - 16.0, 20.0);
+                let ah = hit(cursor, &ar);
+                g.hover_pointer |= ah;
+                if ah {
+                    hover_rect(g, ar.0, ar.1, ar.2, ar.3, theme::radius_sm());
+                }
+                g.draw_text(
+                    x + 12.0,
+                    top + 25.0,
+                    &s,
+                    gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+                );
+                // 주소를 누르면 바로 연다 — 폰으로 보내기 전에 맥에서 먼저 열어 확인하는
+                // 손이 복사보다 잦다. 복사 버튼은 그대로 옆에 있다(둘 다).
+                sb.popover_hits.push((open_hit, ar));
             }
             g.draw_text(
                 x + 12.0,
-                line + 17.0,
-                &s,
-                gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
-            );
-            // 주소를 누르면 바로 연다 — 폰으로 보내기 전에 맥에서 먼저 열어 확인하는
-            // 손이 복사보다 잦다. 복사 버튼은 그대로 옆에 있다(둘 다).
-            sb.popover_hits.push((state::StatusbarHit::OpenTunnelUrl, ar));
-            g.draw_text(
-                x + 12.0,
-                line + 36.0,
+                line + 88.0,
                 "이 주소를 아는 사람은 누구나 붙을 수 있다",
                 gpu::DrawOpts {
                     font_size: 10.0,
@@ -672,7 +727,8 @@ impl crate::App {
             }
             Some(state::StatusbarHit::OpenWebTerm) => {
                 if let Some(port) = self.statusbar.port.clone() {
-                    self.open_url(&format!("http://127.0.0.1:{port}/term"));
+                    // grid — 옛 `/term`(xterm.js)은 폰 IME 에서 한글이 자모로 쪼개진다.
+                    self.open_url(&format!("http://127.0.0.1:{port}/term/grid"));
                 }
                 return true;
             }
@@ -694,11 +750,13 @@ impl crate::App {
             }
             Some(state::StatusbarHit::OpenTunnelUrl) => {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
-                    let url = match kasa_mcp::remote_token() {
-                        Some(t) => format!("https://{h}/term?t={t}"),
-                        None => format!("https://{h}/term"),
-                    };
-                    self.open_url(&url);
+                    self.open_url(&tunnel_url(&h, "/term/grid"));
+                }
+                return true;
+            }
+            Some(state::StatusbarHit::OpenAronaUrl) => {
+                if let Some(h) = self.statusbar.tunnel_host.clone() {
+                    self.open_url(&tunnel_url(&h, "/arona-ui/"));
                 }
                 return true;
             }
@@ -706,11 +764,13 @@ impl crate::App {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
                     // 표시와 같은 **완성 주소**(토큰 포함) — 호스트만 복사하면 붙는
                     // 순간 토큰 관문에 막힌다.
-                    let url = match kasa_mcp::remote_token() {
-                        Some(t) => format!("https://{h}/term?t={t}"),
-                        None => format!("https://{h}/term"),
-                    };
-                    self.copy_to_clipboard(url, "원격 주소 복사됨");
+                    self.copy_to_clipboard(tunnel_url(&h, "/term/grid"), "터미널 주소 복사됨");
+                }
+                return true;
+            }
+            Some(state::StatusbarHit::CopyAronaUrl) => {
+                if let Some(h) = self.statusbar.tunnel_host.clone() {
+                    self.copy_to_clipboard(tunnel_url(&h, "/arona-ui/"), "아로나 주소 복사됨");
                 }
                 return true;
             }

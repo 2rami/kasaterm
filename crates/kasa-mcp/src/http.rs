@@ -3651,26 +3651,38 @@ async fn schale_state_handler() -> impl IntoResponse {
 /// WebSocket 은 커스텀 헤더를 못 붙이므로, 한 번 붙은 뒤 `/term/ws` 와 정적 자산이
 /// 인증을 통과하는 경로는 쿠키뿐이다. 폰은 주소를 한 번만 열면 그 다음부터 쿠키로
 /// 다닌다.
-async fn term_page_handler(
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> axum::response::Response {
-    let html = include_str!("../assets/term/index.html");
-    let content_type = (header::CONTENT_TYPE, "text/html; charset=utf-8");
+/// `?t=<토큰>` 이 맞으면 심을 쿠키 문자열. 안 맞거나 없으면 `None`.
+///
+/// ⚠️ 입구가 하나였을 때는 `term_page_handler` 안에 인라인이었는데, 그러면 그 한
+/// 페이지를 먼저 열지 않은 사람은 다른 입구에서 **HTML 만 200 이고 그 페이지의
+/// JS·CSS 가 403** 이 된다(= 빈 화면). 토큰을 물고 들어올 수 있는 입구는 전부
+/// 이걸 거쳐야 한다.
+fn remote_token_cookie(q: &std::collections::HashMap<String, String>) -> Option<String> {
     // HttpOnly — 페이지 스크립트가 토큰을 읽을 이유가 없다.
     // SameSite=Strict — 남의 사이트에서 건너온 요청에는 안 실린다.
-    let cookie = remote_token()
+    remote_token()
         .filter(|want| q.get("t").map(String::as_str) == Some(*want))
         .map(|want| {
             format!("kasa_token={want}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
-        });
-    match &cookie {
-        Some(c) => (
-            [content_type, (header::SET_COOKIE, c.as_str())],
-            html,
-        )
-            .into_response(),
+        })
+}
+
+/// HTML 응답에 위 쿠키를 붙인다.
+fn html_with_token_cookie(
+    html: &'static str,
+    q: &std::collections::HashMap<String, String>,
+) -> axum::response::Response {
+    let content_type = (header::CONTENT_TYPE, "text/html; charset=utf-8");
+    match remote_token_cookie(q) {
+        Some(c) => ([content_type, (header::SET_COOKIE, c.as_str())], html).into_response(),
         None => ([content_type], html).into_response(),
     }
+}
+
+async fn term_page_handler(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    html_with_token_cookie(include_str!("../assets/term/index.html"), &q)
 }
 
 /// 터미널 폰트. claude code 의 Nerd Font 아이콘(사설영역)과 박스드로잉이 폰
@@ -3714,8 +3726,10 @@ async fn term_grid_css() -> impl IntoResponse {
     )
 }
 
-async fn term_grid_page() -> impl IntoResponse {
-    axum::response::Html(include_str!("../assets/term/grid.html"))
+async fn term_grid_page(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    html_with_token_cookie(include_str!("../assets/term/grid.html"), &q)
 }
 
 async fn term_asset_css() -> impl IntoResponse {
@@ -4478,7 +4492,7 @@ pub fn spawn_http_server_opts(
         // 「왜 403 이냐」로 헤매다 결국 토큰을 끄는 쪽으로 가게 된다.
         eprintln!(
             "[kasaspace-mcp] {addr}:{port} 로 열었습니다 — 원격 접속에는 토큰이 필요합니다.\n\
-             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term?t=$(cat ~/.config/kasaterm/remote-token)"
+             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term/grid?t=$(cat ~/.config/kasaterm/remote-token)"
         );
         // 파일을 미리 만들어 둔다 — 첫 원격 요청 때 만들면 그 요청이 먼저 튕긴다.
         let _ = remote_token();
@@ -4711,7 +4725,21 @@ pub fn spawn_http_server_opts(
                             axum::response::Redirect::permanent("/arona-ui/")
                         }),
                     )
-                    .route("/arona-ui/", get(|| arona_ui_serve(String::new())))
+                    // 폰은 `/arona-ui/?t=<토큰>` 으로 들어온다 — 여기서 쿠키를 안 심으면
+                    // index.html 만 200 이고 그 뒤 assets 가 전부 403 이라 빈 화면이 된다.
+                    .route(
+                        "/arona-ui/",
+                        get(|q: Query<std::collections::HashMap<String, String>>| async move {
+                            let cookie = remote_token_cookie(&q.0);
+                            let mut res = arona_ui_serve(String::new()).await;
+                            if let Some(c) = cookie {
+                                if let Ok(v) = axum::http::HeaderValue::from_str(&c) {
+                                    res.headers_mut().insert(header::SET_COOKIE, v);
+                                }
+                            }
+                            res
+                        }),
+                    )
                     .route(
                         "/arona-ui/{*path}",
                         get(|axum::extract::Path(p): axum::extract::Path<String>| {
