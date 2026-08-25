@@ -97,6 +97,12 @@ impl App {
         else {
             return (0.0, 0.0);
         };
+        self.image_pan_bounds_in(pane_id, bw, bh)
+    }
+    /// `image_pan_bounds` 의 본체 — 본문 박스를 **밖에서 받는다**. 별도창이 이걸 쓴다:
+    /// 꺼낸 pane 은 메인 트리(`effective_leaf_rects`)에 없어 위 경로가 늘 (0,0) 을
+    /// 내고, 그러면 확대해도 이미지가 가운데 붙박여 움직일 수 없다.
+    pub(crate) fn image_pan_bounds_in(&self, pane_id: &str, bw: f32, bh: f32) -> (f32, f32) {
         let ws = self.ws.lock().unwrap();
         let Some(pane) = ws.panes.get(pane_id) else {
             return (0.0, 0.0);

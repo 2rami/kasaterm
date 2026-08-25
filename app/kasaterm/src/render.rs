@@ -2470,73 +2470,7 @@ impl App {
                         is_web: pane.web().is_some(),
                         web_url: pane.web().map(|w| w.url.clone()),
                         web_loading,
-                        // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
-                        // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
-                        // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
-                        // 비배정 pane 은 기존대로 탭별 제목.
-                        tabs: if pane.tabs.len() <= 1
-                            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
-                        {
-                            Vec::new()
-                        } else {
-                            pane.tabs
-                                .iter()
-                                .enumerate()
-                                .map(|(i, t)| {
-                                    // 탭 이름도 헤더와 같은 규칙으로 짓는다 — 여기만
-                                    // OSC 제목을 **날것 그대로** 실어, claude 탭이
-                                    // `✳ Claude Code` 로 떴다(거노 2026-08-21: "탭 안에
-                                    // 있을 때 claude code 랑 무슨 유니코드 이모지 나오는데
-                                    // 그것도 이쁘게"). 헤더는 진작 학생 이름을 쓰고 있어서
-                                    // **같은 pane 인데 헤더와 탭이 서로 다른 것을 부르는**
-                                    // 상태이기도 했다.
-                                    let sess =
-                                        t.pid.as_deref().and_then(|p| self.pty.get(p));
-                                    // 작업명 — 스피너·별표 접두를 벗긴다. 벗기는 일은
-                                    // `strip_activity_prefix` 계약대로 **접두만**이고,
-                                    // 「Claude Code」 같은 기본 제목을 따로 거르지는 않는다:
-                                    // 그건 claude 쪽 문구라 바뀌면 조용히 어긋난다.
-                                    let task = t
-                                        .title
-                                        .as_deref()
-                                        .map(|s| crate::strip_activity_prefix(s).trim().to_string())
-                                        .filter(|s| !s.is_empty());
-                                    // 학생 관문은 헤더(`true_char` + `runs_claude`)와 같은
-                                    // 것을 **탭 pid 로** 묻는다. pane 이 아니라 탭마다
-                                    // 물어야 하는 건, 한 pane 의 탭들이 각각 다른 학생일
-                                    // 수 있어서다.
-                                    let student = sess
-                                        .filter(|s| s.active_agent().is_some())
-                                        .and(t.pid.as_deref())
-                                        .and_then(|p| self.display_pane_char(&ws, p));
-                                    let name = match (student, task) {
-                                        // pane id 는 안 붙인다 — 헤더가 이미 들고 있고,
-                                        // 한 pane 의 탭끼리는 그 값이 전부 같아 구분에
-                                        // 보탬이 안 되면서 좁은 자리만 먹는다.
-                                        (Some(c), Some(t)) => format!("{c} · {t}"),
-                                        (Some(c), None) => c,
-                                        (None, Some(t)) => t,
-                                        // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
-                                        (None, None) => sess
-                                            .and_then(|s| Self::smart_pane_label(s))
-                                            .unwrap_or_else(|| {
-                                                if i == 0 {
-                                                    id.clone()
-                                                } else {
-                                                    format!("탭 {}", i + 1)
-                                                }
-                                            }),
-                                    };
-                                    // 탭별 ● 미저장 도트 — 멀티탭 pane 에서 어느
-                                    // 파일이 저장 안 됐는지 탭 단위로 보이게.
-                                    if t.markdown().map_or(false, |m| m.modified) {
-                                        format!("● {name}")
-                                    } else {
-                                        name
-                                    }
-                                })
-                                .collect()
-                        },
+                        tabs: self.pane_tab_labels(&ws, &id, pane),
                         // 팝아웃 아이콘 대상 판정: 마크다운/텍스트 편집 탭만(터미널 제외).
                         // tabs 라벨을 비운 학생 pane 폴백과 길이를 맞추려 같은 조건으로 계산.
                         tab_is_file: if pane.tabs.len() <= 1
@@ -6359,8 +6293,6 @@ impl App {
                 // Compact glyphs — a touch bigger than the label so icons
                 // read, but no longer the bulky +10 of the old design.
                 let icon_size = theme::ICON_SIZE;
-                let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
-                let icon_y = h.y + (PANE_HEADER_HEIGHT - icon_size) / 2.0;
                 let act_fg: [u8; 4] = if h.is_active {
                     theme::text_dim()
                 } else {
@@ -6404,298 +6336,60 @@ impl App {
                 };
                 let addr_vis = addr_w >= 70.0;
                 let btn_cluster = btn_cluster + if addr_vis { addr_w + 6.0 } else { 0.0 };
-                // ── In-pane tab bar ── empty tabs = single tab from `label`.
-                let tab_list: Vec<&str> = if h.tabs.is_empty() {
-                    vec![h.label.as_str()]
-                } else {
-                    h.tabs.iter().map(|s| s.as_str()).collect()
-                };
-                // SVG icons are square at icon_size; reserve that exact width
-                // (not a glyph measurement) so the × never crowds the tab edge.
-                let close_w = icon_size;
-                let plus_w = icon_size;
-                // Each tab's title gets an equal share of the leftover width.
-                let tabs_area = (h.w - 8.0 - btn_cluster - plus_w - 16.0).max(0.0);
-                let gap = 6.0_f32;
-                // Overflow windowing: whole tabs only — 이 띠는 클립을 안 세우므로
-                // 반쪽 알약이 나온다. When they can't all fit at the 56px minimum,
-                // show a contiguous run from `tab_first` and reserve 12px at
-                // each end for the overflow chevrons; the wheel over the strip
-                // steps the run.
-                let n_tabs = tab_list.len();
-                let fits = |area: f32| (((area + gap) / (56.0 + gap)) as usize).max(1);
-                let overflowing = n_tabs > fits(tabs_area);
-                let (strip_pad, area_eff) = if overflowing {
-                    (12.0_f32, (tabs_area - 24.0).max(56.0))
-                } else {
-                    (0.0, tabs_area)
-                };
-                let n_vis = n_tabs.min(fits(area_eff));
-                let mut first = h.tab_first.min(n_tabs - n_vis);
-                // A tab switch since the last frame (click, close, shortcut —
-                // whichever of the many sites) reveals the newly active tab;
-                // plain wheel scrolling is left where the user put it.
-                if h.active_tab != h.tab_last_active {
-                    if h.active_tab < first {
-                        first = h.active_tab;
-                    } else if h.active_tab >= first + n_vis {
-                        first = h.active_tab + 1 - n_vis;
-                    }
+                // ── In-pane tab bar ── 그리는 몫은 `draw_pane_tabs` 한 곳에.
+                // 별도창도 같은 함수를 지나므로 여기 손질이 저쪽에 자동으로 간다.
+                let strip = draw_pane_tabs(
+                    g,
+                    &TabStrip {
+                        tabs: &h.tabs,
+                        label: &h.label,
+                        x: h.x,
+                        y: h.y,
+                        w: h.w,
+                        active_tab: h.active_tab,
+                        tab_first: h.tab_first,
+                        tab_last_active: h.tab_last_active,
+                        is_active: h.is_active,
+                        color: h.color,
+                        // 이미지 탭도 이제 뺄 수 있다 — 셸을 별도창으로 보낼 때
+                        // 같은 pane 의 그림이 안 따라오던 자리가 여기였다.
+                        can_popout: true,
+                        right_reserve: btn_cluster,
+                        chrome_font,
+                        icon_size,
+                        act_fg,
+                        cursor_px: self.cursor_px,
+                        hover_tab: hover_info
+                            .as_ref()
+                            .filter(|(p, _)| *p == h.id)
+                            .map(|(_, i)| *i),
+                        drag_src: tab_drag_src
+                            .as_ref()
+                            .filter(|(p, _)| *p == h.id)
+                            .map(|(_, i)| *i),
+                        drag_target: tab_drag_info
+                            .as_ref()
+                            .filter(|(p, _)| *p == h.id)
+                            .map(|(_, i)| *i),
+                    },
+                );
+                pane_tab_windowing.push((h.id.clone(), strip.first, strip.n_vis, h.active_tab));
+                tab_hits.extend(strip.tab_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
+                tab_close_hits.extend(strip.close_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
+                tab_popout_hits
+                    .extend(strip.popout_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
+                if let Some(r) = strip.plus_rect {
+                    plus_hits.push((h.id.clone(), r));
                 }
-                pane_tab_windowing.push((h.id.clone(), first, n_vis, h.active_tab));
-                let per_tab = if n_vis == 1 {
-                    area_eff
-                } else {
-                    ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32)
-                        .clamp(56.0, 320.0)
-                };
-                // Left edge of each visible tab's pill, for the drag insertion bar.
-                let mut tab_edges: Vec<f32> = Vec::with_capacity(n_vis);
-                // Geometry for the post-loop structural border pass.
-                let mut tabs_left: Option<f32> = None;
-                let mut tabs_right_edge: f32 = 0.0;
-                let mut inter_boundaries: Vec<f32> = Vec::new();
-                let mut active_tab_box: Option<(f32, f32)> = None;
-                let mut tx = h.x + 8.0 + strip_pad;
-                for (i, tab) in tab_list.iter().enumerate().skip(first).take(n_vis) {
-                    let tab_x0 = tx;
-                    // This pane's active tab — gets the pill + focus strip + ×.
-                    let active = tab_list.len() == 1 || i == h.active_tab;
-                    let is_hover = hover_info
-                        .as_ref()
-                        .map(|(p, hi)| p == &h.id && *hi == i)
-                        .unwrap_or(false);
-                    // × on the active tab always; on inactive only while
-                    // hovered. The width is reserved either way so hover
-                    // doesn't shift the surrounding layout.
-                    let show_x = active || is_hover;
-                    let reserve_x = true;
-                    let bright = active || is_hover;
-                    // Tab being lifted in a cross-pane / reorder drag is
-                    // drawn faint — reads as "in transit" against the
-                    // insertion bar at the drop position.
-                    let being_dragged = tab_drag_src
-                        .as_ref()
-                        .map(|(p, idx)| p == &h.id && *idx == i)
-                        .unwrap_or(false);
-                    let alpha_mul = if being_dragged { 0x55 } else { 0xFF };
-                    let combine = |a: u8| ((a as u16 * alpha_mul as u16) / 0xFF) as u8;
-                    // Per-pane accent (set via `surface.set_color`) recolors the
-                    // tab-name text only; None = default chrome text. Brightness
-                    // (active/hover) still rides on the alpha.
-                    let label_fg = h.color.unwrap_or_else(theme::text);
-                    let t_fg = if bright {
-                        theme::with_alpha(label_fg, combine(0xFF))
-                    } else {
-                        theme::with_alpha(label_fg, combine(0x82))
-                    };
-                    let t_icon = if bright {
-                        theme::with_alpha(theme::text_dim(), combine(0xFF))
-                    } else {
-                        theme::with_alpha(theme::text_dim(), combine(0x82))
-                    };
-                    // Truncate this tab's title to its share of the bar.
-                    // × space is reserved on every tab — see `reserve_x`.
-                    // No per-tab terminal glyph: the +button already signals
-                    // "new shell"; doubling that icon on every tab was noise.
-                    // File tabs reserve an extra icon slot (pop-out), left of ×.
-                    // 터미널 탭도 undock(별도 OS 창) 아이콘을 같은 자리에 쓴다 —
-                    // 이미지 pane 만 제외(뷰어라 별도창 대상 아님).
-                    let can_popout = !h.is_image;
-                    let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
-                    let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
-                    let budget = (per_tab - x_reserve - 14.0).max(0.0);
-                    // 자를 땐 **뒤**를 자른다. 여기 오는 라벨은 전부 앞이 정체다 —
-                    // 학생 이름(`미도리 · 작업명`), 폴더명 한 조각, 프로세스명. 앞을
-                    // 자르면 그 정체가 먼저 사라져 탭들이 다 `…작업명` 이 된다.
-                    // 앞자르기가 옳은 건 경로 전체를 실을 때인데, 셸 탭이 받는 값은
-                    // `smart_pane_label` → `cwd_basename`, 즉 경로가 아니라 마지막
-                    // 폴더명 하나다(경로를 줄이는 `shorten_cwd` 는 이 자리를 안 탄다).
-                    let mut label = tab.to_string();
-                    let mut lw = g.measure_chrome_text(&label, chrome_font, active);
-                    if lw > budget {
-                        while label.chars().count() > 1 {
-                            label.pop();
-                            lw = g.measure_chrome_text(&format!("{label}…"), chrome_font, active);
-                            if lw <= budget {
-                                break;
-                            }
-                        }
-                        label.push('…');
-                    }
-                    // Pill geometry: label + reserved × slot (terminal icon
-                    // removed — +button covers "new shell" duty).
-                    let content_w = lw + x_reserve;
-                    // First tab sits flush with the pane's left edge so the
-                    // active tab's accent strip joins the pane divider with
-                    // no visible gap — only while nothing is windowed off
-                    // (the overflow chevron owns that sliver otherwise).
-                    let box_x = if i == 0 && !overflowing { h.x } else { tab_x0 - 6.0 };
-                    let box_right = tab_x0 + content_w + 6.0;
-                    let tw = (box_right - box_x).max(0.0);
-                    tab_edges.push(box_x);
-                    if tabs_left.is_none() {
-                        tabs_left = Some(box_x);
-                    } else {
-                        inter_boundaries.push(box_x);
-                    }
-                    tabs_right_edge = box_x + tw;
-                    if active {
-                        active_tab_box = Some((box_x, tw));
-                    }
-                    // Active tab keeps the band BG (= terminal body) — no
-                    // fill — so the tab reads as continuous with the content
-                    // below it. The accent top + broken bottom are what
-                    // differentiate it. Structural lines drawn post-loop.
-                    let stroke = 1.0_f32;
-                    let _ = stroke;
-                    let _ = t_icon;
-                    let cx = g.draw_text(
-                        tx,
-                        text_y,
-                        &label,
-                        gpu::DrawOpts { font_size: chrome_font, color: t_fg, bold: active, italic: false },
-                    );
-                    // Pop-out icon (external-link): file tabs only, shown on the
-                    // active or hovered tab. Sits left of the ×; clicking it
-                    // moves the tab's editor into its own OS window.
-                    let mut action_x = cx + 8.0;
-                    if can_popout && show_x {
-                        let po_x = action_x;
-                        let chip = icon_size + 6.0;
-                        let chip_x = po_x + (icon_size - chip) / 2.0;
-                        let chip_y = h.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
-                        let (mx, my) = self.cursor_px;
-                        let po_hover =
-                            mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
-                        if po_hover {
-                            hover_rect(g, chip_x, chip_y, chip, chip, theme::radius_sm());
-                        }
-                        let pocol = if po_hover { theme::text() } else { t_icon };
-                        g.queue_icon("external-link", po_x, icon_y, icon_size, pocol);
-                        tab_popout_hits.push((h.id.clone(), i, (po_x - 2.0, h.y, icon_size + 4.0, PANE_HEADER_HEIGHT)));
-                        action_x = po_x + close_w + 4.0;
-                    }
-                    if show_x {
-                        let close_x = action_x;
-                        // Hover chip behind the × — same lift the +button gets,
-                        // so the close target reads as clickable on hover.
-                        let chip = icon_size + 6.0;
-                        let chip_x = close_x + (icon_size - chip) / 2.0;
-                        let chip_y = h.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
-                        let (mx, my) = self.cursor_px;
-                        let x_hover =
-                            mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
-                        if x_hover {
-                            hover_rect(g, chip_x, chip_y, chip, chip, theme::radius_sm());
-                        }
-                        let xcol = if x_hover { theme::text() } else { t_icon };
-                        g.queue_icon("x", close_x, icon_y, icon_size, xcol);
-                        // × close hit (widen a little for an easy target).
-                        tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, icon_size + 4.0, PANE_HEADER_HEIGHT)));
-                    }
-                    // Whole-pill click/drag hit. Inactive tabs have no × inside,
-                    // so the entire pill switches; the active tab's × is checked
-                    // first by the handler.
-                    tab_hits.push((h.id.clone(), i, (box_x, h.y, tw, PANE_HEADER_HEIGHT)));
-                    tx = box_right + gap;
+                if let Some(a) = strip.accent {
+                    deferred_accents.push(a);
                 }
-                // Structural borders. Browser-tab pattern:
-                //   - Top BORDER across the strip, with the active tab's
-                //     segment painted in the focus color (same thickness).
-                //   - Bottom BORDER across the strip but BROKEN under the
-                //     active tab so the active opens straight into the body.
-                //   - Vertical BORDER at each inter-tab boundary (single line
-                //     shared between neighbours).
-                // No outer left/right of the strip — the pane dividers fill
-                // those roles, so leftmost-active never gets two stacked lines.
-                if let Some(left) = tabs_left {
-                    let stroke = 1.0_f32;
-                    let band_w = (tabs_right_edge - left).max(0.0);
-                    g.rect(left, h.y, band_w, stroke, theme::border());
-                    // Bottom BORDER across the WHOLE pane header (tabs + plus
-                    // button + action cluster), broken only under the active
-                    // tab so it flows into the body.
-                    let by = h.y + PANE_HEADER_HEIGHT - stroke;
-                    let h_right = h.x + h.w;
-                    if let Some((ax, aw)) = active_tab_box {
-                        let lw = (ax - h.x).max(0.0);
-                        g.rect(h.x, by, lw, stroke, theme::border());
-                        let rx = ax + aw;
-                        let rw = (h_right - rx).max(0.0);
-                        g.rect(rx, by, rw, stroke, theme::border());
-                    } else {
-                        g.rect(h.x, by, h.w, stroke, theme::border());
-                    }
-                    for b in &inter_boundaries {
-                        g.rect(*b, h.y, stroke, PANE_HEADER_HEIGHT, theme::border());
-                    }
-                    // Right edge of the strip — gives the last tab (often the
-                    // active one when only the trailing tab is selected) a
-                    // visible right boundary. Left edge is left to the pane
-                    // divider so it never doubles up.
-                    g.rect(tabs_right_edge - stroke, h.y, stroke, PANE_HEADER_HEIGHT, theme::border());
-                    if let Some((ax, aw)) = active_tab_box {
-                        let accent_col = if h.is_active { theme::accent() } else { theme::text() };
-                        // accent 선은 BORDER stroke(1px)보다 살짝 굵게 — 활성 pane 강조.
-                        g.rect(ax, h.y, aw, ACTIVE_ACCENT_STROKE, accent_col);
-                        deferred_accents.push((ax, h.y, aw, accent_col));
-                    }
-                }
-                // Drag insertion bar: 6px accent line spanning the strip.
-                // 옛 2px는 Retina+at-speed drag에서 사실상 안 보였음.
-                if let Some((ref dpane, target)) = tab_drag_info {
-                    if *dpane == h.id {
-                        // tab_edges holds visible tabs only — offset by `first`.
-                        let bar_x = tab_edges
-                            .get(target.saturating_sub(first))
-                            .copied()
-                            .unwrap_or(tx - gap);
-                        g.rect(bar_x - 3.0, h.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::accent());
-                    }
-                }
+                // 아래 오른쪽 버튼 무리가 그대로 쓰는 hover 판정 — 띠 안에서 쓰던
+                // 것을 여기 남긴다(함수로 옮긴 쪽에도 자기 것이 따로 있다).
                 let (cur_x, cur_y) = self.cursor_px;
-                let inside =
-                    |rx: f32, ry: f32, rw: f32, rh: f32| cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh;
-                // [+] new-tab button right after the tabs. Hover chip is a
-                // tight rounded square centered on the glyph so the glow
-                // hugs the icon instead of stretching across a tall band.
-                // Hidden while a tab drag is active so the +button doesn't
-                // sit on top of the insertion bar / accept a stray drop.
-                let dragging_tab = tab_drag_src.is_some();
-                let plus_iw = g.measure_chrome_text("\u{ea60}", icon_size, false);
-                let chip_size = (icon_size + 6.0).max(plus_iw + 6.0);
-                let chip_x = tx + (plus_iw - chip_size) / 2.0;
-                let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
-                let plus_rect = (chip_x, chip_y, chip_size, chip_size);
-                let plus_hover = !dragging_tab && inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
-                if plus_hover {
-                    hover_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
-                        theme::radius_sm());
-                }
-                let plus_color = if plus_hover { theme::text() } else { act_fg };
-                if !dragging_tab {
-                    g.queue_icon("plus", tx, icon_y, icon_size, plus_color);
-                    plus_hits.push((h.id.clone(), plus_rect));
-                }
-                // Overflow chevrons in the reserved end slots — more tabs
-                // exist past this edge; the wheel over the strip scrolls.
-                if overflowing {
-                    let cis = 12.0_f32;
-                    let ccy = h.y + (PANE_HEADER_HEIGHT - cis) / 2.0;
-                    if first > 0 {
-                        g.queue_icon("chevron-left", h.x + 4.0, ccy, cis, theme::text_mute());
-                    }
-                    if first + n_vis < n_tabs {
-                        g.queue_icon(
-                            "chevron-right",
-                            tx + plus_iw + 8.0,
-                            ccy,
-                            cis,
-                            theme::text_mute(),
-                        );
-                    }
-                }
+                let inside = |rx: f32, ry: f32, rw: f32, rh: f32| {
+                    cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh
+                };
                 // ── Right action buttons ── per-kind cluster: terminal panes
                 // get new-terminal/web/split-v/split-h; image panes get
                 // zoom-out / zoom-in / rotate / reset wired to the in-pane
@@ -10335,4 +10029,340 @@ mod elapsed_tests {
         assert_ne!(c2, c3);
         assert!(!b1 && !b2 && b3);
     }
+}
+
+/// pane 안 탭 띠 한 벌 — **메인 그리드와 별도창이 같은 이 함수를 지난다.**
+/// 07-24 에 별도창을 셀 스냅샷만 따로 뜨는 경로로 만든 탓에 메인에만 걸린 손질이
+/// 통째로 빠지는 사고가 세 번 났다(입력박스 칩·`is_rule`·인레이). 띠를 두 벌로
+/// 두면 같은 일이 탭에서 되풀이되므로, 그릴 자리와 hit 규약만 넘겨받는다.
+pub(crate) struct TabStrip<'a> {
+    pub tabs: &'a [String],
+    /// `tabs` 가 비었을 때 쓸 단일 탭 제목.
+    pub label: &'a str,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub active_tab: usize,
+    pub tab_first: usize,
+    pub tab_last_active: usize,
+    /// 이 pane 이 활성인가 — 활성 탭 accent 선의 색만 가른다.
+    pub is_active: bool,
+    pub color: Option<[u8; 4]>,
+    /// 탭에 pop-out 아이콘을 띄울지.
+    pub can_popout: bool,
+    /// 오른쪽 버튼 무리가 이미 가져간 폭 — 탭이 그 밑으로 깔리지 않게.
+    pub right_reserve: f32,
+    pub chrome_font: f32,
+    pub icon_size: f32,
+    pub act_fg: [u8; 4],
+    pub cursor_px: (f32, f32),
+    /// 이 pane 위에서 hover 중인 탭 index(다른 pane 것이면 None).
+    pub hover_tab: Option<usize>,
+    pub drag_src: Option<usize>,
+    pub drag_target: Option<usize>,
+}
+
+/// 그린 결과 — 눌린 자리를 가릴 rect 들과, 띠가 실제로 보인 창(`first`·`n_vis`).
+#[derive(Default)]
+pub(crate) struct TabStripOut {
+    pub first: usize,
+    pub n_vis: usize,
+    pub tab_hits: Vec<(usize, (f32, f32, f32, f32))>,
+    pub close_hits: Vec<(usize, (f32, f32, f32, f32))>,
+    pub popout_hits: Vec<(usize, (f32, f32, f32, f32))>,
+    pub plus_rect: Option<(f32, f32, f32, f32)>,
+    /// 활성 탭 accent 선 — 호출부가 pane 경계 위에 한 번 더 얹는다.
+    pub accent: Option<(f32, f32, f32, [u8; 4])>,
+}
+
+pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStripOut {
+    let mut out = TabStripOut::default();
+    let text_y = c.y + (PANE_HEADER_HEIGHT - c.chrome_font) / 2.0;
+    let icon_y = c.y + (PANE_HEADER_HEIGHT - c.icon_size) / 2.0;
+    // ── In-pane tab bar ── empty tabs = single tab from `label`.
+    let tab_list: Vec<&str> = if c.tabs.is_empty() {
+        vec![c.label]
+    } else {
+        c.tabs.iter().map(|s| s.as_str()).collect()
+    };
+    // SVG icons are square at c.icon_size; reserve that exact width
+    // (not a glyph measurement) so the × never crowds the tab edge.
+    let close_w = c.icon_size;
+    let plus_w = c.icon_size;
+    // Each tab's title gets an equal share of the leftover width.
+    let tabs_area = (c.w - 8.0 - c.right_reserve - plus_w - 16.0).max(0.0);
+    let gap = 6.0_f32;
+    // Overflow windowing: whole tabs only — 이 띠는 클립을 안 세우므로
+    // 반쪽 알약이 나온다. When they can't all fit at the 56px minimum,
+    // show a contiguous run from `tab_first` and reserve 12px at
+    // each end for the overflow chevrons; the wheel over the strip
+    // steps the run.
+    let n_tabs = tab_list.len();
+    let fits = |area: f32| (((area + gap) / (56.0 + gap)) as usize).max(1);
+    let overflowing = n_tabs > fits(tabs_area);
+    let (strip_pad, area_eff) = if overflowing {
+        (12.0_f32, (tabs_area - 24.0).max(56.0))
+    } else {
+        (0.0, tabs_area)
+    };
+    let n_vis = n_tabs.min(fits(area_eff));
+    let mut first = c.tab_first.min(n_tabs - n_vis);
+    // A tab switch since the last frame (click, close, shortcut —
+    // whichever of the many sites) reveals the newly active tab;
+    // plain wheel scrolling is left where the user put it.
+    if c.active_tab != c.tab_last_active {
+        if c.active_tab < first {
+            first = c.active_tab;
+        } else if c.active_tab >= first + n_vis {
+            first = c.active_tab + 1 - n_vis;
+        }
+    }
+    out.first = first;
+    out.n_vis = n_vis;
+    let per_tab = if n_vis == 1 {
+        area_eff
+    } else {
+        ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32)
+            .clamp(56.0, 320.0)
+    };
+    // Left edge of each visible tab's pill, for the drag insertion bar.
+    let mut tab_edges: Vec<f32> = Vec::with_capacity(n_vis);
+    // Geometry for the post-loop structural border pass.
+    let mut tabs_left: Option<f32> = None;
+    let mut tabs_right_edge: f32 = 0.0;
+    let mut inter_boundaries: Vec<f32> = Vec::new();
+    let mut active_tab_box: Option<(f32, f32)> = None;
+    let mut tx = c.x + 8.0 + strip_pad;
+    for (i, tab) in tab_list.iter().enumerate().skip(first).take(n_vis) {
+        let tab_x0 = tx;
+        // This pane's active tab — gets the pill + focus strip + ×.
+        let active = tab_list.len() == 1 || i == c.active_tab;
+        let is_hover = c.hover_tab == Some(i);
+        // × on the active tab always; on inactive only while
+        // hovered. The width is reserved either way so hover
+        // doesn't shift the surrounding layout.
+        let show_x = active || is_hover;
+        let reserve_x = true;
+        let bright = active || is_hover;
+        // Tab being lifted in a cross-pane / reorder drag is
+        // drawn faint — reads as "in transit" against the
+        // insertion bar at the drop position.
+        let being_dragged = c.drag_src == Some(i);
+        let alpha_mul = if being_dragged { 0x55 } else { 0xFF };
+        let combine = |a: u8| ((a as u16 * alpha_mul as u16) / 0xFF) as u8;
+        // Per-pane accent (set via `surface.set_color`) recolors the
+        // tab-name text only; None = default chrome text. Brightness
+        // (active/hover) still rides on the alpha.
+        let label_fg = c.color.unwrap_or_else(theme::text);
+        let t_fg = if bright {
+            theme::with_alpha(label_fg, combine(0xFF))
+        } else {
+            theme::with_alpha(label_fg, combine(0x82))
+        };
+        let t_icon = if bright {
+            theme::with_alpha(theme::text_dim(), combine(0xFF))
+        } else {
+            theme::with_alpha(theme::text_dim(), combine(0x82))
+        };
+        // Truncate this tab's title to its share of the bar.
+        // × space is reserved on every tab — see `reserve_x`.
+        // No per-tab terminal glyph: the +button already signals
+        // "new shell"; doubling that icon on every tab was noise.
+        // File tabs reserve an extra icon slot (pop-out), left of ×.
+        // 터미널 탭도 undock(별도 OS 창) 아이콘을 같은 자리에 쓴다 —
+        // 이미지 pane 만 제외(뷰어라 별도창 대상 아님).
+        let can_popout = c.can_popout;
+        let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
+        let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
+        let budget = (per_tab - x_reserve - 14.0).max(0.0);
+        // 자를 땐 **뒤**를 자른다. 여기 오는 라벨은 전부 앞이 정체다 —
+        // 학생 이름(`미도리 · 작업명`), 폴더명 한 조각, 프로세스명. 앞을
+        // 자르면 그 정체가 먼저 사라져 탭들이 다 `…작업명` 이 된다.
+        // 앞자르기가 옳은 건 경로 전체를 실을 때인데, 셸 탭이 받는 값은
+        // `smart_pane_label` → `cwd_basename`, 즉 경로가 아니라 마지막
+        // 폴더명 하나다(경로를 줄이는 `shorten_cwd` 는 이 자리를 안 탄다).
+        let mut label = tab.to_string();
+        let mut lw = g.measure_chrome_text(&label, c.chrome_font, active);
+        if lw > budget {
+            while label.chars().count() > 1 {
+                label.pop();
+                lw = g.measure_chrome_text(&format!("{label}…"), c.chrome_font, active);
+                if lw <= budget {
+                    break;
+                }
+            }
+            label.push('…');
+        }
+        // Pill geometry: label + reserved × slot (terminal icon
+        // removed — +button covers "new shell" duty).
+        let content_w = lw + x_reserve;
+        // First tab sits flush with the pane's left edge so the
+        // active tab's accent strip joins the pane divider with
+        // no visible gap — only while nothing is windowed off
+        // (the overflow chevron owns that sliver otherwise).
+        let box_x = if i == 0 && !overflowing { c.x } else { tab_x0 - 6.0 };
+        let box_right = tab_x0 + content_w + 6.0;
+        let tw = (box_right - box_x).max(0.0);
+        tab_edges.push(box_x);
+        if tabs_left.is_none() {
+            tabs_left = Some(box_x);
+        } else {
+            inter_boundaries.push(box_x);
+        }
+        tabs_right_edge = box_x + tw;
+        if active {
+            active_tab_box = Some((box_x, tw));
+        }
+        // Active tab keeps the band BG (= terminal body) — no
+        // fill — so the tab reads as continuous with the content
+        // below it. The accent top + broken bottom are what
+        // differentiate it. Structural lines drawn post-loop.
+        let stroke = 1.0_f32;
+        let _ = stroke;
+        let _ = t_icon;
+        let cx = g.draw_text(
+            tx,
+            text_y,
+            &label,
+            gpu::DrawOpts { font_size: c.chrome_font, color: t_fg, bold: active, italic: false },
+        );
+        // Pop-out icon (external-link): file tabs only, shown on the
+        // active or hovered tab. Sits left of the ×; clicking it
+        // moves the tab's editor into its own OS window.
+        let mut action_x = cx + 8.0;
+        if can_popout && show_x {
+            let po_x = action_x;
+            let chip = c.icon_size + 6.0;
+            let chip_x = po_x + (c.icon_size - chip) / 2.0;
+            let chip_y = c.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
+            let (mx, my) = c.cursor_px;
+            let po_hover =
+                mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
+            if po_hover {
+                hover_rect(g, chip_x, chip_y, chip, chip, theme::radius_sm());
+            }
+            let pocol = if po_hover { theme::text() } else { t_icon };
+            g.queue_icon("external-link", po_x, icon_y, c.icon_size, pocol);
+            out.popout_hits.push((i, (po_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
+            action_x = po_x + close_w + 4.0;
+        }
+        if show_x {
+            let close_x = action_x;
+            // Hover chip behind the × — same lift the +button gets,
+            // so the close target reads as clickable on hover.
+            let chip = c.icon_size + 6.0;
+            let chip_x = close_x + (c.icon_size - chip) / 2.0;
+            let chip_y = c.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
+            let (mx, my) = c.cursor_px;
+            let x_hover =
+                mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
+            if x_hover {
+                hover_rect(g, chip_x, chip_y, chip, chip, theme::radius_sm());
+            }
+            let xcol = if x_hover { theme::text() } else { t_icon };
+            g.queue_icon("x", close_x, icon_y, c.icon_size, xcol);
+            // × close hit (widen a little for an easy target).
+            out.close_hits.push((i, (close_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
+        }
+        // Whole-pill click/drag hit. Inactive tabs have no × inside,
+        // so the entire pill switches; the active tab's × is checked
+        // first by the handler.
+        out.tab_hits.push((i, (box_x, c.y, tw, PANE_HEADER_HEIGHT)));
+        tx = box_right + gap;
+    }
+    // Structural borders. Browser-tab pattern:
+    //   - Top BORDER across the strip, with the active tab's
+    //     segment painted in the focus color (same thickness).
+    //   - Bottom BORDER across the strip but BROKEN under the
+    //     active tab so the active opens straight into the body.
+    //   - Vertical BORDER at each inter-tab boundary (single line
+    //     shared between neighbours).
+    // No outer left/right of the strip — the pane dividers fill
+    // those roles, so leftmost-active never gets two stacked lines.
+    if let Some(left) = tabs_left {
+        let stroke = 1.0_f32;
+        let band_w = (tabs_right_edge - left).max(0.0);
+        g.rect(left, c.y, band_w, stroke, theme::border());
+        // Bottom BORDER across the WHOLE pane header (tabs + plus
+        // button + action cluster), broken only under the active
+        // tab so it flows into the body.
+        let by = c.y + PANE_HEADER_HEIGHT - stroke;
+        let h_right = c.x + c.w;
+        if let Some((ax, aw)) = active_tab_box {
+            let lw = (ax - c.x).max(0.0);
+            g.rect(c.x, by, lw, stroke, theme::border());
+            let rx = ax + aw;
+            let rw = (h_right - rx).max(0.0);
+            g.rect(rx, by, rw, stroke, theme::border());
+        } else {
+            g.rect(c.x, by, c.w, stroke, theme::border());
+        }
+        for b in &inter_boundaries {
+            g.rect(*b, c.y, stroke, PANE_HEADER_HEIGHT, theme::border());
+        }
+        // Right edge of the strip — gives the last tab (often the
+        // active one when only the trailing tab is selected) a
+        // visible right boundary. Left edge is left to the pane
+        // divider so it never doubles up.
+        g.rect(tabs_right_edge - stroke, c.y, stroke, PANE_HEADER_HEIGHT, theme::border());
+        if let Some((ax, aw)) = active_tab_box {
+            let accent_col = if c.is_active { theme::accent() } else { theme::text() };
+            // accent 선은 BORDER stroke(1px)보다 살짝 굵게 — 활성 pane 강조.
+            g.rect(ax, c.y, aw, ACTIVE_ACCENT_STROKE, accent_col);
+            out.accent = Some((ax, c.y, aw, accent_col));
+        }
+    }
+    // Drag insertion bar: 6px accent line spanning the strip.
+    // 옛 2px는 Retina+at-speed drag에서 사실상 안 보였음.
+    if let Some(target) = c.drag_target {
+        // tab_edges holds visible tabs only — offset by `first`.
+        let bar_x = tab_edges
+            .get(target.saturating_sub(first))
+            .copied()
+            .unwrap_or(tx - gap);
+        g.rect(bar_x - 3.0, c.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::accent());
+    }
+    let (cur_x, cur_y) = c.cursor_px;
+    let inside =
+        |rx: f32, ry: f32, rw: f32, rh: f32| cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh;
+    // [+] new-tab button right after the tabs. Hover chip is a
+    // tight rounded square centered on the glyph so the glow
+    // hugs the icon instead of stretching across a tall band.
+    // Hidden while a tab drag is active so the +button doesn't
+    // sit on top of the insertion bar / accept a stray drop.
+    let dragging_tab = c.drag_src.is_some();
+    let plus_iw = g.measure_chrome_text("\u{ea60}", c.icon_size, false);
+    let chip_size = (c.icon_size + 6.0).max(plus_iw + 6.0);
+    let chip_x = tx + (plus_iw - chip_size) / 2.0;
+    let chip_y = c.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
+    let plus_rect = (chip_x, chip_y, chip_size, chip_size);
+    let plus_hover = !dragging_tab && inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
+    if plus_hover {
+        hover_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
+            theme::radius_sm());
+    }
+    let plus_color = if plus_hover { theme::text() } else { c.act_fg };
+    if !dragging_tab {
+        g.queue_icon("plus", tx, icon_y, c.icon_size, plus_color);
+        out.plus_rect = Some(plus_rect);
+    }
+    // Overflow chevrons in the reserved end slots — more tabs
+    // exist past this edge; the wheel over the strip scrolls.
+    if overflowing {
+        let cis = 12.0_f32;
+        let ccy = c.y + (PANE_HEADER_HEIGHT - cis) / 2.0;
+        if first > 0 {
+            g.queue_icon("chevron-left", c.x + 4.0, ccy, cis, theme::text_mute());
+        }
+        if first + n_vis < n_tabs {
+            g.queue_icon(
+                "chevron-right",
+                tx + plus_iw + 8.0,
+                ccy,
+                cis,
+                theme::text_mute(),
+            );
+        }
+    }
+    out
 }

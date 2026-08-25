@@ -179,6 +179,25 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
     }
 }
 
+/// 마크다운 탭을 별도창 본문에 그릴 때 필요한 값들. ws 락 안에서 한 번에 떠
+/// 온다 — 그리는 쪽은 `a.gpu` 를 가변으로 잡아 락을 든 채로 못 간다.
+///
+/// 편집기 별도창(`AuxWindowKind::Editor`)이 자기 상태를 **소유**하는 것과 달리
+/// 여기 값들은 pane 탭(`MarkdownPane`)이 주인이다. 그래서 이 화면은 읽기
+/// 전용이다 — 키는 `aux_active_term_pid` 가 셸 탭에서만 통과시킨다.
+struct AuxMdSnap {
+    raw: bool,
+    blocks: Vec<crate::MdBlock>,
+    gen: u64,
+    lines: std::sync::Arc<Vec<String>>,
+    cursor: (usize, usize),
+    sel: Option<((usize, usize), (usize, usize))>,
+    scroll: f32,
+    h_scroll: f32,
+    lang: String,
+    wrap: bool,
+}
+
 /// 마크다운 편집기 별도창 맨 위의 `Rendered | Raw` 띠. 메인 그리드 헤더의 알약과
 /// **같은 두 칸**이다(render.rs 의 `is_markdown` 분기) — 별도창엔 이게 없어 새 창으로
 /// 연 문서는 읽기 전용이나 마찬가지였다(거노).
@@ -444,6 +463,23 @@ pub(crate) enum AuxWindowKind {
     Room { window: usize, focus: Option<String> },
 }
 
+/// 별도창 외곽선. OS 타이틀바를 껐으므로 이게 없으면 창이 어디서 끝나는지가
+/// 배경색 차이 하나뿐이라, 어두운 바탕 위에서 경계가 통째로 사라진다(거노).
+/// 학생이 있으면 그 색으로 — 메인 그리드의 active pane 테두리와 같은 신호다.
+///
+/// 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
+/// 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그 네 점만
+/// 두 배로 진해져 꼭짓점이 점처럼 튄다(거노: "테두리 꼭짓점이 이상해").
+fn draw_aux_border(a: &mut AuxWindow, w: f32, h: f32, accent: Option<[u8; 4]>, focused: bool) {
+    const T: f32 = 1.5;
+    let base = accent.unwrap_or_else(crate::theme::border);
+    let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
+    a.gpu.rect(0.0, 0.0, w, T, col);
+    a.gpu.rect(0.0, h - T, w, T, col);
+    a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
+    a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
+}
+
 /// 설정 화면을 웹뷰 판으로 띄우는 이행 스위치. **기본 ON** — 이제 웹뷰가 정본이고
 /// 이건 **끄는 손잡이**다(`0`·`off`·`false`·`no` 면 옛 네이티브 화면).
 ///
@@ -563,6 +599,15 @@ pub(crate) struct AuxWindow {
     /// CursorMoved 는 헤더 띠에서만 재렌더를 걸었다. 프사는 그 띠 밖(y≈131)이라
     /// 팝업이 뜨고 지는 프레임을 아무도 안 불렀고, 셸이 출력 중일 때만 PTY wake 에
     /// 얹혀 우연히 떴다(조용하면 안 뜸 — 거노의 "가끔 안 뜬다"가 이것).
+    /// 이 창이 보는 pane 의 탭 띠 높이 — 탭이 둘 이상일 때만 선다. `md_bar_h` 와
+    /// 같은 규약이다: **본문 좌표(rows 계산·draw origin·커서·클릭 hit)는 전부 이
+    /// 하나를 지난다.** 07-24 에 `AUX_CELL_TOP` 만 보고 그린 탓에 마지막 줄이 창
+    /// 밖으로 밀리고 커서가 헤더 위에 찍힌 전례가 있어 게이트를 하나로 둔다.
+    ///
+    /// 탭 수는 App.ws 가 쥐고 있어 이 구조체가 셀 수 없다 — 렌더/리사이즈가 채운다.
+    pub(crate) tab_bar_h: f32,
+    /// 탭 띠의 히트 rect — 그린 프레임이 곧 클릭 판정(`header_btns` 와 같은 규약).
+    pub(crate) tabs_out: crate::render::TabStripOut,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
@@ -590,6 +635,21 @@ impl AuxWindow {
     /// 위에 겹치거나(원점만 밀고 cols 를 안 줄임) 오른쪽이 잘린다(반대).
     fn cell_left(&self) -> f32 {
         PANE_INNER_X + self.tree_w()
+    }
+
+    /// 본문(셀 그리드·이미지·마크다운)이 시작하는 y. 헤더 아래 탭 띠가 서면 그만큼
+    /// 내려간다 — `md_bar_h` 와 같은 이유로 이 하나만 지나게 한다.
+    fn cell_top(&self) -> f32 {
+        AUX_CELL_TOP + self.tab_bar_h
+    }
+
+    /// 본문 사각형(원점 + 크기, logical px). 셀 그리드가 아닌 탭(이미지·마크다운)을
+    /// 그리는 자리이자 그 휠이 쓰는 박스라, 그리기와 판정이 **같은 값**을 지나야
+    /// 확대한 이미지가 손가락과 어긋나지 않는다.
+    fn body_box(&self) -> (f32, f32, f32, f32) {
+        let (w, h) = self.logical_size();
+        let (x, y) = (self.cell_left(), self.cell_top());
+        (x, y, (w - x - PANE_INNER_X).max(1.0), (h - y - PANE_INNER_Y).max(1.0))
     }
 
     pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
@@ -815,6 +875,8 @@ impl App {
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
+            tab_bar_h: 0.0,
+            tabs_out: Default::default(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1610,6 +1672,8 @@ impl App {
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
+            tab_bar_h: 0.0,
+            tabs_out: Default::default(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1949,6 +2013,8 @@ impl App {
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
+            tab_bar_h: 0.0,
+            tabs_out: Default::default(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1966,11 +2032,14 @@ impl App {
     /// 창 client 크기(logical)를 셀수로 환산해 이 창이 뷰하는 pane 의 PTY 를 resize.
     /// 본문 = 창 − 좌우/상하 PANE_INNER 여백. 셀 메트릭은 이 창 gpu 의 것(논리 px).
     fn aux_terminal_resize_pty(&mut self, idx: usize) {
-        let (pane_id, w, h, cw, ch, left) = {
+        // 탭 띠 높이를 먼저 갱신해야 아래 rows 가 맞는다 — 띠가 선 만큼 셸이 받을
+        // 줄이 줄어든다. 안 빼면 마지막 줄이 창 밖으로 밀린다.
+        self.aux_sync_tab_bar(idx);
+        let (pane_id, w, h, cw, ch, left, top) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
             let (w, h) = a.logical_size();
-            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h, a.cell_left())
+            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h, a.cell_left(), a.cell_top())
         };
         if cw <= 0.0 || ch <= 0.0 {
             return;
@@ -1978,9 +2047,31 @@ impl App {
         // 왼쪽은 트리 폭까지 포함한 `cell_left`, 오른쪽은 여백 하나 — 트리를 열면
         // 셀이 들어갈 칸 수가 그만큼 줄어야 셸이 새 폭으로 줄바꿈한다.
         let cols = (((w - left - PANE_INNER_X) / cw).floor() as i32).max(1) as u16;
-        let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
+        let rows = (((h - top - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         if let Some(pty) = self.pty.get(&pane_id) {
             let _ = pty.resize(cols, rows);
+        }
+    }
+
+    /// 이 창이 보는 pane 의 탭 수를 App.ws 에 물어 `tab_bar_h` 를 갱신한다.
+    /// **탭이 하나면 0** — 띠를 아예 안 세우므로 단일 탭 창은 지금 화면과 완전히
+    /// 같다(회귀 0). 방 창은 leaf 마다 자기 헤더를 그리므로 대상이 아니다.
+    fn aux_sync_tab_bar(&mut self, idx: usize) {
+        let Some(pane_id) = self
+            .aux_windows
+            .get(idx)
+            .filter(|a| matches!(a.kind, AuxWindowKind::Terminal { .. }))
+            .and_then(|a| a.term_pane_id())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let multi = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(&pane_id).is_some_and(|p| p.tabs.len() > 1)
+        };
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            a.tab_bar_h = if multi { PANE_HEADER_HEIGHT } else { 0.0 };
         }
     }
 
@@ -1988,6 +2079,7 @@ impl App {
     /// `draw_cells` 로 본문을, blink 위상이면 커서 rect 를 그린다(단일 pane 이라
     /// 헤더/링크hover/선택 오버레이는 v1 제외 — paint_gpu_overlays 커서부만 복제).
     fn aux_terminal_render(&mut self, idx: usize, blink: bool) {
+        self.aux_sync_tab_bar(idx);
         let (pane_id, scale, w, h, focused, home_window) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
@@ -2004,7 +2096,7 @@ impl App {
         // 로 메인과 같은 함수를 지난다. 여기서 `ws.pane_character` 를 날로 읽던 동안
         // 셸만 도는 pane 이 이 창에선 학생, 메인 그리드에선 남이었다 — 되돌리면
         // 「학생 테마가 깨졌다」로 보이던 것의 정체다.
-        let (snap, student, student_col) = {
+        let (snap, student, student_col, tab_labels, tab_state, img_snap, md_snap, pane_alive) = {
             let ws = self.ws.lock().unwrap();
             let cells = ws.panes.get(&pane_id).and_then(|p| {
                 p.term()
@@ -2012,7 +2104,37 @@ impl App {
             });
             let name = self.display_pane_char(&ws, &pane_id);
             let col = self.pane_accent(&ws, &pane_id);
-            (cells, name, col)
+            // 탭 제목도 **메인 그리드와 같은 함수**로 짓는다 — 두 벌로 두면 이 창의
+            // 탭만 OSC 날제목(`✳ Claude Code`)으로 돌아간다.
+            let pane = ws.panes.get(&pane_id);
+            let labels = pane
+                .map(|p| self.pane_tab_labels(&ws, &pane_id, p))
+                .unwrap_or_default();
+            let st = pane
+                .map(|p| (p.active_tab, p.tab_first, p.tab_last_active))
+                .unwrap_or((0, 0, 0));
+            // 활성 탭이 그림이면 그것도 뜬다 — `Arc` 라 사본이 싸고, 뷰 상태
+            // (zoom/rot/pan)는 `PaneTab` 필드라 탭과 함께 그냥 따라온다.
+            let img = pane.and_then(|p| {
+                p.image()
+                    .map(|i| (i.clone(), p.image_zoom, p.image_rot, (p.image_pan_x, p.image_pan_y)))
+            });
+            // 마크다운 탭도 뜬다 — 편집기 별도창과 **같은 두 함수**(`draw_markdown`/
+            // `draw_raw_editor`)를 지나 그린다. 두 벌로 두면 한쪽만 손질되는 그
+            // 사고를 또 낸다.
+            let md = pane.and_then(|p| p.markdown()).map(|m| AuxMdSnap {
+                raw: m.raw_mode,
+                blocks: m.doc.blocks.clone(),
+                gen: m.doc.gen,
+                lines: m.edit_lines.clone(),
+                cursor: (m.cur_line, m.cur_col),
+                sel: m.sel_range(),
+                scroll: m.scroll,
+                h_scroll: m.h_scroll,
+                lang: crate::code_lang_for_path(std::path::Path::new(&m.doc.path)).to_string(),
+                wrap: m.wrap,
+            });
+            (cells, name, col, labels, st, img, md, pane.is_some())
         };
         let working = self
             .pane_activity
@@ -2048,15 +2170,15 @@ impl App {
             }
         }
         let (sprites, anim_ms) = {
-            let (cl, cw, ch) = self
+            let (cl, ct, cw, ch) = self
                 .aux_windows
                 .get(idx)
-                .map_or((PANE_INNER_X, 0.0, 0.0), |a| {
-                    (a.cell_left(), a.gpu.cell_w, a.gpu.cell_h)
+                .map_or((PANE_INNER_X, AUX_CELL_TOP, 0.0, 0.0), |a| {
+                    (a.cell_left(), a.cell_top(), a.gpu.cell_w, a.gpu.cell_h)
                 });
             let s = match snap.as_mut() {
                 Some((cells, ..)) if cw > 0.0 => {
-                    self.aux_student_slots(&pane_id, cells, cl, AUX_CELL_TOP, cw, ch)
+                    self.aux_student_slots(&pane_id, cells, cl, ct, cw, ch)
                 }
                 _ => crate::render::StudentOverlays::default(),
             };
@@ -2065,12 +2187,6 @@ impl App {
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
-        let Some((rows, cur_row, cur_col, cur_vis)) = snap else {
-            // pane 이 사라졌으면(셸 종료 등) 빈 배경만 present.
-            let _ = a.gpu.render(&[], scale, 0.0, true);
-            a.dirty = false;
-            return;
-        };
         // macOS 는 OS 타이틀바를 투명으로 비웠으므로 이 띠가 그 자리에 얹힌다 —
         // 신호등만 OS 것이고 나머지는 우리가 그린다(메인 창과 같은 방식). 왼쪽에
         // 「아루 · %3 · 2번 방」, 오른쪽에 되돌리기. 창 이동·리사이즈는 OS 몫이다.
@@ -2115,11 +2231,128 @@ impl App {
             }
             draw_aux_header_btns(a, w);
         }
+        // ── 탭 띠 ── 탭이 둘 이상일 때만 선다. **메인 그리드와 같은 함수**를
+        // 지나므로 라벨 자르기·×/pop-out 자리·활성 표시가 저절로 같다. 트리를 열면
+        // 그 폭만큼 오른쪽에서 시작한다(본문 셀과 같은 왼쪽 경계).
+        if a.tab_bar_h > 0.0 {
+            let (cx, cy) = a.cursor_px;
+            // hover 는 **직전 프레임이 그린 rect** 로 판정한다 — 그린 자리가 곧
+            // 히트 판정이라는 `header_btns` 규약 그대로다.
+            let hov = a
+                .tabs_out
+                .tab_hits
+                .iter()
+                .find(|(_, (rx, ry, rw, rh))| {
+                    cx >= *rx && cx <= rx + rw && cy >= *ry && cy <= ry + rh
+                })
+                .map(|(i, _)| *i);
+            let tree_w = a.cell_left() - PANE_INNER_X;
+            let ctx = crate::render::TabStrip {
+                tabs: &tab_labels,
+                label: &pane_id,
+                x: tree_w,
+                y: AUX_HEADER_H,
+                w: (w - tree_w).max(0.0),
+                active_tab: tab_state.0,
+                tab_first: tab_state.1,
+                tab_last_active: tab_state.2,
+                is_active: focused,
+                color: student_col,
+                can_popout: true,
+                right_reserve: 0.0,
+                chrome_font: 12.0,
+                icon_size: crate::theme::ICON_SIZE,
+                act_fg: crate::theme::text_dim(),
+                cursor_px: (cx, cy),
+                hover_tab: hov,
+                // 창 안 탭 재배치·창 간 드래그는 아직 없다 — 메인 그리드에서 한다.
+                drag_src: None,
+                drag_target: None,
+            };
+            a.tabs_out = crate::render::draw_pane_tabs(&mut a.gpu, &ctx);
+        } else {
+            a.tabs_out = Default::default();
+        }
         if a.tree_open {
             draw_aux_tree(a, &tree_rows, h);
         }
+        // ── 본문 ── 활성 탭의 **종류로** 갈린다. 여태 터미널 하나만 그려서, 셸과
+        // 그림이 같은 pane 에 있으면 그림 탭을 앞에 둔 채 꺼낸 창이 통째로 빈
+        // 화면이었다(거노 2026-08-25: "셸 별도창 할 때 이미지가 안 따라와").
+        let Some((rows, cur_row, cur_col, cur_vis)) = snap else {
+            if let Some((image, zoom, rot, (pan_x, pan_y))) = img_snap {
+                let (bx, by, bw, bh) = a.body_box();
+                // 키 규약은 메인과 같다 — pane id 만으로 키를 만들면 같은 pane 의
+                // 두 번째 그림 탭이 첫 번째 텍스처를 재사용한다. 텍스처는 **이 창의
+                // gpu 에 따로** 올린다(창마다 자기 device·아틀라스라 메인 업로드를
+                // 못 빌린다).
+                let key = format!(
+                    "{pane_id}-p{:x}-r{rot}-f{}",
+                    Arc::as_ptr(&image) as usize,
+                    image.cur_idx()
+                );
+                if !a.gpu.has_image(&key) {
+                    let (rgba, iw, ih) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, rot);
+                    a.gpu.upload_image(&key, &rgba, iw, ih);
+                }
+                a.gpu.queue_image(&key, bx, by, bw, bh, zoom, pan_x, pan_y);
+            } else if let Some(md) = md_snap {
+                let (bx, by, bw, bh) = a.body_box();
+                // 본문 높이는 그려 봐야 나온다 — 휠 clamp 가 이 값을 쓴다.
+                let ch = if md.raw {
+                    a.gpu.draw_raw_editor(
+                        &md.lines,
+                        md.cursor,
+                        md.sel,
+                        bx,
+                        by,
+                        bw,
+                        bh,
+                        md.scroll,
+                        md.h_scroll,
+                        &md.lang,
+                        // 읽기 전용이라 조합·캐럿이 없다. 편집은 pop-out 아이콘으로
+                        // 편집기 창을 열어서 한다.
+                        "",
+                        false,
+                        None,
+                        None,
+                        &[],
+                        &[],
+                        md.wrap,
+                        &[],
+                    )
+                } else {
+                    a.gpu.draw_markdown(&md.blocks, md.gen, bx, by, bw, bh, md.scroll, None)
+                };
+                a.md_content_h = ch;
+            } else if pane_alive {
+                // 웹 탭 — 이 창이 못 그린다. 빈 창으로 두면 고장으로 읽히므로 이유를
+                // 적는다. 웹은 pane 사각형에 접착된 **자식 OS 창**이라(wgpu 본창 안에
+                // WKWebView 를 못 겹친다) 옮기려면 부모·좌표계를 바꿔야 해 축이 다르다.
+                let msg = "이 탭은 별도 창에서 아직 못 봐요 — 메인 창에서 보세요";
+                let fw = a.gpu.measure_chrome_text(msg, 13.0, false);
+                let tx = ((w - fw) / 2.0).max(a.cell_left());
+                let ty = (h / 2.0 - 8.0).max(a.cell_top());
+                a.gpu.draw_text(
+                    tx,
+                    ty,
+                    msg,
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: crate::theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
+            draw_aux_border(a, w, h, student_col.map(|_| accent), focused);
+            let _ = a.gpu.render(&[], scale, 0.0, true);
+            a.dirty = false;
+            return;
+        };
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
-        let origin_px = (a.cell_left() * scale, AUX_CELL_TOP * scale);
+        let origin_px = (a.cell_left() * scale, a.cell_top() * scale);
         let slot = gpu::PaneSlot {
             rows: &rows,
             origin_px,
@@ -2136,7 +2369,7 @@ impl App {
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
         let px = a.cell_left() + cur_col as f32 * cw;
-        let py = AUX_CELL_TOP + cur_row as f32 * ch;
+        let py = a.cell_top() + cur_row as f32 * ch;
         let pe = a.preedit.clone();
         if pe.is_empty() {
             if cur_vis && focused && blink {
@@ -2153,19 +2386,7 @@ impl App {
         // **학생 유무와 무관하게 항상 두른다**: OS 타이틀바를 껐으므로 테두리가
         // 없으면 창이 어디서 끝나는지가 배경색 차이 하나뿐이라, 어두운 바탕 위에서
         // 경계가 통째로 사라진다(거노). 포커스가 없을 땐 흐리게.
-        {
-            const T: f32 = 1.5;
-            let base = if student_col.is_some() { accent } else { crate::theme::border() };
-            let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
-            // 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
-            // 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그
-            // 네 점만 두 배로 진해져 꼭짓점이 점처럼 튄다(거노: "테두리 꼭짓점이
-            // 이상해"). 불투명일 땐 안 보이던 게 반투명이 되며 드러났다.
-            a.gpu.rect(0.0, 0.0, w, T, col);
-            a.gpu.rect(0.0, h - T, w, T, col);
-            a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
-            a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
-        }
+        draw_aux_border(a, w, h, student_col.map(|_| accent), focused);
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
         // 스윕바는 애니메이션이라 다음 프레임을 스스로 불러야 한다 — PTY 출력이
@@ -2613,12 +2834,27 @@ impl App {
         out
     }
 
+    /// 이 창의 **활성 탭**이 셸이면 그 탭의 PTY id. 셸이 아니면 `None`.
+    ///
+    /// `self.pty.get(pane_id)` 를 직접 부르면 안 된다. pane id 는 **첫 탭**의 pid 라,
+    /// 이미지·마크다운 탭을 보고 있는 동안 친 키가 화면에 없는 첫 탭 셸에 그대로
+    /// 박힌다(별도창이 이미지 탭을 그리기 시작하면서 실제로 밟게 된 자리다).
+    /// 메인 창의 `target_surface` 와 같은 해석이되, 셸이 아닌 탭은 여기서 끊는다.
+    fn aux_active_term_pid(&self, pane_id: &str) -> Option<String> {
+        let ws = self.ws.lock().ok()?;
+        let p = ws.panes.get(pane_id)?;
+        let t = p.tabs.get(p.active_tab)?;
+        matches!(t.content, PaneContent::Terminal(_))
+            .then(|| t.pid.clone().unwrap_or_else(|| pane_id.to_string()))
+    }
+
     /// 이 창이 뷰하는 pane 의 PTY 로 바이트 전송(빈 입력 무시).
     fn aux_term_send(&self, pane_id: &str, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
-        if let Some(pty) = self.pty.get(pane_id) {
+        let Some(pid) = self.aux_active_term_pid(pane_id) else { return };
+        if let Some(pty) = self.pty.get(&pid) {
             let _ = pty.send_bytes(bytes);
         }
     }
@@ -2630,7 +2866,6 @@ impl App {
         event: WindowEvent,
         event_loop: &ActiveEventLoop,
     ) {
-        let _ = event_loop;
         match event {
             WindowEvent::CloseRequested => self.dock_pane_terminal(idx),
             WindowEvent::Resized(size) => {
@@ -2662,12 +2897,14 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
-                    let was_header = a.cursor_px.1 <= AUX_HEADER_H;
+                    // 탭 띠도 hover 가 바뀌는 자리라 게이트를 헤더+띠로 잡는다.
+                    let band = AUX_HEADER_H + a.tab_bar_h;
+                    let was_header = a.cursor_px.1 <= band;
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                     // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
                     // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
                     // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
-                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                    if was_header || a.cursor_px.1 <= band {
                         a.dirty = true;
                         a.window.request_redraw();
                     }
@@ -2678,6 +2915,9 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if self.aux_tab_click(idx, event_loop) {
+                    return;
+                }
                 if !self.aux_header_click(idx) {
                     self.aux_tree_click(idx);
                 }
@@ -2688,6 +2928,76 @@ impl App {
             WindowEvent::RedrawRequested => self.aux_render(idx),
             _ => {}
         }
+    }
+
+    /// 탭 띠 클릭 — ×(닫기) → pop-out → 알약(전환) → +(새 탭) 순으로 가른다.
+    /// ×·pop-out 아이콘이 알약 **안**에 있으므로 이 순서가 뒤집히면 닫기를 눌러도
+    /// 전환만 된다. 눌린 게 없으면 `false` 로 평소 경로(헤더·트리)를 잇는다.
+    fn aux_tab_click(&mut self, idx: usize, event_loop: &ActiveEventLoop) -> bool {
+        let Some(a) = self.aux_windows.get(idx) else { return false };
+        if a.tab_bar_h <= 0.0 {
+            return false;
+        }
+        let (cx, cy) = a.cursor_px;
+        let Some(pane_id) = a.term_pane_id().map(str::to_string) else { return false };
+        let in_rect = |r: &(f32, f32, f32, f32)| {
+            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+        };
+        let pick = |v: &[(usize, (f32, f32, f32, f32))]| {
+            v.iter().find(|(_, r)| in_rect(r)).map(|(i, _)| *i)
+        };
+        let close = pick(&a.tabs_out.close_hits);
+        let popout = pick(&a.tabs_out.popout_hits);
+        let switch = pick(&a.tabs_out.tab_hits);
+        let plus = a.tabs_out.plus_rect.filter(in_rect).is_some();
+
+        if let Some(i) = close {
+            self.close_tab(&pane_id, i);
+            self.aux_terminal_resize_pty(idx);
+            self.aux_redraw(idx);
+            return true;
+        }
+        if let Some(i) = popout {
+            // 마크다운만 편집기 창으로 — 나머지(터미널·이미지)는 그 탭을 pane 으로
+            // 승격해 또 하나의 별도창이 본다. 메인 그리드의 같은 아이콘과 같은 분기다.
+            let is_md = self
+                .ws
+                .lock()
+                .unwrap()
+                .panes
+                .get(&pane_id)
+                .and_then(|p| p.tabs.get(i))
+                .is_some_and(|t| matches!(t.content, PaneContent::Markdown(_)));
+            if is_md {
+                self.popout_pane_tab(&pane_id, i, event_loop, None);
+            } else {
+                self.undock_pane_tab(&pane_id, i, event_loop, None);
+            }
+            self.aux_terminal_resize_pty(idx);
+            self.aux_redraw(idx);
+            return true;
+        }
+        if let Some(i) = switch {
+            {
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(p) = ws.panes.get_mut(&pane_id) {
+                    p.active_tab = i.min(p.tabs.len().saturating_sub(1));
+                    p.dirty = true;
+                }
+            }
+            self.aux_terminal_resize_pty(idx);
+            self.aux_redraw(idx);
+            return true;
+        }
+        if plus {
+            if let Err(e) = self.spawn_new_tab(&pane_id, true) {
+                eprintln!("[spawn_new_tab] {e}");
+            }
+            self.aux_terminal_resize_pty(idx);
+            self.aux_redraw(idx);
+            return true;
+        }
+        false
     }
 
     /// 헤더 버튼 클릭 처리. 눌린 게 없으면 `false` — 호출부가 평소 경로를 잇는다.
@@ -2936,9 +3246,87 @@ impl App {
             self.aux_redraw(idx);
             return;
         }
-        let step = lines.abs().ceil() as i32;
-        if let Some(pty) = self.pty.get(&pane_id) {
-            pty.scroll(if lines > 0.0 { step } else { -step });
+        // 굴릴 대상은 **활성 탭이 무엇이냐**가 정한다. 예전엔 무조건 pane id 의 PTY 를
+        // 굴려서, 이미지 탭을 보는 중에도 화면에 없는 첫 탭 셸의 스크롤백이 움직였다.
+        let kind = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(&pane_id)
+                .and_then(|p| p.tabs.get(p.active_tab))
+                .map(|t| match t.content {
+                    PaneContent::Terminal(_) => 0u8,
+                    PaneContent::Image(_) => 1,
+                    PaneContent::Markdown(_) => 2,
+                    PaneContent::Web(_) => 3,
+                })
+                .unwrap_or(0)
+        };
+        match kind {
+            // 메인 창과 같은 규칙 — 트랙패드(PixelDelta)=pan, 휠(LineDelta)=Preview 식 줌.
+            // 앵커는 넘기지 않는다: `image_pane_box` 는 메인 트리를 보므로 꺼낸 pane 에
+            // 대해선 엉뚱한 좌표를 내놓는다(없으면 중심 기준으로 물러난다).
+            1 => {
+                let (_, _, bw, bh) = match self.aux_windows.get(idx) {
+                    Some(a) => a.body_box(),
+                    None => return,
+                };
+                match delta {
+                    MouseScrollDelta::PixelDelta(p) => {
+                        let (mx, my) = self.image_pan_bounds_in(&pane_id, bw, bh);
+                        if mx > 0.0 || my > 0.0 {
+                            if let Ok(mut ws) = self.ws.lock() {
+                                if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                                    pane.image_pan_x =
+                                        (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
+                                    pane.image_pan_y =
+                                        (pane.image_pan_y - p.y as f32).clamp(-my, my);
+                                    pane.dirty = true;
+                                }
+                            }
+                        }
+                    }
+                    MouseScrollDelta::LineDelta(..) => {
+                        let factor = if lines > 0.0 { 1.25 } else { 1.0 / 1.25 };
+                        self.image_zoom_by(&pane_id, factor, None);
+                        // 줌이 바뀌면 pan 한계도 바뀐다 — 메인 창은 자기 박스로 다시
+                        // 클램프하는데, 그 경로는 꺼낸 pane 을 못 찾아 0 으로 몰아 버린다.
+                        let (mx, my) = self.image_pan_bounds_in(&pane_id, bw, bh);
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                                pane.image_pan_x = pane.image_pan_x.clamp(-mx, mx);
+                                pane.image_pan_y = pane.image_pan_y.clamp(-my, my);
+                            }
+                        }
+                    }
+                }
+            }
+            2 => {
+                let (_, _, _, bh) = match self.aux_windows.get(idx) {
+                    Some(a) => a.body_box(),
+                    None => return,
+                };
+                let content = self.aux_windows.get(idx).map(|a| a.md_content_h).unwrap_or(0.0);
+                let px = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 18.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(m) = ws.panes.get_mut(&pane_id).and_then(|p| p.markdown_mut()) {
+                        let max = (content - bh).max(0.0);
+                        m.scroll = (m.scroll - px).clamp(0.0, max);
+                    }
+                }
+            }
+            // 웹 탭은 자식 OS 창이 스스로 굴린다. 셸(0)·그 밖은 예전 그대로 PTY 스크롤백.
+            3 => {}
+            _ => {
+                let step = lines.abs().ceil() as i32;
+                if let Some(pid) = self.aux_active_term_pid(&pane_id) {
+                    if let Some(pty) = self.pty.get(&pid) {
+                        pty.scroll(if lines > 0.0 { step } else { -step });
+                    }
+                }
+            }
         }
         self.aux_redraw(idx);
     }
@@ -3164,20 +3552,40 @@ impl App {
         if self.tmux.is_some() {
             return;
         }
-        let tab_pid: Option<String> = {
+        // 뺀 탭이 앉을 pane id. 터미널 탭은 **자기 pid 를 그대로** 써야 PTY 와
+        // ScreenUpdate 가 따라온다. 그림 탭은 PTY 가 없어 새로 발급한다 — 셸과
+        // 그림이 한 pane 에 있을 때 그림만 자기 창으로 보내는 길이 여기다.
+        enum Promote {
+            Pid(String),
+            Fresh,
+        }
+        let promote = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
+            let tab = ws
+                .panes
                 .get(pane_id)
                 .filter(|p| p.tabs.len() > 1)
-                .and_then(|p| p.tabs.get(idx))
-                .filter(|t| matches!(t.content, PaneContent::Terminal(_)))
-                .and_then(|t| t.pid.clone())
-                .filter(|pid| pid != pane_id && !ws.panes.contains_key(pid))
+                .and_then(|p| p.tabs.get(idx));
+            match tab.map(|t| (&t.content, t.pid.clone())) {
+                Some((PaneContent::Terminal(_), Some(pid)))
+                    if pid != pane_id
+                        && !ws.panes.contains_key(&pid)
+                        && self.pty.contains_key(&pid) =>
+                {
+                    Some(Promote::Pid(pid))
+                }
+                Some((PaneContent::Image(_), _)) => Some(Promote::Fresh),
+                _ => None,
+            }
         };
-        let Some(tab_pid) = tab_pid.filter(|p| self.pty.contains_key(p)) else {
-            // 단일탭·첫 탭·PTY 없는 탭 — pane undock 그대로.
+        let Some(promote) = promote else {
+            // 단일탭·첫 탭·PTY 없는 터미널 탭 — pane undock 그대로.
             self.undock_pane_terminal(pane_id, event_loop, near);
             return;
+        };
+        let tab_pid = match promote {
+            Promote::Pid(p) => p,
+            Promote::Fresh => self.alloc_pane_id(),
         };
         let home_window = self.window_of_pane(pane_id).unwrap_or(self.active_window);
         // 꺼낸 창은 탭이 보이던 pane 칸수를 그대로 담는다(pane undock 과 같은 이유
@@ -3662,6 +4070,8 @@ impl App {
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
+            tab_bar_h: 0.0,
+            tabs_out: Default::default(),
             window: window_handle,
         });
         let idx = self.aux_windows.len() - 1;

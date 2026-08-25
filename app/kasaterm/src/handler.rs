@@ -4774,22 +4774,26 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        // 파일 탭 → 에디터 팝아웃 창. 터미널 탭 → 그 탭만 undock
-                        // (다중탭이면 탭 승격, 아니면 pane 통째 — undock_pane_tab
-                        // 이 가른다). 같은 pop-out 아이콘을 content 종류로 분기한다.
-                        let is_term = self
+                        // 마크다운 탭 → 편집기 팝아웃 창. 나머지(터미널·그림) →
+                        // 그 탭만 undock(다중탭이면 탭 승격, 아니면 pane 통째 —
+                        // undock_pane_tab 이 가른다). 같은 pop-out 아이콘을 content
+                        // 종류로 분기한다. **`is_term` 으로 가르던 것을 뒤집었다**:
+                        // 그림 탭이 else 로 떨어져 `popout_pane_tab` 에 갔는데 그
+                        // 함수는 Markdown 이 아니면 되돌려 놓고 return 한다 — 눌러도
+                        // 아무 일이 없었다(거노 2026-08-25: "이미지도 별도창").
+                        let is_md = self
                             .ws
                             .lock()
                             .unwrap()
                             .panes
                             .get(&pid)
                             .and_then(|p| p.tabs.get(idx))
-                            .map(|t| matches!(t.content, PaneContent::Terminal(_)))
+                            .map(|t| matches!(t.content, PaneContent::Markdown(_)))
                             .unwrap_or(false);
-                        if is_term {
-                            self.undock_pane_tab(&pid, idx, event_loop, None);
-                        } else {
+                        if is_md {
                             self.popout_pane_tab(&pid, idx, event_loop, None);
+                        } else {
+                            self.undock_pane_tab(&pid, idx, event_loop, None);
                         }
                         window.request_redraw();
                         return;
@@ -5255,6 +5259,10 @@ impl ApplicationHandler<UserEvent> for App {
                                         window.request_redraw();
                                         return;
                                     }
+                                    // 웹만 뺀다 — pane 사각형에 접착된 자식 OS
+                                    // 창이라 옮기려면 부모·좌표계가 바뀐다. 마크다운은
+                                    // 위에서 편집기 창으로 갔고, 그림은 이제 탭 undock
+                                    // 이 받는다.
                                     let is_term = self
                                         .ws
                                         .lock()
@@ -5262,9 +5270,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         .panes
                                         .get(&td.pane)
                                         .and_then(|p| p.tabs.get(td.from))
-                                        .map(|t| {
-                                            matches!(t.content, PaneContent::Terminal(_))
-                                        })
+                                        .map(|t| !matches!(t.content, PaneContent::Web(_)))
                                         .unwrap_or(false);
                                     if is_term {
                                         self.finish_live_drag();
@@ -6231,6 +6237,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
+        self.run_pending_autotabpop(event_loop);
         self.run_pending_autoauxmd(event_loop);
         self.run_pending_autoundock_scroll();
         self.run_pending_autoundock_dock();

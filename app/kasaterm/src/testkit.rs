@@ -3522,6 +3522,56 @@ impl App {
     /// 별도창으로 undock(헤더 아이콘 클릭은 헤드리스 주입 불가) 하고, 그 aux 창을
     /// +2500ms 에 자체 캡처(`KASATERM_AUTOUNDOCK_CAP`, 기본 temp undock-window.png).
     /// autosettings 처럼 함수-로컬 static(병렬 작업 규칙: struct App 무접촉).
+    /// Headless 탭 pop-out: `KASATERM_AUTOTABPOP=<탭 index>` 면 `_MS`(기본 6000)
+    /// 뒤에 활성 pane 의 그 탭을 **헤더 아이콘 클릭과 같은 분기**로 뺀다(마크다운=
+    /// 편집기 창, 나머지=탭 undock). 새 창은 +1500ms 뒤 `_CAP` 로 스스로 찍는다.
+    ///
+    /// 클릭은 헤드리스로 못 넣으므로, 그림 탭이 정말 자기 창으로 나가는지는 이
+    /// 길로만 증명된다. 함수-로컬 static — `struct App` 은 안 건드린다.
+    pub(crate) fn run_pending_autotabpop(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, usize)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let idx: usize = std::env::var("KASATERM_AUTOTABPOP").ok()?.parse().ok()?;
+            let ms: u64 = std::env::var("KASATERM_AUTOTABPOP_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), idx))
+        });
+        let Some((due, tab)) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let tab = *tab;
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        let is_md = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(&pid)
+            .and_then(|p| p.tabs.get(tab))
+            .map(|t| matches!(t.content, PaneContent::Markdown(_)))
+            .unwrap_or(false);
+        eprintln!("[autotabpop] pane {pid} tab {tab} (md={is_md})");
+        if is_md {
+            self.popout_pane_tab(&pid, tab, event_loop, None);
+        } else {
+            self.undock_pane_tab(&pid, tab, event_loop, None);
+        }
+        let cap = std::env::var("KASATERM_AUTOTABPOP_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir().join("tabpop.png").to_string_lossy().into_owned()
+        });
+        if let Some(a) = self.aux_windows.last_mut() {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+        }
+    }
+
     pub(crate) fn run_pending_autoundock(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
@@ -3541,6 +3591,20 @@ impl App {
         let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
         eprintln!("[autoundock] undock pane {pid}");
         self.undock_pane_terminal(&pid, event_loop, None);
+        // `_TAB=<idx>` 면 꺼낸 창의 활성 탭을 그것으로 바꾼다. 탭 클릭은 헤드리스로
+        // 못 넣는데, 「셸+그림 두 탭짜리 pane 을 꺼내면 그림 탭이 그려지나」는 그
+        // 클릭 뒤에만 보인다 — 캡처가 증명할 수 있는 자리로 끌어오는 최소 장치다.
+        if let Some(t) = std::env::var("KASATERM_AUTOUNDOCK_TAB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(p) = ws.panes.get_mut(&pid) {
+                p.active_tab = t.min(p.tabs.len().saturating_sub(1));
+                p.dirty = true;
+                eprintln!("[autoundock] active_tab={} of {}", p.active_tab, p.tabs.len());
+            }
+        }
         let cap = std::env::var("KASATERM_AUTOUNDOCK_CAP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("undock-window.png")

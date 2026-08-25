@@ -122,6 +122,83 @@ impl App {
         crate::theme::character_accent_n(&name, crate::theme::character_ordinal(&ws.pane_character, id))
     }
 
+    /// 헤더 탭에 실을 제목들. **메인 그리드와 별도창이 같은 이 함수를 지난다** —
+    /// 두 벌로 두면 별도창 탭만 OSC 날제목(`✳ Claude Code`)으로 돌아간다.
+    pub(crate) fn pane_tab_labels(
+        &self,
+        ws: &Workspace,
+        id: &str,
+        pane: &PaneState,
+    ) -> Vec<String> {
+        // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
+        // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
+        // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
+        // 비배정 pane 은 기존대로 탭별 제목.
+        if pane.tabs.len() <= 1
+            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
+        {
+            Vec::new()
+        } else {
+            pane.tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    // 탭 이름도 헤더와 같은 규칙으로 짓는다 — 여기만
+                    // OSC 제목을 **날것 그대로** 실어, claude 탭이
+                    // `✳ Claude Code` 로 떴다(거노 2026-08-21: "탭 안에
+                    // 있을 때 claude code 랑 무슨 유니코드 이모지 나오는데
+                    // 그것도 이쁘게"). 헤더는 진작 학생 이름을 쓰고 있어서
+                    // **같은 pane 인데 헤더와 탭이 서로 다른 것을 부르는**
+                    // 상태이기도 했다.
+                    let sess =
+                        t.pid.as_deref().and_then(|p| self.pty.get(p));
+                    // 작업명 — 스피너·별표 접두를 벗긴다. 벗기는 일은
+                    // `strip_activity_prefix` 계약대로 **접두만**이고,
+                    // 「Claude Code」 같은 기본 제목을 따로 거르지는 않는다:
+                    // 그건 claude 쪽 문구라 바뀌면 조용히 어긋난다.
+                    let task = t
+                        .title
+                        .as_deref()
+                        .map(|s| crate::strip_activity_prefix(s).trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    // 학생 관문은 헤더(`true_char` + `runs_claude`)와 같은
+                    // 것을 **탭 pid 로** 묻는다. pane 이 아니라 탭마다
+                    // 물어야 하는 건, 한 pane 의 탭들이 각각 다른 학생일
+                    // 수 있어서다.
+                    let student = sess
+                        .filter(|s| s.active_agent().is_some())
+                        .and(t.pid.as_deref())
+                        .and_then(|p| self.display_pane_char(ws, p));
+                    let name = match (student, task) {
+                        // pane id 는 안 붙인다 — 헤더가 이미 들고 있고,
+                        // 한 pane 의 탭끼리는 그 값이 전부 같아 구분에
+                        // 보탬이 안 되면서 좁은 자리만 먹는다.
+                        (Some(c), Some(t)) => format!("{c} · {t}"),
+                        (Some(c), None) => c,
+                        (None, Some(t)) => t,
+                        // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
+                        (None, None) => sess
+                            .and_then(|s| Self::smart_pane_label(s))
+                            .unwrap_or_else(|| {
+                                if i == 0 {
+                                    id.to_string()
+                                } else {
+                                    format!("탭 {}", i + 1)
+                                }
+                            }),
+                    };
+                    // 탭별 ● 미저장 도트 — 멀티탭 pane 에서 어느
+                    // 파일이 저장 안 됐는지 탭 단위로 보이게.
+                    if t.markdown().map_or(false, |m| m.modified) {
+                        format!("● {name}")
+                    } else {
+                        name
+                    }
+                })
+                .collect()
+        }
+    }
+
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
     /// `UserEvent::Notify`). Flash the pane's header and, unless the user is
     /// already looking at that exact pane (our window focused + it's the
