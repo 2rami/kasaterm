@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import {
   Button,
   Notice,
@@ -9,6 +9,7 @@ import {
   useSettingsAction,
 } from './controls';
 import { postAction } from './api';
+import { ColorWheel } from './ColorWheel';
 import { useT } from './lang';
 import type { AppearanceValues, ShapePreset, ThemePreset } from './types';
 
@@ -69,84 +70,42 @@ function ThemeCard({
   );
 }
 
-/// 값 하나를 **한 번에 하나씩만** 보내는 창구. 보내는 중에 새 값이 오면 마지막
-/// 것만 남겨 뒀다가 응답이 온 뒤 이어 보낸다.
-///
-/// 색 휠은 손을 움직이는 내내 이벤트를 뿜으므로 그대로 흘려보내면 요청이 밀린다.
-/// 시간 간격으로 솎으면(스로틀) 얼마로 잡아도 느린 기계에선 밀리고 빠른 기계에선
-/// 덜 부드러운데, 이 방식은 응답 속도가 곧 간격이 되어 저절로 맞는다.
-function useLatestOnly(send: (v: string) => Promise<unknown>) {
-  const pending = useRef<string | null>(null);
-  const busy = useRef(false);
-  return (v: string) => {
-    pending.current = v;
-    if (busy.current) return;
-    void (async () => {
-      busy.current = true;
-      try {
-        while (pending.current !== null) {
-          const next = pending.current;
-          pending.current = null;
-          await send(next);
-        }
-      } finally {
-        busy.current = false;
-      }
-    })();
-  };
-}
-
-/// 색 견본 겸 선택기. 웹뷰라 OS 색 선택 패널을 그대로 쓴다 — 네이티브 화면이 채도×
-/// 명도 사각형을 손으로 그려야 했던 자리다.
-///
-/// 고르는 동안 오는 `change` 는 **미리보기**로 흘려 화면 색이 휠을 따라오게 하고
-/// (2026-08-25 지시 「팔레트 휠로 실시간으로 바로 바뀌게」), 칸을 벗어날 때 한 번만
-/// 굳힌다. 미리보기는 파일에 안 쓰므로 색을 끄는 내내 파일 쓰기가 폭주하지 않는다.
+/// 색 견본 겸 **편집 대상 고르기**. 누르면 그 칸이 휠에 물리고, 색은 휠에서
+/// 맞춘다 — 예전에는 칸마다 OS 색 패널을 열어야 했다(2026-08-25 지시 「원으로
+/// 드래그하면서 되게 해봐, 하나씩 클릭 말고」).
 function ColorSwatch({
   hex,
   title,
+  active,
   disabled,
-  onCommit,
-  onPreview,
+  onPick,
 }: {
   hex: string;
   title: string;
+  active: boolean;
   disabled?: boolean;
-  onCommit: (next: string) => void;
-  onPreview?: (next: string) => Promise<unknown>;
+  onPick: () => void;
 }) {
   const t = useT();
-  const [draft, setDraft] = useState(hex);
-  // 색 패널이 열려 있는 동안은 밖에서 온 값으로 덮지 않는다. 미리보기는 파일에
-  // 안 남아 서버가 되돌려 주는 hex 가 옛 값인데, 그걸 그대로 받으면 휠을 돌리는
-  // 내내 견본이 원래 색으로 튕겨 돌아간다.
-  const editing = useRef(false);
-  useEffect(() => {
-    if (!editing.current) setDraft(hex);
-  }, [hex]);
-  const preview = useLatestOnly(async (v) => {
-    if (onPreview) await onPreview(v);
-  });
   return (
-    <input
-      type="color"
-      value={draft}
+    <button
+      type="button"
       disabled={disabled}
       title={title}
       aria-label={t.common.colorOf({ name: title })}
-      onFocus={() => {
-        editing.current = true;
+      aria-pressed={active}
+      onClick={onPick}
+      className="h-[24px] w-[30px] shrink-0 cursor-pointer p-0 disabled:opacity-40"
+      style={{
+        background: hex,
+        // 선택은 링으로 낸다 — 칸 자체가 그 색을 보여 주는 자리라 배경을 바꿔
+        // 표시하면 그 색을 거짓말하게 된다.
+        border: active
+          ? '2px solid var(--kt-accent)'
+          : 'var(--kt-border-w) solid var(--kt-border)',
+        borderRadius: 'var(--kt-radius-sm)',
+        boxShadow: active ? '0 0 0 2px color-mix(in srgb, var(--kt-accent) 35%, transparent)' : 'none',
       }}
-      onChange={(e) => {
-        setDraft(e.target.value);
-        preview(e.target.value);
-      }}
-      onBlur={() => {
-        editing.current = false;
-        if (draft.toLowerCase() !== hex.toLowerCase()) onCommit(draft);
-      }}
-      className="h-[24px] w-[30px] shrink-0 cursor-pointer bg-transparent p-0 disabled:opacity-40"
-      style={{ border: 'var(--kt-border-w) solid var(--kt-border)', borderRadius: 'var(--kt-radius-sm)' }}
     />
   );
 }
@@ -238,6 +197,12 @@ export function AppearanceTab({
   );
   const atDefaultScale =
     Math.abs(data.ui_zoom - 1) < 0.01 && Math.abs(data.font_size - data.font_size_default) < 0.01;
+
+  // 휠이 지금 물고 있는 칸. 팔레트 칸이 스물 몇 개라 휠을 칸마다 두면 화면이
+  // 휠 밭이 된다 — 하나를 두고 고른 칸을 갈아 끼운다.
+  const [slot, setSlot] = useState(0);
+  const slotName = data.palette_keys[slot] ?? `ansi ${slot - uiCount}`;
+  const slotHex = data.palette_hex[slot] ?? '#000000';
 
   const commitHex = (index: number) => (next: string) =>
     void run('palette-hex', { id: String(index), label: next });
@@ -356,15 +321,31 @@ export function AppearanceTab({
               />
             </div>
 
+            <div className="mb-4 flex items-start gap-4">
+              <ColorWheel
+                hex={slotHex}
+                disabled={busy}
+                onPreview={previewHex(slot)}
+                onCommit={commitHex(slot)}
+              />
+              <div className="pt-1">
+                <p className="text-[12px] text-[var(--kt-text-mute)]">{t.appearance.wheelHint}</p>
+                <p className="mt-2 text-[13px] text-[var(--kt-text)]">{slotName}</p>
+                <p className="mt-1 font-[var(--kt-font-mono)] text-[13px] text-[var(--kt-text-dim)]">
+                  {slotHex}
+                </p>
+              </div>
+            </div>
+
             <div className="grid grid-cols-[repeat(auto-fill,minmax(294px,1fr))] gap-x-2 gap-y-1">
               {data.palette_keys.map((key, i) => (
                 <div key={key} className="flex items-center gap-2 py-1">
                   <ColorSwatch
                     hex={uiHex[i] ?? '#000000'}
                     title={key}
+                    active={slot === i}
                     disabled={busy}
-                    onCommit={commitHex(i)}
-                    onPreview={previewHex(i)}
+                    onPick={() => setSlot(i)}
                   />
                   <span className="flex-1 text-[13px] text-[var(--kt-text)]">{key}</span>
                   <TextField
@@ -386,9 +367,9 @@ export function AppearanceTab({
                   key={i}
                   hex={hex}
                   title={`ansi ${i}`}
+                  active={slot === uiCount + i}
                   disabled={busy}
-                  onCommit={commitHex(uiCount + i)}
-                  onPreview={previewHex(uiCount + i)}
+                  onPick={() => setSlot(uiCount + i)}
                 />
               ))}
             </div>
