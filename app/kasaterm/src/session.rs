@@ -624,35 +624,6 @@ impl App {
     /// 「말투」 토글이 꺼져 있으면 **빈 파일**을 쓴다 — 파일이 아예 없으면 shim 이
     /// spawn 때의 env 로 되돌아가 옛 말투가 되살아난다. 빈 내용은 「말투 없음」이라는
     /// 명시적 뜻이다.
-    fn write_persona_override(&self, pane: &str, character: &str) {
-        let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else { return };
-        let dir = std::path::Path::new(&shim);
-        let persona = if socket::read_claude_persona() {
-            kasa_mcp::character::characters_json()
-                .and_then(|c| kasa_mcp::character::persona_for(&c, character))
-                .or_else(|| kasa_mcp::character::persona_for_any(character))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let base = dir.join(format!("repersona-{pane}"));
-        let _ = std::fs::write(base.with_extension("persona"), persona);
-        let _ = std::fs::write(base.with_extension("character"), character);
-        // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
-        // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
-        let chars = kasa_mcp::character::characters_json();
-        let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
-            chars.as_ref().and_then(|c| f(c, character)).unwrap_or_default()
-        };
-        let _ = std::fs::write(
-            base.with_extension("model"),
-            pick(kasa_mcp::character::model_for),
-        );
-        let _ = std::fs::write(
-            base.with_extension("backend"),
-            pick(kasa_mcp::character::backend_for),
-        );
-    }
 
     pub(crate) fn repersona_pane(&mut self, pane: &str, character: &str) {
         if !self.ws.lock().unwrap().panes.contains_key(pane) {
@@ -692,7 +663,7 @@ impl App {
         // 고정된 `KASATERM_PERSONA`(옛 캐릭터)로 `--append-system-prompt` 를 붙이고,
         // SessionStart 훅은 그 인자가 보이면 자기 주입을 건너뛰기 때문이다. 학생
         // 명령(`시로코`)이 쓰는 override 파일에 새 말투를 남겨 그 사슬을 끊는다.
-        self.write_persona_override(pane, character);
+        write_persona_override(pane, character);
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -4725,6 +4696,49 @@ pub(crate) fn restore_agent_command(
     cmd.push('\r');
     cmd
 }
+
+/// pane 의 말투·모델·통로를 새 학생 것으로 갈아 둔다 — shim 이 다음 부팅에 읽는
+/// override 파일(`repersona-<pane>.*`).
+///
+/// 도는 프로세스의 시스템 프롬프트는 못 바꾸므로 **지금 대화 중인 상대는 옛 말투
+/// 그대로**고, 여기서 바꾸는 것은 다음에 그 pane 에서 claude 가 뜰 때부터다. 그런데
+/// 바인딩·마커만 갱신하면 **다시 띄워도 옛 말투로 뜬다**: shim 이 spawn 때 고정된
+/// `KASATERM_PERSONA`(옛 학생)로 `--append-system-prompt` 를 붙이고, SessionStart
+/// 훅은 그 인자가 보이면 자기 주입을 건너뛰기 때문이다. 이 파일들이 그 사슬을 끊는다.
+///
+/// `self` 를 안 쓰므로 자유함수다 — 캐릭터를 갈아 끼우는 자리가 GUI(`App`)와 board
+/// 빌드(`PtyBackend`) 양쪽에 있고, 한쪽만 갱신하면 그 경로로 바뀐 pane 만 말투가
+/// 어긋난 채 남는다.
+pub(crate) fn write_persona_override(pane: &str, character: &str) {
+        let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else { return };
+        let dir = std::path::Path::new(&shim);
+        let persona = if socket::read_claude_persona() {
+            kasa_mcp::character::characters_json()
+                .and_then(|c| kasa_mcp::character::persona_for(&c, character))
+                .or_else(|| kasa_mcp::character::persona_for_any(character))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let base = dir.join(format!("repersona-{pane}"));
+        let _ = std::fs::write(base.with_extension("persona"), persona);
+        let _ = std::fs::write(base.with_extension("character"), character);
+        // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
+        // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
+        let chars = kasa_mcp::character::characters_json();
+        let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
+            chars.as_ref().and_then(|c| f(c, character)).unwrap_or_default()
+        };
+        let _ = std::fs::write(
+            base.with_extension("model"),
+            pick(kasa_mcp::character::model_for),
+        );
+        let _ = std::fs::write(
+            base.with_extension("backend"),
+            pick(kasa_mcp::character::backend_for),
+        );
+    }
+
 
 /// [`App::stashed_record`] 의 판정 본체. App 없이 검사할 수 있게 갈라 뒀다.
 fn stashed_in<'a>(list: &'a [crate::ClosedPane], pane: &str) -> Option<&'a crate::ClosedPane> {

@@ -2334,6 +2334,13 @@ impl Backend for PtyBackend {
                             // 이 캐릭터를 중복하지 않게. 같은 폴링 내 다른 lazy 가 또 같은 캐릭터를
                             // 안 고르게 lazy_assigned 에도 누적(클론 스냅샷은 빌드 중 안 바뀜).
                             self.ws.lock().unwrap().pane_character.insert(sid.clone(), name.clone());
+                            // 말투·모델도 새 학생 것으로. 이걸 빼면 이름과 얼굴만 갈리고
+                            // **다음에 claude 가 떠도 옛 학생의 말투로 뜬다** — shim 이
+                            // spawn 때 고정된 `KASATERM_PERSONA` 로 `--append-system-prompt`
+                            // 를 붙이고, SessionStart 훅은 그 인자가 보이면 자기 주입을
+                            // 건너뛰기 때문이다. `repersona_pane` 이 쓰는 것과 같은
+                            // override 파일로 그 사슬을 끊는다.
+                            crate::session::write_persona_override(sid.as_str(), &name);
                             lazy_assigned.insert(name.clone());
                             row.character = Some(name);
                         }
@@ -5182,3 +5189,4 @@ mod pid_cwd_tests {
         assert_eq!(super::claude_under(&table, 100), None);
     }
 }
+
