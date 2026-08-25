@@ -11,7 +11,9 @@
     "scripting",
     "activeTab",
     "alarms",
-    "storage"
+    "storage",
+    "identity",
+    "identity.email"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -31,7 +33,9 @@
   },
   "commands": {
     "toggle-overlay": {
-      "suggested_key": { "default": "Alt+Shift+O" },
+      "suggested_key": {
+        "default": "Alt+Shift+O"
+      },
       "description": "페이지 위 표시(테두리·칩·커서) 전부 숨기기/되돌리기"
     }
   },

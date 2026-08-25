@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// 확장(1개)과 MCP 클라이언트(N개) 사이의 중계. 별도 데몬인 이유: pane 마다 Claude 가 떠서
-// MCP 프로세스는 여러 개인데 확장이 붙을 수 있는 포트는 하나뿐이다.
+// 확장(크롬 프로필마다 1개)과 MCP 클라이언트(N개) 사이의 중계. 별도 데몬인 이유: pane 마다
+// Claude 가 떠서 MCP 프로세스는 여러 개인데 확장이 붙을 수 있는 포트는 하나뿐이다.
+// 확장은 프로필 단위로 여러 개가 동시에 붙는다 — 클라이언트가 고른 프로필로 호출을 보낸다.
 import { WebSocketServer, WebSocket } from 'ws'
 import { appendFileSync, mkdirSync, renameSync, statSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -29,11 +30,26 @@ function log(...parts) {
   process.stderr.write(line)
 }
 
-let extension = null
+// 프로필마다 확장 하나. 예전 확장은 profile 을 안 보내므로 DEFAULT_PROFILE 로 접어 넣는다.
+const DEFAULT_PROFILE = 'default'
+const extensions = new Map() // profileId -> {sock, label, hint, since}
 let nextId = 1
 let nextClient = 1
 const pending = new Map() // bridgeId -> {client, clientId, timer, tool}
-const clients = new Map() // sock -> {key, identity}
+const clients = new Map() // sock -> {key, identity, profile}
+
+// 목록 순서는 붙은 순. 클라이언트가 프로필을 안 고르면 첫 번째를 쓰므로, 순서가 흔들리면
+// 같은 pane 의 연속 호출이 서로 다른 크롬으로 갈라진다 — Map 의 삽입 순서에 기댄다.
+function profileList() {
+  return [...extensions.entries()].map(([id, e]) => ({ id, label: e.label, hint: e.hint, since: e.since }))
+}
+
+function extFor(sock) {
+  const want = clients.get(sock)?.profile
+  if (want && extensions.has(want)) return extensions.get(want).sock
+  const first = extensions.values().next().value
+  return first ? first.sock : null
+}
 
 const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
@@ -79,22 +95,27 @@ function send(sock, obj) {
 }
 
 function broadcastStatus() {
-  for (const sock of clients.keys()) send(sock, { type: 'status', extension: !!extension })
+  const profiles = profileList()
+  for (const sock of clients.keys()) {
+    send(sock, { type: 'status', extension: extensions.size > 0, profiles, selected: clients.get(sock)?.profile || null })
+  }
 }
 
 // 확장이 뒤늦게 붙거나 재로드되면 지금 살아 있는 세션을 다시 알려준다.
-function replaySessions() {
+// 방금 붙은 그 확장에만 보낸다 — 전부에 뿌리면 다른 프로필 오버레이에 남의 칩이 뜬다.
+function replaySessions(sock) {
   for (const { key, identity } of clients.values()) {
-    if (identity) send(extension, { type: 'session', action: 'open', client: key, identity })
+    if (identity) send(sock, { type: 'session', action: 'open', client: key, identity })
   }
 }
 
-function failPending(reason) {
-  for (const [, p] of pending) {
+function failPendingOf(extSock, reason) {
+  for (const [id, p] of pending) {
+    if (p.ext !== extSock) continue
     clearTimeout(p.timer)
+    pending.delete(id)
     send(p.client, { type: 'result', id: p.clientId, ok: false, error: reason })
   }
-  pending.clear()
 }
 
 wss.on('connection', (sock) => {
@@ -107,27 +128,63 @@ wss.on('connection', (sock) => {
     if (msg.type === 'hello') {
       role = msg.role === 'extension' ? 'extension' : 'client'
       if (role === 'extension') {
-        // 확장이 재로드되면 옛 소켓은 버린다. 마지막에 붙은 것이 진짜.
-        if (extension && extension !== sock) { try { extension.close() } catch {} }
-        extension = sock
-        log('extension connected')
-        replaySessions()
+        const pid = msg.profile?.id || DEFAULT_PROFILE
+        // 같은 프로필의 확장이 재로드되면 옛 소켓은 버린다. 마지막에 붙은 것이 진짜.
+        // 다른 프로필이면 공존한다 — 여기서 끊으면 두 크롬이 서로를 밀어낸다.
+        const prev = extensions.get(pid)
+        if (prev && prev.sock !== sock) { try { prev.sock.close() } catch {} }
+        sock.profileId = pid
+        extensions.set(pid, {
+          sock,
+          label: msg.profile?.label || '',
+          hint: msg.profile?.hint || '',
+          since: Date.now(),
+        })
+        log(`extension connected: ${pid}${msg.profile?.label ? ` (${msg.profile.label})` : ''}`)
+        replaySessions(sock)
         broadcastStatus()
       } else {
         const key = `c${nextClient++}`
         const identity = msg.identity || null
-        clients.set(sock, { key, identity })
+        clients.set(sock, { key, identity, profile: msg.profile || null })
         if (identity) {
           log(`client ${key} = ${identity.name} (${identity.paneId || 'pane?'})`)
-          send(extension, { type: 'session', action: 'open', client: key, identity })
+          const ext = extFor(sock)
+          if (ext) send(ext, { type: 'session', action: 'open', client: key, identity })
         }
-        send(sock, { type: 'status', extension: !!extension, client: key })
+        send(sock, { type: 'status', extension: extensions.size > 0, client: key, profiles: profileList(), selected: clients.get(sock).profile })
       }
       return
     }
 
+    if (role === 'client' && msg.type === 'profiles') {
+      send(sock, { type: 'profiles', id: msg.id, profiles: profileList(), selected: clients.get(sock)?.profile || null })
+      return
+    }
+
+    if (role === 'client' && msg.type === 'select') {
+      const info = clients.get(sock)
+      if (!info) return
+      const want = msg.profile
+      if (want && !extensions.has(want)) {
+        send(sock, { type: 'select', id: msg.id, ok: false, error: `NO_SUCH_PROFILE: ${want}. 붙어 있는 것: ${[...extensions.keys()].join(', ') || '(없음)'}`, profiles: profileList() })
+        return
+      }
+      // 프로필을 바꾸면 옛 크롬의 오버레이에 이 pane 칩이 남는다 — 떼고 새 쪽에 붙인다.
+      const before = extFor(sock)
+      info.profile = want || null
+      const after = extFor(sock)
+      if (info.identity && before !== after) {
+        if (before) send(before, { type: 'session', action: 'close', client: info.key })
+        if (after) send(after, { type: 'session', action: 'open', client: info.key, identity: info.identity })
+      }
+      send(sock, { type: 'select', id: msg.id, ok: true, profiles: profileList(), selected: info.profile })
+      return
+    }
+
     if (role === 'client' && msg.type === 'call') {
-      if (!extension) {
+      const ext = extFor(sock)
+      if (!ext) {
         send(sock, {
           type: 'result', id: msg.id, ok: false,
           error: 'EXTENSION_NOT_CONNECTED: 크롬 확장이 브리지에 붙어 있지 않습니다. chrome://extensions 에서 확장이 켜져 있는지 확인하세요.',
@@ -140,8 +197,8 @@ wss.on('connection', (sock) => {
         pending.delete(bridgeId)
         send(sock, { type: 'result', id: msg.id, ok: false, error: `TIMEOUT: ${msg.tool} 이 ${timeoutMs}ms 안에 응답하지 않았습니다.` })
       }, timeoutMs)
-      pending.set(bridgeId, { client: sock, clientId: msg.id, timer, tool: msg.tool })
-      send(extension, {
+      pending.set(bridgeId, { client: sock, clientId: msg.id, timer, tool: msg.tool, ext })
+      send(ext, {
         type: 'call', id: bridgeId, tool: msg.tool, args: msg.args || {},
         client: clients.get(sock)?.key || null,
       })
@@ -163,19 +220,22 @@ wss.on('connection', (sock) => {
   })
 
   sock.on('close', () => {
-    if (sock === extension) {
-      extension = null
-      log('extension disconnected')
-      failPending('EXTENSION_DISCONNECTED: 명령 처리 중 확장 연결이 끊겼습니다.')
+    const pid = sock.profileId
+    if (pid && extensions.get(pid)?.sock === sock) {
+      extensions.delete(pid)
+      log(`extension disconnected: ${pid}`)
+      // 이 확장으로 나간 호출만 깬다 — 남은 프로필의 진행 중 호출까지 죽이면 안 된다.
+      failPendingOf(sock, 'EXTENSION_DISCONNECTED: 명령 처리 중 확장 연결이 끊겼습니다.')
       broadcastStatus()
     }
     const info = clients.get(sock)
     if (info) {
+      const ext = extFor(sock)
       clients.delete(sock)
-      if (info.identity) send(extension, { type: 'session', action: 'close', client: info.key })
+      if (info.identity && ext) send(ext, { type: 'session', action: 'close', client: info.key })
     }
-    if (IDLE_EXIT_MS && clients.size === 0 && !extension) {
-      setTimeout(() => { if (clients.size === 0 && !extension) process.exit(0) }, IDLE_EXIT_MS)
+    if (IDLE_EXIT_MS && clients.size === 0 && extensions.size === 0) {
+      setTimeout(() => { if (clients.size === 0 && extensions.size === 0) process.exit(0) }, IDLE_EXIT_MS)
     }
   })
 
@@ -184,7 +244,8 @@ wss.on('connection', (sock) => {
 
 // MV3 service worker 는 유휴 30초면 잠든다. WS 수신은 수명을 연장하므로 주기적으로 깨워 둔다.
 setInterval(() => {
-  if (extension) send(extension, { type: 'ping', t: Date.now() })
+  const t = Date.now()
+  for (const { sock } of extensions.values()) send(sock, { type: 'ping', t })
 }, 20000)
 
 process.on('SIGTERM', () => process.exit(0))

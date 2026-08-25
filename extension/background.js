@@ -54,6 +54,43 @@ let connecting = false
 // 신원 없이 처리된다(작업명이 조용히 버려졌다). 세션 처리는 한 줄로 세우고 호출은 그 뒤에 태운다.
 let sessionChain = Promise.resolve()
 
+// 크롬 프로필마다 확장 인스턴스가 따로 뜨고 storage 도 프로필별로 갈린다 — 여기 심은 id 가
+// 곧 프로필의 신원이다. 브리지는 이 id 로 어느 크롬에 명령을 보낼지 가른다.
+let profileCache = null
+async function profileOf() {
+  if (profileCache) return profileCache
+  let saved = {}
+  try { saved = (await chrome.storage.local.get('kc_profile')).kc_profile || {} } catch {}
+  let id = saved.id
+  if (!id) {
+    id = (crypto.randomUUID?.() || String(Date.now())).slice(0, 8)
+    try { await chrome.storage.local.set({ kc_profile: { ...saved, id } }) } catch {}
+  }
+  let label = saved.label || ''
+  if (!label) {
+    // 로그인 안 된 프로필은 빈 문자열이 온다 — 그때는 아래 hint 로 사람이 알아본다.
+    try { label = (await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }))?.email || '' } catch {}
+  }
+  profileCache = { id, label }
+  return profileCache
+}
+
+// 라벨이 비면 어느 크롬인지 사람이 못 고른다. 열린 탭에서 흔한 도메인을 뽑아 단서로 준다.
+async function profileHint() {
+  try {
+    const tabs = await chrome.tabs.query({})
+    const hosts = new Map()
+    for (const t of tabs) {
+      const m = /^https?:\/\/([^/:]+)/.exec(t.url || '')
+      if (!m) continue
+      const h = m[1].replace(/^www\./, '')
+      hosts.set(h, (hosts.get(h) || 0) + 1)
+    }
+    const top = [...hosts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([h]) => h)
+    return `탭 ${tabs.length}개${top.length ? ' · ' + top.join(', ') : ''}`
+  } catch { return '' }
+}
+
 function connect() {
   if (connecting || (ws && ws.readyState <= 1)) return
   connecting = true
@@ -65,10 +102,14 @@ function connect() {
     return
   }
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     connecting = false
     backoff = 500
-    ws.send(JSON.stringify({ type: 'hello', role: 'extension' }))
+    // await 사이에 재연결이 겹치면 ws 가 딴 소켓으로 바뀐다 — 지금 열린 이 소켓을 잡아 둔다.
+    const sock = ws
+    const profile = await profileOf()
+    const hello = { type: 'hello', role: 'extension', profile: { ...profile, hint: await profileHint() } }
+    if (sock.readyState === 1) sock.send(JSON.stringify(hello))
     refreshAction(true)
   }
 

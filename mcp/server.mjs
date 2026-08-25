@@ -42,6 +42,14 @@ function open() {
         let msg
         try { msg = JSON.parse(raw.toString()) } catch { return }
         if (msg.type === 'status') { extensionUp = !!msg.extension; return }
+        if (msg.type === 'profiles' || msg.type === 'select') {
+          const q = pending.get(msg.id)
+          if (!q) return
+          pending.delete(msg.id)
+          if (msg.ok === false) q.reject(new Error(msg.error || 'select failed'))
+          else q.resolve({ profiles: msg.profiles || [], selected: msg.selected ?? null })
+          return
+        }
         if (msg.type !== 'result') return
         const p = pending.get(msg.id)
         if (!p) return
@@ -93,6 +101,19 @@ async function call(tool, args = {}, timeoutMs = 30000) {
   })
 }
 
+// call 과 달리 확장을 거치지 않고 브리지가 직접 답한다 — 확장이 하나도 없어도 목록은 나온다.
+async function ask(type, extra = {}, timeoutMs = 5000) {
+  const sock = await connect()
+  const id = nextId++
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject })
+    sock.send(JSON.stringify({ type, id, ...extra }))
+    setTimeout(() => {
+      if (pending.has(id)) { pending.delete(id); reject(new Error(`TIMEOUT: ${type}`)) }
+    }, timeoutMs)
+  })
+}
+
 function text(value) {
   return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] }
 }
@@ -115,6 +136,12 @@ function tool(name, description, schema, run, { timeoutMs = 30000 } = {}) {
 
 tool('browser_status', 'Check the bridge/extension connection and which tabs currently have the debugger attached. Call this first if any other tool errors.', {},
   async () => text(await call('status')))
+
+tool('browser_list_profiles', 'List the Chrome profiles currently connected — one entry per profile that has the extension loaded. Each has an id, a label (the profile\'s Google account email when signed in) and a hint (tab count and the most common domains) so you can tell them apart when the label is empty. `selected` is the profile THIS session sends commands to; when it is null, commands go to the first-connected profile. Use this before browser_select_profile, and whenever a page you expect to be signed in appears signed out — that usually means you are driving the wrong profile.', {},
+  async () => text(await ask('profiles')))
+
+tool('browser_select_profile', 'Point this session\'s browser tools at a specific Chrome profile. Pass an id from browser_list_profiles; pass null to go back to the default (first-connected). The choice is per-session, so other panes keep whatever profile they picked — switching here never moves anyone else. Tab ids belong to the profile that issued them, so re-list tabs after switching instead of reusing ids from before.', { profile: z.string().nullable().optional().describe('Profile id from browser_list_profiles, or null to unset') },
+  async (a) => text(await ask('select', { profile: a.profile ?? null })))
 
 tool('browser_list_tabs', 'List all open tabs in the real Chrome profile (with tabId, url, title, active flag).', { windowId: z.number().int().optional() },
   async (a) => text(await call('list_tabs', a)))
