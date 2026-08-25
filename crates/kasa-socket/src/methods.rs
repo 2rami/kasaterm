@@ -87,6 +87,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.rename" => surface_rename(backend, id, &req.params),
         "window.rename" => window_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
+        "surface.repersona" => surface_repersona(backend, id, &req.params),
         "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
@@ -248,6 +249,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.rename",
                 "window.rename",
                 "surface.set_color",
+                "surface.repersona",
                 "surface.resize_divider",
                 "surface.set_ratio",
                 "collab.board",
@@ -536,6 +538,26 @@ fn surface_set_color(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.set_color requires `color` as #rrggbb"),
     };
     match backend.set_color(surface_id, color) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// pane 캐릭터 재배정(respawn 없음). 이름은 **아는 명부의 합집합**(활성∪번들∪설치
+/// 테마)에서 찾으므로, 활성 테마 밖 캐릭터도 지정할 수 있다 — 나쵸 전용 테마처럼
+/// 설치만 해 두고 특정 pane 에서만 쓰는 갈래가 이걸 탄다. GUI 쪽 가드가 로스터 밖
+/// 이름을 막으므로 여기서는 빈 문자열만 거른다.
+fn surface_repersona(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.repersona requires `surface_id` (string)"),
+    };
+    let character = match params.get("character").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    {
+        Some(c) => c,
+        None => return param_err(id, "surface.repersona requires `character` (string)"),
+    };
+    match backend.repersona(surface_id, character) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

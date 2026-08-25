@@ -868,6 +868,21 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "color": color }),
             )
         }
+        "repersona" => {
+            // 이 pane 의 다음 claude 가 쓸 캐릭터를 갈아끼운다(respawn 없음). 이름은
+            // 활성 테마 밖이어도 된다 — 설치 테마까지 합쳐 찾으므로, 나쵸 전용 테마를
+            // 깔아 두고 그 pane 에서만 부르는 쓰임이 여기다.
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("repersona needs <surface_id> <character>"))?;
+            let character = args
+                .get(1)
+                .ok_or_else(|| anyhow!("repersona needs a character name"))?;
+            (
+                "surface.repersona",
+                json!({ "surface_id": surface, "character": character }),
+            )
+        }
         "report-cwd" => {
             // statusline.py 가 매 렌더 호출:
             //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens] [model] [effort]
