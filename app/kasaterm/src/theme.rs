@@ -398,6 +398,11 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("amber-crt", "Amber CRT", &AMBER_CRT),
 ];
 
+/// 지금 store_palette 가 **미리보기** 픽으로 불렸나. OS 색 패널의 휠을 돌리는
+/// 동안 초당 수십 번 오는 경로라, 화면 밖으로 나가는 쓰기(claude 설정 파일)는
+/// 이때 건너뛴다 — 손을 뗄 때 진짜 커밋이 같은 값으로 한 번 더 지나간다.
+static PREVIEWING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn store_palette(p: &Palette) {
     S_BG.store(pack(p.bg), Ordering::Relaxed);
     S_FG.store(pack(p.fg), Ordering::Relaxed);
@@ -439,7 +444,11 @@ fn store_palette(p: &Palette) {
     // 응답이 아니라 이쪽이다 — 설정 파일을 고쳐 쓰면 Claude 가 감시하다 즉시
     // 리로드한다. 팔레트가 실제로 갈리는 지점은 여기뿐이라(프리셋·custom·
     // system 폴링 전부 통과) 훅도 여기 하나면 된다.
-    crate::socket::sync_claude_theme(is_light(p.bg));
+    // 미리보기(색 패널 드래그) 중에는 건너뛴다 — 이 한 줄이 claude 설정 파일과
+    // 커스텀 테마 파일을 굽는다.
+    if !PREVIEWING.load(Ordering::Relaxed) {
+        crate::socket::sync_claude_theme(is_light(p.bg));
+    }
 }
 
 /// 배경이 밝은 쪽인가. ITU-R BT.601 휘도 — 사람이 느끼는 밝기에 맞춰 녹색에
@@ -792,6 +801,20 @@ fn apply_custom_theme(s: &serde_json::Value, slug: &str) {
     };
     store_palette(&custom_palette(e));
     set_current(&format!("custom:{}", custom_slug(e)));
+}
+
+/// 설정 파일에 없는 팔레트를 **화면에만** 입힌다. `set_theme` 과 달리 저장된
+/// 설정을 다시 읽지 않고 넘겨받은 값을 그대로 쓰며, pane 안 claude 의 테마
+/// 파일도 건드리지 않는다.
+///
+/// 색을 고르는 동안(OS 색 패널의 휠 · 네이티브 피커 드래그) 매 이벤트가 이리로
+/// 오기 때문이다. 그때마다 settings.json 을 쓰면 파일 쓰기가 폭주하고, 정작
+/// 화면은 원자 슬롯만 갈면 되므로 파일을 거칠 이유가 없다. 굳히는 것은 손을
+/// 뗄 때 오는 진짜 커밋(`set_theme`)의 몫이다.
+pub fn preview_custom_theme(s: &serde_json::Value, slug: &str) {
+    PREVIEWING.store(true, Ordering::Relaxed);
+    apply_custom_theme(s, slug);
+    PREVIEWING.store(false, Ordering::Relaxed);
 }
 
 /// 지금 편집 대상이 되는 커스텀의 slug — 커스텀을 입고 있지 않으면 `None`.

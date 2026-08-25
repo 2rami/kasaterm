@@ -1697,6 +1697,20 @@ impl App {
                 self.settings_input = None;
                 Ok(self.palette_hex_at(i).eq_ignore_ascii_case(&arg))
             }
+            // 색 패널을 여는 동안 오는 미리보기. 화면만 갈고 파일은 안 건드리므로
+            // 굳히려면 손을 뗄 때 `palette-hex` 가 한 번 더 와야 한다 — 화면이 그
+            // 짝을 지킨다(blur 에서 커밋).
+            "palette-preview" => {
+                let i: usize = id.parse().map_err(|_| unknown(id))?;
+                if i >= theme::PALETTE_KEYS.len() + 16 {
+                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
+                }
+                let Some(c) = theme::parse_hex(&arg) else {
+                    return Err(reject("hex_invalid", "#rrggbb 꼴로 적어 주세요".to_string()));
+                };
+                self.preview_palette_edit(i, c);
+                Ok(true)
+            }
             "accent" => {
                 let name = theme::ACCENT_PRESETS
                     .iter()
@@ -2658,27 +2672,21 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    /// 팔레트 hex 버퍼를 검증해 **지금 입고 있는 커스텀**에 반영하고 즉시 다시
-    /// 칠한다. 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친
-    /// 값으로 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
-    fn apply_palette_edit(&mut self, i: usize) {
-        let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
-        // 타이핑으로 들어온 새 색이면 피커 핸들도 따라온다. 피커 픽이면 지금
-        // HSV 가 이미 이 색이라(변환 일치) 건드리지 않는다 — 무조건 역산하면
-        // s=0·v=0 을 지날 때마다 색상(H)이 0 으로 튄다.
-        {
-            let (h, s, v) = self.set_picker_hsv;
-            if hsv_to_rgb(h, s, v) != c {
-                self.set_picker_hsv = rgb_to_hsv(c);
-            }
-        }
+    /// 팔레트 칸 `i` 를 `c` 로 바꾼 커스텀 목록과 그중 편집 대상 인덱스, 그리고
+    /// 편집 전에 목록이 비어 **새로 만들어야 했는지**.
+    ///
+    /// 저장(`apply_palette_edit`)과 미리보기(`preview_palette_edit`)가 같은 조립을
+    /// 쓰라고 뽑았다 — 둘이 갈리면 색을 고르는 동안 보이는 색과 손을 뗀 뒤 굳는
+    /// 색이 달라진다.
+    fn palette_edited_list(&self, i: usize, c: [u8; 3]) -> (Vec<serde_json::Value>, usize, bool) {
         let s = socket::read_settings();
         // 편집 대상은 지금 입고 있는 커스텀. 아직 하나도 없으면(설정 파일을 손으로
         // 비운 경우) 새로 하나 만들어 그것을 고친다 — 색을 골랐는데 아무 데도
         // 안 적히는 편이 더 나쁘다.
         let want = theme::active_custom_slug().unwrap_or_default();
         let mut list = theme::custom_themes(&s);
-        if list.is_empty() {
+        let seeded = list.is_empty();
+        if seeded {
             list.push(theme::clone_current_custom(&s));
         }
         let idx = list
@@ -2704,10 +2712,50 @@ impl App {
             arr[j] = serde_json::Value::String(hex);
             obj.insert("ansi".to_string(), serde_json::Value::Array(arr));
         }
-        let key = format!("custom:{}", theme::custom_slug(&list[idx]));
         list[idx] = serde_json::Value::Object(obj);
+        (list, idx, seeded)
+    }
+
+    /// 피커 핸들을 이 색에 맞춘다. 타이핑으로 들어온 새 색이면 따라오고, 피커
+    /// 픽이면 지금 HSV 가 이미 이 색이라(변환 일치) 건드리지 않는다 — 무조건
+    /// 역산하면 s=0·v=0 을 지날 때마다 색상(H)이 0 으로 튄다.
+    fn sync_picker_hsv(&mut self, c: [u8; 3]) {
+        let (h, s, v) = self.set_picker_hsv;
+        if hsv_to_rgb(h, s, v) != c {
+            self.set_picker_hsv = rgb_to_hsv(c);
+        }
+    }
+
+    /// 팔레트 hex 버퍼를 검증해 **지금 입고 있는 커스텀**에 반영하고 즉시 다시
+    /// 칠한다. 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친
+    /// 값으로 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
+    fn apply_palette_edit(&mut self, i: usize) {
+        let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
+        self.sync_picker_hsv(c);
+        let (list, idx, _) = self.palette_edited_list(i, c);
+        let key = format!("custom:{}", theme::custom_slug(&list[idx]));
         write_custom_themes(list);
         theme::set_theme(&key);
+        self.repaint_all();
+    }
+
+    /// 파일에 굳히지 않고 **화면 색만** 바꾼다 — OS 색 패널의 휠을 돌리는 동안
+    /// 매 움직임이 이리로 오는데, 그때마다 settings.json 과 claude 설정까지 쓰면
+    /// 파일 쓰기가 폭주한다. 손을 뗄 때 `palette-hex` 가 같은 값을 굳힌다.
+    ///
+    /// 아직 커스텀이 하나도 없으면 저장 경로로 넘긴다: 미리보기는 목록에 없는
+    /// slug 를 「지금 입은 테마」로 세우게 되고, 그 뒤 팔레트를 다시 읽는 경로
+    /// (OS 밝기 폴링 등)가 그것을 사라진 테마로 보고 기본색으로 되돌린다.
+    pub(crate) fn preview_palette_edit(&mut self, i: usize, c: [u8; 3]) {
+        let (list, idx, seeded) = self.palette_edited_list(i, c);
+        if seeded {
+            self.set_palette_edit = theme::hex_str(c);
+            self.apply_palette_edit(i);
+            return;
+        }
+        self.sync_picker_hsv(c);
+        let slug = theme::custom_slug(&list[idx]);
+        theme::preview_custom_theme(&serde_json::json!({ "custom_themes": list }), &slug);
         self.repaint_all();
     }
 

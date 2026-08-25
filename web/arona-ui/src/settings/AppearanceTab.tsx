@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Button,
   Notice,
@@ -8,6 +8,7 @@ import {
   TextField,
   useSettingsAction,
 } from './controls';
+import { postAction } from './api';
 import { useT } from './lang';
 import type { AppearanceValues, ShapePreset, ThemePreset } from './types';
 
@@ -68,25 +69,64 @@ function ThemeCard({
   );
 }
 
+/// 값 하나를 **한 번에 하나씩만** 보내는 창구. 보내는 중에 새 값이 오면 마지막
+/// 것만 남겨 뒀다가 응답이 온 뒤 이어 보낸다.
+///
+/// 색 휠은 손을 움직이는 내내 이벤트를 뿜으므로 그대로 흘려보내면 요청이 밀린다.
+/// 시간 간격으로 솎으면(스로틀) 얼마로 잡아도 느린 기계에선 밀리고 빠른 기계에선
+/// 덜 부드러운데, 이 방식은 응답 속도가 곧 간격이 되어 저절로 맞는다.
+function useLatestOnly(send: (v: string) => Promise<unknown>) {
+  const pending = useRef<string | null>(null);
+  const busy = useRef(false);
+  return (v: string) => {
+    pending.current = v;
+    if (busy.current) return;
+    void (async () => {
+      busy.current = true;
+      try {
+        while (pending.current !== null) {
+          const next = pending.current;
+          pending.current = null;
+          await send(next);
+        }
+      } finally {
+        busy.current = false;
+      }
+    })();
+  };
+}
+
 /// 색 견본 겸 선택기. 웹뷰라 OS 색 선택 패널을 그대로 쓴다 — 네이티브 화면이 채도×
 /// 명도 사각형을 손으로 그려야 했던 자리다.
 ///
-/// 고르는 동안 `change` 가 연달아 오므로 그때는 화면만 바꾸고, 칸을 벗어날 때 한 번만
-/// 굳힌다. 매 이벤트마다 저장하면 색을 끄는 내내 파일 쓰기가 폭주한다.
+/// 고르는 동안 오는 `change` 는 **미리보기**로 흘려 화면 색이 휠을 따라오게 하고
+/// (2026-08-25 지시 「팔레트 휠로 실시간으로 바로 바뀌게」), 칸을 벗어날 때 한 번만
+/// 굳힌다. 미리보기는 파일에 안 쓰므로 색을 끄는 내내 파일 쓰기가 폭주하지 않는다.
 function ColorSwatch({
   hex,
   title,
   disabled,
   onCommit,
+  onPreview,
 }: {
   hex: string;
   title: string;
   disabled?: boolean;
   onCommit: (next: string) => void;
+  onPreview?: (next: string) => Promise<unknown>;
 }) {
   const t = useT();
   const [draft, setDraft] = useState(hex);
-  useEffect(() => setDraft(hex), [hex]);
+  // 색 패널이 열려 있는 동안은 밖에서 온 값으로 덮지 않는다. 미리보기는 파일에
+  // 안 남아 서버가 되돌려 주는 hex 가 옛 값인데, 그걸 그대로 받으면 휠을 돌리는
+  // 내내 견본이 원래 색으로 튕겨 돌아간다.
+  const editing = useRef(false);
+  useEffect(() => {
+    if (!editing.current) setDraft(hex);
+  }, [hex]);
+  const preview = useLatestOnly(async (v) => {
+    if (onPreview) await onPreview(v);
+  });
   return (
     <input
       type="color"
@@ -94,8 +134,15 @@ function ColorSwatch({
       disabled={disabled}
       title={title}
       aria-label={t.common.colorOf({ name: title })}
-      onChange={(e) => setDraft(e.target.value)}
+      onFocus={() => {
+        editing.current = true;
+      }}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        preview(e.target.value);
+      }}
       onBlur={() => {
+        editing.current = false;
         if (draft.toLowerCase() !== hex.toLowerCase()) onCommit(draft);
       }}
       className="h-[24px] w-[30px] shrink-0 cursor-pointer bg-transparent p-0 disabled:opacity-40"
@@ -194,6 +241,10 @@ export function AppearanceTab({
 
   const commitHex = (index: number) => (next: string) =>
     void run('palette-hex', { id: String(index), label: next });
+  // 미리보기는 `run` 을 안 탄다 — 그 훅은 busy 를 세우고 값 전체를 다시 받아오므로,
+  // 색을 고르는 동안 스와치가 잠겼다 풀렸다 하고 옛 hex 가 되돌아온다.
+  const previewHex = (index: number) => (next: string) =>
+    postAction('palette-preview', { id: String(index), label: next });
 
   return (
     <TabCard>
@@ -313,6 +364,7 @@ export function AppearanceTab({
                     title={key}
                     disabled={busy}
                     onCommit={commitHex(i)}
+                    onPreview={previewHex(i)}
                   />
                   <span className="flex-1 text-[13px] text-[var(--kt-text)]">{key}</span>
                   <TextField
@@ -336,6 +388,7 @@ export function AppearanceTab({
                   title={`ansi ${i}`}
                   disabled={busy}
                   onCommit={commitHex(uiCount + i)}
+                  onPreview={previewHex(uiCount + i)}
                 />
               ))}
             </div>
