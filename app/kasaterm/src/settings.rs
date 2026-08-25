@@ -1697,6 +1697,23 @@ impl App {
                 self.settings_input = None;
                 Ok(self.palette_hex_at(i).eq_ignore_ascii_case(&arg))
             }
+            // 화면 어디서나 색 집기. 스포이드를 띄우기만 하고 끝난다 — 사용자가
+            // 클릭하는 시점을 여기서 기다릴 수 없어(GUI 스레드를 잡으면 앱이 멈춘다),
+            // 집힌 색은 GUI 틱이 받아 칸에 넣는다.
+            "palette-eyedropper" => {
+                let i: usize = id.parse().map_err(|_| unknown(id))?;
+                if i >= theme::PALETTE_KEYS.len() + 16 {
+                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
+                }
+                if !crate::eyedropper::supported() {
+                    return Err(reject(
+                        "eyedropper_unsupported",
+                        "이 운영체제에선 화면 집기를 아직 못 써요".to_string(),
+                    ));
+                }
+                crate::eyedropper::pick_screen_color(i);
+                Ok(true)
+            }
             // 색 패널을 여는 동안 오는 미리보기. 화면만 갈고 파일은 안 건드리므로
             // 굳히려면 손을 뗄 때 `palette-hex` 가 한 번 더 와야 한다 — 화면이 그
             // 짝을 지킨다(blur 에서 커밋).
@@ -2217,6 +2234,7 @@ impl App {
                     })
                     .collect::<Vec<_>>(),
                 "custom_active": theme::active_custom_slug().unwrap_or_default(),
+                "eyedropper": crate::eyedropper::supported(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
                 "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()),
                 "accent": theme::accent_name(),
@@ -2757,6 +2775,14 @@ impl App {
         let slug = theme::custom_slug(&list[idx]);
         theme::preview_custom_theme(&serde_json::json!({ "custom_themes": list }), &slug);
         self.repaint_all();
+    }
+
+    /// 스포이드가 집어 둔 색이 있으면 그 칸에 굳힌다. GUI 틱이 부른다 — 시스템
+    /// 콜백은 `App` 을 못 들고 오므로 색만 통에 놓고 가고, 꺼내는 건 여기다.
+    pub(crate) fn pump_eyedropper(&mut self) {
+        let Some((slot, rgb)) = crate::eyedropper::take_picked() else { return };
+        self.set_palette_edit = theme::hex_str(rgb);
+        self.apply_palette_edit(slot);
     }
 
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로

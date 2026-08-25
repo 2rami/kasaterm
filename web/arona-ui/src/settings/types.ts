@@ -111,6 +111,8 @@ export type AppearanceValues = {
   /// 지금 편집 중인 커스텀의 slug. 커스텀을 안 입고 있으면 빈 문자열이다 —
   /// 팔레트 편집 칸이 열릴지가 이 값 하나로 갈린다.
   custom_active: string;
+  /// 이 운영체제에서 화면 집기(스포이드)가 되는가 — 안 되면 단추를 아예 안 낸다.
+  eyedropper: boolean;
   palette_keys: string[];
   /// UI 색(palette_keys 순서) 뒤에 ANSI 16색이 이어 붙는다.
   palette_hex: string[];

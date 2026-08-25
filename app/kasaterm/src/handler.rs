@@ -6264,6 +6264,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.begin_theme_fx();
             self.repaint_all();
         }
+        // 스포이드가 화면에서 집어 둔 색 — 시스템 콜백이 통에 놓고 갔으면 여기서
+        // 꺼내 그 팔레트 칸에 굳힌다.
+        self.pump_eyedropper();
         // 라이트↔다크 플립 → 떠 있는 claude 재테마(리포트 + /theme 피커 주입).
         // poll_system_theme 바로 뒤: OS 전환으로 방금 바뀐 팔레트도 같은 틱에 잡힌다.
         self.poll_claude_retheme();

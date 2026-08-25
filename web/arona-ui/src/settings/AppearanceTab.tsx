@@ -8,7 +8,7 @@ import {
   TextField,
   useSettingsAction,
 } from './controls';
-import { postAction } from './api';
+import { fetchValues, postAction } from './api';
 import { ColorWheel } from './ColorWheel';
 import { useT } from './lang';
 import type { AppearanceValues, ShapePreset, ThemePreset } from './types';
@@ -204,6 +204,28 @@ export function AppearanceTab({
   const slotName = data.palette_keys[slot] ?? `ansi ${slot - uiCount}`;
   const slotHex = data.palette_hex[slot] ?? '#000000';
 
+  // 스포이드는 띄우기만 하고 곧바로 답이 온다 — 사용자가 화면 어딘가를 클릭하는
+  // 순간은 그 뒤라서, 집힌 값은 앱이 팔레트에 넣은 뒤에야 값 조회에 나타난다.
+  // 그래서 그 칸이 실제로 바뀔 때까지 지켜본다(취소하면 안 바뀐 채로 끝난다).
+  const [dropping, setDropping] = useState(false);
+  const eyedrop = async () => {
+    const before = data.palette_hex[slot];
+    if (!(await run('palette-eyedropper', { id: String(slot) }))) return;
+    setDropping(true);
+    try {
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        const v = await fetchValues();
+        if (v.appearance.palette_hex[slot] !== before) {
+          await reload();
+          return;
+        }
+      }
+    } finally {
+      setDropping(false);
+    }
+  };
+
   const commitHex = (index: number) => (next: string) =>
     void run('palette-hex', { id: String(index), label: next });
   // 미리보기는 `run` 을 안 탄다 — 그 훅은 busy 를 세우고 값 전체를 다시 받아오므로,
@@ -334,6 +356,18 @@ export function AppearanceTab({
                 <p className="mt-1 font-[var(--kt-font-mono)] text-[13px] text-[var(--kt-text-dim)]">
                   {slotHex}
                 </p>
+                {data.eyedropper && (
+                  <div className="mt-3">
+                    <Button
+                      label={dropping ? t.appearance.eyedropperWaiting : t.appearance.eyedropper}
+                      disabled={busy || dropping}
+                      onClick={() => void eyedrop()}
+                    />
+                    <p className="mt-1 text-[12px] text-[var(--kt-text-mute)]">
+                      {t.appearance.eyedropperHint}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
 

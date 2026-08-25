@@ -33,6 +33,7 @@ mod webpane;
 mod input;
 mod lineedit;
 mod settings;
+mod eyedropper;
 mod themegen;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
 // 않으려고 여기서 한 번 재수출한다.
