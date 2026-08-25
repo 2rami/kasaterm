@@ -3904,7 +3904,20 @@ impl App {
             // 따로 읽는 건 중복이지만, 캐시를 하나로 묶으면 `struct App` 에 필드가
             // 붙는다(병렬 작업 핫스팟, CLAUDE.md). 같은 파일이라 페이지 캐시가 받는다.
             let (tail, _) = crate::socket::read_tail(&path, WINDOW);
-            let found = tail.lines().filter_map(kasa_socket::sessions::custom_title_of_line).last();
+            let found = tail
+                .lines()
+                .filter_map(kasa_socket::sessions::custom_title_of_line)
+                .last()
+                .or_else(|| {
+                    // 아직 아무 제목도 없는 갓 소환된 학생 — 받은 첫 지시(브리프)를
+                    // 제목으로 굳힌다. nameSource=user 로 남겨 ①하네스 자동 제목이
+                    // 덮지 않고(그쪽은 user 를 사람 개명으로 보고 보호) ②나중에 사람이
+                    // /rename 하면 더 나중 레코드라 그게 이긴다. 한 번 심으면 다음
+                    // 틱부터 custom-title 이 잡혀 이 폴백을 다시 안 탄다.
+                    let label = kasa_socket::sessions::first_prompt_label(&tail)?;
+                    append_boot_title(&path, &sid, &label);
+                    Some(label)
+                });
             let mut seen = session_titles().lock().unwrap();
             let entry = seen.entry(pane_id.clone()).or_default();
             // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — 옛 대화의 마커를 이
@@ -3971,6 +3984,27 @@ impl App {
         let mut set = restored_ultracode().lock().unwrap();
         set.retain(|id| self.pty.contains_key(id));
         set.clone()
+    }
+}
+
+/// 갓 소환된 학생 pane 에 "받은 첫 지시"를 pane 제목으로 굳히는 custom-title
+/// 레코드를 transcript 에 덧붙인다. claude `/rename` 이 남기는 것과 같은 한 줄이되
+/// nameSource=user 라 하네스(`kasaterm-title-sync.py`)가 사람 개명으로 보고 보호하고,
+/// 나중에 진짜 `/rename` 이 오면 더 나중 레코드라 그게 이긴다. 라인 단위 append 라
+/// 라이브 transcript 에 안전하다(claude·하네스도 같은 방식). 실패는 조용히 넘긴다 —
+/// 다음 틱에 다시 시도하고, 그 사이 제목이 없을 뿐이다.
+fn append_boot_title(path: &std::path::Path, sid: &str, title: &str) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "type": "custom-title",
+        "customTitle": title,
+        "sessionId": sid,
+        "nameSource": "user",
+    })
+    .to_string()
+        + "\n";
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

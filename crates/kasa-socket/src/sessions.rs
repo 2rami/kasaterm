@@ -240,10 +240,47 @@ fn is_meta_user_text(t: &str) -> bool {
         || t.starts_with("<system-reminder")
         || t.starts_with("<bash-")
         || t.starts_with("Caveat:")
+        // 다른 pane 이 SendMessage 로 보낸 지시는 `<cross-session-message from=…>`
+        // 래퍼로 남는다 — 첫 줄이 그 여는 태그라 라벨로 부적합하다. 오케스트레이터가
+        // 굴리는 학생은 첫 발화가 대개 이것이므로 걸러야 제목이 태그로 새지 않는다.
+        || t.starts_with("<cross-session-message")
         // claude 내부 title-gen 서브세션의 첫 user 프롬프트 — custom-title 스탬프
         // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(거노 실측).
         || t.starts_with("아래 대화의 주제를 나타내는")
         || t.starts_with("다음 대화 발췌를 보고")
+}
+
+/// 이미 읽어 둔 transcript 꼬리에서 **첫 유효 user 프롬프트**(= 갓 소환된 학생이
+/// 받은 첫 지시·브리프)를 pane 제목 후보로 뽑는다. `parse_session_label` 의
+/// 첫-user 규칙과 같되 파일을 다시 열지 않고 넘겨받은 꼬리 문자열만 훑는다 —
+/// GUI 의 제목 동기화가 매 틱 이미 읽는 꼬리를 재활용하려는 것이다.
+///
+/// custom-title 이 아직 하나도 없는 학생 pane 에만 의미가 있다(제목이 있으면
+/// 호출부가 이 폴백을 안 탄다). 첫 줄만 60자로 자른다 — 탭 이름표는 좁고,
+/// 여러 줄 브리프의 둘째 줄부터는 맥락이라 제목감이 아니다.
+pub fn first_prompt_label(tail: &str) -> Option<String> {
+    for line in tail.lines() {
+        if !line.contains("\"user\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(txt) = user_message_text(&v) else { continue };
+        let txt = txt.trim();
+        if txt.is_empty() || is_meta_user_text(txt) {
+            continue;
+        }
+        let first_line = txt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(txt);
+        if !first_line.is_empty() {
+            return Some(first_line.chars().take(60).collect());
+        }
+    }
+    None
 }
 
 /// user transcript 라인의 본문 텍스트 — content 가 문자열이면 그대로, 블록 배열이면
@@ -358,6 +395,32 @@ use crate::backend::RecentSession;
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn first_prompt_label_skips_meta_and_takes_first_line() {
+        // 슬래시 명령(isMeta)·다른 pane 의 SendMessage 래퍼는 건너뛰고, 첫 진짜
+        // 지시의 첫 줄만 라벨이 된다.
+        let tail = concat!(
+            r#"{"type":"user","isMeta":true,"message":{"content":"<command-name>/clear</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<cross-session-message from=\"x\">일 시켜</cross-session-message>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"로그인 버그 고쳐줘\n맥락은 아래에"}}"#,
+            "\n",
+        );
+        assert_eq!(first_prompt_label(tail).as_deref(), Some("로그인 버그 고쳐줘"));
+    }
+
+    #[test]
+    fn first_prompt_label_none_when_only_meta() {
+        let tail = concat!(
+            r#"{"type":"user","message":{"content":"<system-reminder>x</system-reminder>"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":"네"}}"#,
+            "\n",
+        );
+        assert_eq!(first_prompt_label(tail), None);
+    }
 
     fn tmp_jsonl(name: &str, body: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("kasa-sessions-test-{name}-{}.jsonl", std::process::id()));
