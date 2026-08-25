@@ -745,6 +745,13 @@ pub(crate) fn native_sender_accent(
     } else {
         sender
     };
+    // 라벨이 사람이 붙인 pane 이름이면 위 갈래가 전부 빗나간다(`@ diff❯`). 명부에서
+    // 그 이름의 세션을 찾아 배정 학생을 직접 묻는다 — 이름 모양에 안 기댄다.
+    let sender = if teammate_sender_slug(&sender).is_none() {
+        peer_character_by_label(label, pane_claude_sid, ws).unwrap_or(sender)
+    } else {
+        sender
+    };
     let accent = teammate_sender_accent(&sender, msg.and_then(|m| m.color.as_deref()));
     (sender, accent)
 }
@@ -785,6 +792,95 @@ pub(crate) fn sender_roman_head(name: &str) -> &str {
 /// 라벨이 그대로 남아 있으니 이름꼴로 판정한다(2026-08-20 거노 스샷:
 /// `@ midori-p4-v32❯` 가 무테마로 남았다). `-p<번호>` 토막까지 요구해 사용자가
 /// 우연히 친 텍스트("midori-chan" 등)는 안 걸린다.
+/// `@ 라벨❯` 의 라벨을 명부(`~/.claude/sessions/*.json`)의 세션 이름으로 되짚어
+/// sessionId 를 얻는다.
+///
+/// **왜 필요한가**: 라벨은 발신 세션의 이름인데, pane 은 저마다
+/// `kasaterm-cli rename` 으로 「diff」·「theme」 같은 일감 이름을 스스로 붙인다
+/// (그렇게 하라고 지침에 박혀 있다). 그러면 라벨이 `<슬러그>-p<번호>` 꼴을 잃어
+/// `label_is_roster_agent` 가 떨어뜨리고, 남의 메시지가 학생색도 프사도 없이 뜬다
+/// (2026-08-25 지시). 실측으로 그 순간 살아 있던 세션 13개 중 5개가 사람이 붙인
+/// 이름이었다 — 드문 경우가 아니라 기본값에 가깝다.
+///
+/// **같은 이름이 둘이면 포기한다.** 엉뚱한 학생 얼굴을 붙이는 것보다 무테마가 낫다.
+///
+/// 명부는 파일이라 프레임마다 훑지 않고 2초 캐시한다 — 이름은 사람이 바꿀 때만
+/// 변하므로 이 정도 지연은 화면에서 안 보인다.
+pub(crate) fn peer_sid_by_name(label: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = Mutex<Option<(Instant, std::collections::HashMap<String, Option<String>>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().ok()?;
+    let fresh = guard
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(2));
+    if !fresh {
+        *guard = Some((Instant::now(), scan_peer_names()));
+    }
+    // 값이 None 인 항목 = 이름이 겹쳐서 못 가르는 것. 그대로 None 을 돌려준다.
+    guard.as_ref()?.1.get(label).cloned().flatten()
+}
+
+/// 명부 한 바퀴 → 이름별 sessionId. 파일 훑기와 접기를 갈라 둔 것은 검증 때문이다 —
+/// 충돌 규칙이 틀리면 남의 얼굴이 조용히 붙을 뿐 아무 오류도 안 난다.
+fn scan_peer_names() -> std::collections::HashMap<String, Option<String>> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Default::default();
+    };
+    let Ok(rd) = std::fs::read_dir(home.join(".claude/sessions")) else {
+        return Default::default();
+    };
+    fold_peer_names(rd.flatten().filter_map(|e| {
+        let path = e.path();
+        (path.extension().and_then(|x| x.to_str()) == Some("json")).then_some(())?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        match peer_ident_from_json(&text) {
+            (Some(name), Some(sid)) => Some((name, sid)),
+            _ => None,
+        }
+    }))
+}
+
+/// 겹친 이름은 `None` 으로 남겨 조회가 포기하게 한다. 같은 세션이 두 번 들어오는 것
+/// (명부 파일이 pid 별이라 재시작 잔재가 남을 수 있다)은 충돌이 아니다.
+fn fold_peer_names<I: IntoIterator<Item = (String, String)>>(
+    it: I,
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut out: std::collections::HashMap<String, Option<String>> = Default::default();
+    for (name, sid) in it {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        out.entry(name)
+            .and_modify(|slot| {
+                if slot.as_deref() != Some(sid.as_str()) {
+                    *slot = None;
+                }
+            })
+            .or_insert(Some(sid));
+    }
+    out
+}
+
+/// 라벨 → 그 세션이 도는 pane 의 배정 학생. `peer_sid_by_name` 이 찾은 sessionId 를
+/// 이 앱이 아는 pane 과 맞춰 본다 — 이름이 무엇이든 sessionId 는 안 흔들린다.
+pub(crate) fn peer_character_by_label(
+    label: &str,
+    pane_claude_sid: &std::collections::HashMap<String, String>,
+    ws: &crate::Workspace,
+) -> Option<String> {
+    let sid = peer_sid_by_name(label)?;
+    let pane = pane_claude_sid.iter().find(|(_, s)| s.as_str() == sid).map(|(p, _)| p)?;
+    ws.pane_character.get(&ws.active_tab_pid(pane)).cloned()
+}
+
 pub(crate) fn label_is_roster_agent(label: &str) -> bool {
     let Some((head, rest)) = label.split_once('-') else {
         return false;
@@ -4653,6 +4749,23 @@ This came from another Claude session";
         assert!(!label_is_roster_agent("미도리"));
         assert!(!label_is_roster_agent("mcp, skill사이드바"));
         assert!(!label_is_roster_agent("midori-p"));
+    }
+
+    /// 사람이 붙인 pane 이름은 모양으로 못 가른다 — 명부 대조가 유일한 관문이므로
+    /// 겹친 이름은 포기해야 한다(엉뚱한 학생 얼굴을 붙이는 것보다 무테마가 낫다).
+    #[test]
+    fn peer_name_fold_gives_up_on_collisions() {
+        let m = fold_peer_names([
+            ("diff".to_string(), "sid-a".to_string()),
+            ("theme".to_string(), "sid-b".to_string()),
+            ("diff".to_string(), "sid-c".to_string()),
+            // 같은 세션이 두 번 들어오는 것은 충돌이 아니다(명부는 pid 별 파일).
+            ("theme".to_string(), "sid-b".to_string()),
+            ("  ".to_string(), "sid-d".to_string()),
+        ]);
+        assert_eq!(m.get("theme"), Some(&Some("sid-b".to_string())), "유일한 이름은 되짚어야 한다");
+        assert_eq!(m.get("diff"), Some(&None), "겹친 이름은 포기해야 한다");
+        assert!(!m.contains_key("  "), "빈 이름은 담지 않는다");
     }
 
     #[test]

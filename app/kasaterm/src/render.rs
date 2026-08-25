@@ -1834,7 +1834,17 @@ impl App {
                                         || m.from_pid.as_deref().map(&norm)
                                             == Some(norm(&label))
                                 });
-                                (label_hit || label_is_roster_agent(&label)).then(|| {
+                                // 세 번째 관문: 라벨이 사람이 붙인 pane 이름인 경우
+                                // (`@ diff❯`) — 명부에 그 이름의 세션이 하나뿐이면 인정.
+                                let named = !label_hit
+                                    && !label_is_roster_agent(&label)
+                                    && peer_character_by_label(
+                                        &label,
+                                        &self.pane_claude_sid,
+                                        &ws,
+                                    )
+                                    .is_some();
+                                (label_hit || label_is_roster_agent(&label) || named).then(|| {
                                     native_sender_accent(
                                         &label,
                                         label_hit,
@@ -1957,7 +1967,13 @@ impl App {
                         // 로스터 학생의 agent 이름꼴이면 그것만으로 남의 메시지로
                         // 인정한다(2026-08-20 거노 스샷: dismiss 된 미도리의 메시지가
                         // 무테마로 남았다).
-                        if !label_hit && !label_is_roster_agent(&label) {
+                        // 라벨이 사람이 붙인 pane 이름이어도(`@ diff❯`) 명부에 그
+                        // 이름의 세션이 하나면 남의 메시지로 인정한다 — 지침이 pane
+                        // 마다 일감 이름을 붙이라고 시키므로 이 모양이 기본에 가깝다.
+                        if !label_hit
+                            && !label_is_roster_agent(&label)
+                            && peer_character_by_label(&label, &self.pane_claude_sid, &ws).is_none()
+                        {
                             continue;
                         }
                         // 발신자·색 해석은 헤더가 스크롤로 밀려난 이어칠하기(위
