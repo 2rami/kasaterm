@@ -53,7 +53,9 @@ export function ChatInput({ surfaceId, isPhone }: { surfaceId: string; isPhone: 
         ref={ta}
         value={text}
         rows={1}
-        placeholder={err ? '보내지 못했어요 — pane 을 확인하세요' : '이 학생에게 말 걸기'}
+        // 「이 학생에게」라고 부르지 않는다 — 테마마다 캐릭터의 정체가 달라서(보컬로이드·
+        // 치이카와…) 어느 테마에서나 맞는 말이 아니다(2026-08-25 지시).
+        placeholder={err ? '보내지 못했어요 — 다시 눌러 보세요' : '여기에 입력'}
         onChange={(e) => { setText(e.target.value); grow(e.target); }}
         onKeyDown={(e) => {
           if (e.key !== 'Enter' || e.shiftKey) return;
