@@ -44,9 +44,27 @@ function profileList() {
   return [...extensions.entries()].map(([id, e]) => ({ id, label: e.label, hint: e.hint, since: e.since }))
 }
 
+// 프로필을 안 고른 클라이언트가 어디로 갈지. 파일이 없으면 먼저 붙은 확장인데, 크롬을
+// 두 개 띄우면 어느 쪽이 먼저 붙을지는 그날 사정이라 아무 pane 이나 남의 프로필로 샌다.
+// 파일에는 프로필 id 나 label(계정 메일) 조각을 적는다 — id 는 랜덤 8자라 못 외운다.
+const DEFAULT_FILE = join(HOME, 'default-profile')
+function defaultWanted() {
+  try { return readFileSync(DEFAULT_FILE, 'utf8').trim() } catch { return '' }
+}
+
+function resolveProfile(want) {
+  if (!want) return null
+  if (extensions.has(want)) return want
+  const lower = want.toLowerCase()
+  for (const [id, e] of extensions) if ((e.label || '').toLowerCase().includes(lower)) return id
+  return null
+}
+
 function extFor(sock) {
   const want = clients.get(sock)?.profile
   if (want && extensions.has(want)) return extensions.get(want).sock
+  const fallback = resolveProfile(defaultWanted())
+  if (fallback) return extensions.get(fallback).sock
   const first = extensions.values().next().value
   return first ? first.sock : null
 }
@@ -165,9 +183,9 @@ wss.on('connection', (sock) => {
     if (role === 'client' && msg.type === 'select') {
       const info = clients.get(sock)
       if (!info) return
-      const want = msg.profile
-      if (want && !extensions.has(want)) {
-        send(sock, { type: 'select', id: msg.id, ok: false, error: `NO_SUCH_PROFILE: ${want}. 붙어 있는 것: ${[...extensions.keys()].join(', ') || '(없음)'}`, profiles: profileList() })
+      const want = msg.profile ? resolveProfile(msg.profile) : null
+      if (msg.profile && !want) {
+        send(sock, { type: 'select', id: msg.id, ok: false, error: `NO_SUCH_PROFILE: ${msg.profile}. 붙어 있는 것: ${[...extensions.entries()].map(([id, e]) => `${id}(${e.label || '이름없음'})`).join(', ') || '(없음)'}`, profiles: profileList() })
         return
       }
       // 프로필을 바꾸면 옛 크롬의 오버레이에 이 pane 칩이 남는다 — 떼고 새 쪽에 붙인다.
