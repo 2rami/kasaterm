@@ -375,7 +375,9 @@ impl App {
         // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
         // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
         if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
-            for ext in ["character", "persona"] {
+            // 넷을 함께 지운다 — 셋만 지우면 남은 하나(모델·통로)가 새 학생에게
+            // 따라붙어 이름과 얼굴만 바뀌고 앞 학생의 모델로 도는 상태가 된다.
+            for ext in ["character", "persona", "model", "backend"] {
                 let _ = std::fs::remove_file(
                     std::path::Path::new(&shim).join(format!("repersona-{id}.{ext}")),
                 );
@@ -616,6 +618,42 @@ impl App {
     /// `/repersona` 로 호출한다. persona 는 래퍼가 override 파일로 직접 싣고 여기선
     /// GUI 상태(헤더·테두리·board 마커·세션 바인딩)만 새 캐릭터로 맞춘다. 중복 허용
     /// — 같은 학생 pane 은 색 변주(character_ordinal)로 구분(거노).
+    /// 이 pane 의 다음 claude 가 쓸 정체성을 파일로 남긴다(학생 명령과 같은 규약).
+    /// spawn 때 지워지므로 새 pane 에는 안 따라간다.
+    ///
+    /// 「말투」 토글이 꺼져 있으면 **빈 파일**을 쓴다 — 파일이 아예 없으면 shim 이
+    /// spawn 때의 env 로 되돌아가 옛 말투가 되살아난다. 빈 내용은 「말투 없음」이라는
+    /// 명시적 뜻이다.
+    fn write_persona_override(&self, pane: &str, character: &str) {
+        let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else { return };
+        let dir = std::path::Path::new(&shim);
+        let persona = if socket::read_claude_persona() {
+            kasa_mcp::character::characters_json()
+                .and_then(|c| kasa_mcp::character::persona_for(&c, character))
+                .or_else(|| kasa_mcp::character::persona_for_any(character))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let base = dir.join(format!("repersona-{pane}"));
+        let _ = std::fs::write(base.with_extension("persona"), persona);
+        let _ = std::fs::write(base.with_extension("character"), character);
+        // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
+        // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
+        let chars = kasa_mcp::character::characters_json();
+        let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
+            chars.as_ref().and_then(|c| f(c, character)).unwrap_or_default()
+        };
+        let _ = std::fs::write(
+            base.with_extension("model"),
+            pick(kasa_mcp::character::model_for),
+        );
+        let _ = std::fs::write(
+            base.with_extension("backend"),
+            pick(kasa_mcp::character::backend_for),
+        );
+    }
+
     pub(crate) fn repersona_pane(&mut self, pane: &str, character: &str) {
         if !self.ws.lock().unwrap().panes.contains_key(pane) {
             return;
@@ -638,6 +676,15 @@ impl App {
         if let Some(sid) = self.pane_session_id.get(pane) {
             let _ = kasa_mcp::character::bind_session_character(sid, character);
         }
+        // 말투도 새 캐릭터 것으로 — **다음에 이 pane 에서 claude 가 뜰 때부터**.
+        //
+        // 도는 프로세스의 시스템 프롬프트는 못 바꾸므로 지금 대화 중인 상대는 옛
+        // 말투 그대로다(그걸 바꾸려면 대화를 끊어야 한다 — 그게 「캐릭터 교체」다).
+        // 그런데 바인딩만 갱신하면 **다시 띄워도 옛 말투로 뜬다**: shim 이 spawn 때
+        // 고정된 `KASATERM_PERSONA`(옛 캐릭터)로 `--append-system-prompt` 를 붙이고,
+        // SessionStart 훅은 그 인자가 보이면 자기 주입을 건너뛰기 때문이다. 학생
+        // 명령(`시로코`)이 쓰는 override 파일에 새 말투를 남겨 그 사슬을 끊는다.
+        self.write_persona_override(pane, character);
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
