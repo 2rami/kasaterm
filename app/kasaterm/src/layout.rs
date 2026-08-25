@@ -1082,6 +1082,36 @@ impl App {
         }
     }
 
+    /// 이 pane 의 그리드가 **셸을 전제하는가** — 터미널 탭이 있는데 그 PTY 가 하나도
+    /// 안 남았으면 참.
+    ///
+    /// 그리드 유무만으로는 죽음을 못 가른다. 웹·이미지·마크다운 pane 은 **정의상 PTY 가
+    /// 없어서**(`session.rs`: 「웹 pane — PTY 를 안 띄운다. 그리드 자리만 앉히고…」)
+    /// `!has_pty` 로 걷으면 멀쩡한 파일 pane 을 죽인다. 반대로 그리드가 있다고 살아
+    /// 있다고 보면, 셸이 죽고 마지막 화면만 남은 터미널을 영영 못 걷는다. 그래서
+    /// **pane 이 담은 것이 터미널인지**를 따로 본다.
+    ///
+    /// 탭이 여럿이면 **하나라도 살아 있으면 산 것**이다 — 보조 탭은 자기 pid 로 `pty` 에
+    /// 들어가므로 바깥 pane id 만 조회하면 산 탭을 못 보고 걷게 된다.
+    fn grid_needs_pty(&self, ws: &Workspace, id: &str) -> bool {
+        let Some(pane) = ws.panes.get(id) else {
+            return false;
+        };
+        let mut saw_terminal = false;
+        for tab in &pane.tabs {
+            if tab.term().is_none() {
+                continue;
+            }
+            saw_terminal = true;
+            // 첫 탭은 pid 를 안 들고 있을 수 있다 — 그때는 pane id 자체가 PTY 키다.
+            let pid = tab.pid.as_deref().unwrap_or(id);
+            if self.pty.contains_key(pid) {
+                return false;
+            }
+        }
+        saw_terminal
+    }
+
     /// 트리에 자리는 있는데 자원(PTY·화면 그리드)이 없는 leaf 를 걷는다.
     ///
     /// `drop_pane_resources` 도 같은 검사를 하지만 그건 **자원을 놓는 그 순간**에만
@@ -1104,7 +1134,11 @@ impl App {
                 .flatten()
             {
                 for leaf in tree.leaves() {
-                    if !self.pty.contains_key(leaf) && !ws.panes.contains_key(leaf) {
+                    if leaf_is_orphan(
+                        self.pty.contains_key(leaf),
+                        ws.panes.contains_key(leaf),
+                        self.grid_needs_pty(&ws, leaf),
+                    ) {
                         orphans.push(leaf.to_string());
                     }
                 }
@@ -1665,8 +1699,11 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 자원이 이미 없는 leaf 를 **트리에서만** 걷는다. `remove_pane` 과 달리 자원을
     /// 안 건드리므로 `drop_pane_resources` 안에서 불러도 재귀가 나지 않는다.
     fn collapse_orphan_leaf(&mut self, target: &str) {
-        let has_grid = self.ws.lock().unwrap().panes.contains_key(target);
-        if !leaf_is_orphan(self.pty.contains_key(target), has_grid) {
+        let (has_grid, needs_pty) = {
+            let ws = self.ws.lock().unwrap();
+            (ws.panes.contains_key(target), self.grid_needs_pty(&ws, target))
+        };
+        if !leaf_is_orphan(self.pty.contains_key(target), has_grid, needs_pty) {
             return;
         }
         let in_active = self
@@ -2555,8 +2592,15 @@ for p in glob.glob(os.path.join(d, '*.json')):
 /// 한쪽만 보고 판정하면 멀쩡한 pane 을 걷는다. PTY 만 있는 것은 갓 split 해 첫
 /// 화면이 아직 안 온 pane 이고, 그리드만 있는 것은 이미지·마크다운·웹 pane 이라
 /// 셸이 원래 없다(`resize_backend` 도 `self.pty` 미스로 그냥 건너뛴다).
-fn leaf_is_orphan(has_pty: bool, has_grid: bool) -> bool {
-    !has_pty && !has_grid
+fn leaf_is_orphan(has_pty: bool, has_grid: bool, grid_needs_pty: bool) -> bool {
+    if has_pty {
+        return false;
+    }
+    // 그리드조차 없으면 예전부터 걷던 자리. 그리드가 남아 있어도 **그것이 터미널의
+    // 그리드라면** 셸이 사라진 순간 마지막 프레임을 박제한 사진일 뿐이다 — 2026-08-25
+    // 에 그 자리가 30분 넘게 `Puzzling… (16m 29s)` 를 그대로 띄운 채 앉아 있었고,
+    // board 에도 안 잡혀 사용자가 치울 방법이 없었다.
+    !has_grid || grid_needs_pty
 }
 
 #[cfg(test)]
@@ -2705,11 +2749,29 @@ mod orphan_leaf_tests {
     /// 그 자리를 걷는 판정이 이것 — 한쪽만 보도록 되돌리면 여기서 깨진다.
     #[test]
     fn only_a_leaf_with_neither_shell_nor_grid_is_a_ghost() {
-        assert!(leaf_is_orphan(false, false), "셸도 그리드도 없으면 유령이다");
+        assert!(leaf_is_orphan(false, false, false), "셸도 그리드도 없으면 유령이다");
         // 갓 split 한 pane — PTY 는 붙었고 첫 ScreenUpdate 가 아직 안 왔다.
-        assert!(!leaf_is_orphan(true, false), "갓 태어난 pane 을 걷으면 안 된다");
+        assert!(!leaf_is_orphan(true, false, false), "갓 태어난 pane 을 걷으면 안 된다");
         // 이미지·마크다운·웹 pane — 셸이 원래 없다.
-        assert!(!leaf_is_orphan(false, true), "PTY 없는 파일 pane 을 걷으면 안 된다");
-        assert!(!leaf_is_orphan(true, true), "평범한 셸 pane");
+        assert!(!leaf_is_orphan(false, true, false), "PTY 없는 파일 pane 을 걷으면 안 된다");
+        assert!(!leaf_is_orphan(true, true, true), "평범한 셸 pane");
+    }
+
+    /// 2026-08-25: 셸이 죽었는데 **그리드가 남아** 마지막 프레임을 30분 넘게 띄운 채
+    /// 앉아 있던 자리(`Puzzling… (16m 29s)` 고정). 그리드가 있다는 이유로 산 것으로
+    /// 보면 이 자리를 영영 못 걷고, board 에도 안 잡혀 사용자는 치울 방법이 없다.
+    #[test]
+    fn a_terminal_whose_shell_died_is_a_ghost_even_with_a_grid() {
+        assert!(
+            leaf_is_orphan(false, true, true),
+            "터미널 그리드인데 셸이 없으면 마지막 프레임을 박제한 사진이다"
+        );
+    }
+
+    /// 위 판정을 `!has_pty` 하나로 줄이면 웹·파일 pane 이 죽는다 — 그쪽은 PTY 가
+    /// 원래 없는 것이 정상이라 `grid_needs_pty` 가 거짓이어야 한다.
+    #[test]
+    fn a_file_pane_never_becomes_a_ghost_just_for_lacking_a_shell() {
+        assert!(!leaf_is_orphan(false, true, false), "웹·이미지·마크다운 pane 은 셸이 없어도 산 것");
     }
 }
