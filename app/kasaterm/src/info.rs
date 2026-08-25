@@ -1540,7 +1540,7 @@ impl App {
                     .get(&leaf)
                     .copied()
                     .or_else(|| {
-                        self.closed_panes.iter().find(|c| c.pane_id == *id).map(|c| c.window)
+                        self.stashed_record(id).map(|c| c.window)
                     })
                     .unwrap_or(self.active_window);
                 let (tab_title, tab_active, tab_index) = ws
@@ -1598,7 +1598,7 @@ impl App {
                         .pane_claude_sid
                         .get(id)
                         .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
-                    closed: self.closed_panes.iter().any(|c| c.pane_id == *id),
+                    closed: self.stashed_record(id).is_some(),
                     id: leaf,
                     shell_pid: s.shell_pid()?,
                     outer,

@@ -829,6 +829,22 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 윈도우/세션 이름 변경. surface.rename 과 달리 surface_id 를 받지 않고
             // 호출한 pane($KASATERM_PANE_ID)이 속한 윈도우를 대상으로 한다 —
             // 오케스트레이터 pane 이 윈도우 라벨을 덮어쓸 때 부른다.
+            // ⚠️ 남는 인자를 조용히 버리지 않는다. 이름이 `rename` 과 닮아
+            // `rename-window %21 "이름"` 처럼 pane 을 앞에 붙여 부르는 실수가 나는데,
+            // 그러면 첫 인자가 제목으로 먹혀 **방 이름이 `%21` 이 된다**(2026-08-25
+            // 실측: 방 4 가 그렇게 불리고 있었다). 따옴표를 빠뜨려 제목이 두 토막
+            // 난 경우도 여기 걸린다 — 앞 토막만 먹고 마는 것보다 알려주는 게 낫다.
+            let pane_like = |s: &str| {
+                s.strip_prefix('%')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            };
+            if args.len() > 1 || args.first().is_some_and(|t| pane_like(t)) {
+                return Err(anyhow!(
+                    "rename-window 는 제목 하나만 받는다(대상은 이 pane 이 속한 방)\n\
+                     - pane 제목을 바꾸려면: kasaterm-cli rename <surface_id> <title>\n\
+                     - 제목에 공백이 있으면 따옴표로 묶어라"
+                ));
+            }
             let title = args
                 .first()
                 .ok_or_else(|| anyhow!("rename-window needs <title>"))?;

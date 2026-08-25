@@ -145,7 +145,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 한 왕복으로 "무엇을 껐고 무엇이 남았는지"를 같이 받는다.
                 let mut killed = serde_json::Value::Null;
                 if let Some(want) = discard {
-                    match self.closed_panes.iter().position(|c| &c.pane_id == want) {
+                    match self.closed_pane_index(want) {
                         Some(i) => {
                             let c = &self.closed_panes[i];
                             killed = serde_json::json!({

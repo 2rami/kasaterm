@@ -1491,7 +1491,7 @@ impl App {
                 }
             }
             SidebarMenuAction::Unhide => {
-                if let Some(i) = self.closed_panes.iter().position(|c| c.pane_id == pane) {
+                if let Some(i) = self.closed_pane_index(pane) {
                     self.reopen_closed_pane_at(i);
                 }
             }

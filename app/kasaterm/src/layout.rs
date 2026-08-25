@@ -1181,7 +1181,7 @@ impl App {
                     let is_tab = ws.pid_to_pane.get(*id).is_some_and(|outer| outer != *id);
                     !is_tab
                         && !self.leaf_lingers_anywhere(id)
-                        && !self.closed_panes.iter().any(|c| &c.pane_id == *id)
+                        && self.stashed_record(id).is_none()
                         && !self
                             .aux_windows
                             .iter()

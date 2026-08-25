@@ -1089,7 +1089,7 @@ impl App {
                     .is_some_and(|s| socket::transcript_path_for_session(s).is_some());
                 PaneAccountFact {
                     focused: focused.as_deref() == Some(id.as_str()),
-                    closed: self.closed_panes.iter().any(|c| c.pane_id == id),
+                    closed: self.stashed_record(&id).is_some(),
                     busy: account_restart_busy(
                         self.pane_prompt_wait.contains_key(&id),
                         self.pane_activity.get(&id).map(|a| (a.status.as_str(), a.bg_active)),
@@ -1217,7 +1217,7 @@ impl App {
             }
             // 닫힌 pane 은 사용자 눈 밖에서 되띄우지 않는다 — 표시를 남겨 두면
             // 되살렸을 때 칩이 안내한다.
-            if self.closed_panes.iter().any(|c| c.pane_id == id) {
+            if self.stashed_record(&id).is_some() {
                 continue;
             }
             // 일하는 중·승인 대기·백그라운드 작업 중이면 끊지 않는다 — resume 은
@@ -1539,6 +1539,27 @@ impl App {
             preview: None,
         });
         self.chrome_dirty = true;
+    }
+
+    /// 그 번호를 **지금 물고 있는** 되살리기 레코드. 죽은 레코드는 여기 안 걸린다.
+    ///
+    /// pane 번호는 재사용된다 — [`Self::used_pane_ids`] 가 `alive` 인 레코드의
+    /// 번호만 잡아 두므로, 이미 죽은 레코드의 번호는 다음 pane 에 그대로 다시
+    /// 나간다. 그래서 번호만 맞춰 보면 **살아서 도는 남**이 옛 묘비 때문에
+    /// 「닫힌 pane」으로 판정된다(2026-08-25: 방 6 의 `%21` 이 그랬다. 모모이가
+    /// 멀쩡히 일하는데 인포가 그 pane 을 되살리기 칸으로 보내, 그 방에 설 pane 이
+    /// 하나도 없어 **방 자체가 목록에서 사라졌다**).
+    ///
+    /// 되살리기 목록에 같은 번호가 여럿 뜨는 것은 정상이다 — 서로 다른 pane 의
+    /// 서로 다른 대화라 하나로 합치면 안 된다.
+    pub(crate) fn stashed_record(&self, pane: &str) -> Option<&crate::ClosedPane> {
+        stashed_in(&self.closed_panes, pane)
+    }
+
+    /// 위와 같은 판정의 인덱스 판. 살아 있는 것을 먼저 집고, 없으면 죽은 기록에서
+    /// 찾는다 — 목록에서 지우는 조작은 묘비에도 걸려야 한다.
+    pub(crate) fn closed_pane_index(&self, pane: &str) -> Option<usize> {
+        closed_index_in(&self.closed_panes, pane)
     }
 
     /// 닫힘 스택에 넣고 상한을 정리한다 — pane 닫기와 미리보기 탭 닫기가 같은
@@ -4705,6 +4726,18 @@ pub(crate) fn restore_agent_command(
     cmd
 }
 
+/// [`App::stashed_record`] 의 판정 본체. App 없이 검사할 수 있게 갈라 뒀다.
+fn stashed_in<'a>(list: &'a [crate::ClosedPane], pane: &str) -> Option<&'a crate::ClosedPane> {
+    list.iter().find(|c| c.alive && c.pane_id == pane)
+}
+
+/// [`App::closed_pane_index`] 의 판정 본체.
+fn closed_index_in(list: &[crate::ClosedPane], pane: &str) -> Option<usize> {
+    list.iter()
+        .position(|c| c.alive && c.pane_id == pane)
+        .or_else(|| list.iter().position(|c| c.pane_id == pane))
+}
+
 /// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
 fn next_free_pane_id(used: &std::collections::HashSet<String>) -> String {
     (0u32..).map(|n| format!("%{n}")).find(|id| !used.contains(id)).unwrap_or_default()
@@ -5178,5 +5211,58 @@ mod room_name_tests {
         // 이름이 임시 루트로 시작할 뿐인 경로는 임시가 아니다.
         assert!(!is_temp_path(Path::new("/tmpfs/repo")));
         assert!(!is_temp_path(Path::new("/Users/kasa/tmp/repo")));
+    }
+}
+
+#[cfg(test)]
+mod closed_pane_id_reuse_tests {
+    use super::{closed_index_in, stashed_in};
+    use crate::ClosedPane;
+
+    fn rec(pane: &str, alive: bool, folder: &str) -> ClosedPane {
+        ClosedPane {
+            rec: serde_json::Value::Null,
+            pane_id: pane.to_string(),
+            character: String::new(),
+            folder: folder.to_string(),
+            neighbor: None,
+            window: 0,
+            alive,
+            stashed: false,
+            idle_since: None,
+            preview: None,
+        }
+    }
+
+    /// 죽은 기록은 번호를 안 잡으므로(`used_pane_ids`) 같은 번호가 다음 pane 에
+    /// 다시 나간다. 그 새 pane 을 「닫힌 것」으로 보면 인포에서 통째로 사라지고,
+    /// 그 방의 유일한 pane 이었다면 **방까지 목록에서 없어진다**(2026-08-25 실측).
+    #[test]
+    fn dead_record_does_not_claim_a_live_pane() {
+        let list = [rec("%21", false, "nacho-neko"), rec("%21", false, "Desktop")];
+        assert!(stashed_in(&list, "%21").is_none());
+    }
+
+    /// 숨긴 pane 은 실제로 그 번호를 물고 있으니 걸려야 한다.
+    #[test]
+    fn live_record_is_found() {
+        let list = [rec("%21", false, "옛것"), rec("%21", true, "숨긴것")];
+        assert_eq!(stashed_in(&list, "%21").map(|c| c.folder.as_str()), Some("숨긴것"));
+    }
+
+    /// 목록 조작(숨김 해제·끄기)은 살아 있는 것을 먼저 집는다 — 앞에 놓인 묘비
+    /// 때문에 정작 자원을 문 항목을 못 건드리면 안 된다.
+    #[test]
+    fn index_prefers_the_live_record() {
+        let list = [rec("%21", false, "옛것"), rec("%21", true, "숨긴것")];
+        assert_eq!(closed_index_in(&list, "%21"), Some(1));
+    }
+
+    /// 묘비만 있으면 그건 집는다 — 목록에서 지우는 조작은 죽은 기록에도 걸려야 한다.
+    #[test]
+    fn index_falls_back_to_a_dead_record() {
+        let list = [rec("%21", false, "옛것")];
+        assert_eq!(closed_index_in(&list, "%21"), Some(0));
+        assert_eq!(closed_index_in(&list, "%22"), None);
     }
 }
