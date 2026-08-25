@@ -384,6 +384,40 @@ const AMBER_CRT: Palette = Palette {
     ],
 };
 
+/// 나쵸네코. 캐릭터 테마와 짝이 되라고 만든 팔레트다 — 나쵸 pane 은 헤더 밴드가
+/// `#FF8800` 이고(`theme-src-nacho/roster.json`, panebridge 의 탭 색과 같은 값),
+/// 창 전체를 나쵸로 두고 싶을 때 그 주황이 겉돌지 않는 바닥이 필요하다.
+///
+/// 바닥을 중성 회색으로 두지 않았다. 주황 하나만 얹으면 회색이 파랗게 밀려 보여
+/// 액센트가 화면에서 떠 버린다 — 배경에 같은 계열의 미열을 섞어야 한 벌로 읽힌다.
+/// 대신 셀 색까지 주황으로 묶지는 않았다(AMBER_CRT 가 단색을 피한 것과 같은 이유).
+/// 캐릭터가 회색 머리에 파란 눈이라, 그 파랑을 함수·링크 자리에 남겨 대비를 준다.
+const NACHO: Palette = Palette {
+    bg: [0x1C, 0x19, 0x15, 255],
+    fg: [0xEC, 0xE4, 0xDA, 255],
+    surface: [0x24, 0x20, 0x1B, 255],
+    surface_hover: [0x2E, 0x29, 0x22, 255],
+    surface_active: [0x3B, 0x33, 0x2A, 255],
+    border: [0x4C, 0x42, 0x36, 130],
+    text: [0xEC, 0xE4, 0xDA, 255],
+    text_dim: [0xB2, 0xA7, 0x99, 255],
+    text_mute: [0x7D, 0x72, 0x65, 255],
+    success: [0x7F, 0xD4, 0x8E, 255],
+    danger: [0xFF, 0x6F, 0x5E, 255],
+    syn_keyword: [0xFF, 0x88, 0x00, 255],   // 나쵸 주황 — 로스터 header_color 와 같은 값
+    syn_string: [0xB8, 0xD9, 0x7A, 255],
+    syn_number: [0xFF, 0xC7, 0x4D, 255],    // 치즈 노랑
+    syn_comment: [0x7D, 0x72, 0x65, 255],
+    syn_function: [0x6C, 0xB8, 0xF0, 255],  // 파란 눈
+    syn_type: [0xF2, 0xD5, 0xB0, 255],
+    ansi: [
+        [0x24, 0x20, 0x1B], [0xFF, 0x6F, 0x5E], [0x7F, 0xD4, 0x8E], [0xFF, 0xC7, 0x4D],
+        [0x6C, 0xB8, 0xF0], [0xE9, 0x8F, 0xC0], [0x72, 0xCF, 0xD4], [0xEC, 0xE4, 0xDA],
+        [0x7D, 0x72, 0x65], [0xFF, 0x94, 0x86], [0xA2, 0xE3, 0xAD], [0xFF, 0xDA, 0x85],
+        [0x96, 0xCF, 0xF7], [0xF5, 0xB0, 0xD6], [0x9B, 0xE2, 0xE6], [0xFF, 0xF6, 0xEA],
+    ],
+};
+
 /// Selectable themes: (settings.json key, display label, palette). "dark" /
 /// "light" keep their historical keys so existing settings files keep working.
 pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
@@ -396,6 +430,7 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("schale-light", "Schale Light", &SCHALE_LIGHT),
     ("schale-dark", "Schale Dark", &SCHALE_DARK),
     ("amber-crt", "Amber CRT", &AMBER_CRT),
+    ("nacho", "Nachoneko", &NACHO),
 ];
 
 /// 지금 store_palette 가 **미리보기** 픽으로 불렸나. OS 색 패널의 휠을 돌리는
