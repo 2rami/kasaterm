@@ -16,6 +16,7 @@ import { ShellTab } from './ShellTab';
 import { ClaudeTab } from './ClaudeTab';
 import { FeedbackTab } from './FeedbackTab';
 import { CharacterDetail } from './CharacterDetail';
+import { fetchThemeRoster } from './api';
 import { fetchValues, postAction } from './api';
 import type { Character, SettingsCharacters, SettingsValues } from './types';
 
@@ -145,6 +146,61 @@ export function SettingsApp() {
   const meta = t.titles[cat];
   const tab = TABS[cat];
 
+  /// `?student=<slug>&theme=<id>` 로 열린 **학생 전용 창**인가. 설정 본체가 앱 안으로
+  /// 들어가면 세부 화면은 밖으로 나와야 한다 — 안에서 안을 덮을 수 없다(거노
+  /// 2026-08-25 「설정창을 안으로, 세부설정을 별도창으로」).
+  const studentSlug = new URLSearchParams(location.search).get('student');
+  const studentTheme = new URLSearchParams(location.search).get('theme') ?? '';
+
+  useEffect(() => {
+    if (!studentSlug || open) return;
+    let dead = false;
+    void (async () => {
+      // 쓰는 테마면 이미 받아 둔 명단에 있다 — 왕복이 없다.
+      if (chars && (studentTheme === '' || studentTheme === chars.active_theme)) {
+        const hit = chars.roster.find((c) => c.slug === studentSlug);
+        if (hit && !dead) setOpen(hit);
+        return;
+      }
+      if (!studentTheme) return;
+      try {
+        const list = await fetchThemeRoster(studentTheme);
+        const hit = list.find((c) => c.slug === studentSlug);
+        if (hit && !dead) setOpen(hit);
+      } catch {
+        // 아래 로딩·오류 문구가 그대로 받는다.
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [studentSlug, studentTheme, chars, open]);
+
+  if (studentSlug) {
+    // 좌측 nav 도 제목 줄도 없다. 이 창의 존재 이유가 그 학생 하나라, 다른 칸으로
+    // 갈 길을 주면 같은 설정이 두 창에 떠서 어느 쪽이 정본인지 알 수 없게 된다.
+    return (
+      <div className="min-h-screen px-7 py-5">
+        {open && chars ? (
+          <CharacterDetail
+            character={open}
+            models={chars.models}
+            /// 독립 창에서 「뒤로」는 갈 데가 없다 — 창을 닫는다.
+            onBack={() => window.close()}
+            onSaved={(name) => {
+              setOpen((prev) => (prev ? { ...prev, name } : prev));
+              void reload();
+            }}
+          />
+        ) : (
+          <p className="text-[13px] text-[var(--kt-text-mute)]">
+            {err ? t.common.fetchFailed({ path: '/settings/characters', error: err }) : t.common.loading}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen">
       <nav
@@ -211,22 +267,10 @@ export function SettingsApp() {
 
         {cat === 'theme' ? (
           chars ? (
-            open ? (
-              <CharacterDetail
-                character={open}
-                models={chars.models}
-                onBack={() => setOpen(null)}
-                onSaved={(name) => {
-                  // 이름만 갱신하고 객체는 그대로 둔다 — 상세는 자기가 유일한
-                  // 편집자라 서버에서 다시 받아올 게 없고, 갈아치우면 draft 가
-                  // 리셋된다.
-                  setOpen((prev) => (prev ? { ...prev, name } : prev));
-                  void reload();
-                }}
-              />
-            ) : (
-              <ThemeTab data={chars} onSelect={setOpen} onChanged={reload} />
-            )
+            // 상세는 더 이상 이 화면 안에서 안 열린다 — 카드 우클릭 → 「설정 열기」가
+            // 별도 창(`?student=`)을 띄운다. 설정 본체가 앱 안으로 들어가면 세부는
+            // 밖에 있어야 하고, 두 곳에서 같은 로스터를 고치면 정본이 갈린다.
+            <ThemeTab data={chars} onChanged={reload} />
           ) : (
             !err && (
               <p className="text-[13px] text-[var(--kt-text-mute)]">{t.common.loading}</p>

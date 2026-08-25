@@ -723,6 +723,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let theme_exists =
                     |id: &str| kasa_mcp::character::list_themes().iter().any(|(t, _)| t.as_str() == id);
                 let ok = match action.as_str() {
+                    // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
+                    // 세부는 밖에 있어야 한다(거노 2026-08-25). `label` 에 테마 키가
+                    // 오는데, 번들은 `__base` 라 빈 값과 구분된다 — 빈 값이면 웹이
+                    // 쓰는 테마의 명단에서 찾는다.
+                    "open-student" => {
+                        let theme = label.clone().unwrap_or_default();
+                        Ok(self.open_student_web_window(event_loop, &arg, &theme))
+                    }
                     "select-theme" if !arg.is_empty() && !theme_exists(&arg) => {
                         Err(format!("'{arg}' 테마가 없어요"))
                     }

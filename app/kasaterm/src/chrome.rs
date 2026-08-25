@@ -2304,6 +2304,86 @@ impl App {
     /// 폼의 텍스트 편집용이다. 웹뷰에 그걸 걸면 WKWebView 가 제 IME 로 받아야 할
     /// 한글 조합을 끊어 이행의 목적을 정확히 무효화한다 — 아로나 창도 같은 이유로
     /// 안 부르고, 거기서 한글 입력이 이미 프로덕션으로 돌고 있다.
+    /// 학생 세부설정 창 — `/arona-ui/settings.html?student=<slug>&theme=<id>`.
+    ///
+    /// 설정 본체와 **따로** 뜬다. 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하고,
+    /// 그때 이 창이 그 자리를 맡는다(거노 2026-08-25 「세부설정을 별도창으로」).
+    ///
+    /// 창은 하나만 유지한다 — 이미 떠 있으면 주소만 갈아 끼운다. 학생마다 창을 열면
+    /// 같은 로스터를 고치는 창이 여럿 떠서 어느 쪽이 정본인지 알 수 없게 된다.
+    pub(crate) fn open_student_web_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        slug: &str,
+        theme: &str,
+    ) -> bool {
+        if slug.trim().is_empty() {
+            return false;
+        }
+        let port = mcp_panel_port();
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let url = format!(
+            "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}&student={}&theme={}",
+            urlencode(slug),
+            urlencode(theme)
+        );
+        // 이미 떠 있으면 주소만 바꾸고 앞으로 가져온다.
+        if let (Some(w), Some(wv)) = (
+            self.student_web_window.as_ref(),
+            self.student_web_webview.as_ref(),
+        ) {
+            let _ = wv.load_url(&url);
+            w.focus_window();
+            return true;
+        }
+        if !settings_web_reachable(&port) {
+            eprintln!("[student-web] 페이지에 못 닿는다");
+            return false;
+        }
+        let attrs = WindowAttributes::default()
+            .with_title("학생 설정")
+            .with_theme(Some(Theme::Dark))
+            .with_visible(true)
+            // 본체(920×720)보다 좁다 — 한 학생의 폼과 그림만 서므로 가로가 덜 든다.
+            .with_inner_size(LogicalSize::new(560.0, 720.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[student-web] window create failed: {e}");
+                return false;
+            }
+        };
+        let win_show = window.clone();
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(&url)
+            .with_background_color((27, 37, 65, 255))
+            .with_on_page_load_handler(move |event, _url| {
+                if matches!(event, wry::PageLoadEvent::Finished) {
+                    win_show.focus_window();
+                }
+            })
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(560.0, 720.0).into(),
+            })
+            // 아로나 패널과 같은 use-after-free 사유로 build_as_child.
+            .build_as_child(window.as_ref())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[student-web] webview build failed: {e}");
+                return false;
+            }
+        };
+        self.student_web_window = Some(window);
+        self.student_web_webview = Some(webview);
+        eprintln!("[student-web] open; student={slug} theme={theme}");
+        true
+    }
+
     pub(crate) fn open_settings_web_window(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -3499,6 +3579,21 @@ pub(crate) fn ensure_notification_authorization() {}
 /// HTTP 클라이언트를 새로 들이지 않고 std 로만 한다. 같은 프로세스 안의 루프백이라
 /// 정상 경로는 1ms 도 안 걸리고, 서버가 죽어 있으면 connect 가 곧바로 거절된다.
 /// 타임아웃은 그 둘 다 아닌 경우(포트를 다른 프로세스가 물고 응답을 안 함) 대비다.
+/// 쿼리 값 인코딩. slug 는 대개 ASCII 지만 **커스텀 테마 폴더 이름에는 한글·공백이
+/// 들어간다** — 그대로 실으면 주소가 깨져 창이 빈 화면으로 뜬다.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn settings_web_reachable(port: &str) -> bool {
     use std::io::{Read, Write};
     let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {

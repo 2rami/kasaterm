@@ -5412,6 +5412,14 @@ struct App {
     /// 저장·pane 재시작은 [전환] 을 눌러야 그때 돈다.
     account_switch_confirm: Option<session::PendingAccountSwitch>,
     settings_web_webview: Option<wry::WebView>,
+    /// 학생 하나만 담는 세부설정 창(`/arona-ui/settings.html?student=`). 설정 본체와
+    /// **따로** 사는 이유는, 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하기
+    /// 때문이다 — 안에서 안을 덮을 수 없다(거노 2026-08-25).
+    ///
+    /// 하나만 두는 것은 의도다. 학생마다 창을 열면 같은 로스터를 고치는 창이 여럿
+    /// 떠서 어느 쪽이 정본인지 알 수 없게 된다. 다른 학생을 열면 이 창의 주소만 바꾼다.
+    student_web_window: Option<Arc<Window>>,
+    student_web_webview: Option<wry::WebView>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -5852,6 +5860,8 @@ impl App {
             settings_web_window: None,
             account_switch_confirm: None,
             settings_web_webview: None,
+            student_web_window: None,
+            student_web_webview: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,

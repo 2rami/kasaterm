@@ -177,14 +177,16 @@ function NewThemeCard({
 /// 자리에서 이미 겪은 문제다). 대신 **흐리게 + 학교색 점 제거**로, 켜진 게 기본인
 /// 화면에서 「빠진 것」이 눈에 띄게 한다.
 function CharacterCell({
+  t,
   c,
   theme,
   picked,
   detail,
   disabled,
-  onSelect,
+  onOpenSettings,
   onTogglePick,
 }: {
+  t: Strings;
   c: Character;
   /// 프사를 받을 폴더. 활성 테마면 빈 값이라 활성 → 번들 순으로 찾는다.
   theme?: string;
@@ -193,21 +195,18 @@ function CharacterCell({
   /// 그 테마가 설치돼 있어야 한다.
   detail: boolean;
   disabled: boolean;
-  onSelect: () => void;
+  /// 세부설정 창을 연다. 창을 띄우는 것은 앱이라 여기서는 요청만 올린다.
+  onOpenSettings: () => void;
   onTogglePick: () => void;
 }) {
-  // 클릭=고르기, 더블클릭=캐릭터 설정(거노 2026-08-25). 예전엔 쓰는 테마에서만
-  // 클릭이 상세로 갔는데, 그러면 **같은 동작이 테마에 따라 딴 일을 해서** 어느
-  // 테마를 보고 있는지 먼저 확인해야 눌 수 있었다. 이제 어디서나 클릭은 고르기다.
+  // 클릭=고르기, **우클릭=메뉴**(거노 2026-08-25). 예전엔 쓰는 테마에서만 클릭이
+  // 상세로 갔는데, 그러면 같은 동작이 테마에 따라 딴 일을 해서 어느 테마를 보고
+  // 있는지 먼저 확인해야 눌 수 있었다. 이제 어디서나 클릭은 고르기다.
   //
-  // 더블클릭이 오면 앞선 한 번의 클릭(=고르기)이 이미 나갔으므로 되돌린 뒤 상세로
-  // 간다. 타이머로 클릭을 미루지 않는 이유는, 고르기는 **즉시 반응해야** 하는 조작이라
-  // 300ms 를 기다리면 화면이 굼떠 보이기 때문이다.
-  const openDetail = () => {
-    if (!detail) return;
-    onTogglePick();
-    onSelect();
-  };
+  // 더블클릭을 안 쓰는 이유: 세부설정이 **별도 창**으로 나가면서, 두 번 누르는 동안
+  // 첫 클릭이 이미 고르기를 내고 그걸 되돌리는 편법이 필요했다. 메뉴는 그 왕복이 없고
+  // 「무엇을 할 수 있는지」가 눈에 보인다.
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   return (
     <div
       // 카드를 `<button>` 으로 못 만든다 — 안에 켬/끔 버튼이 들어가고 버튼 중첩은
@@ -219,7 +218,13 @@ function CharacterCell({
       // 저장이 도는 동안은 안 받는다 — 켬/끔이 서버 왕복이라, 연달아 누르면 마지막
       // 응답이 앞선 것을 덮어 화면과 저장이 어긋난다.
       onClick={() => !disabled && onTogglePick()}
-      onDoubleClick={() => !disabled && openDetail()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (disabled) return;
+        // 카드-로컬 좌표(카드가 relative) — 격자가 스크롤해도 메뉴가 따라온다.
+        const r = e.currentTarget.getBoundingClientRect();
+        setMenu({ x: e.clientX - r.left, y: e.clientY - r.top });
+      }}
       onKeyDown={(e) => {
         if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
           e.preventDefault();
@@ -248,6 +253,61 @@ function CharacterCell({
         />
         <span className="text-[12px] text-[var(--kt-text)]">{c.name}</span>
       </div>
+
+      {menu && (
+        <>
+          {/* 바깥 아무 데나 눌러 닫는다. 카드 위에 겹치는 투명 판이라, 이게 없으면
+              메뉴를 닫는 클릭이 밑의 카드까지 눌러 고르기가 뒤집힌다. */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenu(null);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu(null);
+            }}
+          />
+          <div
+            className="absolute z-50 py-1"
+            style={{
+              left: menu.x,
+              top: menu.y,
+              minWidth: 116,
+              borderRadius: 'var(--kt-radius-md)',
+              background: 'var(--kt-surface)',
+              boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border), 0 6px 20px rgba(0,0,0,.35)`,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 그림·성격은 그 테마가 설치돼 있어야 고칠 수 있다 — 아니면 항목을 아예 뺀다.
+                눌리는데 아무 일도 안 나는 항목이 제일 나쁘다. */}
+            {detail && (
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
+                onClick={() => {
+                  setMenu(null);
+                  onOpenSettings();
+                }}
+              >
+                {t.theme.menuSettings}
+              </button>
+            )}
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
+              onClick={() => {
+                setMenu(null);
+                onTogglePick();
+              }}
+            >
+              {picked ? t.theme.menuPickOff : t.theme.menuPickOn}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -263,7 +323,6 @@ function CharacterGroup({
   active,
   activeRoster,
   busy,
-  onSelect,
   onAction,
   onAdded,
   pane,
@@ -278,7 +337,6 @@ function CharacterGroup({
   /// 활성 테마 명단은 `/settings/characters` 에 이미 실려 온다 — 다시 받지 않는다.
   activeRoster: Character[];
   busy: boolean;
-  onSelect: (c: Character) => void;
   onAction: (action: string, args: { id: string; label?: string }) => void;
   /// 학생 추가는 액션이 아니라 자체 업로드다 — 끝났다는 말만 위로 올린다.
   onAdded: (msg: string) => void;
@@ -404,12 +462,14 @@ function CharacterGroup({
               {roster.map((c) => (
                 <CharacterCell
                   key={c.name}
+                  t={t}
                   c={c}
                   theme={active ? undefined : card.id}
                   picked={picked.has(c.name)}
                   detail={active}
                   disabled={busy}
-                  onSelect={() => onSelect(c)}
+                  /// 창을 띄우는 것은 앱이다 — 웹은 slug 와 테마 키만 올린다.
+                  onOpenSettings={() => onAction('open-student', { id: c.slug, label: key })}
                   onTogglePick={() =>
                     onAction(picked.has(c.name) ? 'character-pick-off' : 'character-pick', {
                       id: key,
@@ -434,11 +494,9 @@ function CharacterGroup({
 
 export function ThemeTab({
   data,
-  onSelect,
   onChanged,
 }: {
   data: SettingsCharacters;
-  onSelect: (c: Character) => void;
   /// 액션이 끝난 뒤 로스터를 다시 읽는다. **파일이 진실**이라, 요청값으로 화면을
   /// 그리면 저장 쪽에서 거부된 변경이 화면에만 남는다.
   onChanged: () => Promise<void>;
@@ -609,7 +667,6 @@ export function ThemeTab({
                 active={selTheme.id === data.active_theme}
                 activeRoster={data.roster}
                 busy={busy}
-                onSelect={onSelect}
                 onAction={(action, args) => void run(action, args)}
                 onAdded={(msg) => {
                   setNotice({ ok: true, msg });
