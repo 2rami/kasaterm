@@ -18,7 +18,7 @@ export type SettingsActionResult = {
   message_args?: Record<string, string | number>;
 };
 
-import type { SettingsValues } from './types';
+import type { Character, SettingsValues } from './types';
 
 /// 캐릭터 탭 밖의 설정 값 전부. 탭마다 따로 묻지 않는 이유는 액션과 같다 — 값의
 /// 정본이 앱 한 곳이라 조회도 한 번이면 되고, 탭이 늘어도 여기 손댈 게 없다.
@@ -45,4 +45,27 @@ export async function postAction(
     body: JSON.stringify({ action, ...args }),
   });
   return (await res.json()) as SettingsActionResult;
+}
+
+/// `GET /theme-roster?id=<테마id|__base>` — 그 테마 하나의 명단.
+///
+/// `/settings/characters` 가 **활성 테마 명단만** 싣기 때문에 필요하다. 11테마
+/// 300명을 매번 함께 실으면 설정을 열 때마다 그게 다 오가므로, 접힌 묶음을
+/// 펼치는 그 순간에만 받는다.
+///
+/// 응답은 로스터 원본 형태(`leader`/`leaders`/`members`)라 여기서 한 줄로 편다 —
+/// 리더 특권은 2026-07-13 에 폐기됐고 배정도 이 합집합에서 나온다.
+export async function fetchThemeRoster(id: string): Promise<Character[]> {
+  const res = await fetch(`/theme-roster?id=${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const v = (await res.json()) as {
+    leader?: Character;
+    leaders?: Character[];
+    members?: Character[];
+  };
+  const pool = [...(v.leaders ?? (v.leader ? [v.leader] : [])), ...(v.members ?? [])];
+  const seen = new Set<string>();
+  // 이름이 겹치는 항목(리더가 members 에도 있는 로스터)을 한 번만 남긴다 —
+  // 배정 쪽 `assignable_names` 도 같은 규칙이라 화면과 실제가 어긋나지 않는다.
+  return pool.filter((m) => m?.name && !seen.has(m.name) && seen.add(m.name));
 }

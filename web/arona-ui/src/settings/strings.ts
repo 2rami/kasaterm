@@ -73,8 +73,25 @@ export const ko = {
     openRoster: '로스터 열기',
     refresh: '새로고침',
     characters: '캐릭터',
-    charactersHint: (a: { count: number }) =>
-      `${a.count}명 — 캐릭터를 눌러 성격과 그림을 고치세요`,
+    charactersHint:
+      '켠 애들만 pane 에 배정돼요 — 테마를 가로질러 섞어도 되고, 아무도 안 고르면 쓰는 테마 전원이 나와요',
+    /// 묶음 머리의 「3/21」. 왼쪽이 켠 수, 오른쪽이 그 테마 전원이다.
+    pickCount: (a: { on: number; total: number }) => `${a.on}/${a.total}`,
+    /// 하나도 안 고른 테마 — 「0/21」이면 아무도 안 나오는 것처럼 읽혀서 따로 쓴다.
+    pickNone: '안 고름',
+    pickAll: '전부',
+    pickClear: '해제',
+    /// 활성 테마 카드만 눌러서 상세로 간다 — 다른 테마는 그 폴더를 못 고쳐서
+    /// 카드 자체가 켬/끔이 된다.
+    pickHintActive: '카드를 누르면 상세, 오른쪽 위 동그라미로 켜고 꺼요',
+    pickHintOther: '카드를 누르면 켜고 꺼져요',
+    pickLoading: '명단 읽는 중…',
+    pickLoadFailed: '명단을 못 읽었어요',
+    /// 고른 사람이 아무도 없을 때 화면 맨 위에 뜨는 한 줄. 폴백(전원 배정)이
+    /// 조용히 도는 걸 화면이 말해 준다.
+    pickEmpty: '아직 아무도 안 골랐어요 — 지금은 쓰는 테마 전원이 배정돼요',
+    /// 골라 둔 총원. 테마를 가로지르므로 묶음 머리 숫자만으로는 안 보인다.
+    pickTotal: (a: { count: number }) => `골라 둔 ${a.count}명이 돌아가며 배정돼요`,
   },
 
   /// 그림 생성(참조 그림 → 스프라이트 굽기). 엔진 고르기는 테마 탭에, 굽기는
@@ -384,7 +401,18 @@ export const en: Strings = {
     openRoster: 'Open roster',
     refresh: 'Reload art',
     characters: 'Characters',
-    charactersHint: (a) => `${a.count} in the roster — click one to edit persona and art`,
+    charactersHint:
+      'Only the ones you turn on get assigned to panes — mix across themes freely. Pick nobody and the whole active theme shows up',
+    pickCount: (a) => `${a.on}/${a.total}`,
+    pickNone: 'none',
+    pickAll: 'All',
+    pickClear: 'None',
+    pickHintActive: 'Click a card for detail; use the circle to turn it on or off',
+    pickHintOther: 'Click a card to turn it on or off',
+    pickLoading: 'Loading roster…',
+    pickLoadFailed: 'Could not load the roster',
+    pickEmpty: 'Nobody picked yet — the whole active theme gets assigned for now',
+    pickTotal: (a) => `${a.count} picked, assigned in rotation`,
   },
 
   themegen: {
@@ -599,6 +627,9 @@ export const en: Strings = {
     account_missing: (a) => `There’s no account named “${a.account}”`,
     app_not_found: (a) => `Couldn’t find the app “${a.app}”`,
     theme_missing: (a) => `There’s no theme named “${a.theme}”`,
+    character_pick_bad_id: 'Not sure which theme or character that is',
+    character_pick_unknown: (a) => `“${a.name}” isn’t in that theme`,
+    theme_roster_missing: 'Couldn’t read that theme’s roster',
     action_unknown: (a) => `Unknown action: ${a.action}`,
     cwd_path_empty: 'The path can’t be empty',
     file_open_cmd_empty: 'The command can’t be empty',

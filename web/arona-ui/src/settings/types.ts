@@ -34,6 +34,12 @@ export type ThemeCard = {
   /// 미리보기 얼굴의 slug. 경로가 아니라 slug 라서 프사는 `/character-face` 로
   /// 다시 물어본다.
   faces: string[];
+  /// 이 테마에서 **골라 둔** 캐릭터 이름들. 비면 「안 건드렸다」 = 전원이 배정
+  /// 후보라는 뜻이다(고른 것이 하나도 없으면 지금까지의 동작 그대로).
+  ///
+  /// 명단 전체가 아니라 고른 것만 오는 이유: 11테마 300명을 매번 실으면 설정을
+  /// 열 때마다 그게 다 오간다. 펼칠 때 `/theme-roster?id=` 로 따로 받는다.
+  picked: string[];
 };
 
 export type Character = {
