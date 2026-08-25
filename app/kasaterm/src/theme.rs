@@ -1334,7 +1334,21 @@ pub fn character_ordinal(
 /// 보더(@배지)·배너가 공통으로 쓴다. (본문 틴트도 썼었으나 폐기 — 출력 글자는
 /// 테마 기본 fg, 거노 2026-07-18.)
 pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
-    character_accent(name).map(|c| accent_variant(c, ordinal))
+    // **활성 밖까지 본다**(`_any`). pane 을 다른 테마 학생으로 바꾸는 건 지원되는
+    // 조작인데(2026-08-24 지시), 활성 로스터만 보면 그렇게 바뀐 pane 은 색을 못 찾아
+    // 폴백으로 떨어진다 — 이름·얼굴은 새 학생인데 테두리·프사·스피너만 앞 학생 색으로
+    // 남는다(2026-08-25: star-rail 로 바꾼 %12 가 그랬다. 「미니맵 인포는 바뀌었는데
+    // 스피너나 pane 테마가 안 바뀐다」). 활성 안 학생은 `_any` 가 활성을 먼저 보므로
+    // 그대로다.
+    accent_n_with(name, ordinal, other_rosters())
+}
+
+/// 위의 순수부 — 명부를 주입받는 이유는 `accent_beyond_active` 와 같다(설치 테마에
+/// 기대면 테마를 고른 컴퓨터에서만 도는 검증이 된다).
+fn accent_n_with(name: &str, ordinal: usize, extra: &[Roster]) -> Option<[u8; 4]> {
+    character_accent(name)
+        .or_else(|| accent_beyond_active(name, extra))
+        .map(|c| accent_variant(c, ordinal))
 }
 
 // 캐릭터명 ↔ 에셋 슬러그 대응표(`assets/students/profile/<slug>.png`, arona-ui 디렉토리명·shim
@@ -1786,6 +1800,35 @@ mod roster_tests {
         assert!(character_slug_any("없는캐릭").is_none());
         assert!(name_beyond_active("없는슬러그", &extra).is_none());
         assert!(slug_character_any("없는슬러그").is_none());
+    }
+
+    /// pane 색(테두리·프사·스피너)이 **합집합을 보는가**.
+    ///
+    /// 2026-08-25: star-rail 로 바꾼 `%12` 가 이름·얼굴만 새 학생이고 색은 앞
+    /// 학생 것으로 남았다. 원인은 이 자리가 활성 로스터만 보는 조회를 쓰고 있던
+    /// 것 — 다른 테마 학생으로 바꾸는 건 지원되는 조작이라(2026-08-24 지시)
+    /// 활성 밖 이름이 정상적으로 들어온다.
+    #[test]
+    fn pane_accent_covers_installed_themes() {
+        let themed = serde_json::json!({
+            "members": [{ "name": "하치와레", "slug": "hachiware", "header_color": "#4A90D9" }]
+        });
+        let extra = [roster_from(&themed).expect("테마 명부")];
+        // 활성 밖이지만 설치 테마 안 — 색이 나와야 한다. 되돌리면 여기서 None 이다.
+        assert_eq!(
+            accent_n_with("하치와레", 0, &extra),
+            Some([0x4a, 0x90, 0xd9, 255]),
+            "다른 테마로 바꾼 pane 이 색을 못 찾는다"
+        );
+        // 같은 학생이 둘 이상 떠 있을 때의 변주도 활성 안과 같은 사다리를 탄다.
+        assert_eq!(
+            accent_n_with("하치와레", 1, &extra),
+            Some(accent_variant([0x4a, 0x90, 0xd9, 255], 1))
+        );
+        // 활성 안 이름은 그대로 — 넓힌 조회가 기존 색을 바꾸면 안 된다.
+        assert_eq!(accent_n_with("미도리", 0, &extra), character_accent("미도리"));
+        // 어느 명부에도 없으면 None. 이 None 이 「색이 곧 학생」의 문지기다.
+        assert!(accent_n_with("없는캐릭", 0, &extra).is_none());
     }
 
     /// 합집합이어도 **활성이 먼저다** — 같은 이름을 두 명부가 다른 색으로 가지면

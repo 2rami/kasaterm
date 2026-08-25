@@ -2744,7 +2744,7 @@ impl App {
         let Some((name, slug)) = ({
             let ws = self.ws.lock().unwrap();
             self.display_pane_char(&ws, pane_id)
-                .and_then(|n| crate::theme::character_slug(&n).map(|s| (n, s)))
+                .and_then(|n| crate::theme::character_slug_any(&n).map(|s| (n, s)))
         }) else {
             return out;
         };

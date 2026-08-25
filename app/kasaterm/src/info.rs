@@ -2597,7 +2597,7 @@ fn draw_group_head(
     //
     // 얼굴은 점보다 넓어서 이름 시작점도 같이 민다 — 고정 오프셋을 쓰면 chevron
     // 과 이름 양쪽에 얼굴이 겹쳐 붙는다.
-    let tint = theme::character_accent(&gp.label).unwrap_or_else(theme::text_mute);
+    let tint = theme::character_accent_any(&gp.label).unwrap_or_else(theme::text_mute);
     const FACE: f32 = GROUP_H - 6.0;
     let has_face = crate::render::draw_student_face(g, &gp.label, x0 + 11.0, y + 3.0, FACE);
     if !has_face {
@@ -2769,7 +2769,7 @@ fn draw_tab_row(
 
     let cx = x0 + 12.0;
     const FACE: f32 = ROW_H - 6.0;
-    let tint = theme::character_accent(&t.label).unwrap_or_else(theme::text_mute);
+    let tint = theme::character_accent_any(&t.label).unwrap_or_else(theme::text_mute);
     // 그룹 머리와 같은 규칙 — 배정된 학생이면 얼굴, 아니면 색 점. 셸만 도는 탭은
     // 이름이 비어 있어 늘 점이 된다.
     let has_face = crate::render::draw_student_face(g, &t.label, cx, y + 3.0, FACE);

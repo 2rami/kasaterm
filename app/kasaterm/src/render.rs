@@ -1302,7 +1302,11 @@ impl App {
                 if let Some((name, slug)) = true_char
                     .as_deref()
                     .filter(|_| !agents_view && runs_claude)
-                    .and_then(|n| theme::character_slug(n).map(|s| (n, s)))
+                    // **활성 밖까지**(`_any`) — 이 `if let` 이 프사·테두리·스피너 색을
+                    // 통째로 지고 있어서, 좁은 조회로 None 이 되면 다른 테마 학생으로
+                    // 바꾼 pane 은 그 셋이 전부 안 그려진다(2026-08-25: star-rail 로
+                    // 바꾼 %12 가 「미니맵 인포는 바뀌었는데 스피너·색은 앞 학생」이었다).
+                    .and_then(|n| theme::character_slug_any(n).map(|s| (n, s)))
                 {
                     // 같은 학생 pane 이 여럿이면(지정 스폰 중복 허용) 순번 변주색.
                     let accent = theme::character_accent_n(
