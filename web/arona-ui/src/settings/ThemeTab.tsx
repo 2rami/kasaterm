@@ -265,10 +265,15 @@ function CharacterGroup({
   onSelect,
   onAction,
   onAdded,
+  pane,
 }: {
   t: Strings;
   card: ThemeCard;
   active: boolean;
+  /// `'body'` 면 **머리 없이 본문만** 그린다 — 오른쪽 칸에 한 테마만 펼쳐 두는
+  /// 2단 배치용(거노 2026-08-25 「창 두개로 테마로 선택, 개별선택으로」). 접이식은
+  /// 11테마를 세로로 쌓아 스크롤이 길어지는데, 고르는 동안 보는 것은 늘 한 테마다.
+  pane?: 'body';
   /// 활성 테마 명단은 `/settings/characters` 에 이미 실려 온다 — 다시 받지 않는다.
   activeRoster: Character[];
   busy: boolean;
@@ -277,7 +282,7 @@ function CharacterGroup({
   /// 학생 추가는 액션이 아니라 자체 업로드다 — 끝났다는 말만 위로 올린다.
   onAdded: (msg: string) => void;
 }) {
-  const [open, setOpen] = useState(active);
+  const [open, setOpen] = useState(pane === 'body' ? true : active);
   const [roster, setRoster] = useState<Character[] | null>(active ? activeRoster : null);
   const [failed, setFailed] = useState(false);
   // 번들은 폴더가 없어 카드 id 가 빈 문자열인데, 명단 조회와 고르기 저장은 `__base`
@@ -320,6 +325,7 @@ function CharacterGroup({
         boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
       }}
     >
+      {pane !== 'body' && (
       <div
         role="button"
         tabIndex={0}
@@ -353,9 +359,32 @@ function CharacterGroup({
           onClick={() => onAction('theme-pick-none', { id: key })}
         />
       </div>
+      )}
 
       {open && (
         <div className="px-3 pb-3 pt-1">
+          {pane === 'body' && (
+            // 머리를 없앤 자리 — 「전부/해제」와 개수는 여기 한 줄로 옮긴다.
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-[13px] text-[var(--kt-text)]">{card.label}</span>
+              {active && (
+                <span className="text-[11px] text-[var(--kt-text-mute)]">{t.theme.inUse}</span>
+              )}
+              <span className="ml-auto text-[11px] text-[var(--kt-text-mute)]">
+                {on === 0 ? t.theme.pickNone : t.theme.pickCount({ on, total })}
+              </span>
+              <MiniButton
+                label={t.theme.pickAll}
+                disabled={busy}
+                onClick={() => onAction('theme-pick-all', { id: key })}
+              />
+              <MiniButton
+                label={t.theme.pickClear}
+                disabled={busy}
+                onClick={() => onAction('theme-pick-none', { id: key })}
+              />
+            </div>
+          )}
           <p className="mb-2 text-[11px] text-[var(--kt-text-mute)]">
             {active ? t.theme.pickHintActive : t.theme.pickHintOther}
           </p>
@@ -413,6 +442,13 @@ export function ThemeTab({
   /// `assignable_names` 가 같은 이름을 한 번만 쓰므로, 두 테마에 같은 이름이
   /// 있으면 화면 숫자가 실제 배정 인원보다 커지면 안 된다.
   const pickedTotal = new Set(data.themes.flatMap((c) => c.picked)).size;
+
+  /// 오른쪽 칸에 펼칠 테마. 처음엔 **쓰는 중인 테마**를 연다 — 대개 거기서 고르고,
+  /// 그 명단은 이미 `data.roster` 로 실려 와 있어 첫 화면이 왕복 없이 뜬다.
+  const [selThemeId, setSelThemeId] = useState<string>(data.active_theme ?? '');
+  /// 고른 id 가 목록에 없으면(테마를 지웠다) 첫 칸으로 떨어진다 — 빈 오른쪽을
+  /// 보여 주면 「고장」으로 읽힌다.
+  const selTheme = data.themes.find((c) => c.id === selThemeId) ?? data.themes[0];
 
   async function run(action: string, args?: { id?: string; label?: string }) {
     setBusy(true);
@@ -516,23 +552,61 @@ export function ThemeTab({
         <p className="mb-2 text-[12px] text-[var(--kt-text-mute)]">
           {pickedTotal === 0 ? t.theme.pickEmpty : t.theme.pickTotal({ count: pickedTotal })}
         </p>
-        <div className="flex flex-col gap-2">
-          {data.themes.map((card) => (
-            <CharacterGroup
-              key={card.id || '(bundled)'}
-              t={t}
-              card={card}
-              active={card.id === data.active_theme}
-              activeRoster={data.roster}
-              busy={busy}
-              onSelect={onSelect}
-              onAction={(action, args) => void run(action, args)}
-              onAdded={(msg) => {
-                setNotice({ ok: true, msg });
-                void onChanged();
-              }}
-            />
-          ))}
+        {/* 왼쪽에서 테마를 고르고 오른쪽에서 그 테마의 학생을 켜고 끈다. 접이식을
+            그만둔 이유는 규모다 — 11테마를 세로로 쌓으면 스크롤이 길어지는데, 정작
+            고르는 동안 보는 것은 늘 한 테마다. 왼쪽에 개수를 함께 세워, 어느 테마에서
+            몇을 골랐는지 펼치지 않고도 보이게 했다. */}
+        <div className="flex gap-3">
+          <div className="flex w-[186px] shrink-0 flex-col gap-1">
+            {data.themes.map((card) => {
+              const chosen = card.id === selThemeId;
+              return (
+                <button
+                  key={card.id || '(bundled)'}
+                  type="button"
+                  onClick={() => setSelThemeId(card.id)}
+                  className="flex items-center gap-2 px-2 py-[7px] text-left"
+                  style={{
+                    borderRadius: 'var(--kt-radius-md)',
+                    background: chosen ? 'var(--kt-surface-active)' : 'var(--kt-surface)',
+                    boxShadow: chosen
+                      ? `inset 0 0 0 var(--kt-border-w) var(--kt-accent)`
+                      : `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
+                  }}
+                >
+                  <span className="truncate text-[12px] text-[var(--kt-text)]">{card.label}</span>
+                  {card.id === data.active_theme && (
+                    <span className="shrink-0 text-[10px] text-[var(--kt-text-mute)]">
+                      {t.theme.inUse}
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0 text-[11px] text-[var(--kt-text-mute)]">
+                    {card.picked.length === 0 ? t.theme.pickNone : `${card.picked.length}/${card.count}`}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="min-w-0 flex-1">
+            {selTheme && (
+              <CharacterGroup
+                /* 테마를 바꾸면 명단을 새로 읽어야 한다 — key 로 갈아 끼운다. */
+                key={selTheme.id || '(bundled)'}
+                pane="body"
+                t={t}
+                card={selTheme}
+                active={selTheme.id === data.active_theme}
+                activeRoster={data.roster}
+                busy={busy}
+                onSelect={onSelect}
+                onAction={(action, args) => void run(action, args)}
+                onAdded={(msg) => {
+                  setNotice({ ok: true, msg });
+                  void onChanged();
+                }}
+              />
+            )}
+          </div>
         </div>
       </Section>
     </TabCard>
