@@ -11,6 +11,7 @@ import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
 import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
 import { useIsPhone } from '@/lib/useIsPhone';
+import { ChatInput } from './ChatInput';
 import { accentByName, hex, type AccentColorName } from '@/design/tokens';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
@@ -2160,12 +2161,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       {/* 맨 위·맨 아래 점프 — 긴 대화에서 빠르게(거노). 이미 끝이면 해당 버튼 숨김. */}
       <div style={{ position: 'absolute', right: 14, bottom: 12, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 20 }}>
         {!atTop && (
-          <button onClick={() => bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })} title="맨 위로" style={SCROLL_BTN}>
+          <button onClick={() => bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })} title="맨 위로" style={isPhone ? { ...SCROLL_BTN, width: 44, height: 44 } : SCROLL_BTN}>
             <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 12V4M4.5 7.5 8 4l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </button>
         )}
         {!atBottom && !newMsg && (
-          <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); }} title="맨 아래로" style={SCROLL_BTN}>
+          <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); }} title="맨 아래로" style={isPhone ? { ...SCROLL_BTN, width: 44, height: 44 } : SCROLL_BTN}>
             <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 4v8M4.5 8.5 8 12l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </button>
         )}
@@ -2191,7 +2192,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       {/* 인터랙티브 메뉴(/model·AskUserQuestion) — 선택지 카드. 단일=클릭 즉시 선택,
           multiSelect=체크박스 여러개 토글 후 제출(거노: 중복선택 GUI). */}
       {menu && (
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: 260, overflowY: 'auto', position: 'relative' }}>
+        // 폰에서 260px 는 선택지 세 개면 차서, 정작 고를 것을 상자 안에서 또 굴려야 한다.
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: isPhone ? '58vh' : 260, overflowY: 'auto', position: 'relative' }}>
           {/* 숨기기 — 카드만 치운다(터미널엔 키 안 보내 답은 유지). 같은 질문 부활 방지로
               계속 숨김. ESC(취소, 터미널에 \x1b)와 구분(거노: 선택지 나올 때 숨기기). */}
           <button
@@ -2202,12 +2204,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               setChecked(new Set());
             }}
             title="선택지 숨기기 — 카드만 치워요(터미널에서 직접 답할 수 있어요)"
-            style={{ position: 'absolute', top: 6, right: 8, width: 22, height: 22, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--cth-ink-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, zIndex: 1 }}
+            style={{ position: 'absolute', top: 6, right: 8, width: isPhone ? 44 : 22, height: isPhone ? 44 : 22, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--cth-ink-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, zIndex: 1 }}
           >
             <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
           </button>
-          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4, paddingRight: 22 }}>{menu.header}</div>}
-          {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8, paddingRight: 22 }}>{menu.title}</div>}
+          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4, paddingRight: isPhone ? 46 : 22 }}>{menu.header}</div>}
+          {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8, paddingRight: isPhone ? 46 : 22 }}>{menu.title}</div>}
           {menu.multi && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', marginBottom: 8 }}>여러 개 선택 가능 — 체크하고 제출</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {menu.options.map((o, oi) => {
@@ -2215,7 +2217,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               const isNav = oi === navIdx;
               return (
                 <button key={o.idx} onClick={() => (menu.multi ? toggleCheck(oi) : void pickMenu(oi))} style={{
-                  textAlign: 'left', padding: '8px 12px', borderRadius: 9, cursor: 'pointer',
+                  textAlign: 'left', padding: isPhone ? '11px 12px' : '8px 12px', borderRadius: 9, cursor: 'pointer',
+                  minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                   border: on ? '2px solid var(--cth-sky)' : isNav ? '2px solid var(--cth-sky-light)' : '1px solid var(--cth-cream-200)',
                   background: isNav ? 'var(--cth-paper-100)' : 'var(--cth-cream-50)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)',
                   display: 'flex', alignItems: 'flex-start', gap: 8,
@@ -2258,6 +2261,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               disabled={checked.size === 0}
               style={{
                 marginTop: 9, width: '100%', padding: '9px', border: 'none', borderRadius: 9,
+                minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 cursor: checked.size === 0 ? 'not-allowed' : 'pointer',
                 background: checked.size > 0 ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
                 color: checked.size > 0 ? '#fff' : 'var(--cth-ink-300)',
@@ -2437,7 +2441,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           padding: '9px 12px', background: 'var(--cth-cream-50)', borderTop: '1px solid var(--cth-cream-200)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center',
         }}>서브에이전트 대화 · 읽기 전용</div>
-      ) : null /* 라이브 학생 입력은 터미널에서 — 현재 작업(TaskStrip)은 위 통합 줄의 접이식 묶음으로 이관(거노). */}
+      ) : surfaceId ? (
+        // 한때 없앴던 입력줄이다(「어차피 뷰어」) — 데스크톱은 옆에 터미널 pane 이
+        // 있었으니 맞는 판단이었다. 폰에서는 터미널이 아예 다른 주소라 그 전제가
+        // 깨진다(2026-08-25 「웹뷰 입력하는곳이 없어」).
+        <ChatInput surfaceId={surfaceId} isPhone={isPhone} />
+      ) : null}
 
       {/* 확인 모달 — window.confirm 대체(wry webview 무반응). 종료·compact·diff 공통. */}
       {confirm && (
