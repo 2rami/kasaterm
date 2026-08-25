@@ -2359,6 +2359,9 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            diff: None,
+            diff_peek: None,
+            diff_head: None,
             wrap: false,
             extra: Vec::new(),
             undo_locked: false,
@@ -2517,6 +2520,9 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            diff: None,
+            diff_peek: None,
+            diff_head: None,
             wrap: false,
             extra: Vec::new(),
             undo_locked: false,
@@ -3573,10 +3579,24 @@ impl App {
         // 저장된 캐릭터를 되살린다(거노: 재시작하면 랜덤 둔갑). pending 으로 세팅하면
         // assign_character_env 가 랜덤 대신 이걸 재사용하고, 저장 세션 id 가 있으면 그
         // 원본 sid 에 캐릭터를 다시 bind 해 --resume 후 shim 교정·다음 재시작까지 영속화한다.
+        // 고른 명단 밖이면 **되살리지 않는다** — 그러면 아래 `assign_character_env` 가
+        // 명단 안에서 새로 뽑는다. 저장된 이름을 무조건 되살리던 탓에, 명단을 바꿔도
+        // 이미 배정된 학생은 재시작을 넘어 영원히 남았다(거노 2026-08-25 「설정에서
+        // 원하는거 다 골랐는데 그거 반영안되고 선택안된학생도 스폰돼」 — 새 배정은
+        // 멀쩡했고 옛 배정이 안 바뀐 것이었다).
+        //
+        // 대화는 안 끊긴다. 바뀌는 것은 이름·얼굴·말투뿐이고 `--resume` 은 그대로 탄다.
         let saved_char = rec
             .get("character")
             .and_then(|c| c.as_str())
             .filter(|s| !s.is_empty())
+            .filter(|s| {
+                let keep = kasa_mcp::character::is_assignable(s);
+                if !keep {
+                    eprintln!("[restore] {s} 는 고른 명단 밖 — 새로 배정한다");
+                }
+                keep
+            })
             .map(|s| s.to_string());
         if let Some(ref c) = saved_char {
             self.pending_character = Some(c.clone());

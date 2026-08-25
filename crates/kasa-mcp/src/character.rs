@@ -401,6 +401,23 @@ pub fn assignable_names(chars: &Value) -> Vec<String> {
     assignable_names_with(chars, &picked_names())
 }
 
+/// 그 이름이 **지금 배정 대상인가**.
+///
+/// 재시작 복원이 쓴다. 저장된 캐릭터를 그대로 되살리면 고른 명단을 바꿔도 이미
+/// 배정된 학생은 영원히 남는다 — 거노가 30명을 골랐는데 화면엔 안 고른 9명이
+/// 계속 떠 있었고, 그건 새 배정이 명단을 어긴 게 아니라 **옛 배정이 안 바뀐** 것이었다
+/// (2026-08-25 실측: 새 pane 은 `pool=30/roster=79` 로 정확했다).
+pub fn is_assignable(name: &str) -> bool {
+    is_assignable_with(name, &picked_names())
+}
+
+/// 위의 순수부. 고른 목록이 **비어 있으면 전원이 대상**이다 — 아무도 안 골랐다는
+/// 것은 「아무도 못 쓴다」가 아니라 「제한이 없다」는 뜻이고, 여기서 거짓을 주면
+/// 고르기를 한 번도 안 쓴 사람의 복원이 통째로 랜덤이 된다.
+fn is_assignable_with(name: &str, picked: &[String]) -> bool {
+    picked.is_empty() || picked.iter().any(|n| n == name)
+}
+
 /// 위의 순수부 — 고른 목록을 이미 손에 들고 있을 때. 폴백 규칙이 여기 한 줄로 모여
 /// 있어야 「빈 목록이 배정을 굶기는가」를 파일 없이 시험할 수 있다.
 fn assignable_names_with(chars: &Value, picked: &[String]) -> Vec<String> {
@@ -1431,6 +1448,22 @@ mod tests {
 
     /// 테마를 가로질러 모인다 — 이게 이 기능의 핵심이다.
     #[test]
+    /// 2026-08-25: 고른 명단을 바꿔도 **이미 배정된 학생이 재시작을 넘어 남았다.**
+    /// 복원이 저장된 이름을 무조건 되살렸기 때문 — 이 판정이 그 자리를 막는다.
+    #[test]
+    fn a_name_outside_the_picks_is_not_assignable() {
+        let picked = vec!["시로코".to_string(), "미도리".to_string()];
+        assert!(is_assignable_with("미도리", &picked));
+        assert!(!is_assignable_with("고블린", &picked), "안 고른 이름은 배정 대상이 아니다");
+    }
+
+    /// 아무도 안 고른 상태는 「아무도 못 쓴다」가 아니라 「제한이 없다」다. 여기서
+    /// 거짓을 주면 고르기를 한 번도 안 쓴 사람의 복원이 통째로 랜덤이 된다.
+    #[test]
+    fn an_empty_pick_list_lets_everyone_through() {
+        assert!(is_assignable_with("아무나", &[]));
+    }
+
     fn picks_are_gathered_across_themes() {
         let base = roster(&["아로나", "시로코"]);
         let genshin = roster(&["푸리나", "나히다"]);
