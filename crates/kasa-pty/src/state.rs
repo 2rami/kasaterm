@@ -226,6 +226,11 @@ pub struct PtySession {
     /// 전혀 묶이지 않는다. `blocks` 와 같은 이유로 Arc 공유 — HTTP 백엔드가
     /// GUI 스레드를 거치지 않고 직접 붙는다.
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    /// 우리가 파싱한 **셀 그리드**를 그대로 받는 소비자를 위한 tee. `byte_taps` 가
+    /// 바이트를 주는 것과 달리 여기로는 `ScreenUpdate` 가 간다 — 받는 쪽이 자기 VT
+    /// 파서 없이 화면을 그린다(웹텀). `screens` 채널을 대신 쓸 수는 없다: 그건 MPMC라
+    /// 구독자가 늘면 GUI 와 프레임을 **나눠 갖게 되어** 네이티브 화면이 깨진다.
+    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
     /// 셀-흐름 인라인 이미지(OSC 1337) 기록. 리더 스레드가 채우고, 스냅샷을
     /// 만드는 모든 경로(reader·scroll·full_snapshot)가 뷰포트 배치로 환산해
     /// ScreenUpdate 에 싣는다.
@@ -439,6 +444,7 @@ impl PtySession {
             proc.advance(&mut *t, b"\r\n");
         }
         let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_thread = spawn_reader_thread(
@@ -453,6 +459,7 @@ impl PtySession {
             Arc::clone(&blocks),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
+            Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
         );
@@ -476,6 +483,7 @@ impl PtySession {
             term,
             screens_tx: tx,
             byte_taps,
+            screen_taps,
             title_handle,
             pane_id: opts.pane_id.clone(),
             tty_short,
@@ -693,7 +701,7 @@ impl PtySession {
             true,
         );
         attach_inline_views(&mut update, &t, &self.inline_imgs);
-        let _ = self.screens_tx.try_send(update);
+        self.publish_screen(update);
         after
     }
 
@@ -777,7 +785,7 @@ impl PtySession {
             true,
         );
         attach_inline_views(&mut update, &t, &self.inline_imgs);
-        let _ = self.screens_tx.try_send(update);
+        self.publish_screen(update);
     }
 
     /// 뷰포트가 스크롤백 어디에 있나 — `(display_offset, history_size)`.
@@ -837,7 +845,7 @@ impl PtySession {
         let mut update =
             snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
         attach_inline_views(&mut update, &t, &self.inline_imgs);
-        let _ = self.screens_tx.try_send(update);
+        self.publish_screen(update);
         after
     }
 
@@ -854,7 +862,28 @@ impl PtySession {
     }
 
     pub fn publish_full_snapshot(&self) {
-        let _ = self.screens_tx.try_send(self.full_snapshot());
+        self.publish_screen(self.full_snapshot());
+    }
+
+    /// GUI 채널과 모든 그리드 tap 에 한 프레임을 내보낸다.
+    fn publish_screen(&self, update: ScreenUpdate) {
+        let _ = publish_screen_update(&self.screens_tx, &self.screen_taps, update);
+    }
+
+    /// 셀 그리드를 구독하면서 "지금 화면" 전체를 함께 받는다. 받는 쪽에는 VT 파서가
+    /// 필요 없다 — 그리드를 그대로 그리면 된다(웹텀이 xterm.js 없이 도는 근거).
+    ///
+    /// ⚠️ 스냅샷 채취와 구독 등록이 `term` 락 하나 안에서 끝나야 하는 이유는
+    /// `tap_bytes_with_snapshot` 와 같다 — 둘로 나누면 그 사이 프레임이 스냅샷에도
+    /// tap 에도 없이 사라진다. 그래서 `full_snapshot` 을 부르지 않고 본문을 편다.
+    pub fn tap_screens_with_snapshot(&self) -> (Receiver<ScreenUpdate>, ScreenUpdate) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        let mut snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        attach_inline_views(&mut snap, &t, &self.inline_imgs);
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        self.screen_taps.lock().unwrap().push(tx);
+        (rx, snap)
     }
 
     /// raw PTY 바이트 스트림을 구독한다. 받는 쪽이 자기 VT 파서를 갖고 있을 때
@@ -1318,6 +1347,29 @@ pub fn kept_sessions() -> Vec<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `ScreenUpdate` 한 프레임을 GUI 채널과 그리드 tap 구독자 모두에게 내보낸다.
+///
+/// 구독자가 없으면 clone 을 아예 안 하므로 평소 비용은 lock 하나다. 밀린 구독자를
+/// **버리는 게 아니라 끊는** 정책은 byte tap 과 같은 이유다 — dirty diff 스트림이라
+/// 중간 프레임을 흘리면 받는 쪽 화면이 복구 불능으로 어긋난다. 끊으면 재연결해서
+/// 전체 스냅샷부터 다시 받으므로 조용히 깨진 화면보다 낫다.
+///
+/// ⚠️ 전부 `try_send` 다 — 여기서 블로킹하면 reader 가 멎고 셸이 backpressure 를 먹어
+/// 터미널 전체가 느려진다(`spawn_reader_thread` 의 tee 주석 참고).
+fn publish_screen_update(
+    tx: &Sender<ScreenUpdate>,
+    taps: &Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
+    update: ScreenUpdate,
+) -> Result<(), crossbeam_channel::TrySendError<ScreenUpdate>> {
+    {
+        let mut subs = taps.lock().unwrap();
+        if !subs.is_empty() {
+            subs.retain(|sub| sub.try_send(update.clone()).is_ok());
+        }
+    }
+    tx.try_send(update)
+}
+
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<ScreenUpdate>,
@@ -1330,6 +1382,7 @@ fn spawn_reader_thread(
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
     inline_imgs: Arc<Mutex<InlineImgs>>,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
@@ -1662,7 +1715,7 @@ fn spawn_reader_thread(
                 // The blocking `send` previously stalled the reader, which
                 // backpressured bash, which made claude-code-style TUIs
                 // feel ~10× slower than ghostty.
-                match tx.try_send(upd) {
+                match publish_screen_update(&tx, &screen_taps, upd) {
                     Ok(()) => {}
                     Err(crossbeam_channel::TrySendError::Full(_)) => {}
                     Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,

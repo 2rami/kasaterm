@@ -13,6 +13,10 @@ kasa-socket = { path = "../kasa-socket" }
 # 웹 터미널: PTY 세션 레지스트리에 붙어 raw 바이트를 웹소켓으로 중계한다.
 # kasa-pty 는 kasa-mcp 를 모르므로 순환이 아니다.
 kasa-pty = { path = "../kasa-pty" }
+# 셀 그리드 타입(ScreenUpdate·Cell) — gridwire 인코더가 쓴다.
+kasa-bridge = { path = "../kasa-bridge" }
+# wide 글자(한글) 폭 판정 — 스페이서를 걸러내는 데 쓴다.
+unicode-width = "0.2"
 anyhow.workspace = true
 # "ws" — 웹 터미널의 양방향 채널. 기본 feature 에는 안 들어 있다.
 axum = { version = "0.8.9", features = ["ws"] }

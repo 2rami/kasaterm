@@ -3683,6 +3683,26 @@ async fn term_asset_js() -> impl IntoResponse {
     )
 }
 
+/// 셀 그리드 렌더러. xterm.js 와 달리 VT 파서가 없다 — 서버가 파싱한 그리드를
+/// 그대로 그린다(`gridwire.rs`).
+async fn term_grid_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../assets/term/grid.js"),
+    )
+}
+
+async fn term_grid_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../assets/term/grid.css"),
+    )
+}
+
+async fn term_grid_page() -> impl IntoResponse {
+    axum::response::Html(include_str!("../assets/term/grid.html"))
+}
+
 async fn term_asset_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -4100,6 +4120,23 @@ fn raw_pane_param(raw: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 브라우저로 나가는 한 프레임. 원시 바이트(자기 VT 파서를 든 클라)와 셀 그리드
+/// (파서 없이 그리는 클라)를 한 채널로 흘리려고 묶었다.
+enum Frame {
+    Bytes(Vec<u8>),
+    Grid(Box<kasa_bridge::screen::ScreenUpdate>),
+}
+
+/// 구독 시작 시점의 "지금 화면"과 이후 스트림. 둘을 한 락에서 받아야 그 사이
+/// 프레임이 유실되지 않는다(`tap_bytes_with_snapshot` 주석).
+enum Tap {
+    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>),
+    Grid(
+        kasa_pty::ScreenReceiver<kasa_bridge::screen::ScreenUpdate>,
+        Box<kasa_bridge::screen::ScreenUpdate>,
+    ),
+}
+
 async fn term_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -4120,7 +4157,9 @@ async fn term_ws_handler(
     let pane = q.get("pane").cloned().unwrap_or_default();
     let pane_raw = raw_pane_param(raw.as_deref());
     let cwd = q.get("cwd").cloned();
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd))
+    // 셀 그리드로 받을지(웹텀 자체 렌더) 원시 바이트로 받을지.
+    let grid = q.get("grid").map_or(false, |v| v == "1" || v == "true");
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid))
         .into_response()
 }
 
@@ -4129,6 +4168,7 @@ async fn term_ws_run(
     pane: String,
     pane_raw: Option<String>,
     cwd: Option<String>,
+    want_grid: bool,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -4174,9 +4214,18 @@ async fn term_ws_run(
             }
         }
     };
+    // `grid=1` 이면 우리가 파싱해 둔 셀 그리드를 그대로 보낸다 — 받는 쪽에 VT 파서가
+    // 필요 없다. 그리드를 ANSI 로 되돌려 보내면 브라우저가 그걸 또 파싱해야 하고, 그
+    // 파서(xterm.js)가 키 입력까지 자기 방식으로 가로채 모바일 IME 를 깨뜨렸다.
     // 구독과 화면 스냅샷을 한 번에 받는다 — 둘로 나누면 그 사이 출력이 유실되거나
     // 두 번 그려진다(`tap_bytes_with_snapshot` 주석 참고).
-    let (rx, screen) = sess.tap_bytes_with_snapshot();
+    let tap = if want_grid {
+        let (rx, snap) = sess.tap_screens_with_snapshot();
+        Tap::Grid(rx, Box::new(snap))
+    } else {
+        let (rx, bytes) = sess.tap_bytes_with_snapshot();
+        Tap::Bytes(rx, bytes)
+    };
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
@@ -4196,18 +4245,32 @@ async fn term_ws_run(
     // 바이너리로 나가므로 클라는 PTY 바이트와 구분 없이 그대로 `term.write` 한다 —
     // 받는 쪽에 필요한 코드가 0줄이다. 이게 없으면 이미 떠 있는 pane 에 붙었을 때
     // 다음 출력이 날 때까지 화면이 빈 채로 남는다.
-    let _ = ws_tx.send(Message::Binary(screen.into())).await;
-
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
-    let (btx, mut brx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    std::thread::spawn(move || {
-        while let Ok(chunk) = rx.recv() {
-            if btx.blocking_send(chunk).is_err() {
-                break;
-            }
+    let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
+    match tap {
+        Tap::Bytes(rx, screen) => {
+            let _ = ws_tx.send(Message::Binary(screen.into())).await;
+            std::thread::spawn(move || {
+                while let Ok(chunk) = rx.recv() {
+                    if btx.blocking_send(Frame::Bytes(chunk)).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-    });
+        Tap::Grid(rx, snap) => {
+            let msg = crate::gridwire::encode(&snap).to_string();
+            let _ = ws_tx.send(Message::Text(msg.into())).await;
+            std::thread::spawn(move || {
+                while let Ok(upd) = rx.recv() {
+                    if btx.blocking_send(Frame::Grid(Box::new(upd))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    }
 
     // 폰은 pane 격자(196열)를 축소로 담을 수가 없어서 PTY 자체를 줄여야 읽힌다.
     // 그런데 PTY 는 winsize 가 하나뿐이라 그 순간 kasaterm 쪽 pane 도 같이 좁아진다 —
@@ -4257,7 +4320,15 @@ async fn term_ws_run(
                             break;
                         }
                     }
-                    if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+                    let sent = match chunk {
+                        Frame::Bytes(b) => ws_tx.send(Message::Binary(b.into())).await,
+                        // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
+                        Frame::Grid(u) => {
+                            let msg = crate::gridwire::encode(&u).to_string();
+                            ws_tx.send(Message::Text(msg.into())).await
+                        }
+                    };
+                    if sent.is_err() {
                         break;
                     }
                 }
@@ -4586,6 +4657,9 @@ pub fn spawn_http_server_opts(
                     .route("/term", get(term_page_handler))
                     .route("/term/xterm.js", get(term_asset_js))
                     .route("/term/xterm.css", get(term_asset_css))
+                    .route("/term/grid", get(term_grid_page))
+                    .route("/term/grid.js", get(term_grid_js))
+                    .route("/term/grid.css", get(term_grid_css))
                     .route("/term/font.woff2", get(term_asset_font))
                     .route("/term/avatar/{slug}", get(term_avatar))
                     .route(

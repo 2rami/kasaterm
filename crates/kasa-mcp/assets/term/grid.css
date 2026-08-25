@@ -1,0 +1,45 @@
+/* 셀 그리드 렌더러 스타일. xterm.css 를 대체한다 — 여기는 캔버스가 아니라 DOM 이라
+   글자 선택·복사가 브라우저 기본으로 동작한다(xterm 은 자체 구현이 필요했다). */
+.kg {
+  --kg-bg: #12161c;
+  --kg-fg: #c8d0d9;
+  position: relative;
+  background: var(--kg-bg);
+  color: var(--kg-fg);
+  font: 13px/1.35 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;              /* 셀 공백을 그대로 — 서버가 자리를 이미 맞췄다 */
+  font-variant-ligatures: none;  /* 리거처가 붙으면 칸이 어긋난다 */
+  tab-size: 8;
+}
+.kg-row { height: 1.35em; }
+.kg-row:empty::after { content: ' '; }  /* 빈 행도 높이를 차지해야 줄이 안 밀린다 */
+.kg-cursor {
+  position: absolute;
+  top: 0; left: 0;
+  background: #7aa2f7;
+  opacity: .75;
+  pointer-events: none;
+  mix-blend-mode: difference;   /* 글자 위에 얹혀도 글자가 보인다 */
+}
+/* 셀 크기 자[ruler] — 재기만 하고 보이지는 않는다. display:none 이면 못 잰다. */
+.kg-ruler {
+  position: absolute;
+  visibility: hidden;
+  top: 0; left: 0;
+  pointer-events: none;
+}
+
+/* 입력을 받는 textarea. 눈에는 안 보이지만 **화면에 실재해야** 한다 —
+   화면 밖(left:-9999em)이나 크기 0 으로 숨기면 모바일 IME 가 조합을 포기하고
+   자모를 낱개로 확정해 버린다. 커서 자리에 두면 후보창도 제자리에 뜬다. */
+.kg-input {
+  position: absolute;
+  top: 0; left: 0;
+  width: 2em;
+  padding: 0; margin: 0; border: 0;
+  outline: none; resize: none; overflow: hidden;
+  font: inherit;
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;   /* 커서는 우리가 그린다 */
+}

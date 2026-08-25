@@ -17,6 +17,7 @@ use serde::Deserialize;
 pub mod character;
 pub mod dispatch;
 pub mod git;
+pub mod gridwire;
 mod http;
 pub mod persona;
 mod proxy;
