@@ -761,6 +761,9 @@ impl App {
             crate::markdown::Folds,
             bool,
             Vec<crate::markdown::Caret>,
+            // HEAD 대비 변경 + 펼친 헝크. 락 안에서 통째로 떠 온다 — 그리는 쪽은
+            // `g` 를 가변으로 잡아 락을 든 채로 못 간다(이 vec 전체가 그 이유다).
+            Option<(crate::gitdiff::BufferDiff, Option<usize>)>,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -934,6 +937,7 @@ impl App {
                     crate::markdown::Folds,
                     bool,
                     Vec<crate::markdown::Caret>,
+                    Option<(crate::gitdiff::BufferDiff, Option<usize>)>,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -953,6 +957,12 @@ impl App {
                         m.folds.clone(),
                         m.wrap,
                         m.extra.clone(),
+                        // 변경 없는 파일이면 `is_empty` 라 아예 안 싣는다 — 그
+                        // 경우 아래 그리기는 이 기능이 없던 때와 완전히 같다.
+                        m.diff
+                            .as_ref()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| (d.clone(), m.diff_peek)),
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -2269,6 +2279,7 @@ impl App {
                     folds,
                     wrap,
                     extra,
+                    diff,
                 )) = md
                 {
                     // 편집기 모드에서만 — 렌더 뷰엔 밑줄을 그릴 자리가 없다.
@@ -2296,6 +2307,7 @@ impl App {
                         folds,
                         wrap,
                         extra,
+                        diff,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -3236,6 +3248,7 @@ impl App {
                 folds,
                 wrap,
                 extra,
+                diff,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -3252,6 +3265,16 @@ impl App {
                         Some(_) => ("", pe),
                         None => (pe, ""),
                     };
+                    // 펼친 헝크는 **그 줄을 덮는 헝크가 아직 있을 때만** 그린다 —
+                    // 편집으로 자리를 잃은 펼침은 `store_diff` 가 닫지만, 그 사이
+                    // 한 프레임을 엉뚱한 줄에 붙은 판으로 보내지 않는다.
+                    let dv = diff.as_ref().map(|(d, peek)| crate::gitdiff::DiffView {
+                        marks: &d.marks,
+                        dels: &d.dels,
+                        peek: peek
+                            .and_then(|l| d.hunk_at(l).map(|h| (l, h.old.as_slice())))
+                            .filter(|(_, old)| !old.is_empty()),
+                    });
                     let h = g.draw_raw_editor(
                         lines,
                         *cursor,
@@ -3271,6 +3294,7 @@ impl App {
                         folds,
                         *wrap,
                         extra,
+                        dv.as_ref(),
                     );
                     if let Some(f) = find {
                         for (btn, r) in

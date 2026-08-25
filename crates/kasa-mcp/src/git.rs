@@ -589,6 +589,20 @@ pub fn git_file_diff(repo: &Path, path: &str, staged: bool) -> Vec<DiffLine> {
     parse_unified_diff(&out)
 }
 
+/// HEAD 시점의 파일 본문. 편집기 거터가 「지금 버퍼 ↔ 이것」을 메모리에서 떠
+/// 실시간 diff 를 만든다.
+///
+/// `git_file_diff` 로는 그걸 못 한다 — 그쪽은 **디스크**를 보므로 저장 전 버퍼를
+/// 모른다. 여기서 원본만 받아 오고 차이는 `gitdiff` 가 낸다.
+///
+/// HEAD 에 없으면(미추적·새 파일·레포 아님) `None`. 그때 편집기는 표시를 아예
+/// 안 그린다 — 온 줄이 초록인 화면은 아무것도 알려주지 않는다.
+pub fn git_head_text(repo: &Path, rel: &str) -> Option<String> {
+    // `--` 로 갈라야 `HEAD:foo` 를 리비전이 아니라 경로로 읽는 사고가 안 난다.
+    let (ok, out) = run_git(repo, &["show", &format!("HEAD:{rel}"), "--"]);
+    ok.then_some(out)
+}
+
 /// Parse `git diff` output into line-numbered rows. File headers (`diff`,
 /// `index`, `+++`, `---`, `new file`, …) are dropped; only hunks + body lines
 /// survive. Line numbers track from each hunk header's `@@ -old +new @@`.

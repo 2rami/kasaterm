@@ -5093,6 +5093,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 if !self.try_copy_md_block() {
                                     if self.md_body_rects.contains_key(&pane_id) {
+                                        // 변경 바와 펼친 패널이 가장 먼저다 —
+                                        // 패널은 본문 위에 떠 있어서, 버튼을
+                                        // 눌렀는데 밑의 글자로 캐럿이 가면 안 된다.
+                                        if self.md_diff_click(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        ) {
+                                            window.request_redraw();
+                                            return;
+                                        }
                                         // 거터의 접기 삼각형은 캐럿 배치보다 먼저
                                         // 본다 — 삼각형 위에서 손을 떼는 순간
                                         // 본문에 엉뚱한 선택이 생기면 안 된다.
@@ -6210,6 +6221,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // 편집기 거터의 HEAD 대비 표시. 활성 pane 만이 아니라 **열려 있는 모든**
+        // 편집기를 훑는다(자동 저장과 같은 범위) — 뒤 탭의 바가 낡은 채로 남으면
+        // 탭을 옮기는 순간 한 박자 늦게 튄다. 타자 중이거나 세대가 그대로면
+        // 곧바로 나가므로 이 자리에서 매 턴 불러도 싸다.
+        self.diff_refresh();
         // 정의 이동 응답도 왕복이라 여기서 받는다 — 온 순간 그 파일을 연다.
         self.lsp_goto_pump();
         // 마우스가 멎었으면 그 자리를 묻고, 답이 왔으면 툴팁에 담는다.

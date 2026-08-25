@@ -574,6 +574,11 @@ impl MarkdownPane {
         // 버퍼를 통째로 갈아끼우는 경로다 — `lines_mut` 를 안 지나므로 캐시를
         // 직접 버려야 한다(안 버리면 undo 후 가로 스크롤 상한이 옛 버퍼 값).
         self.longest_cache = None;
+        // 세대도 같은 이유로 직접 올린다. 이걸 빼면 **버퍼는 바뀌었는데 아무도
+        // 모르는** 상태가 된다 — 거터 diff 는 undo 전 모습을 계속 그리고,
+        // rust-analyzer 는 didChange 를 못 받아 옛 본문으로 진단을 낸다.
+        // 접힘 재검증(`folds_valid`)도 이 값으로 걸린다.
+        self.edit_gen = self.edit_gen.wrapping_add(1);
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
@@ -2500,6 +2505,12 @@ impl App {
             } else if m.complete_key(event) {
                 // 자동완성 팝업이 먹었다 — 버퍼로 흘려보내지 않는다.
             } else if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                && m.diff_peek.take().is_some()
+            {
+                // 펼친 원본 판이 본문을 덮고 있다 — Esc 로 제일 먼저 걷힌다.
+                // 보조 커서보다 앞인 이유: 이건 **화면을 가리고 있는 것**이라,
+                // 두 번 눌러야 걷히면 그 사이 코드가 안 보인다.
+            } else if matches!(event.logical_key, Key::Named(NamedKey::Escape))
                 && m.clear_extra_carets()
             {
                 // Esc 는 보조 커서부터 거둔다 — 선택 해제보다 이게 먼저다.
@@ -3022,6 +3033,157 @@ impl App {
         }
     }
 
+    /// 편집기 거터의 **HEAD 대비 표시**를 갱신한다. 틱에서 불린다.
+    ///
+    /// 자리가 여기인 이유는 `lsp_attach` 와 같다 — 편집기가 열리는 경로가 여럿
+    /// (사이드바·소켓·복원·팝아웃)이라, 한 자리에 두면 어느 경로로 열려도 같은
+    /// 순간에 걸린다. 훑는 범위는 자동 저장(`run_editor_autosave`)과 같은 **모든
+    /// 편집기**다: 뒤에 있는 탭의 바가 낡은 채로 남으면 탭을 옮기는 순간 한 박자
+    /// 늦게 튄다.
+    ///
+    /// ⚠️ 락 안에서는 **경로·세대·Arc 만** 뜬다. `git show` 는 프로세스를 띄우고
+    /// 차이 계산은 파일 전체를 훑으므로 둘 다 락 밖에서 한다.
+    pub(crate) fn diff_refresh(&mut self) {
+        /// 타자가 멎었다고 볼 시간. LSP 재전송(`lsp::QUIET`)보다 짧다 — 이쪽은
+        /// 왕복이 없어 더 자주 떠도 되고, 바가 손끝을 너무 늦게 따라오면
+        /// 「실시간」이라는 말이 무색해진다.
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+
+        struct Job {
+            loc: crate::DirtyDoc,
+            path: String,
+            gen: u64,
+            lines: std::sync::Arc<Vec<String>>,
+            head: Option<crate::gitdiff::HeadText>,
+        }
+        let now = std::time::Instant::now();
+        // 이 편집기가 지금 일이 있나 — 있으면 계산에 필요한 것만 떠 온다.
+        let pick = |m: &MarkdownPane, loc: crate::DirtyDoc| -> Option<Job> {
+            // 렌더 모드에는 거터가 없다. 토글하면 다음 틱에 곧바로 잡힌다.
+            if !m.raw_mode || m.doc.path.is_empty() {
+                return None;
+            }
+            // 타이핑 중에는 직전 결과를 그대로 둔다. 글자마다 파일을 통째로
+            // 훑으면 그 자체가 프레임 예산이다.
+            if m.edited_at.is_some_and(|at| now.duration_since(at) < QUIET) {
+                return None;
+            }
+            // 이 세대로 이미 떴고 원본도 손에 있으면 할 일이 없다.
+            if m.diff.as_ref().is_some_and(|d| d.gen == m.edit_gen) && m.diff_head.is_some() {
+                return None;
+            }
+            Some(Job {
+                loc,
+                path: m.doc.path.clone(),
+                gen: m.edit_gen,
+                lines: m.edit_lines.clone(),
+                head: m.diff_head.clone(),
+            })
+        };
+
+        let mut jobs: Vec<Job> = Vec::new();
+        if let Ok(ws) = self.ws.lock() {
+            for (id, pane) in ws.panes.iter() {
+                for (t, tab) in pane.tabs.iter().enumerate() {
+                    let Some(m) = tab.markdown() else { continue };
+                    if let Some(j) =
+                        pick(m, crate::DirtyDoc::Tab { pane: id.clone(), tab: t })
+                    {
+                        jobs.push(j);
+                    }
+                }
+            }
+        }
+        for a in self.aux_windows.iter() {
+            let Some(m) = a.editor() else { continue };
+            if let Some(j) = pick(m, crate::DirtyDoc::Aux(a.window.id())) {
+                jobs.push(j);
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+
+        for job in jobs {
+            let head = job.head.unwrap_or_else(|| crate::gitdiff::read_head_text(&job.path));
+            let diff = match &head {
+                crate::gitdiff::HeadText::Absent => {
+                    // 비교할 원본이 없다. 온 줄이 초록인 화면은 아무것도 알려주지
+                    // 않으므로 **표시를 아예 안 그린다** — 빈 결과를 넣어 두면
+                    // 위의 세대 검사가 걸려 매 틱 다시 시도하지 않는다.
+                    crate::gitdiff::BufferDiff { gen: job.gen, ..Default::default() }
+                }
+                crate::gitdiff::HeadText::Lines(old) => {
+                    crate::gitdiff::diff_lines(old, &job.lines, job.gen)
+                }
+            };
+            self.store_diff(&job.loc, head, diff);
+        }
+    }
+
+    /// 계산 결과를 그 편집기에 되돌려 놓는다. 자리 찾기는 `mark_doc_clean` 과
+    /// 같은 모양 — 락 밖에서 계산하고 여기서만 짧게 잠근다.
+    fn store_diff(
+        &mut self,
+        loc: &crate::DirtyDoc,
+        head: crate::gitdiff::HeadText,
+        diff: crate::gitdiff::BufferDiff,
+    ) {
+        // 펼쳐 둔 헝크가 편집으로 자리를 잃었으면 닫는다 — 안 그러면 패널이
+        // 엉뚱한 줄에 붙은 채 남는다.
+        let keep_peek = |m: &MarkdownPane, d: &crate::gitdiff::BufferDiff| {
+            m.diff_peek.filter(|&l| d.hunk_at(l).is_some())
+        };
+        match loc {
+            crate::DirtyDoc::Tab { pane, tab } => {
+                let Ok(mut ws) = self.ws.lock() else { return };
+                let Some(p) = ws.panes.get_mut(pane) else { return };
+                let Some(m) = p.tabs.get_mut(*tab).and_then(|t| t.markdown_mut()) else {
+                    return;
+                };
+                m.diff_peek = keep_peek(m, &diff);
+                m.diff_head = Some(head);
+                m.diff = Some(diff);
+                p.dirty = true;
+            }
+            crate::DirtyDoc::Aux(id) => {
+                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id)
+                else {
+                    return;
+                };
+                let Some(m) = a.editor_mut() else { return };
+                m.diff_peek = keep_peek(m, &diff);
+                m.diff_head = Some(head);
+                m.diff = Some(diff);
+                a.window.request_redraw();
+            }
+        }
+    }
+
+    /// 열려 있는 모든 편집기의 HEAD 원본 캐시를 버린다. 커밋·스테이지·discard 로
+    /// **HEAD 가 움직인 뒤**에 부른다 — 안 버리면 이미 커밋한 변경이 거터에
+    /// 그대로 남아, 고치지도 않은 줄이 파랗게 보인다.
+    pub(crate) fn invalidate_editor_diffs(&mut self) {
+        if let Ok(mut ws) = self.ws.lock() {
+            for pane in ws.panes.values_mut() {
+                for tab in pane.tabs.iter_mut() {
+                    if let Some(m) = tab.markdown_mut() {
+                        m.diff_head = None;
+                        m.diff = None;
+                        m.diff_peek = None;
+                    }
+                }
+            }
+        }
+        for a in self.aux_windows.iter_mut() {
+            if let Some(m) = a.editor_mut() {
+                m.diff_head = None;
+                m.diff = None;
+                m.diff_peek = None;
+            }
+        }
+    }
+
     /// 이 화면 좌표를 품은 편집기 pane.
     fn md_pane_at_px(&self, px: f32, py: f32) -> Option<String> {
         self.md_body_rects
@@ -3263,6 +3425,103 @@ impl App {
             return Vec::new();
         };
         m.get(std::path::Path::new(path)).cloned().unwrap_or_default()
+    }
+
+    /// 거터의 **변경 바**(또는 펼친 패널의 [되돌리기])를 눌렀으면 처리하고 true.
+    /// 본문을 눌렀으면 false — 호출자는 평소 캐럿 배치로 넘어간다.
+    ///
+    /// 판정 순서가 계약이다: **펼친 패널이 먼저**다. 패널은 본문 위에 떠 있으므로
+    /// 버튼을 눌렀는데 밑에 있는 글자로 캐럿이 옮겨 가면 안 된다(찾기 바가 같은
+    /// 이유로 먼저 판정되는 것과 같다).
+    pub(crate) fn md_diff_click(&mut self, id: &str, px: f32, py: f32) -> bool {
+        let Some(&(bx, by, bw, bh)) = self.md_body_rects.get(id) else {
+            return false;
+        };
+        let snap = {
+            let ws = self.ws.lock().ok();
+            ws.and_then(|w| {
+                w.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
+                    let d = m.diff.clone()?;
+                    m.raw_mode.then(|| {
+                        (m.edit_lines.clone(), m.scroll, m.folds.clone(), m.wrap, d, m.diff_peek)
+                    })
+                })
+            })
+        };
+        let Some((lines, scroll, folds, wrap, diff, peek)) = snap else {
+            return false;
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return false;
+        };
+        // ① 펼쳐 둔 패널의 되돌리기.
+        if let Some(pl) = peek {
+            if let Some(h) = diff.hunk_at(pl) {
+                let old_len = h.old.len();
+                if old_len > 0
+                    && gpu.raw_editor_peek_btn_hit(
+                        &lines,
+                        bx,
+                        by,
+                        bw,
+                        bh,
+                        scroll,
+                        (px, py),
+                        &folds,
+                        wrap,
+                        pl,
+                        old_len,
+                    )
+                {
+                    self.revert_hunk(id, pl);
+                    return true;
+                }
+            }
+        }
+        // ② 거터의 바.
+        let Some(li) =
+            gpu.raw_editor_diff_hit(&lines, bx, by, bw, scroll, px, py, &folds, wrap)
+        else {
+            return false;
+        };
+        let Ok(mut ws) = self.ws.lock() else { return false };
+        let Some(pane) = ws.panes.get_mut(id) else { return false };
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return false };
+        // 헝크가 없는 줄을 눌렀어도 **true** 다 — 거터를 누른 것이지 본문을 누른
+        // 게 아니라서, 여기서 false 를 주면 캐럿이 엉뚱하게 튄다. 그때는 펼침만
+        // 닫는다(빈 자리를 눌러 닫는 자연스러운 몸짓이다).
+        m.diff_peek = match m.diff_peek {
+            Some(cur) if cur == li => None,
+            _ => diff.hunk_at(li).filter(|h| !h.old.is_empty()).map(|_| li),
+        };
+        true
+    }
+
+    /// 헝크 하나를 HEAD 원본으로 되돌린다. **순수 버퍼 편집**이라 새 저장도 git
+    /// 명령도 필요 없다 — 기존 편집 경로를 그대로 지나므로 Cmd+Z 로 통째로
+    /// 취소되고, 다음 틱에 diff 가 저절로 다시 뜬다.
+    fn revert_hunk(&mut self, id: &str, line: usize) {
+        let Ok(mut ws) = self.ws.lock() else { return };
+        let Some(pane) = ws.panes.get_mut(id) else { return };
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return };
+        let Some(h) = m.diff.as_ref().and_then(|d| d.hunk_at(line)).cloned() else {
+            return;
+        };
+        // `Other` 로 스냅샷을 세운다 — 타이핑 런에 이어 붙으면 Cmd+Z 한 번이
+        // 되돌리기와 그 전에 친 글자를 함께 지운다.
+        m.push_undo(crate::EditKind::Other);
+        let end = h.new.end.min(m.edit_lines.len());
+        let start = h.new.start.min(end);
+        m.lines_mut().splice(start..end, h.old.iter().cloned());
+        // 캐럿을 되살아난 자리 첫 줄로. 화면 밖에서 조용히 바뀌면 무엇이 돌아왔는지
+        // 안 보인다.
+        m.cur_line = start.min(m.edit_lines.len().saturating_sub(1));
+        m.cur_col = 0;
+        m.sel_anchor = None;
+        m.diff_peek = None;
+        m.touch();
     }
 
     /// 거터의 접기 삼각형을 눌렀으면 접거나 펴고 true. 본문을 눌렀으면 false —
@@ -3592,6 +3851,9 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            diff: None,
+            diff_peek: None,
+            diff_head: None,
             wrap: false,
             extra: Vec::new(),
             undo_locked: false,
@@ -4647,6 +4909,22 @@ mod tests {
         assert!(!m.do_undo());
     }
 
+    /// undo/redo 도 **버퍼가 바뀐 것**이므로 세대가 올라야 한다. 안 올리면
+    /// 세대를 보는 쪽들이 통째로 눈이 먼다 — 거터 diff 는 undo 전 모습을 계속
+    /// 그리고, rust-analyzer 는 didChange 를 못 받아 옛 본문으로 진단을 낸다.
+    #[test]
+    fn undo_redo_advances_edit_gen() {
+        let mut m = pane(&["a"]);
+        m.cur_col = 1;
+        m.insert_at_caret("b");
+        let after_edit = m.edit_gen;
+        assert!(m.do_undo());
+        assert!(m.edit_gen > after_edit, "undo 가 세대를 안 올렸다");
+        let after_undo = m.edit_gen;
+        assert!(m.do_redo());
+        assert!(m.edit_gen > after_undo, "redo 가 세대를 안 올렸다");
+    }
+
     #[test]
     fn select_all_and_take_copy_cut() {
         let mut m = pane(&["one", "two"]);
@@ -4689,6 +4967,9 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            diff: None,
+            diff_peek: None,
+            diff_head: None,
             wrap: false,
             extra: Vec::new(),
             undo_locked: false,

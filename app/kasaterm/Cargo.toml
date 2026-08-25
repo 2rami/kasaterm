@@ -67,6 +67,12 @@ resvg = "0.45"
 # Move deleted file-tree entries to the OS trash (recoverable) instead of a
 # hard unlink, cross-platform.
 trash = "5"
+# 편집기 거터의 HEAD 대비 실시간 diff — 줄 단위 Myers(src/gitdiff.rs).
+# 직접 짜지 않는 이유는 **틀린 헝크가 조용해서**다: 한 줄 어긋나도 경고 없이
+# 그럴듯한 바가 뜨고, 그 상태로 되돌리기를 누르면 엉뚱한 줄이 되살아난다.
+# default-features off: 우리가 미는 건 `Vec<String>` 두 개(줄 배열)라 텍스트
+# 분할·유니코드 단어 경계가 필요 없다. 알고리즘 본체는 feature 게이트 밖이다.
+similar = { version = "2", default-features = false }
 tree-sitter = "0.26.11"
 tree-sitter-highlight = "0.26.11"
 tree-sitter-rust = "0.24.2"

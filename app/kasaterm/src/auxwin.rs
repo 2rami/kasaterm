@@ -196,6 +196,9 @@ struct AuxMdSnap {
     h_scroll: f32,
     lang: String,
     wrap: bool,
+    /// HEAD 대비 변경 표시. 이 화면은 읽기 전용이라 **바만** 뜨고 펼쳐보기는
+    /// 없다 — 키가 셸 탭에서만 통과하듯, 클릭도 여기선 안 받는다.
+    diff: Option<crate::gitdiff::BufferDiff>,
 }
 
 /// 마크다운 편집기 별도창 맨 위의 `Rendered | Raw` 띠. 메인 그리드 헤더의 알약과
@@ -731,6 +734,18 @@ impl AuxWindow {
             AuxWindowKind::Editor(m) => {
                 let lang = crate::code_lang_for_path(std::path::Path::new(&m.doc.path));
                 let sel = m.sel_range();
+                // 거터 표시는 pane 이 소유하므로 팝아웃 창도 그냥 따라온다 —
+                // 상태가 `MarkdownPane` 에 있는 것의 값어치가 여기서 나온다.
+                let dv = m.diff.as_ref().filter(|d| !d.is_empty()).map(|d| {
+                    crate::gitdiff::DiffView {
+                        marks: &d.marks,
+                        dels: &d.dels,
+                        peek: m
+                            .diff_peek
+                            .and_then(|l| d.hunk_at(l).map(|h| (l, h.old.as_slice())))
+                            .filter(|(_, old)| !old.is_empty()),
+                    }
+                });
                 // self.gpu(mut) 와 self.kind(shared, m) 은 disjoint 필드라 동시 차용 OK.
                 self.gpu.draw_raw_editor(
                     &m.edit_lines,
@@ -761,6 +776,7 @@ impl AuxWindow {
                     // 팝아웃 창엔 멀티커서 키 경로가 없다 — 커서를 더할 방법이
                     // 없는데 그리기만 하면 지울 수도 없는 표시가 남는다.
                     &[],
+                    dv.as_ref(),
                 );
             }
             // Settings/Terminal/Room 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -945,6 +961,9 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            diff: None,
+            diff_peek: None,
+            diff_head: None,
             wrap: false,
             extra: Vec::new(),
             undo_locked: false,
@@ -2133,6 +2152,7 @@ impl App {
                 h_scroll: m.h_scroll,
                 lang: crate::code_lang_for_path(std::path::Path::new(&m.doc.path)).to_string(),
                 wrap: m.wrap,
+                diff: m.diff.as_ref().filter(|d| !d.is_empty()).cloned(),
             });
             (cells, name, col, labels, st, img, md, pane.is_some())
         };
@@ -2298,6 +2318,12 @@ impl App {
                 a.gpu.queue_image(&key, bx, by, bw, bh, zoom, pan_x, pan_y);
             } else if let Some(md) = md_snap {
                 let (bx, by, bw, bh) = a.body_box();
+                // 펼쳐보기는 없다(읽기 전용) — 바만 그린다.
+                let dv = md.diff.as_ref().map(|d| crate::gitdiff::DiffView {
+                    marks: &d.marks,
+                    dels: &d.dels,
+                    peek: None,
+                });
                 // 본문 높이는 그려 봐야 나온다 — 휠 clamp 가 이 값을 쓴다.
                 let ch = if md.raw {
                     a.gpu.draw_raw_editor(
@@ -2321,6 +2347,7 @@ impl App {
                         &[],
                         md.wrap,
                         &[],
+                        dv.as_ref(),
                     )
                 } else {
                     a.gpu.draw_markdown(&md.blocks, md.gen, bx, by, bw, bh, md.scroll, None)

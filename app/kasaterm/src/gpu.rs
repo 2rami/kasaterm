@@ -258,6 +258,18 @@ const RAW_HL_COST_MULT: u32 = 12;
 const RAW_HL_QUIET_MIN_MS: u64 = 80;
 const RAW_HL_QUIET_MAX_MS: u64 = 600;
 
+/// 펼친 원본 패널에 한 번에 보이는 줄 수. 상한이 없으면 큰 헝크 하나가 화면을
+/// 통째로 덮어 정작 편집하던 코드가 사라진다. 넘친 줄 수는 발치에 적는다.
+const PEEK_MAX_LINES: usize = 10;
+
+/// 펼친 원본 패널의 자리. `GpuRenderer::peek_geom` 이 그리기와 클릭 양쪽에 준다.
+pub(crate) struct PeekGeom {
+    pub panel: (f32, f32, f32, f32),
+    pub button: (f32, f32, f32, f32),
+    /// 실제로 그린 원본 줄 수(`PEEK_MAX_LINES` 로 잘린 뒤).
+    pub shown: usize,
+}
+
 /// One pane's slot in `render_frame`. Mirrors the data the existing
 /// sugarloaf renderer carries through `PaneFrame` but trimmed to
 /// what Phase 2a needs (background fills, fg color, and the wide
@@ -2933,6 +2945,113 @@ impl GpuRenderer {
         (base * 0.6, lh)
     }
 
+    /// 거터의 **변경 바**를 눌렀나 — 눌렀으면 그 버퍼 줄.
+    ///
+    /// 접기 삼각형(`raw_editor_fold_hit`)과 띠가 안 겹친다: 저쪽은 거터 오른쪽
+    /// 끝(`gutter_w` 언저리)이고 이쪽은 맨 왼쪽이다.
+    ///
+    /// ⚠️ 화면 행 → 버퍼 줄 변환에 `markdown::buffer_line` 을 쓰면 안 된다. 그건
+    /// 접힘만 되짚고 **랩을 모른다** — 긴 줄이 접힌 파일에서 아래로 갈수록 어긋나
+    /// 엉뚱한 헝크가 열린다. 그리기 루프가 쓰는 `layout_rows` 를 그대로 지난다.
+    pub fn raw_editor_diff_hit(
+        &mut self,
+        lines: &[String],
+        x: f32,
+        y: f32,
+        w: f32,
+        scroll: f32,
+        click_x: f32,
+        click_y: f32,
+        folds: &[(usize, usize)],
+        wrap: bool,
+    ) -> Option<usize> {
+        let base = self.font_size_px as f32 / self.scale;
+        let (pad, lh) = self.raw_editor_metrics();
+        // 3px 막대를 정확히 맞히라고 요구하면 아무도 안 쓴다 — 줄번호 앞까지 연다.
+        if click_x < x || click_x > x + pad + base * 0.5 {
+            return None;
+        }
+        let top0 = (y - scroll) + pad;
+        let row = ((click_y - top0) / lh).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let wrap_cols = self.raw_editor_wrap_cols(w, lines.len(), wrap);
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
+        rows.get(row as usize).map(|&(li, _)| li)
+    }
+
+    /// 펼친 패널의 [되돌리기] 버튼을 눌렀나. 그리기와 **같은** `peek_geom` 을
+    /// 지나므로 보이는 자리와 눌리는 자리가 갈릴 수 없다.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raw_editor_peek_btn_hit(
+        &mut self,
+        lines: &[String],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        scroll: f32,
+        click: (f32, f32),
+        folds: &[(usize, usize)],
+        wrap: bool,
+        line: usize,
+        old_len: usize,
+    ) -> bool {
+        let base = self.font_size_px as f32 / self.scale;
+        let (pad, lh) = self.raw_editor_metrics();
+        let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
+        let cx0 = x + pad + base * 0.62 * digits as f32 + base * 1.0;
+        let wrap_cols = self.raw_editor_wrap_cols(w, lines.len(), wrap);
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
+        let top0 = (y - scroll) + pad;
+        let Some(g) = Self::peek_geom(&rows, top0, lh, cx0, x + w, y, h, line, old_len) else {
+            return false;
+        };
+        let (bx, by, bw, bh) = g.button;
+        click.0 >= bx && click.0 < bx + bw && click.1 >= by && click.1 < by + bh
+    }
+
+    /// 펼친 원본 패널의 자리. **그리기와 클릭이 같은 이 함수를 지난다** — 두 벌로
+    /// 두면 패널이 보이는 자리와 눌리는 자리가 갈린다.
+    ///
+    /// `None` = 그 줄이 지금 화면 행에 없다(접혀 사라졌다). 그때는 패널도 안 뜨고
+    /// 버튼도 없다.
+    fn peek_geom(
+        rows: &[(usize, usize)],
+        top0: f32,
+        lh: f32,
+        cx0: f32,
+        clip_right: f32,
+        y: f32,
+        h: f32,
+        line: usize,
+        old_len: usize,
+    ) -> Option<PeekGeom> {
+        // 랩된 줄은 행이 여럿이다. 패널은 그 **마지막** 행 아래에 붙어야 줄을
+        // 반으로 가르지 않는다.
+        let ri = rows.iter().rposition(|&(li, _)| li == line)?;
+        // 순수 삭제 헝크는 그 자리의 줄을 자기 것으로 안 갖는다 — `hunk_at` 이
+        // `new.start == line` 으로 집어 주므로, 그 경우 패널은 그 줄 **위**가
+        // 자연스럽지만 아래로 통일한다(자리가 하나여야 클릭이 헷갈리지 않는다).
+        let shown = old_len.min(PEEK_MAX_LINES);
+        // 본문(줄) + 발치 한 줄(버튼과 「외 N줄」이 같이 앉는다).
+        let ph = (shown + 1) as f32 * lh;
+        let py = top0 + (ri + 1) as f32 * lh;
+        // 아래로 넘치면 그 줄 **위**로 뒤집는다 — 화면 밖에 뜬 판은 없는 것과 같다.
+        let py = if py + ph <= y + h { py } else { (py - lh - ph).max(y) };
+        let pw = (clip_right - cx0).max(1.0);
+        let bh = lh * 0.85;
+        let bw = lh * 4.2;
+        let button = (
+            (cx0 + pw - bw - 8.0).max(cx0),
+            py + ph - (lh + bh) * 0.5,
+            bw,
+            bh,
+        );
+        Some(PeekGeom { panel: (cx0, py, pw, ph), button, shown })
+    }
+
     /// `find` = the find bar's matches as (line, start col, end col) plus the
     /// index of the highlighted one. Every match gets a band, so the spread of
     /// hits down the page is visible, not just the one you're standing on.
@@ -2962,6 +3081,10 @@ impl GpuRenderer {
         wrap: bool,
         // 보조 커서들. 비어 있는 게 보통이고, 그때는 아래 loop 가 한 번도 안 돈다.
         extra: &[crate::markdown::Caret],
+        // HEAD 대비 변경 — 거터의 색 바와 펼친 원본 패널. `None` 이면 아래 루프가
+        // 지금까지와 완전히 같다. 마커·삭제자리·펼침을 낱개 인자로 더하지 않는
+        // 이유는 이 시그니처가 이미 스무 개라서다.
+        diff: Option<&crate::gitdiff::DiffView<'_>>,
     ) -> f32 {
         // 본문의 오른쪽 벽. `draw_text_clipped` 에 넘기면 그 함수가 이 자리에
         // 시저를 세우므로, 걸친 글자는 사라지지 않고 반으로 잘린다.
@@ -3310,6 +3433,39 @@ impl GpuRenderer {
                     crate::theme::bg()
                 };
                 self.rect(x, pen_y, cx0 - x, lh, gutter_bg);
+                // HEAD 대비 변경 바. **마스크 rect 뒤에** 그린다 — 앞서 그리면
+                // 저 rect 가 거터를 다시 칠하면서 통째로 지운다.
+                //
+                // 자리는 거터 맨 왼쪽이다. 오른쪽 끝은 접기 삼각형이 이미 쓰고
+                // (`gutter_w - base*0.62`) 그 왼쪽을 줄번호가 채우므로, 거기 끼우면
+                // 셋이 겹친다. 색은 git 컬럼의 어휘 그대로 — 같은 뜻이 두 화면에서
+                // 다른 색이면 각각 외워야 한다.
+                //
+                // 랩으로 이어진 행에도 그린다. 한 논리 줄이 바뀐 것이므로 그 줄이
+                // 차지한 화면 높이 전체가 표시를 받아야 띠가 끊겨 보이지 않는다.
+                if let Some(d) = diff {
+                    if let Some(mark) = d.marks.get(li).copied().flatten() {
+                        let col = match mark {
+                            crate::gitdiff::LineMark::Add => crate::theme::success(),
+                            crate::gitdiff::LineMark::Mod => crate::theme::accent(),
+                        };
+                        self.rect(x + pad * 0.5, pen_y, 3.0, lh, col);
+                    }
+                    // 지워진 자리는 줄이 아니라 **줄 사이**다 — 지금 버퍼에 그 줄이
+                    // 없으니 그것 말고 맞는 자리가 없다. 줄의 첫 행에서만 본다
+                    // (랩된 줄의 중간 행마다 쐐기가 반복되면 안 된다).
+                    if from == 0 {
+                        // 파일 끝에서 지워졌으면 `dels` 값이 줄 수와 같다 —
+                        // 그때는 가리킬 줄이 없으므로 마지막 줄의 아래 변에 붙인다.
+                        let above = d.dels.contains(&li);
+                        let below = li + 1 == lines.len() && d.dels.contains(&lines.len());
+                        for (hit, wy) in [(above, pen_y), (below, pen_y + lh - 2.0)] {
+                            if hit {
+                                self.rect(x + pad * 0.5, wy, base * 0.9, 2.0, crate::screenread::DIFF_RED);
+                            }
+                        }
+                    }
+                }
                 // 접기 표시 — 줄 번호와 코드 사이 여백에 삼각형 하나. 접을 수
                 // 있는지는 **다음 줄이 더 깊은가**로 본다: 블록 끝까지 훑는
                 // `fold_end` 는 화면의 모든 줄에서 부르기엔 비싸고, 여기 필요한
@@ -3357,6 +3513,78 @@ impl GpuRenderer {
                 );
             }
             pen_y += lh;
+        }
+        // 펼친 원본 패널 — 줄 루프 밖에서, 자동완성보다 **먼저**. 자동완성은
+        // 지금 치고 있는 것이라 무엇보다 위에 있어야 한다.
+        //
+        // 버퍼에 가상 행을 끼워 밀어내지 않고 위에 띄우는 이유: 행을 끼우려면
+        // `layout_rows` 를 건드려야 하는데 거기가 캐럿·클릭·스크롤·선택이 전부
+        // 지나는 자리다. 보이는 모양은 거의 같고 위험은 훨씬 작다.
+        if let Some((pl, old)) = diff.and_then(|d| d.peek) {
+            if let Some(g) = Self::peek_geom(&rows, top0, lh, cx0, clip_right, y, h, pl, old.len())
+            {
+                let (px, py, pw, ph) = g.panel;
+                self.rect(px, py, pw, ph, crate::theme::surface_active());
+                self.rect(px, py, pw, 1.0, crate::theme::border());
+                self.rect(px, py + ph - 1.0, pw, 1.0, crate::theme::border());
+                // 왼쪽 변만 빨강 — 이 판이 「지워진 것」이라는 신호를 거터 쐐기와
+                // 같은 색으로 잇는다.
+                self.rect(px, py, 2.0, ph, crate::screenread::DIFF_RED);
+                let dim = crate::theme::with_alpha(crate::screenread::DIFF_RED, 0x1C);
+                for (i, l) in old.iter().take(g.shown).enumerate() {
+                    let ly = py + i as f32 * lh;
+                    self.rect(px + 2.0, ly, pw - 2.0, lh, dim);
+                    let cells: Vec<(char, [u8; 4])> = std::iter::once('-')
+                        .chain(std::iter::once(' '))
+                        .chain(l.chars())
+                        .map(|c| (c, crate::theme::text_dim()))
+                        .collect();
+                    self.draw_editor_cells(
+                        &cells,
+                        px + 8.0,
+                        ly + glyph_voff,
+                        base,
+                        px,
+                        px + pw,
+                    );
+                }
+                // 잘린 나머지를 숨기지 않는다 — 「원본이 이게 다」로 읽히면
+                // 되돌리기를 누를 때 무엇이 돌아오는지 잘못 안다.
+                let more = old.len().saturating_sub(g.shown);
+                let foot = py + g.shown as f32 * lh;
+                if more > 0 {
+                    self.draw_text(
+                        px + 8.0,
+                        foot + glyph_voff,
+                        &format!("… 외 {more}줄"),
+                        DrawOpts {
+                            font_size: base * 0.85,
+                            color: crate::theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                }
+                let (bx, by, bw, bh) = g.button;
+                self.rect(bx, by, bw, bh, crate::theme::surface_hover());
+                self.rect(bx, by, bw, 1.0, crate::theme::border());
+                self.rect(bx, by + bh - 1.0, bw, 1.0, crate::theme::border());
+                self.rect(bx, by, 1.0, bh, crate::theme::border());
+                self.rect(bx + bw - 1.0, by, 1.0, bh, crate::theme::border());
+                let label = "되돌리기";
+                let lw = self.measure_pen_run(label, base * 0.85, false, false);
+                self.draw_text(
+                    bx + (bw - lw) * 0.5,
+                    by + (bh - base * 0.85) * 0.5,
+                    label,
+                    DrawOpts {
+                        font_size: base * 0.85,
+                        color: crate::theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
         }
         // 자동완성 팝업 — 줄 루프 **밖**에서 마지막에 그린다. 안에서 그리면
         // 뒤에 오는 줄들이 위에 덮여 목록이 반쯤 잘린다.

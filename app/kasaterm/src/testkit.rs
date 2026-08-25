@@ -3163,6 +3163,24 @@ impl App {
                 self.wake_after_mdstep();
                 return;
             }
+            // 활성 탭 바꾸기 — `tab:<idx>`. `KASATERM_AUTOOPEN` 은 에이전트 경로
+            // (`as_tab`)라 탭을 **앞으로 끌어내지 않는다**(사람이 파일트리에서
+            // 누른 것만 그렇게 한다). 그래서 이 단계가 없으면 뒤에 오는 편집기
+            // 단계들이 전부 「마크다운 pane 없음」으로 조용히 빠진다.
+            Some(("tab", v)) => {
+                let idx: usize = v.trim().parse().unwrap_or(0);
+                let picked = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+                if let (Some(id), Ok(mut ws)) = (picked, self.ws.lock()) {
+                    if let Some(p) = ws.panes.get_mut(&id) {
+                        p.active_tab = idx.min(p.tabs.len().saturating_sub(1));
+                        p.dirty = true;
+                        eprintln!("[mdscript] tab={} of {}", p.active_tab, p.tabs.len());
+                    }
+                }
+                self.chrome_dirty = true;
+                self.wake_after_mdstep();
+                return;
+            }
             // 모달 버튼 누르기 — 저장/저장 안 함/취소.
             Some(("pick", v)) => {
                 let btn = match v {
@@ -3232,6 +3250,40 @@ impl App {
                 let at = self.md_anchor_line(&id);
                 eprintln!("[mdscript] mode={v} anchor_line={at:?}");
             }
+            // 거터 표시가 실제로 섰는지를 **개수로** 찍는다. 스샷만 보면 「바가
+            // 안 보인다」와 「diff 가 비었다」가 같아 보인다 — 원인이 렌더인지
+            // 계산인지 가르려면 이 줄이 있어야 한다.
+            _ if step == "diff" => {
+                // 표시는 틱에서 뜬다. 스크립트가 편집 직후에 물으면 아직 없을 수
+                // 있어, 여기서 한 번 밀어 준 뒤 읽는다.
+                self.diff_refresh();
+                let st = self.ws.lock().ok().and_then(|w| {
+                    w.panes.get(&id).and_then(|p| p.markdown()).map(|m| {
+                        let head = match &m.diff_head {
+                            None => "미시도".to_string(),
+                            Some(crate::gitdiff::HeadText::Absent) => "HEAD없음".to_string(),
+                            Some(crate::gitdiff::HeadText::Lines(l)) => format!("{}줄", l.len()),
+                        };
+                        let (marks, dels, hunks) = m.diff.as_ref().map_or((0, 0, 0), |d| {
+                            (
+                                d.marks.iter().filter(|x| x.is_some()).count(),
+                                d.dels.len(),
+                                d.hunks.len(),
+                            )
+                        });
+                        (head, marks, dels, hunks, m.diff_peek)
+                    })
+                });
+                // 본문 박스도 함께 — `click:` 좌표가 본문 기준 상대라, [되돌리기]
+                // 처럼 오른쪽 끝에 붙는 것을 치려면 폭을 알아야 한다.
+                let box_ = self.md_body_rects.get(&id).copied();
+                // 행 높이·화면 행 수도 — `click:<dx>,<dy>` 의 dy 는 이 둘 없이는
+                // 세울 수 없다(랩이 켜지면 화면 행이 버퍼 줄보다 많아진다).
+                let geom = self.gpu.as_mut().map(|g| g.raw_editor_metrics());
+                eprintln!(
+                    "[mdscript] diff head/마커/삭제/헝크/펼침={st:?} 본문={box_:?} (pad,lh)={geom:?}"
+                );
+            }
             // Raw 편집기 클릭 → 캐럿. 좌표는 **본문 박스 기준 상대 px**
             // (`click:<dx>,<dy>`) 이라 창 크기가 달라도 같은 자리를 가리킨다.
             // 마우스 이벤트를 밖에서 만들 수 없어 히트테스트 진입점을 직접 부른다.
@@ -3248,8 +3300,18 @@ impl App {
                 // 더블클릭이 재현되지 않아 검증이 실물과 어긋난다. 같은
                 // 좌표로 짧은 간격(`_STEP_MS` 450 이하)에 두 번 주면 단어
                 // 선택, 세 번이면 줄 선택이 걸린다.
-                // 실물 press 와 같은 순서: 접기 삼각형을 먼저 본다. 이걸 빼면
-                // 하네스가 삼각형 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
+                // 실물 press 와 같은 순서: 변경 바 → 접기 삼각형 → 캐럿. 하나라도
+                // 빼면 하네스가 다른 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
+                if self.md_diff_click(&id, bx + dx, by + dy) {
+                    let st = self.ws.lock().ok().and_then(|w| {
+                        w.panes.get(&id).and_then(|p| p.markdown()).map(|m| {
+                            (m.diff_peek, m.edit_lines.len(), m.cur_line)
+                        })
+                    });
+                    eprintln!("[mdscript] diff click=({dx},{dy}) peek/줄수/캐럿={st:?}");
+                    self.wake_after_mdstep();
+                    return;
+                }
                 if self.md_fold_click(&id, bx + dx, by + dy) {
                     let f = self.ws.lock().ok().and_then(|w| {
                         w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.folds.clone())
@@ -3518,6 +3580,15 @@ impl App {
                         "tab" => m.indent(false),
                         "untab" => m.indent(true),
                         "enter" => m.newline(),
+                        // 되돌리기가 **한 번의 undo 로 통째로** 취소되는지 보려면
+                        // 여기 있어야 한다 — 헝크 되돌리기는 여러 줄을 한꺼번에
+                        // 갈아끼우므로, 스냅샷을 한 번만 쌓았는지가 계약이다.
+                        "undo" => {
+                            m.do_undo();
+                        }
+                        "redo" => {
+                            m.do_redo();
+                        }
                         "find" => m.find_open(false),
                         "replace" => m.find_open(true),
                         "next" => m.find_step(false),
