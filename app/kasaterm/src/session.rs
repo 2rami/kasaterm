@@ -900,6 +900,28 @@ impl App {
                 "어느 테마의 누구인지 알 수 없어요".to_string(),
             ));
         }
+        // 켜기는 그 테마에 실재하는 이름만 받는다. 안 막으면 오타 하나가 설정
+        // 파일에 그대로 눌러앉는데, 배정 쪽은 유령을 조용히 걸러 내므로 **화면에만
+        // 한 명 더 켜진 것처럼 보이고 실제로는 안 나오는** 상태가 된다.
+        //
+        // 끄기는 검사하지 않는다 — 그래야 이미 들어앉은 유령이나 이름이 바뀐
+        // 항목을 화면에서 지울 길이 남는다.
+        if on {
+            let names = theme_roster_names(theme);
+            if names.is_empty() {
+                return Err(crate::settings::reject(
+                    "theme_roster_missing",
+                    "그 테마의 명단을 못 읽었어요".to_string(),
+                ));
+            }
+            if !names.iter().any(|n| n == name) {
+                return Err(crate::settings::reject_with_args(
+                    "character_pick_unknown",
+                    serde_json::json!({ "name": name }),
+                    format!("{name} 은(는) 그 테마에 없어요"),
+                ));
+            }
+        }
         let mut picks = kasa_mcp::character::all_picks();
         let slot = match picks.iter_mut().find(|(k, _)| k == theme) {
             Some(s) => s,

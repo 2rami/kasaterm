@@ -2917,6 +2917,16 @@ fn reject_with(code: &'static str, args: serde_json::Value, msg: String) -> Stri
     reject(code, msg)
 }
 
+/// 같은 것을 이 모듈 밖에서. 거부 문구를 만드는 자리가 settings.rs 하나가 아니게
+/// 되면서(캐릭터 고르기는 session.rs) 통로가 필요해졌다.
+pub(crate) fn reject_with_args(
+    code: &'static str,
+    args: serde_json::Value,
+    msg: String,
+) -> String {
+    reject_with(code, args, msg)
+}
+
 /// 네이티브 토스트 문구 → 코드. 문구를 만드는 자리와 같은 파일에 둬야 둘이 어긋나도
 /// 곧 눈에 띈다.
 ///
