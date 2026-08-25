@@ -129,7 +129,15 @@ if command -v npm >/dev/null 2>&1; then
     cp -R web/arona-ui/dist "$APP/Contents/Resources/arona-ui"
     echo "[build-app] arona-ui → Resources/arona-ui"
   else
-    echo "[build-app] ⚠ arona-ui 빌드 실패 — god 모드 UI 제외하고 계속"
+    # 여기서 멈춘다. 경고로 넘기면 **웹 UI 가 통째로 빠진 앱**이 나오는데(설정 창·
+    # 아로나 화면이 아예 안 뜬다) 굽기는 성공처럼 보인다 — 2026-08-25 에 타입 오류
+    # 한 줄로 그런 번들이 나왔고, 구운 사람이 아니라 **다음에 앱을 켠 사람**이 발견했다.
+    # npm 이 아예 없는 환경은 위 분기에서 이미 skip 하므로, 여기 오는 것은 코드가
+    # 깨진 경우뿐이다.
+    echo "[build-app] ✖ arona-ui 빌드 실패 — 굽기를 멈춘다(반쪽 번들을 만들지 않는다)"
+    echo "[build-app]   아래는 타입체크 결과다:"
+    ( cd web/arona-ui && npx tsc --noEmit 2>&1 | head -20 ) || true
+    exit 1
   fi
 else
   echo "[build-app] ⚠ npm 없음 — arona-ui 번들 skip(god 모드 UI 제외)"
