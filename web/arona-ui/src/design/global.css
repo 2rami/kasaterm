@@ -182,3 +182,13 @@ canvas { image-rendering: pixelated; }
   55% { opacity: 1; transform: translateY(-5px) scale(1.08); }
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
+
+/* 폰 위생 — 인라인 스타일이 없는 것들만 여기서 잡는다(레이아웃은 useIsPhone 이 맡는다).
+   판정을 `pointer: coarse` 로 하는 이유: 폭이 아니라 **손가락이냐**가 이 두 규칙의 근거다. */
+@media (pointer: coarse) {
+  /* iOS 는 16px 미만 입력에 포커스가 가면 화면을 확대하고, 그 확대는 스스로 안 돌아온다.
+     대화 입력·검색창이 전부 12~13px 이라 폰에서 한 번 누르면 레이아웃이 통째로 어긋난다. */
+  input, textarea, select { font-size: 16px; }
+  /* 대화를 끝까지 스크롤한 뒤 더 밀면 페이지 전체가 튀거나 당겨서 새로고침된다. */
+  html, body { overscroll-behavior: none; }
+}

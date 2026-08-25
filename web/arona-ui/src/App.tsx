@@ -8,6 +8,7 @@ import { startBoardPolling, focusPane, fetchClaudeUsage, fetchSessions, fetchBac
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
+import { useIsPhone } from './lib/useIsPhone';
 import { accentByName, hex } from './design/tokens';
 
 type ViewMode = 'terminal' | 'classroom';
@@ -125,10 +126,22 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('schale-theme', theme);
   }, [theme]);
+  // 폰 폭이면 레이아웃이 갈린다 — 데스크톱 pane 배치 미러 대신 대화 하나만, 패널은 전체폭.
+  const isPhone = useIsPhone();
   // 좌(방/학생)·우(업무/소스/스케줄) 패널 — 상단 아이콘 클릭 시 팝오버 오버레이로 펼침(거노:
   // 상단 아이콘+팝오버, 평소엔 멀티뷰만 꽉 차게). 기본 닫힘, 멀티뷰 공간을 안 뺏는다.
+  //
+  // 폰만 예외로 열고 시작한다 — 폰에는 학생 목록을 늘 보여 줄 자리가 없어서, 아무도 안 고른
+  // 상태의 첫 화면이 "아직 열린 대화가 없어요" 안내로 끝나 버린다. 목록이 첫 화면이어야
+  // 「지금 누가 있나」부터 보인다. 학생을 고르면 기존 onSelectStudent 가 알아서 닫는다.
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
+  const phoneListShown = useRef(false);
+  useEffect(() => {
+    if (!isPhone || phoneListShown.current) return;
+    phoneListShown.current = true;
+    setLeftOpen(true);
+  }, [isPhone]);
   // 집중 모드 — 타이틀바·헤더·좌우 패널·풋터까지 전부 접고 중앙(멀티뷰/대화)만 꽉 채운다
   // (거노: 평소에도 다 닫을 수 있게). 헤더 버튼·⌘\ 토글, 우상단 떠있는 버튼·Esc 로 복귀.
   const [focusMode, setFocusMode] = useState(() => localStorage.getItem('schale-focus') === '1');
@@ -288,6 +301,72 @@ export function App() {
     setZoomedSurface(null);
   };
 
+  // 아직 아무 대화도 없을 때의 안내 — 데스크톱 미러와 폰 단일뷰가 같은 것을 쓴다.
+  const emptyHint = (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)' }}>
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--cth-ink-300)" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--cth-ink-500)' }}>아직 열린 대화가 없어요</div>
+      <div style={{ fontSize: 12, lineHeight: 1.7 }}>터미널에서 <span style={{ fontFamily: 'var(--cth-font-mono)', color: 'var(--cth-ink-500)' }}>claude</span> 를 켜면<br />여기에 대화가 떠요</div>
+    </div>
+  );
+
+  // 폰 본문 — 미러(%) 를 안 그린다. 390px 에서 pane 하나가 24px 조각이 되기 때문이다.
+  // 대신 스택 맨 위 하나만 전체 화면으로 세운다: 서브에이전트 드릴인 → 과거·bg 세션 →
+  // 고른 학생 → 첫 pane. 되돌아가기는 각 패널이 이미 그리는 × 가 그대로 맡는다 — 다만
+  // 학생 대화의 × 는 데스크톱처럼 focusPane 을 부르지 않고 목록을 연다. 폰에서 맥 pane 을
+  // 포커스해 봐야 화면에 아무 일도 안 일어나고, activeId 를 비워도 자동 선택이 되돌린다.
+  // TerminalPeekPanel 은 surfaceId 하나로도 라이브 pane 을 그려서(embedded 는 폭·왼쪽
+  // 테두리만 바꾼다) 새로 만들 컴포넌트가 없다 — 크기만 달라진다.
+  const phoneSub = subPeeks[subPeeks.length - 1];
+  const phoneId = activeId ?? layoutRects[0]?.surface_id ?? null;
+  const phoneAgent = phoneId ? agents.find((x) => x.id === phoneId) : undefined;
+  const phoneRect = phoneId ? layoutRects.find((r) => r.surface_id === phoneId) : undefined;
+  let phoneMain = emptyHint;
+  if (phoneSub) {
+    const parentName = agents.find((a) => a.id === phoneSub.parentSurface)?.name ?? phoneSub.parentSurface;
+    phoneMain = (
+      <TerminalPeekPanel
+        surfaceId=""
+        title={`${parentName} ↳ ${phoneSub.label}`}
+        embedded
+        subagent={phoneSub}
+        onClose={() => setSubPeeks((prev) => prev.filter((x) => x.agentId !== phoneSub.agentId))}
+      />
+    );
+  } else if (offlinePeek) {
+    phoneMain = (
+      <TerminalPeekPanel
+        surfaceId=""
+        title={offlinePeek.title}
+        onClose={() => setOfflinePeek(null)}
+        embedded
+        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort, harness: offlinePeek.harness }}
+      />
+    );
+  } else if (phoneId && phoneAgent) {
+    phoneMain = (
+      <TerminalPeekPanel
+        surfaceId={phoneId}
+        title={phoneAgent.name ?? phoneId}
+        embedded
+        onClose={() => setLeftOpen(true)}
+        onOpenSubagent={openSubagent}
+      />
+    );
+  } else if (phoneId && phoneRect) {
+    // claude 가 아닌 plain 터미널 — 데스크톱 미러와 같은 Warp 명령블록 스택.
+    phoneMain = (
+      <TerminalBlockCard
+        surfaceId={phoneId}
+        rect={phoneRect}
+        onClose={() => setLeftOpen(true)}
+        activeAgentId={agents[0]?.id}
+      />
+    );
+  }
+
   return (
     // SCHALE OS 전체 셸: 세로 100% + 가로 100%
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -317,7 +396,9 @@ export function App() {
           {/* 중앙: 터미널 pane 그리드(기본 뷰어) / 교실(캐릭터) / 카드 */}
           <div style={{ flex: 1, overflow: view === 'terminal' ? 'hidden' : 'auto', padding: view === 'terminal' ? 0 : view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
             {view === 'terminal' ? (
-              offlinePeek && layoutRects.length === 0 ? (
+              isPhone ? (
+                phoneMain
+              ) : offlinePeek && layoutRects.length === 0 ? (
                 // fg pane 이 하나도 없음(터미널 꺼짐/claude 안 뜸) → bg 대화 단독 전체.
                 <TerminalPeekPanel
                   surfaceId=""
@@ -383,13 +464,7 @@ export function App() {
                         })}
                       </div>
                     ) : (
-                      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)' }}>
-                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--cth-ink-300)" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
-                          <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                        </svg>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--cth-ink-500)' }}>아직 열린 대화가 없어요</div>
-                        <div style={{ fontSize: 12, lineHeight: 1.7 }}>터미널에서 <span style={{ fontFamily: 'var(--cth-font-mono)', color: 'var(--cth-ink-500)' }}>claude</span> 를 켜면<br />여기에 대화가 떠요</div>
-                      </div>
+                      emptyHint
                     )}
                   </div>
                   {subPeeks.length > 0 && (
@@ -428,7 +503,8 @@ export function App() {
         {!focusMode && leftOpen && (
           <>
             <div onClick={() => setLeftOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(21,41,74,0.16)' }} />
-            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, zIndex: 31, display: 'flex', boxShadow: '3px 0 16px rgba(21,41,74,0.20)' }}>
+            {/* 폰에선 right:0 까지 늘려 전체폭 시트로 — 데스크톱 폭 그대로면 방 이름이 잘린다. */}
+            <div style={{ position: 'absolute', left: 0, right: isPhone ? 0 : undefined, top: 0, bottom: 0, zIndex: 31, display: 'flex', boxShadow: '3px 0 16px rgba(21,41,74,0.20)' }}>
               <RoomMap
                 sessions={sessions}
                 onSwitch={(i) => { selectRoom(i); setLeftOpen(false); }}
@@ -448,7 +524,7 @@ export function App() {
         {!focusMode && rightOpen && (
           <>
             <div onClick={() => setRightOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(21,41,74,0.16)' }} />
-            <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, zIndex: 31, width: 340, display: 'flex', minHeight: 0, boxShadow: '-3px 0 16px rgba(21,41,74,0.20)' }}>
+            <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, zIndex: 31, width: isPhone ? '100%' : 340, display: 'flex', minHeight: 0, boxShadow: '-3px 0 16px rgba(21,41,74,0.20)' }}>
               <CommandCenter selected={activeSelected} onClearDialog={() => setOfflinePeek(null)} onPickStudent={openStudent} onOpenBackground={openBackgroundSession} onSaved={handleSaved} openGitTab={0} onCollapse={() => setRightOpen(false)} />
             </div>
           </>

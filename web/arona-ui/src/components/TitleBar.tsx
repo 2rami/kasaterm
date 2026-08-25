@@ -1,4 +1,5 @@
 import { CSSProperties, useState } from 'react';
+import { useIsPhone } from '@/lib/useIsPhone';
 import { usagePressure, type ClaudeUsage } from '@/lib/mcp';
 
 // 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(거노: 디자인 통일), 로고·기어 제거.
@@ -15,7 +16,11 @@ interface IconBtnProps {
 
 function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
   const [hover, setHover] = useState(false);
+  const isPhone = useIsPhone();
   const lit = active || hover;
+  // 폰에선 44 — 26px 상자는 손가락으로 못 누른다(iOS HIG 44). 아이콘 크기는 그대로 두고
+  // 누를 수 있는 상자만 키운다.
+  const box = isPhone ? 44 : 26;
   return (
     <button
       title={title}
@@ -24,7 +29,7 @@ function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
       onMouseLeave={() => setHover(false)}
       style={{
         position: 'relative',
-        width: 26, height: 26,
+        width: box, height: box, flexShrink: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         border: 'none', cursor: 'pointer',
         background: lit ? 'var(--cth-sky-light)' : 'transparent',
@@ -156,12 +161,19 @@ export interface TitleBarProps {
 }
 
 export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, onToggleRight, leftOpen, rightOpen, leftBadge = 0, classroom, onToggleClassroom, onFocus }: TitleBarProps) {
+  const isPhone = useIsPhone();
   const divider = <div style={{ width: 1, height: 16, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
   const pressure = usagePressure(usage?.usage ?? null);
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 7,
-      height: 34, padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
+      // 폰은 48 — 44px 버튼이 34px 바에 안 들어간다.
+      // 노치 여백은 **높이에 더한다**. box-sizing 이 border-box 라 paddingTop 만 주면 그만큼
+      // 안쪽이 깎여 버튼이 다시 눌리기 때문이다. 브라우저·데스크톱 webview 에선 inset 이 0 이라
+      // 정확히 48 로 남는다.
+      padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
+      height: isPhone ? 'calc(48px + env(safe-area-inset-top, 0px))' : 34,
+      paddingTop: isPhone ? 'env(safe-area-inset-top, 0px)' : undefined,
       // 전역 바 — 옅은 sky 그라데이션 + 아래 그림자로 pane 하단바(plain cream)와 구분(거노).
       background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',
       borderBottom: '1px solid var(--cth-cream-200)',

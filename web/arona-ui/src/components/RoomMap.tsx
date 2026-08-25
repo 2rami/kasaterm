@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { characterPool, fetchCharacters, fetchRecentSessions, type Harness, type RecentSession, type SessionsInfo } from '@/lib/mcp';
 import type { Agent } from '@/store';
+import { useIsPhone } from '@/lib/useIsPhone';
 import { SpritePortrait } from './SpritePortrait';
 
 // 학생 상태 → 작은 점 색(좌측 트리). 3구분(거노: 작업중·노는중·선택지대기 구분 강화):
@@ -105,6 +106,7 @@ function RoomIcon({ active }: { active: boolean }) {
 // 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(첫 학생 선택). 첫 방은
 // 아로나 고정, 새 방은 아로나/프라나 중 골라 그 학생으로 스폰. × 로 방 닫기.
 export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStudent, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
+  const isPhone = useIsPhone();
   const n = sessions.count;
   // 방별 학생 — pane id 순 안정 정렬.
   const byRoom = new Map<number, Agent[]>();
@@ -236,14 +238,15 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
   if (n < 1) return null;
   return (
     <div style={{
-      width: 184, flexShrink: 0, height: '100%', overflowY: 'auto',
+      // 폰에선 전체폭 — 184px 로 눌리면 방 이름이 「branding · ...momewomo/」로 잘린다.
+      width: isPhone ? '100%' : 184, flexShrink: 0, height: '100%', overflowY: 'auto',
       borderRight: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
       padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 4,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px 4px' }}>
         <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)' }}>방 (터미널 윈도우)</span>
         <button onClick={() => onCollapse?.()} title="좌측 패널 접기" style={{
-          width: 18, height: 18, borderRadius: 5, border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-300)',
+          width: isPhone ? 44 : 18, height: isPhone ? 44 : 18, borderRadius: 5, border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-300)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
         }}>
           <svg width="12" height="12" viewBox="0 0 16 16"><path d="M10 3l-5 5 5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -260,6 +263,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
             }}>
               <button onClick={() => { if (!on) onSwitch(i); }} style={{
                 flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '7px 9px', borderRadius: 8,
+                minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 border: 'none', cursor: on ? 'default' : 'pointer', textAlign: 'left', background: 'transparent', color: 'inherit',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
               }}>
@@ -269,7 +273,9 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
               </button>
               {n > 1 && onCloseRoom && (
                 <button onClick={(e) => { e.stopPropagation(); onCloseRoom(i); }} title="방 닫기" style={{
-                  flexShrink: 0, width: 18, height: 18, marginRight: 5, borderRadius: 5, border: 'none', cursor: 'pointer',
+                  // 폰에서도 32 다 — 44 로 키우면 전체폭 방 줄 바로 옆에서 오탭이 는다.
+                  // 이 버튼은 확인 없이 방(claude pane 여럿)을 통째로 닫는다.
+                  flexShrink: 0, width: isPhone ? 32 : 18, height: isPhone ? 32 : 18, marginRight: 5, borderRadius: 5, border: 'none', cursor: 'pointer',
                   background: on ? 'rgba(255,255,255,0.25)' : 'var(--cth-cream-100)', color: on ? '#fff' : 'var(--cth-ink-500)',
                   fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>×</button>
@@ -283,6 +289,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
               return (
                 <button key={a.id} onClick={() => onSelectStudent?.(a.id, a.name)} title={a.name} style={{
                   display: 'flex', alignItems: 'center', gap: 6, margin: '0 0 0 12px', padding: '4px 7px', borderRadius: 7,
+                  minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                   border: 'none', cursor: 'pointer', textAlign: 'left',
                   background: sel ? 'var(--cth-sky-light)' : 'transparent', color: 'var(--cth-ink-700)',
                   fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: sel ? 700 : 500,
@@ -307,6 +314,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
             {STARTERS.map((g) => (
               <button key={g} onClick={() => { onNewRoom(g); setAdding(false); }} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',
+                minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 background: '#fff', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
                 boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
               }}>
@@ -319,6 +327,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
         ) : (
           <button onClick={() => setAdding(true)} style={{
             marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '8px', borderRadius: 8,
+            minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
             border: '1.5px dashed var(--cth-cream-200)', cursor: 'pointer', background: 'transparent', color: 'var(--cth-sky)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
           }}>
@@ -333,6 +342,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
           하단 '현재 터미널에 입력' 버튼(거노: 먼저 보고 직접 이어가기). */}
       <button onClick={() => setShowRecent((v) => !v)} style={{
         marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 8,
+        minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
         border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-500)',
         fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700,
       }}>

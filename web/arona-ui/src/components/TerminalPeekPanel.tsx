@@ -10,6 +10,7 @@ import { SLUG_TO_CHARACTER } from '@/lib/sprites';
 import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
 import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
+import { useIsPhone } from '@/lib/useIsPhone';
 import { accentByName, hex, type AccentColorName } from '@/design/tokens';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
@@ -1149,6 +1150,7 @@ function TaskStrip({ tasks }: { tasks: StripTask[] }) {
 
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
 export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session, subagent, onOpenSubagent, onToggleZoom, zoomed }: TerminalPeekPanelProps) {
+  const isPhone = useIsPhone();
   const offline = !!session;
   const isSub = !!subagent;
   const [subList, setSubList] = useState<SubagentInfo[]>([]);
@@ -1851,7 +1853,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             <button
               onClick={() => setActionMenu((o) => !o)}
               title="더보기"
-              style={{ width: 24, height: 24, borderRadius: 7, border: '1px solid var(--cth-cream-200)', cursor: 'pointer', background: actionMenu ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)', color: actionMenu ? 'var(--cth-sky)' : 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+              style={{ width: isPhone ? 44 : 24, height: isPhone ? 44 : 24, borderRadius: 7, border: '1px solid var(--cth-cream-200)', cursor: 'pointer', background: actionMenu ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)', color: actionMenu ? 'var(--cth-sky)' : 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
             >
               <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3.3" r="1.35" /><circle cx="8" cy="8" r="1.35" /><circle cx="8" cy="12.7" r="1.35" /></svg>
             </button>
@@ -1869,7 +1871,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             onClick={onClose}
             title="대화 닫기"
             style={{
-              width: 24, height: 24, borderRadius: 7, border: 'none', cursor: 'pointer',
+              width: isPhone ? 44 : 24, height: isPhone ? 44 : 24, borderRadius: 7, border: 'none', cursor: 'pointer',
               background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
               fontFamily: 'var(--cth-font-ui)', fontSize: 15, lineHeight: 1,
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
@@ -2420,6 +2422,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               style={{
                 flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
                 padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer',
+                minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
               }}

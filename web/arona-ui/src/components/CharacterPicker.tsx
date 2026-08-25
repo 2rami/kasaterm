@@ -66,7 +66,8 @@ export function CharacterPicker({ title, note, onPick, onClose }: {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        background: 'var(--cth-cream-50)', borderRadius: 16, padding: 18, width: 340,
+        // 390px 폰에서 340 은 좌우 여백이 25px 씩밖에 안 남는다. 데스크톱에선 그대로 340.
+        background: 'var(--cth-cream-50)', borderRadius: 16, padding: 18, width: 'min(340px, 92vw)',
         maxHeight: '72vh', display: 'flex', flexDirection: 'column',
         boxShadow: '0 8px 32px rgba(21,41,74,0.25)',
       }}>
