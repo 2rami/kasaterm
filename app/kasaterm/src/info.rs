@@ -2316,6 +2316,7 @@ pub(crate) fn draw_info_col(
     // 아래쪽 행에서 연 메뉴가 잘린다. 커서도 거르지 않은 것을 쓴다.
     g.pop_clip();
     draw_row_menu(g, raw_cursor, info, x, w, top, bottom);
+    draw_pane_menu(g, raw_cursor, info, x, w, top, bottom);
     info.view = snap;
     if let Some(t) = prof {
         eprintln!(
@@ -3122,6 +3123,134 @@ fn draw_proc_row(
 
 /// 프로세스 우클릭 메뉴. 칼럼 안에 가두는 건 이 칼럼이 마지막으로 그려지는
 /// 레이어가 아니어서다 — 밖으로 삐져나가면 뒤에 그려질 pane 헤더가 덮는다.
+/// 학생 줄 우클릭 메뉴 — 테마를 고르고, 그 안에서 학생을 고른다.
+///
+/// 한 화면에 79명을 세울 수 없어 테마로 한 단 끊는다. 고른 뒤에는 `repersona_pane`
+/// 이 대화를 끊지 않고 이름·얼굴·말투만 갈아끼운다(2026-08-25 거노 요청: 인포에서
+/// 우클릭으로 바꾸고 싶다).
+fn draw_pane_menu(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    info: &mut state::InfoState,
+    x: f32,
+    w: f32,
+    top: f32,
+    bottom: f32,
+) {
+    info.pane_menu_rects.clear();
+    let Some((rawx, rawy, _, ref opened)) = info.pane_menu else { return };
+    use state::PaneMenuItem as M;
+
+    // (항목, 라벨, 앞에 구분선)
+    let mut items: Vec<(M, String, bool)> = Vec::new();
+    match opened {
+        None => {
+            // `list_themes` 가 아니라 `theme_rows` 를 쓴다 — 그쪽은 설치된 테마만
+            // 주고, **번들(기본) 로스터가 빠진다.** 지금 도는 학생 대부분이 거기
+            // 소속이라 빠지면 정작 되돌릴 이름이 목록에 없다. 번들은 빈 id 로 온다.
+            for r in crate::socket::theme_rows() {
+                let id = if r.id.is_empty() {
+                    kasa_mcp::character::BASE_THEME_KEY.to_string()
+                } else {
+                    r.id
+                };
+                items.push((M::Theme(id), r.label, false));
+            }
+        }
+        Some(theme_id) => {
+            items.push((M::Back, "‹ 테마 고르기".to_string(), false));
+            let chars = if theme_id == kasa_mcp::character::BASE_THEME_KEY {
+                kasa_mcp::character::base_characters_json()
+            } else {
+                kasa_mcp::character::theme_characters_json(theme_id)
+            };
+            let names = chars
+                .as_ref()
+                .map(kasa_mcp::character::member_names)
+                .unwrap_or_default();
+            for (i, n) in names.into_iter().enumerate() {
+                items.push((M::Character(n.clone()), n, i == 0));
+            }
+        }
+    }
+    if items.is_empty() {
+        return;
+    }
+
+    let mih = 28.0_f32;
+    let sep = 7.0_f32;
+    let pad = 6.0_f32;
+    // 세로가 모자라면 잘라 낸다 — 넘치면 메뉴가 본문 밖으로 흘러 아무것도 못 누른다.
+    let room = (bottom - top - 8.0).max(mih * 3.0);
+    let max_items = (((room - pad * 2.0) / mih).floor() as usize).max(3);
+    let clipped = items.len() > max_items;
+    if clipped {
+        items.truncate(max_items - 1);
+    }
+    let widest = items
+        .iter()
+        .map(|(_, l, _)| g.measure_chrome_text(l, 13.0, false))
+        .fold(0.0_f32, f32::max);
+    let menu_w = (widest + 32.0).min(w - 8.0);
+    let nsep = items.iter().filter(|(_, _, s)| *s).count() as f32;
+    let rows = items.len() as f32 + if clipped { 1.0 } else { 0.0 };
+    let menu_h = pad * 2.0 + rows * mih + nsep * sep;
+    let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
+    let my = rawy.min(bottom - menu_h - 4.0).max(top);
+    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
+    let bc = theme::with_alpha(theme::border(), 0xCC);
+    g.rect(mx, my, menu_w, 1.0, bc);
+    g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, bc);
+    g.rect(mx, my, 1.0, menu_h, bc);
+    g.rect(mx + menu_w - 1.0, my, 1.0, menu_h, bc);
+
+    let mut iy = my + pad;
+    for (item, label, sep_before) in items {
+        if sep_before {
+            g.rect(
+                mx + pad,
+                iy + sep * 0.5,
+                menu_w - pad * 2.0,
+                1.0,
+                theme::with_alpha(theme::border(), 0x88),
+            );
+            iy += sep;
+        }
+        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
+        if hit(cursor, &r) {
+            crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
+        }
+        let is_theme = matches!(item, M::Theme(_));
+        g.draw_text(
+            r.0 + 12.0,
+            r.1 + (mih - 13.0) / 2.0,
+            &label,
+            gpu::DrawOpts {
+                font_size: 13.0,
+                color: theme::text(),
+                bold: is_theme,
+                italic: false,
+            },
+        );
+        info.pane_menu_rects.push((item, r));
+        iy += mih;
+    }
+    // 잘렸다는 사실을 숨기지 않는다 — 없는 줄 알고 설정 화면까지 가는 것보다 낫다.
+    if clipped {
+        g.draw_text(
+            mx + 16.0,
+            iy + (mih - 12.0) / 2.0,
+            "… 나머지는 설정 → 캐릭터",
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: theme::with_alpha(theme::text(), 0x99),
+                bold: false,
+                italic: true,
+            },
+        );
+    }
+}
+
 fn draw_row_menu(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),

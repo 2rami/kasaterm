@@ -3052,6 +3052,22 @@ impl ApplicationHandler<UserEvent> for App {
                         self.info.ctx_menu = Some((cx, cy, target));
                         self.chrome_dirty = true;
                         window.request_redraw();
+                        return;
+                    }
+                    // 프로세스 행이 아니면 **학생 줄**을 본다 — 거기서 그 pane 의
+                    // 학생을 바꾼다(2026-08-25 거노: 인포에서 우클릭하게 한 거
+                    // 아니냐). `group_rects` 는 방 머리와 학생 머리를 한 벌로 담으므로
+                    // pane id(`%N`)로 시작하는 것만 고른다.
+                    let pane = self
+                        .info
+                        .group_rects
+                        .iter()
+                        .find(|(k, r)| k.starts_with('%') && inside(r))
+                        .map(|(k, _)| k.clone());
+                    if let Some(pane) = pane {
+                        self.info.pane_menu = Some((cx, cy, pane, None));
+                        self.chrome_dirty = true;
+                        window.request_redraw();
                     }
                     return;
                 }
@@ -4049,6 +4065,36 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 학생 줄 우클릭 메뉴. 테마를 고른 것은 **메뉴를 닫지 않고**
+                        // 같은 자리에서 목록만 바꾼다 — 한 번 더 눌러 학생을 고르는
+                        // 것이 이 메뉴의 본래 목적이라, 여기서 닫으면 매번 우클릭을
+                        // 다시 해야 한다.
+                        if let Some((mx, my, pane, _)) = self.info.pane_menu.clone() {
+                            use state::PaneMenuItem as M;
+                            let picked = self
+                                .info
+                                .pane_menu_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(m, _)| m.clone());
+                            match picked {
+                                Some(M::Theme(id)) => {
+                                    self.info.pane_menu = Some((mx, my, pane, Some(id)));
+                                }
+                                Some(M::Back) => {
+                                    self.info.pane_menu = Some((mx, my, pane, None));
+                                }
+                                Some(M::Character(name)) => {
+                                    self.info.pane_menu = None;
+                                    self.repersona_pane(&pane, &name);
+                                    self.set_toast(format!("{pane} → {name}"));
+                                }
+                                None => self.info.pane_menu = None,
+                            }
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
                         // 프로세스·포트 우클릭 메뉴가 떠 있으면 그게 최상단이다.
                         // 밖을 눌렀으면 닫기만 하고 클릭을 삼킨다 — 메뉴를 닫는
                         // 클릭이 밑의 행까지 누르면 놀란다.
@@ -4083,6 +4129,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // Git 탭에선 Info 본문이 안 그려져 메뉴도 안 뜨는데
                                 // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
                                 self.info.ctx_menu = None;
+                                self.info.pane_menu = None;
                             }
                             window.request_redraw();
                             return;

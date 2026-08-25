@@ -2207,7 +2207,7 @@ impl App {
             return;
         }
         let act = match std::env::var("KASATERM_AUTOINFO").ok() {
-            Some(v) if v == "hover" || v == "menu" => v,
+            Some(v) if v == "hover" || v == "menu" || v == "panemenu" || v == "panechars" => v,
             _ => return,
         };
         if ACTED.load(Ordering::Relaxed)
@@ -2216,6 +2216,38 @@ impl App {
             return;
         }
         ACTED.store(true, Ordering::Relaxed);
+        // 학생 줄 우클릭 메뉴 — 프로세스 행과 다른 목록(`group_rects`)을 쓰고,
+        // 캐릭터 목록은 **한 번 더 눌러야** 나오므로 정적 캡처로는 존재 자체를
+        // 확인할 수 없다. `panemenu` 는 테마 목록까지, `panechars` 는 첫 테마를
+        // 골라 캐릭터 목록까지 편 상태로 세운다.
+        if act == "panemenu" || act == "panechars" {
+            let Some((pane, r)) = self
+                .info
+                .group_rects
+                .iter()
+                .find(|(k, _)| k.starts_with('%'))
+                .cloned()
+            else {
+                eprintln!("[autoinfo] 학생 줄 없음 — group_rects 에 pane 머리가 안 잡혔다");
+                return;
+            };
+            let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+            let opened = if act == "panechars" {
+                let first = kasa_mcp::character::list_themes().into_iter().next();
+                if first.is_none() {
+                    eprintln!("[autoinfo] 테마가 하나도 없다 — 캐릭터 목록을 못 편다");
+                }
+                first.map(|(id, _)| id)
+            } else {
+                None
+            };
+            self.cursor_px = (cx, cy);
+            self.info.pane_menu = Some((cx, cy, pane.clone(), opened.clone()));
+            eprintln!(
+                "[autoinfo] act={act} pane={pane} at ({cx:.0},{cy:.0}) opened={opened:?}"
+            );
+            return;
+        }
         let Some((pid, r)) = self.info.proc_rects.first().copied() else {
             eprintln!("[autoinfo] 프로세스 행 없음 — 좌표가 아직 안 생겼다");
             return;

@@ -404,6 +404,21 @@ pub(crate) enum InfoDirBtn {
     CopyPath,
 }
 
+/// 학생 줄 우클릭 메뉴 항목.
+///
+/// 테마를 고르면 **같은 자리에서 목록만** 그 테마의 캐릭터로 바뀐다. 2단 팝업을
+/// 옆으로 겹치지 않는 이유는 인포 칼럼이 좁아서다 — 겹치면 두 번째 단이 화면 밖으로
+/// 나가거나 본문을 덮는다.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum PaneMenuItem {
+    /// 테마 id. 누르면 그 테마의 캐릭터 목록으로 들어간다.
+    Theme(String),
+    /// 캐릭터 이름. 누르면 그 pane 의 학생이 바뀐다(대화는 안 끊긴다).
+    Character(String),
+    /// 테마 목록으로 되돌아간다.
+    Back,
+}
+
 /// 프로세스·포트 행 우클릭 메뉴 항목.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InfoMenuAction {
@@ -488,6 +503,10 @@ pub(crate) struct InfoState {
     /// `draw_info_col` 이 아니라 그 위 블록이 채운다.
     pub(crate) action_rects: Vec<(InfoAction, (f32, f32, f32, f32))>,
     pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
+    /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 펼친 테마 id)`. 테마가 `None` 이면
+    /// 테마 목록을, 있으면 그 테마의 캐릭터 목록을 그린다.
+    pub(crate) pane_menu: Option<(f32, f32, String, Option<String>)>,
+    pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
 }
 
@@ -525,6 +544,8 @@ impl Default for InfoState {
             dir_btn_rects: Vec::new(),
             action_rects: Vec::new(),
             ctx_menu_rects: Vec::new(),
+            pane_menu: None,
+            pane_menu_rects: Vec::new(),
             refresh_rect: None,
         }
     }
