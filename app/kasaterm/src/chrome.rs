@@ -3480,9 +3480,6 @@ fn set_dock_badge(_count: usize) {}
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn ensure_notification_authorization() {}
 
-/// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
-/// title with quotes can't break out of the `display notification` command.
-#[cfg(target_os = "macos")]
 /// 설정 웹뷰 페이지가 지금 실제로 서빙되나 — 루프백에 300ms.
 ///
 /// 웹뷰는 404 를 받아도 **빌드에 성공한다.** 그래서 빌드 성공만 보고 「열렸다」로
@@ -3521,6 +3518,9 @@ fn settings_web_reachable(port: &str) -> bool {
     n >= 12 && head.starts_with(b"HTTP/1.") && &head[9..12] == b"200"
 }
 
+/// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
+/// title with quotes can't break out of the `display notification` command.
+#[cfg(target_os = "macos")]
 fn applescript_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
