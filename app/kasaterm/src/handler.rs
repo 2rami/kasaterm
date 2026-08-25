@@ -410,6 +410,24 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.pane_claude_sid.insert(pane.clone(), sid.clone());
+                // 재배정 잔재 정리: 이 stem 이 옛 캐릭터로 바인딩돼 있는데 현재 배정이
+                // 다르면(재배정이 stem 을 안 갱신한 자국), 현재 배정을 정본으로 stem 을
+                // 맞춘다. 안 그러면 바로 아래 apply_session_character 가 그 옛 바인딩을
+                // 읽어 pane 을 옛 캐릭터로 되돌리고, persona 재주입(http.rs /persona)도
+                // 옛 말투를 되살린다(거노 실측: 배정은 히후미인데 info·말투는 고블린).
+                // ⚠️ **기존 바인딩이 있고 다를 때만** — 바인딩이 없는(None) 포크·bg
+                // 세션은 건드리지 않는다. 그건 apply 가 부모 상속·anchor 로 복원할 몫이고,
+                // 여기서 굳히면 그 복원을 막아 옛 「미도리→유우카 둔갑」 회귀가 난다.
+                if let Some(cur) =
+                    self.ws.lock().unwrap().pane_character.get(pane.as_str()).cloned()
+                {
+                    if !cur.is_empty()
+                        && kasa_mcp::character::session_character(sid)
+                            .is_some_and(|bound| bound != cur)
+                    {
+                        let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                    }
+                }
                 self.apply_session_character(pane, sid);
                 // 즉시 redraw — 없으면 idle 세션 attach 는 화면 업데이트가 안 흘러
                 // 다음 리드로우가 영영 없고, 교정된 학생(테두리·명찰·프사)이 사용자가

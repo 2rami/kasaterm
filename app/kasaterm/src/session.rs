@@ -672,8 +672,16 @@ impl App {
             let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
             let _ = kasa_mcp::character::write_marker(&rslug, pane, character);
         }
-        // --resume 가 같은 캐릭터로 돌아오게 세션 바인딩도 갱신.
-        if let Some(sid) = self.pane_session_id.get(pane) {
+        // --resume 가 같은 캐릭터로 돌아오게 세션 바인딩도 갱신 — pane 이 물고 있는 sid 를
+        // **모두** 맞춘다. spawn anchor(pane_session_id)와 claude transcript stem
+        // (pane_claude_sid)은 다를 수 있는데(claude 가 자기 세션 id 를 새로 발급), info
+        // 그림과 persona 재주입은 **stem** 을 읽는다(chrome.rs display_tab_char·http.rs
+        // /persona). stem 을 빼먹으면 재배정해도 옛 테마 캐릭터의 얼굴·말투가 남는다
+        // (거노 실측: 배정은 히후미인데 info·말투는 고블린).
+        for sid in [self.pane_session_id.get(pane), self.pane_claude_sid.get(pane)]
+            .into_iter()
+            .flatten()
+        {
             let _ = kasa_mcp::character::bind_session_character(sid, character);
         }
         // 말투도 새 캐릭터 것으로 — **다음에 이 pane 에서 claude 가 뜰 때부터**.

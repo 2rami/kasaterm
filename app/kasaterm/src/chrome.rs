@@ -85,16 +85,24 @@ impl App {
         if let Some(p) = self.pty.get(tab) {
             p.active_agent()?;
         }
-        self.pane_claude_sid
+        // claude agents 목록 뷰는 학생을 안 그린다(옛 or_else 폴백의 view 가드).
+        if self.pty.get(tab).map(|p| p.is_claude_agents()).unwrap_or(false) {
+            return None;
+        }
+        // 현재 배정(`ws.pane_character`)이 정본이다 — 미니맵·목록이 읽는 값과 같다.
+        // 예전엔 `session_character(sid)` 를 우선했는데, 재배정·테마전환은 pane_character
+        // 만 갱신하고 `session_characters.json` 의 옛 claude-stem 바인딩은 안 지워서,
+        // 그걸 우선하면 재배정 전 캐릭터(옛 테마)가 얼굴·이름으로 되살아났다(거노 실측:
+        // 배정은 히후미인데 info 는 고블린). pane 이 살아 있는 한 pane_character 를 믿고,
+        // 그것이 빈(복원 직후 아직 미배정) 순간에만 세션 바인딩으로 되짚는다.
+        ws.pane_character
             .get(tab)
-            .and_then(|sid| kasa_mcp::character::session_character(sid))
+            .cloned()
+            .filter(|c| !c.is_empty())
             .or_else(|| {
-                let view = self.pty.get(tab).map(|p| p.is_claude_agents()).unwrap_or(false);
-                if view {
-                    None
-                } else {
-                    ws.pane_character.get(tab).cloned()
-                }
+                self.pane_claude_sid
+                    .get(tab)
+                    .and_then(|sid| kasa_mcp::character::session_character(sid))
             })
     }
 
