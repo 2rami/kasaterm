@@ -1052,9 +1052,7 @@ impl App {
     /// If removing all panes empties the tree, exit the event loop.
     pub(crate) fn reap_dead_panes(&mut self, event_loop: &ActiveEventLoop) {
         let ids: Vec<String> = std::mem::take(&mut *self.dead_panes.lock().unwrap());
-        if ids.is_empty() {
-            return;
-        }
+        let reaped = !ids.is_empty();
         for id in ids {
             // PTY 를 놓는 것과 트리에서 leaf 를 걷는 것은 경로가 갈려 있다 —
             // `swap_character` 는 PTY 를 **먼저** 놓고 같은 pane id 로 새로 띄우는데,
@@ -1068,11 +1066,133 @@ impl App {
             }
             self.remove_pane(&id);
         }
+        // 자원이 사라진 자리를 매 턴 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
+        // 어긋남은 여기서만 잡히고, 그걸 놓치면 사용자가 손댈 수 없는 상태로 굳는다.
+        self.sweep_orphan_leaves();
+        self.sweep_lost_panes();
+        self.sweep_empty_rooms();
         // Last pane closed (e.g. user typed `exit` in the only shell): shut the
         // window so kasaterm exits cleanly the way users expect from a regular
         // terminal.
-        if self.tmux.is_none() && self.pty.is_empty() {
+        //
+        // 실제로 걷은 턴에만 본다 — 스윕 때문에 매 턴 돌게 되면서, 부팅 직후처럼
+        // pane 이 아직 없는 순간을 「마지막 pane 이 닫혔다」로 읽을 수 있다.
+        if reaped && self.tmux.is_none() && self.pty.is_empty() {
             event_loop.exit();
+        }
+    }
+
+    /// 트리에 자리는 있는데 자원(PTY·화면 그리드)이 없는 leaf 를 걷는다.
+    ///
+    /// `drop_pane_resources` 도 같은 검사를 하지만 그건 **자원을 놓는 그 순간**에만
+    /// 돈다. 그 함수의 주석은 자원을 놓는 지점이 자기 하나뿐이라고 단언하는데 사실이
+    /// 아니다 — `close_window`·`remove_pane_stashed`·`collapse_layout_only`·
+    /// `close_tab` 이 `pty.remove`/`panes.remove` 를 직접 부른다. 그 넷 중 하나로
+    /// 자원이 사라지면 검사가 영영 안 돈다.
+    ///
+    /// 그렇게 남은 자리는 `ws.panes` 에 없어 **클릭 판정에도 안 잡힌다** — 헤더도
+    /// × 버튼도 우클릭 메뉴도 없는 검은 사각형이라 사용자가 치울 방법이 없다
+    /// (2026-08-25 실측: 방 하나에 %8 이 그 상태로 남아 있었고, 앱조차 「그런 pane
+    /// 없다」고 답하면서 화면에는 자리를 차지했다). 태어나는 자리를 하나씩 막는 대신
+    /// 매 턴 훑는 이유는, 자원을 놓는 경로가 앞으로 더 생겨도 여기서 잡히기 때문이다.
+    fn sweep_orphan_leaves(&mut self) {
+        let mut orphans: Vec<String> = Vec::new();
+        {
+            let ws = self.ws.lock().unwrap();
+            for tree in std::iter::once(self.pty_layout.as_ref())
+                .chain(self.windows.iter().map(|w| w.as_ref()))
+                .flatten()
+            {
+                for leaf in tree.leaves() {
+                    if !self.pty.contains_key(leaf) && !ws.panes.contains_key(leaf) {
+                        orphans.push(leaf.to_string());
+                    }
+                }
+            }
+        }
+        if orphans.is_empty() {
+            return;
+        }
+        orphans.sort();
+        orphans.dedup();
+        for id in orphans {
+            self.collapse_orphan_leaf(&id);
+        }
+    }
+
+    /// 자원은 살아 있는데 **어느 트리에도 없고 되살리기 목록에도 없는** pane 을
+    /// 목록에 되돌린다.
+    ///
+    /// 닫아 둔 pane 은 `closed_panes` 가 유일한 손잡이다 — 트리에 없으니 화면에서
+    /// 찾을 수 없고, 그 목록에서까지 빠지면 ⌘⇧T 로도 못 부른다. 그런데 개수 상한
+    /// 정리(`push_closed_pane`)는 밀어낸 항목을 `kill_hidden_pane` 으로 죽이려 하고,
+    /// 그 함수는 죽이기를 거부하는 가지가 있으며(트리에 leaf 가 남은 경우), `pty
+    /// .remove` 가 프로세스를 끝낸다는 전제도 `Arc` 를 다른 곳에서 들고 있으면
+    /// 깨진다. 어느 쪽이든 결과는 같다 — **목록에서는 빠졌는데 셸도 claude 도 계속
+    /// 도는 pane.** 2026-08-25 실측으로 학생 하나가 그 상태로 6시간 48분 동안 화면
+    /// 밖에서 일하고 있었고, 사용자는 그 pane 이 사라졌다고만 알고 있었다.
+    ///
+    /// 죽이지 않고 되돌리는 이유는, 여기서 알 수 있는 것이 「손잡이가 없다」뿐이고
+    /// 그 pane 이 하던 일이 끝났는지는 알 수 없기 때문이다. 손잡이를 돌려주면
+    /// 사용자가 보고 정한다. `stashed` 로 넣는 것도 같은 이유 — 되찾자마자 개수
+    /// 상한에 다시 밀리면 헛일이다.
+    fn sweep_lost_panes(&mut self) {
+        let lost: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            self.pty
+                .keys()
+                .filter(|id| {
+                    // 보조 탭은 애초에 leaf 가 아니다 — 화면을 든 것은 그 탭이 사는
+                    // 바깥 pane 이라 트리에 없는 게 정상이다.
+                    let is_tab = ws.pid_to_pane.get(*id).is_some_and(|outer| outer != *id);
+                    !is_tab
+                        && !self.leaf_lingers_anywhere(id)
+                        && !self.closed_panes.iter().any(|c| &c.pane_id == *id)
+                        && !self
+                            .aux_windows
+                            .iter()
+                            .any(|a| a.term_pane_id() == Some(id.as_str()))
+                })
+                .cloned()
+                .collect()
+        };
+        for id in lost {
+            // 락 밖에서 — `record_closed_pane` 이 스스로 `ws` 를 잡는다.
+            self.record_closed_pane(&id, true, true);
+        }
+    }
+
+    /// pane 이 하나도 없는 방 슬롯을 닫는다.
+    ///
+    /// `switch_window` 는 빈 슬롯이면 셸을 하나 띄워 되살리지만, 그건 사용자가 그
+    /// 방을 눌렀을 때 얘기다. 아무도 안 누르면 껍데기가 사이드바에 계속 앉아 있고,
+    /// 저장은 빈 방을 건너뛰므로 되살릴 기록조차 안 남는다. 방이 비는 것 자체는
+    /// 막을 수 없다 — 그 방의 마지막 pane 이 스스로 끝나면 `remove_pane` 이 트리를
+    /// 통째로 놓는다 — 그러니 빈 뒤에 걷는다.
+    ///
+    /// 활성 창은 제외한다. 그 슬롯이 `None` 인 것은 정상이고(트리가 `pty_layout` 에
+    /// 있다), 새 방을 만드는 중에도 잠깐 그 상태를 지난다. 밖으로 꺼낸 방도 제외 —
+    /// 그쪽은 슬롯에 트리가 남아 있지만, 활성 판정이 한 틱 어긋나는 순간을 빈 방으로
+    /// 읽으면 사용자가 보고 있는 별도 창을 닫아 버린다.
+    fn sweep_empty_rooms(&mut self) {
+        if self.windows.len() <= 1 {
+            return;
+        }
+        let empty: Vec<usize> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(i, slot)| {
+                slot.is_none()
+                    && *i != self.active_window
+                    && !self.aux_windows.iter().any(|a| a.room_window() == Some(*i))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // 뒤에서부터 — `close_window` 가 슬롯을 배열에서 빼므로 앞부터 지우면
+        // 남은 인덱스가 밀려 엉뚱한 방을 겨눈다.
+        for i in empty.into_iter().rev() {
+            let _ = self.close_window(i);
         }
     }
     /// Drag a single-tab pane onto its own body half. Spawns a fresh shell

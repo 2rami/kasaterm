@@ -1255,9 +1255,6 @@ impl App {
         if idx == self.active_window {
             return;
         }
-        if self.windows[idx].is_none() {
-            return;
-        }
         // 줌은 App 전역 상태인데 pane 은 방(윈도우)마다 다르다 — 줌한 채로 방을
         // 옮기면 그 방에 없는 pane 을 가리킨 유령 줌이 남아, 새 방이 「최대화된
         // 무언가」처럼 보이거나 되돌릴 대상이 없어진다. 방을 옮기는 순간 푼다.
@@ -1265,6 +1262,16 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.pty_layout = self.windows[idx].take();
         self.active_window = idx;
+        // 빈 방이면 셸을 하나 띄워 되살린다. 예전엔 여기 오기 전에 `windows[idx]
+        // .is_none()` 으로 막았는데, 그러면 그 방은 **활성으로 만들 수 없고 활성이
+        // 아니면 닫을 수도 없다** — 사이드바에는 계속 보이는데 눌러도 아무 일이
+        // 없었다(거노 2026-08-25 「방을 닫을수도 pane을 닫을수도 없어 복구도
+        // 안되고」). 막는 대신 들여보내고 쓸 수 있는 방으로 만든다.
+        if self.pty_layout.is_none() {
+            if let Err(e) = self.spawn_session_pane() {
+                eprintln!("[window] 빈 방 {idx} 되살리기 실패: {e:#}");
+            }
+        }
         self.win_tab_reveal(idx);
         // The user is now looking at this window — clear any unseen-notification
         // pulse on its sidebar tab.
