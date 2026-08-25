@@ -5411,6 +5411,8 @@ struct App {
     /// **여기 담긴 것 말고는 아무 상태도 미리 안 바뀐다** — 작업대 갈아 끼우기·설정
     /// 저장·pane 재시작은 [전환] 을 눌러야 그때 돈다.
     account_switch_confirm: Option<session::PendingAccountSwitch>,
+    /// 학생 교체 확인 카드 — 말투까지 바꾸려면 다시 띄워야 해서 먼저 묻는다.
+    character_swap_confirm: Option<session::PendingCharacterSwap>,
     settings_web_webview: Option<wry::WebView>,
     /// 학생 하나만 담는 세부설정 창(`/arona-ui/settings.html?student=`). 설정 본체와
     /// **따로** 사는 이유는, 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하기
@@ -5859,6 +5861,7 @@ impl App {
             arona_panel_webview: None,
             settings_web_window: None,
             account_switch_confirm: None,
+            character_swap_confirm: None,
             settings_web_webview: None,
             student_web_window: None,
             student_web_webview: None,

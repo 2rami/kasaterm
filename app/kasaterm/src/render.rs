@@ -3032,6 +3032,10 @@ impl App {
             crate::session::AccountSwitchBtn,
             (f32, f32, f32, f32),
         )> = Vec::new();
+        let mut swap_confirm_hits: Vec<(
+            crate::session::CharacterSwapBtn,
+            (f32, f32, f32, f32),
+        )> = Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
         // Settings entry lives in its own wgpu window now (auxwin.rs); the main
         // frame only draws the sidebar "Settings" entry rect for hit-testing.
@@ -9025,6 +9029,16 @@ impl App {
                     );
                 }
             }
+            // 학생 교체 확인 — 계정 카드와 같은 층. 둘이 동시에 뜰 일은 없다(둘 다
+            // 모든 클릭을 삼키는 모달이라 하나가 떠 있으면 다른 진입점이 안 열린다).
+            if let Some(p) = self.character_swap_confirm.as_ref() {
+                swap_confirm_hits = paint_character_swap_confirm(
+                    g,
+                    (win_px.0 / scale, win_px.1 / scale),
+                    self.cursor_px,
+                    p,
+                );
+            }
             // File-tree drag ghost — a small pill trailing the cursor with the
             // dragged item's name, drawn last so it floats over everything.
             if let Some(drag) = self.file_tree.drag.as_ref() {
@@ -9113,6 +9127,11 @@ impl App {
         if let Some(p) = self.account_switch_confirm.as_mut() {
             if !account_confirm_hits.is_empty() {
                 p.rects = account_confirm_hits;
+            }
+        }
+        if let Some(p) = self.character_swap_confirm.as_mut() {
+            if !swap_confirm_hits.is_empty() {
+                p.rects = swap_confirm_hits;
             }
         }
         self.confirm_btn_rects = confirm_btn_hits;
@@ -9835,20 +9854,28 @@ fn paint_account_flash(g: &mut gpu::GpuRenderer, r: (f32, f32, f32, f32), k: f32
 /// **자유함수인 이유**: 전환을 거는 자리가 두 창에 흩어져 있다(설정 별도창의 계정
 /// 카드 · 메인 창의 드롭다운). 카드를 눌렀는데 확인이 뒤 창에 뜨면 그건 확인이
 /// 아니므로, 누른 창이 자기 손으로 같은 카드를 그린다.
-pub(crate) fn paint_account_switch_confirm(
+/// 확인 카드 한 장 — 스크림 + 제목 + 본문 + 오른쪽 정렬 버튼들.
+///
+/// 계정 전환과 학생 교체가 같은 층에 같은 모양으로 뜬다. 그리는 몸통이 둘이면
+/// 한쪽만 고쳐져 카드 두 장이 조용히 달라진다.
+///
+/// 버튼은 **오른쪽부터** 주어진 순서로 놓인다 — 첫 항목이 가장 오른쪽, 즉 기본
+/// 행동이다. `tone` 이 있으면 채운 버튼, 없으면 테두리 버튼: 흑백에서도 어느 쪽이
+/// 기본인지 형태로 읽혀야 한다.
+pub(crate) fn paint_confirm_card<B: Copy>(
     g: &mut gpu::GpuRenderer,
     win: (f32, f32),
     cursor: (f32, f32),
-    p: &crate::session::PendingAccountSwitch,
-) -> Vec<(crate::session::AccountSwitchBtn, (f32, f32, f32, f32))> {
-    use crate::session::AccountSwitchBtn;
+    title: &str,
+    lines: &[String],
+    buttons: &[(&str, B, Option<[u8; 4]>)],
+) -> Vec<(B, (f32, f32, f32, f32))> {
     let (win_w, win_h) = win;
     g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
 
-    let (title, lines) = crate::session::account_switch_confirm_text(&p.to_label, &p.impact);
     let pad = 24.0_f32;
     let line_h = 20.0_f32;
-    let title_w = g.measure_chrome_text(&title, 15.0, true);
+    let title_w = g.measure_chrome_text(title, 15.0, true);
     let body_w = lines
         .iter()
         .map(|l| g.measure_chrome_text(l, 13.0, false))
@@ -9861,7 +9888,7 @@ pub(crate) fn paint_account_switch_confirm(
     g.draw_text(
         cx0 + pad,
         cy0 + 28.0,
-        &title,
+        title,
         gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
     );
     for (i, l) in lines.iter().enumerate() {
@@ -9879,12 +9906,8 @@ pub(crate) fn paint_account_switch_confirm(
     let btn_h = 34.0_f32;
     let btn_y = cy0 + card_h - 20.0 - btn_h;
     let mut right = cx0 + card_w - pad;
-    let mut hits: Vec<(AccountSwitchBtn, (f32, f32, f32, f32))> = Vec::new();
-    let mut button = |g: &mut gpu::GpuRenderer,
-                      hits: &mut Vec<(AccountSwitchBtn, (f32, f32, f32, f32))>,
-                      label: &str,
-                      btn: AccountSwitchBtn,
-                      tone: Option<[u8; 4]>| {
+    let mut hits: Vec<(B, (f32, f32, f32, f32))> = Vec::new();
+    for (label, btn, tone) in buttons {
         let w = g.measure_chrome_text(label, bf, tone.is_some()) + bpad * 2.0;
         let x = right - w;
         right = x - 10.0;
@@ -9892,14 +9915,12 @@ pub(crate) fn paint_account_switch_confirm(
         g.hover_pointer |= hot;
         let (fill, fg, bold) = match tone {
             Some(c) => (
-                theme::with_alpha(c, if hot { 0xFF } else { 0xDD }),
+                theme::with_alpha(*c, if hot { 0xFF } else { 0xDD }),
                 [0xFF, 0xFF, 0xFF, 0xFF],
                 true,
             ),
             None => (theme::raised_on(theme::surface_active(), hot), theme::text(), false),
         };
-        // 무채색 쪽은 테두리로 선다 — 확인 모달과 같은 규칙(흑백에서도 어느 쪽이
-        // 기본인지 형태로 읽혀야 한다).
         if tone.is_some() {
             panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
         } else {
@@ -9911,14 +9932,56 @@ pub(crate) fn paint_account_switch_confirm(
             label,
             gpu::DrawOpts { font_size: bf, color: fg, bold, italic: false },
         );
-        hits.push((btn, (x, btn_y, w, btn_h)));
-    };
+        hits.push((*btn, (x, btn_y, w, btn_h)));
+    }
+    hits
+}
+
+pub(crate) fn paint_account_switch_confirm(
+    g: &mut gpu::GpuRenderer,
+    win: (f32, f32),
+    cursor: (f32, f32),
+    p: &crate::session::PendingAccountSwitch,
+) -> Vec<(crate::session::AccountSwitchBtn, (f32, f32, f32, f32))> {
+    use crate::session::AccountSwitchBtn;
+    let (title, lines) = crate::session::account_switch_confirm_text(&p.to_label, &p.impact);
     // 채움색이 곧 뜻이다 — 이어붙일 대화가 없는 pane 이 섞여 있으면 그 전환은
     // 되돌릴 수 없으므로 빨강. 아니면 대화가 이어지니 기본 accent.
     let tone = if p.impact.fresh > 0 { theme::danger() } else { theme::accent() };
-    button(g, &mut hits, "전환", AccountSwitchBtn::Switch, Some(tone));
-    button(g, &mut hits, "취소", AccountSwitchBtn::Cancel, None);
-    hits
+    paint_confirm_card(
+        g,
+        win,
+        cursor,
+        &title,
+        &lines,
+        &[("전환", AccountSwitchBtn::Switch, Some(tone)), ("취소", AccountSwitchBtn::Cancel, None)],
+    )
+}
+
+/// 학생 교체 확인 — 계정 전환과 같은 층·같은 모양이다.
+pub(crate) fn paint_character_swap_confirm(
+    g: &mut gpu::GpuRenderer,
+    win: (f32, f32),
+    cursor: (f32, f32),
+    p: &crate::session::PendingCharacterSwap,
+) -> Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> {
+    use crate::session::CharacterSwapBtn;
+    let (title, lines) = crate::session::character_swap_confirm_text(&p.to, p.resumable);
+    // 이어붙일 대화가 없으면 다시 띄우기가 지금 내용을 버린다 — 계정 카드의
+    // `fresh` 와 같은 규칙으로 빨강.
+    let tone = if p.resumable { theme::accent() } else { theme::danger() };
+    paint_confirm_card(
+        g,
+        win,
+        cursor,
+        &title,
+        &lines,
+        &[
+            ("다시 띄우기", CharacterSwapBtn::Relaunch, Some(tone)),
+            ("껍데기만", CharacterSwapBtn::ShellOnly, None),
+            ("취소", CharacterSwapBtn::Cancel, None),
+        ],
+    )
 }
 
 pub(crate) fn draw_usage_windows(

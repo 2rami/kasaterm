@@ -669,6 +669,73 @@ impl App {
             w.request_redraw();
         }
     }
+    /// 학생 교체 진입점 — 말투가 켜져 있으면 **다시 띄울지 먼저 묻는다**.
+    ///
+    /// 이름·얼굴·색은 `repersona_pane` 만으로 즉시 바뀌지만 말투는 그렇지 않다.
+    /// 그래서 말투가 켜져 있고 되띄울 에이전트가 실제로 도는 pane 일 때만 카드를
+    /// 띄운다 — 「말투 오프돼있으면 그냥 껍데기만바뀌게」(2026-08-25 지시). 셸만
+    /// 있는 pane 도 같다: 되띄울 대화가 없으니 물을 것이 없다.
+    pub(crate) fn ask_or_repersona(&mut self, pane: &str, name: &str) {
+        let agent = self.pty.get(pane).and_then(|p| p.active_agent());
+        let agent = agent.as_ref().map(|a| a.as_str());
+        // `restart_pane_agent` 와 **같은 규칙으로** 미리 잰다. 여기서 다르게 재면
+        // 카드가 「대화는 그대로」라고 약속해 놓고 실제로는 새로 시작한다.
+        let has_convo = self.pane_claude_sid.get(pane).is_some_and(|s| {
+            if agent == Some("codex") {
+                socket::codex_rollout_for_session(s).is_some()
+            } else {
+                socket::transcript_path_for_session(s).is_some()
+            }
+        });
+        let resumable = match plan_character_swap(socket::read_claude_persona(), agent, has_convo) {
+            SwapPlan::Now => {
+                self.repersona_pane(pane, name);
+                self.set_toast(format!("{pane} → {name}"));
+                return;
+            }
+            SwapPlan::Ask { resumable } => resumable,
+        };
+        self.character_swap_confirm = Some(PendingCharacterSwap {
+            pane: pane.to_string(),
+            to: name.to_string(),
+            resumable,
+            rects: Vec::new(),
+        });
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 카드에서 고른 결과. 취소는 **아무 일도 안 한다**.
+    pub(crate) fn character_swap_pick(&mut self, btn: CharacterSwapBtn) {
+        let Some(p) = self.character_swap_confirm.take() else { return };
+        if btn != CharacterSwapBtn::Cancel {
+            // 어느 쪽이든 마커·바인딩·말투 파일이 먼저 새 학생으로 서야 한다 —
+            // 되띄우기가 `assign_character_env` 로 env 를 다시 세울 때 그것을 읽는다.
+            self.repersona_pane(&p.pane, &p.to);
+        }
+        let msg = match btn {
+            CharacterSwapBtn::Cancel => None,
+            CharacterSwapBtn::ShellOnly => {
+                Some(format!("{} → {} · 말투는 다음에 띄울 때부터", p.pane, p.to))
+            }
+            CharacterSwapBtn::Relaunch => Some(if self.restart_pane_agent(&p.pane) {
+                format!("{} → {} · 대화를 이어서 다시 띄웠어요", p.pane, p.to)
+            } else {
+                // 되띄우기가 조용히 실패하면 사용자는 말투까지 바뀐 줄 안다.
+                format!("{} → {} · 다시 띄우지 못해 말투는 다음부터", p.pane, p.to)
+            }),
+        };
+        if let Some(m) = msg {
+            self.set_toast(m);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// pane 캐릭터 교체 — persona 는 셸 spawn 시 고정이라 PTY 를 새 persona 로 respawn
     /// 한다(대화 리셋, 거노 확인 후). 같은 pane id·leaf 유지라 레이아웃·자리 그대로,
     /// 헤더/board 캐릭터만 다음 화면에 갱신(assign_character_env 가 ws.pane_character·마커
@@ -4221,6 +4288,94 @@ pub(crate) enum ConfirmSurface {
     Settings,
 }
 
+/// 학생을 바꿀 때 「다시 띄울까」를 묻는 카드의 상태.
+///
+/// 이름·얼굴·색은 바로 바뀌지만 **말투는 pane 이 뜰 때 정해져 굳는다** — 도는
+/// 프로세스의 시스템 프롬프트는 누구도 못 바꾼다. 그래서 말투까지 지금 맞추려면
+/// 다시 띄우는 수밖에 없고, 그건 사용자에게 물어야 하는 조작이다(2026-08-25 지시:
+/// 「그럼 새로띄우게해 테마 바꾸면 확인버튼도 만들고」).
+pub(crate) struct PendingCharacterSwap {
+    pub pane: String,
+    pub to: String,
+    /// 이어붙일 대화가 있는가. 없으면 다시 띄우기가 지금 내용을 잃으므로 문구와
+    /// 버튼 색이 갈린다 — 계정 전환 카드의 `fresh` 와 같은 규칙이다.
+    pub resumable: bool,
+    /// 그 창의 render 가 매 프레임 채운다(`PendingAccountSwitch::rects` 와 같은 이유).
+    pub rects: Vec<(CharacterSwapBtn, (f32, f32, f32, f32))>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CharacterSwapBtn {
+    Cancel,
+    /// 이름·얼굴·색만 지금 바꾼다. 말투는 다음에 그 pane 에서 띄울 때부터.
+    ShellOnly,
+    /// 대화를 이어서 다시 띄운다 — 말투까지 지금 바뀐다.
+    Relaunch,
+}
+
+/// 받침에 맞춘 「으로/로」. 학생 이름은 사람이 읽는 문장 안에 그대로 들어가므로
+/// 조사가 어긋나면 바로 눈에 띈다(2026-08-25 실측 캡처: 「은랑 로 바꿀까요?」).
+///
+/// ㄹ 받침은 「로」다 — 「서울로」. 한글이 아닌 이름(로마자·기호)도 「로」로 둔다.
+fn euro_ro(word: &str) -> &'static str {
+    match word.chars().last() {
+        Some(c) if ('가'..='힣').contains(&c) => {
+            let jong = (c as u32 - 0xAC00) % 28;
+            if jong == 0 || jong == 8 {
+                "로"
+            } else {
+                "으로"
+            }
+        }
+        _ => "로",
+    }
+}
+
+/// 학생을 바꿀 때 물을 것인가, 그냥 바꿀 것인가.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SwapPlan {
+    /// 확인 없이 지금 바꾼다 — 바뀌는 것이 이름·얼굴·색뿐이라 되돌릴 것이 없다.
+    Now,
+    /// 다시 띄울지 묻는다. `resumable` 이 false 면 되띄우기가 지금 내용을 버린다.
+    Ask { resumable: bool },
+}
+
+/// 위 갈림의 순수부. `App` 을 안 들고 다니므로 테스트가 된다.
+///
+/// 카드를 띄우는 유일한 이유는 **다시 띄워야 하는 것**이다. 말투가 꺼져 있으면
+/// 바뀌는 건 껍데기뿐이라 되띄울 이유가 없고(2026-08-25 지시: 「말투 오프돼있으면
+/// 그냥 껍데기만바뀌게」), 에이전트가 안 도는 pane 도 되띄울 대화가 없다. 둘 중
+/// 하나라도 해당하면 묻지 않고 바로 바꾼다 — 묻지 않아도 되는 것을 묻는 카드는
+/// 그 자체가 방해다.
+pub(crate) fn plan_character_swap(
+    persona_on: bool,
+    agent: Option<&str>,
+    has_convo: bool,
+) -> SwapPlan {
+    if !persona_on || agent.is_none() {
+        return SwapPlan::Now;
+    }
+    SwapPlan::Ask { resumable: has_convo }
+}
+
+/// 카드에 적을 제목과 본문. `App` 을 안 들고 다니므로 테스트가 된다.
+pub(crate) fn character_swap_confirm_text(to: &str, resumable: bool) -> (String, Vec<String>) {
+    let title = format!("이 자리를 {to}{} 바꿀까요?", euro_ro(to));
+    let lines = if resumable {
+        vec![
+            "다시 띄우면 말투까지 바뀝니다 — 나눈 대화는 이어서 띄우니 그대로예요.".to_string(),
+            "껍데기만 바꾸면 이름·얼굴·색만 지금 바뀌고, 말투는 다음에 띄울 때부터입니다."
+                .to_string(),
+        ]
+    } else {
+        vec![
+            "이어붙일 대화가 없어, 다시 띄우면 지금 내용이 사라집니다.".to_string(),
+            "껍데기만 바꾸면 이름·얼굴·색만 바뀌고 이 자리는 그대로예요.".to_string(),
+        ]
+    };
+    (title, lines)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum AccountSwitchBtn {
     Cancel,
@@ -5278,5 +5433,56 @@ mod closed_pane_id_reuse_tests {
         let list = [rec("%21", false, "옛것")];
         assert_eq!(closed_index_in(&list, "%21"), Some(0));
         assert_eq!(closed_index_in(&list, "%22"), None);
+    }
+}
+
+/// 학생 교체가 **언제 묻고 언제 그냥 바꾸는가**.
+///
+/// 2026-08-25 지시: 「그럼 새로띄우게해 테마 바꾸면 확인버튼도 만들고 근데 말투
+/// 오프돼있으면 그냥 껍데기만바뀌게」. 말투가 꺼진 채로 카드가 뜨면 되띄울 이유가
+/// 없는 재시작을 묻는 셈이고, 켜진 채로 안 뜨면 대화가 말없이 끊긴다.
+#[cfg(test)]
+mod character_swap_plan_tests {
+    use super::{character_swap_confirm_text, plan_character_swap, SwapPlan};
+
+    #[test]
+    fn persona_off_swaps_the_shell_without_asking() {
+        assert_eq!(plan_character_swap(false, Some("claude"), true), SwapPlan::Now);
+    }
+
+    #[test]
+    fn a_shell_pane_has_nothing_to_relaunch() {
+        assert_eq!(plan_character_swap(true, None, false), SwapPlan::Now);
+    }
+
+    #[test]
+    fn a_running_agent_with_persona_on_is_asked() {
+        assert_eq!(
+            plan_character_swap(true, Some("claude"), true),
+            SwapPlan::Ask { resumable: true }
+        );
+    }
+
+    /// 대화가 없어도 **묻기는 한다** — 되띄우면 지금 내용을 잃으므로 오히려 더
+    /// 물어야 하는 쪽이다. 카드가 그 사실을 문구와 버튼 색으로 알린다.
+    #[test]
+    fn no_transcript_still_asks_but_flags_the_loss() {
+        assert_eq!(
+            plan_character_swap(true, Some("claude"), false),
+            SwapPlan::Ask { resumable: false }
+        );
+        let (_, lines) = character_swap_confirm_text("은랑", false);
+        assert!(
+            lines.iter().any(|l| l.contains("사라집니다")),
+            "대화를 잃는다는 사실이 카드에 안 적힌다"
+        );
+        // 이어붙일 대화가 있을 때는 반대로 「그대로」임을 말해야 한다.
+        let (title, ok) = character_swap_confirm_text("은랑", true);
+        assert!(title.contains("은랑으로"), "조사가 어긋난다: {title}");
+        // 받침 없는 이름과 ㄹ 받침은 「로」다.
+        assert!(character_swap_confirm_text("미도리", true).0.contains("미도리로"));
+        assert!(character_swap_confirm_text("하치와레", true).0.contains("하치와레로"));
+        assert!(character_swap_confirm_text("페이몬", true).0.contains("페이몬으로"));
+        assert!(ok.iter().any(|l| l.contains("그대로")));
     }
 }

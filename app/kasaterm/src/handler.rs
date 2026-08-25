@@ -3306,6 +3306,26 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 학생 교체 확인 — 계정 카드와 같은 「모든 클릭을 삼키는」 모달.
+                // 이 카드는 메인 창에만 뜬다(인포는 메인의 오버레이다).
+                if self.character_swap_confirm.is_some() {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        let hit = self.character_swap_confirm.as_ref().and_then(|p| {
+                            p.rects
+                                .iter()
+                                .find(|(_, r)| {
+                                    cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                                })
+                                .map(|(b, _)| *b)
+                        });
+                        if let Some(btn) = hit {
+                            self.character_swap_pick(btn);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // 계정 전환 확인 — 위 둘과 같은 「모든 클릭을 삼키는」 모달.
                 // 설정 별도창에 뜬 카드는 그 창의 라우터가 잡으므로 여기서는
                 // 메인 몫만 본다.
@@ -4094,8 +4114,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 Some(M::Character(name)) => {
                                     self.info.pane_menu = None;
-                                    self.repersona_pane(&pane, &name);
-                                    self.set_toast(format!("{pane} → {name}"));
+                                    // 말투가 켜져 있으면 「다시 띄울까」를 먼저 묻는다.
+                                    // 토스트는 그 갈래마다 다르므로 여기서 안 띄운다.
+                                    self.ask_or_repersona(&pane, &name);
                                 }
                                 None => self.info.pane_menu = None,
                             }
@@ -5779,6 +5800,26 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // 학생 교체 확인: Enter = 다시 띄우기, Esc = 취소. 나머지는 삼킨다 —
+                // 스크림 뒤 pane 으로 새면 확인 중에 글자가 들어간다.
+                if self.character_swap_confirm.is_some() {
+                    if matches!(event.state, ElementState::Pressed) {
+                        use winit::keyboard::{Key, NamedKey};
+                        match event.logical_key {
+                            Key::Named(NamedKey::Enter) => {
+                                self.character_swap_pick(
+                                    crate::session::CharacterSwapBtn::Relaunch,
+                                );
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                self.character_swap_pick(crate::session::CharacterSwapBtn::Cancel);
+                            }
+                            _ => {}
+                        }
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // 계정 전환 확인: Enter = 전환, Esc = 취소. 나머지 키는 삼킨다 —
                 // 스크림 뒤 pane 으로 새면 확인 중에 글자가 들어간다.
                 if self
@@ -6259,6 +6300,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_account_confirm();
+        self.run_pending_swap_confirm();
         self.run_pending_autowinclose();
         self.run_pending_autolastclose();
         self.run_pending_autobusyclose();
