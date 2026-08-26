@@ -3824,6 +3824,8 @@ impl App {
         // 멀쩡했고 옛 배정이 안 바뀐 것이었다).
         //
         // 대화는 안 끊긴다. 바뀌는 것은 이름·얼굴·말투뿐이고 `--resume` 은 그대로 탄다.
+        let stored_char =
+            rec.get("character").and_then(|c| c.as_str()).filter(|s| !s.is_empty());
         let saved_char = rec
             .get("character")
             .and_then(|c| c.as_str())
@@ -3840,6 +3842,7 @@ impl App {
                 keep
             })
             .map(|s| s.to_string());
+        let mut revived = false;
         if let Some(ref c) = saved_char {
             // **이미 다른 자리가 쓰는 학생이면 되살리지 않는다.** `pending_character`
             // 는 배정의 중복 회피(taken)를 건너뛰는 지름길이라, 저장본에 겹침이 하나
@@ -3854,6 +3857,7 @@ impl App {
                 session_id.as_deref().is_some_and(kasa_mcp::character::is_manual_pick);
             let taken = self.ws.lock().unwrap().pane_character.values().any(|v| v == c);
             if revive_saved_character(taken, manual) {
+                revived = true;
                 self.pending_character = Some(c.clone());
                 if let Some(ref sid) = session_id {
                     let _ = kasa_mcp::character::bind_session_character(sid, c);
@@ -3866,6 +3870,18 @@ impl App {
         let scrollback = restored_scrollback(rec, restores_agent);
         let mut env = crate::proxy_env(&id);
         env.extend(self.assign_character_env(&id, cwd.as_deref(), None));
+        // 저장된 학생을 **안 쓰기로 했으면 옛 세션 바인딩도 갈아 끼운다.** claude 는
+        // `--resume <옛 sid>` 로 돌아오고, board 는 그 sid 의 바인딩을 최우선으로 읽어
+        // pane 색·이름·프사를 정한다. 옛 이름이 남아 있으면 방금 새로 뽑은 학생을 매
+        // 폴링마다 되덮어, **재배정이 화면에 영영 반영되지 않는다** — 저장본이 다시 옛
+        // 이름으로 쓰이니 재시작해도 그대로다(2026-08-26 실측: 이름표는 코유키인데
+        // 바인딩만 아리스라 board·헤더가 계속 아리스였다).
+        if stored_char.is_some() && !revived {
+            let now = self.ws.lock().unwrap().pane_character.get(&id).cloned();
+            if let (Some(sid), Some(now)) = (session_id.as_deref(), now) {
+                let _ = kasa_mcp::character::bind_session_character(sid, &now);
+            }
+        }
         let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd: cwd.clone(),

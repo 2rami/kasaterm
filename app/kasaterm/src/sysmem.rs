@@ -82,8 +82,8 @@ impl MemSample {
         }
     }
 
-    /// 왜 권하는지 한 줄. 토스트와 팝오버가 같은 문장을 쓴다 — 두 자리가 서로
-    /// 다른 이유를 대면 어느 쪽이 진짜인지 알 수가 없다.
+    /// 왜 권하는지 한 줄 — **토스트용**이다. 토스트에는 다른 수치가 함께 뜨지
+    /// 않으므로 원인이 wired 여도 숫자를 적어야 말이 된다.
     pub(crate) fn reason(&self) -> String {
         let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
         if self.pressure >= 4 {
@@ -95,6 +95,21 @@ impl MemSample {
         } else {
             format!("wired {:.0}% · {:.1}G", self.wired_pct(), gb(self.wired))
         }
+    }
+}
+
+/// `mach_host_self` 는 libc 가 mach API 를 `mach2` 크레이트로 밀어내며 붙인
+/// deprecated 다 — 기능이 사라진 게 아니라 소속이 옮겨간 것이고, 이 호출 하나
+/// 때문에 의존성을 늘릴 이유는 없다.
+#[allow(deprecated)]
+impl MemSample {
+    /// 팝오버용 이유 — 옆 칼럼이 이미 `wired 14%` 와 `5.0G / 36G` 를 적으므로,
+    /// 원인이 wired 면 되풀이하지 않는다. 되풀이하면 제목이 길어져 잘리고
+    /// (실측 2026-08-27: `맥북 재시작 권장 · wired 14% · 5…`), 잘린 자리에
+    /// 정작 새 정보는 하나도 없다. 압박·스왑은 그 칼럼에 안 나오니 그때만 밝힌다.
+    pub(crate) fn extra_reason(&self) -> Option<String> {
+        let by_wired = self.pressure < 2 && self.swap_used < SWAP_LIMIT;
+        (!by_wired).then(|| self.reason())
     }
 }
 
@@ -209,6 +224,33 @@ mod tests {
     fn 이유는_가장_급한_신호를_말한다() {
         assert_eq!(s(4.4, 4, 0.0).reason(), "메모리 압박 심각");
         assert!(s(15.0, 1, 0.0).reason().starts_with("wired 42%"));
+    }
+
+    /// 판정이 아무리 옳아도 재는 값이 틀리면 소용이 없다. mach 구조체는
+    /// `repr(packed)` 라 필드 하나만 어긋나도 컴파일은 통과하면서 엉뚱한 숫자가
+    /// 나오는데, 그건 화면에서 그럴듯해 보인다 — 불변식으로 잡아 둔다.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn 실제_기계에서_말이_되는_값이_나온다() {
+        let m = sample().expect("macOS 에서는 늘 읽혀야 한다");
+        let memsize: u64 =
+            unsafe { sysctl_scalar("hw.memsize") }.expect("hw.memsize");
+        assert_eq!(m.total, memsize);
+        assert!(m.wired > 0, "wired 가 0 이면 필드를 잘못 짚은 것이다");
+        assert!(m.wired < m.total, "wired {} >= total {}", m.wired, m.total);
+        // 커널 압박은 1·2·4 중 하나. 0 이 나오면 sysctl 이름이나 타입이 틀렸다.
+        assert!(matches!(m.pressure, 1 | 2 | 4), "pressure={}", m.pressure);
+        let pct = m.wired_pct();
+        assert!((0.0..100.0).contains(&pct), "wired_pct={pct}");
+    }
+
+    #[test]
+    fn 팝오버는_옆칸과_겹치는_이유를_생략한다() {
+        // wired 가 원인이면 옆 칼럼이 이미 그 숫자를 적는다.
+        assert_eq!(s(15.0, 1, 0.0).extra_reason(), None);
+        // 압박·스왑은 옆 칼럼에 안 나오니 밝혀야 한다.
+        assert_eq!(s(4.4, 2, 0.0).extra_reason().as_deref(), Some("메모리 압박 경고"));
+        assert!(s(4.4, 1, 9.0).extra_reason().is_some_and(|r| r.starts_with("스왑")));
     }
 
     #[test]

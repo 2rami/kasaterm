@@ -8044,6 +8044,9 @@ impl App {
                         // (위 주석), 이건 반대다 — 평소엔 아예 없다가 뜨는
                         // 신호라 흐리게 하면 뜬 줄을 모른다. 늘 깜빡여서 무뎌질
                         // 걱정이 없는 자리에서만 색을 쓴다.
+                        // 라벨 오른쪽 끝. 아래에서 `rx` 를 경고 자리로 옮기므로
+                        // 손잡이 폭을 재려면 여기서 먼저 잡아 둬야 한다.
+                        let label_right = rx + lw;
                         let mut seg_x = rx;
                         if let Some(m) = self.statusbar.mem {
                             let adv = m.advice();
@@ -8085,7 +8088,7 @@ impl App {
                         }
                         // 손잡이는 경고까지 통째로 — 경고를 보고 누르는 것이
                         // 자연스러운 동작인데 아이콘만 죽은 픽셀이면 헛손질이 된다.
-                        let rr = (seg_x - 6.0, sy, lw + 12.0 + (rx.max(seg_x) - seg_x), status_h);
+                        let rr = (seg_x - 6.0, sy, label_right - seg_x + 12.0, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= rr.0

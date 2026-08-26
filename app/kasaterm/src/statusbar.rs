@@ -81,7 +81,13 @@ fn paint_usage_popover(
         .flatten();
     let w = 300.0_f32.min(win_w - 16.0);
     let rows = list.len().max(1) + usize::from(rest.is_some());
-    let h = HEAD_H + PAD + rows as f32 * UROW + PAD;
+    // 기계 전체의 물리 메모리. 아래 목록·합계와 **다른 것을 잰다** — 그쪽은
+    // 우리 트리가 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽엔 재부팅 말고는
+    // 회수 경로가 없는 몫(wired)이 들어 있다. 상태줄의 「재시작 권장」이 어디서
+    // 나온 말인지 여기서만 확인할 수 있으니 임계 아래에서도 늘 적는다.
+    let mem = sb.mem;
+    let mem_h = if mem.is_some() { UROW + PAD } else { 0.0 };
+    let h = HEAD_H + mem_h + PAD + rows as f32 * UROW + PAD;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -107,8 +113,63 @@ fn paint_usage_popover(
             gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
         );
     }
-    let top = y + HEAD_H;
+    let mut top = y + HEAD_H;
     g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+    if let Some(m) = mem {
+        let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
+        let adv = m.advice();
+        let col = match adv {
+            crate::sysmem::Advice::Restart => theme::danger(),
+            crate::sysmem::Advice::Watch => theme::syn_number(),
+            crate::sysmem::Advice::Ok => theme::text(),
+        };
+        let my = top + PAD;
+        let head = if adv == crate::sysmem::Advice::Ok {
+            "맥북 메모리".to_string()
+        } else {
+            // 이유까지 적는다 — 「권장」만 있으면 wired 때문인지 스왑 때문인지
+            // 알 수가 없고, 그러면 재시작 말고 다른 손을 쓸 수도 없다.
+            format!("맥북 재시작 권장 · {}", m.reason())
+        };
+        let pct = format!("wired {:.0}%", m.wired_pct());
+        let size = format!("{:.1}G / {:.0}G", gb(m.wired), gb(m.total));
+        let pw = g.measure_chrome_text(&pct, 11.0, true);
+        let sw = g.measure_chrome_text(&size, 10.0, false);
+        let right = x + w - 12.0;
+        g.draw_text(
+            right - pw,
+            my + 2.0,
+            &pct,
+            gpu::DrawOpts { font_size: 11.0, color: col, bold: true, italic: false },
+        );
+        g.draw_text(
+            right - sw,
+            my + 16.0,
+            &size,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        let avail = (right - pw.max(sw) - 10.0 - (x + 12.0)).max(0.0);
+        let h1 = crate::info::fit_text(g, &head, avail, 11.0, false);
+        g.draw_text(
+            x + 12.0,
+            my + 2.0,
+            &h1,
+            gpu::DrawOpts { font_size: 11.0, color: col, bold: false, italic: false },
+        );
+        // 압축과 스왑은 판정에 직접 쓰이지 않지만(압축은 잘 돌고 있다는 뜻일
+        // 뿐이다), 둘 다 0 이 아닌데 wired 만 낮으면 「왜 무겁지」의 답이 여기
+        // 있을 수 있다.
+        let sub = format!("압축 {:.1}G · 스왑 {:.1}G", gb(m.compressed), gb(m.swap_used));
+        let s2 = crate::info::fit_text(g, &sub, avail, 10.0, false);
+        g.draw_text(
+            x + 12.0,
+            my + 17.0,
+            &s2,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: false, italic: false },
+        );
+        top += mem_h;
+        g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+    }
     if list.is_empty() {
         g.draw_text(
             x + 22.0,
