@@ -4720,10 +4720,21 @@ pub fn spawn_http_server_opts(
                     // /arona-ui(슬래시 없음)는 /arona-ui/ 로 리다이렉트 —
                     // index.html 의 상대경로 assets(./assets/*) 가 디렉토리
                     // 기준으로 풀리려면 trailing slash 가 필요하다.
+                    //
+                    // ⚠️ 쿼리를 반드시 들고 간다. 그냥 "/arona-ui/" 로 보내면 `?t=` 가
+                    // 통째로 사라져, 폰이 슬래시를 빠뜨리고 친 순간 빈 화면이 된다
+                    // (실측 2026-08-26: 308 뒤 쿠키 0). 토큰 입구는 예외가 없어야 한다.
                     .route(
                         "/arona-ui",
-                        get(|| async {
-                            axum::response::Redirect::permanent("/arona-ui/")
+                        get(|axum::extract::RawQuery(q): axum::extract::RawQuery| async move {
+                            let to = match q.as_deref().filter(|s| !s.is_empty()) {
+                                Some(q) => format!("/arona-ui/?{q}"),
+                                None => "/arona-ui/".to_string(),
+                            };
+                            // temporary(307) 인 이유: 목적지가 쿼리에 따라 달라졌다.
+                            // 308 은 브라우저가 오래 캐시하므로 토큰이 바뀐 뒤에도 옛
+                            // 토큰이 붙은 주소로 계속 보내게 된다.
+                            axum::response::Redirect::temporary(&to)
                         }),
                     )
                     // 폰은 `/arona-ui/?t=<토큰>` 으로 들어온다 — 여기서 쿠키를 안 심으면
@@ -4741,10 +4752,23 @@ pub fn spawn_http_server_opts(
                             res
                         }),
                     )
+                    // 여기도 쿠키를 심는다. 진입 페이지가 `/arona-ui/` 하나가 아니기
+                    // 때문이다 — `settings.html` 이 두 번째 엔트리이고, 앞으로 늘 수도
+                    // 있다. 그 주소를 북마크하면 HTML 만 200 이고 assets 가 전부 403 이라
+                    // 빈 화면이 된다(실측 2026-08-26). assets 요청은 `?t=` 를 안 달고
+                    // 오므로 쿠키가 붙는 건 사람이 주소로 들어온 순간뿐이다.
                     .route(
                         "/arona-ui/{*path}",
-                        get(|axum::extract::Path(p): axum::extract::Path<String>| {
-                            arona_ui_serve(p)
+                        get(|axum::extract::Path(p): axum::extract::Path<String>,
+                             q: Query<std::collections::HashMap<String, String>>| async move {
+                            let cookie = remote_token_cookie(&q.0);
+                            let mut res = arona_ui_serve(p).await;
+                            if let Some(c) = cookie {
+                                if let Ok(v) = axum::http::HeaderValue::from_str(&c) {
+                                    res.headers_mut().insert(header::SET_COOKIE, v);
+                                }
+                            }
+                            res
                         }),
                     )
                     .route(
