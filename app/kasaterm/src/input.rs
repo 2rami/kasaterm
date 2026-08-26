@@ -389,6 +389,27 @@ impl App {
             self.statusbar.usage_top = top;
             self.statusbar.usage_rows = rows;
         }
+        // 같은 박자에 물리 메모리도 — 이쪽은 서브프로세스가 없어 사실상 공짜다.
+        self.statusbar.mem = crate::sysmem::sample();
+        if let Some(m) = self.statusbar.mem {
+            if m.advice() == crate::sysmem::Advice::Restart {
+                // 상태줄 표시만으로는 시야 끝이라 놓치고, 그 사이 무거운 채로
+                // 계속 쓴다. 다만 임계는 한 번 넘으면 한동안 걸쳐 있으므로
+                // 폴마다 띄우면 5초에 한 번 같은 말이 뜬다 — 한 번 말하고,
+                // 무시하고 계속 쓰는 것도 자연스러운 사용이라 한 시간 뒤 다시.
+                let due = self
+                    .statusbar
+                    .mem_warned
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3600));
+                if due {
+                    self.statusbar.mem_warned = Some(Instant::now());
+                    self.set_toast(format!("맥북 재시작 권장 — {}", m.reason()));
+                }
+            } else {
+                // 내려왔으면 다음 진입에서 처음처럼 말한다.
+                self.statusbar.mem_warned = None;
+            }
+        }
     }
 
     pub(crate) fn refresh_pane_ultracode(&mut self) {

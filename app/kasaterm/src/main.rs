@@ -49,6 +49,8 @@ mod sesscol;
 mod state;
 mod statusbar;
 mod turnjump;
+// 물리 메모리 압박 판정 — 하단바 사용량 위젯의 「재시작 권장」 근거.
+mod sysmem;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]

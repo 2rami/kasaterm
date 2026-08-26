@@ -8034,7 +8034,58 @@ impl App {
                                 italic: false,
                             },
                         );
-                        let rr = (rx - 6.0, sy, lw + 12.0, status_h);
+                        // ── 재시작 권장 ─────────────────────────────────
+                        // 물리 메모리에서 **안 돌아오는 몫**(wired)이 쌓이면
+                        // 재부팅 말고는 회수 경로가 없다. 왼쪽 옆의 `12% · 3.1G`
+                        // 는 우리 트리가 쓰는 양이라 그게 아무리 커도 이 말을
+                        // 대신하지 못한다(2026-08-27 지시).
+                        //
+                        // 계정 게이지는 **늘 있는 값**이라 중립색으로 두지만
+                        // (위 주석), 이건 반대다 — 평소엔 아예 없다가 뜨는
+                        // 신호라 흐리게 하면 뜬 줄을 모른다. 늘 깜빡여서 무뎌질
+                        // 걱정이 없는 자리에서만 색을 쓴다.
+                        let mut seg_x = rx;
+                        if let Some(m) = self.statusbar.mem {
+                            let adv = m.advice();
+                            if adv != crate::sysmem::Advice::Ok {
+                                let danger = adv == crate::sysmem::Advice::Restart;
+                                let col =
+                                    if danger { theme::danger() } else { theme::syn_number() };
+                                let icon = 12.0_f32;
+                                // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
+                                // 무슨 일인지 다 적어 준다.
+                                let words = (win_w >= 900.0)
+                                    .then_some(if danger { "재시작 권장" } else { "메모리 주의" });
+                                let ww = words
+                                    .map_or(0.0, |t| 4.0 + g.measure_chrome_text(t, fs, false));
+                                seg_x -= icon + ww + 10.0;
+                                g.queue_icon(
+                                    "triangle-alert",
+                                    seg_x,
+                                    sy + (status_h - icon) / 2.0,
+                                    icon,
+                                    col,
+                                );
+                                if let Some(t) = words {
+                                    g.draw_text(
+                                        seg_x + icon + 4.0,
+                                        ty,
+                                        t,
+                                        gpu::DrawOpts {
+                                            font_size: fs,
+                                            color: col,
+                                            bold: false,
+                                            italic: false,
+                                        },
+                                    );
+                                }
+                                // 왼쪽 이웃(포트)이 이 자리를 침범하지 않도록.
+                                rx = seg_x;
+                            }
+                        }
+                        // 손잡이는 경고까지 통째로 — 경고를 보고 누르는 것이
+                        // 자연스러운 동작인데 아이콘만 죽은 픽셀이면 헛손질이 된다.
+                        let rr = (seg_x - 6.0, sy, lw + 12.0 + (rx.max(seg_x) - seg_x), status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= rr.0

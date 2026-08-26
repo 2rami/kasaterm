@@ -64,6 +64,15 @@ pub(crate) struct StatusbarState {
     /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
     pub(crate) res: Option<(f32, u64)>,
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
+    /// 물리 메모리 압박 — 위의 `res` 와 **다른 것을 잰다**. `res` 는 우리 트리가
+    /// 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽은 기계 전체에서 **안 돌아오는**
+    /// 몫이다. 그래서 재시작을 권하는 근거는 이쪽뿐이다(2026-08-27 지시).
+    /// 같은 5초 폴에 얹지만 서브프로세스는 없다 — mach 호출 하나다.
+    pub(crate) mem: Option<crate::sysmem::MemSample>,
+    /// 마지막으로 토스트를 띄운 시각. 임계는 한 번 넘으면 한동안 걸쳐 있으므로,
+    /// 폴마다 띄우면 5초에 한 번씩 같은 말이 뜬다. 내려갔다 다시 올라오면
+    /// `None` 으로 되돌려 다음 진입에서 다시 말하게 한다.
+    pub(crate) mem_warned: Option<std::time::Instant>,
     /// 지금 펼쳐진 팝오버와 그것을 연 칩의 자리(앵커). 한 번에 하나만 — 하단바
     /// 칩들이 서로 8px 안에 붙어 있어 둘이 겹치면 어느 쪽 행을 눌렀는지 사람도
     /// 코드도 못 가른다.
