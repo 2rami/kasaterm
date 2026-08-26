@@ -2390,8 +2390,14 @@ impl Backend for PtyBackend {
             // `unwrap_or_default()` 라, 터미널 제목을 안 다는 하네스(agy 는 TUI 라
             // 안 단다)는 파서가 전사본에서 뽑아 온 제목까지 통째로 지워져 board 행이
             // 늘 무제목이었다. OSC 가 있으면 그쪽이 여전히 이긴다 — 살아있는 값이라서다.
-            if let Some(t) = osc_titles.get(&row.surface_id) {
-                row.title = crate::strip_activity_prefix(t).to_string();
+            // ⚠️**사람이 손으로 붙인 이름은 예외다.** claude 는 OSC 요약을 한 번
+            // 쏘고 `/rename` 에는 다시 쏘지 않아서, 개명을 해도 옛 요약이 계속
+            // 이겨 「이름이 안 붙는다」로 보였다(2026-08-27 지적). 자동 제목
+            // 갱신(title-sync)이 한 겹 아래에서 이미 같은 판정을 한다.
+            if !row.title_manual {
+                if let Some(t) = osc_titles.get(&row.surface_id) {
+                    row.title = crate::strip_activity_prefix(t).to_string();
+                }
             }
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {

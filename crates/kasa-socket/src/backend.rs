@@ -141,6 +141,17 @@ pub struct PaneActivity {
     /// names the session.
     #[serde(default)]
     pub title: String,
+    /// True when `title` came from a name a person typed (`/rename`, or the
+    /// socket rename path), not from the harness's own summary.
+    ///
+    /// The board prefers a live OSC terminal title over the parsed one, because
+    /// OSC tracks what the pane is doing right now. That preference is wrong for
+    /// a hand-typed name: claude emits its OSC summary once and does not re-emit
+    /// it on `/rename`, so the stale summary outlived every rename and the name
+    /// looked like it never took (2026-08-27). Same rule the title-sync hook
+    /// already applies one layer down — a human name outranks a generated one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_manual: bool,
     /// The latest user prompt (`last-prompt` line), i.e. what this pane was
     /// just told to do. Empty if nothing's been asked yet.
     #[serde(default)]
