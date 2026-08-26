@@ -2,6 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
+import { lookupDevice, suggestDevices, deviceTable, uaOverrideFor } from './devices.js'
 import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
@@ -18,17 +19,118 @@ const PHONE_PROBE = `({
   viewport: innerWidth + 'x' + innerHeight,
   touchPoints: navigator.maxTouchPoints,
   hoverNone: matchMedia('(hover: none)').matches,
-  pointerCoarse: matchMedia('(pointer: coarse)').matches
+  pointerCoarse: matchMedia('(pointer: coarse)').matches,
+  userAgent: navigator.userAgent,
+  chPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
+  chMobile: navigator.userAgentData ? navigator.userAgentData.mobile : null
 })`
 const GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'])
 
-// 이름 하나로 폭·높이·dpr 을 한꺼번에 맞춘다. 폭만 옮겨 적고 dpr 을 잊으면 레티나에서만 드러나는
-// 이미지·보더 문제를 통째로 못 본다.
-const DEVICES = {
-  phone: { width: 390, height: 844, deviceScaleFactor: 3 },
-  'iphone-se': { width: 375, height: 667, deviceScaleFactor: 2 },
-  pixel: { width: 412, height: 915, deviceScaleFactor: 2.625 },
-  tablet: { width: 768, height: 1024, deviceScaleFactor: 2 },
+// 기기 정의(이름·크기·dpr·UA)는 devices.js 에 있다. 이름 하나로 폭·높이·dpr·UA 를 한꺼번에 맞춘다 —
+// 폭만 옮겨 적고 dpr 을 잊으면 레티나에서만 드러나는 이미지·보더 문제를 통째로 못 본다.
+
+// override 를 걸기 전의 UA. off 로 끌 때 즉시 되돌리는 데 쓴다. 디버거를 떼도 크롬이 알아서
+// 복원하지만 그건 유휴 15초 뒤라, 그 사이 그 탭을 쓰는 다른 pane 은 폰 UA 를 계속 보게 된다.
+const originalUA = new Map()
+
+// ★탭마다 「무엇을 걸어 뒀는지」. 페이지가 새로 뜨면 일부가 조용히 풀리기 때문이다 —
+// 2026-08-26 실측: 크기 override 는 navigate 를 견디는데 **터치 에뮬레이션은 뒤로가기(bfcache
+// 복원)에서 maxTouchPoints 5 → 0 으로 풀렸다**. 터치가 빠지면 `(hover: none)`·`(pointer: coarse)`
+// 규칙이 안 걸려 실제 폰과 **다른 CSS 가 도는데 크기는 폰 그대로**라, 화면만 봐서는 절대 안 보인다.
+// 확장을 재로드하면 디버거 세션이 통째로 끊겨 크기까지 풀리므로 storage.session 에 함께 둔다
+// (worker 가 죽어도 남고, 브라우저를 껐다 켜면 저절로 비워진다).
+// ⚠️storage.**local** 이다. session 을 쓰면 안 된다 — 2026-08-26 실측: `chrome.runtime.reload()`
+// 로 확장을 재시작하면 storage.session 이 통째로 비워져서(기록 1건 → []) 정작 복구가 제일 필요한
+// 그 순간에 되돌릴 근거가 사라진다. 확장 재로드는 디버거 세션을 전부 끊으므로 터치·UA 가 풀리는데,
+// 그때 기록이 없으면 「크기만 폰인 채로」 남는다. local 은 브라우저를 껐다 켜도 남지만 탭 id 가
+// 그때 바뀌므로, 읽을 때 실재하지 않는 탭을 걷어낸다.
+const EMULATED_KEY = 'kc_emulated'
+let emulated = null
+let loadingEmulated = null
+
+async function loadEmulated() {
+  if (emulated) return emulated
+  // ⚠️in-flight 를 공유한다. 예전처럼 빈 Map 을 먼저 대입하고 await 하면, 그 사이 들어온 호출이
+  // **아직 안 채워진 빈 Map** 을 받아 「기록 없음」으로 판단한다(navigate 도구와 onUpdated 리스너가
+  // 거의 동시에 부른다).
+  if (loadingEmulated) return await loadingEmulated
+  loadingEmulated = (async () => {
+    const map = new Map()
+    try {
+      const v = await chrome.storage.local.get(EMULATED_KEY)
+      const raw = v?.[EMULATED_KEY] || {}
+      const live = new Set((await tabsQuery({})).map((t) => t.id))
+      let dropped = false
+      for (const [k, cfg] of Object.entries(raw)) {
+        if (live.has(Number(k))) map.set(Number(k), cfg)
+        else dropped = true
+      }
+      emulated = map
+      if (dropped) void saveEmulated()
+    } catch { emulated = map }
+    return emulated
+  })()
+  try { return await loadingEmulated } finally { loadingEmulated = null }
+}
+
+// ⚠️저장 직전에 죽은 탭을 걷어낸다. onRemoved 리스너만으로는 안 된다 — 확장이 재시작하는 동안
+// 닫힌 탭은 그 리스너가 못 잡고, 한 번 메모리에 올라온 뒤에는 loadEmulated 의 정리도 다시 안 돈다
+// (2026-08-26 실측: 이미 사라진 탭의 기록이 계속 남아 있었다). storage.local 은 브라우저를 껐다
+// 켜도 남으므로 이 정리가 없으면 유령 항목이 쌓인다.
+async function pruneEmulated() {
+  let dropped = false
+  try {
+    const live = new Set((await tabsQuery({})).map((t) => t.id))
+    for (const k of [...(emulated || new Map()).keys()]) if (!live.has(k)) { emulated.delete(k); dropped = true }
+  } catch { /* 탭 목록을 못 읽으면 정리만 건너뛴다 */ }
+  return dropped
+}
+
+async function saveEmulated() {
+  await pruneEmulated()
+  const obj = Object.fromEntries([...(emulated || [])].map(([k, v]) => [String(k), v]))
+  chrome.storage.local.set({ [EMULATED_KEY]: obj }).catch(() => {})
+}
+
+// 페이지가 새로 뜬 뒤 부른다. 어긋난 것만 다시 건다 — 멀쩡한데 setDeviceMetricsOverride 를 또 걸면
+// 페이지가 쓸데없는 resize 이벤트를 받는다.
+export async function reapplyEmulation(tabId) {
+  const map = await loadEmulated()
+  const cfg = map.get(tabId)
+  if (!cfg) return null
+  // 확장 재로드로 세션이 끊겼으면 붙는 것부터. pin 은 유휴 detach 대상에서 빼는 표시이기도 하다.
+  // 세션이 새로 열린 경우엔 어긋난 것만 고치지 않고 전부 다시 건다 — 붙는 순간 크롬이 무엇을
+  // 리셋했는지 알 수 없고, 그 상태로 「크기는 맞으니 놔둔다」로 판단하면 반쯤 걸린 채로 남는다.
+  const wasAttached = cdp.isAttached(tabId)
+  if (!wasAttached) await cdp.pin(tabId, 'emulation').catch(() => {})
+  const seen = await cdp.evaluate(tabId, '({ w: innerWidth, t: navigator.maxTouchPoints })').catch(() => null)
+  if (!seen) return null
+  const fixed = []
+  if (!wasAttached || seen.w !== cfg.width) {
+    await cdp.raw(tabId, 'Emulation.setDeviceMetricsOverride', {
+      width: cfg.width, height: cfg.height, deviceScaleFactor: cfg.dsf, mobile: cfg.mobile,
+      ...(cfg.scale && cfg.scale < 1 ? { scale: cfg.scale } : {}),
+    }).catch(() => {})
+    fixed.push('metrics')
+  }
+  if (cfg.touch && (!wasAttached || !seen.t)) {
+    await cdp.raw(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(() => {})
+    fixed.push('touch')
+  }
+  // UA 는 페이지에서 읽어 비교하면 override 가 살아 있는지 알 수 있다. 값이 같으면 건드리지 않는다.
+  if (cfg.userAgent) {
+    const ua = await cdp.evaluate(tabId, 'navigator.userAgent').catch(() => null)
+    if (!wasAttached || (ua && ua !== cfg.userAgent)) {
+      await cdp.raw(tabId, 'Emulation.setUserAgentOverride', cfg.uaArgs || { userAgent: cfg.userAgent }).catch(() => {})
+      fixed.push('ua')
+    }
+  }
+  return fixed.length ? { tabId, fixed } : null
+}
+
+export async function forgetEmulation(tabId) {
+  const map = await loadEmulated()
+  if (map.delete(tabId)) await saveEmulated()
 }
 
 function tabsQuery(q) {
@@ -133,6 +235,10 @@ async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, m
 const handlers = {
   async status(_args, ctx = {}) {
     const tabs = await tabsQuery({})
+    // 죽은 탭 기록은 여기서 걷는다. onRemoved 를 놓친 항목은 이것 말고 걷힐 자리가 없고(저장은
+    // 새로 걸 때만 돈다), 이미 닫힌 탭을 보여주는 진단은 사람을 헷갈리게만 한다.
+    const emul = await loadEmulated()
+    if (await pruneEmulated()) void saveEmulated()
     return {
       connected: true,
       // 확장을 고쳤는데 동작이 그대로면 service worker 가 옛 코드를 물고 있는 것이다. 먼저 여기를 본다.
@@ -145,6 +251,9 @@ const handlers = {
         return s ? { name: s.name, slug: s.slug, paneId: s.paneId, color: s.groupColor } : null
       })(),
       debuggerSessions: cdp.sessionInfo(),
+      // 폰뷰를 걸어 둔 탭. 「걸었는데 데스크톱으로 보인다」를 진단할 때 여기부터 본다 — 목록에
+      // 있는데 페이지가 그 폭이 아니면 재적용이 못 걸린 것이고, 아예 없으면 기록이 날아간 것이다.
+      emulatedTabs: [...emul].map(([tabId, c]) => ({ tabId, size: `${c.width}x${c.height}`, touch: c.touch, ua: !!c.userAgent })),
       lastDetach: self.__ccLastDetach || null,
       lastError: self.__ccLastError || null,
     }
@@ -427,8 +536,15 @@ const handlers = {
       await chrome.tabs.update(id, { url: normalizeUrl(url) })
     }
     const status = await waitForLoad(id)
+    // ★페이지가 새로 뜨면 폰뷰의 일부가 풀린다(터치는 뒤로가기에서, 크기는 확장 재로드에서).
+    // 부르는 쪽은 알 방법이 없으므로 — 도구는 성공을 돌려주고 페이지만 데스크톱이 된다 — 여기서
+    // 되돌린다. onUpdated 리스너와 겹쳐도 어긋난 것만 고치므로 두 번 걸리지 않는다.
+    const restored = await reapplyEmulation(id).catch(() => null)
     const tab = await chrome.tabs.get(id)
-    return { tabId: id, url: tab.url, title: tab.title, load: status }
+    return {
+      tabId: id, url: tab.url, title: tab.title, load: status,
+      ...(restored ? { emulationRestored: restored.fixed } : {}),
+    }
   },
 
   async read_page({ tabId, filter = 'interactive', maxChars = 40000 }) {
@@ -726,29 +842,69 @@ const handlers = {
   // 구조에서 「걸어두면 몇 분 뒤 데스크톱으로 돌아가 있다」의 원인이 이것이다(2026-08-05 아로나 실측).
   // 그래서 핀을 걸어 유휴 detach 대상에서 뺀다. 디버깅 배너가 남지만 폰뷰가 유지되는 쪽이 중요하고,
   // off:true 로 끄면 배너도 함께 걷힌다.
-  async emulate_device({ tabId, device, width, height, deviceScaleFactor, mobile = true, fit = true, off } = {}) {
+  async emulate_device({ tabId, device, width, height, deviceScaleFactor, mobile, touch, landscape, ua, fit = true, off, list } = {}) {
+    // 목록은 탭이 없어도 답할 수 있어야 한다. 없는 이름을 넣어 오류 메시지로 목록을 캐내는 것은
+    // 도구가 아니라 우회로다.
+    if (list) {
+      return {
+        devices: deviceTable(),
+        note: '가로는 이름 뒤에 -landscape 를 붙입니다(예: ipad-pro-11-landscape). landscape:true 로 줘도 같습니다. 크기를 직접 주면 device 의 UA 는 그대로 두고 뷰포트만 바뀝니다.',
+      }
+    }
+
     const id = await resolveTabId(tabId)
 
     if (off) {
+      // ⚠️디버거가 떨어져 있어도 override 는 페이지에 남아 있을 수 있다(확장 재로드 실측: 세션이
+      // 전부 끊겼는데 크기 override 는 그대로였다). 그때 「안 붙어 있으니 할 일 없음」으로 지나가면
+      // off 가 성공을 돌려주고도 화면은 폰뷰 그대로다 — 기록이 있으면 다시 붙여서 확실히 푼다.
+      if (!cdp.isAttached(id) && (await loadEmulated()).has(id)) await cdp.attach(id, 'emulation').catch(() => {})
       if (cdp.isAttached(id)) {
+        // ⚠️clear 한 번으로는 안 풀리는 경우가 있다. 확장을 재로드하면 **앞 세션이 건 override 가
+        // 페이지에 남는데**, 새 세션의 clear 는 「내가 건 것이 없다」며 조용히 no-op 이 된다
+        // (2026-08-26 실측: clear 를 두 번 불러도 412x915 그대로였고, 0x0 으로 한 번 걸어 이 세션이
+        // 소유자가 된 뒤 clear 하니 1512x772 로 돌아왔다). off 는 화면을 되돌리는 명령이니 리사이즈가
+        // 한 번 더 가도 무방하다 — 안 풀리는 것보다 낫다.
+        await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', { width: 0, height: 0, deviceScaleFactor: 0, mobile: false }).catch(() => {})
         await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
         await cdp.raw(id, 'Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {})
+        // UA 는 clear 명령이 없다. 걸기 전에 재둔 값을 다시 걸어 되돌린다(디버거를 떼도 크롬이
+        // 복원하지만 그건 유휴 15초 뒤라, 그 사이 이 탭을 쓰는 다른 pane 은 폰 UA 를 계속 본다).
+        const back = originalUA.get(id) || (await loadEmulated()).get(id)?.restoreUA
+        if (back) {
+          await cdp.raw(id, 'Emulation.setUserAgentOverride', { userAgent: back }).catch(() => {})
+          originalUA.delete(id)
+        }
       }
       await cdp.unpin(id, 'emulation')
+      await forgetEmulation(id)
       const seen = await cdp.evaluate(id, PHONE_PROBE).catch(() => null)
       return {
-        tabId: id, emulating: false, viewport: seen?.viewport ?? null,
+        tabId: id, emulating: false, viewport: seen?.viewport ?? null, userAgent: seen?.userAgent ?? null,
         note: '핀을 풀었으니 유휴 15초 뒤 디버깅 배너도 걷힙니다.',
       }
     }
 
-    const preset = DEVICES[String(device || 'phone').toLowerCase()]
-    if (device && !preset) throw new Error(`UNKNOWN_DEVICE: ${device}. 쓸 수 있는 이름 — ${Object.keys(DEVICES).join(', ')}`)
-    const w = Math.round(Number(width) || preset.width)
-    const h = Math.round(Number(height) || preset.height)
-    const dsf = Number(deviceScaleFactor) || preset.deviceScaleFactor
+    const asked = device || 'phone'
+    const preset = lookupDevice(asked)
+    if (!preset) {
+      const near = suggestDevices(asked)
+      throw new Error(`UNKNOWN_DEVICE: ${device}. ${near.length ? `가까운 이름 — ${near.join(', ')}. ` : ''}전체 목록은 list:true 로 보세요.`)
+    }
+    // landscape:true 는 이름 접미사와 같은 뜻이다. 둘 다 주면 두 번 뒤집지 않는다.
+    const rotate = landscape === true && !preset.landscape
+    const pw = rotate ? preset.height : preset.width
+    const ph = rotate ? preset.width : preset.height
+    const w = Math.round(Number(width) || pw)
+    const h = Math.round(Number(height) || ph)
+    const dsf = Number(deviceScaleFactor) || preset.dsf
+    // mobile 과 touch 는 다른 것이다 — Surface Pro·Nest Hub 는 데스크톱 렌더인데 손가락이 닿는다.
+    // 명시값이 가장 세고, mobile 만 명시했으면 그 뜻을 따라가고, 아무것도 없으면 기기 정의를 쓴다.
+    const sizedByHand = width !== undefined || height !== undefined
+    const isMobile = mobile === undefined ? !!preset.mobile : !!mobile
+    const wantTouch = touch === undefined ? (mobile === undefined ? !!preset.touch : !!mobile) : !!touch
     if (!(w >= 100 && w <= 4000 && h >= 100 && h <= 4000)) {
-      throw new Error(`BAD_SIZE: ${w}x${h} 는 폰 화면 크기가 아닙니다. 100~4000 사이로 주거나 device 이름을 쓰세요.`)
+      throw new Error(`BAD_SIZE: ${w}x${h} 는 화면 크기가 아닙니다. 100~4000 사이로 주거나 device 이름을 쓰세요.`)
     }
 
     // ⚠️핀을 먼저 건다. override 를 걸고 나서 붙잡으면 그 사이에 타이머가 세션을 놓을 수 있다.
@@ -762,13 +918,60 @@ const handlers = {
     await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
     const room = await measureRoom(id)
 
+    // ★UA 는 크기와 함께 가야 한다. 서버에서 모바일 뷰를 고르는 페이지는 UA 로 가르므로, 크기만
+    // 바꾸면 **데스크톱 HTML 이 폰 폭에 들어간 화면**이 나온다 — 실제 폰에서는 볼 수 없는 화면이다.
+    // ua:false 로 끄고, ua:'<문자열>' 로 직접 줄 수 있다.
+    // 기기 이름 없이 크기만 준 호출에는 걸지 않는다 — 1440x900 을 요청한 사람에게 iPhone UA 를
+    // 씌우면 그건 어떤 기기도 아닌 조합이 된다.
+    const uaMode = ua === false ? 'off'
+      : (typeof ua === 'string' && ua) ? 'custom'
+        : (device !== undefined || !sizedByHand) ? 'preset' : 'off'
+    // ★override 를 걸기 전의 「진짜 UA」를 확정한다. 메모리 Map 만 믿으면 안 된다 — 확장을 재로드하면
+    // 그 Map 은 비는데 페이지의 override 는 남아 있어서, 그때 현재 UA 를 원본으로 저장하면 **폰 UA 를
+    // 원본으로 기억한다**. 그러면 ua:false 나 off 가 폰 UA 로 「복원」하고, 도구는 성공을 돌려준다
+    // (2026-08-26 실측: 재로드 뒤 off 를 걸었더니 크기·터치는 풀렸는데 UA 만 Android 로 남았다).
+    const emulMap = await loadEmulated()
+    let restoreUA = originalUA.get(id) || emulMap.get(id)?.restoreUA || null
+    if (!restoreUA) {
+      restoreUA = await cdp.evaluate(id, 'navigator.userAgent').catch(() => null)
+    }
+    if (restoreUA) originalUA.set(id, restoreUA)
+
+    let uaSet = null
+    let uaArgs = null
+    if (uaMode === 'off') {
+      // ⚠️「안 건다」로는 부족하다. 같은 탭에 앞서 건 override 가 살아 있으면 페이지는 계속 그 UA 를
+      // 보는데 보고서에는 uaOverridden:false 만 남는다 — 그게 제일 나쁜 조합이다. 되돌려 놓는다.
+      if (restoreUA) {
+        await cdp.raw(id, 'Emulation.setUserAgentOverride', { userAgent: restoreUA }).catch(() => {})
+      }
+    } else {
+      const override = uaMode === 'custom'
+        ? { userAgent: ua, userAgentMetadata: undefined, platform: '' }
+        : uaOverrideFor({ ...preset, mobile: isMobile })
+      if (override) {
+        const args = { userAgent: override.userAgent }
+        if (override.platform) args.platform = override.platform
+        if (override.userAgentMetadata) args.userAgentMetadata = override.userAgentMetadata
+        uaArgs = args
+        // metadata 를 거부하는 크롬 버전이 있으면 UA 문자열만이라도 건다. 조용히 통째로 실패하면
+        // 「UA 도 바꿨다」는 보고만 남고 실제로는 데스크톱 UA 인 상태가 된다.
+        const ok = await cdp.raw(id, 'Emulation.setUserAgentOverride', args).then(() => true).catch(() => false)
+        if (ok) uaSet = override.userAgent
+        else {
+          const ok2 = await cdp.raw(id, 'Emulation.setUserAgentOverride', { userAgent: override.userAgent }).then(() => true).catch(() => false)
+          if (ok2) uaSet = override.userAgent
+        }
+      }
+    }
+
     // DevTools 기기 모드와 같은 처리다 — CSS 픽셀은 그대로 두고 화면에 그릴 때만 줄이므로
     // 미디어쿼리 분기는 하나도 바뀌지 않는다(실측: scale 0.915 에서 innerWidth 390 유지).
     const scale = fit && room ? Math.min(1, room.w / w, room.h / h) : 1
     const overflows = !!room && (w > room.w || h > room.h)
 
     await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', {
-      width: w, height: h, deviceScaleFactor: dsf, mobile: !!mobile,
+      width: w, height: h, deviceScaleFactor: dsf, mobile: isMobile,
       ...(scale < 1 ? { scale } : {}),
     })
     // ★크기만 바꾸면 폰이 되지 않는다. 폰에는 마우스가 없으므로 터치까지 켜야 `(hover: none)` 과
@@ -776,27 +979,53 @@ const handlers = {
     // 「폰뷰 확인」이 끝난다(2026-08-05 실측: 크기만 바꾼 상태와 터치까지 켠 상태가 그 두 조건에서
     // 갈렸다. mission-control 에는 `(hover: none)` 규칙이 두 곳 있다). 창을 좁히는 우회로는
     // 애초에 재현할 수 없는 부분이다 — 마우스가 붙어 있는 한 hover 는 계속 hover 다.
-    if (mobile) {
-      await cdp.raw(id, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(() => {})
-    }
+    await cdp.raw(id, 'Emulation.setTouchEmulationEnabled', wantTouch ? { enabled: true, maxTouchPoints: 5 } : { enabled: false }).catch(() => {})
     // 걸었다는 말만으로는 유지 여부를 모른다. 페이지가 실제로 무엇을 봤는지 함께 돌려준다.
     const seen = await cdp.evaluate(id, PHONE_PROBE).catch(() => null)
+
+    // 페이지가 새로 뜰 때 되돌릴 수 있도록 남긴다. 여기 없으면 뒤로가기 한 번에 터치가 풀린 채로
+    // 「폰뷰 확인」이 계속된다.
+    emulMap.set(id, {
+      width: w, height: h, dsf, mobile: isMobile, touch: wantTouch,
+      scale: fit && room ? Math.min(1, room.w / w, room.h / h) : 1,
+      userAgent: uaSet, uaArgs, restoreUA,
+    })
+    await saveEmulated()
+
+    // ★「걸었다」와 「페이지가 그 폭으로 보고 있다」는 다른 말이다. 페이지가 뷰포트 메타로 더 넓은
+    // 레이아웃 폭을 요구하면(데스크톱 전용 페이지가 흔히 그렇다) innerWidth 는 요청한 폭이 아니다 —
+    // 그걸 모르고 재면 데스크톱 배치를 세로 결과로 읽는다. 요청값과 실측값을 나란히 돌려준다.
+    const appliedWidth = seen?.viewport ? Number(String(seen.viewport).split('x')[0]) : null
+    const appliedHeight = seen?.viewport ? Number(String(seen.viewport).split('x')[1]) : null
+    const notes = []
+    if (appliedWidth && appliedWidth !== w) {
+      notes.push(`⚠️요청한 폭은 ${w} 인데 페이지가 실제로 본 폭은 ${appliedWidth} 입니다 — 이 페이지의 뷰포트 메타가 더 넓은 레이아웃을 요구했습니다(실제 폰에서도 그렇게 보입니다). 측정할 때는 appliedWidth 를 기준으로 하세요.`)
+    }
+    if (scale < 1 && room) notes.push(`창이 ${room.w}x${room.h} 라 ${Math.round(scale * 100)}% 로 축소해 넣었습니다. CSS 픽셀은 ${w}x${h} 그대로여서 미디어쿼리는 안 바뀝니다.`)
+    else if (overflows && room) notes.push(`⚠️창(${room.w}x${room.h})보다 커서 화면 밖으로 잘립니다. bottom 에 붙은 요소는 안 보입니다 — fit 을 켜면 축소해 맞춥니다.`)
+    // UA 로 가르는 것은 서버다. 이미 받아둔 문서는 안 바뀌므로 다시 요청해야 그 분기가 보인다.
+    if (uaSet) notes.push('UA 는 다음 요청부터 서버에 전달됩니다 — 이미 열린 페이지의 서버 분기를 보려면 navigate 로 다시 여세요.')
+    else if (uaMode === 'off' && sizedByHand && device === undefined) notes.push('기기 이름 없이 크기만 줘서 UA 는 그대로 둡니다. 기기 UA 까지 필요하면 device 를 함께 주세요.')
     return {
-      tabId: id, emulating: true, ...(preset && !width && !height ? { device: String(device || 'phone').toLowerCase() } : {}),
-      width: w, height: h, deviceScaleFactor: dsf, mobile: !!mobile,
+      tabId: id, emulating: true,
+      device: preset.resolvedKey, deviceLabel: preset.resolvedName,
+      ...(sizedByHand ? { sizedByHand: true } : {}),
+      width: w, height: h, deviceScaleFactor: dsf, mobile: isMobile, touch: wantTouch,
+      landscape: !!(preset.landscape || rotate),
       viewport: seen?.viewport ?? null,
+      appliedWidth, appliedHeight,
       touchPoints: seen?.touchPoints ?? null,
       hoverNone: seen?.hoverNone ?? null,
       pointerCoarse: seen?.pointerCoarse ?? null,
+      userAgent: seen?.userAgent ?? null,
+      uaOverridden: !!uaSet,
+      chPlatform: seen?.chPlatform ?? null,
+      chMobile: seen?.chMobile ?? null,
       windowRoom: room ? `${room.w}x${room.h}` : null,
       scale: Number(scale.toFixed(3)),
       // 「걸렸다」와 「사람 눈에 다 보인다」는 다른 말이다. 후자를 명시적으로 돌려준다.
       fullyVisible: room ? Math.round(h * scale) <= room.h + 1 && Math.round(w * scale) <= room.w + 1 : null,
-      ...(scale < 1
-        ? { note: `창이 ${room.w}x${room.h} 라 ${Math.round(scale * 100)}% 로 축소해 넣었습니다. CSS 픽셀은 ${w}x${h} 그대로여서 미디어쿼리는 안 바뀝니다.` }
-        : overflows
-          ? { note: `⚠️창(${room.w}x${room.h})보다 커서 화면 밖으로 잘립니다. bottom 에 붙은 요소는 안 보입니다 — fit 을 켜면 축소해 맞춥니다.` }
-          : {}),
+      ...(notes.length ? { note: notes.join(' ') } : {}),
     }
   },
 

@@ -222,6 +222,20 @@ cwd 는 도구를 부른 pane 의 cwd 가 아니라서, 상대경로를 받아�
 - **터치를 못 받는 탭에 터치를 쏘면 조용히 버려진다.** `maxTouchPoints` 가 0 이면 이벤트가 사라져
   「밀었는데 아무 일도 없다」가 되고, 크기만 바꾼 화면은 `(pointer: coarse)` 도 안 걸려 실제 폰과
   **다른 코드**가 돈다. `swipe` 는 그 탭을 `NO_TOUCH_EMULATION` 으로 거절한다 — 먼저 `emulate_device`.
+- **폰뷰는 「걸어두면 유지된다」가 아니다 — 페이지가 새로 뜨면 일부만 조용히 풀린다.** 크기 override 는
+  `navigate` 를 견디는데 **터치 에뮬레이션은 뒤로가기(bfcache 복원)에서 `maxTouchPoints` 5 → 0 으로
+  풀렸다**(2026-08-26 실측). 터치가 빠지면 `(hover: none)`·`(pointer: coarse)` 가 안 걸려 **크기는 폰인데
+  CSS 는 데스크톱**이 되고, 화면만 봐서는 절대 구분이 안 된다. 그래서 무엇을 걸었는지 탭별로 남기고
+  (`tools.js` 의 `kc_emulated`) `navigate` 직후와 `tabs.onUpdated` 에서 어긋난 것만 다시 건다.
+  걸린 탭은 `browser_status` 의 `emulatedTabs` 로 본다.
+- **그 기록은 `storage.session` 에 두면 안 된다.** `chrome.runtime.reload()` 로 확장을 재시작하면
+  session 은 통째로 비워지는데(실측: 1건 → `[]`), 재시작은 디버거 세션을 전부 끊어 터치·UA 가 풀리는
+  바로 그 순간이다 — 복구가 제일 필요할 때 근거가 사라진다. `storage.local` 을 쓰고, 브라우저 재시작으로
+  탭 id 가 바뀌므로 저장·조회 때 죽은 탭을 걷어낸다.
+- **`Emulation.clearDeviceMetricsOverride` 는 남의 세션이 건 override 를 못 푼다.** 확장을 재로드하면 앞
+  세션의 크기 override 가 페이지에 남는데, 새 세션의 clear 는 「내가 건 것이 없다」며 조용히 no-op 이 된다
+  (실측: clear 를 두 번 불러도 412x915 그대로). `setDeviceMetricsOverride` 를 0x0 으로 한 번 걸어 이 세션이
+  소유자가 된 **뒤** clear 해야 풀린다.
 - MV3 service worker 는 유휴 30초면 잠든다. 브리지가 20초마다 ping 을 보내고, 확장은 `chrome.alarms` 로도 깨어나 재연결한다.
 - 언팩 확장이라 크롬을 켤 때마다 "개발자 모드 확장" 경고 풍선이 뜬다.
 - **no-op 판정 구간 안에서 준비동작을 하면 승격이 영원히 안 돈다.** `el.focus()` 를 관찰 구간 안에서 부르면
@@ -304,6 +318,22 @@ node scripts/cc.mjs '[["list_tabs",{}],["read_page",{"tabId":123}]]'
 `swipe` 는 진짜 손가락이다. 폰에서 손가락으로 하는 것(캐러셀·덱 넘기기, 당겨서 새로고침, 스와이프 삭제,
 바텀시트 끌어올리기)은 `drag` 로 재현되지 않는다 — 그 UI 들은 touch 이벤트를 읽고 방향 락과 임계 거리로
 판정하는데, `drag` 는 마우스를 보내므로 그 코드에 아예 닿지 않는다. `emulate_device` 로 폰뷰를 먼저 켤 것.
+
+`emulate_device` 는 크롬 DevTools 의 Device Toolbar 목록(21종)을 그대로 이름으로 고른다 —
+`iphone-15-pro` `iphone-14-pro-max` `pixel-7` `galaxy-s20-ultra` `galaxy-z-fold-5` `ipad-mini`
+`ipad-air` `ipad-pro-11` `ipad-pro-12-9` `surface-pro-7` `surface-duo` `nest-hub` …. DevTools 표시명을
+그대로 쳐도 걸리고(`iPhone 14 Pro Max`), 가로는 이름 뒤에 `-landscape` 를 붙인다. 전체 표는 `list: true`.
+정의는 `extension/devices.js` 한 곳에 있다.
+
+**크기만 바꾸는 것으로는 기기 흉내가 안 된다.** 모바일 뷰를 *서버에서* 고르는 페이지는 UA 로 가르므로,
+크기만 바꾸면 데스크톱 HTML 이 폰 폭에 들어간 — 실제 폰에서는 나올 수 없는 — 화면을 보게 된다
+(2026-08-26 실측: 같은 390x844 에서 UA 만 갈아 `www.naver.com` 을 열었더니 데스크톱은 그대로,
+아이폰 UA 는 `m.naver.com` 으로 서버 리다이렉트됐다). 그래서 기기마다 UA 와 client hints 를 함께 건다.
+UA 는 **다음 요청부터** 서버에 전달되므로 이미 열린 페이지는 `navigate` 로 다시 열어야 분기가 보인다.
+`ua:false` 로 끄고 `ua:'<문자열>'` 로 직접 줄 수 있으며, 기기 이름 없이 크기만 준 호출에는 걸지 않는다.
+
+`mobile` 과 `touch` 는 다른 것이다 — Surface Pro·Nest Hub 는 데스크톱 렌더(`mobile:false`)인데 손가락이
+닿는다. 각 기기가 맞는 조합을 들고 있고, 필요하면 따로 덮어쓴다.
 
 `cdp_raw` 는 탈출구다. CDP 로 가능한 모든 것(디바이스 에뮬레이션, 쿠키, 인쇄, 성능 추적…)이 여기로 닿는다.
 
