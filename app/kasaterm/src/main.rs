@@ -4159,6 +4159,11 @@ pub(crate) enum SettingsCat {
     /// `Students`(그림 override 안내 한 줄)였는데, 테마 팩이 생기면서 「누가
     /// 나오는가」를 통째로 정하는 자리가 됐다.
     Theme,
+    /// 캐릭터 한 명씩 — 목록에서 골라 성격·모델·그림을 고치는 곳. `Theme` 에서
+    /// 갈라 나왔다(2026-08-26 지시): 「어느 세트를 쓸까」와 「이 애를 어떻게
+    /// 고칠까」는 다른 일인데 한 화면에 쌓여 있어, 캐릭터를 고치러 온 사람이
+    /// 테마 격자를 지나 한참 내려가야 했다.
+    Students,
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
     /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
     Feedback,
@@ -4168,12 +4173,13 @@ impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 6] = [
+    pub(crate) const ALL: [SettingsCat; 7] = [
         Self::General,
         Self::Appearance,
         Self::Shell,
         Self::Claude,
         Self::Theme,
+        Self::Students,
         Self::Feedback,
     ];
 
@@ -4187,6 +4193,7 @@ impl SettingsCat {
             Self::Shell => "shell",
             Self::Claude => "claude",
             Self::Theme => "theme",
+            Self::Students => "students",
             Self::Feedback => "feedback",
         }
     }

@@ -1816,7 +1816,7 @@ impl App {
     /// 캐릭터 상세가 안 열려 있으면 무시한다 — 어느 캐릭터 것인지 정할 길이 없다.
     /// 이미지가 아닌 파일은 place 쪽 디코드가 거르고 사유가 토스트로 뜬다.
     fn aux_settings_drop(&mut self, idx: usize, path: std::path::PathBuf) {
-        if self.settings_cat != crate::SettingsCat::Theme {
+        if self.settings_cat != crate::SettingsCat::Students {
             return;
         }
         let Some(slug) = self

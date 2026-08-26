@@ -2514,6 +2514,9 @@ impl App {
         self.students_name = name.clone();
         self.students_selected = Some(name);
         self.settings_input = None;
+        // 상세는 「캐릭터」 칸의 화면이다 — 딥링크가 다른 칸을 켜 둔 채로 불러도
+        // (프사 클릭은 `cat=theme` 를 함께 보낸다) 여기서 칸을 맞춰야 상세가 뜬다.
+        self.settings_cat = SettingsCat::Students;
         // 목록을 한참 내려서 골랐어도 상세는 맨 위부터 — 이어받으면 빈 화면이 뜬다.
         self.settings_scroll = 0.0;
     }
@@ -3193,7 +3196,11 @@ pub(crate) fn paint_settings(
         // 한쪽 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽히고, 마땅한 우리말
         // 대응도 없다. 열거자 이름이 `Claude` 로 남은 건 웹 키(`claude`)와 짝이라서다.
         (SettingsCat::Claude, "Agent", "claude"),
-        (SettingsCat::Theme, "캐릭터", "users"),
+        // 「테마」와 「캐릭터」는 다른 일이라 칸을 갈랐다(2026-08-26 지시) — 앞은
+        // 어느 세트를 쓸지, 뒤는 그 안의 한 명을 어떻게 고칠지. 한 칸에 쌓여
+        // 있을 때는 캐릭터를 고치러 온 사람이 테마 격자를 지나 한참 내려가야 했다.
+        (SettingsCat::Theme, "테마", "image"),
+        (SettingsCat::Students, "캐릭터", "users"),
         (SettingsCat::Feedback, "피드백", "message-square-warning"),
     ];
     let mut cy = ay + 48.0;
@@ -4251,12 +4258,6 @@ pub(crate) fn paint_settings(
             }
             content_bottom = y + 34.0;
         }
-        // 캐릭터를 고른 동안은 목록 대신 그 캐릭터만 — guard 로 가르는 건 아래
-        // 목록 arm 을 통째로 한 단 더 들여쓰지 않으려는 것뿐이다.
-        SettingsCat::Theme if ctx.student_selected.is_some() => {
-            let sel = ctx.student_selected.clone().unwrap_or_default();
-            content_bottom = student_detail(g, &mut rects, ctx, fx, fy, fw, clip, &sel);
-        }
         SettingsCat::Theme => {
             let mut y = fy;
             // ── 테마 고르기 ──────────────────────────────────────────────
@@ -4407,7 +4408,19 @@ pub(crate) fn paint_settings(
                 }
                 y = ny;
             }
-
+            content_bottom = y;
+        }
+        // 캐릭터를 고른 동안은 목록 대신 그 캐릭터만 — guard 로 가르는 건 아래
+        // 목록 arm 을 통째로 한 단 더 들여쓰지 않으려는 것뿐이다.
+        SettingsCat::Students if ctx.student_selected.is_some() => {
+            let sel = ctx.student_selected.clone().unwrap_or_default();
+            content_bottom = student_detail(g, &mut rects, ctx, fx, fy, fw, clip, &sel);
+        }
+        // 캐릭터 한 명씩 고치는 화면. 테마 격자와 한 칸에 있던 것을 갈랐다
+        // (2026-08-26 지시) — 그림 엔진·파일 규칙·목록은 전부 「이 애를 고친다」에
+        // 딸린 것이라, 세트를 고르러 온 사람에게는 통째로 군더더기였다.
+        SettingsCat::Students => {
+            let mut y = fy;
             // ── 그림 생성 엔진 ──────────────────────────────────────────
             // 캐릭터 상세의 「그림 생성」이 쓸 백엔드. 엔진마다 준비물(키·CLI)이
             // 달라 감지 결과를 함께 보인다 — 안 되는 것을 고를 수는 있게 두되,
@@ -4691,7 +4704,8 @@ fn cat_blurb(cat: SettingsCat) -> &'static str {
         SettingsCat::Appearance => "테마와 폰트, 사이드바와 상태줄, 창 모양",
         SettingsCat::Shell => "새 pane 이 띄울 셸",
         SettingsCat::Claude => "계정과 자동 전환, 모델 · 추론 강도, 훅",
-        SettingsCat::Theme => "학생 그림과 페르소나, 캐릭터 목록",
+        SettingsCat::Theme => "누가 나올지 — 캐릭터 세트와 말투",
+        SettingsCat::Students => "캐릭터 한 명씩 — 성격 · 모델 · 그림",
         SettingsCat::Feedback => "버그와 건의를 보냅니다",
     }
 }

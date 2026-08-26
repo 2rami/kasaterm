@@ -492,32 +492,12 @@ function CharacterGroup({
   );
 }
 
-export function ThemeTab({
-  data,
-  onChanged,
-}: {
-  data: SettingsCharacters;
-  /// 액션이 끝난 뒤 로스터를 다시 읽는다. **파일이 진실**이라, 요청값으로 화면을
-  /// 그리면 저장 쪽에서 거부된 변경이 화면에만 남는다.
-  onChanged: () => Promise<void>;
-}) {
+/// 두 탭(테마·캐릭터)이 공유하는 액션 통로. 둘 다 같은 로스터 파일을 고치고
+/// 같은 방식으로 알림을 띄우므로, 통로가 갈리면 한쪽만 고쳐지는 자리가 생긴다.
+function useRosterAction(onChanged: () => Promise<void>, onSettled?: () => void) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
-  /// 이름을 고치는 중인 테마 id. 네이티브도 카드 안에서 바로 고친다.
-  const [renaming, setRenaming] = useState<string | null>(null);
-
-  /// 골라 둔 총원. 테마를 가로질러 세되 **이름으로 합집합**을 낸다 — 배정 쪽
-  /// `assignable_names` 가 같은 이름을 한 번만 쓰므로, 두 테마에 같은 이름이
-  /// 있으면 화면 숫자가 실제 배정 인원보다 커지면 안 된다.
-  const pickedTotal = new Set(data.themes.flatMap((c) => c.picked)).size;
-
-  /// 오른쪽 칸에 펼칠 테마. 처음엔 **쓰는 중인 테마**를 연다 — 대개 거기서 고르고,
-  /// 그 명단은 이미 `data.roster` 로 실려 와 있어 첫 화면이 왕복 없이 뜬다.
-  const [selThemeId, setSelThemeId] = useState<string>(data.active_theme ?? '');
-  /// 고른 id 가 목록에 없으면(테마를 지웠다) 첫 칸으로 떨어진다 — 빈 오른쪽을
-  /// 보여 주면 「고장」으로 읽힌다.
-  const selTheme = data.themes.find((c) => c.id === selThemeId) ?? data.themes[0];
 
   async function run(action: string, args?: { id?: string; label?: string }) {
     setBusy(true);
@@ -545,9 +525,25 @@ export function ThemeTab({
       setNotice({ ok: false, msg: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
-      setRenaming(null);
+      onSettled?.();
     }
   }
+
+  return { t, busy, notice, setNotice, run };
+}
+
+export function ThemeTab({
+  data,
+  onChanged,
+}: {
+  data: SettingsCharacters;
+  /// 액션이 끝난 뒤 로스터를 다시 읽는다. **파일이 진실**이라, 요청값으로 화면을
+  /// 그리면 저장 쪽에서 거부된 변경이 화면에만 남는다.
+  onChanged: () => Promise<void>;
+}) {
+  /// 이름을 고치는 중인 테마 id. 네이티브도 카드 안에서 바로 고친다.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const { t, busy, notice, run } = useRosterAction(onChanged, () => setRenaming(null));
 
   return (
     <TabCard>
@@ -587,6 +583,39 @@ export function ThemeTab({
           />
         }
       />
+
+    </TabCard>
+  );
+}
+
+/// 캐릭터 한 명씩 고치는 칸. 테마 격자와 한 화면에 있던 것을 갈랐다(2026-08-26
+/// 지시) — 「어느 세트를 쓸까」와 「이 애를 어떻게 고칠까」는 다른 일이라, 캐릭터를
+/// 고치러 온 사람이 테마 격자를 지나 한참 내려가야 했다. 네이티브의
+/// `SettingsCat::Students` 와 같은 칸이다.
+export function CharactersTab({
+  data,
+  onChanged,
+}: {
+  data: SettingsCharacters;
+  onChanged: () => Promise<void>;
+}) {
+  const { t, busy, notice, setNotice, run } = useRosterAction(onChanged);
+
+  /// 골라 둔 총원. 테마를 가로질러 세되 **이름으로 합집합**을 낸다 — 배정 쪽
+  /// `assignable_names` 가 같은 이름을 한 번만 쓰므로, 두 테마에 같은 이름이
+  /// 있으면 화면 숫자가 실제 배정 인원보다 커지면 안 된다.
+  const pickedTotal = new Set(data.themes.flatMap((c) => c.picked)).size;
+
+  /// 오른쪽 칸에 펼칠 테마. 처음엔 **쓰는 중인 테마**를 연다 — 대개 거기서 고르고,
+  /// 그 명단은 이미 `data.roster` 로 실려 와 있어 첫 화면이 왕복 없이 뜬다.
+  const [selThemeId, setSelThemeId] = useState<string>(data.active_theme ?? '');
+  /// 고른 id 가 목록에 없으면(테마를 지웠다) 첫 칸으로 떨어진다 — 빈 오른쪽을
+  /// 보여 주면 「고장」으로 읽힌다.
+  const selTheme = data.themes.find((c) => c.id === selThemeId) ?? data.themes[0];
+
+  return (
+    <TabCard>
+      <Notice notice={notice} />
 
       <ThemeGenEngine />
 

@@ -17,7 +17,11 @@ export const ko = {
     /// 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 키가 `claude` 로
     /// 남은 건 서버 JSON 의 키라서다(네이티브 `SettingsCat::Claude` 와 짝).
     claude: 'Agent',
-    theme: '캐릭터',
+    /// 「테마」와 「캐릭터」는 다른 칸이다(2026-08-26 지시) — 앞은 어느 세트를
+    /// 쓸지, 뒤는 그 안의 한 명을 어떻게 고칠지. 키가 `theme`/`students` 인 것은
+    /// 네이티브 `SettingsCat` 과 짝이라서다.
+    theme: '테마',
+    students: '캐릭터',
     feedback: '피드백',
     /// 아직 네이티브 창에만 있는 칸에 붙는 꼬리표.
     native: '네이티브',
@@ -29,7 +33,8 @@ export const ko = {
     appearance: { title: '모양', hint: '색·모양·글꼴' },
     shell: { title: '셸', hint: '셸과 편집기' },
     claude: { title: 'Agent', hint: '계정과 실행 방식' },
-    theme: { title: '캐릭터', hint: '학생 그림과 페르소나, 캐릭터 목록' },
+    theme: { title: '테마', hint: '누가 나올지 — 캐릭터 세트와 말투' },
+    students: { title: '캐릭터', hint: '캐릭터 한 명씩 — 성격과 모델, 그림' },
     feedback: { title: '피드백', hint: '쓰다가 걸린 것을 남겨 주세요' },
   },
 
@@ -355,7 +360,8 @@ export const en: Strings = {
     appearance: 'Appearance',
     shell: 'Shell',
     claude: 'Agent',
-    theme: 'Characters',
+    theme: 'Themes',
+    students: 'Characters',
     feedback: 'Feedback',
     native: 'Native',
     portHint: 'the kasaterm on this port',
@@ -366,7 +372,8 @@ export const en: Strings = {
     appearance: { title: 'Appearance', hint: 'Colors, shape, fonts' },
     shell: { title: 'Shell', hint: 'Shell and editor' },
     claude: { title: 'Agent', hint: 'Accounts and how it runs' },
-    theme: { title: 'Characters', hint: 'Student art, personas, and the roster' },
+    theme: { title: 'Themes', hint: 'Who shows up — character sets and personas' },
+    students: { title: 'Characters', hint: 'One at a time — persona, model, and art' },
     feedback: { title: 'Feedback', hint: 'Tell us what tripped you up' },
   },
 

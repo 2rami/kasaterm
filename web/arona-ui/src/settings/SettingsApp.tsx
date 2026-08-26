@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Asterisk,
+  Images,
   MessageSquare,
   SlidersHorizontal,
   Sparkles,
@@ -9,7 +10,7 @@ import {
 } from 'lucide-react';
 import { useT } from './lang';
 import { useTokens } from './useTokens';
-import { ThemeTab } from './ThemeTab';
+import { CharactersTab, ThemeTab } from './ThemeTab';
 import { GeneralTab } from './GeneralTab';
 import { AppearanceTab } from './AppearanceTab';
 import { ShellTab } from './ShellTab';
@@ -37,11 +38,16 @@ const CATS = [
   { key: 'appearance', Icon: Sparkles, ready: true },
   { key: 'shell', Icon: Terminal, ready: true },
   { key: 'claude', Icon: Asterisk, ready: true },
-  { key: 'theme', Icon: Users, ready: true },
+  { key: 'theme', Icon: Images, ready: true },
+  { key: 'students', Icon: Users, ready: true },
   { key: 'feedback', Icon: MessageSquare, ready: true },
 ] as const;
 
 type CatKey = (typeof CATS)[number]['key'];
+
+/// 로스터(`/settings/characters`)를 읽어야 그려지는 칸들. 테마 격자와 캐릭터
+/// 목록이 같은 파일을 보므로, 한쪽만 적으면 다른 칸이 영원히 「읽는 중」에 선다.
+const ROSTER_CATS: CatKey[] = ['theme', 'students'];
 
 /// 딥링크로 받은 시작 칸. 하단바의 「계정 관리」처럼 **특정 칸을 보려고** 여는
 /// 입구가 있는데, 웹 창은 그 뜻을 URL 로만 받는다 — 네이티브는 `SettingsCat` 을
@@ -254,7 +260,7 @@ export function SettingsApp() {
         <p className="mt-1 text-[13px] text-[var(--kt-text-mute)]">{meta.hint}</p>
         <div className="my-5 h-px" style={{ background: 'var(--kt-border)' }} />
 
-        {cat === 'theme' && err && (
+        {ROSTER_CATS.includes(cat) && err && (
           <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
             {t.common.fetchFailed({ path: '/settings/characters', error: err })}
           </p>
@@ -265,12 +271,16 @@ export function SettingsApp() {
           </p>
         )}
 
-        {cat === 'theme' ? (
+        {ROSTER_CATS.includes(cat) ? (
           chars ? (
             // 상세는 더 이상 이 화면 안에서 안 열린다 — 카드 우클릭 → 「설정 열기」가
             // 별도 창(`?student=`)을 띄운다. 설정 본체가 앱 안으로 들어가면 세부는
             // 밖에 있어야 하고, 두 곳에서 같은 로스터를 고치면 정본이 갈린다.
-            <ThemeTab data={chars} onChanged={reload} />
+            cat === 'theme' ? (
+              <ThemeTab data={chars} onChanged={reload} />
+            ) : (
+              <CharactersTab data={chars} onChanged={reload} />
+            )
           ) : (
             !err && (
               <p className="text-[13px] text-[var(--kt-text-mute)]">{t.common.loading}</p>

@@ -2862,8 +2862,10 @@ impl App {
             "appearance" => SettingsCat::Appearance,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
-            // "students" 는 옛 이름 — 이 env 를 쓰는 검증 스크립트가 밖에 있어 함께 받는다.
-            "theme" | "students" => SettingsCat::Theme,
+            "theme" => SettingsCat::Theme,
+            // 옛 이름 그대로지만 이제 진짜 자기 칸이 있다(2026-08-26 분리) —
+            // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.
+            "students" => SettingsCat::Students,
             "feedback" => SettingsCat::Feedback,
             _ => SettingsCat::General,
         };
