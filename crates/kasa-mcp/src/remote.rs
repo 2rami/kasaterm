@@ -52,17 +52,35 @@ enum Out {
     Control(String),
 }
 
-/// 살아 있는 원격 링크 명부 — local pane id → kill 신호 송신로.
+/// 원격 링크 하나의 명부 항목.
+struct Link {
+    kill: tokio::sync::mpsc::UnboundedSender<()>,
+    base: String,
+    remote_id: String,
+    /// 같은 local pane id 가 재사용될 때 낡은 매니저의 정리 가드가 **새 링크를**
+    /// 걷어가지 않게 하는 세대 표식.
+    token: u64,
+}
+
+/// 살아 있는 원격 링크 명부 — local pane id → 링크.
 ///
-/// GUI 의 pane 닫기 경로가 App 필드 없이 원격 셸을 죽일 수 있게 프로세스
-/// 전역이다(kasa-pty 레지스트리와 같은 이유). 항목은 매니저 스레드가 끝날 때
-/// 스스로 걷는다.
-fn links() -> &'static Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<()>>>
-{
-    static L: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<()>>>,
-    > = std::sync::OnceLock::new();
+/// GUI 의 pane 닫기·저장 경로가 App 필드 없이 원격 셸을 죽이고 전송 명세를
+/// 읽을 수 있게 프로세스 전역이다(kasa-pty 레지스트리와 같은 이유). 항목은
+/// 매니저 스레드가 끝날 때 스스로 걷는다.
+fn links() -> &'static Mutex<std::collections::HashMap<String, Link>> {
+    static L: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Link>>> =
+        std::sync::OnceLock::new();
     L.get_or_init(Default::default)
+}
+
+/// 원격 pane 의 전송 명세 `(base, remote_id)` — 세션 저장(layout_to_json)이
+/// 재시작 후 같은 원격 세션에 다시 붙을 수 있게 싣는다.
+pub fn remote_meta(local_id: &str) -> Option<(String, String)> {
+    links()
+        .lock()
+        .unwrap()
+        .get(local_id)
+        .map(|l| (l.base.clone(), l.remote_id.clone()))
 }
 
 /// 이 pane 이 원격 링크인가.
@@ -76,10 +94,10 @@ pub fn is_remote_pane(local_id: &str) -> bool {
 /// 안 부르고 닫으면 원격 셸은 살아남아 나중에 이어받을 수 있다.
 pub fn kill_remote(local_id: &str) -> bool {
     let mut map = links().lock().unwrap();
-    let Some(tx) = map.get(local_id) else {
+    let Some(link) = map.get(local_id) else {
         return false;
     };
-    if tx.send(()).is_err() {
+    if link.kill.send(()).is_err() {
         // 매니저가 이미 죽었다 — 낡은 항목을 걷는다.
         map.remove(local_id);
         return false;
@@ -157,7 +175,10 @@ pub fn connect(
     let (ktx, krx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (htx, hrx) =
         std::sync::mpsc::sync_channel::<std::result::Result<(String, u16, u16), String>>(1);
+    static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let token = TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let spec2 = spec.clone();
+    let local2 = local_pane_id.to_string();
     std::thread::Builder::new()
         .name(format!("remote-ws-{local_pane_id}"))
         .spawn(move || {
@@ -171,7 +192,7 @@ pub fn connect(
                     return;
                 }
             };
-            rt.block_on(manager(spec2, etx, orx, krx, htx));
+            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx));
         })
         .context("remote-ws 스레드")?;
     let (remote_id, rc, rr) = hrx
@@ -196,10 +217,15 @@ pub fn connect(
             }),
         },
     )?;
-    links()
-        .lock()
-        .unwrap()
-        .insert(local_pane_id.to_string(), ktx);
+    links().lock().unwrap().insert(
+        local_pane_id.to_string(),
+        Link {
+            kill: ktx,
+            base: spec.base.clone(),
+            remote_id: remote_id.clone(),
+            token,
+        },
+    );
     let session = Arc::new(session);
     if (cols, rows) != (rc, rr) {
         let _ = session.resize(cols, rows);
@@ -210,13 +236,28 @@ pub fn connect(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn manager(
     spec: RemoteSpec,
+    local: String,
+    token: u64,
     etx: crossbeam_channel::Sender<ExtEvent>,
     mut orx: tokio::sync::mpsc::UnboundedReceiver<Out>,
     mut krx: tokio::sync::mpsc::UnboundedReceiver<()>,
     htx: std::sync::mpsc::SyncSender<std::result::Result<(String, u16, u16), String>>,
 ) {
+    // 어떤 길로 나가든 명부를 걷는다 — 안 걷으면 pane 번호가 재사용될 때 새 로컬
+    // pane 이 「원격」으로 오판된다. 세대 표식이 맞을 때만 걷는 이유는 Link 주석에.
+    struct Unlink(String, u64);
+    impl Drop for Unlink {
+        fn drop(&mut self) {
+            let mut map = links().lock().unwrap();
+            if map.get(&self.0).is_some_and(|l| l.token == self.1) {
+                map.remove(&self.0);
+            }
+        }
+    }
+    let _unlink = Unlink(local, token);
     let mut remote_id: Option<String> = spec.pane.clone();
     // 첫 attach 가 이미 성사됐는가 — 이후의 연결 유실은 재접속 대상이고,
     // 그 전의 실패는 「스폰 실패」로 호출자에게 돌려준다.

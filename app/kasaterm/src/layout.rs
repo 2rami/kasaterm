@@ -1817,11 +1817,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if self.leaf_lingers_anywhere(target) {
             return;
         }
+        // 원격 pane 의 「진짜 끄기」(되살리기 목록에서 지우기) — 원격 셸도 함께.
+        // 위 lingers 가드 **뒤**여야 한다: 낡은 레코드가 살아 있는 pane 번호를
+        // 가리킬 때 그 pane 의 원격 셸을 죽이면 안 된다.
+        kasa_mcp::remote::kill_remote(target);
         self.drop_pane_resources(target);
         self.chrome_dirty = true;
     }
 
     pub(crate) fn remove_pane(&mut self, target: &str) {
+        // 원격 pane 이면 원격 셸까지 죽인다 — 여기는 「진짜 끄기」 경로다.
+        // detach(앱 종료·재시작)는 이 함수를 안 타고 Arc drop 만으로 끝난다.
+        kasa_mcp::remote::kill_remote(target);
         // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 "정말 죽는" 경로의 길목이라
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
         // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니

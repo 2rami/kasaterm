@@ -48,6 +48,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
+        "surface.remote" => surface_remote(backend, id, &req.params),
         "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
@@ -232,6 +233,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.list",
                 "surface.focus",
                 "surface.split",
+                "surface.remote",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
@@ -703,6 +705,21 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
             }
             Response::success(id, body)
         }
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// `surface.remote` — 원격 PTY 호스트의 세션을 pane 으로. params:
+/// `{base, cwd?, pane?, from?}` — `pane` 이 있으면 이어받기, 없으면 스폰.
+fn surface_remote(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(base) = params.get("base").and_then(|v| v.as_str()) else {
+        return param_err(id, "surface.remote requires `base` (예: http://127.0.0.1:18766)");
+    };
+    let cwd = params.get("cwd").and_then(|v| v.as_str());
+    let pane = params.get("pane").and_then(|v| v.as_str());
+    let from = params.get("from").and_then(|v| v.as_str());
+    match backend.remote_pane(base, cwd, pane, from) {
+        Ok(s) => Response::success(id, json!({"surface": s})),
         Err(e) => backend_err(id, e),
     }
 }

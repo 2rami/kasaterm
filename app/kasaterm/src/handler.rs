@@ -242,6 +242,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketRemotePane(base, cwd, rpane, from, reply) => {
+                let outcome = self
+                    .spawn_remote_pane(base, cwd.as_deref(), rpane.as_deref(), from.as_deref())
+                    .map_err(|e| format!("{e:#}"));
+                if let Err(ref why) = outcome {
+                    eprintln!("[kasaterm] socket remote 실패: {why}");
+                }
+                let _ = reply.send(outcome);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::NotifyFocus { pane, sid } => {
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에

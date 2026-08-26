@@ -1118,6 +1118,45 @@ impl Backend for PtyBackend {
         })
     }
 
+    fn remote_pane(
+        &self,
+        base: &str,
+        cwd: Option<&str>,
+        pane: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketRemotePane(
+            base.to_string(),
+            cwd.map(str::to_string),
+            pane.map(str::to_string),
+            from.map(str::to_string),
+            tx,
+        ));
+        // connect 자체가 원격 핸드셰이크를 15초까지 기다린다 — 그보다 길게 잡아야
+        // 「GUI 가 막혔다」와 「원격이 늦다」가 안 섞인다.
+        let id = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Ok(id)) if !id.is_empty() => id,
+            Ok(Ok(_)) => anyhow::bail!("remote 가 빈 pane id 를 돌려줬다"),
+            Ok(Err(why)) => anyhow::bail!("remote 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "remote 응답 없음(30초) — GUI 스레드나 원격 호스트를 확인해라"
+            ),
+        };
+        if let Some(parent) = from.filter(|p| *p != id) {
+            if let Ok(mut m) = self.spawned_by.lock() {
+                m.insert(id.clone(), parent.to_string());
+            }
+        }
+        Ok(SurfaceInfo {
+            id,
+            workspace_id: FIXED_WORKSPACE_ID.into(),
+            title: None,
+            cwd: None,
+            character: None,
+        })
+    }
+
     fn split_fleet(
         &self,
         count: usize,

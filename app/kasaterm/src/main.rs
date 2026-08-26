@@ -3634,6 +3634,15 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 pane 으로 앉힌다 — 스폰(원격
+    /// id 없음) 또는 이어받기. (base, 원격 cwd, 원격 pane id, 쪼갤 기준 pane, 회신)
+    SocketRemotePane(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
     /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
     ///
     /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에

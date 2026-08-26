@@ -529,6 +529,17 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
+    /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
+    /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
+    fn remote_pane(
+        &self,
+        _base: &str,
+        _cwd: Option<&str>,
+        _pane: Option<&str>,
+        _from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
+        anyhow::bail!("remote_pane: 이 백엔드는 원격 pane 을 지원하지 않는다")
+    }
     /// pane `count` 개를 **한 번의 호출로** 배치한다 — 부른 pane 이 크게 남고 나머지가
     /// 균등하게 선다.
     ///

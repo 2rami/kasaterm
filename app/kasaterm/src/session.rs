@@ -509,6 +509,78 @@ impl App {
         Ok(())
     }
 
+    /// 원격 PTY 호스트의 세션을 **이 창의 pane** 으로 앉힌다 — 스폰 또는 이어받기.
+    ///
+    /// `split_active_pane` 과 같은 삽입 규칙(기준 pane 이 든 트리에 꽂는다)을 쓰되,
+    /// 로컬 셸 대신 `kasa_mcp::remote::connect` 의 로컬 파서 세션을 앉힌다. 방향은
+    /// v1 에선 가로 고정 — auto 판정(픽셀 종횡비)은 활성 pane 전제라 배경 스폰과
+    /// 어긋난다.
+    pub(crate) fn spawn_remote_pane(
+        &mut self,
+        base: &str,
+        cwd: Option<&str>,
+        remote_pane: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<String> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let anchor = from
+            .map(str::to_string)
+            .or_else(|| self.ws.lock().unwrap().active_pane.clone())
+            .ok_or_else(|| anyhow::anyhow!("기준 pane 이 없다"))?;
+        let anchor = self
+            .ws
+            .lock()
+            .unwrap()
+            .outer_for_pty(&anchor)
+            .unwrap_or(anchor);
+        let owner = self.window_of_pane(&anchor);
+        if owner.is_none() {
+            anyhow::bail!(
+                "기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"
+            );
+        }
+        let new_id = self.alloc_pane_id();
+        let (win_cols, win_rows) = self.window_cells();
+        let remote = kasa_mcp::remote::connect(
+            kasa_mcp::remote::RemoteSpec {
+                base: base.to_string(),
+                pane: remote_pane.map(str::to_string),
+                cwd: cwd.map(str::to_string),
+                token: None,
+            },
+            &new_id,
+            win_cols,
+            win_rows,
+        )?;
+        self.pump_pty_screens(remote.session.screens.clone(), new_id.clone());
+        self.insert_pty(new_id.clone(), remote.session.clone());
+        let foreign = owner.filter(|w| *w != self.active_window);
+        let layout = match foreign {
+            Some(w) => self.windows.get_mut(w).and_then(|s| s.as_mut()),
+            None => self.pty_layout.as_mut(),
+        };
+        if !layout.is_some_and(|l| {
+            l.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone())
+        }) {
+            // 이어받기(attach) 실패 롤백에서 남의 세션을 죽이는 쪽이 훨씬 나쁘므로
+            // kill 은 안 한다 — Arc drop 이 detach 만 한다(새 스폰의 고아는 원격
+            // keep 목록에 남아 다음에 이어받거나 걷을 수 있다).
+            self.pty.remove(&new_id);
+            anyhow::bail!("pane {anchor} 을 어느 window 트리에서도 못 찾았다");
+        }
+        if foreign.is_none() {
+            self.ws.lock().unwrap().active_pane = Some(new_id.clone());
+            self.resize_backend(win_cols, win_rows);
+            self.publish_pty_layout();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        Ok(new_id)
+    }
+
     /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
     /// 부모(포크/백그라운드)가 있으면 그 학생을 우선 상속하고, 없으면 세션 매핑으로
     /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
@@ -3348,6 +3420,18 @@ impl App {
                         rec = serde_json::json!({ "web_url": url });
                     }
                 }
+                // 원격 pane — 전송 명세를 실어 재시작 후 같은 원격 세션에 다시
+                // 붙는다(restore_leaf 의 remote 가지). cwd·agent 감지(ps 기반)는
+                // 원격이라 비지만, 스크롤백과 sid 마커 오버레이(pane_claude_sid)는
+                // 로컬 파서 덕에 그대로 동작한다.
+                if let Some((base, rid)) = kasa_mcp::remote::remote_meta(pane_id) {
+                    if let Some(obj) = rec.as_object_mut() {
+                        obj.insert("remote_base".to_string(), serde_json::json!(base));
+                        obj.insert("remote_pane".to_string(), serde_json::json!(rid));
+                    } else {
+                        rec = serde_json::json!({ "remote_base": base, "remote_pane": rid });
+                    }
+                }
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
                 if let Some(obj) = rec.as_object_mut() {
@@ -3679,6 +3763,47 @@ impl App {
             self.pending_web_hosts.push((host_id, url.to_string()));
             return Some(id);
         }
+        // 원격 pane — 저장된 전송 명세로 같은 원격 세션에 다시 붙는다. 호스트가
+        // 내려갔거나 세션이 끝났으면(gone) 아래 일반 셸 복원으로 떨어진다 —
+        // 저장해 둔 스크롤백이 자리를 지키고, toast 로 잃음을 알린다.
+        if let (Some(base), Some(rpane)) = (
+            rec.get("remote_base").and_then(|v| v.as_str()),
+            rec.get("remote_pane").and_then(|v| v.as_str()),
+        ) {
+            match kasa_mcp::remote::connect(
+                kasa_mcp::remote::RemoteSpec {
+                    base: base.to_string(),
+                    pane: Some(rpane.to_string()),
+                    cwd: None,
+                    token: None,
+                },
+                &id,
+                cols,
+                rows,
+            ) {
+                Ok(remote) => {
+                    self.pump_pty_screens(remote.session.screens.clone(), id.clone());
+                    self.insert_pty(id.clone(), remote.session.clone());
+                    if let Some(t) = rec
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        let mut ws = self.ws.lock().unwrap();
+                        let pane = ws.pane_mut(&id);
+                        pane.title = Some(t.to_string());
+                        pane.title_pinned = true;
+                    }
+                    return Some(id);
+                }
+                Err(e) => {
+                    self.collab.toast = Some((
+                        format!("원격 pane 을 못 이었어요: {e}"),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+        }
         let cwd = rec
             .get("cwd")
             .and_then(|c| c.as_str())
@@ -3716,9 +3841,25 @@ impl App {
             })
             .map(|s| s.to_string());
         if let Some(ref c) = saved_char {
-            self.pending_character = Some(c.clone());
-            if let Some(ref sid) = session_id {
-                let _ = kasa_mcp::character::bind_session_character(sid, c);
+            // **이미 다른 자리가 쓰는 학생이면 되살리지 않는다.** `pending_character`
+            // 는 배정의 중복 회피(taken)를 건너뛰는 지름길이라, 저장본에 겹침이 하나
+            // 있으면 그대로 복원되고 그 상태가 다시 저장돼 **재시작마다 누적된다**
+            // (2026-08-26 실측: 아리스 %0·%9, 세이아 %17·%19 — 후보가 넉넉한데도
+            // 겹쳤다). pending 을 안 세우면 아래 assign_character_env 가 taken 을
+            // 보고 빈 학생을 새로 뽑는다.
+            //
+            // 손으로 고른 자리는 예외다 — 사람이 일부러 같은 학생을 둘 앉혔다면
+            // 그건 배정 사고가 아니다(같은 날 정한 「손으로 고른 건 지킨다」 규칙).
+            let manual =
+                session_id.as_deref().is_some_and(kasa_mcp::character::is_manual_pick);
+            let taken = self.ws.lock().unwrap().pane_character.values().any(|v| v == c);
+            if revive_saved_character(taken, manual) {
+                self.pending_character = Some(c.clone());
+                if let Some(ref sid) = session_id {
+                    let _ = kasa_mcp::character::bind_session_character(sid, c);
+                }
+            } else {
+                eprintln!("[restore] {c} 는 이미 다른 자리가 쓰는 중 — 새로 배정한다");
             }
         }
         let restores_agent = was_agent.is_some() || (saved_char.is_some() && session_id.is_some());
@@ -4960,6 +5101,15 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
     }
 
 
+/// 저장된 학생을 그대로 되살릴 것인가.
+///
+/// 복원은 `pending_character` 로 배정을 건너뛰는데, 그 지름길은 중복 회피도 함께
+/// 건너뛴다. 그래서 저장본에 겹침이 하나 생기면 재시작마다 그대로 실려 누적된다.
+/// 손으로 고른 자리만 예외로 둔다 — 사람이 일부러 겹쳤다면 사고가 아니다.
+fn revive_saved_character(already_taken: bool, manual: bool) -> bool {
+    manual || !already_taken
+}
+
 /// [`App::stashed_record`] 의 판정 본체. App 없이 검사할 수 있게 갈라 뒀다.
 fn stashed_in<'a>(list: &'a [crate::ClosedPane], pane: &str) -> Option<&'a crate::ClosedPane> {
     list.iter().find(|c| c.alive && c.pane_id == pane)
@@ -5660,5 +5810,32 @@ mod sidebar_scroll_tests {
                 "open_at={open_at}: 한계까지 굴려도 꼬리가 {tail} 로 넘친다"
             );
         }
+    }
+}
+
+/// 복원이 **같은 학생을 둘 앉히지 않는가.**
+///
+/// 2026-08-26 실측: 후보가 넉넉한데도 아리스가 `%0`·`%9`, 세이아가 `%17`·`%19` 에
+/// 겹쳐 있었다. 복원이 `pending_character` 로 배정을 건너뛰는데 그 지름길은 중복
+/// 회피도 함께 건너뛰어서, 겹침이 하나 생기면 재시작마다 그대로 실려 누적된다.
+#[cfg(test)]
+mod revive_saved_character_tests {
+    use super::revive_saved_character;
+
+    #[test]
+    fn a_free_character_is_revived() {
+        assert!(revive_saved_character(false, false));
+    }
+
+    #[test]
+    fn a_character_another_pane_holds_is_not_revived() {
+        assert!(!revive_saved_character(true, false), "겹친 학생이 그대로 되살아난다");
+    }
+
+    /// 손으로 고른 자리는 겹쳐도 지킨다 — 사람이 일부러 그랬다면 배정 사고가 아니다.
+    #[test]
+    fn a_hand_picked_seat_keeps_its_character_even_when_taken() {
+        assert!(revive_saved_character(true, true));
+        assert!(revive_saved_character(false, true));
     }
 }
