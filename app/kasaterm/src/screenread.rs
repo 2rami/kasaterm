@@ -752,6 +752,24 @@ pub(crate) fn native_sender_accent(
     } else {
         sender
     };
+    // 되짚기가 전부 빗나가도 **「peer」를 화면에 남기지 않는다.** 그 글자는 claude 가
+    // cross-session 발신자에 붙이는 고정 라벨이라, 덮어쓰기에 실패하면 받는 학생이
+    // 그대로 읽고 「피어가 어쩌구 했다」고 말한다(2026-08-26 지적).
+    //
+    // 빗나가는 흔한 경우는 **발신 세션이 이미 죽은 것**이다. 명부 파일이 pid 별이라
+    // 그 프로세스가 사라지면(앱 재시작 포함) 소켓 pid 로 되짚을 자리가 없어진다 —
+    // 그런데 메시지는 transcript 에 남아 나중에 다시 읽힌다(실측: 보낸 쪽 소켓
+    // 36264·37850 이 명부에 없었다).
+    //
+    // 그때 태그의 `from-name` 을 그대로 쓴다. 한동안 이걸 안 쓴 이유는 세션 이름이
+    // 자동 제목에 덮이기 때문이었는데, 이제 자동 갱신은 **자기가 지은 것만** 갈아
+    // 치우므로(2026-08-26) 사람이 붙인 이름은 남는다. 학생 이름으로 못 바꾸더라도
+    // 「diff」가 「peer」보다는 누가 보냈는지 말해 준다.
+    let sender = if sender == PEER_LABEL && !label.is_empty() && label != PEER_LABEL {
+        label.to_string()
+    } else {
+        sender
+    };
     let accent = teammate_sender_accent(&sender, msg.and_then(|m| m.color.as_deref()));
     (sender, accent)
 }
@@ -5117,5 +5135,50 @@ mod connection_trouble_tests {
     fn an_empty_screen_is_not_a_stall() {
         assert_eq!(find_connection_trouble(&[]), None);
         assert_eq!(find_connection_trouble(&[row("   "), row("")]), None);
+    }
+}
+
+/// 발신자 되짚기가 **전부 빗나가도 「peer」가 화면에 남지 않는가.**
+///
+/// 2026-08-26: 받은 학생이 「피어가 어쩌구 했다」고 말했다. 원인은 명부 파일이
+/// pid 별이라 발신 세션이 죽으면 소켓 pid 로 되짚을 자리가 없어지는 것 — 그런데
+/// 메시지는 transcript 에 남아 나중에 다시 읽힌다(실측: 소켓 36264·37850 이
+/// 명부에 없었다).
+#[cfg(test)]
+mod peer_label_fallback_tests {
+    use super::{native_sender_accent, PEER_LABEL};
+
+    fn ws() -> crate::Workspace {
+        crate::Workspace::default()
+    }
+
+    /// 되짚을 것이 하나도 없을 때 — 태그의 이름이라도 보여야 한다.
+    #[test]
+    fn a_dead_sender_still_shows_its_tag_name() {
+        let (sender, _) = native_sender_accent(
+            "diff",
+            true,
+            None, // 메시지를 못 찾음 = sender 가 PEER_LABEL 로 떨어지는 경로
+            &Default::default(),
+            &ws(),
+        );
+        assert_eq!(sender, "diff", "되짚기가 빗나가면 peer 가 그대로 샌다");
+        assert_ne!(sender, PEER_LABEL);
+    }
+
+    /// 라벨마저 「peer」면 바꿀 것이 없다 — 그땐 그대로 둔다(없는 이름을 지어내지
+    /// 않는다).
+    #[test]
+    fn a_peer_label_with_nothing_behind_it_stays_put() {
+        let (sender, _) =
+            native_sender_accent(PEER_LABEL, true, None, &Default::default(), &ws());
+        assert_eq!(sender, PEER_LABEL);
+    }
+
+    /// 빈 라벨도 마찬가지 — 빈 이름을 화면에 쓰면 누가 보냈는지가 통째로 사라진다.
+    #[test]
+    fn an_empty_label_does_not_blank_the_sender() {
+        let (sender, _) = native_sender_accent("", true, None, &Default::default(), &ws());
+        assert_eq!(sender, PEER_LABEL);
     }
 }

@@ -6547,12 +6547,21 @@ impl App {
         let px: Option<f32> = std::env::var("KASATERM_AUTOWHEEL_PX")
             .ok()
             .and_then(|s| s.parse().ok());
+        // `KASATERM_AUTOWHEEL_AT=sidebar` — 방 목록 띠 위에서 굴린다. 기본 자리
+        // (pane 본문 중앙)로는 사이드바 스크롤 경로가 아예 안 밟혀서, 「목록 끝에
+        // 닿을 수 없다」류 버그를 헤드리스로 잡을 방법이 없었다.
+        let at_sidebar =
+            std::env::var("KASATERM_AUTOWHEEL_AT").is_ok_and(|v| v.trim() == "sidebar");
         let (cols, rows) = self.window_cells();
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
-        self.cursor_px = (
-            pad + cols as f32 * self.cell.w / 2.0,
-            TITLE_HEIGHT + rows as f32 * self.cell.h / 2.0,
-        );
+        self.cursor_px = if at_sidebar {
+            (self.tab_strip_w() / 2.0, TITLE_HEIGHT + 80.0)
+        } else {
+            (
+                pad + cols as f32 * self.cell.w / 2.0,
+                TITLE_HEIGHT + rows as f32 * self.cell.h / 2.0,
+            )
+        };
         let dir = if n < 0 { -1.0 } else { 1.0 };
         eprintln!(
             "[autowheel] {} ticks {} px_mode={px:?} cursor=({:.0},{:.0})",
@@ -6575,6 +6584,26 @@ impl App {
             "[autowheel] md scroll {before:?} -> {:?}",
             self.autowheel_md_scroll()
         );
+        if at_sidebar {
+            // 도달 가능성은 그림이 아니라 숫자로만 갈린다 — 스크롤이 잠겨 있어도
+            // 화면은 멀쩡해 보인다(그려진 데까지는 정상이라).
+            let win_h = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as f32 / self.effective_scale())
+                .unwrap_or(800.0);
+            let (tabs, ..) = self.sidebar_layout(win_h);
+            let n_rooms = self.windows.len();
+            let last = tabs.last().map(|(i, _)| *i);
+            eprintln!(
+                "[autowheel] sidebar rooms={n_rooms} first={} max_first={} shown={:?}..{:?}                  last_reached={}",
+                self.win_tab_first,
+                self.sidebar_max_first(win_h),
+                tabs.first().map(|(i, _)| *i),
+                last,
+                last.is_some_and(|i| i + 1 == n_rooms)
+            );
+        }
     }
 
     /// active pane 이 문서 뷰면 그 스크롤 오프셋(logical px). autowheel 로그가

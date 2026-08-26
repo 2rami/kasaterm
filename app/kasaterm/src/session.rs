@@ -2954,6 +2954,64 @@ impl App {
         };
         layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
     }
+    /// 방 카드 한 장의 치수 — `(body_h, list_h, hidden)`. 카드 전체 높이는
+    /// `SIDEBAR_TAB_H + list_h` 이고, 접힌 방은 `list_h == 0` 이다.
+    ///
+    /// 배치 루프와 스크롤 한계가 **같은 값**을 봐야 한다. 갈라지면 스크롤은 되는데
+    /// 목록 끝이 영영 안 나오는 종류로 어긋난다 — 실제로 그랬다(아래 참조).
+    fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>) {
+        let leaves = self.window_leaves(i);
+        // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
+        // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.
+        let hidden: Vec<String> = self
+            .closed_panes
+            .iter()
+            .filter(|c| c.stashed && c.alive && c.window == i)
+            .map(|c| c.pane_id.clone())
+            .collect();
+        // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
+        // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
+        // 방에선 그 학생을 볼 길이 통째로 사라졌다(2026-08 지적, 두 번).
+        // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
+        let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
+        // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
+        // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
+        let body_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
+        let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+        (body_h, (full_h * t).round(), hidden)
+    }
+
+    /// 방 목록이 세로로 쓸 수 있는 높이(logical px). 트레이·독·상태줄이 바닥을
+    /// 먹고, 24px 는 chevron-down 오버플로 힌트 자리다.
+    fn sidebar_avail_h(&self, win_h: f32) -> f32 {
+        // 10px slot above the first tab hosts the overflow chevron-up.
+        let top = TITLE_HEIGHT + 18.0;
+        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
+        // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
+        // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
+        let bottom_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
+        (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
+    }
+
+    /// 마지막 방까지 닿는 최대 스크롤 시작점(세로 사이드바 전용).
+    ///
+    /// **뒤에서부터** 카드를 쌓아 구한다. 예전엔 접힌 높이(stride)로 칸을 나눠
+    /// `n - n_vis` 를 썼는데, 그러면 펼친 방이 있을 때 「접힌 기준으로는 다 들어가니
+    /// 스크롤 0 에 묶어라」가 되어 버린다 — 실제 배치는 펼친 카드만큼 길어져
+    /// 아래쪽 방이 배치 루프의 넘침 검사에 걸려 그려지지도 않는데, 스크롤은
+    /// 막혀 있으니 **그 방들에 영영 닿을 수 없었다**(2026-08-27 지적:
+    /// "사이드바 방 많아지면 스크롤이 안되고 그냥 밑에건 안보여").
+    pub(crate) fn sidebar_max_first(&self, win_h: f32) -> usize {
+        if self.tabs_on_top {
+            // 가로 탭은 폭 기준이라 이 계산이 안 통한다 — 그쪽은 `win_tab_vis` 를 쓴다.
+            return self.windows.len().saturating_sub(self.win_tab_vis.max(1));
+        }
+        let heights: Vec<f32> = (0..self.windows.len())
+            .map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1)
+            .collect();
+        max_first_for(&heights, self.sidebar_avail_h(win_h), SIDEBAR_TAB_GAP)
+    }
+
     pub(crate) fn sidebar_layout(
         &self,
         win_h: f32,
@@ -3011,25 +3069,14 @@ impl App {
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = TITLE_HEIGHT + 18.0;
-        let stride = SIDEBAR_TAB_H + SIDEBAR_TAB_GAP;
         // Rows that fit above the "+" button; the dock strip eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
-        // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
-        // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
-        // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
-        let bottom_h =
-            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
-        // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
-        // chevron-down 오버플로 힌트 자리.
-        let avail_h = (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
-        // 스크롤 시작점은 **접힌 높이 기준**으로 잡는다 — 펼침은 방금 사용자가
-        // 편 것이라 그만큼 뒤가 밀리는 게 자연스럽고, 가변 높이로 역산하면 펼칠
-        // 때마다 목록이 통째로 점프한다.
-        let n_vis = n
-            .min((((avail_h + SIDEBAR_TAB_GAP) / stride) as usize).max(1));
-        let first = self.win_tab_first.min(n.saturating_sub(n_vis));
-        let mut tabs = Vec::with_capacity(n_vis);
+        let avail_h = self.sidebar_avail_h(win_h);
+        // 스크롤 한계는 **실제 카드 높이**로 잡는다. 접힌 높이로 칸을 나눠 세면
+        // 펼친 방이 있을 때 한계가 0 으로 나와 목록 끝이 손에 안 닿는다.
+        let first = self.win_tab_first.min(self.sidebar_max_first(win_h));
+        let mut tabs = Vec::new();
         let mut closes = Vec::new();
         let mut rows = Vec::new();
         let mut mini = Vec::new();
@@ -3041,30 +3088,12 @@ impl App {
         // 클릭 판정이 함께 쓰는 값이고, 클릭은 시저가 안 자른다.
         let mut y = top;
         for i in first..n {
-            let leaves = self.window_leaves(i);
-            // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
-            // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.
-            let hidden: Vec<String> = self
-                .closed_panes
-                .iter()
-                .filter(|c| c.stashed && c.alive && c.window == i)
-                .map(|c| c.pane_id.clone())
-                .collect();
-            // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
-            // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
-            // 방에선 그 학생을 볼 길이 통째로 사라졌다(거노, 두 번). 손잡이 쪽은 이미
-            // 폈는데 여기가 안 따라와 버튼만 있고 아무것도 안 나오는 상태였다 — 두
-            // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
-            // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
-            let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,
             // 그 목록은 info 탭이 방→pane→탭→프로세스로 이미 그리는 것의 얕은
             // 사본이었다(2026-08-24 지시: "목록표시는 info에서 보면되고").
-            // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
-            // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
-            let body_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
-            let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
-            let list_h = (full_h * t).round();
+            // 치수는 `sidebar_card_metrics` 하나에서 나온다 — 스크롤 한계도 같은
+            // 함수를 보므로 배치와 한계가 갈릴 수 없다.
+            let (body_h, list_h, hidden) = self.sidebar_card_metrics(i);
             let h = SIDEBAR_TAB_H + list_h;
             if !tabs.is_empty() && y + h > top + avail_h {
                 break;
@@ -4959,6 +4988,29 @@ fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<
 /// 편집기 명령과 파일 경로로 셸에 칠 한 줄을 만든다. `{}` 가 있으면 그 자리에,
 /// 없으면 맨 뒤에 경로가 들어간다(`code -w {} --goto 1` 처럼 인자 뒤에 뭔가 더
 /// 붙는 편집기가 있다). 경로는 홑따옴표로 감싸고 내부 `'` 를 POSIX 방식으로
+/// 카드 높이 목록에서 **마지막 장까지 닿는** 최대 스크롤 시작점.
+///
+/// 뒤에서부터 쌓아 `avail_h` 를 넘기는 순간의 다음 칸이 답이다. 카드 높이가
+/// 제각각(펼친 방은 길다)이라 `총개수 - 한칸높이로_나눈_개수` 로는 못 구한다 —
+/// 그렇게 구하면 펼친 방이 있을 때 스크롤 한계가 실제보다 작게 나와 목록 끝이
+/// 손에 안 닿는다.
+///
+/// 마지막 한 장은 `avail_h` 를 넘겨도 답에 넣는다. 배치 루프도 첫 장은 넘침
+/// 검사를 건너뛰므로(`!tabs.is_empty()`), 여기서 잘라내면 카드 하나가 칸보다 큰
+/// 순간 목록이 통째로 비어 버린다.
+pub(crate) fn max_first_for(heights: &[f32], avail_h: f32, gap: f32) -> usize {
+    let n = heights.len();
+    let mut acc = 0.0f32;
+    for i in (0..n).rev() {
+        let need = if i + 1 == n { heights[i] } else { acc + gap + heights[i] };
+        if i + 1 < n && need > avail_h {
+            return i + 1;
+        }
+        acc = need;
+    }
+    0
+}
+
 /// 끊어 붙인다 — 공백·한글·따옴표가 든 파일명이 명령을 쪼개지 못하게.
 fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
     let q = format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
@@ -5520,5 +5572,93 @@ mod character_swap_plan_tests {
         assert!(character_swap_confirm_text("하치와레", true).0.contains("하치와레로"));
         assert!(character_swap_confirm_text("페이몬", true).0.contains("페이몬으로"));
         assert!(ok.iter().any(|l| l.contains("그대로")));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_scroll_tests {
+    use super::max_first_for;
+
+    // 실측 치수: 접힌 카드 54, 카드 사이 3, pane 2개를 편 카드는 124
+    // (54 + (36+13*2).clamp(46,150) + 8).
+    const FOLDED: f32 = 54.0;
+    const OPEN2: f32 = 124.0;
+    const GAP: f32 = 3.0;
+
+    /// 예전 계산 — 접힌 높이로 칸을 나눠 `n - n_vis` 를 한계로 삼았다.
+    /// 무엇이 어긋났는지 비교하려고 남긴다.
+    fn old_max_first(n: usize, avail_h: f32) -> usize {
+        let stride = FOLDED + GAP;
+        let n_vis = n.min((((avail_h + GAP) / stride) as usize).max(1));
+        n.saturating_sub(n_vis)
+    }
+
+    #[test]
+    fn expanded_rooms_stay_reachable() {
+        // 방 10개 중 뒤 3개를 폈다. 접힌 높이로는 13칸이 들어가니 옛 계산은
+        // "다 보인다"고 판단하지만, 실제 높이 합은 777 로 752 를 넘는다.
+        let mut heights = vec![FOLDED; 7];
+        heights.extend([OPEN2; 3]);
+        let avail = 752.0;
+        let total: f32 = heights.iter().sum::<f32>() + GAP * (heights.len() - 1) as f32;
+        assert!(total > avail, "전제가 깨졌다: 목록이 칸에 다 들어간다 ({total} <= {avail})");
+
+        assert_eq!(
+            old_max_first(heights.len(), avail),
+            0,
+            "옛 계산이 0 이 아니면 이 테스트가 재현하려는 버그가 아니다"
+        );
+        let max_first = max_first_for(&heights, avail, GAP);
+        assert!(
+            max_first > 0,
+            "펼친 방 때문에 목록이 넘치는데 스크롤 한계가 0 이면 아래쪽 방에 영영 못 닿는다"
+        );
+
+        // 한계까지 굴렸을 때 남은 카드가 실제로 칸 안에 들어와야 한다 —
+        // 한계만 늘리고 여전히 넘치면 마지막 방은 그려지지 않는다.
+        let tail: f32 = heights[max_first..].iter().sum::<f32>()
+            + GAP * (heights.len() - max_first - 1) as f32;
+        assert!(tail <= avail, "한계까지 굴려도 꼬리가 넘친다: {tail} > {avail}");
+    }
+
+    #[test]
+    fn fitting_list_never_scrolls() {
+        let heights = vec![FOLDED; 5];
+        assert_eq!(max_first_for(&heights, 752.0, GAP), 0);
+    }
+
+    #[test]
+    fn one_card_taller_than_the_column_still_shows() {
+        // 카드 한 장이 칸보다 커도 한계는 마지막 장을 가리켜야 한다. n 을 반환하면
+        // 배치 루프가 아무것도 못 그려 목록이 통째로 빈다.
+        let heights = vec![FOLDED, 400.0];
+        let max_first = max_first_for(&heights, 300.0, GAP);
+        assert_eq!(max_first, 1);
+        assert!(max_first < heights.len(), "한계가 목록 밖을 가리킨다");
+    }
+
+    #[test]
+    fn single_room_has_no_scroll() {
+        assert_eq!(max_first_for(&[FOLDED], 752.0, GAP), 0);
+        assert_eq!(max_first_for(&[], 752.0, GAP), 0);
+    }
+
+    #[test]
+    fn every_room_is_reachable_by_scrolling() {
+        // 어떤 조합이든 한계까지 굴리면 마지막 방이 보여야 한다.
+        for open_at in 0..8usize {
+            let mut heights = vec![FOLDED; 8];
+            heights[open_at] = OPEN2;
+            heights[(open_at + 3) % 8] = OPEN2;
+            let avail = 400.0;
+            let first = max_first_for(&heights, avail, GAP);
+            assert!(first < heights.len(), "open_at={open_at}: 한계가 목록 밖이다");
+            let tail: f32 = heights[first..].iter().sum::<f32>()
+                + GAP * (heights.len() - first - 1) as f32;
+            assert!(
+                tail <= avail || heights.len() - first == 1,
+                "open_at={open_at}: 한계까지 굴려도 꼬리가 {tail} 로 넘친다"
+            );
+        }
     }
 }

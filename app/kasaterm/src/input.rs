@@ -1486,7 +1486,23 @@ impl App {
             } else {
                 self.tab_strip_w() > 0.0 && cx < self.tab_strip_w() && cy > TITLE_HEIGHT
             };
-            if n > vis && over_strip && !in_status_menu {
+            // 세로 사이드바의 한계는 실제 카드 높이로 잰다 — `n - vis` 는 카드가
+            // 다 같은 높이일 때만 맞는 근사라, 펼친 방이 섞이면 목록 끝에 못 닿는다.
+            // 띠 위에 있을 때만 센다: 방마다 트리를 훑는 계산이라, 커서가 딴 데
+            // 있는 굴림까지 매번 재면 그냥 버리는 일이 된다.
+            let max_first = if !over_strip || in_status_menu {
+                0
+            } else if self.tabs_on_top {
+                n.saturating_sub(vis)
+            } else {
+                let win_h = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.inner_size().height as f32 / self.effective_scale())
+                    .unwrap_or(800.0);
+                self.sidebar_max_first(win_h)
+            };
+            if max_first > 0 {
                 // One tab per 48px of gesture; horizontal axis drives in top
                 // mode when the swipe is decisively sideways.
                 let d = match delta {
@@ -1511,8 +1527,8 @@ impl App {
                 if steps != 0 {
                     self.win_tab_wheel_accum -= steps as f32 * 48.0;
                     // steps>0 = wheel up/left = toward the first tab.
-                    let max_first = (n - vis) as i64;
-                    let next = (self.win_tab_first as i64 - steps).clamp(0, max_first) as usize;
+                    let next =
+                        (self.win_tab_first as i64 - steps).clamp(0, max_first as i64) as usize;
                     if next != self.win_tab_first {
                         self.win_tab_first = next;
                         self.chrome_dirty = true;
