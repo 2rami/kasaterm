@@ -124,12 +124,14 @@ fn paint_usage_popover(
             crate::sysmem::Advice::Ok => theme::text(),
         };
         let my = top + PAD;
-        let head = if adv == crate::sysmem::Advice::Ok {
-            "맥북 메모리".to_string()
-        } else {
-            // 이유까지 적는다 — 「권장」만 있으면 wired 때문인지 스왑 때문인지
-            // 알 수가 없고, 그러면 재시작 말고 다른 손을 쓸 수도 없다.
-            format!("맥북 재시작 권장 · {}", m.reason())
+        let head = match (adv, m.extra_reason()) {
+            (crate::sysmem::Advice::Ok, _) => "맥북 메모리".to_string(),
+            // wired 말고 다른 이유면 밝힌다 — 「권장」만 있으면 재시작 말고
+            // 다른 손을 쓸 수 있는지 판단할 근거가 없다. wired 가 원인일 때는
+            // 오른쪽 칼럼이 이미 그 숫자라 붙이지 않는다.
+            (_, Some(r)) => format!("맥북 재시작 권장 · {r}"),
+            (crate::sysmem::Advice::Restart, None) => "맥북 재시작 권장".to_string(),
+            (crate::sysmem::Advice::Watch, None) => "맥북 메모리 주의".to_string(),
         };
         let pct = format!("wired {:.0}%", m.wired_pct());
         let size = format!("{:.1}G / {:.0}G", gb(m.wired), gb(m.total));

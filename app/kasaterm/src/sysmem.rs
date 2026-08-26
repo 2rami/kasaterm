@@ -96,13 +96,7 @@ impl MemSample {
             format!("wired {:.0}% · {:.1}G", self.wired_pct(), gb(self.wired))
         }
     }
-}
 
-/// `mach_host_self` 는 libc 가 mach API 를 `mach2` 크레이트로 밀어내며 붙인
-/// deprecated 다 — 기능이 사라진 게 아니라 소속이 옮겨간 것이고, 이 호출 하나
-/// 때문에 의존성을 늘릴 이유는 없다.
-#[allow(deprecated)]
-impl MemSample {
     /// 팝오버용 이유 — 옆 칼럼이 이미 `wired 14%` 와 `5.0G / 36G` 를 적으므로,
     /// 원인이 wired 면 되풀이하지 않는다. 되풀이하면 제목이 길어져 잘리고
     /// (실측 2026-08-27: `맥북 재시작 권장 · wired 14% · 5…`), 잘린 자리에
@@ -113,6 +107,10 @@ impl MemSample {
     }
 }
 
+/// `mach_host_self` 는 libc 가 mach API 를 `mach2` 크레이트로 밀어내며 붙인
+/// deprecated 다 — 기능이 사라진 게 아니라 소속이 옮겨간 것이고, 이 호출 하나
+/// 때문에 의존성을 늘릴 이유는 없다.
+#[allow(deprecated)]
 #[cfg(target_os = "macos")]
 pub(crate) fn sample() -> Option<MemSample> {
     // SAFETY: 전부 읽기 전용 조회다. mach 쪽은 우리가 잡은 버퍼와 그 길이를
