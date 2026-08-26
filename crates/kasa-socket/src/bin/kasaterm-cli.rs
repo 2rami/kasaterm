@@ -187,16 +187,6 @@ fn run() -> Result<Option<Response>> {
         run_sessions_picker(cmd == "resume", &args)?;
         return Ok(None);
     }
-    // `rename [sid] <이름>` — 세션 제목 변경. claude 자체 /rename 은 teammate(팀
-    // 트리플로 뜬 pane 세션 전부)에서 차단되지만, 실체는 transcript jsonl 에
-    // custom-title 레코드 한 줄 append 라 디스크에 직접 쓰면 같은 효과다.
-    // 피커 라벨(parse_session_label)이 custom-title 을 최우선으로 읽는다.
-    // 첫 인자가 %surface 면 기존 pane 개명(소켓 rename <surface_id> <title>)
-    // 경로로 넘긴다 — 같은 이름의 선주민 명령을 가로채면 안 된다.
-    if cmd == "rename" && args.first().is_none_or(|a| !a.starts_with('%')) {
-        run_session_rename(&args)?;
-        return Ok(None);
-    }
     // `statusline` — claude statusLine 커맨드(stdin JSON → 한 줄 출력). collab-hooks
     // statusline.py 의 Rust 이식 — Windows 는 python3 가 없어 py 를 못 돌리므로 이
     // 서브커맨드가 pane statusline 을 담당한다(mac 은 검증된 py 경로 유지).
@@ -1554,66 +1544,6 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     }
 }
 
-
-/// 세션 제목 변경 본체 — `rename [sid|sid8] <이름...>`. sid 생략 시 이 pane 의
-/// 세션($KASATERM_RESUMED_SID > $KASATERM_SESSION_ID). claude `/rename` 과 같은
-/// custom-title 레코드를 jsonl 에 append 한다 — 라이브 세션도 append-only 라
-/// 안전하고, teammate 세션에서 claude 가 "team leader 가 정한다"며 거부하는
-/// 것의 공식 우회 경로다. 이름은 남은 인자 전부(공백 포함 가능).
-fn run_session_rename(args: &[String]) -> Result<()> {
-    use kasa_socket::sessions::{is_uuid, recent_sessions_for, session_jsonl_path};
-    let cwd = std::env::current_dir().context("cwd")?;
-    let looks_like_sid = |s: &str| {
-        is_uuid(s) || (s.len() >= 8 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
-    };
-    let (id, name_args): (String, &[String]) = match args.split_first() {
-        Some((first, rest)) if is_uuid(first) => (first.clone(), rest),
-        Some((first, rest)) if looks_like_sid(first) => {
-            // 8자 이상 hex 프리픽스 → 최근 세션에서 유일 매칭만 허용.
-            let list = recent_sessions_for(&cwd, 200);
-            let hits: Vec<_> = list.iter().filter(|s| s.id.starts_with(first.as_str())).collect();
-            match hits.len() {
-                1 => (hits[0].id.clone(), rest),
-                0 => return Err(anyhow!("{first} 로 시작하는 최근 세션이 없어요")),
-                n => return Err(anyhow!("{first} 프리픽스가 세션 {n}개와 겹쳐요 — 더 길게 주세요")),
-            }
-        }
-        _ => {
-            let own = std::env::var("KASATERM_RESUMED_SID")
-                .ok()
-                .filter(|s| is_uuid(s))
-                .or_else(|| std::env::var("KASATERM_SESSION_ID").ok().filter(|s| is_uuid(s)))
-                .ok_or_else(|| {
-                    anyhow!("sid 생략은 kasaterm pane 안에서만 돼요 — rename <sid> <이름>")
-                })?;
-            (own, args)
-        }
-    };
-    let name = name_args.join(" ").trim().to_string();
-    if name.is_empty() {
-        return Err(anyhow!("이름이 비었어요 — rename [sid] <이름>"));
-    }
-    let path = session_jsonl_path(&cwd, &id).ok_or_else(|| anyhow!("$HOME 미설정"))?;
-    if !path.exists() {
-        return Err(anyhow!("이 cwd 에 세션 transcript 가 없어요: {}", path.display()));
-    }
-    let record = serde_json::to_string(&json!({
-        "type": "custom-title",
-        "customTitle": name,
-        "sessionId": id,
-        // 사용자가 CLI 로 직접 지은 이름 = 수동 개명 → title-sync 가 존중(자동
-        // 갱신 제외). 이 마커가 없던 과거 rename 산은 title-sync 가 갱신 대상으로 본다.
-        "nameSource": "user",
-    }))
-    .context("record 직렬화")?;
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    writeln!(f, "{record}").context("append")?;
-    println!("세션 {} 이름 변경: {name}", &id[..8]);
-    Ok(())
-}
 
 /// `{sid: 학생명}` 평면 JSON(session_characters.json). 없거나 깨지면 빈 맵.
 fn read_string_map(path: &Path) -> std::collections::HashMap<String, String> {

@@ -11,11 +11,13 @@
 #     1개만, junk cwd 에서 headless claude 호출 후 제목 검증·스탬프.
 #
 # 규칙:
-#   1. 수동 개명 보호 — 마지막 custom-title 의 nameSource 가 "user"(사용자가
-#      kasaterm-cli rename 으로 손수 지음)일 때만 보호. nameSource 없는 레거시나
-#      "auto"(우리가 지은 것)는 갱신 대상. 과거엔 "auto 아니면 보호"라 nameSource
-#      부재 rename 산 제목이 주제 바뀌어도 영영 안 갱신돼 창이름(활동)과 어긋났다
-#      (거노 실측: divider 세션명이 옛 주제 고착).
+#   1. 수동 개명 보호 — **우리가 지은 것(nameSource "auto")만 갈아치운다.** 사람이
+#      붙인 이름은 표시를 안 남길 수 있는데(claude 의 `/rename` 이 그렇다), 그걸
+#      갱신 대상으로 보면 한 턴 뒤 조용히 덮여 「이름을 붙였는데 안 붙는다」가 된다
+#      (2026-08-26 지적). 한동안 "user 만 보호"였는데, 그 표시를 남기는 통로가
+#      kasaterm-cli rename 하나뿐이라 `/rename` 이 통째로 무력했다.
+#      ⚠️ 이 규칙의 대가: 사람이 한 번 이름을 붙이면 주제가 바뀌어도 자동 갱신이
+#      다시 손대지 않는다. 그게 「손으로 붙인 이름」의 뜻이므로 의도된 것이다.
 #   2. 스로틀 — 직전 auto 스탬프(genTs) 후 60s 이상 && 그 뒤 실사용자 턴이
 #      1개 이상 있을 때만 재생성(auto 레코드의 srcLen 오프셋 기준).
 #   3. headless claude 는 shim PATH 를 우회해 실바이너리 직접 호출(shim 을
@@ -140,8 +142,11 @@ def decide():
     if not users:
         return
     if title is not None:
-        if title.get("nameSource") == "user":
-            return  # 사용자 수동 개명(user)만 존중 — 없음·auto 는 갱신 대상
+        if title.get("nameSource") != "auto":
+            return  # **우리가 지은 것(auto)만 갈아치운다.** 사람이 붙인 이름은
+            # `/rename` 이든 무엇이든 표시를 안 남길 수 있는데, 그때 갱신 대상으로
+            # 보면 한 턴 뒤 조용히 덮인다 — 이름을 붙였는데 안 붙는 것처럼 보이던
+            # 원인이다(2026-08-26 지적). 판정을 뒤집어 「auto 면 갱신」으로 못 박는다.
         if time.time() - float(title.get("genTs") or 0) < MIN_INTERVAL_S:
             return
         # 직전 스탬프 라인 이후 새 실사용자 턴이 없으면 재생성 불필요.
@@ -203,8 +208,8 @@ def generate(tp, sid, srclen):
         return
     _, lines = read_tail(tp)
     title, users, asst = scan(lines)
-    if title is not None and title.get("nameSource") == "user":
-        return  # 스폰 사이에 수동 개명(user)이 들어왔으면 물러난다
+    if title is not None and title.get("nameSource") != "auto":
+        return  # 스폰 사이에 사람이 붙인 이름이 들어왔으면 물러난다(위와 같은 규칙)
     claude = real_claude()
     if not claude:
         return
