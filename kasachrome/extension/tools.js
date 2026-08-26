@@ -915,6 +915,12 @@ const handlers = {
     // 「폰뷰인데 하단 네비바가 없다」의 정체다(2026-08-05 실측: 창 772 에 844 를 걸어 아래 72px 이
     // 창 밖으로 나갔고 bottom:0 인 탭바 783~844 가 통째로 잘렸다. 스크린샷은 CDP 라 844 전부를
     // 찍으니 이미지로는 멀쩡해 보여서 더 헷갈린다).
+    // ⚠️0x0 을 한 번 거쳐야 clear 가 먹는다. 앞 세션(확장 재로드 전, 또는 이 브라우저를 함께 쓰는
+    // 다른 pane)이 건 override 는 새 세션의 clear 를 no-op 으로 흘려보내기 때문이다. 그러면 창 공간을
+    // **직전에 걸어둔 기기 크기로** 재게 되고, 그 값으로 계산한 scale·fullyVisible 이 통째로 거짓이 된다
+    // (2026-08-26 실측: 창이 1512x828 인데 834x1194 로 재서 scale 1 · fullyVisible true 가 나왔다.
+    // 실제로는 아래 366px 이 창 밖이라, 하단 잘림을 잡으라고 만든 값이 정확히 그 경우를 놓친다).
+    await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', { width: 0, height: 0, deviceScaleFactor: 0, mobile: false }).catch(() => {})
     await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
     const room = await measureRoom(id)
 
@@ -1008,8 +1014,11 @@ const handlers = {
     else if (uaMode === 'off' && sizedByHand && device === undefined) notes.push('기기 이름 없이 크기만 줘서 UA 는 그대로 둡니다. 기기 UA 까지 필요하면 device 를 함께 주세요.')
     return {
       tabId: id, emulating: true,
-      device: preset.resolvedKey, deviceLabel: preset.resolvedName,
-      ...(sizedByHand ? { sizedByHand: true } : {}),
+      // 기기 이름 없이 크기만 준 호출에 기본 프리셋 이름을 붙이면 「iPhone 12 Pro 인데 폭이 834」라는
+      // 읽을 수 없는 조합이 된다. 그럴 땐 이름을 아예 안 붙이고 손으로 잡았다고만 밝힌다.
+      ...(device === undefined && sizedByHand
+        ? { device: null, sizedByHand: true }
+        : { device: preset.resolvedKey, deviceLabel: preset.resolvedName, ...(sizedByHand ? { sizedByHand: true } : {}) }),
       width: w, height: h, deviceScaleFactor: dsf, mobile: isMobile, touch: wantTouch,
       landscape: !!(preset.landscape || rotate),
       viewport: seen?.viewport ?? null,

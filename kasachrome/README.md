@@ -235,7 +235,10 @@ cwd 는 도구를 부른 pane 의 cwd 가 아니라서, 상대경로를 받아�
 - **`Emulation.clearDeviceMetricsOverride` 는 남의 세션이 건 override 를 못 푼다.** 확장을 재로드하면 앞
   세션의 크기 override 가 페이지에 남는데, 새 세션의 clear 는 「내가 건 것이 없다」며 조용히 no-op 이 된다
   (실측: clear 를 두 번 불러도 412x915 그대로). `setDeviceMetricsOverride` 를 0x0 으로 한 번 걸어 이 세션이
-  소유자가 된 **뒤** clear 해야 풀린다.
+  소유자가 된 **뒤** clear 해야 풀린다. 이게 `off` 만의 문제가 아니다 — 창 공간을 재기 전의 clear 도 같이
+  흘려보내면 **직전에 걸어둔 기기 크기를 창 크기로 착각**하고, 그 값으로 계산한 `scale`·`fullyVisible` 이
+  통째로 거짓이 된다(실측: 창 1512x828 인데 834x1194 로 재서 `scale 1` · `fullyVisible true` — 실제로는
+  아래 366px 이 창 밖이라, 하단 잘림을 잡으라고 만든 값이 정확히 그 경우를 놓쳤다).
 - MV3 service worker 는 유휴 30초면 잠든다. 브리지가 20초마다 ping 을 보내고, 확장은 `chrome.alarms` 로도 깨어나 재연결한다.
 - 언팩 확장이라 크롬을 켤 때마다 "개발자 모드 확장" 경고 풍선이 뜬다.
 - **no-op 판정 구간 안에서 준비동작을 하면 승격이 영원히 안 돈다.** `el.focus()` 를 관찰 구간 안에서 부르면
