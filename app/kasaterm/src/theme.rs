@@ -1536,14 +1536,21 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
     roster().slugs.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
 
-/// 캐릭터명 → **teammate agent 이름에 쓰는** 슬러그. 로스터에 없는 커스텀 캐릭터는
+/// 캐릭터명 → **teammate agent 이름에 쓰는** 슬러그. 어느 명단에도 없는 캐릭터만
 /// 해시 축약으로 떨어진다(inbox 파일명이 이 슬러그라 한글은 "---" 로 붕괴한다).
 ///
 /// 셰임이 굽는 case 분기(`teammate_case_arms`)와 split 이 미리 알려 주는 이름
 /// (`PtyBackend::pane_agent`)이 **이 하나를** 쓴다. 두 벌이 되면 부른 쪽이 닿지 않는
 /// 인박스에 브리프를 넣고도 성공으로 읽는다 — 어긋나도 오류가 안 나는 종류의 버그다.
+///
+/// 활성 명단만 보던 것을 **전 테마 합집합**으로 넓혔다(2026-08-26). 재배정·resume 으로
+/// 다른 테마 학생이 앉은 pane 이 그 전엔 `s`+해시로 떨어졌는데, 그 이름은 사람도 못
+/// 읽고 셰임의 case 표에도 없어서 **셰임은 이름 붙이기를 통째로 포기**했다 — 그러면
+/// claude 가 cwd 로 지은 이름(`tmuxify-2d`)이 남아, 미리 알려 준 이름으로 말을 걸면
+/// 「그런 이름 없다」가 된다. persona 가 이미 같은 이유로 합집합(`persona_for_any`)을
+/// 쓰고 있었다.
 pub fn agent_slug(name: &str) -> String {
-    character_slug(name)
+    character_slug_any(name)
         .map(String::from)
         .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
 }

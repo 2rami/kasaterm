@@ -7208,9 +7208,16 @@ if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
 fi\n\
 if [ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PANE_ID\" ] && [ -n \"$KASATERM_CHARACTER\" ]; then\n\
   case \" $* \" in *\" --agent-id \"*|*\" --agent-name \"*|*\" --team-name \"*) : ;; *)\n\
-    case \"$KASATERM_CHARACTER\" in\n\
+    # 앱이 학생을 앉히는 그 순간에 같은 함수로 계산해 내려 준 값이 정본이다.\n\
+    # 아래 표는 앱 **부팅 시점 스냅샷**이라, 그 뒤 테마를 바꾸거나 명단 밖 학생이\n\
+    # 앉으면 이름이 표에 없어 통째로 안 붙었다 — 그러면 claude 가 폴더 이름으로\n\
+    # 지은 이름이 남아, 미리 알려 준 이름으로 말을 걸면 「그런 이름 없다」가 된다.\n\
+    AGENT=\"$KASATERM_AGENT_SLUG\"\n\
+    if [ -z \"$AGENT\" ]; then\n\
+      case \"$KASATERM_CHARACTER\" in\n\
 {team_arms}\
-    esac\n\
+      esac\n\
+    fi\n\
   ;; esac\n\
 fi\n\
 if [ -n \"$AGENT\" ]; then\n\
@@ -7286,6 +7293,9 @@ if [ -n \"$KASATERM_PANE_ID\" ] && [ -f \"$OVP\" ]; then\n\
   # 전역 기본). 재배정을 안 한 pane 은 파일이 없어 spawn 때의 env 그대로다.\n\
   [ -f \"${{OVP%.persona}}.model\" ] && KASATERM_MODEL=$(cat \"${{OVP%.persona}}.model\")\n\
   [ -f \"${{OVP%.persona}}.backend\" ] && KASATERM_BACKEND=$(cat \"${{OVP%.persona}}.backend\")\n\
+  # 말 거는 이름의 로마자 머리도 새 학생 것으로 — 안 갈아 끼우면 얼굴과 말투만\n\
+  # 바뀌고 이름은 앞 학생으로 남는다.\n\
+  [ -f \"${{OVP%.persona}}.slug\" ] && KASATERM_AGENT_SLUG=$(cat \"${{OVP%.persona}}.slug\")\n\
 fi\n\
 {tblk}\
 {pblk}\

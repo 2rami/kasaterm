@@ -375,9 +375,10 @@ impl App {
         // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
         // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
         if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
-            // 넷을 함께 지운다 — 셋만 지우면 남은 하나(모델·통로)가 새 학생에게
-            // 따라붙어 이름과 얼굴만 바뀌고 앞 학생의 모델로 도는 상태가 된다.
-            for ext in ["character", "persona", "model", "backend"] {
+            // 다섯을 함께 지운다 — 하나라도 남으면 그것이 새 학생에게 따라붙어,
+            // 이름과 얼굴만 바뀌고 앞 학생의 모델(또는 말 거는 이름)로 도는
+            // 상태가 된다.
+            for ext in ["character", "persona", "model", "backend", "slug"] {
                 let _ = std::fs::remove_file(
                     std::path::Path::new(&shim).join(format!("repersona-{id}.{ext}")),
                 );
@@ -395,6 +396,14 @@ impl App {
             ("KASATERM_SESSION_ID".to_string(), sid.clone()),
             // teammate 이름 꼬리 — 셰임이 `<슬러그>-p<번호>` 뒤에 그대로 붙인다.
             ("KASATERM_AGENT_SUFFIX".to_string(), crate::agent_name_suffix()),
+            // 이름의 로마자 머리. 셰임에도 같은 표(`teammate_case_arms`)가 구워져
+            // 있지만 그건 **앱 부팅 시점 스냅샷**이라, 그 뒤 테마를 바꾸거나 명단
+            // 밖 학생이 앉으면 표에 없는 이름이 되어 셰임이 이름 붙이기를 통째로
+            // 포기한다. 그러면 `kasaterm-cli tab` 이 미리 알려 준 이름과 실제로
+            // 말이 닿는 이름이 갈린다(2026-08-26 실측). 배정과 같은 순간에 같은
+            // 함수로 계산한 값을 여기서 내려 주는 것이 정본이고, 셰임은 이것을
+            // 먼저 본다.
+            ("KASATERM_AGENT_SLUG".to_string(), crate::theme::agent_slug(&name)),
         ];
         // 활성 로스터에 없는 이름(재배정·resume 으로 온 다른 테마 학생)은 합집합
         // 조회로 원 소속 테마의 말투를 찾는다 — 없으면 이름만 남고 말투가 빈다.
@@ -4898,6 +4907,13 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
         let base = dir.join(format!("repersona-{pane}"));
         let _ = std::fs::write(base.with_extension("persona"), persona);
         let _ = std::fs::write(base.with_extension("character"), character);
+        // 이름의 로마자 머리도 새 학생 것으로 — spawn 때 내려간 env 는 옛 학생
+        // 것이라, 이 파일이 없으면 얼굴과 말투만 바뀌고 **말 거는 이름은 앞 학생**
+        // 으로 남는다.
+        let _ = std::fs::write(
+            base.with_extension("slug"),
+            crate::theme::agent_slug(character),
+        );
         // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
         // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
         let chars = kasa_mcp::character::characters_json();
