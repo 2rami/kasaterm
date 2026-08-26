@@ -103,10 +103,15 @@ const DONE_KEEP: usize = 5;
 
 /// 원격 pane 하나를 이 기계 목록에 섞을 수 있게 표시한다.
 ///
-/// ⚠️ **`character` 를 반드시 지운다.** 원격은 이 칸이 비어 있는 게 아니라 **세션 요약
-/// 영어가 들어차 있다**(실측: `"arithmetic calculation"`). 비면 프론트가 `title` 로
-/// 폴백해 「1+1 계산」 같은 쓸 만한 이름표가 나오는데, 값이 있으면 그 문자열로 아바타를
-/// 찾으러 갔다가 조용히 이니셜로 떨어진다 — 있는 게 없느니만 못한 자리다.
+/// ⚠️ **`character` 를 기계 이름으로 갈아 끼운다.** 원격은 이 칸이 비어 있는 게 아니라
+/// **세션 요약 영어가 들어차 있다**(실측: `"arithmetic calculation"`) — 그대로 두면
+/// 프론트가 그 문자열로 아바타를 찾으러 갔다가 조용히 이니셜로 떨어진다.
+///
+/// 지우고 `title` 폴백에 맡기면 이름표가 「1+1 계산」이 되는데, 그러면 **어느 기계
+/// 학생인지가 화면 어디에도 안 남는다** — 합치는 목적이 「경계를 없애는 것」이지
+/// 「출처를 지우는 것」이 아니다. 말을 걸려면 결국 어느 기계인지 알아야 한다.
+/// 기계 이름을 넣으면 이름표가 「맥미니 · 1+1 계산」이 되고 아바타는 「맥」으로
+/// 떨어진다(로스터에 없는 이름이라 강조색은 순환색 그대로). 프론트 수정 0줄.
 ///
 /// ⚠️ **`surface_id` 는 `%` 로 시작할 때만 접두를 붙인다.** 지금 원격(standalone)은
 /// pane 이 없어 세션 UUID 를 쓰므로 로컬 `%1`·`%2` 와 겹칠 수가 없고, 그래서 「`%` 로
@@ -124,7 +129,7 @@ fn tag(mut row: Value, label: &str) -> Value {
         }
     }
     obj.insert("machine".into(), Value::String(label.to_string()));
-    obj.remove("character");
+    obj.insert("character".into(), Value::String(label.to_string()));
     // 말 거는 길이 아직 없다. `"message"` 로 두면 board 를 읽는 쪽이 SendMessage 로
     // 닿는다고 믿는데, 그 이름은 이 기계 명부에 없어서 **오류 없이 사라진다**.
     obj.insert("reach".into(), Value::String("remote".into()));
@@ -274,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn 원격_행은_말걸기가_막히고_엉뚱한_캐릭터가_지워진다() {
+    fn 원격_행은_말걸기가_막히고_캐릭터_자리에_기계가_들어간다() {
         let row = serde_json::json!({
             "surface_id": "abc-uuid",
             "status": "idle",
@@ -288,8 +293,9 @@ mod tests {
         assert_eq!(t["reach"], "remote");
         // peer_name 이 남으면 board 를 읽는 쪽이 SendMessage 로 닿는다고 믿는다.
         assert!(t.get("peer_name").is_none());
-        // character 가 남으면 프론트가 그 영어로 아바타를 찾으러 간다.
-        assert!(t.get("character").is_none());
+        // 세션 요약 영어가 남으면 프론트가 그 문자열로 아바타를 찾으러 간다.
+        // 지우는 대신 기계 이름을 넣어 이름표가 「맥미니 · 1+1 계산」이 되게 한다.
+        assert_eq!(t["character"], "맥미니");
         // 나머지 칸은 그대로 — 합치기는 표시만 얹고 내용을 고치지 않는다.
         assert_eq!(t["status"], "idle");
         assert_eq!(t["title"], "1+1 계산");
