@@ -945,9 +945,17 @@ async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 /// the board panel to poll: `{ board: [{surface_id, intent, status, files}] }`.
 async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let board = backend.collab_board().unwrap_or_default();
+    // 다른 기계의 학생도 같은 목록에 섞는다 — 「어느 기계에 띄울까」를 매번 생각하지
+    // 않으려면 한 화면에 있어야 한다(2026-08-26 지시). 캐시를 읽을 뿐이라 원격이
+    // 죽어 있어도 이 응답은 안 느려진다(remoteboard.rs 머리말).
+    let mut rows = serde_json::to_value(&board)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    rows.extend(crate::remoteboard::board_rows());
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(serde_json::json!({ "board": board })),
+        Json(serde_json::json!({ "board": rows })),
     )
 }
 
@@ -2242,6 +2250,11 @@ async fn background_agents_handler(
                                 }
                             }
                         }
+                    }
+                    // 원격 기계의 background 세션도 같은 목록에. 로컬 파싱이 성공한
+                    // 경우에만 얹는다 — 실패 분기는 이미 ok:false 라 섞을 자리가 없다.
+                    if let Some(arr) = agents.as_array_mut() {
+                        arr.extend(crate::remoteboard::background_agents());
                     }
                     serde_json::json!({ "ok": true, "agents": agents })
                 }
@@ -4533,6 +4546,11 @@ pub fn spawn_http_server_opts(
                     // 바인딩은 #태그로 스탬프한다(부팅 직후 + 60초 주기). standalone
                     // 제외 이유는 scheduler 와 동일(공유 파일 뮤테이터는 본체 1곳만).
                     tokio::spawn(crate::resume_visibility::sweep_loop());
+                    // 다른 기계 board 를 미리 받아 두는 루프. 원격이 설정 안 됐으면
+                    // 루프 자체가 안 돈다. standalone 을 빼는 이유는 위 셋과 다르다 —
+                    // 공유 파일이 아니라 **순환**이다. 서로를 원격으로 걸면 board 가
+                    // 서로를 물어 무한히 부푼다. 합치는 쪽은 본체 한 곳이면 된다.
+                    tokio::spawn(crate::remoteboard::poll_loop());
                 }
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.

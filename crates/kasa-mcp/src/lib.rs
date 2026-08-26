@@ -22,6 +22,7 @@ mod http;
 pub mod persona;
 mod proxy;
 mod register;
+pub mod remoteboard;
 mod resume_visibility;
 pub mod standalone;
 pub mod team;
