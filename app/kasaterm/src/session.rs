@@ -654,6 +654,9 @@ impl App {
             .flatten()
         {
             let _ = kasa_mcp::character::bind_session_character(sid, character);
+            // **사람이 고른 자리**라고 적어 둔다. 이게 없으면 명단을 정리할 때
+            // 자동 배정의 잔재와 구별되지 않아 함께 쓸려 나간다(2026-08-26 지시).
+            kasa_mcp::character::mark_manual_pick(sid);
         }
         // 말투도 새 캐릭터 것으로 — **다음에 이 pane 에서 claude 가 뜰 때부터**.
         //
@@ -3663,7 +3666,11 @@ impl App {
             .and_then(|c| c.as_str())
             .filter(|s| !s.is_empty())
             .filter(|s| {
-                let keep = kasa_mcp::character::is_assignable(s);
+                // 저장된 세션 id 로 **수동 지정 면제**를 본다 — 사람이 직접 고른
+                // 자리는 명단을 바꿔도 지킨다(2026-08-26 지시: 「손으로 고른 건
+                // 명단 상관없이 지키게 해줘」).
+                let sid = rec.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                let keep = kasa_mcp::character::is_assignable_for(sid, s);
                 if !keep {
                     eprintln!("[restore] {s} 는 고른 명단 밖 — 새로 배정한다");
                 }

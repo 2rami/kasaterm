@@ -1780,3 +1780,113 @@ mod collab_protocol_tests {
         assert!(member_from_yaml("").is_err());
     }
 }
+
+/// 손으로 고른 자리의 세션 id 들 — **명단 필터를 면제받는다.**
+///
+/// 고른 명단(`character_picks`)은 「새로 배정할 때 누구 중에서 뽑나」의 풀이고,
+/// 거기 없는 이름은 자동 배정의 잔재로 보고 정리한다. 그런데 사람이 **직접 고른**
+/// 학생도 그 정리에 함께 쓸려 나갔다 — 다른 세계관 학생으로 바꿔 두면 앱을 껐다
+/// 켤 때마다 명단 안 학생으로 되돌아갔다(2026-08-26 지시: 「손으로 고른 건 명단
+/// 상관없이 지키게 해줘」).
+///
+/// 자동 배정과 수동 지정은 같은 바인딩 파일에 같은 모양으로 남아 구별할 수가
+/// 없으므로, 수동인 사실만 따로 적어 둔다. sid 단위인 이유는 필터가 걸리는 자리가
+/// 전부 sid 를 들고 있어서다(복원의 저장된 학생, shim 의 정체성 교정).
+fn manual_pick_path() -> PathBuf {
+    kasa_socket::home_dir()
+        .unwrap_or_default()
+        .join(".config/kasaterm/manual_characters.json")
+}
+
+/// 이 세션의 학생은 사람이 골랐다고 적는다. 실패는 삼킨다 — 표식을 못 남겨도
+/// 나빠지는 것은 「명단을 바꾸면 되돌아간다」뿐이고, 그건 이 기능이 있기 전의
+/// 동작이다.
+pub fn mark_manual_pick(sid: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    let path = manual_pick_path();
+    let mut list = load_manual_picks(&path);
+    if list.iter().any(|s| s == sid) {
+        return;
+    }
+    list.push(sid.to_string());
+    // 무한정 쌓이지 않게 꼬리를 자른다. 오래된 세션은 어차피 transcript 가 없어
+    // 되살아날 일이 없고, 이 파일이 커지면 매 조회가 그만큼 비싸진다.
+    let n = list.len();
+    if n > MANUAL_PICK_CAP {
+        list.drain(..n - MANUAL_PICK_CAP);
+    }
+    let _ = write_manual_picks(&path, &list);
+}
+
+/// 이 세션의 학생을 사람이 골랐나. 파일이 없으면(대부분) false 다.
+pub fn is_manual_pick(sid: &str) -> bool {
+    !sid.is_empty() && load_manual_picks(&manual_pick_path()).iter().any(|s| s == sid)
+}
+
+const MANUAL_PICK_CAP: usize = 512;
+
+fn load_manual_picks(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_manual_picks(path: &Path, list: &[String]) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(list).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// 그 이름을 **이 세션에서** 써도 되나 — `is_assignable` 에 수동 지정 면제를 얹은 판.
+///
+/// 필터가 걸리는 자리(복원의 저장된 학생, shim 의 정체성 교정)는 전부 sid 를 들고
+/// 있으므로, 명단만 보는 `is_assignable` 대신 이걸 부른다.
+pub fn is_assignable_for(sid: &str, name: &str) -> bool {
+    is_assignable(name) || is_manual_pick(sid)
+}
+
+/// 손으로 고른 자리는 **명단을 바꿔도 지킨다** — 2026-08-26 지시.
+#[cfg(test)]
+mod manual_pick_tests {
+    use super::{is_assignable_with, load_manual_picks, write_manual_picks};
+
+    /// `is_assignable_for` 의 판정부를 파일 없이 재현한다 — 진짜 파일을 읽는 판은
+    /// 이 컴퓨터의 설정에 기대므로 테스트로 못 고정한다.
+    fn assignable_for(manual: bool, picked: &[String], name: &str) -> bool {
+        is_assignable_with(name, picked) || manual
+    }
+
+    #[test]
+    fn a_hand_picked_name_survives_a_roster_that_excludes_it() {
+        let picked = vec!["미도리".to_string()];
+        assert!(!assignable_for(false, &picked, "은랑"), "면제가 없으면 걸러진다");
+        assert!(assignable_for(true, &picked, "은랑"), "손으로 고른 것이 안 지켜진다");
+    }
+
+    #[test]
+    fn the_roster_still_governs_everything_else() {
+        let picked = vec!["미도리".to_string()];
+        assert!(assignable_for(false, &picked, "미도리"));
+        // 아무도 안 골랐으면 제한이 없다 — 면제와 무관하게 전원이 대상이다.
+        assert!(assignable_for(false, &[], "은랑"));
+    }
+
+    #[test]
+    fn marks_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join("kasaterm-manual-pick-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manual.json");
+        let _ = std::fs::remove_file(&path);
+        assert!(load_manual_picks(&path).is_empty(), "없는 파일은 빈 목록이다");
+        write_manual_picks(&path, &["sid-a".to_string(), "sid-b".to_string()]).expect("write");
+        let back = load_manual_picks(&path);
+        assert_eq!(back, vec!["sid-a".to_string(), "sid-b".to_string()]);
+        let _ = std::fs::remove_file(&path);
+    }
+}

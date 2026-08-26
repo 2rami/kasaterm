@@ -1957,7 +1957,8 @@ async fn character_binding_handler(
         String::new()
     } else {
         crate::character::session_character(sid)
-            .filter(|c| crate::character::is_assignable(c))
+            // 사람이 직접 고른 자리는 명단 밖이어도 지킨다(2026-08-26 지시).
+            .filter(|c| crate::character::is_assignable_for(sid, c))
             .unwrap_or_default()
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
