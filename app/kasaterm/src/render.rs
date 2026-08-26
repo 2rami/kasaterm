@@ -1309,10 +1309,21 @@ impl App {
                     .and_then(|n| theme::character_slug_any(n).map(|s| (n, s)))
                 {
                     // 같은 학생 pane 이 여럿이면(지정 스폰 중복 허용) 순번 변주색.
-                    let accent = theme::character_accent_n(
-                        name,
-                        theme::character_ordinal(&ws.pane_character, &id),
-                    );
+                    //
+                    // 단 **연결이 끊겨 멈췄으면 빨강이 이긴다**. 학생색은 「누구의
+                    // 자리인가」를 말하지만 멈춘 자리에서 그건 급한 정보가 아니고,
+                    // 테두리·프사·스피너가 한 색을 쓰므로 여기 한 번만 덮으면 셋이
+                    // 함께 빨개진다(2026-08-26 지시).
+                    let stalled =
+                        self.pane_activity.get(id.as_str()).is_some_and(|a| a.stalled.is_some());
+                    let accent = if stalled {
+                        Some(theme::danger())
+                    } else {
+                        theme::character_accent_n(
+                            name,
+                            theme::character_ordinal(&ws.pane_character, &id),
+                        )
+                    };
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;

@@ -42,4 +42,11 @@ pub struct PaneStatusView {
     /// 돈다). status 와 같은 틱에 같은 화면에서 읽어 어긋나지 않는다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_pct: Option<u8>,
+    /// 연결이 끊겨 멈췄다면 그 사연(「연결 끊김」·「재시도 중」…). None 이면 멀쩡하다.
+    ///
+    /// claude 는 인터넷이 끊겨도 조용히 서지 않고 화면에 문구를 남기는데, 그건
+    /// 스크롤백의 글자일 뿐이라 옆에서 보면 도는 pane 과 구별이 안 된다. 헤더를
+    /// 빨갛게 두르는 근거가 이 값이다(2026-08-26 지시).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<String>,
 }

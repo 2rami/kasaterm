@@ -480,10 +480,11 @@ impl App {
         // 보던 동안 뒤 탭 학생은 화면에 아무 흔적이 없었다 — busy 바도 완료 펄스도.
         // 그렇다고 스윕바를 띄우면 노는 화면 위에서 "이 화면이 일한다"는 거짓말이
         // 되므로, 있는 언어를 쓴다: 보이는 것은 busy, 안 보이는 것은 bg 펄스.
-        let (busy_now, bg_tab_busy, compacting_now): (
+        let (busy_now, bg_tab_busy, compacting_now, stalled_now): (
             Vec<(String, bool, Option<ApprovalPrompt>)>,
             std::collections::HashSet<String>,
             std::collections::HashMap<String, Option<u8>>,
+            std::collections::HashMap<String, &'static str>,
         ) = {
             // 프로브는 락 밖 필드라 ws 가드와 나란히 빌린다 — 메서드로 빼면 &mut self
             // 가 통째로 필요해 가드와 충돌한다.
@@ -494,6 +495,10 @@ impl App {
             // compact 중인 pane → 화면에서 읽은 진행률. 같은 스캔에서 뽑는다 — 따로
             // 한 바퀴 돌면 ws 락을 두 번 잡고, 그 사이 화면이 바뀌어 어긋난다.
             let mut compacting = std::collections::HashMap::new();
+            // 연결이 끊겨 멈춘 pane → 화면에서 읽은 사연. `busy` 와 무관하게 본다 —
+            // 멈추면 스피너가 사라져 idle 로 보이므로, busy 안에서만 재면 정작
+            // 표시해야 할 상태를 통째로 놓친다.
+            let mut stalled = std::collections::HashMap::new();
             for (id, pane) in ws.panes.iter() {
                 match pane.term() {
                     Some(t) => {
@@ -549,6 +554,9 @@ impl App {
                                 compacting.insert(id.clone(), pct);
                             }
                         }
+                        if let Some(why) = crate::screenread::find_connection_trouble(&t.cells) {
+                            stalled.insert(id.clone(), why);
+                        }
                         rows.push((id.clone(), busy, prompt));
                     }
                     None => rows.push((id.clone(), false, None)),
@@ -563,7 +571,7 @@ impl App {
                     bg.insert(id.clone());
                 }
             }
-            (rows, bg, compacting)
+            (rows, bg, compacting, stalled)
         };
 
         // The claude spinner blanks/scrolls between frames, so the raw glyph
@@ -598,6 +606,15 @@ impl App {
             // 화면에 알림이 남아 있으면 compacting 으로 유지된다(끝나면 알림이 사라져
             // 자동으로 working→idle 로 떨어진다).
             let compact = compacting_now.get(id).copied();
+            // **에이전트가 도는 pane 만** 빨갛게 둔다. 셸에서는 사람이 그 문구를
+            // 직접 쳐 넣거나 남의 로그를 흘려보내는 일이 흔해서, 화면 글자만으로는
+            // 진짜 끊김과 구분이 안 된다.
+            let stalled = self
+                .pty
+                .get(id)
+                .and_then(|p| p.active_agent())
+                .and(stalled_now.get(id).copied())
+                .map(str::to_string);
             let status = if busy {
                 if compact.is_some() {
                     "compacting"
@@ -628,12 +645,14 @@ impl App {
                     a.status = status.to_string();
                     a.bg_active = bg_active;
                     a.compact_pct = compact_pct;
+                    a.stalled = stalled.clone();
                     a.busy_since = running.then(|| a.busy_since.unwrap_or(now));
                 })
                 .or_insert_with(|| crate::stream::PaneStatusView {
                     status: status.to_string(),
                     bg_active,
                     compact_pct,
+                    stalled,
                     busy_since: running.then_some(now),
                     ..Default::default()
                 });

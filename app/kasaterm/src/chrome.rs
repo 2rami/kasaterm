@@ -421,7 +421,12 @@ impl App {
     /// 대기는 내가 손대야 풀리므로, 둘이 겹치면 급한 쪽을 보여야 한다.
     pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
         let st = self.pane_activity.get(id);
-        if st.is_some_and(|a| status_needs_you(&a.status)) {
+        // 끊김이 가장 먼저다 — 멈춘 pane 은 스피너가 없어 idle 로 보이므로, 아래
+        // 어느 갈래에도 안 걸려 「조용한 정상」과 똑같이 회색으로 앉는다. 그게 이
+        // 표시를 만든 이유다(2026-08-26 지시).
+        if st.is_some_and(|a| a.stalled.is_some()) {
+            theme::danger()
+        } else if st.is_some_and(|a| status_needs_you(&a.status)) {
             theme::attention()
         } else if self.notify_flash_factor(id).is_some() {
             theme::success()

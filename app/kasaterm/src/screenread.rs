@@ -2578,6 +2578,54 @@ pub(crate) const STAND_CELLS: f32 = 4.0;
 /// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
 /// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
 /// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
+/// 연결이 끊겨 멈춘 pane 의 사연 — 화면에 뜬 claude 의 문구를 그대로 읽는다.
+///
+/// 인터넷이 끊기거나 API 가 안 붙으면 claude 는 조용히 서지 않고 화면에 문구를
+/// 남긴다. 그런데 그건 **스크롤백 어딘가의 글자**일 뿐이라, 옆에서 보는 사람에게는
+/// 도는 pane 과 멈춘 pane 이 똑같아 보인다(2026-08-26 지시: 「인터넷안되거나 뭐
+/// 갖가지 상황으로 연결끊겨서 멈추면 빨간색으로 표시되는거하자」).
+///
+/// 문구는 claude 2.1.246 바이너리에서 실측해 뽑았다 — 짐작으로 적으면 판에 따라
+/// 안 걸리고, 안 걸리는 감지는 없는 것과 같다.
+///
+/// **마지막 몇 행만 본다.** 위쪽 스크롤백에는 몇 시간 전에 지나간 오류가 그대로
+/// 남아 있어서, 전체를 훑으면 이미 회복한 pane 이 영영 빨갛게 굳는다. 사람도
+/// 화면 아래를 보고 「지금 멈췄나」를 판단한다.
+pub(crate) fn find_connection_trouble(rows: &[Vec<GridCell>]) -> Option<&'static str> {
+    let last = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let start = (last + 1).saturating_sub(CONNECTION_TROUBLE_ROWS);
+    for row in rows[start..=last].iter() {
+        let (text, _) = row_text_cells(row);
+        if let Some(hit) = connection_trouble_in(&text) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// 화면 아래에서 이만큼만 본다. 입력박스(3행)+상태줄+오류 몇 줄이 들어가는 깊이다.
+const CONNECTION_TROUBLE_ROWS: usize = 12;
+
+/// 한 줄에서 끊김 문구를 찾는다. 반환값은 **사람에게 보여줄 짧은 말**이라 원문이
+/// 아니라 우리 말로 옮긴 것이다 — 헤더에 들어가야 해서 길면 못 쓴다.
+///
+/// `App` 을 안 들고 다니므로 테스트가 된다.
+pub(crate) fn connection_trouble_in(line: &str) -> Option<&'static str> {
+    // 원문은 claude 2.1.246 실측. 왼쪽이 화면에 뜨는 글자, 오른쪽이 헤더에 적을 말.
+    const SIGNS: &[(&str, &str)] = &[
+        ("A network error occurred", "연결 끊김"),
+        ("Connection error", "연결 끊김"),
+        ("(offline)", "오프라인"),
+        ("request timed out", "응답 없음"),
+        ("Retrying in", "재시도 중"),
+    ];
+    // 대소문자는 판에 따라 갈릴 수 있어 낮춰서 본다. 화면 한 줄이라 비용은 무시할 만하다.
+    let low = line.to_lowercase();
+    SIGNS.iter().find(|(needle, _)| low.contains(&needle.to_lowercase())).map(|(_, label)| *label)
+}
+
 pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     let last = rows
         .iter()
@@ -5003,5 +5051,71 @@ mod image_block_tests {
         let b = find_image_blocks(&g).remove(0);
         blank_image_block(&mut g, &b);
         assert!(g.iter().all(|r| row_is_blank(r)));
+    }
+}
+
+/// 끊김 문구 판독 — **claude 2.1.246 바이너리에서 실측한 원문**으로 검사한다.
+///
+/// 짐작으로 적은 문구는 판이 바뀌면 조용히 안 걸리고, 안 걸리는 감지는 없는 것과
+/// 같다. 여기 있는 왼쪽 글자들이 실제로 화면에 뜨는 것들이다(2026-08-26).
+#[cfg(test)]
+mod connection_trouble_tests {
+    use super::{connection_trouble_in, find_connection_trouble, GridCell};
+
+    fn row(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_real_claude_wordings_are_caught() {
+        for (line, want) in [
+            ("API Error: Connection error.", "연결 끊김"),
+            ("A network error occurred. Please check your connection.", "연결 끊김"),
+            ("  ⎿  (request timed out)", "응답 없음"),
+            ("claude (offline)", "오프라인"),
+            ("Retrying in 3 seconds… (attempt 2/10)", "재시도 중"),
+        ] {
+            assert_eq!(connection_trouble_in(line), Some(want), "{line}");
+        }
+    }
+
+    #[test]
+    fn ordinary_lines_stay_quiet() {
+        for line in [
+            "",
+            "❯ 연결해줘",
+            "  ⎿  Read 40 lines",
+            "error: could not compile `kasaterm`",
+            "  ✻ Thinking… (12s · esc to interrupt)",
+        ] {
+            assert_eq!(connection_trouble_in(line), None, "{line}");
+        }
+    }
+
+    /// **화면 아래만 본다.** 위쪽 스크롤백에는 몇 시간 전 오류가 그대로 남아 있어서,
+    /// 전체를 훑으면 이미 회복한 pane 이 영영 빨갛게 굳는다.
+    #[test]
+    fn an_old_error_scrolled_far_up_no_longer_counts() {
+        let mut rows = vec![row("API Error: Connection error.")];
+        rows.extend((0..40).map(|i| row(&format!("  ⎿  Read {i} lines"))));
+        assert_eq!(find_connection_trouble(&rows), None, "옛 오류가 계속 빨갛게 만든다");
+
+        // 같은 줄이 아래쪽(최근)에 있으면 잡혀야 한다.
+        let mut fresh = vec![row("  ⎿  Read 1 lines")];
+        fresh.push(row("API Error: Connection error."));
+        fresh.push(row("❯ "));
+        assert_eq!(find_connection_trouble(&fresh), Some("연결 끊김"));
+    }
+
+    #[test]
+    fn an_empty_screen_is_not_a_stall() {
+        assert_eq!(find_connection_trouble(&[]), None);
+        assert_eq!(find_connection_trouble(&[row("   "), row("")]), None);
     }
 }
