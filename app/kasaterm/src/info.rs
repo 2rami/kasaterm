@@ -1967,6 +1967,8 @@ pub(crate) fn draw_info_col(
     w: f32,
     top: f32,
     bottom: f32,
+    // 되살리기 × 를 연달아 누르는 동안 붙잡아 둘 본문 높이. None = 평소.
+    frozen_content: Option<f32>,
 ) {
     let prof = profiling().then(Instant::now);
     // 커서가 이 안에 있는 동안은 목록을 갈아끼우지 않는다(pump_info 참고).
@@ -2040,7 +2042,11 @@ pub(crate) fn draw_info_col(
         SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
     let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + 14.0;
-    info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
+    info.content_h = content;
+    // × 를 연달아 누르는 동안엔 상한을 안 줄인다. 줄이면 스크롤이 그만큼 끌려 올라와
+    // 목록 전체가 밀리고, 다음 × 가 방금 누른 자리에 없다.
+    let limit = frozen_content.unwrap_or(content);
+    info.scroll = info.scroll.clamp(0.0, (limit - (bottom - top)).max(0.0));
     // 본문 전체를 시저로 가둔다. 지금까지는 섹션·행마다 `y + H > top && y < bottom`
     // 으로 걸렀는데, 그건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로
     // 그려져 탭 줄 위로 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면

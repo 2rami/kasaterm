@@ -6427,6 +6427,99 @@ impl App {
     }
     /// Headless repro for the in-pane tab header: queue N dummy tabs on the
     /// active pane KASATERM_AUTOTABS_MS (default 3200, after autosplit) later.
+    /// [검증용] 같은 좌표를 연달아 눌러 탭을 N개 닫는다
+    /// (`KASATERM_AUTOCLOSEBURST_MS`, 개수는 `KASATERM_AUTOCLOSEBURST`, 기본 3).
+    ///
+    /// 크롬식 「닫는 동안 자리 고정」은 **화면으로 안 보인다** — 자리가 어긋나도
+    /// 그림은 멀쩡하고, 어긋났다는 건 다음 클릭이 빗나가야 비로소 드러난다. 그래서
+    /// 좌표를 한 번 잡고 그 자리만 반복해 눌러, 매번 다른 탭이 실제로 닫히는지 센다.
+    /// 실제 클릭과 **같은 판정**(`pane_tab_close_click`)을 지난다.
+    pub(crate) fn run_pending_autocloseburst(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOCLOSEBURST_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let n: usize = std::env::var("KASATERM_AUTOCLOSEBURST")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        let tabs_of = |app: &App| -> usize {
+            let ws = app.ws.lock().unwrap();
+            ws.active_pane.as_ref().and_then(|p| ws.panes.get(p)).map_or(0, |p| p.tabs.len())
+        };
+        // 제목 길이를 일부러 제각각으로 만든다. 이 띠는 알약 폭이 라벨 실측이라,
+        // 라벨이 다 비슷하면 **얼리지 않아도** 다음 × 가 얼추 같은 자리에 온다 —
+        // 그 상태로 재면 통과해도 아무것도 증명하지 못한다.
+        {
+            let ws_pane = self.ws.lock().unwrap().active_pane.clone();
+            if let Some(outer) = ws_pane {
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(pane) = ws.panes.get_mut(&outer) {
+                    for (i, t) in pane.tabs.iter_mut().enumerate() {
+                        let n = 2 + (i * 7) % 20;
+                        t.title = Some("가".repeat(n.max(2)));
+                        t.title_pinned = true;
+                    }
+                    pane.dirty = true;
+                }
+            }
+        }
+        // 좌표를 **한 번만** 잡는다. 매번 다시 찾으면 자리가 어긋나도 따라가 버려서,
+        // 정작 재려던 것이 사라진다.
+        self.render_frame();
+        let Some(r) = self.pane_tab_close_rects.first().map(|(_, _, r)| *r) else {
+            eprintln!("[closeburst] × 자리를 못 찾았다 — 탭이 하나뿐인가");
+            return;
+        };
+        let spot = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        self.cursor_px = spot;
+        eprintln!("[closeburst] 자리=({:.1},{:.1}) 탭={}", spot.0, spot.1, tabs_of(self));
+        let mut hits = 0;
+        for k in 0..n {
+            let before = tabs_of(self);
+            // 커서는 그대로 둔다 — 손을 안 뗀 상태를 재현해야 동결이 산다.
+            self.cursor_px = spot;
+            let hit = self.pane_tab_close_click(spot.0, spot.1);
+            // 대조군(`KASATERM_AUTOCLOSEBURST_NOFREEZE=1`): 클릭 직후 녹여 동결이
+            // **없던 시절**의 동작을 재현한다. 이게 없으면 "4/4 통과"가 동결 덕인지
+            // 그저 라벨이 비슷해서인지 못 가른다 — 대조 없는 통과는 증명이 아니다.
+            if std::env::var_os("KASATERM_AUTOCLOSEBURST_NOFREEZE").is_some() {
+                self.close_freeze.thaw();
+            }
+            let after = tabs_of(self);
+            if hit && after < before {
+                hits += 1;
+            }
+            // 동결이 살아 있는지, 그리고 그 자리에 지금 어떤 × 가 있는지 함께 찍는다.
+            // 「맞혔다」만으로는 동결 덕인지 우연인지 못 가른다.
+            let frozen = self.close_freeze.tab_slots.is_some();
+            let x_here = self
+                .pane_tab_close_rects
+                .iter()
+                .find(|(_, _, r)| {
+                    spot.0 >= r.0 && spot.0 <= r.0 + r.2 && spot.1 >= r.1 && spot.1 <= r.1 + r.3
+                })
+                .map(|(_, i, _)| *i);
+            eprintln!(
+                "[closeburst] {}번째: 맞힘={hit} 탭 {before}→{after} 얼림={frozen} 그자리의탭={x_here:?}",
+                k + 1
+            );
+            self.render_frame();
+        }
+        eprintln!("[closeburst] 같은 자리로 {hits}/{n} 개 닫음 (동결 성공 = n 과 같아야)");
+    }
+
     pub(crate) fn arm_autotabs(&mut self) {
         let Ok(n_str) = std::env::var("KASATERM_AUTOTABS") else { return };
         let Ok(n) = n_str.parse::<usize>() else { return };

@@ -483,6 +483,10 @@ pub(crate) struct InfoState {
     /// 커서 좌표는 창을 떠나도 마지막 자리에 남는다 — 패널 위에 마우스를 얹어 둔 채
     /// 자리를 뜨면 목록이 영영 굳는다. 그래서 동결에 시한을 둔다.
     pub(crate) frozen_since: Option<std::time::Instant>,
+    /// 직전 프레임에 잰 본문 전체 높이. 되살리기 × 를 연달아 누를 때 스크롤 상한을
+    /// 이 값으로 붙잡아 둔다 — 항목이 빠지면 높이가 줄고 그만큼 목록이 위로 딸려
+    /// 올라와, 다음 × 가 손가락 밑에서 달아난다.
+    pub(crate) content_h: f32,
     /// 접어둔 **방**(`win:N`). 방은 펴진 게 기본이라 여기 담긴 것만 접힌다.
     pub(crate) group_collapsed: std::collections::HashSet<String>,
     /// 펴 둔 **학생 그룹**(surface id). 학생은 접힌 게 기본이라 여기 담긴 것만
@@ -536,6 +540,7 @@ impl Default for InfoState {
             last_refresh: None,
             panel_rect: None,
             frozen_since: None,
+            content_h: 0.0,
             key: String::new(),
             scroll: 0.0,
             root: None,

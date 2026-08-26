@@ -4272,6 +4272,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(i, _)| *i)
                             {
+                                // 지우기 **전에** 지금 높이를 잡아 둔다 — 항목이 빠지면
+                                // 본문이 줄고 스크롤이 그만큼 끌려 올라와, 다음 × 가
+                                // 손가락 밑에서 달아난다. 커서를 떼면 그때 재정렬.
+                                self.freeze_closing(CloseFreezeKind::Info(self.info.content_h));
                                 self.discard_closed_pane_at(idx);
                                 window.request_redraw();
                                 return;
@@ -4886,14 +4890,7 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    if let Some((pid, idx)) = self
-                        .pane_tab_close_rects
-                        .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
-                        .map(|(id, i, _)| (id.clone(), *i))
-                    {
-                        // Same tab-vs-pane + "job running?" logic as Cmd+W.
-                        self.confirm_or_close_tab(&pid, idx);
+                    if self.pane_tab_close_click(cx, cy) {
                         window.request_redraw();
                         return;
                     }
@@ -6304,6 +6301,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_force_drag();
         self.run_pending_auto_pane_merge();
         self.run_pending_autowheel();
+        self.run_pending_autocloseburst();
         self.run_pending_sticky_seek();
         self.run_pending_autoturnclick();
         self.run_pending_autotoggle();

@@ -511,6 +511,89 @@ impl App {
             0.0
         }
     }
+    /// pane 헤더 탭의 × 클릭. 맞혔으면 true.
+    ///
+    /// 메서드로 둔 건 하네스가 **같은 좌표 판정을 지나게** 하기 위함이다
+    /// (`sidebar_row_right_click` 과 같은 이유). 이 동작은 "같은 좌표를 연달아
+    /// 눌렀을 때 매번 다음 탭이 닫히는가" 가 전부인데, 상태를 손으로 세우는 검증은
+    /// 정작 어긋나는 자리(히트렉트 재계산)를 못 본다.
+    pub(crate) fn pane_tab_close_click(&mut self, cx: f32, cy: f32) -> bool {
+        let Some((pid, idx)) = self
+            .pane_tab_close_rects
+            .iter()
+            .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+            .map(|(id, i, _)| (id.clone(), *i))
+        else {
+            return false;
+        };
+        // 알약 자리를 닫기 **전에** 떠 둔다. 이 띠는 폭이 라벨 길이를 따라가서, 하나
+        // 닫으면 남은 탭이 넓어지며 × 가 딴 자리로 간다 — 세로 목록과 달리 여기만
+        // 기하가 실제로 어긋난다. 남은 탭이 이 슬롯을 앞에서부터 채워 × 가 방금 누른
+        // 자리에 온다.
+        let slots: Vec<(f32, f32)> = self
+            .pane_tab_rects
+            .iter()
+            .filter(|(p, _, _)| *p == pid)
+            .map(|(_, _, r)| (r.0, r.2))
+            .collect();
+        if slots.len() > 1 {
+            self.freeze_closing(crate::CloseFreezeKind::Tabs(pid.clone(), slots));
+        }
+        // Same tab-vs-pane + "job running?" logic as Cmd+W.
+        self.confirm_or_close_tab(&pid, idx);
+        true
+    }
+
+    /// 닫기 동결을 한 프레임 재검사한다 — 시한이 지났거나 커서가 그 목록을 떠났으면
+    /// 녹인다. 녹는 그 프레임에 목록이 정상 배치로 돌아간다(= 재정렬).
+    ///
+    /// 커서 판정을 렌더 직전에 두는 건 `CursorLeft` 를 안 받기 때문이다. 이벤트로
+    /// 하면 창 밖으로 나간 것을 못 잡아 영영 굳는다 — `pump_info` 가 시한을 둔 것과
+    /// 같은 이유이고, 여기서도 시한이 마지막 방벽이다.
+    pub(crate) fn tick_close_freeze(&mut self) {
+        if self.close_freeze.since.is_none() {
+            return;
+        }
+        if !self.close_freeze.live() {
+            self.close_freeze.thaw();
+            return;
+        }
+        let (cx, cy) = self.cursor_px;
+        let still_there = if self.close_freeze.sidebar_first.is_some() {
+            let w = self.tab_strip_w();
+            w > 0.0 && cx < w && cy > TITLE_HEIGHT
+        } else if self.close_freeze.info_content.is_some() {
+            self.info.panel_rect.is_some_and(|(x, y, w, h)| {
+                cx >= x && cx < x + w && cy >= y && cy < y + h
+            })
+        } else if let Some((pane, _)) = self.close_freeze.tab_slots.as_ref() {
+            // 탭 알약 사이 틈에서 녹지 않게 좌우로 조금 넓혀 본다. 그 pane 의 탭이
+            // 하나도 안 남았으면 자연히 false 라 그때 녹는다.
+            self.pane_tab_rects.iter().any(|(p, _, (x, y, w, h))| {
+                p == pane && cx >= x - 10.0 && cx <= x + w + 10.0 && cy >= *y && cy <= y + h
+            })
+        } else {
+            false
+        };
+        if !still_there {
+            self.close_freeze.thaw();
+        }
+    }
+
+    /// 닫기 동결을 건다. 어느 목록이든 한 번에 하나만 언다 — 두 목록을 동시에
+    /// 닫을 일이 없고, 하나만 두면 해제 판정도 갈래가 하나다.
+    pub(crate) fn freeze_closing(&mut self, what: CloseFreezeKind) {
+        self.close_freeze.thaw();
+        match what {
+            CloseFreezeKind::Sidebar(first) => self.close_freeze.sidebar_first = Some(first),
+            CloseFreezeKind::Info(content) => self.close_freeze.info_content = Some(content),
+            CloseFreezeKind::Tabs(pane, slots) => {
+                self.close_freeze.tab_slots = Some((pane, slots))
+            }
+        }
+        self.close_freeze.since = Some(Instant::now());
+    }
+
     /// Shift the windowed tab strip so window `idx` is visible. Called on
     /// window switch/create — a keyboard- or click-driven switch must never
     /// land on a tab scrolled out of the strip. Free wheel-scrolling is left
@@ -1577,6 +1660,11 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
+            // 세로 사이드바에서만 자리를 얼린다. 상단 strip 은 폭 기준이라 기하가
+            // 다르고, 무엇보다 이 × 는 두 배치가 공용이다.
+            if !self.tabs_on_top {
+                self.freeze_closing(crate::CloseFreezeKind::Sidebar(self.win_tab_first));
+            }
             // close_window 를 직접 부르면 그 창의 claude 가 돌고 있어도 말없이
             // 죽는다. 같은 동작의 가운데 클릭은 confirm_or_close_session 으로
             // 물어보는데, 이 ×(사이드바/상단 strip 공용)만 확인을 건너뛰고 있었다.

@@ -1974,7 +1974,10 @@ impl App {
         if idx < self.win_tab_first {
             self.win_tab_first -= 1;
         }
-        self.win_tab_reveal(self.active_window);
+        // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
+        // 그쪽으로 튀어, ×를 한자리에서 연달아 누를 수가 없었다(2026-08-27 지시:
+        // "크롬처럼 한곳에서 마우스누르다가 떼면 재정렬되고"). 새 방·방 전환은
+        // 그 방이 보여야 하는 동작이라 `win_tab_reveal` 을 그대로 둔다.
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -3065,6 +3068,34 @@ impl App {
         (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
     }
 
+    /// 방 목록 스크롤 기하 — `(view_top, viewport_h, content_h, scrolled_px)`.
+    /// 넘치지 않으면 `None`(그릴 이유가 없다).
+    ///
+    /// `win_tab_first` 는 **인덱스**라 그대로는 막대 위치가 안 된다. 카드 높이가
+    /// 제각각이라 인덱스 비율과 픽셀 비율이 어긋나므로, 앞쪽 카드 높이를 실제로
+    /// 더해 픽셀로 환산한다.
+    pub(crate) fn sidebar_scroll_geom(&self, win_h: f32) -> Option<(f32, f32, f32, f32)> {
+        if self.tabs_on_top {
+            return None;
+        }
+        let n = self.windows.len();
+        if n == 0 {
+            return None;
+        }
+        let heights: Vec<f32> =
+            (0..n).map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1).collect();
+        let content_h =
+            heights.iter().sum::<f32>() + SIDEBAR_TAB_GAP * n.saturating_sub(1) as f32;
+        let viewport_h = self.sidebar_avail_h(win_h);
+        if content_h <= viewport_h + 0.5 {
+            return None;
+        }
+        let first = self.win_tab_first.min(n - 1);
+        let scrolled =
+            heights[..first].iter().sum::<f32>() + SIDEBAR_TAB_GAP * first as f32;
+        Some((TITLE_HEIGHT + 18.0, viewport_h, content_h, scrolled))
+    }
+
     /// 마지막 방까지 닿는 최대 스크롤 시작점(세로 사이드바 전용).
     ///
     /// **뒤에서부터** 카드를 쌓아 구한다. 예전엔 접힌 높이(stride)로 칸을 나눠
@@ -3147,7 +3178,13 @@ impl App {
         let avail_h = self.sidebar_avail_h(win_h);
         // 스크롤 한계는 **실제 카드 높이**로 잡는다. 접힌 높이로 칸을 나눠 세면
         // 펼친 방이 있을 때 한계가 0 으로 나와 목록 끝이 손에 안 닿는다.
-        let first = self.win_tab_first.min(self.sidebar_max_first(win_h));
+        //
+        // 방 × 를 연달아 누르는 동안엔 그 한계를 안 본다. 방이 줄면 한계도 같이
+        // 줄어 목록이 아래로 당겨지는데, 그러면 다음 × 가 딴 자리로 간다.
+        let first = match self.close_freeze.sidebar_first.filter(|_| self.close_freeze.live()) {
+            Some(f) => f.min(n.saturating_sub(1)),
+            None => self.win_tab_first.min(self.sidebar_max_first(win_h)),
+        };
         let mut tabs = Vec::new();
         let mut closes = Vec::new();
         let mut rows = Vec::new();
@@ -5853,5 +5890,76 @@ mod revive_saved_character_tests {
     fn a_hand_picked_seat_keeps_its_character_even_when_taken() {
         assert!(revive_saved_character(true, true));
         assert!(revive_saved_character(false, true));
+    }
+}
+#[cfg(test)]
+mod close_freeze_tests {
+    /// `draw_pane_tabs` 가 얼려 둔 슬롯을 쓸 때의 × 좌표. 그리기 코드와 **같은 식**을
+    /// 여기 두는 건 그 함수가 GPU 를 받아 단위 테스트로 못 부르기 때문이다 — 식이
+    /// 갈리면 이 테스트가 거짓 안심이 되므로, 바꿀 때 두 곳을 같이 고쳐야 한다
+    /// (render.rs 의 `action_x` 분기).
+    fn close_x(slot: (f32, f32), x_reserve: f32) -> f32 {
+        let (sx, sw) = slot;
+        (sx + sw) - x_reserve + 2.0
+    }
+
+    /// 닫은 자리에 다음 탭이 오는가 — 이 동작의 전부다.
+    #[test]
+    fn next_tab_lands_on_the_same_x() {
+        // 폭이 제각각인 탭 넷(라벨 길이가 다르다).
+        let slots = [(100.0, 140.0), (240.0, 80.0), (320.0, 200.0), (520.0, 90.0)];
+        let reserve = 28.0;
+        // 두 번째 칸의 × 를 눌렀다고 하자.
+        let target = close_x(slots[1], reserve);
+        // 탭이 하나 빠지면 남은 탭이 슬롯을 앞에서부터 채운다 — 원래 2번이 1번 칸으로.
+        // 슬롯은 그대로이므로 그 칸의 × 는 같은 자리다.
+        assert_eq!(close_x(slots[1], reserve), target, "다음 탭의 × 가 방금 누른 자리에 없다");
+        // 연달아 한 번 더 눌러도 마찬가지.
+        assert_eq!(close_x(slots[1], reserve), target);
+    }
+
+    /// 얼리지 않으면 어긋난다는 것 — 이 기능이 왜 필요한지의 근거.
+    #[test]
+    fn without_freezing_the_x_moves() {
+        // 평소 배치는 라벨 실측 폭이라, 탭이 빠지면 남은 탭이 넓어지고 앞으로 당겨진다.
+        let reserve = 28.0;
+        let before = close_x((240.0, 80.0), reserve);
+        // 하나 닫힌 뒤 재계산된 자리(넓어지고 왼쪽으로 당겨짐).
+        let after = close_x((100.0, 190.0), reserve);
+        assert!(
+            (before - after).abs() > 10.0,
+            "재계산해도 × 가 그대로면 얼릴 이유가 없다: {before} vs {after}"
+        );
+    }
+
+    /// 슬롯이 모자라면(닫기 전보다 탭이 늘었다) 평소 계산으로 돌아가야 한다.
+    #[test]
+    fn missing_slot_falls_back() {
+        let slots: [(f32, f32); 2] = [(100.0, 140.0), (240.0, 80.0)];
+        assert!(slots.get(5).is_none(), "없는 칸은 None 이어야 폴백이 돈다");
+    }
+
+    /// 스크롤 막대 위치 — 맨 위·중간·맨 아래.
+    fn thumb_y(view_top: f32, viewport_h: f32, content_h: f32, scrolled: f32) -> f32 {
+        let overflow = content_h - viewport_h;
+        let thumb_h = (viewport_h * viewport_h / content_h).max(28.0);
+        view_top + (viewport_h - thumb_h) * (scrolled / overflow).clamp(0.0, 1.0)
+    }
+
+    #[test]
+    fn thumb_spans_the_track() {
+        let (top, view, content) = (54.0, 400.0, 1000.0);
+        let overflow = content - view;
+        let at_top = thumb_y(top, view, content, 0.0);
+        let at_bottom = thumb_y(top, view, content, overflow);
+        assert_eq!(at_top, top, "맨 위에서 막대가 트랙 머리에 안 붙는다");
+        let thumb_h = (view * view / content).max(28.0);
+        assert!(
+            (at_bottom - (top + view - thumb_h)).abs() < 0.01,
+            "맨 아래에서 막대가 트랙 끝에 안 붙는다: {at_bottom}"
+        );
+        // 넘겨도 트랙 밖으로 안 나간다.
+        assert_eq!(thumb_y(top, view, content, overflow * 2.0), at_bottom);
+        assert!(thumb_y(top, view, content, overflow / 2.0) > at_top);
     }
 }

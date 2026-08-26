@@ -3470,6 +3470,56 @@ struct RoomRename {
     cursor: usize,
 }
 
+/// 닫는 동안 목록 자리를 얼려 두는 상태 — 되살리기 목록·pane 헤더 탭·사이드바 방.
+///
+/// 크롬이 탭을 닫을 때 하는 것과 같다: 커서가 그 목록 위에 있는 동안은 남은 항목이
+/// 자리를 안 옮겨, ×를 **한자리에서 연달아** 누를 수 있다(2026-08-27 지시). 커서를
+/// 떼면 그때 재정렬된다.
+///
+/// **시한이 있는 이유**는 `pump_info` 의 목록 동결과 같다 — `CursorLeft` 를 받지
+/// 않으므로 커서 좌표는 창을 떠나도 마지막 자리에 남는다. 시한이 없으면 목록 위에
+/// 마우스를 얹은 채 자리를 뜨면 영영 굳는다.
+///
+/// `struct App` 정의는 병렬 작업 충돌 핫스팟이라(CLAUDE.md) 필드를 흩지 않고 묶었다.
+#[derive(Default)]
+struct CloseFreeze {
+    /// pane 헤더 탭: 닫기 직전 탭 알약의 `(pane id, [(x, w)])`. 이 띠만 기하가
+    /// 진짜로 어긋난다 — 알약 폭이 라벨 길이를 따라가서, 하나 닫으면 남은 탭이
+    /// 넓어지며 × 가 딴 자리로 간다. 남은 탭이 이 슬롯을 앞에서부터 채운다.
+    tab_slots: Option<(String, Vec<(f32, f32)>)>,
+    /// 사이드바 방 목록: 얼어붙은 스크롤 시작점. 방이 줄면 스크롤 한계가 작아져
+    /// 목록이 아래로 당겨지는 것을 막는다.
+    sidebar_first: Option<usize>,
+    /// 되살리기 패널: 얼어붙은 content 높이. 항목이 줄면 스크롤 상한이 같이 줄어
+    /// 목록 전체가 밀린다 — 그 상한을 붙잡아 둔다.
+    info_content: Option<f32>,
+    /// 언제 얼었나. 위 주석의 시한이 여기서 재진다.
+    since: Option<Instant>,
+}
+
+impl CloseFreeze {
+    /// 얼어 있고 아직 시한 안인가. 아니면 호출자가 `thaw` 로 녹인다.
+    fn live(&self) -> bool {
+        self.since.is_some_and(|t| t.elapsed() < FREEZE_TTL)
+    }
+    fn thaw(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// 닫기 동결 시한 — `pump_info` 의 목록 동결과 같은 3초.
+const FREEZE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 어느 목록을 얼리나 — `freeze_closing` 의 인자.
+pub(crate) enum CloseFreezeKind {
+    /// 사이드바 방 목록. 값은 얼려 둘 스크롤 시작점.
+    Sidebar(usize),
+    /// 되살리기 패널. 값은 얼려 둘 content 높이.
+    Info(f32),
+    /// pane 헤더 탭 띠. `(pane id, [(x, w)])`.
+    Tabs(String, Vec<(f32, f32)>),
+}
+
 struct Workspace {
     panes: HashMap<String, PaneState>,
     layout: Option<Layout>,
@@ -4847,6 +4897,8 @@ struct App {
     /// 사이드바 방 이름 인라인 편집(느린 더블클릭). 필드를 늘리지 않으려 한 줄로 묶었다 —
     /// `struct App` 정의는 병렬 작업 충돌 핫스팟이다(CLAUDE.md).
     room_rename: RoomRename,
+    /// 닫는 동안 목록 자리를 얼려 두는 상태 — `CloseFreeze` 주석 참조.
+    close_freeze: CloseFreeze,
     /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
     /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
     sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
@@ -5632,6 +5684,7 @@ impl App {
             pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
+            close_freeze: CloseFreeze::default(),
             sidebar_row_rects: Vec::new(),
             sidebar_menu: None,
             sidebar_menu_rects: Vec::new(),

@@ -2756,6 +2756,14 @@ impl App {
         // mouse handler; the gpu block below paints from the same numbers so
         // a click always lands on what the user sees.
         let sb_win_h = win_px.1 / scale;
+        // 목록 배치를 재기 **전에** 동결을 한 번 재검사한다 — 커서가 떠났거나 시한이
+        // 지났으면 여기서 녹고, 그 프레임의 배치가 곧 재정렬이 된다.
+        self.tick_close_freeze();
+        // 아래 `self.gpu.as_mut()` 블록 안에서는 `self` 를 다시 못 읽는다. 되살리기
+        // 패널에 넘길 동결값은 그래서 여기서 미리 뽑아 둔다.
+        let frozen_info = self.close_freeze.info_content.filter(|_| self.close_freeze.live());
+        let frozen_tabs =
+            self.close_freeze.live().then(|| self.close_freeze.tab_slots.clone()).flatten();
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
         let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
@@ -2764,6 +2772,8 @@ impl App {
         // hints painted with the tabs below.
         self.win_tab_first = sb_tabs.first().map_or(0, |(i, _)| *i);
         self.win_tab_vis = sb_tabs.len().max(1);
+        // 막대는 `win_tab_first` 가 이 프레임 값으로 갱신된 **뒤에** 재야 한다.
+        let sb_scroll = self.sidebar_scroll_geom(sb_win_h);
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()
@@ -4717,6 +4727,63 @@ impl App {
                         g.queue_icon("chevron-down", ccx, py + ph + 4.0, cis, theme::text_mute());
                     }
                 }
+                // 목록이 넘칠 때의 가장자리 표시 — 파일트리 칼럼과 같은 모양이다
+                // (흐림 + 올렸을 때만 뜨는 막대). chevron 은 남긴다: 막대가 hover
+                // 전용이라, 손을 안 올린 평소엔 저 화살표가 유일한 힌트다.
+                if let Some((view_top, viewport_h, content_h, scrolled)) = sb_scroll {
+                    let view_bottom = view_top + viewport_h;
+                    let overflow = content_h - viewport_h;
+                    let fade_h = 28.0_f32;
+                    let strips = 16;
+                    let strip_h = fade_h / strips as f32 + 0.5;
+                    // 위쪽 흐림은 첫 픽셀에 탁 켜지지 않게 `fade_h` 만큼 스크롤하는
+                    // 동안 서서히 들어온다.
+                    if scrolled > 0.5 {
+                        let k = (scrolled / fade_h).min(1.0);
+                        for i in 0..strips {
+                            let t = i as f32 / (strips - 1) as f32;
+                            let a = ((1.0 - t) * 0.92 * k * 255.0) as u8;
+                            g.rect(
+                                0.0,
+                                view_top + t * fade_h,
+                                tab_strip_w - 1.0,
+                                strip_h,
+                                theme::with_alpha(theme::panel_bg(), a),
+                            );
+                        }
+                    }
+                    if scrolled < overflow - 0.5 {
+                        let k = ((overflow - scrolled) / fade_h).min(1.0);
+                        for i in 0..strips {
+                            let t = i as f32 / (strips - 1) as f32;
+                            let a = (t * 0.92 * k * 255.0) as u8;
+                            g.rect(
+                                0.0,
+                                view_bottom - fade_h + t * fade_h,
+                                tab_strip_w - 1.0,
+                                strip_h,
+                                theme::with_alpha(theme::panel_bg(), a),
+                            );
+                        }
+                    }
+                    let over_col = sb_cursor.0 >= 0.0
+                        && sb_cursor.0 < tab_strip_w
+                        && sb_cursor.1 >= view_top
+                        && sb_cursor.1 < view_bottom;
+                    if over_col {
+                        let thumb_h = (viewport_h * viewport_h / content_h).max(28.0);
+                        let thumb_y = view_top
+                            + (viewport_h - thumb_h) * (scrolled / overflow).clamp(0.0, 1.0);
+                        pill_rect(
+                            g,
+                            tab_strip_w - 6.0,
+                            thumb_y,
+                            3.5,
+                            thumb_h,
+                            theme::with_alpha(theme::text(), 0x66),
+                        );
+                    }
+                }
                 // 재배치 드래그 중이면 떨어질 자리에 가로 막대. 마지막 탭 아래로
                 // 미는 경우만 끝 모서리에 붙는다(target == 마지막 + 1).
                 if let Some(t) = win_drag_target {
@@ -6178,6 +6245,7 @@ impl App {
                     git_col_w,
                     body_top,
                     bottom,
+                    frozen_info,
                 );
             }
             // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
@@ -6448,6 +6516,10 @@ impl App {
                             .as_ref()
                             .filter(|(p, _)| *p == h.id)
                             .map(|(_, i)| *i),
+                        frozen_slots: frozen_tabs
+                            .as_ref()
+                            .filter(|(p, _)| *p == h.id)
+                            .map(|(_, s)| s.as_slice()),
                     },
                 );
                 pane_tab_windowing.push((h.id.clone(), strip.first, strip.n_vis, h.active_tab));
@@ -10250,6 +10322,9 @@ pub(crate) struct TabStrip<'a> {
     pub hover_tab: Option<usize>,
     pub drag_src: Option<usize>,
     pub drag_target: Option<usize>,
+    /// 닫는 동안 얼려 둔 알약 자리 `[(x, w)]`. 남은 탭이 이 슬롯을 앞에서부터
+    /// 채운다 — 그래야 × 가 방금 누른 자리에 온다. `None` = 평소(라벨 실측 폭).
+    pub frozen_slots: Option<&'a [(f32, f32)]>,
 }
 
 /// 그린 결과 — 눌린 자리를 가릴 rect 들과, 띠가 실제로 보인 창(`first`·`n_vis`).
@@ -10315,6 +10390,13 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32)
             .clamp(56.0, 320.0)
     };
+    // 닫는 동안엔 알약을 새로 재지 않고 얼려 둔 자리를 앞에서부터 채운다. 탭이 하나
+    // 빠지면 `n_vis` 가 줄어 `per_tab` 이 커지고 남은 탭이 넓어지는데, 그러면 × 가
+    // 방금 누른 자리에서 달아난다. 슬롯이 모자라면(닫기 전보다 탭이 늘었다) 그
+    // 지점부터는 평소 계산으로 돌아간다.
+    let slot = |i: usize| -> Option<(f32, f32)> {
+        c.frozen_slots.and_then(|s| s.get(i).copied())
+    };
     // Left edge of each visible tab's pill, for the drag insertion bar.
     let mut tab_edges: Vec<f32> = Vec::with_capacity(n_vis);
     // Geometry for the post-loop structural border pass.
@@ -10324,6 +10406,11 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
     let mut active_tab_box: Option<(f32, f32)> = None;
     let mut tx = c.x + 8.0 + strip_pad;
     for (i, tab) in tab_list.iter().enumerate().skip(first).take(n_vis) {
+        // 화면상 몇 번째 칸인가 — 얼려 둔 슬롯은 화면 순서로 담겨 있다.
+        let vi = i - first;
+        if let Some((sx, _)) = slot(vi) {
+            tx = sx + 6.0;
+        }
         let tab_x0 = tx;
         // This pane's active tab — gets the pill + focus strip + ×.
         let active = tab_list.len() == 1 || i == c.active_tab;
@@ -10364,7 +10451,10 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         let can_popout = c.can_popout;
         let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
         let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
-        let budget = (per_tab - x_reserve - 14.0).max(0.0);
+        let budget = match slot(vi) {
+            Some((_, sw)) => (sw - 12.0 - x_reserve).max(0.0),
+            None => (per_tab - x_reserve - 14.0).max(0.0),
+        };
         // 자를 땐 **뒤**를 자른다. 여기 오는 라벨은 전부 앞이 정체다 —
         // 학생 이름(`미도리 · 작업명`), 폴더명 한 조각, 프로세스명. 앞을
         // 자르면 그 정체가 먼저 사라져 탭들이 다 `…작업명` 이 된다.
@@ -10390,8 +10480,13 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // active tab's accent strip joins the pane divider with
         // no visible gap — only while nothing is windowed off
         // (the overflow chevron owns that sliver otherwise).
-        let box_x = if i == 0 && !overflowing { c.x } else { tab_x0 - 6.0 };
-        let box_right = tab_x0 + content_w + 6.0;
+        let (box_x, box_right) = match slot(vi) {
+            Some((sx, sw)) => (sx, sx + sw),
+            None => (
+                if i == 0 && !overflowing { c.x } else { tab_x0 - 6.0 },
+                tab_x0 + content_w + 6.0,
+            ),
+        };
         let tw = (box_right - box_x).max(0.0);
         tab_edges.push(box_x);
         if tabs_left.is_none() {
@@ -10419,7 +10514,14 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // Pop-out icon (external-link): file tabs only, shown on the
         // active or hovered tab. Sits left of the ×; clicking it
         // moves the tab's editor into its own OS window.
-        let mut action_x = cx + 8.0;
+        // 평소엔 라벨 끝 바로 뒤에 붙인다. 얼려 둔 자리에서는 **알약 오른쪽 끝**
+        // 기준으로 놓는다 — 라벨 길이가 탭마다 달라서, 라벨 끝에 붙이면 폭을 얼려
+        // 놓고도 × 가 제각각이 되어 자리를 얼린 뜻이 없어진다. 두 식은 평소 배치에서
+        // 같은 값을 낸다(`box_right = tab_x0 + lw + x_reserve + 6`).
+        let mut action_x = match slot(vi) {
+            Some(_) => box_right - x_reserve + 2.0,
+            None => cx + 8.0,
+        };
         if can_popout && show_x {
             let po_x = action_x;
             let chip = c.icon_size + 6.0;

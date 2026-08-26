@@ -2288,6 +2288,8 @@ impl App {
                 // 창 안 탭 재배치·창 간 드래그는 아직 없다 — 메인 그리드에서 한다.
                 drag_src: None,
                 drag_target: None,
+                // 닫기 동결도 메인 그리드 전용 — 별도창은 탭이 몇 개 안 된다.
+                frozen_slots: None,
             };
             a.tabs_out = crate::render::draw_pane_tabs(&mut a.gpu, &ctx);
         } else {
