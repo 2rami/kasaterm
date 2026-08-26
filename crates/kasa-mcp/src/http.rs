@@ -4202,16 +4202,21 @@ async fn term_ws_handler(
     let cwd = q.get("cwd").cloned();
     // 셀 그리드로 받을지(웹텀 자체 렌더) 원시 바이트로 받을지.
     let grid = q.get("grid").map_or(false, |v| v == "1" || v == "true");
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid))
+    // own=1 — 이 연결이 pane 의 **소유자**(원격 kasaterm GUI)다. 미러 규칙 셋이
+    // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
+    // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
+    let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own))
         .into_response()
 }
 
 async fn term_ws_run(
-    socket: WebSocket,
+    mut socket: WebSocket,
     pane: String,
     pane_raw: Option<String>,
     cwd: Option<String>,
     want_grid: bool,
+    own: bool,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -4253,6 +4258,14 @@ async fn term_ws_run(
             Some((s, id)) => (s, true, id),
             None => {
                 eprintln!("[term-ws] 그런 pane 이 없습니다: {pane}");
+                // 원격 GUI 가 「세션이 정말 끝났다」와 「연결이 잠깐 끊겼다」를 가르는
+                // 유일한 신호. 이게 없으면 재접속 루프가 죽은 id 로 영원히 돈다 —
+                // 연결 즉시 닫힘만으로는 네트워크 유실과 구분되지 않는다.
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({"t": "gone"}).to_string().into(),
+                    ))
+                    .await;
                 return;
             }
         }
@@ -4269,6 +4282,8 @@ async fn term_ws_run(
         let (rx, bytes) = sess.tap_bytes_with_snapshot();
         Tap::Bytes(rx, bytes)
     };
+    // kill 제어가 놓아 줄 대상 — self_id 는 아래 size 메시지에 실려 move 된다.
+    let kill_id = self_id.clone();
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
@@ -4327,7 +4342,11 @@ async fn term_ws_run(
     // ⚠️ 접속 시점 고정값이 아니다 — 내가 force 한 뒤 남(kasaterm divider·다른
     // 미러)이 격자를 바꿨으면 그쪽이 새 원본이라, 끊길 때 낡은 접속 시점 크기를
     // 밀어 넣으면 kasaterm 의 새 레이아웃을 되레 덮는다. force 직전마다 갱신한다.
-    let restore = std::sync::Arc::new(std::sync::Mutex::new(mirrored.then_some((c, r))));
+    // 소유자(own) 연결은 복원 대상이 아니다 — GUI 가 정한 크기가 곧 원본이라,
+    // detach 후 크기를 「원래」로 되돌리면 이어받은 화면이 도리어 어긋난다.
+    let restore = std::sync::Arc::new(std::sync::Mutex::new(
+        (mirrored && !own).then_some((c, r)),
+    ));
     let restore_in = restore.clone();
     // (cols<<16 | rows). 0 = 이 연결은 격자를 건드린 적이 없다.
     let forced = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -4412,7 +4431,7 @@ async fn term_ws_run(
                         // 연결이 끝날 때 아래에서 되돌린다(그 복구가 있어야 클라이언트가
                         // 이걸 자동으로 켤 수 있다).
                         let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
-                        if !mirrored || force {
+                        if !mirrored || force || own {
                             let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                             let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
                             let (c, r) = (c.max(20), r.max(5));
@@ -4437,6 +4456,14 @@ async fn term_ws_run(
                                 );
                             }
                         }
+                    }
+                    // 소유자의 명시적 종료(원격 pane 닫기). keep_session 의 강한
+                    // Arc 를 놓고 연결을 접는다 — 남은 참조(다른 미러)가 다
+                    // 떨어지면 Drop 이 셸을 죽인다. detach(그냥 끊기)와 이 길을
+                    // 갈라 두는 것이 「미러링이 아니라 이사」 설계의 반쪽이다.
+                    if v.get("t").and_then(|x| x.as_str()) == Some("kill") && own {
+                        kasa_pty::release_session(&kill_id);
+                        break;
                     }
                 }
                 Message::Close(_) => break,

@@ -18,6 +18,8 @@ kasa-bridge = { path = "../kasa-bridge" }
 # wide 글자(한글) 폭 판정 — 스페이서를 걸러내는 데 쓴다.
 unicode-width = "0.2"
 anyhow.workspace = true
+# remote 모듈의 ExtEvent 채널 — kasa-pty 의 start_external 과 같은 채널 타입.
+crossbeam-channel.workspace = true
 # "ws" — 웹 터미널의 양방향 채널. 기본 feature 에는 안 들어 있다.
 axum = { version = "0.8.9", features = ["ws"] }
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
@@ -25,6 +27,9 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+# 원격 PTY 호스트에 붙는 WS 클라이언트(remote 모듈). 서버(axum ws)와 같은 crate 에
+# 두어 term-ws 프로토콜 지식이 한 곳에 모인다. lock 에 이미 있는 버전 — 전이 의존 0.
+tokio-tungstenite = "0.29"
 # ccglass-style capture proxy: forward claude의 Anthropic API 호출을 가로채 messages[]
 # 를 깨끗하게 캡처(peek/jsonl 없이 라이브 대화). rustls 로 시스템 openssl 의존 회피.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

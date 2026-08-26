@@ -170,13 +170,94 @@ pub struct PromptAnchor {
     pub text: String,
 }
 
+/// PTY 의 실체가 어디 있는가 — 이 프로세스(Local)인가 원격 호스트(External)인가.
+///
+/// External 은 소유권이 원격에 있는 세션의 **로컬 파서 사본**이다: 바이트가 그대로
+/// 들어와 같은 alacritty Term 을 채우므로 스크롤백·미니맵·peek·sid 마커 스캔이
+/// 로컬 pane 과 똑같이 동작한다. 다른 것은 셋뿐이다 — resize 가 ioctl 대신 제어
+/// 콜백으로 나가고, Drop 이 child 를 죽이지 않으며(원격 세션은 detach 로 살아남는
+/// 것이 목적이다), 자동 응답(DSR·OSC 색 질의)이 나가지 않는다(원격 호스트의 Term
+/// 이 이미 답한다 — 여기서도 답하면 원격 앱이 응답을 두 번 받는다).
+enum SessionIo {
+    Local {
+        master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+        child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    },
+    External {
+        on_resize: Arc<dyn Fn(u16, u16) + Send + Sync>,
+    },
+}
+
+/// 외부 소스(WebSocket 클라이언트 등)가 `start_external` 세션에 밀어 넣는 이벤트.
+///
+/// 순서가 곧 정합성이다 — SetSize 를 별도 경로로 보내면 「옛 바이트를 새 크기로
+/// 파싱」하는 찢어진 프레임이 생긴다. 한 채널에 순서대로 실으면 reader 루프의
+/// 기존 「read 직후 크기 재확인」이 그대로 순서를 보장한다.
+pub enum ExtEvent {
+    /// 원격 PTY 가 뱉은 raw 바이트. 파서로 직행한다.
+    Bytes(Vec<u8>),
+    /// 원격 격자 크기 변경 — 다음 Bytes 를 파싱하기 전에 적용된다.
+    SetSize(u16, u16),
+    /// 원격 세션이 정말로 끝났다(연결 유실이 아니라). reader 가 eof 센티널을
+    /// 발행해 GUI 가 pane 을 걷는다.
+    Eof,
+}
+
+/// `start_external` 에 넘기는 전송 계층 — 만드는 쪽(WS 클라이언트)이 이 셋을 쥔다.
+pub struct ExternalIo {
+    /// 수신 이벤트 스트림. Sender 쪽이 다 사라지면 Eof 와 같다.
+    pub events: Receiver<ExtEvent>,
+    /// 키 입력(send_bytes)·paste 가 나가는 길.
+    pub writer: Box<dyn Write + Send>,
+    /// GUI 쪽 resize 요청을 원격에 알리는 콜백(제어 메시지 전송).
+    pub on_resize: Arc<dyn Fn(u16, u16) + Send + Sync>,
+}
+
+/// ExtEvent 채널을 `Read` 로 감싼다 — `spawn_reader_thread` 의 입력이
+/// `Box<dyn Read + Send>` 라서, 이 어댑터 하나로 파서·tap·스냅샷 배관 전부를
+/// 로컬 PTY 와 공유한다.
+struct ExtReader {
+    events: Receiver<ExtEvent>,
+    /// 세션의 공유 크기 — SetSize 이벤트를 여기 반영하면 reader 루프의
+    /// 「read 직후 크기 재확인」이 다음 파싱 전에 Term 을 맞춘다.
+    size: Arc<Mutex<(u16, u16)>>,
+    /// 64KB read 버퍼보다 큰 프레임의 남은 조각.
+    pending: Vec<u8>,
+}
+
+impl Read for ExtReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if !self.pending.is_empty() {
+                let n = self.pending.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.pending[..n]);
+                self.pending.drain(..n);
+                return Ok(n);
+            }
+            match self.events.recv() {
+                Ok(ExtEvent::Bytes(b)) => {
+                    if b.is_empty() {
+                        continue;
+                    }
+                    self.pending = b;
+                }
+                Ok(ExtEvent::SetSize(c, r)) => {
+                    // resize() 와 같은 하한 — alacritty MIN_COLUMNS 밑은 밟지 않는다.
+                    *self.size.lock().unwrap() = (c.max(2), r.max(1));
+                }
+                // 채널 단절 = 만든 쪽(WS 클라이언트)이 접었다 — 세션 종료와 같다.
+                Ok(ExtEvent::Eof) | Err(_) => return Ok(0),
+            }
+        }
+    }
+}
+
 pub struct PtySession {
     /// Channel the renderer consumes — one ScreenUpdate per dirty
     /// frame after VT processing landed new state.
     pub screens: Receiver<ScreenUpdate>,
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    io: SessionIo,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    _child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Shared cell-dim state used by the resize path so we can reshape
     /// the VT grid without re-creating the Term.
     size: Arc<Mutex<(u16, u16)>>,
@@ -417,6 +498,7 @@ impl PtySession {
             writer: Arc::clone(&writer_arc),
             size: Arc::clone(&size),
             last_title: Arc::clone(&title_handle),
+            respond: true,
         };
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
         // Seed restored scrollback into alacritty before the shell's first
@@ -466,9 +548,11 @@ impl PtySession {
 
         Ok(Self {
             screens: rx,
-            master,
+            io: SessionIo::Local {
+                master,
+                child: Arc::new(Mutex::new(child)),
+            },
             writer: writer_arc,
-            _child: Arc::new(Mutex::new(child)),
             size,
             _reader_thread: reader_thread,
             shell_pid,
@@ -487,6 +571,88 @@ impl PtySession {
             title_handle,
             pane_id: opts.pane_id.clone(),
             tty_short,
+            blocks,
+            cwd_handle,
+            inline_imgs,
+            scheme_reports,
+            last_submit: Mutex::new(None),
+        })
+    }
+
+    /// 원격 호스트가 소유한 PTY 의 **로컬 파서 세션**을 만든다.
+    ///
+    /// `start` 와 배관(파서·스냅샷·tap·scrollback)이 같고 다른 것은 전송뿐이다 —
+    /// 바이트는 `io.events` 로 들어오고, 입력은 `io.writer` 로 나가며, resize 는
+    /// `io.on_resize` 로 원격에 알린다. `opts` 의 shell/env/initial_scrollback 은
+    /// 원격 호스트 소관이라 여기선 무시된다. shell_pid 가 None 이라 ps 기반
+    /// 판정(active_agent 등)은 우아하게 비활성이다.
+    ///
+    /// ⚠️ `start` 와 필드 조립이 쌍이다 — PtySession 에 필드를 더하면 컴파일러가
+    /// 양쪽 다 잡아 주지만, 초기값의 의미(왜 None/빈값인지)는 여기 주석에 적어라.
+    pub fn start_external(opts: PtyOptions, io: ExternalIo) -> Result<Self> {
+        let (tx, rx) = bounded::<ScreenUpdate>(256);
+        let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
+        let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(io.writer));
+        let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let title_handle = Arc::new(Mutex::new(None));
+        let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+        let listener = PtyEventForwarder {
+            writer: Arc::clone(&writer_arc),
+            size: Arc::clone(&size),
+            last_title: Arc::clone(&title_handle),
+            respond: false,
+        };
+        let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
+        let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
+        let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = Box::new(ExtReader {
+            events: io.events,
+            size: Arc::clone(&size),
+            pending: Vec::new(),
+        });
+        let reader_thread = spawn_reader_thread(
+            reader,
+            tx.clone(),
+            opts.cols,
+            opts.rows,
+            size.clone(),
+            opts.pane_id.clone(),
+            Arc::clone(&title_handle),
+            Arc::clone(&term),
+            Arc::clone(&blocks),
+            Arc::clone(&cwd_handle),
+            Arc::clone(&byte_taps),
+            Arc::clone(&screen_taps),
+            Arc::clone(&inline_imgs),
+            Arc::clone(&scheme_reports),
+        );
+        Ok(Self {
+            screens: rx,
+            io: SessionIo::External {
+                on_resize: io.on_resize,
+            },
+            writer: writer_arc,
+            size,
+            _reader_thread: reader_thread,
+            shell_pid: None,
+            proc_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                None,
+            ))),
+            agents_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                false,
+            ))),
+            term,
+            screens_tx: tx,
+            byte_taps,
+            screen_taps,
+            title_handle,
+            pane_id: opts.pane_id.clone(),
+            tty_short: None,
             blocks,
             cwd_handle,
             inline_imgs,
@@ -935,16 +1101,21 @@ impl PtySession {
         if self.size() == (cols, rows) {
             return Ok(());
         }
-        // Kernel-side PTY first (child sees SIGWINCH).
-        {
-            let pty = self.master.lock().unwrap();
-            pty.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("pty resize")?;
+        // Kernel-side PTY first (child sees SIGWINCH). External 은 ioctl 대신
+        // 제어 콜백으로 원격에 알리고, 아래 로컬 격자는 낙관적으로 먼저 맞춘다 —
+        // 원격이 실제로 바꾸면 full snapshot 이 따라와 어긋남을 스스로 치유한다.
+        match &self.io {
+            SessionIo::Local { master, .. } => {
+                let pty = master.lock().unwrap();
+                pty.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("pty resize")?;
+            }
+            SessionIo::External { on_resize } => (on_resize)(cols, rows),
         }
         // Reshape the alacritty grid *here*, not lazily in the next reader
         // pass: snapshot() (incl. full_snapshot from the daemon) indexes the
@@ -972,8 +1143,16 @@ impl Drop for PtySession {
     /// zombie shell. Kill the child explicitly so a closed pane is always
     /// fully reaped.
     fn drop(&mut self) {
-        if let Ok(mut child) = self._child.lock() {
-            let _ = child.kill();
+        match &self.io {
+            SessionIo::Local { child, .. } => {
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                }
+            }
+            // External: 원격 세션은 detach 로 살아남는 것이 목적이다 — 정말 죽일
+            // 때는 호출자가 제어 메시지(kill)를 원격에 보낸다. 전송 스레드는
+            // writer/이벤트 채널이 닫히면 스스로 끝난다.
+            SessionIo::External { .. } => {}
         }
     }
 }
@@ -1029,6 +1208,12 @@ fn host_rgb(cell: &std::sync::atomic::AtomicU32) -> (u8, u8, u8) {
 struct PtyEventForwarder {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     size: Arc<Mutex<(u16, u16)>>,
+    /// false = 자동 응답(DSR-CPR·OSC 색 질의·TextAreaSize·클립보드 read)을 묻는다.
+    /// 원격 미러(`start_external`)용 — 원격 호스트의 Term 이 이미 답하고 있어서,
+    /// 여기서도 답하면 원격 앱이 응답을 두 번 받아 입력줄에 이스케이프가 박힌다.
+    /// (아무도 안 답하면 cmd.exe 류가 DSR 대기로 멎는 함정이 있지만, 그 「한 명」은
+    /// 원격 쪽이다 — 렌더버그 카탈로그 #10 참고.)
+    respond: bool,
     /// Latest OSC 0 / OSC 2 title pushed by the shell or any TUI
     /// running inside it. `None` after `ResetTitle` or until the
     /// first set. The reader thread reads this on each snapshot so
@@ -1044,12 +1229,18 @@ impl Clone for PtyEventForwarder {
             writer: Arc::clone(&self.writer),
             size: Arc::clone(&self.size),
             last_title: Arc::clone(&self.last_title),
+            respond: self.respond,
         }
     }
 }
 
 impl PtyEventForwarder {
     fn write_to_pty(&self, bytes: &[u8]) {
+        // 자동 응답의 유일한 출구 — 음소거는 여기 한 곳이면 전 경로(PtyWrite·
+        // ColorRequest·TextAreaSize·ClipboardLoad)가 막힌다.
+        if !self.respond {
+            return;
+        }
         // Mirror outgoing replies into KASATERM_PTY_OUT_LOG so the
         // ghostty-vs-us escape diff can include OUR side of the
         // conversation (OSC 11 colour replies, TextAreaSize replies,
@@ -4303,6 +4494,7 @@ mod snapshot_fidelity_tests {
         let (cols, rows) = fixture_size();
 
         let listener = PtyEventForwarder {
+            respond: true,
             writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
             size: Arc::new(Mutex::new((cols, rows))),
             last_title: Arc::new(Mutex::new(None)),
@@ -4352,6 +4544,7 @@ mod snapshot_fidelity_tests {
         for rows in [base_rows, base_rows / 2, 12] {
         for chunk in [65536usize, 4096, 1024, 512, 128] {
             let listener = PtyEventForwarder {
+                respond: true,
                 writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
                 size: Arc::new(Mutex::new((cols, rows))),
                 last_title: Arc::new(Mutex::new(None)),
@@ -4439,6 +4632,7 @@ mod snapshot_fidelity_tests {
     fn scrolling_up_actually_shows_history() {
         let (cols, rows) = (40u16, 10u16);
         let listener = PtyEventForwarder {
+            respond: true,
             writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
             size: Arc::new(Mutex::new((cols, rows))),
             last_title: Arc::new(Mutex::new(None)),
@@ -4482,6 +4676,7 @@ mod snapshot_fidelity_tests {
     fn rows_above_walks_history_nearest_first() {
         let (cols, rows) = (40u16, 10u16);
         let listener = PtyEventForwarder {
+            respond: true,
             writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
             size: Arc::new(Mutex::new((cols, rows))),
             last_title: Arc::new(Mutex::new(None)),
@@ -4543,6 +4738,7 @@ mod prompt_anchor_tests {
     fn term_with(lines: &[&str]) -> Term<PtyEventForwarder> {
         let (cols, rows) = (60u16, 10u16);
         let listener = PtyEventForwarder {
+            respond: true,
             writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
             size: Arc::new(Mutex::new((cols, rows))),
             last_title: Arc::new(Mutex::new(None)),
@@ -4615,5 +4811,132 @@ mod prompt_anchor_tests {
         let got = scan_prompt_anchors(&t);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].abs_line, 1);
+    }
+}
+
+#[cfg(test)]
+mod external_session_tests {
+    use super::*;
+
+    struct ChanWriter(std::sync::mpsc::Sender<Vec<u8>>);
+    impl Write for ChanWriter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            let _ = self.0.send(b.to_vec());
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ext_session(
+        cols: u16,
+        rows: u16,
+    ) -> (
+        Arc<PtySession>,
+        crossbeam_channel::Sender<ExtEvent>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        Arc<Mutex<Vec<(u16, u16)>>>,
+    ) {
+        let (etx, erx) = crossbeam_channel::unbounded();
+        let (wtx, wrx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let resized: Arc<Mutex<Vec<(u16, u16)>>> = Default::default();
+        let r2 = Arc::clone(&resized);
+        let sess = PtySession::start_external(
+            PtyOptions {
+                cols,
+                rows,
+                pane_id: "rmt-test".into(),
+                ..Default::default()
+            },
+            ExternalIo {
+                events: erx,
+                writer: Box::new(ChanWriter(wtx)),
+                on_resize: Arc::new(move |c, r| r2.lock().unwrap().push((c, r))),
+            },
+        )
+        .expect("start_external");
+        (Arc::new(sess), etx, wrx, resized)
+    }
+
+    fn wait_text(sess: &PtySession, needle: &str) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if sess
+                .screens
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_ok()
+                && sess.visible_text(50).contains(needle)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn external_bytes_land_in_local_grid_and_input_goes_to_writer() {
+        let (sess, etx, wrx, resized) = ext_session(20, 5);
+        etx.send(ExtEvent::Bytes(b"hello".to_vec())).unwrap();
+        assert!(wait_text(&sess, "hello"), "원격 바이트가 로컬 그리드에 실려야 한다");
+        // 입력은 writer(원격 송신로)로 나간다.
+        sess.send_bytes(b"ls\r").unwrap();
+        assert_eq!(
+            wrx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+            b"ls\r".to_vec()
+        );
+        // resize 는 ioctl 이 아니라 콜백으로 나가고, 로컬 격자는 낙관 적용된다.
+        sess.resize(30, 6).unwrap();
+        assert_eq!(resized.lock().unwrap().as_slice(), &[(30, 6)]);
+        assert_eq!(sess.size(), (30, 6));
+    }
+
+    #[test]
+    fn external_setsize_applies_before_following_bytes() {
+        // SetSize 가 같은 채널에 실리므로, 뒤따르는 바이트는 반드시 새 격자로
+        // 파싱된다 — 이 순서 보장이 ExtEvent 설계의 요점이다.
+        let (sess, etx, _wrx, _resized) = ext_session(20, 5);
+        etx.send(ExtEvent::SetSize(40, 10)).unwrap();
+        etx.send(ExtEvent::Bytes(b"resized-frame".to_vec())).unwrap();
+        assert!(wait_text(&sess, "resized-frame"));
+        assert_eq!(sess.size(), (40, 10));
+    }
+
+    #[test]
+    fn external_eof_emits_reap_sentinel() {
+        let (sess, etx, _wrx, _resized) = ext_session(20, 5);
+        etx.send(ExtEvent::Bytes(b"x".to_vec())).unwrap();
+        etx.send(ExtEvent::Eof).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_eof = false;
+        while Instant::now() < deadline {
+            match sess.screens.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(u) if u.eof => {
+                    saw_eof = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+        }
+        assert!(saw_eof, "Eof 이벤트는 eof 센티널 프레임이 되어야 한다");
+    }
+
+    #[test]
+    fn external_reconnect_ris_clears_history() {
+        // 재접속 시나리오: RIS(ESC c) 한 방이 화면과 스크롤백을 모두 비워, 이어지는
+        // 스냅샷 재생이 중복 없이 상태를 다시 세운다(alacritty Grid::reset 이
+        // clear_history 를 부르는 것에 기댄다 — 이 테스트가 그 계약의 회귀 감시다).
+        let (sess, etx, _wrx, _resized) = ext_session(20, 5);
+        let mut long = Vec::new();
+        for i in 0..30 {
+            long.extend_from_slice(format!("line{i}\r\n").as_bytes());
+        }
+        etx.send(ExtEvent::Bytes(long)).unwrap();
+        assert!(wait_text(&sess, "line29"));
+        assert!(sess.view_state().1 > 0, "스크롤백이 쌓여 있어야 전제 성립");
+        etx.send(ExtEvent::Bytes(b"\x1bcfresh".to_vec())).unwrap();
+        assert!(wait_text(&sess, "fresh"));
+        assert_eq!(sess.view_state().1, 0, "RIS 뒤 히스토리는 0 이어야 한다");
     }
 }
