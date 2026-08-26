@@ -720,11 +720,24 @@ impl App {
             CharacterSwapBtn::ShellOnly => {
                 Some(format!("{} → {} · 말투는 다음에 띄울 때부터", p.pane, p.to))
             }
-            CharacterSwapBtn::Relaunch => Some(if self.restart_pane_agent(&p.pane) {
-                format!("{} → {} · 대화를 이어서 다시 띄웠어요", p.pane, p.to)
-            } else {
-                // 되띄우기가 조용히 실패하면 사용자는 말투까지 바뀐 줄 안다.
-                format!("{} → {} · 다시 띄우지 못해 말투는 다음부터", p.pane, p.to)
+            CharacterSwapBtn::Relaunch => Some({
+                // **되띄우기가 캐릭터를 다시 고르지 못하게 못 박는다.** 그 경로는
+                // `assign_character_env` 로 env 를 새로 세우는데, 그 함수는 고른
+                // 명단(`assignable_names`)에서 뽑으므로 **명단 밖 학생으로 바꾼
+                // 경우 방금 지정한 이름이 그 자리에서 다른 학생으로 갈아치워진다**
+                // (2026-08-26 지시: 「다른거로 바꿔도 테마 적용돼있으면 다른테마
+                // 캐릭터로 안바뀌어」). pending 은 그 선택보다 우선한다.
+                self.pending_character = Some(p.to.clone());
+                let ok = self.restart_pane_agent(&p.pane);
+                // 되띄우기가 실패하면 pending 이 남아 **다음에 뜨는 엉뚱한 pane** 이
+                // 그 학생을 물고 간다. 쓰였든 아니든 여기서 걷는다.
+                self.pending_character = None;
+                if ok {
+                    format!("{} → {} · 대화를 이어서 다시 띄웠어요", p.pane, p.to)
+                } else {
+                    // 되띄우기가 조용히 실패하면 사용자는 말투까지 바뀐 줄 안다.
+                    format!("{} → {} · 다시 띄우지 못해 말투는 다음부터", p.pane, p.to)
+                }
             }),
         };
         if let Some(m) = msg {
