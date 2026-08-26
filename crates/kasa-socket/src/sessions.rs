@@ -35,6 +35,45 @@ pub fn session_jsonl_path(cwd: &Path, id: &str) -> Option<PathBuf> {
     Some(claude_project_dir(cwd)?.join(format!("{id}.jsonl")))
 }
 
+/// `cwd` 를 모르는 채 세션 jsonl 을 찾는다 — `~/.claude/projects/*/<id>.jsonl` 을 훑는다.
+///
+/// ⚠️**`cwd` 를 아는 쪽은 항상 `session_jsonl_path` 를 먼저 써라.** 이건 폴백이다.
+///
+/// 필요한 이유는 **목록을 만드는 길과 여는 길이 서로 다른 cwd 를 쓰기** 때문이다.
+/// standalone(`kasa-serve-web`)의 board 는 `claude agents --json` 이 알려 준 **세션마다의
+/// cwd** 로 제목을 읽는데, `peek`·`transcript` 는 프로세스가 뜰 때 정해진 **root 하나**로만
+/// 열려 했다. 맥미니 실측에서 그 둘의 교집합이 **0개**였다 — board 에 14개가 멀쩡히 뜨는데
+/// 누르면 전부 「no transcript」였고, 목록이 정상이라 화면에선 원인이 안 보인다.
+///
+/// 세션 id 는 uuid 라 프로젝트가 달라도 안 겹치므로, 찾은 첫 파일이 곧 그 세션이다.
+/// 비용은 projects 디렉터리 한 번 읽기 + 폴더마다 `exists()` 한 번이다(파일을 안 연다).
+pub fn session_jsonl_path_anywhere(id: &str) -> Option<PathBuf> {
+    if !is_uuid(id) {
+        return None;
+    }
+    let home = std::env::var_os("HOME")?;
+    let root = PathBuf::from(home).join(".claude/projects");
+    let name = format!("{id}.jsonl");
+    for proj in std::fs::read_dir(&root).ok()?.flatten() {
+        let candidate = proj.path().join(&name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `cwd` 로 먼저, 못 찾으면 프로젝트 전체에서. 세션을 **여는** 쪽(peek·transcript·send)이
+/// 쓴다 — 목록에 뜬 세션이 열리지 않는 상태를 만들지 않기 위해서다.
+pub fn session_jsonl_path_resolved(cwd: &Path, id: &str) -> Option<PathBuf> {
+    if let Some(p) = session_jsonl_path(cwd, id) {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    session_jsonl_path_anywhere(id)
+}
+
 /// 최근 claude 세션 목록(`claude --resume` 후보) — `cwd` 의 projects 디렉터리에서
 /// 모든 .jsonl 을 mtime 내림차순으로 모아 상위 `limit` 개만 라벨까지 파싱한다.
 /// 287개씩 쌓인 디렉터리도 라벨 파싱은 최신 N개에만 들어 비용이 작다.
@@ -333,13 +372,15 @@ fn last_user_text(path: &Path) -> Option<String> {
     last
 }
 
-/// peek 용 — 세션 jsonl 마지막 `turns` 개 user/assistant 텍스트를 사람이 읽을 형태로.
-/// 라이브 pane 화면이 없는 standalone 에서 background 세션 '엿보기'를 대신한다.
-pub fn transcript_tail_text(cwd: &Path, id: &str, turns: usize) -> Option<String> {
-    let path = session_jsonl_path(cwd, id)?;
+/// 세션 jsonl 에서 마지막 `turns` 개의 대화 턴을 `(role, text)` 로. role 은
+/// `"user"`/`"assistant"`. `turns == 0` 이면 전부.
+///
+/// 도구 호출·메타 줄은 뺀다 — 사람이 읽을 대화만 남긴다. **자르지 않는다**:
+/// 화면에 전문을 보여주는 쪽이 부르므로, 줄이는 건 부르는 쪽이 정할 일이다.
+pub fn transcript_turns_at(path: &Path, turns: usize) -> Vec<(String, String)> {
     use std::io::BufRead;
-    let f = std::fs::File::open(&path).ok()?;
-    let mut msgs: Vec<String> = Vec::new();
+    let Ok(f) = std::fs::File::open(path) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = Vec::new();
     for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
         match v.get("type").and_then(|t| t.as_str()) {
@@ -350,7 +391,7 @@ pub fn transcript_tail_text(cwd: &Path, id: &str, turns: usize) -> Option<String
                 if let Some(t) = user_message_text(&v) {
                     let t = t.trim();
                     if !t.is_empty() && !is_meta_user_text(t) {
-                        msgs.push(format!("[사용자] {}", t.chars().take(500).collect::<String>()));
+                        out.push(("user".into(), t.to_string()));
                     }
                 }
             }
@@ -358,15 +399,40 @@ pub fn transcript_tail_text(cwd: &Path, id: &str, turns: usize) -> Option<String
                 if let Some(t) = assistant_message_text(&v) {
                     let t = t.trim();
                     if !t.is_empty() {
-                        msgs.push(format!("[claude] {}", t.chars().take(500).collect::<String>()));
+                        out.push(("assistant".into(), t.to_string()));
                     }
                 }
             }
             _ => {}
         }
     }
-    let start = msgs.len().saturating_sub(turns.max(1));
-    Some(msgs[start..].join("\n\n"))
+    if turns > 0 && out.len() > turns {
+        out.drain(0..out.len() - turns);
+    }
+    out
+}
+
+/// peek 용 — 세션 jsonl 마지막 `turns` 개 user/assistant 텍스트를 사람이 읽을 형태로.
+/// 라이브 pane 화면이 없는 standalone 에서 background 세션 '엿보기'를 대신한다.
+///
+/// ⚠️`cwd` 를 모르면 못 찾는다. 목록과 여는 길이 다른 cwd 를 쓰는 곳
+/// (standalone)에서는 `session_jsonl_path_resolved` 로 경로를 먼저 풀고
+/// `transcript_turns_at` 을 직접 부를 것.
+pub fn transcript_tail_text(cwd: &Path, id: &str, turns: usize) -> Option<String> {
+    let path = session_jsonl_path(cwd, id)?;
+    Some(format_turns(&transcript_turns_at(&path, turns.max(1))))
+}
+
+/// 대화 턴을 peek 화면 문자열로. 한 발언 500자에서 자른다 — 엿보기지 전문이 아니다.
+pub fn format_turns(turns: &[(String, String)]) -> String {
+    turns
+        .iter()
+        .map(|(role, text)| {
+            let who = if role == "user" { "[사용자]" } else { "[claude]" };
+            format!("{who} {}", text.chars().take(500).collect::<String>())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// assistant transcript 라인의 본문 텍스트 — content 블록 배열의 text 블록들을 이어붙인다.
@@ -420,6 +486,47 @@ mod tests {
             "\n",
         );
         assert_eq!(first_prompt_label(tail), None);
+    }
+
+    #[test]
+    fn 대화턴은_메타와_도구줄을_빼고_마지막_n개만_남긴다() {
+        // `/transcript` 가 `ok:true` 에 `turns: 0` 을 주던 자리의 안전망이다 —
+        // 빈 목록은 오류로 안 보이고 「원래 빈 세션」과 구분이 안 된다.
+        let body = concat!(
+            r#"{"type":"user","isMeta":true,"message":{"content":"<command-name>/clear</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"1+1 은?"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"2"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"10 을 곱하면?"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":"20"}}"#,
+            "\n",
+        );
+        let p = tmp_jsonl("turns", body);
+        let all = transcript_turns_at(&p, 0);
+        // isMeta 한 줄과 text 블록이 없는 tool_use 한 줄은 빠진다.
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0], ("user".to_string(), "1+1 은?".to_string()));
+        assert_eq!(all[3], ("assistant".to_string(), "20".to_string()));
+        // turns 는 **마지막** N개다(앞이 아니라).
+        let tail = transcript_turns_at(&p, 2);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].1, "10 을 곱하면?");
+        // peek 표시는 같은 턴을 사람이 읽을 형태로.
+        assert_eq!(format_turns(&tail), "[사용자] 10 을 곱하면?\n\n[claude] 20");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn 세션을_전역에서_찾을_때_uuid_가_아니면_안_찾는다() {
+        // pane id(`%3`)나 빈 문자열로 projects 전체를 훑지 않게 하는 관문이다.
+        assert!(session_jsonl_path_anywhere("%3").is_none());
+        assert!(session_jsonl_path_anywhere("").is_none());
+        assert!(session_jsonl_path_anywhere("../../etc/passwd").is_none());
     }
 
     fn tmp_jsonl(name: &str, body: &str) -> std::path::PathBuf {

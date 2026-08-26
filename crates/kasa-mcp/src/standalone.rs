@@ -7,9 +7,16 @@
 //!
 //! The `Backend` trait already defaults 57 of its methods to a safe
 //! bail/empty, so this only writes the 7 required-no-default methods (live-pane
-//! ops that are meaningless here → bail; list queries → empty) plus the 3 that
+//! ops that are meaningless here → bail; list queries → empty) plus the ones that
 //! actually do work off disk: `active_cwd`, `recent_sessions`,
-//! `session_transcript_raw`. `/background-agents` needs no method — its handler
+//! `session_transcript_raw`, `collab_board`, `peek`, `transcript_tail`.
+//!
+//! ⚠️ **디스크를 읽는 창구는 전부 `jsonl_for` 를 지난다.** 세션 목록을 만드는 길과
+//! 세션 하나를 여는 길이 서로 다른 cwd 를 쓰면 「목록엔 뜨는데 안 열리는」 상태가
+//! 되고, 목록이 정상이라 화면에선 원인이 안 보인다(맥미니 실측: 교집합 0개).
+//! 그리고 트레이트 기본값이 대부분 **빈 값**이라, 창구를 빠뜨리면 오류가 아니라
+//! **빈 화면**으로 나온다 — `transcript_tail` 이 그렇게 `turns: 0` 을 주고 있었다.
+//! `/background-agents` needs no method — its handler
 //! shells out to `claude agents --json --all` and only reads
 //! `pane_session_ids()` (default empty), so background sessions simply come
 //! back without a `parentSurface` tag, which is correct for a paneless host.
@@ -18,10 +25,12 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use kasa_socket::backend::{
-    Backend, PaneActivity, RecentSession, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, ConversationTurn, PaneActivity, RecentSession, SplitDirection, SurfaceInfo,
+    WorkspaceInfo,
 };
 use kasa_socket::sessions::{
-    is_uuid, recent_sessions_here, session_board_meta, session_jsonl_path, transcript_tail_text,
+    format_turns, is_uuid, recent_sessions_here, session_board_meta, session_jsonl_path_resolved,
+    transcript_turns_at,
 };
 
 pub struct StandaloneBackend {
@@ -35,6 +44,19 @@ pub struct StandaloneBackend {
 impl StandaloneBackend {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// 세션 하나를 **여는** 길. 목록을 만드는 길과 갈리지 않게 한 자리로 모았다.
+    ///
+    /// ⚠️ 원래는 세 창구가 제각기 `self.root` 로만 열려 했는데, board 는
+    /// `claude agents --json` 이 준 **세션마다의 cwd** 로 제목을 읽는다. 그 둘이
+    /// 갈려 있으면 **목록엔 뜨는데 누르면 안 열리는** 상태가 된다 — 맥미니 실측에서
+    /// 교집합이 0개였다(root `/Users/miku`, board 14개는 전부 `/Users/miku/nacho-neko`).
+    /// 목록은 멀쩡하니 화면에선 원인이 안 보인다.
+    fn jsonl_for(&self, id: &str, cwd: Option<&str>) -> Result<PathBuf> {
+        let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
+        session_jsonl_path_resolved(&base, id)
+            .ok_or_else(|| anyhow::anyhow!("no transcript for session {id}"))
     }
 }
 
@@ -67,7 +89,16 @@ impl Backend for StandaloneBackend {
         // 토큰이 필요하다(인터포저로 프로토콜 해독). auth 출처가 불투명하므로 그 핸드셰이크를
         // 직접 재현하는 대신, `claude attach <sid>` 를 forkpty 로 띄운다 — claude 가 nudge/
         // attach/auth 를 다 처리하니 우리는 pty stdin 에 텍스트+CR 을 쓰고 잠시 뒤 SIGTERM 으로
-        // detach 하면 된다. (실환경 idle 세션 검증 필요 — blocked/working 세션엔 즉시 안 먹음.)
+        // detach 하면 된다.
+        //
+        // 실환경 검증됨(2026-08-26, 맥미니): `done` 세션에 「방금 답한 숫자에 10을 곱하면?」을
+        // 넣으니 앞 턴(1+1→2)을 이어받아 **20** 이라 답했다 — 주입만 되는 게 아니라 맥락이
+        // 이어진다. blocked/working 세션엔 즉시 안 먹는 것은 그대로다.
+        //
+        // ⚠️**부르는 쪽은 이 함수의 반환을 기다려 성패를 판정하면 안 된다.** drain 2.5s +
+        // 처리 2.5s 에 `claude attach` 가 SIGTERM 을 받고 정리하는 시간이 더 붙어, HTTP 로
+        // 감싸면 25초를 넘겨 클라이언트가 먼저 끊는다(실측). 실제로는 성공했는데 화면엔
+        // 실패로 보인다 — 「보냈다」로 끊고 transcript 갱신으로 확인하는 편이 맞다.
         let sid = surface_id
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("standalone tell requires a session id (surface)"))?;
@@ -139,6 +170,10 @@ impl Backend for StandaloneBackend {
     }
 
     fn recent_sessions(&self, cwd: Option<&str>) -> Result<Vec<RecentSession>> {
+        // ⚠️ 여기는 일부러 root 를 그대로 쓴다 — 「이 폴더의 `claude --resume` 후보」가
+        // 뜻이라, 위 `jsonl_for` 처럼 전역으로 넓히면 다른 뜻이 된다. 대신 standalone 은
+        // root 가 프로세스가 뜬 자리일 뿐이라 board 와 갈릴 수 있다(맥미니가 그랬다).
+        // 전역 목록이 필요해지면 `recent_claude_sessions_all` 이 이미 있다.
         let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
         // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
         // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
@@ -152,12 +187,7 @@ impl Backend for StandaloneBackend {
         if !is_uuid(id) {
             anyhow::bail!("invalid session id: {id}");
         }
-        let base = cwd
-            .map(PathBuf::from)
-            .or_else(|| self.active_cwd())
-            .ok_or_else(|| anyhow::anyhow!("no cwd for session {id}"))?;
-        let path = session_jsonl_path(&base, id)
-            .ok_or_else(|| anyhow::anyhow!("no HOME — cannot locate session {id}"))?;
+        let path = self.jsonl_for(id, cwd)?;
         std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("read session transcript {path:?}: {e}"))
     }
@@ -205,7 +235,18 @@ impl Backend for StandaloneBackend {
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         // surface_id = sessionId(라이브 pane 이 아니므로). transcript 마지막 대화로 '엿보기'.
         let turns = if lines == 0 { 6 } else { lines };
-        transcript_tail_text(&self.root, surface_id, turns)
-            .ok_or_else(|| anyhow::anyhow!("no transcript for session {surface_id}"))
+        let path = self.jsonl_for(surface_id, None)?;
+        Ok(format_turns(&transcript_turns_at(&path, turns)))
+    }
+
+    /// 웹뷰의 대화 화면이 읽는 것. 트레이트 기본값이 **빈 벡터**라, 이걸 안 쓰면
+    /// `/transcript` 가 `ok:true` 에 `turns: 0` 을 준다 — 오류가 아니라 **빈 대화**로
+    /// 보여서 「이 세션은 원래 비었다」와 구분이 안 된다(맥미니 실측으로 밟은 자리).
+    fn transcript_tail(&self, surface_id: &str, turns: usize) -> Result<Vec<ConversationTurn>> {
+        let path = self.jsonl_for(surface_id, None)?;
+        Ok(transcript_turns_at(&path, turns)
+            .into_iter()
+            .map(|(role, text)| ConversationTurn { role, text })
+            .collect())
     }
 }
