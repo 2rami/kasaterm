@@ -40,6 +40,34 @@ pub(crate) struct WebHost {
     zoom_level: f64,
 }
 
+impl WebHost {
+    /// 웹뷰가 지금 보고 있는 주소. **없을 수 있다** — 첫 네비게이션이 commit
+    /// 되기 전, 그리고 서버가 죽어 로드가 실패한 뒤엔 `WKWebView.URL` 이 계속
+    /// nil 이다.
+    ///
+    /// wry 의 `WebView::url()` 을 쓰지 않는 이유: macOS 구현(0.55.1
+    /// wkwebview/mod.rs `url_from_webview`)이 그 nil 을 `unwrap` 해서 Result 가
+    /// 아니라 **앱째 패닉**한다. 2026-08-27 복원 때 죽은 로컬 서버(8731)를
+    /// 가리키던 웹 pane 하나가 0.5초 주소 폴링에 걸려 창 전체가 1초 만에
+    /// 꺼졌다(`kasaterm-panic.log`). 못 여는 주소 하나가 앱을 죽이면 안 되므로
+    /// WKWebView 에 직접 물어 Option 으로 받는다. 다른 플랫폼의 wry 구현은
+    /// 빈 주소를 Err/빈 문자열로 돌려주니 그대로 쓴다.
+    fn current_url(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            use wry::WebViewExtMacOS;
+            let wk = self.webview.webview();
+            let url = unsafe { wk.URL() }?;
+            let s = url.absoluteString()?.to_string();
+            (!s.is_empty()).then_some(s)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.webview.url().ok().filter(|s| !s.is_empty())
+        }
+    }
+}
+
 /// pane 상자 가장자리에서 webview 를 들이는 논리 px — 포커스 테두리(렌더가
 /// pane 상자 모서리에 그린다)가 자식 창에 가려 안 보이는 것을 막는다.
 const WEB_INSET: f32 = 2.0;
@@ -575,10 +603,8 @@ impl App {
             // 주소로 박제해 두면 탭 라벨과 중복-포커스 판정이 거짓말한다.
             if host.last_url_poll.elapsed() >= std::time::Duration::from_millis(500) {
                 host.last_url_poll = std::time::Instant::now();
-                if let Ok(cur) = host.webview.url() {
-                    if !cur.is_empty() {
-                        url_updates.push((pane_id.clone(), host_id, cur));
-                    }
+                if let Some(cur) = host.current_url() {
+                    url_updates.push((pane_id.clone(), host_id, cur));
                 }
             }
             if host.last_frame.is_none() {
@@ -707,10 +733,9 @@ impl App {
             "external" => {
                 // 저장된 WebPane.url 이 아니라 웹뷰의 지금 주소 — 이동했으면
                 // 사용자가 보고 있는 그 페이지를 열어야 한다.
-                match host.webview.url() {
-                    Ok(u) if !u.is_empty() => open_external(&u),
-                    Ok(_) => Err("주소가 비어 있다".to_string()),
-                    Err(e) => Err(e.to_string()),
+                match host.current_url() {
+                    Some(u) => open_external(&u),
+                    None => Err("아직 주소가 없다 — 로드 전이거나 실패한 페이지".to_string()),
                 }
             }
             other => Err(format!("{other}: 모르는 nav")),
@@ -743,7 +768,10 @@ impl App {
         };
         match op {
             "url" => {
-                let _ = reply.send(host.webview.url().map_err(|e| e.to_string()));
+                let _ = reply.send(
+                    host.current_url()
+                        .ok_or_else(|| "아직 주소가 없다 — 로드 전이거나 실패한 페이지".to_string()),
+                );
             }
             "eval" | "text" => {
                 // text 는 eval 의 고정 스크립트일 뿐이다 — 본문 확인이 제일 잦은
