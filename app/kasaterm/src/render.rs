@@ -2420,23 +2420,28 @@ impl App {
                         // 이 분기를 못 타고 아래 폴백으로 흘러 "미도리 · 작업명" 대신
                         // 세션제목이 칩자리에 박혔다(거노 Q1). session_character(bound sid)
                         // 로 해석하면 스프라이트·프사(둘 다 true_char)와 헤더가 일치한다.
-                        match pane
-                            .title
-                            .clone()
-                            .map(|t| crate::strip_activity_prefix(&t).to_string())
-                            .filter(|t| !t.is_empty())
-                        {
-                            // pane 아이디를 캐릭터 뒤에 붙인다(거노 2026-08-05: "칩 위치를
-                            // 바꿔 pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
-                            // 입력박스 보더 우측은 `/rename` 이름 자리로 비워 뒀으니
-                            // (`inlay_prompt_box_right`) **이 pane 이 누구인가**는 헤더가
-                            // 든다. 학생 pane 은 여태 캐릭터만 실어 아이디가 어디에도
-                            // 없었다 — `tell %N` 을 쓰려면 그걸 알아야 한다.
-                            //
-                            // agent 이름(`midori-p1`)을 그대로 싣지 않는 이유: 그건 캐릭터
-                            // 슬러그 + pane 번호라 `미도리 %1` 과 같은 정보인데, 로마자
-                            // 슬러그는 스프라이트·board 의 한글 이름과 안 맞아 두 이름을
-                            // 오가게 만든다. 정체 표시는 한 벌로 둔다.
+                        // pane 아이디를 캐릭터 뒤에 붙인다(2026-08-05 지시: "칩 위치를
+                        // 바꿔 pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
+                        // 학생 pane 은 여태 캐릭터만 실어 아이디가 어디에도 없었다 —
+                        // `tell %N` 을 쓰려면 그걸 알아야 한다.
+                        //
+                        // 셋째 칸은 **사람이 붙인 세션 이름**을 먼저 든다(2026-08-27 지시:
+                        // "pane이름에는 아리스 %0 kasaterm리네임 … 이 되게해줘"). 여태
+                        // OSC 제목(claude 의 활동 요약)만 실어서, `/rename` 을 해도 헤더에
+                        // 반영될 길이 자체가 없었다 — 개명은 세션 명부와 전사본에 남는데
+                        // 헤더는 그 어느 쪽도 안 읽었다. 입력박스 보더 우측은 그대로
+                        // claude 몫이라, 같은 이름이 헤더와 보더에 나란히 선다.
+                        //
+                        // 스폰 초기 이름(`midori-p1-k7q`)은 싣지 않는다(`is_spawn_generated_name`
+                        // 이 걸러낸다): 캐릭터 슬러그 + pane 번호라 바로 옆 `미도리 %1` 과
+                        // 같은 정보인데, 로마자 슬러그는 스프라이트·board 의 한글 이름과
+                        // 안 맞아 두 이름을 오가게 만든다. 정체 표시는 한 벌로 둔다.
+                        match self.pane_renamed_title(&id).or_else(|| {
+                            pane.title
+                                .clone()
+                                .map(|t| crate::strip_activity_prefix(&t).to_string())
+                                .filter(|t| !t.is_empty())
+                        }) {
                             Some(t) => format!("{c} {id} · {t}"),
                             None => format!("{c} {id}"),
                         }
@@ -3139,13 +3144,22 @@ impl App {
                         .filter(|p| p.title_pinned)
                         .and_then(|p| p.title.clone())
                         .filter(|s| !s.trim().is_empty());
-                    pinned
+                    // 헤더와 같은 순서 — 사람이 붙인 세션 이름이 먼저다.
+                    self.pane_renamed_title(&id)
+                        .or(pinned)
                         .or_else(|| self.display_pane_char(&ws, &id))
                         .map(|n| (id, n))
                 })
                 .collect()
         } else {
             HashMap::new()
+        };
+        // gpu 를 가변으로 빌린 뒤에는 `&self` 메서드를 못 부른다 — 타이틀바 칩이 쓸 값을
+        // 미리 떠 둔다. 사본을 새로 만들지 않고 **스냅샷**을 뜨는 이유는, 인라인 사본은
+        // 규칙이 갈려도 아무 오류가 안 나기 때문이다(2026-08-27).
+        let active_renamed: Option<String> = {
+            let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+            active.and_then(|id| self.pane_renamed_title(&id))
         };
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
@@ -3620,11 +3634,15 @@ impl App {
                             None => "샬레".to_string(),
                         }
                     } else if let Some(c) = claude_char {
-                        let work = active
-                            .as_deref()
-                            .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
-                            .map(|t| crate::strip_activity_prefix(&t).to_string())
-                            .filter(|s| !s.is_empty());
+                        // 헤더 띠와 **같은 규칙**으로 고른다(`pane_renamed_title`) — 갈리면
+                        // 같은 pane 이 띠와 타이틀바에서 다른 이름으로 불린다.
+                        let work = active_renamed.clone().or_else(|| {
+                            active
+                                .as_deref()
+                                .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
+                                .map(|t| crate::strip_activity_prefix(&t).to_string())
+                                .filter(|s| !s.is_empty())
+                        });
                         // pane 아이디를 캐릭터 뒤에 (거노 2026-08-05: "칩 위치를 바꿔
                         // pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
                         //

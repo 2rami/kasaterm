@@ -1555,6 +1555,27 @@ pub fn agent_slug(name: &str) -> String {
         .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
 }
 
+/// 이 세션 이름이 **앱이 스폰 때 지어 준 초기값**인가 — `<슬러그>-p<번호>-<3자>`.
+///
+/// 화면 헤더는 이런 이름을 안 싣는다. 로마자 슬러그 + pane 번호라 바로 옆의
+/// `아리스 %0` 과 같은 정보인데, 한글 이름·프사와 안 맞아 한 pane 을 두 이름으로
+/// 부르게 만든다(2026-08-05 결정). 사람이 `/rename` 으로 바꾼 이름만 싣는다.
+///
+/// ⚠️ **계산해서 비교하지 마라.** 꼬리는 `agent_name_suffix()` 이고 그건 앱 부팅마다
+/// 바뀌는 값이라, 재시작하면 옛 이름과 안 맞아 「개명했다」로 오판한다. 형식으로만 판정한다.
+pub fn is_spawn_generated_name(name: &str) -> bool {
+    let is_b36 = |s: &str| s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let name = name.trim();
+    // 꼬리 `-<base36 3자>`
+    let Some((head, tail)) = name.rsplit_once('-') else { return false };
+    if tail.len() != 3 || !is_b36(tail) {
+        return false;
+    }
+    // 그 앞 `-p<숫자>`
+    let Some((slug, pane)) = head.rsplit_once("-p") else { return false };
+    !slug.is_empty() && is_b36(slug) && !pane.is_empty() && pane.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸
 /// 학생을 역추적할 때 쓴다(접힌 팀메시지 줄 학생색).
 pub fn slug_character(slug: &str) -> Option<&'static str> {
@@ -2015,3 +2036,36 @@ mod accent_tests {
         assert!(character_accent("없는학생").is_none());
     }
 }
+
+#[cfg(test)]
+mod spawn_name_tests {
+    use super::is_spawn_generated_name;
+
+    /// 헤더 셋째 칸은 **사람이 붙인 이름만** 싣는다. 이 판정이 느슨해지면 스폰 초기
+    /// 이름이 화면에 올라와 `아리스 %0 · arisu-p0-2l1` 처럼 같은 정보가 두 번 뜬다.
+    #[test]
+    fn spawn_names_are_told_apart_from_hand_typed_ones() {
+        // 스폰 초기값 — `<슬러그>-p<번호>-<base36 3자>`
+        assert!(is_spawn_generated_name("koyuki-p13-2l1"));
+        assert!(is_spawn_generated_name("shiroko-p1-2l1"));
+        // 명단 밖 학생은 슬러그가 해시(`s`+hex)로 떨어진다 — 그것도 초기값이다.
+        assert!(is_spawn_generated_name("sc49a-p14-5i4"));
+
+        // 사람이 `/rename` 으로 붙인 이름 — 실제 명부에서 관측된 것들.
+        assert!(!is_spawn_generated_name("rename"));
+        assert!(!is_spawn_generated_name("theme"));
+        assert!(!is_spawn_generated_name("layoutool"));
+        assert!(!is_spawn_generated_name("리드미꾸미기 visitor counter"));
+        assert!(!is_spawn_generated_name("nacho image"));
+
+        // claude 가 cwd 로 지은 이름(`derived`)은 꼬리가 3자가 아니라 여기서도 걸린다.
+        // 명부의 nameSource 로도 한 번 더 거른다(screenread).
+        assert!(!is_spawn_generated_name("tmuxify-53"));
+        // 모양만 비슷하고 어긋난 것들
+        assert!(!is_spawn_generated_name("midori-p"), "pane 번호가 없다");
+        assert!(!is_spawn_generated_name("midori-2l1"), "-p<번호> 가 없다");
+        assert!(!is_spawn_generated_name("midori-pxx-2l1"), "pane 번호가 숫자가 아니다");
+        assert!(!is_spawn_generated_name("-p1-2l1"), "슬러그가 비었다");
+    }
+}
+

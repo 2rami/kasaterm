@@ -329,6 +329,19 @@ impl App {
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
     /// 미현존(resume/재사용으로 surface_id 가 stale)이거나 순정 pane 이면 None →
     /// 호출부는 hook 정보만으로 폴백(토스트를 드롭하지 않는다).
+    /// 이 pane 에 **사람이 붙인** 세션 이름(`/rename`). 없으면 `None`.
+    ///
+    /// 헤더 띠·타이틀바 칩·Alt 부제가 셋째 칸을 이걸로 든다. 세 자리가 같은 값을 서로
+    /// 다르게 고르면 한 pane 이 화면에서 두세 이름으로 불린다 — 그래서 판정을 여기 하나로
+    /// 둔다. 스폰 초기 이름(`midori-p1-k7q`)은 걸러진다: 슬러그 + pane 번호라 바로 옆의
+    /// `미도리 %1` 과 같은 정보다.
+    pub(crate) fn pane_renamed_title(&self, id: &str) -> Option<String> {
+        self.pane_claude_sid
+            .get(id)
+            .and_then(|sid| crate::screenread::peer_name_by_sid(sid))
+            .filter(|n| !crate::theme::is_spawn_generated_name(n))
+    }
+
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let key = ws.active_tab_pid(id);
