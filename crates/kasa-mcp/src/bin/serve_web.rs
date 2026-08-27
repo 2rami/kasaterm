@@ -34,6 +34,22 @@ fn main() -> anyhow::Result<()> {
     ] {
         std::env::remove_var(k);
     }
+    // pane 안에서 띄운 데몬은 그 pane 의 kasaterm 정체(env)도 물려받는다 — 그대로
+    // 두면 이 데몬이 낳는 모든 셸이 **띄운 사람의 페르소나·계정 프록시·pane id** 를
+    // 달고 태어난다(2026-08-27 실측: 원격 pane 의 claude 가 케이 페르소나 + 남의
+    // 계정 프록시 포트로 떴다). 데몬 셸은 평범한 로그인 셸로 태어나야 한다.
+    let stale: Vec<String> = std::env::vars()
+        .map(|(k, _)| k)
+        .filter(|k| {
+            k.starts_with("KASATERM_")
+                || k == "CMUX_SOCKET_PATH"
+                || k == "KASASPACE_MCP_PORT"
+                || k == "ANTHROPIC_BASE_URL"
+        })
+        .collect();
+    for k in stale {
+        std::env::remove_var(&k);
+    }
     let mut cwd: Option<PathBuf> = None;
     let mut port: u16 = DEFAULT_PORT;
     let mut it = std::env::args().skip(1);
