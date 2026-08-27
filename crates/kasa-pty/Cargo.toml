@@ -33,6 +33,10 @@ memchr = "2"
 # Toolhelp snapshot, and read a single process's argv out of its PEB over
 # ReadProcessMemory — so active_process_name / has_active_job / claude session
 # id detection work natively.
+# 핸드오프(산 채로 fd 넘기기): poll 기반 reader 정지·TIOCSWINSZ·dup·kill.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

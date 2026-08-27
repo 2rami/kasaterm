@@ -186,6 +186,14 @@ enum SessionIo {
     External {
         on_resize: Arc<dyn Fn(u16, u16) + Send + Sync>,
     },
+    /// 다른 프로세스(GUI)가 띄운 PTY 를 **산 채로 입양**했다 — 핸드오프의 데몬 쪽.
+    /// fd 는 SCM_RIGHTS 로 건너온 master 이고, child 는 우리 자식이 아니라
+    /// pid 로만 안다(Drop 에서 kill(pid); 좀비 회수는 원 부모가 죽으면 launchd 몫).
+    #[cfg(unix)]
+    Adopted {
+        fd: std::os::fd::OwnedFd,
+        child_pid: Option<u32>,
+    },
 }
 
 /// 외부 소스(WebSocket 클라이언트 등)가 `start_external` 세션에 밀어 넣는 이벤트.
@@ -321,6 +329,12 @@ pub struct PtySession {
     /// `theme: auto` 등)에게만 테마 전환 때 `CSI ?997;N n` 리포트를 보낸다 —
     /// 구독 안 한 셸에 보내면 입력줄에 이스케이프 쓰레기가 박힌다.
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
+    /// reader 스레드 정지 신호 — 핸드오프(fd 를 다른 프로세스로 넘기기) 직전에
+    /// 세운다. 안 세우고 넘기면 커널이 다음 출력 청크를 **이쪽** read 에 줘 버려,
+    /// 넘긴 뒤의 화면이 두 소비자에게 갈라진다.
+    reader_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// true 면 Drop 이 child 를 죽이지 않는다 — 핸드오프로 소유권이 나간 세션.
+    kill_disarmed: std::sync::atomic::AtomicBool,
     /// 마지막으로 CR/LF 가 이 PTY 로 들어간 시각 — 「방금 제출됐다」 신호.
     /// GUI 의 스피너 즉시-신뢰(턴 시작 첫 프레임부터 학생 테마)가 읽는다.
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
@@ -476,6 +490,11 @@ impl PtySession {
         #[cfg(not(unix))]
         let tty_short: Option<String> = None;
 
+        // poll 기반 정지에 쓸 master fd — Arc 로 싸기 전에 떠 둔다(핸드오프).
+        #[cfg(unix)]
+        let poll_fd = pair.master.as_raw_fd().map(|f| f as i32);
+        #[cfg(not(unix))]
+        let poll_fd: Option<i32> = None;
         let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair
             .master
@@ -529,8 +548,11 @@ impl PtySession {
         let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_thread = spawn_reader_thread(
             reader,
+            Arc::clone(&reader_stop),
+            poll_fd,
             tx.clone(),
             opts.cols,
             opts.rows,
@@ -575,6 +597,8 @@ impl PtySession {
             cwd_handle,
             inline_imgs,
             scheme_reports,
+            reader_stop,
+            kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
         })
     }
@@ -613,8 +637,12 @@ impl PtySession {
             size: Arc::clone(&size),
             pending: Vec::new(),
         });
+        // ExtReader 는 채널이라 poll 대상이 없다 — 정지는 채널 닫힘이 대신한다.
+        let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_thread = spawn_reader_thread(
             reader,
+            Arc::clone(&reader_stop),
+            None,
             tx.clone(),
             opts.cols,
             opts.rows,
@@ -657,8 +685,141 @@ impl PtySession {
             cwd_handle,
             inline_imgs,
             scheme_reports,
+            reader_stop,
+            kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
         })
+    }
+
+    /// 다른 프로세스가 띄운 PTY 를 **산 채로** 입양한다 — 무중단 핸드오프의 받는 쪽.
+    ///
+    /// `fd` 는 SCM_RIGHTS 로 건너온 master. reader/writer 는 dup 로 가르고,
+    /// resize 는 TIOCSWINSZ, Drop 은 kill(child_pid). 넘긴 쪽의 화면·스크롤백은
+    /// `opts.initial_scrollback` 으로 이어받는다(start 와 같은 텍스트 재생 경로).
+    /// **넘기는 쪽이 `stop_reader` 로 자기 reader 를 먼저 세우고** 보내야 출력이
+    /// 두 소비자에게 갈라지지 않는다. 정지 순간 escape 시퀀스가 반 토막 나는
+    /// 창이 이론상 있지만 TUI 는 계속 다시 그리므로 스스로 아문다.
+    #[cfg(unix)]
+    pub fn adopt(
+        opts: PtyOptions,
+        fd: std::os::fd::OwnedFd,
+        child_pid: Option<u32>,
+    ) -> Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let raw = fd.as_raw_fd();
+        let rdup = unsafe { libc::dup(raw) };
+        anyhow::ensure!(rdup >= 0, "dup(reader) 실패");
+        let reader: Box<dyn Read + Send> =
+            Box::new(unsafe { std::fs::File::from_raw_fd(rdup) });
+        let wdup = unsafe { libc::dup(raw) };
+        anyhow::ensure!(wdup >= 0, "dup(writer) 실패");
+        let writer: Box<dyn Write + Send> =
+            Box::new(unsafe { std::fs::File::from_raw_fd(wdup) });
+        let (tx, rx) = bounded::<ScreenUpdate>(256);
+        let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
+        let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+        let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let title_handle = Arc::new(Mutex::new(None));
+        let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+        let listener = PtyEventForwarder {
+            writer: Arc::clone(&writer_arc),
+            size: Arc::clone(&size),
+            last_title: Arc::clone(&title_handle),
+            // 입양자가 이제 유일한 호스트다 — 자동 응답도 이쪽 몫.
+            respond: true,
+        };
+        let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
+        if !opts.initial_scrollback.is_empty() {
+            let mut proc: Processor<StdSyncHandler> = Processor::new();
+            let mut t = term.lock().unwrap();
+            for line in &opts.initial_scrollback {
+                proc.advance(&mut *t, line.as_bytes());
+                proc.advance(&mut *t, b"\r\n");
+            }
+        }
+        let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
+        let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_thread = spawn_reader_thread(
+            reader,
+            Arc::clone(&reader_stop),
+            Some(raw),
+            tx.clone(),
+            opts.cols,
+            opts.rows,
+            size.clone(),
+            opts.pane_id.clone(),
+            Arc::clone(&title_handle),
+            Arc::clone(&term),
+            Arc::clone(&blocks),
+            Arc::clone(&cwd_handle),
+            Arc::clone(&byte_taps),
+            Arc::clone(&screen_taps),
+            Arc::clone(&inline_imgs),
+            Arc::clone(&scheme_reports),
+        );
+        Ok(Self {
+            screens: rx,
+            io: SessionIo::Adopted { fd, child_pid },
+            writer: writer_arc,
+            size,
+            _reader_thread: reader_thread,
+            shell_pid: child_pid,
+            proc_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                None,
+            ))),
+            agents_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                false,
+            ))),
+            term,
+            screens_tx: tx,
+            byte_taps,
+            screen_taps,
+            title_handle,
+            pane_id: opts.pane_id.clone(),
+            tty_short: None,
+            blocks,
+            cwd_handle,
+            inline_imgs,
+            scheme_reports,
+            reader_stop,
+            kill_disarmed: std::sync::atomic::AtomicBool::new(false),
+            last_submit: Mutex::new(None),
+        })
+    }
+
+    /// reader 스레드를 세운다(EOF 센티널 없이 조용히 퇴장). 핸드오프 직전 필수 —
+    /// 다음 poll 티크(≤250ms) 안에 물러난다. 세운 뒤 400ms 쉬고 스크롤백을 떠야
+    /// 마지막 청크까지 로컬 Term 에 담긴 채 넘어간다.
+    pub fn stop_reader(&self) {
+        self.reader_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Drop 의 child kill 을 해제한다 — 핸드오프로 소유권이 밖으로 나간 껍데기용.
+    pub fn disarm_kill(&self) {
+        self.kill_disarmed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// master fd(핸드오프 송신용). Local/Adopted 만 Some.
+    #[cfg(unix)]
+    pub fn master_raw_fd(&self) -> Option<i32> {
+        match &self.io {
+            SessionIo::Local { master, .. } => {
+                master.lock().unwrap().as_raw_fd().map(|f| f as i32)
+            }
+            SessionIo::External { .. } => None,
+            SessionIo::Adopted { fd, .. } => {
+                use std::os::fd::AsRawFd;
+                Some(fd.as_raw_fd())
+            }
+        }
     }
 
     /// 이 pane 의 앱이 DECSET 2031(컬러스킴 변경 알림)을 켰는가. 테마 전환 때
@@ -1116,6 +1277,20 @@ impl PtySession {
                 .context("pty resize")?;
             }
             SessionIo::External { on_resize } => (on_resize)(cols, rows),
+            #[cfg(unix)]
+            SessionIo::Adopted { fd, .. } => {
+                use std::os::fd::AsRawFd;
+                let ws = libc::winsize {
+                    ws_row: rows,
+                    ws_col: cols,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                // TIOCSWINSZ — SIGWINCH 가 자식에게 간다. 실패는 격자만 로컬 적용.
+                unsafe {
+                    let _ = libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+                }
+            }
         }
         // Reshape the alacritty grid *here*, not lazily in the next reader
         // pass: snapshot() (incl. full_snapshot from the daemon) indexes the
@@ -1143,6 +1318,15 @@ impl Drop for PtySession {
     /// zombie shell. Kill the child explicitly so a closed pane is always
     /// fully reaped.
     fn drop(&mut self) {
+        // 핸드오프로 소유권이 나갔다 — 이 껍데기가 죽어도 셸은 남의 것이다.
+        if self.kill_disarmed.load(std::sync::atomic::Ordering::Relaxed) {
+            // ⚠️ portable-pty 의 UnixMasterWriter 는 Drop 에서 `\n`+EOF(ctrl-D) 를
+            // pty 에 밀어 넣는다 — 산 채로 넘긴 셸이 그걸 받으면 프롬프트에서 그대로
+            // 종료된다(실측: 핸드오프 직후 EIO 로 확정). Arc 클론 하나를 영원히
+            // 잊어 그 Drop 이 영영 안 돌게 한다. 비용은 핸드오프당 fd 하나 누수.
+            std::mem::forget(Arc::clone(&self.writer));
+            return;
+        }
         match &self.io {
             SessionIo::Local { child, .. } => {
                 if let Ok(mut child) = child.lock() {
@@ -1153,6 +1337,14 @@ impl Drop for PtySession {
             // 때는 호출자가 제어 메시지(kill)를 원격에 보낸다. 전송 스레드는
             // writer/이벤트 채널이 닫히면 스스로 끝난다.
             SessionIo::External { .. } => {}
+            #[cfg(unix)]
+            SessionIo::Adopted { child_pid, .. } => {
+                if let Some(pid) = child_pid {
+                    unsafe {
+                        let _ = libc::kill(*pid as i32, libc::SIGHUP);
+                    }
+                }
+            }
         }
     }
 }
@@ -1563,6 +1755,8 @@ fn publish_screen_update(
 
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
+    reader_stop: Arc<std::sync::atomic::AtomicBool>,
+    poll_fd: Option<i32>,
     tx: Sender<ScreenUpdate>,
     cols: u16,
     rows: u16,
@@ -1647,6 +1841,28 @@ fn spawn_reader_thread(
                 drop(t);
                 current_size = want;
             }
+            // 핸드오프 정지 게이트. fd 를 다른 프로세스로 넘기기 전에 reader 가
+            // 물러나야 커널이 다음 청크를 새 주인에게 준다. EOF 센티널은 안
+            // 보낸다 — pane 은 원격 모드로 계속 살므로, 보내면 GUI 가 pane 을
+            // 걷어 버린다. poll 티크(250ms)마다 재확인하니 정지는 그 안에 든다.
+            if reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            #[cfg(unix)]
+            if let Some(pfd) = poll_fd {
+                let mut p = libc::pollfd {
+                    fd: pfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let r = unsafe { libc::poll(&mut p, 1, 250) };
+                if r == 0 {
+                    continue; // 타임아웃 — stop 재확인(루프 머리의 크기 재확인 포함)
+                }
+                // r<0(EINTR 등)은 read 가 판정하게 둔다
+            }
+            #[cfg(not(unix))]
+            let _ = poll_fd;
             let n = match reader.read(&mut buf) {
                 Ok(0) => {
                     eprintln!("[pty-backend] EOF on PTY reader — shell exited");
@@ -4938,5 +5154,83 @@ mod external_session_tests {
         etx.send(ExtEvent::Bytes(b"\x1bcfresh".to_vec())).unwrap();
         assert!(wait_text(&sess, "fresh"));
         assert_eq!(sess.view_state().1, 0, "RIS 뒤 히스토리는 0 이어야 한다");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod handoff_tests {
+    use super::*;
+    use std::os::fd::FromRawFd;
+
+    fn wait_contains(s: &PtySession, needle: &str) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(6);
+        while Instant::now() < deadline {
+            if s.visible_text(40).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// 핸드오프 전 구간: 산 셸의 fd 를 다른 세션이 입양해도 셸이 재시작되지 않고
+    /// (변수 기억 유지), 껍데기 drop 은 무해하며, 입양자 drop 만 셸을 죽인다.
+    #[test]
+    fn adopt_takes_over_live_shell_without_restart() {
+        let a = PtySession::start(PtyOptions {
+            cols: 60,
+            rows: 12,
+            pane_id: "hand-a".into(),
+            ..Default::default()
+        })
+        .expect("start");
+        a.send_bytes(b"MARK=alive-42; echo ready-$MARK\r").unwrap();
+        assert!(wait_contains(&a, "ready-alive-42"), "셸 부팅/에코 실패");
+        let pid = a.shell_pid().expect("pid");
+        let raw = a.master_raw_fd().expect("fd");
+        // 넘기기: reader 정지 → 마지막 청크가 Term 에 앉게 잠깐 → 스크롤백 뜨기
+        a.stop_reader();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let scroll = a.scrollback_text(200);
+        let dup = unsafe { libc::dup(raw) };
+        assert!(dup >= 0);
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) };
+        let b = PtySession::adopt(
+            PtyOptions {
+                cols: 60,
+                rows: 12,
+                pane_id: "hand-b".into(),
+                initial_scrollback: scroll,
+                ..Default::default()
+            },
+            owned,
+            Some(pid),
+        )
+        .expect("adopt");
+        a.disarm_kill();
+        drop(a); // 껍데기 폐기 — 셸은 살아 있어야 한다
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "핸드오프 뒤 셸이 죽었다");
+        // 입양자로 이어서 타이핑 — **같은** 셸이어야 변수를 기억한다
+        b.send_bytes(b"echo again-$MARK\r").unwrap();
+        assert!(wait_contains(&b, "again-alive-42"), "입양자 쪽 왕복 실패(다른 셸?)");
+        // 스크롤백 이어받기
+        assert!(
+            b.scrollback_text(300).iter().any(|l| l.contains("ready-alive-42")),
+            "이어받은 스크롤백에 이전 출력이 없다"
+        );
+        // 입양자 drop = 진짜 종료(SIGHUP). 부모는 이 테스트 프로세스라 waitpid 로 걷는다.
+        drop(b);
+        let mut reaped = false;
+        for _ in 0..40 {
+            let mut st = 0i32;
+            let r = unsafe { libc::waitpid(pid as i32, &mut st, libc::WNOHANG) };
+            if r == pid as i32 {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(reaped, "입양자를 버렸는데 셸이 안 죽었다");
     }
 }

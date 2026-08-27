@@ -688,8 +688,9 @@ impl App {
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;
-        self.pump_pty_screens(session.screens.clone(), new_id.clone());
-        self.insert_pty(new_id.clone(), Arc::new(session));
+        let session = Arc::new(session);
+        self.pump_pty_screens(session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&session));
+        self.insert_pty(new_id.clone(), session);
         Ok(new_id)
     }
 
@@ -838,8 +839,9 @@ impl App {
             pane_id: new_pid.clone(),
             initial_scrollback: Vec::new(),
         })?;
-        self.pump_pty_screens(session.screens.clone(), new_pid.clone());
-        self.insert_pty(new_pid.clone(), Arc::new(session));
+        let session = Arc::new(session);
+        self.pump_pty_screens(session.screens.clone(), new_pid.clone(), std::sync::Arc::downgrade(&session));
+        self.insert_pty(new_pid.clone(), session);
         {
             let mut ws = self.ws.lock().unwrap();
             ws.pid_to_pane.insert(new_pid.clone(), outer.to_string());
@@ -1250,8 +1252,9 @@ impl App {
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;
-        self.pump_pty_screens(session.screens.clone(), new_id.clone());
-        self.insert_pty(new_id.clone(), Arc::new(session));
+        let session = Arc::new(session);
+        self.pump_pty_screens(session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&session));
+        self.insert_pty(new_id.clone(), session);
         // `before=true` means the new leaf becomes the LEFT/TOP child, so
         // the source ends up on the RIGHT/BOTTOM. We want source on the
         // dropped side → new on the opposite side.

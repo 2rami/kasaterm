@@ -529,6 +529,10 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
+    /// pane 의 PTY 를 로컬 상주 데몬으로 **무중단 이관**(승격). GUI 백엔드 전용.
+    fn promote_pane(&self, _pane: &str) -> Result<String> {
+        anyhow::bail!("promote: 이 백엔드는 지원하지 않는다")
+    }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
     fn remote_pane(

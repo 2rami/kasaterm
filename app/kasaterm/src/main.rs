@@ -3695,6 +3695,11 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// pane 을 로컬 상주 데몬으로 **무중단 승격** — (pane, 회신=원격 세션 id).
+    SocketPromote(
+        String,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
     /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
     ///
     /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에

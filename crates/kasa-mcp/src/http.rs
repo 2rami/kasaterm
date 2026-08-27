@@ -4528,6 +4528,12 @@ pub fn spawn_http_server_opts(
         .or_else(|_| std::net::TcpListener::bind((addr.as_str(), 0)))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    // 무중단 핸드오프 입양 창구 — HTTP 포트와 짝지은 unix 소켓. 실패해도 서버는
+    // 계속 뜬다(핸드오프만 못 받을 뿐).
+    #[cfg(unix)]
+    if let Err(e) = crate::adopt::spawn_adopt_listener(port) {
+        eprintln!("[adopt] 입양 소켓을 못 열었습니다: {e:#}");
+    }
     if !matches!(addr.as_str(), "127.0.0.1" | "localhost" | "::1") {
         // 여는 순간 토큰이 유일한 방어다. 어디서 얻는지를 로그에 남겨 두지 않으면
         // 「왜 403 이냐」로 헤매다 결국 토큰을 끄는 쪽으로 가게 된다.

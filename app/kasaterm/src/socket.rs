@@ -1157,6 +1157,19 @@ impl Backend for PtyBackend {
         })
     }
 
+    fn promote_pane(&self, pane: &str) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketPromote(pane.to_string(), tx));
+        // 데몬 첫 기동(≤5s)+핸드오프+재연결이 한 번에 들어 있다 — 넉넉히.
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Ok(id)) => Ok(id),
+            Ok(Err(why)) => anyhow::bail!("promote 실패: {why}"),
+            Err(_) => anyhow::bail!("promote 응답 없음(30초) — GUI 스레드를 확인해라"),
+        }
+    }
+
     fn split_fleet(
         &self,
         count: usize,

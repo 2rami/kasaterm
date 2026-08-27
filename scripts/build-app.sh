@@ -95,10 +95,10 @@ fi
 # Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
 # drive siblings via the socket (install_pane_shims stages it on the pane PATH).
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p kasaterm -p kasa-socket
+  cargo build --release -p kasaterm -p kasa-socket -p kasa-mcp --bins
   BINDIR="target/release"
 else
-  cargo build -p kasaterm -p kasa-socket
+  cargo build -p kasaterm -p kasa-socket -p kasa-mcp --bins
   BINDIR="target/debug"
 fi
 
@@ -108,6 +108,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
+# 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
+cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
@@ -429,6 +431,7 @@ if [[ -d "$FW" ]]; then
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
+codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasa-serve-web" 2>/dev/null || true
 codesign --force --sign "$SIGN" "$APP" 2>/dev/null \
   && echo "$SIGN_MSG" \
   || echo "warning: signing '$APP' failed; app left unsigned"

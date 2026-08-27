@@ -110,6 +110,7 @@ impl App {
         &self,
         screens: kasa_pty::ScreenReceiver<kasa_bridge::screen::ScreenUpdate>,
         pane_id: String,
+        sess_weak: std::sync::Weak<kasa_pty::PtySession>,
     ) {
         let ws_screens = self.ws.clone();
         let win_screens = self.window.clone();
@@ -139,6 +140,14 @@ impl App {
                 // the pane would linger as a zombie. Flag it dead and wake
                 // the loop so reap_dead_panes drops it on the next turn.
                 if update.eof {
+                    // 같은 id 로 PTY 가 갈아끼워졌으면(캐릭터 교체·계정 재시작·
+                    // 핸드오프 승격) 이 죽음표시는 **옛 세션**의 것이다 — 새 pane 을
+                    // 걷으면 안 된다. dead_panes.retain 정리는 GUI 스레드와
+                    // 마이크로초 경주가 남지만, 레지스트리의 현 세션과 내 정체를
+                    // 포인터로 비교하면 결정적이다(pane_replaced).
+                    if pane_replaced(&update.pane_id, &sess_weak) {
+                        return;
+                    }
                     dead.lock().unwrap().push(update.pane_id.clone());
                     if let Some(w) = win_screens.as_ref() {
                         w.request_redraw();
@@ -234,6 +243,11 @@ impl App {
             // Channel disconnected — the reader thread exited because
             // the PTY hit EOF (shell quit) or errored. Flag this pane
             // for the main thread to remove on its next tick.
+            // eof 와 같은 정체 가드 — 채널 단절은 승격 스왑의 Arc drop 순간에
+            // 정확히 나므로 여기가 더 밟기 쉽다.
+            if pane_replaced(&pane_id, &sess_weak) {
+                return;
+            }
             dead.lock().unwrap().push(pane_id);
             if let Some(w) = win_screens.as_ref() {
                 w.request_redraw();
@@ -502,7 +516,7 @@ impl App {
             pane_id: id.clone(),
             initial_scrollback: Vec::new(),
         })?);
-        self.pump_pty_screens(session.screens.clone(), id.clone());
+        self.pump_pty_screens(session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&session));
         self.insert_pty(id.clone(), session.clone());
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
@@ -554,7 +568,7 @@ impl App {
             win_cols,
             win_rows,
         )?;
-        self.pump_pty_screens(remote.session.screens.clone(), new_id.clone());
+        self.pump_pty_screens(remote.session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&remote.session));
         self.insert_pty(new_id.clone(), remote.session.clone());
         let foreign = owner.filter(|w| *w != self.active_window);
         let layout = match foreign {
@@ -579,6 +593,120 @@ impl App {
             }
         }
         Ok(new_id)
+    }
+
+    /// 로컬 상주 PTY 데몬(kasa-serve-web)을 보장한다 — 승격된 학생의 새 집.
+    ///
+    /// 판정은 입양 소켓으로 한다: HTTP 포트는 남이 차지할 수 있지만 입양 소켓
+    /// 파일에 연결이 되는 것은 우리 데몬뿐이다. 없으면 바이너리를 찾아 띄운다 —
+    /// ①KASATERM_SERVE_WEB_BIN ②현재 exe 옆 ③PATH.
+    #[cfg(unix)]
+    fn ensure_local_ptyd(&mut self) -> Result<()> {
+        let sock = kasa_mcp::adopt::adopt_sock_path(LOCAL_PTYD_PORT);
+        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+            return Ok(());
+        }
+        let bin = std::env::var("KASATERM_SERVE_WEB_BIN")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists())
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.parent().map(|d| d.join("kasa-serve-web")))
+                    .filter(|p| p.exists())
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("kasa-serve-web"));
+        let lp = std::env::temp_dir().join(format!("kasa-ptyd-{LOCAL_PTYD_PORT}.log"));
+        let logf = || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&lp)
+                .ok()
+        };
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("--port")
+            .arg(LOCAL_PTYD_PORT.to_string())
+            .arg("--cwd")
+            .arg(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+            .stdin(std::process::Stdio::null())
+            .stdout(
+                logf()
+                    .map(std::process::Stdio::from)
+                    .unwrap_or_else(std::process::Stdio::null),
+            )
+            .stderr(
+                logf()
+                    .map(std::process::Stdio::from)
+                    .unwrap_or_else(std::process::Stdio::null),
+            );
+        cmd.spawn().map_err(|e| {
+            anyhow::anyhow!("로컬 PTY 데몬을 못 띄웠어요: {} ({e})", bin.display())
+        })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        anyhow::bail!("로컬 PTY 데몬이 5초 안에 안 떴어요 (로그: {})", lp.display())
+    }
+
+    /// 도는 pane 을 **재시작 없이** 로컬 상주 데몬으로 승격한다 — 셸·claude
+    /// 프로세스는 그대로 두고 PTY 소유권만 fd(SCM_RIGHTS)로 넘긴 뒤, 이 pane 을
+    /// 그 세션의 원격 소유자 연결로 갈아끼운다. 이후 앱을 굽고 껐다 켜도, 앱이
+    /// 죽어도 그 학생은 살아남는다(맥북 전원이 꺼지면 같이 꺼진다 — 그건 물리).
+    #[cfg(unix)]
+    pub(crate) fn promote_pane(&mut self, pid: &str) -> Result<String> {
+        let Some(sess) = self.pty.get(pid).cloned() else {
+            anyhow::bail!("pane {pid} 이 없다");
+        };
+        if kasa_mcp::remote::is_remote_pane(pid) {
+            anyhow::bail!("{pid} 은 이미 원격 pane 이다");
+        }
+        let Some(fd) = sess.master_raw_fd() else {
+            anyhow::bail!("{pid} 은 로컬 PTY 가 아니라 승격할 수 없다");
+        };
+        self.ensure_local_ptyd()?;
+        // reader 를 세우고 마지막 청크가 Term 에 앉을 시간을 준다 — 그 뒤에 뜬
+        // 스크롤백이 곧 「넘어가는 화면」이다. 정지 순간 escape 가 반 토막 날 수
+        // 있지만 TUI 는 계속 다시 그리므로 스스로 아문다(adopt 머리말).
+        sess.stop_reader();
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        let (c, r) = sess.size();
+        let scroll = sess.scrollback_text(2000);
+        let web_id =
+            kasa_mcp::adopt::handoff_to(LOCAL_PTYD_PORT, fd, sess.shell_pid(), c, r, scroll)?;
+        sess.disarm_kill();
+        // 같은 pane id 로 소유자 연결 — pane 자리·이름·학생 배정은 그대로다.
+        let remote = kasa_mcp::remote::connect(
+            kasa_mcp::remote::RemoteSpec {
+                base: format!("http://127.0.0.1:{LOCAL_PTYD_PORT}"),
+                pane: Some(web_id.clone()),
+                cwd: None,
+                token: None,
+            },
+            pid,
+            c,
+            r,
+        )?;
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            pid.to_string(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
+        self.insert_pty(pid.to_string(), remote.session.clone());
+        // 옛 세션의 늦은 죽음표시 정리(스왑 패턴) — 정체 가드가 있지만 이중으로.
+        self.dead_panes.lock().unwrap().retain(|x| x != pid);
+        let (wc, wr) = self.window_cells();
+        self.resize_backend(wc, wr);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(web_id)
     }
 
     /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
@@ -861,7 +989,7 @@ impl App {
         }) {
             Ok(session) => {
                 let sess = Arc::new(session);
-                self.pump_pty_screens(sess.screens.clone(), pane.to_string());
+                self.pump_pty_screens(sess.screens.clone(), pane.to_string(), std::sync::Arc::downgrade(&sess));
                 self.insert_pty(pane.to_string(), sess.clone());
                 // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
@@ -942,7 +1070,7 @@ impl App {
         }) {
             Ok(session) => {
                 let sess = Arc::new(session);
-                self.pump_pty_screens(sess.screens.clone(), pane.to_string());
+                self.pump_pty_screens(sess.screens.clone(), pane.to_string(), std::sync::Arc::downgrade(&sess));
                 self.insert_pty(pane.to_string(), sess.clone());
                 // 옛 PTY 의 EOF 가 이 id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // 되띄웠으니 지운다(swap_character 와 같은 이유).
@@ -3819,7 +3947,7 @@ impl App {
                 rows,
             ) {
                 Ok(remote) => {
-                    self.pump_pty_screens(remote.session.screens.clone(), id.clone());
+                    self.pump_pty_screens(remote.session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&remote.session));
                     self.insert_pty(id.clone(), remote.session.clone());
                     if let Some(t) = rec
                         .get("title")
@@ -3934,7 +4062,7 @@ impl App {
                 return None;
             }
         };
-        self.pump_pty_screens(session.screens.clone(), id.clone());
+        self.pump_pty_screens(session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&session));
         if let Some(ref c) = cwd {
             self.pane_cwd_cache
                 .insert(id.clone(), std::path::PathBuf::from(c));
@@ -5963,3 +6091,19 @@ mod close_freeze_tests {
         assert!(thumb_y(top, view, content, overflow / 2.0) > at_top);
     }
 }
+
+/// 이 pane id 가 **다른 세션으로 갈아끼워졌는가** — pump 스레드의 죽음표시 가드.
+///
+/// 레지스트리의 현 세션과 pump 자신의 세션(Weak)을 포인터로 비교한다. 같은
+/// 세션이 그냥 죽은 것이면 App.pty 가 아직 Arc 를 쥐고 있어 lookup 이 그 세션
+/// 자신을 돌려주므로(포인터 일치) 정상 reap 은 막히지 않는다.
+fn pane_replaced(id: &str, mine: &std::sync::Weak<kasa_pty::PtySession>) -> bool {
+    match kasa_pty::lookup_session(id) {
+        Some(cur) => !std::ptr::eq(std::sync::Arc::as_ptr(&cur), mine.as_ptr()),
+        None => false,
+    }
+}
+
+/// 승격된 학생들이 사는 로컬 상주 데몬(kasa-serve-web)의 HTTP 포트.
+#[cfg(unix)]
+pub(crate) const LOCAL_PTYD_PORT: u16 = 8790;

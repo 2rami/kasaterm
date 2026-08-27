@@ -23,6 +23,8 @@ pub mod persona;
 mod proxy;
 mod register;
 pub mod remote;
+#[cfg(unix)]
+pub mod adopt;
 pub mod remoteboard;
 mod resume_visibility;
 pub mod standalone;
