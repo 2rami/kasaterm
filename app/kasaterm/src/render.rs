@@ -9252,7 +9252,12 @@ impl App {
                 // 그 아래 60px 가 아무 이유 없이 비어, 카드가 대충 얹힌 것처럼 보였다.
                 let title_y = 28.0_f32;
                 let sub_y = title_y + 30.0;
-                let btn_dy = sub_y + 40.0;
+                // 키 안내 한 줄. 이 카드에는 닫기(X)가 없어서, 두 버튼 중 하나를
+                // 고르는 것 말고 빠져나갈 길이 없어 보인다 — 실제로는 Esc 가 「새로
+                // 시작」이다(거노 2026-08-27: 「x버튼이 없네 ㄷㄷ」). 길이 있는데
+                // 안 보이는 것과 없는 것은 화면에서 구별되지 않으므로 적어 둔다.
+                let hint_y = sub_y + 22.0;
+                let btn_dy = hint_y + 32.0;
                 let card_h = btn_dy + btn_h + 26.0;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
@@ -9268,6 +9273,12 @@ impl App {
                     cy0 + sub_y,
                     &subtitle,
                     gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+                );
+                g.draw_text(
+                    cx0 + pad,
+                    cy0 + hint_y,
+                    "Enter = 복원 · Esc = 새로 시작 (지금 도는 pane 은 그대로 남습니다)",
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false },
                 );
                 let (mx, my) = self.cursor_px;
                 let btn_y = cy0 + btn_dy;
