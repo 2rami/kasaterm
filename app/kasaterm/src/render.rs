@@ -4058,7 +4058,13 @@ impl App {
                     // 예전엔 hover 하는 순간 되돌리기가 × 로 바뀌어, 누르러 가면
                     // 버튼이 사라졌다.
                     let undocked = sb_undocked.get(*i).copied().unwrap_or(false);
-                    let show_close = multi && (is_active || is_hover) && !undocked;
+                    // × 는 **hover 에만** 낸다. 활성 방에도 상시로 내던 때는 아래
+                    // `⌘N` 배지와 같은 칸을 다퉈, 하필 **지금 있는 방일수록 번호가
+                    // 안 보였다**(2026-08-27 지적). 번호는 곧 단축키(Cmd+숫자)라 활성
+                    // 방에서 가장 알고 싶은 값이고, 닫기는 마우스를 얹으면 그 자리에
+                    // 나타나므로 잃는 것이 없다 — 누르러 가는 동안 사라지는 반대
+                    // 경우(되돌리기 버튼)와 달리, 이건 다가갈수록 나타난다.
+                    let show_close = multi && is_hover && !undocked;
                     // Budgets are measured against the tab's own right edge, not
                     // the sidebar width: the label starts at `text_x` (inset +
                     // ordinal gutter + chip), so a sidebar-width budget overshoots
