@@ -825,111 +825,44 @@ pub(crate) fn sender_roman_head(name: &str) -> &str {
 /// 명부는 파일이라 프레임마다 훑지 않고 2초 캐시한다 — 이름은 사람이 바꿀 때만
 /// 변하므로 이 정도 지연은 화면에서 안 보인다.
 pub(crate) fn peer_sid_by_name(label: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = Mutex<Option<(Instant, std::collections::HashMap<String, Option<String>>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
     let label = label.trim();
     if label.is_empty() {
         return None;
     }
-    // 값이 None 인 항목 = 이름이 겹쳐서 못 가르는 것. 그대로 None 을 돌려준다.
-    with_peer_index(|ix| ix.by_name.get(label).cloned().flatten())?
-}
-
-/// 반대 방향 — sessionId → 그 세션이 지금 쓰는 이름(`/rename` 이 바꾼 그 값).
-///
-/// pane 헤더가 이걸로 셋째 칸을 든다. 헤더는 여태 OSC 제목(claude 의 활동 요약)만
-/// 실어서, 개명을 해도 반영될 길이 아예 없었다(2026-08-27 지적).
-///
-/// 같은 sessionId 가 명부에 여러 장인 경우가 있다 — 파일이 pid 별이라 재시작 잔재가
-/// 남는다. **가장 새 파일**을 쓴다. 아무거나 집으면 옛 이름이 화면에 살아 돌아온다.
-pub(crate) fn peer_name_by_sid(sid: &str) -> Option<String> {
-    let sid = sid.trim();
-    if sid.is_empty() {
-        return None;
-    }
-    with_peer_index(|ix| ix.by_sid.get(sid).cloned())?
-}
-
-/// 이름↔sessionId 양방향 색인.
-struct PeerIndex {
-    /// 이름 → sessionId. 겹친 이름은 `None`(포기).
-    by_name: std::collections::HashMap<String, Option<String>>,
-    /// sessionId → 이름. 같은 sid 가 여럿이면 파일이 가장 새 것.
-    by_sid: std::collections::HashMap<String, String>,
-}
-
-/// 명부를 2초 캐시해 색인 하나로 들고 있다가 빌려준다.
-///
-/// 두 방향이 **같은 캐시**를 쓴다 — 캐시를 갈라 두면 명부를 2초마다 두 번 훑는 데다,
-/// 한쪽 훑기만 고쳐져도 어긋난 채 아무 오류가 안 난다. 이름은 사람이 바꿀 때만 변하니
-/// 2초 지연은 화면에서 안 보인다.
-fn with_peer_index<T>(f: impl FnOnce(&PeerIndex) -> T) -> Option<T> {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    static CACHE: OnceLock<Mutex<Option<(Instant, PeerIndex)>>> = OnceLock::new();
     let cell = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().ok()?;
     let fresh = guard
         .as_ref()
         .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(2));
     if !fresh {
-        *guard = Some((Instant::now(), build_peer_index()));
+        *guard = Some((Instant::now(), scan_peer_names()));
     }
-    Some(f(&guard.as_ref()?.1))
-}
-
-/// 한 번 훑어 두 방향을 함께 만든다. 훑기와 접기를 가른 것은 검증 때문이다 —
-/// mtime 규칙이 틀리면 옛 이름이 화면에 살아 돌아올 뿐 아무 오류도 안 난다
-/// (`fold_peer_names` 를 따로 둔 것과 같은 이유).
-fn build_peer_index() -> PeerIndex {
-    index_from_entries(scan_peer_entries())
-}
-
-fn index_from_entries(entries: Vec<(String, String, std::time::SystemTime)>) -> PeerIndex {
-    let mut newest: std::collections::HashMap<String, (String, std::time::SystemTime)> =
-        Default::default();
-    for (name, sid, at) in &entries {
-        match newest.get(sid) {
-            Some((_, seen)) if *seen >= *at => {}
-            _ => {
-                newest.insert(sid.clone(), (name.clone(), *at));
-            }
-        }
-    }
-    PeerIndex {
-        by_name: fold_peer_names(entries.into_iter().map(|(n, s, _)| (n, s))),
-        by_sid: newest.into_iter().map(|(sid, (name, _))| (sid, name)).collect(),
-    }
+    // 값이 None 인 항목 = 이름이 겹쳐서 못 가르는 것. 그대로 None 을 돌려준다.
+    guard.as_ref()?.1.get(label).cloned().flatten()
 }
 
 /// 명부 한 바퀴 → 이름별 sessionId. 파일 훑기와 접기를 갈라 둔 것은 검증 때문이다 —
 /// 충돌 규칙이 틀리면 남의 얼굴이 조용히 붙을 뿐 아무 오류도 안 난다.
-fn scan_peer_entries() -> Vec<(String, String, std::time::SystemTime)> {
+fn scan_peer_names() -> std::collections::HashMap<String, Option<String>> {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-        return Vec::new();
+        return Default::default();
     };
     let Ok(rd) = std::fs::read_dir(home.join(".claude/sessions")) else {
-        return Vec::new();
+        return Default::default();
     };
-    rd.flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            (path.extension().and_then(|x| x.to_str()) == Some("json")).then_some(())?;
-            let text = std::fs::read_to_string(&path).ok()?;
-            // mtime 은 같은 sessionId 가 여러 파일에 있을 때만 쓴다 — 못 읽으면
-            // UNIX_EPOCH 라 다른 후보에 자리를 내준다.
-            let at = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            // claude 가 폴더 이름으로 지은 것(`derived`)은 사람이 붙인 이름이 아니다 —
-            // 헤더가 그걸 실으면 개명한 적 없는 pane 에 `tmuxify-2d` 가 뜬다.
-            if peer_name_source_from_json(&text).as_deref() == Some("derived") {
-                return None;
-            }
-            match peer_ident_from_json(&text) {
-                (Some(name), Some(sid)) => Some((name, sid, at)),
-                _ => None,
-            }
-        })
-        .collect()
+    fold_peer_names(rd.flatten().filter_map(|e| {
+        let path = e.path();
+        (path.extension().and_then(|x| x.to_str()) == Some("json")).then_some(())?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        match peer_ident_from_json(&text) {
+            (Some(name), Some(sid)) => Some((name, sid)),
+            _ => None,
+        }
+    }))
 }
 
 /// 겹친 이름은 `None` 으로 남겨 조회가 포기하게 한다. 같은 세션이 두 번 들어오는 것
@@ -1051,14 +984,6 @@ pub(crate) fn peer_ident_from_socket(from: &str) -> Option<(Option<String>, Opti
 
 /// 명부 파일 한 장에서 (이름, 세션 id). 파일 읽기와 갈라 둔 것은 검증 때문이다 —
 /// 이 판정이 틀리면 남의 메시지가 조용히 기본 표시로 떨어질 뿐 아무 오류도 안 난다.
-/// 명부의 `nameSource`. `"derived"` 는 claude 가 cwd 로 지은 이름이라는 표시다 —
-/// 셰임이 이름을 못 붙였을 때 그렇게 된다. 사람이 붙인 것과 갈라야 하는 유일한 자리라
-/// 이름·sessionId 파서와 따로 둔다(같은 값을 두 벌로 해석하지는 않는다).
-pub(crate) fn peer_name_source_from_json(s: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(s).ok()?;
-    Some(v.get("nameSource")?.as_str()?.trim().to_string())
-}
-
 pub(crate) fn peer_ident_from_json(s: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
         return (None, None);
@@ -4907,24 +4832,6 @@ This came from another Claude session";
         assert_eq!(m.get("theme"), Some(&Some("sid-b".to_string())), "유일한 이름은 되짚어야 한다");
         assert_eq!(m.get("diff"), Some(&None), "겹친 이름은 포기해야 한다");
         assert!(!m.contains_key("  "), "빈 이름은 담지 않는다");
-    }
-
-    /// 명부 파일은 pid 별이라 **같은 세션이 여러 장** 남는다(재시작 잔재). 헤더가
-    /// 아무거나 집으면 옛 이름이 화면에 살아 돌아온다 — 가장 새 파일이 이겨야 한다.
-    #[test]
-    fn same_session_across_files_keeps_the_newest_name() {
-        use std::time::{Duration, UNIX_EPOCH};
-        let old = UNIX_EPOCH + Duration::from_secs(1_000);
-        let new = UNIX_EPOCH + Duration::from_secs(2_000);
-        let ix = index_from_entries(vec![
-            ("옛이름".to_string(), "sid-a".to_string(), old),
-            ("새이름".to_string(), "sid-a".to_string(), new),
-            ("혼자".to_string(), "sid-b".to_string(), old),
-        ]);
-        assert_eq!(ix.by_sid.get("sid-a"), Some(&"새이름".to_string()));
-        assert_eq!(ix.by_sid.get("sid-b"), Some(&"혼자".to_string()));
-        // 반대 방향은 겹침 규칙 그대로 — 두 이름 다 살아 있다.
-        assert_eq!(ix.by_name.get("옛이름"), Some(&Some("sid-a".to_string())));
     }
 
     #[test]
