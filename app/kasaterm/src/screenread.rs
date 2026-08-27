@@ -871,18 +871,35 @@ fn fold_peer_names<I: IntoIterator<Item = (String, String)>>(
     it: I,
 ) -> std::collections::HashMap<String, Option<String>> {
     let mut out: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut put = |key: String, sid: &str| {
+        out.entry(key)
+            .and_modify(|slot: &mut Option<String>| {
+                if slot.as_deref() != Some(sid) {
+                    *slot = None;
+                }
+            })
+            .or_insert_with(|| Some(sid.to_string()));
+    };
     for (name, sid) in it {
         let name = name.trim().to_string();
         if name.is_empty() {
             continue;
         }
-        out.entry(name)
-            .and_modify(|slot| {
-                if slot.as_deref() != Some(sid.as_str()) {
-                    *slot = None;
-                }
-            })
-            .or_insert(Some(sid));
+        // 화면 라벨로도 찾을 수 있게 별칭을 함께 넣는다. claude 는 `@<이름>` 을 그릴
+        // 때 **공백을 하이픈으로** 바꾸므로(실측 2026-08-27: 세션 이름 `account
+        // theme` 이 `› Message from @account-theme:` 으로 떴다), 명부의 원래 이름만
+        // 키로 두면 공백이 든 이름은 영영 못 찾는다 — 그 세션이 보낸 메시지는
+        // 학생색도 프사도 없이 뜬다(거노 「sm에 테마가 안붙네 이미지랑 색상」).
+        //
+        // 별칭을 **따로 만들지 않고 같은 표에** 넣는 이유는 충돌 규칙을 한 번만
+        // 쓰기 위해서다 — 별칭이 남의 진짜 이름과 겹치면 그것도 「못 가름(None)」이
+        // 되어야 하고, 표가 둘이면 그 판정이 갈린다.
+        let alias = name.replace(' ', "-");
+        let has_alias = alias != name;
+        put(name, &sid);
+        if has_alias {
+            put(alias, &sid);
+        }
     }
     out
 }
@@ -4832,6 +4849,41 @@ This came from another Claude session";
         assert_eq!(m.get("theme"), Some(&Some("sid-b".to_string())), "유일한 이름은 되짚어야 한다");
         assert_eq!(m.get("diff"), Some(&None), "겹친 이름은 포기해야 한다");
         assert!(!m.contains_key("  "), "빈 이름은 담지 않는다");
+    }
+
+    /// claude 는 `@<이름>` 을 그릴 때 공백을 하이픈으로 바꾼다 — 명부의 원래 이름만
+    /// 키로 두면 공백이 든 세션 이름은 화면 라벨로 절대 못 찾고, 그 세션이 보낸
+    /// 메시지는 학생색도 프사도 없이 뜬다(2026-08-27 실측: 세션 이름 `account theme`
+    /// 이 `› Message from @account-theme:` 으로 떴다).
+    #[test]
+    fn peer_name_fold_also_answers_to_the_hyphenated_screen_label() {
+        let m = fold_peer_names([
+            ("account theme".to_string(), "sid-a".to_string()),
+            ("sidebar".to_string(), "sid-b".to_string()),
+        ]);
+        assert_eq!(
+            m.get("account-theme"),
+            Some(&Some("sid-a".to_string())),
+            "화면 라벨(하이픈)로도 같은 세션을 찾아야 한다"
+        );
+        assert_eq!(
+            m.get("account theme"),
+            Some(&Some("sid-a".to_string())),
+            "원래 이름도 그대로 남아야 한다"
+        );
+        assert_eq!(m.get("sidebar"), Some(&Some("sid-b".to_string())));
+        assert!(!m.contains_key("sidebar-"), "없는 별칭을 만들지는 않는다");
+    }
+
+    /// 별칭이 남의 진짜 이름과 겹치면 그것도 포기다 — 엉뚱한 학생 얼굴을 붙이는
+    /// 것보다 무테마가 낫다는 규칙은 별칭에도 그대로 걸려야 한다.
+    #[test]
+    fn peer_name_alias_collision_is_given_up_too() {
+        let m = fold_peer_names([
+            ("account theme".to_string(), "sid-a".to_string()),
+            ("account-theme".to_string(), "sid-b".to_string()),
+        ]);
+        assert_eq!(m.get("account-theme"), Some(&None), "겹친 별칭은 포기해야 한다");
     }
 
     #[test]
