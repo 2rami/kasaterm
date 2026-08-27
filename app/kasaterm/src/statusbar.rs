@@ -85,7 +85,7 @@ fn paint_usage_popover(
         })
         .flatten();
     let w = 300.0_f32.min(win_w - 16.0);
-    let rows = list.len().max(1) + usize::from(rest.is_some());
+    let rows = list.len().max(1);
     let body = PAD + rows as f32 * UROW;
     // 화면 절반을 넘기지 않는다(포트 팝오버와 같은 규칙) — 팝오버가 창을 덮으면
     // 뒤의 pane 을 못 보면서 판단하게 된다.
@@ -96,7 +96,14 @@ fn paint_usage_popover(
     // 나온 말인지 여기서만 확인할 수 있으니 임계 아래에서도 늘 적는다.
     let mem = sb.mem;
     let mem_h = if mem.is_some() { UROW + PAD } else { 0.0 };
-    let h = HEAD_H + mem_h + inner + PAD;
+    // 「그 외 N개」는 **굴리지 않아도 보여야 한다**. 목록 끝에 두면 스크롤 맨
+    // 아래라 굴리기 전에는 안 보이는데, 거기 접힌 몫이 40% 나 된다(실측
+    // 2026-08-27: 트리 233개 중 목록 밖 203개 = 5.4G / 13.6G). 그러면 합계
+    // 13.6G 옆에 8.2G 짜리 목록이 서서 「13기간데 안에는 그정도는없던데」가
+    // 된다 — 상위 몇 개를 늘려도 꼬리가 길면 같은 일이 되풀이되므로, 접힌
+    // 몫을 늘 보이는 자리에 못박는 쪽이 답이다.
+    let rest_h = if rest.is_some() { UROW + PAD } else { 0.0 };
+    let h = HEAD_H + mem_h + inner + rest_h + PAD;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -206,9 +213,9 @@ fn paint_usage_popover(
     // 목록만 굴린다 — 머리(합계)와 맥북 메모리 줄은 굴려도 늘 보여야 하는 값이라
     // 잘라내는 창 밖에 둔다. 클릭 대상이 없는 팝오버라 시저가 픽셀만 자르고
     // 클릭은 못 자르는 함정(렌더 카탈로그)에는 걸리지 않는다.
-    let bottom = y + h - PAD;
+    let list_bottom = top + inner;
     sb.popover_scroll = sb.popover_scroll.clamp(0.0, (body - inner).max(0.0));
-    g.push_clip(x, top, w, (bottom - top).max(0.0));
+    g.push_clip(x, top, w, inner.max(0.0));
     let mut ry = top + PAD - sb.popover_scroll;
     for (pid, cpu, rss_kb, comm) in &list {
         // 이 앱 자신은 이름을 밝혀 준다 — 목록 맨 위에 `kasaterm` 이 떠 있는데
@@ -268,7 +275,12 @@ fn paint_usage_popover(
         }
         ry += UROW;
     }
+    g.pop_clip();
     if let Some((n, c, r)) = rest {
+        // 목록과 가르는 선 — 없으면 굴러 올라온 마지막 행과 맞닿아, 목록의 한
+        // 줄인지 나머지 합계인지 구별되지 않는다.
+        g.rect(x + 1.0, list_bottom, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+        let ry = list_bottom + PAD;
         let cpu_s = format!("{c:.1}%");
         let gb = r as f32 / (1024.0 * 1024.0 * 1024.0);
         let mem_s = if gb >= 1.0 {
@@ -289,7 +301,6 @@ fn paint_usage_popover(
         );
         g.draw_text(x + 12.0, ry + 8.0, &format!("그 외 {n}개"), dim);
     }
-    g.pop_clip();
 }
 
 /// 터널 주소 한 벌. 표시·열기·복사가 각자 문자열을 조립하면 한 곳만 고쳤을 때
