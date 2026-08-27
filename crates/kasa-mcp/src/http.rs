@@ -3972,6 +3972,16 @@ async fn term_repo_post(
         if !ok {
             return err(format!("clone 실패: {out}"));
         }
+        // 갓 clone 한 자리는 원격 기본 브랜치다 — 부른 쪽이 브랜치를 지정했으면
+        // 거기로 옮겨야 한다. 안 그러면 학생이 남의 브랜치 위에서 깬다(2026-08-27
+        // 실측: yuzu/grass-terrain 을 부탁했는데 main 으로 앉았다 — 그날은 두
+        // 브랜치의 끝이 같아 티가 안 났을 뿐이다).
+        if !branch.is_empty() {
+            let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
+            if !ok {
+                return err(format!("clone 은 됐는데 {branch} 로 못 옮겼어요: {out}"));
+            }
+        }
         action = "cloned";
     } else {
         // 이 기계에 안 올린 변경이 있으면 당겨오지 않는다 — 남의 작업을 덮는다.
