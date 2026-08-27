@@ -115,7 +115,11 @@ fn sweep_projects_root(
             }
             let mut changed = patch_file(&path).unwrap_or(false);
             if let Some(student) = &binding {
-                changed |= stamp_tag(&path, stem, student, students).unwrap_or(false);
+                // `/rename` 으로 붙인 이름만 온다(자동 제목은 안 섞인다) — 없으면
+                // None 이고 태그는 종전대로 학생 이름 하나다.
+                let rename = kasa_socket::sessions::session_rename_for(&path);
+                changed |=
+                    stamp_tag(&path, stem, student, students, rename.as_deref()).unwrap_or(false);
             }
             // 처리 뒤 상태로 기록한다 — stamp_tag 는 파일을 늘릴 수 있다.
             if let (Some(stamp), Ok(mut g)) = (file_stamp(&path), SEEN.lock()) {
@@ -197,21 +201,50 @@ pub(crate) fn stamp_tag(
     sid: &str,
     student: &str,
     students: &HashSet<String>,
+    rename: Option<&str>,
 ) -> std::io::Result<bool> {
     let meta = std::fs::metadata(path)?;
     let len = meta.len();
+    let want = tag_value(student, rename);
     match current_tag(path, len)? {
-        Some(cur) if cur == student => return Ok(false),
+        Some(cur) if cur == want => return Ok(false),
         // 학생 이름이 아닌 태그 = 사용자 지정 — 존중.
-        Some(cur) if !students.contains(&cur) => return Ok(false),
+        //
+        // ⚠️ **첫 토막**으로 본다. 태그가 `우사기 #account-theme` 처럼 두 낱말이
+        // 되면서, 값 전체로 대조하면 우리가 방금 찍은 것도 「사용자 지정」으로
+        // 읽혀 그 세션은 영영 갱신이 멈춘다.
+        Some(cur) if !students.contains(cur.split(' ').next().unwrap_or_default()) => {
+            return Ok(false)
+        }
         _ => {}
     }
-    let line = serde_json::json!({ "type": "tag", "tag": student, "sessionId": sid });
+    let line = serde_json::json!({ "type": "tag", "tag": want, "sessionId": sid });
     let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
     f.write_all(format!("{line}\n").as_bytes())?;
     drop(f);
     restore_times(path, &meta);
     Ok(true)
+}
+
+/// `/resume` 행 설명줄에 세울 태그 값 — `<학생>` 또는 `<학생> #<세션이름>`.
+///
+/// claude 는 이 값을 `#<값>` 으로 렌더하므로, 두 번째 `#` 을 **값 안에** 넣어야
+/// `#우사기 #account-theme` 처럼 둘 다 태그로 선다(실측 2026-08-27). 태그 라인을
+/// 두 개 append 하는 길은 안 된다 — 마지막 것만 그려져 **학생 이름이 사라진다**.
+///
+/// 세션 이름의 공백은 하이픈으로 바꾼다. 그대로 두면 `#account theme` 이
+/// `#account` 와 `theme` 로 갈려 보이고(같은 실측), 화면의 발신자 라벨도 이미
+/// 같은 규칙으로 하이픈이라 두 화면이 같은 이름을 말하게 된다.
+fn tag_value(student: &str, rename: Option<&str>) -> String {
+    let Some(name) = rename.map(str::trim).filter(|s| !s.is_empty()) else {
+        return student.to_string();
+    };
+    let slug = name.replace(' ', "-");
+    // 이름을 학생 이름 그대로 붙여 둔 창은 같은 말을 두 번 하지 않는다.
+    if slug == student || slug.is_empty() {
+        return student.to_string();
+    }
+    format!("{student} #{slug}")
 }
 
 /// tail 창의 마지막 `"type":"tag"` 라인에서 tag 값 — /resume 스캐너와 같은 창.
@@ -380,14 +413,14 @@ mod tests {
         let p = d.join(format!("{SID}.jsonl"));
         std::fs::write(&p, team_line("kt-room-abcd")).unwrap();
         // 첫 스탬프 → tag 라인 append.
-        assert!(stamp_tag(&p, SID, "시로코", &students()).unwrap());
+        assert!(stamp_tag(&p, SID, "시로코", &students(), None).unwrap());
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(body.contains("\"type\":\"tag\""));
         assert!(body.contains("\"tag\":\"시로코\""));
         // 같은 값 재실행 = 무쓰기(멱등).
-        assert!(!stamp_tag(&p, SID, "시로코", &students()).unwrap());
+        assert!(!stamp_tag(&p, SID, "시로코", &students(), None).unwrap());
         // 바인딩이 바뀌면(학생 이름 태그) 갱신 append — 마지막 태그가 이긴다.
-        assert!(stamp_tag(&p, SID, "프라나", &students()).unwrap());
+        assert!(stamp_tag(&p, SID, "프라나", &students(), None).unwrap());
         assert_eq!(
             current_tag(&p, std::fs::metadata(&p).unwrap().len()).unwrap().as_deref(),
             Some("프라나")
@@ -397,7 +430,49 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
         f.write_all(format!("{user}\n").as_bytes()).unwrap();
         drop(f);
-        assert!(!stamp_tag(&p, SID, "시로코", &students()).unwrap());
+        assert!(!stamp_tag(&p, SID, "시로코", &students(), None).unwrap());
+    }
+
+    /// `/rename` 한 창은 그 이름도 태그에 실린다 — 요약 제목만으로는 어느 창인지
+    /// 모르는 것이 이 기능의 요점이다(2026-08-27 지시).
+    #[test]
+    fn rename_rides_along_in_the_same_tag() {
+        let d = tmpdir("tag-rename");
+        let p = d.join(format!("{SID}.jsonl"));
+        std::fs::write(&p, team_line("kt-room-abcd")).unwrap();
+        assert!(stamp_tag(&p, SID, "시로코", &students(), Some("account theme")).unwrap());
+        assert_eq!(
+            current_tag(&p, std::fs::metadata(&p).unwrap().len()).unwrap().as_deref(),
+            Some("시로코 #account-theme"),
+            "공백은 하이픈으로 — 안 그러면 화면에서 두 낱말로 갈린다"
+        );
+        // 우리가 찍은 두 낱말 태그를 「사용자 지정」으로 오해하면 그 세션은 영영
+        // 갱신이 멈춘다 — 첫 토막으로 가르는지 본다.
+        assert!(!stamp_tag(&p, SID, "시로코", &students(), Some("account theme")).unwrap());
+        assert!(stamp_tag(&p, SID, "시로코", &students(), Some("딴이름")).unwrap());
+        assert_eq!(
+            current_tag(&p, std::fs::metadata(&p).unwrap().len()).unwrap().as_deref(),
+            Some("시로코 #딴이름")
+        );
+        // 사용자 지정 태그는 두 낱말 규칙에서도 존중된다.
+        let user = serde_json::json!({"type":"tag","tag":"내태그 #뭐시기","sessionId":SID});
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(format!("{user}\n").as_bytes()).unwrap();
+        drop(f);
+        assert!(!stamp_tag(&p, SID, "시로코", &students(), Some("account theme")).unwrap());
+    }
+
+    #[test]
+    fn tag_value_shapes() {
+        assert_eq!(tag_value("우사기", None), "우사기");
+        assert_eq!(tag_value("우사기", Some("  ")), "우사기");
+        // 이름을 학생 이름 그대로 붙인 창은 같은 말을 두 번 하지 않는다.
+        assert_eq!(tag_value("우사기", Some("우사기")), "우사기");
+        assert_eq!(tag_value("모모이", Some("sidebar")), "모모이 #sidebar");
+        assert_eq!(
+            tag_value("케이", Some("터미널 미러링 데몬 pty")),
+            "케이 #터미널-미러링-데몬-pty"
+        );
     }
 
     #[test]
@@ -457,7 +532,7 @@ mod tests {
         let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
         unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
         assert!(patch_file(&p).unwrap());
-        assert!(stamp_tag(&p, SID, "시로코", &students()).unwrap());
+        assert!(stamp_tag(&p, SID, "시로코", &students(), None).unwrap());
         let m = std::fs::metadata(&p).unwrap().modified().unwrap();
         let secs = m.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(secs, 1_600_000_000);
