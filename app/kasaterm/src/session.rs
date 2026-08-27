@@ -831,13 +831,35 @@ impl App {
         // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
         // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
         sess.stop_reader();
+        // 목적지에 **진짜 학생 pane** 을 먼저 만든다 — 그래야 옮겨간 자리에 캐릭터·
+        // 보드·훅이 다 붙는다. 창 없는 축소판 서버는 이 창구가 없으므로 실패하고,
+        // 그때는 옛 경로(맨 셸 스폰)로 물러선다 — 반쪽이라도 대화는 잇는다.
+        let character = self
+            .ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .get(pid)
+            .cloned()
+            .filter(|c| !c.is_empty());
+        let remote_pane = character.as_deref().and_then(|c| {
+            match kasa_mcp::remote::spawn_student_pane(base, c, None) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    eprintln!("[migrate] 진짜 pane 소환 실패 — 맨 셸로 물러섭니다: {e:#}");
+                    None
+                }
+            }
+        });
         // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
         let (c, r) = sess.size();
         let remote = kasa_mcp::remote::connect(
             kasa_mcp::remote::RemoteSpec {
                 base: base.to_string(),
-                pane: None,
-                cwd: Some(remote_cwd),
+                pane: remote_pane.clone(),
+                // 이어받기(pane 지정)면 cwd 는 무시된다 — 그 셸은 이미 떠 있고,
+                // 아래 주입이 `cd` 로 옮긴다.
+                cwd: remote_pane.is_none().then(|| remote_cwd.clone()),
                 token: None,
             },
             pid,
@@ -859,10 +881,18 @@ impl App {
             Some(model.as_str()).filter(|s| !s.is_empty()),
             Some(effort.as_str()).filter(|s| !s.is_empty()),
         );
+        // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 —
+        // 레포로 옮겨 놓고 이어받아야 학생이 제 코드 위에서 깬다.
+        let cmd = if remote_pane.is_some() {
+            format!("cd '{}' && {}", remote_cwd.replace('\'', r"'\''"), cmd)
+        } else {
+            cmd
+        };
         self.pending_restores.push((
             remote.session.clone(),
             cmd,
-            std::time::Instant::now() + std::time::Duration::from_millis(1500),
+            // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.
+            std::time::Instant::now() + std::time::Duration::from_millis(2200),
         ));
         let (wc, wr) = self.window_cells();
         self.resize_backend(wc, wr);

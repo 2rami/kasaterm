@@ -392,6 +392,51 @@ async fn manager(
     }
 }
 
+/// 원격 kasaterm 에 **진짜 학생 pane** 을 하나 만들고 그 pane id 를 받는다.
+///
+/// 이사(migrate)가 이걸 먼저 부른다. 안 부르고 새 셸만 띄우면 그 자리는 캐릭터도
+/// 보드도 훅도 없는 반쪽이 된다 — 옮겨간 학생이 이름을 잃는다(2026-08-27 지시:
+/// 「진짜 카사텀이 돌게」). 창 없는 축소판 서버(kasa-serve-web)는 이 창구가
+/// 없으므로 실패하고, 호출자는 옛 경로로 물러선다.
+pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> Result<String> {
+    let u = format!(
+        "{}/spawn-student?character={}",
+        base.trim_end_matches('/'),
+        urlencode(character)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("spawn runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("학생 소환 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 학생 소환 실패: {}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    let id = v.get("surface").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if id.is_empty() {
+        anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
+    }
+    Ok(id)
+}
+
 /// 원격 기계에 그 레포를 **있게** 만든다 — 없으면 clone, 뒤처졌으면 fast-forward.
 /// 이사 전에 부른다: 대화만 건너가고 코드가 없거나 옛것이면 학생이 딴 세상에서 깬다.
 /// 원격에 안 올린 변경이 있으면 서버가 거부하고 그 사유가 그대로 올라온다.
