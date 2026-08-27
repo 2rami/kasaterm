@@ -54,6 +54,10 @@ pub(crate) struct StatusbarState {
     /// 표본에 든 프로세스 수 전체 — `usage_top` 은 상위 몇 개뿐이라, 팝오버의
     /// 「그 외 N개」 줄이 이 값으로 나머지를 센다.
     pub(crate) usage_rows: usize,
+    /// 이 앱 **밖**에서 메모리를 많이 쥔 앱 — (대표 pid, rss 합, 이름, 프로세스 수).
+    /// 경고 구간에서만 팝오버에 펴고, 각 줄에 끄기 버튼이 붙는다. 평소에 늘
+    /// 보여 줄 값은 아니다 — 답을 물었을 때만 답하면 된다.
+    pub(crate) usage_outside: Vec<(u32, u64, String, usize)>,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어
@@ -69,10 +73,14 @@ pub(crate) struct StatusbarState {
     /// 몫이다. 그래서 재시작을 권하는 근거는 이쪽뿐이다(2026-08-27 지시).
     /// 같은 5초 폴에 얹지만 서브프로세스는 없다 — mach 호출 하나다.
     pub(crate) mem: Option<crate::sysmem::MemSample>,
-    /// 마지막으로 토스트를 띄운 시각. 임계는 한 번 넘으면 한동안 걸쳐 있으므로,
-    /// 폴마다 띄우면 5초에 한 번씩 같은 말이 뜬다. 내려갔다 다시 올라오면
-    /// `None` 으로 되돌려 다음 진입에서 다시 말하게 한다.
-    pub(crate) mem_warned: Option<std::time::Instant>,
+    /// 마지막으로 토스트를 띄운 판정과 그 시각. 임계는 한 번 넘으면 한동안 걸쳐
+    /// 있으므로, 폴마다 띄우면 5초에 한 번씩 같은 말이 뜬다. 내려갔다 다시
+    /// 올라오면 `None` 으로 되돌려 다음 진입에서 다시 말하게 한다.
+    ///
+    /// 판정까지 함께 쥐는 것은 「재시작 권장」과 「메모리 부족」이 **다른 말**이기
+    /// 때문이다. 하나를 말한 뒤 다른 쪽으로 넘어갔는데 시각만 보면, 할 일이
+    /// 바뀐 것을 한 시간 동안 안 알려 준다.
+    pub(crate) mem_warned: Option<(crate::sysmem::Advice, std::time::Instant)>,
     /// 지금 펼쳐진 팝오버와 그것을 연 칩의 자리(앵커). 한 번에 하나만 — 하단바
     /// 칩들이 서로 8px 안에 붙어 있어 둘이 겹치면 어느 쪽 행을 눌렀는지 사람도
     /// 코드도 못 가른다.
@@ -91,6 +99,10 @@ pub(crate) struct StatusbarState {
     pub(crate) popover_hits: Vec<(StatusbarHit, (f32, f32, f32, f32))>,
     /// 팝오버 세로 스크롤(px). 포트가 스무 개면 창 높이를 넘는다.
     pub(crate) popover_scroll: f32,
+    /// 「끌까요?」로 바뀌어 대기 중인 바깥 앱과 그 시각. 한 번 더 눌러야 신호가
+    /// 나간다 — 여기 뜨는 건 사람이 쓰던 앱(브라우저·편집기)이라, 포트 팝오버의
+    /// dev 서버와 달리 잘못 누르면 열어 둔 것을 잃는다. 몇 초 뒤 저절로 풀린다.
+    pub(crate) usage_kill_armed: Option<(u32, std::time::Instant)>,
 }
 
 /// 하단바에서 펼쳐지는 것들.
@@ -108,6 +120,9 @@ pub(crate) enum StatusbarHit {
     OpenPort(u16),
     /// 호버 시 나오는 ×. 포트는 그 자체로 못 닫으니 쥔 프로세스를 죽인다.
     KillPort(u32),
+    /// 바깥 앱 줄의 ×. 대표(앱 본체)에 종료 신호를 보내면 Helper 자식도 함께
+    /// 정리된다. 첫 클릭은 그 줄을 「끌까요?」로 바꾸기만 한다.
+    KillApp(u32),
     /// 맨 윗줄 — 이 앱의 웹터미널(`/term`).
     OpenWebTerm,
     /// 원격 접속 문을 여닫는다.

@@ -29,13 +29,38 @@ pub(crate) struct MemSample {
 }
 
 /// 무엇을 권할지.
+///
+/// `Restart` 와 `FreeUp` 은 심각도가 같고 **답이 다르다**. 둘을 한 낱말로
+/// 뭉뚱그리면 조언이 틀린다 — 앱이 먹어서 모자란 자리에 「재부팅하세요」는
+/// 헛다리고(닫으면 돌아온다), wired 가 쌓인 자리에 「앱을 닫으세요」도
+/// 헛다리다(닫아도 안 돌아온다). 2026-08-27 지적: 「wire없이 많아지면
+/// 안뜨고?」 — 뜨는데 그때 하던 말이 재시작 권장이었다.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Advice {
     Ok,
     /// 아직 돌아가지만 앱 자리가 눈에 띄게 줄었다.
     Watch,
-    /// 재시작 말고는 회수 경로가 없는 구간.
+    /// 회수 경로가 재시작뿐인 구간 — wired 가 임계를 넘었다.
     Restart,
+    /// 물리 메모리가 모자라지만 앱을 닫으면 돌아온다.
+    FreeUp,
+}
+
+impl Advice {
+    /// 하단바 칩과 팝오버 제목에 쓰는 한 낱말.
+    pub(crate) fn headline(self) -> &'static str {
+        match self {
+            Advice::Ok => "맥북 메모리",
+            Advice::Watch => "맥북 메모리 주의",
+            Advice::Restart => "맥북 재시작 권장",
+            Advice::FreeUp => "메모리 부족",
+        }
+    }
+
+    /// 빨강으로 칠할 구간인가.
+    pub(crate) fn is_danger(self) -> bool {
+        matches!(self, Advice::Restart | Advice::FreeUp)
+    }
 }
 
 /// 주의 임계(wired / 물리 RAM, %).
@@ -50,12 +75,24 @@ const RESTART_PCT: f32 = 40.0;
 /// 스왑 보조 임계. 커널 압박이 아직 normal 이어도 이만큼 나갔으면 이미
 /// 디스크를 물고 도는 중이다. 높게 잡은 것은 오탐 방지다 — macOS 는 여유가
 /// 있어도 스왑을 조금씩 쓴다.
-const SWAP_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
+const SWAP_LIMIT_GB: u64 = 8;
 
 /// 임계는 실측으로 조정할 값이라 env 로 덮을 수 있게 둔다. 위 상수는 이 기계
 /// 한 대의 표본에서 나온 추정이고, RAM 크기나 쓰는 앱 구성이 다르면 어긋난다.
 fn pct_env(key: &str, default: f32) -> f32 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// 스왑 임계(GB → byte). 「메모리 부족」 화면은 실기에서 재현할 수가 없어서
+/// (커널 압박도 스왑도 우리가 만들 수 없다) 검증에도 이 문이 필요하다.
+fn swap_limit() -> u64 {
+    std::env::var("KASATERM_MEM_SWAP_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SWAP_LIMIT_GB)
+        * 1024
+        * 1024
+        * 1024
 }
 
 impl MemSample {
@@ -68,13 +105,15 @@ impl MemSample {
 
     pub(crate) fn advice(&self) -> Advice {
         let pct = self.wired_pct();
-        // `critical` 은 커널이 이미 메모리를 되찾으려 프로세스를 압박하는 단계라
-        // 비율과 무관하게 권한다.
-        if self.pressure >= 4
-            || pct >= pct_env("KASATERM_MEM_RESTART_PCT", RESTART_PCT)
-            || self.swap_used >= SWAP_LIMIT
-        {
+        // wired 를 **가장 먼저** 본다. 같은 위기라도 회수 경로가 갈리는 유일한
+        // 기준이라, 압박이 함께 올라 있어도 재시작 쪽이 근본 처방이다.
+        if pct >= pct_env("KASATERM_MEM_RESTART_PCT", RESTART_PCT) {
             Advice::Restart
+        // `critical` 은 커널이 이미 메모리를 되찾으려 프로세스를 압박하는 단계고,
+        // 스왑이 이만큼 나갔으면 디스크를 물고 도는 중이다. 둘 다 급하지만 wired
+        // 가 정상 범위라면 쥐고 있는 것은 앱이므로, 닫으면 돌아온다.
+        } else if self.pressure >= 4 || self.swap_used >= swap_limit() {
+            Advice::FreeUp
         // ⚠️`warning`(2) 은 **재시작 사유가 아니다**. 큰 빌드 한 번이면 오르고
         // 끝나면 곧 1 로 돌아온다 — 실측 2026-08-27: cargo 빌드 중 캡처에서 wired
         // 16% 인데도 「재시작 권장」이 떴고, 빌드가 끝나자 압박은 1 이었다.
@@ -91,14 +130,15 @@ impl MemSample {
     /// 않으므로 원인이 wired 여도 숫자를 적어야 말이 된다.
     pub(crate) fn reason(&self) -> String {
         let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
-        if self.pressure >= 4 {
-            "메모리 압박 심각".to_string()
-        } else if self.pressure >= 2 {
-            "메모리 압박 경고".to_string()
-        } else if self.swap_used >= SWAP_LIMIT {
-            format!("스왑 {:.1}G", gb(self.swap_used))
-        } else {
-            format!("wired {:.0}% · {:.1}G", self.wired_pct(), gb(self.wired))
+        let wired = || format!("wired {:.0}% · {:.1}G", self.wired_pct(), gb(self.wired));
+        // 판정과 **같은 순서**로 본다. 어긋나면 「재시작 권장」 옆에 압박 얘기가
+        // 붙어, 왜 재시작이 답인지가 도로 흐려진다.
+        match self.advice() {
+            Advice::Restart => wired(),
+            _ if self.pressure >= 4 => "메모리 압박 심각".to_string(),
+            _ if self.swap_used >= swap_limit() => format!("스왑 {:.1}G", gb(self.swap_used)),
+            _ if self.pressure >= 2 => "메모리 압박 경고".to_string(),
+            _ => wired(),
         }
     }
 
@@ -107,7 +147,8 @@ impl MemSample {
     /// (실측 2026-08-27: `맥북 재시작 권장 · wired 14% · 5…`), 잘린 자리에
     /// 정작 새 정보는 하나도 없다. 압박·스왑은 그 칼럼에 안 나오니 그때만 밝힌다.
     pub(crate) fn extra_reason(&self) -> Option<String> {
-        let by_wired = self.pressure < 2 && self.swap_used < SWAP_LIMIT;
+        let by_wired =
+            self.advice() == Advice::Restart || (self.pressure < 2 && self.swap_used < swap_limit());
         (!by_wired).then(|| self.reason())
     }
 }
@@ -219,20 +260,35 @@ mod tests {
     }
 
     #[test]
-    fn 압박_심각은_비율을_앞선다() {
-        // critical 은 커널이 이미 회수에 들어간 것이라 wired 가 정상이어도 권한다.
-        assert_eq!(s(4.4, 4, 0.0).advice(), Advice::Restart);
+    fn wired_가_정상이면_재시작이_아니라_비우기다() {
+        // critical 은 커널이 이미 회수에 들어간 것이라 급하지만, wired 가 정상
+        // 범위면 쥐고 있는 것은 앱이다 — 재부팅해도 그 앱을 다시 열면 그대로다.
+        assert_eq!(s(4.4, 4, 0.0).advice(), Advice::FreeUp);
+        assert_eq!(s(4.4, 1, 9.0).advice(), Advice::FreeUp);
     }
 
     #[test]
-    fn 스왑이_많이_나가면_권한다() {
-        assert_eq!(s(4.4, 1, 9.0).advice(), Advice::Restart);
+    fn wired_가_임계를_넘으면_압박보다_먼저다() {
+        // 둘 다 걸린 자리에서는 재시작이 근본 처방이다. 앱을 닫아도 wired 는
+        // 그대로라, 비우기를 권하면 사람이 해 봐도 안 나아진다.
+        assert_eq!(s(15.0, 4, 9.0).advice(), Advice::Restart);
     }
 
     #[test]
     fn 이유는_가장_급한_신호를_말한다() {
         assert_eq!(s(4.4, 4, 0.0).reason(), "메모리 압박 심각");
         assert!(s(15.0, 1, 0.0).reason().starts_with("wired 42%"));
+        // 판정이 재시작이면 이유도 wired 여야 한다 — 압박이 함께 걸려 있어도
+        // 「압박 심각」이라 말하면 왜 재시작이 답인지가 흐려진다.
+        assert!(s(15.0, 4, 9.0).reason().starts_with("wired"));
+    }
+
+    #[test]
+    fn 답이_다르면_말도_다르다() {
+        assert_eq!(s(15.0, 1, 0.0).advice().headline(), "맥북 재시작 권장");
+        assert_eq!(s(4.4, 4, 0.0).advice().headline(), "메모리 부족");
+        assert!(s(4.4, 4, 0.0).advice().is_danger());
+        assert!(!s(4.4, 2, 0.0).advice().is_danger());
     }
 
     /// 판정이 아무리 옳아도 재는 값이 틀리면 소용이 없다. mach 구조체는

@@ -7158,6 +7158,19 @@ impl App {
                         self.statusbar.popover_scroll = 9999.0;
                         eprintln!("[autoportpop] 스크롤 끝까지");
                     }
+                    // 끄기 버튼은 겨눈 줄에만 뜨는데, 하네스는 마우스를 못
+                    // 움직인다. 두 번째 클릭을 기다리는 상태를 직접 심어 그 줄이
+                    // 무슨 말을 하는지 화면으로 확인한다 — 잘못 누르면 사람이
+                    // 쓰던 앱이 닫히는 자리라 문구가 정확해야 한다.
+                    if want.ends_with("-armed") {
+                        match self.statusbar.usage_outside.first() {
+                            Some((pid, ..)) => {
+                                self.statusbar.usage_kill_armed = Some((*pid, Instant::now()));
+                                eprintln!("[autoportpop] 끄기 겨눔 pid={pid}");
+                            }
+                            None => eprintln!("[autoportpop] FAIL — 바깥 앱 표본이 비었다"),
+                        }
+                    }
                     eprintln!("[autoportpop] 열림 {kind:?} anchor={r:?}");
                 }
                 None => eprintln!("[autoportpop] FAIL — 칩이 아직 안 그려졌다"),

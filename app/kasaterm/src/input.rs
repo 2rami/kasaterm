@@ -384,26 +384,38 @@ impl App {
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());
-        if let Some((cpu, rss, top, rows)) = sample_process_tree_usage() {
-            self.statusbar.res = Some((cpu, rss));
-            self.statusbar.usage_top = top;
-            self.statusbar.usage_rows = rows;
+        if let Some(u) = sample_process_tree_usage() {
+            self.statusbar.res = Some((u.cpu, u.rss));
+            self.statusbar.usage_top = u.top;
+            self.statusbar.usage_rows = u.rows;
+            self.statusbar.usage_outside = u.outside;
         }
         // 같은 박자에 물리 메모리도 — 이쪽은 서브프로세스가 없어 사실상 공짜다.
         self.statusbar.mem = crate::sysmem::sample();
         if let Some(m) = self.statusbar.mem {
-            if m.advice() == crate::sysmem::Advice::Restart {
+            let adv = m.advice();
+            if adv.is_danger() {
                 // 상태줄 표시만으로는 시야 끝이라 놓치고, 그 사이 무거운 채로
                 // 계속 쓴다. 다만 임계는 한 번 넘으면 한동안 걸쳐 있으므로
                 // 폴마다 띄우면 5초에 한 번 같은 말이 뜬다 — 한 번 말하고,
                 // 무시하고 계속 쓰는 것도 자연스러운 사용이라 한 시간 뒤 다시.
-                let due = self
-                    .statusbar
-                    .mem_warned
-                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3600));
+                // 판정이 바뀌었으면 할 일도 바뀐 것이라 곧바로 다시 말한다.
+                let due = self.statusbar.mem_warned.is_none_or(|(a, t)| {
+                    a != adv || t.elapsed() >= std::time::Duration::from_secs(3600)
+                });
                 if due {
-                    self.statusbar.mem_warned = Some(Instant::now());
-                    self.set_toast(format!("맥북 재시작 권장 — {}", m.reason()));
+                    self.statusbar.mem_warned = Some((adv, Instant::now()));
+                    // 「메모리 부족」에는 이유 대신 **범인**을 적는다. 토스트는
+                    // 몇 초 뒤 사라져서 팝오버를 열 겨를이 없고, 그 몇 초 안에
+                    // 쓸모가 있으려면 무엇을 닫으라는 말이어야 한다.
+                    let detail = (adv == crate::sysmem::Advice::FreeUp)
+                        .then(|| self.statusbar.usage_outside.first())
+                        .flatten()
+                        .map(|(_, rss, name, _)| {
+                            format!("{name} {:.1}G", *rss as f32 / (1024.0 * 1024.0 * 1024.0))
+                        })
+                        .unwrap_or_else(|| m.reason());
+                    self.set_toast(format!("{} — {detail}", adv.headline()));
                 }
             } else {
                 // 내려왔으면 다음 진입에서 처음처럼 말한다.
@@ -3473,22 +3485,40 @@ fn claude_theme_token(v: &str) -> Option<&str> {
 /// 있어야 팝오버가 「그 외 N개」를 셀 수 있다 — 목록은 상위 몇 개뿐이라, 합계와
 /// 목록 합이 어긋나 보이는 것을 그 한 줄이 설명한다(2026-08-16 「3.1G가 다 더하면
 /// 아니지않나」).
-fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>, usize)> {
+/// 한 번 잰 프로세스 사용량.
+pub(crate) struct UsageSample {
+    /// 이 앱 트리의 cpu 합(%)·rss 합(byte).
+    pub(crate) cpu: f32,
+    pub(crate) rss: u64,
+    /// 트리 상위 몇 개 — (pid, cpu%, rss byte, 이름).
+    pub(crate) top: Vec<(u32, f32, u64, String)>,
+    /// 트리에 든 프로세스 수 전체.
+    pub(crate) rows: usize,
+    /// 트리 **밖**에서 메모리를 많이 쥔 앱 상위 몇 — (대표 pid, rss 합, 이름,
+    /// 그 앱이 낳은 프로세스 수). 「메모리 부족」일 때 무엇을 닫아야 하는지가
+    /// 이 목록이다(2026-08-27 지시: 「위험! 종료할까요?(뭔지)」).
+    pub(crate) outside: Vec<(u32, u64, String, usize)>,
+}
+
+fn sample_process_tree_usage() -> Option<UsageSample> {
     // `spawn` + `wait_with_output` 인 것은 **재는 도구가 결과에 끼기 때문**이다.
     // `ps` 는 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄
     // 수가 없다. 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
     let child = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pcpu=,rss=,comm="])
+        // uid 를 함께 읽는 것은 바깥 앱 목록 때문이다 — 거기엔 끄기 버튼이 붙는데,
+        // 남(root 데몬)의 프로세스는 눌러도 권한이 없어 아무 일도 안 일어난다.
+        .args(["-axo", "uid=,pid=,ppid=,pcpu=,rss=,comm="])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .ok()?;
     let ps_pid = child.id();
     let out = child.wait_with_output().ok()?;
     let txt = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<(u32, u32, f32, u64, String)> = txt
+    let rows: Vec<(u32, u32, u32, f32, u64, String)> = txt
         .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
+            let uid = it.next()?.parse().ok()?;
             let pid = it.next()?.parse().ok()?;
             let ppid = it.next()?.parse().ok()?;
             let cpu = it.next()?.parse().ok()?;
@@ -3498,7 +3528,7 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
             // 이름에서 파싱이 통째로 어긋난다.
             let comm: String = it.collect::<Vec<_>>().join(" ");
             let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
-            Some((pid, ppid, cpu, rss, name))
+            Some((uid, pid, ppid, cpu, rss, name))
         })
         .collect();
     let me = std::process::id();
@@ -3506,7 +3536,7 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
     // ppid 순서가 임의라 고정점까지 돈다 — 트리 깊이만큼(셸→claude→도구, 얕다).
     loop {
         let before = tree.len();
-        for (pid, ppid, _, _, _) in &rows {
+        for (_, pid, ppid, _, _, _) in &rows {
             if tree.contains(ppid) {
                 tree.insert(*pid);
             }
@@ -3520,7 +3550,7 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
     // 모른다(2026-08-15 지시 「사용량도 펼쳐져서 보이게 뭐가 잡아먹는지」). 목록과
     // 합계가 **같은 표본**에서 나와야 둘이 어긋나 보이지 않는다.
     let mut top: Vec<(u32, f32, u64, String)> = Vec::new();
-    for (pid, _, c, r, name) in &rows {
+    for (_, pid, _, c, r, name) in &rows {
         if tree.contains(pid) && *pid != ps_pid {
             cpu += c;
             rss_kb += r;
@@ -3537,7 +3567,61 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
     // 8개는 39%, 20개는 80%, 30개는 88% 였다 — 30 부터는 한 개당 20MB 아래로
     // 떨어져 더 담아도 답이 안 바뀐다. 화면에는 팝오버가 스크롤로 보여 준다.
     top.truncate(30);
-    Some((cpu, rss_kb * 1024, top, total_rows))
+    Some(UsageSample {
+        cpu,
+        rss: rss_kb * 1024,
+        rows: total_rows,
+        outside: outside_apps(&rows, &tree),
+        top,
+    })
+}
+
+/// 이 앱 트리 **밖**에서 메모리를 많이 쥔 것들을 앱 단위로 묶어 상위 몇 개.
+///
+/// 프로세스 하나씩 세면 안 된다 — Chrome·Electron 앱은 Helper 를 수십 개 낳아서,
+/// 12G 를 쥔 Chrome 이 300MB 짜리 마흔 개로 흩어져 목록 어디에도 안 보인다.
+/// launchd(1) 바로 아래 조상을 그 앱의 대표로 삼으면 Helper 가 전부 본체로
+/// 접히고, 대표에게 종료 신호를 보내면 자식도 함께 정리된다.
+fn outside_apps(
+    rows: &[(u32, u32, u32, f32, u64, String)],
+    tree: &std::collections::HashSet<u32>,
+) -> Vec<(u32, u64, String, usize)> {
+    use std::collections::HashMap;
+    let me_uid = unsafe { libc::getuid() };
+    let parent: HashMap<u32, u32> = rows.iter().map(|r| (r.1, r.2)).collect();
+    let app_root = |mut pid: u32| -> u32 {
+        // 상한은 순환 방어다. ppid 는 커널이 주지만 표본이 찍히는 사이 부모가
+        // 죽으면 자식이 1 로 재부모되므로 사슬이 늘 온전하지는 않다.
+        for _ in 0..32 {
+            match parent.get(&pid) {
+                Some(&pp) if pp > 1 => pid = pp,
+                _ => break,
+            }
+        }
+        pid
+    };
+    let mut apps: HashMap<u32, (u64, usize)> = HashMap::new();
+    for (uid, pid, _, _, rss, _) in rows {
+        // 내 것이 아니면 눌러도 권한이 없다. 보여 주고 안 되는 것보다 안 보이는
+        // 편이 낫다 — 시스템이 쥔 몫은 어차피 wired 쪽에서 잡힌다.
+        if *uid != me_uid || tree.contains(pid) {
+            continue;
+        }
+        let e = apps.entry(app_root(*pid)).or_default();
+        e.0 += rss;
+        e.1 += 1;
+    }
+    let name_of: HashMap<u32, &str> = rows.iter().map(|r| (r.1, r.5.as_str())).collect();
+    let mut out: Vec<(u32, u64, String, usize)> = apps
+        .into_iter()
+        // 대표가 표본에 없으면(권한·경합) 이름도 없고 끌 수도 없다.
+        .filter_map(|(root, (rss, n))| {
+            name_of.get(&root).map(|nm| (root, rss * 1024, (*nm).to_string(), n))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out.truncate(5);
+    out
 }
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.

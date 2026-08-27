@@ -8252,14 +8252,46 @@ impl App {
                         if let Some(m) = self.statusbar.mem {
                             let adv = m.advice();
                             if adv != crate::sysmem::Advice::Ok {
-                                let danger = adv == crate::sysmem::Advice::Restart;
+                                let danger = adv.is_danger();
                                 let col =
                                     if danger { theme::danger() } else { theme::syn_number() };
                                 let icon = 12.0_f32;
                                 // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
                                 // 무슨 일인지 다 적어 준다.
-                                let words = (win_w >= 900.0)
-                                    .then_some(if danger { "재시작 권장" } else { "메모리 주의" });
+                                //
+                                // 「메모리 부족」에는 **범인 이름을 붙인다**. 그게
+                                // 재시작과 갈리는 지점이라서다 — 재시작은 할 일이
+                                // 하나뿐이라 이름이 필요 없지만, 비우는 쪽은
+                                // 무엇을 닫아야 하는지를 모르면 조언이 아니다
+                                // (2026-08-27 지시: 「위험! 종료할까요?(뭔지)」).
+                                let culprit = (adv == crate::sysmem::Advice::FreeUp)
+                                    .then(|| self.statusbar.usage_outside.first())
+                                    .flatten()
+                                    .map(|(_, rss, name, _)| {
+                                        // 앱 이름은 길다(`Google Chrome Helper
+                                        // (Renderer)`). 여기서 자르지 않으면 왼쪽
+                                        // 이웃(포트 칩)을 밀어낸다.
+                                        let short: String = name.chars().take(14).collect();
+                                        let dots = if short.chars().count()
+                                            < name.chars().count()
+                                        {
+                                            "…"
+                                        } else {
+                                            ""
+                                        };
+                                        format!(
+                                            "메모리 부족 · {short}{dots} {:.0}G",
+                                            *rss as f32 / (1024.0 * 1024.0 * 1024.0)
+                                        )
+                                    });
+                                let words = (win_w >= 900.0).then(|| match adv {
+                                    crate::sysmem::Advice::Restart => "재시작 권장".to_string(),
+                                    crate::sysmem::Advice::FreeUp => culprit
+                                        .clone()
+                                        .unwrap_or_else(|| "메모리 부족".to_string()),
+                                    _ => "메모리 주의".to_string(),
+                                });
+                                let words = words.as_deref();
                                 let ww = words
                                     .map_or(0.0, |t| 4.0 + g.measure_chrome_text(t, fs, false));
                                 seg_x -= icon + ww + 10.0;

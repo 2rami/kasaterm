@@ -50,7 +50,9 @@ pub(crate) fn paint_popover(
             paint_ports_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
-        state::StatusbarPopover::Usage => paint_usage_popover(g, sb, view, anchor, win_w, win_h),
+        state::StatusbarPopover::Usage => {
+            paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
+        }
     }
 }
 
@@ -63,6 +65,7 @@ fn paint_usage_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,
     view: &crate::info::InfoSnap,
+    cursor: (f32, f32),
     anchor: (f32, f32, f32, f32),
     win_w: f32,
     win_h: f32,
@@ -103,7 +106,23 @@ fn paint_usage_popover(
     // 된다 — 상위 몇 개를 늘려도 꼬리가 길면 같은 일이 되풀이되므로, 접힌
     // 몫을 늘 보이는 자리에 못박는 쪽이 답이다.
     let rest_h = if rest.is_some() { UROW + PAD } else { 0.0 };
-    let h = HEAD_H + mem_h + inner + rest_h + PAD;
+    // 바깥 앱 — **무엇을 닫아야 하는지**. 경고 구간에서만 편다. 평소엔 이 앱이
+    // 낳은 것이 이 팝오버의 주인공이고, 남의 앱 목록은 물었을 때만 답하면 된다.
+    // 재시작 구간에서도 적는다 — wired 가 임계를 넘었어도 무거운 앱은 무겁고,
+    // 재부팅 전에 당장 숨통을 틔우는 손이 여기 있다.
+    let outside: Vec<(u32, u64, String, usize)> = mem
+        .filter(|m| m.advice() != crate::sysmem::Advice::Ok)
+        .map(|_| sb.usage_outside.iter().take(3).cloned().collect())
+        .unwrap_or_default();
+    // 「끌까요?」 대기는 몇 초 뒤 저절로 풀린다. 눌러 놓고 잊은 줄이 빨갛게 남아
+    // 있으면, 한참 뒤 무심코 그 자리를 눌렀을 때 앱이 닫힌다.
+    if sb.usage_kill_armed.is_some_and(|(_, t)| t.elapsed().as_secs() >= 5) {
+        sb.usage_kill_armed = None;
+    }
+    const OUT_HEAD: f32 = 15.0;
+    let out_h =
+        if outside.is_empty() { 0.0 } else { PAD + OUT_HEAD + outside.len() as f32 * UROW };
+    let h = HEAD_H + mem_h + out_h + inner + rest_h + PAD;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -134,20 +153,18 @@ fn paint_usage_popover(
     if let Some(m) = mem {
         let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
         let adv = m.advice();
-        let col = match adv {
-            crate::sysmem::Advice::Restart => theme::danger(),
-            crate::sysmem::Advice::Watch => theme::syn_number(),
-            crate::sysmem::Advice::Ok => theme::text(),
+        let col = if adv.is_danger() {
+            theme::danger()
+        } else if adv == crate::sysmem::Advice::Watch {
+            theme::syn_number()
+        } else {
+            theme::text()
         };
         let my = top + PAD;
         // 제목은 **판정만** 말한다. 이유를 뒤에 이어 붙였더니 300px 안에서
         // `맥북 재시작 권장 · 메모리 압박 경…` 으로 잘렸다(실측 2026-08-27) —
         // 이유는 아랫줄로 내린다.
-        let head = match adv {
-            crate::sysmem::Advice::Ok => "맥북 메모리",
-            crate::sysmem::Advice::Watch => "맥북 메모리 주의",
-            crate::sysmem::Advice::Restart => "맥북 재시작 권장",
-        };
+        let head = adv.headline();
         let pct = format!("wired {:.0}%", m.wired_pct());
         let size = format!("{:.1}G / {:.0}G", gb(m.wired), gb(m.total));
         let pw = g.measure_chrome_text(&pct, 11.0, true);
@@ -189,6 +206,105 @@ fn paint_usage_popover(
             gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: false, italic: false },
         );
         top += mem_h;
+        g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+    }
+    if !outside.is_empty() {
+        // 아래 목록과 **다른 것을 잰다** — 저긴 이 앱이 낳은 것, 여긴 남의 앱이다.
+        // 제목으로 그 경계를 못 박지 않으면 두 목록이 한 표본으로 읽혀, 합계가
+        // 안 맞는다는 오해가 그대로 되풀이된다.
+        g.draw_text(
+            x + 12.0,
+            top + 3.0,
+            "이 앱 밖에서 쥔 것",
+            gpu::DrawOpts { font_size: 9.5, color: theme::text_dim(), bold: false, italic: false },
+        );
+        let mut oy = top + OUT_HEAD;
+        for (pid, rss, name, n) in &outside {
+            let r = (x + 1.0, oy, w - 2.0, UROW);
+            let hov = hit(cursor, &r);
+            let armed = sb.usage_kill_armed.is_some_and(|(p, _)| p == *pid);
+            if hov || armed {
+                round_rect(
+                    g,
+                    r.0,
+                    r.1,
+                    r.2,
+                    r.3,
+                    theme::radius_sm(),
+                    theme::with_alpha(
+                        if armed { theme::danger() } else { theme::text() },
+                        if armed { 0x2a } else { 0x14 },
+                    ),
+                );
+            }
+            let gb = *rss as f32 / (1024.0 * 1024.0 * 1024.0);
+            let size =
+                if gb >= 1.0 { format!("{gb:.1}G") } else { format!("{:.0}M", gb * 1024.0) };
+            let sw = g.measure_chrome_text(&size, 11.0, true);
+            // 겨눈 줄에서만 오른쪽 한 칸을 ×에 내준다 — 크기는 늘 보여야 하는
+            // 값이라 자리를 뺏기는 대신 왼쪽으로 물러난다.
+            let tail = if hov || armed { 24.0 } else { 0.0 };
+            let right = x + w - 12.0 - tail;
+            g.draw_text(
+                right - sw,
+                oy + 9.0,
+                &size,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: theme::text(),
+                    bold: true,
+                    italic: false,
+                },
+            );
+            let label = if armed {
+                "한 번 더 누르면 종료".to_string()
+            } else if *n > 1 {
+                // 프로세스 수를 밝히는 것은 이 줄이 **합**이라는 표시다. Chrome
+                // 12G 는 Helper 마흔 개를 접은 값이고, 그걸 모르면 활성 모니터의
+                // 프로세스 목록과 대조했을 때 어디에도 없는 숫자로 보인다.
+                format!("{name} · {n}개")
+            } else {
+                name.clone()
+            };
+            let avail = (right - sw - 10.0 - (x + 12.0)).max(0.0);
+            let lt = crate::info::fit_text(g, &label, avail, 11.0, false);
+            g.draw_text(
+                x + 12.0,
+                oy + 9.0,
+                &lt,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: if armed { theme::danger() } else { theme::text() },
+                    bold: false,
+                    italic: false,
+                },
+            );
+            if hov || armed {
+                let br = (x + w - 12.0 - 18.0, oy + (UROW - 18.0) / 2.0, 18.0, 18.0);
+                let bhov = hit(cursor, &br);
+                if bhov {
+                    round_rect(
+                        g,
+                        br.0,
+                        br.1,
+                        br.2,
+                        br.3,
+                        theme::radius_sm(),
+                        theme::with_alpha(theme::danger(), 0x33),
+                    );
+                }
+                g.queue_icon(
+                    "x",
+                    br.0 + 4.0,
+                    br.1 + 4.0,
+                    10.0,
+                    if bhov || armed { theme::danger() } else { theme::text_mute() },
+                );
+                sb.popover_hits.push((state::StatusbarHit::KillApp(*pid), br));
+            }
+            oy += UROW;
+        }
+        top += out_h;
         g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
     }
     if list.is_empty() {
@@ -806,12 +922,46 @@ impl crate::App {
             .statusbar
             .popover_hits
             .iter()
-            .find(|(h, r)| matches!(h, state::StatusbarHit::KillPort(_)) && inside(r))
+            .find(|(h, r)| {
+                matches!(
+                    h,
+                    state::StatusbarHit::KillPort(_) | state::StatusbarHit::KillApp(_)
+                ) && inside(r)
+            })
             .or_else(|| self.statusbar.popover_hits.iter().find(|(_, r)| inside(r)))
             .map(|(h, _)| h.clone());
         match hit {
             Some(state::StatusbarHit::KillPort(pid)) => {
                 self.kill_process(pid, false);
+                return true;
+            }
+            Some(state::StatusbarHit::KillApp(pid)) => {
+                // 첫 클릭은 겨누기만 한다. 포트 팝오버의 ×는 자기가 띄운 dev
+                // 서버라 잘못 눌러도 다시 띄우면 그만이지만, 여기 뜨는 건 사람이
+                // 쓰던 앱(브라우저·편집기)이라 열어 둔 것을 잃는다.
+                match self.statusbar.usage_kill_armed {
+                    Some((p, _)) if p == pid => {
+                        self.statusbar.usage_kill_armed = None;
+                        let name = self
+                            .statusbar
+                            .usage_outside
+                            .iter()
+                            .find(|(p, ..)| *p == pid)
+                            .map(|(_, _, n, _)| n.clone());
+                        // SIGTERM 이다 — 앱이 저장 여부를 물을 틈이 있다.
+                        self.kill_process(pid, false);
+                        if let Some(n) = name {
+                            // `kill_process` 의 「종료 신호 4821」을 덮는다. 이
+                            // 목록에서 사람이 고른 것은 pid 가 아니라 앱이다.
+                            self.set_toast(format!("{n} 종료 신호"));
+                        }
+                    }
+                    _ => {
+                        self.statusbar.usage_kill_armed =
+                            Some((pid, std::time::Instant::now()));
+                        self.chrome_dirty = true;
+                    }
+                }
                 return true;
             }
             Some(state::StatusbarHit::OpenPort(port)) => {
