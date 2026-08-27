@@ -7031,6 +7031,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             ],
             "PostToolUse": [
                 { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] },
+                // 목록에 뜨는 이름도 전부 세션 이름이라, 학생이 그것을 사람 이름으로 쓰게
+                // 된다. 목록 자체는 안 건드리고 옆에 이름↔캐릭터 표만 붙인다 —
+                // **부를 때는 캐릭터, `to:` 주소는 목록의 그 이름**이라는 구분이 요점이다.
+                { "matcher": "ListAgents", "hooks": [cmd("kasaterm-peer-name.py", 5000)] },
                 { "hooks": [cmd("kasaterm-steer-hook.sh", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
