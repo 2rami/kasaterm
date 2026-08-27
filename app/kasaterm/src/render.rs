@@ -4183,11 +4183,16 @@ impl App {
                         } else {
                             theme::panel_bg()
                         };
-                        round_rect(g, er.0 - 1.0, er.1 - 1.0, er.2 + 2.0, er.3 + 2.0,
-                            theme::radius_sm(), theme::border());
-                        round_rect(g, er.0, er.1, er.2, er.3, theme::radius_sm(),
-                            theme::raised_on(base, hov));
-                        let fg = if hov { theme::text() } else { theme::text_dim() };
+                        let fill = theme::raised_on(base, hov);
+                        panel_rect_outlined(g, er.0, er.1, er.2, er.3, theme::radius_sm(), fill);
+                        // 화살표는 목록을 여는 유일한 표지라 배지 안에서 가장 밝아야
+                        // 한다. `text_dim` 은 부제 색이어서, 10px 로 그린 화살표가
+                        // 배지 채움에 묻혀 숫자만 떠 있는 칩으로 보였다(2026-08-27 지적).
+                        let fg = if hov {
+                            theme::text()
+                        } else {
+                            theme::lerp(theme::text_dim(), theme::text(), 0.55)
+                        };
                         // 삼각형은 목록이 절반 열렸을 때 넘어간다 — 누르자마자
                         // 바뀌면 아직 닫힌 목록 위에서 이미 열린 표시가 된다.
                         g.queue_icon(
@@ -4196,9 +4201,9 @@ impl App {
                             } else {
                                 "chevron-right"
                             },
-                            er.0 + 7.0,
-                            er.1 + 5.0,
-                            10.0,
+                            er.0 + 5.0,
+                            er.1 + 3.0,
+                            14.0,
                             fg,
                         );
                         let n = sb_dots.get(*i).map_or(0, |v| v.len()).to_string();
@@ -9340,22 +9345,11 @@ impl App {
                 let card_h = btn_dy + btn_h + pad;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
-                // 카드의 테두리는 `theme::border()` 로는 안 보인다 — 그 색이 카드
-                // 채움과 같은 대역이라, 어두운 스크림 위에서는 테두리 없는 색판으로
-                // 읽혔다(2026-08-27 지적 「테두리나 모양도 신경써줘」). 채움에서
-                // 글자색 쪽으로 조금 끌어온 불투명 헤어라인이라야 여덟 테마 전부에서
-                // 한 줄로 남는다. 라운드는 토큰의 배수 — 픽셀 실루엣(0)에서는 그대로 0.
+                // 라운드는 토큰의 배수 — 픽셀 실루엣(0)에서는 그대로 0 이라 각진
+                // 카드가 유지된다. 테두리는 `panel_rect_outlined` 가 채움 기준으로
+                // 잡는다(`theme::edge_on`).
                 let card_r = theme::radius_md() * 1.5;
-                round_rect(
-                    g,
-                    cx0 - 1.0,
-                    cy0 - 1.0,
-                    card_w + 2.0,
-                    card_h + 2.0,
-                    card_r + 1.0,
-                    theme::lerp(theme::surface_active(), theme::text(), 0.22),
-                );
-                panel_rect(g, cx0, cy0, card_w, card_h, card_r, theme::surface_active());
+                panel_rect_outlined(g, cx0, cy0, card_w, card_h, card_r, theme::surface_active());
                 let (mx, my) = self.cursor_px;
                 g.draw_text(
                     cx0 + pad,

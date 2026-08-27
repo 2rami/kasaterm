@@ -206,8 +206,14 @@ fn panel_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
 /// 어두운 바탕 위에서 그냥 사라져서, 스크림 위에 뜬 모달이나 검은 터미널 위의
 /// 메뉴가 테두리 없는 색판으로 보였다 — 층을 선언하라고 만든 함수가 정작
 /// 층이 필요한 자리에서만 침묵한 셈이다.
+///
+/// 그 링 색이 `theme::border()` 인 동안은 위 문단이 의도로만 남아 있었다. 그
+/// 토큰은 한 자리에 고정된 색이라 어두운 판 위에서 채움과 같은 대역으로
+/// 내려앉는다 — 복원 카드도 사이드바의 펼치기 배지도 테두리 없는 색판으로
+/// 보였다. `theme::edge_on(fill)` 은 링을 **채움 기준으로** 잡으므로 어느 판
+/// 위에서든 한 줄이 남는다(2026-08-27 지적).
 fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, fill: [u8; 4]) {
-    round_rect(g, x - 1.0, y - 1.0, w + 2.0, h + 2.0, r, theme::border());
+    round_rect(g, x - 1.0, y - 1.0, w + 2.0, h + 2.0, r, theme::edge_on(fill));
     panel_rect(g, x, y, w, h, r, fill);
 }
 
