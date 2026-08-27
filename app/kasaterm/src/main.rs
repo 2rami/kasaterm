@@ -1670,6 +1670,10 @@ enum RestoreBtn {
     Restore,
     /// Discard the saved state and keep the fresh single-pane session.
     Fresh,
+    /// 카드만 접는다 — 저장본은 건드리지 않고 아무것도 복원하지 않는다. 닫기(×)와
+    /// Esc 가 이것. 「고르지 않고 빠져나갈 길」이 없어서 카드가 화면을 가둔 채로
+    /// 남았다(2026-08-27 지적).
+    Dismiss,
 }
 
 /// A login shell (vs. a real foreground job like claude / vim / a build).

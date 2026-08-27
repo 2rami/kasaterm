@@ -9253,67 +9253,219 @@ impl App {
                 let win_h = win_px.1 / scale;
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
                 let n = crate::App::count_claude_panes(&state);
-                // claude 가 없는 창도 복원 대상이라, 있을 때만 그 수를 덧붙인다.
                 let total = crate::App::count_panes(&state);
-                let subtitle = if n > 0 {
-                    format!("claude 세션 {n}개를 포함한 pane {total}개를 마지막 레이아웃 그대로 이어서 켭니다")
-                } else {
-                    format!("pane {total}개를 마지막 레이아웃 그대로 이어서 켭니다")
+                // 돌아올 학생들. 「pane 20개」는 숫자일 뿐이지만 얼굴은 누가 오는지를
+                // 말한다 — 이 카드가 크롬 대화상자처럼 보이던 이유가 그 자리가 비어
+                // 있어서였다(2026-08-27 지적: 「디자인이 구려」).
+                let faces: Vec<String> = {
+                    fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+                        if let Some(leaf) = node.get("leaf") {
+                            if let Some(c) = leaf.get("character").and_then(|c| c.as_str()) {
+                                if !c.is_empty() && !out.iter().any(|x| x == c) {
+                                    out.push(c.to_string());
+                                }
+                            }
+                        } else if let Some(split) = node.get("split") {
+                            for k in ["a", "b"] {
+                                if let Some(x) = split.get(k) {
+                                    walk(x, out);
+                                }
+                            }
+                        }
+                    }
+                    let mut out = Vec::new();
+                    if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
+                        for sess in sessions {
+                            if let Some(ws) = sess.get("windows").and_then(|w| w.as_array()) {
+                                for w in ws {
+                                    walk(w, &mut out);
+                                }
+                            }
+                        }
+                    }
+                    out
                 };
-                const RESTORE_TITLE: &str = "이전 세션을 복원할까요?";
-                let pad = 26.0_f32;
+                const RESTORE_TITLE: &str = "이전 세션을 이어서 켤까요?";
+                let subtitle = if n > 0 {
+                    format!("마지막 배치 그대로 · pane {total}개 · 학생 {n}명")
+                } else {
+                    format!("마지막 배치 그대로 · pane {total}개")
+                };
+                let pad = 24.0_f32;
                 let bf = 13.0_f32;
                 let bpad = 18.0_f32;
                 let btn_h = 34.0_f32;
                 let btn_gap = 8.0_f32;
-                // 두 버튼은 **같은 폭**으로 간다. 글자 수대로 재면 기본 액션인 "복원"(2자)이
-                // 부액션 "새로 시작"(4자)보다 좁아져, 색을 걷어내면 큰 쪽이 주액션으로
-                // 읽혔다 — 위계가 accent 파랑 하나에만 얹혀 있었다는 뜻이다.
+                // 프사는 얼굴만 잘라 온 그림이라 **바닥이 평평하게 끊긴다**. 그대로
+                // 놓으면 36px 에서 그 절단면이 그대로 보인다 — 작은 자리(22px 세션탭)
+                // 에서는 안 보이던 것이다. 테두리 있는 칩 **안에** 넣으면 그 끊김이
+                // 상자 안쪽 일이 되어 의도된 모양으로 읽힌다(2026-08-27 지적
+                // 「테두리나 모양도 신경써줘」).
+                let chip = 44.0_f32;
+                let ring = 2.0_f32;
+                let chip_inset = ring + 2.0;
+                let face = chip - chip_inset * 2.0;
+                let face_gap = 8.0_f32;
+                // 카드 폭이 감당하는 얼굴 수를 먼저 정하고(최대 9), 나머지는 +N 로 접는다.
+                let face_max = 9usize.min(faces.len());
+                let overflow = faces.len().saturating_sub(face_max);
                 let btn_w = g
                     .measure_chrome_text("새로 시작", bf, false)
                     .max(g.measure_chrome_text("복원", bf, true))
                     + bpad * 2.0;
-                // 카드 폭은 두 줄을 실측해서 나온다. 448 을 박아 두었더니 크롬 페이스를
-                // 픽셀로 바꾸는 순간 부제 꼬리가 카드 밖으로 잘렸다 — 같은 문장이
-                // pane 수 자릿수로도 길어지니 애초에 잴 일이었다.
-                let title_w = g.measure_chrome_text(RESTORE_TITLE, 15.0, true);
-                let sub_w = g.measure_chrome_text(&subtitle, 13.0, false);
-                let body_w = title_w.max(sub_w).max(btn_w * 2.0 + btn_gap);
-                let card_w = (body_w + pad * 2.0).clamp(448.0, (win_w - 48.0).max(448.0));
-                // 높이도 내용에서 나온다. 176 을 박아 두었더니 글 두 줄이 위에 몰리고
-                // 그 아래 60px 가 아무 이유 없이 비어, 카드가 대충 얹힌 것처럼 보였다.
-                let title_y = 28.0_f32;
-                let sub_y = title_y + 30.0;
-                // 키 안내 한 줄. 이 카드에는 닫기(X)가 없어서, 두 버튼 중 하나를
-                // 고르는 것 말고 빠져나갈 길이 없어 보인다 — 실제로는 Esc 가 「새로
-                // 시작」이다(거노 2026-08-27: 「x버튼이 없네 ㄷㄷ」). 길이 있는데
-                // 안 보이는 것과 없는 것은 화면에서 구별되지 않으므로 적어 둔다.
-                let hint_y = sub_y + 22.0;
-                let btn_dy = hint_y + 32.0;
-                let card_h = btn_dy + btn_h + 26.0;
+                let title_w = g.measure_chrome_text(RESTORE_TITLE, 16.0, true);
+                let sub_w = g.measure_chrome_text(&subtitle, 12.5, false);
+                let hint = "esc 닫기";
+                let hint_w = g.measure_chrome_text(hint, 11.5, false);
+                let faces_w = if face_max > 0 {
+                    face_max as f32 * chip + (face_max as f32 - 1.0).max(0.0) * face_gap
+                        + if overflow > 0 { chip + face_gap } else { 0.0 }
+                } else {
+                    0.0
+                };
+                // 닫기(×) 자리를 제목 오른쪽에 비워 둔다 — 제목이 그 밑으로 흐르면
+                // 카드가 삐뚤어 보인다.
+                // 닫기는 **눌러야 하는 것**이라 글리프 크기가 아니라 손가락 크기로
+                // 잡는다 — 26px 짜리는 화면에서 먼지처럼 보였다(2026-08-27 지적).
+                let close = 36.0_f32;
+                let body_w = (title_w + close + 12.0)
+                    .max(sub_w)
+                    .max(faces_w)
+                    .max(hint_w + 16.0 + btn_w * 2.0 + btn_gap);
+                let card_w = (body_w + pad * 2.0).clamp(440.0, (win_w - 48.0).max(440.0));
+                let title_y = 26.0_f32;
+                let sub_y = title_y + 26.0;
+                let faces_y = sub_y + 24.0;
+                let btn_dy = if face_max > 0 { faces_y + chip + 22.0 } else { sub_y + 34.0 };
+                let card_h = btn_dy + btn_h + pad;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
-                panel_rect_outlined(g, cx0, cy0, card_w, card_h, theme::radius_md(), theme::surface_active());
+                // 카드의 테두리는 `theme::border()` 로는 안 보인다 — 그 색이 카드
+                // 채움과 같은 대역이라, 어두운 스크림 위에서는 테두리 없는 색판으로
+                // 읽혔다(2026-08-27 지적 「테두리나 모양도 신경써줘」). 채움에서
+                // 글자색 쪽으로 조금 끌어온 불투명 헤어라인이라야 여덟 테마 전부에서
+                // 한 줄로 남는다. 라운드는 토큰의 배수 — 픽셀 실루엣(0)에서는 그대로 0.
+                let card_r = theme::radius_md() * 1.5;
+                round_rect(
+                    g,
+                    cx0 - 1.0,
+                    cy0 - 1.0,
+                    card_w + 2.0,
+                    card_h + 2.0,
+                    card_r + 1.0,
+                    theme::lerp(theme::surface_active(), theme::text(), 0.22),
+                );
+                panel_rect(g, cx0, cy0, card_w, card_h, card_r, theme::surface_active());
+                let (mx, my) = self.cursor_px;
                 g.draw_text(
                     cx0 + pad,
                     cy0 + title_y,
                     RESTORE_TITLE,
-                    gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+                    gpu::DrawOpts { font_size: 16.0, color: theme::text(), bold: true, italic: false },
                 );
                 g.draw_text(
                     cx0 + pad,
                     cy0 + sub_y,
                     &subtitle,
-                    gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+                    gpu::DrawOpts { font_size: 12.5, color: theme::text_dim(), bold: false, italic: false },
                 );
+                // 닫기(×) — 이 카드에 없던 것. 저장본은 그대로 두고 카드만 접는다.
+                let close_x = cx0 + card_w - pad - close;
+                let close_y = cy0 + title_y - 10.0;
+                let close_hover = mx >= close_x && mx <= close_x + close && my >= close_y && my <= close_y + close;
+                g.hover_pointer |= close_hover;
+                // 판은 **호버 전에도** 깔아 둔다 — 글리프만 떠 있으면 장식으로 읽혀,
+                // 카드를 접는 길이 있는데도 없는 것과 같았다. 그리고 `×` 글자가 아니라
+                // 아이콘이라야 굵기가 제 크기로 선다(폰트 글리프는 자릿수만 크고
+                // 잉크가 얇다 — 2026-08-27 지적 「x도 작잖아」).
+                circle_rect(
+                    g,
+                    close_x,
+                    close_y,
+                    close,
+                    theme::raised_on(theme::surface_active(), close_hover),
+                );
+                let xs = 30.0_f32;
+                g.queue_icon(
+                    "x",
+                    close_x + (close - xs) / 2.0,
+                    close_y + (close - xs) / 2.0,
+                    xs,
+                    if close_hover { theme::text() } else { theme::text_dim() },
+                );
+                restore_btn_hits.push((crate::RestoreBtn::Dismiss, (close_x, close_y, close, close)));
+                // 돌아올 학생들의 얼굴. 그림이 없는 이름은 조용히 건너뛴다 — 빈 네모를
+                // 그리면 「없는 학생」처럼 보인다.
+                if face_max > 0 {
+                    let fy = cy0 + faces_y;
+                    let mut fx = cx0 + pad;
+                    for name in faces.iter().take(face_max) {
+                        // 칩을 먼저 깔고 그 위에 얼굴 — 순서가 바뀌면 칩이 얼굴을 덮는다.
+                        // 칩 색은 카드보다 한 단 어둡게: 같은 톤이면 테두리만 떠서
+                        // 상자가 아니라 선으로 보인다.
+                        // 링은 **둥근 사각 두 장**으로 만든다 — 직선 네 개를 얹으면
+                        // 모서리가 둥근 상자 밖으로 튀어 각진 테두리처럼 보인다.
+                        let r_out = 12.0_f32;
+                        let tint = theme::character_accent_any(name).unwrap_or_else(theme::border);
+                        round_rect(g, fx, fy, chip, chip, r_out, theme::with_alpha(tint, 0xCC));
+                        round_rect(
+                            g,
+                            fx + ring,
+                            fy + ring,
+                            chip - ring * 2.0,
+                            chip - ring * 2.0,
+                            r_out - ring,
+                            theme::surface(),
+                        );
+                        if !crate::sprites::draw_student_face(
+                            g,
+                            name,
+                            fx + chip_inset,
+                            fy + chip_inset,
+                            face,
+                        ) {
+                            // 그림이 없는 학생 — 빈 칩 대신 이름 첫 글자.
+                            let ch: String = name.chars().take(1).collect();
+                            let cw = g.measure_chrome_text(&ch, 15.0, true);
+                            g.draw_text(
+                                fx + (chip - cw) / 2.0,
+                                fy + (chip - 15.0) / 2.0,
+                                &ch,
+                                gpu::DrawOpts { font_size: 15.0, color: theme::text_dim(), bold: true, italic: false },
+                            );
+                        }
+                        fx += chip + face_gap;
+                    }
+                    if overflow > 0 {
+                        let r_out = 12.0_f32;
+                        round_rect(g, fx, fy, chip, chip, r_out, theme::with_alpha(theme::border(), 0xCC));
+                        round_rect(
+                            g,
+                            fx + ring,
+                            fy + ring,
+                            chip - ring * 2.0,
+                            chip - ring * 2.0,
+                            r_out - ring,
+                            theme::surface(),
+                        );
+                        let more = format!("+{overflow}");
+                        let mw = g.measure_chrome_text(&more, 13.0, true);
+                        g.draw_text(
+                            fx + (chip - mw) / 2.0,
+                            fy + (chip - 13.0) / 2.0,
+                            &more,
+                            gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: true, italic: false },
+                        );
+                    }
+                }
+                let btn_y = cy0 + btn_dy;
+                // 키 안내는 버튼 반대편 바닥에 — 길이 있는데 안 보이면 없는 것과 같다.
                 g.draw_text(
                     cx0 + pad,
-                    cy0 + hint_y,
-                    "Enter = 복원 · Esc = 새로 시작 (지금 도는 pane 은 그대로 남습니다)",
-                    gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false },
+                    btn_y + (btn_h - 11.5) / 2.0,
+                    hint,
+                    gpu::DrawOpts { font_size: 11.5, color: theme::text_dim(), bold: false, italic: false },
                 );
-                let (mx, my) = self.cursor_px;
-                let btn_y = cy0 + btn_dy;
                 let hit = |x: f32| mx >= x && mx <= x + btn_w && my >= btn_y && my <= btn_y + btn_h;
                 // 복원 (primary/accent), flush to the card's right edge.
                 let restore_x = cx0 + card_w - pad - btn_w;

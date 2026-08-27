@@ -5845,7 +5845,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Restore prompt: Enter = 복원, Esc = 새로 시작. Swallow all
+                // Restore prompt: Enter = 복원, Esc = 닫기(안 고름). Swallow all
                 // other keys so nothing reaches the fresh session behind the dim.
                 if self.restore_prompt.is_some() {
                     if matches!(event.state, ElementState::Pressed) {
@@ -5855,7 +5855,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.restore_dialog_pick(RestoreBtn::Restore);
                             }
                             Key::Named(NamedKey::Escape) => {
-                                self.restore_dialog_pick(RestoreBtn::Fresh);
+                                self.restore_dialog_pick(RestoreBtn::Dismiss);
                             }
                             _ => {}
                         }
@@ -6742,6 +6742,8 @@ impl App {
         match btn {
             RestoreBtn::Restore => self.restore_session_state(&state),
             RestoreBtn::Fresh => crate::socket::clear_session_state(),
+            // 저장본을 지우지 않는다 — 닫기는 「안 고름」이지 「버림」이 아니다.
+            RestoreBtn::Dismiss => {}
         }
     }
 }
