@@ -68,14 +68,19 @@ impl MemSample {
 
     pub(crate) fn advice(&self) -> Advice {
         let pct = self.wired_pct();
-        // 커널 판정이 먼저다 — warning 이상은 커널이 직접 「자리가 없다」고
-        // 말하는 것이라, 비율이 임계 아래여도 그쪽이 맞다.
-        if self.pressure >= 2
+        // `critical` 은 커널이 이미 메모리를 되찾으려 프로세스를 압박하는 단계라
+        // 비율과 무관하게 권한다.
+        if self.pressure >= 4
             || pct >= pct_env("KASATERM_MEM_RESTART_PCT", RESTART_PCT)
             || self.swap_used >= SWAP_LIMIT
         {
             Advice::Restart
-        } else if pct >= pct_env("KASATERM_MEM_WATCH_PCT", WATCH_PCT) {
+        // ⚠️`warning`(2) 은 **재시작 사유가 아니다**. 큰 빌드 한 번이면 오르고
+        // 끝나면 곧 1 로 돌아온다 — 실측 2026-08-27: cargo 빌드 중 캡처에서 wired
+        // 16% 인데도 「재시작 권장」이 떴고, 빌드가 끝나자 압박은 1 이었다.
+        // 그걸 재시작 사유로 치면 무거운 작업을 할 때마다 뜨고, 그러면 정작
+        // 진짜로 쌓였을 때의 경고까지 같이 무시하게 된다. 주의까지만 말한다.
+        } else if self.pressure >= 2 || pct >= pct_env("KASATERM_MEM_WATCH_PCT", WATCH_PCT) {
             Advice::Watch
         } else {
             Advice::Ok
@@ -208,9 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn 커널_압박은_비율을_앞선다() {
-        // wired 가 정상이어도 커널이 경고하면 그쪽이 사실이다.
-        assert_eq!(s(4.4, 2, 0.0).advice(), Advice::Restart);
+    fn 일시적인_압박_경고는_재시작_사유가_아니다() {
+        // 큰 빌드 한 번이면 warning 이 뜬다(실측). 주의까지만.
+        assert_eq!(s(4.4, 2, 0.0).advice(), Advice::Watch);
+    }
+
+    #[test]
+    fn 압박_심각은_비율을_앞선다() {
+        // critical 은 커널이 이미 회수에 들어간 것이라 wired 가 정상이어도 권한다.
+        assert_eq!(s(4.4, 4, 0.0).advice(), Advice::Restart);
     }
 
     #[test]

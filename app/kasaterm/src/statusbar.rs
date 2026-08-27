@@ -50,7 +50,7 @@ pub(crate) fn paint_popover(
             paint_ports_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
-        state::StatusbarPopover::Usage => paint_usage_popover(g, sb, view, anchor, win_w),
+        state::StatusbarPopover::Usage => paint_usage_popover(g, sb, view, anchor, win_w, win_h),
     }
 }
 
@@ -65,9 +65,14 @@ fn paint_usage_popover(
     view: &crate::info::InfoSnap,
     anchor: (f32, f32, f32, f32),
     win_w: f32,
+    win_h: f32,
 ) {
     const UROW: f32 = 30.0;
-    let list: Vec<_> = sb.usage_top.iter().take(8).cloned().collect();
+    // 수집한 만큼 전부 담는다 — 넘치는 몫은 스크롤이 맡는다. 예전엔 여기서 8개로
+    // 자르고 나머지를 「그 외 N개」 한 줄로 접었는데, 그 여덟이 전체의 39% 뿐이라
+    // (실측 2026-08-27: 231개 중 8개 = 3.3G / 8.4G) 무엇이 잡아먹는지 묻는 이
+    // 목록의 목적 자체가 안 서고, 굴릴 수도 없어 나머지를 볼 길이 없었다.
+    let list: Vec<_> = sb.usage_top.clone();
     // 목록 밖에 남은 것들 — 합계는 트리 전체 합이라, 이 줄이 없으면 「다 더해도
     // 합계가 안 나온다」가 된다(2026-08-16 「3.1G가 다 더하면 아니지않나」).
     let rest_n = sb.usage_rows.saturating_sub(list.len());
@@ -81,13 +86,17 @@ fn paint_usage_popover(
         .flatten();
     let w = 300.0_f32.min(win_w - 16.0);
     let rows = list.len().max(1) + usize::from(rest.is_some());
+    let body = PAD + rows as f32 * UROW;
+    // 화면 절반을 넘기지 않는다(포트 팝오버와 같은 규칙) — 팝오버가 창을 덮으면
+    // 뒤의 pane 을 못 보면서 판단하게 된다.
+    let inner = body.min((win_h * 0.5).max(200.0));
     // 기계 전체의 물리 메모리. 아래 목록·합계와 **다른 것을 잰다** — 그쪽은
     // 우리 트리가 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽엔 재부팅 말고는
     // 회수 경로가 없는 몫(wired)이 들어 있다. 상태줄의 「재시작 권장」이 어디서
     // 나온 말인지 여기서만 확인할 수 있으니 임계 아래에서도 늘 적는다.
     let mem = sb.mem;
     let mem_h = if mem.is_some() { UROW + PAD } else { 0.0 };
-    let h = HEAD_H + mem_h + PAD + rows as f32 * UROW + PAD;
+    let h = HEAD_H + mem_h + inner + PAD;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -124,14 +133,13 @@ fn paint_usage_popover(
             crate::sysmem::Advice::Ok => theme::text(),
         };
         let my = top + PAD;
-        let head = match (adv, m.extra_reason()) {
-            (crate::sysmem::Advice::Ok, _) => "맥북 메모리".to_string(),
-            // wired 말고 다른 이유면 밝힌다 — 「권장」만 있으면 재시작 말고
-            // 다른 손을 쓸 수 있는지 판단할 근거가 없다. wired 가 원인일 때는
-            // 오른쪽 칼럼이 이미 그 숫자라 붙이지 않는다.
-            (_, Some(r)) => format!("맥북 재시작 권장 · {r}"),
-            (crate::sysmem::Advice::Restart, None) => "맥북 재시작 권장".to_string(),
-            (crate::sysmem::Advice::Watch, None) => "맥북 메모리 주의".to_string(),
+        // 제목은 **판정만** 말한다. 이유를 뒤에 이어 붙였더니 300px 안에서
+        // `맥북 재시작 권장 · 메모리 압박 경…` 으로 잘렸다(실측 2026-08-27) —
+        // 이유는 아랫줄로 내린다.
+        let head = match adv {
+            crate::sysmem::Advice::Ok => "맥북 메모리",
+            crate::sysmem::Advice::Watch => "맥북 메모리 주의",
+            crate::sysmem::Advice::Restart => "맥북 재시작 권장",
         };
         let pct = format!("wired {:.0}%", m.wired_pct());
         let size = format!("{:.1}G / {:.0}G", gb(m.wired), gb(m.total));
@@ -151,17 +159,21 @@ fn paint_usage_popover(
             gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
         );
         let avail = (right - pw.max(sw) - 10.0 - (x + 12.0)).max(0.0);
-        let h1 = crate::info::fit_text(g, &head, avail, 11.0, false);
+        let h1 = crate::info::fit_text(g, head, avail, 11.0, false);
         g.draw_text(
             x + 12.0,
             my + 2.0,
             &h1,
             gpu::DrawOpts { font_size: 11.0, color: col, bold: false, italic: false },
         );
-        // 압축과 스왑은 판정에 직접 쓰이지 않지만(압축은 잘 돌고 있다는 뜻일
-        // 뿐이다), 둘 다 0 이 아닌데 wired 만 낮으면 「왜 무겁지」의 답이 여기
-        // 있을 수 있다.
-        let sub = format!("압축 {:.1}G · 스왑 {:.1}G", gb(m.compressed), gb(m.swap_used));
+        // 아랫줄은 **왜 그렇게 판정했는지**가 먼저다 — 옆 칸의 wired 만 보고는
+        // 커널 압박이나 스왑 때문이라는 걸 알 수가 없고, 그러면 재시작 말고
+        // 다른 손을 쓸 수 있는지 판단할 근거가 없다. 원인이 wired 면 그 숫자가
+        // 이미 옆에 있으므로, 그때만 압축·스왑을 대신 적는다(둘 다 0 이 아닌데
+        // wired 만 낮으면 「왜 무겁지」의 답이 거기 있을 수 있다).
+        let sub = m.extra_reason().unwrap_or_else(|| {
+            format!("압축 {:.1}G · 스왑 {:.1}G", gb(m.compressed), gb(m.swap_used))
+        });
         let s2 = crate::info::fit_text(g, &sub, avail, 10.0, false);
         g.draw_text(
             x + 12.0,
@@ -191,7 +203,13 @@ fn paint_usage_popover(
         })
     };
     let me = std::process::id();
-    let mut ry = top + PAD;
+    // 목록만 굴린다 — 머리(합계)와 맥북 메모리 줄은 굴려도 늘 보여야 하는 값이라
+    // 잘라내는 창 밖에 둔다. 클릭 대상이 없는 팝오버라 시저가 픽셀만 자르고
+    // 클릭은 못 자르는 함정(렌더 카탈로그)에는 걸리지 않는다.
+    let bottom = y + h - PAD;
+    sb.popover_scroll = sb.popover_scroll.clamp(0.0, (body - inner).max(0.0));
+    g.push_clip(x, top, w, (bottom - top).max(0.0));
+    let mut ry = top + PAD - sb.popover_scroll;
     for (pid, cpu, rss_kb, comm) in &list {
         // 이 앱 자신은 이름을 밝혀 준다 — 목록 맨 위에 `kasaterm` 이 떠 있는데
         // 그게 나인 줄 모르면 "이게 뭐지" 로 남는다.
@@ -271,6 +289,7 @@ fn paint_usage_popover(
         );
         g.draw_text(x + 12.0, ry + 8.0, &format!("그 외 {n}개"), dim);
     }
+    g.pop_clip();
 }
 
 /// 터널 주소 한 벌. 표시·열기·복사가 각자 문자열을 조립하면 한 곳만 고쳤을 때

@@ -7008,13 +7008,33 @@ impl App {
                 row(4000, 444, "", "(제목 없음)", "python3", "", true, false),
             ];
             self.info.view.outside = 22;
+            if want.starts_with("usage") {
+                // 격리 리그의 프로세스 트리는 서넛뿐이라 목록이 한 화면에 다
+                // 들어가고, 그러면 정작 봐야 할 것(길 때 잘리는지·굴러가는지)이
+                // 검증되지 않는다. 실기의 형태를 심는다 — 2026-08-27 실측에서
+                // 이 앱 트리는 231개였고 상위 30개가 88% 를 차지했다.
+                self.statusbar.usage_top = (0..30)
+                    .map(|i| {
+                        (
+                            1000 + i as u32,
+                            (30 - i) as f32 * 1.7,
+                            (900 - i as u64 * 25) * 1024,
+                            format!("proc-{i:02}"),
+                        )
+                    })
+                    .collect();
+                self.statusbar.usage_rows = 231;
+                self.statusbar.res = Some((92.0, 9_200_000_000));
+            }
             return;
         }
         if step == 1 {
             // 앵커는 지난 프레임이 세워 둔 칩 사각형이다 — 그게 없으면 상태줄이
             // 아직 안 그려진 것이고, 그때 억지로 열면 팝오버가 엉뚱한 자리에 뜬다.
             let (kind, anchor) = match want.as_str() {
-                "usage" => (crate::state::StatusbarPopover::Usage, self.statusbar.res_rect),
+                w if w.starts_with("usage") => {
+                    (crate::state::StatusbarPopover::Usage, self.statusbar.res_rect)
+                }
                 w if w.starts_with("tunnel") => {
                     (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
                 }
@@ -7023,14 +7043,21 @@ impl App {
             match anchor {
                 Some(r) => {
                     self.toggle_statusbar_popover(kind, r);
+                    // 스크롤을 다음 step 으로 미루면 안 된다 — 팝오버가 열린 뒤
+                    // 화면이 정적이면 프레임이 돌지 않아 그 step 이 영영 안 불린다
+                    // (실측 2026-08-27: 열림만 찍히고 스크롤은 매번 누락).
+                    if want.ends_with("-end") {
+                        self.statusbar.popover_scroll = 9999.0;
+                        eprintln!("[autoportpop] 스크롤 끝까지");
+                    }
                     eprintln!("[autoportpop] 열림 {kind:?} anchor={r:?}");
                 }
                 None => eprintln!("[autoportpop] FAIL — 칩이 아직 안 그려졌다"),
             }
             return;
         }
-        if want == "usage" {
-            // 누를 것이 없는 팝오버라 여기서 끝난다.
+        if want.starts_with("usage") {
+            // 누를 것이 없는 팝오버라 여기서 끝난다(스크롤은 열 때 함께 했다).
             return;
         }
         if tunnel {

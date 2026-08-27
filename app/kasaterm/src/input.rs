@@ -3533,7 +3533,10 @@ fn sample_process_tree_usage() -> Option<(f32, u64, Vec<(u32, f32, u64, String)>
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(b.2.cmp(&a.2))
     });
     let total_rows = top.len();
-    top.truncate(10);
+    // 상위 몇 개까지 담을지. 실측(2026-08-27, 이 기계 트리 231개 8.4G)에서 상위
+    // 8개는 39%, 20개는 80%, 30개는 88% 였다 — 30 부터는 한 개당 20MB 아래로
+    // 떨어져 더 담아도 답이 안 바뀐다. 화면에는 팝오버가 스크롤로 보여 준다.
+    top.truncate(30);
     Some((cpu, rss_kb * 1024, top, total_rows))
 }
 
