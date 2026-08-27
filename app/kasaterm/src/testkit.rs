@@ -6837,6 +6837,72 @@ impl App {
         // 겹침은 **라벨로** 만든다 — 라벨이 있으면 `account_display` 가 그걸 그대로
         // 쓰므로 `claude auth status` 를 부를 필요가 없다(리그에는 로그인이 없다).
         // 전환 중은 배지의 `account_dir` 을 활성 슬롯과 다르게 두면 된다.
+        // 하단바에 **나머지 계정까지** 세우는 줄(2026-08-27). 슬롯 넷을 심어
+        // 네 상태를 한 줄에 모은다 — 활성(게이지 유지) · 여유 · 위험(90%↑) ·
+        // 못 읽은 슬롯(`—`). 마지막이 특히 중요하다: 빈칸이나 0% 로 그리면
+        // 「여유 있음」으로 읽혀 옮길지 말지를 정확히 반대로 만든다.
+        if step == 0 && want.starts_with("statusbar-accounts") {
+            self.set_statusbar_all_accounts = !want.ends_with("off");
+            self.set_claude_accounts = vec![
+                crate::socket::ClaudeAccount {
+                    id: "acct-5".to_string(),
+                    label: "개인사이오닉".to_string(),
+                },
+                crate::socket::ClaudeAccount {
+                    id: "acct-4".to_string(),
+                    label: "사이오닉팀".to_string(),
+                },
+                crate::socket::ClaudeAccount {
+                    id: "acct-1".to_string(),
+                    label: "지메일".to_string(),
+                },
+                crate::socket::ClaudeAccount {
+                    id: "acct-3".to_string(),
+                    label: "네이버".to_string(),
+                },
+            ];
+            self.set_claude_account = "acct-1".to_string();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let mk = |dir: &str, w: Vec<(&str, f32)>, stale: bool| crate::UsageBadge {
+                pct: w.iter().map(|(_, p)| *p).fold(0.0, f32::max),
+                label: "7d".to_string(),
+                stale,
+                account_dir: dir.to_string(),
+                resets_at: Some(now + 3 * 3600 + 54 * 60),
+                windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
+            };
+            // 활성 슬롯의 키는 **작업대 경로**다 — 상태줄이 「전환 중」을 가르는
+            // 근거가 그 경로라, 금고 경로로 심으면 게이지가 영영 `…` 로 남는다.
+            let active_dir = crate::claude_auth::runtime_dir_for("acct-1", "acct-1")
+                .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+            let active = mk(&active_dir, vec![("5h", 12.0), ("7d", 47.0)], false);
+            if let Ok(mut g) = self.claude_usage.lock() {
+                *g = Some(active.clone());
+            }
+            if let Ok(mut g) = self.claude_usage_all.lock() {
+                g.insert(active_dir, active);
+                if let Some(d) = crate::socket::claude_account_dir("acct-5") {
+                    g.insert(
+                        d.to_string_lossy().into_owned(),
+                        mk("", vec![("5h", 8.0), ("7d", 8.0)], false),
+                    );
+                }
+                if let Some(d) = crate::socket::claude_account_dir("acct-4") {
+                    g.insert(
+                        d.to_string_lossy().into_owned(),
+                        mk("", vec![("5h", 91.0), ("7d", 91.0)], true),
+                    );
+                }
+                // acct-3(네이버)은 일부러 안 넣는다 — 토큰이 만료돼 못 읽은 슬롯.
+            }
+            self.chrome_dirty = true;
+            return;
+        }
+        if want.starts_with("statusbar-accounts") {
+            return;
+        }
         if step == 0 && want == "switching" {
             self.set_claude_accounts = vec![
                 crate::socket::ClaudeAccount {

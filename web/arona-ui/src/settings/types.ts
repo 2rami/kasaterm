@@ -160,6 +160,7 @@ export type ClaudeValues = {
   codex_account: string;
   autoswitch: boolean;
   autoswitch_pct: number;
+  statusbar_all_accounts: boolean;
   model: string;
   effort: string;
   extra: string;

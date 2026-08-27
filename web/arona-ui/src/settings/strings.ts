@@ -311,6 +311,12 @@ export const ko = {
     /// (`theme.inUse`)은 「79명 · 쓰는 중」처럼 문장으로 읽혀 그대로 둔다.
     inUse: '사용 중',
     labelPlaceholder: '별명 (비우면 이메일로 불러요)',
+    /// 하단바에 나머지 슬롯까지 세울지. 「어디로 옮기나」에 답하려고 드롭다운을
+    /// 여는 손을 없앤 것이라, 이름은 화면에서 무엇이 늘어나는지로 부른다.
+    statusbarAll: '다른 계정도',
+    statusbarAllHint:
+      '창 맨 아래 줄에 안 쓰는 계정의 한도까지 이름·%로 — 열어 보지 않고 어디로 옮길지 알 수 있어요',
+    statusbarAllLone: '계정이 하나뿐이라 지금은 세울 나머지가 없어요',
     autoSwitch: '자동 전환',
     autoSwitchHint:
       '한도가 차면 다음에 뜨는 claude 부터 다음 계정으로 — 떠난 계정은 풀릴 때까지 쉬어요',
@@ -618,6 +624,10 @@ export const en: Strings = {
     removeSlot: 'Remove',
     inUse: 'Active',
     labelPlaceholder: 'Nickname (empty = called by its email)',
+    statusbarAll: 'Other accounts too',
+    statusbarAllHint:
+      'Put the idle accounts’ limits on the bottom row as name + % — see where to move without opening anything',
+    statusbarAllLone: 'Only one account, so there’s nothing else to line up yet',
     autoSwitch: 'Auto switch',
     autoSwitchHint:
       'When a limit fills, the next claude starts on the next account — the tired one rests until it clears',

@@ -119,6 +119,8 @@ pub(crate) struct SettingsCtx {
     /// 한도가 차면 다음 계정으로 알아서 넘어간다 + 그 임계 사용률(%).
     pub account_autoswitch: bool,
     pub account_autoswitch_pct: f32,
+    /// 하단바에 안 쓰는 계정의 한도까지 세운다.
+    pub statusbar_all_accounts: bool,
     /// (표시명, 에셋 슬러그) — Theme 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
@@ -389,6 +391,10 @@ impl App {
         );
         socket::write_setting("codex_account", serde_json::Value::String(self.set_codex_account.clone()));
         socket::write_setting("usage_compact", serde_json::Value::Bool(self.set_usage_compact));
+        socket::write_setting(
+            "statusbar_all_accounts",
+            serde_json::Value::Bool(self.set_statusbar_all_accounts),
+        );
         socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),
@@ -783,6 +789,7 @@ impl App {
             codex_account: self.set_codex_account.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
+            statusbar_all_accounts: self.set_statusbar_all_accounts,
             characters: roster
                 .as_ref()
                 .map(|c| {
@@ -1221,6 +1228,12 @@ impl App {
             SettingsAction::AccountAutoswitchPct(p) => {
                 self.set_account_autoswitch_pct = p as f32;
                 self.settings_save();
+            }
+            SettingsAction::ToggleStatusbarAllAccounts => {
+                self.set_statusbar_all_accounts = !self.set_statusbar_all_accounts;
+                self.settings_save();
+                // 하단바는 크롬이라 다시 그려 달라고 말해야 그 자리에서 바뀐다.
+                self.chrome_dirty = true;
             }
             SettingsAction::WheelPixelGain(x100) => {
                 self.set_wheel_pixel_gain = x100 as f32 / 100.0;
@@ -1923,6 +1936,11 @@ impl App {
                 self.settings_apply(SettingsAction::ToggleAccountAutoswitch);
                 Ok(saved_bool("claude_account_autoswitch") == Some(self.set_account_autoswitch))
             }
+            "toggle-statusbar-all-accounts" => {
+                self.settings_apply(SettingsAction::ToggleStatusbarAllAccounts);
+                Ok(saved_bool("statusbar_all_accounts")
+                    == Some(self.set_statusbar_all_accounts))
+            }
             "autoswitch-pct" => {
                 let p: u32 = id.parse().map_err(|_| unknown(id))?;
                 if !matches!(p, 80 | 85 | 90 | 95) {
@@ -2272,6 +2290,7 @@ impl App {
                 "codex_account": self.set_codex_account,
                 "autoswitch": self.set_account_autoswitch,
                 "autoswitch_pct": self.set_account_autoswitch_pct.round() as u32,
+                "statusbar_all_accounts": self.set_statusbar_all_accounts,
                 "model": self.set_claude_model,
                 "effort": self.set_claude_effort,
                 "extra": self.set_claude_extra,
@@ -4109,10 +4128,24 @@ pub(crate) fn paint_settings(
                 );
             }
             y += 34.0 + 12.0;
+            let lone = ctx.claude_accounts.is_empty();
+            // 하단바에 나머지 슬롯도 세울지. 계정이 하나뿐이면 세울 나머지가 없어
+            // 아무 일도 안 일어나므로, 아래 자동 전환과 같은 이유로 그 상태를 설명
+            // 줄에서 미리 말한다.
+            {
+                let (cr, ny) = row2(g, fx, y, fw, clip, "다른 계정도",
+                    &[if lone { "계정이 하나뿐이라 지금은 세울 나머지가 없어요" }
+                      else { "창 맨 아래 줄에 안 쓰는 계정의 한도까지 이름·%로 — 열어 보지 않고 어디로 옮길지 알 수 있어요" }],
+                    TOGGLE);
+                if ny > clip {
+                    toggle(g, cr, ctx.statusbar_all_accounts, ctx.cursor);
+                    rects.push((SettingsAction::ToggleStatusbarAllAccounts, cr));
+                }
+                y = ny;
+            }
             // 자동 전환. 계정이 하나뿐이면 갈 곳이 없어 아무 일도 안 일어나므로
             // 그 상태를 설명 줄로 미리 알려 준다 — 켜 놓고 "안 되네" 하는 게 이
             // 기능에서 제일 흔한 오해다.
-            let lone = ctx.claude_accounts.is_empty();
             {
                 let (cr, ny) = row2(g, fx, y, fw, clip, "자동 전환",
                     &[if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
