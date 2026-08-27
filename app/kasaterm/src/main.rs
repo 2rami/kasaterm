@@ -7038,7 +7038,18 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // (payload 스펙의 effort 는 low|medium|high|xhigh|max 뿐). 여러 에이전트를
             // 푸는 턴인지가 화면에 안 보이므로, 프롬프트를 보고 마커를 남겨 statusline 이
             // 읽게 한다. 턴 단위 opt-in 이라 마커도 프롬프트마다 다시 쓰고 지운다.
-            "UserPromptSubmit": [{ "hooks": [cmd("ultracode-mark.py", 3000)] }],
+            // 도착한 cross-session 메시지의 `from-name` 은 **세션 이름**이라 화면의 캐릭터
+            // 이름과 다르다. 태그는 claude 가 직접 만들고 명부도 claude 가 안에 들고 있어
+            // (밖에서 파일을 고쳐도 안 먹는다 — 실측) 앱이 끼어들 자리가 여기뿐이다.
+            // ⚠️ 위에서 걷어낸 board-context.py 와 혼동하지 말 것: 그건 프롬프트마다
+            // board 전체를 밀어 넣어 컨텍스트를 부풀렸고, 이건 **메시지가 온 턴에만**
+            // **발신자 한 줄만** 낸다. 그 좁힘을 풀면 같은 비용이 그대로 돌아온다.
+            // stdout 에 JSON 을 내므로 ultracode-mark 와 **다른 그룹**에 둔다(Stop 의
+            // stop-drain 과 같은 이유 — 한 그룹에 섞이면 결정이 깨질 수 있다).
+            "UserPromptSubmit": [
+                { "hooks": [cmd("ultracode-mark.py", 3000)] },
+                { "hooks": [cmd("kasaterm-peer-name.py", 5000)] }
+            ],
             // 두 훅을 **다른 그룹**으로 나눠 둔다 — stop-drain 은 인박스가 있으면
             // stdout 에 block JSON 을 내는데, 같은 그룹이면 진행 표시 훅의 출력과
             // 섞여 그 결정이 깨질 수 있다. agent-status 는 stdout 을 안 쓰지만
