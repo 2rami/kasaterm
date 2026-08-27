@@ -786,6 +786,36 @@ impl App {
             .filter(|p| p.exists())
             .or_else(|| socket::transcript_path_for_session(&sid))
             .ok_or_else(|| anyhow::anyhow!("세션 {sid} 의 대화 파일을 못 찾았다"))?;
+        // 코드부터 맞춘다 — **claude 를 끄기 전에**. 여기서 실패하면 아무것도 안
+        // 건드린 채로 돌아설 수 있다(끄고 나서 실패하면 학생만 잃는다).
+        let origin = crate::proc::command("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let branch = crate::proc::command("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty() && s != "HEAD");
+        if origin.is_some() {
+            let what = kasa_mcp::remote::ensure_repo(
+                base,
+                &remote_cwd,
+                origin.as_deref(),
+                branch.as_deref(),
+                None,
+            )?;
+            self.set_toast(format!("원격 레포 준비: {what}"));
+        }
         // 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
         // 다투는 것이 최악이다(옛 9-pane 사고의 원형).

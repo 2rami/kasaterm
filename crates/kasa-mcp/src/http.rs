@@ -3920,6 +3920,91 @@ fn web_pane_ok(pane: &str) -> bool {
         && pane.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// `POST /term/repo?path=<abs>&url=<git>&branch=<name>` — 이 기계에 그 레포를
+/// **있게** 만든다: 없으면 clone, 있으면 fetch + fast-forward pull.
+///
+/// 이사(migrate)의 전제다 — 대화만 건너오고 코드가 없거나 뒤처져 있으면 옮겨온
+/// 학생이 딴 세상에서 깨어난다. 되돌릴 수 없는 짓은 하지 않는다: 이 기계에
+/// 안 올린 변경이 있으면 **손대지 않고 사유를 돌려준다**(맥북에서 막아 세우는
+/// 것과 같은 규칙), merge 도 rebase 도 아닌 fast-forward 만 받는다.
+///
+/// 셸을 안 거치고 git 을 직접 실행한다 — 인자에 셸 메타문자가 섞여도 명령이
+/// 갈라지지 않는다.
+async fn term_repo_post(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+        return err("`path`(절대경로) 가 필요해요".into());
+    };
+    let branch = q.get("branch").cloned().unwrap_or_default();
+    let git = |args: Vec<String>| -> (bool, String) {
+        match std::process::Command::new("git").args(&args).output() {
+            Ok(o) => (
+                o.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+                .trim()
+                .to_string(),
+            ),
+            Err(e) => (false, format!("git 실행 실패: {e}")),
+        }
+    };
+    let exists = std::path::Path::new(path).join(".git").exists();
+    let action;
+    if !exists {
+        let Some(url) = q.get("url").filter(|u| !u.is_empty()) else {
+            return err(format!("{path} 에 레포가 없고 `url` 도 없어요"));
+        };
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return err(format!("상위 폴더 생성 실패: {e}"));
+            }
+        }
+        let (ok, out) = git(vec![
+            "clone".into(),
+            url.clone(),
+            path.clone(),
+        ]);
+        if !ok {
+            return err(format!("clone 실패: {out}"));
+        }
+        action = "cloned";
+    } else {
+        // 이 기계에 안 올린 변경이 있으면 당겨오지 않는다 — 남의 작업을 덮는다.
+        let (_, dirty) = git(vec!["-C".into(), path.clone(), "status".into(), "--porcelain".into()]);
+        if !dirty.is_empty() {
+            return err(format!(
+                "이 기계에 안 올린 변경이 있어 당겨오지 않았어요({} 줄) — 사람이 정리해야 해요",
+                dirty.lines().count()
+            ));
+        }
+        let (ok, out) = git(vec!["-C".into(), path.clone(), "fetch".into(), "--prune".into()]);
+        if !ok {
+            return err(format!("fetch 실패: {out}"));
+        }
+        if !branch.is_empty() {
+            let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
+            if !ok {
+                return err(format!("{branch} 로 못 옮겼어요: {out}"));
+            }
+        }
+        let (ok, out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
+        // 업스트림이 없거나 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
+        action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
+            "already-current"
+        } else {
+            "fetched-only"
+        };
+    }
+    let (_, head) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--short".into(), "HEAD".into()]);
+    let (_, br) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()]);
+    Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path }))
+}
+
 /// `POST /term/spawn?cwd=<dir>&cols=&rows=` → `{ok, id}` — 새 셸 세션.
 async fn term_spawn_post(
     q: Query<std::collections::HashMap<String, String>>,
@@ -4900,6 +4985,7 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/ws", get(term_ws_handler))
                     .route("/term/spawn", post(term_spawn_post))
+                    .route("/term/repo", post(term_repo_post))
                     .route("/term/input", post(term_input_post))
                     .route("/term/screen", get(term_screen_get))
                     .route("/term/session", axum::routing::delete(term_session_delete))

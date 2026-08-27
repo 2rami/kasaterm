@@ -392,6 +392,61 @@ async fn manager(
     }
 }
 
+/// 원격 기계에 그 레포를 **있게** 만든다 — 없으면 clone, 뒤처졌으면 fast-forward.
+/// 이사 전에 부른다: 대화만 건너가고 코드가 없거나 옛것이면 학생이 딴 세상에서 깬다.
+/// 원격에 안 올린 변경이 있으면 서버가 거부하고 그 사유가 그대로 올라온다.
+pub fn ensure_repo(
+    base: &str,
+    path: &str,
+    url: Option<&str>,
+    branch: Option<&str>,
+    token: Option<&str>,
+) -> Result<String> {
+    let mut u = format!(
+        "{}/term/repo?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    if let Some(g) = url.filter(|s| !s.is_empty()) {
+        u.push_str(&format!("&url={}", urlencode(g)));
+    }
+    if let Some(b) = branch.filter(|s| !s.is_empty()) {
+        u.push_str(&format!("&branch={}", urlencode(b)));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("repo runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("레포 준비 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 레포 준비 실패: {}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(format!(
+        "{} ({} @{})",
+        v.get("action").and_then(|x| x.as_str()).unwrap_or("?"),
+        v.get("branch").and_then(|x| x.as_str()).unwrap_or("?"),
+        v.get("head").and_then(|x| x.as_str()).unwrap_or("?")
+    ))
+}
+
 /// 이사(migrate)의 대화 운반 — claude jsonl 하나를 원격 호스트의
 /// `/term/transcript` 로 올린다. 동기 — 성공/실패가 호출 시점에 확정된다.
 ///
