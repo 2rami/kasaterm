@@ -3909,6 +3909,84 @@ async fn term_tunnel_post(body: String) -> impl IntoResponse {
     }
 }
 
+/// 웹 세션 REST 4종 — 소켓도 GUI 도 없는 기계(맥미니 상주 에이전트)가 curl 만으로
+/// 셸 세션을 만들고 부리는 창구. `/term/ws` 스폰과 같은 세션을 만들며(등록+keep),
+/// 인증은 라우트 공통 레이어(원격=remote 토큰, 로컬 브라우저=Origin)가 덮는다.
+///
+/// `web-` 접두사만 받는 이유: 이 라우트는 kasaterm GUI(8765)에도 열리므로, GUI 의
+/// `%n` pane 을 원격 텍스트 주입·종료의 사정권에 두지 않기 위해서다.
+fn web_pane_ok(pane: &str) -> bool {
+    pane.starts_with("web-") && pane.len() <= 60
+        && pane.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// `POST /term/spawn?cwd=<dir>&cols=&rows=` → `{ok, id}` — 새 셸 세션.
+async fn term_spawn_post(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = format!("web-{}", uuid::Uuid::new_v4());
+    let opts = kasa_pty::PtyOptions {
+        cwd: q.get("cwd").cloned().or_else(|| std::env::var("HOME").ok()),
+        cols: q.get("cols").and_then(|v| v.parse().ok()).unwrap_or(120),
+        rows: q.get("rows").and_then(|v| v.parse().ok()).unwrap_or(32),
+        pane_id: id.clone(),
+        ..Default::default()
+    };
+    match kasa_pty::PtySession::start(opts) {
+        Ok(s) => {
+            let sess = std::sync::Arc::new(s);
+            kasa_pty::register_session(&id, &sess);
+            // 연결 없이도 살려 둔다 — 이 창구의 존재 이유가 「부착자 없는 세션」이다.
+            kasa_pty::keep_session(&id, sess);
+            Json(serde_json::json!({ "ok": true, "id": id }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("{e:#}") })),
+    }
+}
+
+/// `POST /term/input?pane=web-…` body=raw bytes — 세션 stdin 에 그대로 쓴다.
+/// 제출(엔터)은 body 에 `\r` 을 실어 보낸다.
+async fn term_input_post(
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p)) else {
+        return Json(serde_json::json!({ "ok": false, "error": "`pane`(web-…) 이 필요해요" }));
+    };
+    let Some(sess) = kasa_pty::lookup_session(pane) else {
+        return Json(serde_json::json!({ "ok": false, "error": format!("세션 {pane} 이 없다") }));
+    };
+    match sess.send_bytes(&body) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "bytes": body.len() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("{e:#}") })),
+    }
+}
+
+/// `GET /term/screen?pane=web-…&lines=N` — 화면+스크롤백 꼬리 N줄(기본 60)을 평문으로.
+async fn term_screen_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p)) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "`pane`(web-…) 이 필요해요".to_string());
+    };
+    let Some(sess) = kasa_pty::lookup_session(pane) else {
+        return (axum::http::StatusCode::NOT_FOUND, format!("세션 {pane} 이 없다"));
+    };
+    let lines = q.get("lines").and_then(|v| v.parse().ok()).unwrap_or(60usize).min(2000);
+    (axum::http::StatusCode::OK, sess.scrollback_text(lines).join("\n"))
+}
+
+/// `DELETE /term/session?pane=web-…` — keep 을 놓아 세션을 끝낸다(마지막 참조면 셸 종료).
+async fn term_session_delete(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p)) else {
+        return Json(serde_json::json!({ "ok": false, "error": "`pane`(web-…) 이 필요해요" }));
+    };
+    let released = kasa_pty::release_session(pane);
+    Json(serde_json::json!({ "ok": true, "released": released }))
+}
+
 /// 이사(migrate) 상한 — 대화 jsonl 하나의 최대 크기.
 const TRANSCRIPT_UPLOAD_LIMIT: usize = 512 << 20;
 
@@ -4821,6 +4899,10 @@ pub fn spawn_http_server_opts(
                         get(move || term_panes_handler(panes_backend.clone())),
                     )
                     .route("/term/ws", get(term_ws_handler))
+                    .route("/term/spawn", post(term_spawn_post))
+                    .route("/term/input", post(term_input_post))
+                    .route("/term/screen", get(term_screen_get))
+                    .route("/term/session", axum::routing::delete(term_session_delete))
                     .route(
                         "/term/transcript",
                         post(term_transcript_post)
