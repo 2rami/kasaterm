@@ -1173,6 +1173,20 @@ impl App {
     /// 사용자가 보고 정한다. `stashed` 로 넣는 것도 같은 이유 — 되찾자마자 개수
     /// 상한에 다시 밀리면 헛일이다.
     fn sweep_lost_panes(&mut self) {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        // 「안 보인 지 얼마나 됐나」. **struct App 을 안 건드리는 함수-로컬**이다
+        // (병렬 작업 규칙 — testkit 하네스와 같은 패턴).
+        static LOST_SINCE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+        // 유예. 이 스윕은 매 이벤트 턴 도는데, pane 을 만들고 옮기는 조작은 PTY 를
+        // 먼저 세우고 트리에 나중에 붙이는 순간을 지난다 — 하필 그 찰나에 돌면
+        // 멀쩡히 태어나는 중인 pane 이 「잃어버린 것」으로 잡혀 **숨김으로 치워진다**
+        // (2026-08-27 지적 「숨기지도 않았는데 막 숨어」, 미니맵에 숨김 표시). 한 턴
+        // 어긋난 것은 다음 턴에 제자리로 오므로, 연속으로 안 보일 때만 걷는다.
+        //
+        // 진짜로 잃어버린 pane 은 3초 뒤에 그대로 잡힌다 — 안전망은 살아 있고,
+        // 늦게 목록에 뜨는 것이 멀쩡한 pane 을 치우는 것보다 훨씬 낫다.
+        const GRACE: Duration = Duration::from_secs(3);
         let lost: Vec<String> = {
             let ws = self.ws.lock().unwrap();
             self.pty
@@ -1192,9 +1206,27 @@ impl App {
                 .cloned()
                 .collect()
         };
-        for id in lost {
+        // 돌아온 것은 시계를 지운다 — 안 지우면 몇 분 전 한 번 어긋난 pane 이
+        // 다음에 잠깐 안 보이는 순간 곧바로 유예를 지나 걷힌다.
+        let now = Instant::now();
+        let due: Vec<String> = {
+            let mut seen = LOST_SINCE.get_or_init(Default::default).lock().unwrap();
+            seen.retain(|id, _| lost.contains(id));
+            lost.iter()
+                .filter(|id| now.duration_since(*seen.entry((*id).clone()).or_insert(now)) >= GRACE)
+                .cloned()
+                .collect()
+        };
+        for id in due {
+            // 사용자가 숨긴 적 없는 pane 을 앱이 치우는 것이라, 조용히 하면 안 된다 —
+            // 다음에 이 일이 또 나면 무엇이 언제 걷혔는지가 유일한 단서다.
+            eprintln!(
+                "[sweep] pane {id} 이 {}초 넘게 어느 트리에도 없어 되살리기 목록으로 치웠다",
+                GRACE.as_secs()
+            );
             // 락 밖에서 — `record_closed_pane` 이 스스로 `ws` 를 잡는다.
             self.record_closed_pane(&id, true, true);
+            LOST_SINCE.get_or_init(Default::default).lock().unwrap().remove(&id);
         }
     }
 
