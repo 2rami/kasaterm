@@ -8354,6 +8354,23 @@ impl App {
             // 계정 행이 곧 계정 스위처다(거노 요청) — 거기 보이는 한도가 **활성
             // 계정의** 것이라, 이름을 같은 행에 적고 클릭을 전환에 쓰는 게 별도
             // 칩보다 정직하다.
+            // 폴러에게 「목록이 펼쳐져 있다」를 알린다. 여닫는 손잡이가 여럿이라
+            // (상태줄·Info 계정 행·설정) 각 자리에 심으면 하나를 빠뜨리는 날
+            // 플래그가 켜진 채 남아 폴러가 영영 빠른 박자로 돈다. 그리는 자리에서
+            // 한 번 맞추면 그런 경로가 없다 — 닫힌 프레임이 한 번만 그려져도
+            // 내려간다.
+            //
+            // `swap` 하나로 **동기화와 열림 감지**를 겸한다. 방금 열렸으면 폴러의
+            // 남은 잠을 걷어내(`usage_poke`) 그 자리에서 한 바퀴 돌게 한다 —
+            // 열자마자 최신을 보는 것이 이 화면의 첫 인상이다.
+            {
+                use std::sync::atomic::Ordering;
+                let was = crate::handler::usage_menu_open()
+                    .swap(self.account_menu, Ordering::Relaxed);
+                if self.account_menu && !was {
+                    crate::handler::usage_poke().store(true, Ordering::Relaxed);
+                }
+            }
             self.account_menu_hits.clear();
             // 앵커는 **연 손잡이**를 따라간다. 손잡이가 둘이라(Info 탭 계정 행 ·
             // 상태줄) 하나로 고정하면 다른 쪽에서 열었을 때 메뉴가 화면 반대편에

@@ -3366,10 +3366,20 @@ async fn claude_usage_handler(
         serde_json::json!({ "ok": true, "usage": v, "stale": stale, "account_dir": dir })
     };
 
+    // `?fresh=1` 이면 신선 캐시도 건너뛴다 — 계정 목록을 **펼쳐 놓고 보는 동안**
+    // 쓰는 문이다(2026-08-27 지시 「누르면 펼쳐지잖아 거기 업데이트 되게하라니까」).
+    // 60초 TTL 은 닫혀 있을 때는 맞다: 그때 이 값을 읽는 것은 상태줄 한 줄뿐이라
+    // 1분 낡아도 판단이 안 갈린다. 하지만 목록을 열어 둔 사람은 **지금 어디로
+    // 옮길지**를 고르는 중이고, 그 화면에서 숫자가 1분 내리 굳어 있으면 갱신이
+    // 죽은 것으로 읽힌다.
+    //
+    // 백오프(429)는 **우회하지 않는다** — 그건 upstream 이 그만 두드리라고 한
+    // 것이고, 화면이 열려 있다는 사정과 무관하다. 아래 3) 이 그대로 처리한다.
+    let fresh = params.get("fresh").is_some_and(|v| v == "1" || v == "true");
     // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
         if let Some((Some(at), v)) = g.get(&dir) {
-            if at.elapsed() < TTL {
+            if !fresh && at.elapsed() < TTL {
                 return (cors, Json(ok(v, false)));
             }
         }

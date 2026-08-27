@@ -1560,6 +1560,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // 「어느 계정에서 떠나는가」가 안 갈린다. 기본 슬롯은 경로가 없고
                     // (`claude_account_dir("") == None`) 프록시에서 빈 문자열이 곧 기본
                     // 로그인이라, 빈 문자열로 눌러 넘기면 의미가 정확히 맞는다.
+                    // 이 사이클이 「펼쳐 놓고 보는 중」인가. 한 번만 읽어 활성·비활성
+                    // 조회가 같은 판정을 쓰게 한다 — 도중에 닫히면 반쪽만 캐시를
+                    // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
+                    let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
                     let active_id = socket::read_claude_account();
                     // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
@@ -1581,7 +1585,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // 도는 pane 들의 토큰을 죽인다(runtime_dir_for 주석).
                     let active_dir = crate::claude_auth::runtime_dir_for(&active_id, &active_id)
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-                    let fetched = fetch_claude_usage(&crate::mcp_panel_port(), &active_dir);
+                    let fetched =
+                        fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, menu_open);
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {
@@ -1632,8 +1637,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // 갱신하던 동안, 드롭다운·계정 행의 숫자는 활성 계정 것마저 그동안
                     // 굳어 있었다 — 계정을 눌러 전환할 때만 움직이는 것처럼 보인 이유다
                     // (거노 2026-08-07: "전환해야만 사용량 갱신되는데").
-                    let others_now =
-                        others_at.is_none_or(|t: std::time::Instant| t.elapsed() >= OTHERS_EVERY);
+                    // 펼쳐 놓은 동안은 나머지 슬롯도 **매 사이클** 친다. 이 화면의
+                    // 쓸모가 「지금 어디로 옮기나」인데, 정작 옮겨 갈 후보의 숫자가
+                    // 굳어 있으면 열어 둔 의미가 없다.
+                    let others_now = menu_open
+                        || others_at.is_none_or(|t: std::time::Instant| t.elapsed() >= OTHERS_EVERY);
                     if !others_now {
                         if let Some(b) = active_badge.clone() {
                             if let Ok(mut g) = usage_all.lock() {
@@ -1685,7 +1693,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .filter(|d| !all.contains_key(d) && seen.insert(d.clone()))
                             .map(|d| {
                                 let port = port.clone();
-                                std::thread::spawn(move || fetch_claude_usage(&port, &d))
+                                std::thread::spawn(move || {
+                                    fetch_claude_usage(&port, &d, menu_open)
+                                })
                             })
                             .collect();
                         for j in jobs {
@@ -1846,6 +1856,13 @@ impl ApplicationHandler<UserEvent> for App {
                         std::thread::sleep(std::time::Duration::from_secs(5));
                         // 턴이 끝났으면 남은 잠을 건너뛴다(`usage_poke`).
                         if usage_poke().swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        // 목록을 펼쳐 놓고 보는 중이면 5초짜리 한 조각만 자고 다시
+                        // 돈다. 잠 안에서 **매번** 다시 읽는 것이 중요하다 — 사이클
+                        // 머리의 `menu_open` 을 재사용하면, 자는 동안 열린 목록은
+                        // 남은 55초를 그대로 굳은 채 기다린다.
+                        if usage_menu_open().load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
                         let now = socket::read_claude_account();
@@ -6781,15 +6798,38 @@ pub(crate) fn usage_poke() -> &'static std::sync::atomic::AtomicBool {
     &POKE
 }
 
+/// 계정 목록이 **펼쳐져 있다**. 폴러는 GUI 상태를 직접 못 보므로 원자값으로
+/// 건넨다(`usage_poke` 와 같은 이유).
+///
+/// 켜져 있는 동안 폴러는 잠을 5초로 줄이고, 조회에 `fresh=1` 을 실어 서버의
+/// 60초 캐시를 건너뛴다 — 그러지 않으면 5초마다 물어도 1분 동안 같은 답이
+/// 돌아와 화면은 여전히 굳어 있다(2026-08-27 지시 「누르면 펼쳐지잖아 거기
+/// 업데이트 되게하라니까」).
+///
+/// 닫으면 곧바로 원래 박자(1분·캐시 사용)로 돌아간다. 사람이 목록을 보고 있는
+/// 동안만 잦아지므로 upstream 부담은 그 몇 초에 그친다.
+pub(crate) fn usage_menu_open() -> &'static std::sync::atomic::AtomicBool {
+    static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &OPEN
+}
+
 /// `dir` 은 조회할 **계정 저장소 경로** — 빈 문자열이 기본 로그인이다.
 ///
 /// 호출자가 반드시 명시한다. 안 넘기는 길을 두면 프록시가 자기 프로세스의
 /// `KASATERM_CLAUDE_ACCOUNT_DIR` env 로 떨어져 엉뚱한(또는 **다른 인스턴스의**)
 /// 계정을 조회하는데, 그게 자동전환을 통째로 멈춰 세운 버그였다(2026-08-13).
 /// `Option` 을 없애 그 실수를 타입으로 막는다.
-fn fetch_claude_usage(port: &str, dir: &str) -> Option<(serde_json::Value, bool, String)> {
+fn fetch_claude_usage(
+    port: &str,
+    dir: &str,
+    fresh: bool,
+) -> Option<(serde_json::Value, bool, String)> {
     // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
-    let url = format!("http://127.0.0.1:{port}/claude-usage?dir={}", urlencode(dir));
+    let url = format!(
+        "http://127.0.0.1:{port}/claude-usage?dir={}{}",
+        urlencode(dir),
+        if fresh { "&fresh=1" } else { "" }
+    );
     let out = crate::proc::command("curl")
         .args(["-s", "--max-time", "5", &url])
         .output()

@@ -6900,6 +6900,32 @@ impl App {
             self.chrome_dirty = true;
             return;
         }
+        // 펼친 목록이 실시간으로 갱신되는지 — 화면이 아니라 **신호**를 잰다.
+        // 폴러는 `usage_menu_open` 원자값 하나로 박자를 바꾸므로, 목록을 열었을 때
+        // 그게 서는지와 poke 가 나가는지가 곧 그 기능이다.
+        if step == 1 && want.starts_with("statusbar-accounts") {
+            match self.status_account_rect {
+                Some(r) => {
+                    self.account_menu = true;
+                    self.account_menu_anchor = Some(r);
+                    self.account_menu_provider = Some(crate::AccountProvider::Claude);
+                    self.chrome_dirty = true;
+                    eprintln!("[autoportpop] 계정 목록 폈다 anchor={r:?}");
+                }
+                None => eprintln!("[autoportpop] FAIL — 계정 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        if step == 2 && want.starts_with("statusbar-accounts") {
+            use std::sync::atomic::Ordering;
+            // 렌더가 한 번 돈 뒤라야 값이 서 있다 — 여닫는 손잡이가 아니라 그리는
+            // 자리에서 맞추기 때문이다.
+            let open = crate::handler::usage_menu_open().load(Ordering::Relaxed);
+            // poke 는 폴러가 집어 가면 사라지는 값이라, 남아 있든 이미 걷혔든
+            // 「열림이 섰다」가 확인되면 그 자리에서 나갔다는 뜻이다.
+            eprintln!("[autoportpop] usage_menu_open={open}");
+            return;
+        }
         if want.starts_with("statusbar-accounts") {
             return;
         }
