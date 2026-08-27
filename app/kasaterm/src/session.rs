@@ -592,6 +592,14 @@ impl App {
             self.pty.remove(&new_id);
             anyhow::bail!("pane {anchor} 을 어느 window 트리에서도 못 찾았다");
         }
+        // 몸통이 남의 기계라도 **이 창의 학생은 같은 사람**이어야 한다 — 안 그러면
+        // 이름·색·얼굴이 없는 무명 pane 이 된다(거노: 「옮기면 왜 테마가 없어져」).
+        if let Some(name) = remote_pane
+            .and_then(|p| kasa_mcp::remote::remote_pane_character(base, p, None))
+            .filter(|n| !n.is_empty())
+        {
+            self.relabel_pane(&new_id, &name);
+        }
         if foreign.is_none() {
             self.ws.lock().unwrap().active_pane = Some(new_id.clone());
             self.resize_backend(win_cols, win_rows);
@@ -816,6 +824,16 @@ impl App {
             )?;
             self.set_toast(format!("원격 레포 준비: {what}"));
         }
+        // 권한 모드를 승계한다 — 안 실으면 옮겨간 학생이 기본값(auto)으로 떠서
+        // 「왜 오토모드로 바뀌었냐」가 된다(거노 2026-08-27). 화면 문구를 읽지 않고
+        // **도는 프로세스의 인자**를 본다 — 그게 유일한 진실이다.
+        let bypass = crate::proc::command("ps")
+            .args(["-o", "command=", "-p", &agent_pid.to_string()])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions"))
+            .unwrap_or(false);
         // 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
         // 다투는 것이 최악이다(옛 9-pane 사고의 원형).
@@ -844,7 +862,15 @@ impl App {
             .filter(|c| !c.is_empty());
         let remote_pane = character.as_deref().and_then(|c| {
             match kasa_mcp::remote::spawn_student_pane(base, c, None) {
-                Ok(id) => Some(id),
+                Ok(id) => {
+                    // 소환만으로는 못 미덥다 — 이름표만 그 학생이고 말투는 남의 것으로
+                    // 뜬 실측이 있다(2026-08-27, pane id 재사용 자리). claude 를 띄우기
+                    // 직전에 한 번 더 박는다.
+                    if let Err(e) = kasa_mcp::remote::repersona(base, &id, c, None) {
+                        eprintln!("[migrate] 캐릭터 못박기 실패(계속 진행): {e:#}");
+                    }
+                    Some(id)
+                }
                 Err(e) => {
                     eprintln!("[migrate] 진짜 pane 소환 실패 — 맨 셸로 물러섭니다: {e:#}");
                     None
@@ -883,6 +909,14 @@ impl App {
         );
         // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 —
         // 레포로 옮겨 놓고 이어받아야 학생이 제 코드 위에서 깬다.
+        let cmd = if bypass {
+            format!(
+                "{} --dangerously-skip-permissions\r",
+                cmd.trim_end_matches('\r')
+            )
+        } else {
+            cmd
+        };
         let cmd = if remote_pane.is_some() {
             format!("cd '{}' && {}", remote_cwd.replace('\'', r"'\''"), cmd)
         } else {

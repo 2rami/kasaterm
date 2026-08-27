@@ -437,6 +437,62 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
     Ok(id)
 }
 
+/// 원격 pane 의 캐릭터를 그 이름으로 못 박는다(`GET /repersona`).
+///
+/// 소환만으로는 못 미덥다 — 2026-08-27 실측에서 `spawn-student?character=유즈` 로
+/// 만든 자리가 **이름표는 유즈, 실제 말투는 남의 캐릭터**로 떴다(pane id 가 재사용된
+/// 자리였다). 그래서 claude 를 띄우기 **직전에** 한 번 더 박는다 — 학생 명령 셰임이
+/// 쓰는 것과 같은 창구고, respawn 없이 override 파일만 갱신한다.
+pub fn repersona(base: &str, pane: &str, character: &str, token: Option<&str>) -> Result<()> {
+    let u = format!(
+        "{}/repersona?surface={}&character={}",
+        base.trim_end_matches('/'),
+        urlencode(pane).replace('%', "%25").replace("%2525", "%25"),
+        urlencode(character)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("repersona runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        req.send().await.context("repersona 요청")?;
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+/// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
+/// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
+/// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).
+pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
+    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let list: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        serde_json::from_str(&r.text().await.ok()?).ok()
+    })?;
+    list.as_array()?.iter().find_map(|row| {
+        (row.get("id")?.as_str()? == pane)
+            .then(|| row.get("name")?.as_str().map(str::to_string))
+            .flatten()
+    })
+}
+
 /// 원격 기계에 그 레포를 **있게** 만든다 — 없으면 clone, 뒤처졌으면 fast-forward.
 /// 이사 전에 부른다: 대화만 건너가고 코드가 없거나 옛것이면 학생이 딴 세상에서 깬다.
 /// 원격에 안 올린 변경이 있으면 서버가 거부하고 그 사유가 그대로 올라온다.
