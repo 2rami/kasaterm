@@ -275,17 +275,31 @@ fn load_bindings(path: &Path) -> HashMap<String, String> {
 
 /// 로스터 전체 학생 이름 — characters.json(leader/leaders/members). 태그가
 /// 학생 이름인지(=우리가 단 것) 판정에 쓴다.
+/// 우리가 배정에 쓰는 모든 캐릭터 이름 — **활성 테마가 아니라 설치된 테마 전부.**
+///
+/// `stamp_tag` 가 「이 태그는 우리가 찍은 것인가, 사용자가 손수 붙인 것인가」를 이
+/// 집합으로 가른다. 활성 명단만 담으면 테마를 갈아탄 순간 옛 캐릭터 이름이 집합
+/// 밖으로 나가고, 그 태그가 사용자 지정으로 오인돼 **영영 갱신되지 않는다**
+/// (2026-08-27 실측: 배정이 아리스로 바뀐 세션의 /resume 행에 옛 테마 페이몬 얼굴이
+/// 붙은 채 굳어 있었다 — 태그는 `페이몬`, 바인딩은 `아리스`).
 fn student_names() -> HashSet<String> {
+    names_from_rosters(&crate::character::all_rosters())
+}
+
+/// 로스터 여럿 → 이름 하나의 집합. **합집합인 것이 요점**이라 순수 함수로 떼어
+/// 테스트가 지킨다.
+fn names_from_rosters(rosters: &[serde_json::Value]) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Some(c) = crate::character::characters_json() else { return out };
-    if let Some(n) = c.get("leader").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
-        out.insert(n.to_string());
-    }
-    for key in ["leaders", "members"] {
-        if let Some(arr) = c.get(key).and_then(|a| a.as_array()) {
-            for m in arr {
-                if let Some(n) = m.get("name").and_then(|n| n.as_str()) {
-                    out.insert(n.to_string());
+    for c in rosters {
+        if let Some(n) = c.get("leader").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
+            out.insert(n.to_string());
+        }
+        for key in ["leaders", "members"] {
+            if let Some(arr) = c.get(key).and_then(|a| a.as_array()) {
+                for m in arr {
+                    if let Some(n) = m.get("name").and_then(|n| n.as_str()) {
+                        out.insert(n.to_string());
+                    }
                 }
             }
         }
@@ -448,4 +462,19 @@ mod tests {
         let secs = m.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(secs, 1_600_000_000);
     }
+
+    /// 활성 테마 하나만 담으면, 테마를 갈아탄 뒤 옛 캐릭터 태그가 「사용자 지정」으로
+    /// 오인돼 영영 안 갈린다(2026-08-27 실측). 합집합인 것이 그 방어다.
+    #[test]
+    fn names_come_from_every_roster_not_just_the_active_one() {
+        let blue = serde_json::json!({ "leader": { "name": "아리스" }, "members": [{ "name": "시로코" }] });
+        let genshin = serde_json::json!({ "members": [{ "name": "페이몬" }, { "name": "호두" }] });
+        let names = names_from_rosters(&[blue.clone(), genshin.clone()]);
+        for n in ["아리스", "시로코", "페이몬", "호두"] {
+            assert!(names.contains(n), "{n} 이 빠졌다 — 합집합이 아니다");
+        }
+        // 활성 명단만 보던 옛 동작이면 이쪽이 비어 페이몬을 남의 태그로 오인한다.
+        assert!(!names_from_rosters(&[blue]).contains("페이몬"));
+    }
+
 }

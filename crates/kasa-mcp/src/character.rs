@@ -177,6 +177,48 @@ pub fn characters_json() -> Option<Value> {
     None
 }
 
+/// 설치된 **모든** 로스터 — 활성 테마 + 기본 + `themes/` 아래 테마 전부.
+///
+/// 「이 이름이 우리가 배정한 학생 이름인가」를 묻는 쪽은 활성 명단이 아니라 이것을
+/// 봐야 한다. 활성 명단만 보면 테마를 갈아탄 순간 옛 캐릭터가 「학생이 아닌 것」이
+/// 되고, 그 이름으로 남아 있던 자국을 **사용자가 손수 붙인 것**으로 오인해 영영
+/// 손대지 않는다(2026-08-27 실측: /resume 피커에 옛 테마의 페이몬 얼굴이 붙은 채
+/// 굳었다 — 그 세션의 배정은 진작 아리스로 바뀌어 있었다). `agent_slug` 가 같은
+/// 이유로 전 테마 합집합을 보게 넓혀졌다(`0eedb9c4`) — 같은 함정의 다른 자리다.
+pub fn all_rosters() -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+    let mut push = |p: PathBuf, out: &mut Vec<Value>| {
+        if !seen.insert(p.clone()) {
+            return;
+        }
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                out.push(v);
+            }
+        }
+    };
+    for p in candidate_paths() {
+        push(p, &mut out);
+    }
+    if let Some(root) = themes_root() {
+        for p in theme_roster_paths(&root) {
+            push(p, &mut out);
+        }
+    }
+    out
+}
+
+/// `<root>/*/theme.json` 전부 — root 주입이라 테스트가 env 없이 검증한다
+/// (`active_theme_dir_in` 과 같은 결).
+pub fn theme_roster_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut v: Vec<PathBuf> =
+        rd.flatten().map(|e| e.path()).filter(|d| d.is_dir()).map(|d| d.join("theme.json")).collect();
+    v.sort();
+    v
+}
+
 /// 활성 테마 항목을 뺀 기본 로스터 — 테마를 안 골랐을 때와 같은 것. 진행 중
 /// pane 을 기본(번들) 학생으로 바꾸는 피커의 「기본」 묶음이 쓴다(2026-08-24
 /// 지시: 어느 테마가 활성이어도 다른 테마 캐릭터로 바꿀 수 있어야 한다).
@@ -1888,5 +1930,27 @@ mod manual_pick_tests {
         let back = load_manual_picks(&path);
         assert_eq!(back, vec!["sid-a".to_string(), "sid-b".to_string()]);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod theme_roster_tests {
+    use super::*;
+
+    /// 설치된 테마 **전부**를 훑어야 한다 — 활성 하나만 보면 갈아탄 뒤 옛 캐릭터가
+    /// 「우리 학생이 아닌 것」이 되어 그 자국을 영영 못 고친다(2026-08-27 실측).
+    #[test]
+    fn every_theme_folder_contributes_its_roster_path() {
+        let d = std::env::temp_dir().join(format!("kt-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for t in ["genshin", "bluearchive"] {
+            std::fs::create_dir_all(d.join(t)).unwrap();
+            std::fs::write(d.join(t).join("theme.json"), "{}").unwrap();
+        }
+        std::fs::write(d.join("stray.txt"), "x").unwrap();
+        let got = theme_roster_paths(&d);
+        assert_eq!(got.len(), 2, "폴더마다 하나씩: {got:?}");
+        assert!(got.iter().all(|p| p.ends_with("theme.json")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
