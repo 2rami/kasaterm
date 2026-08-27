@@ -3644,9 +3644,38 @@ impl App {
         if sessions_json.is_empty() {
             return None;
         }
+        // 숨겨 둔 pane 도 함께 싣는다. 여태 안 실려서, 화면에서 치워 둔 작업은
+        // **재시작 한 번에 통째로 사라졌다**(2026-08-27 지적 「재시작하면 완전히
+        // 없어지고」). 숨기기의 약속이 「돌아왔을 때 그 자리에 있다」인데 그 약속이
+        // 앱 수명까지만이었던 셈이다.
+        //
+        // `alive` 는 싣지 않는다 — 재시작하면 PTY 는 어차피 다 죽으므로 되살리기는
+        // 레코드로 새로 띄우는 쪽이고, claude 였던 pane 은 `rec` 에 세션 id 가 실려
+        // 있어 `restore_leaf` 가 `--resume` 까지 붙여 준다. 살아 있다고 적어 두면
+        // 되살리기가 「있지도 않은 PTY 에 재부착」을 시도한다.
+        //
+        // 숨긴 것(`stashed`)만 싣는다. ⌘W 로 닫은 것은 두 정리 루프가 언젠가 놓는
+        // 임시 기록이라 앱 수명을 넘겨 되살릴 값이 아니고, 그것까지 실으면 껐다 켤
+        // 때마다 되살리기 목록이 옛 묘비로 불어난다.
+        let closed_json: Vec<serde_json::Value> = self
+            .closed_panes
+            .iter()
+            .filter(|c| c.stashed && !c.rec.is_null())
+            .map(|c| {
+                serde_json::json!({
+                    "rec": c.rec,
+                    "pane_id": c.pane_id,
+                    "character": c.character,
+                    "folder": c.folder,
+                    "neighbor": c.neighbor,
+                    "window": c.window,
+                })
+            })
+            .collect();
         Some(serde_json::json!({
             "active_session": self.active_session,
             "sessions": sessions_json,
+            "stashed_panes": closed_json,
         }))
     }
     /// Write the restore snapshot on exit.
@@ -3957,6 +3986,43 @@ impl App {
             .and_then(|l| l.leaves().first().map(|s| s.to_string()))
         {
             self.ws.lock().unwrap().active_pane = Some(first);
+        }
+        // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴
+        // 것은 화면에 없는 게 그 사람이 고른 상태고, 켜자마자 우르르 튀어나오면
+        // 숨긴 의미가 없다. 목록에 서 있다가 사용자가 부를 때 뜬다.
+        //
+        // `alive: false` 로 들어간다 — 재시작으로 PTY 는 다 죽었으니 되살리기는
+        // 레코드로 새로 띄우는 쪽이다. claude 였던 pane 은 `rec` 의 세션 id 를
+        // `restore_leaf` 가 `--resume` 으로 이어 준다.
+        for c in state
+            .get("stashed_panes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(rec) = c.get("rec").cloned().filter(|r| !r.is_null()) else {
+                continue;
+            };
+            let str_of = |k: &str| {
+                c.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+            };
+            self.closed_panes.push(crate::ClosedPane {
+                rec,
+                pane_id: str_of("pane_id"),
+                character: str_of("character"),
+                folder: str_of("folder"),
+                neighbor: c
+                    .get("neighbor")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                // 방 번호는 저장 당시 것이다. 그 방이 이번에 안 살아났으면 되살리기가
+                // 활성 방으로 떨어뜨린다(`window` 를 쓰는 쪽의 기존 규칙).
+                window: c.get("window").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                alive: false,
+                stashed: true,
+                idle_since: None,
+                preview: None,
+            });
         }
         self.chrome_dirty = true;
         self.resize_backend(cols, rows);

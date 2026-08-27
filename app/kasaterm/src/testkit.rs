@@ -1397,7 +1397,19 @@ impl App {
                 self.info.tab = crate::state::SideTab::Info;
             }
             self.render_frame();
-            eprintln!("[autostash] hold — leaves={before:?} 배치도칸={}", self.sidebar_row_rects.len());
+            // 복원이 되살리기 목록을 채웠는지도 같은 자리에서 밝힌다 — 재시작으로
+            // 잃던 것이 정확히 이 목록이라(2026-08-27), 눈으로만 보면 카드가 접혀
+            // 있을 때 「없다」와 「안 그렸다」가 구별되지 않는다.
+            let stashed: Vec<String> = self
+                .closed_panes
+                .iter()
+                .filter(|c| c.stashed)
+                .map(|c| format!("{}({})", c.pane_id, c.folder))
+                .collect();
+            eprintln!(
+                "[autostash] hold — leaves={before:?} 배치도칸={} 되살리기목록={stashed:?}",
+                self.sidebar_row_rects.len()
+            );
             return;
         }
         // 그 pane 의 줄 한가운데. 미니맵 칸도 같은 벡터에 있어 `find` 는 먼저 오는
