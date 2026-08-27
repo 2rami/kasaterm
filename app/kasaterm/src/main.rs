@@ -6379,6 +6379,49 @@ pub(crate) fn background_launch() -> bool {
     }
 }
 
+/// 셰임 파일을 **원자적으로** 갈아 끼운다 — 같은 디렉터리의 임시 파일에 쓰고
+/// 실행 권한까지 준 뒤 `rename` 으로 제자리에 놓는다.
+///
+/// 제자리 덮어쓰기(`fs::write`)면 안 되는 이유: 셸은 스크립트를 **읽어가며** 실행한다
+/// (열어 둔 fd 의 오프셋을 들고 다음 줄을 그때그때 읽는다). 실행 중인 파일을 통째로
+/// 덮으면 그 오프셋이 새 내용의 엉뚱한 자리를 가리켜 줄 한가운데부터 읽고 죽는다.
+/// 2026-08-27 실측: 설정 화면 조작 → `regen_pane_shims` 가 claude 래퍼를 덮어썼고,
+/// 하필 그때 claude 를 띄우던 pane 이 `line 92: syntax error near unexpected token
+/// '|'` 로 셸만 남았다(파일 자체는 멀쩡해 `bash -n` 은 통과 — 순수한 경합이다).
+///
+/// `rename` 은 새 inode 를 그 이름에 얹으므로 이미 실행 중인 셸은 옛 inode 를 끝까지
+/// 읽고, 다음 실행부터 새 것을 본다. "덮어쓰기만으로 이미 뜬 pane 에도 반영"이라는
+/// 원래 의도는 그대로다 — 반영 시점이 실행 경계로 옮겨질 뿐이다.
+fn write_shim_inner(path: &std::path::Path, body: &[u8], exec: bool) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("shim");
+    let tmp = path.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    std::fs::write(&tmp, body)?;
+    #[cfg(unix)]
+    if exec {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = exec;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// 실행되는 셰임 스크립트 — 원자 교체 + `0o755`.
+fn write_shim(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_shim_inner(path, body.as_ref(), true)
+}
+
+/// 셰임이 읽기만 하는 파일(rc·hooks json·계정 경로) — 원자 교체, 실행 권한 없음.
+/// 소스되는 rc 도 셸이 읽어가며 실행하므로 스크립트와 같은 경합에 걸린다.
+fn write_shim_data(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_shim_inner(path, body.as_ref(), false)
+}
+
 fn install_pane_shims() {
     // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
     // 이면 pty-backend(state.rs)가 PATH prepend·ZDOTDIR 를 건드리지 않아 자식 셸이 순정
@@ -6452,7 +6495,7 @@ fn install_pane_shims() {
     // it wins over brew. Non-zsh shells ignore ZDOTDIR and rely on the
     // plain PATH prepend pty-backend still does.
     let write_rc = |name: &str, body: String| {
-        if let Err(e) = std::fs::write(shim_dir.join(name), body) {
+        if let Err(e) = write_shim_data(&shim_dir.join(name), body) {
             eprintln!("[shim] write rc {name} failed: {e}");
         }
     };
@@ -6582,16 +6625,8 @@ fi
 exec "$MUX" client --server-path "$REAL" "$@"
 "#;
     let path = shim_dir.join("rust-analyzer");
-    if let Err(e) = std::fs::write(&path, body) {
+    if let Err(e) = write_shim(&path, body) {
         eprintln!("[shim] write rust-analyzer failed: {e}");
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
-            eprintln!("[shim] chmod rust-analyzer failed: {e}");
-        }
     }
 }
 
@@ -6621,18 +6656,8 @@ curl -s --get --data-urlencode \"path=$abs\" \
     };
     for (name, endpoint) in [("imgopen", "open-image"), ("mdopen", "open-markdown")] {
         let path = shim_dir.join(name);
-        if let Err(e) = std::fs::write(&path, mk(name, endpoint)) {
+        if let Err(e) = write_shim(&path, mk(name, endpoint)) {
             eprintln!("[shim] write {name} failed: {e}");
-            continue;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(e) =
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            {
-                eprintln!("[shim] chmod {name} failed: {e}");
-            }
         }
     }
 }
@@ -7109,7 +7134,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     {
         match serde_json::to_string_pretty(&settings) {
             Ok(s) => {
-                if let Err(e) = std::fs::write(&settings_path, s) {
+                if let Err(e) = write_shim_data(&settings_path, s) {
                     eprintln!("[shim] write claude-hooks-settings.json failed: {e}");
                     return;
                 }
@@ -7413,7 +7438,7 @@ fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block);
     let wrapper_path = shim_dir.join("claude");
-    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+    if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
@@ -7426,18 +7451,9 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
             "@echo off\r\n\"{}\" \"%~dp0claude\" %*\r\n",
             hook_shell_program().replace('/', "\\")
         );
-        if let Err(e) = std::fs::write(&cmd_path, cmd) {
+        if let Err(e) = write_shim(&cmd_path, cmd) {
             eprintln!("[shim] write claude.cmd wrapper failed: {e}");
             return;
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
-        {
-            eprintln!("[shim] chmod claude wrapper failed: {e}");
         }
     }
     // kasacollab(협업 CLI)도 pane PATH 에 스테이징 — 훅이 아니라 셸/claude 가
@@ -7446,18 +7462,9 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     let py = python3_program().unwrap_or("python3");
     let collab = format!("#!/bin/sh\nexec {py} -X utf8 \"{hd}/kasacollab.py\" \"$@\"\n");
     let collab_path = shim_dir.join("kasacollab");
-    if let Err(e) = std::fs::write(&collab_path, collab) {
+    if let Err(e) = write_shim(&collab_path, collab) {
         eprintln!("[shim] write kasacollab wrapper failed: {e}");
         return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&collab_path, std::fs::Permissions::from_mode(0o755))
-        {
-            eprintln!("[shim] chmod kasacollab wrapper failed: {e}");
-        }
     }
     // sh 훅 아홉 개가 전부 `python3` 을 이름으로 부른다(bind-transcript·steer·
     // stop-drain·notify·auto-imgopen …). Windows 에서 그 이름은 MS Store 스텁이라
@@ -7467,7 +7474,7 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     // 이름이 이미 맞으면(unix) 아무것도 안 만든다.
     if cfg!(windows) && py != "python3" && python3_program().is_some() {
         let bridge = format!("#!/bin/sh\nexec {py} -X utf8 \"$@\"\n");
-        if let Err(e) = std::fs::write(shim_dir.join("python3"), bridge) {
+        if let Err(e) = write_shim(&shim_dir.join("python3"), bridge) {
             eprintln!("[shim] write python3 bridge failed: {e}");
         }
     }
@@ -7531,7 +7538,7 @@ pub(crate) fn install_codex_hook_shim(shim_dir: &std::path::Path) {
     let settings_path = shim_dir.join("codex-hooks.json");
     match serde_json::to_string_pretty(&settings) {
         Ok(s) => {
-            if let Err(e) = std::fs::write(&settings_path, s) {
+            if let Err(e) = write_shim_data(&settings_path, s) {
                 eprintln!("[shim] write codex-hooks.json failed: {e}");
                 return;
             }
@@ -7620,18 +7627,9 @@ esac
 exec "$REAL" "$@"
 "#;
     let wrapper_path = shim_dir.join("codex");
-    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+    if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write codex wrapper failed: {e}");
         return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
-        {
-            eprintln!("[shim] chmod codex wrapper failed: {e}");
-        }
     }
     write_codex_account_file(shim_dir);
 }
@@ -7651,7 +7649,7 @@ pub(crate) fn write_codex_account_file(shim_dir: &std::path::Path) {
         }
     }
     let body = dir.map_or(String::new(), |d| d.display().to_string());
-    if let Err(e) = std::fs::write(shim_dir.join("codex-account"), body) {
+    if let Err(e) = write_shim_data(&shim_dir.join("codex-account"), body) {
         eprintln!("[shim] write codex-account failed: {e}");
     }
 }
@@ -7730,7 +7728,7 @@ fn install_agy_hook_shim(shim_dir: &std::path::Path) {
             "---\nname: kasaterm-{slug}\ndescription: kasaterm pane persona ({name}) — 자동 생성, 직접 고치지 마세요\n---\n\n{persona}\n"
         );
         let path = agents_dir.join(format!("kasaterm-{slug}.md"));
-        if let Err(e) = std::fs::write(&path, body) {
+        if let Err(e) = write_shim_data(&path, body) {
             eprintln!("[shim] write agy agent {path:?} failed: {e}");
             continue;
         }
@@ -7786,18 +7784,8 @@ exec "$REAL" "$@"
 "#
     );
     let wrapper_path = shim_dir.join("agy");
-    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+    if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write agy wrapper failed: {e}");
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
-        {
-            eprintln!("[shim] chmod agy wrapper failed: {e}");
-        }
     }
 }
 
@@ -7864,18 +7852,8 @@ exec \"$H\" \"$@\"\n",
         }
         for cmd in cmd_names {
             let path = shim_dir.join(&cmd);
-            if let Err(e) = std::fs::write(&path, &script) {
+            if let Err(e) = write_shim(&path, &script) {
                 eprintln!("[shim] write student shim {cmd} failed: {e}");
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                {
-                    eprintln!("[shim] chmod student shim {cmd} failed: {e}");
-                }
             }
         }
     }
@@ -9450,4 +9428,110 @@ mod tests {
             assert!(keys.contains(&c.web_key()), "웹에 없는 칸 이름: {}", c.web_key());
         }
     }
+
+    /// 셰임 교체가 **제자리 덮어쓰기가 아니라 rename** 인지 — inode 로 잰다.
+    ///
+    /// 이 한 줄이 회귀의 정본이다: `write_shim` 을 `fs::write` 로 되돌리면 inode 가
+    /// 그대로라 즉시 실패한다. 실행 중 셸이 안전한 이유가 정확히 "옛 inode 가 살아
+    /// 있어서" 이므로, 검사할 것은 파일 내용이 아니라 inode 다.
+    #[cfg(unix)]
+    #[test]
+    fn write_shim_replaces_the_inode_instead_of_overwriting() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("kasaterm-shim-inode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude");
+
+        write_shim(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let first = std::fs::metadata(&path).unwrap();
+        assert_eq!(first.permissions().mode() & 0o777, 0o755, "실행 권한이 안 붙었다");
+
+        write_shim(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        let second = std::fs::metadata(&path).unwrap();
+        assert_ne!(first.ino(), second.ino(), "제자리 덮어쓰기다 — 실행 중 셸이 깨진다");
+        assert_eq!(second.permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\nexit 1\n");
+
+        // 임시 파일을 남기면 PATH 인 셰임 dir 에 쓰레기가 쌓인다.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n != "claude")
+            .collect();
+        assert!(leftovers.is_empty(), "임시 파일이 남았다: {leftovers:?}");
+
+        // 읽기 전용 파일(실행 안 되는 데이터)은 권한을 안 건드린다.
+        let data = dir.join("codex-account");
+        write_shim_data(&data, "x").unwrap();
+        assert_eq!(std::fs::metadata(&data).unwrap().permissions().mode() & 0o111, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 실행 **중인** 셰임을 갈아도 그 실행이 끝까지 간다.
+    ///
+    /// 2026-08-27 회귀: 설정 화면을 만지면 `regen_pane_shims` 가 claude 래퍼를 제자리에
+    /// 덮어썼고, 하필 그때 claude 를 띄우던 pane 이 `syntax error` 로 셸만 남았다.
+    /// 셸은 열어 둔 fd 의 오프셋으로 다음 줄을 그때그때 읽으므로, 내용이 통째로 갈리면
+    /// 줄 한가운데부터 읽는다.
+    ///
+    /// 교체 시점은 **자식이 남기는 마커를 보고** 잡는다 — 고정 `sleep` 으로 재면 테스트가
+    /// 605개와 함께 도는 부하에서 자식이 스크립트를 열기도 전에 갈아치워, rename 인데도
+    /// 깨진 것처럼 보인다(실측으로 그렇게 한 번 틀렸다).
+    ///
+    /// 대조군(`fs::write`)을 먼저 돌려 **이 환경에서 실제로 깨지는지** 확인하고, 깨질 때만
+    /// rename 쪽을 판정한다 — 셸이 스크립트를 통째로 버퍼에 담는 환경이면 어느 쪽도 안
+    /// 깨지므로 그때의 통과는 아무것도 증명하지 않는다.
+    #[cfg(unix)]
+    #[test]
+    fn a_shim_being_executed_survives_a_regen() {
+        let other = "#!/bin/sh\nexit 9\n";
+
+        let run_with = |name: &str, swap: &dyn Fn(&std::path::Path)| -> String {
+            let dir = std::env::temp_dir()
+                .join(format!("kasaterm-shim-live-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("claude");
+            let mark = dir.join("started");
+            // 마커를 찍은 뒤 잠들고, 깨어나서야 나머지를 읽는다. 패딩은 셸의 읽기
+            // 버퍼(BUFSIZ, 보통 1~8KB)보다 확실히 커야 한다 — 작으면 한 번에 읽혀
+            // 교체가 눈에 안 띈다. 실제 claude 래퍼도 수 KB다.
+            let pad: String =
+                (0..400).map(|i| format!("# padding line {i} ————————————————\n")).collect();
+            let script = format!(
+                "#!/bin/sh\n: > {mark:?}\nsleep 0.5\n{pad}echo OK\nexit 0\n",
+                mark = mark.display().to_string()
+            );
+            write_shim(&path, script.as_bytes()).unwrap();
+            let child = std::process::Command::new(&path)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !mark.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(mark.exists(), "자식이 셰임을 실행하지 못했다");
+            swap(&path);
+            let out = child.wait_with_output().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let control = run_with("control", &|p| {
+            std::fs::write(p, other).unwrap();
+        });
+        if control == "OK" {
+            // 이 셸은 스크립트를 통째로 읽는다 — 제자리 덮어쓰기로도 안 깨지므로
+            // rename 쪽 통과가 아무것도 말해 주지 않는다. 판정을 접는다.
+            return;
+        }
+
+        let atomic = run_with("atomic", &|p| {
+            write_shim(p, other).unwrap();
+        });
+        assert_eq!(atomic, "OK", "rename 으로 갈았는데도 실행 중 셰임이 깨졌다");
+    }
+
 }
