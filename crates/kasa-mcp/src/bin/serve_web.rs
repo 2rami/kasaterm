@@ -18,6 +18,22 @@ use kasa_mcp::standalone::StandaloneBackend;
 const DEFAULT_PORT: u16 = 8766;
 
 fn main() -> anyhow::Result<()> {
+    // claude pane 안에서 손으로 띄우는 경우가 실제로 있다(이사 리허설·수동 배포).
+    // 그 env 의 claude 마커를 물려받으면 이 데몬이 낳는 **모든 셸**의 claude 가
+    // transcript 저장을 끈다 — 이사(migrate)로 옮겨 온 대화가 그 순간부터 안 남는다.
+    // kasaterm 부팅 첫 줄(scrub_inherited_claude_markers, main.rs 목록과 동기)과 같다.
+    for k in [
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_TEAMMATE_MODE",
+        "CLAUDE_CODE_FORK_SUBAGENT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_PID",
+        "CLAUDECODE",
+    ] {
+        std::env::remove_var(k);
+    }
     let mut cwd: Option<PathBuf> = None;
     let mut port: u16 = DEFAULT_PORT;
     let mut it = std::env::args().skip(1);
