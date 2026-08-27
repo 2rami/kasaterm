@@ -1170,6 +1170,23 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn migrate_pane(&self, pane: &str, base: &str, cwd: Option<&str>, force: bool) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketMigrate(
+            pane.to_string(),
+            base.to_string(),
+            cwd.map(str::to_string),
+            force,
+            tx,
+        ));
+        // 대화 jsonl 업로드(수백 MB 가능)+원격 접속이 들어 있다 — promote 보다 길게.
+        match rx.recv_timeout(std::time::Duration::from_secs(240)) {
+            Ok(Ok(id)) => Ok(id),
+            Ok(Err(why)) => anyhow::bail!("migrate 실패: {why}"),
+            Err(_) => anyhow::bail!("migrate 응답 없음(240초) — GUI 스레드를 확인해라"),
+        }
+    }
+
     fn split_fleet(
         &self,
         count: usize,
@@ -4019,6 +4036,16 @@ pub struct CodexAccount {
 /// 사람은 메뉴 안에서 바로 바꾼다.
 pub fn read_usage_compact() -> bool {
     read_settings().get("usage_compact").and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+/// 하단바에 안 쓰는 계정의 한도까지 세울지. 기본은 켬 — 계정을 여러 개 붙인
+/// 사람에게 이 줄의 쓸모는 「지금 얼마나 남았나」보다 「어디로 옮기나」쪽이고,
+/// 계정이 하나뿐이면 그릴 것이 없어 알아서 옛 화면과 같아진다.
+pub fn read_statusbar_all_accounts() -> bool {
+    read_settings()
+        .get("statusbar_all_accounts")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
 }
 
 /// 등록된 codex 슬롯들. claude 와 같은 규칙 — 기본 로그인(`~/.codex/auth.json`)은

@@ -3899,6 +3899,69 @@ async fn term_tunnel_post(body: String) -> impl IntoResponse {
     }
 }
 
+/// 이사(migrate) 상한 — 대화 jsonl 하나의 최대 크기.
+const TRANSCRIPT_UPLOAD_LIMIT: usize = 512 << 20;
+
+/// 이사에 실려 오는 세션 id 검증 — claude sid 는 uuid 꼴이다. 경로는 서버가
+/// cwd·sid 로 계산하므로(claude 규칙: `/`·`.` → `-`) 이 문자집합 검사가 곧
+/// 경로 탈출 방어다: `/` 도 `.` 도 여기서 걸러진다.
+fn valid_session_id(sid: &str) -> bool {
+    !sid.is_empty()
+        && sid.len() <= 80
+        && sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// 이사(migrate)의 대화 수신 창구 — 로컬 GUI 가 claude jsonl 을 올려 두면, 곧이어
+/// 이 호스트에 스폰될 셸의 `claude --resume` 이 그것을 읽는다. 인증은 라우트 공통
+/// 레이어(원격=remote 토큰, 로컬 브라우저=Origin)가 이미 덮는다.
+async fn term_transcript_post(
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |msg: String| Json(serde_json::json!({ "ok": false, "error": msg }));
+    let Some(cwd) = q.get("cwd").filter(|s| s.starts_with('/')) else {
+        return err("`cwd`(이 기계 기준 절대경로) 가 필요해요".into());
+    };
+    let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)) else {
+        return err("`sid`(claude 세션 uuid) 가 필요해요".into());
+    };
+    let force = q.get("force").map(String::as_str) == Some("1");
+    let Some(path) =
+        kasa_socket::sessions::session_jsonl_path(std::path::Path::new(cwd.as_str()), sid)
+    else {
+        return err("서버 HOME 을 몰라 저장 위치를 못 정해요".into());
+    };
+    // 이미 있는 파일이 더 크면 받은 쪽이 낡았을 공산이 크다 — 대화를 되감는
+    // 덮어쓰기는 기본 거부하고, 알고 하는 재이사만 force 로 통과시킨다.
+    if !force {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > body.len() as u64 {
+                return err(format!(
+                    "이 호스트에 더 큰 대화가 이미 있어요({}B > {}B) — force 로만 덮어쓸 수 있어요",
+                    meta.len(),
+                    body.len()
+                ));
+            }
+        }
+    }
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return err(format!("대화 폴더 생성 실패: {e}"));
+        }
+    }
+    // 쓰다 만 파일이 정본 자리에 남지 않게 옆에 쓰고 rename 으로 앉힌다.
+    let tmp = path.with_extension("jsonl.part");
+    if let Err(e) = std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return err(format!("대화 저장 실패: {e}"));
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "bytes": body.len(),
+        "path": path.display().to_string(),
+    }))
+}
+
 /// 이 서버 인스턴스의 1회용 토큰. 프로세스가 뜰 때 한 번 만들어진다.
 ///
 /// `with_html` 로 띄우는 패널(세션·보드)은 문서 origin 이 `null` 이라 Origin 검사를
@@ -4749,6 +4812,13 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/ws", get(term_ws_handler))
                     .route(
+                        "/term/transcript",
+                        post(term_transcript_post)
+                            // 대화 jsonl 은 수백 MB 도 나온다 — axum 기본 2MB 로는
+                            // 이사 자체가 이유 없는 실패로만 보인다.
+                            .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
+                    )
+                    .route(
                         "/term/tunnel",
                         get(term_tunnel_get).post(term_tunnel_post),
                     )
@@ -5204,6 +5274,15 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn valid_session_id_rejects_path_material() {
+        assert!(super::valid_session_id("deffe742-3b0d-40de-a135-ff8d7a207995"));
+        // 경로 탈출 재료는 전부 거부 — 이 검사가 곧 저장 경로 방어다.
+        for bad in ["", "../../etc/passwd", "a/b", "a.b", "a b", &"x".repeat(81)] {
+            assert!(!super::valid_session_id(bad), "{bad:?} 가 통과했다");
+        }
+    }
+
     use super::*;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {

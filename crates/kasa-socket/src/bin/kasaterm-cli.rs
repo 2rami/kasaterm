@@ -741,6 +741,7 @@ fn print_help() {
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 학생은 안 죽는다
+  kasaterm-cli migrate <%surface> <http://호스트:포트> [--cwd /원격/레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화 운반+같은 자리 재개) — 안 올린 git 변경이 있으면 막아 선다
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
@@ -943,6 +944,49 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
                 .ok_or_else(|| anyhow!("promote 는 대상 pane 이 필요해요 (예: promote %3)"))?;
             ("surface.promote", json!({ "pane": pane }))
+        }
+        // pane 의 claude 를 **다른 기계로 이사** — 대화를 통째 그 호스트로 옮기고
+        // 같은 자리에서 같은 대화로 다시 깨운다. 안 올린 git 변경이 있으면 막아 선다.
+        "migrate" => {
+            let mut positional: Vec<String> = Vec::new();
+            let mut i = 0usize;
+            while i < args.len() {
+                let a = &args[i];
+                if a == "--cwd" {
+                    i += 2;
+                    continue;
+                }
+                if a.starts_with('%') || a.starts_with("--") {
+                    i += 1;
+                    continue;
+                }
+                positional.push(a.clone());
+                i += 1;
+            }
+            let base = positional.first().cloned().ok_or_else(|| {
+                anyhow!("migrate 는 목적지 주소가 필요해요 (예: migrate %3 http://127.0.0.1:18791 --cwd /원격/레포)")
+            })?;
+            let flagval = |name: &str| {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let pane = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
+                .ok_or_else(|| anyhow!("migrate 는 대상 pane 이 필요해요 (예: migrate %3 http://...)"))?;
+            (
+                "surface.migrate",
+                json!({
+                    "pane": pane,
+                    "base": base,
+                    "cwd": flagval("--cwd"),
+                    "force": args.iter().any(|a| a == "--force"),
+                }),
+            )
         }
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면

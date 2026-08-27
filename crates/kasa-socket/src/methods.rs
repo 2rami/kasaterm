@@ -50,6 +50,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.split" => surface_split(backend, id, &req.params),
         "surface.remote" => surface_remote(backend, id, &req.params),
         "surface.promote" => surface_promote(backend, id, &req.params),
+        "surface.migrate" => surface_migrate(backend, id, &req.params),
         "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
@@ -236,6 +237,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split",
                 "surface.remote",
                 "surface.promote",
+                "surface.migrate",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
@@ -717,6 +719,24 @@ fn surface_promote(backend: &dyn Backend, id: Value, params: &Value) -> Response
         return param_err(id, "surface.promote requires `pane`");
     };
     match backend.promote_pane(pane) {
+        Ok(remote_id) => Response::success(id, json!({"ok": true, "remote_id": remote_id})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// `surface.migrate` — pane 의 claude 를 다른 기계로 이사. params:
+/// `{pane, base, cwd?, force?}` — `cwd` 는 **원격 기계 기준** 경로,
+/// `force` 는 안 올린 git 변경 관문과 대화 덮어쓰기 관문을 함께 연다.
+fn surface_migrate(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(pane) = params.get("pane").and_then(|v| v.as_str()) else {
+        return param_err(id, "surface.migrate requires `pane`");
+    };
+    let Some(base) = params.get("base").and_then(|v| v.as_str()) else {
+        return param_err(id, "surface.migrate requires `base` (예: http://127.0.0.1:18791)");
+    };
+    let cwd = params.get("cwd").and_then(|v| v.as_str());
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    match backend.migrate_pane(pane, base, cwd, force) {
         Ok(remote_id) => Response::success(id, json!({"ok": true, "remote_id": remote_id})),
         Err(e) => backend_err(id, e),
     }

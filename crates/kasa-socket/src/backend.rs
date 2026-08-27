@@ -533,6 +533,17 @@ pub trait Backend: Send + Sync {
     fn promote_pane(&self, _pane: &str) -> Result<String> {
         anyhow::bail!("promote: 이 백엔드는 지원하지 않는다")
     }
+    /// pane 의 claude 를 다른 기계의 PTY 호스트로 **이사** — 대화 jsonl 운반 +
+    /// 같은 자리 원격 스왑 + resume 주입. GUI 백엔드 전용.
+    fn migrate_pane(
+        &self,
+        _pane: &str,
+        _base: &str,
+        _cwd: Option<&str>,
+        _force: bool,
+    ) -> Result<String> {
+        anyhow::bail!("migrate: 이 백엔드는 지원하지 않는다")
+    }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
     fn remote_pane(

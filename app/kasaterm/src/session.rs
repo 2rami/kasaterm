@@ -204,8 +204,16 @@ impl App {
                             };
                         }
                         Ok(next) => {
-                            // EOF mid-burst: handle the current merge then
-                            // signal death so reap fires next turn.
+                            // EOF mid-burst: 같은 자리에 새 세션이 앉았으면(스왑)
+                            // 이 죽음도, 병합해 둔 옛 프레임도 전부 옛 세션 것이다 —
+                            // 그리지도 죽음표시도 않고 조용히 끝낸다. 이 자리만
+                            // 가드가 없던 탓에, 이사(migrate)가 옛 셸을 걷는 순간
+                            // 여기로 배수된 EOF 가 reap → remove_pane → kill_remote
+                            // 연쇄로 **새 원격 pane 을** 걷고 마지막 pane 이면 앱까지
+                            // 데려갔다(2026-08-27 백트레이스 실측).
+                            if pane_replaced(&next.pane_id, &sess_weak) {
+                                return;
+                            }
                             dead.lock().unwrap().push(next.pane_id.clone());
                             break;
                         }
@@ -707,6 +715,132 @@ impl App {
             w.request_redraw();
         }
         Ok(web_id)
+    }
+
+    /// pane 의 claude 를 **다른 기계로 이사**시킨다 — 로컬을 정리하고 원격에서 같은
+    /// 대화로 다시 깨운다(promote 와 달리 산 채로는 못 건넌다 — 기계가 다르다).
+    ///
+    /// 순서: ①안 올린 git 변경 검사(막아 세우기) ②claude 를 곱게 끄고(jsonl 마지막
+    /// flush 를 기다린다) ③대화 jsonl 을 원격 호스트로 업로드 ④같은 pane 자리를
+    /// 원격 셸로 갈아끼우고 ⑤`claude --resume` 을 주입. 로컬 셸은 스왑의 Drop 이
+    /// 정상 철거한다(이사의 현지 철거 — promote 의 disarm 과 반대로 죽는 게 맞다).
+    ///
+    /// ⚠️ GUI 스레드에서 동기로 돈다 — 업로드가 큰 대화(수백 MB)면 그동안 화면이
+    /// 선다. 이사는 어차피 그 pane 을 떠나는 조작이라 감수한다.
+    #[cfg(unix)]
+    pub(crate) fn migrate_pane(
+        &mut self,
+        pid: &str,
+        base: &str,
+        remote_cwd: Option<&str>,
+        force: bool,
+    ) -> Result<String> {
+        let Some(sess) = self.pty.get(pid).cloned() else {
+            anyhow::bail!("pane {pid} 이 없다");
+        };
+        if kasa_mcp::remote::is_remote_pane(pid) {
+            anyhow::bail!("{pid} 은 이미 원격 pane 이다 — 이사할 로컬이 없다");
+        }
+        let Some(shell) = sess.shell_pid() else {
+            anyhow::bail!("{pid} 의 셸 pid 를 모른다");
+        };
+        let Some((kind, agent_pid)) =
+            kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)
+        else {
+            anyhow::bail!("{pid} 에 도는 에이전트가 없다 — 이사는 claude pane 전용이다");
+        };
+        if kind != kasa_pty::AgentKind::Claude {
+            anyhow::bail!("이사는 claude 전용이다({kind:?} 는 대화 파일 규약이 다르다)");
+        }
+        let Some(sid) = self.pane_claude_sid.get(pid).cloned() else {
+            anyhow::bail!(
+                "{pid} 의 claude 세션 id 를 아직 모른다 — 대화를 한 번 주고받은 뒤 다시"
+            );
+        };
+        let cwd = socket::pid_cwd(shell)
+            .ok_or_else(|| anyhow::anyhow!("{pid} 의 작업 폴더를 못 읽었다"))?;
+        // 원 브리프의 관문: 이 기계에만 있는 변경을 실은 채 떠나면 원격의 코드는
+        // 옛것이라 대화만 미래에 산다 — 막아 세우고, 알고 가는 길만 force 로 연다.
+        if !force {
+            let dirty = git_lines(&cwd, &["status", "--porcelain"]);
+            let unpushed =
+                git_lines(&cwd, &["log", "--branches", "--not", "--remotes", "--oneline"]);
+            if dirty > 0 || unpushed > 0 {
+                anyhow::bail!(
+                    "이 기계에만 있는 변경이 남아 있다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({}) — 커밋·push 하고 오거나 --force",
+                    cwd.display()
+                );
+            }
+        }
+        let remote_cwd = remote_cwd
+            .map(str::to_string)
+            .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+        // 모델·effort 는 claude 가 죽기 전에 떠 둔다 — 원천이 statusline 보고라
+        // 프로세스가 사라지면 다음 스냅샷에서 빠질 수 있다.
+        let (model, effort) = self
+            .agent_cfg_snapshot()
+            .get(pid)
+            .cloned()
+            .unwrap_or_default();
+        let jsonl = kasa_socket::sessions::session_jsonl_path(&cwd, &sid)
+            .filter(|p| p.exists())
+            .or_else(|| socket::transcript_path_for_session(&sid))
+            .ok_or_else(|| anyhow::anyhow!("세션 {sid} 의 대화 파일을 못 찾았다"))?;
+        // 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
+        // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
+        // 다투는 것이 최악이다(옛 9-pane 사고의 원형).
+        unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!("claude(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 이사를 세웠다");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        kasa_mcp::remote::upload_transcript(base, &remote_cwd, &sid, &jsonl, None, force)?;
+        // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
+        // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
+        sess.stop_reader();
+        // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
+        let (c, r) = sess.size();
+        let remote = kasa_mcp::remote::connect(
+            kasa_mcp::remote::RemoteSpec {
+                base: base.to_string(),
+                pane: None,
+                cwd: Some(remote_cwd),
+                token: None,
+            },
+            pid,
+            c,
+            r,
+        )?;
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            pid.to_string(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
+        // insert 가 옛 로컬 세션을 떨군다 — Drop 이 로컬 셸을 걷는다.
+        self.insert_pty(pid.to_string(), remote.session.clone());
+        self.dead_panes.lock().unwrap().retain(|x| x != pid);
+        let cmd = restore_agent_command(
+            Some("claude"),
+            Some(&sid),
+            true,
+            Some(model.as_str()).filter(|s| !s.is_empty()),
+            Some(effort.as_str()).filter(|s| !s.is_empty()),
+        );
+        self.pending_restores.push((
+            remote.session.clone(),
+            cmd,
+            std::time::Instant::now() + std::time::Duration::from_millis(1500),
+        ));
+        let (wc, wr) = self.window_cells();
+        self.resize_backend(wc, wr);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(remote.remote_id)
     }
 
     /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
@@ -5185,6 +5319,26 @@ fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
 /// 표시용 이름(`Gemini 3.6 Flash (Low)`)이라 수집 쪽에서 일부러 안 담는다. 나중에
 /// 담게 되거든 **`agy models` 목록과 대조하고 나서** 담아라: agy 는 없는 모델값에
 /// 에러를 안 내고 조용히 기본값으로 돌아, 틀려도 아무 데도 안 남는다.
+/// `git -C <cwd> <args>` 출력의 비어 있지 않은 줄 수 — 이사 관문의 「안 올린
+/// 변경」 셈. git 자체가 실패하면(레포가 아님 등) 0 — 레포 밖 pane 을 막지 않는다.
+#[cfg(unix)]
+fn git_lines(cwd: &std::path::Path, args: &[&str]) -> usize {
+    crate::proc::command("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 pub(crate) fn restore_agent_command(
     agent: Option<&str>,
     session_id: Option<&str>,

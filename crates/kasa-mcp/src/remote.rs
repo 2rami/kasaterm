@@ -392,6 +392,61 @@ async fn manager(
     }
 }
 
+/// 이사(migrate)의 대화 운반 — claude jsonl 하나를 원격 호스트의
+/// `/term/transcript` 로 올린다. 동기 — 성공/실패가 호출 시점에 확정된다.
+///
+/// `remote_cwd` 는 **원격 기계 기준** 경로다. 저장 위치(claude projects 슬러그)를
+/// 서버가 그 경로로 계산하므로, 이어질 원격 스폰의 cwd 와 같아야 resume 이 찾는다.
+pub fn upload_transcript(
+    base: &str,
+    remote_cwd: &str,
+    sid: &str,
+    jsonl: &std::path::Path,
+    token: Option<&str>,
+    force: bool,
+) -> Result<u64> {
+    let bytes = std::fs::read(jsonl)
+        .with_context(|| format!("대화 파일을 못 읽었어요: {}", jsonl.display()))?;
+    let n = bytes.len() as u64;
+    let mut url = format!(
+        "{}/term/transcript?cwd={}&sid={}",
+        base.trim_end_matches('/'),
+        urlencode(remote_cwd),
+        urlencode(sid)
+    );
+    if force {
+        url.push_str("&force=1");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("upload runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bytes);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("대화 업로드 요청")?;
+        let status = r.status();
+        // reqwest 는 json 피처 없이 들어와 있다 — text 로 받아 직접 파싱한다.
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "대화 업로드 거부: {}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

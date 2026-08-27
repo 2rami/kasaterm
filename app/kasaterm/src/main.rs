@@ -3700,6 +3700,15 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// pane 의 claude 를 다른 기계로 **이사** — (pane, base, 원격 cwd, force,
+    /// 회신=원격 세션 id). 대화 jsonl 운반 + 같은 자리 원격 스왑 + resume 주입.
+    SocketMigrate(
+        String,
+        String,
+        Option<String>,
+        bool,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
     /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
     ///
     /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에
@@ -4410,6 +4419,8 @@ pub(crate) enum SettingsAction {
     RemoveClaudeAccount(String),
     /// 한도가 차면 다음 계정으로 알아서 넘어가는 스위치.
     ToggleAccountAutoswitch,
+    /// 하단바에 **안 쓰는 계정의 한도까지** 세우는 스위치.
+    ToggleStatusbarAllAccounts,
     /// 그 전환을 부르는 사용률(%).
     AccountAutoswitchPct(u32),
     /// PixelDelta 스크롤 감도 배율 ×100. 트랙패드와 고해상도 마우스휠이 같은
@@ -5362,6 +5373,12 @@ struct App {
     set_codex_account: String,
     /// 계정 메뉴 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만, 막대 없이).
     set_usage_compact: bool,
+    /// 하단바에 **활성 계정 말고 나머지 슬롯의 한도까지** 세운다. 활성 하나만
+    /// 보이면 「지금 계정이 찼을 때 어디로 옮기나」에 답하려고 매번 드롭다운을
+    /// 열어야 하는데, 그 손이 아까워 안 열다가 다 찬 계정을 계속 쓴다
+    /// (2026-08-27 지시 「하단바에 다른계정 뭔지랑 사용량 실시간으로 계속
+    /// 보이는거」). 활성은 게이지째 남고 나머지는 이름+% 로만 붙는다.
+    set_statusbar_all_accounts: bool,
     /// 계정 메뉴에서 지금 계정 목록이 열려 있는 제공자. `None` = 로스터만.
     account_menu_provider: Option<AccountProvider>,
     /// 한도가 차면 다음 계정으로 알아서 넘어간다(기본 off) + 그 임계 사용률(%).
@@ -5872,6 +5889,7 @@ impl App {
             set_codex_accounts: socket::read_codex_accounts(),
             set_codex_account: socket::read_codex_account(),
             set_usage_compact: socket::read_usage_compact(),
+            set_statusbar_all_accounts: socket::read_statusbar_all_accounts(),
             account_menu_provider: None,
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),
