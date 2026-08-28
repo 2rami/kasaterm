@@ -8,6 +8,29 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        // 어떤 이벤트가 루프를 깨우는지 — 종류별로 센다. 「UserEvent 쪽이
+        // 원인」까지는 옆 계측이 말해 주지만, 그 다음 질문(무엇이)에는 답이 없다.
+        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+            use std::collections::BTreeMap;
+            thread_local! {
+                static EV: std::cell::RefCell<(BTreeMap<String, u32>, Option<Instant>)> =
+                    const { std::cell::RefCell::new((BTreeMap::new(), None)) };
+            }
+            // variant 이름만 — 페이로드까지 찍으면 한 줄이 화면을 덮는다.
+            let dbg = format!("{event:?}");
+            let name = dbg.split(['(', ' ', '{']).next().unwrap_or("?").to_string();
+            EV.with(|c| {
+                let mut c = c.borrow_mut();
+                *c.0.entry(name).or_default() += 1;
+                let at = c.1.get_or_insert_with(Instant::now);
+                if at.elapsed() >= std::time::Duration::from_secs(1) {
+                    let line: Vec<String> =
+                        c.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    eprintln!("[ev] {}", line.join(" "));
+                    *c = (BTreeMap::new(), Some(Instant::now()));
+                }
+            });
+        }
         // window_event 와 같은 이유 — 소켓/백그라운드에서 온 변경도 자동 저장
         // 대상이다(pane 분할·세션 바인딩이 여기로 들어온다).
         self.session_touched = true;
@@ -6035,6 +6058,24 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 프레임 수와 **루프가 도는 횟수**는 다른 값이다. 화면을 안 그리면서도
+        // 루프만 계속 돌면 CPU 는 그대로 탄다 — 그때 fps 만 보면 조용해 보인다
+        // (2026-08-28 실측: 2fps 인데 68%).
+        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+            thread_local! {
+                static LOOPS: std::cell::RefCell<(u32, Option<Instant>)> =
+                    const { std::cell::RefCell::new((0, None)) };
+            }
+            LOOPS.with(|c| {
+                let mut c = c.borrow_mut();
+                c.0 += 1;
+                let at = c.1.get_or_insert_with(Instant::now);
+                if at.elapsed() >= std::time::Duration::from_secs(1) {
+                    eprintln!("[loop] {}", c.0);
+                    *c = (0, Some(Instant::now()));
+                }
+            });
+        }
         // 켜져 있어야 하는데 아직 웹뷰가 없으면 여기서 세운다. `resumed` 에서 바로
         // 열지 않는 이유는 MCP HTTP 서버가 그 시점엔 아직 포트를 안 잡았을 수 있어서다
         // — 페이지가 same-origin 으로 API 를 부르므로 포트가 틀리면 빈 화면이 된다.
@@ -6657,9 +6698,12 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(period),
             ));
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            // 여기서 `request_redraw` 를 부르면 **타이머가 무의미해진다**. 요청한
+            // 리드로우가 곧바로 큐에 들어가 처리되고, 그러면 다시 여기로 돌아와
+            // 또 요청하므로 `WaitUntil` 의 만기를 한 번도 안 기다린다. 33ms 를
+            // 의도한 펌프가 실측 초당 2만 장으로 돌았다(2026-08-28, 유휴 상태).
+            // 타이머가 만기하면 `new_events` 의 `ResumeTimeReached` 가 리드로우를
+            // 부르므로, 그리는 쪽은 그 한 곳이면 된다.
         } else {
             // 지연 flush 두 종(세션 스냅샷·편집기 자동 저장)은 "조용해진 직후"가
             // 가장 중요하다. dirty 인 동안만 이른 쪽 만기를 걸어 그때 한 번

@@ -10139,6 +10139,24 @@ impl App {
     }
 
     pub(crate) fn render_frame(&mut self) {
+        // 유휴인데 프레임이 나가는지를 **숫자로** 본다(`KASATERM_PUMP_DEBUG=1`).
+        // 펌프 사유는 그 옆 계측이 찍지만, 사유가 참인 것과 실제로 몇 장이
+        // 나가는지는 다른 얘기다 — 최적화 전후를 견주려면 장수가 필요하다.
+        if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
+            thread_local! {
+                static FPS: std::cell::RefCell<(u32, Option<std::time::Instant>)> =
+                    const { std::cell::RefCell::new((0, None)) };
+            }
+            FPS.with(|c| {
+                let mut c = c.borrow_mut();
+                c.0 += 1;
+                let at = c.1.get_or_insert_with(std::time::Instant::now);
+                if at.elapsed() >= std::time::Duration::from_secs(1) {
+                    eprintln!("[fps] {}", c.0);
+                    *c = (0, Some(std::time::Instant::now()));
+                }
+            });
+        }
         self.probe_pane_labels();
         // commit_overlay's job ends the moment the echo lands and moves
         // the cursor. Retire it permanently then — otherwise erasing
