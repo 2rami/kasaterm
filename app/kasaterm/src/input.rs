@@ -384,7 +384,7 @@ impl App {
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());
-        if let Some(u) = sample_process_tree_usage() {
+        if let Some(u) = sample_process_tree_usage(&mut self.statusbar.cpu_track) {
             self.statusbar.res = Some((u.cpu, u.rss));
             self.statusbar.usage_top = u.top;
             self.statusbar.usage_rows = u.rows;
@@ -392,6 +392,22 @@ impl App {
         }
         // 같은 박자에 물리 메모리도 — 이쪽은 서브프로세스가 없어 사실상 공짜다.
         self.statusbar.mem = crate::sysmem::sample();
+        // 계속 코어를 태우는 앱은 메모리와 **다른 축**이라 따로 말한다. 팬이
+        // 도는 이유를 물었을 때 「메모리는 정상입니다」만 답하면 소용이 없다
+        // (2026-08-27: 「안조용한데 위젯좀 잘만들어봐」).
+        let hog = self.statusbar.usage_outside.iter().find(|a| a.is_hog()).cloned();
+        if let Some(a) = &hog {
+            let due = self
+                .statusbar
+                .hog_warned
+                .is_none_or(|(p, t)| p != a.pid || t.elapsed() >= std::time::Duration::from_secs(3600));
+            if due {
+                self.statusbar.hog_warned = Some((a.pid, Instant::now()));
+                self.set_toast(format!("{} 이(가) 계속 CPU 를 쓰는 중 · {:.0}%", a.name, a.cpu));
+            }
+        } else {
+            self.statusbar.hog_warned = None;
+        }
         if let Some(m) = self.statusbar.mem {
             let adv = m.advice();
             if adv.is_danger() {
@@ -411,8 +427,8 @@ impl App {
                     let detail = (adv == crate::sysmem::Advice::FreeUp)
                         .then(|| self.statusbar.usage_outside.first())
                         .flatten()
-                        .map(|(_, rss, name, _)| {
-                            format!("{name} {:.1}G", *rss as f32 / (1024.0 * 1024.0 * 1024.0))
+                        .map(|a| {
+                            format!("{} {:.1}G", a.name, a.rss as f32 / (1024.0 * 1024.0 * 1024.0))
                         })
                         .unwrap_or_else(|| m.reason());
                     self.set_toast(format!("{} — {detail}", adv.headline()));
@@ -3499,6 +3515,88 @@ fn claude_theme_token(v: &str) -> Option<&str> {
 /// 있어야 팝오버가 「그 외 N개」를 셀 수 있다 — 목록은 상위 몇 개뿐이라, 합계와
 /// 목록 합이 어긋나 보이는 것을 그 한 줄이 설명한다(2026-08-16 「3.1G가 다 더하면
 /// 아니지않나」).
+/// 이 앱 밖의 앱 하나.
+#[derive(Clone, Debug)]
+pub(crate) struct AppUsage {
+    /// 앱 본체(대표) pid — 종료 신호를 여기로 보내면 자식도 함께 정리된다.
+    pub(crate) pid: u32,
+    pub(crate) rss: u64,
+    pub(crate) name: String,
+    /// 이 앱이 낳은 프로세스 수. 이 줄이 **합**이라는 표시다.
+    pub(crate) procs: usize,
+    /// 직전 폴 이후 **구간** 사용률(%). 코어 하나를 다 쓰면 100.
+    pub(crate) cpu: f32,
+    /// 그 사용률이 이어진 폴 수. 잠깐 바쁜 것과 계속 태우는 것을 가르는 값이다.
+    pub(crate) hot: u16,
+}
+
+impl AppUsage {
+    /// 코어를 **계속** 태우는 중인가 — 팬이 도는 이유는 대개 이것이다. 잠깐
+    /// 튀는 것과 가르려고 폴 수까지 본다.
+    pub(crate) fn is_hog(&self) -> bool {
+        self.hot >= hog_polls()
+    }
+}
+
+/// 앱별 CPU 시간을 폴 사이에 이어 두는 자리.
+///
+/// `ps` 의 `%CPU` 를 그대로 믿으면 안 된다 — 커널이 주는 최근 추정치라 튀고,
+/// 잠깐 바쁜 것과 몇 시간째 코어를 태우는 것을 구별하지 못한다. 팬을 돌리는
+/// 것은 후자뿐이다. 누적 CPU 시간의 **증분**을 폴 간격으로 나누면 그 구간의
+/// 실제 사용률이 나오고, 그게 몇 번 이어졌는지까지 세면 둘이 갈린다.
+#[derive(Default)]
+pub(crate) struct CpuTrack {
+    /// 대표 pid → (그 앱의 누적 CPU 시간 ms, 잰 시각).
+    last: std::collections::HashMap<u32, (u64, Instant)>,
+    /// 대표 pid → 임계를 넘긴 채 이어진 폴 수.
+    streak: std::collections::HashMap<u32, u16>,
+}
+
+/// 코어 하나를 사실상 다 쓰는 선. 90 이 아니라 85 인 것은 실측 때문이다 —
+/// 코어를 꽉 채워 도는 스핀 루프조차 기계가 바쁘면 88~96% 를 오르내려서
+/// (2026-08-28), 90 으로 잡으면 명백한 폭주가 임계 아래로 새는 폴이 생긴다.
+const HOG_PCT: f32 = 85.0;
+/// 이만큼 이어져야 「계속 태우는 중」으로 본다. 5초 폴이라 약 1분 —
+/// 빌드·영상 인코딩 한 판은 이 안에 끝나거나 오르내리므로 걸리지 않는다.
+const HOG_POLLS: u16 = 12;
+
+/// 두 임계 모두 env 로 덮을 수 있다. 위 값은 이 기계 한 대의 표본에서 나온
+/// 추정이라 코어 수나 쓰는 앱이 다르면 어긋나고, 무엇보다 검증에 필요하다 —
+/// 기본값대로면 화면 한 장을 보려고 1분을 태워야 한다.
+fn hog_pct() -> f32 {
+    std::env::var("KASATERM_CPU_HOG_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(HOG_PCT)
+}
+
+fn hog_polls() -> u16 {
+    std::env::var("KASATERM_CPU_HOG_POLLS").ok().and_then(|v| v.parse().ok()).unwrap_or(HOG_POLLS)
+}
+
+/// 칩·토스트에 넣을 만큼 짧은 앱 이름.
+///
+/// 앱 이름은 길다(`Google Chrome Helper (Renderer)`). 자르지 않으면 하단바에서
+/// 왼쪽 이웃(포트 칩)을 밀어낸다.
+pub(crate) fn short_app_name(name: &str) -> String {
+    let short: String = name.chars().take(14).collect();
+    if short.chars().count() < name.chars().count() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// `ps` 의 누적 CPU 시간(`[[DD-]HH:]MM:SS[.ss]`)을 밀리초로.
+fn cpu_ms(s: &str) -> Option<u64> {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let mut secs = 0.0f64;
+    for part in rest.split(':') {
+        secs = secs * 60.0 + part.parse::<f64>().ok()?;
+    }
+    Some((secs * 1000.0) as u64 + days * 86_400_000)
+}
+
 /// 한 번 잰 프로세스 사용량.
 pub(crate) struct UsageSample {
     /// 이 앱 트리의 cpu 합(%)·rss 합(byte).
@@ -3508,27 +3606,28 @@ pub(crate) struct UsageSample {
     pub(crate) top: Vec<(u32, f32, u64, String)>,
     /// 트리에 든 프로세스 수 전체.
     pub(crate) rows: usize,
-    /// 트리 **밖**에서 메모리를 많이 쥔 앱 상위 몇 — (대표 pid, rss 합, 이름,
-    /// 그 앱이 낳은 프로세스 수). 「메모리 부족」일 때 무엇을 닫아야 하는지가
-    /// 이 목록이다(2026-08-27 지시: 「위험! 종료할까요?(뭔지)」).
-    pub(crate) outside: Vec<(u32, u64, String, usize)>,
+    /// 트리 **밖**의 앱 상위 몇. 「메모리 부족」일 때 무엇을 닫아야 하는지가
+    /// 이 목록이다(2026-08-27 지시: 「위험! 종료할까요?(뭔지)」). 계속 코어를
+    /// 태우는 앱이 있으면 그쪽이 먼저 온다 — 팬이 도는 이유가 그것이라서다.
+    pub(crate) outside: Vec<AppUsage>,
 }
 
-fn sample_process_tree_usage() -> Option<UsageSample> {
+fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
     // `spawn` + `wait_with_output` 인 것은 **재는 도구가 결과에 끼기 때문**이다.
     // `ps` 는 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄
     // 수가 없다. 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
     let child = std::process::Command::new("ps")
         // uid 를 함께 읽는 것은 바깥 앱 목록 때문이다 — 거기엔 끄기 버튼이 붙는데,
         // 남(root 데몬)의 프로세스는 눌러도 권한이 없어 아무 일도 안 일어난다.
-        .args(["-axo", "uid=,pid=,ppid=,pcpu=,rss=,comm="])
+        // `time` 은 누적 CPU 시간 — 폴 사이의 증분이 그 구간의 실제 사용률이다.
+        .args(["-axo", "uid=,pid=,ppid=,pcpu=,rss=,time=,comm="])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .ok()?;
     let ps_pid = child.id();
     let out = child.wait_with_output().ok()?;
     let txt = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<(u32, u32, u32, f32, u64, String)> = txt
+    let rows: Vec<Row> = txt
         .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
@@ -3537,12 +3636,13 @@ fn sample_process_tree_usage() -> Option<UsageSample> {
             let ppid = it.next()?.parse().ok()?;
             let cpu = it.next()?.parse().ok()?;
             let rss = it.next()?.parse().ok()?;
+            let cpu_time = cpu_ms(it.next()?)?;
             // comm 은 경로이고 공백을 품을 수 있다(`.../Google Chrome`). 남은 걸
             // 통째로 이어 붙인 뒤 마지막 조각만 쓴다 — 열 단위로 자르면 공백 있는
             // 이름에서 파싱이 통째로 어긋난다.
             let comm: String = it.collect::<Vec<_>>().join(" ");
             let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
-            Some((uid, pid, ppid, cpu, rss, name))
+            Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name })
         })
         .collect();
     let me = std::process::id();
@@ -3550,9 +3650,9 @@ fn sample_process_tree_usage() -> Option<UsageSample> {
     // ppid 순서가 임의라 고정점까지 돈다 — 트리 깊이만큼(셸→claude→도구, 얕다).
     loop {
         let before = tree.len();
-        for (_, pid, ppid, _, _, _) in &rows {
-            if tree.contains(ppid) {
-                tree.insert(*pid);
+        for r in &rows {
+            if tree.contains(&r.ppid) {
+                tree.insert(r.pid);
             }
         }
         if tree.len() == before {
@@ -3564,11 +3664,11 @@ fn sample_process_tree_usage() -> Option<UsageSample> {
     // 모른다(2026-08-15 지시 「사용량도 펼쳐져서 보이게 뭐가 잡아먹는지」). 목록과
     // 합계가 **같은 표본**에서 나와야 둘이 어긋나 보이지 않는다.
     let mut top: Vec<(u32, f32, u64, String)> = Vec::new();
-    for (_, pid, _, c, r, name) in &rows {
-        if tree.contains(pid) && *pid != ps_pid {
-            cpu += c;
-            rss_kb += r;
-            top.push((*pid, *c, *r, name.clone()));
+    for r in &rows {
+        if tree.contains(&r.pid) && r.pid != ps_pid {
+            cpu += r.cpu;
+            rss_kb += r.rss;
+            top.push((r.pid, r.cpu, r.rss, r.name.clone()));
         }
     }
     // CPU 가 먼저다 — 지금 느린 이유를 찾는 것이 이 목록의 쓸모고, 메모리는 0.1%
@@ -3585,9 +3685,21 @@ fn sample_process_tree_usage() -> Option<UsageSample> {
         cpu,
         rss: rss_kb * 1024,
         rows: total_rows,
-        outside: outside_apps(&rows, &tree),
+        outside: outside_apps(&rows, &tree, track),
         top,
     })
+}
+
+/// `ps` 한 줄.
+struct Row {
+    uid: u32,
+    pid: u32,
+    ppid: u32,
+    cpu: f32,
+    rss: u64,
+    /// 누적 CPU 시간(ms).
+    cpu_time: u64,
+    name: String,
 }
 
 /// 이 앱 트리 **밖**에서 메모리를 많이 쥔 것들을 앱 단위로 묶어 상위 몇 개.
@@ -3597,12 +3709,13 @@ fn sample_process_tree_usage() -> Option<UsageSample> {
 /// launchd(1) 바로 아래 조상을 그 앱의 대표로 삼으면 Helper 가 전부 본체로
 /// 접히고, 대표에게 종료 신호를 보내면 자식도 함께 정리된다.
 fn outside_apps(
-    rows: &[(u32, u32, u32, f32, u64, String)],
+    rows: &[Row],
     tree: &std::collections::HashSet<u32>,
-) -> Vec<(u32, u64, String, usize)> {
+    track: &mut CpuTrack,
+) -> Vec<AppUsage> {
     use std::collections::HashMap;
     let me_uid = unsafe { libc::getuid() };
-    let parent: HashMap<u32, u32> = rows.iter().map(|r| (r.1, r.2)).collect();
+    let parent: HashMap<u32, u32> = rows.iter().map(|r| (r.pid, r.ppid)).collect();
     let app_root = |mut pid: u32| -> u32 {
         // 상한은 순환 방어다. ppid 는 커널이 주지만 표본이 찍히는 사이 부모가
         // 죽으면 자식이 1 로 재부모되므로 사슬이 늘 온전하지는 않다.
@@ -3614,28 +3727,68 @@ fn outside_apps(
         }
         pid
     };
-    let mut apps: HashMap<u32, (u64, usize)> = HashMap::new();
-    for (uid, pid, _, _, rss, _) in rows {
+    // (rss 합, 프로세스 수, 누적 CPU 시간 합)
+    let mut apps: HashMap<u32, (u64, usize, u64)> = HashMap::new();
+    for r in rows {
         // 내 것이 아니면 눌러도 권한이 없다. 보여 주고 안 되는 것보다 안 보이는
         // 편이 낫다 — 시스템이 쥔 몫은 어차피 wired 쪽에서 잡힌다.
-        if *uid != me_uid || tree.contains(pid) {
+        if r.uid != me_uid || tree.contains(&r.pid) {
             continue;
         }
-        let e = apps.entry(app_root(*pid)).or_default();
-        e.0 += rss;
+        let e = apps.entry(app_root(r.pid)).or_default();
+        e.0 += r.rss;
         e.1 += 1;
+        e.2 += r.cpu_time;
     }
-    let name_of: HashMap<u32, &str> = rows.iter().map(|r| (r.1, r.5.as_str())).collect();
-    let mut out: Vec<(u32, u64, String, usize)> = apps
-        .into_iter()
+    let name_of: HashMap<u32, &str> = rows.iter().map(|r| (r.pid, r.name.as_str())).collect();
+    let now = Instant::now();
+    let out: Vec<AppUsage> = apps
+        .iter()
         // 대표가 표본에 없으면(권한·경합) 이름도 없고 끌 수도 없다.
-        .filter_map(|(root, (rss, n))| {
-            name_of.get(&root).map(|nm| (root, rss * 1024, (*nm).to_string(), n))
+        .filter_map(|(root, (rss, procs, cpu_time))| {
+            let name = (*name_of.get(root)?).to_string();
+            // 첫 표본에는 견줄 데가 없어 0 이다. 5초 뒤 두 번째 폴부터 값이 선다.
+            let cpu = match track.last.get(root) {
+                Some((prev_ms, prev_at)) => {
+                    let dt = now.duration_since(*prev_at).as_millis() as f32;
+                    // 너무 짧은 간격은 나눗셈이 튄다. 폴은 5초라 정상 경로에서는
+                    // 걸리지 않고, 창을 다시 그리며 두 번 불릴 때만 걸린다.
+                    (dt >= 1000.0)
+                        // 프로세스가 죽어 합이 줄면 음수가 되므로 포화 뺄셈.
+                        .then(|| cpu_time.saturating_sub(*prev_ms) as f32 / dt * 100.0)
+                        .unwrap_or(0.0)
+                }
+                None => 0.0,
+            };
+            let hot = {
+                let n = track.streak.entry(*root).or_default();
+                // 한 번 내려갔다고 0 으로 되돌리지 않는다. 같은 실측에서 스핀
+                // 루프가 임계를 넘나들었는데, 리셋하면 그런 앱은 아무리 오래
+                // 돌아도 카운터가 못 쌓여 영영 안 잡힌다. 대신 한 칸씩 물러나게
+                // 해서, 정말 멈춘 앱은 같은 시간 안에 목록에서 빠진다.
+                *n = if cpu >= hog_pct() { n.saturating_add(1) } else { n.saturating_sub(1) };
+                *n
+            };
+            Some(AppUsage { pid: *root, rss: rss * 1024, name, procs: *procs, cpu, hot })
         })
         .collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1));
-    out.truncate(5);
-    out
+    // 다음 폴이 견줄 자리. 사라진 앱은 여기서 함께 잊는다 — 안 지우면 pid 가
+    // 재사용될 때 엉뚱한 앱의 이력을 물려받는다.
+    track.last = apps.iter().map(|(k, v)| (*k, (v.2, now))).collect();
+    track.streak.retain(|k, _| apps.contains_key(k));
+    // 계속 태우는 앱이 먼저다 — 팬이 도는 이유는 메모리가 아니라 그쪽이다.
+    //
+    // 그리고 그쪽은 **rss 로 자르지 않는다**. CPU 만 태우고 메모리는 거의 안 쓰는
+    // 것이 있고(스핀 루프가 그렇다), 그게 정확히 팬을 돌리는 부류다. 한 목록을
+    // rss 로 정렬해 다섯만 남기면 그런 앱은 영영 안 나온다 — 실측 2026-08-28 에
+    // 코어를 통째로 태우던 프로세스가 1MB 라는 이유로 목록 밖으로 잘렸다.
+    let (mut hogs, mut rest): (Vec<_>, Vec<_>) = out.into_iter().partition(|a| a.is_hog());
+    hogs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+    rest.sort_by(|a, b| b.rss.cmp(&a.rss));
+    hogs.truncate(3);
+    rest.truncate(5 - hogs.len());
+    hogs.append(&mut rest);
+    hogs
 }
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.
@@ -4082,7 +4235,7 @@ mod working_scan_tests {
 
 #[cfg(test)]
 mod zoom_key_tests {
-    use super::{zoom_key, ZoomKey};
+    use super::{cpu_ms, hog_polls, zoom_key, AppUsage, ZoomKey};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -4131,5 +4284,34 @@ mod zoom_key_tests {
         assert_eq!(zoom_key(Some(KeyCode::KeyR), Some("ㄱ")), None);
         assert_eq!(zoom_key(Some(KeyCode::Digit1), Some("1")), None);
         assert_eq!(zoom_key(None, None), None);
+    }
+
+    /// `ps` 의 시간 형식은 길이에 따라 자리 수가 바뀐다. 틀려도 컴파일은 되고
+    /// 화면에는 그럴듯한 퍼센트가 뜨므로, 값으로 못 박아 둔다.
+    #[test]
+    fn 누적_cpu_시간을_형식대로_읽는다() {
+        assert_eq!(cpu_ms("4:50.82"), Some(290_820)); // MM:SS.ss
+        assert_eq!(cpu_ms("14:44:55"), Some(53_095_000)); // HH:MM:SS
+        // DD-HH:MM:SS — 하루를 안 더하면 오래 산 프로세스의 사용률이 통째로
+        // 어긋난다(증분이 음수가 되어 0 으로 눌린다).
+        assert_eq!(cpu_ms("01-17:19:49"), Some(86_400_000 + 62_389_000));
+        assert_eq!(cpu_ms("-"), None);
+    }
+
+    #[test]
+    fn 잠깐_바쁜_것과_계속_태우는_것을_가른다() {
+        let a = |cpu: f32, hot: u16| AppUsage {
+            pid: 1,
+            rss: 0,
+            name: "x".into(),
+            procs: 1,
+            cpu,
+            hot,
+        };
+        // 한 번 튄 것은 빌드·인코딩과 구별되지 않는다.
+        assert!(!a(99.0, 1).is_hog());
+        assert!(!a(99.0, hog_polls() - 1).is_hog());
+        // 1분 내내 코어 하나를 태우면 그때부터 팬 이유로 본다.
+        assert!(a(99.0, hog_polls()).is_hog());
     }
 }

@@ -110,10 +110,13 @@ fn paint_usage_popover(
     // 낳은 것이 이 팝오버의 주인공이고, 남의 앱 목록은 물었을 때만 답하면 된다.
     // 재시작 구간에서도 적는다 — wired 가 임계를 넘었어도 무거운 앱은 무겁고,
     // 재부팅 전에 당장 숨통을 틔우는 손이 여기 있다.
-    let outside: Vec<(u32, u64, String, usize)> = mem
-        .filter(|m| m.advice() != crate::sysmem::Advice::Ok)
-        .map(|_| sb.usage_outside.iter().take(3).cloned().collect())
-        .unwrap_or_default();
+    // 계속 코어를 태우는 앱이 있으면 메모리가 정상이어도 편다. 그게 없으면
+    // 「지금 왜 시끄럽냐」에 이 팝오버가 답을 못 한다(2026-08-27 실측: 팬이
+    // 도는데 wired 는 17% 로 멀쩡했고 범인은 CPU 쪽이었다).
+    let warm = mem.is_some_and(|m| m.advice() != crate::sysmem::Advice::Ok)
+        || sb.usage_outside.iter().any(|a| a.is_hog());
+    let outside: Vec<crate::input::AppUsage> =
+        if warm { sb.usage_outside.iter().take(3).cloned().collect() } else { Vec::new() };
     // 「끌까요?」 대기는 몇 초 뒤 저절로 풀린다. 눌러 놓고 잊은 줄이 빨갛게 남아
     // 있으면, 한참 뒤 무심코 그 자리를 눌렀을 때 앱이 닫힌다.
     if sb.usage_kill_armed.is_some_and(|(_, t)| t.elapsed().as_secs() >= 5) {
@@ -212,14 +215,23 @@ fn paint_usage_popover(
         // 아래 목록과 **다른 것을 잰다** — 저긴 이 앱이 낳은 것, 여긴 남의 앱이다.
         // 제목으로 그 경계를 못 박지 않으면 두 목록이 한 표본으로 읽혀, 합계가
         // 안 맞는다는 오해가 그대로 되풀이된다.
+        // 빨간 숫자가 무슨 뜻인지는 여기서만 말할 수 있다. 줄에는 `98%` 만
+        // 남는데, 그것만 보고 메모리인지 CPU 인지 가릴 방법이 없다.
+        let head = if outside.iter().any(|a| a.is_hog()) {
+            "이 앱 밖 — 빨간 쪽이 CPU 를 계속 쓴다"
+        } else {
+            "이 앱 밖에서 쥔 것"
+        };
+        let head = crate::info::fit_text(g, head, w - 24.0, 9.5, false);
         g.draw_text(
             x + 12.0,
             top + 3.0,
-            "이 앱 밖에서 쥔 것",
+            &head,
             gpu::DrawOpts { font_size: 9.5, color: theme::text_dim(), bold: false, italic: false },
         );
         let mut oy = top + OUT_HEAD;
-        for (pid, rss, name, n) in &outside {
+        for a in &outside {
+            let (pid, rss, name, n) = (&a.pid, &a.rss, &a.name, &a.procs);
             let r = (x + 1.0, oy, w - 2.0, UROW);
             let hov = hit(cursor, &r);
             let armed = sb.usage_kill_armed.is_some_and(|(p, _)| p == *pid);
@@ -256,6 +268,26 @@ fn paint_usage_popover(
                     italic: false,
                 },
             );
+            // 계속 태우는 줄에만 사용률을 붙인다. 늘 적으면 오르내리는 숫자가
+            // 셋 다 붙어, 정작 멈춰 있는 하나를 골라내기 어려워진다.
+            let cpu_w = if a.is_hog() {
+                let t = format!("{:.0}%", a.cpu);
+                let cw = g.measure_chrome_text(&t, 10.0, true);
+                g.draw_text(
+                    right - sw - 8.0 - cw,
+                    oy + 10.0,
+                    &t,
+                    gpu::DrawOpts {
+                        font_size: 10.0,
+                        color: theme::danger(),
+                        bold: true,
+                        italic: false,
+                    },
+                );
+                cw + 8.0
+            } else {
+                0.0
+            };
             let label = if armed {
                 "한 번 더 누르면 종료".to_string()
             } else if *n > 1 {
@@ -266,7 +298,7 @@ fn paint_usage_popover(
             } else {
                 name.clone()
             };
-            let avail = (right - sw - 10.0 - (x + 12.0)).max(0.0);
+            let avail = (right - sw - cpu_w - 10.0 - (x + 12.0)).max(0.0);
             let lt = crate::info::fit_text(g, &label, avail, 11.0, false);
             g.draw_text(
                 x + 12.0,
@@ -946,8 +978,8 @@ impl crate::App {
                             .statusbar
                             .usage_outside
                             .iter()
-                            .find(|(p, ..)| *p == pid)
-                            .map(|(_, _, n, _)| n.clone());
+                            .find(|a| a.pid == pid)
+                            .map(|a| a.name.clone());
                         // SIGTERM 이다 — 앱이 저장 여부를 물을 틈이 있다.
                         self.kill_process(pid, false);
                         if let Some(n) = name {

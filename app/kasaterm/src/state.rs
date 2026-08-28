@@ -54,10 +54,15 @@ pub(crate) struct StatusbarState {
     /// 표본에 든 프로세스 수 전체 — `usage_top` 은 상위 몇 개뿐이라, 팝오버의
     /// 「그 외 N개」 줄이 이 값으로 나머지를 센다.
     pub(crate) usage_rows: usize,
-    /// 이 앱 **밖**에서 메모리를 많이 쥔 앱 — (대표 pid, rss 합, 이름, 프로세스 수).
-    /// 경고 구간에서만 팝오버에 펴고, 각 줄에 끄기 버튼이 붙는다. 평소에 늘
-    /// 보여 줄 값은 아니다 — 답을 물었을 때만 답하면 된다.
-    pub(crate) usage_outside: Vec<(u32, u64, String, usize)>,
+    /// 이 앱 **밖**의 앱들. 경고 구간에서만 팝오버에 펴고, 각 줄에 끄기 버튼이
+    /// 붙는다. 평소에 늘 보여 줄 값은 아니다 — 답을 물었을 때만 답하면 된다.
+    pub(crate) usage_outside: Vec<crate::input::AppUsage>,
+    /// 마지막으로 CPU 폭주를 말한 앱과 그 시각. 앱이 바뀌면 곧바로 다시 말한다
+    /// — 범인이 달라졌으면 닫을 것도 달라진다.
+    pub(crate) hog_warned: Option<(u32, std::time::Instant)>,
+    /// 앱별 CPU 시간을 폴 사이에 이어 두는 자리. 여기 있는 이유는 `ps` 를 부르는
+    /// 자유함수가 상태를 못 갖기 때문이다.
+    pub(crate) cpu_track: crate::input::CpuTrack,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어

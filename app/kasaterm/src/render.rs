@@ -8368,75 +8368,85 @@ impl App {
                         // 손잡이 폭을 재려면 여기서 먼저 잡아 둬야 한다.
                         let label_right = rx + lw;
                         let mut seg_x = rx;
-                        if let Some(m) = self.statusbar.mem {
-                            let adv = m.advice();
-                            if adv != crate::sysmem::Advice::Ok {
-                                let danger = adv.is_danger();
-                                let col =
-                                    if danger { theme::danger() } else { theme::syn_number() };
-                                let icon = 12.0_f32;
-                                // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
-                                // 무슨 일인지 다 적어 준다.
-                                //
+                        // 경고는 **하나만** 세운다. 하단바는 좁아서 둘을 나란히
+                        // 두면 라벨이 다 잘리고 삼각형 두 개만 남는다. 급한 것부터
+                        // 고른다: 메모리 위험 → 계속 태우는 앱 → 메모리 주의.
+                        //
+                        // CPU 를 함께 보는 것은 메모리만으로는 「지금 왜 시끄러운가」에
+                        // 답을 못 하기 때문이다 — 실측 2026-08-27 에 팬이 도는데
+                        // 메모리는 정상(wired 17%)이었고, 범인은 코어를 계속 태우던
+                        // 바깥 앱들이었다(「안조용한데 위젯좀 잘만들어봐」).
+                        let mem_adv =
+                            self.statusbar.mem.map_or(crate::sysmem::Advice::Ok, |m| m.advice());
+                        let gb =
+                            |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
+                        let warn: Option<(bool, String)> = if mem_adv.is_danger() {
+                            let w = match (mem_adv, self.statusbar.usage_outside.first()) {
                                 // 「메모리 부족」에는 **범인 이름을 붙인다**. 그게
                                 // 재시작과 갈리는 지점이라서다 — 재시작은 할 일이
-                                // 하나뿐이라 이름이 필요 없지만, 비우는 쪽은
-                                // 무엇을 닫아야 하는지를 모르면 조언이 아니다
-                                // (2026-08-27 지시: 「위험! 종료할까요?(뭔지)」).
-                                let culprit = (adv == crate::sysmem::Advice::FreeUp)
-                                    .then(|| self.statusbar.usage_outside.first())
-                                    .flatten()
-                                    .map(|(_, rss, name, _)| {
-                                        // 앱 이름은 길다(`Google Chrome Helper
-                                        // (Renderer)`). 여기서 자르지 않으면 왼쪽
-                                        // 이웃(포트 칩)을 밀어낸다.
-                                        let short: String = name.chars().take(14).collect();
-                                        let dots = if short.chars().count()
-                                            < name.chars().count()
-                                        {
-                                            "…"
-                                        } else {
-                                            ""
-                                        };
-                                        format!(
-                                            "메모리 부족 · {short}{dots} {:.0}G",
-                                            *rss as f32 / (1024.0 * 1024.0 * 1024.0)
-                                        )
-                                    });
-                                let words = (win_w >= 900.0).then(|| match adv {
-                                    crate::sysmem::Advice::Restart => "재시작 권장".to_string(),
-                                    crate::sysmem::Advice::FreeUp => culprit
-                                        .clone()
-                                        .unwrap_or_else(|| "메모리 부족".to_string()),
-                                    _ => "메모리 주의".to_string(),
+                                // 하나뿐이라 이름이 필요 없지만, 비우는 쪽은 무엇을
+                                // 닫아야 하는지를 모르면 조언이 아니다(2026-08-27
+                                // 지시: 「위험! 종료할까요?(뭔지)」).
+                                (crate::sysmem::Advice::FreeUp, Some(a)) => format!(
+                                    "메모리 부족 · {} {:.0}G",
+                                    crate::input::short_app_name(&a.name),
+                                    gb(a.rss)
+                                ),
+                                (crate::sysmem::Advice::FreeUp, None) => "메모리 부족".to_string(),
+                                // 하단바용으로 「맥북」을 뗀다 — 이 줄에 뜨는 것은
+                                // 전부 이 기계 얘기라 그 두 글자가 자리만 먹는다.
+                                _ => "재시작 권장".to_string(),
+                            };
+                            Some((true, w))
+                        } else if let Some(a) =
+                            self.statusbar.usage_outside.iter().find(|a| a.is_hog())
+                        {
+                            Some((
+                                true,
+                                format!(
+                                    "{} {:.0}%",
+                                    crate::input::short_app_name(&a.name),
+                                    a.cpu
+                                ),
+                            ))
+                        } else if mem_adv != crate::sysmem::Advice::Ok {
+                            Some((false, "메모리 주의".to_string()))
+                        } else {
+                            None
+                        };
+                        if let Some((danger, words)) = warn {
+                            let col = if danger { theme::danger() } else { theme::syn_number() };
+                            let icon = 12.0_f32;
+                            // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
+                            // 무슨 일인지 다 적어 준다.
+                            let words = (win_w >= 900.0).then_some(words);
+                            let ww =
+                                words.as_ref().map_or(0.0, |t| {
+                                    4.0 + g.measure_chrome_text(t, fs, false)
                                 });
-                                let words = words.as_deref();
-                                let ww = words
-                                    .map_or(0.0, |t| 4.0 + g.measure_chrome_text(t, fs, false));
-                                seg_x -= icon + ww + 10.0;
-                                g.queue_icon(
-                                    "triangle-alert",
-                                    seg_x,
-                                    sy + (status_h - icon) / 2.0,
-                                    icon,
-                                    col,
+                            seg_x -= icon + ww + 10.0;
+                            g.queue_icon(
+                                "triangle-alert",
+                                seg_x,
+                                sy + (status_h - icon) / 2.0,
+                                icon,
+                                col,
+                            );
+                            if let Some(t) = words {
+                                g.draw_text(
+                                    seg_x + icon + 4.0,
+                                    ty,
+                                    &t,
+                                    gpu::DrawOpts {
+                                        font_size: fs,
+                                        color: col,
+                                        bold: false,
+                                        italic: false,
+                                    },
                                 );
-                                if let Some(t) = words {
-                                    g.draw_text(
-                                        seg_x + icon + 4.0,
-                                        ty,
-                                        t,
-                                        gpu::DrawOpts {
-                                            font_size: fs,
-                                            color: col,
-                                            bold: false,
-                                            italic: false,
-                                        },
-                                    );
-                                }
-                                // 왼쪽 이웃(포트)이 이 자리를 침범하지 않도록.
-                                rx = seg_x;
                             }
+                            // 왼쪽 이웃(포트)이 이 자리를 침범하지 않도록.
+                            rx = seg_x;
                         }
                         // 손잡이는 경고까지 통째로 — 경고를 보고 누르는 것이
                         // 자연스러운 동작인데 아이콘만 죽은 픽셀이면 헛손질이 된다.

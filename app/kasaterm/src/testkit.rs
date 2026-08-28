@@ -7164,12 +7164,24 @@ impl App {
                     // 쓰던 앱이 닫히는 자리라 문구가 정확해야 한다.
                     if want.ends_with("-armed") {
                         match self.statusbar.usage_outside.first() {
-                            Some((pid, ..)) => {
-                                self.statusbar.usage_kill_armed = Some((*pid, Instant::now()));
-                                eprintln!("[autoportpop] 끄기 겨눔 pid={pid}");
+                            Some(a) => {
+                                self.statusbar.usage_kill_armed = Some((a.pid, Instant::now()));
+                                eprintln!("[autoportpop] 끄기 겨눔 pid={}", a.pid);
                             }
                             None => eprintln!("[autoportpop] FAIL — 바깥 앱 표본이 비었다"),
                         }
+                    }
+                    // 바깥 앱 판정은 화면에 몇 줄로만 남아서, 안 떴을 때 「값이
+                    // 없는 것」과 「임계를 못 넘은 것」을 가릴 수가 없다.
+                    for a in &self.statusbar.usage_outside {
+                        eprintln!(
+                            "[autoportpop] 바깥 {} cpu={:.0}% hot={} hog={} rss={:.1}G",
+                            a.name,
+                            a.cpu,
+                            a.hot,
+                            a.is_hog(),
+                            a.rss as f32 / (1024.0 * 1024.0 * 1024.0)
+                        );
                     }
                     eprintln!("[autoportpop] 열림 {kind:?} anchor={r:?}");
                 }
