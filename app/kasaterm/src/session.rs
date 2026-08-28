@@ -571,6 +571,11 @@ impl App {
                 pane: remote_pane.map(str::to_string),
                 cwd: cwd.map(str::to_string),
                 token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+                    remote_cwd: cwd.map(str::to_string),
+                    origin_cwd: None,
+                },
             },
             &new_id,
             win_cols,
@@ -703,6 +708,7 @@ impl App {
                 pane: Some(web_id.clone()),
                 cwd: None,
                 token: None,
+                identity: Default::default(),
             },
             pid,
             c,
@@ -887,6 +893,13 @@ impl App {
                 // 아래 주입이 `cd` 로 옮긴다.
                 cwd: remote_pane.is_none().then(|| remote_cwd.clone()),
                 token: None,
+                // 역이사의 재료다: 어느 기계로 갔고(라벨), 거기 어디서 돌며
+                // (remote_cwd), 돌아오면 어디로 갈지(origin = 지금 이 로컬 경로).
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+                    remote_cwd: Some(remote_cwd.clone()),
+                    origin_cwd: Some(cwd.to_string_lossy().into_owned()),
+                },
             },
             pid,
             c,
@@ -935,6 +948,209 @@ impl App {
             w.request_redraw();
         }
         Ok(remote.remote_id)
+    }
+
+    /// 역이사 — 원격 pane 의 claude 를 **이 기계로** 데려온다(migrate 의 거울).
+    ///
+    /// 순서: ①원격 git 관문(그 기계에만 있는 변경이 있으면 세운다) ②로컬 레포
+    /// 준비(없으면 clone) ③원격 claude 곱게 끄기(권한 모드도 여기서 받는다)
+    /// ④대화 내려받기 ⑤원격 셸 철거 + 같은 pane id 로 로컬 PTY 스왑
+    /// ⑥`claude --resume` 주입.
+    ///
+    /// ③이 ④보다 먼저인 이유: jsonl 은 살아 있는 동안에도 읽을 수 있지만, 끄기
+    /// 전에 받으면 마지막 턴이 파일에 덜 실린 채 건너온다 — 순방향이 SIGTERM
+    /// 뒤에 업로드하는 것과 같은 순서다.
+    #[cfg(unix)]
+    pub(crate) fn migrate_pane_back(
+        &mut self,
+        pid: &str,
+        local_cwd: Option<&str>,
+        force: bool,
+    ) -> Result<String> {
+        let Some(sess) = self.pty.get(pid).cloned() else {
+            anyhow::bail!("pane {pid} 이 없다");
+        };
+        let Some(info) = kasa_mcp::remote::remote_info(pid) else {
+            anyhow::bail!("{pid} 은 원격 pane 이 아니다 — 데려올 것이 없다");
+        };
+        let Some(sid) = self.pane_claude_sid.get(pid).cloned() else {
+            anyhow::bail!(
+                "{pid} 의 claude 세션 id 를 모른다 — 이사로 나간 pane 만 데려올 수 있다 \
+                 (원격에서 태어난 학생은 아직 못 데려온다)"
+            );
+        };
+        let Some(remote_cwd) = info.remote_cwd.clone() else {
+            anyhow::bail!("{pid} 의 원격 작업 폴더를 모른다 — 옛 저장본이다. 한 번 재시작해 다시 저장되면 생긴다");
+        };
+        let machine = kasa_mcp::machines::machines()
+            .into_iter()
+            .find(|m| m.base == info.base.trim_end_matches('/'));
+        let dest = local_cwd
+            .map(str::to_string)
+            .or_else(|| info.origin_cwd.clone())
+            .or_else(|| {
+                machine
+                    .as_ref()
+                    .and_then(|m| kasa_mcp::machines::map_remote_to_local(m, &remote_cwd))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "돌아올 로컬 경로를 모른다 — --cwd 로 지정하거나 machines.json 에 roots 를 적어라"
+                )
+            })?;
+        // 원격 git 관문 — 순방향(출발지 검사)의 거울이다. 원격에만 있는 변경을
+        // 실은 채 떠나면 그 커밋들은 닿지 않는 기계에 남는다.
+        let repo_state = kasa_mcp::remote::remote_repo_state(&info.base, &remote_cwd, None);
+        if !force {
+            match &repo_state {
+                Ok(Some((dirty, unpushed, _, _))) if *dirty > 0 || *unpushed > 0 => {
+                    anyhow::bail!(
+                        "그 기계에만 있는 변경이 남아 있다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({remote_cwd}) — 저쪽에서 커밋·push 하고 오거나 --force"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    anyhow::bail!("원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force");
+                }
+            }
+        }
+        // 로컬 레포 준비 — 목적지 폴더가 없으면 원격이 알려준 origin 으로 clone.
+        // 순방향의 ensure_repo(원격에 레포 보장)와 대칭이다.
+        if !std::path::Path::new(&dest).exists() {
+            let origin = repo_state
+                .as_ref()
+                .ok()
+                .and_then(|s| s.as_ref())
+                .map(|(_, _, o, _)| o.clone())
+                .filter(|o| !o.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{dest} 가 없고 원격 origin 도 몰라 clone 할 수 없다")
+                })?;
+            let branch = repo_state
+                .as_ref()
+                .ok()
+                .and_then(|s| s.as_ref())
+                .map(|(_, _, _, b)| b.clone())
+                .unwrap_or_default();
+            if let Some(parent) = std::path::Path::new(&dest).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let out = crate::proc::command("git")
+                .args(["clone", &origin, &dest])
+                .output()
+                .map_err(|e| anyhow::anyhow!("git clone 실행 실패: {e}"))?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "로컬 clone 실패: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            if !branch.is_empty() && branch != "HEAD" {
+                let _ = crate::proc::command("git")
+                    .args(["-C", &dest, "checkout", &branch])
+                    .output();
+            }
+        }
+        // 모델·effort 는 원격이 죽기 전에 떠 둔다(순방향과 같은 이유).
+        let (model, effort) = self
+            .agent_cfg_snapshot()
+            .get(pid)
+            .cloned()
+            .unwrap_or_default();
+        // 원격 claude 곱게 끄기. 이미 꺼져 있으면(None) 권한 모드를 모르니 안전한
+        // 쪽(물어보는 모드)으로 둔다.
+        let bypass = match kasa_mcp::remote::remote_agent_stop(&info.base, &info.remote_id, None) {
+            Ok(stopped) => stopped.unwrap_or(false),
+            Err(e) => {
+                if force {
+                    eprintln!("[migrate-back] 원격 종료 확인 실패(강행): {e:#}");
+                    false
+                } else {
+                    anyhow::bail!(
+                        "원격 claude 를 못 껐다({e:#}) — 반쯤 산 채 데려오면 같은 대화를 다툰다. 알고 강행하려면 --force"
+                    );
+                }
+            }
+        };
+        let bytes = kasa_mcp::remote::download_transcript(&info.base, &remote_cwd, &sid, None)?;
+        let jsonl = kasa_socket::sessions::session_jsonl_path(std::path::Path::new(&dest), &sid)
+            .ok_or_else(|| anyhow::anyhow!("HOME 을 몰라 대화 저장 위치를 못 정한다"))?;
+        // 크기 후퇴 관문 — 서버 업로드 쪽 규칙의 거울. 로컬에 더 큰 대화가 있으면
+        // 받은 쪽이 낡은 것이다(대개 이사 전 사본이 더 작으니 평소엔 통과).
+        if let Ok(meta) = std::fs::metadata(&jsonl) {
+            if meta.len() > bytes.len() as u64 && !force {
+                anyhow::bail!(
+                    "로컬에 더 큰 대화가 이미 있다({}B > {}B) — 원격 쪽이 낡았다. 알고 덮으려면 --force",
+                    meta.len(),
+                    bytes.len()
+                );
+            }
+        }
+        if let Some(dir) = jsonl.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| anyhow::anyhow!("대화 폴더 생성 실패: {e}"))?;
+        }
+        let tmp = jsonl.with_extension("jsonl.part");
+        std::fs::write(&tmp, &bytes)
+            .and_then(|_| std::fs::rename(&tmp, &jsonl))
+            .map_err(|e| anyhow::anyhow!("대화 저장 실패: {e}"))?;
+        // 원격 셸을 진짜 끝낸다 — 안 걷으면 그 기계에 빈 학생 pane 이 좀비로 남는다.
+        // 매니저가 이미 죽었어도(연결 유실) 실패가 아니다: 남은 셸은 닿을 때 걷는다.
+        let _ = kasa_mcp::remote::kill_remote(pid);
+        // 같은 pane id 로 로컬 PTY 스왑(swap_character 골격).
+        let (c, r) = sess.size();
+        let room = self.ws.lock().unwrap().pane_room.get(pid).cloned();
+        let mut env = crate::proxy_env(pid);
+        if let Some(ref rm) = room {
+            env.push(("KASATERM_ROOM".to_string(), rm.clone()));
+        }
+        env.extend(self.assign_character_env(pid, Some(&dest), room.as_deref()));
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd: Some(dest.clone()),
+            cols: c,
+            rows: r,
+            env,
+            pane_id: pid.to_string(),
+            initial_scrollback: Vec::new(),
+        })
+        .map_err(|e| anyhow::anyhow!("로컬 셸 스폰 실패: {e:#}"))?;
+        let session = Arc::new(session);
+        self.pump_pty_screens(
+            session.screens.clone(),
+            pid.to_string(),
+            std::sync::Arc::downgrade(&session),
+        );
+        // insert 가 원격 링크 세션을 떨군다 — 링크 매니저는 Drop 으로 걷힌다.
+        self.insert_pty(pid.to_string(), session.clone());
+        self.dead_panes.lock().unwrap().retain(|x| x != pid);
+        self.pane_cwd_cache
+            .insert(pid.to_string(), std::path::PathBuf::from(&dest));
+        let cmd = restore_agent_command(
+            Some("claude"),
+            Some(&sid),
+            true,
+            Some(model.as_str()).filter(|s| !s.is_empty()),
+            Some(effort.as_str()).filter(|s| !s.is_empty()),
+        );
+        let cmd = if bypass {
+            format!("{} --dangerously-skip-permissions\r", cmd.trim_end_matches('\r'))
+        } else {
+            cmd
+        };
+        self.pending_restores.push((
+            session,
+            cmd,
+            std::time::Instant::now() + std::time::Duration::from_millis(900),
+        ));
+        let (wc, wr) = self.window_cells();
+        self.resize_backend(wc, wr);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.set_toast(format!("{pid} 을 이 기계로 데려왔어요 ({dest})"));
+        Ok("local".into())
     }
 
     /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
@@ -3845,12 +4061,23 @@ impl App {
                 // 붙는다(restore_leaf 의 remote 가지). cwd·agent 감지(ps 기반)는
                 // 원격이라 비지만, 스크롤백과 sid 마커 오버레이(pane_claude_sid)는
                 // 로컬 파서 덕에 그대로 동작한다.
-                if let Some((base, rid)) = kasa_mcp::remote::remote_meta(pane_id) {
-                    if let Some(obj) = rec.as_object_mut() {
-                        obj.insert("remote_base".to_string(), serde_json::json!(base));
-                        obj.insert("remote_pane".to_string(), serde_json::json!(rid));
-                    } else {
-                        rec = serde_json::json!({ "remote_base": base, "remote_pane": rid });
+                if let Some(info) = kasa_mcp::remote::remote_info(pane_id) {
+                    if rec.as_object_mut().is_none() {
+                        rec = serde_json::json!({});
+                    }
+                    let obj = rec.as_object_mut().unwrap();
+                    obj.insert("remote_base".to_string(), serde_json::json!(info.base));
+                    obj.insert("remote_pane".to_string(), serde_json::json!(info.remote_id));
+                    // 정체 세 벌도 함께 — 저장은 라이브 링크에서 매번 재조립되므로,
+                    // 여기 안 실으면 재시작 한 번에 라벨·되돌아갈 자리가 증발한다.
+                    if !info.label.is_empty() {
+                        obj.insert("remote_label".to_string(), serde_json::json!(info.label));
+                    }
+                    if let Some(c) = &info.remote_cwd {
+                        obj.insert("remote_cwd".to_string(), serde_json::json!(c));
+                    }
+                    if let Some(c) = &info.origin_cwd {
+                        obj.insert("remote_origin_cwd".to_string(), serde_json::json!(c));
                     }
                 }
                 // Attach the pane's scrollback (text lines) so restore can
@@ -4024,6 +4251,10 @@ impl App {
     /// Only the active session's windows are restored into the live fields;
     /// detached sessions aren't wired up (`self.sessions` is always `[None]`),
     /// so the saved `sessions` array carries exactly one entry in practice.
+    /// 복원 중 「저장된 학생을 먼저 잡아 둔」 자리의 키 앞머리. 실제 pane id 는
+    /// `%` 로 시작하므로 이 앞머리와는 절대 겹치지 않는다.
+    const RESERVE_KEY: &'static str = "\u{0}restore-reserve-";
+
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
         let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) else {
             return;
@@ -4053,6 +4284,49 @@ impl App {
         }
         self.pty_layout = None;
         self.windows.clear();
+        // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
+        // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
+        // 그래서 앞 차례의 leaf 가 새로 배정받다가 뒤 leaf 의 학생을 집어가면, 뒤
+        // leaf 는 「이미 다른 자리가 쓰는 중」으로 밀려 엉뚱한 학생이 된다 —
+        // 대화는 `--resume` 으로 그대로 이어지는데 이름·얼굴·말투만 갈린다
+        // (2026-08-28 실측: 재시작 한 번에 우사기 자리가 리오가 됐고, 정작 우사기는
+        // 어느 자리에도 없었다 — 밀어낸 쪽이 그 뒤 사라진 것이다).
+        //
+        // 그래서 되살릴 학생을 **전부 먼저** 예약한다. `assign_character_env` 의
+        // 중복 회피는 `ws.pane_character` 의 **값**을 보므로, 키가 실제 pane 이
+        // 아니어도 된다 — 예약 키를 넣어 두면 새 배정이 그 이름을 피해 간다.
+        // 복원이 끝나면 예약은 걷는다(아래).
+        let reserved: Vec<String> = {
+            fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
+                if let Some(leaf) = n.get("leaf") {
+                    if let Some(c) =
+                        leaf.get("character").and_then(|c| c.as_str()).filter(|s| !s.is_empty())
+                    {
+                        out.push(c.to_string());
+                    }
+                    return;
+                }
+                if let Some(sp) = n.get("split") {
+                    if let Some(a) = sp.get("a") {
+                        walk(a, out);
+                    }
+                    if let Some(b) = sp.get("b") {
+                        walk(b, out);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            for w in windows {
+                walk(w, &mut out);
+            }
+            out
+        };
+        {
+            let mut ws = self.ws.lock().unwrap();
+            for (i, c) in reserved.iter().enumerate() {
+                ws.pane_character.insert(format!("{}{i}", Self::RESERVE_KEY), c.clone());
+            }
+        }
         let (cols, rows) = self.window_cells();
         for (j, w) in windows.iter().enumerate() {
             let tree = self.restore_window_layout(w, cols, rows);
@@ -4093,6 +4367,12 @@ impl App {
             .and_then(|l| l.leaves().first().map(|s| s.to_string()))
         {
             self.ws.lock().unwrap().active_pane = Some(first);
+        }
+        // 예약을 걷는다. 남겨 두면 그 이름들이 영영 taken 으로 잡혀, 앞으로 새로
+        // 쪼개는 pane 이 그 학생을 못 쓴다.
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.pane_character.retain(|k, _| !k.starts_with(Self::RESERVE_KEY));
         }
         // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴
         // 것은 화면에 없는 게 그 사람이 고른 상태고, 켜자마자 우르르 튀어나오면
@@ -4242,12 +4522,20 @@ impl App {
             rec.get("remote_base").and_then(|v| v.as_str()),
             rec.get("remote_pane").and_then(|v| v.as_str()),
         ) {
+            let rec_str = |k: &str| rec.get(k).and_then(|v| v.as_str()).map(str::to_string);
             match kasa_mcp::remote::connect(
                 kasa_mcp::remote::RemoteSpec {
                     base: base.to_string(),
                     pane: Some(rpane.to_string()),
                     cwd: None,
                     token: None,
+                    identity: kasa_mcp::remote::RemoteIdentity {
+                        label: rec_str("remote_label")
+                            .or_else(|| kasa_mcp::machines::label_for_base(base))
+                            .unwrap_or_default(),
+                        remote_cwd: rec_str("remote_cwd"),
+                        origin_cwd: rec_str("remote_origin_cwd"),
+                    },
                 },
                 &id,
                 cols,
@@ -4327,9 +4615,33 @@ impl App {
             // 그건 배정 사고가 아니다(같은 날 정한 「손으로 고른 건 지킨다」 규칙).
             let manual =
                 session_id.as_deref().is_some_and(kasa_mcp::character::is_manual_pick);
-            let taken = self.ws.lock().unwrap().pane_character.values().any(|v| v == c);
+            // ⚠️ 예약(위 `RESERVE_KEY`)은 **세지 않는다.** 그건 「이 이름은 되살릴
+            // 자리가 있으니 새 배정이 집어가지 마라」는 표시라, 여기서 함께 세면
+            // 되살리려는 자리가 제 예약에 막혀 통째로 새로 배정된다(자기 자신을
+            // 막는 자책골 — 재현 리그에서 잡았다).
+            let taken = self
+                .ws
+                .lock()
+                .unwrap()
+                .pane_character
+                .iter()
+                .any(|(k, v)| v == c && !k.starts_with(Self::RESERVE_KEY));
             if revive_saved_character(taken, manual) {
                 revived = true;
+                // 예약을 하나 소비한다. 안 걷으면 그 이름이 계속 예약으로 남아,
+                // 같은 학생을 저장본이 둘 이상 들고 있을 때 두 번째 자리가 제
+                // 예약에 막힌다.
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    if let Some(k) = ws
+                        .pane_character
+                        .iter()
+                        .find(|(k, v)| *v == c && k.starts_with(Self::RESERVE_KEY))
+                        .map(|(k, _)| k.clone())
+                    {
+                        ws.pane_character.remove(&k);
+                    }
+                }
                 self.pending_character = Some(c.clone());
                 if let Some(ref sid) = session_id {
                     let _ = kasa_mcp::character::bind_session_character(sid, c);
