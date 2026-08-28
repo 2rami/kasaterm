@@ -3883,6 +3883,22 @@ impl App {
         // 「울트라코드로 이어가는거 왜안돼」). 마커 판정(pane_ultracode — 입력박스
         // 보라 글로우와 같은 근거)이 참인 pane 은 여기서 덮는다. `--effort ultracode`
         // 는 CLI 가 실제로 받아 켠다(print 자기보고 실측: ultracode→ON, xhigh→OFF).
+        // 보고가 아직 없는 pane 은 **복원이 띄울 때 쓴 값**으로 메운다. 안 메우면
+        // 그 창은 다음 복원에서 기본 모델로 뜨고, 사용자가 고른 값이 재시작 한 번에
+        // 조용히 풀린다. 보고가 있으면 그쪽이 정본이다 — 그 사이 `/model` 로 바꿨을
+        // 수 있고, 그건 이 기준선이 모르는 사실이다.
+        for (pane, (model, effort)) in restored_agent_cfg().lock().unwrap().iter() {
+            if !self.pty.contains_key(pane) {
+                continue;
+            }
+            let e = cfg.entry(pane.clone()).or_default();
+            if e.0.is_empty() && !model.is_empty() {
+                e.0 = model.clone();
+            }
+            if e.1.is_empty() && !effort.is_empty() {
+                e.1 = effort.clone();
+            }
+        }
         for pane in &self.pane_ultracode {
             cfg.entry(pane.clone()).or_default().1 = "ultracode".to_string();
         }
@@ -4749,6 +4765,13 @@ impl App {
             if saved_effort(rec) == Some("ultracode") {
                 self.mark_restored_ultracode(&id);
             }
+            // 방금 이 값으로 띄웠다는 사실을 남긴다 — statusline 보고가 오기 전에
+            // 저장이 돌면 그 창의 모델·effort 가 통째로 빠진다.
+            self.mark_restored_agent_cfg(
+                &id,
+                saved_model(rec).unwrap_or_default(),
+                saved_effort(rec).unwrap_or_default(),
+            );
             let cmd = restore_agent_command(
                 was_agent,
                 session_id.as_deref(),
@@ -5155,6 +5178,22 @@ impl App {
         set.retain(|id| self.pty.contains_key(id));
         set.clone()
     }
+
+    /// 복원이 이 pane 을 띄울 때 쓴 모델·effort 를 적어 둔다.
+    ///
+    /// 세션 저장이 담는 값(`reported_agent_cfg`)은 **statusline 이 보고한 것**이라,
+    /// 훅이 아직 안 돈 pane 은 비어 있다. 그 상태로 저장되면 그 창은 다음 복원에서
+    /// 기본 모델로 뜬다 — 사용자가 고른 값이 재시작 한 번에 조용히 풀린다. 방금
+    /// 그 값으로 띄웠다는 사실은 앱만 알고 있으므로 여기 남긴다.
+    pub(crate) fn mark_restored_agent_cfg(&self, pane: &str, model: &str, effort: &str) {
+        if model.is_empty() && effort.is_empty() {
+            return;
+        }
+        restored_agent_cfg()
+            .lock()
+            .unwrap()
+            .insert(pane.to_string(), (model.to_string(), effort.to_string()));
+    }
 }
 
 /// 갓 소환된 학생 pane 에 "받은 첫 지시"를 pane 제목으로 굳히는 custom-title
@@ -5204,6 +5243,14 @@ fn session_titles() -> &'static std::sync::Mutex<HashMap<String, PaneTranscript>
 }
 
 /// 마지막으로 훑은 시각 — 꼬리 읽기의 박자를 잡는다.
+/// 복원이 띄울 때 쓴 pane 별 (model, effort). `restored_ultracode` 와 같은 이유로
+/// struct App 밖에 둔다(병렬 작업 규칙).
+fn restored_agent_cfg() -> &'static std::sync::Mutex<HashMap<String, (String, String)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (String, String)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 fn session_title_scan() -> &'static std::sync::Mutex<Option<Instant>> {
     static C: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> = std::sync::OnceLock::new();
     C.get_or_init(Default::default)
