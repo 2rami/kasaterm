@@ -8409,6 +8409,11 @@ impl App {
                                     a.cpu
                                 ),
                             ))
+                        // 우리 자신은 바깥 앱 **뒤**다. 저쪽은 눌러서 닫을 수
+                        // 있지만 이건 손 쓸 데가 없어서, 둘 다 걸렸을 때 답이
+                        // 있는 쪽을 먼저 말한다.
+                        } else if crate::input::is_hot(self.statusbar.usage_self.1) {
+                            Some((true, format!("카사텀 {:.0}%", self.statusbar.usage_self.0)))
                         } else if mem_adv != crate::sysmem::Advice::Ok {
                             Some((false, "메모리 주의".to_string()))
                         } else {

@@ -60,6 +60,9 @@ pub(crate) struct StatusbarState {
     /// 마지막으로 CPU 폭주를 말한 앱과 그 시각. 앱이 바뀌면 곧바로 다시 말한다
     /// — 범인이 달라졌으면 닫을 것도 달라진다.
     pub(crate) hog_warned: Option<(u32, std::time::Instant)>,
+    /// 이 앱 트리 자신의 구간 사용률(%)과 그게 이어진 폴 수. 바깥 앱과 같은
+    /// 잣대지만 목록에는 안 넣는다 — 자기에게 끄기 버튼을 붙일 수는 없다.
+    pub(crate) usage_self: (f32, u16),
     /// 앱별 CPU 시간을 폴 사이에 이어 두는 자리. 여기 있는 이유는 `ps` 를 부르는
     /// 자유함수가 상태를 못 갖기 때문이다.
     pub(crate) cpu_track: crate::input::CpuTrack,

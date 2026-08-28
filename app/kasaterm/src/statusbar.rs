@@ -144,11 +144,20 @@ fn paint_usage_popover(
             format!("합계 {cpu:.0}% · {:.0}M", gb * 1024.0)
         };
         let sw = g.measure_chrome_text(&sub, 10.0, false);
+        // 우리 자신이 코어를 계속 태우는 중이면 이 합계가 그 근거다. 아래 바깥
+        // 앱 목록에는 우리가 안 들어가므로, 빨갛게 하지 않으면 하단바의 「카사텀
+        // 130%」가 어디서 나온 말인지 확인할 자리가 없다.
+        let hot = crate::input::is_hot(sb.usage_self.1);
         g.draw_text(
             x + w - 12.0 - sw,
             y + 9.0,
             &sub,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+            gpu::DrawOpts {
+                font_size: 10.0,
+                color: if hot { theme::danger() } else { theme::text_mute() },
+                bold: hot,
+                italic: false,
+            },
         );
     }
     let mut top = y + HEAD_H;

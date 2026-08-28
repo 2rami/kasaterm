@@ -7183,6 +7183,12 @@ impl App {
                             a.rss as f32 / (1024.0 * 1024.0 * 1024.0)
                         );
                     }
+                    eprintln!(
+                        "[autoportpop] 우리 자신 cpu={:.0}% hot={} hot?={}",
+                        self.statusbar.usage_self.0,
+                        self.statusbar.usage_self.1,
+                        crate::input::is_hot(self.statusbar.usage_self.1)
+                    );
                     eprintln!("[autoportpop] 열림 {kind:?} anchor={r:?}");
                 }
                 None => eprintln!("[autoportpop] FAIL — 칩이 아직 안 그려졌다"),

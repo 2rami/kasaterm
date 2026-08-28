@@ -389,6 +389,7 @@ impl App {
             self.statusbar.usage_top = u.top;
             self.statusbar.usage_rows = u.rows;
             self.statusbar.usage_outside = u.outside;
+            self.statusbar.usage_self = (u.self_cpu, u.self_hot);
         }
         // 같은 박자에 물리 메모리도 — 이쪽은 서브프로세스가 없어 사실상 공짜다.
         self.statusbar.mem = crate::sysmem::sample();
@@ -3530,11 +3531,17 @@ pub(crate) struct AppUsage {
     pub(crate) hot: u16,
 }
 
+/// 폴 수가 「계속 태우는 중」에 이르렀는가. 목록에 안 담기는 우리 자신도 같은
+/// 잣대를 써야 해서 자유함수로 둔다.
+pub(crate) fn is_hot(hot: u16) -> bool {
+    hot >= hog_polls()
+}
+
 impl AppUsage {
     /// 코어를 **계속** 태우는 중인가 — 팬이 도는 이유는 대개 이것이다. 잠깐
     /// 튀는 것과 가르려고 폴 수까지 본다.
     pub(crate) fn is_hog(&self) -> bool {
-        self.hot >= hog_polls()
+        is_hot(self.hot)
     }
 }
 
@@ -3550,6 +3557,37 @@ pub(crate) struct CpuTrack {
     last: std::collections::HashMap<u32, (u64, Instant)>,
     /// 대표 pid → 임계를 넘긴 채 이어진 폴 수.
     streak: std::collections::HashMap<u32, u16>,
+}
+
+impl CpuTrack {
+    /// 한 「앱」의 누적 CPU 시간을 받아 구간 사용률과 이어진 폴 수를 낸다.
+    /// 바깥 앱과 이 앱 자신이 같은 잣대를 쓰도록 한 곳에 모은다.
+    fn tick(&mut self, root: u32, cpu_time: u64, now: Instant) -> (f32, u16) {
+        // 첫 표본에는 견줄 데가 없어 0 이다. 5초 뒤 두 번째 폴부터 값이 선다.
+        let cpu = match self.last.get(&root) {
+            Some((prev_ms, prev_at)) => {
+                let dt = now.duration_since(*prev_at).as_millis() as f32;
+                // 너무 짧은 간격은 나눗셈이 튄다. 폴은 5초라 정상 경로에서는
+                // 걸리지 않고, 창을 다시 그리며 두 번 불릴 때만 걸린다.
+                (dt >= 1000.0)
+                    // 프로세스가 죽어 합이 줄면 음수가 되므로 포화 뺄셈.
+                    .then(|| cpu_time.saturating_sub(*prev_ms) as f32 / dt * 100.0)
+                    .unwrap_or(0.0)
+            }
+            None => 0.0,
+        };
+        let n = self.streak.entry(root).or_default();
+        // 한 번 내려갔다고 0 으로 되돌리지 않는다. 실측에서 스핀 루프가 임계를
+        // 넘나들었는데, 리셋하면 그런 앱은 아무리 오래 돌아도 카운터가 못 쌓여
+        // 영영 안 잡힌다. 대신 한 칸씩 물러나게 해서, 정말 멈춘 앱은 같은 시간
+        // 안에 목록에서 빠진다.
+        *n = if cpu >= hog_pct() { n.saturating_add(1) } else { n.saturating_sub(1) };
+        let hot = *n;
+        // 다음 폴이 견줄 자리. 이 한 줄이 빠지면 `last` 가 영영 비어 있어 모든
+        // 사용률이 0 으로 나온다 — 화면에는 「아무도 CPU 를 안 쓴다」로 보인다.
+        self.last.insert(root, (cpu_time, now));
+        (cpu, hot)
+    }
 }
 
 /// 코어 하나를 사실상 다 쓰는 선. 90 이 아니라 85 인 것은 실측 때문이다 —
@@ -3606,6 +3644,11 @@ pub(crate) struct UsageSample {
     pub(crate) top: Vec<(u32, f32, u64, String)>,
     /// 트리에 든 프로세스 수 전체.
     pub(crate) rows: usize,
+    /// 이 앱 트리의 구간 사용률(%)과 그게 이어진 폴 수. 바깥 앱과 같은 잣대로
+    /// 재되 목록에는 안 넣는다 — 자기 자신에게 끄기 버튼을 붙일 수는 없으니
+    /// 말만 하고 손은 사람이 쓴다(2026-08-28 지시: 「카사텀 자신도 짚게」).
+    pub(crate) self_cpu: f32,
+    pub(crate) self_hot: u16,
     /// 트리 **밖**의 앱 상위 몇. 「메모리 부족」일 때 무엇을 닫아야 하는지가
     /// 이 목록이다(2026-08-27 지시: 「위험! 종료할까요?(뭔지)」). 계속 코어를
     /// 태우는 앱이 있으면 그쪽이 먼저 온다 — 팬이 도는 이유가 그것이라서다.
@@ -3681,12 +3724,19 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
     // 8개는 39%, 20개는 80%, 30개는 88% 였다 — 30 부터는 한 개당 20MB 아래로
     // 떨어져 더 담아도 답이 안 바뀐다. 화면에는 팝오버가 스크롤로 보여 준다.
     top.truncate(30);
+    // 트리 전체를 한 「앱」으로 놓고 바깥과 같은 잣대로 잰다. 대표 pid 는 우리
+    // 자신이라 바깥 목록의 키와 겹치지 않는다(우리는 거기서 빠져 있다).
+    let self_time: u64 =
+        rows.iter().filter(|r| tree.contains(&r.pid)).map(|r| r.cpu_time).sum();
+    let (self_cpu, self_hot) = track.tick(me, self_time, Instant::now());
     Some(UsageSample {
         cpu,
         rss: rss_kb * 1024,
         rows: total_rows,
         outside: outside_apps(&rows, &tree, track),
         top,
+        self_cpu,
+        self_hot,
     })
 }
 
@@ -3747,35 +3797,15 @@ fn outside_apps(
         // 대표가 표본에 없으면(권한·경합) 이름도 없고 끌 수도 없다.
         .filter_map(|(root, (rss, procs, cpu_time))| {
             let name = (*name_of.get(root)?).to_string();
-            // 첫 표본에는 견줄 데가 없어 0 이다. 5초 뒤 두 번째 폴부터 값이 선다.
-            let cpu = match track.last.get(root) {
-                Some((prev_ms, prev_at)) => {
-                    let dt = now.duration_since(*prev_at).as_millis() as f32;
-                    // 너무 짧은 간격은 나눗셈이 튄다. 폴은 5초라 정상 경로에서는
-                    // 걸리지 않고, 창을 다시 그리며 두 번 불릴 때만 걸린다.
-                    (dt >= 1000.0)
-                        // 프로세스가 죽어 합이 줄면 음수가 되므로 포화 뺄셈.
-                        .then(|| cpu_time.saturating_sub(*prev_ms) as f32 / dt * 100.0)
-                        .unwrap_or(0.0)
-                }
-                None => 0.0,
-            };
-            let hot = {
-                let n = track.streak.entry(*root).or_default();
-                // 한 번 내려갔다고 0 으로 되돌리지 않는다. 같은 실측에서 스핀
-                // 루프가 임계를 넘나들었는데, 리셋하면 그런 앱은 아무리 오래
-                // 돌아도 카운터가 못 쌓여 영영 안 잡힌다. 대신 한 칸씩 물러나게
-                // 해서, 정말 멈춘 앱은 같은 시간 안에 목록에서 빠진다.
-                *n = if cpu >= hog_pct() { n.saturating_add(1) } else { n.saturating_sub(1) };
-                *n
-            };
+            let (cpu, hot) = track.tick(*root, *cpu_time, now);
             Some(AppUsage { pid: *root, rss: rss * 1024, name, procs: *procs, cpu, hot })
         })
         .collect();
-    // 다음 폴이 견줄 자리. 사라진 앱은 여기서 함께 잊는다 — 안 지우면 pid 가
-    // 재사용될 때 엉뚱한 앱의 이력을 물려받는다.
-    track.last = apps.iter().map(|(k, v)| (*k, (v.2, now))).collect();
-    track.streak.retain(|k, _| apps.contains_key(k));
+    // 사라진 앱은 여기서 잊는다 — 안 지우면 pid 가 재사용될 때 엉뚱한 앱의
+    // 이력을 물려받는다. 우리 자신(트리)은 `apps` 에 없으므로 함께 남긴다.
+    let me = std::process::id();
+    track.last.retain(|k, _| *k == me || apps.contains_key(k));
+    track.streak.retain(|k, _| *k == me || apps.contains_key(k));
     // 계속 태우는 앱이 먼저다 — 팬이 도는 이유는 메모리가 아니라 그쪽이다.
     //
     // 그리고 그쪽은 **rss 로 자르지 않는다**. CPU 만 태우고 메모리는 거의 안 쓰는
@@ -4235,7 +4265,7 @@ mod working_scan_tests {
 
 #[cfg(test)]
 mod zoom_key_tests {
-    use super::{cpu_ms, hog_polls, zoom_key, AppUsage, ZoomKey};
+    use super::{cpu_ms, hog_polls, zoom_key, AppUsage, CpuTrack, ZoomKey};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -4296,6 +4326,25 @@ mod zoom_key_tests {
         // 어긋난다(증분이 음수가 되어 0 으로 눌린다).
         assert_eq!(cpu_ms("01-17:19:49"), Some(86_400_000 + 62_389_000));
         assert_eq!(cpu_ms("-"), None);
+    }
+
+    /// 갱신 한 줄을 빠뜨리면 모든 사용률이 0 이 되고, 화면에는 「아무도 CPU 를
+    /// 안 쓴다」로 조용히 나온다 — 실제로 리팩터링 중에 그 회귀를 냈다.
+    #[test]
+    fn 폴_사이의_증분이_사용률이_된다() {
+        use std::time::Duration;
+        let mut t = CpuTrack::default();
+        let t0 = std::time::Instant::now();
+        // 첫 표본은 견줄 데가 없다.
+        assert_eq!(t.tick(1, 1_000, t0).0, 0.0);
+        // 5초 사이에 CPU 시간이 5초 늘었으면 코어 하나를 통째로 쓴 것이다.
+        let (cpu, hot) = t.tick(1, 6_000, t0 + Duration::from_secs(5));
+        assert!((cpu - 100.0).abs() < 0.1, "cpu={cpu}");
+        assert_eq!(hot, 1);
+        // 멈추면 사용률이 0 이 되고 카운터도 물러난다.
+        let (cpu, hot) = t.tick(1, 6_000, t0 + Duration::from_secs(10));
+        assert_eq!(cpu, 0.0);
+        assert_eq!(hot, 0);
     }
 
     #[test]
