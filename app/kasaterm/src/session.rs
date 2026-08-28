@@ -3412,9 +3412,17 @@ impl App {
         (body_h, (full_h * t).round(), hidden)
     }
 
+    /// 방 카드 전체 높이 목록(갭 제외). 스크롤 한계·막대 위치·굴림 한 칸이
+    /// **같은 값**을 봐야 하므로 한 곳에서만 만든다.
+    pub(crate) fn sidebar_card_heights(&self) -> Vec<f32> {
+        (0..self.windows.len())
+            .map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1)
+            .collect()
+    }
+
     /// 방 목록이 세로로 쓸 수 있는 높이(logical px). 트레이·독·상태줄이 바닥을
     /// 먹고, 24px 는 chevron-down 오버플로 힌트 자리다.
-    fn sidebar_avail_h(&self, win_h: f32) -> f32 {
+    pub(crate) fn sidebar_avail_h(&self, win_h: f32) -> f32 {
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = TITLE_HEIGHT + 18.0;
         // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
@@ -3438,8 +3446,7 @@ impl App {
         if n == 0 {
             return None;
         }
-        let heights: Vec<f32> =
-            (0..n).map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1).collect();
+        let heights = self.sidebar_card_heights();
         let content_h =
             heights.iter().sum::<f32>() + SIDEBAR_TAB_GAP * n.saturating_sub(1) as f32;
         let viewport_h = self.sidebar_avail_h(win_h);
@@ -3465,9 +3472,7 @@ impl App {
             // 가로 탭은 폭 기준이라 이 계산이 안 통한다 — 그쪽은 `win_tab_vis` 를 쓴다.
             return self.windows.len().saturating_sub(self.win_tab_vis.max(1));
         }
-        let heights: Vec<f32> = (0..self.windows.len())
-            .map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1)
-            .collect();
+        let heights = self.sidebar_card_heights();
         max_first_for(&heights, self.sidebar_avail_h(win_h), SIDEBAR_TAB_GAP)
     }
 
@@ -5657,6 +5662,43 @@ fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<
 /// 마지막 한 장은 `avail_h` 를 넘겨도 답에 넣는다. 배치 루프도 첫 장은 넘침
 /// 검사를 건너뛰므로(`!tabs.is_empty()`), 여기서 잘라내면 카드 하나가 칸보다 큰
 /// 순간 목록이 통째로 비어 버린다.
+/// 쌓인 굴림량(px)을 **카드 실제 높이**만큼 소비해 새 시작 인덱스를 낸다.
+///
+/// 예전엔 48px 마다 한 칸이었다. 접힌 카드가 57px(`SIDEBAR_TAB_H` + 갭)이라 화면이
+/// 손보다 19% 빨랐고, 방을 펼치면 카드가 226px 까지 자라 **한 번 밀 때 화면이 손의
+/// 4.7배로 튀었다**(2026-08-28 지적: "사이드바 스크롤되긴하는데 뭔가이상한데").
+/// 넘길 카드의 높이를 그대로 쓰면 손가락 이동량과 목록 이동량이 같아진다.
+///
+/// 남은 누적은 `accum` 에 되돌린다 — 트랙패드의 잔 델타가 버려지면 천천히 미는
+/// 동작이 통째로 먹통이 된다. 다만 양 끝에 닿았으면 버린다: 안 그러면 끝에서 민
+/// 만큼이 계속 쌓여, 반대로 돌릴 때 그 양을 되갚기 전까지 움직이지 않는다.
+pub(crate) fn wheel_step_cards(
+    accum: &mut f32,
+    first: usize,
+    max_first: usize,
+    heights: &[f32],
+    gap: f32,
+) -> usize {
+    // 높이가 0 인 카드가 섞여도 한 걸음은 전진해야 한다 — 안 그러면 여기서 돈다.
+    let stride = |i: usize| (heights.get(i).copied().unwrap_or(SIDEBAR_TAB_H) + gap).max(1.0);
+    let mut cur = first.min(max_first);
+    loop {
+        if cur < max_first && *accum <= -stride(cur) {
+            *accum += stride(cur);
+            cur += 1;
+        } else if cur > 0 && *accum >= stride(cur - 1) {
+            *accum -= stride(cur - 1);
+            cur -= 1;
+        } else {
+            break;
+        }
+    }
+    if (cur == 0 && *accum > 0.0) || (cur >= max_first && *accum < 0.0) {
+        *accum = 0.0;
+    }
+    cur
+}
+
 pub(crate) fn max_first_for(heights: &[f32], avail_h: f32, gap: f32) -> usize {
     let n = heights.len();
     let mut acc = 0.0f32;
@@ -6236,7 +6278,7 @@ mod character_swap_plan_tests {
 
 #[cfg(test)]
 mod sidebar_scroll_tests {
-    use super::max_first_for;
+    use super::{max_first_for, wheel_step_cards};
 
     // 실측 치수: 접힌 카드 54, 카드 사이 3, pane 2개를 편 카드는 124
     // (54 + (36+13*2).clamp(46,150) + 8).
@@ -6320,6 +6362,73 @@ mod sidebar_scroll_tests {
             );
         }
     }
+
+    /// 예전 걸음 — 카드 높이와 무관하게 48px 마다 한 칸이었다.
+    fn old_step(accum: &mut f32, first: usize, max_first: usize) -> usize {
+        let steps = (*accum / 48.0).trunc() as i64;
+        *accum -= steps as f32 * 48.0;
+        (first as i64 - steps).clamp(0, max_first as i64) as usize
+    }
+
+    #[test]
+    fn a_step_costs_exactly_one_card() {
+        let heights = [FOLDED; 6];
+        // 카드 한 장에서 1px 모자라면 아직 안 넘어간다.
+        let mut accum = -(FOLDED + GAP) + 1.0;
+        assert_eq!(wheel_step_cards(&mut accum, 0, 5, &heights, GAP), 0);
+        // 딱 한 장을 채우면 한 칸.
+        let mut accum = -(FOLDED + GAP);
+        assert_eq!(wheel_step_cards(&mut accum, 0, 5, &heights, GAP), 1);
+        assert_eq!(accum, 0.0, "정확히 한 장을 밀면 잔량이 없어야 한다");
+        // 옛 걸음은 같은 양에 이미 한 칸을 갔고, 그 19% 가 손보다 빠른 만큼이었다.
+        let mut old_accum = -(FOLDED + GAP) + 1.0;
+        assert_eq!(old_step(&mut old_accum, 0, 5), 1);
+    }
+
+    #[test]
+    fn an_expanded_card_needs_its_own_height() {
+        // 편 방이 첫 칸이면 그 카드를 다 밀어야 넘어간다.
+        let heights = [OPEN2, FOLDED, FOLDED, FOLDED];
+        let mut accum = -100.0;
+        assert_eq!(
+            wheel_step_cards(&mut accum, 0, 3, &heights, GAP),
+            0,
+            "124px 카드가 100px 만에 넘어가면 화면이 손보다 빠르다"
+        );
+        assert_eq!(accum, -100.0, "못 넘긴 양은 남아 다음 굴림에 이어져야 한다");
+        // 옛 걸음은 같은 100px 로 두 칸을 넘겼다 — 카드 하나 반을 건너뛴 셈이다.
+        let mut old_accum = -100.0;
+        assert_eq!(old_step(&mut old_accum, 0, 3), 2);
+        // 남은 24px 을 마저 밀면 그제야 한 칸.
+        accum -= 27.0;
+        assert_eq!(wheel_step_cards(&mut accum, 0, 3, &heights, GAP), 1);
+    }
+
+    #[test]
+    fn the_ends_do_not_bank_leftover_scroll() {
+        let heights = [FOLDED; 4];
+        // 끝에서 한참 더 밀어도 자리는 그대로고, 민 양이 쌓이지 않는다.
+        let mut accum = -2000.0;
+        assert_eq!(wheel_step_cards(&mut accum, 3, 3, &heights, GAP), 3);
+        assert_eq!(accum, 0.0, "쌓아 두면 되돌릴 때 그만큼 먹통이 된다");
+        // 그래서 반대로 한 장만 밀어도 곧바로 올라온다.
+        accum += FOLDED + GAP;
+        assert_eq!(wheel_step_cards(&mut accum, 3, 3, &heights, GAP), 2);
+    }
+
+    #[test]
+    fn small_nudges_accumulate() {
+        let heights = [FOLDED; 4];
+        // 트랙패드의 잔 델타를 버리면 천천히 미는 동작이 통째로 안 먹는다.
+        let mut accum = 0.0;
+        let mut first = 0;
+        for _ in 0..2 {
+            accum -= 30.0;
+            first = wheel_step_cards(&mut accum, first, 3, &heights, GAP);
+        }
+        assert_eq!(first, 1, "30px 두 번은 카드 한 장을 넘는다");
+    }
+
 }
 
 /// 복원이 **같은 학생을 둘 앉히지 않는가.**

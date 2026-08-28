@@ -1523,21 +1523,28 @@ impl App {
             // 다 같은 높이일 때만 맞는 근사라, 펼친 방이 섞이면 목록 끝에 못 닿는다.
             // 띠 위에 있을 때만 센다: 방마다 트리를 훑는 계산이라, 커서가 딴 데
             // 있는 굴림까지 매번 재면 그냥 버리는 일이 된다.
-            let max_first = if !over_strip || in_status_menu {
-                0
+            let (max_first, sb_heights) = if !over_strip || in_status_menu {
+                (0, Vec::new())
             } else if self.tabs_on_top {
-                n.saturating_sub(vis)
+                (n.saturating_sub(vis), Vec::new())
             } else {
                 let win_h = self
                     .window
                     .as_ref()
                     .map(|w| w.inner_size().height as f32 / self.effective_scale())
                     .unwrap_or(800.0);
-                self.sidebar_max_first(win_h)
+                // 한 칸이 곧 카드 높이라 걸음 계산에도 같은 목록이 든다. 한 번만
+                // 재서 넘겨야 한계와 걸음이 서로 다른 높이를 보는 일이 없다.
+                let heights = self.sidebar_card_heights();
+                let max = crate::session::max_first_for(
+                    &heights,
+                    self.sidebar_avail_h(win_h),
+                    SIDEBAR_TAB_GAP,
+                );
+                (max, heights)
             };
             if max_first > 0 {
-                // One tab per 48px of gesture; horizontal axis drives in top
-                // mode when the swipe is decisively sideways.
+                // 가로 축은 상단 탭 모드에서 옆으로 확실히 그은 스와이프일 때만 쓴다.
                 let d = match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
                         if self.tabs_on_top && x.abs() > y.abs() {
@@ -1556,18 +1563,26 @@ impl App {
                     }
                 };
                 self.win_tab_wheel_accum += d;
-                let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
-                if steps != 0 {
+                let next = if sb_heights.is_empty() {
+                    // 가로 탭은 폭으로 흐르니 카드 높이가 뜻이 없다 — 48px 한 칸.
+                    let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
                     self.win_tab_wheel_accum -= steps as f32 * 48.0;
                     // steps>0 = wheel up/left = toward the first tab.
-                    let next =
-                        (self.win_tab_first as i64 - steps).clamp(0, max_first as i64) as usize;
-                    if next != self.win_tab_first {
-                        self.win_tab_first = next;
-                        self.chrome_dirty = true;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                    (self.win_tab_first as i64 - steps).clamp(0, max_first as i64) as usize
+                } else {
+                    crate::session::wheel_step_cards(
+                        &mut self.win_tab_wheel_accum,
+                        self.win_tab_first,
+                        max_first,
+                        &sb_heights,
+                        SIDEBAR_TAB_GAP,
+                    )
+                };
+                if next != self.win_tab_first {
+                    self.win_tab_first = next;
+                    self.chrome_dirty = true;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
                     }
                 }
                 return;
