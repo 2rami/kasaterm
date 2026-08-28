@@ -546,7 +546,7 @@ impl App {
             return;
         }
         let (cx, cy) = self.cursor_px;
-        let still_there = if self.close_freeze.sidebar_first.is_some() {
+        let still_there = if self.close_freeze.sidebar_scroll.is_some() {
             let w = self.tab_strip_w();
             w > 0.0 && cx < w && cy > TITLE_HEIGHT
         } else if self.close_freeze.info_content.is_some() {
@@ -572,7 +572,7 @@ impl App {
     pub(crate) fn freeze_closing(&mut self, what: CloseFreezeKind) {
         self.close_freeze.thaw();
         match what {
-            CloseFreezeKind::Sidebar(first) => self.close_freeze.sidebar_first = Some(first),
+            CloseFreezeKind::Sidebar(px) => self.close_freeze.sidebar_scroll = Some(px),
             CloseFreezeKind::Info(content) => self.close_freeze.info_content = Some(content),
             CloseFreezeKind::Tabs(pane, slots) => {
                 self.close_freeze.tab_slots = Some((pane, slots))
@@ -586,12 +586,38 @@ impl App {
     /// land on a tab scrolled out of the strip. Free wheel-scrolling is left
     /// alone otherwise (sidebar_layout only clamps, never follows).
     pub(crate) fn win_tab_reveal(&mut self, idx: usize) {
-        let vis = self.win_tab_vis.max(1);
-        if idx < self.win_tab_first {
-            self.win_tab_first = idx;
-        } else if idx >= self.win_tab_first.saturating_add(vis) {
-            self.win_tab_first = idx + 1 - vis;
+        if self.tabs_on_top {
+            let vis = self.win_tab_vis.max(1);
+            if idx < self.win_tab_first {
+                self.win_tab_first = idx;
+            } else if idx >= self.win_tab_first.saturating_add(vis) {
+                self.win_tab_first = idx + 1 - vis;
+            }
+            return;
         }
+        // 세로 사이드바는 픽셀로 흐르므로 그 방 카드의 위·아래 변을 직접 칸 안으로
+        // 들인다. 이미 온전히 보이는 카드면 아무것도 안 움직인다 — 자유 굴림을
+        // 되돌리지 않는 것이 이 함수의 규약이다.
+        let Some(win_h) = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().height as f32 / self.effective_scale())
+        else {
+            return;
+        };
+        let heights = self.sidebar_card_heights();
+        let Some(h) = heights.get(idx).copied() else {
+            return;
+        };
+        let card_top = heights[..idx].iter().sum::<f32>() + SIDEBAR_TAB_GAP * idx as f32;
+        let avail = self.sidebar_avail_h(win_h);
+        let mut px = self.sidebar_scroll_px;
+        if card_top < px {
+            px = card_top;
+        } else if card_top + h > px + avail {
+            px = card_top + h - avail;
+        }
+        self.sidebar_scroll_px = px.clamp(0.0, self.sidebar_max_scroll(win_h));
     }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
@@ -1650,7 +1676,7 @@ impl App {
             // 세로 사이드바에서만 자리를 얼린다. 상단 strip 은 폭 기준이라 기하가
             // 다르고, 무엇보다 이 × 는 두 배치가 공용이다.
             if !self.tabs_on_top {
-                self.freeze_closing(crate::CloseFreezeKind::Sidebar(self.win_tab_first));
+                self.freeze_closing(crate::CloseFreezeKind::Sidebar(self.sidebar_scroll_px));
             }
             // close_window 를 직접 부르면 그 창의 claude 가 돌고 있어도 말없이
             // 죽는다. 같은 동작의 가운데 클릭은 confirm_or_close_session 으로

@@ -3497,9 +3497,9 @@ struct CloseFreeze {
     /// 진짜로 어긋난다 — 알약 폭이 라벨 길이를 따라가서, 하나 닫으면 남은 탭이
     /// 넓어지며 × 가 딴 자리로 간다. 남은 탭이 이 슬롯을 앞에서부터 채운다.
     tab_slots: Option<(String, Vec<(f32, f32)>)>,
-    /// 사이드바 방 목록: 얼어붙은 스크롤 시작점. 방이 줄면 스크롤 한계가 작아져
+    /// 사이드바 방 목록: 얼어붙은 스크롤 위치(px). 방이 줄면 스크롤 한계가 작아져
     /// 목록이 아래로 당겨지는 것을 막는다.
-    sidebar_first: Option<usize>,
+    sidebar_scroll: Option<f32>,
     /// 되살리기 패널: 얼어붙은 content 높이. 항목이 줄면 스크롤 상한이 같이 줄어
     /// 목록 전체가 밀린다 — 그 상한을 붙잡아 둔다.
     info_content: Option<f32>,
@@ -3523,7 +3523,7 @@ const FREEZE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// 어느 목록을 얼리나 — `freeze_closing` 의 인자.
 pub(crate) enum CloseFreezeKind {
     /// 사이드바 방 목록. 값은 얼려 둘 스크롤 시작점.
-    Sidebar(usize),
+    Sidebar(f32),
     /// 되살리기 패널. 값은 얼려 둘 content 높이.
     Info(f32),
     /// pane 헤더 탭 띠. `(pane id, [(x, w)])`.
@@ -4944,6 +4944,11 @@ struct App {
     /// clipping — 이 띠는 클립을 안 세운다); the wheel steps this, and
     /// switch/new reveal the active tab via `win_tab_reveal`.
     win_tab_first: usize,
+    /// 세로 사이드바의 스크롤 위치(logical px). 방 목록은 카드 높이가 제각각이라
+    /// 인덱스로 세면 한 번 밀 때 카드 한 장이 통째로 튄다 — 굴린 만큼 그대로
+    /// 흐르게 픽셀로 쥔다(2026-08-28 지시: "한장씩이 아니라 그냥 보이는대로").
+    /// 가로 탭은 폭으로 흐르고 알약이 다 같은 크기라 `win_tab_first` 그대로다.
+    sidebar_scroll_px: f32,
     /// How many window tabs the strip fit last frame. Written by the render
     /// pass (sidebar_layout output), read by the wheel handler for clamping.
     win_tab_vis: usize,
@@ -5722,6 +5727,7 @@ impl App {
             sidebar_menu_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             win_tab_first: 0,
+            sidebar_scroll_px: 0.0,
             win_tab_vis: usize::MAX,
             win_tab_wheel_accum: 0.0,
             win_tab_drag: None,

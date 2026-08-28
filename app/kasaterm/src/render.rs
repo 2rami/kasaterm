@@ -2765,10 +2765,15 @@ impl App {
         // Windowed strip: publish the effective first/visible-count for the
         // wheel handler's clamp, and note per-side overflow for the chevron
         // hints painted with the tabs below.
-        self.win_tab_first = sb_tabs.first().map_or(0, |(i, _)| *i);
+        if self.tabs_on_top {
+            self.win_tab_first = sb_tabs.first().map_or(0, |(i, _)| *i);
+        }
         self.win_tab_vis = sb_tabs.len().max(1);
         // 막대는 `win_tab_first` 가 이 프레임 값으로 갱신된 **뒤에** 재야 한다.
         let sb_scroll = self.sidebar_scroll_geom(sb_win_h);
+        // 방 목록이 실제로 보이는 세로 구간 `(top, height)`. 그리기의 시저와 아래
+        // 히트렉트 자르기가 **같은 값**을 봐야 한다 — 갈리면 화면엔 없는 방이 눌린다.
+        let sb_view = (TITLE_HEIGHT + 18.0, self.sidebar_avail_h(sb_win_h));
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()
@@ -2778,17 +2783,39 @@ impl App {
         // hidden sidebar (file-tree-only / collapsed) must not leave stale tab
         // rects that a header-drag would false-hit as a cross-window drop.
         let sidebar_shown = self.tabs_on_top || self.tab_strip_w() > 0.0;
-        self.window_tab_rects = if sidebar_shown { sb_tabs.clone() } else { Vec::new() };
+        // 시저는 픽셀만 자른다. 잘려 안 보이는 부분이 눌리지 않도록 여기서 세로로
+        // 교집합을 낸다 — 가로 탭 모드는 띠가 따로라 그대로 둔다.
+        let clip_y = |r: (f32, f32, f32, f32)| -> Option<(f32, f32, f32, f32)> {
+            if self.tabs_on_top {
+                return Some(r);
+            }
+            let y0 = r.1.max(sb_view.0);
+            let y1 = (r.1 + r.3).min(sb_view.0 + sb_view.1);
+            (y1 > y0).then_some((r.0, y0, r.2, y1 - y0))
+        };
+        self.window_tab_rects = if sidebar_shown {
+            sb_tabs.iter().filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c))).collect()
+        } else {
+            Vec::new()
+        };
         // 배치도 칸도 같은 히트 벡터에 넣는다 — 칸을 눌러도 목록 행을 누른 것과 똑같이
         // 포커스가 가고 드래그·우클릭까지 그대로 따라온다. 한 pane 이 rect 둘(칸·행)을
         // 갖지만 히트는 `find`(첫 매치)라 무해하다. **행이 먼저** 와야 좁은 칸보다
         // 누르기 쉬운 쪽이 이긴다.
         self.sidebar_row_rects = if sidebar_shown {
-            sb_rows.iter().chain(sb_mini.iter()).cloned().collect()
+            sb_rows
+                .iter()
+                .chain(sb_mini.iter())
+                .filter_map(|(i, id, r)| clip_y(*r).map(|c| (*i, id.clone(), c)))
+                .collect()
         } else {
             Vec::new()
         };
-        self.window_tab_close_rects = if sidebar_shown { sb_closes.clone() } else { Vec::new() };
+        self.window_tab_close_rects = if sidebar_shown {
+            sb_closes.iter().filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c))).collect()
+        } else {
+            Vec::new()
+        };
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
         // click hit-list and the painted boxes share one source of truth.
@@ -3958,6 +3985,10 @@ impl App {
                 // 칼럼 바닥과 오른쪽 실선은 위 크롬 판에서 한 번에 칠했다.
                 let multi = sb_tabs.len() > 1;
                 let mut dock_back_hits: Vec<(usize, (f32, f32, f32, f32))> = Vec::new();
+                // 잘라 그린다 — 픽셀로 흐르니 카드가 칸 경계에 반쯤 걸친 상태가
+                // 정상이다. 시저가 없으면 그 반쪽이 타이틀바와 트레이 위로 그대로
+                // 삐져나온다(사이드바는 원래 클립을 안 세웠다).
+                g.push_clip(0.0, sb_view.0, tab_strip_w, sb_view.1);
                 for (i, (tx, ty, tw, th)) in &sb_tabs {
                     let is_active = *i == sb_active;
                     let is_hover = sb_hover == Some(*i);
@@ -4241,6 +4272,7 @@ impl App {
                         }
                     }
                 }
+                g.pop_clip();
                 self.window_dock_rects = dock_back_hits;
                 // 펼친 방의 pane 줄. 탭 카드가 그 자리를 이미 비워 뒀으므로(레이아웃이
                 // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
@@ -4249,6 +4281,10 @@ impl App {
                 // 덱 위에 마우스가 있을 때 펼 명단. 루프 **밖에서** 그린다 — 안에서
                 // 그리면 뒤에 오는 칸이 위에 얹혀 팝업이 잘린다.
                 let mut deck_tip: Option<(f32, f32, Vec<TabPeek>)> = None;
+                // 잘라 그린다 — 픽셀로 흐르니 카드가 칸 경계에 반쯤 걸친 상태가
+                // 정상이다. 시저가 없으면 그 반쪽이 타이틀바와 트레이 위로 그대로
+                // 삐져나온다(사이드바는 원래 클립을 안 세웠다).
+                g.push_clip(0.0, sb_view.0, tab_strip_w, sb_view.1);
                 for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
                     let (mx, mut my, mut mw, mut mh) = *r;
                     let cur = sb_active_pane.as_deref() == Some(id.as_str());
@@ -4496,6 +4532,7 @@ impl App {
                         }
                     }
                 }
+                g.pop_clip();
                 if let Some((tx, ty, peeks)) = deck_tip {
                     let fs = 11.0;
                     let (pad, line, dot) = (7.0, fs + 5.0, 5.0);

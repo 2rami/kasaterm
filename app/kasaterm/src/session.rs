@@ -2325,11 +2325,8 @@ impl App {
                 self.active_window -= 1;
             }
         }
-        // Keep the same tabs in view when one before the strip window closes;
-        // out-of-range values are clamped by sidebar_layout either way.
-        if idx < self.win_tab_first {
-            self.win_tab_first -= 1;
-        }
+        // 픽셀 스크롤이라 인덱스를 당길 것이 없다 — 닫는 동안은 `close_freeze` 가
+        // 그 위치를 붙잡고, 범위 밖 값은 `sidebar_layout` 이 클램프한다.
         // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
         // 그쪽으로 튀어, ×를 한자리에서 연달아 누를 수가 없었다(2026-08-27 지시:
         // "크롬처럼 한곳에서 마우스누르다가 떼면 재정렬되고"). 새 방·방 전환은
@@ -3453,28 +3450,19 @@ impl App {
         if content_h <= viewport_h + 0.5 {
             return None;
         }
-        let first = self.win_tab_first.min(n - 1);
-        let scrolled =
-            heights[..first].iter().sum::<f32>() + SIDEBAR_TAB_GAP * first as f32;
+        let scrolled = self.sidebar_scroll_px.clamp(0.0, (content_h - viewport_h).max(0.0));
         Some((TITLE_HEIGHT + 18.0, viewport_h, content_h, scrolled))
     }
 
-    /// 마지막 방까지 닿는 최대 스크롤 시작점(세로 사이드바 전용).
-    ///
-    /// **뒤에서부터** 카드를 쌓아 구한다. 예전엔 접힌 높이(stride)로 칸을 나눠
-    /// `n - n_vis` 를 썼는데, 그러면 펼친 방이 있을 때 「접힌 기준으로는 다 들어가니
-    /// 스크롤 0 에 묶어라」가 되어 버린다 — 실제 배치는 펼친 카드만큼 길어져
-    /// 아래쪽 방이 배치 루프의 넘침 검사에 걸려 그려지지도 않는데, 스크롤은
-    /// 막혀 있으니 **그 방들에 영영 닿을 수 없었다**(2026-08-27 지적:
-    /// "사이드바 방 많아지면 스크롤이 안되고 그냥 밑에건 안보여").
-    pub(crate) fn sidebar_max_first(&self, win_h: f32) -> usize {
-        if self.tabs_on_top {
-            // 가로 탭은 폭 기준이라 이 계산이 안 통한다 — 그쪽은 `win_tab_vis` 를 쓴다.
-            return self.windows.len().saturating_sub(self.win_tab_vis.max(1));
-        }
-        let heights = self.sidebar_card_heights();
-        max_first_for(&heights, self.sidebar_avail_h(win_h), SIDEBAR_TAB_GAP)
+    /// 목록을 끝까지 내렸을 때의 스크롤 위치(px). 넘치지 않으면 0.
+    pub(crate) fn sidebar_max_scroll(&self, win_h: f32) -> f32 {
+        max_scroll_for(
+            &self.sidebar_card_heights(),
+            self.sidebar_avail_h(win_h),
+            SIDEBAR_TAB_GAP,
+        )
     }
+
 
     pub(crate) fn sidebar_layout(
         &self,
@@ -3542,9 +3530,10 @@ impl App {
         //
         // 방 × 를 연달아 누르는 동안엔 그 한계를 안 본다. 방이 줄면 한계도 같이
         // 줄어 목록이 아래로 당겨지는데, 그러면 다음 × 가 딴 자리로 간다.
-        let first = match self.close_freeze.sidebar_first.filter(|_| self.close_freeze.live()) {
-            Some(f) => f.min(n.saturating_sub(1)),
-            None => self.win_tab_first.min(self.sidebar_max_first(win_h)),
+        let scroll = match self.close_freeze.sidebar_scroll.filter(|_| self.close_freeze.live())
+        {
+            Some(px) => px,
+            None => self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(win_h)),
         };
         let mut tabs = Vec::new();
         let mut closes = Vec::new();
@@ -3556,8 +3545,8 @@ impl App {
         //
         // 여기는 배치 계산이라 시저를 세워도 이 규칙은 남는다 — 이 rect 들은 그리기와
         // 클릭 판정이 함께 쓰는 값이고, 클릭은 시저가 안 자른다.
-        let mut y = top;
-        for i in first..n {
+        let mut y = top - scroll;
+        for i in 0..n {
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,
             // 그 목록은 info 탭이 방→pane→탭→프로세스로 이미 그리는 것의 얕은
             // 사본이었다(2026-08-24 지시: "목록표시는 info에서 보면되고").
@@ -3565,8 +3554,13 @@ impl App {
             // 함수를 보므로 배치와 한계가 갈릴 수 없다.
             let (body_h, list_h, hidden) = self.sidebar_card_metrics(i);
             let h = SIDEBAR_TAB_H + list_h;
-            if !tabs.is_empty() && y + h > top + avail_h {
-                break;
+            // 뷰포트에 조금도 안 걸치면 rect 를 아예 안 낸다. **시저는 픽셀만 자르지
+            // 클릭은 안 자르므로**, 밖에 있는 카드를 등록하면 화면엔 없는 방이
+            // 눌린다. 걸친 카드는 그대로 낸다 — 잘라 그리는 건 시저 몫이고, 히트는
+            // 렌더가 뷰포트와 교집합 내서 등록한다.
+            if y + h <= top || y >= top + avail_h {
+                y += h + SIDEBAR_TAB_GAP;
+                continue;
             }
             tabs.push((i, (tab_x, y, tab_w, h)));
             if n > 1 {
@@ -5649,67 +5643,20 @@ fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<
     (!taken(s)).then(|| s.to_string())
 }
 
-/// 편집기 명령과 파일 경로로 셸에 칠 한 줄을 만든다. `{}` 가 있으면 그 자리에,
-/// 없으면 맨 뒤에 경로가 들어간다(`code -w {} --goto 1` 처럼 인자 뒤에 뭔가 더
-/// 붙는 편집기가 있다). 경로는 홑따옴표로 감싸고 내부 `'` 를 POSIX 방식으로
-/// 카드 높이 목록에서 **마지막 장까지 닿는** 최대 스크롤 시작점.
-///
-/// 뒤에서부터 쌓아 `avail_h` 를 넘기는 순간의 다음 칸이 답이다. 카드 높이가
-/// 제각각(펼친 방은 길다)이라 `총개수 - 한칸높이로_나눈_개수` 로는 못 구한다 —
-/// 그렇게 구하면 펼친 방이 있을 때 스크롤 한계가 실제보다 작게 나와 목록 끝이
-/// 손에 안 닿는다.
-///
-/// 마지막 한 장은 `avail_h` 를 넘겨도 답에 넣는다. 배치 루프도 첫 장은 넘침
-/// 검사를 건너뛰므로(`!tabs.is_empty()`), 여기서 잘라내면 카드 하나가 칸보다 큰
-/// 순간 목록이 통째로 비어 버린다.
-/// 쌓인 굴림량(px)을 **카드 실제 높이**만큼 소비해 새 시작 인덱스를 낸다.
-///
-/// 예전엔 48px 마다 한 칸이었다. 접힌 카드가 57px(`SIDEBAR_TAB_H` + 갭)이라 화면이
-/// 손보다 19% 빨랐고, 방을 펼치면 카드가 226px 까지 자라 **한 번 밀 때 화면이 손의
-/// 4.7배로 튀었다**(2026-08-28 지적: "사이드바 스크롤되긴하는데 뭔가이상한데").
-/// 넘길 카드의 높이를 그대로 쓰면 손가락 이동량과 목록 이동량이 같아진다.
-///
-/// 남은 누적은 `accum` 에 되돌린다 — 트랙패드의 잔 델타가 버려지면 천천히 미는
-/// 동작이 통째로 먹통이 된다. 다만 양 끝에 닿았으면 버린다: 안 그러면 끝에서 민
-/// 만큼이 계속 쌓여, 반대로 돌릴 때 그 양을 되갚기 전까지 움직이지 않는다.
-pub(crate) fn wheel_step_cards(
-    accum: &mut f32,
-    first: usize,
-    max_first: usize,
-    heights: &[f32],
-    gap: f32,
-) -> usize {
-    // 높이가 0 인 카드가 섞여도 한 걸음은 전진해야 한다 — 안 그러면 여기서 돈다.
-    let stride = |i: usize| (heights.get(i).copied().unwrap_or(SIDEBAR_TAB_H) + gap).max(1.0);
-    let mut cur = first.min(max_first);
-    loop {
-        if cur < max_first && *accum <= -stride(cur) {
-            *accum += stride(cur);
-            cur += 1;
-        } else if cur > 0 && *accum >= stride(cur - 1) {
-            *accum -= stride(cur - 1);
-            cur -= 1;
-        } else {
-            break;
-        }
-    }
-    if (cur == 0 && *accum > 0.0) || (cur >= max_first && *accum < 0.0) {
-        *accum = 0.0;
-    }
-    cur
-}
 
-pub(crate) fn max_first_for(heights: &[f32], avail_h: f32, gap: f32) -> usize {
+/// 목록을 끝까지 내렸을 때의 스크롤 위치(px). 넘치지 않으면 0.
+///
+/// 예전엔 「마지막 방이 보이는 최소 시작 **인덱스**」였다. 카드 단위로만 굴릴 때는
+/// 그걸로 충분했지만, 픽셀로 흐르는 지금은 카드 중간에서 멈추는 자리가 정상이라
+/// 인덱스로는 표현이 안 된다. 칸보다 큰 카드 한 장의 아래쪽을 들여다보는 것도
+/// 인덱스로는 방법이 아예 없었다.
+pub(crate) fn max_scroll_for(heights: &[f32], avail_h: f32, gap: f32) -> f32 {
     let n = heights.len();
-    let mut acc = 0.0f32;
-    for i in (0..n).rev() {
-        let need = if i + 1 == n { heights[i] } else { acc + gap + heights[i] };
-        if i + 1 < n && need > avail_h {
-            return i + 1;
-        }
-        acc = need;
+    if n == 0 {
+        return 0.0;
     }
-    0
+    let content = heights.iter().sum::<f32>() + gap * n.saturating_sub(1) as f32;
+    (content - avail_h).max(0.0)
 }
 
 /// 끊어 붙인다 — 공백·한글·따옴표가 든 파일명이 명령을 쪼개지 못하게.
@@ -6278,7 +6225,7 @@ mod character_swap_plan_tests {
 
 #[cfg(test)]
 mod sidebar_scroll_tests {
-    use super::{max_first_for, wheel_step_cards};
+    use super::max_scroll_for;
 
     // 실측 치수: 접힌 카드 54, 카드 사이 3, pane 2개를 편 카드는 124
     // (54 + (36+13*2).clamp(46,150) + 8).
@@ -6286,8 +6233,12 @@ mod sidebar_scroll_tests {
     const OPEN2: f32 = 124.0;
     const GAP: f32 = 3.0;
 
-    /// 예전 계산 — 접힌 높이로 칸을 나눠 `n - n_vis` 를 한계로 삼았다.
-    /// 무엇이 어긋났는지 비교하려고 남긴다.
+    fn content(heights: &[f32]) -> f32 {
+        heights.iter().sum::<f32>() + GAP * heights.len().saturating_sub(1) as f32
+    }
+
+    /// 예전 계산 — 접힌 높이로 칸을 나눠 시작 인덱스의 한계를 냈다. 무엇이
+    /// 어긋났는지 비교하려고 남긴다.
     fn old_max_first(n: usize, avail_h: f32) -> usize {
         let stride = FOLDED + GAP;
         let n_vis = n.min((((avail_h + GAP) / stride) as usize).max(1));
@@ -6301,134 +6252,58 @@ mod sidebar_scroll_tests {
         let mut heights = vec![FOLDED; 7];
         heights.extend([OPEN2; 3]);
         let avail = 752.0;
-        let total: f32 = heights.iter().sum::<f32>() + GAP * (heights.len() - 1) as f32;
+        let total = content(&heights);
         assert!(total > avail, "전제가 깨졌다: 목록이 칸에 다 들어간다 ({total} <= {avail})");
-
         assert_eq!(
             old_max_first(heights.len(), avail),
             0,
             "옛 계산이 0 이 아니면 이 테스트가 재현하려는 버그가 아니다"
         );
-        let max_first = max_first_for(&heights, avail, GAP);
-        assert!(
-            max_first > 0,
-            "펼친 방 때문에 목록이 넘치는데 스크롤 한계가 0 이면 아래쪽 방에 영영 못 닿는다"
-        );
 
-        // 한계까지 굴렸을 때 남은 카드가 실제로 칸 안에 들어와야 한다 —
-        // 한계만 늘리고 여전히 넘치면 마지막 방은 그려지지 않는다.
-        let tail: f32 = heights[max_first..].iter().sum::<f32>()
-            + GAP * (heights.len() - max_first - 1) as f32;
-        assert!(tail <= avail, "한계까지 굴려도 꼬리가 넘친다: {tail} > {avail}");
+        let max = max_scroll_for(&heights, avail, GAP);
+        assert!(
+            max > 0.0,
+            "펼친 방 때문에 목록이 넘치는데 한계가 0 이면 아래쪽 방에 영영 못 닿는다"
+        );
+        // 끝까지 내리면 마지막 카드 바닥이 칸 바닥에 딱 온다 — 더도 덜도 아니어야
+        // 한다. 모자라면 꼬리가 잘리고, 넘치면 빈 자리가 열린다.
+        assert!((max + avail - total).abs() < 0.01, "끝이 어긋난다: {max} + {avail} vs {total}");
     }
 
     #[test]
     fn fitting_list_never_scrolls() {
-        let heights = vec![FOLDED; 5];
-        assert_eq!(max_first_for(&heights, 752.0, GAP), 0);
+        assert_eq!(max_scroll_for(&[FOLDED; 5], 752.0, GAP), 0.0);
+        assert_eq!(max_scroll_for(&[FOLDED], 752.0, GAP), 0.0);
+        assert_eq!(max_scroll_for(&[], 752.0, GAP), 0.0);
     }
 
     #[test]
-    fn one_card_taller_than_the_column_still_shows() {
-        // 카드 한 장이 칸보다 커도 한계는 마지막 장을 가리켜야 한다. n 을 반환하면
-        // 배치 루프가 아무것도 못 그려 목록이 통째로 빈다.
-        let heights = vec![FOLDED, 400.0];
-        let max_first = max_first_for(&heights, 300.0, GAP);
-        assert_eq!(max_first, 1);
-        assert!(max_first < heights.len(), "한계가 목록 밖을 가리킨다");
-    }
-
-    #[test]
-    fn single_room_has_no_scroll() {
-        assert_eq!(max_first_for(&[FOLDED], 752.0, GAP), 0);
-        assert_eq!(max_first_for(&[], 752.0, GAP), 0);
+    fn a_card_taller_than_the_column_scrolls_to_its_bottom() {
+        // 카드 한 장이 칸보다 커도 그 아래쪽까지 볼 수 있어야 한다. 인덱스로 셀
+        // 때는 카드 안을 들여다볼 방법이 아예 없었다 — 시작점이 그 카드 머리에
+        // 묶여 있었다.
+        let heights = [FOLDED, 400.0];
+        let avail = 300.0;
+        let max = max_scroll_for(&heights, avail, GAP);
+        assert!(max > 0.0);
+        assert!((max + avail - content(&heights)).abs() < 0.01);
     }
 
     #[test]
     fn every_room_is_reachable_by_scrolling() {
-        // 어떤 조합이든 한계까지 굴리면 마지막 방이 보여야 한다.
+        // 어떤 조합이든 한계까지 내리면 마지막 방 바닥이 칸 안에 들어와야 한다.
         for open_at in 0..8usize {
             let mut heights = vec![FOLDED; 8];
             heights[open_at] = OPEN2;
             heights[(open_at + 3) % 8] = OPEN2;
             let avail = 400.0;
-            let first = max_first_for(&heights, avail, GAP);
-            assert!(first < heights.len(), "open_at={open_at}: 한계가 목록 밖이다");
-            let tail: f32 = heights[first..].iter().sum::<f32>()
-                + GAP * (heights.len() - first - 1) as f32;
+            let max = max_scroll_for(&heights, avail, GAP);
             assert!(
-                tail <= avail || heights.len() - first == 1,
-                "open_at={open_at}: 한계까지 굴려도 꼬리가 {tail} 로 넘친다"
+                max + avail >= content(&heights) - 0.01,
+                "open_at={open_at}: 한계까지 내려도 꼬리가 넘친다"
             );
         }
     }
-
-    /// 예전 걸음 — 카드 높이와 무관하게 48px 마다 한 칸이었다.
-    fn old_step(accum: &mut f32, first: usize, max_first: usize) -> usize {
-        let steps = (*accum / 48.0).trunc() as i64;
-        *accum -= steps as f32 * 48.0;
-        (first as i64 - steps).clamp(0, max_first as i64) as usize
-    }
-
-    #[test]
-    fn a_step_costs_exactly_one_card() {
-        let heights = [FOLDED; 6];
-        // 카드 한 장에서 1px 모자라면 아직 안 넘어간다.
-        let mut accum = -(FOLDED + GAP) + 1.0;
-        assert_eq!(wheel_step_cards(&mut accum, 0, 5, &heights, GAP), 0);
-        // 딱 한 장을 채우면 한 칸.
-        let mut accum = -(FOLDED + GAP);
-        assert_eq!(wheel_step_cards(&mut accum, 0, 5, &heights, GAP), 1);
-        assert_eq!(accum, 0.0, "정확히 한 장을 밀면 잔량이 없어야 한다");
-        // 옛 걸음은 같은 양에 이미 한 칸을 갔고, 그 19% 가 손보다 빠른 만큼이었다.
-        let mut old_accum = -(FOLDED + GAP) + 1.0;
-        assert_eq!(old_step(&mut old_accum, 0, 5), 1);
-    }
-
-    #[test]
-    fn an_expanded_card_needs_its_own_height() {
-        // 편 방이 첫 칸이면 그 카드를 다 밀어야 넘어간다.
-        let heights = [OPEN2, FOLDED, FOLDED, FOLDED];
-        let mut accum = -100.0;
-        assert_eq!(
-            wheel_step_cards(&mut accum, 0, 3, &heights, GAP),
-            0,
-            "124px 카드가 100px 만에 넘어가면 화면이 손보다 빠르다"
-        );
-        assert_eq!(accum, -100.0, "못 넘긴 양은 남아 다음 굴림에 이어져야 한다");
-        // 옛 걸음은 같은 100px 로 두 칸을 넘겼다 — 카드 하나 반을 건너뛴 셈이다.
-        let mut old_accum = -100.0;
-        assert_eq!(old_step(&mut old_accum, 0, 3), 2);
-        // 남은 24px 을 마저 밀면 그제야 한 칸.
-        accum -= 27.0;
-        assert_eq!(wheel_step_cards(&mut accum, 0, 3, &heights, GAP), 1);
-    }
-
-    #[test]
-    fn the_ends_do_not_bank_leftover_scroll() {
-        let heights = [FOLDED; 4];
-        // 끝에서 한참 더 밀어도 자리는 그대로고, 민 양이 쌓이지 않는다.
-        let mut accum = -2000.0;
-        assert_eq!(wheel_step_cards(&mut accum, 3, 3, &heights, GAP), 3);
-        assert_eq!(accum, 0.0, "쌓아 두면 되돌릴 때 그만큼 먹통이 된다");
-        // 그래서 반대로 한 장만 밀어도 곧바로 올라온다.
-        accum += FOLDED + GAP;
-        assert_eq!(wheel_step_cards(&mut accum, 3, 3, &heights, GAP), 2);
-    }
-
-    #[test]
-    fn small_nudges_accumulate() {
-        let heights = [FOLDED; 4];
-        // 트랙패드의 잔 델타를 버리면 천천히 미는 동작이 통째로 안 먹는다.
-        let mut accum = 0.0;
-        let mut first = 0;
-        for _ in 0..2 {
-            accum -= 30.0;
-            first = wheel_step_cards(&mut accum, first, 3, &heights, GAP);
-        }
-        assert_eq!(first, 1, "30px 두 번은 카드 한 장을 넘는다");
-    }
-
 }
 
 /// 복원이 **같은 학생을 둘 앉히지 않는가.**

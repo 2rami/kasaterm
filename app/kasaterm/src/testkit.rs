@@ -6701,9 +6701,9 @@ impl App {
             let n_rooms = self.windows.len();
             let last = tabs.last().map(|(i, _)| *i);
             eprintln!(
-                "[autowheel] sidebar rooms={n_rooms} first={} max_first={} shown={:?}..{:?}                  last_reached={}",
-                self.win_tab_first,
-                self.sidebar_max_first(win_h),
+                "[autowheel] sidebar rooms={n_rooms} scroll={:.0} max_scroll={:.0} shown={:?}..{:?}                  last_reached={}",
+                self.sidebar_scroll_px,
+                self.sidebar_max_scroll(win_h),
                 tabs.first().map(|(i, _)| *i),
                 last,
                 last.is_some_and(|i| i + 1 == n_rooms)
