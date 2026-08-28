@@ -46,7 +46,7 @@ export default defineConfig({
     // (2026-08-25: theme-roster 가 빠져 있어 다른 테마 학생 프사가 다 이니셜로 떴다).
     // mcp.ts 에 새 엔드포인트를 만들면 이 목록에도 넣을 것.
     proxy: {
-      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|background-kill|peek|transcript|transcript-raw|conversation|session-transcript-raw|subagent-transcript-raw|pane-tasks|schale-state|git-status|git-panel|git-commit|git-push|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|session-save|room-cd|close-pane|schedule|schedule-delete|slash-commands|spawn-student|repersona|focus|send|terminal-reveal|paste-active|paste-image|sent-images|image-file|open-file|list-dir|design-tokens|settings|theme-roster|character-face|character-sprite|character-sprite-status)(/|$|\\?)':
+      '^/(mode|sessions|recent-sessions|characters|board|layout|claude-usage|background-agents|background-kill|peek|transcript|transcript-raw|conversation|session-transcript-raw|subagent-transcript-raw|pane-tasks|schale-state|git-status|git-panel|git-commit|git-push|blocks|messages|subagents|session-resume|session-switch|session-new|session-close|session-save|room-cd|close-pane|schedule|schedule-delete|slash-commands|spawn-student|repersona|focus|send|terminal-reveal|paste-active|paste-image|sent-images|image-file|open-file|list-dir|design-tokens|settings|theme-roster|character-face|character-sprite|character-sprite-status|machines|pane-migrate)(/|$|\\?)':
         { target: MCP_TARGET, changeOrigin: true, headers: { origin: MCP_TARGET } }
     }
   }

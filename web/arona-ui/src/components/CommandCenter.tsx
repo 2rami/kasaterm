@@ -3,15 +3,17 @@ import { BoardPanel } from './BoardPanel';
 import { AgentsPanel } from './AgentsTab';
 import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
+import { MachinesTab } from './MachinesTab';
 import type { BackgroundAgent } from '@/lib/mcp';
 
-type CenterTab = 'board' | 'agents' | 'schedule' | 'git';
+type CenterTab = 'board' | 'agents' | 'schedule' | 'git' | 'machines';
 
 const TAB_LABELS: Record<CenterTab, string> = {
   board: '보드',
   agents: '에이전트',
   schedule: '스케줄',
   git: '소스 컨트롤',
+  machines: '이사',
 };
 
 export interface CommandCenterProps {
@@ -34,7 +36,7 @@ export interface CommandCenterProps {
 export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGitTab, onCollapse }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('board'); // 우측 기본 = 보드(현황·소통)
   // 탭 순서 — 드래그로 재정렬(거노). 기본 보드/에이전트/스케줄/소스컨트롤.
-  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'agents', 'schedule', 'git']);
+  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'agents', 'schedule', 'git', 'machines']);
   const [dragOverTab, setDragOverTab] = useState<CenterTab | null>(null); // 드래그 중 삽입선 위치
   const dragTabRef = useRef<CenterTab | null>(null);
   const reorderTab = (target: CenterTab) => {
@@ -146,6 +148,9 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
       ) : tab === 'git' ? (
         /* 소스 컨트롤 — 활성 pane cwd 의 git 상태·커밋·푸시(스케줄 옆, 거노). */
         <GitTab />
+      ) : tab === 'machines' ? (
+        /* 이사 — 기계(맥미니 등)별 학생 목록 + 보내기/데려오기(pane-migrate). */
+        <MachinesTab />
       ) : (
         /* 스케줄/루프 — 반복 지시 루프 · 예약(크론) · 타이머/리마인더. */
         <ScheduleTab />

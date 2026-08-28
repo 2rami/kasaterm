@@ -69,6 +69,9 @@ export interface Agent {
   doneOutcome?: string;
   doneSummary?: string;
   doneAgoSecs?: number;
+  /** 이사 간 학생이 실제로 도는 기계 라벨(board.machine) — 로컬 학생은 없음.
+   *  이사 탭 섹션 분류·보드 칩이 이걸로 가른다. */
+  machine?: string;
 }
 
 /** 한 학생(pane)이 소환한 서브에이전트(Task/Agent) — 백엔드 /subagents 가

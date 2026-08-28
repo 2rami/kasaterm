@@ -127,6 +127,9 @@ interface BoardRow {
   done_outcome?: string;
   done_summary?: string;
   done_ago_secs?: number;
+  /** 이사 간 학생의 로컬 미러 행 — 실제로 도는 기계 라벨(맥미니 등). 로컬 학생은 없음.
+   *  서버가 이미 심는 값인데 UI 가 버리고 있었다 — 이사 탭·보드 칩이 이걸로 가른다. */
+  machine?: string;
 }
 
 function toStatus(s?: string): StatusKind {
@@ -194,7 +197,8 @@ function toAgent(r: BoardRow): Agent {
     windowIdx: r.window_idx ?? 0,
     doneOutcome: r.done_outcome,
     doneSummary: r.done_summary,
-    doneAgoSecs: r.done_ago_secs
+    doneAgoSecs: r.done_ago_secs,
+    machine: r.machine
   };
 }
 
@@ -1122,5 +1126,68 @@ export async function fetchBlocks(surfaceId: string, limit = 50): Promise<PaneBl
     return Array.isArray(d?.blocks) ? d.blocks : [];
   } catch {
     return [];
+  }
+}
+
+// ── 기계(맥미니 등)로 학생 이사 — 이사 탭 ──────────────────────────────────
+
+/** 원격 기계 kasa-serve-web 의 /term/panes 한 행을 그대로 중계한 것 — 전부 없을 수 있다. */
+export interface MachinePane {
+  id?: string | null;
+  name?: string | null;
+  title?: string | null;
+  status?: string | null;
+  window?: number | null;
+  color?: string | null;
+  slug?: string | null;
+}
+
+export interface MachineInfo {
+  label: string;
+  base?: string;
+  online?: boolean;
+  /** 마지막으로 닿은 지 몇 초 — 한 번도 못 닿았으면 null. */
+  ago_secs?: number | null;
+  /** online=false 면 빈 배열. */
+  panes: MachinePane[];
+}
+
+/** GET /machines — 등록된 기계 목록 + 각 기계의 학생(panes). fail-soft 빈 배열. */
+export async function fetchMachines(): Promise<MachineInfo[]> {
+  try {
+    const r = await fetch(`${BASE}/machines`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean; machines?: MachineInfo[] };
+    if (!Array.isArray(d?.machines)) return [];
+    return d.machines.map((m) => ({ ...m, panes: Array.isArray(m.panes) ? m.panes : [] }));
+  } catch {
+    return [];
+  }
+}
+
+export interface MigrateResult { ok: boolean; remoteId?: string; error?: string }
+
+/** POST /pane-migrate — 학생을 기계 label 로 보내거나 "local" 로 데려온다. 서버가 레포
+ *  동기화까지 하므로 **최대 240초** 걸린다 — 기본 fetch 는 그 전에 끊길 수 있어
+ *  AbortController 로 250초를 명시한다. cwd 매핑은 서버 몫이라 안 보낸다. */
+export async function postMigrate(pane: string, target: string): Promise<MigrateResult> {
+  if (!pane || !target) return { ok: false, error: '대상이 없어요' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 250_000);
+  try {
+    const r = await fetch(`${BASE}/pane-migrate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pane, target, force: false }),
+      signal: ctrl.signal,
+    });
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean; remote_id?: string; error?: string };
+    if (!r.ok || d?.ok === false) return { ok: false, error: d?.error || `서버 오류(${r.status})` };
+    return { ok: true, remoteId: d?.remote_id };
+  } catch (e) {
+    const aborted = e instanceof DOMException && e.name === 'AbortError';
+    return { ok: false, error: aborted ? '250초가 지나도 안 끝났어요' : '연결이 안 닿아요' };
+  } finally {
+    clearTimeout(timer);
   }
 }

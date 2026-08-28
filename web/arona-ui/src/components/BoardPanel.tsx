@@ -125,7 +125,13 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                 {/* 작업중=sky(펄스) / 확인필요(waiting_for)=coral(깜빡) / 그 외=초록(정적) */}
                 <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: awaiting ? 'var(--cth-coral)' : busy ? 'var(--cth-sky)' : 'var(--cth-status-success)', animation: busy ? 'cth-dot-pulse 1.3s ease-in-out infinite' : awaiting ? 'cth-blink 0.9s ease-in-out infinite' : undefined }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                    <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+                    {/* 이사 간 학생 — 실제로 도는 기계 라벨(board.machine). 로컬 행과 한눈에 구분. */}
+                    {a.machine && (
+                      <span style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: 'var(--cth-ink-300)', border: '1px solid var(--cth-cream-200)', borderRadius: 5, padding: '0px 5px' }}>{a.machine}</span>
+                    )}
+                  </div>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
                 </div>
                 <button
