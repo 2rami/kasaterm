@@ -4065,14 +4065,28 @@ impl App {
             }
         }
         self.active_window = active_window.min(self.windows.len().saturating_sub(1));
-        // Never leave the user staring at a blank window: if every leaf in the
-        // active window failed to spawn (or a corrupt index left no live slot),
-        // reset to a single fresh pane so the invariant (active slot == None)
-        // holds and something is on screen.
+        // 활성 방이 하나도 안 살아났을 때 화면이 비지 않게 메운다.
+        //
+        // ⚠️ **다른 방은 절대 건드리지 마라.** 예전에는 여기서 `windows` 를 통째로
+        // `vec![None]` 으로 갈아 버려, 활성 방 하나가 못 살아난 것만으로 **멀쩡히
+        // 복원된 나머지 방이 전부 사라졌다.** 2026-08-28 에 실제로 그렇게 잃었다:
+        // 원격으로 이사 보낸 학생들이 활성 방에 몰려 있었는데 그 기계에 못 닿자,
+        // 방 여섯 개가 빈 pane 하나로 뭉개지고 앱이 그 상태를 그대로 저장해
+        // 「어느 학생이 어느 방에 있었는지」까지 지워졌다.
         if self.pty_layout.is_none() {
-            self.windows = vec![None];
-            self.active_window = 0;
-            let _ = self.spawn_session_pane();
+            if self.windows.is_empty() {
+                self.windows.push(None);
+                self.active_window = 0;
+            } else if let Some(tree) =
+                self.windows.get_mut(self.active_window).and_then(Option::take)
+            {
+                // 인덱스가 밀려 살아 있는 방을 가리키게 된 경우다. 그 방을 활성으로
+                // 올린다 — 살아난 방을 두고 빈 pane 을 띄우는 쪽이 더 나쁘다.
+                self.pty_layout = Some(tree);
+            }
+            if self.pty_layout.is_none() {
+                let _ = self.spawn_session_pane();
+            }
         }
         if let Some(first) = self
             .pty_layout

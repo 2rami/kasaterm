@@ -660,10 +660,15 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
     let mut bits = vec![vec![0u8; W]; H];
     let mut labels: Vec<(usize, usize, String)> = Vec::new();
     for (id, x, y, w, h) in rects {
-        let x0 = cx(*x);
-        let y0 = cy(*y);
-        let x1 = cx(x + w).min(W - 1).max(x0 + 2);
-        let y1 = cy(y + h).min(H - 1).max(y0 + 2);
+        // ⚠️ 순서가 계약이다. 전에는 `.min(W - 1).max(x0 + 2)` 였는데, `max` 가
+        // 상한을 **덮어써서** 아주 좁은 pane(x0 이 오른쪽 끝에 붙은 경우) 하나로
+        // `bits[..][W]` 를 짚고 패닉했다 — 방이 많아 pane 이 잘게 쪼개지면 재현된다
+        // (2026-08-28 실측: 창 14개에서 `windows` 가 통째로 죽었다).
+        // x0 을 먼저 묶어 두면 `x0 + 2` 가 상한을 넘을 수 없다.
+        let x0 = cx(*x).min(W - 3);
+        let y0 = cy(*y).min(H - 3);
+        let x1 = cx(x + w).clamp(x0 + 2, W - 1);
+        let y1 = cy(y + h).clamp(y0 + 2, H - 1);
         for xx in (x0 + 1)..x1 {
             bits[y0][xx] |= L | R;
             bits[y1][xx] |= L | R;
@@ -2078,4 +2083,41 @@ fn run_statusline() {
     }
 
     println!("{}{sid_marker}", parts.join(&sep));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 오른쪽 끝에 붙은 아주 좁은 pane 이 격자 밖을 짚지 않는다.
+    ///
+    /// 2026-08-28 에 `windows` 가 이 자리에서 통째로 죽었다(방 14개). 원인은
+    /// `.min(W-1).max(x0+2)` 의 순서였고, `max` 가 상한을 덮어써 인덱스가 폭을
+    /// 넘었다. 방이 많아 pane 이 잘게 쪼개질 때만 나오므로 손으로는 잘 안 걸린다.
+    #[test]
+    fn narrow_pane_at_the_edge_stays_inside_the_grid() {
+        // 폭 0 짜리도 준다 — 저장된 비율이 반올림으로 그렇게 나올 수 있다.
+        let rects = vec![
+            ("%1".to_string(), 0u16, 0u16, 100u16, 100u16),
+            ("%2".to_string(), 100, 100, 0, 0),
+            ("%3".to_string(), 99, 99, 1, 1),
+            ("%4".to_string(), 98, 0, 2, 100),
+        ];
+        let out = draw_boxes(&rects); // 패닉하면 여기서 끝난다
+        assert!(!out.is_empty());
+        assert!(out.lines().all(|l| l.chars().count() <= 46));
+    }
+
+    /// 방 하나를 잘게 쪼갠 실제 모양 — 회귀가 나면 여기서 먼저 걸린다.
+    #[test]
+    fn many_panes_in_one_window_do_not_panic() {
+        let n = 19u16;
+        let rects: Vec<_> = (0..n)
+            .map(|i| {
+                let w = 100 / n;
+                (format!("%{i}"), i * w, 0, w, 100)
+            })
+            .collect();
+        assert!(!draw_boxes(&rects).is_empty());
+    }
 }
