@@ -941,6 +941,78 @@ async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /machines` — 기계 명부와 기계별 세션 목록(캐시). 아로나 이사 탭이 폴링한다.
+async fn machines_handler() -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": true, "machines": crate::machines::snapshot() })),
+    )
+}
+
+/// `POST /pane-migrate` body `{pane, target, cwd?, force?}` — 이사를 웹 UI 에서.
+/// `target` 은 기계 라벨 또는 `"local"`(데려오기). 주소·경로 매핑은 여기(서버)가
+/// 푼다 — UI 가 기계의 파일시스템 구조를 알 이유가 없다.
+///
+/// 이사는 240초까지 걸리는 동기 작업이라 blocking 스레드로 내린다 — 안 내리면
+/// tokio 워커 하나가 그동안 통째로 잠긴다.
+async fn pane_migrate_handler(
+    backend: Arc<dyn Backend>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return err("JSON body 가 필요해요".into());
+    };
+    let Some(pane) = v.get("pane").and_then(|x| x.as_str()).map(str::to_string) else {
+        return err("`pane` 이 필요해요".into());
+    };
+    let Some(target) = v.get("target").and_then(|x| x.as_str()).map(str::to_string) else {
+        return err("`target`(기계 라벨 또는 \"local\") 이 필요해요".into());
+    };
+    let cwd = v.get("cwd").and_then(|x| x.as_str()).map(str::to_string);
+    let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+    let out = tokio::task::spawn_blocking(move || {
+        if target == "local" {
+            backend.migrate_pane_back(&pane, cwd.as_deref(), force)
+        } else {
+            let Some(m) = crate::machines::find(&target) else {
+                anyhow::bail!("기계 {target} 를 명부에서 못 찾았어요 — machines.json 을 확인");
+            };
+            // cwd 미지정이면 지금 pane 의 로컬 경로를 명부 roots 로 매핑한다.
+            let cwd = match cwd {
+                Some(c) => Some(c),
+                None => {
+                    let local = backend
+                        .collab_board()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|p| p.surface_id == pane)
+                        .map(|p| p.cwd);
+                    match local {
+                        Some(l) if !l.is_empty() => {
+                            Some(crate::machines::map_local_to_remote(&m, &l).ok_or_else(
+                                || {
+                                    anyhow::anyhow!(
+                                        "{l} 를 {target} 경로로 못 옮겼어요 — machines.json roots 에 규칙을 적거나 cwd 를 지정"
+                                    )
+                                },
+                            )?)
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            backend.migrate_pane(&pane, &m.base, cwd.as_deref(), force)
+        }
+    })
+    .await;
+    match out {
+        Ok(Ok(id)) => Json(serde_json::json!({ "ok": true, "remote_id": id })),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(e) => err(format!("작업 스레드 실패: {e}")),
+    }
+}
+
 /// `GET /board` — JSON snapshot of every pane's activity (`collab.board`) for
 /// the board panel to poll: `{ board: [{surface_id, intent, status, files}] }`.
 async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -4012,7 +4084,42 @@ async fn term_repo_post(
     }
     let (_, head) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--short".into(), "HEAD".into()]);
     let (_, br) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()]);
+    // claude 신뢰 선탑재 — 이 기계에서 처음 보는 폴더면 claude 가 뜨자마자
+    // 「이 폴더를 신뢰하나」 화면에서 멈추고, 이사 온 학생은 자동 resume 이
+    // 그 화면에 먹혀 밤새 서 있는다(2026-08-27 이사 실측 메모). 레포를 준비하는
+    // 이 자리가 곧 「여기서 claude 를 돌리겠다」는 뜻이므로 여기서 심는다.
+    preseed_claude_trust(path);
     Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path }))
+}
+
+/// `~/.claude.json` 의 projects[path] 에 신뢰 표시를 심는다. 실패해도 조용히
+/// 넘어간다 — 없으면 사람이 한 번 눌러 주면 되는 것이지 이사가 못 갈 일은 아니다.
+///
+/// ⚠️ claude 가 같은 파일을 쓰는 중일 수 있다 — 통짜 읽고 temp+rename 으로
+/// 원자 교체한다. 드물게 서로의 갱신을 덮을 수 있지만 이 파일은 claude 가
+/// 수시로 다시 채우는 캐시라 잃어도 다음 실행이 복구한다.
+fn preseed_claude_trust(path: &str) {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let cfg = std::path::Path::new(&home).join(".claude.json");
+    let Ok(raw) = std::fs::read_to_string(&cfg) else { return };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let Some(projects) = v
+        .as_object_mut()
+        .and_then(|o| o.entry("projects").or_insert(serde_json::json!({})).as_object_mut())
+    else {
+        return;
+    };
+    let entry = projects.entry(path.to_string()).or_insert(serde_json::json!({}));
+    if entry.get("hasTrustDialogAccepted").and_then(|b| b.as_bool()) == Some(true) {
+        return;
+    }
+    if let Some(o) = entry.as_object_mut() {
+        o.insert("hasTrustDialogAccepted".into(), serde_json::json!(true));
+    }
+    let tmp = cfg.with_extension("json.kasaterm-tmp");
+    if std::fs::write(&tmp, v.to_string()).and_then(|_| std::fs::rename(&tmp, &cfg)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// `POST /term/spawn?cwd=<dir>&cols=&rows=` → `{ok, id}` — 새 셸 세션.
@@ -4093,6 +4200,139 @@ fn valid_session_id(sid: &str) -> bool {
         && sid.len() <= 80
         && sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
+
+/// `GET /term/transcript?cwd=<abs>&sid=<uuid>` — 업로드(POST)와 대칭인 내려받기.
+/// 역이사(원격→로컬 되가져오기)가 대화를 걷어 갈 때 쓴다. 통짜 바이트로 준다 —
+/// 업로드 쪽 상한(512MB)과 같은 급이라 JSON 래핑 없이 그대로가 맞다.
+async fn term_transcript_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let bad = |m: &str| {
+        (axum::http::StatusCode::BAD_REQUEST, m.to_string()).into_response()
+    };
+    let Some(cwd) = q.get("cwd").filter(|s| s.starts_with('/')) else {
+        return bad("`cwd`(이 기계 기준 절대경로) 가 필요해요");
+    };
+    let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)) else {
+        return bad("`sid`(claude 세션 uuid) 가 필요해요");
+    };
+    let Some(path) =
+        kasa_socket::sessions::session_jsonl_path(std::path::Path::new(cwd.as_str()), sid)
+    else {
+        return bad("서버 HOME 을 몰라 저장 위치를 못 정해요");
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            axum::http::StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("대화 파일이 없어요({}): {e}", path.display()),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /term/repo?path=<abs>` — 그 레포의 「이 기계에만 있는 것」 상태.
+/// 역이사의 git 관문이다: 순방향이 출발지에서 미커밋·미push 를 검사하듯,
+/// 역방향은 이걸 물어 원격에만 있는 변경을 실은 채 떠나는 사고를 막는다.
+async fn term_repo_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+        return err("`path`(절대경로) 가 필요해요".into());
+    };
+    let git = |args: &[&str]| -> (bool, String) {
+        match std::process::Command::new("git").arg("-C").arg(path).args(args).output() {
+            Ok(o) => (
+                o.status.success(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+                .trim()
+                .to_string(),
+            ),
+            Err(e) => (false, format!("git 실행 실패: {e}")),
+        }
+    };
+    if !std::path::Path::new(path).join(".git").exists() {
+        return Json(serde_json::json!({ "ok": true, "exists": false }));
+    }
+    let (_, dirty) = git(&["status", "--porcelain"]);
+    // 현재 브랜치만 본다 — 전 브랜치(--branches)를 세면 옛 실험 가지가 수천으로
+    // 잡혀 착시가 된다(2026-08-28 실측: 미push 1046건이 전부 죽은 실험 브랜치였다).
+    let (_, unpushed) = git(&["log", "--oneline", "@{u}..HEAD"]);
+    let (_, origin) = git(&["remote", "get-url", "origin"]);
+    let (_, branch) = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (_, head) = git(&["rev-parse", "--short", "HEAD"]);
+    let count = |s: &str| if s.is_empty() { 0 } else { s.lines().count() };
+    Json(serde_json::json!({
+        "ok": true,
+        "exists": true,
+        "dirty": count(&dirty),
+        "unpushed": count(&unpushed),
+        "origin": origin,
+        "branch": branch,
+        "head": head,
+    }))
+}
+
+/// `POST /term/agent-stop?pane=web-…` — 그 세션 셸 아래의 에이전트를 곱게(SIGTERM)
+/// 끄고 꺼질 때까지 지켜본다. 역이사의 「출발지 claude 끄기」와 대칭 — SIGKILL 을
+/// 안 쓰는 이유도 같다(jsonl 마지막 조각 유실). 인자에서 권한 모드도 읽어 준다:
+/// 로컬은 원격 프로세스의 argv 를 볼 손이 없어서, 여기서 읽어 실어 보내야
+/// 「옮겨오니 오토모드로 바뀌었다」(2026-08-27 지적의 역방향)가 안 생긴다.
+async fn term_agent_stop_post(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p)) else {
+        return err("`pane`(web-…) 이 필요해요".into());
+    };
+    let Some(sess) = kasa_pty::lookup_session(pane) else {
+        return err(format!("세션 {pane} 이 없다"));
+    };
+    let Some(shell) = sess.shell_pid() else {
+        return err(format!("{pane} 의 셸 pid 를 모른다"));
+    };
+    let table = kasa_pty::process_table_shared();
+    let Some((kind, agent_pid)) = kasa_pty::agent_pid_for_shell(&table, shell) else {
+        // 이미 꺼져 있는 것은 실패가 아니다 — 대화는 디스크에 남아 있고,
+        // 역이사는 그걸 걷어 가면 된다.
+        return Json(serde_json::json!({ "ok": true, "stopped": false }));
+    };
+    let bypass = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &agent_pid.to_string()])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions"))
+        .unwrap_or(false);
+    unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
+        if std::time::Instant::now() > deadline {
+            return err(format!(
+                "{kind:?}(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 반쯤 산 채 두는 것보다 세우는 게 낫다"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "stopped": true,
+        "agent": format!("{kind:?}").to_lowercase(),
+        "bypass": bypass,
+    }))
+}
+
 
 /// 이사(migrate)의 대화 수신 창구 — 로컬 GUI 가 claude jsonl 을 올려 두면, 곧이어
 /// 이 호스트에 스폰될 셸의 `claude --resume` 이 그것을 읽는다. 인증은 라우트 공통
@@ -4830,6 +5070,9 @@ pub fn spawn_http_server_opts(
                     // 공유 파일이 아니라 **순환**이다. 서로를 원격으로 걸면 board 가
                     // 서로를 물어 무한히 부푼다. 합치는 쪽은 본체 한 곳이면 된다.
                     tokio::spawn(crate::remoteboard::poll_loop());
+                    // 기계 명부(machines.json) 폴링 — 이사 탭이 기계별 학생 목록을
+                    // 즉시 그리게 미리 받아 둔다. 같은 순환 이유로 본체 한정.
+                    tokio::spawn(crate::machines::poll_loop());
                 }
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.
@@ -4842,6 +5085,7 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
                 let session_switch_backend = backend.clone();
@@ -4938,6 +5182,13 @@ pub fn spawn_http_server_opts(
                         "/board",
                         get(move || board_handler(board_backend.clone())),
                     )
+                    .route("/machines", get(machines_handler))
+                    .route(
+                        "/pane-migrate",
+                        post(move |body: axum::body::Bytes| {
+                            pane_migrate_handler(migrate_backend.clone(), body)
+                        }),
+                    )
                     .route(
                         "/transcript",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
@@ -4995,17 +5246,20 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/ws", get(term_ws_handler))
                     .route("/term/spawn", post(term_spawn_post))
-                    .route("/term/repo", post(term_repo_post))
+                    .route("/term/repo", get(term_repo_get).post(term_repo_post))
                     .route("/term/input", post(term_input_post))
                     .route("/term/screen", get(term_screen_get))
                     .route("/term/session", axum::routing::delete(term_session_delete))
                     .route(
                         "/term/transcript",
-                        post(term_transcript_post)
+                        get(term_transcript_get).post(
+                            term_transcript_post,
+                        )
                             // 대화 jsonl 은 수백 MB 도 나온다 — axum 기본 2MB 로는
                             // 이사 자체가 이유 없는 실패로만 보인다.
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
+                    .route("/term/agent-stop", post(term_agent_stop_post))
                     .route(
                         "/term/tunnel",
                         get(term_tunnel_get).post(term_tunnel_post),

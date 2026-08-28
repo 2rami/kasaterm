@@ -354,6 +354,12 @@ pub struct PaneActivity {
     /// 말 것** — 이어받으려면 사람이 되살리기로 화면에 꺼낸 뒤에.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
+    /// 이 pane 이 **다른 기계**의 원격 링크일 때 그 기계 이름. 로컬 pane 은 None.
+    /// remoteboard 가 원격 board 행에 심는 "machine" 과 같은 키다 — 프론트가
+    /// 로컬/원격 행을 한 코드로 읽는다. 키 이름을 status 에 얹지 않는 이유:
+    /// status 소비부가 정확 일치 비교라 문자열을 오염시키면 그쪽이 죽는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).
@@ -543,6 +549,16 @@ pub trait Backend: Send + Sync {
         _force: bool,
     ) -> Result<String> {
         anyhow::bail!("migrate: 이 백엔드는 지원하지 않는다")
+    }
+    /// 역이사 — 원격 pane 의 claude 를 이 기계로 데려온다. `cwd` 는 **이 기계 기준**
+    /// 도착 경로(생략 시 이사 때 저장한 원래 자리 → machines.json roots 매핑 순).
+    fn migrate_pane_back(
+        &self,
+        _pane: &str,
+        _cwd: Option<&str>,
+        _force: bool,
+    ) -> Result<String> {
+        anyhow::bail!("migrate back: 이 백엔드는 지원하지 않는다")
     }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.

@@ -67,6 +67,9 @@ struct SidebarRowInfo {
     /// 한 프레임 안에서 두 번 재면 두 값이 나오고, 그러면 같은 pane 의 칸과 줄이
     /// 서로 다른 시간을 말할 수 있다.
     busy_secs: Option<u64>,
+    /// 원격 pane 이면 그 기계 이름. 페인트 루프는 self 를 못 읽으므로(2887 주석)
+    /// 여기서 프레임당 1회 떠 둔다.
+    machine: Option<String>,
 }
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
@@ -2903,6 +2906,16 @@ impl App {
                     .then(|| self.pane_character_if_known(id))
                     .flatten()
                     .unwrap_or_default();
+                let machine = kasa_mcp::remote::remote_info(id).map(|i| {
+                    if i.label.is_empty() {
+                        i.base
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .to_string()
+                    } else {
+                        i.label
+                    }
+                });
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
@@ -2997,6 +3010,7 @@ impl App {
                     bg_active: act.map(|a| a.bg_active).unwrap_or(false),
                     compact_pct: act.and_then(|a| a.compact_pct),
                     busy_secs,
+                    machine,
                 }
             }
         };
@@ -3605,6 +3619,25 @@ impl App {
                     .is_some_and(|sid| {
                         self.bg_agents.lock().map(|m| m.contains_key(&sid)).unwrap_or(false)
                     });
+                // 원격 pane 이면 어느 기계인지 — 화면은 이 창이지만 학생은 저 기계에서
+                // 돈다. 배지가 없으면 로컬과 겉이 똑같아 「왜 반응이 없지」가 된다
+                // (2026-08-28 실측: 터널이 끊긴 원격 pane 을 로컬로 알고 입력했다).
+                let title_machine: Option<String> = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.active_pane.clone())
+                    .and_then(|id| kasa_mcp::remote::remote_info(&id))
+                    .map(|i| {
+                        if i.label.is_empty() {
+                            i.base
+                                .trim_start_matches("http://")
+                                .trim_start_matches("https://")
+                                .to_string()
+                        } else {
+                            i.label
+                        }
+                    });
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
@@ -3721,13 +3754,14 @@ impl App {
                 // 오른쪽에 붙인다 — 잘리는 것보다 낫다.
                 // 포크/백그라운드 세션이면 이름 뒤에 dim 배지(⑂ = 분기 기호).
                 const BG_BADGE: &str = "  ⑂ bg";
+                let machine_badge = title_machine.as_deref().map(|m| format!("  ⇄ {m}"));
                 let gl = 14.0_f32;
                 let pad = 10.0_f32;
                 let ph = 26.0_f32;
                 let py = (TITLE_HEIGHT - ph) / 2.0;
                 let isz = theme::ICON_SIZE;
-                let (tw, bw) = if title_text.is_empty() {
-                    (0.0, 0.0)
+                let (tw, bw, mw) = if title_text.is_empty() {
+                    (0.0, 0.0, 0.0)
                 } else {
                     (
                         g.measure_chrome_text(&title_text, chrome_font, true),
@@ -3736,12 +3770,16 @@ impl App {
                         } else {
                             0.0
                         },
+                        machine_badge
+                            .as_deref()
+                            .map(|b| g.measure_chrome_text(b, chrome_font, true))
+                            .unwrap_or(0.0),
                     )
                 };
                 let pw = if title_text.is_empty() {
                     0.0
                 } else {
-                    pad + gl + 7.0 + tw + bw + pad
+                    pad + gl + 7.0 + tw + bw + mw + pad
                 };
                 let cwd_w = if cwd_str.is_empty() {
                     0.0
@@ -3786,6 +3824,21 @@ impl App {
                                 font_size: chrome_font,
                                 color: theme::text_mute(),
                                 bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                    if let Some(b) = machine_badge.as_deref() {
+                        // 기계 배지는 dim 이 아니라 강조색 — bg 배지(부가 정보)와 달리
+                        // 이건 「입력이 어디로 가는가」라 흐리면 안 보이는 게 낫지 않다.
+                        g.draw_text(
+                            tx + tw + bw,
+                            ty,
+                            b,
+                            gpu::DrawOpts {
+                                font_size: chrome_font,
+                                color: theme::accent(),
+                                bold: true,
                                 italic: false,
                             },
                         );
@@ -4667,6 +4720,30 @@ impl App {
                                 italic: false,
                             },
                         );
+                    }
+                    // 원격 pane 은 기계 이름 칩을 이름 앞에 — 얼굴·이름이 로컬과
+                    // 똑같아서, 이게 없으면 목록만 봐서는 어느 기계에서 도는지 알 수
+                    // 없다. 이름 예산에서 칩 폭을 미리 뺀다(겹침 방지, elapsed 와 같다).
+                    let mut name_x = name_x;
+                    if let Some(m) = info.machine.as_deref() {
+                        let chip_f = 9.0_f32;
+                        let cw = g.measure_chrome_text(m, chip_f, false) + 8.0;
+                        let ch = 13.0_f32;
+                        let cy = ry + (rh - ch) / 2.0;
+                        let fill = theme::raised_on(theme::surface(), false);
+                        crate::panel_rect_outlined(g, name_x, cy, cw, ch, theme::radius_sm(), fill);
+                        g.draw_text(
+                            name_x + 4.0,
+                            cy + (ch - chip_f) / 2.0,
+                            m,
+                            gpu::DrawOpts {
+                                font_size: chip_f,
+                                color: theme::accent(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        name_x += cw + 5.0;
                     }
                     let budget = (rx + rw - 14.0 - elapsed_w - name_x).max(0.0);
                     let txt = clip_px(g, label, 11.0, false, budget);

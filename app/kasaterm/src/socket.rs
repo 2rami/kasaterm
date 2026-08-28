@@ -1187,6 +1187,22 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn migrate_pane_back(&self, pane: &str, cwd: Option<&str>, force: bool) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketMigrateBack(
+            pane.to_string(),
+            cwd.map(str::to_string),
+            force,
+            tx,
+        ));
+        // 내려받기도 수백 MB 일 수 있다 — 순방향과 같은 한도.
+        match rx.recv_timeout(std::time::Duration::from_secs(240)) {
+            Ok(Ok(id)) => Ok(id),
+            Ok(Err(why)) => anyhow::bail!("migrate back 실패: {why}"),
+            Err(_) => anyhow::bail!("migrate back 응답 없음(240초) — GUI 스레드를 확인해라"),
+        }
+    }
+
     fn split_fleet(
         &self,
         count: usize,
@@ -2144,6 +2160,18 @@ impl Backend for PtyBackend {
                 // 재부착 대비로 돌지만, 학생들이 그런 pane 에 새 일을 시키면 안
                 // 보이는 곳에서 작업이 돈다(거노 2026-08-15).
                 row.detached = !pane_window.contains_key(sid.as_str());
+                // 이사 간 학생 — 화면은 이 창(%N)이지만 실제로 도는 곳은 저 기계다.
+                // 라벨이 비면(명부 밖 주소) 주소의 host:port 로라도 가른다.
+                row.machine = kasa_mcp::remote::remote_info(sid).map(|i| {
+                    if i.label.is_empty() {
+                        i.base
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .to_string()
+                    } else {
+                        i.label
+                    }
+                });
                 // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
                 // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
                 // 직후 잠깐 빌 뿐 곧 tail 에서 잡히니 여기서 읽으면 헛일이다.

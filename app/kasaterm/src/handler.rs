@@ -284,6 +284,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
+                #[cfg(unix)]
+                let outcome = self
+                    .migrate_pane_back(pane, cwd.as_deref(), *force)
+                    .map_err(|e| format!("{e:#}"));
+                #[cfg(not(unix))]
+                let outcome: std::result::Result<String, String> =
+                    Err("이사는 unix 전용이다".to_string());
+                if let Err(ref why) = outcome {
+                    eprintln!("[kasaterm] socket migrate back 실패: {why}");
+                }
+                let _ = reply.send(outcome);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::NotifyFocus { pane, sid } => {
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에

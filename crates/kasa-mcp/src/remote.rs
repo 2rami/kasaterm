@@ -27,6 +27,20 @@ use futures_util::{SinkExt, StreamExt};
 use kasa_pty::{ExtEvent, ExternalIo, PtyOptions, PtySession};
 use tokio_tungstenite::tungstenite::Message;
 
+/// 원격 pane 의 「누구·어디」 — 연결 자체에는 안 쓰이고, 표시(기계 배지)와
+/// 역이사(되돌아갈 자리)가 읽는다. 링크가 사는 동안 Link 에 실려 다니고
+/// 세션 저장을 거쳐 재시작을 넘는다.
+#[derive(Clone, Debug, Default)]
+pub struct RemoteIdentity {
+    /// 기계 명부(machines.json)의 라벨. 명부 밖 주소로 붙었으면 빈 문자열.
+    pub label: String,
+    /// 그 pane 의 **원격 기계 기준** 작업 폴더. 역이사가 원격 git 상태를 물을 때 쓴다.
+    pub remote_cwd: Option<String>,
+    /// 이사(migrate)로 떠나온 pane 의 **원래 로컬 경로** — 역이사가 되돌아갈 자리.
+    /// 원격에서 태어난 pane 은 None 이고, 그때 역이사는 명부의 roots 매핑으로 정한다.
+    pub origin_cwd: Option<String>,
+}
+
 /// 원격 pane 하나의 연결 명세.
 #[derive(Clone, Debug)]
 pub struct RemoteSpec {
@@ -38,6 +52,7 @@ pub struct RemoteSpec {
     pub cwd: Option<String>,
     /// LAN 직결일 때의 remote-token. ssh 터널(양끝 loopback)이면 불필요.
     pub token: Option<String>,
+    pub identity: RemoteIdentity,
 }
 
 /// 접속에 성공한 원격 pane.
@@ -57,6 +72,7 @@ struct Link {
     kill: tokio::sync::mpsc::UnboundedSender<()>,
     base: String,
     remote_id: String,
+    identity: RemoteIdentity,
     /// 같은 local pane id 가 재사용될 때 낡은 매니저의 정리 가드가 **새 링크를**
     /// 걷어가지 않게 하는 세대 표식.
     token: u64,
@@ -86,6 +102,26 @@ pub fn remote_meta(local_id: &str) -> Option<(String, String)> {
 /// 이 pane 이 원격 링크인가.
 pub fn is_remote_pane(local_id: &str) -> bool {
     links().lock().unwrap().contains_key(local_id)
+}
+
+/// 원격 pane 의 전송 명세 + 정체 한 벌. remote_meta 와 달리 표시·역이사가 쓴다.
+#[derive(Clone, Debug)]
+pub struct RemoteInfo {
+    pub base: String,
+    pub remote_id: String,
+    pub label: String,
+    pub remote_cwd: Option<String>,
+    pub origin_cwd: Option<String>,
+}
+
+pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
+    links().lock().unwrap().get(local_id).map(|l| RemoteInfo {
+        base: l.base.clone(),
+        remote_id: l.remote_id.clone(),
+        label: l.identity.label.clone(),
+        remote_cwd: l.identity.remote_cwd.clone(),
+        origin_cwd: l.identity.origin_cwd.clone(),
+    })
 }
 
 /// 원격 셸까지 **정말로 죽인다**(pane 닫기 = 이사가 아니라 폐기일 때).
@@ -223,6 +259,7 @@ pub fn connect(
             kill: ktx,
             base: spec.base.clone(),
             remote_id: remote_id.clone(),
+            identity: spec.identity.clone(),
             token,
         },
     );
@@ -603,6 +640,148 @@ pub fn upload_transcript(
     Ok(n)
 }
 
+/// 블로킹 HTTP 한 방 — 이 파일의 원격 호출 관례(현재 스레드 런타임, 실패가
+/// 호출 시점에 확정)를 한 곳으로 모은다.
+fn blocking_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<(u16, Vec<u8>)> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder().timeout(timeout).build().context("http client")?;
+        let mut req = client.get(url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        Ok((status, body))
+    })
+}
+
+/// 역이사의 대화 운반 — 원격 호스트의 jsonl 을 통짜로 받아 온다.
+///
+/// 옛 바이너리 폴백: `GET /term/transcript` 가 없는(404) 호스트에는
+/// `GET /session-transcript-raw`(전부터 있던 JSON 래핑 창구)로 물러선다 —
+/// 기계의 프로그램이 낡았다고 학생을 못 데려오면 안 된다.
+pub fn download_transcript(
+    base: &str,
+    remote_cwd: &str,
+    sid: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>> {
+    let base = base.trim_end_matches('/');
+    let url = format!(
+        "{base}/term/transcript?cwd={}&sid={}",
+        urlencode(remote_cwd),
+        urlencode(sid)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(180))?;
+    if status == 200 && !body.is_empty() {
+        return Ok(body);
+    }
+    if status != 404 {
+        anyhow::bail!(
+            "대화 내려받기 실패(HTTP {status}): {}",
+            String::from_utf8_lossy(&body[..body.len().min(200)])
+        );
+    }
+    let url = format!(
+        "{base}/session-transcript-raw?id={}&cwd={}",
+        urlencode(sid),
+        urlencode(remote_cwd)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(180))?;
+    if status != 200 {
+        anyhow::bail!("옛 창구도 실패(HTTP {status}) — 그 기계의 프로그램이 너무 낡았어요");
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).context("session-transcript-raw 응답 파싱")?;
+    let raw = v
+        .get("raw")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| anyhow!("응답에 raw 가 없어요"))?;
+    Ok(raw.as_bytes().to_vec())
+}
+
+/// 원격 레포의 「그 기계에만 있는 것」 — 역이사 git 관문의 재료.
+/// (dirty 줄 수, 미push 커밋 수, origin, branch). 창구가 없는 옛 바이너리는
+/// None — 관문을 못 세우는 것이지 이사가 불가능한 게 아니라서, 호출부가
+/// force 요구로 갈음한다.
+pub fn remote_repo_state(
+    base: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<(u64, u64, String, String)>> {
+    let url = format!(
+        "{}/term/repo?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo 상태 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 레포 상태 조회 실패: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    if v.get("exists").and_then(|b| b.as_bool()) == Some(false) {
+        return Ok(Some((0, 0, String::new(), String::new())));
+    }
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let t = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Ok(Some((n("dirty"), n("unpushed"), t("origin"), t("branch"))))
+}
+
+/// 원격 세션의 에이전트를 곱게 끈다. Ok(Some(bypass)) = 껐다(권한 모드 포함),
+/// Ok(None) = 이미 꺼져 있었다. 창구가 없는 옛 바이너리는 Err 로 알린다 —
+/// 확인 없이 progressing 하면 반쯤 산 claude 와 로컬 resume 이 같은 대화를
+/// 다툰다(순방향 9-pane 사고의 원형).
+pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>) -> Result<Option<bool>> {
+    let url = format!(
+        "{}/term/agent-stop?pane={}",
+        base.trim_end_matches('/'),
+        urlencode(pane)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, body): (u16, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("POST {url}"))?;
+        let status = r.status().as_u16();
+        Ok::<_, anyhow::Error>((status, r.bytes().await.unwrap_or_default().to_vec()))
+    })?;
+    if status == 404 || status == 405 {
+        anyhow::bail!("그 기계의 프로그램이 낡아 곱게 끄는 창구가 없어요 — 저쪽을 갱신하고 다시");
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("agent-stop 응답 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 에이전트 종료 실패: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    if v.get("stopped").and_then(|b| b.as_bool()) == Some(true) {
+        Ok(Some(v.get("bypass").and_then(|b| b.as_bool()).unwrap_or(false)))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +809,7 @@ mod tests {
             pane: None,
             cwd: None,
             token: None,
+            identity: Default::default(),
         };
         let rs = connect(spec.clone(), "%rmt0", 60, 12).expect("connect");
         assert!(rs.remote_id.starts_with("web-"), "id={}", rs.remote_id);
@@ -694,6 +874,7 @@ mod tests {
             pane: Some("%12".into()),
             cwd: None,
             token: None,
+            identity: Default::default(),
         };
         assert_eq!(
             build_url(&spec, spec.pane.as_deref()),
@@ -704,6 +885,7 @@ mod tests {
             pane: None,
             cwd: Some("/Users/miku/한글 폴더".into()),
             token: Some("tok".into()),
+            identity: Default::default(),
         };
         let url = build_url(&spec, None);
         assert!(url.contains("cwd=/Users/miku/%ED%95%9C%EA%B8%80%20%ED%8F%B4%EB%8D%94"), "{url}");

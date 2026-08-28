@@ -25,6 +25,7 @@ mod register;
 pub mod remote;
 #[cfg(unix)]
 pub mod adopt;
+pub mod machines;
 pub mod remoteboard;
 mod resume_visibility;
 pub mod standalone;

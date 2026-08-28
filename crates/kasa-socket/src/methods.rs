@@ -736,7 +736,14 @@ fn surface_migrate(backend: &dyn Backend, id: Value, params: &Value) -> Response
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    match backend.migrate_pane(pane, base, cwd, force) {
+    // `base: "local"` = 역이사 — 원격 pane 을 이 기계로 데려온다. 주소 자리에
+    // 예약어를 두는 것은 CLI 가 한 동사(migrate)로 왕복을 다 말하게 하기 위해서다.
+    let result = if base == "local" {
+        backend.migrate_pane_back(pane, cwd, force)
+    } else {
+        backend.migrate_pane(pane, base, cwd, force)
+    };
+    match result {
         Ok(remote_id) => Response::success(id, json!({"ok": true, "remote_id": remote_id})),
         Err(e) => backend_err(id, e),
     }
