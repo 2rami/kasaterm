@@ -3353,6 +3353,22 @@ mod osc_notify_tests {
         assert!(cmd.is_some_and(|c| !c.trim().is_empty()));
     }
 
+    /// 표를 한 번에 뜨는 길로 바꾸면서 깨지기 쉬운 곳은 파싱이다. `ps` 는 pid 를
+    /// 폭에 맞춰 오른쪽 정렬하고 명령줄에는 공백이 얼마든지 들어가므로, 첫 공백
+    /// 하나로만 갈라야 인자가 잘리지 않는다.
+    #[cfg(unix)]
+    #[test]
+    fn 명령줄_표는_첫_공백에서만_갈린다() {
+        let table = super::scan_cmdlines();
+        assert!(!table.is_empty(), "ps 표가 비었다");
+        // 자기 자신은 반드시 있고, 인자가 여럿이면 그게 온전히 남아야 한다.
+        let me = table.get(&std::process::id()).expect("자기 pid 가 표에 없다");
+        assert!(!me.trim().is_empty());
+        // 커널 스레드처럼 명령줄이 빈 줄은 아예 안 담긴다 — 담기면 「이름 없는
+        // 프로세스」가 학생 판정에 섞인다.
+        assert!(table.values().all(|v| !v.trim().is_empty()));
+    }
+
     fn cwd_of(bytes: &[u8]) -> Option<String> {
         super::scan_osc_cwd(bytes).map(|p| p.to_string_lossy().into_owned())
     }
@@ -3594,9 +3610,9 @@ pub fn agent_pid_for_shell(
 /// 이름으로 못 잡은 pane 을 **명령줄로** 한 번 더 본다 — comm 이 `node`·`Python`
 /// 인 하네스들(gemini·cursor·hermes·amp)이 여기서만 잡힌다.
 ///
-/// ⚠️ 순서가 곧 비용이다. `process_cmdline` 은 pid 하나마다 `ps` 를 부르는데
-/// 캐시가 없어서, 이름 판정보다 **먼저** 놓으면 학생이 아닌 셸 pane 까지 매
-/// 프레임 ps 를 돌린다. 그래서 ①이름 판정이 실패하고 ②그 자식이 실제로
+/// ⚠️ 순서가 곧 비용이다. `process_cmdline` 은 표를 500ms 캐시하지만 그 표를
+/// 뜨는 일 자체가 `ps` 한 번이라, 이름 판정보다 **먼저** 놓으면 학생이 아닌 셸
+/// pane 까지 그 문을 연다. 그래서 ①이름 판정이 실패하고 ②그 자식이 실제로
 /// 런처류일 때만 여기까지 온다. 결과는 아래 캐시가 1초 잡아 둔다.
 fn agent_pid_by_argv(
     table: &[(u32, u32, String)],
@@ -3645,8 +3661,9 @@ fn is_argv_probe_launcher(comm: &str) -> bool {
     })
 }
 
-/// pid → argv 판정 결과, 1초 캐시. `process_cmdline` 이 `ps` 한 번씩이라
-/// 캐시 없이는 gemini pane 하나가 매 프레임 프로세스를 띄운다.
+/// pid → argv 판정 결과, 1초 캐시. 아래 `process_cmdline` 이 표를 500ms 쥐므로
+/// 프로세스가 매번 뜨지는 않지만, 판정(문자열 훑기)까지 매 프레임 되풀이할
+/// 이유는 없다.
 ///
 /// pid 는 재사용되지만 TTL 이 1초라 남의 결과를 물려받을 창이 사실상 없다 —
 /// 그 사이에 pid 가 한 바퀴 돌려면 초당 수만 개가 떠야 한다.
@@ -4056,18 +4073,49 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
     }
 }
 
+/// 표를 한 번에 뜬다 — pid 하나를 물어도 `ps` 는 어차피 전 프로세스를 훑으므로,
+/// 하나씩 묻는 것은 같은 일을 pane 수만큼 되풀이하는 것이다.
+#[cfg(unix)]
+fn scan_cmdlines() -> std::collections::HashMap<u32, String> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,args="]).output() else {
+        return std::collections::HashMap::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            // pid 는 폭에 맞춰 오른쪽 정렬돼 앞에 공백이 붙는다.
+            let (pid, args) = line.trim_start().split_once(' ')?;
+            let pid: u32 = pid.parse().ok()?;
+            let args = args.trim();
+            (!args.is_empty()).then(|| (pid, args.to_string()))
+        })
+        .collect()
+}
+
+/// pid → 명령줄. **표 한 벌을 500ms 캐시**한다.
+///
+/// 종전에는 부를 때마다 `ps -p <pid>` 를 띄웠다. 이 함수는 pane 판정·board·정보
+/// 패널이 pane 마다 부르는 자리라, 창이 열 개면 프로세스를 열 개 낳는 일이 화면
+/// 갱신 박자로 되풀이됐다 — 2026-08-29 실측(`sample`)에서 유휴 중인 앱의 CPU
+/// 표본 상위에 `__posix_spawn` 이 올라왔고, 그 스택이 board 조회였다.
+///
+/// 캐시가 아니라 **한 번에 다 받는 것**이 핵심이다. `ps -p` 도 커널의 프로세스
+/// 표를 통째로 훑으므로 하나를 묻는 값과 전부를 묻는 값이 거의 같다.
+///
+/// TTL 이 500ms 인 것은 argv 가 `exec` 로 바뀌기 때문이다 — 셸 pane 에서 명령을
+/// 치면 그 자리에서 달라지므로 영구 캐시는 못 쓴다. 이 값은 같은 파일의
+/// `proc_cache` 와 맞춘 것이다.
 #[cfg(unix)]
 pub fn process_cmdline(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(Instant, HashMap<u32, String>)>> = Mutex::new(None);
+    // 락이 깨져도 답은 내야 한다 — 여기서 None 을 돌리면 학생 판정이 통째로 죽는다.
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.as_ref().is_some_and(|(t, _)| t.elapsed().as_millis() < 500) {
+        *g = Some((Instant::now(), scan_cmdlines()));
     }
+    g.as_ref()?.1.get(&pid).cloned()
 }
 
 /// pane 프로세스 env 의 한 변수 값 — 세션 캐릭터 anchor(`KASATERM_SESSION_ID`) 복원용.
@@ -4319,7 +4367,7 @@ mod 하네스_표_tests {
     }
 
     /// comm 이 런처가 아니면 argv 를 볼 이유가 없다 — 그 문을 열어 두면 셸
-    /// pane 마다 매 프레임 `ps` 가 돈다(`process_cmdline` 은 캐시가 없다).
+    /// pane 마다 명령줄 표를 들추게 된다.
     #[test]
     fn 런처가_아니면_명령줄을_안_읽는다() {
         let t = vec![row(100, 1, "zsh"), row(200, 100, "vim")];
