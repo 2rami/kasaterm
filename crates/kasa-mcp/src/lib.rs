@@ -27,6 +27,7 @@ pub mod remote;
 pub mod adopt;
 pub mod machines;
 pub mod remoteboard;
+pub mod reposync;
 mod resume_visibility;
 pub mod standalone;
 pub mod team;

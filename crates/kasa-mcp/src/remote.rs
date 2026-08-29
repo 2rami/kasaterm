@@ -782,6 +782,143 @@ pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>) -> Result<
     }
 }
 
+/// 파일 싱크 스냅샷의 메타 — `reposync::Snapshot` 에서 bundle 만 뺀 것.
+pub struct RepoSyncMeta {
+    pub head: String,
+    pub sync: String,
+    pub branch: String,
+    pub origin: String,
+    pub dirty: bool,
+}
+
+/// `GET /term/repo-sync` 의 세 갈래 — 역이사가 이 결과로 길을 고른다.
+pub enum RepoSyncFetch {
+    /// 창구가 없는 옛 바이너리(404/405) — 옛 관문(막아 세우기)으로 물러선다.
+    Unsupported,
+    /// 그 기계에만 있는 것이 없다 — 실어 올 것 없이 그대로 진행.
+    Nothing,
+    /// 스냅샷이 실려 왔다 — 로컬 레포에 apply 하면 같은 상태가 된다.
+    Bundle(RepoSyncMeta, Vec<u8>),
+}
+
+/// 원격 기계의 「그 기계에만 있는 것」을 bundle 로 받아 온다(역이사의 파일 싱크).
+pub fn fetch_repo_sync(base: &str, path: &str, token: Option<&str>) -> Result<RepoSyncFetch> {
+    let url = format!(
+        "{}/term/repo-sync?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    // bundle 뜨기는 큰 레포에서 수십 초다 — 대화 내려받기와 같은 여유를 준다.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, headers, body): (u16, Vec<(String, String)>, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        let headers = r
+            .headers()
+            .iter()
+            .filter(|(k, _)| k.as_str().starts_with("x-kasa-") || k.as_str() == "content-type")
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        Ok::<_, anyhow::Error>((status, headers, body))
+    })?;
+    if status == 404 || status == 405 {
+        return Ok(RepoSyncFetch::Unsupported);
+    }
+    let h = |k: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    if h("content-type").starts_with("application/octet-stream") {
+        return Ok(RepoSyncFetch::Bundle(
+            RepoSyncMeta {
+                head: h("x-kasa-head"),
+                sync: h("x-kasa-sync"),
+                branch: h("x-kasa-branch"),
+                origin: h("x-kasa-origin"),
+                dirty: h("x-kasa-dirty") == "1",
+            },
+            body,
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo-sync 응답 파싱")?;
+    if v.get("nothing").and_then(|b| b.as_bool()) == Some(true) {
+        return Ok(RepoSyncFetch::Nothing);
+    }
+    anyhow::bail!(
+        "원격 스냅샷 실패: {}",
+        v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+    )
+}
+
+/// 로컬에서 떠낸 스냅샷을 원격 기계의 레포에 재현한다(순방향 이사의 파일 싱크).
+/// Ok(None) = 창구가 없는 옛 바이너리 — 호출부가 옛 관문으로 물러선다.
+pub fn push_repo_sync(
+    base: &str,
+    path: &str,
+    meta: &RepoSyncMeta,
+    bundle: Vec<u8>,
+    token: Option<&str>,
+    force: bool,
+) -> Result<Option<String>> {
+    let mut url = format!(
+        "{}/term/repo-sync?path={}&head={}&sync={}&branch={}&dirty={}",
+        base.trim_end_matches('/'),
+        urlencode(path),
+        urlencode(&meta.head),
+        urlencode(&meta.sync),
+        urlencode(&meta.branch),
+        if meta.dirty { "1" } else { "0" }
+    );
+    if force {
+        url.push_str("&force=1");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, body): (u16, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bundle);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("POST {url}"))?;
+        let status = r.status().as_u16();
+        Ok::<_, anyhow::Error>((status, r.bytes().await.unwrap_or_default().to_vec()))
+    })?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo-sync 응답 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 적용 실패: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(Some(
+        v.get("applied").and_then(|a| a.as_str()).unwrap_or("적용됨").to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +932,86 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         false
+    }
+
+    /// 파일 싱크 전 구간 — 같은 프로세스에 서버를 띄워 「원격 기계」로 삼고,
+    /// ①push_repo_sync(순방향: 로컬 스냅샷을 원격 레포에 재현) ②fetch_repo_sync
+    /// (역방향: 원격의 것을 떠 와서 로컬에 apply) ③깨끗한 레포의 Nothing 까지
+    /// HTTP 창구·헤더 메타·클라이언트 파싱을 한 번에 검증한다.
+    #[test]
+    fn repo_sync_http_roundtrip() {
+        let sh = |dir: &std::path::Path, cmd: &str| -> String {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "`{cmd}` 실패: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let backend: Arc<dyn kasa_socket::backend::Backend> =
+            Arc::new(crate::standalone::StandaloneBackend::new(std::env::temp_dir()));
+        let port = crate::spawn_http_server_opts(backend, 0, false).expect("server");
+        let base = format!("http://127.0.0.1:{port}");
+        let root =
+            std::env::temp_dir().join(format!("kasaterm-reposync-http-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ident = "-c user.name=t -c user.email=t@t";
+        sh(&root, "git init --bare origin.git");
+        sh(&root, &format!(
+            "git clone origin.git src 2>/dev/null && cd src && echo one > a.txt && git add -A && git {ident} commit -qm init && git push -q origin HEAD"
+        ));
+        sh(&root, "git clone origin.git dst 2>/dev/null");
+        sh(&root, "git clone origin.git back 2>/dev/null");
+        sh(&root, &format!(
+            "cd src && echo two >> a.txt && git add -A && git {ident} commit -qm local-only && echo three >> a.txt && echo new > c.txt"
+        ));
+        let (src, dst, back) = (root.join("src"), root.join("dst"), root.join("back"));
+        // ① 순방향: src 스냅샷 → HTTP POST → 서버가 dst 에 재현.
+        let snap = crate::reposync::snapshot(&src).unwrap().expect("실어 갈 것");
+        let meta = RepoSyncMeta {
+            head: snap.head.clone(),
+            sync: snap.sync,
+            branch: snap.branch,
+            origin: snap.origin,
+            dirty: snap.dirty,
+        };
+        let applied =
+            push_repo_sync(&base, &dst.to_string_lossy(), &meta, snap.bundle, None, false)
+                .expect("push")
+                .expect("창구가 있어야 한다");
+        assert!(applied.contains("미저장"), "applied={applied}");
+        assert_eq!(sh(&dst, "git rev-parse HEAD"), snap.head);
+        assert_eq!(sh(&dst, "cat a.txt"), "one\ntwo\nthree");
+        assert_eq!(sh(&dst, "cat c.txt"), "new");
+        // ② 역방향: 방금 미push+미커밋이 생긴 dst 를 GET 으로 떠 와 back 에 재현.
+        match fetch_repo_sync(&base, &dst.to_string_lossy(), None).expect("fetch") {
+            RepoSyncFetch::Bundle(m, bytes) => {
+                assert_eq!(m.head, snap.head);
+                assert!(m.dirty);
+                let msg = crate::reposync::apply(
+                    &back, &bytes, &m.head, &m.sync, &m.branch, m.dirty, false,
+                )
+                .expect("apply");
+                assert!(msg.contains("미저장"), "msg={msg}");
+                assert_eq!(sh(&back, "cat a.txt"), "one\ntwo\nthree");
+                assert_eq!(sh(&back, "cat c.txt"), "new");
+            }
+            _ => panic!("Bundle 이 와야 한다"),
+        }
+        // ③ 깨끗한 레포는 Nothing — 실어 올 것이 없다는 판정도 창구를 거쳐 온다.
+        sh(&root, "git clone origin.git clean 2>/dev/null");
+        assert!(matches!(
+            fetch_repo_sync(&base, &root.join("clean").to_string_lossy(), None).expect("fetch"),
+            RepoSyncFetch::Nothing
+        ));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 같은 프로세스에 서버(spawn_http_server_opts)와 클라이언트를 함께 띄워

@@ -11,8 +11,6 @@
 
 use super::*;
 
-const ROW_H: f32 = 36.0;
-
 /// ago 초를 사람 말로 — 아로나 판(MachinesTab)의 agoLabel 과 같은 문구.
 fn ago_label(secs: Option<u64>) -> String {
     match secs {

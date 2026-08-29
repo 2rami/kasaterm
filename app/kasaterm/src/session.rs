@@ -734,10 +734,11 @@ impl App {
     /// pane 의 claude 를 **다른 기계로 이사**시킨다 — 로컬을 정리하고 원격에서 같은
     /// 대화로 다시 깨운다(promote 와 달리 산 채로는 못 건넌다 — 기계가 다르다).
     ///
-    /// 순서: ①안 올린 git 변경 검사(막아 세우기) ②claude 를 곱게 끄고(jsonl 마지막
-    /// flush 를 기다린다) ③대화 jsonl 을 원격 호스트로 업로드 ④같은 pane 자리를
-    /// 원격 셸로 갈아끼우고 ⑤`claude --resume` 을 주입. 로컬 셸은 스왑의 Drop 이
-    /// 정상 철거한다(이사의 현지 철거 — promote 의 disarm 과 반대로 죽는 게 맞다).
+    /// 순서: ①원격 레포 준비 + **파일 싱크**(미push 커밋·미커밋 변경을 bundle 로
+    /// 떠서 저쪽에 재현 — 예전엔 여기서 막아 세웠다) ②claude 를 곱게 끄고(jsonl
+    /// 마지막 flush 를 기다린다) ③대화 jsonl 을 원격 호스트로 업로드 ④같은 pane
+    /// 자리를 원격 셸로 갈아끼우고 ⑤`claude --resume` 을 주입. 로컬 셸은 스왑의
+    /// Drop 이 정상 철거한다(이사의 현지 철거 — promote 의 disarm 과 반대).
     ///
     /// ⚠️ GUI 스레드에서 동기로 돈다 — 업로드가 큰 대화(수백 MB)면 그동안 화면이
     /// 선다. 이사는 어차피 그 pane 을 떠나는 조작이라 감수한다.
@@ -773,19 +774,6 @@ impl App {
         };
         let cwd = socket::pid_cwd(shell)
             .ok_or_else(|| anyhow::anyhow!("{pid} 의 작업 폴더를 못 읽었다"))?;
-        // 원 브리프의 관문: 이 기계에만 있는 변경을 실은 채 떠나면 원격의 코드는
-        // 옛것이라 대화만 미래에 산다 — 막아 세우고, 알고 가는 길만 force 로 연다.
-        if !force {
-            let dirty = git_lines(&cwd, &["status", "--porcelain"]);
-            let unpushed =
-                git_lines(&cwd, &["log", "--branches", "--not", "--remotes", "--oneline"]);
-            if dirty > 0 || unpushed > 0 {
-                anyhow::bail!(
-                    "이 기계에만 있는 변경이 남아 있다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({}) — 커밋·push 하고 오거나 --force",
-                    cwd.display()
-                );
-            }
-        }
         let remote_cwd = remote_cwd
             .map(str::to_string)
             .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
@@ -829,6 +817,43 @@ impl App {
                 None,
             )?;
             self.set_toast(format!("원격 레포 준비: {what}"));
+        }
+        // 파일 싱크 — 이 기계에만 있는 것(미push 커밋·미커밋 변경)을 떠서 저쪽에
+        // 재현한다. 예전엔 여기서 「커밋·push 하고 와라」로 막아 세웠다 — 이제는
+        // 실어 간다(2026-08-29 지시: 파일이 달라도 싱크되어 안 끊기게). 창구가
+        // 없는 옛 기계에서만 옛 관문이 남는다. 반드시 ensure_repo 뒤 — bundle 의
+        // 전제(origin 오브젝트)가 저쪽에 있어야 fetch 가 풀린다.
+        match kasa_mcp::reposync::snapshot(&cwd) {
+            Ok(None) => {}
+            Ok(Some(snap)) => {
+                let meta = kasa_mcp::remote::RepoSyncMeta {
+                    head: snap.head,
+                    sync: snap.sync,
+                    branch: snap.branch,
+                    origin: snap.origin,
+                    dirty: snap.dirty,
+                };
+                match kasa_mcp::remote::push_repo_sync(
+                    base,
+                    &remote_cwd,
+                    &meta,
+                    snap.bundle,
+                    None,
+                    force,
+                ) {
+                    Ok(Some(msg)) => self.set_toast(format!("코드 동기화: {msg}")),
+                    Ok(None) if force => {
+                        eprintln!("[migrate] 파일 동기화 창구 없음(강행) — 저쪽 코드가 옛것일 수 있다");
+                    }
+                    Ok(None) => anyhow::bail!(
+                        "이 기계에만 있는 변경이 있는데 저쪽 프로그램이 낡아 파일 동기화 창구가 없다 — 저쪽을 갱신하거나, 커밋·push 하고 오거나 --force"
+                    ),
+                    Err(e) if force => eprintln!("[migrate] 파일 동기화 실패(강행): {e:#}"),
+                    Err(e) => anyhow::bail!("파일 동기화 실패: {e:#} — 알고 강행하려면 --force"),
+                }
+            }
+            Err(e) if force => eprintln!("[migrate] 파일 스냅샷 실패(강행): {e:#}"),
+            Err(e) => anyhow::bail!("파일 스냅샷 실패: {e:#} — 알고 강행하려면 --force"),
         }
         // 권한 모드를 승계한다 — 안 실으면 옮겨간 학생이 기본값(auto)으로 떠서
         // 「왜 오토모드로 바뀌었냐」가 된다(거노 2026-08-27). 화면 문구를 읽지 않고
@@ -952,10 +977,11 @@ impl App {
 
     /// 역이사 — 원격 pane 의 claude 를 **이 기계로** 데려온다(migrate 의 거울).
     ///
-    /// 순서: ①원격 git 관문(그 기계에만 있는 변경이 있으면 세운다) ②로컬 레포
-    /// 준비(없으면 clone) ③원격 claude 곱게 끄기(권한 모드도 여기서 받는다)
-    /// ④대화 내려받기 ⑤원격 셸 철거 + 같은 pane id 로 로컬 PTY 스왑
-    /// ⑥`claude --resume` 주입.
+    /// 순서: ①**파일 싱크**(그 기계에만 있는 미push 커밋·미커밋 변경을 bundle 로
+    /// 떠 온다 — 창구 없는 옛 기계만 옛 관문으로 막아 세운다) ②로컬 레포
+    /// 준비(없으면 clone) + 스냅샷 재현 ③원격 claude 곱게 끄기(권한 모드도
+    /// 여기서 받는다) ④대화 내려받기 ⑤원격 셸 철거 + 같은 pane id 로 로컬
+    /// PTY 스왑 ⑥`claude --resume` 주입.
     ///
     /// ③이 ④보다 먼저인 이유: jsonl 은 살아 있는 동안에도 읽을 수 있지만, 끄기
     /// 전에 받으면 마지막 턴이 파일에 덜 실린 채 건너온다 — 순방향이 SIGTERM
@@ -998,22 +1024,37 @@ impl App {
                     "돌아올 로컬 경로를 모른다 — --cwd 로 지정하거나 machines.json 에 roots 를 적어라"
                 )
             })?;
-        // 원격 git 관문 — 순방향(출발지 검사)의 거울이다. 원격에만 있는 변경을
-        // 실은 채 떠나면 그 커밋들은 닿지 않는 기계에 남는다.
         let repo_state = kasa_mcp::remote::remote_repo_state(&info.base, &remote_cwd, None);
-        if !force {
-            match &repo_state {
-                Ok(Some((dirty, unpushed, _, _))) if *dirty > 0 || *unpushed > 0 => {
-                    anyhow::bail!(
-                        "그 기계에만 있는 변경이 남아 있다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({remote_cwd}) — 저쪽에서 커밋·push 하고 오거나 --force"
-                    );
+        // 파일 싱크 — 그 기계에만 있는 것(미push 커밋·미커밋 변경)을 bundle 로
+        // 떠 온다(순방향의 거울, 2026-08-29). 창구가 없는 옛 기계만 옛 관문
+        // (「저쪽에서 커밋·push 하고 와라」)으로 물러선다.
+        let sync_pack = match kasa_mcp::remote::fetch_repo_sync(&info.base, &remote_cwd, None) {
+            Ok(kasa_mcp::remote::RepoSyncFetch::Bundle(meta, bytes)) => Some((meta, bytes)),
+            Ok(kasa_mcp::remote::RepoSyncFetch::Nothing) => None,
+            Ok(kasa_mcp::remote::RepoSyncFetch::Unsupported) => {
+                if !force {
+                    match &repo_state {
+                        Ok(Some((dirty, unpushed, _, _))) if *dirty > 0 || *unpushed > 0 => {
+                            anyhow::bail!(
+                                "그 기계에만 있는 변경이 남아 있는데 저쪽 프로그램이 낡아 파일 동기화 창구가 없다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({remote_cwd}) — 저쪽을 갱신하거나, 저쪽에서 커밋·push 하고 오거나 --force"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            anyhow::bail!("원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force");
+                        }
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    anyhow::bail!("원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force");
-                }
+                None
             }
-        }
+            Err(e) if force => {
+                eprintln!("[migrate-back] 원격 파일 스냅샷 실패(강행): {e:#}");
+                None
+            }
+            Err(e) => {
+                anyhow::bail!("원격 파일 스냅샷 실패: {e:#} — 알고 강행하려면 --force")
+            }
+        };
         // 로컬 레포 준비 — 목적지 폴더가 없으면 원격이 알려준 origin 으로 clone.
         // 순방향의 ensure_repo(원격에 레포 보장)와 대칭이다.
         if !std::path::Path::new(&dest).exists() {
@@ -1023,6 +1064,13 @@ impl App {
                 .and_then(|s| s.as_ref())
                 .map(|(_, _, o, _)| o.clone())
                 .filter(|o| !o.is_empty())
+                // 옛 상태 창구가 없어도 스냅샷 메타가 origin 을 실어 온다.
+                .or_else(|| {
+                    sync_pack
+                        .as_ref()
+                        .map(|(m, _)| m.origin.clone())
+                        .filter(|o| !o.is_empty())
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!("{dest} 가 없고 원격 origin 도 몰라 clone 할 수 없다")
                 })?;
@@ -1031,6 +1079,8 @@ impl App {
                 .ok()
                 .and_then(|s| s.as_ref())
                 .map(|(_, _, _, b)| b.clone())
+                .filter(|b| !b.is_empty())
+                .or_else(|| sync_pack.as_ref().map(|(m, _)| m.branch.clone()))
                 .unwrap_or_default();
             if let Some(parent) = std::path::Path::new(&dest).parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -1050,6 +1100,21 @@ impl App {
                     .args(["-C", &dest, "checkout", &branch])
                     .output();
             }
+        }
+        // 떠 온 스냅샷을 이 기계 레포에 재현한다 — claude 를 끄기 전이라, 여기서
+        // 막히면(도착지 dirty·브랜치 다름·되감김) 아무것도 안 건드린 채 선다.
+        // 이 워킹트리는 다른 pane 과 공유일 수 있어 그 관문들이 학생을 지킨다.
+        if let Some((meta, bytes)) = &sync_pack {
+            let applied = kasa_mcp::reposync::apply(
+                std::path::Path::new(&dest),
+                bytes,
+                &meta.head,
+                &meta.sync,
+                &meta.branch,
+                meta.dirty,
+                force,
+            )?;
+            self.set_toast(format!("코드 동기화: {applied}"));
         }
         // 모델·effort 는 원격이 죽기 전에 떠 둔다(순방향과 같은 이유).
         let (model, effort) = self
@@ -5851,26 +5916,6 @@ fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
 /// 표시용 이름(`Gemini 3.6 Flash (Low)`)이라 수집 쪽에서 일부러 안 담는다. 나중에
 /// 담게 되거든 **`agy models` 목록과 대조하고 나서** 담아라: agy 는 없는 모델값에
 /// 에러를 안 내고 조용히 기본값으로 돌아, 틀려도 아무 데도 안 남는다.
-/// `git -C <cwd> <args>` 출력의 비어 있지 않은 줄 수 — 이사 관문의 「안 올린
-/// 변경」 셈. git 자체가 실패하면(레포가 아님 등) 0 — 레포 밖 pane 을 막지 않는다.
-#[cfg(unix)]
-fn git_lines(cwd: &std::path::Path, args: &[&str]) -> usize {
-    crate::proc::command("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 pub(crate) fn restore_agent_command(
     agent: Option<&str>,
     session_id: Option<&str>,

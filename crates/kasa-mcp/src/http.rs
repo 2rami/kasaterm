@@ -4284,6 +4284,101 @@ async fn term_repo_get(
     }))
 }
 
+/// `GET /term/repo-sync?path=<abs>` — 이 기계 레포의 「이 기계에만 있는 것」
+/// (미push 커밋 + 미커밋 변경)을 bundle 로 떠서 내려준다. 역이사가 원격의
+/// 작업 상태를 로컬에 재현할 때 쓴다. 실어 갈 것이 없으면 JSON 으로 답하고,
+/// 있으면 메타를 응답 헤더에 싣고 본문은 bundle 통짜 바이트다(대화 창구와
+/// 같은 꼴 — base64 래핑은 큰 레포에서 1/3 을 그냥 부풀린다).
+async fn term_repo_sync_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+        return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }))
+            .into_response();
+    };
+    let path = path.clone();
+    // git 은 블로킹이고 큰 레포에선 초 단위다 — 요청 스레드를 세우지 않는다.
+    let snap = tokio::task::spawn_blocking(move || {
+        crate::reposync::snapshot(std::path::Path::new(&path))
+    })
+    .await;
+    match snap {
+        Ok(Ok(None)) => Json(serde_json::json!({ "ok": true, "nothing": true })).into_response(),
+        Ok(Ok(Some(s))) => {
+            if s.bundle.len() > TRANSCRIPT_UPLOAD_LIMIT {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("떠낸 bundle 이 너무 크다({}MB) — 커밋·push 로 줄이고 다시", s.bundle.len() >> 20),
+                }))
+                .into_response();
+            }
+            (
+                axum::http::StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::HeaderName::from_static("x-kasa-head"), s.head),
+                    (header::HeaderName::from_static("x-kasa-sync"), s.sync),
+                    (header::HeaderName::from_static("x-kasa-branch"), s.branch),
+                    (header::HeaderName::from_static("x-kasa-origin"), s.origin),
+                    (
+                        header::HeaderName::from_static("x-kasa-dirty"),
+                        if s.dirty { "1" } else { "0" }.to_string(),
+                    ),
+                ],
+                s.bundle,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => {
+            Json(serde_json::json!({ "ok": false, "error": format!("{e:#}") })).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("스냅샷 작업 실패: {e}") }))
+            .into_response(),
+    }
+}
+
+/// `POST /term/repo-sync?path=&head=&sync=&branch=&dirty=1&force=1` body=bundle —
+/// 순방향 이사가 출발지에서 떠낸 스냅샷을 이 기계 레포에 재현한다.
+/// 도착지 보호 관문(dirty·브랜치 전환·되감기)은 reposync::apply 안에 있다.
+async fn term_repo_sync_post(
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+        return err("`path`(절대경로) 가 필요해요".into());
+    };
+    let (Some(head), Some(sync)) = (q.get("head"), q.get("sync")) else {
+        return err("`head`·`sync` 가 필요해요".into());
+    };
+    let ok_sha = |s: &String| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !ok_sha(head) || !ok_sha(sync) {
+        return err("`head`·`sync` 는 커밋 sha 여야 해요".into());
+    }
+    let (path, head, sync) = (path.clone(), head.clone(), sync.clone());
+    let branch = q.get("branch").cloned().unwrap_or_default();
+    let dirty = q.get("dirty").map(|v| v == "1").unwrap_or(false);
+    let force = q.get("force").map(|v| v == "1").unwrap_or(false);
+    let applied = tokio::task::spawn_blocking(move || {
+        crate::reposync::apply(
+            std::path::Path::new(&path),
+            &body,
+            &head,
+            &sync,
+            &branch,
+            dirty,
+            force,
+        )
+    })
+    .await;
+    match applied {
+        Ok(Ok(msg)) => Json(serde_json::json!({ "ok": true, "applied": msg })),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(e) => err(format!("적용 작업 실패: {e}")),
+    }
+}
+
 /// `POST /term/agent-stop?pane=web-…` — 그 세션 셸 아래의 에이전트를 곱게(SIGTERM)
 /// 끄고 꺼질 때까지 지켜본다. 역이사의 「출발지 claude 끄기」와 대칭 — SIGKILL 을
 /// 안 쓰는 이유도 같다(jsonl 마지막 조각 유실). 인자에서 권한 모드도 읽어 준다:
@@ -5257,6 +5352,13 @@ pub fn spawn_http_server_opts(
                         )
                             // 대화 jsonl 은 수백 MB 도 나온다 — axum 기본 2MB 로는
                             // 이사 자체가 이유 없는 실패로만 보인다.
+                            .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
+                    )
+                    .route(
+                        "/term/repo-sync",
+                        get(term_repo_sync_get).post(term_repo_sync_post)
+                            // bundle 은 미push 커밋+미커밋 변경 통짜다 — 대화 jsonl 과
+                            // 같은 급이라 같은 상한을 쓴다.
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
