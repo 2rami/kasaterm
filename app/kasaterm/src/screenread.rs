@@ -1877,7 +1877,17 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
     // 스크롤 게이트: "jump to bottom" / ("bottom" & "click") 관대 매치.
     let scrolled = rows.iter().any(|r| {
         let s: String = r.iter().map(|c| c.ch).collect::<String>().to_lowercase();
-        s.contains("jump to bottom") || (s.contains("bottom") && s.contains("click"))
+        // claude 는 이 안내를 **두 문구로 나눠 쓴다**. 올려다보는 동안 새 출력이
+        // 없으면 「Jump to bottom」, 쌓이면 「N new messages」로 바꿔 그린다.
+        // 뒤엣것을 모르면 **일하는 창에서는 이 표시가 통째로 안 뜬다** — 조용한
+        // 창에서만 떠서 「됐다 안 됐다 한다」로 보인다(2026-08-29 지적: 「지금
+        // 조금 올려도 안붙는데」).
+        //
+        // 둘 다 같은 줄에 `(click)` 을 달고 나오므로(claude 는 `{문구} (click) ↓`
+        // 로 조립한다) 그것을 함께 요구해 본문 오탐을 막는다 — 「new message」는
+        // 영어로 대화하다 보면 본문에도 나오는 말이다.
+        s.contains("jump to bottom")
+            || (s.contains("click") && (s.contains("bottom") || s.contains("new message")))
     });
     if dbg {
         eprintln!("[sticky] scrolled_gate={scrolled} rows={}", rows.len());
@@ -1886,15 +1896,33 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
         return None;
     }
     // 최상단 몇 행에서 "흐릿한 글자가 우세하고 실제 텍스트가 있는" 행.
+    //
+    // **프롬프트 마커로 시작하는 행을 먼저** 본다. 게이트가 열린 화면의 맨 위에
+    // 오는 흐릿한 줄은 프롬프트만이 아니다 — 회색 안내문, 접힌 알림, 지나간 도구
+    // 출력이 그 자리에 걸린다. 마커를 안 보고 곧장 잡으면 그런 줄에 pill 이 붙고,
+    // 누르면 그 줄을 질문으로 알고 엉뚱한 데로 되짚는다(2026-08-29 지적: 「다른
+    // 이상한 메시지에 그게 돼있네」).
+    //
+    // 마커를 **요구하지는 않는다** — 없으면 종전대로 흐릿한 행을 잡는다. claude 가
+    // 이 자리를 마커 없이 그리는 판이 오면 요구하는 쪽은 표시가 통째로 죽지만,
+    // 우대하는 쪽은 조용히 옛 동작으로 돌아갈 뿐이다.
+    let marked = |text: &str| {
+        matches!(text.trim_start().chars().next(), Some('\u{276f}') | Some('\u{203a}') | Some('>'))
+    };
+    let mut fallback: Option<(usize, String, usize, usize)> = None;
     for ri in 0..rows.len().min(3) {
         let (text, first, last, glyphs, dim) = sticky_row_span(&rows[ri]);
         if dbg {
             eprintln!(
-                "[sticky] row{ri} glyphs={glyphs} dim={dim} cols={first}..{last} text={:?}",
+                "[sticky] row{ri} glyphs={glyphs} dim={dim} cols={first}..{last} marked={} text={:?}",
+                marked(&text),
                 text.chars().take(48).collect::<String>()
             );
         }
-        if glyphs >= 2 && dim * 2 >= glyphs {
+        if glyphs >= 2 && dim * 2 >= glyphs && !marked(&text) && fallback.is_none() {
+            fallback = Some((ri, text.clone(), first, last));
+        }
+        if glyphs >= 2 && dim * 2 >= glyphs && marked(&text) {
             return Some(StickyPrompt {
                 row: ri,
                 col_start: first,
@@ -1903,7 +1931,7 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
             });
         }
     }
-    None
+    fallback.map(|(row, text, col_start, col_end)| StickyPrompt { row, col_start, col_end, text })
 }
 
 /// agy 시작 로고 자리(왼쪽 위 칸, 스크롤로 잘렸으면 top 이 음수).
@@ -3376,6 +3404,56 @@ mod clawd_banner_tests {
     #[test]
     fn sticky_needs_scroll_gate() {
         let rows = vec![dim_row("> 이전 프롬프트"), row_from("본문 라인")];
+        assert!(find_sticky_prompt(&rows).is_none());
+    }
+
+    /// 맨 위에 흐릿한 줄이 둘일 때 **프롬프트 마커가 있는 쪽**을 잡는다. 마커를
+    /// 안 보면 위에 걸린 회색 안내문에 pill 이 붙고, 누르면 그 줄을 질문으로 알고
+    /// 엉뚱한 데로 되짚는다.
+    #[test]
+    fn a_marked_row_wins_over_a_plain_dim_row_above_it() {
+        let rows = vec![
+            dim_row("이전 도구 출력이 회색으로 걸려 있다"),
+            dim_row("❯ 진짜 질문"),
+            row_from("  3 new messages (click) ↓"),
+        ];
+        let got = find_sticky_prompt(&rows).expect("감지");
+        assert_eq!(got.row, 1, "마커가 있는 행");
+        assert!(got.text.contains("진짜 질문"));
+    }
+
+    /// 마커가 하나도 없으면 종전대로 흐릿한 행을 잡는다 — 요구가 아니라 우대다.
+    #[test]
+    fn without_any_marker_the_old_behaviour_stands() {
+        let rows = vec![
+            dim_row("마커 없는 흐릿한 줄"),
+            row_from("  Jump to bottom (click) ↓"),
+        ];
+        let got = find_sticky_prompt(&rows).expect("감지");
+        assert_eq!(got.row, 0);
+    }
+
+    /// 올려다보는 동안 새 출력이 쌓이면 claude 는 같은 자리에 「N new messages」를
+    /// 그린다. 「bottom」만 찾으면 **일하는 창에서는 이 표시가 통째로 안 뜬다** —
+    /// 조용한 창에서만 떠서 「됐다 안 됐다 한다」로 보인다.
+    #[test]
+    fn sticky_gate_also_opens_on_the_new_messages_wording() {
+        let rows = vec![
+            dim_row("> 이전 프롬프트 미리보기"),
+            row_from("작업 결과 라인"),
+            row_from("  3 new messages (click) ↓"),
+        ];
+        assert!(find_sticky_prompt(&rows).is_some());
+    }
+
+    /// 대조군 — 「new message」가 본문에 그냥 나온 것은 게이트를 열지 않는다.
+    /// 같은 줄의 `(click)` 이 그 둘을 가른다.
+    #[test]
+    fn the_words_alone_in_a_body_line_do_not_open_the_gate() {
+        let rows = vec![
+            dim_row("> 이전 프롬프트"),
+            row_from("we should show a new message here"),
+        ];
         assert!(find_sticky_prompt(&rows).is_none());
     }
 
