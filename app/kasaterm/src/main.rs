@@ -45,6 +45,7 @@ mod links;
 mod proc;
 mod info;
 mod mcpcol;
+mod machinescol;
 mod sesscol;
 mod state;
 mod statusbar;

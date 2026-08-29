@@ -258,8 +258,53 @@ pub(crate) enum SideTab {
     /// wry 웹뷰라, 이 탭일 때만 그 사각형 위로 OS 뷰가 올라온다.
     Persona,
     /// 이사 — 기계별 학생 목록과 보내기/데려오기(아로나 이사 탭의 앱 안 판).
-    /// Persona 와 같은 웹뷰 방식(`/arona-ui/machines.html`).
+    /// 본문은 네이티브 렌더(machinescol.rs) — 데이터가 같은 프로세스에 있다.
     Machines,
+}
+
+/// 이사 칼럼(SideTab::Machines) 상태 — 조립은 `refresh_machines_col`, 그리기는
+/// `machinescol::draw_machines_col`, 클릭은 `machines_col_click`.
+#[derive(Default)]
+pub(crate) struct MachinesColState {
+    /// 기계 섹션들 — machines 폴링 캐시의 스냅샷 + 이사 간 학생의 로컬 미러.
+    pub(crate) machines: Vec<MachinesColMachine>,
+    /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
+    pub(crate) locals: Vec<MachinesColRow>,
+    pub(crate) last_refresh: Option<std::time::Instant>,
+    pub(crate) scroll: f32,
+    /// 매 paint 재생성되는 버튼 hit rect(다른 칼럼과 같은 규칙).
+    pub(crate) btn_rects: Vec<(MachinesColBtn, (f32, f32, f32, f32))>,
+    /// 이사가 도는 중인 (pane, 진행 문구). 이사는 GUI 스레드 동기라 실제로는
+    /// 시작 직전 한 프레임에만 보이지만, 그 한 프레임이 「눌렸다」를 말해 준다.
+    pub(crate) busy: Option<(String, String)>,
+    /// 마지막 이사 결과 — (pane, 성공 여부, 문구). 그 행 밑에 한 줄로 남는다.
+    pub(crate) note: Option<(String, bool, String)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MachinesColMachine {
+    pub(crate) label: String,
+    pub(crate) online: bool,
+    pub(crate) ago_secs: Option<u64>,
+    /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
+    pub(crate) mirrored: Vec<MachinesColRow>,
+    /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다.
+    pub(crate) remote: Vec<MachinesColRow>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MachinesColRow {
+    /// 로컬 surface id. 원격 전용 행은 빈 문자열(이사 대상이 못 된다).
+    pub(crate) pane: String,
+    pub(crate) name: String,
+    pub(crate) title: String,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) enum MachinesColBtn {
+    Send { pane: String, label: String },
+    Bring { pane: String },
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.
@@ -475,10 +520,10 @@ pub(crate) enum InfoMenuAction {
 /// 골라진 것인지를 패널이 정직하게 밝히는 데 쓴다.
 pub(crate) struct InfoState {
     pub(crate) tab: SideTab,
-    /// 이사 탭 본문 웹뷰 — Persona 와 같은 구조라 상태 모양도 같은 타입을 쓴다.
-    /// App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다(struct App 정의는
-    /// 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도 자연스럽다).
-    pub(crate) machines_panel: PersonaState,
+    /// 이사 탭 본문 상태. App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다
+    /// (struct App 정의는 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도
+    /// 자연스럽다).
+    pub(crate) machines_col: MachinesColState,
     pub(crate) snap: std::sync::Arc<std::sync::Mutex<crate::info::InfoSnap>>,
     /// 렌더가 읽는 사본. 매 프레임 `snap` 을 잠가 통째로 clone 하면 프로세스가
     /// 수십이면 프레임마다 그만큼의 String 할당이 도는데, 실제 내용은 1.5초에
@@ -561,7 +606,7 @@ impl Default for InfoState {
     fn default() -> Self {
         Self {
             tab: SideTab::Git,
-            machines_panel: PersonaState::default(),
+            machines_col: MachinesColState::default(),
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
             view: crate::info::InfoSnap::default(),
             rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

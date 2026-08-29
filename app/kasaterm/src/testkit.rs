@@ -2500,7 +2500,8 @@ impl App {
                 SideTab::Mcp => self.mcp_col.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
-                SideTab::Persona | SideTab::Machines => {}
+                SideTab::Persona => {}
+                SideTab::Machines => self.info.machines_col.scroll = px,
             }
         }
         self.chrome_dirty = true;
@@ -2525,7 +2526,8 @@ impl App {
             SideTab::Mcp => self.mcp_col.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
-            SideTab::Persona | SideTab::Machines => 0.0,
+            SideTab::Persona => 0.0,
+            SideTab::Machines => self.info.machines_col.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
         // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
@@ -2534,7 +2536,8 @@ impl App {
             SideTab::Mcp => self.mcp_col.row_rects.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
-            SideTab::Persona | SideTab::Machines => 0,
+            SideTab::Persona => 0,
+            SideTab::Machines => self.info.machines_col.btn_rects.len(),
         };
         let (vis_h, content_h) = self.git.col_list_extent;
         // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
