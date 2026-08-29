@@ -87,6 +87,9 @@ impl TurnJump {
     /// 가리지 않는다는 규칙이 여기 한 줄로 걸린다.
     pub(crate) fn header(&mut self, pane_id: &str, sess: &kasa_pty::PtySession) -> Option<TurnHeader> {
         let (offset, hist) = sess.view_state();
+        if std::env::var_os("KASATERM_TURN_DEBUG").is_some() && offset != 0 {
+            eprintln!("[turn] pane={pane_id} offset={offset} hist={hist}");
+        }
         if offset == 0 {
             return None;
         }
@@ -95,6 +98,9 @@ impl TurnJump {
         if *cached_hist != hist {
             *anchors = sess.prompt_anchors();
             *cached_hist = hist;
+        }
+        if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
+            eprintln!("[turn]   anchors={}", anchors.len());
         }
         if anchors.is_empty() {
             return None;

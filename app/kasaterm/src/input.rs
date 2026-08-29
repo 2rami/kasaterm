@@ -1988,6 +1988,9 @@ impl App {
         //
         // alt-screen 앱(vim·htop)은 그대로 넘긴다 — 그쪽은 터미널 스크롤백이 아예
         // 없어서 우리가 굴릴 것이 없다.
+        if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
+            eprintln!("[wheel] alt={alt} mouse_on={mouse_on} sgr={mouse_sgr} lines={lines}");
+        }
         if mouse_on && mouse_sgr && alt {
             let (col, row) = self
                 .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
