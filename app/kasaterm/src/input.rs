@@ -1974,7 +1974,21 @@ impl App {
         if lines > 0 && launch_screen {
             return;
         }
-        if mouse_on && mouse_sgr {
+        // 마우스를 받는 앱이라도 **본화면(non-alt)에 그리는 앱이면 휠을 넘기지
+        // 않는다.** 넘기면 그 앱이 자기 버퍼를 굴리고 터미널 스크롤백(alacritty
+        // display_offset)은 0 에 머무는데, 우리 대화 턴 헤더는 그 값이 0 이 아닐
+        // 때만 뜬다(`TurnJump::header`) — 즉 넘기는 순간 헤더가 통째로 죽는다.
+        //
+        // claude 가 정확히 그 경우다. 본화면 렌더러(`tui: "default"`)로 돌면서
+        // 마우스를 켜므로 휠이 전부 그쪽으로 갔고, 그래서 「올려다볼 때 위에 붙는
+        // 질문 띠」가 안 떴다(2026-08-29 지적: "스크롤조금올리면 위에 고정돼서
+        // 클릭하면 올라가고내려가고 그거 왜 안되지"). 스크롤백에 같은 내용이 그대로
+        // 쌓여 있으니 터미널이 굴리는 편이 사용자에게 손해가 없고, 헤더는 절대 줄
+        // 번호를 알아 한 번에 그 질문 자리로 간다.
+        //
+        // alt-screen 앱(vim·htop)은 그대로 넘긴다 — 그쪽은 터미널 스크롤백이 아예
+        // 없어서 우리가 굴릴 것이 없다.
+        if mouse_on && mouse_sgr && alt {
             let (col, row) = self
                 .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
                 .unwrap_or((1, 1));
