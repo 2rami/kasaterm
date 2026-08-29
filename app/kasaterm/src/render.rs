@@ -8208,12 +8208,20 @@ impl App {
                         let badge = table.get(&key);
                         // 못 읽은 슬롯은 `—`. 0% 로 그리면 「여유 있음」이라는
                         // 거짓말이 되고, 그게 옮길지 말지를 정확히 반대로 만든다.
+                        // 값을 못 읽은 슬롯은 **이 줄에서 뺀다**. 이름 옆에 `—` 만
+                        // 붙는 칸은 「어디로 옮길까」에 아무 답을 못 주면서 자리만
+                        // 먹는다 — 넷이 다 `—` 면 줄 절반이 뜻 없는 글자가 된다
+                        // (2026-08-29 지적: 「좌측하단 계정정보 좀 정보량 줄이고」).
+                        // 있다는 사실은 끝의 `+N` 이 말하고, 전체는 눌러서 본다.
                         let (pct_s, pct_c) = match badge {
                             Some(b) if b.stale => {
                                 (format!("~{:.0}%", b.pct), pct_col(b.pct))
                             }
                             Some(b) => (format!("{:.0}%", b.pct), pct_col(b.pct)),
-                            None => ("—".to_string(), theme::text_dim()),
+                            None => {
+                                dropped += 1;
+                                continue;
+                            }
                         };
                         let sep = if first { " │ " } else { " · " };
                         let seg = g.measure_chrome_text(sep, fs, true)
