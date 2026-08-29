@@ -1220,6 +1220,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다(session/board 패널과 같은 이유).
         self.persona.webview = None;
+        self.info.machines_panel.webview = None;
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
         self.save_session_state();
@@ -6082,6 +6083,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 탭 전환·창 리사이즈·첫 진입이 전부 같은 동기화 한 번으로 정리된다. 렌더가
         // 본문 자리를 적어 준 **뒤**라야 하므로 여기(프레임 끝)가 그 자리다.
         self.sync_persona_view();
+        self.sync_machines_view();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).

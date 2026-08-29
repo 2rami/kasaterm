@@ -6297,6 +6297,30 @@ impl App {
                     (bottom - body_top).max(0.0),
                 ));
             }
+            // 이사 탭 — Persona 와 같은 웹뷰 본문. 배경·탭 머리를 그리고 남은
+            // 사각형만 적어 두면 sync_machines_view 가 그 위에 OS 뷰를 얹는다.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Machines {
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                self.info.machines_panel.body_rect = Some((
+                    git_col_x + 1.0,
+                    body_top,
+                    (git_col_w - 1.0).max(0.0),
+                    (bottom - body_top).max(0.0),
+                ));
+            }
             // Info 탭 — 같은 칼럼, 같은 머리, 본문만 다르다. git 본문과 형제
             // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.

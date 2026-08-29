@@ -28,7 +28,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: resolve(fileURLToPath(new URL('.', import.meta.url)), 'index.html'),
-        settings: resolve(fileURLToPath(new URL('.', import.meta.url)), 'settings.html')
+        settings: resolve(fileURLToPath(new URL('.', import.meta.url)), 'settings.html'),
+        machines: resolve(fileURLToPath(new URL('.', import.meta.url)), 'machines.html')
       }
     }
   },

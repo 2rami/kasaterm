@@ -5841,6 +5841,8 @@ impl App {
                     state::SideTab::Sessions
                 } else if std::env::var("KASATERM_PERSONA").is_ok() {
                     state::SideTab::Persona
+                } else if std::env::var("KASATERM_TEST_MACHINES").is_ok() {
+                    state::SideTab::Machines
                 } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
                     state::SideTab::Mcp
                 } else {

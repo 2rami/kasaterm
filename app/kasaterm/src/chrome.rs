@@ -711,6 +711,75 @@ impl App {
         self.persona.shown = true;
         window.request_redraw();
     }
+    /// 이사 탭이 지금 화면에 있어야 하나 — persona_active 와 같은 판정.
+    pub(crate) fn machines_tab_active(&self) -> bool {
+        self.git.col_visible && self.info.tab == state::SideTab::Machines
+    }
+    /// 이사 탭 웹뷰의 자리·보이기 동기화 — `sync_persona_view` 의 미러.
+    /// 숨길 때 폴링을 멈추지 않는 것만 다르다: 저쪽은 대화(LLM)라 토큰이 새지만
+    /// 이쪽 폴링은 로컬 HTTP 두 개(board·machines)뿐이라 세울 이유가 없다.
+    pub(crate) fn sync_machines_view(&mut self) {
+        let active = self.machines_tab_active();
+        if active && self.info.machines_panel.webview.is_none() {
+            self.open_machines_view();
+            return;
+        }
+        let Some(wv) = self.info.machines_panel.webview.as_ref() else { return };
+        if active != self.info.machines_panel.shown {
+            let _ = wv.set_visible(active);
+            self.info.machines_panel.shown = active;
+        }
+        if !active {
+            return;
+        }
+        let Some(rect) = self.info.machines_panel.body_rect else { return };
+        if self.info.machines_panel.last_rect == Some(rect) {
+            return;
+        }
+        let _ = wv.set_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
+            size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
+        });
+        self.info.machines_panel.last_rect = Some(rect);
+    }
+    /// 이사 탭 본문을 세운다 — `open_persona_view` 의 미러(같은 자식 웹뷰 방식,
+    /// 페이지만 `/arona-ui/machines.html`).
+    pub(crate) fn open_machines_view(&mut self) {
+        if self.info.machines_panel.webview.is_some() {
+            return;
+        }
+        let Some(window) = self.window.clone() else { return };
+        let Some(rect) = self.info.machines_panel.body_rect else { return };
+        if rect.2 <= 1.0 || rect.3 <= 1.0 {
+            return;
+        }
+        let port = mcp_panel_port();
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(format!("http://127.0.0.1:{port}/arona-ui/machines.html?v={cb}"))
+            // 페이지가 크림톤(--cth-cream-100)이라 배경도 그쪽에 맞춘다 — persona 의
+            // 다크색을 그대로 쓰면 로드 전 한 프레임이 검게 번쩍인다.
+            .with_background_color((247, 242, 234, 255))
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
+                size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("[machines-tab] webview build failed: {e}");
+                return;
+            }
+        };
+        self.info.machines_panel.webview = Some(webview);
+        self.info.machines_panel.last_rect = Some(rect);
+        self.info.machines_panel.shown = true;
+        window.request_redraw();
+    }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
         if self.git.col_visible {
