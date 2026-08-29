@@ -50,6 +50,8 @@ mod sesscol;
 mod state;
 mod statusbar;
 mod turnjump;
+// 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
+mod version;
 // 물리 메모리 압박 판정 — 하단바 사용량 위젯의 「재시작 권장」 근거.
 mod sysmem;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
@@ -6188,25 +6190,47 @@ impl App {
 /// 다음 셋을 다 만족할 때만 움직인다. 하나라도 어긋나면 조용히 아무것도 안 한다:
 /// 지금 도는 것이 **그 설치본**일 것(개발 `cargo run` 이나 남의 위치 앱은 남의 것),
 /// 빌드 트리의 번들이 실재할 것(배포된 머신엔 없다), 그리고 그게 **더 새것**일 것.
-fn arm_self_install() {
-    let installed = match std::env::var("HOME") {
-        Ok(h) => std::path::PathBuf::from(h).join("Applications/kasaterm.app"),
-        Err(_) => return,
-    };
+/// 종료할 때 설치가 **실제로 움직일 조건** — 화면의 「껐다 켜면 바뀝니다」 표시가
+/// 이 답을 그대로 쓴다. 둘이 갈리면 화면이 거짓말을 한다: 표시는 떴는데 안 바뀌거나,
+/// 안 떴는데 바뀌거나.
+///
+/// 반환은 (설치본 번들, 새로 구운 번들). `None` 이면 움직일 이유가 없다.
+fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let installed =
+        std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Applications/kasaterm.app");
     let running = installed.join("Contents/MacOS/kasaterm");
+    // 그 설치본으로 도는 앱에서만 뜻이 있다 — `cargo run` 개발 실행에서는 새로 구운
+    // 쪽이 늘 더 새것이라 표시가 영구히 켜져 있게 된다.
     if std::env::current_exe().ok().as_deref() != Some(running.as_path()) {
-        return;
+        return None;
     }
-    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/kasaterm.app");
-    let mtime = |p: &std::path::Path| {
-        std::fs::metadata(p).and_then(|m| m.modified()).ok()
-    };
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/kasaterm.app");
     let fresh = dist.join("Contents/MacOS/kasaterm");
-    let (Some(new), Some(old)) = (mtime(&fresh), mtime(&running)) else { return };
-    if new <= old {
-        return;
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    (mtime(&fresh)? > mtime(&running)?).then_some((installed, dist))
+}
+
+/// 위 판정의 캐시판 — 상태줄은 프레임마다 도는 자리라 stat 두 번도 매번은 아깝다.
+pub(crate) fn install_pending() -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut g) = cell.lock() else { return false };
+    if let Some((at, v)) = *g {
+        if at.elapsed() < Duration::from_secs(5) {
+            return v;
+        }
     }
+    let v = install_pending_paths().is_some();
+    *g = Some((Instant::now(), v));
+    v
+}
+
+fn arm_self_install() {
+    let Some((installed, dist)) = install_pending_paths() else { return };
+    let running = installed.join("Contents/MacOS/kasaterm");
+    let fresh = dist.join("Contents/MacOS/kasaterm");
     let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
     // 설치 직전 재확인 두 개는 arm 시점 검사와 별개로 필요하다. 헬퍼는 pid 가
     // 사라지길 기다리는데, 그 pid 가 다른 장수 프로세스로 재사용되면 며칠 뒤에야

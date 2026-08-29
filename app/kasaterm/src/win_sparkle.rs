@@ -49,8 +49,7 @@ pub(crate) fn take_found() -> Option<String> {
 /// 쓰는 단순 피드(docs/appcast-win.xml)라 첫 매치가 곧 최신이다.
 /// 실피드(release.sh/release.yml)는 `<sparkle:version>x</sparkle:version>`
 /// 엘리먼트형 — 속성형(`sparkle:version="x"`)은 Sparkle 호환 폴백.
-#[cfg_attr(not(windows), allow(dead_code))] // 비 Windows 에선 테스트만 사용
-fn parse_appcast_version(xml: &str) -> Option<String> {
+pub(crate) fn parse_appcast_version(xml: &str) -> Option<String> {
     const ELEM: &str = "<sparkle:version>";
     if let Some(i) = xml.find(ELEM) {
         let rest = &xml[i + ELEM.len()..];
@@ -66,8 +65,7 @@ fn parse_appcast_version(xml: &str) -> Option<String> {
 
 /// a 가 b 보다 새 버전인가 — 세그먼트별 숫자 비교("0.1.10" > "0.1.9").
 /// 숫자가 아닌 세그먼트가 섞이면 보수적으로 false(오판 업데이트 알림 방지).
-#[cfg_attr(not(windows), allow(dead_code))] // 비 Windows 에선 테스트만 사용
-fn version_newer(a: &str, b: &str) -> bool {
+pub(crate) fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Option<Vec<u64>> { s.split('.').map(|p| p.parse().ok()).collect() };
     match (parse(a), parse(b)) {
         (Some(x), Some(y)) => x > y,

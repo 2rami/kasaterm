@@ -8289,7 +8289,46 @@ impl App {
                     }
                 }
 
-                // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 누르면 열린다.
+                // 판 번호. 이 줄에서 가장 자주 묻는 것이고(2026-08-29 「나 카사텀
+                // 버전몇이지」), 새로 구운 것이 설치를 기다리고 있으면 그것도 여기서
+                // 말한다 — 「껐다 켜면 반영됩니다」를 사람이 말로 전하던 자리다.
+                //
+                // 판정은 종료 때 실제로 설치를 움직이는 것과 **같은 함수**를 쓴다.
+                // 갈리면 표시는 떴는데 안 바뀌거나 그 반대가 된다.
+                //
+                // 화살표는 **여기서 할 일이 있다**는 뜻 하나다 — 구워 둔 것이든
+                // 배포 피드의 새 판이든 사용자가 하는 일은 껐다 켜기로 같다.
+                if win_w >= 720.0 {
+                    let waiting = crate::install_pending()
+                        || matches!(crate::version::state(), crate::version::Check::Newer(_));
+                    let s = if waiting {
+                        format!(" · v{} ↑", crate::version::CURRENT)
+                    } else {
+                        format!(" · v{}", crate::version::CURRENT)
+                    };
+                    let w = g.measure_chrome_text(&s, fs, true);
+                    if x + w <= win_w - 400.0 {
+                        g.draw_text(
+                            x,
+                            ty,
+                            &s,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: if waiting {
+                                    theme::accent()
+                                } else {
+                                    theme::with_alpha(theme::text_dim(), 150)
+                                },
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        x += w;
+                    }
+                }
+
+                // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
+                // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
                 let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), status_h);
                 // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
                 // 생각조차 안 든다(거노 2026-08-12). 채움은 주지 않는다: 세그먼트
@@ -8584,6 +8623,9 @@ impl App {
                     .swap(self.account_menu, Ordering::Relaxed);
                 if self.account_menu && !was {
                     crate::handler::usage_poke().store(true, Ordering::Relaxed);
+                    // 판 확인도 여는 순간에 붙인다 — 상시 폴링을 안 하는 대신
+                    // 사람이 궁금해서 연 그 자리에서 한 바퀴 돈다(30분 캐시).
+                    crate::version::ensure_check();
                 }
             }
             self.account_menu_hits.clear();
@@ -8675,13 +8717,17 @@ impl App {
                 let row_h = 28.0_f32;
                 let prow_h = if compact { 30.0 } else { 46.0 };
                 let rule = 5.0_f32;
+                // 판 줄. 액션 행보다 낮다 — 누르는 자리가 아니라 읽는 자리다.
+                let ver_h = 22.0_f32;
                 let mh = pad * 2.0
                     + head_h
                     + seg_h
                     + rule
                     + prow_h * provs.len() as f32
                     + rule
-                    + row_h * 2.0;
+                    + row_h * 2.0
+                    + rule
+                    + ver_h;
                 // 아래로 펼치되 자리가 없으면 위로 뒤집는다. 손잡이 하나가 창 맨 아래
                 // 상태줄이라(늘 보이는 자리) 아래로만 펼치면 메뉴가 통째로 창 밖에
                 // 그려졌다 — 열리기는 열리는데 화면엔 아무 일도 안 일어난 것처럼 보인다
@@ -8898,6 +8944,67 @@ impl App {
                     self.account_menu_hits.push((item, (mx, ry, mw, row_h)));
                     ry += row_h;
                 }
+
+                // ── 판 번호 ─────────────────────────────────────────────────
+                // 「나 카사텀 버전몇이지」(2026-08-29)가 바로 답이 나오는 자리.
+                // 상태줄엔 번호만 두고 사정은 여기서 말한다 — 늘 보이는 줄에
+                // 넣기엔 셋 중 둘이 평소엔 아무 일 없다는 말이라서다.
+                //
+                // 오른쪽 문구의 우선순위는 **사용자가 지금 할 수 있는 일** 순이다.
+                // 구워 둔 것이 있으면 껐다 켜기만 하면 되니 그게 먼저고, 그다음이
+                // 아직 받지 않은 새 판이다.
+                g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
+                ry += rule;
+                {
+                    let vf = f - 2.0;
+                    let left = format!("카사텀 v{}", crate::version::CURRENT);
+                    g.draw_text(
+                        mx + pad_x,
+                        ry + (ver_h - vf) / 2.0 - 1.0,
+                        &left,
+                        gpu::DrawOpts {
+                            font_size: vf,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    let (note, col) = if crate::install_pending() {
+                        ("새 판 준비됨 · 껐다 켜기".to_string(), theme::accent())
+                    } else {
+                        match crate::version::state() {
+                            crate::version::Check::Newer(v) => {
+                                (format!("v{v} 나왔음"), theme::accent())
+                            }
+                            crate::version::Check::Latest => {
+                                ("최신".to_string(), theme::text_mute())
+                            }
+                            crate::version::Check::Busy => {
+                                ("확인 중…".to_string(), theme::text_dim())
+                            }
+                            crate::version::Check::Failed => {
+                                ("확인 못 함".to_string(), theme::text_dim())
+                            }
+                            crate::version::Check::Idle => (String::new(), theme::text_dim()),
+                        }
+                    };
+                    if !note.is_empty() {
+                        let nw = g.measure_chrome_text(&note, vf, false);
+                        g.draw_text(
+                            mx + mw - pad_x - nw,
+                            ry + (ver_h - vf) / 2.0 - 1.0,
+                            &note,
+                            gpu::DrawOpts {
+                                font_size: vf,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                }
+                // 판 줄이 메뉴의 마지막이라 커서를 더 밀지 않는다 — 아래에 무언가
+                // 붙이는 날 `ry += ver_h;` 를 되살려라.
 
                 // ── 계정 목록(서브메뉴) ─────────────────────────────────────
                 // 로스터 오른쪽에 붙는다. 계정을 첫 화면에 늘어놓지 않는 이유는 위
