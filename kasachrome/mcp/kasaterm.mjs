@@ -40,14 +40,24 @@ function slugOf(entry, name) {
 }
 
 function profileDataUrl(dir, slug) {
-  if (!dir || !slug) return null
-  const p = join(dir, 'app', 'kasaterm', 'assets', 'students', `${slug}-profile.png`)
-  if (!existsSync(p)) return null
-  try {
-    return `data:image/png;base64,${readFileSync(p).toString('base64')}`
-  } catch {
-    return null
+  if (!slug) return null
+  // 실제 구조는 `students/profile/<slug>.png` 다. 예전엔 `students/<slug>-profile.png` 를
+  // 봤는데 그런 파일은 트리에 하나도 없어서 프사가 통째로 비었고(2026-08-29 실측: 79개
+  // 파일이 profile/ 아래 있었다), 오버레이·커서·패널이 전부 민색 원으로 떨어졌다.
+  // 옛 이름도 후보로 남긴다 — 배포 빌드가 평평하게 펴는 경우가 있다.
+  const candidates = [
+    dir && join(dir, 'app', 'kasaterm', 'assets', 'students', 'profile', `${slug}.png`),
+    dir && join(dir, 'app', 'kasaterm', 'assets', 'students', `${slug}-profile.png`),
+    dir && join(dir, 'dist', 'kasaterm.app', 'Contents', 'Resources', 'assets', 'students', 'profile', `${slug}.png`),
+    `/Applications/kasaterm.app/Contents/Resources/assets/students/profile/${slug}.png`,
+  ].filter(Boolean)
+  for (const p of candidates) {
+    if (!existsSync(p)) continue
+    try {
+      return `data:image/png;base64,${readFileSync(p).toString('base64')}`
+    } catch { /* 다음 후보 */ }
   }
+  return null
 }
 
 export function lookup(name) {
