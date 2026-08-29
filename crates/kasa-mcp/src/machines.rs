@@ -145,19 +145,21 @@ async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>>
     serde_json::from_str::<Value>(&text).ok()?.as_array().cloned()
 }
 
-/// 백그라운드 폴링. 명부가 비어 있으면 루프를 아예 안 돈다(remoteboard 규율).
+/// 백그라운드 폴링. 명부는 **매 바퀴 다시 읽는다** — 부팅 때 한 번만 잡으면
+/// machines.json 을 고쳐도 재시작 전까지 옛 주소를 두드린다(2026-08-29 실측:
+/// 미니 창구를 옛 서버→본진 앱으로 바꿨는데 폴링만 옛 주소에 남았다).
+/// 명부가 비어 있으면 바깥 fetch 는 안 나간다(remoteboard 규율) — 파일 한 번
+/// 읽고 자는 것뿐이라 루프 자체는 싸다.
 pub async fn poll_loop() {
-    let list = machines();
-    if list.is_empty() {
-        return;
-    }
-    eprintln!(
-        "[machines] {} 곳 폴링: {}",
-        list.len(),
-        list.iter().map(|m| m.label.as_str()).collect::<Vec<_>>().join(", ")
-    );
     let client = reqwest::Client::new();
+    let mut announced: Vec<String> = Vec::new();
     loop {
+        let list = machines();
+        let labels: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
+        if labels != announced {
+            eprintln!("[machines] {} 곳 폴링: {}", list.len(), labels.join(", "));
+            announced = labels;
+        }
         for m in &list {
             if let Some(panes) = fetch_panes(&client, &m.base).await {
                 if let Ok(mut c) = cache().lock() {
