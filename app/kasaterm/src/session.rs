@@ -279,7 +279,7 @@ impl App {
         room: Option<&str>,
     ) -> Vec<(String, String)> {
         let Some(cwd) = cwd else { return Vec::new() };
-        let Some(chars) = kasa_mcp::character::characters_json() else {
+        let Some(chars) = kasa_mcp::character::roster_in_use() else {
             return Vec::new();
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
@@ -1279,7 +1279,7 @@ impl App {
                     None => {
                         if let Some(cur) = cur.filter(|c| !c.is_empty()) {
                             let _ = kasa_mcp::character::bind_session_character(sid, &cur);
-                        } else if let Some(chars) = kasa_mcp::character::characters_json() {
+                        } else if let Some(chars) = kasa_mcp::character::roster_in_use() {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
                             // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
                             let members = kasa_mcp::character::assignable_names(&chars);

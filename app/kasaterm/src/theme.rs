@@ -1469,7 +1469,11 @@ fn build_roster() -> Roster {
     // 전부 None 이 되어 **그 컴퓨터에서만** 테스트가 깨진다(2026-08-24 실측: 치이카와
     // 테마를 켜자 theme·screenread·sprites 12개 실패). 코드 회귀가 아닌 것이 회귀처럼
     // 보이는 쪽이 훨씬 비싸다.
-    let chars = (!cfg!(test)).then(kasa_mcp::character::characters_json).flatten();
+    // `characters_json` 이 아니라 `roster_in_use` — 다른 테마에서 고른 학생도 활성
+    // 명부의 일원으로 본다. 그게 없으면 그 학생들은 색도 슬러그도 활성 명부에서
+    // 못 찾아, 이름만 뜨고 테마가 안 붙는다(2026-08-29 「에무랑 카사크롬도 테마
+    // 해결해봐」). 이름이 겹칠 때 고른 쪽이 이기는 것도 같은 함수가 정한다.
+    let chars = (!cfg!(test)).then(kasa_mcp::character::roster_in_use).flatten();
     roster_of(chars.as_ref())
 }
 

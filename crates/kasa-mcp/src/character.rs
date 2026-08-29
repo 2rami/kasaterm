@@ -177,6 +177,81 @@ pub fn characters_json() -> Option<Value> {
     None
 }
 
+/// **실제로 쓰는 명부** — 활성 명부에 고른 캐릭터를 그 사람이 고른 테마의 것으로 얹는다.
+///
+/// 이름이 두 테마에 겹치면 **어느 명부를 먼저 보느냐가 곧 정체다.** 실측
+/// (2026-08-29): 「리오」가 번들(츠카츠키 리오)과 eternalreturn 양쪽에 있는데
+/// 사용자는 eternalreturn 쪽만 켜 두었다. 그런데 배정도 색도 그림도 활성 명부
+/// (번들)부터 찾으니, **켠 적 없는 블루아카 리오**가 붙었다("리오는 켜지도않았는데
+/// 너 리오잖아 블루아카"). 고른 쪽을 활성보다 앞에 세워 그 자리를 닫는다.
+///
+/// 덤이 하나 더 있다. 고른 명단은 테마를 가로지르는데(실측 10개 테마 31명) 활성
+/// 명부는 한 벌뿐이라, 다른 테마에서 고른 학생은 **활성 명부에 아예 없었다** —
+/// 이름은 배정되는데 색·슬러그를 활성 명부에서 찾는 자리마다 빈손이 됐다. 여기서
+/// 얹으면 그 학생들도 활성 명부의 일원이 된다.
+///
+/// 고르기를 한 번도 안 썼으면 활성 명부 **그대로** 돌려준다 — 「아무도 안 골랐다」는
+/// 제한이 없다는 뜻이지 명부를 바꾸라는 뜻이 아니다.
+pub fn roster_in_use() -> Option<Value> {
+    roster_in_use_from(&read_character_picks(), characters_json(), |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+/// 위의 순수부 — 명부를 주입받는다. `picked_names_from` 과 같은 이유로 갈라 뒀다:
+/// 이름 충돌 규칙은 **어느 테마가 깔려 있느냐와 무관하게** 성립해야 하는데, 파일에
+/// 기대면 그 테마를 깐 컴퓨터에서만 도는 검증이 된다.
+fn roster_in_use_from(
+    picks: &[(String, Vec<String>)],
+    base: Option<Value>,
+    load: impl Fn(&str) -> Option<Value>,
+) -> Option<Value> {
+    if picks.is_empty() {
+        return base;
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut take = |chars: &Value, only: Option<&[String]>| {
+        for m in entries_of(chars) {
+            let Some(n) = m.get("name").and_then(|v| v.as_str()) else { continue };
+            if only.is_some_and(|w| !w.iter().any(|x| x == n)) {
+                continue;
+            }
+            if !seen.insert(n.to_string()) {
+                continue;
+            }
+            out.push(m.clone());
+        }
+    };
+    // 1. 고른 것부터. 겹치는 이름이 여기서 먼저 잡히므로 활성보다 이긴다.
+    for (theme, names) in picks {
+        // 테마를 지웠으면 조용히 건너뛴다 — 목록에 남은 유령까지 명부에 넣으면
+        // 이름은 뜨는데 그림·색이 없는 학생이 된다.
+        if let Some(c) = load(theme) {
+            take(&c, Some(names));
+        }
+    }
+    // 2. 활성 명부의 나머지.
+    if let Some(c) = base.as_ref() {
+        take(c, None);
+    }
+    // 원래 객체의 나머지 키(테마 메타)는 살린다. 인원은 `members` 한 칸으로 편다 —
+    // 읽는 쪽이 전부 leader/leaders/members 를 합쳐 보므로 갈라 둘 이유가 없고,
+    // `leader` 를 남기면 그 한 명이 두 번 세어진다.
+    let mut obj = base
+        .as_ref()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.remove("leader");
+    obj.insert("leaders".to_string(), Value::Array(Vec::new()));
+    obj.insert("members".to_string(), Value::Array(out));
+    Some(Value::Object(obj))
+}
+
 /// 설치된 **모든** 로스터 — 활성 테마 + 기본 + `themes/` 아래 테마 전부.
 ///
 /// 「이 이름이 우리가 배정한 학생 이름인가」를 묻는 쪽은 활성 명단이 아니라 이것을
@@ -249,7 +324,10 @@ pub fn theme_characters_json(id: &str) -> Option<Value> {
 /// 다른 테마 캐릭터로 재배정된 뒤 재시작·resume 할 때, 활성 로스터에 없는
 /// 이름이라도 원 소속 테마의 말투를 찾아 입힌다.
 pub fn persona_for_any(name: &str) -> Option<String> {
-    for chars in [characters_json(), base_characters_json()].into_iter().flatten() {
+    // `roster_in_use` 가 맨 앞이다 — 이름이 겹칠 때 **말투가 얼굴·색과 갈리면** 안
+    // 된다. 이 자리가 활성 명부를 먼저 보던 탓에 eternalreturn 리오로 배정된 pane 이
+    // 블루아카 리오의 말투로 떴다(2026-08-29).
+    for chars in [roster_in_use(), base_characters_json()].into_iter().flatten() {
         if let Some(p) = persona_for(&chars, name) {
             return Some(p);
         }
@@ -466,7 +544,18 @@ fn assignable_names_with(chars: &Value, picked: &[String]) -> Vec<String> {
     if picked.is_empty() {
         return member_names(chars);
     }
-    picked.to_vec()
+    // **명부에 실재하는 것만.** 고른 이름을 그대로 후보로 쓰면, 그 이름이 명부에서
+    // 다른 사람을 가리키는 경우에 그 사람이 배정된다 — 「리오」가 정확히 그랬다
+    // (`roster_in_use` 주석). 명부를 고른 순서대로 짠 뒤 그 명부와 교집합을 잡으면
+    // 이름이 가리키는 사람과 배정되는 사람이 갈릴 자리가 없다.
+    let have = member_names(chars);
+    let v: Vec<String> = picked.iter().filter(|n| have.contains(n)).cloned().collect();
+    // 하나도 안 남으면 전원 — 빈 후보는 배정을 굶겨 캐릭터 없는 pane 을 만든다.
+    if v.is_empty() {
+        member_names(chars)
+    } else {
+        v
+    }
 }
 
 /// 방 학교 판정에서 빼는 소속 — 학원이 아니라 소속 기관이고 인원도 둘뿐이라,
@@ -515,8 +604,9 @@ pub fn prefer_fresh_school(chars: &Value, free: &[String], elsewhere: &[String])
         .collect()
 }
 
-/// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
-fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
+/// leader/leaders/members 통합 풀. `leader` 는 `leaders[0]` 을 한 번 더 적어 둔
+/// 하위호환 필드라 같은 사람이 두 번 나올 수 있다 — 이름으로 거르는 쪽에서 접힌다.
+fn entries_of(chars: &Value) -> Vec<&Value> {
     let mut pool: Vec<&Value> = Vec::new();
     if let Some(l) = chars.get("leader") {
         pool.push(l);
@@ -526,7 +616,14 @@ fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
             pool.extend(arr);
         }
     }
-    pool.into_iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+    pool
+}
+
+/// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
+fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
+    entries_of(chars)
+        .into_iter()
+        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
 }
 
 /// 캐릭터의 persona 텍스트(leader/leaders/members 통합 풀에서 이름 매칭).
@@ -1478,6 +1575,84 @@ mod tests {
         v.iter()
             .map(|(t, ns)| (t.to_string(), ns.iter().map(|n| n.to_string()).collect()))
             .collect()
+    }
+
+    /// 슬러그까지 갖춘 명부 — 이름 충돌이 **누구를 가리키는지** 재려면 이름만으론
+    /// 안 된다(둘 다 "리오"라 이름은 같다). 슬러그가 정체의 증거다.
+    fn roster_slugged(v: &[(&str, &str)]) -> Value {
+        serde_json::json!({
+            "members": v
+                .iter()
+                .map(|(n, s)| serde_json::json!({"name": n, "slug": s}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// 2026-08-29 "리오는 켜지도않았는데 너 리오잖아 블루아카".
+    ///
+    /// 「리오」가 번들과 eternalreturn 양쪽에 있고 사용자는 eternalreturn 쪽만 켰다.
+    /// 활성 명부(번들)를 먼저 보면 켠 적 없는 쪽이 이긴다 — 이 순서가 뒤집히면
+    /// 화면·말투·그림이 전부 다른 사람을 가리키므로 여기서 못을 박는다.
+    #[test]
+    fn 고른_테마가_같은_이름의_활성_명부를_이긴다() {
+        let base = roster_slugged(&[("리오", "rio_ba"), ("미도리", "midori")]);
+        let er = roster_slugged(&[("리오", "rio_er"), ("아야", "aya")]);
+        let got = roster_in_use_from(
+            &picks(&[("eternalreturn", &["리오"])]),
+            Some(base),
+            |t| (t == "eternalreturn").then(|| er.clone()),
+        )
+        .expect("명부가 나와야 한다");
+        let slug_of = |n: &str| {
+            find_character(&got, n)
+                .and_then(|m| m.get("slug"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(slug_of("리오").as_deref(), Some("rio_er"), "고른 쪽이 이겨야 한다");
+        // 활성 명부의 나머지는 그대로 남는다 — 고르기는 덮어쓰기지 갈아치우기가 아니다.
+        assert_eq!(slug_of("미도리").as_deref(), Some("midori"));
+        // 한 사람이 두 번 세어지지 않는다(leader 가 members 와 겹치던 자리).
+        assert_eq!(member_names(&got).iter().filter(|n| *n == "리오").count(), 1);
+    }
+
+    /// 다른 테마에서 고른 학생은 **활성 명부의 일원이 된다.** 이게 없으면 이름만
+    /// 배정되고 색·슬러그를 활성 명부에서 찾는 자리마다 빈손이었다(2026-08-29
+    /// "에무랑 카사크롬도 테마 해결해봐").
+    #[test]
+    fn 다른_테마에서_고른_학생이_활성_명부에_들어온다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let sekai = roster_slugged(&[("에무", "emu"), ("네네", "nene")]);
+        let got = roster_in_use_from(
+            &picks(&[("project-sekai", &["에무"])]),
+            Some(base),
+            |t| (t == "project-sekai").then(|| sekai.clone()),
+        )
+        .expect("명부가 나와야 한다");
+        let names = member_names(&got);
+        assert!(names.contains(&"에무".to_string()), "고른 학생이 명부에 있어야 한다");
+        assert!(names.contains(&"미도리".to_string()));
+        // 안 고른 같은 테마 학생까지 딸려오면 안 된다 — 그건 고르기를 무시하는 것이다.
+        assert!(!names.contains(&"네네".to_string()));
+    }
+
+    /// 고르기를 한 번도 안 썼으면 활성 명부 **그대로**. 「아무도 안 골랐다」는 제한이
+    /// 없다는 뜻이지 명부를 바꾸라는 뜻이 아니다.
+    #[test]
+    fn 고른_것이_없으면_명부를_손대지_않는다() {
+        let base = roster(&["아로나", "시로코"]);
+        let got = roster_in_use_from(&[], Some(base.clone()), |_| None);
+        assert_eq!(got, Some(base));
+    }
+
+    /// 지운 테마에서 고른 유령은 명부에 안 들어간다 — 이름만 뜨고 그림·색이 없는
+    /// 학생이 되고, 그건 오류로 안 드러난다.
+    #[test]
+    fn 지운_테마의_유령은_명부에_안_들어간다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let got = roster_in_use_from(&picks(&[("지운테마", &["누구"])]), Some(base), |_| None)
+            .expect("명부가 나와야 한다");
+        assert_eq!(member_names(&got), vec!["미도리".to_string()]);
     }
 
     /// 고른 것이 없으면 지금까지의 동작 그대로 — 전원이 후보다.

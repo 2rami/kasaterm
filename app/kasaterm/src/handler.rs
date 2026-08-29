@@ -597,7 +597,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 무관한 세션이 그 학생으로 둔갑했다(거노: 왼쪽 pane 둘 다 프라나). 여기서
                 // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(거노).
                 let resolved = resolved.or_else(|| {
-                    let members = kasa_mcp::character::characters_json()
+                    let members = kasa_mcp::character::roster_in_use()
                         .map(|c| kasa_mcp::character::assignable_names(&c))
                         .unwrap_or_default();
                     let taken: std::collections::HashSet<String> = {
