@@ -134,6 +134,8 @@ pub(crate) struct PaneGroup {
     pub(crate) session: String,
     pub(crate) shell: String,
     pub(crate) shell_pid: u32,
+    /// 원격 pane 이면 그 기계 이름 — 셸·pid 자리에 ⇄ 기계로 그린다.
+    pub(crate) machine: Option<String>,
     pub(crate) active: bool,
     /// 방(윈도우) 인덱스와 이름 — 방이 둘 이상일 때만 머리로 그린다.
     pub(crate) window: usize,
@@ -244,6 +246,10 @@ pub(crate) struct PaneTarget {
     /// 탭바에서의 차례. 접을 때 이 순서로 세운다 — pid 순으로 세우면 탭을 옮긴
     /// 뒤 목록과 탭바가 어긋난다.
     pub(crate) tab_index: usize,
+    /// 원격 pane 이면 그 기계 이름. 로컬 셸이 없어(shell_pid 0) 프로세스 행은
+    /// 못 세우지만, 목록에서 통째로 빼면 「인포에 맥미니 세션이 안 보인다」가
+    /// 된다(2026-08-29 지적) — 자리는 남기고 셸·pid 대신 ⇄ 기계를 적는다.
+    pub(crate) machine: Option<String>,
 }
 
 /// `ps` 한 줄에서 뽑은 원시 레코드. 좀비도 담는다 — 목록에는 안 올리지만
@@ -271,20 +277,27 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             pane: t.id.clone(),
             label: t.label.clone(),
             session: t.session_path.as_deref().map(session_title).unwrap_or_default(),
-            shell: by_pid
-                .get(&t.shell_pid)
-                .map(|r| split_argv(&r.args).0)
-                // 로그인 셸의 argv[0] 은 `-zsh` 처럼 하이픈이 붙는다 — 표시용이라 뗀다.
-                .map(|n| n.trim_start_matches('-').to_string())
-                .unwrap_or_default(),
+            // ⚠️ 원격 pane 의 shell_pid 0 을 그대로 조회하면 pid 0(kernel_task)이
+            // 걸린다 — 셸도 프로세스 행도 로컬에 없는 게 맞다.
+            shell: if t.shell_pid == 0 {
+                String::new()
+            } else {
+                by_pid
+                    .get(&t.shell_pid)
+                    .map(|r| split_argv(&r.args).0)
+                    // 로그인 셸의 argv[0] 은 `-zsh` 처럼 하이픈이 붙는다 — 표시용이라 뗀다.
+                    .map(|n| n.trim_start_matches('-').to_string())
+                    .unwrap_or_default()
+            },
             shell_pid: t.shell_pid,
+            machine: t.machine.clone(),
             active: t.active,
             window: t.window,
             window_label: t.window_label.clone(),
             undocked: t.undocked,
             closed: t.closed,
             cwd: t.cwd.as_deref().map(tilde_path).unwrap_or_default(),
-            rows: build_rows(&table, t.shell_pid),
+            rows: if t.shell_pid == 0 { Vec::new() } else { build_rows(&table, t.shell_pid) },
             // 여기선 늘 빈 값이다 — 탭 접기는 포트 귀속이 끝난 **맨 뒤**에서 한다
             // (`fold_tabs`).
             tabs: Vec::new(),
@@ -305,6 +318,9 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // pid → 소유 pane. 포트를 쥔 프로세스를 pane 으로 되짚는 역인덱스다.
     let mut owner: HashMap<u32, String> = HashMap::new();
     for g in &panes {
+        if g.shell_pid == 0 {
+            continue; // 원격 pane — 로컬 프로세스가 없어 귀속할 것도 없다.
+        }
         owner.insert(g.shell_pid, g.pane.clone());
         for r in &g.rows {
             owner.insert(r.pid, g.pane.clone());
@@ -1600,7 +1616,24 @@ impl App {
                         .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
                     closed: self.stashed_record(id).is_some(),
                     id: leaf,
-                    shell_pid: s.shell_pid()?,
+                    // 원격 pane 은 로컬 셸이 없다 — 0 으로 남기고 machine 이 그
+                    // 자리를 말한다. 예전엔 `?` 로 pane 째 빠져 「인포에 맥미니
+                    // 세션이 안 보인다」였다.
+                    shell_pid: match s.shell_pid() {
+                        Some(p) => p,
+                        None if kasa_mcp::remote::is_remote_pane(id) => 0,
+                        None => return None,
+                    },
+                    machine: kasa_mcp::remote::remote_info(id).map(|i| {
+                        if i.label.is_empty() {
+                            i.base
+                                .trim_start_matches("http://")
+                                .trim_start_matches("https://")
+                                .to_string()
+                        } else {
+                            i.label
+                        }
+                    }),
                     outer,
                     tab_title,
                     tab_active,
@@ -2642,7 +2675,12 @@ fn draw_group_head(
     // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
     let mut cx = tx + tw + 8.0;
-    let shell = format!("{} {}", gp.shell, gp.shell_pid);
+    // 원격 pane 은 셸·pid 대신 어느 기계 것인지 — 이 줄의 존재 이유가 「그
+    // pane 에서 무엇이 도나」인데, 원격은 그 답이 기계 이름이다.
+    let shell = match gp.machine.as_deref() {
+        Some(m) => format!("⇄ {m}"),
+        None => format!("{} {}", gp.shell, gp.shell_pid),
+    };
     // 다만 **통째로** 밀어내진 않는다 — 긴 제목 하나가 폭을 다 먹어 pid 가 사라지면
     // 프로세스를 짚을 열쇠가 없어진다(실측: 30자 제목이 `zsh 35776` 을 지웠다).
     // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
@@ -2722,8 +2760,13 @@ fn draw_group_head(
             &s,
             gpu::DrawOpts {
                 font_size: 10.0,
-                color: theme::with_alpha(theme::text_mute(), 0xA0),
-                bold: false,
+                // 기계 표시는 흐리면 안 보이는 게 낫지 않다 — pane 헤더 칩과 같은 언어.
+                color: if gp.machine.is_some() {
+                    theme::accent()
+                } else {
+                    theme::with_alpha(theme::text_mute(), 0xA0)
+                },
+                bold: gp.machine.is_some(),
                 italic: false,
             },
         );

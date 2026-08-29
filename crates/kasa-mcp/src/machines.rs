@@ -33,6 +33,10 @@ pub struct Machine {
     pub label: String,
     /// pane 호스트 주소(`http://127.0.0.1:18791`) — /term/* 가 사는 곳.
     pub base: String,
+    /// 그 기계의 **진짜** 주소(`user@10.1.2.3` 꼴 허용) — 화면공유(vnc://) 등
+    /// HTTP 창구 밖의 문에 쓴다. base 는 대개 SSH 터널(127.0.0.1)이라 못 쓴다.
+    /// 명부의 `host` 값, 없으면 base 의 호스트가 루프백이 아닐 때만 유도. 빈값 가능.
+    pub host: String,
     /// 로컬 경로 → 그 기계 경로. 긴 접두부터 맞춘다 — nacho-neko 처럼 부모와
     /// 다른 자리에 사는 레포를 부모 규칙보다 먼저 잡기 위해서다.
     pub roots: Vec<(String, String)>,
@@ -47,6 +51,24 @@ fn parse(v: &Value) -> Vec<Machine> {
             if label.is_empty() || base.is_empty() {
                 return None;
             }
+            let host = m
+                .get("host")
+                .and_then(|h| h.as_str())
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| {
+                    let h = base
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://")
+                        .split(['/', ':'])
+                        .next()
+                        .unwrap_or("");
+                    if h == "127.0.0.1" || h == "localhost" {
+                        String::new()
+                    } else {
+                        h.to_string()
+                    }
+                });
             let mut roots: Vec<(String, String)> = m
                 .get("roots")
                 .and_then(|r| r.as_object())
@@ -59,7 +81,7 @@ fn parse(v: &Value) -> Vec<Machine> {
             // 긴 접두가 먼저 이겨야 한다 — 정렬을 여기서 굳혀 두면 매핑 함수는
             // 앞에서부터 첫 일치를 집으면 된다.
             roots.sort_by_key(|(l, _)| std::cmp::Reverse(l.len()));
-            Some(Machine { label, base, roots })
+            Some(Machine { label, base, host, roots })
         })
         .collect()
 }

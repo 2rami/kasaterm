@@ -115,11 +115,18 @@ impl App {
         locals.sort_by_key(|(w, _)| *w);
         let locals: Vec<state::MachinesColRow> = locals.into_iter().map(|(_, r)| r).collect();
 
-        // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다.
+        // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다. host(화면공유 주소)는
+        // 캐시에 없어 명부에서 라벨로 찾는다 — 한 번만 읽어 루프에 물린다.
+        let registry = kasa_mcp::machines::machines();
         let machines = kasa_mcp::machines::snapshot()
             .into_iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
+                let host = registry
+                    .iter()
+                    .find(|r| r.label == label)
+                    .map(|r| r.host.clone())
+                    .unwrap_or_default();
                 let (mirror_ids, mirror_rows) = mirrored.remove(&label).unwrap_or_default();
                 let remote = m
                     .get("panes")
@@ -171,6 +178,7 @@ impl App {
                     label,
                     online: m.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
                     ago_secs: m.get("ago_secs").and_then(|v| v.as_u64()),
+                    host,
                     mirrored: mirror_rows,
                     remote,
                 })
@@ -194,12 +202,20 @@ impl App {
             .find(|(_, (x, y, w, h))| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
             .map(|(b, _)| b.clone());
         let Some(btn) = hit else { return false };
+        if let state::MachinesColBtn::Screen { host } = &btn {
+            // 화면공유는 OS 에 맡긴다 — macOS 화면공유 앱이 vnc:// 를 연다.
+            // 이사와 달리 즉시 끝나는 조작이라 busy 대열에 안 세운다.
+            let _ = crate::proc::command("open").arg(format!("vnc://{host}")).spawn();
+            self.set_toast(format!("화면공유 여는 중 — {host}"));
+            return true;
+        }
         if self.info.machines_col.busy.is_some() {
             return true; // 한 번에 하나 — 이사 중 클릭은 삼킨다.
         }
         let (pane, going) = match &btn {
             state::MachinesColBtn::Send { pane, label } => (pane.clone(), format!("{label}(으)로 보내는 중…")),
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
+            state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
         };
         self.info.machines_col.busy = Some((pane.clone(), going.clone()));
         self.info.machines_col.note = None;
@@ -207,6 +223,7 @@ impl App {
         self.chrome_dirty = true;
         self.render_frame();
         let outcome = match btn {
+            state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {
                 let m = kasa_mcp::machines::find(&label)
                     .ok_or_else(|| anyhow::anyhow!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인"))?;
@@ -509,6 +526,27 @@ pub(crate) fn draw_machines_col(
                 &ago_label(m.ago_secs),
                 gpu::DrawOpts { font_size: 9.0, color: theme::text_mute(), bold: false, italic: false },
             );
+        }
+        // 화면공유 버튼 — 명부에 진짜 주소(host)가 있을 때만, 라벨 줄 오른쪽 끝.
+        // 연결이 끊겨도 그린다: 화면공유는 카사텀 창구와 다른 문이라 따로 살 수 있다.
+        if !m.host.is_empty() {
+            let bl = "화면 보기";
+            let bw = g.measure_chrome_text(bl, 9.0, true) + 12.0;
+            let bh = 16.0;
+            let bx = right - bw;
+            let by = chip_y - 3.0;
+            let hov =
+                cursor.0 >= bx && cursor.0 <= bx + bw && cursor.1 >= by && cursor.1 <= by + bh;
+            g.hover_pointer |= hov;
+            round_rect(g, bx, by, bw, bh, theme::radius_sm(), theme::raised_on(theme::surface(), hov));
+            g.draw_text(
+                bx + 6.0,
+                by + 3.0,
+                bl,
+                gpu::DrawOpts { font_size: 9.0, color: theme::text(), bold: true, italic: false },
+            );
+            mc.btn_rects
+                .push((state::MachinesColBtn::Screen { host: m.host.clone() }, (bx, by, bw, bh)));
         }
         if m.mirrored.is_empty() && m.remote.is_empty() {
             g.draw_text(

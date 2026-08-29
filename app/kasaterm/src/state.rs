@@ -306,6 +306,8 @@ pub(crate) struct MachinesColMachine {
     pub(crate) label: String,
     pub(crate) online: bool,
     pub(crate) ago_secs: Option<u64>,
+    /// 화면공유 등 HTTP 밖 문에 쓰는 진짜 주소(명부 host). 빈값 = 버튼 안 그림.
+    pub(crate) host: String,
     /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
     pub(crate) mirrored: Vec<MachinesColRow>,
     /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다.
@@ -330,6 +332,8 @@ pub(crate) struct MachinesColRow {
 pub(crate) enum MachinesColBtn {
     Send { pane: String, label: String },
     Bring { pane: String },
+    /// 그 기계 화면공유 열기 — host 는 명부의 진짜 주소(`user@ip` 허용).
+    Screen { host: String },
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.

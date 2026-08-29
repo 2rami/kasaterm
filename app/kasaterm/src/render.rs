@@ -613,6 +613,11 @@ impl App {
             /// 화면의 `▰▰▱ N%` 에서 읽은 compact 진행률. Some 이면 바를 이 값으로
             /// 채우고(진짜 진행률), None 이면 시간 루프로 폴백한다.
             compact_pct: Option<u8>,
+            /// 원격 pane 이면 그 기계 이름 — 헤더에 ⇄ 칩을 띄우고 바탕을 물들인다.
+            /// 얼굴·이름이 로컬과 똑같아서, pane 자체에 표가 없으면 「입력이 어느
+            /// 기계로 가는가」를 활성 pane(타이틀바 배지)에서만 알 수 있다
+            /// (2026-08-29 지시 「맥북에서 맥미니 세션을 다르게 보이게」).
+            machine: Option<String>,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -2509,6 +2514,18 @@ impl App {
                             .pane_activity
                             .get(&id)
                             .and_then(|a| a.compact_pct),
+                        // 원격 링크는 kasa-mcp 자체 레지스트리라 ws 락과 무관 — 이
+                        // 락 블록 안에서 불러도 안전하다(사이드바 2909 와 같은 원천).
+                        machine: kasa_mcp::remote::remote_info(&id).map(|i| {
+                            if i.label.is_empty() {
+                                i.base
+                                    .trim_start_matches("http://")
+                                    .trim_start_matches("https://")
+                                    .to_string()
+                            } else {
+                                i.label
+                            }
+                        }),
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
@@ -6477,6 +6494,12 @@ impl App {
                 // alert is suppressed (focused pane).
                 let hdr_bg = match header_flash[hi] {
                     Some(k) => theme::lerp(theme::bg(), theme::success(), 0.7 * k),
+                    // 원격 pane 은 헤더 바탕을 강조색으로 은은히 물들인다 — 칩 하나로는
+                    // 여러 pane 이 깔린 화면에서 훑을 때 안 걸린다(어느 pane 이 저
+                    // 기계 것인지는 바탕색이 먼저 말해야 한다).
+                    None if h.machine.is_some() => {
+                        theme::lerp(theme::bg(), theme::accent(), 0.10)
+                    }
                     None => theme::bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
@@ -6540,6 +6563,8 @@ impl App {
                 //
                 // 오른쪽 버튼 무리보다 **먼저** 그린다 — 그쪽은 x 를 오른쪽 끝에서
                 // 거꾸로 잡아 나가서, 나중에 그리면 칩 위에 겹친다.
+                let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
+                let mut chip_right = h.x + h.w - btn_zone;
                 if let Some((from, to)) = self.pane_account_stale.get(&h.id) {
                     let label = format!("⟳ {from} → {to} 재시작");
                     let pad = 6.0;
@@ -6547,8 +6572,7 @@ impl App {
                     let ch = PANE_HEADER_HEIGHT - 6.0;
                     // 오른쪽 버튼 무리를 피해 그 왼쪽에 붙인다. 자리가 모자라면
                     // 아예 안 그린다 — 겹쳐 그리면 둘 다 못 읽는다.
-                    let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
-                    let cx = h.x + h.w - btn_zone - cw;
+                    let cx = chip_right - cw;
                     if cx > h.x + 8.0 {
                         let cy = h.y + 3.0;
                         g.round_rect_fill(cx, cy, cw, ch, 4.0, theme::attention());
@@ -6564,6 +6588,38 @@ impl App {
                             },
                         );
                         restart_chip_hits.push((h.id.clone(), (cx, cy, cw, ch)));
+                        chip_right = cx - 6.0;
+                    }
+                }
+                // 원격 pane 칩 — 타이틀바 배지와 같은 말(⇄ 기계)을 pane 자체에도.
+                // 활성 pane 이 아니어도 어느 기계 것인지 pane 만 보고 알 수 있게.
+                if let Some(m) = h.machine.as_deref() {
+                    let label = format!("⇄ {m}");
+                    let pad = 6.0;
+                    let cw = g.measure_chrome_text(&label, chrome_font, true) + pad * 2.0;
+                    let ch = PANE_HEADER_HEIGHT - 6.0;
+                    let cx = chip_right - cw;
+                    if cx > h.x + 8.0 {
+                        let cy = h.y + 3.0;
+                        g.round_rect_fill(
+                            cx,
+                            cy,
+                            cw,
+                            ch,
+                            4.0,
+                            theme::with_alpha(theme::accent(), 0x2a),
+                        );
+                        g.draw_text(
+                            cx + pad,
+                            h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: chrome_font,
+                                color: theme::accent(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
                     }
                 }
                 // No bottom hairline: the band == body, and the active tab
