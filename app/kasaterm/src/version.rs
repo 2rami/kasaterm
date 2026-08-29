@@ -18,6 +18,39 @@ use std::time::{Duration, Instant};
 /// 지금 도는 판. 워크스페이스 `Cargo.toml` 이 단일 소스다.
 pub(crate) const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+/// 마지막 릴리스 태그에서 몇 커밋 앞인가(빌드 때 박힌다). 판정 근거가 없으면 빈 값.
+const AHEAD: &str = env!("KASATERM_GIT_AHEAD");
+/// 그 커밋의 시각 `MM-DD HH:MM`.
+pub(crate) const BUILT: &str = env!("KASATERM_GIT_DATE");
+
+fn ahead() -> u32 {
+    AHEAD.parse().unwrap_or(0)
+}
+
+/// 빌드 당시 워킹트리에 미커밋 변경이 있었나 — `git_rev` 가 붙이는 꼬리 `+`.
+fn dirty() -> bool {
+    env!("KASATERM_GIT_REV").ends_with('+')
+}
+
+/// **손수 구운 판인가.** 릴리스 태그 위에 정확히 서 있고 워킹트리도 깨끗했을 때만
+/// 아니다.
+///
+/// 이 구별이 없으면 버전 확인이 거짓말을 한다. 판 번호는 태그를 올릴 때만 바뀌므로
+/// 그 사이에 구운 수백 개의 판이 전부 릴리스와 같은 번호를 말하고, 그것을 피드와
+/// 견주면 「최신」이라는 답이 나온다 — 실제로는 릴리스보다 750 커밋 앞인 판이었다
+/// (2026-08-29 지적: "릴리스말고 나만 빌드해서 쓰는버전도있지않나").
+pub(crate) fn is_local_build() -> bool {
+    ahead() > 0 || dirty()
+}
+
+/// 화면에 쓰는 판 이름 — 릴리스는 `v0.1.19`, 손수 구운 판은 `v0.1.19+750`.
+pub(crate) fn label() -> String {
+    match ahead() {
+        0 => format!("v{CURRENT}"),
+        n => format!("v{CURRENT}+{n}"),
+    }
+}
+
 #[cfg(windows)]
 const FEED: &str = "https://2rami.github.io/kasaterm/appcast-win.xml";
 #[cfg(not(windows))]
@@ -56,6 +89,11 @@ pub(crate) fn state() -> Check {
 /// 확인이 오래됐으면 백그라운드로 한 바퀴 돌린다. 그리는 자리에서 매 프레임
 /// 불러도 되도록 안에서 스스로 걸러낸다.
 pub(crate) fn ensure_check() {
+    // 손수 구운 판은 견줄 대상이 아니다 — 번호가 같아도 내용이 수백 커밋 앞이라
+    // 어떤 답이 나오든 뜻이 없다. 요청도 내보내지 않는다.
+    if is_local_build() {
+        return;
+    }
     {
         let Ok(mut g) = cell().lock() else { return };
         if g.0 == Check::Busy {

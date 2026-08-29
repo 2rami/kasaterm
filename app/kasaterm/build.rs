@@ -8,6 +8,13 @@ fn main() {
     gen_character_slugs();
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=KASATERM_GIT_REV={rev}");
+    // 릴리스 태그에서 몇 커밋 앞인지, 그 커밋이 언제인지. 판 번호(0.1.19)만으로는
+    // 릴리스와 손수 구운 판이 구별되지 않는다 — 태그를 올리기 전까지 수백 번 구워도
+    // 셋 다 같은 번호를 말하고, 그 상태로 「최신」이라 답하면 그건 거짓말이 된다
+    // (2026-08-29 지적: "릴리스말고 나만 빌드해서 쓰는버전도있지않나" — 그때 실측이
+    // 750 커밋 앞이었다).
+    println!("cargo:rustc-env=KASATERM_GIT_AHEAD={}", git_ahead().unwrap_or_default());
+    println!("cargo:rustc-env=KASATERM_GIT_DATE={}", git_date().unwrap_or_default());
     // Re-stamp when HEAD or the staged index moves so a fresh commit
     // shows the new hash without a clean rebuild. Unstaged edits can't
     // be tracked this way, so the dirty '+' may lag until the next
@@ -144,6 +151,38 @@ fn field(line: &str, key: &str) -> Option<String> {
     let inner = rest.strip_prefix('"')?;
     let end = inner.find('"')?;
     Some(inner[..end].to_string())
+}
+
+/// 마지막 릴리스 태그에서 몇 커밋 앞인가. 태그 위에 정확히 서 있으면 `0`.
+///
+/// 태그가 하나도 없거나 git 이 없으면 **빈 값**을 준다. 그 자리에서 화면은 릴리스로
+/// 취급한다 — 판정 근거가 없는 곳(소스 배포·tarball)에서 「내 빌드」라고 우기면
+/// 그것도 똑같이 근거 없는 말이라서다.
+fn git_ahead() -> Option<String> {
+    let out = Command::new("git").args(["describe", "--tags", "--long"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `v0.1.19-750-g98d3f25c` — `--long` 은 태그 위에 서 있어도 `-0-g…` 를 붙여
+    // 형태를 하나로 만든다(그냥 `--describe` 는 그 경우 `v0.1.19` 만 준다).
+    let desc = String::from_utf8(out.stdout).ok()?;
+    let (head, _) = desc.trim().rsplit_once("-g")?;
+    let (_, n) = head.rsplit_once('-')?;
+    n.parse::<u32>().ok().map(|n| n.to_string())
+}
+
+/// HEAD 커밋의 시각 `MM-DD HH:MM`. 해시는 사람이 못 읽지만 시각은 읽는다 —
+/// 「아까 구운 게 이건가」가 이 화면에 오는 유일한 질문이다.
+fn git_date() -> Option<String> {
+    let out = Command::new("git")
+        .args(["log", "-1", "--format=%cd", "--date=format:%m-%d %H:%M"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 fn git_rev() -> Option<String> {

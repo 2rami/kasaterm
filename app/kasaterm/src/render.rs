@@ -8301,10 +8301,14 @@ impl App {
                 if win_w >= 720.0 {
                     let waiting = crate::install_pending()
                         || matches!(crate::version::state(), crate::version::Check::Newer(_));
+                    // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
+                    // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다. 몇 커밋
+                    // 앞인지는 눌러서 보면 된다 — 이 줄은 어느 쪽인지만 말한다.
+                    let mark = if crate::version::is_local_build() { "+" } else { "" };
                     let s = if waiting {
-                        format!(" · v{} ↑", crate::version::CURRENT)
+                        format!(" · v{}{mark} ↑", crate::version::CURRENT)
                     } else {
-                        format!(" · v{}", crate::version::CURRENT)
+                        format!(" · v{}{mark}", crate::version::CURRENT)
                     };
                     let w = g.measure_chrome_text(&s, fs, true);
                     if x + w <= win_w - 400.0 {
@@ -8957,7 +8961,7 @@ impl App {
                 ry += rule;
                 {
                     let vf = f - 2.0;
-                    let left = format!("카사텀 v{}", crate::version::CURRENT);
+                    let left = format!("카사텀 {}", crate::version::label());
                     g.draw_text(
                         mx + pad_x,
                         ry + (ver_h - vf) / 2.0 - 1.0,
@@ -8971,6 +8975,17 @@ impl App {
                     );
                     let (note, col) = if crate::install_pending() {
                         ("새 판 준비됨 · 껐다 켜기".to_string(), theme::accent())
+                    } else if crate::version::is_local_build() {
+                        // 피드와 견주지 않았으므로 견준 척도 하지 않는다. 대신 그
+                        // 판이 언제 것인지를 말한다 — 「아까 구운 게 이건가」가
+                        // 손수 구운 판에 오는 유일한 질문이다.
+                        let built = crate::version::BUILT;
+                        let t = if built.is_empty() {
+                            "내 빌드".to_string()
+                        } else {
+                            format!("내 빌드 · {built}")
+                        };
+                        (t, theme::text_mute())
                     } else {
                         match crate::version::state() {
                             crate::version::Check::Newer(v) => {
