@@ -1085,8 +1085,11 @@ impl App {
             if let Some(parent) = std::path::Path::new(&dest).parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            // PATH 보정 — LFS 레포는 checkout 필터가 git-lfs 를 부르는데 GUI
+            // 프로세스의 기본 PATH 엔 homebrew 가 없다(reposync::tool_path 참조).
             let out = crate::proc::command("git")
                 .args(["clone", &origin, &dest])
+                .env("PATH", kasa_mcp::reposync::tool_path())
                 .output()
                 .map_err(|e| anyhow::anyhow!("git clone 실행 실패: {e}"))?;
             if !out.status.success() {

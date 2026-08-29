@@ -32,9 +32,34 @@ pub struct Snapshot {
     pub dirty: bool,
 }
 
+/// git 자식에 줄 PATH — GUI/launchd 프로세스는 시스템 기본(/usr/bin:…)뿐이라,
+/// git 이 .gitattributes 의 filter 를 부르는 순간(`git-lfs`) "command not found"
+/// 로 무너진다. 터미널에선 되고 이사 버튼에서만 「파일 스냅샷 실패」가 되는
+/// 함정(2026-08-29 실측, LFS 레포의 pane 이사). 도구가 사는 표준 자리를 뒤에
+/// 덧붙인다 — 이미 있으면 그대로 둔다.
+pub fn tool_path() -> &'static str {
+    static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let mut path = std::env::var("PATH").unwrap_or_default();
+        if cfg!(unix) {
+            let home = std::env::var("HOME").unwrap_or_default();
+            for d in
+                ["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string(), format!("{home}/.local/bin")]
+            {
+                if !path.split(':').any(|p| p == d) && Path::new(&d).is_dir() {
+                    path.push(':');
+                    path.push_str(&d);
+                }
+            }
+        }
+        path
+    })
+}
+
 fn git_out(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
     cmd.arg("-C").arg(root).args(args);
+    cmd.env("PATH", tool_path());
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -196,6 +221,7 @@ pub fn apply(
         .arg("-C")
         .arg(&root)
         .args(["merge-base", "--is-ancestor", &cur_head, head])
+        .env("PATH", tool_path())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
