@@ -4635,6 +4635,30 @@ impl App {
                         pane.title = Some(t.to_string());
                         pane.title_pinned = true;
                     }
+                    // 학생 이름을 되살린다. 이 갈래는 여기서 돌아가므로 **아래의
+                    // 저장된-캐릭터 복원에 닿지 않는다** — 그래서 이사 간 학생은
+                    // 재시작 한 번에 이름·색·얼굴이 통째로 사라졌고, 저장은
+                    // `pane_character` 에서 뜨므로 그 다음 저장에 영영 굳었다
+                    // (2026-08-30 지적: 「맥미니로 가면 왜 맥북에서 테마가 안보여」.
+                    // 실측으로 미러 두 자리에 `character` 키가 아예 없었다).
+                    //
+                    // 저장본이 먼저다(공짜). 없을 때만 원격에 묻는다 — 그 자리에
+                    // 이미 굳어 버린 무명 pane 을 되살리는 길이고, 몸통이 남의
+                    // 기계라 이름의 정본도 거기다. 명단 밖이라고 새로 뽑지는
+                    // 않는다: 이 학생은 저쪽에서 도는 사람이라 여기서 이름을
+                    // 갈면 두 화면이 다른 사람을 가리킨다.
+                    if let Some(name) = rec_str("character")
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            kasa_mcp::remote::remote_pane_character(base, rpane, None)
+                        })
+                        .filter(|s| !s.is_empty())
+                    {
+                        // relabel_pane 은 실존 pane 만 손댄다 — 원격 갈래는 아직
+                        // PaneState 를 안 만들었을 수 있어 자리를 먼저 세운다.
+                        self.ws.lock().unwrap().pane_mut(&id);
+                        self.relabel_pane(&id, &name);
+                    }
                     return Some(id);
                 }
                 Err(e) => {
