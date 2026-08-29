@@ -343,11 +343,20 @@ pub(crate) fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize,
     if name.is_empty() {
         return None;
     }
-    // 이름 뒤는 공백, 또는 "(ctrl+o to expand)" 꼴 단축키 힌트 하나만 허용 —
-    // claude v2.1.216+ 가 접힌 줄 끝에 힌트를 붙인다(chord 는 키바인딩 따라
-    // 변주라 "to expand)" 종결로 판정). 그 외 텍스트는 본문 인용 오탐 방지.
+    // 이름 뒤에 올 수 있는 것은 셋뿐이다. 그 외 텍스트는 본문 인용 오탐으로 본다.
+    //
+    // 1. 아무것도 없음(옛 형식)
+    // 2. "(ctrl+o to expand)" 꼴 단축키 힌트 — claude v2.1.216+ 가 붙인다(chord 는
+    //    키바인딩 따라 변주라 "to expand)" 종결로 판정)
+    // 3. `:` 로 시작하는 본문 미리보기 — claude 가 접힌 줄에 본문 앞부분을 함께
+    //    그린다(`› Message from @sidebar: claude 화면 맨 아래 …`). 이걸 모르면 접힌
+    //    줄로 안 보여 **재작성이 통째로 건너뛰어지고**, 남의 메시지가 학생색도 프사도
+    //    없이 원문 그대로 남는다(2026-08-29 지적: 「sm테마 적용안되는데?」).
     let tail = after[name.len()..].trim_matches(' ');
-    if !tail.is_empty() && !(tail.starts_with('(') && tail.ends_with("to expand)")) {
+    let tail_ok = tail.is_empty()
+        || (tail.starts_with('(') && tail.ends_with("to expand)"))
+        || tail.starts_with(':');
+    if !tail_ok {
         return None;
     }
     Some((first, count, name))
@@ -3973,6 +3982,19 @@ mod teammate_msg_tests {
     // 단수·복수 양쪽 다.
     #[test]
     fn rejects_trailing_text_and_plain_lines() {
+        // claude 가 접힌 줄에 본문 앞부분을 함께 그린다. 그 미리보기를 인용으로
+        // 오해하면 재작성이 건너뛰어져 학생색·프사가 통째로 빠진다.
+        let preview = row_from("› Message from @sidebar: 화면 판독 코드 감안해라", 80);
+        assert_eq!(
+            teammate_collapsed_line(&preview).map(|(_, n, s)| (n, s)),
+            Some((1, "sidebar".to_string()))
+        );
+        let preview_hint =
+            row_from("› Message from @sidebar: 본문 앞부분 (ctrl+o to expand)", 80);
+        assert_eq!(
+            teammate_collapsed_line(&preview_hint).map(|(_, n, s)| (n, s)),
+            Some((1, "sidebar".to_string()))
+        );
         let quoted = row_from("› Message from @aru-9c88 라고 떴다", 80);
         assert_eq!(teammate_collapsed_line(&quoted), None);
         let plain = row_from("Message from @aru-9c88", 80);
