@@ -396,7 +396,15 @@ impl App {
         // 계속 코어를 태우는 앱은 메모리와 **다른 축**이라 따로 말한다. 팬이
         // 도는 이유를 물었을 때 「메모리는 정상입니다」만 답하면 소용이 없다
         // (2026-08-27: 「안조용한데 위젯좀 잘만들어봐」).
-        let hog = self.statusbar.usage_outside.iter().find(|a| a.is_hog()).cloned();
+        // 가장 세게 태우는 하나만 말한다. 목록 순서에 기대면 안 된다 — 그 자루엔
+        // 메모리 잣대로 뽑힌 앱도 섞여 있다(2026-08-29).
+        let hog = self
+            .statusbar
+            .usage_outside
+            .iter()
+            .filter(|a| a.is_hog())
+            .max_by(|a, b| a.cpu.total_cmp(&b.cpu))
+            .cloned();
         if let Some(a) = &hog {
             let due = self
                 .statusbar
@@ -3838,20 +3846,28 @@ fn outside_apps(
     let me = std::process::id();
     track.last.retain(|k, _| *k == me || apps.contains_key(k));
     track.streak.retain(|k, _| *k == me || apps.contains_key(k));
-    // 계속 태우는 앱이 먼저다 — 팬이 도는 이유는 메모리가 아니라 그쪽이다.
-    //
-    // 그리고 그쪽은 **rss 로 자르지 않는다**. CPU 만 태우고 메모리는 거의 안 쓰는
-    // 것이 있고(스핀 루프가 그렇다), 그게 정확히 팬을 돌리는 부류다. 한 목록을
-    // rss 로 정렬해 다섯만 남기면 그런 앱은 영영 안 나온다 — 실측 2026-08-28 에
-    // 코어를 통째로 태우던 프로세스가 1MB 라는 이유로 목록 밖으로 잘렸다.
-    let (mut hogs, mut rest): (Vec<_>, Vec<_>) = out.into_iter().partition(|a| a.is_hog());
-    hogs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
-    rest.sort_by(|a, b| b.rss.cmp(&a.rss));
-    hogs.truncate(3);
-    rest.truncate(5 - hogs.len());
-    hogs.append(&mut rest);
-    hogs
+    // **두 잣대로 각각 뽑아 합친다.** 하나로 정렬해 자르면 다른 잣대의 범인이
+    // 통째로 사라진다 — CPU 만 태우고 메모리는 거의 안 쓰는 것이 있고(스핀 루프가
+    // 그렇다), 그게 정확히 팬을 돌리는 부류다. 실측 2026-08-28 에 코어를 통째로
+    // 태우던 프로세스가 1MB 라는 이유로 rss 정렬 밖으로 잘렸다. 반대도 같아서,
+    // 팝오버가 잣대별 탭으로 갈린 뒤로는(2026-08-29) 양쪽 후보가 다 있어야 한다.
+    // 고르는 것과 정렬은 팝오버가 자기 탭 기준으로 다시 한다.
+    let mut by_cpu = out.clone();
+    by_cpu.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+    let mut by_rss = out;
+    by_rss.sort_by(|a, b| b.rss.cmp(&a.rss));
+    let mut picked: Vec<AppUsage> = Vec::with_capacity(TOP_APPS * 2);
+    for a in by_cpu.into_iter().take(TOP_APPS).chain(by_rss.into_iter().take(TOP_APPS)) {
+        if !picked.iter().any(|p| p.pid == a.pid) {
+            picked.push(a);
+        }
+    }
+    picked
 }
+
+/// 잣대 하나당 남기는 바깥 앱 수. 팝오버는 이 중 셋만 펴지만, 탭을 옮겼을 때
+/// 그 잣대의 상위가 비어 있으면 안 되므로 수집은 넉넉히 한다.
+const TOP_APPS: usize = 5;
 
 /// 입력줄이 비어 있는가 — 하단 14행 안에 「❯」 단독 행이 있으면 참.
 /// 재테마 주입은 이게 참일 때만 연다: 반쯤 친 초안이 있으면 주입 글자가 그
@@ -4297,7 +4313,7 @@ mod working_scan_tests {
 
 #[cfg(test)]
 mod zoom_key_tests {
-    use super::{cpu_ms, hog_polls, zoom_key, AppUsage, CpuTrack, ZoomKey};
+    use super::{cpu_ms, hog_polls, outside_apps, zoom_key, AppUsage, CpuTrack, Row, ZoomKey};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -4377,6 +4393,40 @@ mod zoom_key_tests {
         let (cpu, hot) = t.tick(1, 6_000, t0 + Duration::from_secs(10));
         assert_eq!(cpu, 0.0);
         assert_eq!(hot, 0);
+    }
+
+    /// 한 잣대로 정렬해 자르면 다른 잣대의 범인이 통째로 사라진다 — 2026-08-28 에
+    /// 코어를 통째로 태우던 프로세스가 1MB 라는 이유로 rss 정렬 밖으로 잘렸다.
+    /// 팝오버가 잣대별 탭으로 갈린 뒤로는 양쪽 상위가 다 있어야 두 탭이 선다.
+    #[test]
+    fn 두_잣대의_범인이_둘_다_살아남는다() {
+        let me = unsafe { libc::getuid() };
+        let row = |pid: u32, rss: u64, cpu_time: u64, name: &str| Row {
+            uid: me,
+            pid,
+            // 1 이면 자기 자신이 대표가 된다 — 앱 묶기를 타지 않는 가장 단순한 꼴.
+            ppid: 1,
+            cpu: 0.0,
+            rss,
+            cpu_time,
+            name: name.to_string(),
+        };
+        // 메모리만 큰 것 여섯 + CPU 만 태우는 작은 것 하나. 한 잣대로 다섯을
+        // 자르면 마지막 하나가 반드시 잘려 나가는 형태다.
+        let mut rows: Vec<Row> =
+            (0..6).map(|i| row(10 + i, 8_000_000 - i as u64 * 1000, 0, "big")).collect();
+        rows.push(row(99, 1024, 0, "spinner"));
+        let tree = std::collections::HashSet::new();
+        let mut track = CpuTrack::default();
+        // 첫 표본은 견줄 데가 없어 사용률이 0 이다 — 두 번 재야 증분이 선다.
+        outside_apps(&rows, &tree, &mut track);
+        if let Some(r) = rows.iter_mut().find(|r| r.pid == 99) {
+            r.cpu_time = 60_000;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let out = outside_apps(&rows, &tree, &mut track);
+        assert!(out.iter().any(|a| a.pid == 99), "CPU 범인이 잘렸다: {out:?}");
+        assert!(out.iter().any(|a| a.pid == 10), "메모리 1등이 잘렸다: {out:?}");
     }
 
     #[test]

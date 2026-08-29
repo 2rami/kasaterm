@@ -71,11 +71,21 @@ fn paint_usage_popover(
     win_h: f32,
 ) {
     const UROW: f32 = 30.0;
+    let tab = sb.usage_tab;
+    let cpu_tab = tab == state::UsageTab::Cpu;
     // 수집한 만큼 전부 담는다 — 넘치는 몫은 스크롤이 맡는다. 예전엔 여기서 8개로
     // 자르고 나머지를 「그 외 N개」 한 줄로 접었는데, 그 여덟이 전체의 39% 뿐이라
     // (실측 2026-08-27: 231개 중 8개 = 3.3G / 8.4G) 무엇이 잡아먹는지 묻는 이
     // 목록의 목적 자체가 안 서고, 굴릴 수도 없어 나머지를 볼 길이 없었다.
-    let list: Vec<_> = sb.usage_top.clone();
+    //
+    // 정렬은 **고른 탭의 잣대로만** 한다. 예전엔 메모리 순 하나로 고정이라, CPU
+    // 를 통째로 태우는 프로세스가 목록 한복판에 파묻혔다.
+    let mut list: Vec<_> = sb.usage_top.clone();
+    if cpu_tab {
+        list.sort_by(|a, b| b.1.total_cmp(&a.1));
+    } else {
+        list.sort_by(|a, b| b.2.cmp(&a.2));
+    }
     // 목록 밖에 남은 것들 — 합계는 트리 전체 합이라, 이 줄이 없으면 「다 더해도
     // 합계가 안 나온다」가 된다(2026-08-16 「3.1G가 다 더하면 아니지않나」).
     let rest_n = sb.usage_rows.saturating_sub(list.len());
@@ -97,7 +107,10 @@ fn paint_usage_popover(
     // 우리 트리가 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽엔 재부팅 말고는
     // 회수 경로가 없는 몫(wired)이 들어 있다. 상태줄의 「재시작 권장」이 어디서
     // 나온 말인지 여기서만 확인할 수 있으니 임계 아래에서도 늘 적는다.
-    let mem = sb.mem;
+    //
+    // 메모리 탭에서만 편다 — CPU 를 보러 온 사람에게 wired 비율은 답이 아니고,
+    // 팝오버 높이만 한 줄 더 먹는다.
+    let mem = sb.mem.filter(|_| !cpu_tab);
     let mem_h = if mem.is_some() { UROW + PAD } else { 0.0 };
     // 「그 외 N개」는 **굴리지 않아도 보여야 한다**. 목록 끝에 두면 스크롤 맨
     // 아래라 굴리기 전에는 안 보이는데, 거기 접힌 몫이 40% 나 된다(실측
@@ -113,10 +126,20 @@ fn paint_usage_popover(
     // 계속 코어를 태우는 앱이 있으면 메모리가 정상이어도 편다. 그게 없으면
     // 「지금 왜 시끄럽냐」에 이 팝오버가 답을 못 한다(2026-08-27 실측: 팬이
     // 도는데 wired 는 17% 로 멀쩡했고 범인은 CPU 쪽이었다).
-    let warm = mem.is_some_and(|m| m.advice() != crate::sysmem::Advice::Ok)
-        || sb.usage_outside.iter().any(|a| a.is_hog());
-    let outside: Vec<crate::input::AppUsage> =
-        if warm { sb.usage_outside.iter().take(3).cloned().collect() } else { Vec::new() };
+    let hog = sb.usage_outside.iter().any(|a| a.is_hog());
+    let warm = sb.mem.is_some_and(|m| m.advice() != crate::sysmem::Advice::Ok) || hog;
+    let outside: Vec<crate::input::AppUsage> = if warm {
+        let mut v = sb.usage_outside.clone();
+        if cpu_tab {
+            v.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+        } else {
+            v.sort_by(|a, b| b.rss.cmp(&a.rss));
+        }
+        v.truncate(3);
+        v
+    } else {
+        Vec::new()
+    };
     // 「끌까요?」 대기는 몇 초 뒤 저절로 풀린다. 눌러 놓고 잊은 줄이 빨갛게 남아
     // 있으면, 한참 뒤 무심코 그 자리를 눌렀을 때 앱이 닫힌다.
     if sb.usage_kill_armed.is_some_and(|(_, t)| t.elapsed().as_secs() >= 5) {
@@ -136,29 +159,76 @@ fn paint_usage_popover(
         "사용량",
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
+    // 합계 두 숫자가 곧 탭이다. 따로 탭 줄을 두면 같은 값을 두 번 적게 되고
+    // 머리가 한 줄 더 두꺼워진다 — 이미 「이 잣대로 지금 얼마」를 말하고 있는
+    // 자리라, 그걸 누르게 하는 편이 짧다.
+    //
+    // 고르지 않은 쪽도 늘 적는다. 그래야 지금 보고 있지 않은 잣대에 문제가
+    // 생겼을 때(빨갛게 서면) 넘어가 볼 생각이 든다 — 탭을 나눈 대가로 반대편이
+    // 안 보이게 되면 나눈 만큼 잃는다.
     if let Some((cpu, rss)) = sb.res {
         let gb = rss as f32 / (1024.0 * 1024.0 * 1024.0);
-        let sub = if gb >= 1.0 {
-            format!("합계 {cpu:.0}% · {gb:.1}G")
-        } else {
-            format!("합계 {cpu:.0}% · {:.0}M", gb * 1024.0)
-        };
-        let sw = g.measure_chrome_text(&sub, 10.0, false);
-        // 우리 자신이 코어를 계속 태우는 중이면 이 합계가 그 근거다. 아래 바깥
+        let mem_s =
+            if gb >= 1.0 { format!("{gb:.1}G") } else { format!("{:.0}M", gb * 1024.0) };
+        let cpu_s = format!("{cpu:.0}%");
+        // 우리 자신이 코어를 계속 태우는 중이면 이 숫자가 그 근거다. 아래 바깥
         // 앱 목록에는 우리가 안 들어가므로, 빨갛게 하지 않으면 하단바의 「카사텀
         // 130%」가 어디서 나온 말인지 확인할 자리가 없다.
-        let hot = crate::input::is_hot(sb.usage_self.1);
-        g.draw_text(
-            x + w - 12.0 - sw,
-            y + 9.0,
-            &sub,
-            gpu::DrawOpts {
-                font_size: 10.0,
-                color: if hot { theme::danger() } else { theme::text_mute() },
-                bold: hot,
-                italic: false,
-            },
-        );
+        let cpu_hot = crate::input::is_hot(sb.usage_self.1) || hog;
+        let adv = sb.mem.map_or(crate::sysmem::Advice::Ok, |m| m.advice());
+        let mem_col = if adv.is_danger() {
+            Some(theme::danger())
+        } else if adv == crate::sysmem::Advice::Watch {
+            Some(theme::syn_number())
+        } else {
+            None
+        };
+        let pills = [
+            (state::UsageTab::Mem, mem_s, mem_col),
+            (state::UsageTab::Cpu, cpu_s, cpu_hot.then(theme::danger)),
+        ];
+        let mut px = x + w - 8.0;
+        for (t, label, warn) in pills {
+            let on = t == tab;
+            let lw = g.measure_chrome_text(&label, 11.0, on);
+            px -= lw + 12.0;
+            let r = (px, y + 5.0, lw + 12.0, 22.0);
+            if on {
+                round_rect(
+                    g,
+                    r.0,
+                    r.1,
+                    r.2,
+                    r.3,
+                    theme::radius_sm(),
+                    theme::with_alpha(theme::text(), 0x1c),
+                );
+            } else if hit(cursor, &r) {
+                round_rect(
+                    g,
+                    r.0,
+                    r.1,
+                    r.2,
+                    r.3,
+                    theme::radius_sm(),
+                    theme::with_alpha(theme::text(), 0x0e),
+                );
+            }
+            g.draw_text(
+                px + 6.0,
+                y + 9.0,
+                &label,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    // 안 고른 쪽은 흐리게 — 다만 경고가 걸린 잣대는 고르지
+                    // 않았어도 제 색을 유지한다. 그게 넘어가 보라는 신호다.
+                    color: warn.unwrap_or(if on { theme::text() } else { theme::text_mute() }),
+                    bold: on || warn.is_some(),
+                    italic: false,
+                },
+            );
+            sb.popover_hits.push((state::StatusbarHit::UsageTab(t), r));
+        }
     }
     let mut top = y + HEAD_H;
     g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
@@ -224,10 +294,10 @@ fn paint_usage_popover(
         // 아래 목록과 **다른 것을 잰다** — 저긴 이 앱이 낳은 것, 여긴 남의 앱이다.
         // 제목으로 그 경계를 못 박지 않으면 두 목록이 한 표본으로 읽혀, 합계가
         // 안 맞는다는 오해가 그대로 되풀이된다.
-        // 빨간 숫자가 무슨 뜻인지는 여기서만 말할 수 있다. 줄에는 `98%` 만
-        // 남는데, 그것만 보고 메모리인지 CPU 인지 가릴 방법이 없다.
-        let head = if outside.iter().any(|a| a.is_hog()) {
-            "이 앱 밖 — 빨간 쪽이 CPU 를 계속 쓴다"
+        let head = if cpu_tab && outside.iter().any(|a| a.is_hog()) {
+            // 빨간 숫자가 무슨 뜻인지는 여기서만 말할 수 있다. 줄에는 `98%` 만
+            // 남는데, 그것만 보고 잠깐 바쁜 것인지 계속 태우는 것인지 못 가린다.
+            "이 앱 밖 — 빨간 쪽이 코어를 계속 태운다"
         } else {
             "이 앱 밖에서 쥔 것"
         };
@@ -240,7 +310,7 @@ fn paint_usage_popover(
         );
         let mut oy = top + OUT_HEAD;
         for a in &outside {
-            let (pid, rss, name, n) = (&a.pid, &a.rss, &a.name, &a.procs);
+            let (pid, name, n) = (&a.pid, &a.name, &a.procs);
             let r = (x + 1.0, oy, w - 2.0, UROW);
             let hov = hit(cursor, &r);
             let armed = sb.usage_kill_armed.is_some_and(|(p, _)| p == *pid);
@@ -258,45 +328,32 @@ fn paint_usage_popover(
                     ),
                 );
             }
-            let gb = *rss as f32 / (1024.0 * 1024.0 * 1024.0);
-            let size =
-                if gb >= 1.0 { format!("{gb:.1}G") } else { format!("{:.0}M", gb * 1024.0) };
-            let sw = g.measure_chrome_text(&size, 11.0, true);
-            // 겨눈 줄에서만 오른쪽 한 칸을 ×에 내준다 — 크기는 늘 보여야 하는
-            // 값이라 자리를 뺏기는 대신 왼쪽으로 물러난다.
+            // 고른 잣대의 값 **하나만**. 둘을 겹쳐 쌓았더니 오른쪽이 숫자 두
+            // 기둥이 되어, 정작 무엇으로 줄이 세워졌는지가 안 읽혔다.
+            let gb = a.rss as f32 / (1024.0 * 1024.0 * 1024.0);
+            let val = if cpu_tab {
+                format!("{:.0}%", a.cpu)
+            } else if gb >= 1.0 {
+                format!("{gb:.1}G")
+            } else {
+                format!("{:.0}M", gb * 1024.0)
+            };
+            let vw = g.measure_chrome_text(&val, 12.0, true);
+            // 겨눈 줄에서만 오른쪽 한 칸을 ×에 내준다 — 값은 늘 보여야 하는
+            // 것이라 자리를 뺏기는 대신 왼쪽으로 물러난다.
             let tail = if hov || armed { 24.0 } else { 0.0 };
             let right = x + w - 12.0 - tail;
             g.draw_text(
-                right - sw,
-                oy + 9.0,
-                &size,
+                right - vw,
+                oy + 8.0,
+                &val,
                 gpu::DrawOpts {
-                    font_size: 11.0,
-                    color: theme::text(),
+                    font_size: 12.0,
+                    color: if cpu_tab && a.is_hog() { theme::danger() } else { theme::text() },
                     bold: true,
                     italic: false,
                 },
             );
-            // 계속 태우는 줄에만 사용률을 붙인다. 늘 적으면 오르내리는 숫자가
-            // 셋 다 붙어, 정작 멈춰 있는 하나를 골라내기 어려워진다.
-            let cpu_w = if a.is_hog() {
-                let t = format!("{:.0}%", a.cpu);
-                let cw = g.measure_chrome_text(&t, 10.0, true);
-                g.draw_text(
-                    right - sw - 8.0 - cw,
-                    oy + 10.0,
-                    &t,
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: theme::danger(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                cw + 8.0
-            } else {
-                0.0
-            };
             let label = if armed {
                 "한 번 더 누르면 종료".to_string()
             } else if *n > 1 {
@@ -307,7 +364,7 @@ fn paint_usage_popover(
             } else {
                 name.clone()
             };
-            let avail = (right - sw - cpu_w - 10.0 - (x + 12.0)).max(0.0);
+            let avail = (right - vw - 10.0 - (x + 12.0)).max(0.0);
             let lt = crate::info::fit_text(g, &label, avail, 11.0, false);
             g.draw_text(
                 x + 12.0,
@@ -383,32 +440,30 @@ fn paint_usage_popover(
             None if *pid == me => (comm.clone(), "이 앱".to_string()),
             None => (comm.clone(), String::new()),
         };
-        let cpu_s = format!("{cpu:.1}%");
-        let mem_s = match rss_kb {
-            0..=1023 => format!("{rss_kb} KB"),
-            1024..=1_048_575 => format!("{} MB", rss_kb / 1024),
-            _ => format!("{:.1} GB", *rss_kb as f32 / (1024.0 * 1024.0)),
+        let val = if cpu_tab {
+            format!("{cpu:.1}%")
+        } else {
+            match rss_kb {
+                0..=1023 => format!("{rss_kb} KB"),
+                1024..=1_048_575 => format!("{} MB", rss_kb / 1024),
+                _ => format!("{:.1} GB", *rss_kb as f32 / (1024.0 * 1024.0)),
+            }
         };
-        let cw = g.measure_chrome_text(&cpu_s, 11.0, true);
-        let mw = g.measure_chrome_text(&mem_s, 10.0, false);
+        let vw = g.measure_chrome_text(&val, 12.0, true);
         let right = x + w - 12.0;
         g.draw_text(
-            right - cw,
-            ry + 2.0,
-            &cpu_s,
-            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: true, italic: false },
+            right - vw,
+            ry + 8.0,
+            &val,
+            gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
         );
-        g.draw_text(
-            right - mw,
-            ry + 16.0,
-            &mem_s,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-        );
-        let avail = (right - cw.max(mw) - 10.0 - (x + 12.0)).max(0.0);
+        let avail = (right - vw - 10.0 - (x + 12.0)).max(0.0);
         let n = crate::info::fit_text(g, &name, avail, 11.0, false);
+        // 주인이 없으면 아랫줄도 없다 — 그때까지 이름을 윗줄에 붙여 두면 옆의
+        // 값만 가운데 서서 두 글자가 어긋난 줄로 읽힌다.
         g.draw_text(
             x + 12.0,
-            ry + 2.0,
+            if owner.is_empty() { ry + 8.0 } else { ry + 2.0 },
             &n,
             gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
         );
@@ -438,25 +493,28 @@ fn paint_usage_popover(
         // 줄인지 나머지 합계인지 구별되지 않는다.
         g.rect(x + 1.0, list_bottom, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
         let ry = list_bottom + PAD;
-        let cpu_s = format!("{c:.1}%");
         let gb = r as f32 / (1024.0 * 1024.0 * 1024.0);
-        let mem_s = if gb >= 1.0 {
+        let val = if cpu_tab {
+            format!("{c:.1}%")
+        } else if gb >= 1.0 {
             format!("{gb:.1} GB")
         } else {
             format!("{:.0} MB", gb * 1024.0)
         };
-        let cw = g.measure_chrome_text(&cpu_s, 11.0, true);
-        let mw = g.measure_chrome_text(&mem_s, 10.0, false);
+        let vw = g.measure_chrome_text(&val, 12.0, true);
         let right = x + w - 12.0;
-        let dim = gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false };
-        g.draw_text(right - cw, ry + 2.0, &cpu_s, dim.clone());
         g.draw_text(
-            right - mw,
-            ry + 16.0,
-            &mem_s,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+            right - vw,
+            ry + 8.0,
+            &val,
+            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: true, italic: false },
         );
-        g.draw_text(x + 12.0, ry + 8.0, &format!("그 외 {n}개"), dim);
+        g.draw_text(
+            x + 12.0,
+            ry + 8.0,
+            &format!("그 외 {n}개"),
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+        );
     }
 }
 
@@ -1005,6 +1063,18 @@ impl crate::App {
                 }
                 return true;
             }
+            Some(state::StatusbarHit::UsageTab(t)) => {
+                // 잣대가 바뀌면 정렬도 바뀌므로 굴린 자리는 뜻을 잃는다 — 다른
+                // 순서의 목록 한복판에 서 있게 되어, 맨 위가 무엇인지 보려면
+                // 매번 되감아야 한다.
+                if self.statusbar.usage_tab != t {
+                    self.statusbar.popover_scroll = 0.0;
+                }
+                self.statusbar.usage_tab = t;
+                self.statusbar.usage_kill_armed = None;
+                self.chrome_dirty = true;
+                return true;
+            }
             Some(state::StatusbarHit::OpenPort(port)) => {
                 self.open_localhost(port);
                 return true;
@@ -1079,6 +1149,23 @@ impl crate::App {
         let same = matches!(self.statusbar.popover, Some((k, _)) if k == kind);
         self.statusbar.popover = (!same).then_some((kind, anchor));
         self.statusbar.popover_scroll = 0.0;
+        // 사용량은 **경고를 보고 누르는** 자리다. 하단바가 「재시작 권장」이라
+        // 말했는데 CPU 탭이 펴지면, 방금 읽은 그 말의 근거를 보려고 탭을 한 번
+        // 더 눌러야 한다. 지금 급한 잣대로 열어 준다 — 경고가 없을 때만 마지막에
+        // 보던 탭이 남는다.
+        if !same && kind == state::StatusbarPopover::Usage {
+            let mem_bad =
+                self.statusbar.mem.is_some_and(|m| m.advice() != crate::sysmem::Advice::Ok);
+            let cpu_bad = self.statusbar.usage_outside.iter().any(|a| a.is_hog())
+                || crate::input::is_hot(self.statusbar.usage_self.1);
+            // 메모리가 먼저다 — 하단바의 경고 우선순위와 같은 순서라야, 거기서
+            // 읽은 말과 펴진 탭이 어긋나지 않는다.
+            if mem_bad {
+                self.statusbar.usage_tab = state::UsageTab::Mem;
+            } else if cpu_bad {
+                self.statusbar.usage_tab = state::UsageTab::Cpu;
+            }
+        }
         self.chrome_dirty = true;
     }
 }

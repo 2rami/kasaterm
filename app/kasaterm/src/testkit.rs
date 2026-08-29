@@ -7132,11 +7132,15 @@ impl App {
                 // 들어가고, 그러면 정작 봐야 할 것(길 때 잘리는지·굴러가는지)이
                 // 검증되지 않는다. 실기의 형태를 심는다 — 2026-08-27 실측에서
                 // 이 앱 트리는 231개였고 상위 30개가 88% 를 차지했다.
+                //
+                // CPU 와 메모리의 **순서를 일부러 어긋나게** 심는다. 둘이 같은
+                // 차례면 탭을 옮겨도 목록이 그대로라, 잣대별 정렬이 실제로
+                // 도는지 화면으로 가릴 수가 없다(2026-08-29 탭 분리).
                 self.statusbar.usage_top = (0..30)
                     .map(|i| {
                         (
                             1000 + i as u32,
-                            (30 - i) as f32 * 0.15,
+                            ((i * 7) % 30) as f32 * 0.15,
                             (450 - i as u64 * 12) * 1024,
                             format!("proc-{i:02}"),
                         )
@@ -7169,7 +7173,7 @@ impl App {
                     // 스크롤을 다음 step 으로 미루면 안 된다 — 팝오버가 열린 뒤
                     // 화면이 정적이면 프레임이 돌지 않아 그 step 이 영영 안 불린다
                     // (실측 2026-08-27: 열림만 찍히고 스크롤은 매번 누락).
-                    if want.ends_with("-end") {
+                    if want.contains("-end") {
                         self.statusbar.popover_scroll = 9999.0;
                         eprintln!("[autoportpop] 스크롤 끝까지");
                     }
@@ -7177,7 +7181,24 @@ impl App {
                     // 움직인다. 두 번째 클릭을 기다리는 상태를 직접 심어 그 줄이
                     // 무슨 말을 하는지 화면으로 확인한다 — 잘못 누르면 사람이
                     // 쓰던 앱이 닫히는 자리라 문구가 정확해야 한다.
-                    if want.ends_with("-armed") {
+                    // 어느 잣대로 폈는지. 경고가 없으면 마지막에 보던 탭이
+                    // 남으므로, 검증에서는 찍어서 고정한다.
+                    if want.contains("-cpu") {
+                        self.statusbar.usage_tab = crate::state::UsageTab::Cpu;
+                    } else if want.contains("-mem") {
+                        self.statusbar.usage_tab = crate::state::UsageTab::Mem;
+                    }
+                    eprintln!("[autoportpop] 탭={:?}", self.statusbar.usage_tab);
+                    // 바깥 앱 구역은 경고 구간에서만 펴진다. 검증 기계가 마침
+                    // 한가하면 그 구역이 통째로 안 그려져, 거기 붙은 끄기 버튼도
+                    // 잣대별 정렬도 화면으로 확인할 수가 없다 — 임계를 넘긴
+                    // 상태를 심는다(값은 실기에서 온 그대로 쓴다).
+                    if want.contains("-hog") {
+                        for a in self.statusbar.usage_outside.iter_mut() {
+                            a.hot = 99;
+                        }
+                    }
+                    if want.contains("-armed") {
                         match self.statusbar.usage_outside.first() {
                             Some(a) => {
                                 self.statusbar.usage_kill_armed = Some((a.pid, Instant::now()));

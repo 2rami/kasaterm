@@ -107,10 +107,26 @@ pub(crate) struct StatusbarState {
     pub(crate) popover_hits: Vec<(StatusbarHit, (f32, f32, f32, f32))>,
     /// 팝오버 세로 스크롤(px). 포트가 스무 개면 창 높이를 넘는다.
     pub(crate) popover_scroll: f32,
+    /// 팝오버가 어느 잣대로 서 있나. 한 줄에 CPU 와 메모리를 나란히 적었더니
+    /// 오른쪽이 숫자 두 기둥으로 뭉쳐 어느 쪽을 따라가야 할지 알 수 없었고,
+    /// 구역마다 정렬 기준까지 갈렸다(바깥 앱은 CPU 순, 아래 목록은 메모리 순).
+    /// 2026-08-29 지시 「메모리랑 cpugpu분리해야하나 지금 보기도 조금 힘드네」.
+    /// 고른 잣대 하나로 전 구역을 정렬하고 그 값만 적는다.
+    pub(crate) usage_tab: UsageTab,
     /// 「끌까요?」로 바뀌어 대기 중인 바깥 앱과 그 시각. 한 번 더 눌러야 신호가
     /// 나간다 — 여기 뜨는 건 사람이 쓰던 앱(브라우저·편집기)이라, 포트 팝오버의
     /// dev 서버와 달리 잘못 누르면 열어 둔 것을 잃는다. 몇 초 뒤 저절로 풀린다.
     pub(crate) usage_kill_armed: Option<(u32, std::time::Instant)>,
+}
+
+/// 사용량 팝오버의 잣대. 「무엇이 잡아먹나」의 답이 둘이라 한 화면에 겹쳐
+/// 놓을 수가 없다 — CPU 를 태우는 것과 메모리를 쥔 것은 대개 다른 앱이고,
+/// 손 쓸 방법도 다르다(태우는 건 끄면 조용해지고, 쥔 건 닫아야 돌아온다).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum UsageTab {
+    #[default]
+    Cpu,
+    Mem,
 }
 
 /// 하단바에서 펼쳐지는 것들.
@@ -131,6 +147,10 @@ pub(crate) enum StatusbarHit {
     /// 바깥 앱 줄의 ×. 대표(앱 본체)에 종료 신호를 보내면 Helper 자식도 함께
     /// 정리된다. 첫 클릭은 그 줄을 「끌까요?」로 바꾸기만 한다.
     KillApp(u32),
+    /// 머리의 합계 숫자 = 탭 손잡이. 따로 탭 줄을 두지 않는 것은 그 숫자가
+    /// 이미 「지금 이 잣대로 얼마」를 말하고 있어서다 — 같은 값을 두 번 적는
+    /// 대신 그 자리를 누르게 한다.
+    UsageTab(UsageTab),
     /// 맨 윗줄 — 이 앱의 웹터미널(`/term`).
     OpenWebTerm,
     /// 원격 접속 문을 여닫는다.

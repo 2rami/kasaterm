@@ -8406,8 +8406,19 @@ impl App {
                             self.statusbar.mem.map_or(crate::sysmem::Advice::Ok, |m| m.advice());
                         let gb =
                             |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
+                        // 목록 순서에 기대지 않고 **잣대별로 골라 온다** —
+                        // `usage_outside` 는 두 잣대의 후보를 합쳐 둔 자루라
+                        // 앞자리가 무엇인지 정해져 있지 않다(2026-08-29).
+                        let heaviest =
+                            self.statusbar.usage_outside.iter().max_by_key(|a| a.rss);
+                        let hottest = self
+                            .statusbar
+                            .usage_outside
+                            .iter()
+                            .filter(|a| a.is_hog())
+                            .max_by(|a, b| a.cpu.total_cmp(&b.cpu));
                         let warn: Option<(bool, String)> = if mem_adv.is_danger() {
-                            let w = match (mem_adv, self.statusbar.usage_outside.first()) {
+                            let w = match (mem_adv, heaviest) {
                                 // 「메모리 부족」에는 **범인 이름을 붙인다**. 그게
                                 // 재시작과 갈리는 지점이라서다 — 재시작은 할 일이
                                 // 하나뿐이라 이름이 필요 없지만, 비우는 쪽은 무엇을
@@ -8424,9 +8435,7 @@ impl App {
                                 _ => "재시작 권장".to_string(),
                             };
                             Some((true, w))
-                        } else if let Some(a) =
-                            self.statusbar.usage_outside.iter().find(|a| a.is_hog())
-                        {
+                        } else if let Some(a) = hottest {
                             Some((
                                 true,
                                 format!(
