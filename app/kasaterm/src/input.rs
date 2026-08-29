@@ -3609,6 +3609,35 @@ fn hog_polls() -> u16 {
     std::env::var("KASATERM_CPU_HOG_POLLS").ok().and_then(|v| v.parse().ok()).unwrap_or(HOG_POLLS)
 }
 
+/// 그 프로세스가 **실제로** 쥔 물리 메모리(byte).
+///
+/// `ps` 의 RSS 를 그대로 더하면 안 된다. 공유 라이브러리가 매핑된 프로세스마다
+/// 다시 세어져서, 같은 앱을 여럿 띄우면 합이 크게 부푼다 — 실측 2026-08-29 에
+/// claude 여섯의 ps 합이 2377MB 인데 실제는 1564MB(66%) 였다. 학생이 스무 명
+/// 도는 자리에서는 그 허수가 몇 기가가 되고, 그러면 「13.7기가인데 안에는
+/// 그만큼 없다」가 된다(같은 날 지적). 커널이 그 몫을 뺀 값을 따로 갖고 있으니
+/// 프로세스마다 그걸 묻는다 — 시스템 콜 하나라 `ps` 한 번보다 훨씬 싸다.
+#[cfg(target_os = "macos")]
+fn phys_footprint(pid: u32) -> Option<u64> {
+    // SAFETY: 읽기 전용 조회다. 우리가 잡은 버퍼를 넘기고, 커널이 성공을
+    // 돌려줬을 때만 그 안을 읽는다. flavor 와 구조체 판이 짝을 이룬다(V2).
+    unsafe {
+        let mut info: libc::rusage_info_v2 = std::mem::zeroed();
+        let rc = libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            std::ptr::addr_of_mut!(info).cast(),
+        );
+        // 남의 프로세스는 권한이 없어 실패한다. 그때는 부르는 쪽이 RSS 로 돌아간다.
+        (rc == 0).then_some(info.ri_phys_footprint)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn phys_footprint(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// 칩·토스트에 넣을 만큼 짧은 앱 이름.
 ///
 /// 앱 이름은 길다(`Google Chrome Helper (Renderer)`). 자르지 않으면 하단바에서
@@ -3685,6 +3714,9 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
             // 이름에서 파싱이 통째로 어긋난다.
             let comm: String = it.collect::<Vec<_>>().join(" ");
             let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+            // 커널이 아는 실제 값으로 갈아 끼운다. 못 읽으면(남의 프로세스)
+            // `ps` 의 RSS 를 그대로 둔다 — 부풀려진 값이라도 없는 것보다 낫다.
+            let rss = phys_footprint(pid).map_or(rss, |b| b / 1024);
             Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name })
         })
         .collect();
