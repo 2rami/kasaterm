@@ -213,31 +213,20 @@ fn roster_in_use_from(
     if picks.is_empty() {
         return base;
     }
-    let mut out: Vec<Value> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = Default::default();
-    let mut take = |chars: &Value, only: Option<&[String]>| {
-        for m in entries_of(chars) {
-            let Some(n) = m.get("name").and_then(|v| v.as_str()) else { continue };
-            if only.is_some_and(|w| !w.iter().any(|x| x == n)) {
-                continue;
-            }
+    // 1. 고른 것부터. 겹치는 이름이 여기서 먼저 잡히므로 활성보다 이긴다.
+    let picked = picked_entries_from(picks, &load);
+    let mut seen: std::collections::HashSet<String> =
+        picked.iter().filter_map(|(_, m)| name_of(m).map(String::from)).collect();
+    let mut out: Vec<Value> = picked.into_iter().map(|(_, m)| m).collect();
+    // 2. 활성 명부의 나머지.
+    if let Some(c) = base.as_ref() {
+        for m in entries_of(c) {
+            let Some(n) = name_of(m) else { continue };
             if !seen.insert(n.to_string()) {
                 continue;
             }
             out.push(m.clone());
         }
-    };
-    // 1. 고른 것부터. 겹치는 이름이 여기서 먼저 잡히므로 활성보다 이긴다.
-    for (theme, names) in picks {
-        // 테마를 지웠으면 조용히 건너뛴다 — 목록에 남은 유령까지 명부에 넣으면
-        // 이름은 뜨는데 그림·색이 없는 학생이 된다.
-        if let Some(c) = load(theme) {
-            take(&c, Some(names));
-        }
-    }
-    // 2. 활성 명부의 나머지.
-    if let Some(c) = base.as_ref() {
-        take(c, None);
     }
     // 원래 객체의 나머지 키(테마 메타)는 살린다. 인원은 `members` 한 칸으로 편다 —
     // 읽는 쪽이 전부 leader/leaders/members 를 합쳐 보므로 갈라 둘 이유가 없고,
@@ -250,6 +239,72 @@ fn roster_in_use_from(
     obj.insert("leaders".to_string(), Value::Array(Vec::new()));
     obj.insert("members".to_string(), Value::Array(out));
     Some(Value::Object(obj))
+}
+
+/// 고른 명단이 실제로 집어 온 항목 — `(테마 id, 캐릭터)` 를 고른 순서 그대로.
+///
+/// `roster_in_use_from` 의 1단이자 `picked_theme_of_slug_from` 의 전부다. 두 곳이
+/// 각자 순회하면 「어느 테마가 이기는가」가 두 벌이 되고, 어긋나도 오류는 안 난다 —
+/// 이름은 이 테마인데 얼굴은 저 테마인 학생이 될 뿐이다.
+fn picked_entries_from(
+    picks: &[(String, Vec<String>)],
+    load: &impl Fn(&str) -> Option<Value>,
+) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for (theme, names) in picks {
+        // 테마를 지웠으면 조용히 건너뛴다 — 목록에 남은 유령까지 명부에 넣으면
+        // 이름은 뜨는데 그림·색이 없는 학생이 된다.
+        let Some(c) = load(theme) else { continue };
+        for m in entries_of(&c) {
+            let Some(n) = name_of(m) else { continue };
+            if !names.iter().any(|x| x == n) {
+                continue;
+            }
+            if !seen.insert(n.to_string()) {
+                continue;
+            }
+            out.push((theme.clone(), m.clone()));
+        }
+    }
+    out
+}
+
+fn name_of(m: &Value) -> Option<&str> {
+    m.get("name").and_then(|v| v.as_str())
+}
+
+/// 고른 학생의 **그림이 어느 테마 것인가** — `[(슬러그, 테마 id)]`.
+///
+/// 이름은 `roster_in_use` 가 고른 쪽으로 정했는데 그림은 슬러그로만 찾는다. 슬러그가
+/// 겹치면 그 둘이 갈라진다 — 실측(2026-08-29) 「리오」는 번들과 eternalreturn 양쪽에
+/// `rio` 라, 이름·색·말투는 eternalreturn 인데 얼굴만 블루아카가 붙었다. 이 표를
+/// 에셋 찾기의 0단으로 세워 그 자리를 닫는다.
+///
+/// 번들(`__base`)에서 고른 것은 넣지 않는다 — 찾기 순서가 이미 활성 폴더 다음에
+/// 번들을 보므로 얹을 것이 없다. 활성 테마가 번들 슬러그를 가로채는 대칭 사례는
+/// 아직 실물이 없어 두었다(활성 테마 + 번들 고르기가 동시에 있어야 한다).
+pub fn picked_theme_of_slug() -> Vec<(String, String)> {
+    picked_theme_of_slug_from(&read_character_picks(), |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+fn picked_theme_of_slug_from(
+    picks: &[(String, Vec<String>)],
+    load: impl Fn(&str) -> Option<Value>,
+) -> Vec<(String, String)> {
+    picked_entries_from(picks, &load)
+        .into_iter()
+        .filter(|(t, _)| t != BASE_THEME_KEY)
+        .filter_map(|(t, m)| {
+            Some((m.get("slug")?.as_str()?.to_string(), t))
+        })
+        .collect()
 }
 
 /// 설치된 **모든** 로스터 — 활성 테마 + 기본 + `themes/` 아래 테마 전부.
@@ -1653,6 +1708,41 @@ mod tests {
         let got = roster_in_use_from(&picks(&[("지운테마", &["누구"])]), Some(base), |_| None)
             .expect("명부가 나와야 한다");
         assert_eq!(member_names(&got), vec!["미도리".to_string()]);
+    }
+
+    /// 두 「리오」가 **같은 슬러그**를 쓴다 — 이름은 고른 쪽이 이기는데 그림은
+    /// 슬러그로만 찾으니 활성 폴더의 블루아카가 붙었다(2026-08-29 실측). 그 슬러그가
+    /// 어느 테마 폴더를 봐야 하는지 표로 남겨 에셋 찾기의 0단으로 쓴다.
+    #[test]
+    fn 고른_학생의_그림은_그_테마_폴더를_가리킨다() {
+        let er = roster_slugged(&[("리오", "rio")]);
+        let sekai = roster_slugged(&[("에무", "emu")]);
+        let got = picked_theme_of_slug_from(
+            &picks(&[("eternalreturn", &["리오"]), ("project-sekai", &["에무"])]),
+            |t| match t {
+                "eternalreturn" => Some(er.clone()),
+                "project-sekai" => Some(sekai.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("rio".to_string(), "eternalreturn".to_string()),
+                ("emu".to_string(), "project-sekai".to_string()),
+            ]
+        );
+    }
+
+    /// 번들에서 고른 것은 표에 없다 — 찾기 순서가 이미 번들을 보므로, 얹으면 같은
+    /// 폴더를 두 번 뒤지는 것뿐이다.
+    #[test]
+    fn 번들에서_고른_학생은_그림_표에_안_들어간다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let got = picked_theme_of_slug_from(&picks(&[(BASE_THEME_KEY, &["미도리"])]), |t| {
+            (t == BASE_THEME_KEY).then(|| base.clone())
+        });
+        assert!(got.is_empty(), "번들 고르기가 표에 들어갔다: {got:?}");
     }
 
     /// 고른 것이 없으면 지금까지의 동작 그대로 — 전원이 후보다.

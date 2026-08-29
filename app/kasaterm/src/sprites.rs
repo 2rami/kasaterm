@@ -51,6 +51,50 @@ pub(crate) fn other_theme_sprite_dirs() -> &'static [std::path::PathBuf] {
 /// 불러 주므로 직접 부를 일은 없다 — 이름 캐시와 **짝**이어야 해서 묶어 뒀다.
 pub(crate) fn invalidate_theme_sprite_dirs() {
     *OTHER_SPRITE_DIRS.write().unwrap() = None;
+    *PICKED_SPRITE_DIRS.write().unwrap() = None;
+}
+
+/// 고른 학생의 테마 폴더 — 에셋 찾기의 **0단**.
+///
+/// 이름은 `roster_in_use` 가 고른 쪽으로 정하는데 그림은 슬러그로만 찾는다. 슬러그가
+/// 겹치면 그 둘이 갈라진다 — 실측(2026-08-29) 「리오」는 번들과 eternalreturn 양쪽에
+/// `rio` 라, 이름·색·말투는 eternalreturn 인데 **얼굴만 블루아카**가 붙었다. 활성
+/// 폴더(`students_dir`)에 번들 79명이 통째로 깔려 있어서 그게 늘 먼저 걸린다.
+static PICKED_SPRITE_DIRS: std::sync::RwLock<Option<&'static [(String, std::path::PathBuf)]>> =
+    std::sync::RwLock::new(None);
+
+/// 그 슬러그를 고른 테마의 `sprites/`. 안 골랐으면 None → 기존 3단 그대로.
+pub(crate) fn picked_theme_sprite_dir(slug: &str) -> Option<&'static std::path::Path> {
+    let table = {
+        let r = PICKED_SPRITE_DIRS.read().unwrap();
+        match *r {
+            Some(t) => t,
+            None => {
+                drop(r);
+                let mut w = PICKED_SPRITE_DIRS.write().unwrap();
+                // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 훑었을 수 있다.
+                if w.is_none() {
+                    *w = Some(build_picked_sprite_dirs());
+                }
+                w.unwrap()
+            }
+        }
+    };
+    table.iter().find(|(s, _)| s == slug).map(|(_, d)| d.as_path())
+}
+
+fn build_picked_sprite_dirs() -> &'static [(String, std::path::PathBuf)] {
+    // 테스트는 이 컴퓨터에 무엇이 깔려 있든 같은 답이어야 한다.
+    if cfg!(test) {
+        return &[];
+    }
+    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
+    let v: Vec<(String, std::path::PathBuf)> = kasa_mcp::character::picked_theme_of_slug()
+        .into_iter()
+        .map(|(slug, theme)| (slug, root.join(theme).join("sprites")))
+        .filter(|(_, d)| d.is_dir())
+        .collect();
+    Box::leak(v.into_boxed_slice())
 }
 
 fn build_other_sprite_dirs() -> &'static [std::path::PathBuf] {
@@ -426,8 +470,9 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
 /// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
 /// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
 pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
-    // 활성 override(students_dir) → 번들 내장 → 다른 설치 테마.
-    let decoded: Vec<image::RgbaImage> = match user_sprite_images(slug, motion) {
+    // 고른 테마 → 활성 override(students_dir) → 번들 내장 → 다른 설치 테마.
+    let picked = picked_theme_sprite_dir(slug).and_then(|d| user_sprite_images_in(d, slug, motion));
+    let decoded: Vec<image::RgbaImage> = match picked.or_else(|| user_sprite_images(slug, motion)) {
         Some(imgs) => imgs,
         None => match bundled_sprite_images(slug, motion) {
             Some(imgs) => imgs,
@@ -538,8 +583,11 @@ pub(crate) fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     crop_profile_face(rgba, w, h)
 }
 
-/// 자르기 전 프사 원본 — 활성 → 번들 → 다른 설치 테마.
+/// 자르기 전 프사 원본 — 고른 테마 → 활성 → 번들 → 다른 설치 테마.
 fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(r) = picked_theme_sprite_dir(slug).and_then(|d| profile_rgba_in(d, slug)) {
+        return Some(r);
+    }
     if let Some(r) = crate::socket::students_dir().and_then(|d| profile_rgba_in(&d, slug)) {
         return Some(r);
     }
@@ -735,8 +783,12 @@ pub(crate) fn gif_rel(slug: &str) -> String {
     format!("gif/{slug}.gif")
 }
 
-/// 지금 쓰는 대기 gif 의 바이트 — 활성 폴더가 번들을 덮고, 둘 다 없으면 다른 테마.
+/// 지금 쓰는 대기 gif 의 바이트 — 고른 테마가 활성을, 활성이 번들을 덮는다.
 pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
+    if let Some(b) = picked_theme_sprite_dir(slug).and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
+    {
+        return Some(b);
+    }
     if let Some(b) = crate::socket::students_dir().and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
     {
         return Some(b);
