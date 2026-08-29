@@ -3856,9 +3856,14 @@ const AVATAR_SLUGS: &[&str] = &[
 /// 파일명을 정하는 정본이라 두 벌이 되면 어긋나고, 어긋나도 오류가 안 난다. 우리는
 /// 이미 만들어진 결과를 되읽기만 한다 — 표에 없는 커스텀 캐릭터는 해시 슬러그로
 /// 떨어져 여기서 `None` 이 되고, 프사 없이 이름만 뜬다.
-fn avatar_slug(agent_name: &str) -> Option<&'static str> {
+fn avatar_slug(agent_name: &str) -> Option<String> {
     let head = agent_name.split('-').next()?;
-    AVATAR_SLUGS.iter().copied().find(|s| *s == head)
+    // 번들 슬러그 목록은 **번들 프사가 있느냐**의 답일 뿐이다. 테마 학생의 슬러그는
+    // 거기 없어 전부 떨어졌고(에무·하치와레·진천우 → `null`), 그 목록을 읽는 쪽에서
+    // 이사 간 학생만 얼굴이 비었다. 아는 명부 전부에 물어본다 — 그림 실재는
+    // `term_avatar` 가 따로 판정한다.
+    crate::character::known_slug(head)
+        .or_else(|| AVATAR_SLUGS.iter().find(|s| **s == head).map(|s| s.to_string()))
 }
 
 /// `GET /term/avatar/<slug>.png` — pane 칩에 띄울 학생 프사.
@@ -3879,7 +3884,10 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
             }
         };
     }
-    let png = avatars!(
+    // 디스크가 먼저다 — 테마 학생의 얼굴은 번들에 없고, 사용자가 덮어쓴 그림도
+    // 여기 있다(GUI 의 찾기 순서와 같다).
+    let disk = crate::character::profile_png_on_disk(slug.trim_end_matches(".png"));
+    let bundled = avatars!(
         "akane", "akari", "ako", "arisu", "arona", "aru", "asuna", "atsuko", "ayane", "azusa",
         "chihiro", "chinatsu", "eimi", "fubuki", "fuuka", "hanako", "hare", "haruka", "haruna",
         "hasumi", "hibiki", "hifumi", "himari", "hina", "hinata", "hiyori", "hoshino", "ichika",
@@ -3890,13 +3898,14 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
         "serika", "shiroko", "shizuko", "sumire", "toki", "tsubaki", "tsukuyo", "tsurugi",
         "utaha", "wakamo", "yukari", "yuuka", "yuzu",
     );
-    match png {
+    // 번들 그림은 판이 바뀌기 전엔 안 변하니 영구 캐시. 디스크 그림은 사람이
+    // 갈아 끼울 수 있고 **같은 슬러그가 다른 테마를 가리키게 되기도 한다** — 그걸
+    // immutable 로 굳히면 브라우저가 옛 얼굴을 계속 쥔다.
+    let cache = if disk.is_some() { "public, max-age=60" } else { "public, max-age=31536000, immutable" };
+    match disk.or_else(|| bundled.map(<[u8]>::to_vec)) {
         Some(b) => (
             axum::http::StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "image/png"),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
+            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, cache)],
             b,
         ),
         None => (
@@ -3905,7 +3914,7 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
                 (header::CONTENT_TYPE, "text/plain"),
                 (header::CACHE_CONTROL, "no-store"),
             ],
-            b"".as_slice(),
+            Vec::new(),
         ),
     }
 }
@@ -3929,7 +3938,6 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
     // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
     // 중복시키지 않고 여기서 hex 로 얹는다.
-    let chars = crate::character::characters_json();
     let rows: Vec<serde_json::Value> = kasa_pty::live_sessions()
         .into_iter()
         .map(|id| {
@@ -3950,11 +3958,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "cwd": b.map(|p| p.cwd.clone()).filter(|s| !s.is_empty()),
                 "color": b
                     .and_then(|p| p.character.as_deref())
-                    .and_then(|n| {
-                        chars
-                            .as_ref()
-                            .and_then(|c| crate::character::header_color_for(c, n))
-                    }),
+                    .and_then(crate::character::header_color_any),
             })
         })
         .collect();

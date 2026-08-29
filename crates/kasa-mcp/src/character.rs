@@ -35,6 +35,60 @@ pub fn themes_root() -> Option<PathBuf> {
     Some(home()?.join(".config/kasaterm/themes"))
 }
 
+/// 그 슬러그의 프사 파일 — 고른 테마 → 활성 override → 설치 테마 순.
+///
+/// 웹/폰 목록이 얼굴을 받는 창구(`/term/avatar`)가 번들 `include_bytes` 만 갖고 있어
+/// 테마 학생은 통째로 404 였다. GUI 는 `sprites.rs` 가 같은 순서로 이미 디스크를
+/// 뒤지고 있으니, 그 순서만 여기로 옮겨 온다(코드는 못 공유한다 — kasa-mcp → app 은
+/// 없는 의존 방향이다).
+pub fn profile_png_on_disk(slug: &str) -> Option<Vec<u8>> {
+    if slug.is_empty() || slug.contains('/') || slug.contains("..") {
+        return None;
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let root = themes_root();
+    // 1. 그 슬러그를 고른 테마 — 이름이 겹칠 때 얼굴이 갈리지 않게 맨 앞이다.
+    if let Some(r) = root.as_ref() {
+        for (s, theme) in picked_theme_of_slug() {
+            if s == slug {
+                dirs.push(r.join(theme).join("sprites"));
+            }
+        }
+    }
+    // 2. 활성 override 폴더(`students/`) — 앱과 같은 env 이름을 본다.
+    if let Ok(p) = std::env::var("KASATERM_STUDENTS_DIR") {
+        if !p.is_empty() {
+            dirs.push(PathBuf::from(p));
+        }
+    }
+    if let Some(h) = home() {
+        dirs.push(h.join(".config/kasaterm/students"));
+    }
+    // 3. 나머지 설치 테마.
+    if let Some(r) = root {
+        let mut rest: Vec<PathBuf> = std::fs::read_dir(&r)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| d.join("theme.json").is_file())
+            .map(|d| d.join("sprites"))
+            .collect();
+        // read_dir 순서는 파일시스템이 정한다 — 같은 슬러그를 가진 테마가 둘이면
+        // 그냥 두었을 때 어느 얼굴이 이기는지가 실행마다 달라진다.
+        rest.sort();
+        dirs.extend(rest);
+    }
+    for d in dirs {
+        for rel in [format!("profile/{slug}.png"), format!("{slug}-profile.png")] {
+            if let Ok(b) = std::fs::read(d.join(rel)) {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
 /// 활성 테마 폴더. settings.json 의 `character_theme` 가 고른다(팔레트 테마 키
 /// `theme` 와 다른 이름인 이유가 이것 — 둘은 따로 고른다).
 ///
@@ -378,6 +432,40 @@ pub fn theme_characters_json(id: &str) -> Option<Value> {
 /// persona 합집합 조회 — 활성 → 기본(번들) → 설치 테마 전부. 진행 중 pane 이
 /// 다른 테마 캐릭터로 재배정된 뒤 재시작·resume 할 때, 활성 로스터에 없는
 /// 이름이라도 원 소속 테마의 말투를 찾아 입힌다.
+/// 이름 → header_color(hex) 를 **아는 명부 전부**에서 찾는다 — 고른 것 우선.
+///
+/// `header_color_for(characters_json(), …)` 로 활성 명부만 보던 자리가 있었다.
+/// 테마에서 고른 학생은 활성 명부에 없으니 색이 `null` 로 나갔고, 그 값을 그대로
+/// 싣는 pane 목록을 남의 기계가 읽으면 **이사 간 학생만 무색**이 됐다
+/// (2026-08-30 지적: 「맥미니로 가면 왜 맥북에서 테마가 안보여」).
+pub fn header_color_any(name: &str) -> Option<String> {
+    for chars in all_rosters() {
+        if let Some(c) = header_color_for(&chars, name) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// 그 슬러그가 **아는 학생의 것인가** — 맞으면 그대로 돌려준다.
+///
+/// agent 이름(`emu-p27-1uc`)의 앞 토막이 곧 슬러그라, 하는 일은 「이게 진짜 슬러그냐」를
+/// 가리는 문지기뿐이다. 번들 슬러그를 손으로 적어 둔 목록으로 재던 자리가 있었는데,
+/// 테마 학생의 슬러그는 그 목록에 없어 전부 떨어졌다(에무·하치와레·진천우 → `null`).
+pub fn known_slug(head: &str) -> Option<String> {
+    if head.is_empty() {
+        return None;
+    }
+    for chars in all_rosters() {
+        for m in entries_of(&chars) {
+            if m.get("slug").and_then(|v| v.as_str()) == Some(head) {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn persona_for_any(name: &str) -> Option<String> {
     // `roster_in_use` 가 맨 앞이다 — 이름이 겹칠 때 **말투가 얼굴·색과 갈리면** 안
     // 된다. 이 자리가 활성 명부를 먼저 보던 탓에 eternalreturn 리오로 배정된 pane 이
