@@ -4066,14 +4066,20 @@ pub fn read_usage_compact() -> bool {
     read_settings().get("usage_compact").and_then(|x| x.as_bool()).unwrap_or(false)
 }
 
-/// 하단바에 안 쓰는 계정의 한도까지 세울지. 기본은 켬 — 계정을 여러 개 붙인
-/// 사람에게 이 줄의 쓸모는 「지금 얼마나 남았나」보다 「어디로 옮기나」쪽이고,
-/// 계정이 하나뿐이면 그릴 것이 없어 알아서 옛 화면과 같아진다.
+/// 하단바에 안 쓰는 계정의 한도까지 세울지. **기본은 끔.**
+///
+/// 켜 놓고 써 보니 이 줄이 늘 무거웠다(2026-08-29 지시: 「누르기전엔 다른거
+/// 안보여도돼 현재만 보이게해」 — 같은 날 「정보량 좀 줄이고」가 먼저 있었다).
+/// 「어디로 옮기나」는 하루에 몇 번 묻는 질문인데 이 줄은 매 프레임 보이는
+/// 자리라, 그 답을 상시로 세워 두는 값보다 활성 계정을 또렷하게 두는 값이 크다.
+/// 옮길 곳을 고를 때는 누르면 전부 나온다.
+///
+/// 끄는 쪽이 기본일 뿐 기능은 그대로다 — 설정의 「다른 계정도」로 되돌린다.
 pub fn read_statusbar_all_accounts() -> bool {
     read_settings()
         .get("statusbar_all_accounts")
         .and_then(|x| x.as_bool())
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// 등록된 codex 슬롯들. claude 와 같은 규칙 — 기본 로그인(`~/.codex/auth.json`)은
