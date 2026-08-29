@@ -21,6 +21,16 @@ fn ago_label(secs: Option<u64>) -> String {
     }
 }
 
+/// `#RRGGBB` → RGBA. 원격 창구가 주는 학생색(header_color)과 같은 표기만 받는다.
+fn parse_hex(s: &str) -> Option<[u8; 4]> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8, 255])
+}
+
 /// 상태점 색 — 앱 상태 언어 그대로: 기다림=attention, 도는 중=accent, 그 외=success.
 fn status_color(status: &str) -> [u8; 4] {
     match status {
@@ -50,7 +60,26 @@ impl App {
         // 로컬 pane 들 — claude 가 붙어 학생이 앉은 자리만(사이드바와 같은 기준).
         let mut pane_ids: Vec<String> = self.pty.keys().cloned().collect();
         pane_ids.sort_by_key(|s| s.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX));
-        let mut locals: Vec<state::MachinesColRow> = Vec::new();
+        // 방(윈도우) 매핑 스냅샷 — 같은 방 학생을 이어 앉히고 머리줄을 그리는 재료.
+        let pane_window: std::collections::HashMap<String, usize> =
+            self.ws.lock().unwrap().pane_window.clone();
+        let room_of = |w: usize| -> String {
+            self.window_name_override
+                .get(&w)
+                .cloned()
+                .or_else(|| {
+                    // `window_labels.0`(OSC 타이틀)은 안 쓴다 — 사이드바와 같은 규칙:
+                    // 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다. 손수 붙인 이름,
+                    // 없으면 작업 폴더 꼬리가 방을 실제로 가른다.
+                    let (_, cwd) = self.window_labels.get(w)?;
+                    let tail = cwd.rsplit('/').next().unwrap_or(cwd);
+                    (!tail.is_empty()).then(|| tail.to_string())
+                })
+                .unwrap_or_else(|| format!("방 {}", w + 1))
+        };
+        // (방 인덱스, 행) 으로 모아 방 순서로 이어 앉힌다 — pane 번호 순서만으로는
+        // 방이 섞여, 머리줄 하나 아래 남의 방 학생이 선다.
+        let mut locals: Vec<(usize, state::MachinesColRow)> = Vec::new();
         // 라벨 → (원격 surface id 집합, 이사 간 학생 행들). 원격 목록에서 미러와
         // 같은 pane 을 두 번 세우지 않기 위한 대조표다.
         let mut mirrored: std::collections::HashMap<String, (std::collections::HashSet<String>, Vec<state::MachinesColRow>)> =
@@ -60,8 +89,10 @@ impl App {
                 continue;
             }
             let Some(name) = self.pane_character_if_known(id) else { continue };
+            let win = pane_window.get(id).copied().unwrap_or(self.active_window);
             let row = state::MachinesColRow {
                 pane: id.clone(),
+                color: theme::character_accent_any(&name),
                 name,
                 title: self.pane_row_label(id),
                 status: self
@@ -69,6 +100,7 @@ impl App {
                     .get(id)
                     .map(|v| v.status.clone())
                     .unwrap_or_default(),
+                room: room_of(win),
             };
             match kasa_mcp::remote::remote_info(id) {
                 Some(info) => {
@@ -77,9 +109,11 @@ impl App {
                     slot.0.insert(info.remote_id.clone());
                     slot.1.push(row);
                 }
-                None => locals.push(row),
+                None => locals.push((win, row)),
             }
         }
+        locals.sort_by_key(|(w, _)| *w);
+        let locals: Vec<state::MachinesColRow> = locals.into_iter().map(|(_, r)| r).collect();
 
         // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다.
         let machines = kasa_mcp::machines::snapshot()
@@ -91,21 +125,46 @@ impl App {
                     .get("panes")
                     .and_then(|p| p.as_array())
                     .map(|arr| {
-                        arr.iter()
+                        // (원격 방 인덱스, 행) — 로컬과 같은 이유로 방 순서로 이어 앉힌다.
+                        let mut rows: Vec<(u64, state::MachinesColRow)> = arr
+                            .iter()
                             .filter_map(|p| {
                                 let rid = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 if mirror_ids.contains(rid) {
                                     return None; // 이사 간 학생의 원격 반쪽 — 미러 행이 대표한다.
                                 }
                                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                Some(state::MachinesColRow {
-                                    pane: String::new(), // 로컬 자리가 없다 — 데려오기 대상이 못 된다.
-                                    name: if name.is_empty() { "이름 없는 학생".to_string() } else { name.to_string() },
-                                    title: p.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    status: p.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                })
+                                let win = p.get("window").and_then(|v| v.as_u64());
+                                // 방 이름은 폴더 꼬리(사이드바 규칙과 같은 원천) — cwd 를
+                                // 안 주는 옛 창구에서는 방 번호로 물러선다.
+                                let room = p
+                                    .get("cwd")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|c| c.rsplit('/').next())
+                                    .filter(|t| !t.is_empty())
+                                    .map(str::to_string)
+                                    .or_else(|| win.map(|w| format!("방 {}", w + 1)))
+                                    .unwrap_or_default();
+                                let color = p
+                                    .get("color")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(parse_hex)
+                                    .or_else(|| theme::character_accent_any(name));
+                                Some((
+                                    win.unwrap_or(u64::MAX),
+                                    state::MachinesColRow {
+                                        pane: String::new(), // 로컬 자리가 없다 — 데려오기 대상이 못 된다.
+                                        name: if name.is_empty() { "이름 없는 학생".to_string() } else { name.to_string() },
+                                        title: p.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                        status: p.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                        room,
+                                        color,
+                                    },
+                                ))
                             })
-                            .collect()
+                            .collect();
+                        rows.sort_by_key(|(w, _)| *w);
+                        rows.into_iter().map(|(_, r)| r).collect()
                     })
                     .unwrap_or_default();
                 Some(state::MachinesColMachine {
@@ -220,6 +279,28 @@ fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) -> f32 {
     y + 20.0
 }
 
+/// 방 머리줄 — 같은 방 학생들 위에 한 번. `last` 와 같으면(연속) 안 그린다.
+fn room_label(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    room: &str,
+    last: &mut String,
+) -> f32 {
+    if room.is_empty() || room == last {
+        *last = room.to_string();
+        return y;
+    }
+    *last = room.to_string();
+    g.draw_text(
+        x,
+        y,
+        room,
+        gpu::DrawOpts { font_size: 9.5, color: theme::text_dim(), bold: false, italic: false },
+    );
+    y + 15.0
+}
+
 /// 학생 한 행. 버튼 rect 는 `mc.btn_rects` 에 쌓는다.
 #[allow(clippy::too_many_arguments)]
 fn student_row(
@@ -285,7 +366,13 @@ fn student_row(
         text_x,
         y,
         &name,
-        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+        gpu::DrawOpts {
+            font_size: 12.0,
+            // 학생색 — 사이드바가 이름을 캐릭터 테마색으로 칠하는 것과 같은 언어.
+            color: row.color.unwrap_or_else(theme::text),
+            bold: true,
+            italic: false,
+        },
     );
     let mut yy = y + 15.0;
     if !row.title.is_empty() {
@@ -367,7 +454,9 @@ pub(crate) fn draw_machines_col(
         let machines_meta: Vec<(String, bool)> =
             mc.machines.iter().map(|m| (m.label.clone(), m.online)).collect();
         let locals = mc.locals.clone();
+        let mut last_room = String::new();
         for row in &locals {
+            y = room_label(g, x0, y, &row.room, &mut last_room);
             let buttons: Vec<(state::MachinesColBtn, String, bool)> = machines_meta
                 .iter()
                 .map(|(label, online)| {
@@ -378,7 +467,7 @@ pub(crate) fn draw_machines_col(
                     )
                 })
                 .collect();
-            y = student_row(g, cursor, mc, row, &buttons, x0, right, y);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y);
         }
     }
 
@@ -431,16 +520,22 @@ pub(crate) fn draw_machines_col(
             y += 22.0;
             continue;
         }
+        // 미러(이사 간 학생)의 방은 **로컬** 방이고 원격 행의 방은 그 기계의 방이라
+        // 이름이 우연히 겹칠 수 있다 — 두 목록 사이에서 머리줄 기억을 끊는다.
+        let mut last_room = String::new();
         for row in &m.mirrored {
+            y = room_label(g, x0, y, &row.room, &mut last_room);
             let buttons = vec![(
                 state::MachinesColBtn::Bring { pane: row.pane.clone() },
                 "← 데려오기".to_string(),
                 true,
             )];
-            y = student_row(g, cursor, mc, row, &buttons, x0, right, y);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y);
         }
+        let mut last_room = String::new();
         for row in &m.remote {
-            y = student_row(g, cursor, mc, row, &[], x0, right, y);
+            y = room_label(g, x0, y, &row.room, &mut last_room);
+            y = student_row(g, cursor, mc, row, &[], x0 + 8.0, right, y);
         }
     }
 

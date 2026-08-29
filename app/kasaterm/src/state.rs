@@ -319,6 +319,11 @@ pub(crate) struct MachinesColRow {
     pub(crate) name: String,
     pub(crate) title: String,
     pub(crate) status: String,
+    /// 소속 방 표시명(사이드바 규칙: 손수 붙인 이름 → 폴더 꼬리). 같은 값끼리
+    /// 이어 앉히고 바뀌는 자리에 방 머리줄을 그린다. 빈값 = 방 미상.
+    pub(crate) room: String,
+    /// 학생색(캐릭터 테마의 header_color) — 이름 글자를 이 색으로 칠한다.
+    pub(crate) color: Option<[u8; 4]>,
 }
 
 #[derive(Clone, PartialEq)]

@@ -3944,6 +3944,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     .get(&id)
                     .copied()
                     .or_else(|| b.map(|p| p.window_idx)),
+                // 방 이름 재료 — 원격에서 이 목록을 보는 쪽(이사 탭)은 window 번호만으론
+                // 「어느 방」인지 못 말한다. 사람이 읽는 방 이름 규칙(폴더 꼬리)과 같은
+                // 원천을 실어 준다.
+                "cwd": b.map(|p| p.cwd.clone()).filter(|s| !s.is_empty()),
                 "color": b
                     .and_then(|p| p.character.as_deref())
                     .and_then(|n| {
