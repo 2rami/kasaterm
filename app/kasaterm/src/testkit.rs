@@ -2256,7 +2256,14 @@ impl App {
             return;
         }
         let act = match std::env::var("KASATERM_AUTOINFO").ok() {
-            Some(v) if v == "hover" || v == "menu" || v == "panemenu" || v == "panechars" => v,
+            Some(v)
+                if v == "hover"
+                    || v == "menu"
+                    || v == "panemenu"
+                    || v.starts_with("panechars") =>
+            {
+                v
+            }
             _ => return,
         };
         if ACTED.load(Ordering::Relaxed)
@@ -2269,7 +2276,7 @@ impl App {
         // 캐릭터 목록은 **한 번 더 눌러야** 나오므로 정적 캡처로는 존재 자체를
         // 확인할 수 없다. `panemenu` 는 테마 목록까지, `panechars` 는 첫 테마를
         // 골라 캐릭터 목록까지 편 상태로 세운다.
-        if act == "panemenu" || act == "panechars" {
+        if act == "panemenu" || act.starts_with("panechars") {
             let Some((pane, r)) = self
                 .info
                 .group_rects
@@ -2281,7 +2288,12 @@ impl App {
                 return;
             };
             let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
-            let opened = if act == "panechars" {
+            // `panechars:<테마 id>` 로 볼 단을 고른다. 기본(첫 테마)만으로는 **번들
+            // 로스터를 못 연다** — `list_themes` 에 번들이 없어서다. 그런데 켠 학생
+            // 대부분이 거기 있으니, 거르기를 시험할 자리가 바로 그 단이다.
+            let opened = if let Some(id) = act.strip_prefix("panechars:") {
+                Some(id.to_string())
+            } else if act == "panechars" {
                 let first = kasa_mcp::character::list_themes().into_iter().next();
                 if first.is_none() {
                     eprintln!("[autoinfo] 테마가 하나도 없다 — 캐릭터 목록을 못 편다");

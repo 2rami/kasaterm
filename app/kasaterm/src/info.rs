@@ -3149,6 +3149,14 @@ fn draw_pane_menu(
 
     // (항목, 라벨, 앞에 구분선)
     let mut items: Vec<(M, String, bool)> = Vec::new();
+    // 설정에서 켠 학생만 세운다(2026-08-29 지시: 「내가 켠것만 나오게해야지」).
+    // 아무도 안 골랐으면 **제한이 없다**는 뜻으로 읽는다 — `is_assignable` 과 같은
+    // 규칙이고, 그 폴백이 없으면 고르기를 한 번도 안 쓴 사람에게 빈 메뉴가 뜬다.
+    let picks = kasa_mcp::character::all_picks();
+    let unrestricted = picks.is_empty();
+    let picked_of = |theme: &str| -> Vec<String> {
+        picks.iter().find(|(k, _)| k == theme).map(|(_, v)| v.clone()).unwrap_or_default()
+    };
     match opened {
         None => {
             // `list_themes` 가 아니라 `theme_rows` 를 쓴다 — 그쪽은 설치된 테마만
@@ -3160,6 +3168,11 @@ fn draw_pane_menu(
                 } else {
                     r.id
                 };
+                // 켠 학생이 없는 테마는 단을 만들지 않는다 — 눌러 봐야 「‹ 테마
+                // 고르기」 한 줄뿐인 빈 단이라 누른 사람이 고장으로 읽는다.
+                if !unrestricted && picked_of(&id).is_empty() {
+                    continue;
+                }
                 items.push((M::Theme(id), r.label, false));
             }
         }
@@ -3170,10 +3183,16 @@ fn draw_pane_menu(
             } else {
                 kasa_mcp::character::theme_characters_json(theme_id)
             };
-            let names = chars
+            let mut names = chars
                 .as_ref()
                 .map(kasa_mcp::character::member_names)
                 .unwrap_or_default();
+            if !unrestricted {
+                // **테마별로** 거른다. `assignable_names` 는 테마를 가로질러 모은
+                // 한 명단을 주므로 그대로 쓰면 이 단에 그 테마에 없는 이름이 섞인다.
+                let picked = picked_of(theme_id);
+                names.retain(|n| picked.contains(n));
+            }
             for (i, n) in names.into_iter().enumerate() {
                 items.push((M::Character(n.clone()), n, i == 0));
             }
@@ -3183,7 +3202,10 @@ fn draw_pane_menu(
         return;
     }
 
-    let mih = 28.0_f32;
+    // 학생 단은 이름 옆에 얼굴을 세운다(2026-08-29 지시: 「설정처럼 사진도 나오고」).
+    // 79명 중 이름만으로 누구인지 아는 로스터가 얼마 없다.
+    let face = if opened.is_some() { 22.0_f32 } else { 0.0 };
+    let mih = if face > 0.0 { 30.0_f32 } else { 28.0 };
     let sep = 7.0_f32;
     let pad = 6.0_f32;
     // 세로가 모자라면 잘라 낸다 — 넘치면 메뉴가 본문 밖으로 흘러 아무것도 못 누른다.
@@ -3197,7 +3219,8 @@ fn draw_pane_menu(
         .iter()
         .map(|(_, l, _)| g.measure_chrome_text(l, 13.0, false))
         .fold(0.0_f32, f32::max);
-    let menu_w = (widest + 32.0).min(w - 8.0);
+    let lead = if face > 0.0 { face + 6.0 } else { 0.0 };
+    let menu_w = (widest + 32.0 + lead).min(w - 8.0);
     let nsep = items.iter().filter(|(_, _, s)| *s).count() as f32;
     let rows = items.len() as f32 + if clipped { 1.0 } else { 0.0 };
     let menu_h = pad * 2.0 + rows * mih + nsep * sep;
@@ -3227,8 +3250,11 @@ fn draw_pane_menu(
             crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
         }
         let is_theme = matches!(item, M::Theme(_));
+        if let M::Character(ref n) = item {
+            crate::sprites::draw_student_face(g, n, r.0 + 8.0, r.1 + (mih - face) / 2.0, face);
+        }
         g.draw_text(
-            r.0 + 12.0,
+            r.0 + 12.0 + lead,
             r.1 + (mih - 13.0) / 2.0,
             &label,
             gpu::DrawOpts {
