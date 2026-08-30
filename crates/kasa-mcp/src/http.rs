@@ -4369,6 +4369,10 @@ async fn term_repo_sync_post(
     let dirty = q.get("dirty").map(|v| v == "1").unwrap_or(false);
     let force = q.get("force").map(|v| v == "1").unwrap_or(false);
     let applied = tokio::task::spawn_blocking(move || {
+        // 관문(도착지 dirty·브랜치 다름·되감김)에 막혀도 이사를 세우지 않는다 —
+        // Deposit 은 짐을 ref(refs/kasaterm/incoming)로만 보관하고 워킹트리는
+        // 무접촉이라, 관문이 지키려는 것을 안 건드리고 잃는 것도 없다
+        // (2026-08-30: 「푸시 순서」 수작업을 없앤 자리).
         crate::reposync::apply(
             std::path::Path::new(&path),
             &body,
@@ -4377,6 +4381,7 @@ async fn term_repo_sync_post(
             &branch,
             dirty,
             force,
+            crate::reposync::OnBlock::Deposit,
         )
     })
     .await;
@@ -4396,8 +4401,13 @@ async fn term_agent_stop_post(
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
-    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p)) else {
-        return err("`pane`(web-…) 이 필요해요".into());
+    // web- 세션과 GUI pane(%N) 둘 다 받는다. `/term/input` 류의 web-전용 규칙과
+    // 달리 여기는 이사 전용이고, `/send` 가 이미 %N 에 입력(exit·Ctrl-C 포함)을
+    // 넣을 수 있어 종료만 막는 것은 방어가 아니었다 — 그 반쪽 금지가 「진짜
+    // pane(spawn-student)으로 나간 학생은 자동으로 못 데려온다」만 남겼다
+    // (2026-08-30 실측: 미도리·미쿠 둘 다 수동 절차로 데려왔다).
+    let Some(pane) = q.get("pane").filter(|p| web_pane_ok(p) || p.starts_with('%')) else {
+        return err("`pane`(web-… 또는 %N) 이 필요해요".into());
     };
     let Some(sess) = kasa_pty::lookup_session(pane) else {
         return err(format!("세션 {pane} 이 없다"));
@@ -4428,6 +4438,10 @@ async fn term_agent_stop_post(
         }
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
+    // 이사로 학생을 내줬다 — 이 pane 의 sid 주장을 걷으라고 GUI 틱에 알린다.
+    // 안 걷으면 세션 저장이 그 대화를 이 pane 것으로 굳혀, 재시작 복원이 남의
+    // 기계로 간 대화를 다시 연다(2026-08-30 이중 열림 실측).
+    crate::remote::note_migrated_away(pane);
     Json(serde_json::json!({
         "ok": true,
         "stopped": true,

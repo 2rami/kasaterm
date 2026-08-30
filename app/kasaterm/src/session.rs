@@ -1105,8 +1105,10 @@ impl App {
             }
         }
         // 떠 온 스냅샷을 이 기계 레포에 재현한다 — claude 를 끄기 전이라, 여기서
-        // 막히면(도착지 dirty·브랜치 다름·되감김) 아무것도 안 건드린 채 선다.
-        // 이 워킹트리는 다른 pane 과 공유일 수 있어 그 관문들이 학생을 지킨다.
+        // 막혀도 안전하다. 관문(도착지 dirty·브랜치 다름·되감김)에 걸리면 이사를
+        // 세우는 대신 짐을 ref(refs/kasaterm/incoming)로만 보관하고 간다 —
+        // 워킹트리 무접촉이라 다른 pane 의 작업을 안 건드리고, 잃는 것도 없다
+        // (2026-08-30: 미쿠 역이사가 「저쪽 push → 이쪽 정리」를 손으로 밟던 자리).
         if let Some((meta, bytes)) = &sync_pack {
             let applied = kasa_mcp::reposync::apply(
                 std::path::Path::new(&dest),
@@ -1116,6 +1118,7 @@ impl App {
                 &meta.branch,
                 meta.dirty,
                 force,
+                kasa_mcp::reposync::OnBlock::Deposit,
             )?;
             self.set_toast(format!("코드 동기화: {applied}"));
         }
@@ -1561,6 +1564,10 @@ impl App {
         // 이고, 옛 PTY 를 지우기 전에 떠야 값이 남아 있다.
         let (model, effort) =
             self.agent_cfg_snapshot().get(pane).cloned().unwrap_or_default();
+        // 권한 모드도 끄기 전에 화면에서 뜬다 — 계정을 갈았다고 bypass 학생이
+        // 물어보는 모드로 떨어질 이유가 없다(복원·이사와 같은 승계 원칙).
+        // claude 가 이미 죽었어도 얼어붙은 화면에 푸터가 남아 있어 읽힌다.
+        let bypass = Self::pane_bypass_on(&self.ws.lock().unwrap(), pane);
         let (cols, rows) = self.window_cells();
         // 옛 PTY 종료 — 여기서 옛 계정 토큰을 문 프로세스가 사라진다. pump 스레드는
         // EOF 로 빠진다.
@@ -1589,13 +1596,17 @@ impl App {
                 self.dead_panes.lock().unwrap().retain(|x| x != pane);
                 // 빈 값 거르기는 restore_agent_command 몫이다(빈 문자열이면 플래그를
                 // 아예 안 붙인다). 명령 끝 '\r' 도 거기서 이미 붙는다.
-                let cmd = restore_agent_command(
+                let mut cmd = restore_agent_command(
                     Some(agent),
                     sid.as_deref(),
                     resumable,
                     Some(model.as_str()),
                     Some(effort.as_str()),
                 );
+                if bypass && agent == "claude" && cmd.ends_with('\r') {
+                    cmd.pop();
+                    cmd.push_str(" --dangerously-skip-permissions\r");
+                }
                 let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                 self.pending_restores.push((sess, cmd, at));
                 self.resize_backend(cols, rows);
@@ -4112,6 +4123,25 @@ impl App {
         self.session_saved_hash = Some(sum);
         socket::write_session_state(&state);
     }
+    /// 이 pane 의 claude 가 bypass 권한 모드로 도는가 — **화면**으로 판정한다.
+    /// 켜져 있으면 푸터에 항상 떠 있는 줄이라(입력·busy 와 무관) 화면이 정직하고,
+    /// 프로세스 argv 는 claude 가 실행 중 제목으로 덮어써 못 믿는다(2026-08-30
+    /// 실측: 도는 claude 가 `ps` 의 command 에서 통째로 사라졌다). 글리프 접두까지
+    /// 정확히 맞춰 본다 — 대화 본문이 그 문구를 말하는 것과 갈라야 해서다.
+    pub(crate) fn pane_bypass_on(ws: &Workspace, pane_id: &str) -> bool {
+        let Some(t) = ws.panes.get(pane_id).and_then(|p| p.term()) else {
+            return false;
+        };
+        // claude 가 방금 죽었으면 셸 프롬프트가 몇 줄 밀어 올린다 — 바닥 12줄까지 본다.
+        let from = t.cells.len().saturating_sub(12);
+        t.cells[from..].iter().any(|row| {
+            crate::screenread::row_text_cells(row)
+                .0
+                .trim_start()
+                .starts_with("⏵⏵ bypass permissions on")
+        })
+    }
+
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,
     /// resolving each leaf's pane id to its cwd/claude record.
     pub(crate) fn layout_to_json(
@@ -4216,6 +4246,12 @@ impl App {
                         if !effort.is_empty() {
                             obj.insert("effort".to_string(), serde_json::json!(effort));
                         }
+                    }
+                    // 권한 모드 영속 — 복원 resume 이 이 플래그를 안 실으면 학생이
+                    // 전부 물어보는 모드로 깨어난다(2026-08-29 미니 재시작 실측:
+                    // 셋 다 auto — 라이브 재기동으로 복구했다).
+                    if Self::pane_bypass_on(ws, pane_id) {
+                        obj.insert("bypass".to_string(), serde_json::json!(true));
                     }
                     // Agent TUI는 새 화면을 다시 그리므로 옛 터미널 행을 넣지 않는다.
                     // 일반 셸은 실제 PTY history를 저장해야 재시작 뒤 출력이 남는다.
@@ -4662,6 +4698,18 @@ impl App {
                         self.ws.lock().unwrap().pane_mut(&id);
                         self.relabel_pane(&id, &name);
                     }
+                    // 이사로 나간 학생의 대화 id 를 지도(pane_claude_sid)에도 되살린다 —
+                    // 데려오기(migrate_pane_back)의 유일한 열쇠인데 지도는 메모리라
+                    // 재시작 한 번에 증발했고, leaf 에 저장은 되면서 복원이 안 채워
+                    // 「세션 id 를 모른다」로 서던 자리다(2026-08-30 실측: 미도리·미쿠
+                    // 둘 다 수동 이사로 돌아왔다).
+                    if let Some(sid) = rec
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        self.pane_claude_sid.insert(id.clone(), sid.to_string());
+                    }
                     return Some(id);
                 }
                 Err(e) => {
@@ -4864,13 +4912,31 @@ impl App {
                 saved_model(rec).unwrap_or_default(),
                 saved_effort(rec).unwrap_or_default(),
             );
-            let cmd = restore_agent_command(
+            // sid 지도도 바로 채운다 — 훅(첫 프롬프트 뒤)만 기다리면 「재시작 직후엔
+            // 이사를 못 보낸다」가 남는다. 잘못 묶일 값이 아니다: 이 pane 의 저장본이
+            // 실은 그 sid 고, 훅이 오면 어차피 같은 값으로 덮는다.
+            if let (Some(sid), true) = (session_id.as_deref(), resumable) {
+                self.pane_claude_sid.insert(id.clone(), sid.to_string());
+            }
+            let mut cmd = restore_agent_command(
                 was_agent,
                 session_id.as_deref(),
                 resumable,
                 saved_model(rec),
                 saved_effort(rec),
             );
+            // 권한 모드 승계 — 저장이 화면에서 읽어 실은 플래그(layout_to_json).
+            // 안 실으면 복원된 학생이 전부 물어보는 모드로 깨어나고, 특히 사람이
+            // 안 보는 기계(미니)에선 그 물음에 답할 손이 없어 조용히 선다
+            // (2026-08-29 미니 재시작 실측). claude 전용 — codex/agy 는 규약이 다르다.
+            if rec.get("bypass").and_then(|v| v.as_bool()).unwrap_or(false)
+                && resumable
+                && matches!(was_agent, None | Some("claude"))
+                && cmd.ends_with('\r')
+            {
+                cmd.pop();
+                cmd.push_str(" --dangerously-skip-permissions\r");
+            }
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }

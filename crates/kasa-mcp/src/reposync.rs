@@ -168,6 +168,25 @@ pub fn snapshot(cwd: &Path) -> Result<Option<Snapshot>> {
     Ok(Some(Snapshot { bundle, head, sync, branch, origin, dirty }))
 }
 
+/// 관문에 막혔을 때의 처신 — 세울 것인가(Bail), 짐만 보관하고 갈 것인가(Deposit).
+/// Deposit 은 관문이 **워킹트리를 건드리기 전**에만 갈라지므로 안전하다 —
+/// checkout/reset 도중의 실패는 이 폴백을 타지 않고 그대로 오류다.
+#[derive(Clone, Copy, PartialEq)]
+pub enum OnBlock {
+    Bail,
+    Deposit,
+}
+
+fn blocked(on_block: OnBlock, root: &Path, bundle: &[u8], why: String) -> Result<String> {
+    match on_block {
+        OnBlock::Bail => bail!(why),
+        OnBlock::Deposit => {
+            let kept = deposit(root, bundle).with_context(|| why.clone())?;
+            Ok(format!("{kept} — {why}"))
+        }
+    }
+}
+
 /// 스냅샷을 이 기계의 레포에 재현한다. 성공 시 사람이 읽을 한 줄을 돌려준다.
 ///
 /// 도착지 레포는 이미 있어야 하고(없으면 호출부가 clone 한다), origin 오브젝트가
@@ -181,14 +200,20 @@ pub fn apply(
     branch: &str,
     dirty: bool,
     force: bool,
+    on_block: OnBlock,
 ) -> Result<String> {
     let root = repo_root(cwd)?;
     // 관문 ① — 이 워킹트리는 공유물일 수 있다. 남의 미저장 작업 위에
     // reset --hard 를 얹으면 그 작업은 reflog 에도 안 남고 사라진다.
     if !force && is_dirty(&root)? {
-        bail!(
-            "도착지({})에 미저장 변경이 있다 — 그쪽을 정리하고 오거나 --force",
-            root.display()
+        return blocked(
+            on_block,
+            &root,
+            bundle,
+            format!(
+                "도착지({})에 미저장 변경이 있다 — 그쪽을 정리하고 오거나 --force",
+                root.display()
+            ),
         );
     }
     let cur_branch = git_out(&root, &["rev-parse", "--abbrev-ref", "HEAD"], &[])
@@ -197,8 +222,13 @@ pub fn apply(
     // 관문 ② — 브랜치 갈아타기는 같은 트리를 쓰는 남의 pane 을 통째로 딸려
     // 보내는 조작이다(전역 규칙 「브랜치 전환은 물어볼 것」의 기계판).
     if !force && !branch.is_empty() && !cur_branch.is_empty() && cur_branch != branch {
-        bail!(
-            "도착지가 다른 브랜치({cur_branch})에 서 있다 — 실려 온 것은 {branch}. 사람이 정리하거나 --force"
+        return blocked(
+            on_block,
+            &root,
+            bundle,
+            format!(
+                "도착지가 다른 브랜치({cur_branch})에 서 있다 — 실려 온 것은 {branch}. 사람이 정리하거나 --force"
+            ),
         );
     }
     let bfile = tmp_path("kasaterm-apply", ".bundle");
@@ -226,10 +256,15 @@ pub fn apply(
         .map(|s| s.success())
         .unwrap_or(false);
     if !force && !ff_ok && cur_head != head {
-        bail!(
-            "도착지가 더 새롭거나 갈라져 있다(HEAD {}) — 실려 온 {} 로 옮기면 되감긴다. 사람이 정리하거나 --force",
-            &cur_head[..cur_head.len().min(8)],
-            &head[..head.len().min(8)]
+        return blocked(
+            on_block,
+            &root,
+            bundle,
+            format!(
+                "도착지가 더 새롭거나 갈라져 있다(HEAD {}) — 실려 온 {} 로 옮기면 되감긴다. 사람이 정리하거나 --force",
+                &cur_head[..cur_head.len().min(8)],
+                &head[..head.len().min(8)]
+            ),
         );
     }
     if branch.is_empty() {
@@ -252,6 +287,32 @@ pub fn apply(
     } else {
         format!("{short} 로 동기화")
     })
+}
+
+/// 짐을 **풀지 않고 보관만** 한다 — bundle 을 `refs/kasaterm/incoming` 으로
+/// fetch 해 둔다. 워킹트리·인덱스·브랜치 무접촉이라 apply 의 3관문(도착지
+/// dirty·브랜치 다름·되감김)이 지키려는 것을 하나도 건드리지 않는다.
+///
+/// 용도: 관문에 막혀 apply 를 못 할 때 이사를 세우는 대신 여기 두고 간다 —
+/// 실려 온 커밋·미저장 스냅샷이 오브젝트째 남으므로 잃는 것이 없고, 그 레포의
+/// 학생이 나중에 `git merge refs/kasaterm/incoming`(또는 cherry-pick)으로
+/// 정리하면 된다(2026-08-30: 미쿠 역이사가 「저쪽 push → 이쪽 정리」 수순을
+/// 사람 손으로 밟아야 했던 자리).
+pub fn deposit(cwd: &Path, bundle: &[u8]) -> Result<String> {
+    let root = repo_root(cwd)?;
+    let bfile = tmp_path("kasaterm-deposit", ".bundle");
+    std::fs::write(&bfile, bundle).context("bundle 임시 파일 쓰기")?;
+    let bpath = bfile.to_string_lossy().into_owned();
+    let refspec = "+refs/kasaterm/sync:refs/kasaterm/incoming";
+    let mut fetched = git_out(&root, &["fetch", &bpath, refspec], &[]);
+    if fetched.is_err() {
+        // apply 와 같은 전제 — bundle 은 출발지 원격 ref 오브젝트를 깔고 있다.
+        let _ = git_out(&root, &["fetch", "--prune", "origin"], &[]);
+        fetched = git_out(&root, &["fetch", &bpath, refspec], &[]);
+    }
+    let _ = std::fs::remove_file(&bfile);
+    fetched.context("bundle 보관 fetch")?;
+    Ok("워킹트리가 바빠 짐을 refs/kasaterm/incoming 에 보관".to_string())
 }
 
 /// 그 경로 레포의 origin URL — apply 전에 clone 이 필요할 때 재료로 쓴다.
@@ -303,7 +364,7 @@ mod tests {
         let snap = snapshot(&src).unwrap().expect("실어 갈 것이 있어야 한다");
         assert!(snap.dirty);
         assert_ne!(snap.head, snap.sync);
-        let msg = apply(&dst, &snap.bundle, &snap.head, &snap.sync, &snap.branch, snap.dirty, false)
+        let msg = apply(&dst, &snap.bundle, &snap.head, &snap.sync, &snap.branch, snap.dirty, false, OnBlock::Bail)
             .unwrap();
         assert!(msg.contains("미저장"));
         // 같은 커밋 + 같은 미저장 변경인지 — 내용으로 확인한다.
@@ -319,8 +380,18 @@ mod tests {
         // 관문 ①: 도착지가 dirty 면 거부.
         sh(&base, "cd dst && echo x > dirty.txt");
         let again = snapshot(&src).unwrap().unwrap();
-        assert!(apply(&dst, &again.bundle, &again.head, &again.sync, &again.branch, again.dirty, false)
+        assert!(apply(&dst, &again.bundle, &again.head, &again.sync, &again.branch, again.dirty, false, OnBlock::Bail)
             .is_err());
+        // Deposit 갈래 — 관문 자리에서 보관으로 갈라져 성공을 돌려준다.
+        let kept = apply(&dst, &again.bundle, &again.head, &again.sync, &again.branch, again.dirty, false, OnBlock::Deposit)
+            .unwrap();
+        assert!(kept.contains("incoming") && kept.contains("미저장 변경이 있다"));
+        // 관문에 막혔을 때의 보관 경로 — 워킹트리 무접촉으로 짐만 남긴다.
+        let kept = deposit(&dst, &again.bundle).unwrap();
+        assert!(kept.contains("incoming"));
+        assert_eq!(sh(&dst, "git rev-parse refs/kasaterm/incoming"), again.sync);
+        assert_eq!(sh(&dst, "cat dirty.txt"), "x");
+        assert_eq!(sh(&dst, "git rev-parse HEAD"), again.head);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

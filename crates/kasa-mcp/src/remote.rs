@@ -738,6 +738,25 @@ pub fn remote_repo_state(
     Ok(Some((n("dirty"), n("unpushed"), t("origin"), t("branch"))))
 }
 
+/// 이사(agent-stop)로 학생을 내준 pane 들 — HTTP 핸들러는 App 상태(pane 의 sid
+/// 주장)를 못 만지므로 여기 적어 두고, GUI 틱이 걷어 간다. 안 걷으면 세션 저장이
+/// 그 대화를 「이 pane 것」으로 계속 굳혀, 재시작 복원이 **남의 기계로 이사 간
+/// 대화를 다시 연다**(2026-08-30 실측: 미니 재기동이 맥북으로 간 미도리의 대화를
+/// 열어 이중 열림).
+static MIGRATED_AWAY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn note_migrated_away(pane: &str) {
+    if let Ok(mut q) = MIGRATED_AWAY.lock() {
+        if !q.iter().any(|p| p == pane) {
+            q.push(pane.to_string());
+        }
+    }
+}
+
+pub fn drain_migrated_away() -> Vec<String> {
+    MIGRATED_AWAY.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
 /// 원격 세션의 에이전트를 곱게 끈다. Ok(Some(bypass)) = 껐다(권한 모드 포함),
 /// Ok(None) = 이미 꺼져 있었다. 창구가 없는 옛 바이너리는 Err 로 알린다 —
 /// 확인 없이 progressing 하면 반쯤 산 claude 와 로컬 resume 이 같은 대화를
@@ -997,6 +1016,7 @@ mod tests {
                 assert!(m.dirty);
                 let msg = crate::reposync::apply(
                     &back, &bytes, &m.head, &m.sync, &m.branch, m.dirty, false,
+                    crate::reposync::OnBlock::Bail,
                 )
                 .expect("apply");
                 assert!(msg.contains("미저장"), "msg={msg}");

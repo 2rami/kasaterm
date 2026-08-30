@@ -519,6 +519,20 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        // 이사(agent-stop)로 학생을 내준 pane 의 sid 주장 걷기 — HTTP 핸들러는 App
+        // 상태를 못 만져 큐로 넘긴다. 걷자마자 저장까지 해 둔다: 몇 초 안에 앱이
+        // 꺼져도 낡은 주장이 leaf 에 안 남아, 재시작 복원이 남의 기계로 이사 간
+        // 대화를 다시 여는 일(2026-08-30 이중 열림 실측)이 없다.
+        {
+            let gone = kasa_mcp::remote::drain_migrated_away();
+            let mut dropped = false;
+            for pane in gone {
+                dropped |= self.pane_claude_sid.remove(&pane).is_some();
+            }
+            if dropped {
+                self.save_session_state();
+            }
+        }
         // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
         // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
         self.reap_idle_closed_panes();
@@ -780,7 +794,7 @@ impl App {
         };
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if let Some(mt) = mtime {
-            if let Some((cached_mt, cached)) = self.pane_bg_mtime.get(pane_id) {
+            if let Some((cached_mt, cached, _)) = self.pane_bg_mtime.get(pane_id) {
                 if *cached_mt == mt {
                     return *cached;
                 }
@@ -795,9 +809,20 @@ impl App {
         let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         if let Some(mt) = mtime {
-            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg));
+            self.pane_bg_mtime
+                .insert(pane_id.to_string(), (mt, bg, snap.last_prompt.clone()));
         }
         bg
+    }
+
+    /// 그 pane 에서 마지막으로 사람이 친 프롬프트(transcript 기준). 스크롤 sticky
+    /// 띠의 글감 — claude 가 그 행을 더 이상 그려 주지 않으므로 kasaterm 이 직접
+    /// 채운다. `pane_bg_active` 가 같은 tail 에서 채워 둔 캐시를 읽기만 한다(무IO).
+    pub(crate) fn pane_last_prompt(&self, pane_id: &str) -> Option<&str> {
+        self.pane_bg_mtime
+            .get(pane_id)
+            .map(|(_, _, p)| p.trim())
+            .filter(|p| !p.is_empty())
     }
 
     /// 커서가 멎은 `[Image #N]` 참조를 받아 툴팁 상태를 옮기고, 이번 프레임에
