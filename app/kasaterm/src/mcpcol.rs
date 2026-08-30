@@ -2207,10 +2207,16 @@ pub(crate) fn draw_mcp_col(
             } else {
                 theme::text_mute()
             };
+            // 이름도 상세와 같은 폭으로 자른다 — 안 자르면 `plugin:context7:context7`
+            // 처럼 긴 이름이 칼럼 밖으로 그대로 뻗는다(216px 실측: 오른쪽 경계에서
+            // 글자가 반쪽으로 끊겼다). 지우기 × 자리는 hover 여부와 무관하게 늘
+            // 빼 둔다 — hover 때만 빼면 커서가 스칠 때마다 이름이 줄었다 폈다 한다.
+            let name_max = if row.deletable() { avail - 12.0 - 22.0 } else { avail - 12.0 };
+            let name = crate::info::fit_text(g, &row.name, name_max.max(0.0), 12.0, false);
             g.draw_text(
                 text_x + 12.0,
                 y + 6.0,
-                &row.name,
+                &name,
                 gpu::DrawOpts {
                     font_size: 12.0,
                     color: name_c,

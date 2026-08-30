@@ -405,12 +405,17 @@ fn student_row(
     x: f32,
     right: f32,
     y: f32,
+    // 좁은 칼럼 배치 — 버튼을 이름 오른쪽이 아니라 아랫줄에 앉힌다.
+    narrow: bool,
 ) -> f32 {
     let busy_here = mc.busy.as_ref().is_some_and(|(p, _)| !row.pane.is_empty() && *p == row.pane);
     // 상태점.
     let dot = 7.0;
     round_rect(g, x, y + 5.0, dot, dot, dot / 2.0, status_color(&row.status));
-    // 오른쪽 끝에서 버튼을 먼저 앉히고 남는 폭이 글 자리다.
+    // 오른쪽 끝에서 버튼을 먼저 앉히고 남는 폭이 글 자리다. 좁으면 그 자리를
+    // 아랫줄로 내린다 — 216px 칼럼에서 버튼을 같은 줄에 두면 이름에 100px 밖에
+    // 안 남아, 학생 이름과 무슨 일을 하는지가 둘 다 말줄임이 된다.
+    let btn_y = if narrow { y + 32.0 } else { y };
     let mut bx = right;
     if busy_here {
         let t = mc.busy.as_ref().map(|(_, g)| g.clone()).unwrap_or_default();
@@ -418,7 +423,7 @@ fn student_row(
         bx -= tw;
         g.draw_text(
             bx,
-            y + 2.0,
+            btn_y + 2.0,
             &t,
             gpu::DrawOpts { font_size: 10.0, color: theme::accent(), bold: true, italic: false },
         );
@@ -430,14 +435,14 @@ fn student_row(
             let hov = *enabled
                 && cursor.0 >= bx
                 && cursor.0 <= bx + bw
-                && cursor.1 >= y
-                && cursor.1 <= y + bh;
+                && cursor.1 >= btn_y
+                && cursor.1 <= btn_y + bh;
             g.hover_pointer |= hov;
             let fill = theme::raised_on(theme::surface(), hov);
-            round_rect(g, bx, y, bw, bh, theme::radius_sm(), fill);
+            round_rect(g, bx, btn_y, bw, bh, theme::radius_sm(), fill);
             g.draw_text(
                 bx + 6.0,
-                y + 2.0,
+                btn_y + 2.0,
                 label,
                 gpu::DrawOpts {
                     font_size: 10.0,
@@ -447,13 +452,13 @@ fn student_row(
                 },
             );
             if *enabled {
-                mc.btn_rects.push((btn.clone(), (bx, y, bw, bh)));
+                mc.btn_rects.push((btn.clone(), (bx, btn_y, bw, bh)));
             }
             bx -= 4.0;
         }
     }
     let text_x = x + dot + 7.0;
-    let text_max = (bx - 8.0 - text_x).max(0.0);
+    let text_max = if narrow { (right - text_x).max(0.0) } else { (bx - 8.0 - text_x).max(0.0) };
     let name = truncate_to(g, &row.name, 12.0, true, text_max);
     g.draw_text(
         text_x,
@@ -479,6 +484,11 @@ fn student_row(
         );
     }
     yy += 15.0;
+    // 아랫줄로 내린 버튼이 차지한 만큼 — 그 자리를 안 비우면 다음 학생이 그 위에
+    // 겹쳐 앉는다.
+    if narrow {
+        yy += 19.0;
+    }
     // 이 행의 최근 이사 결과 한 줄.
     if let Some((p, ok, note)) = &mc.note {
         if !row.pane.is_empty() && p == &row.pane {
@@ -511,6 +521,8 @@ pub(crate) fn draw_machines_col(
 ) {
     let x0 = x + 14.0;
     let right = x + w - 12.0;
+    // 칼럼이 좁으면 학생 행이 두 단(글 / 버튼)으로 선다.
+    let narrow = w < GIT_DENSE_COMPACT;
     mc.btn_rects.clear();
     let vis_h = (bottom - top).max(0.0);
     g.push_clip(x, top, w, vis_h);
@@ -518,9 +530,15 @@ pub(crate) fn draw_machines_col(
 
     if mc.machines.is_empty() {
         g.pop_clip();
-        let msg = ["등록된 기계가 없어요 —", "~/.config/kasaterm/machines.json 에 적으면 여기 떠요"];
+        // 좁으면 짧게 끊는다 — 한 줄짜리 안내가 칼럼 밖으로 뻗으면 정작 파일
+        // 이름이 잘려, 무엇을 적어야 하는지가 사라진다.
+        let msg: &[&str] = if narrow {
+            &["등록된 기계가 없어요", "machines.json 에 적으면", "여기 떠요"]
+        } else {
+            &["등록된 기계가 없어요 —", "~/.config/kasaterm/machines.json 에 적으면 여기 떠요"]
+        };
         let mut my = top + vis_h * 0.4;
-        for line in msg {
+        for line in msg.iter().copied() {
             let tw = g.measure_chrome_text(line, 11.0, false);
             g.draw_text(
                 x + (w - tw) / 2.0,
@@ -560,7 +578,7 @@ pub(crate) fn draw_machines_col(
                     )
                 })
                 .collect();
-            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
         }
     }
 
@@ -570,6 +588,7 @@ pub(crate) fn draw_machines_col(
         y += 10.0;
         let label_w = g.measure_chrome_text(&m.label, 10.0, true);
         y = section_label(g, x0, y, &m.label);
+        let label_w = label_w.min((right - x0) * 0.5);
         // 연결 칩 — 라벨 오른쪽에.
         let chip_y = y - 20.0;
         let chip_text = if m.online { "연결됨" } else { "연결 안 닿아요" };
@@ -595,28 +614,59 @@ pub(crate) fn draw_machines_col(
                 italic: false,
             },
         );
+        // 「화면 보기」가 오른쪽 끝을 이미 쓴다 — 머리줄에 더 얹는 글은 그 앞에서
+        // 끝나야 한다. 폭을 여기서 한 번 재고 아래 둘이 같이 쓴다.
+        let screen_bl = "화면 보기";
+        let screen_bw = if m.host.is_empty() {
+            0.0
+        } else {
+            g.measure_chrome_text(screen_bl, 9.0, true) + 12.0 + 8.0
+        };
+        let meta_right = right - screen_bw;
         if !m.online {
+            let t = crate::info::fit_text(
+                g,
+                &ago_label(m.ago_secs),
+                (meta_right - (chip_x + cw + 8.0)).max(0.0),
+                9.0,
+                false,
+            );
             g.draw_text(
                 chip_x + cw + 8.0,
                 chip_y,
-                &ago_label(m.ago_secs),
+                &t,
                 gpu::DrawOpts { font_size: 9.0, color: theme::text_mute(), bold: false, italic: false },
             );
         }
         // 프로그램 낡음 경고 — 변경 실은 이사가 「저쪽을 갱신하라」로 서는 상태를
-        // 누르기 전에 알린다. 갱신 방법(sync-mini)까지 한 줄에.
+        // 누르기 전에 알린다. 갱신 방법(sync-mini)까지 한 줄에 담되, 그 한 줄이
+        // 안 들어가면 라벨 줄에 우겨넣지 않고 **아랫줄**로 내린다 — 종전엔 216px
+        // 칼럼에서 이 문장이 「화면 보기」 버튼을 뚫고 칼럼 밖까지 뻗었다.
         if m.online && m.outdated {
-            g.draw_text(
-                chip_x + cw + 8.0,
-                chip_y,
-                "⚠ 프로그램 낡음 — scripts/sync-mini.sh 로 갈아입히면 돼요",
-                gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
-            );
+            let full = "⚠ 프로그램 낡음 — scripts/sync-mini.sh 로 갈아입히면 돼요";
+            let head_room = (meta_right - (chip_x + cw + 8.0)).max(0.0);
+            if g.measure_chrome_text(full, 9.0, true) <= head_room {
+                g.draw_text(
+                    chip_x + cw + 8.0,
+                    chip_y,
+                    full,
+                    gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
+                );
+            } else {
+                let t = crate::info::fit_text(g, full, (right - x0).max(0.0), 9.0, true);
+                g.draw_text(
+                    x0,
+                    y,
+                    &t,
+                    gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
+                );
+                y += 14.0;
+            }
         }
         // 화면공유 버튼 — 명부에 진짜 주소(host)가 있을 때만, 라벨 줄 오른쪽 끝.
         // 연결이 끊겨도 그린다: 화면공유는 카사텀 창구와 다른 문이라 따로 살 수 있다.
         if !m.host.is_empty() {
-            let bl = "화면 보기";
+            let bl = screen_bl;
             let bw = g.measure_chrome_text(bl, 9.0, true) + 12.0;
             let bh = 16.0;
             let bx = right - bw;
@@ -654,12 +704,12 @@ pub(crate) fn draw_machines_col(
                 "← 데려오기".to_string(),
                 true,
             )];
-            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
         }
         let mut last_room = String::new();
         for row in &m.remote {
             y = room_label(g, x0, y, &row.room, &mut last_room);
-            y = student_row(g, cursor, mc, row, &[], x0 + 8.0, right, y);
+            y = student_row(g, cursor, mc, row, &[], x0 + 8.0, right, y, narrow);
         }
     }
 

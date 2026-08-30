@@ -1933,10 +1933,17 @@ pub(crate) fn draw_info_actions(
             } else {
                 format!("{} {:.0}%", u.label, u.pct)
             };
+            // 남은 시간은 자리가 있을 때만 — 좁은 칼럼에선 이게 붙는 순간 정작
+            // 알아야 할 퍼센트가 chevron 밑으로 밀린다.
+            let room = (right - 10.0 - 11.0 - 6.0 - tx).max(0.0);
             let l = match crate::resets_in_label(u.resets_at) {
-                Some(r) => format!("{l} · {r}"),
+                Some(r) => {
+                    let long = format!("{l} · {r}");
+                    if g.measure_chrome_text(&long, f, true) <= room { long } else { l }
+                }
                 None => l,
             };
+            let l = fit_text(g, &l, room, f, true);
             let col = if u.stale { theme::with_alpha(col, 0x99) } else { col };
             g.draw_text(tx, ty, &l,
                 gpu::DrawOpts { font_size: f, color: col, bold: true, italic: false });
@@ -1958,6 +1965,12 @@ pub(crate) fn draw_info_actions(
     let bh = 28.0_f32;
     let gap = 6.0;
     let bw = ((avail - gap * (btns.len() - 1) as f32) / btns.len() as f32).max(0.0);
+    let f = 11.0_f32;
+    // 라벨은 **셋 다** 들어갈 때만 붙인다. 하나만 잘려 아이콘이 되면 같은 줄에서
+    // 어떤 버튼은 글자를, 어떤 버튼은 그림을 말하게 되어 줄이 고장 난 것처럼 읽힌다.
+    let labels_fit = btns
+        .iter()
+        .all(|(_, _, l)| 13.0 + 5.0 + g.measure_chrome_text(l, f, false) + 10.0 <= bw);
     for (i, (kind, icon, label)) in btns.into_iter().enumerate() {
         let bx = x0 + i as f32 * (bw + gap);
         let hov = hit(cursor, &(bx, y, bw, bh));
@@ -1967,13 +1980,16 @@ pub(crate) fn draw_info_actions(
             theme::raised_on(theme::panel_bg(), hov),
         );
         let col = if hov { theme::text() } else { theme::text_dim() };
-        let f = 11.0_f32;
-        let lw = g.measure_chrome_text(label, f, false);
-        let inner = 13.0 + 5.0 + lw;
-        let ix = bx + (bw - inner) / 2.0;
-        g.queue_icon(icon, ix, y + (bh - 13.0) / 2.0, 13.0, col);
-        g.draw_text(ix + 18.0, y + (bh - f) / 2.0 - 1.0, label,
-            gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false });
+        if labels_fit {
+            let lw = g.measure_chrome_text(label, f, false);
+            let inner = 13.0 + 5.0 + lw;
+            let ix = bx + (bw - inner) / 2.0;
+            g.queue_icon(icon, ix, y + (bh - 13.0) / 2.0, 13.0, col);
+            g.draw_text(ix + 18.0, y + (bh - f) / 2.0 - 1.0, label,
+                gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false });
+        } else {
+            g.queue_icon(icon, bx + (bw - 13.0) / 2.0, y + (bh - 13.0) / 2.0, 13.0, col);
+        }
         info.action_rects.push((kind, (bx, y, bw, bh)));
     }
     y += bh + 10.0;
@@ -2131,7 +2147,6 @@ pub(crate) fn draw_info_col(
     // 목록이 전 pane 공유라 "지금 무엇을 보고 있는지"가 셸 하나의 이름일 수
     // 없다. 몇 개의 pane 을 합쳐 몇 개를 세고 있는지가 그 자리를 대신한다.
     if y + HEAD_H > top && y < bottom {
-        g.queue_icon("terminal", x0, y + 5.0, 14.0, theme::text_mute());
         let summary = if snap.panes.is_empty() {
             "읽는 중…".to_string()
         } else {
@@ -2142,12 +2157,37 @@ pub(crate) fn draw_info_col(
                 snap.ports.len()
             )
         };
-        let s = fit_text(g, &summary, (right - x0 - 21.0 - 22.0).max(0.0), 11.5, false);
+        // 세 숫자가 한 덩어리라 하나만 잘리면 줄 전체가 못 쓰게 된다(216px 실측:
+        // 「포트 15」가 통째로 사라졌다). 자리가 모자라면 터미널 아이콘부터 접고,
+        // 그래도 모자라면 글자를 한 단 줄여 셋을 다 보인다 — 이 줄에서 그림은
+        // 장식이고 숫자가 내용이다.
+        let room = |ind: f32| (right - x0 - ind - 22.0).max(0.0);
+        let tight = summary.replace(" · ", "·");
+        let mut fs = 11.5_f32;
+        let mut ind = 21.0_f32;
+        let mut text = summary.clone();
+        for (nind, nfs, ntext) in [
+            (21.0, 11.5, &summary),
+            (0.0, 11.5, &summary),
+            (0.0, 10.5, &summary),
+            (0.0, 10.5, &tight),
+        ] {
+            ind = nind;
+            fs = nfs;
+            text = ntext.clone();
+            if g.measure_chrome_text(ntext, nfs, false) <= room(nind) {
+                break;
+            }
+        }
+        if ind > 0.0 {
+            g.queue_icon("terminal", x0, y + 5.0, 14.0, theme::text_mute());
+        }
+        let s = fit_text(g, &text, room(ind), fs, false);
         g.draw_text(
-            x0 + 21.0,
+            x0 + ind,
             y + 5.0,
             &s,
-            gpu::DrawOpts { font_size: 11.5, color: theme::text_dim(), bold: false, italic: false },
+            gpu::DrawOpts { font_size: fs, color: theme::text_dim(), bold: false, italic: false },
         );
         let rr = (right - 15.0, y + 4.0, 15.0, 15.0);
         let rhov = hit(cursor, &(rr.0 - 4.0, rr.1 - 4.0, rr.2 + 8.0, rr.3 + 8.0));
@@ -2429,13 +2469,22 @@ fn draw_section(
         12.0,
         theme::text_mute(),
     );
+    let right = x + w - 12.0;
+    // 오른쪽 표시(개수 알약·배지)의 자리를 먼저 빼고 라벨을 그 안에 맞춘다.
+    // 안 빼면 좁은 칼럼에서 「프로젝트 디렉터리」가 「현재 경로」 위로 올라탄다.
+    let tail_w = match (count, badge) {
+        (Some(n), _) => g.measure_chrome_text(&n.to_string(), 10.0, true) + 10.0,
+        (None, Some(b)) => g.measure_chrome_text(b, 10.0, false),
+        (None, None) => 0.0,
+    };
+    let label_max = (right - tail_w - 8.0 - (x0 + 13.0)).max(0.0);
+    let label_fit = fit_text(g, label, label_max, 11.0, true);
     g.draw_text(
         x0 + 13.0,
         y + 7.0,
-        label,
+        &label_fit,
         gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: true, italic: false },
     );
-    let right = x + w - 12.0;
     if let Some(n) = count {
         let s = n.to_string();
         let tw = g.measure_chrome_text(&s, 10.0, true);
@@ -3471,6 +3520,46 @@ fn wrap_path(g: &mut gpu::GpuRenderer, s: &str, avail: f32, max_lines: usize) ->
 /// 그 자체가 글자마다 아틀라스를 뒤지므로 그 방식은 길이의 제곱으로 붇고,
 /// claude·MCP 처럼 argv 가 긴 행이 목록에 깔리면 프레임 예산을 통째로 먹는다.
 /// 글자 폭은 서로 독립이라 한 번 훑으며 누적하면 같은 답이 한 바퀴에 나온다.
+/// `fit_text` 의 반대 방향 — **뒤**를 남기고 앞을 접는다(`…tail`).
+///
+/// 경로와 브랜치처럼 "지금 어디인가" 가 꼬리에 오는 문자열 전용이다. 앞에서
+/// 자르면 `/Users/kasa/Desk…` 처럼 누구나 아는 앞머리만 남고 정작 알아야 할
+/// 폴더가 사라진다.
+pub(crate) fn fit_text_tail(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    avail: f32,
+    size: f32,
+    bold: bool,
+) -> String {
+    if avail <= 0.0 {
+        return String::new();
+    }
+    if g.measure_chrome_text(s, size, bold) <= avail {
+        return s.to_string();
+    }
+    let ell = g.measure_chrome_text("…", size, bold);
+    if avail <= ell {
+        return String::new();
+    }
+    let budget = avail - ell;
+    let mut w = 0.0;
+    let mut keep = 0usize; // 뒤에서부터 담은 바이트 수
+    let mut buf = [0u8; 4];
+    for (i, ch) in s.char_indices().rev() {
+        w += g.measure_chrome_text(ch.encode_utf8(&mut buf), size, bold);
+        if w > budget {
+            break;
+        }
+        keep = s.len() - i;
+    }
+    if keep == 0 {
+        String::new()
+    } else {
+        format!("…{}", &s[s.len() - keep..])
+    }
+}
+
 pub(crate) fn fit_text(
     g: &mut gpu::GpuRenderer,
     s: &str,

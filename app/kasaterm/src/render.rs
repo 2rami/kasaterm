@@ -3842,24 +3842,7 @@ impl App {
                     } else {
                         (tree_col_x + tree_col_w - 8.0 - text_x0).max(0.0)
                     };
-                    if cwd_str.is_empty() || g.measure_chrome_text(&cwd_str, chrome_font, false) <= cap {
-                        cwd_str
-                    } else {
-                        // 뒤에서부터 담는다 — 지금 있는 폴더가 알아야 할 쪽이다.
-                        let mut keep = String::new();
-                        for ch in cwd_str.chars().rev() {
-                            let trial = format!("…{ch}{keep}");
-                            if g.measure_chrome_text(&trial, chrome_font, false) > cap {
-                                break;
-                            }
-                            keep.insert(0, ch);
-                        }
-                        if keep.is_empty() {
-                            String::new()
-                        } else {
-                            format!("…{keep}")
-                        }
-                    }
+                    crate::info::fit_text_tail(g, &cwd_str, cap, chrome_font, false)
                 };
                 let cwd_w = if cwd_str.is_empty() {
                     0.0
@@ -3868,7 +3851,39 @@ impl App {
                 };
                 let win_w = win_px.0 / scale;
                 let right_lim = git_col_toggle.map_or(win_w - 8.0, |(x, ..)| x - 12.0);
-                let left_lim = px0 + cwd_w;
+                // 칩은 왼쪽 칼럼(파일트리) 위로 내려앉지 않는다 — 좁은 창에서 가운데가
+                // 마침 그 경계와 겹치면 파일 목록에 딱 붙어 튀어나온 것처럼 보였다
+                // (640px 실측: 경계도 236, 중앙 시작도 236).
+                let left_lim = (px0 + cwd_w)
+                    .max(if tree_col_w > 0.0 { tree_col_x + tree_col_w + 10.0 } else { 0.0 });
+                // 남은 자리보다 칩이 크면 이름을 줄인다. 안 줄이면 clamp 가 왼쪽을
+                // 우선해 칩이 오른쪽 버튼들 밑으로 뻗는다.
+                let (title_text, tw, pw) = {
+                    let avail = (right_lim - left_lim).max(0.0);
+                    let fixed = pad + gl + 7.0 + bw + mw + pad;
+                    if title_text.is_empty() || pw <= avail {
+                        (title_text, tw, pw)
+                    } else if avail - fixed <= 8.0 {
+                        (String::new(), 0.0, 0.0)
+                    } else {
+                        let cap = avail - fixed;
+                        let mut keep = String::new();
+                        for ch in title_text.chars() {
+                            let trial = format!("{keep}{ch}…");
+                            if g.measure_chrome_text(&trial, chrome_font, true) > cap {
+                                break;
+                            }
+                            keep.push(ch);
+                        }
+                        if keep.is_empty() {
+                            (String::new(), 0.0, 0.0)
+                        } else {
+                            let t = format!("{keep}…");
+                            let w = g.measure_chrome_text(&t, chrome_font, true);
+                            (t, w, fixed + w)
+                        }
+                    }
+                };
                 let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
                 if !title_text.is_empty() {
                     round_rect(g, start, py, pw, ph, theme::radius_md(), theme::surface());
@@ -5756,6 +5771,22 @@ impl App {
                         .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
                         .unwrap_or_else(|| "—".to_string());
                     let pcol = if self.git.col_pinned_cwd.is_some() { theme::accent() } else { theme::text_dim() };
+                    // 브랜치 자리를 먼저 떼고 경로를 그 안에 맞춘다. 안 맞추면 좁은
+                    // 칼럼에서 경로가 브랜치와 변경 통계를 통째로 칼럼 밖으로 밀어낸다
+                    // (216px 실측). 앞이 아니라 **뒤**를 남기는 건 지금 어느 폴더냐가
+                    // 알아야 할 쪽이라서다.
+                    let path_disp = {
+                        let branch_w = if git_view.no_repo {
+                            0.0
+                        } else {
+                            let b = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
+                            g.measure_chrome_text(" : ", 12.0, false)
+                                + g.measure_chrome_text(b, 12.0, true)
+                                + 10.0
+                        };
+                        let room = (git_col_x + git_col_w - 12.0 - gcx0 - branch_w).max(0.0);
+                        crate::info::fit_text_tail(g, &path_disp, room, 12.0, false)
+                    };
                     let px = g.draw_text(gcx0, y, &path_disp, gpu::DrawOpts { font_size: 12.0, color: pcol, bold: false, italic: false });
                     self.git.path_hdr_rect = Some((gcx0 - 3.0, y - 3.0, (px - gcx0) + 6.0, 19.0));
                     if !git_view.no_repo {
@@ -5858,8 +5889,6 @@ impl App {
                     self.git.commit_caret_rect = None;
                     list_top = y + 8.0;
                 } else {
-                    g.queue_icon("git-branch", gcx0, y + 1.0, 13.0, theme::text_mute());
-                    g.draw_text(gcx0 + 18.0, y, "Uncommitted changes", gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
                     let bh = 24.0_f32;
                     let by = y - 4.0;
                     let caret_w = 20.0_f32;
@@ -5899,6 +5928,24 @@ impl App {
                     let main_w = 24.0 + lw + 10.0;
                     let total_w = main_w + caret_w;
                     let bx = git_col_x + git_col_w - 12.0 - total_w;
+                    // 라벨은 버튼이 자리를 잡은 **뒤** 남는 폭에 맞춘다. 먼저 그리면
+                    // 좁은 칼럼에서 그대로 버튼 밑으로 파고든다(216px 실측: 라벨은
+                    // 162 까지 뻗는데 버튼이 105 에서 시작했다). 잘라서 「Uncomm…」 을
+                    // 남기는 대신 짧은 말로 갈아탄다 — 말줄임한 영어는 못 읽는다.
+                    {
+                        let room = (bx - 10.0 - (gcx0 + 18.0)).max(0.0);
+                        let lbl = if g.measure_chrome_text("Uncommitted changes", 12.0, true) <= room {
+                            "Uncommitted changes"
+                        } else if g.measure_chrome_text("Changes", 12.0, true) <= room {
+                            "Changes"
+                        } else {
+                            ""
+                        };
+                        if !lbl.is_empty() {
+                            g.queue_icon("git-branch", gcx0, y + 1.0, 13.0, theme::text_mute());
+                            g.draw_text(gcx0 + 18.0, y, lbl, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
+                        }
+                    }
                     let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let base = if can_drop || busy.is_some() { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
@@ -6032,28 +6079,23 @@ impl App {
                                     let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
                                     let tx = gcx0 + 20.0;
                                     let ty = ry + (item_h - 12.0) / 2.0;
-                                    let endx = g.draw_text(
-                                        tx,
-                                        ty,
-                                        fname,
-                                        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false },
-                                    );
-                                    if !dir.is_empty() {
-                                        g.draw_text(
-                                            endx + 7.0,
-                                            ty + 0.5,
-                                            dir,
-                                            gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
-                                        );
-                                    }
+                                    // 이름·경로는 여기서 그리지 않는다. 오른쪽 액션과
+                                    // numstat 이 자리를 잡은 뒤에야 남는 폭을 알 수 있고,
+                                    // 모르면 216px 칼럼에서 셋이 서로 위에 겹쳐 그려진다.
                                     // Action cluster (cursor style), always visible
                                     // right-to-left: +/− stage · ↩ discard · ⤴ open.
                                     // numstat (+ins -del) sits just left of them.
                                     let aw = 19.0_f32;
                                     let agap = 1.0_f32;
-                                    let mut ax = git_col_x + git_col_w - 12.0 - aw;
+                                    // 좁은 칼럼에서 액션 셋(59px)과 numstat 이 늘 자리를
+                                    // 지키면 정작 파일 이름에 55px 밖에 안 남아 「info.…」
+                                    // 로 뭉개진다(216px 실측). 이 폭에서는 이름이 내용이고
+                                    // 버튼은 손이 갈 때만 필요하니, 가리킨 행에서만 꺼낸다.
+                                    let narrow = git_col_w < GIT_DENSE_COMPACT;
+                                    let show_acts = !narrow || hovered;
+                                    let mut ax = git_col_x + git_col_w - 12.0 - if show_acts { aw } else { 0.0 };
                                     let icon_dim = if hovered { theme::text_dim() } else { theme::with_alpha(theme::text_dim(), 0x88) };
-                                    {
+                                    if show_acts {
                                         let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
@@ -6062,7 +6104,7 @@ impl App {
                                         stage_rects.push((!staged, path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
                                         ax -= aw + agap;
                                     }
-                                    {
+                                    if show_acts {
                                         let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
@@ -6071,7 +6113,7 @@ impl App {
                                         discard_rects.push((path.clone(), untracked, (ax - 1.0, ry, aw + 2.0, item_h)));
                                         ax -= aw + agap;
                                     }
-                                    {
+                                    if show_acts {
                                         let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
                                         if bh {
                                             round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
@@ -6080,7 +6122,8 @@ impl App {
                                         open_rects.push((path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
                                     }
                                     // numstat — right-aligned just left of the actions.
-                                    if let Some((ins, del)) = git_view.numstat.get(path) {
+                                    let mut text_right = ax - 4.0;
+                                    if let Some((ins, del)) = git_view.numstat.get(path).filter(|_| !(narrow && show_acts)) {
                                         if *ins > 0 || *del > 0 {
                                             let minus = format!("-{del}");
                                             let plus = format!("+{ins}");
@@ -6095,6 +6138,26 @@ impl App {
                                             if *ins > 0 {
                                                 rx -= wp;
                                                 g.draw_text(rx, ty, &plus, gpu::DrawOpts { font_size: 11.0, color: theme::success(), bold: false, italic: false });
+                                            }
+                                            text_right = rx;
+                                        }
+                                    }
+                                    // 이제 남은 폭이 확정됐다. 이름을 먼저 채우고,
+                                    // 부모 경로는 그러고도 남을 때만 — 좁은 칼럼에서
+                                    // 알아야 할 쪽은 경로가 아니라 파일 이름이다.
+                                    {
+                                        let avail = (text_right - 6.0 - tx).max(0.0);
+                                        let nm = crate::info::fit_text(g, fname, avail, 12.0, false);
+                                        let endx = if nm.is_empty() {
+                                            tx
+                                        } else {
+                                            g.draw_text(tx, ty, &nm, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false })
+                                        };
+                                        if !dir.is_empty() && !nm.is_empty() && nm == fname {
+                                            let room = (text_right - 6.0 - (endx + 7.0)).max(0.0);
+                                            let d = crate::info::fit_text_tail(g, dir, room, 11.0, false);
+                                            if !d.is_empty() {
+                                                g.draw_text(endx + 7.0, ty + 0.5, &d, gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false });
                                             }
                                         }
                                     }

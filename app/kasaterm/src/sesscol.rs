@@ -220,8 +220,12 @@ pub(crate) fn draw_sessions_col(
     let right = x + w - 12.0;
     // 행 왼쪽 거터에 학생 얼굴이 앉고 텍스트 세 줄은 그만큼 들여쓴다. 머리(칩
     // 줄)와 빈 목록 안내는 거터가 없어 `x0` 을 그대로 쓴다.
-    let icon_x = x + 9.0;
-    let text_x = x + 35.0;
+    // 좁은 칼럼에선 거터를 한 단 좁힌다 — 얼굴은 알아볼 만큼만 남기고 그 차이를
+    // 제목에 준다. 이 칼럼에서 6px 은 한글 반 글자다.
+    let narrow = w < GIT_DENSE_COMPACT;
+    let face_sz = if narrow { 19.0_f32 } else { 22.0 };
+    let icon_x = x + if narrow { 7.0 } else { 9.0 };
+    let text_x = icon_x + face_sz + 4.0;
     let avail = (right - text_x).max(0.0);
     sc.row_rects.clear();
     sc.scope_rects.clear();
@@ -343,15 +347,15 @@ pub(crate) fn draw_sessions_col(
         // 들어온 것이라 뺄 수 없다). 나란히 두면 거터가 두 배가 되고, 이 칼럼은
         // 좁아서 그 폭이 곧 잘리는 라벨이다.
         let face = !s.student.is_empty()
-            && sprites::draw_student_face(g, &s.student, icon_x, y + (ROW_H - 22.0) / 2.0, 22.0);
+            && sprites::draw_student_face(g, &s.student, icon_x, y + (ROW_H - face_sz) / 2.0, face_sz);
         if face {
             // 얼굴 위에 그대로 얹으면 그림과 로고가 섞여 둘 다 안 읽힌다 — 밑에
             // 판을 깔아 로고만 남긴다.
             // 얼굴 상자 **안쪽**에 붙인다 — 밖으로 내밀면 그만큼 라벨과의 사이가
             // 좁아지고, 이 칼럼에서 2px 는 글자 한 칸이다.
-            let bs = 13.0;
-            let bx = icon_x + 22.0 - bs;
-            let by = y + (ROW_H - 22.0) / 2.0 + 22.0 - bs;
+            let bs = if narrow { 11.0 } else { 13.0 };
+            let bx = icon_x + face_sz - bs;
+            let by = y + (ROW_H - face_sz) / 2.0 + face_sz - bs;
             round_rect(g, bx, by, bs, bs, bs / 2.0, theme::panel_bg());
             g.queue_icon(
                 harness_icon(&s.harness),
