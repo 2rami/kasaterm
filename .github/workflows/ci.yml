@@ -36,6 +36,13 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Windows 이식(fork/windows-port, PR #2)이 main 에 아직 안 왔다 — main 의 여러
+    # unix 전용 코드(info 의 `getuid`, 이사의 `migrate_pane`·`libc::kill` 등)가
+    # Windows 에서 안 맞물려 이 잡은 오래 빨갛다. macOS 관문은 그대로 지키되,
+    # Windows 실패로 워크플로 전체가 fail 하지는 않게 강등한다(2026-08-30 지시).
+    # 실패는 잡 로그에 노랑으로 남으니 이식 진척은 계속 보인다. 이식이 main 에
+    # 머지되면 이 줄을 지워 Windows 관문을 되살릴 것.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
