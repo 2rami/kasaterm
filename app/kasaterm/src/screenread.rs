@@ -1974,13 +1974,33 @@ pub(crate) fn find_sticky_prompt(
             );
         }
         if glyphs >= 2 && dim * 2 >= glyphs && marked(&text) {
-            return Some(StickyPrompt {
-                row: ri,
-                col_start: first,
-                col_end: last,
-                text,
-                synthetic: false,
-            });
+            // 마커만으로는 모자란다 — 본문의 인용(`> ...`)·diff·접힌 도구 출력도
+            // 같은 글자로 시작한다. **아는 질문과 대조해야** 그 줄이 정말 질문이다
+            // (2026-08-31 지적: 「맨위에 프롬프트 없으면 이상한게 잡혀있어」).
+            //
+            // 질문 목록을 아직 못 읽었으면(첫 프레임·기록 없음) 종전대로 통과시킨다 —
+            // 대조할 것이 없다고 표시를 통째로 죽이는 편보다 낫다.
+            let bare = text
+                .trim_start()
+                .trim_start_matches(['\u{276f}', '\u{203a}', '>'])
+                .trim();
+            let known = prompts
+                .iter()
+                .find(|(p, _)| head12(p) == head12(bare) && !bare.is_empty());
+            if prompts.is_empty() || known.is_some() {
+                // 화면에서 질문을 **직접 봤다**. 더 올려 이 줄이 밀려나도 어느 턴인지
+                // 알도록 기억해 둔다 — 이걸 안 하면 기억이 낡은 채로 남는다.
+                if let Some((p, _)) = known {
+                    *memo = Some(p.clone());
+                }
+                return Some(StickyPrompt {
+                    row: ri,
+                    col_start: first,
+                    col_end: last,
+                    text,
+                    synthetic: false,
+                });
+            }
         }
     }
     // ⚠️ 마커 없는 흐릿한 행을 잡던 폴백은 **걷어냈다**(2026-08-30). 게이트가 열린
@@ -2076,6 +2096,14 @@ fn strip_screen_ornament(t: &str) -> &str {
 ///
 /// 실측(24턴, 8MB 기록): 조각 하나로 22턴이 유일하게 가려진다. 못 가리는 둘은 답이
 /// 한 줄뿐인 턴이라 애초에 화면을 채우지 못한다.
+/// 화면 줄과 기록 속 질문을 맞대 볼 때 쓰는 머리 12자.
+///
+/// 전문을 맞대면 안 맞는다 — 화면의 질문 줄은 폭에서 잘리거나 접히고, 기록 쪽은
+/// 안 잘린 원문이다. 앞부분만 보면 그 둘이 같은 질문인지는 충분히 가려진다.
+fn head12(s: &str) -> String {
+    s.trim().chars().take(12).collect()
+}
+
 fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize> {
     let mut votes = vec![0usize; prompts.len()];
     let mut any = false;
@@ -2122,8 +2150,12 @@ fn pick_scrolled_past_prompt(
     // 빈 줄과 글머리만 남은 줄을 거른다. 길이로 더 자르지는 않는다 — 가리는 힘은
     // 「그 조각을 가진 턴이 하나뿐인가」가 내고, 흔한 줄은 그 조건에서 저절로 떨어진다.
     const MIN_DISTINCT: usize = 2;
-    let head = |s: &str| s.chars().take(12).collect::<String>();
     let mut topmost: Option<usize> = None;
+    // 그 머리줄보다 **위에** 지난 턴의 꼬리가 있었는가. 없으면 머리줄이 곧 화면
+    // 맨 위이므로 띠는 그 질문 자신이다 — 여기서 무조건 한 칸 앞을 집는 것이
+    // 「딱 맞지는 않는다」의 정체였다(2026-08-31).
+    let mut body_above_header = false;
+    let mut header_seen = false;
     let mut body: Vec<String> = Vec::new();
     for row in rows {
         let text = row_match_text(row);
@@ -2131,15 +2163,19 @@ fn pick_scrolled_past_prompt(
         if let Some(q) = t.strip_prefix('>').or_else(|| t.strip_prefix('\u{276f}')) {
             let q = q.trim();
             if !q.is_empty() {
-                let key = head(q);
-                if let Some(i) = prompts.iter().position(|(p, _)| head(p) == key) {
+                let key = head12(q);
+                if let Some(i) = prompts.iter().position(|(p, _)| head12(p) == key) {
                     topmost = Some(topmost.map_or(i, |cur: usize| cur.min(i)));
+                    header_seen = true;
                     continue;
                 }
             }
         }
+        let stripped = strip_screen_ornament(t);
+        if !header_seen && !stripped.is_empty() {
+            body_above_header = true;
+        }
         if body.len() < BODY_ROWS {
-            let stripped = strip_screen_ornament(t);
             // 짧은 줄은 어느 턴에나 있다(「24」·「ok」·닫는 괄호). 길이로 거른다.
             if stripped.chars().count() >= MIN_DISTINCT {
                 body.push(stripped.to_string());
@@ -2154,25 +2190,39 @@ fn pick_scrolled_past_prompt(
         );
     }
     if let Some(i) = topmost {
-        // 머리줄을 봤다 — 이건 짐작이 아니라 확정이다. 기억해 둔다.
-        let past = i.checked_sub(1).and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
-        *memo = past.clone();
+        // 머리줄을 봤다 — 이건 짐작이 아니라 확정이다.
+        //
+        // **그 머리줄 위에 무엇이 있었는가**로 한 칸이 갈린다. 위에 지난 턴의 꼬리가
+        // 남아 있으면 화면 맨 위는 그 앞 턴(i-1)의 답이고, 머리줄이 곧 첫 줄이면
+        // 화면은 이 턴(i)의 답이다. 늘 i-1 을 집던 것이 「딱 맞지는 않는다」였다.
+        let want = if body_above_header { i.checked_sub(1) } else { Some(i) };
+        let past = want.and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
+        if past.is_some() {
+            *memo = past.clone();
+        }
         return past;
     }
-    // 머리줄이 화면 밖이면 **직전에 본 것**이 그대로 답이다. 스크롤은 한 번에 몇 줄씩만
-    // 움직이고 claude 는 그때마다 화면을 다시 그리므로, 머리줄이 뷰포트를 가로질러
-    // 사라지는 장면을 우리가 반드시 본다 — 턴이 바뀌었다면 그 프레임에서 갱신됐다.
-    // 긴 답변 한가운데에 파묻혀도 어느 턴인지 아는 것이 이 기억이다.
+    // 머리줄이 화면 밖이다. **본문으로 먼저 되짚는다** — 보이는 줄이 어느 한 턴에만
+    // 있으면 그게 답이고, 이건 기억보다 세다.
+    //
+    // 기억을 먼저 믿던 것이 「이상한 게 잡혀 있다」의 다른 절반이었다. 그 코드는
+    // 「스크롤은 몇 줄씩만 움직이니 머리줄이 지나가는 프레임을 반드시 본다」를
+    // 전제했는데, PageUp·휠 한 번은 **한 화면씩** 뛴다. 머리줄이 프레임 사이로
+    // 통째로 지나가면 기억은 그 자리에 굳은 채 화면만 저 위로 간다.
+    if let Some(i) = vote_turn(&body, prompts) {
+        let hit = prompts.get(i).map(|(p, _)| p.clone());
+        if hit.is_some() {
+            *memo = hit.clone();
+        }
+        return hit;
+    }
+    // 본문으로도 못 가리면 그때 기억이다(답이 짧아 화면을 못 채우는 턴).
     if let Some(remembered) = memo.as_ref() {
         if prompts.iter().any(|(p, _)| p == remembered) {
             return Some(remembered.clone());
         }
     }
-    // 기억이 없을 때만 짐작한다 — 머리줄을 한 번도 못 본 채 게이트가 열린 자리
-    // (맨 아래에서 한 노치 올렸는데 마지막 턴이 화면보다 긴 경우).
-    if let Some(i) = vote_turn(&body, prompts) {
-        return prompts.get(i).map(|(p, _)| p.clone());
-    }
+    // 기억조차 없으면 마지막 질문 — 맨 아래에서 한 노치 올린 자리가 여기다.
     prompts.last().map(|(p, _)| p.clone())
 }
 

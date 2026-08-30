@@ -8459,6 +8459,78 @@ mod tests {
         assert_eq!(got.text, "codex 작업 상태 알려줘");
     }
 
+    fn grid_row_dim(s: &str, width: usize) -> Vec<GridCell> {
+        let mut row = grid_row(s, width);
+        for c in row.iter_mut() {
+            c.dim = true;
+        }
+        row
+    }
+
+    /// 머리줄이 **화면 첫 줄**이면 띠는 그 질문 자신이다 — 한 칸 앞이 아니다.
+    #[test]
+    fn sticky_band_uses_own_turn_when_header_is_first_row() {
+        const W: usize = 80;
+        let rows: Vec<Vec<GridCell>> = [
+            "❯ 끝났어 커밋푸시하고 빌드해줘",
+            "⏺ 끝났으면 커밋·푸시까지 하겠습니다.",
+            "Jump to bottom (click) ↓",
+        ]
+        .iter()
+        .map(|l| grid_row(l, W))
+        .collect();
+        let prompts = vec![
+            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴 답변".to_string()]),
+            (
+                "끝났어 커밋푸시하고 빌드해줘".to_string(),
+                vec!["끝났으면 커밋·푸시까지 하겠습니다.".to_string()],
+            ),
+        ];
+        let mut memo = None;
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        assert_eq!(got.text, "끝났어 커밋푸시하고 빌드해줘");
+    }
+
+    /// 한 화면씩 뛰어 머리줄을 놓쳤을 때, 낡은 기억보다 **보이는 본문**이 세다.
+    #[test]
+    fn sticky_band_prefers_body_over_stale_memo() {
+        const W: usize = 80;
+        let rows: Vec<Vec<GridCell>> = [
+            "첫 턴에만 있는 고유한 문장",
+            "이어지는 줄 하나",
+            "Jump to bottom (click) ↓",
+        ]
+        .iter()
+        .map(|l| grid_row(l, W))
+        .collect();
+        let prompts = vec![
+            ("첫 질문".to_string(), vec!["첫 턴에만 있는 고유한 문장".to_string()]),
+            ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
+            ("셋째 질문".to_string(), vec!["셋째 턴 문장".to_string()]),
+        ];
+        let mut memo = Some("셋째 질문".to_string());
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        assert_eq!(got.text, "첫 질문");
+        assert_eq!(memo.as_deref(), Some("첫 질문"), "본문으로 되짚었으면 기억도 갱신된다");
+    }
+
+    /// 흐릿한 `>` 로 시작해도 **아는 질문이 아니면** 잡지 않는다(본문 인용·diff).
+    #[test]
+    fn sticky_band_ignores_unknown_marked_row() {
+        const W: usize = 80;
+        let mut rows: Vec<Vec<GridCell>> = vec![grid_row_dim("> 남의 말을 인용한 줄입니다", W)];
+        rows.push(grid_row("첫 턴에만 있는 고유한 문장", W));
+        rows.push(grid_row("Jump to bottom (click) ↓", W));
+        let prompts = vec![
+            ("첫 질문".to_string(), vec!["첫 턴에만 있는 고유한 문장".to_string()]),
+            ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
+        ];
+        let mut memo = None;
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        assert!(got.synthetic, "인용 줄을 그 자리에서 하이라이트하면 안 된다");
+        assert_eq!(got.text, "첫 질문");
+    }
+
     fn test_posix_shell() -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
