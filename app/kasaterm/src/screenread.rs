@@ -1728,6 +1728,9 @@ pub(crate) struct StickyPrompt {
     pub col_start: usize,
     pub col_end: usize, // exclusive
     pub text: String,
+    /// 화면에서 읽은 게 아니라 **우리가 채워 넣은** 띠. 그 행에는 글자 셀이 없어
+    /// 선명화할 것도 없으므로, 렌더가 `text` 를 직접 써 넣어야 한다.
+    pub synthetic: bool,
 }
 
 thread_local! {
@@ -1872,7 +1875,10 @@ pub(crate) fn sticky_row_span(row: &[GridCell]) -> (String, usize, usize, usize,
 /// 스크롤된 상태)가 있을 때만, 최상단의 흐릿한 프롬프트 행을 sticky 로 본다.
 /// 이 게이트가 평상시(맨 아래) 오탐을 막는다. `KASATERM_STICKY_DEBUG=1` 이면
 /// 게이트 결과와 상단 행 스캔을 stderr 로 흘려 실측 튜닝을 돕는다.
-pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt> {
+pub(crate) fn find_sticky_prompt(
+    rows: &[Vec<GridCell>],
+    last_prompt: Option<&str>,
+) -> Option<StickyPrompt> {
     let dbg = std::env::var_os("KASATERM_STICKY_DEBUG").is_some();
     // 스크롤 게이트: "jump to bottom" / ("bottom" & "click") 관대 매치.
     let scrolled = rows.iter().any(|r| {
@@ -1886,8 +1892,15 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
         // 둘 다 같은 줄에 `(click)` 을 달고 나오므로(claude 는 `{문구} (click) ↓`
         // 로 조립한다) 그것을 함께 요구해 본문 오탐을 막는다 — 「new message」는
         // 영어로 대화하다 보면 본문에도 나오는 말이다.
+        // claude 는 이 줄을 `{문구}` + 조작 힌트로 조립하는데 힌트가 네 갈래다
+        // (`(click) ↓` · `: fn+↓ to scroll` · `(Scroll) ↓` · 그 외). 「click」만
+        // 요구하면 **키보드 힌트로 그려진 판을 통째로 놓친다** — 문구가
+        // 「N new messages」로 바뀌는 바쁜 창이 하필 그쪽이라 「조용할 때만 된다」로
+        // 보였다. 그래서 「jump to bottom」은 그대로 잡고, 「new message」는 조작
+        // 힌트 셋 중 아무것이나 함께 있으면 잡는다(본문 오탐 방지).
         s.contains("jump to bottom")
-            || (s.contains("click") && (s.contains("bottom") || s.contains("new message")))
+            || (s.contains("new message")
+                && (s.contains("click") || s.contains("to scroll") || s.contains('\u{2193}')))
     });
     if dbg {
         eprintln!("[sticky] scrolled_gate={scrolled} rows={}", rows.len());
@@ -1928,10 +1941,32 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
                 col_start: first,
                 col_end: last,
                 text,
+                synthetic: false,
             });
         }
     }
-    fallback.map(|(row, text, col_start, col_end)| StickyPrompt { row, col_start, col_end, text })
+    if let Some((row, text, col_start, col_end)) = fallback {
+        return Some(StickyPrompt { row, col_start, col_end, text, synthetic: false });
+    }
+    // claude 가 이 자리를 **비운 채로** 보내는 판(2026-08-30 실측: 스크롤 게이트는
+    // 열리는데 최상단 행이 glyphs=0, 그 아래는 흐릿하지 않은 본문). 읽어 올 행이
+    // 없으니 종전 코드로는 띠가 통째로 안 뜬다 — 화면에서 못 얻으면 transcript 에서
+    // 얻은 프롬프트로 우리가 직접 그린다. **빈 최상단 행에만** 얹어 본문을 덮지 않는다.
+    let text = last_prompt.map(str::trim).filter(|t| !t.is_empty())?;
+    let first = rows.first()?;
+    if sticky_row_span(first).3 != 0 {
+        return None;
+    }
+    if dbg {
+        eprintln!("[sticky] fallback row0 <- last_prompt {text:?}");
+    }
+    Some(StickyPrompt {
+        row: 0,
+        col_start: 0,
+        col_end: first.len().saturating_sub(1),
+        text: text.to_string(),
+        synthetic: true,
+    })
 }
 
 /// agy 시작 로고 자리(왼쪽 위 칸, 스크롤로 잘렸으면 top 이 음수).
@@ -3404,7 +3439,7 @@ mod clawd_banner_tests {
     #[test]
     fn sticky_needs_scroll_gate() {
         let rows = vec![dim_row("> 이전 프롬프트"), row_from("본문 라인")];
-        assert!(find_sticky_prompt(&rows).is_none());
+        assert!(find_sticky_prompt(&rows, None).is_none());
     }
 
     /// 맨 위에 흐릿한 줄이 둘일 때 **프롬프트 마커가 있는 쪽**을 잡는다. 마커를
@@ -3417,9 +3452,46 @@ mod clawd_banner_tests {
             dim_row("❯ 진짜 질문"),
             row_from("  3 new messages (click) ↓"),
         ];
-        let got = find_sticky_prompt(&rows).expect("감지");
+        let got = find_sticky_prompt(&rows, None).expect("감지");
         assert_eq!(got.row, 1, "마커가 있는 행");
         assert!(got.text.contains("진짜 질문"));
+    }
+
+    /// claude 는 조작 힌트를 키보드 문구로 그리기도 한다(`: fn+↓ to scroll`).
+    /// 「click」만 요구하던 게이트는 그 판을 통째로 놓쳐, 새 출력이 쌓이는 바쁜
+    /// 창에서만 띠가 안 뜨는 「됐다 안 됐다」로 보였다.
+    #[test]
+    fn the_keyboard_worded_scroll_hint_also_opens_the_gate() {
+        let rows = vec![
+            dim_row("❯ 진짜 질문"),
+            row_from("  3 new messages: fn+↓ to scroll"),
+        ];
+        let got = find_sticky_prompt(&rows, None).expect("감지");
+        assert!(got.text.contains("진짜 질문"));
+    }
+
+    /// claude 가 이 자리를 빈 채로 보내는 판 — 화면에서 읽어 올 프롬프트 행이
+    /// 없다. 그때는 transcript 에서 받은 프롬프트로 우리가 최상단에 직접 그린다.
+    #[test]
+    fn an_empty_top_row_is_filled_from_the_transcript_prompt() {
+        let rows = vec![
+            row_from("                    "),
+            row_from("  42"),
+            row_from("  Jump to bottom (click) ↓"),
+        ];
+        let got = find_sticky_prompt(&rows, Some("  내가 친 질문  ")).expect("감지");
+        assert_eq!(got.row, 0);
+        assert_eq!(got.text, "내가 친 질문");
+    }
+
+    /// 그 폴백은 **빈 행에만** 얹는다 — 본문이 올라와 있으면 덮지 않는다.
+    #[test]
+    fn the_fallback_never_paints_over_real_content() {
+        let rows = vec![
+            row_from("  본문이 여기 있다"),
+            row_from("  Jump to bottom (click) ↓"),
+        ];
+        assert!(find_sticky_prompt(&rows, Some("내가 친 질문")).is_none());
     }
 
     /// 마커가 하나도 없으면 종전대로 흐릿한 행을 잡는다 — 요구가 아니라 우대다.
@@ -3429,7 +3501,7 @@ mod clawd_banner_tests {
             dim_row("마커 없는 흐릿한 줄"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        let got = find_sticky_prompt(&rows).expect("감지");
+        let got = find_sticky_prompt(&rows, None).expect("감지");
         assert_eq!(got.row, 0);
     }
 
@@ -3443,7 +3515,7 @@ mod clawd_banner_tests {
             row_from("작업 결과 라인"),
             row_from("  3 new messages (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows).is_some());
+        assert!(find_sticky_prompt(&rows, None).is_some());
     }
 
     /// 대조군 — 「new message」가 본문에 그냥 나온 것은 게이트를 열지 않는다.
@@ -3454,7 +3526,7 @@ mod clawd_banner_tests {
             dim_row("> 이전 프롬프트"),
             row_from("we should show a new message here"),
         ];
-        assert!(find_sticky_prompt(&rows).is_none());
+        assert!(find_sticky_prompt(&rows, None).is_none());
     }
 
     // 게이트 + 최상단 흐릿한 프롬프트 → 그 행·텍스트로 감지.
@@ -3465,7 +3537,7 @@ mod clawd_banner_tests {
             row_from("작업 결과 라인"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        let s = find_sticky_prompt(&rows).expect("sticky detected");
+        let s = find_sticky_prompt(&rows, None).expect("sticky detected");
         assert_eq!(s.row, 0);
         assert!(s.text.contains("이전 프롬프트"));
         assert_eq!(s.col_start, 0);
@@ -3479,7 +3551,7 @@ mod clawd_banner_tests {
             row_from("more output"),
             row_from("Jump to bottom (click)"),
         ];
-        assert!(find_sticky_prompt(&rows).is_none());
+        assert!(find_sticky_prompt(&rows, None).is_none());
     }
 
     // 타이틀 치환: "Claude Code" → 학생 이름(와이드+스페이서 셀), 버전 텍스트는

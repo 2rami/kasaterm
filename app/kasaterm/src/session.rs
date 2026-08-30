@@ -4196,6 +4196,11 @@ impl App {
                 }
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
+                if rec.is_null() {
+                    // Null leaf 는 복원이 소리 없이 버린다 — 저장 시점에 흔적이라도
+                    // 남겨야 「재시작하니 창이 없어졌다」를 되짚을 수 있다.
+                    eprintln!("[save] pane {pane_id} 기록이 비어 leaf 로 못 실린다(복원에서 빠질 것)");
+                }
                 if let Some(obj) = rec.as_object_mut() {
                     // pane id 자체를 저장한다. 이게 없으면 복원이 `%1` 부터 새로
                     // 번호를 매기는데, `--resume` 으로 되살아난 학생은 재시작 **전**
@@ -4376,6 +4381,33 @@ impl App {
     const RESERVE_KEY: &'static str = "\u{0}restore-reserve-";
 
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        // 복원 직전 저장본을 곁에 남긴다 — 복원에서 창이 빠졌을 때(2026-08-30
+        // 「재시작했는데 세션이 없어진 것 같다」, %0 미도리가 소리 없이 빠짐)
+        // 무엇이 저장돼 있었는지 되짚을 증거가 이것뿐이다. 원본 session.json 은
+        // 몇 초 안에 현재 상태로 덮여 사라진다. 최근 5벌만 남긴다.
+        if let Some(dir) = kasa_socket::home_dir().map(|h| h.join(".config/kasaterm")) {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = std::fs::write(
+                dir.join(format!("session-restored-{ts}.json")),
+                state.to_string(),
+            );
+            if let Ok(list) = std::fs::read_dir(&dir) {
+                let mut olds: Vec<_> = list
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name().to_string_lossy().starts_with("session-restored-")
+                    })
+                    .map(|e| e.path())
+                    .collect();
+                olds.sort();
+                for p in olds.iter().rev().skip(5) {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
         let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) else {
             return;
         };
@@ -4833,7 +4865,17 @@ impl App {
         }) {
             Ok(s) => Arc::new(s),
             Err(e) => {
+                // 조용히 버리면 사용자는 「세션이 없어졌다」만 안다 — 어느 창이
+                // 왜 빠졌는지 화면에 말한다. 대화 파일은 그대로라 resume 으로
+                // 살릴 수 있다는 것까지.
                 eprintln!("[restore] pane {id} spawn failed: {e:#}");
+                self.collab.toast = Some((
+                    format!(
+                        "복원에서 {} 창을 잃었어요({e}) — 대화 파일은 남아 있어요",
+                        rec.get("character").and_then(|c| c.as_str()).unwrap_or(&id)
+                    ),
+                    std::time::Instant::now(),
+                ));
                 return None;
             }
         };

@@ -1121,7 +1121,9 @@ impl App {
                 // 재도색 스캔은 이 행을 건너뛴다 — pill 이 여기서 fg 까지 완성하므로
                 // (재도색은 fg 를 ❯ 만 만진다) 다시 칠하면 이 선명화가 무너진다.
                 let mut sticky_pill_row: Option<usize> = None;
-                if let Some(sticky) = find_sticky_prompt(&composed) {
+                if let Some(sticky) =
+                    find_sticky_prompt(&composed, self.pane_last_prompt(id.as_str()))
+                {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
@@ -1185,6 +1187,21 @@ impl App {
                             tint_toward([base[0], base[1], base[2]], accent, amount);
                         let text = theme::text();
                         let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
+                        // 우리가 채운 띠는 그 행에 글자 셀이 없다 — 선명화만 하면
+                        // 빈 띠가 그려진다(2026-08-30 실측). 프롬프트 글자를 여기서
+                        // 직접 써 넣는다. `❯` 를 앞세워 아래 fg 규칙이 그대로 걸리게
+                        // 하면 색 분기를 따로 둘 필요가 없다.
+                        if sticky.synthetic {
+                            let line: Vec<char> =
+                                format!("❯ {}", sticky.text).chars().collect();
+                            let room = up_col.unwrap_or(row.len()).saturating_sub(2);
+                            for (i, cell) in row.iter_mut().enumerate() {
+                                cell.ch = match i.checked_sub(1) {
+                                    Some(k) if i < room => *line.get(k).unwrap_or(&' '),
+                                    _ => ' ',
+                                };
+                            }
+                        }
                         for (i, cell) in row.iter_mut().enumerate() {
                             cell.dim = false;
                             cell.inverse = false;
@@ -1204,7 +1221,7 @@ impl App {
                                 cell.bold = true;
                                 continue;
                             }
-                            if i < sticky.col_start || i >= end {
+                            if !sticky.synthetic && (i < sticky.col_start || i >= end) {
                                 cell.ch = ' ';
                             }
                         }
