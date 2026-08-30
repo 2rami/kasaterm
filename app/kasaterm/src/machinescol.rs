@@ -239,6 +239,7 @@ impl App {
                     label,
                     online: m.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
                     ago_secs: m.get("ago_secs").and_then(|v| v.as_u64()),
+                    outdated: m.get("sync_capable").and_then(|v| v.as_bool()) == Some(false),
                     host,
                     mirrored: mirror_rows,
                     remote,
@@ -247,6 +248,16 @@ impl App {
             .collect();
         self.info.machines_col.locals = locals;
         self.info.machines_col.machines = machines;
+    }
+
+    /// 이사 진행 한 줄 — 단계마다 불러 화면을 그 자리에서 한 프레임 굴린다.
+    /// 이사는 GUI 스레드 동기라 이걸 안 부르면 「눌렸다」 한 프레임 뒤 끝날 때까지
+    /// 화면이 얼어붙은 채 무소식이다(2026-08-30 지시: 「진행도가 보이면 좋겠어」).
+    pub(crate) fn migrate_progress(&mut self, pane: &str, msg: String) {
+        self.set_toast(format!("이사 — {msg}"));
+        self.info.machines_col.busy = Some((pane.to_string(), msg));
+        self.chrome_dirty = true;
+        self.render_frame();
     }
 
     /// 이사 칼럼 클릭 — 버튼에 맞으면 이사를 실행하고 true.
@@ -590,6 +601,16 @@ pub(crate) fn draw_machines_col(
                 chip_y,
                 &ago_label(m.ago_secs),
                 gpu::DrawOpts { font_size: 9.0, color: theme::text_mute(), bold: false, italic: false },
+            );
+        }
+        // 프로그램 낡음 경고 — 변경 실은 이사가 「저쪽을 갱신하라」로 서는 상태를
+        // 누르기 전에 알린다. 갱신 방법(sync-mini)까지 한 줄에.
+        if m.online && m.outdated {
+            g.draw_text(
+                chip_x + cw + 8.0,
+                chip_y,
+                "⚠ 프로그램 낡음 — scripts/sync-mini.sh 로 갈아입히면 돼요",
+                gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
             );
         }
         // 화면공유 버튼 — 명부에 진짜 주소(host)가 있을 때만, 라벨 줄 오른쪽 끝.

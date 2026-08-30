@@ -808,6 +808,7 @@ impl App {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty() && s != "HEAD");
+        self.migrate_progress(pid, "저쪽 레포 준비 중…".to_string());
         if origin.is_some() {
             let what = kasa_mcp::remote::ensure_repo(
                 base,
@@ -823,9 +824,14 @@ impl App {
         // 실어 간다(2026-08-29 지시: 파일이 달라도 싱크되어 안 끊기게). 창구가
         // 없는 옛 기계에서만 옛 관문이 남는다. 반드시 ensure_repo 뒤 — bundle 의
         // 전제(origin 오브젝트)가 저쪽에 있어야 fetch 가 풀린다.
+        self.migrate_progress(pid, "이 기계의 짐(커밋·미저장 변경) 뜨는 중…".to_string());
         match kasa_mcp::reposync::snapshot(&cwd) {
             Ok(None) => {}
             Ok(Some(snap)) => {
+                self.migrate_progress(
+                    pid,
+                    format!("짐 {:.1}MB 저쪽에 재현 중…", snap.bundle.len() as f64 / 1048576.0),
+                );
                 let meta = kasa_mcp::remote::RepoSyncMeta {
                     head: snap.head,
                     sync: snap.sync,
@@ -868,6 +874,7 @@ impl App {
         // 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
         // 다투는 것이 최악이다(옛 9-pane 사고의 원형).
+        self.migrate_progress(pid, "학생 곱게 끄는 중…".to_string());
         unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
@@ -876,6 +883,15 @@ impl App {
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
+        self.migrate_progress(
+            pid,
+            format!(
+                "대화 옮기는 중{}…",
+                std::fs::metadata(&jsonl)
+                    .map(|m| format!(" — {:.1}MB", m.len() as f64 / 1048576.0))
+                    .unwrap_or_default()
+            ),
+        );
         kasa_mcp::remote::upload_transcript(base, &remote_cwd, &sid, &jsonl, None, force)?;
         // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
         // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
@@ -1028,6 +1044,7 @@ impl App {
         // 파일 싱크 — 그 기계에만 있는 것(미push 커밋·미커밋 변경)을 bundle 로
         // 떠 온다(순방향의 거울, 2026-08-29). 창구가 없는 옛 기계만 옛 관문
         // (「저쪽에서 커밋·push 하고 와라」)으로 물러선다.
+        self.migrate_progress(pid, "저쪽 짐(커밋·미저장 변경) 떠 오는 중…".to_string());
         let sync_pack = match kasa_mcp::remote::fetch_repo_sync(&info.base, &remote_cwd, None) {
             Ok(kasa_mcp::remote::RepoSyncFetch::Bundle(meta, bytes)) => Some((meta, bytes)),
             Ok(kasa_mcp::remote::RepoSyncFetch::Nothing) => None,
@@ -1110,6 +1127,10 @@ impl App {
         // 워킹트리 무접촉이라 다른 pane 의 작업을 안 건드리고, 잃는 것도 없다
         // (2026-08-30: 미쿠 역이사가 「저쪽 push → 이쪽 정리」를 손으로 밟던 자리).
         if let Some((meta, bytes)) = &sync_pack {
+            self.migrate_progress(
+                pid,
+                format!("짐 {:.1}MB 이 기계에 재현 중…", bytes.len() as f64 / 1048576.0),
+            );
             let applied = kasa_mcp::reposync::apply(
                 std::path::Path::new(&dest),
                 bytes,
@@ -1130,6 +1151,7 @@ impl App {
             .unwrap_or_default();
         // 원격 claude 곱게 끄기. 이미 꺼져 있으면(None) 권한 모드를 모르니 안전한
         // 쪽(물어보는 모드)으로 둔다.
+        self.migrate_progress(pid, "저쪽 학생 곱게 끄는 중…".to_string());
         let bypass = match kasa_mcp::remote::remote_agent_stop(&info.base, &info.remote_id, None) {
             Ok(stopped) => stopped.unwrap_or(false),
             Err(e) => {
@@ -1143,6 +1165,7 @@ impl App {
                 }
             }
         };
+        self.migrate_progress(pid, "대화 내려받는 중…".to_string());
         let bytes = kasa_mcp::remote::download_transcript(&info.base, &remote_cwd, &sid, None)?;
         let jsonl = kasa_socket::sessions::session_jsonl_path(std::path::Path::new(&dest), &sid)
             .ok_or_else(|| anyhow::anyhow!("HOME 을 몰라 대화 저장 위치를 못 정한다"))?;
@@ -1167,6 +1190,7 @@ impl App {
             .map_err(|e| anyhow::anyhow!("대화 저장 실패: {e}"))?;
         // 원격 셸을 진짜 끝낸다 — 안 걷으면 그 기계에 빈 학생 pane 이 좀비로 남는다.
         // 매니저가 이미 죽었어도(연결 유실) 실패가 아니다: 남은 셸은 닿을 때 걷는다.
+        self.migrate_progress(pid, "창 바꿔 끼우고 학생 깨우는 중…".to_string());
         let _ = kasa_mcp::remote::kill_remote(pid);
         // 같은 pane id 로 로컬 PTY 스왑(swap_character 골격).
         let (c, r) = sess.size();

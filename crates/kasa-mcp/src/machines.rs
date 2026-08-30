@@ -145,12 +145,29 @@ pub fn map_remote_to_local(m: &Machine, remote: &str) -> Option<String> {
     hits.into_iter().next()
 }
 
-/// 캐시: 라벨 → (마지막으로 닿은 시각, /term/panes 행들).
-type Cache = HashMap<String, (Instant, Vec<Value>)>;
+/// 캐시: 라벨 → (마지막으로 닿은 시각, /term/panes 행들, 싱크 창구 유무).
+/// 셋째 값이 false 면 그 기계의 프로그램이 낡아(repo-sync 창구 없음) 변경 실은
+/// 이사가 선다 — 이사 탭이 「프로그램 낡음」 경고를 그리는 근거다.
+type Cache = HashMap<String, (Instant, Vec<Value>, bool)>;
 
 fn cache() -> &'static Mutex<Cache> {
     static C: OnceLock<Mutex<Cache>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 그 기계 프로그램에 repo-sync 창구가 있나 — 낡은 판은 라우트 자체가 없어
+/// 404 를 돌려준다(새 판은 인자 오류라도 200 JSON). 판정 불능(타임아웃 등)은
+/// 낡음으로 몰지 않는다 — 경고는 확신할 때만.
+async fn probe_sync(client: &reqwest::Client, base: &str) -> bool {
+    match client
+        .get(format!("{base}/term/repo-sync"))
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) => r.status().as_u16() != 404 && r.status().as_u16() != 405,
+        Err(_) => true,
+    }
 }
 
 async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>> {
@@ -184,8 +201,9 @@ pub async fn poll_loop() {
         }
         for m in &list {
             if let Some(panes) = fetch_panes(&client, &m.base).await {
+                let sync = probe_sync(&client, &m.base).await;
                 if let Ok(mut c) = cache().lock() {
-                    c.insert(m.label.clone(), (Instant::now(), panes));
+                    c.insert(m.label.clone(), (Instant::now(), panes, sync));
                 }
             }
         }
@@ -200,15 +218,16 @@ pub fn snapshot() -> Vec<Value> {
         .into_iter()
         .map(|m| {
             let hit = c.as_ref().and_then(|c| c.get(&m.label));
-            let age = hit.map(|(at, _)| at.elapsed());
+            let age = hit.map(|(at, _, _)| at.elapsed());
             let online = age.is_some_and(|a| a < STALE_AFTER);
             serde_json::json!({
                 "label": m.label,
                 "base": m.base,
                 "online": online,
                 "ago_secs": age.map(|a| a.as_secs()),
+                "sync_capable": hit.map(|(_, _, s)| *s).unwrap_or(true),
                 "panes": if online {
-                    hit.map(|(_, p)| p.clone()).unwrap_or_default()
+                    hit.map(|(_, p, _)| p.clone()).unwrap_or_default()
                 } else {
                     Vec::new()
                 },

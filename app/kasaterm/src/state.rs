@@ -306,6 +306,8 @@ pub(crate) struct MachinesColMachine {
     pub(crate) label: String,
     pub(crate) online: bool,
     pub(crate) ago_secs: Option<u64>,
+    /// 그 기계 프로그램이 낡았나(repo-sync 창구 없음) — 변경 실은 이사가 선다.
+    pub(crate) outdated: bool,
     /// 화면공유 등 HTTP 밖 문에 쓰는 진짜 주소(명부 host). 빈값 = 버튼 안 그림.
     pub(crate) host: String,
     /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
