@@ -1060,19 +1060,88 @@ fn is_injected_user_text(s: &str) -> bool {
 /// 목록이 있어야 화면에 보이는 질문 줄과 대조해 그 **앞** 질문을 집을 수 있다.
 pub fn prompts_from_tail(tail: &str) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
-    for t in tail.lines().filter_map(parse_turn) {
-        if t.role == "user" {
-            let head = clip(t.text.lines().next().unwrap_or_default(), 160);
-            if !head.is_empty() {
-                out.push((head, Vec::new()));
+    for line in tail.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                let Some(content) = v.pointer("/message/content") else { continue };
+                if let Some(text) = content.as_str() {
+                    let text = text.trim();
+                    if text.is_empty() || is_injected_user_text(text) {
+                        continue;
+                    }
+                    let head = clip(text.lines().next().unwrap_or_default(), 160);
+                    if !head.is_empty() {
+                        out.push((head, Vec::new()));
+                    }
+                } else if let Some((_, body)) = out.last_mut() {
+                    // **도구 결과**. 이게 없으면 화면이 명령 출력으로 차 있을 때
+                    // 어느 턴인지 못 맞혀 늘 마지막 질문으로 떨어졌다 — 실제 작업
+                    // 화면은 대부분 이것이다(2026-08-30 실측: 답변 글줄만으로는
+                    // 세 줄 대조가 통째로 빗나간다).
+                    for b in content.as_array().into_iter().flatten() {
+                        if b.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                            push_screen_lines(body, b.get("content"));
+                        }
+                    }
+                }
             }
-        } else if let Some((_, body)) = out.last_mut() {
-            // 답변 본문은 **줄 단위**로 둔다 — 화면에 보이는 줄과 맞춰 「지금 어느
-            // 턴을 보고 있나」를 재는 데 쓴다.
-            body.extend(t.text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
+            Some("assistant") => {
+                let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                let Some((_, body)) = out.last_mut() else { continue };
+                for b in blocks {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        // 답변 본문은 **줄 단위**로 둔다 — 화면에 보이는 줄과 맞춰
+                        // 「지금 어느 턴을 보고 있나」를 재는 데 쓴다.
+                        Some("text") => push_screen_lines(body, b.get("text")),
+                        // 도구를 부른 인자(명령·쓴 파일 내용)도 화면에 그대로 뜬다.
+                        Some("tool_use") => push_screen_lines(body, b.get("input")),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
+}
+
+/// 한 턴이 화면에 남길 법한 글줄을 `body` 에 담는다. 값은 문자열일 수도, 블록
+/// 배열일 수도, 도구 인자 객체일 수도 있어 셋을 다 편다.
+///
+/// 턴당 상한을 두는 이유: 이 목록은 스크롤 중 매 프레임 세 줄씩 훑는 자리다.
+/// 파일 하나를 통째로 쓴 도구 인자가 수천 줄이면 그 한 턴이 목록을 삼킨다.
+fn push_screen_lines(body: &mut Vec<String>, v: Option<&serde_json::Value>) {
+    const PER_TURN_LINES: usize = 400;
+    let Some(v) = v else { return };
+    match v {
+        serde_json::Value::String(s) => {
+            for l in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                if body.len() >= PER_TURN_LINES {
+                    return;
+                }
+                body.push(l.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for it in items {
+                push_screen_lines(body, Some(it.get("text").unwrap_or(it)));
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for val in map.values() {
+                if val.is_string() {
+                    push_screen_lines(body, Some(val));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 활동 기록용 절단 — `clip` 과 달리 **줄바꿈을 살린다.**
@@ -1413,6 +1482,32 @@ mod tests {
         let bare = r#"{"type":"custom-title","customTitle":"슬래시로 붙인 이름"}"#;
         let b = snapshot_from_tail("%1", bare, false);
         assert!(b.title_manual, "nameSource 가 없어도 사람이 붙인 이름이다");
+    }
+
+    #[test]
+    fn 도구_출력_줄로도_어느_질문인지_가른다() {
+        // 실제 작업 화면은 대부분 명령 출력이다. 답변 글줄만 모으면 이 화면에서
+        // 어느 턴인지 못 맞혀 늘 마지막 질문이 붙었다.
+        let tail = concat!(
+            r#"{"type":"user","message":{"content":"첫 질문"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"cargo build -p kasaterm"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Compiling kasaterm\nFinished dev"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"둘째 질문"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"다 됐어"}]}}"#,
+            "\n",
+        );
+        let got = prompts_from_tail(tail);
+        assert_eq!(got.len(), 2, "질문 두 개");
+        assert_eq!(got[0].0, "첫 질문");
+        // 부른 명령과 그 결과가 첫 질문 밑에 함께 달려 있어야 한다.
+        assert!(got[0].1.contains(&"cargo build -p kasaterm".to_string()));
+        assert!(got[0].1.contains(&"Compiling kasaterm".to_string()));
+        assert!(got[0].1.contains(&"Finished dev".to_string()));
+        assert_eq!(got[1].1, vec!["다 됐어".to_string()]);
     }
 
     #[test]
