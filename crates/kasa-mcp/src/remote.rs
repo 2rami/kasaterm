@@ -480,13 +480,27 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
 /// 만든 자리가 **이름표는 유즈, 실제 말투는 남의 캐릭터**로 떴다(pane id 가 재사용된
 /// 자리였다). 그래서 claude 를 띄우기 **직전에** 한 번 더 박는다 — 학생 명령 셰임이
 /// 쓰는 것과 같은 창구고, respawn 없이 override 파일만 갱신한다.
-pub fn repersona(base: &str, pane: &str, character: &str, token: Option<&str>) -> Result<()> {
-    let u = format!(
+/// `sid` 는 이사 전용 — 학생의 **원 대화 세션 id** 를 주면 서버가 그 sid 에
+/// 캐릭터를 바인딩+수동 표식으로 못박아, resume 뒤의 복원·명단 검사가 이사 온
+/// 학생을 개명하지 못한다(2026-08-31 실측: 시로코가 왕복에서 케이로 돌아왔다).
+/// 낡은 서버는 파라미터를 몰라도 무시할 뿐 오류가 아니다.
+pub fn repersona(
+    base: &str,
+    pane: &str,
+    character: &str,
+    sid: Option<&str>,
+    token: Option<&str>,
+) -> Result<()> {
+    let mut u = format!(
         "{}/repersona?surface={}&character={}",
         base.trim_end_matches('/'),
         urlencode(pane).replace('%', "%25").replace("%2525", "%25"),
         urlencode(character)
     );
+    if let Some(s) = sid.filter(|s| !s.is_empty()) {
+        u.push_str("&sid=");
+        u.push_str(&urlencode(s));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -503,6 +517,52 @@ pub fn repersona(base: &str, pane: &str, character: &str, token: Option<&str>) -
         req.send().await.context("repersona 요청")?;
         Ok::<_, anyhow::Error>(())
     })
+}
+
+/// 출발지의 캐릭터 테마 선택(`character_theme` + 고른 명단 JSON)을 목적지에
+/// 재현한다(`POST /term/character-theme`). 이사 때 안 실으면 도착지 기계의 제
+/// 테마·명단으로 배정·복원이 돌아 학생이 다른 얼굴로 뜬다(2026-08-31 지적
+/// 「이사시켜봤는데 테마 적용이 안 되네」). 실패는 Err 로 알리되 호출부는 경고만
+/// 하고 이사를 계속한다 — 색·명단 문제일 뿐 대화는 무사하다.
+pub fn push_character_theme(
+    base: &str,
+    theme_id: &str,
+    picks_json: &str,
+    token: Option<&str>,
+) -> Result<()> {
+    let u = format!(
+        "{}/term/character-theme?theme={}",
+        base.trim_end_matches('/'),
+        urlencode(theme_id)
+    );
+    let body = picks_json.as_bytes().to_vec();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("theme runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).body(body);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("테마 동행 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(())
 }
 
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을

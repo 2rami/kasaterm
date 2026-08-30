@@ -4720,6 +4720,10 @@ struct App {
     /// 지글 원복 큐 — NudgePaneResize 가 1행 줄인 pane 을 (원 cols, 원 rows)로 되돌릴
     /// 시각. pending_restores 와 같은 drain 사이클에서 시간 도달분만 발사.
     pending_unjiggle: Vec<(String, u16, u16, std::time::Instant)>,
+    /// 이사 예약 — 턴 중인 학생의 이사를 여기 앉혀 두면, 턴이 끝난 것을 틱
+    /// (`run_pending_migrations`)이 보고 실행한다. 턴 중 SIGTERM 이 하던 일을
+    /// 자르는 것을 막는 관문(2026-08-31 「이사하고 작업이 끊겨」).
+    migrate_queue: Vec<crate::session::PendingMigration>,
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
@@ -5724,6 +5728,7 @@ impl App {
             pty_layout: None,
             pending_restores: Vec::new(),
             pending_unjiggle: Vec::new(),
+            migrate_queue: Vec::new(),
             autoquit_at: None,
             pending_capture: Vec::new(),
             pending_capture_reply: Vec::new(),
@@ -8529,6 +8534,33 @@ mod tests {
         let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
         assert!(got.synthetic, "인용 줄을 그 자리에서 하이라이트하면 안 된다");
         assert_eq!(got.text, "첫 질문");
+    }
+
+    /// 질문 넷이 **같은 말로 시작할 때** 머리글자만으로 가리면 전부 첫 질문이 된다.
+    /// 실측에서 띠가 어느 자리에서든 1번 질문을 물었던 자리다(2026-08-31).
+    #[test]
+    fn sticky_band_does_not_confuse_same_prefixed_questions() {
+        const W: usize = 100;
+        let rows: Vec<Vec<GridCell>> = [
+            "  붉은 사막에 모래바람이 길게 분다.",
+            "  붉은 사막에 모래바람이 길게 분다.",
+            "❯ 아무 도구도 쓰지 말고 「푸른 숲에 새벽 종소리가 울린다」 를 40줄 적어라.",
+            "  푸른 숲에 새벽 종소리가 울린다.",
+            "Jump to bottom (click) ↓",
+        ]
+        .iter()
+        .map(|l| grid_row(l, W))
+        .collect();
+        let q = |tail: &str| format!("아무 도구도 쓰지 말고 「{tail}」 를 40줄 적어라.");
+        let prompts = vec![
+            (q("고요한 호수 위로 물안개가 피어오른다"), vec!["고요한 호수 위로 물안개가 피어오른다.".to_string()]),
+            (q("붉은 사막에 모래바람이 길게 분다"), vec!["붉은 사막에 모래바람이 길게 분다.".to_string()]),
+            (q("푸른 숲에 새벽 종소리가 울린다"), vec!["푸른 숲에 새벽 종소리가 울린다.".to_string()]),
+        ];
+        let mut memo = None;
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        // 화면 맨 위는 「붉은 사막」 턴의 꼬리다. 머리글자로 가리면 여기서 첫 질문이 나왔다.
+        assert_eq!(got.text, q("붉은 사막에 모래바람이 길게 분다"));
     }
 
     fn test_posix_shell() -> Option<std::path::PathBuf> {

@@ -6432,6 +6432,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
+        // 이사 예약 — 턴 중이라 미뤄 둔 이사를, 스피너가 꺼진 것을 보고 실행한다.
+        // 큐가 비어 있으면 즉시 나가므로 매 턴 불러도 공짜다.
+        self.run_pending_migrations();
         self.note_claude_panes();
         self.apply_autowait();
         self.apply_autounread();

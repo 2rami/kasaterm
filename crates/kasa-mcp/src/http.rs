@@ -1858,11 +1858,56 @@ async fn repersona_handler(
         serde_json::json!({ "ok": false, "error": "surface and character required" })
     } else {
         match backend.repersona(surface, character) {
-            Ok(()) => serde_json::json!({ "ok": true }),
+            Ok(()) => {
+                // 이사가 학생의 **원 세션 id** 를 함께 실어 오면 그 sid 에 캐릭터를
+                // 못박는다(바인딩 + 수동 표식). repersona 자체는 pane 이 지금 물고
+                // 있는 sid 만 묶는데, 이사 시점의 원격 pane 은 갓 태어나 원 대화의
+                // sid 를 아직 모른다 — resume 이 붙은 **뒤**의 복원·명단 검사가
+                // 이사 온 학생을 개명하는 구멍이 그래서 남았다(2026-08-31 실측:
+                // 시로코가 이사 왕복에서 케이로 돌아왔고 수동 표식이 없어 자동
+                // 개명으로 판정). 낡은 서버는 이 파라미터를 몰라도 그냥 무시한다.
+                if let Some(sid) = params.get("sid").filter(|s| !s.is_empty()) {
+                    let _ = crate::character::bind_session_character(sid, character);
+                    crate::character::mark_manual_pick(sid);
+                }
+                serde_json::json!({ "ok": true })
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /term/character-theme?theme=<id>` (body = `character_picks` JSON) —
+/// 이사(migrate)가 출발지의 캐릭터 테마 선택을 이 기계에 재현하는 창구.
+/// 값만 설정 파일에 밖에서 적으면 도는 앱의 캐시(활성 테마·로스터)가 낡은 채
+/// 남으므로, 앱 프로세스 안(backend)에서 설정 화면과 같은 경로를 태운다.
+/// 테마 팩 폴더 자체는 나르지 않는다 — 없으면 오류로 알려 호출부가 경고만 하고
+/// 이사는 계속한다(팩은 큰 그림 뭉치라 기계 간 동기화는 별도 절차).
+async fn term_character_theme_post(
+    backend: Arc<dyn Backend>,
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let theme = q.get("theme").map(|s| s.as_str()).unwrap_or("");
+    // 빈 테마 id = 번들 — 팩 검사 없이 통과. 지정 테마는 팩이 실재해야 적용된다
+    // (없는 테마 id 를 설정에 앉히면 로스터가 통째로 비어 배정이 멈춘다).
+    if !theme.is_empty() {
+        let has_pack = crate::character::themes_root()
+            .map(|r| r.join(theme).join("theme.json").is_file())
+            .unwrap_or(false);
+        if !has_pack {
+            return err(format!(
+                "테마 팩 '{theme}' 이 이 기계에 없다 — ~/.config/kasaterm/themes/ 에 폴더째 복사해 와야 한다"
+            ));
+        }
+    }
+    let picks = String::from_utf8_lossy(&body);
+    match backend.apply_character_theme(theme, picks.as_ref()) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "theme": theme })),
+        Err(e) => err(format!("{e:#}")),
+    }
 }
 
 /// `GET /teamname?cwd=<abs>` — 그 cwd 방의 팀명(플레인 텍스트, sh 파싱 프리). claude shim
@@ -5233,6 +5278,7 @@ pub fn spawn_http_server_opts(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
+                let character_theme_backend = backend.clone();
                 let dispatch_backend = backend.clone();
                 let task_add_backend = backend.clone();
                 let broadcast_backend = backend.clone();
@@ -5409,6 +5455,13 @@ pub fn spawn_http_server_opts(
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
+                    .route(
+                        "/term/character-theme",
+                        post(move |q: Query<std::collections::HashMap<String, String>>,
+                                   body: axum::body::Bytes| {
+                            term_character_theme_post(character_theme_backend.clone(), q, body)
+                        }),
+                    )
                     .route(
                         "/term/tunnel",
                         get(term_tunnel_get).post(term_tunnel_post),

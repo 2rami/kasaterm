@@ -1841,8 +1841,6 @@ mod tests {
         assert_eq!(assignable_names_with(&chars, &[]), member_names(&chars));
     }
 
-    /// 테마를 가로질러 모인다 — 이게 이 기능의 핵심이다.
-    #[test]
     /// 2026-08-25: 고른 명단을 바꿔도 **이미 배정된 학생이 재시작을 넘어 남았다.**
     /// 복원이 저장된 이름을 무조건 되살렸기 때문 — 이 판정이 그 자리를 막는다.
     #[test]
@@ -1859,6 +1857,9 @@ mod tests {
         assert!(is_assignable_with("아무나", &[]));
     }
 
+    /// 테마를 가로질러 모인다 — 이게 이 기능의 핵심이다. (attribute 가 위 테스트로
+    /// 밀려 이 테스트가 조용히 꺼져 있었다 — 2026-08-31 경고를 따라가 복구.)
+    #[test]
     fn picks_are_gathered_across_themes() {
         let base = roster(&["아로나", "시로코"]);
         let genshin = roster(&["푸리나", "나히다"]);

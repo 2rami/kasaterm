@@ -1,6 +1,19 @@
 //! 세션·윈도우·cwd/label·daemon·pty·tmux/socket·스크린 펌프·상태 저장.
 use super::*;
 
+/// 이사 예약 한 건 — 학생이 턴 중일 때 이사를 걸면 여기 앉는다(migrate_pane 의
+/// working 관문). `base == "local"` 은 역이사(데려오기)다. `idle_since` 는 스피너가
+/// 꺼진 첫 관측 시각 — 짧은 틈을 턴 끝으로 오판하지 않게 몇 초 이어져야 발사한다
+/// (run_pending_migrations).
+pub(crate) struct PendingMigration {
+    pub(crate) pane: String,
+    pub(crate) base: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) force: bool,
+    pub(crate) run: Option<String>,
+    pub(crate) idle_since: Option<std::time::Instant>,
+}
+
 impl App {
     /// Drain a PtySession's screen-update channel into shared workspace
     /// state. Used both by `start_pty` (initial pane) and by
@@ -770,6 +783,31 @@ impl App {
             }
         }
         let fresh = agent.is_none();
+        // 턴 중 이사는 하던 일을 자른다 — SIGTERM 이 진행 중 턴을 버리고, 옮겨간
+        // 학생은 하다 만 채로 앉는다(2026-08-31 지적 「이사하고 작업이 끊겨」).
+        // 일하는 학생은 죽이지 않고 예약한다: 턴이 끝나면(스피너가 꺼지고 잠시
+        // 이어지면) 틱(run_pending_migrations)이 이 함수를 다시 부른다. force 는
+        // 「끊겨도 지금 당장」으로 통과. 학생이 스스로 신청하는 셀프 이사는 그 CLI
+        // 호출 자체가 턴 중이라 언제나 이 길로 온다 — 즉답 받고 제 턴을 마치면 간다.
+        if !fresh && !force {
+            let working = {
+                let ws = self.ws.lock().unwrap();
+                Self::pane_agent_working(&ws, pid)
+            };
+            if working {
+                self.migrate_queue.retain(|q| q.pane != pid);
+                self.migrate_queue.push(PendingMigration {
+                    pane: pid.to_string(),
+                    base: base.to_string(),
+                    cwd: remote_cwd.map(str::to_string),
+                    force,
+                    run: run.map(str::to_string),
+                    idle_since: None,
+                });
+                self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 이사간다"));
+                return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 이사간다"));
+            }
+        }
         let sid = if fresh {
             None
         } else {
@@ -929,13 +967,40 @@ impl App {
             .get(pid)
             .cloned()
             .filter(|c| !c.is_empty());
+        // 출발 전에 이 학생의 정체를 **이 기계에도** 못박는다(바인딩+수동 표식) —
+        // 돌아왔을 때의 복원·명단 검사가 개명하지 못하게. 도착지 쪽은 아래
+        // repersona 가 sid 를 실어 같은 못박기를 한다(2026-08-31 시로코→케이 실측).
+        if let (Some(s), Some(ch)) = (&sid, &character) {
+            let _ = kasa_mcp::character::bind_session_character(s, ch);
+            kasa_mcp::character::mark_manual_pick(s);
+        }
+        // 캐릭터 테마·명단도 함께 싼다 — 도착지 기계가 제 테마·명단으로 배정·복원
+        // 하면 이사 온 학생이 다른 얼굴로 뜬다(2026-08-31 지적 「이사시켜봤는데
+        // 테마 적용이 안 되네」). 실패해도 이사는 계속 — 색·명단 문제일 뿐 대화는
+        // 무사하고, 낡은 서버(창구 없음)면 404 가 이 경고로 보인다.
+        {
+            let theme_id = socket::read_character_theme();
+            let picks = socket::read_settings()
+                .get("character_picks")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let picks_json = if picks.is_object() { picks.to_string() } else { String::new() };
+            if let Err(e) = kasa_mcp::remote::push_character_theme(base, &theme_id, &picks_json, None)
+            {
+                eprintln!("[migrate] 테마 동행 실패(계속 진행): {e:#}");
+                self.set_toast(format!("테마 동행 실패(이사는 계속): {e:#}"));
+            }
+        }
         let remote_pane = character.as_deref().and_then(|c| {
             match kasa_mcp::remote::spawn_student_pane(base, c, None) {
                 Ok(id) => {
                     // 소환만으로는 못 미덥다 — 이름표만 그 학생이고 말투는 남의 것으로
                     // 뜬 실측이 있다(2026-08-27, pane id 재사용 자리). claude 를 띄우기
-                    // 직전에 한 번 더 박는다.
-                    if let Err(e) = kasa_mcp::remote::repersona(base, &id, c, None) {
+                    // 직전에 한 번 더 박는다 — sid 까지 실어 도착지 복원·명단 검사도
+                    // 이 학생을 개명하지 못하게 한다.
+                    if let Err(e) =
+                        kasa_mcp::remote::repersona(base, &id, c, sid.as_deref(), None)
+                    {
                         eprintln!("[migrate] 캐릭터 못박기 실패(계속 진행): {e:#}");
                     }
                     Some(id)
@@ -946,6 +1011,11 @@ impl App {
                 }
             }
         });
+        // 맨 셸 폴백은 캐릭터가 통째로 새 배정으로 굴러간다 — 조용히 지나가면
+        // 「이사했더니 딴 학생이 됐다」로만 보이므로 크게 말한다.
+        if character.is_some() && remote_pane.is_none() {
+            self.set_toast("저쪽에 학생 pane 을 못 만들어 맨 셸로 간다 — 캐릭터가 새로 배정될 수 있다".to_string());
+        }
         // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
         let (c, r) = sess.size();
         let remote = kasa_mcp::remote::connect(
@@ -1050,6 +1120,27 @@ impl App {
         let Some(remote_cwd) = info.remote_cwd.clone() else {
             anyhow::bail!("{pid} 의 원격 작업 폴더를 모른다 — 옛 저장본이다. 한 번 재시작해 다시 저장되면 생긴다");
         };
+        // 순방향과 같은 관문 — 원격 학생이 턴 중이면 agent-stop 이 그 턴을 자른다.
+        // 미러 그리드가 원격 화면 그대로라 같은 스피너 판정이 통한다.
+        if !force {
+            let working = {
+                let ws = self.ws.lock().unwrap();
+                Self::pane_agent_working(&ws, pid)
+            };
+            if working {
+                self.migrate_queue.retain(|q| q.pane != pid);
+                self.migrate_queue.push(PendingMigration {
+                    pane: pid.to_string(),
+                    base: "local".into(),
+                    cwd: local_cwd.map(str::to_string),
+                    force,
+                    run: None,
+                    idle_since: None,
+                });
+                self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 데려온다"));
+                return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 데려온다"));
+            }
+        }
         let machine = kasa_mcp::machines::machines()
             .into_iter()
             .find(|m| m.base == info.base.trim_end_matches('/'));
@@ -1225,6 +1316,14 @@ impl App {
         if let Some(ref rm) = room {
             env.push(("KASATERM_ROOM".to_string(), rm.clone()));
         }
+        // 데려온 학생은 **같은 캐릭터로** 앉힌다 — pending 없이 배정을 돌리면
+        // 랜덤 풀에서 새 학생이 뽑혀, 몸(대화)은 그대로인데 이름·얼굴이 바뀐다
+        // (2026-08-31 실측: 시로코가 이사 왕복 뒤 케이로 둔갑 — 이 줄이 주사위였다).
+        // pending 은 명시 지정이라 중복이어도 존중된다(assign_character_env 규칙).
+        let prior_character = self.ws.lock().unwrap().pane_character.get(pid).cloned();
+        if let Some(ref ch) = prior_character {
+            self.pending_character = Some(ch.clone());
+        }
         env.extend(self.assign_character_env(pid, Some(&dest), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
@@ -1264,6 +1363,11 @@ impl App {
             cmd,
             std::time::Instant::now() + std::time::Duration::from_millis(900),
         ));
+        // 정체를 못박는다 — sid 바인딩 + 수동 표식 + 다음 부팅용 persona override.
+        // 이게 없으면 명단·테마를 바꾼 다음 복원이 데려온 학생을 또 개명한다.
+        if let Some(ref ch) = prior_character {
+            self.repersona_pane(pid, ch);
+        }
         let (wc, wr) = self.window_cells();
         self.resize_backend(wc, wr);
         self.publish_pty_layout();
@@ -4390,6 +4494,89 @@ impl App {
                 .trim_start()
                 .starts_with("⏵⏵ bypass permissions on")
         })
+    }
+
+    /// 이 pane 의 에이전트가 지금 턴 중인가 — 헤더 working 바와 **같은** 화면
+    /// 스피너 판정(input.rs `rows_show_working`)이다. 원격 미러 pane 도 원격
+    /// 화면을 같은 그리드로 그리므로 그대로 통한다.
+    pub(crate) fn pane_agent_working(ws: &Workspace, pane_id: &str) -> bool {
+        ws.panes
+            .get(pane_id)
+            .and_then(|p| p.term())
+            .map(|t| crate::input::rows_show_working(&t.cells))
+            .unwrap_or(false)
+    }
+
+    /// 이사 예약 실행기 — 틱마다 불려, 예약된 pane 의 턴이 끝났는지(스피너 꺼짐이
+    /// 잠시 이어졌는지) 보고 끝났으면 이사를 실행한다. 한 틱에 하나만 발사한다 —
+    /// migrate_pane 은 GUI 스레드에서 몇 초를 먹으므로 몰아서 하면 화면이 굳는다.
+    pub(crate) fn run_pending_migrations(&mut self) {
+        #[cfg(unix)]
+        {
+            if self.migrate_queue.is_empty() {
+                return;
+            }
+            // 닫힌 pane 의 예약부터 걷는다 — index 판정보다 먼저.
+            {
+                let pty = &self.pty;
+                self.migrate_queue.retain(|q| pty.contains_key(&q.pane));
+            }
+            let now = std::time::Instant::now();
+            let mut fire: Option<PendingMigration> = None;
+            {
+                let ws = self.ws.lock().unwrap();
+                let mut i = 0;
+                while i < self.migrate_queue.len() {
+                    let working = Self::pane_agent_working(&ws, &self.migrate_queue[i].pane);
+                    let q = &mut self.migrate_queue[i];
+                    if working {
+                        q.idle_since = None;
+                        i += 1;
+                        continue;
+                    }
+                    // 도구 호출 사이의 짧은 틈을 턴 끝으로 오판하지 않게 몇 초
+                    // 이어진 조용함만 발사한다(스피너는 도구 사이에도 떠 있지만
+                    // 프레임 경계의 빈 순간이 있을 수 있다 — 값싼 보험).
+                    let since = *q.idle_since.get_or_insert(now);
+                    if fire.is_none() && now.duration_since(since) >= std::time::Duration::from_secs(3)
+                    {
+                        fire = Some(self.migrate_queue.remove(i));
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+            let Some(q) = fire else { return };
+            // 학생이 그새 스스로 꺼졌으면 순방향 예약은 취소한다 — 그대로 돌리면
+            // 태생 스폰(fresh)으로 새서 빈 claude 가 저쪽에 태어난다. 역이사(local)는
+            // 에이전트가 원격에 있어 이 판정이 성립하지 않으니 그냥 간다.
+            if q.base != "local" && q.run.is_none() {
+                let alive = self
+                    .pty
+                    .get(&q.pane)
+                    .and_then(|s| s.shell_pid())
+                    .and_then(|sh| {
+                        kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), sh)
+                    })
+                    .is_some();
+                if !alive {
+                    self.set_toast(format!("{} 의 학생이 꺼져 있어 예약 이사를 취소했다", q.pane));
+                    return;
+                }
+            }
+            let res = if q.base == "local" {
+                self.migrate_pane_back(&q.pane, q.cwd.as_deref(), q.force)
+            } else {
+                self.migrate_pane(&q.pane, &q.base, q.cwd.as_deref(), q.force, q.run.as_deref())
+            };
+            match res {
+                Ok(id) => self.set_toast(format!("예약 이사 완료: {} → {id}", q.pane)),
+                Err(e) => {
+                    eprintln!("[migrate] 예약 이사 실패({}): {e:#}", q.pane);
+                    self.set_toast(format!("예약 이사 실패({}): {e:#}", q.pane));
+                }
+            }
+        }
     }
 
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,
