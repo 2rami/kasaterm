@@ -1870,7 +1870,14 @@ pub(crate) fn sticky_row_span(row: &[GridCell]) -> (String, usize, usize, usize,
     (text.trim_end().to_string(), first, last, glyphs, dim)
 }
 
-/// Claude Code 의 스크롤 sticky prompt 감지. mouse-tracking TUI 라 kasaterm 은
+/// Claude Code 의 스크롤 sticky prompt 감지 — **이제는 폴백이다.**
+///
+/// kasaterm 이 띄우는 pane 의 claude 는 기본 렌더러로 돌아(대체화면을 안 쓴다,
+/// `kasa-pty` 의 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) 스크롤을 터미널이 쥔다 —
+/// 그 세계의 띠는 `turnjump.rs` 가 절대 줄 번호로 정확히 그린다. 여기 남은 길은
+/// 우리가 안 띄운 claude(예: pane 에서 ssh 로 들어간 다른 기계)처럼 여전히
+/// 대체화면을 쓰는 세션을 위한 것이다.
+/// mouse-tracking TUI 라 kasaterm 은
 /// 뷰포트 스크롤 여부를 직접 못 안다 — 화면에 "Jump to bottom" 힌트(=위로
 /// 스크롤된 상태)가 있을 때만, 최상단의 흐릿한 프롬프트 행을 sticky 로 본다.
 /// 이 게이트가 평상시(맨 아래) 오탐을 막는다. `KASATERM_STICKY_DEBUG=1` 이면

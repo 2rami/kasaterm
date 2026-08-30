@@ -415,6 +415,26 @@ impl PtySession {
             env!("CARGO_PKG_VERSION"),
         );
         cmd.env("COLORTERM", "truecolor");
+        // claude 를 **기본(classic) 렌더러**로 돌린다 — 대체화면을 안 쓰므로 대화가
+        // 이 터미널의 스크롤백에 그대로 쌓인다.
+        //
+        // 왜 이렇게까지 하나: claude 의 전체화면(no-flicker) 렌더러에서는 스크롤이
+        // claude 안에서만 일어나 터미널이 위치를 못 안다. 그 세계의 「맨 위 질문 고정」
+        // 띠는 claude 가 직접 그리는데, 2.1.251 에서 그 띠가 **아예 안 뜬다** — 스크롤
+        // 위치를 읽는 세 값이 뷰포트 핸들 하나에만 묶여 메모되어 첫 프레임의 0 에서
+        // 굳는다(2026-08-30 실행 파일 확인, 실측으로도 어느 스크롤에서도 안 떴다).
+        // 화면 글자만 보고 kasaterm 이 대신 그려 봤지만 코드·도구 출력이 올라오면
+        // 어느 질문인지 맞힐 수가 없다. 스크롤을 터미널이 쥐면 절대 줄 번호가 있어
+        // 그 짐작이 통째로 사라진다(`turnjump.rs`).
+        //
+        // 이 env 는 claude 가 「언제든 classic 을 강제」로 문서화한 값이라
+        // `settings.json` 의 `CLAUDE_CODE_NO_FLICKER` 보다 확실하다 — 그쪽은 사용자
+        // 설정이 덮어쓸 수 있고, 이 값은 그 설정에 없으니 살아남는다.
+        //
+        // 이미 손으로 정해 둔 값이 있으면 그대로 둔다 — 되돌릴 구멍을 남긴다.
+        if std::env::var_os("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").is_none() {
+            cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
+        }
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",
