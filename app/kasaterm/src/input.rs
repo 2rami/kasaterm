@@ -381,6 +381,27 @@ impl App {
         self.statusbar.tunnel_checked = Some(now);
         self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
         self.statusbar.tunnel_host = kasa_mcp::tunnel::host();
+        // 미니→맥북 크롬 다리 — 미니 상주 학생이 지금 어느 크롬을 쓰게 되는지.
+        // 폴백은 실패 기반이라 사람이 상태를 볼 창이 따로 필요하다(2026-08-30
+        // 지시 「하단에 맥북 열림 닫힘을 표시해둬서 나도 볼 수 있게」). 다리의
+        // 실체 = 이 맥북의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
+        // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
+        // 없다(칩도 안 그린다).
+        self.statusbar.chrome_bridge = if kasa_mcp::machines::machines().is_empty() {
+            None
+        } else {
+            let bridge = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], 8777)),
+                std::time::Duration::from_millis(250),
+            )
+            .is_ok();
+            let tunnel = crate::proc::command("pgrep")
+                .args(["-f", "18800:127.0.0.1:8777"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            Some(bridge && tunnel)
+        };
         // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
         // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
         self.statusbar.port = Some(crate::mcp_panel_port());
@@ -1709,7 +1730,7 @@ impl App {
         if self.file_tree.visible
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.file_tree_col_x()
-            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree.w_logical
+            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree_col_w()
         {
             let (_, start_y, _, visible_h) = self.file_tree.body_rect;
             // 첫 paint 전이면 body_rect 가 (0,0,0,0) — 스크롤 대신 redraw 로 geometry 를

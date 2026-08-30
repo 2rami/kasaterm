@@ -3826,6 +3826,41 @@ impl App {
                 } else {
                     pad + gl + 7.0 + tw + bw + mw + pad
                 };
+                // 경로는 파일트리 칼럼 오른쪽에 붙은 표시라, 그 칼럼이 좁아지면 함께
+                // 줄어야 한다. 안 줄이면 640px 창에서 132px 칼럼 옆의 경로가 250px
+                // 자리까지 뻗어, 가운데 서야 할 이름 칩을 오른쪽으로 밀어냈다.
+                // 가장 좁을 때 아예 접는 것은 같은 경로가 파일트리 루트와 하단 칩에도
+                // 있어서다 — 자리가 없으면 중복부터 버린다.
+                let cwd_str = {
+                    let text_x0 = px0 + 12.0 + isz + 6.0;
+                    let cap = if tree_col_w <= 0.0 {
+                        f32::MAX
+                    } else if Density::of(tree_col_w, FILE_TREE_DENSE_FULL, FILE_TREE_DENSE_COMPACT)
+                        .is_icon()
+                    {
+                        0.0
+                    } else {
+                        (tree_col_x + tree_col_w - 8.0 - text_x0).max(0.0)
+                    };
+                    if cwd_str.is_empty() || g.measure_chrome_text(&cwd_str, chrome_font, false) <= cap {
+                        cwd_str
+                    } else {
+                        // 뒤에서부터 담는다 — 지금 있는 폴더가 알아야 할 쪽이다.
+                        let mut keep = String::new();
+                        for ch in cwd_str.chars().rev() {
+                            let trial = format!("…{ch}{keep}");
+                            if g.measure_chrome_text(&trial, chrome_font, false) > cap {
+                                break;
+                            }
+                            keep.insert(0, ch);
+                        }
+                        if keep.is_empty() {
+                            String::new()
+                        } else {
+                            format!("…{keep}")
+                        }
+                    }
+                };
                 let cwd_w = if cwd_str.is_empty() {
                     0.0
                 } else {
@@ -4139,7 +4174,19 @@ impl App {
                     // 점이 없어도 이 칸은 비워 둔다. 점이 뜬 카드만 이름이 밀리면
                     // 목록의 왼쪽 정렬이 흔들리고, 방 목록은 훑는 화면이라 그 흔들림이
                     // 곧 읽는 속도다.
-                    let dot_x = *tx + 12.0;
+                    // 카드가 아니라 **스트립** 폭으로 판정한다(카드는 좌우 inset 만큼
+                    // 좁다) — 문턱은 칼럼 폭 기준으로 잡혀 있다.
+                    let sb_dens = Density::of(
+                        *tw + SIDEBAR_TAB_INSET * 2.0,
+                        SIDEBAR_DENSE_FULL,
+                        SIDEBAR_DENSE_COMPACT,
+                    );
+                    // 가장 좁을 때는 그 여백을 이름에 넘긴다. 점이 뜨는 것은 예외
+                    // 상황인데 그 자리를 늘 비워 두느라 「Desktop」이 「Desk…」가
+                    // 됐다 — 정렬이 흔들리는 것보다 이름을 못 읽는 쪽이 크다.
+                    let gutter = if sb_dens.is_icon() { 6.0 } else { 12.0 };
+                    let dot_gap = if sb_dens.is_icon() { 3.0 } else { 5.0 };
+                    let dot_x = *tx + gutter;
                     let dot_y = *ty + 13.0;
                     let dsz = 9.0_f32;
                     // 상태 동그라미 **하나**. 예전엔 칩의 두 모서리에 점이 따로
@@ -4171,7 +4218,7 @@ impl App {
                         blink_dot(g, dot_x, dot_y, dsz, c, period);
                     }
                     // 두 줄짜리 라벨 — 상태 점 칸 오른쪽.
-                    let text_x = dot_x + dsz + 5.0;
+                    let text_x = dot_x + dsz + dot_gap;
                     let name_fg: [u8; 4] = if is_active {
                         theme::text()
                     } else {
@@ -4209,16 +4256,25 @@ impl App {
                     // 밖에 나가 있는 방은 그 자리를 되돌리기 버튼이 쓴다 — 그 키는
                     // 방을 메인에 다시 그리는 게 아니라 별도 창을 앞으로 가져오므로
                     // (switch_window 라우팅), 키 힌트를 남기면 거짓말이 된다.
-                    let kbd =
-                        (!show_close && !undocked && *i < 9).then(|| format!("\u{2318}{}", *i + 1));
+                    // 아주 좁을 때는 번호를 접는다. 남는 폭이 40px 남짓인데 배지가
+                    // 그 절반을 가져가면 방 이름이 한 글자도 안 남아, 「어느 방인가」를
+                    // 못 읽는다 — 단축키는 못 봐도 눌러지지만 이름은 안 보이면 끝이다.
+                    let kbd = (!show_close && !undocked && *i < 9 && sb_dens.at_least_compact())
+                        .then(|| format!("\u{2318}{}", *i + 1));
                     let kfs = 11.0_f32;
                     let kbd_w = kbd.as_deref().map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
                     const UNDOCK_ICON: f32 = 13.0;
                     let right_slot = if undocked { UNDOCK_ICON } else { kbd_w };
-                    let name_budget = (tab_right
-                        - if show_close { 23.0 } else { 8.0 + right_slot + 6.0 }
-                        - text_x)
-                        .max(0.0);
+                    // 배지를 접었으면 그 자리도 함께 돌려준다 — 안 돌려주면 접어서
+                    // 번 폭이 오른쪽 여백에 그대로 남아, 정작 이름은 그대로 잘린다.
+                    let right_pad = if show_close {
+                        23.0
+                    } else if right_slot > 0.0 {
+                        8.0 + right_slot + 6.0
+                    } else {
+                        6.0
+                    };
+                    let name_budget = (tab_right - right_pad - text_x).max(0.0);
                     // 아랫줄 오른쪽은 이제 펼치기 배지 몫이다. 여기 있던 pane 별
                     // 상태 점은 뺐다 — 방 목록은 "어느 방으로 갈까"를 고르는 자리고,
                     // pane 하나하나의 상태는 방을 펴면 그 줄이 이미 말한다. 둘 다
@@ -4280,7 +4336,10 @@ impl App {
                         );
                         dock_back_hits.push((*i, hit));
                     }
-                    if !cwd.is_empty() {
+                    // 경로는 방을 가르는 좋은 단서지만, 「…」 몇 글자로 잘리면
+                    // 가르지도 못하면서 이름과 자리만 다툰다. 그 폭에서는 아예 접고
+                    // 이름을 카드 가운데로 놓는다.
+                    if !cwd.is_empty() && sb_dens.at_least_compact() {
                         let cwd_txt = clip_px(g, &cwd, 11.0, false, cwd_budget);
                         g.draw_text(
                             text_x,
@@ -5066,14 +5125,21 @@ impl App {
                 let row_x = tree_col_x + inset;
                 let row_w = (tree_col_w - inset * 2.0).max(0.0);
                 // Search box pinned to the column top; the tree starts below it.
+                let tree_dens =
+                    Density::of(tree_col_w, FILE_TREE_DENSE_FULL, FILE_TREE_DENSE_COMPACT);
                 let search_box_h = 28.0_f32;
                 let sbx_y = TITLE_HEIGHT + 8.0;
                 // Reserve room on the right for the new-folder / new-file
                 // buttons; the search box takes what's left.
                 let btn_sz = 24.0_f32;
                 let btn_gap = 4.0_f32;
-                let buttons_w = btn_sz * 2.0 + btn_gap;
-                let search_w = (row_w - buttons_w - 6.0).max(40.0);
+                // 좁아지면 새 폴더·새 파일 버튼을 접고 그 자리를 검색에 준다. 셋이
+                // 자리를 나누던 때는 칼럼이 하한까지 밀리면 검색 상자가 58px 이 되어
+                // 「검색…」 글자조차 안 들어갔다 — 파일을 **찾는** 길이 막히는 것이,
+                // 만드는 버튼이 없는 것보다 크게 잃는다(만들기는 터미널에도 있다).
+                let show_new_btns = tree_dens.at_least_compact();
+                let buttons_w = if show_new_btns { btn_sz * 2.0 + btn_gap + 6.0 } else { 0.0 };
+                let search_w = (row_w - buttons_w).max(40.0);
                 {
                     let active = self.file_tree.search_active;
                     let fill = if active { theme::surface_active() } else { theme::surface() };
@@ -5110,16 +5176,23 @@ impl App {
                     let bty = sbx_y + (search_box_h - btn_sz) / 2.0;
                     let nf_x = row_x + search_w + 6.0;
                     let nfile_x = nf_x + btn_sz + btn_gap;
-                    for (bx, icon) in [(nf_x, "folder-plus"), (nfile_x, "file-plus")] {
-                        let hover = mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
-                        if hover {
-                            hover_rect(g, bx, bty, btn_sz, btn_sz, theme::radius_sm());
+                    if show_new_btns {
+                        for (bx, icon) in [(nf_x, "folder-plus"), (nfile_x, "file-plus")] {
+                            let hover = mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
+                            if hover {
+                                hover_rect(g, bx, bty, btn_sz, btn_sz, theme::radius_sm());
+                            }
+                            let ic = if hover { theme::text() } else { theme::text_dim() };
+                            g.queue_icon(icon, bx + (btn_sz - 15.0) / 2.0, bty + (btn_sz - 15.0) / 2.0, 15.0, ic);
                         }
-                        let ic = if hover { theme::text() } else { theme::text_dim() };
-                        g.queue_icon(icon, bx + (btn_sz - 15.0) / 2.0, bty + (btn_sz - 15.0) / 2.0, 15.0, ic);
+                        self.file_tree.new_folder_rect = (nf_x, bty, btn_sz, btn_sz);
+                        self.file_tree.new_file_rect = (nfile_x, bty, btn_sz, btn_sz);
+                    } else {
+                        // 안 그린 버튼은 히트렉트도 지운다 — 남겨 두면 검색 상자 위를
+                        // 눌렀을 때 보이지도 않는 버튼이 먼저 먹는다.
+                        self.file_tree.new_folder_rect = (0.0, 0.0, 0.0, 0.0);
+                        self.file_tree.new_file_rect = (0.0, 0.0, 0.0, 0.0);
                     }
-                    self.file_tree.new_folder_rect = (nf_x, bty, btn_sz, btn_sz);
-                    self.file_tree.new_file_rect = (nfile_x, bty, btn_sz, btn_sz);
                 }
                 // Inline "new file/folder" naming row, pinned above the tree.
                 let mut tree_top = sbx_y + search_box_h + 8.0;
@@ -5183,7 +5256,15 @@ impl App {
                 let body_visible_h = (sb_win_h - bottom_h - start_y).max(0.0);
                 self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
-                let step = 14.0_f32; // per-depth indent width
+                // 들여쓰기는 칼럼이 좁아질수록 줄인다. 고정 14px 이던 때는 깊은
+                // 가지에서 `depth × step` 이 이름 자리를 통째로 먹어, 좁은 폭에서는
+                // 파일 이름이 「…」 하나로 남았다 — 계층은 화살표와 아이콘으로도
+                // 읽히니, 폭이 모자랄 때 가장 싸게 내줄 수 있는 것이 여기다.
+                let step = match tree_dens {
+                    Density::Full => 14.0_f32,
+                    Density::Compact => 10.0,
+                    Density::Icon => 7.0,
+                };
                 let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
                 // `file_tree_nodes` already holds the right set: a query swaps it
                 // for whole-tree search hits (file_tree_search_collect), empty
@@ -5299,9 +5380,14 @@ impl App {
                     }
                     // Indent guides — one faint rule per ancestor level so deep
                     // nesting stays legible.
-                    for d in 0..node.depth {
-                        let gx = row_x + 6.0 + d as f32 * step;
-                        g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::border(), 0x55));
+                    // 아주 좁을 때는 안내선을 접는다 — 폭이 132px 밑이면 세로줄
+                    // 여러 개가 이름보다 먼저 눈에 들어와, 계층을 돕는 것이 아니라
+                    // 목록을 읽기 어렵게 만든다.
+                    if tree_dens.at_least_compact() {
+                        for d in 0..node.depth {
+                            let gx = row_x + 6.0 + d as f32 * step;
+                            g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::border(), 0x55));
+                        }
                     }
                     let base_x = row_x + node.depth as f32 * step;
                     let isz = 16.0_f32;
@@ -5313,7 +5399,8 @@ impl App {
                         let cc = if hovered { theme::text() } else { theme::text_mute() };
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
-                    let icon_x = base_x + 18.0;
+                    // 화살표와 아이콘 사이 간격도 폭을 따라 줄인다.
+                    let icon_x = base_x + if tree_dens.is_icon() { 13.0 } else { 18.0 };
                     // Folders keep the single-color outline glyph (row-state
                     // tint); files get the branded file-type icon (ft/*, full
                     // color via FLAG_COLOR) with alpha carrying the ignored /
@@ -8488,6 +8575,33 @@ impl App {
                     // 바깥 스위치 왼쪽으로 리소스 → 포트 순서(Orca 하단바처럼 —
                     // 2026-08-15 지시 「포트 하단바로」·「리소스사용량도」).
                     let mut rx = tx - 8.0;
+                    // 미니→맥북 크롬 다리 — 초록=미니 상주 학생이 이 맥북의 크롬
+                    // (로그인 살아 있는 것)을 쓴다 / 주황=끊겨 미니 크롬 폴백.
+                    // 폴백이 실패 기반이라 지금 어느 쪽인지 사람이 볼 창이 필요하다
+                    // (2026-08-30 지시). 기계 명부가 없으면 None 이라 안 그린다.
+                    if let Some(up) = self.statusbar.chrome_bridge {
+                        let label = "크롬다리";
+                        let dot = 6.0_f32;
+                        let gap = 5.0_f32;
+                        let tw = g.measure_chrome_text(label, fs, false);
+                        rx -= tw + gap + dot + 12.0;
+                        let col = if up { theme::text() } else { theme::text_dim() };
+                        g.draw_text(
+                            rx,
+                            ty,
+                            label,
+                            gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                        );
+                        round_rect(
+                            g,
+                            rx + tw + gap,
+                            sy + (status_h - dot) / 2.0,
+                            dot,
+                            dot,
+                            dot / 2.0,
+                            if up { theme::success() } else { theme::attention() },
+                        );
+                    }
                     // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:
                     // 이 줄의 존재 이유는 한도(왼쪽)와 조작(바깥·포트)이다.
                     self.statusbar.res_rect = None;

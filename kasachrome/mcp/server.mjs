@@ -18,7 +18,16 @@ const NAME = 'kasachrome'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE = join(HERE, '..', 'bridge', 'server.mjs')
 // 이름을 URL 로 두면 전역 URL 생성자를 가린다. 확장에서 그 사고가 한 번 났으므로 여기서도 피한다.
-const BRIDGE_URL = `ws://127.0.0.1:${PORT}`
+const LOCAL_BRIDGE_URL = `ws://127.0.0.1:${PORT}`
+// 다리 후보 목록 — 앞에서부터 시도한다. 기본은 이 기계의 다리 하나(종전과 동일).
+// 미니에선 KASACHROME_BRIDGE_URLS="ws://127.0.0.1:18800,ws://127.0.0.1:8777" 처럼
+// 터널 너머 **맥북 다리를 먼저** 두면, 미니 학생이 로그인 살아 있는 맥북 크롬을
+// 그대로 조작하고, 맥북이 덮여 닿지 않을 때만 미니 크롬으로 물러난다(2026-08-30
+// 지시). 끊겼다 다시 붙을 때도 목록 맨 앞부터 다시 시도하므로, 맥북이 다시 열리면
+// 다음 재연결에서 저절로 맥북 크롬으로 돌아온다.
+const BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
+  .split(',').map((s) => s.trim()).filter(Boolean)
+let activeUrl = null
 
 let ws = null
 let ready = null
@@ -29,13 +38,19 @@ const IDENTITY = resolveIdentity()
 
 function log(...a) { process.stderr.write(`[${NAME}] ${a.join(' ')}\n`) }
 
-function open() {
+function open(url = LOCAL_BRIDGE_URL) {
   return new Promise((resolve, reject) => {
-    const sock = new WebSocket(BRIDGE_URL)
-    const fail = (e) => { try { sock.close() } catch {}; reject(e) }
+    const sock = new WebSocket(url)
+    // 터널 청취구는 맥북이 잠든 직후에도 잠시 살아 있어(원격 sshd 소유) 접속만
+    // 받고 응답이 없을 수 있다 — open 이 안 오면 짧게 끊고 다음 후보로 간다.
+    const timer = setTimeout(() => fail(new Error(`OPEN_TIMEOUT: ${url}`)), 2500)
+    const fail = (e) => { clearTimeout(timer); try { sock.close() } catch {}; reject(e) }
     sock.once('error', fail)
     sock.once('open', () => {
+      clearTimeout(timer)
       sock.off('error', fail)
+      if (activeUrl !== url) { log(`bridge: ${url}${url === LOCAL_BRIDGE_URL ? ' (이 기계 크롬)' : ' (원격 크롬)'}`) }
+      activeUrl = url
       sock.send(JSON.stringify({ type: 'hello', role: 'client', identity: IDENTITY }))
       ws = sock
       sock.on('message', (raw) => {
@@ -70,21 +85,22 @@ function open() {
 }
 
 // 첫 MCP 인스턴스가 브리지를 띄우고 나머지는 붙기만 한다. 포트가 이미 잡혀 있으면 브리지가 스스로 빠진다.
+// 후보가 여럿이면 앞에서부터 시도하고, 전부 실패했을 때만 **이 기계의** 다리를 띄운다
+// — 원격 다리는 남의 기계라 여기서 살릴 수 없다.
 async function connect() {
   if (ws && ws.readyState === 1) return ws
   if (ready) return ready
   ready = (async () => {
-    try {
-      return await open()
-    } catch {
-      log('bridge not running — starting it')
-      spawn(process.execPath, [BRIDGE], { detached: true, stdio: 'ignore' }).unref()
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 200))
-        try { return await open() } catch { /* 아직 리스닝 전 */ }
-      }
-      throw new Error('BRIDGE_UNREACHABLE: 브리지를 띄우지 못했습니다. `node bridge/server.mjs` 를 직접 실행해 로그를 확인하세요.')
+    for (const url of BRIDGE_URLS) {
+      try { return await open(url) } catch { /* 다음 후보로 */ }
     }
+    log('bridge not running — starting it')
+    spawn(process.execPath, [BRIDGE], { detached: true, stdio: 'ignore' }).unref()
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 200))
+      try { return await open(LOCAL_BRIDGE_URL) } catch { /* 아직 리스닝 전 */ }
+    }
+    throw new Error('BRIDGE_UNREACHABLE: 브리지를 띄우지 못했습니다. `node bridge/server.mjs` 를 직접 실행해 로그를 확인하세요.')
   })()
   try { return await ready } finally { if (!ws) ready = null }
 }
