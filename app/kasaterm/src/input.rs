@@ -8,6 +8,10 @@ fn claude_launch_screen(text: &str) -> bool {
         || (text.contains("Accessing workspace:") && text.contains("Quick safety check:"))
 }
 
+fn deferred_account_restart_toast(restarted: usize) -> String {
+    format!("계정 전환을 적용해 대기 중이던 pane {restarted}개를 다시 띄웠어요")
+}
+
 impl App {
     pub(crate) fn send_bytes(&self, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -764,10 +768,7 @@ impl App {
         // idle 로 떨어졌으면 여기서 따라 돌린다(같은 300ms 박자, 표시가 없으면 공짜).
         let switched = self.run_pending_account_restarts();
         if switched > 0 {
-            let to = self.claude_account_display(&self.set_claude_account.clone());
-            self.set_toast(format!(
-                "작업이 끝난 claude {switched}개를 {to} 계정으로 다시 띄웠어요"
-            ));
+            self.set_toast(deferred_account_restart_toast(switched));
         }
 
         if completed.is_empty() {
@@ -4044,6 +4045,14 @@ mod working_scan_tests {
     }
     fn blank() -> Vec<GridCell> {
         vec![Cell::blank(); 8]
+    }
+
+    #[test]
+    fn deferred_account_restart_toast_does_not_claim_a_provider_or_account() {
+        let toast = deferred_account_restart_toast(2);
+        assert_eq!(toast, "계정 전환을 적용해 대기 중이던 pane 2개를 다시 띄웠어요");
+        assert!(!toast.to_ascii_lowercase().contains("claude"));
+        assert!(!toast.to_ascii_lowercase().contains("codex"));
     }
 
     #[test]

@@ -3823,11 +3823,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.account_menu = true;
                                 return;
                             }
-                            // claude 는 전환 적용이 떠 있는 pane 까지 간다: 쉬는
-                            // pane 은 대화 이어 재시작, 일하는 중이면 끝나는 대로
-                            // 틱이 따라 돌린다(거노 2026-08-15 "재시작칩없이 나도
-                            // 그렇게 되게해줘"). codex 는 활성 슬롯 경로 파일만
-                            // 갈아 끼운다 — 다음 실행부터 이 계정으로 뜬다.
+                            // 계정 전환은 살아 있는 pane 을 갑자기 끊으면 안 된다.
+                            // Claude/Codex 모두 쉬는 pane 은 대화를 이어 다시 띄우고,
+                            // 일하는 pane 은 끝날 때까지 기다린 뒤 적용한다.
                             Some(AccountMenuItem::Select(p, id)) => {
                                 self.account_menu_provider = None;
                                 match p {
@@ -3838,8 +3836,10 @@ impl ApplicationHandler<UserEvent> for App {
                                         );
                                     }
                                     AccountProvider::Codex => {
-                                        self.set_codex_account = id;
-                                        self.settings_save();
+                                        self.ask_or_switch_codex_account(
+                                            &id,
+                                            crate::session::ConfirmSurface::Main,
+                                        );
                                     }
                                 }
                                 return;

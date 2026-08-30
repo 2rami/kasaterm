@@ -557,7 +557,12 @@ impl App {
         // promote to physical internally, matching the cell pass.
         #[allow(dead_code)]
         struct HeaderInfo {
+            /// BSP leaf used for layout, tabs, and header geometry.
             id: String,
+            /// The actual PTY behind the currently visible tab. Process-bound
+            /// state such as Codex rollout and account restart status uses it,
+            /// rather than the enclosing BSP leaf id.
+            active_tab_pid: String,
             x: f32,
             y: f32,
             w: f32,
@@ -618,6 +623,9 @@ impl App {
             /// 기계로 가는가」를 활성 pane(타이틀바 배지)에서만 알 수 있다
             /// (2026-08-29 지시 「맥북에서 맥미니 세션을 다르게 보이게」).
             machine: Option<String>,
+            /// Codex rollout이 보고한 추론 강도·협업 모드. 모델은 상태줄에 있어
+            /// 헤더에서는 지금 고른 두 값을 짧게 보인다.
+            codex_status: Option<String>,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -2509,8 +2517,14 @@ impl App {
                         .and_then(|w| self.web_hosts.get(&w.host_id))
                         .map(|h| h.loading)
                         .unwrap_or(false);
+                    let codex_status = self
+                        .socket_backend
+                        .as_ref()
+                        .and_then(|backend| backend.codex_rollout_snapshot(&tab_pid))
+                        .and_then(|snapshot| codex_header_summary(&snapshot));
                     headers.push(HeaderInfo {
                         id: id.clone(),
+                        active_tab_pid: tab_pid,
                         x: box_x,
                         y: box_y,
                         w: box_w,
@@ -2554,6 +2568,7 @@ impl App {
                                 i.label
                             }
                         }),
+                        codex_status,
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
@@ -2593,6 +2608,58 @@ impl App {
             }
             (slots, headers, footer_slots, agents_view_panes)
         };
+        // 메뉴에는 계정별 네트워크 조회값이 아니라, 현재 창(없으면 같은 방의 최근
+        // 창)이 rollout에 직접 남긴 값을 쓴다. 그래서 다른 슬롯 수치를 현재 선택할
+        // 계정의 한도로 잘못 읽히게 하지 않는다.
+        let codex_rollout = self.socket_backend.as_ref().and_then(|backend| {
+            let ids = self
+                .ws
+                .lock()
+                .ok()
+                .map(|ws| {
+                    let mut ids = Vec::new();
+                    if let Some(active) = ws.active_pane.as_deref() {
+                        let tab = ws.active_tab_pid(active);
+                        ids.push(tab.clone());
+                        if tab != active {
+                            ids.push(active.to_string());
+                        }
+                    }
+                    for outer in ws.panes.keys() {
+                        let tab = ws.active_tab_pid(outer);
+                        if !ids.contains(&tab) {
+                            ids.push(tab);
+                        }
+                        if !ids.contains(outer) {
+                            ids.push(outer.clone());
+                        }
+                    }
+                    ids
+                })
+                .unwrap_or_default();
+            ids.into_iter()
+                .find_map(|id| backend.codex_rollout_snapshot(&id))
+        });
+        // pane 하단바는 바깥 pane id로 그리지만 rollout은 현재 탭 pid에 묶인다.
+        // GPU 대여 전 한 번 접어 두면 footer 루프에서 socket/워크스페이스를 다시
+        // 잠글 필요가 없고, 탭을 바꾼 순간에도 현재 보이는 Codex 값만 쓴다.
+        let codex_footer_status: std::collections::HashMap<String, String> = self
+            .socket_backend
+            .as_ref()
+            .and_then(|backend| {
+                self.ws.lock().ok().map(|ws| {
+                    footer_slots
+                        .iter()
+                        .filter_map(|(outer, ..)| {
+                            backend
+                                .codex_rollout_snapshot(&ws.active_tab_pid(outer))
+                                .and_then(|snapshot| codex_header_summary(&snapshot))
+                                .map(|status| (outer.clone(), status))
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
@@ -6770,7 +6837,7 @@ impl App {
                 // 거꾸로 잡아 나가서, 나중에 그리면 칩 위에 겹친다.
                 let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
                 let mut chip_right = h.x + h.w - btn_zone;
-                if let Some((from, to)) = self.pane_account_stale.get(&h.id) {
+                if let Some((from, to)) = self.pane_account_stale.get(&h.active_tab_pid) {
                     let label = format!("⟳ {from} → {to} 재시작");
                     let pad = 6.0;
                     let cw = g.measure_chrome_text(&label, chrome_font, true) + pad * 2.0;
@@ -6792,7 +6859,7 @@ impl App {
                                 italic: false,
                             },
                         );
-                        restart_chip_hits.push((h.id.clone(), (cx, cy, cw, ch)));
+                        restart_chip_hits.push((h.active_tab_pid.clone(), (cx, cy, cw, ch)));
                         chip_right = cx - 6.0;
                     }
                 }
@@ -6825,6 +6892,41 @@ impl App {
                                 italic: false,
                             },
                         );
+                        chip_right = cx - 6.0;
+                    }
+                }
+                // Codex의 모델명은 상태줄이 맡고, 여기서는 노력도와 협업 모드만
+                // 작게 붙인다. 값이 없는 구버전 rollout에는 빈 장식을 만들지 않는다.
+                if let Some(status) = h.codex_status.as_deref() {
+                    let max_w = (chip_right - h.x - 16.0).min(160.0).max(0.0);
+                    let label = crate::info::fit_text(g, status, max_w, chrome_font - 1.0, false);
+                    if !label.is_empty() {
+                        let pad = 6.0;
+                        let cw = g.measure_chrome_text(&label, chrome_font - 1.0, false) + pad * 2.0;
+                        let ch = PANE_HEADER_HEIGHT - 8.0;
+                        let cx = chip_right - cw;
+                        if cx > h.x + 8.0 {
+                            let cy = h.y + 4.0;
+                            g.round_rect_fill(
+                                cx,
+                                cy,
+                                cw,
+                                ch,
+                                4.0,
+                                theme::with_alpha(theme::surface_active(), 0xB0),
+                            );
+                            g.draw_text(
+                                cx + pad,
+                                h.y + (PANE_HEADER_HEIGHT - (chrome_font - 1.0)) / 2.0,
+                                &label,
+                                gpu::DrawOpts {
+                                    font_size: chrome_font - 1.0,
+                                    color: theme::text_dim(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                        }
                     }
                 }
                 // No bottom hairline: the band == body, and the active tab
@@ -7690,6 +7792,46 @@ impl App {
                         let _ = tx;
                         self.statusbar.diff_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
+                    }
+                }
+                // Codex의 native statusline에는 협업 mode가 없을 수 있다. 현재 pane의
+                // rollout이 보고한 effort·mode만 앱 footer에 보태고, 경로/Git 칩이 이미
+                // 폭을 썼으면 접는다 — 옆 pane 위로 넘기는 것보다 없는 편이 정직하다.
+                if let Some(status) = codex_footer_status.get(fid) {
+                    let right = fx + fw - 8.0 - 21.0;
+                    let label = crate::info::fit_text(
+                        g,
+                        status,
+                        (right - cx - pad_x * 2.0).min(150.0).max(0.0),
+                        font,
+                        false,
+                    );
+                    if !label.is_empty() {
+                        let pw = pad_x * 2.0 + g.measure_chrome_text(&label, font, false);
+                        if cx + pw <= right {
+                            round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), theme::border());
+                            round_rect(
+                                g,
+                                cx + 1.0,
+                                pill_y + 1.0,
+                                pw - 2.0,
+                                pill_h - 2.0,
+                                theme::radius_sm() - 1.0,
+                                theme::surface_hover(),
+                            );
+                            g.draw_text(
+                                cx + pad_x,
+                                txt_y,
+                                &label,
+                                gpu::DrawOpts {
+                                    font_size: font,
+                                    color: theme::text_dim(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            cx += pw + chip_gap;
+                        }
                     }
                 }
                 let _ = cx;
@@ -9048,12 +9190,18 @@ impl App {
                 };
 
                 // 제공자 두 줄. **사용률 높은 순** — 옮길 곳을 고르려고 여는 목록이라
-                // 급한 쪽이 위로 와야 한다. 값이 없는 쪽(codex 는 한도 조회 경로가 아예
-                // 없다)은 -1 로 두어 뒤로 민다.
+                // 급한 쪽이 위로 와야 한다. Codex는 계정별 HTTP 조회가 아니라 최근
+                // rollout이 남긴 실제 창 하나만 갖고 있으므로, 값이 없을 때만 뒤로 민다.
                 let codex_signed_in = crate::settings::codex_identity(&self.set_codex_account).is_some();
                 let mut provs: Vec<(AccountProvider, f32)> = vec![
                     (AccountProvider::Claude, claude_badge.as_ref().map_or(-1.0, |b| b.pct)),
-                    (AccountProvider::Codex, -1.0),
+                    (
+                        AccountProvider::Codex,
+                        codex_rollout
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.rate_used_pct)
+                            .unwrap_or(-1.0),
+                    ),
                 ];
                 provs.sort_by(|a, b| b.1.total_cmp(&a.1));
 
@@ -9196,13 +9344,10 @@ impl App {
                         theme::text_dim(),
                     );
                     let right = mx + mw - pad_x - icon - 6.0;
-                    let badge = match p {
-                        AccountProvider::Claude => claude_badge.clone(),
-                        AccountProvider::Codex => None,
-                    };
-                    match (&badge, p) {
-                        // 값이 있으면: 첫 줄 오른쪽에 리셋, 둘째 줄에 창별 막대.
-                        (Some(b), _) => {
+                    match p {
+                        AccountProvider::Claude => match claude_badge.as_ref() {
+                            // 값이 있으면: 첫 줄 오른쪽에 리셋, 둘째 줄에 창별 막대.
+                            Some(b) => {
                             if compact {
                                 let t = usage_text(b);
                                 let tf = f - 1.0;
@@ -9229,32 +9374,83 @@ impl App {
                                 let l2 = ry + prow_h - 17.0;
                                 draw_usage_windows(g, name_x, l2, right, f - 3.0, b);
                             }
-                        }
-                        // codex 는 한도 조회 경로가 없다. 그 자리에 로그인 여부를 적는다 —
-                        // 아직 로그인 안 한 슬롯은 이름이 폴백되어, 표시가 없으면 멀쩡한
-                        // 계정과 구별이 안 된다.
-                        (None, AccountProvider::Codex) => {
-                            let (t, col) = if codex_signed_in {
-                                ("기록 없음", theme::text_mute())
-                            } else {
-                                ("로그인 안 됨", theme::danger())
-                            };
-                            let tf = f - 2.0;
-                            let tw = g.measure_chrome_text(t, tf, false);
-                            g.draw_text(
-                                right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
-                                gpu::DrawOpts { font_size: tf, color: col, bold: false, italic: false },
-                            );
-                        }
-                        (None, AccountProvider::Claude) => {
-                            let t = "기록 없음";
-                            let tf = f - 2.0;
-                            let tw = g.measure_chrome_text(t, tf, false);
-                            g.draw_text(
-                                right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
-                                gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
-                            );
-                        }
+                            }
+                            None => {
+                                let t = "기록 없음";
+                                let tf = f - 2.0;
+                                let tw = g.measure_chrome_text(t, tf, false);
+                                g.draw_text(
+                                    right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
+                                    gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                );
+                            }
+                        },
+                        AccountProvider::Codex => match codex_rollout.as_ref() {
+                            Some(snapshot) => {
+                                let usage = codex_usage_text(snapshot);
+                                let summary = codex_run_summary(snapshot);
+                                if compact {
+                                    let t = usage.unwrap_or_else(|| {
+                                        if summary.is_empty() { "최근 기록".to_string() } else { summary }
+                                    });
+                                    let tf = f - 1.0;
+                                    let t = crate::info::fit_text(g, &t, right - name_x, tf, true);
+                                    let tw = g.measure_chrome_text(&t, tf, true);
+                                    g.draw_text(
+                                        right - tw, line1, &t,
+                                        gpu::DrawOpts {
+                                            font_size: tf,
+                                            color: snapshot.rate_used_pct.map_or(theme::text_mute(), pct_col),
+                                            bold: true,
+                                            italic: false,
+                                        },
+                                    );
+                                } else {
+                                    if let Some(t) = usage {
+                                        let tf = f - 2.0;
+                                        let tw = g.measure_chrome_text(&t, tf, true);
+                                        g.draw_text(
+                                            right - tw, line1 + 1.0, &t,
+                                            gpu::DrawOpts {
+                                                font_size: tf,
+                                                color: snapshot.rate_used_pct.map_or(theme::text_mute(), pct_col),
+                                                bold: true,
+                                                italic: false,
+                                            },
+                                        );
+                                    }
+                                    let t = if summary.is_empty() {
+                                        "최근 Codex 실행".to_string()
+                                    } else {
+                                        summary
+                                    };
+                                    let tf = f - 3.0;
+                                    let t = crate::info::fit_text(g, &t, right - name_x, tf, false);
+                                    g.draw_text(
+                                        name_x, ry + prow_h - 17.0, &t,
+                                        gpu::DrawOpts {
+                                            font_size: tf,
+                                            color: theme::text_mute(),
+                                            bold: false,
+                                            italic: false,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                let (t, col) = if codex_signed_in {
+                                    ("최근 기록 없음", theme::text_mute())
+                                } else {
+                                    ("로그인 안 됨", theme::danger())
+                                };
+                                let tf = f - 2.0;
+                                let tw = g.measure_chrome_text(t, tf, false);
+                                g.draw_text(
+                                    right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
+                                    gpu::DrawOpts { font_size: tf, color: col, bold: false, italic: false },
+                                );
+                            }
+                        },
                     }
                     self.account_menu_hits
                         .push((AccountMenuItem::Provider(p), (mx, ry, mw, prow_h)));
@@ -9421,7 +9617,25 @@ impl App {
                         }
                     };
                     let sw = 300.0_f32;
-                    let lab_h = 24.0_f32;
+                    let codex_note = (p == AccountProvider::Codex)
+                        .then(|| {
+                            let snapshot = codex_rollout.as_ref()?;
+                            let mut details = Vec::new();
+                            if let Some(usage) = codex_usage_text(snapshot) {
+                                details.push(usage);
+                            }
+                            if let Some(reset) = codex_resets_text(snapshot) {
+                                details.push(reset);
+                            }
+                            if details.is_empty() {
+                                let summary = codex_run_summary(snapshot);
+                                (!summary.is_empty()).then(|| format!("최근 실행 · {summary}"))
+                            } else {
+                                Some(format!("최근 실행 · {}", details.join(" · ")))
+                            }
+                        })
+                        .flatten();
+                    let lab_h = if codex_note.is_some() { 42.0 } else { 24.0 };
                     // **고르기 전에** 각 계정의 5시간·7일이 둘 다 보여야 한다(거노
                     // 2026-08-15 「계정전환전에 5시간 7일 한도 보이게」). 누르면 그 자리서
                     // 전환되므로 눌러 보고 판단할 수가 없다. 막대 두 벌은 이름과 한 줄에
@@ -9429,7 +9643,8 @@ impl App {
                     // 한 줄에 글자로만.
                     let two_line = p == AccountProvider::Claude && !compact;
                     let arow_h = if two_line { 44.0 } else { row_h };
-                    let sh = pad * 2.0 + lab_h + arow_h * rows.len() as f32 + rule + row_h;
+                    let footer_h = row_h + if p == AccountProvider::Codex { 18.0 } else { 0.0 };
+                    let sh = pad * 2.0 + lab_h + arow_h * rows.len() as f32 + rule + footer_h;
                     // 로스터 오른쪽에 두되, 창 밖으로 나가면 왼쪽으로 접는다.
                     let sx = if mx + mw + 4.0 + sw <= win_w - 4.0 {
                         mx + mw + 4.0
@@ -9443,9 +9658,17 @@ impl App {
                         let t = format!("{} 계정", p.label());
                         let lf = f - 2.0;
                         g.draw_text(
-                            sx + pad_x, sry + (lab_h - lf) / 2.0 - 1.0, &t,
+                            sx + pad_x, sry + 3.0, &t,
                             gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: true, italic: false },
                         );
+                        if let Some(note) = codex_note.as_deref() {
+                            let nf = f - 4.0;
+                            let note = crate::info::fit_text(g, note, sw - pad_x * 2.0, nf, false);
+                            g.draw_text(
+                                sx + pad_x, sry + 21.0, &note,
+                                gpu::DrawOpts { font_size: nf, color: theme::text_mute(), bold: false, italic: false },
+                            );
+                        }
                         sry += lab_h;
                     }
                     for (id, label, active) in rows {
@@ -9489,9 +9712,9 @@ impl App {
                                 gpu::DrawOpts { font_size: tf, color: theme::danger(), bold: true, italic: false },
                             );
                         }
-                        // 한도는 **활성 슬롯도 포함해** 전부 적는다 — 「지금 이만큼 썼으니
-                        // 저기로 옮긴다」를 정하는 자리라 떠날 쪽 숫자가 빠지면 비교가 안
-                        // 된다. codex 는 한도 조회 경로가 아예 없어 이 자리가 없다.
+                        // Claude 한도는 슬롯별 조회값이라 계정 줄마다 적는다. Codex는
+                        // 최근 rollout 하나의 공개값뿐이라, 위 `최근 실행` 줄에만 적어
+                        // 다른 계정의 한도처럼 오해하지 않게 한다.
                         if p == AccountProvider::Claude {
                             match (usage_of(&id), two_line) {
                                 (Some(b), true) => {
@@ -9577,6 +9800,20 @@ impl App {
                         );
                         self.account_menu_hits
                             .push((AccountMenuItem::ManageAccounts, (sx, sry, sw, row_h)));
+                    }
+                    if p == AccountProvider::Codex {
+                        let tf = f - 4.0;
+                        g.draw_text(
+                            sx + pad_x,
+                            sry + row_h + 3.0,
+                            "선택은 다음 Codex 실행부터 적용",
+                            gpu::DrawOpts {
+                                font_size: tf,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                     }
                 }
             }
@@ -10897,6 +11134,77 @@ pub(crate) fn statusbar_account_short(name: &str, others: &[String]) -> String {
     }
 }
 
+/// Codex rollout이 마지막으로 보고한 한도 창. 임의의 구독제 이름을 붙이지 않고,
+/// 로그가 준 시간 창만 짧게 보인다.
+fn codex_rate_window_label(minutes: Option<u32>) -> String {
+    match minutes {
+        Some(0) | None => String::new(),
+        Some(m) if m % (60 * 24) == 0 => format!("{}d", m / (60 * 24)),
+        Some(m) if m % 60 == 0 => format!("{}h", m / 60),
+        Some(m) => format!("{m}m"),
+    }
+}
+
+/// 최근 Codex 실행이 실은 수치다. 계정별 네트워크 조회 결과처럼 보이지 않게
+/// 호출부가 반드시 `최근 Codex 실행`이라는 문맥과 함께 쓴다.
+fn codex_usage_text(s: &crate::transcript::CodexRolloutSnapshot) -> Option<String> {
+    let pct = s.rate_used_pct?;
+    let window = codex_rate_window_label(s.rate_window_minutes);
+    Some(if window.is_empty() {
+        format!("{pct:.0}% 씀")
+    } else {
+        format!("{pct:.0}% 씀 · {window}")
+    })
+}
+
+fn codex_resets_text(s: &crate::transcript::CodexRolloutSnapshot) -> Option<String> {
+    let at = u64::try_from(s.rate_resets_at?).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let left = at.saturating_sub(now);
+    if left == 0 {
+        return Some("곧 초기화".to_string());
+    }
+    let (h, m) = (left / 3600, (left % 3600) / 60);
+    Some(match (h, m) {
+        (0, m) => format!("{m}분 뒤 초기화"),
+        (h, 0) => format!("{h}시간 뒤 초기화"),
+        (h, m) => format!("{h}시간 {m}분 뒤 초기화"),
+    })
+}
+
+/// 계정 메뉴의 최근 실행 설명. model/effort/mode는 Codex가 rollout에 직접 싣는
+/// 값만 보이고, 빠진 필드는 추측하지 않는다.
+fn codex_run_summary(s: &crate::transcript::CodexRolloutSnapshot) -> String {
+    let mut parts = Vec::new();
+    if !s.model.is_empty() {
+        parts.push(s.model.clone());
+    }
+    if !s.effort.is_empty() {
+        parts.push(format!("effort {}", s.effort));
+    }
+    if !s.collaboration_mode.is_empty() {
+        parts.push(format!("mode {}", s.collaboration_mode));
+    }
+    if let Some(plan) = s.plan_type.as_deref().filter(|p| !p.is_empty()) {
+        parts.push(plan.to_string());
+    }
+    parts.join(" · ")
+}
+
+/// Pane header는 모델명보다 지금 고른 추론 강도와 모드를 먼저 읽히게 한다.
+fn codex_header_summary(s: &crate::transcript::CodexRolloutSnapshot) -> Option<String> {
+    let mut parts = Vec::new();
+    if !s.effort.is_empty() {
+        parts.push(s.effort.clone());
+    }
+    if !s.collaboration_mode.is_empty() {
+        parts.push(s.collaboration_mode.clone());
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10918,6 +11226,30 @@ mod tests {
         // 라벨끼리 같아 보이는 경우도 붙일 도메인이 없으니 그대로 둔다.
         let same = vec!["기본".to_string(), "기본".to_string()];
         assert_eq!(statusbar_account_short("기본", &same), "기본");
+    }
+
+    #[test]
+    fn codex_rollout_labels_keep_only_reported_values() {
+        let s = crate::transcript::CodexRolloutSnapshot {
+            model: "gpt-5.5".to_string(),
+            effort: "high".to_string(),
+            collaboration_mode: "default".to_string(),
+            rate_used_pct: Some(62.5),
+            rate_window_minutes: Some(300),
+            rate_resets_at: None,
+            plan_type: Some("plus".to_string()),
+        };
+        assert_eq!(codex_usage_text(&s).as_deref(), Some("62% 씀 · 5h"));
+        assert_eq!(
+            codex_run_summary(&s),
+            "gpt-5.5 · effort high · mode default · plus"
+        );
+        assert_eq!(codex_header_summary(&s).as_deref(), Some("high · default"));
+
+        let empty = crate::transcript::CodexRolloutSnapshot::default();
+        assert_eq!(codex_usage_text(&empty), None);
+        assert_eq!(codex_run_summary(&empty), "");
+        assert_eq!(codex_header_summary(&empty), None);
     }
 }
 

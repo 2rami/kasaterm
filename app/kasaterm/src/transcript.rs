@@ -133,35 +133,167 @@ fn looks_like_codex(tail: &str) -> bool {
     })
 }
 
-/// codex 롤아웃의 **머리**에서 `(model, effort)` 를 집는다 — 앞에서부터 첫
-/// `turn_context`. 둘이 같은 줄에 실려 오므로 한 번에 뽑는다.
+/// UI가 안전하게 표시할 Codex rollout의 현재 상태.
 ///
-/// board 는 꼬리만 읽는데 codex 의 model 은 `turn_context` 에만 실리고, 그게 파일
-/// 앞 **87~122KB** 지점에 있다(실측 2026-08-11, 세션 4개). 그 앞을 채우는 건 지시문
-/// 뭉치다. 꼬리를 키워도 소용없다 — 한 턴이 exec 출력째 실려 512KB 를 넘으므로
-/// 마지막 `turn_context` 는 끝에서 1MB 넘게 떨어져 있다(같은 날 실측).
-///
-/// effort 는 재시작 뒤 되살릴 때 쓴다(`-c model_reasoning_effort=…`). model 과 달리
-/// 없는 세션이 흔하니 빈 문자열이 정상이고, 그때는 플래그를 아예 안 붙인다.
-///
-/// 세션 도중 모델을 갈면 첫 값이 낡는다. 그래도 빈칸보다는 낫다 — board 에서 model
-/// 은 "무엇이 돌고 있나"를 가르는 칸이라 비면 행 자체가 읽히지 않는다.
-pub(crate) fn codex_cfg_from_head(head: &str) -> (String, String) {
-    head.lines()
-        .find_map(|l| {
-            let v: serde_json::Value = serde_json::from_str(l).ok()?;
-            if v.get("type")?.as_str()? != "turn_context" {
-                return None;
+/// 로그에 실린 대화·지시문·토큰은 일부러 싣지 않는다. 모델 선택, 협업 모드, 구독 한도처럼
+/// 화면과 계정 메뉴가 필요한 공개 상태만 남긴다.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CodexRolloutSnapshot {
+    pub model: String,
+    pub effort: String,
+    pub collaboration_mode: String,
+    pub rate_used_pct: Option<f32>,
+    pub rate_window_minutes: Option<u32>,
+    pub rate_resets_at: Option<i64>,
+    pub plan_type: Option<String>,
+}
+
+#[derive(Default)]
+struct CodexRolloutSnapshotParts {
+    snapshot: CodexRolloutSnapshot,
+    model_seen: bool,
+    mode_seen: bool,
+    rate_seen: bool,
+    plan_seen: bool,
+}
+
+fn json_string(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    object.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string()
+}
+
+/// `rate_limits` 한 묶음에서 지금 가장 먼저 닿을 창 하나를 고른다.
+fn codex_rate_limits(
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(Option<(f32, u32, i64)>, Option<String>)> {
+    let limits = payload.get("rate_limits")?.as_object()?;
+    let mut rate = None;
+    for key in ["primary", "secondary", "individual_limit"] {
+        let Some(window) = limits.get(key).and_then(|value| value.as_object()) else {
+            continue;
+        };
+        let Some(used_percent) = window.get("used_percent").and_then(|value| value.as_f64()) else {
+            continue;
+        };
+        let candidate = (
+            used_percent as f32,
+            window.get("window_minutes").and_then(|value| value.as_u64()).unwrap_or(0) as u32,
+            window.get("resets_at").and_then(|value| value.as_i64()).unwrap_or(0),
+        );
+        if rate.is_none_or(|(current, _, _)| candidate.0 > current) {
+            rate = Some(candidate);
+        }
+    }
+    let plan_type = limits
+        .get("plan_type")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Some((rate, plan_type))
+}
+
+/// `text` 안에서 각 상태의 가장 최근 값을 찾는다. 한 줄이 깨진 tail 시작점은 조용히
+/// 건너뛴다.
+fn codex_rollout_snapshot_part(text: &str) -> CodexRolloutSnapshotParts {
+    let mut out = CodexRolloutSnapshotParts::default();
+    for line in text.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(payload) = value.get("payload").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        let kind = value.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        let sub = payload.get("type").and_then(|value| value.as_str()).unwrap_or("");
+
+        if kind == "turn_context" {
+            if !out.model_seen {
+                let model = json_string(payload, "model");
+                if !model.is_empty() {
+                    out.snapshot.model = model;
+                    // effort는 model과 같은 turn의 값이어야 한다. 빈 effort를 예전 turn으로
+                    // 메우면 모델 A에 모델 B의 effort가 붙는다.
+                    out.snapshot.effort = json_string(payload, "effort");
+                    out.model_seen = true;
+                }
             }
-            let p = v.get("payload")?;
-            let get = |k: &str| {
-                p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-            };
-            let m = get("model");
-            // model 이 빈 `turn_context` 는 우리가 찾는 줄이 아니다 — 계속 훑는다.
-            (!m.is_empty()).then(|| (m, get("effort")))
-        })
-        .unwrap_or_default()
+            if !out.mode_seen {
+                let mode = payload
+                    .get("collaboration_mode")
+                    .and_then(|value| value.as_object())
+                    .and_then(|mode| mode.get("mode"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                if let Some(mode) = mode {
+                    out.snapshot.collaboration_mode = mode;
+                    out.mode_seen = true;
+                }
+            }
+        }
+
+        // `task_started`는 구버전 rollout의 fallback이다. 최신 Codex는 turn_context의
+        // `collaboration_mode.mode`에 정본을 싣는다.
+        if kind == "event_msg" && sub == "task_started" && !out.mode_seen {
+            if let Some(mode) = payload
+                .get("collaboration_mode_kind")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+            {
+                out.snapshot.collaboration_mode = mode.to_string();
+                out.mode_seen = true;
+            }
+        }
+
+        if kind == "event_msg" && sub == "token_count" && (!out.rate_seen || !out.plan_seen) {
+            if let Some((rate, plan_type)) = codex_rate_limits(payload) {
+                if !out.rate_seen {
+                    if let Some((used, window, reset)) = rate {
+                        out.snapshot.rate_used_pct = Some(used);
+                        out.snapshot.rate_window_minutes = Some(window);
+                        out.snapshot.rate_resets_at = Some(reset);
+                        out.rate_seen = true;
+                    }
+                }
+                if !out.plan_seen {
+                    if let Some(plan_type) = plan_type {
+                        out.snapshot.plan_type = Some(plan_type);
+                        out.plan_seen = true;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Codex rollout의 현재 공개 상태. tail의 최신 turn을 우선하고, 대형 출력에 밀려난
+/// 경우에만 head를 보조값으로 쓴다.
+pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnapshot {
+    let mut newest = codex_rollout_snapshot_part(tail);
+    let older = codex_rollout_snapshot_part(head);
+    if !newest.model_seen && older.model_seen {
+        newest.snapshot.model = older.snapshot.model;
+        newest.snapshot.effort = older.snapshot.effort;
+    }
+    if !newest.mode_seen && older.mode_seen {
+        newest.snapshot.collaboration_mode = older.snapshot.collaboration_mode;
+    }
+    if !newest.rate_seen && older.rate_seen {
+        newest.snapshot.rate_used_pct = older.snapshot.rate_used_pct;
+        newest.snapshot.rate_window_minutes = older.snapshot.rate_window_minutes;
+        newest.snapshot.rate_resets_at = older.snapshot.rate_resets_at;
+    }
+    if !newest.plan_seen && older.plan_seen {
+        newest.snapshot.plan_type = older.snapshot.plan_type;
+    }
+    newest.snapshot
+}
+
+/// 재시작에 쓸 model·effort를 head에서 읽는다. 최신 `turn_context`가 앞 창에 있으면
+/// 첫 turn의 낡은 선택 대신 그 값을 쓴다.
+pub(crate) fn codex_cfg_from_head(head: &str) -> (String, String) {
+    let snapshot = codex_rollout_snapshot(head, "");
+    (snapshot.model, snapshot.effort)
 }
 
 /// `item.content[]` 의 텍스트 조각을 잇는다.
@@ -192,6 +324,7 @@ fn item_text(it: &serde_json::Map<String, serde_json::Value>) -> String {
 /// 대신 codex 는 `rate_limits.used_percent`/`plan_type` 을 주는데, 구독제라 그쪽이
 /// 실제로 알고 싶은 값이다. 담을 칸이 생기면 그때 싣는다.
 fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    let rollout = codex_rollout_snapshot("", tail);
     let mut model = String::new();
     let mut cwd = String::new();
     let mut last_prompt = String::new();
@@ -200,9 +333,6 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
     let mut observed_ctx = 0u64;
     let mut ctx_window = 0u64;
     let mut intent = String::new();
-    // 한도 — 창이 여럿이면 **가장 먼저 터질 것**(사용률 최대) 하나만 남긴다.
-    let mut rate: Option<(f32, u32, i64)> = None;
-    let mut plan_type: Option<String> = None;
     let mut recent_tools: Vec<String> = Vec::new();
     let mut tool_counts: Vec<(String, u32)> = Vec::new();
     // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude 경로와 같은 규칙).
@@ -247,31 +377,6 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                 }
             }
             ("event_msg", "token_count") => {
-                if let Some(rl) = p.get("rate_limits").and_then(|r| r.as_object()) {
-                    if plan_type.is_none() {
-                        plan_type = rl
-                            .get("plan_type")
-                            .and_then(|x| x.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string);
-                    }
-                    // 실측(78표본)에선 primary 하나뿐이었지만, 창이 늘어도 코드를 안
-                    // 고치게 후보를 다 훑어 최대치를 고른다.
-                    for key in ["primary", "secondary", "individual_limit"] {
-                        let Some(w) = rl.get(key).and_then(|x| x.as_object()) else { continue };
-                        let Some(pct) = w.get("used_percent").and_then(|x| x.as_f64()) else {
-                            continue;
-                        };
-                        let cand = (
-                            pct as f32,
-                            w.get("window_minutes").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                            w.get("resets_at").and_then(|x| x.as_i64()).unwrap_or(0),
-                        );
-                        if rate.is_none_or(|(cur, _, _)| cand.0 > cur) {
-                            rate = Some(cand);
-                        }
-                    }
-                }
                 let Some(info) = p.get("info").and_then(|i| i.as_object()) else { continue };
                 if ctx_window == 0 {
                     ctx_window = info
@@ -386,10 +491,10 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         effort_default: String::new(),
         branch: None,
         window_idx: 0,
-        rate_used_pct: rate.map(|(p, _, _)| p),
-        rate_window_minutes: rate.map(|(_, w, _)| w),
-        rate_resets_at: rate.map(|(_, _, r)| r),
-        plan_type,
+        rate_used_pct: rollout.rate_used_pct,
+        rate_window_minutes: rollout.rate_window_minutes,
+        rate_resets_at: rollout.rate_resets_at,
+        plan_type: rollout.plan_type,
         // 완료 보고는 transcript 소관이 아니다 — collab_board(done_reports)가 채운다.
         done_outcome: None,
         done_summary: None,
@@ -1417,19 +1522,21 @@ mod codex_tests {
         assert_eq!(a.last_reply, "연동을 붙였어요");
     }
 
-    /// model·effort 는 꼬리가 아니라 **머리**에서, 그것도 같은 줄에서 온다(실측
-    /// 87~122KB 지점). 세션 도중 갈아도 **첫** 것을 쓴다 — 뒤엣것은 우리 머리 창에
-    /// 없을 수도 있어, 있다 없다 하는 값보다 한 번 정해진 값이 board 에서 덜 헷갈린다.
+    /// model·effort는 같은 turn_context에서 묶어 읽고, head 안에 여러 turn이 있으면
+    /// 최신 것을 쓴다. effort만 예전 turn에서 섞어 오면 재시작 명령이 틀어진다.
     #[test]
-    fn model_과_effort_는_머리의_첫_turn_context_다() {
+    fn model_과_effort_는_머리의_최신_turn_context_다() {
         let head = [
             r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#,
             r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user"}}"#,
             r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
-            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것","effort":"low"}}"#,
         ]
         .join("\n");
-        assert_eq!(codex_cfg_from_head(&head), ("gpt-5.5".into(), "high".into()));
+        assert_eq!(
+            codex_cfg_from_head(&head),
+            ("뒷턴에서-갈아탄-것".into(), "low".into())
+        );
         // 아직 첫 턴을 안 쓴 세션 — 빈 문자열이어야 호출부가 "다음에 다시" 로 읽는다.
         let only_meta = r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#;
         assert_eq!(codex_cfg_from_head(only_meta), (String::new(), String::new()));
@@ -1438,6 +1545,39 @@ mod codex_tests {
         // model 까지 버리면 복원이 통째로 기본값으로 떨어진다).
         let no_effort = r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#;
         assert_eq!(codex_cfg_from_head(no_effort), ("gpt-5.5".into(), String::new()));
+    }
+
+    #[test]
+    fn 공개_snapshot은_tail의_최신_model_effort_mode와_한도를_쓴다() {
+        let head = r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","collaboration_mode":{"mode":"default"}}}"#;
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":8.0,"window_minutes":10080,"resets_at":1786433096},"secondary":{"used_percent":47.0,"window_minutes":300,"resets_at":1786400000}}}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"medium","collaboration_mode":{"mode":"plan"}}}"#,
+        ]
+        .join("\n");
+        let snapshot = codex_rollout_snapshot(head, &tail);
+        assert_eq!(snapshot.model, "gpt-5.6-sol");
+        assert_eq!(snapshot.effort, "medium");
+        assert_eq!(snapshot.collaboration_mode, "plan");
+        assert_eq!(snapshot.rate_used_pct, Some(47.0));
+        assert_eq!(snapshot.rate_window_minutes, Some(300));
+        assert_eq!(snapshot.rate_resets_at, Some(1786400000));
+        assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn 빈_rate_limits가_앞뒤의_유효_한도를_가리지_않는다() {
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{}}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":37.5,"window_minutes":300,"resets_at":1786400000}}}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{}}}"#,
+        ]
+        .join("\n");
+        let snapshot = codex_rollout_snapshot("", &tail);
+        assert_eq!(snapshot.rate_used_pct, Some(37.5));
+        assert_eq!(snapshot.rate_window_minutes, Some(300));
+        assert_eq!(snapshot.rate_resets_at, Some(1786400000));
+        assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
     }
 
     /// codex 의 답변은 변경 목록째 실려 와 길다 — board 한 줄에 들어가려면 잘려야 한다.

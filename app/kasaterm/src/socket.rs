@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use kasa_bridge::{Layout, TmuxSession};
 
-use crate::transcript::snapshot_from_tail;
+use crate::transcript::{snapshot_from_tail, CodexRolloutSnapshot};
 use crate::{PaneStatus, UserEvent, Workspace};
 use winit::event_loop::EventLoopProxy;
 
@@ -197,11 +197,10 @@ pub struct PtyBackend {
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
     /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
     last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
-    /// codex rollout 경로 → 그 세션의 model. codex 는 model 이 실린 유일한 줄
-    /// (`turn_context`)이 파일 **앞** 87~122KB 에 있어 tail 창에 영영 안 걸린다 —
-    /// 그래서 머리를 한 번만 읽어 여기 기억한다. surface_id 가 아니라 **경로**가
-    /// 키다: 세션을 갈아타면 경로가 바뀌어 저절로 다시 읽는다.
-    codex_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// surface_id → Codex rollout의 마지막 유효 공개 상태. 화면은 이 값만 읽고,
+    /// board 폴링이 실제 rollout에서 갱신한다. 닫힌 pane도 마지막 상태를 잠시 남겨
+    /// 계정 메뉴가 최근 Codex 세션을 설명할 수 있다.
+    codex_rollouts: Arc<Mutex<HashMap<String, CodexRolloutSnapshot>>>,
     /// surface_id → statusline 이 보고한 (model.id, effort.level). 재시작 뒤 그 pane 을
     /// **끄기 직전 쓰던 모델·effort 로** 되살리는 데 쓴다(세션 저장에 실린다).
     ///
@@ -345,6 +344,15 @@ impl PtyBackend {
         self.reported_agent_cfg.lock().unwrap().clone()
     }
 
+    /// surface 하나의 Codex model·effort·협업 mode·구독 한도 snapshot.
+    ///
+    /// 바인드되었지만 아직 첫 turn을 쓰지 않은 pane은 `None`이다. 값은 `collab_board`
+    /// 가 rollout의 최신 유효 줄을 읽을 때 갱신되며, UI는 파일이나 인증 정보를 직접
+    /// 열지 않는다.
+    pub(crate) fn codex_rollout_snapshot(&self, surface_id: &str) -> Option<CodexRolloutSnapshot> {
+        self.codex_rollouts.lock().unwrap().get(surface_id).cloned()
+    }
+
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
@@ -370,7 +378,7 @@ impl PtyBackend {
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             reported_ctx: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
-            codex_cfg: Arc::new(Mutex::new(HashMap::new())),
+            codex_rollouts: Arc::new(Mutex::new(HashMap::new())),
             reported_agent_cfg: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
             bg_agents,
@@ -1832,6 +1840,9 @@ impl Backend for PtyBackend {
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), PathBuf::from(path));
+        // 같은 pane id가 다른 rollout을 가리키기 시작하면, 앞 세션의 model/한도는
+        // 공개하면 안 된다. 새 로그에서 첫 유효 turn을 읽을 때 다시 채운다.
+        self.codex_rollouts.lock().unwrap().remove(surface_id);
         self.publish_transcript_cwd(surface_id, std::path::Path::new(path));
         // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
         // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
@@ -2192,34 +2203,41 @@ impl Backend for PtyBackend {
                         i.label
                     }
                 });
-                // codex 는 model 이 위 창 밖이라(파일 앞 87~122KB 의 `turn_context`)
-                // 머리를 한 번 읽어 채운다. rollout 파일일 때만 — claude 는 부팅
-                // 직후 잠깐 빌 뿐 곧 tail 에서 잡히니 여기서 읽으면 헛일이다.
-                if row.model.is_empty() && codex_sid_from_rollout(path).is_some() {
+                // Codex의 model·effort·협업 mode는 같은 turn_context에 실린다. 대형
+                // 도구 출력이 그 줄을 tail 밖으로 밀면 head를 보조로 쓰되, tail에서
+                // 잡힌 최신 turn은 절대 첫 turn의 캐시로 덮지 않는다.
+                if codex_sid_from_rollout(path).is_some() {
                     const HEAD: u64 = 384 * 1024;
-                    let key = path.to_string_lossy().into_owned();
-                    let hit = self.codex_cfg.lock().unwrap().get(&key).cloned();
-                    let cfg = match hit {
-                        Some(c) => c,
-                        None => {
-                            let head = read_head(path, HEAD);
-                            let c = crate::transcript::codex_cfg_from_head(&head);
-                            // 찾았거나, 머리를 꽉 읽고도 없을 때만 굳힌다. 후자는
-                            // 지시문이 우리 창보다 크다는 뜻이라 다시 읽어도 같은 답이다.
-                            // 더 짧게 읽혔으면 파일을 통째로 본 것 — 아직 첫 턴을 안
-                            // 썼을 뿐이라 굳히지 않고 다음 폴링에 다시 본다.
-                            if !c.0.is_empty() || head.len() as u64 >= HEAD {
-                                self.codex_cfg.lock().unwrap().insert(key, c.clone());
-                            }
-                            c
-                        }
+                    let tail_snapshot = crate::transcript::codex_rollout_snapshot("", &tail);
+                    let snapshot = if tail_snapshot.model.is_empty()
+                        || tail_snapshot.collaboration_mode.is_empty()
+                    {
+                        let head = read_head(path, HEAD);
+                        crate::transcript::codex_rollout_snapshot(&head, &tail)
+                    } else {
+                        tail_snapshot
                     };
-                    row.model.clone_from(&cfg.0);
-                    // 저장 경로가 맵 하나만 보게 여기서 합류시킨다 — claude 는
-                    // statusline 이, codex 는 이 자리가 같은 맵을 채운다.
-                    if !cfg.0.is_empty() || !cfg.1.is_empty() {
-                        self.reported_agent_cfg.lock().unwrap().insert(sid.clone(), cfg);
+                    let has_snapshot = !snapshot.model.is_empty()
+                        || !snapshot.effort.is_empty()
+                        || !snapshot.collaboration_mode.is_empty()
+                        || snapshot.rate_used_pct.is_some()
+                        || snapshot.plan_type.is_some();
+                    if has_snapshot {
+                        self.codex_rollouts.lock().unwrap().insert(sid.clone(), snapshot.clone());
                     }
+                    if !snapshot.model.is_empty() {
+                        row.model.clone_from(&snapshot.model);
+                        // 저장 경로가 맵 하나만 보게 여기서 합류시킨다 — Claude는
+                        // statusline이, Codex는 rollout이 채운다.
+                        self.reported_agent_cfg
+                            .lock()
+                            .unwrap()
+                            .insert(sid.clone(), (snapshot.model.clone(), snapshot.effort.clone()));
+                    }
+                    row.rate_used_pct = snapshot.rate_used_pct;
+                    row.rate_window_minutes = snapshot.rate_window_minutes;
+                    row.rate_resets_at = snapshot.rate_resets_at;
+                    row.plan_type = snapshot.plan_type;
                 }
                 // Prefer claude's official status when it reports this session
                 // (matched by transcript filename stem == sessionId). The
@@ -5328,4 +5346,3 @@ mod pid_cwd_tests {
         assert_eq!(super::claude_under(&table, 100), None);
     }
 }
-

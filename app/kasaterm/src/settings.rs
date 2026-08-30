@@ -1334,9 +1334,7 @@ impl App {
                 self.settings_input = Some(SettingsInput::ClaudeAccountLabel(i));
             }
             SettingsAction::CodexAccount(id) => {
-                self.set_codex_account = id;
-                self.settings_input = None;
-                self.settings_save();
+                self.ask_or_switch_codex_account(&id, crate::session::ConfirmSurface::Settings);
             }
             SettingsAction::AddCodexAccount => self.add_codex_account(),
             SettingsAction::RemoveCodexAccount(id) => {
@@ -4177,7 +4175,7 @@ pub(crate) fn paint_settings(
             // 띄우는 것도 같은 손이라, 두 로그인이 설정의 다른 층에 흩어져 있으면
             // 「지금 어느 계정으로 돌고 있나」를 두 군데서 확인해야 한다.
             y = row_wide(g, fx, y, clip, "Codex 계정",
-                &["다음에 뜨는 codex 부터 이 계정으로 — 돌고 있는 세션은 그대로예요"]);
+                &["선택한 계정은 다음 Codex 실행부터 적용돼요. 실행 중인 pane은 멈추지 않고 안전할 때 이어져요"]);
             let codex_rows = std::iter::once((String::new(), "기본".to_string(), None))
                 .chain(
                     ctx.codex_accounts

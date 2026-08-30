@@ -619,6 +619,7 @@ impl App {
         };
         eprintln!("[autoacctconfirm] fake torn_down={}", impact.torn_down());
         self.account_switch_confirm = Some(crate::session::PendingAccountSwitch {
+            provider: crate::session::AccountSwitchProvider::Claude,
             to: "acct-1".to_string(),
             to_label: "지메일".to_string(),
             impact,
