@@ -356,9 +356,13 @@ pub(crate) fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize,
         let a2 = a[digits..].strip_prefix(" messages from @")?;
         (n, a2.to_string())
     };
+    // ascii 만 받으면 한글 세션 이름이 첫 글자에서 탈락해 **그 발신자만 색칠이
+    // 통째로 안 걸린다**(2026-08-31 스샷: `@터미널-미러링-데몬-pty` 가 무테마).
+    // claude 는 공백 든 세션 이름을 @ 형식에서 하이픈으로 바꿔 그린다 — 유니코드
+    // 글자·숫자와 -·_ 까지가 이름이다.
     let name: String = after
         .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if name.is_empty() {
         return None;
@@ -1092,17 +1096,24 @@ pub(crate) fn extract_tagged_msg(
         // 고정값이라 어떤 태그와도 안 맞는다. 그래서 대조를 건너뛰고 최근 것을 잡되,
         // 소켓 pid 로 진짜 신원을 되찾아 함께 돌려준다(못 찾으면 라벨 그대로).
         let peer_probe = sender == PEER_LABEL && id_attr == "from-name";
-        if peer_probe || attr(id_attr).as_deref() == Some(sender) {
+        // 화면의 @ 형식은 세션 이름의 공백을 하이픈으로 바꿔 그린다 — 태그의
+        // 원문(`터미널 미러링 데몬 pty`)과 정확 일치만 보면 공백 든 이름의
+        // 발신자를 영영 못 찾는다(2026-08-31 스샷).
+        let sender_match =
+            |v: &str| v == sender || v.replace(' ', "-") == sender;
+        if peer_probe || attr(id_attr).as_deref().is_some_and(sender_match) {
             let end = tail.find(close_tag).unwrap_or(tail.len());
             let from = attr("from");
-            let ident = peer_probe
-                .then(|| from.clone())
-                .flatten()
-                .and_then(|f| peer_ident_from_socket(&f));
+            // 소켓 신원은 이름이 맞았을 때도 캔다 — peer_sid 가 있어야 수신측이
+            // 발신 pane 을 되짚어 학생색·프사를 건다(이름만으로는 로스터 밖
+            // 세션 제목이라 못 건다). 이름 갈아치우기는 @peer 탐침에서만.
+            let ident = from.clone().and_then(|f| peer_ident_from_socket(&f));
             return Some(TeammateMsg {
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
-                sender: ident.as_ref().and_then(|(n, _)| n.clone()),
+                sender: peer_probe
+                    .then(|| ident.as_ref().and_then(|(n, _)| n.clone()))
+                    .flatten(),
                 from_label: attr(id_attr),
                 from_pid: from.as_deref().and_then(socket_pid).map(str::to_string),
                 peer_sid: ident.and_then(|(_, s)| s),
@@ -1158,7 +1169,11 @@ pub(crate) fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Optio
         // `@peer` 라벨은 발신자와 무관한 고정값이라 이름 대조 자체를 건너뛴다.
         let tag_hit =
             l.contains("<teammate-message") || l.contains("<cross-session-message");
-        let sender_hit = sender == PEER_LABEL || l.contains(sender);
+        // 화면 이름은 공백이 하이픈으로 바뀐 형식이다 — 태그 원문(공백)도 지나가게
+        // 공백 판까지 함께 본다(정확 대조는 extract 쪽 sender_match 가 한다).
+        let sender_hit = sender == PEER_LABEL
+            || l.contains(sender)
+            || (sender.contains('-') && l.contains(&sender.replace('-', " ")));
         if !tag_hit || !sender_hit {
             return None;
         }
@@ -1187,6 +1202,39 @@ pub(crate) fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Optio
 /// 행 전체가 공백/blank 인가 — 팀메시지 줄바꿈 전개가 이어 쓸 수 있는 행.
 pub(crate) fn row_is_blank(row: &[GridCell]) -> bool {
     row.iter().all(|c| matches!(c.ch, ' ' | '\0'))
+}
+
+/// 접힌 팀메시지 행(r)이 다음 행들로 **감겨 넘어간 꼬리**의 행 수. 접힌 줄은
+/// 논리적으로 한 줄이라 미리보기가 길면 그리드 여러 행을 먹고, 마지막 행이
+/// "(… to expand)" 로 끝난다. 첫 행만 재작성하면 꼬리가 원문 회색 잔해로 남는다
+/// (2026-08-31 스샷: 재작성된 첫 줄 아래 「… (ctrl+o to expand)」 원문 한 줄).
+///
+/// 오탐이 실제 출력을 지우면 안 되므로 판정은 보수적이다: r 행이 끝 칸까지 차
+/// 있어야 시작하고, 사슬은 각 행이 꽉 찬 채로만 이어지며, 몇 행 안에 "to expand)"
+/// 로 끝나야만 인정한다(그 전에 빈 행·덜 찬 행이 나오면 0).
+pub(crate) fn collapsed_wrap_tail(rows: &[Vec<GridCell>], r: usize) -> usize {
+    let full = |row: &[GridCell]| row.last().is_some_and(|c| c.ch != ' ');
+    if !full(&rows[r]) {
+        return 0;
+    }
+    let mut n = 0usize;
+    for row in rows[r + 1..].iter() {
+        let text: String =
+            row.iter().map(|c| if c.ch == '\0' { ' ' } else { c.ch }).collect();
+        let t = text.trim_end();
+        if t.is_empty() {
+            return 0;
+        }
+        n += 1;
+        if t.ends_with("to expand)") {
+            return n;
+        }
+        // 접힌 미리보기가 다섯 행을 넘을 리 없다 — 폭주(본문 오탐) 방지.
+        if !full(row) || n >= 5 {
+            return 0;
+        }
+    }
+    0
 }
 
 /// 문자열의 셀 폭 합(와이드 글리프 2칸).
@@ -4560,6 +4608,51 @@ mod teammate_msg_tests {
             teammate_collapsed_line(&plural_hinted),
             Some((0, 3, "yuzu-1ba1".to_string()))
         );
+    }
+
+    /// 공백 든 세션 이름은 @ 형식에서 하이픈으로 그려진다 — ascii 판정이던 시절
+    /// 한글 이름 발신자만 통째로 무테마였다(2026-08-31 스샷).
+    #[test]
+    fn detects_korean_session_name() {
+        let row = row_from("  › Message from @터미널-미러링-데몬-pty: 미니 배포는 내가", 80);
+        assert_eq!(
+            teammate_collapsed_line(&row).map(|(_, n, s)| (n, s)),
+            Some((1, "터미널-미러링-데몬-pty".to_string()))
+        );
+    }
+
+    /// 화면의 하이픈 이름이 태그 원문의 공백 이름과 맞아야 본문·발신자를 찾는다.
+    #[test]
+    fn extract_matches_hyphenated_screen_name_to_spaced_tag() {
+        let text = r#"<cross-session-message from="uds:/tmp/cc-socks/999999.sock" from-name="터미널 미러링 데몬 pty" from-mode="bypass">미니 배포는 내가 방금 돌렸다</cross-session-message>"#;
+        let m = extract_teammate_msg(text, "터미널-미러링-데몬-pty")
+            .expect("공백↔하이픈 정규화로 잡혀야 한다");
+        assert_eq!(m.body, "미니 배포는 내가 방금 돌렸다");
+        assert_eq!(m.from_label.as_deref(), Some("터미널 미러링 데몬 pty"));
+    }
+
+    /// 접힌 줄이 감겨 넘어간 꼬리 — 첫 행이 꽉 차고 사슬이 "to expand)" 로 끝날
+    /// 때만 인정한다. 본문 오탐으로 실제 출력을 지우면 안 된다.
+    #[test]
+    fn collapsed_wrap_tail_detects_the_wrapped_hint_chain() {
+        let cols = 40;
+        let full_line = format!("› Message from @m: {}", "본".repeat(21));
+        assert_eq!(full_line.chars().count(), cols);
+        let rows = vec![
+            row_from(&full_line, cols),
+            row_from("문 꼬리다 (ctrl+o to expand)", cols),
+            row_from("", cols),
+        ];
+        assert_eq!(collapsed_wrap_tail(&rows, 0), 1);
+        // 첫 행이 덜 찼으면 감긴 것이 아니다.
+        let rows2 = vec![
+            row_from("› Message from @m: 짧다", cols),
+            row_from("다음 행 (ctrl+o to expand)", cols),
+        ];
+        assert_eq!(collapsed_wrap_tail(&rows2, 0), 0);
+        // 사슬이 to expand 로 안 끝나면 본문 오탐 — 지우면 안 된다.
+        let rows3 = vec![row_from(&full_line, cols), row_from("그냥 본문", cols)];
+        assert_eq!(collapsed_wrap_tail(&rows3, 0), 0);
     }
 
     // 복수형 "› N messages from @이름" → count=N, 이름 추출(여러 자릿수 포함).

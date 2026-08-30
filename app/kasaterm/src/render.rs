@@ -2022,6 +2022,21 @@ impl App {
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
                         );
+                        // 접힌 줄이 다음 행들로 감겨 넘어간 꼬리 — 첫 행만 재작성하면
+                        // 원문 회색 잔해가 남는다(2026-08-31 스샷). 본문을 다시 그릴
+                        // 수 있으면 꼬리를 지워 전개 공간으로 넘기고(blank_run 이
+                        // 흡수한다), 본문이 없으면 색이라도 잇는다.
+                        let tail = collapsed_wrap_tail(&composed, r);
+                        for t in 0..tail {
+                            let row = &mut composed[r + 1 + t];
+                            if msg.is_some() {
+                                for c in row.iter_mut() {
+                                    c.ch = ' ';
+                                }
+                            } else {
+                                tint_row(row, accent);
+                            }
+                        }
                         let face_col = expand_teammate_message(
                             &mut composed,
                             r,
