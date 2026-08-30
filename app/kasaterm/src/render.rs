@@ -1122,7 +1122,7 @@ impl App {
                 // (재도색은 fg 를 ❯ 만 만진다) 다시 칠하면 이 선명화가 무너진다.
                 let mut sticky_pill_row: Option<usize> = None;
                 if let Some(sticky) =
-                    find_sticky_prompt(&composed, self.pane_last_prompt(id.as_str()))
+                    find_sticky_prompt(&composed, self.pane_prompts(id.as_str()))
                 {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;

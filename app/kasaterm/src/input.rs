@@ -703,7 +703,10 @@ impl App {
             let bg_active = if busy {
                 false
             } else {
-                bg_tab_busy.contains(id) || self.pane_bg_active(id)
+                // ⚠️ `||` 로 단축평가하지 마라 — bg 탭이 바쁘면 `pane_bg_active` 가
+                // 통째로 안 불려 sticky 띠 글감이 안 채워진다(위 주석과 같은 사고).
+                let from_pane = self.pane_bg_active(id);
+                bg_tab_busy.contains(id) || from_pane
             };
             // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접
             // 일하는 것과 뒤에서 도는 것을 함께 센다 — 그림 굽는 배치는 claude 가
@@ -774,29 +777,31 @@ impl App {
     /// pane, Windows(python3 없어 훅이 안 도는 경우), 옛 세션이 그 폴백으로 산다.
     /// 순서가 이 방향인 이유: 꼬리는 64KB 라 세션이 커지면 런치 기록이 밀려나 **오래
     /// 기다리는 작업일수록 안 보였다**(실측: 3.8MB 7건 / 8.3MB·24MB 0건). 훅이 「있다」고
-    /// 하면 그걸로 끝내고, 훅이 조용할 때만 꼬리를 읽는다.
+    /// 하면 그것으로 판정이 끝난다.
+    ///
+    /// ⚠️ 다만 훅이 「있다」고 **곧장 빠져나가지는 않는다**. 같은 꼬리에서 sticky 띠의
+    /// 글감(마지막 프롬프트)도 함께 꺼내므로, 일찍 반환하면 **일하는 pane 일수록 그
+    /// 글감이 영영 안 채워진다** — 훅 없는 임시창에서만 띠가 뜨고 실사용 창에서는 안
+    /// 뜨는 어긋남이 그래서 났다(2026-08-30). 읽기는 mtime 게이트가 막고 있어 싸다.
     fn pane_bg_active(&mut self, pane_id: &str) -> bool {
-        if self
+        let hook_bg = self
             .collab
             .hook_activity
             .lock()
             .unwrap()
             .get(pane_id)
-            .is_some_and(|a| !a.is_empty())
-        {
-            return true;
-        }
+            .is_some_and(|a| !a.is_empty());
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
-            return false;
+            return hook_bg;
         };
         let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
-            return false;
+            return hook_bg;
         };
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if let Some(mt) = mtime {
             if let Some((cached_mt, cached, _)) = self.pane_bg_mtime.get(pane_id) {
                 if *cached_mt == mt {
-                    return *cached;
+                    return hook_bg || *cached;
                 }
             }
         }
@@ -809,20 +814,17 @@ impl App {
         let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         if let Some(mt) = mtime {
-            self.pane_bg_mtime
-                .insert(pane_id.to_string(), (mt, bg, snap.last_prompt.clone()));
+            let prompts = crate::transcript::prompts_from_tail(&tail);
+            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts));
         }
-        bg
+        hook_bg || bg
     }
 
-    /// 그 pane 에서 마지막으로 사람이 친 프롬프트(transcript 기준). 스크롤 sticky
-    /// 띠의 글감 — claude 가 그 행을 더 이상 그려 주지 않으므로 kasaterm 이 직접
-    /// 채운다. `pane_bg_active` 가 같은 tail 에서 채워 둔 캐시를 읽기만 한다(무IO).
-    pub(crate) fn pane_last_prompt(&self, pane_id: &str) -> Option<&str> {
-        self.pane_bg_mtime
-            .get(pane_id)
-            .map(|(_, _, p)| p.trim())
-            .filter(|p| !p.is_empty())
+    /// 그 pane 에서 사람이 친 프롬프트들(오래된 것부터). 스크롤 sticky 띠의 글감 —
+    /// claude 가 그 행을 더 이상 그려 주지 않으므로 kasaterm 이 직접 채운다.
+    /// `pane_bg_active` 가 같은 tail 에서 채워 둔 캐시를 읽기만 한다(무IO).
+    pub(crate) fn pane_prompts(&self, pane_id: &str) -> &[(String, Vec<String>)] {
+        self.pane_bg_mtime.get(pane_id).map_or(&[], |(_, _, p)| p.as_slice())
     }
 
     /// 커서가 멎은 `[Image #N]` 참조를 받아 툴팁 상태를 옮기고, 이번 프레임에

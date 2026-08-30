@@ -948,6 +948,28 @@ fn is_injected_user_text(s: &str) -> bool {
     MARKERS.iter().any(|m| s.starts_with(m))
 }
 
+/// tail 안의 **사람이 친 프롬프트**를 오래된 것부터 모은다.
+///
+/// sticky 띠는 「지금 화면 위로 지나간 질문」을 골라야 하는데, 마지막 하나만으로는
+/// 한참 위로 올려다볼 때 늘 최신 질문이 붙어 **엉뚱한 게 뜬다**(2026-08-30 지적).
+/// 목록이 있어야 화면에 보이는 질문 줄과 대조해 그 **앞** 질문을 집을 수 있다.
+pub fn prompts_from_tail(tail: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for t in tail.lines().filter_map(parse_turn) {
+        if t.role == "user" {
+            let head = clip(t.text.lines().next().unwrap_or_default(), 160);
+            if !head.is_empty() {
+                out.push((head, Vec::new()));
+            }
+        } else if let Some((_, body)) = out.last_mut() {
+            // 답변 본문은 **줄 단위**로 둔다 — 화면에 보이는 줄과 맞춰 「지금 어느
+            // 턴을 보고 있나」를 재는 데 쓴다.
+            body.extend(t.text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
+        }
+    }
+    out
+}
+
 /// jsonl 한 줄을 대화 turn으로. 모니터링에 의미있는 것만 `Some`:
 /// - `type:"user"` 이고 content가 **문자열**(사람/오케스트레이터가 타이핑한
 ///   프롬프트)일 때만. content가 배열이면 tool_result(노이즈)라 버린다. 하네스

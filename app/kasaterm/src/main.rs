@@ -4931,7 +4931,7 @@ struct App {
     /// 프롬프트 행이 사라져(2026-08-30 실측: 스크롤해도 최상단 행이 빈 채로 온다)
     /// 띠의 글감이 없어졌다. 같은 tail 을 이미 읽고 있으므로 여기서 함께 꺼내면
     /// 추가 IO 없이 kasaterm 이 그 띠를 직접 그릴 수 있다.
-    pane_bg_mtime: HashMap<String, (std::time::SystemTime, bool, String)>,
+    pane_bg_mtime: HashMap<String, (std::time::SystemTime, bool, Vec<(String, Vec<String>)>)>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
