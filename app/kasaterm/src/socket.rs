@@ -698,6 +698,41 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// 이사가 출발지의 캐릭터 테마 선택을 이 기계에 재현한다 — 설정 화면과 같은
+    /// 경로(write_setting + 캐시 무효화)를 앱 프로세스 안에서 태운다. 파일만 밖에서
+    /// 고치면 도는 앱의 활성 테마·로스터 캐시가 낡은 채 남는다(character.rs 캐시 주석).
+    fn apply_character_theme(&self, theme_id: &str, picks_json: &str) -> Result<()> {
+        let picks_json = picks_json.trim();
+        // 빈 몸통 = 「명단은 안 바꾼다」. 값이 왔으면 {테마:[이름…]} 꼴만 받는다 —
+        // 자유 문자열이 설정 키를 오염하지 않게 파싱 실패는 통째로 세운다.
+        if !picks_json.is_empty() {
+            let v: serde_json::Value =
+                serde_json::from_str(picks_json).map_err(|e| anyhow::anyhow!("고른 명단 JSON 파싱 실패: {e}"))?;
+            let Some(obj) = v.as_object() else {
+                anyhow::bail!("고른 명단은 {{테마:[이름…]}} 객체여야 한다");
+            };
+            let picks: Vec<(String, Vec<String>)> = obj
+                .iter()
+                .map(|(k, arr)| {
+                    let names = arr
+                        .as_array()
+                        .map(|a| {
+                            a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()
+                        })
+                        .unwrap_or_default();
+                    (k.clone(), names)
+                })
+                .collect();
+            write_character_picks(&picks);
+        }
+        write_setting("character_theme", serde_json::Value::String(theme_id.to_string()));
+        kasa_mcp::character::invalidate_active_theme();
+        crate::theme::invalidate_roster();
+        // 화면 갱신은 best-effort — 다음 상호작용에서라도 새 테마로 그려진다.
+        let _ = self.proxy.send_event(UserEvent::Redraw);
+        Ok(())
+    }
+
     /// 활성 pane(보이는 방)의 방 식별자 — 모모톡 inbox 등을 방별 격리(거노). ws 공유.
     fn active_room(&self) -> Option<String> {
         let ws = self.ws.lock().unwrap();
@@ -3950,6 +3985,165 @@ pub fn delete_theme(id: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(dest)
 }
 
+/// macOS Finder 로 압축하면 리소스 포크가 `__MACOSX/` 에 따라붙는다. 테마와 무관한데
+/// 최상위 폴더가 둘로 보이게 만들어 껍질 판정을 망가뜨리므로 훑기에서 아예 뺀다.
+fn zip_noise(p: &std::path::Path) -> bool {
+    p.components().any(|c| matches!(c.as_os_str().to_str(), Some("__MACOSX") | Some(".DS_Store")))
+}
+
+/// 테마 zip 하나를 `themes/` 로 푼다 — 성공하면 만들어진 폴더 id 를 돌려준다.
+///
+/// **받은 zip 을 믿지 않는다.** 항목 이름에 `..` 이나 절대 경로가 섞이면 뿌리 밖에
+/// 파일을 쓸 수 있다(zip slip). `enclosed_name` 이 그걸 걸러 주지만, 걸린 항목만
+/// 건너뛰지 않고 **통째로 거절**한다 — 반쯤 풀린 테마는 `theme.json` 이 없어 목록에서
+/// 조용히 빠지고, 그러면 사용자에게는 원인 없는 「가져오기가 안 된다」로만 보인다.
+///
+/// 푸는 자리도 임시 폴더다. 다 풀고 `theme.json` 을 확인한 뒤에야 최종 위치로 옮긴다.
+/// 같은 뿌리 안이라 그 이동은 rename 한 번이고, 중간에 끊겨도 목록에 반쪽이 안 뜬다.
+pub fn import_theme(zip_path: &std::path::Path) -> std::io::Result<String> {
+    let root = kasa_mcp::character::themes_root()
+        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
+    import_theme_into(&root, zip_path)
+}
+
+/// 뿌리를 인자로 받는 본체. 갈라 둔 건 시험 때문이다 — 경로 검사가 이 함수의
+/// 핵심인데, 뿌리를 안에서 구하면 시험이 실제 테마 폴더에 풀어 보는 수밖에 없다.
+fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std::io::Result<String> {
+    // 테마 하나는 400장·5MB 안팎이다. 상한을 넉넉히 두되 무한은 아니게 — 압축률이
+    // 극단적인 zip 한 장으로 디스크를 채울 수 있다.
+    const MAX_FILES: usize = 8_000;
+    const MAX_TOTAL: u64 = 512 * 1024 * 1024;
+
+    let f = std::fs::File::open(zip_path)?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(f))
+        .map_err(|e| std::io::Error::other(format!("zip 을 못 열었어요 — {e}")))?;
+    if zip.len() > MAX_FILES {
+        return Err(std::io::Error::other("한 테마치고 파일이 너무 많아요"));
+    }
+
+    // ── 1) 쓰기 전에 다 훑는다 ──────────────────────────────────────────────
+    // 어디에 풀지와 풀어도 되는지를 첫 바이트를 쓰기 전에 정한다.
+    let mut items: Vec<(std::path::PathBuf, bool)> = Vec::with_capacity(zip.len());
+    let mut total = 0u64;
+    for i in 0..zip.len() {
+        let e = zip.by_index(i).map_err(|e| std::io::Error::other(format!("zip 을 읽다 막혔어요 — {e}")))?;
+        let Some(p) = e.enclosed_name() else {
+            return Err(std::io::Error::other(format!("경로가 뿌리를 벗어나요 — {}", e.name())));
+        };
+        if zip_noise(&p) {
+            continue;
+        }
+        total += e.size();
+        if total > MAX_TOTAL {
+            return Err(std::io::Error::other("압축을 풀면 너무 커져요"));
+        }
+        items.push((p, e.is_dir()));
+    }
+    if items.is_empty() {
+        return Err(std::io::Error::other("빈 zip 이에요"));
+    }
+
+    // ── 2) 껍질 한 겹을 벗길지 정한다 ───────────────────────────────────────
+    // 「폴더째 압축」(`myeongjo/theme.json`)과 「안에서 압축」(`theme.json`)이 둘 다
+    // 흔하다. 전자를 그대로 풀면 `themes/myeongjo/myeongjo/` 가 되어 목록에 안 뜬다.
+    let shell = {
+        let firsts: std::collections::BTreeSet<_> = items
+            .iter()
+            .filter_map(|(p, _)| p.components().next().map(|c| c.as_os_str().to_owned()))
+            .collect();
+        // 최상위가 하나뿐이고 그게 폴더일 때만 껍질로 본다.
+        match firsts.len() {
+            1 if items.iter().any(|(p, _)| p.components().count() > 1) => {
+                firsts.into_iter().next()
+            }
+            _ => None,
+        }
+    };
+    let strip = |p: &std::path::Path| -> Option<std::path::PathBuf> {
+        match &shell {
+            Some(s) => p.strip_prefix(s).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.to_path_buf()),
+            None => Some(p.to_path_buf()),
+        }
+    };
+    if !items.iter().filter_map(|(p, _)| strip(p)).any(|p| p == std::path::Path::new("theme.json")) {
+        return Err(std::io::Error::other("theme.json 이 없어요 — 테마 zip 이 맞나요?"));
+    }
+
+    // id 는 껍질 이름, 껍질이 없으면 zip 파일 이름. 폴더명은 파일시스템 주소라
+    // 화면에 보이는 label 과 달리 정화해서 쓴다(`create_theme` 과 같은 규칙).
+    let raw = shell
+        .as_ref()
+        .and_then(|s| s.to_str().map(|s| s.to_string()))
+        .or_else(|| zip_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let id = match sanitize_theme_id(&raw) {
+        s if s.is_empty() => "imported".to_string(),
+        s => s,
+    };
+
+    // ── 3) 임시로 풀고, 다 된 뒤에 옮긴다 ───────────────────────────────────
+    // 같은 뿌리에 푸는 건 마지막 rename 이 볼륨을 안 넘게 하려는 것이다. `_` 로
+    // 시작하는 이름은 `_trash` 와 같은 이유로 테마 목록에 안 잡힌다.
+    // 이름에 시각까지 넣는 건 **같은 프로세스가 둘을 동시에 풀 수 있어서**다.
+    // pid 만으로 지으면 둘째 호출이 첫째의 임시 폴더를 지우고 들어앉는다.
+    let tmp = root.join(format!(
+        "_import-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp)?;
+    let unpack = |zip: &mut zip::ZipArchive<std::io::BufReader<std::fs::File>>| -> std::io::Result<()> {
+        for i in 0..zip.len() {
+            let mut e = zip.by_index(i).map_err(std::io::Error::other)?;
+            let Some(p) = e.enclosed_name() else { continue };
+            if zip_noise(&p) {
+                continue;
+            }
+            let Some(rel) = strip(&p) else { continue };
+            let dest = tmp.join(&rel);
+            if e.is_dir() {
+                std::fs::create_dir_all(&dest)?;
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&dest)?;
+            std::io::copy(&mut e, &mut out)?;
+        }
+        Ok(())
+    };
+    if let Err(e) = unpack(&mut zip) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if !tmp.join("theme.json").is_file() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(std::io::Error::other("theme.json 이 없어요 — 테마 zip 이 맞나요?"));
+    }
+
+    // 같은 id 가 이미 있으면 덮지 않고 `_trash` 로 물린다 — 손수 고쳐 둔 테마를
+    // 드롭 한 번으로 잃는 건 되돌릴 수 없다. 옮겨 두면 되살릴 수 있다.
+    let dir = root.join(&id);
+    if dir.exists() {
+        let trash = root.join("_trash");
+        std::fs::create_dir_all(&trash)?;
+        let dest = (1..1000)
+            .map(|n| trash.join(if n == 1 { id.clone() } else { format!("{id}-{n}") }))
+            .find(|p| !p.exists())
+            .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
+        std::fs::rename(&dir, &dest)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dir) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    Ok(id)
+}
+
 /// 고른 캐릭터 테마 id — 빈 문자열이면 번들. 폴더가 실재하는지는 여기서 안 본다
 /// (`character::active_theme_dir` 이 그걸 판정한다). 설정 화면이 「지금 고른 것」을
 /// 표시하는 데 쓰므로, 폴더가 사라져도 고른 값 자체는 그대로 보여야 사용자가
@@ -5344,5 +5538,138 @@ mod pid_cwd_tests {
             (200, 100, "/bin/zsh -c cd /repo && claude --model opus".to_string()),
         ];
         assert_eq!(super::claude_under(&table, 100), None);
+    }
+}
+
+#[cfg(test)]
+mod theme_import_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp_root(tag: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("kasaterm-import-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// 항목 이름을 **문자열 그대로** 넣는다 — 경로로 정규화해 담으면 `..` 이
+    /// 여기서 사라져 정작 시험하려던 공격 zip 을 못 만든다.
+    fn make_zip(dir: &std::path::Path, name: &str, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (n, body) in entries {
+            w.start_file(*n, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+        path
+    }
+
+    const ROSTER: &[u8] = r#"{"label":"시험","members":[]}"#.as_bytes();
+
+    /// 「폴더째 압축」이 가장 흔한 형태다. 껍질을 안 벗기면
+    /// `themes/<id>/<id>/theme.json` 이 되어 목록에 안 뜬다.
+    #[test]
+    fn folder_shell_is_stripped() {
+        let root = tmp_root("shell");
+        let z = make_zip(&root, "pack.zip", &[
+            ("myeongjo/theme.json", ROSTER),
+            ("myeongjo/sprites/idle/a-0.png", b"x"),
+        ]);
+        let id = import_theme_into(&root, &z).unwrap();
+        assert_eq!(id, "myeongjo");
+        assert!(root.join("myeongjo/theme.json").is_file());
+        assert!(root.join("myeongjo/sprites/idle/a-0.png").is_file());
+        // 껍질이 한 겹 더 남지 않았는지.
+        assert!(!root.join("myeongjo/myeongjo").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 폴더 안에서 압축한 zip 은 껍질이 없다 — 그때는 파일 이름이 id 가 된다.
+    #[test]
+    fn bare_zip_takes_its_filename() {
+        let root = tmp_root("bare");
+        let z = make_zip(&root, "vocaloid.zip", &[
+            ("theme.json", ROSTER),
+            ("sprites/profile/a.png", b"x"),
+        ]);
+        let id = import_theme_into(&root, &z).unwrap();
+        assert_eq!(id, "vocaloid");
+        assert!(root.join("vocaloid/theme.json").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★ zip slip — `..` 이 든 항목 하나로 뿌리 밖에 쓸 수 있다. 그 항목만
+    /// 건너뛰지 말고 **통째로 거절**해야 반쪽 테마가 안 남는다.
+    #[test]
+    fn escaping_entry_rejects_the_whole_zip() {
+        let root = tmp_root("slip");
+        let z = make_zip(&root, "evil.zip", &[
+            ("theme.json", ROSTER),
+            ("../escaped.txt", b"pwned"),
+        ]);
+        assert!(import_theme_into(&root, &z).is_err());
+        // 뿌리 밖에도, 안에도 아무것도 안 남아야 한다.
+        assert!(!root.parent().unwrap().join("escaped.txt").exists());
+        assert!(!root.join("evil").exists());
+        assert!(std::fs::read_dir(&root).unwrap()
+            .filter_map(|e| e.ok())
+            .all(|e| e.file_name() == "evil.zip"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `theme.json` 이 없는 폴더는 테마로 안 잡힌다(`active_theme_dir_in`). 그걸
+    /// 그냥 풀어 두면 목록에 안 뜨는 폴더만 생기고, 사용자에겐 원인이 안 보인다.
+    #[test]
+    fn zip_without_roster_is_refused() {
+        let root = tmp_root("noroster");
+        let z = make_zip(&root, "sprites-only.zip", &[("sprites/idle/a-0.png", b"x")]);
+        assert!(import_theme_into(&root, &z).is_err());
+        assert!(!root.join("sprites-only").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// macOS Finder 로 압축하면 `__MACOSX/` 가 따라붙는다. 그걸 항목으로 세면
+    /// 최상위가 둘이 되어 껍질 판정이 깨진다.
+    #[test]
+    fn macos_resource_fork_does_not_break_shell_detection() {
+        let root = tmp_root("macosx");
+        let z = make_zip(&root, "pack.zip", &[
+            ("zzz/theme.json", ROSTER),
+            ("__MACOSX/zzz/._theme.json", b"junk"),
+            ("zzz/.DS_Store", b"junk"),
+        ]);
+        let id = import_theme_into(&root, &z).unwrap();
+        assert_eq!(id, "zzz");
+        assert!(root.join("zzz/theme.json").is_file());
+        assert!(!root.join("zzz/__MACOSX").exists());
+        assert!(!root.join("__MACOSX").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 같은 이름을 다시 가져오면 **덮지 않고** 옛것을 `_trash` 로 물린다 —
+    /// 손수 고쳐 둔 테마를 드롭 한 번으로 잃으면 되돌릴 방법이 없다.
+    #[test]
+    fn reimport_parks_the_old_one_in_trash() {
+        let root = tmp_root("replace");
+        let z = make_zip(&root, "pack.zip", &[("genshin/theme.json", ROSTER)]);
+        import_theme_into(&root, &z).unwrap();
+        // 사용자가 고쳐 둔 흔적.
+        std::fs::write(root.join("genshin/mine.txt"), b"hand-edited").unwrap();
+
+        let id = import_theme_into(&root, &z).unwrap();
+        assert_eq!(id, "genshin");
+        assert!(root.join("genshin/theme.json").is_file());
+        // 새로 온 것에는 그 흔적이 없고,
+        assert!(!root.join("genshin/mine.txt").exists());
+        // 옛것은 살아서 `_trash` 에 있다.
+        assert!(root.join("_trash/genshin/mine.txt").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

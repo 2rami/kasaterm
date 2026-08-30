@@ -4423,6 +4423,19 @@ pub(crate) fn paint_settings(
                     rects.push((SettingsAction::ExportTheme, card));
                 }
             }
+            // 가져오기는 버튼이 아니라 드롭이라 화면에 아무 흔적이 없다. 한 줄이라도
+            // 적어 두지 않으면 그런 길이 있다는 걸 알 방법이 없고, 그럼 받은 테마를
+            // 넣으려는 사람은 숨은 폴더를 손으로 찾아 들어가야 한다.
+            {
+                let hint = "테마 zip 을 이 창에 끌어다 놓으면 가져와요";
+                if y + 22.0 > clip {
+                    g.draw_text(
+                        fx + 2.0, y + 10.0, hint,
+                        gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                }
+                y += 26.0;
+            }
             y += 20.0;
 
             // ── 페르소나를 쓸지 ──────────────────────────────────────────

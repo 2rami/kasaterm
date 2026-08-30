@@ -1816,6 +1816,26 @@ impl App {
     /// 캐릭터 상세가 안 열려 있으면 무시한다 — 어느 캐릭터 것인지 정할 길이 없다.
     /// 이미지가 아닌 파일은 place 쪽 디코드가 거르고 사유가 토스트로 뜬다.
     fn aux_settings_drop(&mut self, idx: usize, path: std::path::PathBuf) {
+        // zip 은 테마 팩 말고 쓸 데가 없어서 어느 카테고리에 있든 받는다. Theme
+        // 화면에서만 받으면 「그 화면이 있다」는 것부터 알아야 가져올 수 있고,
+        // 처음 받아 보는 사람에게는 그게 곧 못 쓰는 기능이다.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            match crate::socket::import_theme(&path) {
+                Ok(id) => {
+                    // 덮어쓴 것이 지금 쓰는 테마일 수 있다 — 셋을 다 비우지 않으면
+                    // 화면이 두 테마를 섞고, 그건 「덜 바뀐 것」이 아니라 고장이다.
+                    crate::socket::invalidate_theme_rows();
+                    kasa_mcp::character::invalidate_active_theme();
+                    crate::theme::invalidate_roster();
+                    // 켜 주지는 않는다 — 가져오는 것과 갈아 끼우는 것은 다른 결정이고,
+                    // 쓰던 세트가 드롭 한 번에 바뀌면 그건 사고다.
+                    self.set_toast(format!("'{id}' 을 가져왔어요 — 목록에서 고르면 켜져요"));
+                }
+                Err(e) => self.set_toast(format!("테마를 못 가져왔어요 — {e}")),
+            }
+            self.aux_redraw(idx);
+            return;
+        }
         if self.settings_cat != crate::SettingsCat::Students {
             return;
         }

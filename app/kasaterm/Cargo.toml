@@ -85,6 +85,12 @@ tree-sitter-css = "0.25.0"
 tree-sitter-html = "0.23.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-yaml = "0.7.2"
+# 설정 화면에 떨어뜨린 테마 zip 을 푼다(socket.rs `import_theme`). 외부 `unzip`
+# 을 부르지 않는 건 Windows 에 그게 없어서고, 무엇보다 **경로 검사를 우리가
+# 해야** 하기 때문이다 — 남이 만든 zip 을 그대로 믿고 풀면 `../` 하나로 홈
+# 어디든 쓸 수 있다. default-features off: 테마 zip 은 deflate 뿐이라 bzip2·
+# zstd·lzma·AES 해독기를 함께 들일 이유가 없다(공격면도 그만큼 준다).
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.
