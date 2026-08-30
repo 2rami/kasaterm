@@ -1984,9 +1984,7 @@ pub(crate) fn find_sticky_prompt(
                 .trim_start()
                 .trim_start_matches(['\u{276f}', '\u{203a}', '>'])
                 .trim();
-            let known = prompts
-                .iter()
-                .find(|(p, _)| head12(p) == head12(bare) && !bare.is_empty());
+            let known = match_prompt(bare, prompts).and_then(|i| prompts.get(i));
             if prompts.is_empty() || known.is_some() {
                 // 화면에서 질문을 **직접 봤다**. 더 올려 이 줄이 밀려나도 어느 턴인지
                 // 알도록 기억해 둔다 — 이걸 안 하면 기억이 낡은 채로 남는다.
@@ -2096,12 +2094,37 @@ fn strip_screen_ornament(t: &str) -> &str {
 ///
 /// 실측(24턴, 8MB 기록): 조각 하나로 22턴이 유일하게 가려진다. 못 가리는 둘은 답이
 /// 한 줄뿐인 턴이라 애초에 화면을 채우지 못한다.
-/// 화면 줄과 기록 속 질문을 맞대 볼 때 쓰는 머리 12자.
+/// 화면의 질문 줄이 기록 속 **어느** 질문인가. 딱 하나일 때만 답한다.
 ///
-/// 전문을 맞대면 안 맞는다 — 화면의 질문 줄은 폭에서 잘리거나 접히고, 기록 쪽은
-/// 안 잘린 원문이다. 앞부분만 보면 그 둘이 같은 질문인지는 충분히 가려진다.
-fn head12(s: &str) -> String {
-    s.trim().chars().take(12).collect()
+/// 전문을 맞대면 안 맞는다 — 화면 쪽은 폭에서 잘리고 접히며, 기록 쪽은 원문이다.
+/// 그래서 **접두사**로 본다. 공백은 양쪽에서 지운다(접힘·들여쓰기가 다르다).
+///
+/// ⚠️ 머리 몇 글자만 보던 판이 실측에서 통째로 빗나갔다(2026-08-31, 격리
+/// 인스턴스): 질문 넷이 모두 같은 말로 시작하자 **전부 첫 질문으로 매칭**돼
+/// 어느 자리에서 보든 띠가 1번 질문을 물었다. 실제 대화도 「그럼 …」·「아니 …」로
+/// 시작하는 질문이 줄줄이 이어지므로 이건 시험 데이터만의 사정이 아니다.
+///
+/// 그래서 **후보가 둘 이상이면 못 가린 것으로 본다** — 틀린 질문을 자신 있게
+/// 다는 것보다, 본문으로 되짚는 다음 단계에 넘기는 편이 낫다.
+fn match_prompt(line: &str, prompts: &[(String, Vec<String>)]) -> Option<usize> {
+    let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+    let q = squeeze(line);
+    if q.chars().count() < 2 {
+        return None;
+    }
+    let mut only = None;
+    let mut hits = 0usize;
+    for (i, (p, _)) in prompts.iter().enumerate() {
+        let pn = squeeze(p);
+        if pn.starts_with(&q) || q.starts_with(&pn) {
+            hits += 1;
+            if hits > 1 {
+                return None;
+            }
+            only = Some(i);
+        }
+    }
+    only
 }
 
 fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize> {
@@ -2150,31 +2173,23 @@ fn pick_scrolled_past_prompt(
     // 빈 줄과 글머리만 남은 줄을 거른다. 길이로 더 자르지는 않는다 — 가리는 힘은
     // 「그 조각을 가진 턴이 하나뿐인가」가 내고, 흔한 줄은 그 조건에서 저절로 떨어진다.
     const MIN_DISTINCT: usize = 2;
-    let mut topmost: Option<usize> = None;
-    // 그 머리줄보다 **위에** 지난 턴의 꼬리가 있었는가. 없으면 머리줄이 곧 화면
-    // 맨 위이므로 띠는 그 질문 자신이다 — 여기서 무조건 한 칸 앞을 집는 것이
-    // 「딱 맞지는 않는다」의 정체였다(2026-08-31).
-    let mut body_above_header = false;
-    let mut header_seen = false;
+    // 가장 위 질문과 **그 줄의 행 번호**. 행 번호가 한 칸을 가른다(아래 참조).
+    let mut topmost: Option<(usize, usize)> = None;
     let mut body: Vec<String> = Vec::new();
-    for row in rows {
+    for (ri, row) in rows.iter().enumerate() {
         let text = row_match_text(row);
         let t = text.trim();
         if let Some(q) = t.strip_prefix('>').or_else(|| t.strip_prefix('\u{276f}')) {
             let q = q.trim();
-            if !q.is_empty() {
-                let key = head12(q);
-                if let Some(i) = prompts.iter().position(|(p, _)| head12(p) == key) {
-                    topmost = Some(topmost.map_or(i, |cur: usize| cur.min(i)));
-                    header_seen = true;
-                    continue;
-                }
+            if let Some(i) = match_prompt(q, prompts) {
+                topmost = Some(match topmost {
+                    Some((cur, cr)) if cur <= i => (cur, cr),
+                    _ => (i, ri),
+                });
+                continue;
             }
         }
         let stripped = strip_screen_ornament(t);
-        if !header_seen && !stripped.is_empty() {
-            body_above_header = true;
-        }
         if body.len() < BODY_ROWS {
             // 짧은 줄은 어느 턴에나 있다(「24」·「ok」·닫는 괄호). 길이로 거른다.
             if stripped.chars().count() >= MIN_DISTINCT {
@@ -2189,13 +2204,15 @@ fn pick_scrolled_past_prompt(
             body.iter().collect::<Vec<_>>()
         );
     }
-    if let Some(i) = topmost {
+    if let Some((i, ri)) = topmost {
         // 머리줄을 봤다 — 이건 짐작이 아니라 확정이다.
         //
-        // **그 머리줄 위에 무엇이 있었는가**로 한 칸이 갈린다. 위에 지난 턴의 꼬리가
-        // 남아 있으면 화면 맨 위는 그 앞 턴(i-1)의 답이고, 머리줄이 곧 첫 줄이면
-        // 화면은 이 턴(i)의 답이다. 늘 i-1 을 집던 것이 「딱 맞지는 않는다」였다.
-        let want = if body_above_header { i.checked_sub(1) } else { Some(i) };
+        // **그 머리줄이 몇 행인가**로 한 칸이 갈린다. 띠는 0행을 덮으므로,
+        // 머리줄이 0행이면 띠가 그 자리를 대신 차지한다 — 거기에 앞 질문을 쓰면
+        // 보이던 질문을 덮고 거짓말을 하는 셈이다. 그때는 그 질문 자신이 답이다.
+        // 아래 행이면 띠는 머리줄 **위에** 얹히므로 화면 맨 윗줄은 앞 턴의 꼬리고,
+        // 그 앞 질문이 답이다(첫 질문이면 위가 없으니 띠도 없다).
+        let want = if ri == 0 { Some(i) } else { i.checked_sub(1) };
         let past = want.and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
         if past.is_some() {
             *memo = past.clone();
@@ -3908,14 +3925,22 @@ mod clawd_banner_tests {
         assert!(find_sticky_prompt(&rows, &ps, &mut None).is_none());
     }
 
-    /// 그 폴백은 **빈 행에만** 얹는다 — 본문이 올라와 있으면 덮지 않는다.
+    /// 그 폴백은 **본문이 올라와 있어도 얹는다** — 고정 머리줄은 원래 한 줄을 덮는다.
+    ///
+    /// 「빈 행에만」이던 종전 조건이 실화면에서 거의 안 걸렸다(2026-08-31 실측:
+    /// 올려다보는 화면의 맨 윗줄은 대개 접힌 본문 한 조각이라 띠가 통째로 안 떴고,
+    /// 「스크롤하면 붙는다」가 아니라 「됐다 안 됐다 한다」로 보였다). 덮이는 것은
+    /// 지금 맨 위 한 줄뿐이고, 스크롤하면 곧 아래로 내려와 다시 읽힌다.
     #[test]
-    fn the_fallback_never_paints_over_real_content() {
+    fn the_fallback_covers_the_top_row_even_with_content() {
         let rows = vec![
             row_from("  본문이 여기 있다"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])], &mut None).is_none());
+        let got = find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])], &mut None).expect("감지");
+        assert_eq!(got.row, 0);
+        assert!(got.synthetic);
+        assert_eq!(got.text, "내가 친 질문");
     }
 
     /// 마커 없는 흐릿한 줄은 **잡지 않는다** — claude 배너·회색 안내문이 그 자리에
