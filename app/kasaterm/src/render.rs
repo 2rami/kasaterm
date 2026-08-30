@@ -1192,14 +1192,25 @@ impl App {
                         // 직접 써 넣는다. `❯` 를 앞세워 아래 fg 규칙이 그대로 걸리게
                         // 하면 색 분기를 따로 둘 필요가 없다.
                         if sticky.synthetic {
-                            let line: Vec<char> =
-                                format!("❯ {}", sticky.text).chars().collect();
+                            use unicode_width::UnicodeWidthChar;
                             let room = up_col.unwrap_or(row.len()).saturating_sub(2);
-                            for (i, cell) in row.iter_mut().enumerate() {
-                                cell.ch = match i.checked_sub(1) {
-                                    Some(k) if i < room => *line.get(k).unwrap_or(&' '),
-                                    _ => ' ',
-                                };
+                            for cell in row.iter_mut() {
+                                cell.ch = ' ';
+                            }
+                            let mut w = 1usize; // 왼쪽 한 칸 들여쓴다
+                            for ch in format!("❯ {}", sticky.text).chars() {
+                                let cw = ch.width().unwrap_or(1).max(1);
+                                if w + cw > room {
+                                    break;
+                                }
+                                row[w].ch = ch;
+                                // wide 글리프의 뒤칸은 **공백 셀**로 둔다 — 이 레포의
+                                // 셀 표현 관례다(`paint_header_row` 와 같은 모양).
+                                // 한 칸에 한 글자씩 밀어 넣으면 한글이 겹쳐 뭉개진다.
+                                if cw == 2 {
+                                    row[w + 1].ch = ' ';
+                                }
+                                w += cw;
                             }
                         }
                         for (i, cell) in row.iter_mut().enumerate() {
