@@ -302,22 +302,47 @@ impl ApplicationHandler<UserEvent> for App {
                     let (base, cwd) = if base.starts_with("http") {
                         (base.clone(), cwd.clone())
                     } else {
-                        let m = kasa_mcp::machines::find(base).ok_or_else(|| {
-                            anyhow::anyhow!("기계 {base} 를 명부에서 못 찾았다 — machines.json 확인")
-                        })?;
+                        // `mini` 는 「명부 첫 기계」의 별칭 — `claude mini` 셰임이
+                        // 라벨을 모른 채 보내는 기본값이다(라벨이 뭐든 통하게).
+                        let m = kasa_mcp::machines::find(base)
+                            .or_else(|| {
+                                (base == "mini")
+                                    .then(|| kasa_mcp::machines::machines().into_iter().next())
+                                    .flatten()
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "기계 {base} 를 명부에서 못 찾았다 — machines.json 확인"
+                                )
+                            })?;
                         let cwd = match cwd {
                             Some(c) => Some(c.clone()),
-                            None => self
-                                .pty
-                                .get(pane)
-                                .and_then(|s| s.shell_pid())
-                                .and_then(crate::socket::pid_cwd)
-                                .and_then(|l| {
+                            None => {
+                                let local = self
+                                    .pty
+                                    .get(pane)
+                                    .and_then(|s| s.shell_pid())
+                                    .and_then(crate::socket::pid_cwd)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("{pane} 의 작업 폴더를 못 읽었다")
+                                    })?;
+                                // 매핑이 없으면 세운다 — 조용히 로컬 경로를 그대로 쓰면
+                                // 저쪽에 없는 폴더로 cd 가 실패해 학생이 안 뜬다(격리
+                                // 검증 실측: /tmp 가 /private/tmp 로 풀려 규칙을 비껴갔다).
+                                Some(
                                     kasa_mcp::machines::map_local_to_remote(
                                         &m,
-                                        &l.to_string_lossy(),
+                                        &local.to_string_lossy(),
                                     )
-                                }),
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "{} 를 {} 경로로 못 옮겼다 — machines.json roots 에 규칙을",
+                                            local.display(),
+                                            m.label
+                                        )
+                                    })?,
+                                )
+                            }
                         };
                         (m.base, cwd)
                     };

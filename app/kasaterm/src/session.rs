@@ -759,18 +759,24 @@ impl App {
         let Some(shell) = sess.shell_pid() else {
             anyhow::bail!("{pid} 의 셸 pid 를 모른다");
         };
-        let Some((kind, agent_pid)) =
-            kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)
-        else {
-            anyhow::bail!("{pid} 에 도는 에이전트가 없다 — 이사는 claude pane 전용이다");
-        };
-        if kind != kasa_pty::AgentKind::Claude {
-            anyhow::bail!("이사는 claude 전용이다({kind:?} 는 대화 파일 규약이 다르다)");
+        // 에이전트가 **없는** 셸 pane 이면 이사가 아니라 **그 기계 태생 스폰**이다
+        // — 옮길 대화가 없으니 레포만 맞추고 저쪽에 진짜 학생을 앉힌 뒤 이 pane 을
+        // 거울로 바꾼다(2026-08-30 지시 「claude mini 이렇게 키면 맥미니에서 켜게」).
+        let agent = kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell);
+        if let Some((kind, _)) = &agent {
+            if *kind != kasa_pty::AgentKind::Claude {
+                anyhow::bail!("이사는 claude 전용이다({kind:?} 는 대화 파일 규약이 다르다)");
+            }
         }
-        let Some(sid) = self.pane_claude_sid.get(pid).cloned() else {
-            anyhow::bail!(
-                "{pid} 의 claude 세션 id 를 아직 모른다 — 대화를 한 번 주고받은 뒤 다시"
-            );
+        let fresh = agent.is_none();
+        let sid = if fresh {
+            None
+        } else {
+            Some(self.pane_claude_sid.get(pid).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{pid} 의 claude 세션 id 를 아직 모른다 — 대화를 한 번 주고받은 뒤 다시"
+                )
+            })?)
         };
         let cwd = socket::pid_cwd(shell)
             .ok_or_else(|| anyhow::anyhow!("{pid} 의 작업 폴더를 못 읽었다"))?;
@@ -784,10 +790,15 @@ impl App {
             .get(pid)
             .cloned()
             .unwrap_or_default();
-        let jsonl = kasa_socket::sessions::session_jsonl_path(&cwd, &sid)
-            .filter(|p| p.exists())
-            .or_else(|| socket::transcript_path_for_session(&sid))
-            .ok_or_else(|| anyhow::anyhow!("세션 {sid} 의 대화 파일을 못 찾았다"))?;
+        let jsonl = match &sid {
+            None => None,
+            Some(sid) => Some(
+                kasa_socket::sessions::session_jsonl_path(&cwd, sid)
+                    .filter(|p| p.exists())
+                    .or_else(|| socket::transcript_path_for_session(sid))
+                    .ok_or_else(|| anyhow::anyhow!("세션 {sid} 의 대화 파일을 못 찾았다"))?,
+            ),
+        };
         // 코드부터 맞춘다 — **claude 를 끄기 전에**. 여기서 실패하면 아무것도 안
         // 건드린 채로 돌아설 수 있다(끄고 나서 실패하면 학생만 잃는다).
         let origin = crate::proc::command("git")
@@ -864,35 +875,45 @@ impl App {
         // 권한 모드를 승계한다 — 안 실으면 옮겨간 학생이 기본값(auto)으로 떠서
         // 「왜 오토모드로 바뀌었냐」가 된다(거노 2026-08-27). 화면 문구를 읽지 않고
         // **도는 프로세스의 인자**를 본다 — 그게 유일한 진실이다.
-        let bypass = crate::proc::command("ps")
-            .args(["-o", "command=", "-p", &agent_pid.to_string()])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions"))
-            .unwrap_or(false);
+        // 태생 스폰(fresh)은 물려받을 인자가 없다 — 학생 스폰 관례(bypass)를 따른다.
+        let bypass = match &agent {
+            None => true,
+            Some((_, agent_pid)) => crate::proc::command("ps")
+                .args(["-o", "command=", "-p", &agent_pid.to_string()])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions")
+                })
+                .unwrap_or(false),
+        };
         // 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
-        // 다투는 것이 최악이다(옛 9-pane 사고의 원형).
-        self.migrate_progress(pid, "학생 곱게 끄는 중…".to_string());
-        unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
-            if std::time::Instant::now() > deadline {
-                anyhow::bail!("claude(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 이사를 세웠다");
+        // 다투는 것이 최악이다(옛 9-pane 사고의 원형). 태생 스폰은 끌 것도
+        // 옮길 대화도 없어 이 구간을 통째로 건너뛴다.
+        if let (Some((_, agent_pid)), Some(sid), Some(jsonl)) = (&agent, &sid, &jsonl) {
+            let agent_pid = *agent_pid;
+            self.migrate_progress(pid, "학생 곱게 끄는 중…".to_string());
+            unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
+                if std::time::Instant::now() > deadline {
+                    anyhow::bail!("claude(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 이사를 세웠다");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
             }
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            self.migrate_progress(
+                pid,
+                format!(
+                    "대화 옮기는 중{}…",
+                    std::fs::metadata(jsonl)
+                        .map(|m| format!(" — {:.1}MB", m.len() as f64 / 1048576.0))
+                        .unwrap_or_default()
+                ),
+            );
+            kasa_mcp::remote::upload_transcript(base, &remote_cwd, sid, jsonl, None, force)?;
         }
-        self.migrate_progress(
-            pid,
-            format!(
-                "대화 옮기는 중{}…",
-                std::fs::metadata(&jsonl)
-                    .map(|m| format!(" — {:.1}MB", m.len() as f64 / 1048576.0))
-                    .unwrap_or_default()
-            ),
-        );
-        kasa_mcp::remote::upload_transcript(base, &remote_cwd, &sid, &jsonl, None, force)?;
         // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
         // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
         sess.stop_reader();
@@ -956,8 +977,8 @@ impl App {
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         let cmd = restore_agent_command(
             Some("claude"),
-            Some(&sid),
-            true,
+            sid.as_deref(),
+            sid.is_some(),
             Some(model.as_str()).filter(|s| !s.is_empty()),
             Some(effort.as_str()).filter(|s| !s.is_empty()),
         );

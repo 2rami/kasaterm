@@ -7465,6 +7465,19 @@ fi\n\
 case \"$1\" in\n\
   kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
 esac\n\
+# `claude mini` — 학생을 처음부터 다른 기계(명부 첫 기계, 보통 맥미니)에서\n\
+# 태어나게 한다. 실행은 앱이 한다: 이 셸 pane 을 레포 동율 맞춘 원격 학생의\n\
+# 거울로 바꾼다(2026-08-30 지시). 판정은 **첫 비플래그 인자**다 — zshrc 별칭이\n\
+# 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측: --dangerously-skip-permissions 가\n\
+# 앞에 와 case 분기를 지나쳤고, claude 가 「mini」를 질문으로 받아 로컬에 떴다).\n\
+# 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만 얹는다는 전제다.\n\
+for _a in \"$@\"; do\n\
+  case \"$_a\" in\n\
+    mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
+    -*) ;;\n\
+    *) break ;;\n\
+  esac\n\
+done\n\
 {ablk}\
 # 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
 # tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
@@ -9049,7 +9062,10 @@ mod tests {
             "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
         );
         let at = body.find("--mcp-config").unwrap();
-        let exec_at = body.find("\nexec ").or_else(|| body.find("  exec ")).unwrap();
+        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처,
+        // `claude mini` 원격 스폰 디스패치)는 claude 에 닿지 않는 갈래라 이 검사의
+        // 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
+        let exec_at = body.find("exec \"$REAL\"").unwrap();
         assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
         let _ = std::fs::remove_dir_all(&dir);
     }
