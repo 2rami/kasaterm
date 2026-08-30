@@ -151,6 +151,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
         "collab.transcript" => collab_transcript(backend, id, &req.params),
+        "collab.activity" => collab_activity(backend, id, &req.params),
         "surface.notify" => surface_notify(backend, id, &req.params),
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
@@ -263,6 +264,7 @@ fn system_capabilities(id: Value) -> Response {
                 "window.list",
                 "collab.bind_transcript",
                 "collab.transcript",
+                "collab.activity",
                 "surface.notify",
                 "surface.attention",
                 "surface.done",
@@ -331,6 +333,29 @@ fn collab_transcript(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         .unwrap_or(6);
     match backend.transcript_tail(surface_id, turns) {
         Ok(t) => Response::success(id, json!({ "turns": t })),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 한 pane 이 무엇을 했는지 도구 단위 시간순 — `collab.transcript` 가 버리는
+/// tool_use/tool_result 를 인자·결과까지 준다.
+///
+/// board(`collab.board`)와 나눠 쓰는 자리다: board 는 pane **전부**를 한 번에
+/// 실어 나르므로 도구 라벨을 짧게 자르는데, 이건 **한 pane 을 지목**해 보므로
+/// 자르지 않는다. 「쟤 뭐 하나」는 board, 「쟤 왜 저러나」는 이쪽.
+fn collab_activity(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "collab.activity requires `surface_id` (string)"),
+    };
+    // 기본 40건 — 도구 하나가 호출+결과 두 건이라 대략 최근 20번의 동작이다.
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(40);
+    match backend.pane_activity_log(surface_id, limit) {
+        Ok(events) => Response::success(id, json!({ "events": events })),
         Err(e) => backend_err(id, e),
     }
 }

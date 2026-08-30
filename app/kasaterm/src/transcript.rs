@@ -11,7 +11,7 @@
 //! `snapshot_from_tail`을 호출한다. **상시 폴링 스레드(watcher)는 없다**:
 //! board를 부를 때 그 자리에서 transcript tail을 읽어 만든다(pull).
 
-use kasa_socket::backend::{ConversationTurn, PaneActivity};
+use kasa_socket::backend::{ActivityEvent, ConversationTurn, PaneActivity};
 
 /// transcript에서 뽑은 한 번의 도구 사용.
 #[derive(Clone, Debug)]
@@ -37,21 +37,14 @@ fn tool_event(name: &str, input: Option<&serde_json::Value>) -> ToolEvent {
             }
         }
         "Bash" => {
-            // 첫 명령만 (cd;build 같은 멀티라인/세미콜론 체인이 board를
-            // 줄바꿈으로 더럽히지 않게) + 공백 정규화 + 40자.
+            // 사람이 붙인 한 줄 설명(`description`)이 명령문보다 잘 갈린다 — 같은
+            // 스크립트 골격을 반복해도 설명은 매번 다르다. 명령문도 뒤에 붙여
+            // 「무엇을 하려 했나」와 「실제로 무엇을 쳤나」를 함께 남긴다.
+            let desc = get("description").unwrap_or("").trim();
             let cmd = get("command").unwrap_or("");
-            let first = cmd.split(['\n', ';', '&']).next().unwrap_or("").trim();
-            let short: String = first
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(40)
-                .collect();
-            ToolEvent {
-                label: format!("Bash {short}"),
-                file: None,
-            }
+            let body =
+                if desc.is_empty() { cmd.to_string() } else { format!("{desc} — {cmd}") };
+            ToolEvent { label: format!("Bash {}", clip(&body, CMD_ARG_CHARS)), file: None }
         }
         "Grep" | "Glob" => ToolEvent {
             label: format!("{name} {}", get("pattern").or_else(|| get("path")).unwrap_or("")),
@@ -73,6 +66,29 @@ fn clip(s: &str, max: usize) -> String {
     } else {
         flat
     }
+}
+
+/// board 도구 라벨에 남길 셸 명령 인자의 글자 수.
+///
+/// 40자였을 때 **접두가 같은 명령들이 서로 구분되지 않았다** — 2026-08-30 실측에서
+/// 한 pane 의 `recent_tools` 여덟 줄 중 다섯 줄이
+/// `"Bash D=~/.claude/projects/-Users-kasa-Desktop"` 로 글자까지 똑같았고, 실제로는
+/// 전부 다른 명령이었다. 무엇을 했는지 읽어낼 수 없으면 타임라인을 싣는 뜻이 없다.
+///
+/// 관찰자 에이전트에게 가는 활동 요약은 같은 자리에 **인자를 통째로** 싣는다(잘림 없음).
+/// board 가 거기까지 가지 않는 이유는 크기다 — 목록은 pane 전부를 한 번에 실어 나르므로,
+/// 전문은 한 pane 을 지목해 보는 자리(`surface.inspect`)에 둔다.
+const CMD_ARG_CHARS: usize = 200;
+
+/// 셸 명령을 board 라벨용으로: 공백·줄바꿈 정규화 + 길이 상한.
+///
+/// **첫 줄만 남기지 않는다.** 예전엔 `\n`·`;`·`&` 에서 잘랐는데, 그게 라벨이
+/// 서로 안 갈리던 진짜 원인이었다 — 여러 줄 스크립트를 담은 Bash 호출들이 죄다
+/// 같은 첫 줄(`export …`, `S=/tmp/…`)로 시작해 **뒷부분이 잘린 게 아니라 통째로
+/// 버려졌다**(2026-08-30 실물 board 로 확인). 상한만 늘려서는 안 고쳐진다.
+/// `clip` 이 줄바꿈을 공백으로 바꾸므로 board 가 여러 줄로 더럽혀질 걱정은 없다.
+fn shell_arg(cmd: &str) -> String {
+    clip(cmd, CMD_ARG_CHARS)
 }
 
 /// 도구 이름 카운트 누적(tail 윈도 집계용).
@@ -299,19 +315,8 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                     .unwrap_or(serde_json::Value::Null);
                 let a = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("");
                 let label = match name.as_str() {
-                    // 첫 명령만·공백 정규화·40자 — claude Bash 라벨과 같은 규칙이라
-                    // board 두 종류가 같은 모양으로 읽힌다.
-                    "exec_command" => {
-                        let first = a("cmd").split(['\n', ';', '&']).next().unwrap_or("").trim();
-                        let short: String = first
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .chars()
-                            .take(40)
-                            .collect();
-                        format!("exec {short}")
-                    }
+                    // claude Bash 라벨과 같은 규칙이라 board 두 종류가 같은 모양으로 읽힌다.
+                    "exec_command" => format!("exec {}", shell_arg(a("cmd"))),
                     "view_image" => format!("view {}", basename(a("path"))),
                     other => other.to_string(),
                 };
@@ -481,12 +486,14 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                 call.get("args").and_then(|x| x.get(k)).and_then(|x| x.as_str()).unwrap_or("")
             };
             let label = match name {
-                // 첫 명령만·공백 정규화·40자 — codex 의 exec 라벨과 같은 규칙.
+                // codex 의 exec 라벨과 같은 규칙. `toolAction` 은 agy 가 써 준 한 문장
+                // 설명이라 명령문보다 잘 갈린다 — 라벨 칸이 200자로 늘어 이제 둘 다 실린다.
                 "run_command" => {
-                    let first = a("CommandLine").split(['\n', ';', '&']).next().unwrap_or("").trim();
-                    let short: String =
-                        first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
-                    format!("exec {short}")
+                    let act = a("toolAction").trim();
+                    let cmd = a("CommandLine");
+                    let body =
+                        if act.is_empty() { cmd.to_string() } else { format!("{act} — {cmd}") };
+                    format!("exec {}", clip(&body, CMD_ARG_CHARS))
                 }
                 "view_file" => format!("view {}", basename(a("AbsolutePath"))),
                 "list_dir" => format!("ls {}", basename(a("DirectoryPath"))),
@@ -970,6 +977,139 @@ pub fn prompts_from_tail(tail: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// 활동 기록용 절단 — `clip` 과 달리 **줄바꿈을 살린다.**
+///
+/// board 라벨은 한 줄이어야 해서 `clip` 이 공백을 뭉치지만, 활동 기록은 로그를
+/// 눈으로 읽는 자리다. 줄을 뭉개면 어느 출력이 어디서 끝났는지가 사라져 오류
+/// 메시지를 찾을 수 없다(2026-08-30 실물 검증에서 드러났다).
+fn clip_keep_lines(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.chars().count() > max {
+        t.chars().take(max).collect::<String>() + "…"
+    } else {
+        t.to_string()
+    }
+}
+
+/// 도구 인자에 남길 글자 수. board 라벨(200)보다 넉넉하다 — 여기는 한 pane 을
+/// 지목해 보는 자리라 목록처럼 pane 전부를 실어 나르지 않는다.
+const ACT_ARG_CHARS: usize = 1000;
+/// 도구 결과에 남길 글자 수. 오류는 대개 앞머리에 있으므로 앞에서 자른다.
+const ACT_RESULT_CHARS: usize = 800;
+
+/// tail 을 **시간순 활동 기록**으로 — 사람이 시킨 것, 학생이 말한 것, 부른 도구와
+/// 그 인자, 돌아온 결과.
+///
+/// board 의 `recent_tools` 로는 못 보는 것 셋을 메운다: 잘리지 않은 인자 · 도구의
+/// 성패 · 여덟 개를 넘어가는 시간축. 「같은 명령이 세 번 넘게 같은 오류로 끝났다」를
+/// 판정하려면 이 셋이 다 있어야 한다.
+///
+/// `limit` = 최신 몇 건까지(0 이면 전부). 오래된 것부터 돌려주므로 그대로 읽으면
+/// 일이 진행된 순서다.
+pub fn activity_from_tail(tail: &str, limit: usize) -> Vec<ActivityEvent> {
+    let mut out: Vec<ActivityEvent> = Vec::new();
+    // tool_use_id → 도구 이름. 결과 줄에는 이름이 없어서 호출 쪽에서 기억해 둔다.
+    let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for line in tail.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue; // tail 첫 줄은 중간에서 잘려 있다
+        };
+        let is_meta = v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false);
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => {
+                let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                for b in content {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        // thinking 은 항상 redact 라 실을 것이 없다.
+                        Some("text") => {
+                            let t = b.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
+                            if !t.is_empty() {
+                                out.push(ActivityEvent {
+                                    kind: "say".into(),
+                                    name: String::new(),
+                                    text: clip_keep_lines(t, ACT_ARG_CHARS),
+                                    is_error: None,
+                                });
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            if let Some(id) = b.get("id").and_then(|x| x.as_str()) {
+                                tool_names.insert(id.to_string(), name.to_string());
+                            }
+                            // 인자는 JSON 원문 그대로 — 어느 칸이 무엇인지가 판단 재료다.
+                            // 필드를 골라 담으면 도구마다 다른 스키마를 여기서 다 알아야 한다.
+                            let args = b
+                                .get("input")
+                                .map(|i| i.to_string())
+                                .unwrap_or_default();
+                            out.push(ActivityEvent {
+                                kind: "tool".into(),
+                                name: name.to_string(),
+                                text: clip_keep_lines(&args, ACT_ARG_CHARS),
+                                is_error: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                match v.pointer("/message/content") {
+                    // 문자열 content = 사람이 친 프롬프트. 하네스 합성 턴과
+                    // 시스템 주입 문자열은 대화가 아니다.
+                    Some(serde_json::Value::String(t)) => {
+                        let t = t.trim();
+                        if !is_meta && !t.is_empty() && !is_injected_user_text(t) {
+                            out.push(ActivityEvent {
+                                kind: "prompt".into(),
+                                name: String::new(),
+                                text: clip_keep_lines(t, ACT_ARG_CHARS),
+                                is_error: None,
+                            });
+                        }
+                    }
+                    Some(serde_json::Value::Array(blocks)) => {
+                        for b in blocks {
+                            if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                                continue;
+                            }
+                            let id = b.get("tool_use_id").and_then(|x| x.as_str()).unwrap_or("");
+                            let body = match b.get("content") {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(serde_json::Value::Array(a)) => a
+                                    .iter()
+                                    .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                                _ => String::new(),
+                            };
+                            out.push(ActivityEvent {
+                                kind: "result".into(),
+                                name: tool_names.get(id).cloned().unwrap_or_default(),
+                                text: clip_keep_lines(&body, ACT_RESULT_CHARS),
+                                is_error: Some(
+                                    b.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
+                                ),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if limit > 0 && out.len() > limit {
+        out.drain(..out.len() - limit);
+    }
+    out
+}
+
 /// jsonl 한 줄을 대화 turn으로. 모니터링에 의미있는 것만 `Some`:
 /// - `type:"user"` 이고 content가 **문자열**(사람/오케스트레이터가 타이핑한
 ///   프롬프트)일 때만. content가 배열이면 tool_result(노이즈)라 버린다. 하네스
@@ -1036,6 +1176,85 @@ mod tests {
         assert_eq!(a.intent, "Edit auth.ts");
         assert_eq!(a.files, vec!["/a/auth.ts"]);
         assert_eq!(a.status, "working");
+    }
+
+    #[test]
+    fn 접두가_같은_명령도_board_라벨에서_갈린다() {
+        // 40자였을 때 board 의 여덟 줄 중 다섯 줄이 글자까지 같아 보였다 —
+        // 같은 디렉터리를 훑는 명령들이라 앞 40자가 전부 동일했다(2026-08-30 실측).
+        // 무엇을 했는지 못 읽으면 타임라인을 싣는 뜻이 없다.
+        // ⚠️ 실물은 **여러 줄 스크립트**다. 한 줄짜리로만 시험하면 「첫 줄만 남기던」
+        // 진짜 원인을 놓친다 — 합성 테스트가 통과하는 동안 실물 board 는 그대로였다.
+        let head = "export KASATERM_SOCKET_PATH=/tmp/x.sock\\nCLI=./target/debug/kasaterm-cli";
+        let mk = |tail: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"{head}\\n$CLI activity {tail}"}}}}]}}}}"#
+            )
+        };
+        let tail = [mk("render.rs"), mk("input.rs")].join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.recent_tools.len(), 2);
+        assert_ne!(a.recent_tools[0], a.recent_tools[1], "두 명령이 라벨에서 갈려야 한다");
+        assert!(a.recent_tools.iter().any(|l| l.ends_with("render.rs")), "{:?}", a.recent_tools);
+    }
+
+    #[test]
+    fn 라벨은_상한을_넘으면_잘렸음을_밝힌다() {
+        let long = "x".repeat(CMD_ARG_CHARS + 50);
+        let tail = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"echo {long}"}}}}]}}}}"#
+        );
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert!(a.intent.ends_with('…'), "잘림 표시가 없으면 같아 보이는 문제가 돌아온다");
+        // 옛 40자 상한으로 되돌아가지 않았나.
+        assert!(a.intent.chars().count() > 100, "{}", a.intent);
+    }
+
+    #[test]
+    fn 활동기록은_인자와_결과와_오류를_남긴다() {
+        // board 가 못 주는 셋: 잘리지 않은 인자 · 도구의 성패 · 여덟 개 너머의 시간축.
+        let tail = [
+            r#"{"type":"user","message":{"content":"없는 심볼을 찾아라"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"grep 으로 봅니다."},{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"grep -rn zzz .","description":"1차"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":""}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"t2","input":{"command":"ls /없는경로"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"No such file or directory"}]}}"#,
+        ]
+        .join("\n");
+        let ev = activity_from_tail(&tail, 0);
+        let kinds: Vec<&str> = ev.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["prompt", "say", "tool", "result", "tool", "result"], "시간순 그대로");
+        assert!(ev[2].text.contains("grep -rn zzz ."), "인자 원문: {}", ev[2].text);
+        assert!(ev[2].text.contains("1차"), "인자는 JSON 통째라 description 도 남는다");
+        // 결과 줄에는 도구 이름이 없다 — 호출 쪽 id 로 이어 붙여야 무엇의 결과인지 안다.
+        assert_eq!(ev[3].name, "Bash");
+        assert_eq!(ev[3].is_error, Some(false));
+        assert_eq!(ev[5].is_error, Some(true), "실패를 성공과 구별 못 하면 반복 판정이 불가능하다");
+        assert!(ev[5].text.contains("No such file"));
+    }
+
+    #[test]
+    fn 활동기록은_최신쪽을_남긴다() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo N"}}]}}"#;
+        let tail = (0..10).map(|i| line.replace('N', &i.to_string())).collect::<Vec<_>>().join("\n");
+        let ev = activity_from_tail(&tail, 3);
+        assert_eq!(ev.len(), 3);
+        assert!(ev[2].text.contains("echo 9"), "마지막이 최신: {}", ev[2].text);
+        assert!(ev[0].text.contains("echo 7"));
+    }
+
+    #[test]
+    fn 활동기록은_주입된_사용자턴을_대화로_읽지_않는다() {
+        // 하네스가 합성한 줄(isMeta)과 시스템 주입 문자열은 사람이 시킨 것이 아니다.
+        let tail = [
+            r#"{"type":"user","isMeta":true,"message":{"content":"<command-name>/clear</command-name>"}}"#,
+            r#"{"type":"user","message":{"content":"<bash-stdout>ok</bash-stdout>"}}"#,
+            r#"{"type":"user","message":{"content":"진짜 지시"}}"#,
+        ]
+        .join("\n");
+        let ev = activity_from_tail(&tail, 0);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].text, "진짜 지시");
     }
 
     #[test]
@@ -1340,10 +1559,16 @@ mod agy_snapshot_tests {
     }
 
     #[test]
-    fn the_exec_label_stops_at_the_first_command() {
+    fn the_exec_label_carries_the_whole_command() {
         // codex 의 `exec` 라벨과 같은 규칙 — board 두 종류가 같은 모양으로 읽혀야 한다.
+        // 첫 명령에서 자르지 않는다: 같은 첫 줄로 시작하는 호출들이 라벨에서 안 갈리던
+        // 원인이었다(2026-08-30).
         let a = agy_snapshot("%9", &real_tail(), false);
-        assert!(a.recent_tools.contains(&"exec git log --oneline".to_string()), "{:?}", a.recent_tools);
+        assert!(
+            a.recent_tools.iter().any(|l| l.contains("git log --oneline")),
+            "{:?}",
+            a.recent_tools
+        );
     }
 
     #[test]

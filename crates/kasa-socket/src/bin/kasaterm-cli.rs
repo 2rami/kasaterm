@@ -210,6 +210,12 @@ fn run() -> Result<Option<Response>> {
         println!("{}", render_windows(&response));
         return Ok(None);
     }
+    // `activity` 는 사람(과 학생)이 읽는 자리다 — board 처럼 기계가 파싱하는 게
+    // 아니라 「쟤 왜 저러나」를 눈으로 훑는 용도라, JSON 대신 시간순 목록으로 낸다.
+    if cmd == "activity" && response.ok {
+        println!("{}", render_activity(&response));
+        return Ok(None);
+    }
     Ok(Some(response))
 }
 
@@ -615,6 +621,47 @@ fn render_windows(resp: &Response) -> String {
 }
 
 /// Render `window.layout`'s pane rects (window-relative %) as a box diagram.
+/// `activity` 응답을 시간순 목록으로. 라벨은 네 글자로 맞춰 왼쪽 기둥이 서게 한다 —
+/// 도구와 결과가 번갈아 오므로 기둥이 없으면 어디까지가 한 동작인지 안 보인다.
+fn render_activity(resp: &Response) -> String {
+    let events = resp
+        .result
+        .as_ref()
+        .and_then(|r| r.get("events"))
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if events.is_empty() {
+        return "활동 없음 — 이 pane 의 transcript 꼬리에 도구 호출이 없다.".to_string();
+    }
+    let mut out = format!("최근 활동 {}건 (오래된 것부터)\n", events.len());
+    for e in &events {
+        let g = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let kind = g("kind");
+        let err = e.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+        let label = match kind {
+            "prompt" => "시킴",
+            "say" => "말함",
+            "tool" => "도구",
+            _ if err => "오류",
+            _ => "결과",
+        };
+        let name = g("name");
+        let head = if name.is_empty() {
+            String::new()
+        } else {
+            format!("{name} ")
+        };
+        // 도구 인자는 JSON 원문이라 줄바꿈이 `\n` 두 글자로 남는다 — 여러 줄 셸
+        // 명령이 한 줄로 뭉쳐 읽을 수 없으므로 여기서 푼다(소켓 응답 쪽은 기계가
+        // 파싱하는 자리라 원문 그대로 둔다). 이어지는 줄은 기둥 폭만큼 들여써
+        // 한 동작으로 묶어 보이게 한다.
+        let body = g("text").replace("\\n", "\n").replace('\n', "\n            ");
+        out.push_str(&format!("  {label}  {head}{body}\n"));
+    }
+    out
+}
+
 fn render_layout(resp: &Response) -> String {
     let panes = resp
         .result
@@ -767,6 +814,7 @@ fn print_help() {
   kasaterm-cli capture --window [path] [--max-width N]
                                             # the WHOLE window incl. sidebar/tabs/columns (main window only)");
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
+    eprintln!("  kasaterm-cli activity [surface_id] [N]    # 그 pane 이 실제로 한 일 — 도구·인자·결과를 시간순으로 (왜 저러나)");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
@@ -1478,6 +1526,22 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["turns"] = json!(turns);
             }
             ("collab.transcript", params)
+        }
+        "activity" => {
+            // 형제 pane 이 **실제로 무엇을 했나** — 부른 도구, 그 인자, 돌아온 결과를
+            // 시간순으로. `transcript` 는 대화만(도구를 버린다), `board` 는 도구 라벨을
+            // 짧게 잘라 여덟 개만 준다. 「쟤 뭐 하나」는 board, 「쟤 왜 저러나」는 이쪽.
+            //   activity [surface_id] [N]
+            let surface = args
+                .first()
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
+                .ok_or_else(|| anyhow!("activity needs a surface_id (or $KASATERM_PANE_ID)"))?;
+            let mut params = json!({ "surface_id": surface });
+            if let Some(n) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                params["limit"] = json!(n);
+            }
+            ("collab.activity", params)
         }
         other => return Err(anyhow!("unknown command: {other}")),
     };

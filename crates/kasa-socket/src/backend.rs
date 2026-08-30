@@ -1149,6 +1149,13 @@ pub trait Backend: Send + Sync {
     /// including turns that have already scrolled off-screen. An orchestrator
     /// pane reads this to monitor what its workers are actually doing.
     /// Default: empty (a backend that tracks no transcripts reports nothing).
+    /// 이 pane 이 한 일을 도구 단위로 시간순 — `transcript_tail` 이 버리는
+    /// tool_use/tool_result 를 인자·결과까지 담아 돌려준다. `limit` 은 최신
+    /// 몇 건까지(0=기본). Default: unsupported.
+    fn pane_activity_log(&self, _surface_id: &str, _limit: usize) -> Result<Vec<ActivityEvent>> {
+        anyhow::bail!("pane_activity_log not supported")
+    }
+
     fn transcript_tail(&self, _surface_id: &str, _turns: usize) -> Result<Vec<ConversationTurn>> {
         Ok(Vec::new())
     }
@@ -1226,6 +1233,34 @@ pub struct TranscriptChunk {
 pub struct ConversationTurn {
     pub role: String,
     pub text: String,
+}
+
+/// 한 pane 이 실제로 **무엇을 했는지** 시간순으로 — 도구 이름·인자·결과까지.
+/// `surface.activity` 가 돌려준다.
+///
+/// `ConversationTurn`(=`transcript_tail`)과 정반대 방향이다. 그쪽은 사람이 읽을
+/// 대화만 남기려고 tool_use 와 tool_result 를 버리는데, 이쪽은 그것만 남긴다.
+///
+/// 왜 board 로 부족한가: `PaneActivity::recent_tools` 는 라벨 여덟 개뿐이라
+/// ①인자가 잘리고 ②성패를 모르고 ③여덟 개를 넘어간 것은 사라진다. 그래서
+/// 「같은 명령이 세 번 넘게 같은 오류로 끝났다」 같은 판정은 board 만으로는
+/// **원리적으로 불가능하다** — 재료 자체가 없다. 이 타입이 그 재료다.
+///
+/// 관찰자(observer) 에이전트가 하네스에게서 받는 활동 요약과 같은 재료이기도
+/// 하다(2026-08-30 실측: 그쪽은 `<tool-call>`/`<tool-result>` 태그로 온다).
+/// 차이는 배달 방식뿐 — 관찰자는 턴마다 밀어 주고, 이쪽은 물을 때 뜬다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    /// `"prompt"`(사람이 시킨 것) | `"say"`(학생이 말한 것) | `"tool"` | `"result"`.
+    pub kind: String,
+    /// 도구 이름 — `kind` 가 `tool`/`result` 일 때만, 그 밖엔 빈 문자열.
+    #[serde(default)]
+    pub name: String,
+    /// `tool` 이면 인자, `result` 면 결과, 그 밖엔 본문. 둘 다 상한을 넘으면 `…`.
+    pub text: String,
+    /// `result` 가 오류로 끝났나. `tool`/`prompt`/`say` 는 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
 }
 
 #[cfg(test)]

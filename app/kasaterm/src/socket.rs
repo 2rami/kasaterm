@@ -1941,6 +1941,25 @@ impl Backend for PtyBackend {
         Ok(all)
     }
 
+    fn pane_activity_log(
+        &self,
+        surface_id: &str,
+        limit: usize,
+    ) -> Result<Vec<kasa_socket::backend::ActivityEvent>> {
+        let path = self
+            .bound
+            .lock()
+            .unwrap()
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
+        // board 와 같은 512KB 꼬리. 활동 기록은 「방금 무엇을 했나」라 전문이 필요
+        // 없고, 전체 읽기는 수 MB 짜리 세션에서 물어볼 때마다 값을 치른다. 꼬리
+        // 첫 줄은 중간에서 잘려 있는데 파서가 무시한다.
+        let (tail, _) = read_tail(&path, 512 * 1024);
+        Ok(crate::transcript::activity_from_tail(&tail, limit))
+    }
+
     fn transcript_raw(&self, surface_id: &str, offset: u64) -> Result<TranscriptChunk> {
         // Same bound→jsonl mapping as transcript_tail, but hand back raw jsonl
         // incrementally (tail on first load, appended lines after) so the BA GUI
