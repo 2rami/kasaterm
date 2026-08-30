@@ -746,7 +746,7 @@ fn print_help() {
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 학생은 안 죽는다
-  kasaterm-cli migrate <%surface> <http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화 운반+같은 자리 재개) — 안 올린 git 변경이 있으면 막아 선다. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
+  kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
@@ -969,7 +969,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 i += 1;
             }
             let base = positional.first().cloned().ok_or_else(|| {
-                anyhow!("migrate 는 목적지가 필요해요 (예: migrate %3 http://127.0.0.1:18791 --cwd /원격/레포 · 데려오기: migrate %3 local)")
+                anyhow!("migrate 는 목적지가 필요해요 (예: migrate 맥미니 · migrate %3 맥미니 · 데려오기: migrate %3 local)")
             })?;
             let flagval = |name: &str| {
                 args.iter()

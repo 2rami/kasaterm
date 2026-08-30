@@ -292,10 +292,38 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketMigrate(pane, base, cwd, force, reply) => {
+                // 목적지를 기계 **이름**(「맥미니」)으로도 받는다 — 학생이 자기
+                // 이사를 신청할 때 주소·경로를 외울 필요가 없게(2026-08-30 지시
+                // 「옮길 학생 본인이 직접 옮기게도」). 이름이면 명부에서 주소를
+                // 찾고, --cwd 가 없으면 roots 매핑으로 도착 경로까지 정한다
+                // (이사 탭 버튼과 같은 정책).
                 #[cfg(unix)]
-                let outcome = self
-                    .migrate_pane(pane, base, cwd.as_deref(), *force)
-                    .map_err(|e| format!("{e:#}"));
+                let outcome = (|| {
+                    let (base, cwd) = if base.starts_with("http") {
+                        (base.clone(), cwd.clone())
+                    } else {
+                        let m = kasa_mcp::machines::find(base).ok_or_else(|| {
+                            anyhow::anyhow!("기계 {base} 를 명부에서 못 찾았다 — machines.json 확인")
+                        })?;
+                        let cwd = match cwd {
+                            Some(c) => Some(c.clone()),
+                            None => self
+                                .pty
+                                .get(pane)
+                                .and_then(|s| s.shell_pid())
+                                .and_then(crate::socket::pid_cwd)
+                                .and_then(|l| {
+                                    kasa_mcp::machines::map_local_to_remote(
+                                        &m,
+                                        &l.to_string_lossy(),
+                                    )
+                                }),
+                        };
+                        (m.base, cwd)
+                    };
+                    self.migrate_pane(pane, &base, cwd.as_deref(), *force)
+                })()
+                .map_err(|e| format!("{e:#}"));
                 #[cfg(not(unix))]
                 let outcome: std::result::Result<String, String> =
                     Err("이사는 unix 전용이다".to_string());
