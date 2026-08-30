@@ -4394,6 +4394,29 @@ async fn term_repo_sync_post(
     }
 }
 
+/// 에이전트 pid 를 곱게 끈다. Windows 엔 libc::kill(POSIX) 이 없어 taskkill 로 대신한다
+/// — 원격 이사는 지금 macOS 끼리라 이 갈래는 CI 컴파일용이다.
+#[cfg(unix)]
+fn agent_term_signal(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+}
+#[cfg(windows)]
+fn agent_term_signal(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .spawn();
+}
+
+/// pid 가 살아 있나 — unix 는 `kill(pid, 0)`, Windows 는 taskkill 이 동기 종료라 죽은 것으로 본다.
+#[cfg(unix)]
+fn agent_pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+#[cfg(windows)]
+fn agent_pid_alive(_pid: u32) -> bool {
+    false
+}
+
 /// `POST /term/agent-stop?pane=web-…` — 그 세션 셸 아래의 에이전트를 곱게(SIGTERM)
 /// 끄고 꺼질 때까지 지켜본다. 역이사의 「출발지 claude 끄기」와 대칭 — SIGKILL 을
 /// 안 쓰는 이유도 같다(jsonl 마지막 조각 유실). 인자에서 권한 모드도 읽어 준다:
@@ -4430,9 +4453,9 @@ async fn term_agent_stop_post(
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions"))
         .unwrap_or(false);
-    unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
+    agent_term_signal(agent_pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
+    while agent_pid_alive(agent_pid) {
         if std::time::Instant::now() > deadline {
             return err(format!(
                 "{kind:?}(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 반쯤 산 채 두는 것보다 세우는 게 낫다"

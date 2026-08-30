@@ -289,13 +289,6 @@ pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnap
     newest.snapshot
 }
 
-/// 재시작에 쓸 model·effort를 head에서 읽는다. 최신 `turn_context`가 앞 창에 있으면
-/// 첫 turn의 낡은 선택 대신 그 값을 쓴다.
-pub(crate) fn codex_cfg_from_head(head: &str) -> (String, String) {
-    let snapshot = codex_rollout_snapshot(head, "");
-    (snapshot.model, snapshot.effort)
-}
-
 /// `item.content[]` 의 텍스트 조각을 잇는다.
 ///
 /// ⚠️ 조각의 `type` 으로 거르지 마라 — **대소문자가 갈린다**(실측 2026-08-11:
@@ -1520,31 +1513,6 @@ mod codex_tests {
         // 조각 `type` 이 `text`/`Text` 로 갈리므로 그걸로 걸렀다면 한쪽이 빈다.
         // 줄바꿈은 board 한 줄에 못 들어가니 clip 이 공백으로 편다.
         assert_eq!(a.last_reply, "연동을 붙였어요");
-    }
-
-    /// model·effort는 같은 turn_context에서 묶어 읽고, head 안에 여러 turn이 있으면
-    /// 최신 것을 쓴다. effort만 예전 turn에서 섞어 오면 재시작 명령이 틀어진다.
-    #[test]
-    fn model_과_effort_는_머리의_최신_turn_context_다() {
-        let head = [
-            r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#,
-            r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user"}}"#,
-            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
-            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"뒷턴에서-갈아탄-것","effort":"low"}}"#,
-        ]
-        .join("\n");
-        assert_eq!(
-            codex_cfg_from_head(&head),
-            ("뒷턴에서-갈아탄-것".into(), "low".into())
-        );
-        // 아직 첫 턴을 안 쓴 세션 — 빈 문자열이어야 호출부가 "다음에 다시" 로 읽는다.
-        let only_meta = r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo"}}"#;
-        assert_eq!(codex_cfg_from_head(only_meta), (String::new(), String::new()));
-        assert_eq!(codex_cfg_from_head("깨진 줄\n{}"), (String::new(), String::new()));
-        // effort 없는 세션이 흔하다 — model 만 있어도 채택해야 한다(빈 effort 때문에
-        // model 까지 버리면 복원이 통째로 기본값으로 떨어진다).
-        let no_effort = r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#;
-        assert_eq!(codex_cfg_from_head(no_effort), ("gpt-5.5".into(), String::new()));
     }
 
     #[test]
