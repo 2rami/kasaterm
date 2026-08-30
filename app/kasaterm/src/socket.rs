@@ -733,6 +733,12 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// 이사가 실어 온 테마 팩 zip — 설정 창 드롭과 같은 코드로 푼다(zip slip
+    /// 검사·임시 폴더 경유·기존 팩 _trash 보존 전부 거기 있다).
+    fn import_theme_pack(&self, zip_path: &std::path::Path) -> Result<String> {
+        import_theme(zip_path).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// 활성 pane(보이는 방)의 방 식별자 — 모모톡 inbox 등을 방별 격리(거노). ws 공유.
     fn active_room(&self) -> Option<String> {
         let ws = self.ws.lock().unwrap();
@@ -4004,6 +4010,50 @@ pub fn import_theme(zip_path: &std::path::Path) -> std::io::Result<String> {
     let root = kasa_mcp::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     import_theme_into(&root, zip_path)
+}
+
+/// 테마 팩 하나를 zip 바이트로 싼다 — 이사(migrate)가 도착지에 팩을 실어 나를 때
+/// 쓴다(받는 쪽은 import_theme, 같은 검사·같은 형식). 껍질 없이(항목이 `<id>/…`
+/// 로 시작하지 않게) 싼다 — import 의 껍질 판정은 어느 형태든 받지만 붙일 이유가
+/// 없다.
+pub fn export_theme_zip(id: &str) -> std::io::Result<Vec<u8>> {
+    if id.is_empty() || id.contains('/') || id.contains("..") {
+        return Err(std::io::Error::other("테마 id 가 이상하다"));
+    }
+    let root = kasa_mcp::character::themes_root()
+        .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
+    let dir = root.join(id);
+    if !dir.join("theme.json").is_file() {
+        return Err(std::io::Error::other(format!("테마 팩 {id} 이 이 기계에 없다")));
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let mut stack = vec![dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d)? {
+                let p = e?.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let rel = p
+                    .strip_prefix(&dir)
+                    .map_err(|_| std::io::Error::other("경로 계산 실패"))?;
+                // zip 항목 구분자는 항상 `/` — Windows 에서 싼 팩도 mac 이 읽는다.
+                let name = rel.to_string_lossy().replace('\\', "/");
+                zw.start_file(name, opts)
+                    .map_err(|e| std::io::Error::other(format!("zip 쓰기 실패: {e}")))?;
+                let bytes = std::fs::read(&p)?;
+                std::io::Write::write_all(&mut zw, &bytes)?;
+            }
+        }
+        zw.finish()
+            .map_err(|e| std::io::Error::other(format!("zip 마감 실패: {e}")))?;
+    }
+    Ok(buf.into_inner())
 }
 
 /// 뿌리를 인자로 받는 본체. 갈라 둔 건 시험 때문이다 — 경로 검사가 이 함수의

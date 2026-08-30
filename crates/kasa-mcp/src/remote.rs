@@ -565,6 +565,41 @@ pub fn push_character_theme(
     Ok(())
 }
 
+/// 테마 팩 zip 을 도착지에 푼다(`POST /term/character-theme?pack=1`) — 도착지에
+/// 그 팩이 없어 push_character_theme 가 거절됐을 때 팩을 실어 나르는 두 번째 호출.
+/// 성공 시 풀린 테마 id.
+pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<String> {
+    let u = format!("{}/term/character-theme?pack=1", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("pack runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            // 그림 뭉치 수십 MB 가 터널을 타면 15초는 짧다.
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).body(zip);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("테마 팩 운반 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp.get("theme").and_then(|v| v.as_str()).unwrap_or_default().to_string())
+}
+
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
 /// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
 /// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).

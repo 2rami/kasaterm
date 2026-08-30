@@ -1890,6 +1890,31 @@ async fn term_character_theme_post(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    // `pack=1` = 테마 팩 zip 운반 — 도착지에 그 팩이 없어 위 적용이 거절됐을 때
+    // 호출부가 팩을 싸 보내는 두 번째 호출이다. 풀기는 설정 창 zip 드롭과 같은
+    // 코드(zip slip 검사 포함)를 백엔드에서 탄다.
+    if q.get("pack").map(String::as_str) == Some("1") {
+        if body.is_empty() {
+            return err("팩 zip 몸통이 비었다".into());
+        }
+        let tmp = std::env::temp_dir().join(format!(
+            "kasaterm-theme-pack-{}-{}.zip",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        if let Err(e) = std::fs::write(&tmp, &body) {
+            return err(format!("팩 임시 저장 실패: {e}"));
+        }
+        let out = backend.import_theme_pack(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        return match out {
+            Ok(id) => Json(serde_json::json!({ "ok": true, "theme": id })),
+            Err(e) => err(format!("팩 풀기 실패: {e:#}")),
+        };
+    }
     let theme = q.get("theme").map(|s| s.as_str()).unwrap_or("");
     // 빈 테마 id = 번들 — 팩 검사 없이 통과. 지정 테마는 팩이 실재해야 적용된다
     // (없는 테마 id 를 설정에 앉히면 로스터가 통째로 비어 배정이 멈춘다).
@@ -5460,7 +5485,10 @@ pub fn spawn_http_server_opts(
                         post(move |q: Query<std::collections::HashMap<String, String>>,
                                    body: axum::body::Bytes| {
                             term_character_theme_post(character_theme_backend.clone(), q, body)
-                        }),
+                        })
+                        // 팩 zip 은 그림 뭉치라 수십 MB — 기본 2MB 상한이면 팩 운반이
+                        // 이유 없는 실패로만 보인다.
+                        .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route(
                         "/term/tunnel",

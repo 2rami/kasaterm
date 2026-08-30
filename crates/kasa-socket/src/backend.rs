@@ -679,6 +679,12 @@ pub trait Backend: Send + Sync {
     fn apply_character_theme(&self, _theme_id: &str, _picks_json: &str) -> Result<()> {
         anyhow::bail!("apply_character_theme unsupported by this backend")
     }
+    /// 이사가 실어 온 테마 팩 zip 을 이 기계의 `themes/` 에 푼다 — 설정 창 zip
+    /// 드롭과 같은 코드(zip slip 검사·임시 폴더 경유·기존 팩 _trash 보존)를 탄다.
+    /// 성공 시 풀린 테마 id. Default: unsupported.
+    fn import_theme_pack(&self, _zip_path: &std::path::Path) -> Result<String> {
+        anyhow::bail!("import_theme_pack unsupported by this backend")
+    }
     /// Rename the *window/session* that `surface_id` belongs to (sidebar
     /// session label), independent of the pane header. The rename override uses this
     /// so the session label holds even when that pane isn't the window's

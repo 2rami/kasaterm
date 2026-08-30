@@ -985,10 +985,39 @@ impl App {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let picks_json = if picks.is_object() { picks.to_string() } else { String::new() };
-            if let Err(e) = kasa_mcp::remote::push_character_theme(base, &theme_id, &picks_json, None)
-            {
-                eprintln!("[migrate] 테마 동행 실패(계속 진행): {e:#}");
-                self.set_toast(format!("테마 동행 실패(이사는 계속): {e:#}"));
+            match kasa_mcp::remote::push_character_theme(base, &theme_id, &picks_json, None) {
+                Ok(()) => {}
+                // 도착지에 그 팩이 없다는 거절 — 팩을 zip 으로 싸 보내고 한 번 더.
+                // 직접 만든 테마는 도착지에 있을 리 없으니 이 길이 정상 경로다
+                // (2026-08-31 새벽 zip 가져오기와 짝: 내보내기 쪽 절반).
+                Err(e) if !theme_id.is_empty() && format!("{e:#}").contains("테마 팩") => {
+                    let carried = socket::export_theme_zip(&theme_id)
+                        .map_err(|x| anyhow::anyhow!("{x}"))
+                        .and_then(|zip| {
+                            self.migrate_progress(
+                                pid,
+                                format!(
+                                    "테마 팩 {:.1}MB 실어 나르는 중…",
+                                    zip.len() as f64 / 1048576.0
+                                ),
+                            );
+                            kasa_mcp::remote::push_theme_pack(base, zip, None)?;
+                            kasa_mcp::remote::push_character_theme(
+                                base,
+                                &theme_id,
+                                &picks_json,
+                                None,
+                            )
+                        });
+                    if let Err(e2) = carried {
+                        eprintln!("[migrate] 테마 팩 운반 실패(계속 진행): {e2:#}");
+                        self.set_toast(format!("테마 동행 실패(이사는 계속): {e2:#}"));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[migrate] 테마 동행 실패(계속 진행): {e:#}");
+                    self.set_toast(format!("테마 동행 실패(이사는 계속): {e:#}"));
+                }
             }
         }
         let remote_pane = character.as_deref().and_then(|c| {
