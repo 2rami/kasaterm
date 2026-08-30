@@ -441,19 +441,28 @@ impl PtySession {
             env!("CARGO_PKG_VERSION"),
         );
         cmd.env("COLORTERM", "truecolor");
-        // claude 의 렌더러는 **건드리지 않는다.** 한때 여기서
-        // `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 을 심어 classic 으로 돌렸다 —
-        // 대체화면을 안 쓰면 대화가 이 터미널의 스크롤백에 쌓여, 「맨 위 질문 고정」
-        // 띠를 절대 줄 번호로 정확히 그릴 수 있어서다(`turnjump.rs`).
+        // claude 를 **기본(classic) 렌더러**로 돌린다 — 대체화면을 안 쓰므로 대화가
+        // 이 터미널의 스크롤백에 그대로 쌓인다.
         //
-        // 되돌린 이유는 대가가 더 컸다: classic 은 입력창이 대화의 마지막 줄일
-        // 뿐이라 스크롤을 올리면 타이핑할 자리가 화면 밖으로 나가고, no-flicker 가
-        // 주던 화면 안정성도 함께 잃는다(2026-08-30 지시: "그냥 노플리커 켜고
-        // 방안을 찾아보자").
+        // 왜 이렇게까지 하나: no-flicker 에서는 스크롤이 claude 안에서만 일어나
+        // 터미널이 위치를 모른다. 그러면 「맨 위 질문 고정」 띠를 화면 글자로 짐작할
+        // 수밖에 없는데, 그 짐작이 실제 작업 화면에서 자주 빗나간다. 스크롤을
+        // 터미널이 쥐면 절대 줄 번호가 있어 짐작이 통째로 사라진다(`turnjump.rs`).
         //
-        // 손으로 켜 보고 싶으면 pane 에서 그 env 를 주고 claude 를 띄우면 된다 —
-        // 그때는 렌더러가 입력창을 맨 아래에 붙잡아 준다(render.rs 의
-        // `pinned_input_rows`).
+        // 08-30 밤에 한 번 되돌렸었다 — classic 은 입력창이 대화의 마지막 줄일 뿐이라
+        // 스크롤을 올리면 타이핑할 자리가 화면 밖으로 나갔기 때문이다. 그 대가는
+        // 그사이 메웠다: 렌더러가 살아 있는 화면에서 입력박스를 떠다 뷰포트 맨 아래에
+        // 덮는다(render.rs 의 `pinned_input_rows`). 08-31 실측으로 스크롤을 25노치
+        // 올린 화면에서 정확한 질문 띠와 붙잡힌 입력창이 함께 나오는 것을 확인하고
+        // 다시 켰다(2026-08-31 지시: "다시 수정해줘 옛날에 잘됐는데").
+        //
+        // 끄는 길 둘. `KASATERM_CLAUDE_CLASSIC=0` 이면 아예 안 건드리고,
+        // `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` 을 손으로 정해 뒀으면 그 값을 쓴다.
+        let classic_off = std::env::var("KASATERM_CLAUDE_CLASSIC")
+            .is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false"));
+        if !classic_off && std::env::var_os("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").is_none() {
+            cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
+        }
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",

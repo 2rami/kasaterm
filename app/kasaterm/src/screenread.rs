@@ -1922,14 +1922,15 @@ pub(crate) fn scrolled_gate(rows: &[Vec<GridCell>]) -> bool {
     })
 }
 
-/// Claude Code 의 스크롤 sticky prompt 감지 — **이 길이 정본이다.**
+/// Claude Code 의 스크롤 sticky prompt 감지 — **폴백이다.**
 ///
-/// 한때 pane 의 claude 를 기본 렌더러로 강제해(`kasa-pty` 의
-/// `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) 스크롤을 터미널이 쥐게 하고 띠는
-/// `turnjump.rs` 가 절대 줄 번호로 그리게 했었다. 그러면 입력칸이 화면 밖으로
-/// 밀려나 못 쓰게 되어(2026-08-30 지적) 되돌렸다 — claude 는 다시 대체화면을
-/// 쓰고, 스크롤은 claude 가 쥔다. `turnjump.rs` 는 손수 그 환경변수를 준 세션용
-/// 으로만 남아 있다.
+/// kasaterm 이 띄우는 pane 의 claude 는 기본(classic) 렌더러로 돌아 스크롤을
+/// 터미널이 쥔다(`kasa-pty` 가 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` 을 심는다).
+/// 그 세계의 띠는 `turnjump.rs` 가 절대 줄 번호로 정확히 그리므로 짐작이 없다.
+///
+/// 여기 남은 길은 **대체화면을 쓰는 claude** 를 위한 것이다 — 우리가 안 띄운
+/// 세션(pane 에서 ssh 로 들어간 다른 기계), 또는 `KASATERM_CLAUDE_CLASSIC=0` 으로
+/// 강제를 끈 경우.
 /// mouse-tracking TUI 라 kasaterm 은
 /// 뷰포트 스크롤 여부를 직접 못 안다 — 화면에 "Jump to bottom" 힌트(=위로
 /// 스크롤된 상태)가 있을 때만, 최상단의 흐릿한 프롬프트 행을 sticky 로 본다.
