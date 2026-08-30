@@ -8387,6 +8387,78 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// 화면 한 줄을 실제 그리드처럼 만든다 — 넓은 글자 뒤에 뒷칸(진짜 공백)이 붙는다.
+    fn grid_row(s: &str, width: usize) -> Vec<GridCell> {
+        use unicode_width::UnicodeWidthChar;
+        let mut row: Vec<GridCell> = Vec::new();
+        for ch in s.chars() {
+            let mut c = GridCell::blank();
+            c.ch = ch;
+            row.push(c);
+            if ch.width().unwrap_or(1) > 1 {
+                row.push(GridCell::blank());
+            }
+        }
+        while row.len() < width {
+            row.push(GridCell::blank());
+        }
+        row.truncate(width);
+        row
+    }
+
+    /// 올려다보는 화면의 **맨 윗줄에 본문이 있어도** 띠가 붙는다.
+    ///
+    /// 전에는 최상단 행이 빈 화면에만 얹었는데, 실화면의 맨 윗줄은 대개 접힌 본문
+    /// 조각이라 그 조건이 거의 안 걸렸다 — 「스크롤하면 붙는다」가 아니라 「됐다
+    /// 안 됐다 한다」로 보인 원인이다(2026-08-31 실측).
+    #[test]
+    fn sticky_band_covers_top_row_with_body() {
+        const W: usize = 80;
+        let screen = [
+            "신호입니다.",
+            "- 하지만 굽기엔 codex 작업이 안 들어갔어요.",
+            "두 가지 여쭤요 -",
+            "❯ 끝났어 워크트리깨끗하게 커밋푸시하고 빌드해줘",
+            "⏺ 끝났으면 커밋·푸시·빌드까지 하겠습니다.",
+            "Jump to bottom: fn+↓ to scroll",
+        ];
+        let rows: Vec<Vec<GridCell>> = screen.iter().map(|l| grid_row(l, W)).collect();
+        assert!(crate::screenread::scrolled_gate(&rows), "안내 문구가 있으면 게이트가 열려야 한다");
+
+        let prompts = vec![
+            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴의 답변 한 줄".to_string()]),
+            (
+                "끝났어 워크트리깨끗하게 커밋푸시하고 빌드해줘".to_string(),
+                vec!["끝났으면 커밋·푸시·빌드까지 하겠습니다.".to_string()],
+            ),
+        ];
+        let mut memo = None;
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("맨 윗줄에 본문이 있어도 띠가 나와야 한다");
+        assert!(got.synthetic);
+        assert_eq!(got.row, 0);
+        // 화면에 보이는 질문의 **바로 앞** 질문 — 그 위는 화면 밖이다.
+        assert_eq!(got.text, "codex 작업 상태 알려줘");
+        assert_eq!(memo.as_deref(), Some("codex 작업 상태 알려줘"));
+    }
+
+    /// 머리줄이 화면 밖으로 나가도 **직전에 확정한 턴**을 그대로 문다.
+    #[test]
+    fn sticky_band_remembers_turn_past_header() {
+        const W: usize = 80;
+        let rows: Vec<Vec<GridCell>> = ["앞 턴 답변 한가운데", "이어지는 줄", "Jump to bottom (click) ↓"]
+            .iter()
+            .map(|l| grid_row(l, W))
+            .collect();
+        let prompts = vec![
+            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴 답변 한가운데".to_string()]),
+            ("끝났어 커밋푸시하고 빌드해줘".to_string(), vec!["끝났으면 커밋까지".to_string()]),
+        ];
+        let mut memo = Some("codex 작업 상태 알려줘".to_string());
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        assert_eq!(got.text, "codex 작업 상태 알려줘");
+    }
+
     fn test_posix_shell() -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
