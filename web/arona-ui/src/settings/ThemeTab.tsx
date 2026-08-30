@@ -570,6 +570,10 @@ export function ThemeTab({
           ))}
           <NewThemeCard t={t} busy={busy} onClick={() => void run('new-theme')} />
         </div>
+        {/* 가져오기는 버튼이 아니라 드롭이라 화면에 아무 흔적이 없다. 적어 두지
+            않으면 그런 길이 있다는 걸 알 방법이 없고, 그럼 테마를 건네받은 사람은
+            숨은 폴더를 손으로 찾아 들어가야 한다. */}
+        <p className="mt-3 text-[11px] opacity-60">{t.theme.importHint}</p>
       </Section>
 
       <Section

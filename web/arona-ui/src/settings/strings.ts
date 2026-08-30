@@ -63,6 +63,7 @@ export const ko = {
   theme: {
     section: '테마',
     sectionHint: '폴더 하나가 테마 하나 — 이름·색·그림이 한 벌로 바뀝니다',
+    importHint: '테마 zip 을 이 창에 끌어다 놓으면 가져와요',
     newTheme: '+ 새 테마',
     rename: '이름',
     folder: '폴더',
@@ -407,6 +408,7 @@ export const en: Strings = {
   theme: {
     section: 'Theme',
     sectionHint: 'One folder is one theme — names, colors, and art change together',
+    importHint: 'Drop a theme zip onto this window to import it',
     newTheme: '+ New theme',
     rename: 'Rename',
     folder: 'Folder',

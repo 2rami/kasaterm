@@ -1134,6 +1134,40 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::ImportTheme(path) => {
+                let r = crate::socket::import_theme(&path);
+                let msg = match &r {
+                    Ok(id) => {
+                        // 덮어쓴 것이 지금 쓰는 테마일 수 있다 — 셋을 다 비우지 않으면
+                        // 화면이 두 테마를 섞고, 그건 「덜 바뀐 것」이 아니라 고장이다.
+                        crate::socket::invalidate_theme_rows();
+                        kasa_mcp::character::invalidate_active_theme();
+                        crate::theme::invalidate_roster();
+                        format!("'{id}' 을 가져왔어요 — 목록에서 고르면 켜져요")
+                    }
+                    Err(e) => format!("테마를 못 가져왔어요 — {e}"),
+                };
+                // 사용자가 보고 있는 건 설정 창이다. 메인 창 토스트만 띄우면 성공도
+                // 실패도 그 창에서는 아무 일이 없는 것으로 보인다 — 「떨어뜨렸는데
+                // 반응이 없다」가 이 기능에서 가장 나쁜 결말이라 창 안에도 알린다.
+                if let Some(wv) = self.settings_web_webview.as_ref() {
+                    let js_msg = serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into());
+                    let ok = r.is_ok();
+                    let _ = wv.evaluate_script(&format!(
+                        "(function(){{var d=document.createElement('div');d.textContent={js_msg};\
+                         d.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);\
+                         z-index:99999;padding:10px 16px;border-radius:8px;font:13px system-ui;\
+                         color:#fff;background:{bg};box-shadow:0 4px 16px rgba(0,0,0,.35)';\
+                         document.body.appendChild(d);setTimeout(function(){{d.remove();{reload}}},2200);}})()",
+                        bg = if ok { "#2e7d4f" } else { "#a33" },
+                        // 목록을 다시 그려야 새 테마를 고를 수 있다. 알림을 보여 준
+                        // 뒤에 새로고침해야 그 줄을 읽을 시간이 생긴다.
+                        reload = if ok { "location.reload()" } else { "" },
+                    ));
+                }
+                self.set_toast(msg);
+                return;
+            }
             UserEvent::ClaudeAccountAutoswitch { to, cooldown_until, pct } => {
                 // 사람에게 물어보려고 띄워 둔 확인은 버린다 — 그 숫자는 이미 낡았고,
                 // 자동 전환은 사람이 없는 사이에도 돌아야 해서 확인을 안 탄다.

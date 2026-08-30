@@ -2666,12 +2666,33 @@ impl App {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let win_show = window.clone();
+        let drop_proxy = self.proxy.clone();
         let webview = match wry::WebViewBuilder::new()
             .with_url(format!(
                 "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}{}",
                 cat.map(|c| format!("&cat={}", c.web_key())).unwrap_or_default()
             ))
             .with_background_color((27, 37, 65, 255))
+            // 테마 zip 을 이 창에 떨어뜨리면 받는다. 웹뷰가 창을 덮고 있으면 winit 의
+            // `DroppedFile` 이 창까지 오지 않아(네이티브 설정 창 경로와 갈린다) 여기서
+            // 잡아야 한다. 핸들러는 `Fn(..) -> bool` 이라 `&mut self` 에 못 닿으므로
+            // 소켓 스레드와 같은 방식으로 GUI 에 위임한다.
+            //
+            // zip 이 아니면 false — 설정 페이지가 제 드롭을 쓰게 될 때 여기서 먹어
+            // 버리지 않도록. zip 은 이 앱에서 테마 말고 쓸 데가 없어 모호하지 않다.
+            .with_drag_drop_handler(move |e| match e {
+                wry::DragDropEvent::Drop { paths, .. } => {
+                    let mut took = false;
+                    for p in paths {
+                        if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
+                            let _ = drop_proxy.send_event(UserEvent::ImportTheme(p));
+                            took = true;
+                        }
+                    }
+                    took
+                }
+                _ => false,
+            })
             .with_on_page_load_handler(move |event, _url| {
                 if matches!(event, wry::PageLoadEvent::Finished) {
                     win_show.focus_window();

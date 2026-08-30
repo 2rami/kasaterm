@@ -3705,6 +3705,9 @@ enum UserEvent {
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
+    /// 설정 창(웹뷰)에 떨어뜨린 테마 zip. wry 의 드롭 핸들러는 `Fn(..) -> bool`
+    /// 이라 `&mut self` 에 못 닿아, 소켓 스레드와 같은 방식으로 GUI 에 위임한다.
+    ImportTheme(std::path::PathBuf),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
