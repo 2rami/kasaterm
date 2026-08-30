@@ -21,6 +21,67 @@ fn ago_label(secs: Option<u64>) -> String {
     }
 }
 
+/// 화면공유를 연다 — 응답 못 하는 앱을 먼저 걷어내고.
+///
+/// `open vnc://` 하나로는 모자란다. 화면공유 앱이 이미 떠 있으면 macOS 는 「그 앱
+/// 실행 중」으로 보고 이벤트만 넘기는데, 런루프가 멈춘 앱은 그걸 처리하지 못해
+/// **아무 일도 일어나지 않는다**. 2026-08-30 에 이틀 묵은 창 하나 때문에 미니가
+/// 멀쩡한데도 「연결이 안 된다」였다 — 주소·서비스·로그인 세션 전부 정상이었다.
+///
+/// 소켓으로는 못 가른다. 멈춘 앱도 **옛 연결을 그대로 들고 있어** `lsof` 로는
+/// 붙어 있는 것처럼 보인다(실측). 반대로 연결이 하나도 없는 앱은 `open` 이 알아서
+/// 새로 붙이므로 손댈 필요가 없다(실측). 그래서 프로세스 상태만 본다.
+///
+/// fork 를 여러 번 하므로 호출자는 GUI 스레드 밖에서 부른다.
+fn open_screen_share(host: &str) {
+    let hung = hung_screen_share_pids();
+    for pid in &hung {
+        let _ = crate::proc::command("kill").arg(pid).status();
+    }
+    if !hung.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // 멈춘 프로세스는 TERM 을 받고도 서 있을 수 있다 — 남아 있으면 KILL 로 올린다.
+        for pid in &hung {
+            if pid_alive(pid) {
+                let _ = crate::proc::command("kill").args(["-9", pid]).status();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = crate::proc::command("open").arg(format!("vnc://{host}")).spawn();
+}
+
+fn pid_alive(pid: &str) -> bool {
+    crate::proc::command("kill")
+        .args(["-0", pid])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// 응답 못 하는 화면공유 앱의 PID 들. 멀쩡하면 빈 벡터 — 걷어내는 건 창을 잃는
+/// 조작이라 확실할 때만 한다.
+///
+/// `T`(멈춤)·`U`(인터럽트 불가 대기)만 잡는다. 이 둘은 런루프가 돌 수 없는 상태다.
+/// 그 밖의 형태로 굳은 앱은 `ps` 에 `S` 로 보여 여기서 못 거른다 — 그건 사람이 앱을
+/// 끄는 수밖에 없다.
+fn hung_screen_share_pids() -> Vec<String> {
+    let Ok(out) = crate::proc::command("ps").args(["-Ao", "pid=,stat=,command="]).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("Screen Sharing.app"))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?;
+            let stat = it.next()?;
+            let hung = stat.starts_with('T') || stat.starts_with('U');
+            hung.then(|| pid.to_string())
+        })
+        .collect()
+}
+
 /// `#RRGGBB` → RGBA. 원격 창구가 주는 학생색(header_color)과 같은 표기만 받는다.
 fn parse_hex(s: &str) -> Option<[u8; 4]> {
     let h = s.strip_prefix('#')?;
@@ -204,9 +265,13 @@ impl App {
         let Some(btn) = hit else { return false };
         if let state::MachinesColBtn::Screen { host } = &btn {
             // 화면공유는 OS 에 맡긴다 — macOS 화면공유 앱이 vnc:// 를 연다.
-            // 이사와 달리 즉시 끝나는 조작이라 busy 대열에 안 세운다.
-            let _ = crate::proc::command("open").arg(format!("vnc://{host}")).spawn();
+            // 이사와 달리 즉시 끝나는 조작이라 busy 대열에 안 세운다. 다만 굳은
+            // 앱을 먼저 걷어내야 해서(open_screen_share) fork 가 몇 번 돌고,
+            // 기다릴 결과가 없으니 스레드로 뺀다 — 이 자리에서 기다리면 그
+            // 프레임이 통째로 멈춘다.
             self.set_toast(format!("화면공유 여는 중 — {host}"));
+            let host = host.clone();
+            std::thread::spawn(move || open_screen_share(&host));
             return true;
         }
         if self.info.machines_col.busy.is_some() {
