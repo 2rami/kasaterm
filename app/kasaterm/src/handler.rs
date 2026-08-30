@@ -291,7 +291,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketMigrate(pane, base, cwd, force, reply) => {
+            UserEvent::SocketMigrate(pane, base, cwd, force, run, reply) => {
                 // 목적지를 기계 **이름**(「맥미니」)으로도 받는다 — 학생이 자기
                 // 이사를 신청할 때 주소·경로를 외울 필요가 없게(2026-08-30 지시
                 // 「옮길 학생 본인이 직접 옮기게도」). 이름이면 명부에서 주소를
@@ -346,7 +346,7 @@ impl ApplicationHandler<UserEvent> for App {
                         };
                         (m.base, cwd)
                     };
-                    self.migrate_pane(pane, &base, cwd.as_deref(), *force)
+                    self.migrate_pane(pane, &base, cwd.as_deref(), *force, run.as_deref())
                 })()
                 .map_err(|e| format!("{e:#}"));
                 #[cfg(not(unix))]

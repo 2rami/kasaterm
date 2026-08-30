@@ -322,7 +322,7 @@ impl App {
                     ),
                     None => None,
                 };
-                self.migrate_pane(&pane, &m.base, remote_cwd.as_deref(), false)
+                self.migrate_pane(&pane, &m.base, remote_cwd.as_deref(), false, None)
             })(),
             state::MachinesColBtn::Bring { pane } => self.migrate_pane_back(&pane, None, false),
         };

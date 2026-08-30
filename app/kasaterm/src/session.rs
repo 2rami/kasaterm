@@ -749,6 +749,7 @@ impl App {
         base: &str,
         remote_cwd: Option<&str>,
         force: bool,
+        run: Option<&str>,
     ) -> Result<String> {
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
@@ -975,23 +976,27 @@ impl App {
         // insert 가 옛 로컬 세션을 떨군다 — Drop 이 로컬 셸을 걷는다.
         self.insert_pty(pid.to_string(), remote.session.clone());
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
-        let cmd = restore_agent_command(
-            Some("claude"),
-            sid.as_deref(),
-            sid.is_some(),
-            Some(model.as_str()).filter(|s| !s.is_empty()),
-            Some(effort.as_str()).filter(|s| !s.is_empty()),
-        );
+        // 태생 스폰 + 실행 명령 지정(`mini codex`)이면 그 명령을 **그대로** 돌린다 —
+        // 하네스 불문이 요점이라 플래그를 덧붙이지 않는다. 그 외엔 claude resume.
+        let cmd = match (&sid, run) {
+            (None, Some(r)) => format!("{}\r", r.trim()),
+            _ => {
+                let c = restore_agent_command(
+                    Some("claude"),
+                    sid.as_deref(),
+                    sid.is_some(),
+                    Some(model.as_str()).filter(|s| !s.is_empty()),
+                    Some(effort.as_str()).filter(|s| !s.is_empty()),
+                );
+                if bypass {
+                    format!("{} --dangerously-skip-permissions\r", c.trim_end_matches('\r'))
+                } else {
+                    c
+                }
+            }
+        };
         // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 —
         // 레포로 옮겨 놓고 이어받아야 학생이 제 코드 위에서 깬다.
-        let cmd = if bypass {
-            format!(
-                "{} --dangerously-skip-permissions\r",
-                cmd.trim_end_matches('\r')
-            )
-        } else {
-            cmd
-        };
         let cmd = if remote_pane.is_some() {
             format!("cd '{}' && {}", remote_cwd.replace('\'', r"'\''"), cmd)
         } else {

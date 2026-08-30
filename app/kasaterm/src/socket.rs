@@ -1170,13 +1170,14 @@ impl Backend for PtyBackend {
         }
     }
 
-    fn migrate_pane(&self, pane: &str, base: &str, cwd: Option<&str>, force: bool) -> Result<String> {
+    fn migrate_pane(&self, pane: &str, base: &str, cwd: Option<&str>, force: bool, run: Option<&str>) -> Result<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketMigrate(
             pane.to_string(),
             base.to_string(),
             cwd.map(str::to_string),
             force,
+            run.map(str::to_string),
             tx,
         ));
         // 대화 jsonl 업로드(수백 MB 가능)+원격 접속이 들어 있다 — promote 보다 길게.

@@ -1002,7 +1002,9 @@ async fn pane_migrate_handler(
                     }
                 }
             };
-            backend.migrate_pane(&pane, &m.base, cwd.as_deref(), force)
+            // 이 경로는 대화 이사 전용이다 — 태생 실행 명령(run)은 셸 pane 을
+            // 저쪽에서 처음부터 띄울 때만 뜻이 있어 여기선 늘 없다.
+            backend.migrate_pane(&pane, &m.base, cwd.as_deref(), force, None)
         }
     })
     .await;

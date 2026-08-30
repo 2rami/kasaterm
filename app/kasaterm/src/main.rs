@@ -3745,12 +3745,15 @@ enum UserEvent {
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// pane 의 claude 를 다른 기계로 **이사** — (pane, base, 원격 cwd, force,
-    /// 회신=원격 세션 id). 대화 jsonl 운반 + 같은 자리 원격 스왑 + resume 주입.
+    /// 태생 실행 명령, 회신=원격 세션 id). 대화 jsonl 운반 + 같은 자리 원격 스왑 +
+    /// resume 주입. 태생 실행 명령(run)은 에이전트 없는 셸 pane 의 태생 스폰에서만
+    /// 뜻이 있다 — `mini codex` 처럼 claude 아닌 것을 저쪽에서 돌릴 때.
     SocketMigrate(
         String,
         String,
         Option<String>,
         bool,
+        Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// `surface.migrate` 의 역방향(`base: "local"`) — 원격 pane 을 이 기계로.
@@ -4953,7 +4956,7 @@ struct App {
     /// 죽었다("하다가 계정전환하니까 너가 없어졌어"). 연속으로 조용한 시간을 재서
     /// 그 틈을 건너뛴다.
     pane_account_quiet_since: HashMap<String, Instant>,
-    /// pane id → (transcript mtime, bg_active, 마지막 사용자 프롬프트) — an
+    /// pane id → (transcript mtime, bg_active, (질문, 그 답변 줄들) 목록) — an
     /// mtime-gated cache for the header pulse bar. An idle pane's transcript
     /// rarely changes, so the bar's "background/Monitor running" check reads the
     /// tail only when mtime moves.
@@ -6558,7 +6561,7 @@ fn install_pane_shims() {
     // (`--settings`) so ~/.claude/settings.json is never modified.
     install_claude_hook_shim(&shim_dir);
     // codex 도 같은 대접 — pane 전용 CODEX_HOME 에 우리 훅·페르소나를 얹는다.
-    install_codex_hook_shim(&shim_dir);
+    install_codex_shim(&shim_dir);
     // agy 도 학생이 된다. 셋 중 유일하게 사용자 홈에 파일을 쓰는데(그 CLI 가
     // 에이전트를 이름으로만 찾는다), 접두 `kasaterm-` 밖은 안 건드린다.
     install_agy_hook_shim(&shim_dir);
@@ -7542,6 +7545,20 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
+    // `mini [명령...]` — 그 명령을 명부 첫 기계에서 돌리고 이 pane 을 거울로 바꾼다.
+    // 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로 옮기는 뭐 없을까」의 답:
+    // 옮기지 말고 태생부터 저쪽). 명령이 없으면 claude — `claude mini` 와 같다.
+    #[cfg(unix)]
+    {
+        let mini = "#!/bin/sh\n\
+if [ $# -eq 0 ]; then\n\
+  exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
+fi\n\
+exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"} --run \"$*\"\n";
+        if let Err(e) = write_shim(&shim_dir.join("mini"), mini) {
+            eprintln!("[shim] write mini failed: {e}");
+        }
+    }
     #[cfg(windows)]
     {
         // PowerShell does not execute the extensionless POSIX wrapper and
@@ -7580,74 +7597,18 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     }
 }
 
-/// codex 판 hook shim. claude 와 목적은 같다(pane 안에서만 협업 훅·페르소나를 얹고
-/// 거노 개인 설정은 안 건드린다) — 수단이 넷 다르다. 전부 2026-08-05 실측 확정:
+/// codex 판 pane shim. pane 안에서만 계정·페르소나를 얹고 거노 개인 설정은 안
+/// 건드린다 — 수단이 셋 다르다. 전부 2026-08-05 실측 확정:
 ///
-/// 1. **`--settings` 등가물이 없다.** codex 는 훅을 `$CODEX_HOME/hooks.json` 에서만
-///    읽으므로, 세션 스코프 주입 자리가 `CODEX_HOME` 자체다 → pane 별 홈을 세우고
-///    `~/.codex` 를 심볼릭으로 미러한다(세션·플러그인·스킬·캐시·인증 공유).
-/// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록·훅 해시를 여기 되쓰는데,
+/// 1. **`--settings` 등가물이 없다.** 세션 스코프 주입 자리가 `CODEX_HOME` 자체다.
+///    pane 별 홈을 세우고 `~/.codex` 를 심볼릭으로 미러한다
+///    (세션·플러그인·스킬·캐시·인증 공유).
+/// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록을 여기 되쓰는데,
 ///    심볼릭이면 그 쓰기가 거노 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
-/// 3. **위험 플래그가 둘로 갈려 있다.** `--dangerously-bypass-hook-trust` 는 이름과
-///    달리 **훅 신뢰만** 푼다 — `[hooks.state]` 에 커맨드 SHA256 이 박히는데 shim 경로가
-///    GUI pid 별이라 매번 깨져 TUI 가 재승인을 묻기에 상시 붙인다. 명령 실행 승인은
-///    별개라 `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")를 함께
-///    붙인다. 앞의 것만 붙이면 화면에 "Ask for approval" 이 남아 학생이 첫 명령에서
-///    멈춘다(2026-08-11 지적). claude pane 의 `--dangerously-skip-permissions` 와 같은
-///    자리다.
-/// 4. **`timeout` 단위가 초다**(claude 는 ms). 실측 판별: `timeout:500`+`sleep 1` 은
-///    완주하고 `timeout:1`+`sleep 3` 은 Failed — ms 였다면 전자가 죽었어야 하고,
-///    무시였다면 후자가 살았어야 한다. claude 쪽 5000 을 그대로 옮기면 83분이 된다.
-///
-/// 이벤트는 claude 와 같은 PascalCase 스키마고 stdin JSON 도 같다(`session_id`·
-/// `transcript_path`·`cwd`·`hook_event_name`·`model`·`permission_mode`). 다만
-/// **`Notification` 이 없어** attention 훅은 `PermissionRequest` 에 건다.
-/// `transcript_path` 는 `$CODEX_HOME/sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`.
-pub(crate) fn install_codex_hook_shim(shim_dir: &std::path::Path) {
-    let Some(hooks_dir) = locate_collab_hooks_dir() else {
-        eprintln!("[shim] collab-hooks dir not found — codex hook shim skipped");
-        return;
-    };
-    let hd = if cfg!(windows) {
-        hooks_dir.display().to_string().replace('\\', "/")
-    } else {
-        hooks_dir.display().to_string()
-    };
-    // 초 단위. claude 판(`install_claude_hook_shim`)의 ms 값을 복붙하지 말 것.
-    let cmd = |script: &str, timeout_s: u64| {
-        let run = if cfg!(windows) {
-            format!("sh \"{hd}/{script}\"")
-        } else {
-            format!("\"{hd}/{script}\"")
-        };
-        serde_json::json!({ "type": "command", "command": run, "timeout": timeout_s })
-    };
-    let settings = serde_json::json!({
-        "hooks": {
-            "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5)] }],
-            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5)] }],
-            "PostToolUse": [
-                { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 5)] },
-                { "hooks": [cmd("kasaterm-steer-hook.sh", 5)] }
-            ],
-            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5)] }],
-            // claude 의 Notification 자리 — codex 엔 그 이벤트가 없다.
-            "PermissionRequest": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5)] }],
-        },
-    });
-    let settings_path = shim_dir.join("codex-hooks.json");
-    match serde_json::to_string_pretty(&settings) {
-        Ok(s) => {
-            if let Err(e) = write_shim_data(&settings_path, s) {
-                eprintln!("[shim] write codex-hooks.json failed: {e}");
-                return;
-            }
-        }
-        Err(e) => {
-            eprintln!("[shim] serialize codex hook settings failed: {e}");
-            return;
-        }
-    }
+/// 3. **자동 실행 승인은 codex 전용 플래그로 푼다.** 명령 실행 승인과 샌드박스는
+///    `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")가 맡는다.
+///    claude pane 의 `--dangerously-skip-permissions` 와 대응하는 자리다.
+pub(crate) fn install_codex_shim(shim_dir: &std::path::Path) {
     // 래퍼는 Rust 쪽 값이 하나도 안 박혀 정적 문자열이다 — hooks 경로는 위 json 안에
     // 있고 나머지는 전부 실행 시점에 셸이 푼다. 덕분에 format! 이스케이프가 없다.
     let wrapper = r#"#!/bin/sh
@@ -7699,7 +7660,8 @@ cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
 if [ -n "$PWD" ] && ! grep -qF "[projects.\"$PWD\"]" "$CH/config.toml" 2>/dev/null; then
   printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PWD" >> "$CH/config.toml"
 fi
-cp "$SELF_DIR/codex-hooks.json" "$CH/hooks.json" 2>/dev/null
+# 예전 버전이 만든 pane 전용 hooks.json 은 신뢰 경고를 되살리므로 걷는다.
+rm -f "$CH/hooks.json"
 # 페르소나 — codex 엔 --append-system-prompt 등가물이 없어 CODEX_HOME/AGENTS.md 로 준다
 # (pane 별 홈이라 격리). 거노 전역 AGENTS.md 를 먼저 깔고 뒤에 얹는다 — 통째로 갈아치우면
 # 그의 전역 지시가 pane 안에서만 조용히 사라진다. 매 실행 다시 복사라 누적되지 않는다.
@@ -7711,10 +7673,6 @@ fi
 cp "$SRC/AGENTS.md" "$CH/AGENTS.md" 2>/dev/null || : > "$CH/AGENTS.md"
 [ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$CH/AGENTS.md"
 export CODEX_HOME="$CH"
-case " $* " in
-  *" --dangerously-bypass-hook-trust "*) ;;
-  *) set -- --dangerously-bypass-hook-trust "$@" ;;
-esac
 # 승인·샌드박스도 함께 우회한다 — claude pane 이 `--dangerously-skip-permissions` 로
 # 뜨는 것과 같은 자리다. 이게 없으면 학생이 첫 명령에서 승인 프롬프트에 멈춰 서고,
 # 오케스트레이터는 그걸 「일하는 중」으로 읽는다(화면 하단에 "Ask for approval").
@@ -9196,22 +9154,15 @@ mod tests {
 
     /// codex shim 의 불변식. claude 판에서 값을 복붙하다 깨지기 쉬운 것들만 못박는다.
     #[test]
-    fn codex_shim_wrapper_and_hooks_hold_their_invariants() {
+    fn codex_shim_wrapper_holds_its_invariants() {
         let dir = std::env::temp_dir().join(format!("kt-shim-codex-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        install_codex_hook_shim(&dir);
-        let (Ok(body), Ok(hooks)) = (
-            std::fs::read_to_string(dir.join("codex")),
-            std::fs::read_to_string(dir.join("codex-hooks.json")),
-        ) else {
-            // collab-hooks 를 못 찾는 환경 — 설치 자체가 스킵돼 볼 대상이 없다.
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        };
+        install_codex_shim(&dir);
+        let body = std::fs::read_to_string(dir.join("codex")).unwrap();
         assert!(
-            body.contains("--dangerously-bypass-hook-trust"),
-            "훅 trust 관문을 안 넘으면 TUI 가 매번 재승인을 묻는다"
+            !body.contains("--dangerously-bypass-hook-trust"),
+            "명령 승인과 무관한 훅 trust 우회는 시작 경고만 만들므로 강제하지 않는다"
         );
         assert!(
             body.contains("--dangerously-bypass-approvals-and-sandbox"),
@@ -9219,11 +9170,11 @@ mod tests {
         );
         assert!(
             body.contains("export CODEX_HOME="),
-            "pane 전용 홈을 안 내보내면 훅도 페르소나도 안 붙는다"
+            "pane 전용 홈을 안 내보내면 계정과 페르소나가 안 붙는다"
         );
         assert!(
             body.contains("cp \"$SRC/config.toml\""),
-            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰/훅해시 쓰기가 거노 개인 설정으로 샌다"
+            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰 상태 쓰기가 거노 개인 설정으로 샌다"
         );
         assert!(
             body.contains("trust_level = \\\"trusted\\\"") || body.contains("trust_level"),
@@ -9233,40 +9184,9 @@ mod tests {
             body.contains("grep -qF \"[projects.\\\"$PWD\\\"]\""),
             "중복 [projects] 테이블은 TOML 파싱을 통째로 깬다 — 없을 때만 붙여야 한다"
         );
-        let v: serde_json::Value = serde_json::from_str(&hooks).unwrap();
-        let h = &v["hooks"];
         assert!(
-            h.get("Notification").is_none(),
-            "codex 엔 Notification 이벤트가 없다"
-        );
-        assert!(
-            h.get("PermissionRequest").is_some(),
-            "attention 훅은 PermissionRequest 로 간다"
-        );
-        // timeout 은 **초**다(실측: 500+sleep1 완주, 1+sleep3 Failed). claude 판의
-        // 5000 을 복붙하면 83분이 된다 — 세 자리 이상이면 그 사고다.
-        fn walk_timeouts(v: &serde_json::Value, out: &mut Vec<u64>) {
-            match v {
-                serde_json::Value::Object(m) => {
-                    for (k, x) in m {
-                        if k == "timeout" {
-                            if let Some(n) = x.as_u64() {
-                                out.push(n);
-                            }
-                        }
-                        walk_timeouts(x, out);
-                    }
-                }
-                serde_json::Value::Array(a) => a.iter().for_each(|x| walk_timeouts(x, out)),
-                _ => {}
-            }
-        }
-        let mut ts = Vec::new();
-        walk_timeouts(&v, &mut ts);
-        assert!(!ts.is_empty(), "훅이 하나도 안 실렸다");
-        assert!(
-            ts.iter().all(|t| *t <= 60),
-            "timeout 이 ms 값처럼 크다 — codex 는 초 단위다: {ts:?}"
+            body.contains("rm -f \"$CH/hooks.json\""),
+            "이전 pane 훅을 걷지 않으면 다음 실행에서 신뢰 경고가 되살아난다"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

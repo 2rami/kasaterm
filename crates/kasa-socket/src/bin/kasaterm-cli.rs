@@ -1005,7 +1005,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let mut i = 0usize;
             while i < args.len() {
                 let a = &args[i];
-                if a == "--cwd" {
+                if a == "--cwd" || a == "--run" {
                     i += 2;
                     continue;
                 }
@@ -1037,6 +1037,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "pane": pane,
                     "base": base,
                     "cwd": flagval("--cwd"),
+                    "run": flagval("--run"),
                     "force": args.iter().any(|a| a == "--force"),
                 }),
             )

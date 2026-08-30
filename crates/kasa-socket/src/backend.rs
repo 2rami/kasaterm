@@ -541,12 +541,15 @@ pub trait Backend: Send + Sync {
     }
     /// pane 의 claude 를 다른 기계의 PTY 호스트로 **이사** — 대화 jsonl 운반 +
     /// 같은 자리 원격 스왑 + resume 주입. GUI 백엔드 전용.
+    /// `run` 은 태생 스폰(에이전트 없는 셸 pane) 전용 — 저쪽에서 claude 대신
+    /// 돌릴 명령(`mini codex`). 이사(대화 운반)에는 뜻이 없어 무시된다.
     fn migrate_pane(
         &self,
         _pane: &str,
         _base: &str,
         _cwd: Option<&str>,
         _force: bool,
+        _run: Option<&str>,
     ) -> Result<String> {
         anyhow::bail!("migrate: 이 백엔드는 지원하지 않는다")
     }
