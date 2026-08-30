@@ -158,6 +158,32 @@ fn read_rows_above(term: &Term<PtyEventForwarder>, n: usize) -> Vec<Row> {
     out
 }
 
+/// 살아 있는 화면(스크롤 위치와 무관한 맨 아래 화면)의 마지막 `n` 행 — 위→아래 순.
+///
+/// `read_rows_above` 의 거울이다. 그쪽은 뷰포트 **위** 스크롤백을 보고, 이쪽은
+/// 스크롤을 얼마나 올렸든 지금 프로그램이 그리고 있는 화면의 **꼬리**를 본다.
+/// 그리드 줄 번호는 display_offset 과 무관하므로(뷰포트 r 행 = 줄 `r - offset`)
+/// 화면 마지막 줄은 언제나 `screen_lines - 1` 이다.
+fn read_live_tail(term: &Term<PtyEventForwarder>, n: usize) -> Vec<Row> {
+    let g = term.grid();
+    let cols = g.columns();
+    let lines = g.screen_lines();
+    let start = lines.saturating_sub(n);
+    let mut out = Vec::with_capacity(lines - start);
+    for line in start..lines {
+        let mut row: Row = Vec::with_capacity(cols);
+        for c in 0..cols {
+            let point = Point::new(
+                alacritty_terminal::index::Line(line as i32),
+                alacritty_terminal::index::Column(c),
+            );
+            row.push(convert_cell(&g[point]));
+        }
+        out.push(row);
+    }
+    out
+}
+
 /// 스크롤백에 남은 사용자 프롬프트 한 줄의 자리.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptAnchor {
@@ -415,26 +441,19 @@ impl PtySession {
             env!("CARGO_PKG_VERSION"),
         );
         cmd.env("COLORTERM", "truecolor");
-        // claude 를 **기본(classic) 렌더러**로 돌린다 — 대체화면을 안 쓰므로 대화가
-        // 이 터미널의 스크롤백에 그대로 쌓인다.
+        // claude 의 렌더러는 **건드리지 않는다.** 한때 여기서
+        // `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 을 심어 classic 으로 돌렸다 —
+        // 대체화면을 안 쓰면 대화가 이 터미널의 스크롤백에 쌓여, 「맨 위 질문 고정」
+        // 띠를 절대 줄 번호로 정확히 그릴 수 있어서다(`turnjump.rs`).
         //
-        // 왜 이렇게까지 하나: claude 의 전체화면(no-flicker) 렌더러에서는 스크롤이
-        // claude 안에서만 일어나 터미널이 위치를 못 안다. 그 세계의 「맨 위 질문 고정」
-        // 띠는 claude 가 직접 그리는데, 2.1.251 에서 그 띠가 **아예 안 뜬다** — 스크롤
-        // 위치를 읽는 세 값이 뷰포트 핸들 하나에만 묶여 메모되어 첫 프레임의 0 에서
-        // 굳는다(2026-08-30 실행 파일 확인, 실측으로도 어느 스크롤에서도 안 떴다).
-        // 화면 글자만 보고 kasaterm 이 대신 그려 봤지만 코드·도구 출력이 올라오면
-        // 어느 질문인지 맞힐 수가 없다. 스크롤을 터미널이 쥐면 절대 줄 번호가 있어
-        // 그 짐작이 통째로 사라진다(`turnjump.rs`).
+        // 되돌린 이유는 대가가 더 컸다: classic 은 입력창이 대화의 마지막 줄일
+        // 뿐이라 스크롤을 올리면 타이핑할 자리가 화면 밖으로 나가고, no-flicker 가
+        // 주던 화면 안정성도 함께 잃는다(2026-08-30 지시: "그냥 노플리커 켜고
+        // 방안을 찾아보자").
         //
-        // 이 env 는 claude 가 「언제든 classic 을 강제」로 문서화한 값이라
-        // `settings.json` 의 `CLAUDE_CODE_NO_FLICKER` 보다 확실하다 — 그쪽은 사용자
-        // 설정이 덮어쓸 수 있고, 이 값은 그 설정에 없으니 살아남는다.
-        //
-        // 이미 손으로 정해 둔 값이 있으면 그대로 둔다 — 되돌릴 구멍을 남긴다.
-        if std::env::var_os("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").is_none() {
-            cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
-        }
+        // 손으로 켜 보고 싶으면 pane 에서 그 env 를 주고 claude 를 띄우면 된다 —
+        // 그때는 렌더러가 입력창을 맨 아래에 붙잡아 준다(render.rs 의
+        // `pinned_input_rows`).
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",
@@ -1154,6 +1173,15 @@ impl PtySession {
     /// 락 잡고 읽는다.
     pub fn rows_above(&self, n: usize) -> Vec<Row> {
         read_rows_above(&self.term.lock().unwrap(), n)
+    }
+
+    /// 살아 있는 화면의 마지막 `n` 행 — 스크롤을 올려 둔 상태에서도 같은 값이다.
+    ///
+    /// 대체화면을 안 쓰는 claude 는 입력창이 대화의 마지막 줄일 뿐이라, 스크롤을
+    /// 올리면 함께 위로 밀려난다. 렌더러가 이 행들을 떠다 뷰포트 맨 아래에 덮어
+    /// 입력창을 붙잡아 둔다.
+    pub fn live_tail_rows(&self, n: usize) -> Vec<Row> {
+        read_live_tail(&self.term.lock().unwrap(), n)
     }
 
     /// 스크롤백에 남은 **사용자 프롬프트 줄**을 절대 줄 번호와 함께 모은다.

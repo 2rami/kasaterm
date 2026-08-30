@@ -2460,6 +2460,16 @@ impl App {
             crate::lineedit::insert(buf, cursor, text);
         }
     }
+    /// 지금 pane 이 스크롤백을 보고 있으면 살아 있는 끝으로 되돌린다.
+    /// 이미 끝에 있으면 아무 일도 안 한다(공짜 질의라 매번 물어도 된다).
+    fn follow_live_tail_now(&mut self) {
+        let Some(id) = self.target_surface() else { return };
+        let Some(sess) = self.pty_for_pane(&id) else { return };
+        if sess.view_state().0 > 0 {
+            sess.scroll_to_bottom();
+        }
+    }
+
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -3179,6 +3189,14 @@ impl App {
                     }
                     self.input_buf.clear();
                     self.current_suggestion = None;
+                    // 스크롤을 올려 둔 채로 보냈으면 살아 있는 끝으로 따라 내려간다.
+                    // 입력창은 렌더러가 맨 아래에 붙잡아 두므로 스크롤 위에서도 칠
+                    // 수 있는데, 그대로 두면 정작 **대답이 화면 밖에서** 흐른다.
+                    //
+                    // 출력이 시야를 끌어내리지 않는 규칙과 축이 다르다 — 그쪽은
+                    // 남이 떠드는 것(읽던 자리를 뺏기면 안 된다), 이쪽은 내가 방금
+                    // 보낸 것(답을 보려고 보냈다).
+                    self.follow_live_tail_now();
                     b"\r".to_vec()
                 }
             }

@@ -80,6 +80,26 @@ impl PromptBox {
     }
 }
 
+/// 스크롤을 올렸을 때 뷰포트 맨 아래에 붙잡아 둘 행 범위 — 입력박스의 위 테두리
+/// (codex 는 테두리가 없어 입력행 자신)부터 화면에 글자가 남은 마지막 행까지.
+///
+/// 박스 **아래**까지 함께 뜨는 이유: claude 는 테두리 밑에 모드·단축키 힌트를
+/// 한두 줄 더 그린다. 박스만 떠서 덮으면 그 줄들이 스크롤을 따라 흘러가, 붙잡아
+/// 둔 입력창 밑으로 지나간 대화가 비쳐 화면이 어긋나 보인다.
+///
+/// 살아 있는 화면(`live_tail_rows`)을 받는다 — 뷰포트가 아니라. 뷰포트에는
+/// 스크롤을 올린 순간 입력창이 이미 없다.
+pub(crate) fn pinned_input_rows(
+    rows: &[Vec<GridCell>],
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let top = match prompt_box(rows)? {
+        PromptBox::Bordered { top, .. } => top,
+        PromptBox::Filled { rows } => rows.start,
+    };
+    let last = rows.iter().rposition(|r| r.iter().any(|c| c.ch != ' ' && c.ch != '\0'))?;
+    (last >= top).then_some(top..=last)
+}
+
 /// ultracode 턴의 입력박스 accent — 보라 숨쉬기. 학생 배정과 무관하게 모든
 /// ultracode pane 이 이걸 쓴다(2026-08-16 「보라색 숨쉬기로」 — 한때는 학생색
 /// 보더 위를 혜성이 돌았다). 누구 pane 인지는 pane 테두리 학생색이 계속 말한다.
@@ -5518,5 +5538,42 @@ mod peer_label_fallback_tests {
     fn an_empty_label_does_not_blank_the_sender() {
         let (sender, _) = native_sender_accent("", true, None, &Default::default(), &ws());
         assert_eq!(sender, PEER_LABEL);
+    }
+}
+
+#[cfg(test)]
+mod pinned_input_tests {
+    use super::*;
+
+    fn row(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|ch| GridCell { ch, ..GridCell::blank() })
+            .collect()
+    }
+
+    #[test]
+    fn 입력박스는_위테두리부터_마지막_힌트줄까지_붙잡는다() {
+        // claude 화면 꼬리 — 지나간 대화, 입력박스, 그 아래 모드 힌트.
+        let border = "─".repeat(20);
+        let rows: Vec<Vec<GridCell>> = [
+            "지나간 답변 한 줄",
+            &border,
+            "❯ 여기에 친다",
+            &border,
+            "⏵⏵ accept edits on",
+            "",
+        ]
+        .iter()
+        .map(|s| row(s))
+        .collect();
+        // 테두리(1)부터 힌트(4)까지 — 뒤따르는 빈 줄은 뺀다.
+        assert_eq!(pinned_input_rows(&rows), Some(1..=4));
+    }
+
+    #[test]
+    fn 입력박스가_없으면_아무것도_붙잡지_않는다() {
+        let rows: Vec<Vec<GridCell>> =
+            ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
+        assert_eq!(pinned_input_rows(&rows), None);
     }
 }

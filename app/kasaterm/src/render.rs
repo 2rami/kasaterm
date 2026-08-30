@@ -92,6 +92,12 @@ fn elapsed_label(secs: u64) -> Option<String> {
 }
 
 /// 배치도 칸 바닥의 진행 띠 — 높이와 그 아래 여백.
+/// 입력창을 붙잡으려고 살아 있는 화면에서 떠 보는 행 수. claude 입력박스는
+/// 테두리 2 + 입력 1~여러 줄 + 힌트 1~2 라 평소 5~8 이면 되지만, 여러 줄을 붙여
+/// 넣어 상자가 길어질 수 있어 넉넉히 본다. 이보다 긴 상자는 위 테두리를 못 찾아
+/// 붙잡기가 조용히 쉰다 — 그 편이 잘린 상자를 덮는 것보다 낫다.
+const PINNED_INPUT_SCAN_ROWS: usize = 24;
+
 const MINI_BAR_H: f32 = 2.0;
 const MINI_BAR_PAD: f32 = 2.0;
 /// 걷는 학생 상자가 얼굴보다 큰 몫(위 2 + 아래 2). 원본이 정사각 전신이라
@@ -1002,6 +1008,36 @@ impl App {
                 let agent_kind =
                     self.pty.get(tab_pid.as_str()).and_then(|p| p.active_agent());
                 let runs_claude = agent_kind.is_some();
+                // 스크롤을 올려도 **입력창은 맨 아래에 붙잡는다**. 대체화면을 끈
+                // claude 는 입력창이 대화의 마지막 줄일 뿐이라, 스크롤백을 거슬러
+                // 올라가면 타이핑할 자리가 화면 밖으로 나간다(2026-08-30 지적:
+                // "노플리커 끄니까 하단 채팅창 고정되는게 안된다"). 위쪽 sticky
+                // 띠가 지나간 질문을 붙잡는 것과 같은 원리로, 살아 있는 화면에서
+                // 입력박스를 떠다 뷰포트 맨 아래 행에 덮는다.
+                //
+                // 스크롤이 0 이면 아무것도 안 한다 — 그때는 원래 자리에 있다.
+                // 대체화면 앱(vim·helix)은 스크롤백이 없어 offset 이 늘 0 이므로
+                // 여기 들어오지 않는다. 기본 설정의 claude 도 대체화면을 쓰므로
+                // 평소엔 잠들어 있다 — `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 로
+                // classic 을 켠 pane 에서만 깨어난다.
+                if runs_claude && !composed.is_empty() {
+                    if let Some(sess) = self.pty.get(tab_pid.as_str()) {
+                        if sess.view_state().0 > 0 {
+                            let live: Vec<Vec<GridCell>> = sess
+                                .live_tail_rows(PINNED_INPUT_SCAN_ROWS)
+                                .iter()
+                                .map(normalise)
+                                .collect();
+                            if let Some(range) = crate::screenread::pinned_input_rows(&live) {
+                                let pinned = &live[range];
+                                let h = pinned.len().min(composed.len());
+                                let base = composed.len() - h;
+                                composed[base..]
+                                    .clone_from_slice(&pinned[pinned.len() - h..]);
+                            }
+                        }
+                    }
+                }
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
