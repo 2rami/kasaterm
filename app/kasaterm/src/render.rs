@@ -5324,10 +5324,22 @@ impl App {
                         let icon_x = row_x + 18.0;
                         let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
                         g.queue_icon(icon, icon_x, iy, isz, col);
-                        g.draw_text(
-                            icon_x + isz + 8.0,
-                            y + (item_h - 13.0) / 2.0,
+                        // 이 섹션은 트리 본문의 시저 **밖**에서 그려진다(고정 자리라
+                        // 스크롤에 안 걸린다). 잘라 줄 것이 없으니 좁은 트리에서는
+                        // 라벨이 칼럼을 넘어 터미널 위로 그대로 얹혔다(640px 실측).
+                        // 트리 본문 항목과 같은 규칙으로 여기서 재단한다.
+                        let ltx = icon_x + isz + 8.0;
+                        let lbl = crate::info::fit_text(
+                            g,
                             label,
+                            (row_x + row_w - 4.0 - ltx).max(0.0),
+                            13.0,
+                            false,
+                        );
+                        g.draw_text(
+                            ltx,
+                            y + (item_h - 13.0) / 2.0,
+                            &lbl,
                             gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
                         );
                         self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
@@ -5780,9 +5792,20 @@ impl App {
                             0.0
                         } else {
                             let b = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
+                            // ahead/behind 배지도 브랜치 바로 뒤에 붙는다 — 이 폭을
+                            // 빼지 않으면 경로가 그만큼 배지를 칼럼 밖으로 민다
+                            // (640px 실측: `↑1` 이 창 오른쪽에서 잘렸다).
+                            let mut badge = 0.0_f32;
+                            if git_view.ahead > 0 {
+                                badge += g.measure_chrome_text(&format!("↑{}", git_view.ahead), 12.0, false) + 8.0;
+                            }
+                            if git_view.behind > 0 {
+                                badge += g.measure_chrome_text(&format!("↓{}", git_view.behind), 12.0, false) + 8.0;
+                            }
                             g.measure_chrome_text(" : ", 12.0, false)
                                 + g.measure_chrome_text(b, 12.0, true)
                                 + 10.0
+                                + badge
                         };
                         let room = (git_col_x + git_col_w - 12.0 - gcx0 - branch_w).max(0.0);
                         crate::info::fit_text_tail(g, &path_disp, room, 12.0, false)
@@ -6306,7 +6329,11 @@ impl App {
                             let chev = if expanded { "chevron-down" } else { "chevron-right" };
                             g.queue_icon(chev, gcx0, cy2 - 1.0, 11.0, theme::text_mute());
                             let hxc = g.draw_text(gcx0 + 14.0, cy2, hash, gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false });
-                            g.draw_text_clipped(hxc + 8.0, cy2, subj, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false }, gcx0, clip_r);
+                            // 클립은 글자를 획 중간에서 끊는다 — 좁은 칼럼에서는 제목
+                            // 대부분이 그렇게 사라져 「더 있다」는 신호조차 없다. 말줄임
+                            // 으로 재단해 잘렸다는 것이 보이게 한다.
+                            let sj = crate::info::fit_text(g, subj, (clip_r - (hxc + 8.0)).max(0.0), 11.0, false);
+                            g.draw_text_clipped(hxc + 8.0, cy2, &sj, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false }, gcx0, clip_r);
                             self.git.col_commit_rects.push((hash.clone(), rowr));
                             cy2 += 20.0;
                             if !expanded {
@@ -7533,10 +7560,72 @@ impl App {
                     .as_ref()
                     .map(|p| nfc_hangul(&crate::session::tilde_home(&p.to_string_lossy())))
                     .unwrap_or_else(|| "—".to_string());
+                let badge = cwd
+                    .as_ref()
+                    .and_then(|p| self.window_git.lock().ok().and_then(|m| m.get(p).cloned()));
+                // ── 폭 예산 ───────────────────────────────────────────────
+                // 칩 셋은 지금까지 pane 폭을 아무도 안 재고 왼쪽부터 이어 그렸다.
+                // 좁은 pane 에서는 그대로 옆 칼럼 위로 뻗는다(640px 실측: 282px
+                // 자리에 398px 어치). 그리기 전에 예산을 잡고 모자라면 줄인다.
+                //
+                // 줄이는 차례는 **cwd 가 먼저**다. 그 경로는 파일트리 루트와 타이틀
+                // 칩에도 있는 중복이고, 브랜치와 변경 수는 이 띠에만 있다. 경로를
+                // 꼬리만 남겨도 모자라면 그때 변경 수를 파일 수 하나로 줄이고,
+                // 그 다음에야 칩을 접는다.
+                let pill_w = |tw: f32| pad_x + icon_sz + icon_gap + tw + pad_x;
+                // hover 때 오른쪽 끝에 나오는 접기 손잡이 자리는 늘 비워 둔다 —
+                // 그때만 빼면 손잡이가 뜨는 순간 칩이 흔들린다.
+                let avail = (fw - 16.0 - 21.0).max(0.0);
+                let branch_w = badge
+                    .as_ref()
+                    .map(|b| pill_w(g.measure_chrome_text(&b.branch, font, false)))
+                    .unwrap_or(0.0);
+                let diff_parts = badge.as_ref().filter(|b| b.files > 0 || b.insertions > 0 || b.deletions > 0).map(|b| {
+                    let files_s = b.files.to_string();
+                    let plus_s = format!("+{}", b.insertions);
+                    let minus_s = format!("−{}", b.deletions);
+                    let full = g.measure_chrome_text(&files_s, font, false)
+                        + g.measure_chrome_text(" · ", font, false)
+                        + g.measure_chrome_text(&plus_s, font, false)
+                        + g.measure_chrome_text(" ", font, false)
+                        + g.measure_chrome_text(&minus_s, font, false);
+                    let short = g.measure_chrome_text(&files_s, font, false);
+                    (files_s, plus_s, minus_s, pill_w(full), pill_w(short))
+                });
+                // 아이콘과 여백만 남은 경로 칩은 아무 말도 못 한다 — 글자 한 자는
+                // 들어갈 폭을 바닥으로 잡고, 거기 못 미치면 뒤 칩을 줄인다.
+                let min_cwd = pill_w(g.measure_chrome_text("…w", font, false));
+                let mut show_branch = branch_w > 0.0;
+                let mut diff_mode = if diff_parts.is_some() { 2u8 } else { 0 };
+                let tail_w = |show_branch: bool, diff_mode: u8| {
+                    (if show_branch { branch_w + chip_gap } else { 0.0 })
+                        + match (diff_mode, &diff_parts) {
+                            (2, Some((.., full, _))) => full + chip_gap,
+                            (1, Some((.., short))) => short + chip_gap,
+                            _ => 0.0,
+                        }
+                };
+                while avail - tail_w(show_branch, diff_mode) < min_cwd {
+                    if diff_mode > 0 {
+                        diff_mode -= 1;
+                    } else if show_branch {
+                        show_branch = false;
+                    } else {
+                        break;
+                    }
+                }
+                let cwd_room = (avail - tail_w(show_branch, diff_mode)).max(0.0);
+                let disp = crate::info::fit_text_tail(
+                    g,
+                    &disp,
+                    (cwd_room - pad_x - icon_sz - icon_gap - pad_x).max(0.0),
+                    font,
+                    false,
+                );
                 // cwd pill — folder icon + path.
-                {
+                if !disp.is_empty() {
                     let tw = g.measure_chrome_text(&disp, font, false);
-                    let pw = pad_x + icon_sz + icon_gap + tw + pad_x;
+                    let pw = pill_w(tw);
                     let hov = sb_mx >= cx
                         && sb_mx <= cx + pw
                         && sb_my >= pill_y
@@ -7551,14 +7640,10 @@ impl App {
                     self.statusbar.path_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                     cx += pw + chip_gap;
                 }
-                if let Some(badge) = cwd
-                    .as_ref()
-                    .and_then(|p| self.window_git.lock().ok().and_then(|m| m.get(p).cloned()))
-                {
+                if let Some(badge) = badge {
                     // branch pill — git-branch icon + branch name.
-                    {
-                        let tw = g.measure_chrome_text(&badge.branch, font, false);
-                        let pw = pad_x + icon_sz + icon_gap + tw + pad_x;
+                    if show_branch {
+                        let pw = branch_w;
                         let hov = sb_mx >= cx
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
@@ -7574,18 +7659,12 @@ impl App {
                         cx += pw + chip_gap;
                     }
                     // diff pill — file icon + "N · +ins −del" (green / red).
-                    if badge.files > 0 || badge.insertions > 0 || badge.deletions > 0 {
-                        let files_s = badge.files.to_string();
-                        let dot_s = " · ";
-                        let plus_s = format!("+{}", badge.insertions);
-                        let gap_s = " ";
-                        let minus_s = format!("−{}", badge.deletions);
-                        let content = g.measure_chrome_text(&files_s, font, false)
-                            + g.measure_chrome_text(dot_s, font, false)
-                            + g.measure_chrome_text(&plus_s, font, false)
-                            + g.measure_chrome_text(gap_s, font, false)
-                            + g.measure_chrome_text(&minus_s, font, false);
-                        let pw = pad_x + icon_sz + icon_gap + content + pad_x;
+                    // 좁으면 파일 수만 남긴다 — 「몇 개 바뀌었나」가 「몇 줄인가」보다
+                    // 먼저 알아야 할 쪽이고, 줄 수는 Git 탭 머리에 그대로 있다.
+                    if let (Some((files_s, plus_s, minus_s, full_w, short_w)), true) =
+                        (diff_parts.as_ref(), diff_mode > 0)
+                    {
+                        let pw = if diff_mode == 2 { *full_w } else { *short_w };
                         let hov = sb_mx >= cx
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
@@ -7596,16 +7675,19 @@ impl App {
                             if hov { theme::surface_active() } else { theme::surface_hover() });
                         g.queue_icon("file-text", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
                         let mut tx = cx + pad_x + icon_sz + icon_gap;
-                        tx = g.draw_text(tx, txt_y, &files_s,
+                        tx = g.draw_text(tx, txt_y, files_s,
                             gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
-                        tx = g.draw_text(tx, txt_y, dot_s,
-                            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
-                        tx = g.draw_text(tx, txt_y, &plus_s,
-                            gpu::DrawOpts { font_size: font, color: theme::success(), bold: false, italic: false });
-                        tx = g.draw_text(tx, txt_y, gap_s,
-                            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
-                        g.draw_text(tx, txt_y, &minus_s,
-                            gpu::DrawOpts { font_size: font, color: theme::danger(), bold: false, italic: false });
+                        if diff_mode == 2 {
+                            tx = g.draw_text(tx, txt_y, " · ",
+                                gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
+                            tx = g.draw_text(tx, txt_y, plus_s,
+                                gpu::DrawOpts { font_size: font, color: theme::success(), bold: false, italic: false });
+                            tx = g.draw_text(tx, txt_y, " ",
+                                gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
+                            g.draw_text(tx, txt_y, minus_s,
+                                gpu::DrawOpts { font_size: font, color: theme::danger(), bold: false, italic: false });
+                        }
+                        let _ = tx;
                         self.statusbar.diff_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
                     }
