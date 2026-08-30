@@ -38,6 +38,9 @@ mod themegen;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
 // 않으려고 여기서 한 번 재수출한다.
 pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
+/// 폭에 맞춘 정보 밀도 — chrome 이 정의하지만 그 판정을 읽어 그리는 쪽(render·info)이
+/// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
+pub(crate) use chrome::Density;
 mod gitdiff;
 mod syntax;
 mod lsp;
@@ -577,6 +580,34 @@ const FILE_TREE_W_MAX: f32 = 480.0;
 const GIT_COL_W: f32 = 420.0;
 const GIT_COL_W_MIN: f32 = 220.0;
 const GIT_COL_W_MAX: f32 = 720.0;
+
+/// 창이 좁아 자동으로 좁혀질 때의 하한(logical px). 드래그 하한(`*_W_MIN`)과 따로
+/// 두는 건 방향이 달라서다 — 드래그는 사용자가 원해서 줄이는 것이라 읽기 좋은 폭에서
+/// 멈추지만, 이쪽은 창이 강제해서 줄어드는 것이라 「접히느니 좁게라도 남는다」가 낫다.
+/// 창을 다시 넓히면 사용자가 정한 폭으로 저절로 되돌아간다(원본 값을 안 건드린다).
+const SIDEBAR_W_AUTO_MIN: f32 = 104.0;
+const FILE_TREE_W_AUTO_MIN: f32 = 132.0;
+const GIT_COL_W_AUTO_MIN: f32 = 216.0;
+/// 자동 축소가 터미널에 남겨 주려는 폭(칸). chrome 세 기둥의 합이 창을 넘치면 이만큼을
+/// 먼저 떼어 두고 남는 것만 나눠 준다.
+const GRID_KEEP_COLS: f32 = 40.0;
+/// 칸수의 절대 하한. 예산이 이미 폭을 지켜 주므로 여기 걸리는 건 창이 극단적으로
+/// 작을 때뿐인데, 그때도 0 칸을 PTY 에 알리면 TUI 가 깨지므로 바닥을 둔다.
+///
+/// 예전엔 이 자리가 40 이었다. 그 값은 하한이 아니라 **거짓말**이었다 — 쓸 폭이
+/// 160px 뿐인데도 40칸(340px)이라고 PTY 에 알려, 터미널이 우측 칼럼 밑으로 180px
+/// 파고들어 그려졌다(1000px 창에서 실측). 폭은 예산이 지키고 여기는 바닥만 맡는다.
+const GRID_MIN_COLS: f32 = 20.0;
+
+/// 기둥이 자기 폭에 맞춰 **내용을 바꾸는** 문턱(logical px). 폭만 줄이면 좁은 칼럼에
+/// 넓을 때 쓰던 글자가 그대로 남아 잘리거나 서로 겹친다 — 좁아지면 덜 중요한 것을
+/// 덜어내고 남길 것만 남겨야 한다(2026-08-30 지시: "좁아도 그에맞는 정보가 나오게").
+const SIDEBAR_DENSE_FULL: f32 = 168.0;
+const SIDEBAR_DENSE_COMPACT: f32 = 124.0;
+const FILE_TREE_DENSE_FULL: f32 = 186.0;
+const FILE_TREE_DENSE_COMPACT: f32 = 150.0;
+const GIT_DENSE_FULL: f32 = 340.0;
+const GIT_DENSE_COMPACT: f32 = 248.0;
 /// 칼럼 발치 「최근 커밋」 구역이 손대기 전에 보여 주는 줄 수. 사용자가 그 구역의
 /// 경계선을 끌면 높이가 잡히고, 그때부터는 높이에 들어가는 만큼 가져온다.
 const GIT_RECENT_COMMITS_DEFAULT: usize = 5;

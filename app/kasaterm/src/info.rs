@@ -1782,7 +1782,23 @@ pub(crate) fn draw_side_tabs(
     git.col_expand_rect = Some((expand_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
     git.col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
     info.tab_rects.clear();
-    let mut tx = x + 14.0;
+    // 탭 여섯은 넓을 때만 한 줄에 들어간다(라벨 합 ~143 + 사이 여백 80 + 우상단 버튼
+    // 자리 45). 칼럼이 좁아지면 이 줄이 버튼 밑으로 파고들어 뒤쪽 탭이 잘렸는데,
+    // 탭은 「어느 화면인가」를 고르는 유일한 손잡이라 하나라도 사라지면 그 화면에
+    // 갈 길이 없어진다. 그래서 폭이 모자라면 **줄을 바꿔 흘린다** — 여섯을 다 남기고
+    // 본문이 그만큼 내려간다(반환하는 y 가 본문 상단이라 호출부는 손댈 게 없다).
+    let dens = Density::of(w, GIT_DENSE_FULL, GIT_DENSE_COMPACT);
+    let gap = match dens {
+        Density::Full => 16.0,
+        Density::Compact => 10.0,
+        Density::Icon => 8.0,
+    };
+    let pad_l = if dens.is_icon() { 10.0 } else { 14.0 };
+    let line_h = 21.0_f32;
+    let left = x + pad_l;
+    let mut tx = left;
+    let mut ty = y;
+    let mut row = 0usize;
     for (tab, label) in [
         (state::SideTab::Git, "Git"),
         (state::SideTab::Info, "Info"),
@@ -1793,7 +1809,15 @@ pub(crate) fn draw_side_tabs(
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
-        let hot = (tx - 4.0, y - 4.0, tw + 8.0, 21.0);
+        // 첫 줄만 우상단 버튼(확대·닫기) 앞에서 끊는다. 둘째 줄부터는 그 위가
+        // 비어 있으니 칼럼 오른쪽 끝까지 쓴다.
+        let limit = if row == 0 { expand_x - 8.0 } else { x + w - 10.0 };
+        if tx > left && tx + tw > limit {
+            row += 1;
+            ty += line_h;
+            tx = left;
+        }
+        let hot = (tx - 4.0, ty - 4.0, tw + 8.0, line_h);
         let hovered = cursor.0 >= hot.0
             && cursor.0 <= hot.0 + hot.2
             && cursor.1 >= hot.1
@@ -1808,17 +1832,17 @@ pub(crate) fn draw_side_tabs(
         };
         g.draw_text(
             tx,
-            y,
+            ty,
             label,
             gpu::DrawOpts { font_size: 12.0, color: col, bold: active, italic: false },
         );
         if active {
-            g.rect(tx, y + 17.0, tw, 1.5, theme::accent());
+            g.rect(tx, ty + 17.0, tw, 1.5, theme::accent());
         }
         info.tab_rects.push((tab, hot));
-        tx += tw + 16.0;
+        tx += tw + gap;
     }
-    y + 27.0
+    ty + 27.0
 }
 
 /// 탭 머리와 본문 사이의 전역 진입점 — 계정·사용량 행, 그리고 아로나/설정 버튼.

@@ -312,7 +312,11 @@ impl App {
         // asymmetry is intentional — the strip replaces the top padding.
         // Reserve the dock bar from the grid only when it carries chips.
         let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - self.bottom_reserve_h()).max(0.0);
-        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+        // 하한이 40 이던 시절엔 이 줄이 거짓말을 했다 — 쓸 폭이 160px 뿐인 창에서도
+        // 40칸(340px)이라고 PTY 에 알려, 터미널이 우측 칼럼 밑으로 180px 파고들어
+        // 그려졌다. 폭을 지키는 일은 `chrome_widths` 의 예산이 맡고, 여기는 0 칸을
+        // 알리지 않을 만큼의 바닥만 맡는다.
+        let cols = (lw / self.cell.w).floor().max(GRID_MIN_COLS) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {
             eprintln!(

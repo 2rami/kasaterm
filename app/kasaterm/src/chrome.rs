@@ -1,6 +1,40 @@
 //! 사이드바·git col·파일트리 토글·패널·줌/폰트·toast 등 chrome UI 메서드.
 use super::*;
 
+/// 기둥 하나가 지금 폭에서 **무엇까지 보여 줄 수 있나**. 폭을 줄이는 것만으로는
+/// 반응형이 안 된다 — 넓을 때 쓰던 글자가 좁은 칼럼에 그대로 남으면 잘리거나
+/// 겹쳐서, 좁아진 게 아니라 고장난 것으로 보인다. 각 렌더가 이 단계를 물어보고
+/// 자기 내용을 그 폭에 맞게 덜어낸다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Density {
+    /// 넓다 — 원래 설계대로 전부.
+    Full,
+    /// 좁다 — 부차적인 것(경로·부제·여백)을 덜고 핵심만.
+    Compact,
+    /// 아주 좁다 — 글자를 포기하고 아이콘·기호로만.
+    Icon,
+}
+
+impl Density {
+    /// 폭과 두 문턱으로 단계를 고른다. 문턱은 «이 폭이면 이만큼은 읽힌다» 는
+    /// 기준이라 기둥마다 다르다(글자 크기·들여쓰기·아이콘 자리가 달라서).
+    pub(crate) fn of(w: f32, full: f32, compact: f32) -> Self {
+        if w >= full {
+            Density::Full
+        } else if w >= compact {
+            Density::Compact
+        } else {
+            Density::Icon
+        }
+    }
+    pub(crate) fn is_icon(self) -> bool {
+        matches!(self, Density::Icon)
+    }
+    pub(crate) fn at_least_compact(self) -> bool {
+        !self.is_icon()
+    }
+}
+
 /// How long a completion notification pulses a pane header / sidebar done-dot.
 const NOTIFY_FLASH_MS: u128 = 1800;
 
@@ -489,15 +523,80 @@ impl App {
     pub(crate) fn effective_sidebar_w(&self) -> f32 {
         self.tab_strip_w() + self.file_tree_col_w()
     }
+
+    /// 세 기둥이 **원하는** 폭(사용자가 드래그로 정한 값). 접혀 있으면 0.
+    /// `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면 창이 좁을 때
+    /// 예산을 건너뛰고 겹쳐 그리게 된다.
+    fn chrome_wants(&self) -> (f32, f32, f32) {
+        (
+            if self.sidebar_visible && !self.tabs_on_top { self.sidebar_w_logical } else { 0.0 },
+            if self.file_tree.visible { self.file_tree.w_logical } else { 0.0 },
+            if self.git.col_visible { self.git.col_w_logical } else { 0.0 },
+        )
+    }
+
+    /// 이번 프레임에 세 기둥이 **실제로** 차지할 폭 `(탭 스트립, 파일트리, 우측 칼럼)`.
+    ///
+    /// 원하는 폭의 합이 창에 들어가면 그대로 준다. 넘치면 터미널 몫(`GRID_KEEP_COLS`)을
+    /// 먼저 떼어 두고, 남는 것을 **우선순위 역순**(우측 칼럼 → 파일트리 → 탭 스트립)으로
+    /// 하한까지 깎는다. 그래도 넘치는 창이면 같은 순서로 접는다.
+    ///
+    /// 깎는 것은 **여기서 돌려주는 값뿐이고 `*_w_logical` 은 안 건드린다** — 그래서 창을
+    /// 도로 넓히면 사용자가 정한 폭이 그대로 돌아온다. 예산을 필드에 써 버리면 창을 한 번
+    /// 줄였다 늘린 사람은 자기가 맞춰 둔 폭을 영영 잃는다.
+    ///
+    /// 순서가 우측 칼럼부터인 이유: 셋 중 가장 넓고(420) 참조용이라, 같은 픽셀을 내놓을 때
+    /// 잃는 것이 가장 적다. 탭 스트립이 마지막인 건 그게 방을 오가는 유일한 손잡이여서다.
+    pub(crate) fn chrome_widths(&self) -> (f32, f32, f32) {
+        let (mut tab, mut tree, mut git) = self.chrome_wants();
+        let Some(win) = self.window.as_ref() else {
+            return (tab, tree, git);
+        };
+        let win_w = win.inner_size().width as f32 / self.effective_scale();
+        if win_w <= 1.0 {
+            return (tab, tree, git);
+        }
+        let keep = GRID_KEEP_COLS * self.cell.w + 2.0 * WINDOW_PADDING;
+        let mut over = tab + tree + git - (win_w - keep);
+        if over <= 0.0 {
+            return (tab, tree, git);
+        }
+        for (w, floor) in [
+            (&mut git, GIT_COL_W_AUTO_MIN),
+            (&mut tree, FILE_TREE_W_AUTO_MIN),
+            (&mut tab, SIDEBAR_W_AUTO_MIN),
+        ] {
+            if over <= 0.0 {
+                break;
+            }
+            if *w <= 0.0 {
+                continue;
+            }
+            let give = (*w - floor).max(0.0).min(over);
+            *w -= give;
+            over -= give;
+        }
+        // 하한까지 밀고도 안 들어가는 창 — 여기서는 뭔가를 지워야 터미널이 성립한다.
+        // 하한 폭의 기둥을 억지로 남기면 셋 다 읽을 수 없는 채로 그리드만 죽는다.
+        for w in [&mut git, &mut tree, &mut tab] {
+            if over <= 0.0 {
+                break;
+            }
+            if *w <= 0.0 {
+                continue;
+            }
+            over -= *w;
+            *w = 0.0;
+        }
+        (tab, tree, git)
+    }
+
     /// Width of the session-tab strip alone (0 when collapsed). With top tabs
     /// the strip never opens — the tabs live in the title bar instead.
     pub(crate) fn tab_strip_w(&self) -> f32 {
-        if self.sidebar_visible && !self.tabs_on_top {
-            self.sidebar_w_logical
-        } else {
-            0.0
-        }
+        self.chrome_widths().0
     }
+
     /// pane 헤더 탭의 × 클릭. 맞혔으면 true.
     ///
     /// 메서드로 둔 건 하네스가 **같은 좌표 판정을 지나게** 하기 위함이다
@@ -621,11 +720,7 @@ impl App {
     }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
-        if self.file_tree.visible {
-            self.file_tree.w_logical
-        } else {
-            0.0
-        }
+        self.chrome_widths().1
     }
     /// Left edge (logical x) of the file-tree column — right after the tab
     /// strip. The column sits between the tabs and the cell grid.
@@ -718,11 +813,7 @@ impl App {
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
-        if self.git.col_visible {
-            self.git.col_w_logical
-        } else {
-            0.0
-        }
+        self.chrome_widths().2
     }
     /// Left edge (logical x) of the git column — flush against the window's
     /// right edge. 0 before the window exists (no paint yet).
@@ -1834,16 +1925,27 @@ impl App {
         // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
         let bottom_h =
             if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
-        let b = 28.0_f32;
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
-        let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
+        let strip = self.tab_strip_w();
         let left = SIDEBAR_TAB_INSET + 4.0;
-        let right = (self.sidebar_w_logical - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
+        let gap = 4.0_f32;
+        let avail = (strip - left * 2.0).max(0.0);
+        // 셋이 「왼쪽 하나 · 오른쪽 둘」로 갈라서려면 28×3 에 여백까지 120px 은 있어야
+        // 한다. 그보다 좁으면 오른쪽 기준으로 잡던 가운데 버튼의 x 가 **음수**가 되어
+        // 세 아이콘이 왼쪽 구석에 포개졌다(64px 실측). 폭이 모자랄 때는 자리 배분을
+        // 포기하고 크기를 줄여 균등하게 늘어놓는다 — 뭉쳐 있으면 셋 다 못 누른다.
+        let roomy = avail >= 28.0 * 3.0 + gap * 2.0 + 12.0;
+        let b = if roomy { 28.0 } else { ((avail - gap * 2.0) / 3.0).clamp(16.0, 28.0) };
+        let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
+        if roomy {
+            let right = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
+            return Some((line_y, (left, y, b, b), (right - 4.0 - b, y, b, b), (right, y, b, b)));
+        }
         Some((
             line_y,
             (left, y, b, b),
-            (right - 4.0 - b, y, b, b),
-            (right, y, b, b),
+            (left + b + gap, y, b, b),
+            (left + (b + gap) * 2.0, y, b, b),
         ))
     }
     /// 사이드바 토글 버튼 rect(논리 px).
@@ -1865,7 +1967,7 @@ impl App {
         if self.tabs_on_top || !self.sidebar_visible {
             return (home, y, w, h);
         }
-        ((self.sidebar_w_logical - SIDEBAR_TAB_INSET - w).max(home), y, w, h)
+        ((self.tab_strip_w() - SIDEBAR_TAB_INSET - w).max(home), y, w, h)
     }
     /// 파일트리 토글 rect. 사이드바 토글을 따라다닌다 — 접혀 있으면 그 오른쪽,
     /// 펴져 있으면 사이드바 밖(본문 쪽 첫 자리)이다. 토글이 판 안으로 들어간
@@ -1876,7 +1978,7 @@ impl App {
             return (sx, sy, sw, sh);
         }
         if self.sidebar_visible {
-            return (self.sidebar_w_logical + 10.0, sy, sw, sh);
+            return (self.tab_strip_w() + 10.0, sy, sw, sh);
         }
         (sx + sw + 2.0, sy, sw, sh)
     }

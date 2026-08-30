@@ -3837,7 +3837,7 @@ impl App {
             return (tabs, closes, plus, Vec::new(), Vec::new());
         }
         let tab_x = SIDEBAR_TAB_INSET;
-        let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
+        let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = TITLE_HEIGHT + 18.0;
         // Rows that fit above the "+" button; the dock strip eats the bottom

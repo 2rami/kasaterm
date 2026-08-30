@@ -2993,11 +2993,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_sidebar_edge = self.sidebar_visible
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
-                        && (cx - self.sidebar_w_logical).abs() <= 3.0;
+                        && (cx - self.tab_strip_w()).abs() <= 3.0;
                     let on_tree_edge = self.file_tree.visible
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
-                        && (cx - (self.file_tree_col_x() + self.file_tree.w_logical)).abs() <= 3.0;
+                        && (cx - (self.file_tree_col_x() + self.file_tree_col_w())).abs() <= 3.0;
                     let on_git_edge = self.git.col_visible
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
@@ -3112,7 +3112,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let (cx, cy) = self.cursor_px;
                 // 사이드바 pane 행 → 숨기기 메뉴. 이 띠는 좌클릭을 통째로 삼키므로
                 // (아래 `window_strip_click` 게이트) 우클릭도 여기서 끝낸다.
-                if self.sidebar_visible && !self.tabs_on_top && cx < self.sidebar_w_logical {
+                if self.sidebar_visible && !self.tabs_on_top && cx < self.tab_strip_w() {
                     if self.sidebar_row_right_click(cx, cy) {
                         window.request_redraw();
                     }
@@ -3121,7 +3121,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.file_tree.visible
                     && cy > TITLE_HEIGHT
                     && cx >= self.file_tree_col_x()
-                    && cx < self.file_tree_col_x() + self.file_tree.w_logical
+                    && cx < self.file_tree_col_x() + self.file_tree_col_w()
                 {
                     let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
@@ -3253,7 +3253,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.confirm_or_close_tab(&id, idx);
                     return;
                 }
-                let in_strip = (self.sidebar_visible && cx < self.sidebar_w_logical)
+                let in_strip = (self.sidebar_visible && cx < self.tab_strip_w())
                     || (self.tabs_on_top && cy < TITLE_HEIGHT);
                 if in_strip {
                     if let Some(idx) = self
@@ -3872,7 +3872,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // before the sidebar click path so dragging the edge
                     // resizes instead of clicking the last sidebar column.
                     if self.sidebar_visible && cy > TITLE_HEIGHT && cy < bar_top {
-                        let edge = self.sidebar_w_logical;
+                        let edge = self.tab_strip_w();
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.sidebar_resize = Some((cx, self.sidebar_w_logical));
                             return;
@@ -3882,7 +3882,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // edge. Caught before the tree click path so dragging the
                     // seam resizes instead of selecting the last row.
                     if self.file_tree.visible && cy > TITLE_HEIGHT && cy < bar_top {
-                        let edge = self.file_tree_col_x() + self.file_tree.w_logical;
+                        let edge = self.file_tree_col_x() + self.file_tree_col_w();
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.file_tree.resize = Some((cx, self.file_tree.w_logical));
                             return;
@@ -3914,7 +3914,7 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    if self.sidebar_visible && cx < self.sidebar_w_logical {
+                    if self.sidebar_visible && cx < self.tab_strip_w() {
                         if self.window_strip_click(cx, cy) {
                             return;
                         }
@@ -3936,7 +3936,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let in_col = self.file_tree.visible
                             && cy > TITLE_HEIGHT
                             && cx >= self.file_tree_col_x()
-                            && cx < self.file_tree_col_x() + self.file_tree.w_logical;
+                            && cx < self.file_tree_col_x() + self.file_tree_col_w();
                         if !in_col {
                             self.file_tree.search_active = false;
                             self.chrome_dirty = true;
@@ -3949,7 +3949,7 @@ impl ApplicationHandler<UserEvent> for App {
                         && cy > TITLE_HEIGHT
                         && cy < bar_top
                         && cx >= self.file_tree_col_x()
-                        && cx < self.file_tree_col_x() + self.file_tree.w_logical
+                        && cx < self.file_tree_col_x() + self.file_tree_col_w()
                     {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
