@@ -1940,6 +1940,7 @@ pub(crate) fn scrolled_gate(rows: &[Vec<GridCell>]) -> bool {
 pub(crate) fn find_sticky_prompt(
     rows: &[Vec<GridCell>],
     prompts: &[(String, Vec<String>)],
+    memo: &mut Option<String>,
 ) -> Option<StickyPrompt> {
     let dbg = std::env::var_os("KASATERM_STICKY_DEBUG").is_some();
     let scrolled = scrolled_gate(rows);
@@ -1992,7 +1993,7 @@ pub(crate) fn find_sticky_prompt(
     // 열리는데 최상단 행이 glyphs=0, 그 아래는 흐릿하지 않은 본문). 읽어 올 행이
     // 없으니 종전 코드로는 띠가 통째로 안 뜬다 — 화면에서 못 얻으면 transcript 에서
     // 얻은 프롬프트로 우리가 직접 그린다. **빈 최상단 행에만** 얹어 본문을 덮지 않는다.
-    let text = pick_scrolled_past_prompt(rows, prompts)?;
+    let text = pick_scrolled_past_prompt(rows, prompts, memo)?;
     let first = rows.first()?;
     if sticky_row_span(first).3 != 0 {
         return None;
@@ -2106,6 +2107,7 @@ fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize
 fn pick_scrolled_past_prompt(
     rows: &[Vec<GridCell>],
     prompts: &[(String, Vec<String>)],
+    memo: &mut Option<String>,
 ) -> Option<String> {
     if prompts.is_empty() {
         return None;
@@ -2148,8 +2150,22 @@ fn pick_scrolled_past_prompt(
         );
     }
     if let Some(i) = topmost {
-        return i.checked_sub(1).and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
+        // 머리줄을 봤다 — 이건 짐작이 아니라 확정이다. 기억해 둔다.
+        let past = i.checked_sub(1).and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
+        *memo = past.clone();
+        return past;
     }
+    // 머리줄이 화면 밖이면 **직전에 본 것**이 그대로 답이다. 스크롤은 한 번에 몇 줄씩만
+    // 움직이고 claude 는 그때마다 화면을 다시 그리므로, 머리줄이 뷰포트를 가로질러
+    // 사라지는 장면을 우리가 반드시 본다 — 턴이 바뀌었다면 그 프레임에서 갱신됐다.
+    // 긴 답변 한가운데에 파묻혀도 어느 턴인지 아는 것이 이 기억이다.
+    if let Some(remembered) = memo.as_ref() {
+        if prompts.iter().any(|(p, _)| p == remembered) {
+            return Some(remembered.clone());
+        }
+    }
+    // 기억이 없을 때만 짐작한다 — 머리줄을 한 번도 못 본 채 게이트가 열린 자리
+    // (맨 아래에서 한 노치 올렸는데 마지막 턴이 화면보다 긴 경우).
     if let Some(i) = vote_turn(&body, prompts) {
         return prompts.get(i).map(|(p, _)| p.clone());
     }
@@ -3634,7 +3650,7 @@ mod clawd_banner_tests {
     #[test]
     fn sticky_needs_scroll_gate() {
         let rows = vec![dim_row("> 이전 프롬프트"), row_from("본문 라인")];
-        assert!(find_sticky_prompt(&rows, &[]).is_none());
+        assert!(find_sticky_prompt(&rows, &[], &mut None).is_none());
     }
 
     /// 맨 위에 흐릿한 줄이 둘일 때 **프롬프트 마커가 있는 쪽**을 잡는다. 마커를
@@ -3647,7 +3663,7 @@ mod clawd_banner_tests {
             dim_row("❯ 진짜 질문"),
             row_from("  3 new messages (click) ↓"),
         ];
-        let got = find_sticky_prompt(&rows, &[]).expect("감지");
+        let got = find_sticky_prompt(&rows, &[], &mut None).expect("감지");
         assert_eq!(got.row, 1, "마커가 있는 행");
         assert!(got.text.contains("진짜 질문"));
     }
@@ -3661,7 +3677,7 @@ mod clawd_banner_tests {
             dim_row("❯ 진짜 질문"),
             row_from("  3 new messages: fn+↓ to scroll"),
         ];
-        let got = find_sticky_prompt(&rows, &[]).expect("감지");
+        let got = find_sticky_prompt(&rows, &[], &mut None).expect("감지");
         assert!(got.text.contains("진짜 질문"));
     }
 
@@ -3674,7 +3690,7 @@ mod clawd_banner_tests {
             row_from("  42"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        let got = find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])]).expect("감지");
+        let got = find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])], &mut None).expect("감지");
         assert_eq!(got.row, 0);
         assert_eq!(got.text, "내가 친 질문");
     }
@@ -3690,7 +3706,7 @@ mod clawd_banner_tests {
             row_from("  답변 본문"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        let got = find_sticky_prompt(&rows, &ps).expect("감지");
+        let got = find_sticky_prompt(&rows, &ps, &mut None).expect("감지");
         assert_eq!(got.text, "첫 질문");
     }
 
@@ -3709,7 +3725,49 @@ mod clawd_banner_tests {
             row_from("  26"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+        assert_eq!(find_sticky_prompt(&rows, &ps, &mut None).expect("감지").text, "첫 질문");
+    }
+
+    /// 머리줄이 화면 밖으로 나가도 **직전에 확정한 질문**이 이어진다.
+    ///
+    /// 긴 답변 한가운데를 보고 있으면 `❯ 질문` 이 화면에 없다. 거기서 짐작으로
+    /// 떨어지면 엉뚱한 게 붙는데, 스크롤은 몇 줄씩만 움직이므로 머리줄이 뷰포트를
+    /// 가로지르는 장면을 반드시 한 번은 본다 — 그때 적어 둔 것을 쓴다.
+    #[test]
+    fn 머리줄이_화면_밖이면_직전에_확정한_질문이_이어진다() {
+        let ps = vec![
+            ("첫 질문".to_string(), vec![]),
+            ("둘째 질문".to_string(), vec![]),
+            ("셋째 질문".to_string(), vec![]),
+        ];
+        let mut memo = None;
+        // ① 셋째 질문의 머리줄이 보인다 → 그 위는 둘째 질문의 답이다.
+        let seen = vec![
+            row_from("                    "),
+            row_from("> 셋째 질문"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&seen, &ps, &mut memo).expect("감지").text, "둘째 질문");
+        // ② 더 올려 머리줄이 화면 밖으로 나갔다. 짐작이면 최신(셋째)이 뜬다.
+        let buried = vec![
+            row_from("                    "),
+            row_from("  아무 데도 안 걸리는 본문 줄"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&buried, &ps, &mut memo).expect("감지").text, "둘째 질문");
+    }
+
+    /// 기억해 둔 질문이 목록에서 사라졌으면(오래돼 잘려나감) 붙들지 않는다.
+    #[test]
+    fn 사라진_질문은_기억에서_놓는다() {
+        let ps = vec![("둘째 질문".to_string(), vec![]), ("셋째 질문".to_string(), vec![])];
+        let mut memo = Some("이젠 없는 질문".to_string());
+        let buried = vec![
+            row_from("                    "),
+            row_from("  아무 데도 안 걸리는 본문 줄"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&buried, &ps, &mut memo).expect("감지").text, "셋째 질문");
     }
 
     /// 한글은 셀 두 칸을 먹는다 — 뒷칸을 공백으로 읽으면 「고 요 한」이 되어
@@ -3726,7 +3784,7 @@ mod clawd_banner_tests {
             row_from("  고요한 호수 위로 물안개가 피어오른다"),
             row_from("  Jump to bottom (click) \u{2193}"),
         ];
-        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+        assert_eq!(find_sticky_prompt(&rows, &ps, &mut None).expect("감지").text, "첫 질문");
     }
 
     /// 글머리(`⏺`)가 붙고 화면 폭에서 접힌 줄로도 어느 턴인지 짚는다.
@@ -3753,7 +3811,7 @@ mod clawd_banner_tests {
             row_from("  접히게 되는 문장 하나"),
             row_from("  Jump to bottom (click) \u{2193}"),
         ];
-        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+        assert_eq!(find_sticky_prompt(&rows, &ps, &mut None).expect("감지").text, "첫 질문");
     }
 
     /// 여러 턴에 다 있는 줄은 표를 못 준다 — 그런 줄만 보이면 마지막 질문으로 떨어진다.
@@ -3769,7 +3827,7 @@ mod clawd_banner_tests {
             row_from("  똑같이 들어 있는 흔한 문장"),
             row_from("  Jump to bottom (click) \u{2193}"),
         ];
-        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "둘째 질문");
+        assert_eq!(find_sticky_prompt(&rows, &ps, &mut None).expect("감지").text, "둘째 질문");
     }
 
     /// 화면에 질문이 하나도 안 보이면(한 답변 안에 파묻힌 자리) 마지막 질문.
@@ -3781,7 +3839,7 @@ mod clawd_banner_tests {
             row_from("  42"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "둘째 질문");
+        assert_eq!(find_sticky_prompt(&rows, &ps, &mut None).expect("감지").text, "둘째 질문");
     }
 
     /// 첫 질문이 화면에 보이면 위로 지나간 게 없다 — 띠를 붙이지 않는다.
@@ -3793,7 +3851,7 @@ mod clawd_banner_tests {
             row_from("> 첫 질문"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows, &ps).is_none());
+        assert!(find_sticky_prompt(&rows, &ps, &mut None).is_none());
     }
 
     /// 그 폴백은 **빈 행에만** 얹는다 — 본문이 올라와 있으면 덮지 않는다.
@@ -3803,7 +3861,7 @@ mod clawd_banner_tests {
             row_from("  본문이 여기 있다"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])]).is_none());
+        assert!(find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])], &mut None).is_none());
     }
 
     /// 마커 없는 흐릿한 줄은 **잡지 않는다** — claude 배너·회색 안내문이 그 자리에
@@ -3814,7 +3872,7 @@ mod clawd_banner_tests {
             dim_row("Fable 5 with xhigh effort · Claude Max"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows, &[]).is_none());
+        assert!(find_sticky_prompt(&rows, &[], &mut None).is_none());
     }
 
     /// 올려다보는 동안 새 출력이 쌓이면 claude 는 같은 자리에 「N new messages」를
@@ -3827,7 +3885,7 @@ mod clawd_banner_tests {
             row_from("작업 결과 라인"),
             row_from("  3 new messages (click) ↓"),
         ];
-        assert!(find_sticky_prompt(&rows, &[]).is_some());
+        assert!(find_sticky_prompt(&rows, &[], &mut None).is_some());
     }
 
     /// 대조군 — 「new message」가 본문에 그냥 나온 것은 게이트를 열지 않는다.
@@ -3838,7 +3896,7 @@ mod clawd_banner_tests {
             dim_row("> 이전 프롬프트"),
             row_from("we should show a new message here"),
         ];
-        assert!(find_sticky_prompt(&rows, &[]).is_none());
+        assert!(find_sticky_prompt(&rows, &[], &mut None).is_none());
     }
 
     // 게이트 + 최상단 흐릿한 프롬프트 → 그 행·텍스트로 감지.
@@ -3849,7 +3907,7 @@ mod clawd_banner_tests {
             row_from("작업 결과 라인"),
             row_from("  Jump to bottom (click) ↓"),
         ];
-        let s = find_sticky_prompt(&rows, &[]).expect("sticky detected");
+        let s = find_sticky_prompt(&rows, &[], &mut None).expect("sticky detected");
         assert_eq!(s.row, 0);
         assert!(s.text.contains("이전 프롬프트"));
         assert_eq!(s.col_start, 0);
@@ -3863,7 +3921,7 @@ mod clawd_banner_tests {
             row_from("more output"),
             row_from("Jump to bottom (click)"),
         ];
-        assert!(find_sticky_prompt(&rows, &[]).is_none());
+        assert!(find_sticky_prompt(&rows, &[], &mut None).is_none());
     }
 
     // 타이틀 치환: "Claude Code" → 학생 이름(와이드+스페이서 셀), 버전 텍스트는

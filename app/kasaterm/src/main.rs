@@ -4982,6 +4982,17 @@ struct App {
     /// 다음 틱(`refresh_pane_activity`)이 한다. 한 프레임 늦지만 스크롤은 사람이
     /// 붙들고 있는 상태라 눈에 안 띈다.
     pane_deep_want: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// pane id → 올려다보는 동안 **마지막으로 확정한** 질문.
+    ///
+    /// 띠는 화면에 보이는 `❯ 질문` 머리줄로 어느 턴인지 확정한다. 긴 답변 한가운데를
+    /// 보고 있으면 그 머리줄이 화면 밖이라 확정할 재료가 없어지는데, 거기서 짐작으로
+    /// 떨어지면 엉뚱한 질문이 붙는다. 스크롤은 한 번에 몇 줄씩만 움직이고 claude 는
+    /// 그때마다 화면을 다시 그리므로 머리줄이 뷰포트를 가로지르는 장면을 우리가 반드시
+    /// 본다 — 그때 갱신해 두면 파묻힌 자리에서도 답이 정확하다.
+    ///
+    /// 맨 아래로 돌아가면(스크롤 게이트가 닫히면) 버린다. 렌더가 `&self` 자리라
+    /// RefCell 이다.
+    pane_sticky_turn: std::cell::RefCell<std::collections::HashMap<String, String>>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -5788,6 +5799,7 @@ impl App {
             pane_bg_mtime: HashMap::new(),
             pane_deep_prompts: HashMap::new(),
             pane_deep_want: Default::default(),
+            pane_sticky_turn: Default::default(),
             window_tab_rects: Vec::new(),
             close_freeze: CloseFreeze::default(),
             sidebar_row_rects: Vec::new(),

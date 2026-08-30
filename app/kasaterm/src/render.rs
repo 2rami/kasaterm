@@ -1172,11 +1172,20 @@ impl App {
                 let scrolled = crate::screenread::scrolled_gate(&composed);
                 if scrolled {
                     self.pane_deep_want.borrow_mut().insert(id.to_string());
+                } else {
+                    // 맨 아래로 돌아왔으면 기억을 버린다 — 다음에 올려다볼 때는
+                    // 그때 본 머리줄로 새로 확정해야 한다.
+                    self.pane_sticky_turn.borrow_mut().remove(id.as_str());
                 }
-                if let Some(sticky) = scrolled
-                    .then(|| find_sticky_prompt(&composed, self.pane_prompts(id.as_str())))
-                    .flatten()
-                {
+                let sticky = scrolled.then(|| {
+                    let mut memo = self.pane_sticky_turn.borrow_mut();
+                    let slot = memo.entry(id.to_string()).or_default();
+                    let mut cur = (!slot.is_empty()).then(|| slot.clone());
+                    let got = find_sticky_prompt(&composed, self.pane_prompts(id.as_str()), &mut cur);
+                    *slot = cur.unwrap_or_default();
+                    got
+                });
+                if let Some(sticky) = sticky.flatten() {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
