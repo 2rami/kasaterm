@@ -1165,8 +1165,17 @@ impl App {
                 // 재도색 스캔은 이 행을 건너뛴다 — pill 이 여기서 fg 까지 완성하므로
                 // (재도색은 fg 를 ❯ 만 만진다) 다시 칠하면 이 선명화가 무너진다.
                 let mut sticky_pill_row: Option<usize> = None;
-                if let Some(sticky) =
-                    find_sticky_prompt(&composed, self.pane_prompts(id.as_str()))
+                // 게이트를 먼저 본다. 열렸을 때만 프롬프트 목록을 깊게 다시 읽게
+                // 표시를 남긴다 — 512KB 꼬리에는 일하던 창의 질문이 하나밖에 안
+                // 들어가서, 그대로 두면 띠가 늘 그 하나를 그린다. 평상시(닫힌
+                // 게이트)에는 이 줄에서 끝나므로 매 프레임 비용은 종전과 같다.
+                let scrolled = crate::screenread::scrolled_gate(&composed);
+                if scrolled {
+                    self.pane_deep_want.borrow_mut().insert(id.to_string());
+                }
+                if let Some(sticky) = scrolled
+                    .then(|| find_sticky_prompt(&composed, self.pane_prompts(id.as_str())))
+                    .flatten()
                 {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;

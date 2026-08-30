@@ -4966,6 +4966,22 @@ struct App {
     /// 띠의 글감이 없어졌다. 같은 tail 을 이미 읽고 있으므로 여기서 함께 꺼내면
     /// 추가 IO 없이 kasaterm 이 그 띠를 직접 그릴 수 있다.
     pane_bg_mtime: HashMap<String, (std::time::SystemTime, bool, Vec<(String, Vec<String>)>)>,
+    /// pane id → 그 pane 의 프롬프트 목록을 **깊게** 읽어 둔 transcript mtime.
+    ///
+    /// `pane_bg_mtime` 이 담는 목록은 512KB 꼬리에서 나온다. 일하는 pane 은 도구
+    /// 출력 하나가 1MB 를 넘어서, 그 창에는 질문이 **한 개**밖에 안 들어간다
+    /// (2026-08-31 실측: 24MB 기록에서 0.5MB→1개, 8MB→26개). 후보가 하나뿐이면
+    /// 스크롤 띠는 무엇을 골라도 늘 그 하나라 「엉뚱한 질문이 붙는다」가 된다.
+    ///
+    /// 그렇다고 늘 8MB 를 읽을 수는 없다 — 이 캐시는 pane 마다, transcript 가
+    /// 바뀔 때마다 갱신되므로 창 열두 개면 틱마다 100MB 를 읽게 된다. 그래서
+    /// **위로 스크롤한 pane 에서만** 깊게 다시 읽고 그 mtime 을 여기 적어 둔다.
+    pane_deep_prompts: HashMap<String, std::time::SystemTime>,
+    /// 이번 프레임에 **위로 스크롤돼 있던** pane 들. 렌더는 ws 락을 쥔 채 도는
+    /// `&self` 자리라 `&mut self` 를 못 부른다 — 표시만 남기고, 실제 깊은 읽기는
+    /// 다음 틱(`refresh_pane_activity`)이 한다. 한 프레임 늦지만 스크롤은 사람이
+    /// 붙들고 있는 상태라 눈에 안 띈다.
+    pane_deep_want: std::cell::RefCell<std::collections::HashSet<String>>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -5770,6 +5786,8 @@ impl App {
             pane_last_busy: HashMap::new(),
             pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
+            pane_deep_prompts: HashMap::new(),
+            pane_deep_want: Default::default(),
             window_tab_rects: Vec::new(),
             close_freeze: CloseFreeze::default(),
             sidebar_row_rects: Vec::new(),

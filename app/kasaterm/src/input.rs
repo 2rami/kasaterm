@@ -544,6 +544,14 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        // 지난 프레임에 위로 스크롤돼 있던 pane 의 프롬프트 목록을 깊게 채운다.
+        // **표시를 비우면서** 가져간다 — 아래로 내린 pane 이 목록에 남아 있으면
+        // 틱마다 파일을 되짚게 된다. 계속 올려다보는 중이면 렌더가 다음 프레임에
+        // 다시 남기므로(틱보다 훨씬 잦다) 끊기지 않는다.
+        let want = std::mem::take(&mut *self.pane_deep_want.borrow_mut());
+        for id in want {
+            self.ensure_deep_prompts(&id);
+        }
         // 이사(agent-stop)로 학생을 내준 pane 의 sid 주장 걷기 — HTTP 핸들러는 App
         // 상태를 못 만져 큐로 넘긴다. 걷자마자 저장까지 해 둔다: 몇 초 안에 앱이
         // 꺼져도 낡은 주장이 leaf 에 안 남아, 재시작 복원이 남의 기계로 이사 간
@@ -840,6 +848,53 @@ impl App {
             self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts));
         }
         hook_bg || bg
+    }
+
+    /// 위로 스크롤한 pane 의 프롬프트 목록을 **깊은 꼬리**로 다시 채운다.
+    ///
+    /// `pane_bg_active` 가 채우는 목록은 512KB 꼬리에서 나온다. 그 크기는 헤더
+    /// 펄스바(백그라운드 작업 감지)에는 넉넉하지만 프롬프트에는 턱없다 — 도구
+    /// 출력 한 덩이가 1MB 를 넘는 일이 흔해서, 일하던 창은 그 창에 질문이 **하나**
+    /// 밖에 안 들어간다(2026-08-31 실측: 24MB 기록에서 0.5MB→1개, 8MB→26개).
+    /// 후보가 하나면 띠는 늘 그 하나를 그리고, 올려다보는 사람 눈에는 「엉뚱한
+    /// 질문이 붙는다」로 보인다.
+    ///
+    /// 그래서 스크롤 게이트가 열린 pane 에서만 부른다. transcript mtime 으로 잠가
+    /// 두므로 한 번 올려다보는 동안 8MB 읽기는 많아야 한 번이고, 스크롤을 안 하는
+    /// 평상시에는 아예 일어나지 않는다.
+    pub(crate) fn ensure_deep_prompts(&mut self, pane_id: &str) {
+        // 8MB. 위 실측에서 26개를 얻은 크기다. 더 키워도 얻는 질문 수는 완만하게
+        // 늘지만 읽기·파싱이 선형으로 는다.
+        const DEEP_BYTES: u64 = 8 * 1024 * 1024;
+        // 그 이상은 올려다봐도 못 닿는다. 캐시를 pane 마다 들고 있으므로 상한이
+        // 없으면 창 여럿에서 메모리가 그대로 는다.
+        const KEEP: usize = 24;
+        let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
+            return;
+        };
+        let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
+            return;
+        };
+        let Ok(mt) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+        if self.pane_deep_prompts.get(pane_id) == Some(&mt) {
+            return;
+        }
+        // 넣을 칸이 없으면 그냥 돌아간다 — `pane_bg_active` 가 아직 이 pane 을 안
+        // 훑었다는 뜻이고, mtime 만 적어 두면 다음부터 영영 건너뛰게 된다.
+        if !self.pane_bg_mtime.contains_key(pane_id) {
+            return;
+        }
+        let (tail, _) = crate::socket::read_tail(&path, DEEP_BYTES);
+        let mut prompts = crate::transcript::prompts_from_tail(&tail);
+        if prompts.len() > KEEP {
+            prompts.drain(..prompts.len() - KEEP);
+        }
+        self.pane_deep_prompts.insert(pane_id.to_string(), mt);
+        if let Some(slot) = self.pane_bg_mtime.get_mut(pane_id) {
+            slot.2 = prompts;
+        }
     }
 
     /// 그 pane 에서 사람이 친 프롬프트들(오래된 것부터). 스크롤 sticky 띠의 글감 —
