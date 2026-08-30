@@ -2016,6 +2016,27 @@ impl App {
                                         .map(|(p, _)| ws.active_tab_pid(p))
                                 })
                                 .and_then(|key| ws.pane_character.get(&key).cloned())
+                                // 발신 프로세스가 죽으면 소켓 명부 파일이 사라져
+                                // peer_sid 를 영영 못 얻는다(재시작 전에 온 메시지,
+                                // 2026-08-31 실측: 명부에 2386.json 없음). 그때는
+                                // **이름**으로 살아 있는 같은 이름 세션을 되짚는다
+                                // — 같은 대화가 --resume 으로 살아 있으면 sid 가
+                                // 같아 맞는 학생이 나온다. 태그 원문 라벨(공백판)
+                                // 이 정확하고, 화면 이름은 하이픈판이라 둘 다 민다.
+                                .or_else(|| {
+                                    let by_label = |l: &str| {
+                                        peer_character_by_label(
+                                            l,
+                                            &self.pane_claude_sid,
+                                            &ws,
+                                        )
+                                    };
+                                    msg.as_ref()
+                                        .and_then(|m| m.from_label.as_deref())
+                                        .and_then(by_label)
+                                        .or_else(|| by_label(&sender))
+                                        .or_else(|| by_label(&sender.replace('-', " ")))
+                                })
                                 .unwrap_or(sender)
                         };
                         let accent = teammate_sender_accent(
