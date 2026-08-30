@@ -2033,6 +2033,7 @@ fn spawn_reader_thread(
 
             let update = {
                 let mut t = term.lock().unwrap();
+                let follow_live_tail = t.grid().display_offset() == 0;
                 // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
                 // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
                 //
@@ -2075,11 +2076,12 @@ fn spawn_reader_thread(
                 if processor.sync_bytes_count() > 0 {
                     None
                 } else {
-                    // New PTY output snaps the view back to the live tail
-                    // (display_offset = 0) — matches every terminal's
-                    // "jump to bottom on output" behaviour and keeps the
-                    // cursor row valid.
-                    t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                    // 새 출력은 맨 아래를 보고 있던 사람만 따라간다. 위의 내용을
+                    // 읽는 중이라면 alacritty가 늘려 둔 display_offset을 보존해야
+                    // 스트리밍 출력마다 화면이 아래로 끌려가지 않는다.
+                    if follow_live_tail {
+                        t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                    }
                     let t_snap = std::time::Instant::now();
                     let mut snap = snapshot(
                         &mut t,
@@ -4950,6 +4952,53 @@ mod snapshot_fidelity_tests {
             &scrolled[..],
             &["L27", "L28", "L29", "L30", "L31", "L32", "L33", "L34", "L35", "L36"],
             "위로 올린 화면에 히스토리가 안 보인다"
+        );
+    }
+
+    #[test]
+    fn new_output_does_not_pull_a_scrolled_view_to_the_bottom() {
+        let (cols, rows) = (40u16, 10u16);
+        let listener = PtyEventForwarder {
+            respond: true,
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        let mut term = make_term(cols, rows, listener);
+        let mut proc: Processor<StdSyncHandler> = Processor::new();
+        let mut initial = String::new();
+        for i in 1..=40 {
+            initial.push_str(&format!("L{i}\r\n"));
+        }
+        proc.advance(&mut term, initial.as_bytes());
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+
+        let title = Arc::new(Mutex::new(None));
+        let visible = |t: &mut Term<PtyEventForwarder>| -> Vec<String> {
+            let update = snapshot(t, cols, rows, "%t", &title, true);
+            update
+                .dirty
+                .into_iter()
+                .map(|(_, row)| row.iter().map(|cell| cell.ch).collect::<String>())
+                .collect()
+        };
+        let before_offset = term.grid().display_offset();
+        let before_view = visible(&mut term);
+        let follow_live_tail = before_offset == 0;
+        proc.advance(&mut term, b"L41\r\n");
+        if follow_live_tail {
+            term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        }
+        let after_view = visible(&mut term);
+
+        assert!(before_offset > 0);
+        assert!(
+            term.grid().display_offset() > 0,
+            "새 출력이 위로 올린 화면을 맨 아래로 끌어내렸다"
+        );
+        assert_eq!(
+            after_view, before_view,
+            "새 출력이 읽고 있던 줄을 움직였다"
         );
     }
 
