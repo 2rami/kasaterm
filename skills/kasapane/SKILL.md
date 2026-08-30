@@ -88,6 +88,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `windows` | 윈도우별 pane 목록, 사이드바 순서 (**plain text**). 단일 윈도우면 `(윈도우 없음)` |
 | `peek [<id>] [lines]` | `result.text` = 그 pane 화면 tail(문자열). id 생략=자기 자신 (§5) |
 | `transcript [<id>] [N]` | `result.turns` = `[{"role":"user\|assistant","text":"…"},…]` 마지막 N턴 (§5) |
+| `activity [<id>] [N]` | `result.events` = `[{"kind":"prompt\|say\|tool\|result","name":"Bash","text":"…","is_error":false},…]` 최신 N건, 오래된 것부터. 도구 **인자 원문**+결과+성패 — board가 원리적으로 못 주는 것 (§5) |
 | `board [screen_lines]` | `result.board` = pane별 상태 배열(필드는 아래). N 주면 각 항목에 `screen`(화면 tail N줄) 추가 (§5) |
 | `ping` | `result.pong=true` — 소켓 살아있나 |
 | `capabilities` | `result.methods` = RPC 메서드 전수(디버깅용) |
@@ -96,6 +97,12 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 `surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx` · `title`.
 → **충돌 회피는 `status`+`changed_files`+`intent` 세 개면 충분.**
+
+⚠️ **board 는 도구의 성패를 안 싣는다.** `recent_tools` 는 호출 라벨 최근 **8개**뿐이라
+「같은 명령이 세 번 넘게 같은 오류로 끝났다」를 **원리적으로 판정할 수 없다** — 재료가 없다.
+막힌 이유를 알아야 하면 `activity <id>`(인자 원문+결과+오류 여부, 시간순). 「쟤 뭐 하나」=board,
+「쟤 왜 저러나」=activity. 라벨은 `설명 — 명령` 꼴이다(2026-08-30 — 그 전엔 첫 줄만 남겨서
+여러 줄 스크립트들이 죄다 같은 라벨로 보였다).
 
 **hook 전용 (Claude Code hook이 자동 호출 — 에이전트가 수동으로 부를 일 없음)**
 
