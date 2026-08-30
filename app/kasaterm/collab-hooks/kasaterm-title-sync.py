@@ -44,6 +44,27 @@ CTX_CHARS = 2000
 MAX_CONCURRENT = 2
 
 
+# 제목 자리에 절대 들어오면 안 되는 문장들 — API 에러가 stdout 으로 나온 것.
+ERROR_HEADS = (
+    "prompt is too long",
+    "api error",
+    "credit balance",
+    "invalid api key",
+    "overloaded",
+    "request timed out",
+    "connection error",
+    "rate limit",
+    "usage limit",
+    "please run /login",
+    "execution error",
+)
+
+
+def looks_like_error(s):
+    low = s.lower()
+    return any(low.startswith(h) for h in ERROR_HEADS)
+
+
 def read_tail(tp):
     size = os.path.getsize(tp)
     with open(tp, "rb") as f:
@@ -238,19 +259,28 @@ def generate(tp, sid, srclen):
     # 붙어 제목 하나에 4프로세스가 됐다(2026-08-05: 고아 MCP 43개). 제목 짓는 데
     # 툴은 하나도 안 쓴다. `--mcp-config` 를 안 준 채로 strict 면 서버 0개다.
     try:
-        out = subprocess.run(
+        done = subprocess.run(
             [claude, "-p", "--strict-mcp-config", "--model", "haiku", prompt],
             capture_output=True,
             text=True,
             timeout=60,
             cwd=lockdir,  # -p 가 남기는 세션 파일을 junk 프로젝트로 격리
             env=clean_env,
-        ).stdout.strip()
+        )
     except Exception:
         return
+    # 실패한 호출의 stdout 은 제목이 아니라 **에러 문장**이다. claude 는 그것을
+    # stdout 으로 뱉으므로 종료코드를 안 보면 "Prompt is too long · the request is
+    # ~264k tokens" 가 그대로 세션 이름이 된다 — 개인 훅에서 실제로 그랬고, 그 이름이
+    # nameSource=user 로 굳어 25개 세션이 영영 그 이름에 갇혔다(2026-08-30).
+    if done.returncode != 0:
+        return
+    out = done.stdout.strip()
     new = " ".join(out.split()).strip("\"'“”‘’ ").rstrip(".")
     if not new or len(new) > CLIP or "\n" in out.strip():
         return  # 형식 밖 출력(거부·수다)은 버린다 — 다음 턴에 재시도
+    if looks_like_error(new):
+        return  # 종료코드 0 으로도 새는 에러 문장이 있어 모양으로 한 번 더 거른다
     # 발췌가 부실하면 haiku 가 제목 대신 거부/설명을 뱉는다("대화 발췌가 제공되지
     # 않았어요…"). CLIP 을 통과하는 짧은 거부문도 있어 시그니처로 한 번 더 거른다.
     if new.startswith("대화 발췌") or "제공되지 않" in new:
