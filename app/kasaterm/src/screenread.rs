@@ -2017,6 +2017,92 @@ pub(crate) fn find_sticky_prompt(
 /// 2. 질문 줄이 하나도 안 보이면 화면이 어느 답변 **안에** 파묻힌 것이다 — 보이는
 ///    본문 줄 몇 개가 어느 답변에 연달아 들어 있는지 찾아 그 턴의 질문을 쓴다.
 ///    (「마지막 질문」으로 때우면 첫 답변을 보고 있어도 최신 질문이 떠 어긋난다.)
+/// 대조용 화면 줄 — **넓은 글자의 뒷칸을 걷어낸다.**
+///
+/// 한글·이모지는 셀 두 칸을 먹는다. 그 뒷칸은 `convert_cell`(kasa-pty)이 이미
+/// **진짜 공백**으로 바꿔 넘기므로 문자만 봐서는 사람이 친 띄어쓰기와 구분이
+/// 안 된다. 그대로 이으면 화면의 「고요한 호수」가 「고 요 한  호 수」가 되어
+/// 대화 기록의 같은 글과 영영 안 맞는다 — 2026-08-31 실측으로 한글 창에서는
+/// 질문 줄 대조도 본문 대조도 통째로 죽어 늘 마지막 질문이 붙었다.
+///
+/// 가르는 규칙은 **개수**다. 넓은 글자 뒤에는 뒷칸이 반드시 하나 붙으므로 그
+/// 하나만 버리고, 더 있으면 그건 사람이 친 띄어쓰기라 남긴다. 위 예가
+/// `고`+칸 `요`+칸 `한`+칸+공백 `호`+칸 `수`+칸 이라 그대로 「고요한 호수」로
+/// 돌아온다.
+fn row_match_text(row: &[GridCell]) -> String {
+    let mut out = String::new();
+    let mut eat_spacer = false;
+    for c in row {
+        if c.ch == '\0' {
+            eat_spacer = false;
+            continue;
+        }
+        if eat_spacer && c.ch == ' ' {
+            eat_spacer = false;
+            continue;
+        }
+        eat_spacer = unicode_width::UnicodeWidthChar::width(c.ch).unwrap_or(1) > 1;
+        out.push(c.ch);
+    }
+    out.trim().to_string()
+}
+
+/// 화면 줄에서 claude 가 붙인 장식을 뗀다 — 글머리(`⏺`·`⎿`), 세로줄, 들여쓰기.
+///
+/// 대조 상대인 대화 기록에는 이런 것이 없다. 떼지 않으면 같은 글인데도 안 맞는다.
+fn strip_screen_ornament(t: &str) -> &str {
+    t.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '\u{23fa}' | '\u{23bd}' | '\u{2502}' | '\u{251c}' | '\u{2514}' | '\u{00b7}')
+    })
+    .trim_end()
+}
+
+/// 보이는 줄들이 **어느 턴에만** 있는지로 표를 걷어 그 턴을 고른다.
+///
+/// 종전에는 「연속 세 줄이 기록의 같은 자리에 똑같이 있는가」를 봤다. 실화면에서는
+/// 거의 안 맞는다 — claude 가 글머리를 붙이고 화면 폭에서 줄을 접으므로 한 줄이
+/// 기록의 한 줄과 글자까지 같을 일이 드물다(2026-08-31 실측: 그 조건으로는 대부분
+/// 빗나가 마지막 질문으로 떨어졌다).
+///
+/// 그래서 **같은가**가 아니라 **들어 있는가**로 본다. 접힌 조각은 원래 줄의
+/// 부분문자열이므로 그대로 걸린다. 그 조각을 가진 턴이 **딱 하나**일 때만 한 표를
+/// 주고(여러 턴에 있으면 가릴 힘이 없다), 표가 가장 많은 턴을 고른다. 같으면 위쪽
+/// (오래된) 턴이 이긴다 — 화면 맨 위가 속한 턴을 묻는 것이라 그쪽이 맞다.
+///
+/// 실측(24턴, 8MB 기록): 조각 하나로 22턴이 유일하게 가려진다. 못 가리는 둘은 답이
+/// 한 줄뿐인 턴이라 애초에 화면을 채우지 못한다.
+fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize> {
+    let mut votes = vec![0usize; prompts.len()];
+    let mut any = false;
+    for row in body {
+        let mut only: Option<usize> = None;
+        let mut hits = 0;
+        for (i, (_, lines)) in prompts.iter().enumerate() {
+            if lines.iter().any(|l| l.contains(row.as_str())) {
+                hits += 1;
+                if hits > 1 {
+                    break;
+                }
+                only = Some(i);
+            }
+        }
+        if hits == 1 {
+            if let Some(i) = only {
+                votes[i] += 1;
+                any = true;
+            }
+        }
+    }
+    any.then(|| {
+        votes
+            .iter()
+            .enumerate()
+            .max_by_key(|&(i, v)| (*v, std::cmp::Reverse(i)))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    })
+}
+
 fn pick_scrolled_past_prompt(
     rows: &[Vec<GridCell>],
     prompts: &[(String, Vec<String>)],
@@ -2024,11 +2110,17 @@ fn pick_scrolled_past_prompt(
     if prompts.is_empty() {
         return None;
     }
+    // 화면 위에서부터 이만큼만 본다. 띠는 **맨 위가 어느 턴인가**를 말하므로
+    // 아래쪽까지 표를 걷으면 다음 턴이 이길 수 있다.
+    const BODY_ROWS: usize = 10;
+    // 빈 줄과 글머리만 남은 줄을 거른다. 길이로 더 자르지는 않는다 — 가리는 힘은
+    // 「그 조각을 가진 턴이 하나뿐인가」가 내고, 흔한 줄은 그 조건에서 저절로 떨어진다.
+    const MIN_DISTINCT: usize = 2;
     let head = |s: &str| s.chars().take(12).collect::<String>();
     let mut topmost: Option<usize> = None;
     let mut body: Vec<String> = Vec::new();
     for row in rows {
-        let (text, ..) = sticky_row_span(row);
+        let text = row_match_text(row);
         let t = text.trim();
         if let Some(q) = t.strip_prefix('>').or_else(|| t.strip_prefix('\u{276f}')) {
             let q = q.trim();
@@ -2040,22 +2132,26 @@ fn pick_scrolled_past_prompt(
                 }
             }
         }
-        if !t.is_empty() && body.len() < 6 {
-            body.push(t.to_string());
+        if body.len() < BODY_ROWS {
+            let stripped = strip_screen_ornament(t);
+            // 짧은 줄은 어느 턴에나 있다(「24」·「ok」·닫는 괄호). 길이로 거른다.
+            if stripped.chars().count() >= MIN_DISTINCT {
+                body.push(stripped.to_string());
+            }
         }
+    }
+    if std::env::var_os("KASATERM_STICKY_DEBUG").is_some() {
+        eprintln!(
+            "[sticky] prompts={:?} topmost={topmost:?} body={:?}",
+            prompts.iter().map(|(q, l)| (q.chars().take(14).collect::<String>(), l.len())).collect::<Vec<_>>(),
+            body.iter().collect::<Vec<_>>()
+        );
     }
     if let Some(i) = topmost {
         return i.checked_sub(1).and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
     }
-    // 연속 3줄이 그 답변 안에 그 순서로 들어 있으면 그 턴을 보고 있는 것이다.
-    // 한 줄만으로는 「24」 같은 게 여러 답변에 다 있어 못 가른다.
-    if body.len() >= 3 {
-        let win = &body[..3];
-        for (q, lines) in prompts {
-            if lines.windows(3).any(|w| w == win) {
-                return Some(q.clone());
-            }
-        }
+    if let Some(i) = vote_turn(&body, prompts) {
+        return prompts.get(i).map(|(p, _)| p.clone());
     }
     prompts.last().map(|(p, _)| p.clone())
 }
@@ -3302,14 +3398,22 @@ mod picker_tag_tests {
 mod clawd_banner_tests {
     use super::*;
 
+    /// 실제 그리드 모양으로 만든다 — **넓은 글자 뒤에 빈칸 한 개**가 붙는다.
+    /// kasa-pty 의 `convert_cell` 이 그렇게 넘기므로, 흉내내지 않으면 한글이 든
+    /// 시험이 실물과 다른 것을 재게 된다.
     fn row_from(s: &str) -> Vec<GridCell> {
-        s.chars()
-            .map(|c| {
-                let mut cell = GridCell::blank();
-                cell.ch = c;
-                cell
-            })
-            .collect()
+        let mut out = Vec::new();
+        for c in s.chars() {
+            let mut cell = GridCell::blank();
+            cell.ch = c;
+            out.push(cell);
+            if unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) > 1 {
+                let mut pad = GridCell::blank();
+                pad.ch = ' ';
+                out.push(pad);
+            }
+        }
+        out
     }
 
     // 실측 배너(claude code 2.1.212): 머리 1칸·발 2칸 들여쓰기.
@@ -3606,6 +3710,66 @@ mod clawd_banner_tests {
             row_from("  Jump to bottom (click) ↓"),
         ];
         assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+    }
+
+    /// 한글은 셀 두 칸을 먹는다 — 뒷칸을 공백으로 읽으면 「고 요 한」이 되어
+    /// 기록과 영영 안 맞는다(2026-08-31 실측: 한글 화면에서 띠가 늘 마지막 질문).
+    #[test]
+    fn 넓은_글자_뒷칸_때문에_대조가_죽지_않는다() {
+        let ps = vec![
+            ("첫 질문".to_string(), vec!["고요한 호수 위로 물안개가 피어오른다".to_string()]),
+            ("둘째 질문".to_string(), vec!["붉은 사막에 모래바람이 길게 분다".to_string()]),
+        ];
+        let rows = vec![
+            row_from("                    "),
+            row_from("  고요한 호수 위로 물안개가 피어오른다"),
+            row_from("  고요한 호수 위로 물안개가 피어오른다"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+    }
+
+    /// 글머리(`⏺`)가 붙고 화면 폭에서 접힌 줄로도 어느 턴인지 짚는다.
+    ///
+    /// 실화면의 줄은 기록의 줄과 글자까지 같지 않다 — claude 가 앞에 글머리를 붙이고
+    /// 폭에서 접어 이어 그린다. 「연속 세 줄이 통째로 같은가」를 묻던 종전 조건은
+    /// 그래서 거의 안 맞았고, 늘 마지막 질문으로 떨어졌다(2026-08-31 실측).
+    #[test]
+    fn 글머리와_접힌_줄로도_어느_턴인지_짚는다() {
+        let ps = vec![
+            (
+                "첫 질문".to_string(),
+                vec!["오래된 턴의 아주 길어서 화면에서 접히게 되는 문장 하나".to_string()],
+            ),
+            (
+                "둘째 질문".to_string(),
+                vec!["최신 턴의 전혀 다른 아주 길어서 역시 접히는 문장 하나".to_string()],
+            ),
+        ];
+        let rows = vec![
+            row_from("                    "),
+            // 글머리가 붙은 앞토막과, 들여쓴 뒷토막. 둘 다 기록의 한 줄 안에 있다.
+            row_from("\u{23fa} 오래된 턴의 아주 길어서 화면에서"),
+            row_from("  접히게 되는 문장 하나"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "첫 질문");
+    }
+
+    /// 여러 턴에 다 있는 줄은 표를 못 준다 — 그런 줄만 보이면 마지막 질문으로 떨어진다.
+    #[test]
+    fn 여러_턴에_흔한_줄은_턴을_가리지_못한다() {
+        let common = "똑같이 들어 있는 흔한 문장".to_string();
+        let ps = vec![
+            ("첫 질문".to_string(), vec![common.clone()]),
+            ("둘째 질문".to_string(), vec![common.clone()]),
+        ];
+        let rows = vec![
+            row_from("                    "),
+            row_from("  똑같이 들어 있는 흔한 문장"),
+            row_from("  Jump to bottom (click) \u{2193}"),
+        ];
+        assert_eq!(find_sticky_prompt(&rows, &ps).expect("감지").text, "둘째 질문");
     }
 
     /// 화면에 질문이 하나도 안 보이면(한 답변 안에 파묻힌 자리) 마지막 질문.
