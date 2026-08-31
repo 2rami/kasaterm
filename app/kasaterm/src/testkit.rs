@@ -1600,7 +1600,11 @@ impl App {
         // 그림을 보려는 것이라, 트랜스크립트 감시기가 쓰는 자리(`pane_activity` ·
         // `unread_panes`)에 같은 값을 직접 심는다. 진짜 claude 를 띄워 대기 상태를
         // 만들려면 승인 프롬프트가 뜰 때까지 기다려야 하는데 그건 재현이 안 된다.
-        if let Ok(path) = std::env::var("KASATERM_AUTOVIEW_WAIT") {
+        let error_capture = std::env::var("KASATERM_AUTOVIEW_ERROR").ok();
+        if let Some((path, show_error)) = error_capture
+            .map(|path| (path, true))
+            .or_else(|| std::env::var("KASATERM_AUTOVIEW_WAIT").ok().map(|path| (path, false)))
+        {
             let ls = self.window_leaves(wi);
             // ★ 심고서 이벤트 루프로 돌아가면 안 된다 — `refresh_pane_activity` 가 매
             // 틱 `pane_activity` 를 통째로 다시 만들어 심은 값을 지운다(실측: 3초 뒤
@@ -1610,8 +1614,9 @@ impl App {
                 self.pane_activity.insert(
                     id.clone(),
                     crate::stream::PaneStatusView {
-                        status: "waiting".into(),
-                        waiting_for: Some("선택지".into()),
+                        status: if show_error { "idle" } else { "waiting" }.into(),
+                        waiting_for: (!show_error).then(|| "선택지".into()),
+                        has_error: show_error,
                         ..Default::default()
                     },
                 );
@@ -1632,7 +1637,8 @@ impl App {
             }
             self.render_frame();
             eprintln!(
-                "[autoview] 신호 심음 — 대기={:?} 못본완료={:?} → {path}",
+                "[autoview] 신호 심음 — 오류={} 대기={:?} 못본완료={:?} → {path}",
+                show_error,
                 ls.get(1),
                 ls.get(2)
             );
