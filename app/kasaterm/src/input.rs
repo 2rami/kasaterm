@@ -733,13 +733,17 @@ impl App {
             // A visibly-working pane already shows the sweep, so skip the tail
             // read; only idle panes need the "background job running" check, and
             // their transcript rarely changes so the mtime cache keeps IO ~zero.
-            let bg_active = if busy {
-                false
+            let (bg_active, has_error) = if busy {
+                (false, false)
             } else {
                 // ⚠️ `||` 로 단축평가하지 마라 — bg 탭이 바쁘면 `pane_bg_active` 가
                 // 통째로 안 불려 sticky 띠 글감이 안 채워진다(위 주석과 같은 사고).
-                let from_pane = self.pane_bg_active(id);
-                bg_tab_busy.contains(id) || from_pane
+                let official_error = self
+                    .pane_claude_sid
+                    .get(id)
+                    .is_some_and(|sid| crate::socket::agents_error_sids_cached().contains(sid));
+                let (from_pane, transcript_error) = self.pane_tail_state(id);
+                (bg_tab_busy.contains(id) || from_pane, official_error || transcript_error)
             };
             // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접
             // 일하는 것과 뒤에서 도는 것을 함께 센다 — 그림 굽는 배치는 claude 가
@@ -752,6 +756,7 @@ impl App {
                 .and_modify(|a| {
                     a.status = status.to_string();
                     a.bg_active = bg_active;
+                    a.has_error = has_error;
                     a.compact_pct = compact_pct;
                     a.stalled = stalled.clone();
                     a.busy_since = running.then(|| a.busy_since.unwrap_or(now));
@@ -759,6 +764,7 @@ impl App {
                 .or_insert_with(|| crate::stream::PaneStatusView {
                     status: status.to_string(),
                     bg_active,
+                    has_error,
                     compact_pct,
                     stalled,
                     busy_since: running.then_some(now),
@@ -813,7 +819,7 @@ impl App {
     /// 글감(마지막 프롬프트)도 함께 꺼내므로, 일찍 반환하면 **일하는 pane 일수록 그
     /// 글감이 영영 안 채워진다** — 훅 없는 임시창에서만 띠가 뜨고 실사용 창에서는 안
     /// 뜨는 어긋남이 그래서 났다(2026-08-30). 읽기는 mtime 게이트가 막고 있어 싸다.
-    fn pane_bg_active(&mut self, pane_id: &str) -> bool {
+    fn pane_tail_state(&mut self, pane_id: &str) -> (bool, bool) {
         let hook_bg = self
             .collab
             .hook_activity
@@ -822,16 +828,16 @@ impl App {
             .get(pane_id)
             .is_some_and(|a| !a.is_empty());
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
-            return hook_bg;
+            return (hook_bg, false);
         };
         let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
-            return hook_bg;
+            return (hook_bg, false);
         };
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if let Some(mt) = mtime {
-            if let Some((cached_mt, cached, _)) = self.pane_bg_mtime.get(pane_id) {
+            if let Some((cached_mt, cached, _, error)) = self.pane_bg_mtime.get(pane_id) {
                 if *cached_mt == mt {
-                    return hook_bg || *cached;
+                    return (hook_bg || *cached, *error);
                 }
             }
         }
@@ -843,11 +849,12 @@ impl App {
         let (tail, idle) = crate::socket::read_tail(&path, 512 * 1024);
         let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
+        let error = crate::transcript::latest_harness_error(&tail);
         if let Some(mt) = mtime {
             let prompts = crate::transcript::prompts_from_tail(&tail);
-            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts));
+            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts, error));
         }
-        hook_bg || bg
+        (hook_bg || bg, error)
     }
 
     /// 위로 스크롤한 pane 의 프롬프트 목록을 **깊은 꼬리**로 다시 채운다.
@@ -901,7 +908,7 @@ impl App {
     /// claude 가 그 행을 더 이상 그려 주지 않으므로 kasaterm 이 직접 채운다.
     /// `pane_bg_active` 가 같은 tail 에서 채워 둔 캐시를 읽기만 한다(무IO).
     pub(crate) fn pane_prompts(&self, pane_id: &str) -> &[(String, Vec<String>)] {
-        self.pane_bg_mtime.get(pane_id).map_or(&[], |(_, _, p)| p.as_slice())
+        self.pane_bg_mtime.get(pane_id).map_or(&[], |(_, _, p, _)| p.as_slice())
     }
 
     /// 커서가 멎은 `[Image #N]` 참조를 받아 툴팁 상태를 옮기고, 이번 프레임에
@@ -2836,6 +2843,18 @@ impl App {
         if host || ctrl {
             use winit::keyboard::{KeyCode, PhysicalKey};
             if let PhysicalKey::Code(code) = event.physical_key {
+                if windows_paste_chord(
+                    cfg!(windows),
+                    ctrl,
+                    host,
+                    self.modifiers.alt_key(),
+                    code == KeyCode::KeyV,
+                ) {
+                    self.input_buf.clear();
+                    self.current_suggestion = None;
+                    self.paste_clipboard();
+                    return;
+                }
                 // Host-modifier shortcuts. macOS uses Cmd, Windows/Linux
                 // use Ctrl+Shift — see `host_mod()`.
                 if host {
@@ -3488,6 +3507,22 @@ pub(crate) fn term_is_working(t: &TerminalPane) -> bool {
 ///
 /// 수식키가 **조합된** 단축키(Cmd+W 등)는 여기 안 걸린다 — 그때 logical_key 는
 /// 글자 쪽이다. 걸리는 건 수식키만 눌린 프레임뿐이라 단축키 경로는 그대로다.
+/// 윈도우에서 `Ctrl+V` 를 붙여넣기로 받을지.
+///
+/// 붙여넣기 화음은 원래 `host_mod()`(맥=Cmd, 윈도우=Ctrl+Shift) 하나뿐이었다. 그런데
+/// 윈도우 사용자는 터미널에서도 `Ctrl+V` 를 누르고, 그 키는 `if host` 블록에 못 들어가
+/// 0x16 이 그대로 PTY 로 흘렀다 — 그리고 윈도우 claude 는 0x16 에 반응이 없다
+/// (2026-08-31 실측, 커밋 daffe42c). 눌러도 아무 일이 없으니 원인을 짚을 단서조차 없었다.
+///
+/// 대가를 알고 고른 것이다: vim 의 `Ctrl+V`(blockwise-visual)와 readline 의 quoted-insert
+/// 를 잃는다. Windows Terminal·VS Code 가 같은 선택을 했고 vim 은 그 용도로 `Ctrl+Q` 를
+/// 따로 두고 있다(2026-08-31 확정). 맥은 `windows=false` 라 아무것도 안 바뀐다.
+///
+/// AltGr 은 윈도우에서 Ctrl+Alt 로 오고 그건 문자 입력이라 제외한다.
+fn windows_paste_chord(windows: bool, ctrl: bool, host: bool, alt: bool, is_v: bool) -> bool {
+    windows && ctrl && !host && !alt && is_v
+}
+
 pub(crate) fn is_modifier_key(event: &KeyEvent) -> bool {
     is_modifier_logical(&event.logical_key)
 }
@@ -4553,6 +4588,37 @@ mod working_scan_tests {
         assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Space)));
         // 단축키는 수식키가 눌린 채로 와도 logical_key 가 글자라 안 걸린다.
         assert!(!super::is_modifier_logical(&Key::Character("w".into())));
+    }
+}
+
+#[cfg(test)]
+mod windows_paste_tests {
+    use super::windows_paste_chord;
+
+    #[test]
+    fn 윈도우의_ctrl_v_는_붙여넣기다() {
+        assert!(windows_paste_chord(true, true, false, false, true));
+    }
+
+    #[test]
+    fn 맥은_아무것도_안_바뀐다() {
+        assert!(!windows_paste_chord(false, true, false, false, true));
+    }
+
+    #[test]
+    fn 원래_화음은_기존_경로가_맡는다() {
+        // Ctrl+Shift+V 는 host 라 여기서 가로채면 두 번 붙는다.
+        assert!(!windows_paste_chord(true, true, true, false, true));
+    }
+
+    #[test]
+    fn altgr_은_문자_입력이라_건드리지_않는다() {
+        assert!(!windows_paste_chord(true, true, false, true, true));
+    }
+
+    #[test]
+    fn 다른_글쇠는_제어바이트로_남는다() {
+        assert!(!windows_paste_chord(true, true, false, false, false));
     }
 }
 
