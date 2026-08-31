@@ -321,7 +321,12 @@ pub fn origin_of(cwd: &Path) -> Option<String> {
     git_out(&root, &["remote", "get-url", "origin"], &[]).ok().filter(|s| !s.is_empty())
 }
 
-#[cfg(test)]
+/// 왕복 검증은 `sh -c` 로 git 을 몰기 때문에 unix 에서만 돈다 — 셸 문법(`&&`,
+/// `>` 리다이렉트, `rm`)에 기대 레포 상태를 짓는데 Windows 엔 `sh` 가 없어
+/// 「program not found」로 죽었다(2026-08-31 실측). 이걸 Windows 로 옮길 이유도
+/// 없다: 이 코드를 쓰는 이사(`migrate_pane`)가 애초에 `#[cfg(unix)]` 라, 재 봐야
+/// 그 플랫폼에서 아무도 안 밟는 길을 재는 셈이다. 맥 CI 에서는 그대로 관문이다.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

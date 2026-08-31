@@ -3636,12 +3636,20 @@ mod tilde_tests {
     /// 있지도 않은 자리로 표시된다.
     #[test]
     fn tilde_stops_at_the_separator() {
-        let home = Path::new("/Users/kasa");
-        assert_eq!(tilde_under(Path::new("/Users/kasa"), home), "~");
-        assert_eq!(tilde_under(Path::new("/Users/kasa/Desktop/x"), home), "~/Desktop/x");
+        // 경로를 **그 플랫폼의 구분자로** 짓는다. `tilde_under` 가 MAIN_SEPARATOR 로
+        // 자르므로 `/Users/kasa` 를 박아 두면 Windows 에서만 안 맞는 테스트가 된다
+        // (2026-08-31 실측: Windows 에서 이 테스트가 깨지던 유일한 이유).
+        let s = std::path::MAIN_SEPARATOR;
+        let home = format!("{s}Users{s}kasa");
+        let home = Path::new(&home);
+        assert_eq!(tilde_under(home, home), "~");
+        let sub = format!("{s}Users{s}kasa{s}Desktop{s}x");
+        assert_eq!(tilde_under(Path::new(&sub), home), format!("~{s}Desktop{s}x"));
         // 홈이 아닌 형제 폴더는 그대로 둔다.
-        assert_eq!(tilde_under(Path::new("/Users/kasa2/x"), home), "/Users/kasa2/x");
-        assert_eq!(tilde_under(Path::new("/opt/homebrew"), home), "/opt/homebrew");
+        let sibling = format!("{s}Users{s}kasa2{s}x");
+        assert_eq!(tilde_under(Path::new(&sibling), home), sibling);
+        let other = format!("{s}opt{s}homebrew");
+        assert_eq!(tilde_under(Path::new(&other), home), other);
     }
 }
 

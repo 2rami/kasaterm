@@ -4336,7 +4336,7 @@ mod scrollback_probe {
         };
         let before = rss();
         let s = PtySession::start(PtyOptions {
-            shell: Some("/bin/sh".into()),
+            shell: Some(test_posix_shell()),
             cols, rows: 40, pane_id: "%probe".into(),
             ..Default::default()
         }).unwrap();
@@ -4507,6 +4507,48 @@ mod launcher_descend_tests {
     }
 }
 
+/// 테스트가 띄우는 POSIX 셸. 재려는 것은 셸이 아니라 **PTY** 라, 플랫폼마다 셸만
+/// 갈아 끼우면 검증은 그대로 성립한다 — `/bin/sh` 를 박아 두면 Windows 에서
+/// `CreateProcessW` 가 「지정된 경로를 찾을 수 없습니다」로 죽는다(2026-08-31 실측,
+/// 이 크레이트에서 7개가 그렇게 넘어졌다). Windows 는 Git for Windows 가 같은 셸을
+/// 동봉하고, GitHub Actions 의 windows 러너에도 Git 이 기본으로 깔려 있다.
+///
+/// 못 찾으면 건너뛰지 않고 **죽인다.** 조용히 넘기면 「초록인데 아무것도 안 잰 CI」가
+/// 되어, 정작 ConPTY 가 깨진 날에도 아무도 모른다.
+///
+/// `cfg!` 로 가르는 것은 양쪽 갈래가 다 컴파일되게 하려는 것이다 — `#[cfg]` 로 꺼
+/// 두면 맥에서 Windows 갈래의 오타가 영영 안 잡힌다(이 레포가 반복해 밟은 함정).
+#[cfg(test)]
+fn test_posix_shell() -> String {
+    if cfg!(unix) {
+        return "/bin/sh".to_string();
+    }
+    let mut cands = vec![
+        std::path::PathBuf::from(r"C:\Program Files\Git\usr\bin\sh.exe"),
+        std::path::PathBuf::from(r"C:\Program Files\Git\bin\sh.exe"),
+    ];
+    // 설치 자리가 달라도 따라가게: `<git>\cmd\git.exe` → `<git>\usr\bin\sh.exe`.
+    if let Some(root) = std::process::Command::new("where")
+        .arg("git")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout).lines().next().map(std::path::PathBuf::from)
+        })
+        .and_then(|p| Some(p.parent()?.parent()?.to_path_buf()))
+    {
+        cands.push(root.join(r"usr\bin\sh.exe"));
+        cands.push(root.join(r"bin\sh.exe"));
+    }
+    for p in &cands {
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    panic!("POSIX 셸을 못 찾았다 — 이 테스트는 Git for Windows 의 sh.exe 가 필요하다: {cands:?}");
+}
+
 /// 살아 있는 PTY 로 스냅샷 재생을 검증한다. 순수 변환(`to_ansi`) 쪽 테스트는
 /// kasa-bridge 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
 /// **구독-스냅샷 원자성**을 본다.
@@ -4517,7 +4559,7 @@ mod snapshot_tap_tests {
 
     fn sh(pane_id: &str) -> PtySession {
         PtySession::start(PtyOptions {
-            shell: Some("/bin/sh".into()),
+            shell: Some(test_posix_shell()),
             cols: 40,
             rows: 10,
             pane_id: pane_id.into(),
@@ -4693,7 +4735,7 @@ mod inline_image_tests {
 
     fn sh(pane_id: &str) -> PtySession {
         PtySession::start(PtyOptions {
-            shell: Some("/bin/sh".into()),
+            shell: Some(test_posix_shell()),
             cols: 40,
             rows: 10,
             pane_id: pane_id.into(),

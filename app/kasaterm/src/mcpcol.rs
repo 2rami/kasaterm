@@ -2640,20 +2640,24 @@ enabled = false
                                "teamonly": {"command": "npx"}}}"#,
         )
         .unwrap();
+        // 경로는 **JSON 문자열로 지어 넣는다**(따옴표까지 to_string 이 붙인다).
+        // 그냥 박으면 Windows 임시 경로의 `C:\Users\…` 백슬래시가 잘못된 escape 가
+        // 되어 파일 전체 파싱이 실패하고, 목록이 통째로 비어 이 테스트가 Windows
+        // 에서만 깨진다(2026-08-31 실측). 제품 코드는 serde 로 읽어 무관하다.
+        let repo_key = serde_json::to_string(&repo.to_string_lossy()).unwrap();
         std::fs::write(
             home.join(".claude.json"),
             format!(
                 r#"{{
                   "mcpServers": {{"exa": {{"command": "npx"}}, "kasaspace": {{"url": "u"}}}},
                   "projects": {{
-                    "{}": {{
+                    {repo_key}: {{
                       "mcpServers": {{"myonly": {{"command": "uv"}}}},
                       "disabledMcpServers": ["exa"],
                       "disabledMcpjsonServers": ["teamonly"]
                     }}
                   }}
-                }}"#,
-                repo.display()
+                }}"#
             ),
         )
         .unwrap();
