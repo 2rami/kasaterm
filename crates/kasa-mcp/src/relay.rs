@@ -194,6 +194,32 @@ struct SendQuery {
     from_person: Option<String>,
     #[serde(default)]
     from_machine: Option<String>,
+    /// 발신 계정 — 대상 세션의 계정과 다르면 릴레이가 **강제로** 외부 표식(from_person)을
+    /// 채운다. 그래야 다른 계정이 from_person 을 빼고 지시로 보내는 걸 막는다(거노 결정
+    /// ①의 강제). 같으면 그대로(같은 계정끼리는 지시).
+    #[serde(default)]
+    from_account: Option<String>,
+}
+
+/// 발신 계정과 대상 계정을 견줘, 다른 계정이면 외부 표식(from_person)을 **강제**한다.
+/// 반환값이 수신측으로 넘길 from_person 이다. 순수 함수라 테스트한다.
+///
+/// ⚠️ 이 강제는 발신자가 **정직하게 from_account 를 댈 때** 성립한다 — 계정을 속이면
+/// 뚫린다. 진짜 봉인(계정별 릴레이 자격)은 3단계 인증 redesign 몫이고, 이건 정직한
+/// 발신자 기준의 v1 이다.
+fn enforce_external(
+    from_account: Option<&str>,
+    target_account: &str,
+    from_person: Option<&str>,
+) -> String {
+    let cross = from_account.is_some_and(|a| a != target_account);
+    let given = from_person.unwrap_or("").to_string();
+    if cross && given.is_empty() {
+        // 다른 계정인데 사람 이름을 안 댔다 — 계정 이름으로라도 외부 표식을 세운다.
+        from_account.unwrap_or("외부").to_string()
+    } else {
+        given
+    }
 }
 
 /// `POST /relay/send?to_sid=&from_name=&from_person=&from_machine=` body=본문 — 대상
@@ -223,13 +249,18 @@ async fn send(
             Json(json!({ "ok": false, "error": format!("세션 {} 을 가진 기계가 없어요", q.to_sid) })),
         );
     };
+    // 발신 계정 ≠ 대상 계정이면 외부 표식(from_person)을 강제한다 — 거노 결정 ①의 봉인.
+    let from_person = enforce_external(
+        q.from_account.as_deref(),
+        &m.account,
+        q.from_person.as_deref(),
+    );
     // 그 기계로 라우팅 — send_peer_message 재사용(현-스레드 런타임 블로킹이라 spawn_blocking).
     let base = m.base.clone();
     let token = m.token.clone();
-    let (to_sid, from_name, from_person, from_machine) = (
+    let (to_sid, from_name, from_machine) = (
         q.to_sid.clone(),
         q.from_name.unwrap_or_default(),
-        q.from_person.unwrap_or_default(),
         q.from_machine.unwrap_or_default(),
     );
     let res = tokio::task::spawn_blocking(move || {
@@ -316,5 +347,24 @@ mod tests {
         let acme = collect_sessions(&ms, Some("acme"));
         assert_eq!(acme.len(), 1);
         assert_eq!(acme[0]["sid"], "s1");
+    }
+
+    #[test]
+    fn 다른_계정은_from_person_을_안_대도_외부표식이_강제된다() {
+        // 다른 계정(other→acme)인데 사람 이름을 안 댔다 → 계정 이름으로 외부 표식.
+        assert_eq!(enforce_external(Some("other"), "acme", None), "other");
+        assert_eq!(enforce_external(Some("other"), "acme", Some("")), "other");
+        // 사람 이름을 댔으면 그대로(수신측이 그걸로 봉투).
+        assert_eq!(enforce_external(Some("other"), "acme", Some("우성")), "우성");
+    }
+
+    #[test]
+    fn 같은_계정은_지시로_남는다() {
+        // 같은 계정 → from_person 비면 그대로 비어(지시). 억지 외부표식 없음.
+        assert_eq!(enforce_external(Some("acme"), "acme", None), "");
+        // 계정 미상(from_account 없음) → 발신자 뜻대로(빈 것은 지시).
+        assert_eq!(enforce_external(None, "acme", None), "");
+        // 같은 계정이라도 사람을 명시했으면 그대로 존중.
+        assert_eq!(enforce_external(Some("acme"), "acme", Some("우성")), "우성");
     }
 }
