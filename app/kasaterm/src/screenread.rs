@@ -3130,6 +3130,25 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
     None
 }
 
+/// claude code 스피너의 **앞머리 글리프**인가.
+///
+/// 맥은 Dingbats 별(✻✶✷✸✹✺)을 쓰는데 **Windows 는 ASCII `*` 로 떨어뜨린다.**
+/// 2026-08-31 실측 — 윈도우 pane 의 그 행이 그대로
+/// `* Beaming… (1m 50s · thought for 1s)` 였다. 별 범위만 보던 동안 윈도우에서는
+/// 스피너를 아예 못 찾아 학생 도트도 working 바도 완료 판정도 함께 죽어 있었다
+/// (거노: 「스피너 모양 하나가 윈도우에선 다른가봐, 테마적용이 안돼」).
+///
+/// `·` 는 최근 claude 의 점 프레임이다.
+///
+/// ASCII `*` 는 흔한 글자다. 그래도 오탐이 안 늘어나는 것은 이 함수를 쓰는 자리가
+/// 전부 **행의 첫 글자(col<8)** 라는 관문에 더해 「`…` 뒤 괄호 안의 경과시간」이나
+/// 「바로 아래 행이 `⎿ Tip:`」 같은 두 번째 관문을 요구하기 때문이다 — 마크다운
+/// 불릿(`* 항목`)은 그 두 번째 관문을 통과하지 못한다.
+pub(crate) fn is_spinner_head(ch: char) -> bool {
+    let cp = ch as u32;
+    (0x2720..=0x274F).contains(&cp) || ch == '·' || ch == '*'
+}
+
 /// `spinner_row_col` 의 경과시간-괄호 요구에 떨어진 행을, 바로 아래의 `Tip:` 행이
 /// 구제한다. 부팅·재개 직후의 스피너는 `✻ Computing…` 뒤에 괄호가 아예 없이 뜨고
 /// 그 아래 `⎿ Tip: Press …` 만 깔린다(2026-08-15 스샷 실측 — 이 상태에서 학생이
@@ -3145,8 +3164,7 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
     if first >= 8 {
         return None;
     }
-    let g = row[first].ch as u32;
-    if !((0x2720..=0x274F).contains(&g) || g == '·' as u32) {
+    if !is_spinner_head(row[first].ch) {
         return None;
     }
     let rest: String = row[first + 1..]
@@ -3196,7 +3214,7 @@ pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, 
             continue;
         }
         let g = row[first].ch;
-        if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
+        if !is_spinner_head(g) {
             continue;
         }
         // 본판정이 잡는 행이면 프로브가 낄 자리가 아니다 — find_claude_spinner 몫.
@@ -3297,7 +3315,7 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     }
     // 최근 claude code(2.1.207 실측)는 힌트 없이 "· Verbing… (3m · ↓ 9k tokens)"
     // 만 찍는다 — 점(·) 프레임도 별과 같이 인정해야 감지가 프레임마다 끊기지 않는다.
-    if !((0x2720..=0x274F).contains(&(g as u32)) || g == '·') {
+    if !is_spinner_head(g) {
         return None;
     }
     // compact 알림에는 경과시간 괄호가 아예 없는 변형이 있다 — `· Compacting
@@ -4474,6 +4492,30 @@ mod spinner_tests {
                 cell
             })
             .collect()
+    }
+
+    // 윈도우 회귀 방지: claude 는 맥에서 Dingbats 별(✻)을 쓰지만 **윈도우에서는
+    // ASCII `*`** 로 떨어뜨린다. 아래 문자열은 2026-08-31 윈도우 pane 화면 그대로다.
+    // 별 범위만 보던 동안 윈도우에서는 스피너를 못 찾아 학생 도트도 working 바도
+    // 완료 판정도 함께 죽어 있었다.
+    #[test]
+    fn spinner_detects_windows_ascii_asterisk() {
+        let rows = vec![
+            row_from(""),
+            row_from("* Beaming… (1m 50s · thought for 1s)"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), Some((1, 0)));
+    }
+
+    // `*` 를 인정해도 본문 불릿은 안 걸려야 한다. 가르는 것은 두 번째 관문
+    // (`…` 뒤 괄호 안의 경과시간)이지 앞머리 글리프가 아니다.
+    #[test]
+    fn spinner_ignores_markdown_bullet() {
+        let rows = vec![
+            row_from(""),
+            row_from("* 항목 하나와 그 설명…"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), None);
     }
 
     // 점(·) 프레임 회귀 방지: 예전엔 별/점자 글리프만 잡아 점 프레임에서

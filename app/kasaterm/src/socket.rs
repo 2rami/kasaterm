@@ -2845,7 +2845,9 @@ fn screen_shows_working(screen: &str) -> bool {
         if line.contains("esc to interrupt") {
             return true;
         }
-        let has_star = line.chars().any(|c| (0x2720..=0x274F).contains(&(c as u32)));
+        // 윈도우 claude 는 이 자리에 ASCII `*` 를 쓴다 — `is_spinner_head` 참고.
+        // 여기서 빠뜨리면 mtime-fallback 의 working 판정이 윈도우에서만 죽는다.
+        let has_star = line.chars().any(crate::screenread::is_spinner_head);
         let has_braille = line.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32)));
         (has_star && line.contains('…')) || has_braille
     })
