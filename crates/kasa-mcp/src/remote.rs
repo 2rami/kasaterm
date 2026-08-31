@@ -600,6 +600,58 @@ pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<
     Ok(resp.get("theme").and_then(|v| v.as_str()).unwrap_or_default().to_string())
 }
 
+/// 다른 기계의 세션에게 cross-session 메시지를 보낸다(`POST /term/message`).
+/// 기계 간 세션 소통의 **발신** 절반 — 받는 쪽은 그 sid 의 소켓에 claude 규격
+/// JSON 을 꽂는다(2026-08-31 유령 세션 실증). 발신자 신원 셋(세션·사람·기계)을
+/// 겉봉투에 실어, 사내 다계정에서 「남의 부탁」을 가릴 자리를 처음부터 판다.
+/// `person` 은 같은 계정·내 기계끼리(1단계)면 빈 문자열.
+#[allow(clippy::too_many_arguments)]
+pub fn send_peer_message(
+    base: &str,
+    target_sid: &str,
+    from_name: &str,
+    from_person: &str,
+    from_machine: &str,
+    body: &str,
+    token: Option<&str>,
+) -> Result<()> {
+    let u = format!(
+        "{}/term/message?sid={}&from_name={}&from_person={}&from_machine={}",
+        base.trim_end_matches('/'),
+        urlencode(target_sid),
+        urlencode(from_name),
+        urlencode(from_person),
+        urlencode(from_machine),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("message runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).body(body.as_bytes().to_vec());
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("메시지 전송 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(())
+}
+
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
 /// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
 /// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).
