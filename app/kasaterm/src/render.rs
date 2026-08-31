@@ -4779,29 +4779,46 @@ impl App {
                     // 한 이상(아래 진행 바 참고), 안 비우면 세로로 갈린 칸에서 발밑에
                     // 띠가 파고든다(칸 31 · 얼굴 23 이면 2px).
                     let (fx, fy, face) = minimap_face_box(mx, my, mw, mh);
-                    let walked = info.busy
-                        && draw_student_walk(g, &info.who, fx - 2.0, fy - 2.0, face + 4.0, anim_phase_secs());
-                    if !walked && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs()) {
-                        // 학생이 없는 자리 — 빈 칸으로 두면 "여긴 뭐지"가 되므로
-                        // 그 칸이 무엇인지 말해 둔다(웹=globe · 이미지 · md · 터미널).
-                        let isz = face.min(16.0);
-                        g.queue_icon(
-                            info.icon,
-                            mx + (mw - isz) / 2.0,
-                            my + (mh - isz) / 2.0,
-                            isz,
-                            theme::text_dim(),
-                        );
-                    }
-                    if info.error && mw >= 10.0 && mh >= 10.0 {
-                        let size = mw.min(mh).mul_add(0.28, 4.0).clamp(8.0, 13.0);
+                    if info.error {
+                        let size = face.min(18.0);
                         g.queue_icon(
                             "triangle-alert",
-                            mx + mw - size - 2.0,
-                            my + 2.0,
+                            fx + (face - size) / 2.0,
+                            fy + (face - size) / 2.0,
                             size,
                             theme::danger(),
                         );
+                    } else {
+                        let walked = info.busy
+                            && draw_student_walk(
+                                g,
+                                &info.who,
+                                fx - 2.0,
+                                fy - 2.0,
+                                face + 4.0,
+                                anim_phase_secs(),
+                            );
+                        if !walked
+                            && !draw_student_face_anim(
+                                g,
+                                &info.who,
+                                fx,
+                                fy,
+                                face,
+                                anim_phase_secs(),
+                            )
+                        {
+                            // 학생이 없는 자리 — 빈 칸으로 두면 "여긴 뭐지"가 되므로
+                            // 그 칸이 무엇인지 말해 둔다(웹=globe · 이미지 · md · 터미널).
+                            let isz = face.min(16.0);
+                            g.queue_icon(
+                                info.icon,
+                                mx + (mw - isz) / 2.0,
+                                my + (mh - isz) / 2.0,
+                                isz,
+                                theme::text_dim(),
+                            );
+                        }
                     }
                     // 진행 바 — 칸 바닥의 2px 띠. 도는 칸에는 **걷기와 함께** 그린다
                     // (거노 2026-08-24 「미니맵에서 진행중이면 걷기나 프로세스바가
