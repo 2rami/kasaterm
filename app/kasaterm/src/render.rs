@@ -33,6 +33,8 @@ struct SidebarRowInfo {
     alert: bool,
     /// 승인·입력을 기다리는 중 — 줄 끝 점이 주황으로, 두 배 빠르게 깜빡인다.
     waiting: bool,
+    /// 에이전트가 오류 복구를 기다리는 중 — 미니맵에만 빨간 삼각형으로 표시한다.
+    error: bool,
     /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
     busy: bool,
     /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
@@ -3202,6 +3204,7 @@ impl App {
                     // 겹쳐 어느 쪽도 안 읽힌다. 급한 쪽이 이긴다.
                     alert: !waiting && self.unread_panes.contains(id),
                     waiting,
+                    error: act.is_some_and(|a| a.has_error),
                     busy,
                     stashed: self
                         .closed_panes
@@ -4788,6 +4791,16 @@ impl App {
                             my + (mh - isz) / 2.0,
                             isz,
                             theme::text_dim(),
+                        );
+                    }
+                    if info.error && mw >= 10.0 && mh >= 10.0 {
+                        let size = mw.min(mh).mul_add(0.28, 4.0).clamp(8.0, 13.0);
+                        g.queue_icon(
+                            "triangle-alert",
+                            mx + mw - size - 2.0,
+                            my + 2.0,
+                            size,
+                            theme::danger(),
                         );
                     }
                     // 진행 바 — 칸 바닥의 2px 띠. 도는 칸에는 **걷기와 함께** 그린다

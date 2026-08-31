@@ -4418,6 +4418,108 @@ async fn term_repo_sync_get(
     }
 }
 
+/// `POST /term/message?sid=<대상 세션 uuid>&from_name=<발신 세션명>&from_person=<발신 사람>&from_machine=<발신 기계>`
+/// body = 본문 텍스트 — **기계 간 세션 소통의 수신 창구.** 발신측(다른 기계의
+/// 카사텀)이 이 라우트로 보내면, 이 기계의 명부에서 그 sid 의 세션을 찾아 그
+/// cross-session 소켓에 claude 가 이해하는 JSON 을 그대로 꽂는다(2026-08-31 유령
+/// 세션 실증으로 확정한 프로토콜).
+///
+/// **발신자 신원은 겉봉투에 싣는다** — from_name(세션)·from_person(사람)·
+/// from_machine(기계). 같은 계정·내 기계끼리(1단계)는 person 이 비지만, 사내
+/// 다계정(3단계)에선 받는 학생이 「남의 부탁」인지 가르는 근거가 여기다. 지금은
+/// 태그에 실어 나르기만 하고, 실행성 지시를 부탁으로 낮추는 규약은 학생 지침 몫.
+///
+/// 인증은 라우트 공통 레이어(remote-token / loopback)가 이미 덮는다.
+async fn term_message_post(
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)) else {
+        return err("`sid`(대상 세션 uuid) 가 필요해요".into());
+    };
+    let body_text = String::from_utf8_lossy(&body);
+    if body_text.trim().is_empty() {
+        return err("본문이 비었어요".into());
+    }
+    // 대상 세션을 이 기계 명부에서 찾는다 — sid → cross-session 소켓 경로.
+    let Some(peer) = kasa_socket::peers::by_session_id().remove(sid.as_str()) else {
+        return err(format!("세션 {sid} 이 이 기계 명부에 없어요 — 꺼졌거나 다른 기계입니다"));
+    };
+    if peer.socket_path.as_os_str().is_empty() || !peer.socket_path.exists() {
+        return err(format!("세션 {sid} 의 소켓이 없어요 — 등록만 남고 길이 끊긴 상태입니다"));
+    }
+    let from_name = q.get("from_name").map(String::as_str).unwrap_or("peer");
+    let from_person = q.get("from_person").map(String::as_str).unwrap_or("");
+    let from_machine = q.get("from_machine").map(String::as_str).unwrap_or("");
+    // 발신 소켓 경로 자리 — 원격 발신자는 이 기계에 소켓이 없으므로 응답이 돌아갈
+    // 곳을 「원격」으로 표식만 남긴다(왕복은 후속 단계에서 프록시 소켓으로).
+    let from_addr = format!("remote:{from_machine}");
+    // claude cross-session 태그 — 유령 실험이 캡처한 규격 그대로. 발신자 신원
+    // 셋(세션·사람·기계)을 태그 속성으로 실어, 표시층·규약이 읽을 수 있게 한다.
+    let mut tag = format!("<cross-session-message from=\"{from_addr}\" from-name=\"{from_name}\"");
+    if !from_person.is_empty() {
+        tag.push_str(&format!(" from-person=\"{from_person}\""));
+    }
+    if !from_machine.is_empty() {
+        tag.push_str(&format!(" from-machine=\"{from_machine}\""));
+    }
+    tag.push_str(" from-mode=\"bypass\">\n");
+    let content = format!("{tag}{}\n</cross-session-message>", body_text.trim_end());
+    let wire = serde_json::json!({
+        "msgV": 1,
+        "msg_id": crate::character::new_session_id(),
+        "type": "user",
+        "message": { "role": "user", "content": content },
+        "priority": "next",
+        "from": from_addr,
+    });
+    let line = format!("{}\n", serde_json::to_string(&wire).unwrap_or_default());
+    // 소켓에 한 줄 꽂는다. claude 가 접속 직후 handshake 로 여러 번 붙을 수 있으나
+    // 우리는 한 번 write 하고 닫으면 된다(유령 실험에서 이 한 줄이 배달됐다).
+    match inject_into_socket(&peer.socket_path, line.as_bytes()) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "delivered_to": sid.clone() })),
+        Err(e) => err(format!("소켓 주입 실패: {e}")),
+    }
+}
+
+/// `GET /peer-registry` — 이 기계의 claude 세션 명부를 JSON 으로 내준다(유령 명부
+/// 미러링의 소스). 다른 기계의 카사텀이 이걸 받아 자기 쪽에 유령 항목을 세우면,
+/// 그 기계의 ListAgents 에 이 세션들이 뜨고 SendMessage 가 `/term/message` 로
+/// 라우팅된다. 소켓 경로·pid 는 **내지 않는다** — 원격에선 로컬 소켓이 무의미하고
+/// (프록시로 대체), 필요한 건 sid·이름·상태뿐이다.
+async fn peer_registry_get() -> impl IntoResponse {
+    let rows: Vec<serde_json::Value> = kasa_socket::peers::read_registry()
+        .into_iter()
+        // 소켓이 살아 있는 것만 — 등록만 남고 길이 끊긴 세션을 원격에 유령으로
+        // 세우면 「보이는데 안 닿는」 stale 이 기계 밖까지 번진다.
+        .filter(|p| !p.socket_path.as_os_str().is_empty() && p.socket_path.exists())
+        .map(|p| {
+            serde_json::json!({
+                "sid": p.session_id,
+                "name": p.name,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "ok": true, "peers": rows }))
+}
+
+/// unix 도메인 소켓에 바이트 한 줄을 꽂는다(cross-session 메시지 배달).
+#[cfg(unix)]
+fn inject_into_socket(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let mut s = UnixStream::connect(path)?;
+    s.set_write_timeout(Some(std::time::Duration::from_secs(3)))?;
+    s.write_all(bytes)?;
+    s.flush()?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn inject_into_socket(_path: &std::path::Path, _bytes: &[u8]) -> std::io::Result<()> {
+    Err(std::io::Error::other("cross-session 주입은 unix 전용"))
+}
+
 /// `POST /term/repo-sync?path=&head=&sync=&branch=&dirty=1&force=1` body=bundle —
 /// 순방향 이사가 출발지에서 떠낸 스냅샷을 이 기계 레포에 재현한다.
 /// 도착지 보호 관문(dirty·브랜치 전환·되감기)은 reposync::apply 안에 있다.
@@ -5480,6 +5582,8 @@ pub fn spawn_http_server_opts(
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
+                    .route("/term/message", post(term_message_post))
+                    .route("/peer-registry", get(peer_registry_get))
                     .route(
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,
