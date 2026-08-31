@@ -289,6 +289,68 @@ pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnap
     newest.snapshot
 }
 
+/// Claude Code·Codex 전사본의 가장 최근 활동이 오류인가.
+///
+/// 과거 실패를 세는 함수가 아니다. 오류 뒤에 새 도구 호출·답변·사용자 입력이 있으면
+/// 복구가 시작된 것이므로 즉시 false가 된다. 미니맵은 이 현재 상태만 표시한다.
+pub(crate) fn latest_harness_error(tail: &str) -> bool {
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+
+        if let Some(payload) = v.get("payload").and_then(|x| x.as_object()) {
+            let sub = payload.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if kind == "event_msg" && matches!(sub, "error" | "stream_error" | "task_failed") {
+                return true;
+            }
+            if kind == "event_msg" && sub == "item_completed" {
+                return payload
+                    .get("item")
+                    .and_then(|x| x.get("status"))
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|status| status.eq_ignore_ascii_case("failed"));
+            }
+            if kind == "event_msg"
+                && matches!(sub, "item_started" | "agent_message" | "user_message")
+                || matches!(kind, "response_item" | "turn_context")
+            {
+                return false;
+            }
+            continue;
+        }
+
+        if kind == "system" {
+            if v.get("subtype").and_then(|x| x.as_str()) == Some("api_error") {
+                return true;
+            }
+            continue;
+        }
+        if kind == "user" {
+            match v.pointer("/message/content") {
+                Some(serde_json::Value::Array(blocks)) => {
+                    let mut saw_result = false;
+                    let mut failed = false;
+                    for block in blocks {
+                        if block.get("type").and_then(|x| x.as_str()) == Some("tool_result") {
+                            saw_result = true;
+                            failed |= block.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false);
+                        }
+                    }
+                    if saw_result {
+                        return failed;
+                    }
+                }
+                Some(serde_json::Value::String(_)) => return false,
+                _ => {}
+            }
+        }
+        if kind == "assistant" {
+            return false;
+        }
+    }
+    false
+}
+
 /// `item.content[]` 의 텍스트 조각을 잇는다.
 ///
 /// ⚠️ 조각의 `type` 으로 거르지 마라 — **대소문자가 갈린다**(실측 2026-08-11:
@@ -1422,6 +1484,31 @@ mod tests {
         assert_eq!(ev[3].is_error, Some(false));
         assert_eq!(ev[5].is_error, Some(true), "실패를 성공과 구별 못 하면 반복 판정이 불가능하다");
         assert!(ev[5].text.contains("No such file"));
+    }
+
+    #[test]
+    fn 최신_클로드_오류만_현재_오류로_읽는다() {
+        let failed = r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"#;
+        assert!(latest_harness_error(failed));
+        let recovered = format!(
+            "{failed}\n{}",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"다시 시도합니다"}]}}"#
+        );
+        assert!(!latest_harness_error(&recovered));
+        assert!(latest_harness_error(
+            r#"{"type":"system","subtype":"api_error","error":{"status":500}}"#
+        ));
+    }
+
+    #[test]
+    fn 최신_코덱스_실패만_현재_오류로_읽는다() {
+        let failed = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","status":"failed"}}}"#;
+        assert!(latest_harness_error(failed));
+        let recovered = format!(
+            "{failed}\n{}",
+            r#"{"type":"event_msg","payload":{"type":"item_started","item":{"type":"CommandExecution"}}}"#
+        );
+        assert!(!latest_harness_error(&recovered));
     }
 
     #[test]

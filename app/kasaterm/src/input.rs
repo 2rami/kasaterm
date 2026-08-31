@@ -738,11 +738,13 @@ impl App {
             } else {
                 // ⚠️ `||` 로 단축평가하지 마라 — bg 탭이 바쁘면 `pane_bg_active` 가
                 // 통째로 안 불려 sticky 띠 글감이 안 채워진다(위 주석과 같은 사고).
+                let source_id = self.ws.lock().unwrap().active_tab_pid(id);
                 let official_error = self
                     .pane_claude_sid
-                    .get(id)
+                    .get(source_id.as_str())
+                    .or_else(|| self.pane_claude_sid.get(id))
                     .is_some_and(|sid| crate::socket::agents_error_sids_cached().contains(sid));
-                let (from_pane, transcript_error) = self.pane_tail_state(id);
+                let (from_pane, transcript_error) = self.pane_tail_state(id, &source_id);
                 (bg_tab_busy.contains(id) || from_pane, official_error || transcript_error)
             };
             // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접
@@ -819,7 +821,7 @@ impl App {
     /// 글감(마지막 프롬프트)도 함께 꺼내므로, 일찍 반환하면 **일하는 pane 일수록 그
     /// 글감이 영영 안 채워진다** — 훅 없는 임시창에서만 띠가 뜨고 실사용 창에서는 안
     /// 뜨는 어긋남이 그래서 났다(2026-08-30). 읽기는 mtime 게이트가 막고 있어 싸다.
-    fn pane_tail_state(&mut self, pane_id: &str) -> (bool, bool) {
+    fn pane_tail_state(&mut self, pane_id: &str, source_id: &str) -> (bool, bool) {
         let hook_bg = self
             .collab
             .hook_activity
@@ -828,8 +830,15 @@ impl App {
             .get(pane_id)
             .is_some_and(|a| !a.is_empty());
         let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
-            return (hook_bg, false);
+            let Some(sid) = self.pane_claude_sid.get(source_id).cloned() else {
+                return (hook_bg, false);
+            };
+            return self.pane_tail_state_for_sid(pane_id, &sid, hook_bg);
         };
+        self.pane_tail_state_for_sid(pane_id, &sid, hook_bg)
+    }
+
+    fn pane_tail_state_for_sid(&mut self, pane_id: &str, sid: &str, hook_bg: bool) -> (bool, bool) {
         let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
             return (hook_bg, false);
         };
@@ -847,7 +856,7 @@ impl App {
         // 화면은 아무 표시도 안 하는 어긋남이 있었다(2026-08-11). 판정 재료가 다르면
         // 판정도 다르다 — 두 벌을 둘 거면 최소한 창 크기는 맞춰 둔다.
         let (tail, idle) = crate::socket::read_tail(&path, 512 * 1024);
-        let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
+        let snap = crate::transcript::snapshot_from_tail(sid, &tail, idle);
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         let error = crate::transcript::latest_harness_error(&tail);
         if let Some(mt) = mtime {

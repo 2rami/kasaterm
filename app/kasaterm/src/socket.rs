@@ -246,15 +246,22 @@ struct DoneReport {
 /// agents_status)와 터미널 타이틀바(render)가 같은 데이터로 claude 실행/working 판정을
 /// 일치시킨다(거노: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
 static AGENTS_CACHE: LazyLock<
-    Mutex<Option<(std::time::Instant, HashMap<String, String>, HashMap<String, String>)>>,
+    Mutex<
+        Option<(
+            std::time::Instant,
+            HashMap<String, String>,
+            HashMap<String, String>,
+            HashSet<String>,
+        )>,
+    >,
 > = LazyLock::new(|| Mutex::new(None));
 
-fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>) {
+fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>, HashSet<String>) {
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = std::time::Instant::now();
-    if let Some((at, status, names)) = AGENTS_CACHE.lock().unwrap().as_ref() {
+    if let Some((at, status, names, errors)) = AGENTS_CACHE.lock().unwrap().as_ref() {
         if now.duration_since(*at) < TTL {
-            return (status.clone(), names.clone());
+            return (status.clone(), names.clone(), errors.clone());
         }
     }
     let mut map: HashMap<String, String> = HashMap::new();
@@ -263,6 +270,7 @@ fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>) {
     // 역추적한다(rebind_agents_panes). 같은 이름 둘이면 모호 — 매핑에서 뺀다.
     let mut names: HashMap<String, String> = HashMap::new();
     let mut dup_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut errors: HashSet<String> = HashSet::new();
     // "claude" 이름 호출 금지 — .app 실행 시 kasaterm PATH 는 시스템 기본
     // (/usr/bin:/bin:…)뿐이라 ~/.local/bin 의 claude 가 안 잡혀, 이 캐시가 조용히
     // 늘 빈 값이었다(status 폴백 항상 mtime 휴리스틱 + agents 뷰 이름 매칭 불발 —
@@ -289,6 +297,14 @@ fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>) {
                     if rank(st) > rank(e) {
                         *e = st.to_string();
                     }
+                    if st == "waiting"
+                        && it
+                            .get("waitingFor")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|v| v.eq_ignore_ascii_case("error"))
+                    {
+                        errors.insert(sid.to_string());
+                    }
                     if let Some(n) = it.get("name").and_then(|v| v.as_str()).map(str::trim) {
                         if !n.is_empty() {
                             match names.entry(n.to_string()) {
@@ -310,8 +326,10 @@ fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>) {
     for n in &dup_names {
         names.remove(n);
     }
-    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone(), names.clone()));
-    (map, names)
+    errors.retain(|sid| map.get(sid).is_some_and(|status| status == "waiting"));
+    *AGENTS_CACHE.lock().unwrap() =
+        Some((now, map.clone(), names.clone(), errors.clone()));
+    (map, names, errors)
 }
 
 pub(crate) fn agents_status_cached() -> HashMap<String, String> {
@@ -322,6 +340,12 @@ pub(crate) fn agents_status_cached() -> HashMap<String, String> {
 /// 세션 행 캐릭터 칩(행 name 을 sid→캐릭터로 역추적)에서도 쓴다.
 pub(crate) fn agents_name_sids_cached() -> HashMap<String, String> {
     agents_cached().1
+}
+
+/// Claude Code가 복구를 기다리는 오류 상태인 세션. 일반 입력·권한 대기와 달리
+/// 미니맵에서만 경고 삼각형으로 가른다.
+pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
+    agents_cached().2
 }
 
 impl PtyBackend {

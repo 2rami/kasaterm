@@ -4972,7 +4972,8 @@ struct App {
     /// 프롬프트 행이 사라져(2026-08-30 실측: 스크롤해도 최상단 행이 빈 채로 온다)
     /// 띠의 글감이 없어졌다. 같은 tail 을 이미 읽고 있으므로 여기서 함께 꺼내면
     /// 추가 IO 없이 kasaterm 이 그 띠를 직접 그릴 수 있다.
-    pane_bg_mtime: HashMap<String, (std::time::SystemTime, bool, Vec<(String, Vec<String>)>)>,
+    pane_bg_mtime:
+        HashMap<String, (std::time::SystemTime, bool, Vec<(String, Vec<String>)>, bool)>,
     /// pane id → 그 pane 의 프롬프트 목록을 **깊게** 읽어 둔 transcript mtime.
     ///
     /// `pane_bg_mtime` 이 담는 목록은 512KB 꼬리에서 나온다. 일하는 pane 은 도구
