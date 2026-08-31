@@ -43,11 +43,32 @@ impl Drop for Ghost {
     }
 }
 
-/// 살아 있는 미러 전부 — 키는 `(base, remote_sid)`.
+/// 살아 있는 미러 전부 — 키는 `(경로표식, remote_sid)`. 경로표식은 직결이면
+/// `direct:<base>`, 릴레이면 `relay:<machine>` — 같은 세션이 두 경로로 잡혀도
+/// 키가 갈려 둘 다 서는 일이 없게 sync 쪽에서 직결을 우선한다.
 type Ghosts = HashMap<(String, String), Ghost>;
+
+/// 유령이 원격으로 전달하는 길 — 직결(기계 명부의 base 로 직접) 또는 릴레이 경유.
+#[derive(Clone, Debug)]
+enum Route {
+    /// 그 기계의 /term/message 로 직접.
+    Direct { base: String },
+    /// 중계소의 /relay/send 로 — 설정은 전달 시점에 다시 읽는다(토큰 회전 대비).
+    Relay,
+}
 
 fn sessions_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude/sessions"))
+}
+
+/// 이 소켓이 우리가 세운 유령의 프록시 소켓인가. 유령을 다시 명부·릴레이에
+/// 광고하면 **메아리 루프**가 된다 — B의 세션을 A가 유령으로 세웠는데 A가 그
+/// 유령을 자기 세션이라고 광고하면, B가 자기 세션의 유령을 또 세우고 메시지가
+/// 제자리를 돈다. 광고 경로(peer_registry_get·릴레이 등록) 둘 다 이걸로 거른다.
+pub(crate) fn is_ghost_socket(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("kasa-ghost-"))
 }
 
 /// 로컬 세션명(발신자 표시) — 유령 소켓에 온 JSON 의 `from` 소켓 경로로 되짚는다.
@@ -61,7 +82,7 @@ fn from_name_of_socket(from: &str) -> Option<String> {
 }
 
 /// 유령 소켓에 꽂힌 한 줄(claude SendMessage)을 원격으로 전달한다.
-fn forward_line(base: &str, remote_sid: &str, line: &str) {
+fn forward_line(route: &Route, remote_sid: &str, line: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
     // 본문은 message.content 의 <cross-session-message> 태그 안. 태그를 벗겨
     // 순수 본문만 넘긴다 — 받는 쪽(term_message_post)이 새 태그를 다시 씌운다.
@@ -79,13 +100,131 @@ fn forward_line(base: &str, remote_sid: &str, line: &str) {
             .map(|(n, _)| n.to_string())
             .unwrap_or_else(|| "peer".to_string())
     });
-    // 발신 사람·기계는 1단계(같은 계정·내 기계)에선 비운다 — 3단계에서 신원
-    // 주입기가 채운다(from-person 자리는 term_message_post 가 이미 받는다).
-    if let Err(e) =
-        crate::remote::send_peer_message(base, remote_sid, &from_name, "", "", &body, None)
-    {
-        eprintln!("[peermirror] 전달 실패 {base} {remote_sid}: {e:#}");
+    let res = match route {
+        // 직결 — 발신 사람·기계는 같은 계정·내 기계 사이라 비운다.
+        Route::Direct { base } => {
+            crate::remote::send_peer_message(base, remote_sid, &from_name, "", "", &body, None)
+        }
+        // 릴레이 — 설정을 다시 읽어(회전 대비) 내 계정·기계를 달아 보낸다.
+        // 계정이 다른 상대에게는 릴레이가 외부 표식을 강제한다.
+        Route::Relay => match relay_conf() {
+            Some(conf) => crate::remote::relay_send(
+                &conf.base,
+                conf.token().as_deref(),
+                remote_sid,
+                &from_name,
+                &conf.account,
+                &conf.machine_id,
+                &body,
+            ),
+            None => Err(anyhow::anyhow!("릴레이 설정(relay.json)이 사라졌어요")),
+        },
+    };
+    if let Err(e) = res {
+        eprintln!("[peermirror] 전달 실패 {route:?} {remote_sid}: {e:#}");
     }
+}
+
+// --- 릴레이 설정 ------------------------------------------------------------
+
+/// `~/.config/kasaterm/relay.json` — 있으면 이 기계는 중계소에 자기 세션을 올리고
+/// 중계소 명단의 남의 세션을 유령으로 세운다. 없으면 릴레이 경유는 통째로 꺼진다
+/// (machines.json 직결과 같은 게이팅 규율).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RelayConf {
+    /// 중계소 주소 (예: http://127.0.0.1:8790).
+    pub base: String,
+    /// X-Relay-Token 값 자체. token_file 과 둘 중 하나.
+    token: Option<String>,
+    token_file: Option<String>,
+    /// 이 기계의 라벨(중계소 명단에 machine 으로 뜬다. 예: 맥북).
+    pub machine_id: String,
+    /// 이 기계의 계정 — 같은 계정끼리는 지시, 다르면 릴레이가 부탁 봉투를 강제.
+    pub account: String,
+    /// 중계소가 「이 기계로 배달할 때」 칠 주소(중계소 입장에서 닿는 주소).
+    pub advertise_base: String,
+    advertise_token: Option<String>,
+    advertise_token_file: Option<String>,
+}
+
+impl RelayConf {
+    pub fn token(&self) -> Option<String> {
+        resolve_secret(&self.token, &self.token_file)
+    }
+    pub fn advertise_token(&self) -> Option<String> {
+        resolve_secret(&self.advertise_token, &self.advertise_token_file)
+    }
+}
+
+/// 값이 있으면 값, 없으면 파일에서 읽는다(~ 확장). 둘 다 없으면 None.
+fn resolve_secret(value: &Option<String>, file: &Option<String>) -> Option<String> {
+    if let Some(v) = value.as_ref().filter(|s| !s.is_empty()) {
+        return Some(v.clone());
+    }
+    let f = file.as_ref().filter(|s| !s.is_empty())?;
+    let path = if let Some(rest) = f.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        PathBuf::from(f)
+    };
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// env `KASATERM_RELAY`(JSON 통째) 가 먼저 — 검증용 rig 이 사용자 설정을 안 건드리고
+/// 자기 릴레이·광고 주소를 가리키기 위해서다(다른 격리 env 와 같은 규율).
+pub(crate) fn relay_conf() -> Option<RelayConf> {
+    if let Ok(s) = std::env::var("KASATERM_RELAY") {
+        if let Some(c) = parse_relay_conf(&s) {
+            return Some(c);
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".config/kasaterm/relay.json");
+    parse_relay_conf(&std::fs::read_to_string(path).ok()?)
+}
+
+/// 필수: base·machine_id·account·advertise_base. 하나라도 비면 None — 반쪽 설정으로
+/// 등록만 되고 배달이 안 되는 유령 상태를 만들지 않는다.
+fn parse_relay_conf(text: &str) -> Option<RelayConf> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::trim).map(str::to_string);
+    let req = |k: &str| s(k).filter(|x| !x.is_empty());
+    Some(RelayConf {
+        base: req("base")?.trim_end_matches('/').to_string(),
+        token: s("token"),
+        token_file: s("token_file"),
+        machine_id: req("machine_id")?,
+        account: req("account")?,
+        advertise_base: req("advertise_base")?.trim_end_matches('/').to_string(),
+        advertise_token: s("advertise_token"),
+        advertise_token_file: s("advertise_token_file"),
+    })
+}
+
+/// 이 기계의 살아 있는 실세션(유령 제외) — 릴레이에 올릴 목록. 명부 json 을 직접
+/// 읽는다(peers::read_registry 는 status 를 버리는데 보드엔 상태가 실려야 해서).
+fn local_live_sessions() -> Vec<serde_json::Value> {
+    let Some(dir) = sessions_dir() else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    rd.flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension()?.to_str()? != "json" {
+                return None;
+            }
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+            let sock = PathBuf::from(v.get("messagingSocketPath")?.as_str()?);
+            // 소켓이 죽은 세션·우리가 세운 유령은 올리지 않는다(유령은 메아리 루프).
+            if !sock.exists() || is_ghost_socket(&sock) {
+                return None;
+            }
+            Some(serde_json::json!({
+                "sid": v.get("sessionId")?.as_str()?,
+                "name": v.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
+            }))
+        })
+        .collect()
 }
 
 /// `<cross-session-message …>본문</cross-session-message>` → 본문만.
@@ -118,7 +257,7 @@ pub(crate) fn ghost_display_name(name: &str, label: &str) -> String {
 
 /// 유령 하나를 세운다 — 껍데기 spawn + 명부 파일 + 프록시 소켓 리스너.
 #[cfg(unix)]
-fn spawn_ghost(base: &str, remote_sid: &str, name: &str, label: &str) -> std::io::Result<Ghost> {
+fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::io::Result<Ghost> {
     use std::os::unix::net::UnixListener;
 
     // 껍데기 — 살아 있는 pid 하나(claude 의 liveness 검사 통과용). 아주 오래 잔다.
@@ -173,8 +312,7 @@ fn spawn_ghost(base: &str, remote_sid: &str, name: &str, label: &str) -> std::io
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // 프록시 리스너 스레드 — 유령 소켓에 꽂힌 줄을 원격으로 전달.
     {
-        let (base, remote_sid, stop) =
-            (base.to_string(), remote_sid.to_string(), stop.clone());
+        let (remote_sid, stop) = (remote_sid.to_string(), stop.clone());
         std::thread::Builder::new()
             .name(format!("ghost-proxy-{pid}"))
             .spawn(move || {
@@ -185,7 +323,7 @@ fn spawn_ghost(base: &str, remote_sid: &str, name: &str, label: &str) -> std::io
                             let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                             let _ = conn.read_to_string(&mut buf);
                             for line in buf.lines().filter(|l| !l.trim().is_empty()) {
-                                forward_line(&base, &remote_sid, line);
+                                forward_line(&route, &remote_sid, line);
                             }
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -231,13 +369,15 @@ fn fastrand() -> u32 {
 }
 
 /// 미러링 폴러를 백그라운드로 띄운다 — 카사텀 부팅 때 한 번 부른다.
-/// 5초마다 각 기계의 `/peer-registry` 를 받아 유령을 동기화한다(새 세션 추가,
-/// 사라진 세션 제거). 기계 명부가 비면 아무 일도 안 한다.
+/// 5초마다 ①기계 명부(machines.json)의 각 기계 `/peer-registry` ②릴레이
+/// (relay.json — 자기 세션 등록 후 명단 수신) 를 받아 유령을 동기화한다.
+/// 명부·릴레이 설정이 둘 다 비면 아무 일도 안 한다.
 #[cfg(unix)]
 pub fn spawn() {
     std::thread::Builder::new()
         .name("peermirror".into())
         .spawn(|| {
+            sweep_orphan_ghosts();
             let ghosts: Arc<Mutex<Ghosts>> = Arc::new(Mutex::new(HashMap::new()));
             loop {
                 sync_once(&ghosts);
@@ -249,20 +389,117 @@ pub fn spawn() {
 #[cfg(not(unix))]
 pub fn spawn() {}
 
+/// 부팅 시 고아 유령 청소 — 앞선 카사텀이 강제종료·크래시로 죽으면 `Drop` 이 못
+/// 돌아 유령 파일·껍데기 sleep 이 남고, 껍데기 pid 가 살아 있는 한 죽은 원격이
+/// ListAgents 에 영영 뜬다(2026-09-01 실측: SIGTERM 만으로 잔재 발생). 유령은
+/// 소켓 경로(kasa-ghost-*)로 정확히 가려내고, 껍데기는 **그 pid 가 정말 sleep 일
+/// 때만** 죽인다 — pid 재사용으로 남의 프로세스를 잡는 사고 방지.
+#[cfg(unix)]
+fn sweep_orphan_ghosts() {
+    let Some(dir) = sessions_dir() else { return };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Some(sock) = v.get("messagingSocketPath").and_then(|s| s.as_str()) else { continue };
+        let sock = PathBuf::from(sock);
+        if !is_ghost_socket(&sock) {
+            continue;
+        }
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if let Ok(pid) = stem.parse::<u32>() {
+            let comm = std::process::Command::new("ps")
+                .args(["-o", "comm=", "-p", &pid.to_string()])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if comm.rsplit('/').next() == Some("sleep") {
+                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+            }
+        }
+        let _ = std::fs::remove_file(&sock);
+        // 명부 json 과 그 짝 .key 파일까지.
+        let _ = std::fs::remove_file(&p);
+        if let Ok(rd2) = std::fs::read_dir(&dir) {
+            for k in rd2.flatten() {
+                let name = k.file_name().to_string_lossy().to_string();
+                if name.starts_with(&format!("{stem}.")) && name.ends_with(".key") {
+                    let _ = std::fs::remove_file(k.path());
+                }
+            }
+        }
+    }
+}
+
+/// 릴레이 명단에서 유령으로 세울 대상 고르기 — 순수 함수라 테스트한다.
+/// 거르는 것 둘: ①내 기계(machine == 나) — 내 세션을 유령으로 세우면 자기 메아리
+/// ②직결 기계(machines.json 라벨과 같은 machine) — 직결 유령이 이미 서므로 릴레이
+/// 유령까지 서면 같은 세션이 두 이름으로 뜬다. 직결이 우선이다(왕복이 한 홉 짧다).
+fn relay_targets(
+    rows: &[(String, String, String)], // (machine, sid, name)
+    my_machine: &str,
+    direct_labels: &[String],
+) -> Vec<(String, String, String)> {
+    rows.iter()
+        .filter(|(machine, _, _)| {
+            machine != my_machine && !direct_labels.iter().any(|l| l == machine)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(unix)]
 fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
     let machines = crate::machines::machines();
-    // 이번에 살아 있어야 할 (base, sid) 집합.
-    let mut want: HashMap<(String, String), (String, String)> = HashMap::new(); // →(name,label)
+    // 이번에 살아 있어야 할 유령 집합 — 키는 (경로표식, sid), 값은 (이름, 라벨, 경로).
+    let mut want: HashMap<(String, String), (String, String, Route)> = HashMap::new();
     for m in &machines {
         match crate::remote::fetch_peer_registry(&m.base, None) {
             Ok(peers) => {
                 for (sid, name) in peers {
-                    want.insert((m.base.clone(), sid), (name, m.label.clone()));
+                    want.insert(
+                        (format!("direct:{}", m.base), sid),
+                        (name, m.label.clone(), Route::Direct { base: m.base.clone() }),
+                    );
                 }
             }
             // 죽은 기계는 조용히 건너뛴다 — 그 기계 유령은 아래에서 걷힌다.
             Err(_) => {}
+        }
+    }
+    // 릴레이 — 설정이 있으면 ①내 실세션을 등록하고 ②명단의 남의 기계 세션을 유령 후보로.
+    if let Some(conf) = relay_conf() {
+        let token = conf.token();
+        if let Err(e) = crate::remote::relay_register(
+            &conf.base,
+            token.as_deref(),
+            &conf.machine_id,
+            &conf.account,
+            &conf.advertise_base,
+            conf.advertise_token().as_deref(),
+            &local_live_sessions(),
+        ) {
+            eprintln!("[peermirror] 릴레이 등록 실패 {}: {e:#}", conf.base);
+        }
+        match crate::remote::relay_sessions(&conf.base, token.as_deref()) {
+            Ok(rows) => {
+                let direct_labels: Vec<String> =
+                    machines.iter().map(|m| m.label.clone()).collect();
+                for (machine, sid, name) in
+                    relay_targets(&rows, &conf.machine_id, &direct_labels)
+                {
+                    want.insert(
+                        (format!("relay:{machine}"), sid),
+                        (name, machine, Route::Relay),
+                    );
+                }
+            }
+            Err(e) => eprintln!("[peermirror] 릴레이 명단 실패 {}: {e:#}", conf.base),
         }
     }
     let mut g = ghosts.lock().unwrap();
@@ -273,11 +510,11 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
         g.remove(&k);
     }
     // 새로 생긴 것 추가.
-    for (key, (name, label)) in want {
+    for (key, (name, label, route)) in want {
         if g.contains_key(&key) {
             continue;
         }
-        match spawn_ghost(&key.0, &key.1, &name, &label) {
+        match spawn_ghost(route, &key.1, &name, &label) {
             Ok(ghost) => {
                 g.insert(key, ghost);
             }
@@ -313,5 +550,54 @@ mod tests {
         assert!(!d.contains('@'));
         // 라벨이 비면 이름 그대로.
         assert_eq!(ghost_display_name("solo", ""), "solo");
+    }
+
+    #[test]
+    fn ghost_sockets_are_recognized_and_excluded() {
+        use std::path::Path;
+        assert!(is_ghost_socket(Path::new("/tmp/cc-socks/kasa-ghost-1234.sock")));
+        // 실세션 소켓·다른 파일은 유령이 아니다.
+        assert!(!is_ghost_socket(Path::new("/tmp/cc-socks/48211.sock")));
+        assert!(!is_ghost_socket(Path::new("/tmp/other/kasaterm-1.sock")));
+    }
+
+    #[test]
+    fn relay_conf_parses_and_rejects_halves() {
+        let full = r#"{"base":"http://127.0.0.1:8790/","token_file":"~/.config/kasaterm/relay-token",
+            "machine_id":"맥북","account":"geno",
+            "advertise_base":"http://127.0.0.1:18801/","advertise_token":"tok"}"#;
+        let c = parse_relay_conf(full).expect("완전한 설정은 파싱돼야");
+        assert_eq!(c.base, "http://127.0.0.1:8790"); // 꼬리 슬래시 제거
+        assert_eq!(c.machine_id, "맥북");
+        assert_eq!(c.account, "geno");
+        assert_eq!(c.advertise_base, "http://127.0.0.1:18801");
+        assert_eq!(c.advertise_token(), Some("tok".into()));
+        // 필수 하나라도 빠지면 통째로 None — 반쪽 설정으로 등록만 되고 배달 안 되는
+        // 유령 상태를 만들지 않는다.
+        for broken in [
+            r#"{"machine_id":"맥북","account":"geno","advertise_base":"http://x"}"#,
+            r#"{"base":"http://x","account":"geno","advertise_base":"http://x"}"#,
+            r#"{"base":"http://x","machine_id":"맥북","advertise_base":"http://x"}"#,
+            r#"{"base":"http://x","machine_id":"맥북","account":"geno"}"#,
+            "not json",
+        ] {
+            assert!(parse_relay_conf(broken).is_none(), "{broken} 이 통과했다");
+        }
+    }
+
+    #[test]
+    fn relay_targets_skip_self_and_direct_machines() {
+        let rows = vec![
+            ("맥북".to_string(), "s1".to_string(), "나".to_string()),
+            ("맥미니".to_string(), "s2".to_string(), "미니학생".to_string()),
+            ("데스크탑".to_string(), "s3".to_string(), "데탑학생".to_string()),
+        ];
+        // 내 기계(맥북)와 직결(맥미니)은 걸러지고 릴레이 전용(데스크탑)만 남는다.
+        let t = relay_targets(&rows, "맥북", &["맥미니".to_string()]);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, "데스크탑");
+        // 직결이 없으면 내 것만 빠진다.
+        let t2 = relay_targets(&rows, "맥북", &[]);
+        assert_eq!(t2.len(), 2);
     }
 }

@@ -4545,6 +4545,9 @@ async fn peer_registry_get() -> impl IntoResponse {
         // 소켓이 살아 있는 것만 — 등록만 남고 길이 끊긴 세션을 원격에 유령으로
         // 세우면 「보이는데 안 닿는」 stale 이 기계 밖까지 번진다.
         .filter(|p| !p.socket_path.as_os_str().is_empty() && p.socket_path.exists())
+        // 우리가 세운 유령은 광고하지 않는다 — B의 세션을 여기 유령으로 세웠는데
+        // 그걸 내 세션이라고 내주면 B가 자기 세션의 유령을 또 세워 메아리가 돈다.
+        .filter(|p| !crate::peermirror::is_ghost_socket(&p.socket_path))
         .map(|p| {
             serde_json::json!({
                 "sid": p.session_id,

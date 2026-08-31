@@ -675,6 +675,126 @@ pub fn send_peer_message(
     Ok(())
 }
 
+// --- 릴레이(중계소) 클라이언트 ---------------------------------------------
+// 셋 다 X-Relay-Token 인증(사내 공용 토큰). ⚠️토큰은 ASCII 만 — HTTP 헤더가
+// latin-1 이라 한글 토큰은 헤더에서 깨져 무조건 401 이 난다(2026-09-01 실측).
+
+/// 공용: 릴레이에 요청 하나 보내고 `{ok:true}` 응답을 확인한다.
+fn relay_call(
+    method: reqwest::Method,
+    url: &str,
+    token: Option<&str>,
+    body: Option<Vec<u8>>,
+    json: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("relay runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.request(method, url);
+        if let Some(t) = token {
+            req = req.header("x-relay-token", t);
+        }
+        if let Some(j) = json {
+            // reqwest 가 json feature 없이 빌드돼(.json 미존재) 손으로 직렬화한다.
+            req = req
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&j).unwrap_or_default());
+        } else if let Some(b) = body {
+            req = req.body(b);
+        }
+        let r = req.send().await.context("릴레이 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp)
+}
+
+/// `POST /relay/register` — 이 기계와 살아 있는 세션 목록을 중계소에 올린다(upsert).
+/// sessions 는 `[{sid,name,status}]`. advertise 는 중계소가 이 기계로 배달할 때 칠 주소.
+pub fn relay_register(
+    base: &str,
+    token: Option<&str>,
+    machine_id: &str,
+    account: &str,
+    advertise_base: &str,
+    advertise_token: Option<&str>,
+    sessions: &[serde_json::Value],
+) -> Result<()> {
+    let u = format!("{}/relay/register", base.trim_end_matches('/'));
+    relay_call(
+        reqwest::Method::POST,
+        &u,
+        token,
+        None,
+        Some(serde_json::json!({
+            "machine_id": machine_id,
+            "account": account,
+            "base": advertise_base,
+            "token": advertise_token.unwrap_or(""),
+            "sessions": sessions,
+        })),
+    )
+    .map(|_| ())
+}
+
+/// `GET /relay/sessions` — 중계소 명단. `(machine, sid, name)` 목록으로 돌려준다.
+pub fn relay_sessions(base: &str, token: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    let u = format!("{}/relay/sessions", base.trim_end_matches('/'));
+    let resp = relay_call(reqwest::Method::GET, &u, token, None, None)?;
+    Ok(resp
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("machine")?.as_str()?.to_string(),
+                        r.get("sid")?.as_str()?.to_string(),
+                        r.get("name")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `POST /relay/send` — 중계소를 거쳐 대상 세션으로 보낸다. from_account 를 정직하게
+/// 대면 계정이 다른 상대에겐 릴레이가 부탁 봉투를 강제한다.
+pub fn relay_send(
+    base: &str,
+    token: Option<&str>,
+    to_sid: &str,
+    from_name: &str,
+    from_account: &str,
+    from_machine: &str,
+    body: &str,
+) -> Result<()> {
+    let u = format!(
+        "{}/relay/send?to_sid={}&from_name={}&from_account={}&from_machine={}",
+        base.trim_end_matches('/'),
+        urlencode(to_sid),
+        urlencode(from_name),
+        urlencode(from_account),
+        urlencode(from_machine),
+    );
+    relay_call(reqwest::Method::POST, &u, token, Some(body.as_bytes().to_vec()), None).map(|_| ())
+}
+
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
 /// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
 /// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).
