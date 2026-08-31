@@ -2902,15 +2902,32 @@ impl App {
             return;
         }
         self.ui_zoom = new;
+        self.persist_ui_zoom();
         self.apply_effective_scale();
     }
     /// Reset whole-UI zoom to native (1.0).
+    ///
+    /// 되돌리기도 **저장한다.** 안 그러면 100% 가 "고른 값"이 아니라 "값 없음"과
+    /// 구별되지 않아, 넓은 모니터에서 일부러 100% 로 되돌린 다음 실행에서
+    /// 자동 추정이 다시 키워 버린다.
     pub(crate) fn reset_ui_zoom(&mut self) {
-        if (self.ui_zoom - 1.0).abs() < 0.01 {
+        if (self.ui_zoom - 1.0).abs() < 0.01 && !self.ui_zoom_unset {
             return;
         }
         self.ui_zoom = 1.0;
+        self.persist_ui_zoom();
         self.apply_effective_scale();
+    }
+    /// 지금 배율을 `settings.json` 에 적고, 자동 추정 자격을 내린다.
+    /// 사람이 한 번이라도 고른 뒤에는 앱이 배율을 넘겨짚지 않는다.
+    pub(crate) fn persist_ui_zoom(&mut self) {
+        self.ui_zoom_unset = false;
+        // 검증 실행은 설정 파일을 공유하므로 쓰지 않는다 — `save_window_frame`
+        // 과 같은 이유다(하네스가 띄운 창 값이 거노 앱의 다음 배율이 되면 안 된다).
+        if crate::verification_run() {
+            return;
+        }
+        crate::socket::write_setting("ui_zoom", serde_json::json!(self.ui_zoom));
     }
     /// Push the current effective scale into the GPU renderer and reflow the
     /// cell grid + PTY size. Shared by zoom changes and (future) DPI

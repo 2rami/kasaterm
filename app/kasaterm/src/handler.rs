@@ -2140,6 +2140,30 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.gpu = Some(renderer);
         self.window = Some(window);
+        // 배율을 한 번도 안 고른 사람에게만, 이 모니터에 맞는 값을 넘겨준다.
+        // **백엔드보다 먼저** 정해야 한다 — `start_pty` 가 `window_cells()` 로
+        // 첫 PTY 의 행·열을 잡는데 그 계산이 배율을 타므로, 나중에 바꾸면 방금
+        // 띄운 셸이 한 번 리사이즈되며 첫 화면이 흔들린다.
+        //
+        // 저장하지는 않는다. 추정은 "지금 이 화면 기준의 짐작"이라 값으로 굳히면
+        // 모니터를 바꿔도 옛 화면 기준이 따라다닌다. 사람이 Ctrl +/-/0 으로 한 번
+        // 고르는 순간 그때 저장되고, 그 뒤로 이 자리는 조용해진다.
+        if self.ui_zoom_unset {
+            if let Some(w) = self.window.as_ref() {
+                let logical_w = w
+                    .current_monitor()
+                    .map(|m| m.size().width as f64 / m.scale_factor().max(0.5))
+                    .unwrap_or(0.0);
+                let guess = crate::socket::guess_ui_zoom(logical_w);
+                if (guess - self.ui_zoom).abs() > 0.01 {
+                    self.ui_zoom = guess;
+                    self.apply_effective_scale();
+                    eprintln!(
+                        "[startup] ui_zoom auto {guess:.2} (logical monitor width {logical_w:.0})"
+                    );
+                }
+            }
+        }
         // Backend selection. Defaults to the Phase C direct-PTY path —
         // no tmux daemon, no `set -g focus-events` warnings inside
         // Claude Code, no kasaterm-cli's tmux quirks. KASATERM_BACKEND=tmux
