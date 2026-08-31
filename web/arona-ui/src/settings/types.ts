@@ -196,6 +196,66 @@ export type AccountRow = {
   usage_resets?: string | null;
 };
 
+export type OnboardingPlatform = 'macos' | 'windows' | 'linux';
+
+export type OnboardingAuthStatus =
+  | 'checking'
+  | 'logged_in'
+  | 'logged_out'
+  | 'not_installed'
+  | 'error';
+
+export type OnboardingAuthProvider = {
+  status: OnboardingAuthStatus;
+  account?: string | null;
+  detail?: string | null;
+};
+
+export type OnboardingTerminalImport = {
+  id: 'terminal' | 'iterm2' | string;
+  label: string;
+  available: boolean;
+  detected: boolean;
+  support: 'full' | 'partial' | 'unsupported' | 'unavailable';
+  profile?: string | null;
+  font_family?: string | null;
+  font_path?: string | null;
+  font_size?: number | null;
+  theme_label?: string | null;
+  background?: string | null;
+  foreground?: string | null;
+  cursor?: string | null;
+  ansi16?: string[];
+  reason?: string | null;
+};
+
+export type OnboardingShellChoice = {
+  id: string;
+  label: string;
+  path: string;
+  detected: boolean;
+};
+
+/// 온보딩 전용 값은 설정 스냅샷과 분리한다. 설치 환경 감지는 매번 달라질 수 있지만
+/// 일반 설정은 이미 `/settings/values`가 정본이라 같은 값을 두 응답에 복제하지 않는다.
+export type OnboardingState = {
+  platform: OnboardingPlatform;
+  completed: boolean;
+  imports: OnboardingTerminalImport[];
+  imported_profile?: string | null;
+  fonts: string[];
+  font_family: string | null;
+  font_size: number;
+  restart_required: boolean;
+  windows_shells: OnboardingShellChoice[];
+  selected_shell: string;
+  preferred_agent?: 'claude' | 'codex' | null;
+  auth: {
+    claude: OnboardingAuthProvider;
+    codex: OnboardingAuthProvider;
+  };
+};
+
 /// 프사 URL. `theme` 을 주면 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성
 /// 폴더 → 번들 순으로 찾는다.
 export function faceUrl(slug: string, theme?: string): string {

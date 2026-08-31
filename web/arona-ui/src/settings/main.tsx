@@ -4,13 +4,14 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './settings.css';
+import '../onboarding/onboarding.css';
 import { LangProvider } from './lang';
-import { SettingsApp } from './SettingsApp';
+import { SettingsRoot } from '../onboarding/SettingsRoot';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <LangProvider>
-      <SettingsApp />
+      <SettingsRoot />
     </LangProvider>
   </StrictMode>
 );
