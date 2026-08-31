@@ -3623,6 +3623,36 @@ pub fn read_font_size() -> f32 {
         .unwrap_or(DEFAULT_FONT_SIZE)
 }
 
+/// 저장해 둔 전체 UI 배율(`ui_zoom`). **없으면 `None`** — 그 구분이 중요하다:
+/// 값이 없다는 건 "이 사람은 아직 배율을 손대지 않았다"는 뜻이라, 창을 띄운 뒤
+/// 모니터를 보고 추정해도 된다는 허락이 된다(`guess_ui_zoom`). 한 번이라도
+/// 손대면 여기 값이 생기고, 그 뒤로는 추정이 끼어들지 않는다.
+pub fn read_ui_zoom() -> Option<f32> {
+    read_settings()
+        .get("ui_zoom")
+        .and_then(|x| x.as_f64())
+        .map(|v| (v as f32).clamp(0.5, 3.0))
+}
+
+/// 아직 배율을 고른 적 없는 사람에게 **첫 화면부터** 읽을 만한 크기를 준다.
+///
+/// 기준은 물리 해상도가 아니라 **논리 폭**(= 물리 폭 ÷ OS DPI 배율)이다. 최종
+/// 배율이 `OS DPI × ui_zoom` 이라, OS 쪽에서 이미 키워 둔 화면에 또 곱하면
+/// 두 배로 커진다 — 4K 를 150% 로 쓰는 노트북(논리 2560)과 4K 를 100% 로 쓰는
+/// 데스크톱 모니터(논리 3840)는 눈에 보이는 글자 크기가 이미 비슷하다.
+///
+/// 그래서 "OS 가 안 키워 준 넓은 화면"에서만 올린다. 거노의 3840×1600 을
+/// 100% 로 쓰는 경우가 정확히 이 자리다(2026-09-01: "처음 키면 왤케 조그매").
+pub fn guess_ui_zoom(logical_width: f64) -> f32 {
+    if logical_width >= 3400.0 {
+        1.5
+    } else if logical_width >= 2400.0 {
+        1.25
+    } else {
+        1.0
+    }
+}
+
 /// Whether the file-tree sidebar starts open on launch. Default `false`
 /// (terminal-only first screen).
 pub fn read_file_tree_default() -> bool {

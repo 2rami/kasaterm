@@ -5573,7 +5573,15 @@ struct App {
     /// Whole-UI zoom multiplier folded into the effective render scale
     /// (`effective_scale = DPI scale × ui_zoom`). 1.0 = native. Ctrl +/-/0
     /// drive this so chrome, sidebar, and every pane scale together.
+    ///
+    /// 값은 `settings.json` 에 남는다 — 배율은 그 사람 눈과 그 모니터에 맞춘
+    /// 것이라 앱을 껐다고 사라지면 매번 다시 맞춰야 한다(2026-09-01 거노).
     ui_zoom: f32,
+    /// 배율을 **아직 아무도 안 골랐다**는 표시. 저장된 `ui_zoom` 이 없을 때만
+    /// 참이고, 창이 뜬 뒤 모니터 크기로 한 번 추정할 자격이 된다
+    /// (`handler.rs` resumed). 사용자가 Ctrl +/-/0 을 한 번 누르면 값이
+    /// 저장되면서 이 플래그가 내려가, 다음 실행부터는 추정이 끼어들지 않는다.
+    ui_zoom_unset: bool,
     /// Per-pane font multiplier, keyed by the pane's pty id (the BSP leaf id
     /// the renderer + resize path use). Absent = 1.0. Keyed here rather than
     /// on PaneState because split leaves don't all get a ws.panes entry.
@@ -6051,7 +6059,8 @@ impl App {
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
             font_size: socket::read_font_size(),
-            ui_zoom: 1.0,
+            ui_zoom: socket::read_ui_zoom().unwrap_or(1.0),
+            ui_zoom_unset: socket::read_ui_zoom().is_none(),
             pane_font_scales: std::collections::HashMap::new(),
             proxy,
             session_panel_window: None,
