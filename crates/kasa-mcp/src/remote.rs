@@ -600,6 +600,29 @@ pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<
     Ok(resp.get("theme").and_then(|v| v.as_str()).unwrap_or_default().to_string())
 }
 
+/// 원격 기계의 세션 목록 `(sid, name)` — 유령 명부 미러링의 소스(`GET /peer-registry`).
+/// 소켓이 살아 있는 세션만 온다(원격이 걸러 준다).
+pub fn fetch_peer_registry(base: &str, token: Option<&str>) -> Result<Vec<(String, String)>> {
+    let u = format!("{}/peer-registry", base.trim_end_matches('/'));
+    let (code, body) = blocking_get(&u, token, Duration::from_secs(10))?;
+    if code != 200 {
+        anyhow::bail!("peer-registry HTTP {code}");
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("peer-registry 파싱")?;
+    let peers = v
+        .get("peers")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| anyhow!("peers 배열이 없어요"))?;
+    Ok(peers
+        .iter()
+        .filter_map(|p| {
+            let sid = p.get("sid")?.as_str()?.to_string();
+            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+            Some((sid, name))
+        })
+        .collect())
+}
+
 /// 다른 기계의 세션에게 cross-session 메시지를 보낸다(`POST /term/message`).
 /// 기계 간 세션 소통의 **발신** 절반 — 받는 쪽은 그 sid 의 소켓에 claude 규격
 /// JSON 을 꽂는다(2026-08-31 유령 세션 실증). 발신자 신원 셋(세션·사람·기계)을

@@ -4483,6 +4483,27 @@ async fn term_message_post(
     }
 }
 
+/// `GET /peer-registry` — 이 기계의 claude 세션 명부를 JSON 으로 내준다(유령 명부
+/// 미러링의 소스). 다른 기계의 카사텀이 이걸 받아 자기 쪽에 유령 항목을 세우면,
+/// 그 기계의 ListAgents 에 이 세션들이 뜨고 SendMessage 가 `/term/message` 로
+/// 라우팅된다. 소켓 경로·pid 는 **내지 않는다** — 원격에선 로컬 소켓이 무의미하고
+/// (프록시로 대체), 필요한 건 sid·이름·상태뿐이다.
+async fn peer_registry_get() -> impl IntoResponse {
+    let rows: Vec<serde_json::Value> = kasa_socket::peers::read_registry()
+        .into_iter()
+        // 소켓이 살아 있는 것만 — 등록만 남고 길이 끊긴 세션을 원격에 유령으로
+        // 세우면 「보이는데 안 닿는」 stale 이 기계 밖까지 번진다.
+        .filter(|p| !p.socket_path.as_os_str().is_empty() && p.socket_path.exists())
+        .map(|p| {
+            serde_json::json!({
+                "sid": p.session_id,
+                "name": p.name,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "ok": true, "peers": rows }))
+}
+
 /// unix 도메인 소켓에 바이트 한 줄을 꽂는다(cross-session 메시지 배달).
 #[cfg(unix)]
 fn inject_into_socket(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -5562,6 +5583,7 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
                     .route("/term/message", post(term_message_post))
+                    .route("/peer-registry", get(peer_registry_get))
                     .route(
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,
