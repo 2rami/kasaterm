@@ -21,6 +21,13 @@ const SUB_COLOR: Record<string, string> = {
   faint: 'color-mix(in srgb, var(--kt-text-mute) 60%, transparent)',
 };
 
+/// 하단바와 같은 임계 — 90 위험, 70 주의, 그 밑은 중립(초록으로 안심시키지 않는다).
+function usageColor(p: number): string {
+  if (p >= 90) return 'var(--kt-danger)';
+  if (p >= 70) return 'var(--kt-attention)';
+  return 'var(--kt-text-mute)';
+}
+
 /// 계정 한 줄. 카드 전체가 「이 계정 쓰기」이고 관리 버튼은 hover 때만 보인다 —
 /// 네이티브와 같은 규칙이다. `invisible` 로 숨기는 게 `opacity-0` 보다 맞다:
 /// 투명한 버튼은 여전히 눌리고 탭으로도 잡힌다.
@@ -117,6 +124,20 @@ function AccountCard({
           />
           <MiniButton label={t.claude.removeSlot} danger disabled={busy} onClick={onRemove} />
         </div>
+      )}
+      {/* 한도 — 하단바가 쓰는 우물 그대로라 열자마자 뜬다(2026-08-31 지적
+          「하단바랑 다르게 사용량 바로 안 뜨고」). `~` 는 낡은 값(하단바와 같은
+          문법). 값이 없으면 아무것도 안 그린다 — 0% 는 여유 있다는 거짓말이다. */}
+      {row.usage != null && !renaming && (
+        <span
+          className="shrink-0 text-[12px] tabular-nums"
+          title={row.usage_label ?? undefined}
+          style={{ color: usageColor(row.usage), opacity: row.usage_stale ? 0.65 : 1 }}
+        >
+          {row.usage_stale ? '~' : ''}
+          {Math.round(row.usage)}%
+          {row.usage_resets ? ` · ${row.usage_resets}` : ''}
+        </span>
       )}
       {active && !renaming && (
         <span className="shrink-0 text-[11px] text-[var(--kt-text-mute)]">{t.claude.inUse}</span>

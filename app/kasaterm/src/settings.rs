@@ -113,6 +113,10 @@ pub(crate) struct SettingsCtx {
     pub claude_accounts: Vec<socket::ClaudeAccount>,
     /// 활성 계정 id, `""` = 기본 로그인.
     pub claude_account: String,
+    /// 계정 id → (사용률 %, 낡음, 풀리는 시각 라벨) — 하단바가 쓰는 우물
+    /// (claude_usage_all + 활성 게이지) 그대로라 열자마자 뜬다. 없는 슬롯은
+    /// 항목 자체가 없다(0% 로 그리면 여유 있다는 거짓말 — 하단바와 같은 규칙).
+    pub claude_usage: std::collections::HashMap<String, (f32, bool, Option<String>)>,
     /// 같은 것의 codex(ChatGPT) 판.
     pub codex_accounts: Vec<socket::CodexAccount>,
     pub codex_account: String,
@@ -784,6 +788,29 @@ impl App {
             claude_effort: self.set_claude_effort.clone(),
             claude_extra: self.set_claude_extra.clone(),
             claude_accounts: self.set_claude_accounts.clone(),
+            claude_usage: {
+                let table =
+                    self.claude_usage_all.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                let active = self.claude_usage.lock().ok().and_then(|g| g.clone());
+                let active_id = self.set_claude_account.clone();
+                self.set_claude_accounts
+                    .iter()
+                    .filter_map(|a| {
+                        let dir =
+                            crate::claude_auth::runtime_dir_for_cached(&a.id, &active_id)
+                                .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                        let b = table.get(&dir).cloned().or_else(|| {
+                            active
+                                .clone()
+                                .filter(|b| a.id == active_id && b.account_dir == dir)
+                        })?;
+                        Some((
+                            a.id.clone(),
+                            (b.pct, b.stale, crate::resets_in_label(b.resets_at)),
+                        ))
+                    })
+                    .collect()
+            },
             claude_account: self.set_claude_account.clone(),
             codex_accounts: self.set_codex_accounts.clone(),
             codex_account: self.set_codex_account.clone(),
@@ -2081,6 +2108,14 @@ impl App {
         // 슬롯이 활성인 동안 이 행을 주면 같은 로그인이 두 줄로 떠 계정이 하나
         // 더 있는 것처럼 읽힌다(2026-08-17 「왜 다섯개로 떠」 — 네이티브 카드
         // 목록·상태바 서브메뉴와 같은 규칙).
+        // 계정별 한도 — 하단바가 쓰는 우물(표: 폴러가 채움, 활성: 활성 게이지)
+        // 그대로. 설정을 열 때 따로 묻지 않아 즉시 뜬다(2026-08-31 지적 「하단바랑
+        // 다르게 사용량 바로 안 뜨고」). 값이 없는 슬롯은 null — 0% 로 그리면
+        // 여유 있다는 거짓말이 된다(하단바와 같은 규칙).
+        let usage_table =
+            self.claude_usage_all.lock().ok().map(|g| g.clone()).unwrap_or_default();
+        let active_usage = self.claude_usage.lock().ok().and_then(|g| g.clone());
+        let active_acct = self.set_claude_account.clone();
         let claude_rows: Vec<serde_json::Value> = self
             .set_claude_account
             .is_empty()
@@ -2094,6 +2129,20 @@ impl App {
             )
             .map(|(id, label, idx)| {
                 let probe = auth_probe(&id);
+                let usage = (!id.is_empty())
+                    .then(|| {
+                        let dir = crate::claude_auth::runtime_dir_for_cached(&id, &active_acct)
+                            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                        usage_table.get(&dir).cloned().or_else(|| {
+                            // 활성 계정은 활성 게이지와 같은 원천 — 계정 전환 직후
+                            // 옛 값을 새 계정 것으로 보이지 않게 하는 account_dir
+                            // 대조까지 하단바와 같은 규칙이다.
+                            active_usage
+                                .clone()
+                                .filter(|b| id == active_acct && b.account_dir == dir)
+                        })
+                    })
+                    .flatten();
                 // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
                 // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
                 // 모른다고 말한다.
@@ -2138,6 +2187,10 @@ impl App {
                     "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
                     "sub": sub, "sub_kind": kind, "sub_code": sub_code,
                     "slot": idx.is_some(),
+                    "usage": usage.as_ref().map(|b| b.pct),
+                    "usage_stale": usage.as_ref().map(|b| b.stale),
+                    "usage_label": usage.as_ref().map(|b| b.label.clone()),
+                    "usage_resets": usage.as_ref().and_then(|b| crate::resets_in_label(b.resets_at)),
                 })
             })
             .collect();
@@ -4076,6 +4129,16 @@ pub(crate) fn paint_settings(
                     // 이게 유일한 구분점이다(거노: "팀플랜인지 구분하게 돼?").
                     if let Some(org) = probe.as_ref().and_then(|p| team_org(&p.email, &p.org)) {
                         sub = format!("{sub} · {org}");
+                    }
+                    // 한도도 같은 줄에 — 하단바 우물이라 열자마자 뜬다(2026-08-31
+                    // 지적). `~` 는 낡은 값 표시(하단바와 같은 문법). 값이 없는
+                    // 슬롯은 아무것도 안 붙인다 — 0% 는 여유 있다는 거짓말이다.
+                    if let Some((pct, stale, resets)) = ctx.claude_usage.get(&id) {
+                        let tilde = if *stale { "~" } else { "" };
+                        sub = format!("{sub} · {tilde}{pct:.0}%");
+                        if let Some(r) = resets {
+                            sub = format!("{sub} · {r}");
+                        }
                     }
                     let editing = idx
                         .is_some_and(|i| ctx.input == Some(SettingsInput::ClaudeAccountLabel(i)));

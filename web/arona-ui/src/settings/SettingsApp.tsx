@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Asterisk,
   Images,
@@ -124,6 +124,23 @@ export function SettingsApp() {
     void reload();
     void reloadValues();
   }, [reload, reloadValues]);
+
+  // 계정 부제가 「확인 중」인 동안은 잠깐 뒤 다시 읽는다 — 서버 조회(auth_probe)는
+  // 금방 끝나는데 이 화면은 액션 때만 다시 읽어서, 첫 스냅샷의 「확인 중」이 영영
+  // 얼어 있었다(2026-08-31 지적 「계속 확인중이야」). 횟수를 막는 건 슬롯이 정말
+  // 안 풀릴 때 — 그때는 그대로 두는 게 맞고, 무한 폴링은 소음이다.
+  const checkingTries = useRef(0);
+  useEffect(() => {
+    const rows = values?.claude?.accounts ?? [];
+    if (!rows.some((r) => r.sub_code === 'account_checking')) {
+      checkingTries.current = 0;
+      return;
+    }
+    if (checkingTries.current >= 8) return;
+    checkingTries.current += 1;
+    const id = window.setTimeout(() => void reloadValues(), 1000);
+    return () => window.clearTimeout(id);
+  }, [values, reloadValues]);
 
   // 이미 떠 있는 창을 딥링크가 다시 부를 때의 입구. 창이 하나뿐이라 두 번째
   // 「계정 관리」는 창을 새로 여는 대신 이쪽으로 온다 — 모르는 값은 조용히 무시한다

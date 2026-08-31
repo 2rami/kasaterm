@@ -185,6 +185,15 @@ export type AccountRow = {
   name_code?: string | null;
   name_args?: { n: number } | null;
   sub_code?: string | null;
+  /// 한도 — 하단바가 쓰는 우물 그대로라 열자마자 온다. `null`/없음 = 아직 모름
+  /// (0 으로 그리면 여유 있다는 거짓말이 된다).
+  usage?: number | null;
+  /// 마지막 성공값 재사용 중(`~62%` 로 흐리게).
+  usage_stale?: boolean | null;
+  /// 어느 한도 창인지(`5h`/`7d` …) — 툴팁용.
+  usage_label?: string | null;
+  /// 그 창이 풀리기까지 남은 시간(`2h13m`).
+  usage_resets?: string | null;
 };
 
 /// 프사 URL. `theme` 을 주면 그 테마 폴더의 그림(카드 미리보기), 안 주면 활성
