@@ -998,6 +998,14 @@ impl App {
             return; // 첫 틱 — 기준만 세운다
         };
         if prev != light {
+            // ⓪ 창부터 돌려 세운다. OS 가 제 손으로 그리는 언저리(Windows 의
+            //    스크롤바·시스템 팝업·IME 후보창, 맥 타이틀바 글자)는 앱 안쪽
+            //    팔레트를 모르고 이 값 하나만 본다 — 안 바꾸면 팔레트를 갈아도
+            //    거기만 이전 밝기로 남아 딴 세상처럼 뜬다. 창 생성 때의
+            //    `with_theme`(handler.rs)와 같은 함수를 쓴다.
+            if let Some(w) = &self.window {
+                w.set_theme(Some(crate::theme::window_theme()));
+            }
             // ① 표준 경로: 컬러스킴 변경 리포트(구독한 앱에만 — 셸에 보내면
             //    입력줄에 이스케이프 쓰레기가 박힌다).
             let report: &[u8] = if light { b"\x1b[?997;2n" } else { b"\x1b[?997;1n" };
@@ -2836,6 +2844,31 @@ impl App {
         if host || ctrl {
             use winit::keyboard::{KeyCode, PhysicalKey};
             if let PhysicalKey::Code(code) = event.physical_key {
+                // 붙여넣기 화음은 host 블록보다 **앞**에서 받는다. Windows 의
+                // host 는 Ctrl+**Shift**(`host_mod`)라, 이게 host 안에 있던 동안
+                // 그냥 Ctrl+V 는 여기까지 와서 아래 제어바이트 경로로 빠져
+                // 0x16(quoted-insert)을 PTY 로 흘렸다. 그런데 Windows claude 는
+                // 0x16 에 반응하지 않아(daffe42c 실측) 결과가 **아무 일도 안
+                // 일어남**이었다 — 조용해서 더 나빴다(2026-08-31 거노가 실제로
+                // 붙여넣기를 못 해 바탕화면에 파일이 떨어졌다).
+                //
+                // Ctrl+Shift+V 는 그대로 두고 Ctrl+V 를 더한다. Windows Terminal·
+                // VS Code 관행이고, 잃는 동작도 없다 — 어차피 무시되던 바이트다.
+                let paste_chord =
+                    code == KeyCode::KeyV && (host || (cfg!(windows) && ctrl && !host));
+                if paste_chord {
+                    // 자동반복(누르고 있을 때)은 버린다 — 안 거르면 한 번 눌러
+                    // 여러 번 붙는다. host 블록이 자기 앞에서 하던 몫이다.
+                    if event.repeat {
+                        return;
+                    }
+                    // 붙는 글자는 이 키 경로를 안 지나 input_buf 에 못 비친다.
+                    // 낡은 줄을 근거로 제안하지 않도록 접두를 버린다.
+                    self.input_buf.clear();
+                    self.current_suggestion = None;
+                    self.paste_clipboard();
+                    return;
+                }
                 // Host-modifier shortcuts. macOS uses Cmd, Windows/Linux
                 // use Ctrl+Shift — see `host_mod()`.
                 if host {
@@ -2880,15 +2913,6 @@ impl App {
                     // Shift(redo)는 셸에 기본 위젯이 없어 흘려보낸다.
                     if code == KeyCode::KeyZ && !self.modifiers.shift_key() {
                         self.send_bytes(b"\x1f");
-                        return;
-                    }
-                    if code == KeyCode::KeyV {
-                        // Pasted text bypasses our key path, so we can't
-                        // mirror it into input_buf — drop the suggestion
-                        // prefix so we never suggest off a stale line.
-                        self.input_buf.clear();
-                        self.current_suggestion = None;
-                        self.paste_clipboard();
                         return;
                     }
                     // Terminal.app-style split shortcuts. PTY mode only

@@ -1460,13 +1460,21 @@ impl ApplicationHandler<UserEvent> for App {
                     && cy < (mp.y as f64 + ms.height as f64)
             })
         });
+        // 창을 **팔레트 밝기에 맞춘다.** OS 가 이 값으로 칠하는 것들 — Windows 의
+        // 스크롤바·시스템 팝업·IME 후보창, 맥의 타이틀바 글자색 — 이 앱 안쪽 색과
+        // 어긋나면 거기만 딴 세상처럼 뜬다(2026-08-31 거노: 라이트인 Catppuccin
+        // Latte 를 쓰는데 그 언저리만 어두웠다).
+        //
+        // 전에는 `Theme::Dark` 고정이었다. 맥 타이틀바 글자를 밝은 회색으로 두려던
+        // 것인데, Windows 는 `with_decorations(false)` 라 그 타이틀바가 아예 없어서
+        // 얻는 것은 없고 어긋남만 남았다.
+        //
+        // `apply_from_settings()` 가 창 생성보다 먼저 돌므로(main.rs, 그쪽 주석:
+        // "before any window or pane paints") 여기서 읽는 값은 이미 확정이다.
+        // 실행 중 팔레트가 갈릴 때는 `poll_claude_retheme`(input.rs)이 따라 붙인다.
         let attrs = WindowAttributes::default()
             .with_title("kasaterm")
-            // Force dark appearance so the system titlebar paints its
-            // text in light gray. Default is "follow OS", which would
-            // give black text on our dark content view and make the
-            // process-name label nearly invisible in light mode.
-            .with_theme(Some(Theme::Dark))
+            .with_theme(Some(crate::theme::window_theme()))
             .with_inner_size(LogicalSize::new(init_w, init_h))
             // 배경 실행(검증 캡처)일 땐 뜨면서 키 포커스를 가져가지 않는다.
             .with_active(!crate::background_launch());

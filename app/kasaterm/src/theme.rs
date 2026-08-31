@@ -501,6 +501,20 @@ pub(crate) fn current_is_light() -> bool {
     is_light(bg())
 }
 
+/// 지금 팔레트가 서야 할 **창 테마**. OS 는 이 값 하나로 자기가 그리는 언저리를
+/// 칠한다 — Windows 의 스크롤바·시스템 팝업·IME 후보창, 맥의 타이틀바 글자색.
+/// 그 언저리만 앱 안쪽과 반대편에 서면 거기만 딴 세상처럼 뜬다.
+///
+/// 판정을 `current_is_light` 와 같은 축(BT.601 휘도)에 걸어 두는 게 요점이다.
+/// 커스텀 팔레트도 프리셋도 따로 등록할 것 없이 배경색 하나로 갈린다.
+pub(crate) fn window_theme() -> winit::window::Theme {
+    if current_is_light() {
+        winit::window::Theme::Light
+    } else {
+        winit::window::Theme::Dark
+    }
+}
+
 /// Accent presets offered in the settings screen; first is the default blue.
 pub const ACCENT_PRESETS: &[(&str, [u8; 4])] = &[
     ("blue", [90, 140, 230, 255]),
@@ -952,7 +966,15 @@ pub fn set_accent(name: &str) {
 /// Apply persisted theme + accent from settings.json at launch.
 pub fn apply_from_settings() {
     let s = crate::socket::read_settings();
-    let mode = s.get("theme").and_then(|x| x.as_str()).unwrap_or("dark");
+    // 처음 켠 사람이 보는 팔레트. Windows 만 Catppuccin Latte 로 갈라진다 —
+    // 밝은 바탕이 그쪽 시스템 팝업·창 그림자와 훨씬 덜 부딪힌다(2026-08-31 거노:
+    // "이게 윈도우에서 제일 이쁘게 보이네"). 이미 고른 사람은 안 건드린다:
+    // 이 값은 settings.json 에 `theme` 이 **없을 때만** 쓰인다.
+    //
+    // `#[cfg]` 가 아니라 `cfg!` 인 것은 양쪽 갈래를 다 컴파일시키려는 것이다 —
+    // 꺼 둔 갈래는 파싱 뒤 통째로 버려져서 맥에서 Windows 쪽 오타가 안 잡힌다.
+    let fallback = if cfg!(windows) { "catppuccin-latte" } else { "dark" };
+    let mode = s.get("theme").and_then(|x| x.as_str()).unwrap_or(fallback);
     set_theme(mode);
     let accent = s.get("accent").and_then(|x| x.as_str()).unwrap_or("blue");
     set_accent(accent);
