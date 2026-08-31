@@ -30,6 +30,11 @@ struct Ghost {
     sock_path: PathBuf,
     /// 프록시 소켓 리스너를 멈추는 신호.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 세울 때의 원격 세션 이름(라벨 붙이기 전) — 원격이 개명하면 유령을 다시
+    /// 세우는 비교 기준. 안 따라가면 상대는 옛 이름으로만 불린다(2026-09-01 실측:
+    /// 앱 재시작 직후 자동 슬러그로 굳어, 나중에 붙은 진짜 세션 이름으로 보낸
+    /// 답장이 no agent 로 떨어졌다).
+    name: String,
 }
 
 impl Drop for Ghost {
@@ -336,7 +341,7 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
             .ok();
     }
 
-    Ok(Ghost { shell, json_path, key_path, sock_path, stop })
+    Ok(Ghost { shell, json_path, key_path, sock_path, stop, name: name.to_string() })
 }
 
 fn hex32() -> String {
@@ -509,10 +514,17 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
     for k in dead {
         g.remove(&k);
     }
-    // 새로 생긴 것 추가.
+    // 새로 생긴 것 추가 + 개명 따라가기.
     for (key, (name, label, route)) in want {
-        if g.contains_key(&key) {
-            continue;
+        match g.get(&key) {
+            // 이름이 같으면 그대로. 다르면 걷고 새 이름으로 다시 세운다 — 앱 재시작
+            // 직후엔 자동 슬러그였다가 곧 진짜 세션 이름이 붙는데, 유령이 그걸 안
+            // 따라가면 상대는 옛 이름으로만 불린다(실측: 답장이 no agent 로 실패).
+            Some(existing) if existing.name == name => continue,
+            Some(_) => {
+                g.remove(&key);
+            }
+            None => {}
         }
         match spawn_ghost(route, &key.1, &name, &label) {
             Ok(ghost) => {
