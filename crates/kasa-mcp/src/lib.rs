@@ -23,6 +23,7 @@ pub mod persona;
 mod proxy;
 mod register;
 pub mod peermirror;
+pub mod relay;
 pub mod remote;
 #[cfg(unix)]
 pub mod adopt;

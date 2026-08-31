@@ -48,3 +48,9 @@ sha2 = "0.10"
 [[bin]]
 name = "kasa-serve-web"
 path = "src/bin/serve_web.rs"
+
+# 사내 세션 소통 중계 서버(2단계): 기계들이 등록해 세션 목록을 모으고 메시지를
+# 대상 기계로 라우팅한다. 배포 위치(넷버드·클러스터)와 무관.
+[[bin]]
+name = "kasa-relay"
+path = "src/bin/relay.rs"
