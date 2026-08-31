@@ -683,6 +683,7 @@ impl App {
         // scan flickers working↔idle. Hold `busy` for BUSY_GRACE past the last
         // spinner sighting; only a real stop (grace elapsed with no spinner)
         // counts as completion — otherwise every blink fired a bogus toast.
+        let claude_error_sids = crate::socket::agents_error_sids_cached();
         let mut completed: Vec<String> = Vec::new();
         for (id, raw_busy, _) in &busy_now {
             if *raw_busy {
@@ -743,7 +744,7 @@ impl App {
                     .pane_claude_sid
                     .get(source_id.as_str())
                     .or_else(|| self.pane_claude_sid.get(id))
-                    .is_some_and(|sid| crate::socket::agents_error_sids_cached().contains(sid));
+                    .is_some_and(|sid| claude_error_sids.contains(sid));
                 let (from_pane, transcript_error) = self.pane_tail_state(id, &source_id);
                 (bg_tab_busy.contains(id) || from_pane, official_error || transcript_error)
             };
