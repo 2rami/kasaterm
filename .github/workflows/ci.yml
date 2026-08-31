@@ -37,7 +37,14 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # 학생 프사·스프라이트·폰트는 Git LFS 에 있다(.gitattributes 의 png/ttf/…).
+      # 기본 checkout 은 실물 대신 포인터 텍스트를 놓고 가는데, `include_bytes!` 는
+      # 그것도 바이트라며 그대로 박아 **컴파일은 멀쩡히 지나간다** — 터지는 건
+      # 디코딩할 때뿐이라, check 만 돌던 시절엔 드러날 자리가 없었고 test 를 켠
+      # 첫 판에 79명분 프사가 통째로 깨졌다(2026-08-31).
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: dtolnay/rust-toolchain@stable
 
