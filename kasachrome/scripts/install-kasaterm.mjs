@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, rmSync 
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { findKasatermRoot } from '../mcp/kasaterm-root.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const KEY = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).name
@@ -45,9 +46,7 @@ function write(obj) {
 // 달려서, 셸에는 있는데 MCP 프로세스에는 없는 일이 생긴다(그러면 아바타가 모노그램으로 떨어진다).
 // 설치 시점의 셸 PATH 에서 한 번 찾아 env 로 굳혀 둔다.
 function kasatermDir() {
-  if (process.env.KASACHROME_KASATERM_DIR) return process.env.KASACHROME_KASATERM_DIR
-  const hit = (process.env.PATH || '').split(':').find((p) => p.endsWith('/tmuxify/bin'))
-  return hit ? hit.slice(0, -'/bin'.length) : null
+  return findKasatermRoot()
 }
 
 const cfg = read()

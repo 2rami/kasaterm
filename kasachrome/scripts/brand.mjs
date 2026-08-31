@@ -44,6 +44,8 @@ rmSync(join(OUT, 'scripts', 'brand.mjs'), { force: true })
 rmSync(join(OUT, 'scripts', 'icons-brand.mjs'), { force: true })
 // 호스트 터미널 어댑터는 남의 맥에서 100% 죽은 코드다. identity.mjs 가 optional import 라 빠져도 돈다.
 rmSync(join(OUT, 'mcp', 'kasaterm.mjs'), { force: true })
+rmSync(join(OUT, 'mcp', 'kasaterm-root.mjs'), { force: true })
+rmSync(join(OUT, 'mcp', 'kasaterm-root.test.mjs'), { force: true })
 rmSync(join(OUT, 'scripts', 'install-kasaterm.mjs'), { force: true })
 
 function swap(rel, pairs) {

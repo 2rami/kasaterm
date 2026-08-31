@@ -36,7 +36,7 @@ Parallels 기준: 새 VM → "Windows 11 설치" 선택 시 ARM64 ISO를 자동�
   마운트한다. `target`·`node_modules`를 빼고 VM 로컬 디스크로 복사한다(공유폴더에서
   바로 `cargo build`하면 매우 느리고 심링크·권한 문제):
   ```powershell
-  robocopy \\Mac\Home\Desktop\momewomo\tmuxify C:\kasaterm /MIR /XD target node_modules .git
+  robocopy \\Mac\Home\Desktop\momewomo\kasaterm C:\kasaterm /MIR /XD target node_modules .git
   ```
 
 ---

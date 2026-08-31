@@ -120,6 +120,10 @@ pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 �
 ## 설치 & 실행
 
 ```bash
+# 소스 받기
+git clone https://github.com/2rami/kasaterm.git
+cd kasaterm
+
 # 개발 빌드
 cargo run -p kasaterm
 
@@ -128,6 +132,28 @@ cargo run --release -p kasaterm
 ```
 
 macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
+
+### 예전 `tmuxify` 폴더를 쓰고 있다면
+
+폴더만 손으로 바꾸면 Claude Code 대화와 연결 worktree가 이전 경로를 계속 가리킨다. 먼저
+kasaterm·Claude Code·Codex를 모두 정상 종료하고, 저장소의 **바깥 폴더**에서 이전 도구를
+실행한다. 첫 명령은 바뀔 항목만 보여주는 dry-run이다.
+
+```bash
+cd /path/to/parent
+./tmuxify/scripts/rename-repo-to-kasaterm.sh \
+  --source "$PWD/tmuxify" \
+  --target "$PWD/kasaterm"
+
+# dry-run 내용을 확인한 뒤 실제 적용
+./tmuxify/scripts/rename-repo-to-kasaterm.sh \
+  --source "$PWD/tmuxify" \
+  --target "$PWD/kasaterm" \
+  --apply
+```
+
+적용 시 설정 원본과 Git 연결 정보는 `~/.config/kasaterm/migrations/` 아래에 백업된다.
+스크립트는 연결 worktree를 복구·검증하고, 이전 경로를 가리키는 영구 symlink는 만들지 않는다.
 
 ### Claude Code 플러그인 (kasapane 스킬)
 

@@ -4,12 +4,10 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { findKasatermRoot } from './kasaterm-root.mjs'
 
 function root() {
-  if (process.env.KASACHROME_KASATERM_DIR) return process.env.KASACHROME_KASATERM_DIR
-  // 호스트가 PATH 에 자기 bin 을 꽂아두므로 거기서 레포 위치를 되짚는다.
-  const hit = (process.env.PATH || '').split(':').find((p) => p.endsWith('/tmuxify/bin'))
-  return hit ? hit.slice(0, -'/bin'.length) : null
+  return findKasatermRoot()
 }
 
 // 사용자 설정 뿌리. 테마 팩(명부 + 그림)이 전부 이 아래 산다.
