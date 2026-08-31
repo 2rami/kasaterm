@@ -123,6 +123,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_Debug",
     # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
     "Win32_System_LibraryLoader",
+    # 하단바 사용량 위젯: 맥은 `ps` 한 번으로 rss·cpu 시간을 받지만 Windows 엔
+    # 그런 창구가 없어 프로세스마다 물어야 한다(GetProcessMemoryInfo, input.rs).
+    "Win32_System_ProcessStatus",
     # bridge 테스트의 가짜 attach 클라이언트가 콘솔을 raw 로 내린다(SetConsoleMode).
     "Win32_System_Console",
 ] }

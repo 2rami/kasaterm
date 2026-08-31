@@ -253,6 +253,10 @@ impl App {
     /// 이사 진행 한 줄 — 단계마다 불러 화면을 그 자리에서 한 프레임 굴린다.
     /// 이사는 GUI 스레드 동기라 이걸 안 부르면 「눌렸다」 한 프레임 뒤 끝날 때까지
     /// 화면이 얼어붙은 채 무소식이다(2026-08-30 지시: 「진행도가 보이면 좋겠어」).
+    ///
+    /// 부르는 곳이 `session.rs` 의 이사 본체뿐이고 그쪽이 `#[cfg(unix)]` 이라
+    /// 게이트를 맞춰 둔다 — 안 맞추면 Windows 빌드에서만 dead_code 경고가 뜬다.
+    #[cfg(unix)]
     pub(crate) fn migrate_progress(&mut self, pane: &str, msg: String) {
         self.set_toast(format!("이사 — {msg}"));
         self.info.machines_col.busy = Some((pane.to_string(), msg));
@@ -298,6 +302,16 @@ impl App {
         self.set_toast(format!("이사 — {going}"));
         self.chrome_dirty = true;
         self.render_frame();
+        // 이사의 본체는 unix 전용이다(session.rs 의 `migrate_pane`·`migrate_pane_back`
+        // 이 `#[cfg(unix)]`) — 원격 셸 철거와 claude 를 곱게 끄는 신호가 그쪽 전제다.
+        // 버튼을 숨기는 대신 눌렀을 때 이유를 말하기로 했다(2026-08-31 지시): 맥과
+        // 화면이 같아 렌더 분기가 안 늘고, 구현되면 이 갈래만 걷어내면 된다.
+        // Err 는 아래 성공/실패 갈림을 그대로 타 note 와 토스트로 사람에게 뜬다.
+        #[cfg(not(unix))]
+        let outcome: anyhow::Result<String> = Err(anyhow::anyhow!(
+            "이사는 아직 Windows 에서 안 된다 — 원격 셸을 다루는 unix 전용 경로다"
+        ));
+        #[cfg(unix)]
         let outcome = match btn {
             state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {

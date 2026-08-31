@@ -1052,6 +1052,9 @@ mod tests {
     /// ①push_repo_sync(순방향: 로컬 스냅샷을 원격 레포에 재현) ②fetch_repo_sync
     /// (역방향: 원격의 것을 떠 와서 로컬에 apply) ③깨끗한 레포의 Nothing 까지
     /// HTTP 창구·헤더 메타·클라이언트 파싱을 한 번에 검증한다.
+    /// unix 전용인 이유는 [`reposync`] 쪽 왕복 테스트와 같다 — 레포 상태를 `sh -c`
+    /// 로 짓는데 Windows 엔 `sh` 가 없고, 이걸 쓰는 이사가 `#[cfg(unix)]` 다.
+    #[cfg(unix)]
     #[test]
     fn repo_sync_http_roundtrip() {
         let sh = |dir: &std::path::Path, cmd: &str| -> String {

@@ -854,18 +854,30 @@ fn mcp_name_in(args: &str) -> Option<String> {
 
 /// argv 를 (표시 이름, 나머지) 로 가른다. argv[0] 이 절대경로면 파일명만 남겨
 /// `/opt/homebrew/bin/node` 가 `node` 로 읽히게 한다.
+///
+/// Windows 는 argv[0] 을 **따옴표로 감싼다** — 경로에 공백이 흔해서다
+/// (`"C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo`). 첫 공백에서 자르면
+/// argv[0] 이 `"C:\Program` 이 되고 표시 이름이 `Program` 으로 굳는다
+/// (2026-08-31 Info 패널 실측). 따옴표가 있으면 그 짝까지가 argv[0] 이다.
+///
+/// `.exe` 를 벗기는 건 보기 좋으라고가 아니라 **`classify` 의 이름 판정 때문**이다
+/// — `name == "claude"` 가 `claude.exe` 를 놓치면 Windows 에서 claude 행이 통째로
+/// 평범한 프로세스로 떨어진다. 두 규칙 다 플랫폼을 안 가리는데, 그래야 맥에서
+/// 도는 테스트가 Windows 동작까지 함께 지킨다.
 fn split_argv(args: &str) -> (String, String) {
     let args = args.trim();
-    let (head, rest) = match args.split_once(' ') {
+    let (head, rest) = match args.strip_prefix('"').and_then(|r| r.split_once('"')) {
         Some((h, r)) => (h, r.trim()),
-        None => (args, ""),
+        None => match args.split_once(' ') {
+            Some((h, r)) => (h, r.trim()),
+            None => (args, ""),
+        },
     };
-    let name = std::path::Path::new(head)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(head)
-        .to_string();
-    (name, rest.to_string())
+    // 구분자를 손으로 가르는 건 `Path::file_name` 이 **도는 쪽 플랫폼 규칙만**
+    // 알기 때문이다 — 맥에서 `C:\…\pwsh.exe` 는 통째로 파일명 하나가 된다.
+    let name = head.rsplit(['/', '\\']).next().unwrap_or(head);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    (name.to_string(), rest.to_string())
 }
 
 /// argv 와 부모의 종류 → (표시 이름, 부제, 종류). 부모를 받는 건 MCP 를
@@ -1216,6 +1228,25 @@ mod tests {
         // 런처(`node`)가 아니라 실제로 도는 것이 이름이 된다 — 이름 자리가
         // `node` 로 채워지면 claude 아래 열 몇 줄이 죄다 같은 단어가 된다.
         assert_eq!((rows[0].name.as_str(), rows[0].rest.as_str()), ("srv.js", "--port 3000"));
+    }
+
+    /// Windows 커맨드라인은 argv[0] 을 따옴표로 감싸고 그 경로엔 공백이 흔하다
+    /// (`C:\Program Files\…`). 첫 공백에서 자르던 시절엔 Info 패널의 모든 행이
+    /// `Program` 이라는 한 단어로 굳었다(2026-08-31 실측). 맥에서도 도는 테스트인
+    /// 것이 요점이다 — Windows 러너 없이도 이 규칙이 깨지면 여기서 걸린다.
+    #[test]
+    fn windows_quoted_argv0_survives_spaces_in_the_path() {
+        let (name, rest) =
+            split_argv(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile"#);
+        assert_eq!(name, "pwsh");
+        assert_eq!(rest, "-NoLogo -NoProfile");
+        // 인자가 없어도 따옴표 짝만으로 끝난다.
+        assert_eq!(split_argv(r#""C:\Program Files\Git\bin\bash.exe""#).0, "bash");
+        // `.exe` 를 벗겨야 classify 의 `name == "claude"` 가 Windows 에서 선다.
+        assert_eq!(split_argv(r#"C:\Users\u\.local\bin\claude.exe --resume ab"#).0, "claude");
+        // 따옴표가 없는 옛 유닉스 형태는 하나도 달라지지 않아야 한다.
+        assert_eq!(split_argv("/usr/bin/node srv.js"), ("node".into(), "srv.js".into()));
+        assert_eq!(split_argv("-zsh").0, "-zsh");
     }
 
     #[test]
@@ -3605,12 +3636,20 @@ mod tilde_tests {
     /// 있지도 않은 자리로 표시된다.
     #[test]
     fn tilde_stops_at_the_separator() {
-        let home = Path::new("/Users/kasa");
-        assert_eq!(tilde_under(Path::new("/Users/kasa"), home), "~");
-        assert_eq!(tilde_under(Path::new("/Users/kasa/Desktop/x"), home), "~/Desktop/x");
+        // 경로를 **그 플랫폼의 구분자로** 짓는다. `tilde_under` 가 MAIN_SEPARATOR 로
+        // 자르므로 `/Users/kasa` 를 박아 두면 Windows 에서만 안 맞는 테스트가 된다
+        // (2026-08-31 실측: Windows 에서 이 테스트가 깨지던 유일한 이유).
+        let s = std::path::MAIN_SEPARATOR;
+        let home = format!("{s}Users{s}kasa");
+        let home = Path::new(&home);
+        assert_eq!(tilde_under(home, home), "~");
+        let sub = format!("{s}Users{s}kasa{s}Desktop{s}x");
+        assert_eq!(tilde_under(Path::new(&sub), home), format!("~{s}Desktop{s}x"));
         // 홈이 아닌 형제 폴더는 그대로 둔다.
-        assert_eq!(tilde_under(Path::new("/Users/kasa2/x"), home), "/Users/kasa2/x");
-        assert_eq!(tilde_under(Path::new("/opt/homebrew"), home), "/opt/homebrew");
+        let sibling = format!("{s}Users{s}kasa2{s}x");
+        assert_eq!(tilde_under(Path::new(&sibling), home), sibling);
+        let other = format!("{s}opt{s}homebrew");
+        assert_eq!(tilde_under(Path::new(&other), home), other);
     }
 }
 

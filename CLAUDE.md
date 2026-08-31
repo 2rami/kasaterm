@@ -62,6 +62,7 @@ Co-Authored-By: NachoNekoBot <322779791+NachoNekoBot@users.noreply.github.com>
 ```bash
 KASATERM_SESSION_FILE=/tmp/<네이름>-session.json \
 KASATERM_SETTINGS_FILE=/tmp/<네이름>-settings.json \
+KASATERM_WINDOW_FILE=/tmp/<네이름>-window.json \
 KASATERM_AUTORESTORE=fresh \
 KASATERM_STUDENTS_DIR=/tmp/<네이름>-students \
 KASATERM_AUTOQUIT_MS=120000 \
@@ -72,8 +73,11 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_SESSION_FILE`·`KASATERM_SETTINGS_FILE` 은 선택이 아니다.** 안 걸면 검증용 앱이 사용자의 `~/.config/kasaterm/session.json` 을 읽고, **실행 중 5초마다 자기 상태로 덮어쓴다**. 설정 파일 쪽은 사용자가 손수 적은 계정 라벨을 하네스 값으로 덮은 전례가 있다. 실데이터가 있어야 화면이 성립하면 원본을 스크래치로 **복사**해 그걸 가리켜라 — 빈 파일을 가리키면 검증하려던 UI 자체가 안 뜬다.
 - **`KASATERM_AUTORESTORE=fresh`** — 저장된 세션을 복원하지 않고 빈 창으로 뜬다. 사용자 pane 의 claude 세션과 같은 id 를 다툴 경로가 사라지고, 캡처가 복원 모달만 찍는 일도 없어진다.
 - **`KASATERM_STUDENTS_DIR`** 로 그림 폴더를 격리한다 — 업로드·삭제를 검증하면서 사용자가 실제로 쓰는 `~/.config/kasaterm/students/` 를 건드리지 않는다.
+- **`KASATERM_WINDOW_FILE`** 도 빠뜨리지 마라. 안 걸면 검증용 앱이 자기 창 크기를 사용자의 `window.json` 에 적어 두고, 다음에 사람이 앱을 열 때 엉뚱한 크기로 뜬다(2026-08-31 실제로 덮었다 — 세션은 격리해 무사했는데 이 하나가 목록에 없었다).
+- **격리 창구가 없는 것도 안다.** `session_characters.json`(세션↔학생 바인딩)과 `caps.json` 은 언제나 `~/.config/kasaterm/` 을 쓴다. 다만 전자는 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않고, 후자는 같은 터미널이면 같은 값이라 무해하다. 그래도 깨끗하게 두고 싶으면 검증 전에 복사해 두고 끝나면 되돌려라.
 - **포트는 지정하지 마라.** 8765 가 사용자 앱 것이므로 새 앱은 알아서 다른 포트를 고른다. 그 번호는 로그에서 읽어라:
   `P=$(grep -o "HTTP MCP on 127.0.0.1:[0-9]*" /tmp/<네이름>-app.log | tail -1 | grep -o "[0-9]*$")`
+- **색을 검증한다면 `NO_COLOR` 를 먼저 걷어내라.** claude code 의 셸 도구는 이 변수를 켜 두는데, 거기서 앱을 띄우면 앱을 거쳐 **pane 의 셸까지** 물려간다. 그러면 셸이 스스로 색을 끄고(PowerShell 7 은 `$PSStyle.OutputRendering` 이 `PlainText` 로 내려간다) 화면이 죄다 흑백으로 나온다 — 렌더러는 멀쩡한데 없는 버그를 쫓게 된다(2026-08-31 실제로 한 번 속았다). 의심되면 pane 안에서 `$PSStyle.OutputRendering` 과 `$env:NO_COLOR` 를 찍어 봐라: `Host` 와 빈 값이면 정상이다. claude 마커(`CLAUDE_MARKER_ENV`)와 달리 앱이 지워 주지 않는다 — 사용자가 일부러 켰을 수도 있는 값이라 터미널이 함부로 뺏으면 안 된다.
 
 **거둘 때 — `pkill`·`killall` 을 쓰지 마라. 이름으로 죽이는 명령 자체가 금지다.** 위에서 잡아 둔 `$APP` 만 `kill` 하거나, `KASATERM_AUTOQUIT_MS` 로 스스로 끝나게 둬라. `tmux -C` 와 `/tmp/tmux-501` 도 공유물이라 같은 규칙이다.
 
@@ -143,7 +147,16 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 현재 `v0.1.19` MSI는 최신 upstream `main` 위로 Windows 커밋을 rebase한 뒤 다시 만들었다. Windows Installer 관리 설치로 75개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. `cargo check -p kasaterm`과 agent/shell scrollback 복원 회귀 테스트도 통과했다.
 
-`fork/windows-port`는 최신 upstream보다 8커밋 앞, 0커밋 뒤인 상태로 push했고 upstream PR은 `https://github.com/2rami/kasaterm/pull/2`다. 아직 하지 않은 것은 PR 병합, 버전 태그 생성, GitHub Release 게시다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 PR 병합 뒤 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징이나 PR 생성 완료를 정식 릴리스 완료로 오해하지 말 것.
+upstream PR `https://github.com/2rami/kasaterm/pull/2` 는 **2026-08-14 에 머지됐다.** 남은 것은 버전 태그와 GitHub Release 게시다 — 최신 정식 릴리스가 `v0.1.19`(2026-08-03)이고 그 뒤로 main 에 커밋만 쌓였으니 다음은 `v0.1.20` 이상이다. 로컬 패키징이나 PR 병합을 정식 릴리스 완료로 오해하지 말 것.
+
+### 머지 뒤에도 Windows 는 다시 깨진다 — 범인은 늘 「호출부」다 (2026-08-31 복구)
+
+이식이 머지된 뒤에도 새로 들어온 unix 전용 코드 탓에 Windows 컴파일이 다시 죽었고, CI 는 그동안 Windows 잡을 `continue-on-error` 로 내려 둔 채였다(2026-08-30~31). 복구하며 확인한 재발 패턴 둘:
+
+- **정의만 `#[cfg(unix)]` 로 막고 부르는 쪽을 안 막는 것.** `migrate_pane`(session.rs)이 그랬다 — 맥은 멀쩡하고 Windows 에서만 `E0599: no method named` 가 난다. unix 전용 메서드를 새로 만들면 **호출부까지 같이 게이트**해라.
+- **macOS 전용 의존성을 공용 코드에서 쓰는 것.** `libc` 는 Cargo.toml 의 `cfg(target_os = "macos")` 블록에만 있어서 Windows 엔 크레이트 자체가 없다. cfg 는 `current_uid()`(input.rs)처럼 헬퍼 한 곳에 가두면 부르는 쪽이 양쪽에서 같은 모양이 된다.
+
+맥에서 `cargo check` 가 초록인 것은 Windows 안전의 근거가 못 된다(cfg 로 꺼진 코드는 파싱 뒤 통째로 버려진다 — 자세한 이유는 `ci.yml` 머리말). Windows 관문이 살아 있는지로 판단해라.
 
 ## 함정·배경·수정 주의점은 메모리에
 

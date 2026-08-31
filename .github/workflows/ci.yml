@@ -36,15 +36,15 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows 이식(fork/windows-port, PR #2)이 main 에 아직 안 왔다 — main 의 여러
-    # unix 전용 코드(info 의 `getuid`, 이사의 `migrate_pane`·`libc::kill` 등)가
-    # Windows 에서 안 맞물려 이 잡은 오래 빨갛다. macOS 관문은 그대로 지키되,
-    # Windows 실패로 워크플로 전체가 fail 하지는 않게 강등한다(2026-08-30 지시).
-    # 실패는 잡 로그에 노랑으로 남으니 이식 진척은 계속 보인다. 이식이 main 에
-    # 머지되면 이 줄을 지워 Windows 관문을 되살릴 것.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
+      # 학생 프사·스프라이트·폰트는 Git LFS 에 있다(.gitattributes 의 png/ttf/…).
+      # 기본 checkout 은 실물 대신 포인터 텍스트를 놓고 가는데, `include_bytes!` 는
+      # 그것도 바이트라며 그대로 박아 **컴파일은 멀쩡히 지나간다** — 터지는 건
+      # 디코딩할 때뿐이라, check 만 돌던 시절엔 드러날 자리가 없었고 test 를 켠
+      # 첫 판에 79명분 프사가 통째로 깨졌다(2026-08-31).
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -69,11 +69,29 @@ jobs:
           -p kasa-pty
           -p kasa-bridge
 
+      # 컴파일이 아니라 **동작**을 지키는 관문. 「check 가 양쪽 초록인 것을 확인한
+      # 다음 붙일 것」이라고 적어 두었던 조건이 2026-08-31 에 갖춰졌다. 그날 Windows
+      # 에서 이 레포의 테스트를 처음 재 봤고, 걸린 넷은 전부 **맥을 전제한 테스트**
+      # 였다(제품 코드가 아니다): 홈 축약이 MAIN_SEPARATOR 로 자르는데 `/Users/…` 를
+      # 박아 둔 것, 임시 경로를 JSON 에 raw 로 넣어 `C:\…` 의 백슬래시가 escape 를
+      # 깨뜨린 것, 그리고 `sh -c` 로 레포를 짓는 이사 왕복 둘(unix 로 게이트했다 —
+      # 이사 자체가 `#[cfg(unix)]` 라 Windows 에서 재도 밟을 사람이 없다).
+      #
+      # `--all-targets` 를 여기 안 쓰는 건 그게 **컴파일만** 하기 때문이다. 실제로
+      # 돌려야 하므로 기본 타깃(lib·bin 유닛 테스트)으로 둔다.
+      - name: cargo test
+        run: >
+          cargo test
+          -p kasaterm
+          -p kasa-socket
+          -p kasa-mcp
+          -p kasa-cells
+          -p kasa-ime
+          -p kasa-pty
+          -p kasa-bridge
+
 # 일부러 넣지 않은 것
 #   · `cargo fmt --check` — 이 레포에 fmt 를 걸면 한 번에 28파일 9,361줄이
 #     바뀐다(`mod` 선언 순서까지). 관문이 아니라 대형 diff 생성기가 된다.
 #   · `cargo clippy` — 기존 경고 규모를 재지 않았다. 초록을 확인한 뒤 별도로 켤 것.
-#   · `cargo test` — macOS 는 이미 초록이다(2026-08-13, HEAD 전용 워크트리에서
-#     위 7개 크레이트 400 passed / 0 failed). 안 넣은 이유는 Windows 쪽을 아직
-#     한 번도 재 보지 않아서다. check 가 양쪽 초록인 것을 확인한 다음 붙일 것.
-#     (첫 판부터 빨간불이면 「원래 빨간 CI」가 되어 아무도 보지 않는다.)
+#     (`cargo test` 는 2026-08-31 에 위 스텝으로 들어왔다 — Windows 999 passed / 0 failed.)

@@ -2,6 +2,26 @@
 //! main.rs 에서 분리. impl App 메서드·타입은 crate root 그대로 참조.
 use super::*;
 
+/// claude code 에 「클립보드의 그림을 붙여라」고 이르는 키.
+///
+/// 맥은 Ctrl+V(0x16)지만 **Windows 는 Alt+V(= ESC v)** 다. 0x16 을 보내던 동안
+/// Windows 에서는 드래그·드롭도 웹뷰 드롭도 조용히 아무 일이 없었다 — 클립보드에는
+/// 그림이 실렸고 응답도 ok 였는데 입력창에 칩만 안 붙었다(2026-08-31 실측).
+///
+/// `cfg!` 로 가르는 것은 양쪽 갈래를 다 컴파일시키려는 것이다(`#[cfg]` 로 꺼 두면
+/// 맥에서 Windows 갈래의 오타가 안 잡힌다). 두 팔을 각각 `&[u8]` 로 먼저 선언하는
+/// 건 길이가 달라서다 — 2바이트와 1바이트 배열은 타입이 서로 다르고, const 문맥
+/// 에서는 `[..]` 로 잘라 맞출 수도 없다(`Index` 가 아직 const trait 이 아니다).
+const CLAUDE_IMG_PASTE: &[u8] = {
+    const WIN_ALT_V: &[u8] = &[0x1b, b'v'];
+    const UNIX_CTRL_V: &[u8] = &[0x16];
+    if cfg!(windows) {
+        WIN_ALT_V
+    } else {
+        UNIX_CTRL_V
+    }
+};
+
 impl ApplicationHandler<UserEvent> for App {
     /// A background thread (PTY snapshot, socket) asked us to repaint.
     /// Delivered even while a WaitUntil is parked, so this is what makes
@@ -995,9 +1015,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketPasteImage(surface, bytes) => {
                 // 아로나 프롬프트 입력창 이미지 드롭(webview) → 그 pane claude 에 첨부.
-                // 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16) — claude 가
-                // paste 시 osascript 로 클립보드 PNG 를 읽어 [Image] 칩으로 단다(터미널
-                // DroppedFile 과 같은 경로, 포커스 무관: 클립보드는 시스템 전역).
+                // 시스템 클립보드에 비트맵으로 싣고 그 pane 에 이미지-paste 키를 보내면
+                // claude 가 클립보드 그림을 읽어 [Image] 칩으로 단다(터미널 DroppedFile
+                // 과 같은 경로, 포커스 무관: 클립보드는 시스템 전역).
                 if let Ok(img) = image::load_from_memory(&bytes) {
                     let rgba = img.to_rgba8();
                     let (w, h) = rgba.dimensions();
@@ -1009,7 +1029,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Ok(mut cb) = arboard::Clipboard::new() {
                         if cb.set_image(data).is_ok() {
                             if let Some(p) = self.pty_for_pane(&surface) {
-                                let _ = p.send_bytes(&[0x16]);
+                                let _ = p.send_bytes(CLAUDE_IMG_PASTE);
                             }
                         }
                     }
@@ -6105,10 +6125,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.forward_key(&event);
             }
             WindowEvent::DroppedFile(path) => {
-                // 이미지 파일을 떨구면 클립보드에 비트맵으로 실은 뒤
-                // Ctrl+V(0x16)를 위임한다 — claude code가 osascript로 클립보드
-                // PNG를 직접 읽어 [Image] 칩으로 첨부한다. 경로 텍스트만 박던
-                // 옛 방식은 claude 가 이미지로 인식 못 해 칩이 안 떴다.
+                // 이미지 파일을 떨구면 클립보드에 비트맵으로 실은 뒤 이미지-paste
+                // 키(CLAUDE_IMG_PASTE)를 위임한다 — claude code 가 클립보드 그림을
+                // 직접 읽어 [Image] 칩으로 첨부한다. 경로 텍스트만 박던 옛 방식은
+                // claude 가 이미지로 인식 못 해 칩이 안 떴다.
                 let is_img = path
                     .extension()
                     .and_then(|e| e.to_str())
@@ -6130,7 +6150,7 @@ impl ApplicationHandler<UserEvent> for App {
                         };
                         if let Ok(mut cb) = arboard::Clipboard::new() {
                             if cb.set_image(data).is_ok() {
-                                self.send_bytes(&[0x16]);
+                                self.send_bytes(CLAUDE_IMG_PASTE);
                                 return;
                             }
                         }
