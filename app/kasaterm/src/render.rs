@@ -1171,6 +1171,9 @@ impl App {
                 // 게이트)에는 이 줄에서 끝나므로 매 프레임 비용은 종전과 같다.
                 let scrolled = crate::screenread::scrolled_gate(&composed);
                 if scrolled {
+                    // seek 이 「더 올라갈 데가 없다」를 알아채려면 화면이 움직였는지를
+                    // 알아야 한다 — 그 유일한 단서를 여기서 적는다.
+                    crate::screenread::note_sticky_view(id.as_str(), &composed);
                     self.pane_deep_want.borrow_mut().insert(id.to_string());
                 } else {
                     // 맨 아래로 돌아왔으면 기억을 버린다 — 다음에 올려다볼 때는

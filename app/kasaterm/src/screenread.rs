@@ -1815,6 +1815,27 @@ thread_local! {
     /// 뷰포트로 들어와 sticky 텍스트가 바뀌거나(또는 최상단 도달로 사라지면) 멈춘다.
     pub(crate) static STICKY_SEEK: std::cell::RefCell<Option<StickySeek>> =
         std::cell::RefCell::new(None);
+
+    /// pane 별 **화면 지문** — 렌더가 매 프레임 새로 쓴다. seek 이 「더 올라갈 데가
+    /// 없다」를 알아채는 유일한 단서다. 종료 조건이 「띠 글이 바뀐다」뿐이라,
+    /// 최상단에 닿아 화면이 굳으면 글도 안 바뀌어 상한(500 노치)까지 휠을 쏴 댔다
+    /// (2026-08-31 지적: 「없을때 누르면 계속 올라가려는 문제」).
+    pub(crate) static STICKY_VIEW_FP:
+        std::cell::RefCell<std::collections::HashMap<String, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 그 pane 의 이번 프레임 화면 지문을 적어 둔다(렌더가 부른다).
+pub(crate) fn note_sticky_view(pane_id: &str, rows: &[Vec<GridCell>]) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for row in rows {
+        row_match_text(row).hash(&mut h);
+    }
+    let fp = h.finish();
+    STICKY_VIEW_FP.with(|m| {
+        m.borrow_mut().insert(pane_id.to_string(), fp);
+    });
 }
 
 /// 클릭한 sticky 프롬프트를 화면으로 끌어오는 seek 상태(struct App 밖 — 무접촉).
@@ -1829,6 +1850,9 @@ pub(crate) struct StickySeek {
     pub cell: (u16, u16),
     pub last_send: std::time::Instant,
     pub sent: u32,
+    /// 직전 노치를 쏘던 때의 화면 지문과, 그 뒤로 화면이 굳어 있던 노치 수.
+    pub last_fp: Option<u64>,
+    pub stall: u32,
 }
 
 /// 노치 간 최소 간격 — 33ms 펌프 틱보다 짧게 잡아 틱마다 한 노치가 나가되,
@@ -1836,6 +1860,10 @@ pub(crate) struct StickySeek {
 pub(crate) const STICKY_SEEK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 /// 폭주 방지 상한(정상 종료가 먼저 걸린다). 500 노치면 어떤 화면이든 최상단 도달.
 pub(crate) const STICKY_SEEK_MAX: u32 = 500;
+/// 화면이 이만큼 연속으로 안 바뀌면 최상단(또는 최하단)에 닿은 것으로 본다.
+/// 노치는 20ms 간격이고 렌더는 33ms 라, 리페인트가 늦어 한두 번 같아 보이는
+/// 것과 진짜로 굳은 것을 가르려면 여유가 필요하다.
+pub(crate) const STICKY_SEEK_STALL: u32 = 10;
 
 /// seek 이 진행 중인가 — about_to_wait 의 30fps 펌프 게이트.
 pub(crate) fn sticky_seek_active() -> bool {
@@ -1864,6 +1892,8 @@ pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16
             // 첫 틱에 바로 한 노치 나가게 간격만큼 과거로.
             last_send: now.checked_sub(STICKY_SEEK_INTERVAL).unwrap_or(now),
             sent: 0,
+            last_fp: None,
+            stall: 0,
         });
     });
 }
@@ -1880,12 +1910,23 @@ pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16, bool)> {
             None => true,
             Some(t) => t != seek.target,
         };
-        if reached || seek.sent >= STICKY_SEEK_MAX {
+        if reached || seek.sent >= STICKY_SEEK_MAX || seek.stall >= STICKY_SEEK_STALL {
             *b = None;
             return None;
         }
         if now.duration_since(seek.last_send) < STICKY_SEEK_INTERVAL {
             return None; // 직전 노치의 리페인트 대기
+        }
+        // 지난 노치가 화면을 움직였나. 안 움직였으면 끝에 닿은 것이고, 더 쏴 봐야
+        // 같은 자리에서 상한까지 도는 것뿐이다.
+        let fp = STICKY_VIEW_FP.with(|m| m.borrow().get(&seek.pane_id).copied());
+        match (fp, seek.last_fp) {
+            (Some(now_fp), Some(prev)) if now_fp == prev => seek.stall += 1,
+            (Some(now_fp), _) => {
+                seek.stall = 0;
+                seek.last_fp = Some(now_fp);
+            }
+            _ => {}
         }
         seek.last_send = now;
         seek.sent += 1;
@@ -2066,6 +2107,16 @@ pub(crate) fn find_sticky_prompt(
     // 고정 머리줄은 원래 한 줄을 덮는 물건이다(웹의 sticky header 와 같다). 덮이는
     // 것은 **지금 맨 위 한 줄뿐**이고 스크롤하면 곧 아래로 내려와 다시 읽힌다 —
     // 늘 붙어 있는 쪽이 「어느 질문을 보고 있나」를 잃지 않아 낫다.
+    // ⚠️ **claude 부팅 배너 위에는 얹지 않는다.** 그 로고는 세 행이 한 그림이라
+    // 첫 행을 덮으면 머리가 잘려 나가 깨진 네모로 보이고, 학생 테마 재색칠도 그
+    // 행을 못 찾는다(2026-08-31 스샷: 「테마 깨지는거」). 배너가 보이는 자리는
+    // 세션 첫머리라 위로 지나간 답도 없으니 잃는 것도 없다.
+    if find_clawd_banners(rows).iter().any(|&(head, _)| head <= 0) {
+        if dbg {
+            eprintln!("[sticky] row0 is a clawd banner — no band");
+        }
+        return None;
+    }
     let text = pick_scrolled_past_prompt(rows, prompts, memo)?;
     let first = rows.first()?;
     if dbg {
@@ -3874,6 +3925,60 @@ mod clawd_banner_tests {
             row_from("  Jump to bottom (click) \u{2193}"),
         ];
         assert_eq!(find_sticky_prompt(&buried, &ps, &mut memo).expect("감지").text, "둘째 질문");
+    }
+
+    /// claude 부팅 배너 위에는 띠를 얹지 않는다 — 세 행이 한 그림이라 첫 행을
+    /// 덮으면 머리가 잘려 깨진 네모로 보인다(2026-08-31 스샷: 「테마 깨지는거」).
+    #[test]
+    fn no_band_over_the_clawd_banner() {
+        let ps = vec![("첫 질문".to_string(), vec![]), ("둘째 질문".to_string(), vec![])];
+        let rows = vec![
+            row_from(" ▐▛███▛█   Claude Code v2.1.251"),
+            row_from("▝▜██████▀  Opus 5 with xhigh effort"),
+            row_from("  ▝▝ ▝▝    ~/Desktop"),
+            row_from("  Jump to bottom (click) ↓"),
+        ];
+        assert!(find_sticky_prompt(&rows, &ps, &mut None).is_none());
+        // 배너가 아래로 내려가 0행이 비면 종전대로 얹는다.
+        let mut lower = vec![row_from("  앞 턴의 꼬리 한 줄")];
+        lower.extend(rows.iter().cloned());
+        assert!(find_sticky_prompt(&lower, &ps, &mut None).is_some());
+    }
+
+    /// 더 올라갈 데가 없으면 seek 이 멈춘다. 종료 조건이 「띠 글이 바뀐다」뿐이라,
+    /// 최상단에 닿아 화면이 굳으면 상한(500 노치)까지 휠을 쏴 댔다(2026-08-31
+    /// 지적: 「없을때 누르면 계속 올라가려는 문제」).
+    #[test]
+    fn seek_stops_when_the_view_stops_moving() {
+        let pane = "%seek-test";
+        let target = "붙들고 있는 질문";
+        STICKY_PILLS.with(|s| {
+            s.borrow_mut().push((pane.to_string(), (0.0, 0.0, 0.0, 0.0), target.to_string()))
+        });
+        // 화면이 굳어 있다 — 지문이 매번 같다.
+        note_sticky_view(pane, &[row_from("움직이지 않는 화면")]);
+        begin_sticky_seek(pane.to_string(), target.to_string(), (0, 0), false);
+        let mut notches = 0;
+        for _ in 0..STICKY_SEEK_MAX * 2 {
+            if sticky_seek_step().is_some() {
+                notches += 1;
+            }
+            if !sticky_seek_active() {
+                break;
+            }
+            // 노치 간 대기를 건너뛴다(실시간으로 기다리지 않으려고).
+            STICKY_SEEK.with(|s| {
+                if let Some(k) = s.borrow_mut().as_mut() {
+                    k.last_send -= STICKY_SEEK_INTERVAL;
+                }
+            });
+        }
+        assert!(!sticky_seek_active(), "굳은 화면에서 멈춰야 한다");
+        assert!(
+            notches <= STICKY_SEEK_STALL + 2,
+            "몇 노치 안에 포기해야 한다 — 실제 {notches}"
+        );
+        STICKY_PILLS.with(|s| s.borrow_mut().clear());
     }
 
     /// 기억해 둔 질문이 목록에서 사라졌으면(오래돼 잘려나감) 붙들지 않는다.
