@@ -1030,6 +1030,26 @@ fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {
     if one_m { 1_000_000 } else { 200_000 }
 }
 
+/// 사람이 친 것이 아닌 user 턴인가. `isMeta` 로 잡히는 것 말고도 둘이 더 있다.
+///
+/// **압축 안내문**이 그것이다 — 한도가 차면 claude 가 「This session is being
+/// continued from a previous conversation…」 로 시작하는 요약을 user 턴으로 끼워
+/// 넣는데, 여기엔 `isMeta` 가 없다. 그대로 세면 고정줄이 그 문장을 질문으로 물어
+/// 화면 맨 위에 영문 안내문이 걸린다(2026-08-31 지적, 스크린샷).
+///
+/// 플래그(`isCompactSummary`·`isVisibleInTranscriptOnly`)를 먼저 보고, 그게 없어질
+/// 판을 대비해 선두 문구로 한 번 더 거른다.
+fn is_synthetic_user_turn(v: &serde_json::Value) -> bool {
+    for k in ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"] {
+        if v.get(k).and_then(|m| m.as_bool()).unwrap_or(false) {
+            return true;
+        }
+    }
+    v.pointer("/message/content")
+        .and_then(|c| c.as_str())
+        .is_some_and(|t| t.trim_start().starts_with("This session is being continued from a previous conversation"))
+}
+
 /// 하네스/시스템이 user 턴으로 주입하는 합성 메시지(사람이 타이핑한 게 아님) —
 /// task-notification·system-reminder·command 출력·tool 오류 재시도 등. 메신저 뷰
 /// (대화 탭)에선 노이즈라 버린다. isMeta 플래그가 없는 일부 주입(malformed 재시도)도
@@ -1037,6 +1057,10 @@ fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {
 fn is_injected_user_text(s: &str) -> bool {
     const MARKERS: &[&str] = &[
         "<task-notification>",
+        // 동료 pane 이 보낸 말. 사람이 친 것이 아닌데 `isMeta` 가 없어 여태 샜다 —
+        // 기록 20개에서 221건(2026-08-31 실측). 속성이 붙으므로 여는 꺾쇠까지만 본다.
+        "<teammate-message",
+        "<cross-session-message",
         "<system-reminder>",
         "<command-name>",
         "<command-message>",
@@ -1062,7 +1086,7 @@ pub fn prompts_from_tail(tail: &str) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for line in tail.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+        if is_synthetic_user_turn(&v) {
             continue;
         }
         match v.get("type").and_then(|t| t.as_str()) {
@@ -1285,8 +1309,8 @@ pub fn activity_from_tail(tail: &str, limit: usize) -> Vec<ActivityEvent> {
 ///   있는 turn은 텍스트가 비어 `None`.
 pub fn parse_turn(line: &str) -> Option<ConversationTurn> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    // 하네스 합성 턴(isMeta=true: task-notification 등)은 대화가 아니다.
-    if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+    // 하네스 합성 턴(isMeta=true 인 task-notification, 압축 안내문 등)은 대화가 아니다.
+    if is_synthetic_user_turn(&v) {
         return None;
     }
     match v.get("type").and_then(|t| t.as_str())? {
@@ -1416,12 +1440,37 @@ mod tests {
         let tail = [
             r#"{"type":"user","isMeta":true,"message":{"content":"<command-name>/clear</command-name>"}}"#,
             r#"{"type":"user","message":{"content":"<bash-stdout>ok</bash-stdout>"}}"#,
+            r#"{"type":"user","message":{"content":"<teammate-message teammate_id=\"yuzu-p23\" color=\"pink\">끝났다</teammate-message>"}}"#,
             r#"{"type":"user","message":{"content":"진짜 지시"}}"#,
         ]
         .join("\n");
         let ev = activity_from_tail(&tail, 0);
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].text, "진짜 지시");
+    }
+
+    /// 압축 안내문은 **사람이 친 질문이 아니다.** 한도가 차면 claude 가 요약을
+    /// user 턴으로 끼워 넣는데 `isMeta` 가 없어 종전 걸름망을 통과했고, 고정줄이
+    /// 그걸 질문으로 물어 화면 맨 위에 영문 안내문이 걸렸다(2026-08-31 스크린샷).
+    #[test]
+    fn 압축_안내문은_사람이_친_질문이_아니다() {
+        let cont = "This session is being continued from a previous conversation that ran out of context.";
+        let tail = [
+            r#"{"type":"user","message":{"content":"첫 질문"}}"#.to_string(),
+            format!(
+                r#"{{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{{"content":"{cont}"}}}}"#
+            ),
+            // 플래그가 없어져도 선두 문구로 걸린다.
+            format!(r#"{{"type":"user","message":{{"content":"{cont}"}}}}"#),
+            r#"{"type":"user","message":{"content":"둘째 질문"}}"#.to_string(),
+        ]
+        .join("\n");
+        let ps = prompts_from_tail(&tail);
+        assert_eq!(
+            ps.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>(),
+            vec!["첫 질문", "둘째 질문"]
+        );
+        assert!(parse_turn(&tail.lines().nth(1).unwrap()).is_none(), "대화 탭에도 안 뜬다");
     }
 
     #[test]
