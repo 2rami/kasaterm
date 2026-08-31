@@ -59,8 +59,20 @@ pub fn remotes() -> Vec<Remote> {
     }
     let Ok(home) = std::env::var("HOME") else { return Vec::new() };
     let path = std::path::Path::new(&home).join(".config/kasaterm/remote-boards.json");
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    parse_json(&text)
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let v = parse_json(&text);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    // board 전용 목록(remote-boards.json)이 없으면 기계 명부(machines.json)로 떨어진다 —
+    // 한 base 가 /board·/peer-registry·/term/message 를 다 서빙하므로, board 가 보여주는
+    // 기계와 유령 미러링(peermirror)·이사가 아는 기계가 갈리지 않게 한 소스로 묶는다.
+    // 그래야 board 행 peer_name(유령 이름)이 그 기계 유령과 정확히 맞는다.
+    crate::machines::machines()
+        .into_iter()
+        .map(|m| Remote { label: m.label, base: m.base })
+        .collect()
 }
 
 /// `라벨=주소` 를 쉼표로 이은 형식. 라벨이나 주소가 비면 그 항목만 버린다 — 오타 하나로
@@ -130,10 +142,24 @@ fn tag(mut row: Value, label: &str) -> Value {
     }
     obj.insert("machine".into(), Value::String(label.to_string()));
     obj.insert("character".into(), Value::String(label.to_string()));
-    // 말 거는 길이 아직 없다. `"message"` 로 두면 board 를 읽는 쪽이 SendMessage 로
-    // 닿는다고 믿는데, 그 이름은 이 기계 명부에 없어서 **오류 없이 사라진다**.
-    obj.insert("reach".into(), Value::String("remote".into()));
-    obj.remove("peer_name");
+    // 원격 세션은 이제 peermirror 유령으로 이 기계 ListAgents 에 「이름 (라벨)」로 뜬다
+    // (2026-08-31). board 를 읽는 오케스트레이터가 그 이름으로 SendMessage 하면
+    // 유령 소켓 → 원격 /term/message 로 닿는다. 그래서 peer_name 을 지우지 않고
+    // **유령 이름과 같게 맞춰** 싣고 reach 를 `"message"` 로 올린다.
+    //
+    // 세션명이 있을 때만이다 — 셸 pane(peer_name 없음)은 유령이 없어 여전히 못 닿으니
+    // `"remote"` 로 남겨 「보이되 안 닿음」을 정직하게 표식한다(옛 동작 유지).
+    match obj.get("peer_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(pn) => {
+            let ghost = crate::peermirror::ghost_display_name(pn, label);
+            obj.insert("peer_name".into(), Value::String(ghost));
+            obj.insert("reach".into(), Value::String("message".into()));
+        }
+        None => {
+            obj.insert("reach".into(), Value::String("remote".into()));
+            obj.remove("peer_name");
+        }
+    }
     row
 }
 
@@ -279,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn 원격_행은_말걸기가_막히고_캐릭터_자리에_기계가_들어간다() {
+    fn 세션명_있는_원격행은_유령이름으로_닿게_표식된다() {
         let row = serde_json::json!({
             "surface_id": "abc-uuid",
             "status": "idle",
@@ -290,15 +316,24 @@ mod tests {
         });
         let t = tag(row, "맥미니");
         assert_eq!(t["machine"], "맥미니");
-        assert_eq!(t["reach"], "remote");
-        // peer_name 이 남으면 board 를 읽는 쪽이 SendMessage 로 닿는다고 믿는다.
-        assert!(t.get("peer_name").is_none());
+        // peermirror 유령이 「이름 (맥미니)」로 뜨므로 peer_name 을 그것과 맞춘다 →
+        // board 를 읽는 오케스트레이터가 그 이름으로 SendMessage 하면 닿는다.
+        assert_eq!(t["peer_name"], "hina-p1-abc (맥미니)");
+        assert_eq!(t["reach"], "message");
         // 세션 요약 영어가 남으면 프론트가 그 문자열로 아바타를 찾으러 간다.
         // 지우는 대신 기계 이름을 넣어 이름표가 「맥미니 · 1+1 계산」이 되게 한다.
         assert_eq!(t["character"], "맥미니");
         // 나머지 칸은 그대로 — 합치기는 표시만 얹고 내용을 고치지 않는다.
         assert_eq!(t["status"], "idle");
         assert_eq!(t["title"], "1+1 계산");
+    }
+
+    #[test]
+    fn 세션명_없는_원격행은_여전히_안_닿음으로_남는다() {
+        // 셸 pane 은 유령이 없다 — reach="message" 로 올리면 「보이는데 안 닿는」 stale.
+        let t = tag(serde_json::json!({ "surface_id": "sh-uuid", "status": "idle" }), "맥미니");
+        assert_eq!(t["reach"], "remote");
+        assert!(t.get("peer_name").is_none());
     }
 
     #[test]

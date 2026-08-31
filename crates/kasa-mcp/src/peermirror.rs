@@ -105,8 +105,10 @@ fn strip_cross_session_tag(s: &str) -> String {
 /// 유령의 로컬 표시 이름 — 기계 라벨을 괄호로 붙여 로컬 세션과 구분한다
 /// (「이름 (맥미니)」). ⚠️ `@` 는 쓰지 마라: SendMessage 의 `to` 가 `이름@팀`
 /// 으로 파싱해 유령을 주소로 못 받는다(2026-08-31 실측 — `@` 이름은 배달 자체가
-/// 안 됐다). 괄호·공백은 통한다(`프롬프트 올라가기` 처럼).
-fn ghost_display_name(name: &str, label: &str) -> String {
+/// 안 됐다). 괄호·공백은 통한다(`프롬프트 올라가기` 처럼). remoteboard 도 board
+/// 원격 행의 peer_name 을 이 이름과 같게 맞춰야 board 를 읽는 쪽 SendMessage 가
+/// 유령에 닿는다 — 그래서 pub(crate).
+pub(crate) fn ghost_display_name(name: &str, label: &str) -> String {
     if label.is_empty() {
         name.to_string()
     } else {
