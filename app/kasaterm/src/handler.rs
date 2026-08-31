@@ -2116,6 +2116,10 @@ impl ApplicationHandler<UserEvent> for App {
         // 인박스 미읽음을 attach pty 주입으로 배달. bg-agents 폴러가 채우는 맵을
         // 읽기 전용으로 공유받는다.
         crate::bridge::spawn_inbox_bridge(self.bg_agents.clone());
+        // 원격 세션 유령 미러링 — 다른 기계의 claude 세션을 로컬 ListAgents 에
+        // 유령으로 띄우고, SendMessage 를 그 소켓에서 받아 원격으로 전달한다.
+        // 기계 명부(machines.json)가 비면 아무 일도 안 한다.
+        kasa_mcp::peermirror::spawn();
         // cell-renderer GPU path is the only path. The old sugarloaf
         // opt-in branch (KASATERM_RENDERER=sugarloaf) was removed once
         // cell-renderer absorbed P3 colour reproduction (shader
