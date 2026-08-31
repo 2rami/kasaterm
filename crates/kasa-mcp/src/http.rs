@@ -1355,6 +1355,21 @@ async fn settings_values_handler(backend: Arc<dyn Backend>) -> impl IntoResponse
     )
 }
 
+/// First-install choices plus detected host state. No credentials cross this
+/// route; status changes while the page is open, so responses are never cached.
+async fn onboarding_state_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = backend.settings_action("onboarding-state", None, None).unwrap_or_else(|e| {
+        serde_json::json!({ "completed": true, "error": e.to_string() })
+    });
+    (
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(body),
+    )
+}
+
 /// `GET /settings/themegen/state` — 캐릭터 생성 화면이 2초마다 묻는 진행 상태.
 ///
 /// 캐시를 안 준다. 이 라우트의 존재 이유가 「지금 몇 번째 프레임인가」라서, 1초만
@@ -5484,6 +5499,7 @@ pub fn spawn_http_server_opts(
                 let design_tokens_backend = backend.clone();
                 let settings_chars_backend = backend.clone();
                 let settings_values_backend = backend.clone();
+                let onboarding_state_backend = backend.clone();
                 let settings_char_save_backend = backend.clone();
                 let settings_action_backend = backend.clone();
                 let character_face_backend = backend.clone();
@@ -5735,6 +5751,10 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/settings/values",
                         get(move || settings_values_handler(settings_values_backend.clone())),
+                    )
+                    .route(
+                        "/onboarding/state",
+                        get(move || onboarding_state_handler(onboarding_state_backend.clone())),
                     )
                     .route(
                         "/settings/themegen/state",

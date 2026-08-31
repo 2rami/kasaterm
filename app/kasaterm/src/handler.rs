@@ -2157,6 +2157,13 @@ impl ApplicationHandler<UserEvent> for App {
         if let Err(e) = backend_result {
             eprintln!("[kasaterm] backend start failed: {e}");
         }
+        // HTTP 설정 서버가 선 뒤에 연다. 페이지는 /onboarding/state 를 읽고 미완료면
+        // 설정 폼 대신 첫 설치 흐름을 전체 화면으로 그린다.
+        if crate::onboarding::launch_pending()
+            && self.open_settings_web_window(event_loop, None)
+        {
+            crate::onboarding::mark_opened();
+        }
         // Chrome-style session restore: if the last run left a saved layout with
         // at least one claude pane, offer to reopen it (크롬 "복원하시겠습니까?")
         // instead of silently starting fresh. The blank session start_pty just

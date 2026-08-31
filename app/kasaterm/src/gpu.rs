@@ -555,7 +555,10 @@ impl GpuRenderer {
         // Nerd Font → Segoe UI Symbol) reattaches in Phase 2c when
         // chrome text comes back.
         let font_path = std::env::var("KASATERM_GRID_FONT")
-            .unwrap_or_else(|_| default_font_path());
+            .ok()
+            .filter(|p| !p.is_empty())
+            .or_else(|| crate::socket::read_font_path().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(default_font_path);
         eprintln!("[font] primary={font_path}");
         let mut shaper = Shaper::from_path(&font_path, 0)
             .with_context(|| format!("load font {font_path}"))?;

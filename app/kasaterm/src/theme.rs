@@ -41,6 +41,7 @@ color_slot!(S_SURFACE_HOVER, surface_hover, [48, 56, 67, 255]);
 color_slot!(S_SURFACE_ACTIVE, surface_active, [60, 70, 84, 255]);
 color_slot!(S_BORDER, border, [80, 92, 110, 110]);
 color_slot!(S_ACCENT, accent, [90, 140, 230, 255]);
+color_slot!(S_CURSOR, cursor, [90, 140, 230, 255]);
 color_slot!(S_TEXT, text, [236, 238, 243, 255]);
 color_slot!(S_TEXT_DIM, text_dim, [160, 166, 176, 255]);
 color_slot!(S_TEXT_MUTE, text_mute, [120, 126, 138, 255]);
@@ -463,16 +464,25 @@ fn store_palette(p: &Palette) {
     // pane 안에서 도는 TUI 도 같은 색을 봐야 한다. 이 셋(fg/bg/cursor)이 OSC
     // 10/11/12 질의의 답이 되고, Claude Code 의 `theme: auto` 는 그 배경색으로
     // 밝은 테마와 어두운 테마를 가른다 — 안 넘기면 라이트로 바꿔도 안쪽만 어둡다.
+    let imported_cursor = crate::socket::read_settings()
+        .get("terminal_cursor_color")
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex);
+    let host_cursor = imported_cursor.unwrap_or_else(|| {
+        if is_light(p.bg) { [p.fg[0], p.fg[1], p.fg[2]] } else { p.ansi[7] }
+    });
+    let visible_cursor = imported_cursor.unwrap_or_else(|| {
+        let c = accent();
+        [c[0], c[1], c[2]]
+    });
+    S_CURSOR.store(
+        pack([visible_cursor[0], visible_cursor[1], visible_cursor[2], 255]),
+        Ordering::Relaxed,
+    );
     kasa_pty::set_host_colors(
         (p.bg[0], p.bg[1], p.bg[2]),
         (p.fg[0], p.fg[1], p.fg[2]),
-        // 커서는 팔레트에 없다 — 밝은 배경에선 fg 쪽이, 어두운 배경에선 ANSI 7
-        // (off-white)이 실제 커서에 가깝다.
-        if is_light(p.bg) {
-            (p.fg[0], p.fg[1], p.fg[2])
-        } else {
-            (p.ansi[7][0], p.ansi[7][1], p.ansi[7][2])
-        },
+        (host_cursor[0], host_cursor[1], host_cursor[2]),
     );
     // Accent intentionally not touched here — see set_accent.
     //
@@ -956,7 +966,16 @@ pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json:
 }
 
 pub fn set_accent(name: &str) {
-    S_ACCENT.store(pack(accent_color(name)), Ordering::Relaxed);
+    let value = accent_color(name);
+    S_ACCENT.store(pack(value), Ordering::Relaxed);
+    if crate::socket::read_settings()
+        .get("terminal_cursor_color")
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex)
+        .is_none()
+    {
+        S_CURSOR.store(pack(value), Ordering::Relaxed);
+    }
     // 강조색은 팔레트 적용 경로(`apply_palette`)를 안 지난다 — 그래서 claude 쪽
     // 커스텀 테마도 여기서 따로 다시 구워야 한다. 안 그러면 강조색만 바꿨을 때
     // 터미널은 새 색인데 claude 는 옛 색으로 남는다.

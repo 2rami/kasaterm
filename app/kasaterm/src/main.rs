@@ -33,6 +33,7 @@ mod webpane;
 mod input;
 mod lineedit;
 mod settings;
+mod onboarding;
 mod eyedropper;
 mod themegen;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
@@ -6410,6 +6411,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
     load_capture_config();
+    // 첫 설치 여부는 어떤 부팅 작업도 ~/.config/kasaterm 을 만들기 전에 확정한다.
+    // 기존 설정 파일이 있던 사용자는 완료 표식만 보강하고 화면을 띄우지 않는다.
+    onboarding::prepare_boot();
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
     theme::apply_from_settings();

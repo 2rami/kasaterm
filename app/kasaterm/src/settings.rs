@@ -1536,6 +1536,52 @@ impl App {
                 Ok(self.settings_web_window.is_none())
             }
 
+            // ── First install ───────────────────────────────────────────
+            "terminal-profile-import" => {
+                let applied = crate::onboarding::apply_terminal_profile(id)?;
+                if let Some(size) = applied.font_size {
+                    self.font_size = size.clamp(9.0, 32.0);
+                }
+                theme::apply_from_settings();
+                self.apply_effective_scale();
+                self.begin_theme_fx();
+                self.repaint_all();
+                if applied.restart_required {
+                    self.set_toast("재시작하면 폰트까지 적용돼요".to_string());
+                }
+                Ok(true)
+            }
+            "font-family" => {
+                crate::onboarding::apply_font_family(id)?;
+                self.set_toast("재시작하면 폰트가 적용돼요".to_string());
+                Ok(true)
+            }
+            "font-path" => {
+                crate::onboarding::apply_font_path(&arg)?;
+                self.set_toast("재시작하면 폰트가 적용돼요".to_string());
+                Ok(true)
+            }
+            "default-shell" => {
+                self.set_shell = crate::onboarding::apply_default_shell(id)?;
+                Ok(true)
+            }
+            "complete-onboarding" => {
+                let provider = (!id.is_empty()).then_some(id);
+                if let Some(provider) = provider {
+                    match onboarding_provider_logged_in(provider) {
+                        Some(true) => {}
+                        None => return Err("로그인 상태를 확인하고 있어요".to_string()),
+                        Some(false) => return Err("먼저 로그인해 주세요".to_string()),
+                    }
+                }
+                crate::onboarding::complete(provider)?;
+                Ok(true)
+            }
+            "skip-onboarding" => {
+                crate::onboarding::skip()?;
+                Ok(true)
+            }
+
             // ── General ──────────────────────────────────────────────────
             "cwd-mode" => {
                 let m = pick(&["last", "home", "custom"], id).ok_or_else(|| unknown(id))?;
@@ -2191,6 +2237,7 @@ impl App {
                     "usage_stale": usage.as_ref().map(|b| b.stale),
                     "usage_label": usage.as_ref().map(|b| b.label.clone()),
                     "usage_resets": usage.as_ref().and_then(|b| crate::resets_in_label(b.resets_at)),
+                    "logged_in": probe.as_ref().map(|p| p.logged_in),
                 })
             })
             .collect();
@@ -2206,6 +2253,7 @@ impl App {
                 // claude 판과 달리 "확인 중" 이 없다 — 신원이 파일 하나에 들어 있어
                 // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
                 let ident = codex_identity(&id);
+                let logged_in = codex_logged_in(&id);
                 let name = match (idx, label.is_empty()) {
                     (None, _) => "기본".to_string(),
                     (Some(i), true) => ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2)),
@@ -2233,6 +2281,7 @@ impl App {
                     "sub_code": (ident.is_none() && !sub.is_empty())
                         .then_some("account_login_required"),
                     "slot": idx.is_some(),
+                    "logged_in": logged_in,
                 })
             })
             .collect();
@@ -2994,6 +3043,74 @@ fn publish_web_values(v: serde_json::Value) {
 /// 다음 요청이 옛 값을 받아 가, 화면이 조용히 낡는다.
 pub(crate) fn take_web_values() -> Option<serde_json::Value> {
     web_values_cell().lock().ok().and_then(|mut c| c.take())
+}
+
+/// `None` means an installed Claude CLI is still answering its async probe.
+pub(crate) fn onboarding_provider_logged_in(provider: &str) -> Option<bool> {
+    match provider {
+        "claude" => {
+            let mut ids = vec![String::new()];
+            ids.extend(socket::read_claude_accounts().into_iter().map(|a| a.id));
+            let probes: Vec<Option<AuthProbe>> = ids.iter().map(|id| auth_probe(id)).collect();
+            if probes.iter().flatten().any(|p| p.logged_in) {
+                Some(true)
+            } else if crate::onboarding::command_available("claude") && probes.iter().any(Option::is_none) {
+                None
+            } else {
+                Some(false)
+            }
+        }
+        "codex" => {
+            let mut ids = vec![String::new()];
+            ids.extend(socket::read_codex_accounts().into_iter().map(|a| a.id));
+            Some(ids.iter().any(|id| codex_logged_in(id)))
+        }
+        _ => Some(false),
+    }
+}
+
+fn onboarding_auth_provider(provider: &str) -> serde_json::Value {
+    match provider {
+        "claude" => {
+            let mut ids = vec![String::new()];
+            ids.extend(socket::read_claude_accounts().into_iter().map(|a| a.id));
+            let probes: Vec<Option<AuthProbe>> = ids.iter().map(|id| auth_probe(id)).collect();
+            let logged = probes.iter().flatten().find(|p| p.logged_in);
+            let installed = crate::onboarding::command_available("claude");
+            let status = if logged.is_some() { "logged_in" } else if installed && probes.iter().any(Option::is_none) { "checking" } else if installed { "logged_out" } else { "not_installed" };
+            let account = logged.and_then(|p| (!p.email.is_empty()).then_some(p.email.clone()));
+            let detail = logged.and_then(|p| team_org(&p.email, &p.org));
+            serde_json::json!({ "status": status, "account": account, "detail": detail })
+        }
+        "codex" => {
+            let mut ids = vec![String::new()];
+            ids.extend(socket::read_codex_accounts().into_iter().map(|a| a.id));
+            let logged_id = ids.iter().find(|id| codex_logged_in(id));
+            let installed = crate::onboarding::command_available("codex");
+            let status = if logged_id.is_some() { "logged_in" } else if installed { "logged_out" } else { "not_installed" };
+            let account = logged_id.and_then(|id| codex_identity(id));
+            serde_json::json!({ "status": status, "account": account, "detail": null })
+        }
+        _ => serde_json::json!({ "status": "not_installed", "account": null, "detail": null }),
+    }
+}
+
+/// `GET /onboarding/state` payload. Tokens and credential paths never enter it.
+pub(crate) fn onboarding_state_json() -> serde_json::Value {
+    let claude = onboarding_auth_provider("claude");
+    let codex = onboarding_auth_provider("codex");
+    let mut state = crate::onboarding::base_state_json();
+    if let Some(root) = state.as_object_mut() {
+        let stored = root.get("preferred_agent").and_then(|v| v.as_str()).map(str::to_string);
+        let detected = stored.or_else(|| {
+            (claude.get("status").and_then(|v| v.as_str()) == Some("logged_in"))
+                .then_some("claude".to_string())
+                .or_else(|| (codex.get("status").and_then(|v| v.as_str()) == Some("logged_in")).then_some("codex".to_string()))
+        });
+        root.insert("preferred_agent".to_string(), serde_json::json!(detected));
+        root.insert("auth".to_string(), serde_json::json!({ "claude": claude, "codex": codex }));
+    }
+    state
 }
 
 /// 이번 액션이 남긴 문구 코드. 값 스냅샷과 같은 이유로 전역을 지난다 — 회신 봉투에
@@ -5387,14 +5504,14 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
 /// `/claude-identity`(그 슬롯의 토큰으로 `oauth/profile` 조회)에서 받는다.
 
 #[derive(Clone)]
-struct AuthProbe {
-    logged_in: bool,
-    email: String,
+pub(crate) struct AuthProbe {
+    pub(crate) logged_in: bool,
+    pub(crate) email: String,
     /// 그 슬롯 토큰이 속한 조직. 이메일 하나에 개인 조직과 팀 조직이 둘 다 달려
     /// 있으면 슬롯 둘이 **같은 이메일로** 보여 어느 쪽이 회사 것인지 알 수 없다
     /// (거노: "팀플랜인지 구분하게 돼?"). 한도가 따로 도는 별개 계정이라 이걸
     /// 못 가르면 자동 전환이 어디로 갔는지도 못 읽는다.
-    org: String,
+    pub(crate) org: String,
 }
 
 /// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
@@ -5417,7 +5534,7 @@ struct AuthProbe {
 /// 초 단위로 걸린다 — TTL 20초마다 그만큼 계정 칸이 빈칸이 되어, 가만히 보고 있으면
 /// 계정이 주기적으로 풀리는 것처럼 깜빡였다(거노 2026-08-03). git 폴러가 일시적
 /// 실패에 마지막 값을 붙드는 것과 같은 이유로, 새 답이 올 때까지는 알던 값을 보인다.
-fn auth_probe(id: &str) -> Option<AuthProbe> {
+pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -5452,7 +5569,9 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
         // PATH 에는 claude 가 없어서 직접 spawn 하면 항상 실패한다.
         let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
         let mut c = crate::proc::command(shell);
-        c.arg("-lc").arg("claude auth status");
+        // Orca와 같은 JSON 상태 창구를 쓴다. 사람용 문구는 버전·언어에 따라
+        // 달라지고 "not logged in"도 "logged in"을 포함한다.
+        c.arg("-lc").arg("claude auth status --json");
         if let Some(d) = dir.as_deref() {
             c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
         }
@@ -5577,12 +5696,28 @@ pub(crate) fn account_identity(id: &str) -> Option<String> {
 ///
 /// 서명은 확인하지 않는다. 이 값의 쓰임은 «이 슬롯이 누구인가» 를 화면에 적는 것뿐이고,
 /// 토큰이 유효한지는 codex 가 그걸로 API 를 부를 때 판가름난다.
+fn codex_auth_path(id: &str) -> Option<std::path::PathBuf> {
+    match socket::codex_account_dir(id) {
+        Some(d) => Some(d.join("auth.json")),
+        None => Some(kasa_socket::home_dir()?.join(".codex/auth.json")),
+    }
+}
+
+/// 토큰 값은 직렬화·저장·로그하지 않고 알려진 자리가 비어 있지 않은지만 본다.
+pub(crate) fn codex_logged_in(id: &str) -> bool {
+    let Some(path) = codex_auth_path(id) else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    let nonempty = |p: &str| v.pointer(p).and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty());
+    nonempty("/tokens/access_token")
+        || nonempty("/tokens/id_token")
+        || nonempty("/tokens/refresh_token")
+        || v.get("OPENAI_API_KEY").and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty())
+}
+
 pub(crate) fn codex_identity(id: &str) -> Option<String> {
     use base64::Engine as _;
-    let path = match socket::codex_account_dir(id) {
-        Some(d) => d.join("auth.json"),
-        None => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".codex/auth.json"),
-    };
+    let path = codex_auth_path(id)?;
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let tok = v.get("tokens")?.get("id_token")?.as_str()?;
     // JWT = header.payload.signature — 가운데만 필요하다. 패딩 없는 URL-safe base64.

@@ -61,7 +61,7 @@ pub fn default_bg() -> [u8; 4] {
 /// focus ring / links across the whole UI; selection is a muted blue.
 #[inline]
 pub fn iterm_cursor() -> [u8; 4] {
-    crate::theme::accent()
+    crate::theme::cursor()
 }
 pub const ITERM_SELECTION: [u8; 4] = [49, 99, 139, 0x99];
 /// Inline-autosuggestion ghost text. A dim, low-contrast grey-blue that
@@ -468,4 +468,3 @@ mod box_line_tests {
         assert_eq!(n, 0);
     }
 }
-

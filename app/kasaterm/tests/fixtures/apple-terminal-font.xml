@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>$archiver</key><string>NSKeyedArchiver</string>
+  <key>$objects</key>
+  <array>
+    <string>$null</string>
+    <dict>
+      <key>NSName</key><dict><key>CF$UID</key><integer>2</integer></dict>
+      <key>NSSize</key><real>14</real>
+    </dict>
+    <string>D2CodingLigatureNFM</string>
+    <dict><key>$classname</key><string>NSFont</string></dict>
+    <string>NSObject</string>
+  </array>
+</dict>
+</plist>

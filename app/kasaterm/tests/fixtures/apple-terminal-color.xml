@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>$objects</key>
+  <array>
+    <string>$null</string>
+    <dict>
+      <key>NSColorSpace</key><integer>1</integer>
+      <key>NSRGB</key><data>MC4xIDAuMiAwLjMgMQA=</data>
+    </dict>
+    <dict><key>$classname</key><string>NSColor</string></dict>
+  </array>
+</dict>
+</plist>

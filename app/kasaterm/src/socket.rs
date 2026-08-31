@@ -143,6 +143,54 @@ impl Backend for TmuxBackend {
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
         anyhow::bail!("swap_surfaces not supported on the tmux backend")
     }
+
+    fn settings_action(
+        &self,
+        action: &str,
+        id: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let id = id.unwrap_or_default();
+        match action {
+            "onboarding-state" => Ok(crate::settings::onboarding_state_json()),
+            "skip-onboarding" => {
+                crate::onboarding::skip().map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({ "ok": true, "close": true, "completed": true }))
+            }
+            "complete-onboarding" => {
+                let provider = (!id.is_empty()).then_some(id);
+                if let Some(provider) = provider {
+                    if crate::settings::onboarding_provider_logged_in(provider) != Some(true) {
+                        anyhow::bail!("먼저 로그인해 주세요");
+                    }
+                }
+                crate::onboarding::complete(provider).map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({ "ok": true, "close": true, "completed": true }))
+            }
+            "terminal-profile-import" => {
+                crate::onboarding::apply_terminal_profile(id).map_err(anyhow::Error::msg)?;
+                crate::theme::apply_from_settings();
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "restart_required": crate::onboarding::font_restart_required(),
+                }))
+            }
+            "font-family" => {
+                crate::onboarding::apply_font_family(id).map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({ "ok": true, "restart_required": true }))
+            }
+            "font-path" => {
+                crate::onboarding::apply_font_path(label.unwrap_or_default())
+                    .map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({ "ok": true, "restart_required": true }))
+            }
+            "default-shell" => {
+                let path = crate::onboarding::apply_default_shell(id).map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({ "ok": true, "path": path }))
+            }
+            _ => anyhow::bail!("settings_action unsupported on the tmux backend"),
+        }
+    }
 }
 
 /// Local PTY-mode cmux socket backend. The socket server (claude tmux shim,
@@ -1815,6 +1863,9 @@ impl Backend for PtyBackend {
         id: Option<&str>,
         label: Option<&str>,
     ) -> Result<serde_json::Value> {
+        if action == "onboarding-state" {
+            return Ok(crate::settings::onboarding_state_json());
+        }
         // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
         // 화면도 없다(설정 화면 문구는 웹이 쥔다). 그래서 GUI 왕복을 타지 않는다.
         if action == "set-language" {
@@ -1839,14 +1890,33 @@ impl Backend for PtyBackend {
         // 테마 복제는 80명치 로스터와 그림 폴더를 통째로 복사한다 — 저장보다 훨씬
         // 오래 걸릴 수 있어 여유를 더 준다. 무한 대기는 여전히 안 된다(소켓 워커가
         // 물리면 다른 명령까지 함께 멈춘다).
-        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
-            Ok(Ok(v)) => Ok(crate::settings::merge_web_codes(v)),
+        let mut value = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(v)) => crate::settings::merge_web_codes(v),
             // 거부도 **JSON 으로** 돌려준다. `Err` 로 올려보내면 문자열 하나만 남아
             // 문구 코드를 실을 자리가 없다(웹은 그 코드로 자기 말로 옮긴다) — 회신
             // 형식은 HTTP 쪽이 만들던 `{ok:false, error}` 와 같다.
-            Ok(Err(e)) => Ok(crate::settings::reject_json(e)),
+            Ok(Err(e)) => crate::settings::reject_json(e),
             Err(_) => anyhow::bail!("시간 안에 안 끝났어요"),
+        };
+        if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            if matches!(action, "complete-onboarding" | "skip-onboarding") {
+                let mut state = crate::settings::onboarding_state_json();
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+                    obj.insert("close".to_string(), serde_json::Value::Bool(true));
+                }
+                return Ok(state);
+            }
+            if matches!(action, "terminal-profile-import" | "font-family" | "font-path") {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "restart_required".to_string(),
+                        serde_json::json!(crate::onboarding::font_restart_required()),
+                    );
+                }
+            }
         }
+        Ok(value)
     }
 
     /// 값은 GUI 스레드의 `App` 이 정본이라(UI 배율처럼 파일에 없는 값이 있다) 여기서
@@ -3296,7 +3366,7 @@ fn window_size_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/window.json"))
 }
 
-fn settings_file_path() -> Option<std::path::PathBuf> {
+pub(crate) fn settings_file_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("KASATERM_SETTINGS_FILE") {
         if !p.is_empty() {
             return Some(std::path::PathBuf::from(p));
@@ -3415,6 +3485,54 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
             let _ = f.write_all(txt.as_bytes());
         }
     }
+}
+
+/// Replace the whole settings object with one sibling-temp + rename. A terminal
+/// profile's palette, ANSI colors, cursor and font must appear as one bundle.
+pub(crate) fn write_settings_value_atomic(value: &serde_json::Value) -> std::io::Result<()> {
+    let path = settings_file_path().ok_or_else(|| std::io::Error::other("settings path missing"))?;
+    write_settings_value_atomic_at(&path, value)
+}
+
+pub(crate) fn write_settings_value_atomic_at(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _guard = LOCK.lock().map_err(|_| std::io::Error::other("settings lock poisoned"))?;
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("settings parent missing"))?;
+    std::fs::create_dir_all(parent)?;
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("settings.json");
+    let tmp = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), seq));
+    let body = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+pub(crate) fn write_settings_patch_atomic(
+    entries: &[(&str, serde_json::Value)],
+) -> std::io::Result<()> {
+    let mut value = read_settings();
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("settings is not an object"))?;
+    for (key, item) in entries {
+        obj.insert((*key).to_string(), item.clone());
+    }
+    write_settings_value_atomic(&value)
 }
 
 /// kasaterm 테마가 바뀌면 Claude Code 도 따라간다 — `~/.claude/settings.json`
@@ -3621,6 +3739,23 @@ pub fn read_font_size() -> f32 {
         .and_then(|x| x.as_f64())
         .map(|v| (v as f32).clamp(9.0, 32.0))
         .unwrap_or(DEFAULT_FONT_SIZE)
+}
+
+/// Invalid or uninstalled files are ignored so a stale preference cannot stop
+/// the renderer from falling back to its bundled/system font.
+pub fn read_font_path() -> Option<std::path::PathBuf> {
+    let path = read_settings().get("font_path")?.as_str()?.trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(path).canonicalize().ok()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    (meta.is_file()
+        && meta.len() > 0
+        && meta.len() <= 128 * 1024 * 1024
+        && matches!(ext.as_str(), "ttf" | "otf" | "ttc"))
+    .then_some(path)
 }
 
 /// Whether the file-tree sidebar starts open on launch. Default `false`
