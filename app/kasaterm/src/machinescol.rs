@@ -183,11 +183,9 @@ impl App {
             .into_iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
-                let host = registry
-                    .iter()
-                    .find(|r| r.label == label)
-                    .map(|r| r.host.clone())
-                    .unwrap_or_default();
+                let reg = registry.iter().find(|r| r.label == label);
+                let host = reg.map(|r| r.host.clone()).unwrap_or_default();
+                let kvm = reg.and_then(|r| r.kvm.clone());
                 let (mirror_ids, mirror_rows) = mirrored.remove(&label).unwrap_or_default();
                 let remote = m
                     .get("panes")
@@ -241,6 +239,7 @@ impl App {
                     ago_secs: m.get("ago_secs").and_then(|v| v.as_u64()),
                     outdated: m.get("sync_capable").and_then(|v| v.as_bool()) == Some(false),
                     host,
+                    kvm,
                     mirrored: mirror_rows,
                     remote,
                 })
@@ -278,7 +277,15 @@ impl App {
             .find(|(_, (x, y, w, h))| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
             .map(|(b, _)| b.clone());
         let Some(btn) = hit else { return false };
-        if let state::MachinesColBtn::Screen { host } = &btn {
+        if let state::MachinesColBtn::Screen { host, kvm } = &btn {
+            // KVM 주소가 있으면 그쪽이 우선이다(거노 지시 2026-09-01) — IP KVM 은
+            // OS 밖 물리 콘솔이라 로그인 전·부팅 화면·OS 죽음까지 보인다. 기본
+            // 브라우저로 열고 채널 선택은 PiKVM 웹 UI 에 맡긴다.
+            if let Some(url) = kvm {
+                self.set_toast("KVM 화면 여는 중".to_string());
+                let _ = crate::proc::command("open").arg(url).spawn();
+                return true;
+            }
             // 화면공유는 OS 에 맡긴다 — macOS 화면공유 앱이 vnc:// 를 연다.
             // 이사와 달리 즉시 끝나는 조작이라 busy 대열에 안 세운다. 다만 굳은
             // 앱을 먼저 걷어내야 해서(open_screen_share) fork 가 몇 번 돌고,
@@ -631,7 +638,9 @@ pub(crate) fn draw_machines_col(
         // 「화면 보기」가 오른쪽 끝을 이미 쓴다 — 머리줄에 더 얹는 글은 그 앞에서
         // 끝나야 한다. 폭을 여기서 한 번 재고 아래 둘이 같이 쓴다.
         let screen_bl = "화면 보기";
-        let screen_bw = if m.host.is_empty() {
+        // 문이 둘 중 하나라도 있으면 버튼이 선다 — kvm(IP KVM 웹) 또는 host(화면공유).
+        let has_screen_door = m.kvm.is_some() || !m.host.is_empty();
+        let screen_bw = if !has_screen_door {
             0.0
         } else {
             g.measure_chrome_text(screen_bl, 9.0, true) + 12.0 + 8.0
@@ -677,9 +686,10 @@ pub(crate) fn draw_machines_col(
                 y += 14.0;
             }
         }
-        // 화면공유 버튼 — 명부에 진짜 주소(host)가 있을 때만, 라벨 줄 오른쪽 끝.
-        // 연결이 끊겨도 그린다: 화면공유는 카사텀 창구와 다른 문이라 따로 살 수 있다.
-        if !m.host.is_empty() {
+        // 화면 보기 버튼 — 문(kvm 또는 host)이 있을 때만, 라벨 줄 오른쪽 끝.
+        // 연결이 끊겨도 그린다: KVM·화면공유는 카사텀 창구와 다른 문이라 따로
+        // 살 수 있고, KVM 은 오히려 기계가 죽었을 때 보라고 있는 문이다.
+        if has_screen_door {
             let bl = screen_bl;
             let bw = g.measure_chrome_text(bl, 9.0, true) + 12.0;
             let bh = 16.0;
@@ -695,8 +705,10 @@ pub(crate) fn draw_machines_col(
                 bl,
                 gpu::DrawOpts { font_size: 9.0, color: theme::text(), bold: true, italic: false },
             );
-            mc.btn_rects
-                .push((state::MachinesColBtn::Screen { host: m.host.clone() }, (bx, by, bw, bh)));
+            mc.btn_rects.push((
+                state::MachinesColBtn::Screen { host: m.host.clone(), kvm: m.kvm.clone() },
+                (bx, by, bw, bh),
+            ));
         }
         if m.mirrored.is_empty() && m.remote.is_empty() {
             g.draw_text(

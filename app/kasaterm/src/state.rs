@@ -312,8 +312,11 @@ pub(crate) struct MachinesColMachine {
     pub(crate) ago_secs: Option<u64>,
     /// 그 기계 프로그램이 낡았나(repo-sync 창구 없음) — 변경 실은 이사가 선다.
     pub(crate) outdated: bool,
-    /// 화면공유 등 HTTP 밖 문에 쓰는 진짜 주소(명부 host). 빈값 = 버튼 안 그림.
+    /// 화면공유 등 HTTP 밖 문에 쓰는 진짜 주소(명부 host). kvm 도 없고 이것도
+    /// 빈값이면 「화면 보기」 버튼을 안 그린다.
     pub(crate) host: String,
+    /// IP KVM 웹 주소(명부 kvm) — 있으면 「화면 보기」가 화면공유 대신 이걸 연다.
+    pub(crate) kvm: Option<String>,
     /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
     pub(crate) mirrored: Vec<MachinesColRow>,
     /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다.
@@ -338,8 +341,9 @@ pub(crate) struct MachinesColRow {
 pub(crate) enum MachinesColBtn {
     Send { pane: String, label: String },
     Bring { pane: String },
-    /// 그 기계 화면공유 열기 — host 는 명부의 진짜 주소(`user@ip` 허용).
-    Screen { host: String },
+    /// 그 기계 화면 보기 — kvm(IP KVM 웹 주소)이 있으면 그 문을 열고, 없으면
+    /// host(명부의 진짜 주소, `user@ip` 허용)로 macOS 화면공유를 연다.
+    Screen { host: String, kvm: Option<String> },
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.

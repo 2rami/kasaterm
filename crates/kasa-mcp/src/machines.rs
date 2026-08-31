@@ -37,6 +37,10 @@ pub struct Machine {
     /// HTTP 창구 밖의 문에 쓴다. base 는 대개 SSH 터널(127.0.0.1)이라 못 쓴다.
     /// 명부의 `host` 값, 없으면 base 의 호스트가 루프백이 아닐 때만 유도. 빈값 가능.
     pub host: String,
+    /// IP KVM 웹 주소(예: `https://10.1.21.150/kvm/`) — 있으면 「화면 보기」가
+    /// 화면공유 대신 이 문을 연다(거노 지시 2026-09-01). KVM 은 OS 밖 물리 콘솔이라
+    /// 로그인 전·부팅 화면까지 보인다 — 화면공유는 그 기계 OS 가 살아 있어야 한다.
+    pub kvm: Option<String>,
     /// 로컬 경로 → 그 기계 경로. 긴 접두부터 맞춘다 — nacho-neko 처럼 부모와
     /// 다른 자리에 사는 레포를 부모 규칙보다 먼저 잡기 위해서다.
     pub roots: Vec<(String, String)>,
@@ -81,7 +85,12 @@ fn parse(v: &Value) -> Vec<Machine> {
             // 긴 접두가 먼저 이겨야 한다 — 정렬을 여기서 굳혀 두면 매핑 함수는
             // 앞에서부터 첫 일치를 집으면 된다.
             roots.sort_by_key(|(l, _)| std::cmp::Reverse(l.len()));
-            Some(Machine { label, base, host, roots })
+            let kvm = m
+                .get("kvm")
+                .and_then(|k| k.as_str())
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty());
+            Some(Machine { label, base, host, roots, kvm })
         })
         .collect()
 }
@@ -251,6 +260,21 @@ mod tests {
             },
         }]))
         .remove(0)
+    }
+
+    #[test]
+    fn kvm_field_parses_and_blank_means_none() {
+        // kvm 이 있으면 「화면 보기」가 화면공유 대신 이 문을 연다 — 빈 문자열은
+        // 없는 것과 같아야 한다(반쪽 설정으로 빈 주소를 열지 않게).
+        let v = serde_json::json!([
+            {"label":"팜","base":"http://127.0.0.1:1","kvm":"https://10.1.21.150/kvm/"},
+            {"label":"빈값","base":"http://127.0.0.1:2","kvm":"  "},
+            {"label":"없음","base":"http://127.0.0.1:3"},
+        ]);
+        let ms = parse(&v);
+        assert_eq!(ms[0].kvm.as_deref(), Some("https://10.1.21.150/kvm/"));
+        assert_eq!(ms[1].kvm, None);
+        assert_eq!(ms[2].kvm, None);
     }
 
     #[test]

@@ -2372,8 +2372,9 @@ impl App {
             "mcp" => SideTab::Mcp,
             "info" => SideTab::Info,
             "git" => SideTab::Git,
+            "machines" => SideTab::Machines,
             other => {
-                eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git");
+                eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git|machines");
                 return None;
             }
         };
