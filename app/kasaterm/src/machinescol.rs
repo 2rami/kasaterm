@@ -298,6 +298,16 @@ impl App {
         self.set_toast(format!("이사 — {going}"));
         self.chrome_dirty = true;
         self.render_frame();
+        // 이사의 본체는 unix 전용이다(session.rs 의 `migrate_pane`·`migrate_pane_back`
+        // 이 `#[cfg(unix)]`) — 원격 셸 철거와 claude 를 곱게 끄는 신호가 그쪽 전제다.
+        // 버튼을 숨기는 대신 눌렀을 때 이유를 말하기로 했다(2026-08-31 지시): 맥과
+        // 화면이 같아 렌더 분기가 안 늘고, 구현되면 이 갈래만 걷어내면 된다.
+        // Err 는 아래 성공/실패 갈림을 그대로 타 note 와 토스트로 사람에게 뜬다.
+        #[cfg(not(unix))]
+        let outcome: anyhow::Result<String> = Err(anyhow::anyhow!(
+            "이사는 아직 Windows 에서 안 된다 — 원격 셸을 다루는 unix 전용 경로다"
+        ));
+        #[cfg(unix)]
         let outcome = match btn {
             state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {

@@ -143,7 +143,16 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 현재 `v0.1.19` MSI는 최신 upstream `main` 위로 Windows 커밋을 rebase한 뒤 다시 만들었다. Windows Installer 관리 설치로 75개 파일을 풀어 확인했고, 설치 레이아웃의 앱을 개발용 UI·hook 환경변수 없이 실행해 `http://127.0.0.1:8765/arona-ui/`의 HTTP 200 응답까지 검증했다. `cargo check -p kasaterm`과 agent/shell scrollback 복원 회귀 테스트도 통과했다.
 
-`fork/windows-port`는 최신 upstream보다 8커밋 앞, 0커밋 뒤인 상태로 push했고 upstream PR은 `https://github.com/2rami/kasaterm/pull/2`다. 아직 하지 않은 것은 PR 병합, 버전 태그 생성, GitHub Release 게시다. upstream에는 `v0.1.19` 릴리스가 이미 있으므로 PR 병합 뒤 다음 정식 릴리스는 `v0.1.20` 이상으로 bump한다. 로컬 패키징이나 PR 생성 완료를 정식 릴리스 완료로 오해하지 말 것.
+upstream PR `https://github.com/2rami/kasaterm/pull/2` 는 **2026-08-14 에 머지됐다.** 남은 것은 버전 태그와 GitHub Release 게시다 — 최신 정식 릴리스가 `v0.1.19`(2026-08-03)이고 그 뒤로 main 에 커밋만 쌓였으니 다음은 `v0.1.20` 이상이다. 로컬 패키징이나 PR 병합을 정식 릴리스 완료로 오해하지 말 것.
+
+### 머지 뒤에도 Windows 는 다시 깨진다 — 범인은 늘 「호출부」다 (2026-08-31 복구)
+
+이식이 머지된 뒤에도 새로 들어온 unix 전용 코드 탓에 Windows 컴파일이 다시 죽었고, CI 는 그동안 Windows 잡을 `continue-on-error` 로 내려 둔 채였다(2026-08-30~31). 복구하며 확인한 재발 패턴 둘:
+
+- **정의만 `#[cfg(unix)]` 로 막고 부르는 쪽을 안 막는 것.** `migrate_pane`(session.rs)이 그랬다 — 맥은 멀쩡하고 Windows 에서만 `E0599: no method named` 가 난다. unix 전용 메서드를 새로 만들면 **호출부까지 같이 게이트**해라.
+- **macOS 전용 의존성을 공용 코드에서 쓰는 것.** `libc` 는 Cargo.toml 의 `cfg(target_os = "macos")` 블록에만 있어서 Windows 엔 크레이트 자체가 없다. cfg 는 `current_uid()`(input.rs)처럼 헬퍼 한 곳에 가두면 부르는 쪽이 양쪽에서 같은 모양이 된다.
+
+맥에서 `cargo check` 가 초록인 것은 Windows 안전의 근거가 못 된다(cfg 로 꺼진 코드는 파싱 뒤 통째로 버려진다 — 자세한 이유는 `ci.yml` 머리말). Windows 관문이 살아 있는지로 판단해라.
 
 ## 함정·배경·수정 주의점은 메모리에
 

@@ -3931,6 +3931,25 @@ struct Row {
     name: String,
 }
 
+/// 나를 실행한 사용자의 uid. `libc` 는 Cargo.toml 에서 macOS 전용 의존성이라
+/// Windows 빌드에는 크레이트 자체가 없다 — cfg 를 이 한 곳에 가둬 두면 부르는
+/// 쪽(`outside_apps` 와 그 테스트)이 양쪽에서 같은 모양으로 컴파일된다.
+///
+/// Windows 가 0 인 것은 값이 맞아서가 아니라 **비교에만 쓰이기 때문**이다.
+/// 실사용 경로는 `sample_process_tree_usage` 인데 그쪽이 `ps` 를 spawn 하지
+/// 못해 먼저 `None` 을 내므로 여기까지 오지 않는다. 테스트는 `Row.uid` 도 이
+/// 함수로 채워 필터와 같은 값을 쓰므로 어느 플랫폼에서든 그대로 선다.
+fn current_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// 이 앱 트리 **밖**에서 메모리를 많이 쥔 것들을 앱 단위로 묶어 상위 몇 개.
 ///
 /// 프로세스 하나씩 세면 안 된다 — Chrome·Electron 앱은 Helper 를 수십 개 낳아서,
@@ -3943,7 +3962,7 @@ fn outside_apps(
     track: &mut CpuTrack,
 ) -> Vec<AppUsage> {
     use std::collections::HashMap;
-    let me_uid = unsafe { libc::getuid() };
+    let me_uid = current_uid();
     let parent: HashMap<u32, u32> = rows.iter().map(|r| (r.pid, r.ppid)).collect();
     let app_root = |mut pid: u32| -> u32 {
         // 상한은 순환 방어다. ppid 는 커널이 주지만 표본이 찍히는 사이 부모가
@@ -4460,7 +4479,9 @@ mod working_scan_tests {
 
 #[cfg(test)]
 mod zoom_key_tests {
-    use super::{cpu_ms, hog_polls, outside_apps, zoom_key, AppUsage, CpuTrack, Row, ZoomKey};
+    use super::{
+        cpu_ms, current_uid, hog_polls, outside_apps, zoom_key, AppUsage, CpuTrack, Row, ZoomKey,
+    };
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -4547,7 +4568,7 @@ mod zoom_key_tests {
     /// 팝오버가 잣대별 탭으로 갈린 뒤로는 양쪽 상위가 다 있어야 두 탭이 선다.
     #[test]
     fn 두_잣대의_범인이_둘_다_살아남는다() {
-        let me = unsafe { libc::getuid() };
+        let me = current_uid();
         let row = |pid: u32, rss: u64, cpu_time: u64, name: &str| Row {
             uid: me,
             pid,
