@@ -3832,41 +3832,9 @@ pub(crate) struct UsageSample {
 }
 
 fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
-    // `spawn` + `wait_with_output` 인 것은 **재는 도구가 결과에 끼기 때문**이다.
-    // `ps` 는 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄
-    // 수가 없다. 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
-    let child = std::process::Command::new("ps")
-        // uid 를 함께 읽는 것은 바깥 앱 목록 때문이다 — 거기엔 끄기 버튼이 붙는데,
-        // 남(root 데몬)의 프로세스는 눌러도 권한이 없어 아무 일도 안 일어난다.
-        // `time` 은 누적 CPU 시간 — 폴 사이의 증분이 그 구간의 실제 사용률이다.
-        .args(["-axo", "uid=,pid=,ppid=,pcpu=,rss=,time=,comm="])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-    let ps_pid = child.id();
-    let out = child.wait_with_output().ok()?;
-    let txt = String::from_utf8_lossy(&out.stdout);
-    let rows: Vec<Row> = txt
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let uid = it.next()?.parse().ok()?;
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            let cpu = it.next()?.parse().ok()?;
-            let rss = it.next()?.parse().ok()?;
-            let cpu_time = cpu_ms(it.next()?)?;
-            // comm 은 경로이고 공백을 품을 수 있다(`.../Google Chrome`). 남은 걸
-            // 통째로 이어 붙인 뒤 마지막 조각만 쓴다 — 열 단위로 자르면 공백 있는
-            // 이름에서 파싱이 통째로 어긋난다.
-            let comm: String = it.collect::<Vec<_>>().join(" ");
-            let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
-            // 커널이 아는 실제 값으로 갈아 끼운다. 못 읽으면(남의 프로세스)
-            // `ps` 의 RSS 를 그대로 둔다 — 부풀려진 값이라도 없는 것보다 낫다.
-            let rss = phys_footprint(pid).map_or(rss, |b| b / 1024);
-            Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name })
-        })
-        .collect();
+    // 표본을 뜨는 방법만 플랫폼마다 다르다 — 아래 트리 계산·정렬·합계는 그대로
+    // 공유한다. `exclude` 는 「재는 도구 자신」의 pid 로, 맥에서만 의미가 있다.
+    let (rows, ps_pid) = process_rows()?;
     let me = std::process::id();
     let mut tree: std::collections::HashSet<u32> = std::collections::HashSet::from([me]);
     // ppid 순서가 임의라 고정점까지 돈다 — 트리 깊이만큼(셸→claude→도구, 얕다).
@@ -3908,6 +3876,11 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
     let self_time: u64 =
         rows.iter().filter(|r| tree.contains(&r.pid)).map(|r| r.cpu_time).sum();
     let (self_cpu, self_hot) = track.tick(me, self_time, Instant::now());
+    // Windows 는 순간 사용률(맥 `ps` 의 pcpu)을 안 줘서 행 합계가 늘 0 이다. 그
+    // 자리에 구간 사용률을 넣는다 — 트리 전체를 한 앱으로 놓고 잰 값이라 하단바가
+    // 말하려는 「지금 우리가 얼마나 쓰는가」와 뜻이 같고, 오히려 생애 평균에 가까운
+    // pcpu 합보다 이 물음에 정직하다.
+    let cpu = if cfg!(windows) { self_cpu } else { cpu };
     Some(UsageSample {
         cpu,
         rss: rss_kb * 1024,
@@ -3917,6 +3890,112 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
         self_cpu,
         self_hot,
     })
+}
+
+/// 표본 한 벌과 **재는 도구 자신의 pid**(없으면 0).
+///
+/// `spawn` + `wait_with_output` 인 것은 재는 도구가 결과에 끼기 때문이다. `ps` 는
+/// 우리 자식이라 트리에 들고, `output()` 은 그 pid 를 안 알려줘서 뺄 수가 없다 —
+/// 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
+#[cfg(unix)]
+fn process_rows() -> Option<(Vec<Row>, u32)> {
+    let child = std::process::Command::new("ps")
+        // uid 를 함께 읽는 것은 바깥 앱 목록 때문이다 — 거기엔 끄기 버튼이 붙는데,
+        // 남(root 데몬)의 프로세스는 눌러도 권한이 없어 아무 일도 안 일어난다.
+        // `time` 은 누적 CPU 시간 — 폴 사이의 증분이 그 구간의 실제 사용률이다.
+        .args(["-axo", "uid=,pid=,ppid=,pcpu=,rss=,time=,comm="])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let ps_pid = child.id();
+    let out = child.wait_with_output().ok()?;
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<Row> = txt
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let uid = it.next()?.parse().ok()?;
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let cpu = it.next()?.parse().ok()?;
+            let rss = it.next()?.parse().ok()?;
+            let cpu_time = cpu_ms(it.next()?)?;
+            // comm 은 경로이고 공백을 품을 수 있다(`.../Google Chrome`). 남은 걸
+            // 통째로 이어 붙인 뒤 마지막 조각만 쓴다 — 열 단위로 자르면 공백 있는
+            // 이름에서 파싱이 통째로 어긋난다.
+            let comm: String = it.collect::<Vec<_>>().join(" ");
+            let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+            // 커널이 아는 실제 값으로 갈아 끼운다. 못 읽으면(남의 프로세스)
+            // `ps` 의 RSS 를 그대로 둔다 — 부풀려진 값이라도 없는 것보다 낫다.
+            let rss = phys_footprint(pid).map_or(rss, |b| b / 1024);
+            Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name })
+        })
+        .collect();
+    Some((rows, ps_pid))
+}
+
+/// Windows 판 — `ps` 처럼 한 번에 다 주는 창구가 없어, Toolhelp 스냅샷
+/// (`kasa_pty::process_table`, 이미 하네스·학생 판정이 쓰는 그 표)에 프로세스마다
+/// 메모리와 CPU 시간을 물어 붙인다. 재는 쪽이 프로세스를 안 낳으므로 뺄 pid 도 없다.
+///
+/// **열 수 없는 프로세스는 버린다.** 다른 계정 것이거나 보호된 시스템 프로세스인데,
+/// 맥에서 uid 로 남의 것을 거르는 것과 같은 뜻이다 — 이 목록의 행에는 끄기 버튼이
+/// 붙고, 권한이 없으면 눌러도 아무 일이 없다. 보여 주고 안 되는 것보다 안 보이는 편이
+/// 낫다. 그래서 `current_uid()` 가 Windows 에서 상수를 내도 아래 uid 필터가 성립한다
+/// (남는 행이 전부 「열리는 것」뿐이라 서로 같은 값을 갖는다).
+#[cfg(windows)]
+fn process_rows() -> Option<(Vec<Row>, u32)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // FILETIME 은 100ns 눈금이라 10,000 으로 나누면 ms 다(맥의 `time` 열과 같은 단위).
+    fn ms(f: FILETIME) -> u64 {
+        (((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64) / 10_000
+    }
+    let table = kasa_pty::process_table();
+    if table.is_empty() {
+        return None;
+    }
+    let me_uid = current_uid();
+    let rows: Vec<Row> = table
+        .into_iter()
+        .filter_map(|(pid, ppid, name)| unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            let got_mem = GetProcessMemoryInfo(
+                h,
+                &mut pmc,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ) != 0;
+            let (mut created, mut exited, mut kernel, mut user) = std::mem::zeroed();
+            let got_time =
+                GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+            CloseHandle(h);
+            if !got_mem {
+                return None;
+            }
+            Some(Row {
+                uid: me_uid,
+                pid,
+                ppid,
+                // 순간 사용률은 Windows 가 안 준다 — 폴 사이의 cpu_time 증분으로
+                // 재는 `CpuTrack` 이 그 자리를 대신한다(아래 self_cpu).
+                cpu: 0.0,
+                rss: pmc.WorkingSetSize as u64 / 1024,
+                cpu_time: if got_time { ms(kernel) + ms(user) } else { 0 },
+                // `pwsh.exe` 가 아니라 `pwsh` 로 적는다 — 같은 목록을 맥과 나란히 읽는다.
+                name: name.strip_suffix(".exe").unwrap_or(&name).to_string(),
+            })
+        })
+        .collect();
+    Some((rows, 0))
 }
 
 /// `ps` 한 줄.
