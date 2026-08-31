@@ -178,6 +178,7 @@ export function Toggle({
 /// 올리면 저장 왕복마다 커서가 끝으로 튄다. 서버 값이 바뀌면 key 가 바뀌어 칸이
 /// 새로 서고, 그때만 화면이 파일을 따라간다.
 export function TextField({
+  id,
   value,
   onCommit,
   onDone,
@@ -186,6 +187,7 @@ export function TextField({
   mono,
   className,
 }: {
+  id?: string;
   value: string;
   onCommit: (next: string) => void;
   /// 편집이 **끝났다**는 신호 — 값이 바뀌었든 아니든 blur 마다 온다. onCommit 은
@@ -200,6 +202,7 @@ export function TextField({
 }) {
   return (
     <input
+      id={id}
       key={value}
       className={`kt-field ${className ?? 'w-full max-w-[420px]'}`}
       style={mono ? { fontFamily: 'var(--kt-font-mono)' } : undefined}

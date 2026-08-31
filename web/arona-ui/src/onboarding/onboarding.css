@@ -1,4 +1,7 @@
 .onboarding-root {
+  /* 설정의 mute 값은 작은 안내문에서 4.5:1을 못 넘으므로 온보딩 안에서만
+     한 단계 선명한 기존 토큰으로 올린다. */
+  --kt-text-mute: var(--kt-text-dim);
   min-height: 100vh;
   background: var(--kt-surface);
   color: var(--kt-text);
@@ -388,8 +391,13 @@
 .onboarding-button.is-primary {
   border-color: transparent;
   background: var(--kt-accent);
-  color: var(--kt-bg);
+  color: var(--kt-surface);
   font-weight: 700;
+}
+
+.onboarding-root .kt-field::placeholder {
+  color: var(--kt-text-dim);
+  opacity: 1;
 }
 
 .onboarding-button.is-confirmed {

@@ -13,6 +13,7 @@ import {
   Terminal,
   Type,
 } from 'lucide-react';
+import type { KeyboardEvent } from 'react';
 import { Stepper, TextField } from '../settings/controls';
 import type {
   AppearanceValues,
@@ -27,6 +28,28 @@ export type AgentProvider = 'claude' | 'codex';
 export type AppearanceMode = 'import' | 'manual';
 export type ActionArgs = { id?: string; label?: string };
 export type RunOnboardingAction = (action: string, args?: ActionArgs) => Promise<boolean>;
+
+function moveRadioFocus(event: KeyboardEvent<HTMLDivElement>) {
+  const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'];
+  if (!keys.includes(event.key)) return;
+  const current = event.target instanceof Element
+    ? event.target.closest<HTMLButtonElement>('button[role="radio"]')
+    : null;
+  if (!current) return;
+  const radios = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="radio"]:not(:disabled)')
+  );
+  const index = radios.indexOf(current);
+  if (index < 0 || radios.length === 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home'
+    ? radios[0]
+    : event.key === 'End'
+      ? radios[radios.length - 1]
+      : radios[(index + (event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1) + radios.length) % radios.length];
+  next.focus();
+  next.click();
+}
 
 function EmptyState({ title, hint }: { title: string; hint: string }) {
   return (
@@ -286,6 +309,7 @@ function AgentRow({
   provider,
   auth,
   preferred,
+  tabStop,
   polling,
   busy,
   onPreferred,
@@ -296,6 +320,7 @@ function AgentRow({
   provider: AgentProvider;
   auth: OnboardingAuthProvider;
   preferred: boolean;
+  tabStop: boolean;
   polling: boolean;
   busy: boolean;
   onPreferred: () => void;
@@ -310,7 +335,9 @@ function AgentRow({
         type="button"
         className="onboarding-agent-main"
         disabled={!ready}
-        aria-pressed={preferred}
+        role="radio"
+        aria-checked={preferred}
+        tabIndex={tabStop ? 0 : -1}
         onClick={onPreferred}
       >
         <span className="onboarding-agent-icon"><AuthStatusIcon status={auth.status} /></span>
@@ -364,6 +391,9 @@ export function AuthStep({
   const readyCount = (['claude', 'codex'] as const).filter(
     (provider) => state.auth[provider].status === 'logged_in'
   ).length;
+  const firstReady = (['claude', 'codex'] as const).find(
+    (provider) => state.auth[provider].status === 'logged_in'
+  );
   return (
     <div className="onboarding-step-stack">
       <section className="onboarding-section onboarding-agent-section" aria-label={t.auth.preferredTitle}>
@@ -374,7 +404,12 @@ export function AuthStep({
           </div>
           <ShieldCheck aria-hidden="true" size={20} />
         </div>
-        <div className="onboarding-agent-list" role="radiogroup" aria-label={t.auth.preferredTitle}>
+        <div
+          className="onboarding-agent-list"
+          role="radiogroup"
+          aria-label={t.auth.preferredTitle}
+          onKeyDown={moveRadioFocus}
+        >
           {(['claude', 'codex'] as const).map((provider) => (
             <AgentRow
               key={provider}
@@ -382,6 +417,7 @@ export function AuthStep({
               provider={provider}
               auth={state.auth[provider]}
               preferred={preferred === provider}
+              tabStop={preferred === provider || (preferred == null && firstReady === provider)}
               polling={polling[provider]}
               busy={busy}
               onPreferred={() => onPreferred(provider)}
@@ -415,6 +451,9 @@ export function PlatformStep({
   run: RunOnboardingAction;
 }) {
   if (state.platform === 'windows') {
+    const hasSelectedShell = state.windows_shells.some(
+      (choice) => choice.id === state.selected_shell
+    );
     return (
       <section className="onboarding-section" aria-labelledby="windows-shell-title">
         <div className="onboarding-section-heading">
@@ -425,15 +464,22 @@ export function PlatformStep({
           <Terminal aria-hidden="true" size={20} />
         </div>
         {state.windows_shells.length ? (
-          <div className="onboarding-shell-list" role="radiogroup" aria-label={t.platform.windowsTitle}>
-            {state.windows_shells.map((choice) => {
+          <div
+            className="onboarding-shell-list"
+            role="radiogroup"
+            aria-label={t.platform.windowsTitle}
+            onKeyDown={moveRadioFocus}
+          >
+            {state.windows_shells.map((choice, index) => {
               const selected = state.selected_shell === choice.id;
               return (
                 <button
                   key={choice.id}
                   type="button"
                   className="onboarding-shell-row"
-                  aria-pressed={selected}
+                  role="radio"
+                  aria-checked={selected}
+                  tabIndex={selected || (!hasSelectedShell && index === 0) ? 0 : -1}
                   disabled={busy}
                   onClick={() => !selected && void run('default-shell', { id: choice.id })}
                 >
@@ -450,6 +496,7 @@ export function PlatformStep({
         <div className="onboarding-custom-shell">
           <label htmlFor="custom-shell">{t.platform.customShell}</label>
           <TextField
+            id="custom-shell"
             value={shell}
             disabled={busy}
             mono
@@ -480,7 +527,7 @@ export function PlatformStep({
           <div><dt>{t.platform.importedFrom}</dt><dd>{imported?.label ?? t.platform.notImported}</dd></div>
         )}
         <div><dt>{t.platform.currentTheme}</dt><dd>{theme}</dd></div>
-        <div><dt>{t.platform.currentFont}</dt><dd>{state.font_family || 'System'} · {appearance.font_size}px</dd></div>
+        <div><dt>{t.platform.currentFont}</dt><dd>{state.font_family || t.platform.systemFont} · {appearance.font_size}px</dd></div>
         <div><dt>{t.platform.shellTitle}</dt><dd>{shell || t.platform.systemDefault}</dd></div>
       </dl>
     </section>
@@ -511,7 +558,7 @@ export function ReadyStep({
     <div className="onboarding-ready">
       <div className="onboarding-ready-mark" aria-hidden="true"><Check size={34} /></div>
       <dl className="onboarding-ready-list">
-        <div><dt><Palette size={17} />{t.ready.appearance}</dt><dd>{theme} · {state.font_family || 'System'} {appearance.font_size}px</dd></div>
+        <div><dt><Palette size={17} />{t.ready.appearance}</dt><dd>{theme} · {state.font_family || t.platform.systemFont} {appearance.font_size}px</dd></div>
         <div><dt><ShieldCheck size={17} />{t.ready.agent}</dt><dd>{signedIn ? `${preferred === 'claude' ? t.auth.claude : preferred === 'codex' ? t.auth.codex : t.ready.signedInCount(signedIn)} · ${t.auth.preferred}` : t.ready.noAgent}</dd></div>
         <div><dt><Terminal size={17} />{t.ready.terminal}</dt><dd>{shellLabel || t.platform.systemDefault}</dd></div>
       </dl>
