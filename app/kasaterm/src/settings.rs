@@ -5456,18 +5456,36 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
         if let Some(d) = dir.as_deref() {
             c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
         }
-        let logged_in = c
+        let parsed = c
             .output()
             .ok()
-            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-            .map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
+        let logged_in =
+            parsed.as_ref().map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
         let probe = logged_in.map(|logged_in| {
-            // 로그인 안 된 슬롯은 물어볼 토큰이 없다 — 호출을 아낀다.
-            let (email, org) = if logged_in {
-                slot_identity(dir.as_deref())
+            let field = |k: &str| {
+                parsed
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            // 신원은 방금 받은 auth status JSON 이 직접 준다(email·orgName —
+            // 개인 조직 "X's Organization" 은 team_org 가 걸러 준다). 이게 1순위인
+            // 이유: 활성 계정은 /claude-identity 창구가 빈손이라, 그쪽만 믿으면
+            // 활성 행이 영영 「확인 중…」으로 남는다(2026-08-31 실측 — 슬롯 셋은
+            // 풀렸는데 활성만 안 풀렸다). 로그인 안 된 슬롯은 물어볼 것이 없다.
+            let (mut email, mut org) = if logged_in {
+                (field("email"), field("orgName"))
             } else {
                 (String::new(), String::new())
             };
+            if logged_in && email.is_empty() {
+                let (e, o) = slot_identity(dir.as_deref());
+                email = e;
+                org = o;
+            }
             AuthProbe { logged_in, email, org }
         });
         if let Some(cache) = CACHE.get() {

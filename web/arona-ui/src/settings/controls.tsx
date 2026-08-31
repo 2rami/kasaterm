@@ -180,6 +180,7 @@ export function Toggle({
 export function TextField({
   value,
   onCommit,
+  onDone,
   disabled,
   placeholder,
   mono,
@@ -187,6 +188,11 @@ export function TextField({
 }: {
   value: string;
   onCommit: (next: string) => void;
+  /// 편집이 **끝났다**는 신호 — 값이 바뀌었든 아니든 blur 마다 온다. onCommit 은
+  /// 값이 바뀔 때만 불리므로, 폼을 여닫는 상위 상태를 onCommit 에서만 닫으면
+  /// 그대로 나가기·Esc 에서 폼이 영영 안 닫힌다(2026-08-31 지적: 이름바꾸기가
+  /// 폼 형태에서 안 돌아와 설정 창을 껐다 켜야 했다).
+  onDone?: () => void;
   disabled?: boolean;
   placeholder?: string;
   mono?: boolean;
@@ -203,6 +209,7 @@ export function TextField({
       onBlur={(e) => {
         const next = e.currentTarget.value;
         if (next !== value) onCommit(next);
+        onDone?.();
       }}
       onKeyDown={(e) => {
         // Esc 는 이 칸의 되돌리기다. 설정 창 자체를 닫는 전역 Esc 가 위에 걸려

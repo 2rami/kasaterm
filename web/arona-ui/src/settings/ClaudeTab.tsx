@@ -91,10 +91,10 @@ function AccountCard({
             disabled={busy}
             placeholder={t.claude.labelPlaceholder}
             className="w-full max-w-[280px]"
-            onCommit={(next) => {
-              setRenaming(false);
-              onRename(next);
-            }}
+            onCommit={onRename}
+            // 폼 닫기는 onDone 에서 — onCommit 은 값이 바뀔 때만 불려서, 그대로
+            // 나가기·Esc 면 폼이 영영 남았다(설정 창을 껐다 켜야 풀리던 문제).
+            onDone={() => setRenaming(false)}
           />
         ) : (
           <>
