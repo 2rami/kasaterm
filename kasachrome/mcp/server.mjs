@@ -355,4 +355,5 @@ tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol com
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
-log(`ready (bridge ${BRIDGE_URL})`)
+await connect()
+log(`ready (bridge ${activeUrl})`)
