@@ -73,6 +73,10 @@ struct Link {
     base: String,
     remote_id: String,
     identity: RemoteIdentity,
+    /// 거울(뷰어)인가 — 이 pane 은 원본 세션의 격자를 **절대 바꾸지 않는다**.
+    /// 이사(migrate)·승격(promote)처럼 이 앱이 그 세션의 주인인 경우와 갈리는
+    /// 유일한 지점이라 추측이 아니라 연결 창구(`connect_view`)로만 세운다.
+    view: bool,
     /// 같은 local pane id 가 재사용될 때 낡은 매니저의 정리 가드가 **새 링크를**
     /// 걷어가지 않게 하는 세대 표식.
     token: u64,
@@ -104,6 +108,16 @@ pub fn is_remote_pane(local_id: &str) -> bool {
     links().lock().unwrap().contains_key(local_id)
 }
 
+/// 이 pane 이 **거울**인가 — 원본 격자를 못 바꾸는 뷰어 연결. 로컬 리사이즈
+/// 전파(resize_backend)와 렌더의 자동 맞춤이 이걸로 갈린다.
+pub fn is_view_pane(local_id: &str) -> bool {
+    links()
+        .lock()
+        .unwrap()
+        .get(local_id)
+        .is_some_and(|l| l.view)
+}
+
 /// 원격 pane 의 전송 명세 + 정체 한 벌. remote_meta 와 달리 표시·역이사가 쓴다.
 #[derive(Clone, Debug)]
 pub struct RemoteInfo {
@@ -112,6 +126,9 @@ pub struct RemoteInfo {
     pub label: String,
     pub remote_cwd: Option<String>,
     pub origin_cwd: Option<String>,
+    /// 거울 연결(원본 격자 불변). 세션 저장이 이걸 실어야 재시작 뒤에도
+    /// 거울로 되붙는다 — 안 실으면 복원된 pane 이 원본 크기를 뺏는다.
+    pub view: bool,
 }
 
 pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
@@ -121,6 +138,7 @@ pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
         label: l.identity.label.clone(),
         remote_cwd: l.identity.remote_cwd.clone(),
         origin_cwd: l.identity.origin_cwd.clone(),
+        view: l.view,
     })
 }
 
@@ -199,12 +217,35 @@ fn build_url(spec: &RemoteSpec, pane: Option<&str>) -> String {
 /// 확정되고서야 돌아오므로, 실패가 스폰 시점에 드러난다.
 ///
 /// `cols`/`rows` 는 GUI 가 원하는 격자 — 서버 격자와 다르면 접속 직후 resize
-/// 제어로 맞춘다(own=1 이라 force 없이 통과).
+/// 제어로 맞춘다(own=1 이라 force 없이 통과). **이 앱이 그 세션의 주인일 때만**
+/// 쓴다(스폰·이사·승격). 남의 화면을 들여다보는 거울은 `connect_view` 로.
 pub fn connect(
     spec: RemoteSpec,
     local_pane_id: &str,
     cols: u16,
     rows: u16,
+) -> Result<RemoteSession> {
+    connect_inner(spec, local_pane_id, cols, rows, false)
+}
+
+/// **거울(뷰어)** 로 붙는다 — 원본 세션의 격자를 절대 바꾸지 않는다.
+///
+/// 접속 직후의 맞춤 resize 도 보내지 않고(그래서 `cols`/`rows` 인자가 없다),
+/// 이후 로컬 pane 리사이즈도 원격으로 전파하지 않는다. tmux 의 최소-클라이언트
+/// 문제와 같은 것 — 작은 거울 창 하나가 원본 기계의 화면을 쪼그라뜨리던 자리다
+/// (2026-09-02 지시: 「미러링할때 크기 줄이면 미러링되는곳도 pane안에서 줄어들어」).
+/// 로컬 격자는 서버가 보내는 size 핸드셰이크만 따르고, 로컬 pane 이 그보다
+/// 작으면 GUI 가 그 pane 의 글자 배율을 줄여 담는다.
+pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
+    connect_inner(spec, local_pane_id, 0, 0, true)
+}
+
+fn connect_inner(
+    spec: RemoteSpec,
+    local_pane_id: &str,
+    cols: u16,
+    rows: u16,
+    view: bool,
 ) -> Result<RemoteSession> {
     let (etx, erx) = crossbeam_channel::unbounded::<ExtEvent>();
     let (otx, orx) = tokio::sync::mpsc::unbounded_channel::<Out>();
@@ -247,6 +288,12 @@ pub fn connect(
             events: erx,
             writer: Box::new(WsWriter(otx)),
             on_resize: Arc::new(move |c, r| {
+                // 거울은 원본 격자의 주인이 아니다 — 로컬 pane 이 줄어도 제어를
+                // 안 보낸다. 여기가 마지막 방어선이고, 애초에 GUI 쪽 resize 전파
+                // (resize_backend)가 거울 pane 을 건너뛴다.
+                if view {
+                    return;
+                }
                 let _ = otx_resize.send(Out::Control(
                     serde_json::json!({"t": "resize", "cols": c, "rows": r}).to_string(),
                 ));
@@ -260,17 +307,16 @@ pub fn connect(
             base: spec.base.clone(),
             remote_id: remote_id.clone(),
             identity: spec.identity.clone(),
+            view,
             token,
         },
     );
     let session = Arc::new(session);
-    if (cols, rows) != (rc, rr) {
+    // 거울은 서버 격자를 그대로 받아 산다 — 맞춤 resize 조차 원본을 흔든다.
+    if !view && (cols, rows) != (rc, rr) {
         let _ = session.resize(cols, rows);
     }
-    Ok(RemoteSession {
-        session,
-        remote_id,
-    })
+    Ok(RemoteSession { session, remote_id })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,17 +503,23 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
         let r = req.send().await.context("학생 소환 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         anyhow::bail!(
             "원격 학생 소환 실패: {}",
-            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
-    let id = v.get("surface").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let id = v
+        .get("surface")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if id.is_empty() {
         anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
     }
@@ -552,14 +604,16 @@ pub fn push_character_theme(
         let r = req.send().await.context("테마 동행 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         anyhow::bail!(
             "{}",
-            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(())
@@ -587,17 +641,23 @@ pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<
         let r = req.send().await.context("테마 팩 운반 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         anyhow::bail!(
             "{}",
-            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
-    Ok(resp.get("theme").and_then(|v| v.as_str()).unwrap_or_default().to_string())
+    Ok(resp
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// 원격 기계의 세션 목록 `(sid, name)` — 유령 명부 미러링의 소스(`GET /peer-registry`).
@@ -617,7 +677,11 @@ pub fn fetch_peer_registry(base: &str, token: Option<&str>) -> Result<Vec<(Strin
         .iter()
         .filter_map(|p| {
             let sid = p.get("sid")?.as_str()?.to_string();
-            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+            let name = p
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
             Some((sid, name))
         })
         .collect())
@@ -662,14 +726,16 @@ pub fn send_peer_message(
         let r = req.send().await.context("메시지 전송 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         anyhow::bail!(
             "{}",
-            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(())
@@ -711,14 +777,16 @@ fn relay_call(
         let r = req.send().await.context("릴레이 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         anyhow::bail!(
             "{}",
-            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(resp)
@@ -792,7 +860,14 @@ pub fn relay_send(
         urlencode(from_account),
         urlencode(from_machine),
     );
-    relay_call(reqwest::Method::POST, &u, token, Some(body.as_bytes().to_vec()), None).map(|_| ())
+    relay_call(
+        reqwest::Method::POST,
+        &u,
+        token,
+        Some(body.as_bytes().to_vec()),
+        None,
+    )
+    .map(|_| ())
 }
 
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
@@ -800,7 +875,10 @@ pub fn relay_send(
 /// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).
 pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
     let u = format!("{}/term/panes", base.trim_end_matches('/'));
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
     let list: serde_json::Value = rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -857,14 +935,16 @@ pub fn ensure_repo(
         let r = req.send().await.context("레포 준비 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         anyhow::bail!(
             "원격 레포 준비 실패: {}",
-            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(format!(
@@ -917,14 +997,16 @@ pub fn upload_transcript(
         let status = r.status();
         // reqwest 는 json 피처 없이 들어와 있다 — text 로 받아 직접 파싱한다.
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
     })?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         anyhow::bail!(
             "대화 업로드 거부: {}",
-            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(n)
@@ -938,7 +1020,10 @@ fn blocking_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<(u1
         .build()
         .context("http runtime")?;
     rt.block_on(async {
-        let client = reqwest::Client::builder().timeout(timeout).build().context("http client")?;
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("http client")?;
         let mut req = client.get(url);
         if let Some(t) = token {
             req = req.header("x-kasa-token", t);
@@ -1017,7 +1102,9 @@ pub fn remote_repo_state(
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         anyhow::bail!(
             "원격 레포 상태 조회 실패: {}",
-            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     if v.get("exists").and_then(|b| b.as_bool()) == Some(false) {
@@ -1044,7 +1131,10 @@ pub fn note_migrated_away(pane: &str) {
 }
 
 pub fn drain_migrated_away() -> Vec<String> {
-    MIGRATED_AWAY.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    MIGRATED_AWAY
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 /// 원격 세션의 에이전트를 곱게 끈다. Ok(Some(bypass)) = 껐다(권한 모드 포함),
@@ -1081,11 +1171,15 @@ pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>) -> Result<
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         anyhow::bail!(
             "원격 에이전트 종료 실패: {}",
-            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     if v.get("stopped").and_then(|b| b.as_bool()) == Some(true) {
-        Ok(Some(v.get("bypass").and_then(|b| b.as_bool()).unwrap_or(false)))
+        Ok(Some(
+            v.get("bypass").and_then(|b| b.as_bool()).unwrap_or(false),
+        ))
     } else {
         Ok(None)
     }
@@ -1170,7 +1264,9 @@ pub fn fetch_repo_sync(base: &str, path: &str, token: Option<&str>) -> Result<Re
     }
     anyhow::bail!(
         "원격 스냅샷 실패: {}",
-        v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        v.get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("알 수 없는 이유")
     )
 }
 
@@ -1220,11 +1316,16 @@ pub fn push_repo_sync(
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         anyhow::bail!(
             "원격 적용 실패: {}",
-            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
         );
     }
     Ok(Some(
-        v.get("applied").and_then(|a| a.as_str()).unwrap_or("적용됨").to_string(),
+        v.get("applied")
+            .and_then(|a| a.as_str())
+            .unwrap_or("적용됨")
+            .to_string(),
     ))
 }
 
@@ -1266,8 +1367,9 @@ mod tests {
             );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        let backend: Arc<dyn kasa_socket::backend::Backend> =
-            Arc::new(crate::standalone::StandaloneBackend::new(std::env::temp_dir()));
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
         let port = crate::spawn_http_server_opts(backend, 0, false).expect("server");
         let base = format!("http://127.0.0.1:{port}");
         let root =
@@ -1286,7 +1388,9 @@ mod tests {
         ));
         let (src, dst, back) = (root.join("src"), root.join("dst"), root.join("back"));
         // ① 순방향: src 스냅샷 → HTTP POST → 서버가 dst 에 재현.
-        let snap = crate::reposync::snapshot(&src).unwrap().expect("실어 갈 것");
+        let snap = crate::reposync::snapshot(&src)
+            .unwrap()
+            .expect("실어 갈 것");
         let meta = RepoSyncMeta {
             head: snap.head.clone(),
             sync: snap.sync,
@@ -1294,10 +1398,16 @@ mod tests {
             origin: snap.origin,
             dirty: snap.dirty,
         };
-        let applied =
-            push_repo_sync(&base, &dst.to_string_lossy(), &meta, snap.bundle, None, false)
-                .expect("push")
-                .expect("창구가 있어야 한다");
+        let applied = push_repo_sync(
+            &base,
+            &dst.to_string_lossy(),
+            &meta,
+            snap.bundle,
+            None,
+            false,
+        )
+        .expect("push")
+        .expect("창구가 있어야 한다");
         assert!(applied.contains("미저장"), "applied={applied}");
         assert_eq!(sh(&dst, "git rev-parse HEAD"), snap.head);
         assert_eq!(sh(&dst, "cat a.txt"), "one\ntwo\nthree");
@@ -1308,7 +1418,13 @@ mod tests {
                 assert_eq!(m.head, snap.head);
                 assert!(m.dirty);
                 let msg = crate::reposync::apply(
-                    &back, &bytes, &m.head, &m.sync, &m.branch, m.dirty, false,
+                    &back,
+                    &bytes,
+                    &m.head,
+                    &m.sync,
+                    &m.branch,
+                    m.dirty,
+                    false,
                     crate::reposync::OnBlock::Bail,
                 )
                 .expect("apply");
@@ -1331,8 +1447,9 @@ mod tests {
     /// 전 구간을 돈다: 스폰 → 타이핑 → 둘째 클라이언트 이어받기(스냅샷) → kill.
     #[test]
     fn remote_spawn_type_reattach_kill_roundtrip() {
-        let backend: Arc<dyn kasa_socket::backend::Backend> =
-            Arc::new(crate::standalone::StandaloneBackend::new(std::env::temp_dir()));
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
         let port = crate::spawn_http_server_opts(backend, 0, false).expect("server");
         let spec = RemoteSpec {
             base: format!("http://127.0.0.1:{port}"),
@@ -1397,6 +1514,92 @@ mod tests {
         assert!(saw_eof, "kill 뒤 eof 센티널이 안 왔다");
     }
 
+    /// 거울(뷰어)은 원본 세션의 격자를 **어떤 경로로도** 못 바꾼다 — 붙는 순간의
+    /// 맞춤 resize 도, 그 뒤 pane 을 줄여 생기는 resize 도. 대조군으로 소유자
+    /// 연결(connect)은 여전히 바꾼다. 서버 격자는 「아무것도 안 바꾸는」 거울을
+    /// 하나 더 붙여 그 size 핸드셰이크로 읽는다.
+    #[test]
+    fn view_link_never_resizes_origin() {
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
+        let port = crate::spawn_http_server_opts(backend, 0, false).expect("server");
+        let spec = RemoteSpec {
+            base: format!("http://127.0.0.1:{port}"),
+            pane: None,
+            cwd: None,
+            token: None,
+            identity: Default::default(),
+        };
+        let owner = connect(spec.clone(), "%vw0", 100, 30).expect("connect");
+        // 서버 격자 읽기: 아무것도 안 바꾸는 거울을 하나 붙여 size 핸드셰이크만 본다.
+        fn server_size(spec: &RemoteSpec, remote_id: &str, tag: &str) -> (u16, u16) {
+            connect_view(
+                RemoteSpec {
+                    pane: Some(remote_id.to_string()),
+                    ..spec.clone()
+                },
+                tag,
+            )
+            .expect("probe")
+            .session
+            .size()
+        }
+        fn settle(spec: &RemoteSpec, remote_id: &str, want: (u16, u16), tag: &str) -> (u16, u16) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut n = 0u32;
+            let mut got = server_size(spec, remote_id, &format!("{tag}{n}"));
+            while got != want && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(150));
+                n += 1;
+                got = server_size(spec, remote_id, &format!("{tag}{n}"));
+            }
+            got
+        }
+        let rid = owner.remote_id.clone();
+        // 소유자가 세운 격자가 기준선.
+        assert_eq!(
+            settle(&spec, &rid, (100, 30), "%vwa"),
+            (100, 30),
+            "소유자 resize 가 안 먹었다"
+        );
+
+        // 거울로 붙는다 — 붙는 것만으로 격자가 흔들리면 안 된다.
+        let mirror = connect_view(
+            RemoteSpec {
+                pane: Some(rid.clone()),
+                ..spec.clone()
+            },
+            "%vw1",
+        )
+        .expect("view");
+        assert!(is_view_pane("%vw1"));
+        assert!(!is_view_pane("%vw0"), "소유자 연결이 거울로 오판됐다");
+        assert_eq!(
+            mirror.session.size(),
+            (100, 30),
+            "거울이 서버 격자를 못 받았다"
+        );
+
+        // 거울 pane 을 줄인다(로컬 창 축소와 같은 길) — 원본은 그대로여야 한다.
+        let _ = mirror.session.resize(40, 10);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            server_size(&spec, &rid, "%vwb"),
+            (100, 30),
+            "거울이 원본 격자를 뺏었다"
+        );
+
+        // 대조군: 주인은 여전히 바꿀 수 있다.
+        let _ = owner.session.resize(70, 20);
+        assert_eq!(
+            settle(&spec, &rid, (70, 20), "%vwc"),
+            (70, 20),
+            "소유자 resize 가 막혀 버렸다"
+        );
+        assert!(kill_remote("%vw0"));
+    }
+
     #[test]
     fn build_url_encodes_percent_pane_and_cwd() {
         let spec = RemoteSpec {
@@ -1418,7 +1621,10 @@ mod tests {
             identity: Default::default(),
         };
         let url = build_url(&spec, None);
-        assert!(url.contains("cwd=/Users/miku/%ED%95%9C%EA%B8%80%20%ED%8F%B4%EB%8D%94"), "{url}");
+        assert!(
+            url.contains("cwd=/Users/miku/%ED%95%9C%EA%B8%80%20%ED%8F%B4%EB%8D%94"),
+            "{url}"
+        );
         assert!(url.ends_with("&t=tok"));
     }
 }

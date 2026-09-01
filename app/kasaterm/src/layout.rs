@@ -33,12 +33,7 @@ const DROP_CENTER_R: f32 = 0.42;
 /// 최소 줄수가 16인 이유: claude 입력박스만 5줄이라 12줄짜리 pane 은 대화가 두 줄
 /// 보인다. 「좁은 것보다 짧은 게 낫다」가 성립하려면 짧은 쪽이 실제로 쓸 만해야 한다 —
 /// 12로 뒀다가 80×24 pane(표준 크기)이 12줄 두 장으로 갈렸다.
-pub(crate) fn pick_split_axis(
-    px_w: f32,
-    px_h: f32,
-    cols: u16,
-    rows: u16,
-) -> kasa_pty::SplitDir {
+pub(crate) fn pick_split_axis(px_w: f32, px_h: f32, cols: u16, rows: u16) -> kasa_pty::SplitDir {
     use kasa_pty::SplitDir::{Horizontal, Vertical};
     let long_axis = if px_w >= px_h { Horizontal } else { Vertical };
     match long_axis {
@@ -62,7 +57,11 @@ pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
         return DropZone::Center;
     }
     if nx.abs() > ny.abs() {
-        if nx < 0.0 { DropZone::Left } else { DropZone::Right }
+        if nx < 0.0 {
+            DropZone::Left
+        } else {
+            DropZone::Right
+        }
     } else if ny < 0.0 {
         DropZone::Up
     } else {
@@ -133,7 +132,12 @@ impl App {
                 if t.cols == 0 || t.rows == 0 {
                     return None;
                 }
-                let fs = self.pane_font_scales.get(z).copied().unwrap_or(1.0).max(0.1);
+                let fs = self
+                    .pane_font_scales
+                    .get(z)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(0.1);
                 // 줌 pane 은 「떠 있는 카드」라 가장자리에서 zoom_inset_cells 만큼
                 // 들여 그려진다(render_frame_gpu·effective_leaf_rects 와 같은 함수).
                 // 그 원점을 안 빼면 클릭·드래그 선택이 inset 셀수(가로 ~2·세로 1)
@@ -189,19 +193,18 @@ impl App {
                         let hdr = ws.panes.get(&pid).map(|p| p.header_px()).unwrap_or(0.0);
                         let lc = ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
                             .floor() as u16;
-                        let lr = ((py - box_top - hdr - PANE_INNER_Y).max(0.0)
-                            / (self.cell.h * fs))
+                        let lr = ((py - box_top - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs))
                             .floor() as u16;
-                        let (mc, mr) = ws
-                            .panes
-                            .get(&pid)
-                            .and_then(|p| p.term())
-                            .map_or((lc, lr), |t| {
-                                (
-                                    lc.min(t.cols.saturating_sub(1)),
-                                    lr.min(t.rows.saturating_sub(1)),
-                                )
-                            });
+                        let (mc, mr) =
+                            ws.panes
+                                .get(&pid)
+                                .and_then(|p| p.term())
+                                .map_or((lc, lr), |t| {
+                                    (
+                                        lc.min(t.cols.saturating_sub(1)),
+                                        lr.min(t.rows.saturating_sub(1)),
+                                    )
+                                });
                         return Some((pid, mc, mr));
                     }
                 }
@@ -209,20 +212,28 @@ impl App {
             return None;
         }
         // No layout yet — single pane fills the window (inset only).
-        let id = ws.active_pane.clone().or_else(|| ws.panes.keys().next().cloned())?;
+        let id = ws
+            .active_pane
+            .clone()
+            .or_else(|| ws.panes.keys().next().cloned())?;
         let pane = ws.panes.get(&id)?;
         let t = pane.term()?;
         if t.cols == 0 || t.rows == 0 {
             return None;
         }
-        let fs = self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1);
+        let fs = self
+            .pane_font_scales
+            .get(&id)
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.1);
         // 단일 pane(layout 없음)도 이미지/마크다운/2탭이면 헤더 띠가 있다 —
         // 본문 셀은 그 아래에서 시작하므로 multi-pane 경로와 동일하게 보정.
         let hdr = pane.header_px();
-        let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
-            .floor() as u16;
-        let lr = ((py - TITLE_HEIGHT - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs))
-            .floor() as u16;
+        let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / (self.cell.w * fs)).floor()
+            as u16;
+        let lr =
+            ((py - TITLE_HEIGHT - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs)).floor() as u16;
         Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
     }
     /// Convenience wrapper that returns only the active pane's local
@@ -430,6 +441,12 @@ impl App {
         // freshly split pane has no PaneState until its first output, so the
         // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
         for (id, (pc, pr)) in &leaf_cells {
+            // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다 — 로컬 창을 줄였다고
+            // 저쪽 기계 화면까지 쪼그라들면 안 된다(tmux 최소-클라이언트 문제).
+            // 대신 렌더가 그 pane 의 글자 배율을 줄여 원본 격자를 통째로 담는다.
+            if kasa_mcp::remote::is_view_pane(id) {
+                continue;
+            }
             if let Some(sess) = self.pty.get(id) {
                 let _ = sess.resize(*pc, *pr);
             }
@@ -452,8 +469,13 @@ impl App {
                 .collect()
         };
         for (outer, pids) in snapshot {
-            let Some(&(pc, pr)) = leaf_cells.get(&outer) else { continue };
+            let Some(&(pc, pr)) = leaf_cells.get(&outer) else {
+                continue;
+            };
             for pid in pids {
+                if kasa_mcp::remote::is_view_pane(&pid) {
+                    continue;
+                }
                 if let Some(sess) = self.pty.get(&pid) {
                     let _ = sess.resize(pc, pr);
                 }
@@ -680,7 +702,11 @@ impl App {
         let mut env = crate::proxy_env(&new_id);
         if let Some(ref r) = room {
             env.push(("KASATERM_ROOM".to_string(), r.clone()));
-            self.ws.lock().unwrap().pane_room.insert(new_id.clone(), r.clone());
+            self.ws
+                .lock()
+                .unwrap()
+                .pane_room
+                .insert(new_id.clone(), r.clone());
         }
         env.extend(self.assign_character_env(&new_id, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -693,7 +719,11 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         let session = Arc::new(session);
-        self.pump_pty_screens(session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&session));
+        self.pump_pty_screens(
+            session.screens.clone(),
+            new_id.clone(),
+            std::sync::Arc::downgrade(&session),
+        );
         self.insert_pty(new_id.clone(), session);
         Ok(new_id)
     }
@@ -819,7 +849,9 @@ impl App {
         // pane). Use its size for the initial pty so the shell starts at the
         // right cols/rows — `resize_backend` after re-applies it anyway, but a
         // sane initial size keeps the welcome banner from wrapping weird.
-        let (cols, rows) = self.pane_cells(outer).unwrap_or_else(|| self.window_cells());
+        let (cols, rows) = self
+            .pane_cells(outer)
+            .unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = self.alloc_pane_id();
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
@@ -831,7 +863,11 @@ impl App {
         let mut env = crate::proxy_env(&new_pid);
         if let Some(ref r) = room {
             env.push(("KASATERM_ROOM".to_string(), r.clone()));
-            self.ws.lock().unwrap().pane_room.insert(new_pid.clone(), r.clone());
+            self.ws
+                .lock()
+                .unwrap()
+                .pane_room
+                .insert(new_pid.clone(), r.clone());
         }
         env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -844,7 +880,11 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         let session = Arc::new(session);
-        self.pump_pty_screens(session.screens.clone(), new_pid.clone(), std::sync::Arc::downgrade(&session));
+        self.pump_pty_screens(
+            session.screens.clone(),
+            new_pid.clone(),
+            std::sync::Arc::downgrade(&session),
+        );
         self.insert_pty(new_pid.clone(), session);
         {
             let mut ws = self.ws.lock().unwrap();
@@ -887,7 +927,11 @@ impl App {
     /// state). If the zoomed pane is gone (closed or moved out by a broadcast)
     /// this falls back to the real layout, so a stale zoom never paints a
     /// phantom pane.
-    pub(crate) fn effective_leaf_rects(&self, cols: u16, rows: u16) -> Vec<(String, u16, u16, u16, u16)> {
+    pub(crate) fn effective_leaf_rects(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<(String, u16, u16, u16, u16)> {
         if let Some(z) = self.zoomed_pane.as_ref() {
             if let Some(tree) = self.pty_layout.as_ref() {
                 if tree.leaves().iter().any(|l| *l == z.as_str()) {
@@ -950,7 +994,9 @@ impl App {
             let ws = self.ws.lock().unwrap();
             ws.panes.get(outer).is_some_and(|p| {
                 p.tabs.len() <= 1
-                    && p.tabs.first().is_some_and(|t| t.pid.as_deref() == Some(outer))
+                    && p.tabs
+                        .first()
+                        .is_some_and(|t| t.pid.as_deref() == Some(outer))
             })
         };
         if last_primary {
@@ -1230,7 +1276,11 @@ impl App {
             );
             // 락 밖에서 — `record_closed_pane` 이 스스로 `ws` 를 잡는다.
             self.record_closed_pane(&id, true, true);
-            LOST_SINCE.get_or_init(Default::default).lock().unwrap().remove(&id);
+            LOST_SINCE
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .remove(&id);
         }
     }
 
@@ -1276,7 +1326,9 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("split via drag unsupported on tmux backend");
         }
-        let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
+        let (cols, rows) = self
+            .pane_cells(source)
+            .unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(source));
         let new_id = self.alloc_pane_id();
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -1289,7 +1341,11 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         let session = Arc::new(session);
-        self.pump_pty_screens(session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&session));
+        self.pump_pty_screens(
+            session.screens.clone(),
+            new_id.clone(),
+            std::sync::Arc::downgrade(&session),
+        );
         self.insert_pty(new_id.clone(), session);
         // `before=true` means the new leaf becomes the LEFT/TOP child, so
         // the source ends up on the RIGHT/BOTTOM. We want source on the
@@ -1332,8 +1388,12 @@ impl App {
         // 1. Lift the tab out of source.
         let (moved, src_empty): (Option<PaneTab>, bool) = {
             let mut ws = self.ws.lock().unwrap();
-            let Some(src) = ws.panes.get_mut(&td.pane) else { return };
-            if td.from >= src.tabs.len() { return }
+            let Some(src) = ws.panes.get_mut(&td.pane) else {
+                return;
+            };
+            if td.from >= src.tabs.len() {
+                return;
+            }
             let t = src.tabs.remove(td.from);
             if td.from < src.active_tab && src.active_tab > 0 {
                 src.active_tab -= 1;
@@ -1418,7 +1478,9 @@ impl App {
             if !ws.panes.contains_key(dst) {
                 return false;
             }
-            let Some(s) = ws.panes.get_mut(src) else { return false };
+            let Some(s) = ws.panes.get_mut(src) else {
+                return false;
+            };
             // 비었는지 **비우기 전에** 본다. 순서가 반대면 빈 소스를 만났을 때
             // 이미 `take` 로 비워 놓고 early return 으로 나가, 탭 없는 껍데기가
             // `ws.panes` 에 남는다 — 그 pane 을 그리는 순간 앱이 죽는다.
@@ -1740,7 +1802,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
     fn collapse_orphan_leaf(&mut self, target: &str) {
         let (has_grid, needs_pty) = {
             let ws = self.ws.lock().unwrap();
-            (ws.panes.contains_key(target), self.grid_needs_pty(&ws, target))
+            (
+                ws.panes.contains_key(target),
+                self.grid_needs_pty(&ws, target),
+            )
         };
         if !leaf_is_orphan(self.pty.contains_key(target), has_grid, needs_pty) {
             return;
@@ -2005,7 +2070,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
     pub(crate) fn close_active_tab(&mut self) {
         let (pane, idx) = {
             let ws = self.ws.lock().unwrap();
-            let Some(id) = ws.active_pane.clone() else { return };
+            let Some(id) = ws.active_pane.clone() else {
+                return;
+            };
             let idx = ws.panes.get(&id).map(|p| p.active_tab).unwrap_or(0);
             (id, idx)
         };
@@ -2018,9 +2085,13 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 어느 쪽도 못 믿게 된다. 범위 밖 번호는 조용히 무시(마지막으로 접지 않는다 —
     /// 4번을 눌렀는데 3번으로 가면 오타가 이동으로 굳는다).
     pub(crate) fn focus_pane_at(&self, idx: usize) {
-        let Some(tree) = self.pty_layout.as_ref() else { return };
+        let Some(tree) = self.pty_layout.as_ref() else {
+            return;
+        };
         let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();
-        let Some(target) = leaves.get(idx) else { return };
+        let Some(target) = leaves.get(idx) else {
+            return;
+        };
         let mut ws = self.ws.lock().unwrap();
         if ws.active_pane.as_deref() == Some(target.as_str()) {
             return;
@@ -2032,7 +2103,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
     }
     pub(crate) fn cycle_focus(&self, delta: i32) {
-        let Some(tree) = self.pty_layout.as_ref() else { return; };
+        let Some(tree) = self.pty_layout.as_ref() else {
+            return;
+        };
         let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();
         if leaves.len() < 2 {
             return;
@@ -2168,7 +2241,11 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // When the layout has >1 leaf every pane gets a header band — including
         // single-tab panes — so a drop onto a single-tab header reads as Center
         // (tab-merge), not the body's Up zone (the "drag→merge gives split" bug).
-        let header_band = if leaves_count > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+        let header_band = if leaves_count > 1 {
+            PANE_HEADER_HEIGHT
+        } else {
+            0.0
+        };
         for (id, cx, cy, cw, ch) in rects {
             let bx = pad + *cx as f32 * self.cell.w;
             let pane_top = TITLE_HEIGHT + *cy as f32 * self.cell.h;
@@ -2291,19 +2368,29 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 결과가 어긋나지 않는다(원본 트리로 재판정하면 두 pane 사이 분할선이
     /// 커서 밑에 되살아나 중앙 병합이 가장자리 split 으로 뒤집혔다).
     pub(crate) fn live_drag_hit(&self, moving: &str) -> Option<(String, DropZone)> {
-        let mut base = self.drag_orig_layout.clone().or_else(|| self.pty_layout.clone())?;
+        let mut base = self
+            .drag_orig_layout
+            .clone()
+            .or_else(|| self.pty_layout.clone())?;
         if !base.remove_leaf(moving) {
             return None;
         }
         let (cols, rows) = self.window_cells();
         let rects = base.leaf_rects(cols, rows);
-        self.drop_zone_in_rects(&rects, base.leaves().len(), self.cursor_px.0, self.cursor_px.1)
+        self.drop_zone_in_rects(
+            &rects,
+            base.leaves().len(),
+            self.cursor_px.0,
+            self.cursor_px.1,
+        )
     }
     /// 드롭이 "안에 넣기"(중앙)면 소스 pane 을 타깃 탭 스트립으로 병합하고 true.
     /// 라이브로 옮겨 둔 자리를 원본으로 되돌린 뒤 병합한다 — 안 되돌리면 이미
     /// 재배치된 트리 위에 병합이 겹쳐 소스가 두 번 사라진 것처럼 보인다.
     pub(crate) fn take_center_drop(&mut self, moving: &str) -> bool {
-        let Some((dst, DropZone::Center)) = self.live_drag_hit(moving) else { return false };
+        let Some((dst, DropZone::Center)) = self.live_drag_hit(moving) else {
+            return false;
+        };
         if dst == moving {
             return false;
         }
@@ -2314,12 +2401,16 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.merge_pane_into_tabs(moving, &dst)
     }
     pub(crate) fn update_live_drag(&mut self) {
-        let Some(moving) = self.live_drag_moving() else { return };
+        let Some(moving) = self.live_drag_moving() else {
+            return;
+        };
         // 첫 라이브 적용 — 원본 박제. base = 원본에서 carried pane 제거.
         if self.drag_orig_layout.is_none() {
             self.drag_orig_layout = self.pty_layout.clone();
         }
-        let Some(orig) = self.drag_orig_layout.clone() else { return };
+        let Some(orig) = self.drag_orig_layout.clone() else {
+            return;
+        };
         let mut base = orig.clone();
         if !base.remove_leaf(&moving) {
             // 단일 pane(형제 없음) → 라이브로 가를 게 없다. 드롭 때 split_opposite
@@ -2338,9 +2429,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             Some((ref target, DropZone::Center)) if *target != moving => {
                 (base.clone(), Some((target.clone(), DropZone::Center)))
             }
-            Some((ref target, zone))
-                if zone != DropZone::Center && *target != moving =>
-            {
+            Some((ref target, zone)) if zone != DropZone::Center && *target != moving => {
                 let (dir, before) = match zone {
                     DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
                     DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
@@ -2464,16 +2553,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
     pub(crate) fn room_drag_tears(&self) -> bool {
         const TEAR_MARGIN: f32 = 40.0;
         let (win_w, win_h) = self.logical_win_size();
-        let left_win =
-            Self::drag_left_window(self.cursor_px.0, self.cursor_px.1, win_w, win_h);
-        let left_panel = !self.tabs_on_top
-            && self.cursor_px.0 > self.effective_sidebar_w() + TEAR_MARGIN;
+        let left_win = Self::drag_left_window(self.cursor_px.0, self.cursor_px.1, win_w, win_h);
+        let left_panel =
+            !self.tabs_on_top && self.cursor_px.0 > self.effective_sidebar_w() + TEAR_MARGIN;
         left_win || left_panel
     }
 
     /// 이 방이 이미 별도창으로 나가 있는가 — 그 aux 창 인덱스.
     pub(crate) fn torn_aux_room(&self, win: usize) -> Option<usize> {
-        self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+        self.aux_windows
+            .iter()
+            .position(|a| a.room_window() == Some(win))
     }
 
     /// 방 탭 드래그 도중: 아직 안 나갔으면 **놓기 전에** 꺼내고, 이미 나갔으면 그 창을
@@ -2795,11 +2885,20 @@ mod orphan_leaf_tests {
     /// 그 자리를 걷는 판정이 이것 — 한쪽만 보도록 되돌리면 여기서 깨진다.
     #[test]
     fn only_a_leaf_with_neither_shell_nor_grid_is_a_ghost() {
-        assert!(leaf_is_orphan(false, false, false), "셸도 그리드도 없으면 유령이다");
+        assert!(
+            leaf_is_orphan(false, false, false),
+            "셸도 그리드도 없으면 유령이다"
+        );
         // 갓 split 한 pane — PTY 는 붙었고 첫 ScreenUpdate 가 아직 안 왔다.
-        assert!(!leaf_is_orphan(true, false, false), "갓 태어난 pane 을 걷으면 안 된다");
+        assert!(
+            !leaf_is_orphan(true, false, false),
+            "갓 태어난 pane 을 걷으면 안 된다"
+        );
         // 이미지·마크다운·웹 pane — 셸이 원래 없다.
-        assert!(!leaf_is_orphan(false, true, false), "PTY 없는 파일 pane 을 걷으면 안 된다");
+        assert!(
+            !leaf_is_orphan(false, true, false),
+            "PTY 없는 파일 pane 을 걷으면 안 된다"
+        );
         assert!(!leaf_is_orphan(true, true, true), "평범한 셸 pane");
     }
 
@@ -2818,6 +2917,9 @@ mod orphan_leaf_tests {
     /// 원래 없는 것이 정상이라 `grid_needs_pty` 가 거짓이어야 한다.
     #[test]
     fn a_file_pane_never_becomes_a_ghost_just_for_lacking_a_shell() {
-        assert!(!leaf_is_orphan(false, true, false), "웹·이미지·마크다운 pane 은 셸이 없어도 산 것");
+        assert!(
+            !leaf_is_orphan(false, true, false),
+            "웹·이미지·마크다운 pane 은 셸이 없어도 산 것"
+        );
     }
 }
