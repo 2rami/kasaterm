@@ -761,6 +761,14 @@ impl Backend for PtyBackend {
             .collect()
     }
 
+    fn pane_cwds(&self) -> Vec<(String, String)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketPaneCwds(tx));
+        // 폴링 경로(/term/panes)라 오래 못 세운다 — GUI 가 바쁘면 이번 폴은 빈손.
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap_or_default()
+    }
+
     /// `POST /session-switch?idx=N` — 방=윈도우 전환을 GUI 스레드에 위임.
     fn switch_session(&self, idx: usize) -> Result<()> {
         self.proxy
