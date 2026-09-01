@@ -4806,6 +4806,104 @@ async fn term_transcript_post(
     }))
 }
 
+/// `GET /term/codex-session?sid=<uuid>` — 이 기계 Codex home(`~/.codex`)의 그
+/// 대화(rollout)를 통짜 바이트로 준다. 대화 창구(`/term/transcript`)의 codex 판 —
+/// pane 별 CODEX_HOME 은 sessions 를 실홈으로 심링크하므로 rollout 의 정본 자리는
+/// 언제나 실홈이다. 도착지가 같은 자리에 앉힐 수 있게 상대경로를
+/// `x-kasa-codex-rel` 헤더에 싣는다(경로 성분이 전부 ASCII 라 헤더에 안전).
+async fn term_codex_session_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)).cloned() else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "`sid`(Codex 세션 uuid) 가 필요해요".to_string(),
+        )
+            .into_response();
+    };
+    let Some(home) = kasa_socket::home_dir().map(|h| h.join(".codex")) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "서버 HOME 을 몰라 Codex home 을 못 정해요".to_string(),
+        )
+            .into_response();
+    };
+    // rollout 은 512MB 까지 허용이라 파일 IO 가 초 단위일 수 있다.
+    let got = tokio::task::spawn_blocking(move || {
+        kasa_socket::sessions::codex_sessions::bundle_codex_session_by_id(&home, &sid)
+    })
+    .await;
+    match got {
+        Ok(Ok(Some(mut bundle))) => {
+            // v1 은 rollout 한 파일 — validate_bundle 이 강제한다.
+            let file = bundle.files.pop().expect("v1 bundle은 파일 1개");
+            let rel = file.codex_home_relative_path.to_string_lossy().into_owned();
+            (
+                axum::http::StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (
+                        axum::http::HeaderName::from_static("x-kasa-codex-rel"),
+                        rel,
+                    ),
+                ],
+                file.bytes,
+            )
+                .into_response()
+        }
+        Ok(Ok(None)) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "이 기계에 그 Codex 대화가 없어요".to_string(),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Codex 대화 묶기 실패: {e:#}"),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("작업 스레드 실패: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /term/codex-session?sid=<uuid>&rel=<sessions/…/rollout-….jsonl>`
+/// body=rollout 통짜 바이트 — 받은 대화를 이 기계 Codex home 의 같은 자리에
+/// 앉힌다. 검증·충돌 정책은 `codexhome::install_codex_rollout` 하나에 있다
+/// (역이사가 로컬에 앉힐 때도 같은 함수를 쓴다 — 창구마다 정책이 갈리지 않게).
+async fn term_codex_session_post(
+    q: Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let err = |msg: String| Json(serde_json::json!({ "ok": false, "error": msg }));
+    let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)).cloned() else {
+        return err("`sid`(Codex 세션 uuid) 가 필요해요".into());
+    };
+    let Some(rel) = q.get("rel").filter(|r| !r.is_empty()).cloned() else {
+        return err("`rel`(Codex home 기준 상대경로) 가 필요해요".into());
+    };
+    let Some(home) = kasa_socket::home_dir().map(|h| h.join(".codex")) else {
+        return err("서버 HOME 을 몰라 Codex home 을 못 정해요".into());
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        crate::codexhome::install_codex_rollout(
+            &home,
+            &sid,
+            std::path::Path::new(&rel),
+            &body,
+        )
+    })
+    .await;
+    match out {
+        Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(e) => err(format!("작업 스레드 실패: {e}")),
+    }
+}
+
 /// 이 서버 인스턴스의 1회용 토큰. 프로세스가 뜰 때 한 번 만들어진다.
 ///
 /// `with_html` 로 띄우는 패널(세션·보드)은 문서 origin 이 `null` 이라 Origin 검사를
@@ -5680,6 +5778,12 @@ pub fn spawn_http_server_opts(
                         )
                             // 대화 jsonl 은 수백 MB 도 나온다 — axum 기본 2MB 로는
                             // 이사 자체가 이유 없는 실패로만 보인다.
+                            .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
+                    )
+                    .route(
+                        "/term/codex-session",
+                        get(term_codex_session_get).post(term_codex_session_post)
+                            // rollout 상한(512MiB)은 대화 jsonl 과 같은 급이다.
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route(
