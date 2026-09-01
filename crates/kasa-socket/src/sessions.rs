@@ -9,6 +9,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Codex rollout discovery/transfer stays under the existing session namespace,
+/// so no unrelated crate-root API needs to change.
+pub mod codex_sessions {
+    include!("codex_sessions.rs");
+}
+
 /// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards
 /// against grabbing a non-id token after a bare `-r`/`--resume` (the picker).
 pub fn is_uuid(s: &str) -> bool {
@@ -78,8 +84,12 @@ pub fn session_jsonl_path_resolved(cwd: &Path, id: &str) -> Option<PathBuf> {
 /// 모든 .jsonl 을 mtime 내림차순으로 모아 상위 `limit` 개만 라벨까지 파싱한다.
 /// 287개씩 쌓인 디렉터리도 라벨 파싱은 최신 N개에만 들어 비용이 작다.
 pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
-    let Some(dir) = claude_project_dir(cwd) else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Some(dir) = claude_project_dir(cwd) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
@@ -106,8 +116,8 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let label = parse_session_label(&path, true)
-                .unwrap_or_else(|| id.chars().take(8).collect());
+            let label =
+                parse_session_label(&path, true).unwrap_or_else(|| id.chars().take(8).collect());
             Some(RecentSession {
                 harness: "claude".into(),
                 preview: last_exchange(&path, "claude"),
@@ -136,7 +146,10 @@ fn parse_session_label(path: &Path, allow_custom: bool) -> Option<String> {
     // 발췌를 보고…" 메타프롬프트고 assistant 는 빈 발췌 거부문("대화 발췌가 제공되지
     // 않았어요…")이라 라벨·custom-title 이 전부 오염된다. 경로로 통째 제외해
     // 인레이/피커에 절대 안 뜨게 한다(거노 실측).
-    if path.to_str().is_some_and(|s| s.contains("kasaterm-title-gen")) {
+    if path
+        .to_str()
+        .is_some_and(|s| s.contains("kasaterm-title-gen"))
+    {
         return None;
     }
     if let Some(t) = last_custom_title(path) {
@@ -155,7 +168,9 @@ fn parse_session_label(path: &Path, allow_custom: bool) -> Option<String> {
     let reader = std::io::BufReader::new(f);
     let mut first_user: Option<String> = None;
     for line in reader.lines().take(600).map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         match v.get("type").and_then(|t| t.as_str()) {
             Some("ai-title") => {
                 if let Some(t) = v.get("aiTitle").and_then(|t| t.as_str()) {
@@ -302,19 +317,27 @@ pub fn first_prompt_label(tail: &str) -> Option<String> {
         if !line.contains("\"user\"") {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(|t| t.as_str()) != Some("user") {
             continue;
         }
         if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
             continue;
         }
-        let Some(txt) = user_message_text(&v) else { continue };
+        let Some(txt) = user_message_text(&v) else {
+            continue;
+        };
         let txt = txt.trim();
         if txt.is_empty() || is_meta_user_text(txt) {
             continue;
         }
-        let first_line = txt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(txt);
+        let first_line = txt
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(txt);
         if !first_line.is_empty() {
             return Some(first_line.chars().take(60).collect());
         }
@@ -355,7 +378,9 @@ fn last_user_text(path: &Path) -> Option<String> {
     let f = std::fs::File::open(path).ok()?;
     let mut last: Option<String> = None;
     for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if v.get("type").and_then(|t| t.as_str()) != Some("user") {
             continue;
         }
@@ -379,10 +404,14 @@ fn last_user_text(path: &Path) -> Option<String> {
 /// 화면에 전문을 보여주는 쪽이 부르므로, 줄이는 건 부르는 쪽이 정할 일이다.
 pub fn transcript_turns_at(path: &Path, turns: usize) -> Vec<(String, String)> {
     use std::io::BufRead;
-    let Ok(f) = std::fs::File::open(path) else { return Vec::new() };
+    let Ok(f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
     let mut out: Vec<(String, String)> = Vec::new();
     for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         match v.get("type").and_then(|t| t.as_str()) {
             Some("user") => {
                 if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
@@ -428,7 +457,11 @@ pub fn format_turns(turns: &[(String, String)]) -> String {
     turns
         .iter()
         .map(|(role, text)| {
-            let who = if role == "user" { "[사용자]" } else { "[claude]" };
+            let who = if role == "user" {
+                "[사용자]"
+            } else {
+                "[claude]"
+            };
             format!("{who} {}", text.chars().take(500).collect::<String>())
         })
         .collect::<Vec<_>>()
@@ -474,7 +507,10 @@ mod tests {
             r#"{"type":"user","message":{"content":"로그인 버그 고쳐줘\n맥락은 아래에"}}"#,
             "\n",
         );
-        assert_eq!(first_prompt_label(tail).as_deref(), Some("로그인 버그 고쳐줘"));
+        assert_eq!(
+            first_prompt_label(tail).as_deref(),
+            Some("로그인 버그 고쳐줘")
+        );
     }
 
     #[test]
@@ -530,7 +566,10 @@ mod tests {
     }
 
     fn tmp_jsonl(name: &str, body: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("kasa-sessions-test-{name}-{}.jsonl", std::process::id()));
+        let p = std::env::temp_dir().join(format!(
+            "kasa-sessions-test-{name}-{}.jsonl",
+            std::process::id()
+        ));
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         p
@@ -544,7 +583,8 @@ mod tests {
     // 마지막 custom-title 이 꼬리 64KB 밖으로 밀려도 역스캔이 찾아야 한다.
     #[test]
     fn stamp_beyond_64k_tail_is_found() {
-        let filler_line = format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "x".repeat(400)) + "\n";
+        let filler_line =
+            format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "x".repeat(400)) + "\n";
         let mut body = title_rec("옛 제목");
         body.push_str(&title_rec("최신 제목"));
         for _ in 0..1600 {
@@ -566,7 +606,8 @@ mod tests {
 
     #[test]
     fn no_stamp_returns_none() {
-        let filler_line = format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "y".repeat(400)) + "\n";
+        let filler_line =
+            format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "y".repeat(400)) + "\n";
         let p = tmp_jsonl("nostamp", &filler_line.repeat(300));
         assert_eq!(last_custom_title(&p), None);
         let _ = std::fs::remove_file(&p);
@@ -607,11 +648,17 @@ mod tests {
         let mut custom = user_rec("간단히 인사만 해줘");
         custom.push_str(&title_rec("한 문장 인사"));
         let p1 = tmp_jsonl("normalcustom", &custom);
-        assert_eq!(parse_session_label(&p1, true).as_deref(), Some("한 문장 인사"));
+        assert_eq!(
+            parse_session_label(&p1, true).as_deref(),
+            Some("한 문장 인사")
+        );
         let _ = std::fs::remove_file(&p1);
 
         let p2 = tmp_jsonl("normaluser", &user_rec("파일트리 버그 고쳐줘"));
-        assert_eq!(parse_session_label(&p2, true).as_deref(), Some("파일트리 버그 고쳐줘"));
+        assert_eq!(
+            parse_session_label(&p2, true).as_deref(),
+            Some("파일트리 버그 고쳐줘")
+        );
         let _ = std::fs::remove_file(&p2);
     }
 
@@ -624,7 +671,10 @@ mod tests {
         body.push_str(&title_rec("kasa"));
         let p = tmp_jsonl("renamed", &body);
         assert_eq!(session_label_for(&p).as_deref(), Some("kasa"));
-        assert_eq!(session_summary_for(&p).as_deref(), Some("파일 열기 방식 설정"));
+        assert_eq!(
+            session_summary_for(&p).as_deref(),
+            Some("파일 열기 방식 설정")
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -634,7 +684,10 @@ mod tests {
         let mut body = user_rec("파일트리 버그 고쳐줘");
         body.push_str(&title_rec("kasa"));
         let p = tmp_jsonl("renamednoai", &body);
-        assert_eq!(session_summary_for(&p).as_deref(), Some("파일트리 버그 고쳐줘"));
+        assert_eq!(
+            session_summary_for(&p).as_deref(),
+            Some("파일트리 버그 고쳐줘")
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -688,7 +741,11 @@ fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
 fn jsonl_cwd(path: &Path, max_lines: usize) -> Option<String> {
     use std::io::BufRead;
     let f = std::fs::File::open(path).ok()?;
-    for line in std::io::BufReader::new(f).lines().take(max_lines).map_while(Result::ok) {
+    for line in std::io::BufReader::new(f)
+        .lines()
+        .take(max_lines)
+        .map_while(Result::ok)
+    {
         let v: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -710,16 +767,25 @@ fn jsonl_cwd(path: &Path, max_lines: usize) -> Option<String> {
 /// — 그 계산은 멀티바이트 문자 경계에서 조용히 틀리는 종류의 것이다.
 fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
-    let Ok(meta) = f.metadata() else { return Vec::new() };
-    if f.seek(SeekFrom::Start(meta.len().saturating_sub(max_bytes))).is_err() {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(meta) = f.metadata() else {
+        return Vec::new();
+    };
+    if f.seek(SeekFrom::Start(meta.len().saturating_sub(max_bytes)))
+        .is_err()
+    {
         return Vec::new();
     }
     let mut buf = Vec::new();
     if f.read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&buf).lines().map(str::to_string).collect()
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// 목록 한 줄에 붙일 "마지막으로 오간 말". 누가 한 말인지까지 담는다 — 내가
@@ -732,12 +798,21 @@ fn last_exchange(path: &Path, harness: &str) -> String {
     const MAX_CHARS: usize = 200;
 
     let say = |who: &str, text: &str| {
-        let t = text.split_whitespace().collect::<Vec<_>>().take_chars(MAX_CHARS);
-        if t.is_empty() { String::new() } else { format!("{who}: {t}") }
+        let t = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .take_chars(MAX_CHARS);
+        if t.is_empty() {
+            String::new()
+        } else {
+            format!("{who}: {t}")
+        }
     };
 
     for line in tail_lines(path, TAIL).iter().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         let got = if harness == "codex" {
             let p = v.get("payload").unwrap_or(&v);
             if p.get("type").and_then(|t| t.as_str()) != Some("message") {
@@ -769,7 +844,9 @@ fn last_exchange(path: &Path, harness: &str) -> String {
                     if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
                         continue;
                     }
-                    user_message_text(&v).filter(|t| !is_meta_user_text(t.trim())).map(|t| say("나", &t))
+                    user_message_text(&v)
+                        .filter(|t| !is_meta_user_text(t.trim()))
+                        .map(|t| say("나", &t))
                 }
                 _ => continue,
             }
@@ -785,13 +862,19 @@ fn last_exchange(path: &Path, harness: &str) -> String {
 /// 모든 프로젝트를 가로지르는 최근 claude 세션. `recent_sessions_for` 는 한 cwd
 /// 안만 보므로 "이 프로젝트" 목록에 맞고, 통합 피커에는 이쪽이 필요하다.
 pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let Some(home) = crate::home_dir() else {
+        return Vec::new();
+    };
     let root = home.join(".claude/projects");
-    let Ok(projects) = std::fs::read_dir(&root) else { return Vec::new() };
+    let Ok(projects) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
 
     let mut files: Vec<(u64, PathBuf)> = Vec::new();
     for proj in projects.flatten() {
-        let Ok(entries) = std::fs::read_dir(proj.path()) else { continue };
+        let Ok(entries) = std::fs::read_dir(proj.path()) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
@@ -817,8 +900,15 @@ pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
             // None 으로 돌려주는데 폴백을 걸면 목록 상단이 uuid 로 오염된다.
             let label = parse_session_label(&path, true)?;
             let cwd = jsonl_cwd(&path, 40).unwrap_or_default();
-            let s =
-                RecentSession { harness: "claude".into(), id, label, mtime, cwd, preview: String::new(), student: String::new() };
+            let s = RecentSession {
+                harness: "claude".into(),
+                id,
+                label,
+                mtime,
+                cwd,
+                preview: String::new(),
+                student: String::new(),
+            };
             Some((s, path))
         })
         .take(limit)
@@ -839,7 +929,9 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(u64, PathBuf)>) {
     if depth == 0 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let Ok(ft) = e.file_type() else { continue };
         let p = e.path();
@@ -859,13 +951,28 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(u64, PathBuf)>) {
 /// `payload` 가 있으면 그쪽을, 없으면 자기 자신을 보는 것으로 둘을 한 벌로 읽는다.
 fn codex_head(v: &serde_json::Value) -> (String, String, bool) {
     let p = v.get("payload").unwrap_or(v);
-    let s = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let s = |k: &str| {
+        p.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     let id = {
-        let sid = s("session_id");
-        if sid.is_empty() { s("id") } else { sid }
+        // Codex 0.152.0 subagent rollouts carry both: `id` is this thread and
+        // `session_id` is its parent. Older files may only have session_id, so
+        // retain that as a fallback but never let it override the thread id.
+        let id = s("id");
+        if id.is_empty() {
+            s("session_id")
+        } else {
+            id
+        }
     };
     // `codex_exec` 는 스크립트 일회성 실행이다. `codex-tui`(대화형)와 갈라야 한다.
-    let exec = p.get("originator").and_then(|x| x.as_str()).is_some_and(|o| o.contains("exec"))
+    let exec = p
+        .get("originator")
+        .and_then(|x| x.as_str())
+        .is_some_and(|o| o.contains("exec"))
         || p.get("source").and_then(|x| x.as_str()) == Some("exec");
     (id, s("cwd"), exec)
 }
@@ -898,7 +1005,11 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
     let mut label = String::new();
     // 앞 200줄이면 헤더와 첫 사람 발화를 지나친다. 주입 맥락이 서너 줄 앞에
     // 끼므로 옛 코드보다 더 걸어야 하지만, 그래도 파일 앞머리다.
-    for line in std::io::BufReader::new(f).lines().take(200).map_while(Result::ok) {
+    for line in std::io::BufReader::new(f)
+        .lines()
+        .take(200)
+        .map_while(Result::ok)
+    {
         // 첫 줄에 시스템 프롬프트가 통째로 박혀 있어 50KB 를 넘는다. exec 은 열에
         // 아홉이고 그 판정 하나에 그만큼을 매번 JSON 으로 푸는 게 codex 목록의
         // 제일 큰 비용이었다 — 문자열로 먼저 걸러 그 파싱을 아예 건너뛴다.
@@ -906,7 +1017,9 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
         if id.is_empty() && line.contains(r#""originator":"codex_exec""#) {
             return None;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if id.is_empty() {
             let (i, c, exec) = codex_head(&v);
             // 이어갈 대화가 아니다. 임시폴더에서 돌고 끝나는데 수가 압도적이라
@@ -944,7 +1057,11 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
     }
     // 파일명(rollout-<날짜>-<uuid>)에서라도 id 를 건진다.
     if id.is_empty() {
-        id = path.file_stem()?.to_str()?.rsplit_once('-').map(|(_, u)| u.to_string())?;
+        id = path
+            .file_stem()?
+            .to_str()?
+            .rsplit_once('-')
+            .map(|(_, u)| u.to_string())?;
     }
     // 사람이 한 말이 하나도 없는 세션은 뺀다 — codex 는 띄우기만 하고 아무 말도
     // 안 한 세션도 rollout 파일을 남기는데, 이어갈 게 없는 항목이 목록 상단을
@@ -953,7 +1070,15 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
         return None;
     }
     let preview = last_exchange(path, "codex");
-    Some(RecentSession { harness: "codex".into(), id, label, mtime, cwd, preview, student: String::new() })
+    Some(RecentSession {
+        harness: "codex".into(),
+        id,
+        label,
+        mtime,
+        cwd,
+        preview,
+        student: String::new(),
+    })
 }
 
 /// 최근 codex 세션. 조심할 것이 셋이다.
@@ -977,13 +1102,17 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
 /// 전수 스캔은 681개에 0.14초(debug)라 그 값을 살 이유가 없다. 남긴 상한은
 /// 폭주 방어일 뿐이고, 걸리면 조용히 자르는 게 아니라 애초에 도달하지 않는 수다.
 pub fn recent_codex_sessions(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let Some(home) = crate::home_dir() else {
+        return Vec::new();
+    };
     recent_codex_sessions_in(&home.join(".codex/sessions"), limit)
 }
 
 /// 한 프로젝트 안의 codex 세션만. rollout 이 `payload.cwd` 를 남기므로 가능하다.
 pub fn recent_codex_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
-    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let Some(home) = crate::home_dir() else {
+        return Vec::new();
+    };
     let root = home.join(".codex/sessions");
     codex_sessions(&root, limit, Some(&cwd.to_string_lossy()))
 }
@@ -1003,7 +1132,9 @@ fn codex_sessions(root: &Path, limit: usize, only_cwd: Option<&str>) -> Vec<Rece
 
     let mut out = Vec::with_capacity(limit);
     for (mtime, path) in files.into_iter().take(MAX_SCAN) {
-        let Some(s) = codex_session_of(&path, mtime) else { continue };
+        let Some(s) = codex_session_of(&path, mtime) else {
+            continue;
+        };
         if only_cwd.is_some_and(|c| s.cwd != c) {
             continue;
         }
@@ -1026,7 +1157,11 @@ pub fn recent_sessions_here(cwd: &Path, limit: usize) -> Vec<RecentSession> {
     let mut all = recent_sessions_for(cwd, limit);
     all.extend(recent_codex_sessions_for(cwd, limit));
     // agy 는 요약 테이블을 한 번 읽는 게 전부라, 넉넉히 걷고 걸러도 싸다.
-    all.extend(recent_agy_sessions(limit.saturating_mul(4)).into_iter().filter(|s| s.cwd == want));
+    all.extend(
+        recent_agy_sessions(limit.saturating_mul(4))
+            .into_iter()
+            .filter(|s| s.cwd == want),
+    );
     all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     all.truncate(limit);
     all
@@ -1114,7 +1249,10 @@ mod preview_tests {
         }
         body.push_str(r#"{"type":"user","message":{"content":"끝에 남긴 말"}}"#);
         let p = tmp("huge", &body);
-        assert!(std::fs::metadata(&p).unwrap().len() > 128 * 1024, "테스트 파일이 128KB 를 못 넘었다");
+        assert!(
+            std::fs::metadata(&p).unwrap().len() > 128 * 1024,
+            "테스트 파일이 128KB 를 못 넘었다"
+        );
         assert_eq!(last_exchange(&p, "claude"), "나: 끝에 남긴 말");
     }
 
@@ -1164,7 +1302,11 @@ mod codex_listing_tests {
         let r = root("nested");
         let lines = new_format("/proj", "codex-tui", &["안녕 코덱스"]);
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        write(&r, "2026/08/09/rollout-2026-08-09T22-06-20-aaa.jsonl", &refs);
+        write(
+            &r,
+            "2026/08/09/rollout-2026-08-09T22-06-20-aaa.jsonl",
+            &refs,
+        );
 
         let got = recent_codex_sessions_in(&r, 10);
         assert_eq!(got.len(), 1, "날짜 폴더 아래를 못 봤다");
@@ -1198,8 +1340,16 @@ mod codex_listing_tests {
         let r = root("exec");
         let ex = new_format("/tmp/ppcodex-1", "codex_exec", &["그림 그려"]);
         let tui = new_format("/proj", "codex-tui", &["진짜 대화"]);
-        write(&r, "2026/08/09/a.jsonl", &ex.iter().map(String::as_str).collect::<Vec<_>>());
-        write(&r, "2026/08/09/b.jsonl", &tui.iter().map(String::as_str).collect::<Vec<_>>());
+        write(
+            &r,
+            "2026/08/09/a.jsonl",
+            &ex.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        write(
+            &r,
+            "2026/08/09/b.jsonl",
+            &tui.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
 
         let got = recent_codex_sessions_in(&r, 10);
         assert_eq!(got.len(), 1, "exec 실행이 목록에 남았다");
@@ -1214,9 +1364,16 @@ mod codex_listing_tests {
         let lines = new_format(
             "/proj",
             "codex-tui",
-            &["# AGENTS.md instructions 개발을 처음배우는", "실제로 물어본 것"],
+            &[
+                "# AGENTS.md instructions 개발을 처음배우는",
+                "실제로 물어본 것",
+            ],
         );
-        write(&r, "2026/08/09/c.jsonl", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        write(
+            &r,
+            "2026/08/09/c.jsonl",
+            &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
 
         let got = recent_codex_sessions_in(&r, 10);
         assert_eq!(got.len(), 1);
@@ -1252,7 +1409,11 @@ mod codex_listing_tests {
             write(&r, &format!("2026/08/09/e{i:03}.jsonl"), &refs);
         }
         let tui = new_format("/proj", "codex-tui", &["묻힌 대화"]);
-        write(&r, "2026/08/08/real.jsonl", &tui.iter().map(String::as_str).collect::<Vec<_>>());
+        write(
+            &r,
+            "2026/08/08/real.jsonl",
+            &tui.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
 
         let got = recent_codex_sessions_in(&r, 1);
         assert_eq!(got.len(), 1, "exec 더미에 막혀 대화를 못 찾았다");
@@ -1265,7 +1426,11 @@ mod codex_listing_tests {
         // 차지하면 진짜 대화가 밀린다.
         let r = root("empty");
         let lines = new_format("/proj", "codex-tui", &[]);
-        write(&r, "2026/08/09/d.jsonl", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        write(
+            &r,
+            "2026/08/09/d.jsonl",
+            &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
         assert!(recent_codex_sessions_in(&r, 10).is_empty());
     }
 }
@@ -1284,7 +1449,9 @@ mod codex_listing_tests {
 /// 통째로 평문 JSONL 이라 `conversations/<uuid>.db` 의 protobuf 를 열 이유가 없다 —
 /// 실측으로 brain 105개 == conversations 105개, 차집합 0 이다.
 pub fn recent_agy_sessions(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let Some(home) = crate::home_dir() else {
+        return Vec::new();
+    };
     recent_agy_sessions_in(&home.join(".gemini/antigravity-cli"), limit)
 }
 
@@ -1294,9 +1461,13 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
     // stat 만 먼저 하고 상위 limit 개만 파싱한다. 지금은 105개 3.4MB 라 전수를
     // 읽어도 싸지만, 이 디렉터리는 대화마다 늘고 지워지지 않는다.
     let mut files: Vec<(u64, String, PathBuf)> = Vec::new();
-    let Ok(rd) = std::fs::read_dir(root.join("brain")) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(root.join("brain")) else {
+        return Vec::new();
+    };
     for ent in rd.flatten() {
-        let Some(id) = ent.file_name().to_str().map(str::to_string) else { continue };
+        let Some(id) = ent.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
         let logs = ent.path().join(".system_generated/logs");
         // full 우선. 파일 크기로 신구를 가르면 안 된다 — transcript 쪽은 args 가
         // 이중 인코딩돼 있어 절반은 오히려 full 보다 크다.
@@ -1305,7 +1476,9 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
             .map(|n| logs.join(n))
             .find(|p| p.is_file());
         let Some(path) = path else { continue };
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
         files.push((mtime_secs(&meta), id, path));
     }
     files.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1335,7 +1508,15 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
                 .find_map(agy_cwd)
                 .or_else(|| ws.get(&id).cloned())
                 .unwrap_or_default();
-            RecentSession { harness: "agy".into(), id, label, mtime, cwd, preview, student: String::new() }
+            RecentSession {
+                harness: "agy".into(),
+                id,
+                label,
+                mtime,
+                cwd,
+                preview,
+                student: String::new(),
+            }
         })
         .collect()
 }
@@ -1343,13 +1524,19 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
 /// 줄 단위 JSON 을 읽는다. 깨진 줄은 버린다 — append 도중 잘린 행이 실제로 있고
 /// (105개 중 2곳), `?` 로 흘리면 그 파일 하나가 통째로 목록에서 사라진다.
 fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 /// 한 행의 `content` 를 타입으로 걸러 꺼낸다.
 fn agy_content<'a>(row: &'a serde_json::Value, kind: &str) -> Option<&'a str> {
-    (row.get("type")?.as_str()? == kind).then(|| row.get("content")?.as_str()).flatten()
+    (row.get("type")?.as_str()? == kind)
+        .then(|| row.get("content")?.as_str())
+        .flatten()
 }
 
 /// agy 가 스스로 붙인 제목. CHECKPOINT 행 안의 `# USER Objective:` 다음 줄이다.
@@ -1362,7 +1549,12 @@ fn agy_objective(row: &serde_json::Value) -> Option<String> {
 /// 사용자가 실제로 친 첫 문장. 제목이 없는 대화의 폴백이자 미리보기.
 fn agy_request(row: &serde_json::Value) -> Option<String> {
     let body = agy_content(row, "USER_INPUT")?;
-    clean_label(body.split_once("<USER_REQUEST>")?.1.split_once("</USER_REQUEST>")?.0)
+    clean_label(
+        body.split_once("<USER_REQUEST>")?
+            .1
+            .split_once("</USER_REQUEST>")?
+            .0,
+    )
 }
 
 fn clean_label(s: &str) -> Option<String> {
@@ -1402,7 +1594,11 @@ mod recent_agy_tests {
     }
 
     fn convo(root: &Path, id: &str, file: &str, lines: &[&str]) {
-        let p = root.join("brain").join(id).join(".system_generated/logs").join(file);
+        let p = root
+            .join("brain")
+            .join(id)
+            .join(".system_generated/logs")
+            .join(file);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, lines.join("\n")).unwrap();
     }
@@ -1420,7 +1616,12 @@ mod recent_agy_tests {
     #[test]
     fn objective_wins_and_the_prompt_becomes_the_preview() {
         let r = root("title");
-        convo(&r, "id-a", "transcript_full.jsonl", &[&checkpoint("켄지 이름 소개"), &user_input("얘 이름 뭐야")]);
+        convo(
+            &r,
+            "id-a",
+            "transcript_full.jsonl",
+            &[&checkpoint("켄지 이름 소개"), &user_input("얘 이름 뭐야")],
+        );
         let got = recent_agy_sessions_in(&r, 10);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].label, "켄지 이름 소개");
@@ -1434,7 +1635,12 @@ mod recent_agy_tests {
         // 제목이 없는 대화가 105건 중 14건 있었다. 프롬프트를 제목으로 올리되
         // 같은 줄을 두 번 그리지 않는지가 요지다.
         let r = root("notitle");
-        convo(&r, "id-b", "transcript_full.jsonl", &[&user_input("이거도 팀모드 있나")]);
+        convo(
+            &r,
+            "id-b",
+            "transcript_full.jsonl",
+            &[&user_input("이거도 팀모드 있나")],
+        );
         let got = recent_agy_sessions_in(&r, 10);
         assert_eq!(got[0].label, "이거도 팀모드 있나");
         assert_eq!(got[0].preview, "");
@@ -1444,7 +1650,15 @@ mod recent_agy_tests {
     fn a_torn_line_does_not_drop_the_conversation() {
         // append 도중 잘린 행이 실제로 있다. 파일 하나가 통째로 사라지면 안 된다.
         let r = root("torn");
-        convo(&r, "id-c", "transcript_full.jsonl", &["{\"step_index\":3,\"content\": 중간부터", &checkpoint("살아남기")]);
+        convo(
+            &r,
+            "id-c",
+            "transcript_full.jsonl",
+            &[
+                "{\"step_index\":3,\"content\": 중간부터",
+                &checkpoint("살아남기"),
+            ],
+        );
         assert_eq!(recent_agy_sessions_in(&r, 10)[0].label, "살아남기");
     }
 
@@ -1462,18 +1676,28 @@ mod recent_agy_tests {
         let r = root("cwd");
         let view = json!({"type": "VIEW_FILE", "tool_calls": [
             {"name": "view_file", "args": {"AbsolutePath": "/Users/kasa/input/slime_00.png"}}]})
-            .to_string();
+        .to_string();
         let run = json!({"type": "RUN_COMMAND", "tool_calls": [
             {"name": "run_command", "args": {"CommandLine": "git log", "Cwd": "/Users/kasa/proj"}}]})
             .to_string();
-        convo(&r, "id-e", "transcript_full.jsonl", &[&checkpoint("경로"), &view, &run]);
+        convo(
+            &r,
+            "id-e",
+            "transcript_full.jsonl",
+            &[&checkpoint("경로"), &view, &run],
+        );
         assert_eq!(recent_agy_sessions_in(&r, 10)[0].cwd, "/Users/kasa/proj");
     }
 
     #[test]
     fn the_workspace_cache_fills_in_a_conversation_that_used_no_tools() {
         let r = root("wscache");
-        convo(&r, "id-f", "transcript_full.jsonl", &[&checkpoint("도구 안 씀")]);
+        convo(
+            &r,
+            "id-f",
+            "transcript_full.jsonl",
+            &[&checkpoint("도구 안 씀")],
+        );
         std::fs::create_dir_all(r.join("cache")).unwrap();
         std::fs::write(
             r.join("cache/last_conversations.json"),
@@ -1488,12 +1712,24 @@ mod recent_agy_tests {
         let r = root("order");
         for (i, id) in ["old", "mid", "new"].iter().enumerate() {
             convo(&r, id, "transcript_full.jsonl", &[&checkpoint(id)]);
-            let p = r.join("brain").join(id).join(".system_generated/logs/transcript_full.jsonl");
-            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i as u64 * 100);
-            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+            let p = r
+                .join("brain")
+                .join(id)
+                .join(".system_generated/logs/transcript_full.jsonl");
+            let t = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000 + i as u64 * 100);
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
         }
         let got = recent_agy_sessions_in(&r, 2);
-        assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["new", "mid"]);
+        assert_eq!(
+            got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["new", "mid"]
+        );
     }
 
     #[test]
@@ -1533,7 +1769,11 @@ pub fn resume_command(harness: &str, id: &str, cwd: &str) -> String {
         "agy" => format!("agy --conversation {}", q(id)),
         _ => format!("claude --resume {}", q(id)),
     };
-    if cwd.is_empty() { cmd } else { format!("cd {} && {cmd}", q(cwd)) }
+    if cwd.is_empty() {
+        cmd
+    } else {
+        format!("cd {} && {cmd}", q(cwd))
+    }
 }
 
 #[cfg(test)]
@@ -1563,7 +1803,10 @@ mod resume_command_tests {
     fn quotes_paths_with_spaces() {
         // 사람이 만든 경로엔 공백·괄호가 흔하다. 따옴표가 없으면 cd 가 거기서 끊긴다.
         let got = resume_command("claude", "id", "/Users/kasa/My Projects (old)");
-        assert_eq!(got, "cd '/Users/kasa/My Projects (old)' && claude --resume 'id'");
+        assert_eq!(
+            got,
+            "cd '/Users/kasa/My Projects (old)' && claude --resume 'id'"
+        );
     }
 
     #[test]

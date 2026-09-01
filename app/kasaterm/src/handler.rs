@@ -44,8 +44,7 @@ impl ApplicationHandler<UserEvent> for App {
                 *c.0.entry(name).or_default() += 1;
                 let at = c.1.get_or_insert_with(Instant::now);
                 if at.elapsed() >= std::time::Duration::from_secs(1) {
-                    let line: Vec<String> =
-                        c.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    let line: Vec<String> = c.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
                     eprintln!("[ev] {}", line.join(" "));
                     *c = (BTreeMap::new(), Some(Instant::now()));
                 }
@@ -245,11 +244,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // split 직후 새 pane 은 `ws.panes` 에 PaneState 가 아직 없어서,
                 // 방금 만든 pane 을 다음 대상으로 넘기는 연속 split(`--count`)이
                 // 「없는 pane」으로 거절당한다. 트리는 `split_leaf` 가 동기로 갱신한다.
-                let missing = from.as_ref().and_then(|f| {
-                    self.window_of_pane(f).is_none().then(|| f.clone())
-                });
+                let missing = from
+                    .as_ref()
+                    .and_then(|f| self.window_of_pane(f).is_none().then(|| f.clone()));
                 let outcome = if let Some(f) = missing {
-                    Err(format!("쪼갤 pane {f} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"))
+                    Err(format!(
+                        "쪼갤 pane {f} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"
+                    ))
                 } else {
                     if let Some(from) = from {
                         self.ws.lock().unwrap().active_pane = Some(from.clone());
@@ -398,17 +399,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketUnfold(label, reply) => {
                 // 라벨도 migrate 처럼 별칭을 받는다 — `mini` 는 명부 첫 기계.
-                let resolved = kasa_mcp::machines::find(label).map(|m| m.label).or_else(|| {
-                    (label == "mini")
-                        .then(|| kasa_mcp::machines::machines().into_iter().next())
-                        .flatten()
-                        .map(|m| m.label)
-                });
+                let resolved = kasa_mcp::machines::find(label)
+                    .map(|m| m.label)
+                    .or_else(|| {
+                        (label == "mini")
+                            .then(|| kasa_mcp::machines::machines().into_iter().next())
+                            .flatten()
+                            .map(|m| m.label)
+                    });
                 let outcome = match resolved {
                     Some(l) => self.unfold_machine(&l).map_err(|e| format!("{e:#}")),
-                    None => {
-                        Err(format!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인"))
-                    }
+                    None => Err(format!(
+                        "기계 {label} 를 명부에서 못 찾았다 — machines.json 확인"
+                    )),
                 };
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket unfold 실패: {why}");
@@ -594,8 +597,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // ⚠️ **기존 바인딩이 있고 다를 때만** — 바인딩이 없는(None) 포크·bg
                 // 세션은 건드리지 않는다. 그건 apply 가 부모 상속·anchor 로 복원할 몫이고,
                 // 여기서 굳히면 그 복원을 막아 옛 「미도리→유우카 둔갑」 회귀가 난다.
-                if let Some(cur) =
-                    self.ws.lock().unwrap().pane_character.get(pane.as_str()).cloned()
+                if let Some(cur) = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .pane_character
+                    .get(pane.as_str())
+                    .cloned()
                 {
                     if !cur.is_empty()
                         && kasa_mcp::character::session_character(sid)
@@ -639,7 +647,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // 크기 resize 는 no-op). 원 크기는 그리드 스냅샷에서 취한다.
                 let size = {
                     let ws = self.ws.lock().unwrap();
-                    ws.panes.get(pane).and_then(|p| p.term()).map(|t| (t.cols, t.rows))
+                    ws.panes
+                        .get(pane)
+                        .and_then(|p| p.term())
+                        .map(|t| (t.cols, t.rows))
                 };
                 if let (Some((cols, rows)), Some(sess)) = (size, self.pty.get(pane)) {
                     if rows > 4 {
@@ -654,7 +665,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::ResumeSession { id, cwd, newroom, attach, harness } => {
+            UserEvent::ResumeSession {
+                id,
+                cwd,
+                newroom,
+                attach,
+                harness,
+            } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
@@ -758,8 +775,7 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                             format!("{line}\r")
                         };
-                        let at = std::time::Instant::now()
-                            + std::time::Duration::from_millis(900);
+                        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                         self.pending_restores.push((sess, cmd, at));
                     }
                 }
@@ -780,9 +796,12 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(sess) = self.pty.get(&pane).cloned() {
                         let now = std::time::Instant::now();
                         let at = |n| now + std::time::Duration::from_millis(n);
-                        self.pending_restores.push((sess.clone(), "\u{15}".to_string(), at(0)));
-                        self.pending_restores.push((sess.clone(), "\u{1b}[D".to_string(), at(80)));
-                        self.pending_restores.push((sess, "\u{1b}[D".to_string(), at(160)));
+                        self.pending_restores
+                            .push((sess.clone(), "\u{15}".to_string(), at(0)));
+                        self.pending_restores
+                            .push((sess.clone(), "\u{1b}[D".to_string(), at(80)));
+                        self.pending_restores
+                            .push((sess, "\u{1b}[D".to_string(), at(160)));
                     }
                 }
                 return;
@@ -801,7 +820,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketSaveCharacter(req, reply) => {
                 let kasa_socket::backend::CharacterSave {
-                    name, persona, new_name, model, backend, raw, raw_yaml,
+                    name,
+                    persona,
+                    new_name,
+                    model,
+                    backend,
+                    raw,
+                    raw_yaml,
                 } = req;
                 // 정의를 통째로 받은 경우(원본 뷰 저장)는 낱개 필드와 섞지 않는다 —
                 // 통째 교체가 낱개를 이미 포함하므로, 둘을 겹쳐 태우면 어느 쪽이
@@ -812,7 +837,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.students_raw.text = raw.clone();
                     self.save_student_raw();
                     let err = self.students_raw.err.clone();
-                    let saved = self.students_selected.clone().unwrap_or_else(|| name.clone());
+                    let saved = self
+                        .students_selected
+                        .clone()
+                        .unwrap_or_else(|| name.clone());
                     let _ = reply.send(Ok(serde_json::json!({
                         "ok": err.is_none(),
                         "name": saved,
@@ -829,9 +857,12 @@ impl ApplicationHandler<UserEvent> for App {
                     let keep = |f: fn(&serde_json::Value, &str) -> Option<String>| {
                         cur.as_ref().and_then(|c| f(c, &name)).unwrap_or_default()
                     };
-                    let m = model.clone().unwrap_or_else(|| keep(kasa_mcp::character::model_for));
-                    let b =
-                        backend.clone().unwrap_or_else(|| keep(kasa_mcp::character::backend_for));
+                    let m = model
+                        .clone()
+                        .unwrap_or_else(|| keep(kasa_mcp::character::model_for));
+                    let b = backend
+                        .clone()
+                        .unwrap_or_else(|| keep(kasa_mcp::character::backend_for));
                     self.settings_apply(SettingsAction::SelectStudent(name.clone()));
                     self.settings_apply(SettingsAction::StudentModel(m, b));
                     if persona.is_none() && new_name.is_none() {
@@ -896,8 +927,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // 채 굳는다. 그러면 로스터는 번들로 떨어지는데 「쓰는 중」 배지는
                 // **어느 카드에도 안 붙어서**, 사용자는 무엇이 켜져 있는지 화면에서
                 // 알 수 없게 된다(실측으로 그 상태를 만들었다).
-                let theme_exists =
-                    |id: &str| kasa_mcp::character::list_themes().iter().any(|(t, _)| t.as_str() == id);
+                let theme_exists = |id: &str| {
+                    kasa_mcp::character::list_themes()
+                        .iter()
+                        .any(|(t, _)| t.as_str() == id)
+                };
                 let ok = match action.as_str() {
                     // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
                     // 세부는 밖에 있어야 한다(거노 2026-08-25). `label` 에 테마 키가
@@ -955,9 +989,7 @@ impl ApplicationHandler<UserEvent> for App {
                     "delete-theme" if arg.is_empty() => {
                         Err("기본 테마는 치울 수 없어요".to_string())
                     }
-                    "delete-theme" if !theme_exists(&arg) => {
-                        Err(format!("'{arg}' 테마가 없어요"))
-                    }
+                    "delete-theme" if !theme_exists(&arg) => Err(format!("'{arg}' 테마가 없어요")),
                     "delete-theme" => {
                         self.settings_apply(SettingsAction::DeleteTheme(arg.clone()));
                         Ok(!theme_exists(&arg))
@@ -997,11 +1029,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // 그래서 `<테마>/<이름>` 을 한 값에 못 싣고, 문자열 자리 둘을
                     // 테마·이름에 내주고 켬/끔은 접미로 뺐다(`reauth-account-isolated`
                     // 와 같은 규약).
-                    "character-pick" | "character-pick-off" => self.apply_character_pick(
-                        &arg,
-                        label.as_deref(),
-                        !action.ends_with("-off"),
-                    ),
+                    "character-pick" | "character-pick-off" => {
+                        self.apply_character_pick(&arg, label.as_deref(), !action.ends_with("-off"))
+                    }
                     // 테마 통째로.
                     "theme-pick-all" | "theme-pick-none" => {
                         self.apply_theme_pick_all(&arg, action.ends_with("-all"))
@@ -1107,7 +1137,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::SocketWebDrive { op, arg, surface, reply } => {
+            UserEvent::SocketWebDrive {
+                op,
+                arg,
+                surface,
+                reply,
+            } => {
                 // `kasaterm-cli web-eval/-text/-shot/-url` — 답은 reply 채널로
                 // 소켓 스레드에 돌아간다(eval/shot 은 wry·WebKit 콜백에서 늦게).
                 self.web_drive(op, arg, surface.as_deref(), reply.clone());
@@ -1160,7 +1195,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::Notify { surface_id, title, body } => {
+            UserEvent::Notify {
+                surface_id,
+                title,
+                body,
+            } => {
                 self.handle_notify(surface_id, title, body);
                 self.render_frame();
                 return;
@@ -1210,7 +1249,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_toast(msg);
                 return;
             }
-            UserEvent::ClaudeAccountAutoswitch { to, cooldown_until, pct } => {
+            UserEvent::ClaudeAccountAutoswitch {
+                to,
+                cooldown_until,
+                pct,
+            } => {
                 // 사람에게 물어보려고 띄워 둔 확인은 버린다 — 그 숫자는 이미 낡았고,
                 // 자동 전환은 사람이 없는 사이에도 돌아야 해서 확인을 안 탄다.
                 self.account_switch_confirm = None;
@@ -1256,8 +1299,7 @@ impl ApplicationHandler<UserEvent> for App {
                         format!("{}분 뒤 풀려요", left.div_ceil(60))
                     })
                     .unwrap_or_else(|| "언제 풀리는지는 모르겠어요".to_string());
-                let body =
-                    format!("사용량 {pct:.0}% — 옮겨갈 계정이 없어요. {when}");
+                let body = format!("사용량 {pct:.0}% — 옮겨갈 계정이 없어요. {when}");
                 self.set_toast(body.clone());
                 crate::chrome::notify_desktop(
                     "계정 한도",
@@ -1394,7 +1436,11 @@ impl ApplicationHandler<UserEvent> for App {
             let update_item = MenuItem::new("업데이트 확인…", true, None);
             // ⌘Q 를 가로채 종료 확인(ghostty 식)을 띄우려면 PredefinedMenuItem::quit(OS 가
             // 직접 terminate 라 가로채기 불가) 대신 커스텀 항목으로 — MenuEvent 로 받아 NSAlert.
-            let quit_item = MenuItem::new("kasaterm 종료", true, "CmdOrCtrl+Q".parse::<Accelerator>().ok());
+            let quit_item = MenuItem::new(
+                "kasaterm 종료",
+                true,
+                "CmdOrCtrl+Q".parse::<Accelerator>().ok(),
+            );
             let _ = app_m.append_items(&[
                 &PredefinedMenuItem::about(None, None),
                 &update_item,
@@ -1417,7 +1463,8 @@ impl ApplicationHandler<UserEvent> for App {
             // 만들어 MenuEvent 로 받고, webview 우선 위임(send_*_action) 후 안 먹으면
             // 직접 클립보드를 처리한다. Cut/SelectAll(Cmd+X/A)은 터미널이 안 쓰니 predefined 유지.
             let copy_item = MenuItem::new("복사", true, "CmdOrCtrl+C".parse::<Accelerator>().ok());
-            let paste_item = MenuItem::new("붙여넣기", true, "CmdOrCtrl+V".parse::<Accelerator>().ok());
+            let paste_item =
+                MenuItem::new("붙여넣기", true, "CmdOrCtrl+V".parse::<Accelerator>().ok());
             let edit_m = Submenu::new("편집", true);
             let _ = edit_m.append_items(&[
                 &PredefinedMenuItem::undo(None),
@@ -1533,9 +1580,8 @@ impl ApplicationHandler<UserEvent> for App {
         // from the window edges (see window_event mouse handling).
         #[cfg(windows)]
         let attrs = attrs.with_decorations(false);
-        let window = Arc::new(
-            crate::auxwin::create_untabbed(event_loop, attrs).expect("create window"),
-        );
+        let window =
+            Arc::new(crate::auxwin::create_untabbed(event_loop, attrs).expect("create window"));
         // `with_position` 을 무시하는 플랫폼(일부 Wayland 컴포지터)을 위한 폴백.
         // 이미 그 자리에 떴으면 no-op 이라 mac/Windows 에선 값이 없다.
         if let Some((px, py)) = restore_pos {
@@ -1605,8 +1651,8 @@ impl ApplicationHandler<UserEvent> for App {
                 std::thread::sleep(std::time::Duration::from_millis(
                     crate::render::ULTRA_COMET_FRAME_MS,
                 ));
-                let animating = crate::render::ULTRA_COMET_ANIMATING
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                let animating =
+                    crate::render::ULTRA_COMET_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
                 if animating && comet_proxy.send_event(UserEvent::Redraw).is_err() {
                     break;
                 }
@@ -1625,8 +1671,7 @@ impl ApplicationHandler<UserEvent> for App {
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 let targets: Vec<std::path::PathBuf> = poll_cwds.lock().unwrap().clone();
-                let mut next: HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge> =
-                    HashMap::new();
+                let mut next: HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge> = HashMap::new();
                 for cwd in targets {
                     if next.contains_key(&cwd) {
                         continue;
@@ -1669,7 +1714,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // pane commits, a half-written index, …) returns None — skip
                 // this tick and keep the last good snapshot so the column never
                 // flashes the notice mid-operation.
-                let Some(view) = fetch_git_col_view(&cwd, want) else { continue };
+                let Some(view) = fetch_git_col_view(&cwd, want) else {
+                    continue;
+                };
                 let mut guard = match panel_data.lock() {
                     Ok(g) => g,
                     Err(_) => break,
@@ -1817,7 +1864,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // 쓸모가 「지금 어디로 옮기나」인데, 정작 옮겨 갈 후보의 숫자가
                     // 굳어 있으면 열어 둔 의미가 없다.
                     let others_now = menu_open
-                        || others_at.is_none_or(|t: std::time::Instant| t.elapsed() >= OTHERS_EVERY);
+                        || others_at
+                            .is_none_or(|t: std::time::Instant| t.elapsed() >= OTHERS_EVERY);
                     if !others_now {
                         if let Some(b) = active_badge.clone() {
                             if let Ok(mut g) = usage_all.lock() {
@@ -1836,10 +1884,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(b) = active_badge {
                             all.insert(b.account_dir.clone(), b);
                         }
-                        let mut dirs: Vec<String> = vec![crate::claude_auth::runtime_dir_for(
-                            "", &active_id,
-                        )
-                        .map_or(String::new(), |p| p.to_string_lossy().into_owned())];
+                        let mut dirs: Vec<String> =
+                            vec![crate::claude_auth::runtime_dir_for("", &active_id)
+                                .map_or(String::new(), |p| p.to_string_lossy().into_owned())];
                         dirs.extend(socket::read_claude_accounts().iter().filter_map(|a| {
                             crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                 .map(|p| p.to_string_lossy().into_owned())
@@ -1869,9 +1916,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .filter(|d| !all.contains_key(d) && seen.insert(d.clone()))
                             .map(|d| {
                                 let port = port.clone();
-                                std::thread::spawn(move || {
-                                    fetch_claude_usage(&port, &d, menu_open)
-                                })
+                                std::thread::spawn(move || fetch_claude_usage(&port, &d, menu_open))
                             })
                             .collect();
                         for j in jobs {
@@ -1950,13 +1995,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // 적지 않는다(모르는 값으로 잠그면 영영 안 풀린다).
                     {
                         let limit = socket::read_account_autoswitch_pct();
-                        let known: Vec<(String, std::path::PathBuf)> = socket::read_claude_accounts()
-                            .iter()
-                            .filter_map(|a| {
-                                crate::claude_auth::runtime_dir_for(&a.id, &active_id)
-                                    .map(|d| (a.id.clone(), d))
-                            })
-                            .collect();
+                        let known: Vec<(String, std::path::PathBuf)> =
+                            socket::read_claude_accounts()
+                                .iter()
+                                .filter_map(|a| {
+                                    crate::claude_auth::runtime_dir_for(&a.id, &active_id)
+                                        .map(|d| (a.id.clone(), d))
+                                })
+                                .collect();
                         if let Ok(g) = usage_all.lock() {
                             for (id, dir) in &known {
                                 let key = dir.to_string_lossy();
@@ -2091,8 +2137,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .output()
                     {
                         if out.status.success() {
-                            if let Ok(v) =
-                                serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
                             {
                                 let arr = v
                                     .as_array()
@@ -2100,7 +2145,8 @@ impl ApplicationHandler<UserEvent> for App {
                                     .or_else(|| v.get("agents").and_then(|a| a.as_array().cloned()))
                                     .unwrap_or_default();
                                 for a in &arr {
-                                    if a.get("kind").and_then(|k| k.as_str()) != Some("background") {
+                                    if a.get("kind").and_then(|k| k.as_str()) != Some("background")
+                                    {
                                         continue;
                                     }
                                     let Some(sid) = a.get("sessionId").and_then(|s| s.as_str())
@@ -2112,7 +2158,9 @@ impl ApplicationHandler<UserEvent> for App {
                                         .and_then(|s| s.as_str())
                                         .map(str::to_string)
                                         .or_else(|| {
-                                            a.get("pid").and_then(|p| p.as_u64()).and_then(parent_of)
+                                            a.get("pid")
+                                                .and_then(|p| p.as_u64())
+                                                .and_then(parent_of)
                                         });
                                     next.insert(sid.to_string(), parent);
                                 }
@@ -2148,8 +2196,7 @@ impl ApplicationHandler<UserEvent> for App {
         // sRGB→DisplayP3 + root metal layer install). sugarloaf never
         // had the chrome UI ported across; keeping the branch in was
         // bloating the binary for no user-facing benefit.
-        let renderer = gpu::GpuRenderer::new(window.clone(), FONT_SIZE)
-            .expect("GpuRenderer init");
+        let renderer = gpu::GpuRenderer::new(window.clone(), FONT_SIZE).expect("GpuRenderer init");
         self.cell = CellGeom {
             w: renderer.cell_w,
             h: renderer.cell_h,
@@ -2205,9 +2252,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // HTTP 설정 서버가 선 뒤에 연다. 페이지는 /onboarding/state 를 읽고 미완료면
         // 설정 폼 대신 첫 설치 흐름을 전체 화면으로 그린다.
-        if crate::onboarding::launch_pending()
-            && self.open_settings_web_window(event_loop, None)
-        {
+        if crate::onboarding::launch_pending() && self.open_settings_web_window(event_loop, None) {
             crate::onboarding::mark_opened();
         }
         // Chrome-style session restore: if the last run left a saved layout with
@@ -2256,12 +2301,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autoquit();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -2361,7 +2401,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.aux_window_event(pos, event, event_loop);
             return;
         }
-        let Some(window) = self.window.clone() else { return; };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         // 위 가드를 다 통과했어도 **메인 창이 아닌 id** 는 여기로 오면 안 된다.
         // 패널을 닫는 순간 필드를 먼저 비우므로, 같은 배치에 남아 있던 그 창의
         // Resized 가 이 아래로 흘러 `g.resize()` 를 남의 크기로 부른다 — 위
@@ -2617,7 +2659,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let want_text = self.git.commit_input_rect.map(hit).unwrap_or(false);
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
-                        window.set_cursor(if want_text { CursorIcon::Text } else { CursorIcon::Default });
+                        window.set_cursor(if want_text {
+                            CursorIcon::Text
+                        } else {
+                            CursorIcon::Default
+                        });
                     }
                     self.chrome_dirty = true;
                     window.request_redraw();
@@ -2631,7 +2677,9 @@ impl ApplicationHandler<UserEvent> for App {
                     let new_hover = self
                         .pane_tab_rects
                         .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                         .map(|(id, idx, _)| (id.clone(), *idx));
                     if new_hover != self.pane_tab_hover {
                         self.pane_tab_hover = new_hover;
@@ -2643,7 +2691,8 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     let (cx, cy) = self.cursor_px;
                     let new_hover = self
-                        .file_tree.rects
+                        .file_tree
+                        .rects
                         .iter()
                         .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(p, _)| p.clone());
@@ -2689,8 +2738,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // 글자를 고르는 자리라 I-beam 이 맞다는 쪽과, 화살표여야 클릭 대상이
                     // 보인다는 쪽이 갈려서 고르는 몫을 사람에게 넘긴다. 위 입력칸 판정은
                     // 설정과 무관하게 그대로다 — 거긴 정말 글자를 치는 자리다.
-                    let over_cells = self.mouse_cursor == "ibeam"
-                        && self.px_to_pane_cell(cx, cy).is_some();
+                    let over_cells =
+                        self.mouse_cursor == "ibeam" && self.px_to_pane_cell(cx, cy).is_some();
                     let want_text = over_cells
                         || (self.file_tree.visible && hit(self.file_tree.search_rect))
                         || (self.file_tree.new.is_some() && hit(self.file_tree.new_row_rect));
@@ -2815,14 +2864,15 @@ impl ApplicationHandler<UserEvent> for App {
                     let (cols, rows) = self.window_cells();
                     let pad = WINDOW_PADDING + self.effective_sidebar_w();
                     let pos = match dir {
-                        kasa_pty::SplitDir::Horizontal => (((self.cursor_px.0 - pad)
-                            / self.cell.w.max(1.0))
-                        .round() as i32)
-                            .clamp(0, cols as i32) as u16,
-                        kasa_pty::SplitDir::Vertical => (((self.cursor_px.1 - TITLE_HEIGHT)
-                            / self.cell.h.max(1.0))
-                        .round() as i32)
-                            .clamp(0, rows as i32) as u16,
+                        kasa_pty::SplitDir::Horizontal => {
+                            (((self.cursor_px.0 - pad) / self.cell.w.max(1.0)).round() as i32)
+                                .clamp(0, cols as i32) as u16
+                        }
+                        kasa_pty::SplitDir::Vertical => {
+                            (((self.cursor_px.1 - TITLE_HEIGHT) / self.cell.h.max(1.0)).round()
+                                as i32)
+                                .clamp(0, rows as i32) as u16
+                        }
                     };
                     if Some(pos) != self.last_divider_pos {
                         if let Some(tree) = self.pty_layout.as_mut() {
@@ -2845,8 +2895,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .as_mut()
                                 .and_then(|t| t.merge_vtoh_at(&v_path, snap))
                             {
-                                self.resize_drag =
-                                    Some((merged, kasa_pty::SplitDir::Horizontal));
+                                self.resize_drag = Some((merged, kasa_pty::SplitDir::Horizontal));
                                 self.last_divider_pos = None;
                             }
                         }
@@ -2860,8 +2909,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let now = std::time::Instant::now();
                         let pty_throttle = self
                             .last_divider_pty_resize
-                            .map(|t| now.duration_since(t)
-                                >= std::time::Duration::from_millis(100))
+                            .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(100))
                             .unwrap_or(true);
                         if pty_throttle {
                             self.resize_backend(cols, rows);
@@ -2957,7 +3005,12 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         d.target = target;
                     }
-                    if self.sidebar_row_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                    if self
+                        .sidebar_row_drag
+                        .as_ref()
+                        .map(|d| d.active)
+                        .unwrap_or(false)
+                    {
                         window.set_cursor(CursorIcon::Grabbing);
                         self.chrome_dirty = true;
                         window.request_redraw();
@@ -2975,8 +3028,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 오버플로로 앞쪽 탭이 접혀 있으면 그 앞으로는 못 꽂는다 —
                     // 보이는 첫 탭을 하한으로 두어야 안 보이는 자리에 떨어지지
                     // 않는다(rects 는 보이는 탭만 담는다).
-                    let mut target =
-                        self.window_tab_rects.first().map(|(i, _)| *i).unwrap_or(0);
+                    let mut target = self.window_tab_rects.first().map(|(i, _)| *i).unwrap_or(0);
                     for (i, (rx, ry, rw, rh)) in &self.window_tab_rects {
                         let past = if horizontal {
                             px > rx + rw / 2.0
@@ -2995,7 +3047,12 @@ impl ApplicationHandler<UserEvent> for App {
                         d.target = target;
                         from = d.from;
                     }
-                    if self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                    if self
+                        .win_tab_drag
+                        .as_ref()
+                        .map(|d| d.active)
+                        .unwrap_or(false)
+                    {
                         window.set_cursor(CursorIcon::Grabbing);
                         // 꺼내기 자리에 들어서는 **순간** 방이 별도창으로 떨어지고,
                         // 그 창이 커서를 따라온다. 놓을 때까지 기다리면 드래그 내내
@@ -3037,14 +3094,10 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut strip_y: HashMap<String, (f32, f32)> = HashMap::new();
                     let mut strip_x: HashMap<String, (f32, f32)> = HashMap::new();
                     for (pid, _i, (rx, ry, rw, rh)) in &self.pane_tab_rects {
-                        let y = strip_y
-                            .entry(pid.clone())
-                            .or_insert((*ry, ry + rh));
+                        let y = strip_y.entry(pid.clone()).or_insert((*ry, ry + rh));
                         y.0 = y.0.min(*ry);
                         y.1 = y.1.max(ry + rh);
-                        let x = strip_x
-                            .entry(pid.clone())
-                            .or_insert((*rx, rx + rw));
+                        let x = strip_x.entry(pid.clone()).or_insert((*rx, rx + rw));
                         x.0 = x.0.min(*rx);
                         x.1 = x.1.max(rx + rw);
                     }
@@ -3054,9 +3107,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // strip. Strip y-range scan is a fallback for cursors
                     // that drop_target_at can't catch (e.g. between
                     // panes' gap).
-                    if let Some((target_pane, _)) =
-                        self.drop_target_at(px, py)
-                    {
+                    if let Some((target_pane, _)) = self.drop_target_at(px, py) {
                         drop_pane = target_pane;
                     } else {
                         for (pid, (y0, y1)) in &strip_y {
@@ -3093,8 +3144,8 @@ impl ApplicationHandler<UserEvent> for App {
                         let out = Self::drag_left_window(px, py, win_w, win_h);
                         self.drag_trace("pane탭", out, self.torn_aux_window(&src_pane).is_some());
                         let torn = out || self.torn_aux_window(&src_pane).is_some();
-                        let followed = torn
-                            && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
+                        let followed =
+                            torn && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
                         if !followed {
                             // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
                             // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
@@ -3159,8 +3210,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let (cx, cy) = self.cursor_px;
                     // 클릭 가드와 같은 경계 — 상태줄 위에선 끌 수 없으니 끌린다는
                     // 커서도 보이면 안 된다.
-                    let bar_top = window.inner_size().height as f32
-                        / self.effective_scale()
+                    let bar_top = window.inner_size().height as f32 / self.effective_scale()
                         - self.status_h();
                     let on_sidebar_edge = self.sidebar_visible
                         && cy > TITLE_HEIGHT
@@ -3237,19 +3287,17 @@ impl ApplicationHandler<UserEvent> for App {
                     // Over a detected URL → pointer (hand) cursor + the blue
                     // hover underline (drawn in draw_cells from cursor_px).
                     // Only when nothing more specific already claimed the cursor.
-                    let icon = if matches!(icon, CursorIcon::Default)
-                        && self.link_hit(cx, cy).is_some()
-                    {
-                        CursorIcon::Pointer
-                    } else {
-                        icon
-                    };
+                    let icon =
+                        if matches!(icon, CursorIcon::Default) && self.link_hit(cx, cy).is_some() {
+                            CursorIcon::Pointer
+                        } else {
+                            icon
+                        };
                     // ⋮ 핸들 위 → pointer(손모양). 위 단계가 커서를 안 가져갔을 때만.
                     let icon = if matches!(icon, CursorIcon::Default)
                         && self.pane_handle_rects.iter().any(|(_, r)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                    {
+                        }) {
                         CursorIcon::Pointer
                     } else {
                         icon
@@ -3372,8 +3420,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let bx = pad + *rx as f32 * self.cell.w;
                             let by = TITLE_HEIGHT + *ry as f32 * self.cell.h;
                             let bw = *rw as f32 * self.cell.w;
-                            cx >= bx && cx <= bx + bw
-                                && cy >= by && cy <= by + PANE_HEADER_HEIGHT
+                            cx >= bx && cx <= bx + bw && cy >= by && cy <= by + PANE_HEADER_HEIGHT
                         })
                         .map(|(id, ..)| id)
                 };
@@ -3438,7 +3485,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 // Resolve a file-tree → terminal path drag first, before any
                 // other hit-test, so a release anywhere disarms it. A real drag
                 // (cursor left the row) released over a pane types that path
@@ -3460,7 +3511,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 && cx < tree_x + tree_w;
                             if in_tree {
                                 let hit = self
-                                    .file_tree.rects
+                                    .file_tree
+                                    .rects
                                     .iter()
                                     .find(|(_, r)| {
                                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
@@ -3469,7 +3521,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 let dst_dir = hit
                                     .and_then(|p| {
                                         let is_dir = self
-                                            .file_tree.nodes
+                                            .file_tree
+                                            .nodes
                                             .iter()
                                             .find(|n| n.path == p)
                                             .map(|n| n.is_dir)
@@ -3492,8 +3545,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 if let Ok(mut w) = self.ws.lock() {
                                     w.active_pane = Some(pid);
                                 }
-                                let mut text =
-                                    shell_quote_path(&drag.path.to_string_lossy());
+                                let mut text = shell_quote_path(&drag.path.to_string_lossy());
                                 text.push(' ');
                                 self.send_bytes(text.as_bytes());
                                 self.chrome_dirty = true;
@@ -3521,9 +3573,9 @@ impl ApplicationHandler<UserEvent> for App {
                         self.statusbar.tunnel_rect,
                         self.statusbar.res_rect,
                     ]
-                        .into_iter()
-                        .flatten()
-                        .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
+                    .into_iter()
+                    .flatten()
+                    .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
                     if !on_chip && self.statusbar_popover_click(cx, cy) {
                         window.request_redraw();
                         return;
@@ -3555,7 +3607,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(btn) = self
                             .confirm_btn_rects
                             .iter()
-                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
                             .map(|(b, _)| *b)
                         {
                             self.confirm_dialog_pick(btn, event_loop);
@@ -3574,7 +3628,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(btn) = self
                             .restore_btn_rects
                             .iter()
-                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
                             .map(|(b, _)| *b)
                         {
                             self.restore_dialog_pick(btn);
@@ -3638,23 +3694,34 @@ impl ApplicationHandler<UserEvent> for App {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
                         if let Some(btn) = self
-                            .git.commit_modal_rects
+                            .git
+                            .commit_modal_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(b, _)| *b)
                         {
                             match btn {
-                                crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => self.close_commit_modal(),
+                                crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => {
+                                    self.close_commit_modal()
+                                }
                                 crate::GitModalBtn::IncludeUnstaged => {
-                                    self.git.commit_modal_include_unstaged = !self.git.commit_modal_include_unstaged;
+                                    self.git.commit_modal_include_unstaged =
+                                        !self.git.commit_modal_include_unstaged;
                                     window.request_redraw();
                                 }
-                                crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => self.run_commit_modal(false),
+                                crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => {
+                                    self.run_commit_modal(false)
+                                }
                                 crate::GitModalBtn::CommitAndPush => self.run_commit_modal(true),
                             }
                             return;
                         }
-                        if self.git.commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self
+                            .git
+                            .commit_input_rect
+                            .map(|r| inside(&r))
+                            .unwrap_or(false)
+                        {
                             self.git.commit_focused = true;
                             window.request_redraw();
                             return;
@@ -3679,9 +3746,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // 계속 삼킨다(리뷰 지적). pill 자기 클릭은 pane_action_hits
                     // 매칭이 편집 유지로 처리한다.
                     if self.web_addr.is_some() || self.web_find.is_some() {
-                        let on_addr = self.pane_action_hits.iter().any(|(_, a, r)| {
-                            matches!(a, ActionKind::WebAddress) && hit(*r)
-                        });
+                        let on_addr = self
+                            .pane_action_hits
+                            .iter()
+                            .any(|(_, a, r)| matches!(a, ActionKind::WebAddress) && hit(*r));
                         if !on_addr {
                             self.cancel_web_addr();
                             self.cancel_web_find();
@@ -3761,8 +3829,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 아래 경계 없이 이 띠까지 잡으면, 우측 패널이 열린 동안 그 밑의
                     // 포트·사용량 칩 클릭이 패널에 삼켜져 안 눌린다(2026-08-15
                     // 「우측패널 있을때 하단바 안눌리더라」). 한 번 재서 가드마다 쓴다.
-                    let bar_top = window.inner_size().height as f32
-                        / self.effective_scale()
+                    let bar_top = window.inner_size().height as f32 / self.effective_scale()
                         - self.status_h();
                     // A press outside the inline new-entry row + its buttons
                     // cancels the pending creation. Falls through so the click
@@ -3834,7 +3901,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // (the git-column handler re-asserts it below).
                     if self.git.commit_focused {
                         let on_input = self
-                            .git.commit_input_rect
+                            .git
+                            .commit_input_rect
                             .map(|(x, y, w, h)| cx >= x && cx <= x + w && cy >= y && cy <= y + h)
                             .unwrap_or(false);
                         if !on_input {
@@ -3920,7 +3988,9 @@ impl ApplicationHandler<UserEvent> for App {
                         let pick = self
                             .account_menu_hits
                             .iter()
-                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
                             .map(|(item, _)| item.clone());
                         self.account_menu = false;
                         self.chrome_dirty = true;
@@ -4154,7 +4224,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // "빠른 파일" 고정 섹션 행: 클릭=보조탭, Opt+클릭=별도 편집기 창.
                         if let Some(path) = self
-                            .file_tree.quick_rects
+                            .file_tree
+                            .quick_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
@@ -4169,7 +4240,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Row: folder → toggle expand, file → preview.
                         if let Some(path) = self
-                            .file_tree.rects
+                            .file_tree
+                            .rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
@@ -4197,7 +4269,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 } else if !self.file_tree.selected_more.remove(&path) {
                                     // New row: it becomes the primary; the old
                                     // primary (if any) demotes into the extras.
-                                    if let Some(prev) = self.file_tree.selected.replace(path.clone()) {
+                                    if let Some(prev) =
+                                        self.file_tree.selected.replace(path.clone())
+                                    {
                                         self.file_tree.selected_more.insert(prev);
                                     }
                                 }
@@ -4209,11 +4283,14 @@ impl ApplicationHandler<UserEvent> for App {
                             // anchor (primary) to this row, by visible order.
                             if self.modifiers.shift_key() {
                                 if let Some(anchor) = self.file_tree.selected.clone() {
-                                    let ai = self.file_tree.nodes.iter().position(|n| n.path == anchor);
-                                    let pi = self.file_tree.nodes.iter().position(|n| n.path == path);
+                                    let ai =
+                                        self.file_tree.nodes.iter().position(|n| n.path == anchor);
+                                    let pi =
+                                        self.file_tree.nodes.iter().position(|n| n.path == path);
                                     if let (Some(ai), Some(pi)) = (ai, pi) {
                                         let (lo, hi) = if ai <= pi { (ai, pi) } else { (pi, ai) };
-                                        let run: Vec<std::path::PathBuf> = self.file_tree.nodes[lo..=hi]
+                                        let run: Vec<std::path::PathBuf> = self.file_tree.nodes
+                                            [lo..=hi]
                                             .iter()
                                             .map(|n| n.path.clone())
                                             .collect();
@@ -4236,7 +4313,8 @@ impl ApplicationHandler<UserEvent> for App {
                             self.file_tree.selected = Some(path.clone());
                             self.file_tree.selected_more.clear();
                             let is_dir = self
-                                .file_tree.nodes
+                                .file_tree
+                                .nodes
                                 .iter()
                                 .find(|n| n.path == path)
                                 .map(|n| n.is_dir)
@@ -4302,7 +4380,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // (and the header toggles) before the list/buttons under.
                         if self.git.path_menu_open {
                             if let Some(key) = self
-                                .git.path_menu_rects
+                                .git
+                                .path_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(k, _)| k.clone())
@@ -4317,7 +4396,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         if self.git.branch_menu_open {
                             if let Some(b) = self
-                                .git.branch_menu_rects
+                                .git
+                                .branch_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(b, _)| b.clone())
@@ -4334,7 +4414,12 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        if self.git.branch_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self
+                            .git
+                            .branch_hdr_rect
+                            .map(|r| inside(&r))
+                            .unwrap_or(false)
+                        {
                             self.git.branch_menu_open = !self.git.branch_menu_open;
                             self.git.path_menu_open = false;
                             window.request_redraw();
@@ -4351,7 +4436,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // Commit-button dropdown items (overlay) first.
                         if self.git.commit_menu_open {
                             if let Some(act) = self
-                                .git.commit_menu_rects
+                                .git
+                                .commit_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(a, _)| *a)
@@ -4359,8 +4445,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.git.commit_menu_open = false;
                                 match act {
                                     crate::GitCommitAction::Commit => self.open_commit_modal(),
-                                    crate::GitCommitAction::Push => self.run_git_col_action(crate::GitColBtn::Push),
-                                    crate::GitCommitAction::Pull => self.run_git_col_action(crate::GitColBtn::Pull),
+                                    crate::GitCommitAction::Push => {
+                                        self.run_git_col_action(crate::GitColBtn::Push)
+                                    }
+                                    crate::GitCommitAction::Pull => {
+                                        self.run_git_col_action(crate::GitColBtn::Pull)
+                                    }
                                     crate::GitCommitAction::CreatePr => self.create_git_pr(),
                                 }
                                 window.request_redraw();
@@ -4519,9 +4609,13 @@ impl ApplicationHandler<UserEvent> for App {
                             {
                                 if let Some(path) = self.info.root.clone() {
                                     match btn {
-                                        state::InfoDirBtn::Reveal => self.reveal_in_file_manager(&path),
+                                        state::InfoDirBtn::Reveal => {
+                                            self.reveal_in_file_manager(&path)
+                                        }
                                         state::InfoDirBtn::Editor => {
-                                            if let Some((_, target)) = crate::proc::open_with_apps().first() {
+                                            if let Some((_, target)) =
+                                                crate::proc::open_with_apps().first()
+                                            {
                                                 crate::proc::open_path_with(target, &path);
                                             }
                                         }
@@ -4628,13 +4722,23 @@ impl ApplicationHandler<UserEvent> for App {
                             self.toggle_git_col();
                             return;
                         }
-                        if self.git.col_expand_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self
+                            .git
+                            .col_expand_rect
+                            .map(|r| inside(&r))
+                            .unwrap_or(false)
+                        {
                             self.toggle_git_col_expand();
                             window.request_redraw();
                             return;
                         }
                         // Commit split button: main → modal, caret → dropdown.
-                        if self.git.commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self
+                            .git
+                            .commit_btn_rect
+                            .map(|r| inside(&r))
+                            .unwrap_or(false)
+                        {
                             // Matches the render: with no changes but commits to
                             // sync, the primary button is the sync action — 당길
                             // 것이 있으면 Pull 이 먼저다(render 의 pull_mode 와 같은
@@ -4656,7 +4760,12 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        if self.git.commit_caret_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self
+                            .git
+                            .commit_caret_rect
+                            .map(|r| inside(&r))
+                            .unwrap_or(false)
+                        {
                             self.git.commit_menu_open = !self.git.commit_menu_open;
                             window.request_redraw();
                             return;
@@ -4665,15 +4774,21 @@ impl ApplicationHandler<UserEvent> for App {
                         // before the file-preview path since it sits inside the
                         // row rect. Off-thread; the poller repaints the lists.
                         if let Some((stage, path)) = self
-                            .git.col_stage_rects
+                            .git
+                            .col_stage_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(s, p, _)| (*s, p.clone()))
                         {
-                            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                            if let Some(cwd) =
+                                self.git.col_data.lock().ok().and_then(|g| g.cwd.clone())
+                            {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
-                                let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
+                                let want = self
+                                    .git
+                                    .col_commit_want
+                                    .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
                                     if stage {
                                         let _ = kasa_mcp::git::git_add_path(&cwd, &path);
@@ -4699,15 +4814,21 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Row ↩ discard → restore the file (or delete if untracked).
                         if let Some((path, untracked)) = self
-                            .git.col_discard_rects
+                            .git
+                            .col_discard_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(p, u, _)| (p.clone(), *u))
                         {
-                            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                            if let Some(cwd) =
+                                self.git.col_data.lock().ok().and_then(|g| g.cwd.clone())
+                            {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
-                                let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
+                                let want = self
+                                    .git
+                                    .col_commit_want
+                                    .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
                                     let _ = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
                                     if let Some(view) = fetch_git_col_view(&cwd, want) {
@@ -4724,7 +4845,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Row ⤴ open → preview the file in a pane.
                         if let Some(path) = self
-                            .git.col_open_rects
+                            .git
+                            .col_open_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
@@ -4734,7 +4856,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // File row → toggle its inline unified diff.
                         if let Some((staged, path)) = self
-                            .git.col_file_rects
+                            .git
+                            .col_file_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(s, p, _)| (*s, p.clone()))
@@ -4745,7 +4868,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // Commit-detail file row (inside an expanded commit) →
                         // toggle that file's diff.
                         if let Some((hash, path)) = self
-                            .git.col_commit_file_rects
+                            .git
+                            .col_commit_file_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(h, p, _)| (h.clone(), p.clone()))
@@ -4757,7 +4881,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // Recent-commit row → double-click expands its file list
                         // (single click is just the preview, no action).
                         if let Some(hash) = self
-                            .git.col_commit_rects
+                            .git
+                            .col_commit_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(h, _)| h.clone())
@@ -4791,7 +4916,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(action) = self
                             .handle_menu_hits
                             .iter()
-                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
                             .map(|(a, _)| *a)
                         {
                             self.ws.lock().unwrap().active_pane = Some(menu_pid.clone());
@@ -4862,22 +4989,23 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((pid, action)) = self
                         .pane_action_hits
                         .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                         .map(|(id, a, _)| (id.clone(), *a))
                     {
                         // Focus the clicked pane so splits/new-tabs target it.
                         self.ws.lock().unwrap().active_pane = Some(pid.clone());
                         match action {
                             ActionKind::SplitV => {
-                                if let Err(e) = self
-                                    .split_active_pane(kasa_pty::SplitDir::Vertical)
+                                if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Vertical)
                                 {
                                     eprintln!("[split-v] {e}");
                                 }
                             }
                             ActionKind::SplitH => {
-                                if let Err(e) = self
-                                    .split_active_pane(kasa_pty::SplitDir::Horizontal)
+                                if let Err(e) =
+                                    self.split_active_pane(kasa_pty::SplitDir::Horizontal)
                                 {
                                     eprintln!("[split-h] {e}");
                                 }
@@ -4917,11 +5045,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 찾기 칸이 이 pill 자리를 빌려 쓰는 동안의 클릭은
                                 // 찾기 유지 — 칸 안 클릭이 주소 편집으로 둔갑하면
                                 // 반쯤 친 검색어가 날아간다.
-                                if !self
-                                    .web_find
-                                    .as_ref()
-                                    .is_some_and(|e| e.pane == pid)
-                                {
+                                if !self.web_find.as_ref().is_some_and(|e| e.pane == pid) {
                                     self.begin_web_addr_edit(&pid);
                                 }
                             }
@@ -4940,7 +5064,8 @@ impl ApplicationHandler<UserEvent> for App {
                         match kind {
                             StatusbarMenu::Path => {
                                 if let Some(path) = self
-                                    .statusbar.menu_dir_rects
+                                    .statusbar
+                                    .menu_dir_rects
                                     .iter()
                                     .find(|(_, r)| sb_hit(r))
                                     .map(|(d, _)| d.clone())
@@ -4960,7 +5085,8 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             StatusbarMenu::Branch => {
                                 if let Some(b) = self
-                                    .statusbar.menu_branch_rects
+                                    .statusbar
+                                    .menu_branch_rects
                                     .iter()
                                     .find(|(_, r)| sb_hit(r))
                                     .map(|(b, _)| b.clone())
@@ -5003,7 +5129,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     if let Some(pid) = self
-                        .statusbar.toggle_rects
+                        .statusbar
+                        .toggle_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -5013,7 +5140,8 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar.path_rects
+                        .statusbar
+                        .path_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -5023,7 +5151,8 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar.branch_rects
+                        .statusbar
+                        .branch_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -5033,7 +5162,8 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar.diff_rects
+                        .statusbar
+                        .diff_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -5048,7 +5178,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((pid, kind)) = self
                         .image_btn_rects
                         .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                         .map(|(id, k, _)| (id.clone(), *k))
                     {
                         // 줌은 공용 헬퍼(클램프+pan 재클램프)로, 회전/리셋은 view-state
@@ -5124,7 +5256,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if self.restart_pane_agent(&pid) {
                             self.pane_account_stale.remove(&pid);
                         } else {
-                            self.set_toast("되띄우지 못했어요 — 그 pane 에 도는 에이전트가 없어요".into());
+                            self.set_toast(
+                                "되띄우지 못했어요 — 그 pane 에 도는 에이전트가 없어요".into(),
+                            );
                         }
                         self.chrome_dirty = true;
                         window.request_redraw();
@@ -5135,7 +5269,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((pid, idx)) = self
                         .pane_tab_popout_rects
                         .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
                         // 마크다운 탭 → 편집기 팝아웃 창. 나머지(터미널·그림) →
@@ -5179,16 +5315,13 @@ impl ApplicationHandler<UserEvent> for App {
                         // 경계로 영구 분리(트리를 상하먼저로 재구조화)한 뒤, 새
                         // 하단 경계만 드래그한다. 정렬 안 됨/단일 pane 이면
                         // split_htov_at 이 None → 아래 일반 드래그로 폴백.
-                        if self.modifiers.control_key()
-                            && dir == kasa_pty::SplitDir::Horizontal
-                        {
+                        if self.modifiers.control_key() && dir == kasa_pty::SplitDir::Horizontal {
                             if let Some(bot) = self
                                 .pty_layout
                                 .as_mut()
                                 .and_then(|t| t.split_htov_at(&path))
                             {
-                                self.resize_drag =
-                                    Some((bot, kasa_pty::SplitDir::Horizontal));
+                                self.resize_drag = Some((bot, kasa_pty::SplitDir::Horizontal));
                                 self.publish_pty_layout();
                                 let (cols, rows) = self.window_cells();
                                 self.resize_backend(cols, rows);
@@ -5202,7 +5335,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((pid, idx)) = self
                         .pane_tab_rects
                         .iter()
-                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
                         // A double-click anywhere on the header — including the
@@ -5250,9 +5385,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // and arm a drag-and-drop relocation. It only becomes
                     // a real drag once the cursor passes the threshold, so
                     // a plain header click just focuses.
-                    if let Some(pane) =
-                        self.header_at_px(self.cursor_px.0, self.cursor_px.1)
-                    {
+                    if let Some(pane) = self.header_at_px(self.cursor_px.0, self.cursor_px.1) {
                         // A double-click on a pane header toggles tmux-style
                         // zoom (that pane alone fills the work area). Reuse the
                         // same last_left_click window as the titlebar maximize.
@@ -5356,8 +5489,7 @@ impl ApplicationHandler<UserEvent> for App {
                         {
                             let switched = {
                                 let mut ws = self.ws.lock().unwrap();
-                                let switched =
-                                    ws.active_pane.as_deref() != Some(pane_id.as_str());
+                                let switched = ws.active_pane.as_deref() != Some(pane_id.as_str());
                                 ws.active_pane = Some(pane_id.clone());
                                 switched
                             };
@@ -5462,8 +5594,7 @@ impl ApplicationHandler<UserEvent> for App {
                                                     .map(|m| m.scroll)
                                             })
                                             .unwrap_or(0.0);
-                                        let at =
-                                            (self.cursor_px.0, self.cursor_px.1 + scroll);
+                                        let at = (self.cursor_px.0, self.cursor_px.1 + scroll);
                                         self.md_render_sel = Some(crate::MdRenderSel {
                                             pane: pane_id.clone(),
                                             anchor: at,
@@ -5481,8 +5612,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             self.last_input_at = Instant::now();
                             if let Some(tmux) = self.tmux.as_ref() {
-                                let _ =
-                                    tmux.send_cmd(&format!("select-pane -t '{pane_id}'"));
+                                let _ = tmux.send_cmd(&format!("select-pane -t '{pane_id}'"));
                             }
                         }
                     }
@@ -5496,9 +5626,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some((url, (px, py))) = self.link_armed.take() {
                             let (cx, cy) = self.cursor_px;
                             if (cx - px).abs() < 4.0 && (cy - py).abs() < 4.0 {
-                                let _ = crate::proc::command("open")
-                                    .arg(&url)
-                                    .spawn();
+                                let _ = crate::proc::command("open").arg(&url).spawn();
                                 window.request_redraw();
                                 return;
                             }
@@ -5617,12 +5745,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         // 있을 수 있으니 먼저 정리(원위치 복귀 상태).
                                         self.finish_live_drag();
                                         let near = self.cursor_screen_phys();
-                                        self.popout_pane_tab(
-                                            &td.pane,
-                                            td.from,
-                                            event_loop,
-                                            near,
-                                        );
+                                        self.popout_pane_tab(&td.pane, td.from, event_loop, near);
                                         self.chrome_dirty = true;
                                         window.request_redraw();
                                         return;
@@ -5643,9 +5766,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     if is_term {
                                         self.finish_live_drag();
                                         let near = self.cursor_screen_phys();
-                                        self.undock_pane_tab(
-                                            &td.pane, td.from, event_loop, near,
-                                        );
+                                        self.undock_pane_tab(&td.pane, td.from, event_loop, near);
                                         self.chrome_dirty = true;
                                         window.request_redraw();
                                         return;
@@ -5710,52 +5831,50 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     // Fall through to cross_pane merge.
                                 } else {
-                                let src_tab_count = self
-                                    .ws
-                                    .lock()
-                                    .unwrap()
-                                    .panes
-                                    .get(&td.pane)
-                                    .map(|p| p.tabs.len())
-                                    .unwrap_or(0);
-                                if target == td.pane && src_tab_count == 1 {
-                                    // Single-tab pane dropped on its own body
-                                    // half: the user "threw" the pane to that
-                                    // side. Spawn a fresh shell on the
-                                    // OPPOSITE side so the original sits where
-                                    // it was dropped.
-                                    if let Err(e) =
-                                        self.split_pane_opposite(&td.pane, zone)
-                                    {
-                                        eprintln!("[split-opposite] {e}");
-                                    }
-                                    self.chrome_dirty = true;
-                                    window.request_redraw();
-                                    return;
-                                }
-                                if target != td.pane || src_tab_count > 1 {
-                                    // Daemon mode + single-tab cross-pane = move
-                                    // the whole pane beside target → surface.move
-                                    // RPC (daemon authority). A local
-                                    // drop_tab_into_body wouldn't reach the daemon,
-                                    // so the next State overwrites it and the pane
-                                    // goes dead (drag먹통).
-                                    if target != td.pane && src_tab_count == 1 {
-                                        self.move_pane(&td.pane, &target, zone);
+                                    let src_tab_count = self
+                                        .ws
+                                        .lock()
+                                        .unwrap()
+                                        .panes
+                                        .get(&td.pane)
+                                        .map(|p| p.tabs.len())
+                                        .unwrap_or(0);
+                                    if target == td.pane && src_tab_count == 1 {
+                                        // Single-tab pane dropped on its own body
+                                        // half: the user "threw" the pane to that
+                                        // side. Spawn a fresh shell on the
+                                        // OPPOSITE side so the original sits where
+                                        // it was dropped.
+                                        if let Err(e) = self.split_pane_opposite(&td.pane, zone) {
+                                            eprintln!("[split-opposite] {e}");
+                                        }
                                         self.chrome_dirty = true;
                                         window.request_redraw();
                                         return;
                                     }
-                                    // Multi-tab same-pane → lift dragged tab into
-                                    // a new pane. Cross-pane (non-daemon) → moved
-                                    // tab in a new pane on target's drop side.
-                                    // (Daemon multi-tab lift = GUI-local 보조탭;
-                                    // 데몬 동기화는 후속.)
-                                    self.drop_tab_into_body(&td, &target, zone);
-                                    self.chrome_dirty = true;
-                                    window.request_redraw();
-                                    return;
-                                }
+                                    if target != td.pane || src_tab_count > 1 {
+                                        // Daemon mode + single-tab cross-pane = move
+                                        // the whole pane beside target → surface.move
+                                        // RPC (daemon authority). A local
+                                        // drop_tab_into_body wouldn't reach the daemon,
+                                        // so the next State overwrites it and the pane
+                                        // goes dead (drag먹통).
+                                        if target != td.pane && src_tab_count == 1 {
+                                            self.move_pane(&td.pane, &target, zone);
+                                            self.chrome_dirty = true;
+                                            window.request_redraw();
+                                            return;
+                                        }
+                                        // Multi-tab same-pane → lift dragged tab into
+                                        // a new pane. Cross-pane (non-daemon) → moved
+                                        // tab in a new pane on target's drop side.
+                                        // (Daemon multi-tab lift = GUI-local 보조탭;
+                                        // 데몬 동기화는 후속.)
+                                        self.drop_tab_into_body(&td, &target, zone);
+                                        self.chrome_dirty = true;
+                                        window.request_redraw();
+                                        return;
+                                    }
                                 }
                             }
                             let cross_pane = td.active && td.drop_pane != td.pane;
@@ -5822,8 +5941,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 // Focus the destination pane so the moved
                                 // tab is immediately interactive.
-                                self.ws.lock().unwrap().active_pane =
-                                    Some(td.drop_pane.clone());
+                                self.ws.lock().unwrap().active_pane = Some(td.drop_pane.clone());
                             } else if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(pane) = ws.panes.get_mut(&td.pane) {
                                     let n = pane.tabs.len();
@@ -5882,18 +6000,18 @@ impl ApplicationHandler<UserEvent> for App {
                             let (cols, rows) = self.window_cells();
                             let pad = WINDOW_PADDING + self.effective_sidebar_w();
                             let pos = match dir {
-                                kasa_pty::SplitDir::Horizontal => (((self.cursor_px.0
-                                    - pad)
-                                    / self.cell.w.max(1.0))
-                                .round() as i32)
-                                    .clamp(0, cols as i32)
-                                    as u16,
-                                kasa_pty::SplitDir::Vertical => (((self.cursor_px.1
-                                    - TITLE_HEIGHT)
-                                    / self.cell.h.max(1.0))
-                                .round() as i32)
-                                    .clamp(0, rows as i32)
-                                    as u16,
+                                kasa_pty::SplitDir::Horizontal => {
+                                    (((self.cursor_px.0 - pad) / self.cell.w.max(1.0)).round()
+                                        as i32)
+                                        .clamp(0, cols as i32)
+                                        as u16
+                                }
+                                kasa_pty::SplitDir::Vertical => {
+                                    (((self.cursor_px.1 - TITLE_HEIGHT) / self.cell.h.max(1.0))
+                                        .round() as i32)
+                                        .clamp(0, rows as i32)
+                                        as u16
+                                }
                             };
                             if let Some(tree) = self.pty_layout.as_mut() {
                                 tree.resize_divider(&path, pos, cols, rows);
@@ -6309,8 +6427,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 승인 토스트가 점유 중이면 take 하지 않고 다음 틱으로 미룬다.
         if self.collab.toast_action.is_none() {
             if let Some(v) = crate::win_sparkle::take_found() {
-                self.collab.toast =
-                    Some((format!("↑ 새 버전 v{v}"), std::time::Instant::now()));
+                self.collab.toast = Some((format!("↑ 새 버전 v{v}"), std::time::Instant::now()));
                 self.collab.toast_action =
                     Some(crate::win_sparkle::UPDATE_TOAST_ACTION.to_string());
                 self.collab.toast_rect = None;
@@ -6360,9 +6477,7 @@ impl ApplicationHandler<UserEvent> for App {
         // user lets go, inLiveResize flips false and we replay the final size
         // here — surface.configure + PTY reshape + render happen once,
         // off the critical path of the live-resize tracking loop.
-        if let (Some(window), Some(size)) =
-            (self.window.clone(), self.pending_resize)
-        {
+        if let (Some(window), Some(size)) = (self.window.clone(), self.pending_resize) {
             if !gpu::is_in_live_resize(&window) {
                 if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
                     eprintln!(
@@ -6732,12 +6847,9 @@ impl ApplicationHandler<UserEvent> for App {
             // 로그가 「pane_working 이라 펌프한다」고 하는데 실제론 안 걸린다.
             if {
                 let visible = self.visible_pane_ids();
-                self.pane_activity
-                    .iter()
-                    .any(|(id, a)| {
-                        matches!(a.status.as_str(), "working" | "compacting")
-                            && visible.contains(id)
-                    })
+                self.pane_activity.iter().any(|(id, a)| {
+                    matches!(a.status.as_str(), "working" | "compacting") && visible.contains(id)
+                })
             } {
                 why.push("pane_working");
             }
@@ -6924,11 +7036,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn new_events(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        cause: winit::event::StartCause,
-    ) {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         // The blink-timer fire path. When winit wakes us because the
         // WaitUntil deadline elapsed (no other events arrived), repaint
         // so the cursor block toggles its phase. Other wake causes
@@ -6952,7 +7060,9 @@ impl App {
     /// running still gets its "실행 중이에요" question — which it wouldn't if we
     /// jumped straight to `do_close`.
     pub(crate) fn confirm_dialog_pick(&mut self, btn: ConfirmBtn, event_loop: &ActiveEventLoop) {
-        let Some(dlg) = self.confirm_close.take() else { return };
+        let Some(dlg) = self.confirm_close.take() else {
+            return;
+        };
         self.chrome_dirty = true;
         if btn == ConfirmBtn::Cancel {
             return;
@@ -6997,8 +7107,10 @@ impl App {
             // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에
             // 시작해야 그 화면이 멈춘 채로 남는다(위 restore_applying 주석).
             RestoreBtn::Restore => {
-                self.restore_applying =
-                    Some((state, std::time::Instant::now() + std::time::Duration::from_millis(90)));
+                self.restore_applying = Some((
+                    state,
+                    std::time::Instant::now() + std::time::Duration::from_millis(90),
+                ));
             }
             RestoreBtn::Fresh => crate::socket::clear_session_state(),
             // 저장본을 지우지 않는다 — 닫기는 「안 고름」이지 「버림」이 아니다.
@@ -7103,7 +7215,11 @@ fn fetch_claude_usage(
         return None;
     }
     let stale = v.get("stale").and_then(|b| b.as_bool()).unwrap_or(false);
-    let dir = v.get("account_dir").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+    let dir = v
+        .get("account_dir")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string();
     Some((v.get("usage")?.clone(), stale, dir))
 }
 
@@ -7122,7 +7238,11 @@ pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Optio
         view.no_repo = true;
         return Some(view);
     }
-    view.branch = v.get("branch").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    view.branch = v
+        .get("branch")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     view.ahead = v.get("ahead").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
     view.behind = v.get("behind").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
     view.insertions = v.get("insertions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
@@ -7142,14 +7262,22 @@ pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Optio
     }
     view.branches = kasa_mcp::git::git_branches(cwd);
     view.numstat = kasa_mcp::git::git_numstat(cwd);
-    let n = if commits == 0 { crate::GIT_RECENT_COMMITS_DEFAULT } else { commits };
+    let n = if commits == 0 {
+        crate::GIT_RECENT_COMMITS_DEFAULT
+    } else {
+        commits
+    };
     view.recent_commits = kasa_mcp::git::git_log(cwd, n as u32)
         .as_array()
         .map(|arr| {
             arr.iter()
                 .filter_map(|c| {
                     let h = c.get("hash")?.as_str()?.to_string();
-                    let s = c.get("subject").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let s = c
+                        .get("subject")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     Some((h, s))
                 })
                 .collect()
