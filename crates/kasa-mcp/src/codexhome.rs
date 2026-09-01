@@ -37,6 +37,11 @@ pub fn install_codex_rollout(
     rel: &Path,
     bytes: &[u8],
 ) -> Result<String> {
+    // join·write **이전**에 거른다 — `Path::join` 은 절대경로를 받으면 기준을
+    // 통째로 갈아치우고 `..` 는 임시 홈 밖으로 걸어 나간다. helper 검증에만
+    // 맡기면 그 검증이 돌기 전에 이미 바이트가 밖에 써진다(독립 리뷰 지적
+    // 2026-09-02 — 실측: rel=../../etc/evil 이 임시 홈 밖에 파일을 남겼다).
+    validate_rel(rel)?;
     let tmp_home = std::env::temp_dir().join(format!(
         "kasaterm-codexmove-{}-{}",
         std::process::id(),
@@ -45,6 +50,46 @@ pub fn install_codex_rollout(
     let res = install_via_tmp(&tmp_home, codex_home, sid, rel, bytes);
     let _ = std::fs::remove_dir_all(&tmp_home);
     res
+}
+
+/// `sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` 꼴만 통과 — 성분은 전부
+/// Normal(., .., 루트, 드라이브 금지), 날짜는 자릿수까지 고정, 파일명은 운반
+/// helper 의 uuid 추출 규칙으로 검사한다.
+fn validate_rel(rel: &Path) -> Result<()> {
+    if rel.is_absolute() {
+        bail!("rollout 상대경로가 절대경로다: {}", rel.display());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            _ => bail!(
+                "rollout 상대경로에 허용 밖 성분(`..` 등)이 있다: {}",
+                rel.display()
+            ),
+        }
+    }
+    if parts.len() != 5 || parts[0] != "sessions" {
+        bail!(
+            "rollout 상대경로가 sessions/YYYY/MM/DD/파일 꼴이 아니다: {}",
+            rel.display()
+        );
+    }
+    for (seg, want) in parts[1..4].iter().zip([4usize, 2, 2]) {
+        if seg.len() != want || !seg.chars().all(|ch| ch.is_ascii_digit()) {
+            bail!(
+                "rollout 날짜 폴더가 YYYY/MM/DD 꼴이 아니다: {}",
+                rel.display()
+            );
+        }
+    }
+    if fmt::codex_id_from_rollout_path(rel).is_none() {
+        bail!(
+            "rollout 파일명이 rollout-<ts>-<uuid>.jsonl 꼴이 아니다: {}",
+            rel.display()
+        );
+    }
+    Ok(())
 }
 
 fn install_via_tmp(
@@ -115,5 +160,52 @@ mod tests {
             Some(PathBuf::from("/Users/x/.codex"))
         );
         assert_eq!(codex_home_of_rollout(Path::new("/tmp/rollout.jsonl")), None);
+    }
+
+    const GOOD: &str =
+        "sessions/2026/09/02/rollout-2026-09-02T00-08-01-01a05d83-4ec4-7e73-b66b-8bf5d5309d9f.jsonl";
+
+    #[test]
+    fn rel_validation_blocks_escapes_before_any_io() {
+        assert!(validate_rel(Path::new(GOOD)).is_ok());
+        // 탈출·형식 위반은 전부 join 이전에 선다.
+        for bad in [
+            "/etc/evil.jsonl",                                   // 절대경로(join 이 기준을 갈아치움)
+            "../../etc/evil.jsonl",                              // 상향 탈출
+            "sessions/../2026/09/02/rollout-x.jsonl",            // 중간 `..`
+            "notsessions/2026/09/02/rollout-2026-09-02T00-08-01-01a05d83-4ec4-7e73-b66b-8bf5d5309d9f.jsonl",
+            "sessions/26/09/02/rollout-2026-09-02T00-08-01-01a05d83-4ec4-7e73-b66b-8bf5d5309d9f.jsonl",
+            "sessions/2026/09/02/evil.jsonl",                    // rollout- 아님
+            "sessions/2026/09/02/rollout-nouuid.jsonl",          // uuid 없음
+            "sessions/2026/09/02/x/rollout-2026-09-02T00-08-01-01a05d83-4ec4-7e73-b66b-8bf5d5309d9f.jsonl", // 깊이 초과
+        ] {
+            assert!(validate_rel(Path::new(bad)).is_err(), "통과해선 안 된다: {bad}");
+        }
+    }
+
+    #[test]
+    fn install_rejects_bad_rel_without_writing() {
+        let scratch = std::env::temp_dir().join(format!(
+            "kasaterm-codexhome-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let home = scratch.join("home");
+        let evil_rel = "../escaped-evil.jsonl";
+        let err = install_codex_rollout(
+            &home,
+            "01a05d83-4ec4-7e73-b66b-8bf5d5309d9f",
+            Path::new(evil_rel),
+            b"{}",
+        );
+        assert!(err.is_err());
+        // 임시 홈은 temp_dir 바로 아래 생긴다 — 탈출 대상이 됐을 자리에
+        // 아무것도 안 써졌는지 본다(수정 전에는 여기 파일이 실제로 남았다).
+        assert!(
+            !std::env::temp_dir().join("escaped-evil.jsonl").exists(),
+            "검증 전에 바이트가 밖에 써졌다"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
