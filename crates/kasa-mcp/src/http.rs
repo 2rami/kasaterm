@@ -4513,7 +4513,7 @@ async fn term_message_post(
     let Some(peer) = kasa_socket::peers::by_session_id().remove(sid.as_str()) else {
         return err(format!("세션 {sid} 이 이 기계 명부에 없어요 — 꺼졌거나 다른 기계입니다"));
     };
-    if peer.socket_path.as_os_str().is_empty() || !peer.socket_path.exists() {
+    if !socket_reachable(&peer.socket_path) {
         return err(format!("세션 {sid} 의 소켓이 없어요 — 등록만 남고 길이 끊긴 상태입니다"));
     }
     let from_name = q.get("from_name").map(String::as_str).unwrap_or("peer");
@@ -4550,8 +4550,9 @@ async fn peer_registry_get() -> impl IntoResponse {
     let rows: Vec<serde_json::Value> = kasa_socket::peers::read_registry()
         .into_iter()
         // 소켓이 살아 있는 것만 — 등록만 남고 길이 끊긴 세션을 원격에 유령으로
-        // 세우면 「보이는데 안 닿는」 stale 이 기계 밖까지 번진다.
-        .filter(|p| !p.socket_path.as_os_str().is_empty() && p.socket_path.exists())
+        // 세우면 「보이는데 안 닿는」 stale 이 기계 밖까지 번진다. windows named
+        // pipe 는 exists() 로 안 잡혀 socket_reachable 이 경로로 가른다.
+        .filter(|p| socket_reachable(&p.socket_path))
         // 우리가 세운 유령은 광고하지 않는다 — B의 세션을 여기 유령으로 세웠는데
         // 그걸 내 세션이라고 내주면 B가 자기 세션의 유령을 또 세워 메아리가 돈다.
         .filter(|p| !crate::peermirror::is_ghost_socket(&p.socket_path))
@@ -4565,6 +4566,23 @@ async fn peer_registry_get() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "peers": rows }))
 }
 
+/// messagingSocketPath 가 배달 가능한 창구인가. unix 는 소켓 파일 존재로 가른다.
+/// **windows named pipe 는 파일시스템에 안 보여 `exists()` 가 false** 라, 그것만
+/// 믿으면 배달을 거부한다(2026-09-01) — 그래서 파이프 경로면 통과시키고 실제
+/// 연결 가능 여부는 inject 가 재시도로 확인한다. 빈 경로는 언제나 불가.
+fn socket_reachable(path: &std::path::Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    #[cfg(windows)]
+    if let Some(s) = path.to_str() {
+        if s.starts_with(r"\\.\pipe\") || s.starts_with(r"\\?\pipe\") {
+            return true;
+        }
+    }
+    path.exists()
+}
+
 /// unix 도메인 소켓에 바이트 한 줄을 꽂는다(cross-session 메시지 배달).
 #[cfg(unix)]
 fn inject_into_socket(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -4576,9 +4594,37 @@ fn inject_into_socket(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     s.flush()?;
     Ok(())
 }
-#[cfg(not(unix))]
+/// Windows named pipe 에 바이트 한 줄을 꽂는다(cross-session 메시지 배달).
+///
+/// claude Windows 의 `messagingSocketPath` 는 유닉스 소켓이 아니라 named pipe
+/// (`\\.\pipe\LOCAL\cc-msg-<32hex>`, 2026-09-01 데스크탑 실측)다. 파이프는 파일
+/// API 로 연다 — 서버(claude)가 있으면 클라이언트로 붙고, 유닉스 갈래와 똑같이
+/// JSON 한 줄을 write 후 닫으면 배달이 된다. 파이프가 순간 바쁘면(다른 연결 처리
+/// 중) ERROR_PIPE_BUSY 로 열기가 실패하므로 잠깐 뒤 몇 번 다시 시도한다.
+/// ⚠️ 접근 모드는 실물에서 맞춘다 — claude 파이프가 inbound(서버가 읽기만)면
+/// write only 여야 하고, DUPLEX 면 read+write 다 된다. 일단 write only 로 연다.
+#[cfg(windows)]
+fn inject_into_socket(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut last = std::io::Error::other("파이프 열기 실패");
+    for _ in 0..5 {
+        match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.flush()?;
+                return Ok(());
+            }
+            Err(e) => {
+                last = e;
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+    }
+    Err(last)
+}
+#[cfg(not(any(unix, windows)))]
 fn inject_into_socket(_path: &std::path::Path, _bytes: &[u8]) -> std::io::Result<()> {
-    Err(std::io::Error::other("cross-session 주입은 unix 전용"))
+    Err(std::io::Error::other("cross-session 주입은 unix·windows 전용"))
 }
 
 /// `POST /term/repo-sync?path=&head=&sync=&branch=&dirty=1&force=1` body=bundle —
