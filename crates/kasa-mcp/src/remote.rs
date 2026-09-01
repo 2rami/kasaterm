@@ -1080,6 +1080,110 @@ pub fn download_transcript(
     Ok(raw.as_bytes().to_vec())
 }
 
+/// 원격 기계의 Codex 대화(rollout)를 내려받는다 — 역이사의 codex 판.
+///
+/// `Ok(None)` = 그 기계에 그 대화가 없다(창구 자체가 없는 낡은 기계도 같은 404 라
+/// 여기로 온다 — 부르는 쪽이 claude 대화 실패와 합쳐 한 문장으로 말한다).
+/// 반환은 (Codex home 기준 상대경로, rollout 바이트) — 상대경로가 있어야 도착지가
+/// 같은 자리(`sessions/…`)에 앉힌다.
+pub fn fetch_codex_session(
+    base: &str,
+    sid: &str,
+    token: Option<&str>,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let url = format!(
+        "{}/term/codex-session?sid={}",
+        base.trim_end_matches('/'),
+        urlencode(sid)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        if status == 404 {
+            return Ok(None);
+        }
+        let rel = r
+            .headers()
+            .get("x-kasa-codex-rel")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        if status != 200 {
+            anyhow::bail!(
+                "Codex 대화 내려받기 실패(HTTP {status}): {}",
+                String::from_utf8_lossy(&body[..body.len().min(200)])
+            );
+        }
+        let rel = rel.ok_or_else(|| anyhow!("응답에 x-kasa-codex-rel 헤더가 없다"))?;
+        Ok(Some((rel, body)))
+    })
+}
+
+/// Codex 대화(rollout)를 원격 Codex home 의 같은 자리에 앉힌다 — 순방향 이사.
+/// 도착지 검증·충돌 보관 정책은 저쪽 창구(codexhome::install_codex_rollout)가 맡는다.
+pub fn push_codex_session(
+    base: &str,
+    sid: &str,
+    rel: &str,
+    bytes: Vec<u8>,
+    token: Option<&str>,
+) -> Result<String> {
+    let url = format!(
+        "{}/term/codex-session?sid={}&rel={}",
+        base.trim_end_matches('/'),
+        urlencode(sid),
+        urlencode(rel)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bytes);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("Codex 대화 업로드 요청")?;
+        let status = r.status().as_u16();
+        if status == 404 || status == 405 {
+            anyhow::bail!(
+                "저쪽 프로그램이 낡아 Codex 이사 창구가 없다 — 그 기계를 갱신하고 다시"
+            );
+        }
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "Codex 대화 업로드 거부: {}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp
+        .get("note")
+        .and_then(|v| v.as_str())
+        .unwrap_or("앉힘")
+        .to_string())
+}
+
 /// 원격 레포의 「그 기계에만 있는 것」 — 역이사 git 관문의 재료.
 /// (dirty 줄 수, 미push 커밋 수, origin, branch). 창구가 없는 옛 바이너리는
 /// None — 관문을 못 세우는 것이지 이사가 불가능한 게 아니라서, 호출부가

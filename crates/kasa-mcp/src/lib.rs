@@ -15,6 +15,7 @@ use rmcp::{
 use serde::Deserialize;
 
 pub mod character;
+pub mod codexhome;
 pub mod dispatch;
 pub mod git;
 pub mod gridwire;
