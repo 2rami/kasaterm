@@ -241,7 +241,129 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     Some(PromptBox::Filled { rows: start..end })
 }
 
-/// Codex의 고정 status-line 항목을 Claude Code와 같은 한 줄 문법으로 다시 그린다.
+/// 상태줄 모델 로고 자리. 글리프로 보여 주는 문자가 아니라 SVG 오버레이를 앉힐
+/// 한 칸 표식이다. 서로 다른 PUA를 쓰므로 모델 제공자를 텍스트 추측 없이 보존한다.
+pub(crate) const STATUS_MODEL_CLAUDE_MARKER: char = '\u{e0c0}';
+pub(crate) const STATUS_MODEL_GPT_MARKER: char = '\u{e0c1}';
+pub(crate) const STATUS_MODEL_COLOR: [u8; 4] = [0x7a, 0xa2, 0xf7, 0xff];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusModelProvider {
+    Claude,
+    Gpt,
+}
+
+impl StatusModelProvider {
+    pub(crate) fn icon_name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Gpt => "codex",
+        }
+    }
+}
+
+/// 모델 표식을 찾아 셀 글리프를 지우고 `(행, 열, 제공자)`를 돌려준다.
+/// 아래→위로 훑는 이유는 마지막 실제 상태줄이 이겨야 해서다. Codex는 MCP 부팅
+/// 중에는 상태줄 아래를 빈 행으로 남겨 두므로 `마지막 N행`으로 제한하면 시작 화면만
+/// 로고가 빠진다.
+pub(crate) fn take_status_model_provider(
+    rows: &mut [Vec<GridCell>],
+) -> Option<(usize, usize, StatusModelProvider)> {
+    for row_idx in (0..rows.len()).rev() {
+        let row = &mut rows[row_idx];
+        if let Some(col) = row.iter().position(|cell| {
+            matches!(
+                cell.ch,
+                STATUS_MODEL_CLAUDE_MARKER | STATUS_MODEL_GPT_MARKER
+            )
+        }) {
+            let provider = if row[col].ch == STATUS_MODEL_CLAUDE_MARKER {
+                StatusModelProvider::Claude
+            } else {
+                StatusModelProvider::Gpt
+            };
+            row[col] = GridCell::blank();
+            return Some((row_idx, col, provider));
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatusModelIconSlot {
+    provider: StatusModelProvider,
+    rect: (f32, f32, f32, f32),
+}
+
+/// 셀 표식을 지우고 SVG가 앉을 논리 px 박스로 바꾼다. 표식 다음 한 칸은 모델명
+/// 앞 공백이라 두 칸을 로고 상자로 쓸 수 있다 — 글자를 밀지 않으면서 실제 로고가
+/// 작은 터미널 셀 안에서 뭉개지지 않는 최소 폭이다.
+pub(crate) fn take_status_model_icon_slot(
+    rows: &mut [Vec<GridCell>],
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<StatusModelIconSlot> {
+    let (row, col, provider) = take_status_model_provider(rows)?;
+    Some(StatusModelIconSlot {
+        provider,
+        rect: (
+            origin_x + col as f32 * cell_w,
+            origin_y + row as f32 * cell_h,
+            cell_w * 2.0,
+            cell_h,
+        ),
+    })
+}
+
+/// Claude/OpenAI 공식 SVG를 상태줄 셀 위에 얹는다. 두 제공자가 같은 크기·같은
+/// 모델색을 써야 모델명 시작점이 바뀌지 않고, Claude Code 상태줄과 Codex 상태줄이
+/// 한 벌로 읽힌다.
+pub(crate) fn paint_status_model_icons(
+    g: &mut gpu::GpuRenderer,
+    slots: &[StatusModelIconSlot],
+) {
+    for slot in slots {
+        let (x, y, w, h) = slot.rect;
+        let size = (h * 0.72).min(w * 0.78);
+        g.queue_icon(
+            slot.provider.icon_name(),
+            x + (w - size) * 0.5,
+            y + (h - size) * 0.5,
+            size,
+            STATUS_MODEL_COLOR,
+        );
+    }
+}
+
+#[derive(Clone)]
+struct StatusSpan {
+    text: String,
+    fg: Option<[u8; 3]>,
+    bold: bool,
+    dim: bool,
+}
+
+impl StatusSpan {
+    fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), fg: None, bold: false, dim: false }
+    }
+
+    fn colored(text: impl Into<String>, fg: [u8; 3]) -> Self {
+        Self { text: text.into(), fg: Some(fg), bold: false, dim: false }
+    }
+
+    fn bold(text: impl Into<String>, fg: [u8; 3]) -> Self {
+        Self { text: text.into(), fg: Some(fg), bold: true, dim: false }
+    }
+
+    fn dim(text: impl Into<String>, fg: Option<[u8; 3]>) -> Self {
+        Self { text: text.into(), fg, bold: false, dim: true }
+    }
+}
+
+/// Codex의 고정 status-line 항목을 Claude Code와 같은 한 줄 문법·색으로 다시 그린다.
 ///
 /// Codex 자체 설정은 항목의 순서만 받고 임의 아이콘·구분자를 받지 않는다. 그래서 PTY가
 /// 확정해서 보낸 모델·effort·context 값은 그대로 읽고, 카사텀이 알고 있는 cwd/Git 값만
@@ -259,7 +381,6 @@ pub(crate) fn restyle_codex_status_line(
         .iter()
         .enumerate()
         .rev()
-        .take(8)
         .find_map(|(row_idx, row)| {
             let (text, _) = row_text_cells(row);
             let parts: Vec<&str> = text
@@ -273,9 +394,11 @@ pub(crate) fn restyle_codex_status_line(
             let effort = words.last().copied().filter(|v| EFFORTS.contains(v))?;
             words.pop();
             let model = words.join(" ");
-            let known_model = model.starts_with("gpt-")
-                || model.starts_with("codex-")
-                || model
+            let lower_model = model.to_ascii_lowercase();
+            let known_model = lower_model.starts_with("gpt-")
+                || lower_model.starts_with("codex-")
+                || lower_model.starts_with("claude-")
+                || lower_model
                     .strip_prefix('o')
                     .is_some_and(|suffix| suffix.starts_with(|c: char| c.is_ascii_digit()));
             if model.is_empty() || !known_model {
@@ -319,9 +442,9 @@ pub(crate) fn restyle_codex_status_line(
         (branch, project)
     };
 
-    let pretty_model = |with_window: bool| {
+    let pretty_model = || {
         let lower = raw_model.to_ascii_lowercase();
-        let base = match lower.as_str() {
+        match lower.as_str() {
             "gpt-5.6" | "gpt-5.6-sol" => "GPT-5.6 Sol".to_string(),
             "gpt-5.6-terra" => "GPT-5.6 Terra".to_string(),
             "gpt-5.6-luna" => "GPT-5.6 Luna".to_string(),
@@ -345,35 +468,91 @@ pub(crate) fn restyle_codex_status_line(
                     format!("GPT-{version} {suffix}")
                 }
             }
+            _ if lower.starts_with("claude-") || lower.starts_with("codex-") => lower
+                .split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
             _ => raw_model.clone(),
-        };
-        if with_window && lower.starts_with("gpt-5.6") {
-            format!("{base} 1M")
-        } else {
-            base
         }
     };
 
+    const C_MODEL: [u8; 3] = [0x7a, 0xa2, 0xf7];
+    const C_GIT: [u8; 3] = [0x73, 0xda, 0xca];
+    const C_DIR: [u8; 3] = [0xbb, 0x9a, 0xf7];
+    const C_CTX: [u8; 3] = [0xff, 0x9e, 0x64];
+    const C_SEP: [u8; 3] = [0x56, 0x5f, 0x89];
+    const C_DANGER: [u8; 3] = [0xf7, 0x76, 0x8e];
+
+    let effort_color = |level: &str| match level {
+        "low" => [0x56, 0x5f, 0x89],
+        "medium" => [0x7a, 0xa2, 0xf7],
+        "high" => [0xe0, 0xaf, 0x68],
+        "xhigh" => [0xf7, 0x76, 0x8e],
+        "max" => [0xbb, 0x9a, 0xf7],
+        _ => [0x7a, 0xa2, 0xf7],
+    };
+    let marker = if raw_model.to_ascii_lowercase().starts_with("claude-") {
+        STATUS_MODEL_CLAUDE_MARKER
+    } else {
+        STATUS_MODEL_GPT_MARKER
+    };
+    let add_separator = |parts: &mut Vec<StatusSpan>| {
+        parts.push(StatusSpan::plain(" "));
+        parts.push(StatusSpan::dim("┃", Some(C_SEP)));
+        parts.push(StatusSpan::plain(" "));
+    };
     let make_line =
         |with_window: bool, show_branch: bool, show_project: bool, show_context: bool| {
-            let mut parts = vec![format!(" {}", pretty_model(with_window))];
+            // Claude statusline은 맨 앞 U+FFFC 한 칸을 학생 앵커로 쓰고 그 다음 칸에
+            // 모델 아이콘을 둔다. Codex도 같은 한 칸만 비워 두면 두 줄의 시작점이
+            // 정확히 맞는다(예전 `  ` 두 칸이 한 칸 오른쪽으로 밀린 원인).
+            let mut parts = vec![
+                StatusSpan::plain(" "),
+                StatusSpan::bold(marker.to_string(), C_MODEL),
+                StatusSpan::plain(" "),
+                StatusSpan::bold(pretty_model(), C_MODEL),
+            ];
+            if with_window && raw_model.to_ascii_lowercase().starts_with("gpt-5.6") {
+                parts.push(StatusSpan::dim(" 1M", None));
+            }
             if show_branch {
                 if let Some(branch) = branch {
-                    parts.push(format!(" {branch}"));
+                    add_separator(&mut parts);
+                    parts.push(StatusSpan::colored(format!(" {branch}"), C_GIT));
                 }
             }
             if show_project {
                 if let Some(project) = project {
-                    parts.push(format!(" {project}"));
+                    add_separator(&mut parts);
+                    parts.push(StatusSpan::colored(format!(" {project}"), C_DIR));
                 }
             }
             if show_context {
                 if let Some(context) = context.as_deref() {
-                    parts.push(context.to_string());
+                    add_separator(&mut parts);
+                    let high = context
+                        .trim_end_matches('%')
+                        .parse::<u8>()
+                        .is_ok_and(|pct| pct >= 90);
+                    parts.push(StatusSpan::colored(
+                        context.to_string(),
+                        if high { C_DANGER } else { C_CTX },
+                    ));
                 }
             }
-            parts.push(format!(" {effort}"));
-            format!("  {}", parts.join(" ┃ "))
+            add_separator(&mut parts);
+            parts.push(StatusSpan::colored(
+                format!(" {effort}"),
+                effort_color(&effort),
+            ));
+            parts
         };
 
     let row_width = rows[row_idx].len();
@@ -385,26 +564,40 @@ pub(crate) fn restyle_codex_status_line(
     ];
     let Some(line) = candidates
         .into_iter()
-        .find(|line| UnicodeWidthStr::width(line.as_str()) <= row_width)
+        .find(|line| {
+            line.iter()
+                .map(|span| UnicodeWidthStr::width(span.text.as_str()))
+                .sum::<usize>()
+                <= row_width
+        })
     else {
         return false;
     };
 
     let row = &mut rows[row_idx];
-    for cell in row.iter_mut() {
-        cell.ch = ' ';
-    }
+    row.fill(GridCell::blank());
     let mut col = 0usize;
-    for ch in line.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-        if col + width > row.len() {
-            return false;
+    for span in line {
+        for ch in span.text.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if col + width > row.len() {
+                return false;
+            }
+            let mut cell = GridCell::blank();
+            cell.ch = ch;
+            if let Some([r, g, b]) = span.fg {
+                cell.fg = kasa_bridge::screen::Color::Rgb(r, g, b);
+            }
+            cell.bold = span.bold;
+            cell.dim = span.dim;
+            row[col] = cell.clone();
+            for spacer in 1..width {
+                let mut blank = cell.clone();
+                blank.ch = ' ';
+                row[col + spacer] = blank;
+            }
+            col += width;
         }
-        row[col].ch = ch;
-        for spacer in 1..width {
-            row[col + spacer].ch = ' ';
-        }
-        col += width;
     }
     true
 }
@@ -442,7 +635,27 @@ mod codex_status_line_tests {
         ));
         assert_eq!(
             text(&rows[0]),
-            "   GPT-5.6 Sol 1M ┃  main ┃  kasaterm ┃ 16% ┃  xhigh"
+            format!(
+                " {} GPT-5.6 Sol 1M ┃  main ┃  kasaterm ┃ 16% ┃  xhigh",
+                STATUS_MODEL_GPT_MARKER
+            )
+        );
+        let model = rows[0]
+            .iter()
+            .position(|cell| cell.ch == STATUS_MODEL_GPT_MARKER)
+            .expect("GPT 로고 표식");
+        assert_eq!(
+            rows[0][model].fg,
+            kasa_bridge::screen::Color::Rgb(0x7a, 0xa2, 0xf7)
+        );
+        assert!(rows[0][model].bold);
+        let git = rows[0]
+            .iter()
+            .position(|cell| cell.ch == '')
+            .expect("Git 아이콘");
+        assert_eq!(
+            rows[0][git].fg,
+            kasa_bridge::screen::Color::Rgb(0x73, 0xda, 0xca)
         );
     }
 
@@ -469,7 +682,36 @@ mod codex_status_line_tests {
             Some("kasaterm"),
             Some("main")
         ));
-        assert_eq!(text(&rows[0]), "   GPT-5.6 Sol ┃  xhigh");
+        assert_eq!(
+            text(&rows[0]),
+            format!(" {} GPT-5.6 Sol ┃  xhigh", STATUS_MODEL_GPT_MARKER)
+        );
+    }
+
+    #[test]
+    fn claude_prefixed_model_uses_claude_logo_marker() {
+        let mut rows = vec![row("claude-opus-5 high · Context 22% used", 70)];
+        assert!(restyle_codex_status_line(&mut rows, None, None));
+        assert!(text(&rows[0]).contains(STATUS_MODEL_CLAUDE_MARKER));
+        let (_, _, provider) = take_status_model_provider(&mut rows).expect("Claude 로고 표식");
+        assert_eq!(provider, StatusModelProvider::Claude);
+        assert!(!text(&rows[0]).contains(STATUS_MODEL_CLAUDE_MARKER));
+    }
+
+    #[test]
+    fn startup_status_line_is_found_above_blank_rows() {
+        let mut rows = vec![row(
+            "gpt-5.6-sol xhigh · main · kasaterm · Context 0% used",
+            90,
+        )];
+        rows.extend((0..20).map(|_| row("", 90)));
+        assert!(restyle_codex_status_line(
+            &mut rows,
+            Some("kasaterm"),
+            Some("main")
+        ));
+        assert!(text(&rows[0]).contains(STATUS_MODEL_GPT_MARKER));
+        assert!(take_status_model_provider(&mut rows).is_some());
     }
 
     #[test]

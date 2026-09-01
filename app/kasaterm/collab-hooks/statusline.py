@@ -59,6 +59,12 @@ ICON_SETS = {
     "plain": {"model": "M", "git": "git", "folder": "dir", "effort": "E"},
 }
 
+# kasaterm 안에서는 Nerd Font 글리프 대신 공식 Claude SVG를 얹는다. 이 PUA는
+# 화면에 그릴 문자가 아니라 renderer가 찾아 blank 처리할 한 칸 표식이다. 일반
+# 터미널은 SVG 오버레이가 없으므로 기존 icon_set 글리프를 그대로 쓴다.
+MODEL_MARKER_CLAUDE = "\ue0c0"
+MODEL_MARKER_GPT = "\ue0c1"
+
 # kasaterm pane 표식 — 예전엔 U+FFFC 5칸이 학생 프사(bust) 자리표시자였는데,
 # 프사를 걷어내면서(거노 2026-08-11) 1칸으로 줄였다. **지우지는 마라.** 이 문자가
 # 화면에 있느냐가 kasaterm 쪽에서 세 가지 판정의 근거다: agents 목록 뷰인지
@@ -230,7 +236,18 @@ def main():
         win_s = (f"1M" if ctx_win >= 1_000_000
                  else (f"{ctx_win // 1000}k" if ctx_win else ""))
         tail = f"{DIM} {win_s}{RESET}" if win_s else ""
-        parts.append(f"{ansi(C_MODEL)}{BOLD}{ic['model']} {model}{RESET}{tail}")
+        model_id = ((d.get("model") or {}).get("id") or "").lower()
+        if os.environ.get("KASATERM_PANE_ID"):
+            if (model_id.startswith(("gpt-", "codex-"))
+                    or (model_id.startswith("o") and model_id[1:2].isdigit())):
+                model_icon = MODEL_MARKER_GPT
+            elif model_id.startswith("claude-"):
+                model_icon = MODEL_MARKER_CLAUDE
+            else:
+                model_icon = ic["model"]
+        else:
+            model_icon = ic["model"]
+        parts.append(f"{ansi(C_MODEL)}{BOLD}{model_icon} {model}{RESET}{tail}")
 
     branch = get_git_branch(cwd)
     if branch:
