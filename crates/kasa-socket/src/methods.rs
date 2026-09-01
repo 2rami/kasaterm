@@ -51,6 +51,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.remote" => surface_remote(backend, id, &req.params),
         "surface.promote" => surface_promote(backend, id, &req.params),
         "surface.migrate" => surface_migrate(backend, id, &req.params),
+        "machine.unfold" => machine_unfold(backend, id, &req.params),
         "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
@@ -239,6 +240,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.remote",
                 "surface.promote",
                 "surface.migrate",
+                "machine.unfold",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
@@ -771,6 +773,18 @@ fn surface_migrate(backend: &dyn Backend, id: Value, params: &Value) -> Response
     };
     match result {
         Ok(remote_id) => Response::success(id, json!({"ok": true, "remote_id": remote_id})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로 펼친다.
+/// params: `{label}` — 기계 명부의 라벨(예: 맥미니).
+fn machine_unfold(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(label) = params.get("label").and_then(|v| v.as_str()) else {
+        return param_err(id, "machine.unfold requires `label` (예: 맥미니)");
+    };
+    match backend.unfold_machine(label) {
+        Ok(s) => Response::success(id, json!({"ok": true, "summary": s})),
         Err(e) => backend_err(id, e),
     }
 }
