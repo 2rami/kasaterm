@@ -1316,6 +1316,24 @@ mod codex_listing_tests {
     }
 
     #[test]
+    fn subagent_listing_uses_its_own_id_not_the_parent_session_id() {
+        // 0.152.0 subagent rollout 실측: payload.id는 이 thread, session_id는 부모다.
+        // session_id를 먼저 고르면 목록에서 resume할 때 부모 대화가 열린다.
+        let r = root("subagent-id");
+        write(
+            &r,
+            "2026/09/02/rollout-2026-09-02T00-59-11-child-id.jsonl",
+            &[
+                r#"{"type":"session_meta","payload":{"id":"child-id","session_id":"parent-id","cwd":"/proj","originator":"codex-tui"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"내 작업"}]}}"#,
+            ],
+        );
+        let got = recent_codex_sessions_in(&r, 10);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "child-id");
+    }
+
+    #[test]
     fn old_flat_format_still_reads() {
         // 옛 파일이 디스크에 그대로 남아 있다 — 새 포맷만 보면 그게 통째로 사라진다.
         let r = root("oldflat");
@@ -1757,8 +1775,8 @@ pub fn recent_all_sessions(limit: usize) -> Vec<RecentSession> {
 /// PTY 주입용 개행(`\r`)은 붙이지 않는다. 필요한 쪽이 붙인다.
 ///
 /// cwd 로 먼저 옮기는 게 중요하다 — claude 는 세션을 cwd 별 디렉터리에 나눠 두어
-/// 다른 자리에서 `--resume` 하면 그 세션을 아예 못 찾는다. cwd 를 모르는 하네스
-/// (codex 는 rollout 에 안 남긴다)는 지금 자리에서 연다.
+/// 다른 자리에서 `--resume` 하면 그 세션을 아예 못 찾고, codex 도 resume 피커를
+/// cwd 로 거른다. 현재 codex rollout 은 `session_meta.payload.cwd` 를 남긴다.
 ///
 /// 값은 전부 작은따옴표로 감싼다. id 는 uuid 라 위험할 게 없지만 cwd 는 사람이
 /// 만든 경로라 공백·괄호가 흔하다 — 따옴표가 없으면 `cd` 가 거기서 끊긴다.

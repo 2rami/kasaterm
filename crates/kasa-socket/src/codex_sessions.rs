@@ -1,16 +1,16 @@
-//! Codex rollout transfer primitives.
-//!
-//! Codex 0.152.0 writes an interactive thread to one append-only rollout under
-//! `$CODEX_HOME/sessions/YYYY/MM/DD/`. A kasaterm pane-specific `CODEX_HOME`
-//! symlinks that directory to the user's real Codex home, so neither the
-//! temporary home nor `state_5.sqlite` is a durable transfer source.
-//!
-//! This module deliberately stops at the verified boundary: it discovers and
-//! validates the rollout, reads its bytes, and tells the caller where those
-//! bytes belong under another Codex home. It does not rewrite rollout JSON,
-//! copy authentication/configuration, mutate Codex's SQLite indexes, or write
-//! destination files. The caller can therefore use its own atomic-write and
-//! conflict policy.
+// Codex rollout transfer primitives.
+//
+// Codex 0.152.0 writes an interactive thread to one append-only rollout under
+// `$CODEX_HOME/sessions/YYYY/MM/DD/`. A kasaterm pane-specific `CODEX_HOME`
+// symlinks that directory to the user's real Codex home, so neither the
+// temporary home nor `state_5.sqlite` is a durable transfer source.
+//
+// This module deliberately stops at the verified boundary: it discovers and
+// validates the rollout, reads its bytes, and tells the caller where those
+// bytes belong under another Codex home. It does not rewrite rollout JSON,
+// copy authentication/configuration, mutate Codex's SQLite indexes, or write
+// destination files. The caller can therefore use its own atomic-write and
+// conflict policy.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, Read};
