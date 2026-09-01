@@ -138,12 +138,22 @@ pub(crate) fn send_copy_action() -> bool {
     send_app_edit_action(objc2::sel!(copy:))
 }
 
+/// 종료 확인의 설명문. 로컬 작업이 있으면 무엇이 끊기는지 개수까지 말하고, 없으면
+/// 기존 안내를 유지한다. 거울 pane 은 호출측의 `local_running_job_count`에서 빠진다.
+pub(crate) fn quit_warning_text(local_running_jobs: usize) -> String {
+    if local_running_jobs == 0 {
+        "실행 중인 모든 터미널 세션이 종료됩니다.".to_string()
+    } else {
+        format!("맥북에서 실행 중인 작업 {local_running_jobs}개 — 지금 끄면 중단")
+    }
+}
+
 /// ⌘Q 종료 확인 — ghostty 식 NSAlert("종료"/"취소"). "종료"(첫 버튼)면 true.
 /// PredefinedMenuItem::quit(OS 가 곧장 terminate) 대신 커스텀 ⌘Q 메뉴가 이걸 띄워,
 /// 확인 시에만 호출측이 event_loop.exit()로 정상 종료(세션·window.json 저장)한다.
 /// alert 를 못 띄우면(클래스 없음 등) 막지 않고 true 를 돌려 종료를 진행한다.
 #[cfg(target_os = "macos")]
-pub(crate) fn confirm_quit() -> bool {
+pub(crate) fn confirm_quit_with_local_jobs(local_running_jobs: usize) -> bool {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSString;
@@ -156,7 +166,8 @@ pub(crate) fn confirm_quit() -> bool {
             return true;
         }
         let title = NSString::from_str("kasaterm 을 종료할까요?");
-        let info = NSString::from_str("실행 중인 모든 터미널 세션이 종료됩니다.");
+        let info_text = quit_warning_text(local_running_jobs);
+        let info = NSString::from_str(&info_text);
         let quit_btn = NSString::from_str("종료");
         let cancel_btn = NSString::from_str("취소");
         let _: () = msg_send![alert, setMessageText: &*title];
@@ -166,5 +177,33 @@ pub(crate) fn confirm_quit() -> bool {
         // NSAlertFirstButtonReturn = 1000 ("종료"), Second = 1001 ("취소").
         let resp: isize = msg_send![alert, runModal];
         resp == 1000
+    }
+}
+
+/// 새 호출부가 작업 수를 넘기도록 배선되기 전에도 기존 종료 흐름을 보존한다.
+/// 배선 뒤에는 `confirm_quit_with_local_jobs`가 종료 경고의 정본이다.
+#[cfg(target_os = "macos")]
+pub(crate) fn confirm_quit() -> bool {
+    confirm_quit_with_local_jobs(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quit_warning_text;
+
+    #[test]
+    fn 로컬_작업_수는_종료_위험을_정확히_말한다() {
+        assert_eq!(
+            quit_warning_text(3),
+            "맥북에서 실행 중인 작업 3개 — 지금 끄면 중단"
+        );
+    }
+
+    #[test]
+    fn 로컬_작업이_없으면_기존_안내를_유지한다() {
+        assert_eq!(
+            quit_warning_text(0),
+            "실행 중인 모든 터미널 세션이 종료됩니다."
+        );
     }
 }

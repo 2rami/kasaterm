@@ -43,6 +43,18 @@ const NOTIFY_FLASH_MS: u128 = 1800;
 /// 목적은 끝난다(거노 2026-08-25 "바뀐지도 잘모르겠는데").
 const ACCOUNT_FLASH_MS: u128 = 900;
 
+/// `(세션 정체, 원격 거울 여부, 실제 작업 여부)`를 작업 수로 접는다.
+///
+/// 정체를 별도로 받는 작은 함수로 둬, PTY를 띄우지 않고도 중복·거울 제외 규칙을
+/// 시험할 수 있게 한다. 작업 이름 판정은 `local_running_job_count`가 맡는다.
+fn count_unique_local_jobs(jobs: impl IntoIterator<Item = (usize, bool, bool)>) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    jobs.into_iter()
+        .filter(|(_, mirrored, running)| !mirrored && *running)
+        .filter(|(key, _, _)| seen.insert(*key))
+        .count()
+}
+
 /// 위 진행도의 자유함수판. 렌더가 `g`(=`self.gpu`)를 대여한 채로 불러야 해서
 /// `&self` 메서드로는 안 된다 — 필드 하나만 받으면 disjoint borrow 로 통과한다.
 pub(crate) fn account_flash_k(at: Option<std::time::Instant>) -> Option<f32> {
@@ -3099,6 +3111,31 @@ impl App {
         }
         pids.iter().find_map(|p| self.pid_busy(p))
     }
+
+    /// 앱을 끄면 함께 멈추는 **이 기계의 실제 작업** 수.
+    ///
+    /// 모든 세션의 PTY를 보되 원격 기계를 보기만 하는 거울은 제외한다. 한
+    /// `PtySession`이 pane leaf와 탭 pid 양쪽에 걸리는 경우가 있어 Arc 정체로 한
+    /// 번만 센다. 그렇지 않으면 화면 구조 하나가 작업 수를 부풀려 종료 경고가
+    /// 거짓말한다.
+    pub(crate) fn local_running_job_count(&self) -> usize {
+        let current = self.pty.iter();
+        let stashed = self
+            .sessions
+            .iter()
+            .flatten()
+            .flat_map(|session| session.pty.iter());
+        let jobs = current.chain(stashed).map(|(id, session)| {
+            let key = std::sync::Arc::as_ptr(session) as usize;
+            let mirrored = kasa_mcp::remote::is_view_pane(id);
+            let running = session.active_process_name().is_some_and(|name| {
+                !name.is_empty() && !is_shell_name(&name)
+            });
+            (key, mirrored, running)
+        });
+        count_unique_local_jobs(jobs)
+    }
+
     /// First running job across every pane/tab — drives the window-close
     /// confirmation ("close the whole app while claude is mid-run?").
     fn any_pane_busy(&self) -> Option<String> {
@@ -3919,6 +3956,30 @@ pub(crate) fn open_url_in_browser(url: &str) {
 #[cfg(test)]
 mod toast_tests {
     use super::*;
+
+    #[test]
+    fn 종료_작업_수는_같은_세션을_한_번만_센다() {
+        assert_eq!(
+            count_unique_local_jobs([
+                (10, false, true),
+                (10, false, true),
+                (20, false, true),
+            ]),
+            2
+        );
+    }
+
+    #[test]
+    fn 종료_작업_수는_원격_거울과_빈_셸을_제외한다() {
+        assert_eq!(
+            count_unique_local_jobs([
+                (10, true, true),
+                (20, false, false),
+                (30, false, true),
+            ]),
+            1
+        );
+    }
 
     // 완료 토스트 = 캐릭터(pane 고정) + hook title(완료 순간). title 앞 "✓ " 중복 제거.
     #[test]
