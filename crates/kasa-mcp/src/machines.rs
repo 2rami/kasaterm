@@ -44,14 +44,26 @@ pub struct Machine {
     /// 로컬 경로 → 그 기계 경로. 긴 접두부터 맞춘다 — nacho-neko 처럼 부모와
     /// 다른 자리에 사는 레포를 부모 규칙보다 먼저 잡기 위해서다.
     pub roots: Vec<(String, String)>,
+    /// 본진 — 순정 `claude` 가 이 기계 태생으로 간다(셰임의 home 디스패치).
+    /// 옵트인이라 기본 false 고, **한 기계에만** 걸어야 한다: 서로가 서로를
+    /// 본진으로 걸면 스폰이 두 기계 사이를 무한히 오간다(가드가 없다 — 명부는
+    /// 기계마다 따로라 코드가 원천 차단할 수 없다).
+    pub home: bool,
 }
 
 fn parse(v: &Value) -> Vec<Machine> {
-    let Some(arr) = v.as_array() else { return Vec::new() };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
     arr.iter()
         .filter_map(|m| {
             let label = m.get("label")?.as_str()?.trim().to_string();
-            let base = m.get("base")?.as_str()?.trim().trim_end_matches('/').to_string();
+            let base = m
+                .get("base")?
+                .as_str()?
+                .trim()
+                .trim_end_matches('/')
+                .to_string();
             if label.is_empty() || base.is_empty() {
                 return None;
             }
@@ -90,7 +102,15 @@ fn parse(v: &Value) -> Vec<Machine> {
                 .and_then(|k| k.as_str())
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty());
-            Some(Machine { label, base, host, roots, kvm })
+            let home = m.get("home").and_then(|h| h.as_bool()).unwrap_or(false);
+            Some(Machine {
+                label,
+                base,
+                host,
+                roots,
+                kvm,
+                home,
+            })
         })
         .collect()
 }
@@ -104,7 +124,9 @@ pub fn machines() -> Vec<Machine> {
             }
         }
     }
-    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
     let path = std::path::Path::new(&home).join(".config/kasaterm/machines.json");
     std::fs::read_to_string(path)
         .ok()
@@ -117,11 +139,20 @@ pub fn find(label: &str) -> Option<Machine> {
     machines().into_iter().find(|m| m.label == label)
 }
 
+/// 본진(home:true) 기계 — 여럿이면 첫 항목이 이긴다(걸 일이 없어야 하는 상태라
+/// 굳이 오류로 만들지 않는다).
+pub fn home_machine() -> Option<Machine> {
+    machines().into_iter().find(|m| m.home)
+}
+
 /// 주소로 라벨 역조회 — surface.remote 처럼 주소만 들고 들어온 링크에 이름을
 /// 붙여 준다. 명부 밖 주소면 None.
 pub fn label_for_base(base: &str) -> Option<String> {
     let b = base.trim_end_matches('/');
-    machines().into_iter().find(|m| m.base == b).map(|m| m.label)
+    machines()
+        .into_iter()
+        .find(|m| m.base == b)
+        .map(|m| m.label)
 }
 
 /// 경로 접두 매핑. 경계가 path 성분이어야 한다 — `/a/bc` 가 `/a/b` 규칙에
@@ -190,7 +221,10 @@ async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>>
         return None;
     }
     let text = resp.text().await.ok()?;
-    serde_json::from_str::<Value>(&text).ok()?.as_array().cloned()
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .as_array()
+        .cloned()
 }
 
 /// 백그라운드 폴링. 명부는 **매 바퀴 다시 읽는다** — 부팅 때 한 번만 잡으면

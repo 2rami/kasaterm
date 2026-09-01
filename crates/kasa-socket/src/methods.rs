@@ -52,6 +52,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.promote" => surface_promote(backend, id, &req.params),
         "surface.migrate" => surface_migrate(backend, id, &req.params),
         "machine.unfold" => machine_unfold(backend, id, &req.params),
+        "machine.home" => machine_home(backend, id),
         "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
@@ -99,7 +100,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             req.params.get("outer").and_then(|v| v.as_str()),
             // 기본 no-focus: 자동화가 자기 pane 탭에 서브에이전트를 띄울 때 부모
             // 화면(사람이 보던 대화)을 덮지 않는다. `focus:true` 는 CLI --focus.
-            req.params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false),
+            req.params
+                .get("focus")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         ) {
             Ok(s) => {
                 // split 과 같은 이유로 학생 이름을 **여기서** 준다 — 탭으로 띄워도
@@ -241,6 +245,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.promote",
                 "surface.migrate",
                 "machine.unfold",
+                "machine.home",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
@@ -293,7 +298,12 @@ fn web_drive(backend: &dyn Backend, id: Value, params: &Value) -> Response {
 fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let kind = match params.get("kind").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return param_err(id, "surface.open_preview requires `kind` (image|markdown|web)"),
+        None => {
+            return param_err(
+                id,
+                "surface.open_preview requires `kind` (image|markdown|web)",
+            )
+        }
     };
     let path = match params.get("path").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -394,16 +404,17 @@ fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     // outcome 두 값 강제 — board status 칸에서 겪은 "free text 라더니 소비부는 정확
     // 일치" 함정을 서버 입구에서 막는다. 실패도 정식 보고다(프로즈에만 실으면 못 읽음).
-    let outcome = match params.get("outcome").and_then(|v| v.as_str()) {
-        Some(o @ ("succeeded" | "failed")) => o,
-        Some(other) => {
-            return param_err(
+    let outcome =
+        match params.get("outcome").and_then(|v| v.as_str()) {
+            Some(o @ ("succeeded" | "failed")) => o,
+            Some(other) => return param_err(
                 id,
-                format!("surface.done `outcome` must be \"succeeded\" or \"failed\", got \"{other}\""),
-            )
-        }
-        None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
-    };
+                format!(
+                    "surface.done `outcome` must be \"succeeded\" or \"failed\", got \"{other}\""
+                ),
+            ),
+            None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
+        };
     let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
     match backend.pane_done(surface_id, outcome, summary) {
         Ok(()) => Response::success(id, json!({"ok": true})),
@@ -426,7 +437,12 @@ fn surface_agent_status(backend: &dyn Backend, id: Value, params: &Value) -> Res
                 format!("surface.agent_status `phase` must be start|end|clear, got \"{other}\""),
             )
         }
-        None => return param_err(id, "surface.agent_status requires `phase` (start|end|clear)"),
+        None => {
+            return param_err(
+                id,
+                "surface.agent_status requires `phase` (start|end|clear)",
+            )
+        }
     };
     let kind = match params.get("kind").and_then(|v| v.as_str()) {
         Some(k @ ("subagent" | "background")) => k,
@@ -436,13 +452,21 @@ fn surface_agent_status(backend: &dyn Backend, id: Value, params: &Value) -> Res
                 format!("surface.agent_status `kind` must be subagent|background, got \"{other}\""),
             )
         }
-        None => return param_err(id, "surface.agent_status requires `kind` (subagent|background)"),
+        None => {
+            return param_err(
+                id,
+                "surface.agent_status requires `kind` (subagent|background)",
+            )
+        }
     };
     let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("");
     // `clear` 는 key 를 안 본다(그 kind 통째). start/end 는 짝지을 값이 있어야 한다.
     if phase != "clear" && key.is_empty() {
-        return param_err(id, "surface.agent_status start/end requires a non-empty `key`");
+        return param_err(
+            id,
+            "surface.agent_status start/end requires a non-empty `key`",
+        );
     }
     match backend.agent_status(surface_id, phase, kind, key, label) {
         Ok(()) => Response::success(id, json!({"ok": true})),
@@ -487,7 +511,10 @@ fn surface_capture(backend: &dyn Backend, id: Value, params: &Value) -> Response
         Some(s) => s,
         None => return param_err(id, "surface.capture requires `surface_id` (string)"),
     };
-    let path = params.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let max_width = params
         .get("max_width")
         .and_then(|v| v.as_u64())
@@ -566,7 +593,11 @@ fn surface_set_color(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         Some(s) => s,
         None => return param_err(id, "surface.set_color requires `surface_id` (string)"),
     };
-    let color = match params.get("color").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+    let color = match params
+        .get("color")
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_color)
+    {
         Some(c) => c,
         None => return param_err(id, "surface.set_color requires `color` as #rrggbb"),
     };
@@ -585,7 +616,10 @@ fn surface_repersona(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         Some(s) => s,
         None => return param_err(id, "surface.repersona requires `surface_id` (string)"),
     };
-    let character = match params.get("character").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let character = match params
+        .get("character")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
     {
         Some(c) => c,
         None => return param_err(id, "surface.repersona requires `character` (string)"),
@@ -605,15 +639,26 @@ fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Respo
         Some(s) => s,
         None => return param_err(id, "surface.report_cwd requires `cwd` (string)"),
     };
-    let session_id = params.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+    let session_id = params
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     // 컨텍스트 창·사용 토큰은 선택 — 구버전 statusline 은 안 보내고, 그때는 0(미상)이라
     // GUI 가 종전 추정 폴백으로 떨어진다.
-    let ctx_window = params.get("ctx_window").and_then(|v| v.as_u64()).unwrap_or(0);
-    let ctx_tokens = params.get("ctx_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ctx_window = params
+        .get("ctx_window")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ctx_tokens = params
+        .get("ctx_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     // 모델·effort 도 선택 — 빈 문자열이면 "미보고"라 종전 값을 안 덮는다.
     let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let effort = params.get("effort").and_then(|v| v.as_str()).unwrap_or("");
-    match backend.report_cwd(surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort) {
+    match backend.report_cwd(
+        surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort,
+    ) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -648,9 +693,7 @@ fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         Some("right") => SplitDirection::Right,
         Some("up") => SplitDirection::Up,
         Some("down") => SplitDirection::Down,
-        _ => {
-            return param_err(id, "surface.move requires `direction` (left/right/up/down)")
-        }
+        _ => return param_err(id, "surface.move requires `direction` (left/right/up/down)"),
     };
     match backend.move_surface(surface_id, target, dir) {
         Ok(()) => Response::success(id, json!({"ok": true})),
@@ -675,7 +718,10 @@ fn surface_set_ratio(backend: &dyn Backend, id: Value, params: &Value) -> Respon
 
 fn surface_resize_divider(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let path: Vec<u8> = match params.get("path").and_then(|v| v.as_array()) {
-        Some(arr) => arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect(),
+        Some(arr) => arr
+            .iter()
+            .filter_map(|n| n.as_u64().map(|x| x as u8))
+            .collect(),
         None => return param_err(id, "surface.resize_divider requires `path` (array of 0/1)"),
     };
     let ratio = match params.get("ratio").and_then(|v| v.as_f64()) {
@@ -718,7 +764,10 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     // 기본 no-focus (자동화 경로): `focus:true` 를 명시할 때만 새 pane 으로 포커스
     // 이동. CLI 의 `--focus` 플래그가 이 값을 채운다.
-    let focus = params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
+    let focus = params
+        .get("focus")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // `from` 없이 오면 포커스된 pane 을 쪼갠다(사람이 키보드로 부른 경우). CLI 는
     // pane 안에서 부르면 자기 id 를 채워 보낸다 — 그래야 에이전트의 split 이 사람이
     // 보고 있는 창을 건드리지 않는다.
@@ -759,10 +808,16 @@ fn surface_migrate(backend: &dyn Backend, id: Value, params: &Value) -> Response
         return param_err(id, "surface.migrate requires `pane`");
     };
     let Some(base) = params.get("base").and_then(|v| v.as_str()) else {
-        return param_err(id, "surface.migrate requires `base` (예: http://127.0.0.1:18791)");
+        return param_err(
+            id,
+            "surface.migrate requires `base` (예: http://127.0.0.1:18791)",
+        );
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let run = params.get("run").and_then(|v| v.as_str());
     // `base: "local"` = 역이사 — 원격 pane 을 이 기계로 데려온다. 주소 자리에
     // 예약어를 두는 것은 CLI 가 한 동사(migrate)로 왕복을 다 말하게 하기 위해서다.
@@ -789,11 +844,26 @@ fn machine_unfold(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     }
 }
 
+/// `machine.home` — 명부의 본진 기계. 셰임의 순정 `claude` 디스패치가 부른다.
+fn machine_home(backend: &dyn Backend, id: Value) -> Response {
+    match backend.home_machine() {
+        Ok(Some((label, online))) => Response::success(
+            id,
+            json!({"configured": true, "label": label, "online": online}),
+        ),
+        Ok(None) => Response::success(id, json!({"configured": false})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
 /// `surface.remote` — 원격 PTY 호스트의 세션을 pane 으로. params:
 /// `{base, cwd?, pane?, from?}` — `pane` 이 있으면 이어받기, 없으면 스폰.
 fn surface_remote(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(base) = params.get("base").and_then(|v| v.as_str()) else {
-        return param_err(id, "surface.remote requires `base` (예: http://127.0.0.1:18766)");
+        return param_err(
+            id,
+            "surface.remote requires `base` (예: http://127.0.0.1:18766)",
+        );
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let pane = params.get("pane").and_then(|v| v.as_str());
@@ -821,7 +891,10 @@ fn surface_split_fleet(backend: &dyn Backend, id: Value, params: &Value) -> Resp
         return param_err(id, "surface.split_fleet: count 는 16 이하");
     }
     let from = params.get("from").and_then(|v| v.as_str());
-    let host_ratio = params.get("host_ratio").and_then(|v| v.as_f64()).map(|f| f as f32);
+    let host_ratio = params
+        .get("host_ratio")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32);
     match backend.split_fleet(count, from, host_ratio) {
         Ok(surfaces) => {
             // 새 pane 이 claude 로 뜨면 쓸 이름을 여기서 함께 준다 — N 명을 띄우면
@@ -854,11 +927,23 @@ fn session_resume(backend: &dyn Backend, id: Value, params: &Value) -> Response 
         None => return param_err(id, "session.resume requires `id` (session uuid)"),
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
-    let newroom = params.get("newroom").and_then(|v| v.as_bool()).unwrap_or(false);
-    let attach = params.get("attach").and_then(|v| v.as_bool()).unwrap_or(false);
+    let newroom = params
+        .get("newroom")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let attach = params
+        .get("attach")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // 하네스 미지정은 claude — 이 파라미터가 없던 시절의 호출을 그대로 받는다.
-    let harness = params.get("harness").and_then(|v| v.as_str()).unwrap_or("claude");
-    simple(id, backend.resume_session(sid, cwd, newroom, attach, harness))
+    let harness = params
+        .get("harness")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude");
+    simple(
+        id,
+        backend.resume_session(sid, cwd, newroom, attach, harness),
+    )
 }
 
 fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response {
@@ -888,7 +973,10 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
             // pane 발 tell(메타 동봉) 이 claude pane 을 겨누면 거부 — 지침(「SM 과
             // tell 을 같이 보내지 마라」, 2026-08-18)만으로는 학생들이 계속 겹쳐
             // 보냈다(2026-08-20 재발). 기계적으로 막아야 한 통만 남는다.
-            let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            let force = params
+                .get("force")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !force {
                 if let Some(msg) = tell_into_claude_pane(backend, to) {
                     return param_err(id, &msg);
@@ -916,7 +1004,11 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
 /// 도는 pane 에 말을 거는 정답은 인박스(SendMessage)이고, codex pane 은 tell 뿐이다.
 ///
 /// 거부 사유 문자열을 돌려주고, 보내도 되면 `None`.
-fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str) -> Option<String> {
+fn claude_boot_into_running_pane(
+    backend: &dyn Backend,
+    target: &str,
+    text: &str,
+) -> Option<String> {
     if !looks_like_claude_boot(text) {
         return None;
     }
@@ -986,8 +1078,14 @@ fn looks_like_claude_boot(text: &str) -> bool {
         "--dangerously-bypass-hook-trust",
     ];
     text.lines().any(|line| {
-        let l = line.trim_matches(|c: char| c.is_control() || c == '~' || c == '[').trim();
-        let parts: Vec<&str> = l.split("&&").flat_map(|p| p.split(';')).map(str::trim).collect();
+        let l = line
+            .trim_matches(|c: char| c.is_control() || c == '~' || c == '[')
+            .trim();
+        let parts: Vec<&str> = l
+            .split("&&")
+            .flat_map(|p| p.split(';'))
+            .map(str::trim)
+            .collect();
         let runs_agent = |p: &str| {
             ["claude", "codex"]
                 .iter()
@@ -1071,11 +1169,21 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 fn surface_send_raw(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let hex = match params.get("hex").and_then(|v| v.as_str()) {
         Some(h) => h,
-        None => return param_err(id, "surface.send_raw requires `hex` (space-separated hex bytes)"),
+        None => {
+            return param_err(
+                id,
+                "surface.send_raw requires `hex` (space-separated hex bytes)",
+            )
+        }
     };
     let bytes = match decode_hex(hex) {
         Some(b) => b,
-        None => return param_err(id, "surface.send_raw: `hex` must be space-separated 2-digit hex"),
+        None => {
+            return param_err(
+                id,
+                "surface.send_raw: `hex` must be space-separated 2-digit hex",
+            )
+        }
     };
     let target = params.get("surface_id").and_then(|v| v.as_str());
     match backend.send_raw(target, &bytes) {
@@ -1215,7 +1323,11 @@ mod tests {
     }
 
     fn req(method: &str, params: Value) -> Request {
-        Request { id: json!("test-id"), method: method.into(), params }
+        Request {
+            id: json!("test-id"),
+            method: method.into(),
+            params,
+        }
     }
 
     #[test]
@@ -1241,7 +1353,10 @@ mod tests {
         let backend = FakeBackend::default();
         let r = dispatch(
             &backend,
-            req("surface.resize_divider", json!({"path": [1, 0], "ratio": 0.3})),
+            req(
+                "surface.resize_divider",
+                json!({"path": [1, 0], "ratio": 0.3}),
+            ),
         );
         assert!(r.ok);
         let calls = backend.resized.lock().unwrap();
@@ -1253,9 +1368,15 @@ mod tests {
     #[test]
     fn resize_divider_requires_path_and_ratio() {
         let backend = FakeBackend::default();
-        let no_path = dispatch(&backend, req("surface.resize_divider", json!({"ratio": 0.3})));
+        let no_path = dispatch(
+            &backend,
+            req("surface.resize_divider", json!({"ratio": 0.3})),
+        );
         assert!(!no_path.ok);
-        let no_ratio = dispatch(&backend, req("surface.resize_divider", json!({"path": [0]})));
+        let no_ratio = dispatch(
+            &backend,
+            req("surface.resize_divider", json!({"path": [0]})),
+        );
         assert!(!no_ratio.ok);
         // A malformed call must never reach the backend.
         assert!(backend.resized.lock().unwrap().is_empty());
@@ -1272,7 +1393,10 @@ mod tests {
     #[test]
     fn split_validates_direction_value() {
         let backend = FakeBackend::default();
-        let r = dispatch(&backend, req("surface.split", json!({"direction": "sideways"})));
+        let r = dispatch(
+            &backend,
+            req("surface.split", json!({"direction": "sideways"})),
+        );
         assert!(!r.ok);
         assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
     }
@@ -1280,12 +1404,12 @@ mod tests {
     #[test]
     fn split_with_valid_direction_returns_new_surface() {
         let backend = FakeBackend::default();
-        let r = dispatch(&backend, req("surface.split", json!({"direction": "right"})));
-        assert!(r.ok);
-        assert_eq!(
-            r.result.unwrap()["surface"]["id"],
-            json!("surf-2"),
+        let r = dispatch(
+            &backend,
+            req("surface.split", json!({"direction": "right"})),
         );
+        assert!(r.ok);
+        assert_eq!(r.result.unwrap()["surface"]["id"], json!("surf-2"),);
     }
 
     #[test]
@@ -1325,9 +1449,11 @@ mod tests {
     #[test]
     fn send_text_with_tell_meta_logs_to_room_messages() {
         // slug 는 cwd 문자열 변환이라 유니크 cwd 로 실제 방 파일과 격리.
-        let fake_cwd =
-            std::env::temp_dir().join(format!("kasa-tell-test-{}", std::process::id()));
-        let backend = FakeBackend { cwd: Some(fake_cwd.clone()), ..Default::default() };
+        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-test-{}", std::process::id()));
+        let backend = FakeBackend {
+            cwd: Some(fake_cwd.clone()),
+            ..Default::default()
+        };
         let r = dispatch(
             &backend,
             req(
@@ -1349,19 +1475,27 @@ mod tests {
         let entry: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
         assert_eq!(entry["from_pane"], "%9");
         assert_eq!(entry["to_pane"], "surf-1");
-        assert_eq!(entry["text"], "안녕 유즈", "제어시퀀스 없는 plain 본문만 기록");
+        assert_eq!(
+            entry["text"], "안녕 유즈",
+            "제어시퀀스 없는 plain 본문만 기록"
+        );
         assert!(entry["ts"].as_f64().unwrap() > 0.0);
         let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
     }
 
     #[test]
     fn send_text_without_tell_meta_logs_nothing() {
-        let fake_cwd =
-            std::env::temp_dir().join(format!("kasa-tell-none-{}", std::process::id()));
-        let backend = FakeBackend { cwd: Some(fake_cwd.clone()), ..Default::default() };
+        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-none-{}", std::process::id()));
+        let backend = FakeBackend {
+            cwd: Some(fake_cwd.clone()),
+            ..Default::default()
+        };
         let r = dispatch(
             &backend,
-            req("surface.send_text", json!({"surface_id": "surf-1", "text": "plain send"})),
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-1", "text": "plain send"}),
+            ),
         );
         assert!(r.ok);
         let slug: String = fake_cwd
@@ -1370,14 +1504,19 @@ mod tests {
             .map(|c| if c == '/' || c == '.' { '-' } else { c })
             .collect();
         let path = crate::collab_root().join(&slug).join("messages.jsonl");
-        assert!(!path.exists(), "메타 없는 send_text 는 기록을 남기지 않는다");
+        assert!(
+            !path.exists(),
+            "메타 없는 send_text 는 기록을 남기지 않는다"
+        );
     }
 
     #[test]
     fn claude_boot_signature_is_narrow() {
         // 실행 형태 — 막아야 한다.
         assert!(looks_like_claude_boot("cd /repo && claude"));
-        assert!(looks_like_claude_boot("cd /repo && claude --model 'claude-opus-5[1m]'"));
+        assert!(looks_like_claude_boot(
+            "cd /repo && claude --model 'claude-opus-5[1m]'"
+        ));
         assert!(looks_like_claude_boot("claude --resume abc123"));
         assert!(looks_like_claude_boot("claude"));
         // 사람이 쓴 지시문 — tell 이 막히면 안 된다.
@@ -1391,7 +1530,9 @@ mod tests {
     #[test]
     fn codex_boot_is_caught_too() {
         assert!(looks_like_claude_boot("cd /repo && codex"));
-        assert!(looks_like_claude_boot("codex --dangerously-bypass-hook-trust"));
+        assert!(looks_like_claude_boot(
+            "codex --dangerously-bypass-hook-trust"
+        ));
         assert!(looks_like_claude_boot("codex"));
         // 좁기는 claude 와 똑같이 — 사람이 쓴 문장은 통과시킨다.
         assert!(!looks_like_claude_boot("codex 가 왜 이래?"));
@@ -1420,9 +1561,18 @@ mod tests {
         assert!(!r.ok);
         let msg = r.error.unwrap().message;
         assert!(msg.contains("tell"), "tell 을 답으로 줘야 한다: {msg}");
-        assert!(!msg.contains("SendMessage"), "codex 엔 인박스가 없다: {msg}");
-        assert!(msg.contains("codex"), "무엇이 돌고 있는지 밝혀야 한다: {msg}");
-        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+        assert!(
+            !msg.contains("SendMessage"),
+            "codex 엔 인박스가 없다: {msg}"
+        );
+        assert!(
+            msg.contains("codex"),
+            "무엇이 돌고 있는지 밝혀야 한다: {msg}"
+        );
+        assert!(
+            backend.sent_text.lock().unwrap().is_empty(),
+            "거부했으면 보내지 않는다"
+        );
     }
 
     /// 학생이 SM 과 tell 을 겹쳐 보내는 이중 발송 — 지침은 두 번 어겨졌으니(08-18,
@@ -1449,16 +1599,24 @@ mod tests {
         );
         assert!(!r.ok);
         let msg = r.error.unwrap().message;
-        assert!(msg.contains("SendMessage"), "정답 경로를 알려줘야 한다: {msg}");
-        assert!(msg.contains("midori-p4-v32"), "to 에 넣을 이름까지 줘야 한다: {msg}");
-        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+        assert!(
+            msg.contains("SendMessage"),
+            "정답 경로를 알려줘야 한다: {msg}"
+        );
+        assert!(
+            msg.contains("midori-p4-v32"),
+            "to 에 넣을 이름까지 줘야 한다: {msg}"
+        );
+        assert!(
+            backend.sent_text.lock().unwrap().is_empty(),
+            "거부했으면 보내지 않는다"
+        );
     }
 
     /// 인박스가 죽은 비상시의 탈출구 — force 가 오면 같은 과녁이라도 통과한다.
     #[test]
     fn tell_force_overrides_claude_pane_guard() {
-        let fake_cwd =
-            std::env::temp_dir().join(format!("kasa-tell-force-{}", std::process::id()));
+        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-force-{}", std::process::id()));
         let backend = FakeBackend {
             cwd: Some(fake_cwd.clone()),
             board: vec![crate::backend::PaneActivity {
@@ -1491,8 +1649,7 @@ mod tests {
     /// 명부에 안 오른 claude(agent_name 없음).
     #[test]
     fn tell_still_reaches_codex_and_unlisted_claude() {
-        let fake_cwd =
-            std::env::temp_dir().join(format!("kasa-tell-open-{}", std::process::id()));
+        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-open-{}", std::process::id()));
         let backend = FakeBackend {
             cwd: Some(fake_cwd.clone()),
             board: vec![
@@ -1543,8 +1700,14 @@ mod tests {
             ),
         );
         assert!(!r.ok);
-        assert!(r.error.unwrap().message.contains("succeeded"), "고칠 값을 알려줘야 한다");
-        assert!(backend.done.lock().unwrap().is_empty(), "거부했으면 기록하지 않는다");
+        assert!(
+            r.error.unwrap().message.contains("succeeded"),
+            "고칠 값을 알려줘야 한다"
+        );
+        assert!(
+            backend.done.lock().unwrap().is_empty(),
+            "거부했으면 기록하지 않는다"
+        );
 
         let r = dispatch(
             &backend,
@@ -1556,7 +1719,11 @@ mod tests {
         assert!(r.ok);
         assert_eq!(
             backend.done.lock().unwrap().as_slice(),
-            &[("surf-1".to_string(), "failed".to_string(), "빌드 깨짐".to_string())]
+            &[(
+                "surf-1".to_string(),
+                "failed".to_string(),
+                "빌드 깨짐".to_string()
+            )]
         );
     }
 
@@ -1584,7 +1751,10 @@ mod tests {
         assert!(!r.ok);
         // 무엇을 대신 쓸지까지 알려줘야 부른 쪽이 고칠 수 있다.
         assert!(r.error.unwrap().message.contains("prana-p5"));
-        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+        assert!(
+            backend.sent_text.lock().unwrap().is_empty(),
+            "거부했으면 보내지 않는다"
+        );
     }
 
     #[test]

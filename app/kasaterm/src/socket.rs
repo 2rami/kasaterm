@@ -6,16 +6,16 @@
 //! become real tmux `@N` strings and `list_surfaces` returns one entry
 //! per actually-open pane.
 
+use anyhow::Result;
+use kasa_bridge::{Layout, TmuxSession};
 use kasa_socket::backend::{
     Backend, PaneActivity, PaneBlock, PaneRect, RecentSession, SessionsInfo, SplitDirection,
     SubagentInfo, SurfaceInfo, TranscriptChunk, WorkspaceInfo,
 };
 use kasa_socket::sessions::{is_uuid, recent_sessions_here, session_jsonl_path};
-use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
-use kasa_bridge::{Layout, TmuxSession};
 
 use crate::transcript::{snapshot_from_tail, CodexRolloutSnapshot};
 use crate::{PaneStatus, UserEvent, Workspace};
@@ -88,7 +88,11 @@ impl Backend for TmuxBackend {
             // 대개 가로로 넓으니 옛 기본과 같은 결과다.
             SplitDirection::Auto => "split-window -h",
         };
-        let cmd = if focus { base.to_string() } else { format!("{base} -d") };
+        let cmd = if focus {
+            base.to_string()
+        } else {
+            format!("{base} -d")
+        };
         self.tmux.send_cmd(&cmd)?;
         // We don't have a way to get the new pane's tmux id back
         // synchronously yet — control-mode reports it via a layout-change
@@ -185,7 +189,8 @@ impl Backend for TmuxBackend {
                 Ok(serde_json::json!({ "ok": true, "restart_required": true }))
             }
             "default-shell" => {
-                let path = crate::onboarding::apply_default_shell(id).map_err(anyhow::Error::msg)?;
+                let path =
+                    crate::onboarding::apply_default_shell(id).map_err(anyhow::Error::msg)?;
                 Ok(serde_json::json!({ "ok": true, "path": path }))
             }
             _ => anyhow::bail!("settings_action unsupported on the tmux backend"),
@@ -304,7 +309,11 @@ static AGENTS_CACHE: LazyLock<
     >,
 > = LazyLock::new(|| Mutex::new(None));
 
-fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>, HashSet<String>) {
+fn agents_cached() -> (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashSet<String>,
+) {
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = std::time::Instant::now();
     if let Some((at, status, names, errors)) = AGENTS_CACHE.lock().unwrap().as_ref() {
@@ -375,8 +384,7 @@ fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>, HashSet
         names.remove(n);
     }
     errors.retain(|sid| map.get(sid).is_some_and(|status| status == "waiting"));
-    *AGENTS_CACHE.lock().unwrap() =
-        Some((now, map.clone(), names.clone(), errors.clone()));
+    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone(), names.clone(), errors.clone()));
     (map, names, errors)
 }
 
@@ -404,7 +412,11 @@ impl PtyBackend {
     /// 않는다** — 화면에도 board 에도 없는 유령이 된다(거노 2026-08-07).
     fn live_surfaces(&self) -> std::collections::HashSet<String> {
         let ws = self.ws.lock().unwrap();
-        ws.panes.keys().cloned().chain(ws.pid_to_pane.keys().cloned()).collect()
+        ws.panes
+            .keys()
+            .cloned()
+            .chain(ws.pid_to_pane.keys().cloned())
+            .collect()
     }
 
     /// surface_id → (model, effort) 스냅샷. 세션 저장이 leaf 에 실으려고 읽는다.
@@ -470,17 +482,25 @@ impl PtyBackend {
             }
         }
         let cwd = pid_cwd(pid)?;
-        self.cwd_cache.lock().unwrap().insert(pid, (now, cwd.clone()));
+        self.cwd_cache
+            .lock()
+            .unwrap()
+            .insert(pid, (now, cwd.clone()));
         Some(cwd)
     }
 
     /// 모든 pane 의 `(surface_id, shell_pid)` — GUI 동기 RPC(메모리 즉답).
     fn query_pane_pids(&self) -> Vec<(String, u32)> {
         let (tx, rx) = std::sync::mpsc::channel();
-        if self.proxy.send_event(UserEvent::SocketQueryPanePids(tx)).is_err() {
+        if self
+            .proxy
+            .send_event(UserEvent::SocketQueryPanePids(tx))
+            .is_err()
+        {
             return Vec::new();
         }
-        rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or_default()
+        rx.recv_timeout(std::time::Duration::from_millis(300))
+            .unwrap_or_default()
     }
 
     /// hook-free 발견: bound 안 된 open pane 중 claude 실행 중인 것을 셸 pid 로
@@ -546,16 +566,22 @@ impl PtyBackend {
     /// pump(스크린 diff)가 이미 파싱한 마커 sid8 로 한 pane 을 직접 재바인딩 — 그리드
     /// 재스캔(행 창·타이밍)에 기대지 않는 진입-즉시 경로. 뷰 pane 게이트는 동일.
     pub(crate) fn rebind_pane_marker(&self, pane: &str, sid8: &str) {
-        let Some((_, shell_pid)) =
-            self.query_pane_pids().into_iter().find(|(id, _)| id == pane)
+        let Some((_, shell_pid)) = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(id, _)| id == pane)
         else {
             return;
         };
         if claude_view_subcommand(shell_pid).is_none() {
             return;
         }
-        let Some(sid) = resolve_sid8(sid8) else { return };
-        let Some(path) = transcript_path_for_session(&sid) else { return };
+        let Some(sid) = resolve_sid8(sid8) else {
+            return;
+        };
+        let Some(path) = transcript_path_for_session(&sid) else {
+            return;
+        };
         let cur = self.bound.lock().unwrap().get(pane).cloned();
         if cur.as_ref() != Some(&path) {
             let _ = self.bind_transcript(pane, &path.to_string_lossy());
@@ -578,7 +604,9 @@ impl PtyBackend {
             if !live.contains(&id) {
                 continue;
             }
-            let Some(sub) = claude_view_subcommand(shell_pid) else { continue };
+            let Some(sub) = claude_view_subcommand(shell_pid) else {
+                continue;
+            };
             views.insert(id.clone());
             let sid = match sub {
                 "attach" => attach_target_from_cmdline(shell_pid),
@@ -632,7 +660,9 @@ impl PtyBackend {
                 }
             };
             let Some(sid) = sid else { continue };
-            let Some(path) = transcript_path_for_session(&sid) else { continue };
+            let Some(path) = transcript_path_for_session(&sid) else {
+                continue;
+            };
             let cur = self.bound.lock().unwrap().get(&id).cloned();
             if cur.as_ref() != Some(&path) {
                 let _ = self.bind_transcript(&id, &path.to_string_lossy());
@@ -692,7 +722,11 @@ impl Backend for PtyBackend {
     /// 윈도우 수·활성 idx·라벨을 받는다. arona-ui 좌측 방 네비가 폴링한다(거노).
     fn sessions(&self) -> SessionsInfo {
         let (tx, rx) = std::sync::mpsc::channel();
-        if self.proxy.send_event(UserEvent::SocketQuerySessions(tx)).is_err() {
+        if self
+            .proxy
+            .send_event(UserEvent::SocketQuerySessions(tx))
+            .is_err()
+        {
             return SessionsInfo::default();
         }
         match rx.recv_timeout(std::time::Duration::from_millis(300)) {
@@ -703,7 +737,13 @@ impl Backend for PtyBackend {
                 // 방 이름 = 윈도우 라벨(name). cwd 가 있으면 부가 표기.
                 labels: labels
                     .into_iter()
-                    .map(|(name, cwd)| if cwd.is_empty() { name } else { format!("{name} · {cwd}") })
+                    .map(|(name, cwd)| {
+                        if cwd.is_empty() {
+                            name
+                        } else {
+                            format!("{name} · {cwd}")
+                        }
+                    })
                     .collect(),
             },
             Err(_) => SessionsInfo::default(),
@@ -715,7 +755,10 @@ impl Backend for PtyBackend {
     /// 없는 순수 셸 pane 까지 전부 담겨 웹텀 목록의 방별 그룹핑이 빠짐없다.
     fn pane_windows(&self) -> Vec<(String, usize)> {
         let ws = self.ws.lock().unwrap();
-        ws.pane_window.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        ws.pane_window
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// `POST /session-switch?idx=N` — 방=윈도우 전환을 GUI 스레드에 위임.
@@ -778,8 +821,8 @@ impl Backend for PtyBackend {
         // 빈 몸통 = 「명단은 안 바꾼다」. 값이 왔으면 {테마:[이름…]} 꼴만 받는다 —
         // 자유 문자열이 설정 키를 오염하지 않게 파싱 실패는 통째로 세운다.
         if !picks_json.is_empty() {
-            let v: serde_json::Value =
-                serde_json::from_str(picks_json).map_err(|e| anyhow::anyhow!("고른 명단 JSON 파싱 실패: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(picks_json)
+                .map_err(|e| anyhow::anyhow!("고른 명단 JSON 파싱 실패: {e}"))?;
             let Some(obj) = v.as_object() else {
                 anyhow::bail!("고른 명단은 {{테마:[이름…]}} 객체여야 한다");
             };
@@ -789,7 +832,9 @@ impl Backend for PtyBackend {
                     let names = arr
                         .as_array()
                         .map(|a| {
-                            a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
                         })
                         .unwrap_or_default();
                     (k.clone(), names)
@@ -797,7 +842,10 @@ impl Backend for PtyBackend {
                 .collect();
             write_character_picks(&picks);
         }
-        write_setting("character_theme", serde_json::Value::String(theme_id.to_string()));
+        write_setting(
+            "character_theme",
+            serde_json::Value::String(theme_id.to_string()),
+        );
         kasa_mcp::character::invalidate_active_theme();
         crate::theme::invalidate_roster();
         // 화면 갱신은 best-effort — 다음 상호작용에서라도 새 테마로 그려진다.
@@ -1260,9 +1308,7 @@ impl Backend for PtyBackend {
             Ok(Ok(id)) if !id.is_empty() => id,
             Ok(Ok(_)) => anyhow::bail!("remote 가 빈 pane id 를 돌려줬다"),
             Ok(Err(why)) => anyhow::bail!("remote 실패: {why}"),
-            Err(_) => anyhow::bail!(
-                "remote 응답 없음(30초) — GUI 스레드나 원격 호스트를 확인해라"
-            ),
+            Err(_) => anyhow::bail!("remote 응답 없음(30초) — GUI 스레드나 원격 호스트를 확인해라"),
         };
         if let Some(parent) = from.filter(|p| *p != id) {
             if let Ok(mut m) = self.spawned_by.lock() {
@@ -1291,7 +1337,14 @@ impl Backend for PtyBackend {
         }
     }
 
-    fn migrate_pane(&self, pane: &str, base: &str, cwd: Option<&str>, force: bool, run: Option<&str>) -> Result<String> {
+    fn migrate_pane(
+        &self,
+        pane: &str,
+        base: &str,
+        cwd: Option<&str>,
+        force: bool,
+        run: Option<&str>,
+    ) -> Result<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketMigrate(
             pane.to_string(),
@@ -1338,6 +1391,19 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn home_machine(&self) -> Result<Option<(String, bool)>> {
+        // 명부·폴링 캐시만 읽는다 — GUI 소유물이 없어 스레드 위임이 필요 없다.
+        let Some(m) = kasa_mcp::machines::home_machine() else {
+            return Ok(None);
+        };
+        let online = kasa_mcp::machines::snapshot()
+            .iter()
+            .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()))
+            .and_then(|v| v.get("online").and_then(|o| o.as_bool()))
+            .unwrap_or(false);
+        Ok(Some((m.label, online)))
+    }
+
     fn split_fleet(
         &self,
         count: usize,
@@ -1364,9 +1430,9 @@ impl Backend for PtyBackend {
             // 방법이 없어진다.
             Ok(Ok(_)) => anyhow::bail!("배치가 pane 을 하나도 안 만들었다"),
             Ok(Err(why)) => anyhow::bail!("배치 실패: {why}"),
-            Err(_) => anyhow::bail!(
-                "배치 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
-            ),
+            Err(_) => {
+                anyhow::bail!("배치 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라")
+            }
         };
         Ok(ids
             .into_iter()
@@ -1388,9 +1454,10 @@ impl Backend for PtyBackend {
         // `closed_panes` 는 App 필드라 이 스레드에서 직접 못 읽는다 — split 과 같은
         // 회신 채널 패턴으로 GUI 스레드에 물어본다.
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = self
-            .proxy
-            .send_event(UserEvent::SocketClosedPanes(discard.map(str::to_string), tx));
+        let _ = self.proxy.send_event(UserEvent::SocketClosedPanes(
+            discard.map(str::to_string),
+            tx,
+        ));
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(why)) => anyhow::bail!("{why}"),
@@ -1398,7 +1465,13 @@ impl Backend for PtyBackend {
         }
     }
     fn pane_agent(&self, surface_id: &str) -> Option<(String, String)> {
-        let name = self.ws.lock().unwrap().pane_character.get(surface_id).cloned()?;
+        let name = self
+            .ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .get(surface_id)
+            .cloned()?;
         let slug = crate::theme::agent_slug(&name);
         let cwd = self
             .query_pane_pids()
@@ -1453,7 +1526,11 @@ impl Backend for PtyBackend {
                 kasa_socket::backend::WindowOverview {
                     idx,
                     active,
-                    panes: if active { active_rects.clone() } else { Vec::new() },
+                    panes: if active {
+                        active_rects.clone()
+                    } else {
+                        Vec::new()
+                    },
                     surfaces,
                 }
             })
@@ -1714,8 +1791,10 @@ impl Backend for PtyBackend {
         }
         // 새 폴더 구조(`profile/<slug>.png`) 먼저, 옛 평면 이름이 폴백 — 상대 경로
         // 규약은 render.rs 가 정본이라 여기서 다시 조립하지 않는다.
-        let rels =
-            [crate::render::profile_rel(slug, true), crate::render::profile_rel(slug, false)];
+        let rels = [
+            crate::render::profile_rel(slug, true),
+            crate::render::profile_rel(slug, false),
+        ];
         // 테마를 지정했으면 그 폴더 안에서만 찾는다. 없으면 404 로 두고 번들로
         // 떨어지지 않는다 — 카드는 "이 테마의 얼굴"을 보이는 자리라, 폴백하면
         // 그 테마에 없는 그림이 그 테마 것처럼 보인다.
@@ -1725,13 +1804,18 @@ impl Backend for PtyBackend {
             }
             let root = kasa_mcp::character::themes_root()?;
             let sprites = root.join(id).join("sprites");
-            return rels.iter().find_map(|r| read_file_under(&root, &sprites.join(r)));
+            return rels
+                .iter()
+                .find_map(|r| read_file_under(&root, &sprites.join(r)));
         }
         // 활성 스프라이트 폴더(테마의 sprites/ 또는 ~/.config/kasaterm/students/)가
         // 번들을 덮어쓴다 — 네이티브 로더와 같은 순서다(render.rs `user_asset_rgba`
         // 우선). 순서가 뒤집히면 사용자가 넣은 그림이 무시된다.
         if let Some(dir) = students_dir() {
-            if let Some(b) = rels.iter().find_map(|r| read_file_under(&dir, &dir.join(r))) {
+            if let Some(b) = rels
+                .iter()
+                .find_map(|r| read_file_under(&dir, &dir.join(r)))
+            {
                 return Some(b);
             }
         }
@@ -1809,7 +1893,11 @@ impl Backend for PtyBackend {
         }
         for (i, f) in frames.iter().enumerate() {
             if f.len() > MAX_SPRITE_BYTES {
-                anyhow::bail!("{}번째 그림이 너무 커요(최대 {}MB)", i + 1, MAX_SPRITE_BYTES >> 20);
+                anyhow::bail!(
+                    "{}번째 그림이 너무 커요(최대 {}MB)",
+                    i + 1,
+                    MAX_SPRITE_BYTES >> 20
+                );
             }
             if !image_magic_ok(f, ext) {
                 anyhow::bail!("{}번째 파일이 {ext} 가 아니에요", i + 1);
@@ -1920,7 +2008,10 @@ impl Backend for PtyBackend {
                 }
                 return Ok(state);
             }
-            if matches!(action, "terminal-profile-import" | "font-family" | "font-path") {
+            if matches!(
+                action,
+                "terminal-profile-import" | "font-family" | "font-path"
+            ) {
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert(
                         "restart_required".to_string(),
@@ -1943,7 +2034,10 @@ impl Backend for PtyBackend {
         // 언어는 **파일에만 있는 값**이라 GUI 스냅샷을 굽는 쪽을 거칠 이유가 없다.
         // 여기서 얹으면 조회가 한 번으로 유지되고, 스냅샷 코드를 건드리지 않는다.
         if let Some(o) = v.as_object_mut() {
-            o.insert("language".to_string(), serde_json::json!(read_ui_language()));
+            o.insert(
+                "language".to_string(),
+                serde_json::json!(read_ui_language()),
+            );
         }
         v
     }
@@ -2012,7 +2106,9 @@ impl Backend for PtyBackend {
 
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
-        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
+        let key = ws
+            .outer_for_pty(surface_id)
+            .unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
             .get(&key)
@@ -2031,7 +2127,8 @@ impl Backend for PtyBackend {
     fn scroll_surface(&self, surface_id: &str, lines: i32) -> Result<()> {
         let key = {
             let ws = self.ws.lock().unwrap();
-            ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string())
+            ws.outer_for_pty(surface_id)
+                .unwrap_or_else(|| surface_id.to_string())
         };
         let sess = kasa_pty::lookup_session(surface_id)
             .or_else(|| kasa_pty::lookup_session(&key))
@@ -2042,7 +2139,9 @@ impl Backend for PtyBackend {
 
     fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
-        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
+        let key = ws
+            .outer_for_pty(surface_id)
+            .unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
             .get(&key)
@@ -2057,8 +2156,8 @@ impl Backend for PtyBackend {
             let g = self.pane_status_pub.lock().unwrap();
             g.get(surface_id).and_then(|s| s.blocks.clone())
         };
-        let store = store
-            .ok_or_else(|| anyhow::anyhow!("no command blocks for pane: {surface_id}"))?;
+        let store =
+            store.ok_or_else(|| anyhow::anyhow!("no command blocks for pane: {surface_id}"))?;
         let blocks = store.lock().unwrap();
         let start = blocks.len().saturating_sub(limit);
         Ok(blocks
@@ -2093,8 +2192,10 @@ impl Backend for PtyBackend {
         // simple and correct (no offset bookkeeping like the watcher needs).
         let text = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))?;
-        let mut all: Vec<kasa_socket::backend::ConversationTurn> =
-            text.lines().filter_map(crate::transcript::parse_turn).collect();
+        let mut all: Vec<kasa_socket::backend::ConversationTurn> = text
+            .lines()
+            .filter_map(crate::transcript::parse_turn)
+            .collect();
         if turns > 0 && all.len() > turns {
             all.drain(0..all.len() - turns);
         }
@@ -2164,13 +2265,18 @@ impl Backend for PtyBackend {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
         let dir = path.with_extension("").join("subagents");
-        let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(Vec::new()) };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
         let mut out: Vec<SubagentInfo> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             // Pivot on the transcript file so we only list agents we can open.
-            let Some(id) = name.strip_prefix("agent-").and_then(|s| s.strip_suffix(".jsonl")) else {
+            let Some(id) = name
+                .strip_prefix("agent-")
+                .and_then(|s| s.strip_suffix(".jsonl"))
+            else {
                 continue;
             };
             let mtime = entry
@@ -2180,16 +2286,30 @@ impl Backend for PtyBackend {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let (agent_type, description) = std::fs::read_to_string(dir.join(format!("agent-{id}.meta.json")))
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .map(|v| {
-                    let at = v.get("agentType").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let de = v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    (at, de)
-                })
-                .unwrap_or_default();
-            out.push(SubagentInfo { agent_id: id.to_string(), agent_type, description, mtime });
+            let (agent_type, description) =
+                std::fs::read_to_string(dir.join(format!("agent-{id}.meta.json")))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .map(|v| {
+                        let at = v
+                            .get("agentType")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let de = v
+                            .get("description")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (at, de)
+                    })
+                    .unwrap_or_default();
+            out.push(SubagentInfo {
+                agent_id: id.to_string(),
+                agent_type,
+                description,
+                mtime,
+            });
         }
         out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
         Ok(out)
@@ -2256,7 +2376,11 @@ impl Backend for PtyBackend {
         // GUI(App)의 publish_pty_layout 이 ws 로 미러한다 — PtyBackend 는 App.windows 를 못 본다.
         let (pane_room, pane_character, pane_window) = {
             let ws = self.ws.lock().unwrap();
-            (ws.pane_room.clone(), ws.pane_character.clone(), ws.pane_window.clone())
+            (
+                ws.pane_room.clone(),
+                ws.pane_character.clone(),
+                ws.pane_window.clone(),
+            )
         };
         // pane 셸 프로세스 env 의 KASATERM_CHARACTER — 데몬이 영속하는 세션 정체성.
         // bg/포크 세션은 re-attach 마다 claude 가 transcript id 를 새로 발급해 세션id 키
@@ -2371,16 +2495,19 @@ impl Backend for PtyBackend {
                         || snapshot.rate_used_pct.is_some()
                         || snapshot.plan_type.is_some();
                     if has_snapshot {
-                        self.codex_rollouts.lock().unwrap().insert(sid.clone(), snapshot.clone());
+                        self.codex_rollouts
+                            .lock()
+                            .unwrap()
+                            .insert(sid.clone(), snapshot.clone());
                     }
                     if !snapshot.model.is_empty() {
                         row.model.clone_from(&snapshot.model);
                         // 저장 경로가 맵 하나만 보게 여기서 합류시킨다 — Claude는
                         // statusline이, Codex는 rollout이 채운다.
-                        self.reported_agent_cfg
-                            .lock()
-                            .unwrap()
-                            .insert(sid.clone(), (snapshot.model.clone(), snapshot.effort.clone()));
+                        self.reported_agent_cfg.lock().unwrap().insert(
+                            sid.clone(),
+                            (snapshot.model.clone(), snapshot.effort.clone()),
+                        );
                     }
                     row.rate_used_pct = snapshot.rate_used_pct;
                     row.rate_window_minutes = snapshot.rate_window_minutes;
@@ -2528,9 +2655,10 @@ impl Backend for PtyBackend {
                     })
                     .filter(|c| valid_members.contains(c));
                 // 둘 다 있을 때만 인박스 경로가 성립한다 — 한쪽만으론 파일 경로가 안 나온다.
-                if let (Some(a), Some(t)) =
-                    (env.and_then(|e| e.get("KASATERM_AGENT")), env.and_then(|e| e.get("KASATERM_TEAM")))
-                {
+                if let (Some(a), Some(t)) = (
+                    env.and_then(|e| e.get("KASATERM_AGENT")),
+                    env.and_then(|e| e.get("KASATERM_TEAM")),
+                ) {
                     row.agent_name = Some(a.clone());
                     row.team = Some(t.clone());
                 }
@@ -2539,10 +2667,10 @@ impl Backend for PtyBackend {
                     .or(env_char)
                     .or_else(|| pane_character.get(sid.as_str()).cloned())
                     .or_else(|| {
-                        std::fs::read_to_string(kasa_socket::collab_root().join(format!(
-                            "{rslug}/character-{}",
-                            sid.trim_start_matches('%')
-                        )))
+                        std::fs::read_to_string(
+                            kasa_socket::collab_root()
+                                .join(format!("{rslug}/character-{}", sid.trim_start_matches('%'))),
+                        )
                         .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
@@ -2552,7 +2680,11 @@ impl Backend for PtyBackend {
                 if let Some(rc) = retained {
                     if pane_character.get(sid.as_str()) != Some(&rc) {
                         let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &rc);
-                        self.ws.lock().unwrap().pane_character.insert(sid.clone(), rc);
+                        self.ws
+                            .lock()
+                            .unwrap()
+                            .pane_character
+                            .insert(sid.clone(), rc);
                     }
                 }
                 // 마커 없는 pane(claude --resume 복원·spawn 의 assign_character_env 를 못 탄
@@ -2593,8 +2725,10 @@ impl Backend for PtyBackend {
                             let members = kasa_mcp::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
                             // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
-                            let taken: std::collections::HashSet<&String> =
-                                pane_character.values().chain(lazy_assigned.iter()).collect();
+                            let taken: std::collections::HashSet<&String> = pane_character
+                                .values()
+                                .chain(lazy_assigned.iter())
+                                .collect();
                             members
                                 .iter()
                                 .find(|m| !taken.contains(m))
@@ -2616,7 +2750,11 @@ impl Backend for PtyBackend {
                             // 단일 진실 ws.pane_character 에도 기록 — 다음 폴링·session 배정이
                             // 이 캐릭터를 중복하지 않게. 같은 폴링 내 다른 lazy 가 또 같은 캐릭터를
                             // 안 고르게 lazy_assigned 에도 누적(클론 스냅샷은 빌드 중 안 바뀜).
-                            self.ws.lock().unwrap().pane_character.insert(sid.clone(), name.clone());
+                            self.ws
+                                .lock()
+                                .unwrap()
+                                .pane_character
+                                .insert(sid.clone(), name.clone());
                             // 말투·모델도 새 학생 것으로. 이걸 빼면 이름과 얼굴만 갈리고
                             // **다음에 claude 가 떠도 옛 학생의 말투로 뜬다** — shim 이
                             // spawn 때 고정된 `KASATERM_PERSONA` 로 `--append-system-prompt`
@@ -2634,7 +2772,10 @@ impl Backend for PtyBackend {
             .collect();
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
-        self.done_reports.lock().unwrap().retain(|sid, _| live.contains(sid.as_str()));
+        self.done_reports
+            .lock()
+            .unwrap()
+            .retain(|sid, _| live.contains(sid.as_str()));
         // 훅 상태도 같이 — pane 이 닫히면 `end` 훅은 영영 안 온다. 안 걷으면 죽은
         // 자리의 작업이 계속 도는 것처럼 남는다.
         self.hook_activity
@@ -2726,7 +2867,10 @@ impl Backend for PtyBackend {
             {
                 let mut cache = self.last_ctx.lock().unwrap();
                 if row.context_tokens > 0 {
-                    cache.insert(row.surface_id.clone(), (row.context_tokens, row.context_limit));
+                    cache.insert(
+                        row.surface_id.clone(),
+                        (row.context_tokens, row.context_limit),
+                    );
                 } else if let Some(&(t, l)) = cache.get(&row.surface_id) {
                     row.context_tokens = t;
                     if row.context_limit == 0 {
@@ -2735,7 +2879,9 @@ impl Backend for PtyBackend {
                 }
             }
             if row.context_tokens > 0 && row.context_limit > 0 {
-                row.context_pct = (((row.context_tokens as f64 / row.context_limit as f64) * 100.0).round() as u64).min(100) as u8;
+                row.context_pct = (((row.context_tokens as f64 / row.context_limit as f64) * 100.0)
+                    .round() as u64)
+                    .min(100) as u8;
             }
         }
         // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은
@@ -2813,27 +2959,32 @@ impl Backend for PtyBackend {
         // **부모가 claude 일 때만 보낸다.** 판정은 transcript 바인딩 유무다 — 셸이
         // 도는 pane 에 글자를 밀어 넣으면 그건 명령줄에 섞여 들어간다. claude 는 턴
         // 중에 들어온 입력을 다음 턴으로 큐잉하므로 작업을 끊지 않는다.
-        let parent = self.spawned_by.lock().ok().and_then(|m| m.get(surface_id).cloned());
+        let parent = self
+            .spawned_by
+            .lock()
+            .ok()
+            .and_then(|m| m.get(surface_id).cloned());
         if let Some(parent) = parent {
             let is_claude = self.bound.lock().is_ok_and(|b| b.contains_key(&parent));
             if is_claude {
                 // 캐릭터는 `pane_character`(탭 pid 키)가 정본이다 — `ws.panes` 는
                 // pane 컨테이너 키라 **탭 학생이 안 걸려** 보고가 `[완료] %4(%4)` 로
                 // 떴다(2026-08-20 거노 스샷). 이름이 잡혀야 화면 색칠도 학생을 안다.
-                let who = self
-                    .ws
-                    .lock()
-                    .ok()
-                    .and_then(|ws| {
-                        ws.pane_character
-                            .get(surface_id)
-                            .cloned()
-                            .or_else(|| {
+                let who =
+                    self.ws
+                        .lock()
+                        .ok()
+                        .and_then(|ws| {
+                            ws.pane_character.get(surface_id).cloned().or_else(|| {
                                 ws.panes.get(surface_id).and_then(|p| p.character.clone())
                             })
-                    })
-                    .unwrap_or_else(|| surface_id.to_string());
-                let mark = if outcome == "succeeded" { "완료" } else { "실패" };
+                        })
+                        .unwrap_or_else(|| surface_id.to_string());
+                let mark = if outcome == "succeeded" {
+                    "완료"
+                } else {
+                    "실패"
+                };
                 let line = if summary.is_empty() {
                     format!("[{mark}] {who}({surface_id})")
                 } else {
@@ -2846,8 +2997,7 @@ impl Backend for PtyBackend {
                 // 들어감). \x15 는 반쯤 친 초안 제거, bracketed paste 는 메뉴
                 // 상태에서도 안전한 주입, 꼬리 \r 는 핸들러(split_trailing_submit)
                 // 가 140ms 뒤 별개 read 로 보내 Enter 로 읽히게 한다.
-                let _ = self
-                    .send_text(Some(&parent), &format!("\x15\x1b[200~{line}\x1b[201~\r"));
+                let _ = self.send_text(Some(&parent), &format!("\x15\x1b[200~{line}\x1b[201~\r"));
             }
         }
         Ok(())
@@ -2910,8 +3060,6 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
     }
 }
 
-
-
 /// Read the last `max_bytes` of a file as lossy UTF-8, plus whether it's gone
 /// idle (no write in 60s — claude transcripts are append-only, so file mtime
 /// is the last activity time; no need to parse ISO timestamps). The leading
@@ -2931,7 +3079,9 @@ fn screen_shows_working(screen: &str) -> bool {
         // 윈도우 claude 는 이 자리에 ASCII `*` 를 쓴다 — `is_spinner_head` 참고.
         // 여기서 빠뜨리면 mtime-fallback 의 working 판정이 윈도우에서만 죽는다.
         let has_star = line.chars().any(crate::screenread::is_spinner_head);
-        let has_braille = line.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32)));
+        let has_braille = line
+            .chars()
+            .any(|c| (0x2800..=0x28FF).contains(&(c as u32)));
         (has_star && line.contains('…')) || has_braille
     })
 }
@@ -2961,7 +3111,9 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool
 /// 파일을 통째로 본 것이라, 호출부가 "아직 안 쓰였다"와 "우리 창 밖이다"를 가른다.
 pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
     use std::io::Read;
-    let Ok(f) = std::fs::File::open(path) else { return String::new() };
+    let Ok(f) = std::fs::File::open(path) else {
+        return String::new();
+    };
     let mut buf = Vec::new();
     let _ = f.take(max_bytes).read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
@@ -2980,10 +3132,18 @@ fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<Tran
     let len = f.metadata()?.len();
     // offset==0 = 첫 로드, offset>len = 파일이 줄어듦(세션 교체) → 둘 다 tail 재로드.
     let reset = offset == 0 || offset > len;
-    let start = if reset { len.saturating_sub(TRANSCRIPT_TAIL) } else { offset };
+    let start = if reset {
+        len.saturating_sub(TRANSCRIPT_TAIL)
+    } else {
+        offset
+    };
     if start >= len {
         // 변화 없음(또는 빈 파일) — 재파싱 0.
-        return Ok(TranscriptChunk { raw: String::new(), offset: len, reset: false });
+        return Ok(TranscriptChunk {
+            raw: String::new(),
+            offset: len,
+            reset: false,
+        });
     }
     f.seek(SeekFrom::Start(start))?;
     let mut buf = Vec::with_capacity((len - start) as usize);
@@ -3009,7 +3169,11 @@ fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<Tran
             raw = format!("{head}\n{raw}");
         }
     }
-    Ok(TranscriptChunk { raw, offset: next_offset, reset })
+    Ok(TranscriptChunk {
+        raw,
+        offset: next_offset,
+        reset,
+    })
 }
 
 /// `[0, start)` 구간에서 queue-operation(예약 enqueue/dequeue/remove/popAll) 줄만 모은다.
@@ -3185,7 +3349,11 @@ fn unescape_lsof_path(line: &[u8]) -> std::path::PathBuf {
 #[cfg(windows)]
 fn trim_trailing_sep(s: &str) -> &str {
     let t = s.trim_end_matches(['\\', '/']);
-    if t.len() < 3 { s } else { t }
+    if t.len() < 3 {
+        s
+    } else {
+        t
+    }
 }
 
 #[cfg(windows)]
@@ -3247,7 +3415,12 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
             }
             // PEB+0x20 = ProcessParameters pointer (x64).
             let mut params: usize = 0;
-            if !read_mem(peb + 0x20, &mut params as *mut _ as *mut _, std::mem::size_of::<usize>()) || params == 0 {
+            if !read_mem(
+                peb + 0x20,
+                &mut params as *mut _ as *mut _,
+                std::mem::size_of::<usize>(),
+            ) || params == 0
+            {
                 return None;
             }
             // ProcessParameters+0x38 = CurrentDirectory.DosPath UNICODE_STRING
@@ -3257,9 +3430,9 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
                 return None;
             }
             let length = u16::from_le_bytes([us[0], us[1]]) as usize;
-            let buffer = u64::from_le_bytes([
-                us[8], us[9], us[10], us[11], us[12], us[13], us[14], us[15],
-            ]) as usize;
+            let buffer =
+                u64::from_le_bytes([us[8], us[9], us[10], us[11], us[12], us[13], us[14], us[15]])
+                    as usize;
             if length == 0 || buffer == 0 {
                 return None;
             }
@@ -3268,13 +3441,14 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
                 return None;
             }
             let s = std::ffi::OsString::from_wide(&wide);
-            Some(std::path::PathBuf::from(trim_trailing_sep(&s.to_string_lossy())))
+            Some(std::path::PathBuf::from(trim_trailing_sep(
+                &s.to_string_lossy(),
+            )))
         })();
         CloseHandle(handle);
         result
     }
 }
-
 
 /// Build one layout-tree leaf's restore record from a live PtySession: its
 /// cwd, **which harness** it was running (`was_agent`: "claude"|"codex"|null),
@@ -3325,12 +3499,16 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
 /// 데이터가 아직 캐시에만 있는 채로 이름만 바뀌면 빈 파일이 정본이 된다.
 pub fn write_session_state(state: &serde_json::Value) {
     use std::io::Write;
-    let Some(path) = session_file_path() else { return };
+    let Some(path) = session_file_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    let Ok(mut f) = std::fs::File::create(&tmp) else { return };
+    let Ok(mut f) = std::fs::File::create(&tmp) else {
+        return;
+    };
     if f.write_all(state.to_string().as_bytes()).is_err() || f.sync_all().is_err() {
         let _ = std::fs::remove_file(&tmp);
         return;
@@ -3426,7 +3604,10 @@ fn mark_title_manual(bound: &Arc<Mutex<HashMap<String, PathBuf>>>, surface_id: &
         return;
     };
     // 파일명(stem)이 곧 세션 id — CLI 가 남기는 레코드와 같은 모양을 맞춘다.
-    let sid = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let sid = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let record = serde_json::json!({
         "type": "custom-title",
         "customTitle": title,
@@ -3447,9 +3628,15 @@ fn mark_title_manual(bound: &Arc<Mutex<HashMap<String, PathBuf>>>, surface_id: &
 /// `"home"`, or an absolute/`~`-prefixed path. Missing file/key → `"last"`.
 pub fn read_default_cwd_mode() -> String {
     let fallback = || "last".to_string();
-    let Some(path) = settings_file_path() else { return fallback() };
-    let Ok(txt) = std::fs::read_to_string(&path) else { return fallback() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { return fallback() };
+    let Some(path) = settings_file_path() else {
+        return fallback();
+    };
+    let Ok(txt) = std::fs::read_to_string(&path) else {
+        return fallback();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return fallback();
+    };
     v.get("default_cwd")
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty())
@@ -3471,8 +3658,12 @@ pub fn read_ui_language() -> String {
 /// The settings screen reads this once to populate its controls.
 pub fn read_settings() -> serde_json::Value {
     let empty = || serde_json::json!({});
-    let Some(path) = settings_file_path() else { return empty() };
-    let Ok(txt) = std::fs::read_to_string(&path) else { return empty() };
+    let Some(path) = settings_file_path() else {
+        return empty();
+    };
+    let Ok(txt) = std::fs::read_to_string(&path) else {
+        return empty();
+    };
     serde_json::from_str::<serde_json::Value>(&txt)
         .ok()
         .filter(|v| v.is_object())
@@ -3484,7 +3675,9 @@ pub fn read_settings() -> serde_json::Value {
 /// `default_cwd`. Silently no-ops if the path/dir can't be resolved.
 pub fn write_setting(key: &str, value: serde_json::Value) {
     use std::io::Write;
-    let Some(path) = settings_file_path() else { return };
+    let Some(path) = settings_file_path() else {
+        return;
+    };
     let mut obj = match read_settings() {
         serde_json::Value::Object(m) => m,
         _ => serde_json::Map::new(),
@@ -3503,7 +3696,8 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
 /// Replace the whole settings object with one sibling-temp + rename. A terminal
 /// profile's palette, ANSI colors, cursor and font must appear as one bundle.
 pub(crate) fn write_settings_value_atomic(value: &serde_json::Value) -> std::io::Result<()> {
-    let path = settings_file_path().ok_or_else(|| std::io::Error::other("settings path missing"))?;
+    let path =
+        settings_file_path().ok_or_else(|| std::io::Error::other("settings path missing"))?;
     write_settings_value_atomic_at(&path, value)
 }
 
@@ -3514,15 +3708,25 @@ pub(crate) fn write_settings_value_atomic_at(
     use std::io::Write as _;
     static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let _guard = LOCK.lock().map_err(|_| std::io::Error::other("settings lock poisoned"))?;
-    let parent = path.parent().ok_or_else(|| std::io::Error::other("settings parent missing"))?;
+    let _guard = LOCK
+        .lock()
+        .map_err(|_| std::io::Error::other("settings lock poisoned"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("settings parent missing"))?;
     std::fs::create_dir_all(parent)?;
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("settings.json");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings.json");
     let tmp = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), seq));
     let body = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         file.write_all(&body)?;
         file.sync_all()?;
         drop(file);
@@ -3757,7 +3961,11 @@ pub fn read_font_size() -> f32 {
 /// Invalid or uninstalled files are ignored so a stale preference cannot stop
 /// the renderer from falling back to its bundled/system font.
 pub fn read_font_path() -> Option<std::path::PathBuf> {
-    let path = read_settings().get("font_path")?.as_str()?.trim().to_string();
+    let path = read_settings()
+        .get("font_path")?
+        .as_str()?
+        .trim()
+        .to_string();
     if path.is_empty() {
         return None;
     }
@@ -3844,7 +4052,13 @@ pub fn read_default_shell() -> Option<String> {
 fn sanitize_theme_id(label: &str) -> String {
     let cleaned: String = label
         .chars()
-        .map(|c| if c == '/' || c == '\\' || c == ':' || c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     cleaned.trim().trim_matches('.').trim().to_string()
 }
@@ -3869,7 +4083,13 @@ pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
     // 이름이 겹치면 뒤에 번호를 붙인다 — 이미 만들어 편집 중인 테마를 덮어쓰는 건
     // 되돌릴 수 없다.
     let dir = (1..1000)
-        .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
+        .map(|n| {
+            root.join(if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            })
+        })
         .find(|p| !p.exists())
         .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
     std::fs::create_dir_all(&dir)?;
@@ -3883,7 +4103,11 @@ pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
         // 이름이 곧 테마 id 인 구조라, 조합형으로 들어온 id 와 어긋나는 순간
         // 고른 테마를 못 찾는다.
         let shown = if label.trim().is_empty() {
-            match dir.file_name().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("my-theme")) {
+            match dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("my-theme"))
+            {
                 None | Some("") => "새 테마".to_string(),
                 Some(n) => format!("새 테마 {}", n.trim_start_matches('-')),
             }
@@ -3991,7 +4215,12 @@ fn build_theme_rows() -> Vec<ThemeRow> {
             })
             .take(THEME_PREVIEW_FACES)
             .collect();
-        out.push(ThemeRow { id, label, count: slugs.len(), faces });
+        out.push(ThemeRow {
+            id,
+            label,
+            count: slugs.len(),
+            faces,
+        });
     }
     out
 }
@@ -4053,7 +4282,10 @@ fn user_sprite_layout(slug: &str, motion: &str) -> Option<(std::path::PathBuf, b
     let (n, _) = sprite_spec(motion)?;
     [true, false].into_iter().find_map(|foldered| {
         (0..n)
-            .all(|i| dir.join(sprite_rel_for(slug, motion, i, foldered)).is_file())
+            .all(|i| {
+                dir.join(sprite_rel_for(slug, motion, i, foldered))
+                    .is_file()
+            })
             .then(|| (dir.clone(), foldered))
     })
 }
@@ -4085,13 +4317,25 @@ fn read_file_under(root: &std::path::Path, path: &std::path::Path) -> Option<Vec
 fn roster_entries(v: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut push = |e: &serde_json::Value| {
-        let Some(name) = e.get("name").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) else {
+        let Some(name) = e
+            .get("name")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        else {
             return;
         };
-        if out.iter().any(|o| o.get("name").and_then(|x| x.as_str()) == Some(name)) {
+        if out
+            .iter()
+            .any(|o| o.get("name").and_then(|x| x.as_str()) == Some(name))
+        {
             return;
         }
-        let field = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let field = |k: &str| {
+            e.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
         out.push(serde_json::json!({
             "name": name,
             "slug": field("slug"),
@@ -4158,9 +4402,11 @@ pub fn theme_dir(id: &str) -> Option<std::path::PathBuf> {
 pub fn rename_theme(id: &str, label: &str) -> std::io::Result<()> {
     let dir = theme_dir(id).ok_or_else(|| std::io::Error::other("그 테마 폴더가 없다"))?;
     let p = dir.join("theme.json");
-    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p)?)
-        .map_err(std::io::Error::other)?;
-    let o = v.as_object_mut().ok_or_else(|| std::io::Error::other("theme.json 이 객체가 아니다"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&p)?).map_err(std::io::Error::other)?;
+    let o = v
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("theme.json 이 객체가 아니다"))?;
     match label.trim() {
         // 이름을 비우면 폴더명으로 되돌린다 — 빈 이름은 목록에서 고를 수 없는
         // 칸이 되어 그 테마가 사라진 것처럼 보인다.
@@ -4188,7 +4434,13 @@ pub fn delete_theme(id: &str) -> std::io::Result<std::path::PathBuf> {
         .join("_trash");
     std::fs::create_dir_all(&trash)?;
     let dest = (1..1000)
-        .map(|n| trash.join(if n == 1 { id.to_string() } else { format!("{id}-{n}") }))
+        .map(|n| {
+            trash.join(if n == 1 {
+                id.to_string()
+            } else {
+                format!("{id}-{n}")
+            })
+        })
         .find(|p| !p.exists())
         .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
     std::fs::rename(&dir, &dest)?;
@@ -4198,7 +4450,8 @@ pub fn delete_theme(id: &str) -> std::io::Result<std::path::PathBuf> {
 /// macOS Finder 로 압축하면 리소스 포크가 `__MACOSX/` 에 따라붙는다. 테마와 무관한데
 /// 최상위 폴더가 둘로 보이게 만들어 껍질 판정을 망가뜨리므로 훑기에서 아예 뺀다.
 fn zip_noise(p: &std::path::Path) -> bool {
-    p.components().any(|c| matches!(c.as_os_str().to_str(), Some("__MACOSX") | Some(".DS_Store")))
+    p.components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some("__MACOSX") | Some(".DS_Store")))
 }
 
 /// 테마 zip 하나를 `themes/` 로 푼다 — 성공하면 만들어진 폴더 id 를 돌려준다.
@@ -4228,7 +4481,9 @@ pub fn export_theme_zip(id: &str) -> std::io::Result<Vec<u8>> {
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     let dir = root.join(id);
     if !dir.join("theme.json").is_file() {
-        return Err(std::io::Error::other(format!("테마 팩 {id} 이 이 기계에 없다")));
+        return Err(std::io::Error::other(format!(
+            "테마 팩 {id} 이 이 기계에 없다"
+        )));
     }
     let mut buf = std::io::Cursor::new(Vec::new());
     {
@@ -4262,7 +4517,10 @@ pub fn export_theme_zip(id: &str) -> std::io::Result<Vec<u8>> {
 
 /// 뿌리를 인자로 받는 본체. 갈라 둔 건 시험 때문이다 — 경로 검사가 이 함수의
 /// 핵심인데, 뿌리를 안에서 구하면 시험이 실제 테마 폴더에 풀어 보는 수밖에 없다.
-fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std::io::Result<String> {
+fn import_theme_into(
+    root: &std::path::Path,
+    zip_path: &std::path::Path,
+) -> std::io::Result<String> {
     // 테마 하나는 400장·5MB 안팎이다. 상한을 넉넉히 두되 무한은 아니게 — 압축률이
     // 극단적인 zip 한 장으로 디스크를 채울 수 있다.
     const MAX_FILES: usize = 8_000;
@@ -4280,9 +4538,14 @@ fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std:
     let mut items: Vec<(std::path::PathBuf, bool)> = Vec::with_capacity(zip.len());
     let mut total = 0u64;
     for i in 0..zip.len() {
-        let e = zip.by_index(i).map_err(|e| std::io::Error::other(format!("zip 을 읽다 막혔어요 — {e}")))?;
+        let e = zip
+            .by_index(i)
+            .map_err(|e| std::io::Error::other(format!("zip 을 읽다 막혔어요 — {e}")))?;
         let Some(p) = e.enclosed_name() else {
-            return Err(std::io::Error::other(format!("경로가 뿌리를 벗어나요 — {}", e.name())));
+            return Err(std::io::Error::other(format!(
+                "경로가 뿌리를 벗어나요 — {}",
+                e.name()
+            )));
         };
         if zip_noise(&p) {
             continue;
@@ -4307,20 +4570,28 @@ fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std:
             .collect();
         // 최상위가 하나뿐이고 그게 폴더일 때만 껍질로 본다.
         match firsts.len() {
-            1 if items.iter().any(|(p, _)| p.components().count() > 1) => {
-                firsts.into_iter().next()
-            }
+            1 if items.iter().any(|(p, _)| p.components().count() > 1) => firsts.into_iter().next(),
             _ => None,
         }
     };
     let strip = |p: &std::path::Path| -> Option<std::path::PathBuf> {
         match &shell {
-            Some(s) => p.strip_prefix(s).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.to_path_buf()),
+            Some(s) => p
+                .strip_prefix(s)
+                .ok()
+                .filter(|r| !r.as_os_str().is_empty())
+                .map(|r| r.to_path_buf()),
             None => Some(p.to_path_buf()),
         }
     };
-    if !items.iter().filter_map(|(p, _)| strip(p)).any(|p| p == std::path::Path::new("theme.json")) {
-        return Err(std::io::Error::other("theme.json 이 없어요 — 테마 zip 이 맞나요?"));
+    if !items
+        .iter()
+        .filter_map(|(p, _)| strip(p))
+        .any(|p| p == std::path::Path::new("theme.json"))
+    {
+        return Err(std::io::Error::other(
+            "theme.json 이 없어요 — 테마 zip 이 맞나요?",
+        ));
     }
 
     // id 는 껍질 이름, 껍질이 없으면 zip 파일 이름. 폴더명은 파일시스템 주소라
@@ -4328,7 +4599,12 @@ fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std:
     let raw = shell
         .as_ref()
         .and_then(|s| s.to_str().map(|s| s.to_string()))
-        .or_else(|| zip_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .or_else(|| {
+            zip_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default();
     let id = match sanitize_theme_id(&raw) {
         s if s.is_empty() => "imported".to_string(),
@@ -4349,34 +4625,37 @@ fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std:
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&tmp)?;
-    let unpack = |zip: &mut zip::ZipArchive<std::io::BufReader<std::fs::File>>| -> std::io::Result<()> {
-        for i in 0..zip.len() {
-            let mut e = zip.by_index(i).map_err(std::io::Error::other)?;
-            let Some(p) = e.enclosed_name() else { continue };
-            if zip_noise(&p) {
-                continue;
+    let unpack =
+        |zip: &mut zip::ZipArchive<std::io::BufReader<std::fs::File>>| -> std::io::Result<()> {
+            for i in 0..zip.len() {
+                let mut e = zip.by_index(i).map_err(std::io::Error::other)?;
+                let Some(p) = e.enclosed_name() else { continue };
+                if zip_noise(&p) {
+                    continue;
+                }
+                let Some(rel) = strip(&p) else { continue };
+                let dest = tmp.join(&rel);
+                if e.is_dir() {
+                    std::fs::create_dir_all(&dest)?;
+                    continue;
+                }
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut out = std::fs::File::create(&dest)?;
+                std::io::copy(&mut e, &mut out)?;
             }
-            let Some(rel) = strip(&p) else { continue };
-            let dest = tmp.join(&rel);
-            if e.is_dir() {
-                std::fs::create_dir_all(&dest)?;
-                continue;
-            }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut out = std::fs::File::create(&dest)?;
-            std::io::copy(&mut e, &mut out)?;
-        }
-        Ok(())
-    };
+            Ok(())
+        };
     if let Err(e) = unpack(&mut zip) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
     if !tmp.join("theme.json").is_file() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(std::io::Error::other("theme.json 이 없어요 — 테마 zip 이 맞나요?"));
+        return Err(std::io::Error::other(
+            "theme.json 이 없어요 — 테마 zip 이 맞나요?",
+        ));
     }
 
     // 같은 id 가 이미 있으면 덮지 않고 `_trash` 로 물린다 — 손수 고쳐 둔 테마를
@@ -4386,7 +4665,13 @@ fn import_theme_into(root: &std::path::Path, zip_path: &std::path::Path) -> std:
         let trash = root.join("_trash");
         std::fs::create_dir_all(&trash)?;
         let dest = (1..1000)
-            .map(|n| trash.join(if n == 1 { id.clone() } else { format!("{id}-{n}") }))
+            .map(|n| {
+                trash.join(if n == 1 {
+                    id.clone()
+                } else {
+                    format!("{id}-{n}")
+                })
+            })
             .find(|p| !p.exists())
             .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
         std::fs::rename(&dir, &dest)?;
@@ -4407,7 +4692,10 @@ pub fn read_character_theme() -> String {
 }
 
 pub fn read_claude_persona() -> bool {
-    read_settings().get("claude_persona").and_then(|x| x.as_bool()).unwrap_or(true)
+    read_settings()
+        .get("claude_persona")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
 }
 /// 파일트리에서 파일을 열 때 무엇으로 여는가 — `"builtin"`(내장 편집기 pane,
 /// 기본) · `"app"`(VS Code 같은 GUI 편집기) · `"terminal"`(새 pane 에서 CLI
@@ -4424,14 +4712,22 @@ pub fn read_file_open_mode() -> String {
 /// `"app"` 모드가 쓸 앱의 표시 이름(`proc::open_with_apps()` 의 첫 필드).
 /// 빈 문자열이면 OS 연결 프로그램으로 연다.
 pub fn read_file_open_app() -> String {
-    read_settings().get("file_open_app").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    read_settings()
+        .get("file_open_app")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// `"terminal"` 모드가 pane 에서 실행할 명령줄. `{}` 가 있으면 파일 경로로
 /// 치환하고, 없으면 뒤에 붙인다. 빈 문자열이면 `resolve_terminal_editor()` 가
 /// 고른다.
 pub fn read_file_open_cmd() -> String {
-    read_settings().get("file_open_cmd").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    read_settings()
+        .get("file_open_cmd")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// PATH 에 있는 CLI 편집기를 하나 고른다 — `$VISUAL`/`$EDITOR` 가 먼저고(사용자가
@@ -4440,11 +4736,15 @@ pub fn read_file_open_cmd() -> String {
 pub fn resolve_terminal_editor() -> Option<String> {
     let on_path = |cmd: &str| {
         // `$EDITOR="code -w"` 처럼 인자가 붙어 올 수 있어 첫 토큰만 찾는다.
-        let Some(bin) = cmd.split_whitespace().next() else { return false };
+        let Some(bin) = cmd.split_whitespace().next() else {
+            return false;
+        };
         if bin.contains('/') {
             return std::path::Path::new(bin).is_file();
         }
-        let Some(path) = std::env::var_os("PATH") else { return false };
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
         std::env::split_paths(&path).any(|d| d.join(bin).is_file())
     };
     for key in ["VISUAL", "EDITOR"] {
@@ -4454,17 +4754,32 @@ pub fn resolve_terminal_editor() -> Option<String> {
             }
         }
     }
-    ["hx", "helix", "nvim", "vim", "nano"].into_iter().find(|c| on_path(c)).map(String::from)
+    ["hx", "helix", "nvim", "vim", "nano"]
+        .into_iter()
+        .find(|c| on_path(c))
+        .map(String::from)
 }
 
 pub fn read_claude_model() -> String {
-    read_settings().get("claude_model").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    read_settings()
+        .get("claude_model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 pub fn read_claude_effort() -> String {
-    read_settings().get("claude_effort").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    read_settings()
+        .get("claude_effort")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 pub fn read_claude_extra() -> String {
-    read_settings().get("claude_extra").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    read_settings()
+        .get("claude_extra")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// pane 안 `claude` 에 자동으로 얹을 MCP 서버 목록의 위치. `--mcp-config` 가 그대로
@@ -4483,7 +4798,10 @@ pub fn claude_mcp_config_path() -> Option<std::path::PathBuf> {
 /// 둘이 되고, 어느 쪽이 진실인지 헷갈린다. 파일은 그대로 두고 잠시 꺼야 할 때만
 /// `settings.json` 에 `"claude_mcp": false` 를 직접 넣는다.
 pub fn read_claude_mcp() -> bool {
-    read_settings().get("claude_mcp").and_then(|x| x.as_bool()).unwrap_or(true)
+    read_settings()
+        .get("claude_mcp")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
 }
 
 /// One switchable Claude login. `id` names a directory under
@@ -4549,7 +4867,10 @@ pub struct CodexAccount {
 /// 기본은 Detailed(false): 처음 여는 사람에게는 전부 보이는 편이 낫고, 좁게 쓰고 싶은
 /// 사람은 메뉴 안에서 바로 바꾼다.
 pub fn read_usage_compact() -> bool {
-    read_settings().get("usage_compact").and_then(|x| x.as_bool()).unwrap_or(false)
+    read_settings()
+        .get("usage_compact")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
 }
 
 /// 하단바에 안 쓰는 계정의 한도까지 세울지. **기본은 끔.**
@@ -4683,11 +5004,17 @@ pub fn read_pane_footer_h() -> f32 {
 /// (기본 로그인은 `""` 키). 계정 dir 과 같은 이유로 설정 파일 옆에 둔다 —
 /// 스크래치 설정으로 도는 헤드리스 실행이 진짜 쿨다운을 밟지 않게.
 fn account_cooldown_path() -> Option<std::path::PathBuf> {
-    Some(settings_file_path()?.parent()?.join("account-cooldown.json"))
+    Some(
+        settings_file_path()?
+            .parent()?
+            .join("account-cooldown.json"),
+    )
 }
 
 pub fn read_account_cooldowns() -> std::collections::HashMap<String, u64> {
-    let Some(p) = account_cooldown_path() else { return Default::default() };
+    let Some(p) = account_cooldown_path() else {
+        return Default::default();
+    };
     std::fs::read_to_string(p)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -4700,7 +5027,9 @@ pub fn read_account_cooldowns() -> std::collections::HashMap<String, u64> {
 /// 남고, 같은 번호를 다시 쓰는 슬롯이 **옛 계정의 잠금을 물려받아** 멀쩡한데도
 /// 전환 후보에서 빠진다.
 pub fn forget_account_cooldown(id: &str) {
-    let Some(p) = account_cooldown_path() else { return };
+    let Some(p) = account_cooldown_path() else {
+        return;
+    };
     let mut map = read_account_cooldowns();
     if map.remove(id).is_none() {
         return;
@@ -4711,7 +5040,9 @@ pub fn forget_account_cooldown(id: &str) {
 }
 
 pub fn write_account_cooldown(id: &str, until: u64) {
-    let Some(p) = account_cooldown_path() else { return };
+    let Some(p) = account_cooldown_path() else {
+        return;
+    };
     let mut map = read_account_cooldowns();
     if map.get(id).is_some_and(|&t| t >= until) {
         return;
@@ -4826,20 +5157,29 @@ pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
                 let pct = e.get("percent").and_then(|p| p.as_f64())? as f32;
                 Some((
                     pct,
-                    e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+                    e.get("resets_at")
+                        .and_then(|s| s.as_str())
+                        .and_then(rfc3339_epoch),
                     usage_window_label(e),
                 ))
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
     });
     if let Some((pct, resets_at, label)) = top {
-        return Some(UsagePressure { pct, resets_at, label });
+        return Some(UsagePressure {
+            pct,
+            resets_at,
+            label,
+        });
     }
     // limits[] 가 없는 옛/축약 응답 폴백 — pill 과 같은 소스.
     let five = v.get("five_hour")?;
     Some(UsagePressure {
         pct: five.get("utilization")?.as_f64()? as f32,
-        resets_at: five.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+        resets_at: five
+            .get("resets_at")
+            .and_then(|s| s.as_str())
+            .and_then(rfc3339_epoch),
         label: "5h".to_string(),
     })
 }
@@ -4861,7 +5201,10 @@ fn rfc3339_epoch(s: &str) -> Option<u64> {
         let off = &tail[i..];
         let sign = if off.starts_with('-') { 1 } else { -1 };
         let oh = off.get(1..3)?.parse::<i64>().ok()?;
-        let om = off.get(4..6).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0);
+        let om = off
+            .get(4..6)
+            .and_then(|x| x.parse::<i64>().ok())
+            .unwrap_or(0);
         secs += sign * (oh * 3600 + om * 60);
     }
     u64::try_from(secs).ok()
@@ -4901,7 +5244,10 @@ pub fn pick_next_account(
 /// 아예 안 만들어 PATH/ZDOTDIR 무접촉 → 순정 claude(캐릭터·프록시·훅·board 전무 진짜 독립).
 /// 기본 true(하위호환 — 지금 풀 경험 유지). install 은 부팅 1회라 변경은 재시작 후 적용.
 pub fn read_shim_inject() -> bool {
-    read_settings().get("shim_inject").and_then(|x| x.as_bool()).unwrap_or(true)
+    read_settings()
+        .get("shim_inject")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
 }
 
 /// Persist the last logical window size so the next launch restores it instead
@@ -4912,7 +5258,9 @@ pub fn read_shim_inject() -> bool {
 /// size-only callers must not erase a previously saved position.
 pub fn write_window_frame(w: f64, h: f64, pos: Option<(f64, f64)>) {
     use std::io::Write;
-    let Some(path) = window_size_path() else { return };
+    let Some(path) = window_size_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -4951,16 +5299,23 @@ pub fn read_window_size() -> Option<(f64, f64)> {
     }
 }
 
-
 /// claude 의 saved default effort(~/.claude/settings.json `effortLevel`). resume 직후 GUI effort
 /// 카드 폴백값(거노). 파일/키 없으면 빈 문자열. ultracode 는 session-only 라 여기 안 저장된다.
 fn claude_saved_effort() -> String {
-    let Some(home) = kasa_socket::home_dir() else { return String::new() };
+    let Some(home) = kasa_socket::home_dir() else {
+        return String::new();
+    };
     let path = home.join(".claude/settings.json");
-    let Ok(text) = std::fs::read_to_string(&path) else { return String::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
     serde_json::from_str::<serde_json::Value>(&text)
         .ok()
-        .and_then(|v| v.get("effortLevel").and_then(|e| e.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("effortLevel")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -4984,7 +5339,11 @@ fn claude_under(table: &[(u32, u32, String)], shell: u32) -> Option<u32> {
             }
             // 셸이 낳은 것 중 claude 실행파일만 — `claude` 를 인자로 든 셸 명령이
             // 아니라 실행 경로가 claude 로 끝나는 프로세스.
-            if cmd.split_whitespace().next().is_some_and(|exe| exe.ends_with("claude")) {
+            if cmd
+                .split_whitespace()
+                .next()
+                .is_some_and(|exe| exe.ends_with("claude"))
+            {
                 return Some(*pid);
             }
             next.push(*pid);
@@ -5011,10 +5370,15 @@ fn daemon_session_parents() -> HashMap<String, String> {
         if !name.contains("claude") {
             continue;
         }
-        let Some(cmd) = kasa_pty::process_cmdline(pid) else { continue };
+        let Some(cmd) = kasa_pty::process_cmdline(pid) else {
+            continue;
+        };
         let toks: Vec<&str> = cmd.split_whitespace().collect();
         let val_after = |flag: &str| {
-            toks.iter().position(|t| *t == flag).and_then(|i| toks.get(i + 1)).copied()
+            toks.iter()
+                .position(|t| *t == flag)
+                .and_then(|i| toks.get(i + 1))
+                .copied()
         };
         if let (Some(sid), Some(resume)) = (val_after("--session-id"), val_after("--resume")) {
             let parent = std::path::Path::new(resume)
@@ -5022,7 +5386,8 @@ fn daemon_session_parents() -> HashMap<String, String> {
                 .and_then(|s| s.to_str())
                 .unwrap_or(resume);
             if !sid.is_empty() && !parent.is_empty() && sid != parent {
-                map.entry(sid.to_string()).or_insert_with(|| parent.to_string());
+                map.entry(sid.to_string())
+                    .or_insert_with(|| parent.to_string());
             }
         }
     }
@@ -5067,10 +5432,12 @@ fn claude_view_subcommand(shell_pid: u32) -> Option<&'static str> {
     let pid = claude_child_pid(shell_pid)?;
     let argv = kasa_pty::process_cmdline(pid)?;
     let tokens: Vec<&str> = argv.split_whitespace().collect();
-    if tokens
-        .iter()
-        .any(|t| matches!(*t, "--session-id" | "--resume" | "-r" | "--append-system-prompt"))
-    {
+    if tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "--session-id" | "--resume" | "-r" | "--append-system-prompt"
+        )
+    }) {
         return None;
     }
     for tok in &tokens {
@@ -5094,10 +5461,7 @@ pub(crate) fn screen_marker_sid8(text: &str) -> Option<String> {
         let after = &rest[i + '⟦'.len_utf8()..];
         let cand: String = after.chars().take(8).collect();
         let close = after.chars().nth(8);
-        if cand.len() == 8
-            && cand.chars().all(|c| c.is_ascii_hexdigit())
-            && close == Some('⟧')
-        {
+        if cand.len() == 8 && cand.chars().all(|c| c.is_ascii_hexdigit()) && close == Some('⟧') {
             found = Some(cand.to_ascii_lowercase());
         }
         rest = after;
@@ -5109,7 +5473,12 @@ fn statusline_can_fit_session_marker(screen: &str) -> bool {
     // The marker is deliberately at the far right of Claude's statusline.
     // Narrow panes clip it by design; resizing those panes cannot reveal it
     // and instead tears the live TUI every ten seconds.
-    screen.lines().map(|line| line.chars().count()).max().unwrap_or(0) >= 64
+    screen
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        >= 64
 }
 
 /// sid 앞 8자 → 풀 세션 id. 라이브 agents 세션에서 프리픽스 유일 매칭, 없으면
@@ -5156,7 +5525,10 @@ fn attach_target_from_cmdline(shell_pid: u32) -> Option<String> {
     let tokens: Vec<&str> = argv.split_whitespace().collect();
     for (i, tok) in tokens.iter().enumerate() {
         if *tok == "attach" {
-            return tokens.get(i + 1).filter(|v| is_uuid(v)).map(|v| (*v).to_string());
+            return tokens
+                .get(i + 1)
+                .filter(|v| is_uuid(v))
+                .map(|v| (*v).to_string());
         }
     }
     None
@@ -5226,24 +5598,20 @@ pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBu
 /// 파일시스템이 정하므로 첫 히트를 쓰면 어느 쪽을 이어갈지가 실행마다 달라진다.
 /// 최근에 쓰인 것이 곧 이어가려던 대화라 mtime 최신을 고르고, 같으면 경로
 /// 사전순으로 끊어 답을 하나로 굳힌다.
-fn scan_projects_for_session(
-    projects: &std::path::Path,
-    sid: &str,
-) -> Option<std::path::PathBuf> {
+fn scan_projects_for_session(projects: &std::path::Path, sid: &str) -> Option<std::path::PathBuf> {
     if sid.is_empty() || sid.contains('/') {
         return None;
     }
     let want = format!("{sid}.jsonl");
-    let mut hits: Vec<(std::time::SystemTime, std::path::PathBuf)> =
-        std::fs::read_dir(projects)
-            .ok()?
-            .flatten()
-            .filter_map(|d| {
-                let p = d.path().join(&want);
-                let mtime = p.metadata().and_then(|m| m.modified()).ok()?;
-                Some((mtime, p))
-            })
-            .collect();
+    let mut hits: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .filter_map(|d| {
+            let p = d.path().join(&want);
+            let mtime = p.metadata().and_then(|m| m.modified()).ok()?;
+            Some((mtime, p))
+        })
+        .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     hits.into_iter().next().map(|(_, p)| p)
 }
@@ -5270,10 +5638,7 @@ pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
         .copied()
         .collect::<Vec<_>>()
         .join("-");
-    let ok = sid.len() == 36
-        && sid
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    let ok = sid.len() == 36 && sid.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     ok.then_some(sid)
 }
 
@@ -5372,9 +5737,14 @@ fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::
     let roster = kasa_socket::home_dir()?
         .join(".config/kasaterm/agent-roster")
         .join(format!("{slug}.json"));
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&roster).ok()?).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&roster).ok()?).ok()?;
     let entry = v.get(pane_id)?;
-    if entry.get("archived").and_then(|a| a.as_bool()).unwrap_or(false) {
+    if entry
+        .get("archived")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
     let session = entry.get("session_id").and_then(|s| s.as_str())?;
@@ -5403,7 +5773,9 @@ fn jsonl_for_session_in(
     cwd: &std::path::Path,
     session: &str,
 ) -> Option<std::path::PathBuf> {
-    let direct = projects.join(project_slug(cwd)).join(format!("{session}.jsonl"));
+    let direct = projects
+        .join(project_slug(cwd))
+        .join(format!("{session}.jsonl"));
     if direct.exists() {
         return Some(direct);
     }
@@ -5412,10 +5784,14 @@ fn jsonl_for_session_in(
 
 /// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
 fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std::path::PathBuf> {
-    let Some(home) = kasa_socket::home_dir() else { return Vec::new() };
+    let Some(home) = kasa_socket::home_dir() else {
+        return Vec::new();
+    };
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     let dir = home.join(".claude/projects").join(encoded);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     entries
         .flatten()
         .filter_map(|e| {
@@ -5468,7 +5844,6 @@ pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std:
     )
 }
 
-
 #[cfg(test)]
 mod codex_session_lookup_tests {
     use super::*;
@@ -5515,7 +5890,10 @@ mod codex_session_lookup_tests {
             "{}",
         )
         .unwrap();
-        assert_eq!(scan_codex_sessions(&root, sid).as_deref(), Some(want.as_path()));
+        assert_eq!(
+            scan_codex_sessions(&root, sid).as_deref(),
+            Some(want.as_path())
+        );
         assert_eq!(scan_codex_sessions(&root, "no-such-session"), None);
         // 방어: 빈 sid·경로 조각은 디렉터리 전체를 훑게 두지 않는다.
         assert_eq!(scan_codex_sessions(&root, ""), None);
@@ -5544,14 +5922,23 @@ mod agents_view_tests {
         let in_old = old.join(format!("{sid}.jsonl"));
         std::fs::write(&in_old, "{}\n").unwrap();
 
-        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_old.clone()));
-        assert_eq!(jsonl_for_session_in(&root, new_cwd, "no-such-session"), None);
+        assert_eq!(
+            jsonl_for_session_in(&root, new_cwd, sid),
+            Some(in_old.clone())
+        );
+        assert_eq!(
+            jsonl_for_session_in(&root, new_cwd, "no-such-session"),
+            None
+        );
 
         // 새 cwd 폴더에 같은 대화가 생기면(사용자가 손수 복구) 그쪽이 이긴다 —
         // 폴백은 cwd 로 못 찾았을 때만 도는 뒷문이다.
         let in_new = new.join(format!("{sid}.jsonl"));
         std::fs::write(&in_new, "{}\n").unwrap();
-        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_new.clone()));
+        assert_eq!(
+            jsonl_for_session_in(&root, new_cwd, sid),
+            Some(in_new.clone())
+        );
 
         // 폴백이 여러 폴더에서 같은 sid 를 만나도 답은 하나여야 한다 — mtime 최신.
         // (read_dir 순서에 기대면 어느 대화를 이어갈지가 실행마다 갈린다.)
@@ -5560,7 +5947,10 @@ mod agents_view_tests {
         set_mtime(&in_new, now - std::time::Duration::from_secs(60));
         let other_cwd = std::path::Path::new("/nowhere");
         assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_old));
-        set_mtime(&new.join(format!("{sid}.jsonl")), now + std::time::Duration::from_secs(60));
+        set_mtime(
+            &new.join(format!("{sid}.jsonl")),
+            now + std::time::Duration::from_secs(60),
+        );
         assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_new));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5600,8 +5990,14 @@ mod agents_view_tests {
     #[test]
     fn title_session_name_strips_spinner_glyphs() {
         // 실측 타이틀: 브라유 스피너 + 공백 + 세션 name (agents 뷰 pane).
-        assert_eq!(title_session_name("⠐ 대시보드 로그인 env 문제 해결"), "대시보드 로그인 env 문제 해결");
-        assert_eq!(title_session_name("✻ 학생 프사 크기와 전신 모션 개선"), "학생 프사 크기와 전신 모션 개선");
+        assert_eq!(
+            title_session_name("⠐ 대시보드 로그인 env 문제 해결"),
+            "대시보드 로그인 env 문제 해결"
+        );
+        assert_eq!(
+            title_session_name("✻ 학생 프사 크기와 전신 모션 개선"),
+            "학생 프사 크기와 전신 모션 개선"
+        );
         // 스피너 없는 생 타이틀·앞뒤 공백도 name 으로 수렴.
         assert_eq!(title_session_name("  tmuxify-58 "), "tmuxify-58");
         // 전부 글리프면 빈 문자열(매칭 스킵 신호).
@@ -5619,7 +6015,10 @@ mod account_autoswitch_tests {
     #[test]
     fn rfc3339_epoch_reads_offsets_and_fractions() {
         // oauth/usage 가 실제로 주는 모양(마이크로초 + `+00:00`).
-        assert_eq!(rfc3339_epoch("2026-07-30T11:49:59.589840+00:00"), Some(1785412199));
+        assert_eq!(
+            rfc3339_epoch("2026-07-30T11:49:59.589840+00:00"),
+            Some(1785412199)
+        );
         // 같은 순간을 KST 로 쓴 것 — 오프셋을 안 빼면 9시간이 어긋난다.
         assert_eq!(rfc3339_epoch("2026-07-30T20:49:59+09:00"), Some(1785412199));
         assert_eq!(rfc3339_epoch("1970-01-01T00:00:00Z"), Some(0));
@@ -5696,7 +6095,11 @@ mod account_autoswitch_tests {
             ]
         });
         let labels: Vec<String> = usage_windows(&v).into_iter().map(|w| w.label).collect();
-        assert_eq!(labels, ["5h", "7d", "7d Fable"], "전체 주간이 앞, 스코프 창은 모델명");
+        assert_eq!(
+            labels,
+            ["5h", "7d", "7d Fable"],
+            "전체 주간이 앞, 스코프 창은 모델명"
+        );
         // 모델명이 안 온 스코프 창에 이름을 지어 붙이지 않는다.
         let v2 = serde_json::json!({
             "limits": [{ "group": "weekly", "kind": "weekly_scoped", "percent": 74 }]
@@ -5706,7 +6109,10 @@ mod account_autoswitch_tests {
 
     fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {
         ids.iter()
-            .map(|i| ClaudeAccount { id: i.to_string(), label: String::new() })
+            .map(|i| ClaudeAccount {
+                id: i.to_string(),
+                label: String::new(),
+            })
             .collect()
     }
 
@@ -5715,9 +6121,18 @@ mod account_autoswitch_tests {
         let a = accts(&["acct-1", "acct-2"]);
         let none = Default::default();
         // 기본 → 첫 슬롯 → 둘째 슬롯 → 다시 기본.
-        assert_eq!(pick_next_account("", &a, &none, 0).as_deref(), Some("acct-1"));
-        assert_eq!(pick_next_account("acct-1", &a, &none, 0).as_deref(), Some("acct-2"));
-        assert_eq!(pick_next_account("acct-2", &a, &none, 0).as_deref(), Some(""));
+        assert_eq!(
+            pick_next_account("", &a, &none, 0).as_deref(),
+            Some("acct-1")
+        );
+        assert_eq!(
+            pick_next_account("acct-1", &a, &none, 0).as_deref(),
+            Some("acct-2")
+        );
+        assert_eq!(
+            pick_next_account("acct-2", &a, &none, 0).as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -5726,9 +6141,15 @@ mod account_autoswitch_tests {
         let mut cool = std::collections::HashMap::new();
         cool.insert("acct-1".to_string(), 500_u64);
         // acct-1 은 아직 잠겨 있으니 건너뛴다.
-        assert_eq!(pick_next_account("", &a, &cool, 100).as_deref(), Some("acct-2"));
+        assert_eq!(
+            pick_next_account("", &a, &cool, 100).as_deref(),
+            Some("acct-2")
+        );
         // 풀린 뒤에는 다시 1순위.
-        assert_eq!(pick_next_account("", &a, &cool, 600).as_deref(), Some("acct-1"));
+        assert_eq!(
+            pick_next_account("", &a, &cool, 600).as_deref(),
+            Some("acct-1")
+        );
         // 전부 잠기면 안 옮긴다 — 멀쩡한 자리에서 소진된 자리로 내려앉지 않게.
         cool.insert("acct-2".to_string(), 500);
         cool.insert(String::new(), 500);
@@ -5776,7 +6197,11 @@ mod pid_cwd_tests {
         // 실측 형태: pane 셸(zsh) → claude. claude 의 자식 셸(Bash 툴)도 같이 있다.
         let table = vec![
             (100, 1, "/bin/zsh -il".to_string()),
-            (200, 100, "/Users/x/.local/bin/claude --model opus".to_string()),
+            (
+                200,
+                100,
+                "/Users/x/.local/bin/claude --model opus".to_string(),
+            ),
             (300, 200, "/bin/zsh -c ls".to_string()),
         ];
         assert_eq!(super::claude_under(&table, 100), Some(200));
@@ -5789,7 +6214,11 @@ mod pid_cwd_tests {
         // `send` 로 부팅 커맨드를 흘려보낸 직후의 셸 — 아직 claude 가 아니다.
         let table = vec![
             (100, 1, "/bin/zsh -il".to_string()),
-            (200, 100, "/bin/zsh -c cd /repo && claude --model opus".to_string()),
+            (
+                200,
+                100,
+                "/bin/zsh -c cd /repo && claude --model opus".to_string(),
+            ),
         ];
         assert_eq!(super::claude_under(&table, 100), None);
     }
@@ -5805,14 +6234,19 @@ mod theme_import_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("kasaterm-import-{tag}-{}-{n}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("kasaterm-import-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
 
     /// 항목 이름을 **문자열 그대로** 넣는다 — 경로로 정규화해 담으면 `..` 이
     /// 여기서 사라져 정작 시험하려던 공격 zip 을 못 만든다.
-    fn make_zip(dir: &std::path::Path, name: &str, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+    fn make_zip(
+        dir: &std::path::Path,
+        name: &str,
+        entries: &[(&str, &[u8])],
+    ) -> std::path::PathBuf {
         let path = dir.join(name);
         let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         let opts = zip::write::SimpleFileOptions::default()
@@ -5832,10 +6266,14 @@ mod theme_import_tests {
     #[test]
     fn folder_shell_is_stripped() {
         let root = tmp_root("shell");
-        let z = make_zip(&root, "pack.zip", &[
-            ("myeongjo/theme.json", ROSTER),
-            ("myeongjo/sprites/idle/a-0.png", b"x"),
-        ]);
+        let z = make_zip(
+            &root,
+            "pack.zip",
+            &[
+                ("myeongjo/theme.json", ROSTER),
+                ("myeongjo/sprites/idle/a-0.png", b"x"),
+            ],
+        );
         let id = import_theme_into(&root, &z).unwrap();
         assert_eq!(id, "myeongjo");
         assert!(root.join("myeongjo/theme.json").is_file());
@@ -5849,10 +6287,11 @@ mod theme_import_tests {
     #[test]
     fn bare_zip_takes_its_filename() {
         let root = tmp_root("bare");
-        let z = make_zip(&root, "vocaloid.zip", &[
-            ("theme.json", ROSTER),
-            ("sprites/profile/a.png", b"x"),
-        ]);
+        let z = make_zip(
+            &root,
+            "vocaloid.zip",
+            &[("theme.json", ROSTER), ("sprites/profile/a.png", b"x")],
+        );
         let id = import_theme_into(&root, &z).unwrap();
         assert_eq!(id, "vocaloid");
         assert!(root.join("vocaloid/theme.json").is_file());
@@ -5864,15 +6303,17 @@ mod theme_import_tests {
     #[test]
     fn escaping_entry_rejects_the_whole_zip() {
         let root = tmp_root("slip");
-        let z = make_zip(&root, "evil.zip", &[
-            ("theme.json", ROSTER),
-            ("../escaped.txt", b"pwned"),
-        ]);
+        let z = make_zip(
+            &root,
+            "evil.zip",
+            &[("theme.json", ROSTER), ("../escaped.txt", b"pwned")],
+        );
         assert!(import_theme_into(&root, &z).is_err());
         // 뿌리 밖에도, 안에도 아무것도 안 남아야 한다.
         assert!(!root.parent().unwrap().join("escaped.txt").exists());
         assert!(!root.join("evil").exists());
-        assert!(std::fs::read_dir(&root).unwrap()
+        assert!(std::fs::read_dir(&root)
+            .unwrap()
             .filter_map(|e| e.ok())
             .all(|e| e.file_name() == "evil.zip"));
         let _ = std::fs::remove_dir_all(&root);
@@ -5894,11 +6335,15 @@ mod theme_import_tests {
     #[test]
     fn macos_resource_fork_does_not_break_shell_detection() {
         let root = tmp_root("macosx");
-        let z = make_zip(&root, "pack.zip", &[
-            ("zzz/theme.json", ROSTER),
-            ("__MACOSX/zzz/._theme.json", b"junk"),
-            ("zzz/.DS_Store", b"junk"),
-        ]);
+        let z = make_zip(
+            &root,
+            "pack.zip",
+            &[
+                ("zzz/theme.json", ROSTER),
+                ("__MACOSX/zzz/._theme.json", b"junk"),
+                ("zzz/.DS_Store", b"junk"),
+            ],
+        );
         let id = import_theme_into(&root, &z).unwrap();
         assert_eq!(id, "zzz");
         assert!(root.join("zzz/theme.json").is_file());
