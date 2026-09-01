@@ -121,7 +121,11 @@ pub(crate) fn minimap_has_bar(mw: f32, mh: f32) -> bool {
 /// 띠가 **실제로 서는 동안만** 자리를 빼면 걷기 시작·끝마다 얼굴이 튀므로, 띠를
 /// 그릴 수 있는 칸이면 도는 중이든 아니든 늘 뺀다.
 pub(crate) fn minimap_face_box(mx: f32, my: f32, mw: f32, mh: f32) -> (f32, f32, f32) {
-    let room = if minimap_has_bar(mw, mh) { MINI_BAR_H + MINI_BAR_PAD } else { 0.0 };
+    let room = if minimap_has_bar(mw, mh) {
+        MINI_BAR_H + MINI_BAR_PAD
+    } else {
+        0.0
+    };
     let face = (mw.min(mh - room) - 8.0).clamp(10.0, 26.0);
     (mx + (mw - face) / 2.0, my + (mh - room - face) / 2.0, face)
 }
@@ -270,7 +274,10 @@ impl App {
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
-            pad_x: WINDOW_PADDING + self.effective_sidebar_w() + pane_x as f32 * self.cell.w + PANE_INNER_X,
+            pad_x: WINDOW_PADDING
+                + self.effective_sidebar_w()
+                + pane_x as f32 * self.cell.w
+                + PANE_INNER_X,
             pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h + header_shift + PANE_INNER_Y,
             cursor_row,
             cursor_col,
@@ -340,9 +347,9 @@ impl App {
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
             let mut c = cells::iterm_cursor();
             c[3] = 140; // ~0.55 alpha
-            // 모양은 사각형 하나의 폭·높이·y 로 전부 표현된다. bar 는 셀 왼쪽에 붙는
-            // 세로선(Ghostty 식), underline 은 셀 바닥에 붙는 가로선이다. 굵기가 셀보다
-            // 크면 block 과 구분이 안 되므로 셀 안으로 조인다.
+                        // 모양은 사각형 하나의 폭·높이·y 로 전부 표현된다. bar 는 셀 왼쪽에 붙는
+                        // 세로선(Ghostty 식), underline 은 셀 바닥에 붙는 가로선이다. 굵기가 셀보다
+                        // 크면 block 과 구분이 안 되므로 셀 안으로 조인다.
             let full_w = cw * ov.cursor_w as f32;
             let (rx, ry, rw, rh) = match ov.cursor_shape.as_str() {
                 "bar" => (cx, cy, ov.cursor_thickness.min(full_w), ch),
@@ -465,7 +472,10 @@ impl App {
             } else {
                 format!("kasaterm-capture-{}.png", pane.trim_start_matches('%'))
             };
-            std::env::temp_dir().join(name).to_string_lossy().into_owned()
+            std::env::temp_dir()
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
         });
         if let Some(g) = self.gpu.as_mut() {
             g.capture_crop = crop;
@@ -533,7 +543,9 @@ impl App {
         // Mirror each pane's cwd+badge for the BA GUI's `/layout` (Warp bar on
         // plain terminal tiles). Reads the caches above; no extra git/lsof.
         self.publish_pane_status();
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
         let win_size = window.inner_size();
@@ -657,7 +669,8 @@ impl App {
             0.0
         };
         let git_view = self
-            .git.col_data
+            .git
+            .col_data
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
@@ -682,20 +695,25 @@ impl App {
         let title_px = TITLE_HEIGHT * scale;
         // Per-pane font multipliers (keyed by pty/leaf id), so each pane's
         // glyphs can be sized independently of the shared base cell.
-        let pane_scales = self.pane_font_scales.clone();
+        let mut pane_scales = self.pane_font_scales.clone();
         // Code-block copy buttons (text + logical rect), filled per pane in
         // the loop below and handed to both the mouse handler and overlay.
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
         // (pid, image_data, body_box, zoom, rotation_quarters, pan_xy)
-        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32), f32, u8, (f32, f32))> =
-            Vec::new();
+        let mut image_slots: Vec<(
+            String,
+            Arc<ImagePane>,
+            (f32, f32, f32, f32),
+            f32,
+            u8,
+            (f32, f32),
+        )> = Vec::new();
         // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
         // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
         // (slug, 배너 박스 rect, pane 세로 클립(y0, y1)) — 박스는 스크롤로
         // pane 밖까지 이어질 수 있고, 그리기는 클립 범위 안만.
-        let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))> =
-            Vec::new();
+        let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))> = Vec::new();
         // agents 뷰 SCHALE 로고 자리(Clawd 마스코트 위치 / 헤더 왼쪽 여백) — 위치만.
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // agents 목록·resume 피커 화면의 교실 배경(셀 뒤 cover-fit). pane 본문 rect.
@@ -707,8 +725,14 @@ impl App {
         // (px, py, pw, ph, 텍스트, pane_id, ↑ rect, ↓ rect). 화살표 자리는 셀 폭을
         // 아는 스캔 루프에서 미리 재 둔다 — chrome 패스에서 되재면 어긋난다.
         type StickySlot = (
-            f32, f32, f32, f32, String, String,
-            Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>,
+            f32,
+            f32,
+            f32,
+            f32,
+            String,
+            String,
+            Option<(f32, f32, f32, f32)>,
+            Option<(f32, f32, f32, f32)>,
         );
         let mut sticky_pill_slots: Vec<StickySlot> = Vec::new();
         // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, 헤더 내용). logical px.
@@ -736,7 +760,9 @@ impl App {
             let mut out = std::collections::HashMap::new();
             for id in ids {
                 // Arc 를 복제해 self 빌림을 끊는다 — 참조를 든 채로는 캐시를 못 고친다.
-                let Some(sess) = self.pty_for_pane(&id).cloned() else { continue };
+                let Some(sess) = self.pty_for_pane(&id).cloned() else {
+                    continue;
+                };
                 if let Some(h) = self.turn.header(&id, &sess) {
                     out.insert(id, h);
                 }
@@ -833,9 +859,7 @@ impl App {
                     .leaves()
                     .into_iter()
                     .filter_map(|n| match n {
-                        Layout::Pane { id, x, y, w, h } => {
-                            Some((format!("%{id}"), *x, *y, *w, *h))
-                        }
+                        Layout::Pane { id, x, y, w, h } => Some((format!("%{id}"), *x, *y, *w, *h)),
                         _ => None,
                     })
                     .collect()
@@ -882,8 +906,44 @@ impl App {
             // 하고, 루프 뒤 타이틀바 패스가 학생 이름을 올릴 때 다시 읽는다.
             let mut mirror_claude_panes: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다(resize 를 안 보낸다).
+            // 그래서 로컬 pane 이 원본보다 작으면 오른쪽·아래가 잘려 나가므로, 그
+            // pane 만 글자 배율을 줄여 원본 격자를 통째로 담는다. 원본이 리사이즈되면
+            // 다음 프레임의 격자가 달라져 자동으로 다시 맞춰진다.
+            for (id, _x, _y, w_cells, h_cells) in &leaves {
+                if *w_cells == 0 || *h_cells == 0 || !kasa_mcp::remote::is_view_pane(id) {
+                    continue;
+                }
+                let Some(pane) = ws.panes.get(id) else {
+                    continue;
+                };
+                let Some((gc, gr)) = pane
+                    .term()
+                    .map(|t| (t.cols.max(1) as f32, t.cells.len().max(1) as f32))
+                else {
+                    continue;
+                };
+                let cw = self.cell.w.max(1.0);
+                let ch = self.cell.h.max(1.0);
+                let usable_w = (*w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(cw);
+                let usable_h = (*h_cells as f32 * ch
+                    - pane.header_px()
+                    - self.statusbar_px(id.as_str())
+                    - 2.0 * PANE_INNER_Y)
+                    .max(ch);
+                // 아래 클립 계산이 floor 라, 딱 맞는 배율은 부동소수 오차 한 번에
+                // 한 칸을 잃는다 — 아주 살짝 접어 그 경계를 피한다.
+                let fit = ((usable_w / (gc * cw)).min(usable_h / (gr * ch)) * 0.999).min(1.0);
+                if !fit.is_finite() || fit >= 1.0 {
+                    continue;
+                }
+                let manual = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                pane_scales.insert(id.clone(), (manual * fit).max(0.05));
+            }
             for (id, x_cells, y_cells, w_cells, h_cells) in leaves {
-                let Some(pane) = ws.panes.get(&id) else { continue };
+                let Some(pane) = ws.panes.get(&id) else {
+                    continue;
+                };
                 // pane.cells already holds the correct view: the PTY
                 // backend snapshots through alacritty's display_offset,
                 // so a scrolled-up frame arrives here pre-composed with
@@ -925,11 +985,9 @@ impl App {
                     let header_px_now = pane.header_px();
                     let footer_px_now = self.statusbar_px(id.as_str());
                     let usable_w = (w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
-                    let usable_h = (h_cells as f32 * ch
-                        - header_px_now
-                        - footer_px_now
-                        - 2.0 * PANE_INNER_Y)
-                        .max(scaled_ch);
+                    let usable_h =
+                        (h_cells as f32 * ch - header_px_now - footer_px_now - 2.0 * PANE_INNER_Y)
+                            .max(scaled_ch);
                     let layout_cols = (usable_w / scaled_cw).floor() as usize;
                     let layout_rows = (usable_h / scaled_ch).floor() as usize;
                     (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))
@@ -1061,8 +1119,7 @@ impl App {
                                 let pinned = &live[range];
                                 let h = pinned.len().min(composed.len());
                                 let base = composed.len() - h;
-                                composed[base..]
-                                    .clone_from_slice(&pinned[pinned.len() - h..]);
+                                composed[base..].clone_from_slice(&pinned[pinned.len() - h..]);
                             }
                         }
                     }
@@ -1088,20 +1145,15 @@ impl App {
                 let header_shift_px = pane.header_px() * scale;
                 let origin_px = (
                     pad_px + x_cells as f32 * cell_w_px + PANE_INNER_X * scale,
-                    title_px
-                        + y_cells as f32 * cell_h_px
-                        + header_shift_px
-                        + PANE_INNER_Y * scale,
+                    title_px + y_cells as f32 * cell_h_px + header_shift_px + PANE_INNER_Y * scale,
                 );
                 // Code-block copy buttons: scan this pane's grid for bg
                 // boxes (Claude Code code/command blocks) and stash a copy
                 // button at each block's top-right. Logical px so the mouse
                 // handler and the overlay pass agree on the hit area.
                 let header_shift_logical = pane.header_px();
-                let body_left = WINDOW_PADDING
-                    + sidebar_w
-                    + x_cells as f32 * self.cell.w
-                    + PANE_INNER_X;
+                let body_left =
+                    WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w + PANE_INNER_X;
                 let body_top = TITLE_HEIGHT
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
@@ -1228,7 +1280,8 @@ impl App {
                     let mut memo = self.pane_sticky_turn.borrow_mut();
                     let slot = memo.entry(id.to_string()).or_default();
                     let mut cur = (!slot.is_empty()).then(|| slot.clone());
-                    let got = find_sticky_prompt(&composed, self.pane_prompts(id.as_str()), &mut cur);
+                    let got =
+                        find_sticky_prompt(&composed, self.pane_prompts(id.as_str()), &mut cur);
                     *slot = cur.unwrap_or_default();
                     got
                 });
@@ -1289,11 +1342,9 @@ impl App {
                             })
                             .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
                         let base = theme::bg();
-                        let light =
-                            base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
+                        let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
                         let amount = if light { 0.10 } else { 0.18 };
-                        let fill =
-                            tint_toward([base[0], base[1], base[2]], accent, amount);
+                        let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
                         let text = theme::text();
                         let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
                         // 우리가 채운 띠는 그 행에 글자 셀이 없다 — 선명화만 하면
@@ -1326,7 +1377,8 @@ impl App {
                             cell.dim = false;
                             cell.inverse = false;
                             cell.bg = fill.clone();
-                            cell.fg = if cell.ch == '❯' || Some(i) == up_col || Some(i) == down_col {
+                            cell.fg = if cell.ch == '❯' || Some(i) == up_col || Some(i) == down_col
+                            {
                                 kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
                             } else {
                                 kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
@@ -1360,7 +1412,12 @@ impl App {
                         let rect_at = |c: usize| {
                             // 화살표 한 칸은 손가락으로 누르기엔 좁다 — 좌우로 반 칸씩
                             // 넓혀 잡는다. 그래도 서로 두 칸 떨어져 있어 안 겹친다.
-                            (body_left + c as f32 * hcw - hcw * 0.5, body_top, hcw * 2.0, hch)
+                            (
+                                body_left + c as f32 * hcw - hcw * 0.5,
+                                body_top,
+                                hcw * 2.0,
+                                hch,
+                            )
                         };
                         turn_header_slots.push((
                             id.clone(),
@@ -1406,16 +1463,13 @@ impl App {
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
                     let logo_rows = CLAWD_ROWS;
-                    let logo_cols =
-                        ((logo_rows as f32 * sch / scw).round() as usize).max(3);
+                    let logo_cols = ((logo_rows as f32 * sch / scw).round() as usize).max(3);
                     // SCHALE 로고는 클립 경로가 없어 완전 노출 배너만 쓴다 —
                     // 스크롤로 잘린 배너는 헤더 앵커 폴백(원본 글리프 유지).
                     let clawd = find_clawd_banners(&composed);
                     let anchor = clawd
                         .iter()
-                        .find(|&&(br, _)| {
-                            br >= 0 && br as usize + CLAWD_ROWS <= composed.len()
-                        })
+                        .find(|&&(br, _)| br >= 0 && br as usize + CLAWD_ROWS <= composed.len())
                         .map(|&(br, bc)| (br as usize, bc));
                     let anchor = if let Some((br, bc)) = anchor {
                         for row in composed[br..br + CLAWD_ROWS].iter_mut() {
@@ -1459,8 +1513,10 @@ impl App {
                     // 자리인가」를 말하지만 멈춘 자리에서 그건 급한 정보가 아니고,
                     // 테두리·프사·스피너가 한 색을 쓰므로 여기 한 번만 덮으면 셋이
                     // 함께 빨개진다(2026-08-26 지시).
-                    let stalled =
-                        self.pane_activity.get(id.as_str()).is_some_and(|a| a.stalled.is_some());
+                    let stalled = self
+                        .pane_activity
+                        .get(id.as_str())
+                        .is_some_and(|a| a.stalled.is_some());
                     let accent = if stalled {
                         Some(theme::danger())
                     } else {
@@ -1481,9 +1537,11 @@ impl App {
                         find_clawd_banners(&composed)
                             .into_iter()
                             .map(|(br, bc)| (br, bc, CLAWD_COLS, CLAWD_ROWS, CLAWD_TITLE))
-                            .chain(find_agy_banners(&composed).into_iter().map(
-                                |(br, bc)| (br, bc, AGY_COLS, AGY_ROWS, AGY_TITLE),
-                            ))
+                            .chain(
+                                find_agy_banners(&composed)
+                                    .into_iter()
+                                    .map(|(br, bc)| (br, bc, AGY_COLS, AGY_ROWS, AGY_TITLE)),
+                            )
                             .filter(|_| student_has_sprite(slug, "idle"))
                             .collect();
                     for (br, bc, lcols, lrows, title) in logos {
@@ -1496,9 +1554,7 @@ impl App {
                         banner_slots.push((
                             slug,
                             (
-                                body_left
-                                    + bc as f32 * scw
-                                    + (lcols as f32 * scw - bw) * 0.5,
+                                body_left + bc as f32 * scw + (lcols as f32 * scw - bw) * 0.5,
                                 body_top + br as f32 * sch + (lrows as f32 * sch - bh),
                                 bw,
                                 bh,
@@ -1506,9 +1562,7 @@ impl App {
                             (body_top, body_top + composed.len() as f32 * sch),
                         ));
                         let r0 = br.max(0) as usize;
-                        let r1 = (br + lrows as isize)
-                            .clamp(0, composed.len() as isize)
-                            as usize;
+                        let r1 = (br + lrows as isize).clamp(0, composed.len() as isize) as usize;
                         for row in composed[r0..r1].iter_mut() {
                             for cell in row.iter_mut().skip(bc).take(lcols) {
                                 *cell = GridCell::blank();
@@ -1517,7 +1571,14 @@ impl App {
                         // 배너 타이틀("Claude Code"·"Antigravity CLI")도 학생 이름으로 —
                         // 도트만 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
                         replace_banner_title(
-                            &mut composed, br, bc, lcols, lrows, title, name, accent,
+                            &mut composed,
+                            br,
+                            bc,
+                            lcols,
+                            lrows,
+                            title,
+                            name,
+                            accent,
                         );
                         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
                         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
@@ -1528,14 +1589,8 @@ impl App {
                         // 테두리까지 파랑으로 남았다(2026-08-20 거노 스샷).
                         // 박스 코너가 없는 launcher 화면에선 자연 no-op.
                         if let Some(acc) = accent {
-                            let art_bottom =
-                                (br + lrows as isize).max(0) as usize;
-                            tint_welcome_box(
-                                &mut composed,
-                                br.max(0) as usize,
-                                art_bottom,
-                                acc,
-                            );
+                            let art_bottom = (br + lrows as isize).max(0) as usize;
+                            tint_welcome_box(&mut composed, br.max(0) as usize, art_bottom, acc);
                         }
                     }
                     // codex 시작 패널: 세울 아트가 없어 이름표만 바꾼다. 도트 유무와
@@ -1543,9 +1598,7 @@ impl App {
                     // 배너와 달리 화면 전체를 봐야 해서 공짜가 아니다.
                     if agent_kind == Some(kasa_pty::AgentKind::Codex) {
                         let n = composed.len();
-                        replace_banner_title(
-                            &mut composed, 0, 0, 0, n, CODEX_TITLE, name, accent,
-                        );
+                        replace_banner_title(&mut composed, 0, 0, 0, n, CODEX_TITLE, name, accent);
                     }
                     // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
                     // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
@@ -1618,10 +1671,9 @@ impl App {
                             const PERIOD: f32 = 2.0; // 한 번 스윕(초)
                             const SIGMA: f32 = 2.0; // 밴드 폭(셀)
                             const GLOW: f32 = 0.9; // 밴드 중심 밝기(흰색 비율)
-                            // 밴드가 문구 왼쪽 밖에서 오른쪽 밖으로 완전히 지나가게.
+                                                   // 밴드가 문구 왼쪽 밖에서 오른쪽 밖으로 완전히 지나가게.
                             let sweep = (t / PERIOD).fract();
-                            let center =
-                                first as f32 - SIGMA * 2.0 + sweep * (span + SIGMA * 4.0);
+                            let center = first as f32 - SIGMA * 2.0 + sweep * (span + SIGMA * 4.0);
                             for (idx, cell) in composed[sr].iter_mut().enumerate().take(end) {
                                 if matches!(cell.ch, ' ' | '\0') {
                                     continue;
@@ -1760,8 +1812,8 @@ impl App {
                     {
                         if !pet_busy {
                             if let Some((anchor, left_c)) = stand_anchor {
-                                let h = (INPUT_STANDING_ROWS as f32 * sch)
-                                    .min(rows_now as f32 * sch);
+                                let h =
+                                    (INPUT_STANDING_ROWS as f32 * sch).min(rows_now as f32 * sch);
                                 {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                                     // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
@@ -1821,14 +1873,12 @@ impl App {
                             // **마지막에 출력한 탭**이 이기고, 게다가 관문을 안 지난
                             // 날것이라(session.rs 가 매 업데이트 복사) 셸 pane 에도
                             // 색이 둘렸다(2026-08-22).
-                            true_char
-                                .as_deref()
-                                .and_then(|n| {
-                                    theme::character_accent_n(
-                                        n,
-                                        theme::character_ordinal(&ws.pane_character, &tab_pid),
-                                    )
-                                })
+                            true_char.as_deref().and_then(|n| {
+                                theme::character_accent_n(
+                                    n,
+                                    theme::character_ordinal(&ws.pane_character, &tab_pid),
+                                )
+                            })
                         })
                         .unwrap_or_else(theme::border);
                     // ultracode pane 은 이 테두리도 입력박스 보더와 같은 위상으로
@@ -1862,8 +1912,7 @@ impl App {
                         if faces >= 40 {
                             break; // 폭주 방어 — 화면에 이보다 많을 수 없다
                         }
-                        let Some((c0, end, tag_slug)) = picker_student_tag(&composed[r])
-                        else {
+                        let Some((c0, end, tag_slug)) = picker_student_tag(&composed[r]) else {
                             continue;
                         };
                         for cell in composed[r][c0..=end].iter_mut() {
@@ -1933,8 +1982,8 @@ impl App {
                                 let name_x = body_left + cell_col as f32 * scw;
                                 let side = (name_x - body_left).min(2.0 * sch).max(sch);
                                 let x = body_left;
-                                let y = (body_top + r as f32 * sch + (sch - side) / 2.0)
-                                    .max(body_top);
+                                let y =
+                                    (body_top + r as f32 * sch + (sch - side) / 2.0).max(body_top);
                                 profile_slots.push((slug, (x, y, side, side)));
                                 faces += 1;
                                 continue 'agents_rows;
@@ -1973,9 +2022,7 @@ impl App {
                             .map(|p| p.rows_above(240))
                             .unwrap_or_default();
                         let accent = match carried_message_header(&above) {
-                            Some(CarriedHeader::Tell(name)) => {
-                                theme::character_accent_any(&name)
-                            }
+                            Some(CarriedHeader::Tell(name)) => theme::character_accent_any(&name),
                             Some(CarriedHeader::Native(label)) => {
                                 // 인정 규칙은 화면 안 헤더와 동일 — transcript 최신
                                 // 태그와 라벨 대조, 아니면 로스터 agent 이름꼴만.
@@ -1987,19 +2034,14 @@ impl App {
                                 };
                                 let label_hit = msg.as_ref().is_some_and(|m| {
                                     m.from_label.as_deref().map(&norm) == Some(norm(&label))
-                                        || m.from_pid.as_deref().map(&norm)
-                                            == Some(norm(&label))
+                                        || m.from_pid.as_deref().map(&norm) == Some(norm(&label))
                                 });
                                 // 세 번째 관문: 라벨이 사람이 붙인 pane 이름인 경우
                                 // (`@ diff❯`) — 명부에 그 이름의 세션이 하나뿐이면 인정.
                                 let named = !label_hit
                                     && !label_is_roster_agent(&label)
-                                    && peer_character_by_label(
-                                        &label,
-                                        &self.pane_claude_sid,
-                                        &ws,
-                                    )
-                                    .is_some();
+                                    && peer_character_by_label(&label, &self.pane_claude_sid, &ws)
+                                        .is_some();
                                 (label_hit || label_is_roster_agent(&label) || named).then(|| {
                                     native_sender_accent(
                                         &label,
@@ -2072,11 +2114,7 @@ impl App {
                                 // 이 정확하고, 화면 이름은 하이픈판이라 둘 다 민다.
                                 .or_else(|| {
                                     let by_label = |l: &str| {
-                                        peer_character_by_label(
-                                            l,
-                                            &self.pane_claude_sid,
-                                            &ws,
-                                        )
+                                        peer_character_by_label(l, &self.pane_claude_sid, &ws)
                                     };
                                     msg.as_ref()
                                         .and_then(|m| m.from_label.as_deref())
@@ -2135,9 +2173,7 @@ impl App {
                     // 화면 라벨이 transcript 태그의 from_label 과 일치할 때만
                     // 남의 메시지로 인정한다 — 사용자가 직접 친 `@ …❯` 보호.
                     for r in 0..composed.len() {
-                        let Some((c0, qcol, label)) =
-                            peer_native_header_line(&composed[r])
-                        else {
+                        let Some((c0, qcol, label)) = peer_native_header_line(&composed[r]) else {
                             continue;
                         };
                         let msg = msg_path
@@ -2185,9 +2221,7 @@ impl App {
                         // 그대로 쓰면 로마자 꼬리표가 남는다). 못 찾으면 원문 유지(색만).
                         if let Some(slug) = slug {
                             let display = theme::slug_character_any(slug).unwrap_or(&sender);
-                            restyle_peer_native_header(
-                                &mut composed[r], c0, qcol, display, accent,
-                            );
+                            restyle_peer_native_header(&mut composed[r], c0, qcol, display, accent);
                         }
                         tint_row(&mut composed[r], accent);
                         let mut rr = r + 1;
@@ -2367,8 +2401,8 @@ impl App {
                 // 섞은 톤, `❯` 는 accent 원색. 픽커/목록 화면은 선택 강조가
                 // (`❯`+배경) 오탐되므로 통째로 건너뛴다.
                 if !(agents_view || resume_picker || ask_picker) {
-                    let accent = prompt_accent
-                        .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
+                    let accent =
+                        prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name()));
                     let base = theme::bg();
                     let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
                     let amount = if light { 0.10 } else { 0.18 };
@@ -2387,8 +2421,7 @@ impl App {
                         loop {
                             restyle_user_prompt_row(&mut composed[r], &fill, accent);
                             r += 1;
-                            if r >= composed.len()
-                                || band_bg(&composed[r]).as_ref() != Some(&band)
+                            if r >= composed.len() || band_bg(&composed[r]).as_ref() != Some(&band)
                             {
                                 break;
                             }
@@ -2411,10 +2444,7 @@ impl App {
                 // content fills to the window edge with no seam.
                 // Computed for EVERY pane (not just image/md) — in-pane
                 // WebViews need it too.
-                let bx = WINDOW_PADDING
-                    + sidebar_w
-                    + x_cells as f32 * self.cell.w
-                    + PANE_INNER_X;
+                let bx = WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w + PANE_INNER_X;
                 let by = TITLE_HEIGHT
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
@@ -2446,7 +2476,11 @@ impl App {
                 // gets no inner inset on that side — otherwise the right/bottom
                 // edge keeps an inner-pad-width empty strip (the "우측하단 빈칸"
                 // a drag leaves when it puts a pane against the window edge).
-                let right_inset = if x_cells + eff_w_cells >= grid_cols { 0.0 } else { PANE_INNER_X };
+                let right_inset = if x_cells + eff_w_cells >= grid_cols {
+                    0.0
+                } else {
+                    PANE_INNER_X
+                };
                 let bw = (full_w - PANE_INNER_X - right_inset).max(1.0);
                 let base_h = eff_h_cells as f32 * self.cell.h;
                 let full_h = if y_cells + eff_h_cells >= grid_rows {
@@ -2462,7 +2496,11 @@ impl App {
                 } else {
                     base_h
                 };
-                let bottom_inset = if y_cells + eff_h_cells >= grid_rows { 0.0 } else { PANE_INNER_Y };
+                let bottom_inset = if y_cells + eff_h_cells >= grid_rows {
+                    0.0
+                } else {
+                    PANE_INNER_Y
+                };
                 // 상태바 띠를 빼야 한다. PTY 그리드는 `resize_backend` 가 푸터만큼
                 // 행을 줄여 바 위에서 멈추는데, 편집기·이미지처럼 PTY 없는 pane 은
                 // 이 박스가 곧 본문 클립이라 여기서 빼지 않으면 마지막 줄이 바
@@ -2475,7 +2513,14 @@ impl App {
                 .max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(image) = img {
-                    image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
+                    image_slots.push((
+                        id.clone(),
+                        image,
+                        (bx, by, bw, bh),
+                        img_zoom,
+                        img_rot,
+                        img_pan,
+                    ));
                 }
                 if let Some((
                     doc,
@@ -2536,7 +2581,8 @@ impl App {
                 let box_w = {
                     let base = w_cells as f32 * self.cell.w;
                     if w_cells == 0 || x_cells + w_cells >= grid_cols {
-                        let right_edge = WINDOW_PADDING + sidebar_w + (x_cells + w_cells) as f32 * self.cell.w;
+                        let right_edge =
+                            WINDOW_PADDING + sidebar_w + (x_cells + w_cells) as f32 * self.cell.w;
                         let extra = self.window.as_ref().map_or(0.0, |w| {
                             let s = w.scale_factor() as f32 * self.ui_zoom;
                             let raw_lw = w.inner_size().width as f32 / s;
@@ -2634,15 +2680,18 @@ impl App {
                             .unwrap_or_else(|| id.clone());
                         // Prefix the pane id (for `tell %N`, etc.); skip when the
                         // label already fell back to the id — no "%18 · %18".
-                        if base == id { base } else { format!("{id} · {base}") }
+                        if base == id {
+                            base
+                        } else {
+                            format!("{id} · {base}")
+                        }
                     };
                     // Append the pane's real OS tty (ghostty-style) — daemon
                     // cache first (the daemon owns the PTY), else local pty.
-                    let tty = self
-                        .pane_tty_cache
-                        .get(&id)
-                        .cloned()
-                        .or_else(|| self.pty.get(&id).and_then(|p| p.tty().map(str::to_string)));
+                    let tty =
+                        self.pane_tty_cache.get(&id).cloned().or_else(|| {
+                            self.pty.get(&id).and_then(|p| p.tty().map(str::to_string))
+                        });
                     let label = match tty {
                         Some(t) => format!("{label}  ·  {t}"),
                         None => label,
@@ -2689,10 +2738,7 @@ impl App {
                             .pane_activity
                             .get(&id)
                             .is_some_and(|a| a.status == "compacting"),
-                        compact_pct: self
-                            .pane_activity
-                            .get(&id)
-                            .and_then(|a| a.compact_pct),
+                        compact_pct: self.pane_activity.get(&id).and_then(|a| a.compact_pct),
                         // 원격 링크는 kasa-mcp 자체 레지스트리라 ws 락과 무관 — 이
                         // 락 블록 안에서 불러도 안전하다(사이드바 2909 와 같은 원천).
                         machine: kasa_mcp::remote::remote_info(&id).map(|i| {
@@ -2743,7 +2789,13 @@ impl App {
             if !headers.is_empty() && !headers.iter().any(|h| h.is_active) {
                 headers[0].is_active = true;
             }
-            (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes)
+            (
+                slots,
+                headers,
+                footer_slots,
+                agents_view_panes,
+                mirror_claude_panes,
+            )
         };
         // 메뉴에는 계정별 네트워크 조회값이 아니라, 현재 창(없으면 같은 방의 최근
         // 창)이 rollout에 직접 남긴 값을 쓴다. 그래서 다른 슬롯 수치를 현재 선택할
@@ -2807,8 +2859,8 @@ impl App {
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
         // 업데이트 토스트(win_sparkle 센티널)면 칩 라벨이 승인/거부 대신 설치/나중에.
-        let update_toast_on = self.collab.toast_action.as_deref()
-            == Some(crate::win_sparkle::UPDATE_TOAST_ACTION);
+        let update_toast_on =
+            self.collab.toast_action.as_deref() == Some(crate::win_sparkle::UPDATE_TOAST_ACTION);
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -2843,11 +2895,7 @@ impl App {
             .as_ref()
             .map(|hd| hd.active)
             .unwrap_or(false);
-        let tab_drag_active = self
-            .tab_drag
-            .as_ref()
-            .map(|d| d.active)
-            .unwrap_or(false);
+        let tab_drag_active = self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false);
         // The strip-only insertion bar gets replaced by the zone overlay
         // — without it the user sees no preview when hovering the header,
         // which is exactly the spot most people aim for when intending
@@ -2887,7 +2935,11 @@ impl App {
             // 헤더 = pane_top ~ pane_top + header_band. body_top
             // 10px 위까지 관대 (좁은 헤더에서 마우스 못 맞추는 거 방지).
             let cur_y = self.cursor_px.1;
-            let leaves = self.pty_layout.as_ref().map(|t| t.leaves().len()).unwrap_or(1);
+            let leaves = self
+                .pty_layout
+                .as_ref()
+                .map(|t| t.leaves().len())
+                .unwrap_or(1);
             let header_band = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
             current_zone
                 .as_ref()
@@ -2946,58 +2998,57 @@ impl App {
             Vec::new()
         } else {
             self.pty_layout
-            .as_ref()
-            .map(|tree| {
-                let (cols, rows) = self.window_cells();
-                let pad = WINDOW_PADDING + self.effective_sidebar_w();
-                // True window edges (logical). window_cells floors the grid,
-                // so a seam spanning the last row/col must reach past the grid
-                // to the real edge — otherwise it stops short like box_h did.
-                // ⚠️ 오른쪽 끝은 **창 끝이 아니라 우측 컬럼(Git·Info) 앞**이다.
-                // 격자는 `window_cells` 가 그 폭을 이미 접어 두는데 이 선만 창 끝을
-                // 써서, 마지막 열까지 걸친 가로선이 열려 있는 패널을 관통했다
-                // (거노: "73·27 사이 선이 우측 패널까지 뚫어버려").
-                let (win_right, win_bottom) = self.window.as_ref().map_or(
-                    (
-                        pad + cols as f32 * self.cell.w,
-                        TITLE_HEIGHT + rows as f32 * self.cell.h,
-                    ),
-                    |w| {
-                        let s = w.scale_factor() as f32 * self.ui_zoom;
+                .as_ref()
+                .map(|tree| {
+                    let (cols, rows) = self.window_cells();
+                    let pad = WINDOW_PADDING + self.effective_sidebar_w();
+                    // True window edges (logical). window_cells floors the grid,
+                    // so a seam spanning the last row/col must reach past the grid
+                    // to the real edge — otherwise it stops short like box_h did.
+                    // ⚠️ 오른쪽 끝은 **창 끝이 아니라 우측 컬럼(Git·Info) 앞**이다.
+                    // 격자는 `window_cells` 가 그 폭을 이미 접어 두는데 이 선만 창 끝을
+                    // 써서, 마지막 열까지 걸친 가로선이 열려 있는 패널을 관통했다
+                    // (거노: "73·27 사이 선이 우측 패널까지 뚫어버려").
+                    let (win_right, win_bottom) = self.window.as_ref().map_or(
                         (
-                            w.inner_size().width as f32 / s - self.effective_right_chrome_w(),
-                            w.inner_size().height as f32 / s,
-                        )
-                    },
-                );
-                tree.dividers(cols, rows)
-                    .into_iter()
-                    .map(|d| match d.dir {
-                        kasa_pty::SplitDir::Horizontal => {
-                            let x = pad + d.edge as f32 * self.cell.w;
-                            let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
-                            let y1 = if d.span_start + d.span_len >= rows {
-                                win_bottom
-                            } else {
-                                TITLE_HEIGHT
-                                    + (d.span_start + d.span_len) as f32 * self.cell.h
-                            };
-                            (x, y0, 1.0, (y1 - y0).max(0.0))
-                        }
-                        kasa_pty::SplitDir::Vertical => {
-                            let y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
-                            let x0 = pad + d.span_start as f32 * self.cell.w;
-                            let x1 = if d.span_start + d.span_len >= cols {
-                                win_right
-                            } else {
-                                pad + (d.span_start + d.span_len) as f32 * self.cell.w
-                            };
-                            (x0, y, (x1 - x0).max(0.0), 1.0)
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+                            pad + cols as f32 * self.cell.w,
+                            TITLE_HEIGHT + rows as f32 * self.cell.h,
+                        ),
+                        |w| {
+                            let s = w.scale_factor() as f32 * self.ui_zoom;
+                            (
+                                w.inner_size().width as f32 / s - self.effective_right_chrome_w(),
+                                w.inner_size().height as f32 / s,
+                            )
+                        },
+                    );
+                    tree.dividers(cols, rows)
+                        .into_iter()
+                        .map(|d| match d.dir {
+                            kasa_pty::SplitDir::Horizontal => {
+                                let x = pad + d.edge as f32 * self.cell.w;
+                                let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
+                                let y1 = if d.span_start + d.span_len >= rows {
+                                    win_bottom
+                                } else {
+                                    TITLE_HEIGHT + (d.span_start + d.span_len) as f32 * self.cell.h
+                                };
+                                (x, y0, 1.0, (y1 - y0).max(0.0))
+                            }
+                            kasa_pty::SplitDir::Vertical => {
+                                let y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
+                                let x0 = pad + d.span_start as f32 * self.cell.w;
+                                let x1 = if d.span_start + d.span_len >= cols {
+                                    win_right
+                                } else {
+                                    pad + (d.span_start + d.span_len) as f32 * self.cell.w
+                                };
+                                (x0, y, (x1 - x0).max(0.0), 1.0)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
         // Left window-tab sidebar geometry. Cache the hit rects for the
         // mouse handler; the gpu block below paints from the same numbers so
@@ -3008,9 +3059,15 @@ impl App {
         self.tick_close_freeze();
         // 아래 `self.gpu.as_mut()` 블록 안에서는 `self` 를 다시 못 읽는다. 되살리기
         // 패널에 넘길 동결값은 그래서 여기서 미리 뽑아 둔다.
-        let frozen_info = self.close_freeze.info_content.filter(|_| self.close_freeze.live());
-        let frozen_tabs =
-            self.close_freeze.live().then(|| self.close_freeze.tab_slots.clone()).flatten();
+        let frozen_info = self
+            .close_freeze
+            .info_content
+            .filter(|_| self.close_freeze.live());
+        let frozen_tabs = self
+            .close_freeze
+            .live()
+            .then(|| self.close_freeze.tab_slots.clone())
+            .flatten();
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
         let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
@@ -3046,7 +3103,10 @@ impl App {
             (y1 > y0).then_some((r.0, y0, r.2, y1 - y0))
         };
         self.window_tab_rects = if sidebar_shown {
-            sb_tabs.iter().filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c))).collect()
+            sb_tabs
+                .iter()
+                .filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c)))
+                .collect()
         } else {
             Vec::new()
         };
@@ -3064,7 +3124,10 @@ impl App {
             Vec::new()
         };
         self.window_tab_close_rects = if sidebar_shown {
-            sb_closes.iter().filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c))).collect()
+            sb_closes
+                .iter()
+                .filter_map(|(i, r)| clip_y(*r).map(|c| (*i, c)))
+                .collect()
         } else {
             Vec::new()
         };
@@ -3074,8 +3137,11 @@ impl App {
         // Top tabs have room below the button, while the sidebar button lives
         // in the bottom tray and must open upward to stay inside the window.
         let menu_open = self.shell_menu_open;
-        let shell_items: Vec<(&'static str, &'static str, String)> =
-            if menu_open { available_shells() } else { Vec::new() };
+        let shell_items: Vec<(&'static str, &'static str, String)> = if menu_open {
+            available_shells()
+        } else {
+            Vec::new()
+        };
         const SHELL_ITEM_H: f32 = 34.0;
         let menu_w_for_paint = sb_plus.2.max(210.0);
         let shell_menu_layout: Vec<(String, &'static str, &'static str, (f32, f32, f32, f32))> = {
@@ -3116,16 +3182,24 @@ impl App {
         // 필요한 쪽이 바쁜 쪽과 구별되지 않던 게 이 화면의 가장 큰 거짓말이었다.
         let sb_dots: Vec<Vec<[u8; 4]>> = (0..sb_labels.len())
             .map(|i| {
-                self.window_leaves(i).iter().map(|id| self.pane_state_color(id)).collect()
+                self.window_leaves(i)
+                    .iter()
+                    .map(|id| self.pane_state_color(id))
+                    .collect()
             })
             .collect();
-        let sb_expand_t: Vec<f32> =
-            (0..sb_labels.len()).map(|i| self.expand_progress(i)).collect();
+        let sb_expand_t: Vec<f32> = (0..sb_labels.len())
+            .map(|i| self.expand_progress(i))
+            .collect();
         let sb_row_drop: Option<(String, bool, String)> = self
             .sidebar_row_drag
             .as_ref()
             .filter(|d| d.active)
-            .and_then(|d| d.target.as_ref().map(|(t, b)| (t.clone(), *b, d.pane.clone())));
+            .and_then(|d| {
+                d.target
+                    .as_ref()
+                    .map(|(t, b)| (t.clone(), *b, d.pane.clone()))
+            });
         // 펼치기 버튼의 사각은 클릭 판정과 같은 것을 쓴다 — 페인트 루프는 `&self`
         // 를 다시 못 빌리므로(GPU 를 이미 빌렸다) 방 인덱스로 늘어놓고 들어간다.
         let sb_expand: Vec<Option<(f32, f32, f32, f32)>> = (0..sb_labels.len())
@@ -3229,7 +3303,9 @@ impl App {
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
                 // 부르면 두 신호가 서로를 부정한다.
                 let busy = self.pane_is_busy(id);
-                let busy_secs = act.and_then(|a| a.busy_since).map(|t| t.elapsed().as_secs());
+                let busy_secs = act
+                    .and_then(|a| a.busy_since)
+                    .map(|t| t.elapsed().as_secs());
                 SidebarRowInfo {
                     who,
                     label,
@@ -3294,9 +3370,9 @@ impl App {
         // 거짓말이 된다.
         let sb_wait: Vec<bool> = (0..sb_labels.len())
             .map(|i| {
-                self.window_leaves(i).iter().any(|id| {
-                    self.pane_needs_you(id)
-                })
+                self.window_leaves(i)
+                    .iter()
+                    .any(|id| self.pane_needs_you(id))
             })
             .collect();
         // Per-window "unseen notification" flag: a pane finished / needs
@@ -3307,12 +3383,16 @@ impl App {
             .map(|i| self.window_alert.contains(&i))
             .collect();
         // 별도 창으로 나가 있는 방 — 탭은 자리를 지키되 ⌘N 대신 나갔다는 표시가 뜬다.
-        let sb_undocked: Vec<bool> =
-            (0..sb_labels.len()).map(|i| self.window_is_undocked(i)).collect();
+        let sb_undocked: Vec<bool> = (0..sb_labels.len())
+            .map(|i| self.window_is_undocked(i))
+            .collect();
         // 방 탭을 끌고 있는 동안 떨어질 자리. 탭 자체는 제자리에 두고 삽입선만
         // 그린다 — 실제 이동은 release 뿐이라, 놓기 전엔 "여기로 간다"만 알면 된다.
-        let win_drag_target: Option<usize> =
-            self.win_tab_drag.as_ref().filter(|d| d.active).map(|d| d.target);
+        let win_drag_target: Option<usize> = self
+            .win_tab_drag
+            .as_ref()
+            .filter(|d| d.active)
+            .map(|d| d.target);
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
         let sb_cursor = self.cursor_px;
@@ -3360,10 +3440,8 @@ impl App {
             crate::session::AccountSwitchBtn,
             (f32, f32, f32, f32),
         )> = Vec::new();
-        let mut swap_confirm_hits: Vec<(
-            crate::session::CharacterSwapBtn,
-            (f32, f32, f32, f32),
-        )> = Vec::new();
+        let mut swap_confirm_hits: Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> =
+            Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
         // Settings entry lives in its own wgpu window now (auxwin.rs); the main
         // frame only draws the sidebar "Settings" entry rect for hit-testing.
@@ -3384,8 +3462,10 @@ impl App {
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
         // Per-header completion-flash strength, sampled before `g` borrows
         // `self.gpu` (the header loop can't call `&self` while `g` is live).
-        let header_flash: Vec<Option<f32>> =
-            headers.iter().map(|h| self.notify_flash_factor(&h.id)).collect();
+        let header_flash: Vec<Option<f32>> = headers
+            .iter()
+            .map(|h| self.notify_flash_factor(&h.id))
+            .collect();
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
         let quick_files_list = self.quick_files();
@@ -3468,7 +3548,11 @@ impl App {
             }
             g.draw_cells(&slot_views);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
-                let key = format!("{id}-p{:x}-r{rot}-f{}", Arc::as_ptr(image) as usize, image.cur_idx());
+                let key = format!(
+                    "{id}-p{:x}-r{rot}-f{}",
+                    Arc::as_ptr(image) as usize,
+                    image.cur_idx()
+                );
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
             paint_inline_images(g, &inline_slots);
@@ -3500,7 +3584,8 @@ impl App {
             crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
             for (px, py, pw, ph, text, pane_id, a_up, a_down) in &sticky_pill_slots {
                 STICKY_PILLS.with(|s| {
-                    s.borrow_mut().push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
+                    s.borrow_mut()
+                        .push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
                 });
                 // pill 에 얹은 ↑↓ — 바 클릭(위로 되짚기)보다 **나중에** 담아야
                 // 겹치는 자리에서 화살표가 이긴다(조회가 역순이다).
@@ -3521,7 +3606,11 @@ impl App {
             for (pane_id, bar, up, down, h) in &turn_header_slots {
                 crate::turnjump::TURN_HITS.with(|s| {
                     let mut v = s.borrow_mut();
-                    v.push((pane_id.clone(), *bar, crate::turnjump::TurnHit::Jump(h.cur_abs)));
+                    v.push((
+                        pane_id.clone(),
+                        *bar,
+                        crate::turnjump::TurnHit::Jump(h.cur_abs),
+                    ));
                     if let (Some(r), Some(a)) = (up, h.prev_abs) {
                         v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Prev(a)));
                     }
@@ -3633,9 +3722,16 @@ impl App {
                         dv.as_ref(),
                     );
                     if let Some(f) = find {
-                        for (btn, r) in
-                            Self::draw_find_bar(g, f, *bx, *by, *bw, bar_pe, raw_cursor_on, sb_cursor)
-                        {
+                        for (btn, r) in Self::draw_find_bar(
+                            g,
+                            f,
+                            *bx,
+                            *by,
+                            *bw,
+                            bar_pe,
+                            raw_cursor_on,
+                            sb_cursor,
+                        ) {
                             find_btn_hits.push((id.clone(), btn, r));
                         }
                     }
@@ -3654,8 +3750,7 @@ impl App {
                         .as_ref()
                         .filter(|s| s.pane == *id)
                         .map(|s| (s.anchor.0, s.anchor.1, s.end.0, s.end.1));
-                    let h =
-                        g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll, sel);
+                    let h = g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll, sel);
                     // 이 pane 이 그린 낱말 사각형을 옮겨 둔다 — 복사·히트테스트가
                     // 읽고, block_ys 와 같은 이유로 pane 별로 갈라야 한다.
                     let words = std::mem::take(&mut g.md_word_rects);
@@ -3668,7 +3763,10 @@ impl App {
                     // 생겼으니 보던 줄을 화면 맨 위로 되돌린다. 한 프레임 늦는
                     // 건 어쩔 수 없다 — 위치는 그려봐야 알 수 있어서다.
                     if let Some(line) = self.md_scroll_anchor.remove(id) {
-                        let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
+                        let i = doc
+                            .block_lines
+                            .partition_point(|&l| l <= line)
+                            .saturating_sub(1);
                         let want = ys.get(i).copied().unwrap_or(0.0).max(0.0);
                         if (want - *scroll).abs() > 0.5 {
                             if let Ok(mut ws) = self.ws.lock() {
@@ -3725,7 +3823,11 @@ impl App {
                 // Brighter when the sidebar is open (state indicator) or on
                 // hover; the panel-left SVG shape stays constant.
                 let active = tab_strip_w > 0.0;
-                let fg = if hover || active { theme::text() } else { theme::text_dim() };
+                let fg = if hover || active {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                };
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
                     "panel-left",
@@ -3747,7 +3849,11 @@ impl App {
                     hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                 }
                 let active = tree_col_w > 0.0;
-                let fg = if hover || active { theme::text() } else { theme::text_dim() };
+                let fg = if hover || active {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                };
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
                     "folder-tree",
@@ -3781,9 +3887,19 @@ impl App {
                     hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                 }
                 let active = git_col_w > 0.0;
-                let fg = if hover || active { theme::text() } else { theme::text_dim() };
+                let fg = if hover || active {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                };
                 let gs = 15.0_f32;
-                g.queue_icon("panel-right", bx + (bw - gs) / 2.0, by + (bh - gs) / 2.0, gs, fg);
+                g.queue_icon(
+                    "panel-right",
+                    bx + (bw - gs) / 2.0,
+                    by + (bh - gs) / 2.0,
+                    gs,
+                    fg,
+                );
             }
             // Windows frameless window controls (min / max / close) at the
             // strip's right edge. Native decorations are off on Windows, so we
@@ -3800,7 +3916,11 @@ impl App {
                     if hover {
                         hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                     }
-                    let fg = if hover { theme::text() } else { theme::text_dim() };
+                    let fg = if hover {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    };
                     let isz = theme::ICON_SIZE;
                     g.queue_icon(
                         icons[i],
@@ -3867,7 +3987,10 @@ impl App {
                     .and_then(|w| w.active_pane.clone())
                     .and_then(|id| self.pane_claude_sid.get(&id).cloned())
                     .is_some_and(|sid| {
-                        self.bg_agents.lock().map(|m| m.contains_key(&sid)).unwrap_or(false)
+                        self.bg_agents
+                            .lock()
+                            .map(|m| m.contains_key(&sid))
+                            .unwrap_or(false)
                     });
                 // 원격 pane 이면 어느 기계인지 — 화면은 이 창이지만 학생은 저 기계에서
                 // 돈다. 배지가 없으면 로컬과 겉이 똑같아 「왜 반응이 없지」가 된다
@@ -3970,7 +4093,9 @@ impl App {
                     } else {
                         let title = active
                             .as_deref()
-                            .and_then(|id| ws.panes.get(id).map(|p| (id.to_string(), p.title.clone())))
+                            .and_then(|id| {
+                                ws.panes.get(id).map(|p| (id.to_string(), p.title.clone()))
+                            })
                             .and_then(|(id, osc)| {
                                 osc.filter(|s| !s.is_empty()).or_else(|| {
                                     self.pty
@@ -3982,10 +4107,9 @@ impl App {
                             .unwrap_or_default();
                         // Append the pane's real OS tty (ghostty-style).
                         let tty = active.as_deref().and_then(|id| {
-                            self.pane_tty_cache
-                                .get(id)
-                                .cloned()
-                                .or_else(|| self.pty.get(id).and_then(|p| p.tty().map(str::to_string)))
+                            self.pane_tty_cache.get(id).cloned().or_else(|| {
+                                self.pty.get(id).and_then(|p| p.tty().map(str::to_string))
+                            })
                         });
                         match (title.is_empty(), tty) {
                             (false, Some(t)) => format!("{title}  ·  {t}"),
@@ -4064,8 +4188,11 @@ impl App {
                 // 칩은 왼쪽 칼럼(파일트리) 위로 내려앉지 않는다 — 좁은 창에서 가운데가
                 // 마침 그 경계와 겹치면 파일 목록에 딱 붙어 튀어나온 것처럼 보였다
                 // (640px 실측: 경계도 236, 중앙 시작도 236).
-                let left_lim = (px0 + cwd_w)
-                    .max(if tree_col_w > 0.0 { tree_col_x + tree_col_w + 10.0 } else { 0.0 });
+                let left_lim = (px0 + cwd_w).max(if tree_col_w > 0.0 {
+                    tree_col_x + tree_col_w + 10.0
+                } else {
+                    0.0
+                });
                 // 남은 자리보다 칩이 크면 이름을 줄인다. 안 줄이면 clamp 가 왼쪽을
                 // 우선해 칩이 오른쪽 버튼들 밑으로 뻗는다.
                 let (title_text, tw, pw) = {
@@ -4152,7 +4279,13 @@ impl App {
                 if !cwd_str.is_empty() {
                     let isz = theme::ICON_SIZE;
                     let cx0 = px0 + 12.0;
-                    g.queue_icon("folder", cx0, (TITLE_HEIGHT - isz) / 2.0, isz, theme::text_mute());
+                    g.queue_icon(
+                        "folder",
+                        cx0,
+                        (TITLE_HEIGHT - isz) / 2.0,
+                        isz,
+                        theme::text_mute(),
+                    );
                     g.draw_text(
                         cx0 + isz + 6.0,
                         ty,
@@ -4209,7 +4342,12 @@ impl App {
                         *ix + 38.0,
                         *iy + (*ih - 14.0) / 2.0,
                         label,
-                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false },
+                        gpu::DrawOpts {
+                            font_size: 14.0,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
                     );
                 }
             };
@@ -4225,8 +4363,22 @@ impl App {
                     // 커서는 손가락이어야 한다.
                     g.hover_pointer |= is_hover;
                     if is_active {
-                        round_rect(g, *tx, *ty, *tw, *th, theme::radius_sm(), theme::surface_active());
-                        g.rect(*tx + 5.0, *ty, *tw - 10.0, ACTIVE_ACCENT_STROKE, theme::accent());
+                        round_rect(
+                            g,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                            theme::radius_sm(),
+                            theme::surface_active(),
+                        );
+                        g.rect(
+                            *tx + 5.0,
+                            *ty,
+                            *tw - 10.0,
+                            ACTIVE_ACCENT_STROKE,
+                            theme::accent(),
+                        );
                     } else if is_hover {
                         hover_rect(g, *tx, *ty, *tw, *th, theme::radius_sm());
                     } else {
@@ -4247,14 +4399,32 @@ impl App {
                         icon_x,
                         icon_y,
                         isz,
-                        if is_active { theme::text_dim() } else { theme::text_mute() },
+                        if is_active {
+                            theme::text_dim()
+                        } else {
+                            theme::text_mute()
+                        },
                     );
                     // 세로 사이드바와 같은 규칙 — 자리 고정, 색이 말하고, 깜빡인다.
                     // 여기도 모서리 두 곳을 오가던 점 쌍을 하나로 합쳤다.
                     if sb_wait.get(*i).copied().unwrap_or(false) {
-                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::attention(), 0.9);
+                        blink_dot(
+                            g,
+                            icon_x + isz - 3.0,
+                            icon_y - 3.0,
+                            6.0,
+                            theme::attention(),
+                            0.9,
+                        );
                     } else if sb_alert.get(*i).copied().unwrap_or(false) {
-                        blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::accent(), 1.6);
+                        blink_dot(
+                            g,
+                            icon_x + isz - 3.0,
+                            icon_y - 3.0,
+                            6.0,
+                            theme::accent(),
+                            1.6,
+                        );
                     }
                     let show_close = sb_tabs.len() > 1 && (is_active || is_hover);
                     let text_x = icon_x + isz + 6.0;
@@ -4266,13 +4436,19 @@ impl App {
                         &clip_display_width(&name, budget),
                         gpu::DrawOpts {
                             font_size: 12.5,
-                            color: if is_active { theme::text() } else { theme::text_dim() },
+                            color: if is_active {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            },
                             bold: is_active,
                             italic: false,
                         },
                     );
                     if show_close {
-                        if let Some((_, (cx, cy, cw, ch))) = sb_closes.iter().find(|(ci, _)| ci == i) {
+                        if let Some((_, (cx, cy, cw, ch))) =
+                            sb_closes.iter().find(|(ci, _)| ci == i)
+                        {
                             let x_hover = sb_cursor.0 >= *cx
                                 && sb_cursor.0 <= *cx + *cw
                                 && sb_cursor.1 >= *cy
@@ -4280,7 +4456,11 @@ impl App {
                             if x_hover {
                                 hover_rect(g, *cx, *cy, *cw, *ch, theme::radius_sm());
                             }
-                            let xcol = if x_hover { theme::text() } else { theme::text_mute() };
+                            let xcol = if x_hover {
+                                theme::text()
+                            } else {
+                                theme::text_mute()
+                            };
                             g.queue_icon(
                                 "x",
                                 *cx + (*cw - 12.0) / 2.0,
@@ -4360,7 +4540,14 @@ impl App {
                     // 그 사이를 말한다 — 자리는 네 것이지만 지금 비어 있다.
                     let out = sb_undocked.get(*i).copied().unwrap_or(false);
                     if out {
-                        dashed_rect(g, *tx, *ty, *tw, *th, theme::with_alpha(theme::border(), 0xC0));
+                        dashed_rect(
+                            g,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                            theme::with_alpha(theme::border(), 0xC0),
+                        );
                     } else if is_active {
                         // 고른 방은 **테두리로만** 말한다(2026-08-11 지시: "선택한 방
                         // 아웃라인으로 포커스 바꾸고"). 채운 판이었을 땐 그 밝은
@@ -4372,11 +4559,26 @@ impl App {
                         // 때문이다(이 함수 위쪽에서 칼럼째 칠한다). 링만 그리는
                         // 스트로크가 렌더러에 없어 안쪽을 바탕색으로 덮는 방식이다.
                         outline_rect(
-                            g, *tx, *ty, *tw, *th, theme::radius_md(),
-                            theme::accent(), SIDEBAR_ACTIVE_RING, theme::panel_bg(),
+                            g,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                            theme::radius_md(),
+                            theme::accent(),
+                            SIDEBAR_ACTIVE_RING,
+                            theme::panel_bg(),
                         );
                     } else if is_hover {
-                        panel_rect(g, *tx, *ty, *tw, *th, theme::radius_md(), theme::surface_hover());
+                        panel_rect(
+                            g,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                            theme::radius_md(),
+                            theme::surface_hover(),
+                        );
                     }
                     // 방과 방 사이 실선. 활성·호버 카드만 판을 깔기 때문에, 조용한
                     // 방끼리는 3px 틈만 있고 경계가 없었다 — 두 줄짜리 카드가 죽
@@ -4384,7 +4586,13 @@ impl App {
                     // 없어"). 활성 카드는 스스로 판이라 그 위아래엔 긋지 않는다.
                     if !is_active && *i + 1 < sb_tabs.len() && *i + 1 != sb_active {
                         let ly = (ty + th + SIDEBAR_TAB_GAP / 2.0).round();
-                        g.rect(tx + 10.0, ly, tw - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
+                        g.rect(
+                            tx + 10.0,
+                            ly,
+                            tw - 20.0,
+                            1.0,
+                            theme::with_alpha(theme::border(), 0x60),
+                        );
                     }
                     let (name, cwd) = sb_labels
                         .get(*i)
@@ -4487,7 +4695,9 @@ impl App {
                     let kbd = (!show_close && !undocked && *i < 9 && sb_dens.at_least_compact())
                         .then(|| format!("\u{2318}{}", *i + 1));
                     let kfs = 11.0_f32;
-                    let kbd_w = kbd.as_deref().map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
+                    let kbd_w = kbd
+                        .as_deref()
+                        .map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
                     const UNDOCK_ICON: f32 = 13.0;
                     let right_slot = if undocked { UNDOCK_ICON } else { kbd_w };
                     // 배지를 접었으면 그 자리도 함께 돌려준다 — 안 돌려주면 접어서
@@ -4505,7 +4715,11 @@ impl App {
                     // pane 하나하나의 상태는 방을 펴면 그 줄이 이미 말한다. 둘 다
                     // 두면 같은 정보가 두 층에 겹쳐 목록이 시끄러워진다(거노:
                     // "학생 목록 말고 윈도우 목록에선 없애").
-                    let badge_w = sb_expand.get(*i).copied().flatten().map_or(0.0, |r| r.2 + 14.0);
+                    let badge_w = sb_expand
+                        .get(*i)
+                        .copied()
+                        .flatten()
+                        .map_or(0.0, |r| r.2 + 14.0);
                     let cwd_budget = (tab_right - 8.0 - badge_w - text_x).max(0.0);
                     // Clip before drawing — `draw_text` also borrows `g`.
                     let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
@@ -4525,7 +4739,12 @@ impl App {
                             tab_right - 8.0 - kbd_w,
                             *ty + 12.0,
                             &k,
-                            gpu::DrawOpts { font_size: kfs, color: theme::text_mute(), bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: kfs,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
                         );
                     }
                     // 밖에 나간 방 자리엔 **되돌리는 버튼**을 둔다. 여기 있던
@@ -4557,7 +4776,11 @@ impl App {
                             ix,
                             iy,
                             UNDOCK_ICON,
-                            if hov { theme::accent() } else { theme::text_dim() },
+                            if hov {
+                                theme::accent()
+                            } else {
+                                theme::text_dim()
+                            },
                         );
                         dock_back_hits.push((*i, hit));
                     }
@@ -4624,7 +4847,12 @@ impl App {
                             er.0 + 21.0,
                             er.1 + 5.0,
                             &n,
-                            gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: 11.0,
+                                color: fg,
+                                bold: false,
+                                italic: false,
+                            },
                         );
                     }
                     // × close — only on the active or hovered tab (where the
@@ -4643,7 +4871,11 @@ impl App {
                             if x_hover {
                                 hover_rect(g, *cx, *cy, *cw, *ch, theme::radius_sm());
                             }
-                            let xcol = if x_hover { theme::text() } else { theme::text_mute() };
+                            let xcol = if x_hover {
+                                theme::text()
+                            } else {
+                                theme::text_mute()
+                            };
                             g.queue_icon(
                                 "x",
                                 *cx + (*cw - theme::ICON_SIZE) / 2.0,
@@ -4683,8 +4915,8 @@ impl App {
                     // 마우스를 못 움직이는 헤드리스 검증에서 이 팝업만은 찍을 길이
                     // 없어, env 로 첫 덱 칸의 명단을 펴 둔다(검증 전용).
                     static FORCE_TIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    let force_tip = *FORCE_TIP
-                        .get_or_init(|| std::env::var("KASATERM_AUTODECKTIP").is_ok());
+                    let force_tip =
+                        *FORCE_TIP.get_or_init(|| std::env::var("KASATERM_AUTODECKTIP").is_ok());
                     if (hov || (force_tip && deck_tip.is_none())) && info.tab_peeks.len() > 1 {
                         deck_tip = Some((mx + mw + 6.0, my, info.tab_peeks.clone()));
                     }
@@ -4726,7 +4958,15 @@ impl App {
                         // 장을 가른다 — 같은 색 통짜가 겹치면 한 덩어리가 되고, 그러면
                         // 「여러 개다」는 말해도 「몇 개나」는 못 말한다.
                         let gap = |g: &mut _, x: f32, y: f32| {
-                            round_rect(g, x - 0.7, y - 0.7, cw + 1.4, ch + 1.4, 2.2, theme::panel_bg());
+                            round_rect(
+                                g,
+                                x - 0.7,
+                                y - 0.7,
+                                cw + 1.4,
+                                ch + 1.4,
+                                2.2,
+                                theme::panel_bg(),
+                            );
                         };
                         // 앞장은 활성 탭이므로 뒷장은 **나머지를 순서대로** 맡는다.
                         // k == 1 이 앞장 바로 뒤이고 k 가 클수록 더 뒤다.
@@ -4735,8 +4975,7 @@ impl App {
                         // 뒤에서 앞으로. k 가 클수록 우상단이고, k == 0 이 아래 코드가
                         // 이어서 그리는 앞장(= 활성 탭)이다.
                         for k in (1..=back).rev() {
-                            let (x, y) =
-                                (mx + step * k as f32, my + step * (back - k) as f32);
+                            let (x, y) = (mx + step * k as f32, my + step * (back - k) as f32);
                             gap(g, x, y);
                             // 장마다 **그 탭 학생의 색**으로 칠한다 — 덱이 장 수는
                             // 말하면서 누구인지는 못 말했다(2026-08-24 지시). 계단이
@@ -4807,7 +5046,11 @@ impl App {
                             mw - 3.0,
                             mh - 3.0,
                             1.5,
-                            if cur { theme::surface_active() } else { theme::panel_bg() },
+                            if cur {
+                                theme::surface_active()
+                            } else {
+                                theme::panel_bg()
+                            },
                         );
                     }
                     // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -4904,8 +5147,10 @@ impl App {
                         // 오른쪽 밖에서 시작해야 한다. 칸은 5px 까지 작아지므로 좁은
                         // 칸에서는 조용히 생략된다 — 거기서는 걷기와 바가 이미 「돈다」를
                         // 말하고 있고, 시간까지 우겨넣으면 얼굴 위에 숫자가 겹친다.
-                        if let Some(txt) =
-                            info.busy_secs.filter(|_| info.busy || info.bg_active).and_then(elapsed_label)
+                        if let Some(txt) = info
+                            .busy_secs
+                            .filter(|_| info.busy || info.bg_active)
+                            .and_then(elapsed_label)
                         {
                             let fs = 9.0;
                             let (col, bold) = elapsed_style(info.busy_secs.unwrap_or(0));
@@ -4958,7 +5203,11 @@ impl App {
                     // 사이드바가 왼쪽이라 칸 오른쪽이 기본 자리지만, 창이 좁으면 팝업이
                     // 화면 밖으로 나간다. 그땐 칸 왼쪽으로 접고, 아래로 넘치면 끌어올린다.
                     let (vw, vh) = (win_px.0 / scale, win_px.1 / scale);
-                    let bx = if tx + bw + 4.0 > vw { (tx - bw - 12.0).max(4.0) } else { tx };
+                    let bx = if tx + bw + 4.0 > vw {
+                        (tx - bw - 12.0).max(4.0)
+                    } else {
+                        tx
+                    };
                     let by = ty.min((vh - bh - 4.0).max(4.0));
                     round_rect(g, bx, by, bw, bh, theme::radius_md(), theme::panel_bg());
                     for (i, t) in peeks.iter().enumerate() {
@@ -4978,7 +5227,12 @@ impl App {
                             bx + pad + dot + 5.0,
                             ly,
                             who.unwrap_or("-"),
-                            gpu::DrawOpts { font_size: fs, color: name_col, bold, italic: false },
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: name_col,
+                                bold,
+                                italic: false,
+                            },
                         );
                         g.draw_text(
                             bx + pad + dot + 5.0 + name_w + 8.0,
@@ -4993,24 +5247,41 @@ impl App {
                         );
                     }
                 }
-                for (k, ((wi, _, r), info)) in
-                    sb_rows.iter().zip(sb_row_info.iter()).enumerate()
-                {
+                for (k, ((wi, _, r), info)) in sb_rows.iter().zip(sb_row_info.iter()).enumerate() {
                     let (who, label, col, is_cur) =
                         (&info.who, &info.label, &info.color, info.is_cur);
                     let (rx, ry, rw, rh) = *r;
                     // 줄 사이 실선 — 같은 방 안의 칸막이라 방과 방을 가르는
                     // 카드 테두리보다 옅어야 한다. 첫 줄 위에는 안 긋는다(카드
                     // 머리와 목록은 이미 여백으로 갈려 있다).
-                    if k > 0 && sb_rows.get(k - 1).map(|(pw, _, _)| pw == wi).unwrap_or(false) {
-                        g.rect(rx + 6.0, ry, rw - 12.0, 1.0, theme::with_alpha(theme::border(), 0x50));
+                    if k > 0
+                        && sb_rows
+                            .get(k - 1)
+                            .map(|(pw, _, _)| pw == wi)
+                            .unwrap_or(false)
+                    {
+                        g.rect(
+                            rx + 6.0,
+                            ry,
+                            rw - 12.0,
+                            1.0,
+                            theme::with_alpha(theme::border(), 0x50),
+                        );
                     }
                     let row_hover = sb_cursor.0 >= rx
                         && sb_cursor.0 <= rx + rw
                         && sb_cursor.1 >= ry
                         && sb_cursor.1 <= ry + rh;
                     if row_hover {
-                        round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover());
+                        round_rect(
+                            g,
+                            rx,
+                            ry,
+                            rw,
+                            rh,
+                            theme::radius_sm(),
+                            theme::surface_hover(),
+                        );
                     }
                     // 지금 보고 있는 pane 은 왼쪽 띠로 — 목록이 방을 넘나들어서
                     // 표시가 없으면 "내가 있는 곳"을 매번 번호로 대조하게 된다.
@@ -5026,10 +5297,22 @@ impl App {
                     // 얼굴 GIF 보다 작아 보여 걷기 시작할 때 줄이 움찔한다.
                     let face = rh - 6.0;
                     let walked = info.busy
-                        && draw_student_walk(g, who, rx + 5.0, ry + 1.0, rh - 2.0, anim_phase_secs());
+                        && draw_student_walk(
+                            g,
+                            who,
+                            rx + 5.0,
+                            ry + 1.0,
+                            rh - 2.0,
+                            anim_phase_secs(),
+                        );
                     let has_face = walked
                         || draw_student_face_anim(
-                            g, who, rx + 7.0, ry + 3.0, face, anim_phase_secs(),
+                            g,
+                            who,
+                            rx + 7.0,
+                            ry + 3.0,
+                            face,
+                            anim_phase_secs(),
                         );
                     if !has_face {
                         if info.icon != "terminal" {
@@ -5184,7 +5467,13 @@ impl App {
                     let cis = 12.0_f32;
                     let ccx = ftx + (ftw - cis) / 2.0;
                     if sb_over_before {
-                        g.queue_icon("chevron-up", ccx, TITLE_HEIGHT + 3.0, cis, theme::text_mute());
+                        g.queue_icon(
+                            "chevron-up",
+                            ccx,
+                            TITLE_HEIGHT + 3.0,
+                            cis,
+                            theme::text_mute(),
+                        );
                     }
                     if sb_over_after {
                         g.queue_icon("chevron-down", ccx, py + ph + 4.0, cis, theme::text_mute());
@@ -5279,9 +5568,10 @@ impl App {
                             theme::border(),
                         );
                         let settings_on = self.settings_open;
-                        for (r, icon, on) in
-                            [(fb, "message-square-warning", false), (st, "settings-2", settings_on)]
-                        {
+                        for (r, icon, on) in [
+                            (fb, "message-square-warning", false),
+                            (st, "settings-2", settings_on),
+                        ] {
                             let (bx, by, bw, bh) = r;
                             let hover = sb_cursor.0 >= bx
                                 && sb_cursor.0 <= bx + bw
@@ -5289,7 +5579,15 @@ impl App {
                                 && sb_cursor.1 <= by + bh;
                             g.hover_pointer |= hover;
                             if on {
-                                round_rect(g, bx, by, bw, bh, theme::radius_sm(), theme::surface_active());
+                                round_rect(
+                                    g,
+                                    bx,
+                                    by,
+                                    bw,
+                                    bh,
+                                    theme::radius_sm(),
+                                    theme::surface_active(),
+                                );
                             } else if hover {
                                 hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                             }
@@ -5298,7 +5596,11 @@ impl App {
                                 bx + (bw - theme::ICON_SIZE) / 2.0,
                                 by + (bh - theme::ICON_SIZE) / 2.0,
                                 theme::ICON_SIZE,
-                                if hover || on { theme::text() } else { theme::text_mute() },
+                                if hover || on {
+                                    theme::text()
+                                } else {
+                                    theme::text_mute()
+                                },
                             );
                         }
                     }
@@ -5308,8 +5610,10 @@ impl App {
                 if let Some((mx0, my0, _, pane)) = self.sidebar_menu.clone() {
                     // 이미 숨긴 줄이면 되돌리기 한 갈래만 낸다 — 같은 자리에서 같은
                     // 동작을 토글로 부르는 편이 항목 두 개를 늘 보여주는 것보다 낫다.
-                    let hidden =
-                        self.closed_panes.iter().any(|c| c.stashed && c.alive && c.pane_id == pane);
+                    let hidden = self
+                        .closed_panes
+                        .iter()
+                        .any(|c| c.stashed && c.alive && c.pane_id == pane);
                     let items: [(SidebarMenuAction, &str); 1] = if hidden {
                         [(SidebarMenuAction::Unhide, "다시 보이기")]
                     } else {
@@ -5326,7 +5630,9 @@ impl App {
                     // 시저로 자를 수도 있지만, 반쯤 잘린 메뉴는 읽을 수가 없다.
                     // 안 보이게 자르는 것보다 자리를 옮겨 다 보이는 편이 낫다.
                     let mx = mx0.min((tab_strip_w - mw - 4.0).max(4.0)).max(4.0);
-                    let my = my0.min((sb_win_h - mh - 6.0).max(TITLE_HEIGHT)).max(TITLE_HEIGHT);
+                    let my = my0
+                        .min((sb_win_h - mh - 6.0).max(TITLE_HEIGHT))
+                        .max(TITLE_HEIGHT);
                     panel_rect_outlined(g, mx, my, mw, mh, theme::radius_md(), theme::surface());
                     self.sidebar_menu_rects.clear();
                     for (i, (a, label)) in items.iter().enumerate() {
@@ -5364,7 +5670,13 @@ impl App {
                 let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
                 // Own background + right hairline so the column reads as a
                 // distinct pane between the tabs and the cell grid.
-                g.rect(tree_col_x, TITLE_HEIGHT, tree_col_w, col_h, theme::panel_bg());
+                g.rect(
+                    tree_col_x,
+                    TITLE_HEIGHT,
+                    tree_col_w,
+                    col_h,
+                    theme::panel_bg(),
+                );
                 g.rect(
                     tree_col_x + tree_col_w - 1.0,
                     TITLE_HEIGHT,
@@ -5390,20 +5702,56 @@ impl App {
                 // 「검색…」 글자조차 안 들어갔다 — 파일을 **찾는** 길이 막히는 것이,
                 // 만드는 버튼이 없는 것보다 크게 잃는다(만들기는 터미널에도 있다).
                 let show_new_btns = tree_dens.at_least_compact();
-                let buttons_w = if show_new_btns { btn_sz * 2.0 + btn_gap + 6.0 } else { 0.0 };
+                let buttons_w = if show_new_btns {
+                    btn_sz * 2.0 + btn_gap + 6.0
+                } else {
+                    0.0
+                };
                 let search_w = (row_w - buttons_w).max(40.0);
                 {
                     let active = self.file_tree.search_active;
-                    let fill = if active { theme::surface_active() } else { theme::surface() };
-                    round_rect(g, row_x, sbx_y, search_w, search_box_h, theme::radius_sm(), theme::border());
-                    round_rect(g, row_x + 1.0, sbx_y + 1.0, search_w - 2.0, search_box_h - 2.0, theme::radius_sm() - 1.0, fill);
-                    let ic = if active { theme::text() } else { theme::text_dim() };
-                    g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
+                    let fill = if active {
+                        theme::surface_active()
+                    } else {
+                        theme::surface()
+                    };
+                    round_rect(
+                        g,
+                        row_x,
+                        sbx_y,
+                        search_w,
+                        search_box_h,
+                        theme::radius_sm(),
+                        theme::border(),
+                    );
+                    round_rect(
+                        g,
+                        row_x + 1.0,
+                        sbx_y + 1.0,
+                        search_w - 2.0,
+                        search_box_h - 2.0,
+                        theme::radius_sm() - 1.0,
+                        fill,
+                    );
+                    let ic = if active {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    };
+                    g.queue_icon(
+                        "folder-tree",
+                        row_x + 8.0,
+                        sbx_y + (search_box_h - 14.0) / 2.0,
+                        14.0,
+                        ic,
+                    );
                     // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안
                     // 화면이 거짓말을 한다. 커서 앞뒤로 갈라 「앞 → 조합 중 글자
                     // → 뒤」로 붙여 그리고, 캐럿은 그 앞부분 폭에 세운다.
-                    let (head, tail) =
-                        crate::lineedit::split(&self.file_tree.search_query, self.file_tree.search_cursor);
+                    let (head, tail) = crate::lineedit::split(
+                        &self.file_tree.search_query,
+                        self.file_tree.search_cursor,
+                    );
                     let mut head = head;
                     if active && self.in_preedit {
                         head.push_str(&self.preedit);
@@ -5415,12 +5763,26 @@ impl App {
                     } else {
                         (shown, theme::text())
                     };
-                    g.draw_text(row_x + 30.0, sbx_y + (search_box_h - 13.0) / 2.0, &txt,
-                        gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                    g.draw_text(
+                        row_x + 30.0,
+                        sbx_y + (search_box_h - 13.0) / 2.0,
+                        &txt,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: col,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     // Blinking text caret when the box has focus.
                     if active && commit_caret_on {
-                        g.rect(row_x + 30.0 + caret_w, sbx_y + (search_box_h - 14.0) / 2.0,
-                            1.5, 14.0, theme::text());
+                        g.rect(
+                            row_x + 30.0 + caret_w,
+                            sbx_y + (search_box_h - 14.0) / 2.0,
+                            1.5,
+                            14.0,
+                            theme::text(),
+                        );
                     }
                     self.file_tree.search_rect = (row_x, sbx_y, search_w, search_box_h);
                     // New-folder / new-file buttons.
@@ -5430,12 +5792,23 @@ impl App {
                     let nfile_x = nf_x + btn_sz + btn_gap;
                     if show_new_btns {
                         for (bx, icon) in [(nf_x, "folder-plus"), (nfile_x, "file-plus")] {
-                            let hover = mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
+                            let hover =
+                                mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
                             if hover {
                                 hover_rect(g, bx, bty, btn_sz, btn_sz, theme::radius_sm());
                             }
-                            let ic = if hover { theme::text() } else { theme::text_dim() };
-                            g.queue_icon(icon, bx + (btn_sz - 15.0) / 2.0, bty + (btn_sz - 15.0) / 2.0, 15.0, ic);
+                            let ic = if hover {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            };
+                            g.queue_icon(
+                                icon,
+                                bx + (btn_sz - 15.0) / 2.0,
+                                bty + (btn_sz - 15.0) / 2.0,
+                                15.0,
+                                ic,
+                            );
                         }
                         self.file_tree.new_folder_rect = (nf_x, bty, btn_sz, btn_sz);
                         self.file_tree.new_file_rect = (nfile_x, bty, btn_sz, btn_sz);
@@ -5450,9 +5823,23 @@ impl App {
                 let mut tree_top = sbx_y + search_box_h + 8.0;
                 if let Some((is_dir, buf)) = self.file_tree.new.clone() {
                     let iy = tree_top;
-                    round_rect(g, row_x, iy, row_w, item_h, theme::radius_sm(), theme::surface_active());
+                    round_rect(
+                        g,
+                        row_x,
+                        iy,
+                        row_w,
+                        item_h,
+                        theme::radius_sm(),
+                        theme::surface_active(),
+                    );
                     g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::accent());
-                    g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::text());
+                    g.queue_icon(
+                        if is_dir { "folder" } else { "file" },
+                        row_x + 18.0,
+                        iy + (item_h - 16.0) / 2.0,
+                        16.0,
+                        theme::text(),
+                    );
                     let (mut head, tail) = crate::lineedit::split(&buf, self.file_tree.edit_cursor);
                     if self.in_preedit {
                         head.push_str(&self.preedit);
@@ -5460,14 +5847,37 @@ impl App {
                     let caret_w = g.measure_chrome_text(&head, 13.0, false);
                     let shown = format!("{head}{tail}");
                     let (txt, col) = if shown.is_empty() {
-                        ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::text_mute())
+                        (
+                            (if is_dir {
+                                "폴더 이름…"
+                            } else {
+                                "파일 이름…"
+                            })
+                            .to_string(),
+                            theme::text_mute(),
+                        )
                     } else {
                         (shown, theme::text())
                     };
-                    g.draw_text(row_x + 44.0, iy + (item_h - 13.0) / 2.0, &txt,
-                        gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                    g.draw_text(
+                        row_x + 44.0,
+                        iy + (item_h - 13.0) / 2.0,
+                        &txt,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: col,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     if commit_caret_on {
-                        g.rect(row_x + 44.0 + caret_w, iy + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                        g.rect(
+                            row_x + 44.0 + caret_w,
+                            iy + (item_h - 14.0) / 2.0,
+                            1.5,
+                            14.0,
+                            theme::text(),
+                        );
                     }
                     self.file_tree.new_row_rect = (row_x, iy, row_w, item_h);
                     tree_top += item_h;
@@ -5534,24 +5944,44 @@ impl App {
                 // 붙는 순간 조용히 깨진다. 그리는 차례가 곧 z-order 인 편이 읽기도 쉽다.
                 self.file_tree.quick_rects.clear();
                 if !quick.is_empty() {
-                    g.rect(tree_col_x, quick_top, tree_col_w - 1.0, quick_h, theme::panel_bg());
+                    g.rect(
+                        tree_col_x,
+                        quick_top,
+                        tree_col_w - 1.0,
+                        quick_h,
+                        theme::panel_bg(),
+                    );
                     let mut qy = quick_top;
                     g.draw_text(
                         row_x + 6.0,
                         qy + 3.0,
                         "빠른 파일",
-                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+                        gpu::DrawOpts {
+                            font_size: 10.5,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
                     );
                     qy += 19.0;
                     let (qmx, qmy) = self.cursor_px;
                     for (label, path, icon) in quick {
                         let y = qy;
-                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
+                        let hovered =
+                            qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
                         let is_open = active_file.as_deref() == Some(path.as_path());
                         if hovered {
                             hover_rect(g, row_x, y, row_w, item_h, theme::radius_sm());
                         } else if is_open {
-                            round_rect(g, row_x, y, row_w, item_h, theme::radius_sm(), theme::surface_active());
+                            round_rect(
+                                g,
+                                row_x,
+                                y,
+                                row_w,
+                                item_h,
+                                theme::radius_sm(),
+                                theme::surface_active(),
+                            );
                         }
                         if is_open {
                             g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
@@ -5559,7 +5989,11 @@ impl App {
                         let isz = 16.0_f32;
                         let iy = y + (item_h - isz) / 2.0;
                         let icon_x = row_x + 18.0;
-                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
+                        let col = if hovered || is_open {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        };
                         g.queue_icon(icon, icon_x, iy, isz, col);
                         // 이 섹션은 트리 본문의 시저 **밖**에서 그려진다(고정 자리라
                         // 스크롤에 안 걸린다). 잘라 줄 것이 없으니 좁은 트리에서는
@@ -5577,14 +6011,27 @@ impl App {
                             ltx,
                             y + (item_h - 13.0) / 2.0,
                             &lbl,
-                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
                         );
-                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
+                        self.file_tree
+                            .quick_rects
+                            .push((path.clone(), (row_x, y, row_w, item_h)));
                         qy += item_h;
                     }
                     // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
                     qy += 4.0;
-                    g.rect(row_x, qy, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
+                    g.rect(
+                        row_x,
+                        qy,
+                        row_w,
+                        1.0,
+                        theme::with_alpha(theme::border(), 0x88),
+                    );
                 }
                 // git 표시는 **배지 폴러**가 채운 맵을 읽는다(git 컬럼 폴러가 아니라)
                 // — 컬럼 폴러는 그 패널이 열렸을 때만 돌아서, 파일트리 표시가 남의
@@ -5620,10 +6067,8 @@ impl App {
                     if !g.clip_visible(row_x, y, row_w, item_h) {
                         continue;
                     }
-                    let hovered =
-                        self.file_tree.hover.as_deref() == Some(node.path.as_path());
-                    let expanded =
-                        node.is_dir && self.file_tree.expanded.contains(&node.path);
+                    let hovered = self.file_tree.hover.as_deref() == Some(node.path.as_path());
+                    let expanded = node.is_dir && self.file_tree.expanded.contains(&node.path);
                     let is_open = active_file.as_deref() == Some(node.path.as_path());
                     let is_selected = self.file_tree.selected.as_deref()
                         == Some(node.path.as_path())
@@ -5634,9 +6079,25 @@ impl App {
                     if hovered {
                         hover_rect(g, row_x, y, row_w, item_h, theme::radius_sm());
                     } else if is_open || is_selected {
-                        round_rect(g, row_x, y, row_w, item_h, theme::radius_sm(), theme::surface_active());
+                        round_rect(
+                            g,
+                            row_x,
+                            y,
+                            row_w,
+                            item_h,
+                            theme::radius_sm(),
+                            theme::surface_active(),
+                        );
                     } else if expanded {
-                        round_rect(g, row_x, y, row_w, item_h, theme::radius_sm(), theme::with_alpha(theme::surface_hover(), 0x33));
+                        round_rect(
+                            g,
+                            row_x,
+                            y,
+                            row_w,
+                            item_h,
+                            theme::radius_sm(),
+                            theme::with_alpha(theme::surface_hover(), 0x33),
+                        );
                     }
                     if is_open || is_selected {
                         // Accent rail on the left edge — VSCode "active file" cue.
@@ -5659,8 +6120,16 @@ impl App {
                     let font = 13.0_f32;
                     // Chevron column (folders only); files align past it.
                     if node.is_dir {
-                        let chev = if expanded { "chevron-down" } else { "chevron-right" };
-                        let cc = if hovered { theme::text() } else { theme::text_mute() };
+                        let chev = if expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        };
+                        let cc = if hovered {
+                            theme::text()
+                        } else {
+                            theme::text_mute()
+                        };
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
                     // 화살표와 아이콘 사이 간격도 폭을 따라 줄인다.
@@ -5769,10 +6238,21 @@ impl App {
                             text_x,
                             y + (item_h - font) / 2.0,
                             &txt,
-                            gpu::DrawOpts { font_size: font, color: tcol, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color: tcol,
+                                bold: false,
+                                italic: false,
+                            },
                         );
                         if commit_caret_on {
-                            g.rect(text_x + caret_w, y + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                            g.rect(
+                                text_x + caret_w,
+                                y + (item_h - 14.0) / 2.0,
+                                1.5,
+                                14.0,
+                                theme::text(),
+                            );
                         }
                         self.file_tree.rename_row_rect = (row_x, y, row_w, item_h);
                     } else {
@@ -5780,7 +6260,12 @@ impl App {
                             text_x,
                             y + (item_h - font) / 2.0,
                             &label,
-                            gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: node.ignored },
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color: fg,
+                                bold: false,
+                                italic: node.ignored,
+                            },
                         );
                         // 행 오른쪽 끝 상태 배지. 파일은 글자(M/A/U)로 무엇이
                         // 바뀌었는지까지 말하고, 폴더는 점 하나 — 폴더의 글자는
@@ -5806,7 +6291,12 @@ impl App {
                                     row_x + row_w - 4.0 - bw,
                                     y + (item_h - bf) / 2.0,
                                     &m.to_string(),
-                                    gpu::DrawOpts { font_size: bf, color: c, bold: true, italic: false },
+                                    gpu::DrawOpts {
+                                        font_size: bf,
+                                        color: c,
+                                        bold: true,
+                                        italic: false,
+                                    },
                                 );
                             }
                         }
@@ -5844,7 +6334,13 @@ impl App {
                         for i in 0..strips {
                             let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
                             let a = ((1.0 - t) * 0.92 * k * 255.0) as u8;
-                            g.rect(tree_col_x, view_top + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::bg(), a));
+                            g.rect(
+                                tree_col_x,
+                                view_top + t * fade_h,
+                                tree_col_w - 1.0,
+                                strip_h,
+                                theme::with_alpha(theme::bg(), a),
+                            );
                         }
                     }
                     // Bottom fade — rows still hidden below the last visible line.
@@ -5853,7 +6349,13 @@ impl App {
                         for i in 0..strips {
                             let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
                             let a = (t * 0.92 * k * 255.0) as u8;
-                            g.rect(tree_col_x, view_bottom - fade_h + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::bg(), a));
+                            g.rect(
+                                tree_col_x,
+                                view_bottom - fade_h + t * fade_h,
+                                tree_col_w - 1.0,
+                                strip_h,
+                                theme::with_alpha(theme::bg(), a),
+                            );
                         }
                     }
                     // Scrollbar thumb — only while the cursor hovers the column,
@@ -5867,7 +6369,14 @@ impl App {
                         let thumb_h = (viewport_h * viewport_h / content_h).max(28.0);
                         let thumb_y =
                             view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
-                        pill_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, theme::with_alpha(theme::text(), 0x66));
+                        pill_rect(
+                            g,
+                            tree_col_x + tree_col_w - 6.0,
+                            thumb_y,
+                            3.5,
+                            thumb_h,
+                            theme::with_alpha(theme::text(), 0x66),
+                        );
                     }
                 }
                 // Right-click context menu — painted last in the column so it
@@ -5908,11 +6417,36 @@ impl App {
                     ));
                     let first_sep = !items.is_empty();
                     items.extend([
-                        (crate::FtMenuAction::NewFile, "새 파일".to_string(), false, first_sep),
-                        (crate::FtMenuAction::NewFolder, "새 폴더".to_string(), false, false),
-                        (crate::FtMenuAction::Rename, "이름 변경".to_string(), false, true),
-                        (crate::FtMenuAction::CopyPath, "경로 복사".to_string(), false, false),
-                        (crate::FtMenuAction::Reveal, reveal_label.to_string(), false, false),
+                        (
+                            crate::FtMenuAction::NewFile,
+                            "새 파일".to_string(),
+                            false,
+                            first_sep,
+                        ),
+                        (
+                            crate::FtMenuAction::NewFolder,
+                            "새 폴더".to_string(),
+                            false,
+                            false,
+                        ),
+                        (
+                            crate::FtMenuAction::Rename,
+                            "이름 변경".to_string(),
+                            false,
+                            true,
+                        ),
+                        (
+                            crate::FtMenuAction::CopyPath,
+                            "경로 복사".to_string(),
+                            false,
+                            false,
+                        ),
+                        (
+                            crate::FtMenuAction::Reveal,
+                            reveal_label.to_string(),
+                            false,
+                            false,
+                        ),
                         (crate::FtMenuAction::Delete, String::new(), true, true),
                     ]);
                     let mih = 28.0_f32;
@@ -5938,16 +6472,31 @@ impl App {
                     let win_w = win_px.0 / scale;
                     let mx = rawx.min(win_w - menu_w - 6.0).max(tree_col_x + 2.0);
                     let my = rawy.min(win_h - menu_h - 6.0).max(TITLE_HEIGHT + 2.0);
-                    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
+                    panel_rect_outlined(
+                        g,
+                        mx,
+                        my,
+                        menu_w,
+                        menu_h,
+                        theme::radius_md(),
+                        theme::surface(),
+                    );
                     let (curx, cury) = self.cursor_px;
                     let mut iy = my + pad;
                     for (action, label, danger, sep_before) in items {
                         if sep_before {
-                            g.rect(mx + pad, iy + sep * 0.5, menu_w - pad * 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+                            g.rect(
+                                mx + pad,
+                                iy + sep * 0.5,
+                                menu_w - pad * 2.0,
+                                1.0,
+                                theme::with_alpha(theme::border(), 0x88),
+                            );
                             iy += sep;
                         }
                         let r = (mx + 4.0, iy, menu_w - 8.0, mih);
-                        let hov = curx >= r.0 && curx <= r.0 + r.2 && cury >= r.1 && cury <= r.1 + r.3;
+                        let hov =
+                            curx >= r.0 && curx <= r.0 + r.2 && cury >= r.1 && cury <= r.1 + r.3;
                         if hov {
                             hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
                         }
@@ -5956,12 +6505,21 @@ impl App {
                         } else {
                             label.as_str()
                         };
-                        let color = if danger { theme::danger() } else { theme::text() };
+                        let color = if danger {
+                            theme::danger()
+                        } else {
+                            theme::text()
+                        };
                         g.draw_text(
                             r.0 + 12.0,
                             r.1 + (mih - 13.0) / 2.0,
                             lbl,
-                            gpu::DrawOpts { font_size: 13.0, color, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color,
+                                bold: false,
+                                italic: false,
+                            },
                         );
                         self.file_tree.ctx_menu_rects.push((action, r));
                         iy += mih;
@@ -5993,7 +6551,11 @@ impl App {
                 // 상태줄은 늘 있으므로 dock 과 달리 조건 없이 함께 뺀다 — 안 빼면
                 // 칼럼 바닥(= 최근 커밋 목록의 마지막 줄)이 그 띠 뒤로 들어가 가려진다.
                 // 높이는 이제 설정에서 바뀌므로 상수가 아니라 `status_h` 를 쓴다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let gcx0 = git_col_x + 14.0;
                 let gcw = (git_col_w - 28.0).max(0.0);
                 let top = TITLE_HEIGHT;
@@ -6019,7 +6581,11 @@ impl App {
                         .as_ref()
                         .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
                         .unwrap_or_else(|| "—".to_string());
-                    let pcol = if self.git.col_pinned_cwd.is_some() { theme::accent() } else { theme::text_dim() };
+                    let pcol = if self.git.col_pinned_cwd.is_some() {
+                        theme::accent()
+                    } else {
+                        theme::text_dim()
+                    };
                     // 브랜치 자리를 먼저 떼고 경로를 그 안에 맞춘다. 안 맞추면 좁은
                     // 칼럼에서 경로가 브랜치와 변경 통계를 통째로 칼럼 밖으로 밀어낸다
                     // (216px 실측). 앞이 아니라 **뒤**를 남기는 건 지금 어느 폴더냐가
@@ -6028,16 +6594,28 @@ impl App {
                         let branch_w = if git_view.no_repo {
                             0.0
                         } else {
-                            let b = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
+                            let b = if git_view.branch.is_empty() {
+                                "—"
+                            } else {
+                                git_view.branch.as_str()
+                            };
                             // ahead/behind 배지도 브랜치 바로 뒤에 붙는다 — 이 폭을
                             // 빼지 않으면 경로가 그만큼 배지를 칼럼 밖으로 민다
                             // (640px 실측: `↑1` 이 창 오른쪽에서 잘렸다).
                             let mut badge = 0.0_f32;
                             if git_view.ahead > 0 {
-                                badge += g.measure_chrome_text(&format!("↑{}", git_view.ahead), 12.0, false) + 8.0;
+                                badge += g.measure_chrome_text(
+                                    &format!("↑{}", git_view.ahead),
+                                    12.0,
+                                    false,
+                                ) + 8.0;
                             }
                             if git_view.behind > 0 {
-                                badge += g.measure_chrome_text(&format!("↓{}", git_view.behind), 12.0, false) + 8.0;
+                                badge += g.measure_chrome_text(
+                                    &format!("↓{}", git_view.behind),
+                                    12.0,
+                                    false,
+                                ) + 8.0;
                             }
                             g.measure_chrome_text(" : ", 12.0, false)
                                 + g.measure_chrome_text(b, 12.0, true)
@@ -6047,24 +6625,77 @@ impl App {
                         let room = (git_col_x + git_col_w - 12.0 - gcx0 - branch_w).max(0.0);
                         crate::info::fit_text_tail(g, &path_disp, room, 12.0, false)
                     };
-                    let px = g.draw_text(gcx0, y, &path_disp, gpu::DrawOpts { font_size: 12.0, color: pcol, bold: false, italic: false });
+                    let px = g.draw_text(
+                        gcx0,
+                        y,
+                        &path_disp,
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: pcol,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     self.git.path_hdr_rect = Some((gcx0 - 3.0, y - 3.0, (px - gcx0) + 6.0, 19.0));
                     if !git_view.no_repo {
-                        let branch = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
-                        let cx2 = g.draw_text(px, y, " : ", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
-                        let bend = g.draw_text(cx2, y, branch, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
-                        self.git.branch_hdr_rect = Some((cx2 - 3.0, y - 3.0, (bend - cx2) + 6.0, 19.0));
+                        let branch = if git_view.branch.is_empty() {
+                            "—"
+                        } else {
+                            git_view.branch.as_str()
+                        };
+                        let cx2 = g.draw_text(
+                            px,
+                            y,
+                            " : ",
+                            gpu::DrawOpts {
+                                font_size: 12.0,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        let bend = g.draw_text(
+                            cx2,
+                            y,
+                            branch,
+                            gpu::DrawOpts {
+                                font_size: 12.0,
+                                color: theme::text(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        self.git.branch_hdr_rect =
+                            Some((cx2 - 3.0, y - 3.0, (bend - cx2) + 6.0, 19.0));
                         // ahead/behind counts vs origin, as plain text right after
                         // the branch (↑ unpushed, ↓ unpulled). Push/pull actions
                         // live in the Commit split-button dropdown, not here.
                         let mut hx = bend + 10.0;
                         if git_view.ahead > 0 {
-                            hx = g.draw_text(hx, y, &format!("↑{}", git_view.ahead),
-                                gpu::DrawOpts { font_size: 12.0, color: theme::accent(), bold: false, italic: false }) + 8.0;
+                            hx = g.draw_text(
+                                hx,
+                                y,
+                                &format!("↑{}", git_view.ahead),
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::accent(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            ) + 8.0;
                         }
                         if git_view.behind > 0 {
-                            g.draw_text(hx, y, &format!("↓{}", git_view.behind),
-                                gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false });
+                            g.draw_text(
+                                hx,
+                                y,
+                                &format!("↓{}", git_view.behind),
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::text_dim(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                         }
                         // N · +ins -del, right-aligned just left of the buttons.
                         let files = git_view.staged.len() + git_view.unstaged.len();
@@ -6081,10 +6712,50 @@ impl App {
                         if sx0 > bend + 14.0 {
                             g.queue_icon("file-text", sx0, y, 12.0, theme::text_mute());
                             let mut sx = sx0 + 16.0;
-                            sx = g.draw_text(sx, y, &fnum, gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false });
-                            sx = g.draw_text(sx + 4.0, y, "·", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
-                            sx = g.draw_text(sx + 4.0, y, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::success(), bold: false, italic: false });
-                            g.draw_text(sx + 4.0, y, &minus, gpu::DrawOpts { font_size: 12.0, color: DIFF_RED, bold: false, italic: false });
+                            sx = g.draw_text(
+                                sx,
+                                y,
+                                &fnum,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::text_dim(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            sx = g.draw_text(
+                                sx + 4.0,
+                                y,
+                                "·",
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            sx = g.draw_text(
+                                sx + 4.0,
+                                y,
+                                &plus,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::success(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            g.draw_text(
+                                sx + 4.0,
+                                y,
+                                &minus,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: DIFF_RED,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                         }
                     }
                 }
@@ -6144,7 +6815,17 @@ impl App {
                 };
                 let input_top = bottom - commits_h;
                 if git_view.no_repo {
-                    g.draw_text(gcx0, y, "git 저장소가 아닙니다", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
+                    g.draw_text(
+                        gcx0,
+                        y,
+                        "git 저장소가 아닙니다",
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     self.git.commit_btn_rect = None;
                     self.git.commit_caret_rect = None;
                     list_top = y + 8.0;
@@ -6165,8 +6846,8 @@ impl App {
                     let pull_mode = busy.is_none() && !can_commit && git_view.behind > 0;
                     let push_mode =
                         busy.is_none() && !can_commit && !pull_mode && git_view.ahead > 0;
-                    let can_drop = busy.is_none()
-                        && (can_commit || git_view.ahead > 0 || git_view.behind > 0);
+                    let can_drop =
+                        busy.is_none() && (can_commit || git_view.ahead > 0 || git_view.behind > 0);
                     let main_active = busy.is_none() && (can_commit || push_mode || pull_mode);
                     let main_label = if let Some(op) = busy {
                         format!("{op}…")
@@ -6194,27 +6875,74 @@ impl App {
                     // 남기는 대신 짧은 말로 갈아탄다 — 말줄임한 영어는 못 읽는다.
                     {
                         let room = (bx - 10.0 - (gcx0 + 18.0)).max(0.0);
-                        let lbl = if g.measure_chrome_text("Uncommitted changes", 12.0, true) <= room {
-                            "Uncommitted changes"
-                        } else if g.measure_chrome_text("Changes", 12.0, true) <= room {
-                            "Changes"
-                        } else {
-                            ""
-                        };
+                        let lbl =
+                            if g.measure_chrome_text("Uncommitted changes", 12.0, true) <= room {
+                                "Uncommitted changes"
+                            } else if g.measure_chrome_text("Changes", 12.0, true) <= room {
+                                "Changes"
+                            } else {
+                                ""
+                            };
                         if !lbl.is_empty() {
                             g.queue_icon("git-branch", gcx0, y + 1.0, 13.0, theme::text_mute());
-                            g.draw_text(gcx0 + 18.0, y, lbl, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
+                            g.draw_text(
+                                gcx0 + 18.0,
+                                y,
+                                lbl,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::text(),
+                                    bold: true,
+                                    italic: false,
+                                },
+                            );
                         }
                     }
-                    let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
-                    let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
-                    let base = if can_drop || busy.is_some() { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
+                    let mhov = self.cursor_px.0 >= bx
+                        && self.cursor_px.0 <= bx + main_w
+                        && self.cursor_px.1 >= by
+                        && self.cursor_px.1 <= by + bh;
+                    let chov = self.cursor_px.0 >= bx + main_w
+                        && self.cursor_px.0 <= bx + total_w
+                        && self.cursor_px.1 >= by
+                        && self.cursor_px.1 <= by + bh;
+                    let base = if can_drop || busy.is_some() {
+                        theme::surface_active()
+                    } else {
+                        theme::with_alpha(theme::surface_hover(), 0x66)
+                    };
                     round_rect(g, bx, by, total_w, bh, theme::radius_sm(), base);
-                    if main_active && mhov { round_rect(g, bx, by, main_w, bh, theme::radius_sm(), theme::accent()); }
-                    if can_drop && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::radius_sm(), theme::accent()); }
-                    g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::bg(), 0x99));
-                    let fg_main = if main_active || busy.is_some() { theme::text() } else { theme::text_mute() };
-                    let fg_caret = if can_drop { theme::text() } else { theme::text_mute() };
+                    if main_active && mhov {
+                        round_rect(g, bx, by, main_w, bh, theme::radius_sm(), theme::accent());
+                    }
+                    if can_drop && chov {
+                        round_rect(
+                            g,
+                            bx + main_w,
+                            by,
+                            caret_w,
+                            bh,
+                            theme::radius_sm(),
+                            theme::accent(),
+                        );
+                    }
+                    g.rect(
+                        bx + main_w,
+                        by + 5.0,
+                        1.0,
+                        bh - 10.0,
+                        theme::with_alpha(theme::bg(), 0x99),
+                    );
+                    let fg_main = if main_active || busy.is_some() {
+                        theme::text()
+                    } else {
+                        theme::text_mute()
+                    };
+                    let fg_caret = if can_drop {
+                        theme::text()
+                    } else {
+                        theme::text_mute()
+                    };
                     if busy.is_some() {
                         // Spinner: 8 dots round the icon slot, the bright one
                         // chasing round once a second.
@@ -6222,438 +6950,752 @@ impl App {
                         let scy = by + bh / 2.0;
                         let head = (time_secs * 1.1).fract();
                         for i in 0..8 {
-                            let ang = (i as f32 / 8.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                            let ang = (i as f32 / 8.0) * std::f32::consts::TAU
+                                - std::f32::consts::FRAC_PI_2;
                             let p = i as f32 / 8.0;
                             let mut dd = head - p;
-                            if dd < 0.0 { dd += 1.0; }
+                            if dd < 0.0 {
+                                dd += 1.0;
+                            }
                             let a = (1.0 - dd).powf(1.6);
                             let d = 1.5_f32;
-                            circle_rect(g, scx + ang.cos() * 5.5 - d, scy + ang.sin() * 5.5 - d, d * 2.0, theme::with_alpha(theme::text(), 30 + (a * 220.0) as u8));
+                            circle_rect(
+                                g,
+                                scx + ang.cos() * 5.5 - d,
+                                scy + ang.sin() * 5.5 - d,
+                                d * 2.0,
+                                theme::with_alpha(theme::text(), 30 + (a * 220.0) as u8),
+                            );
                         }
                     } else {
                         g.queue_icon(main_icon, bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
                     }
-                    g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, &main_label, gpu::DrawOpts { font_size: 12.0, color: fg_main, bold: true, italic: false });
-                    g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg_caret, bold: false, italic: false });
+                    g.draw_text(
+                        bx + 24.0,
+                        by + (bh - 12.0) / 2.0,
+                        &main_label,
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: fg_main,
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                    g.draw_text(
+                        bx + main_w + (caret_w - 7.0) / 2.0,
+                        by + (bh - 11.0) / 2.0,
+                        "▾",
+                        gpu::DrawOpts {
+                            font_size: 11.0,
+                            color: fg_caret,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     self.git.commit_btn_rect = Some((bx, by, main_w, bh));
                     self.git.commit_caret_rect = Some((bx + main_w, by, caret_w, bh));
                     y += 24.0;
                     g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
                     list_top = y + 10.0;
                 }
-                    // 휠이 읽을 기하. 목록이 없는 갈래에서도 반드시 써야 한다 —
-                    // 안 쓰면 직전 프레임의 값이 남아, 변경이 사라진 뒤에도 휠이
-                    // 없는 목록을 스크롤한다.
-                    self.git.col_list_extent = ((input_top - list_top).max(0.0), 0.0);
-                    if git_view.clean {
-                        circle_rect(g, gcx0, list_top + 4.0, 8.0, theme::success());
-                        g.draw_text(
-                            gcx0 + 15.0,
-                            list_top + 1.0,
-                            "변경 없음",
-                            gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false },
-                        );
-                    } else {
-                        let item_h = 22.0_f32;
-                        let header_h = 21.0_f32;
-                        let dline_h = 15.0_f32;
-                        let gutter_w = 30.0_f32;
-                        let mut rects: Vec<(bool, String, (f32, f32, f32, f32))> = Vec::new();
-                        let mut stage_rects: Vec<(bool, String, (f32, f32, f32, f32))> = Vec::new();
-                        let mut discard_rects: Vec<(String, bool, (f32, f32, f32, f32))> = Vec::new();
-                        let mut open_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-                        // Two stacked sections (VSCode model). `staged` true =
-                        // "Staged Changes" (− unstages); false = "Changes" (+
-                        // stages). Both scroll together off git_col_scroll.
-                        let mut y_cur = list_top - self.git.col_scroll;
-                        // While a menu is up, skip the change list entirely — its
-                        // text/icons draw in the glyph layer (above the dim quad)
-                        // so they'd otherwise bleed through the menu.
-                        let menus_open = self.git.commit_menu_open
-                            || self.git.path_menu_open
-                            || self.git.branch_menu_open;
-                        // 목록은 `list_top`~`input_top` 안에 가둔다. 지금까지는 행마다
-                        // 「완전히 밖이면 건너뛴다」로만 걸러, 위로 반쯤 걸친 행이 통째로
-                        // 그려져 Commit 버튼 줄과 구분선을 덮었다. 루프 **밖**에서 한 번만
-                        // 세운다 — 안에서 세우면 행마다 세그먼트가 둘씩 쌓인다.
-                        g.push_clip(
-                            git_col_x,
-                            list_top,
-                            git_col_w,
-                            (input_top - list_top).max(0.0),
-                        );
-                        // 커서가 잘려 안 보이는 쪽에 있는데 행의 보이는 쪽에 하이라이트가
-                        // 그려지는 것은 시저가 못 막는다(그 하이라이트는 클립 안이니까).
-                        // 그래서 이 목록 안에서는 걸러 낸 커서를 쓴다. 저장되는 히트렉트는
-                        // 그것과 별개로 루프 끝에서 교집합을 낸다 — `handler.rs` 가 **다음
-                        // 클릭 좌표로 다시** 검사하므로 커서를 거른 것만으로는 안 된다.
-                        let cur = match g.clip_hit((self.cursor_px.0, self.cursor_px.1, 1.0, 1.0)) {
-                            Some(_) => self.cursor_px,
-                            None => (f32::MIN, f32::MIN),
-                        };
-                        for (title, staged, files) in [
-                            ("Staged Changes", true, &git_view.staged),
-                            ("Changes", false, &git_view.unstaged),
-                        ] {
-                            if files.is_empty() {
-                                continue;
-                            }
-                            // Section header (count) — 완전히 밖일 때만 건너뛴다.
-                            // 경계는 손으로 다시 쓰지 않고 클립에게 묻는다.
-                            if !menus_open && g.clip_visible(git_col_x, y_cur, git_col_w, header_h) {
-                                g.draw_text(
+                // 휠이 읽을 기하. 목록이 없는 갈래에서도 반드시 써야 한다 —
+                // 안 쓰면 직전 프레임의 값이 남아, 변경이 사라진 뒤에도 휠이
+                // 없는 목록을 스크롤한다.
+                self.git.col_list_extent = ((input_top - list_top).max(0.0), 0.0);
+                if git_view.clean {
+                    circle_rect(g, gcx0, list_top + 4.0, 8.0, theme::success());
+                    g.draw_text(
+                        gcx0 + 15.0,
+                        list_top + 1.0,
+                        "변경 없음",
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                } else {
+                    let item_h = 22.0_f32;
+                    let header_h = 21.0_f32;
+                    let dline_h = 15.0_f32;
+                    let gutter_w = 30.0_f32;
+                    let mut rects: Vec<(bool, String, (f32, f32, f32, f32))> = Vec::new();
+                    let mut stage_rects: Vec<(bool, String, (f32, f32, f32, f32))> = Vec::new();
+                    let mut discard_rects: Vec<(String, bool, (f32, f32, f32, f32))> = Vec::new();
+                    let mut open_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+                    // Two stacked sections (VSCode model). `staged` true =
+                    // "Staged Changes" (− unstages); false = "Changes" (+
+                    // stages). Both scroll together off git_col_scroll.
+                    let mut y_cur = list_top - self.git.col_scroll;
+                    // While a menu is up, skip the change list entirely — its
+                    // text/icons draw in the glyph layer (above the dim quad)
+                    // so they'd otherwise bleed through the menu.
+                    let menus_open = self.git.commit_menu_open
+                        || self.git.path_menu_open
+                        || self.git.branch_menu_open;
+                    // 목록은 `list_top`~`input_top` 안에 가둔다. 지금까지는 행마다
+                    // 「완전히 밖이면 건너뛴다」로만 걸러, 위로 반쯤 걸친 행이 통째로
+                    // 그려져 Commit 버튼 줄과 구분선을 덮었다. 루프 **밖**에서 한 번만
+                    // 세운다 — 안에서 세우면 행마다 세그먼트가 둘씩 쌓인다.
+                    g.push_clip(
+                        git_col_x,
+                        list_top,
+                        git_col_w,
+                        (input_top - list_top).max(0.0),
+                    );
+                    // 커서가 잘려 안 보이는 쪽에 있는데 행의 보이는 쪽에 하이라이트가
+                    // 그려지는 것은 시저가 못 막는다(그 하이라이트는 클립 안이니까).
+                    // 그래서 이 목록 안에서는 걸러 낸 커서를 쓴다. 저장되는 히트렉트는
+                    // 그것과 별개로 루프 끝에서 교집합을 낸다 — `handler.rs` 가 **다음
+                    // 클릭 좌표로 다시** 검사하므로 커서를 거른 것만으로는 안 된다.
+                    let cur = match g.clip_hit((self.cursor_px.0, self.cursor_px.1, 1.0, 1.0)) {
+                        Some(_) => self.cursor_px,
+                        None => (f32::MIN, f32::MIN),
+                    };
+                    for (title, staged, files) in [
+                        ("Staged Changes", true, &git_view.staged),
+                        ("Changes", false, &git_view.unstaged),
+                    ] {
+                        if files.is_empty() {
+                            continue;
+                        }
+                        // Section header (count) — 완전히 밖일 때만 건너뛴다.
+                        // 경계는 손으로 다시 쓰지 않고 클립에게 묻는다.
+                        if !menus_open && g.clip_visible(git_col_x, y_cur, git_col_w, header_h) {
+                            g.draw_text(
+                                gcx0,
+                                y_cur + 5.0,
+                                &format!("{}  {}", title, files.len()),
+                                gpu::DrawOpts {
+                                    font_size: 11.0,
+                                    color: theme::text_mute(),
+                                    bold: true,
+                                    italic: false,
+                                },
+                            );
+                        }
+                        y_cur += header_h;
+                        for (marker, path) in files.iter() {
+                            let ry = y_cur;
+                            y_cur += item_h;
+                            let expanded = self.git.col_expanded.contains(&(staged, path.clone()));
+                            let row_visible =
+                                !menus_open && g.clip_visible(git_col_x, ry, git_col_w, item_h);
+                            if row_visible {
+                                let hovered = cur.0 >= git_col_x
+                                    && cur.0 <= git_col_x + git_col_w
+                                    && cur.1 >= ry
+                                    && cur.1 < ry + item_h;
+                                if hovered {
+                                    hover_rect(
+                                        g,
+                                        gcx0 - 5.0,
+                                        ry,
+                                        gcw + 10.0,
+                                        item_h,
+                                        theme::radius_sm(),
+                                    );
+                                }
+                                // Expander chevron at the row's left edge.
+                                g.queue_icon(
+                                    if expanded {
+                                        "chevron-down"
+                                    } else {
+                                        "chevron-right"
+                                    },
                                     gcx0,
-                                    y_cur + 5.0,
-                                    &format!("{}  {}", title, files.len()),
-                                    gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false },
+                                    ry + (item_h - 12.0) / 2.0,
+                                    12.0,
+                                    theme::text_mute(),
                                 );
-                            }
-                            y_cur += header_h;
-                            for (marker, path) in files.iter() {
-                                let ry = y_cur;
-                                y_cur += item_h;
-                                let expanded = self.git.col_expanded.contains(&(staged, path.clone()));
-                                let row_visible =
-                                    !menus_open && g.clip_visible(git_col_x, ry, git_col_w, item_h);
-                                if row_visible {
-                                    let hovered = cur.0 >= git_col_x
-                                        && cur.0 <= git_col_x + git_col_w
+                                let untracked = *marker == 'U';
+                                // Filename bright, parent dir dim after it (so the
+                                // name stays readable even when the path is long).
+                                // No status badge — chevron + name, cursor-style.
+                                let fname = path.rsplit('/').next().unwrap_or(path.as_str());
+                                let dir =
+                                    path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
+                                let tx = gcx0 + 20.0;
+                                let ty = ry + (item_h - 12.0) / 2.0;
+                                // 이름·경로는 여기서 그리지 않는다. 오른쪽 액션과
+                                // numstat 이 자리를 잡은 뒤에야 남는 폭을 알 수 있고,
+                                // 모르면 216px 칼럼에서 셋이 서로 위에 겹쳐 그려진다.
+                                // Action cluster (cursor style), always visible
+                                // right-to-left: +/− stage · ↩ discard · ⤴ open.
+                                // numstat (+ins -del) sits just left of them.
+                                let aw = 19.0_f32;
+                                let agap = 1.0_f32;
+                                // 좁은 칼럼에서 액션 셋(59px)과 numstat 이 늘 자리를
+                                // 지키면 정작 파일 이름에 55px 밖에 안 남아 「info.…」
+                                // 로 뭉개진다(216px 실측). 이 폭에서는 이름이 내용이고
+                                // 버튼은 손이 갈 때만 필요하니, 가리킨 행에서만 꺼낸다.
+                                let narrow = git_col_w < GIT_DENSE_COMPACT;
+                                let show_acts = !narrow || hovered;
+                                let mut ax =
+                                    git_col_x + git_col_w - 12.0 - if show_acts { aw } else { 0.0 };
+                                let icon_dim = if hovered {
+                                    theme::text_dim()
+                                } else {
+                                    theme::with_alpha(theme::text_dim(), 0x88)
+                                };
+                                if show_acts {
+                                    let bh = cur.0 >= ax
+                                        && cur.0 <= ax + aw
                                         && cur.1 >= ry
                                         && cur.1 < ry + item_h;
-                                    if hovered {
-                                        hover_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::radius_sm());
+                                    if bh {
+                                        round_rect(
+                                            g,
+                                            ax,
+                                            ry + 2.0,
+                                            aw,
+                                            18.0,
+                                            theme::radius_sm(),
+                                            theme::surface_active(),
+                                        );
                                     }
-                                    // Expander chevron at the row's left edge.
                                     g.queue_icon(
-                                        if expanded { "chevron-down" } else { "chevron-right" },
-                                        gcx0,
-                                        ry + (item_h - 12.0) / 2.0,
-                                        12.0,
-                                        theme::text_mute(),
+                                        if staged { "minus" } else { "plus" },
+                                        ax + (aw - 13.0) / 2.0,
+                                        ry + (item_h - 13.0) / 2.0,
+                                        13.0,
+                                        if bh { theme::text() } else { icon_dim },
                                     );
-                                    let untracked = *marker == 'U';
-                                    // Filename bright, parent dir dim after it (so the
-                                    // name stays readable even when the path is long).
-                                    // No status badge — chevron + name, cursor-style.
-                                    let fname = path.rsplit('/').next().unwrap_or(path.as_str());
-                                    let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
-                                    let tx = gcx0 + 20.0;
-                                    let ty = ry + (item_h - 12.0) / 2.0;
-                                    // 이름·경로는 여기서 그리지 않는다. 오른쪽 액션과
-                                    // numstat 이 자리를 잡은 뒤에야 남는 폭을 알 수 있고,
-                                    // 모르면 216px 칼럼에서 셋이 서로 위에 겹쳐 그려진다.
-                                    // Action cluster (cursor style), always visible
-                                    // right-to-left: +/− stage · ↩ discard · ⤴ open.
-                                    // numstat (+ins -del) sits just left of them.
-                                    let aw = 19.0_f32;
-                                    let agap = 1.0_f32;
-                                    // 좁은 칼럼에서 액션 셋(59px)과 numstat 이 늘 자리를
-                                    // 지키면 정작 파일 이름에 55px 밖에 안 남아 「info.…」
-                                    // 로 뭉개진다(216px 실측). 이 폭에서는 이름이 내용이고
-                                    // 버튼은 손이 갈 때만 필요하니, 가리킨 행에서만 꺼낸다.
-                                    let narrow = git_col_w < GIT_DENSE_COMPACT;
-                                    let show_acts = !narrow || hovered;
-                                    let mut ax = git_col_x + git_col_w - 12.0 - if show_acts { aw } else { 0.0 };
-                                    let icon_dim = if hovered { theme::text_dim() } else { theme::with_alpha(theme::text_dim(), 0x88) };
-                                    if show_acts {
-                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
-                                        if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
-                                        }
-                                        g.queue_icon(if staged { "minus" } else { "plus" }, ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::text() } else { icon_dim });
-                                        stage_rects.push((!staged, path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
-                                        ax -= aw + agap;
-                                    }
-                                    if show_acts {
-                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
-                                        if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
-                                        }
-                                        g.queue_icon("undo-2", ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { DIFF_RED } else { icon_dim });
-                                        discard_rects.push((path.clone(), untracked, (ax - 1.0, ry, aw + 2.0, item_h)));
-                                        ax -= aw + agap;
-                                    }
-                                    if show_acts {
-                                        let bh = cur.0 >= ax && cur.0 <= ax + aw && cur.1 >= ry && cur.1 < ry + item_h;
-                                        if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::radius_sm(), theme::surface_active());
-                                        }
-                                        g.queue_icon("external-link", ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::text() } else { icon_dim });
-                                        open_rects.push((path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
-                                    }
-                                    // numstat — right-aligned just left of the actions.
-                                    let mut text_right = ax - 4.0;
-                                    if let Some((ins, del)) = git_view.numstat.get(path).filter(|_| !(narrow && show_acts)) {
-                                        if *ins > 0 || *del > 0 {
-                                            let minus = format!("-{del}");
-                                            let plus = format!("+{ins}");
-                                            let wm = g.measure_chrome_text(&minus, 11.0, false);
-                                            let wp = g.measure_chrome_text(&plus, 11.0, false);
-                                            let mut rx = ax - 4.0;
-                                            if *del > 0 {
-                                                rx -= wm;
-                                                g.draw_text(rx, ty, &minus, gpu::DrawOpts { font_size: 11.0, color: DIFF_RED, bold: false, italic: false });
-                                                rx -= 5.0;
-                                            }
-                                            if *ins > 0 {
-                                                rx -= wp;
-                                                g.draw_text(rx, ty, &plus, gpu::DrawOpts { font_size: 11.0, color: theme::success(), bold: false, italic: false });
-                                            }
-                                            text_right = rx;
-                                        }
-                                    }
-                                    // 이제 남은 폭이 확정됐다. 이름을 먼저 채우고,
-                                    // 부모 경로는 그러고도 남을 때만 — 좁은 칼럼에서
-                                    // 알아야 할 쪽은 경로가 아니라 파일 이름이다.
-                                    {
-                                        let avail = (text_right - 6.0 - tx).max(0.0);
-                                        let nm = crate::info::fit_text(g, fname, avail, 12.0, false);
-                                        let endx = if nm.is_empty() {
-                                            tx
-                                        } else {
-                                            g.draw_text(tx, ty, &nm, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false })
-                                        };
-                                        if !dir.is_empty() && !nm.is_empty() && nm == fname {
-                                            let room = (text_right - 6.0 - (endx + 7.0)).max(0.0);
-                                            let d = crate::info::fit_text_tail(g, dir, room, 11.0, false);
-                                            if !d.is_empty() {
-                                                g.draw_text(endx + 7.0, ty + 0.5, &d, gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false });
-                                            }
-                                        }
-                                    }
-                                    rects.push((staged, path.clone(), (git_col_x, ry, git_col_w, item_h)));
+                                    stage_rects.push((
+                                        !staged,
+                                        path.clone(),
+                                        (ax - 1.0, ry, aw + 2.0, item_h),
+                                    ));
+                                    ax -= aw + agap;
                                 }
-                                // Inline unified diff for an expanded row, syntax-
-                                // highlighted with the same tokenizer the code-block
-                                // overlay uses. Numbered gutter + tinted +/- bands.
-                                if expanded {
-                                    let lang = code_lang_for_path(std::path::Path::new(path.as_str()));
-                                    if let Some(rows_d) = self.git.col_diff_cache.get(&(staged, path.clone())) {
-                                        for dl in rows_d.iter() {
-                                            let dy = y_cur;
-                                            y_cur += dline_h;
-                                            if !g.clip_visible(git_col_x, dy, git_col_w, dline_h) {
-                                                continue;
-                                            }
-                                            use kasa_mcp::git::DiffLineKind as K;
-                                            let (bg, sign, scol) = match dl.kind {
-                                                K::Add => (theme::with_alpha(theme::success(), 0x22), "+", theme::success()),
-                                                K::Del => (theme::with_alpha(DIFF_RED, 0x22), "-", DIFF_RED),
-                                                K::Hunk => (theme::with_alpha(theme::accent(), 0x14), "", theme::text_mute()),
-                                                K::Context => ([0, 0, 0, 0], " ", theme::text_mute()),
-                                            };
-                                            if bg[3] > 0 {
-                                                g.rect(gcx0 - 5.0, dy, gcw + 10.0, dline_h, bg);
-                                            }
-                                            if dl.kind == K::Hunk {
-                                                g.draw_text(
-                                                    gcx0,
-                                                    dy + 1.5,
-                                                    dl.text.trim_end(),
-                                                    gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-                                                );
-                                                continue;
-                                            }
-                                            // Line number gutter (new side, else old).
-                                            if let Some(n) = dl.new_no.or(dl.old_no) {
-                                                let ns = n.to_string();
-                                                let nw = g.measure_chrome_text(&ns, 10.0, false);
-                                                g.draw_text(
-                                                    gcx0 + gutter_w - nw - 4.0,
-                                                    dy + 1.5,
-                                                    &ns,
-                                                    gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-                                                );
-                                            }
+                                if show_acts {
+                                    let bh = cur.0 >= ax
+                                        && cur.0 <= ax + aw
+                                        && cur.1 >= ry
+                                        && cur.1 < ry + item_h;
+                                    if bh {
+                                        round_rect(
+                                            g,
+                                            ax,
+                                            ry + 2.0,
+                                            aw,
+                                            18.0,
+                                            theme::radius_sm(),
+                                            theme::surface_active(),
+                                        );
+                                    }
+                                    g.queue_icon(
+                                        "undo-2",
+                                        ax + (aw - 13.0) / 2.0,
+                                        ry + (item_h - 13.0) / 2.0,
+                                        13.0,
+                                        if bh { DIFF_RED } else { icon_dim },
+                                    );
+                                    discard_rects.push((
+                                        path.clone(),
+                                        untracked,
+                                        (ax - 1.0, ry, aw + 2.0, item_h),
+                                    ));
+                                    ax -= aw + agap;
+                                }
+                                if show_acts {
+                                    let bh = cur.0 >= ax
+                                        && cur.0 <= ax + aw
+                                        && cur.1 >= ry
+                                        && cur.1 < ry + item_h;
+                                    if bh {
+                                        round_rect(
+                                            g,
+                                            ax,
+                                            ry + 2.0,
+                                            aw,
+                                            18.0,
+                                            theme::radius_sm(),
+                                            theme::surface_active(),
+                                        );
+                                    }
+                                    g.queue_icon(
+                                        "external-link",
+                                        ax + (aw - 13.0) / 2.0,
+                                        ry + (item_h - 13.0) / 2.0,
+                                        13.0,
+                                        if bh { theme::text() } else { icon_dim },
+                                    );
+                                    open_rects
+                                        .push((path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
+                                }
+                                // numstat — right-aligned just left of the actions.
+                                let mut text_right = ax - 4.0;
+                                if let Some((ins, del)) = git_view
+                                    .numstat
+                                    .get(path)
+                                    .filter(|_| !(narrow && show_acts))
+                                {
+                                    if *ins > 0 || *del > 0 {
+                                        let minus = format!("-{del}");
+                                        let plus = format!("+{ins}");
+                                        let wm = g.measure_chrome_text(&minus, 11.0, false);
+                                        let wp = g.measure_chrome_text(&plus, 11.0, false);
+                                        let mut rx = ax - 4.0;
+                                        if *del > 0 {
+                                            rx -= wm;
                                             g.draw_text(
-                                                gcx0 + gutter_w,
-                                                dy + 1.5,
-                                                sign,
-                                                gpu::DrawOpts { font_size: 11.0, color: scol, bold: false, italic: false },
+                                                rx,
+                                                ty,
+                                                &minus,
+                                                gpu::DrawOpts {
+                                                    font_size: 11.0,
+                                                    color: DIFF_RED,
+                                                    bold: false,
+                                                    italic: false,
+                                                },
                                             );
-                                            let mut tx = gcx0 + gutter_w + 9.0;
-                                            for (tok, col) in gpu::highlight_code_line(dl.text.trim_end(), lang, theme::text_dim()) {
-                                                tx = g.draw_text(
-                                                    tx,
-                                                    dy + 1.5,
-                                                    &tok,
-                                                    gpu::DrawOpts { font_size: 11.0, color: col, bold: false, italic: false },
-                                                );
+                                            rx -= 5.0;
+                                        }
+                                        if *ins > 0 {
+                                            rx -= wp;
+                                            g.draw_text(
+                                                rx,
+                                                ty,
+                                                &plus,
+                                                gpu::DrawOpts {
+                                                    font_size: 11.0,
+                                                    color: theme::success(),
+                                                    bold: false,
+                                                    italic: false,
+                                                },
+                                            );
+                                        }
+                                        text_right = rx;
+                                    }
+                                }
+                                // 이제 남은 폭이 확정됐다. 이름을 먼저 채우고,
+                                // 부모 경로는 그러고도 남을 때만 — 좁은 칼럼에서
+                                // 알아야 할 쪽은 경로가 아니라 파일 이름이다.
+                                {
+                                    let avail = (text_right - 6.0 - tx).max(0.0);
+                                    let nm = crate::info::fit_text(g, fname, avail, 12.0, false);
+                                    let endx = if nm.is_empty() {
+                                        tx
+                                    } else {
+                                        g.draw_text(
+                                            tx,
+                                            ty,
+                                            &nm,
+                                            gpu::DrawOpts {
+                                                font_size: 12.0,
+                                                color: theme::text(),
+                                                bold: false,
+                                                italic: false,
+                                            },
+                                        )
+                                    };
+                                    if !dir.is_empty() && !nm.is_empty() && nm == fname {
+                                        let room = (text_right - 6.0 - (endx + 7.0)).max(0.0);
+                                        let d =
+                                            crate::info::fit_text_tail(g, dir, room, 11.0, false);
+                                        if !d.is_empty() {
+                                            g.draw_text(
+                                                endx + 7.0,
+                                                ty + 0.5,
+                                                &d,
+                                                gpu::DrawOpts {
+                                                    font_size: 11.0,
+                                                    color: theme::text_mute(),
+                                                    bold: false,
+                                                    italic: false,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                                rects.push((
+                                    staged,
+                                    path.clone(),
+                                    (git_col_x, ry, git_col_w, item_h),
+                                ));
+                            }
+                            // Inline unified diff for an expanded row, syntax-
+                            // highlighted with the same tokenizer the code-block
+                            // overlay uses. Numbered gutter + tinted +/- bands.
+                            if expanded {
+                                let lang = code_lang_for_path(std::path::Path::new(path.as_str()));
+                                if let Some(rows_d) =
+                                    self.git.col_diff_cache.get(&(staged, path.clone()))
+                                {
+                                    for dl in rows_d.iter() {
+                                        let dy = y_cur;
+                                        y_cur += dline_h;
+                                        if !g.clip_visible(git_col_x, dy, git_col_w, dline_h) {
+                                            continue;
+                                        }
+                                        use kasa_mcp::git::DiffLineKind as K;
+                                        let (bg, sign, scol) = match dl.kind {
+                                            K::Add => (
+                                                theme::with_alpha(theme::success(), 0x22),
+                                                "+",
+                                                theme::success(),
+                                            ),
+                                            K::Del => {
+                                                (theme::with_alpha(DIFF_RED, 0x22), "-", DIFF_RED)
                                             }
+                                            K::Hunk => (
+                                                theme::with_alpha(theme::accent(), 0x14),
+                                                "",
+                                                theme::text_mute(),
+                                            ),
+                                            K::Context => ([0, 0, 0, 0], " ", theme::text_mute()),
+                                        };
+                                        if bg[3] > 0 {
+                                            g.rect(gcx0 - 5.0, dy, gcw + 10.0, dline_h, bg);
+                                        }
+                                        if dl.kind == K::Hunk {
+                                            g.draw_text(
+                                                gcx0,
+                                                dy + 1.5,
+                                                dl.text.trim_end(),
+                                                gpu::DrawOpts {
+                                                    font_size: 10.0,
+                                                    color: theme::text_mute(),
+                                                    bold: false,
+                                                    italic: false,
+                                                },
+                                            );
+                                            continue;
+                                        }
+                                        // Line number gutter (new side, else old).
+                                        if let Some(n) = dl.new_no.or(dl.old_no) {
+                                            let ns = n.to_string();
+                                            let nw = g.measure_chrome_text(&ns, 10.0, false);
+                                            g.draw_text(
+                                                gcx0 + gutter_w - nw - 4.0,
+                                                dy + 1.5,
+                                                &ns,
+                                                gpu::DrawOpts {
+                                                    font_size: 10.0,
+                                                    color: theme::text_mute(),
+                                                    bold: false,
+                                                    italic: false,
+                                                },
+                                            );
+                                        }
+                                        g.draw_text(
+                                            gcx0 + gutter_w,
+                                            dy + 1.5,
+                                            sign,
+                                            gpu::DrawOpts {
+                                                font_size: 11.0,
+                                                color: scol,
+                                                bold: false,
+                                                italic: false,
+                                            },
+                                        );
+                                        let mut tx = gcx0 + gutter_w + 9.0;
+                                        for (tok, col) in gpu::highlight_code_line(
+                                            dl.text.trim_end(),
+                                            lang,
+                                            theme::text_dim(),
+                                        ) {
+                                            tx = g.draw_text(
+                                                tx,
+                                                dy + 1.5,
+                                                &tok,
+                                                gpu::DrawOpts {
+                                                    font_size: 11.0,
+                                                    color: col,
+                                                    bold: false,
+                                                    italic: false,
+                                                },
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
-                        // 히트렉트를 목록 구역과 교집합 낸다. 이 넷은 `handler.rs` 가
-                        // **다음 클릭 좌표로 다시** 검사하므로, 위에서 커서를 거른 것과는
-                        // 별개로 rect 자체가 잘려 있어야 한다. 안 자르면 화면은 완벽한데
-                        // Commit 버튼 뒤로 스크롤된 행의 「되돌리기」가 눌린다 — 되돌릴 수
-                        // 없는 동작이고, 스크린샷이 절대 못 잡는 부류다.
-                        macro_rules! clip_rects {
-                            ($v:expr, $i:tt) => {
-                                $v.retain_mut(|e| match g.clip_hit(e.$i) {
-                                    Some(h) => {
-                                        e.$i = h;
-                                        true
-                                    }
-                                    None => false,
-                                })
-                            };
-                        }
-                        clip_rects!(rects, 2);
-                        clip_rects!(stage_rects, 2);
-                        clip_rects!(discard_rects, 2);
-                        clip_rects!(open_rects, 1);
-                        g.pop_clip();
-                        // 휠에게 넘기는 기하. `y_cur` 는 `list_top - col_scroll` 에서
-                        // 출발해 섹션 머리·파일 행·펼친 diff 줄을 **실제로 그린 만큼**
-                        // 지나왔으므로, 스크롤을 되더하면 그게 곧 내용 높이다. 휠이
-                        // 자기 힘으로는 못 구하는 값이라(펼친 diff 는 캐시를 뒤져야
-                        // 나온다) 여기서 써 준다.
-                        self.git.col_list_extent = (
-                            (input_top - list_top).max(0.0),
-                            (y_cur + self.git.col_scroll - list_top).max(0.0),
-                        );
-                        self.git.col_file_rects = rects;
-                        self.git.col_stage_rects = stage_rects;
-                        self.git.col_discard_rects = discard_rects;
-                        self.git.col_open_rects = open_rects;
                     }
-                    // ── Recent commits, pinned to the column foot. Double-click a
-                    // commit row to expand its changed-file list inline (GitLens-
-                    // graph style); a file row then expands its diff.
-                    self.git.col_commit_rects.clear();
-                    self.git.col_commit_file_rects.clear();
-                    self.git.col_commits_grip = None;
-                    if !git_view.recent_commits.is_empty() {
-                        let (curx, cury) = self.cursor_px;
-                        let foot = bottom - 2.0;
-                        let clip_r = git_col_x + git_col_w - 12.0;
-                        let mut cy2 = input_top + 6.0;
-                        // 구역 머리의 가로선이 곧 크기조절 손잡이다. 잡는 띠는 선보다
-                        // 두껍게(위아래 4px) 잡는다 — 1px 선을 정확히 맞춰 눌러야 하면
-                        // 손잡이가 있다는 걸 알아도 못 쓴다. 이 자리는 매 프레임
-                        // 변경 목록 길이·펼침에 따라 움직여서 handler 가 스스로는
-                        // 못 구한다.
-                        let grip = (git_col_x, cy2 - 6.0, git_col_w, 9.0);
-                        self.git.col_commits_grip = Some(grip);
-                        let grip_hot = self.git.col_commits_resize.is_some()
-                            || (curx >= grip.0
-                                && curx <= grip.0 + grip.2
-                                && cury >= grip.1
-                                && cury <= grip.1 + grip.3);
-                        let (line_col, line_h) = if grip_hot {
-                            (theme::accent(), 2.0)
-                        } else {
-                            (theme::with_alpha(theme::border(), 0x80), 1.0)
+                    // 히트렉트를 목록 구역과 교집합 낸다. 이 넷은 `handler.rs` 가
+                    // **다음 클릭 좌표로 다시** 검사하므로, 위에서 커서를 거른 것과는
+                    // 별개로 rect 자체가 잘려 있어야 한다. 안 자르면 화면은 완벽한데
+                    // Commit 버튼 뒤로 스크롤된 행의 「되돌리기」가 눌린다 — 되돌릴 수
+                    // 없는 동작이고, 스크린샷이 절대 못 잡는 부류다.
+                    macro_rules! clip_rects {
+                        ($v:expr, $i:tt) => {
+                            $v.retain_mut(|e| match g.clip_hit(e.$i) {
+                                Some(h) => {
+                                    e.$i = h;
+                                    true
+                                }
+                                None => false,
+                            })
                         };
-                        g.rect(gcx0, cy2 - 2.0, gcw, line_h, line_col);
-                        g.draw_text(gcx0, cy2 + 4.0, "최근 커밋", gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false });
-                        cy2 += 22.0;
-                        for (hash, subj) in &git_view.recent_commits {
+                    }
+                    clip_rects!(rects, 2);
+                    clip_rects!(stage_rects, 2);
+                    clip_rects!(discard_rects, 2);
+                    clip_rects!(open_rects, 1);
+                    g.pop_clip();
+                    // 휠에게 넘기는 기하. `y_cur` 는 `list_top - col_scroll` 에서
+                    // 출발해 섹션 머리·파일 행·펼친 diff 줄을 **실제로 그린 만큼**
+                    // 지나왔으므로, 스크롤을 되더하면 그게 곧 내용 높이다. 휠이
+                    // 자기 힘으로는 못 구하는 값이라(펼친 diff 는 캐시를 뒤져야
+                    // 나온다) 여기서 써 준다.
+                    self.git.col_list_extent = (
+                        (input_top - list_top).max(0.0),
+                        (y_cur + self.git.col_scroll - list_top).max(0.0),
+                    );
+                    self.git.col_file_rects = rects;
+                    self.git.col_stage_rects = stage_rects;
+                    self.git.col_discard_rects = discard_rects;
+                    self.git.col_open_rects = open_rects;
+                }
+                // ── Recent commits, pinned to the column foot. Double-click a
+                // commit row to expand its changed-file list inline (GitLens-
+                // graph style); a file row then expands its diff.
+                self.git.col_commit_rects.clear();
+                self.git.col_commit_file_rects.clear();
+                self.git.col_commits_grip = None;
+                if !git_view.recent_commits.is_empty() {
+                    let (curx, cury) = self.cursor_px;
+                    let foot = bottom - 2.0;
+                    let clip_r = git_col_x + git_col_w - 12.0;
+                    let mut cy2 = input_top + 6.0;
+                    // 구역 머리의 가로선이 곧 크기조절 손잡이다. 잡는 띠는 선보다
+                    // 두껍게(위아래 4px) 잡는다 — 1px 선을 정확히 맞춰 눌러야 하면
+                    // 손잡이가 있다는 걸 알아도 못 쓴다. 이 자리는 매 프레임
+                    // 변경 목록 길이·펼침에 따라 움직여서 handler 가 스스로는
+                    // 못 구한다.
+                    let grip = (git_col_x, cy2 - 6.0, git_col_w, 9.0);
+                    self.git.col_commits_grip = Some(grip);
+                    let grip_hot = self.git.col_commits_resize.is_some()
+                        || (curx >= grip.0
+                            && curx <= grip.0 + grip.2
+                            && cury >= grip.1
+                            && cury <= grip.1 + grip.3);
+                    let (line_col, line_h) = if grip_hot {
+                        (theme::accent(), 2.0)
+                    } else {
+                        (theme::with_alpha(theme::border(), 0x80), 1.0)
+                    };
+                    g.rect(gcx0, cy2 - 2.0, gcw, line_h, line_col);
+                    g.draw_text(
+                        gcx0,
+                        cy2 + 4.0,
+                        "최근 커밋",
+                        gpu::DrawOpts {
+                            font_size: 11.0,
+                            color: theme::text_mute(),
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                    cy2 += 22.0;
+                    for (hash, subj) in &git_view.recent_commits {
+                        if cy2 > foot {
+                            break;
+                        }
+                        let expanded =
+                            self.git.col_commit_expanded.as_deref() == Some(hash.as_str());
+                        let rowr = (gcx0 - 5.0, cy2 - 3.0, gcw + 10.0, 19.0);
+                        let hov = curx >= rowr.0
+                            && curx <= rowr.0 + rowr.2
+                            && cury >= rowr.1
+                            && cury <= rowr.1 + rowr.3;
+                        if expanded {
+                            g.rect(
+                                rowr.0,
+                                rowr.1,
+                                rowr.2,
+                                rowr.3,
+                                theme::with_alpha(theme::accent(), 0x18),
+                            );
+                        } else if hov {
+                            g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::surface_hover());
+                        }
+                        let chev = if expanded {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        };
+                        g.queue_icon(chev, gcx0, cy2 - 1.0, 11.0, theme::text_mute());
+                        let hxc = g.draw_text(
+                            gcx0 + 14.0,
+                            cy2,
+                            hash,
+                            gpu::DrawOpts {
+                                font_size: 11.0,
+                                color: theme::accent(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        // 클립은 글자를 획 중간에서 끊는다 — 좁은 칼럼에서는 제목
+                        // 대부분이 그렇게 사라져 「더 있다」는 신호조차 없다. 말줄임
+                        // 으로 재단해 잘렸다는 것이 보이게 한다.
+                        let sj = crate::info::fit_text(
+                            g,
+                            subj,
+                            (clip_r - (hxc + 8.0)).max(0.0),
+                            11.0,
+                            false,
+                        );
+                        g.draw_text_clipped(
+                            hxc + 8.0,
+                            cy2,
+                            &sj,
+                            gpu::DrawOpts {
+                                font_size: 11.0,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                            gcx0,
+                            clip_r,
+                        );
+                        self.git.col_commit_rects.push((hash.clone(), rowr));
+                        cy2 += 20.0;
+                        if !expanded {
+                            continue;
+                        }
+                        // Changed-file list for the expanded commit.
+                        let files = self
+                            .git
+                            .col_commit_files_cache
+                            .get(hash)
+                            .cloned()
+                            .unwrap_or_default();
+                        if files.is_empty() {
+                            g.draw_text(
+                                gcx0 + 20.0,
+                                cy2,
+                                "(변경 없음)",
+                                gpu::DrawOpts {
+                                    font_size: 10.0,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: true,
+                                },
+                            );
+                            cy2 += 16.0;
+                        }
+                        for (path, add, del) in &files {
                             if cy2 > foot {
                                 break;
                             }
-                            let expanded = self.git.col_commit_expanded.as_deref() == Some(hash.as_str());
-                            let rowr = (gcx0 - 5.0, cy2 - 3.0, gcw + 10.0, 19.0);
-                            let hov = curx >= rowr.0 && curx <= rowr.0 + rowr.2 && cury >= rowr.1 && cury <= rowr.1 + rowr.3;
-                            if expanded {
-                                g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::with_alpha(theme::accent(), 0x18));
-                            } else if hov {
-                                g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::surface_hover());
+                            let fexp = self
+                                .git
+                                .col_commit_file_expanded
+                                .contains(&(hash.clone(), path.clone()));
+                            let fr = (gcx0 + 14.0, cy2 - 2.0, gcw - 14.0, 17.0);
+                            let fhov = curx >= fr.0
+                                && curx <= fr.0 + fr.2
+                                && cury >= fr.1
+                                && cury <= fr.1 + fr.3;
+                            if fexp {
+                                g.rect(
+                                    fr.0,
+                                    fr.1,
+                                    fr.2,
+                                    fr.3,
+                                    theme::with_alpha(theme::accent(), 0x10),
+                                );
+                            } else if fhov {
+                                g.rect(fr.0, fr.1, fr.2, fr.3, theme::surface_hover());
                             }
-                            let chev = if expanded { "chevron-down" } else { "chevron-right" };
-                            g.queue_icon(chev, gcx0, cy2 - 1.0, 11.0, theme::text_mute());
-                            let hxc = g.draw_text(gcx0 + 14.0, cy2, hash, gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false });
-                            // 클립은 글자를 획 중간에서 끊는다 — 좁은 칼럼에서는 제목
-                            // 대부분이 그렇게 사라져 「더 있다」는 신호조차 없다. 말줄임
-                            // 으로 재단해 잘렸다는 것이 보이게 한다.
-                            let sj = crate::info::fit_text(g, subj, (clip_r - (hxc + 8.0)).max(0.0), 11.0, false);
-                            g.draw_text_clipped(hxc + 8.0, cy2, &sj, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false }, gcx0, clip_r);
-                            self.git.col_commit_rects.push((hash.clone(), rowr));
-                            cy2 += 20.0;
-                            if !expanded {
+                            let fname = std::path::Path::new(path.as_str())
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.clone());
+                            let stat = format!("+{add} -{del}");
+                            let sw = g.measure_chrome_text(&stat, 10.0, false);
+                            g.draw_text_clipped(
+                                gcx0 + 20.0,
+                                cy2,
+                                &fname,
+                                gpu::DrawOpts {
+                                    font_size: 11.0,
+                                    color: if fexp {
+                                        theme::text()
+                                    } else {
+                                        theme::text_dim()
+                                    },
+                                    bold: false,
+                                    italic: false,
+                                },
+                                gcx0 + 20.0,
+                                clip_r - sw - 8.0,
+                            );
+                            g.draw_text(
+                                clip_r - sw,
+                                cy2,
+                                &stat,
+                                gpu::DrawOpts {
+                                    font_size: 10.0,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            self.git
+                                .col_commit_file_rects
+                                .push((hash.clone(), path.clone(), fr));
+                            cy2 += 18.0;
+                            if !fexp {
                                 continue;
                             }
-                            // Changed-file list for the expanded commit.
-                            let files = self.git.col_commit_files_cache.get(hash).cloned().unwrap_or_default();
-                            if files.is_empty() {
-                                g.draw_text(gcx0 + 20.0, cy2, "(변경 없음)", gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: true });
-                                cy2 += 16.0;
-                            }
-                            for (path, add, del) in &files {
+                            // Inline diff for the expanded file (tinted +/- bands).
+                            let diff = self
+                                .git
+                                .col_commit_diff_cache
+                                .get(&(hash.clone(), path.clone()))
+                                .cloned()
+                                .unwrap_or_default();
+                            use kasa_mcp::git::DiffLineKind as K;
+                            for dl in diff.iter() {
                                 if cy2 > foot {
                                     break;
                                 }
-                                let fexp = self.git.col_commit_file_expanded.contains(&(hash.clone(), path.clone()));
-                                let fr = (gcx0 + 14.0, cy2 - 2.0, gcw - 14.0, 17.0);
-                                let fhov = curx >= fr.0 && curx <= fr.0 + fr.2 && cury >= fr.1 && cury <= fr.1 + fr.3;
-                                if fexp {
-                                    g.rect(fr.0, fr.1, fr.2, fr.3, theme::with_alpha(theme::accent(), 0x10));
-                                } else if fhov {
-                                    g.rect(fr.0, fr.1, fr.2, fr.3, theme::surface_hover());
+                                let (bg, scol) = match dl.kind {
+                                    K::Add => (
+                                        theme::with_alpha(theme::success(), 0x22),
+                                        theme::success(),
+                                    ),
+                                    K::Del => {
+                                        (theme::with_alpha(theme::danger(), 0x22), theme::danger())
+                                    }
+                                    K::Hunk => (
+                                        theme::with_alpha(theme::accent(), 0x14),
+                                        theme::text_mute(),
+                                    ),
+                                    K::Context => ([0, 0, 0, 0], theme::text_mute()),
+                                };
+                                if bg[3] > 0 {
+                                    g.rect(gcx0 + 14.0, cy2 - 1.0, gcw - 14.0, 13.0, bg);
                                 }
-                                let fname = std::path::Path::new(path.as_str())
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.clone());
-                                let stat = format!("+{add} -{del}");
-                                let sw = g.measure_chrome_text(&stat, 10.0, false);
+                                let prefix = match dl.kind {
+                                    K::Add => "+",
+                                    K::Del => "-",
+                                    _ => " ",
+                                };
+                                let txt = format!("{prefix}{}", dl.text.trim_end());
                                 g.draw_text_clipped(
                                     gcx0 + 20.0,
                                     cy2,
-                                    &fname,
-                                    gpu::DrawOpts { font_size: 11.0, color: if fexp { theme::text() } else { theme::text_dim() }, bold: false, italic: false },
+                                    &txt,
+                                    gpu::DrawOpts {
+                                        font_size: 10.0,
+                                        color: scol,
+                                        bold: false,
+                                        italic: false,
+                                    },
                                     gcx0 + 20.0,
-                                    clip_r - sw - 8.0,
+                                    clip_r,
                                 );
-                                g.draw_text(clip_r - sw, cy2, &stat, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
-                                self.git.col_commit_file_rects.push((hash.clone(), path.clone(), fr));
-                                cy2 += 18.0;
-                                if !fexp {
-                                    continue;
-                                }
-                                // Inline diff for the expanded file (tinted +/- bands).
-                                let diff = self
-                                    .git
-                                    .col_commit_diff_cache
-                                    .get(&(hash.clone(), path.clone()))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                use kasa_mcp::git::DiffLineKind as K;
-                                for dl in diff.iter() {
-                                    if cy2 > foot {
-                                        break;
-                                    }
-                                    let (bg, scol) = match dl.kind {
-                                        K::Add => (theme::with_alpha(theme::success(), 0x22), theme::success()),
-                                        K::Del => (theme::with_alpha(theme::danger(), 0x22), theme::danger()),
-                                        K::Hunk => (theme::with_alpha(theme::accent(), 0x14), theme::text_mute()),
-                                        K::Context => ([0, 0, 0, 0], theme::text_mute()),
-                                    };
-                                    if bg[3] > 0 {
-                                        g.rect(gcx0 + 14.0, cy2 - 1.0, gcw - 14.0, 13.0, bg);
-                                    }
-                                    let prefix = match dl.kind {
-                                        K::Add => "+",
-                                        K::Del => "-",
-                                        _ => " ",
-                                    };
-                                    let txt = format!("{prefix}{}", dl.text.trim_end());
-                                    g.draw_text_clipped(
-                                        gcx0 + 20.0,
-                                        cy2,
-                                        &txt,
-                                        gpu::DrawOpts { font_size: 10.0, color: scol, bold: false, italic: false },
-                                        gcx0 + 20.0,
-                                        clip_r,
-                                    );
-                                    cy2 += 13.0;
-                                }
+                                cy2 += 13.0;
                             }
                         }
                     }
+                }
                 // Dropdowns (path picker / branch switcher) paint last so they
                 // overlay the list + buttons. Built from the precomputed repo
                 // list and the poller's branch list.
@@ -6679,7 +7721,13 @@ impl App {
                     if let Some((ccx, ccy, ccw, cch)) = self.git.commit_caret_rect {
                         // Dim the panel behind the menu so the change-list rows
                         // (and their hover buttons) don't bleed alongside it.
-                        g.rect(git_col_x, top, git_col_w, bottom - top, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                        g.rect(
+                            git_col_x,
+                            top,
+                            git_col_w,
+                            bottom - top,
+                            theme::with_alpha([0, 0, 0, 255], 0xB0),
+                        );
                         // Push/Pull carry their ahead/behind counts so you can
                         // see what's pending before clicking.
                         let push_label = if git_view.ahead > 0 {
@@ -6706,7 +7754,11 @@ impl App {
                             )
                         };
                         let items: [(&str, String, GitCommitAction); 4] = [
-                            ("git-commit-horizontal", "Commit".to_string(), GitCommitAction::Commit),
+                            (
+                                "git-commit-horizontal",
+                                "Commit".to_string(),
+                                GitCommitAction::Commit,
+                            ),
                             sync_a,
                             sync_b,
                             ("github", "Create PR".to_string(), GitCommitAction::CreatePr),
@@ -6716,15 +7768,42 @@ impl App {
                         let mh = ih * items.len() as f32 + 8.0;
                         let mx = (ccx + ccw - iw).max(git_col_x + 8.0);
                         let my = ccy + cch + 4.0;
-                        panel_rect_outlined(g, mx, my, iw, mh, theme::radius_md(), theme::surface());
+                        panel_rect_outlined(
+                            g,
+                            mx,
+                            my,
+                            iw,
+                            mh,
+                            theme::radius_md(),
+                            theme::surface(),
+                        );
                         let mut iy = my + 4.0;
                         for (icon, label, act) in items {
-                            let hov = self.cursor_px.0 >= mx && self.cursor_px.0 <= mx + iw && self.cursor_px.1 >= iy && self.cursor_px.1 <= iy + ih;
+                            let hov = self.cursor_px.0 >= mx
+                                && self.cursor_px.0 <= mx + iw
+                                && self.cursor_px.1 >= iy
+                                && self.cursor_px.1 <= iy + ih;
                             if hov {
                                 hover_rect(g, mx + 4.0, iy, iw - 8.0, ih, theme::radius_sm());
                             }
-                            g.queue_icon(icon, mx + 14.0, iy + (ih - 15.0) / 2.0, 15.0, theme::text_dim());
-                            g.draw_text(mx + 38.0, iy + (ih - 13.0) / 2.0, &label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                            g.queue_icon(
+                                icon,
+                                mx + 14.0,
+                                iy + (ih - 15.0) / 2.0,
+                                15.0,
+                                theme::text_dim(),
+                            );
+                            g.draw_text(
+                                mx + 38.0,
+                                iy + (ih - 13.0) / 2.0,
+                                &label,
+                                gpu::DrawOpts {
+                                    font_size: 13.0,
+                                    color: theme::text(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                             self.git.commit_menu_rects.push((act, (mx, iy, iw, ih)));
                             iy += ih;
                         }
@@ -6735,7 +7814,11 @@ impl App {
             // 자식 웹뷰에게 넘긴다. 여기서 자리를 적어 두지 않으면 웹뷰가 어디에
             // 앉을지 알 수 없다(탭 머리 높이는 탭 글자 폭까지 재야 나온다).
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Persona {
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6758,7 +7841,11 @@ impl App {
             }
             // 이사 탭 — 다른 칼럼들과 같은 네이티브 본문(machinescol.rs).
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Machines {
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6789,7 +7876,11 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6846,7 +7937,11 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6875,7 +7970,11 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT } + status_h;
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
@@ -6939,9 +8038,7 @@ impl App {
                     // 원격 pane 은 헤더 바탕을 강조색으로 은은히 물들인다 — 칩 하나로는
                     // 여러 pane 이 깔린 화면에서 훑을 때 안 걸린다(어느 pane 이 저
                     // 기계 것인지는 바탕색이 먼저 말해야 한다).
-                    None if h.machine.is_some() => {
-                        theme::lerp(theme::bg(), theme::accent(), 0.10)
-                    }
+                    None if h.machine.is_some() => theme::lerp(theme::bg(), theme::accent(), 0.10),
                     None => theme::bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
@@ -7072,7 +8169,8 @@ impl App {
                     let label = crate::info::fit_text(g, status, max_w, chrome_font - 1.0, false);
                     if !label.is_empty() {
                         let pad = 6.0;
-                        let cw = g.measure_chrome_text(&label, chrome_font - 1.0, false) + pad * 2.0;
+                        let cw =
+                            g.measure_chrome_text(&label, chrome_font - 1.0, false) + pad * 2.0;
                         let ch = PANE_HEADER_HEIGHT - 8.0;
                         let cx = chip_right - cw;
                         if cx > h.x + 8.0 {
@@ -7191,8 +8289,12 @@ impl App {
                 pane_tab_windowing.push((h.id.clone(), strip.first, strip.n_vis, h.active_tab));
                 tab_hits.extend(strip.tab_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
                 tab_close_hits.extend(strip.close_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
-                tab_popout_hits
-                    .extend(strip.popout_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
+                tab_popout_hits.extend(
+                    strip
+                        .popout_hits
+                        .iter()
+                        .map(|(i, r)| (h.id.clone(), *i, *r)),
+                );
                 if let Some(r) = strip.plus_rect {
                     plus_hits.push((h.id.clone(), r));
                 }
@@ -7243,7 +8345,11 @@ impl App {
                     // `statusbar_visible`, inlined here under the gpu borrow).
                     let fvis = self.statusbar.shown.contains(&h.id)
                         || (!self.statusbar.hidden.contains(&h.id) && self.set_footer_default);
-                    let sb_icon = if fvis { "panel-bottom" } else { "panel-bottom-dashed" };
+                    let sb_icon = if fvis {
+                        "panel-bottom"
+                    } else {
+                        "panel-bottom-dashed"
+                    };
                     vec![
                         (sb_icon, None, Some(ActionKind::ToggleStatusbar)),
                         ("columns-2", None, Some(ActionKind::SplitV)),
@@ -7257,8 +8363,7 @@ impl App {
                     let chip_x = bx + (abw - chip_size) / 2.0;
                     let hover = inside(chip_x, chip_y, chip_size, chip_size);
                     if hover {
-                        hover_rect(g, chip_x, chip_y, chip_size, chip_size,
-                            theme::radius_sm());
+                        hover_rect(g, chip_x, chip_y, chip_size, chip_size, theme::radius_sm());
                     }
                     let color = if hover { theme::text() } else { act_fg };
                     g.queue_icon(
@@ -7269,10 +8374,18 @@ impl App {
                         color,
                     );
                     if let Some(k) = kind {
-                        image_btn_hits.push((h.id.clone(), k, (chip_x, chip_y, chip_size, chip_size)));
+                        image_btn_hits.push((
+                            h.id.clone(),
+                            k,
+                            (chip_x, chip_y, chip_size, chip_size),
+                        ));
                     }
                     if let Some(a) = action {
-                        pane_action_hits.push((h.id.clone(), a, (chip_x, chip_y, chip_size, chip_size)));
+                        pane_action_hits.push((
+                            h.id.clone(),
+                            a,
+                            (chip_x, chip_y, chip_size, chip_size),
+                        ));
                     }
                     bx += abw + agap;
                 }
@@ -7282,8 +8395,7 @@ impl App {
                 if addr_vis {
                     let ah = icon_size + 6.0;
                     let ay = h.y + (PANE_HEADER_HEIGHT - ah) / 2.0;
-                    let ax = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0)) - 6.0
-                        - addr_w;
+                    let ax = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0)) - 6.0 - addr_w;
                     let afont = 11.0_f32;
                     let tx = ax + 8.0;
                     let ty = ay + (ah - afont) / 2.0;
@@ -7404,7 +8516,11 @@ impl App {
                             h.web_url.as_deref().unwrap_or(""),
                             gpu::DrawOpts {
                                 font_size: afont,
-                                color: if hover { theme::text() } else { theme::text_dim() },
+                                color: if hover {
+                                    theme::text()
+                                } else {
+                                    theme::text_dim()
+                                },
                                 bold: false,
                                 italic: false,
                             },
@@ -7425,7 +8541,15 @@ impl App {
                     let seg_h = icon_size + 6.0;
                     let seg_y = h.y + (PANE_HEADER_HEIGHT - seg_h) / 2.0;
                     let mut sx = h.x + h.w - 8.0 - seg_w;
-                    round_rect(g, sx, seg_y, seg_w, seg_h, theme::radius_sm(), theme::surface());
+                    round_rect(
+                        g,
+                        sx,
+                        seg_y,
+                        seg_w,
+                        seg_h,
+                        theme::radius_sm(),
+                        theme::surface(),
+                    );
                     let ty = seg_y + (seg_h - seg_font) / 2.0;
                     for (label, lw, raw) in
                         [("Rendered", md_rendered_w, false), ("Raw", md_raw_w, true)]
@@ -7435,20 +8559,39 @@ impl App {
                         let hover = inside(sx, seg_y, cell_w, seg_h);
                         g.hover_pointer |= hover;
                         if active {
-                            round_rect(g, sx, seg_y, cell_w, seg_h,
-                                theme::radius_sm(), theme::surface_hover());
+                            round_rect(
+                                g,
+                                sx,
+                                seg_y,
+                                cell_w,
+                                seg_h,
+                                theme::radius_sm(),
+                                theme::surface_hover(),
+                            );
                         } else if hover {
-                            hover_rect(g, sx, seg_y, cell_w, seg_h,
-                                theme::radius_sm());
+                            hover_rect(g, sx, seg_y, cell_w, seg_h, theme::radius_sm());
                         }
-                        let color = if active { theme::text() } else { theme::text_dim() };
+                        let color = if active {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        };
                         g.draw_text(
                             sx + seg_pad,
                             ty,
                             label,
-                            gpu::DrawOpts { font_size: seg_font, color, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: seg_font,
+                                color,
+                                bold: false,
+                                italic: false,
+                            },
                         );
-                        let act = if raw { ActionKind::MdRaw } else { ActionKind::MdRender };
+                        let act = if raw {
+                            ActionKind::MdRaw
+                        } else {
+                            ActionKind::MdRender
+                        };
                         pane_action_hits.push((h.id.clone(), act, (sx, seg_y, cell_w, seg_h)));
                         sx += cell_w;
                     }
@@ -7505,9 +8648,7 @@ impl App {
                             let key = w.active_tab_pid(id);
                             self.pane_claude_sid
                                 .get(&key)
-                                .and_then(|sid| {
-                                    kasa_mcp::character::session_character(sid)
-                                })
+                                .and_then(|sid| kasa_mcp::character::session_character(sid))
                                 .or_else(|| {
                                     let view = self
                                         .pty
@@ -7526,8 +8667,11 @@ impl App {
                     // outer → 활성 탭 pid. 아래 루프는 `g(=&mut self.gpu)` 를 잡고 있어
                     // `pty_for_pane` 같은 `&self` 메서드를 못 부른다 — 이 lock 한 번에
                     // 같이 떠 두고 거기서 필드 접근만 한다.
-                    let tab_pids: HashMap<String, String> =
-                        w.panes.keys().map(|id| (id.clone(), w.active_tab_pid(id))).collect();
+                    let tab_pids: HashMap<String, String> = w
+                        .panes
+                        .keys()
+                        .map(|id| (id.clone(), w.active_tab_pid(id)))
+                        .collect();
                     (w.active_pane.clone(), chars, tab_pids)
                 })
                 .unwrap_or_default();
@@ -7541,7 +8685,9 @@ impl App {
                 .filter(|(id, ..)| {
                     // outer 키가 아니라 활성 탭 pid — 탭에서 도는 클로드는 outer 로
                     // 안 잡혀 테두리 게이트를 통째로 못 지났다.
-                    let key = tab_pids.get(id.as_str()).map_or(id.as_str(), String::as_str);
+                    let key = tab_pids
+                        .get(id.as_str())
+                        .map_or(id.as_str(), String::as_str);
                     self.pty.get(key).and_then(|p| p.active_agent()).is_some()
                 })
                 .map(|(id, ..)| id.clone())
@@ -7594,8 +8740,7 @@ impl App {
                                 // 줌은 학생이 없는 순수 셸에서도 테두리가 있어야
                                 // 한다 — 없으면 줌 자체가 안 보인다.
                                 .or_else(|| {
-                                    zoom_focus
-                                        .then(|| theme::accent_color(theme::accent_name()))
+                                    zoom_focus.then(|| theme::accent_color(theme::accent_name()))
                                 })
                         };
                         if let Some(col) = border_col {
@@ -7694,17 +8839,25 @@ impl App {
                         // ⋮ 핸들 — 상단 중앙. 평소엔 완전히 숨김. pane 상단 30% 띠에
                         // 커서가 들어오면 흐릿하게 등장하고, ⋮ 바로 위로 가면 진해진다
                         // (그때 손모양 커서 — handler 측). 클릭=메뉴·드래그=이동.
-                        let on_handle = hmx >= hx && hmx <= hx + HANDLE
-                            && hmy >= hy && hmy <= hy + HANDLE;
+                        let on_handle =
+                            hmx >= hx && hmx <= hx + HANDLE && hmy >= hy && hmy <= hy + HANDLE;
                         let zone_h = fbox_h * 0.30;
-                        let in_zone = hmx >= *fx && hmx <= fx + fw
-                            && hmy >= *fy && hmy <= fy + zone_h;
+                        let in_zone =
+                            hmx >= *fx && hmx <= fx + fw && hmy >= *fy && hmy <= fy + zone_h;
                         let isz = 16.0_f32;
                         // glow/chip 없이 ⋮ 아이콘 자체만 숨김→흐릿→진함 3단계.
                         if on_handle || in_zone {
-                            g.queue_icon("ellipsis-horizontal",
-                                hx + (HANDLE - isz) / 2.0, hy + (HANDLE - isz) / 2.0, isz,
-                                if on_handle { theme::text() } else { theme::with_alpha(theme::text(), 0x66) });
+                            g.queue_icon(
+                                "ellipsis-horizontal",
+                                hx + (HANDLE - isz) / 2.0,
+                                hy + (HANDLE - isz) / 2.0,
+                                isz,
+                                if on_handle {
+                                    theme::text()
+                                } else {
+                                    theme::with_alpha(theme::text(), 0x66)
+                                },
+                            );
                         }
                         handle_rects.push((fid.clone(), (hx, hy, HANDLE, HANDLE)));
                         zones.push((fid.clone(), (*fx, *fy, *fw, zone_h)));
@@ -7714,8 +8867,13 @@ impl App {
                         // 상태바(footer) 토글 아이콘은 현재 표시 상태를 그대로
                         // 드러낸다 — 보이면 panel-bottom, 접혀 있으면 dashed.
                         let fvis = self.statusbar.shown.contains(fid.as_str())
-                            || (!self.statusbar.hidden.contains(fid.as_str()) && self.set_footer_default);
-                        let sb_icon = if fvis { "panel-bottom" } else { "panel-bottom-dashed" };
+                            || (!self.statusbar.hidden.contains(fid.as_str())
+                                && self.set_footer_default);
+                        let sb_icon = if fvis {
+                            "panel-bottom"
+                        } else {
+                            "panel-bottom-dashed"
+                        };
                         // 상단바(헤더 띠)도 같은 방식 — 지금 보이는 상태를 아이콘이
                         // 그대로 드러낸다. hdr_vis 는 has_header() 와 같은 답이어야
                         // 하므로 pane 에 직접 물어본다(override 포함).
@@ -7723,7 +8881,11 @@ impl App {
                             let ws = self.ws.lock().unwrap();
                             ws.panes.get(fid.as_str()).is_some_and(|p| p.has_header())
                         };
-                        let hdr_icon = if hdr_vis { "panel-top" } else { "panel-top-dashed" };
+                        let hdr_icon = if hdr_vis {
+                            "panel-top"
+                        } else {
+                            "panel-top-dashed"
+                        };
                         let items = [
                             ("plus", ActionKind::NewTab),
                             // columns-2(세로선=좌우 2칸) → Horizontal(right),
@@ -7766,18 +8928,38 @@ impl App {
                             hy + HANDLE + 3.0
                         };
                         round_rect(g, mx, my, mw, mh, theme::radius_sm(), theme::border());
-                        round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
-                            theme::radius_sm() - 1.0, theme::surface_hover());
+                        round_rect(
+                            g,
+                            mx + 1.0,
+                            my + 1.0,
+                            mw - 2.0,
+                            mh - 2.0,
+                            theme::radius_sm() - 1.0,
+                            theme::surface_hover(),
+                        );
                         let mut bx2 = mx + pad;
                         let by2 = my + pad;
                         for (icon, act) in items {
                             let on = hmx >= bx2 && hmx <= bx2 + bw && hmy >= by2 && hmy <= by2 + bh;
                             if on {
-                                round_rect(g, bx2, by2, bw, bh, theme::radius_sm(), theme::surface_active());
+                                round_rect(
+                                    g,
+                                    bx2,
+                                    by2,
+                                    bw,
+                                    bh,
+                                    theme::radius_sm(),
+                                    theme::surface_active(),
+                                );
                             }
                             let bisz = 16.0_f32;
-                            g.queue_icon(icon, bx2 + (bw - bisz) / 2.0, by2 + (bh - bisz) / 2.0, bisz,
-                                if on { theme::text() } else { theme::text_dim() });
+                            g.queue_icon(
+                                icon,
+                                bx2 + (bw - bisz) / 2.0,
+                                by2 + (bh - bisz) / 2.0,
+                                bisz,
+                                if on { theme::text() } else { theme::text_dim() },
+                            );
                             menu_hits.push((act, (bx2, by2, bw, bh)));
                             bx2 += bw + gap;
                         }
@@ -7808,7 +8990,13 @@ impl App {
                 // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(거노). 두께는
                 // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
                 let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
-                g.rect(fx + bt, bar_y, fw - 2.0 * bt, pane_footer_h - bt, theme::bg());
+                g.rect(
+                    fx + bt,
+                    bar_y,
+                    fw - 2.0 * bt,
+                    pane_footer_h - bt,
+                    theme::bg(),
+                );
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
                 // 글자·아이콘이었다 — 같은 화면의 사이드바(13~14)와 나란히 놓이니
@@ -7852,30 +9040,36 @@ impl App {
                     .as_ref()
                     .map(|b| pill_w(g.measure_chrome_text(&b.branch, font, false)))
                     .unwrap_or(0.0);
-                let diff_parts = badge.as_ref().filter(|b| b.files > 0 || b.insertions > 0 || b.deletions > 0).map(|b| {
-                    let files_s = b.files.to_string();
-                    let plus_s = format!("+{}", b.insertions);
-                    let minus_s = format!("−{}", b.deletions);
-                    let full = g.measure_chrome_text(&files_s, font, false)
-                        + g.measure_chrome_text(" · ", font, false)
-                        + g.measure_chrome_text(&plus_s, font, false)
-                        + g.measure_chrome_text(" ", font, false)
-                        + g.measure_chrome_text(&minus_s, font, false);
-                    let short = g.measure_chrome_text(&files_s, font, false);
-                    (files_s, plus_s, minus_s, pill_w(full), pill_w(short))
-                });
+                let diff_parts = badge
+                    .as_ref()
+                    .filter(|b| b.files > 0 || b.insertions > 0 || b.deletions > 0)
+                    .map(|b| {
+                        let files_s = b.files.to_string();
+                        let plus_s = format!("+{}", b.insertions);
+                        let minus_s = format!("−{}", b.deletions);
+                        let full = g.measure_chrome_text(&files_s, font, false)
+                            + g.measure_chrome_text(" · ", font, false)
+                            + g.measure_chrome_text(&plus_s, font, false)
+                            + g.measure_chrome_text(" ", font, false)
+                            + g.measure_chrome_text(&minus_s, font, false);
+                        let short = g.measure_chrome_text(&files_s, font, false);
+                        (files_s, plus_s, minus_s, pill_w(full), pill_w(short))
+                    });
                 // 아이콘과 여백만 남은 경로 칩은 아무 말도 못 한다 — 글자 한 자는
                 // 들어갈 폭을 바닥으로 잡고, 거기 못 미치면 뒤 칩을 줄인다.
                 let min_cwd = pill_w(g.measure_chrome_text("…w", font, false));
                 let mut show_branch = branch_w > 0.0;
                 let mut diff_mode = if diff_parts.is_some() { 2u8 } else { 0 };
                 let tail_w = |show_branch: bool, diff_mode: u8| {
-                    (if show_branch { branch_w + chip_gap } else { 0.0 })
-                        + match (diff_mode, &diff_parts) {
-                            (2, Some((.., full, _))) => full + chip_gap,
-                            (1, Some((.., short))) => short + chip_gap,
-                            _ => 0.0,
-                        }
+                    (if show_branch {
+                        branch_w + chip_gap
+                    } else {
+                        0.0
+                    }) + match (diff_mode, &diff_parts) {
+                        (2, Some((.., full, _))) => full + chip_gap,
+                        (1, Some((.., short))) => short + chip_gap,
+                        _ => 0.0,
+                    }
                 };
                 while avail - tail_w(show_branch, diff_mode) < min_cwd {
                     if diff_mode > 0 {
@@ -7902,14 +9096,49 @@ impl App {
                         && sb_mx <= cx + pw
                         && sb_my >= pill_y
                         && sb_my <= pill_y + pill_h;
-                    round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), theme::border());
-                    round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
+                    round_rect(
+                        g,
+                        cx,
+                        pill_y,
+                        pw,
+                        pill_h,
+                        theme::radius_sm(),
+                        theme::border(),
+                    );
+                    round_rect(
+                        g,
+                        cx + 1.0,
+                        pill_y + 1.0,
+                        pw - 2.0,
+                        pill_h - 2.0,
                         theme::radius_sm() - 1.0,
-                        if hov { theme::surface_active() } else { theme::surface_hover() });
-                    g.queue_icon("folder", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
-                    g.draw_text(cx + pad_x + icon_sz + icon_gap, txt_y, &disp,
-                        gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
-                    self.statusbar.path_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
+                        if hov {
+                            theme::surface_active()
+                        } else {
+                            theme::surface_hover()
+                        },
+                    );
+                    g.queue_icon(
+                        "folder",
+                        cx + pad_x,
+                        pill_y + (pill_h - icon_sz) / 2.0,
+                        icon_sz,
+                        theme::text_dim(),
+                    );
+                    g.draw_text(
+                        cx + pad_x + icon_sz + icon_gap,
+                        txt_y,
+                        &disp,
+                        gpu::DrawOpts {
+                            font_size: font,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    self.statusbar
+                        .path_rects
+                        .push((fid.clone(), (cx, pill_y, pw, pill_h)));
                     cx += pw + chip_gap;
                 }
                 if let Some(badge) = badge {
@@ -7920,14 +9149,49 @@ impl App {
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
                             && sb_my <= pill_y + pill_h;
-                        round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), theme::border());
-                        round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
+                        round_rect(
+                            g,
+                            cx,
+                            pill_y,
+                            pw,
+                            pill_h,
+                            theme::radius_sm(),
+                            theme::border(),
+                        );
+                        round_rect(
+                            g,
+                            cx + 1.0,
+                            pill_y + 1.0,
+                            pw - 2.0,
+                            pill_h - 2.0,
                             theme::radius_sm() - 1.0,
-                            if hov { theme::surface_active() } else { theme::surface_hover() });
-                        g.queue_icon("git-branch", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
-                        g.draw_text(cx + pad_x + icon_sz + icon_gap, txt_y, &badge.branch,
-                            gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
-                        self.statusbar.branch_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
+                            if hov {
+                                theme::surface_active()
+                            } else {
+                                theme::surface_hover()
+                            },
+                        );
+                        g.queue_icon(
+                            "git-branch",
+                            cx + pad_x,
+                            pill_y + (pill_h - icon_sz) / 2.0,
+                            icon_sz,
+                            theme::text_dim(),
+                        );
+                        g.draw_text(
+                            cx + pad_x + icon_sz + icon_gap,
+                            txt_y,
+                            &badge.branch,
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color: theme::text(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        self.statusbar
+                            .branch_rects
+                            .push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
                     }
                     // diff pill — file icon + "N · +ins −del" (green / red).
@@ -7941,26 +9205,97 @@ impl App {
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
                             && sb_my <= pill_y + pill_h;
-                        round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), theme::border());
-                        round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
+                        round_rect(
+                            g,
+                            cx,
+                            pill_y,
+                            pw,
+                            pill_h,
+                            theme::radius_sm(),
+                            theme::border(),
+                        );
+                        round_rect(
+                            g,
+                            cx + 1.0,
+                            pill_y + 1.0,
+                            pw - 2.0,
+                            pill_h - 2.0,
                             theme::radius_sm() - 1.0,
-                            if hov { theme::surface_active() } else { theme::surface_hover() });
-                        g.queue_icon("file-text", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
+                            if hov {
+                                theme::surface_active()
+                            } else {
+                                theme::surface_hover()
+                            },
+                        );
+                        g.queue_icon(
+                            "file-text",
+                            cx + pad_x,
+                            pill_y + (pill_h - icon_sz) / 2.0,
+                            icon_sz,
+                            theme::text_dim(),
+                        );
                         let mut tx = cx + pad_x + icon_sz + icon_gap;
-                        tx = g.draw_text(tx, txt_y, files_s,
-                            gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
+                        tx = g.draw_text(
+                            tx,
+                            txt_y,
+                            files_s,
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color: theme::text(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                         if diff_mode == 2 {
-                            tx = g.draw_text(tx, txt_y, " · ",
-                                gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
-                            tx = g.draw_text(tx, txt_y, plus_s,
-                                gpu::DrawOpts { font_size: font, color: theme::success(), bold: false, italic: false });
-                            tx = g.draw_text(tx, txt_y, " ",
-                                gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
-                            g.draw_text(tx, txt_y, minus_s,
-                                gpu::DrawOpts { font_size: font, color: theme::danger(), bold: false, italic: false });
+                            tx = g.draw_text(
+                                tx,
+                                txt_y,
+                                " · ",
+                                gpu::DrawOpts {
+                                    font_size: font,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            tx = g.draw_text(
+                                tx,
+                                txt_y,
+                                plus_s,
+                                gpu::DrawOpts {
+                                    font_size: font,
+                                    color: theme::success(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            tx = g.draw_text(
+                                tx,
+                                txt_y,
+                                " ",
+                                gpu::DrawOpts {
+                                    font_size: font,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            g.draw_text(
+                                tx,
+                                txt_y,
+                                minus_s,
+                                gpu::DrawOpts {
+                                    font_size: font,
+                                    color: theme::danger(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                         }
                         let _ = tx;
-                        self.statusbar.diff_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
+                        self.statusbar
+                            .diff_rects
+                            .push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
                     }
                 }
@@ -7979,7 +9314,15 @@ impl App {
                     if !label.is_empty() {
                         let pw = pad_x * 2.0 + g.measure_chrome_text(&label, font, false);
                         if cx + pw <= right {
-                            round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), theme::border());
+                            round_rect(
+                                g,
+                                cx,
+                                pill_y,
+                                pw,
+                                pill_h,
+                                theme::radius_sm(),
+                                theme::border(),
+                            );
                             round_rect(
                                 g,
                                 cx + 1.0,
@@ -8016,12 +9359,28 @@ impl App {
                         && sb_my >= bar_y
                         && sb_my <= bar_y + pane_footer_h;
                     if h_hover {
-                        hover_rect(g, h_x - 4.0, h_y - 2.0, h_sz + 8.0, h_sz + 4.0,
-                            theme::radius_sm());
+                        hover_rect(
+                            g,
+                            h_x - 4.0,
+                            h_y - 2.0,
+                            h_sz + 8.0,
+                            h_sz + 4.0,
+                            theme::radius_sm(),
+                        );
                     }
-                    g.queue_icon("chevrons-down-up", h_x, h_y, h_sz,
-                        if h_hover { theme::text() } else { theme::text_mute() });
-                    self.statusbar.toggle_rects
+                    g.queue_icon(
+                        "chevrons-down-up",
+                        h_x,
+                        h_y,
+                        h_sz,
+                        if h_hover {
+                            theme::text()
+                        } else {
+                            theme::text_mute()
+                        },
+                    );
+                    self.statusbar
+                        .toggle_rects
                         .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, pane_footer_h)));
                 }
             }
@@ -8035,12 +9394,14 @@ impl App {
             if let Some((menu_pid, kind)) = self.statusbar.menu.clone() {
                 let anchor = match kind {
                     StatusbarMenu::Path => self
-                        .statusbar.path_rects
+                        .statusbar
+                        .path_rects
                         .iter()
                         .find(|(p, _)| *p == menu_pid)
                         .map(|(_, r)| *r),
                     StatusbarMenu::Branch => self
-                        .statusbar.branch_rects
+                        .statusbar
+                        .branch_rects
                         .iter()
                         .find(|(p, _)| *p == menu_pid)
                         .map(|(_, r)| *r),
@@ -8052,14 +9413,17 @@ impl App {
                     let is_path = matches!(kind, StatusbarMenu::Path);
                     let labels: Vec<String> = match kind {
                         StatusbarMenu::Path => self
-                            .statusbar.menu_dirs
+                            .statusbar
+                            .menu_dirs
                             .iter()
                             .enumerate()
                             .map(|(i, p)| {
                                 if i == 0 {
                                     ".. (상위 폴더)".to_string()
                                 } else {
-                                    nfc_hangul(p.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
+                                    nfc_hangul(
+                                        p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                                    )
                                 }
                             })
                             .collect(),
@@ -8069,7 +9433,8 @@ impl App {
                     // reads — the gpu borrow (`g`) rules out &self method calls.
                     let q = self.statusbar.menu_search.to_lowercase();
                     let fidx: Vec<usize> = if is_path {
-                        self.statusbar.menu_dirs
+                        self.statusbar
+                            .menu_dirs
                             .iter()
                             .enumerate()
                             .filter(|(i, p)| {
@@ -8100,19 +9465,44 @@ impl App {
                     // 정수 행씩 넘긴다. 시저를 세워도 되지만 둥근 모서리는 시저의
                     // 직사각형으로 못 흉내 낸다 — 모서리에서 각지게 잘린다.
                     let overflow = total.saturating_sub(view_rows);
-                    let scroll = self.statusbar.menu_scroll.clamp(0.0, overflow as f32 * item_h);
+                    let scroll = self
+                        .statusbar
+                        .menu_scroll
+                        .clamp(0.0, overflow as f32 * item_h);
                     self.statusbar.menu_scroll = scroll;
                     let first = ((scroll / item_h).round() as usize).min(overflow);
                     self.statusbar.menu_rect = Some((menu_x, menu_y, menu_w, menu_h));
-                    panel_rect_outlined(g, menu_x, menu_y, menu_w, menu_h, theme::radius_md(), theme::surface());
+                    panel_rect_outlined(
+                        g,
+                        menu_x,
+                        menu_y,
+                        menu_w,
+                        menu_h,
+                        theme::radius_md(),
+                        theme::surface(),
+                    );
                     let rows_top = menu_y + 4.0 + search_h;
                     // Inset search field + live query (or dim placeholder). Typing
                     // anywhere while the picker is open feeds this (forward_key).
                     if is_path {
                         let fy = menu_y + 6.0;
                         let fh = search_h - 8.0;
-                        round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::radius_sm(), theme::bg());
-                        g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::text_dim());
+                        round_rect(
+                            g,
+                            menu_x + 8.0,
+                            fy,
+                            menu_w - 16.0,
+                            fh,
+                            theme::radius_sm(),
+                            theme::bg(),
+                        );
+                        g.queue_icon(
+                            "folder-tree",
+                            menu_x + 16.0,
+                            fy + (fh - 14.0) / 2.0,
+                            14.0,
+                            theme::text_dim(),
+                        );
                         let (mut head, tail) = crate::lineedit::split(
                             &self.statusbar.menu_search,
                             self.statusbar.menu_search_cursor,
@@ -8127,29 +9517,58 @@ impl App {
                         } else {
                             (shown, theme::text())
                         };
-                        g.draw_text(menu_x + 38.0, fy + (fh - 13.0) / 2.0, &txt,
-                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                        g.draw_text(
+                            menu_x + 38.0,
+                            fy + (fh - 13.0) / 2.0,
+                            &txt,
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                         // 이 칸엔 캐럿이 없었다 — 끝에만 붙는 칸이라 커서가 어딘지
                         // 물을 일이 없었기 때문이다. 이제 가운데를 고칠 수 있으니
                         // 자리를 보여 줘야 한다.
                         if commit_caret_on {
-                            g.rect(menu_x + 38.0 + caret_w, fy + (fh - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                            g.rect(
+                                menu_x + 38.0 + caret_w,
+                                fy + (fh - 14.0) / 2.0,
+                                1.5,
+                                14.0,
+                                theme::text(),
+                            );
                         }
                     }
                     if total == 0 {
-                        g.draw_text(menu_x + 16.0, rows_top + 4.0, "(없음)",
-                            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
+                        g.draw_text(
+                            menu_x + 16.0,
+                            rows_top + 4.0,
+                            "(없음)",
+                            gpu::DrawOpts {
+                                font_size: 12.0,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                     }
                     let current_branch = matches!(kind, StatusbarMenu::Branch)
                         .then(|| {
-                            self.pane_cwd_cache
-                                .get(&menu_pid)
-                                .and_then(|p| self.window_git.lock().ok().and_then(|m| m.get(p).map(|b| b.branch.clone())))
+                            self.pane_cwd_cache.get(&menu_pid).and_then(|p| {
+                                self.window_git
+                                    .lock()
+                                    .ok()
+                                    .and_then(|m| m.get(p).map(|b| b.branch.clone()))
+                            })
                         })
                         .flatten();
                     let font = if is_path { 13.0 } else { 12.0 };
                     for vis in 0..view_rows {
-                        let Some(&i) = fidx.get(first + vis) else { break };
+                        let Some(&i) = fidx.get(first + vis) else {
+                            break;
+                        };
                         let Some(label) = labels.get(i) else { break };
                         let iy = rows_top + vis as f32 * item_h;
                         let row = (menu_x, iy, menu_w, item_h);
@@ -8160,7 +9579,15 @@ impl App {
                         // Hovered row = bright accent fill (cursor's selected-item
                         // cue); its glyphs flip to dark for contrast.
                         if hover {
-                            round_rect(g, row.0 + 2.0, row.1, row.2 - 4.0, row.3, theme::radius_sm(), theme::accent());
+                            round_rect(
+                                g,
+                                row.0 + 2.0,
+                                row.1,
+                                row.2 - 4.0,
+                                row.3,
+                                theme::radius_sm(),
+                                theme::accent(),
+                            );
                         }
                         let is_current = current_branch.as_deref() == Some(label.as_str());
                         let mut text_x = menu_x + 12.0;
@@ -8168,9 +9595,24 @@ impl App {
                         if is_path {
                             let is_parent = i == 0;
                             let is_dir = is_parent
-                                || self.statusbar.menu_dirs.get(i).map(|p| p.is_dir()).unwrap_or(false);
-                            let glyph = if is_parent { "arrow-up" } else if is_dir { "folder" } else { "file" };
-                            let icon_c = if hover { theme::bg() } else { theme::text_dim() };
+                                || self
+                                    .statusbar
+                                    .menu_dirs
+                                    .get(i)
+                                    .map(|p| p.is_dir())
+                                    .unwrap_or(false);
+                            let glyph = if is_parent {
+                                "arrow-up"
+                            } else if is_dir {
+                                "folder"
+                            } else {
+                                "file"
+                            };
+                            let icon_c = if hover {
+                                theme::bg()
+                            } else {
+                                theme::text_dim()
+                            };
                             g.queue_icon(glyph, text_x, iy + (item_h - 15.0) / 2.0, 15.0, icon_c);
                             text_x += 15.0 + 9.0;
                         }
@@ -8185,15 +9627,21 @@ impl App {
                             text_x,
                             iy + (item_h - font) / 2.0,
                             label,
-                            gpu::DrawOpts { font_size: font, color, bold: is_current, italic: false },
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color,
+                                bold: is_current,
+                                italic: false,
+                            },
                         );
                         match kind {
                             StatusbarMenu::Path => self
-                                .statusbar.menu_dir_rects
+                                .statusbar
+                                .menu_dir_rects
                                 .push((self.statusbar.menu_dirs[i].clone(), row)),
-                            StatusbarMenu::Branch => self
-                                .statusbar.menu_branch_rects
-                                .push((label.clone(), row)),
+                            StatusbarMenu::Branch => {
+                                self.statusbar.menu_branch_rects.push((label.clone(), row))
+                            }
                         }
                     }
                     // Scrollbar — thin thumb on the right edge so overflow is
@@ -8203,9 +9651,16 @@ impl App {
                         let track_y = rows_top;
                         let track_h = view_rows as f32 * item_h;
                         let thumb_h = (track_h * view_rows as f32 / total as f32).max(18.0);
-                        let thumb_y = track_y
-                            + (track_h - thumb_h) * (first as f32 / overflow as f32);
-                        pill_rect(g, track_x, thumb_y, 3.0, thumb_h, theme::with_alpha(theme::text(), 0x55));
+                        let thumb_y =
+                            track_y + (track_h - thumb_h) * (first as f32 / overflow as f32);
+                        pill_rect(
+                            g,
+                            track_x,
+                            thumb_y,
+                            3.0,
+                            thumb_h,
+                            theme::with_alpha(theme::text(), 0x55),
+                        );
                     }
                 } else {
                     self.statusbar.menu_rect = None;
@@ -8266,8 +9721,11 @@ impl App {
                     let chip_f = 12.0_f32;
                     let chip_pad = 10.0_f32;
                     let chip_gap = 8.0_f32;
-                    let (ok_label, no_label) =
-                        if update_toast_on { ("설치", "나중에") } else { ("승인", "거부") };
+                    let (ok_label, no_label) = if update_toast_on {
+                        ("설치", "나중에")
+                    } else {
+                        ("승인", "거부")
+                    };
                     let (ok_w, no_w) = if collab_toast_action_on {
                         (
                             g.measure_chrome_text(ok_label, chip_f, true) + chip_pad * 2.0,
@@ -8444,40 +9902,45 @@ impl App {
             // — the hidden sibling panes, so the maximize visibly "sends the
             // others to the dock" and a sibling chip click switches the zoom to
             // it. zoom siblings have no × (they're live panes, not parked).
-            let mut dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
-                let ws = self.ws.lock().unwrap();
-                self.pty_layout
-                    .as_ref()
-                    .map(|t| {
-                        t.leaves()
-                            .iter()
-                            .filter(|l| **l != z.as_str())
-                            .map(|l| {
-                                let label = ws
-                                    .panes
-                                    .get(*l)
-                                    .and_then(|p| {
-                                        p.tabs.get(p.active_tab).and_then(|tb| tb.title.clone())
-                                    })
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| l.to_string());
-                                (l.to_string(), label, false)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                self.docked
-                    .iter()
-                    .map(|d| {
-                        (
-                            d.id.clone(),
-                            if d.label.is_empty() { "shell".to_string() } else { d.label.clone() },
-                            true,
-                        )
-                    })
-                    .collect()
-            };
+            let mut dock_items: Vec<(String, String, bool)> =
+                if let Some(z) = self.zoomed_pane.clone() {
+                    let ws = self.ws.lock().unwrap();
+                    self.pty_layout
+                        .as_ref()
+                        .map(|t| {
+                            t.leaves()
+                                .iter()
+                                .filter(|l| **l != z.as_str())
+                                .map(|l| {
+                                    let label = ws
+                                        .panes
+                                        .get(*l)
+                                        .and_then(|p| {
+                                            p.tabs.get(p.active_tab).and_then(|tb| tb.title.clone())
+                                        })
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or_else(|| l.to_string());
+                                    (l.to_string(), label, false)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    self.docked
+                        .iter()
+                        .map(|d| {
+                            (
+                                d.id.clone(),
+                                if d.label.is_empty() {
+                                    "shell".to_string()
+                                } else {
+                                    d.label.clone()
+                                },
+                                true,
+                            )
+                        })
+                        .collect()
+                };
             // 닫은 pane 은 여기 안 선다 — 되살리기는 Info 의 「되살리기」 섹션이
             // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
             // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
@@ -8521,7 +9984,11 @@ impl App {
                 let mut chip_close_hits = Vec::new();
                 for (id, label, killable) in dock_items.iter() {
                     let lw = g.measure_chrome_text(label, chrome_font, false);
-                    let chip_w = if *killable { lw + icon + 24.0 } else { lw + 20.0 };
+                    let chip_w = if *killable {
+                        lw + icon + 24.0
+                    } else {
+                        lw + 20.0
+                    };
                     let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
                     round_rect(
                         g,
@@ -8530,7 +9997,11 @@ impl App {
                         chip_w,
                         chip_h,
                         theme::radius_sm(),
-                        if hover { theme::surface_hover() } else { theme::surface_active() },
+                        if hover {
+                            theme::surface_hover()
+                        } else {
+                            theme::surface_active()
+                        },
                     );
                     g.draw_text(
                         cx + 10.0,
@@ -8545,7 +10016,13 @@ impl App {
                     );
                     if *killable {
                         let close_x = cx + chip_w - icon - 6.0;
-                        g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::text_dim());
+                        g.queue_icon(
+                            "x",
+                            close_x,
+                            cy + (chip_h - icon) / 2.0,
+                            icon,
+                            theme::text_dim(),
+                        );
                         chip_close_hits.push((id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
                         chip_hits.push((id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
                     } else {
@@ -8594,7 +10071,13 @@ impl App {
                 // 말한다(2026-08-16 「클로드사용량 로고도 넣어주고」). 계정 이름은
                 // 좁아지면 빠지는 값이라 로고가 유일한 정체 표식이 되는 폭이 있다.
                 if win_w >= 500.0 {
-                    g.queue_icon("claude", x, sy + (status_h - 12.0) / 2.0, 12.0, theme::text_dim());
+                    g.queue_icon(
+                        "claude",
+                        x,
+                        sy + (status_h - 12.0) / 2.0,
+                        12.0,
+                        theme::text_dim(),
+                    );
                     x += 17.0;
                 }
 
@@ -8718,7 +10201,12 @@ impl App {
                         x,
                         ty,
                         &s,
-                        gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: col,
+                            bold: false,
+                            italic: false,
+                        },
                     );
                     x += g.measure_chrome_text(&s, fs, true);
                 }
@@ -8842,9 +10330,7 @@ impl App {
                         // (2026-08-29 지적: 「좌측하단 계정정보 좀 정보량 줄이고」).
                         // 있다는 사실은 끝의 `+N` 이 말하고, 전체는 눌러서 본다.
                         let (pct_s, pct_c) = match badge {
-                            Some(b) if b.stale => {
-                                (format!("~{:.0}%", b.pct), pct_col(b.pct))
-                            }
+                            Some(b) if b.stale => (format!("~{:.0}%", b.pct), pct_col(b.pct)),
                             Some(b) => (format!("{:.0}%", b.pct), pct_col(b.pct)),
                             None => {
                                 dropped += 1;
@@ -8932,7 +10418,11 @@ impl App {
                     // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
                     // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다. 몇 커밋
                     // 앞인지는 눌러서 보면 된다 — 이 줄은 어느 쪽인지만 말한다.
-                    let mark = if crate::version::is_local_build() { "+" } else { "" };
+                    let mark = if crate::version::is_local_build() {
+                        "+"
+                    } else {
+                        ""
+                    };
                     let s = if waiting {
                         format!(" · v{}{mark} ↑", crate::version::CURRENT)
                     } else {
@@ -9004,7 +10494,12 @@ impl App {
                         tx + icon + gap,
                         ty,
                         label,
-                        gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: col,
+                            bold: false,
+                            italic: false,
+                        },
                     );
                     // 점은 이름 뒤로 옮겼다 — 상태(열림/닫힘)는 이름을 읽은 **다음에**
                     // 궁금해지는 것이고, 앞에 두면 지구본과 나란히 서서 둘 다 뜻이 흐려진다.
@@ -9047,7 +10542,12 @@ impl App {
                             rx,
                             ty,
                             label,
-                            gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
                         );
                         round_rect(
                             g,
@@ -9056,7 +10556,11 @@ impl App {
                             dot,
                             dot,
                             dot / 2.0,
-                            if up { theme::success() } else { theme::attention() },
+                            if up {
+                                theme::success()
+                            } else {
+                                theme::attention()
+                            },
                         );
                     }
                     // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:
@@ -9081,7 +10585,11 @@ impl App {
                             &label,
                             gpu::DrawOpts {
                                 font_size: fs,
-                                color: if open { theme::text() } else { theme::text_dim() },
+                                color: if open {
+                                    theme::text()
+                                } else {
+                                    theme::text_dim()
+                                },
                                 bold: false,
                                 italic: false,
                             },
@@ -9108,15 +10616,15 @@ impl App {
                         // 답을 못 하기 때문이다 — 실측 2026-08-27 에 팬이 도는데
                         // 메모리는 정상(wired 17%)이었고, 범인은 코어를 계속 태우던
                         // 바깥 앱들이었다(「안조용한데 위젯좀 잘만들어봐」).
-                        let mem_adv =
-                            self.statusbar.mem.map_or(crate::sysmem::Advice::Ok, |m| m.advice());
-                        let gb =
-                            |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
+                        let mem_adv = self
+                            .statusbar
+                            .mem
+                            .map_or(crate::sysmem::Advice::Ok, |m| m.advice());
+                        let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
                         // 목록 순서에 기대지 않고 **잣대별로 골라 온다** —
                         // `usage_outside` 는 두 잣대의 후보를 합쳐 둔 자루라
                         // 앞자리가 무엇인지 정해져 있지 않다(2026-08-29).
-                        let heaviest =
-                            self.statusbar.usage_outside.iter().max_by_key(|a| a.rss);
+                        let heaviest = self.statusbar.usage_outside.iter().max_by_key(|a| a.rss);
                         let hottest = self
                             .statusbar
                             .usage_outside
@@ -9144,11 +10652,7 @@ impl App {
                         } else if let Some(a) = hottest {
                             Some((
                                 true,
-                                format!(
-                                    "{} {:.0}%",
-                                    crate::input::short_app_name(&a.name),
-                                    a.cpu
-                                ),
+                                format!("{} {:.0}%", crate::input::short_app_name(&a.name), a.cpu),
                             ))
                         // 우리 자신은 바깥 앱 **뒤**다. 저쪽은 눌러서 닫을 수
                         // 있지만 이건 손 쓸 데가 없어서, 둘 다 걸렸을 때 답이
@@ -9161,15 +10665,18 @@ impl App {
                             None
                         };
                         if let Some((danger, words)) = warn {
-                            let col = if danger { theme::danger() } else { theme::syn_number() };
+                            let col = if danger {
+                                theme::danger()
+                            } else {
+                                theme::syn_number()
+                            };
                             let icon = 12.0_f32;
                             // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
                             // 무슨 일인지 다 적어 준다.
                             let words = (win_w >= 900.0).then_some(words);
-                            let ww =
-                                words.as_ref().map_or(0.0, |t| {
-                                    4.0 + g.measure_chrome_text(t, fs, false)
-                                });
+                            let ww = words
+                                .as_ref()
+                                .map_or(0.0, |t| 4.0 + g.measure_chrome_text(t, fs, false));
                             seg_x -= icon + ww + 10.0;
                             g.queue_icon(
                                 "triangle-alert",
@@ -9199,10 +10706,8 @@ impl App {
                         let rr = (seg_x - 6.0, sy, label_right - seg_x + 12.0, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
-                            g.hover_pointer |= hx >= rr.0
-                                && hx <= rr.0 + rr.2
-                                && hy >= rr.1
-                                && hy <= rr.1 + rr.3;
+                            g.hover_pointer |=
+                                hx >= rr.0 && hx <= rr.0 + rr.2 && hy >= rr.1 && hy <= rr.1 + rr.3;
                         }
                         self.statusbar.res_rect = Some(rr);
                     }
@@ -9219,23 +10724,32 @@ impl App {
                         let lw = g.measure_chrome_text(&label, fs, false);
                         let seg = icon + gap + lw;
                         rx -= seg + 12.0;
-                        let open =
-                            matches!(self.statusbar.popover, Some((state::StatusbarPopover::Ports, _)));
-                        let col = if open || n > 0 { theme::text() } else { theme::text_dim() };
+                        let open = matches!(
+                            self.statusbar.popover,
+                            Some((state::StatusbarPopover::Ports, _))
+                        );
+                        let col = if open || n > 0 {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        };
                         g.queue_icon("plug", rx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(
                             rx + icon + gap,
                             ty,
                             &label,
-                            gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false },
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
                         );
                         let pr = (rx - 6.0, sy, seg + 12.0, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
-                            g.hover_pointer |= hx >= pr.0
-                                && hx <= pr.0 + pr.2
-                                && hy >= pr.1
-                                && hy <= pr.1 + pr.3;
+                            g.hover_pointer |=
+                                hx >= pr.0 && hx <= pr.0 + pr.2 && hy >= pr.1 && hy <= pr.1 + pr.3;
                         }
                         self.statusbar.port_rect = Some(pr);
                     }
@@ -9278,8 +10792,8 @@ impl App {
             // 열자마자 최신을 보는 것이 이 화면의 첫 인상이다.
             {
                 use std::sync::atomic::Ordering;
-                let was = crate::handler::usage_menu_open()
-                    .swap(self.account_menu, Ordering::Relaxed);
+                let was =
+                    crate::handler::usage_menu_open().swap(self.account_menu, Ordering::Relaxed);
                 if self.account_menu && !was {
                     crate::handler::usage_poke().store(true, Ordering::Relaxed);
                     // 판 확인도 여는 순간에 붙인다 — 상시 폴링을 안 하는 대신
@@ -9309,9 +10823,10 @@ impl App {
                     // 같은 규칙을 써야 그 한 줄이 빈칸이 되지 않는다.
                     // 메뉴가 열려 있는 동안 계정 수만큼 **매 프레임** 돈다 —
                     // 활성 계정 차례에서 프로세스를 띄우므로 캐시판을 쓴다.
-                    let key = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                    let key =
+                        crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
                     self.claude_usage_all.lock().ok()?.get(&key).cloned()
                 };
                 // 로스터 행은 **활성 계정의** 한도를 말한다. 표에 아직 없으면 상태줄이
@@ -9362,9 +10877,13 @@ impl App {
                 // 제공자 두 줄. **사용률 높은 순** — 옮길 곳을 고르려고 여는 목록이라
                 // 급한 쪽이 위로 와야 한다. Codex는 계정별 HTTP 조회가 아니라 최근
                 // rollout이 남긴 실제 창 하나만 갖고 있으므로, 값이 없을 때만 뒤로 민다.
-                let codex_signed_in = crate::settings::codex_identity(&self.set_codex_account).is_some();
+                let codex_signed_in =
+                    crate::settings::codex_identity(&self.set_codex_account).is_some();
                 let mut provs: Vec<(AccountProvider, f32)> = vec![
-                    (AccountProvider::Claude, claude_badge.as_ref().map_or(-1.0, |b| b.pct)),
+                    (
+                        AccountProvider::Claude,
+                        claude_badge.as_ref().map_or(-1.0, |b| b.pct),
+                    ),
                     (
                         AccountProvider::Codex,
                         codex_rollout
@@ -9407,7 +10926,15 @@ impl App {
                 // 패널 배경과 팝업 배경은 6단계밖에 안 벌어져서, 색만으로는 이게 떠 있는
                 // 메뉴인지 패널의 한 구역인지 읽히지 않았다(거노: 뒤가 비쳐 보인다).
                 // 층 선언은 색이 아니라 그림자·테두리가 하는 일이다.
-                panel_rect_outlined(g, mx, my, mw, mh, theme::radius_sm(), theme::surface_hover());
+                panel_rect_outlined(
+                    g,
+                    mx,
+                    my,
+                    mw,
+                    mh,
+                    theme::radius_sm(),
+                    theme::surface_hover(),
+                );
                 let mut ry = my + pad;
 
                 // ── 머리: Usage · all agents ────────────────────────────────
@@ -9415,7 +10942,12 @@ impl App {
                     mx + pad_x,
                     ry + (head_h - f) / 2.0 - 1.0,
                     "사용량",
-                    gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: f,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
                 {
                     // 「이 앱에서 도는 학생 전부의 합」이라는 뜻 — 계정 하나를 여러
@@ -9454,12 +10986,22 @@ impl App {
                         let cx = mx + pad_x + cw * i as f32;
                         let r = (cx, ry + 2.0, cw, seg_h - 6.0);
                         let on = compact == want;
-                        let hover = hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
+                        let hover =
+                            hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
                         g.hover_pointer |= hover;
                         if on || hover {
                             round_rect(
-                                g, r.0, r.1, r.2, r.3, theme::radius_sm(),
-                                if on { theme::surface_active() } else { theme::with_alpha(theme::surface_active(), 0x66) },
+                                g,
+                                r.0,
+                                r.1,
+                                r.2,
+                                r.3,
+                                theme::radius_sm(),
+                                if on {
+                                    theme::surface_active()
+                                } else {
+                                    theme::with_alpha(theme::surface_active(), 0x66)
+                                },
                             );
                         }
                         let lf = f - 2.0;
@@ -9470,12 +11012,17 @@ impl App {
                             label,
                             gpu::DrawOpts {
                                 font_size: lf,
-                                color: if on { theme::text() } else { theme::text_mute() },
+                                color: if on {
+                                    theme::text()
+                                } else {
+                                    theme::text_mute()
+                                },
                                 bold: on,
                                 italic: false,
                             },
                         );
-                        self.account_menu_hits.push((AccountMenuItem::Density(want), r));
+                        self.account_menu_hits
+                            .push((AccountMenuItem::Density(want), r));
                     }
                 }
                 ry += seg_h;
@@ -9489,10 +11036,22 @@ impl App {
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + prow_h;
                     g.hover_pointer |= on;
                     if on || open {
-                        round_rect(g, mx + pad, ry, mw - pad * 2.0, prow_h,
-                            theme::radius_sm(), theme::surface_active());
+                        round_rect(
+                            g,
+                            mx + pad,
+                            ry,
+                            mw - pad * 2.0,
+                            prow_h,
+                            theme::radius_sm(),
+                            theme::surface_active(),
+                        );
                     }
-                    let line1 = ry + if compact { (prow_h - f) / 2.0 - 1.0 } else { 7.0 };
+                    let line1 = ry
+                        + if compact {
+                            (prow_h - f) / 2.0 - 1.0
+                        } else {
+                            7.0
+                        };
                     g.queue_icon(
                         p.icon(),
                         mx + pad_x,
@@ -9502,8 +11061,15 @@ impl App {
                     );
                     let name_x = mx + pad_x + icon + 8.0;
                     g.draw_text(
-                        name_x, line1, p.label(),
-                        gpu::DrawOpts { font_size: f, color: theme::text(), bold: false, italic: false },
+                        name_x,
+                        line1,
+                        p.label(),
+                        gpu::DrawOpts {
+                            font_size: f,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
                     );
                     // 오른쪽 끝은 언제나 › — 이 행이 열리는 행이라는 유일한 표시다.
                     g.queue_icon(
@@ -9518,40 +11084,61 @@ impl App {
                         AccountProvider::Claude => match claude_badge.as_ref() {
                             // 값이 있으면: 첫 줄 오른쪽에 리셋, 둘째 줄에 창별 막대.
                             Some(b) => {
-                            if compact {
-                                let t = usage_text(b);
-                                let tf = f - 1.0;
-                                let tw = g.measure_chrome_text(t.as_str(), tf, true);
-                                g.draw_text(
-                                    right - tw, line1, &t,
-                                    gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
-                                );
-                            } else {
-                                if let Some(t) = resets_text(b) {
-                                    let tf = f - 2.0;
-                                    let tw = g.measure_chrome_text(t.as_str(), tf, false);
+                                if compact {
+                                    let t = usage_text(b);
+                                    let tf = f - 1.0;
+                                    let tw = g.measure_chrome_text(t.as_str(), tf, true);
                                     g.draw_text(
-                                        right - tw, line1 + 1.0, &t,
-                                        gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                        right - tw,
+                                        line1,
+                                        &t,
+                                        gpu::DrawOpts {
+                                            font_size: tf,
+                                            color: pct_col(b.pct),
+                                            bold: true,
+                                            italic: false,
+                                        },
                                     );
+                                } else {
+                                    if let Some(t) = resets_text(b) {
+                                        let tf = f - 2.0;
+                                        let tw = g.measure_chrome_text(t.as_str(), tf, false);
+                                        g.draw_text(
+                                            right - tw,
+                                            line1 + 1.0,
+                                            &t,
+                                            gpu::DrawOpts {
+                                                font_size: tf,
+                                                color: theme::text_mute(),
+                                                bold: false,
+                                                italic: false,
+                                            },
+                                        );
+                                    }
+                                    // 둘째 줄: [창 이름][막대][퍼센트] — **창마다 하나씩**.
+                                    // 하단바는 좁아서 급할 땐 한 창으로 접히므로, 펼친
+                                    // 여기서는 5시간과 주간이 **둘 다** 보여야 한다
+                                    // (2026-08-15 지시 「7일 한도는 눌렀을 때만」의 그 자리).
+                                    // 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가
+                                    // 어디까지 갈 수 있는 것인지 알 수가 없어 그냥 얼룩이 된다.
+                                    let l2 = ry + prow_h - 17.0;
+                                    draw_usage_windows(g, name_x, l2, right, f - 3.0, b);
                                 }
-                                // 둘째 줄: [창 이름][막대][퍼센트] — **창마다 하나씩**.
-                                // 하단바는 좁아서 급할 땐 한 창으로 접히므로, 펼친
-                                // 여기서는 5시간과 주간이 **둘 다** 보여야 한다
-                                // (2026-08-15 지시 「7일 한도는 눌렀을 때만」의 그 자리).
-                                // 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가
-                                // 어디까지 갈 수 있는 것인지 알 수가 없어 그냥 얼룩이 된다.
-                                let l2 = ry + prow_h - 17.0;
-                                draw_usage_windows(g, name_x, l2, right, f - 3.0, b);
-                            }
                             }
                             None => {
                                 let t = "기록 없음";
                                 let tf = f - 2.0;
                                 let tw = g.measure_chrome_text(t, tf, false);
                                 g.draw_text(
-                                    right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
-                                    gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                    right - tw,
+                                    ry + (prow_h - tf) / 2.0 - 1.0,
+                                    t,
+                                    gpu::DrawOpts {
+                                        font_size: tf,
+                                        color: theme::text_mute(),
+                                        bold: false,
+                                        italic: false,
+                                    },
                                 );
                             }
                         },
@@ -9561,16 +11148,24 @@ impl App {
                                 let summary = codex_run_summary(snapshot);
                                 if compact {
                                     let t = usage.unwrap_or_else(|| {
-                                        if summary.is_empty() { "최근 기록".to_string() } else { summary }
+                                        if summary.is_empty() {
+                                            "최근 기록".to_string()
+                                        } else {
+                                            summary
+                                        }
                                     });
                                     let tf = f - 1.0;
                                     let t = crate::info::fit_text(g, &t, right - name_x, tf, true);
                                     let tw = g.measure_chrome_text(&t, tf, true);
                                     g.draw_text(
-                                        right - tw, line1, &t,
+                                        right - tw,
+                                        line1,
+                                        &t,
                                         gpu::DrawOpts {
                                             font_size: tf,
-                                            color: snapshot.rate_used_pct.map_or(theme::text_mute(), pct_col),
+                                            color: snapshot
+                                                .rate_used_pct
+                                                .map_or(theme::text_mute(), pct_col),
                                             bold: true,
                                             italic: false,
                                         },
@@ -9580,10 +11175,14 @@ impl App {
                                         let tf = f - 2.0;
                                         let tw = g.measure_chrome_text(&t, tf, true);
                                         g.draw_text(
-                                            right - tw, line1 + 1.0, &t,
+                                            right - tw,
+                                            line1 + 1.0,
+                                            &t,
                                             gpu::DrawOpts {
                                                 font_size: tf,
-                                                color: snapshot.rate_used_pct.map_or(theme::text_mute(), pct_col),
+                                                color: snapshot
+                                                    .rate_used_pct
+                                                    .map_or(theme::text_mute(), pct_col),
                                                 bold: true,
                                                 italic: false,
                                             },
@@ -9597,7 +11196,9 @@ impl App {
                                     let tf = f - 3.0;
                                     let t = crate::info::fit_text(g, &t, right - name_x, tf, false);
                                     g.draw_text(
-                                        name_x, ry + prow_h - 17.0, &t,
+                                        name_x,
+                                        ry + prow_h - 17.0,
+                                        &t,
                                         gpu::DrawOpts {
                                             font_size: tf,
                                             color: theme::text_mute(),
@@ -9616,8 +11217,15 @@ impl App {
                                 let tf = f - 2.0;
                                 let tw = g.measure_chrome_text(t, tf, false);
                                 g.draw_text(
-                                    right - tw, ry + (prow_h - tf) / 2.0 - 1.0, t,
-                                    gpu::DrawOpts { font_size: tf, color: col, bold: false, italic: false },
+                                    right - tw,
+                                    ry + (prow_h - tf) / 2.0 - 1.0,
+                                    t,
+                                    gpu::DrawOpts {
+                                        font_size: tf,
+                                        color: col,
+                                        bold: false,
+                                        italic: false,
+                                    },
                                 );
                             }
                         },
@@ -9640,12 +11248,26 @@ impl App {
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + row_h;
                     g.hover_pointer |= on;
                     if on {
-                        round_rect(g, mx + pad, ry, mw - pad * 2.0, row_h,
-                            theme::radius_sm(), theme::surface_active());
+                        round_rect(
+                            g,
+                            mx + pad,
+                            ry,
+                            mw - pad * 2.0,
+                            row_h,
+                            theme::radius_sm(),
+                            theme::surface_active(),
+                        );
                     }
                     g.draw_text(
-                        mx + pad_x, ry + (row_h - f) / 2.0 - 1.0, label,
-                        gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false },
+                        mx + pad_x,
+                        ry + (row_h - f) / 2.0 - 1.0,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: f,
+                            color: theme::text_dim(),
+                            bold: false,
+                            italic: false,
+                        },
                     );
                     g.queue_icon(
                         "chevron-right",
@@ -9752,7 +11374,9 @@ impl App {
                                 (
                                     a.id.clone(),
                                     crate::settings::account_display(
-                                        &a.id, &a.label, &format!("계정 {}", i + 2),
+                                        &a.id,
+                                        &a.label,
+                                        &format!("계정 {}", i + 2),
                                     ),
                                     self.set_claude_account == a.id,
                                 )
@@ -9767,7 +11391,9 @@ impl App {
                                 match (label.is_empty(), ident) {
                                     (true, Some(e)) => e,
                                     (true, None) => fallback,
-                                    (false, Some(e)) if !label.contains(&e) => format!("{label} · {e}"),
+                                    (false, Some(e)) if !label.contains(&e) => {
+                                        format!("{label} · {e}")
+                                    }
                                     (false, _) => label.to_string(),
                                 }
                             };
@@ -9813,7 +11439,12 @@ impl App {
                     // 한 줄에 글자로만.
                     let two_line = p == AccountProvider::Claude && !compact;
                     let arow_h = if two_line { 44.0 } else { row_h };
-                    let footer_h = row_h + if p == AccountProvider::Codex { 18.0 } else { 0.0 };
+                    let footer_h = row_h
+                        + if p == AccountProvider::Codex {
+                            18.0
+                        } else {
+                            0.0
+                        };
                     let sh = pad * 2.0 + lab_h + arow_h * rows.len() as f32 + rule + footer_h;
                     // 로스터 오른쪽에 두되, 창 밖으로 나가면 왼쪽으로 접는다.
                     let sx = if mx + mw + 4.0 + sw <= win_w - 4.0 {
@@ -9822,21 +11453,43 @@ impl App {
                         (mx - sw - 4.0).max(4.0)
                     };
                     let sy = (py - pad).min(win_h - sh - 4.0).max(4.0);
-                    panel_rect_outlined(g, sx, sy, sw, sh, theme::radius_sm(), theme::surface_hover());
+                    panel_rect_outlined(
+                        g,
+                        sx,
+                        sy,
+                        sw,
+                        sh,
+                        theme::radius_sm(),
+                        theme::surface_hover(),
+                    );
                     let mut sry = sy + pad;
                     {
                         let t = format!("{} 계정", p.label());
                         let lf = f - 2.0;
                         g.draw_text(
-                            sx + pad_x, sry + 3.0, &t,
-                            gpu::DrawOpts { font_size: lf, color: theme::text_mute(), bold: true, italic: false },
+                            sx + pad_x,
+                            sry + 3.0,
+                            &t,
+                            gpu::DrawOpts {
+                                font_size: lf,
+                                color: theme::text_mute(),
+                                bold: true,
+                                italic: false,
+                            },
                         );
                         if let Some(note) = codex_note.as_deref() {
                             let nf = f - 4.0;
                             let note = crate::info::fit_text(g, note, sw - pad_x * 2.0, nf, false);
                             g.draw_text(
-                                sx + pad_x, sry + 21.0, &note,
-                                gpu::DrawOpts { font_size: nf, color: theme::text_mute(), bold: false, italic: false },
+                                sx + pad_x,
+                                sry + 21.0,
+                                &note,
+                                gpu::DrawOpts {
+                                    font_size: nf,
+                                    color: theme::text_mute(),
+                                    bold: false,
+                                    italic: false,
+                                },
                             );
                         }
                         sry += lab_h;
@@ -9846,17 +11499,33 @@ impl App {
                         // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 손모양도 없다.
                         g.hover_pointer |= on && !active;
                         if on && !active {
-                            round_rect(g, sx + pad, sry, sw - pad * 2.0, arow_h,
-                                theme::radius_sm(), theme::surface_active());
+                            round_rect(
+                                g,
+                                sx + pad,
+                                sry,
+                                sw - pad * 2.0,
+                                arow_h,
+                                theme::radius_sm(),
+                                theme::surface_active(),
+                            );
                         }
                         // 두 줄일 때 이름은 위, 막대는 아래. 한 줄이면 예전대로 가운데.
-                        let line1 =
-                            if two_line { sry + 7.0 } else { sry + (arow_h - f) / 2.0 - 1.0 };
+                        let line1 = if two_line {
+                            sry + 7.0
+                        } else {
+                            sry + (arow_h - f) / 2.0 - 1.0
+                        };
                         g.draw_text(
-                            sx + pad_x, line1, &label,
+                            sx + pad_x,
+                            line1,
+                            &label,
                             gpu::DrawOpts {
                                 font_size: f,
-                                color: if active { theme::text() } else { theme::text_dim() },
+                                color: if active {
+                                    theme::text()
+                                } else {
+                                    theme::text_dim()
+                                },
                                 bold: active,
                                 italic: false,
                             },
@@ -9869,8 +11538,15 @@ impl App {
                             let t = "사용 중";
                             let tw = g.measure_chrome_text(t, tf, true);
                             g.draw_text(
-                                right - tw, line1 + if two_line { 0.0 } else { (f - tf) / 2.0 }, t,
-                                gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: true, italic: false },
+                                right - tw,
+                                line1 + if two_line { 0.0 } else { (f - tf) / 2.0 },
+                                t,
+                                gpu::DrawOpts {
+                                    font_size: tf,
+                                    color: theme::text_mute(),
+                                    bold: true,
+                                    italic: false,
+                                },
                             );
                         } else if p == AccountProvider::Codex
                             && crate::settings::codex_identity(&id).is_none()
@@ -9878,8 +11554,15 @@ impl App {
                             let t = "로그인";
                             let tw = g.measure_chrome_text(t, tf, true);
                             g.draw_text(
-                                right - tw, line1 + if two_line { 0.0 } else { (f - tf) / 2.0 }, t,
-                                gpu::DrawOpts { font_size: tf, color: theme::danger(), bold: true, italic: false },
+                                right - tw,
+                                line1 + if two_line { 0.0 } else { (f - tf) / 2.0 },
+                                t,
+                                gpu::DrawOpts {
+                                    font_size: tf,
+                                    color: theme::danger(),
+                                    bold: true,
+                                    italic: false,
+                                },
                             );
                         }
                         // Claude 한도는 슬롯별 조회값이라 계정 줄마다 적는다. Codex는
@@ -9897,8 +11580,15 @@ impl App {
                                     if let Some(t) = crate::resets_in_label(b.resets_at) {
                                         let tw = g.measure_chrome_text(&t, tf, false);
                                         g.draw_text(
-                                            right - tw, sry + arow_h - 16.0, &t,
-                                            gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                            right - tw,
+                                            sry + arow_h - 16.0,
+                                            &t,
+                                            gpu::DrawOpts {
+                                                font_size: tf,
+                                                color: theme::text_mute(),
+                                                bold: false,
+                                                italic: false,
+                                            },
                                         );
                                         // 막대가 그 자리를 침범하지 않게 폭을 미리
                                         // 빼서 넘긴다 — `draw_usage_windows` 는 폭이
@@ -9906,7 +11596,12 @@ impl App {
                                         bar_right = right - tw - 8.0;
                                     }
                                     draw_usage_windows(
-                                        g, sx + pad_x, sry + arow_h - 16.0, bar_right, tf, &b,
+                                        g,
+                                        sx + pad_x,
+                                        sry + arow_h - 16.0,
+                                        bar_right,
+                                        tf,
+                                        &b,
                                     );
                                 }
                                 (Some(b), false) => {
@@ -9919,8 +11614,15 @@ impl App {
                                         right
                                     };
                                     g.draw_text(
-                                        bx - tw, sry + (arow_h - tf) / 2.0 - 1.0, &t,
-                                        gpu::DrawOpts { font_size: tf, color: pct_col(b.pct), bold: true, italic: false },
+                                        bx - tw,
+                                        sry + (arow_h - tf) / 2.0 - 1.0,
+                                        &t,
+                                        gpu::DrawOpts {
+                                            font_size: tf,
+                                            color: pct_col(b.pct),
+                                            bold: true,
+                                            italic: false,
+                                        },
                                     );
                                 }
                                 // 값이 없으면 **빈칸으로 두지 않는다.** 빈칸은 「여유
@@ -9943,8 +11645,15 @@ impl App {
                                         right - g.measure_chrome_text(t, tf, false)
                                     };
                                     g.draw_text(
-                                        tx, ty2, t,
-                                        gpu::DrawOpts { font_size: tf, color: theme::text_mute(), bold: false, italic: false },
+                                        tx,
+                                        ty2,
+                                        t,
+                                        gpu::DrawOpts {
+                                            font_size: tf,
+                                            color: theme::text_mute(),
+                                            bold: false,
+                                            italic: false,
+                                        },
                                     );
                                 }
                             }
@@ -9961,12 +11670,26 @@ impl App {
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
                         g.hover_pointer |= on;
                         if on {
-                            round_rect(g, sx + pad, sry, sw - pad * 2.0, row_h,
-                                theme::radius_sm(), theme::surface_active());
+                            round_rect(
+                                g,
+                                sx + pad,
+                                sry,
+                                sw - pad * 2.0,
+                                row_h,
+                                theme::radius_sm(),
+                                theme::surface_active(),
+                            );
                         }
                         g.draw_text(
-                            sx + pad_x, sry + (row_h - f) / 2.0 - 1.0, "계정 관리…",
-                            gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false },
+                            sx + pad_x,
+                            sry + (row_h - f) / 2.0 - 1.0,
+                            "계정 관리…",
+                            gpu::DrawOpts {
+                                font_size: f,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
                         );
                         self.account_menu_hits
                             .push((AccountMenuItem::ManageAccounts, (sx, sry, sw, row_h)));
@@ -10024,56 +11747,197 @@ impl App {
                 // behind it bleeds through.
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xCC));
+                g.rect(
+                    0.0,
+                    0.0,
+                    win_w,
+                    win_h,
+                    theme::with_alpha([0, 0, 0, 255], 0xCC),
+                );
                 let bw = 560.0_f32.min(win_w - 60.0).max(0.0);
                 let bx = (win_w - bw) / 2.0;
                 let bh = (win_h - TITLE_HEIGHT - 60.0).min(660.0).max(0.0);
                 let bxy = TITLE_HEIGHT + (win_h - TITLE_HEIGHT - bh) / 2.0;
-                round_rect(g, bx - 1.0, bxy - 1.0, bw + 2.0, bh + 2.0, theme::radius_md(), theme::with_alpha(theme::border(), 0xFF));
+                round_rect(
+                    g,
+                    bx - 1.0,
+                    bxy - 1.0,
+                    bw + 2.0,
+                    bh + 2.0,
+                    theme::radius_md(),
+                    theme::with_alpha(theme::border(), 0xFF),
+                );
                 round_rect(g, bx, bxy, bw, bh, theme::radius_md(), theme::bg());
                 let pad = 22.0_f32;
                 let cx = bx + pad;
                 let cw = bw - pad * 2.0;
                 let mut my = bxy + pad;
                 // Header: icon chip + X
-                round_rect(g, cx, my, 36.0, 36.0, theme::radius_sm(), theme::surface_active());
-                g.queue_icon("git-commit-horizontal", cx + 10.0, my + 10.0, 16.0, theme::text());
+                round_rect(
+                    g,
+                    cx,
+                    my,
+                    36.0,
+                    36.0,
+                    theme::radius_sm(),
+                    theme::surface_active(),
+                );
+                g.queue_icon(
+                    "git-commit-horizontal",
+                    cx + 10.0,
+                    my + 10.0,
+                    16.0,
+                    theme::text(),
+                );
                 let xx = bx + bw - pad - 16.0;
-                let xhov = self.cursor_px.0 >= xx - 5.0 && self.cursor_px.0 <= xx + 21.0 && self.cursor_px.1 >= my && self.cursor_px.1 <= my + 24.0;
-                g.queue_icon("x", xx, my + 4.0, 16.0, if xhov { theme::text() } else { theme::text_mute() });
-                self.git.commit_modal_rects.push((GitModalBtn::Close, (xx - 5.0, my, 26.0, 26.0)));
+                let xhov = self.cursor_px.0 >= xx - 5.0
+                    && self.cursor_px.0 <= xx + 21.0
+                    && self.cursor_px.1 >= my
+                    && self.cursor_px.1 <= my + 24.0;
+                g.queue_icon(
+                    "x",
+                    xx,
+                    my + 4.0,
+                    16.0,
+                    if xhov {
+                        theme::text()
+                    } else {
+                        theme::text_mute()
+                    },
+                );
+                self.git
+                    .commit_modal_rects
+                    .push((GitModalBtn::Close, (xx - 5.0, my, 26.0, 26.0)));
                 my += 36.0 + 18.0;
-                g.draw_text(cx, my, "Commit your changes", gpu::DrawOpts { font_size: 19.0, color: theme::text(), bold: true, italic: false });
+                g.draw_text(
+                    cx,
+                    my,
+                    "Commit your changes",
+                    gpu::DrawOpts {
+                        font_size: 19.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
+                );
                 my += 36.0;
                 // Branch
-                g.draw_text(cx, my, "Branch", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
+                g.draw_text(
+                    cx,
+                    my,
+                    "Branch",
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 my += 22.0;
                 g.queue_icon("git-branch", cx, my, 15.0, theme::text_dim());
-                let mbranch = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
-                g.draw_text(cx + 22.0, my + 1.0, mbranch, gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false });
+                let mbranch = if git_view.branch.is_empty() {
+                    "—"
+                } else {
+                    git_view.branch.as_str()
+                };
+                g.draw_text(
+                    cx + 22.0,
+                    my + 1.0,
+                    mbranch,
+                    gpu::DrawOpts {
+                        font_size: 14.0,
+                        color: theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 my += 34.0;
                 // Changes + Include unstaged toggle
-                g.draw_text(cx, my, "Changes", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
+                g.draw_text(
+                    cx,
+                    my,
+                    "Changes",
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 let tw = 38.0_f32;
                 let th = 20.0_f32;
                 let tx = bx + bw - pad - tw;
                 let tlbl = "Include unstaged";
                 let tlw = g.measure_chrome_text(tlbl, 13.0, false);
-                g.draw_text(tx - 8.0 - tlw, my, tlbl, gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false });
+                g.draw_text(
+                    tx - 8.0 - tlw,
+                    my,
+                    tlbl,
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text_dim(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 let on = self.git.commit_modal_include_unstaged;
-                pill_rect(g, tx, my - 2.0, tw, th, if on { theme::accent() } else { theme::surface_active() });
+                pill_rect(
+                    g,
+                    tx,
+                    my - 2.0,
+                    tw,
+                    th,
+                    if on {
+                        theme::accent()
+                    } else {
+                        theme::surface_active()
+                    },
+                );
                 let knob = th - 6.0;
                 let kx = if on { tx + tw - knob - 3.0 } else { tx + 3.0 };
                 circle_rect(g, kx, my - 2.0 + 3.0, knob, [255, 255, 255, 255]);
-                self.git.commit_modal_rects.push((GitModalBtn::IncludeUnstaged, (tx - 4.0, my - 5.0, tw + 8.0, th + 8.0)));
+                self.git.commit_modal_rects.push((
+                    GitModalBtn::IncludeUnstaged,
+                    (tx - 4.0, my - 5.0, tw + 8.0, th + 8.0),
+                ));
                 my += 28.0;
                 // File list box
                 let lh = (bh * 0.28).min(180.0).max(60.0);
                 panel_rect_outlined(g, cx, my, cw, lh, theme::radius_sm(), theme::surface());
                 let nf = git_view.staged.len() + git_view.unstaged.len();
-                let mut fx = g.draw_text(cx + 12.0, my + 10.0, &format!("{} files", nf), gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false });
-                fx = g.draw_text(fx + 10.0, my + 10.0, &format!("+{}", git_view.insertions), gpu::DrawOpts { font_size: 13.0, color: theme::success(), bold: false, italic: false });
-                g.draw_text(fx + 8.0, my + 10.0, &format!("-{}", git_view.deletions), gpu::DrawOpts { font_size: 13.0, color: DIFF_RED, bold: false, italic: false });
+                let mut fx = g.draw_text(
+                    cx + 12.0,
+                    my + 10.0,
+                    &format!("{} files", nf),
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
+                );
+                fx = g.draw_text(
+                    fx + 10.0,
+                    my + 10.0,
+                    &format!("+{}", git_view.insertions),
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::success(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                g.draw_text(
+                    fx + 8.0,
+                    my + 10.0,
+                    &format!("-{}", git_view.deletions),
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: DIFF_RED,
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 let mut ly = my + 34.0;
                 for (_m, path) in git_view.staged.iter().chain(git_view.unstaged.iter()) {
                     if ly > my + lh - 18.0 {
@@ -10081,9 +11945,29 @@ impl App {
                     }
                     let fname = path.rsplit('/').next().unwrap_or(path.as_str());
                     let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
-                    let ex = g.draw_text(cx + 12.0, ly, fname, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                    let ex = g.draw_text(
+                        cx + 12.0,
+                        ly,
+                        fname,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     if !dir.is_empty() {
-                        g.draw_text(ex + 7.0, ly + 0.5, dir, gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false });
+                        g.draw_text(
+                            ex + 7.0,
+                            ly + 0.5,
+                            dir,
+                            gpu::DrawOpts {
+                                font_size: 11.0,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
                     }
                     if let Some((ins, del)) = git_view.numstat.get(path) {
                         let minus = format!("-{del}");
@@ -10093,41 +11977,126 @@ impl App {
                         let mut rx = cx + cw - 12.0;
                         if *del > 0 {
                             rx -= wm;
-                            g.draw_text(rx, ly, &minus, gpu::DrawOpts { font_size: 12.0, color: DIFF_RED, bold: false, italic: false });
+                            g.draw_text(
+                                rx,
+                                ly,
+                                &minus,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: DIFF_RED,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                             rx -= 6.0;
                         }
                         if *ins > 0 {
                             rx -= wp;
-                            g.draw_text(rx, ly, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::success(), bold: false, italic: false });
+                            g.draw_text(
+                                rx,
+                                ly,
+                                &plus,
+                                gpu::DrawOpts {
+                                    font_size: 12.0,
+                                    color: theme::success(),
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
                         }
                     }
                     ly += 22.0;
                 }
                 my += lh + 18.0;
                 // Commit message box
-                g.draw_text(cx, my, "Commit message", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
+                g.draw_text(
+                    cx,
+                    my,
+                    "Commit message",
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 my += 22.0;
                 let inh = 70.0_f32;
                 if self.git.commit_focused {
-                    round_rect(g, cx - 1.0, my - 1.0, cw + 2.0, inh + 2.0, theme::radius_sm(), theme::accent());
+                    round_rect(
+                        g,
+                        cx - 1.0,
+                        my - 1.0,
+                        cw + 2.0,
+                        inh + 2.0,
+                        theme::radius_sm(),
+                        theme::accent(),
+                    );
                 }
                 panel_rect(g, cx, my, cw, inh, theme::radius_sm(), theme::surface());
                 let itx = cx + 10.0;
                 let ity = my + 9.0;
-                let preedit = if self.git.commit_focused { self.preedit.as_str() } else { "" };
+                let preedit = if self.git.commit_focused {
+                    self.preedit.as_str()
+                } else {
+                    ""
+                };
                 if self.git.commit_msg.is_empty() && preedit.is_empty() {
-                    g.draw_text(itx, ity, "변경 사항 설명…", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
+                    g.draw_text(
+                        itx,
+                        ity,
+                        "변경 사항 설명…",
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                 }
-                let cur = self.git.commit_cursor.min(self.git.commit_msg.chars().count());
+                let cur = self
+                    .git
+                    .commit_cursor
+                    .min(self.git.commit_msg.chars().count());
                 let before: String = self.git.commit_msg.chars().take(cur).collect();
                 let after: String = self.git.commit_msg.chars().skip(cur).collect();
-                let mut px = g.draw_text(itx, ity, &before, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                let mut px = g.draw_text(
+                    itx,
+                    ity,
+                    &before,
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 let caret_x = px;
                 if !preedit.is_empty() {
-                    px = g.draw_text(px, ity, preedit, gpu::DrawOpts { font_size: 13.0, color: theme::accent(), bold: false, italic: false });
+                    px = g.draw_text(
+                        px,
+                        ity,
+                        preedit,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: theme::accent(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                 }
                 if !after.is_empty() {
-                    g.draw_text(px, ity, &after, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                    g.draw_text(
+                        px,
+                        ity,
+                        &after,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                 }
                 if self.git.commit_focused && preedit.is_empty() && commit_caret_on {
                     g.rect(caret_x, ity, 1.5, 14.0, theme::text());
@@ -10140,10 +12109,41 @@ impl App {
                     ("git-commit-horizontal", "Commit", GitModalBtn::Commit),
                     ("arrow-up", "Commit and push", GitModalBtn::CommitAndPush),
                 ] {
-                    let hov = self.cursor_px.0 >= cx && self.cursor_px.0 <= cx + cw && self.cursor_px.1 >= my && self.cursor_px.1 <= my + bbh;
-                    panel_rect(g, cx, my, cw, bbh, theme::radius_sm(), if hov { theme::surface_hover() } else { theme::surface_active() });
-                    g.queue_icon(icon, cx + 14.0, my + (bbh - 15.0) / 2.0, 15.0, theme::text());
-                    g.draw_text(cx + 38.0, my + (bbh - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                    let hov = self.cursor_px.0 >= cx
+                        && self.cursor_px.0 <= cx + cw
+                        && self.cursor_px.1 >= my
+                        && self.cursor_px.1 <= my + bbh;
+                    panel_rect(
+                        g,
+                        cx,
+                        my,
+                        cw,
+                        bbh,
+                        theme::radius_sm(),
+                        if hov {
+                            theme::surface_hover()
+                        } else {
+                            theme::surface_active()
+                        },
+                    );
+                    g.queue_icon(
+                        icon,
+                        cx + 14.0,
+                        my + (bbh - 15.0) / 2.0,
+                        15.0,
+                        theme::text(),
+                    );
+                    g.draw_text(
+                        cx + 38.0,
+                        my + (bbh - 13.0) / 2.0,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: 13.0,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                     self.git.commit_modal_rects.push((btn, (cx, my, cw, bbh)));
                     my += bbh + 8.0;
                 }
@@ -10153,22 +12153,74 @@ impl App {
                 let cby = bxy + bh - pad - 34.0;
                 let conf_x = bx + bw - pad - confirm_w;
                 let canc_x = conf_x - 10.0 - cancel_w;
-                let conf_hov = self.cursor_px.0 >= conf_x && self.cursor_px.0 <= conf_x + confirm_w && self.cursor_px.1 >= cby && self.cursor_px.1 <= cby + 34.0;
-                let canc_hov = self.cursor_px.0 >= canc_x && self.cursor_px.0 <= canc_x + cancel_w && self.cursor_px.1 >= cby && self.cursor_px.1 <= cby + 34.0;
+                let conf_hov = self.cursor_px.0 >= conf_x
+                    && self.cursor_px.0 <= conf_x + confirm_w
+                    && self.cursor_px.1 >= cby
+                    && self.cursor_px.1 <= cby + 34.0;
+                let canc_hov = self.cursor_px.0 >= canc_x
+                    && self.cursor_px.0 <= canc_x + cancel_w
+                    && self.cursor_px.1 >= cby
+                    && self.cursor_px.1 <= cby + 34.0;
                 let wcanc = g.measure_chrome_text("Cancel", 13.0, false);
-                g.draw_text(canc_x + (cancel_w - wcanc) / 2.0, cby + 10.0, "Cancel", gpu::DrawOpts { font_size: 13.0, color: if canc_hov { theme::text() } else { theme::text_dim() }, bold: false, italic: false });
-                self.git.commit_modal_rects.push((GitModalBtn::Cancel, (canc_x, cby, cancel_w, 34.0)));
-                panel_rect(g, conf_x, cby, confirm_w, 34.0, theme::radius_sm(), if conf_hov { theme::accent() } else { theme::surface_active() });
+                g.draw_text(
+                    canc_x + (cancel_w - wcanc) / 2.0,
+                    cby + 10.0,
+                    "Cancel",
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: if canc_hov {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        },
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                self.git
+                    .commit_modal_rects
+                    .push((GitModalBtn::Cancel, (canc_x, cby, cancel_w, 34.0)));
+                panel_rect(
+                    g,
+                    conf_x,
+                    cby,
+                    confirm_w,
+                    34.0,
+                    theme::radius_sm(),
+                    if conf_hov {
+                        theme::accent()
+                    } else {
+                        theme::surface_active()
+                    },
+                );
                 let wconf = g.measure_chrome_text("Confirm", 13.0, true);
-                g.draw_text(conf_x + (confirm_w - wconf) / 2.0, cby + 10.0, "Confirm", gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false });
-                self.git.commit_modal_rects.push((GitModalBtn::Confirm, (conf_x, cby, confirm_w, 34.0)));
+                g.draw_text(
+                    conf_x + (confirm_w - wconf) / 2.0,
+                    cby + 10.0,
+                    "Confirm",
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
+                );
+                self.git
+                    .commit_modal_rects
+                    .push((GitModalBtn::Confirm, (conf_x, cby, confirm_w, 34.0)));
             }
             // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
             // queued last so it sits over every pane, overlay and toast.
             if let Some(dlg) = self.confirm_close.clone() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                g.rect(
+                    0.0,
+                    0.0,
+                    win_w,
+                    win_h,
+                    theme::with_alpha([0, 0, 0, 255], 0xB0),
+                );
                 let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
                 // pane 통째 닫기(⋮ ×)를 「탭」이라 부르면 무엇이 사라지는지가
                 // 어긋난다 — 그건 그 pane 의 탭을 전부 걷는다. 와일드카드를 안 쓰는
@@ -10182,10 +12234,9 @@ impl App {
                     crate::PendingClose::Tab { .. } => "이 탭을",
                 };
                 let (title, subtitle) = match &dlg.why {
-                    crate::CloseWhy::Busy(proc) => (
-                        format!("{proc} 실행 중이에요"),
-                        format!("{what} 닫을까요?"),
-                    ),
+                    crate::CloseWhy::Busy(proc) => {
+                        (format!("{proc} 실행 중이에요"), format!("{what} 닫을까요?"))
+                    }
                     // 파일 이름을 보여줘야 뭘 잃는지 안다. 셋을 넘으면 카드가
                     // 감당 못 하니 나머지는 개수로 접는다.
                     crate::CloseWhy::Dirty(docs) => {
@@ -10221,18 +12272,36 @@ impl App {
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
-                panel_rect_outlined(g, cx0, cy0, card_w, card_h, theme::radius_md(), theme::surface_active());
+                panel_rect_outlined(
+                    g,
+                    cx0,
+                    cy0,
+                    card_w,
+                    card_h,
+                    theme::radius_md(),
+                    theme::surface_active(),
+                );
                 g.draw_text(
                     cx0 + pad,
                     cy0 + 30.0,
                     &title,
-                    gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 15.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
                 g.draw_text(
                     cx0 + pad,
                     cy0 + 60.0,
                     subtitle,
-                    gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::text_dim(),
+                        bold: false,
+                        italic: false,
+                    },
                 );
                 let (mx, my) = self.cursor_px;
                 let bf = 13.0_f32;
@@ -10276,7 +12345,12 @@ impl App {
                         x + bpad,
                         btn_y + (btn_h - bf) / 2.0,
                         label,
-                        gpu::DrawOpts { font_size: bf, color: fg, bold, italic: false },
+                        gpu::DrawOpts {
+                            font_size: bf,
+                            color: fg,
+                            bold,
+                            italic: false,
+                        },
                     );
                     hits.push((btn, (x, btn_y, w, btn_h)));
                 };
@@ -10284,14 +12358,38 @@ impl App {
                     // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
                     // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.
                     let acc = theme::accent();
-                    button(g, &mut confirm_btn_hits, "저장", crate::ConfirmBtn::Save, Some(acc));
+                    button(
+                        g,
+                        &mut confirm_btn_hits,
+                        "저장",
+                        crate::ConfirmBtn::Save,
+                        Some(acc),
+                    );
                     let dg = theme::danger();
-                    button(g, &mut confirm_btn_hits, "저장 안 함", crate::ConfirmBtn::Close, Some(dg));
+                    button(
+                        g,
+                        &mut confirm_btn_hits,
+                        "저장 안 함",
+                        crate::ConfirmBtn::Close,
+                        Some(dg),
+                    );
                 } else {
                     let dg = theme::danger();
-                    button(g, &mut confirm_btn_hits, "닫기", crate::ConfirmBtn::Close, Some(dg));
+                    button(
+                        g,
+                        &mut confirm_btn_hits,
+                        "닫기",
+                        crate::ConfirmBtn::Close,
+                        Some(dg),
+                    );
                 }
-                button(g, &mut confirm_btn_hits, "취소", crate::ConfirmBtn::Cancel, None);
+                button(
+                    g,
+                    &mut confirm_btn_hits,
+                    "취소",
+                    crate::ConfirmBtn::Cancel,
+                    None,
+                );
             }
             // Chrome-style restore prompt: dim scrim + centered card offering to
             // reopen the last session's panes. Queued after the confirm modal so
@@ -10300,7 +12398,13 @@ impl App {
             if let Some(state) = self.restore_prompt.clone() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                g.rect(
+                    0.0,
+                    0.0,
+                    win_w,
+                    win_h,
+                    theme::with_alpha([0, 0, 0, 255], 0xB0),
+                );
                 let n = crate::App::count_claude_panes(&state);
                 let total = crate::App::count_panes(&state);
                 // 돌아올 학생들. 「pane 20개」는 숫자일 뿐이지만 얼굴은 누가 오는지를
@@ -10367,7 +12471,8 @@ impl App {
                 let hint = "esc 닫기";
                 let hint_w = g.measure_chrome_text(hint, 11.5, false);
                 let faces_w = if face_max > 0 {
-                    face_max as f32 * chip + (face_max as f32 - 1.0).max(0.0) * face_gap
+                    face_max as f32 * chip
+                        + (face_max as f32 - 1.0).max(0.0) * face_gap
                         + if overflow > 0 { chip + face_gap } else { 0.0 }
                 } else {
                     0.0
@@ -10385,7 +12490,11 @@ impl App {
                 let title_y = 26.0_f32;
                 let sub_y = title_y + 26.0;
                 let faces_y = sub_y + 24.0;
-                let btn_dy = if face_max > 0 { faces_y + chip + 22.0 } else { sub_y + 34.0 };
+                let btn_dy = if face_max > 0 {
+                    faces_y + chip + 22.0
+                } else {
+                    sub_y + 34.0
+                };
                 let card_h = btn_dy + btn_h + pad;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
@@ -10399,18 +12508,31 @@ impl App {
                     cx0 + pad,
                     cy0 + title_y,
                     RESTORE_TITLE,
-                    gpu::DrawOpts { font_size: 16.0, color: theme::text(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 16.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
                 g.draw_text(
                     cx0 + pad,
                     cy0 + sub_y,
                     &subtitle,
-                    gpu::DrawOpts { font_size: 12.5, color: theme::text_dim(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 12.5,
+                        color: theme::text_dim(),
+                        bold: false,
+                        italic: false,
+                    },
                 );
                 // 닫기(×) — 이 카드에 없던 것. 저장본은 그대로 두고 카드만 접는다.
                 let close_x = cx0 + card_w - pad - close;
                 let close_y = cy0 + title_y - 10.0;
-                let close_hover = mx >= close_x && mx <= close_x + close && my >= close_y && my <= close_y + close;
+                let close_hover = mx >= close_x
+                    && mx <= close_x + close
+                    && my >= close_y
+                    && my <= close_y + close;
                 g.hover_pointer |= close_hover;
                 // 판은 **호버 전에도** 깔아 둔다 — 글리프만 떠 있으면 장식으로 읽혀,
                 // 카드를 접는 길이 있는데도 없는 것과 같았다. 그리고 `×` 글자가 아니라
@@ -10429,9 +12551,14 @@ impl App {
                     close_x + (close - xs) / 2.0,
                     close_y + (close - xs) / 2.0,
                     xs,
-                    if close_hover { theme::text() } else { theme::text_dim() },
+                    if close_hover {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    },
                 );
-                restore_btn_hits.push((crate::RestoreBtn::Dismiss, (close_x, close_y, close, close)));
+                restore_btn_hits
+                    .push((crate::RestoreBtn::Dismiss, (close_x, close_y, close, close)));
                 // 돌아올 학생들의 얼굴. 그림이 없는 이름은 조용히 건너뛴다 — 빈 네모를
                 // 그리면 「없는 학생」처럼 보인다.
                 if face_max > 0 {
@@ -10469,14 +12596,27 @@ impl App {
                                 fx + (chip - cw) / 2.0,
                                 fy + (chip - 15.0) / 2.0,
                                 &ch,
-                                gpu::DrawOpts { font_size: 15.0, color: theme::text_dim(), bold: true, italic: false },
+                                gpu::DrawOpts {
+                                    font_size: 15.0,
+                                    color: theme::text_dim(),
+                                    bold: true,
+                                    italic: false,
+                                },
                             );
                         }
                         fx += chip + face_gap;
                     }
                     if overflow > 0 {
                         let r_out = 12.0_f32;
-                        round_rect(g, fx, fy, chip, chip, r_out, theme::with_alpha(theme::border(), 0xCC));
+                        round_rect(
+                            g,
+                            fx,
+                            fy,
+                            chip,
+                            chip,
+                            r_out,
+                            theme::with_alpha(theme::border(), 0xCC),
+                        );
                         round_rect(
                             g,
                             fx + ring,
@@ -10492,7 +12632,12 @@ impl App {
                             fx + (chip - mw) / 2.0,
                             fy + (chip - 13.0) / 2.0,
                             &more,
-                            gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: true, italic: false },
+                            gpu::DrawOpts {
+                                font_size: 13.0,
+                                color: theme::text_dim(),
+                                bold: true,
+                                italic: false,
+                            },
                         );
                     }
                 }
@@ -10502,7 +12647,12 @@ impl App {
                     cx0 + pad,
                     btn_y + (btn_h - 11.5) / 2.0,
                     hint,
-                    gpu::DrawOpts { font_size: 11.5, color: theme::text_dim(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 11.5,
+                        color: theme::text_dim(),
+                        bold: false,
+                        italic: false,
+                    },
                 );
                 let hit = |x: f32| mx >= x && mx <= x + btn_w && my >= btn_y && my <= btn_y + btn_h;
                 // 복원 (primary/accent), flush to the card's right edge.
@@ -10523,9 +12673,15 @@ impl App {
                     restore_x + (btn_w - rl_w) / 2.0,
                     btn_y + (btn_h - bf) / 2.0,
                     "복원",
-                    gpu::DrawOpts { font_size: bf, color: theme::fg(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: bf,
+                        color: theme::fg(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
-                restore_btn_hits.push((crate::RestoreBtn::Restore, (restore_x, btn_y, btn_w, btn_h)));
+                restore_btn_hits
+                    .push((crate::RestoreBtn::Restore, (restore_x, btn_y, btn_w, btn_h)));
                 // 새로 시작, to its left. 채움 대신 테두리로 갈린다 — 주액션과 갈리는 축이
                 // 색 하나가 아니라 형태여야 흑백에서도 어느 쪽이 기본인지 읽힌다.
                 let fresh_x = restore_x - btn_gap - btn_w;
@@ -10545,7 +12701,12 @@ impl App {
                     fresh_x + (btn_w - fl_w) / 2.0,
                     btn_y + (btn_h - bf) / 2.0,
                     "새로 시작",
-                    gpu::DrawOpts { font_size: bf, color: theme::text(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: bf,
+                        color: theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
@@ -10554,7 +12715,13 @@ impl App {
             if let Some((state, _)) = self.restore_applying.clone() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                g.rect(
+                    0.0,
+                    0.0,
+                    win_w,
+                    win_h,
+                    theme::with_alpha([0, 0, 0, 255], 0xB0),
+                );
                 let total = crate::App::count_panes(&state);
                 let msg = format!("창 {total}개를 되살리는 중…");
                 let sub = "다 되면 이 화면이 사라져요";
@@ -10630,7 +12797,8 @@ impl App {
                         .map(|n| nfc_hangul(&n.to_string_lossy()))
                         .unwrap_or_default();
                     let is_dir = self
-                        .file_tree.nodes
+                        .file_tree
+                        .nodes
                         .iter()
                         .find(|n| n.path == drag.path)
                         .map(|n| n.is_dir)
@@ -10642,13 +12810,42 @@ impl App {
                     let pill_h = 22.0_f32;
                     let gx = cx + 12.0;
                     let gy = cy + 10.0;
-                    round_rect(g, gx, gy, pill_w, pill_h, theme::radius_sm(), theme::accent());
-                    round_rect(g, gx + 1.0, gy + 1.0, pill_w - 2.0, pill_h - 2.0,
-                        theme::radius_sm() - 1.0, theme::with_alpha(theme::surface_active(), 0xF5));
-                    g.queue_icon(if is_dir { "folder" } else { "file" },
-                        gx + 6.0, gy + (pill_h - 14.0) / 2.0, 14.0, theme::text());
-                    g.draw_text(gx + 24.0, gy + (pill_h - gf) / 2.0, &name,
-                        gpu::DrawOpts { font_size: gf, color: theme::text(), bold: false, italic: false });
+                    round_rect(
+                        g,
+                        gx,
+                        gy,
+                        pill_w,
+                        pill_h,
+                        theme::radius_sm(),
+                        theme::accent(),
+                    );
+                    round_rect(
+                        g,
+                        gx + 1.0,
+                        gy + 1.0,
+                        pill_w - 2.0,
+                        pill_h - 2.0,
+                        theme::radius_sm() - 1.0,
+                        theme::with_alpha(theme::surface_active(), 0xF5),
+                    );
+                    g.queue_icon(
+                        if is_dir { "folder" } else { "file" },
+                        gx + 6.0,
+                        gy + (pill_h - 14.0) / 2.0,
+                        14.0,
+                        theme::text(),
+                    );
+                    g.draw_text(
+                        gx + 24.0,
+                        gy + (pill_h - gf) / 2.0,
+                        &name,
+                        gpu::DrawOpts {
+                            font_size: gf,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
                 }
             }
             // Pane header drag ghost — 잡은 pane 이 커서를 따라오는 pill(파일트리
@@ -10665,7 +12862,15 @@ impl App {
                 let pill_h = 22.0_f32;
                 let gx = cx + 12.0;
                 let gy = cy + 10.0;
-                round_rect(g, gx, gy, pill_w, pill_h, theme::radius_sm(), theme::accent());
+                round_rect(
+                    g,
+                    gx,
+                    gy,
+                    pill_w,
+                    pill_h,
+                    theme::radius_sm(),
+                    theme::accent(),
+                );
                 round_rect(
                     g,
                     gx + 1.0,
@@ -10679,7 +12884,12 @@ impl App {
                     gx + 14.0,
                     gy + (pill_h - gf) / 2.0,
                     label,
-                    gpu::DrawOpts { font_size: gf, color: theme::accent(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: gf,
+                        color: theme::accent(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
             }
             // 테마 전환 — 옛 배경색이 픽셀 블록으로 부서지며 걷힌다. 맨 마지막에
@@ -10749,7 +12959,11 @@ impl App {
         // A bake that found no room during this frame left blank cells behind.
         // The repack happens at the top of the next frame — but an idle app
         // paints no next frame, so the blanks would just sit there. Ask for it.
-        if self.gpu.as_ref().is_some_and(|g| g.atlas_needs_another_frame()) {
+        if self
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.atlas_needs_another_frame())
+        {
             self.chrome_dirty = true;
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -10936,8 +13150,24 @@ impl App {
         let y0 = y + 6.0;
         // 얇은 테두리는 바깥에 한 겹 더 그려서 낸다 — 편집기 본문 위에 뜨는
         // 물건이라 경계가 없으면 글자에 파묻힌다.
-        round_rect(g, x0 - 1.0, y0 - 1.0, bar_w + 2.0, bar_h + 2.0, theme::radius_md() + 1.0, theme::border());
-        round_rect(g, x0, y0, bar_w, bar_h, theme::radius_md(), theme::surface());
+        round_rect(
+            g,
+            x0 - 1.0,
+            y0 - 1.0,
+            bar_w + 2.0,
+            bar_h + 2.0,
+            theme::radius_md() + 1.0,
+            theme::border(),
+        );
+        round_rect(
+            g,
+            x0,
+            y0,
+            bar_w,
+            bar_h,
+            theme::radius_md(),
+            theme::surface(),
+        );
 
         let text_baseline = |row_y: f32| row_y + (ROW - FS) * 0.5 - 1.0;
         let row1 = y0 + PAD;
@@ -10951,14 +13181,29 @@ impl App {
         let tg_hit = (tg.0 - 2.0, row1, TOGGLE_W + 4.0, ROW);
         let tg_hov = hot(tg_hit);
         if tg_hov {
-            hover_rect(g, tg_hit.0, tg_hit.1, tg_hit.2, tg_hit.3, theme::radius_sm());
+            hover_rect(
+                g,
+                tg_hit.0,
+                tg_hit.1,
+                tg_hit.2,
+                tg_hit.3,
+                theme::radius_sm(),
+            );
         }
         g.queue_icon(
-            if f.replacing { "chevron-down" } else { "chevron-right" },
+            if f.replacing {
+                "chevron-down"
+            } else {
+                "chevron-right"
+            },
             tg.0,
             tg.1,
             TOGGLE_W,
-            if tg_hov { theme::text() } else { theme::text_dim() },
+            if tg_hov {
+                theme::text()
+            } else {
+                theme::text_dim()
+            },
         );
         hits.push((FindBtn::ToggleReplace, tg_hit));
 
@@ -10966,15 +13211,31 @@ impl App {
         // 보여 준다 — 앞머리만 남으면 지금 뭘 치고 있는지 안 보인다.
         let field_x = x0 + PAD + TOGGLE_W + 6.0;
         let field = |g: &mut gpu::GpuRenderer,
-                         row_y: f32,
-                         width: f32,
-                         text: &str,
-                         placeholder: &str,
-                         focused: bool,
-                         pe: &str| {
-            round_rect(g, field_x, row_y, width, ROW, theme::radius_sm(), theme::bg());
+                     row_y: f32,
+                     width: f32,
+                     text: &str,
+                     placeholder: &str,
+                     focused: bool,
+                     pe: &str| {
+            round_rect(
+                g,
+                field_x,
+                row_y,
+                width,
+                ROW,
+                theme::radius_sm(),
+                theme::bg(),
+            );
             if focused {
-                round_rect(g, field_x, row_y, width, ROW, theme::radius_sm(), theme::with_alpha(theme::accent(), 0x22));
+                round_rect(
+                    g,
+                    field_x,
+                    row_y,
+                    width,
+                    ROW,
+                    theme::radius_sm(),
+                    theme::with_alpha(theme::accent(), 0x22),
+                );
             }
             let inner_l = field_x + 7.0;
             let inner_r = field_x + width - 7.0;
@@ -10984,7 +13245,12 @@ impl App {
                     inner_l,
                     by,
                     placeholder,
-                    gpu::DrawOpts { font_size: FS, color: theme::text_mute(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: FS,
+                        color: theme::text_mute(),
+                        bold: false,
+                        italic: false,
+                    },
                 );
                 if focused && caret_on {
                     g.rect(inner_l, row_y + 5.0, 1.5, ROW - 10.0, theme::accent());
@@ -10992,13 +13258,22 @@ impl App {
                 return;
             }
             let tw = g.measure_chrome_text(text, FS, false)
-                + if pe.is_empty() { 0.0 } else { g.measure_chrome_text(pe, FS, false) };
+                + if pe.is_empty() {
+                    0.0
+                } else {
+                    g.measure_chrome_text(pe, FS, false)
+                };
             let shift = (tw - (inner_r - inner_l)).max(0.0);
             let mut pen = g.draw_text_clipped(
                 inner_l - shift,
                 by,
                 text,
-                gpu::DrawOpts { font_size: FS, color: theme::text(), bold: false, italic: false },
+                gpu::DrawOpts {
+                    font_size: FS,
+                    color: theme::text(),
+                    bold: false,
+                    italic: false,
+                },
                 inner_l,
                 inner_r,
             );
@@ -11008,7 +13283,12 @@ impl App {
                     pen,
                     by,
                     pe,
-                    gpu::DrawOpts { font_size: FS, color: theme::text(), bold: false, italic: false },
+                    gpu::DrawOpts {
+                        font_size: FS,
+                        color: theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
                     inner_l,
                     inner_r,
                 );
@@ -11038,13 +13318,22 @@ impl App {
             format!("{}/{}", f.idx + 1, f.hits.len())
         };
         if !count.is_empty() {
-            let col = if f.hits.is_empty() { theme::danger() } else { theme::text_dim() };
+            let col = if f.hits.is_empty() {
+                theme::danger()
+            } else {
+                theme::text_dim()
+            };
             let cw = g.measure_chrome_text(&count, FS, false);
             g.draw_text(
                 field_x + FIELD_W + COUNT_W - 8.0 - cw,
                 text_baseline(row1),
                 &count,
-                gpu::DrawOpts { font_size: FS, color: col, bold: false, italic: false },
+                gpu::DrawOpts {
+                    font_size: FS,
+                    color: col,
+                    bold: false,
+                    italic: false,
+                },
             );
         }
 
@@ -11081,21 +13370,39 @@ impl App {
             let row2 = row1 + ROW + 4.0;
             field(g, row2, FIELD_W, &f.replace, "바꾸기", f.focus_replace, "");
             let mut lx = field_x + FIELD_W + 6.0;
-            for (label, btn) in [("바꾸기", FindBtn::ReplaceOne), ("전부", FindBtn::ReplaceAll)] {
+            for (label, btn) in [
+                ("바꾸기", FindBtn::ReplaceOne),
+                ("전부", FindBtn::ReplaceAll),
+            ] {
                 let lw = g.measure_chrome_text(label, FS, false) + 14.0;
                 let hov = hot((lx, row2, lw, ROW));
                 if hov {
                     g.hover_pointer = true;
                 }
-                round_rect(g, lx, row2 + 2.0, lw, ROW - 4.0, theme::radius_sm(),
-                    if hov { theme::surface_active() } else { theme::surface_hover() });
+                round_rect(
+                    g,
+                    lx,
+                    row2 + 2.0,
+                    lw,
+                    ROW - 4.0,
+                    theme::radius_sm(),
+                    if hov {
+                        theme::surface_active()
+                    } else {
+                        theme::surface_hover()
+                    },
+                );
                 g.draw_text(
                     lx + 7.0,
                     text_baseline(row2),
                     label,
                     gpu::DrawOpts {
                         font_size: FS,
-                        color: if hov { theme::text() } else { theme::text_dim() },
+                        color: if hov {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        },
                         bold: false,
                         italic: false,
                     },
@@ -11174,8 +13481,7 @@ impl App {
         let version_animating = self.version_alpha() > 0.0;
         // Same for the copy toast + collab completion toast: their fade changes
         // the picture every frame.
-        let toast_animating =
-            self.copy_toast_alpha() > 0.0 || self.collab_toast_alpha() > 0.0;
+        let toast_animating = self.copy_toast_alpha() > 0.0 || self.collab_toast_alpha() > 0.0;
         // A busy pane's header bar sweeps every frame, so it's an animation
         // source too — keep painting while any pane is working.
         //
@@ -11196,8 +13502,7 @@ impl App {
         // 학생 도트 배너(Clawd 자리)가 보이는 동안은 idle 애니가 그림을
         // 바꾼다 — 전용 타이머(handler.rs)가 깨운 redraw 를 여기서
         // 통과시켜야 프레임이 넘어간다.
-        let banner_animating =
-            STUDENT_SPRITE_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
+        let banner_animating = STUDENT_SPRITE_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
         // ultracode 혜성은 셀 그리드(`composed`) 위에 얹혀 66ms 마다 위상이 바뀐다.
         // 그런데 이 게이트에 그 사유가 없어서, claude 가 idle 이면 통과하는 게 커서
         // blink(530ms) 뿐이었다 — 혜성이 프레임당 2.8셀이 아니라 **22셀씩** 튀어
@@ -11232,7 +13537,9 @@ impl App {
             return;
         }
         self.last_blink_on = blink_on;
-        if self.window.is_none() { return; }
+        if self.window.is_none() {
+            return;
+        }
         let scale = self.effective_scale();
         // Self-heal: if the GPU renderer's internal scale drifted from the
         // window's effective scale, every logical→physical mapping is off by
@@ -11293,14 +13600,14 @@ impl App {
                 eprintln!(
                     "[render-gpu] {}us since_input={}ms",
                     t0.elapsed().as_micros(),
-                    now.saturating_duration_since(self.last_input_at).as_millis()
+                    now.saturating_duration_since(self.last_input_at)
+                        .as_millis()
                 );
             }
             return;
         }
     }
 }
-
 
 /// compact 진행 게이지 — 칸이 차오르는 눈금(2026-08-15 지시: 연속 띠는 얼마나
 /// 남았는지 눈금이 없어 안 읽혔다). 찬 칸은 accent 원색, 빈 칸은 흐린 트랙.
@@ -11430,18 +13737,33 @@ mod tests {
 
     #[test]
     fn statusbar_account_name_keeps_the_domain_only_when_slots_collide() {
-        let alone = vec!["goenho0613@gmail.com".to_string(), "2rami@sionic.ai".to_string()];
-        assert_eq!(statusbar_account_short("goenho0613@gmail.com", &alone), "goenho0613");
+        let alone = vec![
+            "goenho0613@gmail.com".to_string(),
+            "2rami@sionic.ai".to_string(),
+        ];
+        assert_eq!(
+            statusbar_account_short("goenho0613@gmail.com", &alone),
+            "goenho0613"
+        );
 
         let clash = vec![
             "goenho0613@naver.com".to_string(),
             "goenho0613@gmail.com".to_string(),
         ];
-        assert_eq!(statusbar_account_short("goenho0613@gmail.com", &clash), "goenho0613·gmail");
-        assert_eq!(statusbar_account_short("goenho0613@naver.com", &clash), "goenho0613·naver");
+        assert_eq!(
+            statusbar_account_short("goenho0613@gmail.com", &clash),
+            "goenho0613·gmail"
+        );
+        assert_eq!(
+            statusbar_account_short("goenho0613@naver.com", &clash),
+            "goenho0613·naver"
+        );
 
         // 사람이 지은 라벨엔 `@` 가 없다 — 손대지 않는다.
-        assert_eq!(statusbar_account_short("사이오닉팀플랜", &clash), "사이오닉팀플랜");
+        assert_eq!(
+            statusbar_account_short("사이오닉팀플랜", &clash),
+            "사이오닉팀플랜"
+        );
         // 라벨끼리 같아 보이는 경우도 붙일 도메인이 없으니 그대로 둔다.
         let same = vec!["기본".to_string(), "기본".to_string()];
         assert_eq!(statusbar_account_short("기본", &same), "기본");
@@ -11513,7 +13835,12 @@ fn paint_account_flash(g: &mut gpu::GpuRenderer, r: (f32, f32, f32, f32), k: f32
     let (x, y, w, h) = r;
     // 칩 자체를 물들인다 — 별만 있으면 「무엇이」 바뀌었는지 안 짚어진다.
     round_rect(
-        g, x, y, w, h, theme::radius_sm(),
+        g,
+        x,
+        y,
+        w,
+        h,
+        theme::radius_sm(),
         theme::with_alpha(theme::accent(), (k * 70.0) as u8),
     );
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
@@ -11565,7 +13892,13 @@ pub(crate) fn paint_confirm_card<B: Copy>(
     buttons: &[(&str, B, Option<[u8; 4]>)],
 ) -> Vec<(B, (f32, f32, f32, f32))> {
     let (win_w, win_h) = win;
-    g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+    g.rect(
+        0.0,
+        0.0,
+        win_w,
+        win_h,
+        theme::with_alpha([0, 0, 0, 255], 0xB0),
+    );
 
     let pad = 24.0_f32;
     let line_h = 20.0_f32;
@@ -11578,19 +13911,37 @@ pub(crate) fn paint_confirm_card<B: Copy>(
     let card_h = 104.0 + lines.len() as f32 * line_h;
     let cx0 = ((win_w - card_w) / 2.0).round();
     let cy0 = ((win_h - card_h) / 2.0).round();
-    panel_rect_outlined(g, cx0, cy0, card_w, card_h, theme::radius_md(), theme::surface_active());
+    panel_rect_outlined(
+        g,
+        cx0,
+        cy0,
+        card_w,
+        card_h,
+        theme::radius_md(),
+        theme::surface_active(),
+    );
     g.draw_text(
         cx0 + pad,
         cy0 + 28.0,
         title,
-        gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+        gpu::DrawOpts {
+            font_size: 15.0,
+            color: theme::text(),
+            bold: true,
+            italic: false,
+        },
     );
     for (i, l) in lines.iter().enumerate() {
         g.draw_text(
             cx0 + pad,
             cy0 + 56.0 + i as f32 * line_h,
             l,
-            gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+            gpu::DrawOpts {
+                font_size: 13.0,
+                color: theme::text_dim(),
+                bold: false,
+                italic: false,
+            },
         );
     }
 
@@ -11613,7 +13964,11 @@ pub(crate) fn paint_confirm_card<B: Copy>(
                 [0xFF, 0xFF, 0xFF, 0xFF],
                 true,
             ),
-            None => (theme::raised_on(theme::surface_active(), hot), theme::text(), false),
+            None => (
+                theme::raised_on(theme::surface_active(), hot),
+                theme::text(),
+                false,
+            ),
         };
         if tone.is_some() {
             panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
@@ -11624,7 +13979,12 @@ pub(crate) fn paint_confirm_card<B: Copy>(
             x + bpad,
             btn_y + (btn_h - bf) / 2.0,
             label,
-            gpu::DrawOpts { font_size: bf, color: fg, bold, italic: false },
+            gpu::DrawOpts {
+                font_size: bf,
+                color: fg,
+                bold,
+                italic: false,
+            },
         );
         hits.push((*btn, (x, btn_y, w, btn_h)));
     }
@@ -11641,14 +14001,21 @@ pub(crate) fn paint_account_switch_confirm(
     let (title, lines) = crate::session::account_switch_confirm_text(&p.to_label, &p.impact);
     // 채움색이 곧 뜻이다 — 이어붙일 대화가 없는 pane 이 섞여 있으면 그 전환은
     // 되돌릴 수 없으므로 빨강. 아니면 대화가 이어지니 기본 accent.
-    let tone = if p.impact.fresh > 0 { theme::danger() } else { theme::accent() };
+    let tone = if p.impact.fresh > 0 {
+        theme::danger()
+    } else {
+        theme::accent()
+    };
     paint_confirm_card(
         g,
         win,
         cursor,
         &title,
         &lines,
-        &[("전환", AccountSwitchBtn::Switch, Some(tone)), ("취소", AccountSwitchBtn::Cancel, None)],
+        &[
+            ("전환", AccountSwitchBtn::Switch, Some(tone)),
+            ("취소", AccountSwitchBtn::Cancel, None),
+        ],
     )
 }
 
@@ -11663,7 +14030,11 @@ pub(crate) fn paint_character_swap_confirm(
     let (title, lines) = crate::session::character_swap_confirm_text(&p.to, p.resumable);
     // 이어붙일 대화가 없으면 다시 띄우기가 지금 내용을 버린다 — 계정 카드의
     // `fresh` 와 같은 규칙으로 빨강.
-    let tone = if p.resumable { theme::accent() } else { theme::danger() };
+    let tone = if p.resumable {
+        theme::accent()
+    } else {
+        theme::danger()
+    };
     paint_confirm_card(
         g,
         win,
@@ -11690,8 +14061,11 @@ pub(crate) fn draw_usage_windows(
     const GH: f32 = 5.0;
     let gy = y + (font - GH) / 2.0;
     // `windows` 가 비는 건 옛 스냅샷을 되살렸을 때다 — 그때는 가장 급한 창 하나로.
-    let wins: Vec<(String, f32)> =
-        if b.windows.is_empty() { vec![(b.label.clone(), b.pct)] } else { b.windows.clone() };
+    let wins: Vec<(String, f32)> = if b.windows.is_empty() {
+        vec![(b.label.clone(), b.pct)]
+    } else {
+        b.windows.clone()
+    };
     let mut bx = x;
     for (label, pct) in &wins {
         let (label, pct) = (label.as_str(), *pct);
@@ -11707,19 +14081,33 @@ pub(crate) fn draw_usage_windows(
             bx,
             y,
             label,
-            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false },
+            gpu::DrawOpts {
+                font_size: font,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
         );
         let gx = bx + g.measure_chrome_text(label, font, false) + 6.0;
         g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
         let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(1.5);
         g.rect(gx, gy, w, GH, usage_bar_color(pct));
         // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
-        let pt = if b.stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
+        let pt = if b.stale {
+            format!("~{pct:.0}%")
+        } else {
+            format!("{pct:.0}%")
+        };
         g.draw_text(
             gx + GW + 6.0,
             y,
             &pt,
-            gpu::DrawOpts { font_size: font, color: usage_pct_color(pct), bold: true, italic: false },
+            gpu::DrawOpts {
+                font_size: font,
+                color: usage_pct_color(pct),
+                bold: true,
+                italic: false,
+            },
         );
         bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, true) + 12.0;
     }
@@ -11739,9 +14127,9 @@ mod minimap_box_tests {
     #[test]
     fn walking_student_never_touches_the_bar() {
         for (mw, mh) in [
-            (200.0, 31.0),  // 세로 2분할 — 자리를 안 비우면 여기서 2px 겹쳤다
-            (200.0, 19.0),  // 띠가 서는 가장 좁은 칸
-            (100.0, 62.0),  // 가로 2분할
+            (200.0, 31.0), // 세로 2분할 — 자리를 안 비우면 여기서 2px 겹쳤다
+            (200.0, 19.0), // 띠가 서는 가장 좁은 칸
+            (100.0, 62.0), // 가로 2분할
             (60.0, 25.0),
             (200.0, 150.0), // 가장 큰 카드
         ] {
@@ -11910,16 +14298,13 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
     let per_tab = if n_vis == 1 {
         area_eff
     } else {
-        ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32)
-            .clamp(56.0, 320.0)
+        ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32).clamp(56.0, 320.0)
     };
     // 닫는 동안엔 알약을 새로 재지 않고 얼려 둔 자리를 앞에서부터 채운다. 탭이 하나
     // 빠지면 `n_vis` 가 줄어 `per_tab` 이 커지고 남은 탭이 넓어지는데, 그러면 × 가
     // 방금 누른 자리에서 달아난다. 슬롯이 모자라면(닫기 전보다 탭이 늘었다) 그
     // 지점부터는 평소 계산으로 돌아간다.
-    let slot = |i: usize| -> Option<(f32, f32)> {
-        c.frozen_slots.and_then(|s| s.get(i).copied())
-    };
+    let slot = |i: usize| -> Option<(f32, f32)> { c.frozen_slots.and_then(|s| s.get(i).copied()) };
     // Left edge of each visible tab's pill, for the drag insertion bar.
     let mut tab_edges: Vec<f32> = Vec::with_capacity(n_vis);
     // Geometry for the post-loop structural border pass.
@@ -11973,7 +14358,11 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // 이미지 pane 만 제외(뷰어라 별도창 대상 아님).
         let can_popout = c.can_popout;
         let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
-        let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
+        let x_reserve = if reserve_x {
+            close_w + 8.0 + popout_reserve
+        } else {
+            0.0
+        };
         let budget = match slot(vi) {
             Some((_, sw)) => (sw - 12.0 - x_reserve).max(0.0),
             None => (per_tab - x_reserve - 14.0).max(0.0),
@@ -12006,7 +14395,11 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         let (box_x, box_right) = match slot(vi) {
             Some((sx, sw)) => (sx, sx + sw),
             None => (
-                if i == 0 && !overflowing { c.x } else { tab_x0 - 6.0 },
+                if i == 0 && !overflowing {
+                    c.x
+                } else {
+                    tab_x0 - 6.0
+                },
                 tab_x0 + content_w + 6.0,
             ),
         };
@@ -12032,7 +14425,12 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
             tx,
             text_y,
             &label,
-            gpu::DrawOpts { font_size: c.chrome_font, color: t_fg, bold: active, italic: false },
+            gpu::DrawOpts {
+                font_size: c.chrome_font,
+                color: t_fg,
+                bold: active,
+                italic: false,
+            },
         );
         // Pop-out icon (external-link): file tabs only, shown on the
         // active or hovered tab. Sits left of the ×; clicking it
@@ -12058,7 +14456,8 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
             }
             let pocol = if po_hover { theme::text() } else { t_icon };
             g.queue_icon("external-link", po_x, icon_y, c.icon_size, pocol);
-            out.popout_hits.push((i, (po_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
+            out.popout_hits
+                .push((i, (po_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
             action_x = po_x + close_w + 4.0;
         }
         if show_x {
@@ -12077,7 +14476,10 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
             let xcol = if x_hover { theme::text() } else { t_icon };
             g.queue_icon("x", close_x, icon_y, c.icon_size, xcol);
             // × close hit (widen a little for an easy target).
-            out.close_hits.push((i, (close_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
+            out.close_hits.push((
+                i,
+                (close_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT),
+            ));
         }
         // Whole-pill click/drag hit. Inactive tabs have no × inside,
         // so the entire pill switches; the active tab's × is checked
@@ -12119,9 +14521,19 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // active one when only the trailing tab is selected) a
         // visible right boundary. Left edge is left to the pane
         // divider so it never doubles up.
-        g.rect(tabs_right_edge - stroke, c.y, stroke, PANE_HEADER_HEIGHT, theme::border());
+        g.rect(
+            tabs_right_edge - stroke,
+            c.y,
+            stroke,
+            PANE_HEADER_HEIGHT,
+            theme::border(),
+        );
         if let Some((ax, aw)) = active_tab_box {
-            let accent_col = if c.is_active { theme::accent() } else { theme::text() };
+            let accent_col = if c.is_active {
+                theme::accent()
+            } else {
+                theme::text()
+            };
             // accent 선은 BORDER stroke(1px)보다 살짝 굵게 — 활성 pane 강조.
             g.rect(ax, c.y, aw, ACTIVE_ACCENT_STROKE, accent_col);
             out.accent = Some((ax, c.y, aw, accent_col));
@@ -12135,11 +14547,18 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
             .get(target.saturating_sub(first))
             .copied()
             .unwrap_or(tx - gap);
-        g.rect(bar_x - 3.0, c.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::accent());
+        g.rect(
+            bar_x - 3.0,
+            c.y + 1.0,
+            6.0,
+            PANE_HEADER_HEIGHT - 2.0,
+            theme::accent(),
+        );
     }
     let (cur_x, cur_y) = c.cursor_px;
-    let inside =
-        |rx: f32, ry: f32, rw: f32, rh: f32| cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh;
+    let inside = |rx: f32, ry: f32, rw: f32, rh: f32| {
+        cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh
+    };
     // [+] new-tab button right after the tabs. Hover chip is a
     // tight rounded square centered on the glyph so the glow
     // hugs the icon instead of stretching across a tall band.
@@ -12153,8 +14572,14 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
     let plus_rect = (chip_x, chip_y, chip_size, chip_size);
     let plus_hover = !dragging_tab && inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
     if plus_hover {
-        hover_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
-            theme::radius_sm());
+        hover_rect(
+            g,
+            plus_rect.0,
+            plus_rect.1,
+            plus_rect.2,
+            plus_rect.3,
+            theme::radius_sm(),
+        );
     }
     let plus_color = if plus_hover { theme::text() } else { c.act_fg };
     if !dragging_tab {
