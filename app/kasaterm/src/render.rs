@@ -3520,9 +3520,25 @@ impl App {
                         .filter(|p| p.title_pinned)
                         .and_then(|p| p.title.clone())
                         .filter(|s| !s.trim().is_empty());
-                    pinned
-                        .or_else(|| self.display_pane_char(&ws, &id))
-                        .map(|n| (id, n))
+                    let base = pinned.or_else(|| self.display_pane_char(&ws, &id));
+                    // 헤더 띠도 발치 상태줄도 없는 pane 은 어느 기계의 몸인지 말할
+                    // 자리가 여기밖에 남지 않는다(단일 pane + 상태줄 끔). 그 조합에서만
+                    // 부제 꼬리에 기계를 얹는다 — Alt 를 누른 순간에만 뜨는 자리라,
+                    // 크롬을 걷어내려고 상태줄을 끈 선택과도 싸우지 않는다.
+                    //
+                    // 꼬리에 두는 이유는 정본이 제목이어서다. 앞에 두면 창마다 같은
+                    // 기계 이름이 먼저 읽혀, 창을 가르려고 부제를 켠 뜻이 죽는다.
+                    let machine = (!headers.iter().any(|h| h.id == id)
+                        && !self.statusbar_visible(&id))
+                    .then(|| crate::info::pane_machine_label(&id))
+                    .flatten()
+                    .map(|(label, _)| label);
+                    match (base, machine) {
+                        (Some(b), Some(m)) => Some((id, format!("{b}  ·  {m}"))),
+                        (Some(b), None) => Some((id, b)),
+                        (None, Some(m)) => Some((id, m)),
+                        (None, None) => None,
+                    }
                 })
                 .collect()
         } else {
@@ -9084,6 +9100,32 @@ impl App {
                 // hover 때 오른쪽 끝에 나오는 접기 손잡이 자리는 늘 비워 둔다 —
                 // 그때만 빼면 손잡이가 뜨는 순간 칩이 흔들린다.
                 let avail = (fw - 16.0 - 21.0).max(0.0);
+                // ── 기계 칩 ── 이 pane 의 몸이 어느 기계에 있는지. 맨 앞에 두고
+                // 좁아져도 **마지막까지 남긴다**: 헤더 띠는 pane 이 하나뿐인 창에서
+                // 아예 없고 좁으면 배지를 생략하므로, 그런 화면에서 「이 pane 이 어느
+                // 기계인가」에 답하는 자리가 여기밖에 없다(2026-09-02 감사 ⑤).
+                // 나머지 칩이 말하는 것(경로·브랜치·변경 수)은 파일트리와 Git 탭에도
+                // 있는 중복이지만, 기계는 이 띠가 접히면 화면에서 통째로 사라진다.
+                let machine = crate::info::pane_machine_label(fid)
+                    .map(|(label, remote)| {
+                        // 칩 하나만 남는 폭까지 좁아져도 이름 앞머리는 읽히게 자른다.
+                        let room = (avail - pad_x * 2.0 - icon_sz - icon_gap).max(0.0);
+                        (crate::info::fit_text(g, &label, room, font, false), remote)
+                    })
+                    .filter(|(l, _)| !l.is_empty());
+                let machine_w = machine
+                    .as_ref()
+                    .map(|(l, _)| pill_w(g.measure_chrome_text(l, font, false)))
+                    .unwrap_or(0.0);
+                // 기계 몫을 뗀 나머지로 아래 칩들이 다툰다 — 여기서 먼저 빼 두면
+                // 접는 차례(변경 수 → 브랜치 → 경로)가 그대로 기계 칩을 비껴간다.
+                let avail = (avail
+                    - if machine_w > 0.0 {
+                        machine_w + chip_gap
+                    } else {
+                        0.0
+                    })
+                .max(0.0);
                 let branch_w = badge
                     .as_ref()
                     .map(|b| pill_w(g.measure_chrome_text(&b.branch, font, false)))
@@ -9136,6 +9178,65 @@ impl App {
                     font,
                     false,
                 );
+                // 기계 칩 — 서버 아이콘 + 이름. 원격은 헤더 배지와 **같은 말**
+                // (⇄ 라벨)에 같은 강조색을 쓰고, 로컬은 거의 모든 pane 에 늘 떠 있는
+                // 표시라 한 단계 죽인 톤으로 둔다. 누를 데가 없으니 hover 도 없다.
+                if let Some((label, remote)) = &machine {
+                    let pw = machine_w;
+                    round_rect(
+                        g,
+                        cx,
+                        pill_y,
+                        pw,
+                        pill_h,
+                        theme::radius_sm(),
+                        if *remote {
+                            theme::with_alpha(theme::accent(), 0x66)
+                        } else {
+                            theme::border()
+                        },
+                    );
+                    round_rect(
+                        g,
+                        cx + 1.0,
+                        pill_y + 1.0,
+                        pw - 2.0,
+                        pill_h - 2.0,
+                        theme::radius_sm() - 1.0,
+                        if *remote {
+                            theme::with_alpha(theme::accent(), 0x2a)
+                        } else {
+                            theme::surface_hover()
+                        },
+                    );
+                    g.queue_icon(
+                        "server",
+                        cx + pad_x,
+                        pill_y + (pill_h - icon_sz) / 2.0,
+                        icon_sz,
+                        if *remote {
+                            theme::accent()
+                        } else {
+                            theme::text_dim()
+                        },
+                    );
+                    g.draw_text(
+                        cx + pad_x + icon_sz + icon_gap,
+                        txt_y,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: font,
+                            color: if *remote {
+                                theme::accent()
+                            } else {
+                                theme::text_mute()
+                            },
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    cx += pw + chip_gap;
+                }
                 // cwd pill — folder icon + path.
                 if !disp.is_empty() {
                     let tw = g.measure_chrome_text(&disp, font, false);

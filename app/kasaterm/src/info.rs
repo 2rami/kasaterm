@@ -62,6 +62,31 @@ fn cmd_line(bin: &str, args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// 이 pane 의 몸이 **어느 기계에 있는지** 한 줄로. 헤더 배지·발치 상태줄·Alt
+/// 오버레이가 같은 말을 쓰도록 원천을 여기 하나로 둔다 — 자리마다 따로 판별하면
+/// 같은 pane 이 자리마다 다른 이름으로 불릴 수 있다.
+///
+/// 함께 오는 bool 은 원격 여부다. 그리는 쪽이 그것으로 톤을 가른다: 원격은 훑을
+/// 때 눈이 먼저 걸려야 하고, 로컬은 거의 모든 pane 에 늘 떠 있어 죽여야 한다.
+/// 이름을 못 읽는 기계에서는 None — 그리는 쪽이 통째로 건너뛴다.
+pub(crate) fn pane_machine_label(pane_id: &str) -> Option<(String, bool)> {
+    if let Some(i) = kasa_mcp::remote::remote_info(pane_id) {
+        let m = if i.label.is_empty() {
+            i.base
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string()
+        } else {
+            i.label
+        };
+        return Some((format!("⇄ {m}"), true));
+    }
+    match local_machine_name() {
+        "" => None,
+        m => Some((m.to_string(), false)),
+    }
+}
+
 /// 행이 무엇인지. argv[0] 의 파일명만으로는 claude 아래가 전부 `npm`·`node`·
 /// `Python` 세 단어로 뭉개져 계보만 보이고 정체가 안 보였다(거노: "클로드 밑으로
 /// 초록점밖에 안 보인다"). 종류를 먼저 판정해 이름·색·묶음 규칙을 가른다.
