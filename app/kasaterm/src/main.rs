@@ -7680,7 +7680,13 @@ if [ -n \"$KASATERM_PANE_ID\" ] && [ -z \"$KASATERM_NO_HOME\" ]; then\n\
     HOMEM=$(kasaterm-cli home 2>/dev/null)\n\
     HOMERC=$?\n\
     if [ \"$HOMERC\" = 0 ] && [ -n \"$HOMEM\" ]; then\n\
-      exec kasaterm-cli migrate \"$HOMEM\" \"$KASATERM_PANE_ID\"\n\
+      # 이사 성공 = 이 pane 이 거울로 갈아끼워진다(셸째 걷힘) — 여기서 끝.\n\
+      # 실패면 exec 로 죽지 말고 **로컬로 계속** 연다(독립 리뷰 2026-09-02 ④):\n\
+      # 본진 확인과 이사 사이에 기계가 죽는 틈이 실제로 있다.\n\
+      if HOMEERR=$(kasaterm-cli migrate \"$HOMEM\" \"$KASATERM_PANE_ID\" 2>&1); then\n\
+        exit 0\n\
+      fi\n\
+      echo \"[kasaterm] 본진 이사 실패 — 이 기계에서 엽니다: $HOMEERR\" >&2\n\
     fi\n\
     [ \"$HOMERC\" = 3 ] && echo \"[kasaterm] 본진이 지금 안 닿아 이 기계에서 엽니다\" >&2\n\
   fi\n\
@@ -7842,6 +7848,25 @@ case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
     exec "$REAL" "$@" ;;
 esac
+# 본진(home) — claude 셰임과 같은 규칙(독립 리뷰 2026-09-02 ③): 순정 TUI 실행
+# (서브커맨드 없음 = SUB 빈값, 값 딸린 플래그는 값이 SUB 로 잡혀 저절로 제외)이면
+# 명부의 home 기계에서 태어난다. resume·exec 등 대화 지정류는 로컬 유지. 태생
+# 실행은 migrate --run 으로 이 호출의 인자 그대로 — 안 닿거나 실패하면 이
+# 기계에서 그대로 연다(exec 로 죽지 않는다).
+if [ -z "$SUB" ] && [ -n "$KASATERM_PANE_ID" ] && [ -z "$KASATERM_NO_HOME" ]; then
+  HOMEM=$(kasaterm-cli home 2>/dev/null)
+  HOMERC=$?
+  if [ "$HOMERC" = 0 ] && [ -n "$HOMEM" ]; then
+    RUNCMD="codex"
+    [ $# -gt 0 ] && RUNCMD="codex $*"
+    if HOMEERR=$(kasaterm-cli migrate "$HOMEM" "$KASATERM_PANE_ID" --run "$RUNCMD" 2>&1); then
+      exit 0
+    fi
+    echo "[kasaterm] 본진 이사 실패 — 이 기계에서 엽니다: $HOMEERR" >&2
+  elif [ "$HOMERC" = 3 ]; then
+    echo "[kasaterm] 본진이 지금 안 닿아 이 기계에서 엽니다" >&2
+  fi
+fi
 SRC="$HOME/.codex"
 CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
