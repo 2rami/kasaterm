@@ -4390,6 +4390,157 @@ impl GpuRenderer {
         );
     }
 
+    /// 보이지 않는 pane 의 격자를 **화면 밖 텍스처**에 그려 PNG 로 굽는다 —
+    /// 다른 방(비활성 window)의 pane 은 표면 프레임에 존재하지 않아 기존
+    /// capture(프레임 크롭)가 원리적으로 못 찍는다(나쵸 알림 사진이 termshot
+    /// 폴백으로 밀리던 원인, 2026-09-02). 본 프레임 경로는 안 건드린다:
+    /// 누적 리스트를 통째로 스왑해 두고 셀 전용 미니 패스를 자기 텍스처에
+    /// 돌린 뒤 원상복구한다. 커서·스프라이트 오버레이는 안 싣는다 — 알림
+    /// 사진의 목적은 내용이고, 오버레이는 활성 방 실촬영의 몫이다.
+    pub fn render_cells_offscreen(
+        &mut self,
+        panes: &[PaneSlot<'_>],
+        w: u32,
+        h: u32,
+        path: &str,
+        max_w: u32,
+    ) -> Result<(u32, u32), String> {
+        let w = w.max(1);
+        let h = h.max(1);
+        // 본 프레임 몫과 섞이지 않게 스왑 — 실패해도 아래 복구 블록이 돌도록
+        // 이 지점 이후의 이른 return 을 만들지 않는다.
+        let saved_chrome = std::mem::take(&mut self.chrome);
+        let saved_imgq = std::mem::take(&mut self.image_quads);
+        let saved_iconq = std::mem::take(&mut self.icon_quads);
+        let saved_runs = std::mem::take(&mut self.clip_runs);
+        let saved_stack = std::mem::take(&mut self.clip_stack);
+        self.draw_cells(panes);
+        let dims = [w as f32, h as f32];
+        let (gamma, contrast, sat) = text_render_knobs();
+        self.pipeline
+            .write_uniforms_full(&self.queue, dims, gamma, contrast, sat, self.p3_root_owned, 0.0);
+        self.pipeline
+            .write_instances(&self.device, &self.queue, &self.chrome);
+        let n = self.chrome.len() as u32;
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kasaterm offscreen capture"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kasaterm offscreen encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kasaterm offscreen pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear({
+                            let b = crate::cells::default_bg();
+                            wgpu::Color {
+                                r: b[0] as f64 / 255.0,
+                                g: b[1] as f64 / 255.0,
+                                b: b[2] as f64 / 255.0,
+                                a: 1.0,
+                            }
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_scissor_rect(0, 0, w, h);
+            self.pipeline.draw_range(&mut pass, &self.bind_group, 0, n);
+        }
+        let bpr = w.div_ceil(64) * 256; // align(w*4, 256)
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen readback"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let saved = {
+            let data = buf.slice(..).get_mapped_range();
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let s = (row * bpr) as usize;
+                let line = &data[s..s + (w * 4) as usize];
+                for px in line.chunks_exact(4) {
+                    if bgra {
+                        rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
+                    } else {
+                        rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+                    }
+                }
+            }
+            if max_w > 0 && w > max_w {
+                let nh = ((h as u64 * max_w as u64) / w as u64).max(1) as u32;
+                match image::RgbaImage::from_raw(w, h, rgba.clone()) {
+                    Some(img) => {
+                        let small = image::imageops::resize(
+                            &img,
+                            max_w,
+                            nh,
+                            image::imageops::FilterType::Lanczos3,
+                        );
+                        save_rgba_png(path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
+                    }
+                    None => save_rgba_png(path, &rgba, w, h).map(|()| (w, h)),
+                }
+            } else {
+                save_rgba_png(path, &rgba, w, h).map(|()| (w, h))
+            }
+        };
+        // 원상복구 — 누적 리스트와 uniforms(표면 크기)를 본 프레임 몫으로.
+        self.chrome = saved_chrome;
+        self.image_quads = saved_imgq;
+        self.icon_quads = saved_iconq;
+        self.clip_runs = saved_runs;
+        self.clip_stack = saved_stack;
+        let sdims = [self.config.width as f32, self.config.height as f32];
+        self.pipeline
+            .write_uniforms_full(&self.queue, sdims, gamma, contrast, sat, self.p3_root_owned, 0.0);
+        saved.map_err(|e| format!("offscreen png 저장 실패: {e}"))
+    }
+
     /// Render one frame. `panes` covers every pane the caller wants
     /// drawn this frame, each carrying its grid + pixel origin. The
     /// pipeline gathers all instances into one draw call regardless
