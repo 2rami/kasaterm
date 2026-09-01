@@ -986,10 +986,16 @@ impl App {
         // 거울로 바꾼다(2026-08-30 지시 「claude mini 이렇게 키면 맥미니에서 켜게」).
         let agent = kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell);
         if let Some((kind, _)) = &agent {
-            if *kind != kasa_pty::AgentKind::Claude {
-                anyhow::bail!("이사는 claude 전용이다({kind:?} 는 대화 파일 규약이 다르다)");
+            if !matches!(
+                kind,
+                kasa_pty::AgentKind::Claude | kasa_pty::AgentKind::Codex
+            ) {
+                anyhow::bail!(
+                    "이사는 claude·codex 전용이다({kind:?} 는 대화 파일 규약이 다르다)"
+                );
             }
         }
+        let is_codex = matches!(&agent, Some((kasa_pty::AgentKind::Codex, _)));
         let fresh = agent.is_none();
         // 턴 중 이사는 하던 일을 자른다 — SIGTERM 이 진행 중 턴을 버리고, 옮겨간
         // 학생은 하다 만 채로 앉는다(2026-08-31 지적 「이사하고 작업이 끊겨」).
@@ -1019,9 +1025,11 @@ impl App {
         let sid = if fresh {
             None
         } else {
+            // codex 도 같은 지도에 실린다 — statusline 바인딩이 하네스 불문이라
+            // pane_claude_sid 가 codex pane 에선 rollout uuid 를 쥔다.
             Some(self.pane_claude_sid.get(pid).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{pid} 의 claude 세션 id 를 아직 모른다 — 대화를 한 번 주고받은 뒤 다시"
+                    "{pid} 의 세션 id 를 아직 모른다 — 대화를 한 번 주고받은 뒤 다시"
                 )
             })?)
         };
@@ -1039,12 +1047,24 @@ impl App {
             .unwrap_or_default();
         let jsonl = match &sid {
             None => None,
+            Some(_) if is_codex => None, // codex 는 아래 rollout 운반이 대신 간다
             Some(sid) => Some(
                 kasa_socket::sessions::session_jsonl_path(&cwd, sid)
                     .filter(|p| p.exists())
                     .or_else(|| socket::transcript_path_for_session(sid))
                     .ok_or_else(|| anyhow::anyhow!("세션 {sid} 의 대화 파일을 못 찾았다"))?,
             ),
+        };
+        // codex 의 대화 정본은 rollout(append-only 한 파일)이다. 자리는 지금 찾아
+        // 두고 **묶기는 SIGTERM 뒤에** 한다 — 마지막 턴 조각까지 실리게(jsonl 을
+        // 끄고 나서 올리는 것과 같은 순서).
+        let rollout = match &sid {
+            Some(sid) if is_codex => Some(
+                socket::codex_rollout_for_session(sid).ok_or_else(|| {
+                    anyhow::anyhow!("세션 {sid} 의 Codex rollout 을 못 찾았다")
+                })?,
+            ),
+            _ => None,
         };
         // 코드부터 맞춘다 — **claude 를 끄기 전에**. 여기서 실패하면 아무것도 안
         // 건드린 채로 돌아설 수 있다(끄고 나서 실패하면 학생만 잃는다).
@@ -1134,7 +1154,12 @@ impl App {
                 .ok()
                 .filter(|o| o.status.success())
                 .map(|o| {
-                    String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions")
+                    let cmd = String::from_utf8_lossy(&o.stdout).into_owned();
+                    if is_codex {
+                        cmd.contains("--dangerously-bypass-approvals-and-sandbox")
+                    } else {
+                        cmd.contains("--dangerously-skip-permissions")
+                    }
                 })
                 .unwrap_or(false),
         };
@@ -1142,27 +1167,69 @@ impl App {
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
         // 다투는 것이 최악이다(옛 9-pane 사고의 원형). 태생 스폰은 끌 것도
         // 옮길 대화도 없어 이 구간을 통째로 건너뛴다.
-        if let (Some((_, agent_pid)), Some(sid), Some(jsonl)) = (&agent, &sid, &jsonl) {
+        if let (Some((_, agent_pid)), Some(sid)) = (&agent, &sid) {
             let agent_pid = *agent_pid;
             self.migrate_progress(pid, "학생 곱게 끄는 중…".to_string());
             unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
                 if std::time::Instant::now() > deadline {
-                    anyhow::bail!("claude(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 이사를 세웠다");
+                    anyhow::bail!("학생(pid {agent_pid}) 이 8초 안에 안 꺼졌다 — 이사를 세웠다");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
             }
-            self.migrate_progress(
-                pid,
-                format!(
-                    "대화 옮기는 중{}…",
-                    std::fs::metadata(jsonl)
-                        .map(|m| format!(" — {:.1}MB", m.len() as f64 / 1048576.0))
-                        .unwrap_or_default()
-                ),
-            );
-            kasa_mcp::remote::upload_transcript(base, &remote_cwd, sid, jsonl, None, force)?;
+            if let Some(jsonl) = &jsonl {
+                self.migrate_progress(
+                    pid,
+                    format!(
+                        "대화 옮기는 중{}…",
+                        std::fs::metadata(jsonl)
+                            .map(|m| format!(" — {:.1}MB", m.len() as f64 / 1048576.0))
+                            .unwrap_or_default()
+                    ),
+                );
+                kasa_mcp::remote::upload_transcript(base, &remote_cwd, sid, jsonl, None, force)?;
+            }
+            if let Some(rollout) = &rollout {
+                // 끄고 난 뒤에 묶는다 — append-only rollout 의 마지막 조각까지.
+                // 검증(헤더·경로·id 교차)은 운반 helper 가 전담한다.
+                let home = kasa_mcp::codexhome::codex_home_of_rollout(rollout)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "rollout 이 sessions 트리 밖이다: {}",
+                            rollout.display()
+                        )
+                    })?;
+                let bundle = kasa_socket::sessions::codex_sessions::bundle_codex_session(
+                    &home, rollout,
+                )?;
+                if bundle.session_id != *sid {
+                    anyhow::bail!(
+                        "rollout 헤더 id({}) 가 pane 세션 id({sid}) 와 다르다",
+                        bundle.session_id
+                    );
+                }
+                let file = bundle
+                    .files
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("빈 Codex bundle"))?;
+                self.migrate_progress(
+                    pid,
+                    format!(
+                        "Codex 대화 옮기는 중 — {:.1}MB…",
+                        file.bytes.len() as f64 / 1048576.0
+                    ),
+                );
+                let note = kasa_mcp::remote::push_codex_session(
+                    base,
+                    sid,
+                    &file.codex_home_relative_path.to_string_lossy(),
+                    file.bytes,
+                    None,
+                )?;
+                self.set_toast(format!("Codex 대화: {note}"));
+            }
         }
         // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
         // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
@@ -1298,17 +1365,19 @@ impl App {
             (None, Some(r)) => format!("{}\r", r.trim()),
             _ => {
                 let c = restore_agent_command(
-                    Some("claude"),
+                    Some(if is_codex { "codex" } else { "claude" }),
                     sid.as_deref(),
                     sid.is_some(),
                     Some(model.as_str()).filter(|s| !s.is_empty()),
                     Some(effort.as_str()).filter(|s| !s.is_empty()),
                 );
                 if bypass {
-                    format!(
-                        "{} --dangerously-skip-permissions\r",
-                        c.trim_end_matches('\r')
-                    )
+                    let flag = if is_codex {
+                        "--dangerously-bypass-approvals-and-sandbox"
+                    } else {
+                        "--dangerously-skip-permissions"
+                    };
+                    format!("{} {flag}\r", c.trim_end_matches('\r'))
                 } else {
                     c
                 }
@@ -1362,7 +1431,7 @@ impl App {
         };
         let Some(sid) = self.pane_claude_sid.get(pid).cloned() else {
             anyhow::bail!(
-                "{pid} 의 claude 세션 id 를 모른다 — 이사로 나간 pane 만 데려올 수 있다 \
+                "{pid} 의 세션 id 를 모른다 — 이사로 나간 pane 만 데려올 수 있다 \
                  (원격에서 태어난 학생은 아직 못 데려온다)"
             );
         };
@@ -1537,28 +1606,49 @@ impl App {
             }
         };
         self.migrate_progress(pid, "대화 내려받는 중…".to_string());
-        let bytes = kasa_mcp::remote::download_transcript(&info.base, &remote_cwd, &sid, None)?;
-        let jsonl = kasa_socket::sessions::session_jsonl_path(std::path::Path::new(&dest), &sid)
-            .ok_or_else(|| anyhow::anyhow!("HOME 을 몰라 대화 저장 위치를 못 정한다"))?;
-        // 크기 후퇴 관문 — 서버 업로드 쪽 규칙의 거울. 로컬에 더 큰 대화가 있으면
-        // 받은 쪽이 낡은 것이다(대개 이사 전 사본이 더 작으니 평소엔 통과).
-        if let Ok(meta) = std::fs::metadata(&jsonl) {
-            if meta.len() > bytes.len() as u64 && !force {
-                anyhow::bail!(
-                    "로컬에 더 큰 대화가 이미 있다({}B > {}B) — 원격 쪽이 낡았다. 알고 덮으려면 --force",
-                    meta.len(),
-                    bytes.len()
-                );
+        // 하네스는 짐작하지 않고 **대화가 어느 창구에 있느냐**로 가른다 — codex
+        // 창구를 먼저 물어(없으면 None — 낡은 기계도 같은 답) claude 로 물러선다.
+        let codex_pack = kasa_mcp::remote::fetch_codex_session(&info.base, &sid, None)?;
+        let is_codex = codex_pack.is_some();
+        if let Some((rel, bytes)) = &codex_pack {
+            // 로컬 설치는 서버 POST 창구와 같은 함수 — 검증·충돌 보관 정책이
+            // 창구마다 갈리지 않게 한 벌로 쓴다(다르면 기존 것을 보관하고 앉힘).
+            let home = kasa_socket::home_dir()
+                .map(|h| h.join(".codex"))
+                .ok_or_else(|| anyhow::anyhow!("HOME 을 몰라 Codex home 을 못 정한다"))?;
+            let note = kasa_mcp::codexhome::install_codex_rollout(
+                &home,
+                &sid,
+                std::path::Path::new(rel),
+                bytes,
+            )?;
+            self.set_toast(format!("Codex 대화: {note}"));
+        } else {
+            let bytes =
+                kasa_mcp::remote::download_transcript(&info.base, &remote_cwd, &sid, None)?;
+            let jsonl =
+                kasa_socket::sessions::session_jsonl_path(std::path::Path::new(&dest), &sid)
+                    .ok_or_else(|| anyhow::anyhow!("HOME 을 몰라 대화 저장 위치를 못 정한다"))?;
+            // 크기 후퇴 관문 — 서버 업로드 쪽 규칙의 거울. 로컬에 더 큰 대화가 있으면
+            // 받은 쪽이 낡은 것이다(대개 이사 전 사본이 더 작으니 평소엔 통과).
+            if let Ok(meta) = std::fs::metadata(&jsonl) {
+                if meta.len() > bytes.len() as u64 && !force {
+                    anyhow::bail!(
+                        "로컬에 더 큰 대화가 이미 있다({}B > {}B) — 원격 쪽이 낡았다. 알고 덮으려면 --force",
+                        meta.len(),
+                        bytes.len()
+                    );
+                }
             }
+            if let Some(dir) = jsonl.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| anyhow::anyhow!("대화 폴더 생성 실패: {e}"))?;
+            }
+            let tmp = jsonl.with_extension("jsonl.part");
+            std::fs::write(&tmp, &bytes)
+                .and_then(|_| std::fs::rename(&tmp, &jsonl))
+                .map_err(|e| anyhow::anyhow!("대화 저장 실패: {e}"))?;
         }
-        if let Some(dir) = jsonl.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| anyhow::anyhow!("대화 폴더 생성 실패: {e}"))?;
-        }
-        let tmp = jsonl.with_extension("jsonl.part");
-        std::fs::write(&tmp, &bytes)
-            .and_then(|_| std::fs::rename(&tmp, &jsonl))
-            .map_err(|e| anyhow::anyhow!("대화 저장 실패: {e}"))?;
         // 원격 셸을 진짜 끝낸다 — 안 걷으면 그 기계에 빈 학생 pane 이 좀비로 남는다.
         // 매니저가 이미 죽었어도(연결 유실) 실패가 아니다: 남은 셸은 닿을 때 걷는다.
         self.migrate_progress(pid, "창 바꿔 끼우고 학생 깨우는 중…".to_string());
@@ -1601,17 +1691,19 @@ impl App {
         self.pane_cwd_cache
             .insert(pid.to_string(), std::path::PathBuf::from(&dest));
         let cmd = restore_agent_command(
-            Some("claude"),
+            Some(if is_codex { "codex" } else { "claude" }),
             Some(&sid),
             true,
             Some(model.as_str()).filter(|s| !s.is_empty()),
             Some(effort.as_str()).filter(|s| !s.is_empty()),
         );
         let cmd = if bypass {
-            format!(
-                "{} --dangerously-skip-permissions\r",
-                cmd.trim_end_matches('\r')
-            )
+            let flag = if is_codex {
+                "--dangerously-bypass-approvals-and-sandbox"
+            } else {
+                "--dangerously-skip-permissions"
+            };
+            format!("{} {flag}\r", cmd.trim_end_matches('\r'))
         } else {
             cmd
         };
