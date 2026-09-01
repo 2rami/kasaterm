@@ -63,7 +63,7 @@ enum Route {
 }
 
 fn sessions_dir() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude/sessions"))
+    Some(kasa_socket::home_dir()?.join(".claude/sessions"))
 }
 
 /// 이 소켓이 우리가 세운 유령의 프록시 소켓인가. 유령을 다시 명부·릴레이에
@@ -168,7 +168,7 @@ fn resolve_secret(value: &Option<String>, file: &Option<String>) -> Option<Strin
     }
     let f = file.as_ref().filter(|s| !s.is_empty())?;
     let path = if let Some(rest) = f.strip_prefix("~/") {
-        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+        kasa_socket::home_dir()?.join(rest)
     } else {
         PathBuf::from(f)
     };
@@ -183,8 +183,8 @@ pub(crate) fn relay_conf() -> Option<RelayConf> {
             return Some(c);
         }
     }
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home).join(".config/kasaterm/relay.json");
+    let home = kasa_socket::home_dir()?;
+    let path = home.join(".config/kasaterm/relay.json");
     parse_relay_conf(&std::fs::read_to_string(path).ok()?)
 }
 
@@ -299,7 +299,7 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
     let display = ghost_display_name(name, label);
     let entry = serde_json::json!({
         "pid": pid, "sessionId": remote_sid,
-        "cwd": std::env::var("HOME").unwrap_or_default(),
+        "cwd": kasa_socket::home_dir().map(|p| p.display().to_string()).unwrap_or_default(),
         "startedAt": now, "procStart": procstart, "version": "2.1.251",
         "peerProtocol": 1, "peerFeatures": ["notify_idle"],
         "kind": "interactive", "entrypoint": "cli", "pidDomain": "darwin",

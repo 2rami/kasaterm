@@ -574,7 +574,7 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> 
     if session_id.is_empty() {
         return Vec::new();
     }
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+    let Some(home) = kasa_socket::home_dir() else {
         return Vec::new();
     };
     let base = home.join(".claude/tasks");
@@ -603,7 +603,7 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> 
 /// 를 찾았고, cwd 폴백은 `teams/<team>/config.json` 의 `members[].cwd` 를 읽는데 그 파일이
 /// 이제 안 생긴다(팀 디렉토리엔 `inboxes/` 뿐, 실측 2026-08-05).
 fn team_task_dir_by_name(team: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let home = kasa_socket::home_dir()?;
     team_task_dir_in(&home.join(".claude/tasks"), team)
 }
 
@@ -626,7 +626,7 @@ fn team_task_dir_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
     if cwd.is_empty() {
         return None;
     }
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let home = kasa_socket::home_dir()?;
     let teams = home.join(".claude/teams");
     let tasks_base = home.join(".claude/tasks");
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
