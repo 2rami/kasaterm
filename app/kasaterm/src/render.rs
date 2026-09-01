@@ -10517,6 +10517,55 @@ impl App {
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
+            // 복원을 누르고 재구성을 기다리는 동안. 카드와 버튼을 걷고 한 줄만
+            // 남긴다 — 이 프레임이 재구성 내내 화면에 멈춰 있게 된다.
+            if let Some((state, _)) = self.restore_applying.clone() {
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                let total = crate::App::count_panes(&state);
+                let msg = format!("창 {total}개를 되살리는 중…");
+                let sub = "다 되면 이 화면이 사라져요";
+                let pad = 22.0_f32;
+                let tw = g
+                    .measure_chrome_text(&msg, 16.0, true)
+                    .max(g.measure_chrome_text(sub, 13.0, false));
+                let card_w = (tw + pad * 2.0).clamp(320.0, (win_w - 48.0).max(320.0));
+                let card_h = 92.0_f32;
+                let cx0 = ((win_w - card_w) / 2.0).round();
+                let cy0 = ((win_h - card_h) / 2.0).round();
+                panel_rect_outlined(
+                    g,
+                    cx0,
+                    cy0,
+                    card_w,
+                    card_h,
+                    theme::radius_md() * 1.5,
+                    theme::surface_active(),
+                );
+                g.draw_text(
+                    cx0 + pad,
+                    cy0 + 34.0,
+                    &msg,
+                    gpu::DrawOpts {
+                        font_size: 16.0,
+                        color: theme::text(),
+                        bold: true,
+                        italic: false,
+                    },
+                );
+                g.draw_text(
+                    cx0 + pad,
+                    cy0 + 60.0,
+                    sub,
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: theme::with_alpha(theme::text(), 0xA0),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
             // 계정 전환 확인 — 확인 모달·복원 프롬프트와 같은 층. 설정 별도창에서
             // 누른 것은 그 창이 그리므로 여기서는 메인 몫만 본다.
             if let Some(p) = self.account_switch_confirm.as_ref() {

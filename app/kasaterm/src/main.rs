@@ -5131,6 +5131,14 @@ struct App {
     /// awaiting the user's 복원/새로 시작 decision. While `Some`, a modal is
     /// painted over the fresh session and swallows input.
     restore_prompt: Option<serde_json::Value>,
+    /// 복원을 누른 뒤 실제 재구성까지의 짧은 유예 — `(저장본, 시작할 시각)`.
+    ///
+    /// 재구성은 pane 마다 PTY 를 띄우느라 수 초간 GUI 스레드를 잡는다. 그동안
+    /// 화면은 직전 프레임에 멈춰 있는데, 그게 카드의 검은 막이라 새로 살아난
+    /// pane 이 그 막 아래로 비쳐 「복원 창이 겹친 것처럼 보인다」가 됐다
+    /// (2026-09-01 지적). 그래서 막 대신 「되살리는 중」을 한 프레임 그려 두고,
+    /// 그 화면이 멈춰 있게 한 뒤에 재구성을 시작한다.
+    restore_applying: Option<(serde_json::Value, std::time::Instant)>,
     /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
     restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
     /// 자동 스냅샷(강제 종료 대비) 상태 — 마지막 저장 시각, 그 뒤로 깨어난 적이
@@ -5854,6 +5862,7 @@ impl App {
             confirm_close: None,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
+            restore_applying: None,
             restore_btn_rects: Vec::new(),
             session_saved_at: std::time::Instant::now(),
             session_touched: false,
@@ -6746,6 +6755,15 @@ fn install_rust_analyzer_shim(shim_dir: &std::path::Path) {
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v rust-analyzer 2>/dev/null)
+# 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
+# /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
+# 들어 있는데 $0 로 잰 SELF_DIR 은 `/c/Users/.../Temp/kasaterm-shim-N` 이다. 그러면
+# REAL 이 이 스크립트 자신이 되어 무한 재귀한다(2026-09-01 Windows 실측: --version
+# 조차 안 끝났다). 문자열이 달라도 같은 파일인지로 한 번 더 거른다.
+while [ -n "$REAL" ] && [ "$REAL" -ef "$0" ]; do
+  CLEAN_PATH=$(printf '%s' "$CLEAN_PATH" | tr ':' '\n' | grep -vxF "$(dirname -- "$REAL")" | paste -sd: -)
+  REAL=$(PATH="$CLEAN_PATH" command -v rust-analyzer 2>/dev/null)
+done
 if [ -z "$REAL" ]; then
 echo "kasaterm rust-analyzer shim: real rust-analyzer not found on PATH" >&2
 exit 127
@@ -7510,6 +7528,15 @@ HOOKS_DIR=\"{hd}\"\n\
 SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
 CLEAN_PATH=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | paste -sd: -)\n\
 REAL=$(PATH=\"$CLEAN_PATH\" command -v claude 2>/dev/null)\n\
+# 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는\n\
+# /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이\n\
+# 들어 있는데 $0 로 잰 SELF_DIR 은 `/c/Users/.../Temp/kasaterm-shim-N` 이다. 그러면\n\
+# REAL 이 이 스크립트 자신이 되어 무한 재귀한다(2026-09-01 Windows 실측: --version\n\
+# 조차 안 끝났다). 문자열이 달라도 같은 파일인지로 한 번 더 거른다.\n\
+while [ -n \"$REAL\" ] && [ \"$REAL\" -ef \"$0\" ]; do\n\
+  CLEAN_PATH=$(printf '%s' \"$CLEAN_PATH\" | tr ':' '\\n' | grep -vxF \"$(dirname -- \"$REAL\")\" | paste -sd: -)\n\
+  REAL=$(PATH=\"$CLEAN_PATH\" command -v claude 2>/dev/null)\n\
+done\n\
 if [ -z \"$REAL\" ]; then\n\
   echo \"kasaterm claude shim: real claude not found on PATH\" >&2\n\
   exit 127\n\
@@ -7669,6 +7696,15 @@ pub(crate) fn install_codex_shim(shim_dir: &std::path::Path) {
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v codex 2>/dev/null)
+# 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
+# /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
+# 들어 있는데 $0 로 잰 SELF_DIR 은 `/c/Users/.../Temp/kasaterm-shim-N` 이다. 그러면
+# REAL 이 이 스크립트 자신이 되어 무한 재귀한다(2026-09-01 Windows 실측: --version
+# 조차 안 끝났다). 문자열이 달라도 같은 파일인지로 한 번 더 거른다.
+while [ -n "$REAL" ] && [ "$REAL" -ef "$0" ]; do
+  CLEAN_PATH=$(printf '%s' "$CLEAN_PATH" | tr ':' '\n' | grep -vxF "$(dirname -- "$REAL")" | paste -sd: -)
+  REAL=$(PATH="$CLEAN_PATH" command -v codex 2>/dev/null)
+done
 if [ -z "$REAL" ]; then
   echo "kasaterm codex shim: real codex not found on PATH" >&2
   exit 127
@@ -7855,6 +7891,15 @@ fn install_agy_hook_shim(shim_dir: &std::path::Path) {
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v agy 2>/dev/null)
+# 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
+# /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
+# 들어 있는데 $0 로 잰 SELF_DIR 은 `/c/Users/.../Temp/kasaterm-shim-N` 이다. 그러면
+# REAL 이 이 스크립트 자신이 되어 무한 재귀한다(2026-09-01 Windows 실측: --version
+# 조차 안 끝났다). 문자열이 달라도 같은 파일인지로 한 번 더 거른다.
+while [ -n "$REAL" ] && [ "$REAL" -ef "$0" ]; do
+  CLEAN_PATH=$(printf '%s' "$CLEAN_PATH" | tr ':' '\n' | grep -vxF "$(dirname -- "$REAL")" | paste -sd: -)
+  REAL=$(PATH="$CLEAN_PATH" command -v agy 2>/dev/null)
+done
 if [ -z "$REAL" ]; then
   echo "kasaterm agy shim: real agy not found on PATH" >&2
   exit 127

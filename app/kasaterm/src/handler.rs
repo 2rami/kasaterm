@@ -6488,6 +6488,17 @@ impl ApplicationHandler<UserEvent> for App {
         // Fire any queued session-restore commands whose delay has elapsed.
         // Each carries its own PtySession so a resume reaches the right pane in
         // any session (active or stashed background).
+        // 「되살리는 중」이 한 번 그려졌으면 이제 진짜 재구성한다.
+        if self
+            .restore_applying
+            .as_ref()
+            .is_some_and(|(_, at)| std::time::Instant::now() >= *at)
+        {
+            if let Some((state, _)) = self.restore_applying.take() {
+                self.restore_session_state(&state);
+                self.chrome_dirty = true;
+            }
+        }
         if !self.pending_restores.is_empty() {
             let now = std::time::Instant::now();
             if self.pending_restores.iter().any(|(_, _, at)| now >= *at) {
@@ -6961,7 +6972,12 @@ impl App {
         };
         self.chrome_dirty = true;
         match btn {
-            RestoreBtn::Restore => self.restore_session_state(&state),
+            // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에
+            // 시작해야 그 화면이 멈춘 채로 남는다(위 restore_applying 주석).
+            RestoreBtn::Restore => {
+                self.restore_applying =
+                    Some((state, std::time::Instant::now() + std::time::Duration::from_millis(90)));
+            }
             RestoreBtn::Fresh => crate::socket::clear_session_state(),
             // 저장본을 지우지 않는다 — 닫기는 「안 고름」이지 「버림」이 아니다.
             RestoreBtn::Dismiss => {}

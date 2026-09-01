@@ -4851,7 +4851,13 @@ impl App {
         // 「재시작했는데 세션이 없어진 것 같다」, %0 미도리가 소리 없이 빠짐)
         // 무엇이 저장돼 있었는지 되짚을 증거가 이것뿐이다. 원본 session.json 은
         // 몇 초 안에 현재 상태로 덮여 사라진다. 최근 5벌만 남긴다.
-        if let Some(dir) = kasa_socket::home_dir().map(|h| h.join(".config/kasaterm")) {
+        // 저장본이 놓인 폴더에 함께 둔다 — `home_dir()` 를 직접 부르면
+        // `KASATERM_SESSION_FILE` 로 격리한 검증 실행까지 사람의 config 에
+        // 백업을 쌓고, 5벌 상한에 걸려 **사람의 백업을 밀어낸다**
+        // (2026-09-01 실측: 5벌 중 3벌이 검증 실행 것이었다).
+        if let Some(dir) = crate::socket::session_file_path()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

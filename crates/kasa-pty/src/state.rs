@@ -3017,7 +3017,23 @@ fn attach_inline_views(
 /// its cwd over OSC 9;9 on every prompt, wrapping any profile-defined prompt.
 /// Single-quoted throughout (no `"`) so Windows argv quoting stays trivial; the
 /// `\` inside `'\'` is the literal ST terminator byte that closes the OSC.
-const PWSH_CWD_SHIM: &str = "$__ktp=$function:prompt; function global:prompt { $l=$ExecutionContext.SessionState.Path.CurrentLocation; if($l -and $l.Provider.Name -eq 'FileSystem'){[Console]::Write([char]27+']9;9;'+$l.ProviderPath+[char]27+'\\')}; if($__ktp){& $__ktp}else{'PS '+$PWD.Path+'> '} }";
+/// 두 번째 줄이 `claude` 를 shim 으로 되돌린다. PowerShell 은 **함수가 PATH 조회를
+/// 이겨서**, 사용자 프로필에 `function claude { & claude.exe ... }` 가 있으면 PATH 맨
+/// 앞의 shim(`claude.cmd`)이 통째로 우회된다. 그 래퍼가 붙이던 `--session-id` 와
+/// `--settings` 가 함께 사라지고, 그러면 세션 id 를 채우는 두 경로(argv 스캔·
+/// bind-transcript 훅)가 같이 죽어 `session.json` 의 `session_id` 가 영영 null 이 된다
+/// — 재시작은 「claude 였다」는 것만 알고 어느 대화인지 몰라 빈 셸을 띄운다
+/// (2026-09-01 Windows 실측: 저장본 5벌 전부 sid 0개).
+///
+/// `-Command` 는 프로필 로드 **뒤**에 돌아서 여기서 다시 정의하면 프로필을 이긴다.
+/// 프로필이 붙이던 플래그(`--dangerously-skip-permissions` 등)는 정의 문자열에서 뽑아
+/// 승계한다 — 값을 받는 플래그(`--model opus`)는 값까지 옮기지 못하는 한계가 있다.
+/// `__ktcs` 마커로 재진입을 막아 두 번 돌아도 승계한 플래그를 잃지 않는다.
+/// 앱 밖(shim 디렉터리 없음)에서는 아무것도 하지 않는다.
+const PWSH_CWD_SHIM: &str = concat!(
+    "$__ktp=$function:prompt; function global:prompt { $l=$ExecutionContext.SessionState.Path.CurrentLocation; if($l -and $l.Provider.Name -eq 'FileSystem'){[Console]::Write([char]27+']9;9;'+$l.ProviderPath+[char]27+'\\')}; if($__ktp){& $__ktp}else{'PS '+$PWD.Path+'> '} }",
+    "; if($env:KASATERM_TMUX_SHIM_DIR){$__kts=Join-Path $env:KASATERM_TMUX_SHIM_DIR 'claude.cmd'; $__ktq=(Test-Path function:claude) -and (\"$function:claude\" -match '__ktcs'); if((Test-Path $__kts) -and (-not $__ktq)){$__ktf=@(); if(Test-Path function:claude){$__ktf=@([regex]::Matches(\"$function:claude\",'--[a-z][a-z0-9-]*')|ForEach-Object{$_.Value}|Select-Object -Unique)}; $global:__ktcs=$__kts; $global:__ktcf=$__ktf; function global:claude { $a=$global:__ktcf; & $global:__ktcs @a @args }}}",
+);
 
 /// Extract the path from an OSC 9;9 working-directory report
 /// (`ESC ] 9 ; 9 ; <path> ST|BEL`). Terminator-agnostic. Returns the last match
