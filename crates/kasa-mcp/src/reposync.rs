@@ -267,6 +267,36 @@ pub fn apply(
             ),
         );
     }
+    // 관문 ④(TOCTOU) — ①~③ 검사와 이 되감기 사이에 fetch(수 초, origin 폴백
+    // 포함)가 있다. 그 사이 같은 트리의 다른 pane 이 저장·커밋했으면 위 판정은
+    // 낡은 것이다(독립 리뷰 지적 2026-09-02). 되감기 직전에 dirty·HEAD 를 다시
+    // 재고, 달라졌으면 절대 덮지 않고 같은 막힘 경로(보관/중단)로 보낸다.
+    if !force {
+        if is_dirty(&root)? {
+            return blocked(
+                on_block,
+                &root,
+                bundle,
+                format!(
+                    "적용 직전 도착지({})에 새 미저장 변경이 생겼다 — 덮지 않고 세운다",
+                    root.display()
+                ),
+            );
+        }
+        let head_now = git_out(&root, &["rev-parse", "HEAD"], &[])?;
+        if head_now != cur_head {
+            return blocked(
+                on_block,
+                &root,
+                bundle,
+                format!(
+                    "적용 직전 도착지 HEAD 가 움직였다({} → {}) — 덮지 않고 세운다",
+                    &cur_head[..cur_head.len().min(8)],
+                    &head_now[..head_now.len().min(8)]
+                ),
+            );
+        }
+    }
     if branch.is_empty() {
         git_out(&root, &["checkout", "--detach", head], &[])?;
     } else {
