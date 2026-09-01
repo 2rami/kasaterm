@@ -22,6 +22,9 @@ anyhow.workspace = true
 crossbeam-channel.workspace = true
 # "ws" — 웹 터미널의 양방향 채널. 기본 feature 에는 안 들어 있다.
 axum = { version = "0.8.9", features = ["ws"] }
+# 라우팅 **전에** 도는 레이어(`/u/<slug>/` 접두 벗기기)는 Router::layer 로는 못 건다 —
+# 그건 라우팅 뒤다. ServiceBuilder 로 라우터 바깥에 두른다.
+tower = "0.5"
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

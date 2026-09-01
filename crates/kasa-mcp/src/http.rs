@@ -3845,13 +3845,20 @@ async fn schale_state_handler() -> impl IntoResponse {
 /// JS·CSS 가 403** 이 된다(= 빈 화면). 토큰을 물고 들어올 수 있는 입구는 전부
 /// 이걸 거쳐야 한다.
 fn remote_token_cookie(q: &std::collections::HashMap<String, String>) -> Option<String> {
-    // HttpOnly — 페이지 스크립트가 토큰을 읽을 이유가 없다.
-    // SameSite=Strict — 남의 사이트에서 건너온 요청에는 안 실린다.
     remote_token()
         .filter(|want| q.get("t").map(String::as_str) == Some(*want))
-        .map(|want| {
-            format!("kasa_token={want}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
-        })
+        .map(token_cookie)
+}
+
+/// 토큰 쿠키 한 벌. 심는 자리가 셋(`?t=` 입구 · 유저 주소 관문 · 아로나 입구)이라 여기서만 짓는다.
+///
+/// HttpOnly — 페이지 스크립트가 토큰을 읽을 이유가 없다.
+/// SameSite=**Lax** — 전엔 Strict 였는데, 그러면 슬랙·디스코드 알림에서 링크를 눌러
+/// 건너오는 **첫 화면에 쿠키가 안 실려 403** 이었다(2026-09-02 지적 「토큰없으면
+/// 안봐지고」의 한 축). Lax 는 최상위 이동(GET)에는 실리고 남의 사이트가 띄우는
+/// POST·iframe·fetch 에는 안 실린다 — 부작용 있는 창구는 전부 POST 라 그걸로 족하다.
+fn token_cookie(want: &str) -> String {
+    format!("kasa_token={want}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000")
 }
 
 /// HTML 응답에 위 쿠키를 붙인다.
@@ -5086,6 +5093,11 @@ async fn origin_guard_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // 유저 주소(`/u/<slug>/…`)로 들어왔으면 주소 자체가 자격이다 — `mobile_prefix_mw` 가
+    // slug 를 이미 대조했고, 남의 사이트는 그 slug 를 모르니 교차출처 검사도 필요 없다.
+    if req.extensions().get::<MobileAuth>().is_some() {
+        return next.run(req).await;
+    }
     // 원격(loopback 밖)은 **토큰이 유일한 관문**이다. 아래 로컬 규칙을 그대로
     // 물려주면 안 된다 — 「Origin 이 없으면 로컬 CLI 라 통과」의 근거가 "이미 같은
     // 사용자 권한으로 도는 프로세스"인데 원격에는 그게 성립하지 않는다. 그대로 두면
@@ -5160,6 +5172,320 @@ fn ws_origin_ok(h: &HeaderMap) -> bool {
     // 통과해야 한다. 브라우저는 Host 를 조작할 수 없고(실제 연결 대상으로
     // 채워진다), 원격 연결은 `origin_guard_mw` 가 토큰으로 이미 걸러 낸 뒤다.
     !host.is_empty() && o == host
+}
+
+// ── 유저별 폰 주소 `/u/<slug>/…` ──────────────────────────────────────────────
+//
+// 주소 자체가 자격이다(`mobile.rs` 머리말). 라우팅 **앞**에서 접두를 벗기고
+// `MobileAuth` 를 심으면, 안쪽 라우트와 관문은 로컬 요청처럼 다룬다.
+
+/// 유저 주소로 들어온 요청임을 라우트 안쪽에 알리는 표식.
+#[derive(Clone)]
+pub(crate) struct MobileAuth(pub crate::mobile::MobileUser);
+
+/// 라우팅 앞에 두르는 레이어. `/u/<slug>/term/grid` 를 `/term/grid` 로 고쳐 쓴다.
+/// ⚠️ `Router::layer` 로 걸면 안 된다 — 그건 라우팅 **뒤**라 경로가 이미 404 다.
+/// `spawn_http_server_opts` 가 ServiceBuilder 로 라우터 바깥에 건다.
+async fn mobile_prefix_mw(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use crate::mobile::Rewrite;
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    match crate::mobile::rewrite(req.uri().path()) {
+        Rewrite::NotOurs => next.run(req).await,
+        // 있는지 없는지 구분되지 않게 한 종류로 — 주소를 맞혀 보는 쪽에 힌트를 안 준다.
+        Rewrite::Unknown => {
+            (axum::http::StatusCode::NOT_FOUND, "no such address").into_response()
+        }
+        Rewrite::NeedSlash(slug) => axum::response::Redirect::temporary(&format!(
+            "{}{slug}/{query}",
+            crate::mobile::PREFIX
+        ))
+        .into_response(),
+        Rewrite::Route { user, path } => {
+            let Ok(uri) = format!("{path}{query}").parse::<axum::http::Uri>() else {
+                return (axum::http::StatusCode::BAD_REQUEST, "bad path").into_response();
+            };
+            // 절대경로(`/settings/…`)로 부르는 옛 fetch 를 위해 쿠키도 심는다 — 주소가
+            // 자격이니 필수가 아니라 보조다. 이미 물고 있으면 안 건드린다.
+            let need_cookie = !has_remote_token(req.headers(), None);
+            *req.uri_mut() = uri;
+            req.extensions_mut().insert(MobileAuth(user));
+            let mut res = next.run(req).await;
+            if need_cookie {
+                if let Some(v) = remote_token()
+                    .map(token_cookie)
+                    .and_then(|c| axum::http::HeaderValue::from_str(&c).ok())
+                {
+                    res.headers_mut().append(header::SET_COOKIE, v);
+                }
+            }
+            res
+        }
+    }
+}
+
+/// 폰 허브 — 이 기계와 명부의 다른 기계, 그 pane 목록. 누르면 터미널로.
+async fn hub_page() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../assets/term/hub.html"),
+    )
+}
+
+/// 유저를 더하고 지울 권한 — 이 기계에서 직접(loopback) 왔거나 **주인 주소**로 왔을 때.
+/// 남에게 준 주소로는 자기 화면만 보고 목록은 못 본다.
+fn mobile_can_manage(req: &axum::extract::Request) -> bool {
+    if let Some(a) = req.extensions().get::<MobileAuth>() {
+        return a.0.owner;
+    }
+    !is_remote_peer(req)
+}
+
+fn mobile_user_json(u: &crate::mobile::MobileUser) -> serde_json::Value {
+    let path = crate::mobile::path_of(u);
+    serde_json::json!({
+        "name": u.name,
+        "owner": u.owner,
+        "path": path,
+        // 바깥 주소가 켜져 있으면 폰에 보낼 완성 주소까지 — 허브가 127.0.0.1 로 열려
+        // 있을 때 location.origin 은 폰에 소용이 없다.
+        "url": crate::tunnel::host().map(|h| format!("https://{h}{path}")),
+    })
+}
+
+/// `GET /mobile/me` — 이 요청이 누구 주소로 왔나 + 관리 가능 여부 + 이 기계 이름.
+async fn mobile_me(req: axum::extract::Request) -> axum::response::Response {
+    let who = req
+        .extensions()
+        .get::<MobileAuth>()
+        .map(|a| a.0.clone())
+        .or_else(|| (!is_remote_peer(&req)).then(crate::mobile::owner).flatten());
+    Json(serde_json::json!({
+        "ok": true,
+        "name": who.as_ref().map(|u| u.name.clone()),
+        "owner": who.as_ref().is_some_and(|u| u.owner),
+        "can_manage": mobile_can_manage(&req),
+        "machine": crate::mobile::machine_name(),
+        "tunnel": crate::tunnel::host(),
+    }))
+    .into_response()
+}
+
+fn mobile_query_name(req: &axum::extract::Request) -> Option<String> {
+    axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(req.uri())
+        .ok()
+        .and_then(|q| q.0.get("name").cloned())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+}
+
+/// `GET /mobile/users` — 유저와 주소 목록(주인만).
+async fn mobile_users_get(req: axum::extract::Request) -> axum::response::Response {
+    if !mobile_can_manage(&req) {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
+    // 주인이 아직 없으면 여기서 생긴다 — 목록이 비어 보이는 첫 화면을 없앤다.
+    let _ = crate::mobile::owner();
+    let users: Vec<_> = crate::mobile::users().iter().map(mobile_user_json).collect();
+    Json(serde_json::json!({ "ok": true, "users": users })).into_response()
+}
+
+/// `POST /mobile/users?name=` — 유저를 더하고 그 주소를 돌려준다. `&rotate=1` 이면
+/// 있는 유저의 주소를 새로 뽑는다(샜을 때).
+async fn mobile_users_post(req: axum::extract::Request) -> axum::response::Response {
+    if !mobile_can_manage(&req) {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
+    let Some(name) = mobile_query_name(&req) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "name 이 필요해요").into_response();
+    };
+    let rotate = axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(req.uri())
+        .ok()
+        .and_then(|q| q.0.get("rotate").cloned())
+        .is_some_and(|v| v == "1" || v == "true");
+    let res = if rotate { crate::mobile::rotate(&name) } else { crate::mobile::add(&name) };
+    match res {
+        Ok(u) => Json(serde_json::json!({ "ok": true, "user": mobile_user_json(&u) })).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /mobile/users?name=` — 그 주소가 즉시 죽는다.
+async fn mobile_users_delete(req: axum::extract::Request) -> axum::response::Response {
+    if !mobile_can_manage(&req) {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
+    let Some(name) = mobile_query_name(&req) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "name 이 필요해요").into_response();
+    };
+    match crate::mobile::remove(&name) {
+        Ok(removed) => Json(serde_json::json!({ "ok": true, "removed": removed })).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ── 다른 기계로 넘기는 문 `/m/<기계>/<경로>` ────────────────────────────────────
+//
+// 폰 주소 하나(`/u/<slug>/`)로 **명부(machines.json)의 기계 전부**를 보게 한다 —
+// 기계마다 터널을 파지 않는다. 자격은 관문이 이미 봤으니(slug·토큰·로컬) 여기선
+// 옮기기만 한다. HTTP 와 WebSocket 둘 다.
+
+const PROXY_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+fn proxy_client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| reqwest::Client::builder().build().expect("reqwest client"))
+}
+
+/// 대상 기계로 **넘기지 않는** 헤더. hop-by-hop 과, 대상의 관문을 엉뚱하게 자극할 것들:
+/// 쿠키·Origin·sec-fetch 는 대상 입장에서 남의 사이트처럼 보이고, X-Forwarded-For 는
+/// 대상이 「원격이니 토큰 내라」고 막는다(터널 안쪽은 양끝 loopback 이라 토큰이 없다).
+fn proxy_skip_request_header(k: &axum::http::HeaderName) -> bool {
+    matches!(
+        k.as_str(),
+        "host"
+            | "connection"
+            | "upgrade"
+            | "cookie"
+            | "origin"
+            | "referer"
+            | "content-length"
+            | "transfer-encoding"
+            | "accept-encoding"
+            | "x-kasa-token"
+            | "x-forwarded-for"
+            | "x-forwarded-proto"
+            | "x-forwarded-host"
+            | "cf-connecting-ip"
+    ) || k.as_str().starts_with("sec-")
+}
+
+/// 폰으로 **되돌려주지 않는** 헤더. 대상이 심는 토큰 쿠키는 이 기계 것과 달라서
+/// 그대로 흘리면 우리 쿠키를 덮어 절대경로 fetch 가 죽는다.
+fn proxy_skip_response_header(k: &axum::http::HeaderName) -> bool {
+    matches!(k.as_str(), "set-cookie" | "connection" | "upgrade" | "transfer-encoding")
+}
+
+async fn machine_proxy(
+    AxPath((label, rest)): AxPath<(String, String)>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let Some(m) = crate::machines::find(&label) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such machine").into_response();
+    };
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("{}/{rest}{query}", m.base);
+    let is_ws = req
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    if is_ws {
+        use axum::extract::FromRequestParts as _;
+        let (mut parts, _body) = req.into_parts();
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(w) => w,
+            Err(e) => return e.into_response(),
+        };
+        let ws_target = if let Some(rest) = target.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else {
+            format!("ws://{}", target.trim_start_matches("http://"))
+        };
+        return ws
+            .on_upgrade(move |sock| proxy_ws(sock, ws_target, label))
+            .into_response();
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, PROXY_BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response()
+        }
+    };
+    let mut rb = proxy_client().request(parts.method.clone(), &target);
+    for (k, v) in parts.headers.iter() {
+        if !proxy_skip_request_header(k) {
+            rb = rb.header(k, v);
+        }
+    }
+    let resp = match rb.body(bytes).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("{label} 에 못 닿았어요: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let mut out = axum::response::Response::builder().status(resp.status());
+    for (k, v) in resp.headers().iter() {
+        if !proxy_skip_response_header(k) {
+            out = out.header(k, v);
+        }
+    }
+    use futures_util::TryStreamExt as _;
+    let stream = resp.bytes_stream().map_err(std::io::Error::other);
+    out.body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| axum::http::StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// 폰 ↔ 이 기계 ↔ 대상 기계의 WS 를 양방향으로 잇는다. Ping/Pong 도 **그대로 옮긴다** —
+/// 대상 서버는 Pong 이 75초 없으면 피어가 잠든 것으로 보고 끊는데(`term_ws_run`),
+/// tungstenite 의 자동 pong 은 다음 쓰기 때까지 안 나가서 그 판정에 걸린다.
+async fn proxy_ws(sock: WebSocket, url: String, label: String) {
+    use axum::extract::ws::Message as AM;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as TM;
+    let (mut ctx, mut crx) = sock.split();
+    let up = match tokio_tungstenite::connect_async(&url).await {
+        Ok((u, _)) => u,
+        Err(e) => {
+            eprintln!("[m-proxy] {label} WS 연결 실패: {e}");
+            // 클라가 「기계가 죽었다」와 「잠깐 끊겼다」를 가르게 — gone 은 재접속을 멈춘다.
+            let _ = ctx
+                .send(AM::Text(
+                    serde_json::json!({ "t": "gone", "why": "machine unreachable" })
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let (mut utx, mut urx) = up.split();
+    loop {
+        tokio::select! {
+            m = crx.next() => match m {
+                Some(Ok(AM::Binary(b))) => if utx.send(TM::Binary(b)).await.is_err() { break },
+                Some(Ok(AM::Text(t))) => if utx.send(TM::Text(t.as_str().into())).await.is_err() { break },
+                Some(Ok(AM::Ping(p))) => if utx.send(TM::Ping(p)).await.is_err() { break },
+                Some(Ok(AM::Pong(p))) => if utx.send(TM::Pong(p)).await.is_err() { break },
+                Some(Ok(AM::Close(_))) | Some(Err(_)) | None => break,
+            },
+            m = urx.next() => match m {
+                Some(Ok(TM::Binary(b))) => if ctx.send(AM::Binary(b)).await.is_err() { break },
+                Some(Ok(TM::Text(t))) => if ctx.send(AM::Text(t.as_str().into())).await.is_err() { break },
+                Some(Ok(TM::Ping(p))) => if ctx.send(AM::Ping(p)).await.is_err() { break },
+                Some(Ok(TM::Pong(p))) => if ctx.send(AM::Pong(p)).await.is_err() { break },
+                Some(Ok(TM::Frame(_))) => {}
+                Some(Ok(TM::Close(_))) | Some(Err(_)) | None => break,
+            },
+        }
+    }
+    let _ = utx.close().await;
+    let _ = ctx.close().await;
 }
 
 /// pane id 를 **디코딩하지 않은 원문**으로 꺼낸다.
@@ -5802,6 +6128,16 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
                     .route("/term/message", post(term_message_post))
+                    // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
+                    .route("/hub", get(hub_page))
+                    .route("/mobile/me", get(mobile_me))
+                    .route(
+                        "/mobile/users",
+                        get(mobile_users_get)
+                            .post(mobile_users_post)
+                            .delete(mobile_users_delete),
+                    )
+                    .route("/m/{label}/{*rest}", axum::routing::any(machine_proxy))
                     .route("/peer-registry", get(peer_registry_get))
                     .route(
                         "/term/character-theme",
@@ -6254,6 +6590,12 @@ pub fn spawn_http_server_opts(
                     // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
                     // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.
                     .layer(axum::middleware::from_fn(origin_guard_mw));
+                // 유저별 주소 접두(`/u/<slug>/`)는 라우팅 **앞**에서 벗겨야 한다 —
+                // `Router::layer` 는 라우팅 뒤라 그 경로가 먼저 404 를 맞는다.
+                let app = tower::ServiceBuilder::new()
+                    .layer(axum::middleware::from_fn(mobile_prefix_mw))
+                    .service(app);
+                use axum::ServiceExt as _;
                 // ConnectInfo 를 붙여야 `origin_guard_mw` 가 peer 주소를 보고
                 // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
                 // 토큰 없이 통과한다.
@@ -6273,6 +6615,15 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn token_cookie_is_lax_not_strict() {
+        // Strict 면 슬랙·디스코드 링크에서 건너오는 첫 화면에 쿠키가 안 실려 403 이다.
+        let c = super::token_cookie("abc");
+        assert!(c.contains("SameSite=Lax"), "{c}");
+        assert!(c.contains("HttpOnly"));
+        assert!(c.starts_with("kasa_token=abc;"));
+    }
+
     #[test]
     fn valid_session_id_rejects_path_material() {
         assert!(super::valid_session_id("deffe742-3b0d-40de-a135-ff8d7a207995"));

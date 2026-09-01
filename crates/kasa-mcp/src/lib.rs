@@ -29,6 +29,7 @@ pub mod remote;
 #[cfg(unix)]
 pub mod adopt;
 pub mod machines;
+pub mod mobile;
 pub mod remoteboard;
 pub mod reposync;
 mod resume_visibility;

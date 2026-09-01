@@ -1,23 +1,34 @@
 <!doctype html><html lang="ko"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <title>kasaterm</title>
-<link rel="stylesheet" href="/term/grid.css">
+<!-- 상대 경로 — 이 페이지는 `/term/grid` 로도, 유저 주소 `/u/<slug>/term/grid` 로도,
+     다른 기계 `/u/<slug>/m/<기계>/term/grid` 로도 열린다. 절대 `/term/…` 로 적으면
+     뒤의 둘에서 자격 없는 요청이 되어 403 이다. -->
+<link rel="stylesheet" href="grid.css">
 <style>
   html,body{margin:0;background:#12161c;color:#c8d0d9;
     font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overscroll-behavior:none}
   #wrap{overflow:auto;-webkit-overflow-scrolling:touch}
-  #status{position:fixed;left:0;right:0;bottom:0;padding:6px 10px;background:#1a2130;
+  #status{position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;
+    padding:0 6px;padding-bottom:env(safe-area-inset-bottom);min-height:44px;background:#1a2130;
     font-size:12px;color:#7aa2f7}
+  #status a{display:flex;align-items:center;min-height:44px;padding:0 10px;color:#c8d0d9;text-decoration:none}
+  #st{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 <div id="wrap"></div>
-<div id="status">연결 중…</div>
-<script src="/term/grid.js"></script>
+<div id="status"><a id="hub" href="./">≡ 목록</a><span id="st">연결 중…</span></div>
+<script src="grid.js"></script>
 <script>
-const st = document.getElementById('status');
+// 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — WS 도 같은 문으로.
+const ROOT = location.pathname.replace(/\/term\/grid\/?$/, '');
+// 허브: 유저 주소 아래면 그 뿌리(`/u/<slug>/`), 로컬이면 `/hub`.
+const hubRoot = ROOT.replace(/\/m\/[^/]+$/, '');
+document.getElementById('hub').href = hubRoot ? `${hubRoot}/` : '/hub';
+const st = document.getElementById('st');
 const grid = KasaGrid(document.getElementById('wrap'));
 const enc = new TextEncoder();
 // 키 입력은 바이너리 프레임으로만 간다 — 텍스트 프레임은 resize JSON 으로 읽혀 버려진다.
-const send = (s) => { if (ws.readyState === 1) ws.send(enc.encode(s)); };
+const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
 // 서버가 프레임마다 알려주는 입력 모드. xterm 은 이걸 자기가 추적했지만, 파싱한 쪽이
 // 알려주므로 어긋날 자리가 없다.
 const modes = { appCursor: false, bracketedPaste: false };
@@ -25,27 +36,58 @@ const input = KasaGridInput(grid, send, modes);
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 // 쿼리를 재조립하지 않고 그대로 넘긴다 — pane id 의 `%` 가 여기서 또 깎일 자리다.
 const sep = location.search ? '&' : '?';
-const ws = new WebSocket(`${proto}://${location.host}/term/ws${location.search}${sep}grid=1`);
+const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}${sep}grid=1`;
+let ws = null;
 let frames = 0;
-
-ws.onmessage = (e) => {
-  if (typeof e.data !== 'string') return;   // 그리드 모드에선 바이너리가 안 온다
-  const m = JSON.parse(e.data);
-  if (m.t === 'grid') {
-    grid.apply(m);
-    modes.appCursor = m.appCursor;
-    modes.bracketedPaste = m.bracketedPaste;
-    input.moveTo(m.cursor[0], m.cursor[1]);
-    frames++;
-    st.textContent = `${m.cols}×${m.rows} · ${frames}프레임 · 커서 ${m.cursor} · ${m.alt ? 'alt' : 'primary'}`;
-    fitWidth();
-  } else if (m.t === 'size') {
-    st.textContent = `격자 ${m.cols}×${m.rows}${m.mirror ? ' (미러)' : ''}`;
-  }
-};
-ws.onopen = () => { input.focus(); syncSize(); };
-ws.onclose = (e) => { st.textContent = `끊김 (${e.code})`; };
-ws.onerror = () => { st.textContent = '연결 실패'; };
+// 끊기면 다시 붙는다. 폰은 화면을 끄거나 앱을 바꾸는 것만으로 소켓이 죽고, 예전엔
+// 「끊김」만 찍고 새로고침을 기다렸다(2026-09-02 지적 「연결도 끊기고」). 세션이 정말
+// 끝난 것(`gone`)만 멈춘다 — 연결 유실은 멈출 이유가 아니다.
+let gone = false, backoff = 1000, retryTimer = null;
+function connect() {
+  if (gone) return;
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  clearTimeout(retryTimer);
+  st.textContent = '연결 중…';
+  ws = new WebSocket(WS_URL);
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;   // 그리드 모드에선 바이너리가 안 온다
+    const m = JSON.parse(e.data);
+    if (m.t === 'grid') {
+      grid.apply(m);
+      modes.appCursor = m.appCursor;
+      modes.bracketedPaste = m.bracketedPaste;
+      input.moveTo(m.cursor[0], m.cursor[1]);
+      frames++;
+      st.textContent = `${m.cols}×${m.rows} · ${frames}프레임 · ${m.alt ? 'alt' : 'primary'}`;
+      fitWidth();
+    } else if (m.t === 'size') {
+      st.textContent = `격자 ${m.cols}×${m.rows}${m.mirror ? ' (미러)' : ''}`;
+    } else if (m.t === 'gone') {
+      gone = true;
+      st.textContent = '세션이 끝났어요 — ≡ 목록에서 다른 pane 을 고르세요';
+    }
+  };
+  ws.onopen = () => { backoff = 1000; sentSize = { cols: 0, rows: 0 }; input.focus(); syncSize(); };
+  ws.onclose = (e) => {
+    if (gone) return;
+    st.textContent = `끊김 (${e.code}) — 다시 연결 중…`;
+    schedule();
+  };
+  ws.onerror = () => {};
+}
+function schedule() {
+  clearTimeout(retryTimer);
+  // 화면이 꺼져 있으면 기다린다 — 켜지는 순간(visibilitychange) 바로 붙는다.
+  if (document.visibilityState !== 'visible') return;
+  retryTimer = setTimeout(connect, backoff);
+  backoff = Math.min(backoff * 2, 10000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { backoff = 1000; connect(); }
+});
+addEventListener('online', () => { backoff = 1000; connect(); });
+addEventListener('pageshow', (e) => { if (e.persisted) connect(); });
+connect();
 
 // 넓은 pane(196열)은 폰 폭에 안 들어간다. PTY 를 건드리면 kasaterm 쪽이 같이 좁아지므로
 // 글자만 줄여 담는다.
@@ -65,9 +107,9 @@ function fitWidth() {
 // 보는 kasaterm pane 이 함께 좁아지기 때문이다. 그래서 요청과 별개로 fitWidth() 가 늘 남는다.
 let sentSize = { cols: 0, rows: 0 };
 function syncSize() {
-  if (ws.readyState !== 1 || !grid.cell.w || !grid.cell.h) return;
+  if (!ws || ws.readyState !== 1 || !grid.cell.w || !grid.cell.h) return;
   const w = document.documentElement.clientWidth;
-  const h = document.documentElement.clientHeight - st.offsetHeight;
+  const h = document.documentElement.clientHeight - document.getElementById('status').offsetHeight;
   const cols = Math.max(20, Math.floor(w / grid.cell.w));
   const rows = Math.max(5, Math.floor(h / grid.cell.h));
   if (cols === sentSize.cols && rows === sentSize.rows) return;

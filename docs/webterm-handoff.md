@@ -63,6 +63,64 @@ cargo build -p kasa-mcp --bin kasa-serve-web
 그래서 받는 쪽에 파싱이 필요 없다. 서버는 붙자마자
 `{"t":"size","cols":N,"rows":M,"mirror":bool}` 를 한 번 보낸다.
 
+## 유저별 주소 `/u/<slug>/` — 주소가 곧 자격 (2026-09-02)
+
+「토큰 없으면 안 봐지고, 연결도 끊기고」(2026-09-02 지적)를 한 번에 닫은 판이다.
+
+**왜 토큰이 실사용에서 깨졌나.** `?t=` 를 한 번 물고 들어와 쿠키로 바꿔 다니는 설계는
+①쿠키가 `SameSite=Strict` 라 슬랙·디스코드 알림 링크에서 건너오는 첫 화면에 안 실려
+403 ②인앱 브라우저·홈화면 앱은 쿠키 창고가 따로라 처음부터 403 ③주소에서 `?t=` 가
+빠지는 순간(pane 전환·북마크 정리) 되살릴 길이 없다. 셋 다 「자격이 주소에 없어서」다.
+
+**이제 자격은 주소에 있다.** `https://<host>/u/<slug>/…` — slug 는 유저마다 따로 뽑은
+비밀(UUID v4 → base36, 25자 안팎)이고, 그 아래 모든 경로가 상대 주소라 어디로 가든
+자격이 따라간다. 쿠키는 보조로만 남았다(`SameSite=Lax` 로 완화 — 옛 절대경로 fetch 용).
+
+| 주소 | 하는 일 |
+|---|---|
+| `/u/<slug>/` | **허브** — 이 기계·명부 기계의 pane 목록(대기 ● 먼저), 누르면 터미널 |
+| `/u/<slug>/term/grid?pane=%25N` | 그리드 터미널(폰 기본) |
+| `/u/<slug>/term`, `/u/<slug>/arona-ui/` | xterm 판 · 아로나 — 전부 같은 접두 아래 |
+| `/u/<slug>/m/<기계>/…` | **다른 기계로 넘기는 문** — machines.json 의 그 기계 `/…` 로 프록시(HTTP·WS) |
+| `/hub`, `/m/<기계>/…` | 로컬(127.0.0.1)에서는 접두 없이도 같은 화면 |
+| `GET/POST/DELETE /mobile/users?name=` | 유저 목록·추가(`&rotate=1` 이면 새 주소)·삭제 — **주인 주소나 로컬에서만** |
+
+- 저장은 `~/.config/kasaterm/mobile-users.json`(0600). 주인 항목은 첫 접근 때 저절로
+  생긴다. 검증 리그는 env `KASATERM_MOBILE_USERS` 로 딴 파일을 가리켜라(`kasa-serve-web`
+  도 이 env 와 `KASATERM_MACHINES` 는 안 지운다).
+- 앱 우하단 「● 바깥」 팝오버의 두 줄이 이제 이 주소다(폰 허브 · 아로나). 표시는 slug 를
+  `…` 로 접고, 열기·복사는 완성 주소다.
+- 허브에서 **유저를 더하면 그 사람 주소가 생긴다**(주인 주소로 열었을 때만 보이는 절).
+  남에게 준 주소로는 화면만 보이고 유저 목록은 403 이다. 「새 주소」는 샜을 때 —
+  옛 주소는 그 자리에서 404 가 된다.
+
+### 구현에서 지킬 것
+
+- **접두 벗기기는 라우팅 앞이다.** `mobile_prefix_mw`(http.rs)를 `Router::layer` 로 걸면
+  안 된다 — 그건 라우팅 **뒤**라 `/u/…` 가 먼저 404 를 맞는다. `tower::ServiceBuilder`
+  로 라우터 바깥에 두르고 `axum::ServiceExt::into_make_service_with_connect_info` 로 띄운다.
+  벗긴 뒤엔 `MobileAuth` 확장을 심고, `origin_guard_mw` 는 그게 있으면 토큰·교차출처
+  검사를 건너뛴다.
+- **페이지는 절대경로 `/term/…` 를 쓰면 안 된다.** `grid.html`·`index.html`·`hub.html` 은
+  `location.pathname` 에서 접두(`ROOT`)를 뽑아 fetch·WS·프사에 붙이고, CSS·JS 는
+  상대 참조다. arona-ui 는 `mcp.ts` 의 `PAGE_PREFIX` 가 같은 일을 한다(설정 화면의
+  `/settings/…` 절대 fetch 는 아직 쿠키에 기댄다).
+- **프록시는 헤더를 골라 넘긴다.** 쿠키·Origin·`sec-fetch-*`·`X-Forwarded-For` 를 대상
+  기계로 넘기면 대상 관문이 「남의 사이트」·「원격이니 토큰 내라」로 막는다(터널 안쪽은
+  양끝 loopback 이라 토큰이 없다). 대상이 심는 `Set-Cookie` 는 되돌려주지 않는다 —
+  이 기계 쿠키를 덮는다. WS 는 Ping/Pong 까지 **그대로 옮긴다**(대상의 75초 Pong 판정).
+- **끊기면 다시 붙는다**(`grid.html`·`index.html`). 폰은 화면을 끄는 것만으로 소켓이
+  죽는데 예전엔 「끊김」만 찍고 새로고침을 기다렸다. 백오프 1→10초, 화면이 보일 때만,
+  `visibilitychange`·`online`·`pageshow` 에서 즉시. 멈추는 신호는 서버의 `gone` 뿐이다.
+  xterm 판은 재접속 때 `term.reset()` 뒤 스냅샷을 받는다.
+
+실측(2026-09-02, 격리 `kasa-serve-web` 두 대 A·B, B 명부에 A 를 「에이」로): 원격 판정
+(`X-Forwarded-For`) + 토큰 없음 → `/term/grid` 403 / `/u/<slug>/term/grid` 200 / 엉뚱
+slug 404 / 슬래시 없는 `/u/<slug>?pane=%250` → 307 로 쿼리 보존 / 남의 유저 slug 로
+`/mobile/users` 403 / 새 주소 뽑은 뒤 옛 slug 404. WS: slug 로 새 셸 → 입력 왕복 →
+끊고 같은 셸에 재접속해 스냅샷에 옛 출력 / 무자격 WS 403 / **B 의 slug 로
+`/u/<slug>/m/에이/term/ws` 프록시** → A 셸에 입력 왕복 + ping/pong / 없는 pane → `gone`.
+
 ## 그리드 모드 `/term/grid` — xterm.js 를 안 거치는 길 (2026-08-25)
 
 **폰에서 한글을 치면 자모가 낱개로 나가던 것**(「이렇게」→ `ㅇㅣㄹㅓㅎㄱㅔ`)을 고치면서
@@ -326,6 +384,11 @@ cloudflared tunnel run kasaterm     # 켜기. 끄면 그 주소는 530 이 된�
    되어 칠 수는 있지만, 소프트 키보드가 화면을 반으로 덮으면 좁다. 하단 바에 16px
    입력 필드를 두고 거기 쓴 것을 보내는 쪽이 폰에서는 더 편하다(claude code 는 그냥
    텍스트를 받으므로 붙여 넣는 것과 다르지 않다).
+
+9. **다른 기계 목록은 본체(kasaterm 앱)에서만 산다.** `machines::poll_loop` 는 standalone
+   에서 일부러 안 돌아서(순환 방지) `kasa-serve-web` 의 허브는 명부 기계를 전부
+   「오프라인」으로 보여 준다 — 프록시(`/m/…`)는 그래도 동작한다. 허브를 리그로 볼 땐
+   이 차이를 버그로 읽지 마라.
 
 ## 보안 — 왜 「127.0.0.1 이니까 안전」이 여기선 틀렸나
 
