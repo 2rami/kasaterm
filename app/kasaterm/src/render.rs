@@ -1040,6 +1040,21 @@ impl App {
                         }
                     }
                 }
+                if agent_kind == Some(kasa_pty::AgentKind::Codex) {
+                    let cwd = self.pane_cwd_cache.get(id.as_str()).cloned();
+                    let project = cwd
+                        .as_ref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string);
+                    let branch = cwd.as_ref().and_then(|path| {
+                        self.window_git
+                            .lock()
+                            .ok()
+                            .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
+                    });
+                    restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
+                }
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.

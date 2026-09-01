@@ -241,6 +241,246 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     Some(PromptBox::Filled { rows: start..end })
 }
 
+/// Codex의 고정 status-line 항목을 Claude Code와 같은 한 줄 문법으로 다시 그린다.
+///
+/// Codex 자체 설정은 항목의 순서만 받고 임의 아이콘·구분자를 받지 않는다. 그래서 PTY가
+/// 확정해서 보낸 모델·effort·context 값은 그대로 읽고, 카사텀이 알고 있는 cwd/Git 값만
+/// 보태 시각 표현만 바꾼다. Codex pane에서만 호출하며, 판독에 실패하면 원본을 그대로 둔다.
+pub(crate) fn restyle_codex_status_line(
+    rows: &mut [Vec<GridCell>],
+    project: Option<&str>,
+    branch: Option<&str>,
+) -> bool {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+    let parsed = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .take(8)
+        .find_map(|(row_idx, row)| {
+            let (text, _) = row_text_cells(row);
+            let parts: Vec<&str> = text
+                .trim()
+                .split(" · ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            let first = *parts.first()?;
+            let mut words: Vec<&str> = first.split_whitespace().collect();
+            let effort = words.last().copied().filter(|v| EFFORTS.contains(v))?;
+            words.pop();
+            let model = words.join(" ");
+            let known_model = model.starts_with("gpt-")
+                || model.starts_with("codex-")
+                || model
+                    .strip_prefix('o')
+                    .is_some_and(|suffix| suffix.starts_with(|c: char| c.is_ascii_digit()));
+            if model.is_empty() || !known_model {
+                return None;
+            }
+            let context = parts.iter().find_map(|part| {
+                part.split_whitespace().find_map(|word| {
+                    let pct = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '%');
+                    let number = pct.strip_suffix('%')?;
+                    (!number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+                        .then(|| pct.to_string())
+                })
+            });
+            let middle: Vec<String> = parts
+                .iter()
+                .copied()
+                .skip(1)
+                .filter(|part| {
+                    !part.contains('%')
+                        && !matches!(*part, "never" | "on-request" | "untrusted" | "on-failure")
+                })
+                .map(str::to_string)
+                .collect();
+            Some((row_idx, model, effort.to_string(), context, middle))
+        });
+
+    let Some((row_idx, raw_model, effort, context, middle)) = parsed else {
+        return false;
+    };
+
+    // 새 기본 순서는 branch → project다. 실행 중인 옛 세션은 반대 순서일 수 있으므로
+    // 호출자가 cwd/Git에서 준 값이 언제나 우선하고, 둘 다 없을 때만 상태줄에 폴백한다.
+    let branch = branch.filter(|s| !s.is_empty());
+    let project = project.filter(|s| !s.is_empty());
+    let (branch, project) = if branch.is_none() && project.is_none() {
+        (
+            middle.first().map(String::as_str),
+            middle.get(1).map(String::as_str),
+        )
+    } else {
+        (branch, project)
+    };
+
+    let pretty_model = |with_window: bool| {
+        let lower = raw_model.to_ascii_lowercase();
+        let base = match lower.as_str() {
+            "gpt-5.6" | "gpt-5.6-sol" => "GPT-5.6 Sol".to_string(),
+            "gpt-5.6-terra" => "GPT-5.6 Terra".to_string(),
+            "gpt-5.6-luna" => "GPT-5.6 Luna".to_string(),
+            _ if lower.starts_with("gpt-") => {
+                let mut pieces = lower.split('-');
+                let _ = pieces.next();
+                let version = pieces.next().unwrap_or_default();
+                let suffix = pieces
+                    .map(|part| {
+                        let mut chars = part.chars();
+                        chars
+                            .next()
+                            .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if suffix.is_empty() {
+                    format!("GPT-{version}")
+                } else {
+                    format!("GPT-{version} {suffix}")
+                }
+            }
+            _ => raw_model.clone(),
+        };
+        if with_window && lower.starts_with("gpt-5.6") {
+            format!("{base} 1M")
+        } else {
+            base
+        }
+    };
+
+    let make_line =
+        |with_window: bool, show_branch: bool, show_project: bool, show_context: bool| {
+            let mut parts = vec![format!(" {}", pretty_model(with_window))];
+            if show_branch {
+                if let Some(branch) = branch {
+                    parts.push(format!(" {branch}"));
+                }
+            }
+            if show_project {
+                if let Some(project) = project {
+                    parts.push(format!(" {project}"));
+                }
+            }
+            if show_context {
+                if let Some(context) = context.as_deref() {
+                    parts.push(context.to_string());
+                }
+            }
+            parts.push(format!(" {effort}"));
+            format!("  {}", parts.join(" ┃ "))
+        };
+
+    let row_width = rows[row_idx].len();
+    let candidates = [
+        make_line(true, true, true, true),
+        make_line(true, true, false, true),
+        make_line(true, true, false, false),
+        make_line(false, false, false, false),
+    ];
+    let Some(line) = candidates
+        .into_iter()
+        .find(|line| UnicodeWidthStr::width(line.as_str()) <= row_width)
+    else {
+        return false;
+    };
+
+    let row = &mut rows[row_idx];
+    for cell in row.iter_mut() {
+        cell.ch = ' ';
+    }
+    let mut col = 0usize;
+    for ch in line.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if col + width > row.len() {
+            return false;
+        }
+        row[col].ch = ch;
+        for spacer in 1..width {
+            row[col + spacer].ch = ' ';
+        }
+        col += width;
+    }
+    true
+}
+
+#[cfg(test)]
+mod codex_status_line_tests {
+    use super::*;
+
+    fn row(text: &str, cols: usize) -> Vec<GridCell> {
+        let mut row = vec![GridCell::blank(); cols];
+        for (idx, ch) in text.chars().enumerate().take(cols) {
+            row[idx].ch = ch;
+        }
+        row
+    }
+
+    fn text(row: &[GridCell]) -> String {
+        row.iter()
+            .map(|cell| cell.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn codex_status_line_matches_claude_visual_language() {
+        let mut rows = vec![row(
+            "  gpt-5.6-sol xhigh · kasaterm · main · never · Context 16% used",
+            100,
+        )];
+        assert!(restyle_codex_status_line(
+            &mut rows,
+            Some("kasaterm"),
+            Some("main")
+        ));
+        assert_eq!(
+            text(&rows[0]),
+            "   GPT-5.6 Sol 1M ┃  main ┃  kasaterm ┃ 16% ┃  xhigh"
+        );
+    }
+
+    #[test]
+    fn codex_status_line_omits_git_segment_outside_a_repo() {
+        let mut rows = vec![row(
+            "  gpt-5.6-sol high · scratch · never · Context 3% used",
+            100,
+        )];
+        assert!(restyle_codex_status_line(&mut rows, Some("scratch"), None));
+        let line = text(&rows[0]);
+        assert_eq!(line.matches('').count(), 0, "Git 아이콘이 남았다: {line}");
+        assert!(line.contains(" scratch"), "프로젝트가 사라졌다: {line}");
+    }
+
+    #[test]
+    fn narrow_codex_status_line_keeps_model_and_effort_without_clipping() {
+        let mut rows = vec![row(
+            "gpt-5.6-sol xhigh · main · kasaterm · Context 91% used",
+            30,
+        )];
+        assert!(restyle_codex_status_line(
+            &mut rows,
+            Some("kasaterm"),
+            Some("main")
+        ));
+        assert_eq!(text(&rows[0]), "   GPT-5.6 Sol ┃  xhigh");
+    }
+
+    #[test]
+    fn unknown_status_shape_is_left_untouched() {
+        let original = "ordinary output · high";
+        let mut rows = vec![row(original, 60)];
+        assert!(!restyle_codex_status_line(&mut rows, None, None));
+        assert_eq!(text(&rows[0]), original);
+    }
+}
+
 /// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
 /// --agent-color 로 그린 명시색을 **무시하고** 학생 accent 로 강제 도색한다 —
 /// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
