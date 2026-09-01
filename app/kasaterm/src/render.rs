@@ -452,6 +452,15 @@ impl App {
                 // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
                 // 답해야 부른 쪽이 줌을 풀 생각을 한다.
                 let zoomed = self.zoomed_pane.is_some();
+                // 활성 배치에 없어도 격자가 살아 있으면(다른 방의 pane) 화면 밖
+                // 렌더로 **진짜 그림**을 찍는다 — termshot 폴백으로 밀리던 자리
+                // (2026-09-02 나쵸 알림 사진 건). 줌은 기존 안내가 더 정확하다.
+                if !zoomed {
+                    if let Some(res) = self.capture_pane_offscreen(pane, path.clone(), max_w) {
+                        let _ = reply.send(res);
+                        return;
+                    }
+                }
                 let _ = reply.send(Err(if zoomed {
                     format!("{pane} is hidden behind a zoomed pane")
                 } else {
@@ -508,6 +517,65 @@ impl App {
             };
             let _ = reply.send(msg);
         }
+    }
+
+    /// 다른 방(비활성 window) pane 의 격자를 화면 밖에서 그려 PNG 로 — 기존
+    /// capture(활성 프레임 크롭)가 원리적으로 못 찍는 자리의 진짜 촬영.
+    /// `None` = 이 경로도 모른다(격자 없음·gpu 없음) — 부른 쪽이 기존 오류로.
+    pub(crate) fn capture_pane_offscreen(
+        &mut self,
+        pane: &str,
+        path: Option<String>,
+        max_w: u32,
+    ) -> Option<std::result::Result<serde_json::Value, String>> {
+        let snap = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(pane)
+                .and_then(|p| p.term().map(|t| t.cells.clone()))
+        }?;
+        let rows = snap.len() as u32;
+        let cols = snap.iter().map(Vec::len).max().unwrap_or(0) as u32;
+        if rows == 0 || cols == 0 {
+            return Some(Err(format!("{pane} 의 격자가 비어 있다")));
+        }
+        // gpu 를 빌리기 전에 스칼라를 다 떠 둔다(차용 규칙).
+        let fs = self.pane_font_scales.get(pane).copied().unwrap_or(1.0);
+        let s = self.effective_scale();
+        let w = (cols as f32 * self.cell.w * fs * s).round().max(1.0) as u32;
+        let h = (rows as f32 * self.cell.h * fs * s).round().max(1.0) as u32;
+        let path = path.unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(format!(
+                    "kasaterm-capture-{}.png",
+                    pane.trim_start_matches('%')
+                ))
+                .to_string_lossy()
+                .into_owned()
+        });
+        let default_fg = crate::cells::default_fg();
+        let g = self.gpu.as_mut()?;
+        let slot = gpu::PaneSlot {
+            rows: &snap,
+            origin_px: (0.0, 0.0),
+            font_scale: fs,
+            dim: false,
+            links: Vec::new(),
+            default_fg,
+        };
+        Some(match g.render_cells_offscreen(&[slot], w, h, &path, max_w) {
+            Ok((ow, oh)) => {
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                Ok(serde_json::json!({
+                    "path": path,
+                    "bytes": bytes,
+                    "offscreen": true,
+                    "width": ow,
+                    "height": oh,
+                }))
+            }
+            Err(e) => Err(e),
+        })
     }
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
