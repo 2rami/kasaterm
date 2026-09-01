@@ -403,6 +403,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketPaneCwds(reply) => {
+                let mut out = Vec::new();
+                for (id, sess) in self.pty.iter() {
+                    let cwd = sess
+                        .shell_pid()
+                        .and_then(crate::socket::pid_cwd)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .or_else(|| {
+                            // 원격 pane 은 셸 pid 가 없다 — 마지막으로 안 cwd 라도.
+                            self.pane_cwd_cache
+                                .get(id)
+                                .map(|p| p.to_string_lossy().into_owned())
+                        });
+                    if let Some(c) = cwd.filter(|c| !c.is_empty()) {
+                        out.push((id.clone(), c));
+                    }
+                }
+                let _ = reply.send(out);
+                return;
+            }
             UserEvent::SocketUnfold(label, reply) => {
                 // 라벨도 migrate 처럼 별칭을 받는다 — `mini` 는 명부 첫 기계.
                 let resolved = kasa_mcp::machines::find(label)

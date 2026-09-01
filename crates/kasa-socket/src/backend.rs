@@ -573,6 +573,11 @@ pub trait Backend: Send + Sync {
     fn home_machine(&self) -> Result<Option<(String, bool)>> {
         Ok(None)
     }
+    /// pane → 작업 폴더. `/term/panes` 의 cwd 폴백 — board(claude 바인딩)가 못
+    /// 싣는 순수 셸 pane 의 cwd 를 셸 pid 에서 직접 읽는다. GUI 백엔드 전용.
+    fn pane_cwds(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
     fn remote_pane(

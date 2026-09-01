@@ -4026,6 +4026,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 순수 셸이 빠지므로, 트리 전체를 아는 pane_windows 가 정본이다.
     let pane_windows: std::collections::HashMap<String, usize> =
         backend.pane_windows().into_iter().collect();
+    // cwd 도 board 만으론 순수 셸이 빠진다 — 셸 pid 에서 직접 읽는 폴백. 이 값이
+    // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
+    let pane_cwds: std::collections::HashMap<String, String> =
+        backend.pane_cwds().into_iter().collect();
     // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
     // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
     // 중복시키지 않고 여기서 hex 로 얹는다.
@@ -4046,7 +4050,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // 방 이름 재료 — 원격에서 이 목록을 보는 쪽(이사 탭)은 window 번호만으론
                 // 「어느 방」인지 못 말한다. 사람이 읽는 방 이름 규칙(폴더 꼬리)과 같은
                 // 원천을 실어 준다.
-                "cwd": b.map(|p| p.cwd.clone()).filter(|s| !s.is_empty()),
+                "cwd": b
+                    .map(|p| p.cwd.clone())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| pane_cwds.get(&id).cloned()),
                 "color": b
                     .and_then(|p| p.character.as_deref())
                     .and_then(crate::character::header_color_any),
