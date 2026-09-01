@@ -744,7 +744,13 @@ mod tests {
 
     #[test]
     fn atomic_settings_writer_leaves_one_complete_json_object() {
-        let dir = std::env::temp_dir().join(format!("kasaterm-onboarding-atomic-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("test")));
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let temp_id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "kasaterm-onboarding-atomic-{}-{temp_id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
