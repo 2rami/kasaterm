@@ -132,7 +132,12 @@ impl App {
             p.active_agent()?;
         }
         // claude agents 목록 뷰는 학생을 안 그린다(옛 or_else 폴백의 view 가드).
-        if self.pty.get(tab).map(|p| p.is_claude_agents()).unwrap_or(false) {
+        if self
+            .pty
+            .get(tab)
+            .map(|p| p.is_claude_agents())
+            .unwrap_or(false)
+        {
             return None;
         }
         // 현재 배정(`ws.pane_character`)이 정본이다 — 미니맵·목록이 읽는 값과 같다.
@@ -165,7 +170,10 @@ impl App {
         let tab = ws.active_tab_pid(id);
         self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
         let name = self.display_pane_char(ws, id)?;
-        crate::theme::character_accent_n(&name, crate::theme::character_ordinal(&ws.pane_character, id))
+        crate::theme::character_accent_n(
+            &name,
+            crate::theme::character_ordinal(&ws.pane_character, id),
+        )
     }
 
     /// 헤더 탭에 실을 제목들. **메인 그리드와 별도창이 같은 이 함수를 지난다** —
@@ -180,9 +188,7 @@ impl App {
         // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
         // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
         // 비배정 pane 은 기존대로 탭별 제목.
-        if pane.tabs.len() <= 1
-            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
-        {
+        if pane.tabs.len() <= 1 && pane.character.as_deref().is_some_and(|c| !c.is_empty()) {
             Vec::new()
         } else {
             pane.tabs
@@ -196,8 +202,7 @@ impl App {
                     // 그것도 이쁘게"). 헤더는 진작 학생 이름을 쓰고 있어서
                     // **같은 pane 인데 헤더와 탭이 서로 다른 것을 부르는**
                     // 상태이기도 했다.
-                    let sess =
-                        t.pid.as_deref().and_then(|p| self.pty.get(p));
+                    let sess = t.pid.as_deref().and_then(|p| self.pty.get(p));
                     // 작업명 — 스피너·별표 접두를 벗긴다. 벗기는 일은
                     // `strip_activity_prefix` 계약대로 **접두만**이고,
                     // 「Claude Code」 같은 기본 제목을 따로 거르지는 않는다:
@@ -253,13 +258,7 @@ impl App {
     /// a sibling pane).
     pub(crate) fn handle_notify(&mut self, surface_id: &str, title: &str, body: &str) {
         let now = std::time::Instant::now();
-        let is_active_pane = self
-            .ws
-            .lock()
-            .unwrap()
-            .active_pane
-            .as_deref()
-            == Some(surface_id);
+        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
         // claude's Stop hook fired → this pane's turn is DONE. Trust this push
         // over the glyph heuristic: force the pane idle right now so the working
         // bar can't linger on a stale "✻ Churned for 42s" line, and drop the
@@ -344,8 +343,7 @@ impl App {
         // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
         // 중복 알림으로 텍스트를 덮지 않는다.
         if self.collab.toast_action.as_deref() != Some(surface_id) {
-            self.collab.toast =
-                Some((format_attention_toast(character.as_deref(), reason), now));
+            self.collab.toast = Some((format_attention_toast(character.as_deref(), reason), now));
             self.collab.toast_rect = None;
         }
         if !(self.window_focused && is_active_pane) {
@@ -383,8 +381,14 @@ impl App {
         // pane 이면 None」 이 실제로 성립하려면 에이전트 관문이 함께 있어야 한다.
         let known = (ws.panes.contains_key(id) || self.pty.contains_key(id))
             && (self.pane_claude_sid.contains_key(key.as_str())
-                || self.pty.get(key.as_str()).and_then(|p| p.active_agent()).is_some());
-        known.then(|| ws.pane_character.get(&key).cloned()).flatten()
+                || self
+                    .pty
+                    .get(key.as_str())
+                    .and_then(|p| p.active_agent())
+                    .is_some());
+        known
+            .then(|| ws.pane_character.get(&key).cloned())
+            .flatten()
     }
 
     /// claude 가 떠 있는 pane 을 기억해 둔다 — 얼굴을 내보일 자격.
@@ -414,8 +418,10 @@ impl App {
     /// `dock_window_room` 은 **aux 창 인덱스**를 받는데 사이드바는 방 인덱스로만
     /// 말한다. 그 둘을 그대로 넘기면 엉뚱한 창이 닫히므로 여기서 한 번 옮긴다.
     pub(crate) fn dock_room_back(&mut self, win: usize) {
-        let Some(aux) =
-            self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+        let Some(aux) = self
+            .aux_windows
+            .iter()
+            .position(|a| a.room_window() == Some(win))
         else {
             return;
         };
@@ -494,9 +500,9 @@ impl App {
     /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
     /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
     pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
-        self.pane_activity
-            .get(id)
-            .is_some_and(|a| !a.status.is_empty() && a.status != "idle" && !status_needs_you(&a.status))
+        self.pane_activity.get(id).is_some_and(|a| {
+            !a.status.is_empty() && a.status != "idle" && !status_needs_you(&a.status)
+        })
     }
 
     /// 그 pane 이 **내 손을 기다리는 중**인가 — 승인 프롬프트든 질문이든.
@@ -541,9 +547,21 @@ impl App {
     /// 예산을 건너뛰고 겹쳐 그리게 된다.
     fn chrome_wants(&self) -> (f32, f32, f32) {
         (
-            if self.sidebar_visible && !self.tabs_on_top { self.sidebar_w_logical } else { 0.0 },
-            if self.file_tree.visible { self.file_tree.w_logical } else { 0.0 },
-            if self.git.col_visible { self.git.col_w_logical } else { 0.0 },
+            if self.sidebar_visible && !self.tabs_on_top {
+                self.sidebar_w_logical
+            } else {
+                0.0
+            },
+            if self.file_tree.visible {
+                self.file_tree.w_logical
+            } else {
+                0.0
+            },
+            if self.git.col_visible {
+                self.git.col_w_logical
+            } else {
+                0.0
+            },
         )
     }
 
@@ -661,9 +679,9 @@ impl App {
             let w = self.tab_strip_w();
             w > 0.0 && cx < w && cy > TITLE_HEIGHT
         } else if self.close_freeze.info_content.is_some() {
-            self.info.panel_rect.is_some_and(|(x, y, w, h)| {
-                cx >= x && cx < x + w && cy >= y && cy < y + h
-            })
+            self.info
+                .panel_rect
+                .is_some_and(|(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
         } else if let Some((pane, _)) = self.close_freeze.tab_slots.as_ref() {
             // 탭 알약 사이 틈에서 녹지 않게 좌우로 조금 넓혀 본다. 그 pane 의 탭이
             // 하나도 안 남았으면 자연히 false 라 그때 녹는다.
@@ -685,9 +703,7 @@ impl App {
         match what {
             CloseFreezeKind::Sidebar(px) => self.close_freeze.sidebar_scroll = Some(px),
             CloseFreezeKind::Info(content) => self.close_freeze.info_content = Some(content),
-            CloseFreezeKind::Tabs(pane, slots) => {
-                self.close_freeze.tab_slots = Some((pane, slots))
-            }
+            CloseFreezeKind::Tabs(pane, slots) => self.close_freeze.tab_slots = Some((pane, slots)),
         }
         self.close_freeze.since = Some(Instant::now());
     }
@@ -758,7 +774,9 @@ impl App {
             self.open_persona_view();
             return;
         }
-        let Some(wv) = self.persona.webview.as_ref() else { return };
+        let Some(wv) = self.persona.webview.as_ref() else {
+            return;
+        };
         if active != self.persona.shown {
             let _ = wv.set_visible(active);
             // 숨은 채로 board 를 계속 긁으면 아무도 안 보는 화면 때문에 토큰이 샌다.
@@ -768,7 +786,9 @@ impl App {
         if !active {
             return;
         }
-        let Some(rect) = self.persona.body_rect else { return };
+        let Some(rect) = self.persona.body_rect else {
+            return;
+        };
         if self.persona.last_rect == Some(rect) {
             return;
         }
@@ -784,10 +804,14 @@ impl App {
         if self.persona.webview.is_some() {
             return;
         }
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         // 렌더가 아직 자리를 안 적었으면 다음 프레임에 다시 온다 — 폭이 0 인 웹뷰를
         // 세워 두면 보이지도 않고 bounds 를 다시 밀 때까지 죽은 칸이 된다.
-        let Some(rect) = self.persona.body_rect else { return };
+        let Some(rect) = self.persona.body_rect else {
+            return;
+        };
         if rect.2 <= 1.0 || rect.3 <= 1.0 {
             return;
         }
@@ -799,7 +823,9 @@ impl App {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let webview = match wry::WebViewBuilder::new()
-            .with_url(format!("http://127.0.0.1:{port}/arona-ui/persona.html?v={cb}"))
+            .with_url(format!(
+                "http://127.0.0.1:{port}/arona-ui/persona.html?v={cb}"
+            ))
             .with_background_color((16, 22, 42, 255))
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
@@ -914,7 +940,13 @@ impl App {
         self.statusbar.shown.remove(id);
         if was_visible {
             self.statusbar.hidden.insert(id.to_string());
-            if self.statusbar.menu.as_ref().map(|(p, _)| p == id).unwrap_or(false) {
+            if self
+                .statusbar
+                .menu
+                .as_ref()
+                .map(|(p, _)| p == id)
+                .unwrap_or(false)
+            {
                 self.statusbar.menu = None;
             }
         } else {
@@ -935,7 +967,9 @@ impl App {
     pub(crate) fn toggle_pane_header(&mut self, id: &str) {
         {
             let mut ws = self.ws.lock().unwrap();
-            let Some(pane) = ws.panes.get_mut(id) else { return };
+            let Some(pane) = ws.panes.get_mut(id) else {
+                return;
+            };
             let now = pane.has_header();
             pane.header_override = Some(!now);
             pane.dirty = true;
@@ -988,7 +1022,9 @@ impl App {
                                     .cmp(&b.1.file_name().map(|s| s.to_ascii_lowercase()))
                             })
                         });
-                        self.statusbar.menu_dirs.extend(entries.into_iter().map(|(_, p)| p));
+                        self.statusbar
+                            .menu_dirs
+                            .extend(entries.into_iter().map(|(_, p)| p));
                     }
                 }
             }
@@ -1006,7 +1042,8 @@ impl App {
     /// index 0 always shows). Drives both the dropdown render and Enter-to-open.
     pub(crate) fn statusbar_menu_filtered(&self) -> Vec<usize> {
         let q = self.statusbar.menu_search.to_lowercase();
-        self.statusbar.menu_dirs
+        self.statusbar
+            .menu_dirs
             .iter()
             .enumerate()
             .filter(|(i, p)| {
@@ -1025,12 +1062,17 @@ impl App {
     /// → preview pane). With an active query the `..` parent is skipped so Enter
     /// commits to a searched entry, not the parent.
     pub(crate) fn statusbar_menu_activate_first(&mut self) {
-        let Some((pid, _)) = self.statusbar.menu.clone() else { return };
+        let Some((pid, _)) = self.statusbar.menu.clone() else {
+            return;
+        };
         let idxs = self.statusbar_menu_filtered();
         let target = if self.statusbar.menu_search.is_empty() {
             idxs.first().copied()
         } else {
-            idxs.iter().find(|&&i| i != 0).or_else(|| idxs.first()).copied()
+            idxs.iter()
+                .find(|&&i| i != 0)
+                .or_else(|| idxs.first())
+                .copied()
         };
         if let Some(path) = target.and_then(|i| self.statusbar.menu_dirs.get(i).cloned()) {
             if path.is_dir() {
@@ -1068,7 +1110,9 @@ impl App {
     pub(crate) fn statusbar_checkout(&mut self, id: &str, branch: String) {
         self.statusbar.menu = None;
         self.chrome_dirty = true;
-        let Some(cwd) = self.pane_cwd_cache.get(id).cloned() else { return };
+        let Some(cwd) = self.pane_cwd_cache.get(id).cloned() else {
+            return;
+        };
         let res = kasa_mcp::git::git_checkout(&cwd, &branch);
         let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
         let msg = if ok {
@@ -1158,8 +1202,7 @@ impl App {
                 // 인덱스는 이 프레임에 메뉴를 그린 목록에서 왔고 그 목록은
                 // 프로세스당 한 번만 만들어지므로 어긋날 수 없다. 그래도 get 으로
                 // 받는 건, 목록이 비었을 때 패닉 대신 아무 일도 안 일어나게.
-                if let (Some(p), Some((_, target))) =
-                    (target, crate::proc::open_with_apps().get(i))
+                if let (Some(p), Some((_, target))) = (target, crate::proc::open_with_apps().get(i))
                 {
                     crate::proc::open_path_with(target, &p);
                 }
@@ -1221,7 +1264,9 @@ impl App {
         #[cfg(target_os = "macos")]
         let _ = crate::proc::command("open").arg(url).spawn();
         #[cfg(target_os = "windows")]
-        let _ = crate::proc::command("cmd").args(["/C", "start", "", url]).spawn();
+        let _ = crate::proc::command("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
         #[cfg(all(unix, not(target_os = "macos")))]
         let _ = crate::proc::command("xdg-open").arg(url).spawn();
     }
@@ -1487,7 +1532,9 @@ impl App {
             self.chrome_dirty = true;
             return;
         }
-        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else {
+            return;
+        };
         let include = self.git.commit_modal_include_unstaged;
         self.git.op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
@@ -1513,14 +1560,19 @@ impl App {
     /// `gh pr create --web` for the column's repo (Commit-menu → Create PR).
     pub(crate) fn create_git_pr(&mut self) {
         self.git.commit_menu_open = false;
-        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else {
+            return;
+        };
         std::thread::spawn(move || {
             let _ = crate::proc::command("gh")
                 .args(["pr", "create", "--web"])
                 .current_dir(&cwd)
                 .spawn();
         });
-        self.collab.toast = Some(("gh pr create --web 실행".to_string(), std::time::Instant::now()));
+        self.collab.toast = Some((
+            "gh pr create --web 실행".to_string(),
+            std::time::Instant::now(),
+        ));
         self.chrome_dirty = true;
     }
     /// Expand/restore the git column width (header ⤢ button). Toggles between a
@@ -1528,7 +1580,11 @@ impl App {
     pub(crate) fn toggle_git_col_expand(&mut self) {
         let wide = 620.0_f32;
         let normal = 340.0_f32;
-        self.git.col_w_logical = if self.git.col_w_logical >= wide - 1.0 { normal } else { wide };
+        self.git.col_w_logical = if self.git.col_w_logical >= wide - 1.0 {
+            normal
+        } else {
+            wide
+        };
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
@@ -1542,13 +1598,16 @@ impl App {
     /// 손잡이를 눌렀으면 참. 지금 그려져 있는 높이를 드래그 출발점으로 삼는다 —
     /// 0 에서 출발하면 첫 픽셀에 구역이 접혔다 펴진다.
     pub(crate) fn commits_grip_press(&mut self, cx: f32, cy: f32) -> bool {
-        let Some(gr) = self.git.col_commits_grip else { return false };
+        let Some(gr) = self.git.col_commits_grip else {
+            return false;
+        };
         if !(cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3) {
             return false;
         }
         let cur = self.git.col_commits_h.unwrap_or_else(|| {
             let n = self
-                .git.col_data
+                .git
+                .col_data
                 .lock()
                 .map(|g| g.recent_commits.len())
                 .unwrap_or(crate::GIT_RECENT_COMMITS_DEFAULT);
@@ -1562,8 +1621,12 @@ impl App {
     /// clamp 에 걸린 뒤 커서를 되돌려도 값이 안 따라온다.
     pub(crate) fn commits_grip_drag(&mut self, cy: f32) -> Option<bool> {
         let (start_y, start_h) = self.git.col_commits_resize?;
-        let new_h = (start_h - (cy - start_y)).clamp(crate::GIT_COMMITS_H_MIN, crate::GIT_COMMITS_H_MAX);
-        let moved = self.git.col_commits_h.map_or(true, |h| (new_h - h).abs() > 0.5);
+        let new_h =
+            (start_h - (cy - start_y)).clamp(crate::GIT_COMMITS_H_MIN, crate::GIT_COMMITS_H_MAX);
+        let moved = self
+            .git
+            .col_commits_h
+            .map_or(true, |h| (new_h - h).abs() > 0.5);
         if moved {
             self.git.col_commits_h = Some(new_h);
             self.chrome_dirty = true;
@@ -1580,7 +1643,10 @@ impl App {
         if let Some(cwd) = cwd {
             let proxy = self.proxy.clone();
             let data = self.git.col_data.clone();
-            let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
+            let want = self
+                .git
+                .col_commit_want
+                .load(std::sync::atomic::Ordering::Relaxed);
             std::thread::spawn(move || {
                 if let Some(view) = crate::handler::fetch_git_col_view(&cwd, want) {
                     if let Ok(mut g) = data.lock() {
@@ -1617,18 +1683,13 @@ impl App {
         if crate::verification_run() {
             return;
         }
-        let Some(win) = self.window.as_ref() else { return };
+        let Some(win) = self.window.as_ref() else {
+            return;
+        };
         let scale = win.scale_factor().max(0.5);
         let sz = win.inner_size();
-        let pos = win
-            .outer_position()
-            .ok()
-            .map(|p| (p.x as f64, p.y as f64));
-        crate::socket::write_window_frame(
-            sz.width as f64 / scale,
-            sz.height as f64 / scale,
-            pos,
-        );
+        let pos = win.outer_position().ok().map(|p| (p.x as f64, p.y as f64));
+        crate::socket::write_window_frame(sz.width as f64 / scale, sz.height as f64 / scale, pos);
     }
 
     /// Hit-test a press against the window-tab strip controls, in paint order:
@@ -1641,8 +1702,14 @@ impl App {
     /// 애니메이션이 없으면 0 이나 1 이고, 도는 중이면 그 사이다. 목록 높이·행
     /// 투명도가 이 하나를 같이 보므로 밀림과 나타남이 어긋나지 않는다.
     pub(crate) fn expand_progress(&self, idx: usize) -> f32 {
-        let target = if self.expanded_windows.contains(&idx) { 1.0 } else { 0.0 };
-        let Some((ai, opening, at)) = self.expand_anim else { return target };
+        let target = if self.expanded_windows.contains(&idx) {
+            1.0
+        } else {
+            0.0
+        };
+        let Some((ai, opening, at)) = self.expand_anim else {
+            return target;
+        };
         if ai != idx {
             return target;
         }
@@ -1650,7 +1717,11 @@ impl App {
         // ease-out — 손을 뗀 직후가 가장 빠르고 끝에서 가라앉는다. 선형은 멈추는
         // 순간이 툭 끊겨 목록이 "튄" 것처럼 보인다.
         let e = 1.0 - (1.0 - t).powi(3);
-        if opening { e } else { 1.0 - e }
+        if opening {
+            e
+        } else {
+            1.0 - e
+        }
     }
 
     /// 사이드바 pane 행 우클릭 → 메뉴 장전. 그 줄을 맞혔으면 true.
@@ -1677,10 +1748,16 @@ impl App {
     /// 떠 있는 사이드바 메뉴에 좌클릭. 메뉴가 떠 있었으면 true — 항목을 맞혔든
     /// 빈 곳을 눌렀든 클릭을 삼키고 닫는다.
     pub(crate) fn sidebar_menu_click(&mut self, cx: f32, cy: f32) -> bool {
-        let Some((_, _, wi, pane)) = self.sidebar_menu.clone() else { return false };
+        let Some((_, _, wi, pane)) = self.sidebar_menu.clone() else {
+            return false;
+        };
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
-        let hit = self.sidebar_menu_rects.iter().find(|(_, r)| inside(r)).map(|(a, _)| *a);
+        let hit = self
+            .sidebar_menu_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(a, _)| *a);
         self.sidebar_menu = None;
         self.sidebar_menu_rects.clear();
         if let Some(a) = hit {
@@ -1822,7 +1899,11 @@ impl App {
             .map(|(i, _)| *i)
         {
             // 펼치기 버튼만 전환의 예외다 — 그 배지 크기.
-            let tab = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r);
+            let tab = self
+                .window_tab_rects
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, r)| *r);
             if let Some(r) = tab.and_then(|t| self.window_expand_rect(idx, t)) {
                 if inside(&r) {
                     self.toggle_window_expand(idx);
@@ -1864,7 +1945,11 @@ impl App {
             });
             return true;
         }
-        if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+        if self
+            .new_window_btn_rect
+            .map(|r| inside(&r))
+            .unwrap_or(false)
+        {
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
             // split+claude 수동 부팅으로 충분, 거노).
@@ -1929,14 +2014,22 @@ impl App {
     pub(crate) fn sidebar_tray_rects(
         &self,
         win_h: f32,
-    ) -> Option<(f32, (f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32))> {
+    ) -> Option<(
+        f32,
+        (f32, f32, f32, f32),
+        (f32, f32, f32, f32),
+        (f32, f32, f32, f32),
+    )> {
         if self.tabs_on_top || !self.sidebar_visible {
             return None;
         }
         // 사이드바는 pane 그리드를 안 지나므로 `window_cells` 의 예약이 여기까지
         // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
-        let bottom_h =
-            if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
+        let bottom_h = if self.docked.is_empty() {
+            0.0
+        } else {
+            DOCK_HEIGHT
+        } + self.status_h();
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
         let strip = self.tab_strip_w();
         let left = SIDEBAR_TAB_INSET + 4.0;
@@ -1947,11 +2040,20 @@ impl App {
         // 세 아이콘이 왼쪽 구석에 포개졌다(64px 실측). 폭이 모자랄 때는 자리 배분을
         // 포기하고 크기를 줄여 균등하게 늘어놓는다 — 뭉쳐 있으면 셋 다 못 누른다.
         let roomy = avail >= 28.0 * 3.0 + gap * 2.0 + 12.0;
-        let b = if roomy { 28.0 } else { ((avail - gap * 2.0) / 3.0).clamp(16.0, 28.0) };
+        let b = if roomy {
+            28.0
+        } else {
+            ((avail - gap * 2.0) / 3.0).clamp(16.0, 28.0)
+        };
         let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
         if roomy {
             let right = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
-            return Some((line_y, (left, y, b, b), (right - 4.0 - b, y, b, b), (right, y, b, b)));
+            return Some((
+                line_y,
+                (left, y, b, b),
+                (right - 4.0 - b, y, b, b),
+                (right, y, b, b),
+            ));
         }
         Some((
             line_y,
@@ -1979,7 +2081,12 @@ impl App {
         if self.tabs_on_top || !self.sidebar_visible {
             return (home, y, w, h);
         }
-        ((self.tab_strip_w() - SIDEBAR_TAB_INSET - w).max(home), y, w, h)
+        (
+            (self.tab_strip_w() - SIDEBAR_TAB_INSET - w).max(home),
+            y,
+            w,
+            h,
+        )
     }
     /// 파일트리 토글 rect. 사이드바 토글을 따라다닌다 — 접혀 있으면 그 오른쪽,
     /// 펴져 있으면 사이드바 밖(본문 쪽 첫 자리)이다. 토글이 판 안으로 들어간
@@ -2019,7 +2126,9 @@ impl App {
     /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
     /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
     pub(crate) fn commit_room_rename(&mut self) {
-        let Some((idx, mut buf)) = self.room_rename.editing.take() else { return };
+        let Some((idx, mut buf)) = self.room_rename.editing.take() else {
+            return;
+        };
         // 조합 중이던 마지막 글자도 이름의 일부다 — 안 흘리면 "가나다" 를 치고
         // Enter 를 눌렀을 때 "가나" 만 남는다.
         if let Some(tail) = self.hangul.flush() {
@@ -2074,7 +2183,9 @@ impl App {
     /// 이상한데". git 커밋 칸(`git_commit_input`)이 같은 이유로 같은 경로를 탄다.
     pub(crate) fn room_rename_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let Some(idx) = self.room_rename.editing.as_ref().map(|(i, _)| *i) else { return false };
+        let Some(idx) = self.room_rename.editing.as_ref().map(|(i, _)| *i) else {
+            return false;
+        };
         if crate::input::is_modifier_key(event) {
             return true;
         }
@@ -2207,9 +2318,7 @@ impl App {
                     };
                     // Primary: OSC 133 mark still on the cursor's row.
                     let from_mark = match t.prompt_end {
-                        Some((pr, pc))
-                            if pr as usize == crow && (pc as usize) <= ccol =>
-                        {
+                        Some((pr, pc)) if pr as usize == crow && (pc as usize) <= ccol => {
                             row_cells.map(|r| cell_str(r, pc as usize, ccol))
                         }
                         _ => None,
@@ -2269,7 +2378,9 @@ impl App {
     pub(crate) fn copy_toast_alpha(&self) -> f32 {
         const HOLD: u128 = 900;
         const FADE: u128 = 500;
-        let Some(at) = self.copy_toast_at else { return 0.0 };
+        let Some(at) = self.copy_toast_at else {
+            return 0.0;
+        };
         let e = at.elapsed().as_millis();
         if e < HOLD {
             1.0
@@ -2285,7 +2396,9 @@ impl App {
     pub(crate) fn collab_toast_alpha(&self) -> f32 {
         const HOLD: u128 = 2400;
         const FADE: u128 = 600;
-        let Some((_, at)) = self.collab.toast.as_ref() else { return 0.0 };
+        let Some((_, at)) = self.collab.toast.as_ref() else {
+            return 0.0;
+        };
         // 승인 토스트(칩 포함)는 사용자가 응답하거나 프롬프트가 풀릴 때까지
         // 고정 — 시간 페이드 없음. (해제는 route_approval_prompts/클릭 핸들러)
         if self.collab.toast_action.is_some() {
@@ -2682,7 +2795,8 @@ impl App {
         let webview = match wry::WebViewBuilder::new()
             .with_url(format!(
                 "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}{}",
-                cat.map(|c| format!("&cat={}", c.web_key())).unwrap_or_default()
+                cat.map(|c| format!("&cat={}", c.web_key()))
+                    .unwrap_or_default()
             ))
             .with_background_color((27, 37, 65, 255))
             // 테마 zip 을 이 창에 떨어뜨리면 받는다. 웹뷰가 창을 덮고 있으면 winit 의
@@ -2762,7 +2876,7 @@ impl App {
         };
         let mpos = monitor.position(); // 가상 데스크톱 물리좌표(멀티모니터 오프셋)
         let msize = monitor.size(); // 모니터 해상도(물리 px)
-        // macOS 상단 메뉴바를 가리지 않게 인셋. 다른 OS는 0.
+                                    // macOS 상단 메뉴바를 가리지 않게 인셋. 다른 OS는 0.
         let top_inset: i32 = if cfg!(target_os = "macos") {
             (28.0 * monitor.scale_factor()) as i32
         } else {
@@ -2949,7 +3063,11 @@ impl App {
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_scale(eff);
             let (cw, ch) = gpu.set_font_size(self.font_size);
-            self.cell = CellGeom { w: cw, h: ch, baseline: 0.0 };
+            self.cell = CellGeom {
+                w: cw,
+                h: ch,
+                baseline: 0.0,
+            };
         }
         if self.window.is_some() {
             let (cols, rows) = self.window_cells();
@@ -3012,7 +3130,9 @@ impl App {
     /// pane's glyphs + PTY grid change; the BSP layout and other panes stay
     /// put. Delta is additive on the multiplier; clamped to a sane range.
     pub(crate) fn change_pane_font(&mut self, delta: f32) {
-        let Some(active) = self.target_pane() else { return };
+        let Some(active) = self.target_pane() else {
+            return;
+        };
         let cur = self.pane_font_scales.get(&active).copied().unwrap_or(1.0);
         let new = (cur + delta).clamp(0.5, 3.0);
         if (new - cur).abs() < 0.01 {
@@ -3028,7 +3148,9 @@ impl App {
     }
     /// Reset the focused pane's font multiplier to match the rest of the UI.
     pub(crate) fn reset_pane_font(&mut self) {
-        let Some(active) = self.target_pane() else { return };
+        let Some(active) = self.target_pane() else {
+            return;
+        };
         if self.pane_font_scales.remove(&active).is_none() {
             return;
         }
@@ -3128,9 +3250,9 @@ impl App {
         let jobs = current.chain(stashed).map(|(id, session)| {
             let key = std::sync::Arc::as_ptr(session) as usize;
             let mirrored = kasa_mcp::remote::is_view_pane(id);
-            let running = session.active_process_name().is_some_and(|name| {
-                !name.is_empty() && !is_shell_name(&name)
-            });
+            let running = session
+                .active_process_name()
+                .is_some_and(|name| !name.is_empty() && !is_shell_name(&name));
             (key, mirrored, running)
         });
         count_unique_local_jobs(jobs)
@@ -3196,7 +3318,10 @@ impl App {
             }
         };
         let action = if tabs_len > 1 {
-            PendingClose::Tab { pane: pane.to_string(), idx }
+            PendingClose::Tab {
+                pane: pane.to_string(),
+                idx,
+            }
         } else {
             let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
             if leaves <= 1 {
@@ -3214,11 +3339,16 @@ impl App {
                 }
                 match self.window_busy(idx) {
                     Some(proc) => self.open_confirm_close(proc, action),
-                    None => self.raise_confirm(ConfirmClose { why: CloseWhy::LastPane, action }),
+                    None => self.raise_confirm(ConfirmClose {
+                        why: CloseWhy::LastPane,
+                        action,
+                    }),
                 }
                 return;
             }
-            PendingClose::Pane { pane: pane.to_string() }
+            PendingClose::Pane {
+                pane: pane.to_string(),
+            }
         };
         if self.guard_dirty(&action) {
             return;
@@ -3245,7 +3375,9 @@ impl App {
     /// 무방비 경로**였고, 학생 pane 은 대개 헤더 없는 split 이라 하필 가장 자주 쓰는
     /// 닫기가 무방비였다. ⌘W 로 시험하면 멀쩡히 물어봐서 여태 안 드러났다.
     pub(crate) fn confirm_or_close_pane(&mut self, pane: &str) {
-        let action = PendingClose::Pane { pane: pane.to_string() };
+        let action = PendingClose::Pane {
+            pane: pane.to_string(),
+        };
         if self.guard_dirty(&action) {
             return;
         }
@@ -3282,7 +3414,10 @@ impl App {
         }
     }
     fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
-        self.raise_confirm(ConfirmClose { why: CloseWhy::Busy(proc), action });
+        self.raise_confirm(ConfirmClose {
+            why: CloseWhy::Busy(proc),
+            action,
+        });
     }
     fn raise_confirm(&mut self, dlg: ConfirmClose) {
         self.confirm_close = Some(dlg);
@@ -3317,7 +3452,10 @@ impl App {
                     .and_then(|t| t.markdown().filter(|m| m.modified))
                     .map(|m| {
                         vec![(
-                            DirtyDoc::Tab { pane: pane.clone(), tab: *idx },
+                            DirtyDoc::Tab {
+                                pane: pane.clone(),
+                                tab: *idx,
+                            },
                             doc_name(&m.doc.path),
                         )]
                     })
@@ -3330,7 +3468,9 @@ impl App {
                 } else {
                     self.windows.get(*i).and_then(|w| w.as_ref())
                 };
-                layout.map_or_else(Vec::new, |t| t.leaves().iter().map(|l| l.to_string()).collect())
+                layout.map_or_else(Vec::new, |t| {
+                    t.leaves().iter().map(|l| l.to_string()).collect()
+                })
             }
             PendingClose::AuxEditor(id) => return aux(Some(*id)),
             // 앱 종료는 세션 전부 + 별도창 전부.
@@ -3354,7 +3494,13 @@ impl App {
             .flat_map(|(id, p)| {
                 p.tabs.iter().enumerate().filter_map(move |(t, tab)| {
                     let m = tab.markdown().filter(|m| m.modified)?;
-                    Some((DirtyDoc::Tab { pane: id.clone(), tab: t }, doc_name(&m.doc.path)))
+                    Some((
+                        DirtyDoc::Tab {
+                            pane: id.clone(),
+                            tab: t,
+                        },
+                        doc_name(&m.doc.path),
+                    ))
                 })
             })
             .collect();
@@ -3379,7 +3525,10 @@ impl App {
                 w.focus_window();
             }
         }
-        self.raise_confirm(ConfirmClose { why: CloseWhy::Dirty(docs), action: action.clone() });
+        self.raise_confirm(ConfirmClose {
+            why: CloseWhy::Dirty(docs),
+            action: action.clone(),
+        });
         true
     }
 
@@ -3388,7 +3537,9 @@ impl App {
     pub(crate) fn save_dirty_docs(&mut self, docs: &[(DirtyDoc, String)]) -> bool {
         let mut ok = true;
         for (doc, name) in docs {
-            let Some((text, path)) = self.doc_text(doc) else { continue };
+            let Some((text, path)) = self.doc_text(doc) else {
+                continue;
+            };
             if let Err(e) = crate::markdown::write_atomic(&path, &text) {
                 eprintln!("[editor] 저장 실패 {path}: {e}");
                 self.set_toast(format!("⚠ {name} 저장 실패: {e}"));
@@ -3417,7 +3568,9 @@ impl App {
     /// didn't ask for shouldn't interrupt them; the unsaved dot stays up and
     /// the close guard still catches it, which is the honest signal.
     pub(crate) fn run_editor_autosave(&mut self) -> Option<Instant> {
-        let Some(delay) = self.set_autosave else { return None };
+        let Some(delay) = self.set_autosave else {
+            return None;
+        };
         // "저장 / 저장 안 함" 을 묻는 중에 몰래 쓰면 '저장 안 함' 이 거짓말이 된다.
         // 대화창이 닫힐 때까지 미룬다(취소하면 그때 정상 만기로 다시 걸린다).
         if matches!(
@@ -3434,9 +3587,14 @@ impl App {
             let ws = self.ws.lock().unwrap();
             for (id, pane) in ws.panes.iter() {
                 for (t, tab) in pane.tabs.iter().enumerate() {
-                    let Some(at) = tab.markdown().and_then(|m| m.edited_at) else { continue };
+                    let Some(at) = tab.markdown().and_then(|m| m.edited_at) else {
+                        continue;
+                    };
                     if now.duration_since(at) >= delay {
-                        ready.push(DirtyDoc::Tab { pane: id.clone(), tab: t });
+                        ready.push(DirtyDoc::Tab {
+                            pane: id.clone(),
+                            tab: t,
+                        });
                     } else {
                         let due = at + delay;
                         next = Some(next.map_or(due, |n: Instant| n.min(due)));
@@ -3445,7 +3603,9 @@ impl App {
             }
         }
         for a in self.aux_windows.iter() {
-            let Some(at) = a.editor().and_then(|m| m.edited_at) else { continue };
+            let Some(at) = a.editor().and_then(|m| m.edited_at) else {
+                continue;
+            };
             if now.duration_since(at) >= delay {
                 ready.push(DirtyDoc::Aux(a.window.id()));
             } else {
@@ -3498,7 +3658,9 @@ impl App {
         match doc {
             DirtyDoc::Tab { pane, tab } => {
                 let mut ws = self.ws.lock().unwrap();
-                let Some(p) = ws.panes.get_mut(pane) else { return };
+                let Some(p) = ws.panes.get_mut(pane) else {
+                    return;
+                };
                 if let Some(m) = p.tabs.get_mut(*tab).and_then(|t| t.markdown_mut()) {
                     m.mark_saved();
                     // 미저장 점이 사라지려면 이 pane 이 다시 그려져야 한다.
@@ -3506,8 +3668,7 @@ impl App {
                 }
             }
             DirtyDoc::Aux(id) => {
-                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id)
-                else {
+                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id) else {
                     return;
                 };
                 if let Some(m) = a.editor_mut() {
@@ -3726,10 +3887,7 @@ pub(crate) fn ensure_notification_authorization() {
         let handler = block2::RcBlock::new(
             |granted: objc2::runtime::Bool, err: *mut objc2_foundation::NSError| {
                 let ok = granted.as_bool();
-                NOTIFY_AUTH.store(
-                    if ok { 1 } else { 2 },
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                NOTIFY_AUTH.store(if ok { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
                 if !ok {
                     let why = unsafe { err.as_ref() }
                         .map(|e| e.localizedDescription().to_string())
@@ -3860,7 +4018,9 @@ fn set_dock_badge(count: usize) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::NSString;
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let app = NSApplication::sharedApplication(mtm);
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     app.dockTile().setBadgeLabel(label.as_deref());
@@ -3960,11 +4120,7 @@ mod toast_tests {
     #[test]
     fn 종료_작업_수는_같은_세션을_한_번만_센다() {
         assert_eq!(
-            count_unique_local_jobs([
-                (10, false, true),
-                (10, false, true),
-                (20, false, true),
-            ]),
+            count_unique_local_jobs([(10, false, true), (10, false, true), (20, false, true),]),
             2
         );
     }
@@ -3972,11 +4128,7 @@ mod toast_tests {
     #[test]
     fn 종료_작업_수는_원격_거울과_빈_셸을_제외한다() {
         assert_eq!(
-            count_unique_local_jobs([
-                (10, true, true),
-                (20, false, false),
-                (30, false, true),
-            ]),
+            count_unique_local_jobs([(10, true, true), (20, false, false), (30, false, true),]),
             1
         );
     }
@@ -4007,7 +4159,10 @@ mod toast_tests {
             format_attention_toast(Some("아루"), "Bash 실행 권한"),
             "⚠ 아루 — Bash 실행 권한"
         );
-        assert_eq!(format_attention_toast(Some("아루"), ""), "⚠ 아루 — 권한 대기중");
+        assert_eq!(
+            format_attention_toast(Some("아루"), ""),
+            "⚠ 아루 — 권한 대기중"
+        );
         assert_eq!(
             format_attention_toast(None, "Bash 실행 권한"),
             "⚠ 권한 대기중 — Bash 실행 권한"
@@ -4015,7 +4170,6 @@ mod toast_tests {
         assert_eq!(format_attention_toast(None, ""), "⚠ 권한 대기중");
     }
 }
-
 
 /// 이 간격 안에 다시 누르면 더블클릭이지 이름 편집이 아니다. 헤드리스 하네스도
 /// 이 값을 봐야 하므로(문턱을 두 벌로 두면 하네스가 조용히 어긋난다) 밖에 둔다.
@@ -4036,7 +4190,9 @@ pub(crate) fn starts_room_rename(
     // 너무 오래 지난 클릭은 "다시 누른 것"이 아니라 새 클릭이다 — 몇 분 전 클릭이
     // 편집을 열면 사용자는 이유를 못 찾는다.
     const STALE_MS: u128 = 5_000;
-    let Some((prev_idx, at)) = last else { return false };
+    let Some((prev_idx, at)) = last else {
+        return false;
+    };
     let ms = now.duration_since(at).as_millis();
     prev_idx == idx && idx == active && ms > ROOM_RENAME_DOUBLE_CLICK_MS && ms <= STALE_MS
 }
@@ -4131,7 +4287,13 @@ mod room_rename_tests {
         let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let dead_port = dead.local_addr().unwrap().port().to_string();
         drop(dead);
-        assert!(!settings_web_reachable(&dead_port), "서버가 없으면 실패해야 한다");
-        assert!(!settings_web_reachable("포트아님"), "숫자가 아니면 실패해야 한다");
+        assert!(
+            !settings_web_reachable(&dead_port),
+            "서버가 없으면 실패해야 한다"
+        );
+        assert!(
+            !settings_web_reachable("포트아님"),
+            "숫자가 아니면 실패해야 한다"
+        );
     }
 }

@@ -48,7 +48,9 @@ fn open_screen_share(host: &str) {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let _ = crate::proc::command("open").arg(format!("vnc://{host}")).spawn();
+    let _ = crate::proc::command("open")
+        .arg(format!("vnc://{host}"))
+        .spawn();
 }
 
 fn pid_alive(pid: &str) -> bool {
@@ -66,7 +68,10 @@ fn pid_alive(pid: &str) -> bool {
 /// 그 밖의 형태로 굳은 앱은 `ps` 에 `S` 로 보여 여기서 못 거른다 — 그건 사람이 앱을
 /// 끄는 수밖에 없다.
 fn hung_screen_share_pids() -> Vec<String> {
-    let Ok(out) = crate::proc::command("ps").args(["-Ao", "pid=,stat=,command="]).output() else {
+    let Ok(out) = crate::proc::command("ps")
+        .args(["-Ao", "pid=,stat=,command="])
+        .output()
+    else {
         return Vec::new();
     };
     String::from_utf8_lossy(&out.stdout)
@@ -143,13 +148,20 @@ impl App {
         let mut locals: Vec<(usize, state::MachinesColRow)> = Vec::new();
         // 라벨 → (원격 surface id 집합, 이사 간 학생 행들). 원격 목록에서 미러와
         // 같은 pane 을 두 번 세우지 않기 위한 대조표다.
-        let mut mirrored: std::collections::HashMap<String, (std::collections::HashSet<String>, Vec<state::MachinesColRow>)> =
-            std::collections::HashMap::new();
+        let mut mirrored: std::collections::HashMap<
+            String,
+            (
+                std::collections::HashSet<String>,
+                Vec<state::MachinesColRow>,
+            ),
+        > = std::collections::HashMap::new();
         for id in &pane_ids {
             if !self.pane_claude_ready(id) {
                 continue;
             }
-            let Some(name) = self.pane_character_if_known(id) else { continue };
+            let Some(name) = self.pane_character_if_known(id) else {
+                continue;
+            };
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
             let row = state::MachinesColRow {
                 pane: id.clone(),
@@ -165,7 +177,11 @@ impl App {
             };
             match kasa_mcp::remote::remote_info(id) {
                 Some(info) => {
-                    let label = if info.label.is_empty() { info.base.clone() } else { info.label.clone() };
+                    let label = if info.label.is_empty() {
+                        info.base.clone()
+                    } else {
+                        info.label.clone()
+                    };
                     let slot = mirrored.entry(label).or_default();
                     slot.0.insert(info.remote_id.clone());
                     slot.1.push(row);
@@ -220,9 +236,21 @@ impl App {
                                     win.unwrap_or(u64::MAX),
                                     state::MachinesColRow {
                                         pane: String::new(), // 로컬 자리가 없다 — 데려오기 대상이 못 된다.
-                                        name: if name.is_empty() { "이름 없는 학생".to_string() } else { name.to_string() },
-                                        title: p.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                        status: p.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                        name: if name.is_empty() {
+                                            "이름 없는 학생".to_string()
+                                        } else {
+                                            name.to_string()
+                                        },
+                                        title: p
+                                            .get("title")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        status: p
+                                            .get("status")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
                                         room,
                                         color,
                                     },
@@ -313,7 +341,9 @@ impl App {
             return true;
         }
         let (pane, going) = match &btn {
-            state::MachinesColBtn::Send { pane, label } => (pane.clone(), format!("{label}(으)로 보내는 중…")),
+            state::MachinesColBtn::Send { pane, label } => {
+                (pane.clone(), format!("{label}(으)로 보내는 중…"))
+            }
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
             state::MachinesColBtn::Screen { .. } | state::MachinesColBtn::Unfold { .. } => {
                 unreachable!("위에서 return")
@@ -339,8 +369,9 @@ impl App {
                 unreachable!("위에서 return")
             }
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {
-                let m = kasa_mcp::machines::find(&label)
-                    .ok_or_else(|| anyhow::anyhow!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인"))?;
+                let m = kasa_mcp::machines::find(&label).ok_or_else(|| {
+                    anyhow::anyhow!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인")
+                })?;
                 // cwd 는 명부 roots 로 매핑 — 규칙이 없으면 막고 이유를 말한다
                 // (HTTP 판 pane_migrate_handler 와 같은 정책).
                 let local = self
@@ -405,19 +436,18 @@ fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) -> f32 {
         x,
         y,
         text,
-        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
+        gpu::DrawOpts {
+            font_size: 10.0,
+            color: theme::text_mute(),
+            bold: true,
+            italic: false,
+        },
     );
     y + 20.0
 }
 
 /// 방 머리줄 — 같은 방 학생들 위에 한 번. `last` 와 같으면(연속) 안 그린다.
-fn room_label(
-    g: &mut gpu::GpuRenderer,
-    x: f32,
-    y: f32,
-    room: &str,
-    last: &mut String,
-) -> f32 {
+fn room_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, room: &str, last: &mut String) -> f32 {
     if room.is_empty() || room == last {
         *last = room.to_string();
         return y;
@@ -427,7 +457,12 @@ fn room_label(
         x,
         y,
         room,
-        gpu::DrawOpts { font_size: 9.5, color: theme::text_dim(), bold: false, italic: false },
+        gpu::DrawOpts {
+            font_size: 9.5,
+            color: theme::text_dim(),
+            bold: false,
+            italic: false,
+        },
     );
     y + 15.0
 }
@@ -446,10 +481,21 @@ fn student_row(
     // 좁은 칼럼 배치 — 버튼을 이름 오른쪽이 아니라 아랫줄에 앉힌다.
     narrow: bool,
 ) -> f32 {
-    let busy_here = mc.busy.as_ref().is_some_and(|(p, _)| !row.pane.is_empty() && *p == row.pane);
+    let busy_here = mc
+        .busy
+        .as_ref()
+        .is_some_and(|(p, _)| !row.pane.is_empty() && *p == row.pane);
     // 상태점.
     let dot = 7.0;
-    round_rect(g, x, y + 5.0, dot, dot, dot / 2.0, status_color(&row.status));
+    round_rect(
+        g,
+        x,
+        y + 5.0,
+        dot,
+        dot,
+        dot / 2.0,
+        status_color(&row.status),
+    );
     // 오른쪽 끝에서 버튼을 먼저 앉히고 남는 폭이 글 자리다. 좁으면 그 자리를
     // 아랫줄로 내린다 — 216px 칼럼에서 버튼을 같은 줄에 두면 이름에 100px 밖에
     // 안 남아, 학생 이름과 무슨 일을 하는지가 둘 다 말줄임이 된다.
@@ -463,7 +509,12 @@ fn student_row(
             bx,
             btn_y + 2.0,
             &t,
-            gpu::DrawOpts { font_size: 10.0, color: theme::accent(), bold: true, italic: false },
+            gpu::DrawOpts {
+                font_size: 10.0,
+                color: theme::accent(),
+                bold: true,
+                italic: false,
+            },
         );
     } else {
         for (btn, label, enabled) in buttons.iter().rev() {
@@ -484,7 +535,11 @@ fn student_row(
                 label,
                 gpu::DrawOpts {
                     font_size: 10.0,
-                    color: if *enabled { theme::text() } else { theme::text_mute() },
+                    color: if *enabled {
+                        theme::text()
+                    } else {
+                        theme::text_mute()
+                    },
                     bold: true,
                     italic: false,
                 },
@@ -496,7 +551,11 @@ fn student_row(
         }
     }
     let text_x = x + dot + 7.0;
-    let text_max = if narrow { (right - text_x).max(0.0) } else { (bx - 8.0 - text_x).max(0.0) };
+    let text_max = if narrow {
+        (right - text_x).max(0.0)
+    } else {
+        (bx - 8.0 - text_x).max(0.0)
+    };
     let name = truncate_to(g, &row.name, 12.0, true, text_max);
     g.draw_text(
         text_x,
@@ -518,7 +577,12 @@ fn student_row(
             text_x,
             yy,
             &title,
-            gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+            gpu::DrawOpts {
+                font_size: 10.5,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
         );
     }
     yy += 15.0;
@@ -536,7 +600,11 @@ fn student_row(
                 note,
                 gpu::DrawOpts {
                     font_size: 10.0,
-                    color: if *ok { theme::success() } else { theme::danger() },
+                    color: if *ok {
+                        theme::success()
+                    } else {
+                        theme::danger()
+                    },
                     bold: false,
                     italic: false,
                 },
@@ -571,9 +639,16 @@ pub(crate) fn draw_machines_col(
         // 좁으면 짧게 끊는다 — 한 줄짜리 안내가 칼럼 밖으로 뻗으면 정작 파일
         // 이름이 잘려, 무엇을 적어야 하는지가 사라진다.
         let msg: &[&str] = if narrow {
-            &["등록된 기계가 없어요", "machines.json 에 적으면", "여기 떠요"]
+            &[
+                "등록된 기계가 없어요",
+                "machines.json 에 적으면",
+                "여기 떠요",
+            ]
         } else {
-            &["등록된 기계가 없어요 —", "~/.config/kasaterm/machines.json 에 적으면 여기 떠요"]
+            &[
+                "등록된 기계가 없어요 —",
+                "~/.config/kasaterm/machines.json 에 적으면 여기 떠요",
+            ]
         };
         let mut my = top + vis_h * 0.4;
         for line in msg.iter().copied() {
@@ -582,7 +657,12 @@ pub(crate) fn draw_machines_col(
                 x + (w - tw) / 2.0,
                 my,
                 line,
-                gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: theme::text_mute(),
+                    bold: false,
+                    italic: false,
+                },
             );
             my += 17.0;
         }
@@ -596,12 +676,20 @@ pub(crate) fn draw_machines_col(
             x0,
             y,
             "학생 없음",
-            gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+            gpu::DrawOpts {
+                font_size: 11.0,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
         );
         y += 22.0;
     } else {
-        let machines_meta: Vec<(String, bool)> =
-            mc.machines.iter().map(|m| (m.label.clone(), m.online)).collect();
+        let machines_meta: Vec<(String, bool)> = mc
+            .machines
+            .iter()
+            .map(|m| (m.label.clone(), m.online))
+            .collect();
         let locals = mc.locals.clone();
         let mut last_room = String::new();
         for row in &locals {
@@ -610,7 +698,10 @@ pub(crate) fn draw_machines_col(
                 .iter()
                 .map(|(label, online)| {
                     (
-                        state::MachinesColBtn::Send { pane: row.pane.clone(), label: label.clone() },
+                        state::MachinesColBtn::Send {
+                            pane: row.pane.clone(),
+                            label: label.clone(),
+                        },
                         format!("→ {label}"),
                         *online,
                     )
@@ -629,7 +720,11 @@ pub(crate) fn draw_machines_col(
         let label_w = label_w.min((right - x0) * 0.5);
         // 연결 칩 — 라벨 오른쪽에.
         let chip_y = y - 20.0;
-        let chip_text = if m.online { "연결됨" } else { "연결 안 닿아요" };
+        let chip_text = if m.online {
+            "연결됨"
+        } else {
+            "연결 안 닿아요"
+        };
         let cw = g.measure_chrome_text(chip_text, 9.0, true) + 10.0;
         let chip_x = x0 + label_w + 8.0;
         round_rect(
@@ -639,7 +734,11 @@ pub(crate) fn draw_machines_col(
             cw,
             14.0,
             7.0,
-            if m.online { theme::success() } else { theme::surface() },
+            if m.online {
+                theme::success()
+            } else {
+                theme::surface()
+            },
         );
         g.draw_text(
             chip_x + 5.0,
@@ -647,7 +746,11 @@ pub(crate) fn draw_machines_col(
             chip_text,
             gpu::DrawOpts {
                 font_size: 9.0,
-                color: if m.online { [255, 255, 255, 255] } else { theme::text_mute() },
+                color: if m.online {
+                    [255, 255, 255, 255]
+                } else {
+                    theme::text_mute()
+                },
                 bold: true,
                 italic: false,
             },
@@ -684,7 +787,12 @@ pub(crate) fn draw_machines_col(
                 chip_x + cw + 8.0,
                 chip_y,
                 &t,
-                gpu::DrawOpts { font_size: 9.0, color: theme::text_mute(), bold: false, italic: false },
+                gpu::DrawOpts {
+                    font_size: 9.0,
+                    color: theme::text_mute(),
+                    bold: false,
+                    italic: false,
+                },
             );
         }
         // 프로그램 낡음 경고 — 변경 실은 이사가 「저쪽을 갱신하라」로 서는 상태를
@@ -699,7 +807,12 @@ pub(crate) fn draw_machines_col(
                     chip_x + cw + 8.0,
                     chip_y,
                     full,
-                    gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 9.0,
+                        color: theme::attention(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
             } else {
                 let t = crate::info::fit_text(g, full, (right - x0).max(0.0), 9.0, true);
@@ -707,7 +820,12 @@ pub(crate) fn draw_machines_col(
                     x0,
                     y,
                     &t,
-                    gpu::DrawOpts { font_size: 9.0, color: theme::attention(), bold: true, italic: false },
+                    gpu::DrawOpts {
+                        font_size: 9.0,
+                        color: theme::attention(),
+                        bold: true,
+                        italic: false,
+                    },
                 );
                 y += 14.0;
             }
@@ -724,15 +842,31 @@ pub(crate) fn draw_machines_col(
             let hov =
                 cursor.0 >= bx && cursor.0 <= bx + bw && cursor.1 >= by && cursor.1 <= by + bh;
             g.hover_pointer |= hov;
-            round_rect(g, bx, by, bw, bh, theme::radius_sm(), theme::raised_on(theme::surface(), hov));
+            round_rect(
+                g,
+                bx,
+                by,
+                bw,
+                bh,
+                theme::radius_sm(),
+                theme::raised_on(theme::surface(), hov),
+            );
             g.draw_text(
                 bx + 6.0,
                 by + 3.0,
                 bl,
-                gpu::DrawOpts { font_size: 9.0, color: theme::text(), bold: true, italic: false },
+                gpu::DrawOpts {
+                    font_size: 9.0,
+                    color: theme::text(),
+                    bold: true,
+                    italic: false,
+                },
             );
             mc.btn_rects.push((
-                state::MachinesColBtn::Screen { host: m.host.clone(), kvm: m.kvm.clone() },
+                state::MachinesColBtn::Screen {
+                    host: m.host.clone(),
+                    kvm: m.kvm.clone(),
+                },
                 (bx, by, bw, bh),
             ));
         }
@@ -745,15 +879,30 @@ pub(crate) fn draw_machines_col(
             let hov =
                 cursor.0 >= bx && cursor.0 <= bx + bw && cursor.1 >= by && cursor.1 <= by + bh;
             g.hover_pointer |= hov;
-            round_rect(g, bx, by, bw, bh, theme::radius_sm(), theme::raised_on(theme::surface(), hov));
+            round_rect(
+                g,
+                bx,
+                by,
+                bw,
+                bh,
+                theme::radius_sm(),
+                theme::raised_on(theme::surface(), hov),
+            );
             g.draw_text(
                 bx + 6.0,
                 by + 3.0,
                 bl,
-                gpu::DrawOpts { font_size: 9.0, color: theme::text(), bold: true, italic: false },
+                gpu::DrawOpts {
+                    font_size: 9.0,
+                    color: theme::text(),
+                    bold: true,
+                    italic: false,
+                },
             );
             mc.btn_rects.push((
-                state::MachinesColBtn::Unfold { label: m.label.clone() },
+                state::MachinesColBtn::Unfold {
+                    label: m.label.clone(),
+                },
                 (bx, by, bw, bh),
             ));
         }
@@ -762,7 +911,12 @@ pub(crate) fn draw_machines_col(
                 x0,
                 y,
                 "학생 없음",
-                gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color: theme::text_mute(),
+                    bold: false,
+                    italic: false,
+                },
             );
             y += 22.0;
             continue;
@@ -773,7 +927,9 @@ pub(crate) fn draw_machines_col(
         for row in &m.mirrored {
             y = room_label(g, x0, y, &row.room, &mut last_room);
             let buttons = vec![(
-                state::MachinesColBtn::Bring { pane: row.pane.clone() },
+                state::MachinesColBtn::Bring {
+                    pane: row.pane.clone(),
+                },
                 "← 데려오기".to_string(),
                 true,
             )];

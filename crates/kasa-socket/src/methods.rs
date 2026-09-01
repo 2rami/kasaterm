@@ -404,17 +404,18 @@ fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     };
     // outcome 두 값 강제 — board status 칸에서 겪은 "free text 라더니 소비부는 정확
     // 일치" 함정을 서버 입구에서 막는다. 실패도 정식 보고다(프로즈에만 실으면 못 읽음).
-    let outcome =
-        match params.get("outcome").and_then(|v| v.as_str()) {
-            Some(o @ ("succeeded" | "failed")) => o,
-            Some(other) => return param_err(
+    let outcome = match params.get("outcome").and_then(|v| v.as_str()) {
+        Some(o @ ("succeeded" | "failed")) => o,
+        Some(other) => {
+            return param_err(
                 id,
                 format!(
                     "surface.done `outcome` must be \"succeeded\" or \"failed\", got \"{other}\""
                 ),
-            ),
-            None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
-        };
+            )
+        }
+        None => return param_err(id, "surface.done requires `outcome` (succeeded|failed)"),
+    };
     let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
     match backend.pane_done(surface_id, outcome, summary) {
         Ok(()) => Response::success(id, json!({"ok": true})),
