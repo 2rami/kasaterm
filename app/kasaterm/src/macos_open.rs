@@ -180,12 +180,6 @@ pub(crate) fn confirm_quit_with_local_jobs(local_running_jobs: usize) -> bool {
     }
 }
 
-/// 새 호출부가 작업 수를 넘기도록 배선되기 전에도 기존 종료 흐름을 보존한다.
-/// 배선 뒤에는 `confirm_quit_with_local_jobs`가 종료 경고의 정본이다.
-#[cfg(target_os = "macos")]
-pub(crate) fn confirm_quit() -> bool {
-    confirm_quit_with_local_jobs(0)
-}
 
 #[cfg(test)]
 mod tests {
