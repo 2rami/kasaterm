@@ -19,6 +19,49 @@ pub(crate) fn profiling() -> bool {
     *ON.get_or_init(|| std::env::var_os("KASATERM_PROFILE").is_some())
 }
 
+/// 이 기계를 사람이 부르는 이름. 원격 pane 은 명부 라벨을 ⇄ 칩으로 달지만 로컬
+/// pane 에는 아무 표가 없어서, 원격이 하나도 없는 창에서는 「이 pane 의 몸이 어디
+/// 있나」에 화면이 답을 못 했다(2026-09-02 감사). macOS 는 사람이 손수 지은 컴퓨터
+/// 이름이 machines.json 라벨과 같은 말이라 그것을 먼저 쓰고, 없으면 호스트명으로
+/// 물러선다. 프로세스를 띄우는 일이라 프레임마다 부를 수 없어 한 번 재고 잠근다.
+/// 어느 쪽도 못 읽으면 빈 문자열 — 그리는 쪽이 배지를 통째로 건너뛴다.
+pub(crate) fn local_machine_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        if let Some(n) = cmd_line("scutil", &["--get", "ComputerName"]) {
+            return n;
+        }
+        #[cfg(windows)]
+        if let Some(n) = std::env::var("COMPUTERNAME")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            return n;
+        }
+        // FQDN 이 오면 첫 조각만 — 라벨 자리에 도메인까지 적으면 헤더 칩이 통째로
+        // 잘려 정작 기계 이름이 안 남는다.
+        cmd_line("hostname", &[])
+            .map(|h| h.split('.').next().unwrap_or(&h).to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// 한 줄짜리 출력을 내는 명령을 돌려 그 한 줄만 받는다. 실패·빈 출력은 None.
+///
+/// NBSP 를 보통 공백으로 편다 — macOS 의 기본 컴퓨터 이름은 `MacBook` 과 `Pro`
+/// 사이에 U+00A0 을 넣는데, 셀 폰트에 그 글리프가 없어 화면에서는 폭 0 으로
+/// 사라진다(실측: `건호의 MacBookPro` 로 붙어 그려졌다).
+fn cmd_line(bin: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(bin).args(args).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout)
+        .replace('\u{a0}', " ")
+        .trim()
+        .to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 /// 행이 무엇인지. argv[0] 의 파일명만으로는 claude 아래가 전부 `npm`·`node`·
 /// `Python` 세 단어로 뭉개져 계보만 보이고 정체가 안 보였다(거노: "클로드 밑으로
 /// 초록점밖에 안 보인다"). 종류를 먼저 판정해 이름·색·묶음 규칙을 가른다.
@@ -2785,6 +2828,17 @@ fn draw_group_head(
         Some(m) => format!("⇄ {m}"),
         None => format!("{} {}", gp.shell, gp.shell_pid),
     };
+    // 로컬 pane 이면 그 앞에 이 기계 이름을 얹는다 — 원격에만 표가 있으면 「표시가
+    // 없다」와 「이 기계다」가 같은 모양이라, 아는 사람만 읽는 화면이 된다.
+    // 다만 셸·pid 를 **밀어내면서까지** 적지는 않는다: 프로세스를 짚는 열쇠는 pid
+    // 쪽이고, 기계 이름은 로컬 줄마다 같은 값이라 한 줄에서 빠져도 옆 줄이 말해 준다.
+    let shell_wide = match gp.machine.as_deref() {
+        Some(_) => shell.clone(),
+        None => match local_machine_name() {
+            "" => shell.clone(),
+            m => format!("{m} · {shell}"),
+        },
+    };
     // 다만 **통째로** 밀어내진 않는다 — 긴 제목 하나가 폭을 다 먹어 pid 가 사라지면
     // 프로세스를 짚을 열쇠가 없어진다(실측: 30자 제목이 `zsh 35776` 을 지웠다).
     // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
@@ -2857,7 +2911,11 @@ fn draw_group_head(
     }
     // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
     if budget > 40.0 {
-        let s = fit_text(g, &shell, budget, 10.0, false);
+        // 기계 이름까지 온전히 들어갈 때만 넓은 쪽을 쓴다. 예산을 넘겨 놓고 자르면
+        // 잘려 나가는 것이 뒤에 있는 pid 라, 위 주석의 순서가 뒤집힌다.
+        let wide_w = g.measure_chrome_text(&shell_wide, 10.0, false);
+        let shell = if wide_w <= budget { shell_wide.as_str() } else { shell.as_str() };
+        let s = fit_text(g, shell, budget, 10.0, false);
         g.draw_text(
             cx,
             y + 6.0,
