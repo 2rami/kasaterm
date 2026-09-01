@@ -25,7 +25,10 @@ impl App {
     /// Shared by the in-process channel pump (`pump_pty_screens`) and the
     /// daemon stream pump (`pump_daemon_stream`). The caller holds the ws lock
     /// and fires the redraw; this only mutates ws.
-    pub(crate) fn apply_screen_update(ws: &mut Workspace, update: kasa_bridge::screen::ScreenUpdate) {
+    pub(crate) fn apply_screen_update(
+        ws: &mut Workspace,
+        update: kasa_bridge::screen::ScreenUpdate,
+    ) {
         if ws.active_pane.is_none() {
             ws.active_pane = Some(update.pane_id.clone());
         }
@@ -209,8 +212,7 @@ impl App {
                             for (r, row) in next.dirty {
                                 row_map.insert(r, row);
                             }
-                            let merged_dirty: Vec<(u16, Row)> =
-                                row_map.into_iter().collect();
+                            let merged_dirty: Vec<(u16, Row)> = row_map.into_iter().collect();
                             update = kasa_bridge::screen::ScreenUpdate {
                                 dirty: merged_dirty,
                                 ..next
@@ -305,7 +307,11 @@ impl App {
         // 밖에서 볼 방법이 이것 말고 없다.
         if std::env::var_os("KASATERM_ASSIGN_DEBUG").is_some() {
             let all = kasa_mcp::character::member_names(&chars).len();
-            eprintln!("[assign] pool={} / roster={all} — {:?}", members.len(), members);
+            eprintln!(
+                "[assign] pool={} / roster={all} — {:?}",
+                members.len(),
+                members
+            );
         }
         // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
         // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
@@ -368,8 +374,11 @@ impl App {
         let name = match self.pending_character.take() {
             Some(n) => n,
             None => {
-                let free: Vec<String> =
-                    members.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
+                let free: Vec<String> = members
+                    .iter()
+                    .filter(|n| !taken.contains(n.as_str()))
+                    .cloned()
+                    .collect();
                 // 고갈되면 곧장 전체로 되돌아가지 않고 **이 방 live 만** 피해 한 번 더
                 // 고른다. 다른 방과 겹치는 것은 이름에 pane 번호가 붙어 구분되지만,
                 // 같은 방에서 겹치면 화면에 같은 얼굴이 나란히 서서 누가 누군지 사라진다.
@@ -425,12 +434,19 @@ impl App {
         // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
         // 캐릭터를 재사용하도록 스폰 시점에 기록(apply_session_character 가 조회).
         let _ = kasa_mcp::character::bind_session_character(&sid, &name);
-        self.ws.lock().unwrap().pane_character.insert(id.to_string(), name.clone());
+        self.ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .insert(id.to_string(), name.clone());
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
             ("KASATERM_SESSION_ID".to_string(), sid.clone()),
             // teammate 이름 꼬리 — 셰임이 `<슬러그>-p<번호>` 뒤에 그대로 붙인다.
-            ("KASATERM_AGENT_SUFFIX".to_string(), crate::agent_name_suffix()),
+            (
+                "KASATERM_AGENT_SUFFIX".to_string(),
+                crate::agent_name_suffix(),
+            ),
             // 이름의 로마자 머리. 셰임에도 같은 표(`teammate_case_arms`)가 구워져
             // 있지만 그건 **앱 부팅 시점 스냅샷**이라, 그 뒤 테마를 바꾸거나 명단
             // 밖 학생이 앉으면 표에 없는 이름이 되어 셰임이 이름 붙이기를 통째로
@@ -438,7 +454,10 @@ impl App {
             // 말이 닿는 이름이 갈린다(2026-08-26 실측). 배정과 같은 순간에 같은
             // 함수로 계산한 값을 여기서 내려 주는 것이 정본이고, 셰임은 이것을
             // 먼저 본다.
-            ("KASATERM_AGENT_SLUG".to_string(), crate::theme::agent_slug(&name)),
+            (
+                "KASATERM_AGENT_SLUG".to_string(),
+                crate::theme::agent_slug(&name),
+            ),
         ];
         // 활성 로스터에 없는 이름(재배정·resume 으로 온 다른 테마 학생)은 합집합
         // 조회로 원 소속 테마의 말투를 찾는다 — 없으면 이름만 남고 말투가 빈다.
@@ -477,7 +496,12 @@ impl App {
     pub(crate) fn used_pane_ids(&self) -> std::collections::HashSet<String> {
         let mut used: std::collections::HashSet<String> = self.pty.keys().cloned().collect();
         used.extend(self.ws.lock().unwrap().panes.keys().cloned());
-        for l in self.windows.iter().flatten().chain(self.pty_layout.as_ref()) {
+        for l in self
+            .windows
+            .iter()
+            .flatten()
+            .chain(self.pty_layout.as_ref())
+        {
             used.extend(l.leaves().into_iter().map(str::to_string));
         }
         // 되살리기 목록에서 **아직 도는 것**의 번호도 쓰는 중이다. 레코드는 pane
@@ -523,7 +547,11 @@ impl App {
         let room = self.pending_room.take();
         if let Some(ref room) = room {
             env.push(("KASATERM_ROOM".to_string(), room.clone()));
-            self.ws.lock().unwrap().pane_room.insert(id.clone(), room.clone());
+            self.ws
+                .lock()
+                .unwrap()
+                .pane_room
+                .insert(id.clone(), room.clone());
         }
         // 캐릭터 자동 배정(거노): pending(사용자 지정) 우선, 없으면 통합 풀 랜덤. 마커·
         // session-id 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
@@ -537,7 +565,11 @@ impl App {
             pane_id: id.clone(),
             initial_scrollback: Vec::new(),
         })?);
-        self.pump_pty_screens(session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&session));
+        self.pump_pty_screens(
+            session.screens.clone(),
+            id.clone(),
+            std::sync::Arc::downgrade(&session),
+        );
         self.insert_pty(id.clone(), session.clone());
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
@@ -572,9 +604,7 @@ impl App {
             .unwrap_or(anchor);
         let owner = self.window_of_pane(&anchor);
         if owner.is_none() {
-            anyhow::bail!(
-                "기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"
-            );
+            anyhow::bail!("기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
         }
         let new_id = self.alloc_pane_id();
         let (win_cols, win_rows) = self.window_cells();
@@ -594,16 +624,20 @@ impl App {
             win_cols,
             win_rows,
         )?;
-        self.pump_pty_screens(remote.session.screens.clone(), new_id.clone(), std::sync::Arc::downgrade(&remote.session));
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            new_id.clone(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
         self.insert_pty(new_id.clone(), remote.session.clone());
         let foreign = owner.filter(|w| *w != self.active_window);
         let layout = match foreign {
             Some(w) => self.windows.get_mut(w).and_then(|s| s.as_mut()),
             None => self.pty_layout.as_mut(),
         };
-        if !layout.is_some_and(|l| {
-            l.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone())
-        }) {
+        if !layout
+            .is_some_and(|l| l.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone()))
+        {
             // 이어받기(attach) 실패 롤백에서 남의 세션을 죽이는 쪽이 훨씬 나쁘므로
             // kill 은 안 한다 — Arc drop 이 detach 만 한다(새 스폰의 고아는 원격
             // keep 목록에 남아 다음에 이어받거나 걷을 수 있다).
@@ -641,9 +675,8 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
-        let m = kasa_mcp::machines::find(label).ok_or_else(|| {
-            anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다")
-        })?;
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
         let snap = kasa_mcp::machines::snapshot();
         let entry = snap
             .iter()
@@ -674,8 +707,11 @@ impl App {
                 if !rid.starts_with('%') || mirrored.contains(&rid) {
                     return None;
                 }
-                let name =
-                    p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = p
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let win = p.get("window").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
                 Some((win, rid, name))
             })
@@ -716,9 +752,15 @@ impl App {
                     ok_n + fail.len() + 1
                 ));
                 self.render_frame();
-                let local_id =
-                    if seated.is_empty() { host.clone() } else { self.alloc_pane_id() };
-                match kasa_mcp::remote::connect(
+                let local_id = if seated.is_empty() {
+                    host.clone()
+                } else {
+                    self.alloc_pane_id()
+                };
+                // connect 가 아니라 connect_view — 거울은 원본 세션 크기를 절대
+                // 바꾸지 않는다(거노: 「미러링할때 크기 줄이면 미러링되는곳도
+                // 줄어들어」). 격자가 pane 보다 크면 렌더가 그 pane 만 배율을 줄인다.
+                match kasa_mcp::remote::connect_view(
                     kasa_mcp::remote::RemoteSpec {
                         base: m.base.clone(),
                         pane: Some(rid.clone()),
@@ -731,8 +773,6 @@ impl App {
                         },
                     },
                     &local_id,
-                    win_cols,
-                    win_rows,
                 ) {
                     Ok(remote) => {
                         if seated.is_empty() {
@@ -757,20 +797,14 @@ impl App {
                 continue; // 새 창은 빈 셸로 남는다 — 실패 사유가 아래 보고에 찍힌다.
             }
             if seated.len() > 1 {
-                let others: Vec<String> =
-                    seated.iter().skip(1).map(|(id, _)| id.clone()).collect();
+                let others: Vec<String> = seated.iter().skip(1).map(|(id, _)| id.clone()).collect();
                 let dir = crate::layout::pick_split_axis(
                     win_cols as f32 * self.cell.w.max(1.0),
                     win_rows as f32 * self.cell.h.max(1.0),
                     win_cols,
                     win_rows,
                 );
-                let tree = kasa_pty::fleet(
-                    &seated[0].0,
-                    &others,
-                    dir,
-                    1.0 / seated.len() as f32,
-                );
+                let tree = kasa_pty::fleet(&seated[0].0, &others, dir, 1.0 / seated.len() as f32);
                 if !self
                     .pty_layout
                     .as_mut()
@@ -847,9 +881,8 @@ impl App {
                     .map(std::process::Stdio::from)
                     .unwrap_or_else(std::process::Stdio::null),
             );
-        cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("로컬 PTY 데몬을 못 띄웠어요: {} ({e})", bin.display())
-        })?;
+        cmd.spawn()
+            .map_err(|e| anyhow::anyhow!("로컬 PTY 데몬을 못 띄웠어요: {} ({e})", bin.display()))?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
@@ -857,7 +890,10 @@ impl App {
             }
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
-        anyhow::bail!("로컬 PTY 데몬이 5초 안에 안 떴어요 (로그: {})", lp.display())
+        anyhow::bail!(
+            "로컬 PTY 데몬이 5초 안에 안 떴어요 (로그: {})",
+            lp.display()
+        )
     }
 
     /// 도는 pane 을 **재시작 없이** 로컬 상주 데몬으로 승격한다 — 셸·claude
@@ -1052,7 +1088,10 @@ impl App {
             Ok(Some(snap)) => {
                 self.migrate_progress(
                     pid,
-                    format!("짐 {:.1}MB 저쪽에 재현 중…", snap.bundle.len() as f64 / 1048576.0),
+                    format!(
+                        "짐 {:.1}MB 저쪽에 재현 중…",
+                        snap.bundle.len() as f64 / 1048576.0
+                    ),
                 );
                 let meta = kasa_mcp::remote::RepoSyncMeta {
                     head: snap.head,
@@ -1156,7 +1195,11 @@ impl App {
                 .get("character_picks")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let picks_json = if picks.is_object() { picks.to_string() } else { String::new() };
+            let picks_json = if picks.is_object() {
+                picks.to_string()
+            } else {
+                String::new()
+            };
             match kasa_mcp::remote::push_character_theme(base, &theme_id, &picks_json, None) {
                 Ok(()) => {}
                 // 도착지에 그 팩이 없다는 거절 — 팩을 zip 으로 싸 보내고 한 번 더.
@@ -1199,8 +1242,7 @@ impl App {
                     // 뜬 실측이 있다(2026-08-27, pane id 재사용 자리). claude 를 띄우기
                     // 직전에 한 번 더 박는다 — sid 까지 실어 도착지 복원·명단 검사도
                     // 이 학생을 개명하지 못하게 한다.
-                    if let Err(e) =
-                        kasa_mcp::remote::repersona(base, &id, c, sid.as_deref(), None)
+                    if let Err(e) = kasa_mcp::remote::repersona(base, &id, c, sid.as_deref(), None)
                     {
                         eprintln!("[migrate] 캐릭터 못박기 실패(계속 진행): {e:#}");
                     }
@@ -1215,7 +1257,10 @@ impl App {
         // 맨 셸 폴백은 캐릭터가 통째로 새 배정으로 굴러간다 — 조용히 지나가면
         // 「이사했더니 딴 학생이 됐다」로만 보이므로 크게 말한다.
         if character.is_some() && remote_pane.is_none() {
-            self.set_toast("저쪽에 학생 pane 을 못 만들어 맨 셸로 간다 — 캐릭터가 새로 배정될 수 있다".to_string());
+            self.set_toast(
+                "저쪽에 학생 pane 을 못 만들어 맨 셸로 간다 — 캐릭터가 새로 배정될 수 있다"
+                    .to_string(),
+            );
         }
         // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
         let (c, r) = sess.size();
@@ -1260,7 +1305,10 @@ impl App {
                     Some(effort.as_str()).filter(|s| !s.is_empty()),
                 );
                 if bypass {
-                    format!("{} --dangerously-skip-permissions\r", c.trim_end_matches('\r'))
+                    format!(
+                        "{} --dangerously-skip-permissions\r",
+                        c.trim_end_matches('\r')
+                    )
                 } else {
                     c
                 }
@@ -1376,7 +1424,9 @@ impl App {
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            anyhow::bail!("원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force");
+                            anyhow::bail!(
+                                "원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force"
+                            );
                         }
                     }
                 }
@@ -1447,7 +1497,10 @@ impl App {
         if let Some((meta, bytes)) = &sync_pack {
             self.migrate_progress(
                 pid,
-                format!("짐 {:.1}MB 이 기계에 재현 중…", bytes.len() as f64 / 1048576.0),
+                format!(
+                    "짐 {:.1}MB 이 기계에 재현 중…",
+                    bytes.len() as f64 / 1048576.0
+                ),
             );
             let applied = kasa_mcp::reposync::apply(
                 std::path::Path::new(&dest),
@@ -1555,7 +1608,10 @@ impl App {
             Some(effort.as_str()).filter(|s| !s.is_empty()),
         );
         let cmd = if bypass {
-            format!("{} --dangerously-skip-permissions\r", cmd.trim_end_matches('\r'))
+            format!(
+                "{} --dangerously-skip-permissions\r",
+                cmd.trim_end_matches('\r')
+            )
         } else {
             cmd
         };
@@ -1716,7 +1772,11 @@ impl App {
             eprintln!("[repersona] unknown character '{character}' — ignored");
             return;
         }
-        self.ws.lock().unwrap().pane_character.insert(pane.to_string(), character.to_string());
+        self.ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .insert(pane.to_string(), character.to_string());
         if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
             let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
             let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
@@ -1728,9 +1788,12 @@ impl App {
         // 그림과 persona 재주입은 **stem** 을 읽는다(chrome.rs display_tab_char·http.rs
         // /persona). stem 을 빼먹으면 재배정해도 옛 테마 캐릭터의 얼굴·말투가 남는다
         // (거노 실측: 배정은 히후미인데 info·말투는 고블린).
-        for sid in [self.pane_session_id.get(pane), self.pane_claude_sid.get(pane)]
-            .into_iter()
-            .flatten()
+        for sid in [
+            self.pane_session_id.get(pane),
+            self.pane_claude_sid.get(pane),
+        ]
+        .into_iter()
+        .flatten()
         {
             let _ = kasa_mcp::character::bind_session_character(sid, character);
             // **사람이 고른 자리**라고 적어 둔다. 이게 없으면 명단을 정리할 때
@@ -1791,7 +1854,9 @@ impl App {
 
     /// 카드에서 고른 결과. 취소는 **아무 일도 안 한다**.
     pub(crate) fn character_swap_pick(&mut self, btn: CharacterSwapBtn) {
-        let Some(p) = self.character_swap_confirm.take() else { return };
+        let Some(p) = self.character_swap_confirm.take() else {
+            return;
+        };
         if btn != CharacterSwapBtn::Cancel {
             // 어느 쪽이든 마커·바인딩·말투 파일이 먼저 새 학생으로 서야 한다 —
             // 되띄우기가 `assign_character_env` 로 env 를 다시 세울 때 그것을 읽는다.
@@ -1836,7 +1901,10 @@ impl App {
     /// 헤더/board 캐릭터만 다음 화면에 갱신(assign_character_env 가 ws.pane_character·마커
     /// 를 덮음).
     pub(crate) fn swap_character(&mut self, pane: &str, character: &str) {
-        let cwd = self.pane_cwd_cache.get(pane).map(|p| p.to_string_lossy().into_owned());
+        let cwd = self
+            .pane_cwd_cache
+            .get(pane)
+            .map(|p| p.to_string_lossy().into_owned());
         let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
         let (cols, rows) = self.window_cells();
         // old PTY 종료(셸·claude 죽음). pump 스레드는 EOF 로 빠진다.
@@ -1859,7 +1927,11 @@ impl App {
         }) {
             Ok(session) => {
                 let sess = Arc::new(session);
-                self.pump_pty_screens(sess.screens.clone(), pane.to_string(), std::sync::Arc::downgrade(&sess));
+                self.pump_pty_screens(
+                    sess.screens.clone(),
+                    pane.to_string(),
+                    std::sync::Arc::downgrade(&sess),
+                );
                 self.insert_pty(pane.to_string(), sess.clone());
                 // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
@@ -1869,7 +1941,8 @@ impl App {
                 // claude 를 직접 주입해 새 persona 로 다시 시작한다(거노: 캐릭터 교체 = claude 새로.
                 // 초기 부팅은 셸만 띄워도 됐지만, 교체는 claude 가 꺼진 채 셸만 남던 게 버그였다).
                 let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
-                self.pending_restores.push((sess, "claude\r".to_string(), at));
+                self.pending_restores
+                    .push((sess, "claude\r".to_string(), at));
                 self.resize_backend(cols, rows);
                 self.publish_pty_layout();
                 if let Some(w) = self.window.as_ref() {
@@ -1911,14 +1984,20 @@ impl App {
                 socket::transcript_path_for_session(s).is_some()
             }
         });
-        let cwd = self.pane_cwd_cache.get(pane).map(|p| p.to_string_lossy().into_owned());
+        let cwd = self
+            .pane_cwd_cache
+            .get(pane)
+            .map(|p| p.to_string_lossy().into_owned());
         let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
         // 끄기 직전 이 pane 이 쓰던 모델·effort — 되띄울 때 그대로 잇는다. 안 실으면
         // shim 기본 모델로 떨어져 사용자가 /model·/effort 를 다시 쳐야 했다(2026-08-16
         // 「모델이랑 에포트도 안됐었어」). 세션 저장이 leaf 에 싣는 것과 같은 스냅샷
         // 이고, 옛 PTY 를 지우기 전에 떠야 값이 남아 있다.
-        let (model, effort) =
-            self.agent_cfg_snapshot().get(pane).cloned().unwrap_or_default();
+        let (model, effort) = self
+            .agent_cfg_snapshot()
+            .get(pane)
+            .cloned()
+            .unwrap_or_default();
         // 권한 모드도 끄기 전에 화면에서 뜬다 — 계정을 갈았다고 bypass 학생이
         // 물어보는 모드로 떨어질 이유가 없다(복원·이사와 같은 승계 원칙).
         // claude 가 이미 죽었어도 얼어붙은 화면에 푸터가 남아 있어 읽힌다.
@@ -1944,7 +2023,11 @@ impl App {
         }) {
             Ok(session) => {
                 let sess = Arc::new(session);
-                self.pump_pty_screens(sess.screens.clone(), pane.to_string(), std::sync::Arc::downgrade(&sess));
+                self.pump_pty_screens(
+                    sess.screens.clone(),
+                    pane.to_string(),
+                    std::sync::Arc::downgrade(&sess),
+                );
                 self.insert_pty(pane.to_string(), sess.clone());
                 // 옛 PTY 의 EOF 가 이 id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // 되띄웠으니 지운다(swap_character 와 같은 이유).
@@ -1980,14 +2063,9 @@ impl App {
 
     /// agent 프로세스의 환경을 읽는다. 계정 전환의 판단은 설정값이 아니라 이 값처럼
     /// 이미 떠 있는 process가 실제로 물고 있는 인증 경로를 기준으로 해야 한다.
-    fn pane_agent_ps_env(
-        &self,
-        pane: &str,
-        expected: kasa_pty::AgentKind,
-    ) -> Option<String> {
+    fn pane_agent_ps_env(&self, pane: &str, expected: kasa_pty::AgentKind) -> Option<String> {
         let shell = self.pty.get(pane)?.shell_pid()?;
-        let (kind, pid) =
-            kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)?;
+        let (kind, pid) = kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell)?;
         if kind != expected {
             return None;
         }
@@ -2038,7 +2116,11 @@ impl App {
     /// Codex 슬롯에도 Claude와 같은 표기 규칙을 적용한다. 슬롯 id는 구현 세부라
     /// 화면에는 사람이 붙인 라벨이나 순번만 보인다.
     pub(crate) fn codex_account_display(&self, id: &str) -> String {
-        match self.set_codex_accounts.iter().position(|account| account.id == id) {
+        match self
+            .set_codex_accounts
+            .iter()
+            .position(|account| account.id == id)
+        {
             Some(index) => crate::settings::account_display(
                 id,
                 &self.set_codex_accounts[index].label,
@@ -2124,7 +2206,10 @@ impl App {
         }
         socket::write_character_picks(&picks);
         self.invalidate_character_view();
-        Ok(kasa_mcp::character::picks_of_theme(theme).iter().any(|n| n == name) == on)
+        Ok(kasa_mcp::character::picks_of_theme(theme)
+            .iter()
+            .any(|n| n == name)
+            == on)
     }
 
     /// `theme-pick-all` — 테마 하나를 통째로 켜거나 끈다.
@@ -2263,7 +2348,9 @@ impl App {
 
     /// 확인 카드에서 고른 결과. 취소는 **아무 일도 안 한다**.
     pub(crate) fn account_switch_pick(&mut self, btn: AccountSwitchBtn) {
-        let Some(p) = self.account_switch_confirm.take() else { return };
+        let Some(p) = self.account_switch_confirm.take() else {
+            return;
+        };
         if btn == AccountSwitchBtn::Switch {
             match p.provider {
                 AccountSwitchProvider::Claude => self.claude_account_switch_now(&p.to),
@@ -2328,7 +2415,9 @@ impl App {
                     closed: self.stashed_record(&id).is_some(),
                     busy: account_restart_busy(
                         self.pane_prompt_wait.contains_key(&id),
-                        self.pane_activity.get(&id).map(|a| (a.status.as_str(), a.bg_active)),
+                        self.pane_activity
+                            .get(&id)
+                            .map(|a| (a.status.as_str(), a.bg_active)),
                     ),
                     boot_dir,
                     resumable,
@@ -2363,9 +2452,9 @@ impl App {
                     closed: self.stashed_record(&id).is_some(),
                     busy: account_restart_busy(
                         self.pane_prompt_wait.contains_key(&id),
-                        self.pane_activity.get(&id).map(|activity| {
-                            (activity.status.as_str(), activity.bg_active)
-                        }),
+                        self.pane_activity
+                            .get(&id)
+                            .map(|activity| (activity.status.as_str(), activity.bg_active)),
                     ),
                     boot_dir,
                     resumable,
@@ -2432,7 +2521,8 @@ impl App {
                 Some(d) => self.claude_account_display(account_id_of_dir(d)),
                 None => from_label.clone(),
             };
-            self.pane_account_stale.insert(f.id, (boot_label, to_label.clone()));
+            self.pane_account_stale
+                .insert(f.id, (boot_label, to_label.clone()));
         }
         if matches!(swapped, crate::claude_auth::SwapOutcome::WriteFailed) {
             // 조용히 넘어가면 「바꿨는데 안 바뀐다」가 된다. 재시작 폴백은 그대로
@@ -2450,7 +2540,14 @@ impl App {
             crate::claude_auth::SwapOutcome::VaultEmpty
                 | crate::claude_auth::SwapOutcome::WriteFailed
         );
-        (from_label, to_label, restarted, deferred, focused_pending, live)
+        (
+            from_label,
+            to_label,
+            restarted,
+            deferred,
+            focused_pending,
+            live,
+        )
     }
 
     /// Codex 계정 전환을 현재 pane에도 적용한다. Codex는 실행 중인 process의 auth link를
@@ -2480,10 +2577,18 @@ impl App {
                 .insert(fact.id, (boot_label, to_label.clone()));
         }
         let restarted = self.run_pending_account_restarts();
-        let (deferred, focused_pending) = self.pending_account_restart_state(kasa_pty::AgentKind::Codex);
+        let (deferred, focused_pending) =
+            self.pending_account_restart_state(kasa_pty::AgentKind::Codex);
         // `settings_save`가 shim의 선택 파일을 썼으므로 새 pane과 재시작 pane은 즉시 이
         // 슬롯을 쓴다. 실행 중인 pane은 위 stale 경로에서만 남는다.
-        (from_label, to_label, restarted, deferred, focused_pending, true)
+        (
+            from_label,
+            to_label,
+            restarted,
+            deferred,
+            focused_pending,
+            true,
+        )
     }
 
     /// stale 칩은 공급자별 전환을 같은 map에 보관한다. 토스트와 확인 결과는 이번
@@ -2519,11 +2624,9 @@ impl App {
         }
         // Claude 작업대는 현재 활성 금고를 빈 경로로 읽는 별도 규칙이 있고, Codex는
         // pane별 auth link의 target을 그대로 비교한다. 나머지 안전 대기 규칙은 같다.
-        let claude_target_dir = crate::claude_auth::runtime_dir_for(
-            &self.set_claude_account,
-            &self.set_claude_account,
-        )
-        .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+        let claude_target_dir =
+            crate::claude_auth::runtime_dir_for(&self.set_claude_account, &self.set_claude_account)
+                .map_or(String::new(), |p| p.to_string_lossy().into_owned());
         let codex_target_dir = self.codex_target_dir(&self.set_codex_account);
         // 지금 사용자가 보고 있는 pane 은 자동으로 안 끊는다. 화면 밖 pane 이 조용히
         // 갈리는 것과, 대화하던 상대가 눈앞에서 사라지는 것은 전혀 다른 일이다
@@ -2542,10 +2645,7 @@ impl App {
                 continue;
             }
             // 하네스가 이미 내려갔거나 계정 전환을 지원하지 않는 pane은 표시만 걷는다.
-            let agent = self
-                .pty
-                .get(&id)
-                .and_then(|pane| pane.active_agent());
+            let agent = self.pty.get(&id).and_then(|pane| pane.active_agent());
             let target_dir = match agent {
                 Some(kasa_pty::AgentKind::Claude) => claude_target_dir.as_str(),
                 Some(kasa_pty::AgentKind::Codex) => codex_target_dir.as_str(),
@@ -2564,7 +2664,9 @@ impl App {
             // 다음 틱(300ms)까지 미룬다.
             let busy = account_restart_busy(
                 self.pane_prompt_wait.contains_key(&id),
-                self.pane_activity.get(&id).map(|a| (a.status.as_str(), a.bg_active)),
+                self.pane_activity
+                    .get(&id)
+                    .map(|a| (a.status.as_str(), a.bg_active)),
             );
             if busy {
                 self.pane_account_quiet_since.remove(&id);
@@ -2572,7 +2674,10 @@ impl App {
             }
             // 조용해진 지 얼마나 됐나. 스피너가 도구 결과 사이에서 한 틱 사라지는
             // 틈은 이 문턱을 못 넘는다 — 그 틈에 끊으면 하던 턴이 통째로 죽는다.
-            let quiet_since = *self.pane_account_quiet_since.entry(id.clone()).or_insert(now);
+            let quiet_since = *self
+                .pane_account_quiet_since
+                .entry(id.clone())
+                .or_insert(now);
             if now.duration_since(quiet_since) < Self::ACCOUNT_RESTART_QUIET {
                 continue;
             }
@@ -2674,7 +2779,11 @@ impl App {
         // 밖에 나가 있는 방은 메인에 그리지 않는다 — 같은 트리를 두 창이 그리면 한쪽
         // 입력이 다른 쪽에 안 비치는 유령 상태가 된다. 대신 그 창을 앞으로 가져온다.
         // (사이드바 탭 클릭도 여기로 오므로, 「밖에 있음」 탭을 누르면 창이 뜬다.)
-        if let Some(i) = self.aux_windows.iter().position(|a| a.room_window() == Some(idx)) {
+        if let Some(i) = self
+            .aux_windows
+            .iter()
+            .position(|a| a.room_window() == Some(idx))
+        {
             self.aux_windows[i].window.focus_window();
             return;
         }
@@ -2762,8 +2871,10 @@ impl App {
         let remap = move |i: usize| crate::remap_window_index(i, from, dst);
         self.active_window = remap(self.active_window);
         let overrides = std::mem::take(&mut self.window_name_override);
-        self.window_name_override =
-            overrides.into_iter().map(|(i, name)| (remap(i), name)).collect();
+        self.window_name_override = overrides
+            .into_iter()
+            .map(|(i, name)| (remap(i), name))
+            .collect();
         let alerts = std::mem::take(&mut self.window_alert);
         self.window_alert = alerts.into_iter().map(remap).collect();
         let expanded = std::mem::take(&mut self.expanded_windows);
@@ -2771,7 +2882,9 @@ impl App {
         // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
         // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
         // 지나야 다음 사람이 이 목록을 믿는다.
-        self.expand_anim = self.expand_anim.map(|(i, opening, at)| (remap(i), opening, at));
+        self.expand_anim = self
+            .expand_anim
+            .map(|(i, opening, at)| (remap(i), opening, at));
         // 밖에 나가 있는 방도 인덱스로 자기 트리를 찾는다 — 여기서 안 옮기면 재배치
         // 한 번에 별도 창이 남의 방을 그린다.
         // 꺼낸 pane 도 나온 방을 인덱스로 들고 있다 — 안 옮기면 되돌릴 때 남의 방에서
@@ -2861,7 +2974,11 @@ impl App {
             .get(pane)
             .or_else(|| self.pane_cwd_cache.get(pane))
             .map(|p| p.to_string_lossy().into_owned())
-            .or_else(|| rec.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                rec.get("cwd")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
             .and_then(|s| s.rsplit('/').find(|t| !t.is_empty()).map(|t| t.to_string()))
             .unwrap_or_default();
         let window = self.window_of_pane(pane).unwrap_or(self.active_window);
@@ -2914,7 +3031,9 @@ impl App {
     pub(crate) fn push_closed_pane(&mut self, c: crate::ClosedPane) {
         self.closed_panes.push(c);
         while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {
-            let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else { break };
+            let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else {
+                break;
+            };
             let c = self.closed_panes.remove(i);
             if c.alive {
                 self.kill_hidden_pane(&c.pane_id);
@@ -3003,7 +3122,9 @@ impl App {
 
     /// ⌘⇧T — 가장 최근에 닫은 pane 을 되살린다.
     pub(crate) fn reopen_closed_pane(&mut self) {
-        let Some(c) = self.closed_panes.pop() else { return };
+        let Some(c) = self.closed_panes.pop() else {
+            return;
+        };
         self.reopen_pane_record(c);
     }
 
@@ -3215,7 +3336,9 @@ impl App {
                 } else {
                     self.windows.get(i).and_then(|o| o.as_ref())
                 };
-                layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
+                layout.map_or(Vec::new(), |l| {
+                    l.leaves().iter().map(|s| s.to_string()).collect()
+                })
             };
             let repr = leaves.first().cloned();
             // 방을 대표하는 cwd — 첫 leaf 가 아니라 **학생이 앉은 곳의 최빈값**이다.
@@ -3280,7 +3403,9 @@ impl App {
     /// `lsof` 로 캐느라 비싸서 매 키마다 깰 수가 없는데, 합성을 그 안에 두면 타이핑이
     /// 1초씩 뭉쳐 나온다(거노: "이름 바꾸는 게 버벅여").
     fn overlay_room_rename_label(&mut self) {
-        let Some((idx, buf)) = self.room_rename.editing.as_ref() else { return };
+        let Some((idx, buf)) = self.room_rename.editing.as_ref() else {
+            return;
+        };
         let composing = match self.ime_focus {
             Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
             _ => "",
@@ -3301,7 +3426,10 @@ impl App {
         let proc = sess.active_process_name().filter(|t| !t.is_empty());
         let is_shell = proc.as_deref().map_or(false, |p| {
             let base = p.strip_prefix('-').unwrap_or(p);
-            matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh")
+            matches!(
+                base,
+                "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh"
+            )
         });
         if is_shell {
             sess.shell_pid()
@@ -3399,7 +3527,10 @@ impl App {
     /// which calls `rebuild_file_tree_nodes` directly).
     /// `cwd` 를 감싸는 가장 가까운 git 레포 루트(1-엔트리 캐시 경유).
     /// 레포 밖이면 None — 호출부가 cwd 를 그대로 쓴다.
-    pub(crate) fn anchored_tree_root(&mut self, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    pub(crate) fn anchored_tree_root(
+        &mut self,
+        cwd: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
         if let Some((cached_cwd, root)) = &self.file_tree.anchor_cache {
             if cached_cwd == cwd {
                 return root.clone();
@@ -3414,7 +3545,8 @@ impl App {
         // A background watcher flagged an on-disk change (file added / removed /
         // renamed / modified) — rebuild even if the root is unchanged.
         if self
-            .file_tree.fs_dirty
+            .file_tree
+            .fs_dirty
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             self.rebuild_file_tree_nodes();
@@ -3482,7 +3614,9 @@ impl App {
                     }
                 };
                 for dir in &dirs {
-                    let Ok(rd) = std::fs::read_dir(dir) else { continue };
+                    let Ok(rd) = std::fs::read_dir(dir) else {
+                        continue;
+                    };
                     for ent in rd.flatten() {
                         mix(ent.file_name().as_encoded_bytes());
                         if let Ok(md) = ent.metadata() {
@@ -3568,7 +3702,10 @@ impl App {
             crate::proc::open_path_default(path);
             return true;
         }
-        match crate::proc::open_with_apps().iter().find(|(name, _)| *name == want) {
+        match crate::proc::open_with_apps()
+            .iter()
+            .find(|(name, _)| *name == want)
+        {
             Some((_, target)) => {
                 crate::proc::open_path_with(target, path);
                 true
@@ -3605,7 +3742,8 @@ impl App {
         // 900ms = 계정 추가·swap_character 와 같은 "셸 프롬프트가 뜰 즈음" 대기.
         // 더 일찍 보내면 셸이 아직 안 읽어 명령이 통째로 유실된다.
         let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
-        self.pending_restores.push((sess, format!("{}\r", editor_command_line(&cmd, path)), at));
+        self.pending_restores
+            .push((sess, format!("{}\r", editor_command_line(&cmd, path)), at));
         true
     }
 
@@ -3717,19 +3855,19 @@ impl App {
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 last_edit: EditKind::Break,
-            find: None,
-            complete: None,
-            longest_cache: None,
-            edit_gen: 0,
-            diff: None,
-            diff_peek: None,
-            diff_head: None,
-            wrap: false,
-            extra: Vec::new(),
-            undo_locked: false,
-            folds: Vec::new(),
-            folds_gen: 0,
-            edited_at: None,
+                find: None,
+                complete: None,
+                longest_cache: None,
+                edit_gen: 0,
+                diff: None,
+                diff_peek: None,
+                diff_head: None,
+                wrap: false,
+                extra: Vec::new(),
+                undo_locked: false,
+                folds: Vec::new(),
+                folds_gen: 0,
+                edited_at: None,
             })
         };
 
@@ -3798,10 +3936,17 @@ impl App {
             return;
         }
 
-        let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
+        let ps = PaneState {
+            tabs: vec![tab],
+            dirty: true,
+            ..Default::default()
+        };
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
 
-        let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
+        let layout = self
+            .pty_layout
+            .as_mut()
+            .expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, kasa_pty::SplitDir::Horizontal, new_id.clone()) {
             // Active pane isn't in the tree — undo the orphan insert. 번호는 따로
             // 되돌릴 게 없다: 등록을 지우면 alloc_pane_id 가 다시 빈 번호로 본다.
@@ -3895,7 +4040,11 @@ impl App {
         tab.title = title;
         tab.title_pinned = true;
         tab.preview_path = Some(path.clone());
-        let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
+        let ps = PaneState {
+            tabs: vec![tab],
+            dirty: true,
+            ..Default::default()
+        };
 
         // 새 윈도우 슬롯 — new_window 의 슬롯 스왑만 차용(spawn_session_pane 제외).
         self.windows[self.active_window] = self.pty_layout.take();
@@ -3937,13 +4086,19 @@ impl App {
                 is_repo: is_git_repo(&root),
             });
             if self.file_tree.expanded.contains(&root) {
-                Self::walk_dir(&root, 1, &self.file_tree.expanded, &mut self.file_tree.nodes);
+                Self::walk_dir(
+                    &root,
+                    1,
+                    &self.file_tree.expanded,
+                    &mut self.file_tree.nodes,
+                );
             }
             // Second pass: one batched `git check-ignore` over every visible
             // path marks the gitignored rows italic+dim. Dotfiles get the same
             // treatment regardless (check-ignore won't flag a tracked dotfile).
             let paths: Vec<String> = self
-                .file_tree.nodes
+                .file_tree
+                .nodes
                 .iter()
                 .map(|n| n.path.to_string_lossy().into_owned())
                 .collect();
@@ -3953,13 +4108,14 @@ impl App {
             // toggle. We hand the worker this (root, paths) and apply its
             // cached result; the worker wakes us when fresh ignores land.
             let ignored = self
-                .file_tree.ignored
+                .file_tree
+                .ignored
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
             for n in &mut self.file_tree.nodes {
-                n.ignored = n.name.starts_with('.')
-                    || ignored.contains(n.path.to_string_lossy().as_ref());
+                n.ignored =
+                    n.name.starts_with('.') || ignored.contains(n.path.to_string_lossy().as_ref());
             }
             if let Ok(mut req) = self.git_ignore_req.lock() {
                 *req = Some((root.clone(), paths));
@@ -3974,7 +4130,8 @@ impl App {
                 watch.push(root.clone());
             }
             watch.extend(
-                self.file_tree.nodes
+                self.file_tree
+                    .nodes
                     .iter()
                     .filter(|n| n.is_dir && self.file_tree.expanded.contains(&n.path))
                     .map(|n| n.path.clone()),
@@ -4004,7 +4161,9 @@ impl App {
         if out.len() >= 300 || depth > 7 {
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         let heavy = ["node_modules", "target", "dist", ".git", "build", ".next"];
         let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
         for e in rd.filter_map(|e| e.ok()) {
@@ -4013,7 +4172,14 @@ impl App {
             if name.to_lowercase().contains(q) {
                 let p = e.path();
                 let is_repo = is_dir && is_git_repo(&p);
-                out.push(FileNode { path: p, name: name.clone(), is_dir, depth: 0, ignored: false, is_repo });
+                out.push(FileNode {
+                    path: p,
+                    name: name.clone(),
+                    is_dir,
+                    depth: 0,
+                    ignored: false,
+                    is_repo,
+                });
                 if out.len() >= 300 {
                     return;
                 }
@@ -4101,7 +4267,9 @@ impl App {
     /// Create the entry the inline "new file/folder" row is naming, under the
     /// current tree root, then clear the entry and refresh the tree.
     pub(crate) fn commit_new_entry(&mut self) {
-        let Some((is_dir, name)) = self.file_tree.new.take() else { return };
+        let Some((is_dir, name)) = self.file_tree.new.take() else {
+            return;
+        };
         // Right-click menu pins a parent folder; the toolbar buttons leave it
         // None and fall back to the tree root.
         let parent = self
@@ -4140,7 +4308,9 @@ impl App {
     /// own parent. Carries expanded/selected state across; no-ops on empty /
     /// unchanged / name clash.
     pub(crate) fn commit_rename(&mut self) {
-        let Some((path, name)) = self.file_tree.rename.take() else { return };
+        let Some((path, name)) = self.file_tree.rename.take() else {
+            return;
+        };
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
@@ -4192,7 +4362,14 @@ impl App {
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 let p = e.path();
                 let is_repo = is_dir && is_git_repo(&p);
-                Some(FileNode { path: p, name, is_dir, depth, ignored: false, is_repo })
+                Some(FileNode {
+                    path: p,
+                    name,
+                    is_dir,
+                    depth,
+                    ignored: false,
+                    is_repo,
+                })
             })
             .collect();
         entries.sort_by(|a, b| {
@@ -4230,7 +4407,9 @@ impl App {
         } else {
             self.windows.get(i).and_then(|o| o.as_ref())
         };
-        layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
+        layout.map_or(Vec::new(), |l| {
+            l.leaves().iter().map(|s| s.to_string()).collect()
+        })
     }
     /// 방 카드 한 장의 치수 — `(body_h, list_h, hidden)`. 카드 전체 높이는
     /// `SIDEBAR_TAB_H + list_h` 이고, 접힌 방은 `list_h == 0` 이다.
@@ -4251,7 +4430,11 @@ impl App {
         // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
         // 방에선 그 학생을 볼 길이 통째로 사라졌다(2026-08 지적, 두 번).
         // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
-        let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
+        let t = if leaves.is_empty() {
+            0.0
+        } else {
+            self.expand_progress(i)
+        };
         // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
         // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
         let body_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
@@ -4275,7 +4458,11 @@ impl App {
         // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
         // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
-        let bottom_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT } + self.status_h();
+        let bottom_h = if self.docked.is_empty() {
+            0.0
+        } else {
+            DOCK_HEIGHT
+        } + self.status_h();
         (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
     }
 
@@ -4294,13 +4481,14 @@ impl App {
             return None;
         }
         let heights = self.sidebar_card_heights();
-        let content_h =
-            heights.iter().sum::<f32>() + SIDEBAR_TAB_GAP * n.saturating_sub(1) as f32;
+        let content_h = heights.iter().sum::<f32>() + SIDEBAR_TAB_GAP * n.saturating_sub(1) as f32;
         let viewport_h = self.sidebar_avail_h(win_h);
         if content_h <= viewport_h + 0.5 {
             return None;
         }
-        let scrolled = self.sidebar_scroll_px.clamp(0.0, (content_h - viewport_h).max(0.0));
+        let scrolled = self
+            .sidebar_scroll_px
+            .clamp(0.0, (content_h - viewport_h).max(0.0));
         Some((TITLE_HEIGHT + 18.0, viewport_h, content_h, scrolled))
     }
 
@@ -4312,7 +4500,6 @@ impl App {
             SIDEBAR_TAB_GAP,
         )
     }
-
 
     pub(crate) fn sidebar_layout(
         &self,
@@ -4380,10 +4567,15 @@ impl App {
         //
         // 방 × 를 연달아 누르는 동안엔 그 한계를 안 본다. 방이 줄면 한계도 같이
         // 줄어 목록이 아래로 당겨지는데, 그러면 다음 × 가 딴 자리로 간다.
-        let scroll = match self.close_freeze.sidebar_scroll.filter(|_| self.close_freeze.live())
+        let scroll = match self
+            .close_freeze
+            .sidebar_scroll
+            .filter(|_| self.close_freeze.live())
         {
             Some(px) => px,
-            None => self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(win_h)),
+            None => self
+                .sidebar_scroll_px
+                .clamp(0.0, self.sidebar_max_scroll(win_h)),
         };
         let mut tabs = Vec::new();
         let mut closes = Vec::new();
@@ -4427,7 +4619,12 @@ impl App {
                 let bottom = y + h;
                 // 배치도 — 카드 머리 바로 아래. `leaf_rects` 가 BSP 트리를 사각형으로
                 // 이미 풀어 주므로 여기서 재귀할 것이 없다.
-                let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
+                let ma = (
+                    tab_x + 10.0,
+                    y + SIDEBAR_TAB_H + 3.0,
+                    tab_w - 20.0,
+                    body_h - 8.0,
+                );
                 if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
                     // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
                     // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
@@ -4466,7 +4663,11 @@ impl App {
                     if ry + SIDEBAR_ROW_H > bottom {
                         break;
                     }
-                    rows.push((i, id.clone(), (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H)));
+                    rows.push((
+                        i,
+                        id.clone(),
+                        (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H),
+                    ));
                 }
             }
             y += h + SIDEBAR_TAB_GAP;
@@ -4474,10 +4675,9 @@ impl App {
         // `+` 는 목록 꼬리가 아니라 하단 트레이의 왼쪽 칸이다 — 세션이 늘어도 자리가
         // 안 움직인다. 트레이가 없는 배치(top 탭·사이드바 접힘)에서는 어차피 이
         // 분기를 안 타므로 폴백은 목록 꼬리 그대로.
-        let plus = self.sidebar_tray_rects(win_h).map_or_else(
-            || (tab_x, y, tab_w, 28.0),
-            |(_, p, ..)| p,
-        );
+        let plus = self
+            .sidebar_tray_rects(win_h)
+            .map_or_else(|| (tab_x, y, tab_w, 28.0), |(_, p, ..)| p);
         (tabs, closes, plus, rows, mini)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
@@ -4667,7 +4867,9 @@ impl App {
         if self.restore_prompt.is_some() {
             return;
         }
-        let Some(state) = self.session_state_json() else { return };
+        let Some(state) = self.session_state_json() else {
+            return;
+        };
         let body = state.to_string();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&body, &mut h);
@@ -4739,7 +4941,8 @@ impl App {
                     // 이어진 조용함만 발사한다(스피너는 도구 사이에도 떠 있지만
                     // 프레임 경계의 빈 순간이 있을 수 있다 — 값싼 보험).
                     let since = *q.idle_since.get_or_insert(now);
-                    if fire.is_none() && now.duration_since(since) >= std::time::Duration::from_secs(3)
+                    if fire.is_none()
+                        && now.duration_since(since) >= std::time::Duration::from_secs(3)
                     {
                         fire = Some(self.migrate_queue.remove(i));
                         continue;
@@ -4761,14 +4964,23 @@ impl App {
                     })
                     .is_some();
                 if !alive {
-                    self.set_toast(format!("{} 의 학생이 꺼져 있어 예약 이사를 취소했다", q.pane));
+                    self.set_toast(format!(
+                        "{} 의 학생이 꺼져 있어 예약 이사를 취소했다",
+                        q.pane
+                    ));
                     return;
                 }
             }
             let res = if q.base == "local" {
                 self.migrate_pane_back(&q.pane, q.cwd.as_deref(), q.force)
             } else {
-                self.migrate_pane(&q.pane, &q.base, q.cwd.as_deref(), q.force, q.run.as_deref())
+                self.migrate_pane(
+                    &q.pane,
+                    &q.base,
+                    q.cwd.as_deref(),
+                    q.force,
+                    q.run.as_deref(),
+                )
             };
             match res {
                 Ok(id) => self.set_toast(format!("예약 이사 완료: {} → {id}", q.pane)),
@@ -4820,6 +5032,11 @@ impl App {
                     let obj = rec.as_object_mut().unwrap();
                     obj.insert("remote_base".to_string(), serde_json::json!(info.base));
                     obj.insert("remote_pane".to_string(), serde_json::json!(info.remote_id));
+                    // 거울(view) 여부 — 안 실으면 재시작 뒤 소유자로 되살아나
+                    // 원본 크기를 도로 뺏는다.
+                    if kasa_mcp::remote::is_view_pane(pane_id) {
+                        obj.insert("remote_view".to_string(), serde_json::json!(true));
+                    }
                     // 정체 세 벌도 함께 — 저장은 라이브 링크에서 매번 재조립되므로,
                     // 여기 안 실으면 재시작 한 번에 라벨·되돌아갈 자리가 증발한다.
                     if !info.label.is_empty() {
@@ -4837,7 +5054,9 @@ impl App {
                 if rec.is_null() {
                     // Null leaf 는 복원이 소리 없이 버린다 — 저장 시점에 흔적이라도
                     // 남겨야 「재시작하니 창이 없어졌다」를 되짚을 수 있다.
-                    eprintln!("[save] pane {pane_id} 기록이 비어 leaf 로 못 실린다(복원에서 빠질 것)");
+                    eprintln!(
+                        "[save] pane {pane_id} 기록이 비어 leaf 로 못 실린다(복원에서 빠질 것)"
+                    );
                 }
                 if let Some(obj) = rec.as_object_mut() {
                     // pane id 자체를 저장한다. 이게 없으면 복원이 `%1` 부터 새로
@@ -4913,8 +5132,7 @@ impl App {
                     let sb = if restores_agent {
                         Vec::new()
                     } else {
-                        pty
-                            .get(pane_id)
+                        pty.get(pane_id)
                             .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
                             .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
                             .unwrap_or_default()
@@ -5027,8 +5245,8 @@ impl App {
         // `KASATERM_SESSION_FILE` 로 격리한 검증 실행까지 사람의 config 에
         // 백업을 쌓고, 5벌 상한에 걸려 **사람의 백업을 밀어낸다**
         // (2026-09-01 실측: 5벌 중 3벌이 검증 실행 것이었다).
-        if let Some(dir) = crate::socket::session_file_path()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        if let Some(dir) =
+            crate::socket::session_file_path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
         {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5042,7 +5260,9 @@ impl App {
                 let mut olds: Vec<_> = list
                     .flatten()
                     .filter(|e| {
-                        e.file_name().to_string_lossy().starts_with("session-restored-")
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("session-restored-")
                     })
                     .map(|e| e.path())
                     .collect();
@@ -5095,8 +5315,10 @@ impl App {
         let reserved: Vec<String> = {
             fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
                 if let Some(leaf) = n.get("leaf") {
-                    if let Some(c) =
-                        leaf.get("character").and_then(|c| c.as_str()).filter(|s| !s.is_empty())
+                    if let Some(c) = leaf
+                        .get("character")
+                        .and_then(|c| c.as_str())
+                        .filter(|s| !s.is_empty())
                     {
                         out.push(c.to_string());
                     }
@@ -5120,7 +5342,8 @@ impl App {
         {
             let mut ws = self.ws.lock().unwrap();
             for (i, c) in reserved.iter().enumerate() {
-                ws.pane_character.insert(format!("{}{i}", Self::RESERVE_KEY), c.clone());
+                ws.pane_character
+                    .insert(format!("{}{i}", Self::RESERVE_KEY), c.clone());
             }
         }
         let (cols, rows) = self.window_cells();
@@ -5146,8 +5369,10 @@ impl App {
             if self.windows.is_empty() {
                 self.windows.push(None);
                 self.active_window = 0;
-            } else if let Some(tree) =
-                self.windows.get_mut(self.active_window).and_then(Option::take)
+            } else if let Some(tree) = self
+                .windows
+                .get_mut(self.active_window)
+                .and_then(Option::take)
             {
                 // 인덱스가 밀려 살아 있는 방을 가리키게 된 경우다. 그 방을 활성으로
                 // 올린다 — 살아난 방을 두고 빈 pane 을 띄우는 쪽이 더 나쁘다.
@@ -5168,7 +5393,8 @@ impl App {
         // 쪼개는 pane 이 그 학생을 못 쓴다.
         {
             let mut ws = self.ws.lock().unwrap();
-            ws.pane_character.retain(|k, _| !k.starts_with(Self::RESERVE_KEY));
+            ws.pane_character
+                .retain(|k, _| !k.starts_with(Self::RESERVE_KEY));
         }
         // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴
         // 것은 화면에 없는 게 그 사람이 고른 상태고, 켜자마자 우르르 튀어나오면
@@ -5187,7 +5413,10 @@ impl App {
                 continue;
             };
             let str_of = |k: &str| {
-                c.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+                c.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
             };
             self.closed_panes.push(crate::ClosedPane {
                 rec,
@@ -5278,12 +5507,7 @@ impl App {
     /// Spawn one restored pane from its saved record and, when it was running an
     /// agent, queue the command that brings it back. Returns the new pane id, or
     /// None if the PTY failed to start (caller then collapses the split).
-    fn restore_leaf(
-        &mut self,
-        rec: &serde_json::Value,
-        cols: u16,
-        rows: u16,
-    ) -> Option<String> {
+    fn restore_leaf(&mut self, rec: &serde_json::Value, cols: u16, rows: u16) -> Option<String> {
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
         // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
         // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.
@@ -5296,8 +5520,10 @@ impl App {
         if let Some(url) = rec.get("web_url").and_then(|v| v.as_str()) {
             let host_id = self.alloc_web_host_id();
             let mut tab = crate::PaneTab::default();
-            tab.content =
-                crate::PaneContent::Web(crate::WebPane { url: url.to_string(), host_id });
+            tab.content = crate::PaneContent::Web(crate::WebPane {
+                url: url.to_string(),
+                host_id,
+            });
             tab.title = Some(
                 rec.get("title")
                     .and_then(|v| v.as_str())
@@ -5306,7 +5532,11 @@ impl App {
                     .unwrap_or_else(|| crate::webpane::short_label(url)),
             );
             tab.title_pinned = true;
-            let ps = crate::PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
+            let ps = crate::PaneState {
+                tabs: vec![tab],
+                dirty: true,
+                ..Default::default()
+            };
             self.ws.lock().unwrap().panes.insert(id.clone(), ps);
             self.pending_web_hosts.push((host_id, url.to_string()));
             return Some(id);
@@ -5319,26 +5549,37 @@ impl App {
             rec.get("remote_pane").and_then(|v| v.as_str()),
         ) {
             let rec_str = |k: &str| rec.get(k).and_then(|v| v.as_str()).map(str::to_string);
-            match kasa_mcp::remote::connect(
-                kasa_mcp::remote::RemoteSpec {
-                    base: base.to_string(),
-                    pane: Some(rpane.to_string()),
-                    cwd: None,
-                    token: None,
-                    identity: kasa_mcp::remote::RemoteIdentity {
-                        label: rec_str("remote_label")
-                            .or_else(|| kasa_mcp::machines::label_for_base(base))
-                            .unwrap_or_default(),
-                        remote_cwd: rec_str("remote_cwd"),
-                        origin_cwd: rec_str("remote_origin_cwd"),
-                    },
+            let spec = kasa_mcp::remote::RemoteSpec {
+                base: base.to_string(),
+                pane: Some(rpane.to_string()),
+                cwd: None,
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: rec_str("remote_label")
+                        .or_else(|| kasa_mcp::machines::label_for_base(base))
+                        .unwrap_or_default(),
+                    remote_cwd: rec_str("remote_cwd"),
+                    origin_cwd: rec_str("remote_origin_cwd"),
                 },
-                &id,
-                cols,
-                rows,
-            ) {
+            };
+            // 거울(view)로 살던 pane 은 거울로 되살린다 — 소유자로 붙으면
+            // 재시작 한 번에 원본 크기를 도로 뺏는다.
+            let attempt = if rec
+                .get("remote_view")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                kasa_mcp::remote::connect_view(spec, &id)
+            } else {
+                kasa_mcp::remote::connect(spec, &id, cols, rows)
+            };
+            match attempt {
                 Ok(remote) => {
-                    self.pump_pty_screens(remote.session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&remote.session));
+                    self.pump_pty_screens(
+                        remote.session.screens.clone(),
+                        id.clone(),
+                        std::sync::Arc::downgrade(&remote.session),
+                    );
                     self.insert_pty(id.clone(), remote.session.clone());
                     if let Some(t) = rec
                         .get("title")
@@ -5364,9 +5605,7 @@ impl App {
                     // 갈면 두 화면이 다른 사람을 가리킨다.
                     if let Some(name) = rec_str("character")
                         .filter(|s| !s.is_empty())
-                        .or_else(|| {
-                            kasa_mcp::remote::remote_pane_character(base, rpane, None)
-                        })
+                        .or_else(|| kasa_mcp::remote::remote_pane_character(base, rpane, None))
                         .filter(|s| !s.is_empty())
                     {
                         // relabel_pane 은 실존 pane 만 손댄다 — 원격 갈래는 아직
@@ -5416,8 +5655,10 @@ impl App {
         // 멀쩡했고 옛 배정이 안 바뀐 것이었다).
         //
         // 대화는 안 끊긴다. 바뀌는 것은 이름·얼굴·말투뿐이고 `--resume` 은 그대로 탄다.
-        let stored_char =
-            rec.get("character").and_then(|c| c.as_str()).filter(|s| !s.is_empty());
+        let stored_char = rec
+            .get("character")
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty());
         let saved_char = rec
             .get("character")
             .and_then(|c| c.as_str())
@@ -5445,8 +5686,9 @@ impl App {
             //
             // 손으로 고른 자리는 예외다 — 사람이 일부러 같은 학생을 둘 앉혔다면
             // 그건 배정 사고가 아니다(같은 날 정한 「손으로 고른 건 지킨다」 규칙).
-            let manual =
-                session_id.as_deref().is_some_and(kasa_mcp::character::is_manual_pick);
+            let manual = session_id
+                .as_deref()
+                .is_some_and(kasa_mcp::character::is_manual_pick);
             // ⚠️ 예약(위 `RESERVE_KEY`)은 **세지 않는다.** 그건 「이 이름은 되살릴
             // 자리가 있으니 새 배정이 집어가지 마라」는 표시라, 여기서 함께 세면
             // 되살리려는 자리가 제 예약에 막혀 통째로 새로 배정된다(자기 자신을
@@ -5523,7 +5765,11 @@ impl App {
                 return None;
             }
         };
-        self.pump_pty_screens(session.screens.clone(), id.clone(), std::sync::Arc::downgrade(&session));
+        self.pump_pty_screens(
+            session.screens.clone(),
+            id.clone(),
+            std::sync::Arc::downgrade(&session),
+        );
         if let Some(ref c) = cwd {
             self.pane_cwd_cache
                 .insert(id.clone(), std::path::PathBuf::from(c));
@@ -5670,9 +5916,7 @@ impl App {
                 let is_active = ws.active_pane.as_deref() == Some(pane_id.as_str());
                 let pane = ws.pane_mut(&pane_id);
                 let tp = pane.term_mut().expect("tmux pane must be terminal");
-                let resized = tp.cols != cols
-                    || tp.rows != rows
-                    || tp.cells.len() != rows as usize;
+                let resized = tp.cols != cols || tp.rows != rows || tp.cells.len() != rows as usize;
                 if resized {
                     // Preserve content across resize — see the PTY-path
                     // copy of this branch for the rationale.
@@ -5699,9 +5943,7 @@ impl App {
                 }
                 // Shift detection per pane — alt-screen apps manage their
                 // own scrollback so we skip there.
-                if !alt_screen
-                    && !tp.prev_cells.is_empty()
-                    && tp.prev_cells.len() == tp.cells.len()
+                if !alt_screen && !tp.prev_cells.is_empty() && tp.prev_cells.len() == tp.cells.len()
                 {
                     let n = tp.prev_cells.len();
                     let mut shifted = 0usize;
@@ -5739,8 +5981,7 @@ impl App {
                     // Only the active pane's title shows in the window
                     // chrome — background panes change silently.
                     if title_changed && is_active {
-                        let display =
-                            new_title.unwrap_or_else(|| "kasaterm".into());
+                        let display = new_title.unwrap_or_else(|| "kasaterm".into());
                         w.set_title(&display);
                     }
                     w.request_redraw();
@@ -5762,10 +6003,7 @@ impl App {
                         // space-separated, plus a trailing flag.
                         // parse_layout wants exactly one layout
                         // string, so take the first token.
-                        let first = layout
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or(&layout);
+                        let first = layout.split_whitespace().next().unwrap_or(&layout);
                         match parse_layout(first) {
                             Ok(parsed) => {
                                 let mut ws = ws_events.lock().unwrap();
@@ -5923,7 +6161,9 @@ impl App {
             .map(|(id, sid)| (id.clone(), sid.clone()))
             .collect();
         for (pane_id, sid) in panes {
-            let Some(path) = crate::socket::transcript_path_for_session(&sid) else { continue };
+            let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
+                continue;
+            };
             let meta = std::fs::metadata(&path).ok();
             let mtime = meta.as_ref().and_then(|m| m.modified().ok());
             let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -5932,7 +6172,9 @@ impl App {
                 // 파일이 그대로면 이름도 상태도 그대로다 — 안 읽는다. 노는 pane 은
                 // 여기서 전부 걸러지고, 읽는 것은 지금 말하고 있는 pane 뿐이다.
                 if mtime.is_some()
-                    && seen.get(&pane_id).is_some_and(|e| e.mtime == mtime && e.sid == sid)
+                    && seen
+                        .get(&pane_id)
+                        .is_some_and(|e| e.mtime == mtime && e.sid == sid)
                 {
                     continue;
                 }
@@ -5960,7 +6202,10 @@ impl App {
             // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — 옛 대화의 마커를 이
             // 세션 것으로 읽으면 안 된다.
             if entry.sid != sid {
-                *entry = PaneTranscript { sid: sid.clone(), ..Default::default() };
+                *entry = PaneTranscript {
+                    sid: sid.clone(),
+                    ..Default::default()
+                };
             }
             entry.mtime = mtime;
             // 이 세션을 처음 본 순간의 파일 크기가 기준선이다. 그 앞의 effort 마커는
@@ -5973,7 +6218,10 @@ impl App {
             // 앞부분을 잘라낸다.
             let tail_start = len.saturating_sub(WINDOW);
             let cut = usize::try_from(baseline.saturating_sub(tail_start)).unwrap_or(usize::MAX);
-            if let Some(fresh) = tail.get(cut..).or_else(|| (cut >= tail.len()).then_some("")) {
+            if let Some(fresh) = tail
+                .get(cut..)
+                .or_else(|| (cut >= tail.len()).then_some(""))
+            {
                 // 마커가 없으면 이전 판정을 지운다 — 세션을 갈아탄 뒤라면 옛 상태를
                 // 물려받으면 안 된다. 마커가 있으면 그것이 훅 표식보다 최신이다.
                 entry.ultra = ultra_verdict_in(fresh);
@@ -5982,7 +6230,9 @@ impl App {
             // 길어지면 옛 스탬프는 512KB 밖으로 나간다. 심어 둔 이름을 걷지 않는다.
             let Some(name) = found else { continue };
             let mut ws = self.ws.lock().unwrap();
-            let Some(pane) = ws.panes.get_mut(&pane_id) else { continue };
+            let Some(pane) = ws.panes.get_mut(&pane_id) else {
+                continue;
+            };
             if pane.title.as_deref() == Some(name.as_str()) {
                 entry.title = Some(name);
                 continue;
@@ -6012,7 +6262,10 @@ impl App {
     /// 이 pane 을 `--effort ultracode` 로 되살렸다고 표시한다. 제품 경로는
     /// `restore_leaf` 하나뿐이고, 하네스가 같은 문을 써야 재는 것과 도는 것이 같다.
     pub(crate) fn mark_restored_ultracode(&self, pane: &str) {
-        restored_ultracode().lock().unwrap().insert(pane.to_string());
+        restored_ultracode()
+            .lock()
+            .unwrap()
+            .insert(pane.to_string());
     }
 
     /// 복원이 `--effort ultracode` 로 되살린 pane 들 — 아직 아무 마커도 안 생긴
@@ -6169,7 +6422,9 @@ fn auth_link_target_dir(auth_link: &std::path::Path) -> Option<String> {
     } else {
         auth_link.parent()?.join(target)
     };
-    target.parent().map(|dir| dir.to_string_lossy().into_owned())
+    target
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 /// 저장소 경로 → 계정 id(`…/claude-accounts/<id>` 의 꼬리). `""` 는 기본 로그인이라
@@ -6262,7 +6517,9 @@ pub(crate) fn plan_character_swap(
     if !persona_on || agent.is_none() {
         return SwapPlan::Now;
     }
-    SwapPlan::Ask { resumable: has_convo }
+    SwapPlan::Ask {
+        resumable: has_convo,
+    }
 }
 
 /// 카드에 적을 제목과 본문. `App` 을 안 들고 다니므로 테스트가 된다.
@@ -6364,10 +6621,7 @@ pub(crate) fn pane_account_fate(f: &PaneAccountFact, target_dir: &str) -> PaneAc
 ///
 /// 활동 기록이 아직 없는 pane(`None`)도 바쁜 것으로 친다 — 방금 뜬 pane 을 그 자리에서
 /// 끊지 않으려는 기존 규칙 그대로다.
-pub(crate) fn account_restart_busy(
-    prompt_wait: bool,
-    activity: Option<(&str, bool)>,
-) -> bool {
+pub(crate) fn account_restart_busy(prompt_wait: bool, activity: Option<(&str, bool)>) -> bool {
     prompt_wait || activity.is_none_or(|(status, bg)| status != "idle" || bg)
 }
 
@@ -6450,10 +6704,14 @@ pub(crate) fn account_switch_confirm_text(
     let title = format!("에이전트 {}개가 다시 떠요", i.torn_down());
     // 절을 가운뎃점으로 잇지 않고 **줄로 나눈다** — 사정이 셋만 겹쳐도 한 줄이
     // 카드 밖으로 나가고, 그러면 정작 읽어야 할 마지막 절이 잘린다.
-    let mut lines =
-        vec![format!("{to_label} 로 바꾸면 대화는 이어지지만 그 pane 화면은 비워져요")];
+    let mut lines = vec![format!(
+        "{to_label} 로 바꾸면 대화는 이어지지만 그 pane 화면은 비워져요"
+    )];
     if i.restart_after_turn > 0 {
-        lines.push(format!("작업 중 {}개는 턴이 끝난 뒤에 떠요", i.restart_after_turn));
+        lines.push(format!(
+            "작업 중 {}개는 턴이 끝난 뒤에 떠요",
+            i.restart_after_turn
+        ));
     }
     if i.fresh > 0 {
         lines.push(format!("{}개는 이어붙일 대화가 없어 새로 떠요", i.fresh));
@@ -6462,7 +6720,10 @@ pub(crate) fn account_switch_confirm_text(
         lines.push("지금 보는 pane 은 ⟳ 를 눌러야 바뀌어요".to_string());
     }
     if i.unmeasured > 0 {
-        lines.push(format!("{}개는 어느 계정인지 확인이 안 돼 함께 띄워요", i.unmeasured));
+        lines.push(format!(
+            "{}개는 어느 계정인지 확인이 안 돼 함께 띄워요",
+            i.unmeasured
+        ));
     }
     (title, lines)
 }
@@ -6501,7 +6762,10 @@ fn theme_roster_names(theme: &str) -> Vec<String> {
     } else {
         kasa_mcp::character::theme_characters_json(theme)
     };
-    chars.as_ref().map(kasa_mcp::character::member_names).unwrap_or_default()
+    chars
+        .as_ref()
+        .map(kasa_mcp::character::member_names)
+        .unwrap_or_default()
 }
 
 pub(crate) fn account_switch_toast(
@@ -6716,12 +6980,16 @@ fn room_home_cwd(panes: &[(std::path::PathBuf, bool)]) -> Option<std::path::Path
 /// 호출부가 "없으면 플래그 자체를 뺀다"로 갈리기 때문이다 — 빈 값을 흘리면
 /// `--model ''` 이 나가 하네스가 기본값도 못 고른다.
 fn saved_model(rec: &serde_json::Value) -> Option<&str> {
-    rec.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    rec.get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 /// 저장된 leaf 가 쓰던 reasoning effort — 없으면 `None`. `saved_model` 과 같은 규약.
 fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
-    rec.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    rec.get("effort")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 /// 복원된 pane 에 넣을 명령. 하네스 셋 × (이어가기/새로)라 순수 함수로 뺐다 —
@@ -6811,42 +7079,46 @@ pub(crate) fn restore_agent_command(
 /// 빌드(`PtyBackend`) 양쪽에 있고, 한쪽만 갱신하면 그 경로로 바뀐 pane 만 말투가
 /// 어긋난 채 남는다.
 pub(crate) fn write_persona_override(pane: &str, character: &str) {
-        let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else { return };
-        let dir = std::path::Path::new(&shim);
-        let persona = if socket::read_claude_persona() {
-            kasa_mcp::character::characters_json()
-                .and_then(|c| kasa_mcp::character::persona_for(&c, character))
-                .or_else(|| kasa_mcp::character::persona_for_any(character))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let base = dir.join(format!("repersona-{pane}"));
-        let _ = std::fs::write(base.with_extension("persona"), persona);
-        let _ = std::fs::write(base.with_extension("character"), character);
-        // 이름의 로마자 머리도 새 학생 것으로 — spawn 때 내려간 env 는 옛 학생
-        // 것이라, 이 파일이 없으면 얼굴과 말투만 바뀌고 **말 거는 이름은 앞 학생**
-        // 으로 남는다.
-        let _ = std::fs::write(
-            base.with_extension("slug"),
-            crate::theme::agent_slug(character),
-        );
-        // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
-        // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
-        let chars = kasa_mcp::character::characters_json();
-        let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
-            chars.as_ref().and_then(|c| f(c, character)).unwrap_or_default()
-        };
-        let _ = std::fs::write(
-            base.with_extension("model"),
-            pick(kasa_mcp::character::model_for),
-        );
-        let _ = std::fs::write(
-            base.with_extension("backend"),
-            pick(kasa_mcp::character::backend_for),
-        );
-    }
-
+    let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&shim);
+    let persona = if socket::read_claude_persona() {
+        kasa_mcp::character::characters_json()
+            .and_then(|c| kasa_mcp::character::persona_for(&c, character))
+            .or_else(|| kasa_mcp::character::persona_for_any(character))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let base = dir.join(format!("repersona-{pane}"));
+    let _ = std::fs::write(base.with_extension("persona"), persona);
+    let _ = std::fs::write(base.with_extension("character"), character);
+    // 이름의 로마자 머리도 새 학생 것으로 — spawn 때 내려간 env 는 옛 학생
+    // 것이라, 이 파일이 없으면 얼굴과 말투만 바뀌고 **말 거는 이름은 앞 학생**
+    // 으로 남는다.
+    let _ = std::fs::write(
+        base.with_extension("slug"),
+        crate::theme::agent_slug(character),
+    );
+    // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
+    // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
+    let chars = kasa_mcp::character::characters_json();
+    let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
+        chars
+            .as_ref()
+            .and_then(|c| f(c, character))
+            .unwrap_or_default()
+    };
+    let _ = std::fs::write(
+        base.with_extension("model"),
+        pick(kasa_mcp::character::model_for),
+    );
+    let _ = std::fs::write(
+        base.with_extension("backend"),
+        pick(kasa_mcp::character::backend_for),
+    );
+}
 
 /// 저장된 학생을 그대로 되살릴 것인가.
 ///
@@ -6871,7 +7143,10 @@ fn closed_index_in(list: &[crate::ClosedPane], pane: &str) -> Option<usize> {
 
 /// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
 fn next_free_pane_id(used: &std::collections::HashSet<String>) -> String {
-    (0u32..).map(|n| format!("%{n}")).find(|id| !used.contains(id)).unwrap_or_default()
+    (0u32..)
+        .map(|n| format!("%{n}"))
+        .find(|id| !used.contains(id))
+        .unwrap_or_default()
 }
 
 /// 저장본의 pane 번호를 그대로 되살릴 수 있으면 그것. 없거나(옛 저장본) 형식이
@@ -6881,7 +7156,6 @@ fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool) -> Option<
     s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok())?;
     (!taken(s)).then(|| s.to_string())
 }
-
 
 /// 목록을 끝까지 내렸을 때의 스크롤 위치(px). 넘치지 않으면 0.
 ///
@@ -6912,10 +7186,9 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 mod tests {
     use super::{
         account_restart_busy, account_switch_confirm_text, account_switch_focused_tab,
-        account_switch_impact,
-        editor_command_line, git_repo_root, next_free_pane_id, pane_account_fate,
-        pick_restore_id, predicted_target_dir, restored_scrollback, AccountSwitchImpact,
-        PaneAccountFact, PaneAccountFate,
+        account_switch_impact, editor_command_line, git_repo_root, next_free_pane_id,
+        pane_account_fate, pick_restore_id, predicted_target_dir, restored_scrollback,
+        AccountSwitchImpact, PaneAccountFact, PaneAccountFate,
     };
     use crate::{PaneState, PaneTab, Workspace};
 
@@ -6934,7 +7207,10 @@ mod tests {
     /// 내용과 실제로 벌어지는 일이 갈린다.
     #[test]
     fn a_pane_already_on_the_target_is_left_alone() {
-        assert_eq!(pane_account_fate(&fact(Some("")), ""), PaneAccountFate::Unchanged);
+        assert_eq!(
+            pane_account_fate(&fact(Some("")), ""),
+            PaneAccountFate::Unchanged
+        );
         assert_eq!(
             pane_account_fate(&fact(Some("/v/acct-2")), ""),
             PaneAccountFate::RestartWhenQuiet
@@ -6949,7 +7225,10 @@ mod tests {
     /// 안 하고 넘어간다. 모를 때는 어긋난 쪽으로 센다.
     #[test]
     fn an_unmeasured_pane_is_never_counted_as_unchanged() {
-        assert_ne!(pane_account_fate(&fact(None), ""), PaneAccountFate::Unchanged);
+        assert_ne!(
+            pane_account_fate(&fact(None), ""),
+            PaneAccountFate::Unchanged
+        );
         let i = account_switch_impact(&[fact(None)], "");
         assert_eq!(i.unmeasured, 1);
         assert!(i.needs_confirm());
@@ -7038,7 +7317,10 @@ mod tests {
     /// 되띄우므로 「작업이 끊긴다」는 **거짓말**이다.
     #[test]
     fn the_confirm_text_never_claims_work_gets_killed() {
-        let i = AccountSwitchImpact { restart_when_quiet: 3, ..Default::default() };
+        let i = AccountSwitchImpact {
+            restart_when_quiet: 3,
+            ..Default::default()
+        };
         let (title, lines) = account_switch_confirm_text("지메일", &i);
         let sub = lines.join(" ");
         assert!(title.contains('3'));
@@ -7073,8 +7355,14 @@ mod tests {
         assert_eq!(predicted_target_dir("", true, true, None), "");
         assert_eq!(predicted_target_dir("acct-2", true, true, Some(vault)), "");
         // 작업대를 못 쓰거나 금고가 껍데기면 갈아 끼우기가 안 되고 재시작으로만 반영된다.
-        assert_eq!(predicted_target_dir("acct-2", false, true, Some(vault)), "/v/acct-2");
-        assert_eq!(predicted_target_dir("acct-2", true, false, Some(vault)), "/v/acct-2");
+        assert_eq!(
+            predicted_target_dir("acct-2", false, true, Some(vault)),
+            "/v/acct-2"
+        );
+        assert_eq!(
+            predicted_target_dir("acct-2", true, false, Some(vault)),
+            "/v/acct-2"
+        );
     }
 
     /// 러너와 계산기가 같은 판정을 쓰는지. 활동 기록이 없는 pane 도 바쁜 것으로 친다.
@@ -7126,7 +7414,10 @@ mod tests {
 
     #[test]
     fn restore_keeps_the_saved_pane_id() {
-        assert_eq!(pick_restore_id(Some("%9"), |_| false).as_deref(), Some("%9"));
+        assert_eq!(
+            pick_restore_id(Some("%9"), |_| false).as_deref(),
+            Some("%9")
+        );
     }
 
     #[test]
@@ -7206,7 +7497,10 @@ mod account_switch_tests {
         std::fs::create_dir_all(&slot).unwrap();
         let target = slot.join("auth.json");
         symlink(&target, pane_home.join("auth.json")).unwrap();
-        assert_eq!(auth_link_target_dir(&pane_home.join("auth.json")), Some(slot.display().to_string()));
+        assert_eq!(
+            auth_link_target_dir(&pane_home.join("auth.json")),
+            Some(slot.display().to_string())
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7220,7 +7514,9 @@ mod account_switch_tests {
     fn toast_covers_all_shapes() {
         // 작업대 전환이 성공하면 도는 pane 도 즉시 따라온다 — 「다음에 뜨는」이라고
         // 말하면 거짓말이다(2026-08-17 「토스트에 다음세션부터라고 뜨는데」).
-        assert!(account_switch_toast("사이오닉", false, 0, 0, false, true).contains("다음 메시지부터"));
+        assert!(
+            account_switch_toast("사이오닉", false, 0, 0, false, true).contains("다음 메시지부터")
+        );
         // 작업대 실패(금고 비었음 등)면 재시작 폴백뿐이라 옛 문장이 맞다.
         assert!(account_switch_toast("사이오닉", false, 0, 0, false, false).contains("다음에 뜨는"));
         assert!(account_switch_toast("사이오닉", true, 0, 0, false, true).contains("그대로"));
@@ -7247,12 +7543,22 @@ mod agy_restore_tests {
     /// 늘 때 같은 함정에 다시 빠지지 않게 셋을 다 건다.
     #[test]
     fn every_harness_restores_as_itself() {
-        for (agent, fresh) in [("claude", "claude\r"), ("codex", "codex\r"), ("agy", "agy\r")] {
+        for (agent, fresh) in [
+            ("claude", "claude\r"),
+            ("codex", "codex\r"),
+            ("agy", "agy\r"),
+        ] {
             assert_eq!(cmd(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
         }
-        assert_eq!(cmd(Some("claude"), Some("s1"), true), "claude --resume s1\r");
+        assert_eq!(
+            cmd(Some("claude"), Some("s1"), true),
+            "claude --resume s1\r"
+        );
         assert_eq!(cmd(Some("codex"), Some("s2"), true), "codex resume s2\r");
-        assert_eq!(cmd(Some("agy"), Some("s3"), true), "agy --conversation s3\r");
+        assert_eq!(
+            cmd(Some("agy"), Some("s3"), true),
+            "agy --conversation s3\r"
+        );
     }
 
     /// 이어갈 수 없는 세션(파일이 사라짐)은 **id 를 버리고** 새로 띄워야 한다 —
@@ -7274,7 +7580,13 @@ mod agy_restore_tests {
             "★ 작은따옴표가 빠지면 `[1m]` 이 zsh 글롭이라 명령이 통째 실패한다"
         );
         assert_eq!(
-            restore_agent_command(Some("codex"), Some("s2"), true, Some("gpt-5.5"), Some("high")),
+            restore_agent_command(
+                Some("codex"),
+                Some("s2"),
+                true,
+                Some("gpt-5.5"),
+                Some("high")
+            ),
             "codex resume s2 -m 'gpt-5.5' -c model_reasoning_effort='high'\r"
         );
         assert_eq!(
@@ -7307,7 +7619,10 @@ mod agy_restore_tests {
     #[test]
     fn saved_model_and_effort_fall_back_to_none() {
         let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
-        assert_eq!(saved_model(&j(r#"{"model":"claude-opus-5[1m]"}"#)), Some("claude-opus-5[1m]"));
+        assert_eq!(
+            saved_model(&j(r#"{"model":"claude-opus-5[1m]"}"#)),
+            Some("claude-opus-5[1m]")
+        );
         assert_eq!(saved_effort(&j(r#"{"effort":"xhigh"}"#)), Some("xhigh"));
         assert_eq!(saved_model(&j(r#"{}"#)), None, "옛 저장본");
         assert_eq!(saved_effort(&j(r#"{}"#)), None, "옛 저장본");
@@ -7345,7 +7660,11 @@ mod room_name_tests {
     #[test]
     fn room_name_takes_the_most_common_cwd() {
         assert_eq!(
-            room(&[("/a/recall", true), ("/a/branding", true), ("/a/recall", true)]),
+            room(&[
+                ("/a/recall", true),
+                ("/a/branding", true),
+                ("/a/recall", true)
+            ]),
             Some("recall".into())
         );
         assert_eq!(room(&[]), None);
@@ -7392,7 +7711,11 @@ mod room_name_tests {
     #[test]
     fn room_name_falls_back_to_shells_when_no_agent_sits_there() {
         assert_eq!(
-            room(&[("/a/Downloads", false), ("/a/Downloads", false), ("/a/recall", false)]),
+            room(&[
+                ("/a/Downloads", false),
+                ("/a/Downloads", false),
+                ("/a/recall", false)
+            ]),
             Some("Downloads".into())
         );
     }
@@ -7456,7 +7779,10 @@ mod closed_pane_id_reuse_tests {
     /// 그 방의 유일한 pane 이었다면 **방까지 목록에서 없어진다**(2026-08-25 실측).
     #[test]
     fn dead_record_does_not_claim_a_live_pane() {
-        let list = [rec("%21", false, "nacho-neko"), rec("%21", false, "Desktop")];
+        let list = [
+            rec("%21", false, "nacho-neko"),
+            rec("%21", false, "Desktop"),
+        ];
         assert!(stashed_in(&list, "%21").is_none());
     }
 
@@ -7464,7 +7790,10 @@ mod closed_pane_id_reuse_tests {
     #[test]
     fn live_record_is_found() {
         let list = [rec("%21", false, "옛것"), rec("%21", true, "숨긴것")];
-        assert_eq!(stashed_in(&list, "%21").map(|c| c.folder.as_str()), Some("숨긴것"));
+        assert_eq!(
+            stashed_in(&list, "%21").map(|c| c.folder.as_str()),
+            Some("숨긴것")
+        );
     }
 
     /// 목록 조작(숨김 해제·끄기)은 살아 있는 것을 먼저 집는다 — 앞에 놓인 묘비
@@ -7495,7 +7824,10 @@ mod character_swap_plan_tests {
 
     #[test]
     fn persona_off_swaps_the_shell_without_asking() {
-        assert_eq!(plan_character_swap(false, Some("claude"), true), SwapPlan::Now);
+        assert_eq!(
+            plan_character_swap(false, Some("claude"), true),
+            SwapPlan::Now
+        );
     }
 
     #[test]
@@ -7528,9 +7860,15 @@ mod character_swap_plan_tests {
         let (title, ok) = character_swap_confirm_text("은랑", true);
         assert!(title.contains("은랑으로"), "조사가 어긋난다: {title}");
         // 받침 없는 이름과 ㄹ 받침은 「로」다.
-        assert!(character_swap_confirm_text("미도리", true).0.contains("미도리로"));
-        assert!(character_swap_confirm_text("하치와레", true).0.contains("하치와레로"));
-        assert!(character_swap_confirm_text("페이몬", true).0.contains("페이몬으로"));
+        assert!(character_swap_confirm_text("미도리", true)
+            .0
+            .contains("미도리로"));
+        assert!(character_swap_confirm_text("하치와레", true)
+            .0
+            .contains("하치와레로"));
+        assert!(character_swap_confirm_text("페이몬", true)
+            .0
+            .contains("페이몬으로"));
         assert!(ok.iter().any(|l| l.contains("그대로")));
     }
 }
@@ -7565,7 +7903,10 @@ mod sidebar_scroll_tests {
         heights.extend([OPEN2; 3]);
         let avail = 752.0;
         let total = content(&heights);
-        assert!(total > avail, "전제가 깨졌다: 목록이 칸에 다 들어간다 ({total} <= {avail})");
+        assert!(
+            total > avail,
+            "전제가 깨졌다: 목록이 칸에 다 들어간다 ({total} <= {avail})"
+        );
         assert_eq!(
             old_max_first(heights.len(), avail),
             0,
@@ -7579,7 +7920,10 @@ mod sidebar_scroll_tests {
         );
         // 끝까지 내리면 마지막 카드 바닥이 칸 바닥에 딱 온다 — 더도 덜도 아니어야
         // 한다. 모자라면 꼬리가 잘리고, 넘치면 빈 자리가 열린다.
-        assert!((max + avail - total).abs() < 0.01, "끝이 어긋난다: {max} + {avail} vs {total}");
+        assert!(
+            (max + avail - total).abs() < 0.01,
+            "끝이 어긋난다: {max} + {avail} vs {total}"
+        );
     }
 
     #[test]
@@ -7634,7 +7978,10 @@ mod revive_saved_character_tests {
 
     #[test]
     fn a_character_another_pane_holds_is_not_revived() {
-        assert!(!revive_saved_character(true, false), "겹친 학생이 그대로 되살아난다");
+        assert!(
+            !revive_saved_character(true, false),
+            "겹친 학생이 그대로 되살아난다"
+        );
     }
 
     /// 손으로 고른 자리는 겹쳐도 지킨다 — 사람이 일부러 그랬다면 배정 사고가 아니다.
@@ -7665,7 +8012,11 @@ mod close_freeze_tests {
         let target = close_x(slots[1], reserve);
         // 탭이 하나 빠지면 남은 탭이 슬롯을 앞에서부터 채운다 — 원래 2번이 1번 칸으로.
         // 슬롯은 그대로이므로 그 칸의 × 는 같은 자리다.
-        assert_eq!(close_x(slots[1], reserve), target, "다음 탭의 × 가 방금 누른 자리에 없다");
+        assert_eq!(
+            close_x(slots[1], reserve),
+            target,
+            "다음 탭의 × 가 방금 누른 자리에 없다"
+        );
         // 연달아 한 번 더 눌러도 마찬가지.
         assert_eq!(close_x(slots[1], reserve), target);
     }
