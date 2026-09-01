@@ -698,9 +698,10 @@ impl App {
             .filter(|i| i.base == m.base)
             .map(|i| i.remote_id)
             .collect();
-        // (원격 방 번호, 원격 pane id, 학생 이름). GUI pane(`%…`)만 — 같은 목록에
-        // 헤드리스 세션(`web-…`)도 실려 오는데 그건 화면의 방이 아니다.
-        let mut targets: Vec<(u64, String, String)> = panes
+        // (원격 방 번호, 원격 pane id, 학생 이름, 원격 cwd). GUI pane(`%…`)만 —
+        // 같은 목록에 헤드리스 세션(`web-…`)도 실려 오는데 그건 화면의 방이 아니다.
+        // cwd 를 링크 정체에 실어야 재접속 자동 따라잡기가 이 거울의 레포를 안다.
+        let mut targets: Vec<(u64, String, String, String)> = panes
             .iter()
             .filter_map(|p| {
                 let rid = p.get("id")?.as_str()?.to_string();
@@ -712,8 +713,13 @@ impl App {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let cwd = p
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let win = p.get("window").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
-                Some((win, rid, name))
+                Some((win, rid, name, cwd))
             })
             .collect();
         if targets.is_empty() {
@@ -722,14 +728,14 @@ impl App {
             ));
         }
         targets.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        let mut rooms: Vec<Vec<(String, String)>> = Vec::new();
+        let mut rooms: Vec<Vec<(String, String, String)>> = Vec::new();
         let mut cur_win: Option<u64> = None;
-        for (w, rid, name) in targets {
+        for (w, rid, name, cwd) in targets {
             if cur_win != Some(w) {
                 cur_win = Some(w);
                 rooms.push(Vec::new());
             }
-            rooms.last_mut().unwrap().push((rid, name));
+            rooms.last_mut().unwrap().push((rid, name, cwd));
         }
         let room_n = rooms.len();
         let total: usize = rooms.iter().map(Vec::len).sum();
@@ -746,7 +752,7 @@ impl App {
             };
             let (win_cols, win_rows) = self.window_cells();
             let mut seated: Vec<(String, String)> = Vec::new();
-            for (rid, name) in &room {
+            for (rid, name, rcwd) in &room {
                 self.set_toast(format!(
                     "{label} 펼치는 중 — {}/{total}",
                     ok_n + fail.len() + 1
@@ -768,7 +774,9 @@ impl App {
                         token: None,
                         identity: kasa_mcp::remote::RemoteIdentity {
                             label: m.label.clone(),
-                            remote_cwd: None,
+                            // 원격 pane 의 작업 폴더 — 재접속 자동 따라잡기가
+                            // 이 거울의 레포를 아는 유일한 길이다.
+                            remote_cwd: (!rcwd.is_empty()).then(|| rcwd.clone()),
                             origin_cwd: None,
                         },
                     },
@@ -5527,6 +5535,76 @@ impl App {
                 idle_since: None,
                 preview: None,
             });
+        }
+        // 재접속 자동 따라잡기 — 이 기계가 꺼져 있는 동안 원격(본진)에 쌓인
+        // 미push 커밋·미저장 변경을, 거울이 다시 붙은 레포마다 이사와 같은
+        // 관문으로 끌어와 로컬을 따라잡는다(2026-09-02 감사 ②). origin 에 이미
+        // push 된 것은 여기 소관이 아니다 — 그건 평범한 git pull 의 영역이고,
+        // 이 층은 push 안 된 것만 나른다(이사 동율과 같은 철학). 부팅을 세우지
+        // 않게 백그라운드로 돌고, 막히면(로컬 미저장 등) 덮지 않고 incoming
+        // 보관(OnBlock::Deposit)이라 잃는 것이 없다.
+        {
+            let registry = kasa_mcp::machines::machines();
+            let mut seen = std::collections::HashSet::new();
+            let mut catchup: Vec<(String, String, String, String)> = Vec::new();
+            for id in kasa_pty::live_sessions() {
+                let Some(info) = kasa_mcp::remote::remote_info(&id) else {
+                    continue;
+                };
+                let Some(rcwd) = info.remote_cwd.clone() else {
+                    continue;
+                };
+                let Some(m) = registry
+                    .iter()
+                    .find(|m| m.base == info.base.trim_end_matches('/'))
+                else {
+                    continue;
+                };
+                let Some(local) = info
+                    .origin_cwd
+                    .clone()
+                    .or_else(|| kasa_mcp::machines::map_remote_to_local(m, &rcwd))
+                else {
+                    continue;
+                };
+                if !std::path::Path::new(&local).join(".git").exists() {
+                    continue;
+                }
+                if seen.insert(local.clone()) {
+                    catchup.push((info.base.clone(), m.label.clone(), rcwd, local));
+                }
+            }
+            if !catchup.is_empty() {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    for (base, label, rcwd, local) in catchup {
+                        let tail = local.rsplit('/').next().unwrap_or(&local).to_string();
+                        let msg = match kasa_mcp::remote::fetch_repo_sync(&base, &rcwd, None) {
+                            Ok(kasa_mcp::remote::RepoSyncFetch::Bundle(meta, bytes)) => {
+                                match kasa_mcp::reposync::apply(
+                                    std::path::Path::new(&local),
+                                    &bytes,
+                                    &meta.head,
+                                    &meta.sync,
+                                    &meta.branch,
+                                    meta.dirty,
+                                    false,
+                                    kasa_mcp::reposync::OnBlock::Deposit,
+                                ) {
+                                    Ok(what) => format!("{label} 따라잡기({tail}): {what}"),
+                                    Err(e) => {
+                                        format!("{label} 따라잡기 실패({tail}): {e:#}")
+                                    }
+                                }
+                            }
+                            // 최신이거나 낡은 기계 — 조용히. 낡음 경고는 이사 탭 몫이다.
+                            Ok(_) => continue,
+                            Err(e) => format!("{label} 따라잡기 실패({tail}): {e:#}"),
+                        };
+                        let _ = proxy.send_event(crate::UserEvent::RepoCatchup(msg));
+                    }
+                });
+            }
         }
         self.chrome_dirty = true;
         self.resize_backend(cols, rows);
