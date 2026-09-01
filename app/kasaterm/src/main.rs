@@ -3950,6 +3950,9 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// 재접속 자동 따라잡기(복원 뒤 백그라운드 스레드)의 결과 한 줄 — GUI 스레드로
+    /// 건너와 토스트가 된다. 스레드에서 `set_toast` 를 직접 못 부르는 자리의 통로.
+    RepoCatchup(String),
     /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
     ///
     /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에

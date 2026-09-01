@@ -397,6 +397,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::RepoCatchup(msg) => {
+                self.set_toast(msg.clone());
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketUnfold(label, reply) => {
                 // 라벨도 migrate 처럼 별칭을 받는다 — `mini` 는 명부 첫 기계.
                 let resolved = kasa_mcp::machines::find(label)
