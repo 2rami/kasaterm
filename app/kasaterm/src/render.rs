@@ -793,10 +793,11 @@ impl App {
         // every pane so in-pane WebViews and other overlays can be snapped
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-        let (slots, headers, footer_slots, agents_view_panes): (
+        let (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes): (
             Vec<PaneSlot>,
             Vec<HeaderInfo>,
             Vec<(String, f32, f32, f32, f32)>,
+            std::collections::HashSet<String>,
             std::collections::HashSet<String>,
         ) = {
             let ws = self.ws.lock().unwrap();
@@ -875,6 +876,11 @@ impl App {
             // argv(is_claude_agents) + statusline 프사 슬롯(U+FFFC) 부재로 하고,
             // 루프 뒤 타이틀바·테두리 패스가 이 집합을 읽는다.
             let mut agents_view_panes: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            // 이사 간 거울 pane 중 저쪽에서 claude 가 도는 것으로 판정된 집합 —
+            // 판정(원격 링크 + 화면의 statusline 표식)은 루프 안 agent_kind 폴백이
+            // 하고, 루프 뒤 타이틀바 패스가 학생 이름을 올릴 때 다시 읽는다.
+            let mut mirror_claude_panes: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             for (id, x_cells, y_cells, w_cells, h_cells) in leaves {
                 let Some(pane) = ws.panes.get(&id) else { continue };
@@ -1007,8 +1013,29 @@ impl App {
                 // 접지 않으면 탭에서 도는 클로드가 안 잡혀, 프사·전신·배너 도트가
                 // 통째로 안 뜬다(거노 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
                 let tab_pid = ws.active_tab_pid(&id);
-                let agent_kind =
-                    self.pty.get(tab_pid.as_str()).and_then(|p| p.active_agent());
+                let agent_kind = self
+                    .pty
+                    .get(tab_pid.as_str())
+                    .and_then(|p| p.active_agent())
+                    // 이사 간 거울 pane — claude 는 저쪽 기계에서 돌아 로컬 프로세스
+                    // 테이블에 없다(active_agent=None). 그대로 두면 학생 그림 전부
+                    // (배너·학생색·standing·프사)가 이 게이트에서 잘려 「이사하면
+                    // 테마가 안 보인다」(2026-09-01). 위 주석의 「화면 모양 판정 금지」
+                    // 는 **아무 pane 이나** 모양으로 판정하지 말라는 것이고, 여기는
+                    // ①원격 링크로 확정된 pane 에서만 ②우리 statusline 훅이 심는
+                    // U+FFFC 표식(브라유 스피너류와 달리 남의 TUI 가 안 찍는 값)을
+                    // 본다 — 거울 화면에 그 표식이 실려 오면 저쪽에서 claude 가
+                    // 도는 것이 정본이고, 저쪽 claude 가 꺼지면 표식도 사라져
+                    // 그림이 함께 걷힌다.
+                    .or_else(|| {
+                        (kasa_mcp::remote::is_remote_pane(tab_pid.as_str())
+                            && find_statusline_face(&composed).is_some())
+                        .then(|| {
+                            mirror_claude_panes.insert(tab_pid.clone());
+                            mirror_claude_panes.insert(id.clone());
+                            kasa_pty::AgentKind::Claude
+                        })
+                    });
                 let runs_claude = agent_kind.is_some();
                 // 스크롤을 올려도 **입력창은 맨 아래에 붙잡는다**. 대체화면을 끈
                 // claude 는 입력창이 대화의 마지막 줄일 뿐이라, 스크롤백을 거슬러
@@ -2716,7 +2743,7 @@ impl App {
             if !headers.is_empty() && !headers.iter().any(|h| h.is_active) {
                 headers[0].is_active = true;
             }
-            (slots, headers, footer_slots, agents_view_panes)
+            (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes)
         };
         // 메뉴에는 계정별 네트워크 조회값이 아니라, 현재 창(없으면 같은 방의 최근
         // 창)이 rollout에 직접 남긴 값을 쓴다. 그래서 다른 슬롯 수치를 현재 선택할
@@ -3876,6 +3903,11 @@ impl App {
                                 .get(*id)
                                 .and_then(|p| p.active_agent())
                                 .is_some()
+                                // 이사 간 거울 pane — claude 는 저쪽 기계라 로컬
+                                // 프로세스로는 안 보인다. pane 루프의 판정(원격 링크
+                                // + statusline 표식)을 재사용해 타이틀바에도 학생
+                                // 이름이 남게 한다(2026-09-01 「이사하면 테마 안 보여」).
+                                || mirror_claude_panes.contains(*id)
                         })
                         .and_then(|id| {
                             // 프사와 동일 규칙(display_pane_char 인라인 — gpu 가변 차용
