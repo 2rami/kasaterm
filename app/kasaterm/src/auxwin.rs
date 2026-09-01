@@ -2832,6 +2832,14 @@ impl App {
                 .then(|| crate::render::unconfirmed_spinner_row(cells))
                 .flatten()
                 .map(|(r, c, _)| (r, c))
+                .or_else(|| {
+                    // 메인 창과 같은 폴백 — 박동 확정 pane 은 글리프 없이 위치만.
+                    self.pty
+                        .get(pane_id)
+                        .is_some_and(|p| p.output_heartbeat_fresh())
+                        .then(|| crate::render::lenient_spinner_row(cells))
+                        .flatten()
+                })
         }) {
             busy = true;
             // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수 있을 때만.
