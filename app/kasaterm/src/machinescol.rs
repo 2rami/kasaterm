@@ -299,10 +299,25 @@ impl App {
         if self.info.machines_col.busy.is_some() {
             return true; // 한 번에 하나 — 이사 중 클릭은 삼킨다.
         }
+        if let state::MachinesColBtn::Unfold { label } = &btn {
+            // 이사(pane 단위)와 달리 기계 단위라 busy(pane 키) 대열엔 안 태운다 —
+            // GUI 스레드 동기 실행이라 도는 동안 다른 클릭이 끼어들 수도 없다.
+            // 진행 토스트·최종 토스트는 엔진(unfold_machine)이 직접 띄운다.
+            let label = label.clone();
+            if let Err(e) = self.unfold_machine(&label) {
+                self.set_toast(format!("펼치기 실패 — {e:#}"));
+            }
+            self.info.machines_col.last_refresh = None; // 새 거울들을 바로 읽게.
+            self.chrome_dirty = true;
+            self.render_frame();
+            return true;
+        }
         let (pane, going) = match &btn {
             state::MachinesColBtn::Send { pane, label } => (pane.clone(), format!("{label}(으)로 보내는 중…")),
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
-            state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
+            state::MachinesColBtn::Screen { .. } | state::MachinesColBtn::Unfold { .. } => {
+                unreachable!("위에서 return")
+            }
         };
         self.info.machines_col.busy = Some((pane.clone(), going.clone()));
         self.info.machines_col.note = None;
@@ -320,7 +335,9 @@ impl App {
         ));
         #[cfg(unix)]
         let outcome = match btn {
-            state::MachinesColBtn::Screen { .. } => unreachable!("위에서 return"),
+            state::MachinesColBtn::Screen { .. } | state::MachinesColBtn::Unfold { .. } => {
+                unreachable!("위에서 return")
+            }
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {
                 let m = kasa_mcp::machines::find(&label)
                     .ok_or_else(|| anyhow::anyhow!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인"))?;
@@ -645,7 +662,16 @@ pub(crate) fn draw_machines_col(
         } else {
             g.measure_chrome_text(screen_bl, 9.0, true) + 12.0 + 8.0
         };
-        let meta_right = right - screen_bw;
+        // 「방 펼치기」 — 살아 있는 기계에 아직 거울로 안 뜬 학생이 있을 때만.
+        // 머리줄 글이 버튼을 뚫지 않게 폭을 여기서 같이 잰다(화면 보기와 동일 규칙).
+        let unfold_bl = "방 펼치기";
+        let has_unfold = m.online && !m.remote.is_empty();
+        let unfold_bw = if !has_unfold {
+            0.0
+        } else {
+            g.measure_chrome_text(unfold_bl, 9.0, true) + 12.0 + 8.0
+        };
+        let meta_right = right - screen_bw - unfold_bw;
         if !m.online {
             let t = crate::info::fit_text(
                 g,
@@ -707,6 +733,27 @@ pub(crate) fn draw_machines_col(
             );
             mc.btn_rects.push((
                 state::MachinesColBtn::Screen { host: m.host.clone(), kvm: m.kvm.clone() },
+                (bx, by, bw, bh),
+            ));
+        }
+        if has_unfold {
+            let bl = unfold_bl;
+            let bw = g.measure_chrome_text(bl, 9.0, true) + 12.0;
+            let bh = 16.0;
+            let bx = right - screen_bw - bw;
+            let by = chip_y - 3.0;
+            let hov =
+                cursor.0 >= bx && cursor.0 <= bx + bw && cursor.1 >= by && cursor.1 <= by + bh;
+            g.hover_pointer |= hov;
+            round_rect(g, bx, by, bw, bh, theme::radius_sm(), theme::raised_on(theme::surface(), hov));
+            g.draw_text(
+                bx + 6.0,
+                by + 3.0,
+                bl,
+                gpu::DrawOpts { font_size: 9.0, color: theme::text(), bold: true, italic: false },
+            );
+            mc.btn_rects.push((
+                state::MachinesColBtn::Unfold { label: m.label.clone() },
                 (bx, by, bw, bh),
             ));
         }

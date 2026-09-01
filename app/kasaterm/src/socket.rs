@@ -1325,6 +1325,19 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn unfold_machine(&self, label: &str) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketUnfold(label.to_string(), tx));
+        // 거울 접속은 jsonl 운반이 없어 pane 당 수 초 — 다만 수가 많을 수 있다.
+        match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+            Ok(Ok(summary)) => Ok(summary),
+            Ok(Err(why)) => anyhow::bail!("unfold 실패: {why}"),
+            Err(_) => anyhow::bail!("unfold 응답 없음(120초) — GUI 스레드를 확인해라"),
+        }
+    }
+
     fn split_fleet(
         &self,
         count: usize,

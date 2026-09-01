@@ -3767,6 +3767,12 @@ enum UserEvent {
         bool,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로
+    /// **펼친다**(방마다 새 창). (라벨, 회신=요약 문장).
+    SocketUnfold(
+        String,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
     /// `surface.split_fleet` 위임 — pane 여러 개를 **한 번에** 배치한다.
     ///
     /// `SocketSplit` 을 N 번 보내는 것과 결과가 다르다. 그러면 회차마다 대상이 직전에

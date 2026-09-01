@@ -344,6 +344,8 @@ pub(crate) enum MachinesColBtn {
     /// 그 기계 화면 보기 — kvm(IP KVM 웹 주소)이 있으면 그 문을 열고, 없으면
     /// host(명부의 진짜 주소, `user@ip` 허용)로 macOS 화면공유를 연다.
     Screen { host: String, kvm: Option<String> },
+    /// 방 펼치기 — 그 기계 학생 pane 전부를 이 창의 거울로(원격 방마다 새 창).
+    Unfold { label: String },
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.
