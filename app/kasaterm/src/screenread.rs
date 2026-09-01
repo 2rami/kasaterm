@@ -3726,6 +3726,49 @@ pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, 
     None
 }
 
+/// 백엔드 출력 박동(`output_heartbeat_fresh`)으로 「이 pane 은 지금 생성 중」이
+/// **이미 확정된 때만** 쓰는 관대한 스피너 위치 스캔 — 앞머리 글리프 집합을 안
+/// 본다. 스피너 글리프는 세 번 바뀌었고(윈도우 `*`·점 프레임·reduce motion `●`)
+/// 바뀔 때마다 도트·테마가 통째로 죽었다. 상태는 박동이 대므로, 여기는 위치만:
+/// col<8 에서 시작하고 줄임표가 있는 최하단 live 행이 스피너 자리다 — 생성 중
+/// 화면에서 그 행 아래는 입력박스·statusline 뿐이라 본문과 안 섞인다.
+///
+/// ⚠️ 박동 게이트 없이 부르지 마라 — 줄임표로 끝나는 평범한 본문 마지막 줄도
+/// 잡는 스캔이다. 게이트가 「생성 중」을 보증할 때만 그 최하단 행이 스피너다.
+pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
+    let last = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let start = (last + 1).saturating_sub(30);
+    for r in (start..=last).rev() {
+        let row = &rows[r];
+        let Some(first) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
+            continue;
+        };
+        if first >= 8 {
+            continue;
+        }
+        // TUI 구조 글리프로 시작하는 행은 스피너일 수 없다 — 마커·인용·박스 보더.
+        if matches!(
+            row[first].ch,
+            '⏺' | '⎿' | '❯' | '│' | '⎢' | '─' | '═' | '╌' | '╭' | '╰' | '└' | '⏵'
+        ) {
+            continue;
+        }
+        let rest: String = row[first + 1..]
+            .iter()
+            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+            .collect();
+        if !rest.contains('…') {
+            continue;
+        }
+        // 최하단 후보가 live 가 아니면(아래에 대화 마커) 위 후보도 전부 그 마커
+        // 아래가 아니라 위라 — 같은 마커에 막힌다. 더 훑을 이유가 없다.
+        return spinner_is_live(rows, r).then_some((r, first));
+    }
+    None
+}
+
 /// 그 스피너 행이 **지금 도는 것**인가, 아니면 스크롤백에 굳은 옛 텍스트인가.
 ///
 /// 글자만으로는 못 가른다 — 답변이 스피너 형태를 **인용**하면 진짜와 한 글자도
@@ -5008,6 +5051,38 @@ mod spinner_tests {
             row_from("* 항목 하나와 그 설명…"),
         ];
         assert_eq!(find_claude_spinner(&rows), None);
+    }
+
+    // 관대한 위치 스캔(lenient_spinner_row) — 박동 게이트 아래에서만 불리는 전제.
+    // 미래에 스피너 글리프가 또 바뀌어도(전례 셋) 위치를 잡아야 한다: 집합에 없는
+    // 글리프(◐)라도 col<8 + 줄임표 + live 면 그 행이다.
+    #[test]
+    fn lenient_finds_unknown_glyph_spinner() {
+        let rows = vec![
+            row_from(""),
+            row_from("◐ Verbing… (3s · ↓ 1k tokens)"),
+        ];
+        assert_eq!(lenient_spinner_row(&rows), Some((1, 0)));
+    }
+
+    // 인용(아래에 대화 마커)은 관대한 스캔도 거른다 — 자는 글자가 아니라 위치다.
+    #[test]
+    fn lenient_rejects_quote_with_marker_below() {
+        let rows = vec![
+            row_from("◐ 스피너를 인용한 줄…"),
+            row_from("⏺ 그 아래의 진짜 응답"),
+        ];
+        assert_eq!(lenient_spinner_row(&rows), None);
+    }
+
+    // 구조 글리프(입력박스 ❯·보더)로 시작하는 행은 후보가 아니다.
+    #[test]
+    fn lenient_skips_structure_rows() {
+        let rows = vec![
+            row_from(""),
+            row_from("❯ 줄임표로 끝나는 입력…"),
+        ];
+        assert_eq!(lenient_spinner_row(&rows), None);
     }
 
     // reduce motion(/config) 회귀 방지: 스피너가 돌지 않고 `●` 하나로 고정된다.

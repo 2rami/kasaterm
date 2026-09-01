@@ -366,6 +366,17 @@ pub struct PtySession {
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
     /// 하나로 모이므로 여기가 정본이다.
     last_submit: Mutex<Option<Instant>>,
+    /// 출력 박동 — 리더가 백엔드에서 **실제 바이트를 읽은** 시각들(≥250ms 간격만,
+    /// 최근 8개). scroll()·resize 재스냅샷은 리더 read 가 아니라 안 찍힌다.
+    /// 「이 pane 에 출력이 흐르는가」의 글리프-독립 정본: 에이전트는 작업 중이면
+    /// 스피너 경과시간을 1초마다 다시 그려 바이트가 꾸준히 흐르고, 놀면 조용하다.
+    /// GUI 의 working 판정(`output_heartbeat`)이 읽는다 — 스피너 글리프가 또
+    /// 바뀌어도(윈도우 `*`·점 프레임·reduce motion `●` 전례 셋) 상태 판정이 살게.
+    output_beats: Arc<Mutex<VecDeque<Instant>>>,
+    /// 마지막으로 **아무 바이트든** 이 PTY 로 들어간 시각(포커스 리포트 제외).
+    /// 타이핑·화살표·마우스 SGR 의 에코 재그리기가 출력 박동으로 읽히는 것을
+    /// 막는 억제 신호 — `output_heartbeat` 가 이 직후 1.5초는 박동을 안 믿는다.
+    last_input: Mutex<Option<Instant>>,
 }
 
 impl PtySession {
@@ -599,6 +610,7 @@ impl PtySession {
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_beats: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
         let reader_thread = spawn_reader_thread(
             reader,
             Arc::clone(&reader_stop),
@@ -616,6 +628,7 @@ impl PtySession {
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
+            Arc::clone(&output_beats),
         );
 
         Ok(Self {
@@ -650,6 +663,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
+            output_beats,
+            last_input: Mutex::new(None),
         })
     }
 
@@ -689,6 +704,7 @@ impl PtySession {
         });
         // ExtReader 는 채널이라 poll 대상이 없다 — 정지는 채널 닫힘이 대신한다.
         let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_beats: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
         let reader_thread = spawn_reader_thread(
             reader,
             Arc::clone(&reader_stop),
@@ -706,6 +722,7 @@ impl PtySession {
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
+            Arc::clone(&output_beats),
         );
         Ok(Self {
             screens: rx,
@@ -738,6 +755,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
+            output_beats,
+            last_input: Mutex::new(None),
         })
     }
 
@@ -793,6 +812,7 @@ impl PtySession {
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_beats: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
         let reader_thread = spawn_reader_thread(
             reader,
             Arc::clone(&reader_stop),
@@ -810,6 +830,7 @@ impl PtySession {
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
+            Arc::clone(&output_beats),
         );
         Ok(Self {
             screens: rx,
@@ -840,6 +861,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
+            output_beats,
+            last_input: Mutex::new(None),
         })
     }
 
@@ -1023,6 +1046,12 @@ impl PtySession {
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
+        // 포커스 리포트(CSI I/O)는 pane 전환마다 앱이 자동으로 쏘는 것이라 사람
+        // 입력이 아니다 — 이걸 세면 working pane 으로 포커스를 옮길 때마다 박동
+        // 억제가 걸려 바가 1.5초 꺼졌다 켜진다.
+        if bytes != b"\x1b[I" && bytes != b"\x1b[O" {
+            *self.last_input.lock().unwrap() = Some(Instant::now());
+        }
         {
             let mut w = self.writer.lock().unwrap();
             w.write_all(bytes).context("pty write")?;
@@ -1050,6 +1079,52 @@ impl PtySession {
         *self.last_submit.lock().unwrap()
     }
 
+    /// 백엔드에 출력이 **박자 있게** 흐르는 중인가 — 글리프와 무관한 working 신호.
+    /// 에이전트는 생성 중이면 스피너 경과시간을 1초마다 다시 그려 박동이 1Hz 로
+    /// 잡히고, 놀면 조용하다. 판정: 최근 3.5초 창 안에 박동 2개 이상 + 그 폭이
+    /// 0.8초 이상(단발 burst — 알림 도착·재스냅샷 — 배제) + 최신이 2.2초 안(1Hz
+    /// 틱 두 번 + 여유) + 최근 1.5초 입력 없음(타이핑·스크롤 에코 배제).
+    /// **OR 전용으로 써라** — busy 를 세울 수만 있고 내리는 근거는 못 된다.
+    pub fn output_heartbeat(&self) -> bool {
+        self.heartbeat_within(2200)
+    }
+
+    /// `output_heartbeat` 의 빡빡한 판 — 최신 박동 1.2초 안. 도트 **위치**의
+    /// 관대한 스캔(글리프 모르는 행 잡기)을 여는 열쇠로 쓴다: 턴이 끝난 직후
+    /// 박동 여열로 본문 마지막 줄에 도트가 서는 창을 1.2초로 줄인다.
+    pub fn output_heartbeat_fresh(&self) -> bool {
+        self.heartbeat_within(1200)
+    }
+
+    fn heartbeat_within(&self, newest_ms: u64) -> bool {
+        let now = Instant::now();
+        if self
+            .last_input
+            .lock()
+            .unwrap()
+            .is_some_and(|t| now.duration_since(t).as_millis() < 1500)
+        {
+            return false;
+        }
+        let beats = self.output_beats.lock().unwrap();
+        let mut oldest: Option<Instant> = None;
+        let mut newest: Option<Instant> = None;
+        for t in beats.iter() {
+            if now.duration_since(*t).as_millis() < 3500 {
+                if oldest.is_none() {
+                    oldest = Some(*t);
+                }
+                newest = Some(*t);
+            }
+        }
+        let (Some(o), Some(n)) = (oldest, newest) else {
+            return false;
+        };
+        o != n
+            && now.duration_since(n).as_millis() < u128::from(newest_ms)
+            && n.duration_since(o).as_millis() >= 800
+    }
+
     /// Scroll the view through alacritty's scrollback by `lines`
     /// (positive = toward older history / up, negative = toward the
     /// live tail / down). Re-snapshots immediately and pushes the
@@ -1057,6 +1132,9 @@ impl PtySession {
     /// for PTY output — important for an idle TUI like claude. Returns
     /// the resulting display offset (0 = at the live bottom).
     pub fn scroll(&self, lines: i32) -> usize {
+        // 스크롤도 사람 상호작용이다 — 박동 억제를 걸어, 스크롤 재스냅샷·TUI
+        // 재그리기가 working 으로 읽히지 않게 한다(send_bytes 의 last_input 참고).
+        *self.last_input.lock().unwrap() = Some(Instant::now());
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
         let before = t.grid().display_offset();
@@ -1829,6 +1907,7 @@ fn spawn_reader_thread(
     screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
     inline_imgs: Arc<Mutex<InlineImgs>>,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
+    output_beats: Arc<Mutex<VecDeque<Instant>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -1937,7 +2016,23 @@ fn spawn_reader_thread(
                     });
                     return;
                 }
-                Ok(n) => n,
+                Ok(n) => {
+                    // 출력 박동 — 실제 read 여기 한 곳만 찍는다(struct 필드 주석).
+                    // 250ms 안의 연속 청크는 같은 burst 로 보고 한 번만 센다.
+                    let now = Instant::now();
+                    let mut beats = output_beats.lock().unwrap();
+                    if beats
+                        .back()
+                        .is_none_or(|t| now.duration_since(*t).as_millis() >= 250)
+                    {
+                        if beats.len() >= 8 {
+                            beats.pop_front();
+                        }
+                        beats.push_back(now);
+                    }
+                    drop(beats);
+                    n
+                }
                 Err(e) => {
                     eprintln!("[pty-backend] read error: {e}");
                     let _ = tx.send(ScreenUpdate {

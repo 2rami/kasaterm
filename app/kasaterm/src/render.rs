@@ -1717,6 +1717,16 @@ impl App {
                             .then(|| unconfirmed_spinner_row(&composed))
                             .flatten()
                             .map(|(r, c, _)| (r, c))
+                            .or_else(|| {
+                                // 박동 확정 pane 은 글리프 집합 없이 위치만 잡는다
+                                // (lenient_spinner_row 머리말) — 스피너 모양이 또
+                                // 바뀌어도 도트·테마가 함께 죽지 않게.
+                                self.pty
+                                    .get(tab_pid.as_str())
+                                    .is_some_and(|p| p.output_heartbeat_fresh())
+                                    .then(|| lenient_spinner_row(&composed))
+                                    .flatten()
+                            })
                     });
                     if let Some((sr, sc)) = spinner_hit {
                         pet_busy = true;

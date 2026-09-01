@@ -646,12 +646,35 @@ impl App {
                                 }
                             }
                         };
-                        let busy = strict || boosted;
-                        let prompt = if busy {
+                        let busy_glyph = strict || boosted;
+                        // 승인 프롬프트가 **보이면** 아래 박동보다 우선한다 — 프롬프트가
+                        // 뜨는 순간의 재그리기가 박동 여열(≤2.2초)로 남아, 승인 도트가
+                        // 그만큼 늦게 뜨는 회귀를 막는다.
+                        let approval = if busy_glyph {
                             None
                         } else {
                             rows_show_approval_prompt(&t.cells)
                         };
+                        // 백엔드 출력 박동 — 글리프와 독립인 working 신호(**OR 전용**:
+                        // 세울 수만 있고 내리지 못한다). 스피너 글리프가 또 바뀌어도
+                        // (윈도우 `*`·점 프레임·reduce motion `●` 전례 셋) 바·bg 펄스·
+                        // 완료 판정이 함께 죽지 않는다. 에이전트 pane 한정 — 셸의
+                        // `tail -f` 류 출력까지 바를 돌리지 않는다.
+                        let hb_raw = self
+                            .pty
+                            .get(ws.active_tab_pid(id).as_str())
+                            .is_some_and(|p| p.active_agent().is_some() && p.output_heartbeat());
+                        let heartbeat = !busy_glyph && approval.is_none() && hb_raw;
+                        let busy = busy_glyph || heartbeat;
+                        // 검증 rig 전용 — 판정 재료를 틱마다 흘린다(하네스 env 로만 켜짐).
+                        // hb_raw 는 게이트 전 원신호다: 글리프가 살아 있으면 heartbeat 는
+                        // 늘 false 라, 그것만 찍으면 박동이 도는지 밖에서 알 길이 없다.
+                        if std::env::var_os("KASATERM_HB_LOG").is_some() {
+                            eprintln!(
+                                "[hb] {id} strict={strict} boosted={boosted} hb_raw={hb_raw} busy={busy}"
+                            );
+                        }
+                        let prompt = if busy { None } else { approval };
                         // compact 중에도 스피너는 돌아서 busy 가 이미 참이다. 그 안에서만
                         // 좁히므로, 스크롤을 되짚다 옛 알림을 만나 바가 켜지는 일은 없다.
                         if busy {
@@ -667,12 +690,17 @@ impl App {
                     None => rows.push((id.clone(), false, None)),
                 }
                 let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
-                if pane
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .any(|(i, t)| i != active && t.term().is_some_and(term_is_working))
-                {
+                // 뒤 탭도 활성 탭과 같은 이중 신호(글리프 ∨ 박동)로 본다 — 한쪽만
+                // 글리프면 글리프가 바뀔 때 bg 펄스만 조용히 죽는다.
+                if pane.tabs.iter().enumerate().any(|(i, t)| {
+                    i != active
+                        && (t.term().is_some_and(term_is_working)
+                            || t.pid.as_deref().is_some_and(|pid| {
+                                self.pty.get(pid).is_some_and(|p| {
+                                    p.active_agent().is_some() && p.output_heartbeat()
+                                })
+                            }))
+                }) {
                     bg.insert(id.clone());
                 }
             }
