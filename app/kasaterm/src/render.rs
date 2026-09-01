@@ -8104,6 +8104,11 @@ impl App {
                 // 거꾸로 잡아 나가서, 나중에 그리면 칩 위에 겹친다.
                 let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
                 let mut chip_right = h.x + h.w - btn_zone;
+                // 칩이 실제로 먹은 폭 — 아래 탭 스트립이 오른쪽에 비워 둘 자리에
+                // 얹는다. 탭은 칩보다 **나중에** 그려져서, 예약이 없으면 긴 탭
+                // 이름이 칩 위를 덮는다(4분할 실측: 기계 배지 위에 탭 글자가 겹쳐
+                // 둘 다 안 읽혔다).
+                let chip_zone_right = chip_right;
                 if let Some((from, to)) = self.pane_account_stale.get(&h.active_tab_pid) {
                     let label = format!("⟳ {from} → {to} 재시작");
                     let pad = 6.0;
@@ -8156,6 +8161,47 @@ impl App {
                                 font_size: chrome_font,
                                 color: theme::accent(),
                                 bold: true,
+                                italic: false,
+                            },
+                        );
+                        chip_right = cx - 6.0;
+                    }
+                } else if !crate::info::local_machine_name().is_empty() {
+                    // 로컬 pane 도 어느 기계의 몸인지 말한다 — 원격에만 칩이 있으면
+                    // 「칩이 없다 = 이 기계」를 아는 사람만 읽고, 원격이 하나도 없는
+                    // 창에서는 화면 어디에도 답이 없다(2026-09-02 감사).
+                    //
+                    // 원격 칩과 자리·좌표 규칙은 같게 두되 톤을 한 단계 죽인다. 이쪽은
+                    // 거의 모든 pane 에 늘 떠 있는 표시라, 강조색으로 두면 훑을 때
+                    // 눈이 먼저 가야 할 ⇄ 칩과 무게가 같아진다.
+                    let label = crate::info::local_machine_name();
+                    let font = chrome_font - 1.0;
+                    let pad = 6.0;
+                    let cw = g.measure_chrome_text(label, font, false) + pad * 2.0;
+                    let ch = PANE_HEADER_HEIGHT - 8.0;
+                    let cx = chip_right - cw;
+                    // 원격 칩과 달리 이쪽은 **늘** 떠 있는 표시라, 탭 자리를 빼앗으면
+                    // 좁은 pane 의 탭 이름이 상시로 한 글자만 남는다. 탭이 읽힐 만큼
+                    // (웹 주소 pill 과 같은 140px) 남을 때만 그린다 — 이 기계 이름은
+                    // 창 전체가 같은 값이라 한 pane 에서 빠져도 옆 pane 이 말해 준다.
+                    if cx > h.x + 8.0 + 140.0 {
+                        let cy = h.y + 4.0;
+                        g.round_rect_fill(
+                            cx,
+                            cy,
+                            cw,
+                            ch,
+                            4.0,
+                            theme::with_alpha(theme::surface_active(), 0x70),
+                        );
+                        g.draw_text(
+                            cx + pad,
+                            h.y + (PANE_HEADER_HEIGHT - font) / 2.0,
+                            label,
+                            gpu::DrawOpts {
+                                font_size: font,
+                                color: theme::text_mute(),
+                                bold: false,
                                 italic: false,
                             },
                         );
@@ -8233,6 +8279,8 @@ impl App {
                 } else {
                     abw * n_btn + agap * (n_btn - 1.0) + 12.0
                 };
+                // 위에서 그린 칩(재시작·기계·codex)만큼을 함께 비운다.
+                let btn_cluster = btn_cluster + (chip_zone_right - chip_right).max(0.0);
                 // ── 웹 pane 주소 pill 자리 예약 ── 탭 pill 과 우측 버튼 사이.
                 // btn_cluster 에 얹어 아래 tabs_area 계산이 그대로 따라온다.
                 // 탭에 최소 140px 을 남기고 남는 만큼(상한 420px)만 가진다 —
