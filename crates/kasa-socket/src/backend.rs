@@ -122,7 +122,12 @@ pub struct SessionsInfo {
 
 impl Default for SessionsInfo {
     fn default() -> Self {
-        Self { count: 1, active: 0, saved: Vec::new(), labels: Vec::new() }
+        Self {
+            count: 1,
+            active: 0,
+            saved: Vec::new(),
+            labels: Vec::new(),
+        }
     }
 }
 
@@ -555,18 +560,18 @@ pub trait Backend: Send + Sync {
     }
     /// 역이사 — 원격 pane 의 claude 를 이 기계로 데려온다. `cwd` 는 **이 기계 기준**
     /// 도착 경로(생략 시 이사 때 저장한 원래 자리 → machines.json roots 매핑 순).
-    fn migrate_pane_back(
-        &self,
-        _pane: &str,
-        _cwd: Option<&str>,
-        _force: bool,
-    ) -> Result<String> {
+    fn migrate_pane_back(&self, _pane: &str, _cwd: Option<&str>, _force: bool) -> Result<String> {
         anyhow::bail!("migrate back: 이 백엔드는 지원하지 않는다")
     }
     /// 기계 하나의 학생 pane 전부를 이 창의 거울로 **펼친다** — 원격 방(창)마다
     /// 이쪽에도 새 창을 만들어 같은 묶음으로 미러링한다. GUI 백엔드 전용.
     fn unfold_machine(&self, _label: &str) -> Result<String> {
         anyhow::bail!("unfold: 이 백엔드는 지원하지 않는다")
+    }
+    /// 명부의 본진(home:true) 기계 — `Some((라벨, 지금 닿는가))`, 미설정이면
+    /// `None`. 셰임의 순정 `claude` 디스패치가 이걸 물어 태생지를 고른다.
+    fn home_machine(&self) -> Result<Option<(String, bool)>> {
+        Ok(None)
     }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
@@ -755,7 +760,12 @@ pub trait Backend: Send + Sync {
     /// and re-insert next to target. The PTY stays alive (pure layout move,
     /// unlike close). Drag-and-drop relocation routes through this so the
     /// daemon stays the layout authority. Default: unsupported.
-    fn move_surface(&self, _surface_id: &str, _target: &str, _direction: SplitDirection) -> Result<()> {
+    fn move_surface(
+        &self,
+        _surface_id: &str,
+        _target: &str,
+        _direction: SplitDirection,
+    ) -> Result<()> {
         anyhow::bail!("move_surface unsupported by this backend")
     }
     /// `outer` **안에 새 탭**을 연다 — 쪼개지 않으므로 화면이 안 줄어든다. `outer` 가

@@ -24,9 +24,9 @@
 //! through `jq`. Exit code is 0 on `ok: true`, 1 on `ok: false`, 2 on
 //! a transport / framing error.
 
+use anyhow::{anyhow, Context, Result};
 use kasa_socket::protocol::{Request, Response};
 use kasa_socket::transport::LocalStream;
-use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -58,7 +58,10 @@ fn run() -> Result<Option<Response>> {
     // wake on transitions (a worker going `waiting` for a permission prompt,
     // finishing → `idle`, etc.) without dumping the whole board every tick.
     if cmd == "board-watch" {
-        let interval = args.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(3);
+        let interval = args
+            .first()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3);
         let socket_path = resolve_socket_path()?;
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
@@ -85,7 +88,11 @@ fn run() -> Result<Option<Response>> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
             // 호스트 몫을 넘길 수 있게 둔다 — 기본(0.6)은 서버가 정한다.
             let host_ratio = args
                 .iter()
@@ -103,7 +110,11 @@ fn run() -> Result<Option<Response>> {
                 Ok(r) => (
                     false,
                     r.result,
-                    Some(r.error.map(|e| e.message).unwrap_or_else(|| "사유 없음".into())),
+                    Some(
+                        r.error
+                            .map(|e| e.message)
+                            .unwrap_or_else(|| "사유 없음".into()),
+                    ),
                 ),
                 Err(e) => (false, None, Some(format!("{e:#}"))),
             };
@@ -154,6 +165,32 @@ fn run() -> Result<Option<Response>> {
     if cmd == "dismiss" {
         let socket_path = resolve_socket_path()?;
         run_dismiss(&socket_path, &args)?;
+        return Ok(None);
+    }
+    // `home` — 명부의 본진(home:true) 기계. 셰임의 순정 `claude` 디스패치용이라
+    // 출력은 **라벨 한 줄**이고 상태는 종료코드로 가른다: 0=살아 있다(라벨 출력) ·
+    // 1=미설정(조용히 — 명부에 본진이 없는 기계가 대다수다) · 3=설정돼 있는데
+    // 지금 안 닿는다. 셰임은 0 에만 태생지를 바꾸고, 3 이면 한 줄 알리고 로컬로 연다.
+    if cmd == "home" {
+        let socket_path = resolve_socket_path()?;
+        let resp = roundtrip(
+            &socket_path,
+            &Request {
+                id: "home".into(),
+                method: "machine.home".into(),
+                params: Value::Null,
+            },
+        )?;
+        let r = resp.result.unwrap_or(Value::Null);
+        if !resp.ok || r.get("configured").and_then(|v| v.as_bool()) != Some(true) {
+            std::process::exit(1);
+        }
+        let label = r.get("label").and_then(|v| v.as_str()).unwrap_or("");
+        if r.get("online").and_then(|v| v.as_bool()) != Some(true) {
+            eprintln!("본진 {label} 이 지금 안 닿는다");
+            std::process::exit(3);
+        }
+        println!("{label}");
         return Ok(None);
     }
     // `closed [%pane]` — 되살리기 목록. pane 을 주면 그 항목을 **진짜 끈다**.
@@ -256,8 +293,11 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                     if id == me {
                         continue; // 내 변화는 내가 이미 안다 — 노이즈 제거
                     }
-                    let mut status =
-                        e.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let mut status = e
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     // 사용자가 닫아 화면에 없는 pane — 새 일을 시키면 안 보이는
                     // 곳에서 돈다(2026-08-15). 상태에 못 박아 사람도 필터도 잡게.
                     if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -271,8 +311,7 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                     let done = e.get("done_outcome").and_then(|v| v.as_str());
                     let line = match (done, waiting) {
                         (Some(d), _) => {
-                            let sum =
-                                e.get("done_summary").and_then(|v| v.as_str()).unwrap_or("");
+                            let sum = e.get("done_summary").and_then(|v| v.as_str()).unwrap_or("");
                             if sum.is_empty() {
                                 format!("{status} [done:{d}] — {intent}")
                             } else {
@@ -301,14 +340,19 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
         }
         // --- inbox: new messages addressed to me (kasacollab msg) ---
         if std::env::var_os("KASATERM_BW_DEBUG").is_some() {
-            eprintln!("[bw-dbg] me={me:?} path={msgs_path:?} exists={} seen={}",
-                msgs_path.exists(), seen_msgs.len());
+            eprintln!(
+                "[bw-dbg] me={me:?} path={msgs_path:?} exists={} seen={}",
+                msgs_path.exists(),
+                seen_msgs.len()
+            );
         }
         if !me.is_empty() {
             if let Ok(content) = std::fs::read_to_string(&msgs_path) {
                 let mut out = std::io::stdout().lock();
                 for line in content.lines() {
-                    let Ok(m) = serde_json::from_str::<Value>(line) else { continue };
+                    let Ok(m) = serde_json::from_str::<Value>(line) else {
+                        continue;
+                    };
                     if m.get("to").and_then(|v| v.as_str()) != Some(me.as_str()) {
                         continue;
                     }
@@ -367,8 +411,11 @@ fn run_wake_watch(
                         continue;
                     }
                     seen = true;
-                    let mut status =
-                        e.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let mut status = e
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     // 사용자가 닫아 화면에 없는 pane — 새 일을 시키면 안 보이는
                     // 곳에서 돈다(2026-08-15). 상태에 못 박아 사람도 필터도 잡게.
                     if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -558,9 +605,7 @@ fn collab_messages_path() -> std::path::PathBuf {
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect();
-    kasa_socket::collab_root()
-        .join(enc)
-        .join("messages.jsonl")
+    kasa_socket::collab_root().join(enc).join("messages.jsonl")
 }
 
 /// Render `window.list`'s windows as a labelled stack of box diagrams, one
@@ -584,9 +629,17 @@ fn render_windows(resp: &Response) -> String {
         let surfaces: Vec<String> = w
             .get("surfaces")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let mark = if active { "  ← 현재 보이는 윈도우" } else { "" };
+        let mark = if active {
+            "  ← 현재 보이는 윈도우"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "■ 윈도우 {idx}{mark}\n  pane: {}\n",
             surfaces.join(" ")
@@ -656,7 +709,9 @@ fn render_activity(resp: &Response) -> String {
         // 명령이 한 줄로 뭉쳐 읽을 수 없으므로 여기서 푼다(소켓 응답 쪽은 기계가
         // 파싱하는 자리라 원문 그대로 둔다). 이어지는 줄은 기둥 폭만큼 들여써
         // 한 동작으로 묶어 보이게 한다.
-        let body = g("text").replace("\\n", "\n").replace('\n', "\n            ");
+        let body = g("text")
+            .replace("\\n", "\n")
+            .replace('\n', "\n            ");
         out.push_str(&format!("  {label}  {head}{body}\n"));
     }
     out
@@ -795,6 +850,7 @@ fn print_help() {
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 학생은 안 죽는다
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli unfold <라벨>                  # 기계의 학생 pane 전부를 거울로 펼침
+  kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
@@ -807,8 +863,12 @@ fn print_help() {
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
-    eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
-    eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
+    eprintln!(
+        "  kasaterm-cli layout                       # where each pane sits (active window, %)"
+    );
+    eprintln!(
+        "  kasaterm-cli windows                      # every window (sidebar order) + its panes"
+    );
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
   kasaterm-cli capture [surface_id] [path] [--max-width N]
                                             # screenshot ONE pane to PNG (peek's picture twin)
@@ -864,9 +924,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("rename needs <surface_id> <title>"))?;
-            let title = args
-                .get(1)
-                .ok_or_else(|| anyhow!("rename needs a title"))?;
+            let title = args.get(1).ok_or_else(|| anyhow!("rename needs a title"))?;
             (
                 "surface.rename",
                 json!({ "surface_id": surface, "title": title }),
@@ -943,7 +1001,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
-            let cwd = args.get(1).ok_or_else(|| anyhow!("report-cwd needs a cwd"))?;
+            let cwd = args
+                .get(1)
+                .ok_or_else(|| anyhow!("report-cwd needs a cwd"))?;
             let session_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
             let ctx_window: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             let ctx_tokens: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -980,7 +1040,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
             (
                 "surface.split",
                 json!({ "direction": dir, "focus": focus, "from": from }),
@@ -995,7 +1059,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .ok_or_else(|| anyhow!("promote 는 대상 pane 이 필요해요 (예: promote %3)"))?;
             ("surface.promote", json!({ "pane": pane }))
         }
@@ -1030,8 +1098,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
-                .ok_or_else(|| anyhow!("migrate 는 대상 pane 이 필요해요 (예: migrate %3 http://...)"))?;
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
+                .ok_or_else(|| {
+                    anyhow!("migrate 는 대상 pane 이 필요해요 (예: migrate %3 http://...)")
+                })?;
             (
                 "surface.migrate",
                 json!({
@@ -1084,7 +1158,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
             (
                 "surface.remote",
                 json!({ "base": base, "cwd": flagval("--cwd"), "pane": flagval("--attach"), "from": from }),
@@ -1099,7 +1177,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
             ("surface.new_tab", json!({ "outer": outer, "focus": focus }))
         }
         // URL 을 요청 pane 옆 웹(브라우저) pane 으로. 개발 서버를 그 서버를
@@ -1114,7 +1196,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .iter()
                 .find(|a| a.starts_with('%'))
                 .cloned()
-                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
             (
                 "surface.open_preview",
                 json!({ "kind": "web", "path": url, "target": target }),
@@ -1128,7 +1214,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let surface = args.iter().find(|a| a.starts_with('%')).cloned();
             let arg = args.iter().find(|a| !a.starts_with('%')).cloned();
             match (op, &arg) {
-                ("eval", None) => anyhow::bail!("web-eval needs JS (e.g. web-eval 'document.title')"),
+                ("eval", None) => {
+                    anyhow::bail!("web-eval needs JS (e.g. web-eval 'document.title')")
+                }
                 ("shot", Some(p)) if !p.starts_with('/') => {
                     anyhow::bail!("web-shot needs an absolute path (got {p})")
                 }
@@ -1172,7 +1260,10 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .ok_or_else(|| anyhow!("resize needs a ratio (0..1)"))?
                 .parse()
                 .map_err(|_| anyhow!("ratio must be a number, e.g. 0.6"))?;
-            ("surface.set_ratio", json!({ "surface_id": surface, "ratio": ratio }))
+            (
+                "surface.set_ratio",
+                json!({ "surface_id": surface, "ratio": ratio }),
+            )
         }
         "send" => {
             // Two argument shapes:
@@ -1279,8 +1370,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 학생→학생 tell 을 발신자 좌측 버블로 그린다(거노 #5/#7). CLI 자체 기록은
             // 발신 셸의 cwd 기준 slug 라 cd 상태에 따라 파일이 갈라져 매칭이 새던 것을
             // 서버 기록으로 일원화. PANE_ID 없으면(사람이 직접 친 cli) 거노 발신 = 미기록.
-            if let Some(fp) =
-                std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
+            if let Some(fp) = std::env::var("KASATERM_PANE_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
             {
                 params["from_pane"] = json!(fp);
                 // plain 도 마커 포함 — 웹뷰 senderOf 가 transcript 정확대조라 마커가
@@ -1301,7 +1393,10 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .cloned()
                 .ok_or_else(|| anyhow!("resume needs <session_id> [cwd]"))?;
             let cwd = args.get(1).filter(|s| !s.is_empty()).cloned();
-            ("session.resume", json!({ "id": sid, "cwd": cwd, "newroom": false }))
+            (
+                "session.resume",
+                json!({ "id": sid, "cwd": cwd, "newroom": false }),
+            )
         }
         "recent-sessions" => {
             // recent-sessions [cwd] — 이어갈 후보 세션 목록(최신순, id/label/mtime/cwd). tell
@@ -1331,9 +1426,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         .clone();
                     (s, args.get(2..).unwrap_or(&[]))
                 } else {
-                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
-                        anyhow!("notify needs --surface <id> or $KASATERM_PANE_ID")
-                    })?;
+                    let s = std::env::var("KASATERM_PANE_ID")
+                        .map_err(|_| anyhow!("notify needs --surface <id> or $KASATERM_PANE_ID"))?;
                     (s, &args[..])
                 };
             let title = rest
@@ -1426,9 +1520,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         .clone();
                     (s, args.get(2..).unwrap_or(&[]))
                 } else {
-                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
-                        anyhow!("done needs --surface <id> or $KASATERM_PANE_ID")
-                    })?;
+                    let s = std::env::var("KASATERM_PANE_ID")
+                        .map_err(|_| anyhow!("done needs --surface <id> or $KASATERM_PANE_ID"))?;
                     (s, &args[..])
                 };
             let outcome = match rest.first().map(String::as_str) {
@@ -1590,8 +1683,7 @@ fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
     if line.is_empty() {
         return Err(anyhow!("server closed connection without a response"));
     }
-    let resp: Response =
-        serde_json::from_str(line.trim()).context("parse response JSON")?;
+    let resp: Response = serde_json::from_str(line.trim()).context("parse response JSON")?;
     Ok(resp)
 }
 
@@ -1638,8 +1730,7 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         return Ok(());
     }
     let home = kasa_socket::home_dir().unwrap_or_default();
-    let bindings =
-        read_string_map(&home.join(".config/kasaterm/session_characters.json"));
+    let bindings = read_string_map(&home.join(".config/kasaterm/session_characters.json"));
     let colors = student_colors(&home.join(".config/kasaterm/characters.json"));
     let live = live_session_ids();
     const RESET: &str = "\x1b[0m";
@@ -1647,7 +1738,11 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     for (i, s) in list.iter().enumerate() {
         let student = bindings.get(&s.id).cloned().unwrap_or_default();
         let color = colors.get(&student).map(|h| ansi_fg(h)).unwrap_or_default();
-        let dot = if student.is_empty() { format!("{DIM}·{RESET}") } else { format!("{color}●{RESET}") };
+        let dot = if student.is_empty() {
+            format!("{DIM}·{RESET}")
+        } else {
+            format!("{color}●{RESET}")
+        };
         let name_cell = pad_display(&student, 8);
         let label_cell = pad_display(&clip_display(&s.label, 38), 38);
         // 실행 중 표시는 claude 세션 id 로만 판정된다(live_session_ids). 다른
@@ -1675,7 +1770,10 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         // 있고, 그게 스무 개 중 하나를 고르는 근거가 된다. 없으면 안 그린다 —
         // 빈 들여쓰기 줄이 목록 높이만 두 배로 만든다.
         if !s.preview.is_empty() {
-            println!("     {DIM}{}{RESET}", clip_display(&s.preview, term_cols().saturating_sub(6)));
+            println!(
+                "     {DIM}{}{RESET}",
+                clip_display(&s.preview, term_cols().saturating_sub(6))
+            );
         }
     }
     if !interactive {
@@ -1706,7 +1804,10 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let err = std::process::Command::new(shell).arg("-ic").arg(&run).exec();
+        let err = std::process::Command::new(shell)
+            .arg("-ic")
+            .arg(&run)
+            .exec();
         Err(anyhow!("{} 실행 실패: {err}", sel.harness))
     }
     #[cfg(not(unix))]
@@ -1715,10 +1816,13 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
             .args(["/C", &run])
             .status()
             .context("하네스 실행")?;
-        if status.success() { Ok(()) } else { Err(anyhow!("exit {status}")) }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("exit {status}"))
+        }
     }
 }
-
 
 /// `{sid: 학생명}` 평면 JSON(session_characters.json). 없거나 깨지면 빈 맵.
 fn read_string_map(path: &Path) -> std::collections::HashMap<String, String> {
@@ -1785,7 +1889,9 @@ fn live_session_ids() -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let home = kasa_socket::home_dir().unwrap_or_default();
     let dir = home.join(".claude/sessions");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
     for e in entries.flatten() {
         let Some(v) = std::fs::read_to_string(e.path())
             .ok()
@@ -1793,7 +1899,9 @@ fn live_session_ids() -> std::collections::HashSet<String> {
         else {
             continue;
         };
-        let Some(sid) = v.get("sessionId").and_then(|s| s.as_str()) else { continue };
+        let Some(sid) = v.get("sessionId").and_then(|s| s.as_str()) else {
+            continue;
+        };
         let alive = match v.get("pid").and_then(|p| p.as_u64()) {
             #[cfg(unix)]
             Some(pid) => std::process::Command::new("kill")
@@ -1833,7 +1941,13 @@ fn rel_time(mtime: u64) -> String {
 /// 터미널 표시폭 — 한글 등 넓은 문자 2칸. 정렬용 근사(동아시아 Wide 전부는 아님).
 fn display_width(s: &str) -> usize {
     s.chars()
-        .map(|c| if ('\u{1100}'..='\u{FFDC}').contains(&c) { 2 } else { 1 })
+        .map(|c| {
+            if ('\u{1100}'..='\u{FFDC}').contains(&c) {
+                2
+            } else {
+                1
+            }
+        })
         .sum()
 }
 
@@ -1850,12 +1964,17 @@ fn term_cols() -> usize {
     #[cfg(unix)]
     {
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 20
+        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0
+            && ws.ws_col > 20
         {
             return ws.ws_col as usize;
         }
     }
-    std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 20).unwrap_or(80)
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 20)
+        .unwrap_or(80)
 }
 
 fn clip_display(s: &str, max: usize) -> String {
@@ -1869,7 +1988,11 @@ fn clip_display(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut w = 0;
     for c in flat.chars() {
-        let cw = if ('\u{1100}'..='\u{FFDC}').contains(&c) { 2 } else { 1 };
+        let cw = if ('\u{1100}'..='\u{FFDC}').contains(&c) {
+            2
+        } else {
+            1
+        };
         if w + cw > max.saturating_sub(1) {
             break;
         }
@@ -1942,8 +2065,18 @@ struct SlIcons {
 
 fn sl_icons(set: &str) -> SlIcons {
     match set {
-        "unicode" => SlIcons { model: ">", git: "⎇", folder: "▸", effort: "↯" },
-        "plain" => SlIcons { model: "M", git: "git", folder: "dir", effort: "E" },
+        "unicode" => SlIcons {
+            model: ">",
+            git: "⎇",
+            folder: "▸",
+            effort: "↯",
+        },
+        "plain" => SlIcons {
+            model: "M",
+            git: "git",
+            folder: "dir",
+            effort: "E",
+        },
         _ => SlIcons {
             model: "\u{f233}",
             git: "\u{e0a0}",
@@ -1973,9 +2106,18 @@ fn sl_read_json(path: &std::path::Path) -> Option<Value> {
 /// 취하는 보정이라 하네스 메타데이터가 고쳐지면 자동으로 무해해진다.
 fn sl_context(d: &Value) -> (u64, f64, u64) {
     let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
-    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let tot = ctx.get("total_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut pct = ctx
+        .get("used_percentage")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let mut win = ctx
+        .get("context_window_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let tot = ctx
+        .get("total_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let mid_owned = d
         .get("model")
         .and_then(|m| m.get("id"))
@@ -1983,7 +2125,11 @@ fn sl_context(d: &Value) -> (u64, f64, u64) {
         .unwrap_or("")
         .to_string();
     let mid = mid_owned.split('[').next().unwrap_or("");
-    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
+    let known: u64 = if mid == "claude-fable-5" {
+        1_000_000
+    } else {
+        0
+    };
     if known > win {
         win = known;
         pct = (tot as f64 / win as f64 * 100.0).min(100.0);
@@ -2021,8 +2167,13 @@ fn run_statusline() {
         }
     };
 
-    let cfg = sl_read_json(&sl_home().join(".claude/statusline-config.json")).unwrap_or(Value::Null);
-    let ic = sl_icons(cfg.get("icon_set").and_then(|v| v.as_str()).unwrap_or("nerd-font"));
+    let cfg =
+        sl_read_json(&sl_home().join(".claude/statusline-config.json")).unwrap_or(Value::Null);
+    let ic = sl_icons(
+        cfg.get("icon_set")
+            .and_then(|v| v.as_str())
+            .unwrap_or("nerd-font"),
+    );
     let sep_char = cfg.get("separator").and_then(|v| v.as_str()).unwrap_or("┃");
 
     let cwd = d
@@ -2030,7 +2181,11 @@ fn run_statusline() {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_default();
     let session_id = d.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -2045,11 +2200,24 @@ fn run_statusline() {
                 let (win_s, tot_s) = (ctx_win.to_string(), ctx_tot.to_string());
                 // 재시작 뒤 같은 모델·effort 로 되살리려고 함께 싣는다. `id` 는 **가공
                 // 없이** — `[1m]` 을 떼면 되먹였을 때 1M 세션이 200k 로 강등된다.
-                let model = d.pointer("/model/id").and_then(|v| v.as_str()).unwrap_or("");
-                let effort = d.pointer("/effort/level").and_then(|v| v.as_str()).unwrap_or("");
+                let model = d
+                    .pointer("/model/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let effort = d
+                    .pointer("/effort/level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let _ = std::process::Command::new(me)
                     .args([
-                        "report-cwd", &pane, &cwd, session_id, &win_s, &tot_s, model, effort,
+                        "report-cwd",
+                        &pane,
+                        &cwd,
+                        session_id,
+                        &win_s,
+                        &tot_s,
+                        model,
+                        effort,
                     ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
@@ -2062,7 +2230,11 @@ fn run_statusline() {
     let mut sid_marker = String::new();
     if !session_id.is_empty() && sl_env("KASATERM_PANE_ID").is_some() {
         if let Some(caps) = sl_read_json(&sl_home().join(".config/kasaterm/caps.json")) {
-            if caps.get("sgr_conceal").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if caps
+                .get("sgr_conceal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 let sid8: String = session_id.chars().take(8).collect();
                 sid_marker = format!("\x1b[8m⟦{sid8}⟧\x1b[28m");
             }
@@ -2118,18 +2290,30 @@ fn run_statusline() {
     {
         // "(1M context)" 등 괄호 꼬리는 ctx% 의 "·1M" 과 중복 — 잘라 truncate 방지.
         let model = model.split(" (").next().unwrap_or(model);
-        parts.push(format!("{}{SL_BOLD}{} {model}{SL_RESET}", ansi_fg(SL_C_MODEL), ic.model));
+        parts.push(format!(
+            "{}{SL_BOLD}{} {model}{SL_RESET}",
+            ansi_fg(SL_C_MODEL),
+            ic.model
+        ));
     }
 
     if let Some(branch) = sl_git_branch(&cwd).filter(|s| !s.is_empty()) {
-        parts.push(format!("{}{} {branch}{SL_RESET}", ansi_fg(SL_C_GIT), ic.git));
+        parts.push(format!(
+            "{}{} {branch}{SL_RESET}",
+            ansi_fg(SL_C_GIT),
+            ic.git
+        ));
     }
 
     let dir_name = std::path::Path::new(&cwd)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    parts.push(format!("{}{} {dir_name}{SL_RESET}", ansi_fg(SL_C_DIR), ic.folder));
+    parts.push(format!(
+        "{}{} {dir_name}{SL_RESET}",
+        ansi_fg(SL_C_DIR),
+        ic.folder
+    ));
 
     let (win, pct, _) = sl_context(&d);
     let win_s = if win >= 1_000_000 {
@@ -2139,7 +2323,11 @@ fn run_statusline() {
     } else {
         String::new()
     };
-    let c_ctx = if pct >= 90.0 { ansi_fg("f7768e") } else { ansi_fg(SL_C_CTX) };
+    let c_ctx = if pct >= 90.0 {
+        ansi_fg("f7768e")
+    } else {
+        ansi_fg(SL_C_CTX)
+    };
     parts.push(format!("{c_ctx}{pct:.0}%{SL_DIM}{win_s}{SL_RESET}"));
 
     if let Some(lvl) = d

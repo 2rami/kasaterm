@@ -10,49 +10,49 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
-mod claude_auth;
+mod auxwin;
+mod bridge;
 mod cells;
+mod chrome;
+mod claude_auth;
+mod eyedropper;
 mod gpu;
+mod handler;
+mod input;
+mod layout;
+mod lineedit;
+mod markdown;
+mod notify_banner;
+mod onboarding;
 mod render;
 mod screenread;
-mod sprites;
-mod handler;
-mod socket;
-mod bridge;
-mod stream;
-mod theme;
-mod transcript;
-mod chrome;
-mod testkit;
 mod session;
-mod layout;
-mod markdown;
-mod auxwin;
-mod notify_banner;
-mod webpane;
-mod input;
-mod lineedit;
 mod settings;
-mod onboarding;
-mod eyedropper;
+mod socket;
+mod sprites;
+mod stream;
+mod testkit;
+mod theme;
 mod themegen;
+mod transcript;
+mod webpane;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
 // 않으려고 여기서 한 번 재수출한다.
-pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
 /// 폭에 맞춘 정보 밀도 — chrome 이 정의하지만 그 판정을 읽어 그리는 쪽(render·info)이
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
+pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
 mod gitdiff;
-mod syntax;
-mod lsp;
-mod links;
-mod proc;
 mod info;
-mod mcpcol;
+mod links;
+mod lsp;
 mod machinescol;
+mod mcpcol;
+mod proc;
 mod sesscol;
 mod state;
 mod statusbar;
+mod syntax;
 mod turnjump;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
 mod version;
@@ -74,24 +74,22 @@ mod macos_sparkle;
 mod win_sparkle;
 
 use anyhow::Result;
-use std::collections::{HashMap, VecDeque};
-use std::error::Error;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use kasa_bridge::layout::{parse_layout, Layout};
 use kasa_bridge::screen::Cell as GridCell;
 use kasa_bridge::screen::Row;
 use kasa_bridge::{ScreenUpdate, StartOptions, TmuxEvent, TmuxSession};
+use std::collections::{HashMap, VecDeque};
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{
-    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
-};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Theme, Window, WindowAttributes, WindowId};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowAttributesExtMacOS;
+use winit::window::{CursorIcon, Theme, Window, WindowAttributes, WindowId};
 
 // Match ghostty's default font-size=13. We were at 14, which made every
 // cell ~7.7% taller than ghostty's — visible side-by-side as a "slightly
@@ -118,7 +116,11 @@ fn cjk_display_w(c: char) -> usize {
         | 0xFFE0..=0xFFE6
         | 0x20000..=0x3FFFD // CJK ext B+ / supplementary ideographs
     );
-    if wide { 2 } else { 1 }
+    if wide {
+        2
+    } else {
+        1
+    }
 }
 
 /// Draw a rounded-corner rect with the sharp-quad renderer: a full-width
@@ -196,7 +198,15 @@ fn panel_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
         // The pixel outline is black rather than theme::border() — a border tinted
         // to match the surface disappears into it, which is what killed the first cut.
         round_rect(g, x, y, w, h, r, [0, 0, 0, 0xE0]);
-        round_rect(g, x + b, y + b, w - b * 2.0, h - b * 2.0, (r - b).max(0.0), fill);
+        round_rect(
+            g,
+            x + b,
+            y + b,
+            w - b * 2.0,
+            h - b * 2.0,
+            (r - b).max(0.0),
+            fill,
+        );
     } else {
         round_rect(g, x, y, w, h, r, fill);
     }
@@ -219,8 +229,24 @@ fn panel_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
 /// 내려앉는다 — 복원 카드도 사이드바의 펼치기 배지도 테두리 없는 색판으로
 /// 보였다. `theme::edge_on(fill)` 은 링을 **채움 기준으로** 잡으므로 어느 판
 /// 위에서든 한 줄이 남는다(2026-08-27 지적).
-fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, fill: [u8; 4]) {
-    round_rect(g, x - 1.0, y - 1.0, w + 2.0, h + 2.0, r, theme::edge_on(fill));
+fn panel_rect_outlined(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    fill: [u8; 4],
+) {
+    round_rect(
+        g,
+        x - 1.0,
+        y - 1.0,
+        w + 2.0,
+        h + 2.0,
+        r,
+        theme::edge_on(fill),
+    );
     panel_rect(g, x, y, w, h, r, fill);
 }
 
@@ -245,7 +271,15 @@ fn outline_rect(
     bg: [u8; 4],
 ) {
     round_rect(g, x, y, w, h, r, col);
-    round_rect(g, x + t, y + t, (w - t * 2.0).max(0.0), (h - t * 2.0).max(0.0), (r - t).max(0.0), bg);
+    round_rect(
+        g,
+        x + t,
+        y + t,
+        (w - t * 2.0).max(0.0),
+        (h - t * 2.0).max(0.0),
+        (r - t).max(0.0),
+        bg,
+    );
 }
 
 /// 점선 사각 — "여기 뭔가 있었다"를 그리는 유일한 자리.
@@ -311,15 +345,41 @@ fn git_paint_dropdowns(
     let pw = (col_w - 12.0).max(0.0);
     // A raised menu panel with a 1px border so it reads above the list.
     let panel = |g: &mut gpu::GpuRenderer, y: f32, h: f32| {
-        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::radius_md(), theme::border());
+        round_rect(
+            g,
+            px - 1.0,
+            y - 1.0,
+            pw + 2.0,
+            h + 2.0,
+            theme::radius_md(),
+            theme::border(),
+        );
         round_rect(g, px, y, pw, h, theme::radius_md(), theme::surface_active());
     };
     let row = |g: &mut gpu::GpuRenderer, iy: f32, label: &str, on: bool| {
         if on {
-            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::radius_sm(), theme::with_alpha(theme::accent(), 0x40));
+            round_rect(
+                g,
+                px + 4.0,
+                iy + 1.0,
+                pw - 8.0,
+                item_h - 2.0,
+                theme::radius_sm(),
+                theme::with_alpha(theme::accent(), 0x40),
+            );
         }
         let col = if on { theme::text() } else { theme::text_dim() };
-        g.draw_text(px + 12.0, iy + (item_h - 12.0) / 2.0, label, gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false });
+        g.draw_text(
+            px + 12.0,
+            iy + (item_h - 12.0) / 2.0,
+            label,
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: col,
+                bold: false,
+                italic: false,
+            },
+        );
     };
     if path_open {
         if let Some((_hx, hy, _hw, hh)) = path_hdr {
@@ -397,7 +457,11 @@ pub(crate) fn strip_activity_prefix(s: &str) -> &str {
 /// 내장 이미지 뷰로 열 수 있는 확장자인가. 이미지는 "파일 열기" 설정을 타지
 /// 않는다 — CLI 편집기에 넘기면 바이너리 쓰레기만 뜬다.
 pub(crate) fn is_image_path(path: &std::path::Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     matches!(
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico"
@@ -676,7 +740,6 @@ const VERSION_FADE_MS: u128 = 1200;
 /// long after the last keystroke so it's easy to follow the caret. Same
 /// idea as iTerm2's "smart cursor" pause.
 const BLINK_PAUSE_AFTER_INPUT_MS: u64 = 700;
-
 
 /// Session panel: a tmux-style list of sessions in its own OS window driving
 /// a wry webview, mirroring the git panel. Polls `/sessions` once a second to
@@ -1372,7 +1435,11 @@ struct CellGeom {
 
 impl Default for CellGeom {
     fn default() -> Self {
-        Self { w: 8.6, h: 18.0, baseline: 14.0 }
+        Self {
+            w: 8.6,
+            h: 18.0,
+            baseline: 14.0,
+        }
     }
 }
 
@@ -1721,7 +1788,10 @@ enum RestoreBtn {
 /// Closing a pane whose foreground is just a shell needs no confirmation.
 fn is_shell_name(name: &str) -> bool {
     let base = name.strip_prefix('-').unwrap_or(name);
-    matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh")
+    matches!(
+        base,
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh"
+    )
 }
 
 /// Terminal-pane action button kinds, painted on the right side of a
@@ -2288,10 +2358,18 @@ struct PaneTab {
 
 impl PaneTab {
     fn term(&self) -> Option<&TerminalPane> {
-        if let PaneContent::Terminal(t) = &self.content { Some(t) } else { None }
+        if let PaneContent::Terminal(t) = &self.content {
+            Some(t)
+        } else {
+            None
+        }
     }
     fn term_mut(&mut self) -> Option<&mut TerminalPane> {
-        if let PaneContent::Terminal(t) = &mut self.content { Some(t) } else { None }
+        if let PaneContent::Terminal(t) = &mut self.content {
+            Some(t)
+        } else {
+            None
+        }
     }
     /// The visible screen as text — the last `lines` non-blank rows of the
     /// current grid (0 = all). Trailing blank rows are dropped so a peek of a
@@ -2322,7 +2400,9 @@ impl PaneTab {
     /// are dropped. Used by `GET /peek?ansi=1`.
     pub(crate) fn visible_text_ansi(&self, lines: usize) -> String {
         use kasa_bridge::screen::Color;
-        let Some(t) = self.term() else { return String::new(); };
+        let Some(t) = self.term() else {
+            return String::new();
+        };
 
         fn render_row(row: &[GridCell]) -> String {
             let last_vis = row
@@ -2353,11 +2433,21 @@ impl PaneTab {
                     || cell.inverse != p_inv
                 {
                     s.push_str("\x1b[0m");
-                    if cell.bold { s.push_str("\x1b[1m"); }
-                    if cell.dim { s.push_str("\x1b[2m"); }
-                    if cell.italic { s.push_str("\x1b[3m"); }
-                    if cell.underline { s.push_str("\x1b[4m"); }
-                    if cell.inverse { s.push_str("\x1b[7m"); }
+                    if cell.bold {
+                        s.push_str("\x1b[1m");
+                    }
+                    if cell.dim {
+                        s.push_str("\x1b[2m");
+                    }
+                    if cell.italic {
+                        s.push_str("\x1b[3m");
+                    }
+                    if cell.underline {
+                        s.push_str("\x1b[4m");
+                    }
+                    if cell.inverse {
+                        s.push_str("\x1b[7m");
+                    }
                     match &cell.fg {
                         Color::Default => {}
                         Color::Idx(n) => s.push_str(&format!("\x1b[38;5;{n}m")),
@@ -2377,7 +2467,11 @@ impl PaneTab {
                     p_inv = cell.inverse;
                     any_attr = p_fg != Color::Default
                         || p_bg != Color::Default
-                        || p_bold || p_italic || p_under || p_dim || p_inv;
+                        || p_bold
+                        || p_italic
+                        || p_under
+                        || p_dim
+                        || p_inv;
                 }
                 s.push(ch);
             }
@@ -2398,19 +2492,39 @@ impl PaneTab {
     }
 
     fn markdown(&self) -> Option<&MarkdownPane> {
-        if let PaneContent::Markdown(m) = &self.content { Some(m) } else { None }
+        if let PaneContent::Markdown(m) = &self.content {
+            Some(m)
+        } else {
+            None
+        }
     }
     fn markdown_mut(&mut self) -> Option<&mut MarkdownPane> {
-        if let PaneContent::Markdown(m) = &mut self.content { Some(m) } else { None }
+        if let PaneContent::Markdown(m) = &mut self.content {
+            Some(m)
+        } else {
+            None
+        }
     }
     fn image_view_zoom(&self) -> f32 {
-        if self.image_zoom < 1.0 { 1.0 } else { self.image_zoom }
+        if self.image_zoom < 1.0 {
+            1.0
+        } else {
+            self.image_zoom
+        }
     }
     fn image(&self) -> Option<&Arc<ImagePane>> {
-        if let PaneContent::Image(i) = &self.content { Some(i) } else { None }
+        if let PaneContent::Image(i) = &self.content {
+            Some(i)
+        } else {
+            None
+        }
     }
     fn web(&self) -> Option<&WebPane> {
-        if let PaneContent::Web(w) = &self.content { Some(w) } else { None }
+        if let PaneContent::Web(w) = &self.content {
+            Some(w)
+        } else {
+            None
+        }
     }
 }
 
@@ -2487,7 +2601,11 @@ impl PaneState {
     /// 셀 그리드를 아래로 미는 헤더 높이(logical px). render/layout 양쪽이
     /// 같은 값을 써야 PTY 그리드↔셀 클립이 어긋나지 않는다.
     fn header_px(&self) -> f32 {
-        if self.has_header() { PANE_HEADER_HEIGHT } else { 0.0 }
+        if self.has_header() {
+            PANE_HEADER_HEIGHT
+        } else {
+            0.0
+        }
     }
     /// `pid` 를 가진 탭. 없으면 활성 탭(= `Deref` 가 주는 것).
     ///
@@ -2582,8 +2700,10 @@ impl ImagePane {
         let cur = self.cur_idx();
         let mut last = self.last.lock().unwrap();
         if now.duration_since(*last) >= self.frames[cur].delay {
-            self.cur
-                .store((cur + 1) % self.frames.len(), std::sync::atomic::Ordering::Relaxed);
+            self.cur.store(
+                (cur + 1) % self.frames.len(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             *last = now;
             true
         } else {
@@ -2636,7 +2756,11 @@ fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
                     rgba: buf.into_raw(),
                     // Floor near-zero delays to ~100ms (as browsers do) so a
                     // 0-delay frame doesn't spin the loop.
-                    delay: if delay.is_zero() { Duration::from_millis(100) } else { delay },
+                    delay: if delay.is_zero() {
+                        Duration::from_millis(100)
+                    } else {
+                        delay
+                    },
                 });
             }
             return Ok(ImagePane {
@@ -2748,15 +2872,30 @@ struct MdSpan {
 /// this every frame (cheap) rather than re-parsing the source text.
 #[derive(Clone)]
 enum MdBlock {
-    Heading { level: u8, spans: Vec<MdSpan> },
-    Para { spans: Vec<MdSpan> },
+    Heading {
+        level: u8,
+        spans: Vec<MdSpan>,
+    },
+    Para {
+        spans: Vec<MdSpan>,
+    },
     /// Fenced/indented code block — raw text with embedded newlines. `lang`
     /// is the fence info string (e.g. "rust"), empty for indented blocks.
-    Code { code: String, lang: String },
+    Code {
+        code: String,
+        lang: String,
+    },
     /// `task` = `Some(checked)` for a `- [ ]` / `- [x]` item; the renderer draws
     /// a checkbox instead of `marker`.
-    ListItem { depth: u8, marker: String, spans: Vec<MdSpan>, task: Option<bool> },
-    Quote { spans: Vec<MdSpan> },
+    ListItem {
+        depth: u8,
+        marker: String,
+        spans: Vec<MdSpan>,
+        task: Option<bool>,
+    },
+    Quote {
+        spans: Vec<MdSpan>,
+    },
     /// `> [!NOTE]` 알림. 인용문과 같은 문단 평탄화를 쓰되 `first`/`last` 로 여러
     /// 문단이 한 상자로 이어지게 한다 — 문단마다 상자를 닫으면 이어진 글이
     /// 토막토막 끊겨 읽힌다.
@@ -2776,16 +2915,28 @@ enum MdBlock {
     /// YAML frontmatter, as label/value rows. Kept as its own block rather than
     /// parsed into the body: without it the closing `---` reads as a setext
     /// heading and the whole header lands on screen as huge bold text.
-    Meta { rows: Vec<(String, String)> },
+    Meta {
+        rows: Vec<(String, String)>,
+    },
     /// `![alt](path)` — rendered as a wgpu texture inline (same path as the
     /// image pane). `key` is the texture cache id, `w`/`h` the decoded pixel
     /// size for aspect layout; all three are filled in after parse when the
     /// image is decoded (0/empty until then). `path` is kept for alt fallback.
-    Image { path: String, alt: String, key: String, w: u32, h: u32 },
+    Image {
+        path: String,
+        alt: String,
+        key: String,
+        w: u32,
+        h: u32,
+    },
     /// GFM table. `head` is the header row (empty for a headerless table),
     /// `rows` the body; every cell carries its own inline spans so a cell can
     /// hold bold/code/links like any other block. `align` is per column.
-    Table { head: Vec<MdCell>, rows: Vec<Vec<MdCell>>, align: Vec<MdAlign> },
+    Table {
+        head: Vec<MdCell>,
+        rows: Vec<Vec<MdCell>>,
+        align: Vec<MdAlign>,
+    },
 }
 
 /// A drag selection inside a rendered markdown pane. Coordinates are **document
@@ -2909,7 +3060,9 @@ fn parse_frontmatter_rows(src: &str) -> Vec<(String, String)> {
             }
             continue;
         }
-        let Some((k, v)) = body.split_once(':') else { continue };
+        let Some((k, v)) = body.split_once(':') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         if k.is_empty() {
             continue;
@@ -2941,7 +3094,10 @@ fn parse_frontmatter_rows(src: &str) -> Vec<(String, String)> {
 /// 삼키면 `` `[[a]]` `` 처럼 일부러 표기를 보여 주는 글까지 링크가 된다.
 fn wikilinked(spans: &mut Vec<MdSpan>) -> Vec<MdSpan> {
     let src = std::mem::take(spans);
-    if !src.iter().any(|s| s.link.is_none() && !s.code && s.text.contains('[')) {
+    if !src
+        .iter()
+        .any(|s| s.link.is_none() && !s.code && s.text.contains('['))
+    {
         return src;
     }
     let mut out: Vec<MdSpan> = Vec::with_capacity(src.len());
@@ -3244,7 +3400,9 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                             });
                         }
                     } else if !in_item && !spans.is_empty() {
-                        blocks.push(MdBlock::Para { spans: wikilinked(&mut spans) });
+                        blocks.push(MdBlock::Para {
+                            spans: wikilinked(&mut spans),
+                        });
                     }
                     if !in_item {
                         spans.clear();
@@ -3277,7 +3435,12 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                                 last: false,
                                 list: Some((depth, marker)),
                             },
-                            None => MdBlock::ListItem { depth, marker, spans, task },
+                            None => MdBlock::ListItem {
+                                depth,
+                                marker,
+                                spans,
+                                task,
+                            },
                         });
                         in_item = false;
                     }
@@ -3381,7 +3544,9 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                         strike: false,
                         link: None,
                     }];
-                    blocks.push(MdBlock::Para { spans: wikilinked(&mut s) });
+                    blocks.push(MdBlock::Para {
+                        spans: wikilinked(&mut s),
+                    });
                 }
             }
             Event::InlineHtml(raw) => {
@@ -3461,7 +3626,14 @@ fn build_markdown_doc(p: &std::path::Path, text: &str) -> MarkdownDoc {
     let md_dir = p.parent().map(|d| d.to_path_buf());
     let mut images: Vec<MdDocImage> = Vec::new();
     for block in blocks.iter_mut() {
-        if let MdBlock::Image { path: ipath, key, w, h, .. } = block {
+        if let MdBlock::Image {
+            path: ipath,
+            key,
+            w,
+            h,
+            ..
+        } = block
+        {
             if ipath.starts_with("http://") || ipath.starts_with("https://") {
                 continue;
             }
@@ -3483,7 +3655,12 @@ fn build_markdown_doc(p: &std::path::Path, text: &str) -> MarkdownDoc {
                 *key = k.clone();
                 *w = img.w;
                 *h = img.h;
-                images.push(MdDocImage { key: k, rgba: img.cur_rgba().to_vec(), w: img.w, h: img.h });
+                images.push(MdDocImage {
+                    key: k,
+                    rgba: img.cur_rgba().to_vec(),
+                    w: img.w,
+                    h: img.h,
+                });
             }
         }
     }
@@ -3889,19 +4066,34 @@ enum UserEvent {
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
     /// `cmd` 는 "split-h"/"close"/"focus-left" 같은 동작 이름(webpane::web_pane_cmd).
-    WebPaneCmd { host_id: u64, cmd: String },
+    WebPaneCmd {
+        host_id: u64,
+        cmd: String,
+    },
     /// 웹 pane 의 문서 제목 변경(wry document_title_changed) — 탭 라벨이 host
     /// 대신 페이지 제목을 쓰게 한다(Orca 탭 제목 규칙).
-    WebTitleChanged { host_id: u64, title: String },
+    WebTitleChanged {
+        host_id: u64,
+        title: String,
+    },
     /// 웹 pane 로딩 시작/끝(wry PageLoadEvent) — 헤더 작업 바와 리로드↔정지
     /// 버튼 토글이 읽는다.
-    WebLoadState { host_id: u64, loading: bool },
+    WebLoadState {
+        host_id: u64,
+        loading: bool,
+    },
     /// 웹뷰의 window.open/target=_blank — 그 pane 옆에 새 웹 pane 으로 받는다.
     /// (전엔 소리 없이 무동작이라 OAuth 팝업·새 탭 링크가 죽은 버튼이었다.)
-    WebPopup { host_id: u64, url: String },
+    WebPopup {
+        host_id: u64,
+        url: String,
+    },
     /// 웹뷰 다운로드 완료 — 토스트로 알린다. `path` 는 시작 때 우리가 정한
     /// 목적지(macOS 완료 콜백의 path 는 항상 비어서 못 쓴다).
-    WebDownloadDone { path: String, ok: bool },
+    WebDownloadDone {
+        path: String,
+        ok: bool,
+    },
     /// `web.drive` — 열린 웹 pane 을 조종한다(eval/text/shot/url). 웹뷰는 GUI
     /// 스레드 소유(!Send)라 소켓 스레드가 reply 채널로 결과를 기다린다
     /// (`SocketSpawnStudent` 와 같은 패턴). eval 의 답은 wry 콜백에서 오므로
@@ -4673,8 +4865,9 @@ pub(crate) struct PaneStatus {
     /// Shared handle to the pane's OSC 133 command blocks. The socket `/blocks`
     /// reads it directly — no clone, no `App.pty` access. None for non-terminal
     /// tiles or panes whose PTY isn't tracked.
-    pub(crate) blocks:
-        Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<kasa_pty::CommandBlock>>>>,
+    pub(crate) blocks: Option<
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<kasa_pty::CommandBlock>>>,
+    >,
 }
 
 /// 테마 플립 때 떠 있는 claude 한 pane 을 갈아입히는 대기표 한 장
@@ -4747,8 +4940,10 @@ struct App {
     /// GPU 리드백은 렌더 안에서 동기로 끝나므로(`device.poll(Wait)`), 무장한 프레임을
     /// 그린 직후 파일이 이미 있다. 그래서 렌더 뒤에 이 큐를 훑어 파일을 확인하고
     /// 회신한다 — 무장 시점에 미리 답하면 받는 쪽이 없는 파일을 Read 하게 된다.
-    pending_capture_reply:
-        Vec<(String, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>)>,
+    pending_capture_reply: Vec<(
+        String,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
+    )>,
     /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
     /// "diff" expands the first changed file's inline diff, "modal" opens the
     /// commit modal, so those states can be self-captured without clicking.
@@ -4979,8 +5174,15 @@ struct App {
     /// 프롬프트 행이 사라져(2026-08-30 실측: 스크롤해도 최상단 행이 빈 채로 온다)
     /// 띠의 글감이 없어졌다. 같은 tail 을 이미 읽고 있으므로 여기서 함께 꺼내면
     /// 추가 IO 없이 kasaterm 이 그 띠를 직접 그릴 수 있다.
-    pane_bg_mtime:
-        HashMap<String, (std::time::SystemTime, bool, Vec<(String, Vec<String>)>, bool)>,
+    pane_bg_mtime: HashMap<
+        String,
+        (
+            std::time::SystemTime,
+            bool,
+            Vec<(String, Vec<String>)>,
+            bool,
+        ),
+    >,
     /// pane id → 그 pane 의 프롬프트 목록을 **깊게** 읽어 둔 transcript mtime.
     ///
     /// `pane_bg_mtime` 이 담는 목록은 512KB 꼬리에서 나온다. 일하는 pane 은 도구
@@ -5384,7 +5586,8 @@ struct App {
     /// Sidebar git badge cache (cwd → branch/+ins/-del). A background thread
     /// polls each window's cwd directly (not via the daemon), so this stays
     /// off `%0`'s daemon path. Render reads it; the poller writes it.
-    window_git: std::sync::Arc<std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>>,
+    window_git:
+        std::sync::Arc<std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>>,
     /// cwds the git poller should refresh, set from the current windows' repr
     /// cwd just before the sidebar paints. Shared with the poll thread.
     git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
@@ -5959,8 +6162,7 @@ impl App {
             sessions_col: state::SessionsColState {
                 // 헤드리스 검증에서 방 하나에 기록이 없으면 빈 목록만 찍힌다 —
                 // 전체 범위로 열어야 목록이 실제로 그려진 프레임을 캡처할 수 있다.
-                scope_all: std::env::var("KASATERM_TEST_SESSIONS")
-                    .is_ok_and(|v| v == "all"),
+                scope_all: std::env::var("KASATERM_TEST_SESSIONS").is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
             mcp_col: state::McpColState {
@@ -6028,7 +6230,9 @@ impl App {
             settings_rects: Vec::new(),
             // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해
             // persona 편집기 렌더를 헤드리스로 캡처할 수 있게 한다(테스트 전용).
-            students_selected: std::env::var("KASATERM_TEST_STUDENT").ok().filter(|s| !s.is_empty()),
+            students_selected: std::env::var("KASATERM_TEST_STUDENT")
+                .ok()
+                .filter(|s| !s.is_empty()),
             students_persona: std::env::var("KASATERM_TEST_STUDENT")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -6130,152 +6334,6 @@ impl App {
             themegen: Default::default(),
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /// 종료 뒤 새 빌드를 스스로 설치하도록 도우미를 띄운다 — 껐다 켜면 최신이 되게.
@@ -6332,7 +6390,9 @@ pub(crate) fn install_pending() -> bool {
 }
 
 fn arm_self_install() {
-    let Some((installed, dist)) = install_pending_paths() else { return };
+    let Some((installed, dist)) = install_pending_paths() else {
+        return;
+    };
     let running = installed.join("Contents/MacOS/kasaterm");
     let fresh = dist.join("Contents/MacOS/kasaterm");
     let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
@@ -6355,7 +6415,9 @@ fn arm_self_install() {
         fresh = fresh.display(),
         run = running.display(),
     );
-    let Ok(out) = std::fs::File::create(&log) else { return };
+    let Ok(out) = std::fs::File::create(&log) else {
+        return;
+    };
     let Ok(err) = out.try_clone() else { return };
     let _ = std::process::Command::new("/bin/sh")
         .arg("-c")
@@ -6406,7 +6468,11 @@ fn install_panic_logger() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let log = std::env::temp_dir().join("kasaterm-panic.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
             use std::io::Write;
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -6592,7 +6658,9 @@ fn install_pane_shims() {
     // 마커를 내보낸다. 게이트가 없으면 .app 설치 직후(재시작 전) 구버전 렌더러가
     // 마커를 그대로 그려 화면에 `⟦a1b2c3d4⟧` 가 노출된다(conceal 미지원).
     {
-        let caps = kasa_socket::home_dir().unwrap_or_default().join(".config/kasaterm/caps.json");
+        let caps = kasa_socket::home_dir()
+            .unwrap_or_default()
+            .join(".config/kasaterm/caps.json");
         if let Some(d) = caps.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -6723,8 +6791,7 @@ fn python3_program() -> Option<&'static str> {
                 .stdin(std::process::Stdio::null())
                 .output()
                 .map(|o| {
-                    o.status.success()
-                        && String::from_utf8_lossy(&o.stdout).starts_with("Python 3")
+                    o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("Python 3")
                 })
                 .unwrap_or(false)
         })
@@ -6956,7 +7023,10 @@ fn teammate_case_arms() -> String {
     for name in kasa_mcp::character::member_names(&chars) {
         // case 패턴 자리에 그대로 박히므로 sh 특수문자가 든 이름은 건너뛴다(사용자 편집
         // characters.json 방어 — 그 캐릭터만 팀모드 없이 부팅될 뿐 스크립트는 안 깨진다).
-        if name.chars().any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c)) {
+        if name
+            .chars()
+            .any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c))
+        {
             continue;
         }
         let slug = theme::agent_slug(&name);
@@ -7040,7 +7110,11 @@ fn prune_finished_tasks() {
     };
     let days = |k: &str, d: u64| {
         std::time::Duration::from_secs(
-            std::env::var(k).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(d) * 86_400,
+            std::env::var(k)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(d)
+                * 86_400,
         )
     };
     let cutoff = (
@@ -7052,7 +7126,9 @@ fn prune_finished_tasks() {
     };
     let mut gone = 0usize;
     for team in teams.flatten() {
-        let Ok(files) = std::fs::read_dir(team.path()) else { continue };
+        let Ok(files) = std::fs::read_dir(team.path()) else {
+            continue;
+        };
         for f in files.flatten() {
             let p = f.path();
             if p.extension().is_none_or(|e| e != "json") {
@@ -7089,7 +7165,9 @@ fn prune_empty_inboxes() {
     };
     let mut gone = 0usize;
     for team in teams.flatten() {
-        let Ok(files) = std::fs::read_dir(team.path().join("inboxes")) else { continue };
+        let Ok(files) = std::fs::read_dir(team.path().join("inboxes")) else {
+            continue;
+        };
         for f in files.flatten() {
             let p = f.path();
             let empty = std::fs::read_to_string(&p)
@@ -7117,8 +7195,12 @@ fn task_file_is_stale(
     path: &std::path::Path,
     cutoff: (std::time::Duration, std::time::Duration),
 ) -> bool {
-    let Ok(body) = std::fs::read_to_string(path) else { return false };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return false;
+    };
     let limit = match v.get("status").and_then(|s| s.as_str()) {
         Some("completed") | Some("deleted") => cutoff.0,
         // 열린 것도 지우긴 하지만 훨씬 뒤에. 상태를 못 읽는 파일은 손대지 않는다.
@@ -7293,7 +7375,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         // 일도 못 한다. Windows 는 transcript 폴백으로 표시가 이어진다(꼬리 한계는
         // 그대로 남지만, 훅이 없는 편보다 낫다).
         if python3_program().is_none() {
-            settings["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+            settings["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("PreToolUse");
         }
     }
     let settings_path = shim_dir.join("claude-hooks-settings.json");
@@ -7421,14 +7506,18 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 읽는 쪽이 없고, shim 이 보는 이름과 달라 서로 간섭하지 않는다.
     std::env::set_var(
         "KASATERM_CLAUDE_ACCOUNT_DIR",
-        account_dir.as_deref().map_or(String::new(), |d| d.display().to_string()),
+        account_dir
+            .as_deref()
+            .map_or(String::new(), |d| d.display().to_string()),
     );
     // /status 의 Email/Organization 은 `~/.claude.json` 캐시다 — 작업대를 채워도
     // 캐시가 옛 계정이면 pane 은 새 계정으로 돌면서 /status 는 옛말을 한다. 전환
     // 때만 갱신하고 부팅 재구성 때는 안 갱신해, 표시가 하루 넘게 낡은 실사고가
     // 있었다(2026-08-17: 실물은 사이오닉인데 /status 는 gmail). 여기서 맞춘다.
     if !account_id.is_empty()
-        && account_dir.as_ref().is_some_and(|d| d.as_os_str().is_empty())
+        && account_dir
+            .as_ref()
+            .is_some_and(|d| d.as_os_str().is_empty())
     {
         crate::claude_auth::adopt_oauth_account_cache(
             crate::mcp_panel_port(),
@@ -7566,6 +7655,30 @@ for _a in \"$@\"; do\n\
     *) break ;;\n\
   esac\n\
 done\n\
+# 본진(home) — 명부에 home:true 기계가 있으면 순정 실행(플래그만)도 그 기계\n\
+# 태생으로 간다(2026-09-02 「작업 본체를 맥미니로」). 이어받기·헤드리스가 보이면\n\
+# 손대지 않는다 — 로컬 대화를 남의 기계로 보내면 jsonl 이 없어 깨진다. 값 딸린\n\
+# 플래그는 값이 비플래그로 보여 저절로 걸러진다(--model opus 의 opus). 본진이\n\
+# 안 닿으면 한 줄 알리고 이 기계에서 그대로 연다. 이 pane 만 로컬로 열려면\n\
+# KASATERM_NO_HOME=1, 아예 끄려면 명부(machines.json)에서 home 을 빼면 된다.\n\
+if [ -n \"$KASATERM_PANE_ID\" ] && [ -z \"$KASATERM_NO_HOME\" ]; then\n\
+  HOMEOK=1\n\
+  for _a in \"$@\"; do\n\
+    case \"$_a\" in\n\
+      --resume|-r|--continue|-c|--session-id|-p|--print|--bg|--background) HOMEOK=\"\" ;;\n\
+      -*) ;;\n\
+      *) HOMEOK=\"\" ;;\n\
+    esac\n\
+  done\n\
+  if [ -n \"$HOMEOK\" ]; then\n\
+    HOMEM=$(kasaterm-cli home 2>/dev/null)\n\
+    HOMERC=$?\n\
+    if [ \"$HOMERC\" = 0 ] && [ -n \"$HOMEM\" ]; then\n\
+      exec kasaterm-cli migrate \"$HOMEM\" \"$KASATERM_PANE_ID\"\n\
+    fi\n\
+    [ \"$HOMERC\" = 3 ] && echo \"[kasaterm] 본진이 지금 안 닿아 이 기계에서 엽니다\" >&2\n\
+  fi\n\
+fi\n\
 {ablk}\
 # 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
 # tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
@@ -7872,7 +7985,9 @@ fn install_agy_hook_shim(shim_dir: &std::path::Path) {
         };
         // 토글이 꺼져 있으면 agent 파일 자체를 안 만든다 — 남겨 두면 agy 가 그걸
         // 그대로 읽어 말투가 붙는다.
-        let Some(persona) = persona_on.then(|| kasa_mcp::character::persona_for(&chars, &name)).flatten()
+        let Some(persona) = persona_on
+            .then(|| kasa_mcp::character::persona_for(&chars, &name))
+            .flatten()
         else {
             continue;
         };
@@ -8043,7 +8158,6 @@ fn decorate_process_name(comm: &str) -> String {
     }
 }
 
-
 /// Where the first shell of a fresh session starts. No spawning pane exists
 /// yet, so the `"last"` mode falls back to home — same as every terminal's
 /// very first window.
@@ -8199,7 +8313,11 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
             out.push(("PowerShell 7", "terminal", pwsh7.to_string()));
         }
         // Windows PowerShell ships with the OS — always present.
-        out.push(("Windows PowerShell", "terminal", "powershell.exe".to_string()));
+        out.push((
+            "Windows PowerShell",
+            "terminal",
+            "powershell.exe".to_string(),
+        ));
         out.push(("Command Prompt", "terminal", "cmd.exe".to_string()));
         if let Some(bash) = git_bash_path() {
             out.push(("Git Bash", "terminal", bash));
@@ -8496,10 +8614,16 @@ mod tests {
             "Jump to bottom: fn+↓ to scroll",
         ];
         let rows: Vec<Vec<GridCell>> = screen.iter().map(|l| grid_row(l, W)).collect();
-        assert!(crate::screenread::scrolled_gate(&rows), "안내 문구가 있으면 게이트가 열려야 한다");
+        assert!(
+            crate::screenread::scrolled_gate(&rows),
+            "안내 문구가 있으면 게이트가 열려야 한다"
+        );
 
         let prompts = vec![
-            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴의 답변 한 줄".to_string()]),
+            (
+                "codex 작업 상태 알려줘".to_string(),
+                vec!["앞 턴의 답변 한 줄".to_string()],
+            ),
             (
                 "끝났어 워크트리깨끗하게 커밋푸시하고 빌드해줘".to_string(),
                 vec!["끝났으면 커밋·푸시·빌드까지 하겠습니다.".to_string()],
@@ -8519,16 +8643,27 @@ mod tests {
     #[test]
     fn sticky_band_remembers_turn_past_header() {
         const W: usize = 80;
-        let rows: Vec<Vec<GridCell>> = ["앞 턴 답변 한가운데", "이어지는 줄", "Jump to bottom (click) ↓"]
-            .iter()
-            .map(|l| grid_row(l, W))
-            .collect();
+        let rows: Vec<Vec<GridCell>> = [
+            "앞 턴 답변 한가운데",
+            "이어지는 줄",
+            "Jump to bottom (click) ↓",
+        ]
+        .iter()
+        .map(|l| grid_row(l, W))
+        .collect();
         let prompts = vec![
-            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴 답변 한가운데".to_string()]),
-            ("끝났어 커밋푸시하고 빌드해줘".to_string(), vec!["끝났으면 커밋까지".to_string()]),
+            (
+                "codex 작업 상태 알려줘".to_string(),
+                vec!["앞 턴 답변 한가운데".to_string()],
+            ),
+            (
+                "끝났어 커밋푸시하고 빌드해줘".to_string(),
+                vec!["끝났으면 커밋까지".to_string()],
+            ),
         ];
         let mut memo = Some("codex 작업 상태 알려줘".to_string());
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("띠가 나와야 한다");
         assert_eq!(got.text, "codex 작업 상태 알려줘");
     }
 
@@ -8553,14 +8688,18 @@ mod tests {
         .map(|l| grid_row(l, W))
         .collect();
         let prompts = vec![
-            ("codex 작업 상태 알려줘".to_string(), vec!["앞 턴 답변".to_string()]),
+            (
+                "codex 작업 상태 알려줘".to_string(),
+                vec!["앞 턴 답변".to_string()],
+            ),
             (
                 "끝났어 커밋푸시하고 빌드해줘".to_string(),
                 vec!["끝났으면 커밋·푸시까지 하겠습니다.".to_string()],
             ),
         ];
         let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("띠가 나와야 한다");
         assert_eq!(got.text, "끝났어 커밋푸시하고 빌드해줘");
     }
 
@@ -8577,14 +8716,22 @@ mod tests {
         .map(|l| grid_row(l, W))
         .collect();
         let prompts = vec![
-            ("첫 질문".to_string(), vec!["첫 턴에만 있는 고유한 문장".to_string()]),
+            (
+                "첫 질문".to_string(),
+                vec!["첫 턴에만 있는 고유한 문장".to_string()],
+            ),
             ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
             ("셋째 질문".to_string(), vec!["셋째 턴 문장".to_string()]),
         ];
         let mut memo = Some("셋째 질문".to_string());
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("띠가 나와야 한다");
         assert_eq!(got.text, "첫 질문");
-        assert_eq!(memo.as_deref(), Some("첫 질문"), "본문으로 되짚었으면 기억도 갱신된다");
+        assert_eq!(
+            memo.as_deref(),
+            Some("첫 질문"),
+            "본문으로 되짚었으면 기억도 갱신된다"
+        );
     }
 
     /// 흐릿한 `>` 로 시작해도 **아는 질문이 아니면** 잡지 않는다(본문 인용·diff).
@@ -8595,12 +8742,19 @@ mod tests {
         rows.push(grid_row("첫 턴에만 있는 고유한 문장", W));
         rows.push(grid_row("Jump to bottom (click) ↓", W));
         let prompts = vec![
-            ("첫 질문".to_string(), vec!["첫 턴에만 있는 고유한 문장".to_string()]),
+            (
+                "첫 질문".to_string(),
+                vec!["첫 턴에만 있는 고유한 문장".to_string()],
+            ),
             ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
         ];
         let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
-        assert!(got.synthetic, "인용 줄을 그 자리에서 하이라이트하면 안 된다");
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("띠가 나와야 한다");
+        assert!(
+            got.synthetic,
+            "인용 줄을 그 자리에서 하이라이트하면 안 된다"
+        );
         assert_eq!(got.text, "첫 질문");
     }
 
@@ -8621,12 +8775,22 @@ mod tests {
         .collect();
         let q = |tail: &str| format!("아무 도구도 쓰지 말고 「{tail}」 를 40줄 적어라.");
         let prompts = vec![
-            (q("고요한 호수 위로 물안개가 피어오른다"), vec!["고요한 호수 위로 물안개가 피어오른다.".to_string()]),
-            (q("붉은 사막에 모래바람이 길게 분다"), vec!["붉은 사막에 모래바람이 길게 분다.".to_string()]),
-            (q("푸른 숲에 새벽 종소리가 울린다"), vec!["푸른 숲에 새벽 종소리가 울린다.".to_string()]),
+            (
+                q("고요한 호수 위로 물안개가 피어오른다"),
+                vec!["고요한 호수 위로 물안개가 피어오른다.".to_string()],
+            ),
+            (
+                q("붉은 사막에 모래바람이 길게 분다"),
+                vec!["붉은 사막에 모래바람이 길게 분다.".to_string()],
+            ),
+            (
+                q("푸른 숲에 새벽 종소리가 울린다"),
+                vec!["푸른 숲에 새벽 종소리가 울린다.".to_string()],
+            ),
         ];
         let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo).expect("띠가 나와야 한다");
+        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
+            .expect("띠가 나와야 한다");
         // 화면 맨 위는 「붉은 사막」 턴의 꼬리다. 머리글자로 가리면 여기서 첫 질문이 나왔다.
         assert_eq!(got.text, q("붉은 사막에 모래바람이 길게 분다"));
     }
@@ -8744,7 +8908,8 @@ mod tests {
                     moved.insert(dst, grabbed);
                     for i in 0..n {
                         assert_eq!(
-                            moved[remap_window_index(i, from, dst)], i,
+                            moved[remap_window_index(i, from, dst)],
+                            i,
                             "n={n} from={from} dst={dst} i={i}"
                         );
                     }
@@ -8803,12 +8968,24 @@ mod tests {
         ] {
             let (blocks, _) = parse_markdown(src);
             match blocks.as_slice() {
-                [MdBlock::Callout { kind, first, last, spans, .. }] => {
+                [MdBlock::Callout {
+                    kind,
+                    first,
+                    last,
+                    spans,
+                    ..
+                }] => {
                     assert_eq!(*kind, want, "{src:?}");
-                    assert!(*first && *last, "{src:?} 한 문단이면 상자를 열고 닫아야 한다");
+                    assert!(
+                        *first && *last,
+                        "{src:?} 한 문단이면 상자를 열고 닫아야 한다"
+                    );
                     // 태그 줄은 표지로 그려지므로 본문에 남으면 두 번 보인다.
                     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-                    assert!(!text.contains("[!"), "{src:?} 본문에 태그가 남았다: {text:?}");
+                    assert!(
+                        !text.contains("[!"),
+                        "{src:?} 본문에 태그가 남았다: {text:?}"
+                    );
                 }
                 other => panic!("{src:?} → 콜아웃이 아니다: {} 블록", other.len()),
             }
@@ -8843,7 +9020,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(flags, vec![(true, false), (false, true)], "조각 표시가 어긋났다");
+        assert_eq!(
+            flags,
+            vec![(true, false), (false, true)],
+            "조각 표시가 어긋났다"
+        );
     }
 
     /// 알림 안 목록은 상자 안에 남아야 한다 — `ListItem` 으로 새면 경고에 딸린
@@ -8852,7 +9033,9 @@ mod tests {
     fn list_inside_callout_stays_in_the_box() {
         let (blocks, _) = parse_markdown("> [!WARNING]\n> 확인해라.\n>\n> - 첫째\n> - 둘째\n");
         assert!(
-            blocks.iter().all(|b| !matches!(b, MdBlock::ListItem { .. })),
+            blocks
+                .iter()
+                .all(|b| !matches!(b, MdBlock::ListItem { .. })),
             "목록이 상자 밖으로 샜다"
         );
         let depths: Vec<Option<u8>> = blocks
@@ -8862,7 +9045,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(depths, vec![None, Some(0), Some(0)], "문단 하나 + 목록 둘이어야 한다");
+        assert_eq!(
+            depths,
+            vec![None, Some(0), Some(0)],
+            "문단 하나 + 목록 둘이어야 한다"
+        );
         assert!(
             matches!(blocks.last(), Some(MdBlock::Callout { last: true, .. })),
             "마지막 조각이 상자를 닫지 않았다"
@@ -8875,7 +9062,8 @@ mod tests {
     fn wikilink_works_inside_callout() {
         let got = spans_of("> [!WARNING]\n> 자세히는 [[topic_a]] 참고\n");
         assert!(
-            got.iter().any(|(t, l)| t == "topic_a" && l.as_deref() == Some("wiki:topic_a")),
+            got.iter()
+                .any(|(t, l)| t == "topic_a" && l.as_deref() == Some("wiki:topic_a")),
             "알림 안 링크가 죽었다: {got:?}"
         );
     }
@@ -8903,7 +9091,10 @@ mod tests {
         );
         let texts: Vec<&str> = got.iter().map(|(t, _)| t.as_str()).collect();
         for want in ["접히는 제목", "가운데 문장.", "하이픈 태그 안."] {
-            assert!(texts.iter().any(|t| t.contains(want)), "{want} 이 사라졌다: {got:?}");
+            assert!(
+                texts.iter().any(|t| t.contains(want)),
+                "{want} 이 사라졌다: {got:?}"
+            );
         }
         // 태그 자체는 문서에 없던 글자다.
         assert!(
@@ -9032,14 +9223,24 @@ mod tests {
         let Some(sh) = test_posix_shell() else { return };
         let run = |env: Option<&str>| {
             let mut c = std::process::Command::new(&sh);
-            c.arg("-c").arg(&probe).env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+            c.arg("-c")
+                .arg(&probe)
+                .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
             if let Some(v) = env {
                 c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", v);
             }
             String::from_utf8(c.output().expect("sh").stdout).expect("utf8")
         };
-        assert_eq!(run(None), "/tmp/acct/a1", "미설정이면 우리 계정을 심어야 한다");
-        assert_eq!(run(Some("")), "", "빈 값 = '기본 저장소' 지시라 존중해야 한다");
+        assert_eq!(
+            run(None),
+            "/tmp/acct/a1",
+            "미설정이면 우리 계정을 심어야 한다"
+        );
+        assert_eq!(
+            run(Some("")),
+            "",
+            "빈 값 = '기본 저장소' 지시라 존중해야 한다"
+        );
         assert_eq!(run(Some("/other")), "/other", "명시 값이 우선이어야 한다");
     }
 
@@ -9071,7 +9272,10 @@ mod tests {
         assert_eq!(align, &vec![MdAlign::Left, MdAlign::Right]);
         // A trailing empty row would render as a phantom band under the table.
         assert_eq!(rows.len(), 2, "본문 행 개수");
-        assert!(rows.iter().all(|r| r.len() == 2), "빈 행이 섞였다: {rows:?}");
+        assert!(
+            rows.iter().all(|r| r.len() == 2),
+            "빈 행이 섞였다: {rows:?}"
+        );
         assert!(rows[0][1][0].bold, "셀 안 인라인 스타일 보존");
         assert!(rows[1][1][0].code, "셀 안 인라인 코드 보존");
     }
@@ -9108,7 +9312,10 @@ mod tests {
                   | a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n마지막 문단.\n";
         let (blocks, lines) = parse_markdown(md);
         assert_eq!(blocks.len(), lines.len(), "두 벡터의 길이가 어긋났다");
-        assert!(lines.windows(2).all(|w| w[0] <= w[1]), "줄 번호가 역행한다: {lines:?}");
+        assert!(
+            lines.windows(2).all(|w| w[0] <= w[1]),
+            "줄 번호가 역행한다: {lines:?}"
+        );
         assert_eq!(lines[0], 0, "첫 블록은 0줄");
         assert_eq!(*lines.last().unwrap(), 20, "마지막 문단의 줄");
     }
@@ -9127,19 +9334,40 @@ mod tests {
         let long = std::time::Duration::from_secs(86_400);
         // 끝난 것은 지나고 열린 것은 아직 — 이 조합이 두 문턱이 갈려 있음을 고정한다.
         // (하나로 합치면 어제 안 끝낸 일이 완료분과 같이 쓸려 나간다.)
-        assert!(task_file_is_stale(&write("done.json", "completed"), (zero, long)));
-        assert!(task_file_is_stale(&write("gone.json", "deleted"), (zero, long)));
-        assert!(!task_file_is_stale(&write("open.json", "pending"), (zero, long)));
-        assert!(!task_file_is_stale(&write("busy.json", "in_progress"), (zero, long)));
+        assert!(task_file_is_stale(
+            &write("done.json", "completed"),
+            (zero, long)
+        ));
+        assert!(task_file_is_stale(
+            &write("gone.json", "deleted"),
+            (zero, long)
+        ));
+        assert!(!task_file_is_stale(
+            &write("open.json", "pending"),
+            (zero, long)
+        ));
+        assert!(!task_file_is_stale(
+            &write("busy.json", "in_progress"),
+            (zero, long)
+        ));
         // 열린 문턱까지 지나면 그건 밀린 일이 아니라 버려진 일이다.
-        assert!(task_file_is_stale(&write("dead.json", "pending"), (zero, zero)));
+        assert!(task_file_is_stale(
+            &write("dead.json", "pending"),
+            (zero, zero)
+        ));
         // 아직 안 지난 완료분은 남는다.
-        assert!(!task_file_is_stale(&write("fresh.json", "completed"), (long, long)));
+        assert!(!task_file_is_stale(
+            &write("fresh.json", "completed"),
+            (long, long)
+        ));
         // 깨진 파일·없는 파일·모르는 status 는 건드리지 않는다(삭제는 못 되돌린다).
         let broken = dir.join("broken.json");
         std::fs::write(&broken, "not json").unwrap();
         assert!(!task_file_is_stale(&broken, (zero, zero)));
-        assert!(!task_file_is_stale(&write("weird.json", "쩜쩜"), (zero, zero)));
+        assert!(!task_file_is_stale(
+            &write("weird.json", "쩜쩜"),
+            (zero, zero)
+        ));
         assert!(!task_file_is_stale(&dir.join("nope.json"), (zero, zero)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9189,16 +9417,30 @@ mod tests {
                 let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("collab-hooks")
                     .join(name);
-                assert!(src.is_file(), "설정이 가리키는 훅 스크립트가 레포에 없다: {name}");
+                assert!(
+                    src.is_file(),
+                    "설정이 가리키는 훅 스크립트가 레포에 없다: {name}"
+                );
             }
         };
-        for group in ["SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "Notification"] {
-            let Some(entries) = settings.pointer(&format!("/hooks/{group}")).and_then(|v| v.as_array())
+        for group in [
+            "SessionStart",
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "Notification",
+        ] {
+            let Some(entries) = settings
+                .pointer(&format!("/hooks/{group}"))
+                .and_then(|v| v.as_array())
             else {
                 continue;
             };
             for e in entries {
-                let Some(hooks) = e.get("hooks").and_then(|v| v.as_array()) else { continue };
+                let Some(hooks) = e.get("hooks").and_then(|v| v.as_array()) else {
+                    continue;
+                };
                 for h in hooks {
                     if let Some(c) = h.get("command") {
                         walk(c);
@@ -9206,8 +9448,15 @@ mod tests {
                 }
             }
         }
-        walk(settings.pointer("/statusLine/command").unwrap_or(&serde_json::Value::Null));
-        assert!(seen >= 5, "훅 경로를 하나도 못 읽었다 — 설정 모양이 바뀌었나 ({seen})");
+        walk(
+            settings
+                .pointer("/statusLine/command")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+        assert!(
+            seen >= 5,
+            "훅 경로를 하나도 못 읽었다 — 설정 모양이 바뀌었나 ({seen})"
+        );
     }
 
     #[test]
@@ -9270,7 +9519,10 @@ mod tests {
             body.contains("CLAUDE_CODE_HARBOR_KITE=1"),
             "harbor kite env went missing — 명부에 안 오른다"
         );
-        assert!(body.contains("KASATERM_AGENT="), "board 가 읽는 AGENT env 가 사라졌다");
+        assert!(
+            body.contains("KASATERM_AGENT="),
+            "board 가 읽는 AGENT env 가 사라졌다"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9283,7 +9535,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         install_claude_hook_shim(&dir);
-        let Ok(body) = std::fs::read_to_string(dir.join("claude")) else { return };
+        let Ok(body) = std::fs::read_to_string(dir.join("claude")) else {
+            return;
+        };
         if !body.contains("--mcp-config") {
             // 설정에서 껐거나 홈을 못 찾은 환경 — 블록 자체가 안 실린 것이라 검사할 대상이 없다.
             let _ = std::fs::remove_dir_all(&dir);
@@ -9355,13 +9609,21 @@ mod tests {
         let char_only = serde_json::json!({ "sessions": [{ "windows": [{
             "leaf": { "cwd": "/repo", "was_claude": false, "session_id": null, "character": "아루" }
         }]}]});
-        assert_eq!(App::count_claude_panes(&char_only), 0, "캐릭터만으론 claude 아님");
+        assert_eq!(
+            App::count_claude_panes(&char_only),
+            0,
+            "캐릭터만으론 claude 아님"
+        );
         // was_claude 감지 실패(저장 순간 claude 가 포그라운드가 아님) 보정은
         // session_id 로 한다 — claude 가 실제로 세션을 바인딩했을 때만 붙는다.
         let sid_only = serde_json::json!({ "sessions": [{ "windows": [{
             "leaf": { "cwd": "/repo", "was_claude": false, "session_id": "abcd-1234" }
         }]}]});
-        assert_eq!(App::count_claude_panes(&sid_only), 1, "바인딩된 세션은 claude");
+        assert_eq!(
+            App::count_claude_panes(&sid_only),
+            1,
+            "바인딩된 세션은 claude"
+        );
         // 프롬프트를 띄울 기준은 전체 pane 수 — claude 가 0이어도 레이아웃과
         // 스크롤백은 되살릴 값이 있다.
         assert_eq!(App::count_panes(&state), 5, "null leaf 포함 전체 leaf");
@@ -9374,9 +9636,7 @@ mod tests {
     /// 학생 pane 이 전부 셸로 되살아나는 것을 막는 단언.
     #[test]
     fn was_agent_counts_codex_and_keeps_legacy_was_claude() {
-        let win = |leaf: serde_json::Value| {
-            serde_json::json!({ "sessions": [{ "windows": [{ "leaf": leaf }]}]})
-        };
+        let win = |leaf: serde_json::Value| serde_json::json!({ "sessions": [{ "windows": [{ "leaf": leaf }]}]});
         let n = |leaf: serde_json::Value| App::count_claude_panes(&win(leaf));
         assert_eq!(
             n(serde_json::json!({ "cwd": "/repo", "was_agent": "codex", "session_id": null })),
@@ -9411,7 +9671,11 @@ mod tests {
         let cmd = |a, s, r| crate::session::restore_agent_command(a, s, r, None, None);
         assert_eq!(cmd(Some("codex"), None, false), "codex\r");
         assert_eq!(
-            cmd(Some("codex"), Some("019fd187-ba6e-7812-8976-2a27ffcd843e"), true),
+            cmd(
+                Some("codex"),
+                Some("019fd187-ba6e-7812-8976-2a27ffcd843e"),
+                true
+            ),
             "codex resume 019fd187-ba6e-7812-8976-2a27ffcd843e\r"
         );
         // rollout 이 사라졌으면 새로 — `resume --last` 로 흘리지 않는다(미러된
@@ -9473,7 +9737,10 @@ mod tests {
         assert_eq!(strip_activity_prefix("* build"), "build");
         assert_eq!(strip_activity_prefix("＊작업"), "작업");
         // 브라유 스피너(U+2800 블록) 접두 — 연속 run 도 한 번에.
-        assert_eq!(strip_activity_prefix("⠂ 세션 요약 디버깅"), "세션 요약 디버깅");
+        assert_eq!(
+            strip_activity_prefix("⠂ 세션 요약 디버깅"),
+            "세션 요약 디버깅"
+        );
         assert_eq!(strip_activity_prefix("⠐⠑ 이름"), "이름");
         // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
         assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
@@ -9488,8 +9755,14 @@ mod tests {
     fn self_install_dist_path_resolves_to_the_repo_root() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let root = root.canonicalize().expect("레포 루트는 언제나 실재한다");
-        assert!(root.join("Cargo.toml").is_file(), "워크스페이스 매니페스트가 여기 있어야 한다");
-        assert!(root.join("scripts/build-app.sh").is_file(), "번들을 굽는 스크립트도 같은 자리");
+        assert!(
+            root.join("Cargo.toml").is_file(),
+            "워크스페이스 매니페스트가 여기 있어야 한다"
+        );
+        assert!(
+            root.join("scripts/build-app.sh").is_file(),
+            "번들을 굽는 스크립트도 같은 자리"
+        );
     }
 
     #[test]
@@ -9626,14 +9899,20 @@ mod tests {
                 ..GridCell::blank()
             };
         }
-        let sel = Selection { anchor: (0, 0), end: (4, 0) };
+        let sel = Selection {
+            anchor: (0, 0),
+            end: (4, 0),
+        };
         let s = extract_selection(&[row], sel);
         assert_eq!(s, "hello");
     }
 
     #[test]
     fn selection_normalise_reverses_when_needed() {
-        let sel = Selection { anchor: (5, 2), end: (1, 0) };
+        let sel = Selection {
+            anchor: (5, 2),
+            end: (1, 0),
+        };
         let (a, b) = normalise(sel);
         assert_eq!(a, (1, 0));
         assert_eq!(b, (5, 2));
@@ -9645,9 +9924,15 @@ mod tests {
     fn wide_row(s: &str, width: usize) -> Vec<GridCell> {
         let mut row = Vec::new();
         for ch in s.chars() {
-            row.push(GridCell { ch, ..GridCell::blank() });
+            row.push(GridCell {
+                ch,
+                ..GridCell::blank()
+            });
             if gpu::is_wide_char(ch) {
-                row.push(GridCell { ch: ' ', ..GridCell::blank() });
+                row.push(GridCell {
+                    ch: ' ',
+                    ..GridCell::blank()
+                });
             }
         }
         while row.len() < width {
@@ -9660,12 +9945,18 @@ mod tests {
     fn copy_drops_wide_char_spacer() {
         // Selection copy: "한글" must not become "한 글".
         let row = wide_row("한글", 12);
-        let sel = Selection { anchor: (0, 0), end: (3, 0) };
+        let sel = Selection {
+            anchor: (0, 0),
+            end: (3, 0),
+        };
         assert_eq!(extract_selection(&[row], sel), "한글");
 
         // Mixed ASCII + CJK keeps real spaces, drops only spacers.
         let row = wide_row("a한 b", 12);
-        let sel = Selection { anchor: (0, 0), end: (5, 0) };
+        let sel = Selection {
+            anchor: (0, 0),
+            end: (5, 0),
+        };
         assert_eq!(extract_selection(&[row], sel), "a한 b");
     }
 
@@ -9677,7 +9968,7 @@ mod tests {
         assert!(!App::drag_left_window(0.0, 0.0, w, h)); // 좌상단 모서리 = 안
         assert!(!App::drag_left_window(600.0, 400.0, w, h)); // 정중앙 = 안
         assert!(!App::drag_left_window(w, h, w, h)); // 우하단 모서리(경계) = 안
-        // 네 방향 밖 — 각각 tear-off.
+                                                     // 네 방향 밖 — 각각 tear-off.
         assert!(App::drag_left_window(-1.0, 400.0, w, h)); // 왼쪽 밖
         assert!(App::drag_left_window(w + 1.0, 400.0, w, h)); // 오른쪽 밖
         assert!(App::drag_left_window(600.0, -1.0, w, h)); // 위쪽 밖(탭바 위로 뜯음)
@@ -9691,11 +9982,17 @@ mod tests {
         // TMPDIR 에 자기 포트를 덮어써, 부모 pane 의 hook 들이 테스트 서버로 갔다.
         let a = mcp_port_file_for("/tmp/kasaterm-25057.sock");
         let b = mcp_port_file_for("/tmp/kasaterm-82694.sock");
-        assert_ne!(a, b, "같은 디렉터리의 두 인스턴스가 같은 포트 파일을 쓰면 안 된다");
+        assert_ne!(
+            a, b,
+            "같은 디렉터리의 두 인스턴스가 같은 포트 파일을 쓰면 안 된다"
+        );
         assert_eq!(a, std::path::PathBuf::from("/tmp/kasaterm-25057.mcp_port"));
         // 셸 hook 이 ${sock%.sock}.mcp_port 로 유도하는 것과 같은 결과여야 한다 —
         // 한쪽만 바뀌면 hook 이 영영 빈 파일을 읽고 8765(남의 서버)로 폴백한다.
-        for sock in ["/tmp/kasaterm-1.sock", "/home/u/.config/kasaterm/daemon.sock"] {
+        for sock in [
+            "/tmp/kasaterm-1.sock",
+            "/home/u/.config/kasaterm/daemon.sock",
+        ] {
             let shell = format!("{}.mcp_port", sock.trim_end_matches(".sock"));
             assert_eq!(mcp_port_file_for(sock), std::path::PathBuf::from(shell));
         }
@@ -9720,9 +10017,17 @@ mod tests {
             .filter_map(|s| s.split_once('\''))
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(keys.len(), SettingsCat::ALL.len(), "칸 개수가 어긋난다: {keys:?}");
+        assert_eq!(
+            keys.len(),
+            SettingsCat::ALL.len(),
+            "칸 개수가 어긋난다: {keys:?}"
+        );
         for c in SettingsCat::ALL {
-            assert!(keys.contains(&c.web_key()), "웹에 없는 칸 이름: {}", c.web_key());
+            assert!(
+                keys.contains(&c.web_key()),
+                "웹에 없는 칸 이름: {}",
+                c.web_key()
+            );
         }
     }
 
@@ -9741,13 +10046,24 @@ mod tests {
 
         write_shim(&path, "#!/bin/sh\nexit 0\n").unwrap();
         let first = std::fs::metadata(&path).unwrap();
-        assert_eq!(first.permissions().mode() & 0o777, 0o755, "실행 권한이 안 붙었다");
+        assert_eq!(
+            first.permissions().mode() & 0o777,
+            0o755,
+            "실행 권한이 안 붙었다"
+        );
 
         write_shim(&path, "#!/bin/sh\nexit 1\n").unwrap();
         let second = std::fs::metadata(&path).unwrap();
-        assert_ne!(first.ino(), second.ino(), "제자리 덮어쓰기다 — 실행 중 셸이 깨진다");
+        assert_ne!(
+            first.ino(),
+            second.ino(),
+            "제자리 덮어쓰기다 — 실행 중 셸이 깨진다"
+        );
         assert_eq!(second.permissions().mode() & 0o777, 0o755);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\nexit 1\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\nexit 1\n"
+        );
 
         // 임시 파일을 남기면 PATH 인 셰임 dir 에 쓰레기가 쌓인다.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
@@ -9760,7 +10076,10 @@ mod tests {
         // 읽기 전용 파일(실행 안 되는 데이터)은 권한을 안 건드린다.
         let data = dir.join("codex-account");
         write_shim_data(&data, "x").unwrap();
-        assert_eq!(std::fs::metadata(&data).unwrap().permissions().mode() & 0o111, 0);
+        assert_eq!(
+            std::fs::metadata(&data).unwrap().permissions().mode() & 0o111,
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9793,8 +10112,9 @@ mod tests {
             // 마커를 찍은 뒤 잠들고, 깨어나서야 나머지를 읽는다. 패딩은 셸의 읽기
             // 버퍼(BUFSIZ, 보통 1~8KB)보다 확실히 커야 한다 — 작으면 한 번에 읽혀
             // 교체가 눈에 안 띈다. 실제 claude 래퍼도 수 KB다.
-            let pad: String =
-                (0..400).map(|i| format!("# padding line {i} ————————————————\n")).collect();
+            let pad: String = (0..400)
+                .map(|i| format!("# padding line {i} ————————————————\n"))
+                .collect();
             let script = format!(
                 "#!/bin/sh\n: > {mark:?}\nsleep 0.5\n{pad}echo OK\nexit 0\n",
                 mark = mark.display().to_string()
@@ -9830,5 +10150,4 @@ mod tests {
         });
         assert_eq!(atomic, "OK", "rename 으로 갈았는데도 실행 중 셰임이 깨졌다");
     }
-
 }
