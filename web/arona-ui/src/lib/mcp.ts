@@ -19,9 +19,17 @@ const DEV_PORT = import.meta.env.VITE_MCP_PORT;
 // 웹뷰 백엔드 후보. 프로덕션은 same-origin(페이지를 서빙한 kasaterm 8765) 우선, 그게
 // 죽으면 standalone serve-web(8766)으로 폴백 — 터미널이 꺼져도 daemon 세션을 계속 본다.
 const FALLBACK_PORT = import.meta.env.VITE_MCP_FALLBACK_PORT || '8766';
+// 프로덕션 same-origin 인데 **접두가 붙을 수 있다** — 폰 주소(`/u/<slug>/arona-ui/`)나
+// 다른 기계 프록시(`/u/<slug>/m/<기계>/arona-ui/`) 아래서 열렸으면 API 도 그 접두로
+// 나가야 같은 자격이다. 접두를 떼고 `/board` 로 부르면 폰에선 403 이다(2026-09-02).
+const PAGE_PREFIX: string = (() => {
+  if (typeof location === 'undefined') return '';
+  const m = location.pathname.match(/^(.*)\/arona-ui\//);
+  return m ? m[1] : '';
+})();
 const CANDIDATES: string[] = import.meta.env.DEV
   ? (DEV_PORT ? [`http://127.0.0.1:${DEV_PORT}`] : [''])
-  : ['', `http://127.0.0.1:${FALLBACK_PORT}`];
+  : [PAGE_PREFIX, `http://127.0.0.1:${FALLBACK_PORT}`];
 // 호출부(약 50곳)가 전부 `${BASE}` 를 호출 시점 lazy read 하므로, let 재대입 하나로 전
 // 사이트에 폴백이 전파된다(호출부 수정 0).
 let BASE = CANDIDATES[0];

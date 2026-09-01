@@ -521,11 +521,15 @@ fn paint_usage_popover(
 /// 터널 주소 한 벌. 표시·열기·복사가 각자 문자열을 조립하면 한 곳만 고쳤을 때
 /// 「복사한 것과 열리는 것이 다른」 상태가 된다 — 실제로 `/term` → `/term/grid` 로
 /// 옮길 때 세 자리를 따로 고쳐야 했다(2026-08-25).
+///
+/// 주소는 **주인의 유저 주소**(`https://<host>/u/<slug>/…`)다 — 주소 자체가 자격이라
+/// `?t=` 토큰이 필요 없고, 슬랙 링크·홈화면 앱에서 열어도 그대로 붙는다(2026-09-02,
+/// `kasa_mcp::mobile` 머리말). 주인 주소를 못 만드는 경우(홈 폴더 없음)에만 옛 꼴.
 fn tunnel_url(host: &str, path: &str) -> String {
-    match kasa_mcp::remote_token() {
+    kasa_mcp::mobile::owner_address(host, path).unwrap_or_else(|| match kasa_mcp::remote_token() {
         Some(t) => format!("https://{host}{path}?t={t}"),
         None => format!("https://{host}{path}"),
-    }
+    })
 }
 
 /// 팝오버에 **보일** 짧은 주소. 스킴과 토큰을 떼고, 넘치면 호스트를 줄인다.
@@ -592,24 +596,24 @@ fn paint_tunnel_popover(
     g.rect(x + 12.0, line, w - 24.0, 1.0, theme::with_alpha(theme::border(), 0x88));
     match host {
         Some(host) => {
-            // 토큰까지 붙인 **완성 주소**를 준다. 호스트만 주면 그 주소는 문전에서
-            // 「remote access requires a valid token」에 막힌다 — 사용자가 폰으로
-            // 열어 보고 정확히 그 화면을 만났다(2026-08-16 「원격주소 제대로나오게」).
-            // 토큰은 어차피 이 화면 주인의 것이고, 복사·표시 둘 다 같은 주소여야
-            // 「복사한 것이 열리는 것」이 성립한다.
+            // **완성 주소**를 준다 — 호스트만 주면 그 주소는 문전에서 막힌다. 사용자가
+            // 폰으로 열어 보고 정확히 그 화면을 만났다(2026-08-16 「원격주소 제대로
+            // 나오게」). 자격은 이제 토큰 쿼리가 아니라 주소의 `/u/<slug>/` 부분이고
+            // (`tunnel_url`), 복사·표시 둘 다 같은 주소여야 「복사한 것이 열리는 것」이
+            // 성립한다. 표시에서는 slug 를 `…` 로 접는다 — 남이 어깨너머로 볼 자리다.
             //
-            // 두 줄인 이유: 폰에서 하는 일이 갈린다 — 타자는 터미널, 대화 읽기와
-            // 학생 전환은 아로나다. 라벨 없이 주소만 두 개면 어느 게 무엇인지 모른다.
+            // 두 줄인 이유: 폰에서 하는 일이 갈린다 — 학생 고르기와 타자는 허브→터미널,
+            // 대화 읽기와 학생 전환은 아로나다. 라벨 없이 주소만 두 개면 어느 게 무엇인지 모른다.
             let rows: [(&str, &str, state::StatusbarHit, state::StatusbarHit); 2] = [
                 (
-                    "터미널 — 직접 타자",
-                    "/term/grid",
+                    "폰 허브 — 학생 목록·터미널",
+                    "/u/…/",
                     state::StatusbarHit::OpenTunnelUrl,
                     state::StatusbarHit::CopyTunnelHost,
                 ),
                 (
                     "아로나 — 대화 읽기",
-                    "/arona-ui/",
+                    "/u/…/arona-ui/",
                     state::StatusbarHit::OpenAronaUrl,
                     state::StatusbarHit::CopyAronaUrl,
                 ),
@@ -1104,7 +1108,7 @@ impl crate::App {
             }
             Some(state::StatusbarHit::OpenTunnelUrl) => {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
-                    self.open_url(&tunnel_url(&h, "/term/grid"));
+                    self.open_url(&tunnel_url(&h, ""));
                 }
                 return true;
             }
@@ -1116,9 +1120,9 @@ impl crate::App {
             }
             Some(state::StatusbarHit::CopyTunnelHost) => {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
-                    // 표시와 같은 **완성 주소**(토큰 포함) — 호스트만 복사하면 붙는
-                    // 순간 토큰 관문에 막힌다.
-                    self.copy_to_clipboard(tunnel_url(&h, "/term/grid"), "터미널 주소 복사됨");
+                    // 표시와 같은 **완성 주소**(유저 slug 포함) — 호스트만 복사하면 붙는
+                    // 순간 관문에 막힌다.
+                    self.copy_to_clipboard(tunnel_url(&h, ""), "폰 주소 복사됨");
                 }
                 return true;
             }

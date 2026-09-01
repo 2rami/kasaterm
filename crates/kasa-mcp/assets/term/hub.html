@@ -1,0 +1,202 @@
+<!doctype html><html lang="ko"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>kasaterm</title>
+<style>
+  /* 폰 허브 — 이 주소로 들어온 사람이 처음 보는 화면. 첫 화면은 데이터(학생 목록)여야
+     한다: 머리는 한 줄, 설명 상자 없음. 행은 44px 넘는 터치 타깃. */
+  :root { --bg:#12161c; --panel:#1a2130; --line:#243044; --fg:#c8d0d9; --dim:#7c8798;
+          --acc:#7aa2f7; --wait:#e0af68; --busy:#9ece6a; }
+  html,body { margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Apple SD Gothic Neo',sans-serif;
+    min-height:100dvh; overscroll-behavior:none; -webkit-text-size-adjust:100%; }
+  a { color:inherit; text-decoration:none; }
+  #top { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:10px;
+    height:48px; padding:0 14px; padding-top:env(safe-area-inset-top); background:var(--bg);
+    border-bottom:1px solid var(--line); }
+  #top b { font-weight:700; letter-spacing:.2px; }
+  #who { color:var(--dim); font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #top a.btn { min-height:44px; display:flex; align-items:center; padding:0 10px; color:var(--acc); font-size:14px; }
+  .sect { margin:0; }
+  .shead { display:flex; align-items:center; gap:8px; padding:12px 14px 4px; color:var(--dim); font-size:12px; }
+  .shead .cnt { margin-left:auto; }
+  .shead .off { color:#f7768e; }
+  .row { display:flex; align-items:center; gap:12px; min-height:56px; padding:6px 14px;
+    border-bottom:1px solid var(--line); }
+  .row:active { background:var(--panel); }
+  .face { width:36px; height:36px; border-radius:50%; background:var(--panel); flex:none;
+    display:flex; align-items:center; justify-content:center; overflow:hidden; color:var(--dim); font-size:16px; }
+  .face img { width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
+  .txt { flex:1; min-width:0; }
+  .t1 { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .t2 { color:var(--dim); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tag { flex:none; font-size:12px; padding:3px 8px; border-radius:10px; background:var(--panel); color:var(--dim); }
+  .tag.wait { background:rgba(224,175,104,.18); color:var(--wait); font-weight:600; }
+  .tag.busy { color:var(--busy); }
+  .empty { padding:14px; color:var(--dim); font-size:13px; }
+  #manage { margin-top:20px; border-top:1px solid var(--line); }
+  #manage h2 { font-size:13px; color:var(--dim); font-weight:600; padding:12px 14px 4px; margin:0; }
+  .user { padding:8px 14px; border-bottom:1px solid var(--line); }
+  .user .nm { font-weight:600; }
+  .user .addr { font-size:12px; color:var(--dim); word-break:break-all; margin:2px 0 6px; }
+  .acts { display:flex; gap:6px; flex-wrap:wrap; }
+  button { min-height:44px; padding:0 14px; border:1px solid var(--line); border-radius:10px;
+    background:var(--panel); color:var(--fg); font:inherit; font-size:14px; }
+  button.pri { background:var(--acc); color:#0b1020; border-color:var(--acc); font-weight:600; }
+  button.danger { color:#f7768e; }
+  form.add { display:flex; gap:8px; padding:10px 14px 14px; }
+  form.add input { flex:1; min-width:0; min-height:44px; padding:0 12px; border:1px solid var(--line);
+    border-radius:10px; background:var(--panel); color:var(--fg); font:inherit; font-size:16px; }
+  #foot { padding:14px; padding-bottom:calc(14px + env(safe-area-inset-bottom)); color:var(--dim); font-size:12px; }
+  #toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%);
+    background:var(--acc); color:#0b1020; padding:10px 14px; border-radius:10px; font-size:14px;
+    opacity:0; pointer-events:none; transition:opacity .2s; }
+  #toast.on { opacity:1; }
+  @media (prefers-reduced-motion: reduce) { #toast { transition:none; } }
+</style>
+<header id="top"><b>kasaterm</b><span id="who"></span><a class="btn" id="arona">아로나</a></header>
+<main id="list"><div class="empty">불러오는 중…</div></main>
+<section id="manage" hidden>
+  <h2>폰 주소 — 유저마다 하나</h2>
+  <div id="users"></div>
+  <form class="add" id="addf"><input id="addn" placeholder="이름 (예: 우성)" maxlength="40" autocomplete="off"><button class="pri" type="submit">주소 만들기</button></form>
+</section>
+<footer id="foot"><span id="ver"></span></footer>
+<div id="toast"></div>
+<script>
+// 허브는 `/u/<slug>/`(폰) 또는 `/hub`(로컬) 로 열린다. 그 접두를 그대로 물려받아야
+// 아래 모든 fetch·링크가 같은 자격으로 나간다 — 절대경로 `/term/…` 로 부르면 폰에선 403 이다.
+const ROOT = location.pathname.replace(/\/(hub)?$/, '');
+const $ = (id) => document.getElementById(id);
+const listEl = $('list');
+$('arona').href = `${ROOT}/arona-ui/`;
+
+const toast = (m) => { const t = $('toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 1600); };
+const j = (u, opt) => fetch(u, opt).then((r) => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)));
+
+// 순서: 답을 기다리는 pane 이 맨 위 — 폰을 여는 이유가 대개 그것이다.
+const rank = (p) => p.status === 'waiting' ? 0 : (p.status && p.status !== 'idle' ? 1 : 2);
+const face = (base, p) => {
+  const f = document.createElement('span'); f.className = 'face';
+  if (p.slug) {
+    const img = document.createElement('img');
+    img.src = `${base}/term/avatar/${encodeURIComponent(p.slug)}.png`;
+    img.onerror = () => { img.remove(); f.textContent = '❯'; };
+    f.append(img);
+  } else f.textContent = '❯';
+  return f;
+};
+const badge = (p) => {
+  const b = document.createElement('span');
+  if (p.status === 'waiting') { b.className = 'tag wait'; b.textContent = '● 대기'; }
+  else if (p.status && p.status !== 'idle') { b.className = 'tag busy'; b.textContent = '작업 중'; }
+  else { b.className = 'tag'; b.textContent = '쉼'; }
+  return b;
+};
+// pane id 는 `%3` 꼴 — encodeURIComponent 로 `%253` 이 되어야 서버가 원문을 되찾는다.
+const link = (base, p) => `${base}/term/grid?pane=${encodeURIComponent(p.id)}`;
+
+function section(title, base, panes, labels, extra) {
+  const sect = document.createElement('div'); sect.className = 'sect';
+  const head = document.createElement('div'); head.className = 'shead';
+  const t = document.createElement('span'); t.textContent = title; head.append(t);
+  if (extra) { const e = document.createElement('span'); e.className = extra.cls || ''; e.textContent = extra.text; head.append(e); }
+  const cnt = document.createElement('span'); cnt.className = 'cnt'; cnt.textContent = String(panes.length); head.append(cnt);
+  sect.append(head);
+  // 웹 셸(폰에서 띄운 것)도 싣는다 — 이름이 없어 id 를 접어 보여 준다.
+  const real = panes.map((p) => String(p.id).startsWith('web-') && !p.name
+    ? { ...p, name: `웹 셸 · ${String(p.id).slice(4, 8)}` } : p);
+  if (!real.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = extra && extra.off ? '꺼져 있어요' : 'pane 이 없어요'; sect.append(e); return sect; }
+  // 방(window) 순으로 묶되, 방 안에서는 대기 → 작업 중 → 쉼.
+  real.sort((a, b) => (a.window ?? 99) - (b.window ?? 99) || rank(a) - rank(b));
+  let lastWin = null;
+  for (const p of real) {
+    if (p.window !== lastWin && labels) {
+      lastWin = p.window;
+      const w = document.createElement('div'); w.className = 'shead';
+      w.textContent = (labels[p.window] || `방 ${(p.window ?? 0) + 1}`).split(' · ')[0];
+      sect.append(w);
+    }
+    const a = document.createElement('a'); a.className = 'row'; a.href = link(base, p);
+    const txt = document.createElement('div'); txt.className = 'txt';
+    const t1 = document.createElement('div'); t1.className = 't1'; t1.textContent = p.name || '셸';
+    if (p.color) t1.style.color = p.color;
+    const t2 = document.createElement('div'); t2.className = 't2'; t2.textContent = p.title || (p.cwd ? p.cwd.split('/').pop() : '');
+    txt.append(t1, t2);
+    a.append(face(base, p), txt, badge(p));
+    sect.append(a);
+  }
+  return sect;
+}
+
+let me = null;
+async function load() {
+  const [panes, sess, machines, who] = await Promise.all([
+    j(`${ROOT}/term/panes`).catch(() => []),
+    j(`${ROOT}/sessions`).catch(() => null),
+    j(`${ROOT}/machines`).catch(() => ({ machines: [] })),
+    me ? Promise.resolve(me) : j(`${ROOT}/mobile/me`).catch(() => null),
+  ]);
+  me = who;
+  const frag = document.createDocumentFragment();
+  frag.append(section(who && who.machine ? who.machine : '이 기계', ROOT, panes, sess && sess.labels));
+  for (const m of (machines.machines || [])) {
+    const base = `${ROOT}/m/${encodeURIComponent(m.label)}`;
+    frag.append(section(m.label, base, m.online ? (m.panes || []) : [], null,
+      m.online ? { text: '온라인', cls: '' } : { text: '오프라인', cls: 'off', off: true }));
+  }
+  listEl.replaceChildren(frag);
+  if (who) {
+    $('who').textContent = who.name ? `${who.name} 의 주소` : '';
+    if (who.can_manage && $('manage').hidden) { $('manage').hidden = false; loadUsers(); }
+  }
+}
+
+async function loadUsers() {
+  const r = await j(`${ROOT}/mobile/users`).catch(() => null);
+  if (!r) return;
+  const box = $('users'); box.replaceChildren();
+  for (const u of r.users) {
+    const addr = u.url || `${location.origin}${u.path}`;
+    const d = document.createElement('div'); d.className = 'user';
+    const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = u.name + (u.owner ? ' (주인)' : '');
+    const ad = document.createElement('div'); ad.className = 'addr'; ad.textContent = addr;
+    const acts = document.createElement('div'); acts.className = 'acts';
+    const copy = document.createElement('button'); copy.textContent = '주소 복사';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(addr); toast('복사됐어요'); }
+      catch { prompt('복사해서 폰에 보내세요', addr); }
+    };
+    const rot = document.createElement('button'); rot.textContent = '새 주소';
+    rot.onclick = async () => {
+      if (!confirm(`${u.name} 의 주소를 새로 뽑을까요? 옛 주소는 바로 죽어요.`)) return;
+      await j(`${ROOT}/mobile/users?name=${encodeURIComponent(u.name)}&rotate=1`, { method: 'POST' }).catch((e) => toast(`실패 ${e.message}`));
+      loadUsers();
+    };
+    acts.append(copy, rot);
+    if (!u.owner) {
+      const del = document.createElement('button'); del.className = 'danger'; del.textContent = '지우기';
+      del.onclick = async () => {
+        if (!confirm(`${u.name} 의 주소를 지울까요?`)) return;
+        await j(`${ROOT}/mobile/users?name=${encodeURIComponent(u.name)}`, { method: 'DELETE' }).catch((e) => toast(`실패 ${e.message}`));
+        loadUsers();
+      };
+      acts.append(del);
+    }
+    d.append(nm, ad, acts);
+    box.append(d);
+  }
+}
+$('addf').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const name = $('addn').value.trim();
+  if (!name) return;
+  const r = await j(`${ROOT}/mobile/users?name=${encodeURIComponent(name)}`, { method: 'POST' }).catch((e) => { toast(`실패 ${e.message}`); return null; });
+  if (r) { $('addn').value = ''; toast(`${r.user.name} 주소가 생겼어요`); loadUsers(); }
+});
+
+load().catch(() => { listEl.innerHTML = '<div class="empty">목록을 못 받았어요 — 새로고침</div>'; });
+// pane 은 수시로 생기고 닫힌다. 보고 있을 때만 5초마다.
+setInterval(() => { if (document.visibilityState === 'visible') load().catch(() => {}); }, 5000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load().catch(() => {}); });
+</script>

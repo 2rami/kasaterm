@@ -38,8 +38,13 @@ fn main() -> anyhow::Result<()> {
     // 두면 이 데몬이 낳는 모든 셸이 **띄운 사람의 페르소나·계정 프록시·pane id** 를
     // 달고 태어난다(2026-08-27 실측: 원격 pane 의 claude 가 케이 페르소나 + 남의
     // 계정 프록시 포트로 떴다). 데몬 셸은 평범한 로그인 셸로 태어나야 한다.
+    // 설정 덮어쓰기 둘은 남긴다 — 정체(pane id·페르소나·계정)가 아니라 **이 데몬
+    // 자신이 어느 명부·유저 파일을 볼지**라, 검증 리그가 사용자 파일을 안 건드리고
+    // 가짜 기계·가짜 유저를 가리키는 유일한 손이다(machines.rs·mobile.rs 머리말).
+    const KEEP: [&str; 2] = ["KASATERM_MACHINES", "KASATERM_MOBILE_USERS"];
     let stale: Vec<String> = std::env::vars()
         .map(|(k, _)| k)
+        .filter(|k| !KEEP.contains(&k.as_str()))
         .filter(|k| {
             k.starts_with("KASATERM_")
                 || k == "CMUX_SOCKET_PATH"
