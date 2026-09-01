@@ -3622,13 +3622,19 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 ///
 /// `·` 는 최근 claude 의 점 프레임이다.
 ///
+/// `●`(U+25CF)는 **reduce motion**(/config) 스피너다 — 애니메이션 없이 이 원
+/// 하나로 고정된다. 2026-09-02 실측: `● Whatchamacalliting… (9s · ↓ 442 tokens)`.
+/// 집합에 없던 동안 reduce motion pane 은 스피너를 못 찾아 테마·학생 도트·working
+/// 판정이 전부 죽었다(거노: 「스피너 모양이 달라서 테마가 안붙네」). 응답 마커
+/// `⏺`(U+23FA)와는 다른 글자라 대화 본문과 안 섞인다.
+///
 /// ASCII `*` 는 흔한 글자다. 그래도 오탐이 안 늘어나는 것은 이 함수를 쓰는 자리가
 /// 전부 **행의 첫 글자(col<8)** 라는 관문에 더해 「`…` 뒤 괄호 안의 경과시간」이나
 /// 「바로 아래 행이 `⎿ Tip:`」 같은 두 번째 관문을 요구하기 때문이다 — 마크다운
 /// 불릿(`* 항목`)은 그 두 번째 관문을 통과하지 못한다.
 pub(crate) fn is_spinner_head(ch: char) -> bool {
     let cp = ch as u32;
-    (0x2720..=0x274F).contains(&cp) || ch == '·' || ch == '*'
+    (0x2720..=0x274F).contains(&cp) || ch == '·' || ch == '*' || ch == '●'
 }
 
 /// `spinner_row_col` 의 경과시간-괄호 요구에 떨어진 행을, 바로 아래의 `Tip:` 행이
@@ -3682,6 +3688,10 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
 /// 세웠던 것). 그래서 이 함수는 **후보만** 대고, 확정은 App 쪽 프로브가
 /// **글리프가 움직이는지**로 한다 — 진짜 스피너는 별 프레임(✢✶✽✻✳·)이 계속
 /// 바뀌고 인용문은 멈춰 있다. (행, 열, 글리프)를 돌려준다.
+///
+/// reduce motion(`●` 고정)은 글리프가 안 움직여 이 확정이 영영 안 난다 — 그래도
+/// Enter 직후는 SUBMIT_TRUST 즉시 신뢰가 덮고, 나머지는 ~3초 뒤 경과시간 괄호가
+/// 붙는 순간 본판정이 잡는다. 이 모드의 조기 부착만 포기하는 것이고 감지는 산다.
 pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize, char)> {
     let last = rows
         .iter()
@@ -4996,6 +5006,29 @@ mod spinner_tests {
         let rows = vec![
             row_from(""),
             row_from("* 항목 하나와 그 설명…"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), None);
+    }
+
+    // reduce motion(/config) 회귀 방지: 스피너가 돌지 않고 `●` 하나로 고정된다.
+    // 아래 문자열은 2026-09-02 reduce motion pane 화면 그대로다 — 집합에 없던
+    // 동안 이 모드에서 테마·학생 도트·working 판정이 전부 죽어 있었다.
+    #[test]
+    fn spinner_detects_reduce_motion_circle() {
+        let rows = vec![
+            row_from(""),
+            row_from("● Whatchamacalliting… (9s · ↓ 442 tokens)"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), Some((1, 0)));
+    }
+
+    // `●` 를 인정해도 그 글리프로 시작하는 본문 줄임표 문장은 안 걸려야 한다 —
+    // 가르는 것은 `*` 와 같은 두 번째 관문(경과시간 괄호)이다.
+    #[test]
+    fn spinner_ignores_circle_prose() {
+        let rows = vec![
+            row_from(""),
+            row_from("● 항목 하나와 그 설명…"),
         ];
         assert_eq!(find_claude_spinner(&rows), None);
     }

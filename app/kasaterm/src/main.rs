@@ -450,6 +450,7 @@ pub(crate) fn strip_activity_prefix(s: &str) -> &str {
                 '*' | '\u{2217}' | '\u{FF0A}'   // ASCII * / ∗ / ＊
                 | '\u{2721}'..='\u{2749}'        // ✢..❉ dingbat asterisks·stars
                 | '\u{2800}'..='\u{28FF}'        // braille 스피너 프레임
+                | '\u{25CF}'                     // ● reduce motion 고정 스피너 (2026-09-02)
             )
     })
 }
@@ -9773,6 +9774,8 @@ mod tests {
             "세션 요약 디버깅"
         );
         assert_eq!(strip_activity_prefix("⠐⠑ 이름"), "이름");
+        // reduce motion(/config)은 스피너가 ● 하나로 고정된다 — 2026-09-02 실측.
+        assert_eq!(strip_activity_prefix("● 스피너 판독 수리"), "스피너 판독 수리");
         // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
         assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
         assert_eq!(strip_activity_prefix("main.rs · vim"), "main.rs · vim");
