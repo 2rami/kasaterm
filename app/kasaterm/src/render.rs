@@ -783,6 +783,9 @@ impl App {
         let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // statusline 자리표시자(U+FFFC) → 학생 프사(bust, 정적 1프레임).
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // 상태줄 모델 표식 → Claude/OpenAI 공식 SVG. 셀 글리프 대신 같은 크기의
+        // 오버레이를 써 Claude·Codex의 모델 시작점과 색을 정확히 맞춘다.
+        let mut status_model_icons: Vec<StatusModelIconSlot> = Vec::new();
         // statusline 프사의 hover 확대·클릭용 (학생이름, slug, rect). profile_slots
         // 와 달리 학생 이름을 들고 있어(hover 큰 bust·클릭→학생설정 딥링크) — /resume
         // 피커 프사는 이름을 모르므로 여기 안 담고 statusline 프사만.
@@ -1124,21 +1127,23 @@ impl App {
                         }
                     }
                 }
-                if agent_kind == Some(kasa_pty::AgentKind::Codex) {
-                    let cwd = self.pane_cwd_cache.get(id.as_str()).cloned();
-                    let project = cwd
-                        .as_ref()
-                        .and_then(|path| path.file_name())
-                        .and_then(|name| name.to_str())
-                        .map(str::to_string);
-                    let branch = cwd.as_ref().and_then(|path| {
-                        self.window_git
-                            .lock()
-                            .ok()
-                            .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
-                    });
-                    restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
-                }
+                // Codex 프로세스 판정은 부팅 직후 statusline보다 한두 프레임 늦을 수
+                // 있다. 엄격한 `model effort · … · Context N%` 문법을
+                // 재작성 함수가 자체 검증하므로 모든 pane에 시도하고, Claude·셸 등
+                // 다른 화면은 false로 그대로 둔다. 이래야 첫 상태줄부터 안 밀린다.
+                let cwd = self.pane_cwd_cache.get(id.as_str()).cloned();
+                let project = cwd
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string);
+                let branch = cwd.as_ref().and_then(|path| {
+                    self.window_git
+                        .lock()
+                        .ok()
+                        .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
+                });
+                restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -1158,6 +1163,18 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
+                {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    if let Some(slot) = take_status_model_icon_slot(
+                        &mut composed,
+                        body_left,
+                        body_top,
+                        self.cell.w * fs,
+                        self.cell.h * fs,
+                    ) {
+                        status_model_icons.push(slot);
+                    }
+                }
                 // 인라인 이미지(OSC 1337) — PTY 가 절대 줄 앵커를 뷰포트 좌표로
                 // 환산해 준 그대로 그린다. GUI 는 스크롤 상태를 모르므로 여기서
                 // 계산을 더하면 반드시 어긋난다(정본은 alacritty Term). 클립은
@@ -3563,6 +3580,7 @@ impl App {
                 }
             }
             g.draw_cells(&slot_views);
+            paint_status_model_icons(g, &status_model_icons);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
                 let key = format!(
                     "{id}-p{:x}-r{rot}-f{}",

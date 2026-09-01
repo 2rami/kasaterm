@@ -2200,16 +2200,16 @@ impl App {
         // 사본을 만들지 않고 `render::` 함수를 그대로 부른다. 오늘 같은 로직 두 벌이
         // 세 번 물었고(칩 관문·`is_rule`·인레이), 그때마다 한쪽만 고쳐졌다.
         if let Some((cells, ..)) = snap.as_mut() {
-            let runs_claude = self
+            let agent_kind = self
                 .pty
                 .get(pane_id.as_str())
-                .and_then(|p| p.active_agent())
-                .is_some();
-            if runs_claude {
+                .and_then(|p| p.active_agent());
+            crate::render::restyle_codex_status_line(cells, None, None);
+            if agent_kind.is_some() {
                 crate::render::style_prompt_box(cells, accent);
             }
         }
-        let (sprites, anim_ms) = {
+        let (sprites, status_model_icon, anim_ms) = {
             let (cl, ct, cw, ch) = self
                 .aux_windows
                 .get(idx)
@@ -2222,7 +2222,10 @@ impl App {
                 }
                 _ => crate::render::StudentOverlays::default(),
             };
-            (s, self.version_anim_start.elapsed().as_millis() as u64)
+            let model = snap.as_mut().and_then(|(cells, ..)| {
+                crate::render::take_status_model_icon_slot(cells, cl, ct, cw, ch)
+            });
+            (s, model, self.version_anim_start.elapsed().as_millis() as u64)
         };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
@@ -2411,6 +2414,9 @@ impl App {
             default_fg: crate::cells::default_fg(),
         };
         a.gpu.draw_cells(&[slot]);
+        if let Some(slot) = status_model_icon.as_ref() {
+            crate::render::paint_status_model_icons(&mut a.gpu, std::slice::from_ref(slot));
+        }
         // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키. 셀 위 패스라
         // 비워 둔 자리표시자 위에 얼굴이 또렷하게 얹힌다.
         crate::render::paint_student_overlays(&mut a.gpu, &sprites, anim_ms);
@@ -2565,12 +2571,12 @@ impl App {
         // 별도창에 `@aru-p12` 칩이 남아 있었다). 방 창은 pane 이 여럿이라 각자
         // 자기 accent 로 도색한다.
         for (pid, cells, ..) in snaps.iter_mut() {
-            let runs_claude = self
+            let agent_kind = self
                 .pty
                 .get(pid.as_str())
-                .and_then(|p| p.active_agent())
-                .is_some();
-            if !runs_claude {
+                .and_then(|p| p.active_agent());
+            crate::render::restyle_codex_status_line(cells, None, None);
+            if agent_kind.is_none() {
                 continue;
             }
             if let Some(col) = pane_cols.get(pid) {
@@ -2583,12 +2589,15 @@ impl App {
         // 수 있다.
         let cell_left = self.aux_windows.get(idx).map_or(PANE_INNER_X, |a| a.cell_left());
         let mut student = crate::render::StudentOverlays::default();
+        let mut status_model_icons = Vec::new();
         for (pid, cells, x, y, ..) in snaps.iter_mut() {
+            let ox = cell_left + *x as f32 * cw;
+            let oy = AUX_CELL_TOP + *y as f32 * ch;
             let s = self.aux_student_slots(
                 pid,
                 cells,
-                cell_left + *x as f32 * cw,
-                AUX_CELL_TOP + *y as f32 * ch,
+                ox,
+                oy,
                 cw,
                 ch,
             );
@@ -2600,6 +2609,11 @@ impl App {
             student.waiting.extend(s.waiting);
             student.standing.extend(s.standing);
             student.profile.extend(s.profile);
+            if let Some(slot) =
+                crate::render::take_status_model_icon_slot(cells, ox, oy, cw, ch)
+            {
+                status_model_icons.push(slot);
+            }
         }
         let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
         // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
@@ -2658,6 +2672,7 @@ impl App {
             })
             .collect();
         a.gpu.draw_cells(&slots);
+        crate::render::paint_status_model_icons(&mut a.gpu, &status_model_icons);
         // pane 경계 — 나눠져 있다는 걸 보이게. 포커스 pane 은 그 학생색으로(메인
         // 그리드의 active 테두리와 같은 신호). 학생이 없으면 종전대로 accent.
         for (pid, x, y, pw, ph) in &rects {
