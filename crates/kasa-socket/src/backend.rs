@@ -563,6 +563,11 @@ pub trait Backend: Send + Sync {
     ) -> Result<String> {
         anyhow::bail!("migrate back: 이 백엔드는 지원하지 않는다")
     }
+    /// 기계 하나의 학생 pane 전부를 이 창의 거울로 **펼친다** — 원격 방(창)마다
+    /// 이쪽에도 새 창을 만들어 같은 묶음으로 미러링한다. GUI 백엔드 전용.
+    fn unfold_machine(&self, _label: &str) -> Result<String> {
+        anyhow::bail!("unfold: 이 백엔드는 지원하지 않는다")
+    }
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
     fn remote_pane(

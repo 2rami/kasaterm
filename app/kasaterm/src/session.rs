@@ -629,6 +629,178 @@ impl App {
         Ok(new_id)
     }
 
+    /// 방 펼치기 — 명부 기계 하나의 학생 pane 전부를 이 창에 거울로 앉힌다.
+    ///
+    /// 「완전동기화되는 세션」의 보기 쪽 절반(2026-09-02 지시 「일단 만들어봐」):
+    /// 학생 본체는 그 기계에 그대로 살고, 여기는 원격 방(window)마다 새 창을 하나씩
+    /// 만들어 거울을 균등 배치한다. 목록은 machines 폴링 캐시(`/term/panes`)를 그대로
+    /// 쓰므로 원격에 새 창구가 필요 없고, 이미 거울이 있는 학생은 건너뛴다 — 두 번
+    /// 눌러도 같은 학생이 둘 뜨지 않는다. 배치 비율까지 원본 그대로 재현하는 것은
+    /// 원격 배치 창구가 생긴 뒤의 일이고, 지금은 방 단위 균등 배치가 정본이다.
+    pub(crate) fn unfold_machine(&mut self, label: &str) -> Result<String> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let m = kasa_mcp::machines::find(label).ok_or_else(|| {
+            anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다")
+        })?;
+        let snap = kasa_mcp::machines::snapshot();
+        let entry = snap
+            .iter()
+            .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label))
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 상태를 아직 모른다 — 잠시 뒤 다시"))?;
+        if entry.get("online").and_then(|v| v.as_bool()) != Some(true) {
+            anyhow::bail!("{label} 이 지금 안 닿는다 — 그 기계의 kasaterm 이 떠 있는지 확인");
+        }
+        let panes = entry
+            .get("panes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // 이 기계로 이미 난 거울들 — remote_id 는 원격 GUI pane id 와 같은 값이라
+        // (이사 탭의 미러 대표 규칙과 동일) 그대로 집합 키가 된다.
+        let mirrored: std::collections::HashSet<String> = kasa_pty::live_sessions()
+            .into_iter()
+            .filter_map(|id| kasa_mcp::remote::remote_info(&id))
+            .filter(|i| i.base == m.base)
+            .map(|i| i.remote_id)
+            .collect();
+        // (원격 방 번호, 원격 pane id, 학생 이름). GUI pane(`%…`)만 — 같은 목록에
+        // 헤드리스 세션(`web-…`)도 실려 오는데 그건 화면의 방이 아니다.
+        let mut targets: Vec<(u64, String, String)> = panes
+            .iter()
+            .filter_map(|p| {
+                let rid = p.get("id")?.as_str()?.to_string();
+                if !rid.starts_with('%') || mirrored.contains(&rid) {
+                    return None;
+                }
+                let name =
+                    p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let win = p.get("window").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+                Some((win, rid, name))
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(format!(
+                "{label}: 펼칠 학생이 없다 — 전부 이미 거울로 있거나 빈 기계다"
+            ));
+        }
+        targets.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let mut rooms: Vec<Vec<(String, String)>> = Vec::new();
+        let mut cur_win: Option<u64> = None;
+        for (w, rid, name) in targets {
+            if cur_win != Some(w) {
+                cur_win = Some(w);
+                rooms.push(Vec::new());
+            }
+            rooms.last_mut().unwrap().push((rid, name));
+        }
+        let room_n = rooms.len();
+        let total: usize = rooms.iter().map(Vec::len).sum();
+        let mut ok_n = 0usize;
+        let mut fail: Vec<String> = Vec::new();
+        for room in rooms {
+            // 방 하나 = 새 로컬 창. 첫 학생은 새 창의 기본 셸 자리를 스왑으로
+            // 차지하고(migrate 와 같은 insert_pty 교체 — 옛 reader 를 먼저 세워
+            // EOF 죽음표시 경주를 닫는다), 나머지는 균등 트리로 앉는다.
+            self.new_window();
+            let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
+                fail.push("새 창의 기본 pane 을 못 얻었다".into());
+                continue;
+            };
+            let (win_cols, win_rows) = self.window_cells();
+            let mut seated: Vec<(String, String)> = Vec::new();
+            for (rid, name) in &room {
+                self.set_toast(format!(
+                    "{label} 펼치는 중 — {}/{total}",
+                    ok_n + fail.len() + 1
+                ));
+                self.render_frame();
+                let local_id =
+                    if seated.is_empty() { host.clone() } else { self.alloc_pane_id() };
+                match kasa_mcp::remote::connect(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: m.base.clone(),
+                        pane: Some(rid.clone()),
+                        cwd: None,
+                        token: None,
+                        identity: kasa_mcp::remote::RemoteIdentity {
+                            label: m.label.clone(),
+                            remote_cwd: None,
+                            origin_cwd: None,
+                        },
+                    },
+                    &local_id,
+                    win_cols,
+                    win_rows,
+                ) {
+                    Ok(remote) => {
+                        if seated.is_empty() {
+                            if let Some(old) = self.pty.get(&host).cloned() {
+                                old.stop_reader();
+                            }
+                        }
+                        self.pump_pty_screens(
+                            remote.session.screens.clone(),
+                            local_id.clone(),
+                            std::sync::Arc::downgrade(&remote.session),
+                        );
+                        self.insert_pty(local_id.clone(), remote.session.clone());
+                        self.dead_panes.lock().unwrap().retain(|x| x != &local_id);
+                        seated.push((local_id, name.clone()));
+                        ok_n += 1;
+                    }
+                    Err(e) => fail.push(format!("{rid}({name}): {e:#}")),
+                }
+            }
+            if seated.is_empty() {
+                continue; // 새 창은 빈 셸로 남는다 — 실패 사유가 아래 보고에 찍힌다.
+            }
+            if seated.len() > 1 {
+                let others: Vec<String> =
+                    seated.iter().skip(1).map(|(id, _)| id.clone()).collect();
+                let dir = crate::layout::pick_split_axis(
+                    win_cols as f32 * self.cell.w.max(1.0),
+                    win_rows as f32 * self.cell.h.max(1.0),
+                    win_cols,
+                    win_rows,
+                );
+                let tree = kasa_pty::fleet(
+                    &seated[0].0,
+                    &others,
+                    dir,
+                    1.0 / seated.len() as f32,
+                );
+                if !self
+                    .pty_layout
+                    .as_mut()
+                    .is_some_and(|l| l.replace_leaf(&seated[0].0, tree))
+                {
+                    fail.push("배치 트리 심기 실패".into());
+                }
+            }
+            // 몸통이 남의 기계라도 이 창의 학생은 같은 사람이어야 한다 —
+            // 이름·색·얼굴이 없는 무명 pane 방지(spawn_remote_pane 과 같은 규칙).
+            for (id, name) in &seated {
+                if !name.is_empty() {
+                    self.relabel_pane(id, name);
+                }
+            }
+            self.ws.lock().unwrap().active_pane = Some(seated[0].0.clone());
+            self.resize_backend(win_cols, win_rows);
+            self.publish_pty_layout();
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        let mut msg = format!("{label} 펼침 — 학생 {ok_n}명 · 방(창) {room_n}개");
+        if !fail.is_empty() {
+            msg.push_str(&format!(" · 실패 {}건: {}", fail.len(), fail.join(" / ")));
+        }
+        self.set_toast(msg.clone());
+        Ok(msg)
+    }
+
     /// 로컬 상주 PTY 데몬(kasa-serve-web)을 보장한다 — 승격된 학생의 새 집.
     ///
     /// 판정은 입양 소켓으로 한다: HTTP 포트는 남이 차지할 수 있지만 입양 소켓
