@@ -53,7 +53,9 @@ impl Reach {
 }
 
 fn registry_dir() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude/sessions"))
+    // Windows GUI 프로세스는 HOME 이 없다 — home_dir 이 USERPROFILE 로 폴백해야
+    // 데스크탑에서 세션 명부가 통째로 비지 않는다(2026-09-01 데스크탑 수신 실패 원인).
+    Some(crate::home_dir()?.join(".claude/sessions"))
 }
 
 /// 명부를 통째로 읽는다. 파일 수십 개 규모라 캐시 없이 매번 읽어도 싸고,

@@ -1628,10 +1628,10 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = kasa_socket::home_dir().unwrap_or_default();
     let bindings =
-        read_string_map(&Path::new(&home).join(".config/kasaterm/session_characters.json"));
-    let colors = student_colors(&Path::new(&home).join(".config/kasaterm/characters.json"));
+        read_string_map(&home.join(".config/kasaterm/session_characters.json"));
+    let colors = student_colors(&home.join(".config/kasaterm/characters.json"));
     let live = live_session_ids();
     const RESET: &str = "\x1b[0m";
     const DIM: &str = "\x1b[2m";
@@ -1774,8 +1774,8 @@ fn ansi_fg(hex: &str) -> String {
 /// pid 생존(kill -0) 확인. 중복 --resume(프로세스 갈라짐) 방지용.
 fn live_session_ids() -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dir = Path::new(&home).join(".claude/sessions");
+    let home = kasa_socket::home_dir().unwrap_or_default();
+    let dir = home.join(".claude/sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else { return out };
     for e in entries.flatten() {
         let Some(v) = std::fs::read_to_string(e.path())

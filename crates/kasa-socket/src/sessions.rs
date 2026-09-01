@@ -24,9 +24,9 @@ pub fn is_uuid(s: &str) -> bool {
 /// `cwd`'s session jsonls into. Encoding matches claude code: every `/` and `.`
 /// in the absolute cwd becomes `-`. None when `$HOME` is unset.
 pub fn claude_project_dir(cwd: &Path) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    let home = crate::home_dir()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    Some(PathBuf::from(home).join(".claude/projects").join(encoded))
+    Some(home.join(".claude/projects").join(encoded))
 }
 
 /// Full jsonl path for session `id` (a uuid) under `cwd`. Used both to list
@@ -51,8 +51,8 @@ pub fn session_jsonl_path_anywhere(id: &str) -> Option<PathBuf> {
     if !is_uuid(id) {
         return None;
     }
-    let home = std::env::var_os("HOME")?;
-    let root = PathBuf::from(home).join(".claude/projects");
+    let home = crate::home_dir()?;
+    let root = home.join(".claude/projects");
     let name = format!("{id}.jsonl");
     for proj in std::fs::read_dir(&root).ok()?.flatten() {
         let candidate = proj.path().join(&name);
@@ -785,8 +785,8 @@ fn last_exchange(path: &Path, harness: &str) -> String {
 /// 모든 프로젝트를 가로지르는 최근 claude 세션. `recent_sessions_for` 는 한 cwd
 /// 안만 보므로 "이 프로젝트" 목록에 맞고, 통합 피커에는 이쪽이 필요하다.
 pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let root = PathBuf::from(home).join(".claude/projects");
+    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let root = home.join(".claude/projects");
     let Ok(projects) = std::fs::read_dir(&root) else { return Vec::new() };
 
     let mut files: Vec<(u64, PathBuf)> = Vec::new();
@@ -977,14 +977,14 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
 /// 전수 스캔은 681개에 0.14초(debug)라 그 값을 살 이유가 없다. 남긴 상한은
 /// 폭주 방어일 뿐이고, 걸리면 조용히 자르는 게 아니라 애초에 도달하지 않는 수다.
 pub fn recent_codex_sessions(limit: usize) -> Vec<RecentSession> {
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    recent_codex_sessions_in(&PathBuf::from(home).join(".codex/sessions"), limit)
+    let Some(home) = crate::home_dir() else { return Vec::new() };
+    recent_codex_sessions_in(&home.join(".codex/sessions"), limit)
 }
 
 /// 한 프로젝트 안의 codex 세션만. rollout 이 `payload.cwd` 를 남기므로 가능하다.
 pub fn recent_codex_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let root = PathBuf::from(home).join(".codex/sessions");
+    let Some(home) = crate::home_dir() else { return Vec::new() };
+    let root = home.join(".codex/sessions");
     codex_sessions(&root, limit, Some(&cwd.to_string_lossy()))
 }
 
