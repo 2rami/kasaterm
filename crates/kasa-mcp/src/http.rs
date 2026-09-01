@@ -111,8 +111,8 @@ fn now_unix() -> f64 {
 }
 
 fn schedule_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/schedule.json"))
+    let home = kasa_socket::home_dir()?;
+    Some(home.join(".config/kasaterm/schedule.json"))
 }
 
 fn read_schedule() -> Vec<ScheduleItem> {
@@ -426,7 +426,9 @@ async fn open_file_handler(
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     let raw = params.get("path").cloned().unwrap_or_default();
     let path = match raw.strip_prefix("~/") {
-        Some(rest) => std::env::var("HOME").map(|h| format!("{h}/{rest}")).unwrap_or(raw),
+        Some(rest) => kasa_socket::home_dir()
+            .map(|h| format!("{}/{rest}", h.display()))
+            .unwrap_or(raw),
         None => raw,
     };
     if path.is_empty() {
@@ -452,8 +454,8 @@ async fn image_file_handler(
     let raw = params.get("path").cloned().unwrap_or_default();
     // 화면 파싱 경로는 `~/...` 일 수 있다(터미널이 ~ 로 표시) — HOME 으로 확장.
     let path = match raw.strip_prefix("~/") {
-        Some(rest) => std::env::var("HOME")
-            .map(|h| format!("{h}/{rest}"))
+        Some(rest) => kasa_socket::home_dir()
+            .map(|h| format!("{}/{rest}", h.display()))
             .unwrap_or(raw.clone()),
         None => raw.clone(),
     };
@@ -1039,8 +1041,8 @@ async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 /// .app Resources → 레포 소스). 파싱 실패 파일은 건너뛰고 다음 후보로 (py 동일).
 fn characters_candidate_paths() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        v.push(std::path::PathBuf::from(home).join(".config/kasaterm/characters.json"));
+    if let Some(home) = kasa_socket::home_dir() {
+        v.push(home.join(".config/kasaterm/characters.json"));
     }
     if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
         v.push(std::path::PathBuf::from(p).join("characters.json"));
@@ -1150,8 +1152,8 @@ async fn slash_commands_handler(backend: Arc<dyn Backend>) -> impl IntoResponse 
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     let mut cmds: Vec<serde_json::Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    if let Ok(home) = std::env::var("HOME") {
-        let home = std::path::Path::new(&home);
+    if let Some(home) = kasa_socket::home_dir() {
+        let home = home.as_path();
         // ~/.claude/skills/<name>/SKILL.md → /<name>
         if let Ok(rd) = std::fs::read_dir(home.join(".claude/skills")) {
             for e in rd.flatten() {
@@ -2294,7 +2296,9 @@ pub fn claude_bin() -> std::path::PathBuf {
             return p.into();
         }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = kasa_socket::home_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let candidates = [
         format!("{home}/.claude/local/claude"),
         format!("{home}/.npm-global/bin/claude"),
@@ -3061,7 +3065,7 @@ fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Val
     let account_dir = account_dir.filter(|s| !s.is_empty());
     let creds_dir = match account_dir {
         Some(d) => d.to_string(),
-        None => format!("{}/.claude", std::env::var("HOME").ok()?),
+        None => format!("{}/.claude", kasa_socket::home_dir()?.display()),
     };
     let file = std::path::PathBuf::from(&creds_dir).join(".credentials.json");
     let from_file = std::fs::read_to_string(&file)
@@ -3284,8 +3288,8 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 /// 사슬이 죽고**, 재시작 때 전 pane 이 로그아웃된다(2026-08-19 실사고). 읽기만
 /// 하는 한 그 경로는 열리지 않는다.
 fn active_vault_dir() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let root = std::path::PathBuf::from(home).join(".config/kasaterm/claude-accounts");
+    let home = kasa_socket::home_dir()?;
+    let root = home.join(".config/kasaterm/claude-accounts");
     let raw = std::fs::read_to_string(root.join("_active/workbench-stamp.json")).ok()?;
     active_vault_in(&root, &raw)
 }
@@ -3703,8 +3707,8 @@ fn slot_label(dir: &str) -> &str {
 /// 슬롯 경로를 키로 쓰므로 계정을 늘려도 파일이 안 늘고, 계정을 지워도 남은 항목이
 /// 다른 계정 숫자로 새지 않는다.
 fn usage_cache_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/usage-cache.json"))
+    let home = kasa_socket::home_dir()?;
+    Some(home.join(".config/kasaterm/usage-cache.json"))
 }
 
 /// 스냅샷에서 `dir` 슬롯의 usage 본문을 꺼낸다 — **하루 이내** 기록만.
@@ -3793,8 +3797,8 @@ async fn messages_handler(
 
 /// ~/.config/kasaterm/schale-state.json 경로.
 fn schale_state_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/schale-state.json"))
+    let home = kasa_socket::home_dir()?;
+    Some(home.join(".config/kasaterm/schale-state.json"))
 }
 
 /// schale-state.json 읽기. 파일 없으면 초기값 반환.
@@ -4194,8 +4198,8 @@ async fn term_repo_post(
 /// 원자 교체한다. 드물게 서로의 갱신을 덮을 수 있지만 이 파일은 claude 가
 /// 수시로 다시 채우는 캐시라 잃어도 다음 실행이 복구한다.
 fn preseed_claude_trust(path: &str) {
-    let Ok(home) = std::env::var("HOME") else { return };
-    let cfg = std::path::Path::new(&home).join(".claude.json");
+    let Some(home) = kasa_socket::home_dir() else { return };
+    let cfg = home.join(".claude.json");
     let Ok(raw) = std::fs::read_to_string(&cfg) else { return };
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
     let Some(projects) = v
@@ -4223,7 +4227,10 @@ async fn term_spawn_post(
 ) -> impl IntoResponse {
     let id = format!("web-{}", uuid::Uuid::new_v4());
     let opts = kasa_pty::PtyOptions {
-        cwd: q.get("cwd").cloned().or_else(|| std::env::var("HOME").ok()),
+        cwd: q
+            .get("cwd")
+            .cloned()
+            .or_else(|| kasa_socket::home_dir().map(|p| p.display().to_string())),
         cols: q.get("cols").and_then(|v| v.parse().ok()).unwrap_or(120),
         rows: q.get("rows").and_then(|v| v.parse().ok()).unwrap_or(32),
         pane_id: id.clone(),
@@ -4809,8 +4816,8 @@ fn bind_addr() -> String {
 }
 
 fn remote_conf_bind() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".config/kasaterm/remote.json");
+    let home = kasa_socket::home_dir()?;
+    let path = home.join(".config/kasaterm/remote.json");
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     v.get("bind")?
@@ -4821,8 +4828,8 @@ fn remote_conf_bind() -> Option<String> {
 }
 
 fn remote_token_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/remote-token"))
+    let home = kasa_socket::home_dir()?;
+    Some(home.join(".config/kasaterm/remote-token"))
 }
 
 /// 원격 접속용 토큰. `session_token` 과 달리 **디스크에 남는다** — 프로세스마다
@@ -5078,7 +5085,7 @@ async fn term_ws_run(
     let (sess, mirrored, self_id) = if pane.is_empty() {
         let id = format!("web-{}", uuid::Uuid::new_v4());
         let opts = kasa_pty::PtyOptions {
-            cwd: cwd.or_else(|| std::env::var("HOME").ok()),
+            cwd: cwd.or_else(|| kasa_socket::home_dir().map(|p| p.display().to_string())),
             cols: 80,
             rows: 24,
             pane_id: id.clone(),
