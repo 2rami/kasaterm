@@ -794,6 +794,7 @@ fn print_help() {
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 학생은 안 죽는다
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
+  kasaterm-cli unfold <라벨>                  # 기계의 학생 pane 전부를 거울로 펼침
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
@@ -1041,6 +1042,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "force": args.iter().any(|a| a == "--force"),
                 }),
             )
+        }
+        // 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로 펼친다.
+        "unfold" => {
+            let label = args
+                .first()
+                .cloned()
+                .ok_or_else(|| anyhow!("unfold 는 기계 라벨이 필요해요 (예: unfold 맥미니)"))?;
+            ("machine.unfold", json!({ "label": label }))
         }
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
