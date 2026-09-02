@@ -4116,8 +4116,10 @@ fn applescript_quote(s: &str) -> String {
 /// 기본 브라우저로 URL 열기 — macOS `open`, Windows `cmd /C start`, 그 외 `xdg-open`.
 /// BA GUI 버튼이 arona-ui 를 외부 탭으로 띄울 때 쓴다(wry 임베드 비활성 대체).
 pub(crate) fn open_url_in_browser(url: &str) {
+    // 절대경로다 — pane 셸에 `open` 셰임(install_open_shim)이 깔려 있어서, 이름으로
+    // 부르면 그 셰임 → 앱 → 다시 여기로 도는 고리가 될 수 있다.
     #[cfg(target_os = "macos")]
-    let _ = crate::proc::command("open").arg(url).spawn();
+    let _ = crate::proc::command("/usr/bin/open").arg(url).spawn();
     #[cfg(target_os = "windows")]
     let _ = crate::proc::command("cmd")
         .args(["/C", "start", "", url])

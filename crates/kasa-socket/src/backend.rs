@@ -970,6 +970,13 @@ pub trait Backend: Send + Sync {
     fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
+    /// URL 을 **사람이 보는 브라우저**로 — 그 pane 을 거울로 보는 기계가 있으면
+    /// 거기로 되돌리고, 없으면 이 기계의 기본 브라우저. `target` 은 요청 pane
+    /// (`$KASATERM_PANE_ID`). 웹 pane(`open_preview kind=web`)과 달리 화면 안에
+    /// 아무것도 안 만든다.
+    fn open_url(&self, _url: &str, _target: Option<&str>) -> Result<()> {
+        anyhow::bail!("open_url not supported")
+    }
     /// 웹(브라우저) pane 조종 — 에이전트가 내장 브라우저를 확인 도구로 쓰는
     /// 손잡이(2026-08-18 「손잡이 뚫어줘」). `op` 는 `eval`(JS 실행, 결과를
     /// JSON 문자열로) · `text`(본문 innerText) · `shot`(PNG 를 `arg` 절대경로에

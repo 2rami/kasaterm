@@ -900,6 +900,20 @@ async fn open_image_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /open-url?url=<url>&pane=<pid>` — pane 셸의 `open` 셰임과 `kasaterm-cli
+/// open` 이 부른다. 호스트가 「그 pane 을 보는 거울」로 되돌리거나 직접 연다.
+async fn open_url_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let url = params.get("url").cloned().unwrap_or_default();
+    let pane = params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let body = match backend.open_url(&url, pane) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
 async fn open_markdown_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -4017,6 +4031,70 @@ async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> 
     }
 }
 
+/// `GET /term/shot?pane=%N&w=<최대 가로px>` — 그 pane 을 kasaterm 이 **실제로 그리는
+/// 모습** 그대로 PNG 로.
+///
+/// 폰 격자 화면은 셀을 브라우저 폰트로 다시 그리므로 테마·폰트·프사가 데스크톱과
+/// 다르다(2026-09-02 지적 「폰으로도 테마나 폰트 안 깨지게 보고 싶다」). 나쵸 알림
+/// 사진과 같은 오프스크린 렌더(`capture_surface`)를 쓴다 — GUI 가 한 프레임을 그려
+/// 파일로 떨구므로 여기서는 그 파일을 읽어 넘기고 지운다. 한 장에 GUI 한 프레임이라
+/// 프레임마다 부르지 말고 격자가 바뀔 때만(클라이언트가 스로틀) 부른다. 격자 없는
+/// 헤드리스 셸(kasa-serve-web)은 그림이 없어 503 — 클라이언트는 글자 화면에 머문다.
+///
+/// `w`=0(기본)이면 원본 크기 — 핀치로 키워 읽는 것이 목적이라 줄이면 글자가 뭉갠다.
+async fn term_shot_get(
+    backend: Arc<dyn Backend>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(pane) = q.get("pane").filter(|s| !s.is_empty()).cloned() else {
+        return (axum::http::StatusCode::BAD_REQUEST, "pane 이 없다").into_response();
+    };
+    let max_w: u32 = q.get("w").and_then(|v| v.parse().ok()).unwrap_or(0);
+    // 요청마다 다른 파일 — 같은 pane 을 두 창이 동시에 보면 한 경로에 두 렌더가
+    // 겹쳐 쓴다. GUI 의 「무장 하나」 규칙은 겹침을 거절만 하지 경로를 갈라 주지 않는다.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "kasaterm-shot-{}-{nonce}.png",
+        pane.trim_start_matches('%')
+    ));
+    let path_s = path.to_string_lossy().into_owned();
+    // capture_surface 는 GUI 스레드 왕복을 최대 5초 기다리는 동기 호출이다.
+    let res = tokio::task::spawn_blocking(move || {
+        backend.capture_surface(&pane, Some(&path_s), max_w)
+    })
+    .await;
+    let bytes = match res {
+        Ok(Ok(_)) => std::fs::read(&path),
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_file(&path);
+            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")).into_response();
+        }
+        Err(_) => {
+            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "capture task died").into_response()
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    match bytes {
+        Ok(b) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            b,
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("그림 파일을 못 읽었다: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 /// 살아 있는 pane 목록 — 미러 대상을 고르는 데 쓴다.
 /// `GET /term/panes` — 붙을 수 있는 pane 목록.
 ///
@@ -5519,6 +5597,62 @@ fn raw_pane_param(raw: Option<&str>) -> Option<String> {
 enum Frame {
     Bytes(Vec<u8>),
     Grid(Box<kasa_bridge::screen::ScreenUpdate>),
+    /// 호스트 GUI 가 거울에게 미는 제어 JSON(`{"t":"open-url",…}` 등). 화면과
+    /// 같은 채널을 타야 순서가 보장되고, 송신자(`btx`)를 등록부에 두는 것만으로
+    /// 「이 pane 을 보는 거울 전부」에 닿는다.
+    Control(String),
+}
+
+/// pane 별 거울 제어 송신자 — `term_ws_run` 이 거울(mirrored)로 붙을 때 등록하고
+/// 끝날 때 뺀다. 호스트가 「이 pane 을 누가 보고 있나」를 아는 유일한 창구다.
+///
+/// 쓰임: 원격(본진) 학생이 브라우저를 열면 그 기계 크롬이 아니라 **보고 있는
+/// 사람의 기계**에서 열려야 한다(2026-09-02 「맥미니 세션으로 브라우저 켜면
+/// 맥미니에서 켜져서 화면공유로 봐야」). VS Code Remote 의 브라우저 되돌리기와
+/// 같은 원리 — 거울이 있으면 거울 쪽으로, 없으면 호스트가 직접 연다.
+fn viewer_ctls(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<(u64, tokio::sync::mpsc::Sender<Frame>)>>>
+{
+    static V: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<(u64, tokio::sync::mpsc::Sender<Frame>)>>>,
+    > = std::sync::OnceLock::new();
+    V.get_or_init(Default::default)
+}
+
+fn register_viewer_ctl(pane: &str, tx: tokio::sync::mpsc::Sender<Frame>) -> u64 {
+    static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let token = TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = viewer_ctls().lock() {
+        g.entry(pane.to_string()).or_default().push((token, tx));
+    }
+    token
+}
+
+fn unregister_viewer_ctl(pane: &str, token: u64) {
+    if let Ok(mut g) = viewer_ctls().lock() {
+        if let Some(v) = g.get_mut(pane) {
+            v.retain(|(t, _)| *t != token);
+            if v.is_empty() {
+                g.remove(pane);
+            }
+        }
+    }
+}
+
+/// `pane` 을 거울로 보는 모든 접속에 제어 JSON 한 줄을 민다. 닿은 거울 수를
+/// 돌려준다 — 0 이면 아무도 안 보고 있으니 호스트가 스스로 처리해야 한다.
+pub fn push_viewer_control(pane: &str, text: &str) -> usize {
+    let Ok(mut g) = viewer_ctls().lock() else { return 0 };
+    let Some(v) = g.get_mut(pane) else { return 0 };
+    v.retain(|(_, tx)| !tx.is_closed());
+    let n = v
+        .iter()
+        .filter(|(_, tx)| tx.try_send(Frame::Control(text.to_string())).is_ok())
+        .count();
+    if v.is_empty() {
+        g.remove(pane);
+    }
+    n
 }
 
 /// 구독 시작 시점의 "지금 화면"과 이후 스트림. 둘을 한 락에서 받아야 그 사이
@@ -5635,6 +5769,7 @@ async fn term_ws_run(
     };
     // kill 제어가 놓아 줄 대상 — self_id 는 아래 size 메시지에 실려 move 된다.
     let kill_id = self_id.clone();
+    let ctl_pane = self_id.clone();
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
@@ -5657,6 +5792,9 @@ async fn term_ws_run(
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
     let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
+    // 거울(이미 있는 pane 을 보는 접속)도, 이 접속이 새로 띄운 원격 셸도 등록한다 —
+    // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
+    let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
     match tap {
         Tap::Bytes(rx, screen) => {
             let _ = ws_tx.send(Message::Binary(screen.into())).await;
@@ -5751,6 +5889,7 @@ async fn term_ws_run(
                             let msg = crate::gridwire::encode(&u).to_string();
                             ws_tx.send(Message::Text(msg.into())).await
                         }
+                        Frame::Control(s) => ws_tx.send(Message::Text(s.into())).await,
                     };
                     if sent.is_err() {
                         break;
@@ -5858,6 +5997,7 @@ async fn term_ws_run(
         _ = &mut to_browser => to_shell.abort(),
         _ = &mut to_shell => to_browser.abort(),
     }
+    unregister_viewer_ctl(&ctl_pane, ctl_token);
 
     // 폰이 줄여 놓은 격자를 돌려준다. 안 하면 폰 탭을 닫은 뒤에도 kasaterm pane 이
     // 좁아진 채로 남아, 「폰으로 잠깐 봤더니 내 화면이 줄었다」가 된다.
@@ -5981,6 +6121,7 @@ pub fn spawn_http_server_opts(
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
+                let shot_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
@@ -6001,6 +6142,7 @@ pub fn spawn_http_server_opts(
                 let session_reset_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
+                let open_url_backend = backend.clone();
                 let terminal_reveal_backend = backend.clone();
                 let peek_backend = backend.clone();
                 let blocks_backend = backend.clone();
@@ -6138,6 +6280,12 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/term/panes",
                         get(move || term_panes_handler(panes_backend.clone())),
+                    )
+                    .route(
+                        "/term/shot",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            term_shot_get(shot_backend.clone(), q)
+                        }),
                     )
                     .route("/term/ws", get(term_ws_handler))
                     .route("/term/spawn", post(term_spawn_post))
@@ -6446,6 +6594,12 @@ pub fn spawn_http_server_opts(
                         "/open-markdown",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             open_markdown_handler(open_markdown_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/open-url",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            open_url_handler(open_url_backend.clone(), q)
                         }),
                     )
                     .route(

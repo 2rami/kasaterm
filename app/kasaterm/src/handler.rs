@@ -1180,6 +1180,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketOpenUrl(url, target) => {
+                self.open_url_for_pane(url, target.as_deref());
+                return;
+            }
+            UserEvent::RemoteOpenUrl(pane, url) => {
+                self.open_url_here(url, Some(pane));
+                return;
+            }
             UserEvent::SocketOpenWeb(url, target) => {
                 // `kasaterm-cli web <url>` → 요청 pane 옆에 웹 pane split.
                 // 파일 미리보기와 달리 여기서 처리하는 이유: 자식 창 생성에

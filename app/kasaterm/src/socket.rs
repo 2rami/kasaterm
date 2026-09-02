@@ -1690,6 +1690,14 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn open_url(&self, url: &str, target: Option<&str>) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketOpenUrl(
+            url.to_string(),
+            target.map(|s| s.to_string()),
+        ));
+        Ok(())
+    }
+
     fn open_preview(&self, kind: &str, path: &str, target: Option<&str>) -> Result<()> {
         // kind=web 은 파일이 아니라 URL — open_file 확장자 분기로 못 가고,
         // winit 창 생성이 필요해 별도 이벤트로 GUI 에 위임한다.

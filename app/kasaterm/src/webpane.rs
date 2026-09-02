@@ -389,6 +389,71 @@ impl App {
     /// URL 을 웹 pane 으로 연다 — `target`(요청자 pid) pane 옆 split.
     /// 같은 주소가 이미 열려 있으면 그 pane 으로 포커스만 옮긴다(open_file 의
     /// 중복 방지와 같은 규칙).
+    /// URL 을 **사람이 보는 브라우저**로. 요청 pane 을 거울로 보는 기계가 있으면
+    /// 그 거울에 `open-url` 을 밀어 그쪽(맥북 크롬)에서 열고, 아무도 안 보면 이
+    /// 기계의 기본 브라우저. 본진(맥미니) 학생이 연 페이지를 화면공유로 보러 가지
+    /// 않게 하는 길이다(2026-09-02 지시). 요청자가 탭 pid 면 outer pane 으로
+    /// 접는다 — 거울 등록부는 pane id 로 산다.
+    pub(crate) fn open_url_for_pane(&mut self, raw_url: &str, target: Option<&str>) {
+        let Some(url) = normalize_web_url(raw_url) else {
+            return;
+        };
+        let outer = target.map(|t| {
+            self.ws
+                .lock()
+                .unwrap()
+                .outer_for_pty(t)
+                .unwrap_or_else(|| t.to_string())
+        });
+        let msg = serde_json::json!({ "t": "open-url", "url": url }).to_string();
+        let sent = outer
+            .as_deref()
+            .map_or(0, |p| kasa_mcp::push_viewer_control(p, &msg));
+        if sent > 0 {
+            self.collab.toast = Some((
+                "보고 있는 기계의 브라우저로 열었어요".to_string(),
+                std::time::Instant::now(),
+            ));
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.open_url_here(&url, None);
+    }
+
+    /// 이 기계의 기본 브라우저로 연다. `from` 은 원격 호스트가 되돌려 보낸 경우 그
+    /// 로컬 거울 pane — 토스트로 어디서 온 페이지인지 말한다. 검증 리그는
+    /// `KASATERM_OPEN_URL_SINK=<파일>` 로 실제 창 대신 한 줄을 남기게 한다(testkit 관례).
+    pub(crate) fn open_url_here(&mut self, url: &str, from: Option<&str>) {
+        match std::env::var("KASATERM_OPEN_URL_SINK") {
+            Ok(path) if !path.is_empty() => {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    let _ = writeln!(f, "{}\t{url}", from.unwrap_or("-"));
+                }
+            }
+            _ => crate::chrome::open_url_in_browser(url),
+        }
+        if let Some(pane) = from {
+            let who = self
+                .ws
+                .lock()
+                .unwrap()
+                .pane_character
+                .get(pane)
+                .cloned()
+                .unwrap_or_else(|| pane.to_string());
+            self.collab.toast = Some((
+                format!("{who} 이 연 페이지를 이 기계 브라우저로 열었어요"),
+                std::time::Instant::now(),
+            ));
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
     pub(crate) fn open_web_pane(
         &mut self,
         event_loop: &ActiveEventLoop,

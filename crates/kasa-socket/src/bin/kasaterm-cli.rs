@@ -842,6 +842,7 @@ fn print_help() {
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
+  kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 이 pane 을 거울로 보는 기계가 있으면 그쪽 크롬, 없으면 이 기계 기본 브라우저
   kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
   kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
   kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
@@ -1190,6 +1191,24 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // URL 을 요청 pane 옆 웹(브라우저) pane 으로. 개발 서버를 그 서버를
         // 띄운 pane 곁에 두는 용도 — 어느 방 어느 pane 이 띄운 건지 화면
         // 배치가 말해 준다.
+        // 화면 안 웹 pane(`web`)과 다르다 — 이건 「사람 눈앞의 브라우저」다. 본진
+        // 학생이 부르면 거울로 보고 있는 맥북 크롬에 뜬다(호스트가 되돌린다).
+        "open" => {
+            let url = args
+                .iter()
+                .find(|a| !a.starts_with('%'))
+                .ok_or_else(|| anyhow!("open needs a URL (e.g. open https://example.com)"))?;
+            let target = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| {
+                    std::env::var("KASATERM_PANE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                });
+            ("surface.open_url", json!({ "url": url, "target": target }))
+        }
         "web" => {
             let url = args
                 .iter()

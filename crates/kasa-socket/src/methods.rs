@@ -123,6 +123,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
+        "surface.open_url" => surface_open_url(backend, id, &req.params),
         "web.drive" => web_drive(backend, id, &req.params),
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
@@ -255,6 +256,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.scroll",
                 "surface.peek",
                 "surface.open_preview",
+                "surface.open_url",
                 "web.drive",
                 "surface.capture",
                 "surface.dock",
@@ -311,6 +313,18 @@ fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Res
     };
     let target = params.get("target").and_then(|v| v.as_str());
     match backend.open_preview(kind, path, target) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_open_url(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let url = match params.get("url").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.open_url requires `url` (string)"),
+    };
+    let target = params.get("target").and_then(|v| v.as_str());
+    match backend.open_url(url, target) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

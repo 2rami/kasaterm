@@ -4081,6 +4081,12 @@ enum UserEvent {
     /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
     /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
     SocketOpenWeb(String, Option<String>),
+    /// `surface.open_url` / `/open-url` — URL 을 사람이 보는 브라우저로.
+    /// (url, 요청자 pid). 요청 pane 을 거울로 보는 기계가 있으면 그쪽으로 되돌린다.
+    SocketOpenUrl(String, Option<String>),
+    /// 원격 호스트가 거울로 되돌려 보낸 `open-url` — (로컬 pane id, url). 이 기계의
+    /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
+    RemoteOpenUrl(String, String),
     /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
@@ -6557,6 +6563,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
+    // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
+    {
+        let p = std::sync::Mutex::new(proxy.clone());
+        kasa_mcp::remote::set_open_url_sink(Box::new(move |pane, url| {
+            if let Ok(p) = p.lock() {
+                let _ = p.send_event(UserEvent::RemoteOpenUrl(pane.to_string(), url.to_string()));
+            }
+        }));
+    }
     // argv 폴백: `kasaterm file.md` / 커맨드라인. `.md` 인자면 새 워크스페이스
     // 마크다운으로 위임(resumed 전이면 디퍼됐다 start_pty 후 flush). `open`(1)은
     // odoc 로만 오므로 둘이 겹쳐도 open_markdown_window 의 dedup 이 흡수한다.
@@ -6711,6 +6726,7 @@ fn install_pane_shims() {
     // pop an image viewer / markdown editor into its own window with zero
     // install — each just curls the host's MCP open-preview endpoint.
     install_preview_shims(&shim_dir);
+    install_open_shim(&shim_dir);
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
     // (`--settings`) so ~/.claude/settings.json is never modified.
     install_claude_hook_shim(&shim_dir);
@@ -6911,6 +6927,38 @@ curl -s --get --data-urlencode \"path=$abs\" \
         if let Err(e) = write_shim(&path, mk(name, endpoint)) {
             eprintln!("[shim] write {name} failed: {e}");
         }
+    }
+}
+
+/// pane 셸의 `open` 을 가로채는 셰임 — **http(s) 주소 하나만 넘긴 호출**을 앱의
+/// `/open-url` 로 돌리고, 그 밖(`open .`·`open -a Foo`·파일)은 `/usr/bin/open` 에
+/// 그대로 넘긴다. 본진(맥미니)에서 학생·CLI 가 `open https://…` 를 치면 그 기계
+/// 크롬이 아니라 거울로 보는 맥북 크롬에 뜨게 하는 길이다(2026-09-02 지시). 앱에
+/// 못 닿으면 종전대로 `/usr/bin/open` 이라 잃는 것이 없다. macOS 전용 — 다른 OS 는
+/// `open` 이 이 뜻이 아니다.
+fn install_open_shim(shim_dir: &std::path::Path) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let body = r##"#!/bin/sh
+# kasaterm open — a single http(s) URL goes to the human's browser via the app;
+# everything else is /usr/bin/open untouched.
+if [ "$#" -eq 1 ]; then
+  case "$1" in
+    http://*|https://*)
+      port=${KASASPACE_MCP_PORT:-8765}
+      if curl -s -m 3 --get --data-urlencode "url=$1" \
+          --data-urlencode "pane=${KASATERM_PANE_ID:-}" \
+          "http://127.0.0.1:$port/open-url" 2>/dev/null | grep -q '"ok":true'; then
+        exit 0
+      fi
+      ;;
+  esac
+fi
+exec /usr/bin/open "$@"
+"##;
+    if let Err(e) = write_shim(&shim_dir.join("open"), body) {
+        eprintln!("[shim] write open failed: {e}");
     }
 }
 

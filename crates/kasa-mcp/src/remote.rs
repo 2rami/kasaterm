@@ -104,6 +104,26 @@ pub fn remote_meta(local_id: &str) -> Option<(String, String)> {
 }
 
 /// 이 pane 이 원격 링크인가.
+/// 호스트가 거울로 밀어 준 `open-url` 을 받을 GUI 쪽 손잡이 — (로컬 pane id, URL).
+/// kasa-mcp 는 창을 모르니 앱이 시작할 때 EventLoopProxy 를 물려 등록한다.
+type OpenUrlSink = Box<dyn Fn(&str, &str) + Send + Sync>;
+
+fn open_url_sink() -> &'static std::sync::OnceLock<OpenUrlSink> {
+    static S: std::sync::OnceLock<OpenUrlSink> = std::sync::OnceLock::new();
+    &S
+}
+
+pub fn set_open_url_sink(f: OpenUrlSink) {
+    let _ = open_url_sink().set(f);
+}
+
+fn fire_open_url(local: &str, url: &str) {
+    match open_url_sink().get() {
+        Some(f) => f(local, url),
+        None => eprintln!("[remote] open-url 받았지만 받을 창이 없어요: {url}"),
+    }
+}
+
 pub fn is_remote_pane(local_id: &str) -> bool {
     links().lock().unwrap().contains_key(local_id)
 }
@@ -340,7 +360,7 @@ async fn manager(
             }
         }
     }
-    let _unlink = Unlink(local, token);
+    let _unlink = Unlink(local.clone(), token);
     let mut remote_id: Option<String> = spec.pane.clone();
     // 첫 attach 가 이미 성사됐는가 — 이후의 연결 유실은 재접속 대상이고,
     // 그 전의 실패는 「스폰 실패」로 호출자에게 돌려준다.
@@ -384,6 +404,14 @@ async fn manager(
                                             had_attach = true;
                                             let id = remote_id.clone().unwrap_or_default();
                                             let _ = htx.try_send(Ok((id, c, r)));
+                                        }
+                                    }
+                                    // 호스트가 「이 페이지를 네 쪽에서 열어라」 —
+                                    // 본진 학생이 연 브라우저를 보는 사람의 기계로
+                                    // 되돌리는 길(http.rs push_viewer_control).
+                                    Some("open-url") => {
+                                        if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
+                                            fire_open_url(&local, u);
                                         }
                                     }
                                     Some("gone") => {
