@@ -3913,12 +3913,14 @@ enum UserEvent {
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 pane 으로 앉힌다 — 스폰(원격
-    /// id 없음) 또는 이어받기. (base, 원격 cwd, 원격 pane id, 쪼갤 기준 pane, 회신)
+    /// id 없음) 또는 이어받기. (base 또는 기계 이름, 원격 cwd, 원격 pane id, 기준
+    /// pane, 그 자리에서 갈아끼우기, 회신)
     SocketRemotePane(
         String,
         Option<String>,
         Option<String>,
         Option<String>,
+        bool,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// pane 을 로컬 상주 데몬으로 **무중단 승격** — (pane, 회신=원격 세션 id).
@@ -7768,14 +7770,18 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
-    // `mini [명령...]` — 그 명령을 명부 첫 기계에서 돌리고 이 pane 을 거울로 바꾼다.
-    // 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로 옮기는 뭐 없을까」의 답:
-    // 옮기지 말고 태생부터 저쪽). 명령이 없으면 claude — `claude mini` 와 같다.
+    // `mini` — 이 pane 을 **그 자리에서** 본진(맥미니) 셸의 거울로 바꾼다(2026-09-02
+    // 지시 「mini 라고 치면 맥미니 터미널 보이게」). 폴더는 명부 roots 로 옮긴 자리,
+    // 규칙이 없으면 저쪽 홈. 예전엔 인자 없는 `mini` 가 `claude mini` 였는데, 본진이
+    // 생긴 뒤로는 순정 `claude` 가 이미 저쪽 태생이라 그 자리가 비었다.
+    // `mini <명령...>` 은 종전대로 — 그 명령을 저쪽 학생 pane 에서 돌리고 이 pane 을
+    // 거울로(`mini codex`). 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로 옮기는
+    // 뭐 없을까」의 답: 옮기지 말고 태생부터 저쪽).
     #[cfg(unix)]
     {
         let mini = "#!/bin/sh\n\
 if [ $# -eq 0 ]; then\n\
-  exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
+  exec kasaterm-cli remote mini --here ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
 fi\n\
 exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"} --run \"$*\"\n";
         if let Err(e) = write_shim(&shim_dir.join("mini"), mini) {

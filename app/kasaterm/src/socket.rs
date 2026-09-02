@@ -1301,6 +1301,7 @@ impl Backend for PtyBackend {
         cwd: Option<&str>,
         pane: Option<&str>,
         from: Option<&str>,
+        here: bool,
     ) -> Result<SurfaceInfo> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketRemotePane(
@@ -1308,6 +1309,7 @@ impl Backend for PtyBackend {
             cwd.map(str::to_string),
             pane.map(str::to_string),
             from.map(str::to_string),
+            here,
             tx,
         ));
         // connect 자체가 원격 핸드셰이크를 15초까지 기다린다 — 그보다 길게 잡아야

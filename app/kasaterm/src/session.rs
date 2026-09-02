@@ -576,6 +576,67 @@ impl App {
         Ok(())
     }
 
+    /// 이 pane 을 **그 자리에서** 원격 셸의 거울로 바꾼다 — `mini` 한 마디로 맥미니
+    /// 터미널이 보이게(2026-09-02 지시). 학생·대화 운반이 없는 맨 셸 전용이라
+    /// `migrate_pane` 의 레포 준비·학생 소환은 타지 않고, 승격(`promote_pane`)과 같은
+    /// 스왑 패턴만 쓴다: 같은 pane id 로 원격 세션을 앉히고 옛 로컬 셸은 insert 의
+    /// Drop 이 걷는다. 그래서 자리·크기·방·학생 배정이 그대로다. 부른 CLI 는 그
+    /// 셸의 자식이라 회신을 못 받고 함께 걷힌다 — 성공의 표시는 화면이 바뀌는 것이다.
+    pub(crate) fn remote_shell_here(
+        &mut self,
+        pid: &str,
+        base: &str,
+        remote_cwd: Option<&str>,
+    ) -> Result<String> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let Some(sess) = self.pty.get(pid).cloned() else {
+            anyhow::bail!("pane {pid} 이 없다");
+        };
+        if kasa_mcp::remote::is_remote_pane(pid) {
+            anyhow::bail!("{pid} 은 이미 원격 pane 이다");
+        }
+        // 역이사(`migrate %N local`)가 돌아올 자리 — 지금 이 로컬 폴더.
+        let origin = sess
+            .shell_pid()
+            .and_then(socket::pid_cwd)
+            .map(|p| p.to_string_lossy().into_owned());
+        let (c, r) = sess.size();
+        let remote = kasa_mcp::remote::connect(
+            kasa_mcp::remote::RemoteSpec {
+                base: base.to_string(),
+                pane: None,
+                cwd: remote_cwd.map(str::to_string),
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+                    remote_cwd: remote_cwd.map(str::to_string),
+                    origin_cwd: origin,
+                },
+            },
+            pid,
+            c,
+            r,
+        )?;
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            pid.to_string(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
+        // insert 가 옛 로컬 세션을 떨군다 — Drop 이 로컬 셸을 걷는다.
+        self.insert_pty(pid.to_string(), remote.session.clone());
+        // 옛 세션의 늦은 죽음표시 정리(스왑 패턴) — 정체 가드가 있지만 이중으로.
+        self.dead_panes.lock().unwrap().retain(|x| x != pid);
+        let (wc, wr) = self.window_cells();
+        self.resize_backend(wc, wr);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(pid.to_string())
+    }
+
     /// 원격 PTY 호스트의 세션을 **이 창의 pane** 으로 앉힌다 — 스폰 또는 이어받기.
     ///
     /// `split_active_pane` 과 같은 삽입 규칙(기준 pane 이 든 트리에 꽂는다)을 쓰되,

@@ -286,10 +286,54 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketRemotePane(base, cwd, rpane, from, reply) => {
-                let outcome = self
-                    .spawn_remote_pane(base, cwd.as_deref(), rpane.as_deref(), from.as_deref())
-                    .map_err(|e| format!("{e:#}"));
+            UserEvent::SocketRemotePane(base, cwd, rpane, from, here, reply) => {
+                // 주소 대신 기계 **이름**(「나쵸네코」)이나 별칭 `mini`/`home`(본진)도
+                // 받는다 — `mini` 셰임이 주소를 외울 필요가 없게. 이름이면 명부에서
+                // 주소를 찾고, cwd 가 없으면 기준 pane 의 폴더를 roots 로 옮긴다.
+                // 매핑이 안 되면 **저쪽 홈**으로 간다 — 맨 셸은 레포가 없어도 쓸모가
+                // 있으니 이사처럼 세우지 않는다.
+                let outcome = (|| {
+                    let (base, cwd) = if base.starts_with("http") {
+                        (base.clone(), cwd.clone())
+                    } else {
+                        let m = kasa_mcp::machines::find(base)
+                            .or_else(|| {
+                                (base == "mini" || base == "home")
+                                    .then(|| {
+                                        kasa_mcp::machines::home_machine().or_else(|| {
+                                            kasa_mcp::machines::machines().into_iter().next()
+                                        })
+                                    })
+                                    .flatten()
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "기계 {base} 를 명부에서 못 찾았다 — machines.json 확인"
+                                )
+                            })?;
+                        let cwd = cwd.clone().or_else(|| {
+                            let local = from
+                                .as_deref()
+                                .and_then(|p| self.pty.get(p))
+                                .and_then(|s| s.shell_pid())
+                                .and_then(crate::socket::pid_cwd)?;
+                            kasa_mcp::machines::map_local_to_remote(
+                                &m,
+                                &local.to_string_lossy(),
+                            )
+                        });
+                        (m.base, cwd)
+                    };
+                    if *here {
+                        let pid = from
+                            .as_deref()
+                            .ok_or_else(|| anyhow::anyhow!("--here 는 기준 pane 이 있어야 한다"))?;
+                        self.remote_shell_here(pid, &base, cwd.as_deref())
+                    } else {
+                        self.spawn_remote_pane(&base, cwd.as_deref(), rpane.as_deref(), from.as_deref())
+                    }
+                })()
+                .map_err(|e| format!("{e:#}"));
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket remote 실패: {why}");
                 }

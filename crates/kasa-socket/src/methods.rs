@@ -858,18 +858,21 @@ fn machine_home(backend: &dyn Backend, id: Value) -> Response {
 }
 
 /// `surface.remote` — 원격 PTY 호스트의 세션을 pane 으로. params:
-/// `{base, cwd?, pane?, from?}` — `pane` 이 있으면 이어받기, 없으면 스폰.
+/// `{base, cwd?, pane?, from?, here?}` — `pane` 이 있으면 이어받기, 없으면 스폰.
+/// `base` 는 주소 또는 명부의 기계 이름·별칭(`mini`=본진). `here` 면 `from` pane
+/// 을 그 자리에서 거울로 바꾼다.
 fn surface_remote(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(base) = params.get("base").and_then(|v| v.as_str()) else {
         return param_err(
             id,
-            "surface.remote requires `base` (예: http://127.0.0.1:18766)",
+            "surface.remote requires `base` (예: http://127.0.0.1:18766 또는 mini)",
         );
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let pane = params.get("pane").and_then(|v| v.as_str());
     let from = params.get("from").and_then(|v| v.as_str());
-    match backend.remote_pane(base, cwd, pane, from) {
+    let here = params.get("here").and_then(|v| v.as_bool()).unwrap_or(false);
+    match backend.remote_pane(base, cwd, pane, from, here) {
         Ok(s) => Response::success(id, json!({"surface": s})),
         Err(e) => backend_err(id, e),
     }
