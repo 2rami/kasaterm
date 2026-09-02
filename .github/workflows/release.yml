@@ -156,7 +156,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          NOTES="$(cat <<EOF
+          # docs/release-notes/<태그>.md 가 있으면 그 판의 변경사항을 맨 앞에 싣는다.
+          # 없으면 아래 설치 안내만 — 태그마다 워크플로를 고칠 필요가 없다.
+          HIGHLIGHTS=""
+          if [[ -f "docs/release-notes/$VERSION.md" ]]; then
+            HIGHLIGHTS="$(cat "docs/release-notes/$VERSION.md")"$'\n\n---\n\n'
+          fi
+          NOTES="$HIGHLIGHTS$(cat <<EOF
           kasaterm $VERSION — 한글 특화 GUI 터미널 + Claude 런처
 
           ## 설치 (macOS)
