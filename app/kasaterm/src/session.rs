@@ -3120,6 +3120,18 @@ impl App {
         closed_index_in(&self.closed_panes, pane)
     }
 
+    /// 그 번호를 물고 있던 **살아 있는** 레코드를 걷는다 — PTY 가 진짜 죽는 길목
+    /// (`remove_pane`)에서 부른다. 걷지 않으면 숨겨 둔 pane 을 끈 뒤 같은 번호가
+    /// 「살아 있음」(옛 숨김 레코드)과 「죽음」(방금 적은 묘비) 둘로 남아, 사이드바가
+    /// 죽은 pane 을 재부착할 수 있다고 보이고 `used_pane_ids` 가 그 번호를 영영 잡아
+    /// 둔다(2026-09-02 실측: `dismiss` 두 번 = 숨김 → 끄기). 죽은 레코드는 건드리지
+    /// 않는다 — 그건 다른 대화의 묘비일 수 있다.
+    pub(crate) fn drop_live_closed_records(&mut self, pane: &str) {
+        if drop_live_records(&mut self.closed_panes, pane) > 0 {
+            self.chrome_dirty = true;
+        }
+    }
+
     /// 닫힘 스택에 넣고 상한을 정리한다 — pane 닫기와 미리보기 탭 닫기가 같은
     /// 스택을 쓰므로 ⌘⇧T 가 「가장 최근에 닫은 것」 순서를 하나로 지킨다.
     ///
@@ -7311,6 +7323,13 @@ fn closed_index_in(list: &[crate::ClosedPane], pane: &str) -> Option<usize> {
         .or_else(|| list.iter().position(|c| c.pane_id == pane))
 }
 
+/// [`App::drop_live_closed_records`] 의 본체. 걷은 개수를 돌려준다.
+fn drop_live_records(list: &mut Vec<crate::ClosedPane>, pane: &str) -> usize {
+    let before = list.len();
+    list.retain(|c| !(c.alive && c.pane_id == pane));
+    before - list.len()
+}
+
 /// 쓰이는 번호 집합에서 빠진 **가장 작은** `%N`.
 fn next_free_pane_id(used: &std::collections::HashSet<String>) -> String {
     (0u32..)
@@ -7926,7 +7945,7 @@ mod room_name_tests {
 
 #[cfg(test)]
 mod closed_pane_id_reuse_tests {
-    use super::{closed_index_in, stashed_in};
+    use super::{closed_index_in, drop_live_records, stashed_in};
     use crate::ClosedPane;
 
     fn rec(pane: &str, alive: bool, folder: &str) -> ClosedPane {
@@ -7980,6 +7999,27 @@ mod closed_pane_id_reuse_tests {
         let list = [rec("%21", false, "옛것")];
         assert_eq!(closed_index_in(&list, "%21"), Some(0));
         assert_eq!(closed_index_in(&list, "%22"), None);
+    }
+
+    /// 숨겨 둔 pane 을 끄면 그 번호의 살아 있는 레코드만 걷힌다 — 다른 대화의 묘비와
+    /// 남의 번호는 그대로. 2026-09-02: `dismiss` 두 번에 `%6` 이 「살아 있음」과
+    /// 「죽음」으로 둘 남았다.
+    #[test]
+    fn killing_a_hidden_pane_drops_only_its_live_record() {
+        let mut list = vec![
+            rec("%6", false, "옛대화"),
+            rec("%6", true, "숨긴것"),
+            rec("%7", true, "남의것"),
+        ];
+        assert_eq!(drop_live_records(&mut list, "%6"), 1);
+        let left: Vec<(&str, bool)> = list
+            .iter()
+            .map(|c| (c.folder.as_str(), c.alive))
+            .collect();
+        assert_eq!(left, vec![("옛대화", false), ("남의것", true)]);
+        // 살아 있는 레코드가 없으면 아무것도 안 걷는다 — 묘비는 건드리지 않는다.
+        assert_eq!(drop_live_records(&mut list, "%6"), 0);
+        assert_eq!(list.len(), 2);
     }
 }
 

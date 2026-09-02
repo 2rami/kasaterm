@@ -1933,6 +1933,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 원격 pane 이면 원격 셸까지 죽인다 — 여기는 「진짜 끄기」 경로다.
         // detach(앱 종료·재시작)는 이 함수를 안 타고 Arc drop 만으로 끝난다.
         kasa_mcp::remote::kill_remote(target);
+        // 숨겨 둔(alive) 레코드가 이 번호를 물고 있으면 먼저 걷는다 — 지금 이 PTY 가
+        // 죽으므로 그 손잡이는 재부착할 것이 없는 거짓이 된다. 되살리기 재료는 바로
+        // 아래에서 alive=false 로 새로 적으니 잃지 않는다.
+        self.drop_live_closed_records(target);
         // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 "정말 죽는" 경로의 길목이라
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
         // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니
