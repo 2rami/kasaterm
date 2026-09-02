@@ -2014,6 +2014,27 @@ fn spawn_reader_thread(
                         eof: true,
                         ..Default::default()
                     });
+                    // 그리드 구독자(원격 거울의 WS 핸들러)에게도 EOF 를 알린다 — 이
+                    // 센티널은 위 `tx` 로만 가고 tap 은 못 받아서, 그쪽 핸들러가 세션
+                    // Arc 를 쥔 채 프레임을 끝없이 기다렸다. 그 Arc 때문에 세션이 안
+                    // 죽고 명부에도 남아, 거울 pane 이 「exit」 화면 그대로 45초 넘게
+                    // 서 있었다(2026-09-02 실측, `mini` 거울). 바이트 tap(앱 거울·xterm)은
+                    // 센티널을 실을 수 없으니 송신자를 통째로 놓는다 — 구독자 쪽 recv 가
+                    // 끊겨 같은 뜻이 된다. 둘 다 세션이 아니라 **이 스레드**가 끝나는
+                    // 순간에 해야 한다: 송신자 목록은 세션 소유라 세션이 살아 있는 한
+                    // 저절로는 안 떨어진다.
+                    {
+                        let mut subs = screen_taps.lock().unwrap();
+                        subs.retain(|sub| {
+                            sub.try_send(ScreenUpdate {
+                                pane_id: pane_id.clone(),
+                                eof: true,
+                                ..Default::default()
+                            })
+                            .is_ok()
+                        });
+                    }
+                    byte_taps.lock().unwrap().clear();
                     return;
                 }
                 Ok(n) => {

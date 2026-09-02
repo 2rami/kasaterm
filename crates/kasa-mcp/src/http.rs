@@ -5733,6 +5733,17 @@ async fn term_ws_run(
                             break;
                         }
                     }
+                    // 셸이 끝났다(reader 의 EOF 센티널) — 「gone」으로 거울의 재접속을
+                    // 멈추게 하고 접는다. 안 접으면 이 핸들러가 세션 Arc 를 쥔 채 남아
+                    // 세션이 안 죽고, 거울은 죽은 화면을 계속 비춘다(state.rs EOF 주석).
+                    if matches!(&chunk, Frame::Grid(u) if u.eof) {
+                        let _ = ws_tx
+                            .send(Message::Text(
+                                serde_json::json!({"t": "gone"}).to_string().into(),
+                            ))
+                            .await;
+                        break;
+                    }
                     let sent = match chunk {
                         Frame::Bytes(b) => ws_tx.send(Message::Binary(b.into())).await,
                         // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
@@ -5745,7 +5756,18 @@ async fn term_ws_run(
                         break;
                     }
                 }
-                Ok(None) => break, // tap 스레드가 끝났다(PTY 종료)
+                Ok(None) => {
+                    // tap 이 끝났다 = PTY 종료(reader 가 바이트 tap 송신자를 놓았다)
+                    // 또는 세션 폐기. 어느 쪽이든 「gone」을 먼저 보낸다 — 거울이
+                    // 재접속으로 알아내는 왕복을 없애고, 낡은 서버처럼 죽은 세션에
+                    // 다시 붙는 길을 막는다.
+                    let _ = ws_tx
+                        .send(Message::Text(
+                            serde_json::json!({"t": "gone"}).to_string().into(),
+                        ))
+                        .await;
+                    break;
+                }
                 Err(_) => {
                     // Pong 이 두 주기 넘게 없으면 피어가 잠든 것 — TCP 가 안 끊겨도
                     // 우리가 접어야 아래 복원이 돌아 pane 크기가 돌아온다.
