@@ -342,6 +342,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketBringHome(pane) => {
+                // 원격 셸에서 book 이 뱉은 예약 알림이 여기로 온다 — 그 pane 을 로컬
+                // 셸로 되돌린다. 회신은 없다(부른 CLI 는 원격 셸의 자식이라 스왑과
+                // 함께 걷힌다). 실패는 toast 로만 — book 은 화면 밖 트리거라 화면에
+                // 남길 자리가 없다.
+                if let Err(why) = self.bring_pane_home(&pane) {
+                    eprintln!("[kasaterm] book 되돌리기 실패: {why:#}");
+                    self.set_toast(format!("book 실패: {why:#}"));
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketPromote(pane, reply) => {
                 #[cfg(unix)]
                 let outcome = self.promote_pane(pane).map_err(|e| format!("{e:#}"));

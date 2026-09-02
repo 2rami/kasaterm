@@ -172,13 +172,19 @@ impl App {
                     return;
                 }
                 // OSC 777 desktop notification — drain before the coalesce
-                // merge below rebuilds `update` and would drop it.
+                // merge below rebuilds `update` and would drop it. 예약 title
+                // (`book`)이면 알림이 아니라 「로컬로 되돌리기」 신호다.
                 if let Some((title, body)) = update.notify.take() {
-                    let _ = proxy.send_event(UserEvent::Notify {
-                        surface_id: update.pane_id.clone(),
-                        title,
-                        body,
-                    });
+                    if title == crate::BRING_HOME_MARKER {
+                        let _ = proxy
+                            .send_event(UserEvent::SocketBringHome(update.pane_id.clone()));
+                    } else {
+                        let _ = proxy.send_event(UserEvent::Notify {
+                            surface_id: update.pane_id.clone(),
+                            title,
+                            body,
+                        });
+                    }
                 }
                 // Coalesce: drain every other ScreenUpdate currently sitting
                 // in the channel and merge them into one. Scroll inertia /
@@ -193,11 +199,17 @@ impl App {
                             // OSC 777 from a coalesced frame — fire before the
                             // merge below drops `next.notify`.
                             if let Some((title, body)) = next.notify.take() {
-                                let _ = proxy.send_event(UserEvent::Notify {
-                                    surface_id: next.pane_id.clone(),
-                                    title,
-                                    body,
-                                });
+                                if title == crate::BRING_HOME_MARKER {
+                                    let _ = proxy.send_event(
+                                        UserEvent::SocketBringHome(next.pane_id.clone()),
+                                    );
+                                } else {
+                                    let _ = proxy.send_event(UserEvent::Notify {
+                                        surface_id: next.pane_id.clone(),
+                                        title,
+                                        body,
+                                    });
+                                }
                             }
                             // A resize makes row numbers and widths belong to
                             // a different grid. Combining both generations
@@ -573,6 +585,83 @@ impl App {
         self.insert_pty(id.clone(), session.clone());
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
+        Ok(())
+    }
+
+    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(`remote_shell_here`
+    /// 의 역, 2026-09-02 지시 「mini에서 book치면 다시 로컬로」). 원격 셸에서 book 이
+    /// 뱉은 예약 알림을 화면 펌프가 잡아 부른다. 순수 셸 전용이라 대화 운반 없이
+    /// 스왑만 한다: 같은 pane id 로 로컬 셸을 앉히고 원격 web 세션은 폐기한다.
+    /// 돌아갈 로컬 폴더는 `mini` 로 갈 때 심어 둔 origin(remote identity).
+    pub(crate) fn bring_pane_home(&mut self, pid: &str) -> Result<()> {
+        if self.tmux.is_some() {
+            return Ok(());
+        }
+        // 로컬 pane 에서 book 을 눌렀다 — 되돌릴 원격이 없다. 조용히 무시한다
+        // (예약 알림을 데스크톱 알림으로 흘리지 않는 것으로 충분하다).
+        if !kasa_mcp::remote::is_remote_pane(pid) {
+            return Ok(());
+        }
+        let Some(info) = kasa_mcp::remote::remote_info(pid) else {
+            return Ok(());
+        };
+        // 이사로 나간 **학생**(claude/codex)은 book 이 아니라 데려오기(migrate local)로
+        // 돌아온다 — 대화 jsonl 을 떠 와야 하기 때문이다. book 은 `mini` 로 앉힌 순수
+        // 셸 거울만 되돌린다. 세션 id 가 바인딩돼 있으면 그건 학생이므로 안내만 한다.
+        if self.pane_claude_sid.contains_key(pid) {
+            self.set_toast(
+                "이 창은 학생이에요 — `book` 대신 데려오기(migrate local)로 돌아와요".to_string(),
+            );
+            return Ok(());
+        }
+        let dest = info
+            .origin_cwd
+            .clone()
+            .or_else(|| {
+                kasa_mcp::machines::machines()
+                    .into_iter()
+                    .find(|m| m.base == info.base.trim_end_matches('/'))
+                    .and_then(|m| {
+                        info.remote_cwd
+                            .as_deref()
+                            .and_then(|rc| kasa_mcp::machines::map_remote_to_local(&m, rc))
+                    })
+            });
+        let (c, r) = self
+            .pty
+            .get(pid)
+            .map(|s| s.size())
+            .unwrap_or_else(|| self.window_cells());
+        // 로컬 셸을 같은 pane id 로 — 자리·크기·방·학생 배정 유지(스왑 패턴).
+        let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd: dest.clone(),
+            cols: c,
+            rows: r,
+            env: crate::proxy_env(pid),
+            pane_id: pid.to_string(),
+            initial_scrollback: Vec::new(),
+        })?);
+        // 원격 web 세션을 폐기한다 — insert 의 Drop 은 detach(살려 둠)라, 명시적
+        // kill 이 없으면 저쪽 셸이 남는다. insert **전**에: 스왑 뒤엔 링크가 없다.
+        kasa_mcp::remote::kill_remote(pid);
+        self.pump_pty_screens(
+            session.screens.clone(),
+            pid.to_string(),
+            std::sync::Arc::downgrade(&session),
+        );
+        self.insert_pty(pid.to_string(), session.clone());
+        self.dead_panes.lock().unwrap().retain(|x| x != pid);
+        let (wc, wr) = self.window_cells();
+        self.resize_backend(wc, wr);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.set_toast(match dest {
+            Some(d) => format!("로컬로 돌아왔어요 — {d}"),
+            None => "로컬 셸로 돌아왔어요".to_string(),
+        });
         Ok(())
     }
 

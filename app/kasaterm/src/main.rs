@@ -1974,6 +1974,11 @@ pub(crate) struct ClosedPane {
 /// 무한히 쌓으면 닫기만 반복해도 메모리가 는다.
 const CLOSED_PANE_KEEP: usize = 10;
 
+/// `book` 이 뱉는 예약 알림 title(OSC 777 `notify`). 이 값이 오면 데스크톱 알림
+/// 대신 「원격 pane 을 로컬로 되돌리기」로 해석한다. 셰임 생성(`write_shim`)과
+/// 화면 펌프(`pump_pty_screens`)가 같은 문자열을 써야 하므로 한 곳에 둔다.
+pub(crate) const BRING_HOME_MARKER: &str = "kasaterm-home";
+
 /// 닫아 둔 pane 이 이만큼 내리 놀면 스스로 놓는다.
 ///
 /// 닫아도 안 죽이는 건 의도지만(`hide_pane`), 개수 상한은 **다음 닫기가 있어야만**
@@ -3928,6 +3933,11 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(`mini` 의 역).
+    /// 원격 셸 안에서 book 이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
+    /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — book 을 부른 CLI 는
+    /// 그 원격 셸의 자식이라 함께 걷힌다(성공의 표시는 화면이 로컬로 바뀌는 것).
+    SocketBringHome(String),
     /// pane 의 claude 를 다른 기계로 **이사** — (pane, base, 원격 cwd, force,
     /// 태생 실행 명령, 회신=원격 세션 id). 대화 jsonl 운반 + 같은 자리 원격 스왑 +
     /// resume 주입. 태생 실행 명령(run)은 에이전트 없는 셸 pane 의 태생 스폰에서만
@@ -7769,6 +7779,22 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
+    }
+    // `book` — 원격 셸 거울을 로컬로 되돌린다(`mini` 의 역, 2026-09-02 지시
+    // 「mini에서 book치면 다시 로컬로」). 원격 셸에서 실행되면 예약 알림 마커를
+    // 뱉고, 그 pane 을 소유한 앱(맥북)의 화면 펌프가 그걸 잡아 로컬 셸로 스왑한다.
+    // 서버·프로토콜은 손대지 않는다 — 원격 연결이 raw 바이트 모드라 이 OSC 가
+    // 맥북 파서까지 그대로 오고, 맥북이 이미 OSC 777 을 읽는다. sh 한 줄이라
+    // 셸 종류를 안 탄다. 로컬 pane 에서 눌러도 앱이 「원격 아님」으로 무시한다.
+    #[cfg(unix)]
+    {
+        let book = format!(
+            "#!/bin/sh\nprintf '\\033]777;notify;{};\\033\\\\'\n",
+            crate::BRING_HOME_MARKER
+        );
+        if let Err(e) = write_shim(&shim_dir.join("book"), book) {
+            eprintln!("[shim] write book failed: {e}");
+        }
     }
     // `mini` — 이 pane 을 **그 자리에서** 본진(맥미니) 셸의 거울로 바꾼다(2026-09-02
     // 지시 「mini 라고 치면 맥미니 터미널 보이게」). 폴더는 명부 roots 로 옮긴 자리,
