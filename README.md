@@ -9,8 +9,9 @@
 셀 렌더러 · 한글 IME · PTY를 기성 라이브러리 없이 자체 crate로 구현했고,<br/>
 그 위에 **여러 Claude를 학생처럼 거느리는 GUI**를 얹었다.
 
-[데모](#데모) · [강점](#강점--전부-자체-구현했다) · [crate](#재사용-가능한-crate) · [설치](#설치--실행) · [단축키](#단축키) · [구조](#구조)
+[데모](#데모) · [강점](#강점--전부-자체-구현했다) · [crate](#재사용-가능한-crate) · [기계를 가로지른다](#기계를-가로지른다) · [설치](#설치--실행) · [단축키](#단축키) · [구조](#구조)
 
+[![Release](https://img.shields.io/github/v/release/2rami/kasaterm?label=release&color=blue)](https://github.com/2rami/kasaterm/releases/latest)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)
@@ -40,6 +41,7 @@
 
 - **아래 — 터미널 엔진.** wgpu 셀 렌더러, 두벌식 한글 IME, 크로스플랫폼 PTY를 각각 **독립 crate**로 깎았다. 터미널을 만들려는 사람이 부품만 가져다 쓸 수 있게 설계했다.
 - **위 — AI 오케스트레이션.** 그 엔진 위에서, pane마다 도는 Claude의 작업이 BA GUI(아로나 모드)로 실시간으로 보인다. 로그를 읽는 게 아니라 작업을 *지켜본다.*
+- **밖 — 기계를 가로지른다.** pane이 이 컴퓨터에 묶여 있지 않다. 도는 세션을 다른 기계로 [이사](#기계를-가로지른다)시키고, 그 화면을 원래 창에 거울로 두고, 폰 브라우저로 같은 pane을 이어서 본다.
 
 ---
 
@@ -68,7 +70,8 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 | **`kasa-pty`** | PTY + `alacritty_terminal` 백엔드. 크로스플랫폼(ConPTY 포함) | 헤드리스 PTY 호스트 |
 | **`kasa-ime`** | 두벌식 한글 입력 오토마타. OS IME 비의존 | 한글 입력이 필요한 Rust 앱 |
 | **`kasa-socket`** | cmux 호환 Unix-socket JSON-RPC 서버. `kasaterm-cli` 포함 | pane 제어 프로토콜 |
-| **`kasa-mcp`** | pane 제어를 모델 도구로 노출하는 streamable-HTTP MCP 서버 | Claude/Antigravity 연동 |
+| **`kasa-bridge`** | tmux control-mode(`-C`) 브리지. GUI 비의존, 이벤트·화면 채널만 넘긴다 | tmux를 붙이는 다른 UI |
+| **`kasa-mcp`** | pane 제어 MCP 서버 + 원격 세션·기계 명부·폰 관문의 HTTP 층 | Claude/Antigravity 연동 |
 | `app/kasaterm` | 메인 바이너리 — winit+wgpu 윈도우, chrome UI, 입력·단축키 라우팅 | — |
 
 ---
@@ -86,11 +89,16 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 다른 터미널과 다른 점:
 
 - **작업이 굴러가는 걸 본다** — pane에서 Claude가 하는 일이 채팅·작업 트리로 실시간 표시된다.
-- **pane끼리 연동된다** — pane이 격리된 창이 아니라, 에이전트가 pane을 넘나들며 협업하는 하나의 작업 공간이다.
+- **pane끼리 연동된다** — pane이 격리된 창이 아니라, 에이전트가 pane을 넘나들며 협업하는 하나의 작업 공간이다. 방이 달라도 서로 말을 걸고, 닫힌 pane에 일을 시키는 건 보내기 직전에 막힌다.
+- **창 전체가 한눈에** — 사이드바 배치도가 어느 칸에 누가 앉아 있는지, 무엇이 얼마나 도는 중인지, 손이 필요한 칸은 어디인지 그린다. 안 볼 pane은 죽이지 않고 치워 둔다.
+- **계정을 갈아끼운다** — 상태줄에 claude·codex 계정 슬롯이 모여 있고, 전환하면 도는 pane도 새 계정으로 되띄운다. 5시간·7일 한도와 무엇이 그걸 잡아먹는지가 하단바에 상시 표시된다.
+- **확장을 한 화면에서** — MCP·플러그인·에이전트·커맨드·훅을 하네스별·스코프별로 보고 거기서 바로 켜고 끈다.
 
 ### claude를 켜면 화면에 학생이 산다
 
-pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 명이 배정된다 — 이름·테두리색·프로필이 전부 그 학생으로 맞춰지고, 창 전체에서 겹치지 않게 자동으로 고른다. `/rename 미도리`처럼 이름을 바꾸면 원하는 학생으로 갈아끼운다. (12명 로스터: 아로나·프라나·미도리·모모이·유즈·아리스·유우카·시로코·호시노·코하루·히마리·아루.)
+pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 명이 배정된다 — 이름·테두리색·프로필이 전부 그 학생으로 맞춰지고, 창 전체에서 겹치지 않게 자동으로 고른다. `/rename 미도리`처럼 이름을 바꾸면 원하는 학생으로 갈아끼운다. (기본 로스터 12명: 아로나·프라나·미도리·모모이·유즈·아리스·유우카·시로코·호시노·코하루·히마리·아루.)
+
+**로스터는 갈아끼울 수 있다.** 테마 팩 하나가 캐릭터 세트 하나다 — 폴더에 명부(`characters.json`)·그림·색 프리셋을 넣어 두면 그게 통째로 로스터가 된다. 설정 창에 zip을 떨어뜨려 가져오고, 여러 팩을 가로질러 좋아하는 캐릭터만 골라 쓰는 풀도 만든다. 캐릭터마다 모델·성격·이름을 따로 지정할 수 있고, 대화를 끊지 않고 도중에 바꿔도 말투까지 따라온다.
 
 그리고 kasaterm은 **Claude Code가 그리는 터미널 화면 자체**를 렌더 단계에서 읽어, 그 위에 배정된 학생을 그린다. 로그를 파싱하거나 별도로 통합한 게 아니라 — 화면만 보고 동작한다:
 
@@ -117,7 +125,33 @@ pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 �
 
 ---
 
+## 기계를 가로지른다
+
+pane이 한 대의 컴퓨터에 묶여 있지 않다. 노트북에서 띄운 학생을 데스크톱·서버로 옮기고, 그 화면은 원래 창에 그대로 남기고, 폰에서 같은 pane을 이어서 본다.
+
+| | 무엇 |
+|---|---|
+| **이사(migrate)** | 도는 claude·codex 세션을 다른 기계로 통째로 옮긴다. 대화·모델·작업 경로가 따라가고, 커밋 안 한 변경과 안 올린 커밋까지 떠서 도착지에 재현한다 |
+| **거울 pane** | 옮긴 뒤에도 원래 창에 그 화면이 남는다. 거울 창을 줄여도 원본 기계의 화면 크기는 안 변한다 — 글자만 작아진다 |
+| **세션 소통** | 기계들이 중계소에 스스로 등록한다. 다른 기계에서 도는 세션이 내 목록에 뜨고, 메시지 한 통이면 거기까지 배달된다. 기계가 죽으면 1분 안에 목록에서 빠진다 |
+| **폰 웹터미널** | 앱이 켜지면 관문에 붙어 자기 주소를 하나 받는다. 폰에서 그 주소를 열면 방·학생 목록이 나오고, 고르면 그 pane이 그대로 뜬다. 끊기면 화면이 보일 때 저절로 재접속 |
+
+기계를 명부에 적어 두면 **이사 탭**에서 방별로 학생을 보고, 기계 하나의 학생 전부를 방 단위로 거울로 앉히고, 「화면 보기」로 그 기계의 화면공유를 연다. 원격 pane은 몸통에 색 리본이 붙어 헤더를 안 봐도 갈린다.
+
+---
+
 ## 설치 & 실행
+
+### 받아서 쓰기
+
+[최신 릴리스](https://github.com/2rami/kasaterm/releases/latest)에서 받는다.
+
+- **macOS** — `.dmg`를 열고 kasaterm을 Applications로 드래그. **처음 한 번만 우클릭 → 열기**(직접 서명한 앱이라 macOS가 한 번 확인받는다). 첫 실행에서 화면 녹화·접근 권한을 물으면 허용한다.
+- **Windows** — `.msi` 실행. SmartScreen 경고가 뜨면 「추가 정보 → 실행」.
+
+앱 안에서 자동 업데이트를 받는다(macOS는 Sparkle, Windows는 WinSparkle — 릴리스마다 서명된 appcast가 붙는다).
+
+### 소스에서 빌드
 
 ```bash
 # 소스 받기
@@ -133,7 +167,8 @@ cargo run --release -p kasaterm
 
 macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
 
-### 예전 `tmuxify` 폴더를 쓰고 있다면
+<details>
+<summary><b>예전 <code>tmuxify</code> 폴더를 쓰고 있다면 (펼치기)</b></summary>
 
 폴더만 손으로 바꾸면 Claude Code 대화와 연결 worktree가 이전 경로를 계속 가리킨다. 먼저
 kasaterm·Claude Code·Codex를 모두 정상 종료하고, 저장소의 **바깥 폴더**에서 이전 도구를
@@ -154,6 +189,8 @@ cd /path/to/parent
 
 적용 시 설정 원본과 Git 연결 정보는 `~/.config/kasaterm/migrations/` 아래에 백업된다.
 스크립트는 연결 worktree를 복구·검증하고, 이전 경로를 가리키는 영구 symlink는 만들지 않는다.
+
+</details>
 
 ### Claude Code 플러그인 (kasapane 스킬)
 
@@ -230,9 +267,15 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 
 ### MCP 서버 도구
 
-`crates/kasa-mcp`가 띄우는 streamable-HTTP MCP 서버로, Claude가 pane을 직접 제어한다. 앱이 부팅하면 자동으로 켜지고 Claude Code/Antigravity 설정에 자동 등록된다(별도 빌드·설치 불필요).
+`crates/kasa-mcp`가 띄우는 streamable-HTTP MCP 서버로, 모델이 창 구조를 읽고 자기 pane 이름을 붙인다. 앱이 부팅하면 자동으로 켜지고 Claude Code/Antigravity 설정에 자동 등록된다(별도 빌드·설치 불필요).
 
-`kasaspace_list` · `kasaspace_split` · `kasaspace_close` · `kasaspace_focus` · `kasaspace_swap` · `kasaspace_rename` · `kasaspace_set_color` · `kasaspace_send` · `kasaspace_send_key` · `kasaspace_run_job` · `kasaspace_switch_window` · `kasaspace_workspace_list` · `kasaspace_workspace_current`
+| 도구 | 무엇 |
+|---|---|
+| `kasaspace_list` | pane(surface)과 워크스페이스 목록 — 다른 도구에 넘길 id가 여기서 나온다 |
+| `kasaspace_rename` | 자기 pane 이름을 지금 하는 일로 바꾼다 (`window=true`면 사이드바 라벨까지) |
+| `kasaspace_workspace_list` / `kasaspace_workspace_current` | 워크스페이스 목록 / 지금 포커스된 것 |
+
+split·close·focus·send 같은 **조작은 `kasaterm-cli`**가 맡는다(앱 빌드에 내장). 모델이 셸에서 그대로 부르는 편이 왕복이 적어 MCP 도구에서는 걷어냈다 — `kasaterm-cli board`로 남이 뭘 하는지 보고, `kasaterm-cli tell`·cross-session 메시지로 말을 건다.
 
 </details>
 
@@ -247,11 +290,15 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | ① 엔진 | wgpu 셀 렌더 · P3 색재현 | 안정 |
 | ① 엔진 | 두벌식 한글 IME (OS 비의존) | 안정 |
 | ① 엔진 | 크로스플랫폼 PTY (macOS · Windows · Linux) | 안정 |
-| ① 엔진 | `claude --resume` 세션 복원 | 예정 |
+| ① 엔진 | `claude --resume` 세션 복원 | 안정 |
 | ② 작업환경 | 파일트리 · git 패널 | 진행 중 |
-| ② 작업환경 | pane 간 에이전트 연결 | 진행 중 |
+| ② 작업환경 | pane 간 에이전트 연결 | 안정 |
+| ② 작업환경 | 기계 간 세션 이사 · 거울 pane | 진행 중 |
+| ② 작업환경 | 폰 웹터미널 (관문 주소) | 진행 중 |
 | ③ 오케스트레이션 | BA GUI — 작업 실시간 시각화 | 진행 중 |
-| ③ 오케스트레이션 | 여러 Claude 협업 (아로나 모드) | 진행 중 |
+| ③ 오케스트레이션 | 여러 Claude 협업 (아로나 모드) | 안정 |
+| ③ 오케스트레이션 | 테마 팩 — 캐릭터 세트 교체 | 안정 |
+| ③ 오케스트레이션 | claude · codex 계정 슬롯 전환 | 진행 중 |
 
 ---
 
