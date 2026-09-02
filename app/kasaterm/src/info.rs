@@ -1492,6 +1492,65 @@ impl App {
     /// 패널이 열려 있는 동안 워커를 주기적으로 깨운다. 렌더 루프에서 불리므로
     /// 여기서 직접 ps/lsof 를 돌리면 안 된다 — 스레드를 띄우고 즉시 반환한다.
     /// 워커가 하나 도는 동안 다시 띄우지 않도록 `busy` 로 막는다.
+    /// 「다른 기계」 줄 재료 — machines 폴링 캐시(원격 `/term/panes` 스냅샷)를
+    /// 기계별 학생 수·기다림·거울 수로 접는다. 2초 스로틀: 캐시 자체가 몇 초
+    /// 주기라 더 자주 봐도 새 게 없고, `live_sessions` 훑기가 공짜는 아니다.
+    fn refresh_info_machines(&mut self) {
+        let fresh = self
+            .info
+            .machines_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+        if fresh {
+            return;
+        }
+        self.info.machines_at = Some(Instant::now());
+        let snap = kasa_mcp::machines::snapshot();
+        if snap.is_empty() {
+            self.info.machines_view.clear();
+            return;
+        }
+        // 라벨 → 이 창에 떠 있는 그 기계 거울 수.
+        let mut mirrors: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for id in kasa_pty::live_sessions() {
+            if let Some(i) = kasa_mcp::remote::remote_info(&id) {
+                let key = if i.label.is_empty() { i.base } else { i.label };
+                *mirrors.entry(key).or_default() += 1;
+            }
+        }
+        self.info.machines_view = snap
+            .iter()
+            .filter_map(|m| {
+                let label = m.get("label")?.as_str()?.to_string();
+                let panes: Vec<&serde_json::Value> = m
+                    .get("panes")
+                    .and_then(|p| p.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter(|p| {
+                                p.get("id").and_then(|v| v.as_str()).is_some_and(|s| s.starts_with('%'))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let waiting = panes
+                    .iter()
+                    .filter(|p| {
+                        p.get("status")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|st| st.contains("wait") || st.contains("attention"))
+                    })
+                    .count();
+                Some(state::InfoMachine {
+                    mirrored: mirrors.get(&label).copied().unwrap_or(0),
+                    label,
+                    online: m.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
+                    students: panes.len(),
+                    waiting,
+                })
+            })
+            .collect();
+    }
+
     pub(crate) fn pump_info(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
         // 탭 판정보다 앞이다 — "열기" 앱 목록은 Info 의 버튼뿐 아니라 우클릭
@@ -1551,6 +1610,7 @@ impl App {
         // 그 섹션이 화면에 없을 때까지 매 프레임 되짚을 이유는 없다.
         if watching {
             self.info.root = self.info_root();
+            self.refresh_info_machines();
         }
         if self.info.busy.load(Relaxed) {
             return;
@@ -1904,7 +1964,7 @@ pub(crate) fn draw_side_tabs(
         (state::SideTab::Sessions, "세션"),
         (state::SideTab::Mcp, "MCP"),
         (state::SideTab::Persona, "대화"),
-        (state::SideTab::Machines, "이사"),
+        (state::SideTab::Machines, "원격"),
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
@@ -2158,6 +2218,7 @@ pub(crate) fn draw_info_col(
     info.closed_rects.clear();
     info.closed_kill_rects.clear();
     info.kill_rects.clear();
+    info.machine_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
     info.refresh_rect = None;
@@ -2214,7 +2275,16 @@ pub(crate) fn draw_info_col(
     } else {
         SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
-    let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + 14.0;
+    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다.
+    let machines_h = if info.machines_view.is_empty() {
+        0.0
+    } else if info.machines_collapsed {
+        SEC_H + SEC_GAP
+    } else {
+        SEC_H + info.machines_view.len() as f32 * ROW_H + SEC_GAP
+    };
+    let content =
+        HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + closed_h + 14.0;
     info.content_h = content;
     // × 를 연달아 누르는 동안엔 상한을 안 줄인다. 줄이면 스크롤이 그만큼 끌려 올라와
     // 목록 전체가 밀리고, 다음 × 가 방금 누른 자리에 없다.
@@ -2454,6 +2524,28 @@ pub(crate) fn draw_info_col(
     let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
 
+    // ── 다른 기계 ── 명부 기계마다 한 줄: 학생 수·기다림·이 창의 거울 수. 화면공유를
+    // 열지 않고도 「미니에 누가 뭘 기다리나」가 여기서 보인다(2026-09-02 지시). 줄을
+    // 누르면 원격 탭 — 거울·펼치기 버튼은 거기 있다.
+    if !info.machines_view.is_empty() {
+        let n = info.machines_view.iter().map(|m| m.students).sum();
+        let r = draw_section(
+            g, cursor, "다른 기계", Some(n), None, info.machines_collapsed, x, w, y, bottom, top,
+        );
+        info.sec_rects.push((state::InfoSection::Machines, r));
+        y += SEC_H;
+        if !info.machines_collapsed {
+            for m in &info.machines_view {
+                if y + ROW_H > top && y < bottom {
+                    draw_machine_row(g, cursor, m, x, w, x0, right, y);
+                }
+                info.machine_rects.push((m.label.clone(), (x, y, w, ROW_H)));
+                y += ROW_H;
+            }
+        }
+        y += SEC_GAP;
+    }
+
     // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
     // 맨 위(=가장 최근) 것을 되살린다. 되살릴 게 없으면 통째로 없다.
     if !closed.is_empty() {
@@ -2511,6 +2603,7 @@ pub(crate) fn draw_info_col(
     clip_rects!(info.kill_rects, 1);
     clip_rects!(info.closed_rects, 1);
     clip_rects!(info.closed_kill_rects, 1);
+    clip_rects!(info.machine_rects, 1);
     info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
     // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
     // 자르면 멀쩡한 버튼이 사라진다.
@@ -3093,6 +3186,80 @@ fn draw_tab_row(
 /// 두되, 누를 수 있다는 것과 ⌘⇧T 가 **어느 줄**을 되살리는지는 분명해야 한다 —
 /// 스택이 여럿일 때 그 키가 무엇을 꺼낼지 모르면 누르기가 망설여진다.
 #[allow(clippy::too_many_arguments)]
+/// 「다른 기계」 한 줄 — 왼쪽 기계 이름(끊겼으면 흐리게), 오른쪽 요약. 기다림이
+/// 있으면 그 수만 경고색 — 「누가 내 답을 기다리나」가 이 줄의 존재 이유다.
+fn draw_machine_row(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    m: &state::InfoMachine,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    let hov = hit(cursor, &(x, y, w, ROW_H));
+    if hov {
+        g.hover_pointer = true;
+        g.rect(x, y, w, ROW_H, theme::surface_hover());
+    }
+    let fg = if m.online { theme::text() } else { theme::text_mute() };
+    g.draw_text(
+        x0,
+        y + 3.0,
+        &m.label,
+        gpu::DrawOpts {
+            font_size: 11.0,
+            color: fg,
+            bold: true,
+            italic: false,
+        },
+    );
+    let summary = if !m.online {
+        "안 닿음".to_string()
+    } else if m.students == 0 {
+        "학생 없음".to_string()
+    } else {
+        let mut s = format!("학생 {}", m.students);
+        if m.mirrored > 0 {
+            s.push_str(&format!(" · 거울 {}", m.mirrored));
+        }
+        s
+    };
+    let arrow = if hov { "원격 탭 →" } else { "" };
+    let tail = if arrow.is_empty() { summary.clone() } else { format!("{summary}   {arrow}") };
+    let tw = g.measure_chrome_text(&tail, 10.5, false);
+    let mut tx = (right - tw).max(x0 + 80.0);
+    if m.online && m.waiting > 0 {
+        let warn = format!("기다림 {}  ", m.waiting);
+        let ww = g.measure_chrome_text(&warn, 10.5, true);
+        tx = (tx - ww).max(x0 + 80.0);
+        g.draw_text(
+            tx,
+            y + 4.0,
+            &warn,
+            gpu::DrawOpts {
+                font_size: 10.5,
+                color: theme::attention(),
+                bold: true,
+                italic: false,
+            },
+        );
+        tx += ww;
+    }
+    g.draw_text(
+        tx,
+        y + 4.0,
+        &tail,
+        gpu::DrawOpts {
+            font_size: 10.5,
+            color: theme::text_dim(),
+            bold: false,
+            italic: false,
+        },
+    );
+}
+
 fn draw_closed_row(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),

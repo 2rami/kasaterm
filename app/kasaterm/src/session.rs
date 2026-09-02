@@ -813,6 +813,98 @@ impl App {
         Ok(new_id)
     }
 
+    /// 거울 — 명부 기계의 pane **하나**를 활성 pane 오른쪽에 거울로 앉힌다.
+    ///
+    /// 방 펼치기(`unfold_machine`)의 학생 단위 짝이다(2026-09-02 지시 「이사탭을
+    /// remote로 개편해서 미러링」): 화면공유를 열지 않고도 그 기계의 학생 하나를
+    /// 이 창에서 본다. 크기 규칙은 펼치기와 같다 — `connect_view` 라 원본 세션
+    /// 크기를 절대 안 바꾸고, 격자가 pane 보다 크면 렌더가 이 pane 만 배율을 줄인다.
+    /// 이미 같은 pane 의 거울이 있으면 새로 안 열고 그쪽으로 포커스만 옮긴다.
+    pub(crate) fn mirror_remote_pane(
+        &mut self,
+        label: &str,
+        remote_id: &str,
+        name: &str,
+        remote_cwd: &str,
+    ) -> Result<String> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        if let Some(existing) = kasa_pty::live_sessions().into_iter().find(|id| {
+            kasa_mcp::remote::remote_info(id)
+                .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
+        }) {
+            self.focus_pane(&existing);
+            return Ok(existing);
+        }
+        let anchor = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("기준 pane 이 없다"))?;
+        let anchor = self
+            .ws
+            .lock()
+            .unwrap()
+            .outer_for_pty(&anchor)
+            .unwrap_or(anchor);
+        if self.window_of_pane(&anchor).is_none() {
+            anyhow::bail!("기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
+        }
+        let new_id = self.alloc_pane_id();
+        let (win_cols, win_rows) = self.window_cells();
+        let remote = kasa_mcp::remote::connect_view(
+            kasa_mcp::remote::RemoteSpec {
+                base: m.base.clone(),
+                pane: Some(remote_id.to_string()),
+                cwd: None,
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: m.label.clone(),
+                    remote_cwd: (!remote_cwd.is_empty()).then(|| remote_cwd.to_string()),
+                    origin_cwd: None,
+                },
+            },
+            &new_id,
+        )?;
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            new_id.clone(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
+        self.insert_pty(new_id.clone(), remote.session.clone());
+        self.dead_panes.lock().unwrap().retain(|x| x != &new_id);
+        if !self
+            .pty_layout
+            .as_mut()
+            .is_some_and(|l| l.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone()))
+        {
+            // 거울은 남의 세션이다 — kill 은 안 한다, Arc drop 이 detach 만 한다.
+            self.pty.remove(&new_id);
+            anyhow::bail!("pane {anchor} 을 활성 창 트리에서 못 찾았다");
+        }
+        // 몸통이 남의 기계라도 이 창의 학생은 같은 사람 — 무명 pane 방지.
+        let name = if name.is_empty() {
+            kasa_mcp::remote::remote_pane_character(&m.base, remote_id, None).unwrap_or_default()
+        } else {
+            name.to_string()
+        };
+        if !name.is_empty() {
+            self.relabel_pane(&new_id, &name);
+        }
+        self.ws.lock().unwrap().active_pane = Some(new_id.clone());
+        self.resize_backend(win_cols, win_rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(new_id)
+    }
+
     /// 방 펼치기 — 명부 기계 하나의 학생 pane 전부를 이 창에 거울로 앉힌다.
     ///
     /// 「완전동기화되는 세션」의 보기 쪽 절반(2026-09-02 지시 「일단 만들어봐」):

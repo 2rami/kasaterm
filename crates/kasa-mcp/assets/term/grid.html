@@ -9,14 +9,27 @@
   html,body{margin:0;background:#12161c;color:#c8d0d9;
     font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overscroll-behavior:none}
   #wrap{overflow:auto;-webkit-overflow-scrolling:touch}
-  #status{position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;
+  /* 그림 모드 — PNG 를 폰 폭에 맞춰 두고 두 손가락으로 키운다. 브라우저 핀치는 메타로
+     꺼 두었으므로(입력창 포커스 때 화면이 튀는 것을 막는다) 배율은 우리가 잰다. */
+  #shotwrap{position:fixed;left:0;right:0;top:0;bottom:calc(44px + env(safe-area-inset-bottom));
+    overflow:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;background:#12161c}
+  #shot{display:block;width:100%;max-width:none;user-select:none;-webkit-user-select:none}
+  #shotnote{position:absolute;left:0;right:0;top:0;padding:10px 12px;background:#1a2130;color:#e0af68;font-size:13px}
+  #status{position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;
     padding:0 6px;padding-bottom:env(safe-area-inset-bottom);min-height:44px;background:#1a2130;
     font-size:12px;color:#7aa2f7}
-  #status a{display:flex;align-items:center;min-height:44px;padding:0 10px;color:#c8d0d9;text-decoration:none}
+  #status a,#status button{display:flex;align-items:center;min-height:44px;min-width:44px;justify-content:center;
+    padding:0 10px;color:#c8d0d9;text-decoration:none;background:none;border:0;font:inherit}
+  #status button.on{color:#7aa2f7;text-shadow:0 0 6px #7aa2f7}
   #st{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 <div id="wrap"></div>
-<div id="status"><a id="hub" href="./">≡ 목록</a><span id="st">연결 중…</span></div>
+<div id="shotwrap" hidden><img id="shot" alt=""><div id="shotnote" hidden></div></div>
+<div id="status">
+  <a id="hub" href="./">≡ 목록</a>
+  <span id="st">연결 중…</span>
+  <button id="pic" type="button" title="데스크톱이 그리는 그대로(테마·폰트) 보기">그림</button>
+</div>
 <script src="grid.js"></script>
 <script>
 // 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — WS 도 같은 문으로.
@@ -25,7 +38,12 @@ const ROOT = location.pathname.replace(/\/term\/grid\/?$/, '');
 const hubRoot = ROOT.replace(/\/m\/[^/]+$/, '');
 document.getElementById('hub').href = hubRoot ? `${hubRoot}/` : '/hub';
 const st = document.getElementById('st');
-const grid = KasaGrid(document.getElementById('wrap'));
+const wrap = document.getElementById('wrap');
+const shotwrap = document.getElementById('shotwrap');
+const shot = document.getElementById('shot');
+const shotnote = document.getElementById('shotnote');
+const picBtn = document.getElementById('pic');
+const grid = KasaGrid(wrap);
 const enc = new TextEncoder();
 // 키 입력은 바이너리 프레임으로만 간다 — 텍스트 프레임은 resize JSON 으로 읽혀 버려진다.
 const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
@@ -39,6 +57,8 @@ const sep = location.search ? '&' : '?';
 const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}${sep}grid=1`;
 let ws = null;
 let frames = 0;
+let isMirror = false;       // 네이티브 pane 을 같이 보는 중 — 크기는 그쪽이 주인이다
+let lastCursor = [0, 0];
 // 끊기면 다시 붙는다. 폰은 화면을 끄거나 앱을 바꾸는 것만으로 소켓이 죽고, 예전엔
 // 「끊김」만 찍고 새로고침을 기다렸다(2026-09-02 지적 「연결도 끊기고」). 세션이 정말
 // 끝난 것(`gone`)만 멈춘다 — 연결 유실은 멈출 이유가 아니다.
@@ -56,18 +76,25 @@ function connect() {
       grid.apply(m);
       modes.appCursor = m.appCursor;
       modes.bracketedPaste = m.bracketedPaste;
-      input.moveTo(m.cursor[0], m.cursor[1]);
+      lastCursor = m.cursor;
+      placeInput();
       frames++;
-      st.textContent = `${m.cols}×${m.rows} · ${frames}프레임 · ${m.alt ? 'alt' : 'primary'}`;
+      st.textContent = `${m.cols}×${m.rows} · ${frames}프레임${picture ? ' · 그림' : ''}`;
       fitWidth();
+      // 격자가 바뀌었다 = 데스크톱 화면도 바뀌었다. 그림 모드면 새 장을 받는다.
+      if (picture) { shotDue = true; takeShot(); }
     } else if (m.t === 'size') {
+      isMirror = !!m.mirror;
       st.textContent = `격자 ${m.cols}×${m.rows}${m.mirror ? ' (미러)' : ''}`;
     } else if (m.t === 'gone') {
       gone = true;
       st.textContent = '세션이 끝났어요 — ≡ 목록에서 다른 pane 을 고르세요';
     }
   };
-  ws.onopen = () => { backoff = 1000; sentSize = { cols: 0, rows: 0 }; input.focus(); syncSize(); };
+  ws.onopen = () => {
+    backoff = 1000; sentSize = { cols: 0, rows: 0 }; input.focus(); syncSize();
+    if (picture) { shotDue = true; takeShot(); }
+  };
   ws.onclose = (e) => {
     if (gone) return;
     st.textContent = `끊김 (${e.code}) — 다시 연결 중…`;
@@ -83,7 +110,7 @@ function schedule() {
   backoff = Math.min(backoff * 2, 10000);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { backoff = 1000; connect(); }
+  if (document.visibilityState === 'visible') { backoff = 1000; connect(); if (picture) { shotDue = true; takeShot(); } }
 });
 addEventListener('online', () => { backoff = 1000; connect(); });
 addEventListener('pageshow', (e) => { if (e.persisted) connect(); });
@@ -103,11 +130,13 @@ function fitWidth() {
 
 // 웹 전용 셸이면 폰 화면에 맞는 격자를 서버에 요청한다. 안 하면 PTY 기본값 80×24 가
 // 그대로라 폰 세로 화면의 2/3 가 빈 채로 남는다.
-// ⚠️ 미러(네이티브 pane 을 같이 보는 것)일 땐 서버가 이 요청을 **무시한다** — 같은 PTY 를
-// 보는 kasaterm pane 이 함께 좁아지기 때문이다. 그래서 요청과 별개로 fitWidth() 가 늘 남는다.
+// ⚠️ 미러(네이티브 pane 을 같이 보는 것)일 땐 보내지 않는다 — 같은 PTY 를 보는 kasaterm
+// pane 이 함께 좁아지고, 설령 `force` 로 밀어도 데스크톱이 제 배치 크기로 곧장 되돌린다
+// (2026-09-02 실측: 폰 격자만 잠시 48열이 됐다가 화면이 멈췄다). 그래서 fitWidth() 가 늘 남는다.
 let sentSize = { cols: 0, rows: 0 };
 function syncSize() {
   if (!ws || ws.readyState !== 1 || !grid.cell.w || !grid.cell.h) return;
+  if (isMirror) return;
   const w = document.documentElement.clientWidth;
   const h = document.documentElement.clientHeight - document.getElementById('status').offsetHeight;
   const cols = Math.max(20, Math.floor(w / grid.cell.w));
@@ -117,5 +146,97 @@ function syncSize() {
   ws.send(JSON.stringify({ t: 'resize', cols, rows }));
 }
 
-addEventListener('resize', () => { grid.remeasure(); syncSize(); fitWidth(); });
+addEventListener('resize', () => { grid.remeasure(); syncSize(); fitWidth(); placeInput(); });
+
+// ── 그림 모드 ──
+// 격자 화면은 셀을 브라우저 폰트로 다시 그려 테마·폰트·프사가 데스크톱과 다르다. 그림
+// 모드는 데스크톱이 실제로 그린 프레임(PNG)을 받아 그대로 보인다 — 나쵸 알림 사진과
+// 같은 경로다. 입력은 그대로 격자 소켓으로 가고, 격자 프레임이 「화면이 바뀌었다」는
+// 신호로만 쓰인다. 한 장에 데스크톱 한 프레임이라 400ms 에 한 장을 넘지 않고, 받는
+// 중엔 겹쳐 부르지 않는다.
+let picture = false;
+let zoom = 1;
+let shotBusy = false, shotDue = false, shotAt = 0, shotTimer = null;
+const SHOT_MIN_MS = 400;
+function shotNote(msg) {
+  shotnote.hidden = !msg;
+  shotnote.textContent = msg || '';
+}
+async function takeShot() {
+  if (!picture || document.visibilityState !== 'visible') return;
+  if (shotBusy) { shotDue = true; return; }
+  const wait = SHOT_MIN_MS - (Date.now() - shotAt);
+  if (wait > 0) { clearTimeout(shotTimer); shotTimer = setTimeout(takeShot, wait); return; }
+  shotBusy = true; shotDue = false; shotAt = Date.now();
+  try {
+    const r = await fetch(`${ROOT}/term/shot${location.search}${sep}w=0&n=${shotAt}`, { cache: 'no-store' });
+    if (!r.ok) {
+      const why = (await r.text()).trim();
+      // 격자 없는 헤드리스 셸이나 가려진 pane — 글자 화면으로 돌아간다.
+      if (r.status === 503 && !shot.src) { setPicture(false); st.textContent = `그림이 없는 pane 이에요 — ${why}`; }
+      else shotNote(`그림 갱신 실패 — ${why}`);
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const old = shot.src;
+    shot.src = url;
+    if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+    shotNote('');
+  } catch (e) {
+    shotNote('그림을 못 받았어요 — 연결을 확인하세요');
+  } finally {
+    shotBusy = false;
+    if (shotDue) takeShot();
+  }
+}
+// 입력창(textarea)은 IME 후보창이 뜰 자리다 — 그림 위의 커서 자리에 놓는다. 그림의
+// 셀 크기는 「그림 폭 ÷ 열 수」로 안다(서버가 pane 격자 그대로 그린다).
+function placeInput() {
+  const [row, col] = lastCursor;
+  if (!picture) { input.moveTo(row, col); return; }
+  if (!shot.naturalWidth || !grid.cols || !grid.rows) return;
+  const s = shot.clientWidth / shot.naturalWidth;
+  const cw = (shot.naturalWidth / grid.cols) * s;
+  const ch = (shot.naturalHeight / grid.rows) * s;
+  input.el.style.transform = `translate(${col * cw}px, ${row * ch}px)`;
+  input.el.style.height = `${ch}px`;
+}
+shot.addEventListener('load', placeInput);
+function setPicture(on) {
+  picture = on;
+  wrap.hidden = on;
+  shotwrap.hidden = !on;
+  picBtn.textContent = on ? '글자' : '그림';
+  picBtn.classList.toggle('on', on);
+  // 입력창은 보이는 쪽에 있어야 포커스가 잡힌다(display:none 안의 요소는 포커스 불가).
+  (on ? shotwrap : grid.el).appendChild(input.el);
+  placeInput();
+  if (on) { shotDue = true; takeShot(); }
+  input.focus();
+  try { localStorage.setItem('kasa-picture', on ? '1' : '0'); } catch (e) {}
+}
+picBtn.addEventListener('click', () => setPicture(!picture));
+shotwrap.addEventListener('pointerup', () => input.focus());
+// 두 손가락 핀치 — 폰 폭에 맞춘 1배에서 6배까지. 한 손가락 스크롤은 브라우저 것이다.
+let pinch = null;
+const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+shotwrap.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) pinch = { d: dist(e.touches), z: zoom };
+}, { passive: true });
+shotwrap.addEventListener('touchmove', (e) => {
+  if (!pinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  zoom = Math.min(6, Math.max(1, pinch.z * dist(e.touches) / pinch.d));
+  shot.style.width = `${zoom * 100}%`;
+  placeInput();
+}, { passive: false });
+shotwrap.addEventListener('touchend', () => { pinch = null; });
+// 마지막 선택을 기억한다 — 매번 「그림」을 다시 누르게 하지 않는다. `?pic=1` 이 우선.
+{
+  let want = false;
+  try { want = localStorage.getItem('kasa-picture') === '1'; } catch (e) {}
+  if (new URLSearchParams(location.search).get('pic') === '1') want = true;
+  if (want) setPicture(true);
+}
 </script>

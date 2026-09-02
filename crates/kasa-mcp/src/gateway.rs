@@ -41,7 +41,10 @@ struct Uplink {
 
 #[derive(Clone)]
 pub struct Gate {
-    by_slug: Arc<Mutex<HashMap<String, Arc<Uplink>>>>,
+    /// slug → 그 slug 를 알린 **살아 있는 연결들**(뒤가 최신). 하나만 두면 같은
+    /// 기계에서 앱이 둘 뜬 경우(검증 리그·재시작 겹침)에 나중 것이 떠나며 먼저 것을
+    /// 함께 떼어 버린다 — 2026-09-02 실측: 리그가 붙었다 떠나자 실앱 주소가 502.
+    by_slug: Arc<Mutex<HashMap<String, Vec<Arc<Uplink>>>>>,
     /// slug → 키 해시. 처음 온 키가 주인이다.
     keys: Arc<Mutex<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
@@ -138,6 +141,16 @@ fn parse_hello(v: &serde_json::Value) -> Option<(String, Vec<String>, String)> {
     Some((key, slugs, machine))
 }
 
+/// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
+fn drop_conn(map: &mut HashMap<String, Vec<Arc<Uplink>>>, slug: &str, conn: u64) {
+    if let Some(v) = map.get_mut(slug) {
+        v.retain(|u| u.conn != conn);
+        if v.is_empty() {
+            map.remove(slug);
+        }
+    }
+}
+
 async fn uplink_run(gate: Gate, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let first = tokio::time::timeout(Duration::from_secs(10), rx.next()).await;
@@ -166,7 +179,11 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         let mut rej = Vec::new();
         for s in slugs {
             if gate.claim(s, &hash) {
-                gate.by_slug.lock().unwrap().insert(s.clone(), up.clone());
+                let mut map = gate.by_slug.lock().unwrap();
+                let v = map.entry(s.clone()).or_default();
+                if !v.iter().any(|u| u.conn == conn) {
+                    v.push(up.clone());
+                }
                 acc.push(s.clone());
             } else {
                 rej.push(s.clone());
@@ -227,9 +244,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                     {
                         let mut map = gate.by_slug.lock().unwrap();
                         for old in mine.iter().filter(|s| !acc2.contains(s)) {
-                            if map.get(old).is_some_and(|u| u.conn == conn) {
-                                map.remove(old);
-                            }
+                            drop_conn(&mut map, old, conn);
                         }
                     }
                     mine = acc2.clone();
@@ -252,9 +267,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
     {
         let mut map = gate.by_slug.lock().unwrap();
         for s in &mine {
-            if map.get(s).is_some_and(|u| u.conn == conn) {
-                map.remove(s);
-            }
+            drop_conn(&mut map, s, conn);
         }
     }
     up.streams.lock().unwrap().clear();
@@ -310,7 +323,7 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
     if !crate::mobile::valid_slug(&slug) {
         return offline_page(false);
     }
-    let up = gate.by_slug.lock().unwrap().get(&slug).cloned();
+    let up = gate.by_slug.lock().unwrap().get(&slug).and_then(|v| v.last().cloned());
     let Some(up) = up else {
         // 한 번도 등록된 적 없는 slug 는 「없는 주소」, 등록됐다 떨어진 slug 는 「안 붙어 있음」
         // — 폰에서 할 일이 다르다(주소를 다시 받기 vs 그 기계 앱 켜기).

@@ -248,6 +248,12 @@ pub fn gateway() -> Option<String> {
     if let Ok(v) = std::env::var("KASATERM_GATEWAY") {
         return pick(v);
     }
+    // 검증 리그(자동 종료 타이머를 단 앱)는 관문에 안 나간다 — 같은 기계의 같은 주소로
+    // 붙어 실앱의 우편함을 가로채고, 떠날 때 관문에서 실앱까지 떼어 갔다(2026-09-02
+    // 실측 502). 리그가 관문을 시험하려면 KASATERM_GATEWAY 로 명시한다.
+    if std::env::var_os("KASATERM_AUTOQUIT_MS").is_some() {
+        return None;
+    }
     let file = users_path().map(|p| load_body(&p)).unwrap_or_default();
     match file.gateway {
         Some(v) => pick(v),

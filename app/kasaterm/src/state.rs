@@ -327,6 +327,10 @@ pub(crate) struct MachinesColMachine {
 pub(crate) struct MachinesColRow {
     /// 로컬 surface id. 원격 전용 행은 빈 문자열(이사 대상이 못 된다).
     pub(crate) pane: String,
+    /// 원격 전용 행의 그 기계 pane id(`%N`) — 「거울」이 붙는 열쇠. 로컬·미러 행은 빈값.
+    pub(crate) remote_id: String,
+    /// 원격 pane 의 작업 폴더 — 거울의 링크 정체에 실어야 재접속 따라잡기가 레포를 안다.
+    pub(crate) remote_cwd: String,
     pub(crate) name: String,
     pub(crate) title: String,
     pub(crate) status: String,
@@ -355,6 +359,15 @@ pub(crate) enum MachinesColBtn {
     /// 방 펼치기 — 그 기계 학생 pane 전부를 이 창의 거울로(원격 방마다 새 창).
     Unfold {
         label: String,
+    },
+    /// 거울 — 그 기계 pane **하나**를 활성 pane 옆에 거울로 앉힌다. 방 펼치기가
+    /// 기계 단위라 학생 하나만 보고 싶을 때 창이 통째로 늘던 것의 짝(2026-09-02
+    /// 지시 「이사탭을 remote로 개편해서 미러링」).
+    Mirror {
+        label: String,
+        remote_id: String,
+        name: String,
+        cwd: String,
     },
 }
 
@@ -514,6 +527,21 @@ pub(crate) enum InfoSection {
     /// 닫아서 물러난 pane. 되살릴 게 있을 때만 나타나는 섹션이라, 다른 셋과 달리
     /// 자리를 상시 차지하지 않는다.
     Closed,
+    /// 다른 기계(명부) — 그 기계의 학생 수·기다림·거울 수 한 줄씩. 명부가 비면 없다.
+    Machines,
+}
+
+/// Info 「다른 기계」 한 줄의 재료 — machines 폴링 캐시를 요약한 것.
+#[derive(Clone, Default)]
+pub(crate) struct InfoMachine {
+    pub(crate) label: String,
+    pub(crate) online: bool,
+    /// 그 기계의 GUI pane 수(학생 자리).
+    pub(crate) students: usize,
+    /// 그중 사람 답을 기다리는 것(waiting·attention).
+    pub(crate) waiting: usize,
+    /// 이 창에 이미 거울로 떠 있는 수.
+    pub(crate) mirrored: usize,
 }
 
 /// Info 탭 머리의 앱 전역 진입점. 우상단 아이콘 클러스터에 흩어져 있던 것들이라
@@ -596,6 +624,12 @@ pub(crate) struct InfoState {
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
     pub(crate) closed_collapsed: bool,
+    pub(crate) machines_collapsed: bool,
+    /// 「다른 기계」 섹션 재료 — `pump_info` 가 2초마다 machines 캐시에서 요약한다.
+    pub(crate) machines_view: Vec<InfoMachine>,
+    pub(crate) machines_at: Option<std::time::Instant>,
+    /// 기계 줄 hit rect `(라벨, rect)` — 누르면 원격 탭으로 간다. 매 paint 재생성.
+    pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
     /// 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않게 하려는 것이다.
@@ -675,6 +709,10 @@ impl Default for InfoState {
             dir_collapsed: false,
             procs_collapsed: false,
             closed_collapsed: false,
+            machines_collapsed: false,
+            machines_view: Vec::new(),
+            machines_at: None,
+            machine_rects: Vec::new(),
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),

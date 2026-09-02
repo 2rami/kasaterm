@@ -165,6 +165,8 @@ impl App {
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
             let row = state::MachinesColRow {
                 pane: id.clone(),
+                remote_id: String::new(),
+                remote_cwd: String::new(),
                 color: theme::character_accent_any(&name),
                 name,
                 title: self.pane_row_label(id),
@@ -217,12 +219,16 @@ impl App {
                                 }
                                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                 let win = p.get("window").and_then(|v| v.as_u64());
-                                // 방 이름은 폴더 꼬리(사이드바 규칙과 같은 원천) — cwd 를
-                                // 안 주는 옛 창구에서는 방 번호로 물러선다.
-                                let room = p
+                                let cwd = p
                                     .get("cwd")
                                     .and_then(|v| v.as_str())
-                                    .and_then(|c| c.rsplit('/').next())
+                                    .unwrap_or("")
+                                    .to_string();
+                                // 방 이름은 폴더 꼬리(사이드바 규칙과 같은 원천) — cwd 를
+                                // 안 주는 옛 창구에서는 방 번호로 물러선다.
+                                let room = cwd
+                                    .rsplit('/')
+                                    .next()
                                     .filter(|t| !t.is_empty())
                                     .map(str::to_string)
                                     .or_else(|| win.map(|w| format!("방 {}", w + 1)))
@@ -236,6 +242,10 @@ impl App {
                                     win.unwrap_or(u64::MAX),
                                     state::MachinesColRow {
                                         pane: String::new(), // 로컬 자리가 없다 — 데려오기 대상이 못 된다.
+                                        // GUI pane(`%…`)만 거울 대상이다 — 헤드리스 웹 셸은
+                                        // 그 기계 화면의 방이 아니다.
+                                        remote_id: rid.starts_with('%').then(|| rid.to_string()).unwrap_or_default(),
+                                        remote_cwd: cwd,
                                         name: if name.is_empty() {
                                             "이름 없는 학생".to_string()
                                         } else {
@@ -340,12 +350,33 @@ impl App {
             self.render_frame();
             return true;
         }
+        if let state::MachinesColBtn::Mirror {
+            label,
+            remote_id,
+            name,
+            cwd,
+        } = &btn
+        {
+            let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
+            self.set_toast(format!("{name} 거울 여는 중 — {label}"));
+            self.render_frame();
+            match self.mirror_remote_pane(&label, &rid, &name, &cwd) {
+                Ok(_) => self.set_toast(format!("{name} 거울 — {label} 의 화면을 옆에 앉혔다")),
+                Err(e) => self.set_toast(format!("거울 실패 — {e:#}")),
+            }
+            self.info.machines_col.last_refresh = None; // 새 거울을 바로 읽게.
+            self.chrome_dirty = true;
+            self.render_frame();
+            return true;
+        }
         let (pane, going) = match &btn {
             state::MachinesColBtn::Send { pane, label } => {
                 (pane.clone(), format!("{label}(으)로 보내는 중…"))
             }
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
-            state::MachinesColBtn::Screen { .. } | state::MachinesColBtn::Unfold { .. } => {
+            state::MachinesColBtn::Screen { .. }
+            | state::MachinesColBtn::Unfold { .. }
+            | state::MachinesColBtn::Mirror { .. } => {
                 unreachable!("위에서 return")
             }
         };
@@ -365,7 +396,9 @@ impl App {
         ));
         #[cfg(unix)]
         let outcome = match btn {
-            state::MachinesColBtn::Screen { .. } | state::MachinesColBtn::Unfold { .. } => {
+            state::MachinesColBtn::Screen { .. }
+            | state::MachinesColBtn::Unfold { .. }
+            | state::MachinesColBtn::Mirror { .. } => {
                 unreachable!("위에서 return")
             }
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {
@@ -938,7 +971,24 @@ pub(crate) fn draw_machines_col(
         let mut last_room = String::new();
         for row in &m.remote {
             y = room_label(g, x0, y, &row.room, &mut last_room);
-            y = student_row(g, cursor, mc, row, &[], x0 + 8.0, right, y, narrow);
+            // 학생 하나만 거울로 — 방 펼치기(기계 단위)의 짝. 안 닿는 기계는 버튼을
+            // 안 그린다(눌러도 연결이 안 된다).
+            let buttons: Vec<(state::MachinesColBtn, String, bool)> =
+                if m.online && !row.remote_id.is_empty() {
+                    vec![(
+                        state::MachinesColBtn::Mirror {
+                            label: m.label.clone(),
+                            remote_id: row.remote_id.clone(),
+                            name: row.name.clone(),
+                            cwd: row.remote_cwd.clone(),
+                        },
+                        "거울".to_string(),
+                        true,
+                    )]
+                } else {
+                    Vec::new()
+                };
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
         }
     }
 

@@ -4675,6 +4675,14 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            // 「다른 기계」 줄 — 거울·펼치기 버튼이 있는 원격 탭으로.
+                            if self.info.machine_rects.iter().any(|(_, r)| inside(r)) {
+                                self.info.tab = state::SideTab::Machines;
+                                self.info.machines_col.last_refresh = None;
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             if let Some(sec) = self
                                 .info
                                 .sec_rects
@@ -4686,6 +4694,9 @@ impl ApplicationHandler<UserEvent> for App {
                                     state::InfoSection::Dir => &mut self.info.dir_collapsed,
                                     state::InfoSection::Procs => &mut self.info.procs_collapsed,
                                     state::InfoSection::Closed => &mut self.info.closed_collapsed,
+                                    state::InfoSection::Machines => {
+                                        &mut self.info.machines_collapsed
+                                    }
                                 };
                                 *flag = !*flag;
                                 window.request_redraw();
