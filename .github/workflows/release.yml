@@ -44,9 +44,11 @@ jobs:
       - name: Build and verify Windows packages
         shell: pwsh
         run: |
-          $arguments = @()
+          # 해시테이블 splatting — 배열로 넘기면 "-ExpectedVersion" 이 이름이 아니라
+          # 첫 위치 인자($Repo)로 들어가 경로 해석에서 선다.
+          $arguments = @{}
           if ($env:GITHUB_REF -like "refs/tags/v*") {
-            $arguments += @("-ExpectedVersion", $env:GITHUB_REF_NAME)
+            $arguments["ExpectedVersion"] = $env:GITHUB_REF_NAME
           }
           & .\scripts\windows\package.ps1 @arguments
 
