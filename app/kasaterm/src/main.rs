@@ -7658,10 +7658,22 @@ esac\n\
 for _a in \"$@\"; do\n\
   case \"$_a\" in\n\
     mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
+    local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1; break ;;\n\
     -*) ;;\n\
     *) break ;;\n\
   esac\n\
 done\n\
+# `claude local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(2026-09-02 「로컬에서\n\
+# 실행하려면 어떻게?」). env 한 줄(KASATERM_NO_HOME=1 claude)의 사람용 표기다. 그 단어는\n\
+# claude 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.\n\
+if [ -n \"$_drop_local\" ]; then\n\
+  _n=$#; _i=0\n\
+  while [ $_i -lt $_n ]; do\n\
+    _a=$1; shift\n\
+    if [ -n \"$_drop_local\" ] && [ \"$_a\" = local ]; then _drop_local=\"\"; else set -- \"$@\" \"$_a\"; fi\n\
+    _i=$((_i+1))\n\
+  done\n\
+fi\n\
 # 본진(home) — 명부에 home:true 기계가 있으면 순정 실행(플래그만)도 그 기계\n\
 # 태생으로 간다(2026-09-02 「작업 본체를 맥미니로」). 이어받기·헤드리스가 보이면\n\
 # 손대지 않는다 — 로컬 대화를 남의 기계로 보내면 jsonl 이 없어 깨진다. 값 딸린\n\
@@ -7845,6 +7857,17 @@ fi
 # `plugin add` 는 다음 실행에 사라진다(config 를 매번 새로 복사하므로). 대화 계열
 # (서브커맨드 없음=TUI · exec · resume · fork · review)만 우리 홈을 쓴다.
 SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
+# `codex local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(claude local 과 짝).
+# 그 단어는 codex 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.
+if [ "$SUB" = local ]; then
+  KASATERM_NO_HOME=1; export KASATERM_NO_HOME; SUB=""
+  _n=$#; _i=0; _drop=1
+  while [ $_i -lt $_n ]; do
+    a=$1; shift
+    if [ -n "$_drop" ] && [ "$a" = local ]; then _drop=""; else set -- "$@" "$a"; fi
+    _i=$((_i+1))
+  done
+fi
 case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
     exec "$REAL" "$@" ;;
