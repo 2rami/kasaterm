@@ -6677,6 +6677,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             self.pending_restores.retain(|(sess, cmd, at)| {
                 if now >= *at {
+                    // 입력줄부터 비운다(^U = zsh·bash kill-line, 셸이 아직 안 떴으면
+                    // tty 의 kill 문자로 선입력을 지운다). 2026-09-02 실측: 본진 이사로
+                    // 미니에 갓 만든 pane 의 입력줄에 사람이 친 `hermes s` 가 남아 있어
+                    // 우리 `cd … && claude` 가 `hermes scd …` 로 붙어 학생이 영영 안 떴다.
+                    // 이 pane 은 우리가 학생 자리로 만든 것이라 선입력은 지워도 된다.
+                    #[cfg(unix)]
+                    let _ = sess.send_bytes(b"\x15");
                     let _ = sess.send_bytes(cmd.as_bytes());
                     false
                 } else {
