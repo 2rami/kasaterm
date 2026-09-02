@@ -5169,6 +5169,14 @@ impl App {
                             theme::with_alpha(theme::border(), 0x66)
                         },
                     );
+                    // 원격(맥미니 등) pane 칸은 몸통 물들임과 같은 강조색으로 옅게
+                    // 덮어 곁눈으로도 「다른 기계」가 잡히게 — 명단 줄의 기계 칩과 짝
+                    // (거노 2026-09-02 「미니맵에서도 맥미니색배경」). 활성 칸은 안쪽
+                    // 판이 이 물들임을 덮고 accent 테두리가 대신 말하므로, 비활성
+                    // 칸에서 특히 읽힌다. machine 은 원격 pane 에만 Some 이다.
+                    if info.machine.is_some() && mw > 4.0 && mh > 4.0 {
+                        round_rect(g, mx, my, mw, mh, 2.0, theme::with_alpha(theme::accent(), 0x2e));
+                    }
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
                     // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
                     // 아니라 잘못 칠해진 자리로 읽힌다(실측).
