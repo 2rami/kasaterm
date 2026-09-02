@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
     // 설정 덮어쓰기 둘은 남긴다 — 정체(pane id·페르소나·계정)가 아니라 **이 데몬
     // 자신이 어느 명부·유저 파일을 볼지**라, 검증 리그가 사용자 파일을 안 건드리고
     // 가짜 기계·가짜 유저를 가리키는 유일한 손이다(machines.rs·mobile.rs 머리말).
-    const KEEP: [&str; 2] = ["KASATERM_MACHINES", "KASATERM_MOBILE_USERS"];
+    const KEEP: [&str; 3] = ["KASATERM_MACHINES", "KASATERM_MOBILE_USERS", "KASATERM_GATEWAY"];
     let stale: Vec<String> = std::env::vars()
         .map(|(k, _)| k)
         .filter(|k| !KEEP.contains(&k.as_str()))

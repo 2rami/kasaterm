@@ -25,6 +25,8 @@ axum = { version = "0.8.9", features = ["ws"] }
 # 라우팅 **전에** 도는 레이어(`/u/<slug>/` 접두 벗기기)는 Router::layer 로는 못 건다 —
 # 그건 라우팅 뒤다. ServiceBuilder 로 라우터 바깥에 두른다.
 tower = "0.5"
+# 업링크가 관문에서 흘러온 요청 바디를 reqwest 스트림으로 넘길 때.
+tokio-stream = "0.1"
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -32,7 +34,10 @@ serde_json = "1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 # 원격 PTY 호스트에 붙는 WS 클라이언트(remote 모듈). 서버(axum ws)와 같은 crate 에
 # 두어 term-ws 프로토콜 지식이 한 곳에 모인다. lock 에 이미 있는 버전 — 전이 의존 0.
-tokio-tungstenite = "0.29"
+# rustls 로 wss:// — 업링크가 공용 관문(https 호스트)에 붙는다. 없으면 「TLS support not
+# compiled in」으로 조용히 못 붙는다(2026-09-02 리그에서 잡음). 옛 remote.rs 는 ssh 터널
+# (ws://)만 써서 이 기능이 필요 없었다.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # ccglass-style capture proxy: forward claude의 Anthropic API 호출을 가로채 messages[]
 # 를 깨끗하게 캡처(peek/jsonl 없이 라이브 대화). rustls 로 시스템 openssl 의존 회피.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

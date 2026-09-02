@@ -41,7 +41,25 @@ pub struct MobileUser {
 struct FileBody {
     #[serde(default)]
     users: Vec<MobileUser>,
+    /// 관문(중계소)에 이 기계를 증명하는 비밀 — 기계마다 하나. slug 는 처음 온 키에
+    /// 묶이므로, 이 키가 바뀌면 관문은 옛 slug 를 다른 기계 것으로 보고 거절한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine_key: Option<String>,
+    /// 관문 주소. 없으면 기본 관문(`DEFAULT_GATEWAY`), `"off"` 면 관문 없이 로컬·자기 터널만.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gateway: Option<String>,
+    /// 「● 바깥」 — 관문에 붙어 주소를 살릴지. 기본 켜짐: 앱을 켠 사람은 곧장 주소를 받는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published: Option<bool>,
+    /// 업링크를 **어디로 열지** — 폰에 주는 주소(gateway)와 다를 수 있다. 관문이 같은
+    /// 기계의 ssh 터널(`http://127.0.0.1:8790`)로도 닿으면 그쪽이 공용 주소를 거치는
+    /// 것보다 곧고, 공용 호스트가 다른 연결기로 갈려 있어도 흔들리지 않는다. 없으면 gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gateway_connect: Option<String>,
 }
+
+/// 기본 관문. 카사텀을 쓰는 사람마다 앱이 여기 붙어 자기 주소를 받는다(uplink.rs 머리말).
+pub const DEFAULT_GATEWAY: &str = "https://kasaterm.debimarlene.com";
 
 /// 쓰기는 한 번에 하나 — 읽고-고치고-쓰기 사이에 다른 요청이 끼면 유저가 사라진다.
 static WRITE: Mutex<()> = Mutex::new(());
@@ -53,20 +71,29 @@ fn users_path() -> Option<PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/mobile-users.json"))
 }
 
-fn load_from(path: &std::path::Path) -> Vec<MobileUser> {
+fn load_body(path: &std::path::Path) -> FileBody {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<FileBody>(&s).ok())
-        .map(|f| f.users)
         .unwrap_or_default()
 }
 
+fn load_from(path: &std::path::Path) -> Vec<MobileUser> {
+    load_body(path).users
+}
+
+/// 유저 목록만 갈아 끼우고 나머지 항목(키·관문·스위치)은 그대로 둔다.
 fn save_to(path: &std::path::Path, users: &[MobileUser]) -> std::io::Result<()> {
+    let mut body = load_body(path);
+    body.users = users.to_vec();
+    save_body(path, &body)
+}
+
+fn save_body(path: &std::path::Path, body: &FileBody) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = serde_json::to_string_pretty(&FileBody { users: users.to_vec() })
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let body = serde_json::to_string_pretty(body).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(path, body)?;
     #[cfg(unix)]
     {
@@ -142,6 +169,8 @@ pub fn owner() -> Option<MobileUser> {
     };
     list.insert(0, o.clone());
     save_to(&path, &list).ok()?;
+    drop(_g);
+    crate::uplink::poke();
     Some(o)
 }
 
@@ -160,6 +189,7 @@ pub fn add(name: &str) -> Result<MobileUser, String> {
     let u = MobileUser { name: name.to_string(), slug: new_slug(), created: now_secs(), owner: false };
     list.push(u.clone());
     save_to(&path, &list).map_err(|e| format!("저장 실패: {e}"))?;
+    crate::uplink::poke();
     Ok(u)
 }
 
@@ -176,6 +206,7 @@ pub fn remove(name: &str) -> Result<bool, String> {
     }
     list.remove(i);
     save_to(&path, &list).map_err(|e| format!("저장 실패: {e}"))?;
+    crate::uplink::poke();
     Ok(true)
 }
 
@@ -190,7 +221,84 @@ pub fn rotate(name: &str) -> Result<MobileUser, String> {
     u.slug = new_slug();
     let out = u.clone();
     save_to(&path, &list).map_err(|e| format!("저장 실패: {e}"))?;
+    crate::uplink::poke();
     Ok(out)
+}
+
+/// 관문에 낼 기계 비밀. 없으면 지금 만든다(주인 주소처럼 첫 접근 때).
+pub fn machine_key() -> Option<String> {
+    let path = users_path()?;
+    let _g = WRITE.lock().ok()?;
+    let mut body = load_body(&path);
+    if let Some(k) = body.machine_key.as_ref().filter(|k| k.len() >= 16) {
+        return Some(k.clone());
+    }
+    let k = format!("{}{}", new_slug(), new_slug());
+    body.machine_key = Some(k.clone());
+    save_body(&path, &body).ok()?;
+    Some(k)
+}
+
+/// 관문 주소. env `KASATERM_GATEWAY` 가 우선(리그가 로컬 관문을 가리키게), 빈 값·`off` 면 관문 없음.
+pub fn gateway() -> Option<String> {
+    let pick = |v: String| {
+        let v = v.trim().trim_end_matches('/').to_string();
+        (!v.is_empty() && v != "off" && v != "0" && v != "false").then_some(v)
+    };
+    if let Ok(v) = std::env::var("KASATERM_GATEWAY") {
+        return pick(v);
+    }
+    let file = users_path().map(|p| load_body(&p)).unwrap_or_default();
+    match file.gateway {
+        Some(v) => pick(v),
+        None => Some(DEFAULT_GATEWAY.to_string()),
+    }
+}
+
+/// 업링크를 열 주소. env `KASATERM_GATEWAY_CONNECT` → 파일 `gateway_connect` → gateway.
+pub fn gateway_connect() -> Option<String> {
+    let pick = |v: String| {
+        let v = v.trim().trim_end_matches('/').to_string();
+        (!v.is_empty()).then_some(v)
+    };
+    if let Ok(v) = std::env::var("KASATERM_GATEWAY_CONNECT") {
+        if let Some(v) = pick(v) {
+            return Some(v);
+        }
+    }
+    if let Some(v) = users_path().map(|p| load_body(&p)).and_then(|b| b.gateway_connect).and_then(pick) {
+        return Some(v);
+    }
+    gateway()
+}
+
+/// 관문 호스트(스킴 없이) — 화면 표시·주소 조립용.
+pub fn gateway_host() -> Option<String> {
+    gateway().map(|g| {
+        g.trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string()
+    })
+}
+
+/// 「● 바깥」 스위치. 기본 켜짐.
+pub fn published() -> bool {
+    users_path()
+        .map(|p| load_body(&p))
+        .and_then(|b| b.published)
+        .unwrap_or(true)
+}
+
+pub fn set_published(on: bool) -> std::io::Result<()> {
+    let path = users_path().ok_or_else(|| std::io::Error::other("홈 폴더 없음"))?;
+    let _g = WRITE.lock().map_err(|_| std::io::Error::other("잠금 실패"))?;
+    let mut body = load_body(&path);
+    body.published = Some(on);
+    save_body(&path, &body)?;
+    drop(_g);
+    crate::uplink::poke();
+    Ok(())
 }
 
 pub fn by_slug(slug: &str) -> Option<MobileUser> {
@@ -329,6 +437,20 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_users_keeps_machine_key_and_switch() {
+        let dir = std::env::temp_dir().join(format!("kasa-mobile-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("mobile-users.json");
+        save_body(&path, &FileBody { users: vec![], machine_key: Some("k".repeat(20)), gateway: Some("off".into()), published: Some(false), gateway_connect: None }).unwrap();
+        save_to(&path, &[u("나", &new_slug(), true)]).unwrap();
+        let b = load_body(&path);
+        assert_eq!(b.machine_key.as_deref(), Some("k".repeat(20).as_str()));
+        assert_eq!(b.gateway.as_deref(), Some("off"));
+        assert_eq!(b.published, Some(false));
+        assert_eq!(b.users.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
