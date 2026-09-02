@@ -786,6 +786,8 @@ impl App {
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // agents 목록·resume 피커 화면의 교실 배경(셀 뒤 cover-fit). pane 본문 rect.
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
+        // 원격(거울) pane 의 몸통 박스 — 바탕 물들임(셀 아래)과 왼쪽 리본(셀 위)의 자리.
+        let mut remote_slots: Vec<(String, f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
@@ -2708,6 +2710,20 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
+                // 원격(거울) pane 몸통 표식 — 헤더 칩·물들임만으로는 헤더 없는 일반
+                // pane 이 로컬과 똑같이 보인다(2026-09-02 「pane 헤더 말고 바로
+                // 시각적으로 맥북인지 맥미니인지」). 몸통 바탕을 헤더와 같은 강조색으로
+                // 옅게 물들이고 왼쪽 가장자리에 색 리본을 세운다 — 활성이든 아니든.
+                {
+                    let tab_pid = pane.tabs.get(pane.active_tab).and_then(|t| t.pid.clone());
+                    if kasa_mcp::remote::is_remote_pane(&id)
+                        || tab_pid
+                            .as_deref()
+                            .is_some_and(kasa_mcp::remote::is_remote_pane)
+                    {
+                        remote_slots.push((id.clone(), box_x, box_y, box_w, box_h));
+                    }
+                }
                 // claude agents 목록·resume 피커 화면에만 샬레 교실 배경을 셀 뒤에
                 // 깐다(거노: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
                 // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
@@ -3656,6 +3672,12 @@ impl App {
                     let (rgba, w, h) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, *rot);
                     g.upload_image(&key, &rgba, w, h);
                 }
+            }
+            // 원격 pane 바탕 물들임 — 셀보다 먼저 깔아야 기본 배경 자리에서만 비친다
+            // (글자·색 배경 셀은 그대로). 헤더 물들임과 같은 강조색을 반투명으로 —
+            // 불투명이면 셀 아래 이미지 패스(인라인 이미지)를 통째로 가린다.
+            for (_, bx, by, bw, bh) in &remote_slots {
+                g.rect(*bx, *by, *bw, *bh, theme::with_alpha(theme::accent(), 0x16));
             }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
@@ -8872,6 +8894,12 @@ impl App {
                 const HANDLE: f32 = 22.0;
                 const HMARGIN: f32 = 5.0;
                 for (fid, fx, fy, fw, fbox_h) in &footer_slots {
+                    // 원격 pane 왼쪽 리본 — 활성이든 아니든 상시. 여러 pane 을 훑을 때
+                    // 「저 pane 은 다른 기계」가 헤더를 읽기 전에 걸리게. 포커스 링이
+                    // 이기도록 그보다 먼저 그린다.
+                    if remote_slots.iter().any(|(rid, ..)| rid == fid) {
+                        g.rect(*fx, *fy, 3.0, *fbox_h, theme::accent());
+                    }
                     // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
                     // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(거노).
