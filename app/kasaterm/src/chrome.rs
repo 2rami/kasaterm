@@ -128,8 +128,17 @@ impl App {
     /// 지시: 탭 겹친 pane 에서 「어떤 학생인지 모른다」). 관문은 같다 — claude 가
     /// 실제로 도는 탭만 학생을 갖는다.
     pub(crate) fn display_tab_char(&self, ws: &Workspace, tab: &str) -> Option<String> {
-        if let Some(p) = self.pty.get(tab) {
-            p.active_agent()?;
+        // 로컬 pane 은 claude 가 실제로 도는 탭만 학생을 갖는다. 원격(미러) pane 은
+        // claude 가 저쪽 기계에서 돌아 로컬 프로세스 테이블에 없어(active_agent=None)
+        // 이 관문에 걸려 이름·색·프사가 통째로 사라졌다 — 리본만 남고 테마가 안 붙던
+        // 자리다(2026-09-02: render 게이트의 원격 우회와 짝을 못 맞춘 반쪽 수정이었다).
+        // 원격으로 확정된 pane 은 관문을 건너뛰고 배정(pane_character)을 정본으로 쓴다 —
+        // 실제 프사·색은 render 가 화면의 U+FFFC 표식으로 최종 판정하므로(runs_claude)
+        // 원격 셸 미러는 이름만 갖고 프사는 안 뜬다.
+        if !kasa_mcp::remote::is_remote_pane(tab) {
+            if let Some(p) = self.pty.get(tab) {
+                p.active_agent()?;
+            }
         }
         // claude agents 목록 뷰는 학생을 안 그린다(옛 or_else 폴백의 view 가드).
         if self
@@ -168,7 +177,11 @@ impl App {
     /// 관문은 이름과 같은 키(**탭 pid**)로 본다 — 탭에서 도는 학생을 놓치지 않게.
     pub(crate) fn pane_accent(&self, ws: &Workspace, id: &str) -> Option<[u8; 4]> {
         let tab = ws.active_tab_pid(id);
-        self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
+        // 원격 미러 pane 은 로컬 active_agent 이 없다 — 별도창(터미널·방)에서도
+        // 학생색이 붙게 관문을 건너뛴다(display_tab_char 과 같은 이유).
+        if !kasa_mcp::remote::is_remote_pane(tab.as_str()) {
+            self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
+        }
         let name = self.display_pane_char(ws, id)?;
         crate::theme::character_accent_n(
             &name,
