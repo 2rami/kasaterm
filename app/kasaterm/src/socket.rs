@@ -904,6 +904,15 @@ impl Backend for PtyBackend {
     /// pane → claude session_id(`/pane-tasks` 용) = bound transcript 파일명 stem.
     /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
     /// 매핑에 폴백으로 쓴다.
+    fn agent_cfg(&self) -> Vec<(String, String, String)> {
+        self.reported_agent_cfg
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, (m, e))| (p.clone(), m.clone(), e.clone()))
+            .collect()
+    }
+
     fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
         let live = self.live_surfaces();
         self.discover_unbound(&live);

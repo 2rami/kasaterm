@@ -914,6 +914,12 @@ pub trait Backend: Send + Sync {
     /// 모든 pane 의 `(surface_id, claude session_id)` — claude task store
     /// (~/.claude/tasks) 매핑용. statusline 이 보고한 session_id 를 GUI 즉답으로
     /// 가져온다(`/pane-tasks` 가 소비). 기본 빈 벡터(미지원 백엔드).
+    /// pane 별 `(pane, model, effort)` — statusline 이 보고한 값. 원격에서 이 pane 을
+    /// 데려갈 때(`migrate … local`) 그 기계가 모르는 모델·effort 를 이 창구로 읽는다.
+    /// 기본: 없음(헤드리스 서버).
+    fn agent_cfg(&self) -> Vec<(String, String, String)> {
+        Vec::new()
+    }
     fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }

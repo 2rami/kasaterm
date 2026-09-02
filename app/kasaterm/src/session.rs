@@ -1679,12 +1679,19 @@ impl App {
         let Some(info) = kasa_mcp::remote::remote_info(pid) else {
             anyhow::bail!("{pid} 은 원격 pane 이 아니다 — 데려올 것이 없다");
         };
-        let Some(sid) = self.pane_claude_sid.get(pid).cloned() else {
-            anyhow::bail!(
-                "{pid} 의 세션 id 를 모른다 — 이사로 나간 pane 만 데려올 수 있다 \
-                 (원격에서 태어난 학생은 아직 못 데려온다)"
-            );
+        // sid — 이사로 나간 pane 은 이 창이 기억하지만, **원격에서 태어난 학생**의
+        // 거울은 모른다(bind-transcript 는 몸통이 있는 기계에서만 돈다). 그때는 그
+        // 기계에 묻는다(2026-09-02 코유키 감사 — 전엔 「sid 없음」으로 거부해 손으로
+        // bind-transcript 를 해야 했다). 얻은 값은 기억해 둔다 — 다음 시도·저장에.
+        let local_sid = self.pane_claude_sid.get(pid).cloned();
+        let fetched = if local_sid.is_none() {
+            self.migrate_progress(pid, "저쪽 학생의 대화 id 묻는 중…".to_string());
+            kasa_mcp::remote::remote_pane_session(&info.base, &info.remote_id, None)
+        } else {
+            None
         };
+        let sid = back_migration_sid(local_sid, fetched)?;
+        self.pane_claude_sid.insert(pid.to_string(), sid.clone());
         let Some(remote_cwd) = info.remote_cwd.clone() else {
             anyhow::bail!("{pid} 의 원격 작업 폴더를 모른다 — 옛 저장본이다. 한 번 재시작해 다시 저장되면 생긴다");
         };
@@ -1833,11 +1840,15 @@ impl App {
             )?;
             self.set_toast(format!("코드 동기화: {applied}"));
         }
-        // 모델·effort 는 원격이 죽기 전에 떠 둔다(순방향과 같은 이유).
+        // 모델·effort 는 원격이 죽기 전에 떠 둔다(순방향과 같은 이유). 이 창의 보고는
+        // 이사로 나가기 전 값이라 원격에서 태어난 학생에겐 없다 — 그땐 그 기계의
+        // 목록(`/term/panes` model·effort)이 정본이고, 낡은 원격이면 기본값이다.
         let (model, effort) = self
             .agent_cfg_snapshot()
             .get(pid)
             .cloned()
+            .filter(|(m, e)| !m.is_empty() || !e.is_empty())
+            .or_else(|| kasa_mcp::remote::remote_pane_cfg(&info.base, &info.remote_id, None))
             .unwrap_or_default();
         // 원격 claude 곱게 끄기. 이미 꺼져 있으면(None) 권한 모드를 모르니 안전한
         // 쪽(물어보는 모드)으로 둔다.
@@ -1903,6 +1914,11 @@ impl App {
         // 매니저가 이미 죽었어도(연결 유실) 실패가 아니다: 남은 셸은 닿을 때 걷는다.
         self.migrate_progress(pid, "창 바꿔 끼우고 학생 깨우는 중…".to_string());
         let _ = kasa_mcp::remote::kill_remote(pid);
+        // GUI pane 은 위 kill 로 안 걷힌다(앱이 제 Arc 를 쥔다) — 그 기계의 pane 자체를
+        // 닫는다. 실패해도 이사는 성립한다(저쪽에 빈 셸 pane 이 남을 뿐): 로그만.
+        if let Err(e) = kasa_mcp::remote::close_remote_pane(&info.base, &info.remote_id, None) {
+            eprintln!("[migrate-back] 원격 pane {} 닫기 실패(무시): {e:#}", info.remote_id);
+        }
         // 같은 pane id 로 로컬 PTY 스왑(swap_character 골격).
         let (c, r) = sess.size();
         let room = self.ws.lock().unwrap().pane_room.get(pid).cloned();
@@ -8534,3 +8550,59 @@ fn pane_replaced(id: &str, mine: &std::sync::Weak<kasa_pty::PtySession>) -> bool
 /// 승격된 학생들이 사는 로컬 상주 데몬(kasa-serve-web)의 HTTP 포트.
 #[cfg(unix)]
 pub(crate) const LOCAL_PTYD_PORT: u16 = 8790;
+
+/// 데려오기(`migrate … local`)가 이어갈 세션 id 를 정한다 — 이 창이 기억하는 것이
+/// 먼저, 없으면 원격이 답한 것. 둘 다 없으면 이유를 사람 말로.
+///
+/// 원격 답은 검증한다: claude 세션 id 는 uuid, codex rollout 도 uuid 꼴이라 그 밖의
+/// 글자(경로·공백·HTML 오류 페이지)가 오면 `--resume` 에 실을 수 없다.
+fn back_migration_sid(local: Option<String>, remote: Option<String>) -> Result<String> {
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 80
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    if let Some(s) = local.filter(|s| ok(s)) {
+        return Ok(s);
+    }
+    match remote {
+        Some(s) if ok(&s) => Ok(s),
+        Some(s) => anyhow::bail!("원격이 준 세션 id 가 이상하다({s:?}) — 저쪽 프로그램을 갱신해라"),
+        None => anyhow::bail!(
+            "세션 id 를 모른다 — 저쪽 학생이 아직 첫 프롬프트 전이거나(대화 파일이 없다) 저쪽 프로그램이 낡아 `/pane-session` 이 없다. 저쪽에서 한마디 시킨 뒤 다시 데려와라"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod migrate_back_tests {
+    use super::back_migration_sid;
+
+    #[test]
+    fn local_memory_wins_over_remote() {
+        let sid = back_migration_sid(Some("aaaa-1".into()), Some("bbbb-2".into())).unwrap();
+        assert_eq!(sid, "aaaa-1");
+    }
+
+    /// 원격에서 태어난 학생 — 이 창은 모르고 원격만 안다. 전엔 여기서 거부했다.
+    #[test]
+    fn remote_answer_fills_the_gap() {
+        let sid = back_migration_sid(None, Some("3f2a1b7c-0000-4000-8000-000000000001".into())).unwrap();
+        assert_eq!(sid, "3f2a1b7c-0000-4000-8000-000000000001");
+    }
+
+    #[test]
+    fn garbage_from_remote_is_refused_with_reason() {
+        let e = back_migration_sid(None, Some("<html>404</html>".into())).unwrap_err();
+        assert!(e.to_string().contains("이상하다"), "{e}");
+        let e = back_migration_sid(None, None).unwrap_err();
+        assert!(e.to_string().contains("첫 프롬프트"), "{e}");
+    }
+
+    /// 이 창의 기억이 비어 있는 문자열이면(저장본 손상) 원격 답으로 넘어간다.
+    #[test]
+    fn blank_local_memory_is_not_a_memory() {
+        let sid = back_migration_sid(Some(String::new()), Some("rollout-1".into())).unwrap();
+        assert_eq!(sid, "rollout-1");
+    }
+}

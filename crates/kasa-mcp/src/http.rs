@@ -1774,15 +1774,23 @@ async fn focus_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `POST /close-pane?surface=<id>` — 학생(워커) pane 종료. PtyBackend 가
+/// `POST /close-pane?surface=<id>[&kill=1]` — 학생(워커) pane 종료. PtyBackend 가
 /// SocketClose 로 GUI 에 위임 → layout.rs close_pane 이 leaf 제거 + 포커스 이동.
+///
+/// 닫힌 pane 은 되살리기 대열에 남아 셸이 산다. `kill=1` 이면 그 대열에서도 걷어
+/// 진짜 끝낸다 — 데려오기(역이사)가 쓴다: 대화는 이미 다른 기계로 갔으니 여기
+/// 남는 것은 이름표만 붙은 빈 셸이고, 살려 두면 `/term/panes` 에 유령 학생으로 뜬다.
 async fn close_pane_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let kill = params.get("kill").is_some_and(|v| v == "1" || v == "true");
     let body = match params.get("surface").map(String::as_str) {
         Some(id) if !id.is_empty() => match backend.close_surface(id) {
-            Ok(()) => serde_json::json!({ "ok": true, "surface_id": id }),
+            Ok(()) => {
+                let killed = kill && backend.closed_panes(Some(id)).is_ok();
+                serde_json::json!({ "ok": true, "surface_id": id, "killed": killed })
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         },
         _ => serde_json::json!({ "ok": false, "error": "surface query param required" }),
@@ -4115,6 +4123,13 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
     let pane_cwds: std::collections::HashMap<String, String> =
         backend.pane_cwds().into_iter().collect();
+    // 모델·effort — 원격에서 태어난 학생을 데려가는 기계는 이 값을 달리 알 길이 없다
+    // (statusline 보고는 몸통이 있는 기계로만 온다). 비어 있으면 필드가 null.
+    let agent_cfg: std::collections::HashMap<String, (String, String)> = backend
+        .agent_cfg()
+        .into_iter()
+        .map(|(p, m, e)| (p, (m, e)))
+        .collect();
     // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
     // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
     // 중복시키지 않고 여기서 hex 로 얹는다.
@@ -4142,6 +4157,8 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "color": b
                     .and_then(|p| p.character.as_deref())
                     .and_then(crate::character::header_color_any),
+                "model": agent_cfg.get(&id).map(|(m, _)| m.clone()).filter(|s| !s.is_empty()),
+                "effort": agent_cfg.get(&id).map(|(_, e)| e.clone()).filter(|s| !s.is_empty()),
             })
         })
         .collect();

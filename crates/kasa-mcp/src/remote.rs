@@ -926,6 +926,109 @@ pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Opt
     })
 }
 
+/// 원격 pane 이 지금 쥔 claude(또는 codex) 세션 id — 그 기계의 `GET /pane-session`
+/// (bound transcript stem). **원격에서 태어난 학생**의 거울은 이 창이 sid 를 모르므로
+/// 데려오기(`migrate … local`)가 여기서 묻는다(2026-09-02 코유키 감사: 「sid 없음으로
+/// 거부 — 수동 bind-transcript 없이 데려와야」). 미바인딩·미지정은 None.
+pub fn remote_pane_session(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
+    let u = format!(
+        "{}/pane-session?pane={}",
+        base.trim_end_matches('/'),
+        urlencode(pane)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let text = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        r.text().await.ok()
+    })?;
+    let sid = text.trim().to_string();
+    (!sid.is_empty()).then_some(sid)
+}
+
+/// 원격 GUI pane 을 닫는다(`POST /close-pane`). 데려오기(`migrate … local`) 뒤에
+/// 부른다 — `kill_remote` 는 세션의 keep 참조만 놓는데 GUI pane 은 앱이 제 Arc 를
+/// 쥐고 있어 셸이 안 죽고, 그 기계엔 학생 이름표만 남은 빈 pane 이 좀비로 선다
+/// (2026-09-02 2-앱 리그 실측: 데려온 뒤 원격에 「Resume this session with」 셸이 남았다).
+pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>) -> Result<()> {
+    // kill=1 — 되살리기 대열에서도 걷는다. 낡은 원격은 그 인자를 몰라 닫기만 하고,
+    // 그 셸은 되살리기 목록에 산 채 남는다(다음 배포까지의 한계).
+    let u = format!(
+        "{}/close-pane?surface={}&kill=1",
+        base.trim_end_matches('/'),
+        urlencode(pane)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("close runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 pane 닫기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(())
+}
+
+/// 원격 pane 의 (model, effort) — `/term/panes` 행의 `model`·`effort`. 낡은 원격은
+/// 그 필드가 없어 None — 부른 쪽은 그때 기본값으로 물러선다.
+pub fn remote_pane_cfg(base: &str, pane: &str, token: Option<&str>) -> Option<(String, String)> {
+    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let list: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        serde_json::from_str(&r.text().await.ok()?).ok()
+    })?;
+    let row = list
+        .as_array()?
+        .iter()
+        .find(|row| row.get("id").and_then(|v| v.as_str()) == Some(pane))?;
+    let model = row.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let effort = row.get("effort").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    (!model.is_empty() || !effort.is_empty()).then_some((model, effort))
+}
+
 /// 원격 기계에 그 레포를 **있게** 만든다 — 없으면 clone, 뒤처졌으면 fast-forward.
 /// 이사 전에 부른다: 대화만 건너가고 코드가 없거나 옛것이면 학생이 딴 세상에서 깬다.
 /// 원격에 안 올린 변경이 있으면 서버가 거부하고 그 사유가 그대로 올라온다.
