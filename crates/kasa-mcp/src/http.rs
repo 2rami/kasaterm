@@ -4187,8 +4187,21 @@ async fn term_repo_post(
                 return err(format!("{branch} 로 못 옮겼어요: {out}"));
             }
         }
-        let (ok, out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
-        // 업스트림이 없거나 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
+        let (mut ok, mut out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
+        // 업스트림이 안 잡힌 브랜치(`checkout -B` 로 앉힌 거울)는 `@{u}` 가 없어 여기서
+        // 매번 서고, 거울이 origin 보다 한참 뒤처진 채 「준비됐다」로 넘어갔다
+        // (2026-09-02 실측: 미니 swarm 이 origin 뒤 12 커밋에서 fetched-only). 같은
+        // 이름의 origin 브랜치로 한 번 더 — 빨리감기만 하므로 이쪽 커밋을 잃을 길은 없다.
+        if !ok && !branch.is_empty() && out.contains("no upstream") {
+            (ok, out) = git(vec![
+                "-C".into(),
+                path.clone(),
+                "merge".into(),
+                "--ff-only".into(),
+                format!("origin/{branch}"),
+            ]);
+        }
+        // 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
         action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
             "already-current"
         } else {
