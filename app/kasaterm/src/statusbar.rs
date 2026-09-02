@@ -582,10 +582,24 @@ fn paint_tunnel_popover(
         "원격 접속",
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
+    // 관문(중계소) 모드면 스위치가 켜진 것과 실제로 붙은 것이 다르다 — 켰는데 관문이
+    // 안 닿으면 폰 주소는 「안 붙어 있음」 화면이라, 그 상태를 여기서 말해 준다.
+    let sub: String = if on {
+        let st = kasa_mcp::uplink::status();
+        if st.gateway.is_none() {
+            "폰·다른 기기에서 이 kasaterm 에 붙는다".to_string()
+        } else if st.connected {
+            format!("관문에 붙음 · 주소 {}개 — 폰에서 열면 바로 이 화면", st.accepted)
+        } else {
+            "관문에 붙는 중… (안 닿으면 폰 주소가 잠시 안 열린다)".to_string()
+        }
+    } else {
+        "폰·다른 기기에서 이 kasaterm 에 붙는다".to_string()
+    };
     g.draw_text(
         x + 12.0,
         y + 28.0,
-        "폰·다른 기기에서 이 kasaterm 에 붙는다",
+        &sub,
         gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
     );
     let sw = (x + w - 12.0 - 36.0, y + 10.0, 36.0, 20.0);

@@ -94,6 +94,52 @@ cargo build -p kasa-mcp --bin kasa-serve-web
   남에게 준 주소로는 화면만 보이고 유저 목록은 403 이다. 「새 주소」는 샜을 때 —
   옛 주소는 그 자리에서 404 가 된다.
 
+### 관문 — 사람마다 앱이 저절로 주소를 받는다 (2026-09-02 오후, 정정 반영)
+
+「유저마다 주소 하나」의 뜻은 **카사텀을 쓰는 사람마다 앱이 스스로 자기 주소를 받는 것**
+이지, 주인이 남의 주소를 만들어 주는 것이 아니다(거노 정정 「주소만들기가 아니라 각자
+카사텀 쓰는 사람마다 생성되게」). 사람마다 터널을 팔 수 없으니 앱이 바깥 관문에 붙는다:
+
+```
+폰 ──https://kasaterm.debimarlene.com/u/<slug>/…──▶ cloudflared(맥미니) ─▶ kasa-relay 8790 (관문)
+                                                                              │ 업링크 WS 한 줄(앱이 먼저 건다)
+                                                                              ▼
+                                                    kasaterm 앱 ─▶ 자기 로컬 서버 /u/<slug>/… (자격·화면·pane 전부 여기)
+```
+
+- **앱 쪽 `uplink.rs`**: 부팅 때 관문 `wss://<gateway>/relay/uplink` 에 붙어
+  `hello{key, slugs, machine}` 를 보낸다. `key` 는 기계마다 하나(`mobile-users.json` 의
+  `machine_key`), 주인 slug 는 hello 직전에 없으면 만든다 — **앱을 켜기만 하면 주소가
+  생긴다.** 끊기면 1→30초 백오프로 다시 붙고, `gateway_connect`(예: ssh 터널
+  `http://127.0.0.1:8790`)가 있으면 공용 주소와 번갈아 든다. 유저를 더하거나 지우면
+  `uplink::poke()` 가 hello 를 다시 보내 관문 표가 즉시 바뀐다.
+- **관문 쪽 `gateway.rs`**(kasa-relay 에 얹힘): slug 는 **처음 온 키에 묶여** 디스크
+  (`relay-state.json`)에 남는다 — 다른 키가 같은 slug 를 대면 그 slug 만 거절(남의 주소를
+  자기 기계로 못 끌어온다). 같은 slug 가 다시 붙으면 새 연결이 이긴다(앱 재시작).
+  `/u/<slug>/…` 는 HTTP·WS 전부 **스트림 하나**로 앱에 내려보낸다(프레임: `[kind][stream
+  u32][payload]`, `uplink.rs` 상수). 업링크가 없으면 「그 기계가 지금 안 붙어 있어요」 화면.
+  릴레이 토큰은 안 본다 — 공용 문이다.
+- **앱은 관문에서 온 요청을 `http://127.0.0.1:<포트>/u/<slug>/…` 로 되쏜다.** 그래서
+  로컬 관문(`mobile_prefix_mw`)이 slug 로 자격을 매기고 MobileAuth 를 심는다 — 관문 경로에
+  자격 코드가 한 줄도 따로 없다. Origin·쿠키는 로컬로 안 넘긴다(`ws_origin_ok` 가 Origin 이
+  있으면 Host 와 같기를 요구한다).
+- **「● 바깥」 스위치의 뜻이 바뀌었다.** 관문이 설정돼 있으면(기본 `DEFAULT_GATEWAY`)
+  cloudflared 가 아니라 **업링크를 켜고 끈다**(`mobile-users.json` 의 `published`). 팝오버
+  둘째 줄이 「관문에 붙음 · 주소 N개」/「붙는 중…」을 말한다. cloudflared 손은 관문을
+  `"gateway": "off"` 로 끈 기계에서만 산다.
+- **배포**: 관문 = 맥미니 `~/.local/bin/kasa-relay`(launchd `com.geono.kasa-relay`, 8790,
+  `--state ~/.config/kasaterm/relay-state.json`). 공용 주소 = 맥미니 cloudflared
+  (`~/.cloudflared/kasaterm-gateway.yml`, launchd `com.geono.kasaterm-gateway-tunnel`) →
+  8790. **맥북의 cloudflared 는 껐다** — 같은 호스트에 연결기가 둘이면 폰 요청이 반은 맥북
+  kasaterm 으로 가서 다른 사람 slug 는 404 가 된다.
+- 리그: `kasa-relay --port N --state <파일>` + `KASATERM_GATEWAY=http://127.0.0.1:N
+  KASATERM_MOBILE_USERS=<파일> kasa-serve-web --port M`. 실측(2026-09-02): 허브·grid·css·
+  panes·arona-ui·/board 200 / 슬래시 없음 307 / 엉뚱 404 / 유저 추가 뒤 그 slug 즉시 200,
+  남의 slug 로 users 403 / **키 다른 두 번째 앱은 거절 2개** / 앱 죽이면 오프라인 화면,
+  다시 켜면 같은 주소 200 / WS 새 셸 입력 왕복·재접속 스냅샷·없는 pane gone·ping/pong.
+  ⚠️ 첫 판의 함정: 업링크가 **주인 slug 가 생기기 전에 hello** 해 「붙었는데 주소 0개」
+  였다 — hello 가 `mobile::owner()` 를 먼저 부른다.
+
 ### 구현에서 지킬 것
 
 - **접두 벗기기는 라우팅 앞이다.** `mobile_prefix_mw`(http.rs)를 `Router::layer` 로 걸면

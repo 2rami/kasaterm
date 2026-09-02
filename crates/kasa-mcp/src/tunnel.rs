@@ -40,13 +40,33 @@ fn tunnel_pid() -> Option<u32> {
     String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
 }
 
+/// 관문(중계소)이 설정돼 있으면 「바깥」은 cloudflared 가 아니라 **업링크**다 — 앱이
+/// 관문에 붙어 자기 주소를 받는다(uplink.rs). 그때 이 파일의 cloudflared 손은 안 쓴다.
+fn gateway_mode() -> bool {
+    crate::mobile::gateway().is_some()
+}
+
 pub fn is_on() -> bool {
+    if gateway_mode() {
+        return crate::mobile::published();
+    }
+    tunnel_pid().is_some()
+}
+
+/// 업링크가 실제로 붙어 있나(스위치가 켜진 것과 다르다 — 관문이 안 닿으면 꺼진 채다).
+pub fn is_connected() -> bool {
+    if gateway_mode() {
+        return crate::uplink::status().connected;
+    }
     tunnel_pid().is_some()
 }
 
 /// ~/.cloudflared/config.yml 의 첫 hostname — 화면 표시용. 없으면 이름 붙은
 /// 터널이 아직 구축되지 않은 것이니 켜기를 거부하는 근거로도 쓴다.
 pub fn host() -> Option<String> {
+    if gateway_mode() {
+        return crate::mobile::gateway_host();
+    }
     let home = std::env::var("HOME").ok()?;
     let s = std::fs::read_to_string(
         std::path::PathBuf::from(home).join(".cloudflared/config.yml"),
@@ -62,6 +82,10 @@ pub fn host() -> Option<String> {
 /// 끄기는 TERM 만 보내고 기다리지 않는다 — 종료가 늦으면 다음 상태 조회의
 /// try_wait/pgrep 이 정리된 결과를 준다(부르는 쪽은 어차피 폴링한다).
 pub fn set(on: bool) -> Result<bool, String> {
+    if gateway_mode() {
+        crate::mobile::set_published(on).map_err(|e| format!("스위치 저장 실패: {e}"))?;
+        return Ok(on);
+    }
     if !on {
         if let Some(pid) = tunnel_pid() {
             let _ = std::process::Command::new("kill")

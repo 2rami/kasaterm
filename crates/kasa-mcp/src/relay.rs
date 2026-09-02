@@ -288,9 +288,12 @@ async fn send(
     }
 }
 
-/// 릴레이를 바인드해 실행한다(블로킹). bin 이 부른다.
-pub async fn serve(port: u16, token: Option<String>) -> anyhow::Result<()> {
-    let app = router(Relay::new(token));
+/// 릴레이를 바인드해 실행한다(블로킹). bin 이 부른다. `state` 는 관문의 slug 소유 기록
+/// (재시작을 넘겨야 남의 주소를 못 가로챈다).
+pub async fn serve(port: u16, token: Option<String>, state: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // 관문(`/relay/uplink`·`/u/<slug>/…`)은 토큰을 안 본다 — 카사텀을 쓰는 누구나 붙는 공용 문.
+    let gate = crate::gateway::Gate::new(state);
+    let app = router(Relay::new(token)).merge(crate::gateway::router(gate));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     let addr = listener.local_addr()?;
     println!("[kasa-relay] listening on {addr}");

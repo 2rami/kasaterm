@@ -5926,6 +5926,12 @@ pub fn spawn_http_server_opts(
                     // 즉시 그리게 미리 받아 둔다. 같은 순환 이유로 본체 한정.
                     tokio::spawn(crate::machines::poll_loop());
                 }
+                // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 본체는 늘, standalone 은
+                // 리그가 `KASATERM_GATEWAY` 로 로컬 관문을 가리켰을 때만(사용자 관문에 가짜
+                // 기계를 올리지 않게).
+                if run_scheduler || std::env::var_os("KASATERM_GATEWAY").is_some() {
+                    crate::uplink::spawn(port);
+                }
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.
                 let conv_store: crate::proxy::ConvStore = Default::default();
