@@ -30,11 +30,14 @@ const MOCK_AGENTS: Agent[] = [
 
 // 웹뷰는 항상 SCHALE OS 교실 — solo 모드 마커 폐기(잔재 정리). ready 로 초기 로딩만 게이트.
 export function App() {
+  const launch = new URLSearchParams(location.search);
   const agents = useStore((s) => s.agents);
   const backgroundAgents = useStore((s) => s.backgroundAgents);
   const [ready, setReady] = useState(false);
   // 기본 뷰 = 터미널 pane 그리드(세션 뷰어). 교실(캐릭터)·카드는 토글로.
-  const [view, setView] = useState<ViewMode>('terminal');
+  const [view, setView] = useState<ViewMode>(() =>
+    launch.get('view') === 'classroom' ? 'classroom' : 'terminal'
+  );
   // 중앙 멀티뷰 = 터미널 layout 미러(거노: 터미널이랑 pane 위치 동기화). fetchLayout 의
   // % 배치를 그대로 absolute 로 그린다. activeId = 마지막 포커스 학생(우측·교실 강조).
   // offlinePeek = 과거 세션 단독 보기(layout 과 별개, 읽기 전용).
@@ -135,7 +138,7 @@ export function App() {
   // 상태의 첫 화면이 "아직 열린 대화가 없어요" 안내로 끝나 버린다. 목록이 첫 화면이어야
   // 「지금 누가 있나」부터 보인다. 학생을 고르면 기존 onSelectStudent 가 알아서 닫는다.
   const [leftOpen, setLeftOpen] = useState(false);
-  const [rightOpen, setRightOpen] = useState(false);
+  const [rightOpen, setRightOpen] = useState(() => launch.get('panel') === 'board');
   const phoneListShown = useRef(false);
   useEffect(() => {
     if (!isPhone || phoneListShown.current) return;

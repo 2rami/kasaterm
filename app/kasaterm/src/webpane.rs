@@ -235,7 +235,7 @@ fn download_dest(url: &str) -> std::path::PathBuf {
 }
 
 /// 자식 창을 본창에 접착한다. 이후 본창 드래그에 AppKit 이 자식을 함께 옮긴다.
-fn attach_child(parent: &winit::window::Window, child: &winit::window::Window) {
+pub(crate) fn attach_child(parent: &winit::window::Window, child: &winit::window::Window) {
     #[cfg(target_os = "macos")]
     if let (Some(p), Some(c)) = (ns_window_of(parent), ns_window_of(child)) {
         unsafe { p.addChildWindow_ordered(&c, objc2_app_kit::NSWindowOrderingMode::Above) };
@@ -247,7 +247,7 @@ fn attach_child(parent: &winit::window::Window, child: &winit::window::Window) {
 /// 접착 해제. **orderOut(숨김) 전에 반드시 떼야 한다** — AppKit 은 child 인
 /// 채로 orderOut 하면 관계가 어정쩡하게 남아 다음 orderFront 가 엉뚱한 z 로
 /// 돌아온다.
-fn detach_child(parent: &winit::window::Window, child: &winit::window::Window) {
+pub(crate) fn detach_child(parent: &winit::window::Window, child: &winit::window::Window) {
     #[cfg(target_os = "macos")]
     if let (Some(p), Some(c)) = (ns_window_of(parent), ns_window_of(child)) {
         p.removeChildWindow(&c);
@@ -588,6 +588,7 @@ impl App {
         // ws 잠금 아래에서 「어느 host 가 어느 셀 상자에 보이나」와 「어느 host 가
         // 아직 어딘가에 존재하나」만 뽑는다 — pane_header_px 가 다시 잠그므로
         // 프레임 계산은 잠금 밖에서.
+        let inline_open = self.inline_web.is_some();
         let (visible, alive): (Vec<(u64, String, (u16, u16, u16, u16))>, HashSet<u64>) = {
             let ws = self.ws.lock().unwrap();
             let mut vis = Vec::new();
@@ -599,11 +600,13 @@ impl App {
                     }
                 }
             }
-            for (id, x, y, w, h) in &rects {
-                let Some(p) = ws.panes.get(id) else { continue };
-                let Some(tab) = p.tabs.get(p.active_tab) else { continue };
-                if let Some(web) = tab.web() {
-                    vis.push((web.host_id, id.clone(), (*x, *y, *w, *h)));
+            if !inline_open {
+                for (id, x, y, w, h) in &rects {
+                    let Some(p) = ws.panes.get(id) else { continue };
+                    let Some(tab) = p.tabs.get(p.active_tab) else { continue };
+                    if let Some(web) = tab.web() {
+                        vis.push((web.host_id, id.clone(), (*x, *y, *w, *h)));
+                    }
                 }
             }
             (vis, alive)

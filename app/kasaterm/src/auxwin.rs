@@ -5,8 +5,7 @@
 //! 그린다. 창 하나당 GpuRenderer 하나(자체 device·글리프 아틀라스) — v1 은 공유 device
 //! 리팩토링 없이 창마다 새 인스턴스로 간다(아틀라스 중복 수십 MB 는 v1 트레이드오프).
 //!
-//! 렌더/입력 라우팅이 전부 `AuxWindowKind` match 한 군데를 지나가므로, 나중에
-//! `Settings` variant 를 추가할 땐 각 match(render·key·mouse·title)의 새 팔만 채우면 된다.
+//! 렌더/입력 라우팅은 `AuxWindowKind`의 편집기·터미널·방 복구 경로에만 남아 있다.
 //!
 //! Drop 순서 주의: `AuxWindow.gpu` 는 `window` 보다 **먼저** 드롭돼야 한다 — surface 가
 //! 창의 metal layer 를 참조하므로 창이 먼저 해제되면 surface drop 이 use-after-free 다.
@@ -127,10 +126,9 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
     // 파일트리는 **왼쪽**, 창 조작(접기·되돌리기)은 오른쪽. 메인 창 타이틀 스트립이
     // 같은 규칙이고(트리 토글이 맨 왼쪽), 트리 패널 자체가 왼쪽에서 열리니 버튼도
     // 그쪽에 있어야 무엇을 여는 버튼인지가 위치로 읽힌다(거노).
-    let btns: [(AuxHeaderBtn, &str, bool); 4] = [
+    let btns: [(AuxHeaderBtn, &str, bool); 3] = [
         (AuxHeaderBtn::FileTree, "folder-tree", true),
         (AuxHeaderBtn::Pin, "pin", false),
-        (AuxHeaderBtn::Hide, "minus", false),
         // `corner-down-left` 은 에셋에도 gpu 아이콘 표에도 없어 **아무것도 안 그려졌다**
         // — 보이지 않는데 눌리기는 하는 26px 버튼이라, 헤더 오른쪽을 잘못 짚으면 창이
         // 영문 모르게 되돌아간다. 뜻이 같고 실재하는 undo-2 로 바꾼다.
@@ -436,19 +434,15 @@ fn with_aux_chrome(attrs: WindowAttributes) -> WindowAttributes {
 }
 
 /// 별도창이 담는 내용물. 이 enum 을 match 하는 지점(render/key/mouse/title)의
-/// 팔만 채우면 새 창 종류를 꽂을 수 있다. `Settings` 는 데이터를 안 들고 있다 —
-/// 설정 상태(`settings_cat`/`set_*`/`students_*`)는 App 이 소유하고 이 창은 뷰라,
-/// 렌더는 `aux_render` 가 App 스냅샷으로 `paint_settings` 를 재사용하고 이벤트는
-/// `aux_window_event` 가 `settings_click`/`settings_key`/`settings_scroll` 로 위임한다.
+/// 팔만 채우면 새 창 종류를 꽂을 수 있다.
 pub(crate) enum AuxWindowKind {
     Editor(MarkdownPane),
-    Settings,
     /// 터미널 pane 을 별도 OS 창으로 분리(undock). 데이터를 안 들고 `pane_id` 만 —
     /// 셀 그리드/커서는 App.ws 의 그 pane 이 소유하고 메인 루프 `pump_pty_screens` 가
     /// 계속 갱신하므로, 이 창은 `draw_cells` 로 그 스냅샷을 그리는 뷰다. `PtySession`
     /// 은 App.pty 에 그대로 살아 세션이 안 끊긴다(undock 은 레이아웃 트리에서 leaf 만
     /// 빼고 pty·ws.panes 는 유지). 렌더는 `aux_terminal_render`, 이벤트는
-    /// `aux_terminal_event` 로 위임(Settings 가 paint_settings 를 재사용하는 것과 동형).
+    /// `aux_terminal_event` 로 위임한다.
     /// pane 하나를 꺼낸 창. `window` 는 **어느 방에서 나왔는지** — 이게 없으면
     /// 되돌릴 때 원래 방이 아니라 그때 활성 pane 옆에 붙고, 헤더에 소속을 적을
     /// 수도 없다. 방 재배치를 따라 remap 된다(`reorder_window`).
@@ -483,24 +477,6 @@ fn draw_aux_border(a: &mut AuxWindow, w: f32, h: f32, accent: Option<[u8; 4]>, f
     a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
 }
 
-/// 설정 화면을 웹뷰 판으로 띄우는 이행 스위치. **기본 ON** — 이제 웹뷰가 정본이고
-/// 이건 **끄는 손잡이**다(`0`·`off`·`false`·`no` 면 옛 네이티브 화면).
-///
-/// 부팅 시 env 라 앱을 껐다 켜야 바뀐다. 기본을 뒤집기 전에는 그 때문에 거노가
-/// 웹뷰 화면을 볼 방법이 없었다 — 켜려면 env 를 주고 띄워야 하는데, 앱은 Finder 나
-/// 자기 설치로 뜨지 그렇게 안 뜬다.
-///
-/// **네이티브 화면은 안 지운다.** 한 사이클 써 본 뒤에 지운다 — 지금 지우면 웹뷰가
-/// 뭔가 못 하는 게 드러났을 때 돌아갈 곳이 없다. 폴백은 이 스위치만이 아니다:
-/// `open_settings_web_window` 가 페이지에 못 닿거나 웹뷰를 못 만들면 스스로 false 를
-/// 내고, 그러면 부른 쪽이 네이티브를 연다.
-fn settings_web_enabled() -> bool {
-    match std::env::var("KASATERM_SETTINGS_WEB") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no"),
-        Err(_) => true,
-    }
-}
-
 /// 편집기 창의 OS 타이틀 — 파일명(+ dirty ●). doc.path 는 String 이라 Path 로 감싼다.
 fn aux_editor_title(m: &MarkdownPane) -> String {
     let name = std::path::Path::new(m.doc.path.as_str())
@@ -517,10 +493,6 @@ fn aux_editor_title(m: &MarkdownPane) -> String {
 /// 별도창 헤더의 버튼.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuxHeaderBtn {
-    /// 창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY 는 그대로 살아 있고
-    /// 칩을 누르면 같은 창이 다시 선다 — 최소화와 달리 Dock 이 아니라 **일하던
-    /// 창 안**으로 들어가므로, 꺼내 둔 것이 몇인지 거기서 한눈에 보인다(거노).
-    Hide,
     /// 메인 그리드로 되돌린다(창 닫기·⌘W 와 같은 동작).
     Dock,
     /// 이 창 왼쪽에 파일트리 패널을 연다/닫는다. 창마다 따로 기억한다 — 전역
@@ -658,17 +630,13 @@ impl AuxWindow {
     pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
         match &self.kind {
             AuxWindowKind::Editor(m) => Some(m),
-            AuxWindowKind::Settings
-            | AuxWindowKind::Terminal { .. }
-            | AuxWindowKind::Room { .. } => None,
+            AuxWindowKind::Terminal { .. } | AuxWindowKind::Room { .. } => None,
         }
     }
     pub(crate) fn editor_mut(&mut self) -> Option<&mut MarkdownPane> {
         match &mut self.kind {
             AuxWindowKind::Editor(m) => Some(m),
-            AuxWindowKind::Settings
-            | AuxWindowKind::Terminal { .. }
-            | AuxWindowKind::Room { .. } => None,
+            AuxWindowKind::Terminal { .. } | AuxWindowKind::Room { .. } => None,
         }
     }
     /// 키 입력이 갈 pane id. 터미널 창은 그 pane, 방 창은 지금 포커스된 pane.
@@ -697,7 +665,6 @@ impl AuxWindow {
     fn title(&self) -> String {
         match &self.kind {
             AuxWindowKind::Editor(m) => aux_editor_title(m),
-            AuxWindowKind::Settings => "Settings".to_string(),
             // v1 은 pane id — 프로세스명(vim/claude…) 인레이는 App 만 알아 aux_render 가
             // 더 나은 라벨로 덮어쓸 수 있다(현재는 id 그대로).
             AuxWindowKind::Terminal { pane_id, .. } => pane_id.clone(),
@@ -779,12 +746,8 @@ impl AuxWindow {
                     dv.as_ref(),
                 );
             }
-            // Settings/Terminal/Room 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
-            // `aux_render_settings`/`aux_terminal_render`/`aux_room_render` 가 직접
-            // 페인트한다 — 이 편집기 전용 render 로는 오지 않는다.
-            AuxWindowKind::Settings
-            | AuxWindowKind::Terminal { .. }
-            | AuxWindowKind::Room { .. } => {}
+            // Terminal/Room 창은 App 스냅샷이 필요해 전용 렌더가 직접 페인트한다.
+            AuxWindowKind::Terminal { .. } | AuxWindowKind::Room { .. } => {}
         }
         let _ = self.gpu.render(&[], scale, 0.0, true);
     }
@@ -805,9 +768,7 @@ impl AuxWindow {
                     .unwrap_or_default();
                 ((*m.edit_lines).clone(), line, prefix, m.scroll, m.h_scroll)
             }
-            AuxWindowKind::Settings
-            | AuxWindowKind::Terminal { .. }
-            | AuxWindowKind::Room { .. } => return,
+            AuxWindowKind::Terminal { .. } | AuxWindowKind::Room { .. } => return,
         };
         let (lines, cur_line, prefix, scroll, h_scroll) = snap;
         let line_count = lines.len();
@@ -1058,10 +1019,6 @@ impl App {
                 a.last_title = want;
             }
         }
-        if matches!(self.aux_windows.get(idx).map(|a| &a.kind), Some(AuxWindowKind::Settings)) {
-            self.aux_render_settings(idx, blink);
-            return;
-        }
         if matches!(
             self.aux_windows.get(idx).map(|a| &a.kind),
             Some(AuxWindowKind::Terminal { .. })
@@ -1082,47 +1039,6 @@ impl App {
         a.dirty = false;
     }
 
-    /// 설정 별도창 한 프레임 — App 상태를 스냅샷해 `paint_settings` 를 그대로
-    /// 재사용한다(오버레이 코드와 동일 함수). area 는 창 client 전체, cursor 는
-    /// 이 창의 로컬 좌표. rects·scroll clamp 는 App 에 되돌려 클릭·휠이 참조한다.
-    fn aux_render_settings(&mut self, idx: usize, blink: bool) {
-        let (w, h, scale, cursor, focused) = {
-            let Some(a) = self.aux_windows.get(idx) else { return };
-            let (w, h) = a.logical_size();
-            (w, h, a.gpu.scale(), a.cursor_px, a.focused)
-        };
-        let mut ctx = self.settings_snapshot((0.0, 0.0, w, h), cursor);
-        // 캐럿 blink 는 포커스된 창만(메인창 last_blink_on 은 안 건드린다).
-        ctx.caret_on = focused && blink;
-        let Some(a) = self.aux_windows.get_mut(idx) else { return };
-        a.gpu.clear_chrome();
-        a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
-        let (rects, content_h) = settings::paint_settings(&mut a.gpu, &ctx);
-        // 계정 전환 확인은 **누른 창에** 그린다 — 설정 카드를 눌렀는데 뒤에 깔린
-        // 메인 창에 확인이 뜨면 그건 확인이 아니다.
-        let mut confirm_hits = Vec::new();
-        if let Some(p) = self.account_switch_confirm.as_ref() {
-            if p.surface == crate::session::ConfirmSurface::Settings {
-                confirm_hits =
-                    crate::render::paint_account_switch_confirm(&mut a.gpu, (w, h), cursor, p);
-            }
-        }
-        let _ = a.gpu.render(&[], scale, 0.0, true);
-        a.dirty = false;
-        if let Some(p) = self.account_switch_confirm.as_mut() {
-            if !confirm_hits.is_empty() {
-                p.rects = confirm_hits;
-            }
-        }
-        self.settings_rects = rects;
-        // 휠 스크롤 상한: content 높이 − 보이는 폼 밴드(84px 페이지 헤더 제외) + 여유.
-        let view_h = (h - 84.0).max(0.0);
-        self.settings_scroll_max = (content_h - view_h + 24.0).max(0.0);
-        if self.settings_scroll > self.settings_scroll_max {
-            self.settings_scroll = self.settings_scroll_max;
-        }
-    }
-
     // ── 이벤트 라우팅 ────────────────────────────────────────────────────────
 
     /// window id 가 별도창일 때 handler.rs 가 위임하는 단일 진입점. 반환 없이 소비.
@@ -1137,10 +1053,6 @@ impl App {
         // 에디터 단축키)이 메인 창의 마지막 상태로 고정되는 버그. 종류 무관 공통 갱신.
         if let WindowEvent::ModifiersChanged(mods) = &event {
             self.modifiers = mods.state();
-        }
-        if matches!(self.aux_windows.get(idx).map(|a| &a.kind), Some(AuxWindowKind::Settings)) {
-            self.aux_settings_event(idx, event);
-            return;
         }
         if matches!(
             self.aux_windows.get(idx).map(|a| &a.kind),
@@ -1594,371 +1506,6 @@ impl App {
         a.window.request_redraw();
     }
 
-    // ── 설정 별도창 ────────────────────────────────────────────────────────
-
-    /// 설정 별도창이 있으면 그 인덱스. `settings_open` 은 이 창의 존재와 동기화된
-    /// 편의 플래그(spawn 시 true, 닫힐 때 false)라 chrome active 표시가 참조한다.
-    pub(crate) fn settings_window_idx(&self) -> Option<usize> {
-        self.aux_windows
-            .iter()
-            .position(|a| matches!(a.kind, AuxWindowKind::Settings))
-    }
-
-    /// 설정 별도창 진입점(기어·사이드바 항목·프사 클릭). 이미 열려 있으면 포커스만,
-    /// `cat`/`student` 가 주어지면 그 페이지·학생으로 전환한다(딥링크).
-    ///
-    /// 웹뷰 이행의 **단일 분기점**이다 — 진입 경로가 여기 하나로 모여 있어서
-    /// settings.rs 를 한 줄도 안 건드리고 화면을 갈 수 있다.
-    pub(crate) fn open_settings_window(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        cat: Option<SettingsCat>,
-        student: Option<String>,
-    ) {
-        // 창 생성이 실패하면 아래 네이티브로 그대로 흐른다 — 이행 스위치가
-        // 설정 화면 자체를 못 열게 만드는 단일 실패점이 되면 안 된다.
-        // 딥링크(cat/student)는 웹 라우팅이 붙는 Step 4 이후에 이어진다.
-        // `cat` 을 함께 넘긴다. 예전엔 여기서 버려서, 하단바의 「계정 관리」가 웹
-        // 설정을 열긴 하는데 **캐릭터 화면**으로 떨어졌다(웹의 초기 칸이 그것이다).
-        // 네이티브 경로는 멀쩡했던 터라 「가끔 엉뚱한 데로 간다」로 보였다.
-        if settings_web_enabled() && self.open_settings_web_window(event_loop, cat) {
-            return;
-        }
-        let Some(idx) = self
-            .settings_window_idx()
-            .or_else(|| self.spawn_aux_settings(event_loop))
-        else {
-            return;
-        };
-        if let Some(c) = cat {
-            if self.settings_cat != c {
-                self.flush_student_persona();
-                self.settings_cat = c;
-                self.settings_input = None;
-                self.settings_scroll = 0.0;
-            }
-        }
-        if let Some(name) = student {
-            self.select_student_for_edit(name);
-        }
-        if let Some(a) = self.aux_windows.get(idx) {
-            a.window.focus_window();
-        }
-        self.aux_redraw(idx);
-    }
-
-    fn spawn_aux_settings(&mut self, event_loop: &ActiveEventLoop) -> Option<usize> {
-        let attrs = WindowAttributes::default()
-            .with_title("Settings")
-            .with_theme(Some(Theme::Dark))
-            // Wide enough that the theme grid wraps to three columns instead of
-            // four rows — at 720 the palette cards alone filled the viewport and
-            // pushed shape/accent below the fold.
-            .with_inner_size(LogicalSize::new(920.0, 720.0));
-        let window = match create_untabbed(event_loop, attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[auxwin] settings window create failed: {e}");
-                return None;
-            }
-        };
-        // 설정 폼의 텍스트 필드(경로·persona)에 한글이 필요하다. 편집기와 동일한
-        // IME 정책: macOS 는 OS IME 끄고 in-process composer, 그 외는 OS IME.
-        #[cfg(target_os = "macos")]
-        window.set_ime_allowed(false);
-        #[cfg(not(target_os = "macos"))]
-        window.set_ime_allowed(true);
-        let gpu = match gpu::GpuRenderer::new(window.clone(), FONT_SIZE) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("[auxwin] settings gpu init failed: {e}");
-                return None;
-            }
-        };
-        let aux = AuxWindow {
-            gpu,
-            kind: AuxWindowKind::Settings,
-            dirty: true,
-            cursor_px: (0.0, 0.0),
-            selecting: false,
-            focused: true,
-            preedit: String::new(),
-            last_title: "Settings".to_string(),
-            pending_capture: None,
-            md_content_h: 0.0,
-            tree_open: false,
-            pinned: false,
-            tree_scroll: 0.0,
-            tree_rows: Vec::new(),
-            header_btns: Vec::new(),
-            tab_bar_h: 0.0,
-            tabs_out: Default::default(),
-            window,
-        };
-        self.aux_windows.push(aux);
-        let idx = self.aux_windows.len() - 1;
-        self.settings_open = true;
-        self.settings_scroll = 0.0;
-        self.settings_input = None;
-        eprintln!("[auxwin] opened settings window #{idx}");
-        self.aux_redraw(idx);
-        Some(idx)
-    }
-
-    pub(crate) fn close_settings_window(&mut self, idx: usize) {
-        // 이 창에 뜬 확인은 함께 버린다 — 안 버리면 그릴 창도 취소할 손도 없는
-        // 대기 상태가 남아, 다음 전환이 조용히 막힌다.
-        if self
-            .account_switch_confirm
-            .as_ref()
-            .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
-        {
-            self.account_switch_confirm = None;
-        }
-        self.flush_student_persona();
-        self.settings_input = None;
-        self.settings_open = false;
-        self.close_aux_window(idx);
-    }
-
-    /// 설정 별도창 이벤트 라우팅 — 편집기와 다른 처리(폼 클릭·휠 스크롤·필드 키).
-    fn aux_settings_event(&mut self, idx: usize, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => self.close_settings_window(idx),
-            WindowEvent::Resized(size) => {
-                if let Some(a) = self.aux_windows.get_mut(idx) {
-                    a.gpu.resize(size.width, size.height);
-                    a.dirty = true;
-                    a.window.request_redraw();
-                }
-            }
-            WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(a) = self.aux_windows.get_mut(idx) {
-                    let sf = a.window.scale_factor() as f32;
-                    a.gpu.set_scale(sf);
-                    a.gpu.set_font_size(FONT_SIZE);
-                    let sz = a.window.inner_size();
-                    a.gpu.resize(sz.width, sz.height);
-                    a.dirty = true;
-                    a.window.request_redraw();
-                }
-            }
-            WindowEvent::Focused(f) => {
-                if let Some(a) = self.aux_windows.get_mut(idx) {
-                    a.focused = f;
-                    a.window.request_redraw();
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
-                if let Some(a) = self.aux_windows.get_mut(idx) {
-                    a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
-                    // hover 피드백(카드·세그먼트·행)을 갱신하려면 매 이동에 재페인트.
-                    a.dirty = true;
-                    a.window.request_redraw();
-                }
-                // 색 선택기 드래그 — press 에서 잡은 면을 커서가 따라간다.
-                // rect 밖은 picker_pick 이 클램프하므로 창 어디까지 끌어도 된다.
-                if let Some((act, r)) = self.settings_drag.clone() {
-                    let p = self.aux_windows.get(idx).map(|a| a.cursor_px).unwrap_or((0.0, 0.0));
-                    self.picker_pick(&act, r, p);
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                self.last_input_at = Instant::now();
-                let (cx, cy) = self.aux_windows.get(idx).map(|a| a.cursor_px).unwrap_or((0.0, 0.0));
-                // 계정 전환 확인이 이 창에 떠 있으면 **모든 클릭을 삼킨다** — 스크림
-                // 뒤 설정 컨트롤이 눌리면 안 된다.
-                if self
-                    .account_switch_confirm
-                    .as_ref()
-                    .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
-                {
-                    let hit = self.account_switch_confirm.as_ref().and_then(|p| {
-                        p.rects
-                            .iter()
-                            .find(|(_, r)| {
-                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                            })
-                            .map(|(b, _)| *b)
-                    });
-                    if let Some(btn) = hit {
-                        self.account_switch_pick(btn);
-                    }
-                    self.aux_redraw(idx);
-                    return;
-                }
-                // rects 는 area=(0,0,w,h) 좌표계라 창 로컬 커서를 그대로 넘긴다.
-                self.settings_click(cx, cy);
-                self.aux_redraw(idx);
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
-                ..
-            } => {
-                self.settings_drag = None;
-            }
-            WindowEvent::MouseWheel { delta, .. } => self.aux_settings_wheel(idx, delta),
-            WindowEvent::KeyboardInput { event, .. } => self.aux_settings_key(idx, &event),
-            WindowEvent::Ime(ime) => self.aux_settings_ime(idx, ime),
-            WindowEvent::DroppedFile(path) => self.aux_settings_drop(idx, path),
-            WindowEvent::RedrawRequested => self.aux_render(idx),
-            _ => {}
-        }
-    }
-
-    /// 설정 창에 떨어뜨린 이미지 → 열려 있는 캐릭터의 참조 그림(그림 생성용).
-    /// 캐릭터 상세가 안 열려 있으면 무시한다 — 어느 캐릭터 것인지 정할 길이 없다.
-    /// 이미지가 아닌 파일은 place 쪽 디코드가 거르고 사유가 토스트로 뜬다.
-    fn aux_settings_drop(&mut self, idx: usize, path: std::path::PathBuf) {
-        // zip 은 테마 팩 말고 쓸 데가 없어서 어느 카테고리에 있든 받는다. Theme
-        // 화면에서만 받으면 「그 화면이 있다」는 것부터 알아야 가져올 수 있고,
-        // 처음 받아 보는 사람에게는 그게 곧 못 쓰는 기능이다.
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
-            match crate::socket::import_theme(&path) {
-                Ok(id) => {
-                    // 덮어쓴 것이 지금 쓰는 테마일 수 있다 — 셋을 다 비우지 않으면
-                    // 화면이 두 테마를 섞고, 그건 「덜 바뀐 것」이 아니라 고장이다.
-                    crate::socket::invalidate_theme_rows();
-                    kasa_mcp::character::invalidate_active_theme();
-                    crate::theme::invalidate_roster();
-                    // 켜 주지는 않는다 — 가져오는 것과 갈아 끼우는 것은 다른 결정이고,
-                    // 쓰던 세트가 드롭 한 번에 바뀌면 그건 사고다.
-                    self.set_toast(format!("'{id}' 을 가져왔어요 — 목록에서 고르면 켜져요"));
-                }
-                Err(e) => self.set_toast(format!("테마를 못 가져왔어요 — {e}")),
-            }
-            self.aux_redraw(idx);
-            return;
-        }
-        if self.settings_cat != crate::SettingsCat::Students {
-            return;
-        }
-        let Some(slug) = self
-            .students_selected
-            .as_deref()
-            .and_then(crate::theme::character_slug)
-        else {
-            return;
-        };
-        let theme_id = crate::socket::read_character_theme();
-        if theme_id.is_empty() {
-            self.set_toast("기본 테마에는 못 구워요 — 새 테마로 복제한 뒤에 놓아 주세요".into());
-            return;
-        }
-        let Some(root) = kasa_mcp::character::themes_root() else { return };
-        match crate::place_themegen_ref(&root.join(&theme_id), slug, &path) {
-            Ok(_) => self.set_toast("참조 그림을 놓았어요".into()),
-            Err(e) => self.set_toast(format!("그림을 못 놓았어요 — {e}")),
-        }
-        self.aux_redraw(idx);
-    }
-
-    fn aux_settings_wheel(&mut self, idx: usize, delta: MouseScrollDelta) {
-        let dy_px = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 40.0,
-            MouseScrollDelta::PixelDelta(p) => p.y as f32,
-        };
-        let next = (self.settings_scroll - dy_px).clamp(0.0, self.settings_scroll_max);
-        if (next - self.settings_scroll).abs() > 0.1 {
-            self.settings_scroll = next;
-            self.aux_redraw(idx);
-        }
-    }
-
-    fn aux_settings_key(&mut self, idx: usize, event: &KeyEvent) {
-        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-        if event.state != ElementState::Pressed {
-            return;
-        }
-        self.last_input_at = Instant::now();
-        if crate::input::is_modifier_key(event) {
-            return;
-        }
-        // 계정 전환 확인이 이 창에 떠 있으면 Enter/Esc 만 받고 나머지는 삼킨다 —
-        // 확인 중에 뒤 설정 필드로 글자가 들어가면 안 된다.
-        if self
-            .account_switch_confirm
-            .as_ref()
-            .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Settings)
-        {
-            match event.logical_key {
-                Key::Named(NamedKey::Enter) => {
-                    self.account_switch_pick(crate::session::AccountSwitchBtn::Switch);
-                }
-                Key::Named(NamedKey::Escape) => {
-                    self.account_switch_pick(crate::session::AccountSwitchBtn::Cancel);
-                }
-                _ => {}
-            }
-            self.aux_redraw(idx);
-            return;
-        }
-        self.ime_retarget(crate::ImeFocus::Settings);
-        // Cmd/Ctrl+W: 설정 창 닫기.
-        if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
-            self.close_settings_window(idx);
-            return;
-        }
-        // macOS 는 OS IME 를 껐으므로 한글 자모(U+3130..318F)는 in-process composer
-        // 로 조합해 완성 음절만 포커스 필드에 넣는다.
-        //
-        // ⚠️ 자모는 `event.text` 로만 온다 — `logical_key` 는 같은 키의 **영문
-        // 각인**(ㄱ→r, ㅖ→P)이라, 그걸 보고 판단하면 자모가 조합기를 그냥
-        // 지나쳐 `settings_key` 에 낱자로 꽂힌다("계"가 "ㄱㅖ"로 남던 것).
-        #[cfg(target_os = "macos")]
-        if self.settings_input.is_some() {
-            // text 가 비고 logical_key 만 자모로 오는 프레임이 있어 둘 다 본다 —
-            // 한쪽만 보면 그 프레임의 자모가 조합기를 못 만나고 필드에 낱자로 꽂힌다.
-            let one = |s: &str| {
-                let mut it = s.chars();
-                it.next().filter(|_| it.next().is_none())
-            };
-            let typed = event.text.as_ref().and_then(|t| one(t)).or_else(|| {
-                match &event.logical_key {
-                    Key::Character(s) => one(s),
-                    _ => None,
-                }
-            });
-            if let Some(c) = typed {
-                if self.settings_hangul_char(c) {
-                    self.aux_redraw(idx);
-                    return;
-                }
-            }
-            if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
-                self.aux_redraw(idx);
-                return;
-            }
-            self.settings_hangul_flush();
-        }
-        // 포커스 필드가 있으면 그 필드로(persona/단일라인 분기는 settings_key 내부).
-        if self.settings_input.is_some() {
-            self.settings_key(event);
-            self.aux_redraw(idx);
-            return;
-        }
-        // 포커스 필드가 없을 때 Esc = 창 닫기.
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            self.close_settings_window(idx);
-            return;
-        }
-        self.aux_redraw(idx);
-    }
-
-    /// 비-macOS OS IME 경로 — 설정 폼엔 preedit 렌더가 없어 Commit 만 반영한다.
-    fn aux_settings_ime(&mut self, idx: usize, ime: Ime) {
-        if let Ime::Commit(text) = ime {
-            self.settings_insert_text(&text);
-            self.aux_redraw(idx);
-        }
-    }
-
     // ── 터미널 별도창(undock) ──────────────────────────────────────────────
     //
     // 일반 터미널 pane 을 별도 OS 창으로 분리한다. 편집기/설정 aux 와 달리 이 창은
@@ -2301,7 +1848,7 @@ impl App {
                 tab_last_active: tab_state.2,
                 is_active: focused,
                 color: student_col,
-                can_popout: true,
+                can_popout: false,
                 right_reserve: 0.0,
                 chrome_font: 12.0,
                 icon_size: crate::theme::ICON_SIZE,
@@ -3084,10 +2631,6 @@ impl App {
             })
             .map(|(k, _)| *k);
         match hit {
-            Some(AuxHeaderBtn::Hide) => {
-                self.hide_aux_window(idx);
-                true
-            }
             Some(AuxHeaderBtn::Dock) => {
                 // 창 종류마다 되돌리는 곳이 다르다 — pane 은 메인 그리드로,
                 // 방은 방 목록으로. 둘 다 창 닫기(⌘W)와 같은 경로다.
@@ -3217,78 +2760,6 @@ impl App {
         }
         self.aux_redraw(idx);
         true
-    }
-
-    /// 별도창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY·방 트리는 그대로
-    /// 두고 **창만** 없앤다 — 그래서 되살리기가 `spawn_aux_*` 재호출로 끝난다.
-    ///
-    /// 되돌리기(dock)와 다르다: 되돌리기는 pane 을 메인 그리드에 다시 꽂아 레이아웃을
-    /// 바꾸고, 접기는 꺼내 둔 상태를 유지한 채 화면에서만 물러난다. OS 최소화와도
-    /// 다르다 — Dock 이 아니라 일하던 창 안으로 들어가므로, 꺼내 둔 게 몇인지
-    /// 거기서 한눈에 보인다(거노).
-    pub(crate) fn hide_aux_window(&mut self, idx: usize) {
-        let Some(a) = self.aux_windows.get(idx) else { return };
-        let pos = a.window.outer_position().ok();
-        let what = match &a.kind {
-            AuxWindowKind::Terminal { pane_id, window, .. } => {
-                crate::HiddenAuxKind::Terminal { pane_id: pane_id.clone(), home_window: *window }
-            }
-            AuxWindowKind::Room { window, .. } => crate::HiddenAuxKind::Room { window: *window },
-            // 편집기·설정은 접을 자리가 없다(하단바는 pane 그리드의 띠다).
-            _ => return,
-        };
-        let label = match &what {
-            crate::HiddenAuxKind::Terminal { pane_id, .. } => {
-                let ws = self.ws.lock().unwrap();
-                // `ws.pane_character` 를 날로 읽던 자리(2026-08-22). 관문이 없어
-                // 셸만 도는 pane 을 접으면 칩에 남의 학생이 붙었고, **탭 접기도
-                // 안 해서** 탭에서 도는 학생은 반대로 칩에서 사라졌다.
-                match self.display_pane_char(&ws, pane_id) {
-                    Some(name) => format!("{name} · {pane_id}"),
-                    None => pane_id.clone(),
-                }
-            }
-            crate::HiddenAuxKind::Room { window } => self
-                .window_labels
-                .get(*window)
-                .map(|(n, _)| n.clone())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| format!("{}번 방", window + 1)),
-        };
-        self.hidden_aux.push(crate::HiddenAux { label, what, pos });
-        self.aux_windows.remove(idx);
-        // 하단바가 새로 생기면 그리드가 그만큼 줄어든다 — PTY 도 같이 줄여야
-        // 마지막 줄이 띠 밑으로 숨지 않는다.
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
-    /// 접어 둔 별도창을 다시 세운다. 그 사이 pane 이 사라졌거나 방이 없어졌으면
-    /// 조용히 목록에서만 지운다 — 되살릴 대상이 없는데 빈 창을 띄우면 그게 더 나쁘다.
-    pub(crate) fn unhide_aux(&mut self, i: usize, event_loop: &ActiveEventLoop) {
-        if i >= self.hidden_aux.len() {
-            return;
-        }
-        let h = self.hidden_aux.remove(i);
-        match h.what {
-            crate::HiddenAuxKind::Terminal { pane_id, home_window } => {
-                if self.pty.contains_key(&pane_id) {
-                    // 접었다 되살리는 창은 트리에 leaf 가 없다 — 잴 칸수가 없으므로 기본 크기.
-                    self.spawn_aux_terminal(pane_id, home_window, event_loop, h.pos, None);
-                }
-            }
-            crate::HiddenAuxKind::Room { window } => {
-                self.spawn_aux_room(window, None, event_loop, h.pos);
-            }
-        }
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
     }
 
     /// 휠 → PTY 스크롤백(alacritty display_offset). 위로(y>0)=과거로.
@@ -3610,7 +3081,7 @@ impl App {
     /// 승격하되 레이아웃 트리에는 꽂지 않고 바로 별도창으로 세운다.
     ///
     /// 승격 pane 의 이름은 **그 탭의 pid** — aux 터미널 기계 전체(aux_term_send·
-    /// unhide_aux·resize)가 pane_id ∈ App.pty 를 전제한다. 그래서 pid 가 pane
+    /// resize)가 pane_id ∈ App.pty 를 전제한다. 그래서 pid 가 pane
     /// 이름과 같은 **첫 탭**(pane 의 정체성 그 자체)은 못 가르고 pane undock 으로
     /// 폴백한다 — 소스가 이름을 쥔 채 pid 만 내보내면 나중에 소스가 닫힐 때
     /// `drop_pane_resources` 의 `pty.remove(pane_id)` 가 꺼내 둔 셸을 죽인다.

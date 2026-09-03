@@ -3009,23 +3009,6 @@ impl App {
             }
             other => eprintln!("[autosettings] 모르는 액션 '{other}'"),
         }
-        // 설정은 **별도 OS 창**이라 `KASATERM_AUTOCAPTURE`(메인 창 전용)로는 한 장도
-        // 못 찍는다 — 폼을 고치면서 화면을 확인할 길이 아예 없었다(2026-08-13).
-        // popout 하네스와 같은 방식으로 그 창 자신에게 캡처를 건다. +1200ms 는 새
-        // 창이 첫 프레임을 다 그릴 시간이고, 카드 높이가 직전 프레임 값을 쓰므로
-        // 두 프레임은 지나야 카드가 제 높이로 나온다.
-        if let Ok(cap) = std::env::var("KASATERM_AUTOSETTINGS_CAP") {
-            if !cap.is_empty() {
-                let ms: u64 = std::env::var("KASATERM_AUTOSETTINGS_CAP_MS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1200);
-                if let Some(a) = self.aux_windows.last_mut() {
-                    a.pending_capture =
-                        Some((Instant::now() + std::time::Duration::from_millis(ms), cap));
-                }
-            }
-        }
         // 피드백 본문은 키 이벤트로만 채워지는데 헤드리스엔 그 경로가 없다 —
         // 버퍼를 직접 심어 wrap·캐럿·활성 버튼을 캡처로 본다.
         // KASATERM_AUTOFEEDBACK_SAVE=1 이면 저장까지 눌러, 캡처엔 비워진 폼과
@@ -3062,25 +3045,6 @@ impl App {
                 self.window_cells()
             );
         }
-        if let Ok(t) = std::env::var("KASATERM_AUTOSETTINGS_TYPE") {
-            self.settings_input = Some(SettingsInput::ClaudeAccountLabel(0));
-            self.settings_caret = 0;
-            if let Some(a) = self.set_claude_accounts.first_mut() {
-                a.label.clear();
-            }
-            for c in t.chars() {
-                if !self.settings_hangul_char(c) {
-                    self.settings_hangul_flush();
-                    self.settings_insert_text(&c.to_string());
-                }
-            }
-            let pre = self.hangul.preedit().unwrap_or_default();
-            eprintln!(
-                "[autotype] label={:?} caret={} preedit={pre:?}",
-                self.set_claude_accounts.first().map(|a| a.label.clone()),
-                self.settings_caret
-            );
-        }
         if let Ok(t) = std::env::var("KASATERM_AUTOFEEDBACK_TEXT") {
             self.feedback_caret = t.chars().count();
             self.feedback_body = t;
@@ -3088,24 +3052,6 @@ impl App {
             if std::env::var("KASATERM_AUTOFEEDBACK_SAVE").is_ok_and(|v| v == "1") {
                 self.save_feedback();
             }
-        }
-        // Aux capture (main autocapture only reaches the main window). +1500ms so
-        // the new window renders a full frame first. 화면에 든 값이 subprocess 를
-        // 기다리는 자리(계정 슬롯의 `claude auth status`)면 한 프레임으로는 부족해
-        // 늘 빈칸만 찍힌다 — `_CAP_MS` 로 그 지연을 연다.
-        let cap = std::env::var("KASATERM_AUTOSETTINGS_CAP").unwrap_or_else(|_| {
-            std::env::temp_dir()
-                .join("settings-window.png")
-                .to_string_lossy()
-                .into_owned()
-        });
-        let delay = std::env::var("KASATERM_AUTOSETTINGS_CAP_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1500);
-        if let Some(a) = self.settings_window_idx().and_then(|i| self.aux_windows.get_mut(i)) {
-            a.pending_capture =
-                Some((Instant::now() + std::time::Duration::from_millis(delay), cap));
         }
     }
     /// Headless raw-editor selection seed: KASATERM_TEST_MD_SELECT="al,ac,cl,cc"
@@ -3819,34 +3765,19 @@ impl App {
             *auto_undock_dock_slot().lock().unwrap() =
                 Some((Instant::now() + std::time::Duration::from_millis(ms), pid.clone()));
         }
-        // `_HIDE=1` 이면 이어서 접기→되살리기까지 본다. 접기는 창만 없애는 것이라
-        // **PTY 가 살아 있는지**가 판정의 전부다 — 창 수만 세면 "접었다"와 "죽였다"가
-        // 똑같아 보인다.
+        // 옛 `_HIDE=1` 하네스는 이제 안전한 dock 복구를 확인한다.
         if std::env::var("KASATERM_AUTOUNDOCK_HIDE").is_err() {
             return;
         }
-        self.hide_aux_window(0);
+        self.dock_pane_terminal(0);
         self.render_frame();
         eprintln!(
-            "[autoundock] 접음 → aux={} 접힌목록={:?} 하단바예약={} PTY생존={}",
+            "[autoundock] 복구 → aux={} 하단바예약={} PTY생존={}",
             self.aux_windows.len(),
-            self.hidden_aux.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
             self.bottom_reserve_h(),
             self.pty.contains_key(&pid)
         );
-        eprintln!("[autoundock] 하단바 칩={:?}", self.dock_chip_rects);
-        self.unhide_aux(0, event_loop);
-        self.render_frame();
-        eprintln!(
-            "[autoundock] 되살림 → aux={} 접힌목록={} 하단바예약={} PTY생존={}",
-            self.aux_windows.len(),
-            self.hidden_aux.len(),
-            self.bottom_reserve_h(),
-            self.pty.contains_key(&pid)
-        );
-        eprintln!(
-            "[autoundock] 기대: 접으면 aux=0·예약=40·PTY생존=true / 되살리면 aux=1·예약=0·PTY생존=true"
-        );
+        eprintln!("[autoundock] 기대: aux=0·예약=0·PTY생존=true·메인 레이아웃 복귀");
     }
     /// 학생 테마가 서는 재료를 한 줄로 찍는다. 렌더가 실제로 보는 순서 그대로 —
     /// `active_tab_pid` 로 접고, 그 pid 로 `active_agent`(=runs_claude)를 묻고,
@@ -6171,7 +6102,12 @@ impl App {
         }
         self.autoarona_at = None;
         self.toggle_arona_panel(event_loop);
-        eprintln!("[autoarona] toggled → open={}", self.arona_panel_window.is_some());
+        eprintln!(
+            "[autoarona] toggled → open={}",
+            self.inline_web
+                .as_ref()
+                .is_some_and(|h| h.kind == crate::InlineWebKind::Arona)
+        );
     }
     pub(crate) fn arm_autosplit(&mut self) {
         let Ok(plan) = std::env::var("KASATERM_AUTOSPLIT") else { return; };

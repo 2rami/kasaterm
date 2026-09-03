@@ -2320,7 +2320,6 @@ impl App {
             crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
             crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
-            crate::ImeFocus::Settings => self.settings_insert_text(&text),
             crate::ImeFocus::WebAddr => self.web_addr_insert(&text),
             crate::ImeFocus::WebFind => self.web_find_insert(&text),
         }

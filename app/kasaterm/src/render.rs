@@ -3649,8 +3649,6 @@ impl App {
         // measured tab widths) and published to self after the gpu borrow.
         let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
-        // 파일 탭 hover 시 뜨는 팝아웃(별도창) 아이콘 hit rect: (pane id, 탭 idx, rect).
-        let mut tab_popout_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         // 계정이 바뀐 pane 의 「재시작」 칩 — gpu 대여가 끝난 뒤 self 로 옮긴다.
         let mut restart_chip_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
@@ -8570,7 +8568,7 @@ impl App {
                         color: h.color,
                         // 이미지 탭도 이제 뺄 수 있다 — 셸을 별도창으로 보낼 때
                         // 같은 pane 의 그림이 안 따라오던 자리가 여기였다.
-                        can_popout: true,
+                        can_popout: false,
                         right_reserve: btn_cluster,
                         chrome_font,
                         icon_size,
@@ -8597,12 +8595,6 @@ impl App {
                 pane_tab_windowing.push((h.id.clone(), strip.first, strip.n_vis, h.active_tab));
                 tab_hits.extend(strip.tab_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
                 tab_close_hits.extend(strip.close_hits.iter().map(|(i, r)| (h.id.clone(), *i, *r)));
-                tab_popout_hits.extend(
-                    strip
-                        .popout_hits
-                        .iter()
-                        .map(|(i, r)| (h.id.clone(), *i, *r)),
-                );
                 if let Some(r) = strip.plus_rect {
                     plus_hits.push((h.id.clone(), r));
                 }
@@ -9207,9 +9199,6 @@ impl App {
                             // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
                             ("columns-2", ActionKind::SplitH),
                             ("rows-2", ActionKind::SplitV),
-                            // 별도창 — 헤더 없는 pane 의 유일한 undock 진입점
-                            // (2026-08-13 지적 「점3개 메뉴에 별도창 버튼도 없고」).
-                            ("external-link", ActionKind::Undock),
                             (hdr_icon, ActionKind::ToggleHeader),
                             (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),
@@ -10301,7 +10290,7 @@ impl App {
             // — the hidden sibling panes, so the maximize visibly "sends the
             // others to the dock" and a sibling chip click switches the zoom to
             // it. zoom siblings have no × (they're live panes, not parked).
-            let mut dock_items: Vec<(String, String, bool)> =
+            let dock_items: Vec<(String, String, bool)> =
                 if let Some(z) = self.zoomed_pane.clone() {
                     let ws = self.ws.lock().unwrap();
                     self.pty_layout
@@ -10344,11 +10333,6 @@ impl App {
             // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
             // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
             //
-            // 접어 둔 별도창은 여기 선다. id 는 `aux:<i>` 로 접두사를 붙여 pane id
-            // 와 섞이지 않게 한다 — 클릭 라우팅이 둘을 같은 목록에서 가른다.
-            for (i, h) in self.hidden_aux.iter().enumerate() {
-                dock_items.push((format!("aux:{i}"), h.label.clone(), false));
-            }
             // 칩이 하나도 없어도 **예약된** 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
             // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
             //
@@ -13328,7 +13312,6 @@ impl App {
         self.restore_btn_rects = restore_btn_hits;
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
-        self.pane_tab_popout_rects = tab_popout_hits;
         self.pane_restart_chip_rects = restart_chip_hits;
         self.pane_plus_rects = plus_hits;
         // Tab-windowing write-back: clamped first + fit count for the wheel

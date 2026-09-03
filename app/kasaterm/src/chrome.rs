@@ -2002,8 +2002,6 @@ impl App {
     /// dock 에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
     /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
     ///
-    /// 접어 둔 별도창은 **센다**. 그건 사용자가 그 순간 직접 접은 것이라 띠가 생기는
-    /// 게 결과로 읽히고, 무엇보다 되살릴 손잡이가 여기 말고는 없다.
     pub(crate) fn bottom_reserve_h(&self) -> f32 {
         self.dock_reserve_h() + self.status_h()
     }
@@ -2011,7 +2009,7 @@ impl App {
     /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
     /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
     pub(crate) fn dock_reserve_h(&self) -> f32 {
-        if self.docked.is_empty() && self.zoomed_pane.is_none() && self.hidden_aux.is_empty() {
+        if self.docked.is_empty() && self.zoomed_pane.is_none() {
             0.0
         } else {
             DOCK_HEIGHT
@@ -2447,227 +2445,41 @@ impl App {
         }
         self.copy_toast_at = Some(Instant::now());
     }
-    /// Open the session panel in its own OS window. Mirrors open_git_panel:
-    /// the page polls `/sessions` on the MCP server. Best-effort — any failure
-    /// just logs and leaves the terminal untouched.
-    pub(crate) fn open_session_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.session_panel_window.is_some() {
+    pub(crate) fn toggle_session_panel(&mut self, _event_loop: &ActiveEventLoop) {
+        self.close_inline_web();
+        if self.git.col_visible && self.info.tab == state::SideTab::Sessions {
+            self.toggle_git_col();
             return;
         }
-        let port = mcp_panel_port();
-        let attrs = WindowAttributes::default()
-            .with_title("sessions")
-            .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(260.0, 360.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[session-panel] window create failed: {e}");
-                return;
-            }
-        };
-        let html = SESSION_PANEL_HTML
-            .replace("__PORT__", &port)
-            .replace("__TOKEN__", kasa_mcp::session_token());
-        // build_as_child for the same use-after-free reason as the git panel.
-        let webview = match wry::WebViewBuilder::new()
-            .with_html(html)
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(260.0, 360.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => wv,
-            Err(e) => {
-                eprintln!("[session-panel] webview build failed: {e}");
-                return;
-            }
-        };
-        eprintln!("[session-panel] open; polling 127.0.0.1:{port}/sessions");
-        self.session_panel_window = Some(window);
-        self.session_panel_webview = Some(webview);
-    }
-    /// Toggle the session panel from the menu: close if open, open if not.
-    pub(crate) fn toggle_session_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.session_panel_window.is_some() {
-            // Drop the webview before the window it borrows from.
-            self.session_panel_webview = None;
-            self.session_panel_window = None;
-        } else {
-            self.open_session_panel(event_loop);
-        }
-    }
-    /// Open the board panel in its own OS window. Mirrors open_session_panel:
-    /// the page polls `/board` on the MCP server. Best-effort — any failure
-    /// just logs and leaves the terminal untouched.
-    pub(crate) fn open_board_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.board_panel_window.is_some() {
-            return;
-        }
-        let port = mcp_panel_port();
-        let attrs = WindowAttributes::default()
-            .with_title("board")
-            .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(320.0, 440.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[board-panel] window create failed: {e}");
-                return;
-            }
-        };
-        let html = BOARD_PANEL_HTML
-            .replace("__PORT__", &port)
-            .replace("__TOKEN__", kasa_mcp::session_token());
-        // build_as_child for the same use-after-free reason as the git panel.
-        let webview = match wry::WebViewBuilder::new()
-            .with_html(html)
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(320.0, 440.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => wv,
-            Err(e) => {
-                eprintln!("[board-panel] webview build failed: {e}");
-                return;
-            }
-        };
-        eprintln!("[board-panel] open; polling 127.0.0.1:{port}/board");
-        self.board_panel_window = Some(window);
-        self.board_panel_webview = Some(webview);
-    }
-    /// Toggle the board panel from the menu: close if open, open if not.
-    pub(crate) fn toggle_board_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.board_panel_window.is_some() {
-            // Drop the webview before the window it borrows from.
-            self.board_panel_webview = None;
-            self.board_panel_window = None;
-        } else {
-            self.open_board_panel(event_loop);
-        }
-    }
-    /// Open the arona full UI in its own OS window. Unlike the
-    /// HTML-string panels this loads the arona-ui dist over the MCP HTTP
-    /// server (`/arona-ui/`) — same-origin with the API the page fetches, and
-    /// the in-window wry embed is off the table anyway (Metal layer conflict).
-    pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        // shim OFF(순정 모드)면 아로나 GUI 자체를 안 띄운다 — board/미러 hook 이 전무해
-        // 빈 웹뷰가 뜨는 어색함 방지(arona_btn_rect 도 None 이라 버튼부터 숨겨진다).
-        // 이건 전역 shim 축 — 아래 방 모드 게이트 부재와는 다른 결이다.
-        if !crate::socket::read_shim_inject() {
-            return;
-        }
-        if self.arona_panel_window.is_some() {
-            return;
-        }
-        // (방) 모드 게이트 없음: solo/미설정 방에서도 창은 연다. 모드 안내·전환은
-        // 웹 쪽 ModePicker 담당(GET /mode 로 분기) — 네이티브가 차단하면
-        // ModePicker 에 도달 자체가 불가한 설계 모순이었다(거노 실측).
-        let port = mcp_panel_port();
-        // 처음부터 보이게 띄운다 — 배경을 교실 다크톤으로 칠해(아래 with_background_color)
-        // 흰 플래시가 없고, 무엇보다 webview 로드가 실패해도(포트 stale 등) 창이 영영
-        // 숨겨지는 단일 실패점을 없앤다. 옛 "Finished 후에만 set_visible(true)"는 로드가
-        // 안 끝나면 "버튼 눌러도 안 열림"이 됐다(멀티 인스턴스 포트 race). 완료 시 focus 만.
-        let attrs = WindowAttributes::default()
-            .with_title("아로나 — 샬레 교실")
-            .with_theme(Some(Theme::Dark))
-            .with_visible(true)
-            .with_inner_size(LogicalSize::new(1100.0, 720.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[arona-panel] window create failed: {e}");
-                return;
-            }
-        };
-        // launch 별 캐시버스트 — webview 가 옛 index.html 을 캐시해도 새 URL 이라
-        // 무조건 새로 받는다(서버 no-store 와 이중 방어). relaunch 마다 값이 바뀜.
-        let cb = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        // 로드 끝나면 포커스를 주는 핸들러(창은 이미 보임). webview2 가 UI(메인)
-        // 스레드에서 콜백하므로 winit 호출이 안전하다.
-        let win_show = window.clone();
-        // 이미지 드롭은 HTML5 onDrop(입력창/패널)이 처리한다 — dragover preventDefault 로
-        // WKWebView 가 드롭을 웹콘텐츠에 넘겨 ondrop+files 가 뜬다. wry 네이티브
-        // drag_drop_handler 를 설치하면 그게 드롭을 가로채(active_pty 로 오배송) HTML 경로를
-        // 막아 첨부가 안 됐다(거노 실측) → 설치 안 함.
-        // build_as_child for the same use-after-free reason as the git panel.
-        let webview = match wry::WebViewBuilder::new()
-            .with_url(format!("http://127.0.0.1:{port}/arona-ui/?v={cb}"))
-            // 로딩 중 노출되는 빈 배경을 교실 다크톤으로 — 흰 플래시 제거.
-            .with_background_color((20, 22, 28, 255))
-            .with_on_page_load_handler(move |event, _url| {
-                if matches!(event, wry::PageLoadEvent::Finished) {
-                    win_show.focus_window();
-                }
-            })
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(1100.0, 720.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => Some(wv),
-            Err(e) => {
-                // webview 생성 실패해도 window 는 살려둔다(아래 항상 저장) — 옛 `return`
-                // 은 로컬 window 를 drop 해 "검은창 떴다 사라짐"을 냈다. 실패 원인이
-                // 보이게 창 제목을 에러로 바꾸고 webview 는 None 으로 둔다.
-                eprintln!("[arona-panel] webview build failed: {e}");
-                window.set_title(&format!("아로나 — 웹뷰 로드 실패: {e}"));
-                None
-            }
-        };
-        eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
-        self.arona_panel_window = Some(window);
-        self.arona_panel_webview = webview;
-        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). 자동 통솔
-        // 자체가 폐기됐다(솔로 확정 06-18) — 아로나/SCHALE OS 는 관찰·시각 레이어일 뿐
-        // 세션을 통솔하지 않는다(활성 pane 승격 호출 제거).
-        // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
-        // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
-        // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
-        if std::env::var_os("KASATERM_ARONA_SOLO_VIEW").is_some() {
+        self.info.tab = state::SideTab::Sessions;
+        self.info.scroll = 0.0;
+        if self.git.col_visible {
+            self.chrome_dirty = true;
             if let Some(w) = &self.window {
-                w.set_visible(false);
+                w.request_redraw();
             }
+        } else {
+            self.toggle_git_col();
         }
     }
-    /// Close the arona window and bring the hidden main terminal back. The
-    /// single close path — menu toggle, the window's X button, and
-    /// `POST /arona-close` (ModePicker "터미널로") all route here so none of
-    /// them can forget the reveal and strand the terminal hidden. No-op when
-    /// the window isn't open.
-    pub(crate) fn close_arona_panel(&mut self) {
-        if self.arona_panel_window.is_none() {
+    pub(crate) fn toggle_board_panel(&mut self, event_loop: &ActiveEventLoop) {
+        self.toggle_inline_web(event_loop, InlineWebKind::Board, None);
+    }
+    pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if !crate::socket::read_shim_inject() {
+            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
             return;
         }
-        // Drop the webview before the window it borrows from.
-        self.arona_panel_webview = None;
-        self.arona_panel_window = None;
-        // 교실에서 나옴 — 숨겨둔 메인 터미널 창 복귀(+숨김 동안 못 받은
-        // redraw 직접 청구).
-        if let Some(w) = &self.window {
-            w.set_visible(true);
-            w.focus_window();
-            w.request_redraw();
-        }
-        eprintln!("[arona-panel] closed; terminal revealed");
+        let _ = self.open_inline_web(event_loop, InlineWebKind::Arona, None);
     }
-    /// 설정 화면의 웹뷰 판. 별도 OS 창 + `/arona-ui/settings.html` 을 MCP HTTP 로
-    /// 로드한다 — same-origin 이라 페이지의 fetch 가 CORS 없이 붙고, POST 는
-    /// `origin_guard_mw`(Router::layer)가 새 라우트까지 자동으로 보호한다.
-    /// 이미 열려 있으면 포커스만 주고 `true`.
-    ///
-    /// **`set_ime_allowed` 를 부르지 않는다.** 네이티브 설정창은 macOS 에서 OS IME
-    /// 를 끄고 in-process 조합기를 쓰지만(auxwin.rs `spawn_aux_settings`), 그건 GPU
-    /// 폼의 텍스트 편집용이다. 웹뷰에 그걸 걸면 WKWebView 가 제 IME 로 받아야 할
-    /// 한글 조합을 끊어 이행의 목적을 정확히 무효화한다 — 아로나 창도 같은 이유로
-    /// 안 부르고, 거기서 한글 입력이 이미 프로덕션으로 돌고 있다.
+
+    pub(crate) fn close_arona_panel(&mut self) {
+        if self.inline_web.as_ref().is_some_and(|h| {
+            matches!(h.kind, InlineWebKind::Arona | InlineWebKind::Board)
+        }) {
+            self.close_inline_web();
+        }
+    }
     /// 학생 세부설정 창 — `/arona-ui/settings.html?student=<slug>&theme=<id>`.
     ///
     /// 설정 본체와 **따로** 뜬다. 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하고,
@@ -2699,7 +2511,10 @@ impl App {
             self.student_web_window.as_ref(),
             self.student_web_webview.as_ref(),
         ) {
-            let _ = wv.load_url(&url);
+            if let Err(e) = wv.load_url(&url) {
+                self.set_toast(format!("캐릭터 설정을 바꾸지 못했어요 — {e}"));
+                return false;
+            }
             w.focus_window();
             return true;
         }
@@ -2717,6 +2532,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[student-web] window create failed: {e}");
+                self.set_toast(format!("캐릭터 설정 창을 만들지 못했어요 — {e}"));
                 return false;
             }
         };
@@ -2739,6 +2555,7 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[student-web] webview build failed: {e}");
+                self.set_toast(format!("캐릭터 설정 화면을 만들지 못했어요 — {e}"));
                 return false;
             }
         };
@@ -2748,77 +2565,114 @@ impl App {
         true
     }
 
-    pub(crate) fn open_settings_web_window(
+    pub(crate) fn close_student_web_window(&mut self) {
+        self.student_web_webview = None;
+        self.student_web_window = None;
+        if let Some(w) = &self.window {
+            w.focus_window();
+            w.request_redraw();
+        }
+        eprintln!("[student-web] closed");
+    }
+
+    fn open_inline_web(
         &mut self,
         event_loop: &ActiveEventLoop,
+        kind: InlineWebKind,
         cat: Option<crate::SettingsCat>,
     ) -> bool {
-        if let Some(w) = self.settings_web_window.as_ref() {
-            w.focus_window();
-            // 이미 떠 있으면 URL 을 다시 못 쓴다 — 다시 로드하면 입력 중이던 값이
-            // 날아간다. 열려 있는 화면을 그 자리에서 돌린다.
-            if let (Some(c), Some(wv)) = (cat, self.settings_web_webview.as_ref()) {
-                let _ = wv.evaluate_script(&format!(
+        if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
+            if let (InlineWebKind::Settings, Some(c), Some(host)) =
+                (kind, cat, self.inline_web.as_ref())
+            {
+                let _ = host.webview.evaluate_script(&format!(
                     "window.__ktSetCat && window.__ktSetCat('{}')",
                     c.web_key()
                 ));
             }
+            if let Some(host) = self.inline_web.as_ref() {
+                host.window.focus_window();
+            }
             return true;
         }
-        // 페이지가 실제로 서빙되는지 **창을 만들기 전에** 묻는다. 웹뷰는 404 를 받아도
-        // 빌드에 성공하므로, 빌드 성공을 「열렸다」로 읽으면 `web/arona-ui/dist` 가 없는
-        // 체크아웃에서 **오류 페이지가 뜬 창**이 설정 자리를 차지한다 — 그러면 설정을
-        // 아예 못 연다. 여기서 false 를 주면 부른 쪽이 네이티브 화면으로 떨어진다.
-        if !settings_web_reachable(&mcp_panel_port()) {
-            eprintln!("[settings-web] 페이지에 못 닿는다 — 네이티브 설정으로 간다");
+        self.close_inline_web();
+        let (port, certain) = crate::mcp_panel_port_certain();
+        if !settings_web_reachable(&port) {
+            let label = match kind {
+                InlineWebKind::Settings => "설정",
+                InlineWebKind::Arona => "아로나",
+                InlineWebKind::Board => "보드",
+            };
+            self.set_toast(format!("{label} 화면을 열지 못했어요 — 잠시 뒤 다시 시도해 주세요"));
+            eprintln!("[inline-web] page unreachable: kind={kind:?} port={port}");
             return false;
         }
-        // 포트가 **확실하지 않을 때만** 제목에 박는다. `mcp_panel_port` 은 8765 폴백을
-        // 가지고 있어 멀티 인스턴스에서 남의 프로세스를 가리킬 수 있고, 설정은 파일을
-        // 쓰므로 그때는 어디에 말하는지 보여야 한다. 다만 늘 띄우면 평소에 지저분하고
-        // (거노 2026-08-25 「그거 주소안나오게해봐」) 정작 위험한 순간에도 늘 있던
-        // 글자라 눈에 안 띈다 — 경고는 드물어야 경고다.
-        let (port, certain) = crate::mcp_panel_port_certain();
-        let title = if certain {
-            "설정".to_string()
-        } else {
-            format!("설정 — 127.0.0.1:{port} (포트 불확실)")
-        };
-        let attrs = WindowAttributes::default()
-            .with_title(title)
-            .with_theme(Some(Theme::Dark))
-            .with_visible(true)
-            // 네이티브 설정창과 같은 치수 — 나란히 스샷 비교(Step 4)가 목적이다.
-            .with_inner_size(LogicalSize::new(920.0, 720.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[settings-web] window create failed: {e}");
-                return false;
-            }
-        };
-        // launch 별 캐시버스트 — WKWebView 가 옛 settings.html+JS 를 캐시해도 새
-        // URL 이라 무조건 새로 받는다(서버 no-store 와 이중 방어).
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
         let cb = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let win_show = window.clone();
-        let drop_proxy = self.proxy.clone();
-        let webview = match wry::WebViewBuilder::new()
-            .with_url(format!(
+        let url = match kind {
+            InlineWebKind::Settings => format!(
                 "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}{}",
                 cat.map(|c| format!("&cat={}", c.web_key()))
                     .unwrap_or_default()
-            ))
-            .with_background_color((27, 37, 65, 255))
-            // 테마 zip 을 이 창에 떨어뜨리면 받는다. 웹뷰가 창을 덮고 있으면 winit 의
-            // `DroppedFile` 이 창까지 오지 않아(네이티브 설정 창 경로와 갈린다) 여기서
-            // 잡아야 한다. 핸들러는 `Fn(..) -> bool` 이라 `&mut self` 에 못 닿으므로
-            // 소켓 스레드와 같은 방식으로 GUI 에 위임한다.
-            //
-            // zip 이 아니면 false — 설정 페이지가 제 드롭을 쓰게 될 때 여기서 먹어
-            // 버리지 않도록. zip 은 이 앱에서 테마 말고 쓸 데가 없어 모호하지 않다.
+            ),
+            InlineWebKind::Arona => {
+                format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&view=classroom")
+            }
+            InlineWebKind::Board => {
+                format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&panel=board")
+            }
+        };
+        let title = match kind {
+            InlineWebKind::Settings if !certain => {
+                format!("설정 — 127.0.0.1:{port} (포트 불확실)")
+            }
+            InlineWebKind::Settings => "설정".to_string(),
+            InlineWebKind::Arona => "아로나".to_string(),
+            InlineWebKind::Board => "보드".to_string(),
+        };
+        let attrs = WindowAttributes::default()
+            .with_title(title)
+            .with_theme(Some(Theme::Dark))
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_visible(false)
+            .with_inner_size(LogicalSize::new(720.0, 560.0));
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs.with_has_shadow(false)
+        };
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                self.set_toast(format!("화면을 열지 못했어요 — {e}"));
+                eprintln!("[inline-web] window create failed: {e}");
+                return false;
+            }
+        };
+        let drop_proxy = self.proxy.clone();
+        let ipc_proxy = self.proxy.clone();
+        let background = if kind == InlineWebKind::Settings {
+            (27, 37, 65, 255)
+        } else {
+            (20, 22, 28, 255)
+        };
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(url.clone())
+            .with_background_color(background)
+            .with_initialization_script(
+                "window.addEventListener('keydown',function(e){var t=e.target&&e.target.tagName;if(e.key==='Escape'&&!['INPUT','TEXTAREA','SELECT'].includes(t)){e.preventDefault();window.ipc.postMessage('close-inline');}},true);",
+            )
+            .with_ipc_handler(move |req: wry::http::Request<String>| {
+                if req.body() == "close-inline" {
+                    let _ = ipc_proxy.send_event(UserEvent::InlineWebClose);
+                }
+            })
             .with_drag_drop_handler(move |e| match e {
                 wry::DragDropEvent::Drop { paths, .. } => {
                     let mut took = false;
@@ -2832,124 +2686,188 @@ impl App {
                 }
                 _ => false,
             })
-            .with_on_page_load_handler(move |event, _url| {
-                if matches!(event, wry::PageLoadEvent::Finished) {
-                    win_show.focus_window();
-                }
-            })
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(920.0, 720.0).into(),
+                size: wry::dpi::LogicalSize::new(720.0, 560.0).into(),
             })
-            // 아로나 패널과 같은 use-after-free 사유로 build_as_child.
             .build_as_child(window.as_ref())
         {
-            Ok(wv) => wv,
+            Ok(webview) => webview,
             Err(e) => {
-                // 창을 접고 false 를 준다 — 부른 쪽이 네이티브 설정을 연다.
-                //
-                // 예전엔 빈 창을 살려 두고 실패 원인을 제목에 띄운 뒤 `true` 를 줬다.
-                // 웹뷰가 기본 OFF 이던 시절엔 그게 나았다(일부러 켠 사람에게 원인을
-                // 보여주는 것이 목적이고, 창이 떴다 사라지면 그마저 못 본다). 기본이
-                // ON 이 된 지금은 정반대다 — 그 빈 창이 설정 자리를 차지해 **설정을
-                // 아예 못 열게** 만든다. 창이 한 번 깜빡이는 대가로 옛 화면이 뜬다.
-                eprintln!("[settings-web] webview build failed: {e} — 네이티브 설정으로 간다");
-                drop(window);
+                self.set_toast(format!("웹 화면을 만들지 못했어요 — {e}"));
+                eprintln!("[inline-web] webview build failed: {e}");
                 return false;
             }
         };
-        eprintln!("[settings-web] open; http://127.0.0.1:{port}/arona-ui/settings.html");
-        self.settings_web_window = Some(window);
-        self.settings_web_webview = Some(webview);
+        self.settings_open = kind == InlineWebKind::Settings;
+        self.inline_web = Some(InlineWebHost {
+            webview,
+            window,
+            kind,
+            last_frame: None,
+            visible: false,
+        });
+        self.chrome_dirty = true;
+        if let Some(main) = &self.window {
+            main.request_redraw();
+        }
+        eprintln!("[inline-web] open kind={kind:?} url={url}");
         true
     }
 
-    /// 설정 웹뷰 창의 단일 닫기 경로 — 창 X 버튼(`window_event` 가드)과 메뉴/토글이
-    /// 모두 여기로 온다. webview 를 그것이 빌린 window 보다 먼저 drop 한다.
-    pub(crate) fn close_settings_web_window(&mut self) {
-        if self.settings_web_window.is_none() {
-            return;
-        }
-        self.settings_web_webview = None;
-        self.settings_web_window = None;
-        eprintln!("[settings-web] closed");
-    }
-
-    /// 거노: "터미널 보기"를 누르면 화면을 2분할 — 터미널(왼쪽)·아로나 교실(오른쪽).
-    /// 두 네이티브 창을 현재 모니터 작업영역의 좌/우 절반에 타일링한다. 둘 다 떠
-    /// 있을 때만 의미가 있어, 아로나 창이 없으면(순수 터미널) no-op.
-    pub(crate) fn tile_terminal_arona_split(&self) {
-        let (Some(term), Some(arona)) = (self.window.as_ref(), self.arona_panel_window.as_ref())
-        else {
-            return;
-        };
-        // 사용자가 보고 있는 화면 기준 — 떠 있는 아로나 창의 모니터.
-        let Some(monitor) = arona.current_monitor().or_else(|| term.current_monitor()) else {
-            return;
-        };
-        let mpos = monitor.position(); // 가상 데스크톱 물리좌표(멀티모니터 오프셋)
-        let msize = monitor.size(); // 모니터 해상도(물리 px)
-                                    // macOS 상단 메뉴바를 가리지 않게 인셋. 다른 OS는 0.
-        let top_inset: i32 = if cfg!(target_os = "macos") {
-            (28.0 * monitor.scale_factor()) as i32
+    pub(crate) fn toggle_settings_web(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cat: Option<crate::SettingsCat>,
+    ) {
+        if self
+            .inline_web
+            .as_ref()
+            .is_some_and(|h| h.kind == InlineWebKind::Settings)
+            && cat.is_none()
+        {
+            self.close_inline_web();
         } else {
-            0
-        };
-        let half_w = (msize.width / 2) as i32;
-        let usable_h = ((msize.height as i32 - top_inset).max(200)) as u32;
-        let y = mpos.y + top_inset;
-        // 왼쪽: 터미널(frameless 라 inner≈outer).
-        term.set_outer_position(winit::dpi::PhysicalPosition::new(mpos.x, y));
-        let _ = term.request_inner_size(winit::dpi::PhysicalSize::new(half_w as u32, usable_h));
-        term.set_visible(true);
-        term.request_redraw();
-        // 오른쪽: 아로나 교실(타이틀바 높이만큼 아래로 밀려도 허용).
-        arona.set_outer_position(winit::dpi::PhysicalPosition::new(mpos.x + half_w, y));
-        let _ = arona.request_inner_size(winit::dpi::PhysicalSize::new(
-            msize.width - half_w as u32,
-            usable_h,
-        ));
-    }
-    /// BA GUI 버튼: 없으면 열고, 뒤/최소화 상태면 앞으로 가져오고, 이미 맨 앞이면 닫는다.
-    /// 순수 토글이던 시절엔 창이 다른 창 뒤로 내려가 있어도 버튼이 "있음→닫기"라 두 번
-    /// 눌러야 다시 떴다(거노: 내려간 창 다시 누르면 꺼져 불편). has_focus 로 분기.
-    pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        // 기본: arona-ui 를 기본 웹브라우저 탭으로 연다(거노 06-26). wry 임베드(별도 OS
-        // 창)는 Metal layer 충돌을 피하려던 우회였고 지금은 비활성 — KASATERM_ARONA_WRY=1
-        // 로만 복귀한다. 버튼·메뉴·키보드 3경로가 다 이 함수를 거치므로 여기서만 분기.
-        if std::env::var_os("KASATERM_ARONA_WRY").is_none() {
-            self.open_arona_in_browser();
-            return;
-        }
-        if self.arona_panel_window.is_none() {
-            self.open_arona_panel(event_loop);
-            return;
-        }
-        // 떠 있음: 맨 앞이면 닫고, 뒤/숨김/최소화면 앞으로(raise+focus). borrow 를 블록에
-        // 가둬 self.close_arona_panel(&mut self) 와 충돌하지 않게 focus 여부만 빼낸다.
-        let focused = {
-            let w = self.arona_panel_window.as_ref().unwrap();
-            let f = w.has_focus();
-            if !f {
-                w.set_minimized(false);
-                w.set_visible(true);
-                w.focus_window();
-            }
-            f
-        };
-        if focused {
-            self.close_arona_panel();
+            let _ = self.open_inline_web(event_loop, InlineWebKind::Settings, cat);
         }
     }
 
-    /// arona-ui 를 기본 브라우저 탭으로 연다. MCP HTTP 서버가 같은 포트로 `/arona-ui/`
-    /// 와 API 를 동일 origin 서빙하므로 페이지 fetch 가 그대로 동작한다. 캐시버스트(`?v=`)는
-    /// 안 붙인다 — 같은 URL 이면 브라우저가 기존 탭을 재사용할 수 있다(중복 탭 방지).
-    pub(crate) fn open_arona_in_browser(&self) {
-        let port = mcp_panel_port();
-        let url = format!("http://127.0.0.1:{port}/arona-ui/");
-        open_url_in_browser(&url);
-        eprintln!("[arona-browser] open {url}");
+    fn toggle_inline_web(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        kind: InlineWebKind,
+        cat: Option<crate::SettingsCat>,
+    ) {
+        if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
+            self.close_inline_web();
+        } else {
+            let _ = self.open_inline_web(event_loop, kind, cat);
+        }
+    }
+
+    pub(crate) fn close_inline_web(&mut self) {
+        let Some(host) = self.inline_web.take() else {
+            self.settings_open = false;
+            return;
+        };
+        if let Some(main) = &self.window {
+            if host.visible {
+                crate::webpane::detach_child(main, &host.window);
+            }
+            main.focus_window();
+            main.request_redraw();
+        }
+        host.window.set_visible(false);
+        self.settings_open = false;
+        self.chrome_dirty = true;
+        eprintln!("[inline-web] closed kind={:?}", host.kind);
+    }
+
+    pub(crate) fn sync_inline_web(&mut self) {
+        let Some(main) = self.window.clone() else { return };
+        let Ok(origin) = main.inner_position() else { return };
+        let origin = origin.to_logical::<f64>(main.scale_factor());
+        let zoom = (self.ui_zoom as f64).max(0.1);
+        let inner = main.inner_size().to_logical::<f64>(main.scale_factor());
+        let left = (WINDOW_PADDING + self.effective_sidebar_w()) as f64 * zoom;
+        let top = TITLE_HEIGHT as f64 * zoom;
+        let width = (inner.width - left).max(1.0);
+        let height = (inner.height - top).max(1.0);
+        let Some(host) = self.inline_web.as_mut() else { return };
+        let frame = inline_web_frame(origin.x, origin.y, inner.width, inner.height, left, top);
+        if host.last_frame != Some(frame) {
+            let _ = host
+                .window
+                .request_inner_size(winit::dpi::LogicalSize::new(width, height));
+            host.window.set_outer_position(winit::dpi::LogicalPosition::new(
+                origin.x + left,
+                origin.y + top,
+            ));
+            let _ = host.webview.set_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(width, height).into(),
+            });
+            host.last_frame = Some(frame);
+        }
+        if !host.visible {
+            host.window.set_visible(true);
+            crate::webpane::attach_child(&main, &host.window);
+            host.window.focus_window();
+            host.visible = true;
+        }
+    }
+
+    pub(crate) fn inline_web_window_event(
+        &mut self,
+        id: winit::window::WindowId,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
+        let Some(host) = self.inline_web.as_ref() else { return false };
+        if host.window.id() != id {
+            return false;
+        }
+        match event {
+            winit::event::WindowEvent::CloseRequested => self.close_inline_web(),
+            winit::event::WindowEvent::Resized(size) => {
+                if let Some(host) = self.inline_web.as_ref() {
+                    let _ = host.webview.set_bounds(wry::Rect {
+                        position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                        size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(crate) fn open_settings_inline(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cat: Option<crate::SettingsCat>,
+    ) -> bool {
+        self.open_inline_web(event_loop, InlineWebKind::Settings, cat)
+    }
+
+    pub(crate) fn open_settings_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cat: Option<SettingsCat>,
+        student: Option<String>,
+    ) {
+        if let Some(name) = student {
+            let slug = crate::theme::character_slug(&name).unwrap_or_default();
+            let theme = crate::socket::read_character_theme();
+            let _ = self.open_student_web_window(event_loop, slug, &theme);
+        } else {
+            let _ = self.open_settings_inline(event_loop, cat);
+        }
+    }
+
+    pub(crate) fn close_settings_inline(&mut self) {
+        if self
+            .inline_web
+            .as_ref()
+            .is_some_and(|h| h.kind == InlineWebKind::Settings)
+        {
+            self.close_inline_web();
+        }
+    }
+
+    pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if !crate::socket::read_shim_inject() {
+            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
+            return;
+        }
+        if self
+            .inline_web
+            .as_ref()
+            .is_some_and(|h| h.kind == InlineWebKind::Arona)
+        {
+            self.close_inline_web();
+        } else {
+            self.open_arona_panel(event_loop);
+        }
     }
 
     /// 거노: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
@@ -4097,6 +4015,22 @@ fn settings_web_reachable(port: &str) -> bool {
     n >= 12 && head.starts_with(b"HTTP/1.") && &head[9..12] == b"200"
 }
 
+fn inline_web_frame(
+    origin_x: f64,
+    origin_y: f64,
+    inner_w: f64,
+    inner_h: f64,
+    left: f64,
+    top: f64,
+) -> (i32, i32, u32, u32) {
+    (
+        (origin_x + left).round() as i32,
+        (origin_y + top).round() as i32,
+        (inner_w - left).round().max(1.0) as u32,
+        (inner_h - top).round().max(1.0) as u32,
+    )
+}
+
 /// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
 /// title with quotes can't break out of the `display notification` command.
 #[cfg(target_os = "macos")]
@@ -4309,6 +4243,18 @@ mod room_rename_tests {
         assert!(
             !settings_web_reachable("포트아님"),
             "숫자가 아니면 실패해야 한다"
+        );
+    }
+
+    #[test]
+    fn 인라인_웹은_제목줄과_왼쪽_사이드바만_남긴다() {
+        assert_eq!(
+            inline_web_frame(100.0, 200.0, 1200.0, 800.0, 244.0, 36.0),
+            (344, 236, 956, 764)
+        );
+        assert_eq!(
+            inline_web_frame(-300.0, 40.0, 100.0, 20.0, 200.0, 36.0),
+            (-100, 76, 1, 1)
         );
     }
 }

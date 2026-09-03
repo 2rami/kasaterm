@@ -81,6 +81,9 @@ const TABS: Partial<
 export function SettingsApp() {
   const t = useT();
   const tokens = useTokens();
+  const query = new URLSearchParams(location.search);
+  const studentSlug = query.get('student');
+  const studentTheme = query.get('theme') ?? '';
   const [cat, setCat] = useState<CatKey>(initialCat);
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
   const [values, setValues] = useState<SettingsValues | null>(null);
@@ -160,11 +163,13 @@ export function SettingsApp() {
   // 여기까지 오지 않는다.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') void postAction('close-settings');
+      if (e.key === 'Escape') {
+        void postAction(studentSlug ? 'close-student-window' : 'close-settings');
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [studentSlug]);
 
   const meta = t.titles[cat];
   const tab = TABS[cat];
@@ -172,9 +177,6 @@ export function SettingsApp() {
   /// `?student=<slug>&theme=<id>` 로 열린 **학생 전용 창**인가. 설정 본체가 앱 안으로
   /// 들어가면 세부 화면은 밖으로 나와야 한다 — 안에서 안을 덮을 수 없다(거노
   /// 2026-08-25 「설정창을 안으로, 세부설정을 별도창으로」).
-  const studentSlug = new URLSearchParams(location.search).get('student');
-  const studentTheme = new URLSearchParams(location.search).get('theme') ?? '';
-
   useEffect(() => {
     if (!studentSlug || open) return;
     let dead = false;
@@ -209,7 +211,7 @@ export function SettingsApp() {
             character={open}
             models={chars.models}
             /// 독립 창에서 「뒤로」는 갈 데가 없다 — 창을 닫는다.
-            onBack={() => window.close()}
+            onBack={() => void postAction('close-student-window')}
             onSaved={(name) => {
               setOpen((prev) => (prev ? { ...prev, name } : prev));
               void reload();

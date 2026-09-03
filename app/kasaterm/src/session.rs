@@ -2664,9 +2664,9 @@ impl App {
         // 그릴 창이 없으면(헤드리스·단축키가 설정창 없이 부른 경우) 메인으로 접는다 —
         // 안 그러면 취소할 손도 없는 확인이 뜬다.
         let has_settings_window = self
-            .aux_windows
-            .iter()
-            .any(|a| matches!(a.kind, crate::auxwin::AuxWindowKind::Settings));
+            .inline_web
+            .as_ref()
+            .is_some_and(|h| h.kind == crate::InlineWebKind::Settings);
         let surface = match surface {
             ConfirmSurface::Settings if !has_settings_window => ConfirmSurface::Main,
             s => s,
@@ -3101,6 +3101,7 @@ impl App {
     /// them never tears a pane down. Windows are this session's tmux-style
     /// "windows"; the session list one level up is tmux "sessions".
     pub(crate) fn new_window(&mut self) {
+        self.close_inline_web();
         // Active window's slot is None — its layout lives in pty_layout. Park
         // it back into the slot before opening a new window.
         self.windows[self.active_window] = self.pty_layout.take();
@@ -3162,6 +3163,10 @@ impl App {
         if idx >= self.windows.len() {
             return;
         }
+        if idx == self.active_window {
+            return;
+        }
+        self.close_inline_web();
         // 밖에 나가 있는 방은 메인에 그리지 않는다 — 같은 트리를 두 창이 그리면 한쪽
         // 입력이 다른 쪽에 안 비치는 유령 상태가 된다. 대신 그 창을 앞으로 가져온다.
         // (사이드바 탭 클릭도 여기로 오므로, 「밖에 있음」 탭을 누르면 창이 뜬다.)
@@ -3171,9 +3176,6 @@ impl App {
             .position(|a| a.room_window() == Some(idx))
         {
             self.aux_windows[i].window.focus_window();
-            return;
-        }
-        if idx == self.active_window {
             return;
         }
         // 줌은 App 전역 상태인데 pane 은 방(윈도우)마다 다르다 — 줌한 채로 방을

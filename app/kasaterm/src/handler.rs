@@ -552,6 +552,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.close_arona_panel();
                 return;
             }
+            UserEvent::InlineWebClose => {
+                self.close_inline_web();
+                return;
+            }
             UserEvent::SocketSwap(a, b) => {
                 // swap_dir 와 같은 시퀀스: leaf id 교환 → 자리가 바뀐 두 PTY
                 // 의 그리드 크기가 다를 수 있으니 resize 로 SIGWINCH.
@@ -591,9 +595,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if *show {
-                    // 거노: "터미널 보기"는 화면 2분할(터미널 좌·아로나 우).
-                    // 아로나 창이 떠 있으면 둘을 모니터 좌/우 절반으로 타일링.
-                    self.tile_terminal_arona_split();
+                    self.close_inline_web();
                     if let Some(id) = focus_pane {
                         self.ws.lock().unwrap().active_pane = Some(id.clone());
                         self.chrome_dirty = true;
@@ -610,7 +612,7 @@ impl ApplicationHandler<UserEvent> for App {
                     w.focus_window();
                     w.request_redraw();
                 }
-                self.tile_terminal_arona_split();
+                self.close_inline_web();
                 self.toggle_git_col();
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -1030,6 +1032,10 @@ impl ApplicationHandler<UserEvent> for App {
                         .any(|(t, _)| t.as_str() == id)
                 };
                 let ok = match action.as_str() {
+                    "close-student-window" => {
+                        self.close_student_web_window();
+                        Ok(true)
+                    }
                     // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
                     // 세부는 밖에 있어야 한다(거노 2026-08-25). `label` 에 테마 키가
                     // 오는데, 번들은 `__base` 라 빈 값과 구분된다 — 빈 값이면 웹이
@@ -1336,7 +1342,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // 사용자가 보고 있는 건 설정 창이다. 메인 창 토스트만 띄우면 성공도
                 // 실패도 그 창에서는 아무 일이 없는 것으로 보인다 — 「떨어뜨렸는데
                 // 반응이 없다」가 이 기능에서 가장 나쁜 결말이라 창 안에도 알린다.
-                if let Some(wv) = self.settings_web_webview.as_ref() {
+                if let Some(wv) = self
+                    .inline_web
+                    .as_ref()
+                    .filter(|h| h.kind == InlineWebKind::Settings)
+                    .map(|h| &h.webview)
+                {
                     let js_msg = serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into());
                     let ok = r.is_ok();
                     let _ = wv.evaluate_script(&format!(
@@ -2384,7 +2395,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // HTTP 설정 서버가 선 뒤에 연다. 페이지는 /onboarding/state 를 읽고 미완료면
         // 설정 폼 대신 첫 설치 흐름을 전체 화면으로 그린다.
-        if crate::onboarding::launch_pending() && self.open_settings_web_window(event_loop, None) {
+        if crate::onboarding::launch_pending() && self.open_settings_inline(event_loop, None) {
             crate::onboarding::mark_opened();
         }
         if let Some(state) = saved {
@@ -2422,25 +2433,14 @@ impl ApplicationHandler<UserEvent> for App {
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
         self.session_touched = true;
-        // Child panel windows (session/board) drive their own wry webviews.
-        // Their events must never reach the terminal logic below: without this
-        // guard a panel's Resized/ScaleFactorChanged falls through and calls
-        // gpu.resize() with the panel's tiny size, shrinking the main wgpu
-        // viewport uniform → everything renders ~2x zoomed; a CloseRequested
-        // would exit the whole app instead of just closing the panel.
-        // 웹 pane 자식 창 — 패널들과 같은 가드(아래 주석 참조). Cmd+W 는 그
-        // 웹 pane 닫기로 해석한다(webpane.rs).
         if self.web_host_window_event(id, &event) {
             return;
         }
-        if self.session_panel_window.as_ref().map(|w| w.id()) == Some(id) {
+        if self.student_web_window.as_ref().map(|w| w.id()) == Some(id) {
             match &event {
-                WindowEvent::CloseRequested => {
-                    self.session_panel_webview = None;
-                    self.session_panel_window = None;
-                }
+                WindowEvent::CloseRequested => self.close_student_web_window(),
                 WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.session_panel_webview.as_ref() {
+                    if let Some(wv) = self.student_web_webview.as_ref() {
                         let _ = wv.set_bounds(wry::Rect {
                             position: wry::dpi::PhysicalPosition::new(0, 0).into(),
                             size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
@@ -2451,60 +2451,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
-        if self.board_panel_window.as_ref().map(|w| w.id()) == Some(id) {
-            match &event {
-                WindowEvent::CloseRequested => {
-                    self.board_panel_webview = None;
-                    self.board_panel_window = None;
-                }
-                WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.board_panel_webview.as_ref() {
-                        let _ = wv.set_bounds(wry::Rect {
-                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.arona_panel_window.as_ref().map(|w| w.id()) == Some(id) {
-            match &event {
-                WindowEvent::CloseRequested => {
-                    // 메인 창 복귀까지 포함한 단일 닫기 경로 — 여기서 직접
-                    // 필드를 비우면 reveal 을 빼먹어 터미널이 영영 숨는다.
-                    self.close_arona_panel();
-                }
-                WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.arona_panel_webview.as_ref() {
-                        let _ = wv.set_bounds(wry::Rect {
-                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        // 설정 웹뷰 창. 위 패널들과 같은 격리가 **반드시** 필요하다 — 이 가드가
-        // 없으면 이 창의 Resized 가 아래로 흘러 `g.resize()` 를 이 창 크기로 불러
-        // 메인 뷰포트가 통째로 줄고(모든 게 2배 확대로 보인다), CloseRequested 는
-        // 패널 하나가 아니라 **앱 전체**를 종료시킨다.
-        if self.settings_web_window.as_ref().map(|w| w.id()) == Some(id) {
-            match &event {
-                WindowEvent::CloseRequested => self.close_settings_web_window(),
-                WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.settings_web_webview.as_ref() {
-                        let _ = wv.set_bounds(wry::Rect {
-                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
+        if self.inline_web_window_event(id, &event) {
             return;
         }
         // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
@@ -3155,13 +3102,11 @@ impl ApplicationHandler<UserEvent> for App {
                             target = i + 1;
                         }
                     }
-                    let mut from = 0usize;
                     if let Some(d) = self.win_tab_drag.as_mut() {
                         if !d.active && dx * dx + dy * dy > 9.0 {
                             d.active = true;
                         }
                         d.target = target;
-                        from = d.from;
                     }
                     if self
                         .win_tab_drag
@@ -3170,17 +3115,6 @@ impl ApplicationHandler<UserEvent> for App {
                         .unwrap_or(false)
                     {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 꺼내기 자리에 들어서는 **순간** 방이 별도창으로 떨어지고,
-                        // 그 창이 커서를 따라온다. 놓을 때까지 기다리면 드래그 내내
-                        // 이게 나갈지 말지가 화면에 안 보인다(거노: "아직도 드래그
-                        // 뗄 때 분리된다"). 판정은 놓을 때 쓰던 `room_drag_tears`
-                        // 그대로라 두 순간이 갈리지 않는다.
-                        let tears = self.room_drag_tears();
-                        let torn = self.torn_aux_room(from).is_some();
-                        self.drag_trace("방탭", tears, torn);
-                        if torn || tears {
-                            self.drag_tear_follow_room(from, event_loop);
-                        }
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -3192,9 +3126,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // `tab_drag.target`.
                 if self.tab_drag.is_some() {
                     let (px, py) = self.cursor_px;
-                    let (start, src_pane, src_tab) = {
+                    let (start, src_pane) = {
                         let d = self.tab_drag.as_ref().unwrap();
-                        (d.start, d.pane.clone(), d.from)
+                        (d.start, d.pane.clone())
                     };
                     let dx = self.cursor_px.0 - start.0;
                     let dy = self.cursor_px.1 - start.1;
@@ -3251,22 +3185,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 창 밖으로 나가는 순간 뜯어낸다 — 놓을 때까지 기다리면
-                        // 드래그 내내 "빠질지 말지"가 화면에 안 보인다. 한 번
-                        // 뜯긴 뒤엔 커서가 창 안으로 돌아와도 계속 따라오게 두고
-                        // (되돌리기는 창 닫기 = dock), 라이브 재배치는 멈춘다 —
-                        // 레이아웃에 없는 pane 을 옮기려 들면 안 되기 때문이다.
-                        let (win_w, win_h) = self.logical_win_size();
-                        let out = Self::drag_left_window(px, py, win_w, win_h);
-                        self.drag_trace("pane탭", out, self.torn_aux_window(&src_pane).is_some());
-                        let torn = out || self.torn_aux_window(&src_pane).is_some();
-                        let followed =
-                            torn && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
-                        if !followed {
-                            // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
-                            // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
-                            self.update_live_drag();
-                        }
+                        // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
+                        // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
+                        self.update_live_drag();
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -3282,24 +3203,10 @@ impl ApplicationHandler<UserEvent> for App {
                         hd.active = true;
                     }
                     let active = hd.active;
-                    let pane = hd.pane.clone();
                     if active {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 탭 pill 과 같은 규칙 — 창 밖으로 나가면 놓기 전에 뜯긴다.
-                        let (win_w, win_h) = self.logical_win_size();
-                        let out = Self::drag_left_window(
-                            self.cursor_px.0,
-                            self.cursor_px.1,
-                            win_w,
-                            win_h,
-                        );
-                        self.drag_trace("pane헤더", out, self.torn_aux_window(&pane).is_some());
-                        let torn = out || self.torn_aux_window(&pane).is_some();
-                        let followed = torn && self.drag_tear_follow(&pane, None, event_loop);
-                        if !followed {
-                            // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
-                            self.update_live_drag();
-                        }
+                        // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
+                        self.update_live_drag();
                         window.request_redraw();
                     }
                     return;
@@ -3879,9 +3786,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if hit(self.settings_btn_rect) {
-                        // 사이드바 "Settings" 항목 — 설정 별도창을 열거나(이미
-                        // 열려 있으면) 그 창을 포커스한다.
-                        self.open_settings_window(event_loop, None, None);
+                        self.toggle_settings_web(event_loop, None);
                         window.request_redraw();
                         return;
                     }
@@ -3930,12 +3835,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| hit(*r))
                         .map(|(i, _)| i.clone())
                     {
-                        // `aux:<i>` = 접어 둔 별도창. pane id 와 한 목록에 서므로
-                        // 접두사로 가른다 — 그 id 로 toggle_pane_zoom 을 부르면
-                        // 레이아웃에 없는 pane 으로 zoom 이 들어가 화면이 빈다.
-                        if let Some(i) = id.strip_prefix("aux:").and_then(|n| n.parse().ok()) {
-                            self.unhide_aux(i, event_loop);
-                        } else if self.zoomed_pane.is_some() {
+                        if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
                         window.request_redraw();
@@ -4345,7 +4245,7 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // "빠른 파일" 고정 섹션 행: 클릭=보조탭, Opt+클릭=별도 편집기 창.
+                        // "빠른 파일" 고정 섹션 행: 클릭=보조탭, Opt+클릭=새 split.
                         if let Some(path) = self
                             .file_tree
                             .quick_rects
@@ -4354,7 +4254,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(p, _)| p.clone())
                         {
                             if self.modifiers.alt_key() {
-                                self.popout_file_window(path, event_loop);
+                                self.open_file_split(path);
                             } else {
                                 self.open_file(path, None, true);
                             }
@@ -4474,9 +4374,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 );
                                 if is_double {
                                     self.last_tree_click = None;
-                                    // Opt+더블클릭 = 별도 편집기 창으로 바로 열기.
+                                    // Opt+더블클릭 = 새 split 으로 바로 열기.
                                     if self.modifiers.alt_key() {
-                                        self.popout_file_window(path.clone(), event_loop);
+                                        self.open_file_split(path.clone());
                                     } else {
                                         self.open_file_split(path.clone());
                                     }
@@ -5071,9 +4971,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 ActionKind::Close => self.confirm_or_close_pane(&menu_pid),
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
-                                ActionKind::Undock => {
-                                    self.undock_pane_terminal(&menu_pid, event_loop, None)
-                                }
                                 // md 토글·웹 컨트롤은 헤더 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
@@ -5167,9 +5064,6 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::RefreshRenderer => {
                                 self.refresh_renderer();
-                            }
-                            ActionKind::Undock => {
-                                self.undock_pane_terminal(&pid, event_loop, None);
                             }
                             ActionKind::WebBack => self.web_nav(&pid, "back"),
                             ActionKind::WebForward => self.web_nav(&pid, "forward"),
@@ -5395,40 +5289,6 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                         }
                         self.chrome_dirty = true;
-                        window.request_redraw();
-                        return;
-                    }
-                    // Pop-out icon (file tabs): tear the tab's editor into its
-                    // own wgpu window. Checked before × since it sits left of it.
-                    if let Some((pid, idx)) = self
-                        .pane_tab_popout_rects
-                        .iter()
-                        .find(|(_, _, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                        .map(|(id, i, _)| (id.clone(), *i))
-                    {
-                        // 마크다운 탭 → 편집기 팝아웃 창. 나머지(터미널·그림) →
-                        // 그 탭만 undock(다중탭이면 탭 승격, 아니면 pane 통째 —
-                        // undock_pane_tab 이 가른다). 같은 pop-out 아이콘을 content
-                        // 종류로 분기한다. **`is_term` 으로 가르던 것을 뒤집었다**:
-                        // 그림 탭이 else 로 떨어져 `popout_pane_tab` 에 갔는데 그
-                        // 함수는 Markdown 이 아니면 되돌려 놓고 return 한다 — 눌러도
-                        // 아무 일이 없었다(거노 2026-08-25: "이미지도 별도창").
-                        let is_md = self
-                            .ws
-                            .lock()
-                            .unwrap()
-                            .panes
-                            .get(&pid)
-                            .and_then(|p| p.tabs.get(idx))
-                            .map(|t| matches!(t.content, PaneContent::Markdown(_)))
-                            .unwrap_or(false);
-                        if is_md {
-                            self.popout_pane_tab(&pid, idx, event_loop, None);
-                        } else {
-                            self.undock_pane_tab(&pid, idx, event_loop, None);
-                        }
                         window.request_redraw();
                         return;
                     }
@@ -5824,21 +5684,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(d) = self.win_tab_drag.take() {
                             if d.active {
                                 window.set_cursor(CursorIcon::Default);
-                                // 끄는 도중에 이미 나갔으면 놓는 순간 할 일이 없다 —
-                                // 여기서 재배치를 태우면 방금 꺼낸 방을 다시 줄 세운다.
-                                // 판정(`room_drag_tears`)은 CursorMoved 와 한 벌을
-                                // 쓴다: 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
-                                // 어긋남이 생기고 화면만 봐선 원인을 못 짚는다.
-                                if self.torn_aux_room(d.from).is_some() {
-                                    window.request_redraw();
-                                    return;
-                                }
-                                if self.room_drag_tears() {
-                                    let near = self.cursor_screen_phys();
-                                    self.undock_window_room(d.from, event_loop, near);
-                                } else {
-                                    self.reorder_window(d.from, d.target);
-                                }
+                                self.reorder_window(d.from, d.target);
                                 window.request_redraw();
                                 return;
                             }
@@ -5853,60 +5699,6 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            // 드래그 중 이미 뜯겨 별도창이 됐다 — 놓는 순간 할 일이
-                            // 없다. 아래 split/dock 경로를 그대로 태우면 레이아웃에
-                            // 없는 pane 을 다시 꽂으려 든다.
-                            if td.active && self.torn_aux_window(&td.pane).is_some() {
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            // Phase 3 tear-off: 탭을 창 밖에서 놓으면 별도 창으로
-                            // 뜯어낸다 — 파일 탭=편집기 창, 터미널 탭=undock 터미널
-                            // 창(헤더 pop-out 아이콘과 동일 경로, 커서 자리에 스폰).
-                            // 창 안(패널 body 포함)에 놓으면 아래 split/dock 경로가
-                            // 그대로 처리 — 여기선 창 밖으로 나갔을 때만 가로챈다.
-                            if td.active {
-                                let (win_w, win_h) = self.logical_win_size();
-                                if Self::drag_left_window(
-                                    self.cursor_px.0,
-                                    self.cursor_px.1,
-                                    win_w,
-                                    win_h,
-                                ) {
-                                    if self.tab_is_file(&td.pane, td.from) {
-                                        // 단일탭 파일 pane 이면 라이브 백업이 남아
-                                        // 있을 수 있으니 먼저 정리(원위치 복귀 상태).
-                                        self.finish_live_drag();
-                                        let near = self.cursor_screen_phys();
-                                        self.popout_pane_tab(&td.pane, td.from, event_loop, near);
-                                        self.chrome_dirty = true;
-                                        window.request_redraw();
-                                        return;
-                                    }
-                                    // 웹만 뺀다 — pane 사각형에 접착된 자식 OS
-                                    // 창이라 옮기려면 부모·좌표계가 바뀐다. 마크다운은
-                                    // 위에서 편집기 창으로 갔고, 그림은 이제 탭 undock
-                                    // 이 받는다.
-                                    let is_term = self
-                                        .ws
-                                        .lock()
-                                        .unwrap()
-                                        .panes
-                                        .get(&td.pane)
-                                        .and_then(|p| p.tabs.get(td.from))
-                                        .map(|t| !matches!(t.content, PaneContent::Web(_)))
-                                        .unwrap_or(false);
-                                    if is_term {
-                                        self.finish_live_drag();
-                                        let near = self.cursor_screen_phys();
-                                        self.undock_pane_tab(&td.pane, td.from, event_loop, near);
-                                        self.chrome_dirty = true;
-                                        window.request_redraw();
-                                        return;
-                                    }
-                                }
-                            }
                             // 라이브로 옮기던 단일탭 pane 을 타깃 중앙에 놓았다 —
                             // split 이 아니라 그 pane 의 탭으로 들어간다. 라이브가
                             // 걸린 드래그(drag_orig_layout 이 있는 경우)는 여기서
@@ -6556,6 +6348,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 턴에 배치까지 끝난다.
         self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
+        self.sync_inline_web();
         // Windows 업데이트 체커 결과 → sticky 토스트([설치][나중에] 칩).
         // 승인 토스트 배관을 센티널 action 으로 재사용(win_sparkle.rs 참고).
         // 승인 토스트가 점유 중이면 take 하지 않고 다음 틱으로 미룬다.

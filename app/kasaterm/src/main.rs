@@ -41,7 +41,7 @@ mod webpane;
 /// 폭에 맞춘 정보 밀도 — chrome 이 정의하지만 그 판정을 읽어 그리는 쪽(render·info)이
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
-pub(crate) use themegen::{add_theme_member, mask_key, place_themegen_ref};
+pub(crate) use themegen::{add_theme_member, place_themegen_ref};
 mod gitdiff;
 mod info;
 mod links;
@@ -742,438 +742,6 @@ const VERSION_FADE_MS: u128 = 1200;
 /// idea as iTerm2's "smart cursor" pause.
 const BLINK_PAUSE_AFTER_INPUT_MS: u64 = 700;
 
-/// Session panel: a tmux-style list of sessions in its own OS window driving
-/// a wry webview, mirroring the git panel. Polls `/sessions` once a second to
-/// draw one row per session, highlights the active one, click → switch,
-/// "+ 새 세션" → create. Kept fully separate from the wgpu terminal window.
-const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 14px;
-    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-    background: #1a1d23; color: #ecedf3;
-    -webkit-user-select: none; user-select: none;
-  }
-  .title { font-weight: 600; font-size: 14px; color: #ecedf3; margin-bottom: 10px; }
-  ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-  .sess {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 11px; border-radius: 9px; cursor: pointer;
-    background: #22262e; border: 1px solid #22262e; color: #a0a6b0;
-  }
-  .sess:hover { background: #22262e; }
-  .sess.active { background: #2e323b; border-color: #5a8ce6; color: #ecedf3; }
-  .sess .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #787e8a; }
-  .sess.active .dot { background: #5a8ce6; box-shadow: 0 0 6px #5a8ce666; }
-  .sess .label { font-weight: 600; }
-  .sess .badge { margin-left: auto; font-size: 11px; color: #787e8a; }
-  .sess.active .badge { color: #5a8ce6; }
-  .sess .close { background: none; border: none; color: #787e8a; font-size: 16px;
-    line-height: 1; padding: 0 2px; margin-left: 8px; cursor: pointer; flex: 0 0 auto; }
-  .sess .close:hover { color: #f85149; }
-  /* Pencil (rename) — only visible on row hover so the row stays clean. */
-  .sess .edit { background: none; border: none; color: #787e8a; padding: 0 2px;
-    margin-left: 8px; cursor: pointer; flex: 0 0 auto; display: inline-flex;
-    align-items: center; opacity: 0; transition: opacity .12s; }
-  .sess:hover .edit { opacity: 1; }
-  .sess .edit:hover { color: #5a8ce6; }
-  .sess .edit svg { width: 13px; height: 13px; }
-  /* Inline name editor, swapped in for the label span on pencil-click. */
-  .sess input.rename { flex: 1 1 auto; min-width: 0; font: inherit; font-weight: 600;
-    color: #ecedf3; background: #15171c; border: 1px solid #5a8ce6; border-radius: 5px;
-    padding: 1px 6px; outline: none; }
-  .new {
-    margin-top: 12px; width: 100%; padding: 9px 0; border-radius: 9px;
-    background: #22262e; color: #ecedf3; border: 1px dashed #2e323b;
-    font-size: 13px; cursor: pointer;
-  }
-  .new:hover:not(:disabled) { background: #2a313b; border-color: #4a525e; }
-  .new:disabled { opacity: .5; cursor: default; }
-  .reset {
-    margin-top: 8px; width: 100%; padding: 8px 0; border-radius: 9px;
-    background: none; color: #787e8a; border: 1px solid #2e323b;
-    font-size: 12px; cursor: pointer;
-  }
-  .reset:hover:not(:disabled) { background: #2a1d1f; border-color: #f85149; color: #f85149; }
-  .reset:disabled { opacity: .5; cursor: default; }
-  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
-</style>
-</head>
-<body>
-  <div class="title">세션</div>
-  <ul id="list"></ul>
-  <button id="btn-new" class="new">+ 새 세션</button>
-  <button id="btn-reset" class="reset">전체 초기화</button>
-  <div id="err" class="err" style="display:none"></div>
-<script>
-const PORT = "__PORT__";
-// 이 패널은 with_html 로 뜨는 문서라 origin 이 `null` 이다 — 서버의 Origin 검사를
-// 통과할 수 없고, `null` 을 허용하면 방어가 무너진다(악성 사이트가 sandboxed
-// iframe 으로 얼마든지 `null` 을 만든다). 그래서 토큰으로 신원을 밝힌다. 이 HTML 은
-// 네트워크로 나가지 않으므로 토큰이 새지 않는다.
-const TOKEN = "__TOKEN__";
-// GET 도 cross-site 로 잡히므로(이 문서는 origin 이 null) 개별 호출에 헤더를 다는
-// 대신 fetch 자체를 감싼다 — 새 호출을 추가하다 빠뜨릴 여지를 없앤다.
-const _rawFetch = window.fetch;
-window.fetch = (u, o) => {
-  o = o || {};
-  return _rawFetch(u, { ...o, headers: { ...(o.headers || {}), "X-Kasa-Token": TOKEN } });
-};
-const post = (u) => fetch(u, { method: "POST" });
-const $ = (id) => document.getElementById(id);
-const base = "http://127.0.0.1:" + PORT;
-let busy = false;
-// While inline-renaming, skip the 1s poll re-render so the open <input> isn't
-// yanked out from under the user mid-edit.
-let editing = false;
-
-function render(d) {
-  $("err").style.display = "none";
-  const count = d.count || 1, active = d.active || 0;
-  const saved = Array.isArray(d.saved) ? d.saved : [];
-  // Live per-session folder labels from the daemon (parallel to count).
-  const labels = Array.isArray(d.labels) ? d.labels : [];
-  if (editing) return;
-  const ul = $("list");
-  ul.innerHTML = "";
-  for (let i = 0; i < count; i++) {
-    const li = document.createElement("li");
-    li.className = "sess" + (i === active ? " active" : "");
-    const dot = document.createElement("span"); dot.className = "dot";
-    const label = document.createElement("span"); label.className = "label";
-    label.textContent = (labels[i] && labels[i].length) ? labels[i] : ("세션 " + (i + 1));
-    const badge = document.createElement("span"); badge.className = "badge";
-    if (i === active) badge.textContent = "활성";
-    li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
-    const pen = document.createElement("button");
-    pen.className = "edit"; pen.title = "이름 변경";
-    pen.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
-    pen.onclick = (e) => { e.stopPropagation(); startRename(i, li, label); };
-    li.appendChild(pen);
-    if (count > 1) {
-      const x = document.createElement("button");
-      x.className = "close"; x.textContent = "×"; x.title = "세션 닫기";
-      x.onclick = (e) => { e.stopPropagation(); closeSession(i); };
-      li.appendChild(x);
-    }
-    if (i !== active) li.onclick = () => switchTo(i);
-    ul.appendChild(li);
-  }
-  // Saved sessions from the last shutdown — light-launch keeps them on disk
-  // instead of auto-restoring. Click to restore in-place; we surface them
-  // here so they're never lost behind the always-fresh first pane.
-  if (saved.length) {
-    const hr = document.createElement("li");
-    hr.style.cssText = "margin-top:14px;color:#787e8a;font-size:11px;letter-spacing:.04em;text-transform:uppercase;border-top:1px solid #2e323b;padding-top:10px;list-style:none;";
-    hr.textContent = "저장됨";
-    ul.appendChild(hr);
-    saved.forEach((name, i) => {
-      const li = document.createElement("li");
-      li.className = "sess";
-      li.style.opacity = "0.78";
-      const dot = document.createElement("span"); dot.className = "dot";
-      const label = document.createElement("span"); label.className = "label";
-      label.textContent = name || ("세션 " + (i + 1));
-      const badge = document.createElement("span"); badge.className = "badge";
-      badge.textContent = "저장";
-      li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
-      li.title = "이 세션 복원";
-      li.onclick = () => restoreSaved(i);
-      ul.appendChild(li);
-    });
-  }
-}
-
-async function restoreSaved(idx) {
-  if (busy) return;
-  busy = true;
-  try {
-    await post(base + "/session-restore?idx=" + idx);
-  } catch (e) {}
-  busy = false;
-  poll();
-}
-
-async function switchTo(idx) {
-  if (busy) return;
-  busy = true;
-  // idx in the query string, no JSON body → no CORS preflight (the panel's
-  // null origin would otherwise trip an OPTIONS the server 405s).
-  try {
-    await post(base + "/session-switch?idx=" + idx);
-  } catch (e) {}
-  busy = false;
-  poll();
-}
-
-async function closeSession(idx) {
-  if (busy) return;
-  busy = true;
-  try {
-    await post(base + "/session-close?idx=" + idx);
-  } catch (e) {}
-  busy = false;
-  poll();
-}
-
-// Swap the label span for an inline <input>. Enter saves, Esc/blur leaves it.
-function startRename(idx, li, labelEl) {
-  if (editing) return;
-  editing = true;
-  const input = document.createElement("input");
-  input.className = "rename";
-  input.value = labelEl.textContent;
-  li.replaceChild(input, labelEl);
-  input.focus(); input.select();
-  let done = false;
-  const finish = (save) => {
-    if (done) return; done = true;
-    editing = false;
-    if (save) renameSession(idx, input.value.trim());
-    else poll();
-  };
-  input.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
-    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
-  };
-  input.onblur = () => finish(true);
-  input.onclick = (e) => e.stopPropagation();
-}
-
-async function renameSession(idx, name) {
-  busy = true;
-  try {
-    await post(base + "/session-rename?idx=" + idx + "&name=" + encodeURIComponent(name));
-  } catch (e) {}
-  busy = false;
-  poll();
-}
-
-async function doReset() {
-  if (busy) return;
-  if (!confirm("모든 세션과 pane을 닫고 새 세션 하나로 초기화할까요?")) return;
-  busy = true;
-  $("btn-reset").disabled = true;
-  try {
-    await post(base + "/session-reset");
-  } catch (e) {}
-  busy = false;
-  $("btn-reset").disabled = false;
-  poll();
-}
-
-async function doNew() {
-  if (busy) return;
-  busy = true;
-  $("btn-new").disabled = true;
-  try {
-    await post(base + "/session-new");
-  } catch (e) {}
-  busy = false;
-  $("btn-new").disabled = false;
-  poll();
-}
-
-async function poll() {
-  try {
-    const r = await fetch(base + "/sessions", { cache: "no-store" });
-    render(await r.json());
-  } catch (e) {
-    $("err").style.display = "block";
-    $("err").textContent = "server unreachable :" + PORT;
-  }
-}
-
-$("btn-new").onclick = doNew;
-$("btn-reset").onclick = doReset;
-poll();
-setInterval(poll, 1000);
-</script>
-</body>
-</html>"#;
-
-/// Board panel: a read-only monitor of each pane's live activity (surface_id ·
-/// status · intent · files), auto-filled from the transcript watcher, in its
-/// own OS window driving a wry webview. Mirrors the session panel. Polls
-/// `/board` once a second. No input here on purpose — the user and the panes
-/// just *watch* it; talking to a pane happens through that pane's own prompt
-/// (claude↔claude uses `kasaterm-cli tell`).
-const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 14px;
-    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-    background: #1a1d23; color: #ecedf3;
-    -webkit-user-select: none; user-select: none;
-  }
-  .title { font-weight: 600; font-size: 14px; margin-bottom: 10px; }
-  .pane { background: #22262e; border: 1px solid #2e323b; border-left: 4px solid #2e323b; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
-  .badges { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
-  .badge { font-size: 10px; padding: 2px 6px; border-radius: 5px; background: #2e323b; color: #a0a6b0; }
-  .badge.tok { color: #e3b341; }
-  .badge.cost { color: #70AD47; }
-  .badge.chg { color: #f0883e; }
-  /* 정액제 한도 — 비용(초록)과 다른 색이라야 "돈"과 "쿼터"가 안 섞인다. 90% 넘으면
-     경고색으로 바뀐다(ctx 90% 규칙과 같은 문턱). */
-  .badge.rate { color: #79c0ff; }
-  .badge.rate.hot { color: #f7768e; }
-  .tools { margin-top: 4px; font-size: 10px; color: #5a5f6b; word-break: break-word; }
-  .row1 { display: flex; align-items: center; gap: 8px; }
-  .sid { font-weight: 600; color: #5a8ce6; }
-  .status { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #2e323b; color: #a0a6b0; }
-  .status.working { color: #5a8ce6; }
-  .status.building { color: #e3b341; }
-  .status.idle { color: #787e8a; }
-  .status.blocked { color: #f85149; }
-  .status.waiting { color: #f0883e; font-weight: 600; }
-  .row1 { display: flex; align-items: center; }
-  .ptitle { font-weight: 600; color: #ecedf3; margin-left: 8px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ptitle.empty-title { color: #5a5f6b; font-weight: 400; font-style: italic; }
-  .prompt { margin-top: 7px; color: #c9cedb; word-break: break-word; }
-  .prompt::before { content: "▸ "; color: #5a8ce6; }
-  .reply { margin-top: 3px; color: #8b91a0; font-size: 12px; word-break: break-word; }
-  .intent { margin-top: 4px; font-size: 11px; color: #5a5f6b; word-break: break-word; }
-  .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
-  .empty { color: #787e8a; font-size: 12px; padding: 8px 2px; }
-  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
-</style>
-</head>
-<body>
-  <div class="title">작업 현황</div>
-  <div id="list"></div>
-  <div id="err" class="err" style="display:none"></div>
-<script>
-const PORT = "__PORT__";
-// 이 패널도 with_html 문서라 origin 이 null 이고, 그래서 모든 fetch 가 서버 눈에
-// cross-site 로 보인다. 토큰으로 신원을 밝힌다(세션 패널과 같은 이유).
-const TOKEN = "__TOKEN__";
-const _rawFetch = window.fetch;
-window.fetch = (u, o) => {
-  o = o || {};
-  return _rawFetch(u, { ...o, headers: { ...(o.headers || {}), "X-Kasa-Token": TOKEN } });
-};
-const base = "http://127.0.0.1:" + PORT;
-const $ = (id) => document.getElementById(id);
-
-function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
-// 워커 색 — pane id 숫자(%5 → 5) 기반. 고정 팔레트·
-// 같은 식이라 헤더 색과 board 카드 색이 일치한다.
-function workerColor(sid) {
-  const palette = ['#5B9BD5','#70AD47','#C00000','#7030A0','#ED7D31','#1F9D8E','#E84393'];
-  const num = parseInt((sid || "").replace(/\D/g, "")) || 0;
-  return palette[num % palette.length];
-}
-function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : "" + n; }
-
-function render(board) {
-  $("err").style.display = "none";
-  const list = $("list");
-  list.innerHTML = "";
-  if (!board || !board.length) {
-    const e = document.createElement("div");
-    e.className = "empty"; e.textContent = "활성 pane 없음";
-    list.appendChild(e);
-    return;
-  }
-  board.forEach(p => {
-    const st = (p.status || "").toLowerCase();
-    const files = (p.files || []).map(leaf).join(", ");
-    // "waiting" = claude blocked on a permission/input prompt. The transcript
-    // can't see this, so it's the one status worth flagging hard.
-    const statusLabel = st === "waiting"
-      ? "⚠ 권한 대기중" + (p.waiting_for ? ` (${esc(p.waiting_for)})` : "")
-      : esc(p.status || "");
-    const d = document.createElement("div");
-    d.className = "pane";
-    d.style.borderLeftColor = workerColor(p.surface_id);
-    const title = p.title
-      ? `<span class="ptitle">${esc(p.title)}</span>`
-      : `<span class="ptitle empty-title">제목 없음</span>`;
-    const intent = (p.intent && p.intent !== "active")
-      ? `<div class="intent">${esc(p.intent)}</div>` : "";
-    // P3 — tail 윈도 누적: 토큰/비용/변경파일/도구 뱃지.
-    const tot = (p.tokens_in || 0) + (p.tokens_out || 0);
-    const changed = (p.changed_files || []).length;
-    const cost = p.cost_usd || 0;
-    // 정액제(codex)는 비용이 없다 — 한도 지표가 있으면 그쪽이다. 비용 칸을 그냥
-    // 비우면 "아직 안 썼다"로 읽히니 `—` 를 박아 **해당 없음**을 표시한다(거노).
-    const metered = p.rate_used_pct == null;
-    const bg = [];
-    if (tot) bg.push(`<span class="badge tok">${fmtTok(tot)} tok</span>`);
-    if (metered && cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
-    if (!metered) {
-      // 창 라벨은 **분**으로 온다(창이 늘어도 파서를 안 고치려고). 표시만 여기서 붙인다.
-      const wm = p.rate_window_minutes || 0;
-      const win = wm === 10080 ? "주간" : wm === 1440 ? "일간" : wm === 300 ? "5시간"
-                : wm ? `${wm}분` : "한도";
-      // resets_at 은 절대 시각(unix 초) — 읽는 사람이 뺄셈을 하지 않게 상대로 바꾼다.
-      const left = (p.rate_resets_at || 0) - Math.floor(Date.now() / 1000);
-      const rel = left <= 0 ? "" :
-        left < 3600 ? ` (${Math.round(left / 60)}m 뒤 리셋)` :
-        left < 86400 ? ` (${Math.round(left / 3600)}h 뒤 리셋)` :
-        ` (${Math.round(left / 86400)}d 뒤 리셋)`;
-      bg.push(`<span class="badge cost">—</span>`);
-      const hot = p.rate_used_pct >= 90 ? " hot" : "";
-      bg.push(`<span class="badge rate${hot}">${win} ${Math.round(p.rate_used_pct)}%${rel}</span>`);
-    }
-    if (changed) bg.push(`<span class="badge chg">변경 ${changed}</span>`);
-    const badges = bg.length ? `<div class="badges">${bg.join("")}</div>` : "";
-    const tools = (p.tool_counts || []).map(t => `${esc(t[0])}×${t[1]}`).join(" · ");
-    const toolsDiv = tools ? `<div class="tools">${tools}</div>` : "";
-    d.innerHTML =
-      `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
-      title +
-      `<span class="status ${esc(st)}">${statusLabel}</span></div>` +
-      (p.last_prompt ? `<div class="prompt">${esc(p.last_prompt)}</div>` : "") +
-      (p.last_reply ? `<div class="reply">${esc(p.last_reply)}</div>` : "") +
-      intent +
-      (files ? `<div class="files">${esc(files)}</div>` : "") +
-      badges + toolsDiv;
-    list.appendChild(d);
-  });
-}
-
-async function poll() {
-  try {
-    const r = await fetch(base + "/board", { cache: "no-store" });
-    render((await r.json()).board);
-  } catch (e) {
-    $("err").style.display = "block";
-    $("err").textContent = "server unreachable :" + PORT;
-  }
-}
-
-poll();
-setInterval(poll, 1000);
-</script>
-</body>
-</html>"#;
-
-/// Minimal HTML-escape for text dropped into a preview page's markup
-/// (the filename shown in the title strip). Covers the five characters
-/// that would otherwise break out of text content / an attribute.
-#[allow(dead_code)] // used by IMAGE_VIEWER_HTML / MARKDOWN_EDITOR_HTML preview path (wry webview spike, kept for future)
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 /// Image-viewer window page. `__NAME__` is the filename (title strip),
 /// `__SRC__` a self-contained `data:` URI of the image bytes (injected at
 /// open time, so the page is fully offline). Fit-to-window by default;
@@ -1826,10 +1394,6 @@ enum ActionKind {
     /// pane 스코프 메뉴에 있지만 동작은 창 전체다. 모니터를 옮겨 화면이 깨졌을 때
     /// 단축키를 모르는 채로도 닿을 수 있는 자리가 필요했다.
     RefreshRenderer,
-    /// ⋮ 메뉴의 별도창 — 이 pane 을 undock 한다. 헤더 없는 보통 pane 은 여태
-    /// 별도창으로 갈 진입점이 아예 없었다(pop-out 아이콘은 헤더 탭에만 그려진다
-    /// — 2026-08-13 지적 「평소에는 안 보이고 점3개 메뉴에 별도창 버튼도 없고」).
-    Undock,
     /// 웹 pane 헤더의 브라우저 컨트롤 — 터미널 클러스터(분할·상태바) 대신
     /// 이 넷이 그려진다. 실행은 webpane::web_nav.
     WebBack,
@@ -1916,23 +1480,19 @@ struct TabDrag {
 /// 껐다 켜 프로세스가 사라진 뒤의 복원분. 그때는 세션 복원과 **똑같은 레코드**
 /// (cwd·claude 세션 id·캐릭터·스크롤백)를 들고 있으므로 `restore_leaf` 재사용으로
 /// 새로 띄우고 `--resume` 까지 그 함수가 처리한다. `alive` 가 그 두 길을 가른다.
-/// 접어 둔 별도창 하나. 창을 되살리는 데 필요한 최소한만 든다 — 내용물(pane 의
-/// PTY·스크롤백, 방의 레이아웃 트리)은 App 이 그대로 쥐고 있으므로 여기 복사하지
-/// 않는다. 그래서 접기는 "창만 없애기"고, 되살리기는 `spawn_aux_*` 재호출이다.
-pub(crate) struct HiddenAux {
-    /// 하단바 칩에 적을 이름.
-    pub(crate) label: String,
-    pub(crate) what: HiddenAuxKind,
-    /// 접을 때의 창 위치 — 되살릴 때 같은 자리에 세운다. 화면 한가운데로
-    /// 튀어나오면 "아까 그 창"으로 안 읽힌다.
-    pub(crate) pos: Option<winit::dpi::PhysicalPosition<i32>>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineWebKind {
+    Settings,
+    Arona,
+    Board,
 }
 
-pub(crate) enum HiddenAuxKind {
-    /// 꺼낸 pane 하나. `home_window` 는 되돌릴 방.
-    Terminal { pane_id: String, home_window: usize },
-    /// 통째로 꺼낸 방.
-    Room { window: usize },
+pub(crate) struct InlineWebHost {
+    pub(crate) webview: wry::WebView,
+    pub(crate) window: Arc<Window>,
+    pub(crate) kind: InlineWebKind,
+    pub(crate) last_frame: Option<(i32, i32, u32, u32)>,
+    pub(crate) visible: bool,
 }
 
 pub(crate) struct ClosedPane {
@@ -4207,6 +3767,7 @@ enum UserEvent {
     /// Close the arona classroom window (`POST /arona-close` — the
     /// ModePicker's "터미널로" choice). No-op when it isn't open.
     SocketAronaClose,
+    InlineWebClose,
     /// `surface.swap` delegated from the socket thread — exchange two leaves'
     /// tree positions (PTYs stay put, ids trade slots). `(a, b)`, both
     /// pre-validated to exist by the backend.
@@ -4462,7 +4023,6 @@ pub(crate) enum ImeFocus {
     PathSearch,
     TreeSearch,
     TreeNew,
-    Settings,
     /// 웹 pane 헤더 주소창(한 번에 하나만 열리므로 pane id 는 `App.web_addr` 가
     /// 쥔다 — variant 에 중복으로 싣지 않는다).
     WebAddr,
@@ -5150,10 +4710,6 @@ struct App {
     pane_tab_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
     /// Per-tab × close hit rects: (pane id, tab index, logical rect).
     pane_tab_close_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
-    /// Per-tab pop-out (external-link) hit rects for file tabs: (pane id, tab
-    /// index, logical rect). Click moves that tab's editor into its own wgpu
-    /// window (auxwin.rs). Rebuilt each header paint.
-    pane_tab_popout_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
     /// 계정이 바뀐 pane 헤더의 「재시작」 칩 hit rect — (pane, rect).
     /// 실제로 그리는 조건은 `pane_account_stale` 에 그 pane 이 있을 때.
     pane_restart_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
@@ -5280,7 +4836,6 @@ struct App {
     closed_panes: Vec<ClosedPane>,
     /// 접어 둔 별도창(하단바 칩). 창만 없애고 pane·PTY 는 그대로라, 칩을 누르면
     /// 같은 내용의 창이 다시 선다.
-    hidden_aux: Vec<HiddenAux>,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -5703,7 +5258,6 @@ struct App {
     set_picker_hsv: (f32, f32, f32),
     /// 색 선택기 드래그 중인 면(액션)과 그 히트 rect(x,y,w,h). 커서가 rect
     /// 밖으로 나가도 클램프해 계속 따라오게, press 때 잡아 release 때 놓는다.
-    settings_drag: Option<(SettingsAction, (f32, f32, f32, f32))>,
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
@@ -5736,7 +5290,6 @@ struct App {
     /// single-line field and the persona box.
     settings_caret: usize,
     /// Clickable targets collected during the settings paint, for hit-testing.
-    settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
     /// Theme 카테고리의 캐릭터 상세 화면: 열린 캐릭터(이름) + persona 편집 버퍼 +
     /// 캐럿(문자 인덱스). 열 때 raw_persona 를 버퍼로 로드하고, blur/닫기 시
     /// characters.json 에 flush 한다. `None` 이면 목록 화면이다.
@@ -5766,7 +5319,6 @@ struct App {
     /// Max scroll for the current category — content height minus the visible
     /// form area, computed by the render pass (paint_settings returns the
     /// content height). The wheel handler clamps against this.
-    settings_scroll_max: f32,
     /// 피드백 본문 편집 버퍼. 설정 창을 닫아도 안 비운다 — 쓰다 만 글이
     /// 실수로 창을 닫았다고 사라지면 다시 안 쓴다.
     feedback_body: String,
@@ -5832,31 +5384,15 @@ struct App {
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
-    /// Session panel: a second OS window/webview listing the tmux-style
-    /// sessions. Same lifetime discipline as the git panel — webview must
-    /// outlive its window, so both are owned here.
-    session_panel_window: Option<Arc<Window>>,
-    session_panel_webview: Option<wry::WebView>,
-    /// Board panel: a second OS window/webview showing each pane's live
-    /// activity (collab board) with a per-pane message box. Same lifetime
-    /// discipline as the git/session panels — webview must outlive its window.
-    board_panel_window: Option<Arc<Window>>,
-    board_panel_webview: Option<wry::WebView>,
-    /// 아로나 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
-    arona_panel_window: Option<Arc<Window>>,
-    arona_panel_webview: Option<wry::WebView>,
-    /// 설정 화면의 웹뷰 판(`/arona-ui/settings.html`). 네이티브 GPU 설정창
-    /// (`AuxWindowKind::Settings`)과 **한 번에 하나만** 뜬다 — 진입점이
-    /// `open_settings_window` 하나라 거기서 갈린다. 이행이 끝나면 네이티브
-    /// 쪽이 지워지고 이 필드만 남는다. webview 가 window 를 빌리므로 같이 소유.
-    settings_web_window: Option<Arc<Window>>,
+    /// 메인 작업공간을 덮는 웹 화면. 장식 없는 자식 창을 본창에 붙여 titlebar와
+    /// 왼쪽 sidebar는 남기고, pane grid와 우측 칼럼을 한 면으로 교체한다.
+    inline_web: Option<InlineWebHost>,
     /// 대기 중인 계정 전환 확인. `Some` 인 동안 그 창이 스크림을 깔고 입력을 삼킨다.
     /// **여기 담긴 것 말고는 아무 상태도 미리 안 바뀐다** — 작업대 갈아 끼우기·설정
     /// 저장·pane 재시작은 [전환] 을 눌러야 그때 돈다.
     account_switch_confirm: Option<session::PendingAccountSwitch>,
     /// 학생 교체 확인 카드 — 말투까지 바꾸려면 다시 띄워야 해서 먼저 묻는다.
     character_swap_confirm: Option<session::PendingCharacterSwap>,
-    settings_web_webview: Option<wry::WebView>,
     /// 학생 하나만 담는 세부설정 창(`/arona-ui/settings.html?student=`). 설정 본체와
     /// **따로** 사는 이유는, 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하기
     /// 때문이다 — 안에서 안을 덮을 수 없다(거노 2026-08-25).
@@ -6046,7 +5582,6 @@ impl App {
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
-            pane_tab_popout_rects: Vec::new(),
             pane_restart_chip_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
             docked: Vec::new(),
@@ -6072,7 +5607,6 @@ impl App {
             win_tab_wheel_accum: 0.0,
             win_tab_drag: None,
             closed_panes: Vec::new(),
-            hidden_aux: Vec::new(),
             new_window_btn_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
@@ -6238,7 +5772,6 @@ impl App {
             set_shim_inject: socket::read_shim_inject(),
             set_palette_edit: String::new(),
             set_picker_hsv: (0.0, 0.0, 0.0),
-            settings_drag: None,
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),
@@ -6252,7 +5785,6 @@ impl App {
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),
             settings_input: None,
-            settings_rects: Vec::new(),
             // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해
             // persona 편집기 렌더를 헤드리스로 캡처할 수 있게 한다(테스트 전용).
             students_selected: std::env::var("KASATERM_TEST_STUDENT")
@@ -6279,7 +5811,6 @@ impl App {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0),
-            settings_scroll_max: 0.0,
             feedback_body: String::new(),
             feedback_caret: 0,
             feedback_diag: true,
@@ -6308,16 +5839,9 @@ impl App {
             ui_zoom_unset: socket::read_ui_zoom().is_none(),
             pane_font_scales: std::collections::HashMap::new(),
             proxy,
-            session_panel_window: None,
-            session_panel_webview: None,
-            board_panel_window: None,
-            board_panel_webview: None,
-            arona_panel_window: None,
-            arona_panel_webview: None,
-            settings_web_window: None,
+            inline_web: None,
             account_switch_confirm: None,
             character_swap_confirm: None,
-            settings_web_webview: None,
             student_web_window: None,
             student_web_webview: None,
             pane_action_hits: Vec::new(),
