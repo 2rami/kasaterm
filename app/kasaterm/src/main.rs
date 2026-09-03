@@ -7728,7 +7728,8 @@ esac\n\
 for _a in \"$@\"; do\n\
   case \"$_a\" in\n\
     mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
-    local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1; break ;;\n\
+    local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1 ;;\n\
+    classic) CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_classic=1 ;;\n\
     -*) ;;\n\
     *) break ;;\n\
   esac\n\
@@ -7736,11 +7737,18 @@ done\n\
 # `claude local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(2026-09-02 「로컬에서\n\
 # 실행하려면 어떻게?」). env 한 줄(KASATERM_NO_HOME=1 claude)의 사람용 표기다. 그 단어는\n\
 # claude 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.\n\
-if [ -n \"$_drop_local\" ]; then\n\
+# `claude classic` — 이 창의 claude 만 **본화면 렌더러**로 연다(2026-09-03 지시:\n\
+# 「선택할수있게하자」). 그러면 대화가 이 터미널의 스크롤백에 쌓여, 올려다볼 때\n\
+# 붙는 질문 띠가 codex 와 같은 길로 간다 — 절대 줄 번호를 알아 한 번에 그 자리에\n\
+# 선다. 대가는 깜빡임과 입력창 하단 고정을 잃는 것이라, 앱 전체가 아니라 **창마다**\n\
+# 고르게 둔다. 두 단어를 함께 쓸 수 있다(`claude local classic`).\n\
+if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ]; then\n\
   _n=$#; _i=0\n\
   while [ $_i -lt $_n ]; do\n\
     _a=$1; shift\n\
-    if [ -n \"$_drop_local\" ] && [ \"$_a\" = local ]; then _drop_local=\"\"; else set -- \"$@\" \"$_a\"; fi\n\
+    if [ \"$_a\" = local ] && [ -n \"$_drop_local\" ]; then _drop_local=\"\";\n\
+    elif [ \"$_a\" = classic ] && [ -n \"$_drop_classic\" ]; then _drop_classic=\"\";\n\
+    else set -- \"$@\" \"$_a\"; fi\n\
     _i=$((_i+1))\n\
   done\n\
 fi\n\
