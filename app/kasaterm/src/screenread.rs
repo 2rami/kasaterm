@@ -2372,11 +2372,23 @@ pub(crate) fn note_sticky_view(pane_id: &str, rows: &[Vec<GridCell>]) {
         }
         let Some(want) = seek.want.clone() else { return };
         // 맨 위 세 줄 안에 서면 도착이다 — 그 자리에서 띠가 그 줄을 덮어 딱 겹친다.
-        // 보이기는 하는데 아직 아래면 「가깝다」로 두어 마지막 접근을 촘촘히 한다.
+        //
+        // 아직 아래에 있으면 **방향을 뒤집는다.** 화면에 보이는 줄을 위로 올리려면
+        // 아래로 굴려야 한다(내용이 위로 흐른다). 그걸 안 하고 위로만 굴리면 그 줄은
+        // 오히려 아래로 밀려 화면 밖으로 나가고, 다시는 못 만나 최상단까지 굴러간다
+        // (2026-09-03 지적: 「클로드 이상해 맨위로 올라가」).
         match rows.iter().position(|r| line_shows_prompt(r, &want)) {
             Some(r) if r <= 2 => seek.reached = true,
-            Some(_) => seek.near = true,
-            None => seek.near = false,
+            Some(_) => {
+                seek.near = true;
+                seek.down = true;
+            }
+            // 지나쳐서 시야 밖으로 나갔으면 처음 방향으로 돌아간다 — 뒤집힌 채로
+            // 두면 반대편 끝까지 굴러간다.
+            None => {
+                seek.near = false;
+                seek.down = seek.orig_down;
+            }
         }
     });
 }
@@ -2410,6 +2422,9 @@ pub(crate) struct StickySeek {
     /// 노치씩 하려고 둔다 — 평소처럼 네 노치를 한꺼번에 쏘면 그 줄을 훌쩍 지나쳐
     /// 「딱 붙는」 자리에 못 선다.
     pub near: bool,
+    /// 처음 정한 방향. 목적지가 화면에 보일 때는 그 줄을 맨 위로 올리려고 방향을
+    /// 뒤집는데, 다시 안 보이게 되면 여기로 돌아온다.
+    pub orig_down: bool,
 }
 
 /// 그 화면 줄이 `want` 질문의 머리줄인가.
@@ -2481,6 +2496,7 @@ pub(crate) fn begin_sticky_seek(
             want,
             reached: false,
             near: false,
+            orig_down: down,
         });
     });
 }
@@ -6114,6 +6130,35 @@ mod sticky_seek_tests {
         note_sticky_view("%1", &screen(&["\u{203a} 코덱스 질문", "답", "셋", "넷", "다섯", "여섯"]));
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
+    }
+
+    /// 목적지가 **화면 아래쪽에 보이면 방향을 뒤집어** 그 줄을 위로 끌어올린다.
+    /// 위로만 굴리면 보이던 줄이 오히려 아래로 밀려 시야에서 사라지고, 다시는 못
+    /// 만나 최상단까지 굴러간다.
+    #[test]
+    fn a_destination_below_pulls_the_scroll_the_other_way() {
+        set_pills(&[("%1", "지금 턴")]);
+        begin_sticky_seek("%1".into(), "지금 턴".into(), (1, 1), false, Some("가려던 질문".into()));
+        note_sticky_view(
+            "%1",
+            &screen(&["한 줄", "두 줄", "세 줄", "네 줄", "\u{276f} 가려던 질문", "여섯 줄"]),
+        );
+        let step = sticky_seek_step().expect("아직 진행 중");
+        assert!(step.3, "보이는 줄을 위로 올리려면 아래로 굴려야 한다");
+        assert!(sticky_seek_near(), "가까우니 한 노치씩");
+    }
+
+    /// 지나쳐서 시야 밖으로 나가면 **처음 방향으로 돌아간다** — 뒤집힌 채로 두면
+    /// 반대편 끝까지 굴러간다.
+    #[test]
+    fn losing_sight_restores_the_original_direction() {
+        set_pills(&[("%1", "지금 턴")]);
+        begin_sticky_seek("%1".into(), "지금 턴".into(), (1, 1), false, Some("가려던 질문".into()));
+        note_sticky_view("%1", &screen(&["한", "두", "세", "네", "\u{276f} 가려던 질문", "여섯"]));
+        note_sticky_view("%1", &screen(&["한", "두", "세", "네", "다섯", "여섯"]));
+        assert!(!sticky_seek_near());
+        let step = sticky_seek_step().expect("아직 진행 중");
+        assert!(!step.3, "처음 방향(위로)으로 돌아온다");
     }
 
     /// 목적지를 모르면(질문 목록이 없는 pane) 종전 규칙 그대로 — 표시를 통째로 죽이는
