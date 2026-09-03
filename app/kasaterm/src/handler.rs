@@ -3909,13 +3909,13 @@ impl ApplicationHandler<UserEvent> for App {
                             .px_to_pane_cell(cx, cy)
                             .map(|(_, c, r)| (c, r))
                             .unwrap_or((1, 1));
-                        // 바 본체 클릭 = 앞 질문으로 되짚기. 목적지를 미리 짚어
-                        // 넘기면 그 자리에서 멈춘다(`begin_sticky_seek` 의 want).
-                        let want = crate::render::neighbor_prompt(
-                            &target,
-                            self.pane_prompts(&pane_id),
-                            false,
-                        );
+                        // 바 본체 = **지금 띠에 뜬 그 질문 자리로**. 앞뒤로 옮기는 것은
+                        // 화살표 몫이다 — 바에까지 「앞 질문」을 물리면 한 턴을 더 올라가고,
+                        // 그 앞 질문이 화면에 안 나타나면 최상단까지 굴러간다(2026-09-03
+                        // 지적: 「둘째질문누르면 맨위로가는데」). 스크롤백을 쥔 창에서
+                        // 바가 `TurnHit::Jump` 로 그 줄에 서는 것과 같은 뜻이어야, 두 창이
+                        // 같은 기능으로 읽힌다.
+                        let want = Some(target.clone());
                         crate::render::begin_sticky_seek(pane_id, target, cell, false, want);
                         window.request_redraw();
                         return;
