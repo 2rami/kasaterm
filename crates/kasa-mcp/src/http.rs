@@ -3095,12 +3095,22 @@ fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Val
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .map(|v| (v, CredSource::File(file)));
     let svc = claude_keychain_service(account_dir);
-    let from_keychain = crate::no_window_command("security")
-        .args(["find-generic-password", "-s", &svc, "-w"])
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok())
+    // 계정 칸(`-a`)까지 맞춰 읽는다. 같은 서비스명의 항목이 둘일 수 있다 — 2026-09-03
+    // 실측: 기본 항목 옆에 account="unknown" 인 빈 껍데기(08-18 사고 잔재)가 있어
+    // 이름만으로 읽으면 그 껍데기가 먼저 잡혔고, 활성 계정 신원이 「빈손」이 됐다.
+    // claude 는 로그인 사용자명을 계정 칸에 쓴다(`K7()`). 그 이름으로 못 찾을 때만
+    // 이름만으로 한 번 더 본다.
+    let read_secret = |args: &[&str]| {
+        crate::no_window_command("security")
+            .args(args)
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok())
+    };
+    let from_keychain = keychain_user()
+        .and_then(|u| read_secret(&["find-generic-password", "-s", &svc, "-a", &u, "-w"]))
+        .or_else(|| read_secret(&["find-generic-password", "-s", &svc, "-w"]))
         .map(|v| (v, CredSource::Keychain(svc)));
     let expires_at = |v: &serde_json::Value| {
         v.pointer("/claudeAiOauth/expiresAt")
@@ -3141,6 +3151,20 @@ fn write_claude_credentials(src: &CredSource, v: &serde_json::Value) -> bool {
                 .unwrap_or(false)
         }
     }
+}
+
+/// claude 가 키체인 항목의 계정 칸에 쓰는 로그인 사용자명. env 가 비면 홈 폴더
+/// 이름으로 — Finder 로 띄운 앱은 USER 가 없을 수 있다.
+fn keychain_user() -> Option<String> {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            kasa_socket::home_dir()?
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
 }
 
 /// 그 키체인 항목의 `acct` 필드. `security find-generic-password` 는 값을 뺀 속성

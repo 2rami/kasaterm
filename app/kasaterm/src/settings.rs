@@ -5582,29 +5582,25 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         let logged_in =
             parsed.as_ref().map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
         let probe = logged_in.map(|logged_in| {
-            let field = |k: &str| {
-                parsed
-                    .as_ref()
-                    .and_then(|v| v.get(k))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            // 신원은 방금 받은 auth status JSON 이 직접 준다(email·orgName —
-            // 개인 조직 "X's Organization" 은 team_org 가 걸러 준다). 이게 1순위인
-            // 이유: 활성 계정은 /claude-identity 창구가 빈손이라, 그쪽만 믿으면
-            // 활성 행이 영영 「확인 중…」으로 남는다(2026-08-31 실측 — 슬롯 셋은
-            // 풀렸는데 활성만 안 풀렸다). 로그인 안 된 슬롯은 물어볼 것이 없다.
-            let (mut email, mut org) = if logged_in {
-                (field("email"), field("orgName"))
+            // ⚠️ auth status 의 email·orgName 은 **안 쓴다** — 그 둘은 슬롯별
+            // 저장소가 아니라 공유 캐시(`~/.claude.json`)에서 오므로 마지막에
+            // 로그인한 계정이 모든 슬롯에 찍힌다. 2026-08-31 에 「활성 행이 영영
+            // 확인 중」을 풀려고 이걸 1순위로 올렸다가 슬롯 다섯이 전부 지메일로
+            // 보였다(2026-09-03 지적). 그 「빈손」의 진짜 원인은 키체인에 같은
+            // 이름의 껍데기 항목이 하나 더 있어 이름만으로 읽던 창구가 그걸 집은
+            // 것이었다 — http.rs `read_claude_credentials` 가 이제 계정 칸까지
+            // 맞춘다. 신원은 슬롯 토큰으로 물은 것만 믿고, 못 물으면 마지막에
+            // 알아낸 진짜 값을 쓴다 — 틀린 이메일보다 옛 진짜 값이 낫다.
+            let (email, org) = if logged_in {
+                let (e, o) = slot_identity(dir.as_deref());
+                if e.is_empty() {
+                    remembered_identity(&key)
+                } else {
+                    (e, o)
+                }
             } else {
                 (String::new(), String::new())
             };
-            if logged_in && email.is_empty() {
-                let (e, o) = slot_identity(dir.as_deref());
-                email = e;
-                org = o;
-            }
             AuthProbe { logged_in, email, org }
         });
         if let Some(cache) = CACHE.get() {
@@ -5612,8 +5608,8 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
             let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()));
-            if let Some(email) = v.as_ref().map(|p| p.email.as_str()).filter(|e| !e.is_empty()) {
-                remember_account_email(&key, email);
+            if let Some(p) = v.as_ref().filter(|p| !p.email.is_empty()) {
+                remember_account_identity(&key, &p.email, &p.org);
             }
             m.insert(key, (Instant::now(), v));
         }
@@ -5734,31 +5730,51 @@ pub(crate) fn codex_identity(id: &str) -> Option<String> {
 /// 그 스크립트는 claude 가 초당 한 번 부르는 파이썬이라 슬롯 신원을 직접 물을 수
 /// 없다(로그인 셸 + HTTP 두 번). 여기서 이미 알아낸 값을 흘려 두면 공짜로 읽는다.
 /// 안 남기면 이름 없는 슬롯의 statusline 이 `acct-1` 같은 내부 id 를 그린다.
-fn remember_account_email(id: &str, email: &str) {
-    let mut m = match socket::read_settings().get("claude_account_emails") {
-        Some(serde_json::Value::Object(m)) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    if m.get(id).and_then(|v| v.as_str()) == Some(email) {
-        return; // 값이 그대로면 쓰지 않는다 — 20초마다 파일을 다시 쓸 이유가 없다
+fn remember_account_identity(id: &str, email: &str, org: &str) {
+    let settings = socket::read_settings();
+    for (key, val) in [("claude_account_emails", email), ("claude_account_orgs", org)] {
+        let mut m = match settings.get(key) {
+            Some(serde_json::Value::Object(m)) => m.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if m.get(id).and_then(|v| v.as_str()) == Some(val) {
+            continue; // 값이 그대로면 쓰지 않는다 — 20초마다 파일을 다시 쓸 이유가 없다
+        }
+        m.insert(id.to_string(), serde_json::Value::String(val.to_string()));
+        socket::write_setting(key, serde_json::Value::Object(m));
     }
-    m.insert(id.to_string(), serde_json::Value::String(email.to_string()));
-    socket::write_setting("claude_account_emails", serde_json::Value::Object(m));
+}
+
+/// 마지막에 알아낸 그 슬롯의 진짜 신원(이메일, 조직). 슬롯 토큰으로 못 물을 때
+/// (활성 계정의 access token 이 막 만료돼 pane 이 갱신하기 전 같은 순간) 화면이
+/// 「확인 중」으로 굳는 대신 이걸 그린다. 공유 캐시는 절대 여기 안 들어온다.
+fn remembered_identity(id: &str) -> (String, String) {
+    let settings = socket::read_settings();
+    let get = |key: &str| {
+        settings
+            .get(key)
+            .and_then(|m| m.get(id))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    (get("claude_account_emails"), get("claude_account_orgs"))
 }
 
 /// 슬롯을 지울 때 그 이메일 기록도 지운다. 안 지우면 목록에 없는 유령 키가 남고,
 /// 같은 번호를 다시 쓰는 슬롯이 **옛 계정의 이메일로 불린다** — statusline 은 이 표만
 /// 보므로 화면이 조용히 거짓말을 한다.
 fn forget_account_email(id: &str) {
-    let Some(serde_json::Value::Object(mut m)) =
-        socket::read_settings().get("claude_account_emails").cloned()
-    else {
-        return;
-    };
-    if m.remove(id).is_none() {
-        return;
+    let settings = socket::read_settings();
+    for key in ["claude_account_emails", "claude_account_orgs"] {
+        let Some(serde_json::Value::Object(mut m)) = settings.get(key).cloned() else {
+            continue;
+        };
+        if m.remove(id).is_none() {
+            continue;
+        }
+        socket::write_setting(key, serde_json::Value::Object(m));
     }
-    socket::write_setting("claude_account_emails", serde_json::Value::Object(m));
 }
 
 /// 우리가 붙인 이름인가. 빈 라벨과 옛 기본값 `계정 N` 을 자동으로 본다 — 후자는

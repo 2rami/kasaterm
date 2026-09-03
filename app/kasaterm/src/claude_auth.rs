@@ -324,7 +324,21 @@ fn write_credentials_inner(dir: Option<&Path>, blob: &[u8]) -> bool {
 #[cfg(all(target_os = "macos", not(test)))]
 fn keychain_account() -> String {
     // claude 의 `K7()` — keychain 항목의 account 필드는 로그인 사용자명이다.
-    std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+    // USER 가 비면(Finder 로 띄운 앱은 그럴 수 있다) 홈 폴더 이름으로 — "unknown"
+    // 으로 항목을 만들면 같은 서비스명의 껍데기가 하나 더 생기고, 이름만으로 읽는
+    // 쪽이 그걸 집는다(2026-09-03 실측: 08-18 에 생긴 껍데기가 활성 계정 신원을 막았다).
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var_os("HOME").and_then(|h| {
+                PathBuf::from(h)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// 작업대 지문이 말하는 **활성 계정 id**. 지문이 없으면(작업대를 한 번도 우리가
