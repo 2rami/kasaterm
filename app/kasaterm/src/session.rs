@@ -5352,6 +5352,9 @@ impl App {
                     q.run.as_deref(),
                 )
             };
+            // 예약 이사도 migrate_progress 로 「바쁨」을 세운다 — 클릭 경로만 풀면
+            // 원격 칼럼이 잠긴 채 남는다(handler 의 소켓 갈래와 같은 이유).
+            self.info.machines_col.busy = None;
             match res {
                 Ok(id) => self.set_toast(format!("예약 이사 완료: {} → {id}", q.pane)),
                 Err(e) => {

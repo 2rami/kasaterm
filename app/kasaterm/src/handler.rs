@@ -433,6 +433,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket migrate 실패: {why}");
                 }
+                // 이사가 끝났으면(성공·실패 무관) 「바쁨」 잠금을 반드시 푼다 —
+                // migrate_pane 안 migrate_progress 가 세운 것이라, GUI 클릭이 아닌
+                // 이 경로(CLI·셀프·아로나)는 여기서 안 지우면 원격 칼럼이 통째로
+                // 잠긴 채 남아 「거울」 클릭까지 삼킨다(2026-09-03 실측).
+                self.info.machines_col.busy = None;
                 let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -449,6 +454,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket migrate back 실패: {why}");
                 }
+                // 이사가 끝났으면(성공·실패 무관) 「바쁨」 잠금을 반드시 푼다 —
+                // migrate_pane 안 migrate_progress 가 세운 것이라, GUI 클릭이 아닌
+                // 이 경로(CLI·셀프·아로나)는 여기서 안 지우면 원격 칼럼이 통째로
+                // 잠긴 채 남아 「거울」 클릭까지 삼킨다(2026-09-03 실측).
+                self.info.machines_col.busy = None;
                 let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
