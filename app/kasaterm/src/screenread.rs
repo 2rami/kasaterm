@@ -2655,12 +2655,19 @@ pub(crate) fn find_sticky_prompt(
                 .trim_start_matches(['\u{276f}', '\u{203a}', '>'])
                 .trim();
             let known = match_prompt(bare, prompts).and_then(|i| prompts.get(i));
-            if prompts.is_empty() || known.is_some() {
+            // 목록에 없어도 **에이전트 마커로 그려진 줄**이면 받는다. 기록에 안 남는
+            // 질문이 있어서다(아래 `seen_on_screen` 주석). 마커와 흐릿함을 이미
+            // 요구했으므로 인용문·diff 는 여기 못 온다 — ASCII `>` 로 시작하는 줄은
+            // 아는 질문과 맞을 때만 받는 종전 규칙 그대로다.
+            let strict_marker =
+                matches!(text.trim_start().chars().next(), Some('\u{276f}') | Some('\u{203a}'));
+            if prompts.is_empty() || known.is_some() || strict_marker {
                 // 화면에서 질문을 **직접 봤다**. 더 올려 이 줄이 밀려나도 어느 턴인지
                 // 알도록 기억해 둔다 — 이걸 안 하면 기억이 낡은 채로 남는다.
-                if let Some((p, _)) = known {
-                    *memo = Some(p.clone());
-                }
+                *memo = Some(match known {
+                    Some((p, _)) => p.clone(),
+                    None => bare.to_string(),
+                });
                 return Some(StickyPrompt {
                     row: ri,
                     col_start: first,
@@ -2871,6 +2878,18 @@ fn pick_scrolled_past_prompt(
     const MIN_DISTINCT: usize = 2;
     // 가장 위 질문과 **그 줄의 행 번호**. 행 번호가 한 칸을 가른다(아래 참조).
     let mut topmost: Option<(usize, usize)> = None;
+    // 목록에는 없지만 **화면에는 그려져 있는** 가장 위 질문 — (행, 그 줄의 글).
+    //
+    // 기록에 없는 질문이 실재한다. claude 가 답하는 동안 넣어 큐에 쌓인 프롬프트가
+    // 그렇다 — 화면에는 `❯ …` 로 멀쩡히 그려지는데 대화 기록에는 user 레코드가
+    // 안 남는다(2026-09-03 실측: 화면에 질문 셋, 기록에 하나). 기록만 믿으면 그 턴을
+    // 보고 있어도 **아는 것 중 하나**, 즉 맨 처음 질문으로 떨어진다(거노 지적:
+    // 「클로드는 맨위에 쳤던거가 뜨는데」).
+    //
+    // 그 자리에서는 화면이 정본이다. 다만 아는 질문을 우선하는 순서는 그대로 둔다 —
+    // 목록이 온전할 때의 판정(「가장 위 질문의 **앞** 턴」)이 더 정확하고, 이건
+    // 그것이 통하지 않을 때의 차선이다.
+    let mut seen_on_screen: Option<(usize, String)> = None;
     let mut body: Vec<String> = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
         let text = row_match_text(row);
@@ -2884,6 +2903,16 @@ fn pick_scrolled_past_prompt(
                 });
                 continue;
             }
+        }
+        // 목록 밖 질문은 **에이전트 마커로 쓴 줄만** 받는다(`❯`·`›`). ASCII `>` 는
+        // 인용문·diff 가 행 머리에 흔히 써서, 대조 없이 받으면 대화와 무관한 줄이
+        // 띠에 뜬다 — 그래서 위쪽 대조 경로와 달리 여기서는 안 본다.
+        if let Some(q) = t.strip_prefix('\u{276f}').or_else(|| t.strip_prefix('\u{203a}')) {
+            let q = q.trim();
+            if !q.is_empty() && seen_on_screen.as_ref().is_none_or(|(r, _)| ri < *r) {
+                seen_on_screen = Some((ri, q.to_string()));
+            }
+            continue;
         }
         let stripped = strip_screen_ornament(t);
         if body.len() < BODY_ROWS {
@@ -2914,6 +2943,14 @@ fn pick_scrolled_past_prompt(
             *memo = past.clone();
         }
         return past;
+    }
+    // 아는 질문은 화면에 없고, **모르는 질문이 화면에 있다.** 기록에 안 남은 턴이라
+    // 앞뒤 순서를 셀 수가 없으니 「그 앞 턴」은 못 말한다 — 화면이 보여 주는 그 질문을
+    // 그대로 쓴다. 맨 윗줄이 엄밀히는 앞 턴의 꼬리일 수 있지만, 기록에 없는 질문을
+    // 아는 것 중 하나로 바꿔치기하는 것보다 눈에 보이는 것을 말하는 편이 낫다.
+    if let Some((_, q)) = &seen_on_screen {
+        *memo = Some(q.clone());
+        return Some(q.clone());
     }
     // 머리줄이 화면 밖이다. **본문으로 먼저 되짚는다** — 보이는 줄이 어느 한 턴에만
     // 있으면 그게 답이고, 이건 기억보다 세다.
@@ -6124,6 +6161,89 @@ mod scroll_gate_tests {
         note_scroll_forwarded("%9");
         assert!(scroll_forwarded_recently("%9"));
         assert!(!scroll_forwarded_recently("%다른"), "굴린 pane 에만 걸린다");
+    }
+}
+
+#[cfg(test)]
+mod screen_is_the_source_tests {
+    use super::*;
+
+    fn rows(lines: &[&str]) -> Vec<Vec<GridCell>> {
+        lines
+            .iter()
+            .map(|l| {
+                let mut row = Vec::new();
+                for c in l.chars() {
+                    let mut cell = GridCell::blank();
+                    cell.ch = c;
+                    row.push(cell);
+                    if unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) > 1 {
+                        let mut sp = GridCell::blank();
+                        sp.ch = ' ';
+                        row.push(sp);
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn prompts(qs: &[&str]) -> Vec<(String, Vec<String>)> {
+        qs.iter().map(|q| (q.to_string(), Vec::new())).collect()
+    }
+
+    /// **기록에 없는 질문이 화면에 있으면 그것을 쓴다.** claude 가 답하는 동안 넣어
+    /// 큐에 쌓인 프롬프트가 그렇다 — 화면엔 그려지는데 대화 기록엔 안 남는다
+    /// (2026-09-03 실측: 화면에 셋, 기록에 하나). 기록만 믿으면 그 턴을 보고 있어도
+    /// 맨 처음 질문으로 떨어진다.
+    #[test]
+    fn a_question_only_the_screen_knows_still_wins() {
+        let mut memo = None;
+        let got = pick_scrolled_past_prompt(
+            &rows(&["  답변 줄", "\u{276f} 기록에 없는 질문", "  그 답"]),
+            &prompts(&["기록에 있는 첫 질문"]),
+            &mut memo,
+        );
+        assert_eq!(got.as_deref(), Some("기록에 없는 질문"));
+        assert_eq!(memo.as_deref(), Some("기록에 없는 질문"), "다음 프레임을 위해 기억한다");
+    }
+
+    /// 목록에 **있는** 질문이 화면에 보이면 종전 규칙이 이긴다 — 그쪽이 앞뒤 순서를
+    /// 알아 「그 앞 턴」까지 짚으므로 더 정확하다.
+    #[test]
+    fn a_known_question_still_takes_precedence() {
+        let mut memo = None;
+        let got = pick_scrolled_past_prompt(
+            &rows(&["  꼬리", "\u{276f} 둘째 질문", "  답", "\u{276f} 모르는 질문"]),
+            &prompts(&["첫 질문", "둘째 질문"]),
+            &mut memo,
+        );
+        assert_eq!(got.as_deref(), Some("첫 질문"), "아는 질문의 앞 턴");
+    }
+
+    /// ASCII `>` 로 시작하는 줄은 **대조 없이는 안 받는다** — 인용문·diff 가 행 머리에
+    /// 흔히 써서, 받으면 대화와 무관한 줄이 띠에 뜬다.
+    #[test]
+    fn a_plain_angle_bracket_line_is_not_a_question() {
+        let mut memo = None;
+        let got = pick_scrolled_past_prompt(
+            &rows(&["  답변", "> 인용문이거나 diff 한 줄", "  이어지는 답"]),
+            &prompts(&["첫 질문"]),
+            &mut memo,
+        );
+        assert_eq!(got.as_deref(), Some("첫 질문"), "인용문이 아니라 폴백이 나와야 한다");
+    }
+
+    /// codex 마커도 같게 받는다 — 두 창이 한 규칙으로 서야 한다.
+    #[test]
+    fn the_codex_marker_counts_too() {
+        let mut memo = None;
+        let got = pick_scrolled_past_prompt(
+            &rows(&["  답", "\u{203a} 코덱스에만 있는 질문", "  그 답"]),
+            &prompts(&["다른 질문"]),
+            &mut memo,
+        );
+        assert_eq!(got.as_deref(), Some("코덱스에만 있는 질문"));
     }
 }
 
