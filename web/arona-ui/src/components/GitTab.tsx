@@ -70,8 +70,8 @@ export function GitTab() {
         <div style={{ flex: 1 }} />
         {(!!st.insertions || !!st.deletions) && (
           <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10 }}>
-            <span style={{ color: 'var(--cth-mint)' }}>+{st.insertions ?? 0}</span>{' '}
-            <span style={{ color: 'var(--cth-coral-text)' }}>−{st.deletions ?? 0}</span>
+            <span style={{ color: 'var(--cth-mint-text-surface)' }}>+{st.insertions ?? 0}</span>{' '}
+            <span style={{ color: 'var(--cth-coral-text-surface)' }}>−{st.deletions ?? 0}</span>
           </span>
         )}
       </div>
@@ -83,7 +83,7 @@ export function GitTab() {
         ) : rows.map((f) => (
           <label key={f.path} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px', cursor: 'pointer' }}>
             <input type="checkbox" checked={picked.has(f.path)} onChange={() => toggle(f.path)} style={{ accentColor: 'var(--cth-sky)', flexShrink: 0 }} />
-            <span style={{ flexShrink: 0, width: 16, height: 16, borderRadius: 4, background: f.color, color: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{f.tag}</span>
+            <span style={{ flexShrink: 0, width: 16, height: 16, borderRadius: 4, background: f.color, color: 'var(--cth-on-color)', fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{f.tag}</span>
             <span style={{ flex: 1, fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-700)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' }}>{f.path}</span>
           </label>
         ))}
@@ -91,7 +91,7 @@ export function GitTab() {
 
       {/* 커밋 + 푸시 */}
       <div style={{ padding: 10, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)', display: 'flex', flexDirection: 'column', gap: 7 }}>
-        {toast && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: toast.startsWith('커밋 완료') || toast.startsWith('푸시 완료') ? 'var(--cth-mint)' : 'var(--cth-coral)' }}>{toast}</div>}
+        {toast && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: toast.startsWith('커밋 완료') || toast.startsWith('푸시 완료') ? 'var(--cth-mint-text-bg)' : 'var(--cth-coral-text-bg)' }}>{toast}</div>}
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <button onClick={() => setPicked(new Set(rows.map((r) => r.path)))} style={miniBtn}>전체</button>
           <button onClick={() => setPicked(new Set())} style={miniBtn}>해제</button>
@@ -99,11 +99,11 @@ export function GitTab() {
         </div>
         <input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="커밋 메시지" style={{
           width: '100%', padding: '6px 9px', borderRadius: 8, border: '1px solid var(--cth-cream-200)', outline: 'none',
-          fontFamily: 'var(--cth-font-ui)', fontSize: 12, background: '#fff', color: 'var(--cth-ink-900)', boxSizing: 'border-box',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 12, background: 'var(--cth-cream-50)', color: 'var(--cth-ink-900)', boxSizing: 'border-box',
         }} />
         <div style={{ display: 'flex', gap: 6 }}>
           <button onClick={() => void doCommit()} disabled={busy || !picked.size || !msg.trim()} style={{
-            flex: 1, padding: '7px 0', borderRadius: 8, border: 'none', color: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
+            flex: 1, padding: '7px 0', borderRadius: 8, border: 'none', color: 'var(--cth-on-color)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
             cursor: busy || !picked.size || !msg.trim() ? 'not-allowed' : 'pointer',
             background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', opacity: busy || !picked.size || !msg.trim() ? 0.5 : 1,
           }}>커밋</button>
@@ -123,7 +123,7 @@ const miniBtn: React.CSSProperties = {
 };
 
 function Chip({ text, color }: { text: string; color: string }) {
-  return <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: '#fff', background: color, padding: '1px 6px', borderRadius: 5 }}>{text}</span>;
+  return <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-on-color)', background: color, padding: '1px 6px', borderRadius: 5 }}>{text}</span>;
 }
 
 function Empty({ text }: { text: string }) {

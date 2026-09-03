@@ -24,6 +24,8 @@ function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
   return (
     <button
       title={title}
+      aria-label={title}
+      aria-pressed={active == null ? undefined : active}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -34,7 +36,7 @@ function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
         border: 'none', cursor: 'pointer',
         background: lit ? 'var(--cth-sky-light)' : 'transparent',
         borderRadius: 7,
-        color: active ? 'var(--cth-sky)' : 'var(--cth-ink-500)',
+        color: active ? 'var(--cth-sky-text-surface)' : 'var(--cth-ink-500)',
       }}
     >
       {children}

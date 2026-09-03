@@ -1,5 +1,6 @@
 import { useStore } from '@/store';
 import { resumeSession, killBackgroundAgent, type BackgroundAgent } from '@/lib/mcp';
+import { X } from 'lucide-react';
 
 // claude agents (pane 밖에서 도는 daemon 세션) 한 행 — '에이전트' 탭이 쓴다.
 // 데이터/폴링은 App 이 store.backgroundAgents 로 채운다(3s). '이어받기'→resumeSession
@@ -39,7 +40,7 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
       background: 'var(--cth-cream-100, rgba(255,255,255,0.5))',
       boxShadow: 'inset 0 0 0 1px var(--cth-cream-200, rgba(21,41,74,0.08))',
     }}>
-      <div onClick={() => onView?.(a)} title="대화 보기" style={{ flex: 1, minWidth: 0, cursor: onView ? 'pointer' : 'default' }}>
+      <button type="button" onClick={() => onView?.(a)} title="대화 보기" style={{ flex: 1, minWidth: 0, cursor: onView ? 'pointer' : 'default', border: 'none', background: 'transparent', padding: 0, textAlign: 'left' }}>
         <div style={{
           fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900, #1c2b4a)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -47,7 +48,7 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
         <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', marginTop: 1 }}>
           {fmtAgo(a.startedAt)} · {shortCwd(a.cwd)}
         </div>
-      </div>
+      </button>
       {isBg && (
         // 돌아갈 pane 이 살아있나(parentSurface) vs 터미널과 분리돼 떠도나(orphan). 터미널이
         // 꺼지거나 다른 kasaterm 이면 parentSurface 가 비어 '독립' — shim 도 dangling 상태.
@@ -57,15 +58,15 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)',
             fontSize: 9, fontWeight: 700, whiteSpace: 'nowrap', padding: '2px 6px', borderRadius: 999,
-            color: a.parentSurface ? 'var(--cth-mint)' : 'var(--cth-ink-500)',
-            background: a.parentSurface ? 'color-mix(in srgb, var(--cth-mint) 16%, #fff)' : 'var(--cth-cream-200)',
+            color: a.parentSurface ? 'var(--cth-mint-text-bg)' : 'var(--cth-ink-500)',
+            background: a.parentSurface ? 'color-mix(in srgb, var(--cth-mint) 16%, var(--cth-cream-50))' : 'var(--cth-cream-200)',
           }}>
           <span style={{ width: 5, height: 5, borderRadius: 999, flexShrink: 0, background: a.parentSurface ? 'var(--cth-mint)' : 'var(--cth-ink-300)' }} />
           {a.parentSurface ? `연결 ${a.parentSurface}` : '독립'}
         </span>
       )}
       <span style={{
-        fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: '#fff',
+        fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: 'var(--cth-on-color)',
         background: isBg ? st.bg : 'var(--cth-lilac)', padding: '2px 6px', borderRadius: 999, whiteSpace: 'nowrap',
       }}>{isBg ? st.label : '활성'}</span>
       {isBg && (
@@ -81,12 +82,13 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
         <button
           onClick={() => { if (confirm(`'${a.name || a.id}' 세션을 종료할까요?`)) void killBackgroundAgent(a.pid); }}
           title="세션 종료(정리)"
+          aria-label="세션 종료"
           style={{
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, lineHeight: 1, color: 'var(--cth-ink-500)',
             background: 'transparent', border: '1px solid var(--cth-cream-200, rgba(21,41,74,0.14))',
             borderRadius: 7, padding: '4px 7px', cursor: 'pointer', whiteSpace: 'nowrap',
           }}
-        >×</button>
+        ><X size={13} aria-hidden="true" /></button>
       )}
     </div>
   );

@@ -86,7 +86,9 @@ async function refreshCharacterAccents(intervalMs = 30000): Promise<void> {
     const map = t?.character_accents;
     if (map && typeof map === 'object') CHARACTER_ACCENT = map as Record<string, string>;
     applyRuntimeTokens(t);
-  } catch { /* 옛 표 유지 */ }
+  } catch {
+    accentsFetchedMs = -Infinity;
+  }
 }
 
 export async function refreshRuntimeTheme(): Promise<void> {
@@ -114,10 +116,19 @@ function applyRuntimeTokens(t: any): void {
   set('--cth-ink-300', p.text_dim);
   set('--cth-sky', p.accent);
   set('--cth-on-sky', p.on_accent);
+  set('--cth-sky-text-bg', p.accent_text_bg ?? p.accent);
+  set('--cth-sky-text-surface', p.accent_text_surface ?? p.accent);
   set('--cth-mint', p.success);
+  set('--cth-mint-text-bg', p.success_text_bg ?? p.success);
+  set('--cth-mint-text-surface', p.success_text_surface ?? p.success);
   set('--cth-coral', p.danger);
-  set('--cth-coral-text', p.danger_text_surface ?? p.danger);
+  set('--cth-coral-text-bg', p.danger_text_bg ?? p.danger);
+  set('--cth-coral-text-surface', p.danger_text_surface ?? p.danger);
   set('--cth-on-coral', p.on_danger);
+  set('--cth-attention', p.attention);
+  set('--cth-on-attention', p.on_attention);
+  set('--cth-attention-text-bg', p.attention_text_bg ?? p.attention);
+  set('--cth-attention-text-surface', p.attention_text_surface ?? p.attention);
   root.style.setProperty('--cth-sky-light', 'color-mix(in srgb, var(--cth-sky) 18%, var(--cth-cream-100))');
   const hex = String(p.bg ?? '').replace('#', '').slice(0, 6);
   const n = Number.parseInt(hex, 16);
@@ -255,12 +266,14 @@ export async function fetchBoard(): Promise<BoardRow[]> {
   return (await fetchBoardResult()).rows;
 }
 
+let boardGeneration = 0;
+let boardInFlight: Promise<{ rows: BoardRow[]; ok: boolean }> | null = null;
+
 async function fetchBoardResult(): Promise<{ rows: BoardRow[]; ok: boolean }> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 6000);
   try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 6000);
     const res = await fetch(`${BASE}/board`, { signal: controller.signal });
-    window.clearTimeout(timer);
     if (!res.ok) return { rows: [], ok: false };
     const data = await res.json();
     // /board 가 {board:[...]} 든 JSON-RPC {result:{board:[...]}} 든 흡수.
@@ -268,15 +281,31 @@ async function fetchBoardResult(): Promise<{ rows: BoardRow[]; ok: boolean }> {
     return { rows: Array.isArray(rows) ? (rows as BoardRow[]) : [], ok: true };
   } catch {
     return { rows: [], ok: false };
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 
 export async function refreshBoardNow(): Promise<void> {
-  const state = useStore.getState();
-  state.setBoardStatus('loading');
-  const result = await fetchBoardResult();
-  useStore.getState().setAgents(result.rows.map(toAgent));
-  useStore.getState().setBoardStatus(result.ok ? 'ready' : 'error');
+  await updateBoard(true);
+}
+
+async function updateBoard(showLoading: boolean): Promise<void> {
+  const generation = ++boardGeneration;
+  if (showLoading) useStore.getState().setBoardStatus('loading');
+  const request = boardInFlight ?? fetchBoardResult();
+  boardInFlight = request;
+  const result = await request;
+  if (boardInFlight === request) boardInFlight = null;
+  if (generation !== boardGeneration) return;
+  if (result.ok) {
+    useStore.getState().setAgents(result.rows.map(toAgent));
+    useStore.getState().setBoardStatus('ready');
+  } else {
+    // 마지막 정상 목록은 유지한다. 네트워크 한 번 실패했다고 학생 전원을 지우면
+    // 빈 방으로 오인하고 진행 중 대화가 화면에서 사라진다.
+    useStore.getState().setBoardStatus('error');
+  }
 }
 
 export async function openCharacterSettings(): Promise<boolean> {
@@ -302,9 +331,7 @@ export function startBoardPolling(intervalMs = 1000): () => void {
     // 표가 비어 순환색으로 그려질 수 있는데, 그건 로스터에 없는 캐릭터의 기존
     // 동작과 같고 다음 프레임에 제 색으로 바뀐다.
     await refreshCharacterAccents();
-    const result = await fetchBoardResult();
-    useStore.getState().setAgents(result.rows.map(toAgent));
-    useStore.getState().setBoardStatus(result.ok ? 'ready' : 'error');
+    await updateBoard(false);
   };
   void tick();
   const iv = setInterval(tick, intervalMs);

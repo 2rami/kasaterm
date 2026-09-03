@@ -3,6 +3,7 @@ import { characterPool, fetchCharacters, fetchRecentSessions, type Harness, type
 import type { Agent } from '@/store';
 import { useIsPhone } from '@/lib/useIsPhone';
 import { SpritePortrait } from './SpritePortrait';
+import { X } from 'lucide-react';
 
 // 학생 상태 → 작은 점 색(좌측 트리). 3구분(거노: 작업중·노는중·선택지대기 구분 강화):
 // 작업중(working/thinking)=하늘, 선택지대기(waiting/blocked)=빨강, 노는중·완료=초록.
@@ -36,9 +37,9 @@ function shortPath(p?: string): string {
 // 하네스 배지 — 목록에 세 프로그램의 세션이 섞이면 제목만으론 무엇으로 여는지 알 수
 // 없다. 이어가는 명령이 셋 다 달라서, 고르기 전에 눈으로 갈라 보여야 한다.
 const HARNESS_STYLE: Record<Harness, { label: string; fg: string; bg: string }> = {
-  claude: { label: 'claude', fg: 'var(--cth-sky)', bg: 'var(--cth-sky-light)' },
+  claude: { label: 'claude', fg: 'var(--cth-sky-text-surface)', bg: 'var(--cth-sky-light)' },
   codex: { label: 'codex', fg: 'var(--cth-ink-700)', bg: 'var(--cth-cream-200)' },
-  agy: { label: 'agy', fg: 'var(--cth-coral)', bg: 'var(--cth-cream-200)' },
+  agy: { label: 'agy', fg: 'var(--cth-ink-700)', bg: 'var(--cth-cream-200)' },
 };
 function HarnessBadge({ harness }: { harness?: Harness }) {
   // 옛 기록엔 이 칸이 없다 — 그 시절은 전부 claude 였다.
@@ -94,7 +95,7 @@ export interface RoomMapProps {
 }
 
 function RoomIcon({ active }: { active: boolean }) {
-  const c = active ? '#fff' : 'var(--cth-sky)';
+  const c = active ? 'var(--cth-on-sky)' : 'var(--cth-sky-text-surface)';
   return (
     <svg width="16" height="16" viewBox="0 0 18 18" style={{ flexShrink: 0 }}>
       <path d="M2 8 9 3l7 5v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8Z" fill="none" stroke={c} strokeWidth="1.4" strokeLinejoin="round" />
@@ -259,7 +260,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
           <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 4, borderRadius: 8,
-              background: on ? 'var(--cth-sky)' : 'transparent', color: on ? '#fff' : 'var(--cth-ink-700)',
+              background: on ? 'var(--cth-sky)' : 'transparent', color: on ? 'var(--cth-on-sky)' : 'var(--cth-ink-700)',
             }}>
               <button onClick={() => { if (!on) onSwitch(i); }} style={{
                 flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '7px 9px', borderRadius: 8,
@@ -276,9 +277,9 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                   // 폰에서도 32 다 — 44 로 키우면 전체폭 방 줄 바로 옆에서 오탭이 는다.
                   // 이 버튼은 확인 없이 방(claude pane 여럿)을 통째로 닫는다.
                   flexShrink: 0, width: isPhone ? 32 : 18, height: isPhone ? 32 : 18, marginRight: 5, borderRadius: 5, border: 'none', cursor: 'pointer',
-                  background: on ? 'rgba(255,255,255,0.25)' : 'var(--cth-cream-100)', color: on ? '#fff' : 'var(--cth-ink-500)',
+                  background: on ? 'rgba(255,255,255,0.25)' : 'var(--cth-cream-100)', color: on ? 'var(--cth-on-sky)' : 'var(--cth-ink-500)',
                   fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>×</button>
+                }}><X aria-hidden="true" size={12} /></button>
               )}
             </div>
             {/* 방 안 학생 — windowIdx 로 그룹핑. 활성 방뿐 아니라 전 방 학생이 영속(거노). 클릭=
@@ -315,7 +316,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
               <button key={g} onClick={() => { onNewRoom(g); setAdding(false); }} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',
                 minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
-                background: '#fff', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
+                background: 'var(--cth-cream-50)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
                 boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
               }}>
                 <img src={`${import.meta.env.BASE_URL || '/'}assets/idle-front-${g === '아로나' ? 'arona' : 'prana'}.png`} alt="" style={{ width: 20, height: 20, objectFit: 'contain', imageRendering: 'pixelated' }} />
@@ -328,7 +329,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
           <button onClick={() => setAdding(true)} style={{
             marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '8px', borderRadius: 8,
             minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
-            border: '1.5px dashed var(--cth-cream-200)', cursor: 'pointer', background: 'transparent', color: 'var(--cth-sky)',
+            border: '1.5px dashed var(--cth-cream-200)', cursor: 'pointer', background: 'transparent', color: 'var(--cth-sky-text-surface)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
           }}>
             <svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" /></svg>
@@ -361,7 +362,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                 <button key={k} onClick={() => setScopeAll(k === 'all')} style={{
                   flex: 1, padding: '3px 0', borderRadius: 5, border: 'none', cursor: 'pointer',
                   background: on ? 'var(--cth-sky)' : 'var(--cth-cream-100)',
-                  color: on ? '#fff' : 'var(--cth-ink-500)',
+                  color: on ? 'var(--cth-on-sky)' : 'var(--cth-ink-500)',
                   fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700,
                 }}>{txt}</button>
               );
@@ -385,7 +386,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                 position: 'absolute', right: 5, top: 2, width: 15, height: 15, borderRadius: 4, border: 'none',
                 cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-300)',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 800, lineHeight: 1, padding: 0,
-              }}>×</button>
+              }}><X aria-hidden="true" size={11} /></button>
             )}
           </div>
           {filtered.length === 0 ? (

@@ -6,7 +6,7 @@ import {
   type Furniture, type CafeSpot,
 } from './classroomSpace';
 import { pickExchange } from './cafeteriaLines';
-import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon } from './activity';
+import { isBuildCmd, BUILD_COLOR_BG, GearIcon, SpinIcon } from './activity';
 
 const ROOT = import.meta.env.BASE_URL || '/';
 const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
@@ -193,26 +193,26 @@ function ClassroomCharacter(
         <div style={{
           maxWidth: 150, padding: '6px 10px', borderRadius: 12,
           // 미확인(선생님 확인 대기) = 코랄 강조 말풍선(거노). 그 외엔 흰 말풍선.
-          background: unconfirmed ? 'var(--cth-coral)' : '#fff',
+          background: unconfirmed ? 'var(--cth-coral)' : 'var(--cth-cream-50)',
           border: unconfirmed ? '1px solid var(--cth-coral)' : '1px solid var(--cth-cream-200)',
           boxShadow: unconfirmed
             ? '0 3px 12px color-mix(in srgb, var(--cth-coral) 55%, transparent)'
             : '0 2px 8px rgba(21, 41, 74, 0.14)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: unconfirmed ? 800 : 500, lineHeight: 1.4,
           // 교실 바닥 위 고정 흰 말풍선 — 다크에서도 흰색이라 텍스트는 고정 어두운색으로.
-          color: unconfirmed ? 'var(--cth-on-coral)' : '#15294A', textAlign: 'center',
+          color: unconfirmed ? 'var(--cth-on-coral)' : 'var(--cth-ink-900)', textAlign: 'center',
           whiteSpace: 'normal', wordBreak: 'break-word',
           animation: unconfirmed ? 'schale-glyph-pulse 1.1s ease-in-out infinite' : undefined,
         }}>
           {unconfirmed ? '확인 필요!' : agent.status === 'working' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
               {isBuildCmd(agent.action) ? (
-                <b style={{ color: BUILD_COLOR, display: 'inline-flex', alignItems: 'center', gap: 3 }}><GearIcon />빌드 중</b>
+                <b style={{ color: BUILD_COLOR_BG, display: 'inline-flex', alignItems: 'center', gap: 3 }}><GearIcon />빌드 중</b>
               ) : agent.currentTool ? (
-                <b style={{ color: 'var(--cth-sky)' }}>{agent.currentTool}</b>
+                <b style={{ color: 'var(--cth-sky-text-bg)' }}>{agent.currentTool}</b>
               ) : <span>{thought}</span>}
-              {agent.subagents?.length ? <span style={{ color: 'var(--cth-lilac)' }}>· 서브 {agent.subagents.length}</span> : null}
-              {agent.background?.length ? <span style={{ color: BUILD_COLOR, display: 'inline-flex', alignItems: 'center', gap: 2 }}><SpinIcon size={10} />{agent.background.length}</span> : null}
+              {agent.subagents?.length ? <span style={{ color: 'var(--cth-ink-500)' }}>· 서브 {agent.subagents.length}</span> : null}
+              {agent.background?.length ? <span style={{ color: BUILD_COLOR_BG, display: 'inline-flex', alignItems: 'center', gap: 2 }}><SpinIcon size={10} />{agent.background.length}</span> : null}
             </span>
           ) : thought}
         </div>
@@ -226,10 +226,10 @@ function ClassroomCharacter(
 
       <div style={{
         display: 'flex', alignItems: 'center', gap: 5,
-        background: 'rgba(255,255,255,0.9)', borderRadius: 9, padding: '2px 9px',
+        background: 'color-mix(in srgb, var(--cth-cream-50) 90%, transparent)', borderRadius: 9, padding: '2px 9px',
         boxShadow: '0 1px 4px rgba(21, 41, 74, 0.12)',
         // 흰 이름표 — 다크에서도 흰 바닥 위라 텍스트는 고정 어두운색.
-        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: '#15294A',
+        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-900)',
       }}>
         <span style={{ width: 7, height: 7, borderRadius: 999, background: STATUS_COLOR[agent.status] ?? 'var(--cth-ink-300)' }} />
         {agent.character}
@@ -238,9 +238,9 @@ function ClassroomCharacter(
       {agent.cwd && (
         <div style={{
           marginTop: 2, padding: '1px 7px', borderRadius: 7,
-          background: 'rgba(255,255,255,0.82)', boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
+          background: 'color-mix(in srgb, var(--cth-cream-50) 82%, transparent)', boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
           // 흰 cwd칩 — 다크에서도 흰 바닥 위라 텍스트는 고정 어두운색.
-          fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: '#4A638F',
+          fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)',
           maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{shortCwd(agent.cwd)}</div>
       )}
@@ -306,7 +306,7 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
     >
       <span style={{
         width: 38, height: 38, borderRadius: 999,
-        background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
+        background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: 'var(--cth-on-color)',
         border: '2px solid #fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
         boxShadow: '0 3px 10px rgba(74,144,226,0.5)',
         animation: 'schale-glyph-pulse 1.6s ease-in-out infinite',
@@ -314,8 +314,8 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
         <svg width="18" height="18" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" /></svg>
       </span>
       <span style={{
-        fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800, color: '#fff',
-        background: 'var(--cth-ink-900)', padding: '1px 8px', borderRadius: 7,
+        fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800, color: 'var(--cth-ink-900)',
+        background: 'var(--cth-cream-50)', padding: '1px 8px', borderRadius: 7,
         boxShadow: '0 1px 4px rgba(21,41,74,0.3)',
       }}>부르기</span>
     </button>
@@ -358,7 +358,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
           position: 'absolute', inset: 0, zIndex: 9999,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18,
           background: 'rgba(12, 19, 38, 0.58)', backdropFilter: 'blur(2px)',
-        }}>
+        }} role={emptyState === 'error' ? 'alert' : 'status'} aria-live="polite">
           {emptyState === 'loading' ? (
             <>
               <div className="cth-spinner" />

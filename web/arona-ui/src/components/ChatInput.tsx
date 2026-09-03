@@ -68,7 +68,7 @@ export function ChatInput({ surfaceId, isPhone }: { surfaceId: string; isPhone: 
           flex: 1, resize: 'none', minHeight: isPhone ? 44 : 32, maxHeight: isPhone ? 120 : 160,
           boxSizing: 'border-box', padding: '9px 11px', borderRadius: 10,
           border: `1px solid ${err ? 'var(--cth-coral)' : 'var(--cth-cream-200)'}`,
-          background: '#fff', color: 'var(--cth-ink-900)',
+          background: 'var(--cth-cream-50)', color: 'var(--cth-ink-900)',
           fontFamily: 'var(--cth-font-ui)',
           // 16px 미만이면 iOS 가 포커스 때 화면을 확대하고 스스로 안 돌아온다.
           fontSize: isPhone ? 16 : 13, lineHeight: 1.4, outline: 'none',
@@ -83,7 +83,7 @@ export function ChatInput({ surfaceId, isPhone }: { surfaceId: string; isPhone: 
           borderRadius: 10, border: 'none',
           cursor: text.trim() && !sending ? 'pointer' : 'not-allowed',
           background: text.trim() && !sending ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
-          color: text.trim() && !sending ? '#fff' : 'var(--cth-ink-300)',
+          color: text.trim() && !sending ? 'var(--cth-on-sky)' : 'var(--cth-ink-300)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}
       >

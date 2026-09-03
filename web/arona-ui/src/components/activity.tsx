@@ -7,7 +7,8 @@ export function isBuildCmd(s?: string): boolean {
   return !!s && BUILD_RE.test(s);
 }
 
-export const BUILD_COLOR = '#E5923A';
+export const BUILD_COLOR = 'var(--cth-attention-text-surface)';
+export const BUILD_COLOR_BG = 'var(--cth-attention-text-bg)';
 
 // 톱니바퀴 — 빌드/컴파일 진행. currentColor 로 색 상속.
 export function GearIcon({ size = 12 }: { size?: number }) {
@@ -15,7 +16,7 @@ export function GearIcon({ size = 12 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 16 16" style={{ display: 'block' }}>
       <path d="M8 1.4l1 1.7 1.9-.4.5 1.9 1.7 1-1 1.7 1 1.7-1.7 1-.5 1.9-1.9-.4-1 1.7-1-1.7-1.9.4-.5-1.9-1.7-1 1-1.7-1-1.7 1.7-1 .5-1.9 1.9.4 1-1.7Z"
         fill="currentColor" stroke="currentColor" strokeWidth="0.5" strokeLinejoin="round" />
-      <circle cx="8" cy="8" r="2.4" fill="#fff" />
+      <circle cx="8" cy="8" r="2.4" fill="var(--cth-cream-50)" />
     </svg>
   );
 }

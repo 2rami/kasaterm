@@ -4267,4 +4267,19 @@ mod room_rename_tests {
         assert!(tab.contains("role=\"menu\""));
         assert!(tab.contains("role=\"menuitem\""));
     }
+
+    #[test]
+    fn 보조_확인창은_키보드_포커스를_가둔_뒤_돌려준다() {
+        let panel = include_str!("../../../web/arona-ui/src/components/TerminalPeekPanel.tsx");
+        for marker in [
+            "role=\"alertdialog\"",
+            "aria-modal=\"true\"",
+            "e.key === 'Escape'",
+            "e.key !== 'Tab'",
+            "confirmCancelRef.current?.focus()",
+            "trigger?.isConnected && trigger.focus()",
+        ] {
+            assert!(panel.contains(marker), "확인창 포커스 경계 누락: {marker}");
+        }
+    }
 }

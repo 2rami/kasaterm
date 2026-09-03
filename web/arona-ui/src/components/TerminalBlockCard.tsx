@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchBlocks, fetchPeek, sendToPane, sendToInbox, listDir, openGitPanel, type PaneBlock, type PaneRect } from '../lib/mcp';
 import { AnsiText } from './AnsiText';
+import { X } from 'lucide-react';
 
 // 공백·특수문자 든 경로를 cd 인자로 안전하게 — 셸 single-quote 이스케이프.
 function shQuote(p: string): string {
@@ -212,12 +213,12 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
       {/* 상단바 — cwd · branch · diff + HISTORY/zoom/close */}
       <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, padding: '6px 9px', background: 'transparent', borderBottom: '1px solid var(--cth-ink-100)', minWidth: 0 }}>
         <span title={rect.cwd || surfaceId} style={{ ...chip, color: 'var(--cth-ink-700)', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
-          <span style={{ color: 'var(--cth-sky)', flexShrink: 0, display: 'inline-flex' }}><FolderIcon /></span>
+          <span style={{ color: 'var(--cth-sky-text-surface)', flexShrink: 0, display: 'inline-flex' }}><FolderIcon /></span>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cwd || surfaceId}</span>
         </span>
         {rect.branch && (
           <span style={{ ...chip, color: 'var(--cth-ink-500)' }}>
-            <span style={{ color: 'var(--cth-sky)', display: 'inline-flex' }}><BranchIcon /></span>
+            <span style={{ color: 'var(--cth-sky-text-surface)', display: 'inline-flex' }}><BranchIcon /></span>
             <span style={{ fontWeight: 600 }}>{rect.branch}</span>
           </span>
         )}
@@ -225,13 +226,13 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
           <span style={{ ...chip, gap: 6, color: 'var(--cth-ink-500)' }}>
             <span style={{ color: 'var(--cth-ink-300)', display: 'inline-flex' }}><FileIcon /></span>
             <span>{files}</span>
-            {ins > 0 && <span style={{ color: 'var(--cth-mint)' }}>+{ins}</span>}
-            {del > 0 && <span style={{ color: 'var(--cth-coral-text)' }}>-{del}</span>}
+            {ins > 0 && <span style={{ color: 'var(--cth-mint-text-surface)' }}>+{ins}</span>}
+            {del > 0 && <span style={{ color: 'var(--cth-coral-text-surface)' }}>-{del}</span>}
           </span>
         )}
         <div style={{ flex: 1 }} />
         <button onClick={() => { setShowHistory((v) => !v); setHistSel(Math.max(0, blocks.length - 1)); }}
-          title="HISTORY" style={{ ...btn, width: 'auto', padding: '0 8px', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, letterSpacing: 0.4, color: showHistory ? 'var(--cth-sky)' : 'var(--cth-ink-500)', borderColor: showHistory ? 'var(--cth-sky)' : 'var(--cth-cream-200)' }}>
+          title="HISTORY" style={{ ...btn, width: 'auto', padding: '0 8px', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, letterSpacing: 0.4, color: showHistory ? 'var(--cth-sky-text-surface)' : 'var(--cth-ink-500)', borderColor: showHistory ? 'var(--cth-sky)' : 'var(--cth-cream-200)' }}>
           HISTORY
         </button>
         {onToggleZoom && (
@@ -242,7 +243,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
           </button>
         )}
         {onClose && (
-          <button onClick={onClose} title="포커스" style={{ ...btn, fontFamily: 'var(--cth-font-ui)', fontSize: 14, lineHeight: 1 }}>×</button>
+          <button onClick={onClose} title="포커스" aria-label="터미널 카드 닫기" style={{ ...btn, fontFamily: 'var(--cth-font-ui)', fontSize: 14, lineHeight: 1 }}><X size={13} aria-hidden="true" /></button>
         )}
       </div>
 
@@ -284,7 +285,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
                   ) : (
                     <>
                       {!ok && b.exit_code != null && (
-                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, fontWeight: 600, color: 'var(--cth-coral-text)', flexShrink: 0 }}>exit {b.exit_code}</span>
+                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, fontWeight: 600, color: 'var(--cth-coral-text-surface)', flexShrink: 0 }}>exit {b.exit_code}</span>
                       )}
                       {b.duration_ms != null && (
                         <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, color: 'var(--cth-ink-300)', flexShrink: 0 }}>{formatDuration(b.duration_ms)}</span>
@@ -293,7 +294,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
                   )}
                   {hovered && (
                     <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }}>
-                      <button onClick={() => copyOutput(b)} title="출력 복사" style={{ ...btn, width: 20, height: 20, color: copiedId === b.id ? 'var(--cth-mint)' : 'var(--cth-ink-500)' }}><CopyIcon /></button>
+                      <button onClick={() => copyOutput(b)} title="출력 복사" style={{ ...btn, width: 20, height: 20, color: copiedId === b.id ? 'var(--cth-mint-text-surface)' : 'var(--cth-ink-500)' }}><CopyIcon /></button>
                       <button onClick={() => attachToAgent(b)} title={activeAgentId ? '에이전트에 첨부' : '출력 복사(에이전트 없음)'} style={{ ...btn, width: 20, height: 20 }}><AttachIcon /></button>
                     </span>
                   )}
@@ -320,13 +321,13 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 11px 3px', minWidth: 0 }}>
           <button onClick={openDirPopup} title="디렉토리 이동 (Tab)"
             style={{ ...chip, background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', color: 'var(--cth-ink-500)', maxWidth: '46%', overflow: 'hidden' }}>
-            <span style={{ color: 'var(--cth-sky)', flexShrink: 0, display: 'inline-flex' }}><FolderIcon /></span>
+            <span style={{ color: 'var(--cth-sky-text-surface)', flexShrink: 0, display: 'inline-flex' }}><FolderIcon /></span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cwd || surfaceId}</span>
           </button>
           {rect.branch && (
             <button onClick={() => void openGitPanel()} title="git 패널 열기"
               style={{ ...chip, background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', color: 'var(--cth-ink-500)' }}>
-              <span style={{ color: 'var(--cth-sky)', display: 'inline-flex' }}><BranchIcon /></span>
+              <span style={{ color: 'var(--cth-sky-text-surface)', display: 'inline-flex' }}><BranchIcon /></span>
               <span style={{ fontWeight: 600 }}>{rect.branch}</span>
             </button>
           )}
@@ -335,14 +336,14 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
               style={{ ...chip, gap: 6, background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0', color: 'var(--cth-ink-500)' }}>
               <span style={{ color: 'var(--cth-ink-300)', display: 'inline-flex' }}><FileIcon /></span>
               <span>{files}</span>
-              {ins > 0 && <span style={{ color: 'var(--cth-mint)' }}>+{ins}</span>}
-              {del > 0 && <span style={{ color: 'var(--cth-coral-text)' }}>-{del}</span>}
+              {ins > 0 && <span style={{ color: 'var(--cth-mint-text-surface)' }}>+{ins}</span>}
+              {del > 0 && <span style={{ color: 'var(--cth-coral-text-surface)' }}>-{del}</span>}
             </button>
           )}
         </div>
         {/* 입력 줄 — 박스/테두리 없이 배경 위에 직접, 커서만(caret sky). 멀티라인 자동 높이. */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '0 11px 2px' }}>
-          <span style={{ color: 'var(--cth-sky)', fontFamily: 'var(--cth-font-mono)', fontSize: 13, fontWeight: 700, lineHeight: 1.65, flexShrink: 0, userSelect: 'none' }}>❯</span>
+          <span style={{ color: 'var(--cth-sky-text-surface)', fontFamily: 'var(--cth-font-mono)', fontSize: 13, fontWeight: 700, lineHeight: 1.65, flexShrink: 0, userSelect: 'none' }}>❯</span>
           <textarea ref={inputRef} value={input} rows={1}
             onChange={(e) => { setInput(e.target.value); setHistIdx(-1); autoGrow(e.target); }}
             onKeyDown={(e) => {
@@ -454,8 +455,8 @@ function DirPopup({ browsePath, items, filter, setFilter, sel, setSel, onActivat
             const on = i === sel;
             return (
               <div key={it.parent ? '..' : it.name} onMouseEnter={() => setSel(i)} onClick={() => onActivate(i)}
-                style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '7px 12px', cursor: 'pointer', background: on ? 'var(--cth-sky)' : 'transparent', color: on ? '#fff' : 'var(--cth-ink-700)' }}>
-                <span style={{ display: 'inline-flex', color: on ? '#fff' : 'var(--cth-sky)', flexShrink: 0 }}>
+                style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '7px 12px', cursor: 'pointer', background: on ? 'var(--cth-sky)' : 'transparent', color: on ? 'var(--cth-on-sky)' : 'var(--cth-ink-700)' }}>
+                <span style={{ display: 'inline-flex', color: on ? 'var(--cth-on-sky)' : 'var(--cth-sky-text-bg)', flexShrink: 0 }}>
                   {it.parent ? <UpIcon /> : <FolderIcon />}
                 </span>
                 <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

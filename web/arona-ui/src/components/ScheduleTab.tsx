@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '@/store';
 import { fetchSchedule, addSchedule, deleteSchedule, type ScheduleItem } from '@/lib/mcp';
+import { Pause, Play, X } from 'lucide-react';
 
 type Kind = 'loop' | 'cron' | 'timer';
 const KIND_LABEL: Record<Kind, string> = { loop: '반복 루프', cron: '예약', timer: '타이머' };
@@ -65,7 +66,7 @@ export function ScheduleTab() {
         <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 11, color: 'var(--cth-ink-500)', flex: 1 }}>루프 · 예약 · 타이머</span>
         <button onClick={() => setAdding((v) => !v)} style={{
           padding: '4px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
-          background: adding ? 'var(--cth-cream-200)' : 'var(--cth-sky)', color: adding ? 'var(--cth-ink-500)' : '#fff',
+          background: adding ? 'var(--cth-cream-200)' : 'var(--cth-sky)', color: adding ? 'var(--cth-ink-500)' : 'var(--cth-on-sky)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700,
         }}>{adding ? '닫기' : '+ 추가'}</button>
       </div>
@@ -77,7 +78,7 @@ export function ScheduleTab() {
             {(['loop', 'cron', 'timer'] as Kind[]).map((k) => (
               <button key={k} onClick={() => setKind(k)} style={{
                 flex: 1, padding: '5px 0', borderRadius: 7, border: 'none', cursor: 'pointer',
-                background: kind === k ? KIND_COLOR[k] : '#fff', color: kind === k ? '#fff' : 'var(--cth-ink-500)',
+                background: kind === k ? KIND_COLOR[k] : 'var(--cth-cream-50)', color: kind === k ? 'var(--cth-on-color)' : 'var(--cth-ink-500)',
                 boxShadow: kind === k ? 'none' : 'inset 0 0 0 1px var(--cth-cream-200)',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
               }}>{KIND_LABEL[k]}</button>
@@ -96,13 +97,13 @@ export function ScheduleTab() {
             </label>
           )}
           {agents.length === 0 && (
-            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral-text)' }}>
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral-text-surface)' }}>
               살아있는 캐릭터가 없어 예약을 보낼 대상이 없습니다.
             </div>
           )}
           <button onClick={() => void submit()} disabled={busy || !text.trim() || !surface} style={{
             padding: '7px 0', borderRadius: 8, border: 'none', cursor: busy || !text.trim() || !surface ? 'not-allowed' : 'pointer',
-            background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
+            background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: 'var(--cth-on-color)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
             opacity: busy || !text.trim() || !surface ? 0.5 : 1,
           }}>{busy ? '등록 중…' : '등록'}</button>
         </div>
@@ -119,13 +120,13 @@ export function ScheduleTab() {
           const k = it.kind as Kind;
           return (
             <div key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 4px', borderBottom: '1px solid var(--cth-cream-200)', opacity: it.enabled ? 1 : 0.45 }}>
-              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: '#fff', background: KIND_COLOR[k] ?? 'var(--cth-ink-300)', padding: '1px 6px', borderRadius: 5, flexShrink: 0 }}>{KIND_LABEL[k] ?? it.kind}</span>
+              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: 'var(--cth-on-color)', background: KIND_COLOR[k] ?? 'var(--cth-ink-300)', padding: '1px 6px', borderRadius: 5, flexShrink: 0 }}>{KIND_LABEL[k] ?? it.kind}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.text}</div>
                 <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)' }}>{ag?.character ?? it.surface} · {whenText(it)}</div>
               </div>
-              <button onClick={() => void deleteSchedule(it.id, true).then(() => fetchSchedule().then(setItems))} title={it.enabled ? '일시정지' : '재개'} style={iconBtn}>{it.enabled ? '⏸' : '▶'}</button>
-              <button onClick={() => void deleteSchedule(it.id).then(() => fetchSchedule().then(setItems))} title="삭제" style={iconBtn}>×</button>
+              <button onClick={() => void deleteSchedule(it.id, true).then(() => fetchSchedule().then(setItems))} title={it.enabled ? '일시정지' : '재개'} aria-label={it.enabled ? '예약 일시정지' : '예약 재개'} style={iconBtn}>{it.enabled ? <Pause size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}</button>
+              <button onClick={() => void deleteSchedule(it.id).then(() => fetchSchedule().then(setItems))} title="삭제" aria-label="예약 삭제" style={iconBtn}><X size={13} aria-hidden="true" /></button>
             </div>
           );
         })}
@@ -136,10 +137,11 @@ export function ScheduleTab() {
 
 const inStyle: React.CSSProperties = {
   width: '100%', padding: '6px 9px', borderRadius: 8, border: '1px solid var(--cth-cream-200)',
-  outline: 'none', fontFamily: 'var(--cth-font-ui)', fontSize: 12, background: '#fff', color: 'var(--cth-ink-900)', boxSizing: 'border-box',
+  outline: 'none', fontFamily: 'var(--cth-font-ui)', fontSize: 12, background: 'var(--cth-cream-50)', color: 'var(--cth-ink-900)', boxSizing: 'border-box',
 };
 const selStyle: React.CSSProperties = { ...inStyle };
 const iconBtn: React.CSSProperties = {
   width: 24, height: 24, borderRadius: 6, border: 'none', cursor: 'pointer', flexShrink: 0,
   background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)', fontSize: 13, lineHeight: 1,
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
 };

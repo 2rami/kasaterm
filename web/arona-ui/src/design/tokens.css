@@ -20,10 +20,20 @@
 
   /* Accents — sky = SCHALE primary 블루 */
   --cth-coral: #FF6B6B;       --cth-coral-light: #FFB4B4;
-  --cth-coral-text: #B42318;
+  --cth-coral-text-bg: #B42318;
+  --cth-coral-text-surface: #B42318;
   --cth-on-coral: #000000;
   --cth-on-sky: #000000;
+  --cth-sky-text-bg: #245EA8;
+  --cth-sky-text-surface: #245EA8;
+  --cth-attention: #FA8C2A;
+  --cth-on-attention: #000000;
+  --cth-attention-text-bg: #8A4700;
+  --cth-attention-text-surface: #8A4700;
+  --cth-on-color: #000000;
   --cth-mint:  #6BCF7F;       --cth-mint-light:  #B4E5BD;
+  --cth-mint-text-bg: #167A35;
+  --cth-mint-text-surface: #167A35;
   --cth-sky:   #4A90E2;       --cth-sky-light:   #A9CBF0;
   --cth-lemon: #FFD93D;       --cth-lemon-light: #FFEC99;
   --cth-lilac: #B197FC;       --cth-lilac-light: #D6C5FF;
@@ -85,7 +95,7 @@
   --cth-panel-border-dialog:   inset 0 0 0 1px var(--cth-cream-300);
 }
 
-/* 다크 모드 — 태양 버튼 토글(거노). 토큰 *이름* 유지·값만 재매핑: cream=어두운 네이비
+/* 다크 모드 폴백. 런타임에는 터미널 팔레트가 같은 토큰을 덮는다: cream=어두운 네이비
    표면, ink=밝은 텍스트(반전), accent 는 유지하되 light 변형만 어두운 톤(hover 배경용).
    SCHALE 의 클린 블루 정체성을 밤버전으로. */
 :root[data-theme="dark"] {
@@ -106,12 +116,19 @@
 
   /* Accent light 변형 = 어두운 배경용(hover/선택 면) */
   --cth-sky-light:   #2C4368;
+  --cth-sky-text-bg: #75AEF0;
+  --cth-sky-text-surface: #75AEF0;
   --cth-coral-light: #4A2E36;
-  --cth-coral-text: #FF8A82;
+  --cth-coral-text-bg: #FF8A82;
+  --cth-coral-text-surface: #FF8A82;
   --cth-mint-light:  #2A4536;
+  --cth-mint-text-bg: #7CE38B;
+  --cth-mint-text-surface: #7CE38B;
   --cth-lemon-light: #4A4326;
   --cth-lilac-light: #383056;
   --cth-peach-light: #4A372C;
+  --cth-attention-text-bg: #FFB66B;
+  --cth-attention-text-surface: #FFB66B;
 
   color-scheme: dark;
 }

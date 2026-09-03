@@ -238,6 +238,7 @@ export function CharacterDetail({
   }
 
   const currentChoice = models.find((m) => model === m.model && backend === m.backend);
+  const recommendedChoice = models[0];
   const primaryModels = [currentChoice, models[0], models[1]]
     .filter((m): m is ModelChoice => !!m)
     .filter((m, i, all) => all.findIndex((x) => x.model === m.model && x.backend === m.backend) === i);
@@ -433,12 +434,13 @@ export function CharacterDetail({
           {/* 후보 수가 고정이 아니다(원본에 적어 늘릴 수 있다) — 한 줄로 두면
               넣는 순간 오른쪽이 잘리므로 접히게 둔다. */}
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {shownModels.map((m, index) => {
+            {shownModels.map((m) => {
               const on = model === m.model && backend === m.backend;
               return (
                 <button
                   key={`${m.model}|${m.backend}`}
                   type="button"
+                  aria-pressed={on}
                   onClick={() => saveModel(m)}
                   disabled={saving}
                   className="min-h-[40px] px-3 py-1.5 text-[13px]"
@@ -451,7 +453,13 @@ export function CharacterDetail({
                   }}
                 >
                   {m.label}
-                  {on ? ` · ${t.detail.modelCurrent}` : index === 0 ? ` · ${t.detail.modelRecommended}` : ''}
+                  {on
+                    ? ` · ${t.detail.modelCurrent}`
+                    : recommendedChoice
+                        && m.model === recommendedChoice.model
+                        && m.backend === recommendedChoice.backend
+                      ? ` · ${t.detail.modelRecommended}`
+                      : ''}
                 </button>
               );
             })}

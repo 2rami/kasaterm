@@ -17,7 +17,7 @@ export const colors = {
     900: 0x15294a,
     700: 0x25406b,
     500: 0x4a638f,
-    300: 0x8aa6c8,
+    300: 0x4a638f,
     100: 0xcbdcef
   },
   accent: {

@@ -165,9 +165,12 @@ export function App() {
 
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
   useEffect(() => {
-    // solo 모드 마커 폐기(잔재 정리) — 웹뷰는 항상 SCHALE OS 교실. 초기 1회 ready 만.
-    void refreshRuntimeTheme();
-    setReady(true);
+    let live = true;
+    const fallback = new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+    void Promise.race([refreshRuntimeTheme(), fallback]).finally(() => {
+      if (live) setReady(true);
+    });
+    return () => { live = false; };
   }, []);
   useEffect(() => {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
@@ -272,7 +275,7 @@ export function App() {
   }, [layoutRects, zoomedSurface]);
 
   if (!ready) {
-    return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
+    return <div role="status" aria-live="polite" style={{ padding: 24, color: 'var(--cth-ink-500)' }}>팔레트를 불러오는 중…</div>;
   }
 
   // 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
@@ -468,7 +471,7 @@ export function App() {
                     <div style={{ width: 360, flexShrink: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
                       {/* 서브에이전트 뷰 열 — 부모(학생) 세션에 속한 영역임을 헤더로 못박는다(거노:
                           다른 pane 과 헷갈리지 않게). 각 타일은 부모 이름 prefix + 스카이 좌측 띠로 묶음. */}
-                      <div style={{ flexShrink: 0, padding: '6px 12px', fontFamily: 'var(--cth-font-display)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', borderBottom: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{ flexShrink: 0, padding: '6px 12px', fontFamily: 'var(--cth-font-display)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky-text-surface)', borderBottom: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'center', gap: 6 }}>
                         <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
                         서브에이전트 뷰
                       </div>

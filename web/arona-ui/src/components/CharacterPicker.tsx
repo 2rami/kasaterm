@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { fetchCharacters, fetchThemeRoster, fetchThemesList, characterPool, characterFaceUrl, type CharacterDef } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 
@@ -36,6 +36,13 @@ export function CharacterPicker({ title, note, onPick, onClose }: {
 }) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const dialog = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+  const titleId = useId();
+  const close = () => {
+    onClose();
+    window.requestAnimationFrame(() => trigger.current?.focus());
+  };
   useEffect(() => {
     void (async () => {
       const [act, meta] = await Promise.all([fetchCharacters(), fetchThemesList()]);
@@ -60,18 +67,45 @@ export function CharacterPicker({ title, note, onPick, onClose }: {
       setLoaded(true);
     })();
   }, []);
+  useEffect(() => {
+    if (loaded) dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    else dialog.current?.focus();
+  }, [loaded]);
   return (
-    <div onClick={onClose} style={{
+    <div onClick={close} style={{
       position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(21,41,74,0.35)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
+      <div
+        ref={dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            close();
+            return;
+          }
+          if (e.key !== 'Tab') return;
+          const items = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button, [tabindex="0"]') ?? []);
+          if (!items.length) return;
+          const first = items[0];
+          const last = items[items.length - 1];
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault(); last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault(); first.focus();
+          }
+        }}
+        onClick={(e) => e.stopPropagation()} style={{
         // 390px 폰에서 340 은 좌우 여백이 25px 씩밖에 안 남는다. 데스크톱에선 그대로 340.
         background: 'var(--cth-cream-50)', borderRadius: 16, padding: 18, width: 'min(340px, 92vw)',
         maxHeight: '72vh', display: 'flex', flexDirection: 'column',
         boxShadow: '0 8px 32px rgba(21,41,74,0.25)',
       }}>
-        <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: note ? 4 : 12 }}>{title}</div>
+        <div id={titleId} style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: note ? 4 : 12 }}>{title}</div>
         {note && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', marginBottom: 12 }}>{note}</div>}
         <div style={{ overflowY: 'auto', minHeight: 0 }}>
           {!loaded ? (
@@ -84,9 +118,9 @@ export function CharacterPicker({ title, note, onPick, onClose }: {
               }}>{g.label}</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                 {g.pool.map((c) => (
-                  <button key={`${g.key}:${c.name}`} onClick={() => onPick(c.name)} className="cth-titlebar-nodrag" style={{
+                  <button key={`${g.key}:${c.name}`} onClick={() => { onPick(c.name); window.requestAnimationFrame(() => trigger.current?.focus()); }} className="cth-titlebar-nodrag" style={{
                     display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 10,
-                    border: '1px solid var(--cth-cream-200)', background: '#fff', cursor: 'pointer', textAlign: 'left',
+                    border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)', cursor: 'pointer', textAlign: 'left',
                   }}>
                     <div style={{ width: 32, height: 32, borderRadius: 8, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                       <Face c={c} theme={g.theme} />

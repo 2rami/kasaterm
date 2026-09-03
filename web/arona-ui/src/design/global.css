@@ -26,7 +26,7 @@ body {
   background: linear-gradient(180deg, #DCEBFA 0%, #EAF3FC 45%, #F5FAFE 100%);
 }
 
-/* 다크 모드 — 깊은 네이비 그라데이션(태양 버튼 토글). */
+/* 다크 모드 폴백 — 런타임 토큰이 오기 전에도 깊은 네이비를 유지한다. */
 :root[data-theme="dark"] body {
   background: linear-gradient(180deg, #10172E 0%, #18213D 45%, #20294A 100%);
 }
@@ -55,7 +55,7 @@ canvas { image-rendering: pixelated; }
 
 /* Focus ring — SCHALE blue */
 :focus-visible {
-  outline: 2px solid var(--cth-sky);
+  outline: 2px solid var(--cth-sky) !important;
   outline-offset: 2px;
 }
 

@@ -1254,14 +1254,45 @@ pub enum NoticeTone {
 }
 
 pub fn notice_tone(message: &str, has_action: bool) -> NoticeTone {
-    let m = message.trim().to_ascii_lowercase();
-    if has_action || m.contains("권한") || m.contains("확인 필요") || m.contains("attention") {
+    let raw = message.trim();
+    let m = raw.to_ascii_lowercase();
+    if has_action {
         NoticeTone::Attention
-    } else if m.contains("실패") || m.contains("오류") || m.contains("failed") || m.contains("error") {
+    } else if raw.starts_with('✗')
+        || m.contains("실패")
+        || m.contains("오류")
+        || m.contains("못")
+        || m.contains("수 없")
+        || m.contains("불가")
+        || m.contains("failed")
+        || m.contains("error")
+    {
         NoticeTone::Error
-    } else if m.contains("주의") || m.contains("경고") || m.contains("재시작") || m.contains("warning") {
+    } else if raw.starts_with('✓') {
+        NoticeTone::Success
+    } else if raw.starts_with('⚠')
+        || m.contains("권한")
+        || m.contains("확인 필요")
+        || m.contains("계정 한도")
+        || m.contains("로그인 필요")
+        || m.contains("attention")
+    {
+        NoticeTone::Attention
+    } else if m.contains("주의")
+        || m.contains("경고")
+        || m.contains("재시작")
+        || m.contains("부족")
+        || m.contains("warning")
+    {
         NoticeTone::Warning
-    } else if m.contains("완료") || m.contains("저장했") || m.contains("복사됨") || m.contains("success") {
+    } else if m.contains("완료")
+        || m.contains("저장했")
+        || m.contains("복사됨")
+        || m.contains("치웠어요")
+        || m.contains("만들었어요")
+        || m.contains("바꿨어요")
+        || m.contains("success")
+    {
         NoticeTone::Success
     } else {
         NoticeTone::Info
@@ -1782,11 +1813,15 @@ pub fn tokens_json() -> serde_json::Value {
             "surface_active": css_hex(surface_active()),
             "border": css_hex(border()),
             "accent": css_hex(accent()),
+            "accent_text_bg": css_hex(enforce_contrast_at(accent(), bg(), 4.5)),
+            "accent_text_surface": css_hex(enforce_contrast_at(accent(), surface(), 4.5)),
             "on_accent": css_hex(foreground_on(accent())),
             "text": css_hex(text()),
             "text_dim": css_hex(text_dim()),
             "text_mute": css_hex(text_mute()),
             "success": css_hex(success()),
+            "success_text_bg": css_hex(enforce_contrast_at(success(), bg(), 4.5)),
+            "success_text_surface": css_hex(enforce_contrast_at(success(), surface(), 4.5)),
             "danger": css_hex(danger()),
             "on_danger": css_hex(foreground_on(danger())),
             "danger_text_bg": css_hex(enforce_contrast_at(danger(), bg(), 4.5)),
@@ -1794,6 +1829,9 @@ pub fn tokens_json() -> serde_json::Value {
             // 테마 슬롯이 아니라 고정값이다 — 「내 손을 기다린다」는 취향이 아니라
             // 신호이고, 테마마다 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다.
             "attention": css_hex(attention()),
+            "on_attention": css_hex(foreground_on(attention())),
+            "attention_text_bg": css_hex(enforce_contrast_at(attention(), bg(), 4.5)),
+            "attention_text_surface": css_hex(enforce_contrast_at(attention(), surface(), 4.5)),
             "syn_keyword": css_hex(syn_keyword()),
             "syn_string": css_hex(syn_string()),
             "syn_number": css_hex(syn_number()),
@@ -1838,14 +1876,25 @@ mod roster_tests {
     }
 
     #[test]
-    fn 채움_위_글자와_오류_글자는_최소_대비를_넘긴다() {
-        for fill in [[90, 140, 230, 255], [224, 88, 78, 255], [128, 128, 128, 255]] {
+    fn 채움과_상태_글자는_각_배경의_최소_대비를_넘긴다() {
+        for fill in [accent(), success(), danger(), attention(), [128, 128, 128, 255]] {
             assert!(contrast_of(luminance(foreground_on(fill)), luminance(fill)) >= 4.5);
         }
-        let danger_bg = enforce_contrast_at(danger(), bg(), 4.5);
-        let danger_surface = enforce_contrast_at(danger(), surface(), 4.5);
-        assert!(contrast_of(luminance(danger_bg), luminance(bg())) >= 4.5);
-        assert!(contrast_of(luminance(danger_surface), luminance(surface())) >= 4.5);
+        for status in [accent(), success(), danger(), attention()] {
+            let text_bg = enforce_contrast_at(status, bg(), 4.5);
+            let text_surface = enforce_contrast_at(status, surface(), 4.5);
+            assert!(contrast_of(luminance(text_bg), luminance(bg())) >= 4.5);
+            assert!(contrast_of(luminance(text_surface), luminance(surface())) >= 4.5);
+        }
+        let tokens = tokens_json();
+        let palette = tokens["palette"].as_object().unwrap();
+        for key in [
+            "accent_text_bg", "accent_text_surface", "success_text_bg", "success_text_surface",
+            "danger_text_bg", "danger_text_surface", "attention_text_bg", "attention_text_surface",
+            "on_accent", "on_danger", "on_attention",
+        ] {
+            assert!(palette.get(key).and_then(|v| v.as_str()).is_some(), "누락된 역할 토큰: {key}");
+        }
     }
 
     #[test]
@@ -1853,6 +1902,15 @@ mod roster_tests {
         assert_eq!(notice_tone("저장 완료", false), NoticeTone::Success);
         assert_eq!(notice_tone("재시작하면 적용", false), NoticeTone::Warning);
         assert_eq!(notice_tone("빌드 실패", false), NoticeTone::Error);
+        assert_eq!(notice_tone("창을 만들지 못했어요", false), NoticeTone::Error);
+        assert_eq!(notice_tone("지금 열 수 없습니다", false), NoticeTone::Error);
+        assert_eq!(notice_tone("변경사항 때문에 전환 불가", false), NoticeTone::Error);
+        assert_eq!(notice_tone("메모리 부족", false), NoticeTone::Warning);
+        assert_eq!(notice_tone("✓ 3곳 바꿈", false), NoticeTone::Success);
+        assert_eq!(notice_tone("테마를 치웠어요", false), NoticeTone::Success);
+        assert_eq!(notice_tone("계정 한도 — 옮겨갈 계정이 없어요", false), NoticeTone::Attention);
+        assert_eq!(notice_tone("로그인 필요", false), NoticeTone::Attention);
+        assert_eq!(notice_tone("⚠ 저장 실패: 권한 없음", false), NoticeTone::Error);
         assert_eq!(notice_tone("권한 필요", false), NoticeTone::Attention);
         assert_eq!(notice_tone("새 소식", false), NoticeTone::Info);
         assert_eq!(notice_tone("설치할까요", true), NoticeTone::Attention);

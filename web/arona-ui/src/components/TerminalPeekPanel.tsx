@@ -1,4 +1,4 @@
-import { Fragment, type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, type CSSProperties, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { fetchConversation, fetchTranscriptChunk, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, fetchMessages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, resumeCommand, revealTerminal, closeAgent, repersona, type Harness, type Turn, type MessageEntry } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { CharacterPicker } from './CharacterPicker';
@@ -13,6 +13,7 @@ import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
 import { useIsPhone } from '@/lib/useIsPhone';
 import { ChatInput } from './ChatInput';
 import { accentByName, hex, type AccentColorName } from '@/design/tokens';
+import { X } from 'lucide-react';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
 // 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(거노:
@@ -616,22 +617,22 @@ const SCROLL_BTN: CSSProperties = {
 function MetaChip({ label, dim, onClick, tone, title, dot }: { label: string; dim?: boolean; onClick?: () => void; tone?: 'danger' | 'sky'; title?: string; dot?: string }) {
   const danger = tone === 'danger';
   const sky = tone === 'sky'; // 서브에이전트 칩 — launch 마커·WorkflowCard 와 색 통일(거노)
-  return (
-    <span
-      onClick={onClick}
-      title={title ?? (onClick ? '클릭해서 변경' : undefined)}
-      style={{
-        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: danger ? 700 : 600,
-        padding: '2px 8px', borderRadius: 6,
-        background: danger ? 'color-mix(in srgb, var(--cth-coral) 16%, #fff)' : sky ? 'var(--cth-sky-light)' : dim ? 'transparent' : 'var(--cth-cream-100)',
-        color: danger ? 'var(--cth-coral)' : sky ? 'var(--cth-sky)' : dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
-        border: danger ? '1px solid var(--cth-coral)' : sky ? '1px solid var(--cth-sky)' : dim ? 'none' : '1px solid var(--cth-cream-200)',
-        cursor: onClick ? 'pointer' : undefined,
-      }}>
+  const style: CSSProperties = {
+    fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: danger ? 700 : 600,
+    padding: '2px 8px', borderRadius: 6,
+    background: danger ? 'color-mix(in srgb, var(--cth-coral) 16%, var(--cth-cream-50))' : sky ? 'var(--cth-sky-light)' : dim ? 'transparent' : 'var(--cth-cream-100)',
+    color: danger ? 'var(--cth-coral-text-bg)' : sky ? 'var(--cth-sky-text-surface)' : dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
+    border: danger ? '1px solid var(--cth-coral)' : sky ? '1px solid var(--cth-sky)' : dim ? 'none' : '1px solid var(--cth-cream-200)',
+    cursor: onClick ? 'pointer' : undefined,
+  };
+  const content = <>
       {dot && <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 999, background: dot, marginRight: 5, verticalAlign: 'middle' }} />}
       {label}
-    </span>
-  );
+  </>;
+  const chipTitle = title ?? (onClick ? '클릭해서 변경' : undefined);
+  return onClick
+    ? <button type="button" onClick={onClick} title={chipTitle} style={{ ...style, appearance: 'none' }}>{content}</button>
+    : <span title={chipTitle} style={style}>{content}</span>;
 }
 
 // 권한 모드(transcript permissionMode) → 칩 라벨. default/normal 은 일반 상태라 미표시(null).
@@ -648,8 +649,8 @@ function modeLabel(m: string | null): string | null {
 function modeStyle(m: string | null): { bg: string; fg: string; border: string } | null {
   switch (m) {
     case 'plan': return { bg: '#EEEBFF', fg: '#6B4EE6', border: '#B6A8F5' };
-    case 'acceptEdits': return { bg: 'color-mix(in srgb, var(--cth-mint) 16%, #fff)', fg: 'var(--cth-mint)', border: 'var(--cth-mint)' };
-    case 'bypassPermissions': return { bg: 'color-mix(in srgb, var(--cth-coral) 16%, #fff)', fg: 'var(--cth-coral)', border: 'var(--cth-coral)' };
+    case 'acceptEdits': return { bg: 'color-mix(in srgb, var(--cth-mint) 16%, var(--cth-cream-50))', fg: 'var(--cth-mint-text-bg)', border: 'var(--cth-mint)' };
+    case 'bypassPermissions': return { bg: 'color-mix(in srgb, var(--cth-coral) 16%, var(--cth-cream-50))', fg: 'var(--cth-coral-text-bg)', border: 'var(--cth-coral)' };
     default: return null;
   }
 }
@@ -674,8 +675,8 @@ function MenuItem({ label, danger, onClick }: { label: string; danger?: boolean;
       onMouseLeave={() => setH(false)}
       style={{
         textAlign: 'left', padding: '7px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
-        background: h ? (danger ? 'color-mix(in srgb, var(--cth-coral) 12%, #fff)' : 'var(--cth-sky-light)') : 'transparent',
-        color: danger ? 'var(--cth-coral)' : 'var(--cth-ink-700)',
+        background: h ? (danger ? 'color-mix(in srgb, var(--cth-coral) 12%, var(--cth-cream-50))' : 'var(--cth-sky-light)') : 'transparent',
+        color: danger ? 'var(--cth-coral-text-bg)' : 'var(--cth-ink-700)',
         fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
       }}
     >{label}</button>
@@ -748,7 +749,7 @@ function ChatBubble({
     ? (cancelled ? 'var(--cth-cream-200)' : queued ? '#FFF3D6' : MOMO_TEACHER_BUBBLE)
     : 'var(--cth-cream-50)';
   const fg = mine
-    ? (cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500' : '#FFFFFF')
+    ? (cancelled ? 'var(--cth-ink-500)' : queued ? '#5F5000' : 'var(--cth-on-color)')
     : 'var(--cth-ink-900)';
   return (
     <div style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: grouped ? 3 : 12 }}>
@@ -992,10 +993,10 @@ function WorkflowCard({ item, subList, onDrill }: {
     <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
       <div style={{ maxWidth: '92%', width: '100%', border: '1px solid var(--cth-sky)', borderRadius: 12, background: 'var(--cth-sky-light)', overflow: 'hidden' }}>
         <button onClick={() => setOpen((o) => !o)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
-          <svg width="14" height="14" viewBox="0 0 16 16" style={{ flexShrink: 0, color: 'var(--cth-sky)' }}><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
-          <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 12, fontWeight: 700, color: 'var(--cth-sky)' }}>워크플로</span>
+          <svg width="14" height="14" viewBox="0 0 16 16" style={{ flexShrink: 0, color: 'var(--cth-sky-text-surface)' }}><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 12, fontWeight: 700, color: 'var(--cth-sky-text-surface)' }}>워크플로</span>
           <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name || item.description || '이름 없음'}</span>
-          <span style={{ marginLeft: 'auto', flexShrink: 0, padding: '1px 8px', borderRadius: 999, background: 'var(--cth-cream-50)', color: 'var(--cth-sky)', fontSize: 10, fontWeight: 700 }}>{item.phases.length ? `${item.phases.length}단계 · ` : ''}에이전트 {item.agentCount}</span>
+          <span style={{ marginLeft: 'auto', flexShrink: 0, padding: '1px 8px', borderRadius: 999, background: 'var(--cth-cream-50)', color: 'var(--cth-sky-text-bg)', fontSize: 10, fontWeight: 700 }}>{item.phases.length ? `${item.phases.length}단계 · ` : ''}에이전트 {item.agentCount}</span>
         </button>
         {open && (
           <div style={{ padding: '0 12px 10px' }}>
@@ -1004,7 +1005,7 @@ function WorkflowCard({ item, subList, onDrill }: {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: item.agents.length ? 8 : 0 }}>
                 {item.phases.map((p, i) => (
                   <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 6, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-700)' }}>
-                    <span style={{ fontWeight: 700, color: 'var(--cth-sky)' }}>{i + 1}</span>{p}
+                    <span style={{ fontWeight: 700, color: 'var(--cth-sky-text-surface)' }}>{i + 1}</span>{p}
                   </span>
                 ))}
               </div>
@@ -1019,7 +1020,7 @@ function WorkflowCard({ item, subList, onDrill }: {
                       onClick={drillable ? () => onDrill!(m!.agentId, m!.agentType, m!.description || tok) : undefined}
                       title={drillable ? '이 에이전트 대화를 따로 열기' : '아직 시작 전(드릴인 불가)'}
                       style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '5px 9px', borderRadius: 8, border: '1px solid var(--cth-cream-200)', background: drillable ? 'var(--cth-cream-50)' : 'transparent', cursor: drillable ? 'pointer' : 'default', textAlign: 'left', fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: drillable ? 'var(--cth-ink-900)' : 'var(--cth-ink-300)' }}>
-                      <span style={{ color: 'var(--cth-sky)', fontWeight: 700, flexShrink: 0 }}>↳</span>
+                      <span style={{ color: 'var(--cth-sky-text-surface)', fontWeight: 700, flexShrink: 0 }}>↳</span>
                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tok}</span>
                       {m && Date.now() / 1000 - m.mtime < 60 && <span style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 999, background: 'var(--cth-sky)' }} />}
                     </button>
@@ -1128,9 +1129,9 @@ function TaskStrip({ tasks }: { tasks: StripTask[] }) {
             <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, lineHeight: 1.35 }}>
               <span style={{ flexShrink: 0, marginTop: 2, width: 13, height: 13, display: 'inline-flex' }}>
                 {cp ? (
-                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-mint)" /><path d="M4.5 8.2l2.2 2.2 4.8-4.8" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-mint)" /><path d="M4.5 8.2l2.2 2.2 4.8-4.8" stroke="var(--cth-on-color)" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 ) : ip ? (
-                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-sky)" /><circle cx="8" cy="8" r="2.6" fill="#fff" /></svg>
+                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-sky)" /><circle cx="8" cy="8" r="2.6" fill="var(--cth-on-sky)" /></svg>
                 ) : (
                   <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="var(--cth-ink-300)" strokeWidth="1.6" /></svg>
                 )}
@@ -1217,6 +1218,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 정리해 대화창 안에 보여준다. null=비활성, 그 외=정리된 그리드 텍스트.
   const [ctxView, setCtxView] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const confirmDialogRef = useRef<HTMLDivElement>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement>(null);
+  const confirmTriggerRef = useRef<HTMLElement | null>(null);
+  const confirmTitleId = useId();
+  const confirmDescriptionId = useId();
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
   const evtLenRef = useRef(0); // 직전 events 길이 — 위로 올려둔 중 증가하면 newMsg(새 대화 도착)
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
@@ -1238,6 +1244,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 직접 user 버블로 남긴다(거노: 뭐 선택했는지 대화창에 떠야). surface 바뀌면 리셋.
   const [myChoices, setMyChoices] = useState<Turn[]>([]);
   useEffect(() => { setMyChoices([]); setPermPrompt(false); dismissedQRef.current = null; }, [surfaceId]);
+  useEffect(() => {
+    if (!confirm) return;
+    confirmTriggerRef.current = document.activeElement as HTMLElement | null;
+    window.requestAnimationFrame(() => confirmCancelRef.current?.focus());
+    return () => {
+      const trigger = confirmTriggerRef.current;
+      window.requestAnimationFrame(() => trigger?.isConnected && trigger.focus());
+    };
+  }, [confirm]);
 
   // 대화 내역: transcript jsonl 우선(깨끗), 비었으면 PTY 화면(peek) 폴백 — 인터랙티브
   // claude 가 jsonl 을 라이브로 안 써 진행 중엔 transcript 가 빈다(claude-code-guide
@@ -1794,7 +1809,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           title={onToggleZoom ? (zoomed ? '클릭 — 전체화면 해제' : '클릭 — 임시 전체화면') : undefined}
           style={{ display: 'inline-flex', alignItems: 'baseline', gap: 7, minWidth: 0, overflow: 'hidden', userSelect: 'none', cursor: onToggleZoom ? 'pointer' : 'default', padding: '2px 6px', margin: '-2px -6px', borderRadius: 7, background: titleHover ? 'var(--cth-sky-light)' : 'transparent', transition: 'background .12s', flexShrink: 1 }}>
           {onToggleZoom && titleHover && (
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, alignSelf: 'center', color: 'var(--cth-sky)' }}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, alignSelf: 'center', color: 'var(--cth-sky-text-bg)' }}>
               {zoomed
                 ? <path d="M9 3h4v4M13 3l-4 4M7 13H3V9M3 13l4-4" />
                 : <path d="M3 7V3h4M13 9v4H9M3 3l4 4M13 13l-4-4" />}
@@ -1805,7 +1820,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
             {session?.transferred ? (
               // ←← detach 로 방금 background 로 넘어온 세션 — 일반 오프라인과 구분(앰버 번개).
-              <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, #E5923A 16%, #fff)', color: '#B5701F', border: '1px solid color-mix(in srgb, #E5923A 40%, #fff)', fontWeight: 700, fontSize: 10, whiteSpace: 'nowrap' }}>
+              <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, var(--cth-attention) 16%, var(--cth-cream-50))', color: 'var(--cth-attention-text-bg)', border: '1px solid color-mix(in srgb, var(--cth-attention) 40%, var(--cth-cream-50))', fontWeight: 700, fontSize: 10, whiteSpace: 'nowrap' }}>
                 <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 2 3.5 9H8l-1 5 5.5-7H8l1-5Z" /></svg>백그라운드로 넘어감
               </span>
             ) : (
@@ -1813,9 +1828,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             )}</>
           ) : isSub ? (
             <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
-            <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky)', fontWeight: 700, fontSize: 10 }}>서브에이전트</span></>
+            <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky-text-surface)', fontWeight: 700, fontSize: 10 }}>서브에이전트</span></>
           ) : (
-            <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: titleHover ? 'var(--cth-sky)' : 'var(--cth-ink-900)', whiteSpace: 'nowrap', flexShrink: 0 }}>{avatarChar}</span>
+            <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: titleHover ? 'var(--cth-sky-text-bg)' : 'var(--cth-ink-900)', whiteSpace: 'nowrap', flexShrink: 0 }}>{avatarChar}</span>
             {liveTask && <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 400, color: 'var(--cth-ink-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, maxWidth: 220 }}>{liveTask}</span>}</>
           )}
         </span>
@@ -1840,7 +1855,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <button
             onClick={() => { setFooterHidden(false); try { localStorage.setItem('schale-footer-hidden', '0'); } catch { /* sandbox */ } setFooterOpen(true); }}
             title={`진행 중 — 클릭하면 하단바를 펼쳐요\n${[...(agent?.background ?? []), ...(agent?.subagents ?? [])].join('\n')}`}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'pointer', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, var(--cth-sky) 14%, #fff)', color: 'var(--cth-sky)', border: '1px solid color-mix(in srgb, var(--cth-sky) 38%, #fff)' }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'pointer', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, var(--cth-sky) 14%, var(--cth-cream-50))', color: 'var(--cth-ink-700)', border: '1px solid color-mix(in srgb, var(--cth-sky) 38%, var(--cth-cream-50))' }}
           >
             <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'cth-pulse 1.6s ease-in-out infinite' }}><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.2v2.6h-2.6" /></svg>
             {(agent?.background?.length ?? 0) + (agent?.subagents?.length ?? 0)}
@@ -1854,7 +1869,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             <button
               onClick={() => setActionMenu((o) => !o)}
               title="더보기"
-              style={{ width: isPhone ? 44 : 24, height: isPhone ? 44 : 24, borderRadius: 7, border: '1px solid var(--cth-cream-200)', cursor: 'pointer', background: actionMenu ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)', color: actionMenu ? 'var(--cth-sky)' : 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+              style={{ width: isPhone ? 44 : 36, height: isPhone ? 44 : 36, borderRadius: 7, border: '1px solid var(--cth-cream-200)', cursor: 'pointer', background: actionMenu ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)', color: actionMenu ? 'var(--cth-sky-text-surface)' : 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
             >
               <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3.3" r="1.35" /><circle cx="8" cy="8" r="1.35" /><circle cx="8" cy="12.7" r="1.35" /></svg>
             </button>
@@ -1871,13 +1886,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <button
             onClick={onClose}
             title="대화 닫기"
+            aria-label="대화 닫기"
             style={{
-              width: isPhone ? 44 : 24, height: isPhone ? 44 : 24, borderRadius: 7, border: 'none', cursor: 'pointer',
+              width: isPhone ? 44 : 36, height: isPhone ? 44 : 36, borderRadius: 7, border: 'none', cursor: 'pointer',
               background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
               fontFamily: 'var(--cth-font-ui)', fontSize: 15, lineHeight: 1,
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
             }}
-          >×</button>
+          ><X size={14} aria-hidden="true" /></button>
         )}
       </div>
 
@@ -1936,11 +1952,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                       boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
                     }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cth-mint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cth-mint-text-bg)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                           <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
                         </svg>
                         <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-700)' }}>Claude Code Command</span>
-                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 6, color: 'var(--cth-mint)', border: '1px solid color-mix(in srgb, var(--cth-mint) 45%, transparent)' }}>{it.commandName}</span>
+                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 6, color: 'var(--cth-mint-text-bg)', border: '1px solid color-mix(in srgb, var(--cth-mint) 45%, transparent)' }}>{it.commandName}</span>
                       </div>
                       {(hasArgs || hasMsg) && (
                         <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2009,7 +2025,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               if (it.kind === 'launch') {
                 return (
                   <div key={i} style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, maxWidth: '88%', padding: '5px 12px', borderRadius: 999, background: 'var(--cth-sky-light)', border: '1px solid var(--cth-sky)', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-sky)' }}>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, maxWidth: '88%', padding: '5px 12px', borderRadius: 999, background: 'var(--cth-sky-light)', border: '1px solid var(--cth-sky)', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-sky-text-surface)' }}>
                       <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
                       <span style={{ fontWeight: 700 }}>서브에이전트 시작</span>
                       {it.subagentType && <span style={{ fontWeight: 600, color: 'var(--cth-ink-700)' }}>· {it.subagentType}</span>}
@@ -2208,7 +2224,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           >
             <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
           </button>
-          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4, paddingRight: isPhone ? 46 : 22 }}>{menu.header}</div>}
+          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky-text-surface)', marginBottom: 4, paddingRight: isPhone ? 46 : 22 }}>{menu.header}</div>}
           {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8, paddingRight: isPhone ? 46 : 22 }}>{menu.title}</div>}
           {menu.multi && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', marginBottom: 8 }}>여러 개 선택 가능 — 체크하고 제출</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2230,10 +2246,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                       background: on ? 'var(--cth-sky)' : 'transparent',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                     }}>
-                      {on && <svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" stroke="#fff" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                      {on && <svg width="12" height="12" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" stroke="var(--cth-on-sky)" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>}
                     </span>
                   ) : (
-                    <span style={{ fontWeight: 800, color: 'var(--cth-sky)', minWidth: 14 }}>{o.idx}</span>
+                    <span style={{ fontWeight: 800, color: 'var(--cth-sky-text-surface)', minWidth: 14 }}>{o.idx}</span>
                   )}
                   {(() => { const c = detectStudent(o.label, o.preview, o.description); return c ? (
                     <span style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, overflow: 'hidden', background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
@@ -2244,7 +2260,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                     <span style={{ fontWeight: 600 }}>{o.label}</span>
                     {o.description && <span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-300)', marginTop: 2, lineHeight: 1.4 }}>{o.description}</span>}
                   </span>
-                  {!menu.multi && o.cur && <span style={{ fontSize: 10, color: 'var(--cth-sky)', fontWeight: 700 }}>현재</span>}
+                  {!menu.multi && o.cur && <span style={{ fontSize: 10, color: 'var(--cth-sky-text-surface)', fontWeight: 700 }}>현재</span>}
                 </button>
               );
             })}
@@ -2264,7 +2280,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                 minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
                 cursor: checked.size === 0 ? 'not-allowed' : 'pointer',
                 background: checked.size > 0 ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
-                color: checked.size > 0 ? '#fff' : 'var(--cth-ink-300)',
+                color: checked.size > 0 ? 'var(--cth-on-sky)' : 'var(--cth-ink-300)',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700,
               }}
             >제출{checked.size > 0 ? ` (${checked.size}개)` : ''}</button>
@@ -2319,7 +2335,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   <span onClick={() => setFooterOpen(true)} title="진행 중 서브에이전트 — 클릭하면 펼쳐요" style={{
                     display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
                     padding: '2px 7px', borderRadius: 6, background: 'var(--cth-sky-light)',
-                    fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky-text-surface)',
                   }}>
                     <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--cth-sky)', animation: 'cth-dot-pulse 1.3s ease-in-out infinite' }} />
                     <svg width="10" height="10" viewBox="0 0 16 16"><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -2386,7 +2402,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                 padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
                 border: i === effortMenu ? '2px solid var(--cth-sky)' : '1px solid var(--cth-cream-200)',
                 background: i === effortMenu ? 'var(--cth-sky)' : 'var(--cth-cream-50)',
-                color: i === effortMenu ? '#fff' : 'var(--cth-ink-900)',
+                color: i === effortMenu ? 'var(--cth-on-sky)' : 'var(--cth-ink-900)',
                 fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: i === effortMenu ? 700 : 500,
               }}>{o}</button>
             ))}
@@ -2427,13 +2443,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                 flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
                 padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer',
                 minHeight: isPhone ? 44 : undefined, boxSizing: 'border-box',
-                background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
+                background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: 'var(--cth-on-color)',
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
               }}
             >현재 터미널에 입력</button>
           </div>
-          {flash === 'ok' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-mint)' }}>터미널에 입력했어요 — 엔터로 실행하세요</div>}
-          {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral-text)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
+          {flash === 'ok' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-mint-text-bg)' }}>터미널에 입력했어요 — 엔터로 실행하세요</div>}
+          {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral-text-bg)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
         </div>
       ) : isSub ? (
         // 서브에이전트 대화는 읽기 전용.
@@ -2454,12 +2470,42 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           onClick={() => setConfirm(null)}
           style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(21,41,74,0.32)', padding: 20 }}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--cth-cream-50)', borderRadius: 14, padding: '18px 20px', width: '100%', maxWidth: 300, boxShadow: '0 12px 32px rgba(21,41,74,0.32)' }}>
-            <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: confirm.sub ? 6 : 16 }}>{confirm.msg}</div>
-            {confirm.sub && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', lineHeight: 1.5, marginBottom: 16 }}>{confirm.sub}</div>}
+          <div
+            ref={confirmDialogRef}
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={confirmTitleId}
+            aria-describedby={confirm.sub ? confirmDescriptionId : undefined}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                setConfirm(null);
+                return;
+              }
+              if (e.key !== 'Tab') return;
+              const buttons = Array.from(
+                confirmDialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [],
+              );
+              if (!buttons.length) return;
+              const first = buttons[0];
+              const last = buttons[buttons.length - 1];
+              if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+              } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+              }
+            }}
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--cth-cream-50)', borderRadius: 14, padding: '18px 20px', width: '100%', maxWidth: 300, boxShadow: '0 12px 32px rgba(21,41,74,0.32)' }}
+          >
+            <h2 id={confirmTitleId} style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)', margin: 0, marginBottom: confirm.sub ? 6 : 16 }}>{confirm.msg}</h2>
+            {confirm.sub && <div id={confirmDescriptionId} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', lineHeight: 1.5, marginBottom: 16 }}>{confirm.sub}</div>}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button onClick={() => setConfirm(null)} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600, padding: '7px 14px', border: '1px solid var(--cth-cream-200)', borderRadius: 9, cursor: 'pointer', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-500)' }}>취소</button>
-              <button onClick={() => { const c = confirm; setConfirm(null); c.onYes(); }} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700, padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer', background: confirm.danger ? 'var(--cth-coral)' : 'var(--cth-sky)', color: confirm.danger ? 'var(--cth-on-coral)' : '#fff' }}>{confirm.yes}</button>
+              <button ref={confirmCancelRef} onClick={() => setConfirm(null)} style={{ minHeight: 36, fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600, padding: '7px 14px', border: '1px solid var(--cth-cream-200)', borderRadius: 9, cursor: 'pointer', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-500)' }}>취소</button>
+              <button onClick={() => { const c = confirm; setConfirm(null); c.onYes(); }} style={{ minHeight: 36, fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700, padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer', background: confirm.danger ? 'var(--cth-coral)' : 'var(--cth-sky)', color: confirm.danger ? 'var(--cth-on-coral)' : 'var(--cth-on-sky)' }}>{confirm.yes}</button>
             </div>
           </div>
         </div>

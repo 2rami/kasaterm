@@ -4,8 +4,9 @@ import { openCharacterSettings, refreshBoardNow, saveSession } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
-import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
+import { isBuildCmd, BUILD_COLOR, BUILD_COLOR_BG, GearIcon, SpinIcon, ForkIcon } from './activity';
 import { PaneToolTimeline } from './PaneToolTimeline';
+import { ArrowRight, Check, Circle, X } from 'lucide-react';
 
 const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2 : 1);
 
@@ -71,6 +72,12 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--cth-cream-100)' }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: 10, minHeight: 0 }}>
+        {boardStatus === 'error' && agents.length > 0 && (
+          <div role="alert" style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'color-mix(in srgb, var(--cth-attention) 14%, var(--cth-cream-50))', color: 'var(--cth-ink-700)', fontFamily: 'var(--cth-font-ui)', fontSize: 11 }}>
+            연결이 끊겨 마지막 현황을 표시하고 있어요.
+            <button className="cth-panel-action" style={{ marginLeft: 8 }} onClick={() => void refreshBoardNow()}>새로고침</button>
+          </div>
+        )}
         {/* 확인 대기 — waiting_for(AskUserQuestion·권한) 있는 학생만(거노: 빨강 남발 방지) */}
         {(() => {
           const awaiting = agents.filter(isAwaitingTeacher);
@@ -82,7 +89,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
               background: pending ? 'color-mix(in srgb, var(--cth-coral) 10%, var(--cth-cream-50))' : 'var(--cth-cream-100)',
               border: `1px solid ${pending ? 'var(--cth-coral)' : 'var(--cth-cream-200)'}`,
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, color: pending ? 'var(--cth-coral)' : 'var(--cth-ink-500)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, color: pending ? 'var(--cth-coral-text-bg)' : 'var(--cth-ink-500)' }}>
                 {pending ? <BellGlyph /> : null}
                 {pending ? `확인 안 한 게 ${pending}건 있어요, 선생님` : '확인 대기 (모두 확인함)'}
               </div>
@@ -93,11 +100,11 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                     <button key={a.id} onClick={() => onPickStudent?.(a.id, a.character)} style={{
                       display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8,
                       border: 'none', cursor: 'pointer', textAlign: 'left',
-                      background: un ? 'var(--cth-coral)' : '#fff', color: un ? 'var(--cth-on-coral)' : 'var(--cth-ink-900)',
+                      background: un ? 'var(--cth-coral)' : 'var(--cth-cream-50)', color: un ? 'var(--cth-on-coral)' : 'var(--cth-ink-900)',
                       fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: un ? 800 : 600,
                       boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
                     }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: un ? '#fff' : 'var(--cth-coral)' }} />
+                      <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: un ? 'var(--cth-on-coral)' : 'var(--cth-coral)' }} />
                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
                       <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.85 }}>{un ? '확인 필요' : '확인함'}</span>
                     </button>
@@ -111,7 +118,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
         {/* 현황 — 학생별 작업 상세(status·도구·태스크·서브에이전트·도구 흐름). 업무 탭 흡수. */}
         <SectionLabel>현황</SectionLabel>
         {agents.length === 0 ? (
-          <div style={{ padding: '18px 12px', borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-ui)' }}>
+          <div role={boardStatus === 'error' ? 'alert' : 'status'} aria-live="polite" style={{ padding: '18px 12px', borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-ui)' }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)' }}>
               {boardStatus === 'error' ? '현황을 불러오지 못했어요' : boardStatus === 'loading' ? '현황을 확인하는 중…' : '아직 이 방에 학생이 없어요'}
             </div>
@@ -127,8 +134,13 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
           const busy = a.status === 'working' || a.status === 'thinking';
           return (
             <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
-              {/* 헤더 클릭 → 그 학생 대화 탭으로(거노). */}
-              <div onClick={() => onPickStudent?.(a.id, a.name)} title="대화 열기" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <div role="group" aria-label={`${a.name} 작업 현황`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => onPickStudent?.(a.id, a.name)}
+                  title="대화 열기"
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, cursor: 'pointer', border: 'none', background: 'transparent', padding: 0, textAlign: 'left' }}
+                >
                 <div style={{ width: 26, height: 26, borderRadius: 7, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={spriteOf.get(a.id) || a.character} scale={1.2} bust />
                 </div>
@@ -144,8 +156,9 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                   </div>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
                 </div>
+                </button>
                 <button
-                  onClick={async (e) => { e.stopPropagation(); const ok = await saveSession(a.id); if (ok) onSaved?.(a.id); }}
+                  onClick={async () => { const ok = await saveSession(a.id); if (ok) onSaved?.(a.id); }}
                   title="대화 저장 — background daemon 으로 보내 터미널이 꺼져도 유지(←← detach)"
                   style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', background: 'transparent', border: '1px solid var(--cth-cream-200)', borderRadius: 6, padding: '2px 7px', cursor: 'pointer' }}
                 >저장</button>
@@ -156,24 +169,24 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                     title={[a.doneSummary, agoLabel(a.doneAgoSecs)].filter(Boolean).join(' — ')}
                     style={{
                       flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800,
-                      color: a.doneOutcome === 'succeeded' ? 'var(--cth-status-success)' : 'var(--cth-coral)',
+                      color: a.doneOutcome === 'succeeded' ? 'var(--cth-mint-text-bg)' : 'var(--cth-coral-text-bg)',
                       background: a.doneOutcome === 'succeeded'
-                        ? 'color-mix(in srgb, var(--cth-status-success) 13%, #fff)'
-                        : 'color-mix(in srgb, var(--cth-coral) 13%, #fff)',
+                        ? 'color-mix(in srgb, var(--cth-status-success) 13%, var(--cth-cream-50))'
+                        : 'color-mix(in srgb, var(--cth-coral) 13%, var(--cth-cream-50))',
                       padding: '2px 7px', borderRadius: 6,
                     }}
-                  >{a.doneOutcome === 'succeeded' ? '✓ 완료 보고' : '✗ 실패 보고'}</span>
+                  >{a.doneOutcome === 'succeeded' ? <><Check size={11} aria-hidden="true" /> 완료 보고</> : <><X size={11} aria-hidden="true" /> 실패 보고</>}</span>
                 )}
                 {building ? (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR_BG, background: 'color-mix(in srgb, var(--cth-attention) 14%, var(--cth-cream-50))', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
                 ) : a.currentTool ? (
-                  <span style={{ flexShrink: 0, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
+                  <span style={{ flexShrink: 0, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky-text-bg)', background: 'color-mix(in srgb, var(--cth-sky) 12%, var(--cth-cream-50))', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
                 ) : null}
                 {!!a.background?.length && (
-                  <span title={a.background.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><SpinIcon size={10} />bg {a.background.length}</span>
+                  <span title={a.background.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR_BG, background: 'color-mix(in srgb, var(--cth-attention) 14%, var(--cth-cream-50))', padding: '2px 7px', borderRadius: 6 }}><SpinIcon size={10} />bg {a.background.length}</span>
                 )}
                 {!!a.subagents?.length && (
-                  <span title={a.subagents.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><ForkIcon size={10} />{a.subagents.length}</span>
+                  <span title={a.subagents.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-700)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, var(--cth-cream-50))', padding: '2px 7px', borderRadius: 6 }}><ForkIcon size={10} />{a.subagents.length}</span>
                 )}
               </div>
               {/* claude TaskCreate 태스크 — 진행중(◉) 먼저. */}
@@ -203,8 +216,8 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                           const done = t.status === 'completed';
                           const active = t.status === 'in_progress';
                           return (
-                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
-                              <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
+                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint-text-surface)' : 'var(--cth-ink-700)' }}>
+                              <span style={{ flexShrink: 0, width: 10, display: 'inline-flex' }}>{done ? <Check size={10} aria-hidden="true" /> : <Circle size={9} fill={active ? 'currentColor' : 'none'} aria-hidden="true" />}</span>
                               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
                             </div>
                           );
@@ -242,13 +255,13 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
               {(!!a.background?.length || !!a.subagents?.length || !!a.subagentsDone?.length) && (
                 <div style={{ marginLeft: 16, marginTop: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
                   {a.background?.map((b, i) => (
-                    <div key={'b' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: BUILD_COLOR, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>⟳ {b}</div>
+                    <div key={'b' + i} style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: BUILD_COLOR, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><SpinIcon size={10} />{b}</div>
                   ))}
                   {a.subagents?.map((s, i) => (
-                    <div key={'s' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-lilac)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>↳ {s}</div>
+                    <div key={'s' + i} style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><ForkIcon size={10} />{s}</div>
                   ))}
                   {a.subagentsDone?.map((s, i) => (
-                    <div key={'d' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'line-through' }}>✓ {s}</div>
+                    <div key={'d' + i} style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'line-through' }}><Check size={10} aria-hidden="true" />{s}</div>
                   ))}
                 </div>
               )}
@@ -265,7 +278,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                   ) : [...a.recentTools].reverse().map((t, i, arr) => (
                     <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                       <span title={t} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)', background: 'var(--cth-cream-100)', padding: '1px 5px', borderRadius: 5, whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t}</span>
-                      {i < arr.length - 1 && <span style={{ fontSize: 8, color: 'var(--cth-ink-300)' }}>→</span>}
+                      {i < arr.length - 1 && <ArrowRight size={9} color="var(--cth-ink-300)" aria-hidden="true" />}
                     </span>
                   ))}
                 </div>

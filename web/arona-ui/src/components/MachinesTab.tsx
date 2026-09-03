@@ -67,7 +67,7 @@ function StudentRow({ character, name, title, status, busy, result, buttons }: {
           )}
         </div>
         {busy ? (
-          <span style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)' }}>이사 중…</span>
+          <span style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky-text-surface)' }}>이사 중…</span>
         ) : (
           <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>{buttons}</div>
         )}
@@ -75,7 +75,7 @@ function StudentRow({ character, name, title, status, busy, result, buttons }: {
       {!busy && result && (
         <div style={{
           marginLeft: 34, marginTop: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10,
-          color: result.ok ? 'var(--cth-mint)' : 'var(--cth-coral)', opacity: result.ok ? 1 : 0.85,
+          color: result.ok ? 'var(--cth-mint-text-surface)' : 'var(--cth-coral-text-surface)', opacity: result.ok ? 1 : 0.85,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{result.text}</div>
       )}
@@ -161,7 +161,7 @@ export function MachinesTab() {
                 <span style={{
                   textTransform: 'none', letterSpacing: 0, padding: '1px 7px', borderRadius: 5,
                   fontSize: 9, fontWeight: 700,
-                  color: m.online ? '#fff' : 'var(--cth-ink-300)',
+                  color: m.online ? 'var(--cth-on-color)' : 'var(--cth-ink-300)',
                   background: m.online ? 'var(--cth-mint)' : 'var(--cth-cream-200)',
                 }}>{m.online ? '연결됨' : '연결 안 닿아요'}</span>
                 {!m.online && (

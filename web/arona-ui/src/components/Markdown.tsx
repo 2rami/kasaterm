@@ -21,7 +21,7 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
     );
     else if (m[4] != null) out.push(<del key={`${keyBase}-s${i}`}>{m[4]}</del>);
     else if (m[5] != null) out.push(
-      <a key={`${keyBase}-l${i}`} href={m[6]} target="_blank" rel="noreferrer" style={{ color: 'var(--cth-sky)', textDecoration: 'underline' }}>{m[5]}</a>
+      <a key={`${keyBase}-l${i}`} href={m[6]} target="_blank" rel="noreferrer" style={{ color: 'var(--cth-sky-text-surface)', textDecoration: 'underline' }}>{m[5]}</a>
     );
     else if (m[7] != null) out.push(<em key={`${keyBase}-i${i}`}>{m[7]}</em>);
     else if (m[8] != null) out.push(<em key={`${keyBase}-u${i}`}>{m[8]}</em>);

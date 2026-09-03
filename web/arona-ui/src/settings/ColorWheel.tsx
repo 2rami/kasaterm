@@ -5,6 +5,7 @@
 /// 각도가 색상(H), 중심에서의 거리가 채도(S), 오른쪽 띠가 명도(V)다. 명도는 휠
 /// 위에 검정을 덮어 나타내므로, 휠에 보이는 색이 곧 지금 고른 색이다.
 import { useEffect, useRef, useState } from 'react';
+import { LatestCommitCoordinator } from './latestCommit';
 
 export type Hsv = { h: number; s: number; v: number };
 
@@ -57,46 +58,6 @@ export function hexToHsv(hex: string): Hsv {
   return { h: (h + 360) % 360, s: max === 0 ? 0 : d / max, v: max };
 }
 
-/// 값 하나를 **한 번에 하나씩만** 보내는 창구. 보내는 중에 새 값이 오면 마지막
-/// 것만 남겨 뒀다가 응답이 온 뒤 이어 보낸다.
-///
-/// 휠은 손을 움직이는 내내 값을 뿜으므로 그대로 흘려보내면 요청이 밀린다. 시간
-/// 간격으로 솎으면(스로틀) 얼마로 잡아도 느린 기계에선 밀리고 빠른 기계에선 덜
-/// 부드러운데, 이 방식은 응답 속도가 곧 간격이 되어 저절로 맞는다.
-export function useLatestOnly(send: (v: string) => Promise<unknown>) {
-  const pending = useRef<string | null>(null);
-  const busy = useRef(false);
-  const frame = useRef<number | null>(null);
-  const alive = useRef(true);
-  const sendRef = useRef(send);
-  sendRef.current = send;
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      if (frame.current != null) window.cancelAnimationFrame(frame.current);
-    };
-  }, []);
-  const schedule = () => {
-    if (!alive.current || busy.current || frame.current != null) return;
-    frame.current = window.requestAnimationFrame(() => {
-      frame.current = null;
-      const next = pending.current;
-      pending.current = null;
-      if (next === null) return;
-      busy.current = true;
-      void sendRef.current(next).finally(() => {
-        busy.current = false;
-        if (pending.current !== null) schedule();
-      });
-    });
-  };
-  return (v: string) => {
-    pending.current = v;
-    schedule();
-  };
-}
-
 /// 휠 원판 — 색상×채도만 그린다(명도는 위에 덮는 검정이 맡는다). 한 번 그려 두면
 /// 드래그 내내 다시 그릴 일이 없다.
 function useWheelCanvas(canvas: React.RefObject<HTMLCanvasElement | null>) {
@@ -143,7 +104,7 @@ export function ColorWheel({
   /// 드래그하는 내내 불린다 — 파일에 굳히지 않고 화면 색만 바꾸는 쪽.
   onPreview: (next: string) => Promise<unknown>;
   /// 손을 뗄 때 한 번 불린다 — 저장하는 쪽.
-  onCommit: (next: string) => void;
+  onCommit: (next: string) => Promise<unknown>;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useWheelCanvas(canvas);
@@ -151,7 +112,15 @@ export function ColorWheel({
   // 방금 고른 값. state 는 이 이벤트 안에서 아직 새 값이 아니라, 손을 뗄 때 굳힐
   // 값을 여기서 읽는다.
   const last = useRef(hsv);
-  const preview = useLatestOnly(onPreview);
+  const coordinatorRef = useRef<LatestCommitCoordinator | null>(null);
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = new LatestCommitCoordinator(onPreview, onCommit, {
+      request: (callback) => window.requestAnimationFrame(callback),
+      cancel: (frame) => window.cancelAnimationFrame(frame),
+    });
+  }
+  coordinatorRef.current.setSenders(onPreview, onCommit);
+  useEffect(() => () => coordinatorRef.current?.dispose(), []);
 
   // 밖에서 온 색이 **지금 손잡이가 가리키는 색과 다를 때만** 다시 잡는다. 무조건
   // 역산하면 채도나 명도가 0 인 자리를 지날 때마다 색상이 빨강으로 튀고, 미리보기
@@ -169,8 +138,8 @@ export function ColorWheel({
     last.current = next;
     setHsv(next);
     const hx = hsvToHex(next);
-    if (live) preview(hx);
-    else onCommit(hx);
+    if (live) coordinatorRef.current?.pushPreview(hx);
+    else void coordinatorRef.current?.commitLatest(hx);
   };
 
   // 원 밖으로 나간 커서는 채도 1 로 잡아 둔다 — 손이 살짝 벗어났다고 픽이 끊기면
@@ -214,7 +183,7 @@ export function ColorWheel({
       } catch {
         /* 안 잡혀 있었으면 놓을 것도 없다 */
       }
-      onCommit(hsvToHex(last.current));
+      commitLatest(hsvToHex(last.current));
     },
   });
 
@@ -224,10 +193,38 @@ export function ColorWheel({
   const cur = hsvToHex(hsv);
   // 손잡이 테두리는 밝은 자리선 검정, 어두운 자리선 흰색 — 어느 색 위에서도 보인다.
   const ring = hsv.v > 0.55 ? '#000' : '#fff';
+  const commitLatest = (value: string) => {
+    void coordinatorRef.current?.commitLatest(value);
+  };
+  const commitKeyboard = (next: Hsv) => {
+    last.current = next;
+    setHsv(next);
+    const value = hsvToHex(next);
+    commitLatest(value);
+  };
 
   return (
     <div className="flex items-start gap-3" style={{ opacity: disabled ? 0.4 : 1 }}>
       <div
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="색상과 채도"
+        aria-valuemin={0}
+        aria-valuemax={359}
+        aria-valuenow={Math.round(hsv.h)}
+        aria-valuetext={`색상 ${Math.round(hsv.h)}도, 채도 ${Math.round(hsv.s * 100)}%`}
+        aria-disabled={disabled}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          let next = hsv;
+          if (e.key === 'ArrowLeft') next = { ...hsv, h: (hsv.h + 355) % 360 };
+          else if (e.key === 'ArrowRight') next = { ...hsv, h: (hsv.h + 5) % 360 };
+          else if (e.key === 'ArrowUp') next = { ...hsv, s: clamp01(hsv.s + 0.05) };
+          else if (e.key === 'ArrowDown') next = { ...hsv, s: clamp01(hsv.s - 0.05) };
+          else return;
+          e.preventDefault();
+          commitKeyboard(next);
+        }}
         className="relative shrink-0 touch-none select-none"
         style={{ width: WHEEL, height: WHEEL, cursor: disabled ? 'default' : 'crosshair' }}
         {...dragProps(pickWheel)}
@@ -257,6 +254,24 @@ export function ColorWheel({
       </div>
 
       <div
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="명도"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(hsv.v * 100)}
+        aria-disabled={disabled}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          let next = hsv.v;
+          if (e.key === 'ArrowUp' || e.key === 'ArrowRight') next += 0.05;
+          else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') next -= 0.05;
+          else if (e.key === 'Home') next = 0;
+          else if (e.key === 'End') next = 1;
+          else return;
+          e.preventDefault();
+          commitKeyboard({ ...hsv, v: clamp01(next) });
+        }}
         className="relative shrink-0 touch-none select-none rounded-[3px]"
         style={{
           width: 16,
