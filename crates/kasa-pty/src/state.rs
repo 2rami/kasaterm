@@ -87,12 +87,13 @@ impl Default for PtyOptions {
     }
 }
 
-/// claude 가 확정된 사용자 프롬프트 행 머리에 남기는 마커(U+276F).
+/// 에이전트가 확정된 사용자 프롬프트 행 머리에 남기는 마커 — claude 는 U+276F,
+/// codex 는 U+203A 를 같은 자리에 쓴다(2026-09-03 실측).
 ///
 /// ASCII `>` 는 **일부러 제외한다** — diff·인용·다른 TUI 가 행 머리에 흔히 써서,
 /// 그것까지 마커로 치면 대화와 무관한 줄이 턴 목록에 섞인다(같은 이유로
 /// `screenread::prompt_box` 도 `❯`/`›` 만 인정한다).
-const PROMPT_MARKER: char = '\u{276f}';
+const PROMPT_MARKERS: [char; 2] = ['\u{276f}', '\u{203a}'];
 
 /// 그리드 전체(스크롤백+화면)에서 프롬프트 줄을 훑는다. `PtySession::prompt_anchors`
 /// 의 알맹이이자, 시험이 살아 있는 PTY 없이 부를 수 있는 진입점이다.
@@ -103,13 +104,24 @@ fn scan_prompt_anchors(term: &Term<PtyEventForwarder>) -> Vec<PromptAnchor> {
     let cols = grid.columns();
     let hist = grid.history_size();
     let screen = grid.screen_lines();
+    // 커서가 앉아 있는 줄 = 지금 치고 있는 입력줄. **codex 를 가르는 유일한 단서다.**
+    // claude 는 입력줄 마커 뒤에 NBSP 를 두어 아래 규칙으로 갈리지만, codex 는 확정된
+    // 질문과 똑같이 일반 공백을 써서(2026-09-03 실측) 그 규칙이 안 통한다. 그래서
+    // 마커별로 다른 단서를 본다 — 각 에이전트가 실제로 남기는 표시가 다르니 판정도
+    // 그것을 따른다. 이 한 줄이 자리표시자(`› Ask Codex to do anything`)와 타이핑
+    // 중인 글이 지나간 질문 목록에 끼는 것을 막는다.
+    let cursor_line = grid.cursor.point.line.0;
     let mut out = Vec::new();
     for i in 0..(hist + screen) {
         let line = i as i32 - hist as i32;
-        if grid[Point::new(Line(line), Column(0))].c != PROMPT_MARKER {
+        let marker = grid[Point::new(Line(line), Column(0))].c;
+        if !PROMPT_MARKERS.contains(&marker) {
             continue;
         }
         if cols > 1 && grid[Point::new(Line(line), Column(1))].c == '\u{a0}' {
+            continue;
+        }
+        if marker == '\u{203a}' && line == cursor_line {
             continue;
         }
         let mut text = String::new();
@@ -5377,6 +5389,36 @@ mod prompt_anchor_tests {
         let got = scan_prompt_anchors(&t);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].abs_line, 1);
+    }
+
+    /// codex 는 같은 자리에 U+203A 를 쓴다(2026-09-03 실측 화면: `› 1+1은?`).
+    /// 대체화면을 안 써서 대화가 이 터미널의 스크롤백에 그대로 쌓이므로, 마커만
+    /// 인정하면 claude 가 못 쓰는 **정확한 절대 줄 점프**가 codex 에 그대로 붙는다.
+    #[test]
+    fn codex_marker_is_a_prompt_too() {
+        let t = term_with(&["\u{203a} 코덱스에 던진 질문", "  2예요, 선생님.", "다른 줄"]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["코덱스에 던진 질문".to_string()]);
+    }
+
+    /// codex 의 입력줄은 확정된 질문과 **글자로는 구별이 안 된다** — claude 와 달리
+    /// NBSP 를 안 써서 `› Ask Codex to do anything` 이 그냥 질문처럼 보인다. 커서가
+    /// 그 줄에 앉아 있다는 것만이 단서고, 그것을 안 보면 자리표시자가 「지나간 질문」
+    /// 으로 목록 끝에 끼어 ↓ 를 누를 때마다 거기로 끌려간다.
+    #[test]
+    fn codex_input_line_under_the_cursor_is_not_a_past_prompt() {
+        let t = term_with(&["\u{203a} 확정된 질문", "  답변 줄", "\u{203a} Ask Codex to do anything"]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["확정된 질문".to_string()]);
+    }
+
+    /// 위 시험의 **대조군** — 커서가 딴 줄로 옮겨가면 같은 문장이 잡혀야 한다.
+    /// 짝이 없으면 판정이 엉뚱한 이유(맨 아랫줄이라서 등)로 걸러도 통과로 읽힌다.
+    #[test]
+    fn the_same_codex_line_away_from_the_cursor_is_a_prompt() {
+        let t = term_with(&["\u{203a} 질문 하나", "\u{203a} 질문 둘", "  커서는 여기"]);
+        let got: Vec<String> = scan_prompt_anchors(&t).into_iter().map(|a| a.text).collect();
+        assert_eq!(got, vec!["질문 하나".to_string(), "질문 둘".to_string()]);
     }
 }
 
