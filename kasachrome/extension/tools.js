@@ -294,9 +294,9 @@ const ltBag = async () => {
     return kept
   } catch { return {} }
 }
-const ltMark = async (tabId, on) => {
+const ltMark = async (tabId, on, src = null) => {
   const bag = await ltBag()
-  if (on) bag[String(tabId)] = true
+  if (on) bag[String(tabId)] = { src }
   else delete bag[String(tabId)]
   await chrome.storage.local.set({ [LT_KEY]: bag }).catch(() => {})
 }
@@ -340,7 +340,33 @@ export async function reapplyLayout(tabId) {
   if (!bag[String(tabId)]) return null
   const tab = await chrome.tabs.get(tabId).catch(() => null)
   if (!tab || !/^https?:/.test(tab.url || '')) return null
-  try { return await ltPlant(tabId, tab.url) } catch { return null }
+  try {
+    const who = await ltPlant(tabId, tab.url)
+    await ltMark(tabId, true, who.src)
+    return who
+  } catch { return null }
+}
+
+// 아이콘 팝업이 이 탭의 지금 상태를 묻는다. ⚠️여기서 서버를 훑으면 안 된다 — 팝업은 1초마다
+// 다시 묻는데 포트 훑기는 안 뜬 자리마다 기다리느라 그 사이에 안 끝난다. 켜져 있나만 창고에서
+// 읽고, 서버가 있나 없나는 사람이 눌렀을 때 그 자리에서 알려 준다.
+export async function layoutState(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (!tab || !/^https?:/.test(tab.url || '')) return { ok: false }
+  const at = (await ltBag())[String(tabId)]
+  return { ok: true, tabId, on: !!at, src: at?.src || null }
+}
+
+export async function layoutToggle(tabId) {
+  const tab = await chrome.tabs.get(tabId)
+  if ((await ltBag())[String(tabId)]) {
+    await ltMark(tabId, false)
+    await ltRun(tabId, () => window.__layoutool_toggle?.(false)).catch(() => {})
+    return { ok: true, on: false }
+  }
+  const who = await ltPlant(tabId, tab.url)
+  await ltMark(tabId, true, who.src)
+  return { ok: true, on: true, src: who.src }
 }
 
 export async function forgetLayout(tabId) {
@@ -686,7 +712,7 @@ const handlers = {
     }
     const tab = await chrome.tabs.get(id)
     const who = await ltPlant(id, tab.url)
-    await ltMark(id, true)
+    await ltMark(id, true, who.src)
     return { tabId: id, on: true, server: who.api, src: who.src, note: '사람이 화면을 만진 뒤 browser_layout_edits 로 가져오세요. 화면이 갈려도 저절로 다시 붙습니다.' }
   },
 

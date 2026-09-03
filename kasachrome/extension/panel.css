@@ -125,3 +125,15 @@ body.panel .openpanel { display: none; }
 
 .warn { margin: 8px; padding: 9px 11px; border-radius: 8px; font-size: 11.5px; line-height: 1.5;
         background: rgba(224,49,49,.12); border: 1px solid rgba(224,49,49,.35); color: #ffa8a8; }
+
+/* 레이아웃툴 줄. 화면 표시 줄과 같은 카드로 보이되, 켜져 있을 때만 색이 산다 —
+   무엇이 지금 페이지에 얹혀 있는지가 한눈에 갈려야 한다. */
+.lay {
+  margin: 8px 8px 0; padding: 8px 10px 9px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+}
+.lay.on { border-color: rgba(79,124,255,.5); }
+.lay.on .sw { color: #8ba8ff; border-color: rgba(79,124,255,.45); }
+.lay-n { font-size: 10.5px; color: var(--dim); line-height: 1.45; word-break: break-all; }
+.lay.bad { border-color: rgba(240,140,0,.45); }
+.lay.bad .lay-n { color: var(--busy); }

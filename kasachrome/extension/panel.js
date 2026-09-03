@@ -112,6 +112,45 @@ function displayBar(d) {
   return wrap
 }
 
+// --- 레이아웃툴 -------------------------------------------------------------
+
+// 편집기를 사람이 직접 붙이는 줄. 여기 없으면 터미널의 에이전트에게 「켜 줘」 하는 길밖에 없는데,
+// 화면을 만지는 것은 사람이라 그때마다 부탁하게 된다.
+// 켜져 있나만 미리 보여주고, 서버가 있나 없나는 누른 자리에서 알려 준다 — 포트를 훑는 일은
+// 1초마다 도는 이 화면에 얹을 만큼 가볍지 않다.
+function layoutBar(l) {
+  const wrap = el('div', l.on ? 'lay on' : 'lay')
+
+  const b = el('button', 'sw', l.on ? '끄기' : '켜기')
+  b.title = '이 탭을 그대로 만지는 편집기'
+  const head = el('div', 'disp-h')
+  head.append(el('span', 'disp-t', '레이아웃툴'), b)
+
+  const note = el('div', 'lay-n')
+  note.textContent = l.on
+    ? (l.src ? '고칠 소스 ' + l.src : '켜짐 — 화면 아래 바에서 편집 켜기')
+    : '이 화면을 그대로 만진다'
+
+  b.addEventListener('click', async () => {
+    b.disabled = true
+    b.textContent = '…'
+    const r = await ask('layoutToggle', { tabId: l.tabId })
+    if (r && r.ok === false) {
+      // 대개 「그 주소를 맡은 서버가 없다」다 — 그 문장에 무엇을 띄우면 되는지가 들어 있다
+      wrap.classList.add('bad')
+      note.textContent = r.error || '켜지 못했습니다'
+      b.disabled = false
+      b.textContent = '켜기'
+      return
+    }
+    lastSig = null
+    await tick()
+  })
+
+  wrap.append(head, note)
+  return wrap
+}
+
 function card(s) {
   const c = el('div', 'card')
 
@@ -161,7 +200,7 @@ function activityList(log) {
   return wrap
 }
 
-function render(state) {
+function render(state, layout) {
   const sessions = state?.sessions || []
   const connected = !!state?.connected
   connEl.className = connected ? 'conn on' : 'conn off'
@@ -172,6 +211,8 @@ function render(state) {
     rootEl.appendChild(el('div', 'warn', `브리지(127.0.0.1:${PORT})에 붙어 있지 않습니다. 터미널에서 브라우저 툴을 한 번 쓰면 브리지가 자동으로 뜹니다.`))
   }
   rootEl.appendChild(displayBar({ ...DISPLAY_FALLBACK, ...(state?.display || {}) }))
+  // 붙을 수 없는 화면(확장 관리·웹스토어)에서는 아예 안 낸다 — 눌러도 안 되는 단추가 남는다
+  if (layout?.ok) rootEl.appendChild(layoutBar(layout))
   if (!sessions.length) {
     const e = el('div', 'empty')
     e.appendChild(el('b', null, '아직 이 크롬을 조작한 세션이 없습니다'))
@@ -185,10 +226,11 @@ function render(state) {
 }
 
 // 프사 dataURL 은 25KB 라 비교에서 뺀다 — 어차피 신원이 바뀌면 이름이 같이 바뀐다.
-function sig(state) {
+function sig(state, layout) {
   return JSON.stringify({
     c: state?.connected,
     d: state?.display,
+    l: layout && [layout.ok, layout.on, layout.src],
     s: (state?.sessions || []).map((s) => [
       s.key, s.name, s.paneId, s.task, s.busy, s.grouped,
       s.log?.length, s.log?.[0]?.at,
@@ -197,12 +239,22 @@ function sig(state) {
   })
 }
 
+// 팝업·사이드패널이 붙어 있는 창의 활성 탭 — 사람이 지금 보고 있는 화면이 그것이다
+let myTabId = null
+const whichTab = chrome.tabs.query({ active: true, currentWindow: true })
+  .then(([t]) => { myTabId = t?.id ?? null })
+  .catch(() => {})
+
 async function tick() {
-  const state = await ask('state')
-  const g = sig(state)
+  await whichTab
+  const [state, layout] = await Promise.all([
+    ask('state'),
+    myTabId == null ? null : ask('layoutState', { tabId: myTabId }),
+  ])
+  const g = sig(state, layout)
   if (g === lastSig) return
   lastSig = g
-  render(state)
+  render(state, layout)
 }
 
 // 사이드 패널은 한 번 열면 탭을 옮겨다녀도 계속 떠 있다 — 아이콘을 누르지 않아도 보이는 유일한 방법이다.

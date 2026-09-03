@@ -1,4 +1,4 @@
-import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout } from './tools.js'
+import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
 import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
@@ -216,6 +216,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     setDisplay(msg.patch || {})
       .then(async (d) => { await repaintAll(); sendResponse(d) })
       .catch((e) => sendResponse({ error: String(e?.message || e) }))
+    return true
+  }
+  // 레이아웃툴 편집기를 사람이 직접 켜고 끄는 줄. 터미널의 에이전트를 거치지 않는 길이 하나는
+  // 있어야 한다 — 화면을 만지는 것은 사람이고, 그때마다 부탁할 수는 없다.
+  if (msg.op === 'layoutState') {
+    layoutState(msg.tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+  if (msg.op === 'layoutToggle') {
+    layoutToggle(msg.tabId)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
   }
   if (msg.op === 'group' || msg.op === 'ungroup') {
