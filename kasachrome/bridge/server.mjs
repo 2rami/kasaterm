@@ -4,6 +4,7 @@
 // 확장은 프로필 단위로 여러 개가 동시에 붙는다 — 클라이언트가 고른 프로필로 호출을 보낸다.
 import { WebSocketServer, WebSocket } from 'ws'
 import { appendFileSync, mkdirSync, renameSync, statSync, readFileSync } from 'node:fs'
+import { spawn, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -136,6 +137,98 @@ function failPendingOf(extSock, reason) {
   }
 }
 
+// --- 레이아웃툴 자동 기동 ------------------------------------------------------
+// 편집기를 켜려면 그 개발서버를 맡은 레이아웃툴이 떠 있어야 하는데, 그걸 사람이 터미널에서
+// 손으로 띄우고 있었다. 화면마다 하나씩 필요해서 화면을 옮길 때마다 되풀이된다 —
+// 2026-09-03 지시: "카사크롬붙을때 알아서 붙게해봐".
+// 확장은 프로세스를 못 띄우므로 여기서 대신 띄운다. `--src` 는 그 포트를 물고 있는 개발서버의
+// 작업 폴더에서 얻는다 — 사람이 손으로 줄 때와 같은 값이다.
+const LT_PORTS = [4300, 4301, 4302, 4303, 4304, 4305]
+const ltStarting = new Map() // 개발서버 포트 -> 진행 중인 약속. 연달아 눌러도 하나만 띄운다.
+
+function sh(cmd, args) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch { return '' }
+}
+
+// 그 포트를 듣고 있는 프로세스의 작업 폴더. 개발서버는 레포 안에서 뜨므로 이것이 곧 소스 폴더다.
+function cwdOfPort(port) {
+  const pid = sh('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']).split(/\s+/)[0]
+  if (!pid) return null
+  const out = sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'])
+  const line = out.split('\n').find((l) => l.startsWith('n'))
+  const dir = line ? line.slice(1) : ''
+  try { return dir && statSync(dir).isDirectory() ? dir : null } catch { return null }
+}
+
+function ltBin() {
+  const which = sh('sh', ['-lc', 'command -v layoutool'])
+  if (which) return which
+  // 로그인 셸을 못 타는 자리(launchd 로 뜬 크롬 밑 등)에서는 흔한 자리를 직접 본다
+  for (const p of [join(homedir(), '.npm-global/bin/layoutool'), '/usr/local/bin/layoutool', '/opt/homebrew/bin/layoutool']) {
+    try { if (statSync(p).isFile()) return p } catch {}
+  }
+  return null
+}
+
+// 이미 그 개발서버를 맡은 것이 떠 있나. 확장이 훑는 것과 같은 규칙이다.
+async function ltFind(port) {
+  for (const p of LT_PORTS) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${p}/__layoutool/who`, {
+        cache: 'no-store', signal: AbortSignal.timeout(600),
+      })
+      if (!r.ok) continue
+      const who = await r.json()
+      const target = who.target ? new URL(who.target).port : null
+      if (String(target) === String(port) || p === Number(port)) {
+        return { ok: true, api: `http://127.0.0.1:${p}`, src: who.src || null }
+      }
+    } catch {}
+  }
+  return null
+}
+
+async function startLayoutool(url) {
+  let u
+  try { u = new URL(url) } catch { throw new Error(`주소를 읽지 못했습니다: ${url}`) }
+  // 내 기계에서 도는 개발서버만. 바깥 주소를 보고 프로세스를 띄우는 길을 열어 두지 않는다.
+  if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(u.hostname)) {
+    throw new Error('내 기계에서 도는 개발서버(localhost)에서만 띄울 수 있습니다')
+  }
+  const port = u.port || (u.protocol === 'https:' ? '443' : '80')
+
+  const already = await ltFind(port)
+  if (already) return already
+  if (ltStarting.has(port)) return ltStarting.get(port)
+
+  const job = (async () => {
+    const src = cwdOfPort(port)
+    if (!src) throw new Error(`${port} 번을 듣고 있는 개발서버를 못 찾았습니다 — 그 서버부터 띄우세요`)
+    const bin = ltBin()
+    if (!bin) throw new Error('layoutool 이 설치돼 있지 않습니다 — `npm i -g layoutool`')
+
+    // 브리지가 죽어도 편집기가 같이 죽지 않게 떼어 놓는다. 사람이 손으로 띄운 것과 같은 모양.
+    const child = spawn(bin, [String(port), '--src', src], {
+      cwd: src, detached: true, stdio: 'ignore',
+    })
+    child.unref()
+    log(`layoutool 기동: ${port} ← ${src}`)
+
+    // 뜨는 데 1~2초 걸린다. 뜰 때까지만 기다린다.
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((r) => setTimeout(r, 400))
+      const found = await ltFind(port)
+      if (found) return { ...found, started: true }
+    }
+    throw new Error('레이아웃툴을 띄웠지만 응답이 없습니다 — 터미널에서 직접 띄워 보세요')
+  })().finally(() => ltStarting.delete(port))
+
+  ltStarting.set(port, job)
+  return job
+}
+
 wss.on('connection', (sock) => {
   let role = null
 
@@ -229,6 +322,14 @@ wss.on('connection', (sock) => {
       clearTimeout(p.timer)
       pending.delete(msg.id)
       send(p.client, { type: 'result', id: p.clientId, ok: msg.ok, result: msg.result, error: msg.error })
+      return
+    }
+
+    if (role === 'extension' && msg.type === 'layoutool') {
+      startLayoutool(msg.url).then(
+        (r) => send(sock, { type: 'layoutool', id: msg.id, ...r }),
+        (e) => send(sock, { type: 'layoutool', id: msg.id, ok: false, error: String((e && e.message) || e) }),
+      )
       return
     }
 

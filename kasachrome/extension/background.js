@@ -1,4 +1,5 @@
 import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
+import { setBridgeSender, bridgeResolve } from './bridge-ask.js'
 import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
@@ -118,6 +119,9 @@ function connect() {
     try { msg = JSON.parse(ev.data) } catch { return }
     if (msg.type === 'ping') return
 
+    // 우리가 브리지에 물어본 것의 답
+    if (msg.type === 'layoutool') { bridgeResolve(msg); return }
+
     if (msg.type === 'session') {
       sessionChain = sessionChain
         .then(() => (msg.action === 'open' ? openSession(msg.client, msg.identity) : closeSession(msg.client)))
@@ -168,6 +172,8 @@ function connect() {
 function reply(obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj))
 }
+
+setBridgeSender(reply)
 
 function schedule() {
   backoff = Math.min(backoff * 2, 15000)

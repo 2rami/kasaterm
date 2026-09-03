@@ -1,6 +1,7 @@
 // 툴 핸들러. 기본은 조용한 경로(content script)로 돌고, 그게 no-op 이면 같은 동작을 CDP 로 재시도한다.
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
+import { askBridge } from './bridge-ask.js'
 import { page, restricted } from './page.js'
 import { lookupDevice, suggestDevices, deviceTable, uaOverrideFor } from './devices.js'
 import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
@@ -304,7 +305,16 @@ const ltMark = async (tabId, on, src = null) => {
 // 편집기를 이 화면에 넣고 켠다. 이미 들어가 있으면 편집기가 스스로 물러나므로 두 번 넣어도
 // 만지던 내역이 흔들리지 않는다 — 그래서 「이미 넣었나」를 따지지 않는다.
 async function ltPlant(tabId, tabUrl) {
-  const who = await ltServer(tabUrl)
+  let who = await ltServer(tabUrl)
+  // 없으면 브리지에 부탁해 띄운다. 화면마다 하나씩 필요해서, 없다고 돌려보내면 사람이 화면을
+  // 옮길 때마다 터미널로 나가야 한다(2026-09-03 지시: "카사크롬붙을때 알아서 붙게해봐").
+  if (!who) {
+    const r = await askBridge('layoutool', { url: tabUrl }, 15000).catch((e) => ({ ok: false, error: e.message }))
+    if (!r?.ok) {
+      throw new Error(`이 화면을 맡을 레이아웃툴을 띄우지 못했습니다 (${tabUrl}) — ${r?.error || '까닭 모름'}`)
+    }
+    who = await ltServer(tabUrl)
+  }
   if (!who) throw new Error(`이 주소를 맡은 레이아웃툴 서버가 없습니다 (${tabUrl}) — 터미널에서 \`layoutool <개발서버 포트> --src <소스 폴더>\` 로 띄운 뒤 다시 부르세요.`)
   if (!who.src) throw new Error('레이아웃툴이 고칠 소스를 모른 채 떠 있습니다 — --src <폴더> 를 주고 다시 띄우세요.')
   const code = await (await fetch(who.api + '/__layoutool/editor.js', { cache: 'no-store' })).text()
