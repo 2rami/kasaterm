@@ -813,13 +813,11 @@ impl App {
         Ok(new_id)
     }
 
-    /// 거울 — 명부 기계의 pane **하나**를 활성 pane 오른쪽에 거울로 앉힌다.
-    ///
-    /// 방 펼치기(`unfold_machine`)의 학생 단위 짝이다(2026-09-02 지시 「이사탭을
-    /// remote로 개편해서 미러링」): 화면공유를 열지 않고도 그 기계의 학생 하나를
-    /// 이 창에서 본다. 크기 규칙은 펼치기와 같다 — `connect_view` 라 원본 세션
-    /// 크기를 절대 안 바꾸고, 격자가 pane 보다 크면 렌더가 이 pane 만 배율을 줄인다.
-    /// 이미 같은 pane 의 거울이 있으면 새로 안 열고 그쪽으로 포커스만 옮긴다.
+    /// 원격 학생 하나를 **포커스된 pane 의 탭**으로 거울 낸다(2026-09-03 지시
+    /// 「거울 버튼 말고 그냥 누르면 포커스된 pane 탭 안에 띄워지게」). 옆에
+    /// 쪼개 앉히던 09-02 판은 누를수록 창이 갈라졌다 — 탭은 자리를 안 뺏고,
+    /// 다 봤으면 탭만 닫으면 된다. 이미 그 학생의 거울이 있으면 새로 안 만들고
+    /// 그 창·그 pane·그 탭으로 간다.
     pub(crate) fn mirror_remote_pane(
         &mut self,
         label: &str,
@@ -836,7 +834,7 @@ impl App {
             kasa_mcp::remote::remote_info(id)
                 .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
         }) {
-            self.focus_pane(&existing);
+            self.reveal_pane_tab(&existing);
             return Ok(existing);
         }
         let anchor = self
@@ -845,18 +843,18 @@ impl App {
             .unwrap()
             .active_pane
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("기준 pane 이 없다"))?;
-        let anchor = self
+            .ok_or_else(|| anyhow::anyhow!("포커스된 pane 이 없다"))?;
+        // 포커스가 보조 탭에 있어도 새 탭은 그 바깥 pane 에 붙는다.
+        let outer = self
             .ws
             .lock()
             .unwrap()
             .outer_for_pty(&anchor)
             .unwrap_or(anchor);
-        if self.window_of_pane(&anchor).is_none() {
-            anyhow::bail!("기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
+        if self.window_of_pane(&outer).is_none() {
+            anyhow::bail!("포커스된 pane {outer} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
         }
         let new_id = self.alloc_pane_id();
-        let (win_cols, win_rows) = self.window_cells();
         let remote = kasa_mcp::remote::connect_view(
             kasa_mcp::remote::RemoteSpec {
                 base: m.base.clone(),
@@ -878,16 +876,23 @@ impl App {
         );
         self.insert_pty(new_id.clone(), remote.session.clone());
         self.dead_panes.lock().unwrap().retain(|x| x != &new_id);
-        if !self
-            .pty_layout
-            .as_mut()
-            .is_some_and(|l| l.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone()))
         {
-            // 거울은 남의 세션이다 — kill 은 안 한다, Arc drop 이 detach 만 한다.
-            self.pty.remove(&new_id);
-            anyhow::bail!("pane {anchor} 을 활성 창 트리에서 못 찾았다");
+            // spawn_new_tab 과 같은 대접 — 탭은 트리를 안 바꾸고 pid_to_pane 과
+            // 바깥 pane 의 탭 목록만 늘린다. 방도 바깥 pane 것을 물려받는다.
+            let mut ws = self.ws.lock().unwrap();
+            ws.pid_to_pane.insert(new_id.clone(), outer.clone());
+            if let Some(r) = ws.pane_room.get(&outer).cloned() {
+                ws.pane_room.insert(new_id.clone(), r);
+            }
+            let pane = ws.panes.entry(outer.clone()).or_default();
+            let mut tab = PaneTab::default();
+            tab.pid = Some(new_id.clone());
+            pane.tabs.push(tab);
+            pane.active_tab = pane.tabs.len() - 1;
+            pane.dirty = true;
+            ws.active_pane = Some(outer.clone());
         }
-        // 몸통이 남의 기계라도 이 창의 학생은 같은 사람 — 무명 pane 방지.
+        // 몸통이 남의 기계라도 이 창의 학생은 같은 사람 — 무명 탭 방지.
         let name = if name.is_empty() {
             kasa_mcp::remote::remote_pane_character(&m.base, remote_id, None).unwrap_or_default()
         } else {
@@ -896,13 +901,36 @@ impl App {
         if !name.is_empty() {
             self.relabel_pane(&new_id, &name);
         }
-        self.ws.lock().unwrap().active_pane = Some(new_id.clone());
+        let (win_cols, win_rows) = self.window_cells();
         self.resize_backend(win_cols, win_rows);
         self.publish_pty_layout();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
         Ok(new_id)
+    }
+
+    /// pid 가 보조 탭이면 그 바깥 pane 을 포커스하고 그 탭을 앞으로 — 창이 다르면
+    /// 창부터 바꾼다. `focus_pane` 은 바깥 pane 만 알아서 탭 pid 로는 못 찾는다.
+    pub(crate) fn reveal_pane_tab(&mut self, pid: &str) -> bool {
+        let outer = self
+            .ws
+            .lock()
+            .unwrap()
+            .outer_for_pty(pid)
+            .unwrap_or_else(|| pid.to_string());
+        if !self.focus_pane(&outer) {
+            return false;
+        }
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(pane) = ws.panes.get_mut(&outer) {
+                if let Some(i) = pane.tabs.iter().position(|t| t.pid.as_deref() == Some(pid)) {
+                    pane.active_tab = i;
+                    pane.dirty = true;
+                }
+            }
+        }
+        true
     }
 
     /// 방 펼치기 — 명부 기계 하나의 학생 pane 전부를 이 창에 거울로 앉힌다.

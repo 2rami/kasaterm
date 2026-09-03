@@ -358,10 +358,10 @@ impl App {
         } = &btn
         {
             let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
-            self.set_toast(format!("{name} 거울 여는 중 — {label}"));
+            self.set_toast(format!("{name} 거울 여는 중 — {label}, 이 pane 의 탭으로"));
             self.render_frame();
             match self.mirror_remote_pane(&label, &rid, &name, &cwd) {
-                Ok(_) => self.set_toast(format!("{name} 거울 — {label} 의 화면을 옆에 앉혔다")),
+                Ok(_) => self.set_toast(format!("{name} 거울 — {label} 의 화면을 이 pane 의 탭으로 열었다")),
                 Err(e) => self.set_toast(format!("거울 실패 — {e:#}")),
             }
             self.info.machines_col.last_refresh = None; // 새 거울을 바로 읽게.
@@ -513,11 +513,64 @@ fn student_row(
     y: f32,
     // 좁은 칼럼 배치 — 버튼을 이름 오른쪽이 아니라 아랫줄에 앉힌다.
     narrow: bool,
+    // 줄 자체가 눌리는 행 — 원격 학생은 버튼 없이 줄을 누르면 거울 탭이 된다
+    // (2026-09-03 지시). 버튼 행과 달리 표적이 줄 전체라 손이 덜 간다.
+    row_action: Option<state::MachinesColBtn>,
 ) -> f32 {
     let busy_here = mc
         .busy
         .as_ref()
         .is_some_and(|(p, _)| !row.pane.is_empty() && *p == row.pane);
+    // 줄 높이는 아래 그리기가 밟는 줄 수로 미리 센다(이름·제목·아랫줄 버튼·결과 한 줄) —
+    // 호버 바탕을 글 밑에 먼저 깔아야 해서다.
+    let note_h = if mc
+        .note
+        .as_ref()
+        .is_some_and(|(p, _, _)| !row.pane.is_empty() && p == &row.pane)
+    {
+        14.0
+    } else {
+        0.0
+    };
+    let row_h = 15.0 + 15.0 + if narrow { 19.0 } else { 0.0 } + note_h + 6.0;
+    let row_rect = (x - 6.0, y - 3.0, (right - x + 6.0).max(0.0), row_h);
+    let hint = "탭으로 →";
+    let hint_w = if row_action.is_some() {
+        g.measure_chrome_text(hint, 10.0, false) + 8.0
+    } else {
+        0.0
+    };
+    let row_hot = row_action.is_some()
+        && cursor.0 >= row_rect.0
+        && cursor.0 <= row_rect.0 + row_rect.2
+        && cursor.1 >= row_rect.1
+        && cursor.1 <= row_rect.1 + row_rect.3;
+    if row_hot {
+        g.hover_pointer = true;
+        round_rect(
+            g,
+            row_rect.0,
+            row_rect.1,
+            row_rect.2,
+            row_rect.3,
+            theme::radius_sm(),
+            theme::raised_on(theme::surface(), true),
+        );
+        g.draw_text(
+            right - hint_w + 8.0,
+            y + 2.0,
+            hint,
+            gpu::DrawOpts {
+                font_size: 10.0,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
+        );
+    }
+    if let Some(a) = row_action {
+        mc.btn_rects.push((a, row_rect));
+    }
     // 상태점.
     let dot = 7.0;
     round_rect(
@@ -587,7 +640,7 @@ fn student_row(
     let text_max = if narrow {
         (right - text_x).max(0.0)
     } else {
-        (bx - 8.0 - text_x).max(0.0)
+        (bx - 8.0 - text_x - hint_w).max(0.0)
     };
     let name = truncate_to(g, &row.name, 12.0, true, text_max);
     g.draw_text(
@@ -740,7 +793,7 @@ pub(crate) fn draw_machines_col(
                     )
                 })
                 .collect();
-            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow, None);
         }
     }
 
@@ -966,29 +1019,23 @@ pub(crate) fn draw_machines_col(
                 "← 데려오기".to_string(),
                 true,
             )];
-            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
+            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow, None);
         }
         let mut last_room = String::new();
         for row in &m.remote {
             y = room_label(g, x0, y, &row.room, &mut last_room);
-            // 학생 하나만 거울로 — 방 펼치기(기계 단위)의 짝. 안 닿는 기계는 버튼을
-            // 안 그린다(눌러도 연결이 안 된다).
-            let buttons: Vec<(state::MachinesColBtn, String, bool)> =
-                if m.online && !row.remote_id.is_empty() {
-                    vec![(
-                        state::MachinesColBtn::Mirror {
-                            label: m.label.clone(),
-                            remote_id: row.remote_id.clone(),
-                            name: row.name.clone(),
-                            cwd: row.remote_cwd.clone(),
-                        },
-                        "거울".to_string(),
-                        true,
-                    )]
-                } else {
-                    Vec::new()
-                };
-            y = student_row(g, cursor, mc, row, &buttons, x0 + 8.0, right, y, narrow);
+            // 학생 하나만 거울로 — 방 펼치기(기계 단위)의 짝. 버튼이 아니라 줄을
+            // 누르면 포커스된 pane 의 탭으로 열린다. 안 닿는 기계는 줄이 안 눌린다
+            // (눌러도 연결이 안 된다).
+            let action = (m.online && !row.remote_id.is_empty()).then(|| {
+                state::MachinesColBtn::Mirror {
+                    label: m.label.clone(),
+                    remote_id: row.remote_id.clone(),
+                    name: row.name.clone(),
+                    cwd: row.remote_cwd.clone(),
+                }
+            });
+            y = student_row(g, cursor, mc, row, &[], x0 + 8.0, right, y, false, action);
         }
     }
 
