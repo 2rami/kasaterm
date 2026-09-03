@@ -115,6 +115,11 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
 cp -R app/kasaterm/collab-hooks "$APP/Contents/Resources/collab-hooks"
 rm -rf "$APP/Contents/Resources/collab-hooks/__pycache__"
+# 자기설치가 볼 「새로 구운 번들」 자리 — 구운 워킹트리가 아니라 **본 레포**의 dist 다.
+# 남의 미커밋 변경을 빼려고 임시 워크트리에서 구워도 설치본은 늘 본 레포 dist 를
+# 본다(main.rs install_pending_paths 가 이 표를 컴파일 경로보다 먼저 읽는다).
+MAIN_ROOT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+printf '%s' "$MAIN_ROOT" > "$APP/Contents/Resources/build-root"
 
 # Sparkle.framework → Contents/Frameworks (ditto 로 symlink·권한 보존). 자동 업데이트용.
 # macos_sparkle.rs 가 런타임에 Versions/B/Sparkle 를 dlopen 한다.

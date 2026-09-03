@@ -6391,7 +6391,17 @@ fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     if std::env::current_exe().ok().as_deref() != Some(running.as_path()) {
         return None;
     }
-    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/kasaterm.app");
+    // 새로 구운 번들의 자리 — 구운 쪽이 남긴 표(`Resources/build-root`, build-app.sh)가
+    // 먼저다. 컴파일 시점 경로(CARGO_MANIFEST_DIR)만 믿으면 임시 워크트리에서 구운
+    // 판이 그 워크트리를 영영 바라봐, 워크트리를 걷은 뒤엔 자기설치가 다시는
+    // 안 움직인다(2026-09-03 실측). 표가 없는 옛 번들은 컴파일 경로로 물러선다.
+    let root = std::fs::read_to_string(installed.join("Contents/Resources/build-root"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    let dist = root.join("dist/kasaterm.app");
     let fresh = dist.join("Contents/MacOS/kasaterm");
     let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     (mtime(&fresh)? > mtime(&running)?).then_some((installed, dist))
