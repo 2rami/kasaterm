@@ -1,11 +1,11 @@
-//! 웹(브라우저) pane — pane 자리에 붙어 다니는 자식 OS 창.
+//! 웹(브라우저) pane — pane 자리에 붙어 다니는 네이티브 WebView.
 //!
 //! wgpu 본창 **안**에는 WKWebView 를 겹칠 수 없다(CAMetalLayer 가 자식 뷰를
 //! 전부 덮는다 — 2026-05-25 실측, 그때 포기했던 이유). 그래서 반대로 간다:
-//! 장식 없는 자식 창을 pane 사각형 위에 얹고 NSWindow `addChildWindow:` 로
-//! 본창에 접착한다. 창을 끌면 AppKit 이 자식을 같이 옮기고(프레임 간 위임이
-//! 없어 드래그 중에도 안 떨어진다), pane 이 갈라지거나 커지거나 탭이 바뀌면
-//! `sync_web_hosts` 가 다음 루프 턴에 프레임을 따라잡는다.
+//! macOS 에서는 장식 없는 backing 창을 pane 사각형 위에 얹고 NSWindow
+//! `addChildWindow:` 로 본창에 접착한다. 다른 플랫폼은 메인 Window 에 WebView 를
+//! 직접 child 로 붙인다 — 별도 top-level 창을 만들면 작업표시줄·Alt+Tab 에 가짜
+//! 앱 창이 늘고 그 창 이벤트가 본창 surface 로 샐 수 있다.
 //!
 //! 그리드 쪽 자리는 `PaneContent::Web`(주소 + host_id 뿐)이 잡는다 — 셀
 //! 렌더는 그 pane 을 빈 바탕으로 두고, 이 모듈의 자식 창이 그 위를 덮는다.
@@ -17,12 +17,13 @@ use winit::event_loop::ActiveEventLoop;
 
 /// 웹 pane 하나의 실물. `App.web_hosts` 에 `WebPane.host_id` 로 산다.
 pub(crate) struct WebHost {
-    // webview 가 window 를 빌린다 — 필드는 선언 순서로 drop 되므로 webview 가
-    // 먼저 와야 한다(chrome.rs 패널들이 수동으로 지키는 순서와 같은 이유).
+    // webview 가 backing/main window 를 빌린다 — 필드는 선언 순서로 drop 되므로
+    // webview 가 먼저 와야 한다(chrome.rs 패널들이 수동으로 지키는 순서와 같은 이유).
     webview: wry::WebView,
-    window: Arc<winit::window::Window>,
-    /// 마지막으로 적용한 프레임(물리 px: x, y, w, h) — 같으면 안 건드린다.
-    /// 매 루프 턴 호출되는 sync 가 OS 창 이동/리사이즈를 반복 호출하지 않게.
+    /// macOS 만 child backing 창이 필요하다. webview 뒤에 둬 drop 순서를 보장한다.
+    backing: Option<Arc<winit::window::Window>>,
+    /// 마지막으로 적용한 프레임(논리 px: x, y, w, h) — backing 은 화면 좌표,
+    /// direct child 는 메인 content 좌표다. 매 sync 의 OS 호출을 줄이는 용도.
     last_frame: Option<(i32, i32, u32, u32)>,
     /// 지금 화면에 붙어(orderFront + child 접착) 있는가.
     visible: bool,
@@ -79,6 +80,23 @@ const WEB_INSET: f32 = 2.0;
 /// 위변은 헤더(34px)가 이미 본창 띠라 따로 안 들인다.
 const WEB_SEAM_INSET: f32 = 6.0;
 
+/// direct child 에 화면 원점을 섞으면 메인 창 이동 때 pane 밖으로 밀리므로,
+/// backing frame 과 WebView 부모 안 원점을 한 판에서 가른다.
+fn web_host_origins(
+    main_origin: (f64, f64),
+    pane_origin: (f64, f64),
+    backed: bool,
+) -> ((f64, f64), (f64, f64)) {
+    if backed {
+        (
+            (main_origin.0 + pane_origin.0, main_origin.1 + pane_origin.1),
+            (0.0, 0.0),
+        )
+    } else {
+        (pane_origin, pane_origin)
+    }
+}
+
 /// 웹뷰마다 심는 keydown 훅. 자식 창이 key 인 동안 앱은 키 이벤트를 못 받으므로
 /// (WKWebView 가 first responder — winit 뷰까지 안 온다), 페이지 캡처 단계에서
 /// kasaterm 의 pane 단축키만 골라 IPC 로 넘긴다. Cmd+C/V/A/Z 같은 편집 계열은
@@ -90,6 +108,8 @@ const WEB_CHORD_JS: &str = r#"(() => {
   // meta 만 보면 Windows/Linux 에선 chord 가 통째로 죽는다(리뷰 지적).
   const mac = (navigator.platform || '').indexOf('Mac') >= 0;
   const post = (m) => { try { window.ipc.postMessage('chord:' + m); } catch (_) {} };
+  // direct child 에는 pane 별 winit Focused 이벤트가 없으므로 실제 포인터 입력을 넘긴다.
+  window.addEventListener('pointerdown', () => post('focus'), true);
   window.addEventListener('keydown', (e) => {
     // 자동반복 무시 — 본창 chord 경로와 같은 이유(Cmd+D 를 살짝 길게 누르는
     // 것만으로 split 이 우르르 나간다).
@@ -266,7 +286,8 @@ impl App {
         id
     }
 
-    /// 자식 창 + webview 실물을 만들어 `web_hosts[host_id]` 에 앉힌다.
+    /// webview 실물을 만들어 `web_hosts[host_id]` 에 앉힌다. macOS 만 별도
+    /// backing 창을 만들고, 다른 플랫폼은 메인 창에 직접 child 로 붙인다.
     /// 실패하면 false(창/웹뷰 생성 실패 — 호출자가 그리드 자리를 되감는다).
     ///
     /// 크기는 자리표시자 — 첫 sync 가 pane 프레임으로 맞춘다. 보이지 않게
@@ -278,26 +299,12 @@ impl App {
         url: &str,
         host_id: u64,
     ) -> bool {
-        let attrs = winit::window::WindowAttributes::default()
-            .with_title(short_label(url))
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_visible(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(480.0, 360.0));
+        let Some(main) = self.window.clone() else {
+            eprintln!("[webpane] main window missing");
+            return false;
+        };
         #[cfg(target_os = "macos")]
-        let attrs = {
-            use winit::platform::macos::WindowAttributesExtMacOS;
-            // 그림자가 있으면 pane 경계 안쪽에 창 그림자 띠가 진다 — 내장처럼
-            // 보여야 하므로 끈다.
-            attrs.with_has_shadow(false)
-        };
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[webpane] window create failed: {e}");
-                return false;
-            }
-        };
+        let _ = &main;
         // 아래 핸들러 전부 같은 패턴 — wry 콜백은 메인 스레드지만 &mut App 이
         // 없어, 소켓 명령과 같은 proxy 경로로 이벤트 루프에 넘긴다.
         let chord_proxy = self.proxy.clone();
@@ -311,11 +318,12 @@ impl App {
         let dl_dests: std::rc::Rc<std::cell::RefCell<HashMap<String, std::path::PathBuf>>> =
             std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()));
         let dl_dests_done = dl_dests.clone();
-        // build_as_child — 같은 wry 를 쓰는 chrome.rs 패널들과 같은 이유(build()
-        // 는 content view 를 갈아치워 use-after-free).
-        let webview = match wry::WebViewBuilder::new()
+        // build_as_child — build() 는 content view 를 갈아치워 use-after-free 를
+        // 만들 수 있다. macOS 는 backing, 다른 플랫폼은 main 이 부모다.
+        let builder = wry::WebViewBuilder::new()
             .with_url(url.to_string())
             .with_devtools(true)
+            .with_visible(false)
             .with_initialization_script(WEB_CHORD_JS)
             .with_ipc_handler(move |req: wry::http::Request<String>| {
                 let body = req.into_body();
@@ -361,10 +369,39 @@ impl App {
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
                 size: wry::dpi::LogicalSize::new(480.0, 360.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => wv,
+            });
+        #[cfg(target_os = "macos")]
+        let built = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            let attrs = winit::window::WindowAttributes::default()
+                .with_title(short_label(url))
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_visible(false)
+                .with_inner_size(winit::dpi::LogicalSize::new(480.0, 360.0))
+                // 그림자 띠가 pane 경계 안에 보이면 내장 surface 처럼 보이지 않는다.
+                .with_has_shadow(false);
+            match event_loop.create_window(attrs) {
+                Ok(window) => {
+                    let backing = Arc::new(window);
+                    builder
+                        .build_as_child(backing.as_ref())
+                        .map(|webview| (webview, Some(backing)))
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let built = {
+            let _ = event_loop;
+            builder
+                .build_as_child(main.as_ref())
+                .map(|webview| (webview, None))
+                .map_err(|e| e.to_string())
+        };
+        let (webview, backing) = match built {
+            Ok(pair) => pair,
             Err(e) => {
                 eprintln!("[webpane] webview build failed: {e}");
                 return false;
@@ -374,7 +411,7 @@ impl App {
             host_id,
             WebHost {
                 webview,
-                window,
+                backing,
                 last_frame: None,
                 visible: false,
                 last_url_poll: std::time::Instant::now(),
@@ -570,16 +607,20 @@ impl App {
         let Some(main) = self.window.clone() else {
             return;
         };
-        let Ok(origin) = main.inner_position() else {
-            return;
+        // direct child 는 메인 content 좌표를 쓰므로 Wayland 에서 지원하지 않는
+        // inner_position 을 물었다가 웹뷰 전체를 포기하면 안 된다.
+        #[cfg(target_os = "macos")]
+        let main_origin = {
+            let Ok(origin) = main.inner_position() else {
+                return;
+            };
+            let origin = origin.to_logical::<f64>(main.scale_factor());
+            (origin.x, origin.y)
         };
-        // 전부 **OS 논리 포인트**로 계산해 Logical* 타입으로 넘긴다. 물리 px 로
-        // 넘기면 winit 이 "그 창의" 배율로 환산하는데, 숨겨 둔 자식 창은 아직
-        // 어느 모니터에 있는지 몰라 본창과 다른 배율을 믿을 수 있다 — 실측:
-        // 본창이 1x 모니터인데 자식이 2x 를 믿어 창 꼭대기에 반쯤 잘려 붙었다.
+        #[cfg(not(target_os = "macos"))]
+        let main_origin = (0.0, 0.0);
         // 레이아웃 좌표(pad·cell·TITLE_HEIGHT)는 줌 이전 공간이라 ui_zoom 만
-        // 곱하면 포인트가 된다(effective_scale 은 dpi 까지 곱해 물리 px 용).
-        let origin = origin.to_logical::<f64>(main.scale_factor());
+        // 곱하면 논리 포인트가 된다(effective_scale 은 dpi 까지 곱해 물리 px 용).
         let zoom = (self.ui_zoom as f64).max(0.1);
         let (cols, rows) = self.window_cells();
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
@@ -618,9 +659,13 @@ impl App {
             self.web_hosts.keys().copied().filter(|k| !alive.contains(k)).collect();
         for k in dead {
             if let Some(h) = self.web_hosts.remove(&k) {
-                if h.visible {
-                    detach_child(&main, &h.window);
+                if let Some(backing) = h.backing.as_ref() {
+                    if h.visible {
+                        detach_child(&main, backing);
+                    }
+                    backing.set_visible(false);
                 }
+                let _ = h.webview.set_visible(false);
             }
         }
 
@@ -634,8 +679,11 @@ impl App {
             .collect();
         for k in to_hide {
             if let Some(h) = self.web_hosts.get_mut(&k) {
-                detach_child(&main, &h.window);
-                h.window.set_visible(false);
+                if let Some(backing) = h.backing.as_ref() {
+                    detach_child(&main, backing);
+                    backing.set_visible(false);
+                }
+                let _ = h.webview.set_visible(false);
                 h.visible = false;
             }
         }
@@ -653,20 +701,23 @@ impl App {
             // 위변은 헤더(34px)가 본창 잡기 띠 노릇을 하지만, ⋮ 로 헤더를 접은
             // pane 은 그 띠가 없어 좌우아래와 같은 조건이 필요하다(리뷰 지적).
             let inset_t = if header <= 0.0 && y > 0 { WEB_SEAM_INSET } else { WEB_INSET };
-            let lx = origin.x + (pad + x as f32 * self.cell.w + inset_l) as f64 * zoom;
-            let ly = origin.y
-                + (TITLE_HEIGHT + y as f32 * self.cell.h + header + inset_t) as f64 * zoom;
+            let pane_x = (pad + x as f32 * self.cell.w + inset_l) as f64 * zoom;
+            let pane_y =
+                (TITLE_HEIGHT + y as f32 * self.cell.h + header + inset_t) as f64 * zoom;
             let lw = ((w as f32 * self.cell.w - inset_l - inset_r).max(1.0)) as f64 * zoom;
             let lh = ((h as f32 * self.cell.h - header - inset_t - inset_b).max(1.0)) as f64
                 * zoom;
-            // 비교용 정수 스냅(포인트) — 매 턴 같은 값이면 OS 호출을 안 한다.
+            let Some(host) = self.web_hosts.get_mut(&host_id) else { continue };
+            let backed = host.backing.is_some();
+            let (frame_origin, webview_origin) =
+                web_host_origins(main_origin, (pane_x, pane_y), backed);
+            // 비교용 정수 스냅(논리 포인트) — 매 턴 같은 값이면 OS 호출을 안 한다.
             let frame = (
-                lx.round() as i32,
-                ly.round() as i32,
+                frame_origin.0.round() as i32,
+                frame_origin.1.round() as i32,
                 lw.round().max(1.0) as u32,
                 lh.round().max(1.0) as u32,
             );
-            let Some(host) = self.web_hosts.get_mut(&host_id) else { continue };
             // 페이지 이동(링크·리다이렉트)을 따라간다 — WebPane.url 을 열 때
             // 주소로 박제해 두면 탭 라벨과 중복-포커스 판정이 거짓말한다.
             if host.last_url_poll.elapsed() >= std::time::Duration::from_millis(500) {
@@ -684,24 +735,32 @@ impl App {
                 );
             }
             if host.last_frame != Some(frame) {
-                // **크기 먼저, 위치 나중.** AppKit 리사이즈는 창의 아래변을
-                // 고정하고 위로 자란다 — 위치를 먼저 잡으면 그 뒤 리사이즈가
-                // 위변을 화면 밖으로 밀고, constrain 이 창을 화면 꼭대기로
-                // 끌어올린다(실측: 의도 y=-1320 이 화면 상단 -1570 에 박혔다).
-                let _ = host
-                    .window
-                    .request_inner_size(winit::dpi::LogicalSize::new(lw, lh));
-                host.window
-                    .set_outer_position(winit::dpi::LogicalPosition::new(lx, ly));
+                if let Some(backing) = host.backing.as_ref() {
+                    // AppKit 은 아래변을 고정하고 위로 키우므로 위치보다 크기를
+                    // 먼저 바꿔야 화면 밖 child 가 엉뚱한 모니터로 constrain 되지 않는다.
+                    let _ = backing
+                        .request_inner_size(winit::dpi::LogicalSize::new(lw, lh));
+                    backing.set_outer_position(winit::dpi::LogicalPosition::new(
+                        frame_origin.0,
+                        frame_origin.1,
+                    ));
+                }
                 let _ = host.webview.set_bounds(wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                    position: wry::dpi::LogicalPosition::new(
+                        webview_origin.0,
+                        webview_origin.1,
+                    )
+                    .into(),
                     size: wry::dpi::LogicalSize::new(lw, lh).into(),
                 });
                 host.last_frame = Some(frame);
             }
             if !host.visible {
-                host.window.set_visible(true);
-                attach_child(&main, &host.window);
+                let _ = host.webview.set_visible(true);
+                if let Some(backing) = host.backing.as_ref() {
+                    backing.set_visible(true);
+                    attach_child(&main, backing);
+                }
                 host.visible = true;
             }
         }
@@ -940,8 +999,12 @@ impl App {
         id: winit::window::WindowId,
         event: &winit::event::WindowEvent,
     ) -> bool {
-        let Some(host_id) =
-            self.web_hosts.iter().find(|(_, h)| h.window.id() == id).map(|(k, _)| *k)
+        let Some(host_id) = self.web_hosts.iter().find_map(|(host_id, host)| {
+            host.backing
+                .as_ref()
+                .filter(|backing| backing.id() == id)
+                .map(|_| *host_id)
+        })
         else {
             return false;
         };
@@ -972,6 +1035,19 @@ impl App {
         true
     }
 
+    /// 직접 child 는 pane 별 key window 가 없으므로 보임+메인 focus 까지 함께
+    /// 확인하지 않으면 배경 페이지 IPC 가 사용자 단축키를 흉내낼 수 있다.
+    fn web_host_accepts_user_action(&self, host_id: u64) -> bool {
+        let Some(host) = self.web_hosts.get(&host_id) else {
+            return false;
+        };
+        host.visible
+            && host.backing.as_ref().map_or_else(
+                || self.window.as_ref().is_some_and(|main| main.has_focus()),
+                |backing| backing.has_focus(),
+            )
+    }
+
     /// host_id → 그 웹뷰가 붙은 pane(outer id). 어느 탭에 있든 찾는다.
     fn pane_of_web_host(&self, host_id: u64) -> Option<String> {
         let ws = self.ws.lock().unwrap();
@@ -995,16 +1071,21 @@ impl App {
         // (리뷰 실증). 사용자 제스처를 흉내낼 수는 있어도, 최소한 그 웹뷰 창이
         // key(사용자가 실제로 보고 치는 중)일 때만 받는다 — 배경 pane 의 페이지가
         // 몰래 pane 을 닫거나 쪼개는 것을 막는다.
-        let focused = self
-            .web_hosts
-            .get(&host_id)
-            .map(|h| h.window.has_focus())
-            .unwrap_or(false);
-        if !focused {
+        if !self.web_host_accepts_user_action(host_id) {
             eprintln!("[webpane] chord {cmd}: 웹뷰가 key 가 아니라 무시(페이지 주입 의심)");
             return;
         }
         self.ws.lock().unwrap().active_pane = Some(pid.clone());
+        if cmd == "focus" {
+            // 직접 child 클릭은 winit Focused 이벤트가 없어서 IPC 시점에 주소 편집과
+            // 정본 focus 를 함께 맞춰야 다음 split/socket 명령이 이 pane 을 잡는다.
+            self.cancel_web_addr();
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let mut refocus_main = true;
         match cmd {
             "split-h" | "split-v" => {
@@ -1162,12 +1243,7 @@ impl App {
         host_id: u64,
         url: &str,
     ) {
-        let focused = self
-            .web_hosts
-            .get(&host_id)
-            .map(|h| h.window.has_focus())
-            .unwrap_or(false);
-        if !focused {
+        if !self.web_host_accepts_user_action(host_id) {
             eprintln!("[webpane] popup {url}: 웹뷰가 key 가 아니라 무시(배경 팝업 차단)");
             return;
         }
@@ -1653,5 +1729,22 @@ mod tests {
     fn web_label_is_host_only() {
         assert_eq!(short_label("http://localhost:5173/app/x"), "localhost:5173");
         assert_eq!(short_label("example.com"), "example.com");
+    }
+
+    #[test]
+    fn web_host_origins_separate_backing_and_direct_child_coordinates() {
+        let main = (1200.0, -700.0);
+        let pane = (240.0, 80.0);
+        assert_eq!(
+            web_host_origins(main, pane, true),
+            ((1440.0, -620.0), (0.0, 0.0))
+        );
+        assert_eq!(web_host_origins(main, pane, false), (pane, pane));
+    }
+
+    #[test]
+    fn direct_child_pointer_focus_is_forwarded() {
+        assert!(WEB_CHORD_JS.contains("pointerdown"));
+        assert!(WEB_CHORD_JS.contains("post('focus')"));
     }
 }
