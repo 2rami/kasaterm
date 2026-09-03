@@ -1188,11 +1188,14 @@ impl App {
                                 .iter()
                                 .map(normalise)
                                 .collect();
-                            if let Some(range) = crate::screenread::pinned_input_rows(&live) {
-                                let pinned = &live[range];
-                                let h = pinned.len().min(composed.len());
+                            if let Some(top) = crate::screenread::pinned_input_top(&live) {
+                                // 두 화면은 높이가 같다 — 살아 있는 화면의 **아래
+                                // 몇 줄**을 뷰포트의 같은 수만큼에 그대로 얹으면
+                                // 입력창이 원래 있던 줄에 정확히 앉는다. 글자가
+                                // 남은 데서 끊으면 화면 밑 빈 줄만큼 밀려 내려간다.
+                                let h = (live.len() - top).min(composed.len());
                                 let base = composed.len() - h;
-                                composed[base..].clone_from_slice(&pinned[pinned.len() - h..]);
+                                composed[base..].clone_from_slice(&live[live.len() - h..]);
                             }
                         }
                     }

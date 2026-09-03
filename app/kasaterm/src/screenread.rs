@@ -80,24 +80,27 @@ impl PromptBox {
     }
 }
 
-/// 스크롤을 올렸을 때 뷰포트 맨 아래에 붙잡아 둘 행 범위 — 입력박스의 위 테두리
-/// (codex 는 테두리가 없어 입력행 자신)부터 화면에 글자가 남은 마지막 행까지.
+/// 스크롤을 올렸을 때 뷰포트 맨 아래에 붙잡아 둘 **첫 행** — 입력박스의 위 테두리
+/// (codex 는 테두리가 없어 입력행 자신). 이 행부터 살아 있는 화면 **끝까지**를
+/// 통째로 옮긴다.
 ///
-/// 박스 **아래**까지 함께 뜨는 이유: claude 는 테두리 밑에 모드·단축키 힌트를
+/// 박스 **아래**까지 함께 옮기는 이유: claude 는 테두리 밑에 모드·단축키 힌트를
 /// 한두 줄 더 그린다. 박스만 떠서 덮으면 그 줄들이 스크롤을 따라 흘러가, 붙잡아
 /// 둔 입력창 밑으로 지나간 대화가 비쳐 화면이 어긋나 보인다.
 ///
+/// 끝을 「글자가 남은 마지막 행」에서 끊지 않고 **화면 끝까지** 가는 이유: claude 는
+/// 화면 맨 아래 한두 줄을 비워 두는데, 거기서 끊고 뷰포트 바닥에 맞춰 붙이면 그 빈
+/// 줄 수만큼 입력창이 아래로 밀린다 — 스크롤을 올리는 순간 한 칸 내려앉았다가 바닥에
+/// 닿으면 제자리로 뛴다(2026-09-03 지적: "프롬프트 입력하는거 움직여 하단바").
+/// 빈 줄까지 함께 옮기면 두 화면의 높이가 같아 자리가 정확히 겹친다.
+///
 /// 살아 있는 화면(`live_tail_rows`)을 받는다 — 뷰포트가 아니라. 뷰포트에는
 /// 스크롤을 올린 순간 입력창이 이미 없다.
-pub(crate) fn pinned_input_rows(
-    rows: &[Vec<GridCell>],
-) -> Option<std::ops::RangeInclusive<usize>> {
-    let top = match prompt_box(rows)? {
+pub(crate) fn pinned_input_top(rows: &[Vec<GridCell>]) -> Option<usize> {
+    Some(match prompt_box(rows)? {
         PromptBox::Bordered { top, .. } => top,
         PromptBox::Filled { rows } => rows.start,
-    };
-    let last = rows.iter().rposition(|r| r.iter().any(|c| c.ch != ' ' && c.ch != '\0'))?;
-    (last >= top).then_some(top..=last)
+    })
 }
 
 /// ultracode 턴의 입력박스 accent — 보라 숨쉬기. 학생 배정과 무관하게 모든
@@ -7170,7 +7173,7 @@ mod pinned_input_tests {
     }
 
     #[test]
-    fn 입력박스는_위테두리부터_마지막_힌트줄까지_붙잡는다() {
+    fn 입력박스는_위테두리부터_화면_끝까지_붙잡는다() {
         // claude 화면 꼬리 — 지나간 대화, 입력박스, 그 아래 모드 힌트.
         let border = "─".repeat(20);
         let rows: Vec<Vec<GridCell>> = [
@@ -7184,14 +7187,14 @@ mod pinned_input_tests {
         .iter()
         .map(|s| row(s))
         .collect();
-        // 테두리(1)부터 힌트(4)까지 — 뒤따르는 빈 줄은 뺀다.
-        assert_eq!(pinned_input_rows(&rows), Some(1..=4));
+        // 테두리(1)부터 화면 끝까지 — 뒤따르는 빈 줄도 함께 옮겨야 자리가 겹친다.
+        assert_eq!(pinned_input_top(&rows), Some(1));
     }
 
     #[test]
     fn 입력박스가_없으면_아무것도_붙잡지_않는다() {
         let rows: Vec<Vec<GridCell>> =
             ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
-        assert_eq!(pinned_input_rows(&rows), None);
+        assert_eq!(pinned_input_top(&rows), None);
     }
 }
