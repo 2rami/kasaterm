@@ -230,6 +230,8 @@ export function AppearanceTab({
     void run('palette-hex', { id: String(index), label: next });
   // 미리보기는 `run` 을 안 탄다 — 그 훅은 busy 를 세우고 값 전체를 다시 받아오므로,
   // 색을 고르는 동안 스와치가 잠겼다 풀렸다 하고 옛 hex 가 되돌아온다.
+  // ColorWheel.useLatestOnly 가 in-flight 하나와 마지막 값 하나만 남긴다. 이 Promise를
+  // 돌려줘야 다음 미리보기가 앞 응답을 추월하지 않는다.
   const previewHex = (index: number) => (next: string) =>
     postAction('palette-preview', { id: String(index), label: next });
 

@@ -543,8 +543,6 @@ impl App {
     /// 카드를 띄운다. `_TO=<계정id>` 를 주면 **실제 경로**(`ask_or_switch_claude_account`)
     /// 를 태우고, 안 주면 가짜 영향으로 카드만 세운다 — 헤드리스에는 claude pane 이
     /// 없어 영향이 늘 0이라 실제 경로만으로는 카드를 볼 수 없다.
-    ///
-    /// `_SURFACE=settings` 면 설정 별도창 몫으로 세운다(그 창이 그리는지 확인용).
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_account_confirm(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -561,10 +559,6 @@ impl App {
         if Instant::now() < due || FIRED.swap(true, Ordering::SeqCst) {
             return;
         }
-        let surface = match std::env::var("KASATERM_AUTOACCOUNTCONFIRM_SURFACE").as_deref() {
-            Ok("settings") => crate::session::ConfirmSurface::Settings,
-            _ => crate::session::ConfirmSurface::Main,
-        };
         // `_FLASH=1` 이면 카드 대신 반짝임만 켠다 — 헤드리스에는 전환할 계정이 없어
         // 실제 경로로는 그 효과를 볼 수 없다.
         if std::env::var_os("KASATERM_AUTOACCOUNTCONFIRM_FLASH").is_some() {
@@ -576,7 +570,7 @@ impl App {
             return;
         }
         if let Ok(to) = std::env::var("KASATERM_AUTOACCOUNTCONFIRM_TO") {
-            self.ask_or_switch_claude_account(&to, surface);
+            self.ask_or_switch_claude_account(&to, crate::session::ConfirmSurface::Main);
             let shown = self.account_switch_confirm.is_some();
             eprintln!("[autoacctconfirm] real to={to} shown={shown}");
             return;
@@ -591,10 +585,11 @@ impl App {
         eprintln!("[autoacctconfirm] fake torn_down={}", impact.torn_down());
         self.account_switch_confirm = Some(crate::session::PendingAccountSwitch {
             provider: crate::session::AccountSwitchProvider::Claude,
+            nonce: "testkit".to_string(),
             to: "acct-1".to_string(),
             to_label: "지메일".to_string(),
             impact,
-            surface,
+            surface: crate::session::ConfirmSurface::Main,
             rects: Vec::new(),
         });
         self.chrome_dirty = true;

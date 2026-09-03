@@ -82,7 +82,7 @@ export function SettingsApp() {
   const t = useT();
   const tokens = useTokens();
   const query = new URLSearchParams(location.search);
-  const studentSlug = query.get('student');
+  const studentName = query.get('student');
   const studentTheme = query.get('theme') ?? '';
   const [cat, setCat] = useState<CatKey>(initialCat);
   const [chars, setChars] = useState<SettingsCharacters | null>(null);
@@ -164,33 +164,33 @@ export function SettingsApp() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        void postAction(studentSlug ? 'close-student-window' : 'close-settings');
+        void postAction(studentName ? 'close-student-window' : 'close-settings');
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [studentSlug]);
+  }, [studentName]);
 
   const meta = t.titles[cat];
   const tab = TABS[cat];
 
-  /// `?student=<slug>&theme=<id>` 로 열린 **학생 전용 창**인가. 설정 본체가 앱 안으로
+  /// `?student=<exact name>&theme=<id>` 로 열린 **학생 전용 창**인가. 설정 본체가 앱 안으로
   /// 들어가면 세부 화면은 밖으로 나와야 한다 — 안에서 안을 덮을 수 없다(거노
   /// 2026-08-25 「설정창을 안으로, 세부설정을 별도창으로」).
   useEffect(() => {
-    if (!studentSlug || open) return;
+    if (!studentName || open) return;
     let dead = false;
     void (async () => {
       // 쓰는 테마면 이미 받아 둔 명단에 있다 — 왕복이 없다.
       if (chars && (studentTheme === '' || studentTheme === chars.active_theme)) {
-        const hit = chars.roster.find((c) => c.slug === studentSlug);
+        const hit = chars.roster.find((c) => c.name === studentName);
         if (hit && !dead) setOpen(hit);
         return;
       }
       if (!studentTheme) return;
       try {
         const list = await fetchThemeRoster(studentTheme);
-        const hit = list.find((c) => c.slug === studentSlug);
+        const hit = list.find((c) => c.name === studentName);
         if (hit && !dead) setOpen(hit);
       } catch {
         // 아래 로딩·오류 문구가 그대로 받는다.
@@ -199,9 +199,9 @@ export function SettingsApp() {
     return () => {
       dead = true;
     };
-  }, [studentSlug, studentTheme, chars, open]);
+  }, [studentName, studentTheme, chars, open]);
 
-  if (studentSlug) {
+  if (studentName) {
     // 좌측 nav 도 제목 줄도 없다. 이 창의 존재 이유가 그 학생 하나라, 다른 칸으로
     // 갈 길을 주면 같은 설정이 두 창에 떠서 어느 쪽이 정본인지 알 수 없게 된다.
     return (
@@ -241,6 +241,7 @@ export function SettingsApp() {
             <button
               key={key}
               type="button"
+              aria-current={on ? 'page' : undefined}
               onClick={() => setCat(key)}
               className="relative mb-0.5 flex min-h-[40px] w-full items-center gap-2.5 px-2.5 py-2 text-left text-[13px]"
               style={{
@@ -280,12 +281,12 @@ export function SettingsApp() {
         <div className="my-5 h-px" style={{ background: 'var(--kt-border)' }} />
 
         {ROSTER_CATS.includes(cat) && err && (
-          <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
+          <p role="alert" className="text-[13px]" style={{ color: 'var(--kt-danger-text-bg)' }}>
             {t.common.fetchFailed({ path: '/settings/characters', error: err })}
           </p>
         )}
         {tab && valErr && (
-          <p className="text-[13px]" style={{ color: 'var(--kt-danger)' }}>
+          <p role="alert" className="text-[13px]" style={{ color: 'var(--kt-danger-text-bg)' }}>
             {t.common.fetchFailed({ path: '/settings/values', error: valErr })}
           </p>
         )}

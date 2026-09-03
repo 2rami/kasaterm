@@ -266,8 +266,10 @@ export function CharacterDetail({
         )}
         {toast && (
           <span
+            role={toast.ok ? 'status' : 'alert'}
+            aria-live={toast.ok ? 'polite' : 'assertive'}
             className="text-[12px]"
-            style={{ color: toast.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger)' }}
+            style={{ color: toast.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger-text-bg)' }}
           >
             {toast.msg}
           </span>

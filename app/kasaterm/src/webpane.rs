@@ -39,6 +39,9 @@ pub(crate) struct WebHost {
     page_title: Option<String>,
     /// 페이지 줌 배율(Cmd+= / - / 0). 1.0 = 100%.
     zoom_level: f64,
+    /// 초기화 스크립트가 증명한 실제 포인터/키 입력. popup은 이 짧은 창 안에서만
+    /// 받아 배경 페이지의 programmatic window.open을 막는다.
+    trusted_at: Option<std::time::Instant>,
 }
 
 impl WebHost {
@@ -107,10 +110,13 @@ const WEB_CHORD_JS: &str = r#"(() => {
   // 본창 host chord 와 같은 판정 — mac=Cmd, 그 외=Ctrl+Shift(chrome.rs host_mod).
   // meta 만 보면 Windows/Linux 에선 chord 가 통째로 죽는다(리뷰 지적).
   const mac = (navigator.platform || '').indexOf('Mac') >= 0;
-  const post = (m) => { try { window.ipc.postMessage('chord:' + m); } catch (_) {} };
+  const capability = '__KASATERM_WEB_CAPABILITY__';
+  const post = (m) => { try { window.ipc.postMessage('chord:' + capability + ':' + m); } catch (_) {} };
   // direct child 에는 pane 별 winit Focused 이벤트가 없으므로 실제 포인터 입력을 넘긴다.
-  window.addEventListener('pointerdown', () => post('focus'), true);
+  window.addEventListener('pointerdown', (e) => { if (e.isTrusted) post('focus'); }, true);
   window.addEventListener('keydown', (e) => {
+    if (!e.isTrusted) return;
+    post('gesture');
     // 자동반복 무시 — 본창 chord 경로와 같은 이유(Cmd+D 를 살짝 길게 누르는
     // 것만으로 split 이 우르르 나간다).
     if (e.repeat) return;
@@ -146,6 +152,22 @@ const WEB_CHORD_JS: &str = r#"(() => {
     if (cmd) { e.preventDefault(); e.stopImmediatePropagation(); post(cmd); }
   }, true);
 })();"#;
+
+fn web_capability() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn direct_host_action_allowed(
+    visible: bool,
+    active_host: Option<u64>,
+    requested_host: u64,
+) -> bool {
+    visible && active_host == Some(requested_host)
+}
+
+fn authenticated_web_cmd<'a>(body: &'a str, prefix: &str) -> Option<&'a str> {
+    body.strip_prefix(prefix).filter(|cmd| !cmd.is_empty())
+}
 
 /// 스킴 없는 입력(`localhost:5173`)을 브라우저가 여는 주소로 만든다.
 /// 개발 서버 확인이 주 용도라 기본 스킴은 http 다(로컬은 https 가 없다).
@@ -277,6 +299,21 @@ pub(crate) fn detach_child(parent: &winit::window::Window, child: &winit::window
 }
 
 impl App {
+    /// 부모 창보다 webview를 먼저 내린다. 직접 child인 플랫폼은 부모가 먼저 drop되면
+    /// 네이티브 핸들을 늦게 해제하며 use-after-free가 될 수 있다.
+    pub(crate) fn close_web_hosts(&mut self) {
+        let main = self.window.clone();
+        for (_, host) in self.web_hosts.drain() {
+            let _ = host.webview.set_visible(false);
+            if let Some(backing) = host.backing.as_ref() {
+                if let Some(main) = main.as_ref() {
+                    detach_child(main, backing);
+                }
+                backing.set_visible(false);
+            }
+        }
+    }
+
     /// `WebPane.host_id` 발급 — spawn 과 분리한 이유: 세션 복원은 그리드 쪽
     /// `WebPane` 을 먼저 앉히고(id 필요) 자식 창은 event_loop 가 잡히는
     /// `about_to_wait` 에서 뒤늦게 만든다(`pending_web_hosts`).
@@ -320,14 +357,17 @@ impl App {
         let dl_dests_done = dl_dests.clone();
         // build_as_child — build() 는 content view 를 갈아치워 use-after-free 를
         // 만들 수 있다. macOS 는 backing, 다른 플랫폼은 main 이 부모다.
+        let capability = web_capability();
+        let ipc_prefix = format!("chord:{capability}:");
+        let init_script = WEB_CHORD_JS.replace("__KASATERM_WEB_CAPABILITY__", &capability);
         let builder = wry::WebViewBuilder::new()
             .with_url(url.to_string())
             .with_devtools(true)
             .with_visible(false)
-            .with_initialization_script(WEB_CHORD_JS)
+            .with_initialization_script(init_script)
             .with_ipc_handler(move |req: wry::http::Request<String>| {
                 let body = req.into_body();
-                if let Some(cmd) = body.strip_prefix("chord:") {
+                if let Some(cmd) = authenticated_web_cmd(&body, &ipc_prefix) {
                     let _ = chord_proxy.send_event(crate::UserEvent::WebPaneCmd {
                         host_id,
                         cmd: cmd.to_string(),
@@ -418,6 +458,7 @@ impl App {
                 loading: false,
                 page_title: None,
                 zoom_level: 1.0,
+                trusted_at: None,
             },
         );
         true
@@ -1035,17 +1076,40 @@ impl App {
         true
     }
 
-    /// 직접 child 는 pane 별 key window 가 없으므로 보임+메인 focus 까지 함께
-    /// 확인하지 않으면 배경 페이지 IPC 가 사용자 단축키를 흉내낼 수 있다.
+    /// 직접 child 는 pane 별 key window 가 없으므로 보임+활성 pane을 함께 확인한다.
+    /// 보이기만 하는 이웃 webview의 IPC가 단축키를 흉내내면 안 된다.
     fn web_host_accepts_user_action(&self, host_id: u64) -> bool {
         let Some(host) = self.web_hosts.get(&host_id) else {
             return false;
         };
-        host.visible
-            && host.backing.as_ref().map_or_else(
-                || self.window.as_ref().is_some_and(|main| main.has_focus()),
-                |backing| backing.has_focus(),
-            )
+        if !host.visible {
+            return false;
+        }
+        match host.backing.as_ref() {
+            Some(backing) => backing.has_focus(),
+            None => {
+                let active_host = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.active_pane
+                        .as_deref()
+                        .and_then(|pane| ws.panes.get(pane))
+                        .and_then(|pane| pane.tabs.get(pane.active_tab))
+                        .and_then(|tab| tab.web())
+                        .map(|web| web.host_id)
+                };
+                direct_host_action_allowed(host.visible, active_host, host_id)
+            }
+        }
+    }
+
+    fn web_host_can_claim_focus(&self, host_id: u64) -> bool {
+        self.web_hosts.get(&host_id).is_some_and(|host| {
+            host.visible
+                && host
+                    .backing
+                    .as_ref()
+                    .is_none_or(|backing| backing.has_focus())
+        })
     }
 
     /// host_id → 그 웹뷰가 붙은 pane(outer id). 어느 탭에 있든 찾는다.
@@ -1066,19 +1130,20 @@ impl App {
     pub(crate) fn web_pane_cmd(&mut self, host_id: u64, cmd: &str) {
         // 창이 닫히는 사이 도착한 IPC 잔류는 조용히 버린다.
         let Some(pid) = self.pane_of_web_host(host_id) else { return };
-        // **IPC 는 신뢰 경계 밖이다** — WEB_CHORD_JS 만이 아니라 로드된 페이지의
-        // 어떤 스크립트든 `window.ipc.postMessage('chord:…')` 를 부를 수 있다
-        // (리뷰 실증). 사용자 제스처를 흉내낼 수는 있어도, 최소한 그 웹뷰 창이
-        // key(사용자가 실제로 보고 치는 중)일 때만 받는다 — 배경 pane 의 페이지가
-        // 몰래 pane 을 닫거나 쪼개는 것을 막는다.
-        if !self.web_host_accepts_user_action(host_id) {
-            eprintln!("[webpane] chord {cmd}: 웹뷰가 key 가 아니라 무시(페이지 주입 의심)");
+        if cmd == "gesture" {
+            if let Some(host) = self.web_hosts.get_mut(&host_id).filter(|host| host.visible) {
+                host.trusted_at = Some(std::time::Instant::now());
+            }
             return;
         }
-        self.ws.lock().unwrap().active_pane = Some(pid.clone());
         if cmd == "focus" {
-            // 직접 child 클릭은 winit Focused 이벤트가 없어서 IPC 시점에 주소 편집과
-            // 정본 focus 를 함께 맞춰야 다음 split/socket 명령이 이 pane 을 잡는다.
+            if !self.web_host_can_claim_focus(host_id) {
+                return;
+            }
+            if let Some(host) = self.web_hosts.get_mut(&host_id) {
+                host.trusted_at = Some(std::time::Instant::now());
+            }
+            self.ws.lock().unwrap().active_pane = Some(pid);
             self.cancel_web_addr();
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
@@ -1086,6 +1151,17 @@ impl App {
             }
             return;
         }
+        // IPC 자체는 페이지도 부를 수 있어, 초기화 스크립트의 비공개 capability와
+        // 실제 입력(`isTrusted`)을 통과한 메시지만 여기 도착한다. direct child는
+        // key window가 따로 없으므로 활성 host까지 맞아야 닫기·분할을 받는다.
+        if !self.web_host_accepts_user_action(host_id) {
+            eprintln!("[webpane] chord {cmd}: 웹뷰가 key 가 아니라 무시(페이지 주입 의심)");
+            return;
+        }
+        if let Some(host) = self.web_hosts.get_mut(&host_id) {
+            host.trusted_at = Some(std::time::Instant::now());
+        }
+        self.ws.lock().unwrap().active_pane = Some(pid.clone());
         let mut refocus_main = true;
         match cmd {
             "split-h" | "split-v" => {
@@ -1234,16 +1310,19 @@ impl App {
     }
 
     /// window.open/target=_blank — 요청한 웹 pane 옆에 새 웹 pane split.
-    /// chord 와 같은 신뢰 경계: 그 웹뷰가 key(사용자가 방금 클릭한 창)일 때만
-    /// 받는다 — 배경 pane 의 페이지가 사용자 몰래 pane 을 늘리면 안 된다.
-    /// 정상 흐름(페이지 안 링크·OAuth 버튼 클릭)은 클릭 순간 그 창이 key 다.
+    /// chord 와 같은 신뢰 경계: 활성 웹뷰의 실제 포인터/키 입력 직후만 받는다.
+    /// 배경 페이지의 programmatic window.open은 pane을 늘릴 수 없다.
     pub(crate) fn web_popup(
         &mut self,
         event_loop: &ActiveEventLoop,
         host_id: u64,
         url: &str,
     ) {
-        if !self.web_host_accepts_user_action(host_id) {
+        let trusted = self.web_hosts.get(&host_id).is_some_and(|host| {
+            host.trusted_at
+                .is_some_and(|at| at.elapsed() <= std::time::Duration::from_secs(2))
+        });
+        if !self.web_host_accepts_user_action(host_id) || !trusted {
             eprintln!("[webpane] popup {url}: 웹뷰가 key 가 아니라 무시(배경 팝업 차단)");
             return;
         }
@@ -1746,5 +1825,36 @@ mod tests {
     fn direct_child_pointer_focus_is_forwarded() {
         assert!(WEB_CHORD_JS.contains("pointerdown"));
         assert!(WEB_CHORD_JS.contains("post('focus')"));
+        assert!(WEB_CHORD_JS.contains("isTrusted"));
+        assert!(WEB_CHORD_JS.contains("capability"));
+        let a = web_capability();
+        let b = web_capability();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(authenticated_web_cmd("chord:cap:close", "chord:cap:"), Some("close"));
+        assert_eq!(authenticated_web_cmd("chord:close", "chord:cap:"), None);
+        assert_eq!(authenticated_web_cmd("chord:other:close", "chord:cap:"), None);
+    }
+
+    #[test]
+    fn direct_child_accepts_only_the_active_visible_host() {
+        assert!(direct_host_action_allowed(true, Some(7), 7));
+        assert!(!direct_host_action_allowed(true, Some(7), 8));
+        assert!(!direct_host_action_allowed(false, Some(7), 7));
+    }
+
+    #[test]
+    fn webviews_are_hidden_and_dropped_before_the_parent_window() {
+        let source = include_str!("webpane.rs");
+        assert!(source.contains("h.webview.set_visible(false)"));
+        assert!(source.contains("host.webview.set_visible(true)"));
+        assert!(source.contains("self.web_hosts.drain()"));
+        let handler = include_str!("handler.rs");
+        let exiting = &handler[handler.find("fn exiting(").unwrap()..];
+        assert!(
+            exiting.find("self.close_web_hosts();").unwrap()
+                < exiting.find("self.persona.webview = None;").unwrap()
+        );
     }
 }

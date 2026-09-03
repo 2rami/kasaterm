@@ -2660,19 +2660,11 @@ impl App {
         to_label: String,
         impact: AccountSwitchImpact,
         surface: ConfirmSurface,
-    ) {
-        // 그릴 창이 없으면(헤드리스·단축키가 설정창 없이 부른 경우) 메인으로 접는다 —
-        // 안 그러면 취소할 손도 없는 확인이 뜬다.
-        let has_settings_window = self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == crate::InlineWebKind::Settings);
-        let surface = match surface {
-            ConfirmSurface::Settings if !has_settings_window => ConfirmSurface::Main,
-            s => s,
-        };
+    ) -> String {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
         self.account_switch_confirm = Some(PendingAccountSwitch {
             provider,
+            nonce: nonce.clone(),
             to_label,
             to: to.to_string(),
             impact,
@@ -2683,6 +2675,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        nonce
     }
 
     /// 다시 뜰 Claude pane이 있으면 물어보고, 없으면 지금 바꾼다.
@@ -2692,7 +2685,7 @@ impl App {
             self.claude_account_switch_now(to);
             return;
         }
-        self.show_account_switch_confirm(
+        let _ = self.show_account_switch_confirm(
             AccountSwitchProvider::Claude,
             to,
             self.claude_account_display(to),
@@ -2723,13 +2716,102 @@ impl App {
             self.codex_account_switch_now(to);
             return;
         }
-        self.show_account_switch_confirm(
+        let _ = self.show_account_switch_confirm(
             AccountSwitchProvider::Codex,
             to,
             self.codex_account_display(to),
             impact,
             surface,
         );
+    }
+
+    /// 웹 설정에서 계정을 고른 첫 단계. 재시작 대상이 없으면 바로 바꾸고, 있으면
+    /// 아무 상태도 바꾸지 않은 채 웹이 그릴 확인 자료만 돌려준다.
+    pub(crate) fn request_web_account_switch(
+        &mut self,
+        provider: AccountSwitchProvider,
+        to: &str,
+    ) -> Option<serde_json::Value> {
+        if self
+            .account_switch_confirm
+            .as_ref()
+            .is_some_and(|p| p.surface == ConfirmSurface::Web)
+        {
+            self.account_switch_confirm = None;
+        }
+        let (impact, to_label) = match provider {
+            AccountSwitchProvider::Claude => (
+                self.preview_claude_account_switch(to),
+                self.claude_account_display(to),
+            ),
+            AccountSwitchProvider::Codex => (
+                self.preview_codex_account_switch(to),
+                self.codex_account_display(to),
+            ),
+        };
+        if !impact.needs_confirm() {
+            match provider {
+                AccountSwitchProvider::Claude => self.claude_account_switch_now(to),
+                AccountSwitchProvider::Codex => self.codex_account_switch_now(to),
+            }
+            return None;
+        }
+        let nonce = self.show_account_switch_confirm(
+            provider,
+            to,
+            to_label.clone(),
+            impact,
+            ConfirmSurface::Web,
+        );
+        Some(web_account_confirm_json(
+            provider,
+            to,
+            &to_label,
+            &impact,
+            &nonce,
+        ))
+    }
+
+    /// 웹 확인 카드의 두 번째 단계. 응답이 현재 대기표와 정확히 맞을 때만 소비한다.
+    pub(crate) fn resolve_web_account_switch(
+        &mut self,
+        provider: AccountSwitchProvider,
+        to: &str,
+        nonce: &str,
+        accept: bool,
+    ) -> Result<(), String> {
+        let picked = take_web_account_switch(
+            &mut self.account_switch_confirm,
+            provider,
+            to,
+            nonce,
+            accept,
+        )?;
+        if let Some((provider, to)) = picked {
+            match provider {
+                AccountSwitchProvider::Claude => self.claude_account_switch_now(&to),
+                AccountSwitchProvider::Codex => self.codex_account_switch_now(&to),
+            }
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn current_web_account_confirmation(&self) -> Option<serde_json::Value> {
+        let pending = self
+            .account_switch_confirm
+            .as_ref()
+            .filter(|pending| pending.surface == ConfirmSurface::Web)?;
+        Some(web_account_confirm_json(
+            pending.provider,
+            &pending.to,
+            &pending.to_label,
+            &pending.impact,
+            &pending.nonce,
+        ))
     }
 
     /// 확인 카드에서 고른 결과. 취소는 **아무 일도 안 한다**.
@@ -6920,12 +7002,11 @@ fn account_id_of_dir(dir: &str) -> &str {
 /// 메시지부터** 새 계정이므로 「다음에 뜨는 claude 부터」라고 말하면 거짓말이
 /// 된다(2026-08-17 「토스트에 다음세션부터라고 뜨는데」). 실패(금고 비었음·
 /// 쓰기 실패)일 때만 재시작 폴백이 전부라 옛 문장이 맞다.
-/// 확인 카드를 **어느 창에 그리는가**. 카드를 눌렀는데 뒤 창에 확인이 뜨면 그건
-/// 확인이 아니다 — 설정 별도창에서 누른 것은 그 창에 그린다.
+/// 확인 카드를 메인 GPU와 인라인 웹 중 어디에서 소유하는가.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ConfirmSurface {
     Main,
-    Settings,
+    Web,
 }
 
 /// 학생을 바꿀 때 「다시 띄울까」를 묻는 카드의 상태.
@@ -7032,6 +7113,15 @@ pub(crate) enum AccountSwitchProvider {
     Codex,
 }
 
+impl AccountSwitchProvider {
+    pub(crate) fn web_key(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
 /// 대기 중인 계정 전환 확인.
 ///
 /// **여기 담긴 것 말고는 아무 상태도 미리 바뀌지 않는다** — 작업대 갈아 끼우기·신원
@@ -7039,6 +7129,7 @@ pub(crate) enum AccountSwitchProvider {
 /// 버리는 것으로 끝이다.
 pub(crate) struct PendingAccountSwitch {
     pub provider: AccountSwitchProvider,
+    pub nonce: String,
     pub to: String,
     pub to_label: String,
     pub impact: AccountSwitchImpact,
@@ -7047,6 +7138,163 @@ pub(crate) struct PendingAccountSwitch {
     /// 레포 관례지만, `struct App` 정의는 병렬 작업 충돌 핫스팟이라 여기 담아 필드
     /// 하나로 줄였다(CLAUDE.md 병렬 규칙).
     pub rects: Vec<(AccountSwitchBtn, (f32, f32, f32, f32))>,
+}
+
+fn take_web_account_switch(
+    pending: &mut Option<PendingAccountSwitch>,
+    provider: AccountSwitchProvider,
+    to: &str,
+    nonce: &str,
+    accept: bool,
+) -> Result<Option<(AccountSwitchProvider, String)>, String> {
+    let matches = pending.as_ref().is_some_and(|p| {
+        p.surface == ConfirmSurface::Web
+            && p.provider == provider
+            && p.to == to
+            && p.nonce == nonce
+    });
+    if !matches {
+        return Err("확인할 계정 전환이 없거나 대상이 달라졌어요".to_string());
+    }
+    let p = pending.take().expect("위에서 확인한 대기표");
+    Ok(accept.then_some((p.provider, p.to)))
+}
+
+fn web_account_confirm_json(
+    provider: AccountSwitchProvider,
+    to: &str,
+    to_label: &str,
+    impact: &AccountSwitchImpact,
+    nonce: &str,
+) -> serde_json::Value {
+    let (title, lines) = account_switch_confirm_text(to_label, impact);
+    serde_json::json!({
+        "provider": provider.web_key(),
+        "id": to,
+        "nonce": nonce,
+        "title": title,
+        "lines": lines,
+        "dangerous": impact.fresh > 0,
+    })
+}
+
+#[cfg(test)]
+mod web_account_confirm_tests {
+    use super::*;
+
+    fn pending(provider: AccountSwitchProvider, to: &str) -> Option<PendingAccountSwitch> {
+        Some(PendingAccountSwitch {
+            provider,
+            nonce: "nonce-a".to_string(),
+            to: to.to_string(),
+            to_label: "다음 계정".to_string(),
+            impact: AccountSwitchImpact {
+                restart_when_quiet: 1,
+                restart_after_turn: 1,
+                fresh: 1,
+                ..Default::default()
+            },
+            surface: ConfirmSurface::Web,
+            rects: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn 웹_취소는_대기표만_소비하고_전환을_만들지_않는다() {
+        let mut p = pending(AccountSwitchProvider::Claude, "acct-2");
+        let picked = take_web_account_switch(
+            &mut p,
+            AccountSwitchProvider::Claude,
+            "acct-2",
+            "nonce-a",
+            false,
+        )
+        .unwrap();
+        assert!(picked.is_none());
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn 웹_확정만_혼합된_재시작_대상을_전환으로_내보낸다() {
+        let mut p = pending(AccountSwitchProvider::Codex, "codex-2");
+        assert_eq!(p.as_ref().unwrap().impact.torn_down(), 2);
+        assert_eq!(p.as_ref().unwrap().impact.fresh, 1);
+        let picked = take_web_account_switch(
+            &mut p,
+            AccountSwitchProvider::Codex,
+            "codex-2",
+            "nonce-a",
+            true,
+        )
+        .unwrap();
+        assert_eq!(picked, Some((AccountSwitchProvider::Codex, "codex-2".to_string())));
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn 웹_확인은_공급자와_대상이_다르면_소비되지_않는다() {
+        let mut p = pending(AccountSwitchProvider::Claude, "acct-2");
+        assert!(take_web_account_switch(
+            &mut p,
+            AccountSwitchProvider::Codex,
+            "acct-2",
+            "nonce-a",
+            true,
+        )
+        .is_err());
+        assert!(p.is_some());
+        let mut gone = None;
+        assert!(take_web_account_switch(
+            &mut gone,
+            AccountSwitchProvider::Claude,
+            "acct-2",
+            "nonce-a",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn 같은_계정의_옛_확인은_새_대기표를_소비하지_않는다() {
+        let mut p = pending(AccountSwitchProvider::Claude, "acct-2");
+        p.as_mut().unwrap().nonce = "nonce-new".to_string();
+        assert!(take_web_account_switch(
+            &mut p,
+            AccountSwitchProvider::Claude,
+            "acct-2",
+            "nonce-old",
+            true,
+        )
+        .is_err());
+        assert_eq!(p.as_ref().unwrap().nonce, "nonce-new");
+    }
+
+    #[test]
+    fn 웹_확인_자료는_재시작과_새대화_위험을_그대로_싣는다() {
+        let impact = AccountSwitchImpact {
+            restart_when_quiet: 1,
+            restart_after_turn: 2,
+            fresh: 1,
+            ..Default::default()
+        };
+        let prompt = web_account_confirm_json(
+            AccountSwitchProvider::Claude,
+            "acct-2",
+            "팀 계정",
+            &impact,
+            "nonce-a",
+        );
+        assert_eq!(prompt["provider"], "claude");
+        assert_eq!(prompt["id"], "acct-2");
+        assert_eq!(prompt["nonce"], "nonce-a");
+        assert_eq!(prompt["dangerous"], true);
+        assert!(prompt["title"].as_str().unwrap().contains('3'));
+        assert!(prompt["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().is_some_and(|line| line.contains("새로 떠요"))));
+    }
 }
 
 /// 계정 전환이 pane 하나에 무엇을 하는지 정하는 데 필요한 **사실만**. `App` 을 안

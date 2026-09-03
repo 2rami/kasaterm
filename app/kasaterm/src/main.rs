@@ -4210,7 +4210,6 @@ pub(crate) enum SettingsAction {
     PaneFooterH(u32),
     /// 위 넷의 codex(ChatGPT) 판. 로그인 수단이 달라 동작이 갈리므로(claude 는
     /// `claude auth login`, codex 는 `CODEX_HOME=<슬롯> codex login`) 액션도 가른다.
-    CodexAccount(String),
     AddCodexAccount,
     RemoveCodexAccount(String),
     /// Open `~/.config/kasaterm/students/` in the OS file manager so the user
@@ -5297,7 +5296,8 @@ struct App {
     /// 메인 작업공간을 덮는 웹 화면. 장식 없는 자식 창을 본창에 붙여 titlebar와
     /// 왼쪽 sidebar는 남기고, pane grid와 우측 칼럼을 한 면으로 교체한다.
     inline_web: Option<InlineWebHost>,
-    /// 대기 중인 계정 전환 확인. `Some` 인 동안 그 창이 스크림을 깔고 입력을 삼킨다.
+    /// 대기 중인 계정 전환 확인. `Some` 인 동안 메인 또는 인라인 웹이 스크림을
+    /// 깔고 입력을 삼킨다.
     /// **여기 담긴 것 말고는 아무 상태도 미리 안 바뀐다** — 작업대 갈아 끼우기·설정
     /// 저장·pane 재시작은 [전환] 을 눌러야 그때 돈다.
     account_switch_confirm: Option<session::PendingAccountSwitch>,

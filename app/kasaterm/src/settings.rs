@@ -786,9 +786,6 @@ impl App {
                 self.settings_input = None;
                 self.settings_save();
             }
-            SettingsAction::CodexAccount(id) => {
-                self.ask_or_switch_codex_account(&id, crate::session::ConfirmSurface::Settings);
-            }
             SettingsAction::AddCodexAccount => self.add_codex_account(),
             SettingsAction::RemoveCodexAccount(id) => {
                 self.set_codex_accounts.retain(|a| a.id != id);
@@ -1287,13 +1284,15 @@ impl App {
                 if !id.is_empty() && !self.set_claude_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
-                // ⚠️ 확인 카드를 태우지 않는다. 이 반환은 「반영됐는가」라서, 확인이
-                // 뜬 채로 돌아오면 `Ok(false)` 가 되어 웹 화면이 조용히 실패로 읽는다.
-                // 게다가 HTTP 요청이 네이티브 창을 모달로 잠글 수 있게 된다 — 웹은
-                // 자기 화면에서 자기 확인을 띄우는 것이 맞다(그때 쓸 숫자는
-                // `preview_claude_account_switch` 가 준다).
-                self.claude_account_switch_now(id);
-                Ok(self.set_claude_account == id)
+                let confirm = self.request_web_account_switch(
+                    crate::session::AccountSwitchProvider::Claude,
+                    id,
+                );
+                let awaiting = confirm.is_some();
+                if let Some(confirm) = confirm {
+                    put_web_code("confirm", confirm);
+                }
+                Ok(awaiting || self.set_claude_account == id)
             }
             "add-claude-account" => {
                 let before = self.set_claude_accounts.len();
@@ -1323,8 +1322,40 @@ impl App {
                 if !id.is_empty() && !self.set_codex_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
-                self.settings_apply(SettingsAction::CodexAccount(id.to_string()));
-                Ok(self.set_codex_account == id)
+                let confirm = self.request_web_account_switch(
+                    crate::session::AccountSwitchProvider::Codex,
+                    id,
+                );
+                let awaiting = confirm.is_some();
+                if let Some(confirm) = confirm {
+                    put_web_code("confirm", confirm);
+                }
+                Ok(awaiting || self.set_codex_account == id)
+            }
+            "confirm-account-switch" | "cancel-account-switch" => {
+                let Some((provider_key, nonce)) = arg.split_once(':') else {
+                    return Err(reject(
+                        "account_confirm_invalid",
+                        "계정 전환 확인값이 올바르지 않아요".to_string(),
+                    ));
+                };
+                let provider = match provider_key {
+                    "claude" => crate::session::AccountSwitchProvider::Claude,
+                    "codex" => crate::session::AccountSwitchProvider::Codex,
+                    other => return Err(unknown(other)),
+                };
+                if let Err(error) = self.resolve_web_account_switch(
+                    provider,
+                    id,
+                    nonce,
+                    action == "confirm-account-switch",
+                ) {
+                    if let Some(confirm) = self.current_web_account_confirmation() {
+                        put_web_code("confirm", confirm);
+                    }
+                    return Err(error);
+                }
+                Ok(true)
             }
             "add-codex-account" => {
                 let before = self.set_codex_accounts.len();
@@ -2323,7 +2354,7 @@ pub(crate) fn reject_json(msg: String) -> serde_json::Value {
     obj.insert("ok".to_string(), serde_json::Value::Bool(false));
     obj.insert("error".to_string(), serde_json::Value::String(msg));
     for (k, v) in codes {
-        if k.starts_with("error") {
+        if k.starts_with("error") || k == "confirm" {
             obj.insert(k, v);
         }
     }
@@ -3144,7 +3175,7 @@ pub(crate) fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, 
 
 #[cfg(test)]
 mod account_label_tests {
-    use super::label_is_auto;
+    use super::{label_is_auto, merge_web_codes, put_web_code};
 
     #[test]
     fn auto_labels_yield_to_email() {
@@ -3156,5 +3187,12 @@ mod account_label_tests {
         for l in ["개인계정", "사이오닉팀플랜", "계정", "계정 팀", "계정 2호"] {
             assert!(!label_is_auto(l), "별명을 자동으로 봤다: {l:?}");
         }
+    }
+
+    #[test]
+    fn 웹_확인_자료는_토스트가_없어도_응답에_남는다() {
+        put_web_code("confirm", serde_json::json!({ "id": "acct-2" }));
+        let out = merge_web_codes(serde_json::json!({ "ok": true, "message": null }));
+        assert_eq!(out["confirm"]["id"], "acct-2");
     }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { DesignTokens } from './types';
 
 declare global {
@@ -17,34 +17,55 @@ declare global {
 /// 늦게 와도 그때 리페인트만 일어난다.
 export function useTokens(): DesignTokens | null {
   const [tokens, setTokens] = useState<DesignTokens | null>(null);
-  const refresh = useCallback(async () => {
-    const res = await fetch('/design-tokens');
-    if (!res.ok) return;
-    const next = (await res.json()) as DesignTokens;
-    applyTokens(next);
-    setTokens(next);
-  }, []);
 
   useEffect(() => {
     let alive = true;
-    window.__ktRefreshTokens = async () => {
+    let frame: number | null = null;
+    let inFlight = false;
+    let rerun = false;
+
+    const fetchLatest = async () => {
+      if (inFlight) {
+        rerun = true;
+        return;
+      }
+      inFlight = true;
       try {
         const res = await fetch('/design-tokens');
         if (!res.ok) return;
-        const t = (await res.json()) as DesignTokens;
+        const next = (await res.json()) as DesignTokens;
         if (!alive) return;
-        applyTokens(t);
-        setTokens(t);
+        applyTokens(next);
+        setTokens(next);
       } catch {
         // CSS 폴백을 유지한다.
+      } finally {
+        inFlight = false;
+        if (rerun && alive) {
+          rerun = false;
+          schedule();
+        }
       }
     };
-    void refresh().catch(() => undefined);
+
+    const schedule = () => {
+      if (frame != null || !alive) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        void fetchLatest();
+      });
+    };
+
+    window.__ktRefreshTokens = async () => {
+      schedule();
+    };
+    schedule();
     return () => {
       alive = false;
+      if (frame != null) window.cancelAnimationFrame(frame);
       delete window.__ktRefreshTokens;
     };
-  }, [refresh]);
+  }, []);
 
   return tokens;
 }

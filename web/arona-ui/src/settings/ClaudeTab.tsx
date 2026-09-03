@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
+  Button,
   MiniButton,
   Notice,
   Row,
@@ -12,18 +13,19 @@ import {
 } from './controls';
 import { serverText, useT } from './lang';
 import type { AccountRow, ClaudeValues } from './types';
+import type { AccountSwitchConfirmation } from './api';
 
 /// 부제 색. 「로그인 필요」는 경고, 이메일은 보통, 「확인 중…」은 더 흐리게 —
 /// 아직 모른다는 것과 없다는 것을 색으로 가른다.
 const SUB_COLOR: Record<string, string> = {
-  danger: 'var(--kt-danger)',
+  danger: 'var(--kt-danger-text-surface)',
   mute: 'var(--kt-text-mute)',
   faint: 'color-mix(in srgb, var(--kt-text-mute) 60%, transparent)',
 };
 
 /// 하단바와 같은 임계 — 90 위험, 70 주의, 그 밑은 중립(초록으로 안심시키지 않는다).
 function usageColor(p: number): string {
-  if (p >= 90) return 'var(--kt-danger)';
+  if (p >= 90) return 'var(--kt-danger-text-surface)';
   if (p >= 70) return 'var(--kt-attention)';
   return 'var(--kt-text-mute)';
 }
@@ -155,10 +157,34 @@ export function ClaudeTab({
   reload: () => Promise<void>;
 }) {
   const t = useT();
-  const { busy, notice, run } = useSettingsAction(reload);
+  const { busy, notice, run, runResult } = useSettingsAction(reload);
+  const [confirm, setConfirm] = useState<AccountSwitchConfirmation | null>(null);
+  const confirmDialog = useRef<HTMLDivElement>(null);
+  const confirmTrigger = useRef<HTMLElement | null>(null);
   // 계정이 하나뿐이면 자동 전환이 갈 곳이 없어 아무 일도 안 일어난다. 켜 놓고
   // "안 되네" 하는 게 이 기능에서 제일 흔한 오해라, 그 상태를 미리 말해 준다.
   const lone = data.accounts.filter((a) => a.slot).length === 0;
+
+  const selectAccount = async (provider: 'claude' | 'codex', id: string) => {
+    confirmTrigger.current = document.activeElement as HTMLElement | null;
+    const out = await runResult(`${provider}-account`, { id });
+    if (out?.confirm) setConfirm(out.confirm);
+  };
+
+  const resolveAccount = async (accept: boolean) => {
+    const pending = confirm;
+    if (!pending) return;
+    const out = await runResult(
+      accept ? 'confirm-account-switch' : 'cancel-account-switch',
+      { id: pending.id, label: `${pending.provider}:${pending.nonce}` }
+    );
+    if (out?.confirm) {
+      setConfirm(out.confirm);
+    } else if (out?.ok && !out.error) {
+      setConfirm(null);
+      window.requestAnimationFrame(() => confirmTrigger.current?.focus());
+    }
+  };
 
   const accountList = (
     provider: 'claude' | 'codex',
@@ -172,7 +198,7 @@ export function ClaudeTab({
           row={row}
           active={row.id === activeId}
           busy={busy}
-          onSelect={() => void run(`${provider}-account`, { id: row.id })}
+          onSelect={() => void selectAccount(provider, row.id)}
           onRename={(label) => void run(`${provider}-account-label`, { id: row.id, label })}
           onReauth={() => void run('reauth-account', { id: row.id, label: provider })}
           onReauthIsolated={() =>
@@ -196,6 +222,81 @@ export function ClaudeTab({
   return (
     <TabCard>
       <Notice notice={notice} />
+
+      {confirm && (
+        <div
+          ref={confirmDialog}
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-6"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="account-switch-title"
+          aria-describedby="account-switch-description"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              void resolveAccount(false);
+              return;
+            }
+            if (e.key === 'Tab') {
+              const buttons = Array.from(
+                confirmDialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []
+              );
+              if (!buttons.length) return;
+              const first = buttons[0];
+              const last = buttons[buttons.length - 1];
+              if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+              } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+              }
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-[520px] p-6"
+            style={{
+              borderRadius: 'var(--kt-radius-md)',
+              background: 'var(--kt-surface)',
+              boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border), 0 18px 48px rgba(0,0,0,.45)',
+            }}
+          >
+            <h2 id="account-switch-title" className="text-[18px] font-semibold text-[var(--kt-text)]">
+              {confirm.title}
+            </h2>
+            <div id="account-switch-description" className="mt-3 space-y-1.5">
+              {confirm.lines.map((line) => (
+                <p key={line} className="text-[13px] leading-relaxed text-[var(--kt-text-dim)]">
+                  {line}
+                </p>
+              ))}
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                label={t.common.cancel}
+                disabled={busy}
+                autoFocus
+                onClick={() => void resolveAccount(false)}
+              />
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void resolveAccount(true)}
+                className="min-h-[40px] px-3.5 py-2 text-[13px] font-semibold disabled:opacity-40"
+                style={{
+                  borderRadius: 'var(--kt-radius-md)',
+                  background: confirm.dangerous ? 'var(--kt-danger)' : 'var(--kt-accent)',
+                  color: confirm.dangerous ? 'var(--kt-on-danger)' : 'var(--kt-on-accent)',
+                }}
+              >
+                {t.common.switch}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Row label={t.claude.shim} desc={[t.claude.shimHint]}>
         <Toggle

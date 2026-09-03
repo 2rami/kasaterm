@@ -2438,7 +2438,7 @@ impl App {
             self.close_inline_web();
         }
     }
-    /// 학생 세부설정 창 — `/arona-ui/settings.html?student=<slug>&theme=<id>`.
+    /// 학생 세부설정 창 — `/arona-ui/settings.html?student=<exact name>&theme=<id>`.
     ///
     /// 설정 본체와 **따로** 뜬다. 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하고,
     /// 그때 이 창이 그 자리를 맡는다(거노 2026-08-25 「세부설정을 별도창으로」).
@@ -2448,10 +2448,10 @@ impl App {
     pub(crate) fn open_student_web_window(
         &mut self,
         event_loop: &ActiveEventLoop,
-        slug: &str,
+        name: &str,
         theme: &str,
     ) -> bool {
-        if slug.trim().is_empty() {
+        if name.trim().is_empty() {
             return false;
         }
         let port = mcp_panel_port();
@@ -2459,7 +2459,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let url = student_web_url(&port, slug, theme, cb);
+        let url = student_web_url(&port, name, theme, cb);
         // 이미 떠 있으면 주소만 바꾸고 앞으로 가져온다.
         if let (Some(w), Some(wv)) = (
             self.student_web_window.as_ref(),
@@ -2515,7 +2515,7 @@ impl App {
         };
         self.student_web_window = Some(window);
         self.student_web_webview = Some(webview);
-        eprintln!("[student-web] open; student={slug} theme={theme}");
+        eprintln!("[student-web] open; student={name} theme={theme}");
         true
     }
 
@@ -2709,6 +2709,13 @@ impl App {
     }
 
     pub(crate) fn close_inline_web(&mut self) {
+        if self
+            .account_switch_confirm
+            .as_ref()
+            .is_some_and(|p| p.surface == crate::session::ConfirmSurface::Web)
+        {
+            self.account_switch_confirm = None;
+        }
         let Some(host) = self.inline_web.take() else {
             self.settings_open = false;
             return;
@@ -2822,9 +2829,8 @@ impl App {
         student: Option<String>,
     ) {
         if let Some(name) = student {
-            let slug = crate::theme::character_slug(&name).unwrap_or_default();
             let theme = crate::socket::read_character_theme();
-            let _ = self.open_student_web_window(event_loop, slug, &theme);
+            let _ = self.open_student_web_window(event_loop, &name, &theme);
         } else {
             let _ = self.open_settings_inline(event_loop, cat);
         }
@@ -3902,8 +3908,8 @@ pub(crate) fn ensure_notification_authorization() {}
 /// HTTP 클라이언트를 새로 들이지 않고 std 로만 한다. 같은 프로세스 안의 루프백이라
 /// 정상 경로는 1ms 도 안 걸리고, 서버가 죽어 있으면 connect 가 곧바로 거절된다.
 /// 타임아웃은 그 둘 다 아닌 경우(포트를 다른 프로세스가 물고 응답을 안 함) 대비다.
-/// 쿼리 값 인코딩. slug 는 대개 ASCII 지만 **커스텀 테마 폴더 이름에는 한글·공백이
-/// 들어간다** — 그대로 실으면 주소가 깨져 창이 빈 화면으로 뜬다.
+/// 쿼리 값 인코딩. 캐릭터 이름과 커스텀 테마 폴더 이름에는 한글·공백이 들어갈 수
+/// 있어 그대로 실으면 주소가 깨져 창이 빈 화면으로 뜬다.
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -3917,10 +3923,10 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-fn student_web_url(port: &str, slug: &str, theme: &str, cache_key: u128) -> String {
+fn student_web_url(port: &str, name: &str, theme: &str, cache_key: u128) -> String {
     format!(
         "http://127.0.0.1:{port}/arona-ui/settings.html?v={cache_key}&student={}&theme={}",
-        urlencode(slug),
+        urlencode(name),
         urlencode(theme)
     )
 }
@@ -4238,5 +4244,27 @@ mod room_rename_tests {
             student_web_url("8765", "ari su", "한글 테마", 42),
             "http://127.0.0.1:8765/arona-ui/settings.html?v=42&student=ari%20su&theme=%ED%95%9C%EA%B8%80%20%ED%85%8C%EB%A7%88"
         );
+    }
+
+    #[test]
+    fn 같은_슬러그가_될_수_있는_이름도_상세창에서_갈린다() {
+        let a = student_web_url("8765", "A B", "theme", 1);
+        let b = student_web_url("8765", "A-B", "theme", 1);
+        assert_ne!(a, b);
+        assert!(a.contains("student=A%20B"));
+        assert!(b.contains("student=A-B"));
+        let app = include_str!("../../../web/arona-ui/src/settings/SettingsApp.tsx");
+        assert!(app.contains("c.name === studentName"));
+        assert!(!app.contains("c.slug === studentName"));
+    }
+
+    #[test]
+    fn 캐릭터_메뉴는_키보드_이동과_닫기를_모두_가진다() {
+        let tab = include_str!("../../../web/arona-ui/src/settings/ThemeTab.tsx");
+        for key in ["ArrowDown", "ArrowUp", "Home", "End", "Escape"] {
+            assert!(tab.contains(key), "메뉴 키가 없다: {key}");
+        }
+        assert!(tab.contains("role=\"menu\""));
+        assert!(tab.contains("role=\"menuitem\""));
     }
 }

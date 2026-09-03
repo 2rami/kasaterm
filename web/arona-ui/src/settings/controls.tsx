@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { postAction } from './api';
+import type { SettingsActionResult } from './api';
 import { serverText, useT } from './lang';
 
 /// 카드 안의 소제목 + 설명. 네이티브 폼의 `row_wide` 대응 — 제목만 크게 하고 설명은
@@ -57,7 +58,7 @@ export function MiniButton({
       style={{
         borderRadius: 'var(--kt-radius-sm)',
         background: 'var(--kt-surface-hover)',
-        color: danger ? 'var(--kt-danger)' : 'var(--kt-text)',
+        color: danger ? 'var(--kt-danger-text-surface)' : 'var(--kt-text)',
         boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
       }}
     >
@@ -309,22 +310,25 @@ export function Button({
   onClick,
   disabled,
   primary,
+  autoFocus,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
   primary?: boolean;
+  autoFocus?: boolean;
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
+      autoFocus={autoFocus}
       onClick={onClick}
       className="min-h-[40px] px-3.5 py-2 text-[13px] disabled:opacity-40"
       style={{
         borderRadius: 'var(--kt-radius-md)',
         background: primary ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',
-        color: primary ? 'var(--kt-bg)' : 'var(--kt-text)',
+        color: primary ? 'var(--kt-on-accent)' : 'var(--kt-text)',
         fontWeight: primary ? 600 : 400,
         boxShadow: primary ? 'none' : 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
       }}
@@ -340,8 +344,10 @@ export function Notice({ notice }: { notice: { ok: boolean; msg: string } | null
   if (!notice) return null;
   return (
     <p
+      role={notice.ok ? 'status' : 'alert'}
+      aria-live={notice.ok ? 'polite' : 'assertive'}
       className="mb-4 text-[12px]"
-      style={{ color: notice.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger)' }}
+      style={{ color: notice.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger-text-surface)' }}
     >
       {notice.msg}
     </p>
@@ -362,10 +368,10 @@ export function useSettingsAction(reload: () => Promise<void>) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  async function run(
+  async function runResult(
     action: string,
     args?: { id?: string; label?: string }
-  ): Promise<boolean> {
+  ): Promise<SettingsActionResult | null> {
     setBusy(true);
     setNotice(null);
     try {
@@ -384,16 +390,24 @@ export function useSettingsAction(reload: () => Promise<void>) {
         });
       } else if (!out.ok) setNotice({ ok: false, msg: t.common.failed });
       await reload();
-      return out.ok && !out.error;
+      return out;
     } catch (e) {
       setNotice({ ok: false, msg: e instanceof Error ? e.message : String(e) });
-      return false;
+      return null;
     } finally {
       setBusy(false);
     }
   }
 
-  return { busy, notice, run, setNotice };
+  async function run(
+    action: string,
+    args?: { id?: string; label?: string }
+  ): Promise<boolean> {
+    const out = await runResult(action, args);
+    return !!out?.ok && !out.error;
+  }
+
+  return { busy, notice, run, runResult, setNotice };
 }
 
 /// 탭 본문을 감싸는 카드. 다섯 탭이 같은 테두리 안에 서야 nav 를 옮겨 다닐 때

@@ -50,6 +50,8 @@ export const ko = {
     valuesUnavailable: '이 인스턴스는 설정 값을 안 알려 줘요',
     stepDown: '한 칸 줄이기',
     stepUp: '한 칸 늘리기',
+    cancel: '취소',
+    switch: '전환',
     colorOf: (a: { name: string }) => `${a.name} 색`,
   },
 
@@ -395,6 +397,8 @@ export const en: Strings = {
     valuesUnavailable: "This instance doesn't report its settings",
     stepDown: 'Step down',
     stepUp: 'Step up',
+    cancel: 'Cancel',
+    switch: 'Switch',
     colorOf: (a) => `${a.name} color`,
   },
 

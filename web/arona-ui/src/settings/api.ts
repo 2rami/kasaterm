@@ -16,6 +16,16 @@ export type SettingsActionResult = {
   error_args?: Record<string, string | number>;
   message_code?: string | null;
   message_args?: Record<string, string | number>;
+  confirm?: AccountSwitchConfirmation;
+};
+
+export type AccountSwitchConfirmation = {
+  provider: 'claude' | 'codex';
+  id: string;
+  nonce: string;
+  title: string;
+  lines: string[];
+  dangerous: boolean;
 };
 
 import type { Character, OnboardingState, SettingsValues } from './types';
@@ -51,9 +61,27 @@ export async function postAction(
     body: JSON.stringify({ action, ...args }),
   });
   const out = (await res.json()) as SettingsActionResult;
-  if (out.ok && !out.error) void window.__ktRefreshTokens?.();
+  if (out.ok && !out.error && TOKEN_ACTIONS.has(action)) {
+    void window.__ktRefreshTokens?.();
+  }
   return out;
 }
+
+const TOKEN_ACTIONS = new Set([
+  'terminal-profile-import',
+  'theme-mode',
+  'theme-system-light',
+  'theme-system-dark',
+  'start-custom-theme',
+  'delete-custom-theme',
+  'reset-custom-theme',
+  'palette-hex',
+  'palette-preview',
+  'accent',
+  'shape',
+  'min-contrast',
+  'select-theme',
+]);
 
 /// `GET /theme-roster?id=<테마id|__base>` — 그 테마 하나의 명단.
 ///

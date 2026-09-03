@@ -53,6 +53,7 @@ kasa-mcp = { path = "../../crates/kasa-mcp" }
 # devtools: 웹 pane 의 인스펙터(Cmd+Opt+I). 이 feature 없이는 release 빌드에서
 # open_devtools 심볼 자체가 사라진다(debug_assertions 게이트).
 wry = { version = "0.55", features = ["devtools"] }
+uuid = { version = "1", features = ["v4"] }
 muda = "0.19.2"
 # Encode image bytes into a self-contained data: URI for the preview
 # window's <img> (the webview loads via with_html / null origin, so a

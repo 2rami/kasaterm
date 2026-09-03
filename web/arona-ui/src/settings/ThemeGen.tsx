@@ -121,7 +121,7 @@ export function ThemeGenEngine() {
         ))}
       </div>
       {sel && !sel.available && (
-        <p className="mt-2 text-[12px]" style={{ color: 'var(--kt-danger)' }}>
+        <p role="alert" className="mt-2 text-[12px]" style={{ color: 'var(--kt-danger-text-surface)' }}>
           {t.themegen.notReady({ why: sel.why })}
         </p>
       )}
@@ -329,7 +329,7 @@ export function ThemeGenSection({ slug }: { slug: string }) {
 
       <div className="mt-3">
         {job?.failed_reason ? (
-          <p className="text-[12px]" style={{ color: 'var(--kt-danger)' }}>
+          <p role="alert" className="text-[12px]" style={{ color: 'var(--kt-danger-text-surface)' }}>
             {t.themegen.failed({ reason: job.failed_reason })}
           </p>
         ) : running && job ? (
@@ -367,7 +367,7 @@ export function ThemeGenSection({ slug }: { slug: string }) {
               {job ? t.themegen.restart : t.themegen.start}
             </button>
             {startErr && (
-              <p className="mt-1 text-[12px]" style={{ color: 'var(--kt-danger)' }}>
+              <p role="alert" className="mt-1 text-[12px]" style={{ color: 'var(--kt-danger-text-surface)' }}>
                 {startErr}
               </p>
             )}

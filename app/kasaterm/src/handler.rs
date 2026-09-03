@@ -1065,7 +1065,8 @@ impl ApplicationHandler<UserEvent> for App {
                         Ok(true)
                     }
                     // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
-                    // 세부는 밖에 있어야 한다(거노 2026-08-25). `label` 에 테마 키가
+                    // 세부는 밖에 있어야 한다(거노 2026-08-25). `arg`는 정확한 이름,
+                    // `label` 에 테마 키가
                     // 오는데, 번들은 `__base` 라 빈 값과 구분된다 — 빈 값이면 웹이
                     // 쓰는 테마의 명단에서 찾는다.
                     "open-student" => {
@@ -1524,6 +1525,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.close_inline_web();
         self.close_student_web_window();
+        self.close_web_hosts();
         // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다.
         self.persona.webview = None;
         // Persist every session's layout + pane cwds + claude sessions so the
@@ -3695,8 +3697,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // 계정 전환 확인 — 위 둘과 같은 「모든 클릭을 삼키는」 모달.
-                // 설정 별도창에 뜬 카드는 그 창의 라우터가 잡으므로 여기서는
-                // 메인 몫만 본다.
+                // 인라인 웹의 확인은 React가 잡으므로 여기서는 메인 몫만 본다.
                 if self
                     .account_switch_confirm
                     .as_ref()

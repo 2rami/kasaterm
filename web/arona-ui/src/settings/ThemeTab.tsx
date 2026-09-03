@@ -209,6 +209,32 @@ function CharacterCell({
   // 「무엇을 할 수 있는지」가 눈에 보인다.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const card = useRef<HTMLDivElement>(null);
+  const menuItems = useRef<Array<HTMLButtonElement | null>>([]);
+  useEffect(() => {
+    if (menu) menuItems.current[0]?.focus();
+  }, [menu]);
+
+  const menuKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = menuItems.current.filter((item): item is HTMLButtonElement => !!item);
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setMenu(null);
+      card.current?.focus();
+      return;
+    }
+    const current = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+    let next: number | null = null;
+    if (e.key === 'ArrowDown') next = (current + 1) % items.length;
+    if (e.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+    if (e.key === 'Home') next = 0;
+    if (e.key === 'End') next = items.length - 1;
+    if (next != null && items[next]) {
+      e.preventDefault();
+      e.stopPropagation();
+      items[next].focus();
+    }
+  };
   return (
     <div
       ref={card}
@@ -289,6 +315,7 @@ function CharacterCell({
           <div
             className="absolute z-50 py-1"
             role="menu"
+            onKeyDown={menuKey}
             style={{
               left: menu.x,
               top: menu.y,
@@ -303,9 +330,9 @@ function CharacterCell({
                 눌리는데 아무 일도 안 나는 항목이 제일 나쁘다. */}
             {detail && (
               <button
+                ref={(node) => { menuItems.current[0] = node; }}
                 type="button"
                 role="menuitem"
-                autoFocus
                 className="block min-h-[36px] w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
                 onClick={() => {
                   setMenu(null);
@@ -316,9 +343,9 @@ function CharacterCell({
               </button>
             )}
             <button
+              ref={(node) => { menuItems.current[detail ? 1 : 0] = node; }}
               type="button"
               role="menuitem"
-              autoFocus={!detail}
               className="block min-h-[36px] w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
               onClick={() => {
                 setMenu(null);
@@ -494,8 +521,8 @@ function CharacterGroup({
                   picked={picked.has(c.name)}
                   detail={active}
                   disabled={busy}
-                  /// 창을 띄우는 것은 앱이다 — 웹은 slug 와 테마 키만 올린다.
-                  onOpenSettings={() => onAction('open-student', { id: c.slug, label: key })}
+                  /// slug 는 서로 겹칠 수 있어 정확한 이름과 테마 키를 올린다.
+                  onOpenSettings={() => onAction('open-student', { id: c.name, label: key })}
                   onTogglePick={() =>
                     onAction(picked.has(c.name) ? 'character-pick-off' : 'character-pick', {
                       id: key,

@@ -1230,6 +1230,20 @@ pub fn enforce_contrast_at(fg: [u8; 4], bg: [u8; 4], min: f32) -> [u8; 4] {
     mix(hi)
 }
 
+/// 채움 위의 작은 UI 글자색. 검정과 흰색 중 대비가 더 큰 쪽을 골라 어떤 accent나
+/// danger 색에서도 WCAG AA 바닥을 넘긴다.
+pub fn foreground_on(fill: [u8; 4]) -> [u8; 4] {
+    let dark = [0, 0, 0, 255];
+    let light = [255, 255, 255, 255];
+    if contrast_of(luminance(dark), luminance(fill))
+        >= contrast_of(luminance(light), luminance(fill))
+    {
+        dark
+    } else {
+        light
+    }
+}
+
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
 
@@ -1719,11 +1733,15 @@ pub fn tokens_json() -> serde_json::Value {
             "surface_active": css_hex(surface_active()),
             "border": css_hex(border()),
             "accent": css_hex(accent()),
+            "on_accent": css_hex(foreground_on(accent())),
             "text": css_hex(text()),
             "text_dim": css_hex(text_dim()),
             "text_mute": css_hex(text_mute()),
             "success": css_hex(success()),
             "danger": css_hex(danger()),
+            "on_danger": css_hex(foreground_on(danger())),
+            "danger_text_bg": css_hex(enforce_contrast_at(danger(), bg(), 4.5)),
+            "danger_text_surface": css_hex(enforce_contrast_at(danger(), surface(), 4.5)),
             // 테마 슬롯이 아니라 고정값이다 — 「내 손을 기다린다」는 취향이 아니라
             // 신호이고, 테마마다 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다.
             "attention": css_hex(attention()),
@@ -1768,6 +1786,17 @@ mod roster_tests {
         let bg = [37, 44, 53, 255];
         let dim = enforce_contrast_at([120, 126, 138, 255], bg, 4.5);
         assert!(contrast_of(luminance(dim), luminance(bg)) >= 4.5);
+    }
+
+    #[test]
+    fn 채움_위_글자와_오류_글자는_최소_대비를_넘긴다() {
+        for fill in [[90, 140, 230, 255], [224, 88, 78, 255], [128, 128, 128, 255]] {
+            assert!(contrast_of(luminance(foreground_on(fill)), luminance(fill)) >= 4.5);
+        }
+        let danger_bg = enforce_contrast_at(danger(), bg(), 4.5);
+        let danger_surface = enforce_contrast_at(danger(), surface(), 4.5);
+        assert!(contrast_of(luminance(danger_bg), luminance(bg())) >= 4.5);
+        assert!(contrast_of(luminance(danger_surface), luminance(surface())) >= 4.5);
     }
 
     /// 런타임 로스터는 같은 JSON 에서 **코드젠과 똑같은 표**를 구워야 한다.

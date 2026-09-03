@@ -14,11 +14,15 @@
   --kt-surface-active: #3c4654;
   --kt-border: #505c6e6e;
   --kt-accent: #5a8ce6;
+  --kt-on-accent: #000000;
   --kt-text: #eceef3;
   --kt-text-dim: #a0a6b0;
   --kt-text-mute: #a0a6b0;
   --kt-success: #3fb950;
   --kt-danger: #e0584e;
+  --kt-on-danger: #000000;
+  --kt-danger-text-bg: #ff8078;
+  --kt-danger-text-surface: #ff8078;
   --kt-attention: #fa8c2a;
 
   --kt-radius-sm: 6px;
@@ -107,5 +111,5 @@ select:focus-visible,
 
 .kt-field::selection {
   background: var(--kt-accent);
-  color: var(--kt-fg);
+  color: var(--kt-on-accent);
 }

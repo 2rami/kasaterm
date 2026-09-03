@@ -128,7 +128,7 @@ export function MotionSprites({ slug }: { slug: string }) {
       <h3 className="text-[13px] font-medium text-[var(--kt-text)]">{t.motion.title}</h3>
       <p className="mt-0.5 text-[12px] text-[var(--kt-text-mute)]">{t.motion.hint}</p>
 
-      {error && <p className="mt-3 text-[12px] text-[var(--kt-danger)]">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-[12px] text-[var(--kt-danger-text-surface)]">{error}</p>}
       {!motions && !error && (
         <p className="mt-3 text-[12px] text-[var(--kt-text-mute)]">{t.common.loading}</p>
       )}
@@ -260,8 +260,10 @@ function MotionRow({
           )}
           {msg && (
             <span
+              role={msg.ok ? 'status' : 'alert'}
+              aria-live={msg.ok ? 'polite' : 'assertive'}
               className="text-[11px]"
-              style={{ color: msg.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger)' }}
+              style={{ color: msg.ok ? 'var(--kt-text-dim)' : 'var(--kt-danger-text-surface)' }}
             >
               {msg.text}
             </span>
