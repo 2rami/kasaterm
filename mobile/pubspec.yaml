@@ -1,0 +1,33 @@
+name: kasaterm_mobile
+description: "kasaterm 학생 원격 조종 앱 — 폰에서 학생 목록·화면·답장."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  # 웹(크롬 개발 루프)과 iOS 를 한 코드로 — lib/ 에서 dart:io 를 쓰지 않는다.
+  http: ^1.2.2
+  web_socket_channel: ^3.0.1
+  # 주소에 든 slug 가 곧 자격이라 평문 저장소가 아니라 Keychain 에 둔다.
+  flutter_secure_storage: ^9.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  # 한글이 정확히 두 칸이고 Nerd 아이콘·박스드로잉이 들어 있어 claude 화면이
+  # 깨지지 않는 유일한 선택. UI 글은 시스템 글꼴을 쓰고 격자에만 쓴다.
+  fonts:
+    - family: TermMono
+      fonts:
+        - asset: assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf
+        - asset: assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf
+          weight: 700

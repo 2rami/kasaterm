@@ -1,0 +1,237 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:http/http.dart' as http;
+
+/// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
+class ServerException implements Exception {
+  ServerException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class Pane {
+  const Pane({
+    required this.id,
+    required this.name,
+    required this.title,
+    required this.status,
+    required this.window,
+    required this.cwd,
+    this.slug,
+    this.color,
+    this.model,
+    this.effort,
+    this.machine,
+  });
+
+  final String id;
+  final String name;
+  final String title;
+  final String status;
+  final int window;
+  final String cwd;
+  final String? slug;
+  final String? color;
+  final String? model;
+  final String? effort;
+
+  /// 다른 기계의 pane 이면 그 기계 이름 — 요청마다 `m/<이름>/` 접두가 붙는다.
+  final String? machine;
+
+  bool get isWaiting => status == 'waiting';
+  bool get isIdle => status == 'idle';
+  bool get isWebShell => id.startsWith('web-');
+
+  static Pane fromJson(Map<String, Object?> j, {String? machine}) => Pane(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        title: j['title'] as String? ?? '',
+        status: j['status'] as String? ?? '',
+        window: (j['window'] as num?)?.toInt() ?? 0,
+        cwd: j['cwd'] as String? ?? '',
+        slug: j['slug'] as String?,
+        color: j['color'] as String?,
+        model: j['model'] as String?,
+        effort: j['effort'] as String?,
+        machine: machine,
+      );
+}
+
+class Machine {
+  const Machine({required this.label, required this.online, required this.panes});
+  final String label;
+  final bool online;
+  final List<Pane> panes;
+}
+
+class Me {
+  const Me({required this.name, required this.owner, this.machine});
+  final String name;
+  final bool owner;
+  final String? machine;
+}
+
+/// 서버 하나. 주소 뒤 `/` 까지가 루트라 모든 경로는 상대로 붙는다 — `/u/<slug>/`
+/// 아래에서는 slug 가 자격이고, 그 자격은 상대경로에 저절로 따라간다.
+class Server {
+  Server(Uri root, {http.Client? client})
+      : root = normalize(root),
+        _client = client ?? http.Client();
+
+  final Uri root;
+  final http.Client _client;
+
+  static Uri normalize(Uri u) =>
+      u.path.endsWith('/') ? u : u.replace(path: '${u.path}/');
+
+  /// 사람이 붙여 넣은 글을 주소로. 스킴이 없으면 https, 쿼리·조각은 버린다.
+  static Uri? parse(String text) {
+    var t = text.trim();
+    if (t.isEmpty) return null;
+    if (!t.contains('://')) t = 'https://$t';
+    final u = Uri.tryParse(t);
+    if (u == null || u.host.isEmpty) return null;
+    return normalize(Uri(
+      scheme: u.scheme,
+      host: u.host,
+      port: u.hasPort ? u.port : null,
+      path: u.path.isEmpty ? '/' : u.path,
+    ));
+  }
+
+  static String _prefix(String? machine) =>
+      machine == null ? '' : 'm/${Uri.encodeComponent(machine)}/';
+
+  /// `%N` 같은 pane id 는 문자열로 붙이지 않는다 — queryParameters 가 `%25N` 으로
+  /// 인코딩해야 서버가 제 id 로 읽는다.
+  Uri uri(String path, {Map<String, String>? query, String? machine}) {
+    final u = root.resolve('${_prefix(machine)}$path');
+    return query == null ? u : u.replace(queryParameters: query);
+  }
+
+  Uri wsUri(String path, {required Map<String, String> query, String? machine}) {
+    final u = uri(path, query: query, machine: machine);
+    return u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws');
+  }
+
+  /// 오류 문구·설정 화면용. slug 는 자격이라 가린다.
+  String describe() {
+    final p = root.path;
+    final shown = p.startsWith('/u/') ? '/u/•••/' : p;
+    final port = root.hasPort ? ':${root.port}' : '';
+    return '${root.host}$port$shown';
+  }
+
+  Future<Object?> _getJson(String path,
+      {Map<String, String>? query, String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client.get(uri(path, query: query, machine: machine));
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('${describe()} 응답 ${res.statusCode} ($path)');
+    }
+    try {
+      return jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      throw ServerException('${describe()} 응답을 읽지 못했다 ($path)');
+    }
+  }
+
+  Future<Me> me() async {
+    final j = await _getJson('mobile/me');
+    if (j is! Map) throw ServerException('${describe()} 는 카사텀이 아닌 것 같다');
+    return Me(
+      name: j['name'] as String? ?? '',
+      owner: j['owner'] == true,
+      machine: j['machine'] as String?,
+    );
+  }
+
+  Future<List<Pane>> panes({String? machine}) async {
+    final j = await _getJson('term/panes', machine: machine);
+    return _panesFrom(j, machine: machine);
+  }
+
+  static List<Pane> _panesFrom(Object? j, {String? machine}) => [
+        if (j is List)
+          for (final e in j)
+            if (e is Map) Pane.fromJson(e.cast<String, Object?>(), machine: machine),
+      ];
+
+  /// 방(window) 이름 — 인덱스가 pane 의 `window` 와 맞는다.
+  Future<List<String>> sessions() async {
+    final j = await _getJson('sessions');
+    final labels = j is Map ? j['labels'] : null;
+    return [
+      if (labels is List)
+        for (final l in labels) l is String ? l : '',
+    ];
+  }
+
+  Future<List<Machine>> machines() async {
+    final j = await _getJson('machines');
+    final list = j is Map ? j['machines'] : null;
+    return [
+      if (list is List)
+        for (final m in list)
+          if (m is Map)
+            Machine(
+              label: m['label'] as String? ?? '',
+              online: m['online'] == true,
+              panes: _panesFrom(m['panes'], machine: m['label'] as String?),
+            ),
+    ];
+  }
+
+  /// 그림 모드 한 장. 서버가 503 을 주면(헤드리스 셸) null — 글자 모드로 돌아간다.
+  Future<Uint8List?> shot(String pane, {String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client.get(uri(
+        'term/shot',
+        query: {
+          'pane': pane,
+          'w': '0',
+          'n': DateTime.now().millisecondsSinceEpoch.toString(),
+        },
+        machine: machine,
+      ));
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode == 503) return null;
+    if (res.statusCode != 200) {
+      throw ServerException('그림을 못 받았다 (${res.statusCode})');
+    }
+    return res.bodyBytes;
+  }
+
+  /// 답장 한 줄. 서버가 Ctrl-U·bracketed paste·짧은 지연 뒤 Enter 를 맡으므로
+  /// 여기서는 글만 준다 — 소켓으로 `글\r` 을 한 번에 쏘면 Enter 가 먹힌다.
+  Future<void> send(String pane, String text, {String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('send', query: {'surface': pane}, machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'text': text, 'submit': true}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('답장이 안 갔다 (${res.statusCode})');
+    }
+  }
+
+  Uri avatar(String slug, {String? machine}) =>
+      uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
+
+  void close() => _client.close();
+}
