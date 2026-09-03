@@ -5565,44 +5565,33 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         socket::claude_account_dir(id)
     };
     std::thread::spawn(move || {
-        // pane 과 같은 PATH 를 보려면 로그인 셸을 거쳐야 한다 — Finder 로 뜬 .app 의
-        // PATH 에는 claude 가 없어서 직접 spawn 하면 항상 실패한다.
-        let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
-        let mut c = crate::proc::command(shell);
-        // Orca와 같은 JSON 상태 창구를 쓴다. 사람용 문구는 버전·언어에 따라
-        // 달라지고 "not logged in"도 "logged in"을 포함한다.
-        c.arg("-lc").arg("claude auth status --json");
-        if let Some(d) = dir.as_deref() {
-            c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
-        }
-        let parsed = c
-            .output()
-            .ok()
-            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
-        let logged_in =
-            parsed.as_ref().map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
-        let probe = logged_in.map(|logged_in| {
-            // ⚠️ auth status 의 email·orgName 은 **안 쓴다** — 그 둘은 슬롯별
-            // 저장소가 아니라 공유 캐시(`~/.claude.json`)에서 오므로 마지막에
-            // 로그인한 계정이 모든 슬롯에 찍힌다. 2026-08-31 에 「활성 행이 영영
-            // 확인 중」을 풀려고 이걸 1순위로 올렸다가 슬롯 다섯이 전부 지메일로
-            // 보였다(2026-09-03 지적). 그 「빈손」의 진짜 원인은 키체인에 같은
-            // 이름의 껍데기 항목이 하나 더 있어 이름만으로 읽던 창구가 그걸 집은
-            // 것이었다 — http.rs `read_claude_credentials` 가 이제 계정 칸까지
-            // 맞춘다. 신원은 슬롯 토큰으로 물은 것만 믿고, 못 물으면 마지막에
-            // 알아낸 진짜 값을 쓴다 — 틀린 이메일보다 옛 진짜 값이 낫다.
-            let (email, org) = if logged_in {
-                let (e, o) = slot_identity(dir.as_deref());
-                if e.is_empty() {
-                    remembered_identity(&key)
-                } else {
-                    (e, o)
-                }
-            } else {
-                (String::new(), String::new())
-            };
-            AuthProbe { logged_in, email, org }
-        });
+        // ⚠️ `claude auth status` 를 더 이상 띄우지 않는다. 그 명령은 access token 이
+        // 만료돼 있으면 저장소의 refresh token 을 **소비**해 회전시키는데, 안 쓰는
+        // 슬롯은 사용량 폴러(프록시 `/claude-usage`)도 같은 일을 한다 — 둘이 겹치면
+        // 한쪽이 죽은 refresh token 으로 실패하고, claude 는 실패하면 그 자리에
+        // 로그아웃 껍데기를 쓴다(2026-08-19 사고의 물증이 그 껍데기였고, 2026-09-03
+        // 에도 네이버 슬롯이 그 꼴로 발견됐다). 안 쓰는 슬롯의 갱신은 프록시 하나만
+        // 하게 두고, 여기서는 슬롯 토큰으로 **신원만** 묻는다 — 「토큰 없음」이면
+        // 로그인이 필요한 슬롯, 신원이 오면 로그인된 슬롯이다.
+        //
+        // 신원의 출처는 슬롯 토큰뿐이다. `auth status` 의 email·orgName 은 공유
+        // 캐시(`~/.claude.json`)라 마지막에 로그인한 계정이 모든 슬롯에 찍힌다 —
+        // 2026-08-31 에 그걸 1순위로 올렸다가 슬롯 다섯이 전부 지메일로 보였다.
+        // 그때의 「활성 행이 빈손」은 키체인 동명 껍데기 항목 탓이었고(http.rs
+        // `read_claude_credentials` 가 계정 칸까지 맞춰 해결), 일시 실패는 표에 남은
+        // 마지막 진짜 신원으로 그린다 — 틀린 이메일보다 옛 진짜 값이 낫다.
+        let probe = match slot_identity_full(dir.as_deref()) {
+            SlotIdentity::Known { email, org } => Some(AuthProbe { logged_in: true, email, org }),
+            SlotIdentity::NoToken => Some(AuthProbe {
+                logged_in: false,
+                email: String::new(),
+                org: String::new(),
+            }),
+            SlotIdentity::Unavailable => {
+                let (email, org) = remembered_identity(&key);
+                (!email.is_empty()).then(|| AuthProbe { logged_in: true, email, org })
+            }
+        };
         if let Some(cache) = CACHE.get() {
             let mut m = cache.lock().unwrap();
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
@@ -5625,7 +5614,15 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
 /// 것보다 아무것도 안 그리는 게 낫다**(그 표시를 믿고 슬롯이 겹쳤다고 오판했다).
 ///
 /// 반환은 (이메일, 조직명). 조직명은 팀 슬롯을 가르는 유일한 단서라 같이 받는다.
-fn slot_identity(dir: Option<&std::path::Path>) -> (String, String) {
+enum SlotIdentity {
+    Known { email: String, org: String },
+    /// 저장소에 토큰이 없다 — 로그인이 필요한 슬롯(껍데기).
+    NoToken,
+    /// 답을 못 받았다(막 만료돼 갱신 전·upstream 막힘). 로그아웃과 다르다.
+    Unavailable,
+}
+
+fn slot_identity_full(dir: Option<&std::path::Path>) -> SlotIdentity {
     let port = crate::mcp_panel_port();
     let d = dir.map(|p| p.display().to_string()).unwrap_or_default();
     // -G + --data-urlencode: 경로에 공백이나 한글이 섞여도 쿼리로 안전하게 실린다.
@@ -5634,16 +5631,22 @@ fn slot_identity(dir: Option<&std::path::Path>) -> (String, String) {
         .arg(format!("http://127.0.0.1:{port}/claude-identity"))
         .output()
     else {
-        return (String::new(), String::new());
+        return SlotIdentity::Unavailable;
     };
     let field = |v: &serde_json::Value, k: &str| {
         v.get(k).and_then(|s| s.as_str()).unwrap_or_default().to_string()
     };
-    serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        .ok()
-        .filter(|v| v.get("ok").and_then(|b| b.as_bool()) == Some(true))
-        .map(|v| (field(&v, "email"), field(&v, "org")))
-        .unwrap_or_default()
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return SlotIdentity::Unavailable;
+    };
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        return SlotIdentity::Known { email: field(&v, "email"), org: field(&v, "org") };
+    }
+    if field(&v, "error") == "no token" {
+        SlotIdentity::NoToken
+    } else {
+        SlotIdentity::Unavailable
+    }
 }
 
 /// 계정 슬롯을 부를 이름. 거노가 별명을 직접 붙였으면 그것, 아니면 그 슬롯의
