@@ -53,14 +53,24 @@ def board_rows():
         return []
 
 
-def name_table():
+def name_table(rows=None):
     by_name = {}
-    for row in board_rows():
+    for row in rows if rows is not None else board_rows():
         peer = row.get("peer_name")
         char = row.get("character")
         if isinstance(peer, str) and peer and isinstance(char, str) and char:
             by_name[peer] = char
     return by_name
+
+
+def room_label(row, my_room):
+    """「방2·같은 방」 — 목록엔 방이 없어서 세션 이름만 보고 다른 방에 일을 보낸 적이
+    있다(2026-09-03, 「mobile」을 폰 담당으로 읽었다). 방 번호는 화면과 같은 1부터."""
+    w = row.get("window_idx")
+    if not isinstance(w, int):
+        return "방 없음"
+    same = "같은 방" if my_room is not None and w == my_room else "다른 방"
+    return f"방{w + 1}·{same}"
 
 
 def label_of(peer, char, by_name):
@@ -83,10 +93,19 @@ def on_list_agents(d):
     """목록을 본 직후 — 이름↔캐릭터 표를 옆에 붙인다(목록 자체는 안 건드린다)."""
     if d.get("tool_name") != "ListAgents":
         return
-    table = name_table()
+    rows = board_rows()
+    table = name_table(rows)
     if not table:
         return
-    pairs = " · ".join(f"{n}={c}" for n, c in table.items() if n != c)
+    me = os.environ.get("KASATERM_PANE_ID", "")
+    my_room = next(
+        (r.get("window_idx") for r in rows if r.get("surface_id") == me),
+        None,
+    )
+    by_peer = {r.get("peer_name"): r for r in rows}
+    pairs = " · ".join(
+        f"{n}={c}({room_label(by_peer[n], my_room)})" for n, c in table.items() if n != c
+    )
     if not pairs:
         return
     twins = sorted({c for c in table.values() if list(table.values()).count(c) > 1})
@@ -102,7 +121,8 @@ def on_list_agents(d):
         "이 기계에서 캐릭터가 잡히는 것들:\n"
         + pairs
         + "\n**부를 때는 캐릭터 이름**을 쓰고, `to:` 에 넣는 주소는 **위 목록의 그 이름 그대로**다 "
-        "— 캐릭터 이름으로 보내면 닿지 않는다." + warn,
+        "— 캐릭터 이름으로 보내면 닿지 않는다. **일은 같은 방 캐릭터에게만** 보낸다 — "
+        "방별 목록은 `kasaterm-cli rooms`." + warn,
     )
 
 

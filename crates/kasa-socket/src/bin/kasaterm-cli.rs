@@ -66,6 +66,12 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
+    // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
+    if cmd == "rooms" {
+        let socket_path = resolve_socket_path()?;
+        print_rooms(&socket_path)?;
+        return Ok(None);
+    }
     // `split --count N` 은 **한 번의 호출로** pane N 개를 배치한다.
     //
     // 예전엔 여기서 split 을 N 번 부르면서 2회차부터 직전에 만든 pane 을 대상으로
@@ -254,6 +260,80 @@ fn run() -> Result<Option<Response>> {
         return Ok(None);
     }
     Ok(Some(response))
+}
+
+/// `rooms` — 방(창)별로 누가 뭘 하는지 한 화면에. 위임 상대를 고르는 자리다.
+///
+/// board 는 방 전부가 JSON 한 덩어리로 오고 ListAgents 엔 방이 아예 없다 — 그래서
+/// 2026-09-03 에 방2 캐릭터가 「mobile」이라는 세션 이름만 보고 다른 방 캐릭터에게
+/// 폰 화면 점검을 보냈다. 여기서는 내 방·내 자리를 표시하고, `to:` 에 넣을 주소
+/// (세션 이름)를 캐릭터 이름 옆에 같이 낸다.
+fn print_rooms(socket_path: &str) -> Result<()> {
+    let req = Request {
+        id: "rooms".into(),
+        method: "collab.board".into(),
+        params: json!({}),
+    };
+    let resp = roundtrip(socket_path, &req)?;
+    let board: Vec<Value> = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("board"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let me = std::env::var("KASATERM_PANE_ID").unwrap_or_default();
+    let s = |e: &Value, k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let win_of = |e: &Value| e.get("window_idx").and_then(|v| v.as_u64());
+    let my_room = board
+        .iter()
+        .find(|e| s(e, "surface_id") == me)
+        .and_then(win_of);
+    let mut rooms: std::collections::BTreeMap<Option<u64>, Vec<&Value>> =
+        std::collections::BTreeMap::new();
+    for e in &board {
+        rooms.entry(win_of(e)).or_default().push(e);
+    }
+    if rooms.is_empty() {
+        println!("(pane 없음)");
+        return Ok(());
+    }
+    for (win, rows) in &rooms {
+        let head = match win {
+            Some(w) => format!("방{}", w + 1),
+            None => "방 없음(화면밖·원격 거울)".to_string(),
+        };
+        let mine = win.is_some() && win == &my_room;
+        println!("{head}{}", if mine { "  ← 내 방" } else { "" });
+        for e in rows {
+            let id = s(e, "surface_id");
+            let ch = s(e, "character");
+            let ch = if ch.is_empty() { "(캐릭터 없음)".to_string() } else { ch };
+            let status = s(e, "status");
+            let peer = s(e, "peer_name");
+            let title = s(e, "title");
+            let mut tags: Vec<String> = Vec::new();
+            if id == me {
+                tags.push("나".into());
+            }
+            let harness = s(e, "harness");
+            if !harness.is_empty() && harness != "claude" {
+                tags.push(harness);
+            }
+            let machine = s(e, "machine");
+            if !machine.is_empty() {
+                tags.push(format!("원격 {machine}"));
+            }
+            if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
+                tags.push("화면밖".into());
+            }
+            let addr = if peer.is_empty() { String::new() } else { format!("  to={peer}") };
+            let tag = if tags.is_empty() { String::new() } else { format!("  [{}]", tags.join("·")) };
+            println!("  {id:<5} {ch:<8} {status:<8}{addr}{tag}  {title}");
+        }
+    }
+    println!("같은 방 캐릭터에게만 일을 보낸다. 주소는 to= 의 세션 이름, 부를 때는 캐릭터 이름.");
+    Ok(())
 }
 
 /// Poll `collab.board` AND this pane's inbox every `interval_secs`, printing
@@ -862,6 +942,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
     eprintln!("  kasaterm-cli tell  [--force] <surface_id> <text>  # send + submit (codex 등 SendMessage 밖 전용 — claude pane 은 거부, 비상시 --force)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
+    eprintln!("  kasaterm-cli rooms                        # 방별로 누가 뭘 하는지(내 방·내 자리·to= 주소) — 위임 상대는 여기서 고른다");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
     eprintln!(
