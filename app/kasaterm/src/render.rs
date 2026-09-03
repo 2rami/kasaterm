@@ -1380,7 +1380,6 @@ impl App {
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
                     let ncols = composed.get(sticky.row).map_or(0, |r| r.len());
-                    let end = sticky.col_end.min(ncols);
                     sticky_pill_row = Some(sticky.row);
                     // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(거노: "흰색
                     // 바탕 pane 양끝으로 다 채워"). 클릭 rect 도 행 전체 폭 — 흰 바탕
@@ -1437,18 +1436,40 @@ impl App {
                         let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
                         let text = theme::text();
                         let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
-                        // 우리가 채운 띠는 그 행에 글자 셀이 없다 — 선명화만 하면
-                        // 빈 띠가 그려진다(2026-08-30 실측). 프롬프트 글자를 여기서
-                        // 직접 써 넣는다. `❯` 를 앞세워 아래 fg 규칙이 그대로 걸리게
-                        // 하면 색 분기를 따로 둘 필요가 없다.
-                        if sticky.synthetic {
+                        // 그 질문 줄이 화면에 그려져 있으면 **셀을 그대로 옮긴다.**
+                        // 눌러서 그 줄이 맨 위에 서면 띠와 본문이 같은 그림이라 딱
+                        // 겹친다(2026-09-03 지시: 「코덱스처럼 딱붙게 클로드도」).
+                        // 다시 칠하면 같은 질문이 두 모양으로 보인다.
+                        if let Some(src) = &sticky.cells {
+                            let blank = kasa_bridge::screen::Cell::blank();
+                            for c in row.iter_mut() {
+                                *c = blank.clone();
+                            }
+                            for (dst, s) in row.iter_mut().zip(src.iter()) {
+                                *dst = s.clone();
+                            }
+                            // 화살표는 그 칸 배경을 그대로 두고 글자만 얹는다.
+                            for (at, ch) in [(up_col, '\u{2191}'), (down_col, '\u{2193}')] {
+                                if let Some(i) = at {
+                                    if let Some(c) = row.get_mut(i) {
+                                        c.ch = ch;
+                                        c.fg = kasa_bridge::screen::Color::Rgb(
+                                            accent[0], accent[1], accent[2],
+                                        );
+                                        c.bold = true;
+                                        c.dim = false;
+                                    }
+                                }
+                            }
+                        } else {
+                            // 질문이 화면 밖이라 옮겨 올 셀이 없다 — 그때만 우리가 칠한다.
                             use unicode_width::UnicodeWidthChar;
                             let room = up_col.unwrap_or(row.len()).saturating_sub(2);
                             for cell in row.iter_mut() {
                                 cell.ch = ' ';
                             }
                             let mut w = 1usize; // 왼쪽 한 칸 들여쓴다
-                            for ch in format!("❯ {}", sticky.text).chars() {
+                            for ch in format!("\u{276f} {}", sticky.text).chars() {
                                 let cw = ch.width().unwrap_or(1).max(1);
                                 if w + cw > room {
                                     break;
@@ -1456,35 +1477,32 @@ impl App {
                                 row[w].ch = ch;
                                 // wide 글리프의 뒤칸은 **공백 셀**로 둔다 — 이 레포의
                                 // 셀 표현 관례다(`paint_header_row` 와 같은 모양).
-                                // 한 칸에 한 글자씩 밀어 넣으면 한글이 겹쳐 뭉개진다.
                                 if cw == 2 {
                                     row[w + 1].ch = ' ';
                                 }
                                 w += cw;
                             }
-                        }
-                        for (i, cell) in row.iter_mut().enumerate() {
-                            cell.dim = false;
-                            cell.inverse = false;
-                            cell.bg = fill.clone();
-                            cell.fg = if cell.ch == '❯' || Some(i) == up_col || Some(i) == down_col
-                            {
-                                kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
-                            } else {
-                                kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
-                            };
-                            if Some(i) == up_col {
-                                cell.ch = '↑';
-                                cell.bold = true;
-                                continue;
-                            }
-                            if Some(i) == down_col {
-                                cell.ch = '↓';
-                                cell.bold = true;
-                                continue;
-                            }
-                            if !sticky.synthetic && (i < sticky.col_start || i >= end) {
-                                cell.ch = ' ';
+                            for (i, cell) in row.iter_mut().enumerate() {
+                                cell.dim = false;
+                                cell.inverse = false;
+                                cell.bg = fill.clone();
+                                cell.fg = if cell.ch == '\u{276f}'
+                                    || Some(i) == up_col
+                                    || Some(i) == down_col
+                                {
+                                    kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
+                                } else {
+                                    kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
+                                };
+                                if Some(i) == up_col {
+                                    cell.ch = '\u{2191}';
+                                    cell.bold = true;
+                                    continue;
+                                }
+                                if Some(i) == down_col {
+                                    cell.ch = '\u{2193}';
+                                    cell.bold = true;
+                                }
                             }
                         }
                     }

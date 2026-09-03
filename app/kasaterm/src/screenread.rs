@@ -2275,12 +2275,13 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
 /// 감지된 Claude Code 스크롤 sticky prompt 한 건(셀 좌표 + 보이는 텍스트).
 pub(crate) struct StickyPrompt {
     pub row: usize,
-    pub col_start: usize,
-    pub col_end: usize, // exclusive
     pub text: String,
-    /// 화면에서 읽은 게 아니라 **우리가 채워 넣은** 띠. 그 행에는 글자 셀이 없어
-    /// 선명화할 것도 없으므로, 렌더가 `text` 를 직접 써 넣어야 한다.
-    pub synthetic: bool,
+    /// 그 질문 줄이 **화면 어딘가에 실제로 그려져 있으면** 그 줄의 셀.
+    ///
+    /// 있으면 띠를 다시 칠하지 않고 이것을 그대로 옮긴다 — 눌러서 그 줄이 맨 위에
+    /// 서면 띠와 본문이 같은 그림이라 딱 겹친다(2026-09-03 지시, 스크롤백을 쥔 창의
+    /// 머리줄과 같은 규칙). 질문이 화면 밖이면 `None` 이고 그때만 우리가 칠한다.
+    pub cells: Option<Vec<GridCell>>,
 }
 
 thread_local! {
@@ -2370,9 +2371,12 @@ pub(crate) fn note_sticky_view(pane_id: &str, rows: &[Vec<GridCell>]) {
             return;
         }
         let Some(want) = seek.want.clone() else { return };
-        let top = (rows.len() / 3).max(1);
-        if rows.iter().take(top).any(|r| line_shows_prompt(r, &want)) {
-            seek.reached = true;
+        // 맨 위 세 줄 안에 서면 도착이다 — 그 자리에서 띠가 그 줄을 덮어 딱 겹친다.
+        // 보이기는 하는데 아직 아래면 「가깝다」로 두어 마지막 접근을 촘촘히 한다.
+        match rows.iter().position(|r| line_shows_prompt(r, &want)) {
+            Some(r) if r <= 2 => seek.reached = true,
+            Some(_) => seek.near = true,
+            None => seek.near = false,
         }
     });
 }
@@ -2402,6 +2406,10 @@ pub(crate) struct StickySeek {
     pub want: Option<String>,
     /// 이번 프레임 화면에서 `want` 를 봤다 — 렌더가 적고 다음 스텝이 읽는다.
     pub reached: bool,
+    /// 목적지가 화면에 **보이기 시작했다**(아직 맨 위는 아니다). 마지막 접근을 한
+    /// 노치씩 하려고 둔다 — 평소처럼 네 노치를 한꺼번에 쏘면 그 줄을 훌쩍 지나쳐
+    /// 「딱 붙는」 자리에 못 선다.
+    pub near: bool,
 }
 
 /// 그 화면 줄이 `want` 질문의 머리줄인가.
@@ -2428,6 +2436,11 @@ pub(crate) const STICKY_SEEK_MAX: u32 = 500;
 /// 노치는 20ms 간격이고 렌더는 33ms 라, 리페인트가 늦어 한두 번 같아 보이는
 /// 것과 진짜로 굳은 것을 가르려면 여유가 필요하다.
 pub(crate) const STICKY_SEEK_STALL: u32 = 10;
+
+/// 목적지가 화면에 보이기 시작했나 — 마지막 접근을 한 노치씩 하기 위한 신호.
+pub(crate) fn sticky_seek_near() -> bool {
+    STICKY_SEEK.with(|s| s.borrow().as_ref().is_some_and(|k| k.near))
+}
 
 /// seek 이 진행 중인가 — about_to_wait 의 30fps 펌프 게이트.
 pub(crate) fn sticky_seek_active() -> bool {
@@ -2467,6 +2480,7 @@ pub(crate) fn begin_sticky_seek(
             stall: 0,
             want,
             reached: false,
+            near: false,
         });
     });
 }
@@ -2635,10 +2649,10 @@ pub(crate) fn find_sticky_prompt(
         matches!(text.trim_start().chars().next(), Some('\u{276f}') | Some('\u{203a}') | Some('>'))
     };
     for ri in 0..rows.len().min(3) {
-        let (text, first, last, glyphs, dim) = sticky_row_span(&rows[ri]);
+        let (text, _first, _last, glyphs, dim) = sticky_row_span(&rows[ri]);
         if dbg {
             eprintln!(
-                "[sticky] row{ri} glyphs={glyphs} dim={dim} cols={first}..{last} marked={} text={:?}",
+                "[sticky] row{ri} glyphs={glyphs} dim={dim} cols={_first}..{_last} marked={} text={:?}",
                 marked(&text),
                 text.chars().take(48).collect::<String>()
             );
@@ -2670,10 +2684,8 @@ pub(crate) fn find_sticky_prompt(
                 });
                 return Some(StickyPrompt {
                     row: ri,
-                    col_start: first,
-                    col_end: last,
                     text,
-                    synthetic: false,
+                    cells: Some(rows[ri].clone()),
                 });
             }
         }
@@ -2705,18 +2717,15 @@ pub(crate) fn find_sticky_prompt(
         }
         return None;
     }
-    let text = pick_scrolled_past_prompt(rows, prompts, memo)?;
-    let first = rows.first()?;
+    let (text, at) = pick_scrolled_past_prompt(rows, prompts, memo)?;
+    rows.first()?; // 그릴 행이 하나는 있어야 한다
     if dbg {
-        eprintln!("[sticky] row0 band <- {text:?}");
+        eprintln!("[sticky] row0 band <- {text:?} (화면 {at:?}행)");
     }
-    Some(StickyPrompt {
-        row: 0,
-        col_start: 0,
-        col_end: first.len().saturating_sub(1),
-        text,
-        synthetic: true,
-    })
+    // 그 질문 줄이 화면에 그려져 있으면 **그 셀을 옮긴다.** 우리가 칠한 띠와 원본이
+    // 다르게 생기면, 눌러서 그 줄로 갔을 때 같은 질문이 두 모양으로 보인다.
+    let cells = at.and_then(|r| rows.get(r).cloned());
+    Some(StickyPrompt { row: 0, text, cells })
 }
 
 /// 지금 **화면 위로 지나간** 질문. claude 의 원래 띠가 보여주던 것이 그것이라,
@@ -2862,11 +2871,13 @@ fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize
     })
 }
 
+/// 반환은 (질문 한 줄, **그 줄이 화면 몇 행인가**). 행을 함께 주는 이유는 띠에
+/// 원본 셀을 옮기기 위해서다 — 화면에 없으면 `None` 이고 그때는 우리가 칠한다.
 fn pick_scrolled_past_prompt(
     rows: &[Vec<GridCell>],
     prompts: &[(String, Vec<String>)],
     memo: &mut Option<String>,
-) -> Option<String> {
+) -> Option<(String, Option<usize>)> {
     if prompts.is_empty() {
         return None;
     }
@@ -2942,15 +2953,17 @@ fn pick_scrolled_past_prompt(
         if past.is_some() {
             *memo = past.clone();
         }
-        return past;
+        // 그 머리줄이 0행이면 답이 곧 그 줄이라 셀을 쓸 수 있다. 아래 행이면 답은
+        // **앞** 질문이고 그것은 화면 밖이다.
+        return past.map(|p| (p, (ri == 0).then_some(0)));
     }
     // 아는 질문은 화면에 없고, **모르는 질문이 화면에 있다.** 기록에 안 남은 턴이라
     // 앞뒤 순서를 셀 수가 없으니 「그 앞 턴」은 못 말한다 — 화면이 보여 주는 그 질문을
     // 그대로 쓴다. 맨 윗줄이 엄밀히는 앞 턴의 꼬리일 수 있지만, 기록에 없는 질문을
     // 아는 것 중 하나로 바꿔치기하는 것보다 눈에 보이는 것을 말하는 편이 낫다.
-    if let Some((_, q)) = &seen_on_screen {
+    if let Some((ri, q)) = &seen_on_screen {
         *memo = Some(q.clone());
-        return Some(q.clone());
+        return Some((q.clone(), Some(*ri)));
     }
     // 머리줄이 화면 밖이다. **본문으로 먼저 되짚는다** — 보이는 줄이 어느 한 턴에만
     // 있으면 그게 답이고, 이건 기억보다 세다.
@@ -2964,16 +2977,16 @@ fn pick_scrolled_past_prompt(
         if hit.is_some() {
             *memo = hit.clone();
         }
-        return hit;
+        return hit.map(|p| (p, None));
     }
     // 본문으로도 못 가리면 그때 기억이다(답이 짧아 화면을 못 채우는 턴).
     if let Some(remembered) = memo.as_ref() {
         if prompts.iter().any(|(p, _)| p == remembered) {
-            return Some(remembered.clone());
+            return Some((remembered.clone(), None));
         }
     }
     // 기억조차 없으면 마지막 질문 — 맨 아래에서 한 노치 올린 자리가 여기다.
-    prompts.last().map(|(p, _)| p.clone())
+    prompts.last().map(|(p, _)| (p.clone(), None))
 }
 
 /// agy 시작 로고 자리(왼쪽 위 칸, 스크롤로 잘렸으면 top 이 음수).
@@ -4797,7 +4810,7 @@ mod clawd_banner_tests {
         ];
         let got = find_sticky_prompt(&rows, &[("내가 친 질문".to_string(), vec![])], &mut None).expect("감지");
         assert_eq!(got.row, 0);
-        assert!(got.synthetic);
+        assert!(got.cells.is_none(), "그 질문 줄이 화면에 없으니 우리가 칠한다");
         assert_eq!(got.text, "내가 친 질문");
     }
 
@@ -4847,7 +4860,7 @@ mod clawd_banner_tests {
         let s = find_sticky_prompt(&rows, &[], &mut None).expect("sticky detected");
         assert_eq!(s.row, 0);
         assert!(s.text.contains("이전 프롬프트"));
-        assert_eq!(s.col_start, 0);
+        assert!(s.cells.is_some(), "화면에서 읽은 띠는 그 줄 셀을 들고 온다");
     }
 
     // 게이트가 있어도 상단이 흐릿하지 않으면(일반 밝은 텍스트) 감지 안 함.
@@ -6204,7 +6217,7 @@ mod screen_is_the_source_tests {
             &prompts(&["기록에 있는 첫 질문"]),
             &mut memo,
         );
-        assert_eq!(got.as_deref(), Some("기록에 없는 질문"));
+        assert_eq!(got.as_ref().map(|(q, _)| q.as_str()), Some("기록에 없는 질문"));
         assert_eq!(memo.as_deref(), Some("기록에 없는 질문"), "다음 프레임을 위해 기억한다");
     }
 
@@ -6218,7 +6231,7 @@ mod screen_is_the_source_tests {
             &prompts(&["첫 질문", "둘째 질문"]),
             &mut memo,
         );
-        assert_eq!(got.as_deref(), Some("첫 질문"), "아는 질문의 앞 턴");
+        assert_eq!(got.as_ref().map(|(q, _)| q.as_str()), Some("첫 질문"), "아는 질문의 앞 턴");
     }
 
     /// ASCII `>` 로 시작하는 줄은 **대조 없이는 안 받는다** — 인용문·diff 가 행 머리에
@@ -6231,7 +6244,7 @@ mod screen_is_the_source_tests {
             &prompts(&["첫 질문"]),
             &mut memo,
         );
-        assert_eq!(got.as_deref(), Some("첫 질문"), "인용문이 아니라 폴백이 나와야 한다");
+        assert_eq!(got.as_ref().map(|(q, _)| q.as_str()), Some("첫 질문"), "인용문이 아니라 폴백이 나와야 한다");
     }
 
     /// codex 마커도 같게 받는다 — 두 창이 한 규칙으로 서야 한다.
@@ -6243,7 +6256,7 @@ mod screen_is_the_source_tests {
             &prompts(&["다른 질문"]),
             &mut memo,
         );
-        assert_eq!(got.as_deref(), Some("코덱스에만 있는 질문"));
+        assert_eq!(got.as_ref().map(|(q, _)| q.as_str()), Some("코덱스에만 있는 질문"));
     }
 }
 

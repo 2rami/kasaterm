@@ -272,7 +272,10 @@ impl App {
             // 잠깐 사라질 때 게이트가 닫히고, 도착을 보는 눈(`note_sticky_view`)이
             // 함께 감겨 목적지를 지나쳐 버린다.
             crate::screenread::note_scroll_forwarded(&pane);
-            for _ in 0..4 {
+            // 멀 때는 네 노치씩 성큼, **목적지가 보이기 시작하면 한 노치씩**. 끝까지
+            // 성큼 가면 그 줄을 훌쩍 지나쳐 「딱 붙는」 자리에 못 선다.
+            let notches = if crate::render::sticky_seek_near() { 1 } else { 4 };
+            for _ in 0..notches {
                 self.send_mouse_sgr(&pane, button, col, row, true);
             }
             if let Some(w) = self.window.as_ref() {

@@ -8777,7 +8777,7 @@ mod tests {
         let mut memo = None;
         let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
             .expect("맨 윗줄에 본문이 있어도 띠가 나와야 한다");
-        assert!(got.synthetic);
+        assert!(got.cells.is_none(), "답은 화면 밖의 앞 질문이라 옮겨 올 셀이 없다");
         assert_eq!(got.row, 0);
         // 화면에 보이는 질문의 **바로 앞** 질문 — 그 위는 화면 밖이다.
         assert_eq!(got.text, "codex 작업 상태 알려줘");
@@ -8897,7 +8897,7 @@ mod tests {
         let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
             .expect("띠가 나와야 한다");
         assert!(
-            got.synthetic,
+            got.cells.is_none(),
             "인용 줄을 그 자리에서 하이라이트하면 안 된다"
         );
         assert_eq!(got.text, "첫 질문");
