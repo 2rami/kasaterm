@@ -226,7 +226,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
             <span style={{ color: 'var(--cth-ink-300)', display: 'inline-flex' }}><FileIcon /></span>
             <span>{files}</span>
             {ins > 0 && <span style={{ color: 'var(--cth-mint)' }}>+{ins}</span>}
-            {del > 0 && <span style={{ color: 'var(--cth-coral)' }}>-{del}</span>}
+            {del > 0 && <span style={{ color: 'var(--cth-coral-text)' }}>-{del}</span>}
           </span>
         )}
         <div style={{ flex: 1 }} />
@@ -284,7 +284,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
                   ) : (
                     <>
                       {!ok && b.exit_code != null && (
-                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, fontWeight: 600, color: 'var(--cth-coral)', flexShrink: 0 }}>exit {b.exit_code}</span>
+                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, fontWeight: 600, color: 'var(--cth-coral-text)', flexShrink: 0 }}>exit {b.exit_code}</span>
                       )}
                       {b.duration_ms != null && (
                         <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10.5, color: 'var(--cth-ink-300)', flexShrink: 0 }}>{formatDuration(b.duration_ms)}</span>
@@ -336,7 +336,7 @@ export function TerminalBlockCard({ surfaceId, rect, onClose, onToggleZoom, zoom
               <span style={{ color: 'var(--cth-ink-300)', display: 'inline-flex' }}><FileIcon /></span>
               <span>{files}</span>
               {ins > 0 && <span style={{ color: 'var(--cth-mint)' }}>+{ins}</span>}
-              {del > 0 && <span style={{ color: 'var(--cth-coral)' }}>-{del}</span>}
+              {del > 0 && <span style={{ color: 'var(--cth-coral-text)' }}>-{del}</span>}
             </button>
           )}
         </div>

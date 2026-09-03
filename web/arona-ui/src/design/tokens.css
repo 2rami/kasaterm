@@ -15,11 +15,14 @@
   --cth-ink-900: #15294A;
   --cth-ink-700: #25406B;
   --cth-ink-500: #4A638F;
-  --cth-ink-300: #8AA6C8;
+  --cth-ink-300: #4A638F;
   --cth-ink-100: #CBDCEF;
 
   /* Accents — sky = SCHALE primary 블루 */
   --cth-coral: #FF6B6B;       --cth-coral-light: #FFB4B4;
+  --cth-coral-text: #B42318;
+  --cth-on-coral: #000000;
+  --cth-on-sky: #000000;
   --cth-mint:  #6BCF7F;       --cth-mint-light:  #B4E5BD;
   --cth-sky:   #4A90E2;       --cth-sky-light:   #A9CBF0;
   --cth-lemon: #FFD93D;       --cth-lemon-light: #FFEC99;
@@ -98,12 +101,13 @@
   --cth-ink-900: #EAF2FF;
   --cth-ink-700: #C6D6F0;
   --cth-ink-500: #9DB2D6;
-  --cth-ink-300: #6B82AD;
+  --cth-ink-300: #9DB2D6;
   --cth-ink-100: #41547D;
 
   /* Accent light 변형 = 어두운 배경용(hover/선택 면) */
   --cth-sky-light:   #2C4368;
   --cth-coral-light: #4A2E36;
+  --cth-coral-text: #FF8A82;
   --cth-mint-light:  #2A4536;
   --cth-lemon-light: #4A4326;
   --cth-lilac-light: #383056;

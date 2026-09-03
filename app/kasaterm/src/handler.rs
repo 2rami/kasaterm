@@ -1064,6 +1064,17 @@ impl ApplicationHandler<UserEvent> for App {
                         self.close_student_web_window();
                         Ok(true)
                     }
+                    "open-character-settings" => {
+                        self.open_settings_window(
+                            event_loop,
+                            Some(crate::SettingsCat::Students),
+                            None,
+                        );
+                        Ok(self
+                            .inline_web
+                            .as_ref()
+                            .is_some_and(|host| host.kind == crate::InlineWebKind::Settings))
+                    }
                     // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
                     // 세부는 밖에 있어야 한다(거노 2026-08-25). `arg`는 정확한 이름,
                     // `label` 에 테마 키가
@@ -2435,8 +2446,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autoalert();
         self.arm_autotoggle();
         self.arm_autoarona();
-        // 온보딩 제거(거노) — 강제 ModePicker 자동오픈 안 함. 터미널이 기본,
-        // SCHALE OS 는 타이틀바 ✨ 버튼/단축키(Cmd+Shift+A)로 켠다(progressive disclosure).
+        // 온보딩 제거 — 강제 ModePicker 자동오픈 없이 터미널이 기본이다.
         self.arm_autotabs();
         self.arm_autodrag();
         self.arm_autopanemove();
@@ -6226,8 +6236,7 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                // Cmd+Shift+A (macOS) / Ctrl+Shift+A: SCHALE OS(아로나) 패널 토글 —
-                // 터미널로 작업하다 한 키로 전환(거노). PTY 로는 안 흘린다.
+                // Cmd+, (macOS) / Ctrl+Shift+,: 인라인 설정 토글. PTY 로는 안 흘린다.
                 if matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()

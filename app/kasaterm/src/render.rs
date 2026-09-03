@@ -10027,6 +10027,8 @@ impl App {
                     let t_font = 13.0_f32;
                     let win_w = win_px.0 / scale;
                     let px = 14.0_f32;
+                    let icon_size = 16.0_f32;
+                    let icon_gap = 8.0_f32;
                     // 승인 모드(sticky)면 텍스트 뒤에 [승인][거부] 칩이 붙는다 —
                     // 박스 폭에 미리 반영. (munder 승인 카드 축소판)
                     let chip_f = 12.0_f32;
@@ -10050,11 +10052,23 @@ impl App {
                     } else {
                         0.0
                     };
-                    let max_text_w = (win_w - 32.0 - px * 2.0 - chips_w).min(480.0).max(40.0);
-                    let shown = crate::info::fit_text(g, msg, max_text_w, t_font, true);
-                    let text_w = g.measure_chrome_text(&shown, t_font, true);
-                    let box_w = text_w + px * 2.0 + chips_w;
-                    let box_h = 40.0;
+                    let max_text_w = (win_w
+                        - 32.0
+                        - px * 2.0
+                        - chips_w
+                        - icon_size
+                        - icon_gap)
+                        .min(480.0)
+                        .max(40.0);
+                    let tone = theme::notice_tone(msg, collab_toast_action_on);
+                    let clean = theme::clean_notice_text(msg);
+                    let lines = crate::info::fit_text_lines(g, clean, max_text_w, t_font, true, 2);
+                    let text_w = lines
+                        .iter()
+                        .map(|line| g.measure_chrome_text(line, t_font, true))
+                        .fold(0.0_f32, f32::max);
+                    let box_w = text_w + px * 2.0 + chips_w + icon_size + icon_gap;
+                    let box_h = if lines.len() > 1 { 60.0 } else { 44.0 };
                     let bx = (win_w - box_w - 16.0).max(16.0);
                     let by = TITLE_HEIGHT + 12.0;
                     self.collab.toast_rect = Some((bx, by, box_w, box_h));
@@ -10069,29 +10083,41 @@ impl App {
                         theme::with_alpha(theme::surface_active(), a),
                     );
                     let ta = (255.0 * collab_toast_alpha).round() as u8;
-                    // 승인 대기 토스트는 경고 뉘앙스(텍스트가 ⚠로 시작) — 본문은
-                    // 기본 텍스트색, 완료 토스트는 기존 success 색 유지.
-                    let msg_color = if collab_toast_action_on {
-                        theme::with_alpha(theme::text(), ta)
-                    } else {
-                        theme::with_alpha(theme::success(), ta)
-                    };
-                    g.draw_text(
-                        bx + px,
-                        by + (box_h - t_font) / 2.0,
-                        &shown,
-                        gpu::DrawOpts {
-                            font_size: t_font,
-                            color: msg_color,
-                            bold: true,
-                            italic: false,
-                        },
+                    let tone_color = theme::enforce_contrast_at(
+                        theme::notice_tone_color(tone),
+                        theme::surface_active(),
+                        4.5,
                     );
+                    let tone_color = theme::with_alpha(tone_color, ta);
+                    let icon_x = bx + px;
+                    g.queue_icon(
+                        theme::notice_tone_icon(tone),
+                        icon_x,
+                        by + (box_h - icon_size) / 2.0,
+                        icon_size,
+                        tone_color,
+                    );
+                    let text_x = icon_x + icon_size + icon_gap;
+                    let line_h = 18.0;
+                    let text_top = by + (box_h - lines.len() as f32 * line_h) / 2.0 + 1.0;
+                    for (i, line) in lines.iter().enumerate() {
+                        g.draw_text(
+                            text_x,
+                            text_top + i as f32 * line_h,
+                            line,
+                            gpu::DrawOpts {
+                                font_size: t_font,
+                                color: tone_color,
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                    }
                     if collab_toast_action_on {
                         let ch = 36.0;
-                        let cy = by + 2.0;
+                        let cy = by + (box_h - ch) / 2.0;
                         let ty = cy + (ch - chip_f) / 2.0;
-                        let ox = bx + px + text_w + chip_gap;
+                        let ox = text_x + text_w + chip_gap;
                         round_rect(
                             g,
                             ox,
@@ -10107,7 +10133,7 @@ impl App {
                             ok_label,
                             gpu::DrawOpts {
                                 font_size: chip_f,
-                                color: theme::with_alpha(theme::fg(), ta),
+                                color: theme::with_alpha(theme::foreground_on(theme::success()), ta),
                                 bold: true,
                                 italic: false,
                             },
@@ -10129,7 +10155,7 @@ impl App {
                             no_label,
                             gpu::DrawOpts {
                                 font_size: chip_f,
-                                color: theme::with_alpha(theme::fg(), ta),
+                                color: theme::with_alpha(theme::foreground_on(theme::danger()), ta),
                                 bold: true,
                                 italic: false,
                             },

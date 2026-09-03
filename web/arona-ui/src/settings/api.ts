@@ -76,7 +76,6 @@ const TOKEN_ACTIONS = new Set([
   'delete-custom-theme',
   'reset-custom-theme',
   'palette-hex',
-  'palette-preview',
   'accent',
   'shape',
   'min-contrast',

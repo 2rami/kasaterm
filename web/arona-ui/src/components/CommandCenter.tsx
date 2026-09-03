@@ -53,7 +53,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
   useEffect(() => { if (openGitTab) setTab('git'); }, [openGitTab]);
 
   return (
-    <div style={{
+    <div className="cth-command-center" style={{
       width: '100%', // 폭은 App 의 wrapper(드래그 조절)가 제어
       flexShrink: 0,
       height: '100%',
@@ -79,7 +79,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
           <svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{
+          <div className="cth-command-subtitle" style={{
             fontFamily: 'var(--cth-font-display)',
             fontSize: 'var(--cth-text-display-sm)',
             color: 'var(--cth-ink-500)',
@@ -92,10 +92,10 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
             lineHeight: 1.2
           }}>Command Center</div>
         </div>
-        <div style={{
+        <div className="cth-command-badge" style={{
           padding: '4px 10px',
           background: 'var(--cth-sky)',
-          color: '#fff',
+          color: 'var(--cth-on-sky)',
           fontFamily: 'var(--cth-font-ui)',
           fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
           borderRadius: 6
@@ -125,7 +125,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
               fontSize: 12, fontWeight: 600,
               border: 'none', borderRadius: 7,
               background: tab === t ? 'var(--cth-sky)' : 'transparent',
-              color: tab === t ? '#fff' : 'var(--cth-ink-500)',
+              color: tab === t ? 'var(--cth-on-sky)' : 'var(--cth-ink-500)',
               cursor: 'grab',
               whiteSpace: 'nowrap',
               // 드래그 삽입선 — 이 탭 앞에 떨굴 위치면 좌측에 파란 선(거노: 위치 선으로).

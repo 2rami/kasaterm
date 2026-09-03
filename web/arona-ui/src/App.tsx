@@ -4,7 +4,7 @@ import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
 import { TitleBar } from './components/TitleBar';
 import { RoomMap } from './components/RoomMap';
-import { startBoardPolling, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent, type Harness } from './lib/mcp';
+import { startBoardPolling, refreshBoardNow, refreshRuntimeTheme, openCharacterSettings, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent, type Harness } from './lib/mcp';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
@@ -32,6 +32,7 @@ const MOCK_AGENTS: Agent[] = [
 export function App() {
   const launch = new URLSearchParams(location.search);
   const agents = useStore((s) => s.agents);
+  const boardStatus = useStore((s) => s.boardStatus);
   const backgroundAgents = useStore((s) => s.backgroundAgents);
   const [ready, setReady] = useState(false);
   // 기본 뷰 = 터미널 pane 그리드(세션 뷰어). 교실(캐릭터)·카드는 토글로.
@@ -123,12 +124,6 @@ export function App() {
   }, []);
   // claude oauth 한도 — 본문 + 그 값이 지금 것인지(stale) + 어느 계정 것인지.
   const [usage, setUsage] = useState<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null>(null);
-  // 라이트/다크 테마 — 태양 버튼 토글, localStorage 영속(거노). data-theme 로 토큰 재매핑.
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('schale-theme') === 'dark' ? 'dark' : 'light'));
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem('schale-theme', theme);
-  }, [theme]);
   // 폰 폭이면 레이아웃이 갈린다 — 데스크톱 pane 배치 미러 대신 대화 하나만, 패널은 전체폭.
   const isPhone = useIsPhone();
   // 좌(방/학생)·우(업무/소스/스케줄) 패널 — 상단 아이콘 클릭 시 팝오버 오버레이로 펼침(거노:
@@ -171,6 +166,7 @@ export function App() {
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
   useEffect(() => {
     // solo 모드 마커 폐기(잔재 정리) — 웹뷰는 항상 SCHALE OS 교실. 초기 1회 ready 만.
+    void refreshRuntimeTheme();
     setReady(true);
   }, []);
   useEffect(() => {
@@ -378,8 +374,6 @@ export function App() {
       {!focusMode && (<TitleBar
         leftBadge={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         usage={usage}
-        theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onToggleLeft={() => { setLeftOpen((v) => !v); setRightOpen(false); }}
         onToggleRight={() => { setRightOpen((v) => !v); setLeftOpen(false); }}
         leftOpen={leftOpen}
@@ -497,7 +491,15 @@ export function App() {
                 </div>
               )
             ) : (
-              <ClassroomView agents={shown} background={roomBg} onSelect={openStudent} selectedId={activeId ?? undefined} />
+              <ClassroomView
+                agents={shown}
+                background={roomBg}
+                onSelect={openStudent}
+                selectedId={activeId ?? undefined}
+                emptyState={boardStatus}
+                onAdd={() => void openCharacterSettings()}
+                onRefresh={() => void refreshBoardNow()}
+              />
             )}
           </div>
         </div>

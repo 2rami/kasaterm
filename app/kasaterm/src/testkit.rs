@@ -2872,14 +2872,6 @@ impl App {
         // 한 글자씩 먹여, 조합기가 완성 음절을 만드는지 낱자로 흘리는지 찍는다.
         // 실제 IME 없이 재현할 수 있는 건 macOS 가 OS IME 를 끄고 자모를 그대로
         // 받기 때문 — 그 경로가 곧 거노가 치는 경로다.
-        // 페이지 아래쪽 항목은 창을 아무리 키워도 첫 화면에 안 들어온다 —
-        // 스크롤 위치를 직접 심어 그 자리를 캡처한다(휠 이벤트는 aux 창으로
-        // 안 간다).
-        if let Ok(s) = std::env::var("KASATERM_AUTOSETTINGS_SCROLL") {
-            if let Ok(v) = s.parse::<f32>() {
-                self.settings_scroll = v;
-            }
-        }
         // 배율/폰트를 흐트러뜨린 뒤 "1:1 로 되돌리기"가 둘 다 되돌리는지. 되돌린
         // 값이 맞아도 격자를 다시 안 재면 화면만 옛 크기로 남으므로 cells 도 찍는다.
         if std::env::var("KASATERM_AUTOSETTINGS_RESET").is_ok() {

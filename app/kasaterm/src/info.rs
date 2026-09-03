@@ -3867,6 +3867,50 @@ pub(crate) fn fit_text(
     s.to_string()
 }
 
+pub(crate) fn fit_text_lines(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    avail: f32,
+    size: f32,
+    bold: bool,
+    max_lines: usize,
+) -> Vec<String> {
+    let mut rest = s.trim();
+    let mut lines = Vec::new();
+    while !rest.is_empty() && lines.len() < max_lines {
+        if g.measure_chrome_text(rest, size, bold) <= avail {
+            lines.push(rest.to_string());
+            break;
+        }
+        if lines.len() + 1 == max_lines {
+            lines.push(fit_text(g, rest, avail, size, bold));
+            break;
+        }
+        let mut width = 0.0;
+        let mut cut = 0usize;
+        let mut space = None;
+        let mut buf = [0u8; 4];
+        for (i, ch) in rest.char_indices() {
+            width += g.measure_chrome_text(ch.encode_utf8(&mut buf), size, bold);
+            if width > avail {
+                break;
+            }
+            cut = i + ch.len_utf8();
+            if ch.is_whitespace() {
+                space = Some(i);
+            }
+        }
+        let cut = space.filter(|i| *i > 0).unwrap_or(cut);
+        if cut == 0 {
+            lines.push(fit_text(g, rest, avail, size, bold));
+            break;
+        }
+        lines.push(rest[..cut].trim_end().to_string());
+        rest = rest[cut..].trim_start();
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tilde_tests {
     use super::tilde_under;

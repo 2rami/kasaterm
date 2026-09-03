@@ -274,7 +274,7 @@ impl App {
     /// 때문이다(session.rs). 그래서 토스트로 그 사실을 알린다. 조용히 안 바뀌면
     /// 사용자는 전환이 실패했다고 읽는다.
     fn select_theme(&mut self, id: String) {
-        if self.settings_cat == SettingsCat::Theme && socket::read_character_theme() == id {
+        if socket::read_character_theme() == id {
             return;
         }
         // 편집 중이던 persona 는 **먼저** 옛 테마 파일에 흘려보낸다. 순서를 바꾸면
@@ -1826,11 +1826,6 @@ impl App {
         self.students_name = name.clone();
         self.students_selected = Some(name);
         self.settings_input = None;
-        // 상세는 「캐릭터」 칸의 화면이다 — 딥링크가 다른 칸을 켜 둔 채로 불러도
-        // (프사 클릭은 `cat=theme` 를 함께 보낸다) 여기서 칸을 맞춰야 상세가 뜬다.
-        self.settings_cat = SettingsCat::Students;
-        // 목록을 한참 내려서 골랐어도 상세는 맨 위부터 — 이어받으면 빈 화면이 뜬다.
-        self.settings_scroll = 0.0;
     }
 
     /// 상세를 닫고 목록으로. 편집 중이던 것은 여기서 굳힌다(persona 를 **먼저** —
@@ -1842,7 +1837,6 @@ impl App {
         self.students_persona.clear();
         self.students_name.clear();
         self.settings_input = None;
-        self.settings_scroll = 0.0;
     }
 
     /// 이름 버퍼를 로스터에 굳힌다. 이름은 로스터의 **키**라 바꾸면 그 캐릭터의

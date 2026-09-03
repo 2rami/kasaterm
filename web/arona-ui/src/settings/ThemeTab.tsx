@@ -278,13 +278,18 @@ function CharacterCell({
         borderRadius: 'var(--kt-radius-sm)',
         background: 'var(--kt-surface)',
         boxShadow: `inset 0 0 0 var(--kt-border-w) var(--kt-border)`,
-        opacity: picked ? 1 : 0.38,
+        border: picked ? '1px solid transparent' : '1px dashed var(--kt-border)',
       }}
     >
       {/* 켬/끔 동그라미를 없앴다 — 이제 카드 전체가 고르기라 같은 일을 하는 표적이
           둘이 되고, 작은 동그라미를 빗맞히면 「눌렀는데 딴 게 됐다」가 된다.
           켜짐은 카드 밝기와 이름 옆 색점으로 이미 보인다. */}
-      <img className="kt-face h-[64px] w-auto" src={faceUrl(c.slug, theme)} alt="" />
+      <img
+        className="kt-face h-[64px] w-auto"
+        src={faceUrl(c.slug, theme)}
+        alt=""
+        style={{ filter: picked ? 'none' : 'grayscale(.75)' }}
+      />
       <div className="flex items-center gap-1.5">
         <span
           className="inline-block h-[7px] w-[7px] shrink-0"
@@ -415,13 +420,14 @@ function CharacterGroup({
   }, [open, active, roster, key]);
 
   const picked = new Set(card.picked);
+  const fallback = card.picked.length === 0;
   // 명단을 아직 안 받았으면 카드가 알려 준 총원을 쓴다 — 펼치기 전에도 「몇 명
   // 중 몇 명」이 보여야 어느 묶음을 열지 정할 수 있다.
   const total = roster?.length ?? card.count;
   // 접힌 동안에는 명단이 없어 저장된 개수를 그대로 센다. 이름이 바뀌거나 테마가
   // 줄어든 옛 설정에는 이제 없는 사람이 남아 있을 수 있어서, 그대로 두면 「23/21」
   // 같은 숫자가 나온다 — 펼치면 실제 명단으로 다시 세니 여기서만 눌러 둔다.
-  const on = roster
+  const on = fallback ? total : roster
     ? roster.filter((c) => picked.has(c.name)).length
     : Math.min(picked.size, total);
 
@@ -466,7 +472,7 @@ function CharacterGroup({
           onClick={() => onAction('theme-pick-all', { id: key })}
         />
         <MiniButton
-          label={t.theme.pickClear}
+          label={t.theme.pickFallback}
           disabled={busy}
           onClick={() => onAction('theme-pick-none', { id: key })}
         />
@@ -476,7 +482,7 @@ function CharacterGroup({
       {open && (
         <div className="px-3 pb-3 pt-1">
           {pane === 'body' && (
-            // 머리를 없앤 자리 — 「전부/해제」와 개수는 여기 한 줄로 옮긴다.
+            // 머리를 없앤 자리 — 「전부/기본값」과 개수는 여기 한 줄로 옮긴다.
             <div className="mb-2 flex items-center gap-2">
               <span className="text-[13px] text-[var(--kt-text)]">{card.label}</span>
               {active && (
@@ -501,14 +507,16 @@ function CharacterGroup({
                 onClick={() => onAction('theme-pick-all', { id: key })}
               />
               <MiniButton
-                label={t.theme.pickClear}
+                label={t.theme.pickFallback}
                 disabled={busy}
                 onClick={() => onAction('theme-pick-none', { id: key })}
               />
             </div>
           )}
           <p className="mb-2 text-[11px] text-[var(--kt-text-mute)]">
-            {active ? t.theme.pickHintActive : t.theme.pickHintOther}
+            {fallback
+              ? t.theme.pickFallbackHint
+              : active ? t.theme.pickHintActive : t.theme.pickHintOther}
           </p>
           {roster ? (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
@@ -518,13 +526,13 @@ function CharacterGroup({
                   t={t}
                   c={c}
                   theme={active ? undefined : card.id}
-                  picked={picked.has(c.name)}
+                  picked={fallback || picked.has(c.name)}
                   detail={active}
                   disabled={busy}
                   /// slug 는 서로 겹칠 수 있어 정확한 이름과 테마 키를 올린다.
                   onOpenSettings={() => onAction('open-student', { id: c.name, label: key })}
                   onTogglePick={() =>
-                    onAction(picked.has(c.name) ? 'character-pick-off' : 'character-pick', {
+                    onAction(fallback || picked.has(c.name) ? 'character-pick-off' : 'character-pick', {
                       id: key,
                       label: c.name,
                     })

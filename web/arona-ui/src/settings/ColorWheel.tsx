@@ -66,23 +66,34 @@ export function hexToHsv(hex: string): Hsv {
 export function useLatestOnly(send: (v: string) => Promise<unknown>) {
   const pending = useRef<string | null>(null);
   const busy = useRef(false);
+  const frame = useRef<number | null>(null);
+  const alive = useRef(true);
   const sendRef = useRef(send);
   sendRef.current = send;
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (frame.current != null) window.cancelAnimationFrame(frame.current);
+    };
+  }, []);
+  const schedule = () => {
+    if (!alive.current || busy.current || frame.current != null) return;
+    frame.current = window.requestAnimationFrame(() => {
+      frame.current = null;
+      const next = pending.current;
+      pending.current = null;
+      if (next === null) return;
+      busy.current = true;
+      void sendRef.current(next).finally(() => {
+        busy.current = false;
+        if (pending.current !== null) schedule();
+      });
+    });
+  };
   return (v: string) => {
     pending.current = v;
-    if (busy.current) return;
-    void (async () => {
-      busy.current = true;
-      try {
-        while (pending.current !== null) {
-          const next = pending.current;
-          pending.current = null;
-          await sendRef.current(next);
-        }
-      } finally {
-        busy.current = false;
-      }
-    })();
+    schedule();
   };
 }
 

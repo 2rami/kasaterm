@@ -85,7 +85,48 @@ async function refreshCharacterAccents(intervalMs = 30000): Promise<void> {
     const t = await res.json();
     const map = t?.character_accents;
     if (map && typeof map === 'object') CHARACTER_ACCENT = map as Record<string, string>;
+    applyRuntimeTokens(t);
   } catch { /* 옛 표 유지 */ }
+}
+
+export async function refreshRuntimeTheme(): Promise<void> {
+  await refreshCharacterAccents(0);
+}
+
+/** 터미널과 같은 런타임 팔레트를 SCHALE 토큰 이름에 연결한다. inline 화면만 별도
+ * light/dark 상태를 가지면 설정에서 고른 custom 팔레트가 여기서 끊긴다. */
+function applyRuntimeTokens(t: any): void {
+  const p = t?.palette;
+  if (!p || typeof p !== 'object') return;
+  const root = document.documentElement;
+  const set = (name: string, value: unknown) => {
+    if (typeof value === 'string' && value) root.style.setProperty(name, value);
+  };
+  set('--cth-cream-50', p.bg);
+  set('--cth-cream-100', p.surface);
+  set('--cth-cream-200', p.border);
+  set('--cth-cream-300', p.surface_active);
+  set('--cth-paper-100', p.surface_hover);
+  set('--cth-paper-200', p.surface_active);
+  set('--cth-ink-900', p.text);
+  set('--cth-ink-700', p.text);
+  set('--cth-ink-500', p.text_dim);
+  set('--cth-ink-300', p.text_dim);
+  set('--cth-sky', p.accent);
+  set('--cth-on-sky', p.on_accent);
+  set('--cth-mint', p.success);
+  set('--cth-coral', p.danger);
+  set('--cth-coral-text', p.danger_text_surface ?? p.danger);
+  set('--cth-on-coral', p.on_danger);
+  root.style.setProperty('--cth-sky-light', 'color-mix(in srgb, var(--cth-sky) 18%, var(--cth-cream-100))');
+  const hex = String(p.bg ?? '').replace('#', '').slice(0, 6);
+  const n = Number.parseInt(hex, 16);
+  if (Number.isFinite(n)) {
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    root.dataset.theme = 0.299 * r + 0.587 * g + 0.114 * b < 128 ? 'dark' : 'light';
+  }
 }
 
 interface BoardRow {
@@ -211,15 +252,44 @@ function toAgent(r: BoardRow): Agent {
 }
 
 export async function fetchBoard(): Promise<BoardRow[]> {
+  return (await fetchBoardResult()).rows;
+}
+
+async function fetchBoardResult(): Promise<{ rows: BoardRow[]; ok: boolean }> {
   try {
-    const res = await fetch(`${BASE}/board`);
-    if (!res.ok) return [];
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(`${BASE}/board`, { signal: controller.signal });
+    window.clearTimeout(timer);
+    if (!res.ok) return { rows: [], ok: false };
     const data = await res.json();
     // /board 가 {board:[...]} 든 JSON-RPC {result:{board:[...]}} 든 흡수.
     const rows = data?.board ?? data?.result?.board ?? [];
-    return Array.isArray(rows) ? (rows as BoardRow[]) : [];
+    return { rows: Array.isArray(rows) ? (rows as BoardRow[]) : [], ok: true };
   } catch {
-    return [];
+    return { rows: [], ok: false };
+  }
+}
+
+export async function refreshBoardNow(): Promise<void> {
+  const state = useStore.getState();
+  state.setBoardStatus('loading');
+  const result = await fetchBoardResult();
+  useStore.getState().setAgents(result.rows.map(toAgent));
+  useStore.getState().setBoardStatus(result.ok ? 'ready' : 'error');
+}
+
+export async function openCharacterSettings(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/settings/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'open-character-settings' }),
+    });
+    const out = await res.json();
+    return out?.ok === true;
+  } catch {
+    return false;
   }
 }
 
@@ -232,8 +302,9 @@ export function startBoardPolling(intervalMs = 1000): () => void {
     // 표가 비어 순환색으로 그려질 수 있는데, 그건 로스터에 없는 캐릭터의 기존
     // 동작과 같고 다음 프레임에 제 색으로 바뀐다.
     await refreshCharacterAccents();
-    const rows = await fetchBoard();
-    useStore.getState().setAgents(rows.map(toAgent));
+    const result = await fetchBoardResult();
+    useStore.getState().setAgents(result.rows.map(toAgent));
+    useStore.getState().setBoardStatus(result.ok ? 'ready' : 'error');
   };
   void tick();
   const iv = setInterval(tick, intervalMs);

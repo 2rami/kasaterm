@@ -35,7 +35,7 @@ use super::*;
 /// 배너 한 장의 논리 크기. macOS 기본 배너와 비슷한 비례 — 낯선 물건을 새 규격으로
 /// 내놓을 이유가 없다.
 const W: f32 = 360.0;
-const H: f32 = 78.0;
+const H: f32 = 96.0;
 /// 쌓일 때의 세로 간격.
 const GAP: f32 = 10.0;
 /// 화면 오른쪽 여백.
@@ -750,10 +750,38 @@ impl App {
         // 흘러 옆 창 위에 글자만 떠 있는 꼴이 되므로 오른쪽 여백에서 자른다.
         let close_x = w - CLOSE_BOX;
         let clip_r = close_x - 4.0;
-        let title = crate::info::fit_text(&mut b.gpu, &title, clip_r - x0, 13.0, true);
-        let body = crate::info::fit_text(&mut b.gpu, &body, clip_r - x0, 12.0, false);
-        b.gpu.draw_text_clipped(
+        let tone = theme::notice_tone(&format!("{title} {body}"), false);
+        let tone_color = theme::enforce_contrast_at(
+            theme::notice_tone_color(tone),
+            theme::panel_bg(),
+            4.5,
+        );
+        let tone_icon = 14.0;
+        b.gpu.queue_icon(
+            theme::notice_tone_icon(tone),
             x0,
+            14.0,
+            tone_icon,
+            tone_color,
+        );
+        let text_x = x0 + tone_icon + 7.0;
+        let title = crate::info::fit_text(
+            &mut b.gpu,
+            theme::clean_notice_text(&title),
+            clip_r - text_x,
+            13.0,
+            true,
+        );
+        let body = crate::info::fit_text_lines(
+            &mut b.gpu,
+            theme::clean_notice_text(&body),
+            clip_r - text_x,
+            12.0,
+            false,
+            2,
+        );
+        b.gpu.draw_text_clipped(
+            text_x,
             16.0,
             &title,
             gpu::DrawOpts {
@@ -762,7 +790,7 @@ impl App {
                 bold: true,
                 italic: false,
             },
-            x0,
+            text_x,
             clip_r,
         );
         // 항상 보이는 선형 X. 글자나 유니코드 기호가 아니라 기존 아이콘 자산을
@@ -778,19 +806,21 @@ impl App {
                 theme::text_dim()
             },
         );
-        b.gpu.draw_text_clipped(
-            x0,
-            40.0,
-            &body,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: theme::enforce_contrast_at(theme::text_dim(), theme::panel_bg(), 4.5),
-                bold: false,
-                italic: false,
-            },
-            x0,
-            clip_r,
-        );
+        for (i, line) in body.iter().enumerate() {
+            b.gpu.draw_text_clipped(
+                text_x,
+                42.0 + i as f32 * 18.0,
+                line,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: theme::enforce_contrast_at(theme::text_dim(), theme::panel_bg(), 4.5),
+                    bold: false,
+                    italic: false,
+                },
+                text_x,
+                clip_r,
+            );
+        }
         // 헤드리스 검증: 배너는 **별도 창**이라 메인 창을 찍는 `KASATERM_AUTOCAPTURE`
         // 로는 안 잡힌다. 자체 GPU 서피스라 별도 readback 이 필요하다.
         if let Ok(p) = std::env::var("KASATERM_AUTOBANNER_CAP") {
@@ -1136,7 +1166,7 @@ mod tests {
         let left_top = clamp_stack_origin(Point { x: -500, y: -500 }, bounds, 3);
         assert_eq!(left_top, Point { x: 114, y: 244 });
         let right_bottom = clamp_stack_origin(Point { x: 5000, y: 5000 }, bounds, 3);
-        assert_eq!(right_bottom, Point { x: 726, y: 732 });
+        assert_eq!(right_bottom, Point { x: 726, y: 678 });
         assert_eq!(
             clamp_stack_origin(Point { x: 400, y: 500 }, bounds, 3),
             Point { x: 400, y: 500 }
@@ -1168,7 +1198,7 @@ mod tests {
                 retina,
                 3
             ),
-            Point { x: -748, y: 344 }
+            Point { x: -748, y: 236 }
         );
     }
 

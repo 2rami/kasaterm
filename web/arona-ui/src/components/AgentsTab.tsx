@@ -73,7 +73,7 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
         // 넘기면 claude 가 'attach' 를 프롬프트로 먹어 재진입 실패(2.1.197 실측). --resume 은
         // background 세션에 아예 불가("running as background agent, use claude agents to attach").
         <button onClick={() => void resumeSession(a.id, a.cwd, false, true)} style={{
-          fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: '#fff', background: 'var(--cth-sky)',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: 'var(--cth-on-sky)', background: 'var(--cth-sky)',
           border: 'none', borderRadius: 7, padding: '4px 9px', cursor: 'pointer', whiteSpace: 'nowrap',
         }}>이어받기</button>
       )}

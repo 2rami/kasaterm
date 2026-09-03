@@ -5133,7 +5133,6 @@ struct App {
     /// Settings screen (Warp-style full-view, reached from the sidebar). When
     /// open it replaces the pane grid; the sidebar/titlebar stay live.
     settings_open: bool,
-    settings_cat: SettingsCat,
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
@@ -5222,12 +5221,6 @@ struct App {
     /// Raw-editor mouse selection in progress: the pane id whose editor owns
     /// the drag (armed on body press, released on mouse-up).
     md_select_drag: Option<String>,
-    /// Settings form wheel-scroll offset (logical px). Reset on open and on
-    /// category switch.
-    settings_scroll: f32,
-    /// Max scroll for the current category — content height minus the visible
-    /// form area, computed by the render pass (paint_settings returns the
-    /// content height). The wheel handler clamps against this.
     /// 피드백 본문 편집 버퍼. 설정 창을 닫아도 안 비운다 — 쓰다 만 글이
     /// 실수로 창을 닫았다고 사라지면 다시 안 쓴다.
     feedback_body: String,
@@ -5661,7 +5654,6 @@ impl App {
             // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
             // 위에서 담당한다.
             settings_open: false,
-            settings_cat: SettingsCat::General,
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_open_mode: socket::read_file_open_mode(),
             set_file_open_app: socket::read_file_open_app(),
@@ -5710,12 +5702,6 @@ impl App {
             settings_caret: 0,
             window_frame_save_due: None,
             md_select_drag: None,
-            // KASATERM_TEST_SETTINGS_SCROLL: 헤드리스 스크린샷으로 폼 스크롤을
-            // 검증하는 시드(휠 주입 불가) — 렌더 패스가 max 로 클램프해 준다.
-            settings_scroll: std::env::var("KASATERM_TEST_SETTINGS_SCROLL")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0),
             feedback_body: String::new(),
             feedback_caret: 0,
             feedback_diag: true,

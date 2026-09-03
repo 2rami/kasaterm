@@ -93,6 +93,8 @@ export const ko = {
     pickNone: '안 고름',
     pickAll: '전부',
     pickClear: '해제',
+    pickFallback: '기본값',
+    pickFallbackHint: '아직 따로 고르지 않아 기본 명단 전원이 자동 배정돼요.',
     /// 활성 테마 카드만 눌러서 상세로 간다 — 다른 테마는 그 폴더를 못 고쳐서
     /// 카드 자체가 켬/끔이 된다.
     pickHintActive: '카드를 누르면 상세, 오른쪽 위 동그라미로 켜고 꺼요',
@@ -134,7 +136,7 @@ export const ko = {
   },
 
   detail: {
-    back: '목록',
+    back: '닫기',
     name: '이름',
     nameHint: '로스터의 키예요 — 성격·색·그림이 이 이름을 따라가요. 칸을 벗어날 때 저장돼요.',
     persona: '성격',
@@ -148,6 +150,9 @@ export const ko = {
     modelHint: '이 캐릭터로 뜨는 claude 가 쓸 모델이에요 — 「Agent」 탭의 전역 설정보다 앞서요.',
     modelHint2: '지금 도는 pane 은 그대로고, 새로 뜨는 pane 부터 이 모델로 떠요.',
     modelCustom: (a: { value: string }) => `원본에 적은 값: ${a.value}`,
+    modelCurrent: '현재',
+    modelRecommended: '추천',
+    modelMore: (a: { count: number }) => `다른 모델 ${a.count}개`,
     rawTitle: '정의',
     rawHint: '칸에 없는 모델도 여기 model 에 직접 적으면 그대로 붙어요.',
     rawHint2: 'backend 는 kimi·glm 처럼 게이트웨이로 보내는 실행 통로예요 (비우면 순정).',
@@ -438,6 +443,8 @@ export const en: Strings = {
     pickNone: 'none',
     pickAll: 'All',
     pickClear: 'None',
+    pickFallback: 'Default',
+    pickFallbackHint: 'No custom picks yet — everyone in the default roster is assigned automatically.',
     pickHintActive: 'Click a card for detail; use the circle to turn it on or off',
     pickHintOther: 'Click a card to turn it on or off',
     pickLoading: 'Loading roster…',
@@ -472,7 +479,7 @@ export const en: Strings = {
   },
 
   detail: {
-    back: 'Roster',
+    back: 'Close',
     name: 'Name',
     nameHint:
       'This is the roster key — persona, color, and art all follow it. Saved when you leave the field.',
@@ -488,6 +495,9 @@ export const en: Strings = {
     modelHint: 'The model claude uses in panes opened as this character — it wins over the global setting in the Agent tab.',
     modelHint2: 'Panes already running keep theirs; this applies to newly opened panes.',
     modelCustom: (a) => `Set in the source: ${a.value}`,
+    modelCurrent: 'Current',
+    modelRecommended: 'Recommended',
+    modelMore: (a) => `${a.count} more models`,
     rawTitle: 'Definition',
     rawHint: 'A model that is not in the row still works — write it into `model` here.',
     rawHint2: '`backend` is the launcher that routes through a gateway (kimi, glm). Leave it empty for plain claude.',

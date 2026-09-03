@@ -96,7 +96,7 @@ export function ScheduleTab() {
             </label>
           )}
           {agents.length === 0 && (
-            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral)' }}>
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral-text)' }}>
               살아있는 캐릭터가 없어 예약을 보낼 대상이 없습니다.
             </div>
           )}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
-import { saveSession } from '@/lib/mcp';
+import { openCharacterSettings, refreshBoardNow, saveSession } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
@@ -46,6 +46,7 @@ const SectionLabel = ({ children }: { children: string }) => (
 // 빨강 '확인 필요'는 waiting_for(AskUserQuestion·권한) 있는 것만 — isAwaitingTeacher 가 그 판정.
 export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: string, title: string) => void; onSaved?: (surface: string) => void }) {
   const agents = useStore((s) => s.agents);
+  const boardStatus = useStore((s) => s.boardStatus);
   const acked = useStore((s) => s.acked);
   const sprited = assignSprites(agents);
   const spriteOf = new Map(sprited.map((a) => [a.id, a.spriteChar || a.character]));
@@ -92,7 +93,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                     <button key={a.id} onClick={() => onPickStudent?.(a.id, a.character)} style={{
                       display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8,
                       border: 'none', cursor: 'pointer', textAlign: 'left',
-                      background: un ? 'var(--cth-coral)' : '#fff', color: un ? '#fff' : 'var(--cth-ink-900)',
+                      background: un ? 'var(--cth-coral)' : '#fff', color: un ? 'var(--cth-on-coral)' : 'var(--cth-ink-900)',
                       fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: un ? 800 : 600,
                       boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
                     }}>
@@ -110,7 +111,16 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
         {/* 현황 — 학생별 작업 상세(status·도구·태스크·서브에이전트·도구 흐름). 업무 탭 흡수. */}
         <SectionLabel>현황</SectionLabel>
         {agents.length === 0 ? (
-          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>캐릭터 없음</span>
+          <div style={{ padding: '18px 12px', borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-ui)' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)' }}>
+              {boardStatus === 'error' ? '현황을 불러오지 못했어요' : boardStatus === 'loading' ? '현황을 확인하는 중…' : '아직 이 방에 학생이 없어요'}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.6 }}>캐릭터 설정에서 학생을 고르거나 목록을 다시 확인하세요.</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+              <button className="cth-panel-action" onClick={() => void openCharacterSettings()}>캐릭터 설정 열기</button>
+              <button className="cth-panel-action" onClick={() => void refreshBoardNow()}>새로고침</button>
+            </div>
+          </div>
         ) : agents.map((a) => {
           const building = a.status === 'working' && isBuildCmd(a.action);
           const awaiting = isAwaitingTeacher(a);

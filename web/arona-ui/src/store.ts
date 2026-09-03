@@ -92,7 +92,9 @@ export function isAwaitingTeacher(a: Agent): boolean {
 
 interface AppState {
   agents: Agent[];
+  boardStatus: 'loading' | 'ready' | 'error';
   setAgents: (a: Agent[]) => void;
+  setBoardStatus: (status: 'loading' | 'ready' | 'error') => void;
   /** `claude agents` 가 보고하는 pane 밖 background 세션(+interactive). 교실에 별도 표시. */
   backgroundAgents: BackgroundAgent[];
   setBackgroundAgents: (a: BackgroundAgent[]) => void;
@@ -104,6 +106,8 @@ interface AppState {
 
 export const useStore = create<AppState>((set) => ({
   agents: [],
+  boardStatus: 'loading',
+  setBoardStatus: (boardStatus) => set({ boardStatus }),
   backgroundAgents: [],
   setBackgroundAgents: (backgroundAgents) => set({ backgroundAgents }),
   acked: [],

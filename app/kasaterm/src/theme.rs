@@ -1244,6 +1244,55 @@ pub fn foreground_on(fill: [u8; 4]) -> [u8; 4] {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeTone {
+    Success,
+    Warning,
+    Error,
+    Attention,
+    Info,
+}
+
+pub fn notice_tone(message: &str, has_action: bool) -> NoticeTone {
+    let m = message.trim().to_ascii_lowercase();
+    if has_action || m.contains("권한") || m.contains("확인 필요") || m.contains("attention") {
+        NoticeTone::Attention
+    } else if m.contains("실패") || m.contains("오류") || m.contains("failed") || m.contains("error") {
+        NoticeTone::Error
+    } else if m.contains("주의") || m.contains("경고") || m.contains("재시작") || m.contains("warning") {
+        NoticeTone::Warning
+    } else if m.contains("완료") || m.contains("저장했") || m.contains("복사됨") || m.contains("success") {
+        NoticeTone::Success
+    } else {
+        NoticeTone::Info
+    }
+}
+
+pub fn notice_tone_color(tone: NoticeTone) -> [u8; 4] {
+    match tone {
+        NoticeTone::Success => success(),
+        NoticeTone::Warning | NoticeTone::Attention => attention(),
+        NoticeTone::Error => danger(),
+        NoticeTone::Info => accent(),
+    }
+}
+
+pub fn notice_tone_icon(tone: NoticeTone) -> &'static str {
+    match tone {
+        NoticeTone::Success => "square-check",
+        NoticeTone::Warning => "triangle-alert",
+        NoticeTone::Error => "octagon-alert",
+        NoticeTone::Attention => "message-square-warning",
+        NoticeTone::Info => "info",
+    }
+}
+
+pub fn clean_notice_text(message: &str) -> &str {
+    message
+        .trim_start_matches(['⚠', '✓', '✗', ' '])
+        .trim_start()
+}
+
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
 
@@ -1797,6 +1846,26 @@ mod roster_tests {
         let danger_surface = enforce_contrast_at(danger(), surface(), 4.5);
         assert!(contrast_of(luminance(danger_bg), luminance(bg())) >= 4.5);
         assert!(contrast_of(luminance(danger_surface), luminance(surface())) >= 4.5);
+    }
+
+    #[test]
+    fn 알림_의미는_색과_svg_아이콘으로_갈린다() {
+        assert_eq!(notice_tone("저장 완료", false), NoticeTone::Success);
+        assert_eq!(notice_tone("재시작하면 적용", false), NoticeTone::Warning);
+        assert_eq!(notice_tone("빌드 실패", false), NoticeTone::Error);
+        assert_eq!(notice_tone("권한 필요", false), NoticeTone::Attention);
+        assert_eq!(notice_tone("새 소식", false), NoticeTone::Info);
+        assert_eq!(notice_tone("설치할까요", true), NoticeTone::Attention);
+        for tone in [
+            NoticeTone::Success,
+            NoticeTone::Warning,
+            NoticeTone::Error,
+            NoticeTone::Attention,
+            NoticeTone::Info,
+        ] {
+            assert!(!notice_tone_icon(tone).is_empty());
+        }
+        assert_eq!(clean_notice_text("⚠ 권한 필요"), "권한 필요");
     }
 
     /// 런타임 로스터는 같은 JSON 에서 **코드젠과 똑같은 표**를 구워야 한다.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ChevronDown, X } from 'lucide-react';
 import { useT } from './lang';
 import { MotionSprites } from './MotionSprites';
 import { ThemeGenSection } from './ThemeGen';
@@ -63,6 +63,7 @@ export function CharacterDetail({
   // (상세가 유일한 편집자라는 전제), prop 만 보면 방금 고른 칸이 안 켜진다.
   const [model, setModel] = useState(character.model);
   const [backend, setBackend] = useState(character.backend);
+  const [showAllModels, setShowAllModels] = useState(false);
   // 조합 중(한글·일본어 등)에는 자동 저장을 걸지 않는다 — 조합이 확정되기 전의
   // 값을 보내면 마지막 음절이 잘린 채 파일에 박힌다.
   const composing = useRef(false);
@@ -92,6 +93,7 @@ export function CharacterDetail({
     setRawText('');
     setModel(character.model);
     setBackend(character.backend);
+    setShowAllModels(false);
   }, [character.slug]);
 
   useEffect(() => () => {
@@ -235,6 +237,15 @@ export function CharacterDetail({
     void post({ name: savedName.current, new_name: next });
   }
 
+  const currentChoice = models.find((m) => model === m.model && backend === m.backend);
+  const primaryModels = [currentChoice, models[0], models[1]]
+    .filter((m): m is ModelChoice => !!m)
+    .filter((m, i, all) => all.findIndex((x) => x.model === m.model && x.backend === m.backend) === i);
+  const secondaryModels = models.filter(
+    (m) => !primaryModels.some((x) => x.model === m.model && x.backend === m.backend)
+  );
+  const shownModels = showAllModels ? [...primaryModels, ...secondaryModels] : primaryModels;
+
   return (
     <div>
       <div className="mb-4 flex items-center gap-3">
@@ -255,7 +266,7 @@ export function CharacterDetail({
             boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
           }}
         >
-          <ArrowLeft size={14} />
+          <X size={15} aria-hidden="true" />
           {t.detail.back}
         </button>
         <span className="text-[13px] text-[var(--kt-text-mute)]">
@@ -422,7 +433,7 @@ export function CharacterDetail({
           {/* 후보 수가 고정이 아니다(원본에 적어 늘릴 수 있다) — 한 줄로 두면
               넣는 순간 오른쪽이 잘리므로 접히게 둔다. */}
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {models.map((m) => {
+            {shownModels.map((m, index) => {
               const on = model === m.model && backend === m.backend;
               return (
                 <button
@@ -440,13 +451,24 @@ export function CharacterDetail({
                   }}
                 >
                   {m.label}
+                  {on ? ` · ${t.detail.modelCurrent}` : index === 0 ? ` · ${t.detail.modelRecommended}` : ''}
                 </button>
               );
             })}
+            {!showAllModels && secondaryModels.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAllModels(true)}
+                className="min-h-[40px] px-3 py-1.5 text-[13px] text-[var(--kt-text-dim)]"
+              >
+                <ChevronDown aria-hidden="true" className="mr-1 inline h-4 w-4 align-middle" />
+                {t.detail.modelMore({ count: secondaryModels.length })}
+              </button>
+            )}
           </div>
           {/* 저장된 값이 후보 어디에도 없으면 원본에서 손으로 적은 커스텀이다.
               이 줄이 없으면 아무 칸도 안 켜져 "설정 안 됨"으로 읽힌다. */}
-          {!models.some((m) => model === m.model && backend === m.backend) && (
+          {!currentChoice && (
             <p className="mt-1.5 text-[12px] text-[var(--kt-text-mute)]">
               {t.detail.modelCustom({
                 value: [model, backend && `${backend}`].filter(Boolean).join(' · '),

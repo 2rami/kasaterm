@@ -44,7 +44,7 @@ function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
           minWidth: 13, height: 13, padding: '0 2px',
           boxSizing: 'border-box',
           background: 'var(--cth-coral)',
-          color: '#fff',
+          color: 'var(--cth-on-coral)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 8, fontWeight: 700,
           borderRadius: 999,
           lineHeight: '13px', textAlign: 'center',
@@ -79,21 +79,6 @@ function ClassroomIcon() {
       <rect style={stroke} x="2" y="3" width="12" height="10" rx="1.5" />
       <circle style={stroke} cx="5.6" cy="6.4" r="1.1" />
       <path style={stroke} d="M2.6 11.2 6 8.4l2.4 1.9 2-1.5 3 2.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-function SunIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16">
-      <circle cx="8" cy="8" r="3" fill="currentColor" />
-      <path style={stroke} d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3.05 3.05l1.13 1.13M11.82 11.82l1.13 1.13M12.95 3.05l-1.13 1.13M4.18 11.82l-1.13 1.13" />
-    </svg>
-  );
-}
-function MoonIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16">
-      <path style={stroke} d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5Z" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -143,9 +128,6 @@ function UsagePill({ label, pct, resetsAt, stale }: { label: string; pct: number
 export interface TitleBarProps {
   /** claude oauth 한도 — 본문 + 그 값이 지금 것인지(stale) + 어느 계정 것인지. */
   usage?: { usage: ClaudeUsage; stale: boolean; accountDir: string } | null;
-  /** 현재 테마 — 태양/달 버튼 표시. */
-  theme?: 'light' | 'dark';
-  onToggleTheme?: () => void;
   /** 좌측 방·학생 / 우측 업무 패널 팝오버 토글. */
   onToggleLeft?: () => void;
   onToggleRight?: () => void;
@@ -160,7 +142,7 @@ export interface TitleBarProps {
   onFocus?: () => void;
 }
 
-export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, onToggleRight, leftOpen, rightOpen, leftBadge = 0, classroom, onToggleClassroom, onFocus }: TitleBarProps) {
+export function TitleBar({ usage, onToggleLeft, onToggleRight, leftOpen, rightOpen, leftBadge = 0, classroom, onToggleClassroom, onFocus }: TitleBarProps) {
   const isPhone = useIsPhone();
   const divider = <div style={{ width: 1, height: 16, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
   const pressure = usagePressure(usage?.usage ?? null);
@@ -184,13 +166,12 @@ export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, 
 
       <div style={{ flex: 1 }} />
 
-      {/* 우측 — 사용량·테마·업무·교실·집중 */}
+      {/* 우측 — 사용량·업무·교실·집중. 색은 터미널 런타임 팔레트를 그대로 따른다. */}
       {/* 창을 하나만 — **가장 먼저 닫히는** 것. 전에는 five_hour·seven_day 를 각각
           그렸는데 oauth/usage 는 seven_day 를 안 주고(limits[] 로 옮겨 갔다) five_hour
           는 세 계정 모두 0 이라, 실제로는 주간 95% 인데 pill 이 「5h 0%」 하나만
           떴다(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). */}
       {pressure && <UsagePill label={pressure.label} pct={pressure.pct} resetsAt={pressure.resetsAt} stale={usage?.stale} />}
-      <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
       <IconBtn title="업무·소스 컨트롤·스케줄" active={rightOpen} onClick={onToggleRight}><TasksIcon /></IconBtn>
       <IconBtn title={classroom ? '대화 보기로' : '교실(캐릭터) 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>
       {divider}

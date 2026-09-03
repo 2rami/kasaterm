@@ -200,7 +200,7 @@ function ClassroomCharacter(
             : '0 2px 8px rgba(21, 41, 74, 0.14)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: unconfirmed ? 800 : 500, lineHeight: 1.4,
           // 교실 바닥 위 고정 흰 말풍선 — 다크에서도 흰색이라 텍스트는 고정 어두운색으로.
-          color: unconfirmed ? '#fff' : '#15294A', textAlign: 'center',
+          color: unconfirmed ? 'var(--cth-on-coral)' : '#15294A', textAlign: 'center',
           whiteSpace: 'normal', wordBreak: 'break-word',
           animation: unconfirmed ? 'schale-glyph-pulse 1.1s ease-in-out infinite' : undefined,
         }}>
@@ -283,6 +283,8 @@ export interface ClassroomViewProps {
   cafe?: CafeSpot[];
   /** 빈 자리 클릭 시 — 학생 부르기(멀리 있는 버튼 대신 빈 책상에서 바로 소환). */
   onAdd?: () => void;
+  onRefresh?: () => void;
+  emptyState?: 'loading' | 'ready' | 'error';
   /** 클릭으로 선택된 학생 — 교실에서 글로우 강조 + 방향키로 직접 이동(거노). */
   selectedId?: string | null;
 }
@@ -322,7 +324,7 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
 
 // 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
 // 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
-export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, selectedId }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, onRefresh, emptyState = 'ready', selectedId }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
   const agents = agentsProp ?? storeAgents;
@@ -350,21 +352,32 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
     }}>
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
-      {/* 빈 교실(첫 부팅, 첫 학생 자동 스폰 전) — 화면 어두워지며 로딩 스피너만(거노). */}
+      {/* 빈 교실은 로딩·정상 빈값·오류를 가른다. 빈 배열 하나로 합치면 영구 spinner다. */}
       {sorted.length === 0 && (
         <div style={{
           position: 'absolute', inset: 0, zIndex: 9999,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18,
           background: 'rgba(12, 19, 38, 0.58)', backdropFilter: 'blur(2px)',
         }}>
-          <div style={{
-            width: 46, height: 46, borderRadius: '50%',
-            border: '4px solid rgba(255,255,255,0.22)', borderTopColor: '#fff',
-            animation: 'schale-spin 0.8s linear infinite',
-          }} />
-          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 14, fontWeight: 600, color: '#fff', letterSpacing: 0.3 }}>
-            아로나 오는 중…
-          </div>
+          {emptyState === 'loading' ? (
+            <>
+              <div className="cth-spinner" />
+              <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 14, fontWeight: 600, color: '#fff' }}>학생을 확인하는 중…</div>
+            </>
+          ) : (
+            <>
+              <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0M19 4v5M16.5 6.5h5" />
+              </svg>
+              <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 15, fontWeight: 700, color: '#fff' }}>
+                {emptyState === 'error' ? '학생 목록을 불러오지 못했어요' : '아직 이 방에 학생이 없어요'}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="cth-empty-action" onClick={onAdd}>학생 부르기</button>
+                <button className="cth-empty-action" onClick={onRefresh}>새로고침</button>
+              </div>
+            </>
+          )}
         </div>
       )}
 

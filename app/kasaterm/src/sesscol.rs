@@ -309,6 +309,21 @@ pub(crate) fn draw_sessions_col(
                 italic: false,
             },
         );
+        g.draw_text(
+            x0,
+            body_top + 34.0,
+            if sc.scope_all {
+                "+ 새 방에서 claude나 codex를 시작하면 기록이 생겨요"
+            } else {
+                "전체를 눌러 다른 방 기록도 확인하세요"
+            },
+            gpu::DrawOpts {
+                font_size: 10.5,
+                color: theme::text_dim(),
+                bold: false,
+                italic: false,
+            },
+        );
         return;
     }
 

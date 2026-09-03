@@ -71,7 +71,7 @@ export function GitTab() {
         {(!!st.insertions || !!st.deletions) && (
           <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10 }}>
             <span style={{ color: 'var(--cth-mint)' }}>+{st.insertions ?? 0}</span>{' '}
-            <span style={{ color: 'var(--cth-coral)' }}>−{st.deletions ?? 0}</span>
+            <span style={{ color: 'var(--cth-coral-text)' }}>−{st.deletions ?? 0}</span>
           </span>
         )}
       </div>

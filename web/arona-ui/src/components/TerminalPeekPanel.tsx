@@ -2124,7 +2124,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   {progress != null && (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 140 }}>
                       <span style={{ position: 'relative', flex: 1, height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
-                        <span style={{ position: 'absolute', inset: 0, width: `${progress}%`, background: 'linear-gradient(90deg, var(--cth-sky-light), var(--cth-sky))', borderRadius: 999, transition: 'width .4s cubic-bezier(0.22,1,0.36,1)' }} />
+                        <span style={{ position: 'absolute', inset: 0, background: 'linear-gradient(90deg, var(--cth-sky-light), var(--cth-sky))', borderRadius: 999, transform: `scaleX(${progress / 100})`, transformOrigin: 'left', transition: 'transform .4s cubic-bezier(0.22,1,0.36,1)' }} />
                       </span>
                       <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', flexShrink: 0 }}>{progress}%</span>
                     </span>
@@ -2178,7 +2178,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); setNewMsg(false); }} style={{
             pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
             padding: '7px 14px', borderRadius: 999,
-            background: 'var(--cth-sky)', color: '#fff', border: 'none',
+            background: 'var(--cth-sky)', color: 'var(--cth-on-sky)', border: 'none',
             boxShadow: '0 3px 12px rgba(21, 41, 74, 0.22)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
           }}>
@@ -2290,7 +2290,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               <path d="M8 13.5 2.5 8a3 3 0 0 1 4.2-4.2L8 5l1.3-1.2A3 3 0 0 1 13.5 8L8 13.5Z" fill="var(--cth-coral)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" />
             </svg>
             <div title={`컨텍스트 사용량 ${pct}%`} style={{ position: 'relative', minWidth: 40, maxWidth: 96, flex: '0 1 96px', height: 8, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, background: 'linear-gradient(90deg,#FF8FB1,#FF6B6B)', borderRadius: 999, transition: 'width .5s cubic-bezier(0.22,1,0.36,1)' }} />
+              <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(90deg,#FF8FB1,#FF6B6B)', borderRadius: 999, transform: `scaleX(${pct / 100})`, transformOrigin: 'left', transition: 'transform .5s cubic-bezier(0.22,1,0.36,1)' }} />
             </div>
             <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap' }}>{pct}%</span>
             {/* 재화 — 누적 입력토큰·비용 */}
@@ -2433,7 +2433,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             >현재 터미널에 입력</button>
           </div>
           {flash === 'ok' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-mint)' }}>터미널에 입력했어요 — 엔터로 실행하세요</div>}
-          {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
+          {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral-text)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
         </div>
       ) : isSub ? (
         // 서브에이전트 대화는 읽기 전용.
@@ -2459,7 +2459,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             {confirm.sub && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', lineHeight: 1.5, marginBottom: 16 }}>{confirm.sub}</div>}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setConfirm(null)} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600, padding: '7px 14px', border: '1px solid var(--cth-cream-200)', borderRadius: 9, cursor: 'pointer', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-500)' }}>취소</button>
-              <button onClick={() => { const c = confirm; setConfirm(null); c.onYes(); }} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700, padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer', background: confirm.danger ? 'var(--cth-coral)' : 'var(--cth-sky)', color: '#fff' }}>{confirm.yes}</button>
+              <button onClick={() => { const c = confirm; setConfirm(null); c.onYes(); }} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700, padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer', background: confirm.danger ? 'var(--cth-coral)' : 'var(--cth-sky)', color: confirm.danger ? 'var(--cth-on-coral)' : '#fff' }}>{confirm.yes}</button>
             </div>
           </div>
         </div>
