@@ -2347,6 +2347,33 @@ impl ApplicationHandler<UserEvent> for App {
         let want_tmux = std::env::var("KASATERM_BACKEND")
             .map(|v| v.eq_ignore_ascii_case("tmux"))
             .unwrap_or(false);
+        // Chrome-style session restore: if the last run left a saved layout with
+        // at least one claude pane, offer to reopen it (크롬 "복원하시겠습니까?")
+        // instead of silently starting fresh. The blank session start_pty spawns
+        // below is the "새로 시작" fallback that stays if the user declines;
+        // 복원 tears it down and rebuilds. Tmux backend manages its own restore,
+        // so only the direct-PTY path prompts.
+        // 검증 실행은 저장 세션을 안 읽는다 — 복원 대화상자가 캡처를 통째로
+        // 덮어서 정작 봐야 할 화면이 안 보였고(실측 2026-08-06 좁은 창 촬영), 실수로
+        // "복원"이 눌리면 그 인스턴스가 14 pane 을 열어 셸을 무더기로 띄운다.
+        // 저장하지 않는 실행이 읽지도 않는 것이 짝이 맞다(`save_window_frame` 가드).
+        //
+        // 저장본은 첫 pane 을 띄우기 **전에** 읽는다. 첫 pane 도 스폰 때 명단에서
+        // 이름을 뽑는데, 그것이 저장본의 학생을 집으면 복원되는 자리가 「이미 쓰는
+        // 중」으로 밀려 다른 학생이 된다 — 2026-09-03 실측: 재시작 한 번에 방3
+        // 호시노 자리가 모모이가 됐고, 호시노는 그 첫 빈 셸이 집고 있었다. 복원
+        // 안의 예약(`restore_session_state`)은 그보다 늦어 이 첫 pane 을 못 막는다.
+        // 그래서 저장본의 학생을 여기서 먼저 예약한다 — 복원이 끝나며 걷고, 「새로
+        // 시작」·닫기는 `restore_dialog_pick` 이 푼다.
+        // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
+        // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
+        let saved = (!want_tmux && !crate::verification_run())
+            .then(crate::socket::read_session_state)
+            .flatten()
+            .filter(|s| App::count_panes(s) > 0);
+        if let Some(s) = &saved {
+            self.reserve_saved_characters(s);
+        }
         let backend_result = if want_tmux {
             self.start_tmux()
         } else {
@@ -2360,24 +2387,8 @@ impl ApplicationHandler<UserEvent> for App {
         if crate::onboarding::launch_pending() && self.open_settings_web_window(event_loop, None) {
             crate::onboarding::mark_opened();
         }
-        // Chrome-style session restore: if the last run left a saved layout with
-        // at least one claude pane, offer to reopen it (크롬 "복원하시겠습니까?")
-        // instead of silently starting fresh. The blank session start_pty just
-        // spawned is the "새로 시작" fallback that stays if the user declines;
-        // 복원 tears it down and rebuilds. Tmux backend manages its own restore,
-        // so only the direct-PTY path prompts.
-        // 검증 실행은 거노의 저장 세션을 안 읽는다 — 복원 대화상자가 캡처를 통째로
-        // 덮어서 정작 봐야 할 화면이 안 보였고(실측 2026-08-06 좁은 창 촬영), 실수로
-        // "복원"이 눌리면 그 인스턴스가 14 pane 을 열어 셸을 무더기로 띄운다.
-        // 저장하지 않는 실행이 읽지도 않는 것이 짝이 맞다(`save_window_frame` 가드).
-        if !want_tmux && !crate::verification_run() {
-            if let Some(state) = crate::socket::read_session_state() {
-                // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
-                // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
-                if App::count_panes(&state) > 0 {
-                    self.restore_prompt = Some(state);
-                }
-            }
+        if let Some(state) = saved {
+            self.restore_prompt = Some(state);
         }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
         // 둘 다 준비됨. 빈손이면 무비용.
@@ -7239,9 +7250,14 @@ impl App {
                     std::time::Instant::now() + std::time::Duration::from_millis(90),
                 ));
             }
-            RestoreBtn::Fresh => crate::socket::clear_session_state(),
+            // 복원을 안 하면 부팅 때 걸어 둔 학생 예약을 푼다 — 두면 새로 쪼개는
+            // pane 이 그 학생들을 영영 못 쓴다(예약의 근거는 `resumed` 의 주석).
+            RestoreBtn::Fresh => {
+                crate::socket::clear_session_state();
+                self.release_reserved_characters();
+            }
             // 저장본을 지우지 않는다 — 닫기는 「안 고름」이지 「버림」이 아니다.
-            RestoreBtn::Dismiss => {}
+            RestoreBtn::Dismiss => self.release_reserved_characters(),
         }
     }
 }

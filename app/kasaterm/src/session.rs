@@ -5637,6 +5637,80 @@ impl App {
     /// `%` 로 시작하므로 이 앞머리와는 절대 겹치지 않는다.
     const RESERVE_KEY: &'static str = "\u{0}restore-reserve-";
 
+    /// 저장본에서 되살릴 세션의 창 목록과 활성 창 번호. 복원과 학생 예약이 **같은
+    /// 창을** 보도록 한 곳에 둔다 — 둘이 다른 세션을 읽으면 예약이 엉뚱한 이름을
+    /// 지키고 정작 되살아나는 학생은 밀린다.
+    fn saved_windows(state: &serde_json::Value) -> Option<(&[serde_json::Value], usize)> {
+        let sessions = state.get("sessions")?.as_array()?;
+        let active = state
+            .get("active_session")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        let session = sessions.get(active).or_else(|| sessions.first())?;
+        let windows = session.get("windows")?.as_array()?;
+        let active_window = session
+            .get("active_window")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        Some((windows.as_slice(), active_window))
+    }
+
+    /// 저장본의 leaf 가 쥐고 있던 학생 이름 — 트리 순서대로, 빈 이름은 뺀다.
+    pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
+        fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
+            if let Some(leaf) = n.get("leaf") {
+                if let Some(c) = leaf
+                    .get("character")
+                    .and_then(|c| c.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(c.to_string());
+                }
+                return;
+            }
+            if let Some(sp) = n.get("split") {
+                if let Some(a) = sp.get("a") {
+                    walk(a, out);
+                }
+                if let Some(b) = sp.get("b") {
+                    walk(b, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if let Some((windows, _)) = Self::saved_windows(state) {
+            for w in windows {
+                walk(w, &mut out);
+            }
+        }
+        out
+    }
+
+    /// 저장본의 학생을 전부 「쓰는 중」으로 걸어 둔다. `assign_character_env` 의
+    /// 중복 회피는 `ws.pane_character` 의 **값**을 보므로 키가 실제 pane 이 아니어도
+    /// 되고, 그래서 이 예약 키는 pane 번호와 겹칠 수 없는 꼴이다.
+    ///
+    /// 부팅(`resumed`)이 첫 pane 을 띄우기 전에 부르고, 복원이 한 번 더 부른다(같은
+    /// 키에 같은 이름이라 두 번 걸어도 하나다). 걷는 쪽은
+    /// `release_reserved_characters` — 복원 끝, 「새로 시작」, 닫기.
+    pub(crate) fn reserve_saved_characters(&self, state: &serde_json::Value) {
+        let mut ws = self.ws.lock().unwrap();
+        for (i, c) in Self::saved_characters(state).into_iter().enumerate() {
+            ws.pane_character
+                .insert(format!("{}{i}", Self::RESERVE_KEY), c);
+        }
+    }
+
+    /// 예약을 걷는다. 남겨 두면 그 이름들이 영영 taken 으로 잡혀, 앞으로 새로
+    /// 쪼개는 pane 이 그 학생을 못 쓴다.
+    pub(crate) fn release_reserved_characters(&self) {
+        self.ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .retain(|k, _| !k.starts_with(Self::RESERVE_KEY));
+    }
+
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
         // 복원 직전 저장본을 곁에 남긴다 — 복원에서 창이 빠졌을 때(2026-08-30
         // 「재시작했는데 세션이 없어진 것 같다」, %0 미도리가 소리 없이 빠짐)
@@ -5673,23 +5747,12 @@ impl App {
                 }
             }
         }
-        let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) else {
+        // 저장본이 형식 밖이면 부팅 때 걸어 둔 예약도 여기서 푼다 — 안 풀면 복원은
+        // 안 됐는데 그 이름들만 영영 taken 으로 남는다.
+        let Some((windows, active_window)) = Self::saved_windows(state) else {
+            self.release_reserved_characters();
             return;
         };
-        let active = state
-            .get("active_session")
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0) as usize;
-        let Some(session) = sessions.get(active).or_else(|| sessions.first()) else {
-            return;
-        };
-        let Some(windows) = session.get("windows").and_then(|w| w.as_array()) else {
-            return;
-        };
-        let active_window = session
-            .get("active_window")
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0) as usize;
         // Tear down the blank session start_pty just spawned: drop its PTY and
         // clear its pane state so the rebuilt layout starts from an empty slate.
         // The socket server (start_socket_pty) stays up — only panes are rebuilt.
@@ -5709,44 +5772,11 @@ impl App {
         // (2026-08-28 실측: 재시작 한 번에 우사기 자리가 리오가 됐고, 정작 우사기는
         // 어느 자리에도 없었다 — 밀어낸 쪽이 그 뒤 사라진 것이다).
         //
-        // 그래서 되살릴 학생을 **전부 먼저** 예약한다. `assign_character_env` 의
-        // 중복 회피는 `ws.pane_character` 의 **값**을 보므로, 키가 실제 pane 이
-        // 아니어도 된다 — 예약 키를 넣어 두면 새 배정이 그 이름을 피해 간다.
-        // 복원이 끝나면 예약은 걷는다(아래).
-        let reserved: Vec<String> = {
-            fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
-                if let Some(leaf) = n.get("leaf") {
-                    if let Some(c) = leaf
-                        .get("character")
-                        .and_then(|c| c.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        out.push(c.to_string());
-                    }
-                    return;
-                }
-                if let Some(sp) = n.get("split") {
-                    if let Some(a) = sp.get("a") {
-                        walk(a, out);
-                    }
-                    if let Some(b) = sp.get("b") {
-                        walk(b, out);
-                    }
-                }
-            }
-            let mut out = Vec::new();
-            for w in windows {
-                walk(w, &mut out);
-            }
-            out
-        };
-        {
-            let mut ws = self.ws.lock().unwrap();
-            for (i, c) in reserved.iter().enumerate() {
-                ws.pane_character
-                    .insert(format!("{}{i}", Self::RESERVE_KEY), c.clone());
-            }
-        }
+        // 그래서 되살릴 학생을 **전부 먼저** 예약한다. 부팅(`resumed`)이 첫 pane 을
+        // 띄우기 전에 이미 같은 예약을 걸어 두는데(그 첫 pane 이 저장본의 이름을
+        // 집던 2026-09-03 사고), 복원이 그 길 밖에서 불릴 수도 있어 여기서 한 번 더
+        // 건다 — 같은 키·같은 이름이라 겹쳐도 하나다. 복원이 끝나면 걷는다(아래).
+        self.reserve_saved_characters(state);
         let (cols, rows) = self.window_cells();
         for (j, w) in windows.iter().enumerate() {
             let tree = self.restore_window_layout(w, cols, rows);
@@ -5790,13 +5820,7 @@ impl App {
         {
             self.ws.lock().unwrap().active_pane = Some(first);
         }
-        // 예약을 걷는다. 남겨 두면 그 이름들이 영영 taken 으로 잡혀, 앞으로 새로
-        // 쪼개는 pane 이 그 학생을 못 쓴다.
-        {
-            let mut ws = self.ws.lock().unwrap();
-            ws.pane_character
-                .retain(|k, _| !k.starts_with(Self::RESERVE_KEY));
-        }
+        self.release_reserved_characters();
         // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴
         // 것은 화면에 없는 게 그 사람이 고른 상태고, 켜자마자 우르르 튀어나오면
         // 숨긴 의미가 없다. 목록에 서 있다가 사용자가 부를 때 뜬다.
@@ -7663,6 +7687,29 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 부팅 예약과 복원이 같은 목록을 봐야 한다 — 되살릴 세션의 leaf 를 트리 깊이와
+    /// 무관하게 순서대로 모으고, 빈 이름과 다른 세션은 건너뛴다.
+    #[test]
+    fn saved_characters_walks_active_session_leaves() {
+        let state = serde_json::json!({
+            "active_session": 1,
+            "sessions": [
+                {"windows": [{"leaf": {"character": "다른세션"}}]},
+                {"windows": [
+                    {"split": {"a": {"leaf": {"character": "호시노"}},
+                               "b": {"split": {"a": {"leaf": {"character": ""}},
+                                               "b": {"leaf": {"character": "세이아"}}}}}},
+                    {"leaf": {"character": "유즈"}}
+                ]}
+            ]
+        });
+        assert_eq!(
+            super::App::saved_characters(&state),
+            vec!["호시노", "세이아", "유즈"]
+        );
+        assert!(super::App::saved_characters(&serde_json::json!({})).is_empty());
+    }
+
     use super::{
         account_restart_busy, account_switch_confirm_text, account_switch_focused_tab,
         account_switch_impact, editor_command_line, git_repo_root, next_free_pane_id,
