@@ -5913,6 +5913,49 @@ fn scrub_inherited_claude_markers() {
 /// 자기설치 로그조차 안 갱신된다). "왜 꺼졌는지" 를 알 유일한 증거를 남긴 뒤
 /// 기본 훅에 넘긴다. GUI 스레드 패닉(즉사)과 작업 스레드 패닉(Mutex poison 으로
 /// 지연 폭발) 둘 다 여기를 지나므로, 죽음의 첫 원인이 항상 파일 맨 위에 남는다.
+/// 설치 앱의 stderr 를 파일로 남긴다 — `$TMPDIR/kasaterm-app.log`(패닉 로그 옆).
+///
+/// Finder 로 뜬 .app 의 stderr 는 어디에도 안 닿는다. 그래서 `[sweep]`·복원처럼
+/// pane 이 화면에서 빠지는 순간을 적는 eprintln 이 전부 허공에 흩어졌고, 2026-09-03
+/// 하루에 세 번(아침 %5·%2, 저녁 우사기) 「재시작하니 pane 이 사라졌다」를 원인
+/// 미확정으로 남겼다. 터미널에 붙어 있으면(`cargo run`) 그대로 둔다. 5MB 를 넘으면
+/// 부팅 때 한 번 비운다 — 최근 부팅 몇 번이 남는 쪽이 디스크보다 값이 있다.
+#[cfg(target_os = "macos")]
+fn install_stderr_log() {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: isatty 는 fd 번호 하나를 읽기만 한다.
+    if unsafe { libc::isatty(2) } == 1 {
+        return;
+    }
+    let log = std::env::temp_dir().join("kasaterm-app.log");
+    if std::fs::metadata(&log)
+        .map(|m| m.len() > 5 * 1024 * 1024)
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(&log);
+    }
+    let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    else {
+        return;
+    };
+    // SAFETY: f 는 열린 파일이고 dup2 는 fd 2 를 그 파일의 복제로 바꾼다. f 가 여기서
+    // 닫혀도 fd 2 는 독립된 복제라 남는다.
+    unsafe {
+        libc::dup2(f.as_raw_fd(), 2);
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    eprintln!("==== boot epoch={ts} pid={} ====", std::process::id());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_stderr_log() {}
+
 fn install_panic_logger() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -5942,6 +5985,7 @@ fn install_panic_logger() {
 
 fn main() -> Result<(), Box<dyn Error>> {
     install_panic_logger();
+    install_stderr_log();
     scrub_inherited_claude_markers();
     // `open`(1) doesn't forward shell env to the launched .app, but the
     // .app's screen-recording TCC permission only applies when launched
