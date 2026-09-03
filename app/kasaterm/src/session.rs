@@ -6553,6 +6553,7 @@ impl App {
             self.pane_status_pub.clone(),
             self.bg_agents.clone(),
         ));
+        backend.start_session_discovery();
         // GUI 쪽에도 핸들 보관 — ResumeSession 이 attach/재개 pane 의 transcript 를
         // bind hook 없이 즉석 확정(bind_transcript)할 때 쓴다.
         self.socket_backend = Some(backend.clone());
