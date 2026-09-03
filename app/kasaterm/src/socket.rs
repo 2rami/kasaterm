@@ -235,6 +235,10 @@ pub struct PtyBackend {
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
+    /// surface_id → 마지막으로 결속을 확인한 Codex pid·시각. fresh Codex는 argv에
+    /// UUID가 없어 실제 열린 파일을 봐야 한다. pid 교체는 즉시 재결속하고, 같은 TUI
+    /// 안에서 thread를 바꾸는 경우도 있어 같은 pid도 10초마다 다시 확인한다.
+    codex_bound_pids: Arc<Mutex<HashMap<String, (u32, std::time::Instant)>>>,
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
@@ -458,6 +462,7 @@ impl PtyBackend {
             attention,
             hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
+            codex_bound_pids: Arc::new(Mutex::new(HashMap::new())),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             reported_ctx: Arc::new(Mutex::new(HashMap::new())),
@@ -470,6 +475,22 @@ impl PtyBackend {
             view_panes: Arc::new(Mutex::new(HashSet::new())),
             done_reports: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// board/CLI 요청이 한 번도 없어도 Codex UUID를 저장할 수 있게 독립 폴러를 둔다.
+    /// 파일·프로세스 조회는 이 스레드에서만 하고 GUI에는 SocketSessionBound 이벤트만
+    /// 보내므로, 자동 저장 프레임이 lsof/SQLite를 기다리지 않는다.
+    pub(crate) fn start_session_discovery(self: &Arc<Self>) {
+        let backend = Arc::downgrade(self);
+        std::thread::spawn(move || loop {
+            let Some(backend) = backend.upgrade() else {
+                break;
+            };
+            let live = backend.live_surfaces();
+            backend.discover_unbound(&live);
+            drop(backend);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
     }
 
     /// pane 셸 pid 의 라이브 cwd(pid_cwd) — 2s 캐시. cd 하면 곧 반영, lsof 폭주 방지.
@@ -503,8 +524,8 @@ impl PtyBackend {
             .unwrap_or_default()
     }
 
-    /// hook-free 발견: bound 안 된 open pane 중 claude 실행 중인 것을 셸 pid 로
-    /// 추적해 transcript 를 자동 bind 한다(claude 훅 없이도 board 가 학생을 본다).
+    /// hook-free 발견: open pane의 Claude/Codex 프로세스를 셸 pid로 추적해 transcript를
+    /// 자동 bind 한다. Codex는 훅 신뢰를 우회하지 않으므로 이 경로가 UUID의 정본이다.
     /// 락을 잡은 채 ps/lsof 를 호출하지 않는다(GUI 멈춤 lock-bug 회피) — pid 스냅샷·
     /// 발견은 락 밖, insert 만 짧게 락. 2s 스로틀로 폴마다 재스캔 안 함.
     fn discover_unbound(&self, live: &HashSet<String>) {
@@ -529,18 +550,61 @@ impl PtyBackend {
                 .cloned()
                 .collect()
         };
-        if unbound.is_empty() {
-            return;
-        }
+        let table = kasa_pty::process_table_shared();
+        let mut live_codex = HashSet::new();
         for (id, shell_pid) in self.query_pane_pids() {
-            if !unbound.contains(&id) {
-                continue;
-            }
-            if let Some(path) = discover_transcript(&id, shell_pid) {
-                self.publish_transcript_cwd(&id, &path);
-                self.bound.lock().unwrap().insert(id, path);
+            match kasa_pty::agent_pid_for_shell(&table, shell_pid) {
+                Some((kasa_pty::AgentKind::Codex, agent_pid)) => {
+                    live_codex.insert(id.clone());
+                    let already_bound = self
+                        .codex_bound_pids
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .is_some_and(|(seen, at)| {
+                            *seen == agent_pid
+                                && at.elapsed() < std::time::Duration::from_secs(10)
+                        })
+                        && self
+                            .bound
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .is_some_and(|path| path.exists());
+                    if already_bound {
+                        continue;
+                    }
+                    if let Some(path) = discover_codex_rollout(&id, agent_pid) {
+                        let same = self.bound.lock().unwrap().get(&id) == Some(&path);
+                        if same {
+                            self.codex_bound_pids
+                                .lock()
+                                .unwrap()
+                                .insert(id, (agent_pid, std::time::Instant::now()));
+                            continue;
+                        }
+                        if self.bind_transcript(&id, &path.to_string_lossy()).is_ok() {
+                            self.codex_bound_pids
+                                .lock()
+                                .unwrap()
+                                .insert(id, (agent_pid, std::time::Instant::now()));
+                        }
+                    }
+                }
+                Some((kasa_pty::AgentKind::Claude, _)) if unbound.contains(&id) => {
+                    if let Some(path) = discover_transcript(&id, shell_pid) {
+                        // insert만 하면 board는 보여도 GUI의 pane_claude_sid는 비어
+                        // session.json에 UUID가 안 실린다. 두 상태는 이 관문에서 함께 묶는다.
+                        let _ = self.bind_transcript(&id, &path.to_string_lossy());
+                    }
+                }
+                _ => {}
             }
         }
+        self.codex_bound_pids
+            .lock()
+            .unwrap()
+            .retain(|pane, _| live_codex.contains(pane));
     }
 
     /// bind 된 transcript 의 tail 에서 그 세션의 cwd 를 뽑아 GUI 파일트리 오버라이드로
@@ -549,9 +613,10 @@ impl PtyBackend {
     fn publish_transcript_cwd(&self, surface_id: &str, path: &std::path::Path) {
         let (tail, _) = read_tail(path, 64 * 1024);
         let cwd = tail.lines().rev().find_map(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
-                .ok()?
-                .get("cwd")?
+            let value = serde_json::from_str::<serde_json::Value>(l).ok()?;
+            value
+                .get("cwd")
+                .or_else(|| value.get("payload").and_then(|p| p.get("cwd")))?
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from)
@@ -901,9 +966,8 @@ impl Backend for PtyBackend {
             .map(|k| k.as_str().to_string())
     }
 
-    /// pane → claude session_id(`/pane-tasks` 용) = bound transcript 파일명 stem.
-    /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
-    /// 매핑에 폴백으로 쓴다.
+    /// pane → agent session_id(`/pane-tasks` 용). Claude는 파일명 stem, Codex는
+    /// `rollout-<ts>-<uuid>` 꼬리 UUID다.
     fn agent_cfg(&self) -> Vec<(String, String, String)> {
         self.reported_agent_cfg
             .lock()
@@ -919,12 +983,13 @@ impl Backend for PtyBackend {
         let bound = self.bound.lock().unwrap();
         let mut out: Vec<(String, String)> = Vec::new();
         for pane in &live {
-            if let Some(stem) = bound
-                .get(pane)
-                .and_then(|p| p.file_stem())
-                .and_then(|s| s.to_str())
-            {
-                out.push((pane.clone(), stem.to_string()));
+            if let Some(path) = bound.get(pane) {
+                let sid = codex_sid_from_rollout(path).or_else(|| {
+                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                });
+                if let Some(sid) = sid {
+                    out.push((pane.clone(), sid));
+                }
             }
         }
         Ok(out)
@@ -5671,9 +5736,9 @@ pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
 
 /// 세션 id → codex rollout jsonl. `transcript_path_for_session` 의 codex 판.
 ///
-/// sqlite(`state_5.sqlite` 의 `threads`)에도 같은 정보가 있지만 **파일 탐색으로 간다**:
-/// 워크스페이스에 sqlite 의존성이 없고(넣을 만큼 큰 조회가 아니다), rollout 파일명이
-/// sid 를 그대로 품으며, transcript 파서도 같은 디렉터리를 읽는다 — 정본이 하나로 남는다.
+/// sqlite(`state_5.sqlite` 의 `threads`)에도 같은 정보가 있지만, 이미 UUID를 아는
+/// 복원·이사 경로는 파일명 탐색으로 간다. DB의 rollout_path는 옛 pane 홈 경로로
+/// 남을 수 있어서 이 조회의 정본으로 쓸 수 없다.
 ///
 /// **`~/.codex/sessions` 만 본다.** shim 이 세운 pane 별 CODEX_HOME 은 이 디렉터리를
 /// 심볼릭으로 미러하므로 pane 안에서 만든 세션의 실체도 여기 있다(실측). sqlite 에는
@@ -5682,6 +5747,209 @@ pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
 pub(crate) fn codex_rollout_for_session(sid: &str) -> Option<std::path::PathBuf> {
     let root = kasa_socket::home_dir()?.join(".codex").join("sessions");
     scan_codex_sessions(&root, sid)
+}
+
+/// hook 없이 실행 중인 Codex가 어느 root thread를 보고 있는지 알아낸다.
+///
+/// `lsof`가 주는 열린 rollout은 그 pane 프로세스에 정확히 귀속되지만, root가 띄운
+/// subagent rollout도 함께 온다. 신형 Codex는 각 session_meta의 `session_id`에 부모
+/// UUID를 싣기 때문에 그 사슬이 하나의 root로 수렴할 때만 취한다. 구형 로그에는 그 필드가 없어서
+/// `source="cli"`이면서 payload.id가 파일명 UUID인 root만 보조로 인정한다.
+fn codex_root_sid_from_open_rollouts(paths: &[std::path::PathBuf]) -> Option<String> {
+    let mut parents = HashMap::new();
+    let mut legacy_roots: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for path in paths {
+        let Some(path_sid) = codex_sid_from_rollout(path) else {
+            continue;
+        };
+        let Ok(file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let mut line = String::new();
+        if std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut line).is_err() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if payload.get("id").and_then(|v| v.as_str()) != Some(path_sid.as_str()) {
+            continue;
+        }
+        if let Some(sid) = payload
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|sid| is_uuid(sid))
+        {
+            parents.insert(path_sid, sid.to_string());
+            continue;
+        }
+        let root = payload.get("source").and_then(|v| v.as_str()) == Some("cli");
+        if root {
+            let mtime = path
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            legacy_roots.push((mtime, path_sid));
+        }
+    }
+    if !parents.is_empty() {
+        let mut roots = HashSet::new();
+        for id in parents.keys() {
+            let mut current = id.as_str();
+            let mut seen = HashSet::new();
+            for _ in 0..=parents.len() {
+                if !seen.insert(current.to_string()) {
+                    break;
+                }
+                let Some(parent) = parents.get(current) else {
+                    break;
+                };
+                if parent == current {
+                    break;
+                }
+                current = parent;
+            }
+            roots.insert(current.to_string());
+        }
+        return (roots.len() == 1).then(|| roots.into_iter().next()).flatten();
+    }
+    legacy_roots.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    legacy_roots.into_iter().next().map(|(_, sid)| sid)
+}
+
+#[cfg(unix)]
+fn codex_open_rollouts(pid: u32) -> Vec<std::path::PathBuf> {
+    let Ok(out) = crate::proc::command("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(std::path::PathBuf::from)
+        .filter(|path| codex_sid_from_rollout(path).is_some())
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn codex_open_rollouts(_pid: u32) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+fn codex_resume_id_from_argv(argv: &str) -> Option<String> {
+    let tokens: Vec<&str> = argv.split_whitespace().collect();
+    let at = tokens.iter().position(|token| *token == "resume")?;
+    tokens[at + 1..]
+        .iter()
+        .copied()
+        .find(|token| is_uuid(token))
+        .map(str::to_string)
+}
+
+fn normalized_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        value.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
+
+fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let path = normalized_path(path);
+    let root = normalized_path(root).trim_end_matches('/').to_string();
+    path == root || path.strip_prefix(&root).is_some_and(|tail| tail.starts_with('/'))
+}
+
+/// `lsof`가 없는 플랫폼/환경의 보조 경로. fresh thread의 rollout_path에는 현재
+/// pane 전용 CODEX_HOME이 남으므로 같은 cwd의 다른 pane을 섞지 않는다. resume 뒤
+/// 이 열이 옛 shim 경로로 남는 경우가 있어 Unix에서는 반드시 lsof를 먼저 쓴다.
+fn codex_rollout_from_state_db(pane_id: &str) -> Option<std::path::PathBuf> {
+    let shim = std::env::var_os("KASATERM_TMUX_SHIM_DIR").map(std::path::PathBuf::from)?;
+    let db = kasa_socket::home_dir()?.join(".codex/state_5.sqlite");
+    codex_rollout_from_state_db_at(&db, &shim, pane_id)
+}
+
+fn codex_rollout_from_state_db_at(
+    db: &std::path::Path,
+    shim: &std::path::Path,
+    pane_id: &str,
+) -> Option<std::path::PathBuf> {
+    let raw_home = shim.join(format!("codex-home-{pane_id}"));
+    let canonical_home = std::fs::canonicalize(&raw_home).ok();
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(50));
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, rollout_path, updated_at FROM threads \
+             WHERE source = 'cli' AND archived = 0 \
+             ORDER BY updated_at DESC, id DESC",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    for row in rows.flatten() {
+        let (id, raw_path, updated_at) = row;
+        let path = std::path::PathBuf::from(raw_path);
+        let in_home = path_is_under(&path, &raw_home)
+            || canonical_home.as_ref().is_some_and(|home| path_is_under(&path, home));
+        // 같은 pane에서 직전에 끝난 root도 같은 홈을 가리킨다. 새 프로세스의 row가
+        // 생기기 전 그 옛 대화를 바인드하고 pid를 캐시하면 이후 영원히 안 고쳐진다.
+        let just_touched = (0..=60).contains(&now.saturating_sub(updated_at));
+        if in_home
+            && just_touched
+            && path.exists()
+            && codex_sid_from_rollout(&path).as_deref() == Some(id.as_str())
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn discover_codex_rollout(pane_id: &str, agent_pid: u32) -> Option<std::path::PathBuf> {
+    // resume은 argv 자체가 pane별 정답이라 파일 목록이나 DB를 볼 이유가 없다.
+    if let Some(sid) = kasa_pty::process_cmdline(agent_pid)
+        .as_deref()
+        .and_then(codex_resume_id_from_argv)
+    {
+        return codex_rollout_for_session(&sid);
+    }
+    let open = codex_open_rollouts(agent_pid);
+    if !open.is_empty() {
+        let sid = codex_root_sid_from_open_rollouts(&open)?;
+        return open
+            .into_iter()
+            .find(|path| codex_sid_from_rollout(path).as_deref() == Some(sid.as_str()))
+            .or_else(|| codex_rollout_for_session(&sid));
+    }
+    codex_rollout_from_state_db(pane_id)
 }
 
 /// `codex_rollout_for_session` 의 순수 부분 — 루트를 인자로 받아 `$HOME` 없이 테스트한다.
@@ -5875,6 +6143,36 @@ pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std:
 mod codex_session_lookup_tests {
     use super::*;
 
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("kt-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn rollout(
+        home: &std::path::Path,
+        sid: &str,
+        root_sid: &str,
+        source: serde_json::Value,
+    ) -> std::path::PathBuf {
+        let day = home.join("sessions/2026/09/03");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("rollout-2026-09-03T09-36-28-{sid}.jsonl"));
+        let line = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "id": sid,
+                "session_id": root_sid,
+                "cwd": "/same/repo",
+                "source": source,
+            }
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        path
+    }
+
     /// codex 파일명은 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다.
     /// 타임스탬프도 uuid 도 `-` 를 품어 앞에서 세는 방식은 못 쓴다.
     #[test]
@@ -5926,6 +6224,125 @@ mod codex_session_lookup_tests {
         assert_eq!(scan_codex_sessions(&root, ""), None);
         assert_eq!(scan_codex_sessions(&root, "../x"), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_rollouts_converge_subagents_on_their_root_thread() {
+        let root = temp_root("codex-open-root");
+        let root_sid = "01a064ad-3875-7713-a4a8-c9883095ffae";
+        let child_a = "01a064b2-0118-7ca1-86ba-01239cedde5d";
+        let child_b = "01a064b2-1921-76d0-8857-62dd2c052f4a";
+        let paths = vec![
+            rollout(&root, root_sid, root_sid, serde_json::json!("cli")),
+            rollout(
+                &root,
+                child_a,
+                root_sid,
+                serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": root_sid}}}),
+            ),
+            rollout(
+                &root,
+                child_b,
+                child_a,
+                serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": child_a}}}),
+            ),
+        ];
+        assert_eq!(codex_root_sid_from_open_rollouts(&paths).as_deref(), Some(root_sid));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn open_rollouts_refuse_two_root_threads_in_one_process() {
+        let root = temp_root("codex-open-ambiguous");
+        let a = "01a064ad-3875-7713-a4a8-c9883095ffae";
+        let b = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
+        let paths = vec![
+            rollout(&root, a, a, serde_json::json!("cli")),
+            rollout(&root, b, b, serde_json::json!("cli")),
+        ];
+        assert_eq!(codex_root_sid_from_open_rollouts(&paths), None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn state_db_fallback_separates_same_cwd_panes_and_ignores_newer_subagent() {
+        let root = temp_root("codex-state-bind");
+        let shim = root.join("shim");
+        let home_a = shim.join("codex-home-%1");
+        let home_b = shim.join("codex-home-%2");
+        let sid_a = "01a064ad-3875-7713-a4a8-c9883095ffae";
+        let sid_b = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
+        let child = "01a064b2-0118-7ca1-86ba-01239cedde5d";
+        let stale = "01a060e6-fab7-7a60-ba86-276ca01a643f";
+        let path_a = rollout(&home_a, sid_a, sid_a, serde_json::json!("cli"));
+        let path_b = rollout(&home_b, sid_b, sid_b, serde_json::json!("cli"));
+        let stale_path = rollout(&home_a, stale, stale, serde_json::json!("cli"));
+        let child_path = rollout(
+            &home_a,
+            child,
+            sid_a,
+            serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": sid_a}}}),
+        );
+        let db = root.join("state_5.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        let insert = |id: &str, path: &std::path::Path, updated: i64, source: &str| {
+            conn.execute(
+                "INSERT INTO threads(id, rollout_path, updated_at, source, cwd, archived)
+                 VALUES (?1, ?2, ?3, ?4, '/same/repo', 0)",
+                rusqlite::params![id, path.to_string_lossy(), updated, source],
+            )
+            .unwrap();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        insert(sid_a, &path_a, now - 2, "cli");
+        insert(sid_b, &path_b, now - 1, "cli");
+        insert(child, &child_path, now, r#"{"subagent":{}}"#);
+        insert(stale, &stale_path, now - 120, "cli");
+        assert_eq!(
+            codex_rollout_from_state_db_at(&db, &shim, "%1"),
+            Some(path_a)
+        );
+        assert_eq!(
+            codex_rollout_from_state_db_at(&db, &shim, "%2"),
+            Some(path_b)
+        );
+        conn.execute(
+            "DELETE FROM threads WHERE id IN (?1, ?2)",
+            rusqlite::params![sid_a, child],
+        )
+        .unwrap();
+        assert_eq!(
+            codex_rollout_from_state_db_at(&db, &shim, "%1"),
+            None,
+            "새 process row가 생기기 전 옛 thread를 현재 대화로 오인하면 안 됨"
+        );
+        drop(conn);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn resume_argv_returns_only_a_uuid_after_the_subcommand() {
+        let sid = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
+        assert_eq!(
+            codex_resume_id_from_argv(&format!("/bin/codex --flag resume {sid} -m gpt-5.6"))
+                .as_deref(),
+            Some(sid)
+        );
+        assert_eq!(codex_resume_id_from_argv("/bin/codex fresh"), None);
     }
 }
 

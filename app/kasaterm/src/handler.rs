@@ -672,6 +672,10 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.pane_claude_sid.insert(pane.clone(), sid.clone());
+                // UUID가 들어온 사실 자체가 복원 스냅샷 변경이다. 이 표시가 없으면
+                // 직전 autosave가 null을 쓴 뒤 화면 조작이 없는 pane은 다음 저장을
+                // 못 만나, 정확히 찾은 대화를 앱 종료 때 또 놓칠 수 있다.
+                self.session_touched = true;
                 // 재배정 잔재 정리: 이 stem 이 옛 캐릭터로 바인딩돼 있는데 현재 배정이
                 // 다르면(재배정이 stem 을 안 갱신한 자국), 현재 배정을 정본으로 stem 을
                 // 맞춘다. 안 그러면 바로 아래 apply_session_character 가 그 옛 바인딩을

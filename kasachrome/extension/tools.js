@@ -232,6 +232,52 @@ async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, m
   }
 }
 
+// ── 레이아웃툴 ────────────────────────────────────────────────────────────────
+// 화면을 브라우저에서 그대로 만지는 편집기. 사람이 눌러 옮긴 결과를 여기 붙어 있는
+// 에이전트가 그대로 받아 소스를 고친다 — 예전에는 편집기의 「코드에 반영」이 창도 맥락도
+// 없는 클로드를 새로 낳았고, 그 애는 무엇을 하는지 안 보이고 멈출 수도 없었다
+// (2026-09-02 지시: 「카사크롬으로 보고 레이아웃툴로 수정하는 방식으로 가자,
+// 지금 너 세션이면 너가 고치는거지」).
+// 편집기 본체는 여기 사본을 두지 않는다. 그 폴더를 쥔 레이아웃툴 서버에서 그때그때
+// 받아 오므로, 저쪽에서 편집기를 고치면 다음에 켤 때 바로 그것이 붙는다.
+const LT_PORTS = [4300, 4301, 4302, 4303, 4304, 4305]
+const ltLoop = (h) => h === 'localhost' || h === '127.0.0.1' || h === '[::1]'
+
+// 서버가 맡은 곳과 이 탭이 같은 자리인가. 개발서버는 같은 자리를 localhost 로도
+// 127.0.0.1 로도 부르므로 이름이 아니라 포트로 가른다.
+function ltMine(tabUrl, who, port) {
+  // 프록시로 서 있으면 목적지가 짝이고, 폴더를 직접 내주고 있으면 자기 주소가 짝이다
+  const mine = [who.target, `http://localhost:${port}`].filter(Boolean)
+  try {
+    const a = new URL(tabUrl)
+    return mine.some((u) => {
+      const b = new URL(u)
+      if (ltLoop(a.hostname) && ltLoop(b.hostname)) return (a.port || '80') === (b.port || '80')
+      return a.host === b.host
+    })
+  } catch { return false }
+}
+
+async function ltServer(tabUrl) {
+  for (const port of LT_PORTS) {
+    try {
+      // 안 떠 있는 포트는 곧장 튕기지만, 다른 것이 물고 늘어지면 여기서 멎는다
+      const r = await fetch(`http://127.0.0.1:${port}/__layoutool/who`, {
+        cache: 'no-store', signal: AbortSignal.timeout(700),
+      })
+      if (!r.ok) continue
+      const who = await r.json()
+      if (ltMine(tabUrl, who, port)) return { ...who, api: `http://127.0.0.1:${port}` }
+    } catch {}
+  }
+  return null
+}
+
+const ltRun = async (tabId, func, args = []) => {
+  const [r] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func, args })
+  return r?.result
+}
+
 const handlers = {
   async status(_args, ctx = {}) {
     const tabs = await tabsQuery({})
@@ -560,6 +606,60 @@ const handlers = {
   async find({ tabId, query }) {
     const id = await resolveTabId(tabId)
     return await page(id, 'find', { query })
+  },
+
+  async layout({ tabId, on = true }) {
+    const id = await resolveTabId(tabId)
+    if (!on) {
+      await ltRun(id, () => window.__layoutool_toggle?.(false)).catch(() => {})
+      return { tabId: id, on: false }
+    }
+    const tab = await chrome.tabs.get(id)
+    const who = await ltServer(tab.url)
+    if (!who) throw new Error(`이 주소를 맡은 레이아웃툴 서버가 없습니다 (${tab.url}) — 터미널에서 \`layoutool <개발서버 포트> --src <소스 폴더>\` 로 띄운 뒤 다시 부르세요.`)
+    if (!who.src) throw new Error('레이아웃툴이 고칠 소스를 모른 채 떠 있습니다 — --src <폴더> 를 주고 다시 띄우세요.')
+    const code = await (await fetch(who.api + '/__layoutool/editor.js', { cache: 'no-store' })).text()
+
+    const put = (api, src) => {
+      window.__layoutool_api = api
+      window.__layoutool_canApply = true
+      if (!window.__layoutool) {
+        const s = document.createElement('script')
+        s.textContent = src
+        ;(document.head || document.documentElement).append(s)
+        s.remove()
+      }
+      window.__layoutool_toggle?.(true)
+      return !!window.__layoutool
+    }
+    let ok = await ltRun(id, put, [who.api, code])
+    if (!ok) {
+      // 인라인 스크립트를 막아 둔 페이지에서는 위가 조용히 씹힌다 — CDP 는 그 규칙 밖이다
+      await cdp.evaluate(id, `window.__layoutool_api=${JSON.stringify(who.api)};window.__layoutool_canApply=true`)
+      await cdp.evaluate(id, code)
+      ok = await cdp.evaluate(id, 'window.__layoutool_toggle?.(true), !!window.__layoutool')
+      if (!ok) throw new Error('편집기를 못 넣었습니다 — 이 페이지가 스크립트 주입을 막고 있습니다.')
+    }
+    return { tabId: id, on: true, server: who.api, src: who.src, note: '사람이 화면을 만진 뒤 browser_layout_edits 로 가져오세요.' }
+  },
+
+  // 만진 결과를 가져온다. 지시문은 레이아웃툴이 만들어 준다 — 여기서 따로 지어내면
+  // 「좌표를 그대로 박지 마라」 같은 규칙이 이 길에서만 빠진다.
+  async layout_edits({ tabId, raw = false }) {
+    const id = await resolveTabId(tabId)
+    const tab = await chrome.tabs.get(id)
+    const data = await ltRun(id, () => window.__layoutool_edits?.() || null)
+    if (!data) throw new Error('이 탭에 편집기가 없습니다 — browser_layout 으로 먼저 켜세요.')
+    if (!data.edits?.length) return { tabId: id, count: 0, note: '아직 만진 것이 없습니다.' }
+    const who = raw ? null : await ltServer(tab.url)
+    if (!who) return { tabId: id, count: data.edits.length, viewport: data.viewport, edits: data.edits }
+    const r = await fetch(who.api + '/__layoutool/brief', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...data, page: data.url }),
+    })
+    if (!r.ok) throw new Error('지시문을 못 받았습니다: ' + (await r.text()))
+    const b = await r.json()
+    return { tabId: id, root: b.root, page: b.page, count: b.count, brief: b.text }
   },
 
   // ★찍는 동안 우리 표시(칩·테두리·커서)를 걷는다. 그림은 대개 사람에게 보여주거나 문서에 넣으려고
