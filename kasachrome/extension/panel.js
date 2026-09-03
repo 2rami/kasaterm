@@ -239,17 +239,21 @@ function sig(state, layout) {
   })
 }
 
-// 팝업·사이드패널이 붙어 있는 창의 활성 탭 — 사람이 지금 보고 있는 화면이 그것이다
-let myTabId = null
-const whichTab = chrome.tabs.query({ active: true, currentWindow: true })
-  .then(([t]) => { myTabId = t?.id ?? null })
-  .catch(() => {})
+// 사람이 지금 보고 있는 화면. 매번 다시 묻는다 — 팝업은 누를 때마다 새로 뜨지만 사이드패널은
+// 열어 둔 채로 탭을 갈아타므로, 한 번 읽어 두면 없어진 탭을 계속 가리킨다(2026-09-03 실측:
+// 「No tab with id」가 그대로 줄에 떴다).
+async function activeTabId() {
+  try {
+    const [t] = await chrome.tabs.query({ active: true, currentWindow: true })
+    return t?.id ?? null
+  } catch { return null }
+}
 
 async function tick() {
-  await whichTab
+  const my = await activeTabId()
   const [state, layout] = await Promise.all([
     ask('state'),
-    myTabId == null ? null : ask('layoutState', { tabId: myTabId }),
+    my == null ? null : ask('layoutState', { tabId: my }),
   ])
   const g = sig(state, layout)
   if (g === lastSig) return
