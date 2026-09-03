@@ -50,7 +50,9 @@ export async function postAction(
     headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify({ action, ...args }),
   });
-  return (await res.json()) as SettingsActionResult;
+  const out = (await res.json()) as SettingsActionResult;
+  if (out.ok && !out.error) void window.__ktRefreshTokens?.();
+  return out;
 }
 
 /// `GET /theme-roster?id=<테마id|__base>` — 그 테마 하나의 명단.

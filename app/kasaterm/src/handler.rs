@@ -2,6 +2,29 @@
 //! main.rs 에서 분리. impl App 메서드·타입은 crate root 그대로 참조.
 use super::*;
 
+fn create_main_window(
+    event_loop: &ActiveEventLoop,
+    attrs: WindowAttributes,
+) -> Result<Window, winit::error::OsError> {
+    let window = event_loop.create_window(attrs)?;
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSView, NSWindowTabbingMode};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+                unsafe {
+                    let view: &NSView = handle.ns_view.cast().as_ref();
+                    if let Some(native) = view.window() {
+                        native.setTabbingMode(NSWindowTabbingMode::Disallowed);
+                    }
+                }
+            }
+        }
+    }
+    Ok(window)
+}
+
 /// claude code 에 「클립보드의 그림을 붙여라」고 이르는 키.
 ///
 /// 맥은 Ctrl+V(0x16)지만 **Windows 는 Alt+V(= ESC v)** 다. 0x16 을 보내던 동안
@@ -552,10 +575,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.close_arona_panel();
                 return;
             }
-            UserEvent::InlineWebClose => {
-                self.close_inline_web();
-                return;
-            }
             UserEvent::SocketSwap(a, b) => {
                 // swap_dir 와 같은 시퀀스: leaf id 교환 → 자리가 바뀐 두 PTY
                 // 의 그리드 크기가 다를 수 있으니 resize 로 SIGWINCH.
@@ -612,8 +631,17 @@ impl ApplicationHandler<UserEvent> for App {
                     w.focus_window();
                     w.request_redraw();
                 }
+                let replacing_inline = self.inline_web.is_some();
                 self.close_inline_web();
-                self.toggle_git_col();
+                self.info.tab = state::SideTab::Git;
+                if crate::chrome::side_column_should_toggle(
+                    replacing_inline,
+                    self.git.col_visible,
+                    self.info.tab == state::SideTab::Git,
+                ) || !self.git.col_visible
+                {
+                    self.toggle_git_col();
+                }
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -1491,21 +1519,12 @@ impl ApplicationHandler<UserEvent> for App {
         // another winit cycle of latency. Painting inline gets the echo
         // on screen this turn.
         self.render_frame();
-        // A focused pop-out editor window blinks its caret off the same wake
-        // (blink thread / timer). request_redraw coalesces, and only the
-        // focused aux window repaints — unfocused ones stay idle (no GPU burn).
-        // Terminal undock 창은 예외: 이 wake 를 만든 PTY echo 가 그 창이 뷰하는
-        // pane 을 갱신했을 수 있어, 포커스 여부와 무관하게 매 wake redraw 해야 셸
-        // 출력이 라이브로 반영된다(idle 엔 Wait 라 wake 자체가 안 나 CPU 0).
-        for a in &self.aux_windows {
-            if a.focused || matches!(a.kind, crate::auxwin::AuxWindowKind::Terminal { .. }) {
-                a.window.request_redraw();
-            }
-        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다(session/board 패널과 같은 이유).
+        self.close_inline_web();
+        self.close_student_web_window();
+        // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다.
         self.persona.webview = None;
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
@@ -1696,8 +1715,7 @@ impl ApplicationHandler<UserEvent> for App {
         // from the window edges (see window_event mouse handling).
         #[cfg(windows)]
         let attrs = attrs.with_decorations(false);
-        let window =
-            Arc::new(crate::auxwin::create_untabbed(event_loop, attrs).expect("create window"));
+        let window = Arc::new(create_main_window(event_loop, attrs).expect("create window"));
         // `with_position` 을 무시하는 플랫폼(일부 Wayland 컴포지터)을 위한 폴백.
         // 이미 그 자리에 떴으면 no-op 이라 mac/Windows 에선 값이 없다.
         if let Some((px, py)) = restore_pos {
@@ -2454,14 +2472,8 @@ impl ApplicationHandler<UserEvent> for App {
         if self.inline_web_window_event(id, &event) {
             return;
         }
-        // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
-        // 창의 surface·터미널 로직과 완전히 격리 — 이벤트를 kind 별 라우팅에 위임한다.
         if let Some(pos) = self.banners.iter().position(|b| b.window.id() == id) {
             self.banner_window_event(pos, &event);
-            return;
-        }
-        if let Some(pos) = self.aux_windows.iter().position(|a| a.window.id() == id) {
-            self.aux_window_event(pos, event, event_loop);
             return;
         }
         let Some(window) = self.window.clone() else {
@@ -2713,7 +2725,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Commit modal is a full-window overlay over the pane grid —
                 // drive its cursor here (I-beam over the message field, default
                 // elsewhere) and skip the pane/column hover below so it can't
-                // override the cursor. (Settings is now its own window.)
+                // override the cursor.
                 if self.git.commit_modal_open {
                     let (cx, cy) = self.cursor_px;
                     let hit = |r: (f32, f32, f32, f32)| {
@@ -4099,10 +4111,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some((bx, by, bw, bh)) = self.settings_title_rect() {
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            self.toggle_settings_web(event_loop, None);
+                            return;
+                        }
+                    }
                     // Side-panel toggle, parked at the right end of the strip.
-                    // It's the only chrome button left up here — the account
-                    // pill, the arona ✨ and the settings gear all moved into
-                    // the panel's Info tab, which this button opens.
                     if let Some((bx, by, bw, bh)) = self.git_col_toggle_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_git_col();
@@ -5954,12 +5969,6 @@ impl ApplicationHandler<UserEvent> for App {
                         // reset the cursor.
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            // 이미 뜯긴 pane — 탭 드래그와 같은 이유로 여기서 끝낸다.
-                            if hd.active && self.torn_aux_window(&hd.pane).is_some() {
-                                self.chrome_dirty = true;
-                                window.request_redraw();
-                                return;
-                            }
                             if hd.active {
                                 // 커서가 사이드바의 다른 윈도우 탭 위면 cross-window
                                 // 이동이 최우선이다. 라이브 재배치가 pane 가장자리에
@@ -6218,6 +6227,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Cmd+Shift+A (macOS) / Ctrl+Shift+A: SCHALE OS(아로나) 패널 토글 —
                 // 터미널로 작업하다 한 키로 전환(거노). PTY 로는 안 흘린다.
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Comma)
+                    )
+                {
+                    self.toggle_settings_web(event_loop, None);
+                    window.request_redraw();
+                    return;
+                }
                 if matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()
@@ -6676,7 +6697,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoroomrename();
         self.run_pending_autoftrename();
         self.run_pending_autopathsearch();
-        self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
@@ -6719,13 +6739,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoftmenu();
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);
-        self.run_pending_auxpopout(event_loop);
-        self.run_pending_autoundock(event_loop);
-        self.run_pending_autotabpop(event_loop);
-        self.run_pending_autoauxmd(event_loop);
-        self.run_pending_autoundock_scroll();
-        self.run_pending_autoundock_dock();
-        self.run_pending_autoauxtree();
         // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
         // 수명이 다한 것을 걷는다.
         // 알림은 전부 `notify_desktop` 을 지나 `banner_inbox` 에 줄 선다. 창을
@@ -6739,18 +6752,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.push_notify_banner(event_loop, &title, &body, who, route);
         }
         self.expire_banners();
-        self.run_pending_autoteardrag(event_loop);
-        self.run_pending_autotearroom(event_loop);
         self.run_pending_autostudent(event_loop);
         self.run_pending_autotabcycle();
         self.run_pending_autoboxlabel();
         self.run_pending_autoimgtip();
         self.run_pending_autoportpop();
-        self.run_pending_autoroomsplit();
         self.run_pending_autoforeignsplit();
-        self.run_pending_autofacehover(event_loop);
-        self.run_pending_autotreeclick(event_loop);
-        self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
         // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도
         // 저장은 되는데, 커서 블링크 스레드가 530ms 마다 무조건 루프를 깨워
@@ -6793,9 +6800,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             if !self.pending_capture.is_empty() {
                 why.push("pending_capture");
-            }
-            if self.aux_windows.iter().any(|a| a.pending_capture.is_some()) {
-                why.push("aux_capture");
             }
             if self.pending_autogit.is_some() {
                 why.push("autogit");
@@ -6897,8 +6901,6 @@ impl ApplicationHandler<UserEvent> for App {
                     })
             }
             || !self.pending_capture.is_empty()
-            // 별도창 캡처가 대기 중이면 그 deadline 까지 깨어 있어야 arming 이 발화한다.
-            || self.aux_windows.iter().any(|a| a.pending_capture.is_some())
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
             // 남은 md 스크립트 단계는 about_to_wait 이 다시 돌아야 발화한다.
@@ -7027,7 +7029,6 @@ impl App {
                 PendingClose::Tab { pane, idx } => self.confirm_or_close_tab(&pane, idx),
                 PendingClose::Pane { pane } => self.confirm_or_close_pane(&pane),
                 PendingClose::Session(i) => self.confirm_or_close_session(i),
-                other @ PendingClose::AuxEditor(_) => self.do_close(other),
             }
             return;
         }

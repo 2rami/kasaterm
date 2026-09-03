@@ -247,7 +247,7 @@ export function CharacterDetail({
             savePersona(persona);
             onBack();
           }}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-[13px]"
+          className="flex min-h-[40px] items-center gap-1.5 px-2.5 py-1.5 text-[13px]"
           style={{
             borderRadius: 'var(--kt-radius-sm)',
             background: 'var(--kt-surface)',
@@ -289,7 +289,7 @@ export function CharacterDetail({
             key={String(isRaw)}
             type="button"
             onClick={() => openRaw(isRaw)}
-            className="px-3 py-1 text-[13px]"
+            className="min-h-[36px] px-3 py-1 text-[13px]"
             style={{
               borderRadius: 'var(--kt-radius-sm)',
               background: rawOpen === isRaw ? 'var(--kt-accent)' : 'transparent',
@@ -334,7 +334,7 @@ export function CharacterDetail({
                     setRawYaml(y);
                     void loadRaw(y);
                   }}
-                  className="px-3 py-1 text-[13px]"
+                  className="min-h-[36px] px-3 py-1 text-[13px]"
                   style={{
                     borderRadius: 'var(--kt-radius-sm)',
                     background: rawYaml === y ? 'var(--kt-accent)' : 'transparent',
@@ -350,7 +350,7 @@ export function CharacterDetail({
               type="button"
               onClick={() => void saveRaw()}
               disabled={saving || rawLoading}
-              className="px-3 py-1.5 text-[13px]"
+              className="min-h-[40px] px-3 py-1.5 text-[13px]"
               style={{
                 borderRadius: 'var(--kt-radius-sm)',
                 background: 'var(--kt-surface)',
@@ -428,7 +428,7 @@ export function CharacterDetail({
                   type="button"
                   onClick={() => saveModel(m)}
                   disabled={saving}
-                  className="px-3 py-1.5 text-[13px]"
+                  className="min-h-[40px] px-3 py-1.5 text-[13px]"
                   style={{
                     borderRadius: 'var(--kt-radius-sm)',
                     background: on ? 'var(--kt-accent)' : 'var(--kt-surface)',

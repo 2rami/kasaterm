@@ -10,7 +10,6 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
-mod auxwin;
 mod bridge;
 mod cells;
 mod chrome;
@@ -41,7 +40,6 @@ mod webpane;
 /// 폭에 맞춘 정보 밀도 — chrome 이 정의하지만 그 판정을 읽어 그리는 쪽(render·info)이
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
-pub(crate) use themegen::{add_theme_member, place_themegen_ref};
 mod gitdiff;
 mod info;
 mod links;
@@ -280,31 +278,6 @@ fn outline_rect(
         (r - t).max(0.0),
         bg,
     );
-}
-
-/// 점선 사각 — "여기 뭔가 있었다"를 그리는 유일한 자리.
-///
-/// 채운 판이 **없다**는 것 자체가 뜻이라, 실선으로 두르면 그냥 빈 카드가 되고
-/// 아무것도 안 두르면 목록에서 그 자리가 사라진다. 점선은 자리는 지키되 비어
-/// 있음을 말한다.
-fn dashed_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, col: [u8; 4]) {
-    const DASH: f32 = 4.0;
-    const GAP: f32 = 3.0;
-    let step = DASH + GAP;
-    let mut px = x;
-    while px < x + w {
-        let seg = DASH.min(x + w - px);
-        g.rect(px, y, seg, 1.0, col);
-        g.rect(px, y + h - 1.0, seg, 1.0, col);
-        px += step;
-    }
-    let mut py = y;
-    while py < y + h {
-        let seg = DASH.min(y + h - py);
-        g.rect(x, py, 1.0, seg, col);
-        g.rect(x + w - 1.0, py, 1.0, seg, col);
-        py += step;
-    }
 }
 
 /// 커서가 얹힌 것을 **들어 올리는** 유일한 함수 — 버튼·탭·행·메뉴 항목, 눌리는
@@ -1286,11 +1259,6 @@ enum PendingClose {
     Session(usize),
     /// Quit the app (window red-light / Cmd+W on the last pane).
     Window,
-    /// Close a popped-out editor window. Identified by window id, not by index:
-    /// `aux_windows` is a Vec and another window closing shifts every index
-    /// after it, so a stored index can point at the wrong window by the time
-    /// the dialog resolves.
-    AuxEditor(winit::window::WindowId),
 }
 
 /// Where one unsaved editor lives, so the dialog can go back and save it (or
@@ -1299,8 +1267,6 @@ enum PendingClose {
 enum DirtyDoc {
     /// Tab `tab` of pane `pane` in the main window.
     Tab { pane: String, tab: usize },
-    /// A popped-out editor window.
-    Aux(winit::window::WindowId),
 }
 
 /// Why a close is being held up.
@@ -1489,10 +1455,11 @@ pub(crate) enum InlineWebKind {
 
 pub(crate) struct InlineWebHost {
     pub(crate) webview: wry::WebView,
-    pub(crate) window: Arc<Window>,
+    pub(crate) window: Option<Arc<Window>>,
     pub(crate) kind: InlineWebKind,
     pub(crate) last_frame: Option<(i32, i32, u32, u32)>,
     pub(crate) visible: bool,
+    pub(crate) restore_sidebar: bool,
 }
 
 pub(crate) struct ClosedPane {
@@ -1722,9 +1689,7 @@ struct MarkdownPane {
     /// 미추적 파일, 아직 한 번도 안 뜬 상태가 전부 여기다. 접힘·보조커서와 같은
     /// 규율으로, 비어 있으면 거터 루프 비용이 정확히 0 이다.
     ///
-    /// 이 필드가 `MarkdownPane` 에 있는 것이 배선의 핵심이다 —
-    /// `AuxWindowKind::Editor` 가 pane 을 **소유**하므로(auxwin.rs), 한 자리에 두면
-    /// 메인 그리드·별도창 편집기·별도창 md 탭 셋이 같은 값을 본다.
+    /// 이 값은 pane 상태와 함께 움직여 그리드를 재배치해도 같은 표시를 유지한다.
     diff: Option<crate::gitdiff::BufferDiff>,
     /// 거터 바를 눌러 펼친 헝크가 덮는 버퍼 줄. 패널은 그 줄 아래에 뜬다.
     /// 편집으로 줄이 밀리면 다음 diff 갱신 때 자리를 잃으므로 그때 닫는다.
@@ -2155,7 +2120,7 @@ impl PaneState {
         // 로딩바는 pane 위 별도. 헤더 띠는 멀티탭·이미지·md 전용 컨트롤만 남긴다.
         // 코드/텍스트 raw 편집기도 헤더를 가진다 — 파일명 + ● 미저장 도트의 자리.
         // ⋮ 에서 직접 정했으면 그게 우선 — 탭이 하나인 터미널에도 띠를 띄워
-        // 제목·pop-out 을 쓸 수 있고, md 처럼 자동으로 뜨는 pane 은 접을 수 있다.
+        // 제목을 쓸 수 있고, md 처럼 자동으로 뜨는 pane 은 접을 수 있다.
         if let Some(forced) = self.header_override {
             return forced;
         }
@@ -3767,7 +3732,6 @@ enum UserEvent {
     /// Close the arona classroom window (`POST /arona-close` — the
     /// ModePicker's "터미널로" choice). No-op when it isn't open.
     SocketAronaClose,
-    InlineWebClose,
     /// `surface.swap` delegated from the socket thread — exchange two leaves'
     /// tree positions (PTYs stay put, ids trade slots). `(a, b)`, both
     /// pre-validated to exist by the backend.
@@ -4008,12 +3972,10 @@ enum SidebarMenuAction {
 /// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ImeFocus {
-    /// 터미널 pane(PTY). 메인창·별도창 공통 — pane id 가 곧 보낼 곳이다.
+    /// 터미널 pane(PTY) — pane id 가 곧 보낼 곳이다.
     Pane(String),
     /// 메인창 raw 편집기(pane id).
     Editor(String),
-    /// 별도창 raw 편집기(aux 인덱스).
-    AuxEditor(usize),
     GitCommit,
     /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
     /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
@@ -4141,25 +4103,12 @@ pub(crate) enum SettingsInput {
     CwdPath,
     /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
     FileOpenCmd,
-    Shell,
-    ClaudeExtra,
-    /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
-    StudentPersona,
-    /// 캐릭터 상세의 「원본」 편집기. persona 와 같은 멀티라인 경로를 타지만
-    /// 버퍼가 따로라, 원본을 고치다 폼으로 돌아가도 성격 글이 안 덮인다.
-    StudentRaw,
     /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
     /// 들고 있다 — 상세는 한 번에 한 명뿐이라 여기 실을 것이 없다.
     StudentName,
     /// Feedback 본문 멀티라인 필드. persona 와 같은 편집 경로를 타지만 캐럿·버퍼가
     /// 따로라, 설정 창을 두 카테고리로 오가도 서로 안 덮어쓴다.
     FeedbackBody,
-    /// Claude 계정 라벨 필드. 목록이라 어느 행인지 실어야 하는데, 이 enum 은
-    /// `Copy` 로 여기저기 값 복사돼 돌아서 String 을 못 넣는다 — 행 인덱스로 잡고
-    /// 계정 삭제 시 포커스를 푼다(인덱스가 밀려 엉뚱한 행을 가리키지 않게).
-    ClaudeAccountLabel(usize),
-    /// 같은 것의 codex 판.
-    CodexAccountLabel(usize),
     /// 테마 이름 칸. 어느 테마인지는 `App.theme_label_edit` 이 폴더 id 로 들고
     /// 있다 — 이 enum 이 `Copy` 라 String 을 못 실어서다. 인덱스로 잡지 않는 건
     /// 테마를 지우면 뒷 번호가 밀려 엉뚱한 폴더를 고치게 되기 때문이다.
@@ -4168,31 +4117,24 @@ pub(crate) enum SettingsInput {
     /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
     /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
     PaletteHex(usize),
-    /// 나노바나나(gemini) API 키 칸. 버퍼는 `App.themegen.key_edit` — 값의
-    /// 정본은 settings.json 의 `gemini_api_key` 고 매 키마다 거기 굳힌다.
-    GeminiKey,
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SettingsAction {
-    Category(SettingsCat),
     CwdMode(&'static str),
-    FocusCwdPath,
     /// 파일트리에서 파일을 열 때 쓸 방식 — `"builtin"` · `"app"` · `"terminal"`.
     FileOpenMode(&'static str),
     /// `"app"` 모드가 쓸 앱 이름. 빈 문자열 = OS 연결 프로그램.
     FileOpenApp(String),
     /// 최소 대비 프리셋 이름 (`theme::CONTRAST_PRESETS`).
     MinContrast(&'static str),
-    FocusFileOpenCmd,
     ToggleFileTree,
     ToggleFooter,
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),
     ShellPreset(String),
-    FocusShell,
     /// 프리셋 키 · `"system"` · `custom:<slug>`. 커스텀 키는 설정 파일에서 읽은
     /// slug 를 달고 태어나 `&'static str` 로 못 담는다.
     ThemeMode(String),
@@ -4238,9 +4180,6 @@ pub(crate) enum SettingsAction {
     ToggleShimInject,
     ClaudeModel(String),
     ClaudeEffort(String),
-    FocusClaudeExtra,
-    /// 활성 Claude 계정 선택. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
-    ClaudeAccount(String),
     /// 계정 추가 — 저장소 dir 을 만들고 그 dir 을 물린 로그인 CLI 를 **터미널 없이**
     /// 돌린다. 브라우저 승인만 사람이 하고, 결과는 설정 화면 그 자리에 뜬다.
     AddClaudeAccount,
@@ -4251,10 +4190,6 @@ pub(crate) enum SettingsAction {
     /// 마지막 칸은 승인을 **어느 브라우저**에서 받을지다. 되살리려는 계정이 이미
     /// 브라우저에 로그인돼 있으면 쓰던 창이 훨씬 짧다(`settings::LoginBrowser`).
     ReauthAccount(AccountProvider, String, settings::LoginBrowser),
-    /// 진행 중인 숨은 로그인을 취소(프로세스 그룹째 종료).
-    CancelLogin,
-    /// 끝난 로그인의 결과 표시를 지운다.
-    DismissLogin,
     /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
     /// 말고는 복구가 없고, 남겨 둬도 해가 없다.
     RemoveClaudeAccount(String),
@@ -4273,15 +4208,11 @@ pub(crate) enum SettingsAction {
     StatusBarH(u32),
     /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
     PaneFooterH(u32),
-    /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
-    /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
-    FocusClaudeAccountLabel(usize),
     /// 위 넷의 codex(ChatGPT) 판. 로그인 수단이 달라 동작이 갈리므로(claude 는
     /// `claude auth login`, codex 는 `CODEX_HOME=<슬롯> codex login`) 액션도 가른다.
     CodexAccount(String),
     AddCodexAccount,
     RemoveCodexAccount(String),
-    FocusCodexAccountLabel(usize),
     /// Open `~/.config/kasaterm/students/` in the OS file manager so the user
     /// can drop replacement character images there.
     OpenStudentsDir,
@@ -4308,8 +4239,6 @@ pub(crate) enum SettingsAction {
     SelectStudent(String),
     /// 캐릭터 상세를 닫고 목록으로 돌아간다(편집 중이던 것은 저장하고).
     CloseStudent,
-    /// Focus the persona multiline editor for the selected character.
-    FocusStudentPersona,
     /// 상세 화면의 이름 칸에 포커스.
     FocusStudentName,
     /// 상세를 「렌더링됨 ↔ 원본」으로 전환한다.
@@ -4319,16 +4248,10 @@ pub(crate) enum SettingsAction {
     /// 파싱해 다른 쪽으로 다시 쓰는 왕복이 필요한데, 문법이 깨진 중간 상태에서는
     /// 그게 불가능하다. 사라지는 쪽이 조용히 어긋나는 것보다 낫다.
     StudentRawFormat(bool),
-    /// 원본 편집기에 포커스.
-    FocusStudentRaw,
-    /// 원본 버퍼를 로스터에 저장한다.
-    SaveStudentRaw,
     /// 열려 있는 캐릭터가 쓸 모델을 고른다 — `(--model 값, 실행 통로)`. 둘을 함께
     /// 나르는 이유는 축이 달라서다: 게이트웨이 모델은 `--model` 로 못 닿고 래퍼가
     /// 환경을 씌워야 하므로, 한 칸을 골라도 저장할 필드가 둘이다.
     StudentModel(String, String),
-    /// 피드백 본문 편집기에 포커스.
-    FocusFeedbackBody,
     /// 진단 정보(버전·OS·창 구성)를 같이 남길지. 기본 켬 — 없으면 대부분의
     /// 제보가 "어느 버전에서요?"로 한 번 더 왕복한다.
     ToggleFeedbackDiag,
@@ -4339,16 +4262,6 @@ pub(crate) enum SettingsAction {
     /// 그림 생성 엔진을 고른다 — `"opengateway"` · `"codex"` · `"nanobanana"`.
     /// 정본은 settings.json 의 `theme_gen_provider`.
     ThemeGenProvider(String),
-    /// 나노바나나 API 키 칸에 포커스.
-    FocusGeminiKey,
-    /// 참조 그림을 파일 선택으로 고른다 — 고른 파일을 열려 있는 캐릭터의
-    /// `themes/<id>/gen/<slug>/ref.png` 자리로 복사한다(생성은 따로 누른다).
-    ThemeGenPickRef,
-    /// 참조 그림으로 스프라이트 생성을 시작한다(열려 있는 캐릭터 대상).
-    ThemeGenStart,
-    /// 캐릭터 격자의 「+ 새 캐릭터」 — 참조 그림을 고르면 파일명에서 slug 를
-    /// 유도해 테마 로스터에 추가하고 상세로 들어간다.
-    ThemeGenNewStudent,
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -4834,8 +4747,6 @@ struct App {
     /// 닫은 pane 스택(최근이 뒤). ⌘⇧T 가 뒤에서 꺼내 되살리고, 인포가 흐린 줄로
     /// 보여 준다 — 되돌릴 수 있다는 걸 알리지 않으면 있으나 마나다.
     closed_panes: Vec<ClosedPane>,
-    /// 접어 둔 별도창(하단바 칩). 창만 없애고 pane·PTY 는 그대로라, 칩을 누르면
-    /// 같은 내용의 창이 다시 선다.
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -5071,7 +4982,6 @@ struct App {
     sidebar_row_drag: Option<SidebarRowDrag>,
     /// 밖에 나간 방을 **되돌리는** 아이콘의 자리 — `(방 인덱스, 사각)`. 매 프레임
     /// 재구축이라 창을 닫으면 그 자리도 같이 사라진다.
-    window_dock_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// claude 가 **한 번이라도** 떴던 pane. 학생 얼굴을 여기에만 내보인다.
     ///
     /// 캐릭터 자체는 pane 을 만들 때 배정된다 — 셸 env(`KASATERM_CHARACTER`·
@@ -5399,8 +5309,8 @@ struct App {
     ///
     /// 하나만 두는 것은 의도다. 학생마다 창을 열면 같은 로스터를 고치는 창이 여럿
     /// 떠서 어느 쪽이 정본인지 알 수 없게 된다. 다른 학생을 열면 이 창의 주소만 바꾼다.
-    student_web_window: Option<Arc<Window>>,
     student_web_webview: Option<wry::WebView>,
+    student_web_window: Option<Arc<Window>>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -5474,9 +5384,6 @@ struct App {
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
     /// 디퍼 없이 바로 `open_markdown_window`.
     pending_open_md: Vec<std::path::PathBuf>,
-    /// 편집기/파일뷰를 떼어낸 별도 OS 창들(각자 자체 wgpu GpuRenderer). 메인 창과
-    /// 독립적으로 렌더/입력 라우팅되며 window id 로 handler 가 분기한다(auxwin.rs).
-    aux_windows: Vec<auxwin::AuxWindow>,
     /// 떠 있는 완료 알림 배너들(가장 오래된 것이 앞). macOS 알림 센터를 자체 서명
     /// 번들이 못 쓰기 때문에 우리가 그린다 — 사연은 `notify_banner` 모듈 doc.
     banners: Vec<notify_banner::Banner>,
@@ -5663,7 +5570,6 @@ impl App {
             expanded_windows: std::collections::HashSet::new(),
             expand_anim: None,
             sidebar_row_drag: None,
-            window_dock_rects: Vec::new(),
             pane_claude_seen: std::collections::HashSet::new(),
             unread_panes: std::collections::HashSet::new(),
             dock_badge_n: 0,
@@ -5752,9 +5658,8 @@ impl App {
             },
             git_ignore_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_ignore_started: false,
-            // 설정은 별도창(auxwin)이라 부팅 시엔 항상 닫힘 — settings_open 은
-            // 그 창의 존재와 동기화되는 플래그. 헤드리스 초기 열림은 이제
-            // KASATERM_AUTOSETTINGS(testkit)가 event_loop 위에서 담당한다.
+            // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
+            // 위에서 담당한다.
             settings_open: false,
             settings_cat: SettingsCat::General,
             set_cwd_mode: socket::read_default_cwd_mode(),
@@ -5842,8 +5747,8 @@ impl App {
             inline_web: None,
             account_switch_confirm: None,
             character_swap_confirm: None,
-            student_web_window: None,
             student_web_webview: None,
+            student_web_window: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
@@ -5873,7 +5778,6 @@ impl App {
             cursor_thickness: socket::read_cursor_thickness(),
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
-            aux_windows: Vec::new(),
             banners: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,
@@ -6257,8 +6161,8 @@ fn install_pane_shims() {
         }
     }
     // Drop `imgopen` / `mdopen` on the pane PATH so the user (or Claude) can
-    // pop an image viewer / markdown editor into its own window with zero
-    // install — each just curls the host's MCP open-preview endpoint.
+    // open an image viewer / markdown editor in the current workspace with
+    // zero install — each just curls the host's MCP open-preview endpoint.
     install_preview_shims(&shim_dir);
     install_open_shim(&shim_dir);
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
@@ -6369,7 +6273,7 @@ fn python3_program() -> Option<&'static str> {
 
 /// Write `imgopen` and `mdopen` into the shim dir (on the pane PATH). Each
 /// resolves its argument to an absolute path and curls the host's MCP
-/// open-preview endpoint, which spawns a separate wry window. No dependency
+/// open-preview endpoint, which opens a main-workspace tab. No dependency
 /// beyond `curl` (ships on macOS/Linux); the port comes from
 /// KASASPACE_MCP_PORT (default 8765), inherited from the host process.
 /// `rust-analyzer` 를 가로채 **서버 하나를 모든 pane 이 나눠 쓰게** 한다.
@@ -6444,7 +6348,7 @@ fn install_preview_shims(shim_dir: &std::path::Path) {
     let mk = |cmd: &str, endpoint: &str| -> String {
         format!(
             "#!/bin/sh\n\
-# kasaterm {cmd} — open a file in a separate preview window.\n\
+# kasaterm {cmd} — open a file in the current kasaterm workspace.\n\
 if [ \"$#\" -lt 1 ]; then echo \"usage: {cmd} FILE\" >&2; exit 1; fi\n\
 f=$1\n\
 if command -v realpath >/dev/null 2>&1; then abs=$(realpath \"$f\"); \
@@ -9643,21 +9547,6 @@ mod tests {
             end: (5, 0),
         };
         assert_eq!(extract_selection(&[row], sel), "a한 b");
-    }
-
-    #[test]
-    fn tear_off_only_fires_outside_the_window() {
-        // Phase 3: 파일 탭 tear-off 트리거는 커서가 창 콘텐츠 사각형 밖일 때만.
-        // 창 안(패널 body·탭 스트립 포함) 어디에 놓든 false → 기존 split/dock 경로가 처리.
-        let (w, h) = (1200.0_f32, 800.0_f32);
-        assert!(!App::drag_left_window(0.0, 0.0, w, h)); // 좌상단 모서리 = 안
-        assert!(!App::drag_left_window(600.0, 400.0, w, h)); // 정중앙 = 안
-        assert!(!App::drag_left_window(w, h, w, h)); // 우하단 모서리(경계) = 안
-                                                     // 네 방향 밖 — 각각 tear-off.
-        assert!(App::drag_left_window(-1.0, 400.0, w, h)); // 왼쪽 밖
-        assert!(App::drag_left_window(w + 1.0, 400.0, w, h)); // 오른쪽 밖
-        assert!(App::drag_left_window(600.0, -1.0, w, h)); // 위쪽 밖(탭바 위로 뜯음)
-        assert!(App::drag_left_window(600.0, h + 1.0, w, h)); // 아래쪽 밖
     }
 
     #[test]

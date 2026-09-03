@@ -43,7 +43,11 @@ color_slot!(S_BORDER, border, [80, 92, 110, 110]);
 color_slot!(S_ACCENT, accent, [90, 140, 230, 255]);
 color_slot!(S_CURSOR, cursor, [90, 140, 230, 255]);
 color_slot!(S_TEXT, text, [236, 238, 243, 255]);
-color_slot!(S_TEXT_DIM, text_dim, [160, 166, 176, 255]);
+static S_TEXT_DIM: AtomicU32 = AtomicU32::new(pack([160, 166, 176, 255]));
+#[inline]
+pub fn text_dim() -> [u8; 4] {
+    enforce_contrast_at(unpack(S_TEXT_DIM.load(Ordering::Relaxed)), bg(), 4.5)
+}
 color_slot!(S_TEXT_MUTE, text_mute, [120, 126, 138, 255]);
 color_slot!(S_SUCCESS, success, [63, 185, 80, 255]);
 color_slot!(S_DANGER, danger, [224, 88, 78, 255]);
@@ -1758,6 +1762,13 @@ pub fn tokens_json() -> serde_json::Value {
 #[cfg(test)]
 mod roster_tests {
     use super::*;
+
+    #[test]
+    fn 보조_본문은_최소_대비를_넘긴다() {
+        let bg = [37, 44, 53, 255];
+        let dim = enforce_contrast_at([120, 126, 138, 255], bg, 4.5);
+        assert!(contrast_of(luminance(dim), luminance(bg)) >= 4.5);
+    }
 
     /// 런타임 로스터는 같은 JSON 에서 **코드젠과 똑같은 표**를 구워야 한다.
     ///

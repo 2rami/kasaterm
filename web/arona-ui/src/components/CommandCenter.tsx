@@ -73,7 +73,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
       }}>
         {/* 우측 패널 접기 — 가장자리 접기 일원화(거노). ▶ = 오른쪽으로 접어 레일로. */}
         <button onClick={() => onCollapse?.()} title="우측 패널 접기" style={{
-          width: 18, height: 18, borderRadius: 5, border: 'none', cursor: 'pointer', background: 'transparent',
+          width: 36, height: 36, borderRadius: 7, border: 'none', cursor: 'pointer', background: 'transparent',
           color: 'var(--cth-ink-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
         }}>
           <svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -120,7 +120,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
             onDrop={(e) => { e.preventDefault(); reorderTab(t); setDragOverTab(null); }}
             style={{
               flexShrink: 0,
-              padding: '6px 12px',
+              minHeight: 36, padding: '6px 12px',
               fontFamily: 'var(--cth-font-ui)',
               fontSize: 12, fontWeight: 600,
               border: 'none', borderRadius: 7,

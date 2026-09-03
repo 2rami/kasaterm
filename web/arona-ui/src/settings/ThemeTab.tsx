@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { fetchThemeRoster, postAction } from './api';
 import { MiniButton, Notice, Section, TabCard, Toggle } from './controls';
 import { serverText, useT } from './lang';
@@ -207,14 +208,18 @@ function CharacterCell({
   // 첫 클릭이 이미 고르기를 내고 그걸 되돌리는 편법이 필요했다. 메뉴는 그 왕복이 없고
   // 「무엇을 할 수 있는지」가 눈에 보인다.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const card = useRef<HTMLDivElement>(null);
   return (
     <div
+      ref={card}
       // 카드를 `<button>` 으로 못 만든다 — 안에 켬/끔 버튼이 들어가고 버튼 중첩은
       // 잘못된 HTML 이다. ThemeCardView 와 같은 방식으로 조작만 준다.
       role="button"
       tabIndex={0}
       aria-pressed={picked}
-      title={detail ? `${c.name} — 두 번 누르면 설정` : c.name}
+      aria-haspopup="menu"
+      aria-expanded={menu != null}
+      title={detail ? `${c.name} — 우클릭하면 설정` : c.name}
       // 저장이 도는 동안은 안 받는다 — 켬/끔이 서버 왕복이라, 연달아 누르면 마지막
       // 응답이 앞선 것을 덮어 화면과 저장이 어긋난다.
       onClick={() => !disabled && onTogglePick()}
@@ -226,6 +231,17 @@ function CharacterCell({
         setMenu({ x: e.clientX - r.left, y: e.clientY - r.top });
       }}
       onKeyDown={(e) => {
+        if (e.key === 'Escape' && menu) {
+          e.preventDefault();
+          setMenu(null);
+          card.current?.focus();
+          return;
+        }
+        if ((e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) && e.target === e.currentTarget) {
+          e.preventDefault();
+          setMenu({ x: 20, y: 32 });
+          return;
+        }
         if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
           e.preventDefault();
           if (!disabled) onTogglePick();
@@ -263,6 +279,7 @@ function CharacterCell({
             onClick={(e) => {
               e.stopPropagation();
               setMenu(null);
+              card.current?.focus();
             }}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -271,6 +288,7 @@ function CharacterCell({
           />
           <div
             className="absolute z-50 py-1"
+            role="menu"
             style={{
               left: menu.x,
               top: menu.y,
@@ -286,7 +304,9 @@ function CharacterCell({
             {detail && (
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
+                role="menuitem"
+                autoFocus
+                className="block min-h-[36px] w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
                 onClick={() => {
                   setMenu(null);
                   onOpenSettings();
@@ -297,7 +317,9 @@ function CharacterCell({
             )}
             <button
               type="button"
-              className="block w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
+              role="menuitem"
+              autoFocus={!detail}
+              className="block min-h-[36px] w-full px-3 py-1.5 text-left text-[12px] text-[var(--kt-text)]"
               onClick={() => {
                 setMenu(null);
                 onTogglePick();
@@ -399,7 +421,11 @@ function CharacterGroup({
         className="flex items-center gap-2 px-3 py-2"
         style={{ background: open ? 'var(--kt-surface-active)' : 'var(--kt-surface)' }}
       >
-        <span className="text-[11px] text-[var(--kt-text-mute)]">{open ? '▾' : '▸'}</span>
+        {open ? (
+          <ChevronDown aria-hidden="true" className="h-4 w-4 text-[var(--kt-text-mute)]" />
+        ) : (
+          <ChevronRight aria-hidden="true" className="h-4 w-4 text-[var(--kt-text-mute)]" />
+        )}
         <span className="text-[13px] text-[var(--kt-text)]">{card.label}</span>
         {active && (
           <span className="text-[11px] text-[var(--kt-text-mute)]">{t.theme.inUse}</span>
@@ -581,6 +607,7 @@ export function ThemeTab({
         hint={t.theme.personaHint}
         right={
           <Toggle
+            label={t.theme.persona}
             on={data.persona_enabled}
             disabled={busy}
             onToggle={() => void run('toggle-persona')}

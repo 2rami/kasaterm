@@ -1,5 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { DesignTokens } from './types';
+
+declare global {
+  interface Window {
+    __ktRefreshTokens?: () => Promise<void>;
+  }
+}
 
 /// 네이티브 토큰을 `--kt-*` CSS 변수로 심는다. 이 화면은 arona 의 `--cth-*`
 /// (SCHALE 클린 블루, 라이트 기본)를 쓰지 않는다 — 설정은 터미널 창과 나란히
@@ -11,10 +17,17 @@ import type { DesignTokens } from './types';
 /// 늦게 와도 그때 리페인트만 일어난다.
 export function useTokens(): DesignTokens | null {
   const [tokens, setTokens] = useState<DesignTokens | null>(null);
+  const refresh = useCallback(async () => {
+    const res = await fetch('/design-tokens');
+    if (!res.ok) return;
+    const next = (await res.json()) as DesignTokens;
+    applyTokens(next);
+    setTokens(next);
+  }, []);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+    window.__ktRefreshTokens = async () => {
       try {
         const res = await fetch('/design-tokens');
         if (!res.ok) return;
@@ -23,13 +36,15 @@ export function useTokens(): DesignTokens | null {
         applyTokens(t);
         setTokens(t);
       } catch {
-        // 토큰을 못 받으면 아래 CSS 의 폴백값으로 그린다 — 화면이 비지는 않는다.
+        // CSS 폴백을 유지한다.
       }
-    })();
+    };
+    void refresh().catch(() => undefined);
     return () => {
       alive = false;
+      delete window.__ktRefreshTokens;
     };
-  }, []);
+  }, [refresh]);
 
   return tokens;
 }
@@ -37,7 +52,8 @@ export function useTokens(): DesignTokens | null {
 function applyTokens(t: DesignTokens) {
   const root = document.documentElement;
   for (const [k, v] of Object.entries(t.palette)) {
-    root.style.setProperty(`--kt-${k.replace(/_/g, '-')}`, v);
+    const value = k === 'text_mute' ? t.palette.text_dim : v;
+    root.style.setProperty(`--kt-${k.replace(/_/g, '-')}`, value);
   }
   t.ansi.forEach((c, i) => root.style.setProperty(`--kt-ansi-${i}`, c));
   root.style.setProperty('--kt-radius-sm', `${t.shape.radius_sm}px`);

@@ -3531,10 +3531,8 @@ pub(crate) fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
 
 /// 한 창이 이번 프레임에 얹을 학생 스프라이트 자리들.
 ///
-/// 셀을 훑어 모으는 쪽(메인 그리드 / 별도창)과 그리는 쪽을 가르는 경계다 —
-/// 좌표계는 창마다 다르지만 **이미지 키와 업로드 규칙은 한 벌**이어야 한다.
-/// 두 벌이 되면 한쪽만 프레임을 올리거나 캐시 키가 갈려, 같은 학생이 창마다
-/// 다른 그림으로 뜬다.
+/// 셀을 훑어 모으는 쪽과 그리는 쪽을 가르는 경계다. 이미지 키와 업로드 규칙은
+/// 한 벌이어야 한다.
 #[derive(Default)]
 pub(crate) struct StudentOverlays {
     /// Clawd 배너 자리 — `(slug, rect, (클립 위, 클립 아래))`. 스크롤로 잘리게 클립.
@@ -3547,17 +3545,6 @@ pub(crate) struct StudentOverlays {
     pub(crate) standing: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
     /// statusline 프사(bust) 자리.
     pub(crate) profile: Vec<(&'static str, (f32, f32, f32, f32))>,
-}
-
-impl StudentOverlays {
-    /// 다음 프레임을 스스로 불러야 하나 — 움직이는 스프라이트가 하나라도 있으면.
-    /// 프사만 있는 창은 정적 1프레임이라 깨울 필요가 없다.
-    pub(crate) fn animating(&self) -> bool {
-        !self.banner.is_empty()
-            || !self.spinner.is_empty()
-            || !self.waiting.is_empty()
-            || !self.standing.is_empty()
-    }
 }
 
 /// 모은 자리에 스프라이트를 얹는다. `anim_ms` 는 창이 공유하는 애니 시계
@@ -3620,7 +3607,7 @@ pub(crate) fn paint_student_overlays(
 /// statusline.py 가 학생 이름 대신 이 문자를 내보낸다. **아래→위 스캔**인 것이
 /// 중요하다: statusline 은 늘 화면 바닥 쪽인데, 대화 출력에 U+FFFC 원문이 섞이면
 /// (statusline 디버그 출력 등) 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다
-/// (실사고). 메인 창과 별도창이 같은 자리를 찍도록 한 곳에 둔다.
+/// (실사고). 모든 호출부가 같은 자리를 찍도록 한 곳에 둔다.
 pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
     rows.iter().enumerate().rev().find_map(|(r, row)| {
         row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {

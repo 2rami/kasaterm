@@ -47,6 +47,7 @@ export function ShellTab({
       </Row>
       {showField && (
         <TextField
+          label={t.shell.custom}
           value={isPreset ? '' : data.shell}
           disabled={busy}
           mono

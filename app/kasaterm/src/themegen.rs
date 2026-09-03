@@ -39,17 +39,8 @@ pub(crate) struct ProviderStatus {
     pub why: String,
 }
 
-/// UI 가 매 프레임 읽는 진행 스냅샷.
 pub(crate) struct GenJobView {
     pub phase: GenPhase,
-    /// 그대로 그리면 되는 한글 문구.
-    pub phase_label: String,
-    /// 부가 문구("2/3 번째 시도"). 없으면 빈 문자열.
-    pub detail: String,
-    pub failed_reason: Option<String>,
-    pub provider: String,
-    /// 시작 시각(epoch ms) — 경과 표시용.
-    pub started_ms: u64,
 }
 
 /// 프레임 뭉갬 판정 문턱. `theme-sprites.py` 의 `MIN_COLORS`/`MAX_RUN` 과 같은 값이고
@@ -1119,12 +1110,6 @@ fn slug_from_path(p: &Path) -> String {
 }
 
 impl App {
-    /// 감지 스냅샷. `themegen_poll` 이 채운 캐시를 읽기만 한다 — 설정 화면이 매
-    /// 프레임 부르는 자리라 여기서 디스크를 돌면 안 된다.
-    pub(crate) fn themegen_providers(&self) -> Vec<ProviderStatus> {
-        providers_cached()
-    }
-
     /// 한 명 굽기를 시작한다. `ref_path` 는 UI 가 이미 놓아 둔 원본이다.
     pub(crate) fn themegen_start(
         &mut self,
@@ -1248,14 +1233,7 @@ impl App {
     pub(crate) fn themegen_view(&self, slug: &str) -> Option<GenJobView> {
         let jobs = JOBS.read().unwrap();
         let j = jobs.get(slug)?.lock().unwrap();
-        Some(GenJobView {
-            phase: j.phase,
-            phase_label: j.phase_label().to_string(),
-            detail: j.detail.clone(),
-            failed_reason: j.failed.clone(),
-            provider: j.provider.to_string(),
-            started_ms: j.started_ms,
-        })
+        Some(GenJobView { phase: j.phase })
     }
 }
 

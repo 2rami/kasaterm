@@ -171,7 +171,7 @@ pub(crate) fn short_label(url: &str) -> String {
     rest.split('/').next().unwrap_or(rest).to_string()
 }
 
-/// winit 창의 NSWindow. auxwin.rs 와 같은 경로 — ns_view 는 호출 동안 살아
+/// winit 창의 NSWindow. ns_view 는 호출 동안 살아
 /// 있는 NSView* 다(창 Arc 를 우리가 쥐고 있다).
 #[cfg(target_os = "macos")]
 fn ns_window_of(

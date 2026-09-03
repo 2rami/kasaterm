@@ -608,49 +608,6 @@ fn profile_rgba_in(dir: &std::path::Path, slug: &str) -> Option<(Vec<u8>, u32, u
     [true, false].into_iter().find_map(|f| user_asset_rgba_in(dir, &profile_rel(slug, f)))
 }
 
-/// 테마 목록의 미리보기 얼굴 — **지정한 그림 하나**를 그린다.
-///
-/// `draw_student_face` 와 갈라 두는 이유가 있다. 그건 "지금 고른 테마의 그림"을
-/// 찾으므로, 테마 목록처럼 **여러 테마를 나란히** 놓는 자리에서는 전부 같은
-/// 얼굴이 된다 — 고르기 전에 무엇을 고르는지 보여 주는 게 목적인 화면에서 그건
-/// 아무것도 안 보여 주는 것과 같다. `src` 가 파일이면 그 png 를, `None` 이면
-/// 바이너리에 박힌 번들 그림을 쓴다(번들 테마 카드).
-///
-/// 키가 서로 다르므로 `student:` 캐시와 섞이지 않는다 — 테마를 바꿔도
-/// `drop_images_with_prefix("student:")` 가 이 미리보기를 건드리지 않고, 대신
-/// 테마 목록이 바뀔 때 `theme:` 접두사로 따로 비운다.
-pub(crate) fn draw_theme_face(
-    g: &mut gpu::GpuRenderer,
-    theme_id: &str,
-    slug: &str,
-    src: Option<&std::path::Path>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-) -> bool {
-    let key = format!("theme:{theme_id}:{slug}");
-    if !g.has_image(&key) {
-        let decoded = match src {
-            Some(p) => std::fs::read(p)
-                .ok()
-                .and_then(|b| image::load_from_memory(&b).ok())
-                .map(|i| i.to_rgba8()),
-            None => student_profile_png(slug)
-                .and_then(|b| image::load_from_memory(b).ok())
-                .map(|i| i.to_rgba8()),
-        };
-        let Some(img) = decoded else { return false };
-        let (iw, ih) = img.dimensions();
-        g.upload_image(&key, &img.into_raw(), iw, ih);
-    }
-    if !g.has_image(&key) {
-        return false;
-    }
-    g.queue_image_above(&key, x, y, w, h);
-    true
-}
-
 /// 테마 전환이 걷히는 데 걸리는 시간. 눈이 "무엇이 바뀌었나"를 읽을 만큼은 길고,
 /// 다음 클릭을 기다리게 할 만큼 길지는 않은 자리.
 pub(crate) const THEME_FX_SECS: f32 = 0.34;

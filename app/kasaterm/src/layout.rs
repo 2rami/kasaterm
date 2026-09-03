@@ -679,8 +679,7 @@ impl App {
     }
 
     /// split 이 얹을 새 셸을 띄우고 `self.pty` 에 등록한다 — **레이아웃은 안 건드린다**.
-    /// 트리에 꽂는 일과 갈라 둔 건 방 별도창 때문이다: 그 창의 pane 은 비활성 window
-    /// 트리에 살아 `pty_layout` 에 없고, 리사이즈도 메인 그리드가 아니라 그 창이 한다.
+    /// 트리에 꽂는 일과 갈라 둔 건 비활성 방의 트리가 `pty_layout` 밖에 있기 때문이다.
     /// 트리에 못 꽂았으면 호출부가 `self.pty` 에서 지운다 — 번호는 거기 등록된 것으로만
     /// 판정하므로(`alloc_pane_id`) 그것으로 자동 회수된다.
     pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
@@ -799,8 +798,7 @@ impl App {
         // 예전엔 `pty_layout` 만 봐서, 거노가 다른 방을 보고 있으면 pane 이 자기
         // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
         // 스폰은 오케스트레이터가 배경에서 하는 일이라 **거노가 어느 방을 보고 있는지와
-        // 무관해야** 한다. 방 별도창이 같은 이유로 이미 이렇게 하고 있다
-        // (`split_room_pane`) — 그 두 벌을 여기 한 벌로 모은다.
+        // 무관해야** 한다.
         let owner = self.window_of_pane(&active);
         let new_id = self.spawn_split_session(&active)?;
         let (win_cols, win_rows) = self.window_cells();
@@ -1245,13 +1243,7 @@ impl App {
                     // 보조 탭은 애초에 leaf 가 아니다 — 화면을 든 것은 그 탭이 사는
                     // 바깥 pane 이라 트리에 없는 게 정상이다.
                     let is_tab = ws.pid_to_pane.get(*id).is_some_and(|outer| outer != *id);
-                    !is_tab
-                        && !self.leaf_lingers_anywhere(id)
-                        && self.stashed_record(id).is_none()
-                        && !self
-                            .aux_windows
-                            .iter()
-                            .any(|a| a.term_pane_id() == Some(id.as_str()))
+                    !is_tab && !self.leaf_lingers_anywhere(id) && self.stashed_record(id).is_none()
                 })
                 .cloned()
                 .collect()
@@ -1293,9 +1285,7 @@ impl App {
     /// 통째로 놓는다 — 그러니 빈 뒤에 걷는다.
     ///
     /// 활성 창은 제외한다. 그 슬롯이 `None` 인 것은 정상이고(트리가 `pty_layout` 에
-    /// 있다), 새 방을 만드는 중에도 잠깐 그 상태를 지난다. 밖으로 꺼낸 방도 제외 —
-    /// 그쪽은 슬롯에 트리가 남아 있지만, 활성 판정이 한 틱 어긋나는 순간을 빈 방으로
-    /// 읽으면 사용자가 보고 있는 별도 창을 닫아 버린다.
+    /// 있다), 새 방을 만드는 중에도 잠깐 그 상태를 지난다.
     fn sweep_empty_rooms(&mut self) {
         if self.windows.len() <= 1 {
             return;
@@ -1304,11 +1294,7 @@ impl App {
             .windows
             .iter()
             .enumerate()
-            .filter(|(i, slot)| {
-                slot.is_none()
-                    && *i != self.active_window
-                    && !self.aux_windows.iter().any(|a| a.room_window() == Some(*i))
-            })
+            .filter(|(i, slot)| slot.is_none() && *i != self.active_window)
             .map(|(i, _)| i)
             .collect();
         // 뒤에서부터 — `close_window` 가 슬롯을 배열에서 빼므로 앞부터 지우면
@@ -2479,176 +2465,6 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.drag_orig_layout = None;
         self.drag_live_applied = None;
         applied
-    }
-
-    // ── Phase 3 tear-off ─────────────────────────────────────────────────────
-
-    /// tab-drag 를 창(콘텐츠 사각형) 밖에서 놓았는가 — 파일 탭이면 별도창으로 뜯어내는
-    /// 트리거. 창 안(패널 body 포함)에서 놓으면 기존 split/dock 경로가 처리하므로,
-    /// 여기서 true 는 오직 커서가 창 밖으로 나갔을 때뿐이다. 순수 함수(단위테스트 대상).
-    pub(crate) fn drag_left_window(px: f32, py: f32, win_w: f32, win_h: f32) -> bool {
-        px < 0.0 || py < 0.0 || px > win_w || py > win_h
-    }
-
-    /// 메인 창 client 영역의 논리 크기(px). tear-off 판정용.
-    pub(crate) fn logical_win_size(&self) -> (f32, f32) {
-        let scale = self.effective_scale();
-        self.window
-            .as_ref()
-            .map(|w| {
-                let s = w.inner_size();
-                (s.width as f32 / scale, s.height as f32 / scale)
-            })
-            .unwrap_or((0.0, 0.0))
-    }
-
-    /// 현재 커서(창-로컬 논리좌표)를 스크린 물리좌표로 환산 — tear-off 별도창을 커서
-    /// 밑에 띄우기 위한 위치. client 영역 원점 + 커서*scale, 살짝 위/왼쪽으로 올려
-    /// 뜯긴 탭 제목이 포인터 바로 밑에 오게 한다.
-    pub(crate) fn cursor_screen_phys(&self) -> Option<winit::dpi::PhysicalPosition<i32>> {
-        let w = self.window.as_ref()?;
-        let scale = self.effective_scale() as f64;
-        let origin = w.inner_position().or_else(|_| w.outer_position()).ok()?;
-        let x = origin.x + (self.cursor_px.0 as f64 * scale) as i32 - 40;
-        let y = origin.y + (self.cursor_px.1 as f64 * scale) as i32 - 12;
-        Some(winit::dpi::PhysicalPosition::new(x, y))
-    }
-
-    /// 이 pane 의 tab_idx 탭이 파일(Markdown) 탭인가 — tear-off 는 파일 탭만(터미널
-    /// PTY pane 은 범위 밖).
-    pub(crate) fn tab_is_file(&self, pane: &str, tab_idx: usize) -> bool {
-        self.ws
-            .lock()
-            .ok()
-            .and_then(|w| {
-                w.panes
-                    .get(pane)
-                    .and_then(|p| p.tabs.get(tab_idx))
-                    .map(|t| matches!(t.content, PaneContent::Markdown(_)))
-            })
-            .unwrap_or(false)
-    }
-
-    /// `KASATERM_DRAG_DEBUG=1` 일 때 드래그 판정을 한 줄로 찍는다.
-    ///
-    /// "끌어도 안 떨어진다"는 보고가 오면 **어느 제스처를 쓰는지**부터 갈라야 하는데,
-    /// pane 탭·pane 헤더·방 탭이 각각 다른 경로라 화면만 봐선 구별이 안 된다. 실제로
-    /// pane 탭만 고쳐 놓고 방 탭 제스처를 쓰는 바람에 "하나도 안 고쳐졌다"로 읽힌
-    /// 왕복이 한 번 있었다 — 그때 이게 있었으면 한 줄로 끝났다.
-    pub(crate) fn drag_trace(&self, what: &str, tears: bool, torn: bool) {
-        if std::env::var_os("KASATERM_DRAG_DEBUG").is_none() {
-            return;
-        }
-        let (w, h) = self.logical_win_size();
-        eprintln!(
-            "[drag] {what} cursor=({:.0},{:.0}) win=({w:.0}x{h:.0}) 꺼내기자리={tears} 이미나감={torn}",
-            self.cursor_px.0, self.cursor_px.1
-        );
-    }
-
-    /// 방 탭 드래그가 「꺼내기」 자리에 와 있는가. **놓을 때와 끄는 도중이 같은 판정을
-    /// 써야 하므로** 한 벌만 둔다 — 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
-    /// 어긋남이 생기고, 그건 화면만 봐선 원인을 못 짚는다.
-    ///
-    /// 기준이 「창 밖」이 아니라 **패널 밖**인 이유: 창을 통째로 벗어나야 꺼지게 뒀더니
-    /// 사이드바에서 옆으로 빼는 자연스러운 동작이 전부 재배치로 흘러 기능이 죽어 있었다
-    /// (거노: "윈도우 패널에서 꺼내면"). 상단 탭 모드는 스트립이 가로라 같은 논리를 쓰면
-    /// 재배치(좌우)와 꺼내기(아래)가 뒤엉켜, 그쪽만 창 밖 기준을 남긴다.
-    pub(crate) fn room_drag_tears(&self) -> bool {
-        const TEAR_MARGIN: f32 = 40.0;
-        let (win_w, win_h) = self.logical_win_size();
-        let left_win = Self::drag_left_window(self.cursor_px.0, self.cursor_px.1, win_w, win_h);
-        let left_panel =
-            !self.tabs_on_top && self.cursor_px.0 > self.effective_sidebar_w() + TEAR_MARGIN;
-        left_win || left_panel
-    }
-
-    /// 이 방이 이미 별도창으로 나가 있는가 — 그 aux 창 인덱스.
-    pub(crate) fn torn_aux_room(&self, win: usize) -> Option<usize> {
-        self.aux_windows
-            .iter()
-            .position(|a| a.room_window() == Some(win))
-    }
-
-    /// 방 탭 드래그 도중: 아직 안 나갔으면 **놓기 전에** 꺼내고, 이미 나갔으면 그 창을
-    /// 커서 밑으로 옮긴다. 반환값 = 이 방이 지금 별도창이다(= 호출부는 재배치 미리보기를
-    /// 멈춰야 한다).
-    ///
-    /// pane 쪽 `drag_tear_follow` 와 형제지만 대상이 다르다 — 이쪽은 방(윈도우) 통째다.
-    /// 거노가 "드래그 뗄 때 분리된다"고 한 건 이 경로였다: pane 탭만 고쳐 두고 방 탭을
-    /// 안 고쳐서, 고친 쪽을 안 쓰면 아무것도 안 바뀐 것처럼 보였다.
-    pub(crate) fn drag_tear_follow_room(
-        &mut self,
-        win: usize,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> bool {
-        if let Some(i) = self.torn_aux_room(win) {
-            if let Some(pos) = self.cursor_screen_phys() {
-                self.aux_windows[i].window.set_outer_position(pos);
-            }
-            return true;
-        }
-        let near = self.cursor_screen_phys();
-        self.undock_window_room(win, event_loop, near);
-        self.torn_aux_room(win).is_some()
-    }
-
-    /// 이 pane 이 이미 별도창으로 뜯겨 있는가 — 그 aux 창 인덱스. 드래그 도중
-    /// 뜯긴 상태를 App 필드 없이 판별하는 유일한 기준이다(`aux_windows` 자체가
-    /// 상태다). 병렬 작업 규칙상 struct App 은 건드리지 않는다.
-    pub(crate) fn torn_aux_window(&self, pane: &str) -> Option<usize> {
-        self.aux_windows.iter().position(|a| {
-            matches!(&a.kind, crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if pane_id == pane)
-        })
-    }
-
-    /// 드래그 중 커서가 창 밖으로 나갔을 때: 아직 안 뜯겼으면 **놓기 전에** 별도창으로
-    /// 뜯어내고, 이미 뜯겼으면 그 창을 커서 밑으로 옮긴다. 반환값 = 이 pane 이 지금
-    /// 별도창이다(= 호출부는 라이브 재배치를 하지 말아야 한다 — 레이아웃에 없는 pane 을
-    /// 옮기려 들면 엉뚱한 자리에 꽂힌다).
-    ///
-    /// 터미널 pane 만 대상이다. 파일(마크다운) 탭은 별도창 종류가 달라(`Editor`) 뜯긴
-    /// 여부를 pane id 로 판별할 수 없으니 놓는 순간 처리하는 기존 경로에 남긴다.
-    /// `tab` = 잡은 탭 인덱스(헤더 드래그처럼 모르면 `None` → 활성 탭).
-    pub(crate) fn drag_tear_follow(
-        &mut self,
-        pane: &str,
-        tab: Option<usize>,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> bool {
-        if let Some(i) = self.torn_aux_window(pane) {
-            // 창이 커서를 따라온다 — 뜯긴 순간의 자리에 못 박으면 "들고 있다"는
-            // 감각이 끊긴다. 위치 계산은 스폰 때와 같은 오프셋(cursor_screen_phys).
-            if let Some(pos) = self.cursor_screen_phys() {
-                self.aux_windows[i].window.set_outer_position(pos);
-            }
-            return true;
-        }
-        // 파일 탭이면 넘긴다. 판정은 `ws.panes` 를 보는데, 갓 split 된 pane 은 아직
-        // PaneState 가 없다(첫 출력이 만든다) — 그때 "터미널이 아니다"로 읽히면
-        // 안 되므로 없으면 false(=터미널)로 떨어지는 tab_is_file 을 그대로 쓴다.
-        let tab_idx = tab
-            .or_else(|| {
-                self.ws
-                    .lock()
-                    .ok()
-                    .and_then(|w| w.panes.get(pane).map(|p| p.active_tab))
-            })
-            .unwrap_or(0);
-        if self.tab_is_file(pane, tab_idx) {
-            return false;
-        }
-        // PTY 없는 pane(이미지·md)은 undock 이 어차피 거절한다 — 미리 걸러 쓸데없이
-        // 라이브 백업만 날리는 일을 막는다.
-        if !self.pty.contains_key(pane) {
-            return false;
-        }
-        // 라이브 재배치 백업을 먼저 정리한다 — 놓는 순간 뜯어내던 경로와 같은 순서.
-        // 안 하면 undock 뒤에도 백업 트리가 남아 다음 드래그가 옛 레이아웃을 복원한다.
-        self.finish_live_drag();
-        let near = self.cursor_screen_phys();
-        self.undock_pane_terminal(pane, event_loop, near);
-        self.torn_aux_window(pane).is_some()
     }
 
     /// Detach `moving` from the active window and graft it beside `target`,

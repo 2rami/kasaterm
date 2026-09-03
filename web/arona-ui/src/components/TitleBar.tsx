@@ -20,7 +20,7 @@ function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
   const lit = active || hover;
   // 폰에선 44 — 26px 상자는 손가락으로 못 누른다(iOS HIG 44). 아이콘 크기는 그대로 두고
   // 누를 수 있는 상자만 키운다.
-  const box = isPhone ? 44 : 26;
+  const box = isPhone ? 44 : 36;
   return (
     <button
       title={title}
@@ -172,7 +172,7 @@ export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, 
       // 안쪽이 깎여 버튼이 다시 눌리기 때문이다. 브라우저·데스크톱 webview 에선 inset 이 0 이라
       // 정확히 48 로 남는다.
       padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
-      height: isPhone ? 'calc(48px + env(safe-area-inset-top, 0px))' : 34,
+      height: isPhone ? 'calc(48px + env(safe-area-inset-top, 0px))' : 44,
       paddingTop: isPhone ? 'env(safe-area-inset-top, 0px)' : undefined,
       // 전역 바 — 옅은 sky 그라데이션 + 아래 그림자로 pane 하단바(plain cream)와 구분(거노).
       background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',

@@ -740,14 +740,6 @@ impl GpuRenderer {
         self.scale
     }
 
-    /// Current font size in **logical** px — the value `set_font_size` was last
-    /// given (round-tripped through the physical size it stores). Separate
-    /// windows keep their own zoom here instead of in App's global `ui_zoom`,
-    /// so a zoom shortcut needs to read back what this window is at.
-    pub fn font_size(&self) -> f32 {
-        self.font_size_px as f32 / self.scale
-    }
-
     /// Repack the glyph atlas if it asked to be repacked — because a bake
     /// found no room, or because a DPI / font-size change invalidated every
     /// cached size. **Frame boundary only**: quads already queued this frame
@@ -1015,11 +1007,6 @@ impl GpuRenderer {
 
     pub fn draw_text(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
         self.draw_text_clipped(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY)
-    }
-
-    /// `draw_text` pinned to the terminal face — see `chrome_face_opt`.
-    pub fn draw_text_mono(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
-        self.draw_text_inner(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY, true)
     }
 
     /// `draw_text` 에 좌우 울타리(logical px)를 세운 것. Raw 편집기의 긴 코드 줄이

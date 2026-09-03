@@ -151,7 +151,6 @@ impl App {
         // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
         // 닫지도, pane 을 띄우지도 않는다 — 이 자리에 「로그인 중… / 취소」가 뜬다.
         spawn_hidden_login(
-            "Claude",
             id.clone(),
             "claude auth login --claudeai".to_string(),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -189,7 +188,6 @@ impl App {
         // 서브커맨드라(우리 홈을 씌우면 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이
         // 그대로 진짜 codex 에 닿아 이 슬롯에 auth.json 을 쓴다.
         spawn_hidden_login(
-            "Codex",
             id.clone(),
             "codex login".to_string(),
             "CODEX_HOME",
@@ -382,52 +380,6 @@ impl App {
         kasa_mcp::character::list_themes()
     }
 
-    /// 열려 있는 캐릭터의 참조 그림을 파일 선택으로 고른다. 대화상자는 고를 때까지
-    /// 블록되므로 스레드에서 띄우고, 결과는 GUI 에 돌려주는 대신 **ref 자리에 파일로
-    /// 남긴다** — 스냅샷이 매 프레임 그 자리를 stat 하니 다음 프레임에 저절로 보인다.
-    fn themegen_pick_ref(&mut self) {
-        let theme_id = socket::read_character_theme();
-        let Some(slug) = self
-            .students_selected
-            .as_deref()
-            .and_then(theme::character_slug)
-            .map(str::to_string)
-        else {
-            return;
-        };
-        let Some(root) = kasa_mcp::character::themes_root() else { return };
-        if theme_id.is_empty() {
-            return;
-        }
-        let dir = root.join(&theme_id);
-        std::thread::spawn(move || {
-            if let Some(src) = choose_image_file() {
-                let _ = place_themegen_ref(&dir, &slug, &src);
-            }
-        });
-    }
-
-    /// 캐릭터 격자의 「+ 새 캐릭터」 — 참조 그림을 고르면 파일명에서 slug 를 유도해
-    /// 로스터(theme.json)에 추가하고 ref 를 놓는다. 상세 자동 진입은 없다 — 추가는
-    /// 스레드에서 끝나는데 App 상태(students_selected)는 GUI 스레드 것이라서다.
-    /// 캐시를 비워 두면 다음 프레임 격자에 새 카드가 뜨고, 사용자가 그걸 누른다.
-    fn themegen_new_student(&mut self) {
-        let theme_id = socket::read_character_theme();
-        let Some(root) = kasa_mcp::character::themes_root() else { return };
-        if theme_id.is_empty() {
-            return;
-        }
-        let dir = root.join(&theme_id);
-        std::thread::spawn(move || {
-            let Some(src) = choose_image_file() else { return };
-            let Some(slug) = add_theme_member(&dir, &src) else { return };
-            let _ = place_themegen_ref(&dir, &slug, &src);
-            kasa_mcp::character::invalidate_active_theme();
-            theme::invalidate_roster();
-            socket::invalidate_theme_rows();
-        });
-    }
-
     /// Mark every pane + chrome dirty so a theme/accent change repaints the
     /// whole window (cell backgrounds pick up the new palette too).
     /// 테마를 갈기 **직전에** 부른다 — 지금 배경색을 붙잡아 둬야 그게 흩어질 옛
@@ -451,13 +403,6 @@ impl App {
     /// (헤드리스 검증·단축키) 같은 경로를 탈 수 있게 하기 위한 것이다.
     pub(crate) fn settings_apply(&mut self, action: SettingsAction) {
         match action {
-            SettingsAction::Category(c) => {
-                self.flush_student_persona();
-                self.settings_cat = c;
-                self.settings_input = None;
-                // 페이지가 바뀌면 스크롤은 맨 위부터.
-                self.settings_scroll = 0.0;
-            }
             SettingsAction::CwdMode(m) => {
                 // "last"/"home" are literal; "custom" keeps any existing path or
                 // seeds $HOME so the field isn't empty.
@@ -474,10 +419,6 @@ impl App {
                     self.settings_input = None;
                 }
                 self.settings_save();
-            }
-            SettingsAction::FocusCwdPath => {
-                self.settings_caret = self.set_cwd_mode.chars().count();
-                self.settings_input = Some(SettingsInput::CwdPath);
             }
             SettingsAction::FileOpenMode(m) => {
                 self.set_file_open_mode = m.to_string();
@@ -512,10 +453,6 @@ impl App {
                 self.set_file_open_app = name;
                 self.settings_save();
             }
-            SettingsAction::FocusFileOpenCmd => {
-                self.settings_caret = self.set_file_open_cmd.chars().count();
-                self.settings_input = Some(SettingsInput::FileOpenCmd);
-            }
             SettingsAction::ToggleFileTree => {
                 self.set_file_tree_default = !self.set_file_tree_default;
                 self.settings_save();
@@ -549,10 +486,6 @@ impl App {
                 self.set_shell = s;
                 self.settings_input = None;
                 self.settings_save();
-            }
-            SettingsAction::FocusShell => {
-                self.settings_caret = self.set_shell.chars().count();
-                self.settings_input = Some(SettingsInput::Shell);
             }
             SettingsAction::ThemeMode(m) => {
                 self.begin_theme_fx();
@@ -749,14 +682,6 @@ impl App {
                 self.settings_input = None;
                 self.settings_save();
             }
-            SettingsAction::FocusClaudeExtra => {
-                self.settings_caret = self.set_claude_extra.chars().count();
-                self.settings_input = Some(SettingsInput::ClaudeExtra);
-            }
-            SettingsAction::ClaudeAccount(id) => {
-                // 다시 뜰 pane 이 있으면 먼저 묻는다. 없으면 옛 경로 그대로 즉시 전환.
-                self.ask_or_switch_claude_account(&id, crate::session::ConfirmSurface::Settings);
-            }
             SettingsAction::ToggleAccountAutoswitch => {
                 self.set_account_autoswitch = !self.set_account_autoswitch;
                 // 켜는 순간 옛 쿨다운은 버린다 — 며칠 전 소진 기록이 남아 있으면
@@ -813,26 +738,22 @@ impl App {
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
             // 붙은 한도 이력이 남는다. 새로 만들었다 지우는 것과 여기가 갈린다.
             SettingsAction::ReauthAccount(p, id, browser) => {
-                let (provider, argv, key, dir) = match p {
+                let (argv, key, dir) = match p {
                     AccountProvider::Claude => (
-                        "Claude",
                         "claude auth login --claudeai",
                         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
                         socket::claude_account_dir(&id),
                     ),
-                    AccountProvider::Codex => (
-                        "Codex",
-                        "codex login",
-                        "CODEX_HOME",
-                        socket::codex_account_dir(&id),
-                    ),
+                    AccountProvider::Codex => {
+                        ("codex login", "CODEX_HOME", socket::codex_account_dir(&id))
+                    }
                 };
                 let Some(dir) = dir else {
                     self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
                     return;
                 };
                 let _ = std::fs::create_dir_all(&dir);
-                spawn_hidden_login(provider, id, argv.to_string(), key, dir, browser);
+                spawn_hidden_login(id, argv.to_string(), key, dir, browser);
                 self.set_toast(
                     match browser {
                         LoginBrowser::Isolated => "빈 브라우저 창에서 로그인하세요",
@@ -843,8 +764,6 @@ impl App {
                     .to_string(),
                 );
             }
-            SettingsAction::CancelLogin => cancel_login(),
-            SettingsAction::DismissLogin => clear_login_job(),
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);
                 // 지운 계정이 활성이었으면 기본 로그인으로 — 아무도 로그인할 수
@@ -867,13 +786,6 @@ impl App {
                 self.settings_input = None;
                 self.settings_save();
             }
-            SettingsAction::FocusClaudeAccountLabel(i) => {
-                self.settings_caret = self
-                    .set_claude_accounts
-                    .get(i)
-                    .map_or(0, |a| a.label.chars().count());
-                self.settings_input = Some(SettingsInput::ClaudeAccountLabel(i));
-            }
             SettingsAction::CodexAccount(id) => {
                 self.ask_or_switch_codex_account(&id, crate::session::ConfirmSurface::Settings);
             }
@@ -889,13 +801,6 @@ impl App {
                 self.settings_input = None;
                 self.settings_save();
             }
-            SettingsAction::FocusCodexAccountLabel(i) => {
-                self.settings_caret = self
-                    .set_codex_accounts
-                    .get(i)
-                    .map_or(0, |a| a.label.chars().count());
-                self.settings_input = Some(SettingsInput::CodexAccountLabel(i));
-            }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
@@ -909,10 +814,6 @@ impl App {
             SettingsAction::FocusStudentName => {
                 self.settings_caret = self.students_name.chars().count();
                 self.settings_input = Some(SettingsInput::StudentName);
-            }
-            SettingsAction::FocusFeedbackBody => {
-                self.feedback_caret = self.feedback_body.chars().count();
-                self.settings_input = Some(SettingsInput::FeedbackBody);
             }
             SettingsAction::ToggleFeedbackDiag => self.feedback_diag = !self.feedback_diag,
             SettingsAction::SaveFeedback => self.save_feedback(),
@@ -934,13 +835,6 @@ impl App {
                     self.reload_student_raw();
                 }
             }
-            SettingsAction::FocusStudentRaw => {
-                self.settings_input = Some(SettingsInput::StudentRaw);
-            }
-            SettingsAction::SaveStudentRaw => {
-                self.settings_input = None;
-                self.save_student_raw();
-            }
             SettingsAction::StudentModel(model, backend) => {
                 let Some(name) = self.students_selected.clone() else { return };
                 // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
@@ -952,42 +846,10 @@ impl App {
                     &name, "backend", serde_json::Value::String(backend.clone()));
                 self.regen_pane_shims();
             }
-            SettingsAction::FocusStudentPersona => {
-                // 캐럿 저장소를 단일라인 필드와 공유하므로, 다른 필드가 만졌을 수
-                // 있는 캐럿을 persona 끝으로 되돌린다.
-                self.students_caret = self.students_persona.chars().count();
-                self.settings_input = Some(SettingsInput::StudentPersona);
-            }
             SettingsAction::ThemeGenProvider(p) => {
                 socket::write_setting("theme_gen_provider", serde_json::Value::String(p));
                 self.settings_input = None;
             }
-            SettingsAction::FocusGeminiKey => {
-                // 정본(settings.json)을 버퍼로 불러와 이어서 고친다 — 빈 버퍼로
-                // 시작하면 한 글자만 쳐도 저장된 키가 그 한 글자로 바뀐다.
-                self.themegen.key_edit = socket::read_settings()
-                    .get("gemini_api_key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                self.settings_caret = self.themegen.key_edit.chars().count();
-                self.settings_input = Some(SettingsInput::GeminiKey);
-            }
-            SettingsAction::ThemeGenPickRef => self.themegen_pick_ref(),
-            SettingsAction::ThemeGenStart => {
-                let theme_id = socket::read_character_theme();
-                let slug = self
-                    .students_selected
-                    .as_deref()
-                    .and_then(theme::character_slug)
-                    .map(str::to_string);
-                if let Some(slug) = slug {
-                    if let Some((path, _)) = themegen_ref_info(&theme_id, &slug) {
-                        self.themegen_start(&theme_id, &slug, &path, None);
-                    }
-                }
-            }
-            SettingsAction::ThemeGenNewStudent => self.themegen_new_student(),
         }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -2001,8 +1863,7 @@ impl App {
             .unwrap_or_else(|| "#000000".to_string())
     }
 
-    /// 색 선택기의 한 픽 — press(settings_click)와 드래그(auxwin CursorMoved)
-    /// 양쪽이 부른다. rect 밖 커서는 클램프해 가장자리 값으로 잇는다: 드래그
+    /// 색 선택기의 한 픽. rect 밖 커서는 클램프해 가장자리 값으로 잇는다: 드래그
     /// 중 손이 살짝 벗어났다고 픽이 끊기면 끝값(0·1·순수 원색)을 잡을 수 없다.
     pub(crate) fn picker_pick(
         &mut self,
@@ -2501,22 +2362,6 @@ fn themegen_ref_info(theme_id: &str, slug: &str) -> Option<(std::path::PathBuf, 
 /// macOS 파일 선택 대화상자. 고를 때까지 **블록**되므로 GUI 스레드에서 부르면
 /// 화면이 통째로 멎는다 — 반드시 스레드에서. 취소하면 osascript 가 비정상 종료해
 /// stdout 이 비고, 그대로 None 이 된다.
-fn choose_image_file() -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            r#"POSIX path of (choose file of type {"public.image"} with prompt "참조 그림 고르기")"#,
-        ])
-        .output()
-        .ok()?;
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!p.is_empty()).then(|| std::path::PathBuf::from(p))
-}
-
-// place_themegen_ref(PNG 재인코딩) · add_theme_member(로스터 등록) · mask_key 는
-// themegen.rs 것을 쓴다(crate root 재수출) — 규약의 정본이 굽는 쪽에 있어야
-// 전처리·설치가 같은 자리를 본다.
-
 /// 저장된 피드백이 쌓이는 폴더. 홈을 못 찾으면 temp 로 — 빈 PathBuf 에 join 하면
 /// **상대경로**가 되어 피드백이 그때그때의 cwd 에 흩뿌려진다(Windows GUI 프로세스는
 /// HOME 이 없어 항상 그랬다).
@@ -2660,7 +2505,6 @@ fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
 pub(crate) struct LoginJob {
     /// 로그인 중인 슬롯 id(`acct-2` · `codex-1`).
     pub(crate) id: String,
-    pub(crate) provider: &'static str,
     pub(crate) state: LoginState,
 }
 
@@ -2677,35 +2521,6 @@ type LoginCell = std::sync::Mutex<(Option<LoginJob>, Option<u32>)>;
 fn login_cell() -> &'static LoginCell {
     static CELL: std::sync::OnceLock<LoginCell> = std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::Mutex::new((None, None)))
-}
-
-/// 지금 진행 중이거나 방금 끝난 로그인. 설정 화면이 매 프레임 읽는다.
-pub(crate) fn login_job() -> Option<LoginJob> {
-    login_cell().lock().ok()?.0.clone()
-}
-
-/// 로그인 표시를 지운다 — 결과를 읽은 사용자가 닫을 때.
-pub(crate) fn clear_login_job() {
-    if let Ok(mut c) = login_cell().lock() {
-        c.0 = None;
-    }
-}
-
-/// 진행 중인 로그인을 죽인다. **프로세스 그룹째** 죽이는 게 핵심이다 — 로그인
-/// 프로세스는 콜백 서버와 브라우저 자식을 남기고, 그 서버가 살아 있으면 다음 시도가
-/// 같은 포트에서 막힌다(Orca 도 같은 이유로 POSIX 프로세스 그룹을 쓴다).
-pub(crate) fn cancel_login() {
-    let pgid = {
-        let Ok(mut c) = login_cell().lock() else { return };
-        c.0 = None;
-        c.1.take()
-    };
-    if let Some(pgid) = pgid {
-        // 셸을 안 거친다 — `kill -TERM -<pgid>` 를 직접 부른다.
-        let _ = crate::proc::command("kill")
-            .args(["-TERM", &format!("-{pgid}")])
-            .status();
-    }
 }
 
 /// 로그인 승인을 **어느 브라우저**에서 받을지. 두 길이 다 필요하다.
@@ -2764,7 +2579,6 @@ fn add_account_toast() -> String {
 /// 찍히는 "Paste code here if prompted" 는 콜백이 실패했을 때의 폴백이다. 그래서
 /// **stdin 을 열어둔 채** 둔다 — 닫으면 그 폴백 경로가 통째로 죽는다.
 fn spawn_hidden_login(
-    provider: &'static str,
     id: String,
     argv: String,
     env_key: &'static str,
@@ -2775,7 +2589,7 @@ fn spawn_hidden_login(
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
     if let Ok(mut c) = login_cell().lock() {
-        c.0 = Some(LoginJob { id: id.clone(), provider, state: LoginState::Running });
+        c.0 = Some(LoginJob { id: id.clone(), state: LoginState::Running });
     }
     std::thread::spawn(move || {
         // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의

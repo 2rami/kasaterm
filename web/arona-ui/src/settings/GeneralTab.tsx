@@ -86,6 +86,7 @@ export function GeneralTab({
       {cwd === 'custom' && (
         <div className="mb-4">
           <TextField
+            label={t.general.startupFolder}
             value={data.cwd_mode}
             disabled={busy}
             mono
@@ -96,6 +97,7 @@ export function GeneralTab({
 
       <Row label={t.general.fileTree} desc={[t.general.fileTreeHint]}>
         <Toggle
+          label={t.general.fileTree}
           on={data.file_tree_default}
           disabled={busy}
           onToggle={() => void run('toggle-file-tree')}
@@ -104,6 +106,7 @@ export function GeneralTab({
 
       <Row label={t.general.statusBar} desc={[t.general.statusBarHint]}>
         <Toggle
+          label={t.general.statusBar}
           on={data.footer_default}
           disabled={busy}
           onToggle={() => void run('toggle-footer')}
@@ -171,6 +174,7 @@ export function GeneralTab({
             {t.general.terminalCmdHint}
           </p>
           <TextField
+            label={t.general.terminalCmdHint}
             value={data.file_open_cmd}
             disabled={busy}
             mono

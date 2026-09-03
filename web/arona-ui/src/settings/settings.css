@@ -16,7 +16,7 @@
   --kt-accent: #5a8ce6;
   --kt-text: #eceef3;
   --kt-text-dim: #a0a6b0;
-  --kt-text-mute: #787e8a;
+  --kt-text-mute: #a0a6b0;
   --kt-success: #3fb950;
   --kt-danger: #e0584e;
   --kt-attention: #fa8c2a;
@@ -80,6 +80,7 @@ img.kt-face {
    `field-sizing` 같은 최신 속성은 안 쓴다(웹뷰의 WebKit 버전을 우리가 못 고정
    한다). 높이는 쓰는 쪽에서 클래스로 준다. */
 .kt-field {
+  min-height: 40px;
   background: var(--kt-surface);
   color: var(--kt-text);
   border: var(--kt-border-w) solid var(--kt-border);
@@ -93,6 +94,15 @@ img.kt-face {
 .kt-field:focus {
   /* 포커스 링을 테두리 색 교체로 낸다 — box-shadow 로 겹치면 옆 칸을 덮는다. */
   border-color: var(--kt-accent);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--kt-accent);
+  outline-offset: 2px;
 }
 
 .kt-field::selection {

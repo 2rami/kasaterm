@@ -208,9 +208,6 @@ pub(crate) struct PaneGroup {
     /// 방(윈도우) 인덱스와 이름 — 방이 둘 이상일 때만 머리로 그린다.
     pub(crate) window: usize,
     pub(crate) window_label: String,
-    /// 이 방이 별도 창으로 나가 있나. 나가 있으면 그 pane 들은 메인 화면에 없으므로,
-    /// 표시가 없으면 "왜 여기 있는데 안 보이지"가 된다.
-    pub(crate) undocked: bool,
     /// 사용자가 닫은 pane 인가. 닫아도 PTY 는 되살리기 대비로 계속 도는데,
     /// **프로세스 목록에는 안 올린다** — 화면에 없는 pane 이 목록에 남아 있으면
     /// 「닫았는데 왜 아직 있나」가 되고, 되살리기 목록과 두 곳에서 같은 것을
@@ -291,9 +288,6 @@ pub(crate) struct PaneTarget {
     pub(crate) active: bool,
     pub(crate) window: usize,
     pub(crate) window_label: String,
-    /// 이 방이 별도 창으로 나가 있나. 나가 있으면 그 pane 들은 메인 화면에 없으므로,
-    /// 표시가 없으면 "왜 여기 있는데 안 보이지"가 된다.
-    pub(crate) undocked: bool,
     /// 이 pane 이 붙든 claude transcript. 제목을 뽑으려면 jsonl 꼬리를 읽어야
     /// 해서 **경로만** GUI 가 넘기고 읽기는 워커가 한다.
     pub(crate) session_path: Option<std::path::PathBuf>,
@@ -362,7 +356,6 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             active: t.active,
             window: t.window,
             window_label: t.window_label.clone(),
-            undocked: t.undocked,
             closed: t.closed,
             cwd: t.cwd.as_deref().map(tilde_path).unwrap_or_default(),
             rows: if t.shell_pid == 0 { Vec::new() } else { build_rows(&table, t.shell_pid) },
@@ -1766,7 +1759,6 @@ impl App {
                             (!tail.is_empty()).then(|| tail.to_string())
                         })
                         .unwrap_or_default(),
-                    undocked: self.window_is_undocked(window),
                     // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
                     // 훑어야 해서 그건 워커 몫이다(session_title).
                     session_path: self
@@ -2855,7 +2847,6 @@ fn draw_window_head(
     };
     // 별도 창으로 나간 방은 그 사실을 머리에 적는다 — 이 pane 들은 메인 화면에
     // 없으니, 표시가 없으면 목록에만 있고 어디에도 안 보이는 유령으로 읽힌다.
-    let name = if gp.undocked { format!("{name} · 별도 창") } else { name };
     let name = fit_text(g, &name, (right - nw - 8.0 - tx).max(0.0), 10.5, true);
     g.draw_text(
         tx,

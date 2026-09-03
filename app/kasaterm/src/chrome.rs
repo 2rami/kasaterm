@@ -110,8 +110,8 @@ impl App {
     /// 그 병을 호출부에서 한 곳씩 고쳐 왔다(`5c761f6` 이 헤더·되살리기·알림 셋).
     /// 그런데 **새 호출부가 생길 때마다 같은 것을 또 밟는다** — 전수로 세어 보니
     /// 아홉 자리 중 여섯이 각자 관문을 걸고 있었고, 안 건 둘은 실제로 새고 있었다
-    /// (별도창 헤더는 **바로 옆에서 `pane_accent`(관문 有)를 부르면서** 이름만
-    /// 관문 없이 불러, 같은 pane 이 이름은 있고 색은 없었다). 기본값이 반대였다.
+    /// (예전 보조창 헤더는 이름만 관문 없이 불러, 같은 pane 이 이름은 있고 색은
+    /// 없었다). 기본값이 반대였다.
     ///
     /// 그래서 관문을 이 안으로 들였다. 이제 **덜 안전한 쪽을 쓰려면 그렇게 쓰겠다고
     /// 적어야 한다** — 잊어서 새는 일이 안 생긴다.
@@ -166,31 +166,7 @@ impl App {
             })
     }
 
-    /// pane 에 **학생색을 입힐지**의 정본. 이름(`display_pane_char`)과 달리
-    /// 「지금 에이전트가 도는가」 관문을 지난다 — 순수 셸 pane 에 남의 학생색이
-    /// 둘리면 「저기 누가 있다」로 잘못 읽히기 때문이고, 메인 그리드의 pane 테두리가
-    /// 이미 그 규칙이다(`render.rs` 의 `claude_panes` 필터).
-    ///
-    /// 별도창(터미널·방)이 이걸 안 쓰고 `ws.pane_character` 를 날로 읽던 동안,
-    /// 같은 pane 이 창마다 다른 대접을 받았다 — 셸 pane 이 별도창에선 학생색·이름을
-    /// 달고 메인에선 무채색이라, 되돌리면 「학생 테마가 깨졌다」로 보였다(거노).
-    /// 관문은 이름과 같은 키(**탭 pid**)로 본다 — 탭에서 도는 학생을 놓치지 않게.
-    pub(crate) fn pane_accent(&self, ws: &Workspace, id: &str) -> Option<[u8; 4]> {
-        let tab = ws.active_tab_pid(id);
-        // 원격 미러 pane 은 로컬 active_agent 이 없다 — 별도창(터미널·방)에서도
-        // 학생색이 붙게 관문을 건너뛴다(display_tab_char 과 같은 이유).
-        if !kasa_mcp::remote::is_remote_pane(tab.as_str()) {
-            self.pty.get(tab.as_str()).and_then(|p| p.active_agent())?;
-        }
-        let name = self.display_pane_char(ws, id)?;
-        crate::theme::character_accent_n(
-            &name,
-            crate::theme::character_ordinal(&ws.pane_character, id),
-        )
-    }
-
-    /// 헤더 탭에 실을 제목들. **메인 그리드와 별도창이 같은 이 함수를 지난다** —
-    /// 두 벌로 두면 별도창 탭만 OSC 날제목(`✳ Claude Code`)으로 돌아간다.
+    /// 메인 그리드 헤더 탭에 실을 제목들.
     pub(crate) fn pane_tab_labels(
         &self,
         ws: &Workspace,
@@ -424,22 +400,6 @@ impl App {
             .collect();
         self.pane_claude_seen.extend(seen);
         self.pane_claude_seen.retain(|id| self.pty.contains_key(id));
-    }
-
-    /// 밖에 나간 방을 메인으로 되돌린다 — 사이드바가 부르는 쪽 입구.
-    ///
-    /// `dock_window_room` 은 **aux 창 인덱스**를 받는데 사이드바는 방 인덱스로만
-    /// 말한다. 그 둘을 그대로 넘기면 엉뚱한 창이 닫히므로 여기서 한 번 옮긴다.
-    pub(crate) fn dock_room_back(&mut self, win: usize) {
-        let Some(aux) = self
-            .aux_windows
-            .iter()
-            .position(|a| a.room_window() == Some(win))
-        else {
-            return;
-        };
-        self.dock_window_room(aux);
-        self.chrome_dirty = true;
     }
 
     /// 이 pane 에 학생 얼굴을 내보여도 되나 — claude 를 한 번이라도 띄웠는가.
@@ -924,6 +884,11 @@ impl App {
         let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w;
         let y = (TITLE_HEIGHT - h) / 2.0;
         Some((x, y, w, h))
+    }
+
+    pub(crate) fn settings_title_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        self.git_col_toggle_rect()
+            .map(|(x, y, w, h)| (x - w - 4.0, y, w, h))
     }
     /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
@@ -1853,18 +1818,6 @@ impl App {
     pub(crate) fn window_strip_click(&mut self, cx: f32, cy: f32) -> bool {
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
-        // 밖에 나간 방의 되돌리기 버튼이 가장 먼저다. × 히트렉트는 그려지지 않는
-        // 탭에도 남아 있고 자리가 정확히 겹쳐서, 뒤에 두면 되돌리려던 클릭이
-        // 「이 방 닫을까요」로 새어 나갔다(실측: 방이 통째로 사라짐).
-        if let Some(idx) = self
-            .window_dock_rects
-            .iter()
-            .find(|(_, r)| inside(r))
-            .map(|(i, _)| *i)
-        {
-            self.dock_room_back(idx);
-            return true;
-        }
         if let Some(idx) = self
             .window_tab_close_rects
             .iter()
@@ -2446,8 +2399,13 @@ impl App {
         self.copy_toast_at = Some(Instant::now());
     }
     pub(crate) fn toggle_session_panel(&mut self, _event_loop: &ActiveEventLoop) {
+        let replacing_inline = self.inline_web.is_some();
         self.close_inline_web();
-        if self.git.col_visible && self.info.tab == state::SideTab::Sessions {
+        if side_column_should_toggle(
+            replacing_inline,
+            self.git.col_visible,
+            self.info.tab == state::SideTab::Sessions,
+        ) {
             self.toggle_git_col();
             return;
         }
@@ -2501,11 +2459,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let url = format!(
-            "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}&student={}&theme={}",
-            urlencode(slug),
-            urlencode(theme)
-        );
+        let url = student_web_url(&port, slug, theme, cb);
         // 이미 떠 있으면 주소만 바꾸고 앞으로 가져온다.
         if let (Some(w), Some(wv)) = (
             self.student_web_window.as_ref(),
@@ -2591,7 +2545,10 @@ impl App {
                 ));
             }
             if let Some(host) = self.inline_web.as_ref() {
-                host.window.focus_window();
+                host.window
+                    .as_ref()
+                    .or(self.window.as_ref())
+                    .map(|w| w.focus_window());
             }
             return true;
         }
@@ -2607,7 +2564,8 @@ impl App {
             eprintln!("[inline-web] page unreachable: kind={kind:?} port={port}");
             return false;
         }
-        if !self.sidebar_visible {
+        let restore_sidebar = !self.sidebar_visible;
+        if restore_sidebar {
             self.toggle_sidebar();
         }
         let cb = std::time::SystemTime::now()
@@ -2627,7 +2585,7 @@ impl App {
                 format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&panel=board")
             }
         };
-        let title = match kind {
+        let _title = match kind {
             InlineWebKind::Settings if !certain => {
                 format!("설정 — 127.0.0.1:{port} (포트 불확실)")
             }
@@ -2635,44 +2593,16 @@ impl App {
             InlineWebKind::Arona => "아로나".to_string(),
             InlineWebKind::Board => "보드".to_string(),
         };
-        let attrs = WindowAttributes::default()
-            .with_title(title)
-            .with_theme(Some(Theme::Dark))
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_visible(false)
-            .with_inner_size(LogicalSize::new(720.0, 560.0));
-        #[cfg(target_os = "macos")]
-        let attrs = {
-            use winit::platform::macos::WindowAttributesExtMacOS;
-            attrs.with_has_shadow(false)
-        };
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                self.set_toast(format!("화면을 열지 못했어요 — {e}"));
-                eprintln!("[inline-web] window create failed: {e}");
-                return false;
-            }
-        };
         let drop_proxy = self.proxy.clone();
-        let ipc_proxy = self.proxy.clone();
         let background = if kind == InlineWebKind::Settings {
             (27, 37, 65, 255)
         } else {
             (20, 22, 28, 255)
         };
-        let webview = match wry::WebViewBuilder::new()
+        let builder = wry::WebViewBuilder::new()
             .with_url(url.clone())
             .with_background_color(background)
-            .with_initialization_script(
-                "window.addEventListener('keydown',function(e){var t=e.target&&e.target.tagName;if(e.key==='Escape'&&!['INPUT','TEXTAREA','SELECT'].includes(t)){e.preventDefault();window.ipc.postMessage('close-inline');}},true);",
-            )
-            .with_ipc_handler(move |req: wry::http::Request<String>| {
-                if req.body() == "close-inline" {
-                    let _ = ipc_proxy.send_event(UserEvent::InlineWebClose);
-                }
-            })
+            .with_visible(false)
             .with_drag_drop_handler(move |e| match e {
                 wry::DragDropEvent::Drop { paths, .. } => {
                     let mut took = false;
@@ -2689,13 +2619,45 @@ impl App {
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
                 size: wry::dpi::LogicalSize::new(720.0, 560.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(webview) => webview,
+            });
+        #[cfg(target_os = "macos")]
+        let built = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            let attrs = WindowAttributes::default()
+                .with_title(_title)
+                .with_theme(Some(Theme::Dark))
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_visible(false)
+                .with_inner_size(LogicalSize::new(720.0, 560.0))
+                .with_has_shadow(false);
+            match event_loop.create_window(attrs) {
+                Ok(window) => {
+                    let window = Arc::new(window);
+                    builder
+                        .build_as_child(window.as_ref())
+                        .map(|webview| (webview, Some(window)))
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let built = match self.window.as_ref() {
+            Some(main) => builder
+                .build_as_child(main.as_ref())
+                .map(|webview| (webview, None))
+                .map_err(|e| e.to_string()),
+            None => Err("메인 창이 아직 없어요".to_string()),
+        };
+        let (webview, window) = match built {
+            Ok(pair) => pair,
             Err(e) => {
+                if restore_sidebar {
+                    self.toggle_sidebar();
+                }
                 self.set_toast(format!("웹 화면을 만들지 못했어요 — {e}"));
-                eprintln!("[inline-web] webview build failed: {e}");
+                eprintln!("[inline-web] build failed: {e}");
                 return false;
             }
         };
@@ -2706,6 +2668,7 @@ impl App {
             kind,
             last_frame: None,
             visible: false,
+            restore_sidebar,
         });
         self.chrome_dirty = true;
         if let Some(main) = &self.window {
@@ -2750,17 +2713,27 @@ impl App {
             self.settings_open = false;
             return;
         };
+        let restore_sidebar = host.restore_sidebar;
         if let Some(main) = &self.window {
-            if host.visible {
-                crate::webpane::detach_child(main, &host.window);
+            if let Some(child) = host.window.as_ref().filter(|_| host.visible) {
+                crate::webpane::detach_child(main, child);
             }
+        }
+        if let Some(child) = host.window.as_ref() {
+            child.set_visible(false);
+        }
+        let kind = host.kind;
+        drop(host);
+        self.settings_open = false;
+        if restore_sidebar && self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        self.chrome_dirty = true;
+        if let Some(main) = &self.window {
             main.focus_window();
             main.request_redraw();
         }
-        host.window.set_visible(false);
-        self.settings_open = false;
-        self.chrome_dirty = true;
-        eprintln!("[inline-web] closed kind={:?}", host.kind);
+        eprintln!("[inline-web] closed kind={kind:?}");
     }
 
     pub(crate) fn sync_inline_web(&mut self) {
@@ -2769,30 +2742,41 @@ impl App {
         let origin = origin.to_logical::<f64>(main.scale_factor());
         let zoom = (self.ui_zoom as f64).max(0.1);
         let inner = main.inner_size().to_logical::<f64>(main.scale_factor());
-        let left = (WINDOW_PADDING + self.effective_sidebar_w()) as f64 * zoom;
+        let left = self.tab_strip_w() as f64 * zoom;
         let top = TITLE_HEIGHT as f64 * zoom;
         let width = (inner.width - left).max(1.0);
         let height = (inner.height - top).max(1.0);
-        let Some(host) = self.inline_web.as_mut() else { return };
+        let Some(host) = self.inline_web.as_mut() else {
+            return;
+        };
         let frame = inline_web_frame(origin.x, origin.y, inner.width, inner.height, left, top);
         if host.last_frame != Some(frame) {
-            let _ = host
-                .window
-                .request_inner_size(winit::dpi::LogicalSize::new(width, height));
-            host.window.set_outer_position(winit::dpi::LogicalPosition::new(
-                origin.x + left,
-                origin.y + top,
-            ));
+            if let Some(child) = host.window.as_ref() {
+                let _ = child.request_inner_size(winit::dpi::LogicalSize::new(width, height));
+                child.set_outer_position(winit::dpi::LogicalPosition::new(
+                    origin.x + left,
+                    origin.y + top,
+                ));
+            }
             let _ = host.webview.set_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                position: wry::dpi::LogicalPosition::new(
+                    if host.window.is_some() { 0.0 } else { left },
+                    if host.window.is_some() { 0.0 } else { top },
+                )
+                .into(),
                 size: wry::dpi::LogicalSize::new(width, height).into(),
             });
             host.last_frame = Some(frame);
         }
         if !host.visible {
-            host.window.set_visible(true);
-            crate::webpane::attach_child(&main, &host.window);
-            host.window.focus_window();
+            let _ = host.webview.set_visible(true);
+            if let Some(child) = host.window.as_ref() {
+                child.set_visible(true);
+                crate::webpane::attach_child(&main, child);
+                child.focus_window();
+            } else {
+                main.focus_window();
+            }
             host.visible = true;
         }
     }
@@ -2802,8 +2786,10 @@ impl App {
         id: winit::window::WindowId,
         event: &winit::event::WindowEvent,
     ) -> bool {
-        let Some(host) = self.inline_web.as_ref() else { return false };
-        if host.window.id() != id {
+        let Some(host) = self.inline_web.as_ref() else {
+            return false;
+        };
+        if host.window.as_ref().map(|w| w.id()) != Some(id) {
             return false;
         }
         match event {
@@ -3361,18 +3347,6 @@ impl App {
     /// Every unsaved editor that `action` would destroy, with the file name to
     /// show. Empty means nothing would be lost.
     fn dirty_docs(&self, action: &PendingClose) -> Vec<(DirtyDoc, String)> {
-        // 별도창 편집기는 pane 트리 밖에 산다 — 앱 종료와 그 창 자체를 닫을
-        // 때만 걸린다.
-        let aux = |want: Option<winit::window::WindowId>| -> Vec<(DirtyDoc, String)> {
-            self.aux_windows
-                .iter()
-                .filter(|a| want.is_none_or(|w| a.window.id() == w))
-                .filter_map(|a| {
-                    let m = a.editor().filter(|m| m.modified)?;
-                    Some((DirtyDoc::Aux(a.window.id()), doc_name(&m.doc.path)))
-                })
-                .collect()
-        };
         let panes: Vec<String> = match action {
             PendingClose::Tab { pane, idx } => {
                 let ws = self.ws.lock().unwrap();
@@ -3403,8 +3377,7 @@ impl App {
                     t.leaves().iter().map(|l| l.to_string()).collect()
                 })
             }
-            PendingClose::AuxEditor(id) => return aux(Some(*id)),
-            // 앱 종료는 세션 전부 + 별도창 전부.
+            // 앱 종료는 모든 세션의 편집 탭을 포함한다.
             PendingClose::Window => {
                 let mut all: Vec<String> = self
                     .windows
@@ -3419,7 +3392,7 @@ impl App {
             }
         };
         let ws = self.ws.lock().unwrap();
-        let mut out: Vec<(DirtyDoc, String)> = panes
+        let out: Vec<(DirtyDoc, String)> = panes
             .iter()
             .filter_map(|id| Some((id, ws.panes.get(id)?)))
             .flat_map(|(id, p)| {
@@ -3435,10 +3408,6 @@ impl App {
                 })
             })
             .collect();
-        drop(ws);
-        if matches!(action, PendingClose::Window) {
-            out.extend(aux(None));
-        }
         out
     }
 
@@ -3448,13 +3417,6 @@ impl App {
         let docs = self.dirty_docs(action);
         if docs.is_empty() {
             return false;
-        }
-        // 별도창을 닫으려는데 확인은 메인 창에 뜬다 — 안 띄우면 사용자는 창이
-        // 그냥 안 닫히는 것으로 본다.
-        if matches!(action, PendingClose::AuxEditor(_)) {
-            if let Some(w) = &self.window {
-                w.focus_window();
-            }
         }
         self.raise_confirm(ConfirmClose {
             why: CloseWhy::Dirty(docs),
@@ -3533,17 +3495,6 @@ impl App {
                 }
             }
         }
-        for a in self.aux_windows.iter() {
-            let Some(at) = a.editor().and_then(|m| m.edited_at) else {
-                continue;
-            };
-            if now.duration_since(at) >= delay {
-                ready.push(DirtyDoc::Aux(a.window.id()));
-            } else {
-                let due = at + delay;
-                next = Some(next.map_or(due, |n: Instant| n.min(due)));
-            }
-        }
         if !ready.is_empty() {
             self.save_dirty_docs_quiet(&ready);
             self.chrome_dirty = true;
@@ -3576,12 +3527,6 @@ impl App {
                     .and_then(|t| t.markdown())
                     .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
             }
-            DirtyDoc::Aux(id) => self
-                .aux_windows
-                .iter()
-                .find(|a| a.window.id() == *id)
-                .and_then(|a| a.editor())
-                .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone())),
         }
     }
 
@@ -3596,15 +3541,6 @@ impl App {
                     m.mark_saved();
                     // 미저장 점이 사라지려면 이 pane 이 다시 그려져야 한다.
                     p.dirty = true;
-                }
-            }
-            DirtyDoc::Aux(id) => {
-                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id) else {
-                    return;
-                };
-                if let Some(m) = a.editor_mut() {
-                    m.mark_saved();
-                    a.window.request_redraw();
                 }
             }
         }
@@ -3624,11 +3560,6 @@ impl App {
             PendingClose::Session(idx) => {
                 if let Err(e) = self.close_window(idx) {
                     eprintln!("[window] close failed: {e:#}");
-                }
-            }
-            PendingClose::AuxEditor(id) => {
-                if let Some(i) = self.aux_windows.iter().position(|a| a.window.id() == id) {
-                    self.close_aux_window(i);
                 }
             }
             PendingClose::Window => {}
@@ -3962,11 +3893,11 @@ fn set_dock_badge(_count: usize) {}
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn ensure_notification_authorization() {}
 
-/// 설정 웹뷰 페이지가 지금 실제로 서빙되나 — 루프백에 300ms.
+/// 앱 내부 웹 화면이 지금 실제로 서빙되나 — 루프백에 300ms.
 ///
 /// 웹뷰는 404 를 받아도 **빌드에 성공한다.** 그래서 빌드 성공만 보고 「열렸다」로
-/// 판단하면 `web/arona-ui/dist` 를 안 만든 체크아웃에서 오류 페이지가 뜬 창이 설정
-/// 자리를 차지한다. 그건 설정을 못 여는 것과 같다 — 그래서 창을 만들기 전에 묻는다.
+/// 판단하면 `web/arona-ui/dist` 를 안 만든 체크아웃에서 오류 페이지가 작업공간을
+/// 차지한다. 그래서 자식 창을 만들기 전에 묻는다.
 ///
 /// HTTP 클라이언트를 새로 들이지 않고 std 로만 한다. 같은 프로세스 안의 루프백이라
 /// 정상 경로는 1ms 도 안 걸리고, 서버가 죽어 있으면 connect 가 곧바로 거절된다.
@@ -3984,6 +3915,14 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+fn student_web_url(port: &str, slug: &str, theme: &str, cache_key: u128) -> String {
+    format!(
+        "http://127.0.0.1:{port}/arona-ui/settings.html?v={cache_key}&student={}&theme={}",
+        urlencode(slug),
+        urlencode(theme)
+    )
 }
 
 fn settings_web_reachable(port: &str) -> bool {
@@ -4029,6 +3968,14 @@ fn inline_web_frame(
         (inner_w - left).round().max(1.0) as u32,
         (inner_h - top).round().max(1.0) as u32,
     )
+}
+
+pub(crate) fn side_column_should_toggle(
+    replacing_inline: bool,
+    column_visible: bool,
+    destination_already_selected: bool,
+) -> bool {
+    !replacing_inline && column_visible && destination_already_selected
 }
 
 /// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
@@ -4255,6 +4202,41 @@ mod room_rename_tests {
         assert_eq!(
             inline_web_frame(-300.0, 40.0, 100.0, 20.0, 200.0, 36.0),
             (-100, 76, 1, 1)
+        );
+    }
+
+    #[test]
+    fn 인라인에서_고른_목적지는_이미_열려_있어도_닫지_않는다() {
+        assert!(!side_column_should_toggle(true, true, true));
+        assert!(!side_column_should_toggle(true, false, false));
+        assert!(side_column_should_toggle(false, true, true));
+    }
+
+    #[test]
+    fn 부모보다_웹뷰가_먼저_정리되는_수명_순서를_지킨다() {
+        let app = include_str!("main.rs");
+        assert!(
+            app.find("student_web_webview: Option<wry::WebView>")
+                .unwrap()
+                < app.find("student_web_window: Option<Arc<Window>>").unwrap()
+        );
+        let handler = include_str!("handler.rs");
+        let exiting = &handler[handler.find("fn exiting(").unwrap()..];
+        assert!(
+            exiting.find("self.close_inline_web();").unwrap()
+                < exiting.find("self.persona.webview = None;").unwrap()
+        );
+        assert!(
+            exiting.find("self.close_student_web_window();").unwrap()
+                < exiting.find("self.persona.webview = None;").unwrap()
+        );
+    }
+
+    #[test]
+    fn 캐릭터_상세창은_학생과_테마를_주소로_교체한다() {
+        assert_eq!(
+            student_web_url("8765", "ari su", "한글 테마", 42),
+            "http://127.0.0.1:8765/arona-ui/settings.html?v=42&student=ari%20su&theme=%ED%95%9C%EA%B8%80%20%ED%85%8C%EB%A7%88"
         );
     }
 }

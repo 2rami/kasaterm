@@ -504,7 +504,7 @@ impl App {
     /// pane 을 담는 곳이 셋이라 셋을 다 봐야 한다. `self.pty` 만 보면 PTY 없이
     /// `ws.panes` 에만 사는 미리보기·마크다운 pane 을 덮어쓰고, `ws.panes` 만 보면
     /// split 직후 아직 `PaneState` 가 없는 leaf 를 덮어쓴다(희소 저장이라 보조탭이
-    /// 생기기 전까지 없다). 레이아웃 트리는 비활성 창(방 별도창)까지 훑는다.
+    /// 생기기 전까지 없다). 레이아웃 트리는 비활성 방까지 훑는다.
     pub(crate) fn used_pane_ids(&self) -> std::collections::HashSet<String> {
         let mut used: std::collections::HashSet<String> = self.pty.keys().cloned().collect();
         used.extend(self.ws.lock().unwrap().panes.keys().cloned());
@@ -3159,23 +3159,19 @@ impl App {
         kasa_pty::register_session(&id, &sess);
         self.pty.insert(id, sess);
     }
+
+    fn room_selection_changes(requested: usize, total: usize, active: usize) -> Option<bool> {
+        (requested < total).then_some(requested != active)
+    }
+
     pub(crate) fn switch_window(&mut self, idx: usize) {
-        if idx >= self.windows.len() {
+        let Some(changes_room) =
+            Self::room_selection_changes(idx, self.windows.len(), self.active_window)
+        else {
             return;
-        }
-        if idx == self.active_window {
-            return;
-        }
+        };
         self.close_inline_web();
-        // 밖에 나가 있는 방은 메인에 그리지 않는다 — 같은 트리를 두 창이 그리면 한쪽
-        // 입력이 다른 쪽에 안 비치는 유령 상태가 된다. 대신 그 창을 앞으로 가져온다.
-        // (사이드바 탭 클릭도 여기로 오므로, 「밖에 있음」 탭을 누르면 창이 뜬다.)
-        if let Some(i) = self
-            .aux_windows
-            .iter()
-            .position(|a| a.room_window() == Some(idx))
-        {
-            self.aux_windows[i].window.focus_window();
+        if !changes_room {
             return;
         }
         // 줌은 App 전역 상태인데 pane 은 방(윈도우)마다 다르다 — 줌한 채로 방을
@@ -3273,19 +3269,6 @@ impl App {
         self.expand_anim = self
             .expand_anim
             .map(|(i, opening, at)| (remap(i), opening, at));
-        // 밖에 나가 있는 방도 인덱스로 자기 트리를 찾는다 — 여기서 안 옮기면 재배치
-        // 한 번에 별도 창이 남의 방을 그린다.
-        // 꺼낸 pane 도 나온 방을 인덱스로 들고 있다 — 안 옮기면 되돌릴 때 남의 방에서
-        // 튀어나온다. 인덱스를 키로 쓰는 필드는 예외 없이 이 목록을 지난다.
-        for a in self.aux_windows.iter_mut() {
-            match &mut a.kind {
-                crate::auxwin::AuxWindowKind::Room { window, .. }
-                | crate::auxwin::AuxWindowKind::Terminal { window, .. } => {
-                    *window = remap(*window);
-                }
-                _ => {}
-            }
-        }
         // 되살리기 대기 중인 pane 도 자기 방을 인덱스로 가리킨다 — 안 옮기면 ⌘⇧T 가
         // 엉뚱한 방에서 pane 을 꺼낸다.
         for c in self.closed_panes.iter_mut() {
@@ -3542,10 +3525,7 @@ impl App {
     fn reopen_pane_record(&mut self, c: crate::ClosedPane) {
         // 밖에 나가 있는 방으로는 보내지 않는다 — `switch_window` 가 그 창을 앞으로
         // 보낼 뿐 메인은 그대로라, 되살린 pane 이 보이지 않는 방에 들어가 버린다.
-        if c.window < self.windows.len()
-            && c.window != self.active_window
-            && !self.window_is_undocked(c.window)
-        {
+        if c.window < self.windows.len() && c.window != self.active_window {
             self.switch_window(c.window);
         }
         // 미리보기 탭 레코드 — pane 이 아니라 보조 탭이었으니 `open_file` 로 다시
@@ -8685,5 +8665,17 @@ mod migrate_back_tests {
     fn blank_local_memory_is_not_a_memory() {
         let sid = back_migration_sid(Some(String::new()), Some("rollout-1".into())).unwrap();
         assert_eq!(sid, "rollout-1");
+    }
+}
+
+#[cfg(test)]
+mod inline_room_selection_tests {
+    use super::App;
+
+    #[test]
+    fn 현재_방_재선택도_유효한_닫기_요청이다() {
+        assert_eq!(App::room_selection_changes(1, 3, 1), Some(false));
+        assert_eq!(App::room_selection_changes(2, 3, 1), Some(true));
+        assert_eq!(App::room_selection_changes(3, 3, 1), None);
     }
 }

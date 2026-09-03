@@ -242,7 +242,7 @@ export function SettingsApp() {
               key={key}
               type="button"
               onClick={() => setCat(key)}
-              className="relative mb-0.5 flex w-full items-center gap-2.5 px-2.5 py-2 text-left text-[13px]"
+              className="relative mb-0.5 flex min-h-[40px] w-full items-center gap-2.5 px-2.5 py-2 text-left text-[13px]"
               style={{
                 borderRadius: 'var(--kt-radius-sm)',
                 background: on ? 'var(--kt-surface-active)' : 'transparent',
@@ -274,7 +274,7 @@ export function SettingsApp() {
         </div>
       </nav>
 
-      <main className="min-w-0 flex-1 px-8 py-6">
+      <main className="min-w-0 max-w-[1120px] flex-1 px-8 py-6">
         <h1 className="text-[24px] font-semibold text-[var(--kt-text)]">{meta.title}</h1>
         <p className="mt-1 text-[13px] text-[var(--kt-text-mute)]">{meta.hint}</p>
         <div className="my-5 h-px" style={{ background: 'var(--kt-border)' }} />

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Minus, Plus } from 'lucide-react';
 import { postAction } from './api';
 import { serverText, useT } from './lang';
 
@@ -52,7 +53,7 @@ export function MiniButton({
         e.stopPropagation();
         onClick();
       }}
-      className="px-2 py-1 text-[11px] disabled:opacity-40"
+      className="min-h-[36px] px-3 py-1.5 text-[12px] disabled:opacity-40"
       style={{
         borderRadius: 'var(--kt-radius-sm)',
         background: 'var(--kt-surface-hover)',
@@ -80,7 +81,11 @@ export function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mb-4 flex flex-wrap items-start justify-between gap-x-6 gap-y-2 last:mb-0">
+    <div
+      role="group"
+      aria-label={label}
+      className="mb-4 flex flex-wrap items-start justify-between gap-x-6 gap-y-2 last:mb-0"
+    >
       <div className="min-w-[180px] flex-1">
         <div className="text-[13px] text-[var(--kt-text)]">{label}</div>
         {desc?.map((d) => (
@@ -125,7 +130,7 @@ export function Segmented({
             disabled={disabled}
             aria-pressed={on}
             onClick={() => !on && onPick(o.key)}
-            className="whitespace-nowrap px-3 py-1 text-[12.5px] disabled:opacity-40"
+            className="min-h-[36px] whitespace-nowrap px-3 py-1 text-[12.5px] disabled:opacity-40"
             style={{
               borderRadius: 'calc(var(--kt-radius-md) - 2px)',
               background: on ? 'var(--kt-surface-active)' : 'transparent',
@@ -146,10 +151,12 @@ export function Toggle({
   on,
   onToggle,
   disabled,
+  label,
 }: {
   on: boolean;
   onToggle: () => void;
   disabled?: boolean;
+  label: string;
 }) {
   return (
     <button
@@ -157,16 +164,25 @@ export function Toggle({
       disabled={disabled}
       onClick={onToggle}
       aria-pressed={on}
-      className="relative inline-block h-[22px] w-[40px] shrink-0 disabled:opacity-40"
+      aria-label={label}
+      className="relative inline-block h-[36px] w-[44px] shrink-0 disabled:opacity-40"
       style={{
-        borderRadius: '11px',
-        background: on ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',
+        borderRadius: 'var(--kt-radius-md)',
+        background: 'transparent',
       }}
     >
       <span
-        className="absolute top-[3px] h-[16px] w-[16px] bg-white transition-all"
-        style={{ borderRadius: 'var(--kt-dot-radius)', left: on ? '21px' : '3px' }}
-      />
+        className="absolute left-[2px] top-[7px] h-[22px] w-[40px]"
+        style={{
+          borderRadius: 11,
+          background: on ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',
+        }}
+      >
+        <span
+          className="absolute top-[3px] h-[16px] w-[16px] bg-white transition-all"
+          style={{ borderRadius: 'var(--kt-dot-radius)', left: on ? '21px' : '3px' }}
+        />
+      </span>
     </button>
   );
 }
@@ -179,6 +195,7 @@ export function Toggle({
 /// 새로 서고, 그때만 화면이 파일을 따라간다.
 export function TextField({
   id,
+  label,
   value,
   onCommit,
   onDone,
@@ -188,6 +205,7 @@ export function TextField({
   className,
 }: {
   id?: string;
+  label: string;
   value: string;
   onCommit: (next: string) => void;
   /// 편집이 **끝났다**는 신호 — 값이 바뀌었든 아니든 blur 마다 온다. onCommit 은
@@ -203,6 +221,7 @@ export function TextField({
   return (
     <input
       id={id}
+      aria-label={label}
       key={value}
       className={`kt-field ${className ?? 'w-full max-w-[420px]'}`}
       style={mono ? { fontFamily: 'var(--kt-font-mono)' } : undefined}
@@ -229,7 +248,7 @@ export function TextField({
   );
 }
 
-/// −/값/+ 스테퍼 — 네이티브 `stepper_btn` 한 벌.
+/// 감소/값/증가 스테퍼 — 네이티브 `stepper_btn` 한 벌.
 export function Stepper({
   text,
   onStep,
@@ -261,10 +280,10 @@ export function Stepper({
         disabled={disabled || atMin}
         onClick={() => onStep(-1)}
         aria-label={t.common.stepDown}
-        className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
+        className="h-[36px] w-[36px] text-[15px] leading-none disabled:opacity-40"
         style={box}
       >
-        −
+        <Minus aria-hidden="true" className="mx-auto h-4 w-4" />
       </button>
       <span className="min-w-[52px] text-center text-[15px] font-semibold text-[var(--kt-text)]">
         {text}
@@ -274,10 +293,10 @@ export function Stepper({
         disabled={disabled || atMax}
         onClick={() => onStep(1)}
         aria-label={t.common.stepUp}
-        className="h-[30px] w-[30px] text-[15px] leading-none disabled:opacity-40"
+        className="h-[36px] w-[36px] text-[15px] leading-none disabled:opacity-40"
         style={box}
       >
-        +
+        <Plus aria-hidden="true" className="mx-auto h-4 w-4" />
       </button>
       {right}
     </div>
@@ -301,7 +320,7 @@ export function Button({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="px-3.5 py-2 text-[13px] disabled:opacity-40"
+      className="min-h-[40px] px-3.5 py-2 text-[13px] disabled:opacity-40"
       style={{
         borderRadius: 'var(--kt-radius-md)',
         background: primary ? 'var(--kt-accent)' : 'var(--kt-surface-hover)',

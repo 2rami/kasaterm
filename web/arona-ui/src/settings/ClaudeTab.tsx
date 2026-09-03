@@ -87,6 +87,7 @@ function AccountCard({
       <div className="min-w-0 flex-1">
         {renaming ? (
           <TextField
+            label={t.claude.labelPlaceholder}
             value={row.label}
             disabled={busy}
             placeholder={t.claude.labelPlaceholder}
@@ -198,6 +199,7 @@ export function ClaudeTab({
 
       <Row label={t.claude.shim} desc={[t.claude.shimHint]}>
         <Toggle
+          label={t.claude.shim}
           on={data.shim_inject}
           disabled={busy}
           onToggle={() => void run('toggle-shim-inject')}
@@ -213,6 +215,7 @@ export function ClaudeTab({
         desc={[lone ? t.claude.statusbarAllLone : t.claude.statusbarAllHint]}
       >
         <Toggle
+          label={t.claude.statusbarAll}
           on={data.statusbar_all_accounts}
           disabled={busy}
           onToggle={() => void run('toggle-statusbar-all-accounts')}
@@ -224,6 +227,7 @@ export function ClaudeTab({
         desc={[lone ? t.claude.autoSwitchLone : t.claude.autoSwitchHint]}
       >
         <Toggle
+          label={t.claude.autoSwitch}
           on={data.autoswitch}
           disabled={busy}
           onToggle={() => void run('toggle-account-autoswitch')}
@@ -278,6 +282,7 @@ export function ClaudeTab({
 
       <Section title={t.claude.extraArgs} hint={t.claude.extraArgsHint}>
         <TextField
+          label={t.claude.extraArgs}
           value={data.extra}
           disabled={busy}
           mono

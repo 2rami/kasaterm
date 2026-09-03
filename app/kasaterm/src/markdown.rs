@@ -589,31 +589,6 @@ impl MarkdownPane {
         self.touch();
     }
 
-    // ── Pure buffer-mutation core (shared by the active-pane path in `impl App`
-    // below and the pop-out editor window in auxwin.rs). These operate only on
-    // the pane's own fields — no `App`/`ws` — so both drivers reuse identical
-    // edit semantics; the driver owns undo/caret-scroll wiring around them.
-
-    /// Seed the edit buffer from the doc source if it isn't populated yet — a
-    /// `.md` opened in Render mode carries no lines, and the first keystroke
-    /// would otherwise edit an empty buffer. Leaves the view mode alone.
-    pub(crate) fn seed_edit_lines(&mut self) {
-        if self.edit_lines.is_empty() {
-            self.edit_lines = Arc::new(self.doc.raw.split('\n').map(String::from).collect());
-            self.longest_cache = None;
-            if self.edit_lines.is_empty() {
-                self.lines_mut().push(String::new());
-            }
-        }
-    }
-
-    /// `seed_edit_lines` + 뷰를 raw 로 확정. 렌더 뷰에서 편집으로 넘어가는 자리에
-    /// 쓴다.
-    pub(crate) fn ensure_raw_seeded(&mut self) {
-        self.raw_mode = true;
-        self.seed_edit_lines();
-    }
-
     /// Insert `text` (a committed Hangul syllable or a single typed segment) at
     /// the caret as one typing run — replacing any active selection. No-op on
     /// empty text.
@@ -3094,12 +3069,6 @@ impl App {
                 }
             }
         }
-        for a in self.aux_windows.iter() {
-            let Some(m) = a.editor() else { continue };
-            if let Some(j) = pick(m, crate::DirtyDoc::Aux(a.window.id())) {
-                jobs.push(j);
-            }
-        }
         if jobs.is_empty() {
             return;
         }
@@ -3146,17 +3115,6 @@ impl App {
                 m.diff = Some(diff);
                 p.dirty = true;
             }
-            crate::DirtyDoc::Aux(id) => {
-                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id)
-                else {
-                    return;
-                };
-                let Some(m) = a.editor_mut() else { return };
-                m.diff_peek = keep_peek(m, &diff);
-                m.diff_head = Some(head);
-                m.diff = Some(diff);
-                a.window.request_redraw();
-            }
         }
     }
 
@@ -3173,13 +3131,6 @@ impl App {
                         m.diff_peek = None;
                     }
                 }
-            }
-        }
-        for a in self.aux_windows.iter_mut() {
-            if let Some(m) = a.editor_mut() {
-                m.diff_head = None;
-                m.diff = None;
-                m.diff_peek = None;
             }
         }
     }
@@ -3712,31 +3663,6 @@ impl App {
         if let Some(line) = anchor {
             self.md_scroll_anchor.insert(id.to_string(), line);
         }
-    }
-
-    /// 별도창(aux) 마크다운의 Rendered ↔ Raw 전환. pane 판(`set_md_mode`)과 **같은
-    /// 본체**(`switch_md_mode`)를 쓴다 — 별도창에만 토글이 없어 "새 창으로 열면
-    /// 고칠 수가 없다"였는데(거노), 여기서 사본을 뜨면 저장 실패 처리·커서 이월
-    /// 같은 미묘한 규칙이 두 곳에서 갈린다.
-    ///
-    /// pane 과 다른 것 하나: 별도창은 블록 y 표(`md_block_ys`)를 안 들고 다녀
-    /// Rendered → Raw 의 줄 앵커를 **스크롤 비율로 근사**한다. 정확하진 않아도
-    /// 늘 맨 위로 되돌아가는 것보다 낫다 — 고치려고 여는 모드라 위치가 곧 용건이다.
-    pub(crate) fn aux_set_md_mode(&mut self, idx: usize, want_raw: bool) {
-        let raw_metrics = self.gpu.as_mut().map(|g| g.raw_editor_metrics());
-        let Some(a) = self.aux_windows.get_mut(idx) else { return };
-        let content_h = a.md_content_h;
-        let Some(m) = a.editor_mut() else { return };
-        let anchor = (!m.raw_mode && content_h > 1.0).then(|| {
-            let frac = (m.scroll / content_h).clamp(0.0, 1.0);
-            let lines = m.doc.raw.split('\n').count();
-            ((frac * lines as f32).floor() as usize).min(lines.saturating_sub(1))
-        });
-        if !switch_md_mode(m, want_raw, anchor, raw_metrics, None) {
-            return;
-        }
-        a.dirty = true;
-        a.window.request_redraw();
     }
 
     /// Directory of the active markdown pane's source file, for resolving
@@ -4866,7 +4792,7 @@ mod tests {
         assert_eq!(m.undo_stack[0].lines[0], "19");
     }
 
-    // ── Pure-core methods shared with the pop-out editor window (auxwin.rs) ──
+    // ── Raw editor buffer mutation ──
 
     #[test]
     fn insert_at_caret_advances_and_replaces_selection() {
@@ -4940,50 +4866,6 @@ mod tests {
         // 선택이 없으면 캐럿이 선 줄을 집는다(VS Code 의 Cmd+C/Cmd+X). 여기선
         // 방금 전부 잘라내 빈 줄 하나만 남았으니 개행 하나가 나온다.
         assert_eq!(m.take_copy(false).as_deref(), Some("\n"));
-    }
-
-    #[test]
-    fn ensure_raw_seeded_from_doc_source() {
-        // A render-mode .md pane (empty edit buffer) seeds from doc.raw on pop-out.
-        let doc = Arc::new(build_markdown_doc(
-            std::path::Path::new("/tmp/t.md"),
-            "line1\nline2",
-        ));
-        let mut m = MarkdownPane {
-            doc,
-            is_md_doc: true,
-            raw_mode: false,
-            edit_lines: Arc::default(),
-            cur_line: 0,
-            cur_col: 0,
-            scroll: 0.0,
-            h_scroll: 0.0,
-            modified: false,
-            sel_anchor: None,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_edit: EditKind::Break,
-            find: None,
-            complete: None,
-            longest_cache: None,
-            edit_gen: 0,
-            diff: None,
-            diff_peek: None,
-            diff_head: None,
-            wrap: false,
-            extra: Vec::new(),
-            undo_locked: false,
-            folds: Vec::new(),
-            folds_gen: 0,
-            edited_at: None,
-        };
-        m.ensure_raw_seeded();
-        assert!(m.raw_mode);
-        assert_eq!(*m.edit_lines, vec!["line1".to_string(), "line2".to_string()]);
-        // Already-seeded buffers are left untouched.
-        let mut m2 = pane(&["kept"]);
-        m2.ensure_raw_seeded();
-        assert_eq!(*m2.edit_lines, vec!["kept".to_string()]);
     }
 
     /// 원자적 쓰기가 지켜야 하는 것: 내용이 맞을 것, 권한을 잃지 않을 것,
@@ -5064,8 +4946,7 @@ mod tests {
     }
 }
 
-/// 마크다운 뷰 모드 전환의 **본체** — 메인 그리드 pane(`set_md_mode`)과 별도창
-/// (`aux_set_md_mode`)이 이 한 벌을 같이 쓴다. 이 파일이 이미 겪은 함정 셋이 전부
+/// 마크다운 뷰 모드 전환의 **본체**. 이 파일이 이미 겪은 함정 셋이 전부
 /// 여기 들어 있어, 사본을 뜨면 한쪽만 고쳐진 채 남는다:
 ///
 /// - **저장 실패인데 modified 를 내리면 안 된다.** 내리는 순간 dirty 표시도 닫기

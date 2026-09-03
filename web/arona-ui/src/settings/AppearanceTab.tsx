@@ -327,6 +327,7 @@ export function AppearanceTab({
                 {t.appearance.paletteName}
               </span>
               <TextField
+                label={t.appearance.paletteName}
                 value={activeCustom?.label ?? ''}
                 disabled={busy}
                 className="w-[200px]"
@@ -383,6 +384,7 @@ export function AppearanceTab({
                   />
                   <span className="flex-1 text-[13px] text-[var(--kt-text)]">{key}</span>
                   <TextField
+                    label={key}
                     value={uiHex[i] ?? '#000000'}
                     disabled={busy}
                     mono

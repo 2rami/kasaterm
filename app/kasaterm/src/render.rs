@@ -490,8 +490,7 @@ impl App {
     /// 안 세우면(`capture_crop = None`) 그대로 창 한 장이 나온다. 에이전트가 제 UI 를
     /// 보려면 이 길이 필요하다 — pane 만 찍혀서는 사이드바가 어떻게 보이는지 알 수 없다.
     ///
-    /// ⚠️ **메인 창만이다.** 별도 창으로 꺼낸 방(`auxwin`)은 자기 `GpuRenderer` 를 따로
-    /// 들고 있어 이 서피스에 없다.
+    /// 알림 배너처럼 자체 렌더러를 가진 임시 창은 이 서피스에 없다.
     pub(crate) fn arm_pane_capture(
         &mut self,
         pane: &str,
@@ -747,12 +746,6 @@ impl App {
             web_loading: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
-            /// Per-tab "is this a file tab (markdown/text editor, not a shell)"
-            /// — drives the hover pop-out icon. Same length/order as `tabs`;
-            /// empty when `tabs` is (single-tab fallback uses `single_is_file`).
-            tab_is_file: Vec<bool>,
-            /// Single-tab fallback: whether the lone tab is a file editor.
-            single_is_file: bool,
             /// Active tab index into `tabs`.
             active_tab: usize,
             /// Overflow windowing: first tab drawn (pane.tab_first snapshot).
@@ -1974,7 +1967,7 @@ impl App {
                         // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
                         // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
                         // 학생을 그리므로(pet_busy) 세우지 않는다. 앵커 규칙은
-                        // `find_standing_anchor` 에 — 별도창도 같은 자리에 세운다.
+                        // 앵커 규칙은 `find_standing_anchor` 한 곳에 둔다.
                         // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이
                         // 직접 말한다. 이 자리는 조건 셋(스피너 감지·pet_busy·앵커)이
                         // 겹쳐 있고 실패하면 **아무것도 안 그려** 밖에서 원인을 가릴
@@ -2989,23 +2982,6 @@ impl App {
                         web_url: pane.web().map(|w| w.url.clone()),
                         web_loading,
                         tabs: self.pane_tab_labels(&ws, &id, pane),
-                        // 팝아웃 아이콘 대상 판정: 마크다운/텍스트 편집 탭만(터미널 제외).
-                        // tabs 라벨을 비운 학생 pane 폴백과 길이를 맞추려 같은 조건으로 계산.
-                        tab_is_file: if pane.tabs.len() <= 1
-                            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
-                        {
-                            Vec::new()
-                        } else {
-                            pane.tabs
-                                .iter()
-                                .map(|t| matches!(t.content, PaneContent::Markdown(_)))
-                                .collect()
-                        },
-                        single_is_file: pane
-                            .tabs
-                            .first()
-                            .map(|t| matches!(t.content, PaneContent::Markdown(_)))
-                            .unwrap_or(false),
                         active_tab: pane.active_tab,
                         tab_first: pane.tab_first,
                         tab_last_active: pane.tab_last_active,
@@ -3611,10 +3587,6 @@ impl App {
         let sb_alert: Vec<bool> = (0..sb_labels.len())
             .map(|i| self.window_alert.contains(&i))
             .collect();
-        // 별도 창으로 나가 있는 방 — 탭은 자리를 지키되 ⌘N 대신 나갔다는 표시가 뜬다.
-        let sb_undocked: Vec<bool> = (0..sb_labels.len())
-            .map(|i| self.window_is_undocked(i))
-            .collect();
         // 방 탭을 끌고 있는 동안 떨어질 자리. 탭 자체는 제자리에 두고 삽입선만
         // 그린다 — 실제 이동은 release 뿐이라, 놓기 전엔 "여기로 간다"만 알면 된다.
         let win_drag_target: Option<usize> = self
@@ -3670,8 +3642,6 @@ impl App {
         let mut swap_confirm_hits: Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> =
             Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
-        // Settings entry lives in its own wgpu window now (auxwin.rs); the main
-        // frame only draws the sidebar "Settings" entry rect for hit-testing.
         let win_h_logical = win_px.1 / scale;
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
@@ -3684,6 +3654,7 @@ impl App {
         // 타이틀바 제목을 가운데 세울 때 오른쪽 한계로 쓴다 — 같은 이유로 여기서
         // 미리 읽는다(`g` 가 self.gpu 를 잡은 뒤엔 &self 메서드를 못 부른다).
         let git_col_toggle = self.git_col_toggle_rect();
+        let settings_title = self.settings_title_rect();
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -3811,7 +3782,6 @@ impl App {
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
             // 디코딩 실패 시 queue_image가 조용히 skip.
             let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
-            // 배너·스피너·승인대기·standing·프사는 별도창(auxwin)도 그린다 —
             // 그리기와 이미지 키는 `paint_student_overlays` 한 곳에 있고, 여기선
             // 이 창의 좌표로 모은 자리만 넘긴다.
             let student_slots = StudentOverlays {
@@ -4119,6 +4089,28 @@ impl App {
             // axis, and a hand-drawn 3px radius can't follow a pixel silhouette
             // the way the icon set does. It's `panel-right` now — the mirror of
             // the sidebar toggle's `panel-left`, which is what it always meant.
+            if let Some((bx, by, bw, bh)) = settings_title {
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                if hover {
+                    hover_rect(g, bx, by, bw, bh, theme::radius_sm());
+                }
+                let fg = if hover || self.settings_open {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                };
+                let isz = theme::ICON_SIZE;
+                g.queue_icon(
+                    "settings-2",
+                    bx + (bw - isz) / 2.0,
+                    by + (bh - isz) / 2.0,
+                    isz,
+                    fg,
+                );
+            }
             {
                 let bw = 26.0_f32;
                 let bh = 22.0_f32;
@@ -4772,7 +4764,6 @@ impl App {
             if tab_strip_w > 0.0 {
                 // 칼럼 바닥과 오른쪽 실선은 위 크롬 판에서 한 번에 칠했다.
                 let multi = sb_tabs.len() > 1;
-                let mut dock_back_hits: Vec<(usize, (f32, f32, f32, f32))> = Vec::new();
                 // 잘라 그린다 — 픽셀로 흐르니 카드가 칸 경계에 반쯤 걸친 상태가
                 // 정상이다. 시저가 없으면 그 반쪽이 타이틀바와 트레이 위로 그대로
                 // 삐져나온다(사이드바는 원래 클립을 안 세웠다).
@@ -4784,21 +4775,7 @@ impl App {
                     // accent bar). Non-selected: flat, only a faint box on
                     // hover. Warp-style.
                     g.hover_pointer |= is_hover;
-                    // 밖에 나간 방은 **자리만 남긴다**. 채운 카드로 두면 여기 있는
-                    // 것처럼 읽혀 눌렀다가 아무 일도 안 일어나고, 목록에서 빼면
-                    // 어디로 갔는지 알 길이 없다(거노: "그 자리 빵꾸나게"). 점선이
-                    // 그 사이를 말한다 — 자리는 네 것이지만 지금 비어 있다.
-                    let out = sb_undocked.get(*i).copied().unwrap_or(false);
-                    if out {
-                        dashed_rect(
-                            g,
-                            *tx,
-                            *ty,
-                            *tw,
-                            *th,
-                            theme::with_alpha(theme::border(), 0xC0),
-                        );
-                    } else if is_active {
+                    if is_active {
                         // 고른 방은 **테두리로만** 말한다(2026-08-11 지시: "선택한 방
                         // 아웃라인으로 포커스 바꾸고"). 채운 판이었을 땐 그 밝은
                         // 바탕이 카드 전체를 덮어, 그 위에 얹히는 상태색(알림 점·
@@ -4911,19 +4888,13 @@ impl App {
                     // 폴더명이라 같아진다). `text_mute` 는 "있지만 안 읽어도 되는
                     // 것"의 톤이라 여기선 너무 물러나 있었다 — 한 단 올린다.
                     let cwd_fg: [u8; 4] = theme::text_dim();
-                    // 밖에 나간 방은 × 를 내주고 되돌리기 버튼이 그 자리를 쓴다.
-                    // 둘은 카드 오른쪽 위 같은 칸이라 나눠 가질 수 없고, 안 보이는
-                    // 창의 claude 를 여기서 죽일 일도 아니다(닫으려면 그 창에서).
-                    // 예전엔 hover 하는 순간 되돌리기가 × 로 바뀌어, 누르러 가면
-                    // 버튼이 사라졌다.
-                    let undocked = sb_undocked.get(*i).copied().unwrap_or(false);
                     // × 는 **hover 에만** 낸다. 활성 방에도 상시로 내던 때는 아래
                     // `⌘N` 배지와 같은 칸을 다퉈, 하필 **지금 있는 방일수록 번호가
                     // 안 보였다**(2026-08-27 지적). 번호는 곧 단축키(Cmd+숫자)라 활성
                     // 방에서 가장 알고 싶은 값이고, 닫기는 마우스를 얹으면 그 자리에
                     // 나타나므로 잃는 것이 없다 — 누르러 가는 동안 사라지는 반대
                     // 경우(되돌리기 버튼)와 달리, 이건 다가갈수록 나타난다.
-                    let show_close = multi && is_hover && !undocked;
+                    let show_close = multi && is_hover;
                     // Budgets are measured against the tab's own right edge, not
                     // the sidebar width: the label starts at `text_x` (inset +
                     // ordinal gutter + chip), so a sidebar-width budget overshoots
@@ -4936,20 +4907,16 @@ impl App {
                     // 숫자를 왼쪽 여백에 두면 "몇 번째"까지만 말하지만, 이름 옆의
                     // `⌘1` 은 "이 키로 온다"까지 말한다. 9 까지만 매핑돼 있고, ×
                     // 가 뜨는 동안은 같은 자리라 물러난다.
-                    // 밖에 나가 있는 방은 그 자리를 되돌리기 버튼이 쓴다 — 그 키는
-                    // 방을 메인에 다시 그리는 게 아니라 별도 창을 앞으로 가져오므로
-                    // (switch_window 라우팅), 키 힌트를 남기면 거짓말이 된다.
                     // 아주 좁을 때는 번호를 접는다. 남는 폭이 40px 남짓인데 배지가
                     // 그 절반을 가져가면 방 이름이 한 글자도 안 남아, 「어느 방인가」를
                     // 못 읽는다 — 단축키는 못 봐도 눌러지지만 이름은 안 보이면 끝이다.
-                    let kbd = (!show_close && !undocked && *i < 9 && sb_dens.at_least_compact())
+                    let kbd = (!show_close && *i < 9 && sb_dens.at_least_compact())
                         .then(|| format!("\u{2318}{}", *i + 1));
                     let kfs = 11.0_f32;
                     let kbd_w = kbd
                         .as_deref()
                         .map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
-                    const UNDOCK_ICON: f32 = 13.0;
-                    let right_slot = if undocked { UNDOCK_ICON } else { kbd_w };
+                    let right_slot = kbd_w;
                     // 배지를 접었으면 그 자리도 함께 돌려준다 — 안 돌려주면 접어서
                     // 번 폭이 오른쪽 여백에 그대로 남아, 정작 이름은 그대로 잘린다.
                     let right_pad = if show_close {
@@ -4996,43 +4963,6 @@ impl App {
                                 italic: false,
                             },
                         );
-                    }
-                    // 밖에 나간 방 자리엔 **되돌리는 버튼**을 둔다. 여기 있던
-                    // external-link 는 점선 슬롯이 이미 하는 말("나가 있다")을 한 번
-                    // 더 할 뿐이었고, 정작 다시 넣는 길은 별도 창을 찾아 닫는 것뿐
-                    // 이었다. 나간 자리가 곧 돌아올 자리다.
-                    if undocked {
-                        let ix = tab_right - 8.0 - UNDOCK_ICON;
-                        let iy = *ty + 9.0;
-                        let hit = (ix - 6.0, iy - 5.0, UNDOCK_ICON + 12.0, UNDOCK_ICON + 10.0);
-                        let hov = sb_cursor.0 >= hit.0
-                            && sb_cursor.0 <= hit.0 + hit.2
-                            && sb_cursor.1 >= hit.1
-                            && sb_cursor.1 <= hit.1 + hit.3;
-                        g.hover_pointer |= hov;
-                        if hov {
-                            round_rect(
-                                g,
-                                hit.0,
-                                hit.1,
-                                hit.2,
-                                hit.3,
-                                theme::radius_sm(),
-                                theme::surface_hover(),
-                            );
-                        }
-                        g.queue_icon(
-                            "undo-2",
-                            ix,
-                            iy,
-                            UNDOCK_ICON,
-                            if hov {
-                                theme::accent()
-                            } else {
-                                theme::text_dim()
-                            },
-                        );
-                        dock_back_hits.push((*i, hit));
                     }
                     // 경로는 방을 가르는 좋은 단서지만, 「…」 몇 글자로 잘리면
                     // 가르지도 못하면서 이름과 자리만 다툰다. 그 폭에서는 아예 접고
@@ -5137,7 +5067,6 @@ impl App {
                     }
                 }
                 g.pop_clip();
-                self.window_dock_rects = dock_back_hits;
                 // 펼친 방의 pane 줄. 탭 카드가 그 자리를 이미 비워 뒀으므로(레이아웃이
                 // 카드 높이에 목록만큼을 더해 준다) 여기서는 채우기만 한다.
                 // 방 배치도 — 목록보다 **먼저** 그린다(행 hover 판이 위에 와야 한다).
@@ -5922,8 +5851,7 @@ impl App {
             // right of it (VSCode explorer). Root = active pane's cwd; folders
             // first — click a folder to expand, a file to preview. Rows laid
             // out + hit rects cached here (window-tab pattern); the read_dir
-            // build lives in refresh_file_tree, never per-frame. (Settings is
-            // its own window now, so it no longer masks this column.)
+            // build lives in refresh_file_tree, never per-frame.
             if tree_col_w > 0.0 {
                 let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
                 // Own background + right hairline so the column reads as a
@@ -8552,7 +8480,6 @@ impl App {
                 let addr_vis = addr_w >= 70.0;
                 let btn_cluster = btn_cluster + if addr_vis { addr_w + 6.0 } else { 0.0 };
                 // ── In-pane tab bar ── 그리는 몫은 `draw_pane_tabs` 한 곳에.
-                // 별도창도 같은 함수를 지나므로 여기 손질이 저쪽에 자동으로 간다.
                 let strip = draw_pane_tabs(
                     g,
                     &TabStrip {
@@ -8566,9 +8493,6 @@ impl App {
                         tab_last_active: h.tab_last_active,
                         is_active: h.is_active,
                         color: h.color,
-                        // 이미지 탭도 이제 뺄 수 있다 — 셸을 별도창으로 보낼 때
-                        // 같은 pane 의 그림이 안 따라오던 자리가 여기였다.
-                        can_popout: false,
                         right_reserve: btn_cluster,
                         chrome_font,
                         icon_size,
@@ -10102,8 +10026,7 @@ impl App {
                 if let Some(msg) = collab_toast_msg.as_ref() {
                     let t_font = 13.0_f32;
                     let win_w = win_px.0 / scale;
-                    let text_w = g.measure_chrome_text(msg, t_font, true);
-                    let (px, py) = (14.0_f32, 8.0_f32);
+                    let px = 14.0_f32;
                     // 승인 모드(sticky)면 텍스트 뒤에 [승인][거부] 칩이 붙는다 —
                     // 박스 폭에 미리 반영. (munder 승인 카드 축소판)
                     let chip_f = 12.0_f32;
@@ -10127,9 +10050,12 @@ impl App {
                     } else {
                         0.0
                     };
+                    let max_text_w = (win_w - 32.0 - px * 2.0 - chips_w).min(480.0).max(40.0);
+                    let shown = crate::info::fit_text(g, msg, max_text_w, t_font, true);
+                    let text_w = g.measure_chrome_text(&shown, t_font, true);
                     let box_w = text_w + px * 2.0 + chips_w;
-                    let box_h = t_font + py * 2.0;
-                    let bx = win_w - box_w - 16.0;
+                    let box_h = 40.0;
+                    let bx = (win_w - box_w - 16.0).max(16.0);
                     let by = TITLE_HEIGHT + 12.0;
                     self.collab.toast_rect = Some((bx, by, box_w, box_h));
                     let a = (235.0 * collab_toast_alpha).round() as u8;
@@ -10152,8 +10078,8 @@ impl App {
                     };
                     g.draw_text(
                         bx + px,
-                        by + py,
-                        msg,
+                        by + (box_h - t_font) / 2.0,
+                        &shown,
                         gpu::DrawOpts {
                             font_size: t_font,
                             color: msg_color,
@@ -10162,8 +10088,8 @@ impl App {
                         },
                     );
                     if collab_toast_action_on {
-                        let ch = box_h - 8.0;
-                        let cy = by + 4.0;
+                        let ch = 36.0;
+                        let cy = by + 2.0;
                         let ty = cy + (ch - chip_f) / 2.0;
                         let ox = bx + px + text_w + chip_gap;
                         round_rect(
@@ -12612,7 +12538,6 @@ impl App {
                 let what = match dlg.action {
                     crate::PendingClose::Window => "앱을",
                     crate::PendingClose::Session(_) => "이 세션을",
-                    crate::PendingClose::AuxEditor(_) => "이 창을",
                     crate::PendingClose::Pane { .. } => "이 pane 을",
                     crate::PendingClose::Tab { .. } => "이 탭을",
                 };
@@ -14586,10 +14511,7 @@ mod elapsed_tests {
     }
 }
 
-/// pane 안 탭 띠 한 벌 — **메인 그리드와 별도창이 같은 이 함수를 지난다.**
-/// 07-24 에 별도창을 셀 스냅샷만 따로 뜨는 경로로 만든 탓에 메인에만 걸린 손질이
-/// 통째로 빠지는 사고가 세 번 났다(입력박스 칩·`is_rule`·인레이). 띠를 두 벌로
-/// 두면 같은 일이 탭에서 되풀이되므로, 그릴 자리와 hit 규약만 넘겨받는다.
+/// pane 안 탭 띠 한 벌.
 pub(crate) struct TabStrip<'a> {
     pub tabs: &'a [String],
     /// `tabs` 가 비었을 때 쓸 단일 탭 제목.
@@ -14603,8 +14525,6 @@ pub(crate) struct TabStrip<'a> {
     /// 이 pane 이 활성인가 — 활성 탭 accent 선의 색만 가른다.
     pub is_active: bool,
     pub color: Option<[u8; 4]>,
-    /// 탭에 pop-out 아이콘을 띄울지.
-    pub can_popout: bool,
     /// 오른쪽 버튼 무리가 이미 가져간 폭 — 탭이 그 밑으로 깔리지 않게.
     pub right_reserve: f32,
     pub chrome_font: f32,
@@ -14627,7 +14547,6 @@ pub(crate) struct TabStripOut {
     pub n_vis: usize,
     pub tab_hits: Vec<(usize, (f32, f32, f32, f32))>,
     pub close_hits: Vec<(usize, (f32, f32, f32, f32))>,
-    pub popout_hits: Vec<(usize, (f32, f32, f32, f32))>,
     pub plus_rect: Option<(f32, f32, f32, f32)>,
     /// 활성 탭 accent 선 — 호출부가 pane 경계 위에 한 번 더 얹는다.
     pub accent: Option<(f32, f32, f32, [u8; 4])>,
@@ -14735,16 +14654,7 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // × space is reserved on every tab — see `reserve_x`.
         // No per-tab terminal glyph: the +button already signals
         // "new shell"; doubling that icon on every tab was noise.
-        // File tabs reserve an extra icon slot (pop-out), left of ×.
-        // 터미널 탭도 undock(별도 OS 창) 아이콘을 같은 자리에 쓴다 —
-        // 이미지 pane 만 제외(뷰어라 별도창 대상 아님).
-        let can_popout = c.can_popout;
-        let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
-        let x_reserve = if reserve_x {
-            close_w + 8.0 + popout_reserve
-        } else {
-            0.0
-        };
+        let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
         let budget = match slot(vi) {
             Some((_, sw)) => (sw - 12.0 - x_reserve).max(0.0),
             None => (per_tab - x_reserve - 14.0).max(0.0),
@@ -14802,7 +14712,6 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // differentiate it. Structural lines drawn post-loop.
         let stroke = 1.0_f32;
         let _ = stroke;
-        let _ = t_icon;
         let cx = g.draw_text(
             tx,
             text_y,
@@ -14821,27 +14730,10 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // 기준으로 놓는다 — 라벨 길이가 탭마다 달라서, 라벨 끝에 붙이면 폭을 얼려
         // 놓고도 × 가 제각각이 되어 자리를 얼린 뜻이 없어진다. 두 식은 평소 배치에서
         // 같은 값을 낸다(`box_right = tab_x0 + lw + x_reserve + 6`).
-        let mut action_x = match slot(vi) {
+        let action_x = match slot(vi) {
             Some(_) => box_right - x_reserve + 2.0,
             None => cx + 8.0,
         };
-        if can_popout && show_x {
-            let po_x = action_x;
-            let chip = c.icon_size + 6.0;
-            let chip_x = po_x + (c.icon_size - chip) / 2.0;
-            let chip_y = c.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
-            let (mx, my) = c.cursor_px;
-            let po_hover =
-                mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
-            if po_hover {
-                hover_rect(g, chip_x, chip_y, chip, chip, theme::radius_sm());
-            }
-            let pocol = if po_hover { theme::text() } else { t_icon };
-            g.queue_icon("external-link", po_x, icon_y, c.icon_size, pocol);
-            out.popout_hits
-                .push((i, (po_x - 2.0, c.y, c.icon_size + 4.0, PANE_HEADER_HEIGHT)));
-            action_x = po_x + close_w + 4.0;
-        }
         if show_x {
             let close_x = action_x;
             // Hover chip behind the × — same lift the +button gets,

@@ -103,9 +103,7 @@ impl App {
         };
         self.image_pan_bounds_in(pane_id, bw, bh)
     }
-    /// `image_pan_bounds` 의 본체 — 본문 박스를 **밖에서 받는다**. 별도창이 이걸 쓴다:
-    /// 꺼낸 pane 은 메인 트리(`effective_leaf_rects`)에 없어 위 경로가 늘 (0,0) 을
-    /// 내고, 그러면 확대해도 이미지가 가운데 붙박여 움직일 수 없다.
+    /// `image_pan_bounds` 의 본체 — 테스트와 레이아웃 호출부가 잰 본문 박스를 받는다.
     pub(crate) fn image_pan_bounds_in(&self, pane_id: &str, bw: f32, bh: f32) -> (f32, f32) {
         let ws = self.ws.lock().unwrap();
         let Some(pane) = ws.panes.get(pane_id) else {
@@ -2277,7 +2275,7 @@ impl App {
     /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
     ///
     /// 조합기(`self.hangul`)와 preedit 은 App 에 하나뿐인데 이걸 쓰는 입구는
-    /// 아홉 곳(터미널·편집기·별도창 셋·git 커밋·경로검색·트리검색·새이름·설정)
+    /// 터미널·편집기·git 커밋·경로검색·트리검색·새이름·설정
     /// 이다. 문맥이 바뀌어도 조합 상태가 그대로 남아 있어서, 터미널에서 "한" 을
     /// 치다 편집기를 클릭하면 그 "한" 이 **편집기에** 떨어지고(이상하게 쳐짐),
     /// Backspace 는 편집기 글자 대신 그 잔재를 갉아 아무것도 안 지워진다
@@ -2294,13 +2292,6 @@ impl App {
         let pending = self.hangul.flush();
         self.preedit.clear();
         self.in_preedit = false;
-        // 별도창(편집기·터미널 양쪽)은 프리에딧을 self 가 아니라 자기 창에
-        // 스탬프한다. 주인이 바뀌었다는 건 그 조합이 끝났다는 뜻이니 전부
-        // 비운다 — 안 그러면 조합 중이던 글자가 떠난 창에 유령으로 남는다.
-        // (새 주인 창은 다음 키에서 다시 스탬프한다.)
-        for a in self.aux_windows.iter_mut() {
-            a.preedit.clear();
-        }
         let (Some(text), Some(prev)) = (pending, prev) else {
             return;
         };
@@ -2313,7 +2304,6 @@ impl App {
                 }
             }
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
-            crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
@@ -3652,8 +3642,7 @@ pub(crate) enum ZoomKey {
 /// `code`(물리 위치) 와 `logical`(그 키가 실제로 내놓은 문자)을 **둘 다** 본다.
 /// 한글·유럽 배열은 같은 문자를 다른 물리 위치에서 내놓기 때문이다 — 물리키만
 /// 보면 그 배열에서 Cmd+- 가 안 먹고, 문자만 보면 US 배열의 NumpadSubtract 를
-/// 놓친다. 메인 창(`forward_key`)과 별도창(`aux_terminal_key`)이 같은 판정을
-/// 쓰라고 한 벌만 둔다: 두 벌이면 한쪽만 고쳐진다(별도창이 실제로 그랬다).
+/// 놓친다. 입력 경로가 모두 같은 판정을 쓰도록 한 벌만 둔다.
 ///
 /// winit `KeyEvent` 는 비공개 필드가 있어 테스트에서 만들 수 없으니
 /// `is_modifier_logical` 과 같은 이유로 두 조각만 따로 받는다.
@@ -4747,8 +4736,8 @@ mod zoom_key_tests {
     }
 
     /// 이게 이 함수의 존재 이유다: 한글(두벌식) 배열에선 Cmd 를 낀 키의 물리 위치가
-    /// US 와 어긋날 수 있어, 물리키만 보면 별도창에서 Cmd+- 가 안 먹고 '-' 가 셸에
-    /// 박혔다. 문자가 맞으면 물리 위치를 몰라도 잡아야 한다.
+    /// US 와 어긋날 수 있어, 물리키만 보면 Cmd+- 가 안 먹고 '-' 가 셸에 박힌다.
+    /// 문자가 맞으면 물리 위치를 몰라도 잡아야 한다.
     #[test]
     fn logical_char_alone_is_enough() {
         assert_eq!(zoom_key(None, Some("-")), Some(ZoomKey::Out));

@@ -497,6 +497,7 @@ export function PlatformStep({
           <label htmlFor="custom-shell">{t.platform.customShell}</label>
           <TextField
             id="custom-shell"
+            label={t.platform.customShell}
             value={shell}
             disabled={busy}
             mono

@@ -110,7 +110,7 @@ export function ThemeGenEngine() {
             type="button"
             disabled={busy}
             onClick={() => void pick(p.kind)}
-            className="px-3 py-1.5 text-[13px]"
+            className="min-h-[40px] px-3 py-1.5 text-[13px]"
             style={segStyle(state.provider === p.kind, busy)}
           >
             {p.label}
@@ -305,7 +305,7 @@ export function ThemeGenSection({ slug }: { slug: string }) {
             type="button"
             disabled={uploading || running}
             onClick={() => fileRef.current?.click()}
-            className="px-3 py-1.5 text-[13px] disabled:opacity-50"
+            className="min-h-[40px] px-3 py-1.5 text-[13px] disabled:opacity-50"
             style={segStyle(false)}
           >
             {uploading
@@ -351,7 +351,7 @@ export function ThemeGenSection({ slug }: { slug: string }) {
             <>
             <button
               type="button"
-              className="mt-2 px-3 py-1.5 text-[13px]"
+              className="mt-2 min-h-[40px] px-3 py-1.5 text-[13px]"
               style={segStyle(true)}
               onClick={() =>
                 void postAction('theme-gen-start', { id: slug }).then((out) => {

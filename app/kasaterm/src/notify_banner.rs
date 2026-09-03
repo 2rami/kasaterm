@@ -50,7 +50,7 @@ const LEAVE_GRACE: Duration = Duration::from_millis(1800);
 /// 카드 click과 drag를 가르는 논리 픽셀 거리.
 const DRAG_THRESHOLD: f64 = 4.0;
 const MARGIN_B: f32 = 14.0;
-const CLOSE_BOX: f32 = 28.0;
+const CLOSE_BOX: f32 = 36.0;
 const CLOSE_ICON: f32 = 14.0;
 /// 동시에 쌓이는 최대 장수. 넘으면 **가장 오래된 것부터** 걷는다 — 무한히 쌓으면
 /// 학생이 여럿 끝나는 순간 화면이 배너로 덮이고, 그건 알림이 아니라 방해다.
@@ -421,7 +421,7 @@ fn save_position(point: Point) {
 }
 
 pub(crate) struct Banner {
-    /// 자체 wgpu 렌더러. `window` 보다 먼저 드롭돼야 한다(auxwin 과 같은 규약).
+    /// 자체 wgpu 렌더러. `window` 보다 먼저 드롭돼야 한다.
     pub(crate) gpu: gpu::GpuRenderer,
     pub(crate) window: Arc<Window>,
     title: String,
@@ -700,8 +700,7 @@ impl App {
         // ⚠️ **`set_scale` 만으로는 칸 폭이 안 따라온다.** 그건 scale 과 아틀라스만
         // 갈고 `cell_w`/`cell_h` 는 `set_font_size` 가 정한다 — 즉 칸 폭은 창을 만들
         // 때의 scale 로 굳는데, `GpuRenderer::new` 는 아직 화면에 안 붙은 창의
-        // `scale_factor()` 를 읽는다. auxwin 이 네 자리 모두에서 이 둘을 **붙여
-        // 부르는** 이유가 이것이다.
+        // `scale_factor()` 를 읽으므로 창과 렌더러의 수명을 함께 묶는다.
         //
         // 지금 배너는 chrome 텍스트만 그려서 칸 폭을 안 쓴다 — 이 줄이 눈에 보이는
         // 것을 바꾸지는 않는다. 그래도 붙여 두는 건 칸이 실제 배율과 어긋난 채로
@@ -730,7 +729,7 @@ impl App {
         // 둥근 모서리가 사는 건 그 덕이다. 알파 합성이 안 먹는 환경에서는 이 판이
         // 그냥 사각형으로 보일 뿐, 내용은 그대로다.
         b.gpu
-            .round_rect_fill(0.0, 0.0, w, h, 14.0, theme::panel_bg());
+            .round_rect_fill(0.0, 0.0, w, h, theme::radius_md(), theme::panel_bg());
         // 왼쪽 색띠 — 알림 여럿이 쌓였을 때 누구 것인지 글자보다 먼저 읽힌다.
         b.gpu.round_rect_fill(0.0, 0.0, 4.0, h, 2.0, accent);
 
@@ -751,6 +750,8 @@ impl App {
         // 흘러 옆 창 위에 글자만 떠 있는 꼴이 되므로 오른쪽 여백에서 자른다.
         let close_x = w - CLOSE_BOX;
         let clip_r = close_x - 4.0;
+        let title = crate::info::fit_text(&mut b.gpu, &title, clip_r - x0, 13.0, true);
+        let body = crate::info::fit_text(&mut b.gpu, &body, clip_r - x0, 12.0, false);
         b.gpu.draw_text_clipped(
             x0,
             16.0,
@@ -783,7 +784,7 @@ impl App {
             &body,
             gpu::DrawOpts {
                 font_size: 12.0,
-                color: theme::text_mute(),
+                color: theme::enforce_contrast_at(theme::text_dim(), theme::panel_bg(), 4.5),
                 bold: false,
                 italic: false,
             },
@@ -791,7 +792,7 @@ impl App {
             clip_r,
         );
         // 헤드리스 검증: 배너는 **별도 창**이라 메인 창을 찍는 `KASATERM_AUTOCAPTURE`
-        // 로는 안 잡힌다. auxwin 이 자기 gpu 로 따로 readback 하는 것과 같은 이유다.
+        // 로는 안 잡힌다. 자체 GPU 서피스라 별도 readback 이 필요하다.
         if let Ok(p) = std::env::var("KASATERM_AUTOBANNER_CAP") {
             let dot = p.rfind('.').unwrap_or(p.len());
             b.gpu.capture_next = Some(format!("{}-{idx}{}", &p[..dot], &p[dot..]));
