@@ -2959,19 +2959,24 @@ fn pick_scrolled_past_prompt(
     if let Some((i, ri)) = topmost {
         // 머리줄을 봤다 — 이건 짐작이 아니라 확정이다.
         //
-        // **그 머리줄이 몇 행인가**로 한 칸이 갈린다. 띠는 0행을 덮으므로,
-        // 머리줄이 0행이면 띠가 그 자리를 대신 차지한다 — 거기에 앞 질문을 쓰면
-        // 보이던 질문을 덮고 거짓말을 하는 셈이다. 그때는 그 질문 자신이 답이다.
-        // 아래 행이면 띠는 머리줄 **위에** 얹히므로 화면 맨 윗줄은 앞 턴의 꼬리고,
-        // 그 앞 질문이 답이다(첫 질문이면 위가 없으니 띠도 없다).
-        let want = if ri == 0 { Some(i) } else { i.checked_sub(1) };
+        // **그 머리줄이 화면 어디쯤인가**로 한 칸이 갈린다. 위쪽 절반에 있으면 화면에
+        // 담긴 것 대부분이 그 턴이므로 **그 질문 자신**이 답이다. 아래쪽에 있으면
+        // 보이는 것 대부분은 앞 턴의 꼬리고, 그 앞 질문이 답이다(첫 질문이면 위가
+        // 없으니 띠도 없다).
+        //
+        // 한동안 이 경계가 「0행이냐」였다. 그 규칙은 「맨 윗줄 한 줄이 속한 턴」을
+        // 정확히 말하지만 사람이 보는 것은 화면 전체다 — 맨 아래에서 조금만 올려
+        // 마지막 질문이 화면에 뻔히 보이는데도 그 **앞** 질문이 떴다(2026-09-03 지적:
+        // 「맨밑에서 스크롤살짝올리면 둘째질문이 붙어」).
+        let half = (rows.len() / 2).max(1);
+        let want = if ri <= half { Some(i) } else { i.checked_sub(1) };
         let past = want.and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
         if past.is_some() {
             *memo = past.clone();
         }
-        // 그 머리줄이 0행이면 답이 곧 그 줄이라 셀을 쓸 수 있다. 아래 행이면 답은
-        // **앞** 질문이고 그것은 화면 밖이다.
-        return past.map(|p| (p, (ri == 0).then_some(0)));
+        // 답이 그 머리줄 자신이면 그 줄의 셀을 띠에 옮길 수 있다. 앞 질문이 답일
+        // 때는 그것이 화면 밖이라 옮겨 올 것이 없다.
+        return past.map(|p| (p, (ri <= half).then_some(ri)));
     }
     // 아는 질문은 화면에 없고, **모르는 질문이 화면에 있다.** 기록에 안 남은 턴이라
     // 앞뒤 순서를 셀 수가 없으니 「그 앞 턴」은 못 말한다 — 화면이 보여 주는 그 질문을
@@ -4604,14 +4609,32 @@ mod clawd_banner_tests {
     #[test]
     fn the_band_shows_the_question_that_scrolled_past_not_the_latest() {
         let ps = vec![("첫 질문".to_string(), vec![]), ("둘째 질문".to_string(), vec![]), ("셋째 질문".to_string(), vec![])];
-        let rows = vec![
-            row_from("                    "),
-            row_from("> 둘째 질문"),
-            row_from("  답변 본문"),
-            row_from("  Jump to bottom (click) ↓"),
-        ];
+        // 머리줄이 화면 **아래쪽**에 있다 — 보이는 것 대부분은 앞 턴의 꼬리다.
+        let mut rows = vec![row_from("  앞 턴의 꼬리"); 8];
+        rows.push(row_from("> 둘째 질문"));
+        rows.push(row_from("  답변 본문"));
+        rows.push(row_from("  Jump to bottom (click) ↓"));
         let got = find_sticky_prompt(&rows, &ps, &mut None).expect("감지");
         assert_eq!(got.text, "첫 질문");
+    }
+
+    /// 머리줄이 화면 **위쪽**에 있으면 보이는 것 대부분이 그 턴이므로 **그 질문**이
+    /// 답이다. 맨 아래에서 조금만 올린 자리가 정확히 이 경우고, 여기서 앞 질문을
+    /// 띄우면 화면에 뻔히 보이는 질문을 두고 지난 것을 말하는 셈이다(2026-09-03
+    /// 지적: 「맨밑에서 스크롤살짝올리면 둘째질문이 붙어」).
+    #[test]
+    fn a_heading_near_the_top_names_its_own_turn() {
+        let ps = vec![
+            ("첫 질문".to_string(), vec![]),
+            ("둘째 질문".to_string(), vec![]),
+            ("셋째 질문".to_string(), vec![]),
+        ];
+        let mut rows = vec![row_from("                    ")];
+        rows.push(row_from("> 셋째 질문"));
+        rows.extend(vec![row_from("  그 답 한 줄"); 8]);
+        rows.push(row_from("  Jump to bottom (click) \u{2193}"));
+        let got = find_sticky_prompt(&rows, &ps, &mut None).expect("감지");
+        assert_eq!(got.text, "셋째 질문");
     }
 
     /// 질문 줄이 안 보여도 **보이는 본문으로 어느 턴인지** 짚는다 — 첫 답변을
@@ -4646,11 +4669,9 @@ mod clawd_banner_tests {
         ];
         let mut memo = None;
         // ① 셋째 질문의 머리줄이 보인다 → 그 위는 둘째 질문의 답이다.
-        let seen = vec![
-            row_from("                    "),
-            row_from("> 셋째 질문"),
-            row_from("  Jump to bottom (click) \u{2193}"),
-        ];
+        let mut seen = vec![row_from("  둘째 턴의 꼬리"); 8];
+        seen.push(row_from("> 셋째 질문"));
+        seen.push(row_from("  Jump to bottom (click) \u{2193}"));
         assert_eq!(find_sticky_prompt(&seen, &ps, &mut memo).expect("감지").text, "둘째 질문");
         // ② 더 올려 머리줄이 화면 밖으로 나갔다. 짐작이면 최신(셋째)이 뜬다.
         let buried = vec![
@@ -4804,11 +4825,9 @@ mod clawd_banner_tests {
     #[test]
     fn no_band_when_the_first_question_is_still_on_screen() {
         let ps = vec![("첫 질문".to_string(), vec![]), ("둘째 질문".to_string(), vec![])];
-        let rows = vec![
-            row_from("                    "),
-            row_from("> 첫 질문"),
-            row_from("  Jump to bottom (click) ↓"),
-        ];
+        let mut rows = vec![row_from("  부팅 로그 줄"); 8];
+        rows.push(row_from("> 첫 질문"));
+        rows.push(row_from("  Jump to bottom (click) ↓"));
         assert!(find_sticky_prompt(&rows, &ps, &mut None).is_none());
     }
 
@@ -6272,11 +6291,18 @@ mod screen_is_the_source_tests {
     fn a_known_question_still_takes_precedence() {
         let mut memo = None;
         let got = pick_scrolled_past_prompt(
-            &rows(&["  꼬리", "\u{276f} 둘째 질문", "  답", "\u{276f} 모르는 질문"]),
+            &rows(&[
+                "  꼬리", "  꼬리", "  꼬리", "  꼬리", "  꼬리", "  꼬리",
+                "\u{276f} 둘째 질문", "  답", "\u{276f} 모르는 질문",
+            ]),
             &prompts(&["첫 질문", "둘째 질문"]),
             &mut memo,
         );
-        assert_eq!(got.as_ref().map(|(q, _)| q.as_str()), Some("첫 질문"), "아는 질문의 앞 턴");
+        assert_eq!(
+            got.as_ref().map(|(q, _)| q.as_str()),
+            Some("첫 질문"),
+            "머리줄이 화면 아래쪽이면 보이는 것 대부분은 앞 턴이다"
+        );
     }
 
     /// ASCII `>` 로 시작하는 줄은 **대조 없이는 안 받는다** — 인용문·diff 가 행 머리에
