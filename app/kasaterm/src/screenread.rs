@@ -2990,14 +2990,18 @@ fn pick_scrolled_past_prompt(
         // 마지막 질문이 화면에 뻔히 보이는데도 그 **앞** 질문이 떴다(2026-09-03 지적:
         // 「맨밑에서 스크롤살짝올리면 둘째질문이 붙어」).
         let half = (rows.len() / 2).max(1);
-        let want = if ri <= half { Some(i) } else { i.checked_sub(1) };
+        // 정확히 경계에 걸친 머리줄은 아래쪽이다. 0-based 행에서 `half`까지
+        // 위쪽으로 세면 짝수 높이는 아래 절반의 첫 줄을 하나 더 먹고, 홀수 높이는
+        // 가운데 질문 앞의 답변 꼬리를 무시해 현재 턴을 너무 일찍 붙인다.
+        let heading_is_above_half = ri < half;
+        let want = if heading_is_above_half { Some(i) } else { i.checked_sub(1) };
         let past = want.and_then(|k| prompts.get(k)).map(|(p, _)| p.clone());
         if past.is_some() {
             *memo = past.clone();
         }
         // 답이 그 머리줄 자신이면 그 줄의 셀을 띠에 옮길 수 있다. 앞 질문이 답일
         // 때는 그것이 화면 밖이라 옮겨 올 것이 없다.
-        return past.map(|p| (p, (ri <= half).then_some(ri)));
+        return past.map(|p| (p, heading_is_above_half.then_some(ri)));
     }
     // 아는 질문은 화면에 없고, **모르는 질문이 화면에 있다.** 기록에 안 남은 턴이라
     // 앞뒤 순서를 셀 수가 없으니 「그 앞 턴」은 못 말한다 — 화면이 보여 주는 그 질문을
