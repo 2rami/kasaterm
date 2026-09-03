@@ -7730,6 +7730,7 @@ for _a in \"$@\"; do\n\
     mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
     local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1 ;;\n\
     classic) CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_classic=1 ;;\n\
+    tasks) CLAUDE_CODE_ENABLE_TODO_TOOLS=1; export CLAUDE_CODE_ENABLE_TODO_TOOLS; _drop_tasks=1 ;;\n\
     -*) ;;\n\
     *) break ;;\n\
   esac\n\
@@ -7742,12 +7743,17 @@ done\n\
 # 붙는 질문 띠가 codex 와 같은 길로 간다 — 절대 줄 번호를 알아 한 번에 그 자리에\n\
 # 선다. 대가는 깜빡임과 입력창 하단 고정을 잃는 것이라, 앱 전체가 아니라 **창마다**\n\
 # 고르게 둔다. 두 단어를 함께 쓸 수 있다(`claude local classic`).\n\
-if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ]; then\n\
+# `claude tasks` — 이 창의 claude 에만 **태스크 목록 도구**를 얹는다. 최신 모델은\n\
+# 그 다섯 도구(TaskCreate/Get/List/Update·TodoWrite)를 기본으로 안 싣는다 — 체크리스트\n\
+# 없이도 다단계 작업을 놓치지 않고, 도구 정의와 리마인더가 매 턴 컨텍스트를 먹기\n\
+# 때문이다(claude-code 2.1.233~). 그래서 켜는 것도 창마다 고른다.\n\
+if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ] || [ -n \"$_drop_tasks\" ]; then\n\
   _n=$#; _i=0\n\
   while [ $_i -lt $_n ]; do\n\
     _a=$1; shift\n\
     if [ \"$_a\" = local ] && [ -n \"$_drop_local\" ]; then _drop_local=\"\";\n\
     elif [ \"$_a\" = classic ] && [ -n \"$_drop_classic\" ]; then _drop_classic=\"\";\n\
+    elif [ \"$_a\" = tasks ] && [ -n \"$_drop_tasks\" ]; then _drop_tasks=\"\";\n\
     else set -- \"$@\" \"$_a\"; fi\n\
     _i=$((_i+1))\n\
   done\n\
