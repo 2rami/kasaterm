@@ -54,12 +54,23 @@ sudo xcode-select -s /Applications/Xcode.app
 sudo xcodebuild -runFirstLaunch
 brew install cocoapods
 flutter precache --ios
-flutter run -d <기기>
 ```
 
-무료 Apple ID 로 서명하면 7일마다 다시 설치해야 한다. 번들 id 는 `com.debimarlene.kasatermMobile`.
-로컬 서버(`http://127.0.0.1:8765/` · LAN)에 붙이려면 `Info.plist` 의 `NSAppTransportSecurity` 에
-`NSAllowsLocalNetworking` 이 켜져 있어야 한다.
+서명은 Xcode 화면을 열지 않고 붙인다. Xcode 의 계정 설정(Settings → Accounts)에 Apple ID 를
+한 번 넣어 두면 팀 ID 가 아래 명령으로 읽히고, 그 값을 환경변수로 주면 flutter 가 xcodebuild 에
+`-allowProvisioningUpdates` 를 붙여 인증서·프로필을 스스로 만든다. 프로젝트 파일에는 팀 ID 를
+적지 않는다 — 사람마다 다르다.
+
+```bash
+defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier | grep -E 'teamID|teamName'
+FLUTTER_XCODE_DEVELOPMENT_TEAM=<teamID> NO_PROXY='127.0.0.1,localhost' flutter run -d <기기 UDID>
+```
+
+기기 UDID 는 `flutter devices`. 폰 쪽은 **개발자 모드**(설정 → 개인정보 보호 및 보안 → 개발자 모드)가
+켜져 있어야 Xcode 가 기기를 목적지로 잡는다 — 꺼져 있으면 "Developer Mode disabled" 로 선다.
+무료 Apple ID(Personal Team)로 서명하면 7일마다 다시 설치해야 한다. 번들 id 는
+`com.debimarlene.kasatermMobile`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에 붙이려면
+`Info.plist` 의 `NSAppTransportSecurity` 에 `NSAllowsLocalNetworking` 이 켜져 있어야 한다.
 
 ## 지킬 것
 
