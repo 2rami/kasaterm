@@ -172,9 +172,15 @@ impl App {
             None => return Vec::new(),
         };
         // 대체화면 앱(vim·helix·기본 claude)은 스크롤백이 없어 당길 위가 없고,
-        // 애초에 화면 끝까지 그려 여백도 없다. claude 가 도는 pane 에서만 —
-        // 남의 TUI 가 아래를 비워 두는 것은 그 앱의 레이아웃이지 버그가 아니다.
-        if term.alt_screen || sess.active_agent().is_none() {
+        // 애초에 화면 끝까지 그려 여백도 없다.
+        //
+        // 그리고 **claude 로 좁힌다** — 여백 한 줄은 classic claude 의 성질이지
+        // 하네스 일반의 성질이 아니다. codex 는 대화가 짧을 때 화면 아래를 통째로
+        // 비워 두는데(2026-09-03 리그 실측), 거기서 위를 끌어다 채우면 그 앱이
+        // 의도한 레이아웃을 터미널이 제멋대로 밀어 올리는 꼴이 된다.
+        if term.alt_screen
+            || !matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude))
+        {
             return Vec::new();
         }
         // 빈 줄은 **살아 있는 화면**에서 잰다 — 뷰포트가 아니라. 스크롤을 올리면
