@@ -145,6 +145,28 @@ fn scan_prompt_anchors(term: &Term<PtyEventForwarder>) -> Vec<PromptAnchor> {
     out
 }
 
+/// 절대 줄 `abs` 의 셀들 — `PtySession::row_at_abs` 의 알맹이.
+///
+/// 좌표 규약은 `scan_prompt_anchors` 와 같다(그리드 줄 = `abs - history_size`). 두
+/// 셈이 어긋나면 머리줄이 **한 줄 옆을 그린다** — 눌러 가 보기 전에는 티가 안 나는
+/// 부류라, 앵커를 만드는 쪽과 읽는 쪽이 같은 식을 쓰게 붙여 둔다.
+fn read_row_at_abs(term: &Term<PtyEventForwarder>, abs: i64) -> Option<Row> {
+    let g = term.grid();
+    let hist = g.history_size() as i64;
+    let line = abs - hist;
+    if line < -hist || line >= g.screen_lines() as i64 {
+        return None;
+    }
+    let cols = g.columns();
+    let mut row: Row = Vec::with_capacity(cols);
+    for c in 0..cols {
+        row.push(convert_cell(
+            &g[Point::new(alacritty_terminal::index::Line(line as i32), alacritty_terminal::index::Column(c))],
+        ));
+    }
+    Some(row)
+}
+
 /// 뷰포트 바로 위 스크롤백 행들 — `PtySession::rows_above` 의 알맹이이자, 시험이
 /// 살아 있는 PTY 없이 부를 수 있는 진입점(`scan_prompt_anchors` 와 같은 모양).
 /// 뷰포트 첫 행은 그리드 줄 `-display_offset` 이므로(스냅샷과 같은 셈) 그 위는
@@ -1274,6 +1296,15 @@ impl PtySession {
     /// 락 잡고 읽는다.
     pub fn rows_above(&self, n: usize) -> Vec<Row> {
         read_rows_above(&self.term.lock().unwrap(), n)
+    }
+
+    /// 절대 줄 하나를 **셀 그대로** 읽는다 — 색·굵기·마커까지 원본 그대로.
+    ///
+    /// 고정 머리줄이 이걸 쓴다. 머리줄을 글자만 다시 그리면 원본과 색도 마커도
+    /// 어긋나서, 눌러서 그 자리로 갔을 때 같은 줄인데 다르게 보인다. 셀을 옮겨
+    /// 그리면 머리줄과 본문이 **딱 겹친다**(2026-09-03 지시).
+    pub fn row_at_abs(&self, abs: i64) -> Option<Row> {
+        read_row_at_abs(&self.term.lock().unwrap(), abs)
     }
 
     /// 살아 있는 화면의 마지막 `n` 행 — 스크롤을 올려 둔 상태에서도 같은 값이다.

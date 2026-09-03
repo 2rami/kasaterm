@@ -28,6 +28,13 @@ pub(crate) struct TurnHeader {
     pub prev_abs: Option<i64>,
     /// 하나 아래 질문. 없으면 ↓ 를 흐리게 둔다.
     pub next_abs: Option<i64>,
+    /// 그 질문 줄의 **원본 셀**(색·굵기·마커 그대로). 여러 줄에 걸친 질문이어도 마커가
+    /// 있는 **맨 위 한 줄**이다 — 앵커가 그 줄에만 서기 때문이다.
+    ///
+    /// 이걸 그대로 옮겨 그리면 눌러서 그 자리로 갔을 때 머리줄과 본문이 같은 그림이
+    /// 되어 딱 겹친다(2026-09-03 지시). 스크롤백 밖으로 밀려나 못 읽으면 `None` 이고,
+    /// 그때만 글자를 다시 그린다.
+    pub cells: Option<Vec<GridCell>>,
 }
 
 /// 헤더의 어느 부분을 눌렀나. 셋 다 결국 「절대 줄로 이동」이라 목적지를 함께 든다.
@@ -112,11 +119,13 @@ impl TurnJump {
         // 자체일 때도 자기 자신이 잡히는 게 맞다(그 턴을 보고 있는 것이므로).
         let idx = anchors.partition_point(|a| a.abs_line <= top_abs);
         let cur = idx.checked_sub(1)?;
+        let cur_abs = anchors[cur].abs_line;
         Some(TurnHeader {
             text: anchors[cur].text.clone(),
-            cur_abs: anchors[cur].abs_line,
+            cur_abs,
             prev_abs: cur.checked_sub(1).map(|i| anchors[i].abs_line),
             next_abs: anchors.get(cur + 1).map(|a| a.abs_line),
+            cells: sess.row_at_abs(cur_abs),
         })
     }
 
@@ -154,15 +163,28 @@ pub(crate) struct HeaderCols {
 pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCols {
     use unicode_width::UnicodeWidthChar;
     let rgb = |c: [u8; 4]| Color::Rgb(c[0], c[1], c[2]);
-    let bg = rgb(crate::theme::surface_hover());
-    let base = {
+    // **원본 줄이 있으면 그것을 그대로 옮긴다**(2026-09-03 지시: 「입력했던거 그대로
+    // 뜨게, 누르면 딱겹치게」). 글자만 다시 그리던 종전 방식은 색도 마커도 원본과
+    // 달라서, 눌러서 그 자리로 가면 같은 질문인데 다른 줄로 보였다. 셀을 옮기면
+    // 머리줄과 본문이 같은 그림이라 「덮였다」가 아니라 「그 자리에 왔다」로 읽힌다.
+    let from_source = h.cells.is_some();
+    let base = if from_source {
+        // 원본 줄은 자기 배경을 들고 온다 — 여기서 띠 색을 깔면 그 겹침이 깨진다.
+        GridCell::blank()
+    } else {
         let mut c = GridCell::blank();
         c.ch = ' ';
-        c.bg = bg.clone();
+        c.bg = rgb(crate::theme::surface_hover());
         c
     };
     for c in row.iter_mut() {
         *c = base.clone();
+    }
+    if let Some(src) = &h.cells {
+        // 창을 넓히거나 좁힌 뒤면 길이가 다르다 — 짧은 쪽에 맞춰 옮기고 나머지는 빈칸.
+        for (dst, s) in row.iter_mut().zip(src.iter()) {
+            *dst = s.clone();
+        }
     }
     // 오른쪽 끝 화살표 자리부터 잡는다 — 본문은 그 앞까지만 쓴다.
     // `↑ ↓ ` 로 넉 칸. claude 가 "Jump to bottom ↓" 에 같은 계열 글리프를 쓰고 있어
@@ -170,10 +192,13 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
     let (mut up_col, mut down_col) = (None, None);
     let text_end = if let (Some(up), Some(down)) = sticky_arrow_cols(row.len()) {
         let put = |row: &mut [GridCell], at: usize, ch: char, on: bool| {
-            let mut c = base.clone();
+            // 그 칸의 **배경은 그대로 두고** 글자만 얹는다 — 원본을 옮겨 온 줄에서
+            // 배경까지 바꾸면 화살표 자리만 색이 튄다.
+            let mut c = row[at].clone();
             c.ch = ch;
-            c.fg = rgb(if on { crate::theme::text() } else { crate::theme::text_mute() });
+            c.fg = rgb(if on { crate::theme::accent() } else { crate::theme::text_mute() });
             c.bold = on;
+            c.dim = false;
             row[at] = c;
         };
         put(row, up, '↑', h.prev_abs.is_some());
@@ -184,6 +209,10 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
     } else {
         row.len()
     };
+    // 원본을 옮겼으면 본문은 이미 제자리에 있다.
+    if from_source {
+        return HeaderCols { up: up_col, down: down_col };
+    }
     let mut w = 0usize;
     let put = |row: &mut [GridCell], ch: char, fg: [u8; 4], bold: bool, w: &mut usize| {
         let cw = ch.width().unwrap_or(1).max(1);
@@ -355,5 +384,88 @@ mod tests {
         let a = anchors(&[10, 50]);
         // 첫 질문보다 위(로고·부팅 출력)에는 가리킬 턴이 없다.
         assert_eq!(pick(&a, 5), None);
+    }
+
+    /// 진짜 그리드처럼 **넓은 글자 뒤에 뒷칸을 둔다**(한글은 셀 두 칸).
+    fn cells_of(s: &str) -> Vec<GridCell> {
+        let mut out = Vec::new();
+        for ch in s.chars() {
+            let mut c = GridCell::blank();
+            c.ch = ch;
+            c.bold = true; // 원본의 표식 — 옮겨졌는지 이걸로 잰다
+            out.push(c);
+            if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) > 1 {
+                let mut sp = GridCell::blank();
+                sp.ch = ' ';
+                sp.bold = true;
+                out.push(sp);
+            }
+        }
+        out
+    }
+
+    /// 셀에서 보이는 글을 되읽는다 — 넓은 글자의 뒷칸은 건너뛴다.
+    fn read(row: &[GridCell]) -> String {
+        let mut out = String::new();
+        let mut skip = false;
+        for c in row {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if unicode_width::UnicodeWidthChar::width(c.ch).unwrap_or(1) > 1 {
+                skip = true;
+            }
+            out.push(c.ch);
+        }
+        out
+    }
+
+    fn header(cells: Option<Vec<GridCell>>, has_prev: bool, has_next: bool) -> TurnHeader {
+        TurnHeader {
+            text: "원본 질문".into(),
+            cur_abs: 10,
+            prev_abs: has_prev.then_some(1),
+            next_abs: has_next.then_some(20),
+            cells,
+        }
+    }
+
+    /// 머리줄은 **원본 셀을 그대로 옮긴다** — 글자만이 아니라 색·굵기까지. 눌러서
+    /// 그 자리로 갔을 때 본문과 딱 겹쳐야 하고, 다시 그리면 그 겹침이 깨진다.
+    #[test]
+    fn the_header_carries_the_original_cells() {
+        let mut row = vec![GridCell::blank(); 24];
+        let cols = paint_header_row(&mut row, &header(Some(cells_of("\u{203a} 원본 질문")), true, true));
+        assert!(read(&row).starts_with("\u{203a} 원본 질문"), "옮긴 글: {:?}", read(&row));
+        assert!(row[0].bold, "원본의 굵기까지 따라와야 옮긴 것이다");
+        assert!(cols.up.is_some() && cols.down.is_some());
+    }
+
+    /// 화살표는 **그 칸의 배경을 그대로 두고** 글자만 얹는다 — 배경까지 바꾸면 원본을
+    /// 옮겨 온 줄에서 그 두 칸만 색이 튄다.
+    #[test]
+    fn arrows_sit_on_the_original_background() {
+        let mut src = cells_of("\u{203a} 질문");
+        src.resize(24, {
+            let mut c = GridCell::blank();
+            c.bg = Color::Rgb(7, 8, 9);
+            c
+        });
+        let mut row = vec![GridCell::blank(); 24];
+        let cols = paint_header_row(&mut row, &header(Some(src), true, true));
+        let up = cols.up.expect("↑ 자리");
+        assert_eq!(row[up].ch, '↑');
+        assert_eq!(row[up].bg, Color::Rgb(7, 8, 9), "배경은 원본 그대로");
+    }
+
+    /// 원본을 못 읽으면(스크롤백 밖으로 밀려남) 종전대로 글자를 그린다 — 표시를 통째로
+    /// 죽이는 것보다 낫다.
+    #[test]
+    fn without_source_cells_the_text_is_drawn() {
+        let mut row = vec![GridCell::blank(); 24];
+        paint_header_row(&mut row, &header(None, false, false));
+        let text = read(&row);
+        assert!(text.starts_with("\u{276f} 원본 질문"), "글자 폴백: {text:?}");
     }
 }
