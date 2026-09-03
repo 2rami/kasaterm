@@ -361,5 +361,15 @@ tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol com
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
+
+// stdio 서버의 수명은 자기를 띄운 쪽의 수명이다 — stdin 이 닫히면 붙어 있을 상대가 없다.
+// 그런데 브리지로 가는 WebSocket 이 이벤트 루프를 붙잡고 있어서, 부모가 죽어도 이 프로세스만
+// 며칠씩 남아 브리지에 세션을 등록한 채로 있었다(2026-09-03 실측: 60개 중 41개가 고아, 그중
+// 8개는 이미 지워진 경로에서 도는 것이었다). 사람 눈에는 확장 팝업이 「kasa」 줄로 뒤덮인 걸로
+// 보인다 — 작업명도 잡은 탭도 없는, 아무도 안 쓰는 세션들이다.
+const bye = () => { try { ws?.close() } catch {} process.exit(0) }
+process.stdin.on('end', bye)
+process.stdin.on('close', bye)
+
 await connect()
 log(`ready (bridge ${activeUrl})`)
