@@ -4282,4 +4282,10 @@ mod room_rename_tests {
             assert!(panel.contains(marker), "확인창 포커스 경계 누락: {marker}");
         }
     }
+
+    #[test]
+    fn 빈_교실_오버레이는_뒤의_자리표시자를_숨긴다() {
+        let view = include_str!("../../../web/arona-ui/src/components/ClassroomView.tsx");
+        assert!(view.contains("onAdd && sorted.length > 0 && seats.slice(sorted.length)"));
+    }
 }

@@ -386,7 +386,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       ))}
 
       {/* 빈 자리마다 '부르기' 버튼 — 학생 없는 책상에서 바로 소환(멀리 있는 버튼 대신) */}
-      {onAdd && seats.slice(sorted.length).map((seat, i) => seat && (
+      {onAdd && sorted.length > 0 && seats.slice(sorted.length).map((seat, i) => seat && (
         <EmptySeat key={`empty-${i}`} seat={seat} onAdd={onAdd} />
       ))}
     </div>

@@ -10062,13 +10062,21 @@ impl App {
                         .max(40.0);
                     let tone = theme::notice_tone(msg, collab_toast_action_on);
                     let clean = theme::clean_notice_text(msg);
-                    let lines = crate::info::fit_text_lines(g, clean, max_text_w, t_font, true, 2);
+                    let lines = crate::info::fit_text_lines(
+                        g,
+                        clean,
+                        max_text_w,
+                        t_font,
+                        true,
+                        theme::notice_line_limit(tone),
+                        theme::notice_keeps_tail(tone),
+                    );
                     let text_w = lines
                         .iter()
                         .map(|line| g.measure_chrome_text(line, t_font, true))
                         .fold(0.0_f32, f32::max);
                     let box_w = text_w + px * 2.0 + chips_w + icon_size + icon_gap;
-                    let box_h = if lines.len() > 1 { 60.0 } else { 44.0 };
+                    let box_h = 44.0 + lines.len().saturating_sub(1) as f32 * 16.0;
                     let bx = (win_w - box_w - 16.0).max(16.0);
                     let by = TITLE_HEIGHT + 12.0;
                     self.collab.toast_rect = Some((bx, by, box_w, box_h));

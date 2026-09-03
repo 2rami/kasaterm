@@ -1318,6 +1318,17 @@ pub fn notice_tone_icon(tone: NoticeTone) -> &'static str {
     }
 }
 
+pub fn notice_line_limit(tone: NoticeTone) -> usize {
+    match tone {
+        NoticeTone::Warning | NoticeTone::Error | NoticeTone::Attention => 3,
+        NoticeTone::Success | NoticeTone::Info => 2,
+    }
+}
+
+pub fn notice_keeps_tail(tone: NoticeTone) -> bool {
+    matches!(tone, NoticeTone::Warning | NoticeTone::Error | NoticeTone::Attention)
+}
+
 pub fn clean_notice_text(message: &str) -> &str {
     message
         .trim_start_matches(['⚠', '✓', '✗', ' '])
@@ -1914,6 +1925,12 @@ mod roster_tests {
         assert_eq!(notice_tone("권한 필요", false), NoticeTone::Attention);
         assert_eq!(notice_tone("새 소식", false), NoticeTone::Info);
         assert_eq!(notice_tone("설치할까요", true), NoticeTone::Attention);
+        assert_eq!(notice_line_limit(NoticeTone::Success), 2);
+        assert_eq!(notice_line_limit(NoticeTone::Info), 2);
+        for tone in [NoticeTone::Warning, NoticeTone::Error, NoticeTone::Attention] {
+            assert_eq!(notice_line_limit(tone), 3);
+            assert!(notice_keeps_tail(tone));
+        }
         for tone in [
             NoticeTone::Success,
             NoticeTone::Warning,

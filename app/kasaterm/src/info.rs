@@ -3794,9 +3794,9 @@ fn wrap_path(g: &mut gpu::GpuRenderer, s: &str, avail: f32, max_lines: usize) ->
 /// 글자 폭은 서로 독립이라 한 번 훑으며 누적하면 같은 답이 한 바퀴에 나온다.
 /// `fit_text` 의 반대 방향 — **뒤**를 남기고 앞을 접는다(`…tail`).
 ///
-/// 경로와 브랜치처럼 "지금 어디인가" 가 꼬리에 오는 문자열 전용이다. 앞에서
-/// 자르면 `/Users/kasa/Desk…` 처럼 누구나 아는 앞머리만 남고 정작 알아야 할
-/// 폴더가 사라진다.
+/// 경로·브랜치와 오류 복구 안내처럼 결론이 꼬리에 오는 문자열 전용이다. 앞에서
+/// 자르면 `/Users/kasa/Desk…` 또는 긴 원인만 남고 정작 알아야 할 폴더·다음 조작이
+/// 사라진다.
 pub(crate) fn fit_text_tail(
     g: &mut gpu::GpuRenderer,
     s: &str,
@@ -3814,22 +3814,12 @@ pub(crate) fn fit_text_tail(
     if avail <= ell {
         return String::new();
     }
-    let budget = avail - ell;
-    let mut w = 0.0;
-    let mut keep = 0usize; // 뒤에서부터 담은 바이트 수
     let mut buf = [0u8; 4];
-    for (i, ch) in s.char_indices().rev() {
-        w += g.measure_chrome_text(ch.encode_utf8(&mut buf), size, bold);
-        if w > budget {
-            break;
-        }
-        keep = s.len() - i;
-    }
-    if keep == 0 {
-        String::new()
-    } else {
-        format!("…{}", &s[s.len() - keep..])
-    }
+    let start = tail_start_for_width(s, avail - ell, |ch| {
+        g.measure_chrome_text(ch.encode_utf8(&mut buf), size, bold)
+    });
+    let tail = s[start..].trim_start();
+    (!tail.is_empty()).then(|| format!("…{tail}")).unwrap_or_default()
 }
 
 pub(crate) fn fit_text(
@@ -3874,6 +3864,7 @@ pub(crate) fn fit_text_lines(
     size: f32,
     bold: bool,
     max_lines: usize,
+    keep_tail: bool,
 ) -> Vec<String> {
     let mut rest = s.trim();
     let mut lines = Vec::new();
@@ -3883,7 +3874,11 @@ pub(crate) fn fit_text_lines(
             break;
         }
         if lines.len() + 1 == max_lines {
-            lines.push(fit_text(g, rest, avail, size, bold));
+            lines.push(if keep_tail {
+                fit_text_tail(g, rest, avail, size, bold)
+            } else {
+                fit_text(g, rest, avail, size, bold)
+            });
             break;
         }
         let mut width = 0.0;
@@ -3911,9 +3906,38 @@ pub(crate) fn fit_text_lines(
     lines
 }
 
+fn tail_start_for_width(
+    s: &str,
+    budget: f32,
+    mut char_width: impl FnMut(char) -> f32,
+) -> usize {
+    let mut width = 0.0;
+    let mut start = s.len();
+    for (i, ch) in s.char_indices().rev() {
+        let next = width + char_width(ch);
+        if next > budget {
+            break;
+        }
+        width = next;
+        start = i;
+    }
+    if start > 0
+        && start < s.len()
+        && !s[..start].chars().next_back().is_some_and(char::is_whitespace)
+    {
+        if let Some((i, ch)) = s[start..].char_indices().find(|(_, ch)| ch.is_whitespace()) {
+            let after = start + i + ch.len_utf8();
+            if after < s.len() {
+                start = after;
+            }
+        }
+    }
+    start
+}
+
 #[cfg(test)]
 mod tilde_tests {
-    use super::tilde_under;
+    use super::{tail_start_for_width, tilde_under};
     use std::path::Path;
 
     /// 홈 축약이 **구분자 경계**를 지키는지. `/Users/kasa2` 는 `/Users/kasa` 의
@@ -3935,6 +3959,13 @@ mod tilde_tests {
         assert_eq!(tilde_under(Path::new(&sibling), home), sibling);
         let other = format!("{s}opt{s}homebrew");
         assert_eq!(tilde_under(Path::new(&other), home), other);
+    }
+
+    #[test]
+    fn 긴_알림은_마지막_복구_문장을_단어째_남긴다() {
+        let text = "앞부분 아주 길게 설명 다시 시도해 주세요";
+        let start = tail_start_for_width(text, 10.0, |_| 1.0);
+        assert_eq!(&text[start..], "다시 시도해 주세요");
     }
 }
 

@@ -778,7 +778,8 @@ impl App {
             clip_r - text_x,
             12.0,
             false,
-            2,
+            theme::notice_line_limit(tone),
+            theme::notice_keeps_tail(tone),
         );
         b.gpu.draw_text_clipped(
             text_x,
