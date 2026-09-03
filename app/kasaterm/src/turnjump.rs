@@ -257,10 +257,16 @@ impl crate::App {
                 };
                 // wheel 을 쏠 자리는 그 pane 안이어야 한다(클릭 지점이면 늘 그렇다).
                 let cell = self.px_to_pane_cell(x, y).map(|(_, c, r)| (c, r)).unwrap_or((1, 1));
+                // 가려는 질문을 미리 짚어 함께 넘긴다 — 그래야 seek 이 「띠 글이 바뀔
+                // 때까지」가 아니라 **그 질문 자리에서** 멈춘다.
+                let want =
+                    crate::render::neighbor_prompt(&target, self.pane_prompts(&pane_id), down);
                 if dbg {
-                    eprintln!("[turn] seek {hit:?} pane={pane_id} down={down} target={target:?}");
+                    eprintln!(
+                        "[turn] seek {hit:?} pane={pane_id} down={down} target={target:?} want={want:?}"
+                    );
                 }
-                crate::render::begin_sticky_seek(pane_id, target, cell, down);
+                crate::render::begin_sticky_seek(pane_id, target, cell, down, want);
             }
         }
         true

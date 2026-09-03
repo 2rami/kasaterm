@@ -1352,7 +1352,10 @@ impl App {
                 // 표시를 남긴다 — 512KB 꼬리에는 일하던 창의 질문이 하나밖에 안
                 // 들어가서, 그대로 두면 띠가 늘 그 하나를 그린다. 평상시(닫힌
                 // 게이트)에는 이 줄에서 끝나므로 매 프레임 비용은 종전과 같다.
-                let scrolled = crate::screenread::scrolled_gate(&composed);
+                // 화면 안내가 정본이고, 방금 우리가 넘긴 위쪽 스크롤이 그것이 그려지기
+                // 전까지의 빈틈을 메운다(`scroll_forwarded_recently` 주석 참조).
+                let scrolled = crate::screenread::scrolled_gate(&composed)
+                    || crate::screenread::scroll_forwarded_recently(id.as_str());
                 if scrolled {
                     // seek 이 「더 올라갈 데가 없다」를 알아채려면 화면이 움직였는지를
                     // 알아야 한다 — 그 유일한 단서를 여기서 적는다.

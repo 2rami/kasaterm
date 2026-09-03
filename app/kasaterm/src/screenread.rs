@@ -2305,6 +2305,48 @@ thread_local! {
     pub(crate) static STICKY_VIEW_FP:
         std::cell::RefCell<std::collections::HashMap<String, u64>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// pane 별 **마지막으로 위쪽 스크롤을 넘겨준 시각**.
+    ///
+    /// 게이트를 화면 문구(`Jump to bottom`)에만 걸면 **스크롤이 정착하기 전까지는
+    /// 못 잡는다** — claude 는 굴린 뒤 여러 프레임에 걸쳐 이동하고 그 안내를 마지막에
+    /// 그린다(2026-09-03 실측: 굴린 직후 화면엔 그 줄이 없고, 정착한 뒤에야 생겼다).
+    /// 그 구간이 곧 「조금 올렸을 때 안 붙는다」로 보이는 자리다.
+    ///
+    /// 우리가 그 스크롤을 **직접 넘겨줬으므로** 굴렸다는 사실만큼은 확실히 안다.
+    /// 짧은 유예로 그 빈틈만 메우고, 판정의 정본은 그대로 화면 문구에 둔다 — 유예가
+    /// 지나도 화면에 안내가 있으면 열린 채로 남고, 바닥으로 돌아갔으면 닫힌다.
+    /// 부채를 세지 않고 시각 하나만 두는 이유가 이것이다: 「바닥에 닿았나」를 우리가
+    /// 판정할 필요가 없어져, 세다가 어긋나 평상시 화면을 덮는 사고가 구조적으로 없다.
+    pub(crate) static WHEEL_UP_AT:
+        std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 스크롤을 그 pane 에 넘겨준 순간을 적는다.
+///
+/// 두 곳이 부른다. `handle_wheel` 은 **위로** 굴린 것만(아래로 굴려 바닥에 닿는 것까지
+/// 열어 두면 평상시 화면에 띠가 남는다), 되짚기(`run_pending_sticky_seek`)는 방향과
+/// 무관하게 — 그쪽은 이미 스크롤 중인 화면을 옮기고 있고, 옮기는 동안 게이트가 닫히면
+/// 도착 판정을 하는 눈(`note_sticky_view`)이 함께 감긴다.
+pub(crate) fn note_scroll_forwarded(pane_id: &str) {
+    WHEEL_UP_AT.with(|m| {
+        m.borrow_mut().insert(pane_id.to_string(), std::time::Instant::now());
+    });
+}
+
+/// claude 가 스크롤을 정착시키고 안내를 그리기까지 기다려 주는 시간.
+///
+/// 실측(2026-09-03)으로 굴린 직후 한 프레임에는 안내가 없고 곧 생긴다. 넉넉히
+/// 잡아도 손해가 작다 — 이 시간이 지나면 판정은 화면 문구로 넘어가므로, 길어야
+/// 「바닥으로 돌아온 직후 잠깐 띠가 남는다」가 전부다.
+pub(crate) const WHEEL_UP_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// 방금 위로 굴렸나 — 화면 문구가 아직 안 그려진 구간을 메우는 보조 게이트.
+pub(crate) fn scroll_forwarded_recently(pane_id: &str) -> bool {
+    WHEEL_UP_AT.with(|m| {
+        m.borrow().get(pane_id).is_some_and(|t| t.elapsed() < WHEEL_UP_GRACE)
+    })
 }
 
 /// 그 pane 의 이번 프레임 화면 지문을 적어 둔다(렌더가 부른다).
@@ -2317,6 +2359,21 @@ pub(crate) fn note_sticky_view(pane_id: &str, rows: &[Vec<GridCell>]) {
     let fp = h.finish();
     STICKY_VIEW_FP.with(|m| {
         m.borrow_mut().insert(pane_id.to_string(), fp);
+    });
+    // 가려던 질문이 **화면 위쪽**에 들어왔는지 여기서 본다. 위로 갈 때 그 줄은 위에서
+    // 내려오므로 나타나는 즉시 맨 위 근처고, 아래로 갈 때는 밑에서 올라와 위쪽에 닿을
+    // 때까지 더 굴러야 한다 — 「위쪽 1/3」 하나로 두 방향이 같은 자리에 선다.
+    STICKY_SEEK.with(|s| {
+        let mut b = s.borrow_mut();
+        let Some(seek) = b.as_mut() else { return };
+        if seek.pane_id != pane_id || seek.reached {
+            return;
+        }
+        let Some(want) = seek.want.clone() else { return };
+        let top = (rows.len() / 3).max(1);
+        if rows.iter().take(top).any(|r| line_shows_prompt(r, &want)) {
+            seek.reached = true;
+        }
     });
 }
 
@@ -2335,6 +2392,31 @@ pub(crate) struct StickySeek {
     /// 직전 노치를 쏘던 때의 화면 지문과, 그 뒤로 화면이 굳어 있던 노치 수.
     pub last_fp: Option<u64>,
     pub stall: u32,
+    /// **가려던 질문의 첫 줄**. 이것이 있으면 종료 판정이 「그 줄이 화면 위쪽에
+    /// 들어왔나」가 되어 목적지에 정확히 선다.
+    ///
+    /// 없으면(질문 목록을 못 읽은 pane) 종전대로 「띠 글이 바뀌면 멈춤」으로 돈다.
+    /// 그쪽은 한 박자 어긋난다 — 띠는 「화면 맨 위가 속한 턴」이라 **앞 질문이 화면에
+    /// 겨우 걸친 순간** 이미 바뀌고, 아래로 갈 때는 반대로 다음 질문을 지나친 뒤에야
+    /// 바뀐다(2026-09-03 지적: 「엉뚱한 데로 간다」).
+    pub want: Option<String>,
+    /// 이번 프레임 화면에서 `want` 를 봤다 — 렌더가 적고 다음 스텝이 읽는다.
+    pub reached: bool,
+}
+
+/// 그 화면 줄이 `want` 질문의 머리줄인가.
+///
+/// 앞머리만 본다 — 화면은 폭에 맞춰 접히고 claude 가 장식(글머리·세로줄)을 붙이므로
+/// 통째로 같기를 요구하면 거의 안 맞는다. 마커는 claude(`❯`)·codex(`›`)·인용(`>`)을
+/// 모두 떼고 본다.
+fn line_shows_prompt(row: &[GridCell], want: &str) -> bool {
+    let head: String = want.chars().take(20).collect();
+    if head.trim().is_empty() {
+        return false;
+    }
+    let text = row_match_text(row);
+    let body = text.trim_start_matches(['\u{276f}', '\u{203a}', '>']).trim_start();
+    body.starts_with(head.trim_end())
 }
 
 /// 노치 간 최소 간격 — 33ms 펌프 틱보다 짧게 잡아 틱마다 한 노치가 나가되,
@@ -2362,8 +2444,15 @@ pub(crate) fn sticky_text_for(pane_id: &str) -> Option<String> {
     })
 }
 
-/// sticky 클릭 → seek 시작. target 은 클릭한 pill 텍스트, cell 은 wheel 을 쏠 위치.
-pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16), down: bool) {
+/// sticky 클릭 → seek 시작. target 은 클릭한 pill 텍스트, cell 은 wheel 을 쏠 위치,
+/// want 는 **가려던 질문의 첫 줄**(알면 그 자리에 정확히 선다, 몰라도 된다).
+pub(crate) fn begin_sticky_seek(
+    pane_id: String,
+    target: String,
+    cell: (u16, u16),
+    down: bool,
+    want: Option<String>,
+) {
     let now = std::time::Instant::now();
     STICKY_SEEK.with(|s| {
         *s.borrow_mut() = Some(StickySeek {
@@ -2376,6 +2465,8 @@ pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16
             sent: 0,
             last_fp: None,
             stall: 0,
+            want,
+            reached: false,
         });
     });
 }
@@ -2388,9 +2479,17 @@ pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16, bool)> {
     STICKY_SEEK.with(|s| {
         let mut b = s.borrow_mut();
         let seek = b.as_mut()?;
-        let reached = match sticky_text_for(&seek.pane_id) {
-            None => true,
-            Some(t) => t != seek.target,
+        // 가려던 질문을 알면 **그 줄이 화면 위쪽에 들어왔나**가 정본이다(`note_sticky_view`
+        // 가 적어 준다). 모를 때만 종전 규칙 — 띠 글이 바뀌었거나 띠가 사라졌으면 완료.
+        let reached = match &seek.want {
+            Some(_) => {
+                // 목적지를 알아도 **띠가 사라진 것**은 여전히 끝이다(라이브 바닥 도달).
+                seek.reached || sticky_text_for(&seek.pane_id).is_none()
+            }
+            None => match sticky_text_for(&seek.pane_id) {
+                None => true,
+                Some(t) => t != seek.target,
+            },
         };
         if reached || seek.sent >= STICKY_SEEK_MAX || seek.stall >= STICKY_SEEK_STALL {
             *b = None;
@@ -2706,6 +2805,22 @@ fn match_prompt(line: &str, prompts: &[(String, Vec<String>)]) -> Option<usize> 
         }
     }
     only
+}
+
+/// 지금 띠가 문 질문의 **한 칸 앞(또는 뒤)** 질문 첫 줄 — ↑↓ 가 가려는 목적지.
+///
+/// 이걸 알아야 seek 이 그 자리에 정확히 선다. 띠 텍스트는 두 갈래로 오는데(화면에서
+/// 읽은 것은 마커가 붙어 있고, 우리가 채운 것은 목록의 값 그대로) 마커를 떼고 `match_prompt`
+/// 로 맞추면 둘 다 같은 자리를 짚는다. 못 맞히면 `None` — 부르는 쪽이 종전 규칙으로 돈다.
+pub(crate) fn neighbor_prompt(
+    cur: &str,
+    prompts: &[(String, Vec<String>)],
+    down: bool,
+) -> Option<String> {
+    let bare = cur.trim_start_matches(['\u{276f}', '\u{203a}', '>']).trim();
+    let i = match_prompt(bare, prompts)?;
+    let k = if down { i.checked_add(1)? } else { i.checked_sub(1)? };
+    prompts.get(k).map(|(p, _)| p.clone())
 }
 
 fn vote_turn(body: &[String], prompts: &[(String, Vec<String>)]) -> Option<usize> {
@@ -4510,7 +4625,7 @@ mod clawd_banner_tests {
         });
         // 화면이 굳어 있다 — 지문이 매번 같다.
         note_sticky_view(pane, &[row_from("움직이지 않는 화면")]);
-        begin_sticky_seek(pane.to_string(), target.to_string(), (0, 0), false);
+        begin_sticky_seek(pane.to_string(), target.to_string(), (0, 0), false, None);
         let mut notches = 0;
         for _ in 0..STICKY_SEEK_MAX * 2 {
             if sticky_seek_step().is_some() {
@@ -5853,7 +5968,7 @@ mod sticky_seek_tests {
     #[test]
     fn first_step_emits_notch() {
         set_pills(&[("%1", "이전 프롬프트")]);
-        begin_sticky_seek("%1".into(), "이전 프롬프트".into(), (5, 7), false);
+        begin_sticky_seek("%1".into(), "이전 프롬프트".into(), (5, 7), false, None);
         assert!(sticky_seek_active());
         assert_eq!(sticky_seek_step(), Some(("%1".to_string(), 5, 7, false)));
         assert!(sticky_seek_active()); // 아직 진행 중
@@ -5863,7 +5978,7 @@ mod sticky_seek_tests {
     #[test]
     fn throttled_between_notches() {
         set_pills(&[("%1", "T")]);
-        begin_sticky_seek("%1".into(), "T".into(), (1, 1), false);
+        begin_sticky_seek("%1".into(), "T".into(), (1, 1), false, None);
         assert!(sticky_seek_step().is_some()); // 첫 노치
         assert_eq!(sticky_seek_step(), None); // 간격 내 재호출 → 대기
         assert!(sticky_seek_active());
@@ -5873,7 +5988,7 @@ mod sticky_seek_tests {
     #[test]
     fn stops_when_target_enters_view() {
         set_pills(&[("%1", "타깃")]);
-        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false);
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false, None);
         set_pills(&[("%1", "더 이전 프롬프트")]); // sticky 가 이전 프롬프트로 교체됨
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
@@ -5883,10 +5998,164 @@ mod sticky_seek_tests {
     #[test]
     fn stops_when_sticky_gone() {
         set_pills(&[("%1", "타깃")]);
-        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false);
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false, None);
         set_pills(&[]); // 최상단 — pill 없음
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
+    }
+
+    /// 진짜 그리드처럼 **넓은 글자 뒤에 뒷칸을 둔다.** 한글은 셀 두 칸을 먹고 그
+    /// 뒷칸은 진짜 공백이라, 이걸 빼먹으면 `row_match_text` 가 사람이 친 띄어쓰기를
+    /// 뒷칸으로 오인해 「가려던 질문」이 「가려던질문」으로 돌아온다. 화면을 흉내내는
+    /// 시험이 실제 셀 배치를 안 지키면 통과·실패가 다 거짓이 된다.
+    fn screen(lines: &[&str]) -> Vec<Vec<GridCell>> {
+        lines
+            .iter()
+            .map(|l| {
+                let mut row = Vec::new();
+                for c in l.chars() {
+                    let mut cell = GridCell::blank();
+                    cell.ch = c;
+                    row.push(cell);
+                    if unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) > 1 {
+                        let mut spacer = GridCell::blank();
+                        spacer.ch = ' ';
+                        row.push(spacer);
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// 목적지를 알면 **띠 글이 바뀌는 것과 무관하게** 그 질문이 화면 위쪽에 들어온
+    /// 순간 선다. 이것이 「엉뚱한 데로 간다」를 고치는 자리다 — 띠는 앞 질문이 화면에
+    /// 겨우 걸쳐도 이미 바뀌어, 그것만 보면 목적지 못 미쳐 멈춘다.
+    #[test]
+    fn stops_where_the_wanted_prompt_actually_shows() {
+        set_pills(&[("%1", "지금 턴 질문")]);
+        begin_sticky_seek("%1".into(), "지금 턴 질문".into(), (1, 1), false, Some("가려던 질문".into()));
+        // 띠는 바뀌었지만 목적지는 아직 화면에 없다 — 계속 간다.
+        set_pills(&[("%1", "그 앞의 다른 질문")]);
+        note_sticky_view("%1", &screen(&["답변 한 줄", "또 한 줄", "세 줄", "네 줄", "다섯 줄", "여섯 줄"]));
+        assert!(sticky_seek_active(), "목적지를 못 봤으면 멈추지 않는다");
+        // 목적지가 화면 위쪽에 들어왔다 — 여기서 선다.
+        note_sticky_view("%1", &screen(&["\u{276f} 가려던 질문", "그 답", "세 줄", "네 줄", "다섯 줄", "여섯 줄"]));
+        assert_eq!(sticky_seek_step(), None);
+        assert!(!sticky_seek_active());
+    }
+
+    /// 아래로 갈 때 목적지가 **화면 밑자락에 걸친 것**만으로는 멈추지 않는다. 거기서
+    /// 서면 가려던 질문이 화면 맨 아래에 남아, 정작 그 턴의 답을 하나도 못 본다.
+    #[test]
+    fn a_prompt_at_the_bottom_edge_is_not_yet_the_destination() {
+        set_pills(&[("%1", "지금 턴")]);
+        begin_sticky_seek("%1".into(), "지금 턴".into(), (1, 1), true, Some("다음 질문".into()));
+        note_sticky_view("%1", &screen(&["한 줄", "두 줄", "세 줄", "네 줄", "다섯 줄", "\u{276f} 다음 질문"]));
+        assert!(sticky_seek_active(), "밑자락에 걸친 것은 아직 목적지가 아니다");
+    }
+
+    /// codex 마커(`›`)로 그려진 질문도 같은 자리로 읽는다 — 두 에이전트가 한 규칙으로
+    /// 서야 ↑↓ 가 같은 기능으로 읽힌다.
+    #[test]
+    fn codex_marker_line_counts_as_the_destination() {
+        set_pills(&[("%1", "지금 턴")]);
+        begin_sticky_seek("%1".into(), "지금 턴".into(), (1, 1), false, Some("코덱스 질문".into()));
+        note_sticky_view("%1", &screen(&["\u{203a} 코덱스 질문", "답", "셋", "넷", "다섯", "여섯"]));
+        assert_eq!(sticky_seek_step(), None);
+        assert!(!sticky_seek_active());
+    }
+
+    /// 목적지를 모르면(질문 목록이 없는 pane) 종전 규칙 그대로 — 표시를 통째로 죽이는
+    /// 것보다 한 박자 어긋나더라도 도는 편이 낫다.
+    #[test]
+    fn without_a_destination_the_old_rule_still_applies() {
+        set_pills(&[("%1", "타깃")]);
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1), false, None);
+        set_pills(&[("%1", "바뀐 띠")]);
+        assert_eq!(sticky_seek_step(), None);
+        assert!(!sticky_seek_active());
+    }
+}
+
+#[cfg(test)]
+mod scroll_gate_tests {
+    use super::*;
+
+    fn rows(lines: &[&str]) -> Vec<Vec<GridCell>> {
+        lines
+            .iter()
+            .map(|l| {
+                l.chars()
+                    .map(|c| {
+                        let mut cell = GridCell::blank();
+                        cell.ch = c;
+                        cell
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// claude 의 안내는 **본문 줄 오른쪽에 겹쳐** 그려진다(2026-09-03 실측). 줄 전체가
+    /// 안내일 것을 기대하면 그 판을 통째로 놓친다.
+    #[test]
+    fn the_hint_is_found_even_when_it_shares_a_line_with_content() {
+        assert!(scrolled_gate(&rows(&[
+            "  78",
+            "  79                    Jump to bottom: fn+\u{2193} to scroll",
+        ])));
+    }
+
+    /// 굴린 직후에는 그 안내가 아직 없다 — claude 가 스크롤을 정착시키고 나서 그린다.
+    /// 화면만 보면 이 구간이 「맨 아래」와 구별이 안 되고, 그것이 「조금 올리면 띠가
+    /// 안 붙는다」의 정체다.
+    #[test]
+    fn a_freshly_scrolled_screen_has_no_hint_yet() {
+        assert!(!scrolled_gate(&rows(&["  65", "  66", "  67"])));
+    }
+
+    /// 그 빈틈은 **우리가 그 스크롤을 넘겼다는 사실**로 메운다. 유예가 지나면 판정은
+    /// 다시 화면 문구로 넘어간다.
+    #[test]
+    fn forwarding_a_scroll_up_opens_the_gate_for_a_moment() {
+        WHEEL_UP_AT.with(|m| m.borrow_mut().clear());
+        assert!(!scroll_forwarded_recently("%9"), "굴린 적이 없으면 닫혀 있다");
+        note_scroll_forwarded("%9");
+        assert!(scroll_forwarded_recently("%9"));
+        assert!(!scroll_forwarded_recently("%다른"), "굴린 pane 에만 걸린다");
+    }
+}
+
+#[cfg(test)]
+mod neighbor_prompt_tests {
+    use super::*;
+
+    fn prompts(qs: &[&str]) -> Vec<(String, Vec<String>)> {
+        qs.iter().map(|q| (q.to_string(), Vec::new())).collect()
+    }
+
+    /// 띠가 화면에서 읽혀 마커가 붙어 있어도 같은 자리를 짚는다.
+    #[test]
+    fn finds_the_previous_and_next_question() {
+        let p = prompts(&["첫 질문", "둘째 질문", "셋째 질문"]);
+        assert_eq!(neighbor_prompt("\u{276f} 둘째 질문", &p, false).as_deref(), Some("첫 질문"));
+        assert_eq!(neighbor_prompt("둘째 질문", &p, true).as_deref(), Some("셋째 질문"));
+    }
+
+    /// 양 끝에서는 갈 곳이 없다 — 화살표를 흐리게 두는 것과 같은 판정이다.
+    #[test]
+    fn the_ends_have_no_neighbour() {
+        let p = prompts(&["첫 질문", "둘째 질문"]);
+        assert_eq!(neighbor_prompt("첫 질문", &p, false), None);
+        assert_eq!(neighbor_prompt("둘째 질문", &p, true), None);
+    }
+
+    /// 목록에 없는 띠(기억이 낡았거나 목록을 못 읽었다)면 짚지 않는다 — 그때는 부르는
+    /// 쪽이 종전 규칙으로 돈다.
+    #[test]
+    fn an_unknown_band_yields_nothing() {
+        assert_eq!(neighbor_prompt("어디에도 없는 글", &prompts(&["첫 질문"]), false), None);
     }
 }
 

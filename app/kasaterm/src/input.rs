@@ -267,6 +267,11 @@ impl App {
             // 확인하므로 목표가 뷰에 들면 즉시 멈춘다(약간의 overshoot 는 허용 —
             // 한 화면 지나가도 프롬프트는 보인다).
             let button = if down { 65 } else { 64 };
+            // 되짚는 동안 게이트를 열어 둔다. 이 노치는 `handle_wheel` 을 안 거치므로
+            // 표시를 여기서 직접 남긴다 — 안 남기면 화면이 움직이는 사이 안내 문구가
+            // 잠깐 사라질 때 게이트가 닫히고, 도착을 보는 눈(`note_sticky_view`)이
+            // 함께 감겨 목적지를 지나쳐 버린다.
+            crate::screenread::note_scroll_forwarded(&pane);
             for _ in 0..4 {
                 self.send_mouse_sgr(&pane, button, col, row, true);
             }
@@ -889,7 +894,21 @@ impl App {
         let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
         let error = crate::transcript::latest_harness_error(&tail);
         if let Some(mt) = mtime {
-            let prompts = crate::transcript::prompts_from_tail(&tail);
+            // 512KB 꼬리에서 나온 **빈 목록으로는 덮지 않는다.** 일하는 창은 도구
+            // 출력이 커서 그 창에 질문이 하나도 안 들어가고(2026-09-03 실측: 925KB
+            // 기록의 512KB 꼬리에서 0개, 전체에서 1개), 그대로 넣으면 스크롤 중에
+            // 깊게 읽어 채워 둔 목록이 **기록이 자랄 때마다** 빈 것으로 지워진다.
+            // 그러면 띠는 일하는 창에서만 안 뜨는데, 그 창이 바로 사람이 올려다보는
+            // 창이다.
+            //
+            // 한계: pane 이 다른 세션으로 갈아탔는데 새 기록의 꼬리에도 질문이 없으면
+            // 옛 목록이 잠시 남는다. 새 세션은 기록이 작아 꼬리가 곧 전체라 실제로는
+            // 거의 첫 질문에서 교체된다.
+            let fresh = crate::transcript::prompts_from_tail(&tail);
+            let prompts = match self.pane_bg_mtime.get(pane_id) {
+                Some((_, _, prev, _)) if fresh.is_empty() && !prev.is_empty() => prev.clone(),
+                _ => fresh,
+            };
             self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts, error));
         }
         (hook_bg || bg, error)
@@ -2147,6 +2166,21 @@ impl App {
         // 없어서 우리가 굴릴 것이 없다.
         if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
             eprintln!("[wheel] alt={alt} mouse_on={mouse_on} sgr={mouse_sgr} lines={lines}");
+        }
+        // 대체화면 앱으로 **위쪽 스크롤을 넘긴다**는 사실을 적어 둔다. 아래 두 갈래
+        // (SGR·PageUp)가 모두 그 길이라 여기서 한 번에 적는다.
+        //
+        // 두 가지가 여기 걸려 있다. ①띠 게이트가 화면 안내(`Jump to bottom`)를
+        // 기다리는 동안의 빈틈을 이 표시가 메운다 — claude 는 굴린 뒤 정착하고 나서야
+        // 그 줄을 그려서, 안내만 보면 「조금 올렸을 때」를 통째로 놓친다. ②띠에 쓸
+        // 질문 목록을 **미리** 깊게 읽는다. 게이트가 열린 뒤에 예약하면 그 프레임엔
+        // 목록이 비어(얕은 꼬리에는 일하는 창의 질문이 하나도 안 들어간다) 띠가 한
+        // 박자 늦거나, 그 사이 화면이 더 움직여 엉뚱한 턴을 문다.
+        if alt && lines > 0 {
+            if let Some(id) = target_pane_id.as_deref() {
+                crate::screenread::note_scroll_forwarded(id);
+                self.pane_deep_want.borrow_mut().insert(id.to_string());
+            }
         }
         if mouse_on && mouse_sgr && alt {
             let (col, row) = self

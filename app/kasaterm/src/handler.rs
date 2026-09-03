@@ -3909,7 +3909,14 @@ impl ApplicationHandler<UserEvent> for App {
                             .px_to_pane_cell(cx, cy)
                             .map(|(_, c, r)| (c, r))
                             .unwrap_or((1, 1));
-                        crate::render::begin_sticky_seek(pane_id, target, cell, false);
+                        // 바 본체 클릭 = 앞 질문으로 되짚기. 목적지를 미리 짚어
+                        // 넘기면 그 자리에서 멈춘다(`begin_sticky_seek` 의 want).
+                        let want = crate::render::neighbor_prompt(
+                            &target,
+                            self.pane_prompts(&pane_id),
+                            false,
+                        );
+                        crate::render::begin_sticky_seek(pane_id, target, cell, false, want);
                         window.request_redraw();
                         return;
                     }
