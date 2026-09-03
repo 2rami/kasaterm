@@ -103,6 +103,24 @@ pub(crate) fn pinned_input_top(rows: &[Vec<GridCell>]) -> Option<usize> {
     })
 }
 
+/// 화면 **꼬리의 빈 줄 수** — 글자도 배경색도 없는 행이 바닥에서 몇 개 이어지나.
+///
+/// classic claude 는 입력창·상태줄을 그린 뒤 화면 맨 아래 한두 줄을 안 쓴 채 남긴다.
+/// 대체화면 claude 는 화면 끝까지 그리므로 두 창을 나란히 놓으면 이쪽만 pane 바닥에
+/// 빈 띠가 생겨 보인다(2026-09-03 지적: "하단공간이 넓잖아" / "이게 지금"). 그 빈 줄
+/// 수를 세어 두면 렌더러가 그만큼 위에서 더 읽어 화면을 아래로 당길 수 있다.
+///
+/// 배경색까지 보는 이유: codex 입력창은 채움색 행이라 글자가 없어도 빈 줄이 아니다.
+pub(crate) fn blank_tail(rows: &[Vec<GridCell>]) -> usize {
+    rows.iter()
+        .rev()
+        .take_while(|r| {
+            r.iter()
+                .all(|c| matches!(c.ch, ' ' | '\0') && c.bg == kasa_bridge::screen::Color::Default)
+        })
+        .count()
+}
+
 /// ultracode 턴의 입력박스 accent — 보라 숨쉬기. 학생 배정과 무관하게 모든
 /// ultracode pane 이 이걸 쓴다(2026-08-16 「보라색 숨쉬기로」 — 한때는 학생색
 /// 보더 위를 혜성이 돌았다). 누구 pane 인지는 pane 테두리 학생색이 계속 말한다.
@@ -7196,5 +7214,26 @@ mod pinned_input_tests {
         let rows: Vec<Vec<GridCell>> =
             ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
         assert_eq!(pinned_input_top(&rows), None);
+    }
+
+    #[test]
+    fn 화면_밑에_남은_빈_줄을_센다() {
+        let rows: Vec<Vec<GridCell>> = ["⏵⏵ accept edits on", "", "   "]
+            .iter()
+            .map(|s| row(s))
+            .collect();
+        // 글자가 없는 두 줄 — 그만큼 화면을 아래로 당길 수 있다.
+        assert_eq!(blank_tail(&rows), 2);
+    }
+
+    #[test]
+    fn 채움색_행은_빈_줄이_아니다() {
+        // codex 입력창은 글자 없이 배경만 칠한 행이 있다 — 걷어내면 상자가 잘린다.
+        let mut filled = row("   ");
+        for c in filled.iter_mut() {
+            c.bg = kasa_bridge::screen::Color::Idx(8);
+        }
+        let rows = vec![row("지나간 답변"), filled];
+        assert_eq!(blank_tail(&rows), 0);
     }
 }
