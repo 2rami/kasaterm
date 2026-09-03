@@ -7173,6 +7173,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .filter(|t| !t.looked)
                         .map(|t| t.since + crate::IMAGE_TIP_DELAY),
                 )
+                // 자체 배너가 유일한 애니메이션/미확인 상태여도 정확히 수명 만기에
+                // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
+                .chain(self.next_banner_deadline())
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),
