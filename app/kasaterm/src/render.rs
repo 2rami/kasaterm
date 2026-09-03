@@ -11236,7 +11236,7 @@ impl App {
                 {
                     // 「이 앱에서 도는 학생 전부의 합」이라는 뜻 — 계정 하나를 여러
                     // pane 이 나눠 쓰므로, 이 숫자가 내 pane 것이 아님을 밝혀야 한다.
-                    let sub = "학생 전체";
+                    let sub = "캐릭터 전체";
                     let sf = f - 2.0;
                     let sw = g.measure_chrome_text(sub, sf, false);
                     g.draw_text(
@@ -12724,7 +12724,7 @@ impl App {
                 };
                 const RESTORE_TITLE: &str = "이전 세션을 이어서 켤까요?";
                 let subtitle = if n > 0 {
-                    format!("마지막 배치 그대로 · pane {total}개 · 학생 {n}명")
+                    format!("마지막 배치 그대로 · pane {total}개 · 캐릭터 {n}명")
                 } else {
                     format!("마지막 배치 그대로 · pane {total}개")
                 };

@@ -626,7 +626,7 @@ impl App {
         );
         if room == 0 {
             anyhow::bail!(
-                "{host} 칸이 {}x{} 라 학생 한 명도 못 앉힌다 — 창을 키우거나 탭으로 띄워라",
+                "{host} 칸이 {}x{} 라 캐릭터 한 명도 못 앉힌다 — 창을 키우거나 탭으로 띄워라",
                 host_rect.0,
                 host_rect.1
             );

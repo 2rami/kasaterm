@@ -293,7 +293,7 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
   return (
     <button
       onClick={onAdd}
-      title="이 자리에 학생 부르기"
+      title="이 자리에 캐릭터 부르기"
       className="cth-emptyseat"
       style={{
         position: 'absolute', left: `${seat.x}%`, top: `${seat.y}%`,

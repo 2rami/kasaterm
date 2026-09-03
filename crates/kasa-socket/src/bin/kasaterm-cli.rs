@@ -217,7 +217,7 @@ fn run() -> Result<Option<Response>> {
     }
     // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
     // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
-    // jsonl 직스캔으로 팀 세션까지 전부 보여주고 학생색·학생명으로 구분한다.
+    // jsonl 직스캔으로 팀 세션까지 전부 보여주고 캐릭터색·캐릭터명으로 구분한다.
     // 디스크만 읽어 GUI 가 죽어 있어도 동작. `resume` 은 번호를 받아 그 자리에서
     // `claude --resume` 을 실행한다(pane 이면 shim 이 트리플·페르소나 재부착).
     if cmd == "sessions" || cmd == "resume" {
@@ -832,7 +832,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli focus <surface_id>");
     eprintln!("  kasaterm-cli close <surface_id>");
     eprintln!(
-        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 학생 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)
+        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 캐릭터 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)
   kasaterm-cli closed [%pane]                # 되살리기 목록(닫아도 안 죽은 pane 들). %pane 을 주면 그것만 진짜 끈다"
     );
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
@@ -848,9 +848,9 @@ fn print_help() {
   kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
-  kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 학생은 안 죽는다
+  kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
-  kasaterm-cli unfold <라벨>                  # 기계의 학생 pane 전부를 거울로 펼침
+  kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
   kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
@@ -882,7 +882,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
-    eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(학생색·학생명, /resume 이 숨기는 팀 세션 포함)");
+    eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");
     eprintln!();
@@ -1054,7 +1054,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
         "window-new" => ("window.new", json!({})),
         // 도는 pane 을 로컬 상주 데몬으로 **무중단 승격** — 셸·claude 는 그대로,
-        // 소유권만 앱 밖으로. 이후 앱을 굽고 껐다 켜도 그 학생은 안 죽는다.
+        // 소유권만 앱 밖으로. 이후 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다.
         "promote" => {
             let pane = args
                 .iter()

@@ -447,7 +447,7 @@ pub fn decide(
                 if t.attempts + 1 >= cfg.max_attempts.max(1) {
                     out.push(Decision::Fail {
                         idx: i,
-                        reason: format!("학생이 올라오지 않았다({}회 시도)", t.attempts + 1),
+                        reason: format!("캐릭터가 올라오지 않았다({}회 시도)", t.attempts + 1),
                     });
                 } else {
                     out.push(Decision::Requeue { idx: i, close_pane: true });
@@ -944,7 +944,7 @@ fn planner_prompt(instruction: &str, board: &[PaneActivity]) -> String {
         ));
     }
     if who.is_empty() {
-        who.push_str("- (지금 일하는 학생 없음)\n");
+        who.push_str("- (지금 일하는 캐릭터 없음)\n");
     }
     format!(
         "너는 작업 분배 판단기다. 아래 지시를 학생(각자 독립된 claude 인스턴스)에게 나눠 줄 작업으로 쪼갠다.\n\

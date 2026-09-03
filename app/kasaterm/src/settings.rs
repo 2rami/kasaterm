@@ -6282,7 +6282,7 @@ fn student_detail(
     // 모델은 성격보다 앞에 둔다 — 성격 편집기는 높이가 글 길이만큼 자라서,
     // 뒤에 놓으면 긴 성격을 가진 학생에서 모델 칸이 스크롤 한참 아래로 밀린다.
     y = row_wide(g, fx, y, clip, "모델",
-        &["이 학생으로 뜨는 claude 가 쓸 모델 — 「Agent」 탭의 전역 설정보다 앞섭니다",
+        &["이 캐릭터로 뜨는 claude 가 쓸 모델 — 「Agent」 탭의 전역 설정보다 앞섭니다",
           "지금 도는 pane 은 그대로고, 새로 뜨는 pane 부터 이 모델로 떠요"]);
     {
         let cells: Vec<(String, bool, SettingsAction)> = ctx

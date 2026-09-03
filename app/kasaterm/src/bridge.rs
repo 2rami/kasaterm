@@ -301,7 +301,7 @@ fn format_delivery(msgs: &[InboxMsg], nonce: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ");
-    format!("[학생채팅 msg:{nonce}] {body}")
+    format!("[캐릭터채팅 msg:{nonce}] {body}")
 }
 
 fn transcript_contains(sid: &str, nonce: &str) -> bool {
@@ -630,7 +630,7 @@ mod tests {
             text: "첫 줄\n둘째 줄".into(),
         }];
         let s = format_delivery(&msgs, "deadbeef");
-        assert!(s.starts_with("[학생채팅 msg:deadbeef] yuuka-3d51: 첫 줄 / 둘째 줄"));
+        assert!(s.starts_with("[캐릭터채팅 msg:deadbeef] yuuka-3d51: 첫 줄 / 둘째 줄"));
         assert!(!s.contains('\n'));
     }
 
@@ -752,7 +752,7 @@ mod attach_tests {
     #[test]
     fn attach_send_waits_for_the_guard_then_chunks_the_text_and_submits() {
         let log = scratch("happy.txt");
-        let text = "[학생채팅 msg:abcd1234] 하나: 둘 | 셋: 넷";
+        let text = "[캐릭터채팅 msg:abcd1234] 하나: 둘 | 셋: 넷";
         let out = attach_send(
             fake_child(&log, "KB-READY"),
             "KB-READY",

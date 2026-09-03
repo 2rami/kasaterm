@@ -180,7 +180,7 @@ export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, 
       boxShadow: '0 1px 4px rgba(21,41,74,0.06)', zIndex: 5,
     }}>
       {/* 좌측 — 방·학생 팝오버 진입 하나만 */}
-      <IconBtn title="방·학생" active={leftOpen} badge={leftBadge} onClick={onToggleLeft}><RoomIcon /></IconBtn>
+      <IconBtn title="방·캐릭터" active={leftOpen} badge={leftBadge} onClick={onToggleLeft}><RoomIcon /></IconBtn>
 
       <div style={{ flex: 1 }} />
 

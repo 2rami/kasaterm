@@ -2708,7 +2708,7 @@ impl App {
             return false;
         }
         let attrs = WindowAttributes::default()
-            .with_title("학생 설정")
+            .with_title("캐릭터 설정")
             .with_theme(Some(Theme::Dark))
             .with_visible(true)
             // 본체(920×720)보다 좁다 — 한 학생의 폼과 그림만 서므로 가로가 덜 든다.

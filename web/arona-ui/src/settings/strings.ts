@@ -143,7 +143,7 @@ export const ko = {
     rendered: '렌더링됨',
     raw: '원본',
     model: '모델',
-    modelHint: '이 학생으로 뜨는 claude 가 쓸 모델이에요 — 「Agent」 탭의 전역 설정보다 앞서요.',
+    modelHint: '이 캐릭터로 뜨는 claude 가 쓸 모델이에요 — 「Agent」 탭의 전역 설정보다 앞서요.',
     modelHint2: '지금 도는 pane 은 그대로고, 새로 뜨는 pane 부터 이 모델로 떠요.',
     modelCustom: (a: { value: string }) => `원본에 적은 값: ${a.value}`,
     rawTitle: '정의',

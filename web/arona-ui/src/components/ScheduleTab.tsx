@@ -41,7 +41,7 @@ export function ScheduleTab() {
 
   const submit = async () => {
     if (busy) return;
-    if (!surface) { alert('보낼 학생(에이전트)이 없어요. 학생 pane을 먼저 띄워주세요.'); return; }
+    if (!surface) { alert('보낼 캐릭터(에이전트)가 없어요. 캐릭터 pane을 먼저 띄워주세요.'); return; }
     if (!text.trim()) return;
     setBusy(true);
     const payload: { kind: string; surface: string; text: string; interval_sec?: number; at_ts?: number } = {
@@ -97,7 +97,7 @@ export function ScheduleTab() {
           )}
           {agents.length === 0 && (
             <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral)' }}>
-              살아있는 학생이 없어 예약을 보낼 대상이 없습니다.
+              살아있는 캐릭터가 없어 예약을 보낼 대상이 없습니다.
             </div>
           )}
           <button onClick={() => void submit()} disabled={busy || !text.trim() || !surface} style={{

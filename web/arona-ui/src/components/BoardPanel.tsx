@@ -110,7 +110,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
         {/* 현황 — 학생별 작업 상세(status·도구·태스크·서브에이전트·도구 흐름). 업무 탭 흡수. */}
         <SectionLabel>현황</SectionLabel>
         {agents.length === 0 ? (
-          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
+          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>캐릭터 없음</span>
         ) : agents.map((a) => {
           const building = a.status === 'working' && isBuildCmd(a.action);
           const awaiting = isAwaitingTeacher(a);
@@ -220,7 +220,7 @@ export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: st
                             title={room.filter((t) => t.mine === false && !!t.owner).map((t) => `${t.owner} · ${t.subject}`).join('\n')}
                             style={{ marginLeft: 15, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}
                           >
-                            같은 방 다른 학생 {others}개
+                            같은 방 다른 캐릭터 {others}개
                           </div>
                         )}
                       </>

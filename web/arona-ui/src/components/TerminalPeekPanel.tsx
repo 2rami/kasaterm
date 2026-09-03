@@ -1539,7 +1539,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // (거노: ba gui 종료버튼 눌러도 반응없음) 자체 확인 모달로.
   const onKill = () => {
     setConfirm({
-      msg: `${title} 학생을 종료할까요?`,
+      msg: `${title} 캐릭터를 종료할까요?`,
       sub: 'pane 이 닫히고 되돌릴 수 없어요.',
       danger: true, yes: '종료',
       onYes: async () => { await closeAgent(surfaceId); onClose(); },
@@ -1737,7 +1737,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       <MenuItem label="캐릭터 변경" onClick={() => { setCharPicker(true); close(); }} />
       <MenuItem label="대화 닫기" onClick={() => { onClose(); close(); }} />
       <div style={{ height: 1, background: 'var(--cth-cream-200)', margin: '2px 4px' }} />
-      <MenuItem label="학생 종료" danger onClick={() => { void onKill(); close(); }} />
+      <MenuItem label="캐릭터 종료" danger onClick={() => { void onKill(); close(); }} />
     </>
   );
 
@@ -2307,7 +2307,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
             {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
               msg: '변경사항을 볼까요?',
-              sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
+              sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 캐릭터에게 띄워요.`,
               yes: '변경 보기',
               onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
             })} />}

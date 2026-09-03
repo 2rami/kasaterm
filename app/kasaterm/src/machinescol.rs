@@ -247,7 +247,7 @@ impl App {
                                         remote_id: rid.starts_with('%').then(|| rid.to_string()).unwrap_or_default(),
                                         remote_cwd: cwd,
                                         name: if name.is_empty() {
-                                            "이름 없는 학생".to_string()
+                                            "이름 없는 캐릭터".to_string()
                                         } else {
                                             name.to_string()
                                         },
@@ -761,7 +761,7 @@ pub(crate) fn draw_machines_col(
         g.draw_text(
             x0,
             y,
-            "학생 없음",
+            "캐릭터 없음",
             gpu::DrawOpts {
                 font_size: 11.0,
                 color: theme::text_mute(),
@@ -996,7 +996,7 @@ pub(crate) fn draw_machines_col(
             g.draw_text(
                 x0,
                 y,
-                "학생 없음",
+                "캐릭터 없음",
                 gpu::DrawOpts {
                     font_size: 11.0,
                     color: theme::text_mute(),

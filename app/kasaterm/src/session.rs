@@ -610,7 +610,7 @@ impl App {
         // 셸 거울만 되돌린다. 세션 id 가 바인딩돼 있으면 그건 학생이므로 안내만 한다.
         if self.pane_claude_sid.contains_key(pid) {
             self.set_toast(
-                "이 창은 학생이에요 — `book` 대신 데려오기(migrate local)로 돌아와요".to_string(),
+                "이 창은 캐릭터예요 — `book` 대신 데려오기(migrate local)로 돌아와요".to_string(),
             );
             return Ok(());
         }
@@ -994,7 +994,7 @@ impl App {
             .collect();
         if targets.is_empty() {
             return Ok(format!(
-                "{label}: 펼칠 학생이 없다 — 전부 이미 거울로 있거나 빈 기계다"
+                "{label}: 펼칠 캐릭터가 없다 — 전부 이미 거울로 있거나 빈 기계다"
             ));
         }
         targets.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -1105,7 +1105,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        let mut msg = format!("{label} 펼침 — 학생 {ok_n}명 · 방(창) {room_n}개");
+        let mut msg = format!("{label} 펼침 — 캐릭터 {ok_n}명 · 방(창) {room_n}개");
         if !fail.is_empty() {
             msg.push_str(&format!(" · 실패 {}건: {}", fail.len(), fail.join(" / ")));
         }
@@ -1447,12 +1447,12 @@ impl App {
         // 옮길 대화도 없어 이 구간을 통째로 건너뛴다.
         if let (Some((_, agent_pid)), Some(sid)) = (&agent, &sid) {
             let agent_pid = *agent_pid;
-            self.migrate_progress(pid, "학생 곱게 끄는 중…".to_string());
+            self.migrate_progress(pid, "캐릭터 곱게 끄는 중…".to_string());
             unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
                 if std::time::Instant::now() > deadline {
-                    anyhow::bail!("학생(pid {agent_pid}) 이 8초 안에 안 꺼졌다 — 이사를 세웠다");
+                    anyhow::bail!("캐릭터(pid {agent_pid}) 이 8초 안에 안 꺼졌다 — 이사를 세웠다");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
             }
@@ -1603,7 +1603,7 @@ impl App {
         // 「이사했더니 딴 학생이 됐다」로만 보이므로 크게 말한다.
         if character.is_some() && remote_pane.is_none() {
             self.set_toast(
-                "저쪽에 학생 pane 을 못 만들어 맨 셸로 간다 — 캐릭터가 새로 배정될 수 있다"
+                "저쪽에 캐릭터 pane 을 못 만들어 맨 셸로 간다 — 캐릭터가 새로 배정될 수 있다"
                     .to_string(),
             );
         }
@@ -1713,7 +1713,7 @@ impl App {
         // bind-transcript 를 해야 했다). 얻은 값은 기억해 둔다 — 다음 시도·저장에.
         let local_sid = self.pane_claude_sid.get(pid).cloned();
         let fetched = if local_sid.is_none() {
-            self.migrate_progress(pid, "저쪽 학생의 대화 id 묻는 중…".to_string());
+            self.migrate_progress(pid, "저쪽 캐릭터의 대화 id 묻는 중…".to_string());
             kasa_mcp::remote::remote_pane_session(&info.base, &info.remote_id, None)
         } else {
             None
@@ -1880,7 +1880,7 @@ impl App {
             .unwrap_or_default();
         // 원격 claude 곱게 끄기. 이미 꺼져 있으면(None) 권한 모드를 모르니 안전한
         // 쪽(물어보는 모드)으로 둔다.
-        self.migrate_progress(pid, "저쪽 학생 곱게 끄는 중…".to_string());
+        self.migrate_progress(pid, "저쪽 캐릭터 곱게 끄는 중…".to_string());
         let bypass = match kasa_mcp::remote::remote_agent_stop(&info.base, &info.remote_id, None) {
             Ok(stopped) => stopped.unwrap_or(false),
             Err(e) => {
@@ -1940,7 +1940,7 @@ impl App {
         }
         // 원격 셸을 진짜 끝낸다 — 안 걷으면 그 기계에 빈 학생 pane 이 좀비로 남는다.
         // 매니저가 이미 죽었어도(연결 유실) 실패가 아니다: 남은 셸은 닿을 때 걷는다.
-        self.migrate_progress(pid, "창 바꿔 끼우고 학생 깨우는 중…".to_string());
+        self.migrate_progress(pid, "창 바꿔 끼우고 캐릭터 깨우는 중…".to_string());
         let _ = kasa_mcp::remote::kill_remote(pid);
         // GUI pane 은 위 kill 로 안 걷힌다(앱이 제 Arc 를 쥔다) — 그 기계의 pane 자체를
         // 닫는다. 실패해도 이사는 성립한다(저쪽에 빈 셸 pane 이 남을 뿐): 로그만.
@@ -5363,7 +5363,7 @@ impl App {
                     .is_some();
                 if !alive {
                     self.set_toast(format!(
-                        "{} 의 학생이 꺼져 있어 예약 이사를 취소했다",
+                        "{} 의 캐릭터가 꺼져 있어 예약 이사를 취소했다",
                         q.pane
                     ));
                     return;
@@ -8648,7 +8648,7 @@ fn back_migration_sid(local: Option<String>, remote: Option<String>) -> Result<S
         Some(s) if ok(&s) => Ok(s),
         Some(s) => anyhow::bail!("원격이 준 세션 id 가 이상하다({s:?}) — 저쪽 프로그램을 갱신해라"),
         None => anyhow::bail!(
-            "세션 id 를 모른다 — 저쪽 학생이 아직 첫 프롬프트 전이거나(대화 파일이 없다) 저쪽 프로그램이 낡아 `/pane-session` 이 없다. 저쪽에서 한마디 시킨 뒤 다시 데려와라"
+            "세션 id 를 모른다 — 저쪽 캐릭터가 아직 첫 프롬프트 전이거나(대화 파일이 없다) 저쪽 프로그램이 낡아 `/pane-session` 이 없다. 저쪽에서 한마디 시킨 뒤 다시 데려와라"
         ),
     }
 }

@@ -528,7 +528,7 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
         if let Some(t) = token {
             req = req.header("x-kasa-token", t);
         }
-        let r = req.send().await.context("학생 소환 요청")?;
+        let r = req.send().await.context("캐릭터 소환 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
         Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
@@ -537,7 +537,7 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
     })?;
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         anyhow::bail!(
-            "원격 학생 소환 실패: {}",
+            "원격 캐릭터 소환 실패: {}",
             v.get("error")
                 .and_then(|x| x.as_str())
                 .unwrap_or("알 수 없는 이유")

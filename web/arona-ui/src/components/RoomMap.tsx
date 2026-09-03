@@ -310,7 +310,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
       {onNewRoom && (
         adding ? (
           <div style={{ marginTop: 4, padding: 7, borderRadius: 8, background: 'var(--cth-cream-100)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', padding: '0 2px 2px' }}>첫 학생 선택</div>
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', padding: '0 2px 2px' }}>첫 캐릭터 선택</div>
             {STARTERS.map((g) => (
               <button key={g} onClick={() => { onNewRoom(g); setAdding(false); }} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',

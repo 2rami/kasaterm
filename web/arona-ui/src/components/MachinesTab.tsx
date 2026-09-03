@@ -125,7 +125,7 @@ export function MachinesTab() {
         {/* 이 맥북 — machine 없는 로컬 학생. 기계 수만큼 보내기 버튼. */}
         <SectionLabel>이 맥북</SectionLabel>
         {localAgents.length === 0 ? (
-          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', margin: '0 4px 8px' }}>학생 없음</div>
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', margin: '0 4px 8px' }}>캐릭터 없음</div>
         ) : localAgents.map((a) => (
           <StudentRow
             key={a.id}
@@ -169,7 +169,7 @@ export function MachinesTab() {
                 )}
               </SectionLabel>
               {mirrored.length === 0 && panes.length === 0 ? (
-                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', margin: '0 4px' }}>학생 없음</div>
+                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', margin: '0 4px' }}>캐릭터 없음</div>
               ) : (
                 <>
                   {mirrored.map((a) => (
@@ -194,7 +194,7 @@ export function MachinesTab() {
                     <StudentRow
                       key={p.id || `${m.label}-${i}`}
                       character={p.name || ''}
-                      name={p.name || p.id || '이름 없는 학생'}
+                      name={p.name || p.id || '이름 없는 캐릭터'}
                       title={p.title}
                       status={p.status}
                       busy={false}

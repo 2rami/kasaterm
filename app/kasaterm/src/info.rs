@@ -3218,9 +3218,9 @@ fn draw_machine_row(
     let summary = if !m.online {
         "안 닿음".to_string()
     } else if m.students == 0 {
-        "학생 없음".to_string()
+        "캐릭터 없음".to_string()
     } else {
-        let mut s = format!("학생 {}", m.students);
+        let mut s = format!("캐릭터 {}", m.students);
         if m.mirrored > 0 {
             s.push_str(&format!(" · 거울 {}", m.mirrored));
         }

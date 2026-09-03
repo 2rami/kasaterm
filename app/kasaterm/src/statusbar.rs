@@ -620,7 +620,7 @@ fn paint_tunnel_popover(
             // 대화 읽기와 학생 전환은 아로나다. 라벨 없이 주소만 두 개면 어느 게 무엇인지 모른다.
             let rows: [(&str, &str, state::StatusbarHit, state::StatusbarHit); 2] = [
                 (
-                    "폰 허브 — 학생 목록·터미널",
+                    "폰 허브 — 캐릭터 목록·터미널",
                     "/u/…/",
                     state::StatusbarHit::OpenTunnelUrl,
                     state::StatusbarHit::CopyTunnelHost,
