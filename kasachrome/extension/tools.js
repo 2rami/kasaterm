@@ -278,6 +278,75 @@ const ltRun = async (tabId, func, args = []) => {
   return r?.result
 }
 
+// 편집기를 켜 둔 탭. 화면이 갈리면 넣어 둔 것이 통째로 날아가므로 다시 넣어야 하는데,
+// 그 판단 근거가 여기다. ⚠️storage.**local** 이다 — session 은 확장을 재시작하면 통째로
+// 비워져서(폰뷰 기록에서 실측) 정작 되돌릴 근거가 필요한 순간에 사라진다. local 은 브라우저를
+// 껐다 켜도 남고 그때 탭 id 가 바뀌므로, 읽을 때 실재하지 않는 탭을 걷어낸다.
+const LT_KEY = 'kc_layout'
+const ltBag = async () => {
+  try {
+    const raw = (await chrome.storage.local.get(LT_KEY))?.[LT_KEY] || {}
+    const live = new Set((await tabsQuery({})).map((t) => t.id))
+    const kept = Object.fromEntries(Object.entries(raw).filter(([k]) => live.has(Number(k))))
+    if (Object.keys(kept).length !== Object.keys(raw).length) {
+      chrome.storage.local.set({ [LT_KEY]: kept }).catch(() => {})
+    }
+    return kept
+  } catch { return {} }
+}
+const ltMark = async (tabId, on) => {
+  const bag = await ltBag()
+  if (on) bag[String(tabId)] = true
+  else delete bag[String(tabId)]
+  await chrome.storage.local.set({ [LT_KEY]: bag }).catch(() => {})
+}
+
+// 편집기를 이 화면에 넣고 켠다. 이미 들어가 있으면 편집기가 스스로 물러나므로 두 번 넣어도
+// 만지던 내역이 흔들리지 않는다 — 그래서 「이미 넣었나」를 따지지 않는다.
+async function ltPlant(tabId, tabUrl) {
+  const who = await ltServer(tabUrl)
+  if (!who) throw new Error(`이 주소를 맡은 레이아웃툴 서버가 없습니다 (${tabUrl}) — 터미널에서 \`layoutool <개발서버 포트> --src <소스 폴더>\` 로 띄운 뒤 다시 부르세요.`)
+  if (!who.src) throw new Error('레이아웃툴이 고칠 소스를 모른 채 떠 있습니다 — --src <폴더> 를 주고 다시 띄우세요.')
+  const code = await (await fetch(who.api + '/__layoutool/editor.js', { cache: 'no-store' })).text()
+
+  const put = (api, src) => {
+    window.__layoutool_api = api
+    window.__layoutool_canApply = true
+    if (!window.__layoutool) {
+      const s = document.createElement('script')
+      s.textContent = src
+      ;(document.head || document.documentElement).append(s)
+      s.remove()
+    }
+    window.__layoutool_toggle?.(true)
+    return !!window.__layoutool
+  }
+  let ok = await ltRun(tabId, put, [who.api, code])
+  if (!ok) {
+    // 인라인 스크립트를 막아 둔 페이지에서는 위가 조용히 씹힌다 — CDP 는 그 규칙 밖이다
+    await cdp.evaluate(tabId, `window.__layoutool_api=${JSON.stringify(who.api)};window.__layoutool_canApply=true`)
+    await cdp.evaluate(tabId, code)
+    ok = await cdp.evaluate(tabId, 'window.__layoutool_toggle?.(true), !!window.__layoutool')
+    if (!ok) throw new Error('편집기를 못 넣었습니다 — 이 페이지가 스크립트 주입을 막고 있습니다.')
+  }
+  return who
+}
+
+// 화면이 새로 뜬 뒤 부른다. 켜 둔 탭이면 다시 넣는다 — 로그인처럼 화면이 한 번 갈리는
+// 자리에서 편집기가 소리 없이 사라지면, 사람 눈에는 「켰다고 했는데 없다」로만 보인다
+// (2026-09-03 실측: mission-control 로그인 뒤 바가 통째로 없어졌다).
+export async function reapplyLayout(tabId) {
+  const bag = await ltBag()
+  if (!bag[String(tabId)]) return null
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (!tab || !/^https?:/.test(tab.url || '')) return null
+  try { return await ltPlant(tabId, tab.url) } catch { return null }
+}
+
+export async function forgetLayout(tabId) {
+  await ltMark(tabId, false)
+}
+
 const handlers = {
   async status(_args, ctx = {}) {
     const tabs = await tabsQuery({})
@@ -611,36 +680,14 @@ const handlers = {
   async layout({ tabId, on = true }) {
     const id = await resolveTabId(tabId)
     if (!on) {
+      await ltMark(id, false)
       await ltRun(id, () => window.__layoutool_toggle?.(false)).catch(() => {})
       return { tabId: id, on: false }
     }
     const tab = await chrome.tabs.get(id)
-    const who = await ltServer(tab.url)
-    if (!who) throw new Error(`이 주소를 맡은 레이아웃툴 서버가 없습니다 (${tab.url}) — 터미널에서 \`layoutool <개발서버 포트> --src <소스 폴더>\` 로 띄운 뒤 다시 부르세요.`)
-    if (!who.src) throw new Error('레이아웃툴이 고칠 소스를 모른 채 떠 있습니다 — --src <폴더> 를 주고 다시 띄우세요.')
-    const code = await (await fetch(who.api + '/__layoutool/editor.js', { cache: 'no-store' })).text()
-
-    const put = (api, src) => {
-      window.__layoutool_api = api
-      window.__layoutool_canApply = true
-      if (!window.__layoutool) {
-        const s = document.createElement('script')
-        s.textContent = src
-        ;(document.head || document.documentElement).append(s)
-        s.remove()
-      }
-      window.__layoutool_toggle?.(true)
-      return !!window.__layoutool
-    }
-    let ok = await ltRun(id, put, [who.api, code])
-    if (!ok) {
-      // 인라인 스크립트를 막아 둔 페이지에서는 위가 조용히 씹힌다 — CDP 는 그 규칙 밖이다
-      await cdp.evaluate(id, `window.__layoutool_api=${JSON.stringify(who.api)};window.__layoutool_canApply=true`)
-      await cdp.evaluate(id, code)
-      ok = await cdp.evaluate(id, 'window.__layoutool_toggle?.(true), !!window.__layoutool')
-      if (!ok) throw new Error('편집기를 못 넣었습니다 — 이 페이지가 스크립트 주입을 막고 있습니다.')
-    }
-    return { tabId: id, on: true, server: who.api, src: who.src, note: '사람이 화면을 만진 뒤 browser_layout_edits 로 가져오세요.' }
+    const who = await ltPlant(id, tab.url)
+    await ltMark(id, true)
+    return { tabId: id, on: true, server: who.api, src: who.src, note: '사람이 화면을 만진 뒤 browser_layout_edits 로 가져오세요. 화면이 갈려도 저절로 다시 붙습니다.' }
   },
 
   // 만진 결과를 가져온다. 지시문은 레이아웃툴이 만들어 준다 — 여기서 따로 지어내면

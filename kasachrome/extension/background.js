@@ -1,4 +1,4 @@
-import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation } from './tools.js'
+import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout } from './tools.js'
 import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
@@ -178,7 +178,7 @@ function connected() {
   return !!(ws && ws.readyState === 1)
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => { forgetTab(tabId); forgetEmulation(tabId).catch(() => {}) })
+chrome.tabs.onRemoved.addListener((tabId) => { forgetTab(tabId); forgetEmulation(tabId).catch(() => {}); forgetLayout(tabId).catch(() => {}) })
 
 // 페이지가 새로 뜨면 오버레이가 통째로 날아간다. 담당 세션이 있는 탭이면 칩을 다시 붙인다.
 chrome.tabs.onUpdated.addListener((tabId, info) => {
@@ -187,6 +187,9 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   // 폰뷰도 같은 이유로 되돌린다. 새 문서에서 터치 에뮬레이션이 풀린 채 남으면 크기만 폰이고
   // `(pointer: coarse)` 규칙은 안 걸리는 상태가 되는데, 그건 화면만 봐서는 구분이 안 된다.
   reapplyEmulation(tabId).catch(() => {})
+  // 레이아웃툴 편집기도 마찬가지다. 새 문서에는 안 들어가 있어서, 켜 둔 탭인데 화면만 갈려도
+  // 사람 눈에는 편집기가 고장난 것으로 보인다.
+  reapplyLayout(tabId).catch(() => {})
 })
 
 // 확장 아이콘 팝업이 상태를 물어온다. 팝업이 열렸다는 건 service worker 가 막 깨어났을 수도 있다는
