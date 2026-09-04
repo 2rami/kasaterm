@@ -294,6 +294,17 @@ impl App {
         row: u16,
         press: bool,
     ) {
+        // 화면 좌표를 **앱이 아는 좌표**로 되돌린다. 우리가 화면을 옮겨 그렸으므로
+        // 그대로 넘기면 그 TUI 는 다른 줄이 눌린 것으로 안다(2026-09-05). 당겨 온
+        // 구간은 스크롤백이라 앱 화면에 자리가 없어 그 클릭은 흘린다 — 없는 줄을
+        // 눌렀다고 알리느니 아무 일도 안 하는 편이 낫다.
+        let row = match self.pane_view_shift.get(pane_id) {
+            Some(shift) => match shift.term_row(row as usize) {
+                Some(r) => r as u16,
+                None => return,
+            },
+            None => row,
+        };
         let final_byte = if press { 'M' } else { 'm' };
         let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
         if let Some(tmux) = self.tmux.as_ref() {

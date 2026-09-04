@@ -1132,25 +1132,50 @@ struct PaneViewShift {
 }
 
 impl PaneViewShift {
-    /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
-    ///
-    /// 옮김이 없으면(평범한 pane·대체화면 claude) 원본을 그대로 돌려주므로,
-    /// 이 경로가 붙기 전과 동작이 같다.
-    fn compose(&self, base: &[Vec<GridCell>]) -> Vec<Vec<GridCell>> {
-        if self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty()) {
-            return base.to_vec();
+    /// 옮김이 아예 없나 — 평범한 pane, 그리고 **대체화면 claude**(노플리커)가 그렇다.
+    /// 그쪽은 claude 가 화면 끝까지 직접 그려 메울 여백이 없다.
+    fn is_identity(&self) -> bool {
+        self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty())
+    }
+
+    /// 화면 행 `r` 에 **실제로 그려진** 줄. 화면 좌표를 쓰는 모든 판독(복사·링크
+    /// 집기)이 이걸 거쳐야 고른 자리와 집히는 글자가 같다.
+    fn row<'a>(&'a self, r: usize, base: &'a [Vec<GridCell>]) -> Option<&'a Vec<GridCell>> {
+        if self.is_identity() {
+            return base.get(r);
+        }
+        if r < self.above.len() {
+            return self.above.get(r);
         }
         let pin_start = self.rows.saturating_sub(self.pinned.len());
+        if r >= pin_start {
+            return self.pinned.get(r - pin_start);
+        }
+        base.get(r - self.above.len())
+    }
+
+    /// 화면 행을 **앱이 아는 행**으로 되돌린다 — 마우스 이벤트를 TUI 로 넘길 때
+    /// 쓴다. 우리가 화면을 옮겨 그렸으므로 그대로 보내면 그 앱은 다른 줄을 눌린
+    /// 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에 없으니 `None`.
+    fn term_row(&self, r: usize) -> Option<usize> {
+        if self.is_identity() {
+            return Some(r);
+        }
+        if r < self.above.len() {
+            return None;
+        }
+        Some(r - self.above.len())
+    }
+
+    /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
+    ///
+    /// 옮김이 없으면 원본을 그대로 돌려주므로, 이 경로가 붙기 전과 동작이 같다.
+    fn compose(&self, base: &[Vec<GridCell>]) -> Vec<Vec<GridCell>> {
+        if self.is_identity() {
+            return base.to_vec();
+        }
         (0..self.rows)
-            .map(|r| {
-                if r < self.above.len() {
-                    self.above[r].clone()
-                } else if r >= pin_start {
-                    self.pinned[r - pin_start].clone()
-                } else {
-                    base.get(r - self.above.len()).cloned().unwrap_or_default()
-                }
-            })
+            .map(|r| self.row(r, base).cloned().unwrap_or_default())
             .collect()
     }
 }

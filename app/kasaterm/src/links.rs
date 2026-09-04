@@ -91,7 +91,14 @@ impl App {
         let (pid, col, row) = self.px_to_pane_cell(px, py)?;
         let ws = self.ws.lock().unwrap();
         let term = ws.panes.get(&pid)?.term()?;
-        let cells = term.cells.get(row as usize)?;
+        // 화면은 렌더가 옮겨 그린 것이라 원본 글자판과 행이 어긋난다. 클릭 좌표는
+        // 화면 기준이므로 같은 옮김을 되짚어야 눈에 보이는 그 링크가 열린다 —
+        // 원본을 그대로 보면 당긴 줄 수만큼 아래 줄에서 주소를 찾는다(복사와 같은
+        // 뿌리, 2026-09-05).
+        let cells = match self.pane_view_shift.get(&pid) {
+            Some(shift) => shift.row(row as usize, &term.cells)?,
+            None => term.cells.get(row as usize)?,
+        };
         detect_links_row(cells)
             .into_iter()
             .find(|(s, e, _)| col >= *s && col < *e)
