@@ -2859,13 +2859,13 @@ impl App {
 
     pub(crate) fn open_settings_window(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         cat: Option<SettingsCat>,
         student: Option<String>,
     ) {
         if let Some(name) = student {
-            let theme = crate::socket::read_character_theme();
-            let _ = self.open_student_web_window(event_loop, &name, &theme);
+            let _ = self.open_settings_room(Some(SettingsCat::Students));
+            self.settings_apply(SettingsAction::SelectStudent(name));
         } else {
             let _ = self.open_settings_room(cat);
         }

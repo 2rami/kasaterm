@@ -2405,6 +2405,9 @@ impl App {
             crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
             crate::ImeFocus::WebAddr => self.web_addr_insert(&text),
             crate::ImeFocus::WebFind => self.web_find_insert(&text),
+            crate::ImeFocus::Settings(field) => {
+                self.native_settings_insert_into(field, &text)
+            }
         }
     }
 

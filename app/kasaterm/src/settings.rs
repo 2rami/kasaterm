@@ -632,6 +632,16 @@ impl App {
                     self.chrome_dirty = true;
                 }
             }
+            SettingsAction::SwitchAccount(provider, id) => match provider {
+                AccountProvider::Claude => self.ask_or_switch_claude_account(
+                    &id,
+                    crate::session::ConfirmSurface::Main,
+                ),
+                AccountProvider::Codex => self.ask_or_switch_codex_account(
+                    &id,
+                    crate::session::ConfirmSurface::Main,
+                ),
+            },
             SettingsAction::CursorThickness(px) => {
                 let want = (px as f32).clamp(1.0, 6.0);
                 if (self.cursor_thickness - want).abs() > 0.01 {
@@ -1969,7 +1979,7 @@ impl App {
     /// 팔레트 hex 버퍼를 검증해 **지금 입고 있는 커스텀**에 반영하고 즉시 다시
     /// 칠한다. 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친
     /// 값으로 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
-    fn apply_palette_edit(&mut self, i: usize) {
+    pub(crate) fn apply_palette_edit(&mut self, i: usize) {
         let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
         self.sync_picker_hsv(c);
         let (list, idx, _) = self.palette_edited_list(i, c);

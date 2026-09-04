@@ -1125,15 +1125,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.open_settings_window(
                             event_loop,
                             Some(crate::SettingsCat::Students),
-                            None,
+                            (!arg.is_empty()).then(|| arg.clone()),
                         );
                         Ok(self.settings_room_active())
                     }
-                    // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
-                    // 세부는 밖에 있어야 한다(거노 2026-08-25). `arg`는 정확한 이름,
-                    // `label` 에 테마 키가
-                    // 오는데, 번들은 `__base` 라 빈 값과 구분된다 — 빈 값이면 웹이
-                    // 쓰는 테마의 명단에서 찾는다.
                     "open-student" => {
                         let theme = label.clone().unwrap_or_default();
                         Ok(self.open_student_web_window(event_loop, &arg, &theme))
@@ -2728,7 +2723,11 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                self.handle_wheel(delta);
+                if self.settings_room_active() {
+                    self.native_settings_wheel(delta);
+                } else {
+                    self.handle_wheel(delta);
+                }
             }
             // 트랙패드 핀치(macOS magnification) → 커서 아래 이미지 pane 줌.
             WindowEvent::PinchGesture { delta, .. } => {
@@ -2738,6 +2737,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let scale = self.effective_scale();
                 if self.autohover.is_none() {
                     self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                }
+                if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
+                    let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
+                    self.text_cursor_shown = cursor == CursorIcon::Text;
+                    window.set_cursor(cursor);
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
                 }
                 // 호버 툴팁 시계를 다시 잰다. 셀 하나를 넘게 움직였을 때만 —
                 // 손 떨림 수준의 1px 이동으로 시계가 매번 리셋되면 툴팁이 영원히
@@ -3598,6 +3605,14 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
+                    if matches!(state, ElementState::Pressed) {
+                        self.last_input_at = Instant::now();
+                        self.native_settings_click(self.cursor_px.0, self.cursor_px.1);
+                    }
+                    window.request_redraw();
+                    return;
+                }
                 // Resolve a file-tree → terminal path drag first, before any
                 // other hit-test, so a release anywhere disarms it. A real drag
                 // (cursor left the row) released over a pane types that path
@@ -6142,6 +6157,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
                     eprintln!("[ime] event={ime:?}");
                 }
+                if self.settings_room_active() {
+                    self.native_settings_ime(ime);
+                    return;
+                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -6375,12 +6394,16 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if matches!(event.state, ElementState::Pressed)
-                    && !event.repeat
-                    && self.settings_room_active()
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                {
-                    self.close_settings_room();
+                if self.settings_room_active() {
+                    if matches!(event.state, ElementState::Pressed)
+                        && !event.repeat
+                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    {
+                        self.native_settings_blur();
+                        self.close_settings_room();
+                    } else {
+                        self.native_settings_key(&event);
+                    }
                     window.request_redraw();
                     return;
                 }
@@ -6400,6 +6423,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.forward_key(&event);
             }
             WindowEvent::DroppedFile(path) => {
+                if self.native_settings_drop(path.clone()) {
+                    window.request_redraw();
+                    return;
+                }
                 // 이미지 파일을 떨구면 클립보드에 비트맵으로 실은 뒤 이미지-paste
                 // 키(CLAUDE_IMG_PASTE)를 위임한다 — claude code 가 클립보드 그림을
                 // 직접 읽어 [Image] 칩으로 첨부한다. 경로 텍스트만 박던 옛 방식은

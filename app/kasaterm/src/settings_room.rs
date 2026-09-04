@@ -26,6 +26,12 @@ pub(crate) struct SettingsSceneSnapshot {
 pub(crate) struct SettingsScene {
     category: SettingsCat,
     return_pane: Option<String>,
+    cache: crate::native_settings::SettingsCache,
+    scroll: f32,
+    scroll_max: f32,
+    hits: Vec<crate::native_settings::Hit>,
+    caret_rect: Option<crate::native_settings::Rect>,
+    first_run: bool,
 }
 
 impl Default for SettingsScene {
@@ -33,6 +39,12 @@ impl Default for SettingsScene {
         Self {
             category: SettingsCat::General,
             return_pane: None,
+            cache: crate::native_settings::SettingsCache::default(),
+            scroll: 0.0,
+            scroll_max: 0.0,
+            hits: Vec::new(),
+            caret_rect: None,
+            first_run: crate::onboarding::launch_pending(),
         }
     }
 }
@@ -47,7 +59,7 @@ impl SettingsScene {
 
     pub(crate) fn enter(&mut self, category: Option<SettingsCat>, return_pane: Option<String>) {
         if let Some(category) = category {
-            self.category = category;
+            self.set_category(category);
         }
         if return_pane.as_deref().is_some_and(|id| id != SETTINGS_PANE_ID) {
             self.return_pane = return_pane;
@@ -58,8 +70,74 @@ impl SettingsScene {
         self.return_pane.as_deref()
     }
 
+    pub(crate) fn cache(&self) -> &crate::native_settings::SettingsCache {
+        &self.cache
+    }
+
+    pub(crate) fn refresh_cache(&mut self) {
+        self.cache.refresh();
+    }
+
+    pub(crate) fn category(&self) -> SettingsCat {
+        self.category
+    }
+
+    pub(crate) fn set_category(&mut self, category: SettingsCat) {
+        if self.category != category {
+            self.category = category;
+            self.scroll = 0.0;
+            self.hits.clear();
+            self.caret_rect = None;
+        }
+    }
+
+    pub(crate) fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    pub(crate) fn scroll_by(&mut self, delta: f32) -> bool {
+        let next = (self.scroll + delta).clamp(0.0, self.scroll_max);
+        let changed = (next - self.scroll).abs() > f32::EPSILON;
+        self.scroll = next;
+        changed
+    }
+
+    pub(crate) fn hit_at(&self, x: f32, y: f32) -> Option<&crate::native_settings::Hit> {
+        self.hits.iter().rev().find(|hit| {
+            let (rx, ry, rw, rh) = hit.rect;
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
+    }
+
+    pub(crate) fn finish_paint(
+        &mut self,
+        hits: Vec<crate::native_settings::Hit>,
+        content_h: f32,
+        view_h: f32,
+        caret_rect: Option<crate::native_settings::Rect>,
+    ) {
+        self.scroll_max = (content_h - view_h).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, self.scroll_max);
+        self.hits = hits;
+        self.caret_rect = caret_rect;
+    }
+
+    pub(crate) fn caret_rect(&self) -> Option<crate::native_settings::Rect> {
+        self.caret_rect
+    }
+
+    pub(crate) fn first_run(&self) -> bool {
+        self.first_run
+    }
+
+    pub(crate) fn finish_onboarding(&mut self) {
+        self.first_run = false;
+    }
+
     pub(crate) fn leave(&mut self) {
         self.return_pane = None;
+        self.hits.clear();
+        self.caret_rect = None;
     }
 }
 
@@ -251,6 +329,9 @@ impl App {
         self.close_inline_web();
         let return_pane = self.active_user_pane();
         self.settings_scene.enter(category, return_pane);
+        if !self.settings_scene.cache().ready {
+            self.settings_scene.refresh_cache();
+        }
 
         if let Some(idx) = self.settings_room_index() {
             if idx != self.active_window {
@@ -329,6 +410,7 @@ impl App {
         let Some(target) = target else {
             return false;
         };
+        self.native_settings_blur();
         self.switch_window(target);
         true
     }
@@ -342,6 +424,7 @@ impl App {
         if self.user_room_count() == 0 {
             return false;
         }
+        self.native_settings_blur();
 
         let was_active = settings_idx == self.active_window;
         let return_idx = self
@@ -551,6 +634,35 @@ mod tests {
             "SettingsMutation::WebPane",
             "spawn_web_host",
         );
+    }
+
+    #[test]
+    fn scene_paint_contract_clamps_scroll_and_uses_topmost_hit() {
+        use crate::native_settings::{Hit, HitCursor, Target};
+
+        let mut scene = SettingsScene::default();
+        scene.finish_onboarding();
+        scene.set_category(SettingsCat::Appearance);
+        let bottom = Hit {
+            target: Target::Category(SettingsCat::General),
+            rect: (0.0, 0.0, 20.0, 20.0),
+            cursor: HitCursor::Pointer,
+        };
+        let top = Hit {
+            target: Target::Category(SettingsCat::Claude),
+            rect: (5.0, 5.0, 10.0, 10.0),
+            cursor: HitCursor::Pointer,
+        };
+        scene.finish_paint(vec![bottom, top], 300.0, 100.0, Some((4.0, 5.0, 2.0, 12.0)));
+        assert!(scene.scroll_by(500.0));
+        assert_eq!(scene.scroll(), 200.0);
+        assert_eq!(scene.category(), SettingsCat::Appearance);
+        assert_eq!(scene.caret_rect(), Some((4.0, 5.0, 2.0, 12.0)));
+        assert!(matches!(
+            scene.hit_at(8.0, 8.0).map(|hit| &hit.target),
+            Some(Target::Category(SettingsCat::Claude))
+        ));
+        assert!(!scene.first_run());
     }
 
     #[test]

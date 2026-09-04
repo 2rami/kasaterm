@@ -22,6 +22,8 @@ mod input;
 mod layout;
 mod lineedit;
 mod markdown;
+mod native_onboarding;
+mod native_settings;
 mod notify_banner;
 mod onboarding;
 mod render;
@@ -2129,9 +2131,6 @@ impl PaneTab {
         }
     }
 
-    fn settings(&self) -> bool {
-        matches!(&self.content, PaneContent::Settings)
-    }
 }
 
 struct PaneState {
@@ -4069,6 +4068,9 @@ pub(crate) enum ImeFocus {
     WebAddr,
     /// 웹 pane 페이지 내 찾기 칸(`App.web_find`) — WebAddr 와 같은 규칙.
     WebFind,
+    /// PTY 없는 설정 방의 폼 입력. 필드를 함께 실어야 조합 중 다른 칸을 눌렀을 때
+    /// 마지막 음절이 새 칸이 아니라 떠나는 칸에 확정된다.
+    Settings(SettingsInput),
 }
 
 impl ImeFocus {
@@ -4186,14 +4188,20 @@ pub(crate) struct StudentRawEdit {
 
 /// The two free-text fields in the settings form. Tracks which one (if any)
 /// has keyboard focus so keystrokes route to its buffer.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
     CwdPath,
     /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
     FileOpenCmd,
+    /// 직접 적는 기본 셸 경로.
+    Shell,
+    /// Claude 실행에 붙일 자유 인자.
+    ClaudeExtra,
     /// 캐릭터 상세 화면의 이름 칸. 어느 캐릭터인지는 `App.students_selected` 가
     /// 들고 있다 — 상세는 한 번에 한 명뿐이라 여기 실을 것이 없다.
     StudentName,
+    /// 캐릭터 상세의 여러 줄 성격 입력.
+    StudentPersona,
     /// Feedback 본문 멀티라인 필드. persona 와 같은 편집 경로를 타지만 캐럿·버퍼가
     /// 따로라, 설정 창을 두 카테고리로 오가도 서로 안 덮어쓴다.
     FeedbackBody,
@@ -4261,6 +4269,8 @@ pub(crate) enum SettingsAction {
     CursorThickness(u8),
     /// 터미널 셀 위 마우스 포인터 — `"arrow"` · `"ibeam"`.
     MouseCursor(&'static str),
+    /// 떠 있는 pane 보호·확인 카드를 포함한 계정 전환. 빈 id는 기본 로그인.
+    SwitchAccount(AccountProvider, String),
     ToggleClaudePersona,
     ToggleShimInject,
     ClaudeModel(String),
@@ -5389,12 +5399,9 @@ struct App {
     account_switch_confirm: Option<session::PendingAccountSwitch>,
     /// 학생 교체 확인 카드 — 말투까지 바꾸려면 다시 띄워야 해서 먼저 묻는다.
     character_swap_confirm: Option<session::PendingCharacterSwap>,
-    /// 학생 하나만 담는 세부설정 창(`/arona-ui/settings.html?student=`). 설정 본체와
-    /// **따로** 사는 이유는, 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하기
-    /// 때문이다 — 안에서 안을 덮을 수 없다(거노 2026-08-25).
-    ///
-    /// 하나만 두는 것은 의도다. 학생마다 창을 열면 같은 로스터를 고치는 창이 여럿
-    /// 떠서 어느 쪽이 정본인지 알 수 없게 된다. 다른 학생을 열면 이 창의 주소만 바꾼다.
+    /// 캐릭터 그림·모션 편집은 아직 웹 상세 화면이 가진다. 이름·성격·모델은
+    /// 네이티브 설정 방으로 옮겼지만 그 남은 기능의 대체가 생길 때까지 수명 순서를
+    /// 지키며 보관한다.
     student_web_webview: Option<wry::WebView>,
     student_web_window: Option<Arc<Window>>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
