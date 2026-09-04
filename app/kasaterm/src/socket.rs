@@ -3562,9 +3562,9 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // per-pane 세션을 채우므로, pane_record 는 argv id 만 보고하고 없으면 None 을 둔다
     // (restore_leaf 가 fresh claude 로 복원).
     //
-    // codex 는 여기서 세션 id 를 못 집는다 — argv 에 없고 rollout 파일명에만 있다(실측).
-    // 대신 bind-transcript 훅이 보고한 값이 `pane_claude_sid` 에 들어와 `layout_to_json`
-    // 이 그걸 정본으로 덮어쓴다(claude 와 같은 경로). 그래서 여기선 None 이 맞다.
+    // codex 는 여기서 fresh 세션 id 를 못 집는다 — argv 에 없고 rollout 파일명에만
+    // 있다(실측). PID가 실제 연 root rollout을 찾은 값이 `pane_claude_sid`에 들어와
+    // `layout_to_json`에서 덮어쓰므로 여기서는 None이 맞다.
     let session_id = if matches!(agent, Some(kasa_pty::AgentKind::Claude)) {
         shell_pid.and_then(claude_session_id_from_cmdline)
     } else {
@@ -5749,6 +5749,21 @@ pub(crate) fn codex_rollout_for_session(sid: &str) -> Option<std::path::PathBuf>
     scan_codex_sessions(&root, sid)
 }
 
+/// 하네스 표식이 비어 있는 저장본을 Codex로 되살릴 때 쓰는 강한 증거.
+///
+/// UUID와 같은 이름의 파일만으로는 부족하다. root rollout의 첫 session_meta가
+/// 파일명과 같은 id로 자기 자신에게 수렴해야 한다. subagent는 자기 파일명 UUID와
+/// 부모 session_id가 달라 여기서 거절된다.
+pub(crate) fn codex_root_rollout_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    let path = codex_rollout_for_session(sid)?;
+    codex_rollout_is_root_for_sid(&path, sid).then_some(path)
+}
+
+fn codex_rollout_is_root_for_sid(path: &std::path::Path, sid: &str) -> bool {
+    let paths = [path.to_path_buf()];
+    codex_root_sid_from_open_rollouts(&paths).as_deref() == Some(sid)
+}
+
 /// hook 없이 실행 중인 Codex가 어느 root thread를 보고 있는지 알아낸다.
 ///
 /// `lsof`가 주는 열린 rollout은 그 pane 프로세스에 정확히 귀속되지만, root가 띄운
@@ -6265,6 +6280,24 @@ mod codex_session_lookup_tests {
     }
 
     #[test]
+    fn exact_root_evidence_rejects_a_subagent_rollout() {
+        let root = temp_root("codex-root-evidence");
+        let root_sid = "01a064ad-3875-7713-a4a8-c9883095ffae";
+        let child_sid = "01a064b2-0118-7ca1-86ba-01239cedde5d";
+        let root_path = rollout(&root, root_sid, root_sid, serde_json::json!("cli"));
+        let child_path = rollout(
+            &root,
+            child_sid,
+            root_sid,
+            serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": root_sid}}}),
+        );
+        assert!(codex_rollout_is_root_for_sid(&root_path, root_sid));
+        assert!(!codex_rollout_is_root_for_sid(&child_path, child_sid));
+        assert!(!codex_rollout_is_root_for_sid(&root_path, child_sid));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn state_db_fallback_separates_same_cwd_panes_and_ignores_newer_subagent() {
         let root = temp_root("codex-state-bind");
         let shim = root.join("shim");
@@ -6338,7 +6371,9 @@ mod codex_session_lookup_tests {
     fn resume_argv_returns_only_a_uuid_after_the_subcommand() {
         let sid = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
         assert_eq!(
-            codex_resume_id_from_argv(&format!("/bin/codex --flag resume {sid} -m gpt-5.6"))
+            codex_resume_id_from_argv(&format!(
+                "/bin/codex --flag resume {sid} -c check_for_update_on_startup=false -m gpt-5.6"
+            ))
                 .as_deref(),
             Some(sid)
         );

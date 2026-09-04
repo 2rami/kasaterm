@@ -5563,6 +5563,13 @@ impl App {
                     if let Some(sid) = pane_claude_sid.get(pane_id) {
                         obj.insert("session_id".to_string(), serde_json::json!(sid));
                     }
+                    // Codex가 업데이트를 고른 뒤 종료하면 셸만 남아 live process 감지는
+                    // `null`이지만, 직전에 정확히 결속한 root rollout UUID는 남아 있다.
+                    // 그 둘이 함께 있을 때만 종류를 복원해 다음 저장이 fresh Claude로
+                    // 오염되지 않게 한다. cwd 최신 파일은 같은 폴더 pane을 섞으므로 보지 않는다.
+                    normalize_saved_agent_map_with(obj, |sid| {
+                        socket::codex_root_rollout_for_session(sid).is_some()
+                    });
                     // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
                     // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
                     // `--model ''` 같은 게 나갈 위험만 는다.
@@ -7622,7 +7629,10 @@ fn restored_scrollback(rec: &serde_json::Value, restarting_agent: bool) -> Vec<S
 /// 되읽기를 `AgentKind::from_id` 하나로 모은 이유: 예전엔 여기가 세 종류를 손으로
 /// 나열했는데, 하네스가 서른이 된 지금 그 사본을 두면 표에만 있고 여기엔 없는
 /// 하네스가 **재시작 한 번에 셸로 되살아난다**(학생·대화 이어가기가 통째로 빠진다).
-fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
+fn saved_agent_map_with(
+    rec: &serde_json::Map<String, serde_json::Value>,
+    mut codex_root_exists: impl FnMut(&str) -> bool,
+) -> Option<&'static str> {
     if let Some(kind) = rec
         .get("was_agent")
         .and_then(|v| v.as_str())
@@ -7630,10 +7640,36 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
     {
         return Some(kind.as_str());
     }
-    rec.get("was_claude")
+    if rec
+        .get("was_claude")
         .and_then(|b| b.as_bool())
         .unwrap_or(false)
-        .then_some("claude")
+    {
+        return Some("claude");
+    }
+    let may_infer = rec.get("was_agent").is_none_or(serde_json::Value::is_null);
+    let sid = rec
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|sid| !sid.is_empty());
+    (may_infer && sid.is_some_and(&mut codex_root_exists)).then_some("codex")
+}
+
+fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
+    saved_agent_map_with(rec.as_object()?, |sid| {
+        socket::codex_root_rollout_for_session(sid).is_some()
+    })
+}
+
+fn normalize_saved_agent_map_with(
+    rec: &mut serde_json::Map<String, serde_json::Value>,
+    codex_root_exists: impl FnMut(&str) -> bool,
+) {
+    if rec.get("was_agent").is_none_or(serde_json::Value::is_null)
+        && saved_agent_map_with(rec, codex_root_exists) == Some("codex")
+    {
+        rec.insert("was_agent".to_string(), serde_json::json!("codex"));
+    }
 }
 
 /// 임시 디렉토리 아래인가. 방 이름 후보에서 밀어내는 데 쓴다 — claude 가 pane 마다
@@ -7731,8 +7767,8 @@ fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
 ///   pane 별 CODEX_HOME 은 GUI pid 별이라 재시작이면 통째로 없어지는데, `sessions` 가
 ///   `~/.codex/sessions` 심볼릭이라 실체가 남고 codex 가 거기서 찾아낸다(홈을 치우고
 ///   다른 pane 홈에서 resume 해 첫 질문까지 그대로 복원되는 것을 확인).
-/// - 세션 id 는 `pane_claude_sid`(bind-transcript 훅)로 들어온다 — rollout 파일명에서
-///   uuid 를 떼어낸 값이다. argv 로는 못 집는다.
+/// - 세션 id 는 `pane_claude_sid`(PID→열린 rollout 결속)로 들어온다 — rollout
+///   파일명에서 uuid 를 떼어낸 값이다. argv 로는 fresh thread를 못 집는다.
 /// - `resume --last` 는 쓰지 않는다. 그건 미러된 `~/.codex/sessions` 전체에서 최신 하나를
 ///   고르므로 **다른 pane·pane 밖 codex 의 대화**를 물어온다. id 가 없으면 새로 띄운다.
 /// `model`/`effort` 는 끄기 직전 그 pane 이 쓰던 값이다(없으면 `None`). **없으면
@@ -7760,7 +7796,9 @@ pub(crate) fn restore_agent_command(
     let effort = effort.filter(|s| !s.is_empty());
     let resume = session_id.filter(|_| resumable);
     let mut cmd = match (agent, resume) {
-        (Some("codex"), Some(sid)) => format!("codex resume {sid}"),
+        (Some("codex"), Some(sid)) => {
+            format!("codex resume {sid} -c check_for_update_on_startup=false")
+        }
         (Some("codex"), None) => "codex".to_string(),
         // agy 는 아직 세션 id 가 안 들어온다 — bind-transcript 훅이 claude·codex
         // shim 에만 걸려 있어서다. 그래도 하네스는 맞춰 띄운다: 여기 없으면 agy
@@ -8287,7 +8325,10 @@ mod account_switch_tests {
 
 #[cfg(test)]
 mod agy_restore_tests {
-    use super::{restore_agent_command, saved_agent, saved_effort, saved_model};
+    use super::{
+        normalize_saved_agent_map_with, restore_agent_command, saved_agent, saved_agent_map_with,
+        saved_effort, saved_model,
+    };
 
     /// 하네스 갈래만 보는 판 — 모델·effort 는 아래 전용 테스트가 건다.
     fn cmd(agent: Option<&str>, sid: Option<&str>, resumable: bool) -> String {
@@ -8310,7 +8351,10 @@ mod agy_restore_tests {
             cmd(Some("claude"), Some("s1"), true),
             "claude --resume s1\r"
         );
-        assert_eq!(cmd(Some("codex"), Some("s2"), true), "codex resume s2\r");
+        assert_eq!(
+            cmd(Some("codex"), Some("s2"), true),
+            "codex resume s2 -c check_for_update_on_startup=false\r"
+        );
         assert_eq!(
             cmd(Some("agy"), Some("s3"), true),
             "agy --conversation s3\r"
@@ -8343,8 +8387,16 @@ mod agy_restore_tests {
                 Some("gpt-5.5"),
                 Some("high")
             ),
-            "codex resume s2 -m 'gpt-5.5' -c model_reasoning_effort='high'\r"
+            "codex resume s2 -c check_for_update_on_startup=false -m 'gpt-5.5' -c model_reasoning_effort='high'\r"
         );
+        let codex = restore_agent_command(
+            Some("codex"),
+            Some("s2"),
+            true,
+            Some("gpt-5.6-sol"),
+            Some("xhigh"),
+        );
+        assert_eq!(codex.matches("-c ").count(), 2, "서로 다른 config override 두 개");
         assert_eq!(
             restore_agent_command(Some("agy"), Some("s3"), true, None, Some("low")),
             "agy --conversation s3 --effort 'low'\r"
@@ -8394,6 +8446,75 @@ mod agy_restore_tests {
         // 옛 저장본 — 이게 깨지면 판올림 한 번에 학생 pane 이 전부 셸이 된다.
         assert_eq!(saved_agent(&j(r#"{"was_claude":true}"#)), Some("claude"));
         assert_eq!(saved_agent(&j(r#"{}"#)), None);
+    }
+
+    #[test]
+    fn null_agent_with_an_exact_codex_root_sid_recovers_as_codex() {
+        const PANE_10: &str = "01a06773-4e83-7782-a251-361937f953fc";
+        const PANE_13: &str = "01a06af3-3d5f-7542-ad87-6d81a6509bff";
+        let j = |sid: &str| {
+            serde_json::json!({
+                "was_agent": null,
+                "session_id": sid,
+                "cwd": "/Users/kasa/Desktop/momewomo/sionic/swarm"
+            })
+        };
+        for sid in [PANE_10, PANE_13] {
+            let mut rec = j(sid);
+            let got = saved_agent_map_with(rec.as_object().unwrap(), |candidate| candidate == sid);
+            assert_eq!(got, Some("codex"), "{sid}");
+            assert!(restore_agent_command(got, Some(sid), true, None, None)
+                .starts_with("codex resume "));
+            normalize_saved_agent_map_with(rec.as_object_mut().unwrap(), |candidate| {
+                candidate == sid
+            });
+            assert_eq!(rec["was_agent"], "codex", "저장본도 즉시 정규화: {sid}");
+        }
+    }
+
+    #[test]
+    fn explicit_claude_and_missing_rollouts_are_never_guessed_as_codex() {
+        let claude_sid = "6043e850-19a1-4b83-834c-190081ede618";
+        let explicit = serde_json::json!({
+            "was_agent": "claude",
+            "session_id": claude_sid
+        });
+        assert_eq!(
+            saved_agent_map_with(explicit.as_object().unwrap(), |_| true),
+            Some("claude"),
+            "명시 하네스가 rollout 추론보다 우선"
+        );
+        let mut normalized = explicit.clone();
+        normalize_saved_agent_map_with(normalized.as_object_mut().unwrap(), |_| true);
+        assert_eq!(normalized["was_agent"], "claude");
+
+        let unknown = serde_json::json!({
+            "was_agent": null,
+            "session_id": claude_sid,
+            "character": "아루"
+        });
+        let agent = saved_agent_map_with(unknown.as_object().unwrap(), |_| false);
+        assert_eq!(agent, None, "exact Codex root가 없으면 추측 금지");
+        let mut normalized = unknown.clone();
+        normalize_saved_agent_map_with(normalized.as_object_mut().unwrap(), |_| false);
+        assert!(normalized["was_agent"].is_null());
+        assert_eq!(
+            restore_agent_command(agent, Some(claude_sid), false, None, None),
+            "claude\r",
+            "기존 sid-only fallback은 fresh Claude"
+        );
+
+        let explicit_codex = serde_json::json!({
+            "was_agent": "codex",
+            "session_id": "01a00000-0000-7000-8000-000000000000"
+        });
+        let agent = saved_agent_map_with(explicit_codex.as_object().unwrap(), |_| false);
+        assert_eq!(agent, Some("codex"));
+        assert_eq!(
+            restore_agent_command(agent, explicit_codex["session_id"].as_str(), false, None, None),
+            "codex\r",
+            "명시 Codex의 rollout이 사라졌으면 fresh Codex"
+        );
     }
 }
 

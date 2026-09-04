@@ -1783,7 +1783,10 @@ pub fn recent_all_sessions(limit: usize) -> Vec<RecentSession> {
 pub fn resume_command(harness: &str, id: &str, cwd: &str) -> String {
     let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let cmd = match harness {
-        "codex" => format!("codex resume {}", q(id)),
+        "codex" => format!(
+            "codex resume {} -c check_for_update_on_startup=false",
+            q(id)
+        ),
         "agy" => format!("agy --conversation {}", q(id)),
         _ => format!("claude --resume {}", q(id)),
     };
@@ -1808,8 +1811,20 @@ mod resume_command_tests {
 
     #[test]
     fn codex_and_agy_use_their_own_flags() {
-        assert_eq!(resume_command("codex", "id1", ""), "codex resume 'id1'");
+        assert_eq!(
+            resume_command("codex", "id1", ""),
+            "codex resume 'id1' -c check_for_update_on_startup=false"
+        );
         assert_eq!(resume_command("agy", "id2", ""), "agy --conversation 'id2'");
+    }
+
+    #[test]
+    fn update_suppression_is_scoped_to_codex_resume() {
+        let codex = resume_command("codex", "id1", "/repo");
+        assert_eq!(codex.matches("-c ").count(), 1);
+        assert!(codex.ends_with("-c check_for_update_on_startup=false"));
+        assert!(!resume_command("claude", "id2", "").contains("check_for_update"));
+        assert!(!resume_command("agy", "id3", "").contains("check_for_update"));
     }
 
     #[test]
