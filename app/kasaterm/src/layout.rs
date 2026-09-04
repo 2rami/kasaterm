@@ -539,7 +539,14 @@ impl App {
     /// 새 pane 의 surface id 를 돌려준다(빈 문자열 = 실패) — 디스패처가 스폰 직후
     /// 그 학생에게 브리프를 주입할 주소로 쓴다.
     pub(crate) fn spawn_student(&mut self, character: &str) -> String {
-        if self.settings_room_active() {
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        if active.as_deref().is_some_and(|pane| {
+            self.ensure_user_mutation_target(
+                pane,
+                crate::settings_room::SettingsMutation::Split,
+            )
+            .is_err()
+        }) {
             return String::new();
         }
         self.pending_character = Some(character.to_string());
@@ -599,9 +606,10 @@ impl App {
         };
         // 탭을 지목받았으면 그 탭이 든 pane — 탭은 BSP leaf 가 아니라 트리에서 못 찾는다.
         let host = self.ws.lock().unwrap().outer_for_pty(&host).unwrap_or(host);
-        if self.pane_is_settings(&host) {
-            anyhow::bail!("설정 방은 pane 배치 기준이 될 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            &host,
+            crate::settings_room::SettingsMutation::Split,
+        )?;
         let Some(owner) = self.window_of_pane(&host) else {
             anyhow::bail!("배치할 pane {host} 이 어느 window 트리에도 없다");
         };
@@ -690,9 +698,10 @@ impl App {
     /// 트리에 못 꽂았으면 호출부가 `self.pty` 에서 지운다 — 번호는 거기 등록된 것으로만
     /// 판정하므로(`alloc_pane_id`) 그것으로 자동 회수된다.
     pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
-        if self.pane_is_settings(active) {
-            anyhow::bail!("설정 방은 split 기준이 될 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            active,
+            crate::settings_room::SettingsMutation::Split,
+        )?;
         let new_id = self.alloc_pane_id();
 
         // Spawn the new session at a placeholder size — the resize
@@ -796,9 +805,10 @@ impl App {
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("활성 pane 이 없다");
         };
-        if self.pane_is_settings(&active) {
-            anyhow::bail!("설정 방은 split 할 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            &active,
+            crate::settings_room::SettingsMutation::Split,
+        )?;
         // 탭을 지목받았으면 **그 탭이 든 pane** 을 쪼갠다. 탭은 BSP leaf 가 아니라
         // `split_leaf` 가 못 찾고, 그러면 셸만 새로 띄운 채 통째로 실패한다.
         let active = self
@@ -868,9 +878,10 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
         }
-        if self.pane_is_settings(outer) {
-            anyhow::bail!("설정 방에는 터미널 탭을 만들 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            outer,
+            crate::settings_room::SettingsMutation::Tab,
+        )?;
         // Outer pane must already exist in the layout (it's the user's focused
         // pane). Use its size for the initial pty so the shell starts at the
         // right cols/rows — `resize_backend` after re-applies it anyway, but a
@@ -1341,9 +1352,10 @@ impl App {
     /// from `drop_tab_into_body` (which lifts a tab into a new pane on the
     /// drop side) — this one keeps the source intact and adds a sibling.
     pub(crate) fn split_pane_opposite(&mut self, source: &str, zone: DropZone) -> Result<()> {
-        if self.pane_is_settings(source) {
-            anyhow::bail!("설정 방은 split 할 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            source,
+            crate::settings_room::SettingsMutation::Split,
+        )?;
         if self.tmux.is_some() {
             anyhow::bail!("split via drag unsupported on tmux backend");
         }
@@ -1407,7 +1419,19 @@ impl App {
     /// the old "drag pane header" semantics into the tab drag so there's
     /// one drop UX.
     pub(crate) fn drop_tab_into_body(&mut self, td: &TabDrag, target: &str, zone: DropZone) {
-        if self.pane_is_settings(&td.pane) || self.pane_is_settings(target) {
+        if self
+            .ensure_user_mutation_target(
+                &td.pane,
+                crate::settings_room::SettingsMutation::Move,
+            )
+            .is_err()
+            || self
+                .ensure_user_mutation_target(
+                    target,
+                    crate::settings_room::SettingsMutation::Move,
+                )
+                .is_err()
+        {
             return;
         }
         // 1. Lift the tab out of source.
@@ -1496,7 +1520,20 @@ impl App {
     ///
     /// 반환값 = 실제로 옮겼는지. 자기 자신·없는 pane·빈 소스면 false.
     pub(crate) fn merge_pane_into_tabs(&mut self, src: &str, dst: &str) -> bool {
-        if src == dst || self.pane_is_settings(src) || self.pane_is_settings(dst) {
+        if src == dst
+            || self
+                .ensure_user_mutation_target(
+                    src,
+                    crate::settings_room::SettingsMutation::Merge,
+                )
+                .is_err()
+            || self
+                .ensure_user_mutation_target(
+                    dst,
+                    crate::settings_room::SettingsMutation::Merge,
+                )
+                .is_err()
+        {
             return false;
         }
         let moved: Vec<PaneTab> = {
@@ -2328,7 +2365,20 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// beside the target, then resizes every pane to its new rect. No-op
     /// when source and target are the same pane.
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
-        if moving == target || self.pane_is_settings(moving) || self.pane_is_settings(target) {
+        if moving == target
+            || self
+                .ensure_user_mutation_target(
+                    moving,
+                    crate::settings_room::SettingsMutation::Move,
+                )
+                .is_err()
+            || self
+                .ensure_user_mutation_target(
+                    target,
+                    crate::settings_room::SettingsMutation::Move,
+                )
+                .is_err()
+        {
             return;
         }
         let (dir, before) = match zone {

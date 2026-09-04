@@ -630,6 +630,10 @@ impl App {
     /// 스왑만 한다: 같은 pane id 로 로컬 셸을 앉히고 원격 web 세션은 폐기한다.
     /// 돌아갈 로컬 폴더는 `mini` 로 갈 때 심어 둔 origin(remote identity).
     pub(crate) fn bring_pane_home(&mut self, pid: &str) -> Result<()> {
+        self.ensure_user_mutation_target(
+            pid,
+            crate::settings_room::SettingsMutation::RemotePane,
+        )?;
         if self.tmux.is_some() {
             return Ok(());
         }
@@ -713,6 +717,10 @@ impl App {
         base: &str,
         remote_cwd: Option<&str>,
     ) -> Result<String> {
+        self.ensure_user_mutation_target(
+            pid,
+            crate::settings_room::SettingsMutation::RemotePane,
+        )?;
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
@@ -788,6 +796,10 @@ impl App {
             .unwrap()
             .outer_for_pty(&anchor)
             .unwrap_or(anchor);
+        self.ensure_user_mutation_target(
+            &anchor,
+            crate::settings_room::SettingsMutation::RemotePane,
+        )?;
         let owner = self.window_of_pane(&anchor);
         if owner.is_none() {
             anyhow::bail!("기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
@@ -865,15 +877,6 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
-        let m = kasa_mcp::machines::find(label)
-            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
-        if let Some(existing) = kasa_pty::live_sessions().into_iter().find(|id| {
-            kasa_mcp::remote::remote_info(id)
-                .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
-        }) {
-            self.reveal_pane_tab(&existing);
-            return Ok(existing);
-        }
         let anchor = self
             .ws
             .lock()
@@ -888,6 +891,19 @@ impl App {
             .unwrap()
             .outer_for_pty(&anchor)
             .unwrap_or(anchor);
+        self.ensure_user_mutation_target(
+            &outer,
+            crate::settings_room::SettingsMutation::RemoteMirror,
+        )?;
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        if let Some(existing) = kasa_pty::live_sessions().into_iter().find(|id| {
+            kasa_mcp::remote::remote_info(id)
+                .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
+        }) {
+            self.reveal_pane_tab(&existing);
+            return Ok(existing);
+        }
         if self.window_of_pane(&outer).is_none() {
             anyhow::bail!("포커스된 pane {outer} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
         }
@@ -1201,6 +1217,10 @@ impl App {
     /// 죽어도 그 학생은 살아남는다(맥북 전원이 꺼지면 같이 꺼진다 — 그건 물리).
     #[cfg(unix)]
     pub(crate) fn promote_pane(&mut self, pid: &str) -> Result<String> {
+        self.ensure_user_mutation_target(
+            pid,
+            crate::settings_room::SettingsMutation::RemotePane,
+        )?;
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -1271,9 +1291,10 @@ impl App {
         force: bool,
         run: Option<&str>,
     ) -> Result<String> {
-        if self.pane_is_settings(pid) {
-            anyhow::bail!("설정 방은 이사할 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            pid,
+            crate::settings_room::SettingsMutation::Migrate,
+        )?;
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -1725,9 +1746,10 @@ impl App {
         local_cwd: Option<&str>,
         force: bool,
     ) -> Result<String> {
-        if self.pane_is_settings(pid) {
-            anyhow::bail!("설정 방은 데려올 수 없다");
-        }
+        self.ensure_user_mutation_target(
+            pid,
+            crate::settings_room::SettingsMutation::Migrate,
+        )?;
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -3642,6 +3664,12 @@ impl App {
         if c.window < self.windows.len() && c.window != self.active_window {
             self.switch_window(c.window);
         }
+        if self.settings_room_active() && !self.return_from_settings_room() {
+            // 설정 sole-leaf를 되살리기 anchor로 쓰지 않는다. 돌아갈 사용자 방이
+            // 없다면 레코드를 잃지 않고 제자리에 돌려놓는다.
+            self.closed_panes.push(c);
+            return;
+        }
         // 미리보기 탭 레코드 — pane 이 아니라 보조 탭이었으니 `open_file` 로 다시
         // 연다. 원래 붙어 있던 pane 이 사라졌으면 open_file 이 활성 pane 으로 폴백.
         if let Some((outer, path)) = c.preview.clone() {
@@ -3697,6 +3725,15 @@ impl App {
                         .is_some_and(|t| t.leaves().iter().any(|l| *l == n.as_str()))
             })
             .or_else(|| self.ws.lock().unwrap().active_pane.clone());
+        if anchor.as_deref().is_some_and(|pane| {
+            self.ensure_user_mutation_target(
+                pane,
+                crate::settings_room::SettingsMutation::Split,
+            )
+            .is_err()
+        }) {
+            return;
+        }
         let grafted = match (anchor, self.pty_layout.as_mut()) {
             (Some(a), Some(tree)) => {
                 tree.split_leaf(&a, kasa_pty::SplitDir::Horizontal, new_id.clone())
@@ -4305,6 +4342,13 @@ impl App {
         if self.tmux.is_some() {
             return;
         }
+        let requested = if as_tab { target.as_deref() } else { None };
+        let Ok(active) = self.resolve_user_mutation_anchor(
+            requested,
+            crate::settings_room::SettingsMutation::FilePreview,
+        ) else {
+            return;
+        };
         // "파일 열기" 설정은 **사람이 연 것**에만 적용한다. `as_tab` 은 에이전트·
         // 소켓의 미리보기 요청이라, 그것까지 pane 을 새로 열면 파일을 보여 달랄
         // 때마다 화면이 쪼개진다.
@@ -4409,10 +4453,6 @@ impl App {
             })
         };
 
-        let active = self.ws.lock().unwrap().active_pane.clone();
-        let Some(active) = active else {
-            return;
-        };
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -4445,13 +4485,8 @@ impl App {
         // push. 트리를 안 바꾸므로 split 과 달리 resize_backend/publish 가 필요 없다
         // (image/markdown 은 PTY-less, pane_cells 기반 렌더라 redraw 면 충분). 대상 pane
         // 이 panes 에 실재할 때만(contains_key) 탭 경로; 아니면 아래 split 폴백(tab 재사용).
-        let tab_outer: Option<String> = if as_tab {
-            let ws = self.ws.lock().unwrap();
-            target
-                .as_deref()
-                .and_then(|t| ws.outer_for_pty(t))
-                .filter(|o| ws.panes.contains_key(o))
-                .or_else(|| ws.panes.contains_key(&active).then(|| active.clone()))
+        let tab_outer = if as_tab && self.ws.lock().unwrap().panes.contains_key(&active) {
+            Some(active.clone())
         } else {
             None
         };

@@ -80,8 +80,71 @@ fn remap_after_removal(index: usize, removed: usize) -> Option<usize> {
     }
 }
 
-pub(crate) fn pane_operation_allowed(pane: &str) -> bool {
-    pane != SETTINGS_PANE_ID
+/// 설정 marker를 대상으로 삼으면 안 되는 pane 구조 변경 종류.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsMutation {
+    Split,
+    Tab,
+    Merge,
+    Move,
+    FilePreview,
+    WebPane,
+    RemotePane,
+    RemoteMirror,
+    Migrate,
+}
+
+impl SettingsMutation {
+    #[cfg(test)]
+    const ALL: [Self; 9] = [
+        Self::Split,
+        Self::Tab,
+        Self::Merge,
+        Self::Move,
+        Self::FilePreview,
+        Self::WebPane,
+        Self::RemotePane,
+        Self::RemoteMirror,
+        Self::Migrate,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Split => "split",
+            Self::Tab => "tab",
+            Self::Merge => "merge",
+            Self::Move => "move",
+            Self::FilePreview => "file preview",
+            Self::WebPane => "web pane",
+            Self::RemotePane => "remote pane",
+            Self::RemoteMirror => "remote mirror",
+            Self::Migrate => "migrate",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsToggle {
+    OpenOrFocus,
+    ReturnToUser,
+}
+
+fn settings_toggle(active: bool, category: Option<SettingsCat>) -> SettingsToggle {
+    if active && category.is_none() {
+        SettingsToggle::ReturnToUser
+    } else {
+        SettingsToggle::OpenOrFocus
+    }
+}
+
+pub(crate) fn pane_operation_allowed(pane: &str, _mutation: SettingsMutation) -> bool {
+    !is_settings_pane(pane)
+}
+
+/// 렌더가 이미 `Workspace` lock을 잡은 채 호출할 수 있으므로 sentinel 비교만 한다.
+/// Settings pane은 생성 시 이 고정 id를 쓰며 다른 id로 바뀌지 않는다.
+pub(crate) fn is_settings_pane(pane: &str) -> bool {
+    pane == SETTINGS_PANE_ID
 }
 
 /// 복원 파일에 내부 방이 잘못 실렸던 개발판도 안전하게 읽기 위한 표식 판정.
@@ -117,13 +180,50 @@ impl App {
     }
 
     pub(crate) fn pane_is_settings(&self, pane: &str) -> bool {
-        !pane_operation_allowed(pane)
-            || self
-                .ws
-                .lock()
-                .ok()
-                .and_then(|ws| ws.panes.get(pane).map(|state| state.settings()))
-                .unwrap_or(false)
+        is_settings_pane(pane)
+    }
+
+    /// pane 구조를 바꾸기 직전에 통과해야 하는 단일 관문. enum 인자를 강제해 새
+    /// 호출자가 단순 "settings 아님" 검사를 복사하지 않고 작업 종류를 명시하게 한다.
+    pub(crate) fn ensure_user_mutation_target(
+        &self,
+        pane: &str,
+        mutation: SettingsMutation,
+    ) -> anyhow::Result<()> {
+        if !pane_operation_allowed(pane, mutation) {
+            anyhow::bail!("설정 방은 {} 대상이 될 수 없다", mutation.label());
+        }
+        Ok(())
+    }
+
+    /// 파일·웹처럼 요청 pane이 없거나 이미 사라졌으면 현재 pane으로 폴백하는
+    /// 진입점용. 반환된 값은 항상 BSP의 바깥 leaf이고 Settings marker가 아니다.
+    pub(crate) fn resolve_user_mutation_anchor(
+        &self,
+        requested: Option<&str>,
+        mutation: SettingsMutation,
+    ) -> anyhow::Result<String> {
+        let anchor = {
+            let ws = self.ws.lock().unwrap();
+            let resolve = |pane: &str| {
+                if ws.panes.contains_key(pane) {
+                    Some(pane.to_string())
+                } else {
+                    ws.outer_for_pty(pane)
+                }
+            };
+            requested
+                .and_then(resolve)
+                .or_else(|| {
+                    ws.active_pane.as_deref().map(|pane| {
+                        ws.outer_for_pty(pane)
+                            .unwrap_or_else(|| pane.to_string())
+                    })
+                })
+        }
+        .ok_or_else(|| anyhow::anyhow!("기준 pane 이 없다"))?;
+        self.ensure_user_mutation_target(&anchor, mutation)?;
+        Ok(anchor)
     }
 
     pub(crate) fn user_room_count(&self) -> usize {
@@ -201,11 +301,36 @@ impl App {
     }
 
     pub(crate) fn toggle_settings_room(&mut self, category: Option<SettingsCat>) {
-        if self.settings_room_active() && category.is_none() {
-            self.close_settings_room();
-        } else {
-            self.open_settings_room(category);
+        match settings_toggle(self.settings_room_active(), category) {
+            SettingsToggle::ReturnToUser => {
+                self.return_from_settings_room();
+            }
+            SettingsToggle::OpenOrFocus => {
+                self.open_settings_room(category);
+            }
         }
+    }
+
+    /// 기어/⌘,로 설정에서 빠져나갈 때는 방을 보관한 채 마지막 사용자 방만 다시
+    /// 앞으로 가져온다. 삭제는 ⌘W·×·Esc가 `close_settings_room`으로 명시한다.
+    pub(crate) fn return_from_settings_room(&mut self) -> bool {
+        let Some(settings_idx) = self.settings_room_index() else {
+            return false;
+        };
+        if settings_idx != self.active_window {
+            return false;
+        }
+        let target = self
+            .settings_scene
+            .return_pane()
+            .and_then(|pane| self.window_of_pane(pane))
+            .filter(|idx| *idx != settings_idx)
+            .or_else(|| (0..self.windows.len()).find(|idx| *idx != settings_idx));
+        let Some(target) = target else {
+            return false;
+        };
+        self.switch_window(target);
+        true
     }
 
     /// 설정 방만 즉시 걷고 마지막 사용자 pane의 방으로 돌아간다. 작업 확인창을 띄울
@@ -356,9 +481,76 @@ mod tests {
 
     #[test]
     fn settings_leaf_is_never_a_user_operation_anchor() {
-        assert!(!pane_operation_allowed(SETTINGS_PANE_ID));
-        assert!(pane_operation_allowed("%0"));
+        for mutation in SettingsMutation::ALL {
+            assert!(!pane_operation_allowed(SETTINGS_PANE_ID, mutation));
+            assert!(pane_operation_allowed("%0", mutation));
+        }
         assert_eq!(SETTINGS_LABEL, "설정");
+    }
+
+    #[test]
+    fn settings_marker_check_is_lock_free_and_exact() {
+        assert!(is_settings_pane(SETTINGS_PANE_ID));
+        assert!(!is_settings_pane("%0"));
+        assert!(!is_settings_pane("kasaterm-settings"));
+    }
+
+    #[test]
+    fn gear_returns_without_deleting_the_singleton_room() {
+        assert_eq!(settings_toggle(true, None), SettingsToggle::ReturnToUser);
+        assert_eq!(settings_toggle(false, None), SettingsToggle::OpenOrFocus);
+        assert_eq!(
+            settings_toggle(true, Some(SettingsCat::Claude)),
+            SettingsToggle::OpenOrFocus
+        );
+    }
+
+    #[test]
+    fn every_direct_pane_creator_passes_the_typed_settings_gate_first() {
+        fn between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+            src.split_once(start)
+                .unwrap_or_else(|| panic!("missing function start: {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing function end: {end}"))
+                .0
+        }
+        fn before(body: &str, gate: &str, mutation: &str) {
+            let gate_at = body
+                .find(gate)
+                .unwrap_or_else(|| panic!("missing settings gate: {gate}"));
+            let mutation_at = body
+                .find(mutation)
+                .unwrap_or_else(|| panic!("missing mutation: {mutation}"));
+            assert!(
+                gate_at < mutation_at,
+                "settings gate must run before {mutation}"
+            );
+        }
+
+        let session = include_str!("session.rs");
+        before(
+            between(session, "pub(crate) fn spawn_remote_pane", "pub(crate) fn mirror_remote_pane"),
+            "SettingsMutation::RemotePane",
+            "remote::connect(",
+        );
+        before(
+            between(session, "pub(crate) fn mirror_remote_pane", "pub(crate) fn reveal_pane_tab"),
+            "SettingsMutation::RemoteMirror",
+            "remote::connect_view(",
+        );
+        before(
+            between(session, "pub(crate) fn open_file(", "pub(crate) fn open_markdown_window"),
+            "SettingsMutation::FilePreview",
+            "panes.insert(new_id.clone(), ps)",
+        );
+
+        let webpane = include_str!("webpane.rs");
+        before(
+            between(webpane, "pub(crate) fn open_web_pane", "pub(crate) fn sync_web_hosts"),
+            "SettingsMutation::WebPane",
+            "spawn_web_host",
+        );
     }
 
     #[test]

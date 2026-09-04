@@ -544,6 +544,12 @@ impl App {
         let Some(url) = normalize_web_url(raw_url) else {
             return;
         };
+        let Ok(anchor) = self.resolve_user_mutation_anchor(
+            target,
+            crate::settings_room::SettingsMutation::WebPane,
+        ) else {
+            return;
+        };
         // 이미 열려 있으면 포커스만.
         let matches: Vec<(String, usize)> = {
             let ws = self.ws.lock().unwrap();
@@ -587,23 +593,6 @@ impl App {
         // 어느 pane 옆에 붙일지: 요청자 pane → 없으면 active. target 은 PTY
         // pid 일 수도(CLI 의 $KASATERM_PANE_ID), outer pane id 일 수도(팝업 —
         // 웹 pane 은 PTY 가 없어 outer_for_pty 로는 못 찾는다) 있다.
-        let anchor = {
-            let ws = self.ws.lock().unwrap();
-            target
-                .and_then(|t| {
-                    if ws.panes.contains_key(t) {
-                        Some(t.to_string())
-                    } else {
-                        ws.outer_for_pty(t)
-                    }
-                })
-                .filter(|o| ws.panes.contains_key(o))
-                .or_else(|| ws.active_pane.clone())
-        };
-        let Some(anchor) = anchor else {
-            return;
-        };
-
         let host_id = self.alloc_web_host_id();
         if !self.spawn_web_host(event_loop, &url, host_id) {
             return;
