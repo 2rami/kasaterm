@@ -747,7 +747,9 @@ impl App {
     }
     /// 페르소나 탭이 지금 화면에 있어야 하나 — 우측 패널이 열려 있고 그 탭이 선택된 때.
     pub(crate) fn persona_active(&self) -> bool {
-        self.git.col_visible && self.info.tab == state::SideTab::Persona
+        !self.settings_room_active()
+            && self.git.col_visible
+            && self.info.tab == state::SideTab::Persona
     }
     /// 웹뷰를 렌더가 적어 준 본문 사각형에 맞추고, 탭이 바뀌었으면 보이기/숨기기를
     /// 뒤집는다. 드롭하지 않고 숨기는 이유는 대화 이력이 그 페이지에 있어서다 —
