@@ -576,6 +576,7 @@ impl App {
                 }
                 ws.active_pane = Some(id);
             }
+            self.handoff_ime_to_active_surface();
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -628,6 +629,7 @@ impl App {
             return;
         }
         self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -1062,7 +1064,7 @@ impl App {
                 // 따라가야 이후 분할·이동 chord 와 소켓 명령이 이 pane 을 잡는다
                 // (웹 pane 스플릿이 안 되던 원인 절반 — 나머지 절반은 WEB_CHORD_JS).
                 if let Some(pid) = self.pane_of_web_host(host_id) {
-                    self.ws.lock().unwrap().active_pane = Some(pid);
+                    self.focus_pane(&pid);
                     // 주소창 편집 중 웹뷰를 클릭했으면 다른 곳 클릭과 같은 blur.
                     self.cancel_web_addr();
                     self.chrome_dirty = true;
@@ -1143,7 +1145,7 @@ impl App {
             if let Some(host) = self.web_hosts.get_mut(&host_id) {
                 host.trusted_at = Some(std::time::Instant::now());
             }
-            self.ws.lock().unwrap().active_pane = Some(pid);
+            self.focus_pane(&pid);
             self.cancel_web_addr();
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
@@ -1161,7 +1163,7 @@ impl App {
         if let Some(host) = self.web_hosts.get_mut(&host_id) {
             host.trusted_at = Some(std::time::Instant::now());
         }
-        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+        self.focus_pane(&pid);
         let mut refocus_main = true;
         match cmd {
             "split-h" | "split-v" => {
@@ -1170,7 +1172,7 @@ impl App {
                 } else {
                     kasa_pty::SplitDir::Horizontal
                 };
-                if let Err(e) = self.split_active_pane(dir) {
+                if let Err(e) = self.split_active_pane_focused(dir) {
                     eprintln!("[webpane] chord split: {e:#}");
                     refocus_main = false;
                 }

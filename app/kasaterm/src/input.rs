@@ -14,6 +14,16 @@ fn deferred_account_restart_toast(restarted: usize) -> String {
 
 impl App {
     pub(crate) fn send_bytes(&self, bytes: &[u8]) {
+        let surface = self.target_surface();
+        self.send_bytes_to_surface(surface.as_deref(), bytes);
+    }
+
+    /// Send bytes to one concrete terminal surface instead of consulting the
+    /// current pane/tab focus. IME ownership is intentionally surface-based:
+    /// an OS commit can arrive after the user has already selected another
+    /// pane, and routing that commit through `send_bytes` would put the final
+    /// syllable in the newly-focused terminal.
+    pub(crate) fn send_bytes_to_surface(&self, surface: Option<&str>, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -24,8 +34,7 @@ impl App {
         // daemon path — otherwise keystrokes for a secondary tab get sent to
         // the daemon, which has no such surface and routes them to the primary
         // tab instead (the "typing in another tab lands in the first tab" bug).
-        let surface = self.target_surface();
-        if let Some(pid) = surface.as_deref() {
+        if let Some(pid) = surface {
             if let Some(pty) = self.pty.get(pid) {
                 let _ = pty.send_bytes(bytes);
                 return;
@@ -35,17 +44,18 @@ impl App {
         // a tmux send-keys quirk (the daemon decodes hex pairs back
         // to bytes itself); for the pty backend we hand the raw bytes
         // straight to the PTY writer.
-        let _ = &surface;
         if let Some(tmux) = self.tmux.as_ref() {
             let hex: String = bytes
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let target = self.target_pane();
-            let _ = tmux.send_keys_hex(target.as_deref(), &hex);
-        } else if let Some(pty) = self.active_pty() {
-            let _ = pty.send_bytes(bytes);
+            let fallback = self.target_pane();
+            let _ = tmux.send_keys_hex(surface.or(fallback.as_deref()), &hex);
+        } else if surface.is_none() {
+            if let Some(pty) = self.active_pty() {
+                let _ = pty.send_bytes(bytes);
+            }
         }
     }
     /// True when the pane has mouse reporting + SGR encoding enabled
@@ -2296,13 +2306,7 @@ impl App {
             return;
         };
         match prev {
-            crate::ImeFocus::Pane(id) => {
-                // 탭이 있는 pane 은 leaf id 와 실제 pid 가 갈린다 —
-                // `self.pty.get(id)` 로는 보조 탭을 못 찾는다.
-                if let Some(s) = self.pty_for_pane(&id) {
-                    let _ = s.send_bytes(text.as_bytes());
-                }
-            }
+            crate::ImeFocus::Pane(id) => self.send_bytes_to_surface(Some(&id), text.as_bytes()),
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
@@ -2313,6 +2317,32 @@ impl App {
             crate::ImeFocus::WebAddr => self.web_addr_insert(&text),
             crate::ImeFocus::WebFind => self.web_find_insert(&text),
         }
+    }
+
+    /// Move the shared composer to the terminal surface that is visible now.
+    /// Call this only after a real user-visible pane/tab transition; startup,
+    /// restore and temporary layout bookkeeping deliberately keep assigning
+    /// `active_pane` directly.
+    pub(crate) fn handoff_ime_to_active_surface(&mut self) {
+        let Some(surface) = self.target_surface() else {
+            return;
+        };
+        self.ime_retarget(crate::ImeFocus::Pane(surface));
+    }
+
+    /// Final step for a real pane-focus transition. Layout construction and
+    /// socket split bookkeeping sometimes assign `active_pane` temporarily;
+    /// those paths must stay direct so they cannot steal/flush a composition
+    /// the user never moved.
+    pub(crate) fn activate_pane_focus(&mut self, pane: &str) -> bool {
+        let changed = {
+            let mut ws = self.ws.lock().unwrap();
+            let changed = ws.active_pane.as_deref() != Some(pane);
+            ws.active_pane = Some(pane.to_string());
+            changed
+        };
+        self.handoff_ime_to_active_surface();
+        changed
     }
     /// Commit-input key entry with Hangul composition, mirroring
     /// `md_editor_input` for the single-line git commit field. macOS hands jamo
@@ -2836,8 +2866,7 @@ impl App {
             // id 를 별도 문으로 꺼내 락을 확실히 놓는다 — `if let` 조건식의
             // 임시 MutexGuard 는 2021 에디션에서 body 끝까지 살아, 안에서
             // ws 를 다시 잠그는 `ime_retarget` 과 자기 락에 물린다.
-            let active = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
-            if let Some(id) = active {
+            if let Some(id) = self.target_surface() {
                 self.ime_retarget(crate::ImeFocus::Pane(id));
             }
         }
@@ -3005,13 +3034,13 @@ impl App {
                         } else {
                             kasa_pty::SplitDir::Horizontal
                         };
-                        if let Err(e) = self.split_active_pane(dir) {
+                        if let Err(e) = self.split_active_pane_focused(dir) {
                             eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
                     }
                     if code == KeyCode::KeyE {
-                        if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Vertical) {
+                        if let Err(e) = self.split_active_pane_focused(kasa_pty::SplitDir::Vertical) {
                             eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
@@ -3491,7 +3520,11 @@ impl App {
                                                 .map(|t| (t.cursor_row, t.cursor_col))
                                         })
                                     });
-                                    self.commit_overlay = before.map(|b| (commit.clone(), b));
+                                    self.commit_overlay = self
+                                        .target_surface()
+                                        .and_then(|surface| {
+                                            before.map(|b| (commit.clone(), b, surface))
+                                        });
                                     self.input_buf.push_str(&commit);
                                     self.send_bytes(commit.as_bytes());
                                 }
@@ -4318,6 +4351,56 @@ pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<Appro
 mod working_scan_tests {
     use super::*;
     use kasa_bridge::screen::Cell;
+
+    #[test]
+    fn terminal_ime_owner_keeps_the_exact_tab_surface() {
+        let owner = crate::ImeFocus::Pane("%secondary-tab".to_string());
+        assert_eq!(owner.terminal_surface(), Some("%secondary-tab"));
+        assert_ne!(owner.terminal_surface(), Some("%outer-pane"));
+        assert_eq!(crate::ImeFocus::GitCommit.terminal_surface(), None);
+    }
+
+    #[test]
+    fn focus_handoff_and_late_platform_commit_use_surface_routing() {
+        let input = include_str!("input.rs");
+        let handoff = input
+            .split_once("pub(crate) fn activate_pane_focus")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn git_commit_input")
+            .unwrap()
+            .0;
+        assert!(handoff.contains("handoff_ime_to_active_surface"));
+        let handler = include_str!("handler.rs");
+        let ime = handler
+            .split_once("Ime::Commit(text)")
+            .unwrap()
+            .1
+            .split_once("WindowEvent::KeyboardInput")
+            .unwrap()
+            .0;
+        assert!(ime.contains("os_ime_surface"));
+        assert!(ime.contains("send_bytes_to_surface"));
+        assert!(!ime.contains("self.send_bytes(text.as_bytes())"));
+
+        let socket_split = handler
+            .split_once("UserEvent::SocketSplit(")
+            .unwrap()
+            .1
+            .split_once("UserEvent::SocketSplitFleet")
+            .unwrap()
+            .0;
+        assert!(socket_split.contains("split_pane_auto"));
+        assert!(!socket_split.contains("split_active_pane_focused"));
+        let shortcuts = input
+            .split_once("if code == KeyCode::KeyD")
+            .unwrap()
+            .1
+            .split_once("if code == KeyCode::KeyR")
+            .unwrap()
+            .0;
+        assert!(shortcuts.contains("split_active_pane_focused"));
+    }
 
     fn row(s: &str) -> Vec<GridCell> {
         s.chars()

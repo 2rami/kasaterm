@@ -571,6 +571,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::BackendFocus(id) => {
+                let exists = self.ws.lock().unwrap().panes.contains_key(id);
+                if exists {
+                    self.activate_pane_focus(id);
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                }
+                return;
+            }
             UserEvent::SocketAronaClose => {
                 self.close_arona_panel();
                 return;
@@ -616,7 +625,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if *show {
                     self.close_inline_web();
                     if let Some(id) = focus_pane {
-                        self.ws.lock().unwrap().active_pane = Some(id.clone());
+                        self.focus_pane(id);
                         self.chrome_dirty = true;
                         self.render_frame();
                     }
@@ -870,6 +879,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.split_active_pane(kasa_pty::SplitDir::Horizontal).ok()
                 };
                 if let Some(new_id) = new_id {
+                    self.handoff_ime_to_active_surface();
                     // pane↔세션 transcript 즉석 확정(파싱 우선): attach 뷰는 bind hook 이
                     // 안 떠서 board discovery 의 recent-jsonl 추측이 같은 cwd 의 남의 활성
                     // 세션에 오귀속됐다(거노: 왼쪽 pane 둘 다 프라나 + board 내용 뒤섞임).
@@ -3480,7 +3490,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .get(&pid)
                         .is_some_and(|p| p.has_header());
                     if headered {
-                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        self.focus_pane(&pid);
                         self.handle_menu = Some(pid);
                         self.chrome_dirty = true;
                         window.request_redraw();
@@ -3589,9 +3599,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 return;
                             }
                             if let Some((pid, _, _)) = self.px_to_pane_cell(cx, cy) {
-                                if let Ok(mut w) = self.ws.lock() {
-                                    w.active_pane = Some(pid);
-                                }
+                                self.focus_pane(&pid);
                                 let mut text = shell_quote_path(&drag.path.to_string_lossy());
                                 text.push(' ');
                                 self.send_bytes(text.as_bytes());
@@ -3933,7 +3941,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 업데이트 토스트 본문 클릭은 dismiss 만 — 센티널을
                                 // active_pane 에 넣으면 존재하지 않는 pane 을 가리킨다.
                                 if target != crate::win_sparkle::UPDATE_TOAST_ACTION {
-                                    self.ws.lock().unwrap().active_pane = Some(target);
+                                    self.focus_pane(&target);
                                 }
                             }
                             self.clear_approval_toast();
@@ -4981,13 +4989,15 @@ impl ApplicationHandler<UserEvent> for App {
                             })
                             .map(|(a, _)| *a)
                         {
-                            self.ws.lock().unwrap().active_pane = Some(menu_pid.clone());
+                            self.focus_pane(&menu_pid);
                             match action {
                                 ActionKind::SplitV => {
-                                    let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+                                    let _ = self
+                                        .split_active_pane_focused(kasa_pty::SplitDir::Vertical);
                                 }
                                 ActionKind::SplitH => {
-                                    let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+                                    let _ = self
+                                        .split_active_pane_focused(kasa_pty::SplitDir::Horizontal);
                                 }
                                 ActionKind::ToggleStatusbar => self.toggle_statusbar(&menu_pid),
                                 ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
@@ -5029,7 +5039,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // the menu (release path); past it, the pane relocates
                         // exactly like a header-bar drag. This is how a
                         // header-less pane gets dragged at all.
-                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        self.focus_pane(&pid);
                         self.header_drag = Some(HeaderDrag {
                             pane: pid,
                             start: self.cursor_px,
@@ -5052,17 +5062,18 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|(id, a, _)| (id.clone(), *a))
                     {
                         // Focus the clicked pane so splits/new-tabs target it.
-                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        self.focus_pane(&pid);
                         match action {
                             ActionKind::SplitV => {
-                                if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Vertical)
+                                if let Err(e) =
+                                    self.split_active_pane_focused(kasa_pty::SplitDir::Vertical)
                                 {
                                     eprintln!("[split-v] {e}");
                                 }
                             }
                             ActionKind::SplitH => {
-                                if let Err(e) =
-                                    self.split_active_pane(kasa_pty::SplitDir::Horizontal)
+                                if let Err(e) = self
+                                    .split_active_pane_focused(kasa_pty::SplitDir::Horizontal)
                                 {
                                     eprintln!("[split-h] {e}");
                                 }
@@ -5270,9 +5281,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                         }
-                        if let Ok(mut ws) = self.ws.lock() {
-                            ws.active_pane = Some(pid.clone());
-                        }
+                        self.focus_pane(&pid);
                         self.chrome_dirty = true;
                         window.request_redraw();
                         return;
@@ -5387,9 +5396,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // Focus the pane now; arm a tab drag. A plain press
                         // (no movement) switches to this tab on release; a
                         // drag past the threshold reorders instead.
-                        if let Ok(mut ws) = self.ws.lock() {
-                            ws.active_pane = Some(pid.clone());
-                        }
+                        self.focus_pane(&pid);
                         self.tab_drag = Some(TabDrag {
                             pane: pid.clone(),
                             from: idx,
@@ -5424,7 +5431,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.last_left_click = None;
                             return;
                         }
-                        self.ws.lock().unwrap().active_pane = Some(pane.clone());
+                        self.focus_pane(&pane);
                         self.header_drag = Some(HeaderDrag {
                             pane,
                             start: self.cursor_px,
@@ -5501,18 +5508,15 @@ impl ApplicationHandler<UserEvent> for App {
                             self.link_hit(self.cursor_px.0, self.cursor_px.1)
                         {
                             self.link_armed = Some((url, self.cursor_px));
-                            self.ws.lock().unwrap().active_pane = Some(pid);
+                            self.focus_pane(&pid);
                             return;
                         }
                         if let Some((pane_id, col, row)) =
                             self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
                         {
-                            let switched = {
-                                let mut ws = self.ws.lock().unwrap();
-                                let switched = ws.active_pane.as_deref() != Some(pane_id.as_str());
-                                ws.active_pane = Some(pane_id.clone());
-                                switched
-                            };
+                            let switched = self.ws.lock().unwrap().active_pane.as_deref()
+                                != Some(pane_id.as_str());
+                            self.focus_pane(&pane_id);
                             if switched {
                                 // Daemon owns the active pointer: its cwd poll
                                 self.selection = None;
@@ -5893,7 +5897,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 // Focus the destination pane so the moved
                                 // tab is immediately interactive.
-                                self.ws.lock().unwrap().active_pane = Some(td.drop_pane.clone());
+                                self.focus_pane(&td.drop_pane);
                             } else if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(pane) = ws.panes.get_mut(&td.pane) {
                                     let n = pane.tabs.len();
@@ -5915,6 +5919,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     pane.dirty = true;
                                 }
                             }
+                            self.handoff_ime_to_active_surface();
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
@@ -6056,16 +6061,26 @@ impl ApplicationHandler<UserEvent> for App {
                         self.ime_active = true;
                         self.in_preedit = false;
                         self.preedit.clear();
+                        self.os_ime_surface = None;
                     }
                     Ime::Disabled => {
                         self.ime_active = false;
                         self.in_preedit = false;
                         self.preedit.clear();
+                        self.os_ime_surface = None;
                     }
                     Ime::Preedit(text, _range) => {
                         // Receiving a Preedit implies the IME is
                         // active — winit doesn't always emit Enabled
                         // first on macOS, so we set both flags here.
+                        if self.ime_focus.is_none() {
+                            if let Some(surface) = self.target_surface() {
+                                self.ime_retarget(crate::ImeFocus::Pane(surface));
+                            }
+                        }
+                        if !text.is_empty() && self.os_ime_surface.is_none() {
+                            self.os_ime_surface = self.target_surface();
+                        }
                         self.ime_active = true;
                         self.in_preedit = !text.is_empty();
                         self.preedit = text;
@@ -6079,23 +6094,44 @@ impl ApplicationHandler<UserEvent> for App {
                         // everything composing in one spot, then appearing at
                         // once. Consecutive commits at the same (un-echoed) spot
                         // accumulate so a burst keeps its order.
-                        let before = self.ws.lock().ok().and_then(|ws| {
-                            ws.active_pane.clone().and_then(|id| {
-                                ws.panes
-                                    .get(&id)
-                                    .and_then(|p| p.term())
-                                    .map(|t| (t.cursor_row, t.cursor_col))
+                        let current_surface = self.target_surface();
+                        let owner_surface = self
+                            .os_ime_surface
+                            .take()
+                            .or_else(|| {
+                                self.ime_focus
+                                    .as_ref()
+                                    .and_then(crate::ImeFocus::terminal_surface)
+                                    .map(str::to_string)
+                                    .or_else(|| current_surface.clone())
+                            });
+                        let before = (owner_surface == current_surface)
+                            .then(|| {
+                                self.ws.lock().ok().and_then(|ws| {
+                                    ws.active_pane.clone().and_then(|id| {
+                                        ws.panes
+                                            .get(&id)
+                                            .and_then(|p| p.term())
+                                            .map(|t| (t.cursor_row, t.cursor_col))
+                                    })
+                                })
                             })
-                        });
+                            .flatten();
                         self.commit_overlay = match self.commit_overlay.take() {
-                            Some((prev, pos)) if Some(pos) == before => {
-                                Some((format!("{prev}{text}"), pos))
+                            Some((prev, pos, surface))
+                                if Some(pos) == before && Some(&surface) == owner_surface.as_ref() =>
+                            {
+                                Some((format!("{prev}{text}"), pos, surface))
                             }
-                            _ => before.map(|b| (text.clone(), b)),
+                            _ => before.and_then(|b| {
+                                owner_surface
+                                    .clone()
+                                    .map(|surface| (text.clone(), b, surface))
+                            }),
                         };
                         self.in_preedit = false;
                         self.preedit.clear();
-                        self.send_bytes(text.as_bytes());
+                        self.send_bytes_to_surface(owner_surface.as_deref(), text.as_bytes());
                     }
                 }
                 // Preedit is chrome, not PTY grid — flag it so the damage

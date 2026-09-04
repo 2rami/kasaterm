@@ -551,6 +551,7 @@ impl App {
                 return String::new();
             }
         };
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -828,6 +829,18 @@ impl App {
         }
         Ok(new_id)
     }
+
+    /// User-facing split. SocketSplit keeps using `split_active_pane` because
+    /// it temporarily rewrites `active_pane` while arranging background work;
+    /// only a split that really leaves focus on the new pane hands off IME.
+    pub(crate) fn split_active_pane_focused(
+        &mut self,
+        dir: kasa_pty::SplitDir,
+    ) -> Result<String> {
+        let new_id = self.split_active_pane(dir)?;
+        self.handoff_ime_to_active_surface();
+        Ok(new_id)
+    }
     /// Stage-3 in-pane tab spawn. Creates a fresh PtySession with its own
     /// pid, registers it in `pid_to_pane` so output streams find the right
     /// (outer pane, tab) pair, and appends a `PaneTab` whose `pid` points at
@@ -896,6 +909,9 @@ impl App {
                 }
                 pane.dirty = true;
             }
+        }
+        if activate {
+            self.handoff_ime_to_active_surface();
         }
         // 탭은 트리를 안 바꾸지만 pane_window 미러는 pid_to_pane 을 함께 싣는다 —
         // 안 밀어주면 다음 레이아웃 변경까지 board 가 이 학생을 화면밖으로 찍는다.
@@ -1050,6 +1066,7 @@ impl App {
                 pane.dirty = true;
             }
         }
+        self.handoff_ime_to_active_surface();
         // 이미지·마크다운 미리보기 탭은 닫아도 ⌘⇧T 로 되살릴 수 있게 경로를
         // 남긴다 — pane 닫기와 같은 스택이라 인포의 닫힘 줄에도 함께 뜬다
         // (2026-08-20 지시). PTY 탭(pid 있음)은 종전대로 기록 없이 죽는다.
@@ -1360,6 +1377,7 @@ impl App {
         self.publish_pty_layout();
         // Focus the freshly-spawned pane so the user is typing into it.
         self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.handoff_ime_to_active_surface();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1550,6 +1568,9 @@ impl App {
             for pane in ws.panes.values_mut() {
                 pane.dirty = true;
             }
+        }
+        if was_active {
+            self.handoff_ime_to_active_surface();
         }
         self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
@@ -1887,6 +1908,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 pane.dirty = true;
             }
         }
+        if was_active {
+            self.handoff_ime_to_active_surface();
+        }
         self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -1985,6 +2009,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 pane.dirty = true;
             }
         }
+        if was_active {
+            self.handoff_ime_to_active_surface();
+        }
         self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -2043,7 +2070,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             // split a fresh shell next to it, then hide the original — the new
             // shell takes over the whole window. 원본은 죽지 않고 백그라운드로
             // 물러날 뿐이라 ⌘⇧T 로 그대로 데려올 수 있다.
-            if let Ok(new_id) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+            if let Ok(new_id) = self.split_active_pane_focused(kasa_pty::SplitDir::Horizontal) {
                 if !new_id.is_empty() && new_id != pid {
                     self.hide_pane(pid);
                 }
@@ -2074,7 +2101,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 순서다 — 두 손이 다른 순서를 세면 「⌘] 로 두 번 = Ctrl+3」이 안 맞아
     /// 어느 쪽도 못 믿게 된다. 범위 밖 번호는 조용히 무시(마지막으로 접지 않는다 —
     /// 4번을 눌렀는데 3번으로 가면 오타가 이동으로 굳는다).
-    pub(crate) fn focus_pane_at(&self, idx: usize) {
+    pub(crate) fn focus_pane_at(&mut self, idx: usize) {
         let Some(tree) = self.pty_layout.as_ref() else {
             return;
         };
@@ -2082,17 +2109,15 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let Some(target) = leaves.get(idx) else {
             return;
         };
-        let mut ws = self.ws.lock().unwrap();
-        if ws.active_pane.as_deref() == Some(target.as_str()) {
+        if self.ws.lock().unwrap().active_pane.as_deref() == Some(target.as_str()) {
             return;
         }
-        ws.active_pane = Some(target.clone());
-        drop(ws);
+        self.focus_pane(target);
         if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
-    pub(crate) fn cycle_focus(&self, delta: i32) {
+    pub(crate) fn cycle_focus(&mut self, delta: i32) {
         let Some(tree) = self.pty_layout.as_ref() else {
             return;
         };
@@ -2100,8 +2125,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if leaves.len() < 2 {
             return;
         }
-        let mut ws = self.ws.lock().unwrap();
-        let cur_idx = ws
+        let cur_idx = self
+            .ws
+            .lock()
+            .unwrap()
             .active_pane
             .as_deref()
             .and_then(|id| leaves.iter().position(|l| l == id))
@@ -2109,9 +2136,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let n = leaves.len() as i32;
         let new_idx = ((cur_idx as i32 + delta).rem_euclid(n)) as usize;
         let new_active = leaves[new_idx].clone();
-        ws.active_pane = Some(new_active.clone());
-        drop(ws);
-        let _ = new_active;
+        self.focus_pane(&new_active);
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -2157,9 +2182,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
         best.map(|(id, _)| id)
     }
     /// Move keyboard focus to the adjacent pane in `dir`.
-    pub(crate) fn focus_dir(&self, dir: FocusDir) {
+    pub(crate) fn focus_dir(&mut self, dir: FocusDir) {
         if let Some(id) = self.adjacent_pane(dir) {
-            self.ws.lock().unwrap().active_pane = Some(id);
+            self.focus_pane(&id);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }

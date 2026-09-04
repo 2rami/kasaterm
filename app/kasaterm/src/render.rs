@@ -4,6 +4,17 @@ use super::*;
 pub(crate) use crate::screenread::*;
 pub(crate) use crate::sprites::*;
 
+fn terminal_preedit_for_active<'a>(
+    preedit: &'a str,
+    owner_surface: Option<&str>,
+    active_surface: Option<&str>,
+) -> &'a str {
+    match owner_surface {
+        Some(owner) if active_surface == Some(owner) => preedit,
+        _ => "",
+    }
+}
+
 /// 펼친 방의 pane 줄 하나를 그리는 데 필요한 것 전부 — 페인트 루프가 `g`
 /// (=&mut self.gpu) 를 잡고 있어 `self` 를 다시 읽을 수 없으므로 미리 뜬 스냅샷이다.
 /// 튜플로 두다 필드가 여섯이 되면서 `.3`/`.4` 가 무엇인지 호출부에서 안 읽혀 이름을 달았다.
@@ -218,10 +229,18 @@ impl App {
         // **화이트리스트로 둔다.** 크롬 쪽 입력칸(git 커밋·파일트리·방 이름·경로 검색)은
         // 전부 자기 자리에 프리에딧을 그리므로, 빠뜨린 갈래가 하나라도 있으면 같은 글자가
         // 그 칸과 터미널 커서에 이중으로 뜬다. 목록에 없는 새 필드가 생겨도 안 새게.
-        let preedit_text = match &self.ime_focus {
-            None | Some(crate::ImeFocus::Pane(_)) => self.preedit.clone(),
-            _ => String::new(),
-        };
+        let active_surface = self.target_surface();
+        let terminal_owner = self.os_ime_surface.as_deref().or_else(|| {
+            self.ime_focus
+                .as_ref()
+                .and_then(crate::ImeFocus::terminal_surface)
+        });
+        let preedit_text = terminal_preedit_for_active(
+            &self.preedit,
+            terminal_owner,
+            active_surface.as_deref(),
+        )
+        .to_string();
         let commit_overlay = self.commit_overlay.clone();
         // Active pane's font multiplier — the overlay anchors to this same
         // pane (see pane_origin below), so its cell size must match the
@@ -299,7 +318,10 @@ impl App {
                     // 동시에 되고"). 터미널 오버레이는 터미널일 때만 그린다.
                     let (display, prow, pcol) = match &commit_overlay {
                         _ if pane.term().is_none() => (String::new(), base_row, base_col),
-                        Some((ctext, before)) if *before == (raw_row, cur_col) => {
+                        Some((ctext, before, owner))
+                            if active_surface.as_deref() == Some(owner.as_str())
+                                && *before == (raw_row, cur_col) =>
+                        {
                             (format!("{ctext}{preedit_text}"), before.0 + pulled, before.1)
                         }
                         _ => (preedit_text.clone(), base_row, base_col),
@@ -13778,7 +13800,12 @@ impl App {
         // the cursor. Retire it permanently then — otherwise erasing
         // back to the commit position re-satisfies `cursor == stored`
         // and the stale "안" reappears.
-        if let Some(before) = self.commit_overlay.as_ref().map(|(_, b)| *b) {
+        if let Some((before, owner)) = self
+            .commit_overlay
+            .as_ref()
+            .map(|(_, b, owner)| (*b, owner.clone()))
+        {
+            let active_surface = self.target_surface();
             let cur = self.ws.lock().ok().and_then(|ws| {
                 ws.active_pane.clone().and_then(|id| {
                     ws.panes
@@ -13787,7 +13814,7 @@ impl App {
                         .map(|t| (t.cursor_row, t.cursor_col))
                 })
             });
-            if cur != Some(before) {
+            if active_surface.as_deref() != Some(owner.as_str()) || cur != Some(before) {
                 self.commit_overlay = None;
             }
         }
@@ -14074,6 +14101,19 @@ fn codex_header_summary(s: &crate::transcript::CodexRolloutSnapshot) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_preedit_never_follows_focus_to_another_surface() {
+        assert_eq!(
+            terminal_preedit_for_active("한", Some("%tab-a"), Some("%tab-a")),
+            "한"
+        );
+        assert_eq!(
+            terminal_preedit_for_active("한", Some("%tab-a"), Some("%tab-b")),
+            ""
+        );
+        assert_eq!(terminal_preedit_for_active("한", None, Some("%tab-b")), "");
+    }
 
     #[test]
     fn statusbar_account_name_keeps_the_domain_only_when_slots_collide() {

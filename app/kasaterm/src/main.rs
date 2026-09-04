@@ -3552,6 +3552,9 @@ enum UserEvent {
     /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
     SocketNewWindow,
     SocketFocus(String),
+    /// tmux control-mode가 보고한 실제 활성 pane 변경. 백엔드 스레드가 App 의
+    /// IME 소유권을 만질 수 없으므로 GUI 이벤트로 건너와 함께 전환한다.
+    BackendFocus(String),
     /// 데스크톱 알림 배너를 눌렀다 — 그 pane 으로 간다(`SocketFocus` 와 같은 길).
     ///
     /// `sid` 는 **알림을 쏜 시점의** claude 세션이다. surface id 는 재사용되므로,
@@ -3972,7 +3975,8 @@ enum SidebarMenuAction {
 /// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ImeFocus {
-    /// 터미널 pane(PTY) — pane id 가 곧 보낼 곳이다.
+    /// 터미널 surface(PTY id). 바깥 pane id 로 두면 같은 pane 안의 탭을
+    /// 바꿨을 때 조합 중인 마지막 음절이 새 탭으로 넘어간다.
     Pane(String),
     /// 메인창 raw 편집기(pane id).
     Editor(String),
@@ -3990,6 +3994,15 @@ pub(crate) enum ImeFocus {
     WebAddr,
     /// 웹 pane 페이지 내 찾기 칸(`App.web_find`) — WebAddr 와 같은 규칙.
     WebFind,
+}
+
+impl ImeFocus {
+    pub(crate) fn terminal_surface(&self) -> Option<&str> {
+        match self {
+            Self::Pane(surface) => Some(surface),
+            _ => None,
+        }
+    }
 }
 
 /// Action buttons at the foot of the git column. `Commit` hands the commit to
@@ -4525,14 +4538,19 @@ struct App {
     /// macOS 는 플랫폼 IME 를 꺼서(`set_ime_allowed(false)`) 읽는 쪽이 없다.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     ime_cursor_px: Option<(i32, i32)>,
-    /// (committed text, cursor-at-commit). gpu paints frames so fast it
+    /// Surface that owned the current platform-IME preedit. Windows/Linux can
+    /// deliver `Ime::Commit` after our internal pane focus has moved; keeping
+    /// this separate from `ime_focus` prevents that late commit from landing
+    /// in the newly-active terminal.
+    os_ime_surface: Option<String>,
+    /// (committed text, cursor-at-commit, owner surface). gpu paints frames so fast it
     /// draws the moment AFTER a syllable commits but BEFORE the shell's
     /// echo arrives, so the preedit ("ㄴ") briefly shows where the
     /// committed glyph ("안") will land. We overlay the committed text
     /// in front of the preedit until the echo lands (cursor advances ⇒
     /// `cursor != stored`), which is what sugarloaf got for free by
     /// being slow enough to wait for the echo.
-    commit_overlay: Option<(String, (u16, u16))>,
+    commit_overlay: Option<(String, (u16, u16), String)>,
     /// True between `Ime::Enabled` and `Ime::Disabled`. Tracks whether
     /// the OS IME owns this keyboard at all — when active, Hangul (and
     /// other CJK) keystrokes are double-delivered (KeyboardInput.text
@@ -5452,6 +5470,7 @@ impl App {
             preedit: String::new(),
             in_preedit: false,
             ime_cursor_px: None,
+            os_ime_surface: None,
             commit_overlay: None,
             ime_active: false,
             hangul: kasa_ime::Composer::new(),

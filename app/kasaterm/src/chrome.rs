@@ -1343,9 +1343,7 @@ impl App {
             self.toggle_git_col();
             return;
         }
-        if let Ok(mut w) = self.ws.lock() {
-            w.active_pane = Some(id.to_string());
-        }
+        self.focus_pane(id);
         self.git.col_pinned_cwd = None;
         if self.git.col_visible {
             self.publish_git_col_cwd();

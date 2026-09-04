@@ -804,6 +804,7 @@ impl App {
         }
         if foreign.is_none() {
             self.ws.lock().unwrap().active_pane = Some(new_id.clone());
+            self.handoff_ime_to_active_surface();
             self.resize_backend(win_cols, win_rows);
             self.publish_pty_layout();
             if let Some(w) = &self.window {
@@ -892,6 +893,7 @@ impl App {
             pane.dirty = true;
             ws.active_pane = Some(outer.clone());
         }
+        self.handoff_ime_to_active_surface();
         // 몸통이 남의 기계라도 이 창의 학생은 같은 사람 — 무명 탭 방지.
         let name = if name.is_empty() {
             kasa_mcp::remote::remote_pane_character(&m.base, remote_id, None).unwrap_or_default()
@@ -930,6 +932,7 @@ impl App {
                 }
             }
         }
+        self.handoff_ime_to_active_surface();
         true
     }
 
@@ -3296,6 +3299,7 @@ impl App {
                 }
             }
         }
+        self.handoff_ime_to_active_surface();
         self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -3632,6 +3636,7 @@ impl App {
                     ws.active_pane = Some(id);
                 }
             }
+            self.handoff_ime_to_active_surface();
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -3681,6 +3686,7 @@ impl App {
                 pane.dirty = true;
             }
         }
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -3707,9 +3713,7 @@ impl App {
         if wi != self.active_window {
             self.switch_window(wi);
         }
-        if let Ok(mut ws) = self.ws.lock() {
-            ws.active_pane = Some(pane.to_string());
-        }
+        self.activate_pane_focus(pane);
         self.chrome_dirty = true;
         true
     }
@@ -3751,6 +3755,7 @@ impl App {
                 .and_then(|l| l.leaves().first().map(|s| s.to_string()))
             {
                 self.ws.lock().unwrap().active_pane = Some(first);
+                self.handoff_ime_to_active_surface();
             }
         } else {
             self.windows.remove(idx);
@@ -4193,7 +4198,7 @@ impl App {
             self.set_toast("터미널 편집기를 못 찾았어요 — 내장 편집기로 엽니다".to_string());
             return false;
         }
-        let Ok(pane) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) else {
+        let Ok(pane) = self.split_active_pane_focused(kasa_pty::SplitDir::Horizontal) else {
             self.set_toast("pane 을 열지 못했어요 — 내장 편집기로 엽니다".to_string());
             return false;
         };
@@ -4262,6 +4267,9 @@ impl App {
                 if !as_tab {
                     ws.active_pane = Some(id);
                 }
+            }
+            if !as_tab {
+                self.handoff_ime_to_active_surface();
             }
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
@@ -4416,6 +4424,7 @@ impl App {
             return;
         }
         self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -4445,10 +4454,7 @@ impl App {
             })
         };
         if let Some(pid) = existing {
-            if let Some(wi) = self.window_of_pane(&pid) {
-                self.switch_window(wi);
-            }
-            self.ws.lock().unwrap().active_pane = Some(pid);
+            self.focus_pane(&pid);
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -4518,6 +4524,7 @@ impl App {
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
         self.pty_layout = Some(kasa_pty::PtyLayout::single(new_id.as_str()));
         self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.handoff_ime_to_active_surface();
 
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows); // PTY 없는 leaf 는 self.pty miss → no-op
@@ -6563,6 +6570,7 @@ impl App {
         let events = tmux.events.clone();
         let ws_events = self.ws.clone();
         let win_events = self.window.clone();
+        let proxy_events = self.proxy.clone();
         std::thread::spawn(move || {
             while let Ok(evt) = events.recv() {
                 match evt {
@@ -6593,13 +6601,14 @@ impl App {
                         // grabbed focus). Mirror that into our state
                         // so the cursor + active border + outgoing key
                         // target all move together.
-                        let mut ws = ws_events.lock().unwrap();
-                        if ws.active_pane.as_deref() != Some(pane_id.as_str()) {
-                            ws.active_pane = Some(pane_id);
-                            drop(ws);
-                            if let Some(w) = win_events.as_ref() {
-                                w.request_redraw();
-                            }
+                        let changed = ws_events
+                            .lock()
+                            .unwrap()
+                            .active_pane
+                            .as_deref()
+                            != Some(pane_id.as_str());
+                        if changed {
+                            let _ = proxy_events.send_event(UserEvent::BackendFocus(pane_id));
                         }
                     }
                     _ => {}
