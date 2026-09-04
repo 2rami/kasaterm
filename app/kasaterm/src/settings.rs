@@ -609,10 +609,10 @@ impl App {
             }
             SettingsAction::CursorShape(shape) => {
                 if self.cursor_shape != shape {
-                    self.cursor_shape = shape.to_string();
+                    self.cursor_shape = shape;
                     socket::write_setting(
                         "cursor_shape",
-                        serde_json::Value::String(shape.to_string()),
+                        serde_json::Value::String(shape.as_str().to_string()),
                     );
                     // 커서는 셀 그리드 위에 그려지므로 chrome 만 더럽히면 안 바뀐다.
                     self.chrome_dirty = true;
@@ -1020,7 +1020,7 @@ impl App {
                 Ok(self.tabs_on_top == (p == "top"))
             }
             "cursor-shape" => {
-                let s = pick(&["block", "bar", "underline"], id).ok_or_else(|| unknown(id))?;
+                let s = crate::cursor::CursorShape::from_str(id).ok_or_else(|| unknown(id))?;
                 self.settings_apply(SettingsAction::CursorShape(s));
                 Ok(self.cursor_shape == s)
             }
@@ -1731,7 +1731,7 @@ impl App {
                 "footer_default": self.set_footer_default,
                 "autosave_ms": self.set_autosave.map_or(0, |d| d.as_millis() as u64),
                 "tabs_on_top": self.tabs_on_top,
-                "cursor_shape": self.cursor_shape,
+                "cursor_shape": self.cursor_shape.as_str(),
                 "cursor_thickness": self.cursor_thickness,
                 "mouse_cursor": self.mouse_cursor,
                 "wheel_gain_x100": (self.set_wheel_pixel_gain * 100.0).round() as u32,

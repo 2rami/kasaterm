@@ -401,7 +401,7 @@ impl App {
             cursor_row,
             cursor_col,
             cursor_w,
-            cursor_shape: self.cursor_shape.clone(),
+            cursor_shape: self.cursor_shape,
             cursor_thickness: self.cursor_thickness,
             cursor_visible,
             cols,
@@ -466,19 +466,19 @@ impl App {
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
             let mut c = cells::iterm_cursor();
             c[3] = 140; // ~0.55 alpha
-                        // 모양은 사각형 하나의 폭·높이·y 로 전부 표현된다. bar 는 셀 왼쪽에 붙는
-                        // 세로선(Ghostty 식), underline 은 셀 바닥에 붙는 가로선이다. 굵기가 셀보다
-                        // 크면 block 과 구분이 안 되므로 셀 안으로 조인다.
-            let full_w = cw * ov.cursor_w as f32;
-            let (rx, ry, rw, rh) = match ov.cursor_shape.as_str() {
-                "bar" => (cx, cy, ov.cursor_thickness.min(full_w), ch),
-                "underline" => {
-                    let t = ov.cursor_thickness.min(ch);
-                    (cx, cy + ch - t, full_w, t)
-                }
-                _ => (cx, cy, full_w, ch),
-            };
-            g.rect(rx, ry, rw, rh, c);
+            for quad in crate::cursor::cursor_primitives(
+                ov.cursor_shape,
+                cx,
+                cy,
+                cw,
+                ch,
+                ov.cursor_w,
+                ov.cursor_thickness,
+            )
+            .as_slice()
+            {
+                g.rect(quad.x, quad.y, quad.width, quad.height, c);
+            }
         }
         // Inline autosuggestion ghost text — dim, on the same baseline as
         // committed cells, starting at the cursor and clipped to the row's

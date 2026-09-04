@@ -3992,16 +3992,13 @@ pub fn read_tab_position() -> String {
     }
 }
 
-/// 터미널 커서 모양 — `"block"`(기본) · `"bar"`(Ghostty 식 세로선) · `"underline"`.
-///
-/// 모르는 값은 block 으로 떨어뜨린다. 설정 파일을 손으로 고치다 오타가 나도 커서가
-/// 사라지지는 않아야 한다 — 커서가 없으면 어디를 치는지 알 수가 없다.
-pub fn read_cursor_shape() -> String {
-    match read_settings().get("cursor_shape").and_then(|x| x.as_str()) {
-        Some("bar") => "bar".to_string(),
-        Some("underline") => "underline".to_string(),
-        _ => "block".to_string(),
-    }
+/// 모르는 값은 block 으로 떨어뜨려 오타가 커서를 없애지 못하게 한다.
+pub fn read_cursor_shape() -> crate::cursor::CursorShape {
+    read_settings()
+        .get("cursor_shape")
+        .and_then(|x| x.as_str())
+        .and_then(crate::cursor::CursorShape::from_str)
+        .unwrap_or_default()
 }
 
 /// 터미널 셀 위에서 마우스 포인터 모양 — `"arrow"`(기본) · `"ibeam"`.
@@ -4016,8 +4013,6 @@ pub fn read_mouse_cursor() -> String {
     }
 }
 
-/// `bar`·`underline` 커서의 굵기(논리 px). block 은 셀을 통째로 채우므로 안 쓴다.
-///
 /// 1~6 으로 조인다. 0 이면 커서가 보이지 않고, 셀 폭(≈8.5px)을 넘기면 bar 가 block
 /// 과 구분이 안 된다 — 어느 쪽도 「고를 수 있는 값」이 아니다.
 pub fn read_cursor_thickness() -> f32 {
