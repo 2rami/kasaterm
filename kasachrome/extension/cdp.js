@@ -75,12 +75,19 @@ export async function attach(tabId, reason = 'command') {
   return s
 }
 
+// 붙어 있던 탭이 답하지 않아도 떼는 일 자체는 끝나야 한다 — close_tab 이 이 앞에서 멎으면
+// 정작 문제의 탭을 못 닫는다. 지역 기록은 이미 지운 뒤이므로 여기서 끊는 것은 기다림뿐이다.
+const DETACH_TIMEOUT_MS = 3000
+
 export async function detach(tabId) {
   const s = sessions.get(tabId)
   if (!s) return { detached: false }
   clearTimeout(s.idleTimer)
   sessions.delete(tabId)
-  await new Promise((resolve) => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; resolve() }))
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, DETACH_TIMEOUT_MS)
+    chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; clearTimeout(timer); resolve() })
+  })
   return { detached: true }
 }
 
@@ -291,6 +298,10 @@ export async function pressKey(tabId, key, modifiers = 0) {
   return { pressed: key }
 }
 
+// 캡처는 렌더러·컴포지터가 답해야 끝난다. 막힌 페이지에서 이것마저 무한정 기다리면 도구가 통째로
+// 침묵한다. 문서 전체를 뜨는 정상적인 한 방은 살릴 만큼 넉넉하되 도구 상한(45초)보다는 앞에 둔다.
+const CAPTURE_TIMEOUT_MS = 20000
+
 export async function screenshot(tabId, { fullPage = false, format = 'png', quality, clip } = {}) {
   await attach(tabId)
   await ensureDomain(tabId, 'Page')
@@ -306,7 +317,7 @@ export async function screenshot(tabId, { fullPage = false, format = 'png', qual
       params.clip = { x: 0, y: 0, width: cssContentSize.width, height: cssContentSize.height, scale: 1 }
     }
   }
-  const { data } = await send(tabId, 'Page.captureScreenshot', params)
+  const { data } = await send(tabId, 'Page.captureScreenshot', params, { timeoutMs: CAPTURE_TIMEOUT_MS })
   return data
 }
 
@@ -314,7 +325,7 @@ export async function screenshot(tabId, { fullPage = false, format = 'png', qual
 // 전에 직렬화돼 **`{}` 만 돌아온다**(실측). 값을 받는 쪽이 훨씬 중요하므로 replMode 를 버리고,
 // 대신 top-level await 는 async IIFE 로 감싸 되살린다. 표현식이 우선이고(대부분 `await fetch(…)`
 // 꼴이다) 그게 SyntaxError 면 statement 로 한 번 더 — 그때는 `return` 이 호출자 몫이다.
-export async function evaluate(tabId, expression, { awaitPromise = true } = {}) {
+export async function evaluate(tabId, expression, { awaitPromise = true, timeoutMs = 0 } = {}) {
   await ensureDomain(tabId, 'Runtime')
   // ⚠️`return` 도 감싸기 조건에 넣어야 한다. `await` 만 봤을 때는 await 없이 `return` 만 쓴 코드가
   // 감싸이지 않은 채 최상위로 나가 `Illegal return statement` 로 죽었다 — 값을 돌려주려면 return 을
@@ -328,7 +339,7 @@ export async function evaluate(tabId, expression, { awaitPromise = true } = {}) 
   for (const form of forms) {
     const res = await send(tabId, 'Runtime.evaluate', {
       expression: form, awaitPromise, returnByValue: true, userGesture: true,
-    })
+    }, { timeoutMs })
     last = res.exceptionDetails
     if (!last) return res.result?.value ?? res.result?.description ?? null
     // 감싸기 때문에 생긴 문법 오류만 다음 형태로 넘어간다. 진짜 런타임 오류는 그대로 알린다.

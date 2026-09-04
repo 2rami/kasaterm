@@ -15,6 +15,11 @@ const clientPane = new Map() // clientKey -> paneKey
 // tabId -> Map<paneKey, 마지막으로 만진 시각>. 순서는 먼저 잡은 순(Map 이 삽입 순을 지킨다).
 // 시각까지 담는 이유는 칩에 누구를 남길지 정하기 위해서다 — occupantsOf 를 함께 볼 것.
 const tabOwner = new Map()
+// 오버레이·커서는 꾸밈이다. 페이지가 답하지 않아도 도구는 제 일을 마쳐야 하므로 짧게 끊는다.
+// ★「조작 전에 칩을 active 로 굳혀 클릭을 안 가로채게 한다」는 보장(content.js 의
+// `:host([data-mode="active"])` 규칙)은 그대로다 — 답이 오는 페이지에서는 조작 전에 확정되고,
+// 답이 없는 페이지는 애초에 칩을 다시 그리지도 못하는 페이지라 가로챌 칩이 없다.
+const OVERLAY_TIMEOUT_MS = 1500
 const iconCache = new Map() // `${slug}:${state}:${size}` -> {imageData, dataUrl}
 const offTimers = new Map() // tabId -> timeout
 let lastActive = null
@@ -130,7 +135,7 @@ export function closeSession(client) {
     tabOwner.delete(tabId)
     clearTimeout(offTimers.get(tabId))
     offTimers.delete(tabId)
-    page(tabId, 'overlay', { state: 'off', lingerMs: 0 }).catch(() => {})
+    page(tabId, 'overlay', { state: 'off', lingerMs: 0 }, { timeoutMs: OVERLAY_TIMEOUT_MS }).catch(() => {})
   }
   sessions.delete(key)
   // 세션을 지운 뒤에 칠해야 나간 사람이 목록에 남지 않는다.
@@ -224,9 +229,10 @@ async function paintTab(tabId) {
     state: occupants.some((o) => o.busy) ? 'on' : 'idle',
     occupants,
     display: await getDisplay(),
-  }).catch((e) => {
-    // 크롬 내부 페이지와 그새 닫힌 탭은 정상적인 실패다. 나머지만 남겨 status 로 볼 수 있게 한다.
-    if (!/RESTRICTED_PAGE|No tab with id/.test(String(e.message))) note('overlay', e)
+  }, { timeoutMs: OVERLAY_TIMEOUT_MS }).catch((e) => {
+    // 크롬 내부 페이지·그새 닫힌 탭·메인 스레드가 막힌 탭은 정상적인 실패다. 나머지만 남겨
+    // status 로 볼 수 있게 한다.
+    if (!/RESTRICTED_PAGE|No tab with id|PAGE_TIMEOUT/.test(String(e.message))) note('overlay', e)
   })
 }
 
@@ -268,7 +274,7 @@ export async function showCursor(client, tabId, x, y, click = false) {
     try { avatar = (await compose(s.identity, 'plain', 64)).dataUrl } catch (e) { note('cursor-avatar', e) }
     who = { avatar, color: s.identity.headerColor || '#6BCF7F' }
   }
-  await page(tabId, 'cursor', { x, y, click, ...(who || {}) }).catch(() => {})
+  await page(tabId, 'cursor', { x, y, click, ...(who || {}) }, { timeoutMs: OVERLAY_TIMEOUT_MS }).catch(() => {})
 }
 
 // ★스크린샷에 우리 표시가 함께 찍히지 않게 한 장 동안만 걷는다. 사람에게 보여줄 그림, 하물며
@@ -277,15 +283,18 @@ export async function showCursor(client, tabId, x, y, click = false) {
 // tabOwner 가드: 오버레이는 담당이 있는 탭에만 그려져 있으므로 그 밖에서는 왕복이 낭비다.
 export async function hideForShot(tabId) {
   if (!tabOwner.has(tabId)) return false
-  const r = await page(tabId, 'shot', { hide: true }).catch(() => null)
+  const r = await page(tabId, 'shot', { hide: true }, { timeoutMs: OVERLAY_TIMEOUT_MS }).catch(() => null)
   return !!r?.hidden
 }
 
 export async function showAfterShot(tabId) {
-  await page(tabId, 'shot', { hide: false }).catch(() => {})
+  await page(tabId, 'shot', { hide: false }, { timeoutMs: OVERLAY_TIMEOUT_MS }).catch(() => {})
 }
 
-export async function markBusy(client, tabId) {
+// paint:false 는 곧 사라질 탭을 위한 것이다 — 닫기 직전에 칩을 그리는 것은 낭비인데다, 그 왕복이
+// 페이지 메인 스레드를 타므로 막힌 탭에서는 정작 그 탭을 닫지 못하게 만든다(2026-09-05 실측).
+// 자리 등록(claim)은 그대로 한다 — 닫기가 실패해도 누가 잡고 있던 탭인지는 남아야 한다.
+export async function markBusy(client, tabId, { paint = true } = {}) {
   const s = sessionOf(client)
   if (!s) return
   const key = clientPane.get(client)
@@ -303,7 +312,7 @@ export async function markBusy(client, tabId) {
     s.busy.add(tabId)
     clearTimeout(offTimers.get(tabId))
     offTimers.delete(tabId)
-    await paintTab(tabId)
+    if (paint) await paintTab(tabId)
   }
   refreshAction()
 }

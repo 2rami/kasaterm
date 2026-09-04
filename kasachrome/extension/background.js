@@ -12,6 +12,12 @@ const BRIDGE_URL = `ws://127.0.0.1:${PORT}`
 // 대상이 실행 결과로만 정해진다(new_tab). 여기서 활성 탭을 잡으면 엉뚱한 탭이 조작 중으로 켜진 채 남는다.
 const NO_TAB_TOOLS = new Set(['status', 'list_tabs', 'set_task', 'dev_reload', 'new_tab'])
 
+// 탭을 없애는 툴. 오버레이를 그리지 않고 곧장 dispatch 로 간다 — 곧 사라질 탭을 꾸미는 일이라
+// 얻는 것이 없는데, 그 왕복이 페이지 메인 스레드를 타는 탓에 **막힌 탭을 못 닫게 만든다**.
+// 2026-09-05 실측: 메인 스레드를 붙잡은 페이지에서 close_tab 이 30초 타임아웃까지 침묵했고,
+// 그때 `chrome.tabs.remove` 는 불리지도 않은 채였다(탭이 그대로 남아 있었다).
+const NO_PAINT_TOOLS = new Set(['close_tab', 'close_window'])
+
 // 툴 호출을 사람이 읽는 한 줄로 옮긴다. null 이면 기록하지 않는다 — 상태 조회까지 남기면
 // 정작 무엇을 했는지가 묻힌다. ⚠️입력값은 절대 넣지 않는다(비밀번호·검색어가 그대로 남는다).
 function describe(tool, args = {}, result = {}) {
@@ -136,7 +142,7 @@ function connect() {
     try {
       if (!NO_TAB_TOOLS.has(msg.tool)) {
         tabId = await targetTabOf(msg.args).catch(() => null)
-        if (tabId) await markBusy(msg.client, tabId)
+        if (tabId) await markBusy(msg.client, tabId, { paint: !NO_PAINT_TOOLS.has(msg.tool) })
       }
       const result = await dispatch(msg.tool, msg.args, ctx)
       // 새로 만든 탭에도 곧바로 오버레이를 띄운다 — 누가 연 창인지 바로 보이게.

@@ -3,6 +3,7 @@
 import * as cdp from './cdp.js'
 import { askBridge } from './bridge-ask.js'
 import { page, restricted } from './page.js'
+import { withTimeout } from './wait.js'
 import { lookupDevice, suggestDevices, deviceTable, uaOverrideFor } from './devices.js'
 import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
@@ -14,6 +15,33 @@ let jobSeq = 0
 // 그룹에 속하지 않은 탭의 groupId. chrome.tabGroups.TAB_GROUP_ID_NONE 과 같은 값이지만,
 // service worker 가 그 상수를 못 읽는 경우가 있어 직접 둔다.
 const NO_GROUP = -1
+
+// 확장이 **스스로** 페이지에 물어보는 값들(크기·UA·터치)의 상한. 부르는 쪽은 이런 프로브가 도는지도
+// 모르므로, 답이 없으면 그냥 모르는 채로 진행해야 한다 — 여기서 무한정 기다리면 navigate 같은
+// 도구가 자기 일을 다 끝내 놓고 프로브에서 멈춰 통째로 실패한다(2026-09-05 실측).
+// ⚠️사용자가 부르는 eval_js 는 이 값을 쓰지 않는다. 오래 걸리는 것이 정상인 자리다.
+const PROBE_TIMEOUT_MS = 5000
+
+// 탭 제거는 렌더러가 막혀 있으면 콜백이 늦게 온다. 늦은 것과 실패한 것은 다르므로 기다림을 끊고
+// 실제로 사라졌는지 확인한다 — 사라졌으면 성공이다.
+const REMOVE_TIMEOUT_MS = 5000
+
+// 앞에서 도는 eval_js 의 상한. 이 도구는 원래 「25초 넘게 걸릴 것은 background:true 로」가 규약이다 —
+// service worker 가 기다리는 동안 잠들어 값이 통째로 사라지기 때문이다. 그러니 앞선 경로에 상한을
+// 두는 것은 능력을 깎는 게 아니라 이미 있는 규약을 말로 알려주는 것이다. 상한이 없으면 메인 스레드가
+// 막힌 페이지에서 도구 상한(45초)까지 침묵하고, 부르는 쪽은 왜 안 되는지조차 못 듣는다.
+const EVAL_TIMEOUT_MS = 25000
+
+async function removeTab(id) {
+  try {
+    await withTimeout(chrome.tabs.remove(id), REMOVE_TIMEOUT_MS, 'REMOVE_SLOW')
+  } catch (e) {
+    if (String(e.message) !== 'REMOVE_SLOW') throw e
+    if (await chrome.tabs.get(id).catch(() => null)) {
+      throw new Error(`CLOSE_FAILED: 탭 ${id} 이 ${REMOVE_TIMEOUT_MS}ms 안에 닫히지 않았습니다.`)
+    }
+  }
+}
 
 // 폰뷰가 진짜로 걸렸는지 페이지에 직접 물어보는 값들. 크기만 보면 터치 관련 분기가 빠진 것을 놓친다.
 const PHONE_PROBE = `({
@@ -104,7 +132,7 @@ export async function reapplyEmulation(tabId) {
   // 리셋했는지 알 수 없고, 그 상태로 「크기는 맞으니 놔둔다」로 판단하면 반쯤 걸린 채로 남는다.
   const wasAttached = cdp.isAttached(tabId)
   if (!wasAttached) await cdp.pin(tabId, 'emulation').catch(() => {})
-  const seen = await cdp.evaluate(tabId, '({ w: innerWidth, t: navigator.maxTouchPoints })').catch(() => null)
+  const seen = await cdp.evaluate(tabId, '({ w: innerWidth, t: navigator.maxTouchPoints })', { timeoutMs: PROBE_TIMEOUT_MS }).catch(() => null)
   if (!seen) return null
   const fixed = []
   if (!wasAttached || seen.w !== cfg.width) {
@@ -120,7 +148,7 @@ export async function reapplyEmulation(tabId) {
   }
   // UA 는 페이지에서 읽어 비교하면 override 가 살아 있는지 알 수 있다. 값이 같으면 건드리지 않는다.
   if (cfg.userAgent) {
-    const ua = await cdp.evaluate(tabId, 'navigator.userAgent').catch(() => null)
+    const ua = await cdp.evaluate(tabId, 'navigator.userAgent', { timeoutMs: PROBE_TIMEOUT_MS }).catch(() => null)
     if (!wasAttached || (ua && ua !== cfg.userAgent)) {
       await cdp.raw(tabId, 'Emulation.setUserAgentOverride', cfg.uaArgs || { userAgent: cfg.userAgent }).catch(() => {})
       fixed.push('ua')
@@ -176,7 +204,7 @@ function waitForLoad(tabId, timeoutMs = 20000) {
 async function measureRoom(tabId) {
   let prev = null
   for (let i = 0; i < 8; i++) {
-    const now = await cdp.evaluate(tabId, '({ w: innerWidth, h: innerHeight })').catch(() => null)
+    const now = await cdp.evaluate(tabId, '({ w: innerWidth, h: innerHeight })', { timeoutMs: PROBE_TIMEOUT_MS }).catch(() => null)
     if (!now) return prev
     if (prev && prev.w === now.w && prev.h === now.h) return now
     prev = now
@@ -571,7 +599,7 @@ const handlers = {
     await ungroupBeforeClose([id])
     await cdp.detach(id).catch(() => {})
     forgetTab(id)
-    await chrome.tabs.remove(id)
+    await removeTab(id)
     // 방 그룹 제목은 지금 탭을 갖고 있는 학생 이름으로 만들어진다. 내가 빠졌으면 이름도 빠져야 한다.
     if (gid !== NO_GROUP) await refreshGroupTitle(gid)
     const remaining = await ownTabCount(ctx.client)
@@ -940,14 +968,21 @@ const handlers = {
         const j = (window.__ccJobs || {})[${key}]
         if (!j) return { jobId: ${key}, missing: true }
         return { jobId: ${key}, done: j.done, value: j.value, error: j.error, elapsedMs: Date.now() - j.t0 }
-      })()`)
+      })()`, { timeoutMs: PROBE_TIMEOUT_MS })
       if (r && r.missing) {
         throw new Error(`JOB_NOT_FOUND: 작업 ${jobId} 이 이 탭에 없습니다. 페이지가 이동했다면 작업도 함께 사라집니다.`)
       }
       return r
     }
 
-    if (!background) return { value: await cdp.evaluate(id, code) }
+    if (!background) {
+      try {
+        return { value: await cdp.evaluate(id, code, { timeoutMs: EVAL_TIMEOUT_MS }) }
+      } catch (e) {
+        if (!/CDP_TIMEOUT/.test(String(e.message))) throw e
+        throw new Error(`EVAL_TIMEOUT: 코드가 ${EVAL_TIMEOUT_MS}ms 안에 끝나지 않았습니다. 오래 걸리는 코드는 background:true 로 부르고 jobId 로 조회하세요. 페이지 메인 스레드가 막혀 있어도 이렇게 됩니다.`)
+      }
+    }
 
     const key = JSON.stringify(`job${++jobSeq}_${Date.now().toString(36)}`)
     return await cdp.evaluate(id, `(async () => {
@@ -959,7 +994,7 @@ const handlers = {
         (e) => { j.error = String((e && e.message) || e); j.done = true },
       )
       return { jobId: ${key}, started: true }
-    })()`)
+    })()`, { timeoutMs: EVAL_TIMEOUT_MS })
   },
 
   async watch({ tabId, console: wantConsole, network: wantNetwork }) {
@@ -1016,7 +1051,8 @@ const handlers = {
     if (ms) { await new Promise((r) => setTimeout(r, ms)); return { waited: ms } }
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
-      const { text: body } = await page(id, 'text', { maxChars: 200000 })
+      const left = timeoutMs - (Date.now() - started)
+      const { text: body } = await page(id, 'text', { maxChars: 200000 }, { timeoutMs: left })
       if (text && body.includes(text)) return { found: text, elapsed: Date.now() - started }
       if (textGone && !body.includes(textGone)) return { gone: textGone, elapsed: Date.now() - started }
       await new Promise((r) => setTimeout(r, 400))
