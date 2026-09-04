@@ -3994,11 +3994,47 @@ pub fn read_tab_position() -> String {
 
 /// 모르는 값은 block 으로 떨어뜨려 오타가 커서를 없애지 못하게 한다.
 pub fn read_cursor_shape() -> crate::cursor::CursorShape {
-    read_settings()
+    cursor_shape_from_settings(&read_settings())
+}
+
+fn cursor_shape_from_settings(settings: &serde_json::Value) -> crate::cursor::CursorShape {
+    settings
         .get("cursor_shape")
         .and_then(|x| x.as_str())
         .and_then(crate::cursor::CursorShape::from_str)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod cursor_settings_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_shape_survives_a_real_settings_file_round_trip() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kasaterm-cursor-settings-{}-{nonce}",
+            std::process::id()
+        ));
+        let path = root.join("settings.json");
+
+        for shape in crate::cursor::CursorShape::ALL {
+            let value = serde_json::json!({
+                "cursor_shape": shape.as_str(),
+                "unrelated": "kept",
+            });
+            write_settings_value_atomic_at(&path, &value).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(cursor_shape_from_settings(&saved), shape);
+            assert_eq!(saved.get("unrelated").and_then(|v| v.as_str()), Some("kept"));
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// 터미널 셀 위에서 마우스 포인터 모양 — `"arrow"`(기본) · `"ibeam"`.

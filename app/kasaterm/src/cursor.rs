@@ -96,8 +96,10 @@ pub(crate) fn cursor_primitives(
     let width = cell_width * cell_span.max(1) as f32;
     if !x.is_finite()
         || !y.is_finite()
+        || !cell_width.is_finite()
         || !width.is_finite()
         || !cell_height.is_finite()
+        || cell_width <= 0.0
         || width <= 0.0
         || cell_height <= 0.0
     {
@@ -107,7 +109,7 @@ pub(crate) fn cursor_primitives(
     match shape {
         CursorShape::Block => out.push(x, y, width, cell_height),
         CursorShape::Bar => {
-            let t = clamped_thickness(thickness, width / 2.0);
+            let t = clamped_thickness(thickness, cell_width);
             out.push(x, y, t, cell_height);
         }
         CursorShape::Underline => {
@@ -119,20 +121,21 @@ pub(crate) fn cursor_primitives(
             out.push(x, y, width, t);
         }
         CursorShape::TwinRails => {
-            let t = clamped_thickness(thickness, width / 3.0);
+            let t = clamped_thickness(thickness, cell_width / 3.0);
             out.push(x, y, t, cell_height);
             out.push(x + width - t, y, t, cell_height);
         }
         CursorShape::Frame => {
-            let t = clamped_thickness(thickness, width.min(cell_height) / 3.0);
+            let t = clamped_thickness(thickness, cell_width.min(cell_height) / 3.0);
             out.push(x, y, width, t);
             out.push(x, y + cell_height - t, width, t);
             out.push(x, y + t, t, cell_height - t * 2.0);
             out.push(x + width - t, y + t, t, cell_height - t * 2.0);
         }
         CursorShape::Brackets => {
-            let t = clamped_thickness(thickness, width.min(cell_height) / 3.0);
-            let arm = (width * 0.32).max(t).min(width / 2.0);
+            let t = clamped_thickness(thickness, cell_width.min(cell_height) / 3.0);
+            let cap = (cell_width * 0.22).max(1.0).min((width / 2.0 - t).max(0.0));
+            let arm = t + cap;
             out.push(x, y, t, cell_height);
             out.push(x + width - t, y, t, cell_height);
             out.push(x + t, y, arm - t, t);
@@ -141,7 +144,7 @@ pub(crate) fn cursor_primitives(
             out.push(x + width - arm, y + cell_height - t, arm - t, t);
         }
         CursorShape::CornerMarks => {
-            let t = clamped_thickness(thickness, width.min(cell_height) / 3.0);
+            let t = clamped_thickness(thickness, cell_width.min(cell_height) / 3.0);
             let arm_w = (width * 0.30).max(t).min(width / 2.0);
             let arm_h = (cell_height * 0.28).max(t).min(cell_height / 2.0);
             out.push(x, y, arm_w, t);
@@ -257,6 +260,53 @@ mod tests {
                     q.x >= 0.0 && q.y >= 0.0 && q.x + q.width <= 3.0 && q.y + q.height <= 4.0
                 }));
             }
+        }
+    }
+
+    #[test]
+    fn stroke_does_not_get_thicker_on_a_wide_cell() {
+        fn stroke(shape: CursorShape, span: u16) -> f32 {
+            let quads = cursor_primitives(shape, 0.0, 0.0, 8.0, 18.0, span, 99.0);
+            match shape {
+                CursorShape::Bar | CursorShape::TwinRails | CursorShape::Brackets => {
+                    quads.as_slice()[0].width
+                }
+                CursorShape::Underline
+                | CursorShape::Frame
+                | CursorShape::Topline
+                | CursorShape::CornerMarks => quads.as_slice()[0].height,
+                CursorShape::Block => unreachable!(),
+            }
+        }
+
+        for shape in CursorShape::ALL
+            .into_iter()
+            .filter(|s| *s != CursorShape::Block)
+        {
+            assert_eq!(stroke(shape, 1), stroke(shape, 2), "{}", shape.as_str());
+        }
+    }
+
+    #[test]
+    fn bar_keeps_legacy_four_and_six_pixel_widths() {
+        for span in [1, 2] {
+            for thickness in [4.0, 6.0] {
+                let quads =
+                    cursor_primitives(CursorShape::Bar, 0.0, 0.0, 8.0, 18.0, span, thickness);
+                assert_eq!(quads.as_slice()[0].width, thickness, "span={span}");
+            }
+        }
+    }
+
+    #[test]
+    fn brackets_keep_caps_after_the_stroke_is_clamped() {
+        for span in [1, 2] {
+            let brackets =
+                cursor_primitives(CursorShape::Brackets, 0.0, 0.0, 8.0, 18.0, span, 99.0);
+            let rails = cursor_primitives(CursorShape::TwinRails, 0.0, 0.0, 8.0, 18.0, span, 99.0);
+            assert_eq!(rails.as_slice().len(), 2);
+            assert_eq!(brackets.as_slice().len(), 6, "span={span}");
+            assert_ne!(brackets, rails, "span={span}");
         }
     }
 }
