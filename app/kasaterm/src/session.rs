@@ -5638,7 +5638,10 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
-                let was_agent = saved_agent(leaf).is_some();
+                // 이 함수는 복원 확인창을 그릴 때마다 불린다. 디스크 rollout 확인은
+                // 실제 저장·복원 시 한 번만 하고, 여기서는 저장본 표식과 이미 결속된
+                // session_id만 센다.
+                let was_agent = saved_agent_marker(leaf).is_some();
                 let bound_sid = leaf
                     .get("session_id")
                     .and_then(|c| c.as_str())
@@ -7633,6 +7636,22 @@ fn saved_agent_map_with(
     rec: &serde_json::Map<String, serde_json::Value>,
     mut codex_root_exists: impl FnMut(&str) -> bool,
 ) -> Option<&'static str> {
+    if let Some(kind) = saved_agent_marker_map(rec) {
+        return Some(kind);
+    }
+    let may_infer = rec.get("was_agent").is_none_or(serde_json::Value::is_null);
+    let sid = rec
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|sid| !sid.is_empty());
+    (may_infer && sid.is_some_and(&mut codex_root_exists)).then_some("codex")
+}
+
+/// 화면에 표시할 복원 수처럼 반복 호출되는 경로가 읽는 저장본 표식.
+/// 정확한 Codex rollout 확인은 재귀 파일 탐색이라 이 순수 판정에 넣지 않는다.
+fn saved_agent_marker_map(
+    rec: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static str> {
     if let Some(kind) = rec
         .get("was_agent")
         .and_then(|v| v.as_str())
@@ -7647,12 +7666,11 @@ fn saved_agent_map_with(
     {
         return Some("claude");
     }
-    let may_infer = rec.get("was_agent").is_none_or(serde_json::Value::is_null);
-    let sid = rec
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .filter(|sid| !sid.is_empty());
-    (may_infer && sid.is_some_and(&mut codex_root_exists)).then_some("codex")
+    None
+}
+
+fn saved_agent_marker(rec: &serde_json::Value) -> Option<&'static str> {
+    saved_agent_marker_map(rec.as_object()?)
 }
 
 fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
@@ -8327,7 +8345,7 @@ mod account_switch_tests {
 mod agy_restore_tests {
     use super::{
         normalize_saved_agent_map_with, restore_agent_command, saved_agent, saved_agent_map_with,
-        saved_effort, saved_model,
+        saved_agent_marker, saved_effort, saved_model,
     };
 
     /// 하네스 갈래만 보는 판 — 모델·effort 는 아래 전용 테스트가 건다.
@@ -8446,6 +8464,27 @@ mod agy_restore_tests {
         // 옛 저장본 — 이게 깨지면 판올림 한 번에 학생 pane 이 전부 셸이 된다.
         assert_eq!(saved_agent(&j(r#"{"was_claude":true}"#)), Some("claude"));
         assert_eq!(saved_agent(&j(r#"{}"#)), None);
+    }
+
+    #[test]
+    fn restore_count_uses_only_pure_saved_markers() {
+        let unknown = serde_json::json!({
+            "was_agent": null,
+            "session_id": "01a06773-4e83-7782-a251-361937f953fc"
+        });
+        assert_eq!(saved_agent_marker(&unknown), None);
+
+        let source = include_str!("session.rs");
+        let count_body = source
+            .split_once("pub(crate) fn count_claude_panes")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn count_panes")
+            .unwrap()
+            .0;
+        assert!(count_body.contains("saved_agent_marker(leaf)"));
+        assert!(!count_body.contains("saved_agent(leaf)"));
+        assert!(!count_body.contains("codex_root_rollout_for_session"));
     }
 
     #[test]
