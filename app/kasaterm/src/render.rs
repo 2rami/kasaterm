@@ -1429,11 +1429,17 @@ impl App {
                     let clip_y0 = body_top;
                     let clip_y1 = body_top + rows_now as f32 * ich;
                     for v in &t.inline_images {
+                        // 앵커는 **뷰포트** 좌표다. 화면을 아래로 당긴 pane 은 그림도
+                        // 같은 만큼 내려야 글 흐름과 안 어긋난다 — 커서·조합 오버레이가
+                        // `pulled` 를 더하는 것과 같은 이유다. classic claude 는 OSC
+                        // 1337 을 안 써서 지금은 셸 pane 만 이 길로 오지만(그쪽은 당김이
+                        // 없다), 보정을 빼 두면 나중에 조용히 어긋난다.
+                        let vrow = v.row as usize + pulled;
                         inline_slots.push((
                             format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
                             v.path.clone(),
                             body_left + v.col as f32 * icw,
-                            body_top + v.row as f32 * ich,
+                            body_top + vrow as f32 * ich,
                             v.cols as f32 * icw,
                             v.rows as f32 * ich,
                             clip_y0,

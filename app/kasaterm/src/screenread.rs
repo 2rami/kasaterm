@@ -2043,26 +2043,62 @@ pub(crate) struct ImageBlock {
 /// 하나로 접어서, 빈 줄로 만든 자리는 화면에 남지 않는다.
 pub(crate) fn find_image_blocks(rows: &[Vec<GridCell>]) -> Vec<ImageBlock> {
     const HEAD: &str = "[[img:";
+    // 표식 하나가 걸칠 수 있는 최대 줄 수. 경로가 길면 claude 가 접어서 그리는데,
+    // 한 줄 안에서만 `]]` 를 찾던 종전 코드는 그때 **통째로 실패**했다 — 그림이 안
+    // 뜨고 표식 글자만 화면에 남는다(2026-09-05 지적: "이미지넣는거 깨지는곳이 너무
+    // 많다", 실측: scratchpad 경로가 두 줄로 접혀 파싱이 안 됐다). 화면 폭이 좁을수록
+    // 많이 접히므로 여유를 둔다.
+    const MAX_JOIN: usize = 6;
     let mut out = Vec::new();
-    for (r, row) in rows.iter().enumerate() {
+    let mut r = 0usize;
+    while r < rows.len() {
         // 값싼 프리체크 — 대부분의 행에는 `[[` 가 없고, 여긴 매 프레임 모든
         // pane 의 모든 행을 지난다. 문자열을 만드는 건 그 다음이다.
-        if !row.windows(2).any(|w| w[0].ch == '[' && w[1].ch == '[') {
+        if !rows[r].windows(2).any(|w| w[0].ch == '[' && w[1].ch == '[') {
+            r += 1;
             continue;
         }
-        let (text, _) = row_text_cells(row);
-        let Some(at) = text.find(HEAD) else { continue };
-        let Some(end) = text[at..].find("]]") else { continue };
+        let (mut text, _) = row_text_cells(&rows[r]);
+        let Some(at) = text.find(HEAD) else {
+            r += 1;
+            continue;
+        };
+        // 한 줄에서 안 끝나면 다음 줄을 이어 붙인다. 이어지는 줄은 claude 가 두 칸
+        // 들여쓰고, 앞 줄은 화면 폭에서 끊겨 꼬리 공백이 남을 수 있다 — 양쪽을 걷어야
+        // 경로 한가운데 공백이 끼지 않는다.
+        let mut span = 1usize;
+        while !text[at..].contains("]]") && span < MAX_JOIN && r + span < rows.len() {
+            while text.ends_with(' ') {
+                text.pop();
+            }
+            let (next, _) = row_text_cells(&rows[r + span]);
+            text.push_str(next.trim_start());
+            span += 1;
+        }
+        let Some(end) = text[at..].find("]]") else {
+            r += 1;
+            continue;
+        };
         let body = &text[at + HEAD.len()..at + end];
         // 경로에 `:` 가 들어갈 수 있으니 **마지막** 콜론에서 가른다.
-        let Some(cut) = body.rfind(':') else { continue };
-        let Ok(n) = body[cut + 1..].trim().parse::<usize>() else { continue };
+        let Some(cut) = body.rfind(':') else {
+            r += 1;
+            continue;
+        };
+        let Ok(n) = body[cut + 1..].trim().parse::<usize>() else {
+            r += 1;
+            continue;
+        };
         let path = body[..cut].trim();
         // 0 행은 자리가 없다는 뜻이라 그릴 데가 없고, 상한은 폭주 방지다.
         if path.is_empty() || n == 0 || n > 200 {
+            r += 1;
             continue;
         }
         out.push(ImageBlock { row: r, path: path.to_string(), rows: n });
+        // 표식이 걸친 줄을 통째로 건너뛴다 — 이어 붙인 줄에서 같은 표식을 또 잡으면
+        // 그림이 두 장 겹쳐 뜬다.
+        r += span;
     }
     out
 }
@@ -7002,6 +7038,44 @@ mod image_block_tests {
         );
     }
 
+    // 경로가 길면 claude 가 스스로 접는다. 한 줄 안에서만 `]]` 를 찾던 종전 코드는
+    // 그때 통째로 실패해, 그림이 안 뜨고 표식 글자만 화면에 남았다(2026-09-05 실측 —
+    // scratchpad 경로가 딱 그 길이라 두 줄로 접혔다).
+    #[test]
+    fn joins_a_marker_wrapped_across_rows() {
+        let g = grid(&[
+            "⏺ [[img:/private/tmp/claude-501/-Users-kasa-Desktop-mome",
+            "  womo/scratchpad/win.png:12]]",
+        ]);
+        assert_eq!(
+            find_image_blocks(&g),
+            vec![ImageBlock {
+                row: 0,
+                path: "/private/tmp/claude-501/-Users-kasa-Desktop-momewomo/scratchpad/win.png"
+                    .into(),
+                rows: 12,
+            }]
+        );
+    }
+
+    // 앞 줄이 화면 폭에서 끊겨 꼬리 공백이 남아도 경로 한가운데 공백이 안 낀다.
+    #[test]
+    fn joins_without_leaving_padding_in_the_path() {
+        let g = grid(&["[[img:/tmp/a   ", "   /b.png:4]]"]);
+        assert_eq!(find_image_blocks(&g)[0].path, "/tmp/a/b.png");
+    }
+
+    // 이어 붙인 줄에서 같은 표식을 또 잡으면 그림이 두 장 겹쳐 뜬다.
+    #[test]
+    fn counts_a_wrapped_marker_once() {
+        let g = grid(&[
+            "[[img:/tmp/very/long/path/that/wraps",
+            "  /deeper/x.png:5]]",
+            "본문",
+        ]);
+        assert_eq!(find_image_blocks(&g).len(), 1);
+    }
+
     // 경로에 콜론이 들어가도 마지막 콜론이 행 수를 가른다.
     #[test]
     fn splits_on_the_last_colon() {
@@ -7171,6 +7245,7 @@ mod peer_label_fallback_tests {
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod pinned_input_tests {
     use super::*;
