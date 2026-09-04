@@ -340,7 +340,7 @@ kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude\n'
 ⚠️ **send 를 두 번 연달아 보내지 마라 — 둘째가 첫 명령줄 안으로 빨려 들어간다.** 부팅 커맨드를 보낸 직후 브리프를 또 보내면, 셸이 아직 `claude` 를 exec 하기 전이라 둘째 텍스트를 **같은 명령줄의 일부로** 읽는다(실측 2026-08-05: 모델명이 `claude-opus-5[1m]지금[1m]` 이 되어 부팅 실패, 프롬프트엔 「몇」 한 글자만 남음). 그래서 부팅은 **한 번의 send 로 끝내고**, 할 말은 전부 SendMessage 로 한다 — 인박스는 셸 명령줄과 무관한 경로라 이 함정 자체가 없다.
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
-- **가벼운 작업의 기본은 glm·kimi 학생**(사내 OpenGateway, 키 `~/.config/opengateway.key`) — 정찰·검색·스샷 촬영·기계적 반복처럼 판단보다 손이 많은 일. Claude 로 띄울지부터 고민하지 말고 그냥 여기로 보낸다. 부팅 커맨드만 바꾸면 된다:
+- **가벼운 작업의 기본은 glm·kimi 학생**(사내 OpenGateway, 키 `~/.config/opengateway.key`) — 정찰·검색·기계적 반복처럼 판단보다 손이 많은 일. ⚠️**그림 판정은 빼라** — 하네스를 거친 glm·kimi 는 이미지를 못 받는다(2026-09-05 실측). 스샷은 `askimg <파일> "질문"` 으로. Claude 로 띄울지부터 고민하지 말고 그냥 여기로 보낸다. 부팅 커맨드만 바꾸면 된다:
   ```bash
   kasaterm-cli send --surface "$S" $'cd /path/to/repo && glm claude --dangerously-skip-permissions\n'
   ```
