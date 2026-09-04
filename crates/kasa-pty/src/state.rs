@@ -486,27 +486,30 @@ impl PtySession {
             env!("CARGO_PKG_VERSION"),
         );
         cmd.env("COLORTERM", "truecolor");
-        // claude 의 렌더러는 **건드리지 않는다** — no-flicker(대체화면)로 둔다.
+        // claude 는 **classic(본화면)이 기본이다**(2026-09-04 지시: "클래식을 기본으로
+        // 해줘").
         //
-        // 두 길의 맞바꿈은 이렇다. classic 으로 돌리면 대화가 이 터미널의 스크롤백에
-        // 쌓여, 「맨 위 질문 고정」 띠를 절대 줄 번호로 정확히 그릴 수 있다
-        // (`turnjump.rs`). no-flicker 는 스크롤이 claude 안에서만 일어나 터미널이
-        // 위치를 몰라, 그 띠를 화면 글자로 짐작해야 한다(`find_sticky_prompt`).
-        // 대신 no-flicker 는 다시 그릴 때 깜빡이지 않고 입력창이 늘 제자리에 있다.
+        // 두 길의 맞바꿈은 이렇다. classic 은 대화가 이 터미널의 스크롤백에 쌓여,
+        // 「맨 위 질문 고정」 띠를 절대 줄 번호로 정확히 그릴 수 있다(`turnjump.rs`).
+        // no-flicker(대체화면)는 스크롤이 claude 안에서만 일어나 터미널이 위치를
+        // 몰라, 그 띠를 화면 글자로 짐작해야 한다(`find_sticky_prompt`) — 그쪽은
+        // claude 가 "Jump to bottom" 안내를 그릴 때만 열리는 게이트에 매달려 있어
+        // 「됐다 안 됐다」로 보인다.
         //
-        // 2026-08-30~31 사이에 이 값을 세 번 뒤집었다(강제 → 해제 → 강제 → 해제).
-        // 마지막이 정본이다 — 띠의 정확도보다 화면 안정성을 고른다(2026-08-31 지시:
-        // "켜고싶어"). **다음에 「띠가 엉뚱한 질문을 문다」는 얘기가 나와도 이 값을
-        // 되돌리지 마라.** 그 길은 이미 두 번 가 봤고, 되돌리면 그때마다 입력창과
-        // 깜빡임을 다시 잃는다. 고칠 곳은 짐작하는 쪽(`find_sticky_prompt` ·
-        // `pick_scrolled_past_prompt`)이다.
+        // ⚠️ **이 값은 2026-08-30~31 에 세 번 뒤집혔다**(강제 → 해제 → 강제 → 해제).
+        // 그때 해제로 굳힌 이유는 classic 이 깜빡이고 **입력창이 바닥에서 떠오르는**
+        // 것이었다. 그 두 대가는 그 뒤에 갚았다 — 스크롤 중에도 입력창을 바닥에
+        // 붙잡는 보조(`render::pinned_input_rows`)와, classic 이 화면 끝에 남기던
+        // 여백을 걷는 당김(`render::bottom_pull_rows`, 2026-09-03)이다. 그러니
+        // **「띠가 엉뚱한 질문을 문다」는 이유로 여기를 되돌리지 마라** — 그건 여전히
+        // 짐작하는 쪽(`find_sticky_prompt` · `pick_scrolled_past_prompt`)을 고칠 일이다.
         //
-        // classic 을 보고 싶으면 `KASATERM_CLAUDE_CLASSIC=1`. 그러면 정확한 띠와
-        // 함께, 스크롤을 올려도 입력창을 맨 아래에 붙잡는 보조(render.rs 의
-        // `pinned_input_rows`)가 깨어난다 — 08-31 실측으로 둘 다 확인했다.
-        // `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` 을 손으로 정해 뒀으면 그 값이 이긴다.
+        // 옛 화면이 필요하면 `KASATERM_CLAUDE_CLASSIC=0`(또는 창에서 `claude
+        // noflicker`). `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` 을 손으로 정해 뒀으면
+        // 그 값이 이긴다 — 셸 단어 둘 다 그 길로 간다.
         let classic_on = std::env::var("KASATERM_CLAUDE_CLASSIC")
-            .is_ok_and(|v| matches!(v.trim(), "1" | "on" | "true"));
+            .map(|v| !matches!(v.trim(), "0" | "off" | "false"))
+            .unwrap_or(true);
         if classic_on && std::env::var_os("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").is_none() {
             cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
         }

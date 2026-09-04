@@ -7188,6 +7188,7 @@ for _a in \"$@\"; do\n\
     mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
     local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1 ;;\n\
     classic) CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_classic=1 ;;\n\
+    noflicker) unset CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_noflicker=1 ;;\n\
     tasks) CLAUDE_CODE_ENABLE_TODO_TOOLS=1; export CLAUDE_CODE_ENABLE_TODO_TOOLS; _drop_tasks=1 ;;\n\
     -*) ;;\n\
     *) break ;;\n\
@@ -7196,21 +7197,27 @@ done\n\
 # `claude local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(2026-09-02 「로컬에서\n\
 # 실행하려면 어떻게?」). env 한 줄(KASATERM_NO_HOME=1 claude)의 사람용 표기다. 그 단어는\n\
 # claude 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.\n\
-# `claude classic` — 이 창의 claude 만 **본화면 렌더러**로 연다(2026-09-03 지시:\n\
-# 「선택할수있게하자」). 그러면 대화가 이 터미널의 스크롤백에 쌓여, 올려다볼 때\n\
+# `claude classic` — 본화면 렌더러. **이제 기본이라 안 쳐도 된다**(2026-09-04 지시:\n\
+# 「클래식을 기본으로 해줘」). 대화가 이 터미널의 스크롤백에 쌓여, 올려다볼 때\n\
 # 붙는 질문 띠가 codex 와 같은 길로 간다 — 절대 줄 번호를 알아 한 번에 그 자리에\n\
-# 선다. 대가는 깜빡임과 입력창 하단 고정을 잃는 것이라, 앱 전체가 아니라 **창마다**\n\
-# 고르게 둔다. 두 단어를 함께 쓸 수 있다(`claude local classic`).\n\
+# 선다. 단어를 남겨 둔 것은 `KASATERM_CLAUDE_CLASSIC=0` 으로 꺼 둔 판에서 이 창\n\
+# 하나만 되살리는 길이 필요해서다.\n\
+# `claude noflicker` — 그 반대. 이 창의 claude 만 **대체화면**으로 되돌린다. 깜빡임이\n\
+# 없는 대신 스크롤이 claude 안에서 일어나 터미널이 위치를 몰라, 질문 띠가 화면\n\
+# 글자를 보고 짐작하는 부실한 길로 간다. 변수를 `0` 으로 두지 않고 **지우는** 이유는\n\
+# claude 가 그 값을 존재만으로 읽을지 값으로 읽을지 우리가 정하지 않기 때문이다.\n\
+# 두 단어 모두 다른 것과 함께 쓸 수 있다(`claude local noflicker`).\n\
 # `claude tasks` — 이 창의 claude 에만 **태스크 목록 도구**를 얹는다. 최신 모델은\n\
 # 그 다섯 도구(TaskCreate/Get/List/Update·TodoWrite)를 기본으로 안 싣는다 — 체크리스트\n\
 # 없이도 다단계 작업을 놓치지 않고, 도구 정의와 리마인더가 매 턴 컨텍스트를 먹기\n\
 # 때문이다(claude-code 2.1.233~). 그래서 켜는 것도 창마다 고른다.\n\
-if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ] || [ -n \"$_drop_tasks\" ]; then\n\
+if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ] || [ -n \"$_drop_noflicker\" ] || [ -n \"$_drop_tasks\" ]; then\n\
   _n=$#; _i=0\n\
   while [ $_i -lt $_n ]; do\n\
     _a=$1; shift\n\
     if [ \"$_a\" = local ] && [ -n \"$_drop_local\" ]; then _drop_local=\"\";\n\
     elif [ \"$_a\" = classic ] && [ -n \"$_drop_classic\" ]; then _drop_classic=\"\";\n\
+    elif [ \"$_a\" = noflicker ] && [ -n \"$_drop_noflicker\" ]; then _drop_noflicker=\"\";\n\
     elif [ \"$_a\" = tasks ] && [ -n \"$_drop_tasks\" ]; then _drop_tasks=\"\";\n\
     else set -- \"$@\" \"$_a\"; fi\n\
     _i=$((_i+1))\n\
