@@ -189,21 +189,42 @@ impl App {
         // 하네스 일반의 성질이 아니다. codex 는 대화가 짧을 때 화면 아래를 통째로
         // 비워 두는데(2026-09-03 리그 실측), 거기서 위를 끌어다 채우면 그 앱이
         // 의도한 레이아웃을 터미널이 제멋대로 밀어 올리는 꼴이 된다.
+        // 「하단바 위치가 이상하다」를 잡는 계측(2026-09-05). 어느 게이트에서 멈추는지,
+        // 여백을 몇 줄로 쟀는지가 화면이 얼마나 당겨지는지를 그대로 정한다.
+        let dbg = std::env::var_os("KASATERM_VIEWSHIFT_DEBUG").is_some();
         if term.alt_screen
             || !matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude))
         {
+            if dbg {
+                eprintln!(
+                    "[bottompull] pane={tab_pid} 멈춤: alt={} agent={:?}",
+                    term.alt_screen,
+                    sess.active_agent()
+                );
+            }
             return Vec::new();
         }
         // 빈 줄은 **살아 있는 화면**에서 잰다 — 뷰포트가 아니라. 스크롤을 올리면
         // 뷰포트 꼬리는 지나간 대화라 빈 줄이 없고, 그러면 바닥에서만 당겨져
         // 스크롤을 오갈 때 화면이 한 줄씩 튄다. claude 가 남기는 여백은 화면의
         // 성질이므로 스크롤 위치와 무관하게 같은 값이어야 한다.
-        let blank = crate::screenread::blank_tail(&sess.live_tail_rows(BOTTOM_PULL_MAX + 1))
-            .min(BOTTOM_PULL_MAX);
+        // 상한을 넘겨 재 본다 — 실제 여백이 상한보다 크면 그만큼이 화면에 남는데,
+        // `min` 뒤의 값만 보면 그 사실이 안 보인다.
+        let raw = crate::screenread::blank_tail(&sess.live_tail_rows(BOTTOM_PULL_MAX + 4));
+        let blank = raw.min(BOTTOM_PULL_MAX);
         if blank == 0 || blank >= rows_now {
+            if dbg {
+                eprintln!("[bottompull] pane={tab_pid} 멈춤: raw={raw} blank={blank} rows_now={rows_now}");
+            }
             return Vec::new();
         }
         let above = sess.rows_above(blank);
+        if dbg {
+            eprintln!(
+                "[bottompull] pane={tab_pid} raw={raw} blank={blank} above={} rows_now={rows_now}",
+                above.len()
+            );
+        }
         if above.len() == blank {
             above
         } else {
@@ -977,6 +998,9 @@ impl App {
         // every pane so in-pane WebViews and other overlays can be snapped
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        // pane 마다 화면을 어떻게 옮겨 그렸는지. 락 안에서는 `self` 가 불변이라
+        // 여기 모아 두었다가 블록이 끝난 뒤 한 번에 옮긴다(body_rects 와 같은 이유).
+        let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Vec::new();
         let (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes): (
             Vec<PaneSlot>,
             Vec<HeaderInfo>,
@@ -1267,6 +1291,8 @@ impl App {
                 // classic 을 켠 pane 에서만 깨어난다.
                 // classic claude 가 화면 밑에 남긴 빈 줄만큼 화면을 아래로 당겨,
                 // 상태줄이 pane 바닥에 붙게 한다 — 근거는 `bottom_pull_rows`.
+                // 이 pane 을 어떻게 옮겨 그렸는지 — 복사가 되짚을 유일한 기록.
+                let mut view_shift = crate::PaneViewShift::default();
                 let pulled = match pane.term() {
                     Some(t) => {
                         let above = self.bottom_pull_rows(tab_pid.as_str(), t, rows_now);
@@ -1276,7 +1302,11 @@ impl App {
                             // rows_above 는 가까운 순([0] = 뷰포트 위 1줄)이라, 앞에
                             // 차례로 밀어 넣으면 먼 줄이 저절로 위로 간다.
                             for r in above {
-                                composed.insert(0, normalise(&r));
+                                let row = normalise(&r);
+                                // composed 와 **같은 순서**로 쌓는다 — 둘 다 앞에
+                                // 밀어 넣어야 화면 맨 위 행이 서로 같은 줄을 가리킨다.
+                                view_shift.above.insert(0, row.clone());
+                                composed.insert(0, row);
                             }
                             n
                         } else {
@@ -1305,10 +1335,33 @@ impl App {
                                 let h = (live.len() - top).min(composed.len());
                                 let base = composed.len() - h;
                                 composed[base..].clone_from_slice(&live[live.len() - h..]);
+                                view_shift.pinned = live[live.len() - h..].to_vec();
                             }
                         }
                     }
                 }
+                view_shift.rows = composed.len();
+                // 「하단바 위치가 이상하다」를 잡는 계측(2026-09-05). 화면이 몇 줄
+                // 당겨졌는지는 프레임마다 다시 재는 값이라, 그 값이 흔들리면 입력창과
+                // 상태줄이 함께 오르내린다. **바뀔 때만** 찍는다 — 매 프레임 찍으면
+                // 초당 수십 줄이라 로그가 못 쓰게 된다.
+                if std::env::var_os("KASATERM_VIEWSHIFT_DEBUG").is_some() {
+                    let prev = self.pane_view_shift.get(id.as_str());
+                    let changed = prev.map_or(true, |p| {
+                        p.above.len() != view_shift.above.len()
+                            || p.pinned.len() != view_shift.pinned.len()
+                            || p.rows != view_shift.rows
+                    });
+                    if changed {
+                        eprintln!(
+                            "[viewshift] pane={id} pulled={} pinned={} rows={} claude={runs_claude}",
+                            view_shift.above.len(),
+                            view_shift.pinned.len(),
+                            view_shift.rows,
+                        );
+                    }
+                }
+                view_shifts.push((id.clone(), view_shift));
                 // Codex 프로세스 판정은 부팅 직후 statusline보다 한두 프레임 늦을 수
                 // 있다. 엄격한 `model effort · … · Context N%` 문법을
                 // 재작성 함수가 자체 검증하므로 모든 pane에 시도하고, Claude·셸 등
@@ -3024,6 +3077,9 @@ impl App {
                 mirror_claude_panes,
             )
         };
+        // 이 프레임이 화면을 어떻게 옮겼는지 확정. 통째로 갈아끼워야 사라진 pane 의
+        // 옛 옮김이 남아, 닫힌 창의 좌표로 복사가 어긋나는 일이 없다.
+        self.pane_view_shift = view_shifts.into_iter().collect();
         // 메뉴에는 계정별 네트워크 조회값이 아니라, 현재 창(없으면 같은 방의 최근
         // 창)이 rollout에 직접 남긴 값을 쓴다. 그래서 다른 슬롯 수치를 현재 선택할
         // 계정의 한도로 잘못 읽히게 하지 않는다.

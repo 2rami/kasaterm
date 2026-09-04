@@ -1619,9 +1619,22 @@ impl App {
         };
         let rows = {
             let ws = self.ws.lock().unwrap();
-            match ws.active().and_then(|p| p.term()) {
+            let base = match ws.active().and_then(|p| p.term()) {
                 Some(t) => t.cells.clone(),
                 None => return,
+            };
+            // 화면은 렌더가 **옮겨 그린 것**이라 원본 글자판과 행이 어긋난다. 드래그
+            // 좌표는 화면 기준이므로 같은 옮김을 되짚어야 고른 자리의 글자가 담긴다 —
+            // 원본을 그대로 쓰면 당긴 줄 수만큼 아래 글자가 복사된다(2026-09-05 지적:
+            // "복사가 이상하게 되고"). classic claude 가 기본이 된 뒤로 이 옮김이
+            // 모든 claude pane 에서 돌아 눈에 띄게 됐다.
+            match ws
+                .active_pane
+                .as_deref()
+                .and_then(|id| self.pane_view_shift.get(id))
+            {
+                Some(shift) => shift.compose(&base),
+                None => base,
             }
         };
         let text = extract_selection(&rows, sel);

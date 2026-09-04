@@ -1109,6 +1109,52 @@ fn scrollback_lines(pane: &PaneState) -> Vec<String> {
 
 /// Pull the selected text out of the visible row grid. Joined with `\n`,
 /// trailing spaces trimmed per row. Mirrors kasaterm::extract_selection.
+/// 렌더가 뷰포트 원본(`term.cells`) 위에 얹는 **자리 옮김**. 화면에서 고른 글자와
+/// 클립보드에 담기는 글자가 같으려면 복사도 이 옮김을 되짚어야 한다 — 원본만 보면
+/// 당긴 줄 수만큼 어긋난 글자가 담긴다(2026-09-05 지적: "복사가 이상하게 되고").
+///
+/// classic claude 가 기본이 되면서(2026-09-04) 이 옮김이 **모든 claude pane** 에서
+/// 돌게 됐다. 전에는 손으로 classic 을 켠 창에서만 깨어나 눈에 안 띄었다.
+///
+/// 화면 한 장을 통째로 캐시하지 않고 **옮긴 조각만** 담는다: pane 하나가 수천 셀이라
+/// 프레임마다 복사하면 값이 크고, 어긋나는 자리는 위아래 끝 몇 줄뿐이다.
+#[derive(Default, Clone)]
+struct PaneViewShift {
+    /// classic claude 가 화면 끝에 남긴 여백만큼 위(스크롤백)에서 당겨 온 줄.
+    /// 화면 맨 위 `above.len()` 행이 이것이고, 그 아래부터 원본이 같은 수만큼 밀린다.
+    above: Vec<Vec<GridCell>>,
+    /// 스크롤 중 바닥에 붙잡아 둔 입력창 — 화면 맨 아래 `pinned.len()` 행.
+    /// 살아 있는 화면에서 떠 온 것이라 지나간 대화를 담은 뷰포트에는 없다.
+    pinned: Vec<Vec<GridCell>>,
+    /// 재구성 뒤 화면 행 수. 바닥에서 몇 번째 행인지 세는 기준이라 원본 길이로
+    /// 대신하면 안 된다 — 원본이 화면보다 길 수 있다(`take(rows_now)`).
+    rows: usize,
+}
+
+impl PaneViewShift {
+    /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
+    ///
+    /// 옮김이 없으면(평범한 pane·대체화면 claude) 원본을 그대로 돌려주므로,
+    /// 이 경로가 붙기 전과 동작이 같다.
+    fn compose(&self, base: &[Vec<GridCell>]) -> Vec<Vec<GridCell>> {
+        if self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty()) {
+            return base.to_vec();
+        }
+        let pin_start = self.rows.saturating_sub(self.pinned.len());
+        (0..self.rows)
+            .map(|r| {
+                if r < self.above.len() {
+                    self.above[r].clone()
+                } else if r >= pin_start {
+                    self.pinned[r - pin_start].clone()
+                } else {
+                    base.get(r - self.above.len()).cloned().unwrap_or_default()
+                }
+            })
+            .collect()
+    }
+}
+
 fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
     let (start, end) = normalise(sel);
     let mut out = String::new();
@@ -5301,6 +5347,10 @@ struct App {
     /// the renderer + resize path use). Absent = 1.0. Keyed here rather than
     /// on PaneState because split leaves don't all get a ws.panes entry.
     pane_font_scales: std::collections::HashMap<String, f32>,
+    /// 렌더가 pane 마다 얹은 자리 옮김(BSP leaf id 로 키). 복사·선택이 화면과
+    /// 같은 글자를 보게 하는 유일한 창구다 — 렌더 파이프라인 한복판에서 만들어지는
+    /// 화면 행을 복사 시점에 되짚을 다른 길이 없다.
+    pane_view_shift: std::collections::HashMap<String, PaneViewShift>,
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
@@ -5748,6 +5798,7 @@ impl App {
             ui_zoom: socket::read_ui_zoom().unwrap_or(1.0),
             ui_zoom_unset: socket::read_ui_zoom().is_none(),
             pane_font_scales: std::collections::HashMap::new(),
+            pane_view_shift: std::collections::HashMap::new(),
             proxy,
             inline_web: None,
             account_switch_confirm: None,
@@ -8238,6 +8289,64 @@ mod tests {
         }
         row.truncate(width);
         row
+    }
+
+    /// 화면 행 하나를 통째로 고르는 선택.
+    fn whole_row(r: u16, width: usize) -> Selection {
+        Selection {
+            anchor: (0, r),
+            end: (width as u16 - 1, r),
+        }
+    }
+
+    /// 위에서 줄을 당겨 그린 pane 에서, 복사가 **화면에 보이는 그 줄**을 담는다.
+    ///
+    /// classic claude 는 화면 끝에 여백을 남기고, 렌더는 그만큼 스크롤백에서 당겨
+    /// 화면을 아래로 민다(`bottom_pull_rows`). 원본 글자판을 그대로 복사하면 그
+    /// 당긴 줄 수만큼 **아래 글자**가 담긴다(2026-09-05: "복사가 이상하게 되고").
+    #[test]
+    fn copy_follows_pulled_rows() {
+        const W: usize = 8;
+        let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
+        let shift = PaneViewShift {
+            above: vec![grid_row("a0", W)],
+            pinned: Vec::new(),
+            rows: 5,
+        };
+        let view = shift.compose(&base);
+        // 화면 = [a0, b0, b1, b2, b3] — 원본 마지막 줄(b4)은 잘려 나갔다.
+        assert_eq!(extract_selection(&view, whole_row(0, W)), "a0");
+        assert_eq!(extract_selection(&view, whole_row(2, W)), "b1");
+        // 옮김을 안 되짚으면 한 줄 아래를 집는다 — 이게 고치기 전 동작이다.
+        assert_eq!(extract_selection(&base, whole_row(2, W)), "b2");
+    }
+
+    /// 스크롤 중 바닥에 붙잡아 둔 입력창을 복사하면 **붙잡힌 그 글자**가 담긴다.
+    ///
+    /// 뷰포트 꼬리는 지나간 대화라, 원본을 보면 화면에 없는 옛 줄이 복사된다.
+    #[test]
+    fn copy_follows_pinned_input() {
+        const W: usize = 8;
+        let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
+        let shift = PaneViewShift {
+            above: Vec::new(),
+            pinned: vec![grid_row("p0", W), grid_row("p1", W)],
+            rows: 5,
+        };
+        let view = shift.compose(&base);
+        // 화면 = [b0, b1, b2, p0, p1]
+        assert_eq!(extract_selection(&view, whole_row(2, W)), "b2");
+        assert_eq!(extract_selection(&view, whole_row(4, W)), "p1");
+    }
+
+    /// 옮김이 없는 pane(평범한 셸·대체화면 claude)은 원본 그대로 — 이 경로가
+    /// 붙기 전과 한 글자도 다르지 않아야 한다.
+    #[test]
+    fn copy_without_shift_is_untouched() {
+        const W: usize = 8;
+        let base: Vec<Vec<GridCell>> = (0..3).map(|i| grid_row(&format!("b{i}"), W)).collect();
+        let view = PaneViewShift::default().compose(&base);
+        assert_eq!(view, base);
     }
 
     /// 올려다보는 화면의 **맨 윗줄에 본문이 있어도** 띠가 붙는다.
