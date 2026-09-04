@@ -15,9 +15,17 @@ class AppLink {
   static AppLink? parse(Uri? u) {
     if (u == null) return null;
     final q = u.queryParameters;
-    if (u.scheme != scheme && !q.containsKey('pane') && !q.containsKey('root')) return null;
+    if (u.scheme != scheme &&
+        !q.containsKey('pane') &&
+        !q.containsKey('root')) {
+      return null;
+    }
     String? nz(String? s) => (s == null || s.isEmpty) ? null : s;
-    return AppLink(root: nz(q['root']), machine: nz(q['machine']), pane: nz(q['pane']));
+    return AppLink(
+      root: nz(q['root']),
+      machine: nz(q['machine']),
+      pane: nz(q['pane']),
+    );
   }
 }
 
@@ -35,7 +43,9 @@ class AppLinkObserver with WidgetsBindingObserver {
   void install() {
     final binding = WidgetsBinding.instance;
     binding.addObserver(this);
-    _pending = AppLink.parse(Uri.tryParse(binding.platformDispatcher.defaultRouteName));
+    _pending = AppLink.parse(
+      Uri.tryParse(binding.platformDispatcher.defaultRouteName),
+    );
   }
 
   void attach(Future<void> Function(AppLink) handler) {
@@ -48,7 +58,9 @@ class AppLinkObserver with WidgetsBindingObserver {
   void detach() => _handler = null;
 
   @override
-  Future<bool> didPushRouteInformation(RouteInformation routeInformation) async {
+  Future<bool> didPushRouteInformation(
+    RouteInformation routeInformation,
+  ) async {
     final link = AppLink.parse(routeInformation.uri);
     if (link == null) return false;
     final h = _handler;

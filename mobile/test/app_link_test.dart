@@ -4,8 +4,11 @@ import 'package:kasaterm_mobile/app_link.dart';
 void main() {
   group('AppLink.parse', () {
     test('kasaterm://open 링크에서 root·machine·pane 을 읽는다', () {
-      final l = AppLink.parse(Uri.parse(
-          'kasaterm://open?root=https%3A%2F%2Fh%2Fu%2Fabc%2F&machine=%EB%A7%A5%EB%AF%B8%EB%8B%88&pane=%253'));
+      final l = AppLink.parse(
+        Uri.parse(
+          'kasaterm://open?root=https%3A%2F%2Fh%2Fu%2Fabc%2F&machine=%EB%A7%A5%EB%AF%B8%EB%8B%88&pane=%253',
+        ),
+      );
       expect(l, isNotNull);
       expect(l!.root, 'https://h/u/abc/');
       expect(l.machine, '맥미니');

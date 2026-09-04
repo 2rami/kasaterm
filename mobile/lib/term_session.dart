@@ -55,11 +55,13 @@ class TermSession extends ChangeNotifier {
         notifyListeners();
       });
     }
-    final ch = WebSocketChannel.connect(server.wsUri(
-      'term/ws',
-      query: {'pane': pane.id, 'grid': '1'},
-      machine: pane.machine,
-    ));
+    final ch = WebSocketChannel.connect(
+      server.wsUri(
+        'term/ws',
+        query: {'pane': pane.id, 'grid': '1'},
+        machine: pane.machine,
+      ),
+    );
     _channel = ch;
     _sub = ch.stream.listen(
       _onData,

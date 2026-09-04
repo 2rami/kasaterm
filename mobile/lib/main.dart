@@ -17,24 +17,63 @@ void main() {
 
 /// DESIGN.md 의 「SCHALE 작업대」— 흰색·연하늘 표면 위 네이비 잉크, 강조는 하늘색
 /// 하나. 다크는 같은 역할을 깊은 네이비 층으로 뒤집는다. 그림자 없이 톤과 한 줄
-/// 경계로만 층을 만든다.
+/// 경계로만 층을 만든다. 데스크톱 색을 못 받았을 때의 기본 얼굴이다.
 ThemeData buildTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
-  final scheme = ColorScheme(
+  return buildThemeFrom(
     brightness: brightness,
     primary: dark ? const Color(0xff7ab8ff) : const Color(0xff4a90e2),
     onPrimary: dark ? const Color(0xff0f1b2d) : Colors.white,
-    secondary: dark ? const Color(0xff9fc5f0) : const Color(0xff2f63c4),
-    onSecondary: dark ? const Color(0xff0f1b2d) : Colors.white,
     error: dark ? const Color(0xffff7a93) : const Color(0xffc4304f),
-    onError: Colors.white,
     surface: dark ? const Color(0xff16243a) : Colors.white,
     onSurface: dark ? const Color(0xffe6eef8) : const Color(0xff15294a),
-    surfaceContainerHighest: dark ? const Color(0xff213247) : const Color(0xffe3eefb),
+    surfaceHigh: dark ? const Color(0xff213247) : const Color(0xffe3eefb),
     onSurfaceVariant: dark ? const Color(0xffa9b8cf) : const Color(0xff5b6b8a),
     outline: dark ? const Color(0xff2a3b55) : const Color(0xffd6e0ee),
+    background: dark ? const Color(0xff0f1b2d) : const Color(0xfff5f9ff),
   );
-  final background = dark ? const Color(0xff0f1b2d) : const Color(0xfff5f9ff);
+}
+
+/// 데스크톱이 지금 쓰는 색 그대로 — 허브·상단 바·입력창까지 같은 얼굴이 된다.
+ThemeData themeFromTokens(DesignTokens t) => buildThemeFrom(
+  brightness: t.dark ? Brightness.dark : Brightness.light,
+  primary: Color(t.accent),
+  onPrimary: Color(t.onAccent),
+  error: Color(t.danger),
+  surface: Color(t.surface),
+  onSurface: Color(t.text),
+  surfaceHigh: Color(t.surfaceHover),
+  onSurfaceVariant: Color(t.textDim),
+  outline: Color(t.border),
+  background: Color(t.bg),
+);
+
+ThemeData buildThemeFrom({
+  required Brightness brightness,
+  required Color primary,
+  required Color onPrimary,
+  required Color error,
+  required Color surface,
+  required Color onSurface,
+  required Color surfaceHigh,
+  required Color onSurfaceVariant,
+  required Color outline,
+  required Color background,
+}) {
+  final scheme = ColorScheme(
+    brightness: brightness,
+    primary: primary,
+    onPrimary: onPrimary,
+    secondary: primary,
+    onSecondary: onPrimary,
+    error: error,
+    onError: Colors.white,
+    surface: surface,
+    onSurface: onSurface,
+    surfaceContainerHighest: surfaceHigh,
+    onSurfaceVariant: onSurfaceVariant,
+    outline: outline,
+  );
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
@@ -46,7 +85,11 @@ ThemeData buildTheme(Brightness brightness) {
       scrolledUnderElevation: 0,
       centerTitle: false,
     ),
-    dividerTheme: DividerThemeData(color: scheme.outline, space: 1, thickness: 1),
+    dividerTheme: DividerThemeData(
+      color: scheme.outline,
+      space: 1,
+      thickness: 1,
+    ),
     cardTheme: CardThemeData(
       elevation: 0,
       color: scheme.surface,
@@ -88,12 +131,12 @@ class KasatermApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        navigatorKey: navigatorKey,
-        title: 'kasaterm',
-        theme: buildTheme(Brightness.light),
-        darkTheme: buildTheme(Brightness.dark),
-        home: const RootScreen(),
-      );
+    navigatorKey: navigatorKey,
+    title: 'kasaterm',
+    theme: buildTheme(Brightness.light),
+    darkTheme: buildTheme(Brightness.dark),
+    home: const RootScreen(),
+  );
 }
 
 /// 저장된 주소가 있으면 허브, 없으면 연결 화면. 주소를 바꾸거나 지우면 다시 여기로.
@@ -148,10 +191,13 @@ class _RootScreenState extends State<RootScreen> {
     if (found == null || nav == null || !mounted) return;
     final s = server;
     nav.popUntil((r) => r.isFirst);
-    nav.push(MaterialPageRoute<void>(
-      builder: (_) => TerminalScreen(server: s, pane: found),
-    ));
+    nav.push(
+      MaterialPageRoute<void>(
+        builder: (_) => TerminalScreen(server: s, pane: found),
+      ),
+    );
   }
+
   late Future<Server?> _initial = _load();
   Server? _server;
 
@@ -161,9 +207,24 @@ class _RootScreenState extends State<RootScreen> {
   /// 실행에는 다시 이 값으로 돌아온다.
   static const _baked = String.fromEnvironment('KASA_ROOT');
 
+  /// 붙은 기계의 색. 앱 전체가 그 얼굴이 된다 — 못 받으면 SCHALE 기본색.
+  DesignTokens? _tokens;
+
   Future<Server?> _load() async {
     final root = await _store.load() ?? Uri.tryParse(_baked);
-    return root == null || !root.hasScheme ? null : Server(root);
+    if (root == null || !root.hasScheme) return null;
+    final server = Server(root);
+    _loadTokens(server);
+    return server;
+  }
+
+  void _loadTokens(Server server) {
+    server.designTokens().then((t) {
+      if (t == null || !mounted || (_server != null && _server != server)) {
+        return;
+      }
+      setState(() => _tokens = t);
+    });
   }
 
   Future<void> _connected(Server server) async {
@@ -172,7 +233,9 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _server = server;
       _initial = Future.value(server);
+      _tokens = null;
     });
+    _loadTokens(server);
   }
 
   Future<void> _disconnected() async {
@@ -181,23 +244,32 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _server = null;
       _initial = Future.value(null);
+      _tokens = null;
     });
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<Server?>(
-        future: _initial,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
-          }
-          final server = _server ?? snap.data;
-          if (server == null) return ConnectScreen(onConnected: _connected);
-          return HubScreen(
-            key: ValueKey(server.root),
-            server: server,
-            onChangeAddress: _disconnected,
+  Widget build(BuildContext context) {
+    final tokens = _tokens;
+    final child = FutureBuilder<Server?>(
+      future: _initial,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
           );
-        },
-      );
+        }
+        final server = _server ?? snap.data;
+        if (server == null) return ConnectScreen(onConnected: _connected);
+        return HubScreen(
+          key: ValueKey(server.root),
+          server: server,
+          onChangeAddress: _disconnected,
+        );
+      },
+    );
+    return tokens == null
+        ? child
+        : Theme(data: themeFromTokens(tokens), child: child);
+  }
 }

@@ -7,7 +7,11 @@ import 'terminal.dart';
 
 /// 첫 화면 — 기계·방별 학생 목록. 기다리는 학생이 맨 위에 선다.
 class HubScreen extends StatefulWidget {
-  const HubScreen({super.key, required this.server, required this.onChangeAddress});
+  const HubScreen({
+    super.key,
+    required this.server,
+    required this.onChangeAddress,
+  });
 
   final Server server;
   final Future<void> Function() onChangeAddress;
@@ -49,81 +53,88 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
 
   void _open(Pane pane) {
     _model.clearBadge();
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => TerminalScreen(server: widget.server, pane: pane),
-    ));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TerminalScreen(server: widget.server, pane: pane),
+      ),
+    );
   }
 
   void _openSettings() {
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => SettingsScreen(
-        server: widget.server,
-        onChangeAddress: widget.onChangeAddress,
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          server: widget.server,
+          onChangeAddress: widget.onChangeAddress,
+        ),
       ),
-    ));
+    );
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-        listenable: _model,
-        builder: (context, _) {
-          final theme = Theme.of(context);
-          return Scaffold(
-            appBar: AppBar(
-              title: const Text('학생'),
-              actions: [
-                if (_model.newWaiting > 0)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Badge.count(
-                      count: _model.newWaiting,
-                      child: const Icon(Icons.notifications_outlined),
-                    ),
-                  ),
-                IconButton(
-                  onPressed: _openSettings,
-                  icon: const Icon(Icons.settings_outlined),
-                  tooltip: '설정',
+    listenable: _model,
+    builder: (context, _) {
+      final theme = Theme.of(context);
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('학생'),
+          actions: [
+            if (_model.newWaiting > 0)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Badge.count(
+                  count: _model.newWaiting,
+                  child: const Icon(Icons.notifications_outlined),
                 ),
-              ],
+              ),
+            IconButton(
+              onPressed: _openSettings,
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: '설정',
             ),
-            body: RefreshIndicator(
-              onRefresh: _model.refresh,
-              child: _body(theme),
-            ),
-          );
-        },
+          ],
+        ),
+        body: RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
       );
+    },
+  );
 
   Widget _body(ThemeData theme) {
     final sections = _model.sections;
     final children = <Widget>[];
     if (_model.error != null) {
-      children.add(_Notice(text: _model.error!, color: theme.colorScheme.error));
+      children.add(
+        _Notice(text: _model.error!, color: theme.colorScheme.error),
+      );
     }
     if (sections.isEmpty && _model.error == null) {
       children.add(const _Notice(text: '학생 목록을 받는 중…'));
     }
     for (final s in sections) {
       final title = s.machine ?? '이 기계';
-      children.add(_SectionHeader(
-        title: title,
-        trailing: s.machine == null
-            ? null
-            : (s.online ? '${s.paneCount}명' : '안 닿음'),
-        muted: !s.online,
-      ));
+      children.add(
+        _SectionHeader(
+          title: title,
+          trailing: s.machine == null
+              ? null
+              : (s.online ? '${s.paneCount}명' : '안 닿음'),
+          muted: !s.online,
+        ),
+      );
       if (s.online && s.rooms.isEmpty) {
         children.add(const _Notice(text: '학생이 없다'));
       }
       for (final room in s.rooms) {
         children.add(_RoomHeader(title: room.title));
         for (final p in room.panes) {
-          children.add(_PaneTile(
-            server: widget.server,
-            pane: p,
-            onTap: s.online ? () => _open(p) : null,
-          ));
+          children.add(
+            _PaneTile(
+              server: widget.server,
+              pane: p,
+              onTap: s.online ? () => _open(p) : null,
+            ),
+          );
         }
       }
     }
@@ -136,7 +147,11 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
 }
 
 class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.title, this.trailing, this.muted = false});
+  const _SectionHeader({
+    required this.title,
+    this.trailing,
+    this.muted = false,
+  });
 
   final String title;
   final String? trailing;
@@ -145,7 +160,9 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = muted ? theme.colorScheme.onSurfaceVariant : theme.colorScheme.onSurface;
+    final color = muted
+        ? theme.colorScheme.onSurfaceVariant
+        : theme.colorScheme.onSurface;
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 18, 4, 6),
       child: Row(
@@ -162,8 +179,9 @@ class _SectionHeader extends StatelessWidget {
           if (trailing != null)
             Text(
               trailing!,
-              style: theme.textTheme.labelMedium
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
         ],
       ),
@@ -183,8 +201,9 @@ class _RoomHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 10, 4, 4),
       child: Text(
         title,
-        style: theme.textTheme.labelLarge
-            ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        style: theme.textTheme.labelLarge?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
       ),
     );
   }
@@ -203,8 +222,9 @@ class _Notice extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
       child: Text(
         text,
-        style: theme.textTheme.bodyMedium
-            ?.copyWith(color: color ?? theme.colorScheme.onSurfaceVariant),
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: color ?? theme.colorScheme.onSurfaceVariant,
+        ),
       ),
     );
   }
@@ -241,7 +261,11 @@ class _PaneTile extends StatelessWidget {
             children: [
               Container(width: 4, height: 60, color: accent),
               const SizedBox(width: 10),
-              _Avatar(url: slug == null ? null : server.avatar(slug, machine: pane.machine)),
+              _Avatar(
+                url: slug == null
+                    ? null
+                    : server.avatar(slug, machine: pane.machine),
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -256,8 +280,9 @@ class _PaneTile extends StatelessWidget {
                     if (pane.title.isNotEmpty)
                       Text(
                         pane.title,
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: scheme.onSurfaceVariant),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -336,9 +361,9 @@ class _StatusChip extends StatelessWidget {
           Text(
             label,
             style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: fg,
-                  fontWeight: filled ? FontWeight.w600 : FontWeight.w500,
-                ),
+              color: fg,
+              fontWeight: filled ? FontWeight.w600 : FontWeight.w500,
+            ),
           ),
         ],
       ),

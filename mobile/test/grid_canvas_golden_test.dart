@@ -30,7 +30,12 @@ Grid sample() => Grid()
         2,
         [
           ['red ', 1, null, 0],
-          ['true', [255, 128, 0], [0, 0, 128], 0],
+          [
+            'true',
+            [255, 128, 0],
+            [0, 0, 128],
+            0,
+          ],
           [' 208', 208, null, 0],
         ],
       ],
@@ -66,16 +71,16 @@ const _light = TerminalPalette(
 );
 
 Widget host(Grid g, TerminalPalette palette, double width) => MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: SizedBox(
-            width: width,
-            height: 120,
-            child: GridCanvas(grid: g, version: g.version, palette: palette),
-          ),
-        ),
+  home: Scaffold(
+    body: Center(
+      child: SizedBox(
+        width: width,
+        height: 120,
+        child: GridCanvas(grid: g, version: g.version, palette: palette),
       ),
-    );
+    ),
+  ),
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -84,23 +89,35 @@ void main() {
     // flutter test 는 글꼴을 Ahem 사각형으로 바꾼다 — 번들 ttf 를 직접 올려야
     // 실제 글리프(한글·박스드로잉)가 찍힌다.
     final loader = FontLoader('TermMono')
-      ..addFont(rootBundle.load('assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf'))
-      ..addFont(rootBundle.load('assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf'));
+      ..addFont(
+        rootBundle.load(
+          'assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf',
+        ),
+      )
+      ..addFont(
+        rootBundle.load('assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf'),
+      );
     await loader.load();
   });
 
-  testWidgets('다크 — 폭이 넉넉하면 원 크기로', (tester) async {
+  testWidgets('다크 — 폭이 남으면 폭을 채운다', (tester) async {
     final g = sample();
     await tester.pumpWidget(host(g, _dark, 320));
     await tester.pump();
-    await expectLater(find.byType(GridCanvas), matchesGoldenFile('goldens/grid_dark.png'));
+    await expectLater(
+      find.byType(GridCanvas),
+      matchesGoldenFile('goldens/grid_dark.png'),
+    );
     expect(g.rowText(0), 'abc 가나다 x');
   });
 
-  testWidgets('라이트 — 폭이 모자라면 줄여 담는다', (tester) async {
+  testWidgets('라이트 — 폭이 모자라면 높이를 채우고 옆으로 민다', (tester) async {
     final g = sample();
     await tester.pumpWidget(host(g, _light, 120));
     await tester.pump();
-    await expectLater(find.byType(GridCanvas), matchesGoldenFile('goldens/grid_light_fit.png'));
+    await expectLater(
+      find.byType(GridCanvas),
+      matchesGoldenFile('goldens/grid_light_fit.png'),
+    );
   });
 }

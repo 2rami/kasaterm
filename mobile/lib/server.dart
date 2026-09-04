@@ -46,22 +46,26 @@ class Pane {
   bool get isWebShell => id.startsWith('web-');
 
   static Pane fromJson(Map<String, Object?> j, {String? machine}) => Pane(
-        id: j['id'] as String? ?? '',
-        name: j['name'] as String? ?? '',
-        title: j['title'] as String? ?? '',
-        status: j['status'] as String? ?? '',
-        window: (j['window'] as num?)?.toInt() ?? 0,
-        cwd: j['cwd'] as String? ?? '',
-        slug: j['slug'] as String?,
-        color: j['color'] as String?,
-        model: j['model'] as String?,
-        effort: j['effort'] as String?,
-        machine: machine,
-      );
+    id: j['id'] as String? ?? '',
+    name: j['name'] as String? ?? '',
+    title: j['title'] as String? ?? '',
+    status: j['status'] as String? ?? '',
+    window: (j['window'] as num?)?.toInt() ?? 0,
+    cwd: j['cwd'] as String? ?? '',
+    slug: j['slug'] as String?,
+    color: j['color'] as String?,
+    model: j['model'] as String?,
+    effort: j['effort'] as String?,
+    machine: machine,
+  );
 }
 
 class Machine {
-  const Machine({required this.label, required this.online, required this.panes});
+  const Machine({
+    required this.label,
+    required this.online,
+    required this.panes,
+  });
   final String label;
   final bool online;
   final List<Pane> panes;
@@ -83,14 +87,31 @@ class DesignTokens {
     required this.fg,
     required this.accent,
     required this.ansi,
+    required this.surface,
+    required this.surfaceHover,
+    required this.border,
+    required this.text,
+    required this.textDim,
+    required this.onAccent,
+    required this.danger,
   });
 
   final bool dark;
   final int bg;
   final int fg;
   final int accent;
+
   /// ANSI 0–15, ARGB.
   final List<int> ansi;
+
+  /// 앱 화면(허브·상단 바·입력창)이 데스크톱과 같은 얼굴이 되도록 쓰는 색들.
+  final int surface;
+  final int surfaceHover;
+  final int border;
+  final int text;
+  final int textDim;
+  final int onAccent;
+  final int danger;
 
   /// `#rrggbb`·`#rrggbbaa` → 불투명 ARGB. 알파는 버린다 — 격자 배경은 늘 꽉 찬 색이다.
   static int? parseHex(Object? v) {
@@ -108,7 +129,9 @@ class DesignTokens {
     final bg = parseHex(palette['bg']);
     final fg = parseHex(palette['fg']);
     final ansiRaw = json['ansi'];
-    if (bg == null || fg == null || ansiRaw is! List || ansiRaw.length < 16) return null;
+    if (bg == null || fg == null || ansiRaw is! List || ansiRaw.length < 16) {
+      return null;
+    }
     final accent = parseHex(palette['accent']) ?? fg;
     final ansi = <int>[];
     for (final c in ansiRaw.take(16)) {
@@ -116,12 +139,25 @@ class DesignTokens {
       if (v == null) return null;
       ansi.add(v);
     }
+    final dark = json['theme'] != 'light';
+    final text = parseHex(palette['text']) ?? fg;
     return DesignTokens(
-      dark: json['theme'] != 'light',
+      dark: dark,
       bg: bg,
       fg: fg,
       accent: accent,
       ansi: ansi,
+      surface: parseHex(palette['surface']) ?? bg,
+      surfaceHover:
+          parseHex(palette['surface_hover']) ??
+          parseHex(palette['surface']) ??
+          bg,
+      border: parseHex(palette['border']) ?? text,
+      text: text,
+      textDim: parseHex(palette['text_dim']) ?? text,
+      onAccent:
+          parseHex(palette['on_accent']) ?? (dark ? 0xff000000 : 0xffffffff),
+      danger: parseHex(palette['danger']) ?? 0xffe0584e,
     );
   }
 }
@@ -130,8 +166,8 @@ class DesignTokens {
 /// 아래에서는 slug 가 자격이고, 그 자격은 상대경로에 저절로 따라간다.
 class Server {
   Server(Uri root, {http.Client? client})
-      : root = normalize(root),
-        _client = client ?? http.Client();
+    : root = normalize(root),
+      _client = client ?? http.Client();
 
   final Uri root;
   final http.Client _client;
@@ -146,12 +182,14 @@ class Server {
     if (!t.contains('://')) t = 'https://$t';
     final u = Uri.tryParse(t);
     if (u == null || u.host.isEmpty) return null;
-    return normalize(Uri(
-      scheme: u.scheme,
-      host: u.host,
-      port: u.hasPort ? u.port : null,
-      path: u.path.isEmpty ? '/' : u.path,
-    ));
+    return normalize(
+      Uri(
+        scheme: u.scheme,
+        host: u.host,
+        port: u.hasPort ? u.port : null,
+        path: u.path.isEmpty ? '/' : u.path,
+      ),
+    );
   }
 
   static String _prefix(String? machine) =>
@@ -164,7 +202,11 @@ class Server {
     return query == null ? u : u.replace(queryParameters: query);
   }
 
-  Uri wsUri(String path, {required Map<String, String> query, String? machine}) {
+  Uri wsUri(
+    String path, {
+    required Map<String, String> query,
+    String? machine,
+  }) {
     final u = uri(path, query: query, machine: machine);
     return u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws');
   }
@@ -177,8 +219,11 @@ class Server {
     return '${root.host}$port$shown';
   }
 
-  Future<Object?> _getJson(String path,
-      {Map<String, String>? query, String? machine}) async {
+  Future<Object?> _getJson(
+    String path, {
+    Map<String, String>? query,
+    String? machine,
+  }) async {
     final http.Response res;
     try {
       res = await _client.get(uri(path, query: query, machine: machine));
@@ -198,7 +243,9 @@ class Server {
   /// 색은 장식이라 실패해도 화면을 막지 않는다 — 못 받으면 null, 앱 기본색으로 간다.
   Future<DesignTokens?> designTokens({String? machine}) async {
     try {
-      return DesignTokens.fromJson(await _getJson('design-tokens', machine: machine));
+      return DesignTokens.fromJson(
+        await _getJson('design-tokens', machine: machine),
+      );
     } on ServerException {
       return null;
     }
@@ -220,10 +267,11 @@ class Server {
   }
 
   static List<Pane> _panesFrom(Object? j, {String? machine}) => [
-        if (j is List)
-          for (final e in j)
-            if (e is Map) Pane.fromJson(e.cast<String, Object?>(), machine: machine),
-      ];
+    if (j is List)
+      for (final e in j)
+        if (e is Map)
+          Pane.fromJson(e.cast<String, Object?>(), machine: machine),
+  ];
 
   /// 방(window) 이름 — 인덱스가 pane 의 `window` 와 맞는다.
   Future<List<String>> sessions() async {
@@ -254,15 +302,17 @@ class Server {
   Future<Uint8List?> shot(String pane, {String? machine}) async {
     final http.Response res;
     try {
-      res = await _client.get(uri(
-        'term/shot',
-        query: {
-          'pane': pane,
-          'w': '0',
-          'n': DateTime.now().millisecondsSinceEpoch.toString(),
-        },
-        machine: machine,
-      ));
+      res = await _client.get(
+        uri(
+          'term/shot',
+          query: {
+            'pane': pane,
+            'w': '0',
+            'n': DateTime.now().millisecondsSinceEpoch.toString(),
+          },
+          machine: machine,
+        ),
+      );
     } catch (_) {
       throw ServerException('${describe()} 에 닿지 못했다');
     }

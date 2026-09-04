@@ -43,11 +43,11 @@ class Run {
   final int flags;
 
   static Run parse(List<Object?> raw) => Run(
-        raw[0] as String,
-        CellColor.parse(raw[1]),
-        CellColor.parse(raw[2]),
-        (raw[3] as num?)?.toInt() ?? 0,
-      );
+    raw[0] as String,
+    CellColor.parse(raw[1]),
+    CellColor.parse(raw[2]),
+    (raw[3] as num?)?.toInt() ?? 0,
+  );
 
   /// 이 런이 차지하는 칸 수 — 서버는 wide 글자의 스페이서 칸을 빼고 보낸다.
   int get cells {
@@ -233,13 +233,41 @@ bool _isWide(int r) =>
 /// xterm 기본 16색 — 웹 격자(`grid.js`)와 같은 자리. 테마의 fg/bg 는 null 로 오므로
 /// 여기 없다. 라이트 판은 같은 색상을 흰 바탕에서 읽히게 어둡혀 둔 것.
 const base16Dark = <int>[
-  0xff12161c, 0xfff7768e, 0xff9ece6a, 0xffe0af68, 0xff7aa2f7, 0xffbb9af7, 0xff7dcfff, 0xffa9b1d6,
-  0xff414868, 0xffff7a93, 0xffb9f27c, 0xffff9e64, 0xff7da6ff, 0xffc0a3ff, 0xff0db9d7, 0xffc0caf5,
+  0xff12161c,
+  0xfff7768e,
+  0xff9ece6a,
+  0xffe0af68,
+  0xff7aa2f7,
+  0xffbb9af7,
+  0xff7dcfff,
+  0xffa9b1d6,
+  0xff414868,
+  0xffff7a93,
+  0xffb9f27c,
+  0xffff9e64,
+  0xff7da6ff,
+  0xffc0a3ff,
+  0xff0db9d7,
+  0xffc0caf5,
 ];
 
 const base16Light = <int>[
-  0xff15294a, 0xffc4304f, 0xff3f8a2a, 0xffa26a12, 0xff2f63c4, 0xff7a4fd1, 0xff1183b0, 0xff5b6b8a,
-  0xff8a97b3, 0xffd8385a, 0xff4d9d34, 0xffc27a1f, 0xff3b72d6, 0xff8d67e3, 0xff0d97b3, 0xff2c3e5f,
+  0xff15294a,
+  0xffc4304f,
+  0xff3f8a2a,
+  0xffa26a12,
+  0xff2f63c4,
+  0xff7a4fd1,
+  0xff1183b0,
+  0xff5b6b8a,
+  0xff8a97b3,
+  0xffd8385a,
+  0xff4d9d34,
+  0xffc27a1f,
+  0xff3b72d6,
+  0xff8d67e3,
+  0xff0d97b3,
+  0xff2c3e5f,
 ];
 
 /// 256 팔레트를 ARGB 정수로. 0–15 는 넘겨받은 표(데스크톱 테마의 ANSI 16 이 정본,

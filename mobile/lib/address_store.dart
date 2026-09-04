@@ -14,7 +14,8 @@ class AddressStore {
     return Uri.tryParse(text);
   }
 
-  Future<void> save(Uri root) => _storage.write(key: _key, value: root.toString());
+  Future<void> save(Uri root) =>
+      _storage.write(key: _key, value: root.toString());
 
   Future<void> clear() => _storage.delete(key: _key);
 }

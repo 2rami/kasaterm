@@ -7,42 +7,47 @@ Map<String, Object?> frame({
   List<Object?> dirty = const [],
   List<int> cursor = const [0, 0],
   bool appCursor = false,
-}) =>
-    {
-      't': 'grid',
-      'cols': cols,
-      'rows': rows,
-      'dirty': dirty,
-      'cursor': cursor,
-      'cursorVisible': true,
-      'appCursor': appCursor,
-      'bracketedPaste': false,
-    };
+}) => {
+  't': 'grid',
+  'cols': cols,
+  'rows': rows,
+  'dirty': dirty,
+  'cursor': cursor,
+  'cursorVisible': true,
+  'appCursor': appCursor,
+  'bracketedPaste': false,
+};
 
 void main() {
   group('Grid.apply', () {
     test('런을 행에 넣고 커서·모드를 읽는다', () {
       final g = Grid();
-      g.apply(frame(dirty: [
-        [
-          0,
-          [
-            ['ab', null, null, 0],
+      g.apply(
+        frame(
+          dirty: [
             [
-              '가나',
-              1,
-              [10, 20, 30],
-              flagBold,
+              0,
+              [
+                ['ab', null, null, 0],
+                [
+                  '가나',
+                  1,
+                  [10, 20, 30],
+                  flagBold,
+                ],
+              ],
+            ],
+            [
+              2,
+              [
+                ['x', 200, null, flagUnderline],
+              ],
             ],
           ],
-        ],
-        [
-          2,
-          [
-            ['x', 200, null, flagUnderline],
-          ],
-        ],
-      ], cursor: [2, 1], appCursor: true));
+          cursor: [2, 1],
+          appCursor: true,
+        ),
+      );
       expect(g.cols, 10);
       expect(g.rows, 3);
       expect(g.rowText(0), 'ab가나');
@@ -62,29 +67,37 @@ void main() {
 
     test('바뀐 행만 새 객체로 갈아 끼우고 나머지는 그대로 둔다', () {
       final g = Grid();
-      g.apply(frame(dirty: [
-        [
-          0,
-          [
-            ['first', null, null, 0],
+      g.apply(
+        frame(
+          dirty: [
+            [
+              0,
+              [
+                ['first', null, null, 0],
+              ],
+            ],
+            [
+              1,
+              [
+                ['keep', null, null, 0],
+              ],
+            ],
           ],
-        ],
-        [
-          1,
-          [
-            ['keep', null, null, 0],
-          ],
-        ],
-      ]));
+        ),
+      );
       final keep = g.lines[1];
-      g.apply(frame(dirty: [
-        [
-          0,
-          [
-            ['second', null, null, 0],
+      g.apply(
+        frame(
+          dirty: [
+            [
+              0,
+              [
+                ['second', null, null, 0],
+              ],
+            ],
           ],
-        ],
-      ]));
+        ),
+      );
       expect(g.rowText(0), 'second');
       expect(identical(g.lines[1], keep), isTrue);
       expect(g.version, 2);
@@ -92,14 +105,18 @@ void main() {
 
     test('크기가 바뀌면 행을 비우고 다시 받는다', () {
       final g = Grid();
-      g.apply(frame(dirty: [
-        [
-          0,
-          [
-            ['old', null, null, 0],
+      g.apply(
+        frame(
+          dirty: [
+            [
+              0,
+              [
+                ['old', null, null, 0],
+              ],
+            ],
           ],
-        ],
-      ]));
+        ),
+      );
       g.apply(frame(cols: 5, rows: 2));
       expect(g.lines.length, 2);
       expect(g.rowText(0), '');
@@ -108,21 +125,26 @@ void main() {
 
     test('범위 밖 행과 깨진 런은 버린다', () {
       final g = Grid();
-      g.apply(frame(rows: 2, dirty: [
-        [
-          5,
-          [
-            ['nope', null, null, 0],
+      g.apply(
+        frame(
+          rows: 2,
+          dirty: [
+            [
+              5,
+              [
+                ['nope', null, null, 0],
+              ],
+            ],
+            [
+              0,
+              [
+                ['ok', null, null, 0],
+                ['short'],
+              ],
+            ],
           ],
-        ],
-        [
-          0,
-          [
-            ['ok', null, null, 0],
-            ['short'],
-          ],
-        ],
-      ]));
+        ),
+      );
       expect(g.rowText(0), 'ok');
       expect(g.lines.length, 2);
     });

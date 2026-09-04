@@ -12,7 +12,11 @@ class HubRoom {
 }
 
 class HubSection {
-  const HubSection({required this.machine, required this.online, required this.rooms});
+  const HubSection({
+    required this.machine,
+    required this.online,
+    required this.rooms,
+  });
 
   /// null 이면 주소가 가리키는 그 기계.
   final String? machine;
@@ -71,7 +75,11 @@ class HubModel extends ChangeNotifier {
       final next = <HubSection>[
         HubSection(machine: null, online: true, rooms: _rooms(panes, labels)),
         for (final m in machines)
-          HubSection(machine: m.label, online: m.online, rooms: _rooms(m.panes, const [])),
+          HubSection(
+            machine: m.label,
+            online: m.online,
+            rooms: _rooms(m.panes, const []),
+          ),
       ];
       _noteWaiting(next);
       sections = next;
@@ -118,7 +126,9 @@ class HubModel extends ChangeNotifier {
     return [
       for (final w in windows)
         HubRoom(
-          title: w < labels.length && labels[w].isNotEmpty ? labels[w] : '방 ${w + 1}',
+          title: w < labels.length && labels[w].isNotEmpty
+              ? labels[w]
+              : '방 ${w + 1}',
           panes: byWindow[w]!
             ..sort((a, b) {
               final r = _rank(a).compareTo(_rank(b));

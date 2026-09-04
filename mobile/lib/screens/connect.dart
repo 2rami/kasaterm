@@ -62,8 +62,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   const SizedBox(height: 8),
                   Text(
                     '데스크톱 카사텀 허브에서 「폰 주소」를 복사해 여기 붙여 넣어라. 그 주소가 곧 열쇠다.',
-                    style: theme.textTheme.bodyMedium
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 24),
                   TextField(

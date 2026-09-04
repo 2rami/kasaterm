@@ -15,7 +15,8 @@ class TerminalScreen extends StatefulWidget {
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
-class _TerminalScreenState extends State<TerminalScreen> with WidgetsBindingObserver {
+class _TerminalScreenState extends State<TerminalScreen>
+    with WidgetsBindingObserver {
   late final TermSession _session = TermSession(widget.server, widget.pane);
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
@@ -80,67 +81,70 @@ class _TerminalScreenState extends State<TerminalScreen> with WidgetsBindingObse
   }
 
   String _stateText(TermSession s) => switch (s.state) {
-        TermState.connecting => '연결 중…',
-        TermState.connected => s.mirror ? '데스크톱 화면 그대로' : '웹 셸',
-        TermState.reconnecting => '다시 연결 중…',
-        TermState.gone => '끝난 화면',
-      };
+    TermState.connecting => '연결 중…',
+    TermState.connected => s.mirror ? '데스크톱 화면 그대로' : '웹 셸',
+    TermState.reconnecting => '다시 연결 중…',
+    TermState.gone => '끝난 화면',
+  };
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-        listenable: _session,
-        builder: (context, _) {
-          final theme = Theme.of(context);
-          final scheme = theme.colorScheme;
-          final s = _session;
-          return Scaffold(
-            appBar: AppBar(
-              title: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.pane.name.isEmpty ? widget.pane.id : widget.pane.name,
-                    style: theme.textTheme.titleMedium,
-                  ),
-                  Text(
-                    _stateText(s),
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: scheme.onSurfaceVariant),
-                  ),
-                ],
+    listenable: _session,
+    builder: (context, _) {
+      final theme = Theme.of(context);
+      final scheme = theme.colorScheme;
+      final s = _session;
+      return Scaffold(
+        appBar: AppBar(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.pane.name.isEmpty ? widget.pane.id : widget.pane.name,
+                style: theme.textTheme.titleMedium,
               ),
-              actions: [
-                IconButton(
-                  tooltip: s.picture ? '글자로 보기' : '그림으로 보기',
-                  isSelected: s.picture,
-                  onPressed: s.state == TermState.gone ? null : () => s.setPicture(!s.picture),
-                  icon: const Icon(Icons.image_outlined),
-                  selectedIcon: const Icon(Icons.image),
+              Text(
+                _stateText(s),
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
                 ),
-              ],
-            ),
-            body: SafeArea(
-              child: Column(
-                children: [
-                  Expanded(child: _view(s)),
-                  if (s.note != null) _NoteBar(text: s.note!),
-                  _KeyBar(
-                    session: s,
-                    ctrl: _ctrl,
-                    onCtrl: () => setState(() => _ctrl = !_ctrl),
-                  ),
-                  _ReplyBar(
-                    controller: _input,
-                    focusNode: _inputFocus,
-                    enabled: s.state != TermState.gone && !_sending,
-                    onSend: _send,
-                  ),
-                ],
               ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: s.picture ? '글자로 보기' : '그림으로 보기',
+              isSelected: s.picture,
+              onPressed: s.state == TermState.gone
+                  ? null
+                  : () => s.setPicture(!s.picture),
+              icon: const Icon(Icons.image_outlined),
+              selectedIcon: const Icon(Icons.image),
             ),
-          );
-        },
+          ],
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(child: _view(s)),
+              if (s.note != null) _NoteBar(text: s.note!),
+              _KeyBar(
+                session: s,
+                ctrl: _ctrl,
+                onCtrl: () => setState(() => _ctrl = !_ctrl),
+              ),
+              _ReplyBar(
+                controller: _input,
+                focusNode: _inputFocus,
+                enabled: s.state != TermState.gone && !_sending,
+                onSend: _send,
+              ),
+            ],
+          ),
+        ),
       );
+    },
+  );
 
   Widget _view(TermSession s) {
     final bytes = s.shotBytes;
@@ -148,7 +152,11 @@ class _TerminalScreenState extends State<TerminalScreen> with WidgetsBindingObse
       return InteractiveViewer(
         maxScale: 6,
         child: Center(
-          child: Image.memory(bytes, gaplessPlayback: true, fit: BoxFit.contain),
+          child: Image.memory(
+            bytes,
+            gaplessPlayback: true,
+            fit: BoxFit.contain,
+          ),
         ),
       );
     }
@@ -156,7 +164,9 @@ class _TerminalScreenState extends State<TerminalScreen> with WidgetsBindingObse
     return GridCanvas(
       grid: s.grid,
       version: s.grid.version,
-      palette: tokens == null ? TerminalPalette.of(context) : TerminalPalette.fromTokens(tokens),
+      palette: tokens == null
+          ? TerminalPalette.of(context)
+          : TerminalPalette.fromTokens(tokens),
     );
   }
 }
@@ -179,7 +189,11 @@ class _NoteBar extends StatelessWidget {
 }
 
 class _KeyBar extends StatelessWidget {
-  const _KeyBar({required this.session, required this.ctrl, required this.onCtrl});
+  const _KeyBar({
+    required this.session,
+    required this.ctrl,
+    required this.onCtrl,
+  });
 
   final TermSession session;
   final bool ctrl;
@@ -214,7 +228,12 @@ class _KeyBar extends StatelessWidget {
 }
 
 class _Key extends StatelessWidget {
-  const _Key({this.label, this.icon, required this.onTap, this.selected = false});
+  const _Key({
+    this.label,
+    this.icon,
+    required this.onTap,
+    this.selected = false,
+  });
 
   final String? label;
   final IconData? icon;
@@ -238,7 +257,11 @@ class _Key extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 10),
           alignment: Alignment.center,
           child: icon != null
-              ? Icon(icon, size: 18, color: selected ? scheme.onPrimary : scheme.onSurface)
+              ? Icon(
+                  icon,
+                  size: 18,
+                  color: selected ? scheme.onPrimary : scheme.onSurface,
+                )
               : Text(
                   label!,
                   style: TextStyle(
@@ -268,32 +291,32 @@ class _ReplyBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                focusNode: focusNode,
-                enabled: enabled,
-                autocorrect: false,
-                enableSuggestions: false,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => onSend(),
-                // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
-                style: const TextStyle(fontSize: 16),
-                decoration: const InputDecoration(hintText: '답장…'),
-              ),
-            ),
-            const SizedBox(width: 6),
-            IconButton.filled(
-              onPressed: enabled ? onSend : null,
-              icon: const Icon(Icons.send),
-              tooltip: '보내기',
-            ),
-          ],
+    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+    child: Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: controller,
+            focusNode: focusNode,
+            enabled: enabled,
+            autocorrect: false,
+            enableSuggestions: false,
+            minLines: 1,
+            maxLines: 4,
+            textInputAction: TextInputAction.send,
+            onSubmitted: (_) => onSend(),
+            // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
+            style: const TextStyle(fontSize: 16),
+            decoration: const InputDecoration(hintText: '답장…'),
+          ),
         ),
-      );
+        const SizedBox(width: 6),
+        IconButton.filled(
+          onPressed: enabled ? onSend : null,
+          icon: const Icon(Icons.send),
+          tooltip: '보내기',
+        ),
+      ],
+    ),
+  );
 }

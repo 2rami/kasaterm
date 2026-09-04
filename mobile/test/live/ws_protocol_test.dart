@@ -17,7 +17,10 @@ import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:web_socket_channel/io.dart';
 
-Future<void> waitFor(bool Function() done, {Duration timeout = const Duration(seconds: 6)}) async {
+Future<void> waitFor(
+  bool Function() done, {
+  Duration timeout = const Duration(seconds: 6),
+}) async {
   final until = DateTime.now().add(timeout);
   while (!done()) {
     if (DateTime.now().isAfter(until)) fail('시간 안에 조건이 안 됐다');
@@ -28,7 +31,11 @@ Future<void> waitFor(bool Function() done, {Duration timeout = const Duration(se
 void main() {
   final rootText = Platform.environment['KASA_ROOT'];
   if (rootText == null || rootText.isEmpty) {
-    test('KASA_ROOT 없음', () {}, skip: 'KASA_ROOT=http://127.0.0.1:8765/ 로 실서버를 가리켜라');
+    test(
+      'KASA_ROOT 없음',
+      () {},
+      skip: 'KASA_ROOT=http://127.0.0.1:8765/ 로 실서버를 가리켜라',
+    );
     return;
   }
   final server = Server(Uri.parse(rootText));
@@ -46,10 +53,9 @@ void main() {
   });
 
   test('웹 셸 왕복: size → grid → binary 입력이 화면에 → text 프레임은 버려짐 → 정리', () async {
-    final ch = IOWebSocketChannel.connect(server.wsUri(
-      'term/ws',
-      query: {'grid': '1', 'cwd': '/tmp'},
-    ));
+    final ch = IOWebSocketChannel.connect(
+      server.wsUri('term/ws', query: {'grid': '1', 'cwd': '/tmp'}),
+    );
     final grid = Grid();
     String? id;
     bool? mirror;
@@ -76,7 +82,8 @@ void main() {
       await waitFor(() => frames > 0);
       expect(grid.cols, greaterThan(0));
 
-      bool seen(String s) => List.generate(grid.rows, grid.rowText).any((row) => row.contains(s));
+      bool seen(String s) =>
+          List.generate(grid.rows, grid.rowText).any((row) => row.contains(s));
 
       ch.sink.add(Uint8List.fromList(utf8.encode('echo 가나다\r')));
       await waitFor(() => seen('가나다'));
@@ -90,7 +97,9 @@ void main() {
       await sub.cancel();
       await ch.sink.close();
       if (id != null) {
-        final res = await http.delete(server.uri('term/session', query: {'pane': id!}));
+        final res = await http.delete(
+          server.uri('term/session', query: {'pane': id!}),
+        );
         expect(res.statusCode, lessThan(500));
       }
     }
