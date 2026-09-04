@@ -111,10 +111,13 @@ fn elapsed_label(secs: u64) -> Option<String> {
 /// 붙잡기가 조용히 쉰다 — 그 편이 잘린 상자를 덮는 것보다 낫다.
 const PINNED_INPUT_SCAN_ROWS: usize = 24;
 
-/// 화면을 아래로 당길 때 걷어내는 꼬리 빈 줄의 상한. classic claude 가 남기는
-/// 여백은 실측 한두 줄이라 3 이면 충분하고, 그보다 크면 화면이 통째로 빈
-/// 상황(부팅 직후 셸)이라 당길 것이 아니라 그냥 빈 화면이다.
-const BOTTOM_PULL_MAX: usize = 3;
+/// 화면 꼬리의 빈 줄을 재려고 살아 있는 화면에서 떠 보는 행 수. 빈 줄은 **꼬리**부터
+/// 세므로 화면보다 넉넉히 떠도 답이 달라지지 않는다 — 앞쪽에 스크롤백이 섞여도 무해하다.
+///
+/// 한때 이 값이 「당길 수 있는 줄 수의 상한」(3)이기도 했다. 그 상한이 여백을 다 못
+/// 메워, 같은 pane 이 대화가 자라는 동안 입력창을 바닥에서 7줄 위 → 4줄 위 → 바닥으로
+/// 옮겨 앉혔다(2026-09-05 실측). 이제 여백만큼 전부 당기므로 상한이 아니다.
+const BOTTOM_PULL_SCAN_ROWS: usize = 48;
 
 const MINI_BAR_H: f32 = 2.0;
 const MINI_BAR_PAD: f32 = 2.0;
@@ -208,28 +211,31 @@ impl App {
         // 뷰포트 꼬리는 지나간 대화라 빈 줄이 없고, 그러면 바닥에서만 당겨져
         // 스크롤을 오갈 때 화면이 한 줄씩 튄다. claude 가 남기는 여백은 화면의
         // 성질이므로 스크롤 위치와 무관하게 같은 값이어야 한다.
-        // 상한을 넘겨 재 본다 — 실제 여백이 상한보다 크면 그만큼이 화면에 남는데,
-        // `min` 뒤의 값만 보면 그 사실이 안 보인다.
-        let raw = crate::screenread::blank_tail(&sess.live_tail_rows(BOTTOM_PULL_MAX + 4));
-        let blank = raw.min(BOTTOM_PULL_MAX);
+        let blank = crate::screenread::blank_tail(&sess.live_tail_rows(BOTTOM_PULL_SCAN_ROWS));
+        // 화면이 통째로 비면(부팅 직후) 당길 것이 아니라 그냥 빈 화면이다.
         if blank == 0 || blank >= rows_now {
             if dbg {
-                eprintln!("[bottompull] pane={tab_pid} 멈춤: raw={raw} blank={blank} rows_now={rows_now}");
+                eprintln!("[bottompull] pane={tab_pid} 멈춤: blank={blank} rows_now={rows_now}");
             }
             return Vec::new();
         }
-        let above = sess.rows_above(blank);
+        let mut above = sess.rows_above(blank);
+        // 스크롤백이 모자라면 **빈 줄로 메운다**. 목적은 입력창을 바닥에 붙이는 것이지
+        // 지난 대화로 화면을 채우는 것이 아니다 — 모자라다고 통째로 포기하면 갓 뜬
+        // claude 는 입력창이 화면 한가운데 떠 있고, 스크롤백이 쌓이는 순간 그 자리가
+        // 툭 뛴다(2026-09-05 실측: 같은 pane 이 7줄 위 → 4줄 위 → 바닥).
+        //
+        // 모자란 몫은 **뒤에** 채운다: 이 vec 은 가까운 순([0] = 뷰포트 위 1줄)이고
+        // 렌더가 앞에서부터 화면 위로 밀어 넣으므로, 뒤에 붙은 빈 줄이 맨 위에 앉는다.
+        let missing = blank - above.len().min(blank);
+        above.resize(blank, Vec::new());
         if dbg {
             eprintln!(
-                "[bottompull] pane={tab_pid} raw={raw} blank={blank} above={} rows_now={rows_now}",
+                "[bottompull] pane={tab_pid} blank={blank} above={} (빈줄 {missing}) rows_now={rows_now}",
                 above.len()
             );
         }
-        if above.len() == blank {
-            above
-        } else {
-            Vec::new()
-        }
+        above
     }
 
     /// Phase 2a path. Collects every pane's live cell grid and hands
@@ -1319,7 +1325,10 @@ impl App {
                     if let Some(sess) = self.pty.get(tab_pid.as_str()) {
                         if sess.view_state().0 > 0 {
                             let live_all: Vec<Vec<GridCell>> = sess
-                                .live_tail_rows(PINNED_INPUT_SCAN_ROWS)
+                                // 아래에서 `pulled` 만큼 걷어내므로 그만큼 더 떠 온다 —
+                                // 안 그러면 많이 당긴 pane 에서 스캔 폭이 좁아져 입력박스
+                                // 위 테두리를 놓치고 붙잡기가 조용히 쉰다.
+                                .live_tail_rows(PINNED_INPUT_SCAN_ROWS + pulled)
                                 .iter()
                                 .map(normalise)
                                 .collect();
