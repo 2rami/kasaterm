@@ -3,6 +3,10 @@ import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
 import type { SessionEvent } from './types';
 import { parseJsonlSync } from './jsonl';
+import { resumeCommand, type Harness } from './resumeCommand';
+
+export { resumeCommand };
+export type { Harness };
 
 // munder 는 electron IPC(window.cth.*)로 hive 와 통신했지만, 우리는 kasaterm 의
 // kasaspace MCP HTTP 를 fetch 로 폴링한다. dist 는 MCP 가 /arona-ui/ 로 정적
@@ -534,33 +538,16 @@ export function characterFaceUrl(slug: string, theme?: string): string {
   return `${BASE}/character-face?${q}`;
 }
 
-/** `character` = 세션→학생 영속 바인딩(백엔드가 session_characters.json 에서 얹음).
- *  미바인딩 세션은 undefined — 피커가 실루엣/무색 폴백. */
-/** 세션을 만든 코딩 프로그램. 이어가는 명령이 셋 다 달라서(`claude --resume` /
- *  `codex resume` / `agy --conversation`) 목록을 합칠 때 이 값이 없으면 무엇으로
- *  여는지 알 수가 없다. 옛 기록엔 없어서 서버가 `"claude"` 를 기본으로 채운다. */
-export type Harness = 'claude' | 'codex' | 'agy';
-
 export interface RecentSession {
   harness?: Harness;
   id: string;
   label: string;
   mtime: number;
   cwd: string;
+  /** 백엔드의 세션→학생 영속 바인딩. 미바인딩 세션은 피커에서 실루엣으로 남는다. */
   character?: string;
   /** 마지막 대화 한 줄. 서버가 아직 안 보내므로 대개 비어 있다 — 생기면 행에 자동으로 붙는다. */
   preview?: string;
-}
-
-/** 그 세션을 이어가는 셸 명령. 하네스마다 다르므로 한 곳에서만 만든다 —
- *  목록에 세 프로그램이 섞이는 순간, claude 명령을 하드코딩해 두면 codex 세션을
- *  골라도 claude 로 열려 그냥 실패한다. */
-export function resumeCommand(id: string, harness?: Harness): string {
-  switch (harness) {
-    case 'codex': return `codex resume ${id}`;
-    case 'agy': return `agy --conversation ${id}`;
-    default: return `claude --resume ${id}`;
-  }
 }
 
 /** GET /recent-sessions?cwd=<abs>[&scope=here|all] — 최근 세션 목록(이어가기 후보, 최신순).
