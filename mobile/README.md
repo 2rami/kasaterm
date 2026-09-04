@@ -75,6 +75,13 @@ tool/phone.sh
 - 번들 id 는 `com.debimarlene.kasatermMobile`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에
   붙이려면 `Info.plist` 의 `NSAppTransportSecurity` 에 `NSAllowsLocalNetworking` 이 켜져 있어야 한다.
 
+## 웹에서 앱으로
+
+폰의 사파리로 들어온 웹 허브·학생 화면(슬랙 알림 링크 포함)은 `kasaterm://open?root=…&machine=…&pane=…`
+로 앱을 부른다. 처음엔 「앱」 단추, 한 번 성공한 뒤부터는 저절로 넘어간다(앱 없는 폰에 대고 무작정
+가면 사파리가 경고를 띄운다). 앱은 `root` 를 **주소가 하나도 없을 때만** 받는다 — 링크 한 줄이
+저장된 자격을 갈아치우면 안 된다. 애플의 유니버설 링크는 유료 계정이 필요해 쓰지 않는다.
+
 ## 지킬 것
 
 - 키는 `Uint8List` 로만 소켓에 넣는다 — text 프레임은 서버가 제어 JSON 으로 읽고 조용히 버린다.

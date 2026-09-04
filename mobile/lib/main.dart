@@ -1,11 +1,19 @@
 import 'package:flutter/material.dart';
 
 import 'address_store.dart';
+import 'app_link.dart';
 import 'screens/connect.dart';
 import 'screens/hub.dart';
+import 'screens/terminal.dart';
 import 'server.dart';
 
-void main() => runApp(const KasatermApp());
+final navigatorKey = GlobalKey<NavigatorState>();
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  AppLinkObserver.instance.install();
+  runApp(const KasatermApp());
+}
 
 /// DESIGN.md 의 「SCHALE 작업대」— 흰색·연하늘 표면 위 네이비 잉크, 강조는 하늘색
 /// 하나. 다크는 같은 역할을 깊은 네이비 층으로 뒤집는다. 그림자 없이 톤과 한 줄
@@ -80,6 +88,7 @@ class KasatermApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
+        navigatorKey: navigatorKey,
         title: 'kasaterm',
         theme: buildTheme(Brightness.light),
         darkTheme: buildTheme(Brightness.dark),
@@ -97,6 +106,52 @@ class RootScreen extends StatefulWidget {
 
 class _RootScreenState extends State<RootScreen> {
   static const _store = AddressStore();
+
+  @override
+  void initState() {
+    super.initState();
+    AppLinkObserver.instance.attach(_openLink);
+  }
+
+  @override
+  void dispose() {
+    AppLinkObserver.instance.detach();
+    super.dispose();
+  }
+
+  /// 웹에서 건너뛴 링크. root 는 **주소가 하나도 없을 때만** 받는다 — 링크 한 줄로
+  /// 저장된 주소를 갈아치우게 두면 남이 보낸 링크가 자격을 바꾸는 문이 된다.
+  Future<void> _openLink(AppLink link) async {
+    var server = _server ?? await _initial;
+    if (server == null) {
+      final root = Server.parse(link.root ?? '');
+      if (root == null) return;
+      final candidate = Server(root);
+      try {
+        await candidate.me();
+      } on ServerException {
+        return;
+      }
+      await _connected(candidate);
+      server = candidate;
+    }
+    final pane = link.pane;
+    if (pane == null) return;
+    final List<Pane> panes;
+    try {
+      panes = await server.panes(machine: link.machine);
+    } on ServerException {
+      return;
+    }
+    final found = panes.where((p) => p.id == pane).firstOrNull;
+    final nav = navigatorKey.currentState;
+    if (found == null || nav == null || !mounted) return;
+    final s = server;
+    nav.popUntil((r) => r.isFirst);
+    nav.push(MaterialPageRoute<void>(
+      builder: (_) => TerminalScreen(server: s, pane: found),
+    ));
+  }
   late Future<Server?> _initial = _load();
   Server? _server;
 

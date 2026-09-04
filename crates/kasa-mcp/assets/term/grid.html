@@ -29,6 +29,7 @@
   <a id="hub" href="./">≡ 목록</a>
   <span id="st">연결 중…</span>
   <button id="pic" type="button" title="데스크톱이 그리는 그대로(테마·폰트) 보기">그림</button>
+  <button id="app" type="button" title="이 학생을 앱에서 열기" hidden>앱</button>
 </div>
 <script src="grid.js"></script>
 <script>
@@ -37,6 +38,29 @@ const ROOT = location.pathname.replace(/\/term\/grid\/?$/, '');
 // 허브: 유저 주소 아래면 그 뿌리(`/u/<slug>/`), 로컬이면 `/hub`.
 const hubRoot = ROOT.replace(/\/m\/[^/]+$/, '');
 document.getElementById('hub').href = hubRoot ? `${hubRoot}/` : '/hub';
+// 아이폰이면 이 학생을 앱에서 연다(kasaterm:// 스킴). 규율은 허브와 같다 — 처음엔 단추,
+// 한 번 성공한 뒤부터 저절로. 슬랙 알림 링크로 들어와도 앱으로 넘어간다.
+(function appJump() {
+  if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return;
+  const btn = document.getElementById('app');
+  const m = ROOT.match(/\/m\/([^/]+)$/);
+  const q = new URLSearchParams({ root: `${location.origin}${hubRoot}/` });
+  if (m) q.set('machine', decodeURIComponent(m[1]));
+  const pane = new URLSearchParams(location.search).get('pane');
+  if (pane) q.set('pane', pane);
+  const link = `kasaterm://open?${q}`;
+  const KEY = 'kasaterm-app';
+  const go = () => {
+    location.href = link;
+    setTimeout(() => {
+      if (document.visibilityState === 'hidden') localStorage.setItem(KEY, '1');
+      else localStorage.removeItem(KEY);
+    }, 1500);
+  };
+  btn.hidden = false;
+  btn.addEventListener('click', go);
+  if (localStorage.getItem(KEY) === '1') go();
+})();
 const st = document.getElementById('st');
 const wrap = document.getElementById('wrap');
 const shotwrap = document.getElementById('shotwrap');

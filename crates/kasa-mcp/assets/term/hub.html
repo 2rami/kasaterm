@@ -54,7 +54,7 @@
   #toast.on { opacity:1; }
   @media (prefers-reduced-motion: reduce) { #toast { transition:none; } }
 </style>
-<header id="top"><b>kasaterm</b><span id="who"></span><a class="btn" id="arona">아로나</a></header>
+<header id="top"><b>kasaterm</b><span id="who"></span><a class="btn" id="app" href="#" hidden>앱</a><a class="btn" id="arona">아로나</a></header>
 <main id="list"><div class="empty">불러오는 중…</div></main>
 <section id="manage" hidden>
   <h2>폰 주소 — 유저마다 하나</h2>
@@ -70,6 +70,26 @@ const ROOT = location.pathname.replace(/\/(hub)?$/, '');
 const $ = (id) => document.getElementById(id);
 const listEl = $('list');
 $('arona').href = `${ROOT}/arona-ui/`;
+
+// 아이폰이면 앱으로 건너뛴다(kasaterm:// 스킴). 앱이 없는 폰에 대고 무작정 가면 사파리가
+// 「주소가 잘못됐다」 경고를 띄우므로, 처음엔 단추만 보이고 한 번 성공(화면이 가려짐)한
+// 뒤부터는 저절로 간다. 실패하면 그 표시를 지운다(앱을 지운 폰).
+(function appJump() {
+  if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return;
+  const btn = $('app');
+  const link = `kasaterm://open?root=${encodeURIComponent(`${location.origin}${ROOT}/`)}`;
+  const KEY = 'kasaterm-app';
+  const go = () => {
+    location.href = link;
+    setTimeout(() => {
+      if (document.visibilityState === 'hidden') localStorage.setItem(KEY, '1');
+      else localStorage.removeItem(KEY);
+    }, 1500);
+  };
+  btn.hidden = false;
+  btn.addEventListener('click', (e) => { e.preventDefault(); go(); });
+  if (localStorage.getItem(KEY) === '1') go();
+})();
 
 const toast = (m) => { const t = $('toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 1600); };
 const j = (u, opt) => fetch(u, opt).then((r) => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)));
