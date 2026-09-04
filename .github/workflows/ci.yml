@@ -48,6 +48,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/arona-ui/package-lock.json
+
+      # 번들 빌드가 순수 웹 회귀 테스트를 먼저 실행한다. 테스트 파일을 따로 직접
+      # 나열하지 않아 새 `*.test.mjs`도 CI에서 자동 발견된다.
+      - name: arona-ui test + build
+        working-directory: web/arona-ui
+        run: npm ci && npm run build
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}

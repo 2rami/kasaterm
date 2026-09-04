@@ -8470,7 +8470,7 @@ mod agy_restore_tests {
     fn restore_count_uses_only_pure_saved_markers() {
         let unknown = serde_json::json!({
             "was_agent": null,
-            "session_id": "01a06773-4e83-7782-a251-361937f953fc"
+            "session_id": "01900000-0000-7000-8000-000000000001"
         });
         assert_eq!(saved_agent_marker(&unknown), None);
 
@@ -8489,16 +8489,16 @@ mod agy_restore_tests {
 
     #[test]
     fn null_agent_with_an_exact_codex_root_sid_recovers_as_codex() {
-        const PANE_10: &str = "01a06773-4e83-7782-a251-361937f953fc";
-        const PANE_13: &str = "01a06af3-3d5f-7542-ad87-6d81a6509bff";
+        const ROOT_ALPHA: &str = "01900000-0000-7000-8000-000000000001";
+        const ROOT_BETA: &str = "01900000-0000-7000-8000-000000000002";
         let j = |sid: &str| {
             serde_json::json!({
                 "was_agent": null,
                 "session_id": sid,
-                "cwd": "/Users/kasa/Desktop/momewomo/sionic/swarm"
+                "cwd": "/workspace/shared"
             })
         };
-        for sid in [PANE_10, PANE_13] {
+        for sid in [ROOT_ALPHA, ROOT_BETA] {
             let mut rec = j(sid);
             let got = saved_agent_map_with(rec.as_object().unwrap(), |candidate| candidate == sid);
             assert_eq!(got, Some("codex"), "{sid}");
@@ -8513,7 +8513,7 @@ mod agy_restore_tests {
 
     #[test]
     fn explicit_claude_and_missing_rollouts_are_never_guessed_as_codex() {
-        let claude_sid = "6043e850-19a1-4b83-834c-190081ede618";
+        let claude_sid = "00000000-0000-4000-8000-000000000001";
         let explicit = serde_json::json!({
             "was_agent": "claude",
             "session_id": claude_sid
@@ -8545,7 +8545,7 @@ mod agy_restore_tests {
 
         let explicit_codex = serde_json::json!({
             "was_agent": "codex",
-            "session_id": "01a00000-0000-7000-8000-000000000000"
+            "session_id": "01900000-0000-7000-8000-000000000099"
         });
         let agent = saved_agent_map_with(explicit_codex.as_object().unwrap(), |_| false);
         assert_eq!(agent, Some("codex"));

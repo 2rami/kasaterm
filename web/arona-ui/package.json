@@ -6,7 +6,8 @@
   "description": "kasaterm god(아로나) 모드 UI — munder-difflin renderer 이식, vite 정적 번들",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b --noEmit && vite build",
+    "test": "node --test",
+    "build": "npm test && tsc -b --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

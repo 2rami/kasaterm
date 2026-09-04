@@ -6193,11 +6193,11 @@ mod codex_session_lookup_tests {
     #[test]
     fn sid_comes_from_the_tail_not_the_stem() {
         let p = std::path::Path::new(
-            "/x/sessions/2026/08/05/rollout-2026-08-05T19-46-01-019fd187-ba6e-7812-8976-2a27ffcd843e.jsonl",
+            "/x/sessions/2026/08/05/rollout-2026-08-05T19-46-01-01900000-0000-7000-8000-000000000003.jsonl",
         );
         assert_eq!(
             codex_sid_from_rollout(p).as_deref(),
-            Some("019fd187-ba6e-7812-8976-2a27ffcd843e")
+            Some("01900000-0000-7000-8000-000000000003")
         );
         // claude 파일(파일명 자체가 sid)은 rollout 이 아니라 None — 호출측이 stem 폴백을 쓴다.
         assert_eq!(
@@ -6219,7 +6219,7 @@ mod codex_session_lookup_tests {
         std::fs::remove_dir_all(&root).ok();
         let day = root.join("2026/08/05");
         std::fs::create_dir_all(&day).unwrap();
-        let sid = "019fd187-ba6e-7812-8976-2a27ffcd843e";
+        let sid = "01900000-0000-7000-8000-000000000003";
         let want = day.join(format!("rollout-2026-08-05T19-46-01-{sid}.jsonl"));
         std::fs::write(&want, "{}").unwrap();
         // 다른 날 + 다른 세션 — 골라내면 안 되는 것들.
@@ -6244,9 +6244,9 @@ mod codex_session_lookup_tests {
     #[test]
     fn open_rollouts_converge_subagents_on_their_root_thread() {
         let root = temp_root("codex-open-root");
-        let root_sid = "01a064ad-3875-7713-a4a8-c9883095ffae";
-        let child_a = "01a064b2-0118-7ca1-86ba-01239cedde5d";
-        let child_b = "01a064b2-1921-76d0-8857-62dd2c052f4a";
+        let root_sid = "01900000-0000-7000-8000-000000000001";
+        let child_a = "01900000-0000-7000-8000-000000000101";
+        let child_b = "01900000-0000-7000-8000-000000000102";
         let paths = vec![
             rollout(&root, root_sid, root_sid, serde_json::json!("cli")),
             rollout(
@@ -6269,8 +6269,8 @@ mod codex_session_lookup_tests {
     #[test]
     fn open_rollouts_refuse_two_root_threads_in_one_process() {
         let root = temp_root("codex-open-ambiguous");
-        let a = "01a064ad-3875-7713-a4a8-c9883095ffae";
-        let b = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
+        let a = "01900000-0000-7000-8000-000000000001";
+        let b = "01900000-0000-7000-8000-000000000002";
         let paths = vec![
             rollout(&root, a, a, serde_json::json!("cli")),
             rollout(&root, b, b, serde_json::json!("cli")),
@@ -6282,8 +6282,8 @@ mod codex_session_lookup_tests {
     #[test]
     fn exact_root_evidence_rejects_a_subagent_rollout() {
         let root = temp_root("codex-root-evidence");
-        let root_sid = "01a064ad-3875-7713-a4a8-c9883095ffae";
-        let child_sid = "01a064b2-0118-7ca1-86ba-01239cedde5d";
+        let root_sid = "01900000-0000-7000-8000-000000000010";
+        let child_sid = "01900000-0000-7000-8000-000000000110";
         let root_path = rollout(&root, root_sid, root_sid, serde_json::json!("cli"));
         let child_path = rollout(
             &root,
@@ -6303,10 +6303,10 @@ mod codex_session_lookup_tests {
         let shim = root.join("shim");
         let home_a = shim.join("codex-home-%1");
         let home_b = shim.join("codex-home-%2");
-        let sid_a = "01a064ad-3875-7713-a4a8-c9883095ffae";
-        let sid_b = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
-        let child = "01a064b2-0118-7ca1-86ba-01239cedde5d";
-        let stale = "01a060e6-fab7-7a60-ba86-276ca01a643f";
+        let sid_a = "01900000-0000-7000-8000-000000000001";
+        let sid_b = "01900000-0000-7000-8000-000000000002";
+        let child = "01900000-0000-7000-8000-000000000101";
+        let stale = "01900000-0000-7000-8000-000000000099";
         let path_a = rollout(&home_a, sid_a, sid_a, serde_json::json!("cli"));
         let path_b = rollout(&home_b, sid_b, sid_b, serde_json::json!("cli"));
         let stale_path = rollout(&home_a, stale, stale, serde_json::json!("cli"));
@@ -6369,7 +6369,7 @@ mod codex_session_lookup_tests {
 
     #[test]
     fn resume_argv_returns_only_a_uuid_after_the_subcommand() {
-        let sid = "01a0628e-8704-7bc2-b30b-b11c36e8f68a";
+        let sid = "01900000-0000-7000-8000-000000000002";
         assert_eq!(
             codex_resume_id_from_argv(&format!(
                 "/bin/codex --flag resume {sid} -c check_for_update_on_startup=false -m gpt-5.6"

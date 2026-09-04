@@ -9290,10 +9290,10 @@ mod tests {
         assert_eq!(
             cmd(
                 Some("codex"),
-                Some("019fd187-ba6e-7812-8976-2a27ffcd843e"),
+                Some("01900000-0000-7000-8000-000000000003"),
                 true
             ),
-            "codex resume 019fd187-ba6e-7812-8976-2a27ffcd843e -c check_for_update_on_startup=false\r"
+            "codex resume 01900000-0000-7000-8000-000000000003 -c check_for_update_on_startup=false\r"
         );
         // rollout 이 사라졌으면 새로 — `resume --last` 로 흘리지 않는다(미러된
         // ~/.codex/sessions 전체에서 골라 남의 대화를 물어온다).
