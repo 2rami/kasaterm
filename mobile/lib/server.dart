@@ -74,6 +74,58 @@ class Me {
   final String? machine;
 }
 
+/// 데스크톱이 지금 쓰는 색(`GET design-tokens`). 격자를 그 화면과 같은 색으로 그린다 —
+/// 폰만 다른 팔레트면 같은 학생 화면이 다른 물건처럼 보인다.
+class DesignTokens {
+  const DesignTokens({
+    required this.dark,
+    required this.bg,
+    required this.fg,
+    required this.accent,
+    required this.ansi,
+  });
+
+  final bool dark;
+  final int bg;
+  final int fg;
+  final int accent;
+  /// ANSI 0–15, ARGB.
+  final List<int> ansi;
+
+  /// `#rrggbb`·`#rrggbbaa` → 불투명 ARGB. 알파는 버린다 — 격자 배경은 늘 꽉 찬 색이다.
+  static int? parseHex(Object? v) {
+    if (v is! String) return null;
+    final h = v.startsWith('#') ? v.substring(1) : v;
+    if (h.length != 6 && h.length != 8) return null;
+    final rgb = int.tryParse(h.substring(0, 6), radix: 16);
+    return rgb == null ? null : 0xff000000 | rgb;
+  }
+
+  static DesignTokens? fromJson(Object? json) {
+    if (json is! Map) return null;
+    final palette = json['palette'];
+    if (palette is! Map) return null;
+    final bg = parseHex(palette['bg']);
+    final fg = parseHex(palette['fg']);
+    final ansiRaw = json['ansi'];
+    if (bg == null || fg == null || ansiRaw is! List || ansiRaw.length < 16) return null;
+    final accent = parseHex(palette['accent']) ?? fg;
+    final ansi = <int>[];
+    for (final c in ansiRaw.take(16)) {
+      final v = parseHex(c);
+      if (v == null) return null;
+      ansi.add(v);
+    }
+    return DesignTokens(
+      dark: json['theme'] != 'light',
+      bg: bg,
+      fg: fg,
+      accent: accent,
+      ansi: ansi,
+    );
+  }
+}
+
 /// 서버 하나. 주소 뒤 `/` 까지가 루트라 모든 경로는 상대로 붙는다 — `/u/<slug>/`
 /// 아래에서는 slug 가 자격이고, 그 자격은 상대경로에 저절로 따라간다.
 class Server {
@@ -140,6 +192,15 @@ class Server {
       return jsonDecode(utf8.decode(res.bodyBytes));
     } catch (_) {
       throw ServerException('${describe()} 응답을 읽지 못했다 ($path)');
+    }
+  }
+
+  /// 색은 장식이라 실패해도 화면을 막지 않는다 — 못 받으면 null, 앱 기본색으로 간다.
+  Future<DesignTokens?> designTokens({String? machine}) async {
+    try {
+      return DesignTokens.fromJson(await _getJson('design-tokens', machine: machine));
+    } on ServerException {
+      return null;
     }
   }
 

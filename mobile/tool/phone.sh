@@ -35,5 +35,9 @@ python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1]}))' "$r
 NO_PROXY='127.0.0.1,localhost' FLUTTER_XCODE_DEVELOPMENT_TEAM="$team" \
   flutter build ios --release --dart-define-from-file="$defines"
 xcrun devicectl device install app --device "$device" build/ios/iphoneos/Runner.app >/dev/null
-xcrun devicectl device process launch --device "$device" com.debimarlene.kasatermMobile >/dev/null
-echo "폰에 올렸다 — 앱이 켜져 있을 것이다"
+# 잠긴 폰은 켜 주지 못한다(FBSOpenApplicationErrorDomain 7) — 설치는 이미 끝났으니 오류가 아니다.
+if xcrun devicectl device process launch --device "$device" com.debimarlene.kasatermMobile >/dev/null 2>&1; then
+  echo "폰에 올렸다 — 앱이 켜져 있을 것이다"
+else
+  echo "폰에 올렸다 — 잠겨 있어 못 켰다, 잠금을 풀고 아이콘을 눌러 달라"
+fi

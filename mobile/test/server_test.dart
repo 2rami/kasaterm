@@ -139,4 +139,40 @@ void main() {
       expect(await s.shot('%3'), isNull);
     });
   });
+  _designTokensTests();
+}
+
+void _designTokensTests() {
+  group('DesignTokens', () {
+    test('design-tokens 응답을 팔레트로 — 알파는 버리고 theme 이 light 가 아니면 다크', () {
+      final t = DesignTokens.fromJson({
+        'theme': 'dark',
+        'palette': {'bg': '#252c35', 'fg': '#ffffff', 'accent': '#5a8ce6', 'border': '#505c6e6e'},
+        'ansi': List.generate(16, (i) => '#${i.toRadixString(16).padLeft(2, '0')}0000'),
+      });
+      expect(t, isNotNull);
+      expect(t!.dark, isTrue);
+      expect(t.bg, 0xff252c35);
+      expect(t.fg, 0xffffffff);
+      expect(t.accent, 0xff5a8ce6);
+      expect(t.ansi[1], 0xff010000);
+      expect(DesignTokens.parseHex('#505c6e6e'), 0xff505c6e);
+    });
+
+    test('모양이 어긋나면 null — 색은 장식이라 앱 기본색으로 간다', () {
+      expect(DesignTokens.fromJson({'theme': 'light'}), isNull);
+      expect(
+        DesignTokens.fromJson({'palette': {'bg': '#000000', 'fg': '#ffffff'}, 'ansi': ['#000']}),
+        isNull,
+      );
+      expect(
+        DesignTokens.fromJson({
+          'theme': 'light',
+          'palette': {'bg': '#ffffff', 'fg': '#000000'},
+          'ansi': List.filled(16, '#123456'),
+        })!.dark,
+        isFalse,
+      );
+    });
+  });
 }

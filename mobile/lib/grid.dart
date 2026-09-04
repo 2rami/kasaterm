@@ -242,10 +242,11 @@ const base16Light = <int>[
   0xff8a97b3, 0xffd8385a, 0xff4d9d34, 0xffc27a1f, 0xff3b72d6, 0xff8d67e3, 0xff0d97b3, 0xff2c3e5f,
 ];
 
-/// 256 팔레트를 ARGB 정수로. 0–15 는 테마별 표, 그 뒤는 xterm 의 계산식이다.
-int palette256(int n, {required bool dark}) {
-  if (n < 0) return dark ? base16Dark[7] : base16Light[7];
-  if (n < 16) return dark ? base16Dark[n] : base16Light[n];
+/// 256 팔레트를 ARGB 정수로. 0–15 는 넘겨받은 표(데스크톱 테마의 ANSI 16 이 정본,
+/// 없으면 `base16Dark`/`base16Light`), 그 뒤는 xterm 의 계산식이다.
+int palette256(int n, {required List<int> base16}) {
+  if (n < 0) return base16[7];
+  if (n < 16) return base16[n];
   if (n < 232) {
     final i = n - 16;
     final r = i ~/ 36, g = (i % 36) ~/ 6, b = i % 6;

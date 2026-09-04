@@ -145,16 +145,16 @@ void main() {
 
   group('palette256', () {
     test('큐브와 회색 계산이 xterm 과 같다', () {
-      expect(palette256(16, dark: true), 0xff000000);
-      expect(palette256(231, dark: true), 0xffffffff);
-      expect(palette256(232, dark: true), 0xff080808);
-      expect(palette256(255, dark: true), 0xffeeeeee);
-      expect(palette256(196, dark: true), 0xffff0000);
+      expect(palette256(16, base16: base16Dark), 0xff000000);
+      expect(palette256(231, base16: base16Dark), 0xffffffff);
+      expect(palette256(232, base16: base16Dark), 0xff080808);
+      expect(palette256(255, base16: base16Dark), 0xffeeeeee);
+      expect(palette256(196, base16: base16Dark), 0xffff0000);
     });
 
     test('0–15 는 테마별 표를 쓴다', () {
-      expect(palette256(1, dark: true), base16Dark[1]);
-      expect(palette256(1, dark: false), base16Light[1]);
+      expect(palette256(1, base16: base16Dark), base16Dark[1]);
+      expect(palette256(1, base16: base16Light), base16Light[1]);
       expect(base16Dark[1] != base16Light[1], isTrue);
     });
   });

@@ -28,6 +28,9 @@ class TermSession extends ChangeNotifier {
   bool picture = false;
   Uint8List? shotBytes;
 
+  /// 데스크톱 색. 세션마다 한 번 받는다 — 기계마다 테마가 다를 수 있어 pane 의 기계로 묻는다.
+  DesignTokens? tokens;
+
   WebSocketChannel? _channel;
   StreamSubscription<Object?>? _sub;
   Timer? _retry;
@@ -45,6 +48,13 @@ class TermSession extends ChangeNotifier {
     _retry = null;
     _closeChannel();
     if (_paused || _disposed || state == TermState.gone) return;
+    if (tokens == null) {
+      server.designTokens(machine: pane.machine).then((t) {
+        if (t == null || _disposed) return;
+        tokens = t;
+        notifyListeners();
+      });
+    }
     final ch = WebSocketChannel.connect(server.wsUri(
       'term/ws',
       query: {'pane': pane.id, 'grid': '1'},

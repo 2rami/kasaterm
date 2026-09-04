@@ -152,10 +152,11 @@ class _TerminalScreenState extends State<TerminalScreen> with WidgetsBindingObse
         ),
       );
     }
+    final tokens = s.tokens;
     return GridCanvas(
       grid: s.grid,
       version: s.grid.version,
-      palette: TerminalPalette.of(context),
+      palette: tokens == null ? TerminalPalette.of(context) : TerminalPalette.fromTokens(tokens),
     );
   }
 }

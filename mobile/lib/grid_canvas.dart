@@ -1,8 +1,10 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'grid.dart';
+import 'server.dart';
 
 /// 테마의 기본 fg/bg 와 256 팔레트 판을 한데 묶는다.
 class TerminalPalette {
@@ -11,13 +13,24 @@ class TerminalPalette {
     required this.fg,
     required this.bg,
     required this.cursor,
+    required this.ansi,
   });
+
+  /// 데스크톱이 지금 쓰는 색 그대로 — 같은 학생 화면이 폰에서도 같은 얼굴로 보인다.
+  TerminalPalette.fromTokens(DesignTokens t)
+      : dark = t.dark,
+        fg = Color(t.fg),
+        bg = Color(t.bg),
+        cursor = Color(t.accent),
+        ansi = t.ansi;
 
   final bool dark;
   final Color fg;
   final Color bg;
   final Color cursor;
+  final List<int> ansi;
 
+  /// 서버 색을 아직 못 받았을 때의 앱 기본색.
   static TerminalPalette of(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final dark = scheme.brightness == Brightness.dark;
@@ -26,12 +39,13 @@ class TerminalPalette {
       fg: dark ? const Color(0xffc0caf5) : const Color(0xff15294a),
       bg: dark ? const Color(0xff12161c) : Colors.white,
       cursor: scheme.primary,
+      ansi: dark ? base16Dark : base16Light,
     );
   }
 
   Color resolve(CellColor c, {required bool foreground}) => switch (c) {
         DefaultColor() => foreground ? fg : bg,
-        IndexColor(:final index) => Color(palette256(index, dark: dark)),
+        IndexColor(:final index) => Color(palette256(index, base16: ansi)),
         RgbColor(:final r, :final g, :final b) => Color.fromARGB(255, r, g, b),
       };
 
@@ -41,10 +55,11 @@ class TerminalPalette {
       other.dark == dark &&
       other.fg == fg &&
       other.bg == bg &&
-      other.cursor == cursor;
+      other.cursor == cursor &&
+      listEquals(other.ansi, ansi);
 
   @override
-  int get hashCode => Object.hash(dark, fg, bg, cursor);
+  int get hashCode => Object.hash(dark, fg, bg, cursor, Object.hashAll(ansi));
 }
 
 const _fontFamily = 'TermMono';

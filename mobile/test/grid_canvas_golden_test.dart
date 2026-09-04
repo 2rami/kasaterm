@@ -54,6 +54,7 @@ const _dark = TerminalPalette(
   fg: Color(0xffc0caf5),
   bg: Color(0xff12161c),
   cursor: Color(0xff7ab8ff),
+  ansi: base16Dark,
 );
 
 const _light = TerminalPalette(
@@ -61,6 +62,7 @@ const _light = TerminalPalette(
   fg: Color(0xff15294a),
   bg: Colors.white,
   cursor: Color(0xff4a90e2),
+  ansi: base16Light,
 );
 
 Widget host(Grid g, TerminalPalette palette, double width) => MaterialApp(
