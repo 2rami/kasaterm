@@ -100,9 +100,15 @@ class _RootScreenState extends State<RootScreen> {
   late Future<Server?> _initial = _load();
   Server? _server;
 
+  /// 빌드 때 `KASA_ROOT` 로 구워 넣은 주소(tool/phone.sh). 자기 맥에서 만들어 자기
+  /// 폰에 넣는 판은 주소를 처음부터 알고 있어 연결 화면을 안 거친다. 저장된 주소가
+  /// 있으면 그쪽이 우선이고, 「주소 지우기」는 그 자리에서 연결 화면을 보이되 다음
+  /// 실행에는 다시 이 값으로 돌아온다.
+  static const _baked = String.fromEnvironment('KASA_ROOT');
+
   Future<Server?> _load() async {
-    final root = await _store.load();
-    return root == null ? null : Server(root);
+    final root = await _store.load() ?? Uri.tryParse(_baked);
+    return root == null || !root.hasScheme ? null : Server(root);
   }
 
   Future<void> _connected(Server server) async {

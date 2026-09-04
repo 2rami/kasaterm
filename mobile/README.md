@@ -56,21 +56,24 @@ brew install cocoapods
 flutter precache --ios
 ```
 
-서명은 Xcode 화면을 열지 않고 붙인다. Xcode 의 계정 설정(Settings → Accounts)에 Apple ID 를
-한 번 넣어 두면 팀 ID 가 아래 명령으로 읽히고, 그 값을 환경변수로 주면 flutter 가 xcodebuild 에
-`-allowProvisioningUpdates` 를 붙여 인증서·프로필을 스스로 만든다. 프로젝트 파일에는 팀 ID 를
-적지 않는다 — 사람마다 다르다.
+그 다음은 한 줄이다. 아이폰을 케이블로 붙이고(폰의 개발자 모드가 켜져 있어야 한다):
 
 ```bash
-defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier | grep -E 'teamID|teamName'
-FLUTTER_XCODE_DEVELOPMENT_TEAM=<teamID> NO_PROXY='127.0.0.1,localhost' flutter run -d <기기 UDID>
+tool/phone.sh
 ```
 
-기기 UDID 는 `flutter devices`. 폰 쪽은 **개발자 모드**(설정 → 개인정보 보호 및 보안 → 개발자 모드)가
-켜져 있어야 Xcode 가 기기를 목적지로 잡는다 — 꺼져 있으면 "Developer Mode disabled" 로 선다.
-무료 Apple ID(Personal Team)로 서명하면 7일마다 다시 설치해야 한다. 번들 id 는
-`com.debimarlene.kasatermMobile`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에 붙이려면
-`Info.plist` 의 `NSAppTransportSecurity` 에 `NSAllowsLocalNetworking` 이 켜져 있어야 한다.
+이 맥의 카사텀이 받은 폰 주소(`GET /mobile/users` 의 주인 항목)를 앱 안에 구워 넣은
+릴리스판을 만들어 폰에 설치하고 켠다. 앱은 주소를 처음부터 알고 있어 **폰에서 아무것도
+입력하지 않는다** — 연결 화면은 남의 기계에 붙을 때만 나온다. 주소는 `--dart-define-from-file`
+로 넘긴다(argv 에 자격이 안 남는다). Xcode 화면은 열지 않는다: 팀 ID 를 Xcode 계정 설정에서
+읽어 환경변수로 주면 flutter 가 인증서 검사를 건너뛰고 xcodebuild 에 `-allowProvisioningUpdates`
+를 붙여 인증서·프로필을 스스로 만든다. 팀 ID 는 사람마다 달라 프로젝트 파일에 적지 않는다.
+
+- 첫 설치 뒤 폰의 설정 → 일반 → VPN 및 기기 관리에서 개발자 앱을 한 번 「신뢰」해야 켜진다.
+- 무료 Apple ID(Personal Team)는 7일마다 `tool/phone.sh` 를 다시 돌린다.
+- 개발자 모드가 꺼져 있으면 xcodebuild 가 "Developer Mode disabled" 로 선다.
+- 번들 id 는 `com.debimarlene.kasatermMobile`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에
+  붙이려면 `Info.plist` 의 `NSAppTransportSecurity` 에 `NSAllowsLocalNetworking` 이 켜져 있어야 한다.
 
 ## 지킬 것
 
