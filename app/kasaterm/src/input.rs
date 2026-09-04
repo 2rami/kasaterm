@@ -16,8 +16,11 @@ fn retheme_injection_allowed(
     bare: bool,
     target_surface: &str,
     composing_owner: Option<&str>,
-    composing: bool,
+    in_preedit: bool,
+    preedit: &str,
+    waiting_for_os_commit: bool,
 ) -> bool {
+    let composing = in_preedit || !preedit.is_empty() || waiting_for_os_commit;
     bare && !(composing && composing_owner == Some(target_surface))
 }
 
@@ -1218,7 +1221,9 @@ impl App {
                 bare,
                 &surface,
                 composing_owner,
-                self.in_preedit || !self.preedit.is_empty(),
+                self.in_preedit,
+                &self.preedit,
+                self.os_ime_surface.is_some(),
             ) {
                 continue;
             }
@@ -2394,20 +2399,6 @@ impl App {
         self.ime_retarget(crate::ImeFocus::Pane(surface));
     }
 
-    /// Final step for a real pane-focus transition. Layout construction and
-    /// socket split bookkeeping sometimes assign `active_pane` temporarily;
-    /// those paths must stay direct so they cannot steal/flush a composition
-    /// the user never moved.
-    pub(crate) fn activate_pane_focus(&mut self, pane: &str) -> bool {
-        let changed = {
-            let mut ws = self.ws.lock().unwrap();
-            let changed = ws.active_pane.as_deref() != Some(pane);
-            ws.active_pane = Some(pane.to_string());
-            changed
-        };
-        self.handoff_ime_to_active_surface();
-        changed
-    }
     /// Commit-input key entry with Hangul composition, mirroring
     /// `md_editor_input` for the single-line git commit field. macOS hands jamo
     /// through `event.text`; feed the shared composer, insert committed
@@ -4430,25 +4421,44 @@ mod working_scan_tests {
             true,
             "%tab-a",
             Some("%tab-a"),
-            true
+            true,
+            "한",
+            false
         ));
         assert!(retheme_injection_allowed(
             true,
             "%tab-b",
             Some("%tab-a"),
-            true
+            true,
+            "한",
+            false
         ));
         assert!(retheme_injection_allowed(
             true,
             "%tab-a",
             Some("%tab-a"),
+            false,
+            "",
             false
         ));
         assert!(!retheme_injection_allowed(
             false,
             "%tab-a",
             Some("%tab-a"),
+            false,
+            "",
             false
+        ));
+
+        // Windows/Linux pane focus handoff clears the visible preedit while
+        // the OS can still owe us a late Commit for the old surface.
+        assert!(!retheme_injection_allowed(
+            true,
+            "%tab-a",
+            Some("%tab-a"),
+            false,
+            "",
+            true
         ));
     }
 

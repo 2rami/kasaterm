@@ -63,6 +63,12 @@ fn socket_split_focus_action(
     }
 }
 
+fn apply_trusted_backend_focus(ws: &mut Workspace, pane_id: &str) -> bool {
+    let changed = ws.active_pane.as_deref() != Some(pane_id);
+    ws.active_pane = Some(pane_id.to_string());
+    changed
+}
+
 impl ApplicationHandler<UserEvent> for App {
     /// A background thread (PTY snapshot, socket) asked us to repaint.
     /// Delivered even while a WaitUntil is parked, so this is what makes
@@ -595,9 +601,15 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::BackendFocus(id) => {
-                let exists = self.ws.lock().unwrap().panes.contains_key(id);
-                if exists {
-                    self.activate_pane_focus(id);
+                // tmux가 보낸 id는 ScreenUpdate보다 먼저 올 수 있다. 아직 panes에
+                // 없다는 이유로 버리면 첫 화면이 와도 포커스 이벤트는 다시 안 온다.
+                let changed = {
+                    let mut ws = self.ws.lock().unwrap();
+                    apply_trusted_backend_focus(&mut ws, id)
+                };
+                let ime_before = self.ime_focus.clone();
+                self.handoff_ime_to_active_surface();
+                if changed || self.ime_focus != ime_before {
                     self.chrome_dirty = true;
                     self.render_frame();
                 }
@@ -7299,7 +7311,32 @@ pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Optio
 
 #[cfg(test)]
 mod ime_focus_tests {
-    use super::{socket_split_focus_action, SocketSplitFocusAction};
+    use super::{
+        apply_trusted_backend_focus, socket_split_focus_action, SocketSplitFocusAction,
+    };
+    use crate::Workspace;
+
+    fn screen_update(id: &str) -> kasa_bridge::screen::ScreenUpdate {
+        kasa_bridge::screen::ScreenUpdate {
+            pane_id: id.to_string(),
+            rows: 1,
+            cols: 1,
+            dirty: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+            mouse_enabled: false,
+            mouse_sgr: false,
+            app_cursor: false,
+            bracketed_paste: false,
+            title: None,
+            eof: false,
+            prompt_end: None,
+            notify: None,
+            inline_images: Vec::new(),
+        }
+    }
 
     #[test]
     fn focused_socket_split_hands_composition_to_the_new_surface() {
@@ -7327,5 +7364,17 @@ mod ime_focus_tests {
             socket_split_focus_action(Some("%old".into()), true, false),
             SocketSplitFocusAction::Restore(Some("%old".into()))
         );
+    }
+
+    #[test]
+    fn backend_focus_before_first_screen_update_is_not_dropped() {
+        let mut ws = Workspace::default();
+        assert!(apply_trusted_backend_focus(&mut ws, "%future"));
+        assert!(!ws.panes.contains_key("%future"));
+
+        crate::App::apply_screen_update(&mut ws, screen_update("%future"));
+
+        assert_eq!(ws.active_pane.as_deref(), Some("%future"));
+        assert!(ws.panes.contains_key("%future"));
     }
 }

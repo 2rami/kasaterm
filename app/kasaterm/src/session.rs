@@ -1,6 +1,10 @@
 //! 세션·윈도우·cwd/label·daemon·pty·tmux/socket·스크린 펌프·상태 저장.
 use super::*;
 
+fn forward_backend_focus<T>(pane_id: String, send: impl FnOnce(String) -> T) -> T {
+    send(pane_id)
+}
+
 fn apply_workspace_focus(
     ws: &mut Workspace,
     requested: &str,
@@ -6637,15 +6641,13 @@ impl App {
                         // grabbed focus). Mirror that into our state
                         // so the cursor + active border + outgoing key
                         // target all move together.
-                        let changed = ws_events
-                            .lock()
-                            .unwrap()
-                            .active_pane
-                            .as_deref()
-                            != Some(pane_id.as_str());
-                        if changed {
-                            let _ = proxy_events.send_event(UserEvent::BackendFocus(pane_id));
-                        }
+                        // 백엔드 스레드의 active_pane은 GUI 이벤트 처리보다 늦다.
+                        // 여기서 중복 제거하면 빠른 A→B→A의 마지막 A를 옛 상태와
+                        // 같다고 버려 GUI가 B에 멈춘다. 순서 보존은 큐에 전부 싣고,
+                        // 실제 no-op 판정은 GUI 스레드가 자기 최신 상태로 한다.
+                        let _ = forward_backend_focus(pane_id, |id| {
+                            proxy_events.send_event(UserEvent::BackendFocus(id))
+                        });
                     }
                     _ => {}
                 }
@@ -8045,7 +8047,8 @@ mod tests {
         account_restart_busy, account_switch_confirm_text, account_switch_focused_tab,
         account_switch_impact, apply_workspace_focus, editor_command_line, git_repo_root,
         next_free_pane_id, pane_account_fate, pick_restore_id, predicted_target_dir,
-        restored_scrollback, AccountSwitchImpact, PaneAccountFact, PaneAccountFate,
+        restored_scrollback, forward_backend_focus, AccountSwitchImpact, PaneAccountFact,
+        PaneAccountFate,
     };
     use crate::{PaneState, PaneTab, Workspace};
 
@@ -8170,6 +8173,16 @@ mod tests {
         assert_eq!(ws.panes["%outer"].active_tab, 1, "pane 클릭은 보던 탭 유지");
         assert_eq!(apply_workspace_focus(&mut ws, "%outer", true), Some(true));
         assert_eq!(ws.panes["%outer"].active_tab, 0, "surface.focus는 첫 탭 선택");
+    }
+
+    #[test]
+    fn backend_focus_queue_preserves_a_to_b_to_a_order() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for pane in ["%a", "%b", "%a"] {
+            forward_backend_focus(pane.to_string(), |id| tx.send(id).unwrap());
+        }
+        drop(tx);
+        assert_eq!(rx.into_iter().collect::<Vec<_>>(), ["%a", "%b", "%a"]);
     }
 
     /// 칩만 다는 pane 으로는 묻지 않는다 — 아무 일도 안 당하므로 물으면 한 가지를
