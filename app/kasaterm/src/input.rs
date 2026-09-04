@@ -2278,6 +2278,15 @@ impl App {
             let (col, row) = self
                 .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
                 .unwrap_or((1, 1));
+            // 화면 좌표를 앱이 아는 좌표로 되돌린다. 여기서 SGR 을 직접 조립하므로
+            // `send_mouse_sgr` 의 같은 보정이 안 걸린다 — 화면을 당긴 pane 에서는 그
+            // 앱이 다른 줄에서 굴린 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에
+            // 자리가 없으니 첫 줄로 친다: 휠은 어느 줄인지보다 **그 pane 안**인지가
+            // 중요해서, 클릭과 달리 흘리지 않고 보낸다.
+            let row = self
+                .target_pane()
+                .and_then(|id| self.pane_view_shift.get(&id).map(|s| s.term_row(row as usize)))
+                .map_or(row, |r| r.unwrap_or(0) as u16);
             let button = if lines > 0 { 64 } else { 65 };
             let count = lines.unsigned_abs().min(8) as usize;
             let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
