@@ -9,6 +9,11 @@ import 'server.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
+/// 붙은 기계의 색. MaterialApp 의 테마로 들어가야 한다 — RootScreen 안에서 Theme 으로
+/// 감싸면 Navigator 가 위에 올리는 학생 화면(다른 라우트)에는 안 닿아, 허브만 데스크톱
+/// 색이고 상단 바·키 줄·입력창은 기본 흰색으로 남았다.
+final designTokens = ValueNotifier<DesignTokens?>(null);
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLinkObserver.instance.install();
@@ -130,12 +135,21 @@ class KasatermApp extends StatelessWidget {
   const KasatermApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    navigatorKey: navigatorKey,
-    title: 'kasaterm',
-    theme: buildTheme(Brightness.light),
-    darkTheme: buildTheme(Brightness.dark),
-    home: const RootScreen(),
+  Widget build(BuildContext context) => ValueListenableBuilder<DesignTokens?>(
+    valueListenable: designTokens,
+    // 데스크톱 색을 받았으면 폰의 라이트·다크 설정과 상관없이 그 얼굴이다.
+    builder: (context, tokens, _) => MaterialApp(
+      navigatorKey: navigatorKey,
+      debugShowCheckedModeBanner: false,
+      title: 'kasaterm',
+      theme: tokens == null
+          ? buildTheme(Brightness.light)
+          : themeFromTokens(tokens),
+      darkTheme: tokens == null
+          ? buildTheme(Brightness.dark)
+          : themeFromTokens(tokens),
+      home: const RootScreen(),
+    ),
   );
 }
 
@@ -150,10 +164,23 @@ class RootScreen extends StatefulWidget {
 class _RootScreenState extends State<RootScreen> {
   static const _store = AddressStore();
 
+  /// 검증용: 빌드 때 `KASA_OPEN_PANE`(과 `KASA_OPEN_MACHINE`)을 주면 켜자마자 그 학생
+  /// 화면을 연다 — 시뮬레이터는 탭을 못 보내니 링크와 같은 길로 화면을 꺼내 본다.
+  static const _openPane = String.fromEnvironment('KASA_OPEN_PANE');
+  static const _openMachine = String.fromEnvironment('KASA_OPEN_MACHINE');
+
   @override
   void initState() {
     super.initState();
     AppLinkObserver.instance.attach(_openLink);
+    if (_openPane.isNotEmpty) {
+      _openLink(
+        AppLink(
+          pane: _openPane,
+          machine: _openMachine.isEmpty ? null : _openMachine,
+        ),
+      );
+    }
   }
 
   @override
@@ -207,9 +234,6 @@ class _RootScreenState extends State<RootScreen> {
   /// 실행에는 다시 이 값으로 돌아온다.
   static const _baked = String.fromEnvironment('KASA_ROOT');
 
-  /// 붙은 기계의 색. 앱 전체가 그 얼굴이 된다 — 못 받으면 SCHALE 기본색.
-  DesignTokens? _tokens;
-
   Future<Server?> _load() async {
     final root = await _store.load() ?? Uri.tryParse(_baked);
     if (root == null || !root.hasScheme) return null;
@@ -223,7 +247,7 @@ class _RootScreenState extends State<RootScreen> {
       if (t == null || !mounted || (_server != null && _server != server)) {
         return;
       }
-      setState(() => _tokens = t);
+      designTokens.value = t;
     });
   }
 
@@ -233,8 +257,8 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _server = server;
       _initial = Future.value(server);
-      _tokens = null;
     });
+    designTokens.value = null;
     _loadTokens(server);
   }
 
@@ -244,32 +268,24 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _server = null;
       _initial = Future.value(null);
-      _tokens = null;
     });
+    designTokens.value = null;
   }
 
   @override
-  Widget build(BuildContext context) {
-    final tokens = _tokens;
-    final child = FutureBuilder<Server?>(
-      future: _initial,
-      builder: (context, snap) {
-        if (snap.connectionState != ConnectionState.done) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-        final server = _server ?? snap.data;
-        if (server == null) return ConnectScreen(onConnected: _connected);
-        return HubScreen(
-          key: ValueKey(server.root),
-          server: server,
-          onChangeAddress: _disconnected,
-        );
-      },
-    );
-    return tokens == null
-        ? child
-        : Theme(data: themeFromTokens(tokens), child: child);
-  }
+  Widget build(BuildContext context) => FutureBuilder<Server?>(
+    future: _initial,
+    builder: (context, snap) {
+      if (snap.connectionState != ConnectionState.done) {
+        return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      }
+      final server = _server ?? snap.data;
+      if (server == null) return ConnectScreen(onConnected: _connected);
+      return HubScreen(
+        key: ValueKey(server.root),
+        server: server,
+        onChangeAddress: _disconnected,
+      );
+    },
+  );
 }

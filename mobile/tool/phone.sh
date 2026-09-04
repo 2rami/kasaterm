@@ -34,7 +34,29 @@ python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1]}))' "$r
 
 NO_PROXY='127.0.0.1,localhost' FLUTTER_XCODE_DEVELOPMENT_TEAM="$team" \
   flutter build ios --release --dart-define-from-file="$defines"
-xcrun devicectl device install app --device "$device" build/ios/iphoneos/Runner.app >/dev/null
+
+# 네이티브 에셋 프레임워크(objective_c 등)는 flutter 가 Run Script 단계에서 서명하는데,
+# 그때 EXPANDED_CODE_SIGN_IDENTITY 가 비어 오는 빌드가 있어 ad-hoc 으로 남는다 — 폰이
+# 「invalid signature」로 설치를 거부한다(2026-09-05 실측: 같은 트리에서 두 번 연속 그랬고
+# 다음 빌드는 멀쩡했다, 조건은 못 잡았다). 앱과 같은 인증서로 다시 서명하면 된다. 앱 봉인이
+# 프레임워크를 덮으므로 앱도 다시 서명한다(권한은 그대로 둔다).
+app=build/ios/iphoneos/Runner.app
+identity=$(codesign -dvv "$app" 2>&1 | sed -n 's/^Authority=\(Apple Development.*\)/\1/p' | head -1)
+resign=
+for fw in "$app"/Frameworks/*.framework; do
+  if codesign -dvv "$fw" 2>&1 | grep -q '^Signature=adhoc'; then
+    [ -n "$identity" ] || { echo "앱이 개발 인증서로 서명돼 있지 않다" >&2; exit 1; }
+    codesign --force --sign "$identity" --preserve-metadata=identifier,entitlements "$fw"
+    resign=1
+  fi
+done
+if [ -n "$resign" ]; then
+  codesign --force --sign "$identity" --preserve-metadata=identifier,entitlements,flags "$app"
+  codesign --verify --deep --strict "$app"
+  echo "ad-hoc 으로 남은 프레임워크를 다시 서명했다"
+fi
+
+xcrun devicectl device install app --device "$device" "$app" >/dev/null
 # 잠긴 폰은 켜 주지 못한다(FBSOpenApplicationErrorDomain 7) — 설치는 이미 끝났으니 오류가 아니다.
 if xcrun devicectl device process launch --device "$device" com.debimarlene.kasatermMobile >/dev/null 2>&1; then
   echo "폰에 올렸다 — 앱이 켜져 있을 것이다"
