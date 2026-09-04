@@ -3549,6 +3549,7 @@ impl App {
                             PaneContent::Web(_) => "globe",
                             PaneContent::Image(_) => "image",
                             PaneContent::Markdown(_) => "file-text",
+                            PaneContent::Settings => "settings",
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
@@ -3835,6 +3836,7 @@ impl App {
         } else {
             HashMap::new()
         };
+        let settings_room_active = self.settings_room_active();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -4190,7 +4192,7 @@ impl App {
                 if hover {
                     hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                 }
-                let fg = if hover || self.settings_open {
+                let fg = if hover || settings_room_active {
                     theme::text()
                 } else {
                     theme::text_dim()
@@ -5847,7 +5849,7 @@ impl App {
                             1.0,
                             theme::border(),
                         );
-                        let settings_on = self.settings_open;
+                        let settings_on = settings_room_active;
                         for (r, icon, on) in [
                             (fb, "message-square-warning", false),
                             (st, "settings-2", settings_on),

@@ -519,6 +519,17 @@ impl App {
     /// `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면 창이 좁을 때
     /// 예산을 건너뛰고 겹쳐 그리게 된다.
     fn chrome_wants(&self) -> (f32, f32, f32) {
+        if self.settings_room_active() {
+            return (
+                if self.sidebar_visible && !self.tabs_on_top {
+                    self.sidebar_w_logical
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+            );
+        }
         (
             if self.sidebar_visible && !self.tabs_on_top {
                 self.sidebar_w_logical
@@ -839,6 +850,9 @@ impl App {
     /// (`set_footer_default`) decides it unless this pane sits in an exception
     /// set: `shown` forces it on, `hidden` forces it off.
     pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
+        if self.pane_is_settings(id) {
+            return false;
+        }
         if self.statusbar.shown.contains(id) {
             true
         } else if self.statusbar.hidden.contains(id) {
@@ -894,6 +908,9 @@ impl App {
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.
     pub(crate) fn toggle_git_col(&mut self) {
+        if self.settings_room_active() {
+            return;
+        }
         self.git.col_visible = !self.git.col_visible;
         if self.git.col_visible {
             self.publish_git_col_cwd();
@@ -910,6 +927,9 @@ impl App {
     /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
     /// is all the state it needs.
     pub(crate) fn toggle_statusbar(&mut self, id: &str) {
+        if self.pane_is_settings(id) {
+            return;
+        }
         // Record this pane as an exception to the global default — drop any
         // stale membership first, then file it under the set opposite to its
         // new state (off → hidden, on → shown).
@@ -943,6 +963,9 @@ impl App {
     /// clicks land a row off, which is the same class of bug as the zoom
     /// mapping. `chrome_dirty` alone would repaint but not re-measure.
     pub(crate) fn toggle_pane_header(&mut self, id: &str) {
+        if self.pane_is_settings(id) {
+            return;
+        }
         {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.panes.get_mut(id) else {
@@ -1224,7 +1247,11 @@ impl App {
     /// 서버는 브라우저가 리다이렉트해준다).
     /// 창 맨 아래 상태줄 높이(logical px). 설정에서 바뀌므로 상수를 직접 읽지 마라.
     pub(crate) fn status_h(&self) -> f32 {
-        self.set_status_h
+        if self.settings_room_active() {
+            0.0
+        } else {
+            self.set_status_h
+        }
     }
 
     /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
@@ -1775,6 +1802,9 @@ impl App {
 
     /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.
     pub(crate) fn toggle_window_expand(&mut self, idx: usize) {
+        if self.settings_room_index() == Some(idx) {
+            return;
+        }
         let opening = !self.expanded_windows.contains(&idx);
         if opening {
             self.expanded_windows.insert(idx);
@@ -1798,6 +1828,9 @@ impl App {
         idx: usize,
         tab: (f32, f32, f32, f32),
     ) -> Option<(f32, f32, f32, f32)> {
+        if self.settings_room_index() == Some(idx) {
+            return None;
+        }
         let n = self.window_leaves(idx).len();
         // pane 이 하나뿐인 방도 편다. 예전엔 `n < 2` 로 막았는데 — 한 줄짜리 목록은
         // 펼 값어치가 없다는 판단이었다 — 그 한 줄이 **누가 거기 있고 무슨 상태인지**
@@ -1862,6 +1895,13 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
+            // 설정은 고정 이름의 내부 방이다. 클릭은 전환만 하고 이름 편집·드래그는
+            // 장전하지 않는다.
+            if self.settings_room_index() == Some(idx) {
+                self.commit_room_rename();
+                self.open_settings_room(None);
+                return true;
+            }
             // 펼치기 버튼만 전환의 예외다 — 그 배지 크기.
             let tab = self
                 .window_tab_rects
@@ -1960,6 +2000,9 @@ impl App {
     /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
     /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
     pub(crate) fn dock_reserve_h(&self) -> f32 {
+        if self.settings_room_active() {
+            return 0.0;
+        }
         if self.docked.is_empty() && self.zoomed_pane.is_none() {
             0.0
         } else {
@@ -2220,6 +2263,9 @@ impl App {
     }
     /// Show/hide the file-tree column. Same reflow path as `toggle_sidebar`.
     pub(crate) fn toggle_file_tree(&mut self) {
+        if self.settings_room_active() {
+            return;
+        }
         self.file_tree.visible = !self.file_tree.visible;
         if self.file_tree.visible {
             self.refresh_file_tree();
@@ -2533,6 +2579,9 @@ impl App {
         kind: InlineWebKind,
         cat: Option<crate::SettingsCat>,
     ) -> bool {
+        if kind == InlineWebKind::Settings {
+            return self.open_settings_room(cat);
+        }
         if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
             if let (InlineWebKind::Settings, Some(c), Some(host)) =
                 (kind, cat, self.inline_web.as_ref())
@@ -2659,7 +2708,6 @@ impl App {
                 return false;
             }
         };
-        self.settings_open = kind == InlineWebKind::Settings;
         self.inline_web = Some(InlineWebHost {
             webview,
             window,
@@ -2678,19 +2726,10 @@ impl App {
 
     pub(crate) fn toggle_settings_web(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         cat: Option<crate::SettingsCat>,
     ) {
-        if self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == InlineWebKind::Settings)
-            && cat.is_none()
-        {
-            self.close_inline_web();
-        } else {
-            let _ = self.open_inline_web(event_loop, InlineWebKind::Settings, cat);
-        }
+        self.toggle_settings_room(cat);
     }
 
     fn toggle_inline_web(
@@ -2714,10 +2753,7 @@ impl App {
         {
             self.account_switch_confirm = None;
         }
-        let Some(host) = self.inline_web.take() else {
-            self.settings_open = false;
-            return;
-        };
+        let Some(host) = self.inline_web.take() else { return };
         let restore_sidebar = host.restore_sidebar;
         if let Some(main) = &self.window {
             if let Some(child) = host.window.as_ref().filter(|_| host.visible) {
@@ -2729,7 +2765,6 @@ impl App {
         }
         let kind = host.kind;
         drop(host);
-        self.settings_open = false;
         if restore_sidebar && self.sidebar_visible {
             self.toggle_sidebar();
         }
@@ -2814,10 +2849,10 @@ impl App {
 
     pub(crate) fn open_settings_inline(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         cat: Option<crate::SettingsCat>,
     ) -> bool {
-        self.open_inline_web(event_loop, InlineWebKind::Settings, cat)
+        self.open_settings_room(cat)
     }
 
     pub(crate) fn open_settings_window(
@@ -2830,18 +2865,12 @@ impl App {
             let theme = crate::socket::read_character_theme();
             let _ = self.open_student_web_window(event_loop, &name, &theme);
         } else {
-            let _ = self.open_settings_inline(event_loop, cat);
+            let _ = self.open_settings_room(cat);
         }
     }
 
     pub(crate) fn close_settings_inline(&mut self) {
-        if self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == InlineWebKind::Settings)
-        {
-            self.close_inline_web();
-        }
+        self.close_settings_room();
     }
 
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
@@ -3250,7 +3279,7 @@ impl App {
                 // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(거노).
                 // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
                 let idx = self.active_window;
-                if self.windows.len() <= 1 {
+                if self.user_room_count() <= 1 {
                     return;
                 }
                 let action = PendingClose::Session(idx);
@@ -3326,6 +3355,10 @@ impl App {
     /// in that session is running a job, else close it now. The app stays open —
     /// this is the per-session path, distinct from the whole-app quit above.
     pub(crate) fn confirm_or_close_session(&mut self, idx: usize) {
+        if self.settings_room_index() == Some(idx) {
+            self.close_settings_room();
+            return;
+        }
         if self.guard_dirty(&PendingClose::Session(idx)) {
             return;
         }

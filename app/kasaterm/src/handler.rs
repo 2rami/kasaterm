@@ -99,7 +99,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // window_event 와 같은 이유 — 소켓/백그라운드에서 온 변경도 자동 저장
         // 대상이다(pane 분할·세션 바인딩이 여기로 들어온다).
-        self.session_touched = true;
+        let settings_only = match &event {
+            UserEvent::SocketSwitchSession(idx) | UserEvent::SocketCloseRoom(idx) => {
+                self.settings_room_index() == Some(*idx)
+            }
+            _ => false,
+        };
+        if !settings_only {
+            self.session_touched = true;
+        }
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
@@ -722,7 +730,11 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketSwitchSession(idx) => {
-                self.switch_window(*idx);
+                if self.settings_room_index() == Some(*idx) {
+                    self.open_settings_room(None);
+                } else {
+                    self.switch_window(*idx);
+                }
                 return;
             }
             UserEvent::SocketNewRoom(character) => {
@@ -1115,10 +1127,7 @@ impl ApplicationHandler<UserEvent> for App {
                             Some(crate::SettingsCat::Students),
                             None,
                         );
-                        Ok(self
-                            .inline_web
-                            .as_ref()
-                            .is_some_and(|host| host.kind == crate::InlineWebKind::Settings))
+                        Ok(self.settings_room_active())
                     }
                     // 학생 세부설정을 **별도 창**으로. 설정 본체가 앱 안으로 들어가면
                     // 세부는 밖에 있어야 한다(거노 2026-08-25). `arg`는 정확한 이름,
@@ -2507,7 +2516,10 @@ impl ApplicationHandler<UserEvent> for App {
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
-        self.session_touched = true;
+        let session_touched_before_event = self.session_touched;
+        if !self.settings_room_active() {
+            self.session_touched = true;
+        }
         if self.web_host_window_event(id, &event) {
             return;
         }
@@ -3573,7 +3585,11 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| inside(r))
                         .map(|(i, _)| *i)
                     {
+                        let settings = self.settings_room_index() == Some(idx);
                         self.confirm_or_close_session(idx);
+                        if settings {
+                            self.session_touched = session_touched_before_event;
+                        }
                     }
                 }
             }
@@ -3848,11 +3864,13 @@ impl ApplicationHandler<UserEvent> for App {
                         // 트레이 말풍선 — 설정 창을 Feedback 페이지로 바로 연다.
                         // 쓰다 만 본문은 App 에 남아 있어 다시 열면 그대로다.
                         self.open_settings_window(event_loop, Some(SettingsCat::Feedback), None);
+                        self.session_touched = session_touched_before_event;
                         window.request_redraw();
                         return;
                     }
                     if hit(self.settings_btn_rect) {
                         self.toggle_settings_web(event_loop, None);
+                        self.session_touched = session_touched_before_event;
                         window.request_redraw();
                         return;
                     }
@@ -4130,6 +4148,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     Some(SettingsCat::Claude),
                                     None,
                                 );
+                                self.session_touched = session_touched_before_event;
                                 return;
                             }
                             None => self.account_menu_provider = None,
@@ -4249,7 +4268,22 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if self.sidebar_visible && cx < self.tab_strip_w() {
+                        let over = |rect: (f32, f32, f32, f32)| {
+                            cx >= rect.0
+                                && cx <= rect.0 + rect.2
+                                && cy >= rect.1
+                                && cy <= rect.1 + rect.3
+                        };
+                        let settings_hit = self.settings_room_index().is_some_and(|settings| {
+                            self.window_tab_rects
+                                .iter()
+                                .chain(self.window_tab_close_rects.iter())
+                                .any(|(idx, rect)| *idx == settings && over(*rect))
+                        });
                         if self.window_strip_click(cx, cy) {
+                            if settings_hit {
+                                self.session_touched = session_touched_before_event;
+                            }
                             return;
                         }
                         // Empty sidebar space — swallow the click.
@@ -4260,8 +4294,25 @@ impl ApplicationHandler<UserEvent> for App {
                     // the click fell through to the title-bar drag below and
                     // the tabs were dead (switch/close/+ all no-ops). A miss is
                     // NOT swallowed: empty strip space still drags the window.
-                    if self.tabs_on_top && cy < TITLE_HEIGHT && self.window_strip_click(cx, cy) {
-                        return;
+                    if self.tabs_on_top && cy < TITLE_HEIGHT {
+                        let over = |rect: (f32, f32, f32, f32)| {
+                            cx >= rect.0
+                                && cx <= rect.0 + rect.2
+                                && cy >= rect.1
+                                && cy <= rect.1 + rect.3
+                        };
+                        let settings_hit = self.settings_room_index().is_some_and(|settings| {
+                            self.window_tab_rects
+                                .iter()
+                                .chain(self.window_tab_close_rects.iter())
+                                .any(|(idx, rect)| *idx == settings && over(*rect))
+                        });
+                        if self.window_strip_click(cx, cy) {
+                            if settings_hit {
+                                self.session_touched = session_touched_before_event;
+                            }
+                            return;
+                        }
                     }
                     // Click outside the tree column drops search focus — else
                     // keystrokes meant for the clicked terminal pane keep
@@ -4660,13 +4711,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 match act {
                                     state::InfoAction::Arona => self.toggle_arona_panel(event_loop),
                                     state::InfoAction::Settings => {
-                                        self.open_settings_window(event_loop, None, None)
+                                        self.open_settings_window(event_loop, None, None);
+                                        self.session_touched = session_touched_before_event;
                                     }
-                                    state::InfoAction::Feedback => self.open_settings_window(
-                                        event_loop,
-                                        Some(SettingsCat::Feedback),
-                                        None,
-                                    ),
+                                    state::InfoAction::Feedback => {
+                                        self.open_settings_window(
+                                            event_loop,
+                                            Some(SettingsCat::Feedback),
+                                            None,
+                                        );
+                                        self.session_touched = session_touched_before_event;
+                                    }
                                 }
                                 window.request_redraw();
                                 return;
@@ -6298,11 +6353,15 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW)
                     )
                 {
-                    self.close_active_tab();
+                    if self.settings_room_active() {
+                        self.close_settings_room();
+                    } else {
+                        self.close_active_tab();
+                    }
                     window.request_redraw();
                     return;
                 }
-                // Cmd+, (macOS) / Ctrl+Shift+,: 인라인 설정 토글. PTY 로는 안 흘린다.
+                // Cmd+, (macOS) / Ctrl+Shift+,: 네이티브 설정 방 토글. PTY 로는 안 흘린다.
                 if matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()
@@ -6312,6 +6371,16 @@ impl ApplicationHandler<UserEvent> for App {
                     )
                 {
                     self.toggle_settings_web(event_loop, None);
+                    self.session_touched = session_touched_before_event;
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.settings_room_active()
+                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    self.close_settings_room();
                     window.request_redraw();
                     return;
                 }

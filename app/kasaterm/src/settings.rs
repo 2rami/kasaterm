@@ -906,7 +906,7 @@ impl App {
             // "esc왜안되냐") — 페이지가 keydown 을 잡아 이 액션으로 되돌린다.
             "close-settings" => {
                 self.close_settings_inline();
-                Ok(!self.settings_open)
+                Ok(!self.settings_room_active())
             }
 
             // ── First install ───────────────────────────────────────────

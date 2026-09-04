@@ -1271,6 +1271,9 @@ impl App {
         force: bool,
         run: Option<&str>,
     ) -> Result<String> {
+        if self.pane_is_settings(pid) {
+            anyhow::bail!("설정 방은 이사할 수 없다");
+        }
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -1722,6 +1725,9 @@ impl App {
         local_cwd: Option<&str>,
         force: bool,
     ) -> Result<String> {
+        if self.pane_is_settings(pid) {
+            anyhow::bail!("설정 방은 데려올 수 없다");
+        }
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -3205,6 +3211,7 @@ impl App {
     /// "windows"; the session list one level up is tmux "sessions".
     pub(crate) fn new_window(&mut self) {
         self.close_inline_web();
+        self.session_touched = true;
         // Active window's slot is None — its layout lives in pty_layout. Park
         // it back into the slot before opening a new window.
         self.windows[self.active_window] = self.pty_layout.take();
@@ -3344,6 +3351,9 @@ impl App {
     pub(crate) fn reorder_window(&mut self, from: usize, to: usize) {
         let n = self.windows.len();
         if from >= n || to > n {
+            return;
+        }
+        if self.settings_room_index() == Some(from) {
             return;
         }
         // 뽑고 난 뒤 기준의 착지 인덱스. 제자리면 옮길 것이 없다.
@@ -3764,12 +3774,21 @@ impl App {
     /// teardown remove_pane uses. Closing the visible window swaps a neighbor
     /// in so the terminal keeps painting.
     pub(crate) fn close_window(&mut self, idx: usize) -> Result<()> {
-        if self.windows.len() <= 1 {
-            anyhow::bail!("cannot close the last window");
-        }
         if idx >= self.windows.len() {
             anyhow::bail!("no such window: {idx}");
         }
+        if self.settings_room_index() == Some(idx) {
+            return self
+                .close_settings_room()
+                .then_some(())
+                .ok_or_else(|| anyhow::anyhow!("cannot close settings room"));
+        }
+        // 설정 방이 옆에 있어도 마지막 사용자 방은 마지막이다. `windows.len()`만
+        // 보면 사용자 방 하나 + 설정 방 하나를 둘로 세어 작업 공간을 없앨 수 있다.
+        if self.user_room_count() <= 1 {
+            anyhow::bail!("cannot close the last user window");
+        }
+        self.session_touched = true;
         // Pull the closing window's layout (active one lives in pty_layout) and
         // kill every pane it owns.
         let layout = if idx == self.active_window {
@@ -3785,7 +3804,12 @@ impl App {
             }
         }
         if idx == self.active_window {
-            let target = if idx == 0 { 1 } else { idx - 1 };
+            let settings = self.settings_room_index();
+            let target = (0..idx)
+                .rev()
+                .chain(idx + 1..self.windows.len())
+                .find(|candidate| Some(*candidate) != settings)
+                .ok_or_else(|| anyhow::anyhow!("no user window remains"))?;
             self.pty_layout = self.windows[target].take();
             self.windows.remove(idx);
             self.active_window = if target > idx { target - 1 } else { target };
@@ -3835,6 +3859,10 @@ impl App {
         let mut out = Vec::with_capacity(n);
         let ws = self.ws.lock().unwrap();
         for i in 0..n {
+            if self.settings_room_index() == Some(i) {
+                out.push((crate::settings_room::SETTINGS_LABEL.to_string(), String::new()));
+                continue;
+            }
             // Representative pane = first leaf of the window's layout. The
             // active window's tree lives in pty_layout; the rest in windows[i].
             let leaves: Vec<String> = {
@@ -5054,7 +5082,9 @@ impl App {
             for (vi, i) in (first..n.min(first + n_vis)).enumerate() {
                 let x = x0 + vi as f32 * (tab_w + gap);
                 tabs.push((i, (x, y, tab_w, tab_h)));
-                if n > 1 {
+                if n > 1
+                    && (self.settings_room_index() == Some(i) || self.user_room_count() > 1)
+                {
                     let cs = 14.0;
                     closes.push((i, (x + tab_w - cs - 5.0, y + (tab_h - cs) / 2.0, cs, cs)));
                 }
@@ -5114,7 +5144,9 @@ impl App {
                 continue;
             }
             tabs.push((i, (tab_x, y, tab_w, h)));
-            if n > 1 {
+            if n > 1
+                && (self.settings_room_index() == Some(i) || self.user_room_count() > 1)
+            {
                 let cs = 14.0;
                 // Centered on the *name* row (drawn at y+11, 13.5px) rather than
                 // pinned to the card top — the two-line tab put the × above the
@@ -5276,6 +5308,27 @@ impl App {
                     None => continue,
                 }
             };
+            let persisted_active_window = if i == self.active_session
+                && self.settings_room_index() == Some(active_window)
+            {
+                self.settings_scene
+                    .return_pane()
+                    .and_then(|pane| self.window_of_pane(pane))
+                    .filter(|idx| *idx != active_window)
+                    .or_else(|| {
+                        (0..windows.len()).find(|idx| {
+                            let layout = if *idx == active_window {
+                                active_layout
+                            } else {
+                                windows.get(*idx).and_then(Option::as_ref)
+                            };
+                            layout.is_some_and(crate::settings_room::should_persist_layout)
+                        })
+                    })
+                    .unwrap_or(0)
+            } else {
+                active_window
+            };
             // Lock this session's workspace once so each leaf can read its
             // pane scrollback while serializing the window trees.
             let ws_guard = ws_arc.lock().unwrap();
@@ -5290,7 +5343,10 @@ impl App {
                     slot.as_ref()
                 };
                 let Some(layout) = layout else { continue };
-                if j == active_window {
+                if !crate::settings_room::should_persist_layout(layout) {
+                    continue;
+                }
+                if j == persisted_active_window {
                     new_active = windows_json.len();
                 }
                 windows_json.push(Self::layout_to_json(
@@ -5325,18 +5381,22 @@ impl App {
         // 숨긴 것(`stashed`)만 싣는다. ⌘W 로 닫은 것은 두 정리 루프가 언젠가 놓는
         // 임시 기록이라 앱 수명을 넘겨 되살릴 값이 아니고, 그것까지 실으면 껐다 켤
         // 때마다 되살리기 목록이 옛 묘비로 불어난다.
+        let settings_window = self.settings_room_index();
         let closed_json: Vec<serde_json::Value> = self
             .closed_panes
             .iter()
             .filter(|c| c.stashed && !c.rec.is_null())
             .map(|c| {
+                let window = c.window.saturating_sub(usize::from(
+                    settings_window.is_some_and(|settings| settings < c.window),
+                ));
                 serde_json::json!({
                     "rec": c.rec,
                     "pane_id": c.pane_id,
                     "character": c.character,
                     "folder": c.folder,
                     "neighbor": c.neighbor,
-                    "window": c.window,
+                    "window": window,
                 })
             })
             .collect();
@@ -5685,6 +5745,9 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
+                if crate::settings_room::is_saved_settings_window(node) {
+                    return;
+                }
                 // 이 함수는 복원 확인창을 그릴 때마다 불린다. 디스크 rollout 확인은
                 // 실제 저장·복원 시 한 번만 하고, 여기서는 저장본 표식과 이미 결속된
                 // session_id만 센다.
@@ -5723,7 +5786,9 @@ impl App {
     pub(crate) fn count_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if node.get("leaf").is_some() {
-                *n += 1;
+                if !crate::settings_room::is_saved_settings_window(node) {
+                    *n += 1;
+                }
             } else if let Some(split) = node.get("split") {
                 if let Some(a) = split.get("a") {
                     walk(a, n);
@@ -5780,6 +5845,9 @@ impl App {
     pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
         fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
             if let Some(leaf) = n.get("leaf") {
+                if crate::settings_room::is_saved_settings_window(n) {
+                    return;
+                }
                 if let Some(c) = leaf
                     .get("character")
                     .and_then(|c| c.as_str())
@@ -5885,6 +5953,7 @@ impl App {
         }
         self.pty_layout = None;
         self.windows.clear();
+        self.settings_scene.leave();
         // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
         // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
         // 그래서 앞 차례의 leaf 가 새로 배정받다가 뒤 leaf 의 학생을 집어가면, 뒤
@@ -5899,16 +5968,21 @@ impl App {
         // 건다 — 같은 키·같은 이름이라 겹쳐도 하나다. 복원이 끝나면 걷는다(아래).
         self.reserve_saved_characters(state);
         let (cols, rows) = self.window_cells();
+        let mut restored_active = 0usize;
         for (j, w) in windows.iter().enumerate() {
+            if crate::settings_room::is_saved_settings_window(w) {
+                continue;
+            }
             let tree = self.restore_window_layout(w, cols, rows);
             if j == active_window {
+                restored_active = self.windows.len();
                 self.pty_layout = tree;
                 self.windows.push(None);
             } else {
                 self.windows.push(tree);
             }
         }
-        self.active_window = active_window.min(self.windows.len().saturating_sub(1));
+        self.active_window = restored_active.min(self.windows.len().saturating_sub(1));
         // 활성 방이 하나도 안 살아났을 때 화면이 비지 않게 메운다.
         //
         // ⚠️ **다른 방은 절대 건드리지 마라.** 예전에는 여기서 `windows` 를 통째로

@@ -539,6 +539,9 @@ impl App {
     /// 새 pane 의 surface id 를 돌려준다(빈 문자열 = 실패) — 디스패처가 스폰 직후
     /// 그 학생에게 브리프를 주입할 주소로 쓴다.
     pub(crate) fn spawn_student(&mut self, character: &str) -> String {
+        if self.settings_room_active() {
+            return String::new();
+        }
         self.pending_character = Some(character.to_string());
         // 축을 고정하지 않는다(예전엔 `Horizontal` 이었다) — 디스패처가 학생을 여럿
         // 띄우면 매번 좌우로 갈라 얇은 세로 기둥이 된다. `None` 은 쪼갤 pane 의
@@ -596,6 +599,9 @@ impl App {
         };
         // 탭을 지목받았으면 그 탭이 든 pane — 탭은 BSP leaf 가 아니라 트리에서 못 찾는다.
         let host = self.ws.lock().unwrap().outer_for_pty(&host).unwrap_or(host);
+        if self.pane_is_settings(&host) {
+            anyhow::bail!("설정 방은 pane 배치 기준이 될 수 없다");
+        }
         let Some(owner) = self.window_of_pane(&host) else {
             anyhow::bail!("배치할 pane {host} 이 어느 window 트리에도 없다");
         };
@@ -684,6 +690,9 @@ impl App {
     /// 트리에 못 꽂았으면 호출부가 `self.pty` 에서 지운다 — 번호는 거기 등록된 것으로만
     /// 판정하므로(`alloc_pane_id`) 그것으로 자동 회수된다.
     pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
+        if self.pane_is_settings(active) {
+            anyhow::bail!("설정 방은 split 기준이 될 수 없다");
+        }
         let new_id = self.alloc_pane_id();
 
         // Spawn the new session at a placeholder size — the resize
@@ -787,6 +796,9 @@ impl App {
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("활성 pane 이 없다");
         };
+        if self.pane_is_settings(&active) {
+            anyhow::bail!("설정 방은 split 할 수 없다");
+        }
         // 탭을 지목받았으면 **그 탭이 든 pane** 을 쪼갠다. 탭은 BSP leaf 가 아니라
         // `split_leaf` 가 못 찾고, 그러면 셸만 새로 띄운 채 통째로 실패한다.
         let active = self
@@ -855,6 +867,9 @@ impl App {
     pub(crate) fn spawn_new_tab(&mut self, outer: &str, activate: bool) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
+        }
+        if self.pane_is_settings(outer) {
+            anyhow::bail!("설정 방에는 터미널 탭을 만들 수 없다");
         }
         // Outer pane must already exist in the layout (it's the user's focused
         // pane). Use its size for the initial pty so the shell starts at the
@@ -1326,6 +1341,9 @@ impl App {
     /// from `drop_tab_into_body` (which lifts a tab into a new pane on the
     /// drop side) — this one keeps the source intact and adds a sibling.
     pub(crate) fn split_pane_opposite(&mut self, source: &str, zone: DropZone) -> Result<()> {
+        if self.pane_is_settings(source) {
+            anyhow::bail!("설정 방은 split 할 수 없다");
+        }
         if self.tmux.is_some() {
             anyhow::bail!("split via drag unsupported on tmux backend");
         }
@@ -1389,6 +1407,9 @@ impl App {
     /// the old "drag pane header" semantics into the tab drag so there's
     /// one drop UX.
     pub(crate) fn drop_tab_into_body(&mut self, td: &TabDrag, target: &str, zone: DropZone) {
+        if self.pane_is_settings(&td.pane) || self.pane_is_settings(target) {
+            return;
+        }
         // 1. Lift the tab out of source.
         let (moved, src_empty): (Option<PaneTab>, bool) = {
             let mut ws = self.ws.lock().unwrap();
@@ -1475,7 +1496,7 @@ impl App {
     ///
     /// 반환값 = 실제로 옮겼는지. 자기 자신·없는 pane·빈 소스면 false.
     pub(crate) fn merge_pane_into_tabs(&mut self, src: &str, dst: &str) -> bool {
-        if src == dst {
+        if src == dst || self.pane_is_settings(src) || self.pane_is_settings(dst) {
             return false;
         }
         let moved: Vec<PaneTab> = {
@@ -2294,7 +2315,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .iter()
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)?;
-        if idx == self.active_window {
+        if idx == self.active_window || self.settings_room_index() == Some(idx) {
             return None;
         }
         self.windows
@@ -2307,7 +2328,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// beside the target, then resizes every pane to its new rect. No-op
     /// when source and target are the same pane.
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
-        if moving == target {
+        if moving == target || self.pane_is_settings(moving) || self.pane_is_settings(target) {
             return;
         }
         let (dir, before) = match zone {

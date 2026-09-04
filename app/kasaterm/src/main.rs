@@ -28,6 +28,7 @@ mod render;
 mod screenread;
 mod session;
 mod settings;
+mod settings_room;
 mod socket;
 mod sprites;
 mod stream;
@@ -1880,6 +1881,8 @@ enum PaneContent {
     Image(Arc<ImagePane>),
     Markdown(MarkdownPane),
     Web(WebPane),
+    /// PTY 없는 네이티브 설정 방. 화면 상태는 `App.settings_scene`가 소유한다.
+    Settings,
 }
 
 /// 웹(브라우저) pane 의 그리드 쪽 상태 — 주소뿐이다. 실제 브라우저는 이 pane
@@ -2124,6 +2127,10 @@ impl PaneTab {
         } else {
             None
         }
+    }
+
+    fn settings(&self) -> bool {
+        matches!(&self.content, PaneContent::Settings)
     }
 }
 
@@ -4108,7 +4115,7 @@ enum GitModalBtn {
 
 /// Left-nav category in the settings screen (Warp-style: list on the left,
 /// form on the right). `Appearance` is the theme placeholder for phase 2.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsCat {
     General,
     Appearance,
@@ -5213,9 +5220,8 @@ struct App {
     /// the loop so the next rebuild dims gitignored rows; until then, un-dimmed.
     git_ignore_req: std::sync::Arc<std::sync::Mutex<Option<(std::path::PathBuf, Vec<String>)>>>,
     git_ignore_started: bool,
-    /// Settings screen (Warp-style full-view, reached from the sidebar). When
-    /// open it replaces the pane grid; the sidebar/titlebar stay live.
-    settings_open: bool,
+    /// PTY 없는 싱글턴 설정 방의 카테고리와 돌아갈 사용자 pane.
+    settings_scene: settings_room::SettingsScene,
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
@@ -5738,7 +5744,7 @@ impl App {
             git_ignore_started: false,
             // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
             // 위에서 담당한다.
-            settings_open: false,
+            settings_scene: settings_room::SettingsScene::default(),
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_open_mode: socket::read_file_open_mode(),
             set_file_open_app: socket::read_file_open_app(),
