@@ -1457,6 +1457,7 @@ impl App {
             }
             ws.active_pane = Some(new_outer.clone());
         }
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -1514,6 +1515,7 @@ impl App {
         }
         self.collapse_layout_only(src);
         self.ws.lock().unwrap().active_pane = Some(dst.to_string());
+        self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();

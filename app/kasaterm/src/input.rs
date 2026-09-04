@@ -12,6 +12,46 @@ fn deferred_account_restart_toast(restarted: usize) -> String {
     format!("계정 전환을 적용해 대기 중이던 pane {restarted}개를 다시 띄웠어요")
 }
 
+fn retheme_injection_allowed(
+    bare: bool,
+    target_surface: &str,
+    composing_owner: Option<&str>,
+    composing: bool,
+) -> bool {
+    bare && !(composing && composing_owner == Some(target_surface))
+}
+
+pub(crate) fn platform_commit_surface(
+    os_owner: Option<String>,
+    ime_focus: Option<&crate::ImeFocus>,
+    current_surface: Option<String>,
+) -> Option<String> {
+    os_owner
+        .or_else(|| {
+            ime_focus
+                .and_then(crate::ImeFocus::terminal_surface)
+                .map(str::to_string)
+        })
+        .or(current_surface)
+}
+
+fn take_ime_handoff(
+    hangul: &mut kasa_ime::Composer,
+    focus: &mut Option<crate::ImeFocus>,
+    preedit: &mut String,
+    in_preedit: &mut bool,
+    next: crate::ImeFocus,
+) -> Option<(crate::ImeFocus, String)> {
+    if focus.as_ref() == Some(&next) {
+        return None;
+    }
+    let prev = focus.replace(next);
+    let pending = hangul.flush();
+    preedit.clear();
+    *in_preedit = false;
+    prev.zip(pending)
+}
+
 impl App {
     pub(crate) fn send_bytes(&self, bytes: &[u8]) {
         let surface = self.target_surface();
@@ -1160,14 +1200,26 @@ impl App {
             if !idle {
                 continue;
             }
-            let bare = {
+            let (bare, surface) = {
                 let ws = self.ws.lock().unwrap();
-                ws.panes
+                let bare = ws
+                    .panes
                     .get(&id)
                     .and_then(|pn| pn.term())
-                    .map_or(false, |t| input_line_bare(&t.cells))
+                    .map_or(false, |t| input_line_bare(&t.cells));
+                (bare, ws.active_tab_pid(&id))
             };
-            if !bare {
+            let composing_owner = self.os_ime_surface.as_deref().or_else(|| {
+                self.ime_focus
+                    .as_ref()
+                    .and_then(crate::ImeFocus::terminal_surface)
+            });
+            if !retheme_injection_allowed(
+                bare,
+                &surface,
+                composing_owner,
+                self.in_preedit || !self.preedit.is_empty(),
+            ) {
                 continue;
             }
             // 커맨드 뒤 CR 은 **지연 별도 write** — 본문에 붙은 CR 은 Ink 가
@@ -2295,14 +2347,13 @@ impl App {
     /// 같다). 떠나는 쪽이 이미 사라졌으면(pane 닫힘·드롭다운 닫힘) 조용히 버린다
     /// — 갈 곳 없는 음절을 아무 데나 떨구는 게 잃는 것보다 나쁘다.
     pub(crate) fn ime_retarget(&mut self, next: crate::ImeFocus) {
-        if self.ime_focus.as_ref() == Some(&next) {
-            return;
-        }
-        let prev = self.ime_focus.replace(next);
-        let pending = self.hangul.flush();
-        self.preedit.clear();
-        self.in_preedit = false;
-        let (Some(text), Some(prev)) = (pending, prev) else {
+        let Some((prev, text)) = take_ime_handoff(
+            &mut self.hangul,
+            &mut self.ime_focus,
+            &mut self.preedit,
+            &mut self.in_preedit,
+            next,
+        ) else {
             return;
         };
         match prev {
@@ -4361,45 +4412,76 @@ mod working_scan_tests {
     }
 
     #[test]
-    fn focus_handoff_and_late_platform_commit_use_surface_routing() {
-        let input = include_str!("input.rs");
-        let handoff = input
-            .split_once("pub(crate) fn activate_pane_focus")
-            .unwrap()
-            .1
-            .split_once("pub(crate) fn git_commit_input")
-            .unwrap()
-            .0;
-        assert!(handoff.contains("handoff_ime_to_active_surface"));
-        let handler = include_str!("handler.rs");
-        let ime = handler
-            .split_once("Ime::Commit(text)")
-            .unwrap()
-            .1
-            .split_once("WindowEvent::KeyboardInput")
-            .unwrap()
-            .0;
-        assert!(ime.contains("os_ime_surface"));
-        assert!(ime.contains("send_bytes_to_surface"));
-        assert!(!ime.contains("self.send_bytes(text.as_bytes())"));
+    fn composing_text_blocks_bare_prompt_injection_on_its_surface() {
+        assert!(!retheme_injection_allowed(
+            true,
+            "%tab-a",
+            Some("%tab-a"),
+            true
+        ));
+        assert!(retheme_injection_allowed(
+            true,
+            "%tab-b",
+            Some("%tab-a"),
+            true
+        ));
+        assert!(retheme_injection_allowed(
+            true,
+            "%tab-a",
+            Some("%tab-a"),
+            false
+        ));
+        assert!(!retheme_injection_allowed(
+            false,
+            "%tab-a",
+            Some("%tab-a"),
+            false
+        ));
+    }
 
-        let socket_split = handler
-            .split_once("UserEvent::SocketSplit(")
-            .unwrap()
-            .1
-            .split_once("UserEvent::SocketSplitFleet")
-            .unwrap()
-            .0;
-        assert!(socket_split.contains("split_pane_auto"));
-        assert!(!socket_split.contains("split_active_pane_focused"));
-        let shortcuts = input
-            .split_once("if code == KeyCode::KeyD")
-            .unwrap()
-            .1
-            .split_once("if code == KeyCode::KeyR")
-            .unwrap()
-            .0;
-        assert!(shortcuts.contains("split_active_pane_focused"));
+    #[test]
+    fn same_outer_tab_handoff_keeps_the_syllable_in_the_old_surface() {
+        let mut hangul = kasa_ime::Composer::new();
+        assert_eq!(hangul.feed('ㄱ'), None);
+        assert_eq!(hangul.feed('ㅏ'), None);
+        let mut focus = Some(crate::ImeFocus::Pane("%tab-old".into()));
+        let mut preedit = "가".to_string();
+        let mut in_preedit = true;
+
+        let committed = take_ime_handoff(
+            &mut hangul,
+            &mut focus,
+            &mut preedit,
+            &mut in_preedit,
+            crate::ImeFocus::Pane("%tab-new".into()),
+        );
+
+        assert_eq!(
+            committed,
+            Some((crate::ImeFocus::Pane("%tab-old".into()), "가".into()))
+        );
+        assert_eq!(focus, Some(crate::ImeFocus::Pane("%tab-new".into())));
+        assert!(preedit.is_empty());
+        assert!(!in_preedit);
+        assert_eq!(hangul.preedit(), None);
+    }
+
+    #[test]
+    fn late_platform_commit_keeps_the_original_surface_owner() {
+        let current = Some("%tab-new".to_string());
+        let focus = crate::ImeFocus::Pane("%tab-new".to_string());
+        assert_eq!(
+            platform_commit_surface(
+                Some("%tab-old".to_string()),
+                Some(&focus),
+                current.clone(),
+            ),
+            Some("%tab-old".to_string())
+        );
+        assert_eq!(
+            platform_commit_surface(None, Some(&focus), current),
+            Some("%tab-new".to_string())
+        );
     }
 
     fn row(s: &str) -> Vec<GridCell> {

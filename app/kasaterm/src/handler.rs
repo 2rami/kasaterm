@@ -45,6 +45,24 @@ const CLAUDE_IMG_PASTE: &[u8] = {
     }
 };
 
+#[derive(Debug, PartialEq, Eq)]
+enum SocketSplitFocusAction {
+    Handoff,
+    Restore(Option<String>),
+}
+
+fn socket_split_focus_action(
+    previous: Option<String>,
+    focus_requested: bool,
+    split_succeeded: bool,
+) -> SocketSplitFocusAction {
+    if focus_requested && split_succeeded {
+        SocketSplitFocusAction::Handoff
+    } else {
+        SocketSplitFocusAction::Restore(previous)
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     /// A background thread (PTY snapshot, socket) asked us to repaint.
     /// Delivered even while a WaitUntil is parked, so this is what makes
@@ -280,9 +298,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.split_pane_auto(*dir).map_err(|e| format!("{e:#}"))
                 };
-                if !*focus {
-                    if let Some(prev) = prev {
-                        self.ws.lock().unwrap().active_pane = Some(prev);
+                match socket_split_focus_action(prev, *focus, outcome.is_ok()) {
+                    SocketSplitFocusAction::Handoff => {
+                        if let Ok(new_id) = &outcome {
+                            self.focus_surface(new_id);
+                        }
+                    }
+                    SocketSplitFocusAction::Restore(previous) => {
+                        self.ws.lock().unwrap().active_pane = previous;
                     }
                 }
                 if let Err(ref why) = outcome {
@@ -566,7 +589,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — 캐릭터/작업명/async
                 // 같은 비-leaf 집계 id 로 active_pane 을 덮으면 다음 /layout 폴에서 그 타일이
                 // 빠져 "pane 이 닫힌 것처럼" 보였다(거노: 캐릭터 클릭→학생 선택하면 닫힘).
-                if self.focus_pane(id) {
+                if self.focus_surface(id) {
                     self.render_frame();
                 }
                 return;
@@ -6095,16 +6118,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // once. Consecutive commits at the same (un-echoed) spot
                         // accumulate so a burst keeps its order.
                         let current_surface = self.target_surface();
-                        let owner_surface = self
-                            .os_ime_surface
-                            .take()
-                            .or_else(|| {
-                                self.ime_focus
-                                    .as_ref()
-                                    .and_then(crate::ImeFocus::terminal_surface)
-                                    .map(str::to_string)
-                                    .or_else(|| current_surface.clone())
-                            });
+                        let owner_surface = crate::input::platform_commit_surface(
+                            self.os_ime_surface.take(),
+                            self.ime_focus.as_ref(),
+                            current_surface.clone(),
+                        );
                         let before = (owner_surface == current_surface)
                             .then(|| {
                                 self.ws.lock().ok().and_then(|ws| {
@@ -7277,4 +7295,37 @@ pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Optio
         })
         .unwrap_or_default();
     Some(view)
+}
+
+#[cfg(test)]
+mod ime_focus_tests {
+    use super::{socket_split_focus_action, SocketSplitFocusAction};
+
+    #[test]
+    fn focused_socket_split_hands_composition_to_the_new_surface() {
+        assert_eq!(
+            socket_split_focus_action(Some("%old".into()), true, true),
+            SocketSplitFocusAction::Handoff
+        );
+    }
+
+    #[test]
+    fn background_socket_split_restores_focus_without_handoff() {
+        assert_eq!(
+            socket_split_focus_action(Some("%old".into()), false, true),
+            SocketSplitFocusAction::Restore(Some("%old".into()))
+        );
+        assert_eq!(
+            socket_split_focus_action(None, false, true),
+            SocketSplitFocusAction::Restore(None)
+        );
+    }
+
+    #[test]
+    fn failed_socket_split_restores_the_temporary_target() {
+        assert_eq!(
+            socket_split_focus_action(Some("%old".into()), true, false),
+            SocketSplitFocusAction::Restore(Some("%old".into()))
+        );
+    }
 }

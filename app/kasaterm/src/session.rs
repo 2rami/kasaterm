@@ -1,6 +1,38 @@
 //! 세션·윈도우·cwd/label·daemon·pty·tmux/socket·스크린 펌프·상태 저장.
 use super::*;
 
+fn apply_workspace_focus(
+    ws: &mut Workspace,
+    requested: &str,
+    exact_surface: bool,
+) -> Option<bool> {
+    let outer = ws
+        .outer_for_pty(requested)
+        .unwrap_or_else(|| requested.to_string());
+    if !ws.panes.contains_key(&outer) {
+        let changed = ws.active_pane.as_deref() != Some(outer.as_str());
+        ws.active_pane = Some(outer);
+        return Some(changed);
+    }
+    let tab = if exact_surface || requested != outer {
+        Some(ws.panes.get(&outer)?.tabs.iter().position(|tab| {
+            tab.pid.as_deref() == Some(requested)
+                || (requested == outer && tab.pid.is_none())
+        })?)
+    } else {
+        None
+    };
+    let pane_changed = ws.active_pane.as_deref() != Some(outer.as_str());
+    let pane = ws.panes.get_mut(&outer)?;
+    let changed = pane_changed || tab.is_some_and(|idx| pane.active_tab != idx);
+    if let Some(idx) = tab {
+        pane.active_tab = idx;
+        pane.dirty = true;
+    }
+    ws.active_pane = Some(outer);
+    Some(changed)
+}
+
 /// 이사 예약 한 건 — 학생이 턴 중일 때 이사를 걸면 여기 앉는다(migrate_pane 의
 /// working 관문). `base == "local"` 은 역이사(데려오기)다. `idle_since` 는 스피너가
 /// 꺼진 첫 관측 시각 — 짧은 틈을 턴 끝으로 오판하지 않게 몇 초 이어져야 발사한다
@@ -915,25 +947,7 @@ impl App {
     /// pid 가 보조 탭이면 그 바깥 pane 을 포커스하고 그 탭을 앞으로 — 창이 다르면
     /// 창부터 바꾼다. `focus_pane` 은 바깥 pane 만 알아서 탭 pid 로는 못 찾는다.
     pub(crate) fn reveal_pane_tab(&mut self, pid: &str) -> bool {
-        let outer = self
-            .ws
-            .lock()
-            .unwrap()
-            .outer_for_pty(pid)
-            .unwrap_or_else(|| pid.to_string());
-        if !self.focus_pane(&outer) {
-            return false;
-        }
-        if let Ok(mut ws) = self.ws.lock() {
-            if let Some(pane) = ws.panes.get_mut(&outer) {
-                if let Some(i) = pane.tabs.iter().position(|t| t.pid.as_deref() == Some(pid)) {
-                    pane.active_tab = i;
-                    pane.dirty = true;
-                }
-            }
-        }
-        self.handoff_ime_to_active_surface();
-        true
+        self.focus_surface(pid)
     }
 
     /// 방 펼치기 — 명부 기계 하나의 학생 pane 전부를 이 창에 거울로 앉힌다.
@@ -3707,13 +3721,35 @@ impl App {
     /// 을 덮으면 다음 `/layout` 폴에서 그 타일이 빠져 pane 이 닫힌 것처럼 보였다
     /// (거노: 캐릭터 클릭→학생 선택하면 닫힘).
     pub(crate) fn focus_pane(&mut self, pane: &str) -> bool {
-        let Some(wi) = self.window_of_pane(pane) else {
+        self.focus_target(pane, false)
+    }
+
+    /// `surface.focus`/알림처럼 PTY id를 지목한 전환. 바깥 leaf만 고르면 같은
+    /// pane의 다른 탭을 요청해도 화면은 옛 탭에 남으므로 active_tab까지 맞춘다.
+    pub(crate) fn focus_surface(&mut self, surface: &str) -> bool {
+        self.focus_target(surface, true)
+    }
+
+    fn focus_target(&mut self, requested: &str, exact_surface: bool) -> bool {
+        let outer = {
+            let ws = self.ws.lock().unwrap();
+            ws.outer_for_pty(requested)
+                .unwrap_or_else(|| requested.to_string())
+        };
+        let Some(wi) = self.window_of_pane(&outer) else {
             return false;
         };
         if wi != self.active_window {
             self.switch_window(wi);
         }
-        self.activate_pane_focus(pane);
+        let applied = {
+            let mut ws = self.ws.lock().unwrap();
+            apply_workspace_focus(&mut ws, requested, exact_surface).is_some()
+        };
+        if !applied {
+            return false;
+        }
+        self.handoff_ime_to_active_surface();
         self.chrome_dirty = true;
         true
     }
@@ -8007,9 +8043,9 @@ mod tests {
 
     use super::{
         account_restart_busy, account_switch_confirm_text, account_switch_focused_tab,
-        account_switch_impact, editor_command_line, git_repo_root, next_free_pane_id,
-        pane_account_fate, pick_restore_id, predicted_target_dir, restored_scrollback,
-        AccountSwitchImpact, PaneAccountFact, PaneAccountFate,
+        account_switch_impact, apply_workspace_focus, editor_command_line, git_repo_root,
+        next_free_pane_id, pane_account_fate, pick_restore_id, predicted_target_dir,
+        restored_scrollback, AccountSwitchImpact, PaneAccountFact, PaneAccountFate,
     };
     use crate::{PaneState, PaneTab, Workspace};
 
@@ -8101,6 +8137,39 @@ mod tests {
             pane_account_fate(&visible, "/v/new-account"),
             PaneAccountFate::ChipFocused
         );
+    }
+
+    #[test]
+    fn surface_focus_selects_the_requested_tab_but_keeps_the_outer_leaf_active() {
+        let mut ws = Workspace::default();
+        ws.active_pane = Some("%outer".to_string());
+        ws.panes.insert(
+            "%outer".to_string(),
+            PaneState {
+                tabs: vec![
+                    PaneTab {
+                        pid: Some("%outer".to_string()),
+                        ..Default::default()
+                    },
+                    PaneTab {
+                        pid: Some("%second".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                active_tab: 0,
+                ..Default::default()
+            },
+        );
+        ws.rebuild_pid_map();
+
+        assert_eq!(apply_workspace_focus(&mut ws, "%second", true), Some(true));
+        assert_eq!(ws.active_pane.as_deref(), Some("%outer"));
+        assert_eq!(ws.panes["%outer"].active_tab, 1);
+
+        assert_eq!(apply_workspace_focus(&mut ws, "%outer", false), Some(false));
+        assert_eq!(ws.panes["%outer"].active_tab, 1, "pane 클릭은 보던 탭 유지");
+        assert_eq!(apply_workspace_focus(&mut ws, "%outer", true), Some(true));
+        assert_eq!(ws.panes["%outer"].active_tab, 0, "surface.focus는 첫 탭 선택");
     }
 
     /// 칩만 다는 pane 으로는 묻지 않는다 — 아무 일도 안 당하므로 물으면 한 가지를
