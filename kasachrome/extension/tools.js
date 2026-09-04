@@ -32,15 +32,40 @@ const REMOVE_TIMEOUT_MS = 5000
 // 막힌 페이지에서 도구 상한(45초)까지 침묵하고, 부르는 쪽은 왜 안 되는지조차 못 듣는다.
 const EVAL_TIMEOUT_MS = 25000
 
+// ★`chrome.tabs.remove` 는 페이지의 beforeunload 를 존중한다. 그래서 그것이 걸린 탭은
+// 닫히는 대신 「정말 나가시겠습니까?」 대화상자를 띄우고 **사람 손을 기다린다** — 사람이 안 보는
+// 창이면 영영 안 닫히고, 보고 있으면 하던 일 위로 대화상자가 튀어나온다. 2026-09-05 실측:
+// PiKVM 콘솔(`/kvm/` iframe)이 그것을 걸어 두어 close_tab 이 매번 실패했고, 그 대화상자가
+// 사용자 화면을 가로챘다. 그러므로 닫기 전에 걷어낸다. 이미 걸린 것을 되돌리는 길은
+// 프로퍼티를 지우는 것뿐이라(addEventListener 로 등록한 것은 뺄 수 없다) 그래도 안 되면
+// 무엇이 막았는지 이름을 달아 실패한다 — 조용히 남겨 두면 다음 사람이 같은 자리를 또 판다.
+async function dropBeforeUnload(id) {
+  await chrome.scripting.executeScript({
+    target: { tabId: id, allFrames: true },
+    world: 'MAIN',
+    func: () => { window.onbeforeunload = null },
+  }).catch(() => {})
+}
+
 async function removeTab(id) {
-  try {
-    await withTimeout(chrome.tabs.remove(id), REMOVE_TIMEOUT_MS, 'REMOVE_SLOW')
-  } catch (e) {
-    if (String(e.message) !== 'REMOVE_SLOW') throw e
-    if (await chrome.tabs.get(id).catch(() => null)) {
-      throw new Error(`CLOSE_FAILED: 탭 ${id} 이 ${REMOVE_TIMEOUT_MS}ms 안에 닫히지 않았습니다.`)
+  const gone = async () => !(await chrome.tabs.get(id).catch(() => null))
+  for (const clearFirst of [false, true]) {
+    if (clearFirst) {
+      if (await gone()) return
+      await withTimeout(dropBeforeUnload(id), REMOVE_TIMEOUT_MS, 'REMOVE_SLOW').catch(() => {})
+    }
+    try {
+      await withTimeout(chrome.tabs.remove(id), REMOVE_TIMEOUT_MS, 'REMOVE_SLOW')
+      return
+    } catch (e) {
+      if (String(e.message) !== 'REMOVE_SLOW') throw e
+      if (await gone()) return
     }
   }
+  throw new Error(
+    `CLOSE_FAILED: 탭 ${id} 이 닫히지 않았습니다 — beforeunload 를 걷어내고 다시 시도해도 남아 있습니다.`
+    + ' addEventListener 로 등록된 beforeunload 이거나 페이지가 응답하지 않는 경우입니다.',
+  )
 }
 
 // 폰뷰가 진짜로 걸렸는지 페이지에 직접 물어보는 값들. 크기만 보면 터치 관련 분기가 빠진 것을 놓친다.
