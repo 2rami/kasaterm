@@ -35,6 +35,11 @@ pub(crate) struct SettingsScene {
     onboarding: crate::native_onboarding::State,
     field_backup: Option<crate::native_settings::FieldBackup>,
     field_dirty: bool,
+    inspected_theme: Option<String>,
+    dynamic_at: Option<std::time::Instant>,
+    picker_drag: Option<(SettingsAction, crate::native_settings::Rect)>,
+    sprite_slot: Option<(String, usize)>,
+    field_select_all: bool,
 }
 
 impl Default for SettingsScene {
@@ -51,6 +56,11 @@ impl Default for SettingsScene {
             onboarding: crate::native_onboarding::State::default(),
             field_backup: None,
             field_dirty: false,
+            inspected_theme: None,
+            dynamic_at: None,
+            picker_drag: None,
+            sprite_slot: None,
+            field_select_all: false,
         }
     }
 }
@@ -82,6 +92,13 @@ impl SettingsScene {
 
     pub(crate) fn refresh_cache(&mut self) {
         self.cache.refresh();
+    }
+
+    pub(crate) fn set_account_cache(
+        &mut self,
+        accounts: Vec<crate::native_settings::AccountChoice>,
+    ) {
+        self.cache.set_accounts(accounts);
     }
 
     pub(crate) fn category(&self) -> SettingsCat {
@@ -152,9 +169,60 @@ impl SettingsScene {
         self.scroll = 0.0;
     }
 
+    pub(crate) fn inspected_theme(&self) -> Option<&str> {
+        self.inspected_theme.as_deref()
+    }
+
+    pub(crate) fn toggle_inspected_theme(&mut self, id: String) {
+        if self.inspected_theme.as_deref() == Some(id.as_str()) {
+            self.inspected_theme = None;
+        } else {
+            self.inspected_theme = Some(id);
+        }
+    }
+
+    pub(crate) fn dynamic_refresh_due(&mut self) -> bool {
+        let due = self
+            .dynamic_at
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(2));
+        if due {
+            self.dynamic_at = Some(std::time::Instant::now());
+        }
+        due
+    }
+
+    pub(crate) fn begin_picker_drag(
+        &mut self,
+        action: SettingsAction,
+        rect: crate::native_settings::Rect,
+    ) {
+        self.picker_drag = Some((action, rect));
+    }
+
+    pub(crate) fn picker_drag(&self) -> Option<(SettingsAction, crate::native_settings::Rect)> {
+        self.picker_drag.clone()
+    }
+
+    pub(crate) fn end_picker_drag(&mut self) -> bool {
+        self.picker_drag.take().is_some()
+    }
+
+    pub(crate) fn sprite_slot(&self) -> Option<(&str, usize)> {
+        self.sprite_slot.as_ref().map(|(motion, frame)| (motion.as_str(), *frame))
+    }
+
+    pub(crate) fn toggle_sprite_slot(&mut self, motion: String, frame: usize) {
+        if self.sprite_slot.as_ref().is_some_and(|(picked, at)| picked == &motion && *at == frame) {
+            self.sprite_slot = None;
+        } else {
+            self.sprite_slot = Some((motion, frame));
+        }
+    }
+
     pub(crate) fn arm_field_backup(&mut self, backup: crate::native_settings::FieldBackup) {
         self.field_backup = Some(backup);
         self.field_dirty = false;
+        self.field_select_all = false;
     }
 
     pub(crate) fn field_backup_matches(&self, field: SettingsInput) -> bool {
@@ -163,8 +231,28 @@ impl SettingsScene {
             .is_some_and(|backup| backup.field == field)
     }
 
+    pub(crate) fn field_backup(&self) -> Option<crate::native_settings::FieldBackup> {
+        self.field_backup.clone()
+    }
+
     pub(crate) fn mark_field_dirty(&mut self) {
         self.field_dirty = true;
+    }
+
+    pub(crate) fn select_all_field(&mut self) {
+        self.field_select_all = true;
+    }
+
+    pub(crate) fn clear_field_selection(&mut self) {
+        self.field_select_all = false;
+    }
+
+    pub(crate) fn field_select_all(&self) -> bool {
+        self.field_select_all
+    }
+
+    pub(crate) fn take_field_select_all(&mut self) -> bool {
+        std::mem::take(&mut self.field_select_all)
     }
 
     pub(crate) fn take_field_backup(
@@ -179,6 +267,11 @@ impl SettingsScene {
         self.caret_rect = None;
         self.field_backup = None;
         self.field_dirty = false;
+        self.inspected_theme = None;
+        self.dynamic_at = None;
+        self.picker_drag = None;
+        self.sprite_slot = None;
+        self.field_select_all = false;
     }
 }
 
@@ -373,6 +466,7 @@ impl App {
         if !self.settings_scene.cache().ready {
             self.settings_scene.refresh_cache();
         }
+        self.refresh_native_settings_dynamic_cache();
 
         if let Some(idx) = self.settings_room_index() {
             if idx != self.active_window {

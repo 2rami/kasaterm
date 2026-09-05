@@ -22,7 +22,25 @@ pub(crate) struct PaletteChoice {
 #[derive(Clone)]
 pub(crate) struct CharacterChoice {
     name: String,
-    slug: Option<&'static str>,
+    slug: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct CustomThemeChoice {
+    slug: String,
+    label: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct AccountChoice {
+    provider: AccountProvider,
+    id: String,
+    name: String,
+    sub: String,
+    sub_kind: &'static str,
+    active: bool,
+    slot: bool,
+    usage: Option<UsageBadge>,
 }
 
 #[derive(Clone, Default)]
@@ -35,6 +53,19 @@ pub(crate) struct SettingsCache {
     roster: Option<serde_json::Value>,
     open_apps: Arc<Vec<(String, String)>>,
     character_theme: String,
+    language: String,
+    system_light: String,
+    system_dark: String,
+    custom_themes: Arc<Vec<CustomThemeChoice>>,
+    custom_active: String,
+    palette_hex: Arc<Vec<String>>,
+    theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
+    theme_picks: Arc<std::collections::HashMap<String, Vec<String>>>,
+    accounts: Arc<Vec<AccountChoice>>,
+    themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
+    themegen_provider: String,
+    themegen_key_masked: String,
+    themegen_refs: Arc<std::collections::HashSet<String>>,
 }
 
 impl std::fmt::Debug for SettingsCache {
@@ -46,6 +77,8 @@ impl std::fmt::Debug for SettingsCache {
             .field("themes", &self.themes.len())
             .field("models", &self.models.len())
             .field("open_apps", &self.open_apps.len())
+            .field("theme_rosters", &self.theme_rosters.len())
+            .field("accounts", &self.accounts.len())
             .finish()
     }
 }
@@ -86,7 +119,9 @@ impl SettingsCache {
                 kasa_mcp::character::member_names(value)
                     .into_iter()
                     .map(|name| CharacterChoice {
-                        slug: theme::character_slug(&name),
+                        slug: kasa_mcp::character::member_def(value, &name)
+                            .and_then(|entry| entry.get("slug").and_then(|v| v.as_str()).map(str::to_string))
+                            .unwrap_or_else(|| theme::agent_slug(&name)),
                         name,
                     })
                     .collect()
@@ -105,6 +140,84 @@ impl SettingsCache {
         self.roster = roster;
         self.open_apps = Arc::new(proc::open_with_apps().to_vec());
         self.character_theme = socket::read_character_theme();
+        self.language = socket::read_ui_language();
+        self.system_light = theme::system_slot_theme(true);
+        self.system_dark = theme::system_slot_theme(false);
+        let customs = theme::custom_themes(&saved);
+        self.custom_active = theme::active_custom_slug().unwrap_or_default();
+        self.custom_themes = Arc::new(
+            customs
+                .iter()
+                .map(|entry| CustomThemeChoice {
+                    slug: theme::custom_slug(entry),
+                    label: theme::custom_label(entry),
+                })
+                .collect(),
+        );
+        self.palette_hex = Arc::new(crate::settings::palette_hex_list(
+            &saved,
+            (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
+        ));
+
+        let mut theme_rosters = std::collections::HashMap::new();
+        let mut theme_picks = std::collections::HashMap::new();
+        for row in self.themes.iter() {
+            let key = if row.id.is_empty() {
+                kasa_mcp::character::BASE_THEME_KEY.to_string()
+            } else {
+                row.id.clone()
+            };
+            let value = if row.id.is_empty() {
+                kasa_mcp::character::base_characters_json()
+            } else {
+                kasa_mcp::character::theme_characters_json(&row.id)
+            };
+            let members = value
+                .as_ref()
+                .map(|roster| {
+                    kasa_mcp::character::member_names(roster)
+                        .into_iter()
+                        .map(|name| CharacterChoice {
+                            slug: kasa_mcp::character::member_def(roster, &name)
+                                .and_then(|entry| entry.get("slug").and_then(|v| v.as_str()).map(str::to_string))
+                                .unwrap_or_else(|| theme::agent_slug(&name)),
+                            name,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            theme_picks.insert(key.clone(), kasa_mcp::character::picks_of_theme(&key));
+            theme_rosters.insert(key, members);
+        }
+        self.theme_rosters = Arc::new(theme_rosters);
+        self.theme_picks = Arc::new(theme_picks);
+
+        let settings = socket::read_settings();
+        self.themegen_provider = settings
+            .get("theme_gen_provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("opengateway")
+            .to_string();
+        self.themegen_key_masked = settings
+            .get("gemini_api_key")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(crate::themegen::mask_key)
+            .unwrap_or_default();
+        self.themegen_providers = Arc::new(crate::themegen::detect_providers());
+        let mut refs = std::collections::HashSet::new();
+        if !self.character_theme.is_empty() {
+            for character in self.characters.iter() {
+                if crate::settings::themegen_ref_info(&self.character_theme, &character.slug).is_some() {
+                    refs.insert(character.slug.clone());
+                }
+            }
+        }
+        self.themegen_refs = Arc::new(refs);
+    }
+
+    pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountChoice>) {
+        self.accounts = Arc::new(accounts);
     }
 }
 
@@ -117,6 +230,126 @@ fn palette_choice(key: &str, label: &str, palette: &theme::Palette) -> PaletteCh
         bg: palette.bg,
         text: palette.text,
         ansi,
+    }
+}
+
+fn account_choices(app: &App) -> Vec<AccountChoice> {
+    let usage_table = app
+        .claude_usage_all
+        .lock()
+        .ok()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let active_usage = app.claude_usage.lock().ok().and_then(|guard| guard.clone());
+    let active_id = app.set_claude_account.clone();
+    let mut rows = Vec::new();
+
+    if active_id.is_empty() {
+        let probe = crate::settings::auth_probe("");
+        rows.push(AccountChoice {
+            provider: AccountProvider::Claude,
+            id: String::new(),
+            name: "기본 로그인".to_string(),
+            sub: probe
+                .as_ref()
+                .map(|value| {
+                    if value.logged_in {
+                        account_sub(&value.email, &value.org)
+                    } else {
+                        "로그인 필요".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "확인 중…".to_string()),
+            sub_kind: match probe {
+                Some(ref value) if !value.logged_in => "danger",
+                Some(_) => "mute",
+                None => "faint",
+            },
+            active: true,
+            slot: false,
+            usage: active_usage.clone().filter(|badge| badge.account_dir.is_empty()),
+        });
+    }
+    for (index, account) in app.set_claude_accounts.iter().enumerate() {
+        let probe = crate::settings::auth_probe(&account.id);
+        let sub = probe
+            .as_ref()
+            .map(|value| {
+                if value.logged_in {
+                    account_sub(&value.email, &value.org)
+                } else {
+                    "로그인 필요".to_string()
+                }
+            })
+            .unwrap_or_else(|| "확인 중…".to_string());
+        let dir = crate::claude_auth::runtime_dir_for_cached(&account.id, &active_id)
+            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
+        let usage = usage_table.get(&dir).cloned().or_else(|| {
+            active_usage
+                .clone()
+                .filter(|badge| account.id == active_id && badge.account_dir == dir)
+        });
+        rows.push(AccountChoice {
+            provider: AccountProvider::Claude,
+            id: account.id.clone(),
+            name: crate::settings::account_display(
+                &account.id,
+                &account.label,
+                &format!("계정 {}", index + 2),
+            ),
+            sub,
+            sub_kind: match probe {
+                Some(ref value) if !value.logged_in => "danger",
+                Some(_) => "mute",
+                None => "faint",
+            },
+            active: account.id == active_id,
+            slot: true,
+            usage,
+        });
+    }
+
+    rows.push(AccountChoice {
+        provider: AccountProvider::Codex,
+        id: String::new(),
+        name: "기본 로그인".to_string(),
+        sub: crate::settings::codex_identity("")
+            .unwrap_or_else(|| "로그인 필요".to_string()),
+        sub_kind: if crate::settings::codex_logged_in("") { "mute" } else { "danger" },
+        active: app.set_codex_account.is_empty(),
+        slot: false,
+        usage: None,
+    });
+    for (index, account) in app.set_codex_accounts.iter().enumerate() {
+        let identity = crate::settings::codex_identity(&account.id);
+        rows.push(AccountChoice {
+            provider: AccountProvider::Codex,
+            id: account.id.clone(),
+            name: if account.label.trim().is_empty() {
+                identity.clone().unwrap_or_else(|| format!("계정 {}", index + 2))
+            } else {
+                account.label.clone()
+            },
+            sub: if account.label.trim().is_empty() {
+                String::new()
+            } else {
+                identity.unwrap_or_else(|| "로그인 필요".to_string())
+            },
+            sub_kind: if crate::settings::codex_logged_in(&account.id) { "mute" } else { "danger" },
+            active: account.id == app.set_codex_account,
+            slot: true,
+            usage: None,
+        });
+    }
+    rows
+}
+
+fn account_sub(email: &str, org: &str) -> String {
+    let personal = format!("{email}'s Organization");
+    if !org.is_empty() && org != personal {
+        format!("{email} · {org}")
+    } else {
+        email.to_string()
     }
 }
 
@@ -172,8 +405,10 @@ pub(crate) struct Snapshot {
     pub(crate) scroll: f32,
     pub(crate) caret_on: bool,
     pub(crate) input: Option<SettingsInput>,
+    pub(crate) select_all: bool,
     pub(crate) preedit: String,
     pub(crate) first_run: bool,
+    pub(crate) language: String,
     pub(crate) cwd_mode: String,
     pub(crate) file_open_mode: String,
     pub(crate) file_open_app: String,
@@ -183,6 +418,15 @@ pub(crate) struct Snapshot {
     pub(crate) autosave_ms: u64,
     pub(crate) shell: String,
     pub(crate) theme: String,
+    pub(crate) system_light: String,
+    pub(crate) system_dark: String,
+    pub(crate) custom_themes: Arc<Vec<CustomThemeChoice>>,
+    pub(crate) custom_active: String,
+    pub(crate) custom_theme_label_edit: Option<(String, String)>,
+    pub(crate) palette_hex: Arc<Vec<String>>,
+    pub(crate) palette_edit: String,
+    pub(crate) picker_hsv: (f32, f32, f32),
+    pub(crate) eyedropper: bool,
     pub(crate) accent: String,
     pub(crate) shape: String,
     pub(crate) min_contrast: f32,
@@ -200,16 +444,19 @@ pub(crate) struct Snapshot {
     pub(crate) claude_model: String,
     pub(crate) claude_effort: String,
     pub(crate) claude_extra: String,
-    pub(crate) claude_accounts: Vec<socket::ClaudeAccount>,
-    pub(crate) claude_account: String,
-    pub(crate) codex_accounts: Vec<socket::CodexAccount>,
-    pub(crate) codex_account: String,
     pub(crate) account_autoswitch: bool,
     pub(crate) account_autoswitch_pct: f32,
     pub(crate) statusbar_all_accounts: bool,
+    pub(crate) accounts: Arc<Vec<AccountChoice>>,
+    pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
+    pub(crate) login_job: Option<crate::settings::LoginJob>,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     pub(crate) characters: Arc<Vec<CharacterChoice>>,
     pub(crate) themes: Arc<Vec<socket::ThemeRow>>,
+    pub(crate) theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
+    pub(crate) theme_picks: Arc<std::collections::HashMap<String, Vec<String>>>,
+    pub(crate) inspected_theme: Option<String>,
+    pub(crate) theme_label_edit: Option<(String, String)>,
     pub(crate) character_theme: String,
     pub(crate) open_apps: Arc<Vec<(String, String)>>,
     pub(crate) student_selected: Option<String>,
@@ -218,15 +465,48 @@ pub(crate) struct Snapshot {
     pub(crate) student_caret: usize,
     pub(crate) student_model: String,
     pub(crate) student_backend: String,
+    pub(crate) student_raw_open: bool,
+    pub(crate) student_raw_yaml: bool,
+    pub(crate) student_raw_text: String,
+    pub(crate) student_raw_caret: usize,
+    pub(crate) student_raw_error: Option<String>,
     pub(crate) models: Arc<Vec<kasa_mcp::character::ModelChoice>>,
     pub(crate) settings_caret: usize,
     pub(crate) feedback_body: String,
     pub(crate) feedback_caret: usize,
     pub(crate) feedback_diag: bool,
+    pub(crate) themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
+    pub(crate) themegen_provider: String,
+    pub(crate) themegen_key_masked: String,
+    pub(crate) themegen_key_edit: String,
+    pub(crate) themegen_has_ref: bool,
+    pub(crate) themegen_phase: Option<crate::themegen::GenPhase>,
+    pub(crate) sprite_slot: Option<(String, usize)>,
     pub(crate) onboarding: crate::native_onboarding::Snapshot,
 }
 
 impl App {
+    /// 계정 신원/한도는 렌더 스냅샷에서 조회하지 않는다. 이 함수는 event-loop의
+    /// 느린 틱에서만 캐시를 갱신하므로 auth probe가 자식 프로세스를 띄우더라도
+    /// 프레임마다 반복되지 않는다.
+    pub(crate) fn refresh_native_settings_dynamic_cache(&mut self) {
+        if !self.settings_room_active() {
+            return;
+        }
+        let accounts = account_choices(self);
+        self.settings_scene.set_account_cache(accounts);
+    }
+
+    pub(crate) fn native_settings_tick(&mut self) {
+        if self.settings_room_active() && self.settings_scene.dynamic_refresh_due() {
+            self.refresh_native_settings_dynamic_cache();
+            self.chrome_dirty = true;
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+    }
+
     pub(crate) fn native_settings_snapshot(&self, area: Rect) -> Option<Snapshot> {
         if !self.settings_room_active() {
             return None;
@@ -252,8 +532,10 @@ impl App {
             scroll: scene.scroll(),
             caret_on: self.last_blink_on,
             input: self.settings_input,
+            select_all: scene.field_select_all(),
             preedit: self.preedit.clone(),
             first_run: scene.first_run(),
+            language: cache.language.clone(),
             cwd_mode: self.set_cwd_mode.clone(),
             file_open_mode: self.set_file_open_mode.clone(),
             file_open_app: self.set_file_open_app.clone(),
@@ -263,6 +545,15 @@ impl App {
             autosave_ms: self.set_autosave.map_or(0, |d| d.as_millis() as u64),
             shell: self.set_shell.clone(),
             theme: theme::theme_name(),
+            system_light: cache.system_light.clone(),
+            system_dark: cache.system_dark.clone(),
+            custom_themes: cache.custom_themes.clone(),
+            custom_active: cache.custom_active.clone(),
+            custom_theme_label_edit: self.custom_theme_label_edit.clone(),
+            palette_hex: cache.palette_hex.clone(),
+            palette_edit: self.set_palette_edit.clone(),
+            picker_hsv: self.set_picker_hsv,
+            eyedropper: crate::eyedropper::supported(),
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             min_contrast: theme::min_contrast(),
@@ -280,16 +571,19 @@ impl App {
             claude_model: self.set_claude_model.clone(),
             claude_effort: self.set_claude_effort.clone(),
             claude_extra: self.set_claude_extra.clone(),
-            claude_accounts: self.set_claude_accounts.clone(),
-            claude_account: self.set_claude_account.clone(),
-            codex_accounts: self.set_codex_accounts.clone(),
-            codex_account: self.set_codex_account.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             statusbar_all_accounts: self.set_statusbar_all_accounts,
+            accounts: cache.accounts.clone(),
+            account_label_edit: self.account_label_edit.clone(),
+            login_job: crate::settings::hidden_login_job(),
             palettes: cache.palettes.clone(),
             characters: cache.characters.clone(),
             themes: cache.themes.clone(),
+            theme_rosters: cache.theme_rosters.clone(),
+            theme_picks: cache.theme_picks.clone(),
+            inspected_theme: scene.inspected_theme().map(str::to_string),
+            theme_label_edit: self.theme_label_edit.clone(),
             character_theme: cache.character_theme.clone(),
             open_apps: cache.open_apps.clone(),
             student_selected: self.students_selected.clone(),
@@ -298,11 +592,29 @@ impl App {
             student_caret: self.students_caret,
             student_model,
             student_backend,
+            student_raw_open: self.students_raw.open,
+            student_raw_yaml: self.students_raw.yaml,
+            student_raw_text: self.students_raw.text.clone(),
+            student_raw_caret: self.students_raw.caret,
+            student_raw_error: self.students_raw.err.clone(),
             models: cache.models.clone(),
             settings_caret: self.settings_caret,
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
+            themegen_providers: cache.themegen_providers.clone(),
+            themegen_provider: cache.themegen_provider.clone(),
+            themegen_key_masked: cache.themegen_key_masked.clone(),
+            themegen_key_edit: self.themegen.key_edit.clone(),
+            themegen_has_ref: selected
+                .and_then(|name| cache.characters.iter().find(|character| character.name == name))
+                .is_some_and(|character| cache.themegen_refs.contains(&character.slug)),
+            themegen_phase: selected
+                .and_then(|name| cache.characters.iter().find(|character| character.name == name))
+                .and_then(|character| self.themegen_view(&character.slug).map(|view| view.phase)),
+            sprite_slot: scene
+                .sprite_slot()
+                .map(|(motion, frame)| (motion.to_string(), frame)),
             onboarding: crate::native_onboarding::snapshot(self, area),
         })
     }
@@ -348,23 +660,47 @@ impl App {
         if !self.settings_room_active() {
             return false;
         }
-        let target = self
-            .settings_scene
-            .hit_at(x, y)
-            .map(|hit| hit.target.clone());
+        let hit = self.settings_scene.hit_at(x, y).cloned();
+        let target = hit.as_ref().map(|hit| hit.target.clone());
         match target {
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.settings_scene.set_category(cat);
             }
             Some(Target::Setting(action)) => {
+                if matches!(action, SettingsAction::PickerSV | SettingsAction::PickerHue) {
+                    if !matches!(self.settings_input, Some(SettingsInput::PaletteHex(_))) {
+                        self.settings_apply(SettingsAction::FocusPaletteHex(0));
+                        self.native_settings_arm_backup(SettingsInput::PaletteHex(0));
+                    }
+                    if let Some(rect) = hit.map(|hit| hit.rect) {
+                        self.picker_preview(&action, rect, (x, y));
+                        self.settings_scene.begin_picker_drag(action, rect);
+                    }
+                    self.chrome_dirty = true;
+                    return true;
+                }
                 self.native_settings_blur();
                 self.native_settings_apply(action);
                 if let Some(field) = self.settings_input {
                     self.native_settings_arm_backup(field);
                 }
             }
-            Some(Target::Focus(field)) => self.native_settings_focus(field),
+            Some(Target::Focus(field)) => {
+                if let SettingsInput::PaletteHex(slot) = field {
+                    if self.settings_input != Some(field) {
+                        self.native_settings_blur();
+                        self.settings_apply(SettingsAction::FocusPaletteHex(slot));
+                        self.native_settings_arm_backup(field);
+                        self.ime_focus = Some(crate::ImeFocus::Settings(field));
+                    }
+                } else {
+                    self.native_settings_focus(field);
+                }
+                if let Some(rect) = hit.map(|hit| hit.rect) {
+                    self.native_settings_place_caret(field, rect, (x, y));
+                }
+            }
             Some(Target::Close) => {
                 self.native_settings_blur();
                 self.return_from_settings_room();
@@ -383,11 +719,43 @@ impl App {
         true
     }
 
+    pub(crate) fn native_settings_drag_move(&mut self, x: f32, y: f32) -> bool {
+        let Some((action, rect)) = self.settings_scene.picker_drag() else { return false };
+        self.picker_preview(&action, rect, (x, y));
+        self.chrome_dirty = true;
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(crate) fn native_settings_end_drag(&mut self) -> bool {
+        let ended = self.settings_scene.end_picker_drag();
+        if ended {
+            if let Some(SettingsInput::PaletteHex(slot)) = self.settings_input {
+                self.apply_palette_edit(slot);
+            }
+        }
+        ended
+    }
+
     fn native_settings_apply(&mut self, action: SettingsAction) {
         let refresh = action_refreshes_cache(&action);
+        let accounts = matches!(
+            action,
+            SettingsAction::SwitchAccount(_, _)
+                | SettingsAction::AddClaudeAccount
+                | SettingsAction::AddCodexAccount
+                | SettingsAction::RemoveClaudeAccount(_)
+                | SettingsAction::RemoveCodexAccount(_)
+                | SettingsAction::ReauthAccount(_, _, _)
+        );
         self.settings_apply(action);
         if refresh {
             self.settings_scene.refresh_cache();
+        }
+        if accounts {
+            self.refresh_native_settings_dynamic_cache();
         }
     }
 
@@ -396,6 +764,7 @@ impl App {
             self.native_settings_blur();
         }
         self.native_settings_arm_backup(field);
+        self.settings_scene.clear_field_selection();
         self.settings_input = Some(field);
         match field {
             SettingsInput::CwdPath => self.settings_caret = self.set_cwd_mode.chars().count(),
@@ -403,7 +772,12 @@ impl App {
                 self.settings_caret = self.set_file_open_cmd.chars().count()
             }
             SettingsInput::Shell => {
-                self.set_shell = direct_shell_seed(&self.set_shell);
+                let detected_preset = self.settings_scene.first_run()
+                    && self
+                        .settings_scene
+                        .onboarding()
+                        .shell_path_is_preset(&self.set_shell);
+                self.set_shell = direct_shell_seed(&self.set_shell, detected_preset);
                 self.settings_caret = self.set_shell.chars().count();
             }
             SettingsInput::ClaudeExtra => {
@@ -414,11 +788,34 @@ impl App {
                 self.students_caret = self.students_persona.chars().count()
             }
             SettingsInput::FeedbackBody => self.feedback_caret = self.feedback_body.chars().count(),
+            SettingsInput::StudentRaw => self.students_raw.caret = self.students_raw.text.chars().count(),
+            SettingsInput::ThemeGenKey => {
+                self.themegen.key_edit.clear();
+                self.settings_caret = 0;
+            }
+            SettingsInput::CustomThemeLabel | SettingsInput::AccountLabel => {
+                self.settings_caret = self
+                    .native_settings_field_value(field)
+                    .0
+                    .chars()
+                    .count();
+            }
             SettingsInput::ThemeLabel | SettingsInput::PaletteHex(_) => {}
         }
         self.ime_focus = Some(crate::ImeFocus::Settings(field));
         self.preedit.clear();
         self.in_preedit = false;
+    }
+
+    fn native_settings_place_caret(&mut self, field: SettingsInput, rect: Rect, point: (f32, f32)) {
+        if is_multiline(field) {
+            return;
+        }
+        let ratio = ((point.0 - rect.0 - 10.0) / (rect.2 - 20.0).max(1.0)).clamp(0.0, 1.0);
+        if let Some((buffer, caret)) = field_buffer(self, field) {
+            *caret = (buffer.chars().count() as f32 * ratio).round() as usize;
+        }
+        self.settings_scene.clear_field_selection();
     }
 
     fn native_settings_arm_backup(&mut self, field: SettingsInput) {
@@ -442,6 +839,22 @@ impl App {
             SettingsInput::StudentName => (self.students_name.clone(), self.settings_caret),
             SettingsInput::StudentPersona => (self.students_persona.clone(), self.students_caret),
             SettingsInput::FeedbackBody => (self.feedback_body.clone(), self.feedback_caret),
+            SettingsInput::StudentRaw => (self.students_raw.text.clone(), self.students_raw.caret),
+            SettingsInput::ThemeGenKey => (self.themegen.key_edit.clone(), self.settings_caret),
+            SettingsInput::CustomThemeLabel => (
+                self.custom_theme_label_edit
+                    .as_ref()
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default(),
+                self.settings_caret,
+            ),
+            SettingsInput::AccountLabel => (
+                self.account_label_edit
+                    .as_ref()
+                    .map(|(_, _, value)| value.clone())
+                    .unwrap_or_default(),
+                self.settings_caret,
+            ),
             SettingsInput::ThemeLabel => (
                 self.theme_label_edit
                     .as_ref()
@@ -454,7 +867,14 @@ impl App {
     }
 
     pub(crate) fn native_settings_insert_into(&mut self, field: SettingsInput, text: &str) {
-        if !text.is_empty() {
+        let replacing = self.settings_scene.take_field_select_all();
+        if replacing {
+            if let Some((buffer, caret)) = field_buffer(self, field) {
+                buffer.clear();
+                *caret = 0;
+            }
+        }
+        if !text.is_empty() || replacing {
             self.settings_scene.mark_field_dirty();
         }
         match field {
@@ -479,6 +899,22 @@ impl App {
             SettingsInput::FeedbackBody => {
                 crate::lineedit::insert(&mut self.feedback_body, &mut self.feedback_caret, text)
             }
+            SettingsInput::StudentRaw => {
+                crate::lineedit::insert(&mut self.students_raw.text, &mut self.students_raw.caret, text)
+            }
+            SettingsInput::ThemeGenKey => {
+                crate::lineedit::insert(&mut self.themegen.key_edit, &mut self.settings_caret, text)
+            }
+            SettingsInput::CustomThemeLabel => {
+                if let Some((_, buffer)) = self.custom_theme_label_edit.as_mut() {
+                    crate::lineedit::insert(buffer, &mut self.settings_caret, text);
+                }
+            }
+            SettingsInput::AccountLabel => {
+                if let Some((_, _, buffer)) = self.account_label_edit.as_mut() {
+                    crate::lineedit::insert(buffer, &mut self.settings_caret, text);
+                }
+            }
             SettingsInput::ThemeLabel => {
                 if let Some((_, buffer)) = self.theme_label_edit.as_mut() {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
@@ -497,6 +933,12 @@ impl App {
                 | SettingsInput::ClaudeExtra
         ) {
             self.settings_save();
+        }
+        if field == SettingsInput::FeedbackBody {
+            socket::write_setting(
+                "feedback_draft",
+                serde_json::Value::String(self.feedback_body.clone()),
+            );
         }
         self.chrome_dirty = true;
     }
@@ -524,7 +966,24 @@ impl App {
             self.flush_theme_label();
             self.settings_scene.refresh_cache();
         }
+        if self.settings_input == Some(SettingsInput::CustomThemeLabel) {
+            self.flush_custom_theme_label();
+            self.settings_scene.refresh_cache();
+        }
+        if self.settings_input == Some(SettingsInput::AccountLabel) {
+            self.flush_account_label();
+            self.refresh_native_settings_dynamic_cache();
+        }
+        if self.settings_input == Some(SettingsInput::ThemeGenKey) {
+            let key = self.themegen.key_edit.trim();
+            if !key.is_empty() {
+                socket::write_setting("gemini_api_key", serde_json::json!(key));
+                self.settings_scene.refresh_cache();
+            }
+            self.themegen.key_edit.clear();
+        }
         self.settings_input = None;
+        self.settings_scene.clear_field_selection();
         if matches!(self.ime_focus, Some(crate::ImeFocus::Settings(_))) {
             self.ime_focus = None;
         }
@@ -541,6 +1000,18 @@ impl App {
             SettingsInput::StudentName => self.students_name = backup.value,
             SettingsInput::StudentPersona => self.students_persona = backup.value,
             SettingsInput::FeedbackBody => self.feedback_body = backup.value,
+            SettingsInput::StudentRaw => self.students_raw.text = backup.value,
+            SettingsInput::ThemeGenKey => self.themegen.key_edit = backup.value,
+            SettingsInput::CustomThemeLabel => {
+                if let Some((_, value)) = self.custom_theme_label_edit.as_mut() {
+                    *value = backup.value;
+                }
+            }
+            SettingsInput::AccountLabel => {
+                if let Some((_, _, value)) = self.account_label_edit.as_mut() {
+                    *value = backup.value;
+                }
+            }
             SettingsInput::ThemeLabel => {
                 if let Some((_, value)) = self.theme_label_edit.as_mut() {
                     *value = backup.value;
@@ -553,6 +1024,7 @@ impl App {
         }
         match backup.field {
             SettingsInput::StudentPersona => self.students_caret = backup.caret,
+            SettingsInput::StudentRaw => self.students_raw.caret = backup.caret,
             SettingsInput::FeedbackBody => self.feedback_caret = backup.caret,
             _ => self.settings_caret = backup.caret,
         }
@@ -564,6 +1036,12 @@ impl App {
                 | SettingsInput::ClaudeExtra
         ) {
             self.settings_save();
+        }
+        if backup.field == SettingsInput::FeedbackBody {
+            socket::write_setting(
+                "feedback_draft",
+                serde_json::Value::String(self.feedback_body.clone()),
+            );
         }
     }
 
@@ -609,6 +1087,42 @@ impl App {
 
         self.ime_retarget(crate::ImeFocus::Settings(field));
         let host = self.host_mod();
+        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyA)) {
+            self.settings_scene.select_all_field();
+            if let Some((buffer, caret)) = field_buffer(self, field) {
+                *caret = buffer.chars().count();
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
+        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC)) {
+            if self.settings_scene.field_select_all() {
+                let value = self.native_settings_field_value(field).0;
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(value);
+                }
+            }
+            return true;
+        }
+        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyX)) {
+            if self.settings_scene.field_select_all() {
+                let value = self.native_settings_field_value(field).0;
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(value);
+                }
+                self.native_settings_insert_into(field, "");
+            }
+            return true;
+        }
+        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyZ)) {
+            if let Some(backup) = self.settings_scene.field_backup() {
+                self.native_settings_restore_backup(backup.clone());
+                self.settings_scene.arm_field_backup(backup);
+                self.settings_scene.select_all_field();
+                self.chrome_dirty = true;
+            }
+            return true;
+        }
         if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                 if let Ok(mut text) = clipboard.get_text() {
@@ -664,6 +1178,27 @@ impl App {
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
             self.native_settings_cancel_field();
             return true;
+        }
+
+        if self.settings_scene.field_select_all()
+            && matches!(
+                event.logical_key,
+                Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete)
+            )
+        {
+            self.native_settings_insert_into(field, "");
+            return true;
+        }
+        if self.settings_scene.field_select_all()
+            && matches!(
+                event.logical_key,
+                Key::Named(NamedKey::ArrowLeft)
+                    | Key::Named(NamedKey::ArrowRight)
+                    | Key::Named(NamedKey::Home)
+                    | Key::Named(NamedKey::End)
+            )
+        {
+            self.settings_scene.clear_field_selection();
         }
 
         match event.logical_key {
@@ -785,24 +1320,112 @@ impl App {
             self.set_toast("테마 압축 파일은 어느 설정 화면에서든 놓을 수 있어요".to_string());
             return true;
         }
-        let Some(slug) = self
-            .students_selected
-            .as_deref()
-            .and_then(theme::character_slug)
-        else {
-            self.set_toast("먼저 캐릭터를 골라 주세요".to_string());
+        if let (Some(name), Some((motion, frame))) = (
+            self.students_selected.clone(),
+            self.settings_scene
+                .sprite_slot()
+                .map(|(motion, frame)| (motion.to_string(), frame)),
+        ) {
+            let slug = self
+                .settings_scene
+                .cache()
+                .characters
+                .iter()
+                .find(|character| character.name == name)
+                .map(|character| character.slug.clone())
+                .unwrap_or_else(|| theme::agent_slug(&name));
+            let Some((count, ext)) = socket::character_sprite_spec(&motion) else {
+                self.set_toast("그 모션 칸을 못 찾았어요".to_string());
+                return true;
+            };
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.set_toast(format!("그림을 못 읽었어요 — {error}"));
+                    return true;
+                }
+            };
+            let mut frames = Vec::with_capacity(count);
+            for index in 0..count {
+                if index == frame {
+                    frames.push(bytes.clone());
+                } else if let Some(existing) = socket::character_sprite_bytes(&slug, &motion, index) {
+                    frames.push(existing);
+                } else {
+                    self.set_toast(format!(
+                        "{motion}은 {count}장의 {ext}가 모두 있어야 해요 — 없는 칸부터 채워 주세요"
+                    ));
+                    return true;
+                }
+            }
+            match socket::save_character_sprite_files(&slug, &motion, &frames) {
+                Ok(_) => {
+                    self.settings_apply(SettingsAction::RefreshStudentAssets);
+                    self.set_toast(format!("{motion} {}번째 그림을 바꿨어요", frame + 1));
+                }
+                Err(error) => self.set_toast(format!("그림을 못 바꿨어요 — {error}")),
+            }
             return true;
-        };
+        }
         let theme_id = self.settings_scene.cache().character_theme.clone();
         if theme_id.is_empty() {
             self.set_toast("기본 테마에는 못 구워요 — 테마를 복제한 뒤 놓아 주세요".to_string());
             return true;
         }
+        if self.students_selected.is_none() {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.set_toast(format!("그림을 못 읽었어요 — {error}"));
+                    return true;
+                }
+            };
+            let name = path.file_name().and_then(|value| value.to_str());
+            match crate::themegen::themegen_put_ref(None, name, &bytes) {
+                Ok(slug) => {
+                    socket::invalidate_theme_rows();
+                    kasa_mcp::character::invalidate_active_theme();
+                    theme::invalidate_roster();
+                    self.settings_scene.refresh_cache();
+                    if let Some(name) = self
+                        .settings_scene
+                        .cache()
+                        .characters
+                        .iter()
+                        .find(|character| character.slug == slug)
+                        .map(|character| character.name.clone())
+                    {
+                        self.select_student_for_edit(name);
+                    }
+                    self.set_toast(format!("{slug} 캐릭터와 참조 그림을 만들었어요"));
+                }
+                Err(error) => self.set_toast(format!("캐릭터를 못 만들었어요 — {error}")),
+            }
+            return true;
+        }
+        let Some(slug) = self
+            .students_selected
+            .as_deref()
+            .and_then(|name| {
+                self.settings_scene
+                    .cache()
+                    .characters
+                    .iter()
+                    .find(|character| character.name == name)
+                    .map(|character| character.slug.clone())
+            })
+        else {
+            self.set_toast("캐릭터의 그림 이름을 못 찾았어요".to_string());
+            return true;
+        };
         let Some(root) = kasa_mcp::character::themes_root() else {
             return true;
         };
-        match crate::themegen::place_themegen_ref(&root.join(theme_id), slug, &path) {
-            Ok(_) => self.set_toast("참조 그림을 놓았어요".to_string()),
+        match crate::themegen::place_themegen_ref(&root.join(theme_id), &slug, &path) {
+            Ok(_) => {
+                self.settings_scene.refresh_cache();
+                self.set_toast("참조 그림을 놓았어요".to_string());
+            }
             Err(error) => self.set_toast(format!("그림을 못 놓았어요 — {error}")),
         }
         true
@@ -812,14 +1435,16 @@ impl App {
 fn is_multiline(field: SettingsInput) -> bool {
     matches!(
         field,
-        SettingsInput::StudentPersona | SettingsInput::FeedbackBody
+        SettingsInput::StudentPersona | SettingsInput::StudentRaw | SettingsInput::FeedbackBody
     )
 }
 
 fn action_refreshes_cache(action: &SettingsAction) -> bool {
     matches!(
         action,
-        SettingsAction::ThemeMode(_)
+        SettingsAction::UiLanguage(_)
+            | SettingsAction::ThemeMode(_)
+            | SettingsAction::ThemeSystemSlot(_, _)
             | SettingsAction::StartCustomTheme
             | SettingsAction::ResetCustomTheme
             | SettingsAction::DeleteCustomTheme(_)
@@ -828,11 +1453,14 @@ fn action_refreshes_cache(action: &SettingsAction) -> bool {
             | SettingsAction::DeleteTheme(_)
             | SettingsAction::RefreshStudentAssets
             | SettingsAction::StudentModel(_, _)
+            | SettingsAction::ThemePickAll(_, _)
+            | SettingsAction::CharacterPick(_, _, _)
+            | SettingsAction::ThemeGenProvider(_)
     )
 }
 
-fn direct_shell_seed(current: &str) -> String {
-    if matches!(current, "" | "/bin/zsh" | "/bin/bash") {
+fn direct_shell_seed(current: &str, detected_preset: bool) -> String {
+    if detected_preset || matches!(current, "" | "/bin/zsh" | "/bin/bash") {
         String::new()
     } else {
         current.to_string()
@@ -860,6 +1488,16 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
         SettingsInput::StudentName => Some((&mut app.students_name, &mut app.settings_caret)),
         SettingsInput::StudentPersona => Some((&mut app.students_persona, &mut app.students_caret)),
         SettingsInput::FeedbackBody => Some((&mut app.feedback_body, &mut app.feedback_caret)),
+        SettingsInput::StudentRaw => Some((&mut app.students_raw.text, &mut app.students_raw.caret)),
+        SettingsInput::ThemeGenKey => Some((&mut app.themegen.key_edit, &mut app.settings_caret)),
+        SettingsInput::CustomThemeLabel => app
+            .custom_theme_label_edit
+            .as_mut()
+            .map(|(_, buffer)| (buffer, &mut app.settings_caret)),
+        SettingsInput::AccountLabel => app
+            .account_label_edit
+            .as_mut()
+            .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
         SettingsInput::ThemeLabel => app
             .theme_label_edit
             .as_mut()
@@ -1023,7 +1661,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             content_w,
         ),
         SettingsCat::Appearance => {
-            paint_appearance(g, snapshot, &mut hits, content_x, &mut y, content_w)
+            paint_appearance(
+                g,
+                snapshot,
+                &mut hits,
+                &mut caret_rect,
+                content_x,
+                &mut y,
+                content_w,
+            )
         }
         SettingsCat::Shell => paint_shell(
             g,
@@ -1043,7 +1689,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Theme => paint_themes(g, snapshot, &mut hits, content_x, &mut y, content_w),
+        SettingsCat::Theme => paint_themes(
+            g,
+            snapshot,
+            &mut hits,
+            &mut caret_rect,
+            content_x,
+            &mut y,
+            content_w,
+        ),
         SettingsCat::Students => paint_students(
             g,
             snapshot,
@@ -1134,6 +1788,21 @@ fn paint_general(
     y: &mut f32,
     w: f32,
 ) {
+    section_title(g, x, *y, "언어", "설정과 안내 화면에서 쓸 말을 고릅니다");
+    *y += 48.0;
+    segmented(
+        g,
+        s,
+        hits,
+        x,
+        *y,
+        w,
+        &[
+            ("한국어", s.language == "ko", SettingsAction::UiLanguage("ko")),
+            ("English", s.language == "en", SettingsAction::UiLanguage("en")),
+        ],
+    );
+    *y += 54.0;
     section_title(
         g,
         x,
@@ -1207,19 +1876,23 @@ fn paint_general(
         ],
     );
     *y += 42.0;
-    if matches!(s.file_open_mode.as_str(), "app" | "system") && !s.open_apps.is_empty() {
-        let choices: Vec<(String, bool, SettingsAction)> = s
+    if matches!(s.file_open_mode.as_str(), "app" | "system") {
+        let mut choices: Vec<(String, bool, SettingsAction)> = s
             .open_apps
             .iter()
-            .take(5)
-            .map(|(name, _)| {
+            .map(|(name, short)| {
                 (
-                    name.clone(),
+                    short.clone(),
                     s.file_open_app == *name,
                     SettingsAction::FileOpenApp(name.clone()),
                 )
             })
             .collect();
+        choices.push((
+            "기본 앱".to_string(),
+            s.file_open_app.is_empty(),
+            SettingsAction::FileOpenApp(String::new()),
+        ));
         chips_owned(g, s, hits, x, y, w, choices);
     }
     if s.file_open_mode == "terminal" {
@@ -1271,7 +1944,7 @@ fn paint_general(
         "자주 바꾸지 않는 입력 감각만 모았습니다",
     );
     *y += 48.0;
-    let autosave = [("끔", 0), ("0.3초", 300), ("1초", 1000), ("3초", 3000)];
+    let autosave = [("끔", 0), ("1초", 1000), ("3초", 3000), ("10초", 10000)];
     let autosave_cells: Vec<(&str, bool, SettingsAction)> = autosave
         .iter()
         .map(|(label, ms)| {
@@ -1334,6 +2007,7 @@ fn paint_appearance(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
@@ -1547,6 +2221,37 @@ fn paint_appearance(
     }
     let palette_rows = (s.palettes.len() + grid_cols - 1) / grid_cols;
     *y += palette_rows as f32 * (ph + gap) + 4.0;
+    if s.theme == "system" {
+        section_title(
+            g,
+            x,
+            *y,
+            "시스템 밝기별 테마",
+            "운영체제가 밝음/어두움을 바꿀 때 입을 팔레트입니다",
+        );
+        *y += 46.0;
+        for (light, label, current) in [
+            (true, "밝은 화면", s.system_light.as_str()),
+            (false, "어두운 화면", s.system_dark.as_str()),
+        ] {
+            draw_text(g, x + 2.0, *y + 9.0, label, 11.5, theme::text_dim(), false);
+            let choices = s
+                .palettes
+                .iter()
+                .filter(|palette| palette.key != "system")
+                .map(|palette| {
+                    (
+                        palette.label.clone(),
+                        palette.key == current,
+                        SettingsAction::ThemeSystemSlot(light, palette.key.clone()),
+                    )
+                })
+                .collect();
+            *y += 28.0;
+            chips_owned(g, s, hits, x, y, w, choices);
+        }
+        *y += 8.0;
+    }
     button(
         g,
         s,
@@ -1557,6 +2262,61 @@ fn paint_appearance(
         false,
     );
     *y += 48.0;
+    if !s.custom_active.is_empty() {
+        let label = s
+            .custom_themes
+            .iter()
+            .find(|custom| custom.slug == s.custom_active)
+            .map(|custom| custom.label.as_str())
+            .unwrap_or(s.custom_active.as_str());
+        let edit_value = s
+            .custom_theme_label_edit
+            .as_ref()
+            .filter(|(slug, _)| slug == &s.custom_active)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or(label);
+        text_field(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            *y,
+            (w - 196.0).max(160.0),
+            "커스텀 팔레트 이름",
+            edit_value,
+            SettingsInput::CustomThemeLabel,
+            s.settings_caret,
+            false,
+        );
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::FocusCustomThemeLabel(s.custom_active.clone())),
+            (x, *y + 18.0, (w - 196.0).max(160.0), 36.0),
+            HitCursor::Text,
+        );
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 184.0, *y + 18.0, 86.0, 36.0),
+            "초기화",
+            Target::Setting(SettingsAction::ResetCustomTheme),
+            false,
+        );
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 92.0, *y + 18.0, 92.0, 36.0),
+            "팔레트 치우기",
+            Target::Setting(SettingsAction::DeleteCustomTheme(s.custom_active.clone())),
+            false,
+        );
+        *y += 72.0;
+        paint_palette_editor(g, s, hits, caret, x, y, w);
+    }
     let accents: Vec<(String, bool, SettingsAction)> = theme::ACCENT_PRESETS
         .iter()
         .map(|(name, _)| {
@@ -1641,6 +2401,181 @@ fn paint_appearance(
         false,
     );
     *y += 46.0;
+}
+
+fn paint_palette_editor(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "팔레트 색",
+        "색 칸을 고른 뒤 휠이나 #rrggbb 값으로 바꿉니다",
+    );
+    *y += 48.0;
+    let selected = match s.input {
+        Some(SettingsInput::PaletteHex(index)) => index.min(s.palette_hex.len().saturating_sub(1)),
+        _ => 0,
+    };
+    let (hue, sat, val) = s.picker_hsv;
+    let wheel_w = w.min(310.0).max(180.0);
+    let sv = (x, *y, wheel_w, 132.0);
+    let cells_x = 24;
+    let cells_y = 12;
+    for row in 0..cells_y {
+        for col in 0..cells_x {
+            let saturation = (col + 1) as f32 / cells_x as f32;
+            let value = 1.0 - row as f32 / cells_y as f32;
+            let rgb = hsv_rgb(hue, saturation, value);
+            g.rect(
+                sv.0 + col as f32 * sv.2 / cells_x as f32,
+                sv.1 + row as f32 * sv.3 / cells_y as f32,
+                sv.2 / cells_x as f32 + 0.5,
+                sv.3 / cells_y as f32 + 0.5,
+                [rgb[0], rgb[1], rgb[2], 255],
+            );
+        }
+    }
+    stroke_rect(g, sv, theme::border());
+    let marker_x = sv.0 + sat * sv.2;
+    let marker_y = sv.1 + (1.0 - val) * sv.3;
+    stroke_rect(g, (marker_x - 4.0, marker_y - 4.0, 8.0, 8.0), [255, 255, 255, 255]);
+    register_clipped(
+        g,
+        hits,
+        Target::Setting(SettingsAction::PickerSV),
+        sv,
+        HitCursor::Pointer,
+    );
+
+    let hue_rect = (x, *y + 141.0, wheel_w, 18.0);
+    for col in 0..60 {
+        let rgb = hsv_rgb(col as f32 * 6.0, 1.0, 1.0);
+        g.rect(
+            hue_rect.0 + col as f32 * hue_rect.2 / 60.0,
+            hue_rect.1,
+            hue_rect.2 / 60.0 + 0.5,
+            hue_rect.3,
+            [rgb[0], rgb[1], rgb[2], 255],
+        );
+    }
+    stroke_rect(g, hue_rect, theme::border());
+    g.rect(
+        hue_rect.0 + (hue / 360.0) * hue_rect.2 - 1.0,
+        hue_rect.1 - 2.0,
+        2.0,
+        hue_rect.3 + 4.0,
+        [255, 255, 255, 255],
+    );
+    register_clipped(
+        g,
+        hits,
+        Target::Setting(SettingsAction::PickerHue),
+        hue_rect,
+        HitCursor::Pointer,
+    );
+    let field_x = x + wheel_w + 16.0;
+    let field_w = (w - wheel_w - 16.0).max(110.0);
+    let slot_label = if selected < theme::PALETTE_KEYS.len() {
+        theme::PALETTE_KEYS[selected].0.to_string()
+    } else {
+        format!("ANSI {}", selected.saturating_sub(theme::PALETTE_KEYS.len()))
+    };
+    draw_text(g, field_x, *y + 4.0, &slot_label, 12.0, theme::text(), true);
+    text_field(
+        g,
+        s,
+        hits,
+        caret,
+        field_x,
+        *y + 28.0,
+        field_w,
+        "HEX",
+        if s.input == Some(SettingsInput::PaletteHex(selected)) {
+            &s.palette_edit
+        } else {
+            s.palette_hex.get(selected).map(String::as_str).unwrap_or("#000000")
+        },
+        SettingsInput::PaletteHex(selected),
+        s.settings_caret,
+        false,
+    );
+    if s.eyedropper {
+        button(
+            g,
+            s,
+            hits,
+            (field_x, *y + 91.0, field_w.min(126.0), 34.0),
+            "화면에서 색 집기",
+            Target::Setting(SettingsAction::PaletteEyedropper(selected)),
+            false,
+        );
+    }
+    *y += 178.0;
+
+    let swatch_w = 31.0;
+    let gap = 7.0;
+    let cols = ((w + gap) / (swatch_w + gap)).floor().max(1.0) as usize;
+    for (index, hex) in s.palette_hex.iter().enumerate() {
+        let rect = (
+            x + (index % cols) as f32 * (swatch_w + gap),
+            *y + (index / cols) as f32 * 36.0,
+            swatch_w,
+            28.0,
+        );
+        round_rect(
+            g,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            theme::radius_sm(),
+            theme::parse_hex(hex)
+                .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                .unwrap_or([0, 0, 0, 255]),
+        );
+        stroke_rect(
+            g,
+            rect,
+            if index == selected { theme::accent() } else { theme::border() },
+        );
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::FocusPaletteHex(index)),
+            rect,
+            HitCursor::Pointer,
+        );
+    }
+    let rows = (s.palette_hex.len() + cols - 1) / cols;
+    *y += rows as f32 * 36.0 + 18.0;
+}
+
+fn hsv_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    ]
 }
 
 fn paint_shell(
@@ -1811,9 +2746,9 @@ fn paint_claude(
         "고르면 실행 중인 작업을 확인한 뒤 안전하게 갈아낍니다",
     );
     *y += 48.0;
-    account_group(g, s, hits, x, y, w, AccountProvider::Claude);
+    account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
     *y += 12.0;
-    account_group(g, s, hits, x, y, w, AccountProvider::Codex);
+    account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
     *y += 14.0;
     toggle_row(
         g,
@@ -1837,38 +2772,46 @@ fn paint_claude(
         s.statusbar_all_accounts,
         SettingsAction::ToggleStatusbarAllAccounts,
     );
-    segmented(
-        g,
-        s,
-        hits,
-        x,
-        *y,
-        w,
-        &[
-            (
-                "80%",
-                s.account_autoswitch_pct.round() as u32 == 80,
-                SettingsAction::AccountAutoswitchPct(80),
-            ),
-            (
-                "90%",
-                s.account_autoswitch_pct.round() as u32 == 90,
-                SettingsAction::AccountAutoswitchPct(90),
-            ),
-            (
-                "95%",
-                s.account_autoswitch_pct.round() as u32 == 95,
-                SettingsAction::AccountAutoswitchPct(95),
-            ),
-        ],
-    );
-    *y += 48.0;
+    if s.account_autoswitch {
+        segmented(
+            g,
+            s,
+            hits,
+            x,
+            *y,
+            w,
+            &[
+                (
+                    "80%",
+                    s.account_autoswitch_pct.round() as u32 == 80,
+                    SettingsAction::AccountAutoswitchPct(80),
+                ),
+                (
+                    "85%",
+                    s.account_autoswitch_pct.round() as u32 == 85,
+                    SettingsAction::AccountAutoswitchPct(85),
+                ),
+                (
+                    "90%",
+                    s.account_autoswitch_pct.round() as u32 == 90,
+                    SettingsAction::AccountAutoswitchPct(90),
+                ),
+                (
+                    "95%",
+                    s.account_autoswitch_pct.round() as u32 == 95,
+                    SettingsAction::AccountAutoswitchPct(95),
+                ),
+            ],
+        );
+        *y += 48.0;
+    }
 }
 
 fn paint_themes(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
@@ -1931,9 +2874,27 @@ fn paint_themes(
                 color,
             );
         }
+        let inspect = (rect.0 + rect.2 - 38.0, rect.1 + 8.0, 26.0, 26.0);
+        mini_icon_button(
+            g,
+            s,
+            hits,
+            inspect,
+            "users",
+            Target::Setting(SettingsAction::InspectTheme(theme_row.id.clone())),
+        );
         if !theme_row.id.is_empty() {
+            let rename = (rect.0 + rect.2 - 106.0, rect.1 + 68.0, 26.0, 26.0);
             let open = (rect.0 + rect.2 - 72.0, rect.1 + 68.0, 26.0, 26.0);
             let delete = (rect.0 + rect.2 - 38.0, rect.1 + 68.0, 26.0, 26.0);
+            mini_icon_button(
+                g,
+                s,
+                hits,
+                rename,
+                "edit-3",
+                Target::Setting(SettingsAction::FocusThemeLabel(theme_row.id.clone())),
+            );
             mini_icon_button(
                 g,
                 s,
@@ -1954,6 +2915,83 @@ fn paint_themes(
     }
     let rows = (s.themes.len() + cols - 1) / cols;
     *y += rows as f32 * (ch + gap) + 6.0;
+    if let Some((id, label)) = s.theme_label_edit.as_ref() {
+        text_field(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            *y,
+            w,
+            &format!("{} 이름", id),
+            label,
+            SettingsInput::ThemeLabel,
+            s.settings_caret,
+            false,
+        );
+        *y += 62.0;
+    }
+    if let Some(id) = s.inspected_theme.as_deref() {
+        let key = if id.is_empty() {
+            kasa_mcp::character::BASE_THEME_KEY
+        } else {
+            id
+        };
+        let roster = s.theme_rosters.get(key).cloned().unwrap_or_default();
+        let picked = s.theme_picks.get(key).cloned().unwrap_or_default();
+        let fallback = picked.is_empty();
+        let label = s
+            .themes
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.label.as_str())
+            .unwrap_or(key);
+        section_title(
+            g,
+            x,
+            *y,
+            &format!("{label} 명단"),
+            "아무도 따로 고르지 않으면 이 테마의 전원이 기본 후보입니다",
+        );
+        *y += 48.0;
+        button(
+            g,
+            s,
+            hits,
+            (x, *y, 112.0, 34.0),
+            "전부 고르기",
+            Target::Setting(SettingsAction::ThemePickAll(key.to_string(), true)),
+            false,
+        );
+        button(
+            g,
+            s,
+            hits,
+            (x + 120.0, *y, 124.0, 34.0),
+            "기본값으로",
+            Target::Setting(SettingsAction::ThemePickAll(key.to_string(), false)),
+            false,
+        );
+        *y += 46.0;
+        let choices = roster
+            .iter()
+            .map(|character| {
+                let on = fallback || picked.iter().any(|name| name == &character.name);
+                (
+                    character.name.clone(),
+                    on,
+                    SettingsAction::CharacterPick(
+                        key.to_string(),
+                        character.name.clone(),
+                        !on,
+                    ),
+                )
+            })
+            .collect();
+        chips_owned(g, s, hits, x, y, w, choices);
+        *y += 10.0;
+    }
     button(
         g,
         s,
@@ -1991,6 +3029,7 @@ fn paint_students(
     y: &mut f32,
     w: f32,
 ) {
+    paint_themegen_engine(g, s, hits, caret, x, y, w);
     if let Some(selected) = s.student_selected.as_deref() {
         button(
             g,
@@ -2003,6 +3042,70 @@ fn paint_students(
         );
         draw_text(g, x + 112.0, *y + 6.0, selected, 17.0, theme::text(), true);
         *y += 48.0;
+        segmented(
+            g,
+            s,
+            hits,
+            x,
+            *y,
+            w.min(280.0),
+            &[
+                (
+                    "화면으로",
+                    !s.student_raw_open,
+                    SettingsAction::ToggleStudentRaw(false),
+                ),
+                (
+                    "원본",
+                    s.student_raw_open,
+                    SettingsAction::ToggleStudentRaw(true),
+                ),
+            ],
+        );
+        *y += 46.0;
+        if s.student_raw_open {
+            segmented(
+                g,
+                s,
+                hits,
+                x,
+                *y,
+                230.0,
+                &[
+                    ("JSON", !s.student_raw_yaml, SettingsAction::StudentRawFormat(false)),
+                    ("YAML", s.student_raw_yaml, SettingsAction::StudentRawFormat(true)),
+                ],
+            );
+            button(
+                g,
+                s,
+                hits,
+                (x + 242.0, *y, 104.0, 34.0),
+                "원본 저장",
+                Target::Setting(SettingsAction::SaveStudentRaw),
+                true,
+            );
+            *y += 46.0;
+            text_field(
+                g,
+                s,
+                hits,
+                caret,
+                x,
+                *y,
+                w,
+                "정의 전체",
+                &s.student_raw_text,
+                SettingsInput::StudentRaw,
+                s.student_raw_caret,
+                true,
+            );
+            *y += 158.0;
+            if let Some(error) = s.student_raw_error.as_deref() {
+                info_slab(g, x, y, w, error);
+            }
+            return;
+        }
         text_field(
             g,
             s,
@@ -2063,6 +3166,44 @@ fn paint_students(
             true,
         );
         *y += 154.0;
+        section_title(
+            g,
+            x,
+            *y,
+            "그림 생성",
+            "참조 그림을 이 화면에 놓고 모든 기본 동작을 한 번에 굽습니다",
+        );
+        *y += 48.0;
+        let status = match s.themegen_phase {
+            Some(crate::themegen::GenPhase::Describing) => "그림 살펴보는 중",
+            Some(crate::themegen::GenPhase::Generating) => "굽는 중",
+            Some(crate::themegen::GenPhase::Installing) => "설치하는 중",
+            Some(crate::themegen::GenPhase::Done) => "완성",
+            Some(crate::themegen::GenPhase::Failed) => "실패",
+            None if s.themegen_has_ref => "참조 그림 준비됨",
+            None => "참조 그림을 놓아 주세요",
+        };
+        draw_text(g, x + 2.0, *y + 9.0, status, 12.0, theme::text_dim(), false);
+        if s.themegen_has_ref
+            && !matches!(
+                s.themegen_phase,
+                Some(crate::themegen::GenPhase::Describing)
+                    | Some(crate::themegen::GenPhase::Generating)
+                    | Some(crate::themegen::GenPhase::Installing)
+            )
+        {
+            button(
+                g,
+                s,
+                hits,
+                (x + w - 112.0, *y, 112.0, 34.0),
+                "그림 굽기",
+                Target::Setting(SettingsAction::ThemeGenStart),
+                true,
+            );
+        }
+        *y += 48.0;
+        paint_motion_sprites(g, s, hits, x, y, w);
         button(
             g,
             s,
@@ -2091,13 +3232,7 @@ fn paint_students(
             false,
         );
         *y += 50.0;
-        info_slab(
-            g,
-            x,
-            y,
-            w,
-            "캐릭터 그림 생성과 모션 스프라이트 편집은 다음 네이티브 단계에서 이어집니다.",
-        );
+        info_slab(g, x, y, w, "그림 파일을 이 화면에 놓으면 이 캐릭터의 참조로 저장합니다.");
         return;
     }
 
@@ -2134,10 +3269,11 @@ fn paint_students(
             false,
             Target::Setting(SettingsAction::SelectStudent(character.name.clone())),
         );
-        let color = character
-            .slug
-            .map(color_for_word)
-            .unwrap_or_else(|| color_for_word(&character.name));
+        let color = color_for_word(if character.slug.is_empty() {
+            &character.name
+        } else {
+            &character.slug
+        });
         round_rect(g, rect.0 + 12.0, rect.1 + 14.0, 34.0, 34.0, 17.0, color);
         let initial = character
             .name
@@ -2186,6 +3322,157 @@ fn paint_students(
         false,
     );
     *y += 48.0;
+    info_slab(
+        g,
+        x,
+        y,
+        w,
+        if s.character_theme.is_empty() {
+            "새 캐릭터는 먼저 테마를 복제한 뒤 그림 파일을 이 화면에 놓아 만듭니다."
+        } else {
+            "새 캐릭터 그림을 이 화면에 놓으면 파일 이름으로 명단에 추가합니다."
+        },
+    );
+}
+
+fn paint_motion_sprites(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "모션 그림",
+        "프레임 칸을 고르고 그림 파일을 놓으면 그 한 장만 바뀝니다",
+    );
+    *y += 48.0;
+    for (motion, title) in [
+        ("idle", "대기"),
+        ("walk", "걷기"),
+        ("wave", "손 흔들기"),
+        ("cheer", "완료"),
+        ("profile", "프로필"),
+        ("gif", "대기 GIF"),
+    ] {
+        let Some((count, ext)) = socket::character_sprite_spec(motion) else { continue };
+        draw_text(g, x + 2.0, *y + 9.0, title, 12.0, theme::text(), true);
+        draw_text(
+            g,
+            x + 78.0,
+            *y + 9.0,
+            &format!("{} × {}", ext.to_uppercase(), count),
+            10.5,
+            theme::text_dim(),
+            false,
+        );
+        let mut bx = x + 168.0;
+        for frame in 0..count {
+            let selected = s
+                .sprite_slot
+                .as_ref()
+                .is_some_and(|(picked_motion, picked_frame)| picked_motion == motion && *picked_frame == frame);
+            let rect = (bx, *y, 34.0, 32.0);
+            choice_card(
+                g,
+                s,
+                hits,
+                rect,
+                selected,
+                Target::Setting(SettingsAction::SelectMotionFrame(motion.to_string(), frame)),
+            );
+            draw_text(
+                g,
+                rect.0 + 12.0,
+                rect.1 + 9.0,
+                &(frame + 1).to_string(),
+                11.0,
+                theme::text(),
+                selected,
+            );
+            bx += 40.0;
+        }
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 88.0, *y, 88.0, 32.0),
+            "기본으로",
+            Target::Setting(SettingsAction::ResetMotion(motion.to_string())),
+            false,
+        );
+        *y += 40.0;
+    }
+    *y += 12.0;
+}
+
+fn paint_themegen_engine(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "그림 생성 엔진",
+        "준비되지 않은 엔진은 이유를 함께 표시합니다",
+    );
+    *y += 48.0;
+    let providers = s
+        .themegen_providers
+        .iter()
+        .map(|provider| {
+            (
+                if provider.available {
+                    provider.label.clone()
+                } else {
+                    format!("{} · 준비 안 됨", provider.label)
+                },
+                provider.kind == s.themegen_provider,
+                SettingsAction::ThemeGenProvider(provider.kind.to_string()),
+            )
+        })
+        .collect();
+    chips_owned(g, s, hits, x, y, w, providers);
+    if let Some(provider) = s
+        .themegen_providers
+        .iter()
+        .find(|provider| provider.kind == s.themegen_provider && !provider.available)
+    {
+        info_slab(g, x, y, w, &provider.why);
+    }
+    if s.themegen_provider == "nanobanana" {
+        let value = if s.input == Some(SettingsInput::ThemeGenKey) {
+            s.themegen_key_edit.as_str()
+        } else {
+            s.themegen_key_masked.as_str()
+        };
+        text_field(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            *y,
+            w.min(420.0),
+            "Gemini API 키",
+            value,
+            SettingsInput::ThemeGenKey,
+            s.settings_caret,
+            false,
+        );
+        *y += 64.0;
+    }
+    *y += 12.0;
 }
 
 fn paint_feedback(
@@ -2256,75 +3543,47 @@ fn account_group(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
     provider: AccountProvider,
 ) {
-    let (accounts, active): (Vec<(String, String)>, &str) = match provider {
-        AccountProvider::Claude => (
-            s.claude_accounts
-                .iter()
-                .map(|a| (a.id.clone(), a.label.clone()))
-                .collect(),
-            &s.claude_account,
-        ),
-        AccountProvider::Codex => (
-            s.codex_accounts
-                .iter()
-                .map(|a| (a.id.clone(), a.label.clone()))
-                .collect(),
-            &s.codex_account,
-        ),
-    };
     draw_text(g, x, *y, provider.label(), 13.0, theme::text(), true);
     *y += 28.0;
-    account_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        provider,
-        "",
-        "기본 로그인",
-        active.is_empty(),
-        false,
-    );
-    for (id, label) in accounts {
-        let shown = if label.trim().is_empty() {
-            id.clone()
-        } else {
-            label
-        };
-        account_row(
+    for row in s.accounts.iter().filter(|row| row.provider == provider) {
+        account_row(g, s, hits, caret, x, y, w, row);
+    }
+    if s
+        .login_job
+        .as_ref()
+        .is_some_and(|job| job.state == crate::settings::LoginState::Running)
+    {
+        draw_text(g, x + 2.0, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
+        button(
             g,
             s,
             hits,
-            x,
-            y,
-            w,
-            provider,
-            &id,
-            &shown,
-            active == id,
-            true,
+            (x + w - 92.0, *y, 92.0, 31.0),
+            "로그인 취소",
+            Target::Setting(SettingsAction::CancelLogin),
+            false,
+        );
+    } else {
+        let add = match provider {
+            AccountProvider::Claude => SettingsAction::AddClaudeAccount,
+            AccountProvider::Codex => SettingsAction::AddCodexAccount,
+        };
+        button(
+            g,
+            s,
+            hits,
+            (x, *y, 108.0, 31.0),
+            "계정 추가",
+            Target::Setting(add),
+            false,
         );
     }
-    let add = match provider {
-        AccountProvider::Claude => SettingsAction::AddClaudeAccount,
-        AccountProvider::Codex => SettingsAction::AddCodexAccount,
-    };
-    button(
-        g,
-        s,
-        hits,
-        (x, *y, 108.0, 31.0),
-        "계정 추가",
-        Target::Setting(add),
-        false,
-    );
     *y += 42.0;
 }
 
@@ -2333,48 +3592,114 @@ fn account_row(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
-    provider: AccountProvider,
-    id: &str,
-    label: &str,
-    selected: bool,
-    removable: bool,
+    row: &AccountChoice,
 ) {
-    let rect = (x, *y, w, 42.0);
+    let editing = s
+        .account_label_edit
+        .as_ref()
+        .is_some_and(|(provider, id, _)| *provider == row.provider && id == &row.id);
+    let rect = (x, *y, w, if editing { 62.0 } else { 54.0 });
     choice_card(
         g,
         s,
         hits,
         rect,
-        selected,
-        Target::Setting(SettingsAction::SwitchAccount(provider, id.to_string())),
+        row.active,
+        Target::Setting(SettingsAction::SwitchAccount(row.provider, row.id.clone())),
     );
     g.queue_icon(
-        provider.icon(),
+        row.provider.icon(),
         rect.0 + 12.0,
         rect.1 + 12.0,
         17.0,
-        if selected {
+        if row.active {
             theme::accent()
         } else {
             theme::text_mute()
         },
     );
-    let shown = fit(g, label, w - 150.0, 12.0, false);
-    draw_text(
-        g,
-        rect.0 + 40.0,
-        rect.1 + 12.0,
-        &shown,
-        12.0,
-        theme::text(),
-        selected,
-    );
-    if removable {
-        let reauth = (rect.0 + rect.2 - 67.0, rect.1 + 8.0, 26.0, 26.0);
-        let remove = (rect.0 + rect.2 - 35.0, rect.1 + 8.0, 26.0, 26.0);
+    if editing {
+        let value = s
+            .account_label_edit
+            .as_ref()
+            .map(|(_, _, value)| value.as_str())
+            .unwrap_or_default();
+        text_field(
+            g,
+            s,
+            hits,
+            caret,
+            rect.0 + 40.0,
+            rect.1 + 4.0,
+            (w - 54.0).max(120.0),
+            "별명",
+            value,
+            SettingsInput::AccountLabel,
+            s.settings_caret,
+            false,
+        );
+    } else {
+        let right_reserve = if row.slot { 152.0 } else { 74.0 };
+        let shown = fit(g, &row.name, w - right_reserve, 12.0, false);
+        draw_text(g, rect.0 + 40.0, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
+        let job_sub = s.login_job.as_ref().filter(|job| job.id == row.id).map(|job| {
+            match &job.state {
+                crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
+                crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
+                crate::settings::LoginState::Err(error) => error.clone(),
+            }
+        });
+        let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
+        if !sub_value.is_empty() {
+            let sub = fit(g, sub_value, w - right_reserve, 10.5, false);
+            draw_text(
+                g,
+                rect.0 + 40.0,
+                rect.1 + 29.0,
+                &sub,
+                10.5,
+                if row.sub_kind == "danger" { theme::danger() } else { theme::text_mute() },
+                false,
+            );
+        }
+        if let Some(usage) = row.usage.as_ref() {
+            let resets = crate::resets_in_label(usage.resets_at)
+                .map(|value| format!(" · {value}"))
+                .unwrap_or_default();
+            draw_text(
+                g,
+                rect.0 + rect.2 - if row.slot { 232.0 } else { 96.0 },
+                rect.1 + 20.0,
+                &format!("{}{:.0}%{resets}", if usage.stale { "~" } else { "" }, usage.pct),
+                10.5,
+                if usage.pct >= 90.0 { theme::danger() } else if usage.pct >= 70.0 { theme::attention() } else { theme::text_mute() },
+                false,
+            );
+        }
+    }
+    if row.slot
+        && !editing
+        && !s
+            .login_job
+            .as_ref()
+            .is_some_and(|job| job.state == crate::settings::LoginState::Running)
+    {
+        let rename = (rect.0 + rect.2 - 131.0, rect.1 + 14.0, 24.0, 24.0);
+        let reauth = (rect.0 + rect.2 - 101.0, rect.1 + 14.0, 24.0, 24.0);
+        let isolated = (rect.0 + rect.2 - 71.0, rect.1 + 14.0, 24.0, 24.0);
+        let remove = (rect.0 + rect.2 - 41.0, rect.1 + 14.0, 24.0, 24.0);
+        mini_icon_button(
+            g,
+            s,
+            hits,
+            rename,
+            "edit-3",
+            Target::Setting(SettingsAction::FocusAccountLabel(row.provider, row.id.clone())),
+        );
         mini_icon_button(
             g,
             s,
@@ -2382,18 +3707,30 @@ fn account_row(
             reauth,
             "refresh-cw",
             Target::Setting(SettingsAction::ReauthAccount(
-                provider,
-                id.to_string(),
+                row.provider,
+                row.id.clone(),
                 settings::LoginBrowser::Default,
             )),
         );
-        let action = match provider {
-            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(id.to_string()),
-            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(id.to_string()),
+        mini_icon_button(
+            g,
+            s,
+            hits,
+            isolated,
+            "shield",
+            Target::Setting(SettingsAction::ReauthAccount(
+                row.provider,
+                row.id.clone(),
+                settings::LoginBrowser::Isolated,
+            )),
+        );
+        let action = match row.provider {
+            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
+            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
         };
         mini_icon_button(g, s, hits, remove, "x", Target::Setting(action));
     }
-    *y += 48.0;
+    *y += rect.3 + 6.0;
 }
 
 fn cursor_sample(
@@ -2696,6 +4033,15 @@ fn text_field(
     );
     if focused {
         stroke_rect(g, rect, theme::accent());
+        if s.select_all {
+            g.rect(
+                rect.0 + 3.0,
+                rect.1 + 3.0,
+                rect.2 - 6.0,
+                rect.3 - 6.0,
+                theme::with_alpha(theme::accent(), 42),
+            );
+        }
     } else {
         stroke_rect(g, rect, theme::border());
     }
@@ -2731,12 +4077,13 @@ fn text_field(
             draw_preedit_and_caret(g, s, caret_xy, 17.0, caret_out);
         }
     } else {
-        let shown = if value.is_empty() {
-            "입력하세요"
+        let (shown, visible_start) = if value.is_empty() {
+            ("입력하세요".to_string(), 0)
+        } else if focused {
+            single_line_window(g, value, caret, rect.2 - 22.0, 12.0)
         } else {
-            value
+            (fit(g, value, rect.2 - 22.0, 12.0, false), 0)
         };
-        let shown = fit(g, shown, rect.2 - 22.0, 12.0, false);
         draw_text(
             g,
             rect.0 + 11.0,
@@ -2753,13 +4100,42 @@ fn text_field(
         if focused {
             let prefix: String = value
                 .chars()
-                .take(caret.min(value.chars().count()))
+                .skip(visible_start)
+                .take(caret.saturating_sub(visible_start).min(value.chars().count()))
                 .collect();
             let cx = rect.0 + 11.0 + g.measure_chrome_text(&prefix, 12.0, false);
             draw_preedit_and_caret(g, s, (cx, rect.1 + 9.0), 18.0, caret_out);
         }
     }
     g.pop_clip();
+}
+
+fn single_line_window(
+    g: &mut gpu::GpuRenderer,
+    text: &str,
+    caret: usize,
+    width: f32,
+    font: f32,
+) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let caret = caret.min(chars.len());
+    let mut start = caret;
+    while start > 0 {
+        let candidate: String = chars[start - 1..caret].iter().collect();
+        if g.measure_chrome_text(&candidate, font, false) > width * 0.72 {
+            break;
+        }
+        start -= 1;
+    }
+    let mut end = caret;
+    while end < chars.len() {
+        let candidate: String = chars[start..=end].iter().collect();
+        if g.measure_chrome_text(&candidate, font, false) > width {
+            break;
+        }
+        end += 1;
+    }
+    (chars[start..end].iter().collect(), start)
 }
 
 fn draw_preedit_and_caret(
@@ -3032,6 +4408,7 @@ mod tests {
     #[test]
     fn multiline_classification_stays_narrow() {
         assert!(is_multiline(SettingsInput::StudentPersona));
+        assert!(is_multiline(SettingsInput::StudentRaw));
         assert!(is_multiline(SettingsInput::FeedbackBody));
         assert!(!is_multiline(SettingsInput::CwdPath));
     }
@@ -3052,11 +4429,12 @@ mod tests {
 
     #[test]
     fn direct_shell_field_never_appends_to_a_preset() {
-        assert_eq!(direct_shell_seed("/bin/zsh"), "");
-        assert_eq!(direct_shell_seed("/bin/bash"), "");
-        assert_eq!(direct_shell_seed(""), "");
+        assert_eq!(direct_shell_seed("/bin/zsh", false), "");
+        assert_eq!(direct_shell_seed("/bin/bash", false), "");
+        assert_eq!(direct_shell_seed("", false), "");
+        assert_eq!(direct_shell_seed("C:\\Windows\\System32\\cmd.exe", true), "");
         assert_eq!(
-            direct_shell_seed("/opt/homebrew/bin/fish"),
+            direct_shell_seed("/opt/homebrew/bin/fish", false),
             "/opt/homebrew/bin/fish"
         );
     }
@@ -3114,5 +4492,70 @@ mod tests {
                 "렌더 경로에 I/O가 들어왔다: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn native_settings_keeps_every_web_settings_feature_reachable() {
+        let native = include_str!("native_settings.rs");
+        let web = [
+            include_str!("../../../web/arona-ui/src/settings/GeneralTab.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/lang.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/AppearanceTab.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/ShellTab.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/ClaudeTab.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/ThemeTab.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/CharacterDetail.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/ThemeGen.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/MotionSprites.tsx"),
+            include_str!("../../../web/arona-ui/src/settings/FeedbackTab.tsx"),
+        ]
+        .join("\n");
+        for (feature, web_needle, native_needle) in [
+            ("language", "set-language", "UiLanguage"),
+            ("system theme slots", "theme-system-${slot}", "ThemeSystemSlot"),
+            ("custom palette rename", "rename-custom-theme", "FocusCustomThemeLabel"),
+            ("palette wheel", "ColorWheel", "PickerSV"),
+            ("eyedropper", "palette-eyedropper", "PaletteEyedropper"),
+            ("isolated reauth", "reauth-account-isolated", "LoginBrowser::Isolated"),
+            ("account label", "account-label", "FocusAccountLabel"),
+            ("theme roster", "theme-pick-all", "ThemePickAll"),
+            ("raw character", "rawSave", "SaveStudentRaw"),
+            ("theme generation", "theme-gen-start", "ThemeGenStart"),
+            ("motion frames", "character-sprite", "SelectMotionFrame"),
+            ("feedback draft", "feedback-draft", "feedback_draft"),
+        ] {
+            assert!(web.contains(web_needle), "web lost {feature}: {web_needle}");
+            assert!(native.contains(native_needle), "native lost {feature}: {native_needle}");
+        }
+    }
+
+    #[test]
+    fn parity_settings_bundle_roundtrips_through_an_isolated_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "kasaterm-settings-parity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("settings.json");
+        let value = serde_json::json!({
+            "language": "en",
+            "file_open_mode": "terminal",
+            "file_open_app": "",
+            "file_open_cmd": "code --goto {path}:{line}",
+            "editor_autosave_ms": 10000,
+            "theme_system_light": "light",
+            "theme_system_dark": "custom:night",
+            "claude_account_autoswitch_pct": 85,
+            "feedback_draft": "쓰다 만 초안",
+            "theme_gen_provider": "nanobanana"
+        });
+        socket::write_settings_value_atomic_at(&path, &value).unwrap();
+        let roundtrip: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(roundtrip, value);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

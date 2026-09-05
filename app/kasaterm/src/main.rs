@@ -4202,6 +4202,14 @@ pub(crate) enum SettingsInput {
     /// Feedback 본문 멀티라인 필드. persona 와 같은 편집 경로를 타지만 캐럿·버퍼가
     /// 따로라, 설정 창을 두 카테고리로 오가도 서로 안 덮어쓴다.
     FeedbackBody,
+    /// 캐릭터 정의 전체를 고치는 JSON/YAML 원본 편집기.
+    StudentRaw,
+    /// 나노바나나가 쓸 Gemini API 키. 저장값은 화면에 되돌리지 않고 새 입력만 둔다.
+    ThemeGenKey,
+    /// 커스텀 팔레트 표시명. 대상 slug 는 `App.custom_theme_label_edit` 이 든다.
+    CustomThemeLabel,
+    /// Agent 계정 별명. 제공자와 슬롯 id 는 `App.account_label_edit` 이 든다.
+    AccountLabel,
     /// 테마 이름 칸. 어느 테마인지는 `App.theme_label_edit` 이 폴더 id 로 들고
     /// 있다 — 이 enum 이 `Copy` 라 String 을 못 실어서다. 인덱스로 잡지 않는 건
     /// 테마를 지우면 뒷 번호가 밀려 엉뚱한 폴더를 고치게 되기 때문이다.
@@ -4214,8 +4222,10 @@ pub(crate) enum SettingsInput {
 
 /// Clickable targets painted into the settings screen, collected each frame for
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsAction {
+    /// 설정과 웹 화면이 쓸 언어(`ko`/`en`).
+    UiLanguage(&'static str),
     CwdMode(&'static str),
     /// 파일트리에서 파일을 열 때 쓸 방식 — `"builtin"` · `"app"` · `"terminal"`.
     FileOpenMode(&'static str),
@@ -4231,6 +4241,8 @@ pub(crate) enum SettingsAction {
     /// 프리셋 키 · `"system"` · `custom:<slug>`. 커스텀 키는 설정 파일에서 읽은
     /// slug 를 달고 태어나 `&'static str` 로 못 담는다.
     ThemeMode(String),
+    /// System 테마가 OS 밝기별로 입을 실제 팔레트.
+    ThemeSystemSlot(bool, String),
     /// 지금 팔레트를 복제해 **새** 커스텀을 목록에 더하고 그것으로 전환 —
     /// 팔레트 편집의 입구. 하던 편집은 목록에 그대로 남는다.
     StartCustomTheme,
@@ -4238,6 +4250,8 @@ pub(crate) enum SettingsAction {
     ResetCustomTheme,
     /// 커스텀 팔레트 하나를 목록에서 치운다(인자는 slug).
     DeleteCustomTheme(String),
+    /// 커스텀 팔레트 이름을 고치는 인라인 입력칸.
+    FocusCustomThemeLabel(String),
     /// 팔레트 색 한 칸의 hex 필드에 포커스(인덱스 규약은 `SettingsInput::PaletteHex`).
     FocusPaletteHex(usize),
     /// 색 선택기의 채도×명도 사각형. 좌표는 액션에 못 싣는다(연속값) —
@@ -4246,6 +4260,8 @@ pub(crate) enum SettingsAction {
     PickerSV,
     /// 색 선택기의 색상(Hue) 띠. 처리 방식은 PickerSV 와 같다.
     PickerHue,
+    /// 화면의 한 점에서 색을 집어 현재 팔레트 칸에 넣는다.
+    PaletteEyedropper(usize),
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -4282,6 +4298,10 @@ pub(crate) enum SettingsAction {
     /// 마지막 칸은 승인을 **어느 브라우저**에서 받을지다. 되살리려는 계정이 이미
     /// 브라우저에 로그인돼 있으면 쓰던 창이 훨씬 짧다(`settings::LoginBrowser`).
     ReauthAccount(AccountProvider, String, settings::LoginBrowser),
+    /// 진행 중인 숨은 OAuth 로그인과 그 브라우저 자식을 함께 멈춘다.
+    CancelLogin,
+    /// 계정 슬롯 별명을 고치는 인라인 입력칸.
+    FocusAccountLabel(AccountProvider, String),
     /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
     /// 말고는 복구가 없고, 남겨 둬도 해가 없다.
     RemoveClaudeAccount(String),
@@ -4323,6 +4343,12 @@ pub(crate) enum SettingsAction {
     DeleteTheme(String),
     /// 그 테마의 이름 칸에 포커스를 준다. 인자는 폴더 id.
     FocusThemeLabel(String),
+    /// 테마 카드 아래에서 명단을 펼치거나 접는다.
+    InspectTheme(String),
+    /// 테마 한 벌의 고른 명단을 전원/기본값으로 바꾼다.
+    ThemePickAll(String, bool),
+    /// 테마 한 벌에서 캐릭터 한 명을 켜거나 끈다.
+    CharacterPick(String, String, bool),
     /// Evict cached character textures so edited images reload on next paint.
     RefreshStudentAssets,
     /// Select a character in the Students list → load its persona into the edit
@@ -4339,6 +4365,8 @@ pub(crate) enum SettingsAction {
     /// 파싱해 다른 쪽으로 다시 쓰는 왕복이 필요한데, 문법이 깨진 중간 상태에서는
     /// 그게 불가능하다. 사라지는 쪽이 조용히 어긋나는 것보다 낫다.
     StudentRawFormat(bool),
+    /// 원본 JSON/YAML 버퍼를 검증해 로스터에 저장한다.
+    SaveStudentRaw,
     /// 열려 있는 캐릭터가 쓸 모델을 고른다 — `(--model 값, 실행 통로)`. 둘을 함께
     /// 나르는 이유는 축이 달라서다: 게이트웨이 모델은 `--model` 로 못 닿고 래퍼가
     /// 환경을 씌워야 하므로, 한 칸을 골라도 저장할 필드가 둘이다.
@@ -4353,6 +4381,12 @@ pub(crate) enum SettingsAction {
     /// 그림 생성 엔진을 고른다 — `"opengateway"` · `"codex"` · `"nanobanana"`.
     /// 정본은 settings.json 의 `theme_gen_provider`.
     ThemeGenProvider(String),
+    /// 선택한 캐릭터의 참조 그림으로 생성 잡을 시작한다.
+    ThemeGenStart,
+    /// 다음에 놓는 그림이 바꿀 모션/프레임 칸.
+    SelectMotionFrame(String, usize),
+    /// 사용자 모션 한 벌을 걷고 번들 그림으로 되돌린다.
+    ResetMotion(String),
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -5310,6 +5344,10 @@ struct App {
     /// 을 같이 쓴다(한 번에 한 칸만 포커스). 버퍼를 파일과 따로 두는 건 타이핑
     /// 도중의 반쯤 지운 이름이 목록에 그대로 새어 나가지 않게 하려는 것이다.
     theme_label_edit: Option<(String, String)>,
+    /// `(커스텀 팔레트 slug, 편집 버퍼)`.
+    custom_theme_label_edit: Option<(String, String)>,
+    /// `(제공자, 슬롯 id, 편집 버퍼)`.
+    account_label_edit: Option<(AccountProvider, String, String)>,
     /// Debounced window-frame save deadline: set 1s after every Moved/Resized,
     /// written by about_to_wait. Exit-only persistence lost the frame on a
     /// crash/force-quit.
@@ -5396,11 +5434,6 @@ struct App {
     account_switch_confirm: Option<session::PendingAccountSwitch>,
     /// 학생 교체 확인 카드 — 말투까지 바꾸려면 다시 띄워야 해서 먼저 묻는다.
     character_swap_confirm: Option<session::PendingCharacterSwap>,
-    /// 캐릭터 그림·모션 편집은 아직 웹 상세 화면이 가진다. 이름·성격·모델은
-    /// 네이티브 설정 방으로 옮겼지만 그 남은 기능의 대체가 생길 때까지 수명 순서를
-    /// 지키며 보관한다.
-    student_web_webview: Option<wry::WebView>,
-    student_web_window: Option<Arc<Window>>,
     /// Per-frame hit rects for the terminal-pane right-side action cluster
     /// (new-terminal / web / split-v / split-h). Re-built each chrome
     /// paint alongside `image_btn_rects`; the mouse handler matches a
@@ -5794,10 +5827,12 @@ impl App {
             students_raw: StudentRawEdit::default(),
             students_name: std::env::var("KASATERM_TEST_STUDENT").unwrap_or_default(),
             theme_label_edit: None,
+            custom_theme_label_edit: None,
+            account_label_edit: None,
             settings_caret: 0,
             window_frame_save_due: None,
             md_select_drag: None,
-            feedback_body: String::new(),
+            feedback_body: socket::read_feedback_draft(),
             feedback_caret: 0,
             feedback_diag: true,
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
@@ -5829,8 +5864,6 @@ impl App {
             inline_web: None,
             account_switch_confirm: None,
             character_swap_confirm: None,
-            student_web_webview: None,
-            student_web_window: None,
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,

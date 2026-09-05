@@ -2484,97 +2484,6 @@ impl App {
             self.close_inline_web();
         }
     }
-    /// 학생 세부설정 창 — `/arona-ui/settings.html?student=<exact name>&theme=<id>`.
-    ///
-    /// 설정 본체와 **따로** 뜬다. 본체가 앱 안으로 들어가면 세부는 밖에 있어야 하고,
-    /// 그때 이 창이 그 자리를 맡는다(거노 2026-08-25 「세부설정을 별도창으로」).
-    ///
-    /// 창은 하나만 유지한다 — 이미 떠 있으면 주소만 갈아 끼운다. 학생마다 창을 열면
-    /// 같은 로스터를 고치는 창이 여럿 떠서 어느 쪽이 정본인지 알 수 없게 된다.
-    pub(crate) fn open_student_web_window(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        name: &str,
-        theme: &str,
-    ) -> bool {
-        if name.trim().is_empty() {
-            return false;
-        }
-        let port = mcp_panel_port();
-        let cb = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let url = student_web_url(&port, name, theme, cb);
-        // 이미 떠 있으면 주소만 바꾸고 앞으로 가져온다.
-        if let (Some(w), Some(wv)) = (
-            self.student_web_window.as_ref(),
-            self.student_web_webview.as_ref(),
-        ) {
-            if let Err(e) = wv.load_url(&url) {
-                self.set_toast(format!("캐릭터 설정을 바꾸지 못했어요 — {e}"));
-                return false;
-            }
-            w.focus_window();
-            return true;
-        }
-        if !settings_web_reachable(&port) {
-            eprintln!("[student-web] 페이지에 못 닿는다");
-            return false;
-        }
-        let attrs = WindowAttributes::default()
-            .with_title("캐릭터 설정")
-            .with_theme(Some(Theme::Dark))
-            .with_visible(true)
-            // 본체(920×720)보다 좁다 — 한 학생의 폼과 그림만 서므로 가로가 덜 든다.
-            .with_inner_size(LogicalSize::new(560.0, 720.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[student-web] window create failed: {e}");
-                self.set_toast(format!("캐릭터 설정 창을 만들지 못했어요 — {e}"));
-                return false;
-            }
-        };
-        let win_show = window.clone();
-        let webview = match wry::WebViewBuilder::new()
-            .with_url(&url)
-            .with_background_color((27, 37, 65, 255))
-            .with_on_page_load_handler(move |event, _url| {
-                if matches!(event, wry::PageLoadEvent::Finished) {
-                    win_show.focus_window();
-                }
-            })
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(560.0, 720.0).into(),
-            })
-            // 아로나 패널과 같은 use-after-free 사유로 build_as_child.
-            .build_as_child(window.as_ref())
-        {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[student-web] webview build failed: {e}");
-                self.set_toast(format!("캐릭터 설정 화면을 만들지 못했어요 — {e}"));
-                return false;
-            }
-        };
-        self.student_web_window = Some(window);
-        self.student_web_webview = Some(webview);
-        eprintln!("[student-web] open; student={name} theme={theme}");
-        true
-    }
-
-    pub(crate) fn close_student_web_window(&mut self) {
-        self.student_web_webview = None;
-        self.student_web_window = None;
-        if let Some(w) = &self.window {
-            w.focus_window();
-            w.request_redraw();
-        }
-        eprintln!("[student-web] closed");
-    }
-
     fn open_inline_web(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2591,7 +2500,7 @@ impl App {
         }
         self.close_inline_web();
         let (port, _) = crate::mcp_panel_port_certain();
-        if !settings_web_reachable(&port) {
+        if !arona_web_reachable(&port) {
             let label = match kind {
                 InlineWebKind::Arona => "아로나",
                 InlineWebKind::Board => "보드",
@@ -3900,30 +3809,7 @@ pub(crate) fn ensure_notification_authorization() {}
 /// HTTP 클라이언트를 새로 들이지 않고 std 로만 한다. 같은 프로세스 안의 루프백이라
 /// 정상 경로는 1ms 도 안 걸리고, 서버가 죽어 있으면 connect 가 곧바로 거절된다.
 /// 타임아웃은 그 둘 다 아닌 경우(포트를 다른 프로세스가 물고 응답을 안 함) 대비다.
-/// 쿼리 값 인코딩. 캐릭터 이름과 커스텀 테마 폴더 이름에는 한글·공백이 들어갈 수
-/// 있어 그대로 실으면 주소가 깨져 창이 빈 화면으로 뜬다.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn student_web_url(port: &str, name: &str, theme: &str, cache_key: u128) -> String {
-    format!(
-        "http://127.0.0.1:{port}/arona-ui/settings.html?v={cache_key}&student={}&theme={}",
-        urlencode(name),
-        urlencode(theme)
-    )
-}
-
-fn settings_web_reachable(port: &str) -> bool {
+fn arona_web_reachable(port: &str) -> bool {
     use std::io::{Read, Write};
     let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
         return false;
@@ -3935,7 +3821,7 @@ fn settings_web_reachable(port: &str) -> bool {
     let _ = s.set_read_timeout(Some(to));
     let _ = s.set_write_timeout(Some(to));
     // HTTP/1.0 이라 서버가 응답 뒤 알아서 닫는다 — keep-alive 를 안 다뤄도 된다.
-    if s.write_all(b"GET /arona-ui/settings.html HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+    if s.write_all(b"GET /arona-ui/ HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
         .is_err()
     {
         return false;
@@ -4171,9 +4057,9 @@ mod room_rename_tests {
                 let _ = s.write_all(format!("{status}\r\nContent-Length: 0\r\n\r\n").as_bytes());
             }
         });
-        assert!(settings_web_reachable(&ok_port), "200 은 통과해야 한다");
+        assert!(arona_web_reachable(&ok_port), "200 은 통과해야 한다");
         // 같은 서버의 두 번째 응답은 404 — 페이지가 없는 체크아웃이 이 모양이다.
-        assert!(!settings_web_reachable(&ok_port), "404 는 막아야 한다");
+        assert!(!arona_web_reachable(&ok_port), "404 는 막아야 한다");
         let _ = h.join();
 
         // 아무도 안 듣는 포트 → 실패. 방금 닫은 리스너의 포트를 재사용해 「누가
@@ -4182,11 +4068,11 @@ mod room_rename_tests {
         let dead_port = dead.local_addr().unwrap().port().to_string();
         drop(dead);
         assert!(
-            !settings_web_reachable(&dead_port),
+            !arona_web_reachable(&dead_port),
             "서버가 없으면 실패해야 한다"
         );
         assert!(
-            !settings_web_reachable("포트아님"),
+            !arona_web_reachable("포트아님"),
             "숫자가 아니면 실패해야 한다"
         );
     }
@@ -4212,42 +4098,12 @@ mod room_rename_tests {
 
     #[test]
     fn 부모보다_웹뷰가_먼저_정리되는_수명_순서를_지킨다() {
-        let app = include_str!("main.rs");
-        assert!(
-            app.find("student_web_webview: Option<wry::WebView>")
-                .unwrap()
-                < app.find("student_web_window: Option<Arc<Window>>").unwrap()
-        );
         let handler = include_str!("handler.rs");
         let exiting = &handler[handler.find("fn exiting(").unwrap()..];
         assert!(
             exiting.find("self.close_inline_web();").unwrap()
                 < exiting.find("self.persona.webview = None;").unwrap()
         );
-        assert!(
-            exiting.find("self.close_student_web_window();").unwrap()
-                < exiting.find("self.persona.webview = None;").unwrap()
-        );
-    }
-
-    #[test]
-    fn 캐릭터_상세창은_학생과_테마를_주소로_교체한다() {
-        assert_eq!(
-            student_web_url("8765", "ari su", "한글 테마", 42),
-            "http://127.0.0.1:8765/arona-ui/settings.html?v=42&student=ari%20su&theme=%ED%95%9C%EA%B8%80%20%ED%85%8C%EB%A7%88"
-        );
-    }
-
-    #[test]
-    fn 같은_슬러그가_될_수_있는_이름도_상세창에서_갈린다() {
-        let a = student_web_url("8765", "A B", "theme", 1);
-        let b = student_web_url("8765", "A-B", "theme", 1);
-        assert_ne!(a, b);
-        assert!(a.contains("student=A%20B"));
-        assert!(b.contains("student=A-B"));
-        let app = include_str!("../../../web/arona-ui/src/settings/SettingsApp.tsx");
-        assert!(app.contains("c.name === studentName"));
-        assert!(!app.contains("c.slug === studentName"));
     }
 
     #[test]

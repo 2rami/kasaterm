@@ -120,6 +120,10 @@ impl App {
     /// 즉시 갈아타면 그 뒤에 뜨는 모든 claude 가 로그아웃 상태로 뜬다. 전환은 로그인이
     /// 끝난 뒤 거노가 목록에서 직접 고른다.
     fn add_claude_account(&mut self) {
+        if hidden_login_running() {
+            self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
+            return;
+        }
         // dir 이름이 곧 Keychain 서비스명 해시의 입력이라 계정마다 유일하고 그 뒤로
         // 안 변해야 한다 — 재사용하면 지운 계정의 토큰을 새 계정이 물려받는다.
         // 목록에 없어도 **폴더가 남아 있으면 쓰지 않는다.** 슬롯을 지울 때 키체인
@@ -168,6 +172,10 @@ impl App {
     /// `oauth_profile_dir` 은 id 하나로 자리를 잡으므로 claude 의 `acct-1` 과 겹치면
     /// 두 서비스가 같은 브라우저 프로필을 나눠 쓰게 된다.
     fn add_codex_account(&mut self) {
+        if hidden_login_running() {
+            self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
+            return;
+        }
         let id = (1..)
             .map(|n| format!("codex-{n}"))
             .find(|c| self.set_codex_accounts.iter().all(|a| &a.id != c))
@@ -375,6 +383,41 @@ impl App {
         self.theme_label_edit = None;
     }
 
+    /// 네이티브 팔레트 이름 칸을 저장한다. 웹 액션도 같은 순수 서비스를 써서
+    /// 어느 화면에서 이름을 바꾸든 검증과 파일 모양이 갈리지 않는다.
+    pub(crate) fn flush_custom_theme_label(&mut self) {
+        let Some((slug, label)) = self.custom_theme_label_edit.clone() else { return };
+        match rename_custom_theme(&slug, &label) {
+            Ok(()) => self.custom_theme_label_edit = None,
+            Err(error) => self.set_toast(error),
+        }
+    }
+
+    /// 네이티브 계정 카드의 별명 편집을 계정 목록에 굳힌다.
+    pub(crate) fn flush_account_label(&mut self) {
+        let Some((provider, id, label)) = self.account_label_edit.clone() else { return };
+        let found = match provider {
+            AccountProvider::Claude => self
+                .set_claude_accounts
+                .iter_mut()
+                .find(|account| account.id == id)
+                .map(|account| account.label = label.trim().to_string())
+                .is_some(),
+            AccountProvider::Codex => self
+                .set_codex_accounts
+                .iter_mut()
+                .find(|account| account.id == id)
+                .map(|account| account.label = label.trim().to_string())
+                .is_some(),
+        };
+        if found {
+            self.settings_save();
+            self.account_label_edit = None;
+        } else {
+            self.set_toast("그 계정 슬롯이 더는 없어요".to_string());
+        }
+    }
+
     /// 테마 목록 `(폴더 id, 표시명)` — 번들은 목록에 없다(폴더가 없어서).
     fn settings_snapshot_themes(&self) -> Vec<(String, String)> {
         kasa_mcp::character::list_themes()
@@ -403,6 +446,9 @@ impl App {
     /// (헤드리스 검증·단축키) 같은 경로를 탈 수 있게 하기 위한 것이다.
     pub(crate) fn settings_apply(&mut self, action: SettingsAction) {
         match action {
+            SettingsAction::UiLanguage(language) => {
+                socket::write_setting("language", serde_json::json!(language));
+            }
             SettingsAction::CwdMode(m) => {
                 // "last"/"home" are literal; "custom" keeps any existing path or
                 // seeds $HOME so the field isn't empty.
@@ -493,6 +539,17 @@ impl App {
                 socket::write_setting("theme", serde_json::Value::String(m));
                 self.repaint_all();
             }
+            SettingsAction::ThemeSystemSlot(light, key) => {
+                socket::write_setting(
+                    if light { "theme_system_light" } else { "theme_system_dark" },
+                    serde_json::Value::String(key),
+                );
+                if theme::theme_name() == "system" {
+                    self.begin_theme_fx();
+                    theme::set_theme("system");
+                    self.repaint_all();
+                }
+            }
             SettingsAction::StartCustomTheme => {
                 // 언제나 **새** 팔레트를 더한다 — 하던 편집은 목록에 그대로 남고,
                 // 이어서 고치려면 그 카드를 고르면 된다(2026-08-15 지시: 커스텀을
@@ -565,6 +622,17 @@ impl App {
                 }
                 self.repaint_all();
             }
+            SettingsAction::FocusCustomThemeLabel(slug) => {
+                self.flush_custom_theme_label();
+                let label = theme::custom_themes(&socket::read_settings())
+                    .iter()
+                    .find(|entry| theme::custom_slug(entry) == slug)
+                    .map(theme::custom_label)
+                    .unwrap_or_else(|| slug.clone());
+                self.settings_caret = label.chars().count();
+                self.custom_theme_label_edit = Some((slug, label));
+                self.settings_input = Some(SettingsInput::CustomThemeLabel);
+            }
             SettingsAction::FocusPaletteHex(i) => {
                 self.set_palette_edit = self.palette_hex_at(i);
                 self.settings_caret = self.set_palette_edit.chars().count();
@@ -578,6 +646,13 @@ impl App {
             // 피커 면은 settings_click 이 좌표와 함께 가로챈다(picker_pick) —
             // 좌표 없는 이 경로로 오면 고를 값이 없다.
             SettingsAction::PickerSV | SettingsAction::PickerHue => {}
+            SettingsAction::PaletteEyedropper(slot) => {
+                if crate::eyedropper::supported() {
+                    crate::eyedropper::pick_screen_color(slot);
+                } else {
+                    self.set_toast("이 운영체제에선 화면 집기를 아직 못 써요".to_string());
+                }
+            }
             SettingsAction::Accent(name) => {
                 theme::set_accent(&name);
                 socket::write_setting("accent", serde_json::Value::String(name));
@@ -748,6 +823,14 @@ impl App {
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
             // 붙은 한도 이력이 남는다. 새로 만들었다 지우는 것과 여기가 갈린다.
             SettingsAction::ReauthAccount(p, id, browser) => {
+                if hidden_login_running() {
+                    self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
+                    return;
+                }
+                if hidden_login_running() {
+                    self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
+                    return;
+                }
                 let (argv, key, dir) = match p {
                     AccountProvider::Claude => (
                         "claude auth login --claudeai",
@@ -773,6 +856,30 @@ impl App {
                     }
                     .to_string(),
                 );
+            }
+            SettingsAction::CancelLogin => {
+                cancel_hidden_login();
+                self.set_toast("로그인을 취소했어요".to_string());
+            }
+            SettingsAction::FocusAccountLabel(provider, id) => {
+                self.flush_account_label();
+                let label = match provider {
+                    AccountProvider::Claude => self
+                        .set_claude_accounts
+                        .iter()
+                        .find(|account| account.id == id)
+                        .map(|account| account.label.clone()),
+                    AccountProvider::Codex => self
+                        .set_codex_accounts
+                        .iter()
+                        .find(|account| account.id == id)
+                        .map(|account| account.label.clone()),
+                };
+                if let Some(label) = label {
+                    self.settings_caret = label.chars().count();
+                    self.account_label_edit = Some((provider, id, label));
+                    self.settings_input = Some(SettingsInput::AccountLabel);
+                }
             }
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);
@@ -816,6 +923,17 @@ impl App {
             SettingsAction::OpenThemeDir(id) => self.open_theme_dir(&id),
             SettingsAction::DeleteTheme(id) => self.delete_theme(&id),
             SettingsAction::FocusThemeLabel(id) => self.focus_theme_label(id),
+            SettingsAction::InspectTheme(id) => self.settings_scene.toggle_inspected_theme(id),
+            SettingsAction::ThemePickAll(theme, on) => {
+                if let Err(error) = self.apply_theme_pick_all(&theme, on) {
+                    self.set_toast(error);
+                }
+            }
+            SettingsAction::CharacterPick(theme, name, on) => {
+                if let Err(error) = self.apply_character_pick(&theme, Some(&name), on) {
+                    self.set_toast(error);
+                }
+            }
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
             SettingsAction::CloseStudent => self.close_student_edit(),
             SettingsAction::FocusStudentName => {
@@ -842,6 +960,7 @@ impl App {
                     self.reload_student_raw();
                 }
             }
+            SettingsAction::SaveStudentRaw => self.save_student_raw(),
             SettingsAction::StudentModel(model, backend) => {
                 let Some(name) = self.students_selected.clone() else { return };
                 // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
@@ -856,6 +975,42 @@ impl App {
             SettingsAction::ThemeGenProvider(p) => {
                 socket::write_setting("theme_gen_provider", serde_json::Value::String(p));
                 self.settings_input = None;
+            }
+            SettingsAction::ThemeGenStart => {
+                let Some(name) = self.students_selected.as_deref() else { return };
+                let Some(slug) = kasa_mcp::character::characters_json()
+                    .as_ref()
+                    .and_then(|roster| kasa_mcp::character::member_def(roster, name))
+                    .and_then(|entry| entry.get("slug").and_then(|value| value.as_str()).map(str::to_string))
+                    .or_else(|| theme::character_slug(name).map(str::to_string))
+                else {
+                    self.set_toast("이 캐릭터의 그림 이름을 못 찾았어요".to_string());
+                    return;
+                };
+                let theme_id = socket::read_character_theme();
+                let Some((path, _)) = themegen_ref_info(&theme_id, &slug) else {
+                    self.set_toast("먼저 참조 그림을 놓아 주세요".to_string());
+                    return;
+                };
+                self.themegen_start(&theme_id, &slug, &path, None);
+            }
+            SettingsAction::SelectMotionFrame(motion, frame) => {
+                self.settings_scene.toggle_sprite_slot(motion, frame);
+            }
+            SettingsAction::ResetMotion(motion) => {
+                let Some(name) = self.students_selected.as_deref() else { return };
+                let slug = kasa_mcp::character::characters_json()
+                    .as_ref()
+                    .and_then(|roster| kasa_mcp::character::member_def(roster, name))
+                    .and_then(|entry| entry.get("slug").and_then(|value| value.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| theme::agent_slug(name));
+                match socket::clear_character_sprite_files(&slug, &motion) {
+                    Ok(_) => {
+                        self.refresh_student_assets();
+                        self.set_toast("기본 그림으로 되돌렸어요".to_string());
+                    }
+                    Err(error) => self.set_toast(format!("그림을 못 되돌렸어요: {error}")),
+                }
             }
         }
         self.chrome_dirty = true;
@@ -1124,26 +1279,9 @@ impl App {
             // 이름 바꾸기 — id 는 slug, 새 이름은 label. 이름만 바뀌므로 팔레트를
             // 다시 적용할 것이 없다(색은 그대로다).
             "rename-custom-theme" => {
-                let label = arg.trim().to_string();
-                if label.is_empty() {
-                    return Err(reject("label_empty", "이름을 적어 주세요".to_string()));
-                }
-                let s = socket::read_settings();
-                let mut list = theme::custom_themes(&s);
-                let Some(e) = list.iter_mut().find(|e| theme::custom_slug(e) == id) else {
-                    return Err(reject(
-                        "custom_theme_absent",
-                        "그 커스텀 팔레트가 없어요".to_string(),
-                    ));
-                };
-                if let Some(o) = e.as_object_mut() {
-                    o.insert("label".to_string(), serde_json::Value::String(label.clone()));
-                }
-                write_custom_themes(list);
+                rename_custom_theme(id, &arg)?;
                 self.chrome_dirty = true;
-                Ok(theme::custom_themes(&socket::read_settings())
-                    .iter()
-                    .any(|e| theme::custom_slug(e) == id && theme::custom_label(e) == label))
+                Ok(true)
             }
             "reset-custom-theme" => {
                 self.settings_apply(SettingsAction::ResetCustomTheme);
@@ -1922,6 +2060,30 @@ impl App {
         self.chrome_dirty = true;
     }
 
+    /// 드래그 중 색 미리보기. `picker_pick`과 HSV 계산은 같지만 파일에는 쓰지
+    /// 않고, 손을 놓을 때 네이티브 설정이 `apply_palette_edit`을 한 번 부른다.
+    pub(crate) fn picker_preview(
+        &mut self,
+        action: &SettingsAction,
+        r: (f32, f32, f32, f32),
+        p: (f32, f32),
+    ) {
+        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else { return };
+        let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
+        let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
+        let (h, s, v) = self.set_picker_hsv;
+        self.set_picker_hsv = match action {
+            SettingsAction::PickerHue => ((rx * 360.0).min(359.9), s, v),
+            _ => (h, rx, 1.0 - ry),
+        };
+        let (h, s, v) = self.set_picker_hsv;
+        let rgb = hsv_to_rgb(h, s, v);
+        self.set_palette_edit = theme::hex_str(rgb);
+        self.settings_caret = self.set_palette_edit.chars().count();
+        self.preview_palette_edit(i, rgb);
+        self.chrome_dirty = true;
+    }
+
     /// 팔레트 칸 `i` 를 `c` 로 바꾼 커스텀 목록과 그중 편집 대상 인덱스, 그리고
     /// 편집 전에 목록이 비어 **새로 만들어야 했는지**.
     ///
@@ -2123,6 +2285,7 @@ impl App {
                 self.feedback_body.clear();
                 self.feedback_caret = 0;
                 self.settings_input = None;
+                socket::write_setting("feedback_draft", serde_json::Value::String(String::new()));
                 self.set_toast("피드백을 저장했어요".to_string());
             }
             Err(e) => self.set_toast(format!("저장 실패: {e}")),
@@ -2382,7 +2545,7 @@ fn themegen_ref_path(theme_id: &str, slug: &str) -> Option<std::path::PathBuf> {
 
 /// 참조 그림의 `(경로, mtime초)` — mtime 이 미리보기 텍스처 캐시 키에 들어가므로
 /// 그림을 갈아 끼우면 키가 바뀌어 낡은 그림이 화면에 눌어붙지 않는다.
-fn themegen_ref_info(theme_id: &str, slug: &str) -> Option<(std::path::PathBuf, u64)> {
+pub(crate) fn themegen_ref_info(theme_id: &str, slug: &str) -> Option<(std::path::PathBuf, u64)> {
     let p = themegen_ref_path(theme_id, slug)?;
     let t = std::fs::metadata(&p)
         .ok()?
@@ -2499,7 +2662,33 @@ fn write_custom_themes(list: Vec<serde_json::Value>) {
     socket::write_setting("custom_themes", serde_json::Value::Array(named));
 }
 
-fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
+pub(crate) fn rename_custom_theme(slug: &str, label: &str) -> Result<(), String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(reject("label_empty", "이름을 적어 주세요".to_string()));
+    }
+    let mut list = theme::custom_themes(&socket::read_settings());
+    let Some(entry) = list
+        .iter_mut()
+        .find(|entry| theme::custom_slug(entry) == slug)
+    else {
+        return Err(reject(
+            "custom_theme_absent",
+            "그 커스텀 팔레트가 없어요".to_string(),
+        ));
+    };
+    let Some(object) = entry.as_object_mut() else {
+        return Err("커스텀 팔레트 정의가 깨졌어요".to_string());
+    };
+    object.insert(
+        "label".to_string(),
+        serde_json::Value::String(label.to_string()),
+    );
+    write_custom_themes(list);
+    Ok(())
+}
+
+pub(crate) fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
     let list = theme::custom_themes(s);
     let obj = theme::find_custom(&list, slug.unwrap_or(""));
     let base_key = obj
@@ -2558,6 +2747,33 @@ fn login_cell() -> &'static LoginCell {
     CELL.get_or_init(|| std::sync::Mutex::new((None, None)))
 }
 
+pub(crate) fn hidden_login_job() -> Option<LoginJob> {
+    login_cell().lock().ok().and_then(|cell| cell.0.clone())
+}
+
+pub(crate) fn hidden_login_running() -> bool {
+    hidden_login_job().is_some_and(|job| job.state == LoginState::Running)
+}
+
+pub(crate) fn cancel_hidden_login() {
+    let pgid = login_cell().lock().ok().and_then(|mut cell| {
+        cell.0 = None;
+        cell.1.take()
+    });
+    #[cfg(unix)]
+    if let Some(pgid) = pgid {
+        unsafe {
+            libc::kill(-(pgid as i32), libc::SIGTERM);
+        }
+    }
+    #[cfg(windows)]
+    if let Some(pid) = pgid {
+        let _ = crate::proc::command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+    }
+}
+
 /// 로그인 승인을 **어느 브라우저**에서 받을지. 두 길이 다 필요하다.
 ///
 /// 격리만 있던 동안 불편이 실재했다(거노 2026-08-15 「계정 로그인이 쓰던 브라우저로
@@ -2569,7 +2785,7 @@ fn login_cell() -> &'static LoginCell {
 /// 기본이 쓰던 브라우저로」). 있는 슬롯을 다시 로그인하는 일은 거의 전부 「그 계정
 /// 그대로 되살리기」라, 흔한 쪽이 한 번에 끝나야 한다. `Isolated` 는 그 슬롯에 다른
 /// 계정을 붙일 때의 보조 선택지로 남는다.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoginBrowser {
     /// 쿠키 없는 크롬 프로필. URL 을 우리가 주워 그 창으로 연다.
     Isolated,
@@ -2623,9 +2839,17 @@ fn spawn_hidden_login(
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
-    if let Ok(mut c) = login_cell().lock() {
-        c.0 = Some(LoginJob { id: id.clone(), state: LoginState::Running });
+    let Ok(mut cell) = login_cell().lock() else { return };
+    if cell
+        .0
+        .as_ref()
+        .is_some_and(|job| job.state == LoginState::Running)
+    {
+        return;
     }
+    cell.0 = Some(LoginJob { id: id.clone(), state: LoginState::Running });
+    cell.1 = None;
+    drop(cell);
     std::thread::spawn(move || {
         // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의
         // PATH 에는 claude·codex 가 없어 직접 spawn 하면 항상 실패한다.

@@ -1118,7 +1118,7 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let ok = match action.as_str() {
                     "close-student-window" => {
-                        self.close_student_web_window();
+                        self.settings_apply(SettingsAction::CloseStudent);
                         Ok(true)
                     }
                     "open-character-settings" => {
@@ -1130,8 +1130,9 @@ impl ApplicationHandler<UserEvent> for App {
                         Ok(self.settings_room_active())
                     }
                     "open-student" => {
-                        let theme = label.clone().unwrap_or_default();
-                        Ok(self.open_student_web_window(event_loop, &arg, &theme))
+                        let _ = self.open_settings_room(Some(crate::SettingsCat::Students));
+                        self.settings_apply(SettingsAction::SelectStudent(arg.clone()));
+                        Ok(self.settings_room_active())
                     }
                     "select-theme" if !arg.is_empty() && !theme_exists(&arg) => {
                         Err(format!("'{arg}' 테마가 없어요"))
@@ -1545,7 +1546,6 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.close_inline_web();
-        self.close_student_web_window();
         self.close_web_hosts();
         // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다.
         self.persona.webview = None;
@@ -2479,21 +2479,6 @@ impl ApplicationHandler<UserEvent> for App {
         if self.web_host_window_event(id, &event) {
             return;
         }
-        if self.student_web_window.as_ref().map(|w| w.id()) == Some(id) {
-            match &event {
-                WindowEvent::CloseRequested => self.close_student_web_window(),
-                WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.student_web_webview.as_ref() {
-                        let _ = wv.set_bounds(wry::Rect {
-                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
         if self.inline_web_window_event(id, &event) {
             return;
         }
@@ -2736,6 +2721,9 @@ impl ApplicationHandler<UserEvent> for App {
                     });
                     self.chrome_dirty = true;
                     window.request_redraw();
+                    return;
+                }
+                if self.native_settings_drag_move(self.cursor_px.0, self.cursor_px.1) {
                     return;
                 }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
@@ -3589,6 +3577,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
                 if matches!(state, ElementState::Released) {
+                    if self.native_settings_end_drag() {
+                        window.request_redraw();
+                        return;
+                    }
                     if let Some(drag) = self.file_tree.drag.take() {
                         window.set_cursor(CursorIcon::Default);
                         if drag.active {
@@ -6481,6 +6473,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
         self.themegen_poll();
+        self.native_settings_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크

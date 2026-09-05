@@ -238,6 +238,7 @@ pub(crate) struct State {
     loading: bool,
     load_generation: Option<u64>,
     auth_poll: Option<(AccountProvider, std::time::Instant, u8, bool)>,
+    auth_generation: Option<(u64, AccountProvider)>,
     notice: Option<(bool, String)>,
 }
 
@@ -255,12 +256,20 @@ impl Default for State {
             loading: false,
             load_generation: None,
             auth_poll: None,
+            auth_generation: None,
             notice: None,
         }
     }
 }
 
 impl State {
+    pub(crate) fn shell_path_is_preset(&self, path: &str) -> bool {
+        self.data
+            .shells
+            .iter()
+            .any(|choice| choice.path.eq_ignore_ascii_case(path))
+    }
+
     pub(crate) fn request_load(&mut self, proxy: EventLoopProxy<UserEvent>) {
         if self.loading || self.loaded {
             return;
@@ -332,37 +341,45 @@ impl State {
             60,
             true,
         ));
+        self.auth_generation = None;
         self.notice = Some((true, "브라우저에서 로그인을 마쳐 주세요".to_string()));
     }
 
-    fn poll_auth(&mut self) -> bool {
+    fn poll_auth(&mut self, proxy: EventLoopProxy<UserEvent>) -> bool {
         let Some((provider, due, left, waiting_login)) = self.auth_poll else {
             return false;
         };
+        if let Some((generation, pending_provider)) = self.auth_generation {
+            let Some(auth) = take_auth_data(generation, pending_provider) else {
+                return false;
+            };
+            self.auth_generation = None;
+            let logged_in = auth.logged_in();
+            let settled = auth.status != AuthStatus::Checking;
+            let mut data = (*self.data).clone();
+            *data.auth_mut(provider) = auth;
+            self.data = Arc::new(data);
+            if logged_in || left <= 1 || (!waiting_login && settled) {
+                self.auth_poll = None;
+                if logged_in && !self.preferred_touched && self.preferred.is_none() {
+                    self.preferred = Some(provider);
+                }
+                self.notice = logged_in.then(|| (true, "로그인을 확인했어요".to_string()));
+            } else {
+                self.auth_poll = Some((
+                    provider,
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                    left - 1,
+                    waiting_login,
+                ));
+            }
+            return true;
+        }
         if std::time::Instant::now() < due {
             return false;
         }
-        let auth = AuthInfo::load(provider);
-        let logged_in = auth.logged_in();
-        let settled = auth.status != AuthStatus::Checking;
-        let mut data = (*self.data).clone();
-        *data.auth_mut(provider) = auth;
-        self.data = Arc::new(data);
-        if logged_in || left <= 1 || (!waiting_login && settled) {
-            self.auth_poll = None;
-            if logged_in && !self.preferred_touched && self.preferred.is_none() {
-                self.preferred = Some(provider);
-            }
-            self.notice = logged_in.then(|| (true, "로그인을 확인했어요".to_string()));
-        } else {
-            self.auth_poll = Some((
-                provider,
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
-                left - 1,
-                waiting_login,
-            ));
-        }
-        true
+        self.auth_generation = Some((request_auth_data(proxy, provider), provider));
+        false
     }
 
     fn set_font(&mut self, family: String) {
@@ -372,11 +389,19 @@ impl State {
         self.data = Arc::new(data);
     }
 
-    fn set_imported(&mut self, id: String, restart_required: bool) {
+    fn set_imported(
+        &mut self,
+        id: String,
+        restart_required: bool,
+        font_family: Option<String>,
+    ) {
         self.last_imported = Some(id);
-        if restart_required {
+        if restart_required || font_family.is_some() {
             let mut data = (*self.data).clone();
-            data.restart_required = true;
+            data.restart_required |= restart_required;
+            if let Some(family) = font_family {
+                data.font_family = Some(family);
+            }
             self.data = Arc::new(data);
         }
     }
@@ -431,6 +456,38 @@ fn take_data(generation: u64) -> Option<Data> {
     }
 }
 
+type AuthLoadCell = std::sync::Mutex<Option<(u64, AccountProvider, AuthInfo)>>;
+
+fn auth_load_cell() -> &'static AuthLoadCell {
+    static CELL: std::sync::OnceLock<AuthLoadCell> = std::sync::OnceLock::new();
+    CELL.get_or_init(Default::default)
+}
+
+fn request_auth_data(proxy: EventLoopProxy<UserEvent>, provider: AccountProvider) -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let auth = AuthInfo::load(provider);
+        if let Ok(mut cell) = auth_load_cell().lock() {
+            *cell = Some((generation, provider, auth));
+        }
+        let _ = proxy.send_event(UserEvent::Redraw);
+    });
+    generation
+}
+
+fn take_auth_data(generation: u64, provider: AccountProvider) -> Option<AuthInfo> {
+    let mut cell = auth_load_cell().lock().ok()?;
+    if cell
+        .as_ref()
+        .is_some_and(|(got, got_provider, _)| *got == generation && *got_provider == provider)
+    {
+        cell.take().map(|(_, _, auth)| auth)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Go(u8),
@@ -445,6 +502,7 @@ pub(crate) enum Action {
     FontDelta(i8),
     Accent(String),
     Login(AccountProvider),
+    CancelLogin,
     Preferred(AccountProvider),
     Shell(String),
 }
@@ -513,7 +571,9 @@ impl App {
             self.settings_scene.onboarding_mut().apply_loaded(data);
             true
         } else {
-            self.settings_scene.onboarding_mut().poll_auth()
+            self.settings_scene
+                .onboarding_mut()
+                .poll_auth(self.proxy.clone())
         };
         if changed {
             self.chrome_dirty = true;
@@ -590,7 +650,11 @@ impl App {
                     self.settings_scene.refresh_cache();
                     self.settings_scene
                         .onboarding_mut()
-                        .set_imported(id, applied.restart_required);
+                        .set_imported(
+                            id,
+                            applied.restart_required,
+                            onboarding::current_font_family(),
+                        );
                 }
                 Err(error) => self
                     .settings_scene
@@ -611,13 +675,29 @@ impl App {
             Action::FontDelta(delta) => self.settings_apply(SettingsAction::FontSizeDelta(delta)),
             Action::Accent(name) => self.settings_apply(SettingsAction::Accent(name)),
             Action::Login(provider) => {
+                if settings::hidden_login_running() {
+                    self.settings_scene
+                        .onboarding_mut()
+                        .set_notice(false, "다른 로그인이 끝난 뒤 다시 시도해 주세요");
+                    return;
+                }
                 self.settings_apply(match provider {
                     AccountProvider::Claude => SettingsAction::AddClaudeAccount,
                     AccountProvider::Codex => SettingsAction::AddCodexAccount,
                 });
+                if settings::hidden_login_running() {
+                    self.settings_scene
+                        .onboarding_mut()
+                        .start_auth_poll(provider);
+                }
+            }
+            Action::CancelLogin => {
+                settings::cancel_hidden_login();
+                self.settings_scene.onboarding_mut().auth_poll = None;
+                self.settings_scene.onboarding_mut().auth_generation = None;
                 self.settings_scene
                     .onboarding_mut()
-                    .start_auth_poll(provider);
+                    .set_notice(true, "로그인을 취소했어요");
             }
             Action::Preferred(provider) => {
                 if self
@@ -752,21 +832,18 @@ pub(crate) fn paint(
             11.0,
             if current {
                 theme::accent()
-            } else if step < snapshot.state.step || step < snapshot.state.furthest {
-                theme::success()
             } else {
                 theme::surface_hover()
             },
         );
-        let complete = step < snapshot.state.step || step < snapshot.state.furthest;
         let number = ["1", "2", "3", "4"][index];
         text(
             g,
             dot.0 + 7.0,
             dot.1 + 5.0,
-            if complete { "✓" } else { number },
+            number,
             10.5,
-            [255, 255, 255, 255],
+            if current { [255, 255, 255, 255] } else { theme::text() },
             true,
         );
         text(
@@ -810,8 +887,8 @@ pub(crate) fn paint(
         skip.1 + 9.0,
         "건너뛰고 터미널 열기",
         11.0,
-        theme::text_dim(),
-        false,
+        theme::text(),
+        true,
     );
     hit(
         &mut hits,
@@ -1300,6 +1377,16 @@ fn auth_row(
             Target::Onboarding(Action::Preferred(provider)),
             rect,
             crate::native_settings::HitCursor::Pointer,
+        );
+    } else if settings::hidden_login_running() {
+        button(
+            g,
+            s,
+            hits,
+            (rect.0 + rect.2 - 94.0, rect.1 + 20.0, 78.0, 34.0),
+            "취소",
+            Target::Onboarding(Action::CancelLogin),
+            false,
         );
     } else if auth.status == AuthStatus::LoggedOut {
         button(
@@ -2116,8 +2203,73 @@ mod tests {
             .unwrap()
             .0;
         assert!(!variants.contains("Settings"));
+        for removed in ["student_web_webview", "student_web_window"] {
+            assert!(!main.contains(removed), "desktop Settings still owns Wry: {removed}");
+        }
+        let chrome = include_str!("chrome.rs");
+        for removed in ["open_student_web_window", "settings.html"] {
+            assert!(!chrome.contains(removed), "desktop Settings Wry route remains: {removed}");
+        }
         let socket = include_str!("socket.rs");
         assert!(socket.contains("\"onboarding-state\""));
         assert!(socket.contains("crate::settings::onboarding_state_json()"));
+    }
+
+    #[test]
+    fn auth_poll_never_runs_the_probe_on_the_gui_thread() {
+        let source = include_str!("native_onboarding.rs");
+        let poll = source
+            .split_once("fn poll_auth(")
+            .unwrap()
+            .1
+            .split_once("fn set_font(")
+            .unwrap()
+            .0;
+        assert!(!poll.contains("AuthInfo::load"));
+        assert!(poll.contains("request_auth_data"));
+        let worker = source
+            .split_once("fn request_auth_data(")
+            .unwrap()
+            .1
+            .split_once("fn take_auth_data(")
+            .unwrap()
+            .0;
+        assert!(worker.contains("std::thread::spawn"));
+        assert!(worker.contains("AuthInfo::load"));
+    }
+
+    #[test]
+    fn login_actions_are_guarded_before_a_second_job_can_spawn() {
+        let settings = include_str!("settings.rs");
+        let spawn = settings
+            .split_once("fn spawn_hidden_login(")
+            .unwrap()
+            .1
+            .split_once("/// 결과를 기록한다")
+            .unwrap()
+            .0;
+        assert!(spawn.find("LoginState::Running").unwrap() < spawn.find("std::thread::spawn").unwrap());
+
+        let action = include_str!("native_onboarding.rs")
+            .split_once("Action::Login(provider) =>")
+            .unwrap()
+            .1
+            .split_once("Action::CancelLogin")
+            .unwrap()
+            .0;
+        assert!(action.find("hidden_login_running").unwrap() < action.find("settings_apply").unwrap());
+    }
+
+    #[test]
+    fn imported_profile_refreshes_the_summary_font_immediately() {
+        let source = include_str!("native_onboarding.rs");
+        let import = source
+            .split_once("Action::Import(id) =>")
+            .unwrap()
+            .1
+            .split_once("Action::Theme(key)")
+            .unwrap()
+            .0;
+        assert!(import.contains("onboarding::current_font_family()"));
     }
 }
