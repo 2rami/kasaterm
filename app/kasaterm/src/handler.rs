@@ -7008,6 +7008,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
         self.run_pending_autolonestash();
+        self.run_pending_autohitaudit();
         self.run_pending_autoghost();
         self.run_pending_autoview();
         self.run_pending_autoinfo();

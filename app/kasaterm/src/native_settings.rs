@@ -393,7 +393,7 @@ pub(crate) enum HitCursor {
     Text,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     Category(SettingsCat),
     Setting(SettingsAction),

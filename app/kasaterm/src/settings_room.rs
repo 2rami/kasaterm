@@ -164,6 +164,12 @@ impl SettingsScene {
         changed
     }
 
+    /// 등록된 클릭 영역 전부. 화면을 눌러 보지 않고도 「눌릴 수 없는 것」을 셀 수
+    /// 있게 검사 하네스에 연다(`KASATERM_AUTOHITAUDIT_MS`).
+    pub(crate) fn hits(&self) -> &[crate::native_settings::Hit] {
+        &self.hits
+    }
+
     pub(crate) fn hit_at(&self, x: f32, y: f32) -> Option<&crate::native_settings::Hit> {
         self.hits.iter().rev().find(|hit| {
             let (rx, ry, rw, rh) = hit.rect;

@@ -1386,6 +1386,117 @@ impl App {
         eprintln!("[autoghost] {}", if pass { "PASS" } else { "FAIL" });
     }
 
+    /// Headless 클릭 영역 감사: `KASATERM_AUTOHITAUDIT_MS` 뒤에 설정 화면의 모든
+    /// 카테고리를 차례로 열어 **눌릴 수 없는 영역**을 센다.
+    ///
+    /// 「눌렀는데 아무 일도 안 난다」는 사람이 우연히 그 자리를 눌러야 발견되고,
+    /// 발견해도 어느 버튼인지 말로 옮기기 어렵다(2026-09-05 「자잘한 버그는 내가
+    /// 직접 써 보면서 계속 말해야 하나」). 그런데 그 원인 둘은 화면을 안 보고도
+    /// 셀 수 있다:
+    ///
+    /// - **크기가 0 이하** — 어느 좌표로도 안 잡힌다.
+    /// - **뒤에 등록된 영역에 완전히 덮임** — `hit_at` 은 `.rev()` 라 나중 것이
+    ///   먼저 잡히므로, 완전히 덮인 앞 영역은 영영 차례가 안 온다.
+    ///
+    /// 겹침 자체는 정상이다(카드 위의 버튼). **완전히 덮여 자기 몫이 한 점도 안
+    /// 남은 것**만 센다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autohitaudit(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOHITAUDIT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let cats = [
+            ("일반", SettingsCat::General),
+            ("모양", SettingsCat::Appearance),
+            ("셸", SettingsCat::Shell),
+            ("에이전트", SettingsCat::Claude),
+            ("테마", SettingsCat::Theme),
+            ("캐릭터", SettingsCat::Students),
+            ("피드백", SettingsCat::Feedback),
+        ];
+        let mut total_bad = 0usize;
+        for (label, cat) in cats {
+            if !self.open_settings_room(Some(cat)) {
+                eprintln!("[hitaudit] {label}: 설정 방을 못 열었다");
+                continue;
+            }
+            // 화면을 바꾼 **직후**에 무엇이 눌리는가. 클릭 영역은 그리면서 채우므로,
+            // 첫 프레임 전에는 앞 화면의 영역이 그대로 남아 있다 — 그 사이에 누르면
+            // 지금 화면에 없는 버튼이 눌린다(2026-09-05 「설정창 열릴 때 뭔가 안
+            // 눌리는 것」의 후보).
+            let stale = self.settings_scene.hits().len();
+            self.render_frame();
+            let after_one = self.settings_scene.hits().len();
+            for _ in 0..2 {
+                self.render_frame();
+            }
+            let hits = self.settings_scene.hits();
+            eprintln!(
+                "[hitaudit] {label}: 열자마자 남아 있던 영역={stale} · 한 프레임 뒤={after_one} · 안정={}",
+                hits.len()
+            );
+            let mut zero = Vec::new();
+            let mut buried = Vec::new();
+            for (i, hit) in hits.iter().enumerate() {
+                let (x, y, w, h) = hit.rect;
+                if w <= 0.0 || h <= 0.0 {
+                    zero.push(format!("{:?}", hit.target));
+                    continue;
+                }
+                // 나보다 **뒤에** 등록된 것 하나가 나를 통째로 덮으면 끝이다.
+                let covered = hits[i + 1..].iter().any(|later| {
+                    let (lx, ly, lw, lh) = later.rect;
+                    lw > 0.0
+                        && lh > 0.0
+                        && lx <= x
+                        && ly <= y
+                        && lx + lw >= x + w
+                        && ly + lh >= y + h
+                });
+                if covered {
+                    buried.push(format!("{:?}", hit.target));
+                }
+            }
+            total_bad += zero.len() + buried.len();
+            eprintln!(
+                "[hitaudit] {label}: 영역 {}개 · 크기0 {} · 완전히덮임 {}{}{}",
+                hits.len(),
+                zero.len(),
+                buried.len(),
+                if zero.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  크기0: {}", zero.join(", "))
+                },
+                if buried.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  덮임: {}", buried.join(", "))
+                },
+            );
+        }
+        eprintln!(
+            "[hitaudit] {}",
+            if total_bad == 0 {
+                "PASS — 눌릴 수 없는 영역 없음".to_string()
+            } else {
+                format!("FAIL — 눌릴 수 없는 영역 {total_bad}개")
+            }
+        );
+    }
+
     /// Headless 「마지막 pane 을 숨기면 그 방은 어떻게 되나」 repro:
     /// `KASATERM_AUTOLONESTASH_MS` 뒤에 방을 하나 더 만들고, pane 이 하나뿐인 그 방의
     /// pane 을 숨긴 다음 방 목록과 라벨을 찍는다.
