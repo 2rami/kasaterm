@@ -3838,6 +3838,13 @@ impl App {
             HashMap::new()
         };
         let settings_room_active = self.settings_room_active();
+        // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
+        // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
+        // 사라지면 「눌렀는데 아무 일도 안 남」이 되고, 그 상태로 같은 버튼을
+        // 반복해 누른 것이 애초에 이 기능이 생긴 이유다.
+        if settings_room_active {
+            self.drain_home_account_toasts();
+        }
         let settings_snapshot = settings_room_active
             .then(|| {
                 let left = self.effective_sidebar_w();
