@@ -1816,6 +1816,9 @@ pub fn tokens_json() -> serde_json::Value {
         // (`CURRENT_THEME`) — 웹 UI 의 선택 표시가 이걸 쓴다.
         "theme": theme_name(),
         "accent_name": accent_name(),
+        // 폰이 셀 글자색을 데스크톱과 같은 바닥(cells.rs 의 enforce_min_contrast)으로
+        // 보정하려면 설정값이 필요하다 — 색만 보내면 원색 그대로 그려 다른 테마로 보인다.
+        "min_contrast": min_contrast(),
         "palette": {
             "bg": css_hex(bg()),
             "fg": css_hex(fg()),
