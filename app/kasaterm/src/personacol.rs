@@ -28,6 +28,7 @@ const MAX_DECODE_EDGE: u32 = 2_048;
 const MAX_DECODE_ALLOC: u64 = 32 << 20;
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
+type FallbackBytes = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 /// 전역 IME 소유권에 실을 값. `ImeFocus::Persona(PersonaInput)`처럼 필드까지
 /// 함께 싣지 않으면 검색칸으로 옮긴 순간 조합 중이던 글자가 새 칸에 확정된다.
@@ -108,6 +109,9 @@ pub(crate) enum PortraitState {
     Fallback {
         slug: String,
         reason: PortraitFallback,
+        /// 번들 idle frame-0도 워커에서 미리 디코딩한다. None은 번들에도 그
+        /// 슬러그가 없다는 뜻이며, 렌더는 파일이나 PNG를 다시 열지 않는다.
+        image: Option<PortraitImage>,
     },
 }
 
@@ -177,6 +181,36 @@ pub(crate) enum DraftEnter {
     Submit,
 }
 
+/// 렌더가 실제 글자 폭으로 줄바꿈한 뒤 코어에 돌려주는 입력창 측정값.
+/// `caret_row`는 전체 visual row 기준이라 긴 글에서도 커서 행을 정확히 보존한다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DraftLayoutMetrics {
+    pub(crate) total_rows: usize,
+    pub(crate) caret_row: usize,
+    pub(crate) line_height: f32,
+}
+
+/// 36~96px 안에서 현재 보일 visual row 범위. 렌더는 `first_row` 앞을 건너뛰고
+/// `visible_rows`만 그리면 되며, 별도의 글자 자르기 추측을 만들지 않는다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DraftViewport {
+    pub(crate) first_row: usize,
+    pub(crate) visible_rows: usize,
+    pub(crate) total_rows: usize,
+    pub(crate) height: f32,
+}
+
+impl Default for DraftViewport {
+    fn default() -> Self {
+        Self {
+            first_row: 0,
+            visible_rows: 1,
+            total_rows: 1,
+            height: DRAFT_MIN_H,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PersonaEffect {
     Speak(ProactiveReason),
@@ -189,6 +223,7 @@ enum ProfileLoadKind {
 }
 
 struct LoadedProfile {
+    generation: u64,
     profile: PersonaProfile,
     roster: Vec<RosterEntry>,
     portrait: PortraitState,
@@ -222,6 +257,9 @@ pub(crate) struct PersonaColState {
     pub(crate) activity: ActivitySummary,
     pub(crate) busy: bool,
     pub(crate) switching_to: Option<String>,
+    /// 캐릭터 저장 실패는 기존 말풍선을 덮지 않고 로스터 자리에서 보여준다.
+    pub(crate) switch_error: Option<String>,
+    pub(crate) draft_viewport: DraftViewport,
     pub(crate) bubble_scroll: f32,
     pub(crate) roster_scroll: f32,
     pub(crate) body_rect: UiRect,
@@ -237,6 +275,7 @@ pub(crate) struct PersonaColState {
     tx: Sender<WorkerResult>,
     rx: Receiver<WorkerResult>,
     wake: Wake,
+    fallback_bytes: FallbackBytes,
 }
 
 impl Default for PersonaColState {
@@ -247,6 +286,15 @@ impl Default for PersonaColState {
 
 impl PersonaColState {
     pub(crate) fn with_waker(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::with_sources(wake, |_| None)
+    }
+
+    /// 앱 통합 입구. `fallback_bytes`에는 번들 idle frame-0 바이트만 돌려주는
+    /// 함수를 건넨다. 이 함수 자체는 GUI 스레드에서 불리지 않고 워커로 복제된다.
+    pub(crate) fn with_sources(
+        wake: impl Fn() + Send + Sync + 'static,
+        fallback_bytes: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             profile: PersonaProfile::default(),
@@ -261,6 +309,8 @@ impl PersonaColState {
             activity: ActivitySummary::default(),
             busy: false,
             switching_to: None,
+            switch_error: None,
+            draft_viewport: DraftViewport::default(),
             bubble_scroll: 0.0,
             roster_scroll: 0.0,
             body_rect: UiRect::default(),
@@ -276,6 +326,7 @@ impl PersonaColState {
             tx,
             rx,
             wake: Arc::new(wake),
+            fallback_bytes: Arc::new(fallback_bytes),
         }
     }
 
@@ -286,10 +337,11 @@ impl PersonaColState {
         }
         self.initial_requested = true;
         let generation = self.generation;
+        let fallback_bytes = self.fallback_bytes.clone();
         self.spawn(move || WorkerResult::Profile {
             generation,
             kind: ProfileLoadKind::Initial,
-            result: Ok(load_profile(generation, None)),
+            result: Ok(load_profile(generation, None, &fallback_bytes)),
         });
         true
     }
@@ -301,20 +353,18 @@ impl PersonaColState {
         if name.is_empty() || name == self.profile.name || self.switching_to.is_some() {
             return false;
         }
-        self.generation = self.generation.wrapping_add(1).max(1);
         self.switching_to = Some(name.to_string());
+        self.switch_error = None;
         self.roster_open = false;
         self.roster_query.clear();
         self.roster_query_caret = 0;
-        self.history.clear();
-        self.last_spoke_at = None;
-        self.busy = false;
-        self.bubble = BubbleState::Hidden;
         let generation = self.generation;
+        let next_generation = generation.wrapping_add(1).max(1);
         let name = name.to_string();
+        let fallback_bytes = self.fallback_bytes.clone();
         self.spawn(move || {
             let result = kasa_mcp::persona::set_character(&name)
-                .map(|_| load_profile(generation, Some(name)));
+                .map(|_| load_profile(next_generation, Some(name), &fallback_bytes));
             WorkerResult::Profile {
                 generation,
                 kind: ProfileLoadKind::Switch,
@@ -353,21 +403,36 @@ impl PersonaColState {
                 if generation != self.generation {
                     return false;
                 }
-                self.switching_to = None;
                 match result {
                     Ok(loaded) => {
+                        if kind == ProfileLoadKind::Switch {
+                            self.history.clear();
+                            self.last_spoke_at = None;
+                            self.busy = false;
+                            self.bubble = BubbleState::Hidden;
+                        }
+                        self.generation = loaded.generation;
                         self.profile = loaded.profile;
                         self.roster = loaded.roster;
                         self.portrait = loaded.portrait;
                         self.texture_reset_pending = true;
                         self.roster_scroll = 0.0;
                         self.bubble_scroll = 0.0;
+                        self.switching_to = None;
+                        self.switch_error = None;
                         effects.push(PersonaEffect::Speak(match kind {
                             ProfileLoadKind::Initial => ProactiveReason::Opened,
                             ProfileLoadKind::Switch => ProactiveReason::CharacterChanged,
                         }));
                     }
-                    Err(error) => self.bubble = BubbleState::Error(error),
+                    Err(error) => {
+                        self.switching_to = None;
+                        if kind == ProfileLoadKind::Switch {
+                            self.switch_error = Some(error);
+                        } else {
+                            self.bubble = BubbleState::Error(error);
+                        }
+                    }
                 }
                 true
             }
@@ -609,6 +674,35 @@ impl PersonaColState {
         }
     }
 
+    /// 긴 draft의 커서가 96px 입력창 밖으로 밀리지 않도록 visual row 창을 맞춘다.
+    /// 줄바꿈 자체는 폰트 폭을 아는 렌더가 계산하고, 이 함수는 순수한 viewport만 맡는다.
+    pub(crate) fn update_draft_layout(&mut self, metrics: DraftLayoutMetrics) -> DraftViewport {
+        let total_rows = metrics.total_rows.max(1);
+        let caret_row = metrics.caret_row.min(total_rows - 1);
+        let line_height = if metrics.line_height.is_finite() && metrics.line_height > 0.0 {
+            metrics.line_height
+        } else {
+            DRAFT_MIN_H - DRAFT_VERTICAL_PAD
+        };
+        let height = draft_height(total_rows as f32 * line_height);
+        let visible_rows =
+            (((height - DRAFT_VERTICAL_PAD) / line_height).floor() as usize).clamp(1, total_rows);
+        let max_first = total_rows.saturating_sub(visible_rows);
+        let mut first_row = self.draft_viewport.first_row.min(max_first);
+        if caret_row < first_row {
+            first_row = caret_row;
+        } else if caret_row >= first_row + visible_rows {
+            first_row = (caret_row + 1).saturating_sub(visible_rows);
+        }
+        self.draft_viewport = DraftViewport {
+            first_row: first_row.min(max_first),
+            visible_rows,
+            total_rows,
+            height,
+        };
+        self.draft_viewport
+    }
+
     pub(crate) fn set_scroll_extent(&mut self, roster: bool, viewport: f32, content: f32) {
         if roster {
             self.roster_extent = (viewport.max(0.0), content.max(0.0));
@@ -684,19 +778,18 @@ fn elapsed_over(now: Duration, since: Option<Duration>, threshold: Duration) -> 
 }
 
 fn activity_summary(board: &[PaneActivity]) -> ActivitySummary {
-    let tone = if board.iter().any(|row| row.status == "waiting") {
+    let is_idle = |status: &str| status.trim().is_empty() || status == "idle";
+    let is_waiting = |status: &str| matches!(status, "waiting" | "needs-you");
+    let tone = if board.iter().any(|row| is_waiting(&row.status)) {
         ActivityTone::Waiting
-    } else if board
-        .iter()
-        .any(|row| matches!(row.status.as_str(), "working" | "building"))
-    {
+    } else if board.iter().any(|row| !is_idle(&row.status)) {
         ActivityTone::Working
     } else {
         ActivityTone::Idle
     };
     ActivitySummary {
         tone,
-        active_count: board.iter().filter(|row| row.status != "idle").count(),
+        active_count: board.iter().filter(|row| !is_idle(&row.status)).count(),
     }
 }
 
@@ -731,12 +824,17 @@ fn clamp_scroll(value: f32, extent: (f32, f32)) -> f32 {
     value.clamp(0.0, (extent.1 - extent.0).max(0.0))
 }
 
-fn load_profile(generation: u64, chosen: Option<String>) -> LoadedProfile {
+fn load_profile(
+    generation: u64,
+    chosen: Option<String>,
+    fallback_bytes: &FallbackBytes,
+) -> LoadedProfile {
     let roster = load_roster();
     let name = chosen.unwrap_or_else(|| kasa_mcp::persona::character_name(""));
     let profile = profile_for(&name, &roster);
-    let portrait = load_portrait(generation, &profile);
+    let portrait = load_portrait(generation, &profile, fallback_bytes);
     LoadedProfile {
+        generation,
         profile,
         roster,
         portrait,
@@ -819,24 +917,47 @@ fn parse_hex(value: &str) -> Option<[u8; 4]> {
     ])
 }
 
-fn load_portrait(generation: u64, profile: &PersonaProfile) -> PortraitState {
-    let Some((bytes, _)) = kasa_mcp::persona::portrait(&profile.slug) else {
-        return PortraitState::Fallback {
-            slug: profile.slug.clone(),
-            reason: PortraitFallback::Missing,
-        };
-    };
-    let Some((rgba, width, height)) = decode_portrait_bytes(&bytes) else {
-        return PortraitState::Fallback {
-            slug: profile.slug.clone(),
-            reason: PortraitFallback::Rejected,
-        };
-    };
-    PortraitState::Ready(PortraitImage {
+fn load_portrait(
+    generation: u64,
+    profile: &PersonaProfile,
+    fallback_bytes: &FallbackBytes,
+) -> PortraitState {
+    let primary = kasa_mcp::persona::portrait(&profile.slug);
+    if let Some((bytes, _)) = primary.as_ref() {
+        if let Some(image) = decoded_image(
+            bytes,
+            format!("{PORTRAIT_TEXTURE_PREFIX}{generation}:{}", profile.slug),
+        ) {
+            return PortraitState::Ready(image);
+        }
+    }
+    let image = fallback_bytes(&profile.slug).and_then(|bytes| {
+        decoded_image(
+            &bytes,
+            format!(
+                "{PORTRAIT_TEXTURE_PREFIX}{generation}:{}:fallback",
+                profile.slug
+            ),
+        )
+    });
+    PortraitState::Fallback {
+        slug: profile.slug.clone(),
+        reason: if primary.is_some() {
+            PortraitFallback::Rejected
+        } else {
+            PortraitFallback::Missing
+        },
+        image,
+    }
+}
+
+fn decoded_image(bytes: &[u8], texture_key: String) -> Option<PortraitImage> {
+    let (rgba, width, height) = decode_portrait_bytes(bytes)?;
+    Some(PortraitImage {
         rgba: Arc::from(rgba),
         width,
         height,
-        texture_key: format!("{PORTRAIT_TEXTURE_PREFIX}{generation}:{}", profile.slug),
+        texture_key,
     })
 }
 
@@ -908,6 +1029,23 @@ mod tests {
     }
 
     #[test]
+    fn board_status_aliases_share_one_activity_vocabulary() {
+        let needs_you = activity_summary(&[row("%1", "needs-you", "승인")]);
+        assert_eq!(needs_you.tone, ActivityTone::Waiting);
+        assert_eq!(needs_you.active_count, 1);
+
+        let working = activity_summary(&[
+            row("%1", "blocked", "막힘"),
+            row("%2", "compacting", "정리"),
+            row("%3", "idle", "쉼"),
+            row("%4", "", "아직 없음"),
+        ]);
+        assert_eq!(working.tone, ActivityTone::Working);
+        assert_eq!(working.active_count, 2);
+        assert_eq!(working.label(), "작업 중 2");
+    }
+
+    #[test]
     fn stale_chat_result_cannot_cross_character_generation() {
         let mut state = PersonaColState::default();
         state.generation = 8;
@@ -925,6 +1063,76 @@ mod tests {
         assert!(!changed);
         assert_eq!(state.bubble, BubbleState::Thinking);
         assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn failed_character_switch_preserves_existing_conversation() {
+        let mut state = PersonaColState::default();
+        state.switching_to = Some("미도리".to_string());
+        state.bubble = BubbleState::Reply("기존 답".to_string());
+        state.history.push(ConversationTurn {
+            role: "assistant",
+            content: "기존 답".to_string(),
+        });
+        state.last_spoke_at = Some(Duration::from_secs(11));
+        let mut effects = Vec::new();
+        assert!(state.apply_result(
+            WorkerResult::Profile {
+                generation: state.generation,
+                kind: ProfileLoadKind::Switch,
+                result: Err("저장 실패".to_string()),
+            },
+            Duration::from_secs(12),
+            &mut effects,
+        ));
+        assert_eq!(state.bubble, BubbleState::Reply("기존 답".to_string()));
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.last_spoke_at, Some(Duration::from_secs(11)));
+        assert_eq!(state.switch_error.as_deref(), Some("저장 실패"));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn successful_character_switch_resets_conversation_after_save() {
+        let mut state = PersonaColState::default();
+        state.generation = 4;
+        state.switching_to = Some("미도리".to_string());
+        state.busy = true;
+        state.bubble = BubbleState::Reply("기존 답".to_string());
+        state.history.push(ConversationTurn {
+            role: "assistant",
+            content: "기존 답".to_string(),
+        });
+        state.last_spoke_at = Some(Duration::from_secs(11));
+        let mut effects = Vec::new();
+        assert!(state.apply_result(
+            WorkerResult::Profile {
+                generation: 4,
+                kind: ProfileLoadKind::Switch,
+                result: Ok(LoadedProfile {
+                    generation: 5,
+                    profile: PersonaProfile {
+                        name: "미도리".to_string(),
+                        slug: "midori".to_string(),
+                        accent: [1, 2, 3, 255],
+                    },
+                    roster: Vec::new(),
+                    portrait: PortraitState::Loading,
+                }),
+            },
+            Duration::from_secs(12),
+            &mut effects,
+        ));
+        assert_eq!(state.generation(), 5);
+        assert_eq!(state.profile.name, "미도리");
+        assert_eq!(state.bubble, BubbleState::Hidden);
+        assert!(state.history.is_empty());
+        assert_eq!(state.last_spoke_at, None);
+        assert!(!state.busy);
+        assert_eq!(
+            effects,
+            vec![PersonaEffect::Speak(ProactiveReason::CharacterChanged)]
+        );
     }
 
     #[test]
@@ -1021,6 +1229,27 @@ mod tests {
     }
 
     #[test]
+    fn draft_viewport_keeps_caret_row_visible() {
+        let mut state = PersonaColState::default();
+        let bottom = state.update_draft_layout(DraftLayoutMetrics {
+            total_rows: 20,
+            caret_row: 19,
+            line_height: 18.0,
+        });
+        assert_eq!(bottom.height, DRAFT_MAX_H);
+        assert_eq!(bottom.visible_rows, 4);
+        assert_eq!(bottom.first_row, 16);
+
+        let top = state.update_draft_layout(DraftLayoutMetrics {
+            total_rows: 20,
+            caret_row: 2,
+            line_height: 18.0,
+        });
+        assert_eq!(top.first_row, 2);
+        assert!(top.first_row <= 2 && 2 < top.first_row + top.visible_rows);
+    }
+
+    #[test]
     fn portrait_decoder_rejects_dimensions_over_2048() {
         let image =
             image::RgbaImage::from_pixel(MAX_DECODE_EDGE + 1, 1, image::Rgba([1, 2, 3, 255]));
@@ -1029,6 +1258,32 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         assert!(decode_portrait_bytes(bytes.get_ref()).is_none());
+    }
+
+    #[test]
+    fn fallback_sprite_is_decoded_before_render() {
+        let image = image::RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let fallback: FallbackBytes = Arc::new(move |_| Some(bytes.get_ref().clone()));
+        let profile = PersonaProfile {
+            name: "테스트".to_string(),
+            slug: "no-such-persona-fallback".to_string(),
+            accent: [1, 2, 3, 255],
+        };
+        let portrait = load_portrait(9, &profile, &fallback);
+        let PortraitState::Fallback {
+            reason: PortraitFallback::Missing,
+            image: Some(image),
+            ..
+        } = portrait
+        else {
+            panic!("번들 폴백 픽셀이 준비돼야 한다");
+        };
+        assert_eq!((image.width, image.height), (2, 3));
+        assert!(image.texture_key.ends_with(":fallback"));
     }
 
     #[test]
