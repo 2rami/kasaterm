@@ -5693,6 +5693,10 @@ fn raw_pane_param(raw: Option<&str>) -> Option<String> {
 
 /// 브라우저로 나가는 한 프레임. 원시 바이트(자기 VT 파서를 든 클라)와 셀 그리드
 /// (파서 없이 그리는 클라)를 한 채널로 흘리려고 묶었다.
+/// 거울에게 한 번에 주는 지난 줄의 상한 — 폰은 이 이상 넘겨 볼 일이 드물고, 터널 너머로
+/// 한 프레임에 실리는 크기를 묶어 둔다.
+const HISTORY_ROWS_MAX: usize = 2000;
+
 enum Frame {
     Bytes(Vec<u8>),
     Grid(Box<kasa_bridge::screen::ScreenUpdate>),
@@ -5891,6 +5895,8 @@ async fn term_ws_run(
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
     let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
+    // 거울의 「지난 줄 달라」 응답도 화면과 같은 채널을 탄다 — 순서가 보장된다.
+    let btx_shell = btx.clone();
     // 거울(이미 있는 pane 을 보는 접속)도, 이 접속이 새로 띄운 원격 셸도 등록한다 —
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
@@ -5948,6 +5954,9 @@ async fn term_ws_run(
     let sess_in = sess.clone();
     let sess_sz = sess.clone();
     let mut last_size = (c, r);
+    // 화면이 위로 밀려 스크롤백으로 들어간 줄을 거울에게도 흘린다(`scrolled`). 이게
+    // 없으면 폰은 살아 있는 화면만 받아 위로 넘길 지난 줄이 없다.
+    let mut last_hist = sess.view_state().1;
     let mut to_browser = tokio::spawn(async move {
         loop {
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
@@ -5985,6 +5994,22 @@ async fn term_ws_run(
                         Frame::Bytes(b) => ws_tx.send(Message::Binary(b.into())).await,
                         // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
                         Frame::Grid(u) => {
+                            let hist = sess_sz.view_state().1;
+                            if hist > last_hist {
+                                // 이번 프레임에 스크롤백으로 들어간 줄 — 화면보다 먼저 보내야
+                                // 받는 쪽이 「지난 줄 뒤에 새 화면」 순서로 잇는다. 오래된 순.
+                                let k = (hist - last_hist).min(HISTORY_ROWS_MAX);
+                                let rows = sess_sz.rows_above_live(k);
+                                let msg = serde_json::json!({
+                                    "t": "scrolled",
+                                    "rows": rows.iter().rev().map(|r| crate::gridwire::encode_row(r)).collect::<Vec<_>>(),
+                                })
+                                .to_string();
+                                if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            last_hist = hist;
                             let msg = crate::gridwire::encode(&u).to_string();
                             ws_tx.send(Message::Text(msg.into())).await
                         }
@@ -6035,6 +6060,23 @@ async fn term_ws_run(
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
                         continue;
                     };
+                    // `{"t":"history","rows":N}` — 살아 있는 화면 위의 지난 줄 N 개(오래된 순).
+                    // 붙자마자 한 번 받아 두면 그 뒤로는 `scrolled` 가 이어 준다.
+                    if v.get("t").and_then(|x| x.as_str()) == Some("history") {
+                        let n = v
+                            .get("rows")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(300)
+                            .min(HISTORY_ROWS_MAX as u64) as usize;
+                        let rows = sess_in.rows_above_live(n);
+                        let msg = serde_json::json!({
+                            "t": "history",
+                            "rows": rows.iter().rev().map(|r| crate::gridwire::encode_row(r)).collect::<Vec<_>>(),
+                        })
+                        .to_string();
+                        let _ = btx_shell.send(Frame::Control(msg)).await;
+                        continue;
+                    }
                     if v.get("t").and_then(|x| x.as_str()) == Some("resize") {
                         // ⚠️ 미러일 땐 창 크기를 따라 **저절로** 바꾸지 않는다 — 같은 PTY 를
                         // 보고 있는 kasaterm pane 이 같이 좁아진다. 폰은 그 규칙을 깨야만

@@ -50,7 +50,7 @@ fn style_of(c: &Cell) -> (Value, Value, u8) {
 /// 하지만 `snapshot()` 을 거친 그리드에는 이미 **공백으로 바뀌어** 도착한다(2026-08-25
 /// 실측: `echo 가나다` → `'가 나 다'`). 문자로는 진짜 공백과 구분이 안 되므로 **앞 글자의
 /// 폭**으로 판정해야 한다 — 폭 2짜리 뒤의 한 칸이 그 글자의 자리다.
-fn encode_row(row: &[Cell]) -> Value {
+pub(crate) fn encode_row(row: &[Cell]) -> Value {
     let mut runs: Vec<Value> = Vec::new();
     let mut text = String::new();
     let mut style: Option<(Value, Value, u8)> = None;

@@ -192,6 +192,30 @@ fn read_rows_above(term: &Term<PtyEventForwarder>, n: usize) -> Vec<Row> {
     out
 }
 
+/// 살아 있는 화면 **바로 위**의 스크롤백 행들 — `read_rows_above` 와 같되 스크롤 위치를
+/// 무시한다. 폰 거울이 쓴다: 데스크톱 사람이 스크롤을 올려 둔 것과 상관없이, 프로그램이
+/// 지금 그리는 화면 위로 지난 줄이 이어져야 폰에서 위로 넘길 수 있다.
+fn read_rows_above_live(term: &Term<PtyEventForwarder>, n: usize) -> Vec<Row> {
+    let g = term.grid();
+    let cols = g.columns();
+    let bottom = -(g.history_size() as i32);
+    let mut line = -1;
+    let mut out = Vec::new();
+    while line >= bottom && out.len() < n {
+        let mut row: Row = Vec::with_capacity(cols);
+        for c in 0..cols {
+            let point = Point::new(
+                alacritty_terminal::index::Line(line),
+                alacritty_terminal::index::Column(c),
+            );
+            row.push(convert_cell(&g[point]));
+        }
+        out.push(row);
+        line -= 1;
+    }
+    out
+}
+
 /// 살아 있는 화면(스크롤 위치와 무관한 맨 아래 화면)의 마지막 `n` 행 — 위→아래 순.
 ///
 /// `read_rows_above` 의 거울이다. 그쪽은 뷰포트 **위** 스크롤백을 보고, 이쪽은
@@ -1299,6 +1323,10 @@ impl PtySession {
     /// 락 잡고 읽는다.
     pub fn rows_above(&self, n: usize) -> Vec<Row> {
         read_rows_above(&self.term.lock().unwrap(), n)
+    }
+    /// 살아 있는 화면 위의 스크롤백 — 가까운 순, 스크롤 위치 무시(`read_rows_above_live`).
+    pub fn rows_above_live(&self, n: usize) -> Vec<Row> {
+        read_rows_above_live(&self.term.lock().unwrap(), n)
     }
 
     /// 절대 줄 하나를 **셀 그대로** 읽는다 — 색·굵기·마커까지 원본 그대로.
