@@ -59,12 +59,28 @@ class Run {
   }
 }
 
-class Grid {
+/// 그리는 쪽이 보는 화면 — 원본 격자든 폰 폭으로 접은 격자든 같은 모양이다.
+abstract class GridLines {
+  int get cols;
+  int get rows;
+  List<List<Run>> get lines;
+  int get cursorRow;
+  int get cursorCol;
+  bool get cursorVisible;
+}
+
+class Grid implements GridLines {
+  @override
   int cols = 0;
+  @override
   int rows = 0;
+  @override
   List<List<Run>> lines = const [];
+  @override
   int cursorRow = 0;
+  @override
   int cursorCol = 0;
+  @override
   bool cursorVisible = true;
   bool appCursor = false;
   bool bracketedPaste = false;

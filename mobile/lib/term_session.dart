@@ -25,9 +25,6 @@ class TermSession extends ChangeNotifier {
   String? note;
   bool mirror = true;
 
-  bool picture = false;
-  Uint8List? shotBytes;
-
   /// 데스크톱 색. 세션마다 한 번 받는다 — 기계마다 테마가 다를 수 있어 pane 의 기계로 묻는다.
   DesignTokens? tokens;
 
@@ -37,11 +34,6 @@ class TermSession extends ChangeNotifier {
   int _backoffSec = 1;
   bool _paused = false;
   bool _disposed = false;
-
-  bool _shotBusy = false;
-  DateTime _shotAt = DateTime.fromMillisecondsSinceEpoch(0);
-  Timer? _shotTimer;
-  static const _shotEvery = Duration(milliseconds: 400);
 
   void connect() {
     _retry?.cancel();
@@ -91,7 +83,6 @@ class TermSession extends ChangeNotifier {
       case 'grid':
         grid.apply(msg);
         if (state != TermState.connected) state = TermState.connected;
-        if (picture) _scheduleShot();
       case 'gone':
         // 세션이 진짜 끝났다 — 유실과 달리 다시 붙을 곳이 없다.
         state = TermState.gone;
@@ -149,8 +140,6 @@ class TermSession extends ChangeNotifier {
     _paused = true;
     _retry?.cancel();
     _retry = null;
-    _shotTimer?.cancel();
-    _shotTimer = null;
     _closeChannel();
   }
 
@@ -164,44 +153,6 @@ class TermSession extends ChangeNotifier {
     connect();
   }
 
-  void setPicture(bool on) {
-    picture = on;
-    notifyListeners();
-    if (on) _scheduleShot();
-  }
-
-  /// 격자 프레임을 「바뀌었다」 신호로만 쓴다 — 400ms 안에는 한 장, 동시 요청은 하나.
-  void _scheduleShot() {
-    if (_shotBusy || _shotTimer != null) return;
-    final wait = _shotEvery - DateTime.now().difference(_shotAt);
-    if (wait <= Duration.zero) {
-      _fetchShot();
-    } else {
-      _shotTimer = Timer(wait, _fetchShot);
-    }
-  }
-
-  Future<void> _fetchShot() async {
-    _shotTimer = null;
-    if (!picture || _shotBusy || _disposed) return;
-    _shotBusy = true;
-    _shotAt = DateTime.now();
-    try {
-      final bytes = await server.shot(pane.id, machine: pane.machine);
-      if (bytes == null) {
-        picture = false;
-        note = '이 화면은 그림으로 못 본다 — 글자로 돌아왔다';
-      } else {
-        shotBytes = bytes;
-      }
-    } on ServerException catch (e) {
-      note = e.message;
-    } finally {
-      _shotBusy = false;
-      if (!_disposed) notifyListeners();
-    }
-  }
-
   void _closeChannel() {
     _sub?.cancel();
     _sub = null;
@@ -213,7 +164,6 @@ class TermSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _retry?.cancel();
-    _shotTimer?.cancel();
     _closeChannel();
     super.dispose();
   }

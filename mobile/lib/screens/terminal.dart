@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../grid_canvas.dart';
 import '../server.dart';
-import '../shot_view.dart';
 import '../term_session.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
@@ -23,6 +22,9 @@ class _TerminalScreenState extends State<TerminalScreen>
   final _inputFocus = FocusNode();
   bool _ctrl = false;
   bool _sending = false;
+
+  /// 폰 폭으로 접어 보기(기본). 끄면 데스크톱 격자 그대로를 옆으로 밀어 읽는다.
+  bool _wrap = true;
 
   @override
   void initState() {
@@ -113,13 +115,10 @@ class _TerminalScreenState extends State<TerminalScreen>
           ),
           actions: [
             IconButton(
-              tooltip: s.picture ? '글자로 보기' : '그림으로 보기',
-              isSelected: s.picture,
-              onPressed: s.state == TermState.gone
-                  ? null
-                  : () => s.setPicture(!s.picture),
-              icon: const Icon(Icons.image_outlined),
-              selectedIcon: const Icon(Icons.image),
+              tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
+              isSelected: _wrap,
+              onPressed: () => setState(() => _wrap = !_wrap),
+              icon: const Icon(Icons.wrap_text),
             ),
           ],
         ),
@@ -151,9 +150,12 @@ class _TerminalScreenState extends State<TerminalScreen>
     final palette = tokens == null
         ? TerminalPalette.of(context)
         : TerminalPalette.fromTokens(tokens);
-    final bytes = s.shotBytes;
-    if (s.picture && bytes != null) {
-      return ShotView(bytes: bytes, background: palette.bg);
+    if (_wrap) {
+      return WrappedCanvas(
+        grid: s.grid,
+        version: s.grid.version,
+        palette: palette,
+      );
     }
     return GridCanvas(grid: s.grid, version: s.grid.version, palette: palette);
   }

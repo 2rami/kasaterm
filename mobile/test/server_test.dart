@@ -169,14 +169,6 @@ void main() {
       expect(seen!.url.query, 'surface=%253');
       expect(jsonDecode(seen!.body), {'text': '안녕', 'submit': true});
     });
-
-    test('shot 은 503 이면 null', () async {
-      final s = Server(
-        Uri.parse(publicRoot),
-        client: MockClient((_) async => http.Response('', 503)),
-      );
-      expect(await s.shot('%3'), isNull);
-    });
   });
   _designTokensTests();
 }

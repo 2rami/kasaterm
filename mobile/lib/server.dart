@@ -1,6 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:http/http.dart' as http;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
@@ -308,31 +306,6 @@ class Server {
               panes: _panesFrom(m['panes'], machine: m['label'] as String?),
             ),
     ];
-  }
-
-  /// 그림 모드 한 장. 서버가 503 을 주면(헤드리스 셸) null — 글자 모드로 돌아간다.
-  Future<Uint8List?> shot(String pane, {String? machine}) async {
-    final http.Response res;
-    try {
-      res = await _client.get(
-        uri(
-          'term/shot',
-          query: {
-            'pane': pane,
-            'w': '0',
-            'n': DateTime.now().millisecondsSinceEpoch.toString(),
-          },
-          machine: machine,
-        ),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
-    if (res.statusCode == 503) return null;
-    if (res.statusCode != 200) {
-      throw ServerException('그림을 못 받았다 (${res.statusCode})');
-    }
-    return res.bodyBytes;
   }
 
   /// 답장 한 줄. 서버가 Ctrl-U·bracketed paste·짧은 지연 뒤 Enter 를 맡으므로

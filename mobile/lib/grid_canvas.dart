@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'fill_viewer.dart';
 import 'grid.dart';
+import 'reflow.dart';
 import 'server.dart';
 
 /// 테마의 기본 fg/bg 와 256 팔레트 판을 한데 묶는다.
@@ -266,7 +267,7 @@ class _GridPainter extends CustomPainter {
     required this.cache,
   });
 
-  final Grid grid;
+  final GridLines grid;
   final int version;
   final TerminalPalette palette;
   final _CellMetrics metrics;
@@ -353,4 +354,70 @@ class _GridCanvasState extends State<GridCanvas> {
       ),
     );
   }
+}
+
+/// 폰 폭으로 접은 화면. 데스크톱 pane 은 제 크기 그대로 두고(크기 신호를 안 보낸다)
+/// 받은 행을 이 폭의 열 수로 접는다. 세로로만 넘기고, 바닥(입력창)에 붙어 새 줄을 따라간다.
+class WrappedCanvas extends StatefulWidget {
+  const WrappedCanvas({
+    super.key,
+    required this.grid,
+    required this.version,
+    required this.palette,
+    this.fontSize = 13,
+  });
+
+  final Grid grid;
+  final int version;
+  final TerminalPalette palette;
+  final double fontSize;
+
+  @override
+  State<WrappedCanvas> createState() => _WrappedCanvasState();
+}
+
+class _WrappedCanvasState extends State<WrappedCanvas> {
+  final _cache = _RowCache();
+  final _reflow = Reflow();
+  late _CellMetrics _metrics = _CellMetrics(widget.fontSize);
+
+  @override
+  void didUpdateWidget(WrappedCanvas old) {
+    super.didUpdateWidget(old);
+    if (old.fontSize != widget.fontSize) {
+      _metrics = _CellMetrics(widget.fontSize);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final cols = math.max(
+        20,
+        (constraints.maxWidth / _metrics.width).floor(),
+      );
+      final view = _reflow.apply(widget.grid, cols);
+      return ColoredBox(
+        color: widget.palette.bg,
+        // reverse 라 짧은 내용은 바닥에 앉고, 길면 스크롤 0 이 곧 맨 아래다 — 새 줄이
+        // 와도 보던 바닥이 그대로 바닥이다.
+        child: SingleChildScrollView(
+          reverse: true,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            height: math.max(view.rows, 1) * _metrics.height,
+            child: CustomPaint(
+              painter: _GridPainter(
+                grid: view,
+                version: widget.version,
+                palette: widget.palette,
+                metrics: _metrics,
+                cache: _cache,
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
 }
