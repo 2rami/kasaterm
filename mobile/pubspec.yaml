@@ -23,6 +23,13 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # 데스크톱과 같은 학생 그림(idle 애니메이션·프로필)·SCHALE 로고·교실 배경. 서버 프사는
+  # 터널 너머라 늦고 끊기면 없다 — 번들이 먼저 뜨고 서버 것이 오면 덮는다.
+  assets:
+    - assets/schale-classroom.png
+    - assets/students/schale-logo.png
+    - assets/students/gif/
+    - assets/students/profile/
   # 한글이 정확히 두 칸이고 Nerd 아이콘·박스드로잉이 들어 있어 claude 화면이
   # 깨지지 않는 유일한 선택. UI 글은 시스템 글꼴을 쓰고 격자에만 쓴다.
   fonts:

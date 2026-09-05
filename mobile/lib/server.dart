@@ -104,6 +104,7 @@ class DesignTokens {
     required this.textDim,
     required this.onAccent,
     required this.danger,
+    this.characterAccents = const {},
   });
 
   final bool dark;
@@ -122,6 +123,9 @@ class DesignTokens {
   final int textDim;
   final int onAccent;
   final int danger;
+
+  /// 학생 이름 → 그 학생의 색. pane 에 색이 없을 때 이름으로 찾는다.
+  final Map<String, int> characterAccents;
 
   /// `#rrggbb`·`#rrggbbaa` → 불투명 ARGB. 알파는 버린다 — 격자 배경은 늘 꽉 찬 색이다.
   static int? parseHex(Object? v) {
@@ -151,6 +155,13 @@ class DesignTokens {
     }
     final dark = json['theme'] != 'light';
     final text = parseHex(palette['text']) ?? fg;
+    final accentsRaw = json['character_accents'];
+    final accents = <String, int>{
+      if (accentsRaw is Map)
+        for (final e in accentsRaw.entries)
+          if (e.key is String && parseHex(e.value) != null)
+            e.key as String: parseHex(e.value)!,
+    };
     return DesignTokens(
       dark: dark,
       bg: bg,
@@ -168,6 +179,7 @@ class DesignTokens {
       onAccent:
           parseHex(palette['on_accent']) ?? (dark ? 0xff000000 : 0xffffffff),
       danger: parseHex(palette['danger']) ?? 0xffe0584e,
+      characterAccents: accents,
     );
   }
 }

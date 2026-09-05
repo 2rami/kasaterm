@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../grid_canvas.dart';
 import '../server.dart';
+import '../student_art.dart';
 import '../term_session.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
@@ -99,16 +100,38 @@ class _TerminalScreenState extends State<TerminalScreen>
       final theme = Theme.of(context);
       final scheme = theme.colorScheme;
       final s = _session;
+      final pane = widget.pane;
+      final accent = studentAccent(context, pane, s.tokens);
+      final slug = pane.slug;
       return Scaffold(
         appBar: AppBar(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          titleSpacing: 0,
+          title: Row(
             children: [
-              Text(widget.pane.displayName, style: theme.textTheme.titleMedium),
-              Text(
-                _stateText(s),
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+              StudentSprite(
+                slug: slug,
+                url: slug == null
+                    ? null
+                    : widget.server.avatar(slug, machine: pane.machine),
+                size: 40,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      pane.displayName,
+                      style: theme.textTheme.titleMedium,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      _stateText(s),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -125,7 +148,15 @@ class _TerminalScreenState extends State<TerminalScreen>
         body: SafeArea(
           child: Column(
             children: [
-              Expanded(child: _view(s)),
+              Expanded(
+                child: Row(
+                  children: [
+                    // 데스크톱 pane 의 학생색 리본 — 어느 학생 화면인지 색으로 안다.
+                    Container(width: 3, color: accent),
+                    Expanded(child: _view(s)),
+                  ],
+                ),
+              ),
               if (s.note != null) _NoteBar(text: s.note!),
               _KeyBar(
                 session: s,

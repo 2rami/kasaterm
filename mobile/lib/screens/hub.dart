@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../hub_model.dart';
 import '../server.dart';
+import '../student_art.dart';
 import 'settings.dart';
 import 'terminal.dart';
 
@@ -77,7 +78,17 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       final theme = Theme.of(context);
       return Scaffold(
         appBar: AppBar(
-          title: const Text('학생'),
+          title: Row(
+            children: [
+              Image.asset(
+                'assets/students/schale-logo.png',
+                height: 22,
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+              ),
+              const SizedBox(width: 8),
+              const Text('학생'),
+            ],
+          ),
           actions: [
             if (_model.waiting > 0)
               Padding(
@@ -94,7 +105,31 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ),
           ],
         ),
-        body: RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            // 데스크톱이 학생을 고르는 화면 뒤에 까는 교실. 목록이 읽히게 배경색으로 덮는다.
+            Image.asset(
+              'assets/schale-classroom.png',
+              fit: BoxFit.cover,
+              alignment: Alignment.topCenter,
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    theme.scaffoldBackgroundColor.withValues(alpha: 0.72),
+                    theme.scaffoldBackgroundColor.withValues(alpha: 0.96),
+                  ],
+                ),
+              ),
+            ),
+            RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
+          ],
+        ),
       );
     },
   );
@@ -260,7 +295,8 @@ class _PaneTile extends StatelessWidget {
             children: [
               Container(width: 4, height: 60, color: accent),
               const SizedBox(width: 10),
-              _Avatar(
+              StudentFace(
+                slug: slug,
                 url: slug == null
                     ? null
                     : server.avatar(slug, machine: pane.machine),
@@ -296,38 +332,6 @@ class _PaneTile extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-class _Avatar extends StatelessWidget {
-  const _Avatar({required this.url, this.shell = false});
-
-  final Uri? url;
-  final bool shell;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final fallback = Container(
-      width: 40,
-      height: 40,
-      color: scheme.surfaceContainerHighest,
-      child: Icon(
-        shell ? Icons.terminal : Icons.person_outline,
-        color: scheme.onSurfaceVariant,
-      ),
-    );
-    return ClipOval(
-      child: url == null
-          ? fallback
-          : Image.network(
-              url.toString(),
-              width: 40,
-              height: 40,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => fallback,
-            ),
     );
   }
 }

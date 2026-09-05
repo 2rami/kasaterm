@@ -178,6 +178,7 @@ void _designTokensTests() {
     test('design-tokens 응답을 팔레트로 — 알파는 버리고 theme 이 light 가 아니면 다크', () {
       final t = DesignTokens.fromJson({
         'theme': 'dark',
+        'character_accents': {'아로나': '#4a90e2', '깨진것': 'zz'},
         'palette': {
           'bg': '#252c35',
           'fg': '#ffffff',
@@ -195,6 +196,7 @@ void _designTokensTests() {
       expect(t.fg, 0xffffffff);
       expect(t.accent, 0xff5a8ce6);
       expect(t.ansi[1], 0xff010000);
+      expect(t.characterAccents['아로나'], 0xff4a90e2);
       expect(DesignTokens.parseHex('#505c6e6e'), 0xff505c6e);
     });
 
