@@ -5717,10 +5717,41 @@ impl App {
                     normalize_saved_agent_map_with(obj, |sid| {
                         socket::codex_root_rollout_for_session(sid).is_some()
                     });
+                    // 하네스를 갈아 끼운 자리에 남은 **옛 대화 번호**를 여기서 뺀다.
+                    // `pane_claude_sid` 는 claude sid 와 codex rollout uuid 를 한 칸에
+                    // 담고 전환을 신호로 걷지 않아, claude 를 끄고 codex 를 띄운 pane 이
+                    // 옛 claude 번호를 그대로 들고 저장된다. 복원은 자기 창고에서 그
+                    // 번호를 못 찾아 새 대화로 떨어지고, 그 fresh 세션의 번호가 다시
+                    // 저장되면서 옛 대화는 영영 안 열린다(2026-09-05: codex pane 에
+                    // 실린 claude 번호 탓에 4.3MB 대화가 통째로 묻혔다).
+                    let saved_agent = obj
+                        .get("was_agent")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    if let Some(sid) = obj
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                    {
+                        if !saved_sid_fits_agent(saved_agent.as_deref(), &sid) {
+                            eprintln!(
+                                "[save] pane {pane_id}: {} 자리에 남은 옛 대화 번호({sid})를 빼고 저장한다",
+                                saved_agent.as_deref().unwrap_or("claude")
+                            );
+                            obj.insert("session_id".to_string(), serde_json::Value::Null);
+                        }
+                    }
                     // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
                     // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
                     // `--model ''` 같은 게 나갈 위험만 는다.
-                    if let Some((model, effort)) = agent_cfg.get(pane_id) {
+                    //
+                    // 모델도 대화 번호와 같은 이유로 하네스와 대조한다 — 어긋나면
+                    // effort 까지 함께 버린다. 두 값은 같은 자리의 한 벌이라, 모델만
+                    // 빼면 codex 자리에 claude 의 `ultracode` 같은 값이 남는다.
+                    if let Some((model, effort)) = agent_cfg
+                        .get(pane_id)
+                        .filter(|(m, _)| saved_model_fits_agent(saved_agent.as_deref(), m))
+                    {
                         if !model.is_empty() {
                             obj.insert("model".to_string(), serde_json::json!(model));
                         }
@@ -6568,12 +6599,27 @@ impl App {
             if saved_effort(rec) == Some("ultracode") {
                 self.mark_restored_ultracode(&id);
             }
+            // 하네스와 어긋나는 모델은 여기서 버린다 — 2026-09-05 이전에 저장된
+            // 오염분(갈아 끼운 자리에 남은 옛 모델)이 `codex -m 'claude-…'` 로
+            // 되살아나는 것을 막는다. 새 오염은 저장 쪽(layout_to_json)이 같은
+            // 판정으로 막으므로, 이 겹은 이미 디스크에 있는 것만 상대한다.
+            // effort 는 모델과 한 벌이라 함께 버린다.
+            let (use_model, use_effort) = match saved_model(rec) {
+                Some(m) if !saved_model_fits_agent(was_agent, m) => {
+                    eprintln!(
+                        "[restore] pane {id}: {} 자리에 남은 옛 모델({m})을 빼고 되살린다",
+                        was_agent.unwrap_or("claude")
+                    );
+                    (None, None)
+                }
+                m => (m, saved_effort(rec)),
+            };
             // 방금 이 값으로 띄웠다는 사실을 남긴다 — statusline 보고가 오기 전에
             // 저장이 돌면 그 창의 모델·effort 가 통째로 빠진다.
             self.mark_restored_agent_cfg(
                 &id,
-                saved_model(rec).unwrap_or_default(),
-                saved_effort(rec).unwrap_or_default(),
+                use_model.unwrap_or_default(),
+                use_effort.unwrap_or_default(),
             );
             // sid 지도도 바로 채운다 — 훅(첫 프롬프트 뒤)만 기다리면 「재시작 직후엔
             // 이사를 못 보낸다」가 남는다. 잘못 묶일 값이 아니다: 이 pane 의 저장본이
@@ -6585,8 +6631,8 @@ impl App {
                 was_agent,
                 session_id.as_deref(),
                 resumable,
-                saved_model(rec),
-                saved_effort(rec),
+                use_model,
+                use_effort,
             );
             // 권한 모드 승계 — 저장이 화면에서 읽어 실은 플래그(layout_to_json).
             // 안 실으면 복원된 학생이 전부 물어보는 모드로 깨어나고, 특히 사람이
@@ -7841,6 +7887,52 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
     })
 }
 
+/// 저장하려는 대화 번호가 그 하네스의 것인가.
+///
+/// 한 자리에서 하네스를 갈아 끼워도 `pane_claude_sid` 는 옛 번호를 쥐고 있다 — 그 지도는
+/// claude sid 와 codex rollout uuid 를 한 칸에 담으면서 전환을 신호로 걷지 않는다. 그래서
+/// codex 자리에 claude 번호가 실려 저장되고, 복원은 codex 창고에서 그 번호를 못 찾아 새
+/// 대화로 떨어진다(2026-09-05 실측: 그 자리의 4.3MB 대화가 통째로 안 열렸다).
+///
+/// **상대 창고에서 실물이 확인될 때만 거짓**을 낸다. 갓 뜬 세션은 자기 기록 파일이 아직
+/// 없을 수 있어서, "내 창고에 없다"만으로 버리면 멀쩡한 번호를 잃는다.
+fn saved_sid_fits_agent(agent: Option<&str>, sid: &str) -> bool {
+    saved_sid_fits_agent_with(
+        agent,
+        sid,
+        |s| socket::codex_root_rollout_for_session(s).is_some(),
+        |s| socket::transcript_path_for_session(s).is_some(),
+    )
+}
+
+/// `saved_sid_fits_agent` 의 순수 부분 — 두 창고 조회를 주입해 파일 없이 시험한다.
+fn saved_sid_fits_agent_with(
+    agent: Option<&str>,
+    sid: &str,
+    is_codex: impl Fn(&str) -> bool,
+    is_claude: impl Fn(&str) -> bool,
+) -> bool {
+    match agent {
+        Some("codex") => is_codex(sid) || !is_claude(sid),
+        // 하네스 미상은 claude 로 되살아난다(`restore_agent_command`) — 판정도 같이 간다.
+        Some("claude") | None => is_claude(sid) || !is_codex(sid),
+        // agy 는 아직 번호를 안 넘겨받는다. 남의 규칙으로 재단하지 않는다.
+        _ => true,
+    }
+}
+
+/// 저장하려는 모델이 그 하네스의 것인가. 번호와 같은 사고의 다른 면이다 — 갈아 끼운
+/// 자리에 옛 모델이 남으면 복원이 `codex -m 'claude-opus-5[1m]'` 를 내보낸다(2026-09-05
+/// 실측: codex 창이 claude 모델명을 달고 떠 있었다).
+fn saved_model_fits_agent(agent: Option<&str>, model: &str) -> bool {
+    let m = model.trim();
+    match agent {
+        Some("codex") => !m.starts_with("claude-"),
+        Some("claude") | None => !m.starts_with("gpt-"),
+        _ => true,
+    }
+}
+
 fn normalize_saved_agent_map_with(
     rec: &mut serde_json::Map<String, serde_json::Value>,
     codex_root_exists: impl FnMut(&str) -> bool,
@@ -8551,8 +8643,60 @@ mod account_switch_tests {
 mod agy_restore_tests {
     use super::{
         normalize_saved_agent_map_with, restore_agent_command, saved_agent, saved_agent_map_with,
-        saved_agent_marker, saved_effort, saved_model,
+        saved_agent_marker, saved_effort, saved_model, saved_model_fits_agent,
+        saved_sid_fits_agent_with,
     };
+
+    /// 하네스를 갈아 끼운 자리에 남은 옛 대화 번호는 **상대 창고에서 실물이 보일 때만**
+    /// 버린다. 2026-09-05 사고가 정확히 이 조합이었다 — codex 자리에 실재하는 claude
+    /// 번호가 실려, 복원이 codex 창고를 뒤지다 새 대화로 떨어졌다.
+    #[test]
+    fn foreign_harness_session_id_is_dropped_before_saving() {
+        const CLAUDE_SID: &str = "af880ea3-3138-4836-9db2-d8503f32b724";
+        const CODEX_SID: &str = "01a06e68-c840-7033-be2f-60be3285ffc8";
+        let is_codex = |s: &str| s == CODEX_SID;
+        let is_claude = |s: &str| s == CLAUDE_SID;
+
+        assert!(
+            !saved_sid_fits_agent_with(Some("codex"), CLAUDE_SID, is_codex, is_claude),
+            "codex 자리의 claude 번호는 버린다"
+        );
+        assert!(
+            !saved_sid_fits_agent_with(Some("claude"), CODEX_SID, is_codex, is_claude),
+            "claude 자리의 codex 번호도 같다"
+        );
+        assert!(
+            !saved_sid_fits_agent_with(None, CODEX_SID, is_codex, is_claude),
+            "하네스 미상은 claude 로 되살아나므로 같은 잣대"
+        );
+
+        assert!(saved_sid_fits_agent_with(Some("codex"), CODEX_SID, is_codex, is_claude));
+        assert!(saved_sid_fits_agent_with(Some("claude"), CLAUDE_SID, is_codex, is_claude));
+        // 어느 창고에도 아직 없는 번호(갓 뜬 세션)를 잘못 버리지 않는다 — 그러면
+        // 첫 저장에서 대화가 통째로 날아간다.
+        let fresh = "00000000-0000-4000-8000-00000000ffff";
+        assert!(saved_sid_fits_agent_with(Some("codex"), fresh, is_codex, is_claude));
+        assert!(saved_sid_fits_agent_with(Some("claude"), fresh, is_codex, is_claude));
+        // agy 는 아직 번호를 안 넘겨받는다 — 남의 규칙으로 재단하지 않는다.
+        assert!(saved_sid_fits_agent_with(Some("agy"), CLAUDE_SID, is_codex, is_claude));
+    }
+
+    /// 모델도 같은 사고의 다른 면 — 걸러 내지 않으면 복원이
+    /// `codex -m 'claude-opus-5[1m]'` 를 내보낸다(2026-09-05 실측).
+    #[test]
+    fn foreign_harness_model_is_dropped_and_never_reaches_the_command() {
+        assert!(!saved_model_fits_agent(Some("codex"), "claude-opus-5[1m]"));
+        assert!(!saved_model_fits_agent(Some("claude"), "gpt-5.6-sol"));
+        assert!(!saved_model_fits_agent(None, "gpt-5.6-sol"));
+        assert!(saved_model_fits_agent(Some("codex"), "gpt-5.6-sol"));
+        assert!(saved_model_fits_agent(Some("claude"), "claude-opus-5[1m]"));
+        assert!(saved_model_fits_agent(Some("agy"), "claude-opus-5[1m]"));
+
+        // 복원이 실제로 쓰는 조합: 걸러낸 값은 명령에 아예 안 실린다.
+        let clean = restore_agent_command(Some("codex"), Some("sid"), true, None, None);
+        assert!(!clean.contains("claude-"), "{clean}");
+        assert!(!clean.contains("model_reasoning_effort"), "모델을 버리면 effort 도 함께");
+    }
 
     /// 하네스 갈래만 보는 판 — 모델·effort 는 아래 전용 테스트가 건다.
     fn cmd(agent: Option<&str>, sid: Option<&str>, resumable: bool) -> String {
