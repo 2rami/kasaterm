@@ -3959,6 +3959,20 @@ impl App {
                             })
                     })
                 })
+                .or_else(|| {
+                    // 방의 pane 을 전부 숨기면 대표 pane 도 cwd 도 사라져 이름이
+                    // `win 3` 으로 떨어진다 — 조금 전까지 「momewomo」였던 방이 갑자기
+                    // 번호가 되면 사람 눈에는 그 방이 없어지고 빈 방이 새로 생긴
+                    // 것처럼 읽힌다(2026-09-05 지적 「pane 하나 있을 때 숨기면 윈도우가
+                    // 없어지던데? win4 이렇게 되면서」). 숨겨 둔 pane 이 자기 폴더를
+                    // 들고 있으니 그것으로 이름을 잇는다 — 숨김은 정리 루프가 건너뛰어
+                    // 되살릴 때까지 남으므로, 이름도 그동안 버틴다.
+                    let mine = || self.closed_panes.iter().filter(|c| c.window == i);
+                    mine()
+                        .find(|c| c.stashed && !c.folder.is_empty())
+                        .or_else(|| mine().find(|c| !c.folder.is_empty()))
+                        .map(|c| c.folder.clone())
+                })
                 .unwrap_or_else(|| format!("win {}", i + 1));
             let cwd = home
                 .as_ref()
@@ -8733,6 +8747,28 @@ mod account_switch_tests {
         // 보고 있는 pane 만 남았으면 「끝나면 자동」이 아니라 눌러야 한다고 말한다.
         let f = account_switch_toast("사이오닉", false, 2, 1, true, true);
         assert!(f.contains("⟳") && !f.contains("작업 중"), "{f}");
+    }
+}
+
+#[cfg(test)]
+mod room_label_tests {
+    /// 방의 pane 을 전부 숨기면 대표 pane 도 cwd 도 없어져 이름이 번호로 떨어졌다.
+    /// 조금 전까지 폴더 이름이던 방이 갑자기 `win 4` 가 되면, 사람 눈에는 그 방이
+    /// 사라지고 빈 방이 새로 생긴 것으로 읽힌다(2026-09-05 지적). 숨긴 pane 이
+    /// 자기 폴더를 들고 있으므로 번호로 가기 전에 그것을 본다.
+    #[test]
+    fn an_emptied_room_keeps_its_name_before_falling_back_to_a_number() {
+        let session = include_str!("session.rs");
+        let numbered = session
+            .find(r#"format!("win {}", i + 1)"#)
+            .expect("번호 폴백");
+        let stashed = session
+            .find("c.stashed && !c.folder.is_empty()")
+            .expect("숨긴 pane 의 폴더를 보는 겹");
+        assert!(
+            stashed < numbered,
+            "번호로 떨어지기 전에 숨겨 둔 pane 의 폴더를 먼저 봐야 한다"
+        );
     }
 }
 

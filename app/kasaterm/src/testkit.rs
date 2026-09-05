@@ -1386,6 +1386,87 @@ impl App {
         eprintln!("[autoghost] {}", if pass { "PASS" } else { "FAIL" });
     }
 
+    /// Headless 「마지막 pane 을 숨기면 그 방은 어떻게 되나」 repro:
+    /// `KASATERM_AUTOLONESTASH_MS` 뒤에 방을 하나 더 만들고, pane 이 하나뿐인 그 방의
+    /// pane 을 숨긴 다음 방 목록과 라벨을 찍는다.
+    ///
+    /// 숨기기는 트리에서 leaf 를 빼는데, 마지막 하나면 뺄 자리가 없어 트리를 통째로
+    /// 버린다(`pty_layout = None`). 그 뒤 그 방이 목록에서 사라지는지, 빈 채로 남는지,
+    /// 남는다면 이름이 무엇이 되는지가 화면으로는 잘 안 갈린다 — 비어 있으면 사라진
+    /// 것처럼 보이기 때문이다. 그래서 개수와 라벨을 같이 찍는다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autolonestash(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOLONESTASH_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        let dump = |app: &mut App, tag: &str| {
+            app.window_labels_at = None;
+            app.refresh_window_labels();
+            let rows: Vec<String> = (0..app.windows.len())
+                .map(|i| {
+                    let leaves = if i == app.active_window {
+                        app.pty_layout.as_ref()
+                    } else {
+                        app.windows[i].as_ref()
+                    }
+                    .map(|l| l.leaves().len())
+                    .unwrap_or(0);
+                    let label = app
+                        .window_labels
+                        .get(i)
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!(
+                        "{i}{}:{label} leaves={leaves}",
+                        if i == app.active_window { "*" } else { "" }
+                    )
+                })
+                .collect();
+            eprintln!("[lonestash] {tag}: 방={} | {}", app.windows.len(), rows.join(" | "));
+        };
+        // 방을 하나 더 만든다 — 방이 하나뿐이면 「사라졌다」와 「원래 하나뿐」이
+        // 안 갈린다.
+        self.new_window();
+        self.render_frame();
+        dump(self, "before");
+        let Some(lone) = self
+            .pty_layout
+            .as_ref()
+            .and_then(|t| t.leaves().first().map(|s| s.to_string()))
+        else {
+            eprintln!("[lonestash] 숨길 pane 이 없다");
+            return;
+        };
+        let leaves = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().len())
+            .unwrap_or(0);
+        eprintln!("[lonestash] 이 방의 pane 수={leaves} · 숨길 것={lone}");
+        self.stash_pane(&lone);
+        self.render_frame();
+        dump(self, "after ");
+        eprintln!(
+            "[lonestash] 되살리기 목록에 남았나={}",
+            self.closed_panes.iter().any(|c| c.pane_id == lone)
+        );
+    }
+
     /// Headless pane 숨기기 repro: `KASATERM_AUTOSTASH_MS` 뒤에 사이드바를 켜고 pane 을
     /// 셋으로 쪼갠 다음, 한 줄을 **진짜로 우클릭**해 「숨기기」를 고른다.
     ///
