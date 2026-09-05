@@ -522,6 +522,7 @@ pub(crate) struct Snapshot {
     font_size: f32,
     palettes: Arc<Vec<crate::native_settings::PaletteChoice>>,
     state: State,
+    language: String,
 }
 
 pub(crate) fn snapshot(app: &App, area: Rect) -> Snapshot {
@@ -539,6 +540,7 @@ pub(crate) fn snapshot(app: &App, area: Rect) -> Snapshot {
         font_size: app.font_size,
         palettes: app.settings_scene.cache().palettes.clone(),
         state: app.settings_scene.onboarding().clone(),
+        language: app.settings_scene.cache().language().to_string(),
     }
 }
 
@@ -772,6 +774,7 @@ pub(crate) fn paint(
     g: &mut gpu::GpuRenderer,
     snapshot: &Snapshot,
 ) -> crate::native_settings::PaintOutput {
+    crate::native_strings::set_language(&snapshot.language);
     use crate::native_settings::{HitCursor, PaintOutput, Target};
     let (ax, ay, aw, ah) = snapshot.area;
     let rail_w = if aw < 760.0 { 154.0 } else { 190.0 };
@@ -2100,10 +2103,11 @@ fn text(
     color: [u8; 4],
     bold: bool,
 ) {
+    let value = crate::native_strings::text(value);
     g.draw_text(
         x,
         y,
-        value,
+        &value,
         gpu::DrawOpts {
             font_size: size,
             color,
@@ -2114,6 +2118,8 @@ fn text(
 }
 
 fn fit(g: &mut gpu::GpuRenderer, value: &str, width: f32, size: f32, bold: bool) -> String {
+    let translated = crate::native_strings::text(value);
+    let value = translated.as_ref();
     if g.measure_chrome_text(value, size, bold) <= width {
         return value.to_string();
     }

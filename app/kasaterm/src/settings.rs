@@ -288,13 +288,17 @@ impl App {
         // 편집 중이던 persona 는 **먼저** 옛 테마 파일에 흘려보낸다. 순서를 바꾸면
         // 활성 테마가 이미 새것이라, 옛 테마에서 고친 글이 새 테마 파일에 쓰인다.
         self.flush_student_persona();
-        socket::write_setting("character_theme", serde_json::Value::String(id));
+        socket::write_setting("character_theme", serde_json::Value::String(id.clone()));
         kasa_mcp::character::invalidate_active_theme();
         theme::invalidate_roster();
         // 목록의 "쓰는 중" 배지가 어느 카드에 붙는지가 여기서 바뀐다.
         socket::invalidate_theme_rows();
         self.students_selected = None;
         self.students_persona.clear();
+        self.students_theme = id;
+        self.students_slug.clear();
+        self.students_model.clear();
+        self.students_backend.clear();
         self.students_caret = 0;
         self.refresh_student_assets();
         self.set_toast("테마를 바꿨어요 — 새로 여는 pane 부터 적용돼요".to_string());
@@ -935,6 +939,9 @@ impl App {
                 }
             }
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
+            SettingsAction::SelectStudentInTheme(theme, name) => {
+                self.select_student_for_edit_in_theme(theme, name)
+            }
             SettingsAction::CloseStudent => self.close_student_edit(),
             SettingsAction::FocusStudentName => {
                 self.settings_caret = self.students_name.chars().count();
@@ -966,10 +973,12 @@ impl App {
                 // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
                 // "지정 없음"으로 걸러내므로 결과가 같고, 삭제 경로를 따로 두면
                 // 로스터가 테마 파일일 때와 홈 override 일 때 두 곳을 맞춰야 한다.
-                let _ = kasa_mcp::character::update_member(
-                    &name, "model", serde_json::Value::String(model.clone()));
-                let _ = kasa_mcp::character::update_member(
-                    &name, "backend", serde_json::Value::String(backend.clone()));
+                let _ = kasa_mcp::character::update_member_in_theme(
+                    &self.students_theme, &name, "model", serde_json::Value::String(model.clone()));
+                let _ = kasa_mcp::character::update_member_in_theme(
+                    &self.students_theme, &name, "backend", serde_json::Value::String(backend.clone()));
+                self.students_model = model;
+                self.students_backend = backend;
                 self.regen_pane_shims();
             }
             SettingsAction::ThemeGenProvider(p) => {
@@ -977,17 +986,15 @@ impl App {
                 self.settings_input = None;
             }
             SettingsAction::ThemeGenStart => {
-                let Some(name) = self.students_selected.as_deref() else { return };
-                let Some(slug) = kasa_mcp::character::characters_json()
-                    .as_ref()
-                    .and_then(|roster| kasa_mcp::character::member_def(roster, name))
-                    .and_then(|entry| entry.get("slug").and_then(|value| value.as_str()).map(str::to_string))
-                    .or_else(|| theme::character_slug(name).map(str::to_string))
-                else {
+                if self.students_selected.is_none() {
+                    return;
+                }
+                let slug = self.students_slug.clone();
+                if slug.is_empty() {
                     self.set_toast("이 캐릭터의 그림 이름을 못 찾았어요".to_string());
                     return;
-                };
-                let theme_id = socket::read_character_theme();
+                }
+                let theme_id = self.students_theme.clone();
                 let Some((path, _)) = themegen_ref_info(&theme_id, &slug) else {
                     self.set_toast("먼저 참조 그림을 놓아 주세요".to_string());
                     return;
@@ -998,13 +1005,15 @@ impl App {
                 self.settings_scene.toggle_sprite_slot(motion, frame);
             }
             SettingsAction::ResetMotion(motion) => {
-                let Some(name) = self.students_selected.as_deref() else { return };
-                let slug = kasa_mcp::character::characters_json()
-                    .as_ref()
-                    .and_then(|roster| kasa_mcp::character::member_def(roster, name))
-                    .and_then(|entry| entry.get("slug").and_then(|value| value.as_str()).map(str::to_string))
-                    .unwrap_or_else(|| theme::agent_slug(name));
-                match socket::clear_character_sprite_files(&slug, &motion) {
+                if self.students_selected.is_none() {
+                    return;
+                }
+                let slug = self.students_slug.clone();
+                match socket::clear_character_sprite_files_in_theme(
+                    &self.students_theme,
+                    &slug,
+                    &motion,
+                ) {
                     Ok(_) => {
                         self.refresh_student_assets();
                         self.set_toast("기본 그림으로 되돌렸어요".to_string());
@@ -1964,13 +1973,48 @@ impl App {
     /// 포커스는 **주지 않는다**. 상세는 목록을 통째로 덮는 화면이라, 열자마자
     /// 커서가 성격 칸에 있으면 뒤로 가려고 누른 키가 본문에 박힌다.
     pub(crate) fn select_student_for_edit(&mut self, name: String) {
+        self.select_student_for_edit_in_theme(socket::read_character_theme(), name);
+    }
+
+    pub(crate) fn select_student_for_edit_in_theme(&mut self, theme_id: String, name: String) {
         self.flush_student_persona();
         self.flush_student_name();
-        let persona = kasa_mcp::character::characters_json()
-            .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
-            .unwrap_or_default();
+        let theme_id = if theme_id == kasa_mcp::character::BASE_THEME_KEY {
+            String::new()
+        } else {
+            theme_id
+        };
+        let roster = student_roster_for_theme(&theme_id);
+        let def = roster
+            .as_ref()
+            .and_then(|value| kasa_mcp::character::member_def(value, &name));
+        let persona = def
+            .as_ref()
+            .and_then(|value| value.get("persona"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
         self.students_caret = persona.chars().count();
         self.students_persona = persona;
+        self.students_theme = theme_id;
+        self.students_slug = def
+            .as_ref()
+            .and_then(|value| value.get("slug"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| theme::agent_slug(&name));
+        self.students_model = def
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.students_backend = def
+            .as_ref()
+            .and_then(|value| value.get("backend"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
         self.students_name = name.clone();
         self.students_selected = Some(name);
         self.settings_input = None;
@@ -1984,6 +2028,9 @@ impl App {
         self.students_selected = None;
         self.students_persona.clear();
         self.students_name.clear();
+        self.students_slug.clear();
+        self.students_model.clear();
+        self.students_backend.clear();
         self.settings_input = None;
     }
 
@@ -1999,10 +2046,20 @@ impl App {
         }
         let reject = if new.is_empty() {
             Some("이름은 비울 수 없어요".to_string())
-        } else if theme::character_slugs().iter().any(|(n, _)| *n == new) {
+        } else if student_roster_for_theme(&self.students_theme)
+            .as_ref()
+            .is_some_and(|roster| {
+                kasa_mcp::character::member_names(roster)
+                    .iter()
+                    .any(|name| name == &new && name != &old)
+            })
+        {
             Some(format!("{new} 은(는) 이미 있어요"))
-        } else if kasa_mcp::character::update_member(
-            &old, "name", serde_json::Value::String(new.clone()),
+        } else if kasa_mcp::character::update_member_in_theme(
+            &self.students_theme,
+            &old,
+            "name",
+            serde_json::Value::String(new.clone()),
         )
         .is_err()
         {
@@ -2148,6 +2205,7 @@ impl App {
         let key = format!("custom:{}", theme::custom_slug(&list[idx]));
         write_custom_themes(list);
         theme::set_theme(&key);
+        self.settings_scene.refresh_palette_cache();
         self.repaint_all();
     }
 
@@ -2188,7 +2246,7 @@ impl App {
         // 원본 뷰가 옛 성격을 보여 주고, 그걸 저장하는 순간 방금 친 글이 날아간다.
         self.flush_student_persona();
         let Some(name) = self.students_selected.clone() else { return };
-        let def = kasa_mcp::character::characters_json()
+        let def = student_roster_for_theme(&self.students_theme)
             .and_then(|c| kasa_mcp::character::member_def(&c, &name));
         self.students_raw.text = match def {
             Some(d) if self.students_raw.yaml => kasa_mcp::character::member_to_yaml(&d),
@@ -2216,7 +2274,9 @@ impl App {
                 return;
             }
         };
-        if let Err(e) = kasa_mcp::character::replace_member(&name, &def) {
+        if let Err(e) =
+            kasa_mcp::character::replace_member_in_theme(&self.students_theme, &name, &def)
+        {
             self.students_raw.err = Some(e.to_string());
             return;
         }
@@ -2226,6 +2286,21 @@ impl App {
             self.students_selected = Some(n.to_string());
             self.students_name = n.to_string();
         }
+        self.students_slug = def
+            .get("slug")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&self.students_slug)
+            .to_string();
+        self.students_model = def
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.students_backend = def
+            .get("backend")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
         // 폼 버퍼도 새 정의로 맞춘다. 안 맞추면 폼으로 돌아가 편집기를 벗어나는
         // 순간 옛 성격이 다시 저장돼, 원본에서 고친 것이 조용히 되돌아간다.
         self.students_persona =
@@ -2238,13 +2313,14 @@ impl App {
 
     pub(crate) fn flush_student_persona(&mut self) {
         let Some(name) = self.students_selected.clone() else { return };
-        let cur = kasa_mcp::character::characters_json()
+        let cur = student_roster_for_theme(&self.students_theme)
             .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
             .unwrap_or_default();
         if cur == self.students_persona {
             return;
         }
-        let _ = kasa_mcp::character::update_member(
+        let _ = kasa_mcp::character::update_member_in_theme(
+            &self.students_theme,
             &name,
             "persona",
             serde_json::Value::String(self.students_persona.clone()),
@@ -2543,6 +2619,14 @@ fn themegen_ref_path(theme_id: &str, slug: &str) -> Option<std::path::PathBuf> {
     )
 }
 
+fn student_roster_for_theme(theme_id: &str) -> Option<serde_json::Value> {
+    if theme_id.is_empty() || theme_id == kasa_mcp::character::BASE_THEME_KEY {
+        kasa_mcp::character::base_characters_json()
+    } else {
+        kasa_mcp::character::theme_characters_json(theme_id)
+    }
+}
+
 /// 참조 그림의 `(경로, mtime초)` — mtime 이 미리보기 텍스처 캐시 키에 들어가므로
 /// 그림을 갈아 끼우면 키가 바뀌어 낡은 그림이 화면에 눌어붙지 않는다.
 pub(crate) fn themegen_ref_info(theme_id: &str, slug: &str) -> Option<(std::path::PathBuf, u64)> {
@@ -2571,7 +2655,7 @@ fn feedback_dir() -> std::path::PathBuf {
 
 /// 제보에 붙는 진단 한 줄. 이게 없으면 대부분의 제보가 "어느 버전에서요?"로
 /// 한 번 더 왕복한다.
-fn diag_line() -> String {
+pub(crate) fn diag_line() -> String {
     format!(
         "kasaterm {} · {} {}",
         env!("CARGO_PKG_VERSION"),

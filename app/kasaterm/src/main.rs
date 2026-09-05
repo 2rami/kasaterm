@@ -24,6 +24,7 @@ mod lineedit;
 mod markdown;
 mod native_onboarding;
 mod native_settings;
+mod native_strings;
 mod notify_banner;
 mod onboarding;
 mod render;
@@ -4354,6 +4355,8 @@ pub(crate) enum SettingsAction {
     /// Select a character in the Students list → load its persona into the edit
     /// buffer. Carries the character's display name.
     SelectStudent(String),
+    /// HTTP/테마 카드가 연 정확한 `(테마, 이름)` 상세.
+    SelectStudentInTheme(String, String),
     /// 캐릭터 상세를 닫고 목록으로 돌아간다(편집 중이던 것은 저장하고).
     CloseStudent,
     /// 상세 화면의 이름 칸에 포커스.
@@ -5332,6 +5335,11 @@ struct App {
     /// 캐럿(문자 인덱스). 열 때 raw_persona 를 버퍼로 로드하고, blur/닫기 시
     /// characters.json 에 flush 한다. `None` 이면 목록 화면이다.
     students_selected: Option<String>,
+    /// 상세를 연 테마 id. 빈 값/`__base`는 번들, 그 밖은 설치 테마 폴더다.
+    students_theme: String,
+    students_slug: String,
+    students_model: String,
+    students_backend: String,
     students_persona: String,
     students_caret: usize,
     /// 상세 화면의 이름 편집 버퍼. `students_selected` 는 파일에 **저장된** 이름을
@@ -5815,6 +5823,10 @@ impl App {
             students_selected: std::env::var("KASATERM_TEST_STUDENT")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            students_theme: socket::read_character_theme(),
+            students_slug: String::new(),
+            students_model: String::new(),
+            students_backend: String::new(),
             students_persona: std::env::var("KASATERM_TEST_STUDENT")
                 .ok()
                 .filter(|s| !s.is_empty())

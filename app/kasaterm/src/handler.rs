@@ -1130,8 +1130,9 @@ impl ApplicationHandler<UserEvent> for App {
                         Ok(self.settings_room_active())
                     }
                     "open-student" => {
+                        let theme = label.clone().unwrap_or_default();
                         let _ = self.open_settings_room(Some(crate::SettingsCat::Students));
-                        self.settings_apply(SettingsAction::SelectStudent(arg.clone()));
+                        self.settings_apply(SettingsAction::SelectStudentInTheme(theme, arg.clone()));
                         Ok(self.settings_room_active())
                     }
                     "select-theme" if !arg.is_empty() && !theme_exists(&arg) => {
@@ -1238,10 +1239,15 @@ impl ApplicationHandler<UserEvent> for App {
                     (None, Some((m, _))) => Some(m.clone()),
                     (Some((bm, bt)), Some((m, t))) => (t != bt || m != bm).then(|| m.clone()),
                 };
+                let settings_changed = matches!(&ok, Ok(true));
                 let _ = reply.send(match ok {
                     Ok(ok) => Ok(serde_json::json!({ "ok": ok, "message": message })),
                     Err(e) => Err(e),
                 });
+                if settings_changed && self.settings_room_active() {
+                    self.settings_scene.refresh_cache();
+                    self.refresh_native_settings_dynamic_cache();
+                }
                 // 네이티브 설정 화면이 열려 있으면 같은 변경을 곧바로 보여야 한다.
                 // `refresh_student_assets` 를 지나는 액션은 스스로 repaint 하지만
                 // 나머지(만들기·치우기·이름)는 아니라, 이 한 줄이 없으면 다음 입력이

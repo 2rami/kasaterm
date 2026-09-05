@@ -4331,6 +4331,35 @@ pub(crate) fn character_sprite_spec(motion: &str) -> Option<(usize, &'static str
     sprite_spec(motion)
 }
 
+fn sprite_dir_for_theme(theme: &str) -> Option<std::path::PathBuf> {
+    if theme.is_empty() || theme == kasa_mcp::character::BASE_THEME_KEY {
+        return Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"));
+    }
+    if !safe_path_component(theme) {
+        return None;
+    }
+    Some(kasa_mcp::character::themes_root()?.join(theme).join("sprites"))
+}
+
+fn validate_sprite_frames(slug: &str, motion: &str, frames: &[Vec<u8>]) -> anyhow::Result<()> {
+    if !safe_path_component(slug) {
+        anyhow::bail!("쓸 수 없는 이름이에요");
+    }
+    let (count, ext) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
+    if frames.len() != count {
+        anyhow::bail!("{motion} 은 {count}장이 필요한데 {}장을 받았어요", frames.len());
+    }
+    for (index, frame) in frames.iter().enumerate() {
+        if frame.len() > MAX_SPRITE_BYTES {
+            anyhow::bail!("{}번째 그림이 너무 커요(최대 {}MB)", index + 1, MAX_SPRITE_BYTES >> 20);
+        }
+        if !image_magic_ok(frame, ext) {
+            anyhow::bail!("{}번째 파일이 {ext} 가 아니에요", index + 1);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn character_sprite_bytes(
     slug: &str,
     motion: &str,
@@ -4347,6 +4376,40 @@ pub(crate) fn character_sprite_bytes(
         let path = dir.join(sprite_rel_for(slug, motion, frame, foldered));
         if let Some(bytes) = read_file_under(&dir, &path) {
             return Some(bytes);
+        }
+    }
+    match motion {
+        "profile" => crate::render::student_profile_png(slug).map(<[u8]>::to_vec),
+        "gif" => crate::render::student_idle_gif(slug).map(<[u8]>::to_vec),
+        _ => crate::render::student_sprite_png(slug, motion)
+            .and_then(|frames| frames.get(frame).copied())
+            .map(<[u8]>::to_vec),
+    }
+}
+
+pub(crate) fn character_sprite_bytes_in_theme(
+    theme: &str,
+    slug: &str,
+    motion: &str,
+    frame: usize,
+) -> Option<Vec<u8>> {
+    if !safe_path_component(slug) {
+        return None;
+    }
+    let (count, _) = sprite_spec(motion)?;
+    if frame >= count {
+        return None;
+    }
+    let dir = sprite_dir_for_theme(theme)?;
+    for foldered in [true, false] {
+        let path = dir.join(sprite_rel_for(slug, motion, frame, foldered));
+        if (0..count).all(|index| {
+            dir.join(sprite_rel_for(slug, motion, index, foldered))
+                .is_file()
+        }) {
+            if let Some(bytes) = read_file_under(&dir, &path) {
+                return Some(bytes);
+            }
         }
     }
     match motion {
@@ -4390,12 +4453,54 @@ pub(crate) fn save_character_sprite_files(
     Ok(count)
 }
 
+pub(crate) fn save_character_sprite_files_in_theme(
+    theme: &str,
+    slug: &str,
+    motion: &str,
+    frames: &[Vec<u8>],
+) -> anyhow::Result<usize> {
+    validate_sprite_frames(slug, motion, frames)?;
+    let (count, _) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
+    let dir = sprite_dir_for_theme(theme).ok_or_else(|| anyhow::anyhow!("그림 폴더를 못 찾았어요"))?;
+    for (index, frame) in frames.iter().enumerate() {
+        let path = dir.join(sprite_rel_for(slug, motion, index, true));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, frame)?;
+    }
+    let _ = crate::render::write_sprite_readme(&dir);
+    Ok(count)
+}
+
 pub(crate) fn clear_character_sprite_files(slug: &str, motion: &str) -> anyhow::Result<usize> {
     if !safe_path_component(slug) {
         anyhow::bail!("쓸 수 없는 이름이에요");
     }
     let (count, _) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
     let dir = students_dir().ok_or_else(|| anyhow::anyhow!("그림 폴더를 못 찾았어요"))?;
+    let mut removed = 0;
+    for index in 0..count {
+        for foldered in [true, false] {
+            let path = dir.join(sprite_rel_for(slug, motion, index, foldered));
+            if read_file_under(&dir, &path).is_some() && std::fs::remove_file(path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+pub(crate) fn clear_character_sprite_files_in_theme(
+    theme: &str,
+    slug: &str,
+    motion: &str,
+) -> anyhow::Result<usize> {
+    if !safe_path_component(slug) {
+        anyhow::bail!("쓸 수 없는 이름이에요");
+    }
+    let (count, _) = sprite_spec(motion).ok_or_else(|| anyhow::anyhow!("모르는 모션이에요"))?;
+    let dir = sprite_dir_for_theme(theme).ok_or_else(|| anyhow::anyhow!("그림 폴더를 못 찾았어요"))?;
     let mut removed = 0;
     for index in 0..count {
         for foldered in [true, false] {

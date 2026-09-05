@@ -94,6 +94,10 @@ impl SettingsScene {
         self.cache.refresh();
     }
 
+    pub(crate) fn refresh_palette_cache(&mut self) {
+        self.cache.refresh_palette();
+    }
+
     pub(crate) fn set_account_cache(
         &mut self,
         accounts: Vec<crate::native_settings::AccountChoice>,
@@ -129,6 +133,13 @@ impl SettingsScene {
         self.hits.iter().rev().find(|hit| {
             let (rx, ry, rw, rh) = hit.rect;
             x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
+    }
+
+    pub(crate) fn field_rect(&self, field: SettingsInput) -> Option<crate::native_settings::Rect> {
+        self.hits.iter().find_map(|hit| {
+            matches!(hit.target, crate::native_settings::Target::Focus(found) if found == field)
+                .then_some(hit.rect)
         })
     }
 
@@ -463,9 +474,9 @@ impl App {
         self.close_inline_web();
         let return_pane = self.active_user_pane();
         self.settings_scene.enter(category, return_pane);
-        if !self.settings_scene.cache().ready {
-            self.settings_scene.refresh_cache();
-        }
+        // HTTP/모바일이 설정 방이 닫힌 동안 값을 바꿀 수 있다. `ready`는 한 번
+        // 그렸다는 뜻일 뿐 최신이라는 뜻이 아니므로, 재진입마다 파일을 다시 읽는다.
+        self.settings_scene.refresh_cache();
         self.refresh_native_settings_dynamic_cache();
 
         if let Some(idx) = self.settings_room_index() {

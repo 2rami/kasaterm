@@ -9,6 +9,8 @@ pub(crate) type Rect = (f32, f32, f32, f32);
 
 const HEADER_H: f32 = 92.0;
 const CONTENT_MAX_W: f32 = 820.0;
+const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
+const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 
 #[derive(Clone)]
 pub(crate) struct PaletteChoice {
@@ -86,32 +88,7 @@ impl std::fmt::Debug for SettingsCache {
 impl SettingsCache {
     pub(crate) fn refresh(&mut self) {
         let saved = socket::read_settings();
-        let mut palettes = Vec::new();
-        let system_key = theme::system_theme_key();
-        if let Some((_, label, palette)) = theme::THEME_PRESETS
-            .iter()
-            .find(|(key, _, _)| *key == system_key)
-        {
-            palettes.push(palette_choice(
-                "system",
-                &format!("System · {label}"),
-                palette,
-            ));
-        }
-        palettes.extend(
-            theme::THEME_PRESETS
-                .iter()
-                .map(|(key, label, palette)| palette_choice(key, label, palette)),
-        );
-        palettes.extend(theme::custom_themes(&saved).iter().map(|entry| {
-            let palette = theme::custom_palette(entry);
-            palette_choice(
-                &format!("custom:{}", theme::custom_slug(entry)),
-                &theme::custom_label(entry),
-                &palette,
-            )
-        }));
-
+        self.refresh_palette_from(&saved);
         let roster = kasa_mcp::character::characters_json();
         let characters = roster
             .as_ref()
@@ -133,7 +110,6 @@ impl SettingsCache {
             .unwrap_or_default();
 
         self.ready = true;
-        self.palettes = Arc::new(palettes);
         self.characters = Arc::new(characters);
         self.themes = Arc::new(socket::theme_rows());
         self.models = Arc::new(models);
@@ -141,23 +117,6 @@ impl SettingsCache {
         self.open_apps = Arc::new(proc::open_with_apps().to_vec());
         self.character_theme = socket::read_character_theme();
         self.language = socket::read_ui_language();
-        self.system_light = theme::system_slot_theme(true);
-        self.system_dark = theme::system_slot_theme(false);
-        let customs = theme::custom_themes(&saved);
-        self.custom_active = theme::active_custom_slug().unwrap_or_default();
-        self.custom_themes = Arc::new(
-            customs
-                .iter()
-                .map(|entry| CustomThemeChoice {
-                    slug: theme::custom_slug(entry),
-                    label: theme::custom_label(entry),
-                })
-                .collect(),
-        );
-        self.palette_hex = Arc::new(crate::settings::palette_hex_list(
-            &saved,
-            (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
-        ));
 
         let mut theme_rosters = std::collections::HashMap::new();
         let mut theme_picks = std::collections::HashMap::new();
@@ -206,18 +165,76 @@ impl SettingsCache {
             .unwrap_or_default();
         self.themegen_providers = Arc::new(crate::themegen::detect_providers());
         let mut refs = std::collections::HashSet::new();
-        if !self.character_theme.is_empty() {
-            for character in self.characters.iter() {
-                if crate::settings::themegen_ref_info(&self.character_theme, &character.slug).is_some() {
-                    refs.insert(character.slug.clone());
+        for (theme_id, roster) in self.theme_rosters.iter() {
+            if theme_id == kasa_mcp::character::BASE_THEME_KEY {
+                continue;
+            }
+            for character in roster {
+                if crate::settings::themegen_ref_info(theme_id, &character.slug).is_some() {
+                    refs.insert(format!("{theme_id}\0{}", character.slug));
                 }
             }
         }
         self.themegen_refs = Arc::new(refs);
     }
 
+    fn refresh_palette_from(&mut self, saved: &serde_json::Value) {
+        let mut palettes = Vec::new();
+        let system_key = theme::system_theme_key();
+        if let Some((_, label, palette)) = theme::THEME_PRESETS
+            .iter()
+            .find(|(key, _, _)| *key == system_key)
+        {
+            palettes.push(palette_choice(
+                "system",
+                &format!("System · {label}"),
+                palette,
+            ));
+        }
+        palettes.extend(
+            theme::THEME_PRESETS
+                .iter()
+                .map(|(key, label, palette)| palette_choice(key, label, palette)),
+        );
+        palettes.extend(theme::custom_themes(&saved).iter().map(|entry| {
+            let palette = theme::custom_palette(entry);
+            palette_choice(
+                &format!("custom:{}", theme::custom_slug(entry)),
+                &theme::custom_label(entry),
+                &palette,
+            )
+        }));
+
+        self.palettes = Arc::new(palettes);
+        self.system_light = theme::system_slot_theme(true);
+        self.system_dark = theme::system_slot_theme(false);
+        let customs = theme::custom_themes(&saved);
+        self.custom_active = theme::active_custom_slug().unwrap_or_default();
+        self.custom_themes = Arc::new(
+            customs
+                .iter()
+                .map(|entry| CustomThemeChoice {
+                    slug: theme::custom_slug(entry),
+                    label: theme::custom_label(entry),
+                })
+                .collect(),
+        );
+        self.palette_hex = Arc::new(crate::settings::palette_hex_list(
+            &saved,
+            (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
+        ));
+    }
+
+    pub(crate) fn refresh_palette(&mut self) {
+        self.refresh_palette_from(&socket::read_settings());
+    }
+
     pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountChoice>) {
         self.accounts = Arc::new(accounts);
+    }
+
+    pub(crate) fn language(&self) -> &str {
+        &self.language
     }
 }
 
@@ -460,6 +477,8 @@ pub(crate) struct Snapshot {
     pub(crate) character_theme: String,
     pub(crate) open_apps: Arc<Vec<(String, String)>>,
     pub(crate) student_selected: Option<String>,
+    pub(crate) student_theme: String,
+    pub(crate) student_slug: String,
     pub(crate) student_name: String,
     pub(crate) student_persona: String,
     pub(crate) student_caret: usize,
@@ -475,6 +494,7 @@ pub(crate) struct Snapshot {
     pub(crate) feedback_body: String,
     pub(crate) feedback_caret: usize,
     pub(crate) feedback_diag: bool,
+    pub(crate) feedback_diag_line: String,
     pub(crate) themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
     pub(crate) themegen_provider: String,
     pub(crate) themegen_key_masked: String,
@@ -513,18 +533,6 @@ impl App {
         }
         let scene = &self.settings_scene;
         let cache = scene.cache();
-        let selected = self.students_selected.as_deref();
-        let (student_model, student_backend) = cache
-            .roster
-            .as_ref()
-            .zip(selected)
-            .map(|(roster, name)| {
-                (
-                    kasa_mcp::character::model_for(roster, name).unwrap_or_default(),
-                    kasa_mcp::character::backend_for(roster, name).unwrap_or_default(),
-                )
-            })
-            .unwrap_or_default();
         Some(Snapshot {
             area,
             cat: scene.category(),
@@ -587,11 +595,13 @@ impl App {
             character_theme: cache.character_theme.clone(),
             open_apps: cache.open_apps.clone(),
             student_selected: self.students_selected.clone(),
+            student_theme: self.students_theme.clone(),
+            student_slug: self.students_slug.clone(),
             student_name: self.students_name.clone(),
             student_persona: self.students_persona.clone(),
             student_caret: self.students_caret,
-            student_model,
-            student_backend,
+            student_model: self.students_model.clone(),
+            student_backend: self.students_backend.clone(),
             student_raw_open: self.students_raw.open,
             student_raw_yaml: self.students_raw.yaml,
             student_raw_text: self.students_raw.text.clone(),
@@ -602,16 +612,18 @@ impl App {
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
+            feedback_diag_line: crate::settings::diag_line(),
             themegen_providers: cache.themegen_providers.clone(),
             themegen_provider: cache.themegen_provider.clone(),
             themegen_key_masked: cache.themegen_key_masked.clone(),
             themegen_key_edit: self.themegen.key_edit.clone(),
-            themegen_has_ref: selected
-                .and_then(|name| cache.characters.iter().find(|character| character.name == name))
-                .is_some_and(|character| cache.themegen_refs.contains(&character.slug)),
-            themegen_phase: selected
-                .and_then(|name| cache.characters.iter().find(|character| character.name == name))
-                .and_then(|character| self.themegen_view(&character.slug).map(|view| view.phase)),
+            themegen_has_ref: cache
+                .themegen_refs
+                .contains(&format!("{}\0{}", self.students_theme, self.students_slug)),
+            themegen_phase: (!self.students_slug.is_empty())
+                .then(|| self.themegen_view(&self.students_slug))
+                .flatten()
+                .map(|view| view.phase),
             sprite_slot: scene
                 .sprite_slot()
                 .map(|(motion, frame)| (motion.to_string(), frame)),
@@ -674,6 +686,7 @@ impl App {
                         self.native_settings_arm_backup(SettingsInput::PaletteHex(0));
                     }
                     if let Some(rect) = hit.map(|hit| hit.rect) {
+                        self.settings_scene.mark_field_dirty();
                         self.picker_preview(&action, rect, (x, y));
                         self.settings_scene.begin_picker_drag(action, rect);
                     }
@@ -687,6 +700,7 @@ impl App {
                 }
             }
             Some(Target::Focus(field)) => {
+                let was_focused = self.settings_input == Some(field);
                 if let SettingsInput::PaletteHex(slot) = field {
                     if self.settings_input != Some(field) {
                         self.native_settings_blur();
@@ -698,7 +712,7 @@ impl App {
                     self.native_settings_focus(field);
                 }
                 if let Some(rect) = hit.map(|hit| hit.rect) {
-                    self.native_settings_place_caret(field, rect, (x, y));
+                    self.native_settings_place_caret(field, rect, (x, y), was_focused);
                 }
             }
             Some(Target::Close) => {
@@ -721,6 +735,7 @@ impl App {
 
     pub(crate) fn native_settings_drag_move(&mut self, x: f32, y: f32) -> bool {
         let Some((action, rect)) = self.settings_scene.picker_drag() else { return false };
+        self.settings_scene.mark_field_dirty();
         self.picker_preview(&action, rect, (x, y));
         self.chrome_dirty = true;
         if let Some(window) = self.window.as_ref() {
@@ -807,13 +822,34 @@ impl App {
         self.in_preedit = false;
     }
 
-    fn native_settings_place_caret(&mut self, field: SettingsInput, rect: Rect, point: (f32, f32)) {
-        if is_multiline(field) {
-            return;
-        }
-        let ratio = ((point.0 - rect.0 - 10.0) / (rect.2 - 20.0).max(1.0)).clamp(0.0, 1.0);
+    fn native_settings_place_caret(
+        &mut self,
+        field: SettingsInput,
+        rect: Rect,
+        point: (f32, f32),
+        was_focused: bool,
+    ) {
         if let Some((buffer, caret)) = field_buffer(self, field) {
-            *caret = (buffer.chars().count() as f32 * ratio).round() as usize;
+            if is_multiline(field) {
+                let columns = ((rect.2 - 22.0) / 7.2).floor().max(1.0) as usize;
+                let rows = multiline_visual_rows(buffer, columns);
+                let visible = ((rect.3 - 20.0) / 18.0).floor().max(1.0) as usize;
+                let current_row = visual_row_at(&rows, *caret);
+                let first = if was_focused {
+                    multiline_first_line(current_row, visible, true)
+                } else {
+                    0
+                };
+                let row = (first
+                    + ((point.1 - rect.1 - 10.0) / 18.0).floor().max(0.0) as usize)
+                    .min(rows.len().saturating_sub(1));
+                let column = ((point.0 - rect.0 - 11.0) / 7.2).round().max(0.0) as usize;
+                *caret = rows[row].0 + column.min(rows[row].1);
+            } else {
+                let ratio =
+                    ((point.0 - rect.0 - 10.0) / (rect.2 - 20.0).max(1.0)).clamp(0.0, 1.0);
+                *caret = (buffer.chars().count() as f32 * ratio).round() as usize;
+            }
         }
         self.settings_scene.clear_field_selection();
     }
@@ -1046,12 +1082,19 @@ impl App {
     }
 
     fn native_settings_cancel_field(&mut self) {
+        let field = self.settings_input;
         let _ = self.hangul.flush();
         let (backup, _) = self.settings_scene.take_field_backup();
         if let Some(backup) = backup {
             self.native_settings_restore_backup(backup);
         }
         self.settings_input = None;
+        match field {
+            Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
+            Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
+            Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
+            _ => {}
+        }
         self.ime_focus = None;
         self.preedit.clear();
         self.in_preedit = false;
@@ -1201,6 +1244,25 @@ impl App {
             self.settings_scene.clear_field_selection();
         }
 
+        if is_multiline(field)
+            && matches!(
+                event.logical_key,
+                Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown)
+            )
+        {
+            let columns = self
+                .settings_scene
+                .field_rect(field)
+                .map(|rect| ((rect.2 - 22.0) / 7.2).floor().max(1.0) as usize)
+                .unwrap_or(72);
+            let down = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+            if let Some((buffer, caret)) = field_buffer(self, field) {
+                *caret = move_multiline_caret(buffer, *caret, columns, down);
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
+
         match event.logical_key {
             Key::Named(NamedKey::Enter) if is_multiline(field) => {
                 self.native_settings_insert_into(field, "\n");
@@ -1338,6 +1400,10 @@ impl App {
                 self.set_toast("그 모션 칸을 못 찾았어요".to_string());
                 return true;
             };
+            if let Err(error) = drop_size_ok(&path, SPRITE_DROP_MAX_BYTES) {
+                self.set_toast(error);
+                return true;
+            }
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -1349,7 +1415,12 @@ impl App {
             for index in 0..count {
                 if index == frame {
                     frames.push(bytes.clone());
-                } else if let Some(existing) = socket::character_sprite_bytes(&slug, &motion, index) {
+                } else if let Some(existing) = socket::character_sprite_bytes_in_theme(
+                    &self.students_theme,
+                    &slug,
+                    &motion,
+                    index,
+                ) {
                     frames.push(existing);
                 } else {
                     self.set_toast(format!(
@@ -1358,7 +1429,12 @@ impl App {
                     return true;
                 }
             }
-            match socket::save_character_sprite_files(&slug, &motion, &frames) {
+            match socket::save_character_sprite_files_in_theme(
+                &self.students_theme,
+                &slug,
+                &motion,
+                &frames,
+            ) {
                 Ok(_) => {
                     self.settings_apply(SettingsAction::RefreshStudentAssets);
                     self.set_toast(format!("{motion} {}번째 그림을 바꿨어요", frame + 1));
@@ -1367,12 +1443,20 @@ impl App {
             }
             return true;
         }
-        let theme_id = self.settings_scene.cache().character_theme.clone();
+        let theme_id = if self.students_selected.is_some() {
+            self.students_theme.clone()
+        } else {
+            self.settings_scene.cache().character_theme.clone()
+        };
         if theme_id.is_empty() {
             self.set_toast("기본 테마에는 못 구워요 — 테마를 복제한 뒤 놓아 주세요".to_string());
             return true;
         }
         if self.students_selected.is_none() {
+            if let Err(error) = drop_size_ok(&path, THEMEGEN_DROP_MAX_BYTES) {
+                self.set_toast(error);
+                return true;
+            }
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -1421,6 +1505,10 @@ impl App {
         let Some(root) = kasa_mcp::character::themes_root() else {
             return true;
         };
+        if let Err(error) = drop_size_ok(&path, THEMEGEN_DROP_MAX_BYTES) {
+            self.set_toast(error);
+            return true;
+        }
         match crate::themegen::place_themegen_ref(&root.join(theme_id), &slug, &path) {
             Ok(_) => {
                 self.settings_scene.refresh_cache();
@@ -1430,6 +1518,17 @@ impl App {
         }
         true
     }
+}
+
+fn drop_size_ok(path: &std::path::Path, limit: u64) -> Result<u64, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| format!("파일 크기를 못 읽었어요 — {error}"))?;
+    if !metadata.is_file() {
+        return Err("파일 하나를 놓아 주세요".to_string());
+    }
+    if metadata.len() > limit {
+        return Err(format!("그림이 너무 커요 — 최대 {}MB", limit >> 20));
+    }
+    Ok(metadata.len())
 }
 
 fn is_multiline(field: SettingsInput) -> bool {
@@ -1475,6 +1574,50 @@ fn multiline_first_line(caret_line: usize, visible_lines: usize, focused: bool) 
     }
 }
 
+/// 여러 줄 설정 칸의 마우스/위아래 이동용 논리 행. 렌더의 폭 측정은 GPU가
+/// 맡지만 입력 경로는 GPU를 빌릴 수 없어 보수적인 평균 글자폭으로 같은 줄바꿈을
+/// 근사한다. 각 값은 `(전역 문자 시작, 행 문자 수)`다.
+fn multiline_visual_rows(text: &str, columns: usize) -> Vec<(usize, usize)> {
+    let columns = columns.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut len = 0;
+    for (index, ch) in text.chars().enumerate() {
+        if ch == '\n' {
+            rows.push((start, len));
+            start = index + 1;
+            len = 0;
+        } else {
+            if len == columns {
+                rows.push((start, len));
+                start = index;
+                len = 0;
+            }
+            len += 1;
+        }
+    }
+    rows.push((start, len));
+    rows
+}
+
+fn visual_row_at(rows: &[(usize, usize)], caret: usize) -> usize {
+    rows.iter()
+        .position(|(start, len)| caret >= *start && caret <= start + len)
+        .unwrap_or_else(|| rows.len().saturating_sub(1))
+}
+
+fn move_multiline_caret(text: &str, caret: usize, columns: usize, down: bool) -> usize {
+    let rows = multiline_visual_rows(text, columns);
+    let row = visual_row_at(&rows, caret);
+    let column = caret.saturating_sub(rows[row].0).min(rows[row].1);
+    let target = if down {
+        (row + 1).min(rows.len().saturating_sub(1))
+    } else {
+        row.saturating_sub(1)
+    };
+    rows[target].0 + column.min(rows[target].1)
+}
+
 fn is_jamo(ch: char) -> bool {
     (0x3130..=0x318f).contains(&(ch as u32))
 }
@@ -1507,6 +1650,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
 }
 
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
+    crate::native_strings::set_language(&snapshot.language);
     if snapshot.first_run {
         return crate::native_onboarding::paint(g, &snapshot.onboarding);
     }
@@ -3041,6 +3185,19 @@ fn paint_students(
             false,
         );
         draw_text(g, x + 112.0, *y + 6.0, selected, 17.0, theme::text(), true);
+        draw_text(
+            g,
+            x + 112.0,
+            *y + 28.0,
+            if s.student_theme.is_empty() {
+                "Bundled"
+            } else {
+                &s.student_theme
+            },
+            10.5,
+            theme::text_dim(),
+            false,
+        );
         *y += 48.0;
         segmented(
             g,
@@ -3518,6 +3675,7 @@ fn paint_feedback(
         s.feedback_diag,
         SettingsAction::ToggleFeedbackDiag,
     );
+    info_slab(g, x, y, w, &s.feedback_diag_line);
     button(
         g,
         s,
@@ -4338,10 +4496,11 @@ fn draw_text(
     color: [u8; 4],
     bold: bool,
 ) {
+    let text = crate::native_strings::text(text);
     g.draw_text(
         x,
         y,
-        text,
+        &text,
         gpu::DrawOpts {
             font_size: size,
             color,
@@ -4352,6 +4511,8 @@ fn draw_text(
 }
 
 fn fit(g: &mut gpu::GpuRenderer, text: &str, width: f32, font: f32, bold: bool) -> String {
+    let translated = crate::native_strings::text(text);
+    let text = translated.as_ref();
     if g.measure_chrome_text(text, font, bold) <= width {
         return text.to_string();
     }
@@ -4444,6 +4605,16 @@ mod tests {
         assert_eq!(multiline_first_line(14, 6, true), 9);
         assert_eq!(multiline_first_line(2, 6, true), 0);
         assert_eq!(multiline_first_line(14, 6, false), 0);
+    }
+
+    #[test]
+    fn multiline_click_rows_and_vertical_motion_use_global_character_indices() {
+        let rows = multiline_visual_rows("abcd\nefghij", 3);
+        assert_eq!(rows, vec![(0, 3), (3, 1), (5, 3), (8, 3)]);
+        assert_eq!(visual_row_at(&rows, 6), 2);
+        assert_eq!(move_multiline_caret("abcd\nefghij", 1, 3, true), 4);
+        assert_eq!(move_multiline_caret("abcd\nefghij", 4, 3, true), 6);
+        assert_eq!(move_multiline_caret("abcd\nefghij", 6, 3, false), 4);
     }
 
     #[test]
@@ -4557,5 +4728,54 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(roundtrip, value);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dropped_images_are_bounded_before_their_bytes_are_allocated() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-drop-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(SPRITE_DROP_MAX_BYTES + 1).unwrap();
+        assert!(drop_size_ok(&path, SPRITE_DROP_MAX_BYTES).is_err());
+        assert!(drop_size_ok(&path, THEMEGEN_DROP_MAX_BYTES).is_ok());
+        drop(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn palette_preview_marks_the_field_dirty_and_commit_refreshes_visible_cache() {
+        let source = include_str!("native_settings.rs");
+        let click = source
+            .split_once("pub(crate) fn native_settings_click")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn native_settings_drag_move")
+            .unwrap()
+            .0;
+        assert!(click.find("mark_field_dirty").unwrap() < click.find("picker_preview").unwrap());
+        let settings = include_str!("settings.rs");
+        let apply = settings
+            .split_once("pub(crate) fn apply_palette_edit")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn preview_palette_edit")
+            .unwrap()
+            .0;
+        assert!(apply.find("refresh_palette_cache").unwrap() < apply.find("repaint_all").unwrap());
+    }
+
+    #[test]
+    fn remote_student_open_preserves_the_theme_context() {
+        let handler = include_str!("handler.rs");
+        let open = handler
+            .split_once("\"open-student\" =>")
+            .unwrap()
+            .1
+            .split_once("\"select-theme\"")
+            .unwrap()
+            .0;
+        assert!(open.contains("label.clone().unwrap_or_default()"));
+        assert!(open.contains("SelectStudentInTheme(theme, arg.clone())"));
     }
 }

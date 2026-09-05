@@ -1203,6 +1203,96 @@ pub fn replace_member(name: &str, def: &Value) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
+/// 설정 상세가 활성 테마가 아닌 카드에서 열렸을 때도 그 카드의 `theme.json`을
+/// 정확히 고친다. 빈 문자열과 `__base`는 번들 기반 사용자 override를 뜻한다.
+pub fn update_member_in_theme(
+    theme: &str,
+    name: &str,
+    key: &str,
+    value: Value,
+) -> std::io::Result<()> {
+    update_member_at(theme_member_path(theme)?, theme_roster_for_edit(theme), name, |member| {
+        member[key] = value.clone();
+    })
+}
+
+pub fn replace_member_in_theme(theme: &str, name: &str, def: &Value) -> std::io::Result<()> {
+    if !def.is_object() {
+        return Err(std::io::Error::other("정의가 map 이 아님"));
+    }
+    update_member_at(theme_member_path(theme)?, theme_roster_for_edit(theme), name, |member| {
+        *member = def.clone();
+    })
+}
+
+fn theme_member_path(theme: &str) -> std::io::Result<PathBuf> {
+    if theme.is_empty() || theme == BASE_THEME_KEY {
+        return Ok(home()
+            .ok_or_else(|| std::io::Error::other("no HOME"))?
+            .join(".config/kasaterm/characters.json"));
+    }
+    if theme.contains('/') || theme.contains('\\') || theme.contains("..") {
+        return Err(std::io::Error::other("쓸 수 없는 테마 이름"));
+    }
+    Ok(themes_root()
+        .ok_or_else(|| std::io::Error::other("no themes root"))?
+        .join(theme)
+        .join("theme.json"))
+}
+
+fn theme_roster_for_edit(theme: &str) -> Option<Value> {
+    if theme.is_empty() || theme == BASE_THEME_KEY {
+        base_characters_json()
+    } else {
+        theme_characters_json(theme)
+    }
+}
+
+fn update_member_at(
+    path: PathBuf,
+    seed: Option<Value>,
+    name: &str,
+    mut apply: impl FnMut(&mut Value),
+) -> std::io::Result<()> {
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    } else {
+        seed
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+    let mut applied = false;
+    if let Some(leader) = root.get_mut("leader") {
+        if leader.get("name").and_then(Value::as_str) == Some(name) {
+            apply(leader);
+            applied = true;
+        }
+    }
+    for key in ["leaders", "members"] {
+        if let Some(members) = root.get_mut(key).and_then(Value::as_array_mut) {
+            for member in members {
+                if member.get("name").and_then(Value::as_str) == Some(name) {
+                    apply(member);
+                    applied = true;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Err(std::io::Error::other(format!("로스터에 '{name}' 이 없음")));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?,
+    )?;
+    std::fs::rename(tmp, path)
+}
+
 /// 로스터에서 한 명의 정의를 그대로 떠 온다(원본 뷰가 보여 줄 것).
 pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
     find_character(chars, name).cloned()
@@ -1718,6 +1808,29 @@ mod tests {
         v.iter()
             .map(|(t, ns)| (t.to_string(), ns.iter().map(|n| n.to_string()).collect()))
             .collect()
+    }
+
+    #[test]
+    fn explicit_theme_member_edit_never_falls_back_to_the_active_roster() {
+        let dir = std::env::temp_dir().join(format!("kt-theme-member-{}", std::process::id()));
+        let path = dir.join("theme.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = serde_json::json!({
+            "leader": { "name": "A", "persona": "old" },
+            "leaders": [{ "name": "A", "persona": "old" }],
+            "members": [{ "name": "B", "persona": "untouched" }]
+        });
+        std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+        update_member_at(path.clone(), None, "A", |member| {
+            member["persona"] = serde_json::json!("new");
+        })
+        .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["leader"]["persona"], "new");
+        assert_eq!(saved["leaders"][0]["persona"], "new");
+        assert_eq!(saved["members"][0]["persona"], "untouched");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 슬러그까지 갖춘 명부 — 이름 충돌이 **누구를 가리키는지** 재려면 이름만으론
