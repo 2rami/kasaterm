@@ -197,9 +197,11 @@ pub(crate) fn overlay_ultracode_label(rows: &mut [Vec<GridCell>]) {
 /// 그 자리를 대신 채운다 — 헤더의 제목과 달리 **pane 화면 안에** 붙으므로, 창을
 /// 여럿 늘어놓고 볼 때 눈이 헤더까지 올라가지 않아도 된다.
 ///
-/// codex 입력창은 보더가 없으므로(`PromptBox::Filled`) **바로 윗줄** 우측에 둔다 —
-/// claude 의 위보더와 같은 높이다. **그 구간이 비어 있을 때만** 심는다: 대화 출력이
-/// 거기까지 차 있으면 남의 글자를 지우게 된다.
+/// codex 입력창은 보더가 없고 **여러 줄**이다(`PromptBox::Filled`). 배지는 그 **안쪽
+/// 첫 줄** 우측에 둔다(2026-09-05 지시: 「입력창이 3칸이니까 맨윗칸 우측에 뜨게하자
+/// 안에」) — 입력창 바깥 윗줄은 대화 출력이 흘러 내려오는 자리라 배지가 떴다 사라졌다
+/// 한다. 안쪽 첫 줄은 입력이 짧은 동안 늘 비어 있어 자리가 흔들리지 않는다.
+/// **그 구간이 비어 있을 때만** 심는다: 길게 타이핑해 글자가 거기까지 차면 안 그린다.
 ///
 /// 색은 여기서 직접 넣는다. `style_prompt_box` 의 codex 갈래는 입력행 배경만 만지고
 /// 이 줄은 건드리지 않아서, 맡겨 두면 배지만 테마 기본색으로 남는다.
@@ -212,9 +214,7 @@ pub(crate) fn overlay_codex_session_label(
     let Some(PromptBox::Filled { rows: r }) = prompt_box(rows) else {
         return;
     };
-    let Some(line) = r.start.checked_sub(1) else {
-        return;
-    };
+    let line = r.start;
     let name = name.trim();
     if name.is_empty() || line >= rows.len() {
         return;
