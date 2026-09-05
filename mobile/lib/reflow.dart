@@ -59,16 +59,26 @@ class _Cell {
 /// 한 행을 접은 결과. `starts` 는 각 조각이 원본의 몇 번째 열에서 시작하는지 —
 /// 커서를 어느 조각으로 옮길지 여기서 찾는다.
 class RowReflow {
-  const RowReflow(this.chunks, this.starts);
+  const RowReflow(this.chunks, this.starts, {this.indent = 0});
   final List<List<Run>> chunks;
   final List<int> starts;
+
+  /// 둘째 조각부터 앞에 붙인 빈 칸 수 — 글머리(- • ⎿ 1.)와 들여쓰기 아래로 이어져
+  /// 문단이 한 덩어리로 읽힌다.
+  final int indent;
 }
 
-RowReflow reflowRow(List<Run> runs, int cols) {
-  final cells = <_Cell>[
-    for (final r in runs)
-      for (final rune in r.text.runes) _Cell(rune, r),
-  ];
+RowReflow reflowRow(List<Run> runs, int cols) =>
+    _reflowCells(_cellsOf(runs), cols);
+
+List<_Cell> _cellsOf(List<Run> runs) => [
+  for (final r in runs)
+    for (final rune in r.text.runes) _Cell(rune, r),
+];
+
+const _blank = Run(' ', DefaultColor(), DefaultColor(), 0);
+
+RowReflow _reflowCells(List<_Cell> cells, int cols) {
   var end = cells.length;
   while (end > 0 && cells[end - 1].blank) {
     end--;
@@ -110,8 +120,16 @@ RowReflow reflowRow(List<Run> runs, int cols) {
   final shrunk = _shrinkLines(trimmed, width - cols);
   if (shrunk != null) return RowReflow([_runs(shrunk)], const [0]);
 
+  // 이어지는 조각은 글머리·들여쓰기 아래로 — 폭의 절반까지만(들여쓰기가 너무 깊으면
+  // 한 줄에 낱말 하나씩 남는다).
+  final indent = _hangingIndent(trimmed).clamp(0, cols ~/ 2);
+  final pad = <_Cell>[for (var p = 0; p < indent; p++) _Cell(0x20, _blank)];
   final chunks = <List<Run>>[];
   final starts = <int>[];
+  void emit(List<_Cell> line) {
+    chunks.add(_runs(chunks.isEmpty ? line : [...pad, ...line]));
+  }
+
   var i = 0;
   var col = 0;
   while (i < trimmed.length) {
@@ -119,7 +137,8 @@ RowReflow reflowRow(List<Run> runs, int cols) {
     final line = <_Cell>[];
     var lineWidth = 0;
     var j = i;
-    while (j < trimmed.length && lineWidth + trimmed[j].width <= cols) {
+    final budget = chunks.isEmpty ? cols : cols - indent;
+    while (j < trimmed.length && lineWidth + trimmed[j].width <= budget) {
       line.add(trimmed[j]);
       lineWidth += trimmed[j].width;
       j++;
@@ -132,7 +151,7 @@ RowReflow reflowRow(List<Run> runs, int cols) {
     if (j < trimmed.length) {
       // 넘쳤다 — 낱말 가운데가 갈리지 않게 가까운 빈칸에서 끊고 그 빈칸은 버린다.
       if (trimmed[j].rune == 0x20) {
-        chunks.add(_runs(line));
+        emit(line);
         starts.add(start);
         i = j + 1;
         col = start + lineWidth + 1;
@@ -150,19 +169,169 @@ RowReflow reflowRow(List<Run> runs, int cols) {
         for (final c in kept) {
           keptWidth += c.width;
         }
-        chunks.add(_runs(kept));
+        emit(kept);
         starts.add(start);
         i += k + 1;
         col = start + keptWidth + 1;
         continue;
       }
     }
-    chunks.add(_runs(line));
+    emit(line);
     starts.add(start);
     i = j;
     col = start + lineWidth;
   }
-  return RowReflow(chunks, starts);
+  return RowReflow(chunks, starts, indent: indent);
+}
+
+/// 글머리 기호 — 이 뒤의 빈칸까지가 이어지는 줄의 들여쓰기다.
+const _marks = {
+  0x2d, // -
+  0x2a, // *
+  0x3e, // >
+  0x2022, // •
+  0x25cf, // ●
+  0x23fa, // ⏺
+  0x23bf, // ⎿
+  0x276f, // ❯
+  0x25b8, // ▸
+  0x25aa, // ▪
+};
+
+/// 행의 들여쓰기 — 앞 빈칸에, 글머리(- • ⎿ ❯ 「1.」「2)」)가 있으면 그 뒤 빈칸까지.
+int _hangingIndent(List<_Cell> cells) {
+  var i = 0;
+  while (i < cells.length && cells[i].rune == 0x20) {
+    i++;
+  }
+  if (i >= cells.length) return 0;
+  final lead = i;
+  var j = i;
+  final r = cells[j].rune;
+  if (_marks.contains(r)) {
+    j++;
+  } else if (r >= 0x30 && r <= 0x39) {
+    var k = j;
+    while (k < cells.length && cells[k].rune >= 0x30 && cells[k].rune <= 0x39) {
+      k++;
+    }
+    if (k >= cells.length || (cells[k].rune != 0x2e && cells[k].rune != 0x29)) {
+      return lead;
+    }
+    j = k + 1;
+  } else {
+    return lead;
+  }
+  if (j >= cells.length || cells[j].rune != 0x20) return lead;
+  while (j < cells.length && cells[j].rune == 0x20) {
+    j++;
+  }
+  var w = 0;
+  for (var k = 0; k < j; k++) {
+    w += cells[k].width;
+  }
+  return w;
+}
+
+/// 행 하나의 접기 정보 — 문단 되잇기 판정용. 행 객체마다 한 번만 잰다.
+class _Info {
+  _Info(
+    this.width,
+    this.lead,
+    this.indent,
+    this.prose,
+    this.words,
+    this.firstWord,
+  );
+
+  /// 뒤 빈칸을 뺀 폭.
+  final int width;
+  final int lead;
+  final int indent;
+
+  /// 글줄인가 — 빈 행·선 그리기(테두리)·상자 옆선은 아니다.
+  final bool prose;
+
+  /// 낱말 수 — 빈칸 없는 긴 토큰(주소·해시) 하나는 접어 둔 문단이 아니다.
+  final int words;
+
+  /// 들여쓰기 뒤 첫 낱말의 폭 — 앞줄에 이게 들어갈 자리가 있었다면 거기서 접었을
+  /// 리가 없다.
+  final int firstWord;
+
+  bool get marked => indent > lead;
+}
+
+_Info _infoOf(List<Run> runs) {
+  final cells = _cellsOf(runs);
+  var end = cells.length;
+  while (end > 0 && cells[end - 1].blank) {
+    end--;
+  }
+  final trimmed = end == cells.length ? cells : cells.sublist(0, end);
+  var width = 0;
+  for (final c in trimmed) {
+    width += c.width;
+  }
+  var i = 0;
+  while (i < trimmed.length && trimmed[i].rune == 0x20) {
+    i++;
+  }
+  final prose =
+      i < trimmed.length &&
+      !(trimmed[i].rune >= 0x2500 && trimmed[i].rune <= 0x259f);
+  var words = 0;
+  var inWord = false;
+  var firstWord = 0;
+  for (var k = i; k < trimmed.length; k++) {
+    final space = trimmed[k].rune == 0x20;
+    if (!space && !inWord) words++;
+    if (!space && words == 1) firstWord += trimmed[k].width;
+    inWord = !space;
+  }
+  return _Info(width, i, _hangingIndent(trimmed), prose, words, firstWord);
+}
+
+/// 데스크톱이 제 폭에서 낱말 끝으로 접어 둔 줄은 이만큼까지 짧을 수 있다.
+const _joinSlack = 12;
+
+/// `b` 가 `a` 의 이어지는 줄인가 — `a` 가 pane 폭을 거의 채우고, `b` 가 `a` 의
+/// 들여쓰기 자리에서 글머리 없이 시작하면 데스크톱(Ink)이 한 문단을 접어 둔 것이다.
+bool _continues(_Info a, _Info b, int gridCols) =>
+    a.prose &&
+    b.prose &&
+    a.words > 1 &&
+    a.width >= gridCols - _joinSlack &&
+    a.width <= gridCols &&
+    // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다.
+    a.width + 1 + b.firstWord > gridCols &&
+    b.lead == a.indent &&
+    !b.marked;
+
+/// 접어 둔 줄들을 한 줄로 되잇는다 — 앞줄 뒤 빈칸과 뒷줄 들여쓰기를 빼고 빈칸 하나로.
+/// `offsets[i]` 는 i 번째 줄의 글이 되이은 줄의 몇 번째 칸에서 시작하는지.
+(List<_Cell>, List<int>) _joinRows(List<List<Run>> rows, List<_Info> infos) {
+  final out = <_Cell>[];
+  final offsets = <int>[];
+  for (var i = 0; i < rows.length; i++) {
+    final cells = _cellsOf(rows[i]);
+    var end = cells.length;
+    while (end > 0 && cells[end - 1].blank) {
+      end--;
+    }
+    var from = 0;
+    if (i > 0) {
+      out.add(_Cell(0x20, _blank));
+      from = infos[i].lead;
+    }
+    var w = 0;
+    for (final c in out) {
+      w += c.width;
+    }
+    offsets.add(w);
+    out.addAll(cells.sublist(from, end));
+  }
+  return (out, offsets);
 }
 
 /// 낱말을 지키려고 되돌아가는 최대 칸 수 — 이보다 긴 낱말은 그냥 자른다.
@@ -242,9 +411,23 @@ List<Run> _runs(List<_Cell> cells) {
 }
 
 class _Entry {
-  _Entry(this.cols, this.row);
+  _Entry(this.cols, this.row, this.members, this.offsets);
   final int cols;
   final RowReflow row;
+
+  /// 이 결과에 든 원본 행들(되이은 문단이면 여럿) — 하나라도 바뀌면 다시 접는다.
+  final List<List<Run>> members;
+
+  /// 각 원본 행의 글이 되이은 줄의 몇 번째 칸에서 시작하나(첫 행은 0).
+  final List<int> offsets;
+
+  bool matches(List<List<Run>> lines, int r, int n) {
+    if (members.length != n) return false;
+    for (var i = 0; i < n; i++) {
+      if (!identical(members[i], lines[r + i])) return false;
+    }
+    return true;
+  }
 }
 
 /// 지난 줄(스크롤백) 위에 살아 있는 화면을 이어 붙인 한 장 — 접는 쪽은 이걸 하나의
@@ -286,32 +469,70 @@ class CombinedGrid implements GridLines {
 /// 재사용되어 렌더러의 행 캐시가 같은 규칙으로 살아남는다.
 class Reflow {
   final _rows = Expando<_Entry>();
+  final _infos = Expando<_Info>();
+
+  _Info _info(List<Run> row) => _infos[row] ??= _infoOf(row);
 
   ReflowedGrid apply(GridLines grid, int cols) {
+    final src = grid.lines;
     final lines = <List<Run>>[];
     int? cursorRow;
     var cursorCol = 0;
     final lineStart = <int>[];
     final starts = <List<int>>[];
-    for (var r = 0; r < grid.lines.length; r++) {
-      final src = grid.lines[r];
-      var e = _rows[src];
-      if (e == null || e.cols != cols) {
-        e = _Entry(cols, reflowRow(src, cols));
-        _rows[src] = e;
-      }
-      lineStart.add(lines.length);
-      starts.add(e.row.starts);
-      if (r == grid.cursorRow) {
-        final starts = e.row.starts;
-        var k = 0;
-        for (var i = 0; i < starts.length; i++) {
-          if (starts[i] <= grid.cursorCol) k = i;
+    // 원본 행의 열 → 접힌 줄의 열: 되이은 문단이면 앞 행들 뒤로 밀리고(offset) 그 행의
+    // 들여쓰기(lead)는 빠진다. 둘째 조각부터는 indent 만큼 앞이 채워진다.
+    final shift = <int>[];
+    final indents = <int>[];
+    // 문단 되잇기는 pane 이 폰보다 넓어 다시 접을 때만 — 그대로 들어가면 데스크톱과
+    // 같은 줄 나눔이 정답이다.
+    final widen = grid.cols > cols;
+    var r = 0;
+    while (r < src.length) {
+      var n = 1;
+      if (widen) {
+        var last = _info(src[r]);
+        while (r + n < src.length) {
+          final next = _info(src[r + n]);
+          if (!_continues(last, next, grid.cols)) break;
+          last = next;
+          n++;
         }
-        cursorRow = lines.length + k;
-        cursorCol = (grid.cursorCol - starts[k]).clamp(0, cols - 1);
+      }
+      var e = _rows[src[r]];
+      if (e == null || e.cols != cols || !e.matches(src, r, n)) {
+        final members = src.sublist(r, r + n);
+        if (n == 1) {
+          e = _Entry(cols, reflowRow(src[r], cols), members, const [0]);
+        } else {
+          final (cells, offsets) = _joinRows(members, [
+            for (final m in members) _info(m),
+          ]);
+          e = _Entry(cols, _reflowCells(cells, cols), members, offsets);
+        }
+        _rows[src[r]] = e;
+      }
+      for (var i = 0; i < n; i++) {
+        lineStart.add(lines.length);
+        starts.add(e.row.starts);
+        shift.add(i == 0 ? 0 : e.offsets[i] - _info(src[r + i]).lead);
+        indents.add(e.row.indent);
+        if (r + i == grid.cursorRow) {
+          final st = e.row.starts;
+          final col = grid.cursorCol + shift.last;
+          var k = 0;
+          for (var q = 0; q < st.length; q++) {
+            if (st[q] <= col) k = q;
+          }
+          cursorRow = lines.length + k;
+          cursorCol = (col - st[k] + (k > 0 ? e.row.indent : 0)).clamp(
+            0,
+            cols - 1,
+          );
+        }
       }
       lines.addAll(e.row.chunks);
+      r += n;
     }
     var end = lines.length;
     while (end > 0 && lines[end - 1].isEmpty && (cursorRow ?? -1) < end - 1) {
@@ -321,7 +542,8 @@ class Reflow {
     // 조각 시작만큼 뺀다. 도트가 앉는 행은 접히지 않는 짧은 행이라 폭은 그대로다.
     final slots = <SpriteSlot>[
       for (final s in grid.slots)
-        if (s.row.floor() < lineStart.length) _mapSlot(s, lineStart, starts),
+        if (s.row.floor() < lineStart.length)
+          _mapSlot(s, lineStart, starts, shift, indents),
     ];
     return ReflowedGrid(
       cols: cols,
@@ -334,7 +556,13 @@ class Reflow {
   }
 }
 
-SpriteSlot _mapSlot(SpriteSlot s, List<int> lineStart, List<List<int>> starts) {
+SpriteSlot _mapSlot(
+  SpriteSlot s,
+  List<int> lineStart,
+  List<List<int>> starts,
+  List<int> shift,
+  List<int> indents,
+) {
   final r = s.row.floor();
   // 머리가 화면 위로 밀린 배너는 행이 음수다 — 첫 줄 위로 그만큼 삐져나가게 둔다.
   if (r < 0) {
@@ -342,14 +570,15 @@ SpriteSlot _mapSlot(SpriteSlot s, List<int> lineStart, List<List<int>> starts) {
   }
   final frac = s.row - r;
   final st = starts[r];
+  final col = s.col + shift[r];
   var k = 0;
   for (var i = 0; i < st.length; i++) {
-    if (st[i] <= s.col) k = i;
+    if (st[i] <= col) k = i;
   }
   return SpriteSlot(
     s.motion,
     lineStart[r] + k + frac,
-    s.col - st[k],
+    col - st[k] + (k > 0 ? indents[r] : 0),
     s.rows,
     s.cols,
   );

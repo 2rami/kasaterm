@@ -8,6 +8,7 @@ Run r(String t, {CellColor? bg, int flags = 0}) =>
 String text(List<Run> runs) => runs.map((x) => x.text).join();
 
 void main() {
+  joinTests();
   test('짧은 줄은 뒤 빈칸을 잘라 한 줄', () {
     final out = reflowRow([r('hi'), r('      ')], 40);
     expect(out.chunks.map(text), ['hi']);
@@ -68,6 +69,19 @@ void main() {
   test('빈칸이 너무 멀면 그냥 자른다', () {
     final out = reflowRow([r('ab ${'x' * 60}')], 40);
     expect(out.chunks.map(text), ['ab ${'x' * 37}', 'x' * 23]);
+  });
+
+  test('글머리 줄의 이어지는 조각은 글머리 아래로 들여쓴다', () {
+    final out = reflowRow([r('  - ${'ab '.trim()} ${'cd ' * 20}')], 30);
+    expect(out.chunks.length, greaterThan(1));
+    expect(text(out.chunks[1]).startsWith('    cd'), isTrue);
+    expect(text(out.chunks[1]).length, lessThanOrEqualTo(30));
+    expect(out.indent, 4);
+  });
+
+  test('「1.」 번호도 글머리다', () {
+    final out = reflowRow([r('1. ${'xy ' * 20}')], 30);
+    expect(text(out.chunks[1]).startsWith('   xy'), isTrue);
   });
 
   test('빈 행은 빈 줄 하나', () {
@@ -149,5 +163,82 @@ void combinedTests() {
     final v = Reflow().apply(c, 10);
     expect(v.lines.map(text), ['old1', 'old2', 'live']);
     expect(v.cursorRow, 2);
+  });
+}
+
+Grid gridRows(
+  int cols,
+  List<String> rows, {
+  int cursorRow = 0,
+  int cursorCol = 0,
+}) => Grid()
+  ..apply({
+    'cols': cols,
+    'rows': rows.length,
+    'dirty': [
+      for (var i = 0; i < rows.length; i++)
+        [
+          i,
+          [
+            [rows[i], null, null, 0],
+          ],
+        ],
+    ],
+    'cursor': [cursorRow, cursorCol],
+    'cursorVisible': true,
+  });
+
+void joinTests() {
+  test('데스크톱이 접어 둔 문단은 되이어 폰 폭으로 다시 접는다 — 조각이 안 난다', () {
+    // 60열 pane: 글머리 줄이 폭을 거의 채우고(남은 7칸에 continued 가 안 들어감)
+    // 다음 줄이 그 들여쓰기에서 잇는다. 36열로 접으면 continued 가 앞 조각에 올라간다.
+    final g = gridRows(60, [
+      '  - ${'word ' * 10}',
+      '    continued end',
+      '',
+      '다음 문단',
+    ]);
+    final out = Reflow().apply(g, 36);
+    expect(out.lines.map(text).toList(), [
+      '  - word word word word word word',
+      '    word word word word continued',
+      '    end',
+      '',
+      '다음 문단',
+    ]);
+  });
+
+  test('뒷줄 첫 낱말이 앞줄에 들어갈 자리였으면 되잇지 않는다 — 접어 둔 게 아니다', () {
+    final g = gridRows(60, ['  - ${'word ' * 10}', '    ab cd']);
+    expect(Reflow().apply(g, 30).lines.length, 3);
+  });
+
+  test('빈칸 없는 긴 토큰 하나는 문단이 아니다', () {
+    final g = gridRows(100, ['a' * 95, 'prompt']);
+    expect(Reflow().apply(g, 40).lines.map(text).last, 'prompt');
+  });
+
+  test('글머리로 시작하는 다음 줄은 되잇지 않는다', () {
+    final g = gridRows(60, ['  - ${'word ' * 10}', '  - next']);
+    final out = Reflow().apply(g, 30);
+    expect(text(out.lines.last), '  - next');
+  });
+
+  test('폰이 pane 보다 넓으면 되잇지 않는다 — 데스크톱과 같은 줄 나눔', () {
+    final g = gridRows(60, ['  - ${'word ' * 10}', '    continued end']);
+    final out = Reflow().apply(g, 80);
+    expect(out.lines.length, 2);
+  });
+
+  test('되이은 줄 안의 커서는 그 글자 위에 그대로 앉는다', () {
+    final g = gridRows(
+      60,
+      ['  - ${'word ' * 10}', '    continued end'],
+      cursorRow: 1,
+      cursorCol: 14,
+    );
+    final out = Reflow().apply(g, 36);
+    expect(out.cursorRow, 2);
+    expect(text(out.lines[2])[out.cursorCol], 'e');
   });
 }
