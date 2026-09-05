@@ -995,6 +995,8 @@ pub(crate) fn paint(
         content_h,
         view_h,
         caret_rect,
+        multiline_layouts: Vec::new(),
+        motion_preview_visible: false,
     }
 }
 

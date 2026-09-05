@@ -250,25 +250,38 @@ impl SettingsMediaCache {
         self.gpu_reset_pending.store(true, Ordering::Release);
     }
 
-    pub(crate) fn refresh(&mut self, plan: &MediaPlan) {
+    #[cfg(test)]
+    fn refresh(&mut self, plan: &MediaPlan) {
         self.invalidate();
+        self.ensure(plan);
+    }
+
+    /// 화면만 오갈 때는 이미 디코딩한 항목을 보존하고 새로 필요한 것만 채운다.
+    /// 실제 파일이 바뀐 액션은 `invalidate` 뒤 이 함수를 부른다.
+    pub(crate) fn ensure(&mut self, plan: &MediaPlan) {
 
         if let Some(detail) = plan.detail.as_ref() {
             let face_key = MediaKey::Face(FaceKey {
                 theme: detail.theme.clone(),
                 slug: detail.slug.clone(),
             });
-            self.load_and_insert(face_key, load_face(&detail.theme, &detail.slug));
+            if !self.entries.contains_key(&face_key) {
+                self.load_and_insert(face_key, load_face(&detail.theme, &detail.slug));
+            }
 
             let ref_key = MediaKey::Reference(detail.clone());
-            self.load_and_insert(ref_key, load_reference(&detail.theme, &detail.slug));
+            if !self.entries.contains_key(&ref_key) {
+                self.load_and_insert(ref_key, load_reference(&detail.theme, &detail.slug));
+            }
 
             for motion in ["idle", "walk", "wave", "cheer", "gif"] {
                 let key = MediaKey::Motion {
                     detail: detail.clone(),
                     motion: motion.to_string(),
                 };
-                self.load_and_insert(key, load_motion(&detail.theme, &detail.slug, motion));
+                if !self.entries.contains_key(&key) {
+                    self.load_and_insert(key, load_motion(&detail.theme, &detail.slug, motion));
+                }
             }
 
             let profile_key = MediaKey::Motion {
@@ -279,8 +292,10 @@ impl SettingsMediaCache {
                 theme: detail.theme.clone(),
                 slug: detail.slug.clone(),
             }));
-            if let Some(entry) = profile.cloned() {
-                self.entries.insert(profile_key, entry);
+            if !self.entries.contains_key(&profile_key) {
+                if let Some(entry) = profile.cloned() {
+                    self.entries.insert(profile_key, entry);
+                }
             }
         }
 
@@ -959,6 +974,21 @@ mod tests {
         assert_eq!(
             cache.reference_status("", "not-a-real-student"),
             MediaStatus::Missing
+        );
+    }
+
+    #[test]
+    fn ensuring_the_same_plan_reuses_decoded_entries() {
+        let mut plan = MediaPlan::new();
+        plan.include_student_detail("", "midori");
+        let mut cache = SettingsMediaCache::default();
+        cache.refresh(&plan);
+        let before = (cache.generation, cache.entries.len(), cache.decoded_bytes());
+        cache.ensure(&plan);
+        assert_eq!(
+            (cache.generation, cache.entries.len(), cache.decoded_bytes()),
+            before,
+            "view-only actions must not decode the same media again"
         );
     }
 }

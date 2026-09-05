@@ -2310,6 +2310,7 @@ impl App {
         self.students_caret = 0;
         self.students_raw.err = None;
         self.regen_pane_shims();
+        self.refresh_native_settings_media_cache();
         self.set_toast("원본을 저장했어요".to_string());
     }
 

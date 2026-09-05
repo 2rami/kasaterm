@@ -1104,6 +1104,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // 판정과 무관하게 그대로 실어 보낸다(웹뷰 창에선 네이티브 토스트가
                 // 안 보이니, 네이티브가 하려던 말은 여기서만 전달된다).
                 let toast_before = self.collab.toast.clone();
+                let media_changed =
+                    crate::native_settings::remote_action_refreshes_media(action.as_str());
                 let arg = id.clone().unwrap_or_default();
                 // 네이티브에는 이 검사가 필요 없다 — 카드가 있는 것만 눌리기
                 // 때문이다. HTTP 는 아무 문자열이나 보낼 수 있고, 없는 id 로
@@ -1247,7 +1249,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if settings_changed && self.settings_room_active() {
                     self.settings_scene.refresh_cache();
                     self.refresh_native_settings_dynamic_cache();
-                    self.refresh_native_settings_media_cache();
+                    if media_changed {
+                        self.reload_native_settings_media_cache();
+                    }
                 }
                 // 네이티브 설정 화면이 열려 있으면 같은 변경을 곧바로 보여야 한다.
                 // `refresh_student_assets` 를 지나는 액션은 스스로 repaint 하지만

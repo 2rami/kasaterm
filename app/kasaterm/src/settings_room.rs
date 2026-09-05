@@ -42,6 +42,8 @@ pub(crate) struct SettingsScene {
     field_select_all: bool,
     media: Arc<crate::settings_media::SettingsMediaCache>,
     media_started: std::time::Instant,
+    multiline_layouts: Vec<crate::native_settings::MultilineLayout>,
+    motion_preview_visible: bool,
 }
 
 impl Default for SettingsScene {
@@ -65,6 +67,8 @@ impl Default for SettingsScene {
             field_select_all: false,
             media: Arc::new(crate::settings_media::SettingsMediaCache::default()),
             media_started: std::time::Instant::now(),
+            multiline_layouts: Vec::new(),
+            motion_preview_visible: false,
         }
     }
 }
@@ -103,10 +107,22 @@ impl SettingsScene {
     }
 
     pub(crate) fn refresh_media_cache(&mut self, plan: &crate::settings_media::MediaPlan) {
-        let mut media = crate::settings_media::SettingsMediaCache::default();
-        media.refresh(plan);
-        self.media = Arc::new(media);
+        if let Some(media) = Arc::get_mut(&mut self.media) {
+            media.ensure(plan);
+        } else {
+            let mut media = crate::settings_media::SettingsMediaCache::default();
+            media.ensure(plan);
+            self.media = Arc::new(media);
+        }
         self.media_started = std::time::Instant::now();
+    }
+
+    pub(crate) fn invalidate_media_cache(&mut self) {
+        if let Some(media) = Arc::get_mut(&mut self.media) {
+            media.invalidate();
+        } else {
+            self.media = Arc::new(crate::settings_media::SettingsMediaCache::default());
+        }
     }
 
     pub(crate) fn media(&self) -> Arc<crate::settings_media::SettingsMediaCache> {
@@ -155,11 +171,17 @@ impl SettingsScene {
         })
     }
 
-    pub(crate) fn field_rect(&self, field: SettingsInput) -> Option<crate::native_settings::Rect> {
-        self.hits.iter().find_map(|hit| {
-            matches!(hit.target, crate::native_settings::Target::Focus(found) if found == field)
-                .then_some(hit.rect)
-        })
+    pub(crate) fn multiline_layout(
+        &self,
+        field: SettingsInput,
+    ) -> Option<&crate::native_settings::MultilineLayout> {
+        self.multiline_layouts
+            .iter()
+            .find(|layout| layout.field == field)
+    }
+
+    pub(crate) fn motion_preview_visible(&self) -> bool {
+        self.motion_preview_visible
     }
 
     pub(crate) fn finish_paint(
@@ -168,11 +190,15 @@ impl SettingsScene {
         content_h: f32,
         view_h: f32,
         caret_rect: Option<crate::native_settings::Rect>,
+        multiline_layouts: Vec<crate::native_settings::MultilineLayout>,
+        motion_preview_visible: bool,
     ) {
         self.scroll_max = (content_h - view_h).max(0.0);
         self.scroll = self.scroll.clamp(0.0, self.scroll_max);
         self.hits = hits;
         self.caret_rect = caret_rect;
+        self.multiline_layouts = multiline_layouts;
+        self.motion_preview_visible = motion_preview_visible;
     }
 
     pub(crate) fn caret_rect(&self) -> Option<crate::native_settings::Rect> {
@@ -303,6 +329,8 @@ impl SettingsScene {
         self.sprite_slot = None;
         self.field_select_all = false;
         self.media = Arc::new(crate::settings_media::SettingsMediaCache::default());
+        self.multiline_layouts.clear();
+        self.motion_preview_visible = false;
     }
 }
 
@@ -822,11 +850,30 @@ mod tests {
             rect: (5.0, 5.0, 10.0, 10.0),
             cursor: HitCursor::Pointer,
         };
-        scene.finish_paint(vec![bottom, top], 300.0, 100.0, Some((4.0, 5.0, 2.0, 12.0)));
+        scene.finish_paint(
+            vec![bottom, top],
+            300.0,
+            100.0,
+            Some((4.0, 5.0, 2.0, 12.0)),
+            vec![crate::native_settings::MultilineLayout {
+                field: SettingsInput::FeedbackBody,
+                rect: (10.0, 20.0, 200.0, 100.0),
+                rows: vec![crate::native_settings::VisualRow {
+                    start: 0,
+                    len: 1,
+                    caret_xs: vec![0.0, 12.0],
+                }],
+                first_line: 0,
+                visible_lines: 4,
+            }],
+            true,
+        );
         assert!(scene.scroll_by(500.0));
         assert_eq!(scene.scroll(), 200.0);
         assert_eq!(scene.category(), SettingsCat::Appearance);
         assert_eq!(scene.caret_rect(), Some((4.0, 5.0, 2.0, 12.0)));
+        assert!(scene.motion_preview_visible());
+        assert!(scene.multiline_layout(SettingsInput::FeedbackBody).is_some());
         assert!(matches!(
             scene.hit_at(8.0, 8.0).map(|hit| &hit.target),
             Some(Target::Category(SettingsCat::Claude))

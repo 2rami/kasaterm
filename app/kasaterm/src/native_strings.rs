@@ -37,6 +37,9 @@ pub(crate) fn text(value: &str) -> Cow<'_, str> {
     if let Some(name) = value.strip_suffix(" · 준비 안 됨") {
         return Cow::Owned(format!("{name} · not ready"));
     }
+    if let Some(count) = value.strip_suffix("개 로그인됨") {
+        return Cow::Owned(format!("{count} signed in"));
+    }
     for (ko, en) in [
         ("테마 그림", "theme artwork"),
         ("내 그림", "custom artwork"),
@@ -214,6 +217,7 @@ fn english(value: &str) -> Option<&'static str> {
         "저장 폴더 열기" => "Open saved feedback",
         "입력하세요" => "Enter text",
         "처음 설정" => "First setup",
+        "테마, 터미널 설정, Agent 로그인을 한 번만 살펴봅니다." => "Review theme, terminal settings, and Agent sign-ins once",
         "외형" => "Appearance",
         "건너뛰고 터미널 열기" => "Skip and open terminal",
         "익숙한 터미널 모습으로 시작하세요" => "Start with a familiar terminal",
@@ -262,6 +266,15 @@ fn english(value: &str) -> Option<&'static str> {
         "현재 테마" => "Current theme",
         "현재 글꼴" => "Current font",
         "나중에 연결" => "Connect later",
+        "취소" => "Cancel",
+        "적용됨" => "Applied",
+        "새 글꼴은 kasaterm을 다시 열면 적용돼요." => "The new font applies after reopening kasaterm",
+        "재시작하면 폰트가 적용돼요" => "The font applies after restarting",
+        "브라우저에서 로그인을 마쳐 주세요" => "Finish signing in in your browser",
+        "로그인을 확인했어요" => "Sign-in confirmed",
+        "로그인을 취소했어요" => "Sign-in cancelled",
+        "먼저 로그인해 주세요" => "Sign in first",
+        "다른 로그인이 끝난 뒤 다시 시도해 주세요" => "Wait for the other sign-in to finish",
         _ => return None,
     })
 }
@@ -276,6 +289,20 @@ mod tests {
         assert_eq!(text("설정 방"), "Settings room");
         assert_eq!(text("준비가 끝났어요"), "You're ready");
         assert_eq!(text("테마 이름"), "테마 name");
+        for status in [
+            "설치 환경을 확인하고 있어요",
+            "로그인됨",
+            "로그인이 필요해요",
+            "확인 중…",
+            "설치되지 않았어요",
+            "브라우저에서 로그인을 마쳐 주세요",
+            "로그인을 확인했어요",
+            "로그인을 취소했어요",
+            "적용됨",
+            "2개 로그인됨",
+        ] {
+            assert_ne!(text(status), status, "English onboarding leak: {status}");
+        }
         set_language("ko");
         assert_eq!(text("설정 방"), "설정 방");
     }

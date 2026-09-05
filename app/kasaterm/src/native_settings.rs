@@ -413,6 +413,51 @@ pub(crate) struct PaintOutput {
     pub(crate) content_h: f32,
     pub(crate) view_h: f32,
     pub(crate) caret_rect: Option<Rect>,
+    pub(crate) multiline_layouts: Vec<MultilineLayout>,
+    pub(crate) motion_preview_visible: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct VisualRow {
+    pub(crate) start: usize,
+    pub(crate) len: usize,
+    /// 각 caret 경계의 실제 GPU 측정 x 좌표(필드 안 상대좌표).
+    pub(crate) caret_xs: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MultilineLayout {
+    pub(crate) field: SettingsInput,
+    pub(crate) rect: Rect,
+    pub(crate) rows: Vec<VisualRow>,
+    pub(crate) first_line: usize,
+    pub(crate) visible_lines: usize,
+}
+
+#[derive(Default)]
+struct PaintFeedback {
+    multiline_layouts: Vec<MultilineLayout>,
+    motion_preview_visible: bool,
+}
+
+thread_local! {
+    static PAINT_FEEDBACK: std::cell::RefCell<PaintFeedback> = Default::default();
+}
+
+fn begin_paint_feedback() {
+    PAINT_FEEDBACK.with(|feedback| *feedback.borrow_mut() = PaintFeedback::default());
+}
+
+fn push_multiline_layout(layout: MultilineLayout) {
+    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().multiline_layouts.push(layout));
+}
+
+fn mark_motion_preview_visible() {
+    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().motion_preview_visible = true);
+}
+
+fn take_paint_feedback() -> PaintFeedback {
+    PAINT_FEEDBACK.with(|feedback| std::mem::take(&mut *feedback.borrow_mut()))
 }
 
 pub(crate) struct Snapshot {
@@ -547,11 +592,17 @@ impl App {
         self.settings_scene.refresh_media_cache(&plan);
     }
 
+    pub(crate) fn reload_native_settings_media_cache(&mut self) {
+        self.settings_scene.invalidate_media_cache();
+        self.refresh_native_settings_media_cache();
+    }
+
     pub(crate) fn settings_media_animating(&self) -> bool {
-        if !self.settings_room_active()
-            || self.students_selected.is_none()
-            || self.students_slug.is_empty()
-        {
+        if !motion_preview_pump_needed(
+            self.settings_room_active(),
+            self.students_selected.is_some() && !self.students_slug.is_empty(),
+            self.settings_scene.motion_preview_visible(),
+        ) {
             return false;
         }
         let elapsed = self.settings_scene.media_elapsed();
@@ -701,6 +752,8 @@ impl App {
             output.content_h,
             output.view_h,
             output.caret_rect,
+            output.multiline_layouts,
+            output.motion_preview_visible,
         );
         if let (Some(window), Some((x, y, w, h))) =
             (self.window.as_ref(), self.settings_scene.caret_rect())
@@ -765,7 +818,6 @@ impl App {
                 }
             }
             Some(Target::Focus(field)) => {
-                let was_focused = self.settings_input == Some(field);
                 if let SettingsInput::PaletteHex(slot) = field {
                     if self.settings_input != Some(field) {
                         self.native_settings_blur();
@@ -777,7 +829,7 @@ impl App {
                     self.native_settings_focus(field);
                 }
                 if let Some(rect) = hit.map(|hit| hit.rect) {
-                    self.native_settings_place_caret(field, rect, (x, y), was_focused);
+                    self.native_settings_place_caret(field, rect, (x, y));
                 }
             }
             Some(Target::Close) => {
@@ -830,13 +882,7 @@ impl App {
                 | SettingsAction::RemoveCodexAccount(_)
                 | SettingsAction::ReauthAccount(_, _, _)
         );
-        let media = refresh
-            || matches!(
-                action,
-                SettingsAction::InspectTheme(_)
-                    | SettingsAction::RefreshStudentAssets
-                    | SettingsAction::ResetMotion(_)
-            );
+        let media = action_refreshes_media(&action);
         self.settings_apply(action);
         if refresh {
             self.settings_scene.refresh_cache();
@@ -845,7 +891,7 @@ impl App {
             self.refresh_native_settings_dynamic_cache();
         }
         if media {
-            self.refresh_native_settings_media_cache();
+            self.reload_native_settings_media_cache();
         }
     }
 
@@ -902,24 +948,16 @@ impl App {
         field: SettingsInput,
         rect: Rect,
         point: (f32, f32),
-        was_focused: bool,
     ) {
+        let multiline_caret = is_multiline(field)
+            .then(|| self.settings_scene.multiline_layout(field).cloned())
+            .flatten()
+            .map(|layout| multiline_caret_from_point(&layout, point));
         if let Some((buffer, caret)) = field_buffer(self, field) {
             if is_multiline(field) {
-                let columns = ((rect.2 - 22.0) / 7.2).floor().max(1.0) as usize;
-                let rows = multiline_visual_rows(buffer, columns);
-                let visible = ((rect.3 - 20.0) / 18.0).floor().max(1.0) as usize;
-                let current_row = visual_row_at(&rows, *caret);
-                let first = if was_focused {
-                    multiline_first_line(current_row, visible, true)
-                } else {
-                    0
-                };
-                let row = (first
-                    + ((point.1 - rect.1 - 10.0) / 18.0).floor().max(0.0) as usize)
-                    .min(rows.len().saturating_sub(1));
-                let column = ((point.0 - rect.0 - 11.0) / 7.2).round().max(0.0) as usize;
-                *caret = rows[row].0 + column.min(rows[row].1);
+                if let Some(next) = multiline_caret {
+                    *caret = next.min(buffer.chars().count());
+                }
             } else {
                 let ratio =
                     ((point.0 - rect.0 - 10.0) / (rect.2 - 20.0).max(1.0)).clamp(0.0, 1.0);
@@ -1325,14 +1363,14 @@ impl App {
                 Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown)
             )
         {
-            let columns = self
-                .settings_scene
-                .field_rect(field)
-                .map(|rect| ((rect.2 - 22.0) / 7.2).floor().max(1.0) as usize)
-                .unwrap_or(72);
+            let current = self.native_settings_field_value(field).1;
             let down = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
-            if let Some((buffer, caret)) = field_buffer(self, field) {
-                *caret = move_multiline_caret(buffer, *caret, columns, down);
+            let next = self
+                .settings_scene
+                .multiline_layout(field)
+                .map(|layout| move_multiline_caret(layout, current, down));
+            if let (Some(next), Some((buffer, caret))) = (next, field_buffer(self, field)) {
+                *caret = next.min(buffer.chars().count());
             }
             self.chrome_dirty = true;
             return true;
@@ -1451,7 +1489,7 @@ impl App {
             kasa_mcp::character::invalidate_active_theme();
             theme::invalidate_roster();
             self.settings_scene.refresh_cache();
-            self.refresh_native_settings_media_cache();
+            self.reload_native_settings_media_cache();
             return true;
         }
         if self.settings_scene.category() != SettingsCat::Students {
@@ -1510,7 +1548,7 @@ impl App {
             ) {
                 Ok(_) => {
                     self.settings_apply(SettingsAction::RefreshStudentAssets);
-                    self.refresh_native_settings_media_cache();
+                    self.reload_native_settings_media_cache();
                     self.set_toast(format!("{motion} {}번째 그림을 바꿨어요", frame + 1));
                 }
                 Err(error) => self.set_toast(format!("그림을 못 바꿨어요 — {error}")),
@@ -1576,13 +1614,17 @@ impl App {
         match crate::themegen::place_themegen_ref(&root.join(theme_id), &slug, &path) {
             Ok(_) => {
                 self.settings_scene.refresh_cache();
-                self.refresh_native_settings_media_cache();
+                self.reload_native_settings_media_cache();
                 self.set_toast("참조 그림을 놓았어요".to_string());
             }
             Err(error) => self.set_toast(format!("그림을 못 놓았어요 — {error}")),
         }
         true
     }
+}
+
+fn motion_preview_pump_needed(room_active: bool, detail_open: bool, visible_this_frame: bool) -> bool {
+    room_active && detail_open && visible_this_frame
 }
 
 fn drop_size_ok(path: &std::path::Path, limit: u64) -> Result<u64, String> {
@@ -1623,6 +1665,21 @@ fn action_refreshes_cache(action: &SettingsAction) -> bool {
     )
 }
 
+fn action_refreshes_media(action: &SettingsAction) -> bool {
+    matches!(
+        action,
+        SettingsAction::ExportTheme
+            | SettingsAction::DeleteTheme(_)
+            | SettingsAction::InspectTheme(_)
+            | SettingsAction::RefreshStudentAssets
+            | SettingsAction::ResetMotion(_)
+    )
+}
+
+pub(crate) fn remote_action_refreshes_media(action: &str) -> bool {
+    matches!(action, "new-theme" | "delete-theme" | "refresh-assets")
+}
+
 fn direct_shell_seed(current: &str, detected_preset: bool) -> String {
     if detected_preset || matches!(current, "" | "/bin/zsh" | "/bin/bash") {
         String::new()
@@ -1639,48 +1696,52 @@ fn multiline_first_line(caret_line: usize, visible_lines: usize, focused: bool) 
     }
 }
 
-/// 여러 줄 설정 칸의 마우스/위아래 이동용 논리 행. 렌더의 폭 측정은 GPU가
-/// 맡지만 입력 경로는 GPU를 빌릴 수 없어 보수적인 평균 글자폭으로 같은 줄바꿈을
-/// 근사한다. 각 값은 `(전역 문자 시작, 행 문자 수)`다.
-fn multiline_visual_rows(text: &str, columns: usize) -> Vec<(usize, usize)> {
-    let columns = columns.max(1);
-    let mut rows = Vec::new();
-    let mut start = 0;
-    let mut len = 0;
-    for (index, ch) in text.chars().enumerate() {
-        if ch == '\n' {
-            rows.push((start, len));
-            start = index + 1;
-            len = 0;
-        } else {
-            if len == columns {
-                rows.push((start, len));
-                start = index;
-                len = 0;
-            }
-            len += 1;
-        }
-    }
-    rows.push((start, len));
-    rows
-}
-
-fn visual_row_at(rows: &[(usize, usize)], caret: usize) -> usize {
+fn visual_row_at(rows: &[VisualRow], caret: usize) -> usize {
     rows.iter()
-        .position(|(start, len)| caret >= *start && caret <= start + len)
+        .position(|row| caret >= row.start && caret <= row.start + row.len)
         .unwrap_or_else(|| rows.len().saturating_sub(1))
 }
 
-fn move_multiline_caret(text: &str, caret: usize, columns: usize, down: bool) -> usize {
-    let rows = multiline_visual_rows(text, columns);
-    let row = visual_row_at(&rows, caret);
-    let column = caret.saturating_sub(rows[row].0).min(rows[row].1);
+fn nearest_caret_boundary(xs: &[f32], x: f32) -> usize {
+    xs.iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - x)
+                .abs()
+                .partial_cmp(&(*b - x).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map_or(0, |(index, _)| index)
+}
+
+fn multiline_caret_from_point(layout: &MultilineLayout, point: (f32, f32)) -> usize {
+    if layout.rows.is_empty() {
+        return 0;
+    }
+    let visible_row = ((point.1 - layout.rect.1 - 10.0) / 18.0)
+        .floor()
+        .max(0.0) as usize;
+    let row_index = (layout.first_line + visible_row.min(layout.visible_lines.saturating_sub(1)))
+        .min(layout.rows.len() - 1);
+    let row = &layout.rows[row_index];
+    let x = (point.0 - layout.rect.0 - 11.0).max(0.0);
+    row.start + nearest_caret_boundary(&row.caret_xs, x).min(row.len)
+}
+
+fn move_multiline_caret(layout: &MultilineLayout, caret: usize, down: bool) -> usize {
+    if layout.rows.is_empty() {
+        return caret;
+    }
+    let row = visual_row_at(&layout.rows, caret);
+    let local = caret.saturating_sub(layout.rows[row].start).min(layout.rows[row].len);
+    let x = layout.rows[row].caret_xs.get(local).copied().unwrap_or_default();
     let target = if down {
-        (row + 1).min(rows.len().saturating_sub(1))
+        (row + 1).min(layout.rows.len().saturating_sub(1))
     } else {
         row.saturating_sub(1)
     };
-    rows[target].0 + column.min(rows[target].1)
+    layout.rows[target].start
+        + nearest_caret_boundary(&layout.rows[target].caret_xs, x).min(layout.rows[target].len)
 }
 
 fn is_jamo(ch: char) -> bool {
@@ -1719,6 +1780,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     if snapshot.first_run {
         return crate::native_onboarding::paint(g, &snapshot.onboarding);
     }
+    begin_paint_feedback();
     let (ax, ay, aw, ah) = snapshot.area;
     let nav_w = if aw < 760.0 { 154.0 } else { 190.0 };
     let mut hits = Vec::new();
@@ -1938,11 +2000,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         snapshot.scroll,
     );
 
+    let feedback = take_paint_feedback();
     PaintOutput {
         hits,
         content_h,
         view_h,
         caret_rect,
+        multiline_layouts: feedback.multiline_layouts,
+        motion_preview_visible: feedback.motion_preview_visible,
     }
 }
 
@@ -3663,6 +3728,9 @@ fn paint_motion_sprites(
             false,
         );
         let preview = (x, *y + 25.0, 54.0, 46.0);
+        if g.clip_hit(preview).is_some() && matches!(media_status, crate::settings_media::MediaStatus::Ready { frames, .. } if frames > 1) {
+            mark_motion_preview_visible();
+        }
         s.media.draw_motion_preview(
             g,
             &s.student_theme,
@@ -4365,6 +4433,30 @@ fn text_field(
             .unwrap_or_else(|| lines.len().saturating_sub(1));
         let visible_lines = ((rect.3 - 20.0) / 18.0).floor().max(1.0) as usize;
         let first_line = multiline_first_line(caret_line, visible_lines, focused);
+        let rows = lines
+            .iter()
+            .map(|(line, start)| {
+                let mut caret_xs = Vec::with_capacity(line.chars().count() + 1);
+                caret_xs.push(0.0);
+                let mut prefix = String::new();
+                for ch in line.chars() {
+                    prefix.push(ch);
+                    caret_xs.push(g.measure_chrome_text(&prefix, 12.0, false));
+                }
+                VisualRow {
+                    start: *start,
+                    len: line.chars().count(),
+                    caret_xs,
+                }
+            })
+            .collect();
+        push_multiline_layout(MultilineLayout {
+            field,
+            rect,
+            rows,
+            first_line,
+            visible_lines,
+        });
         let mut caret_xy = (rect.0 + 11.0, rect.1 + 10.0);
         for (i, (line, start)) in lines
             .iter()
@@ -4741,6 +4833,23 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_settings_actions_never_trigger_full_media_decode() {
+        for action in [
+            SettingsAction::UiLanguage("en"),
+            SettingsAction::Accent("blue".to_string()),
+            SettingsAction::StudentModel("model".to_string(), String::new()),
+            SettingsAction::ToggleFeedbackDiag,
+            SettingsAction::AccountAutoswitchPct(85),
+        ] {
+            assert!(!action_refreshes_media(&action));
+        }
+        assert!(!remote_action_refreshes_media("set-language"));
+        assert!(!remote_action_refreshes_media("palette-hex"));
+        assert!(action_refreshes_media(&SettingsAction::RefreshStudentAssets));
+        assert!(remote_action_refreshes_media("refresh-assets"));
+    }
+
+    #[test]
     fn direct_shell_field_never_appends_to_a_preset() {
         assert_eq!(direct_shell_seed("/bin/zsh", false), "");
         assert_eq!(direct_shell_seed("/bin/bash", false), "");
@@ -4761,12 +4870,28 @@ mod tests {
 
     #[test]
     fn multiline_click_rows_and_vertical_motion_use_global_character_indices() {
-        let rows = multiline_visual_rows("abcd\nefghij", 3);
-        assert_eq!(rows, vec![(0, 3), (3, 1), (5, 3), (8, 3)]);
-        assert_eq!(visual_row_at(&rows, 6), 2);
-        assert_eq!(move_multiline_caret("abcd\nefghij", 1, 3, true), 4);
-        assert_eq!(move_multiline_caret("abcd\nefghij", 4, 3, true), 6);
-        assert_eq!(move_multiline_caret("abcd\nefghij", 6, 3, false), 4);
+        let layout = MultilineLayout {
+            field: SettingsInput::StudentPersona,
+            rect: (100.0, 200.0, 300.0, 132.0),
+            rows: vec![
+                VisualRow {
+                    start: 0,
+                    len: 2,
+                    // 실제 shaper가 잰 한글 두 글자 폭처럼 균등하지 않은 좌표.
+                    caret_xs: vec![0.0, 13.0, 27.0],
+                },
+                VisualRow {
+                    start: 3,
+                    len: 3,
+                    caret_xs: vec![0.0, 7.0, 15.0, 22.0],
+                },
+            ],
+            first_line: 0,
+            visible_lines: 6,
+        };
+        assert_eq!(multiline_caret_from_point(&layout, (126.0, 228.0)), 5);
+        assert_eq!(move_multiline_caret(&layout, 1, true), 5);
+        assert_eq!(move_multiline_caret(&layout, 5, false), 1);
     }
 
     #[test]
@@ -4939,8 +5064,35 @@ mod tests {
         }
         let handler = include_str!("handler.rs");
         assert!(handler.contains("self.settings_media_animating()"));
+        let motion = source
+            .split_once("fn paint_motion_sprites(")
+            .unwrap()
+            .1
+            .split_once("fn paint_themegen_engine(")
+            .unwrap()
+            .0;
+        assert!(motion.find("clip_hit(preview)").unwrap() < motion.find("mark_motion_preview_visible").unwrap());
+        let animating = source
+            .split_once("pub(crate) fn settings_media_animating")
+            .unwrap()
+            .1
+            .split_once("/// 계정 신원")
+            .unwrap()
+            .0;
+        assert!(
+            animating.find("motion_preview_visible").unwrap()
+                < animating.find("next_motion_frame_in").unwrap()
+        );
         let paint = &source
             [source.find("pub(crate) fn paint(").unwrap()..source.find("#[cfg(test)]").unwrap()];
         assert!(!paint.contains("std::fs::"));
+    }
+
+    #[test]
+    fn motion_timer_stays_off_for_raw_tabs_and_offscreen_previews() {
+        assert!(!motion_preview_pump_needed(true, true, false));
+        assert!(!motion_preview_pump_needed(true, false, true));
+        assert!(!motion_preview_pump_needed(false, true, true));
+        assert!(motion_preview_pump_needed(true, true, true));
     }
 }
