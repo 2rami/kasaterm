@@ -779,7 +779,7 @@ fn elapsed_over(now: Duration, since: Option<Duration>, threshold: Duration) -> 
 
 fn activity_summary(board: &[PaneActivity]) -> ActivitySummary {
     let is_idle = |status: &str| status.trim().is_empty() || status == "idle";
-    let is_waiting = |status: &str| matches!(status, "waiting" | "needs-you");
+    let is_waiting = |status: &str| matches!(status, "waiting" | "blocked" | "needs-you");
     let tone = if board.iter().any(|row| is_waiting(&row.status)) {
         ActivityTone::Waiting
     } else if board.iter().any(|row| !is_idle(&row.status)) {
@@ -1030,13 +1030,16 @@ mod tests {
 
     #[test]
     fn board_status_aliases_share_one_activity_vocabulary() {
-        let needs_you = activity_summary(&[row("%1", "needs-you", "승인")]);
+        let needs_you = activity_summary(&[
+            row("%1", "needs-you", "승인"),
+            row("%2", "blocked", "입력 대기"),
+        ]);
         assert_eq!(needs_you.tone, ActivityTone::Waiting);
-        assert_eq!(needs_you.active_count, 1);
+        assert_eq!(needs_you.active_count, 2);
 
         let working = activity_summary(&[
-            row("%1", "blocked", "막힘"),
-            row("%2", "compacting", "정리"),
+            row("%1", "compacting", "정리"),
+            row("%2", "reviewing", "검수"),
             row("%3", "idle", "쉼"),
             row("%4", "", "아직 없음"),
         ]);
