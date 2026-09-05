@@ -63,6 +63,7 @@ impl App {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
+            self.prime_hit_areas();
             return true;
         }
         if self.user_room_count() == 0 {
@@ -98,6 +99,8 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        // 설정과 같은 이유로 클릭 영역을 지금 채운다(`prime_hit_areas`).
+        self.prime_hit_areas();
         true
     }
 

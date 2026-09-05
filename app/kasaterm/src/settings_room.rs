@@ -465,6 +465,7 @@ impl App {
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
+            self.prime_hit_areas();
             return true;
         }
 
@@ -503,7 +504,20 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
+        self.prime_hit_areas();
         true
+    }
+
+    /// 방금 연 화면의 클릭 영역을 지금 채운다.
+    ///
+    /// 클릭 영역은 **그리면서** 등록된다. 여는 즉시 한 프레임 그려 두지 않으면 그
+    /// 사이에 온 클릭이 어느 영역에도 안 맞아 통째로 사라진다 — 사람 눈에는
+    /// 「열자마자 누르면 가끔 안 먹는다」가 된다(2026-09-05 지적 「설정창 열릴 때
+    /// 뭔가 안 눌리는 것」). `request_redraw` 는 다음 프레임을 예약할 뿐이라
+    /// 그 공백을 못 메운다 — 실측으로 12~96ms 였고, 사람의 두 번째 클릭이 충분히
+    /// 들어오는 틈이다.
+    pub(crate) fn prime_hit_areas(&mut self) {
+        self.render_frame();
     }
 
     pub(crate) fn toggle_settings_room(&mut self, category: Option<SettingsCat>) {

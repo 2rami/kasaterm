@@ -1437,14 +1437,18 @@ impl App {
             // 지금 화면에 없는 버튼이 눌린다(2026-09-05 「설정창 열릴 때 뭔가 안
             // 눌리는 것」의 후보).
             let stale = self.settings_scene.hits().len();
+            // 첫 프레임까지 걸리는 시간. 이 틈이 사람의 두 번째 클릭보다 길면
+            // 「열자마자 눌렀는데 안 먹었다」가 실제로 일어난다.
+            let t0 = Instant::now();
             self.render_frame();
+            let first_frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
             let after_one = self.settings_scene.hits().len();
             for _ in 0..2 {
                 self.render_frame();
             }
             let hits = self.settings_scene.hits();
             eprintln!(
-                "[hitaudit] {label}: 열자마자 남아 있던 영역={stale} · 한 프레임 뒤={after_one} · 안정={}",
+                "[hitaudit] {label}: 열자마자 영역={stale} · 첫 프레임 {first_frame_ms:.0}ms 뒤={after_one} · 안정={}",
                 hits.len()
             );
             let mut zero = Vec::new();
@@ -1469,7 +1473,13 @@ impl App {
                     buried.push(format!("{:?}", hit.target));
                 }
             }
-            total_bad += zero.len() + buried.len();
+            // 여는 즉시 영역이 하나도 없으면, 그 사이 클릭은 통째로 사라진다.
+            // 좌표 겹침이 아니라 타이밍이라 화면으로는 영영 안 보인다.
+            let cold = stale == 0 && !hits.is_empty();
+            if cold {
+                eprintln!("[hitaudit] {label}: ⚠ 여는 순간 클릭 영역 0 — 그때 누르면 사라진다");
+            }
+            total_bad += zero.len() + buried.len() + usize::from(cold);
             eprintln!(
                 "[hitaudit] {label}: 영역 {}개 · 크기0 {} · 완전히덮임 {}{}{}",
                 hits.len(),
