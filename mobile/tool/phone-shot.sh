@@ -6,15 +6,14 @@
 # 처음 붙을 때 폰에 「이 컴퓨터를 신뢰」 암호 창이 뜬다 — 그건 사람이 넣는다.
 set -euo pipefail
 out=${1:-${TMPDIR:-/tmp}/phone.jpg}
-udid=${KASA_PHONE_UDID:-$(system_profiler SPUSBDataType 2>/dev/null | awk '/iPhone/ {f=1} f && /Serial Number/ {print $3; exit}')}
 pmd=${PYMOBILEDEVICE3:-$HOME/.local/bin/pymobiledevice3}
-if ! curl -sf http://127.0.0.1:49151/ >/dev/null 2>&1; then
+# 터널 데몬의 목록이 곧 「지금 찍을 수 있는 기기」다 — 키가 UDID.
+list=$(curl -sf http://127.0.0.1:49151/ 2>/dev/null) || {
   echo "터널 데몬이 없다 — 사람이 한 번 띄워야 한다:  sudo $pmd remote tunneld -d -p tcp" >&2
   exit 1
-fi
-[ -n "$udid" ] || { echo "케이블로 붙은 아이폰이 없다" >&2; exit 1; }
-# system_profiler 의 시리얼은 하이픈이 빠져 있다(00008140001059A41431801C) — 8자리 뒤에 넣는다.
-case "$udid" in *-*) ;; *) udid="${udid:0:8}-${udid:8}" ;; esac
+}
+udid=${KASA_PHONE_UDID:-$(printf '%s' "$list" | python3 -c 'import json, sys; print(next(iter(json.load(sys.stdin)), ""))')}
+[ -n "$udid" ] || { echo "터널에 잡힌 아이폰이 없다 — 케이블과 잠금을 확인해 달라" >&2; exit 1; }
 png=$(mktemp -t phone).png
 "$pmd" developer dvt screenshot --tunnel "$udid" "$png" >/dev/null 2>&1
 sips -s format jpeg -s formatOptions 60 -Z 720 "$png" --out "$out" >/dev/null 2>&1
