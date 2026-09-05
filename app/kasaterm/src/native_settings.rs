@@ -512,6 +512,8 @@ pub(crate) struct Snapshot {
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
+    /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
+    pub(crate) login_code: String,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     pub(crate) characters: Arc<Vec<CharacterChoice>>,
     pub(crate) themes: Arc<Vec<socket::ThemeRow>>,
@@ -698,6 +700,7 @@ impl App {
             accounts: cache.accounts.clone(),
             account_label_edit: self.account_label_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
+            login_code: self.login_code_edit.clone(),
             palettes: cache.palettes.clone(),
             characters: cache.characters.clone(),
             themes: cache.themes.clone(),
@@ -929,7 +932,9 @@ impl App {
                 self.themegen.key_edit.clear();
                 self.settings_caret = 0;
             }
-            SettingsInput::CustomThemeLabel | SettingsInput::AccountLabel => {
+            SettingsInput::CustomThemeLabel
+            | SettingsInput::AccountLabel
+            | SettingsInput::LoginCode => {
                 self.settings_caret = self
                     .native_settings_field_value(field)
                     .0
@@ -1004,6 +1009,7 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
+            SettingsInput::LoginCode => (self.login_code_edit.clone(), self.settings_caret),
             SettingsInput::ThemeLabel => (
                 self.theme_label_edit
                     .as_ref()
@@ -1064,6 +1070,9 @@ impl App {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
                 }
             }
+            SettingsInput::LoginCode => {
+                crate::lineedit::insert(&mut self.login_code_edit, &mut self.settings_caret, text);
+            }
             SettingsInput::ThemeLabel => {
                 if let Some((_, buffer)) = self.theme_label_edit.as_mut() {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
@@ -1123,6 +1132,9 @@ impl App {
             self.flush_account_label();
             self.refresh_native_settings_dynamic_cache();
         }
+        if self.settings_input == Some(SettingsInput::LoginCode) {
+            self.submit_login_code_field();
+        }
         if self.settings_input == Some(SettingsInput::ThemeGenKey) {
             let key = self.themegen.key_edit.trim();
             if !key.is_empty() {
@@ -1161,6 +1173,7 @@ impl App {
                     *value = backup.value;
                 }
             }
+            SettingsInput::LoginCode => self.login_code_edit = backup.value,
             SettingsInput::ThemeLabel => {
                 if let Some((_, value)) = self.theme_label_edit.as_mut() {
                     *value = backup.value;
@@ -1206,6 +1219,8 @@ impl App {
             Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
+            // 코드는 지우지 않는다 — 붙여넣다 esc 를 눌러도 다시 치게 하지 않는다.
+            Some(SettingsInput::LoginCode) => {}
             _ => {}
         }
         self.ime_focus = None;
@@ -1759,6 +1774,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
         SettingsInput::FeedbackBody => Some((&mut app.feedback_body, &mut app.feedback_caret)),
         SettingsInput::StudentRaw => Some((&mut app.students_raw.text, &mut app.students_raw.caret)),
         SettingsInput::ThemeGenKey => Some((&mut app.themegen.key_edit, &mut app.settings_caret)),
+        SettingsInput::LoginCode => Some((&mut app.login_code_edit, &mut app.settings_caret)),
         SettingsInput::CustomThemeLabel => app
             .custom_theme_label_edit
             .as_mut()
@@ -3932,11 +3948,53 @@ fn account_group(
     for row in s.accounts.iter().filter(|row| row.provider == provider) {
         account_row(g, s, hits, caret, x, y, w, row);
     }
-    if s
-        .login_job
-        .as_ref()
-        .is_some_and(|job| job.state == crate::settings::LoginState::Running)
-    {
+    let login_state = s.login_job.as_ref().map(|job| &job.state);
+    if login_state == Some(&crate::settings::LoginState::NeedCode) {
+        // 브라우저가 승인해도 CLI 로 돌아오는 길이 없다 — 화면에 뜬 코드를 여기
+        // 붙여넣어야 로그인이 끝난다. 이 칸이 없던 동안 로그인은 전부 실패했다.
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "브라우저에 나온 코드를 붙여넣으세요",
+            11.0,
+            theme::attention(),
+            false,
+        );
+        *y += 18.0;
+        text_field(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            *y,
+            (w - 178.0).max(140.0),
+            "",
+            &s.login_code,
+            SettingsInput::LoginCode,
+            s.settings_caret,
+            false,
+        );
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 172.0, *y, 76.0, 31.0),
+            "확인",
+            Target::Setting(SettingsAction::SubmitLoginCode),
+            true,
+        );
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 92.0, *y, 92.0, 31.0),
+            "로그인 취소",
+            Target::Setting(SettingsAction::CancelLogin),
+            false,
+        );
+    } else if login_state == Some(&crate::settings::LoginState::Running) {
         draw_text(g, x + 2.0, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
         button(
             g,
@@ -4027,6 +4085,7 @@ fn account_row(
         let job_sub = s.login_job.as_ref().filter(|job| job.id == row.id).map(|job| {
             match &job.state {
                 crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
+                crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
                 crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
                 crate::settings::LoginState::Err(error) => error.clone(),
             }
@@ -4064,7 +4123,12 @@ fn account_row(
         && !s
             .login_job
             .as_ref()
-            .is_some_and(|job| job.state == crate::settings::LoginState::Running)
+            .is_some_and(|job| {
+                matches!(
+                    job.state,
+                    crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
+                )
+            })
     {
         let rename = (rect.0 + rect.2 - 131.0, rect.1 + 14.0, 24.0, 24.0);
         let reauth = (rect.0 + rect.2 - 101.0, rect.1 + 14.0, 24.0, 24.0);

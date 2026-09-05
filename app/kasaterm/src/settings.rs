@@ -112,6 +112,23 @@ impl App {
         }
     }
 
+    /// 붙여넣은 OAuth 코드를 로그인 중인 CLI 로 보낸다. 엔터와 「확인」 버튼이 같은
+    /// 길을 탄다.
+    pub(crate) fn submit_login_code_field(&mut self) {
+        let code = self.login_code_edit.trim().to_string();
+        if code.is_empty() {
+            self.set_toast("브라우저에 나온 코드를 붙여넣어 주세요".to_string());
+            return;
+        }
+        if submit_login_code(&code) {
+            self.login_code_edit.clear();
+            self.settings_caret = 0;
+            self.set_toast("코드를 보냈어요 — 확인 중이에요".to_string());
+        } else {
+            self.set_toast("보낼 로그인이 없어요 — 다시 시작해 주세요".to_string());
+        }
+    }
+
     /// 계정 슬롯을 하나 만들고, 그 인증 저장소를 얹은 `claude` 를 새 pane 에 띄운다.
     /// 실제 로그인은 OAuth 브라우저 흐름이라 거노가 그 pane 에서 `/login` 을 한 번
     /// 눌러야 끝난다.
@@ -863,8 +880,10 @@ impl App {
             }
             SettingsAction::CancelLogin => {
                 cancel_hidden_login();
+                self.login_code_edit.clear();
                 self.set_toast("로그인을 취소했어요".to_string());
             }
+            SettingsAction::SubmitLoginCode => self.submit_login_code_field(),
             SettingsAction::FocusAccountLabel(provider, id) => {
                 self.flush_account_label();
                 let label = match provider {
@@ -2822,29 +2841,90 @@ pub(crate) struct LoginJob {
 #[derive(Clone, PartialEq)]
 pub(crate) enum LoginState {
     Running,
+    /// CLI 가 `Paste code here if prompted >` 에서 멈춰 **코드를 기다린다**.
+    ///
+    /// 지금 `claude auth login` 의 redirect_uri 는 localhost 가 아니라
+    /// `platform.claude.com/oauth/code/callback` 이다 — 브라우저가 승인해도 CLI 로
+    /// 자동으로 돌아오는 길이 없고, 사람이 화면의 코드를 stdin 에 붙여넣어야 끝난다.
+    /// 그 칸이 없던 동안 이 로그인은 **한 번도 성공할 수 없었고**, 3분 타임아웃까지
+    /// 매달렸다가 실패했다(2026-09-05 실측: 슬롯만 늘고 키체인 항목이 116개까지
+    /// 쌓였다 — 거노 "계정 등록만 100번 한 것 같은데").
+    NeedCode,
     Ok,
     /// 실패 이유 한 줄. 사용자에게 그대로 보인다.
     Err(String),
 }
 
-/// 로그인 중인 CLI 프로세스의 그룹 id — 취소가 브라우저 손자까지 걷어내야 한다.
-type LoginCell = std::sync::Mutex<(Option<LoginJob>, Option<u32>)>;
+/// 진행 중인 로그인 한 건의 손잡이 셋.
+///
+/// - `0` 표시용 상태(`LoginJob`)
+/// - `1` CLI 프로세스의 그룹 id — 취소가 브라우저 손자까지 걷어내야 한다.
+/// - `2` 그 프로세스의 stdin — **OAuth 코드를 여기로 밀어 넣는다.** 예전엔 핸들을
+///   그냥 붙들고만 있었는데(닫으면 CLI 가 EOF 로 죽어서), 그래서 코드를 넣을 길이
+///   없었다. 셀에 두면 설정창이 사용자가 붙여넣은 코드를 그대로 전달할 수 있다.
+type LoginCell =
+    std::sync::Mutex<(Option<LoginJob>, Option<u32>, Option<std::process::ChildStdin>)>;
 fn login_cell() -> &'static LoginCell {
     static CELL: std::sync::OnceLock<LoginCell> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| std::sync::Mutex::new((None, None)))
+    CELL.get_or_init(|| std::sync::Mutex::new((None, None, None)))
 }
 
 pub(crate) fn hidden_login_job() -> Option<LoginJob> {
     login_cell().lock().ok().and_then(|cell| cell.0.clone())
 }
 
+/// 「다른 로그인을 시작하면 안 되는 상태」. 코드를 기다리는 중도 포함한다 —
+/// 그 사이 새 로그인을 띄우면 앞의 CLI 가 stdin 을 잃고 조용히 3분 뒤 실패한다.
 pub(crate) fn hidden_login_running() -> bool {
-    hidden_login_job().is_some_and(|job| job.state == LoginState::Running)
+    hidden_login_job()
+        .is_some_and(|job| matches!(job.state, LoginState::Running | LoginState::NeedCode))
+}
+
+/// 코드 입력 칸을 띄울 때인가.
+pub(crate) fn hidden_login_needs_code() -> bool {
+    hidden_login_job().is_some_and(|job| job.state == LoginState::NeedCode)
+}
+
+/// CLI 가 코드를 요구하기 시작했다 — 출력 리더 스레드가 부른다.
+fn mark_login_needs_code(id: &str) {
+    if let Ok(mut c) = login_cell().lock() {
+        if let Some(job) = c.0.as_mut() {
+            // 늦게 도착한 옛 작업의 출력이 새 작업 표시를 갈아치우면 안 된다.
+            if job.id == id && job.state == LoginState::Running {
+                job.state = LoginState::NeedCode;
+            }
+        }
+    }
+}
+
+/// 사용자가 붙여넣은 OAuth 코드를 CLI stdin 으로 보낸다.
+///
+/// 보낸 뒤 상태를 `Running` 으로 되돌린다 — 코드가 맞는지는 CLI 가 판정하고, 그
+/// 결과는 프로세스 종료 코드로 온다. 틀린 코드면 CLI 가 다시 물어보므로 리더가
+/// 곧 `NeedCode` 로 되돌린다.
+pub(crate) fn submit_login_code(code: &str) -> bool {
+    use std::io::Write;
+    let code = code.trim();
+    if code.is_empty() {
+        return false;
+    }
+    let Ok(mut c) = login_cell().lock() else { return false };
+    let Some(stdin) = c.2.as_mut() else { return false };
+    if writeln!(stdin, "{code}").is_err() {
+        return false;
+    }
+    let _ = stdin.flush();
+    if let Some(job) = c.0.as_mut() {
+        job.state = LoginState::Running;
+    }
+    true
 }
 
 pub(crate) fn cancel_hidden_login() {
     let pgid = login_cell().lock().ok().and_then(|mut cell| {
         cell.0 = None;
+        // stdin 을 놓아 EOF 를 준다 — 코드를 기다리던 CLI 는 이걸로 즉시 끝난다.
+        cell.2 = None;
         cell.1.take()
     });
     #[cfg(unix)]
@@ -2923,7 +3003,7 @@ fn spawn_hidden_login(
     dir: std::path::PathBuf,
     browser: LoginBrowser,
 ) {
-    use std::io::{BufRead, BufReader};
+    use std::io::Read;
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
     let Ok(mut cell) = login_cell().lock() else { return };
@@ -2968,11 +3048,12 @@ fn spawn_hidden_login(
                 return;
             }
         };
+        // stdin 을 셀에 맡긴다 — 붙들고만 있으면(옛 코드) 코드를 넣을 길이 없고,
+        // 떨어뜨리면 CLI 가 EOF 로 즉시 죽는다. 취소·완료 때 셀이 놓아 준다.
         if let Ok(mut c) = login_cell().lock() {
             c.1 = Some(child.id());
+            c.2 = child.stdin.take();
         }
-        // stdin 핸들을 **떨어뜨리지 않는다**(위 주석). 스레드가 끝날 때 닫힌다.
-        let _stdin = child.stdin.take();
         // 두 파이프를 각각 읽어 한 버퍼에 모은다 — URL 이 어느 쪽으로 오는지는
         // CLI 버전에 따라 다르고, 실패 이유는 대개 stderr 로 온다.
         let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -2986,28 +3067,61 @@ fn spawn_hidden_login(
         {
             let buf = buf.clone();
             let profile = profile.clone();
+            let job_id = id.clone();
             readers.push(std::thread::spawn(move || {
+                // **줄 단위로 읽으면 안 된다.** 코드를 묻는 `Paste code here if
+                // prompted >` 는 개행 없이 오므로 `lines()` 는 그 줄을 EOF 까지
+                // 내주지 않는다 — 프로세스가 죽어야 비로소 보이니 「기다리는 중」을
+                // 영영 못 잡는다(2026-09-05 실측). 바이트로 읽어 꼬리까지 본다.
+                let mut pipe = pipe;
+                let mut chunk = [0u8; 1024];
+                let mut tail = String::new();
                 let mut opened = false;
-                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                let mut asked = false;
+                loop {
+                    let n = match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    let text = String::from_utf8_lossy(&chunk[..n]).to_string();
                     if let Ok(mut b) = buf.lock() {
-                        b.push_str(&line);
-                        b.push('\n');
+                        b.push_str(&text);
                     }
-                    if opened {
-                        continue;
+                    tail.push_str(&text);
+                    // 완성된 줄에서만 URL 을 찾는다 — 반쯤 온 URL 로 브라우저를
+                    // 열면 끊긴 주소가 뜬다.
+                    while let Some(pos) = tail.find('\n') {
+                        let line: String = tail.drain(..=pos).collect();
+                        if opened {
+                            continue;
+                        }
+                        if let (Some(url), Some(prof)) = (login_url_in(&line), profile.as_deref())
+                        {
+                            let _ = std::fs::create_dir_all(prof);
+                            open_isolated_browser(&url, prof);
+                            opened = true;
+                        }
                     }
-                    // 프로세스 출력은 PTY 와 달리 접히지 않아 URL 이 한 줄에 온다.
-                    if let (Some(url), Some(prof)) = (login_url_in(&line), profile.as_deref()) {
-                        let _ = std::fs::create_dir_all(prof);
-                        open_isolated_browser(&url, prof);
-                        opened = true;
+                    // 남은 꼬리가 코드를 묻고 있나. CLI 가 다시 물으면(틀린 코드)
+                    // 그때도 잡아야 하므로 꼬리를 비운 뒤 플래그를 되돌린다.
+                    if tail.contains("Paste code") {
+                        if !asked {
+                            asked = true;
+                            mark_login_needs_code(&job_id);
+                        }
+                    } else if tail.is_empty() {
+                        asked = false;
                     }
                 }
             }));
         }
         // 3분. 브라우저에서 계정을 새로 만드는 사람도 있어 넉넉히 두지만, 무한정
         // 두면 취소를 안 누른 사용자가 「로그인 중」에 영구히 갇힌다.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        //
+        // **코드를 묻기 시작하면 10분으로 늘린다** — 그때부터는 사람이 브라우저에서
+        // 승인하고 코드를 복사해 창을 옮겨 붙여넣는 시간이라, 3분은 실제로 모자란다.
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut extended = false;
         let code = loop {
             match child.try_wait() {
                 Ok(Some(st)) => break st.success(),
@@ -3018,9 +3132,18 @@ fn spawn_hidden_login(
             if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
                 return;
             }
+            if !extended && hidden_login_needs_code() {
+                extended = true;
+                deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+            }
             if std::time::Instant::now() > deadline {
                 let _ = child.kill();
-                finish_login(&id, LoginState::Err("로그인이 3분 안에 안 끝났어요".into()));
+                let why = if extended {
+                    "코드를 기다리다 10분이 지났어요 — 다시 해 주세요"
+                } else {
+                    "로그인이 3분 안에 안 끝났어요"
+                };
+                finish_login(&id, LoginState::Err(why.into()));
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -3047,6 +3170,9 @@ fn finish_login(id: &str, state: LoginState) {
                 j.state = state;
             }
             c.1 = None;
+            // 끝난 프로세스의 stdin 을 계속 들고 있으면, 다음 로그인의 코드가
+            // 죽은 파이프로 가 조용히 사라진다.
+            c.2 = None;
         }
     }
 }

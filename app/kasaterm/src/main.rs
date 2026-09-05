@@ -27,6 +27,7 @@ mod native_board;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
+mod personacol;
 mod settings_media;
 mod notify_banner;
 mod onboarding;
@@ -3842,12 +3843,16 @@ enum UserEvent {
         /// 그 세션을 만든 코딩 프로그램 — `claude`/`codex`/`agy`. 빈 값이면 claude.
         /// `attach` 는 claude 의 daemon 개념이라 이 값과 무관하게 claude 로 간다.
         harness: String,
+        /// 실제 pane 생성 결과가 필요한 네이티브 호출자. 기존 HTTP·세션 칼럼은
+        /// fire-and-forget 규약이라 None을 보낸다.
+        reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
     },
     /// "대화 저장하기" — surface pane 의 foreground claude 를 ←←(agents view = bg-detach)
     /// 주입으로 background daemon 으로 detach. surface 없으면 active pane. 터미널이 꺼져도
     /// daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(거노 핵심).
     SaveSession {
         surface: Option<String>,
+        reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
     },
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.
@@ -4076,6 +4081,9 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 보드 방의 입력. 필드를 함께 실어 조합 중 탭 이동도 떠나는 칸에
     /// 확정되게 한다.
     Board(native_board::BoardInput),
+    /// 우측 네이티브 대화 칼럼의 입력. draft와 로스터 검색을 갈라야 포커스 이동
+    /// 때 조합 중인 마지막 음절이 떠나는 칸에 확정된다.
+    Persona(personacol::PersonaInput),
 }
 
 impl ImeFocus {
@@ -4219,6 +4227,9 @@ pub(crate) enum SettingsInput {
     CustomThemeLabel,
     /// Agent 계정 별명. 제공자와 슬롯 id 는 `App.account_label_edit` 이 든다.
     AccountLabel,
+    /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드. 어느 슬롯인지는 진행 중인 로그인
+    /// 한 건뿐이라 실을 것이 없다(`settings::hidden_login_job`).
+    LoginCode,
     /// 테마 이름 칸. 어느 테마인지는 `App.theme_label_edit` 이 폴더 id 로 들고
     /// 있다 — 이 enum 이 `Copy` 라 String 을 못 실어서다. 인덱스로 잡지 않는 건
     /// 테마를 지우면 뒷 번호가 밀려 엉뚱한 폴더를 고치게 되기 때문이다.
@@ -4309,6 +4320,10 @@ pub(crate) enum SettingsAction {
     ReauthAccount(AccountProvider, String, settings::LoginBrowser),
     /// 진행 중인 숨은 OAuth 로그인과 그 브라우저 자식을 함께 멈춘다.
     CancelLogin,
+    /// 브라우저가 준 OAuth 코드를 로그인 중인 CLI 의 stdin 으로 보낸다. 지금 로그인은
+    /// localhost 콜백이 아니라 **코드 붙여넣기**로 끝나므로, 이 칸이 없으면 로그인은
+    /// 영영 안 끝난다(2026-09-05 확정).
+    SubmitLoginCode,
     /// 계정 슬롯 별명을 고치는 인라인 입력칸.
     FocusAccountLabel(AccountProvider, String),
     /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
@@ -5236,7 +5251,7 @@ struct App {
     /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
     /// the file-tree `git_ignore_*` stay separate — different domains.)
     git: state::GitState,
-    persona: state::PersonaState,
+    persona: personacol::PersonaColState,
     /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
     /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
     info: state::InfoState,
@@ -5368,6 +5383,9 @@ struct App {
     custom_theme_label_edit: Option<(String, String)>,
     /// `(제공자, 슬롯 id, 편집 버퍼)`.
     account_label_edit: Option<(AccountProvider, String, String)>,
+    /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드 버퍼. 진행 중인 로그인은 한 건뿐이라
+    /// 슬롯 id 를 함께 들 필요가 없다.
+    login_code_edit: String,
     /// Debounced window-frame save deadline: set 1s after every Moved/Resized,
     /// written by about_to_wait. Exit-only persistence lost the frame on a
     /// crash/force-quit.
@@ -5734,11 +5752,24 @@ impl App {
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            persona: state::PersonaState::default(),
+            persona: personacol::PersonaColState::with_sources(
+                {
+                    let proxy = proxy.clone();
+                    move || {
+                        let _ = proxy.send_event(UserEvent::Redraw);
+                    }
+                },
+                |slug| {
+                    crate::sprites::student_sprite_png(slug, "idle")
+                        .and_then(|frames| frames.first().copied())
+                        .map(<[u8]>::to_vec)
+                },
+            ),
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
+                    .unwrap_or(false)
+                    || std::env::var_os("KASATERM_PERSONA").is_some(),
                 col_w_logical: GIT_COL_W,
                 // KASATERM_FORCE_ACCOUNT_MENU 와 같은 헤드리스 검증용 — 클릭 합성
                 // 없이 모달이 열린 프레임을 캡처한다(모달은 창 안 모든 것 위에
@@ -5855,6 +5886,7 @@ impl App {
             theme_label_edit: None,
             custom_theme_label_edit: None,
             account_label_edit: None,
+            login_code_edit: String::new(),
             settings_caret: 0,
             window_frame_save_due: None,
             md_select_drag: None,
