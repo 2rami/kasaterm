@@ -151,6 +151,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             children: [
               Expanded(
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     // 데스크톱 pane 의 학생색 리본 — 어느 학생 화면인지 색으로 안다.
                     Container(width: 3, color: accent),
