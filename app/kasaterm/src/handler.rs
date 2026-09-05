@@ -858,6 +858,7 @@ impl ApplicationHandler<UserEvent> for App {
                 newroom,
                 attach,
                 harness,
+                reply,
             } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
@@ -966,12 +967,17 @@ impl ApplicationHandler<UserEvent> for App {
                         let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                         self.pending_restores.push((sess, cmd, at));
                     }
+                    if let Some(reply) = reply {
+                        let _ = reply.send(crate::native_board::confirmed_resume_pane(Some(new_id)));
+                    }
+                } else if let Some(reply) = reply {
+                    let _ = reply.send(crate::native_board::confirmed_resume_pane(None));
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
             }
-            UserEvent::SaveSession { surface } => {
+            UserEvent::SaveSession { surface, reply } => {
                 // foreground claude 를 background daemon 으로 detach: 입력칸 비우고(Ctrl-U)
                 // ←←(agents view = "bg-detach") 를 gap 두고 주입한다. claude TUI 의
                 // leftArrowOpensAgents(기본 ON) confirm-on-second-press 를 태운다 — 첫 ←
@@ -990,7 +996,14 @@ impl ApplicationHandler<UserEvent> for App {
                             .push((sess.clone(), "\u{1b}[D".to_string(), at(80)));
                         self.pending_restores
                             .push((sess, "\u{1b}[D".to_string(), at(160)));
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Ok(pane));
+                        }
+                    } else if let Some(reply) = reply {
+                        let _ = reply.send(Err("저장할 로컬 pane이 없어요".to_string()));
                     }
+                } else if let Some(reply) = reply {
+                    let _ = reply.send(Err("저장할 pane을 고르지 못했어요".to_string()));
                 }
                 return;
             }
@@ -1562,8 +1575,6 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.close_inline_web();
         self.close_web_hosts();
-        // 부모 창이 사라진 뒤에 드롭되면 use-after-free 다.
-        self.persona.webview = None;
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
         self.save_session_state();
@@ -2689,6 +2700,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_wheel(delta);
                 } else if self.board_room_active() {
                     self.native_board_wheel(delta);
+                } else if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
+                    self.persona_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
                 }
@@ -2754,6 +2767,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_board_cursor(self.cursor_px.0, self.cursor_px.1);
+                    self.text_cursor_shown = cursor == CursorIcon::Text;
+                    window.set_cursor(cursor);
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
+                if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
+                    let cursor = self.persona_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
                     window.set_cursor(cursor);
                     self.chrome_dirty = true;
@@ -3853,6 +3874,14 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
+                    if matches!(state, ElementState::Pressed) {
+                        self.last_input_at = Instant::now();
+                        self.persona_click(self.cursor_px.0, self.cursor_px.1);
+                    }
+                    window.request_redraw();
+                    return;
+                }
                 // Settings: the sidebar entry toggles the screen. While it's
                 // open, clicks in the view area (right of the sidebar) route to
                 // the form; a click on the session sidebar closes settings and
@@ -4684,6 +4713,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(t, r)| (*t, *r))
                         {
                             if self.info.tab != tab {
+                                if self.info.tab == state::SideTab::Persona {
+                                    self.persona_blur();
+                                }
                                 self.info.tab = tab;
                                 // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
                                 // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
@@ -6173,6 +6205,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_board_ime(ime);
                     return;
                 }
+                if self.persona_active()
+                    && matches!(self.ime_focus, Some(crate::ImeFocus::Persona(_)))
+                {
+                    self.persona_ime(ime);
+                    window.request_redraw();
+                    return;
+                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -6410,6 +6449,23 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 설정·보드 방과 persona 입력칸은 아래에서 키를 통째로 삼킨다
+                // (내부 방은 무조건 return, `persona_key` 는 host_mod 를 전부 소비).
+                // 아로나 토글이 그 뒤에 있으면 그 화면들에서 영영 안 먹으므로,
+                // `Cmd+,`(설정) 와 같은 자리에서 먼저 잡는다.
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && self.modifiers.shift_key()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA)
+                    )
+                {
+                    self.toggle_arona_panel(event_loop);
+                    window.request_redraw();
+                    return;
+                }
                 if self.settings_room_active() {
                     if matches!(event.state, ElementState::Pressed)
                         && !event.repeat
@@ -6436,16 +6492,7 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if matches!(event.state, ElementState::Pressed)
-                    && !event.repeat
-                    && self.host_mod()
-                    && self.modifiers.shift_key()
-                    && matches!(
-                        event.physical_key,
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA)
-                    )
-                {
-                    self.toggle_arona_panel(event_loop);
+                if self.persona_active() && self.persona_key(&event) {
                     window.request_redraw();
                     return;
                 }
@@ -6521,12 +6568,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // 켜져 있어야 하는데 아직 웹뷰가 없으면 여기서 세운다. `resumed` 에서 바로
-        // 열지 않는 이유는 MCP HTTP 서버가 그 시점엔 아직 포트를 안 잡았을 수 있어서다
-        // — 페이지가 same-origin 으로 API 를 부르므로 포트가 틀리면 빈 화면이 된다.
-        // 탭 전환·창 리사이즈·첫 진입이 전부 같은 동기화 한 번으로 정리된다. 렌더가
-        // 본문 자리를 적어 준 **뒤**라야 하므로 여기(프레임 끝)가 그 자리다.
-        self.sync_persona_view();
         self.refresh_machines_col();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
@@ -6534,6 +6575,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.themegen_poll();
         self.native_settings_tick();
         self.native_board_tick();
+        self.persona_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크

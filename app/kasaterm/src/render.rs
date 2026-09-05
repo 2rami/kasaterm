@@ -8117,9 +8117,8 @@ impl App {
                     }
                 }
             }
-            // 페르소나 탭 — 배경과 탭 머리까지만 셀 렌더로 그리고, 본문 사각형은
-            // 자식 웹뷰에게 넘긴다. 여기서 자리를 적어 두지 않으면 웹뷰가 어디에
-            // 앉을지 알 수 없다(탭 머리 높이는 탭 글자 폭까지 재야 나온다).
+            // 페르소나 탭 — 다른 칼럼과 같은 wgpu 본문. worker가 준비한 메모리
+            // 스냅샷만 읽으므로 이 paint 경로에는 파일·HTTP 작업이 없다.
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Persona {
                 let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
                     0.0
@@ -8139,12 +8138,30 @@ impl App {
                     git_col_w,
                     top,
                 );
-                self.persona.body_rect = Some((
-                    git_col_x + 1.0,
-                    body_top,
-                    (git_col_w - 1.0).max(0.0),
-                    (bottom - body_top).max(0.0),
-                ));
+                let body = crate::personacol::UiRect {
+                    x: git_col_x + 1.0,
+                    y: body_top,
+                    w: (git_col_w - 1.0).max(0.0),
+                    h: (bottom - body_top).max(0.0),
+                };
+                let focused = match self.ime_focus.as_ref() {
+                    Some(crate::ImeFocus::Persona(input)) => Some(*input),
+                    _ => None,
+                };
+                let preedit = if focused.is_some() {
+                    self.preedit.as_str()
+                } else {
+                    ""
+                };
+                crate::personacol::paint(
+                    g,
+                    &mut self.persona,
+                    self.cursor_px,
+                    body,
+                    focused,
+                    preedit,
+                    self.last_blink_on,
+                );
             }
             // 이사 탭 — 다른 칼럼들과 같은 네이티브 본문(machinescol.rs).
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Machines {
@@ -13388,6 +13405,9 @@ impl App {
         }
         if let Some(output) = board_paint {
             self.finish_native_board_paint(output);
+        }
+        if self.persona_active() {
+            self.finish_persona_paint();
         }
         if let Some(p) = self.account_switch_confirm.as_mut() {
             if !account_confirm_hits.is_empty() {

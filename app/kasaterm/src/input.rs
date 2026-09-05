@@ -2409,6 +2409,7 @@ impl App {
                 self.native_settings_insert_into(field, &text)
             }
             crate::ImeFocus::Board(field) => self.native_board_insert_into(field, &text),
+            crate::ImeFocus::Persona(field) => self.persona_insert_into(field, &text),
         }
     }
 

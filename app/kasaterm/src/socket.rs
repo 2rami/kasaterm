@@ -1213,6 +1213,7 @@ impl Backend for PtyBackend {
                 newroom,
                 attach,
                 harness: harness.to_string(),
+                reply: None,
             })
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())
@@ -1222,6 +1223,7 @@ impl Backend for PtyBackend {
         self.proxy
             .send_event(UserEvent::SaveSession {
                 surface: surface.map(str::to_string),
+                reply: None,
             })
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())

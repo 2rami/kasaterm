@@ -153,6 +153,7 @@ impl App {
                         newroom: false,
                         attach: false,
                         harness: s.harness.clone(),
+                        reply: None,
                     });
                 }
                 return true;

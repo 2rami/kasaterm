@@ -77,6 +77,20 @@ pub(crate) struct BackgroundRow {
     pub(crate) pid: u32,
     pub(crate) started_at: u64,
     pub(crate) parent_surface: Option<String>,
+    /// 원격 board에서 온 세션이면 기계 라벨. 로컬 PID와 같은 숫자여도 이 값이
+    /// 있으면 이 프로세스에서 signal을 보내면 안 된다.
+    pub(crate) machine: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalBackgroundProcess {
+    pub(crate) pid: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BringHomeTarget {
+    pub(crate) local_pane: String,
+    pub(crate) machine: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,6 +145,8 @@ pub(crate) struct BoardData {
     pub(crate) machines: Arc<Vec<MachineRow>>,
     pub(crate) git: Arc<GitSnapshot>,
     pub(crate) faces: Arc<Vec<FaceAsset>>,
+    /// 로컬 앱 안의 mirror pane이며 remote origin mapping까지 확인된 id만.
+    pub(crate) bring_home: Arc<HashSet<String>>,
     pub(crate) error: Option<String>,
 }
 
@@ -162,7 +178,9 @@ pub(crate) enum Target {
     ToggleAgentDetail(String),
     SavePane(String),
     ResumeBackground(String, String),
-    StopBackground(u32),
+    StopBackground(LocalBackgroundProcess),
+    ConfirmStopBackground(LocalBackgroundProcess),
+    CancelStopBackground,
     ScheduleKind(String),
     ScheduleSurface(String),
     Input(BoardInput),
@@ -175,6 +193,7 @@ pub(crate) enum Target {
     GitCommit,
     GitPush,
     Migrate(String, String),
+    BringHome(BringHomeTarget),
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +226,7 @@ pub(crate) struct Snapshot {
     pub(crate) caret_on: bool,
     pub(crate) toast: Option<(bool, String)>,
     pub(crate) expanded_agent: Option<String>,
+    pub(crate) pending_stop: Option<LocalBackgroundProcess>,
 }
 
 pub(crate) struct PaintOutput {
@@ -246,6 +266,7 @@ pub(crate) struct Scene {
     git_selected: HashSet<String>,
     toast: Option<(bool, String, Instant)>,
     expanded_agent: Option<String>,
+    pending_stop: Option<LocalBackgroundProcess>,
 }
 
 impl Default for Scene {
@@ -280,6 +301,7 @@ impl Default for Scene {
             git_selected: HashSet::new(),
             toast: None,
             expanded_agent: None,
+            pending_stop: None,
         }
     }
 }
@@ -310,6 +332,7 @@ impl Scene {
         self.caret_rect = None;
         self.scroll = 0.0;
         self.scroll_max = 0.0;
+        self.pending_stop = None;
     }
 
     pub(crate) fn return_pane(&self) -> Option<&str> {
@@ -398,6 +421,7 @@ impl Scene {
             caret_on,
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
             expanded_agent: self.expanded_agent.clone(),
+            pending_stop: self.pending_stop.clone(),
         }
     }
 
@@ -411,6 +435,14 @@ impl Scene {
         } else {
             self.expanded_agent = Some(pane);
         }
+    }
+
+    pub(crate) fn arm_stop(&mut self, target: LocalBackgroundProcess) {
+        self.pending_stop = Some(target);
+    }
+
+    pub(crate) fn clear_stop(&mut self) {
+        self.pending_stop = None;
     }
 
     pub(crate) fn toggle_git_file(&mut self, path: String) {
@@ -568,13 +600,48 @@ impl Scene {
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
+
+    pub(crate) fn wait_for_gui_result(
+        &mut self,
+        receiver: std::sync::mpsc::Receiver<std::result::Result<String, String>>,
+        success: &'static str,
+        proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    ) {
+        self.action_generation += 1;
+        let generation = self.action_generation;
+        let mailbox = self.mailbox.clone();
+        std::thread::spawn(move || {
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .map_err(|_| "pane 생성 응답이 없어요".to_string())
+                .and_then(|result| result);
+            let (ok, message) = match result {
+                Ok(pane) => (true, format!("{success} · {pane}")),
+                Err(error) => (false, error),
+            };
+            mailbox.lock().unwrap().actions.push(ActionEnvelope {
+                generation,
+                ok,
+                message,
+            });
+            let _ = proxy.send_event(UserEvent::Redraw);
+        });
+    }
+
+    pub(crate) fn report_error(&mut self, message: impl Into<String>) {
+        self.toast = Some((false, message.into(), Instant::now()));
+    }
+}
+
+pub(crate) fn confirmed_resume_pane(
+    created: Option<String>,
+) -> std::result::Result<String, String> {
+    created.ok_or_else(|| "이어받을 pane을 만들지 못했어요".to_string())
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum WorkerAction {
-    SavePane(String),
-    ResumeBackground { id: String, cwd: String },
-    StopBackground(u32),
+    StopBackground(LocalBackgroundProcess),
     ScheduleAdd {
         kind: String,
         surface: String,
@@ -591,25 +658,18 @@ pub(crate) enum WorkerAction {
     },
     GitPush { cwd: String },
     Migrate { pane: String, target: String },
+    BringHome(BringHomeTarget),
 }
 
 fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::Result<String> {
     match action {
-        WorkerAction::SavePane(pane) => {
-            backend.save_session(Some(&pane))?;
-            Ok("대화를 백그라운드에 저장했어요".to_string())
-        }
-        WorkerAction::ResumeBackground { id, cwd } => {
-            backend.resume_session(&id, Some(&cwd), false, true, "claude")?;
-            Ok("세션을 새 pane으로 이어받았어요".to_string())
-        }
-        WorkerAction::StopBackground(pid) => {
-            if pid == 0 {
+        WorkerAction::StopBackground(target) => {
+            if target.pid == 0 {
                 anyhow::bail!("종료할 세션 pid가 없어요");
             }
             let output = crate::proc::command("kill")
                 .arg("-TERM")
-                .arg(pid.to_string())
+                .arg(target.pid.to_string())
                 .output()?;
             if !output.status.success() {
                 anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -670,24 +730,37 @@ fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::R
             Ok("푸시했어요".to_string())
         }
         WorkerAction::Migrate { pane, target } => {
-            let id = if target == "local" {
-                backend.migrate_pane_back(&pane, None, false)?
-            } else {
-                let machine = kasa_mcp::machines::find(&target)
-                    .ok_or_else(|| anyhow::anyhow!("기계 {target}를 찾지 못했어요"))?;
-                let local = backend
-                    .collab_board()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|row| row.surface_id == pane)
-                    .map(|row| row.cwd)
-                    .filter(|cwd| !cwd.is_empty());
-                let remote = local
-                    .as_deref()
-                    .and_then(|cwd| kasa_mcp::machines::map_local_to_remote(&machine, cwd));
-                backend.migrate_pane(&pane, &machine.base, remote.as_deref(), false, None)?
-            };
+            let machine = kasa_mcp::machines::find(&target)
+                .ok_or_else(|| anyhow::anyhow!("기계 {target}를 찾지 못했어요"))?;
+            let local = backend
+                .collab_board()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|row| row.surface_id == pane)
+                .map(|row| row.cwd)
+                .filter(|cwd| !cwd.is_empty());
+            let remote = local
+                .as_deref()
+                .and_then(|cwd| kasa_mcp::machines::map_local_to_remote(&machine, cwd));
+            let id = backend.migrate_pane(&pane, &machine.base, remote.as_deref(), false, None)?;
             Ok(format!("이사를 마쳤어요 · {id}"))
+        }
+        WorkerAction::BringHome(target) => {
+            let info = kasa_mcp::remote::remote_info(&target.local_pane)
+                .ok_or_else(|| anyhow::anyhow!("원격 origin mapping이 사라졌어요"))?;
+            let actual_machine = if info.label.is_empty() {
+                info.base
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+                    .to_string()
+            } else {
+                info.label
+            };
+            if actual_machine != target.machine {
+                anyhow::bail!("원격 기계 정체가 바뀌었어요 — 목록을 새로고침해 주세요");
+            }
+            let id = backend.migrate_pane_back(&target.local_pane, None, false)?;
+            Ok(format!("데려오기를 마쳤어요 · {id}"))
         }
     }
 }
@@ -705,6 +778,14 @@ fn collect_data(
             Vec::new()
         }
     };
+    let bring_home: HashSet<String> = agents
+        .iter()
+        .filter(|row| {
+            row.machine.is_some()
+                && kasa_mcp::remote::remote_info(&row.surface_id).is_some()
+        })
+        .map(|row| row.surface_id.clone())
+        .collect();
     agents.extend(
         kasa_mcp::remoteboard::board_rows()
             .into_iter()
@@ -748,6 +829,7 @@ fn collect_data(
         machines: Arc::new(machines),
         git: Arc::new(git),
         faces: Arc::new(faces),
+        bring_home: Arc::new(bring_home),
         error: (!errors.is_empty()).then(|| errors.join(" · ")),
     }
 }
@@ -759,12 +841,25 @@ fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<Backgrou
     if !output.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    let mut values = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)?;
-    values.extend(kasa_mcp::remoteboard::background_agents());
+    let local = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)?;
+    let values = local
+        .into_iter()
+        .map(|value| (value, None))
+        .chain(
+            kasa_mcp::remoteboard::background_agents()
+                .into_iter()
+                .map(|value| {
+                    let machine = value
+                        .get("machine")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    (value, machine)
+                }),
+        );
     let pane_sids = backend.pane_session_ids().unwrap_or_default();
     Ok(values
         .into_iter()
-        .map(|value| {
+        .map(|(value, machine)| {
             let session_id = text_value(&value, "sessionId");
             let parent_surface = value
                 .get("parentSurface")
@@ -790,6 +885,7 @@ fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<Backgrou
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0),
                 parent_surface,
+                machine,
             }
         })
         .collect())
@@ -905,13 +1001,13 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         .data
         .agents
         .iter()
-        .filter(|row| matches!(row.status.as_str(), "working" | "building"))
+        .filter(|row| agent_is_working(row))
         .count();
     let waiting = snapshot
         .data
         .agents
         .iter()
-        .filter(|row| row.waiting_for.is_some() || matches!(row.status.as_str(), "waiting" | "blocked"))
+        .filter(|row| agent_needs_attention(row))
         .count();
     text(
         g,
@@ -1061,7 +1157,7 @@ fn paint_overview(
         .data
         .agents
         .iter()
-        .filter(|row| row.waiting_for.is_some() || matches!(row.status.as_str(), "waiting" | "blocked"))
+        .filter(|row| agent_needs_attention(row))
         .collect();
     if !awaiting.is_empty() {
         section(g, x, y, "확인 필요", &format!("선생님을 기다리는 학생 {}명", awaiting.len()));
@@ -1079,7 +1175,9 @@ fn paint_overview(
                 theme::danger(),
                 false,
             );
-            hit(g, hits, Target::FocusPane(row.surface_id.clone()), rect, false);
+            if row.machine.is_none() {
+                hit(g, hits, Target::FocusPane(row.surface_id.clone()), rect, false);
+            }
             *y += 48.0;
         }
         *y += 8.0;
@@ -1090,13 +1188,27 @@ fn paint_overview(
         return;
     }
     for row in s.data.agents.iter() {
-        let tasks: Vec<_> = s.data.tasks.iter().filter(|task| task.pane == row.surface_id).collect();
+        let room_tasks: Vec<_> = s
+            .data
+            .tasks
+            .iter()
+            .filter(|task| task.pane == row.surface_id)
+            .collect();
+        let tasks: Vec<_> = room_tasks.iter().copied().filter(|task| task.mine).collect();
+        let unassigned = room_tasks.iter().filter(|task| task.owner.is_empty()).count();
+        let others = room_tasks
+            .iter()
+            .filter(|task| !task.mine && !task.owner.is_empty())
+            .count();
         let expanded = s.expanded_agent.as_deref() == Some(row.surface_id.as_str());
+        let task_fold_lines = usize::from(unassigned > 0) + usize::from(others > 0);
         let summary_lines = usize::from(!tasks.is_empty())
+            + task_fold_lines
             + usize::from(!row.subagents.is_empty() || !row.background.is_empty())
             + usize::from(!row.recent_tools.is_empty());
         let detail_lines = if expanded {
             tasks.len().min(5)
+                + task_fold_lines
                 + row.subagents.len().min(3)
                 + row.background.len().min(3)
                 + row.recent_tools.len().min(8)
@@ -1131,8 +1243,20 @@ fn paint_overview(
             Target::ToggleAgentDetail(row.surface_id.clone()),
             false,
         );
-        let save = (rect.0 + rect.2 - 72.0, rect.1 + 12.0, 60.0, 28.0);
-        button(g, s, hits, save, "저장", Target::SavePane(row.surface_id.clone()), false);
+        if row.machine.is_none() {
+            let save = (rect.0 + rect.2 - 72.0, rect.1 + 12.0, 60.0, 28.0);
+            button(g, s, hits, save, "저장", Target::SavePane(row.surface_id.clone()), false);
+        } else {
+            text(
+                g,
+                rect.0 + rect.2 - 72.0,
+                rect.1 + 20.0,
+                "원격",
+                10.0,
+                theme::text_mute(),
+                true,
+            );
+        }
         let mut ey = rect.1 + 70.0;
         if !tasks.is_empty() {
             if expanded {
@@ -1150,6 +1274,32 @@ fn paint_overview(
                 text(g, rect.0 + 36.0, ey + 1.0, &format!("태스크 · 진행 {doing} · 완료 {done}"), 10.5, theme::text_dim(), false);
                 ey += 22.0;
             }
+        }
+        if unassigned > 0 {
+            g.queue_icon("square", rect.0 + 16.0, ey, 13.0, theme::text_mute());
+            text(
+                g,
+                rect.0 + 36.0,
+                ey + 1.0,
+                &format!("미배정 태스크 {unassigned}개"),
+                10.5,
+                theme::text_mute(),
+                false,
+            );
+            ey += 22.0;
+        }
+        if others > 0 {
+            g.queue_icon("users", rect.0 + 16.0, ey, 13.0, theme::text_mute());
+            text(
+                g,
+                rect.0 + 36.0,
+                ey + 1.0,
+                &format!("같은 방 다른 캐릭터 태스크 {others}개"),
+                10.5,
+                theme::text_mute(),
+                false,
+            );
+            ey += 22.0;
         }
         if !row.subagents.is_empty() || !row.background.is_empty() {
             if expanded {
@@ -1215,30 +1365,64 @@ fn paint_agents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
             .as_deref()
             .map(|pane| format!("연결 {pane}"))
             .unwrap_or_else(|| format_age(row.started_at));
+        let location = row.machine.as_deref().unwrap_or("이 기기");
         let sub = format!(
-            "{} · {} · {}",
+            "{} · {} · {} · {}",
             background_state(row),
             short_path(&row.cwd),
-            origin
+            origin,
+            location,
         );
         let sub = fit(g, &sub, w - 210.0, 10.5, false);
         text(g, rect.0 + 14.0, rect.1 + 32.0, &sub, 10.5, theme::text_dim(), false);
-        if row.kind == "background" {
-            let resume = (rect.0 + rect.2 - 164.0, rect.1 + 14.0, 96.0, 30.0);
-            button(
+        if row.kind == "background" && row.machine.is_none() {
+            // 멈춤은 되돌릴 수 없다. 확인을 기다리는 행은 「이어받기」를 접고 그
+            // 자리를 확인 버튼에 내준다 — 둘을 함께 두면 폭이 겹치고, 이 순간
+            // 고를 것은 멈출지 말지뿐이다.
+            let pending = background_stop_target(row)
+                .filter(|target| s.pending_stop.as_ref() == Some(target));
+            if let Some(target) = pending {
+                let confirm = (rect.0 + rect.2 - 164.0, rect.1 + 14.0, 96.0, 30.0);
+                button(
+                    g,
+                    s,
+                    hits,
+                    confirm,
+                    "정말 멈추기",
+                    Target::ConfirmStopBackground(target),
+                    true,
+                );
+                let cancel = (rect.0 + rect.2 - 56.0, rect.1 + 14.0, 44.0, 30.0);
+                icon_button(g, s, hits, cancel, "x", Target::CancelStopBackground);
+            } else {
+                let resume = (rect.0 + rect.2 - 164.0, rect.1 + 14.0, 96.0, 30.0);
+                button(
+                    g,
+                    s,
+                    hits,
+                    resume,
+                    "이어받기",
+                    Target::ResumeBackground(
+                        if row.id.is_empty() { row.session_id.clone() } else { row.id.clone() },
+                        row.cwd.clone(),
+                    ),
+                    true,
+                );
+                let stop = (rect.0 + rect.2 - 56.0, rect.1 + 14.0, 44.0, 30.0);
+                if let Some(target) = background_stop_target(row) {
+                    icon_button(g, s, hits, stop, "x", Target::StopBackground(target));
+                }
+            }
+        } else if row.kind == "background" {
+            text(
                 g,
-                s,
-                hits,
-                resume,
-                "이어받기",
-                Target::ResumeBackground(
-                    if row.id.is_empty() { row.session_id.clone() } else { row.id.clone() },
-                    row.cwd.clone(),
-                ),
-                true,
+                rect.0 + rect.2 - 176.0,
+                rect.1 + 21.0,
+                "원격 기기에서만 제어 가능",
+                10.0,
+                theme::text_mute(),
+                false,
             );
-            let stop = (rect.0 + rect.2 - 56.0, rect.1 + 14.0, 44.0, 30.0);
-            icon_button(g, s, hits, stop, "x", Target::StopBackground(row.pid));
         }
         *y += 66.0;
     }
@@ -1417,6 +1601,38 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
                 .unwrap_or_else(|| "연결이 닿지 않아요".to_string())
         };
         section(g, x, y, &machine.label, &state);
+        for row in s.data.agents.iter().filter(|row| {
+            row.machine.as_deref() == Some(machine.label.as_str())
+                && s.data.bring_home.contains(&row.surface_id)
+        }) {
+            let rect = (x, *y, w, 48.0);
+            outlined(g, rect, theme::surface_hover());
+            status_dot(g, rect.0 + 14.0, rect.1 + 19.0, row);
+            text(
+                g,
+                rect.0 + 32.0,
+                rect.1 + 7.0,
+                &agent_name(row),
+                12.0,
+                theme::text(),
+                true,
+            );
+            let title = fit(g, &row.title, w - 170.0, 10.5, false);
+            text(g, rect.0 + 32.0, rect.1 + 26.0, &title, 10.5, theme::text_dim(), false);
+            button(
+                g,
+                s,
+                hits,
+                (rect.0 + rect.2 - 104.0, rect.1 + 9.0, 92.0, 30.0),
+                "← 데려오기",
+                Target::BringHome(BringHomeTarget {
+                    local_pane: row.surface_id.clone(),
+                    machine: machine.label.clone(),
+                }),
+                false,
+            );
+            *y += 56.0;
+        }
         for pane in &machine.panes {
             let rect = (x, *y, w, 48.0);
             outlined(g, rect, theme::surface_hover());
@@ -1424,9 +1640,15 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
             text(g, rect.0 + 32.0, rect.1 + 7.0, if pane.name.is_empty() { &pane.id } else { &pane.name }, 12.0, theme::text(), true);
             let title = fit(g, &pane.title, w - 170.0, 10.5, false);
             text(g, rect.0 + 32.0, rect.1 + 26.0, &title, 10.5, theme::text_dim(), false);
-            if !pane.id.is_empty() {
-                button(g, s, hits, (rect.0 + rect.2 - 104.0, rect.1 + 9.0, 92.0, 30.0), "← 데려오기", Target::Migrate(pane.id.clone(), "local".to_string()), false);
-            }
+            text(
+                g,
+                rect.0 + rect.2 - 126.0,
+                rect.1 + 17.0,
+                "원격 목록",
+                10.0,
+                theme::text_mute(),
+                false,
+            );
             *y += 56.0;
         }
     }
@@ -1574,16 +1796,25 @@ fn status_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, row: &PaneActivity) {
 }
 
 fn status_dot_raw(g: &mut gpu::GpuRenderer, x: f32, y: f32, status: &str) {
-    let color = if matches!(status, "waiting" | "blocked") { theme::danger() } else if matches!(status, "working" | "building" | "thinking") { theme::accent() } else { theme::success() };
+    let color = if status == "blocked" {
+        theme::danger()
+    } else if matches!(
+        status,
+        "working" | "building" | "waiting" | "thinking" | "compacting"
+    ) {
+        theme::accent()
+    } else {
+        theme::success()
+    };
     circle_rect(g, x, y, 8.0, color);
 }
 
 fn status_color(row: &PaneActivity) -> [u8; 4] {
-    if row.waiting_for.is_some() || matches!(row.status.as_str(), "waiting" | "blocked") {
+    if agent_needs_attention(row) {
         theme::danger()
     } else if row.done_outcome.as_deref() == Some("failed") {
         theme::danger()
-    } else if matches!(row.status.as_str(), "working" | "building" | "thinking") {
+    } else if agent_is_working(row) {
         theme::accent()
     } else {
         theme::success()
@@ -1591,15 +1822,30 @@ fn status_color(row: &PaneActivity) -> [u8; 4] {
 }
 
 fn status_label(row: &PaneActivity) -> String {
-    if row.waiting_for.is_some() || matches!(row.status.as_str(), "waiting" | "blocked") {
+    if agent_needs_attention(row) {
         "확인 필요".to_string()
     } else if let Some(outcome) = &row.done_outcome {
         if outcome == "succeeded" { "완료 보고".to_string() } else { "실패 보고".to_string() }
-    } else if matches!(row.status.as_str(), "working" | "building") {
+    } else if row.status == "thinking" {
+        "생각 중".to_string()
+    } else if row.status == "compacting" {
+        "대화 정리 중".to_string()
+    } else if agent_is_working(row) {
         if row.intent.is_empty() { "작업 중".to_string() } else { row.intent.clone() }
     } else {
         "대기 중".to_string()
     }
+}
+
+fn agent_needs_attention(row: &PaneActivity) -> bool {
+    row.waiting_for.is_some() || row.status == "blocked"
+}
+
+fn agent_is_working(row: &PaneActivity) -> bool {
+    matches!(
+        row.status.as_str(),
+        "working" | "building" | "waiting" | "compacting" | "thinking"
+    )
 }
 
 fn agent_name(row: &PaneActivity) -> String {
@@ -1618,6 +1864,10 @@ fn background_state(row: &BackgroundRow) -> &str {
         "running" | "working" => "작업 중",
         _ => if row.status.is_empty() { "대기" } else { &row.status },
     }
+}
+
+fn background_stop_target(row: &BackgroundRow) -> Option<LocalBackgroundProcess> {
+    (row.machine.is_none() && row.pid > 0).then_some(LocalBackgroundProcess { pid: row.pid })
 }
 
 fn schedule_when(item: &kasa_mcp::ScheduleItem) -> String {
@@ -1773,8 +2023,17 @@ impl App {
     pub(crate) fn native_board_click(&mut self, x: f32, y: f32) -> bool {
         let Some(target) = self.board_scene.hit_at(x, y).map(|hit| hit.target.clone()) else {
             self.native_board_blur();
+            self.board_scene.clear_stop();
             return false;
         };
+        // 멈춤 확인은 그 행에서 답할 때만 살아 있다. 다른 곳을 누르면 접어, 화면에
+        // 남은 확인이 나중 클릭에 엉뚱하게 걸리지 않게 한다.
+        if !matches!(
+            target,
+            Target::StopBackground(_) | Target::ConfirmStopBackground(_)
+        ) {
+            self.board_scene.clear_stop();
+        }
         match target {
             Target::Tab(tab) => {
                 self.native_board_blur();
@@ -1792,13 +2051,24 @@ impl App {
             }
             Target::ToggleAgentDetail(pane) => self.board_scene.toggle_agent_detail(pane),
             Target::SavePane(pane) => {
-                self.run_native_board_action(WorkerAction::SavePane(pane));
+                self.save_pane_confirmed(pane);
             }
             Target::ResumeBackground(id, cwd) => {
-                self.run_native_board_action(WorkerAction::ResumeBackground { id, cwd });
+                self.resume_background_in_target_room(id, cwd);
             }
-            Target::StopBackground(pid) => {
-                self.run_native_board_action(WorkerAction::StopBackground(pid));
+            Target::StopBackground(target) => {
+                // 첫 클릭은 확인을 세우기만 한다 — 여기서 kill 을 보내면 잘못 누른
+                // 한 번으로 배경 세션이 사라지고 되돌릴 방법이 없다.
+                self.board_scene.arm_stop(target);
+                self.board_scene
+                    .report_error("멈추면 되돌릴 수 없어요 · 「정말 멈추기」를 눌러 주세요".to_string());
+            }
+            Target::ConfirmStopBackground(target) => {
+                self.board_scene.clear_stop();
+                self.run_native_board_action(WorkerAction::StopBackground(target));
+            }
+            Target::CancelStopBackground => {
+                self.board_scene.clear_stop();
             }
             Target::ScheduleKind(kind) => self.board_scene.set_schedule_kind(kind),
             Target::ScheduleSurface(surface) => self.board_scene.set_schedule_surface(surface),
@@ -1865,6 +2135,9 @@ impl App {
             Target::Migrate(pane, target) => {
                 self.run_native_board_action(WorkerAction::Migrate { pane, target });
             }
+            Target::BringHome(target) => {
+                self.run_native_board_action(WorkerAction::BringHome(target));
+            }
         }
         self.chrome_dirty = true;
         true
@@ -1876,6 +2149,50 @@ impl App {
         };
         self.board_scene
             .run_action(backend, action, self.proxy.clone());
+    }
+
+    fn resume_background_in_target_room(&mut self, id: String, cwd: String) {
+        let Some(target) = self.board_scene.target_pane().map(str::to_string) else {
+            self.board_scene.report_error("돌아갈 작업 pane이 없어요");
+            return;
+        };
+        self.native_board_blur();
+        if !self.return_from_board_room() || !self.focus_surface(&target) {
+            self.board_scene
+                .report_error("대상 작업 방으로 돌아가지 못했어요");
+            self.set_toast("대상 작업 방으로 돌아가지 못했어요".to_string());
+            return;
+        }
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let event = UserEvent::ResumeSession {
+            id,
+            cwd: (!cwd.is_empty()).then_some(cwd),
+            newroom: false,
+            attach: true,
+            harness: "claude".to_string(),
+            reply: Some(reply),
+        };
+        if self.proxy.send_event(event).is_err() {
+            self.board_scene.report_error("이어받기 요청을 보내지 못했어요");
+            self.set_toast("이어받기 요청을 보내지 못했어요".to_string());
+            return;
+        }
+        self.board_scene
+            .wait_for_gui_result(receiver, "세션을 이어받았어요", self.proxy.clone());
+    }
+
+    fn save_pane_confirmed(&mut self, pane: String) {
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let event = UserEvent::SaveSession {
+            surface: Some(pane),
+            reply: Some(reply),
+        };
+        if self.proxy.send_event(event).is_err() {
+            self.board_scene.report_error("저장 요청을 보내지 못했어요");
+            return;
+        }
+        self.board_scene
+            .wait_for_gui_result(receiver, "백그라운드 저장을 시작했어요", self.proxy.clone());
     }
 
     pub(crate) fn native_board_insert_into(&mut self, field: BoardInput, text: &str) {
@@ -2054,6 +2371,50 @@ mod tests {
         }
     }
 
+    /// 「x」 한 번으로 배경 세션이 죽으면 안 된다 — 되돌릴 수 없다. 첫 클릭은 확인을
+    /// 세우기만 하고, 실제 kill 은 확인 클릭에서만 나간다. 뼈대(enum·arm/clear·
+    /// pending_stop)만 있고 배선이 없으면 화면은 종전처럼 한 번에 죽인다.
+    #[test]
+    fn stopping_a_background_session_needs_a_confirming_second_click() {
+        let source = include_str!("native_board.rs");
+        let click = source
+            .split_once("pub(crate) fn native_board_click")
+            .unwrap()
+            .1
+            .split_once("fn run_native_board_action")
+            .unwrap()
+            .0;
+        let first = click
+            .split_once("Target::StopBackground(target) => {")
+            .expect("첫 클릭 갈래")
+            .1
+            .split_once("Target::ConfirmStopBackground")
+            .expect("확인 갈래가 뒤따라야 한다")
+            .0;
+        assert!(first.contains("arm_stop"), "첫 클릭은 확인만 세운다");
+        assert!(
+            !first.contains("WorkerAction::StopBackground"),
+            "첫 클릭에서 kill 이 나가면 확인 단계가 장식이 된다"
+        );
+        let confirmed = click
+            .split_once("Target::ConfirmStopBackground(target) => {")
+            .expect("확인 갈래")
+            .1;
+        assert!(
+            confirmed.contains("WorkerAction::StopBackground"),
+            "확인 클릭이 실제로 멈춘다"
+        );
+        assert!(click.contains("Target::CancelStopBackground"), "취소 갈래");
+        assert!(
+            click.contains("clear_stop"),
+            "다른 곳을 누르면 확인이 접혀야 한다"
+        );
+        assert!(
+            source.contains("s.pending_stop.as_ref() == Some(target)"),
+            "paint 가 확인 대기 행을 실제로 갈라 그려야 한다"
+        );
+    }
+
     #[test]
     fn clicks_route_mutations_to_typed_worker_actions() {
         let source = include_str!("native_board.rs");
@@ -2065,8 +2426,6 @@ mod tests {
             .unwrap()
             .0;
         for action in [
-            "WorkerAction::SavePane",
-            "WorkerAction::ResumeBackground",
             "WorkerAction::StopBackground",
             "WorkerAction::ScheduleAdd",
             "WorkerAction::ScheduleToggle",
@@ -2074,8 +2433,15 @@ mod tests {
             "WorkerAction::GitCommit",
             "WorkerAction::GitPush",
             "WorkerAction::Migrate",
+            "WorkerAction::BringHome",
         ] {
             assert!(click.contains(action), "worker action routing 누락: {action}");
+        }
+        // 저장·이어받기는 pane 을 실제로 만드는 일이라 워커 스레드가 아니라 GUI
+        // 스레드로 간다(`UserEvent` 의 reply 채널로 결과를 되받는다). 워커에 남으면
+        // 만들어진 pane 을 확인할 길이 없어 성공 토스트가 거짓이 된다.
+        for gui in ["save_pane_confirmed", "resume_background_in_target_room"] {
+            assert!(click.contains(gui), "GUI 스레드 경로 누락: {gui}");
         }
         for forbidden in ["git_status(", "std::process::Command", "read_to_string"] {
             assert!(!click.contains(forbidden), "click에서 직접 I/O 발견: {forbidden}");

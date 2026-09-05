@@ -2365,7 +2365,7 @@ impl App {
                 SideTab::Mcp => self.mcp_col.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
-                SideTab::Persona => {}
+                SideTab::Persona => self.persona.bubble_scroll = px,
                 SideTab::Machines => self.info.machines_col.scroll = px,
             }
         }
@@ -2391,7 +2391,7 @@ impl App {
             SideTab::Mcp => self.mcp_col.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
-            SideTab::Persona => 0.0,
+            SideTab::Persona => self.persona.bubble_scroll,
             SideTab::Machines => self.info.machines_col.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
@@ -2401,7 +2401,7 @@ impl App {
             SideTab::Mcp => self.mcp_col.row_rects.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
-            SideTab::Persona => 0,
+            SideTab::Persona => self.persona.hits.len(),
             SideTab::Machines => self.info.machines_col.btn_rects.len(),
         };
         let (vis_h, content_h) = self.git.col_list_extent;

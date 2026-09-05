@@ -12,6 +12,8 @@ use std::io::Cursor;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
+use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
 pub(crate) const DRAFT_MIN_H: f32 = 36.0;
 pub(crate) const DRAFT_MAX_H: f32 = 96.0;
@@ -22,6 +24,7 @@ const REQUEST_HISTORY_LIMIT: usize = 12;
 const MEMORY_HISTORY_LIMIT: usize = 24;
 const BOARD_SPEAK_COOLDOWN: Duration = Duration::from_secs(45);
 const IDLE_SPEAK_COOLDOWN: Duration = Duration::from_secs(8 * 60);
+const BOARD_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_DRAFT_CHARS: usize = 4_000;
 const MAX_QUERY_CHARS: usize = 128;
 const MAX_DECODE_EDGE: u32 = 2_048;
@@ -200,6 +203,15 @@ pub(crate) struct DraftViewport {
     pub(crate) height: f32,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DraftRowHit {
+    start: usize,
+    len: usize,
+    y: f32,
+    h: f32,
+    caret_xs: Vec<f32>,
+}
+
 impl Default for DraftViewport {
     fn default() -> Self {
         Self {
@@ -266,16 +278,23 @@ pub(crate) struct PersonaColState {
     pub(crate) bubble_extent: (f32, f32),
     pub(crate) roster_extent: (f32, f32),
     pub(crate) hits: Vec<(PersonaAction, UiRect)>,
+    pub(crate) caret_rect: Option<UiRect>,
     generation: u64,
     history: Vec<ConversationTurn>,
     board_signature: Option<String>,
     last_spoke_at: Option<Duration>,
+    last_board_poll_at: Option<Duration>,
+    queued_proactive: Option<ProactiveReason>,
     initial_requested: bool,
     texture_reset_pending: bool,
     tx: Sender<WorkerResult>,
     rx: Receiver<WorkerResult>,
     wake: Wake,
     fallback_bytes: FallbackBytes,
+    draft_rows: Vec<DraftRowHit>,
+    query_rect: Option<UiRect>,
+    query_visible_start: usize,
+    query_caret_xs: Vec<f32>,
 }
 
 impl Default for PersonaColState {
@@ -317,16 +336,23 @@ impl PersonaColState {
             bubble_extent: (0.0, 0.0),
             roster_extent: (0.0, 0.0),
             hits: Vec::new(),
+            caret_rect: None,
             generation: 1,
             history: Vec::new(),
             board_signature: None,
             last_spoke_at: None,
+            last_board_poll_at: None,
+            queued_proactive: None,
             initial_requested: false,
             texture_reset_pending: false,
             tx,
             rx,
             wake: Arc::new(wake),
             fallback_bytes: Arc::new(fallback_bytes),
+            draft_rows: Vec::new(),
+            query_rect: None,
+            query_visible_start: 0,
+            query_caret_xs: Vec::new(),
         }
     }
 
@@ -567,6 +593,23 @@ impl PersonaColState {
         .then_some(ProactiveReason::Idle)
     }
 
+    pub(crate) fn board_poll_due(&self, now: Duration) -> bool {
+        self.last_board_poll_at
+            .is_none_or(|at| now.saturating_sub(at) >= BOARD_POLL_INTERVAL)
+    }
+
+    pub(crate) fn mark_board_poll(&mut self, now: Duration) {
+        self.last_board_poll_at = Some(now);
+    }
+
+    pub(crate) fn defer_proactive(&mut self, reason: ProactiveReason) {
+        self.queued_proactive.get_or_insert(reason);
+    }
+
+    pub(crate) fn take_deferred_proactive(&mut self) -> Option<ProactiveReason> {
+        self.queued_proactive.take()
+    }
+
     pub(crate) fn open_roster(&mut self) {
         self.roster_open = true;
         self.roster_query.clear();
@@ -656,6 +699,11 @@ impl PersonaColState {
         };
     }
 
+    pub(crate) fn set_caret(&mut self, input: PersonaInput, at: usize) {
+        let (value, caret) = self.text_mut(input);
+        *caret = at.min(value.chars().count());
+    }
+
     pub(crate) fn draft_enter(&mut self, shift: bool, composing: bool) -> DraftEnter {
         if composing || self.busy || self.switching_to.is_some() {
             return DraftEnter::Ignored;
@@ -728,6 +776,10 @@ impl PersonaColState {
     pub(crate) fn begin_layout(&mut self, body_rect: UiRect) {
         self.body_rect = body_rect;
         self.hits.clear();
+        self.caret_rect = None;
+        self.draft_rows.clear();
+        self.query_rect = None;
+        self.query_caret_xs.clear();
     }
 
     pub(crate) fn push_hit(&mut self, action: PersonaAction, rect: UiRect) {
@@ -747,8 +799,30 @@ impl PersonaColState {
         std::mem::take(&mut self.texture_reset_pending)
     }
 
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    fn place_caret(&mut self, input: PersonaInput, point: (f32, f32)) {
+        match input {
+            PersonaInput::Draft => {
+                let Some(row) = self.draft_rows.iter().min_by(|a, b| {
+                    distance_to_band(point.1, a.y, a.h)
+                        .total_cmp(&distance_to_band(point.1, b.y, b.h))
+                }) else {
+                    self.draft_caret = self.draft.chars().count();
+                    return;
+                };
+                let local = nearest_caret(&row.caret_xs, point.0);
+                self.draft_caret = (row.start + local.min(row.len)).min(self.draft.chars().count());
+            }
+            PersonaInput::RosterQuery => {
+                let local = nearest_caret(&self.query_caret_xs, point.0);
+                self.roster_query_caret =
+                    (self.query_visible_start + local).min(self.roster_query.chars().count());
+            }
+        }
     }
 
     fn text_mut(&mut self, input: PersonaInput) -> (&mut String, &mut usize) {
@@ -822,6 +896,24 @@ fn char_to_byte(text: &str, char_index: usize) -> usize {
 
 fn clamp_scroll(value: f32, extent: (f32, f32)) -> f32 {
     value.clamp(0.0, (extent.1 - extent.0).max(0.0))
+}
+
+fn distance_to_band(y: f32, top: f32, h: f32) -> f32 {
+    if y < top {
+        top - y
+    } else if y > top + h {
+        y - (top + h)
+    } else {
+        0.0
+    }
+}
+
+fn nearest_caret(xs: &[f32], x: f32) -> usize {
+    xs.iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - x).abs().total_cmp(&(*b - x).abs()))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }
 
 fn load_profile(
@@ -984,6 +1076,938 @@ fn decode_portrait_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
     Some((rgba.into_raw(), width, height))
+}
+
+/// Persona 본문을 그린다. 이 함수 아래에는 파일·네트워크 입구가 없다. worker가
+/// 준비한 RGBA와 상태만 읽고 GPU 캐시 업로드·그리기만 수행한다.
+pub(crate) fn paint(
+    g: &mut crate::gpu::GpuRenderer,
+    state: &mut PersonaColState,
+    cursor: (f32, f32),
+    body: UiRect,
+    focused: Option<PersonaInput>,
+    preedit: &str,
+    caret_on: bool,
+) {
+    state.begin_layout(body);
+    if body.w <= 1.0 || body.h <= 1.0 {
+        return;
+    }
+    if state.take_texture_reset() {
+        g.drop_images_with_prefix(PORTRAIT_TEXTURE_PREFIX);
+    }
+    g.rect(body.x, body.y, body.w, body.h, crate::theme::panel_bg());
+    g.push_clip(body.x, body.y, body.w, body.h);
+
+    let pad = if body.w < 280.0 { 10.0 } else { 12.0 };
+    let top_y = body.y + 10.0;
+    let status = state.activity.label();
+    let status_w = (g.measure_chrome_text(&status, 10.5, false) + 30.0).min(body.w * 0.58);
+    let status_rect = UiRect {
+        x: body.x + pad,
+        y: top_y,
+        w: status_w,
+        h: 23.0,
+    };
+    round(g, status_rect, crate::theme::surface());
+    stroke(g, status_rect, crate::theme::border());
+    let dot_color = match state.activity.tone {
+        ActivityTone::Waiting => crate::theme::attention(),
+        ActivityTone::Working => crate::theme::accent(),
+        ActivityTone::Idle => crate::theme::text_mute(),
+    };
+    g.round_rect_fill(
+        status_rect.x + 8.0,
+        status_rect.y + 8.0,
+        7.0,
+        7.0,
+        3.5,
+        dot_color,
+    );
+    let shown_status = fit(g, &status, status_rect.w - 25.0, 10.5, false);
+    text(
+        g,
+        status_rect.x + 20.0,
+        status_rect.y + 5.0,
+        &shown_status,
+        10.5,
+        crate::theme::text_dim(),
+        false,
+    );
+
+    let name_room = (body.w - status_w - pad * 3.0).max(28.0);
+    let shown_name = fit(g, &state.profile.name, name_room, 12.0, true);
+    let name_w = g.measure_chrome_text(&shown_name, 12.0, true);
+    let name_rect = UiRect {
+        x: body.x + body.w - pad - name_w - 8.0,
+        y: top_y,
+        w: name_w + 8.0,
+        h: 23.0,
+    };
+    let name_hover = name_rect.contains(cursor.0, cursor.1);
+    text(
+        g,
+        name_rect.x + 4.0,
+        name_rect.y + 5.0,
+        &shown_name,
+        12.0,
+        if name_hover {
+            state.profile.accent
+        } else {
+            crate::theme::text()
+        },
+        true,
+    );
+    state.push_hit(PersonaAction::OpenRoster, name_rect);
+    g.hover_pointer |= name_hover;
+
+    let base_lines = wrap_text(g, &state.draft, (body.w - pad * 2.0 - 48.0).max(30.0), 12.5);
+    let caret_line = base_lines
+        .iter()
+        .position(|(line, start)| {
+            state.draft_caret >= *start && state.draft_caret <= *start + line.chars().count()
+        })
+        .unwrap_or_else(|| base_lines.len().saturating_sub(1));
+    let draft_view = state.update_draft_layout(DraftLayoutMetrics {
+        total_rows: base_lines.len(),
+        caret_row: caret_line,
+        line_height: 18.0,
+    });
+    let input_y = body.y + body.h - pad - draft_view.height;
+    let send_rect = UiRect {
+        x: body.x + body.w - pad - 36.0,
+        y: input_y + draft_view.height - 36.0,
+        w: 36.0,
+        h: 36.0,
+    };
+    let input_rect = UiRect {
+        x: body.x + pad,
+        y: input_y,
+        w: (send_rect.x - body.x - pad - 8.0).max(36.0),
+        h: draft_view.height,
+    };
+
+    let art_rect = UiRect {
+        x: body.x - body.w * 0.1,
+        y: body.y + 38.0,
+        w: body.w * 1.2,
+        h: (input_y - body.y + 22.0).max(1.0),
+    };
+    draw_portrait(g, &state.portrait, art_rect);
+
+    draw_bubble(g, state, body, input_y, pad);
+    draw_draft(
+        g,
+        state,
+        cursor,
+        input_rect,
+        send_rect,
+        &base_lines,
+        focused == Some(PersonaInput::Draft),
+        preedit,
+        caret_on,
+    );
+
+    if state.roster_open {
+        draw_roster(g, state, cursor, body, focused, preedit, caret_on);
+    }
+    g.pop_clip();
+}
+
+fn draw_portrait(g: &mut crate::gpu::GpuRenderer, portrait: &PortraitState, rect: UiRect) {
+    let image = match portrait {
+        PortraitState::Ready(image) => Some(image),
+        PortraitState::Fallback {
+            slug,
+            reason,
+            image,
+        } => {
+            let _ = (slug, reason);
+            image.as_ref()
+        }
+        PortraitState::Loading => None,
+    };
+    let Some(image) = image else { return };
+    if !g.has_image(&image.texture_key) {
+        g.upload_image(
+            &image.texture_key,
+            image.rgba.as_ref(),
+            image.width,
+            image.height,
+        );
+    }
+    g.push_clip(rect.x, rect.y, rect.w, rect.h);
+    g.queue_image_above(&image.texture_key, rect.x, rect.y, rect.w, rect.h);
+    g.pop_clip();
+}
+
+fn draw_bubble(
+    g: &mut crate::gpu::GpuRenderer,
+    state: &mut PersonaColState,
+    body: UiRect,
+    input_y: f32,
+    pad: f32,
+) {
+    let (message, error) = match &state.bubble {
+        BubbleState::Hidden => return,
+        BubbleState::Thinking => ("···", false),
+        BubbleState::Reply(message) => (message.as_str(), false),
+        BubbleState::Error(message) => (message.as_str(), true),
+    };
+    let bubble_w = (body.w - pad * 2.0).max(20.0);
+    let lines = wrap_text(g, message, bubble_w - 24.0, 12.5);
+    let content_h = lines.len().max(1) as f32 * 19.0 + 20.0;
+    let max_h = ((input_y - body.y) * 0.46).clamp(44.0, 260.0);
+    let bubble_h = content_h.min(max_h);
+    let rect = UiRect {
+        x: body.x + pad,
+        y: body.y + 45.0,
+        w: bubble_w,
+        h: bubble_h,
+    };
+    round(
+        g,
+        rect,
+        if error {
+            crate::theme::with_alpha(crate::theme::danger(), 42)
+        } else {
+            crate::theme::surface_active()
+        },
+    );
+    stroke(
+        g,
+        rect,
+        if error {
+            crate::theme::with_alpha(crate::theme::danger(), 110)
+        } else {
+            crate::theme::border()
+        },
+    );
+    state.set_scroll_extent(false, bubble_h - 20.0, content_h - 20.0);
+    g.push_clip(rect.x + 10.0, rect.y + 8.0, rect.w - 20.0, rect.h - 16.0);
+    for (index, (line, _)) in lines.iter().enumerate() {
+        let y = rect.y + 10.0 + index as f32 * 19.0 - state.bubble_scroll;
+        if y + 18.0 >= rect.y && y <= rect.y + rect.h {
+            text(
+                g,
+                rect.x + 12.0,
+                y,
+                line,
+                12.5,
+                if error {
+                    crate::theme::danger()
+                } else {
+                    crate::theme::text()
+                },
+                false,
+            );
+        }
+    }
+    g.pop_clip();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_draft(
+    g: &mut crate::gpu::GpuRenderer,
+    state: &mut PersonaColState,
+    cursor: (f32, f32),
+    input_rect: UiRect,
+    send_rect: UiRect,
+    lines: &[(String, usize)],
+    focused: bool,
+    preedit: &str,
+    caret_on: bool,
+) {
+    round(g, input_rect, crate::theme::surface());
+    stroke(
+        g,
+        input_rect,
+        if focused {
+            state.profile.accent
+        } else {
+            crate::theme::border()
+        },
+    );
+    state.push_hit(PersonaAction::Focus(PersonaInput::Draft), input_rect);
+    let field_hover = input_rect.contains(cursor.0, cursor.1);
+    g.hover_pointer |= field_hover;
+    g.push_clip(
+        input_rect.x + 10.0,
+        input_rect.y + 5.0,
+        input_rect.w - 20.0,
+        input_rect.h - 10.0,
+    );
+    if state.draft.is_empty() && !focused {
+        text(
+            g,
+            input_rect.x + 11.0,
+            input_rect.y + 10.0,
+            "말 걸어보세요...",
+            12.5,
+            crate::theme::text_mute(),
+            false,
+        );
+    }
+    let mut caret_pos = (input_rect.x + 11.0, input_rect.y + 10.0);
+    for (visible_index, (line, start)) in lines
+        .iter()
+        .skip(state.draft_viewport.first_row)
+        .take(state.draft_viewport.visible_rows)
+        .enumerate()
+    {
+        let y = input_rect.y + 9.0 + visible_index as f32 * 18.0;
+        text(
+            g,
+            input_rect.x + 11.0,
+            y,
+            line,
+            12.5,
+            crate::theme::text(),
+            false,
+        );
+        let mut caret_xs = Vec::with_capacity(line.chars().count() + 1);
+        let mut prefix = String::new();
+        caret_xs.push(input_rect.x + 11.0);
+        for ch in line.chars() {
+            prefix.push(ch);
+            caret_xs.push(input_rect.x + 11.0 + g.measure_chrome_text(&prefix, 12.5, false));
+        }
+        let len = line.chars().count();
+        if state.draft_caret >= *start && state.draft_caret <= *start + len {
+            let local = state.draft_caret - start;
+            caret_pos = (caret_xs[local.min(len)], y);
+        }
+        state.draft_rows.push(DraftRowHit {
+            start: *start,
+            len,
+            y,
+            h: 18.0,
+            caret_xs,
+        });
+    }
+    if focused {
+        let accent = state.profile.accent;
+        draw_preedit_caret(g, state, caret_pos, preedit, caret_on, accent);
+    }
+    g.pop_clip();
+
+    let send_hover = send_rect.contains(cursor.0, cursor.1);
+    round(
+        g,
+        send_rect,
+        if state.busy || state.switching_to.is_some() {
+            crate::theme::surface_active()
+        } else if send_hover {
+            crate::theme::accent_variant(state.profile.accent, 1)
+        } else {
+            state.profile.accent
+        },
+    );
+    g.queue_icon(
+        "arrow-up",
+        send_rect.x + 10.0,
+        send_rect.y + 10.0,
+        16.0,
+        if state.busy || state.switching_to.is_some() {
+            crate::theme::text_mute()
+        } else {
+            [255, 255, 255, 255]
+        },
+    );
+    state.push_hit(PersonaAction::Send, send_rect);
+    g.hover_pointer |= send_hover && !state.busy;
+}
+
+fn draw_roster(
+    g: &mut crate::gpu::GpuRenderer,
+    state: &mut PersonaColState,
+    cursor: (f32, f32),
+    body: UiRect,
+    focused: Option<PersonaInput>,
+    preedit: &str,
+    caret_on: bool,
+) {
+    g.rect(body.x, body.y, body.w, body.h, crate::theme::panel_bg());
+    let pad = 10.0;
+    let close = UiRect {
+        x: body.x + body.w - pad - 30.0,
+        y: body.y + pad,
+        w: 30.0,
+        h: 32.0,
+    };
+    let query = UiRect {
+        x: body.x + pad,
+        y: body.y + pad,
+        w: (close.x - body.x - pad - 7.0).max(30.0),
+        h: 32.0,
+    };
+    let query_focused = focused == Some(PersonaInput::RosterQuery);
+    round(g, query, crate::theme::surface());
+    stroke(
+        g,
+        query,
+        if query_focused {
+            state.profile.accent
+        } else {
+            crate::theme::border()
+        },
+    );
+    state.query_rect = Some(query);
+    let (shown, visible_start) = single_line_window(
+        g,
+        &state.roster_query,
+        state.roster_query_caret,
+        query.w - 20.0,
+        12.0,
+    );
+    state.query_visible_start = visible_start;
+    if shown.is_empty() {
+        text(
+            g,
+            query.x + 10.0,
+            query.y + 8.0,
+            "이름으로 찾기",
+            12.0,
+            crate::theme::text_mute(),
+            false,
+        );
+    } else {
+        text(
+            g,
+            query.x + 10.0,
+            query.y + 8.0,
+            &shown,
+            12.0,
+            crate::theme::text(),
+            false,
+        );
+    }
+    state.query_caret_xs.push(query.x + 10.0);
+    let mut prefix = String::new();
+    for ch in shown.chars() {
+        prefix.push(ch);
+        state
+            .query_caret_xs
+            .push(query.x + 10.0 + g.measure_chrome_text(&prefix, 12.0, false));
+    }
+    if query_focused {
+        let local = state.roster_query_caret.saturating_sub(visible_start);
+        let x = state
+            .query_caret_xs
+            .get(local)
+            .copied()
+            .unwrap_or(query.x + 10.0);
+        let accent = state.profile.accent;
+        draw_preedit_caret(g, state, (x, query.y + 7.0), preedit, caret_on, accent);
+    }
+    state.push_hit(PersonaAction::Focus(PersonaInput::RosterQuery), query);
+
+    let close_hover = close.contains(cursor.0, cursor.1);
+    round(
+        g,
+        close,
+        if close_hover {
+            crate::theme::surface_active()
+        } else {
+            crate::theme::surface()
+        },
+    );
+    stroke(g, close, crate::theme::border());
+    g.queue_icon(
+        "x",
+        close.x + 8.0,
+        close.y + 8.0,
+        14.0,
+        crate::theme::text_dim(),
+    );
+    state.push_hit(PersonaAction::CloseRoster, close);
+    g.hover_pointer |= close_hover;
+
+    let mut list_y = body.y + 52.0;
+    if let Some(error) = state.switch_error.as_deref() {
+        let shown_error = fit(g, error, body.w - pad * 2.0, 10.5, false);
+        text(
+            g,
+            body.x + pad,
+            list_y,
+            &shown_error,
+            10.5,
+            crate::theme::danger(),
+            false,
+        );
+        list_y += 23.0;
+    }
+    let list_h = (body.y + body.h - pad - list_y).max(1.0);
+    let filtered = state.filtered_roster_indices();
+    let row_h = 34.0;
+    state.set_scroll_extent(true, list_h, filtered.len() as f32 * row_h);
+    g.push_clip(body.x + 4.0, list_y, body.w - 8.0, list_h);
+    for (visible, index) in filtered.into_iter().enumerate() {
+        let y = list_y + visible as f32 * row_h - state.roster_scroll;
+        if y + row_h < list_y || y > list_y + list_h {
+            continue;
+        }
+        let entry = state.roster[index].clone();
+        let rect = UiRect {
+            x: body.x + 6.0,
+            y,
+            w: body.w - 12.0,
+            h: row_h - 2.0,
+        };
+        let hover = rect.contains(cursor.0, cursor.1);
+        if entry.name == state.profile.name || hover {
+            round(
+                g,
+                rect,
+                if entry.name == state.profile.name {
+                    crate::theme::surface_active()
+                } else {
+                    crate::theme::surface_hover()
+                },
+            );
+        }
+        g.round_rect_fill(rect.x + 9.0, rect.y + 12.0, 8.0, 8.0, 4.0, entry.accent);
+        let shown_entry = fit(g, &entry.name, (rect.w * 0.55).max(20.0), 12.0, false);
+        text(
+            g,
+            rect.x + 25.0,
+            rect.y + 8.0,
+            &shown_entry,
+            12.0,
+            crate::theme::text(),
+            entry.name == state.profile.name,
+        );
+        let school = fit(g, &entry.school, (rect.w * 0.34).max(16.0), 10.0, false);
+        let school_w = g.measure_chrome_text(&school, 10.0, false);
+        text(
+            g,
+            rect.x + rect.w - school_w - 9.0,
+            rect.y + 9.0,
+            &school,
+            10.0,
+            crate::theme::text_mute(),
+            false,
+        );
+        state.push_hit(PersonaAction::PickCharacter(entry.name), rect);
+        g.hover_pointer |= hover;
+    }
+    g.pop_clip();
+}
+
+fn draw_preedit_caret(
+    g: &mut crate::gpu::GpuRenderer,
+    state: &mut PersonaColState,
+    pos: (f32, f32),
+    preedit: &str,
+    caret_on: bool,
+    accent: [u8; 4],
+) {
+    if !preedit.is_empty() {
+        text(g, pos.0, pos.1, preedit, 12.5, crate::theme::text(), false);
+        let width = g.measure_chrome_text(preedit, 12.5, false).max(7.0);
+        g.rect(pos.0, pos.1 + 16.0, width, 1.0, accent);
+    } else if caret_on {
+        g.rect(pos.0, pos.1, 1.5, 17.0, crate::theme::cursor());
+    }
+    state.caret_rect = Some(UiRect {
+        x: pos.0,
+        y: pos.1,
+        w: 2.0,
+        h: 17.0,
+    });
+}
+
+fn round(g: &mut crate::gpu::GpuRenderer, rect: UiRect, color: [u8; 4]) {
+    g.round_rect_fill(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        crate::theme::radius_md(),
+        color,
+    );
+}
+
+fn stroke(g: &mut crate::gpu::GpuRenderer, rect: UiRect, color: [u8; 4]) {
+    g.rect(rect.x, rect.y, rect.w, 1.0, color);
+    g.rect(rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, color);
+    g.rect(rect.x, rect.y, 1.0, rect.h, color);
+    g.rect(rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, color);
+}
+
+fn text(
+    g: &mut crate::gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    value: &str,
+    font_size: f32,
+    color: [u8; 4],
+    bold: bool,
+) {
+    g.draw_text(
+        x,
+        y,
+        value,
+        crate::gpu::DrawOpts {
+            font_size,
+            color,
+            bold,
+            italic: false,
+        },
+    );
+}
+
+fn fit(g: &mut crate::gpu::GpuRenderer, value: &str, width: f32, font: f32, bold: bool) -> String {
+    if g.measure_chrome_text(value, font, bold) <= width {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    for ch in value.chars() {
+        let candidate = format!("{out}{ch}…");
+        if g.measure_chrome_text(&candidate, font, bold) > width {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn wrap_text(
+    g: &mut crate::gpu::GpuRenderer,
+    value: &str,
+    width: f32,
+    font: f32,
+) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut start = 0usize;
+    for (index, ch) in value.chars().enumerate() {
+        if ch == '\n' {
+            out.push((std::mem::take(&mut line), start));
+            start = index + 1;
+            continue;
+        }
+        line.push(ch);
+        if line.chars().count() > 1 && g.measure_chrome_text(&line, font, false) > width {
+            let carry = line.pop().unwrap_or(ch);
+            out.push((std::mem::take(&mut line), start));
+            start = index;
+            line.push(carry);
+        }
+    }
+    out.push((line, start));
+    out
+}
+
+fn single_line_window(
+    g: &mut crate::gpu::GpuRenderer,
+    value: &str,
+    caret: usize,
+    width: f32,
+    font: f32,
+) -> (String, usize) {
+    let chars: Vec<char> = value.chars().collect();
+    let caret = caret.min(chars.len());
+    let mut start = caret;
+    while start > 0 {
+        let candidate: String = chars[start - 1..caret].iter().collect();
+        if g.measure_chrome_text(&candidate, font, false) > width * 0.72 {
+            break;
+        }
+        start -= 1;
+    }
+    let mut end = caret;
+    while end < chars.len() {
+        let candidate: String = chars[start..=end].iter().collect();
+        if g.measure_chrome_text(&candidate, font, false) > width {
+            break;
+        }
+        end += 1;
+    }
+    (chars[start..end].iter().collect(), start)
+}
+
+impl crate::App {
+    fn persona_rows(&self) -> Arc<Vec<PaneActivity>> {
+        self.board_scene
+            .snapshot((0.0, 0.0, 1.0, 1.0), self.cursor_px, false, String::new())
+            .data
+            .agents
+            .clone()
+    }
+
+    pub(crate) fn persona_tick(&mut self) {
+        let visible = self.persona_active();
+        let now = self.version_anim_start.elapsed();
+        let mut changed = visible && self.persona.request_initial_load();
+        let (pumped, effects) = self.persona.pump(now);
+        changed |= pumped;
+        let board = visible.then(|| self.persona_rows());
+        for PersonaEffect::Speak(reason) in effects {
+            if let Some(board) = board.as_ref() {
+                changed |= self.persona.begin_proactive(reason, board.as_ref());
+            } else {
+                self.persona.defer_proactive(reason);
+            }
+        }
+        if visible {
+            if self.persona.board_poll_due(now) && self.board_scene.refresh_due() {
+                self.persona.mark_board_poll(now);
+                self.request_native_board_refresh();
+            }
+            let board = board.as_ref().expect("visible Persona has a board snapshot");
+            if let Some(reason) = self.persona.take_deferred_proactive() {
+                changed |= self.persona.begin_proactive(reason, board.as_ref());
+            }
+            let observation = self.persona.observe_board(board.as_ref(), now);
+            changed |= observation.changed;
+            if let Some(reason) = observation.proactive {
+                changed |= self.persona.begin_proactive(reason, board.as_ref());
+            }
+            if let Some(reason) = self.persona.idle_proactive(true, now) {
+                changed |= self.persona.begin_proactive(reason, board.as_ref());
+            }
+        }
+        if changed {
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    pub(crate) fn persona_contains(&self, x: f32, y: f32) -> bool {
+        self.persona_active() && self.persona.body_rect.contains(x, y)
+    }
+
+    pub(crate) fn persona_cursor(&self, x: f32, y: f32) -> winit::window::CursorIcon {
+        match self.persona.hit(x, y) {
+            Some(PersonaAction::Focus(_)) => winit::window::CursorIcon::Text,
+            Some(_) => winit::window::CursorIcon::Pointer,
+            None => winit::window::CursorIcon::Default,
+        }
+    }
+
+    pub(crate) fn persona_click(&mut self, x: f32, y: f32) -> bool {
+        let Some(action) = self.persona.hit(x, y) else {
+            self.persona_blur();
+            return false;
+        };
+        match action {
+            PersonaAction::OpenRoster => {
+                self.persona.open_roster();
+                self.ime_retarget(crate::ImeFocus::Persona(PersonaInput::RosterQuery));
+            }
+            PersonaAction::CloseRoster => {
+                self.persona.close_roster();
+                self.persona_blur();
+            }
+            PersonaAction::Focus(input) => {
+                self.ime_retarget(crate::ImeFocus::Persona(input));
+                self.persona.place_caret(input, (x, y));
+            }
+            PersonaAction::Send => {
+                let board = self.persona_rows();
+                self.persona.send_draft(board.as_ref());
+            }
+            PersonaAction::PickCharacter(name) => {
+                self.persona_blur();
+                self.persona.switch_character(&name);
+            }
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
+    pub(crate) fn persona_wheel(&mut self, delta: MouseScrollDelta) {
+        let dy = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * 34.0 * 3.0,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        if self.persona.scroll_by(self.persona.roster_open, -dy) {
+            self.chrome_dirty = true;
+        }
+    }
+
+    pub(crate) fn persona_insert_into(&mut self, input: PersonaInput, text: &str) {
+        if self.persona.insert_text(input, text) {
+            self.chrome_dirty = true;
+        }
+    }
+
+    pub(crate) fn persona_blur(&mut self) {
+        let focused = match self.ime_focus.as_ref() {
+            Some(crate::ImeFocus::Persona(input)) => Some(*input),
+            _ => None,
+        };
+        if let Some(input) = focused {
+            if let Some(text) = self.hangul.flush() {
+                self.persona_insert_into(input, &text);
+            }
+            self.ime_focus = None;
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.chrome_dirty = true;
+    }
+
+    pub(crate) fn persona_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(input) = (match self.ime_focus.as_ref() {
+            Some(crate::ImeFocus::Persona(input)) => Some(*input),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if event.state != ElementState::Pressed {
+            return true;
+        }
+        self.ime_retarget(crate::ImeFocus::Persona(input));
+        let composing_before = self.in_preedit
+            || !self.preedit.is_empty()
+            || self.hangul.preedit().is_some();
+        if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                if let Ok(text) = clipboard.get_text() {
+                    self.persona_insert_into(input, &text);
+                }
+            }
+            return true;
+        }
+        if self.host_mod() {
+            return true;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let one = |value: &str| {
+                let mut chars = value.chars();
+                chars.next().filter(|_| chars.next().is_none())
+            };
+            let typed = event
+                .text
+                .as_ref()
+                .and_then(|value| one(value))
+                .or_else(|| {
+                    if let Key::Character(value) = &event.logical_key {
+                        one(value)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(ch) = typed.filter(|ch| is_jamo(*ch)) {
+                if let Some(text) = self.hangul.feed(ch) {
+                    self.persona_insert_into(input, &text);
+                }
+                self.preedit = self.hangul.preedit().unwrap_or_default();
+                self.in_preedit = !self.preedit.is_empty();
+                self.chrome_dirty = true;
+                return true;
+            }
+            if matches!(event.logical_key, Key::Named(NamedKey::Backspace))
+                && self.hangul.backspace()
+            {
+                self.preedit = self.hangul.preedit().unwrap_or_default();
+                self.in_preedit = !self.preedit.is_empty();
+                self.chrome_dirty = true;
+                return true;
+            }
+            if let Some(text) = self.hangul.flush() {
+                self.persona_insert_into(input, &text);
+            }
+            self.preedit.clear();
+            self.in_preedit = false;
+        }
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                if input == PersonaInput::RosterQuery {
+                    self.persona.close_roster();
+                }
+                self.persona_blur();
+            }
+            Key::Named(NamedKey::Enter) if input == PersonaInput::Draft => {
+                match self.persona.draft_enter(
+                    self.modifiers.shift_key(),
+                    composing_before,
+                ) {
+                    DraftEnter::Submit => {
+                        let board = self.persona_rows();
+                        self.persona.send_draft(board.as_ref());
+                    }
+                    DraftEnter::Ignored | DraftEnter::Newline => {}
+                }
+            }
+            Key::Named(NamedKey::Enter) => {}
+            Key::Named(NamedKey::Backspace) => {
+                self.persona.backspace(input);
+            }
+            Key::Named(NamedKey::Delete) => {
+                self.persona.delete_forward(input);
+            }
+            Key::Named(NamedKey::ArrowLeft) => self.persona.move_caret(input, -1),
+            Key::Named(NamedKey::ArrowRight) => self.persona.move_caret(input, 1),
+            Key::Named(NamedKey::Home) => self.persona.set_caret(input, 0),
+            Key::Named(NamedKey::End) => {
+                let len = self.persona.text(input).0.chars().count();
+                self.persona.set_caret(input, len);
+            }
+            Key::Named(NamedKey::Space) => self.persona_insert_into(input, " "),
+            Key::Character(value) => {
+                if !(self.ime_active || self.in_preedit)
+                    || !value.chars().any(crate::is_hangul_codepoint)
+                {
+                    self.persona_insert_into(input, value);
+                }
+            }
+            _ => return true,
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
+    pub(crate) fn persona_ime(&mut self, ime: Ime) {
+        let focused = match self.ime_focus.as_ref() {
+            Some(crate::ImeFocus::Persona(input)) => Some(*input),
+            _ => None,
+        };
+        match ime {
+            Ime::Enabled => self.ime_active = true,
+            Ime::Disabled => {
+                self.ime_active = false;
+                self.in_preedit = false;
+                self.preedit.clear();
+            }
+            Ime::Preedit(text, _) => {
+                if focused.is_some() {
+                    self.ime_active = true;
+                    self.in_preedit = !text.is_empty();
+                    self.preedit = text;
+                }
+            }
+            Ime::Commit(text) => {
+                if let Some(input) = focused {
+                    self.persona_insert_into(input, &text);
+                }
+                self.in_preedit = false;
+                self.preedit.clear();
+            }
+        }
+        self.chrome_dirty = true;
+    }
+
+    pub(crate) fn finish_persona_paint(&self) {
+        if let (Some(window), Some(rect)) = (self.window.as_ref(), self.persona.caret_rect) {
+            window.set_ime_cursor_area(
+                winit::dpi::LogicalPosition::new(rect.x as f64, rect.y as f64),
+                winit::dpi::LogicalSize::new(rect.w.max(1.0) as f64, rect.h.max(1.0) as f64),
+            );
+        }
+    }
+}
+
+fn is_jamo(ch: char) -> bool {
+    (0x3130..=0x318f).contains(&(ch as u32))
 }
 
 #[cfg(test)]
@@ -1301,5 +2325,50 @@ mod tests {
         assert_eq!(roster.len(), 2);
         assert_eq!(roster[0].accent, [0x11, 0x22, 0x33, 0xff]);
         assert_eq!(roster[1].accent, [0x8a, 0xa6, 0xc8, 0xff]);
+    }
+
+    #[test]
+    fn desktop_persona_has_no_wry_source() {
+        for (name, source) in [
+            ("main", include_str!("main.rs")),
+            ("state", include_str!("state.rs")),
+            ("chrome", include_str!("chrome.rs")),
+            ("handler", include_str!("handler.rs")),
+            ("render", include_str!("render.rs")),
+        ] {
+            for forbidden in [
+                "persona.html",
+                "persona.webview",
+                "open_persona_view",
+                "sync_persona_view",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{name}에 Persona WebView 경로가 남았다: {forbidden}"
+                );
+            }
+        }
+        let main = include_str!("main.rs");
+        assert!(main.contains("persona: personacol::PersonaColState"));
+        assert!(main.contains("Persona(personacol::PersonaInput)"));
+    }
+
+    #[test]
+    fn persona_paint_path_has_no_io() {
+        let source = include_str!("personacol.rs");
+        let paint = &source[source.find("pub(crate) fn paint(").unwrap()
+            ..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        for forbidden in [
+            "std::fs",
+            "reqwest",
+            "kasa_mcp::persona::portrait",
+            "decode_portrait_bytes",
+            "characters_json",
+        ] {
+            assert!(
+                !paint.contains(forbidden),
+                "paint 경로에 I/O가 섞였다: {forbidden}"
+            );
+        }
     }
 }

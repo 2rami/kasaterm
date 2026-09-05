@@ -751,85 +751,6 @@ impl App {
             && self.git.col_visible
             && self.info.tab == state::SideTab::Persona
     }
-    /// 웹뷰를 렌더가 적어 준 본문 사각형에 맞추고, 탭이 바뀌었으면 보이기/숨기기를
-    /// 뒤집는다. 드롭하지 않고 숨기는 이유는 대화 이력이 그 페이지에 있어서다 —
-    /// 탭을 한 번 오갔다고 하던 얘기를 잊으면 말상대가 아니다.
-    pub(crate) fn sync_persona_view(&mut self) {
-        let active = self.persona_active();
-        if active && self.persona.webview.is_none() {
-            self.open_persona_view();
-            return;
-        }
-        let Some(wv) = self.persona.webview.as_ref() else {
-            return;
-        };
-        if active != self.persona.shown {
-            let _ = wv.set_visible(active);
-            // 숨은 채로 board 를 계속 긁으면 아무도 안 보는 화면 때문에 토큰이 샌다.
-            let _ = wv.evaluate_script(&format!("window.__paused = {}", !active));
-            self.persona.shown = active;
-        }
-        if !active {
-            return;
-        }
-        let Some(rect) = self.persona.body_rect else {
-            return;
-        };
-        if self.persona.last_rect == Some(rect) {
-            return;
-        }
-        let _ = wv.set_bounds(wry::Rect {
-            position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
-            size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
-        });
-        self.persona.last_rect = Some(rect);
-    }
-    /// 우측 패널의 페르소나 탭 본문을 세운다. 메인 창의 **자식** 웹뷰라 별도 OS 창이
-    /// 뜨지 않는다 — 참조 배치(패널 안에 늘 서 있는 한 칸)가 그래야 성립한다.
-    pub(crate) fn open_persona_view(&mut self) {
-        if self.persona.webview.is_some() {
-            return;
-        }
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        // 렌더가 아직 자리를 안 적었으면 다음 프레임에 다시 온다 — 폭이 0 인 웹뷰를
-        // 세워 두면 보이지도 않고 bounds 를 다시 밀 때까지 죽은 칸이 된다.
-        let Some(rect) = self.persona.body_rect else {
-            return;
-        };
-        if rect.2 <= 1.0 || rect.3 <= 1.0 {
-            return;
-        }
-        let port = mcp_panel_port();
-        // launch 별 캐시버스트 — WKWebView 가 옛 persona.html 을 물고 있으면 고친 것이
-        // 화면에 안 온다(설정 웹뷰가 같은 이유로 붙인다).
-        let cb = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let webview = match wry::WebViewBuilder::new()
-            .with_url(format!(
-                "http://127.0.0.1:{port}/arona-ui/persona.html?v={cb}"
-            ))
-            .with_background_color((16, 22, 42, 255))
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(rect.0 as f64, rect.1 as f64).into(),
-                size: wry::dpi::LogicalSize::new(rect.2 as f64, rect.3 as f64).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => wv,
-            Err(e) => {
-                eprintln!("[persona] webview build failed: {e}");
-                return;
-            }
-        };
-        self.persona.webview = Some(webview);
-        self.persona.last_rect = Some(rect);
-        self.persona.shown = true;
-        window.request_redraw();
-    }
     /// 이사 탭이 지금 화면에 있어야 하나 — persona_active 와 같은 판정.
     /// (본문은 웹뷰가 아니라 네이티브 렌더 — machinescol.rs.)
     pub(crate) fn machines_tab_active(&self) -> bool {
@@ -912,6 +833,9 @@ impl App {
     pub(crate) fn toggle_git_col(&mut self) {
         if self.internal_room_active_any() {
             return;
+        }
+        if self.persona_active() {
+            self.persona_blur();
         }
         self.git.col_visible = !self.git.col_visible;
         if self.git.col_visible {
@@ -2738,9 +2662,19 @@ impl App {
             .is_some_and(|h| h.kind == InlineWebKind::Arona)
         {
             self.close_inline_web();
-        } else {
-            self.open_arona_panel(event_loop);
+            return;
         }
+        // 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정·보드는 셸 없는
+        // 표식 pane 이라, 그 방에서 열면 대상이 `\0kasaterm-board` 같은 내부 id 로
+        // 굳어 아래 작업이 엉뚱한 곳을 가리킨다. 열기 전에 원래 사용자 방으로
+        // 돌려보내고, 돌아갈 방이 없으면 아예 열지 않는다.
+        if self.internal_room_kind_at(self.active_window).is_some()
+            && !self.return_from_active_internal_room()
+        {
+            self.set_toast("아로나를 열 사용자 방이 없어요".to_string());
+            return;
+        }
+        self.open_arona_panel(event_loop);
     }
 
     /// 거노: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
@@ -4085,16 +4019,6 @@ mod room_rename_tests {
         assert!(!side_column_should_toggle(true, true, true));
         assert!(!side_column_should_toggle(true, false, false));
         assert!(side_column_should_toggle(false, true, true));
-    }
-
-    #[test]
-    fn 부모보다_웹뷰가_먼저_정리되는_수명_순서를_지킨다() {
-        let handler = include_str!("handler.rs");
-        let exiting = &handler[handler.find("fn exiting(").unwrap()..];
-        assert!(
-            exiting.find("self.close_inline_web();").unwrap()
-                < exiting.find("self.persona.webview = None;").unwrap()
-        );
     }
 
     #[test]

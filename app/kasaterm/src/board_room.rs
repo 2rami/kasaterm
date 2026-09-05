@@ -244,6 +244,44 @@ mod tests {
         assert_eq!(board_toggle(false), BoardToggle::OpenOrFocus);
     }
 
+    /// 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정·보드는 셸 없는 표식
+    /// pane 이라 그 방에서 열면 대상이 내부 id 로 굳고, 아래 작업이 엉뚱한 곳을
+    /// 가리킨다. 그래서 여는 쪽이 사용자 방 복귀를 먼저 태운다.
+    ///
+    /// 단축키도 같은 사고의 다른 면이다 — 내부 방은 키를 잡으면 무조건 return 하고
+    /// `persona_key` 는 host_mod 조합을 전부 삼키므로, 토글이 그 뒤에 있으면 그
+    /// 화면들에서 영영 안 먹는다(`Cmd+,` 는 이미 앞에 있어 먹는다).
+    #[test]
+    fn arona_leaves_internal_rooms_and_its_shortcut_outranks_them() {
+        let chrome = include_str!("chrome.rs");
+        let after = chrome
+            .split_once("fn toggle_arona_panel")
+            .expect("toggle_arona_panel")
+            .1;
+        let body = &after[..after.find("\n    }\n").expect("함수 끝")];
+        assert!(
+            body.contains("return_from_active_internal_room"),
+            "내부 방에서 열면 작업 대상이 표식 pane 으로 굳는다"
+        );
+
+        let handler = include_str!("handler.rs");
+        // 단축키가 첫 등장 — 메뉴 항목의 같은 호출은 파일 뒤쪽에 있다.
+        let shortcut = handler
+            .find("self.toggle_arona_panel(event_loop);")
+            .expect("아로나 단축키");
+        for (label, marker) in [
+            ("설정 방", "self.native_settings_key(&event);"),
+            ("보드 방", "self.native_board_key(&event);"),
+            ("persona 입력칸", "self.persona_key(&event)"),
+        ] {
+            let at = handler.find(marker).expect(marker);
+            assert!(
+                shortcut < at,
+                "{label}이 키를 삼키기 전에 아로나 토글을 잡아야 한다"
+            );
+        }
+    }
+
     #[test]
     fn desktop_board_has_no_wry_route_and_arona_keeps_its_route() {
         let chrome = include_str!("chrome.rs");

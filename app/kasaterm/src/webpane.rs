@@ -1843,9 +1843,13 @@ mod tests {
         assert!(source.contains("self.web_hosts.drain()"));
         let handler = include_str!("handler.rs");
         let exiting = &handler[handler.find("fn exiting(").unwrap()..];
+        assert!(exiting.contains("self.close_web_hosts();"));
+        // 우측 persona 칼럼은 네이티브 렌더로 바뀌어 창보다 먼저 드롭할 웹뷰가
+        // 없다. 다시 웹뷰로 돌아가면 이 줄이 잡는다 — 부모 창이 사라진 뒤에
+        // 드롭되면 use-after-free 다.
         assert!(
-            exiting.find("self.close_web_hosts();").unwrap()
-                < exiting.find("self.persona.webview = None;").unwrap()
+            !handler.contains("self.persona.webview"),
+            "persona 가 웹뷰로 돌아왔다면 exiting 에서 창보다 먼저 드롭해야 한다"
         );
     }
 }
