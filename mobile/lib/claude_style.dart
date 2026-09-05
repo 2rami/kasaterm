@@ -760,6 +760,18 @@ void _tintWelcomeBox(
   }
 }
 
+/// 스크롤을 올렸을 때 뷰포트 바닥에 붙잡아 둘 **첫 행** — 입력상자의 위 테두리(codex 는
+/// 입력행 자신). 여기서부터 화면 끝까지를 통째로 붙잡는다: 상자 아래 힌트 줄까지 함께
+/// 가야 붙잡아 둔 상자 밑으로 지나간 대화가 비치지 않는다(데스크톱 `pinned_input_top`).
+int? pinnedInputTop(List<List<Run>> lines) {
+  final rows = <List<_Cell>>[for (final r in lines) _cells(r)];
+  return switch (_promptBox(rows)) {
+    _Bordered(:final top) => top,
+    _Filled(:final start) => start,
+    null => null,
+  };
+}
+
 /// 데스크톱과 같은 순서로 꾸민다. `t` 는 초 단위 애니 시계.
 StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   final rows = <List<_Cell>>[for (final r in live.lines) _cells(r)];

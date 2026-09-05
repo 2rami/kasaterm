@@ -455,6 +455,7 @@ class WrappedCanvas extends StatefulWidget {
     required this.palette,
     this.history = const [],
     this.student,
+    this.bottomTick = 0,
     this.fontSize = 13,
   });
 
@@ -467,6 +468,10 @@ class WrappedCanvas extends StatefulWidget {
 
   /// 학생 꾸밈(도트·학생색). 셸 화면처럼 학생이 없으면 null.
   final StudentStyle? student;
+
+  /// 값이 바뀌면 맨 아래로 내려간다 — 답장·키를 보낸 순간(터미널이 입력에 바닥으로
+  /// 내려가는 것과 같다).
+  final int bottomTick;
   final double fontSize;
 
   @override
@@ -478,18 +483,29 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
   final _reflow = Reflow();
   final _t0 = DateTime.now();
   Timer? _anim;
+  final _scroll = ScrollController();
+
+  /// 바닥에서 떠 있는가 — 떠 있으면 입력상자를 바닥에 붙잡아 둔다.
+  bool _away = false;
 
   @override
   void initState() {
     super.initState();
     spriteCache.addListener(_repaint);
+    _scroll.addListener(_onScroll);
   }
 
   @override
   void dispose() {
     _anim?.cancel();
     spriteCache.removeListener(_repaint);
+    _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    final away = _scroll.hasClients && _scroll.offset > 4;
+    if (away != _away) setState(() => _away = away);
   }
 
   void _repaint() {
@@ -525,6 +541,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     if (old.fontSize != widget.fontSize) {
       _base = _CellMetrics(widget.fontSize);
       _scaled = null;
+    }
+    if (old.bottomTick != widget.bottomTick && _scroll.hasClients) {
+      _scroll.jumpTo(0);
     }
   }
 
@@ -569,35 +588,82 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
         (_) => _setAnimating(animated),
       );
       final view = _reflow.apply(CombinedGrid(widget.history, live), cols);
+      final walkFrame = (t * 1000 ~/ spriteWalkFrameMs) % spriteWalkFrames;
+      final idleFrame = (t * 1000 ~/ spriteIdleFrameMs) % spriteIdleFrames;
+      _GridPainter painter(GridLines g) => _GridPainter(
+        grid: g,
+        version: widget.version,
+        palette: widget.palette,
+        metrics: metrics,
+        cache: _cache,
+        slug: slug,
+        sprites: spriteCache,
+        walkFrame: walkFrame,
+        idleFrame: idleFrame,
+      );
+      // 스크롤을 올린 동안은 입력상자부터 화면 끝까지를 바닥에 붙잡아 둔다 — 데스크톱과
+      // 같이 지나간 대화를 읽는 중에도 타이핑하는 자리가 제자리에 있다.
+      ReflowedGrid? tail;
+      if (_away) {
+        final top = pinnedInputTop(live.lines);
+        if (top != null) {
+          tail = _reflow.apply(_TailGrid(live, top), cols);
+        }
+      }
       // 스크롤 상자는 내용만큼만 줄어들려 한다 — 느슨한 높이(Row 안 등)에서는 두 줄짜리
       // 상자가 세로 가운데에 떠서 바닥 정렬이 깨진다. 주어진 자리를 통째로 차지시킨다.
       return SizedBox.expand(
         child: ColoredBox(
           color: widget.palette.bg,
-          // reverse 라 짧은 내용은 바닥에 앉고, 길면 스크롤 0 이 곧 맨 아래다 — 새 줄이
-          // 와도 보던 바닥이 그대로 바닥이다.
-          child: SingleChildScrollView(
-            reverse: true,
-            child: SizedBox(
-              width: constraints.maxWidth,
-              height: math.max(view.rows, 1) * metrics.height,
-              child: CustomPaint(
-                painter: _GridPainter(
-                  grid: view,
-                  version: widget.version,
-                  palette: widget.palette,
-                  metrics: metrics,
-                  cache: _cache,
-                  slug: slug,
-                  sprites: spriteCache,
-                  walkFrame: (t * 1000 ~/ spriteWalkFrameMs) % spriteWalkFrames,
-                  idleFrame: (t * 1000 ~/ spriteIdleFrameMs) % spriteIdleFrames,
+          child: Stack(
+            children: [
+              // reverse 라 짧은 내용은 바닥에 앉고, 길면 스크롤 0 이 곧 맨 아래다 — 새 줄이
+              // 와도 보던 바닥이 그대로 바닥이다.
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  controller: _scroll,
+                  reverse: true,
+                  child: SizedBox(
+                    width: constraints.maxWidth,
+                    height: math.max(view.rows, 1) * metrics.height,
+                    child: CustomPaint(painter: painter(view)),
+                  ),
                 ),
               ),
-            ),
+              if (tail != null)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  height: math.max(tail.rows, 1) * metrics.height,
+                  child: CustomPaint(painter: painter(tail)),
+                ),
+            ],
           ),
         ),
       );
     },
   );
+}
+
+/// 살아 있는 화면의 꼬리(입력상자 위 테두리부터 끝까지) — 붙잡아 둘 부분만 든 격자.
+class _TailGrid implements GridLines {
+  _TailGrid(this.live, this.top) : lines = live.lines.sublist(top);
+
+  final GridLines live;
+  final int top;
+  @override
+  final List<List<Run>> lines;
+  @override
+  List<SpriteSlot> get slots => const [];
+  @override
+  int get cols => live.cols;
+  @override
+  int get rows => lines.length;
+  @override
+  int get cursorRow => live.cursorRow - top;
+  @override
+  int get cursorCol => live.cursorCol;
+  @override
+  bool get cursorVisible => live.cursorVisible && live.cursorRow >= top;
 }

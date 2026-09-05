@@ -28,6 +28,11 @@ class _TerminalScreenState extends State<TerminalScreen>
   /// 폰 폭으로 접어 보기(기본). 끄면 데스크톱 격자 그대로를 옆으로 밀어 읽는다.
   bool _wrap = true;
 
+  /// 답장·키를 보낼 때마다 올린다 — 화면이 맨 아래로 내려간다.
+  int _bottomTick = 0;
+
+  void _toBottom() => setState(() => _bottomTick++);
+
   @override
   void initState() {
     super.initState();
@@ -62,7 +67,10 @@ class _TerminalScreenState extends State<TerminalScreen>
   Future<void> _send() async {
     final text = _input.text;
     if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
+    setState(() {
+      _sending = true;
+      _bottomTick++;
+    });
     try {
       if (_ctrl && text.length == 1) {
         _session.ctrl(text);
@@ -164,6 +172,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                 session: s,
                 ctrl: _ctrl,
                 onCtrl: () => setState(() => _ctrl = !_ctrl),
+                onKey: _toBottom,
               ),
               _ReplyBar(
                 controller: _input,
@@ -190,6 +199,7 @@ class _TerminalScreenState extends State<TerminalScreen>
         history: s.history,
         version: s.grid.version + s.historyVersion,
         palette: palette,
+        bottomTick: _bottomTick,
         // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
         student: pane.isWebShell
             ? null
@@ -227,26 +237,37 @@ class _KeyBar extends StatelessWidget {
     required this.session,
     required this.ctrl,
     required this.onCtrl,
+    required this.onKey,
   });
 
   final TermSession session;
   final bool ctrl;
   final VoidCallback onCtrl;
 
+  /// 키를 보낸 뒤 — 화면을 맨 아래로.
+  final VoidCallback onKey;
+
   @override
   Widget build(BuildContext context) {
     final s = session;
+    VoidCallback tap(void Function() send) => () {
+      send();
+      onKey();
+    };
     final keys = <Widget>[
-      _Key(label: 'esc', onTap: () => s.sendText('\x1b')),
-      _Key(label: 'tab', onTap: () => s.sendText('\t')),
+      _Key(label: 'esc', onTap: tap(() => s.sendText('\x1b'))),
+      _Key(label: 'tab', onTap: tap(() => s.sendText('\t'))),
       _Key(label: 'ctrl', selected: ctrl, onTap: onCtrl),
-      _Key(label: '^C', onTap: () => s.ctrl('c')),
-      _Key(icon: Icons.keyboard_arrow_left, onTap: () => s.arrow('D')),
-      _Key(icon: Icons.keyboard_arrow_down, onTap: () => s.arrow('B')),
-      _Key(icon: Icons.keyboard_arrow_up, onTap: () => s.arrow('A')),
-      _Key(icon: Icons.keyboard_arrow_right, onTap: () => s.arrow('C')),
-      _Key(icon: Icons.backspace_outlined, onTap: () => s.sendText('\x7f')),
-      _Key(icon: Icons.keyboard_return, onTap: () => s.sendText('\r')),
+      _Key(label: '^C', onTap: tap(() => s.ctrl('c'))),
+      _Key(icon: Icons.keyboard_arrow_left, onTap: tap(() => s.arrow('D'))),
+      _Key(icon: Icons.keyboard_arrow_down, onTap: tap(() => s.arrow('B'))),
+      _Key(icon: Icons.keyboard_arrow_up, onTap: tap(() => s.arrow('A'))),
+      _Key(icon: Icons.keyboard_arrow_right, onTap: tap(() => s.arrow('C'))),
+      _Key(
+        icon: Icons.backspace_outlined,
+        onTap: tap(() => s.sendText('\x7f')),
+      ),
+      _Key(icon: Icons.keyboard_return, onTap: tap(() => s.sendText('\r'))),
     ];
     return SizedBox(
       height: 44,

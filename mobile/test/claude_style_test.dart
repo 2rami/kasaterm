@@ -42,6 +42,7 @@ Matcher rgb(RgbColor c) => predicate<CellColor>(
 
 void main() {
   bannerTests();
+  pinnedTests();
 
   test('스피너 자리: 글리프를 지우고 걷는 도트 2칸×2줄, 문구는 학생색', () {
     final g = gridOf([
@@ -254,5 +255,21 @@ void bannerTests() {
     expect(icon.col, 0);
     expect(icon.cols, 2);
     expect(text(v.lines[4]).contains('\u{e0c0}'), isFalse);
+  });
+}
+
+void pinnedTests() {
+  test('붙잡을 첫 행은 입력상자의 위 테두리', () {
+    final g = gridOf([
+      '⏺ 답',
+      '',
+      '──────────────────────────────',
+      '❯ 입력 중',
+      '──────────────────────────────',
+      '  ⏵⏵ bypass permissions on',
+      'Fable ￼',
+    ]);
+    expect(pinnedInputTop(g.lines), 2);
+    expect(pinnedInputTop(gridOf(['그냥 글', '']).lines), isNull);
   });
 }
