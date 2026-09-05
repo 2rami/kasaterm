@@ -52,7 +52,6 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   }
 
   void _open(Pane pane) {
-    _model.clearBadge();
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => TerminalScreen(server: widget.server, pane: pane),
@@ -80,11 +79,11 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
         appBar: AppBar(
           title: const Text('학생'),
           actions: [
-            if (_model.newWaiting > 0)
+            if (_model.waiting > 0)
               Padding(
                 padding: const EdgeInsets.only(right: 4),
                 child: Badge.count(
-                  count: _model.newWaiting,
+                  count: _model.waiting,
                   child: const Icon(Icons.notifications_outlined),
                 ),
               ),
@@ -265,6 +264,7 @@ class _PaneTile extends StatelessWidget {
                 url: slug == null
                     ? null
                     : server.avatar(slug, machine: pane.machine),
+                shell: pane.isShell,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -273,13 +273,13 @@ class _PaneTile extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      pane.name.isEmpty ? '이름 없는 학생' : pane.name,
+                      pane.displayName,
                       style: theme.textTheme.titleSmall,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    if (pane.title.isNotEmpty)
+                    if (pane.subtitle.isNotEmpty)
                       Text(
-                        pane.title,
+                        pane.subtitle,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -301,9 +301,10 @@ class _PaneTile extends StatelessWidget {
 }
 
 class _Avatar extends StatelessWidget {
-  const _Avatar({required this.url});
+  const _Avatar({required this.url, this.shell = false});
 
   final Uri? url;
+  final bool shell;
 
   @override
   Widget build(BuildContext context) {
@@ -312,7 +313,10 @@ class _Avatar extends StatelessWidget {
       width: 40,
       height: 40,
       color: scheme.surfaceContainerHighest,
-      child: Icon(Icons.person_outline, color: scheme.onSurfaceVariant),
+      child: Icon(
+        shell ? Icons.terminal : Icons.person_outline,
+        color: scheme.onSurfaceVariant,
+      ),
     );
     return ClipOval(
       child: url == null
@@ -337,7 +341,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final label = pane.isWaiting ? '대기' : (pane.isIdle ? '쉼' : '작업 중');
+    final label = pane.isWaiting ? '대기' : (pane.isBusy ? '작업 중' : '쉼');
     final filled = pane.isWaiting;
     final fg = filled ? scheme.onPrimary : scheme.onSurfaceVariant;
     return Container(
@@ -350,7 +354,7 @@ class _StatusChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (!filled && !pane.isIdle) ...[
+          if (!filled && pane.isBusy) ...[
             Container(
               width: 7,
               height: 7,

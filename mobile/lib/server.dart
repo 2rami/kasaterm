@@ -43,7 +43,19 @@ class Pane {
 
   bool get isWaiting => status == 'waiting';
   bool get isIdle => status == 'idle';
+
+  /// 상태가 비면(학생이 안 도는 셸) 바쁜 것이 아니다 — 웹 허브와 같은 규칙.
+  bool get isBusy => status.isNotEmpty && !isIdle && !isWaiting;
   bool get isWebShell => id.startsWith('web-');
+
+  /// 학생이 없는 pane 은 「셸」, 둘째 줄은 제목이나 폴더 이름 — 웹 허브와 같다.
+  bool get isShell => name.isEmpty;
+  String get displayName => isShell ? '셸' : name;
+  String get subtitle {
+    if (title.isNotEmpty) return title;
+    final parts = cwd.split('/').where((s) => s.isNotEmpty).toList();
+    return parts.isEmpty ? '' : parts.last;
+  }
 
   static Pane fromJson(Map<String, Object?> j, {String? machine}) => Pane(
     id: j['id'] as String? ?? '',

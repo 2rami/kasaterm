@@ -38,8 +38,10 @@ class HubModel extends ChangeNotifier {
   bool loading = false;
   DateTime? updatedAt;
 
-  /// 마지막으로 본 뒤 새로 「대기」가 된 학생 수 — 상단 배지.
-  int newWaiting = 0;
+  /// 지금 기다리는 학생 수 — 상단 배지. 「마지막으로 본 뒤 새로 기다리게 된 수」를
+  /// 누적했더니 학생 화면에 머무는 동안 상태가 오락가락한 것까지 쌓여 52 같은 수가
+  /// 떴다. 서버가 말하는 지금 수가 늘 맞고, 목록이 길 때 위에서 한눈에 보인다.
+  int waiting = 0;
 
   Map<String, String> _lastStatus = const {};
   Timer? _timer;
@@ -52,12 +54,6 @@ class HubModel extends ChangeNotifier {
   void stop() {
     _timer?.cancel();
     _timer = null;
-  }
-
-  void clearBadge() {
-    if (newWaiting == 0) return;
-    newWaiting = 0;
-    notifyListeners();
   }
 
   Future<void> refresh() async {
@@ -99,23 +95,24 @@ class HubModel extends ChangeNotifier {
   void _noteWaiting(List<HubSection> next) {
     final status = <String, String>{};
     var fresh = 0;
+    var now = 0;
     for (final s in next) {
       for (final r in s.rooms) {
         for (final p in r.panes) {
           final key = '${s.machine ?? ''}|${p.id}';
           status[key] = p.status;
+          if (p.isWaiting) now++;
           final before = _lastStatus[key];
           if (p.isWaiting && before != null && before != 'waiting') fresh++;
         }
       }
     }
     _lastStatus = status;
-    if (fresh == 0) return;
-    newWaiting += fresh;
-    HapticFeedback.mediumImpact();
+    waiting = now;
+    if (fresh > 0) HapticFeedback.mediumImpact();
   }
 
-  static int _rank(Pane p) => p.isWaiting ? 0 : (p.isIdle ? 2 : 1);
+  static int _rank(Pane p) => p.isWaiting ? 0 : (p.isBusy ? 1 : 2);
 
   static List<HubRoom> _rooms(List<Pane> panes, List<String> labels) {
     final byWindow = <int, List<Pane>>{};
