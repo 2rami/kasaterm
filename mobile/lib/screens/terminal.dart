@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../grid_canvas.dart';
 import '../server.dart';
+import '../shot_view.dart';
 import '../term_session.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
@@ -146,27 +147,15 @@ class _TerminalScreenState extends State<TerminalScreen>
   );
 
   Widget _view(TermSession s) {
+    final tokens = s.tokens;
+    final palette = tokens == null
+        ? TerminalPalette.of(context)
+        : TerminalPalette.fromTokens(tokens);
     final bytes = s.shotBytes;
     if (s.picture && bytes != null) {
-      return InteractiveViewer(
-        maxScale: 6,
-        child: Center(
-          child: Image.memory(
-            bytes,
-            gaplessPlayback: true,
-            fit: BoxFit.contain,
-          ),
-        ),
-      );
+      return ShotView(bytes: bytes, background: palette.bg);
     }
-    final tokens = s.tokens;
-    return GridCanvas(
-      grid: s.grid,
-      version: s.grid.version,
-      palette: tokens == null
-          ? TerminalPalette.of(context)
-          : TerminalPalette.fromTokens(tokens),
-    );
+    return GridCanvas(grid: s.grid, version: s.grid.version, palette: palette);
   }
 }
 

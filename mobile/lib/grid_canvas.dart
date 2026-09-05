@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'fill_viewer.dart';
 import 'grid.dart';
 import 'server.dart';
 
@@ -302,8 +303,7 @@ class _GridPainter extends CustomPainter {
       old.grid != grid;
 }
 
-/// 격자를 그리고, 폭이 넘치면 줄여 담고, 핀치로 키운다. 미러 pane 은 크기를 못
-/// 바꾸므로(데스크톱이 같이 좁아진다) 글꼴을 줄이는 대신 변환으로 맞춘다.
+/// 격자를 그린다. 채우기·핀치는 FillViewer 가 맡는다(그림 모드와 같은 규칙).
 class GridCanvas extends StatefulWidget {
   const GridCanvas({
     super.key,
@@ -323,10 +323,8 @@ class GridCanvas extends StatefulWidget {
 }
 
 class _GridCanvasState extends State<GridCanvas> {
-  final _controller = TransformationController();
   final _cache = _RowCache();
   late _CellMetrics _metrics = _CellMetrics(widget.fontSize);
-  double _fit = 1;
 
   @override
   void didUpdateWidget(GridCanvas old) {
@@ -337,69 +335,22 @@ class _GridCanvasState extends State<GridCanvas> {
   }
 
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  /// 사용자가 손대지 않은 배율(= 직전 fit)일 때만 새 fit 을 적용한다 — 키운
-  /// 상태를 프레임마다 되돌리면 핀치가 무의미해진다.
-  void _applyFit(double fit) {
-    final current = _controller.value.getMaxScaleOnAxis();
-    final untouched = (current - _fit).abs() < 1e-3;
-    _fit = fit;
-    if (!untouched) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _controller.value = Matrix4.diagonal3Values(fit, fit, 1);
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
     final grid = widget.grid;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final cols = math.max(grid.cols, 1);
-        final rows = math.max(grid.rows, 1);
-        final contentW = cols * _metrics.width;
-        final contentH = rows * _metrics.height;
-        final fitW = constraints.maxWidth / contentW;
-        final fitH = constraints.maxHeight / contentH;
-        // 화면을 채운다: 폭에만 맞추면 넓은 pane(196열)이 위쪽에 손톱만 하게 붙고 아래가
-        // 빈다. 높이를 채우고 옆으로 밀어 읽게 하되, 작은 pane 이 거대해지지 않게
-        // 1.3배에서 멈춘다. 핀치로는 전체가 한눈에 들어오는 배율까지 줄일 수 있다.
-        final fit = math.max(fitW, math.min(fitH, 1.3));
-        if ((fit - _fit).abs() > 1e-6) _applyFit(fit);
-        return ColoredBox(
-          color: widget.palette.bg,
-          child: ClipRect(
-            child: InteractiveViewer(
-              transformationController: _controller,
-              constrained: false,
-              minScale: math.min(math.min(fitW, fitH), fit),
-              maxScale: 6,
-              boundaryMargin: EdgeInsets.symmetric(
-                horizontal: constraints.maxWidth,
-                vertical: constraints.maxHeight,
-              ),
-              child: SizedBox(
-                width: contentW,
-                height: contentH,
-                child: CustomPaint(
-                  painter: _GridPainter(
-                    grid: grid,
-                    version: widget.version,
-                    palette: widget.palette,
-                    metrics: _metrics,
-                    cache: _cache,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
+    final cols = math.max(grid.cols, 1);
+    final rows = math.max(grid.rows, 1);
+    return FillViewer(
+      content: Size(cols * _metrics.width, rows * _metrics.height),
+      background: widget.palette.bg,
+      child: CustomPaint(
+        painter: _GridPainter(
+          grid: grid,
+          version: widget.version,
+          palette: widget.palette,
+          metrics: _metrics,
+          cache: _cache,
+        ),
+      ),
     );
   }
 }
