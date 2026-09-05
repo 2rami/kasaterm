@@ -195,6 +195,7 @@ class _TerminalScreenState extends State<TerminalScreen>
             ? null
             : StudentStyle(
                 slug: pane.slug,
+                name: pane.name,
                 accent: studentAccent(context, pane, tokens),
                 bg: palette.bg,
               ),

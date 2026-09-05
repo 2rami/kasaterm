@@ -334,21 +334,50 @@ class _GridPainter extends CustomPainter {
   void _paintSprites(Canvas canvas) {
     final slug = this.slug;
     final sprites = this.sprites;
-    if (slug == null || sprites == null || grid.slots.isEmpty) return;
+    if (sprites == null || grid.slots.isEmpty) return;
     final paint = Paint()..filterQuality = FilterQuality.none;
     for (final s in grid.slots) {
+      final box = Rect.fromLTWH(
+        s.col * metrics.width,
+        s.row * metrics.height,
+        s.cols * metrics.width,
+        s.rows * metrics.height,
+      );
+      if (s.motion.startsWith('icon:')) {
+        final img = sprites.icon(s.motion.substring(5));
+        if (img == null) continue;
+        // 데스크톱 paint_status_model_icons — 칸 안 가운데, 높이의 72%·폭의 78% 중 작은 쪽.
+        final size = math.min(box.height * 0.72, box.width * 0.78);
+        canvas.drawImageRect(
+          img,
+          Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+          Rect.fromLTWH(
+            box.left + (box.width - size) / 2,
+            box.top + (box.height - size) / 2,
+            size,
+            size,
+          ),
+          Paint()
+            ..filterQuality = FilterQuality.medium
+            ..colorFilter = const ColorFilter.mode(
+              statusModelColor,
+              BlendMode.srcIn,
+            ),
+        );
+        continue;
+      }
+      if (slug == null) continue;
       final i = s.motion == 'walk' ? walkFrame : idleFrame;
       final img = sprites.frame(slug, s.motion, i);
       if (img == null) continue;
+      // 그림 비율은 지킨다 — 자리 상자 안에 맞춰 바닥에 세우고 가로는 가운데.
+      final iw = img.width.toDouble(), ih = img.height.toDouble();
+      final k = math.min(box.width / iw, box.height / ih);
+      final dw = iw * k, dh = ih * k;
       canvas.drawImageRect(
         img,
-        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-        Rect.fromLTWH(
-          s.col * metrics.width,
-          s.row * metrics.height,
-          s.cols * metrics.width,
-          s.rows * metrics.height,
-        ),
+        Rect.fromLTWH(0, 0, iw, ih),
+        Rect.fromLTWH(box.left + (box.width - dw) / 2, box.bottom - dh, dw, dh),
         paint,
       );
     }
@@ -527,6 +556,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
               widget.grid,
               StudentStyle(
                 slug: slug,
+                name: st.name,
                 accent: st.accent,
                 bg: st.bg,
                 hasWalk: slug != null && spriteCache.available(slug, 'walk'),

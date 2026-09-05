@@ -63,12 +63,16 @@ class StudentStyle {
     required this.slug,
     required this.accent,
     required this.bg,
+    this.name,
     this.hasWalk = true,
     this.hasIdle = true,
   });
 
   /// 도트 파일명의 학생 슬러그 — 없으면 색만 입힌다.
   final String? slug;
+
+  /// 표시 이름(「아리스」) — 시작 배너의 제목·환영문에 들어간다.
+  final String? name;
   final Color accent;
   final Color bg;
   final bool hasWalk;
@@ -496,6 +500,266 @@ bool _isRule(List<_Cell> row, int maxLabel) {
   return leftC > 2.0 ? (anchor, leftC) : null;
 }
 
+/// claude 시작 배너의 Clawd 블록 그림 — 9칸×3줄. 위 줄이 화면 밖으로 밀리면 행이 음수다.
+const clawdCols = 9;
+const clawdRows = 3;
+const _clawdTitle = 'Claude Code';
+
+/// 상태줄 모델 표식 — 글자가 아니라 로고를 앉힐 한 칸 자리표(데스크톱 `STATUS_MODEL_*_MARKER`).
+const statusModelClaude = 0xE0C0;
+const statusModelGpt = 0xE0C1;
+const statusModelColor = Color(0xff7aa2f7);
+
+int? _idxAtCol(List<_Cell> row, int col) {
+  var c = 0;
+  for (var i = 0; i < row.length; i++) {
+    if (c == col) return i;
+    if (c > col) return null;
+    c += cellWidth(row[i].rune);
+  }
+  return c == col ? row.length : null;
+}
+
+bool _matchesAt(List<_Cell> row, int at, List<int> pat) {
+  if (at < 0 || at + pat.length > row.length) return false;
+  for (var i = 0; i < pat.length; i++) {
+    if (row[at + i].rune != pat[i]) return false;
+  }
+  return true;
+}
+
+/// (시작 행, 시작 index) 목록. 두 세대의 그림을 다 본다; 행 -1·-2 는 머리가 밀려난 것.
+List<(int, int)> _findClawdBanners(List<List<_Cell>> rows) {
+  const gens = [
+    (
+      [0x2590, 0x259B, 0x2588, 0x2588, 0x2588, 0x259B, 0x2588],
+      [0x259D, 0x259C, 0x2588, 0x2588, 0x2588, 0x2588, 0x2588, 0x2588, 0x2580],
+      [0x259D, 0x259D, 0x20, 0x259D, 0x259D],
+    ),
+    (
+      [0x2590, 0x259B, 0x2588, 0x2588, 0x2588, 0x259C, 0x258C],
+      [0x259D, 0x259C, 0x2588, 0x2588, 0x2588, 0x2588, 0x2588, 0x259B, 0x2598],
+      [0x2598, 0x2598, 0x20, 0x259D, 0x259D],
+    ),
+  ];
+  final out = <(int, int)>[];
+  for (final (head, body, feet) in gens) {
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      var c = 0;
+      while (c + body.length <= row.length) {
+        if (_matchesAt(row, c, body)) {
+          if (r == 0) {
+            out.add((-1, c));
+            c += body.length;
+            continue;
+          }
+          if (_matchesAt(rows[r - 1], c + 1, head)) {
+            out.add((r - 1, c));
+            c += body.length;
+            continue;
+          }
+        }
+        c++;
+      }
+    }
+    if (rows.isNotEmpty) {
+      final row = rows.first;
+      var p = 2;
+      while (p + feet.length + 2 <= row.length) {
+        if (_matchesAt(row, p, feet) &&
+            row[p - 2].blank &&
+            row[p - 1].blank &&
+            row[p + 5].blank &&
+            row[p + 6].blank) {
+          out.add((-2, p - 2));
+          p += feet.length;
+          continue;
+        }
+        p++;
+      }
+    }
+  }
+  return out;
+}
+
+void _blankCell(_Cell c) {
+  c
+    ..rune = 0x20
+    ..fg = const DefaultColor()
+    ..bg = const DefaultColor()
+    ..flags = 0;
+}
+
+/// 「Claude Code」를 학생 이름으로 — 이름 글자마다 빈 칸 하나(두 칸 글자의 자리)를 붙이고,
+/// 뒤따르는 버전 글은 왼쪽으로 당긴다. 여섯 칸을 넘는 이름은 원문을 둔다.
+void _replaceBannerTitle(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  int br,
+  int bc,
+  String name,
+  RgbColor accent,
+) {
+  final title = _clawdTitle.runes.toList();
+  final r0 = math.max(0, br), r1 = math.min(rows.length, br + clawdRows);
+  for (var r = r0; r < r1; r++) {
+    final row = rows[r];
+    final start = bc + clawdCols;
+    if (start >= row.length) continue;
+    int? tc;
+    for (var c = start; c + title.length <= row.length; c++) {
+      if (_matchesAt(row, c, title)) {
+        tc = c;
+        break;
+      }
+    }
+    if (tc == null) continue;
+    final style = row[tc];
+    final repl = <_Cell>[];
+    for (final ch in name.runes) {
+      repl.add(_Cell(ch, accent, style.bg, style.flags));
+      if (cellWidth(ch) == 1) {
+        repl.add(_Cell(0x20, accent, style.bg, style.flags));
+      }
+    }
+    final replCols = repl.fold(0, (n, c) => n + cellWidth(c.rune));
+    if (replCols > title.length) return;
+    var end = tc + title.length;
+    var probe = end;
+    while (probe < row.length) {
+      if (row[probe].blank) {
+        if (probe + 1 >= row.length || row[probe + 1].blank) break;
+      } else {
+        end = probe + 1;
+      }
+      probe++;
+    }
+    final tail = row.sublist(tc + title.length, end);
+    final rebuilt = [...row.sublist(0, tc), ...repl, ...tail];
+    // 빈 칸으로 채워 폭을 지킨다 — 원본은 칸 단위라 뒤 글자가 안 밀린다.
+    var cols = rebuilt.fold(0, (n, c) => n + cellWidth(c.rune));
+    final want = _colOf(row, end);
+    while (cols < want) {
+      rebuilt.add(_Cell(0x20, const DefaultColor(), const DefaultColor(), 0));
+      cols++;
+    }
+    rebuilt.addAll(row.sublist(end));
+    rows[r] = rebuilt;
+    touched.add(r);
+    return;
+  }
+}
+
+String _welcomeFor(String name, String user) => switch (name) {
+  '아로나' => '어서 오세요 $user 선생님!',
+  '프라나' => '$user 선생님, 오셨군요.',
+  '미도리' => '$user 선생님, 오셨어요.',
+  '모모이' => '$user 선생님, 어서 오세요!',
+  '유즈' => '$user 선생님… 오셨네요.',
+  '아리스' => '$user 선생님, 돌아왔구나!',
+  '유우카' => '$user 선생님, 오셨네요.',
+  '시로코' => '$user 선생님, 오셨어요.',
+  '호시노' => '$user 선생님~ 왔구나~',
+  '코하루' => '어, 어서오세요 $user 선생님…!',
+  '히마리' => '$user 선생님, 어서 오세요.',
+  '아루' => '훗, 왔군 $user 선생님!',
+  _ => '$user 선생님, 어서 오세요.',
+};
+
+/// 「Welcome back `<user>`!」 를 학생 말투의 인사로. 배너 위 네 줄만 본다.
+void _replaceWelcome(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  int br,
+  String name,
+  RgbColor accent,
+) {
+  final prefix = 'Welcome back '.runes.toList();
+  final hi = br.clamp(0, rows.length), lo = math.max(0, br - 4);
+  for (var r = lo; r < hi; r++) {
+    final row = rows[r];
+    int? wc;
+    for (var c = 0; c + prefix.length <= row.length; c++) {
+      if (_matchesAt(row, c, prefix)) {
+        wc = c;
+        break;
+      }
+    }
+    if (wc == null) continue;
+    final nameStart = wc + prefix.length;
+    var excl = -1;
+    for (var i = nameStart; i < row.length; i++) {
+      if (row[i].rune == 0x21) {
+        excl = i;
+        break;
+      }
+    }
+    if (excl <= nameStart) continue;
+    final user = String.fromCharCodes([
+      for (var i = nameStart; i < excl; i++) row[i].rune,
+    ]).trim();
+    var limit = row.length;
+    for (var i = excl + 1; i < row.length; i++) {
+      if (!row[i].blank) {
+        limit = i;
+        break;
+      }
+    }
+    final greet = _welcomeFor(name, user);
+    final cells = <_Cell>[
+      for (final ch in greet.runes)
+        _Cell(ch, accent, row[wc].bg, row[wc].flags),
+    ];
+    final width = cells.fold(0, (n, c) => n + cellWidth(c.rune));
+    final room = _colOf(row, limit) - _colOf(row, wc);
+    if (width > room) return;
+    final rebuilt = [...row.sublist(0, wc), ...cells];
+    var cols = width;
+    while (cols < room) {
+      rebuilt.add(_Cell(0x20, const DefaultColor(), row[wc].bg, 0));
+      cols++;
+    }
+    rebuilt.addAll(row.sublist(limit));
+    rows[r] = rebuilt;
+    touched.add(r);
+    return;
+  }
+}
+
+/// 환영 상자의 선을 학생색으로 — 배너 위의 ╭ 줄부터 그림 아래 첫 ╰ 줄까지.
+void _tintWelcomeBox(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  int welcomeRow,
+  int artBottom,
+  RgbColor accent,
+) {
+  bool hasAny(List<_Cell> row, Set<int> set) =>
+      row.any((c) => set.contains(c.rune));
+  int? top;
+  for (var r = welcomeRow - 1; r >= 0; r--) {
+    if (hasAny(rows[r], const {0x256D, 0x256E, 0x250C, 0x2510})) {
+      top = r;
+      break;
+    }
+  }
+  int? bottom;
+  for (var r = math.min(artBottom, rows.length); r < rows.length; r++) {
+    if (hasAny(rows[r], const {0x2570, 0x256F, 0x2514, 0x2518})) {
+      bottom = r;
+      break;
+    }
+  }
+  if (top == null || bottom == null) return;
+  for (var r = top; r <= bottom; r++) {
+    for (final c in rows[r]) {
+      if (c.rune >= 0x2500 && c.rune <= 0x257F) c.fg = accent;
+    }
+    touched.add(r);
+  }
+}
+
 /// 데스크톱과 같은 순서로 꾸민다. `t` 는 초 단위 애니 시계.
 StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   final rows = <List<_Cell>>[for (final r in live.lines) _cells(r)];
@@ -511,13 +775,64 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   if (face != null) {
     final (fr, fc, n) = face;
     for (var i = fc; i < fc + n; i++) {
-      rows[fr][i]
-        ..rune = 0x20
-        ..fg = const DefaultColor()
-        ..bg = const DefaultColor()
-        ..flags = 0;
+      _blankCell(rows[fr][i]);
     }
     touched.add(fr);
+  }
+
+  // 상태줄 모델 표식 — 글리프 대신 로고. 아래→위, 마지막 상태줄이 이긴다.
+  for (var r = rows.length - 1; r >= 0; r--) {
+    final row = rows[r];
+    var done = false;
+    for (var i = 0; i < row.length; i++) {
+      final g = row[i].rune;
+      if (g != statusModelClaude && g != statusModelGpt) continue;
+      final col = _colOf(row, i);
+      _blankCell(row[i]);
+      touched.add(r);
+      slots.add(
+        SpriteSlot(
+          g == statusModelClaude ? 'icon:claude' : 'icon:codex',
+          r.toDouble(),
+          col.toDouble(),
+          1,
+          2,
+        ),
+      );
+      done = true;
+      break;
+    }
+    if (done) break;
+  }
+
+  // 시작 배너 — Clawd 그림 자리에 학생 도트, 제목·환영문은 학생 것으로.
+  final name = st.name;
+  if (canStand && name != null) {
+    for (final (br, bc) in _findClawdBanners(rows)) {
+      final r0 = math.max(0, br), r1 = math.min(rows.length, br + clawdRows);
+      for (var r = r0; r < r1; r++) {
+        final i0 = _idxAtCol(rows[r], bc);
+        if (i0 == null) continue;
+        for (var i = i0; i < math.min(rows[r].length, i0 + clawdCols); i++) {
+          _blankCell(rows[r][i]);
+        }
+        touched.add(r);
+      }
+      slots.add(
+        SpriteSlot(
+          'idle',
+          br.toDouble(),
+          bc.toDouble(),
+          clawdRows.toDouble(),
+          clawdCols.toDouble(),
+        ),
+      );
+      animated = true;
+      final acc = _rgb(accent);
+      _replaceBannerTitle(rows, touched, br, bc, name, acc);
+      _replaceWelcome(rows, touched, br, name, acc);
+      _tintWelcomeBox(rows, touched, math.max(0, br), br + clawdRows, acc);
+    }
   }
 
   var busy = false;
@@ -575,11 +890,7 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
       if (!row[i].blank) row[i].fg = tail;
     }
     if (canWalk) {
-      row[sc]
-        ..rune = 0x20
-        ..fg = const DefaultColor()
-        ..bg = const DefaultColor()
-        ..flags = 0;
+      _blankCell(row[sc]);
       final topR = math.max(0, sr - 1);
       slots.add(
         SpriteSlot(

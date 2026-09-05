@@ -242,6 +242,10 @@ class Reflow {
 
 SpriteSlot _mapSlot(SpriteSlot s, List<int> lineStart, List<List<int>> starts) {
   final r = s.row.floor();
+  // 머리가 화면 위로 밀린 배너는 행이 음수다 — 첫 줄 위로 그만큼 삐져나가게 둔다.
+  if (r < 0) {
+    return SpriteSlot(s.motion, lineStart[0] + s.row, s.col, s.rows, s.cols);
+  }
   final frac = s.row - r;
   final st = starts[r];
   var k = 0;

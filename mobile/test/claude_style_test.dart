@@ -31,12 +31,18 @@ Grid gridOf(List<String> rows, {int cols = 60, List<int>? cursor}) =>
 
 String text(List<Run> runs) => runs.map((r) => r.text).join();
 
+/// 칸 수 — 한글은 두 칸이라 글자 수와 다르다.
+int cols(List<Run> runs) =>
+    text(runs).runes.fold(0, (n, r) => n + cellWidth(r));
+
 Matcher rgb(RgbColor c) => predicate<CellColor>(
   (v) => v is RgbColor && v.r == c.r && v.g == c.g && v.b == c.b,
   'rgb(${c.r},${c.g},${c.b})',
 );
 
 void main() {
+  bannerTests();
+
   test('스피너 자리: 글리프를 지우고 걷는 도트 2칸×2줄, 문구는 학생색', () {
     final g = gridOf([
       '⏺ Bash(ls)',
@@ -170,5 +176,83 @@ void main() {
       60,
     );
     expect(view.slots.single.row + view.slots.single.rows, 5);
+  });
+}
+
+void bannerTests() {
+  const named = StudentStyle(
+    slug: 'arisu',
+    name: '아리스',
+    accent: accent,
+    bg: bg,
+  );
+
+  test('시작 배너: Clawd 그림 자리에 도트, 제목은 학생 이름, 환영문은 학생 말투', () {
+    final g = gridOf([
+      '╭──────────────────────────────────────╮',
+      '│ Welcome back kasa!                    │',
+      '│ ▐▛███▛█   Claude Code v2.1.0         │',
+      '│▝▜██████▀                             │',
+      '│ ▝▝ ▝▝                                │',
+      '╰──────────────────────────────────────╯',
+      '',
+      '──────────────────────────────',
+      '❯ ',
+      '──────────────────────────────',
+      'Fable ￼',
+    ]);
+    final v = restyleClaude(g, named, 0);
+    final banner = v.slots.firstWhere((s) => s.cols == 9);
+    expect(banner.motion, 'idle');
+    expect(banner.row, 2);
+    expect(banner.col, 1);
+    expect(banner.cols, 9);
+    // 그림 칸은 비고 제목·환영문이 바뀐다.
+    expect(text(v.lines[2]).contains('▛'), isFalse);
+    expect(text(v.lines[3]).contains('█'), isFalse);
+    expect(text(v.lines[2]), contains('아리스'));
+    expect(text(v.lines[2]), contains('v2.1.0'));
+    expect(text(v.lines[1]), contains('kasa 선생님, 돌아왔구나!'));
+    // 상자 선은 학생색.
+    final corner = v.lines[0].first;
+    expect(corner.fg, isA<RgbColor>());
+    // 칸 폭이 보존된다 — 뒤 글자가 밀리지 않는다.
+    for (final r in [1, 2]) {
+      expect(cols(v.lines[r]), cols(g.lines[r]));
+    }
+  });
+
+  test('머리가 화면 위로 밀린 배너는 행 -1 에서 시작해 위로 삐져나간다', () {
+    final g = gridOf([
+      '▝▜██████▀  Claude Code v2',
+      ' ▝▝ ▝▝',
+      '',
+      '──────────────────────────────',
+      '❯ ',
+      '──────────────────────────────',
+      'Fable ￼',
+    ]);
+    final v = restyleClaude(g, named, 0);
+    final banner = v.slots.firstWhere((s) => s.cols == 9);
+    expect(banner.row, -1);
+    final view = Reflow().apply(CombinedGrid(const [], v), 60);
+    expect(view.slots.firstWhere((s) => s.cols == 9).row, -1);
+  });
+
+  test('상태줄 모델 표식은 로고 자리가 되고 글자는 지운다', () {
+    final g = gridOf([
+      '',
+      '──────────────────────────────',
+      '❯ ',
+      '──────────────────────────────',
+      '\u{e0c0} Fable 5.1 ￼ main',
+    ]);
+    final v = restyleClaude(g, named, 0);
+    final icon = v.slots.firstWhere((s) => s.motion.startsWith('icon:'));
+    expect(icon.motion, 'icon:claude');
+    expect(icon.row, 4);
+    expect(icon.col, 0);
+    expect(icon.cols, 2);
+    expect(text(v.lines[4]).contains('\u{e0c0}'), isFalse);
   });
 }
