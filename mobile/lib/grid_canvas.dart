@@ -734,6 +734,10 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                 child: SingleChildScrollView(
                   controller: _scroll,
                   reverse: true,
+                  // 위로 넘기며 읽을 땐 키보드를 내린다 — 키보드가 화면 반을 먹어
+                  // 열 줄밖에 안 보인다. 다시 치려면 아래 칸을 누르면 된다.
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
                   child: SizedBox(
                     width: constraints.maxWidth,
                     height: math.max(view.rows, 1) * metrics.height,
