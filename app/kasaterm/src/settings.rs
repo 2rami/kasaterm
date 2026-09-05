@@ -3445,6 +3445,17 @@ fn spawn_hidden_login(
     std::thread::spawn(move || {
         // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의
         // PATH 에는 claude·codex 가 없어 직접 spawn 하면 항상 실패한다.
+        // 승인이 끝난 브라우저가 되돌아올 창구. 못 열면(포트 고갈 등) 옛 방식
+        // 그대로 코드를 받는다 — 되돌림이 안 되는 환경에서 로그인 자체가 막히면 안 된다.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok();
+        if let Some(l) = listener.as_ref() {
+            let _ = l.set_nonblocking(true);
+        }
+        let port = listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port());
+
         let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
         let mut cmd = crate::proc::command(shell);
         cmd.arg("-lc")
