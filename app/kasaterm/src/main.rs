@@ -1519,7 +1519,6 @@ struct TabDrag {
 /// 새로 띄우고 `--resume` 까지 그 함수가 처리한다. `alive` 가 그 두 길을 가른다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InlineWebKind {
-    Settings,
     Arona,
     Board,
 }
@@ -3488,9 +3487,6 @@ enum UserEvent {
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
-    /// 설정 창(웹뷰)에 떨어뜨린 테마 zip. wry 의 드롭 핸들러는 `Fn(..) -> bool`
-    /// 이라 `&mut self` 에 못 닿아, 소켓 스레드와 같은 방식으로 GUI 에 위임한다.
-    ImportTheme(std::path::PathBuf),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
@@ -4154,6 +4150,7 @@ impl SettingsCat {
     /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
     /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
     /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
+    #[cfg(test)]
     pub(crate) fn web_key(self) -> &'static str {
         match self {
             Self::General => "general",

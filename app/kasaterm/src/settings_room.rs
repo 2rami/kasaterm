@@ -32,6 +32,9 @@ pub(crate) struct SettingsScene {
     hits: Vec<crate::native_settings::Hit>,
     caret_rect: Option<crate::native_settings::Rect>,
     first_run: bool,
+    onboarding: crate::native_onboarding::State,
+    field_backup: Option<crate::native_settings::FieldBackup>,
+    field_dirty: bool,
 }
 
 impl Default for SettingsScene {
@@ -45,6 +48,9 @@ impl Default for SettingsScene {
             hits: Vec::new(),
             caret_rect: None,
             first_run: crate::onboarding::launch_pending(),
+            onboarding: crate::native_onboarding::State::default(),
+            field_backup: None,
+            field_dirty: false,
         }
     }
 }
@@ -134,10 +140,45 @@ impl SettingsScene {
         self.first_run = false;
     }
 
+    pub(crate) fn onboarding(&self) -> &crate::native_onboarding::State {
+        &self.onboarding
+    }
+
+    pub(crate) fn onboarding_mut(&mut self) -> &mut crate::native_onboarding::State {
+        &mut self.onboarding
+    }
+
+    pub(crate) fn reset_scroll(&mut self) {
+        self.scroll = 0.0;
+    }
+
+    pub(crate) fn arm_field_backup(&mut self, backup: crate::native_settings::FieldBackup) {
+        self.field_backup = Some(backup);
+        self.field_dirty = false;
+    }
+
+    pub(crate) fn field_backup_matches(&self, field: SettingsInput) -> bool {
+        self.field_backup
+            .as_ref()
+            .is_some_and(|backup| backup.field == field)
+    }
+
+    pub(crate) fn mark_field_dirty(&mut self) {
+        self.field_dirty = true;
+    }
+
+    pub(crate) fn take_field_backup(
+        &mut self,
+    ) -> (Option<crate::native_settings::FieldBackup>, bool) {
+        (self.field_backup.take(), std::mem::take(&mut self.field_dirty))
+    }
+
     pub(crate) fn leave(&mut self) {
         self.return_pane = None;
         self.hits.clear();
         self.caret_rect = None;
+        self.field_backup = None;
+        self.field_dirty = false;
     }
 }
 
@@ -337,6 +378,7 @@ impl App {
             if idx != self.active_window {
                 self.switch_window(idx);
             }
+            self.begin_native_onboarding();
             self.chrome_dirty = true;
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -375,6 +417,7 @@ impl App {
         self.window_labels_at = None;
         self.chrome_dirty = true;
         self.publish_pty_layout();
+        self.begin_native_onboarding();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -663,6 +706,17 @@ mod tests {
             Some(Target::Category(SettingsCat::Claude))
         ));
         assert!(!scene.first_run());
+
+        scene.arm_field_backup(crate::native_settings::FieldBackup {
+            field: SettingsInput::Shell,
+            value: "/bin/zsh".to_string(),
+            caret: 9,
+        });
+        assert!(scene.field_backup_matches(SettingsInput::Shell));
+        scene.mark_field_dirty();
+        let (backup, dirty) = scene.take_field_backup();
+        assert!(dirty);
+        assert_eq!(backup.map(|value| value.value), Some("/bin/zsh".to_string()));
     }
 
     #[test]

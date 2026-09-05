@@ -2467,14 +2467,14 @@ impl App {
         }
     }
     pub(crate) fn toggle_board_panel(&mut self, event_loop: &ActiveEventLoop) {
-        self.toggle_inline_web(event_loop, InlineWebKind::Board, None);
+        self.toggle_inline_web(event_loop, InlineWebKind::Board);
     }
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         if !crate::socket::read_shim_inject() {
             self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
             return;
         }
-        let _ = self.open_inline_web(event_loop, InlineWebKind::Arona, None);
+        let _ = self.open_inline_web(event_loop, InlineWebKind::Arona);
     }
 
     pub(crate) fn close_arona_panel(&mut self) {
@@ -2579,20 +2579,8 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         kind: InlineWebKind,
-        cat: Option<crate::SettingsCat>,
     ) -> bool {
-        if kind == InlineWebKind::Settings {
-            return self.open_settings_room(cat);
-        }
         if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
-            if let (InlineWebKind::Settings, Some(c), Some(host)) =
-                (kind, cat, self.inline_web.as_ref())
-            {
-                let _ = host.webview.evaluate_script(&format!(
-                    "window.__ktSetCat && window.__ktSetCat('{}')",
-                    c.web_key()
-                ));
-            }
             if let Some(host) = self.inline_web.as_ref() {
                 host.window
                     .as_ref()
@@ -2602,10 +2590,9 @@ impl App {
             return true;
         }
         self.close_inline_web();
-        let (port, certain) = crate::mcp_panel_port_certain();
+        let (port, _) = crate::mcp_panel_port_certain();
         if !settings_web_reachable(&port) {
             let label = match kind {
-                InlineWebKind::Settings => "설정",
                 InlineWebKind::Arona => "아로나",
                 InlineWebKind::Board => "보드",
             };
@@ -2622,11 +2609,6 @@ impl App {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let url = match kind {
-            InlineWebKind::Settings => format!(
-                "http://127.0.0.1:{port}/arona-ui/settings.html?v={cb}{}",
-                cat.map(|c| format!("&cat={}", c.web_key()))
-                    .unwrap_or_default()
-            ),
             InlineWebKind::Arona => {
                 format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&view=classroom")
             }
@@ -2635,36 +2617,14 @@ impl App {
             }
         };
         let _title = match kind {
-            InlineWebKind::Settings if !certain => {
-                format!("설정 — 127.0.0.1:{port} (포트 불확실)")
-            }
-            InlineWebKind::Settings => "설정".to_string(),
             InlineWebKind::Arona => "아로나".to_string(),
             InlineWebKind::Board => "보드".to_string(),
         };
-        let drop_proxy = self.proxy.clone();
-        let background = if kind == InlineWebKind::Settings {
-            (27, 37, 65, 255)
-        } else {
-            (20, 22, 28, 255)
-        };
+        let background = (20, 22, 28, 255);
         let builder = wry::WebViewBuilder::new()
             .with_url(url.clone())
             .with_background_color(background)
             .with_visible(false)
-            .with_drag_drop_handler(move |e| match e {
-                wry::DragDropEvent::Drop { paths, .. } => {
-                    let mut took = false;
-                    for p in paths {
-                        if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
-                            let _ = drop_proxy.send_event(UserEvent::ImportTheme(p));
-                            took = true;
-                        }
-                    }
-                    took
-                }
-                _ => false,
-            })
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
                 size: wry::dpi::LogicalSize::new(720.0, 560.0).into(),
@@ -2738,12 +2698,11 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         kind: InlineWebKind,
-        cat: Option<crate::SettingsCat>,
     ) {
         if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
             self.close_inline_web();
         } else {
-            let _ = self.open_inline_web(event_loop, kind, cat);
+            let _ = self.open_inline_web(event_loop, kind);
         }
     }
 

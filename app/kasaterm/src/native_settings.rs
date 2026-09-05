@@ -9,14 +9,13 @@ pub(crate) type Rect = (f32, f32, f32, f32);
 
 const HEADER_H: f32 = 92.0;
 const CONTENT_MAX_W: f32 = 820.0;
-const SECTION_GAP: f32 = 18.0;
 
 #[derive(Clone)]
 pub(crate) struct PaletteChoice {
-    key: String,
-    label: String,
-    bg: [u8; 4],
-    text: [u8; 4],
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) bg: [u8; 4],
+    pub(crate) text: [u8; 4],
     ansi: [[u8; 3]; 6],
 }
 
@@ -29,7 +28,7 @@ pub(crate) struct CharacterChoice {
 #[derive(Clone, Default)]
 pub(crate) struct SettingsCache {
     pub(crate) ready: bool,
-    palettes: Arc<Vec<PaletteChoice>>,
+    pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     characters: Arc<Vec<CharacterChoice>>,
     themes: Arc<Vec<socket::ThemeRow>>,
     models: Arc<Vec<kasa_mcp::character::ModelChoice>>,
@@ -133,7 +132,7 @@ pub(crate) enum Target {
     Setting(SettingsAction),
     Focus(SettingsInput),
     Close,
-    FinishOnboarding,
+    Onboarding(crate::native_onboarding::Action),
 }
 
 #[derive(Clone)]
@@ -141,6 +140,13 @@ pub(crate) struct Hit {
     pub(crate) target: Target,
     pub(crate) rect: Rect,
     pub(crate) cursor: HitCursor,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FieldBackup {
+    pub(crate) field: SettingsInput,
+    pub(crate) value: String,
+    pub(crate) caret: usize,
 }
 
 impl std::fmt::Debug for Hit {
@@ -217,6 +223,7 @@ pub(crate) struct Snapshot {
     pub(crate) feedback_body: String,
     pub(crate) feedback_caret: usize,
     pub(crate) feedback_diag: bool,
+    pub(crate) onboarding: crate::native_onboarding::Snapshot,
 }
 
 impl App {
@@ -296,6 +303,7 @@ impl App {
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
+            onboarding: crate::native_onboarding::snapshot(self, area),
         })
     }
 
@@ -349,18 +357,22 @@ impl App {
                 self.native_settings_blur();
                 self.settings_scene.set_category(cat);
             }
-            Some(Target::Setting(action)) => self.native_settings_apply(action),
+            Some(Target::Setting(action)) => {
+                self.native_settings_blur();
+                self.native_settings_apply(action);
+                if let Some(field) = self.settings_input {
+                    self.native_settings_arm_backup(field);
+                }
+            }
             Some(Target::Focus(field)) => self.native_settings_focus(field),
             Some(Target::Close) => {
                 self.native_settings_blur();
                 self.return_from_settings_room();
                 return true;
             }
-            Some(Target::FinishOnboarding) => {
-                if crate::onboarding::skip().is_ok() {
-                    self.settings_scene.finish_onboarding();
-                    self.set_toast("기본값으로 시작했어요".to_string());
-                }
+            Some(Target::Onboarding(action)) => {
+                self.native_settings_blur();
+                self.native_onboarding_action(action);
             }
             None => self.native_settings_blur(),
         }
@@ -372,17 +384,7 @@ impl App {
     }
 
     fn native_settings_apply(&mut self, action: SettingsAction) {
-        let refresh = matches!(
-            action,
-            SettingsAction::ThemeMode(_)
-                | SettingsAction::StartCustomTheme
-                | SettingsAction::ResetCustomTheme
-                | SettingsAction::DeleteCustomTheme(_)
-                | SettingsAction::SelectTheme(_)
-                | SettingsAction::ExportTheme
-                | SettingsAction::DeleteTheme(_)
-                | SettingsAction::RefreshStudentAssets
-        );
+        let refresh = action_refreshes_cache(&action);
         self.settings_apply(action);
         if refresh {
             self.settings_scene.refresh_cache();
@@ -391,15 +393,19 @@ impl App {
 
     fn native_settings_focus(&mut self, field: SettingsInput) {
         if self.settings_input != Some(field) {
-            self.ime_retarget(crate::ImeFocus::Settings(field));
+            self.native_settings_blur();
         }
+        self.native_settings_arm_backup(field);
         self.settings_input = Some(field);
         match field {
             SettingsInput::CwdPath => self.settings_caret = self.set_cwd_mode.chars().count(),
             SettingsInput::FileOpenCmd => {
                 self.settings_caret = self.set_file_open_cmd.chars().count()
             }
-            SettingsInput::Shell => self.settings_caret = self.set_shell.chars().count(),
+            SettingsInput::Shell => {
+                self.set_shell = direct_shell_seed(&self.set_shell);
+                self.settings_caret = self.set_shell.chars().count();
+            }
             SettingsInput::ClaudeExtra => {
                 self.settings_caret = self.set_claude_extra.chars().count()
             }
@@ -415,7 +421,42 @@ impl App {
         self.in_preedit = false;
     }
 
+    fn native_settings_arm_backup(&mut self, field: SettingsInput) {
+        if self.settings_scene.field_backup_matches(field) {
+            return;
+        }
+        let (value, caret) = self.native_settings_field_value(field);
+        self.settings_scene.arm_field_backup(FieldBackup {
+            field,
+            value,
+            caret,
+        });
+    }
+
+    fn native_settings_field_value(&self, field: SettingsInput) -> (String, usize) {
+        match field {
+            SettingsInput::CwdPath => (self.set_cwd_mode.clone(), self.settings_caret),
+            SettingsInput::FileOpenCmd => (self.set_file_open_cmd.clone(), self.settings_caret),
+            SettingsInput::Shell => (self.set_shell.clone(), self.settings_caret),
+            SettingsInput::ClaudeExtra => (self.set_claude_extra.clone(), self.settings_caret),
+            SettingsInput::StudentName => (self.students_name.clone(), self.settings_caret),
+            SettingsInput::StudentPersona => (self.students_persona.clone(), self.students_caret),
+            SettingsInput::FeedbackBody => (self.feedback_body.clone(), self.feedback_caret),
+            SettingsInput::ThemeLabel => (
+                self.theme_label_edit
+                    .as_ref()
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default(),
+                self.settings_caret,
+            ),
+            SettingsInput::PaletteHex(_) => (self.set_palette_edit.clone(), self.settings_caret),
+        }
+    }
+
     pub(crate) fn native_settings_insert_into(&mut self, field: SettingsInput, text: &str) {
+        if !text.is_empty() {
+            self.settings_scene.mark_field_dirty();
+        }
         match field {
             SettingsInput::CwdPath => {
                 crate::lineedit::insert(&mut self.set_cwd_mode, &mut self.settings_caret, text)
@@ -466,6 +507,12 @@ impl App {
                 self.native_settings_insert_into(field, &text);
             }
         }
+        let (backup, dirty) = self.settings_scene.take_field_backup();
+        if !dirty {
+            if let Some(backup) = backup {
+                self.native_settings_restore_backup(backup);
+            }
+        }
         if self.settings_input == Some(SettingsInput::StudentPersona) {
             self.flush_student_persona();
         }
@@ -485,6 +532,54 @@ impl App {
         self.in_preedit = false;
     }
 
+    fn native_settings_restore_backup(&mut self, backup: FieldBackup) {
+        match backup.field {
+            SettingsInput::CwdPath => self.set_cwd_mode = backup.value,
+            SettingsInput::FileOpenCmd => self.set_file_open_cmd = backup.value,
+            SettingsInput::Shell => self.set_shell = backup.value,
+            SettingsInput::ClaudeExtra => self.set_claude_extra = backup.value,
+            SettingsInput::StudentName => self.students_name = backup.value,
+            SettingsInput::StudentPersona => self.students_persona = backup.value,
+            SettingsInput::FeedbackBody => self.feedback_body = backup.value,
+            SettingsInput::ThemeLabel => {
+                if let Some((_, value)) = self.theme_label_edit.as_mut() {
+                    *value = backup.value;
+                }
+            }
+            SettingsInput::PaletteHex(slot) => {
+                self.set_palette_edit = backup.value;
+                self.apply_palette_edit(slot);
+            }
+        }
+        match backup.field {
+            SettingsInput::StudentPersona => self.students_caret = backup.caret,
+            SettingsInput::FeedbackBody => self.feedback_caret = backup.caret,
+            _ => self.settings_caret = backup.caret,
+        }
+        if matches!(
+            backup.field,
+            SettingsInput::CwdPath
+                | SettingsInput::FileOpenCmd
+                | SettingsInput::Shell
+                | SettingsInput::ClaudeExtra
+        ) {
+            self.settings_save();
+        }
+    }
+
+    fn native_settings_cancel_field(&mut self) {
+        let _ = self.hangul.flush();
+        let (backup, _) = self.settings_scene.take_field_backup();
+        if let Some(backup) = backup {
+            self.native_settings_restore_backup(backup);
+        }
+        self.settings_input = None;
+        self.ime_focus = None;
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn native_settings_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
@@ -495,6 +590,9 @@ impl App {
             return true;
         }
         let Some(field) = self.settings_input else {
+            if self.settings_scene.first_run() {
+                return self.native_onboarding_key(event);
+            }
             let at = SettingsCat::ALL
                 .iter()
                 .position(|cat| *cat == self.settings_scene.category())
@@ -564,7 +662,7 @@ impl App {
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            self.native_settings_blur();
+            self.native_settings_cancel_field();
             return true;
         }
 
@@ -579,6 +677,7 @@ impl App {
                 return true;
             }
             Key::Named(NamedKey::Backspace)
+            | Key::Named(NamedKey::Delete)
             | Key::Named(NamedKey::ArrowLeft)
             | Key::Named(NamedKey::ArrowRight)
             | Key::Named(NamedKey::Home)
@@ -600,6 +699,7 @@ impl App {
                 == crate::lineedit::LineEditAction::Edited
         });
         if changed {
+            self.settings_scene.mark_field_dirty();
             if matches!(
                 field,
                 SettingsInput::CwdPath
@@ -716,6 +816,37 @@ fn is_multiline(field: SettingsInput) -> bool {
     )
 }
 
+fn action_refreshes_cache(action: &SettingsAction) -> bool {
+    matches!(
+        action,
+        SettingsAction::ThemeMode(_)
+            | SettingsAction::StartCustomTheme
+            | SettingsAction::ResetCustomTheme
+            | SettingsAction::DeleteCustomTheme(_)
+            | SettingsAction::SelectTheme(_)
+            | SettingsAction::ExportTheme
+            | SettingsAction::DeleteTheme(_)
+            | SettingsAction::RefreshStudentAssets
+            | SettingsAction::StudentModel(_, _)
+    )
+}
+
+fn direct_shell_seed(current: &str) -> String {
+    if matches!(current, "" | "/bin/zsh" | "/bin/bash") {
+        String::new()
+    } else {
+        current.to_string()
+    }
+}
+
+fn multiline_first_line(caret_line: usize, visible_lines: usize, focused: bool) -> usize {
+    if focused {
+        caret_line.saturating_sub(visible_lines.saturating_sub(1))
+    } else {
+        0
+    }
+}
+
 fn is_jamo(ch: char) -> bool {
     (0x3130..=0x318f).contains(&(ch as u32))
 }
@@ -738,6 +869,9 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
 }
 
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
+    if snapshot.first_run {
+        return crate::native_onboarding::paint(g, &snapshot.onboarding);
+    }
     let (ax, ay, aw, ah) = snapshot.area;
     let nav_w = if aw < 760.0 { 154.0 } else { 190.0 };
     let mut hits = Vec::new();
@@ -761,7 +895,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         ay + 47.0,
         "앱의 작업 환경",
         11.0,
-        theme::text_mute(),
+        theme::text_dim(),
         false,
     );
 
@@ -877,18 +1011,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let view_h = (body_bottom - body_top).max(0.0);
     g.push_clip(content_x, body_top, content_w, view_h);
     let mut y = body_top - snapshot.scroll;
-    if snapshot.first_run {
-        let (h, rect) =
-            crate::native_onboarding::paint(g, content_x, y, content_w, snapshot.cursor);
-        register_clipped(
-            g,
-            &mut hits,
-            Target::FinishOnboarding,
-            rect,
-            HitCursor::Pointer,
-        );
-        y += h + SECTION_GAP;
-    }
 
     match snapshot.cat {
         SettingsCat::General => paint_general(
@@ -942,12 +1064,64 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         ),
     }
     g.pop_clip();
+    let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
+    paint_scroll_affordance(
+        g,
+        content_x,
+        body_top,
+        content_w,
+        view_h,
+        content_h,
+        snapshot.scroll,
+    );
 
     PaintOutput {
         hits,
-        content_h: (y + snapshot.scroll - body_top + 18.0).max(view_h),
+        content_h,
         view_h,
         caret_rect,
+    }
+}
+
+pub(crate) fn paint_scroll_affordance(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    view_h: f32,
+    content_h: f32,
+    scroll: f32,
+) {
+    let max_scroll = (content_h - view_h).max(0.0);
+    if max_scroll <= 1.0 || view_h <= 1.0 {
+        return;
+    }
+    let track_x = x + w - 3.0;
+    g.rect(
+        track_x,
+        y,
+        2.0,
+        view_h,
+        theme::with_alpha(theme::border(), 90),
+    );
+    let thumb_h = (view_h * view_h / content_h).clamp(28.0, view_h);
+    let thumb_y = y + (view_h - thumb_h) * (scroll / max_scroll).clamp(0.0, 1.0);
+    g.rect(track_x, thumb_y, 2.0, thumb_h, theme::text_dim());
+    if scroll < max_scroll - 1.0 {
+        g.rect(
+            x,
+            y + view_h - 16.0,
+            w,
+            16.0,
+            theme::with_alpha(theme::bg(), 210),
+        );
+        g.queue_icon(
+            "chevron-down",
+            x + w - 20.0,
+            y + view_h - 15.0,
+            13.0,
+            theme::text_dim(),
+        );
     }
 }
 
@@ -1244,7 +1418,7 @@ fn paint_appearance(
         preview.1 + 10.0,
         "실제 깜빡임",
         10.5,
-        theme::text_mute(),
+        theme::text_dim(),
         false,
     );
     if s.caret_on {
@@ -1742,7 +1916,7 @@ fn paint_themes(
             rect.1 + 42.0,
             &format!("캐릭터 {}명", theme_row.count),
             11.0,
-            theme::text_mute(),
+            theme::text_dim(),
             false,
         );
         for (j, (slug, _)) in theme_row.faces.iter().take(3).enumerate() {
@@ -2288,7 +2462,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
 
 fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, desc: &str) {
     draw_text(g, x, y, title, 15.0, theme::text(), true);
-    draw_text(g, x, y + 24.0, desc, 11.5, theme::text_mute(), false);
+    draw_text(g, x, y + 24.0, desc, 11.5, theme::text_dim(), false);
 }
 
 fn info_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, text: &str) {
@@ -2501,7 +2675,7 @@ fn text_field(
     multiline: bool,
 ) {
     if !label.is_empty() {
-        draw_text(g, x + 2.0, y, label, 11.0, theme::text_mute(), false);
+        draw_text(g, x + 2.0, y, label, 11.0, theme::text_dim(), false);
     }
     let top = y + if label.is_empty() { 0.0 } else { 18.0 };
     let h = if multiline { 132.0 } else { 36.0 };
@@ -2529,8 +2703,19 @@ fn text_field(
     g.push_clip(rect.0 + 10.0, rect.1 + 5.0, rect.2 - 20.0, rect.3 - 10.0);
     if multiline {
         let lines = wrap_text(g, value, rect.2 - 22.0, 12.0);
+        let caret_line = lines
+            .iter()
+            .position(|(line, start)| caret >= *start && caret <= start + line.chars().count())
+            .unwrap_or_else(|| lines.len().saturating_sub(1));
+        let visible_lines = ((rect.3 - 20.0) / 18.0).floor().max(1.0) as usize;
+        let first_line = multiline_first_line(caret_line, visible_lines, focused);
         let mut caret_xy = (rect.0 + 11.0, rect.1 + 10.0);
-        for (i, (line, start)) in lines.iter().take(6).enumerate() {
+        for (i, (line, start)) in lines
+            .iter()
+            .skip(first_line)
+            .take(visible_lines)
+            .enumerate()
+        {
             let ly = rect.1 + 10.0 + i as f32 * 18.0;
             draw_text(g, rect.0 + 11.0, ly, line, 12.0, theme::text(), false);
             let end = start + line.chars().count();
@@ -2559,7 +2744,7 @@ fn text_field(
             &shown,
             12.0,
             if value.is_empty() {
-                theme::text_mute()
+                theme::text_dim()
             } else {
                 theme::text()
             },
@@ -2849,6 +3034,61 @@ mod tests {
         assert!(is_multiline(SettingsInput::StudentPersona));
         assert!(is_multiline(SettingsInput::FeedbackBody));
         assert!(!is_multiline(SettingsInput::CwdPath));
+    }
+
+    #[test]
+    fn student_model_and_roster_actions_refresh_the_cached_selection() {
+        assert!(action_refreshes_cache(&SettingsAction::StudentModel(
+            "model".to_string(),
+            "backend".to_string(),
+        )));
+        assert!(action_refreshes_cache(&SettingsAction::SelectTheme(
+            "theme".to_string(),
+        )));
+        assert!(!action_refreshes_cache(&SettingsAction::CursorShape(
+            cursor::CursorShape::Frame,
+        )));
+    }
+
+    #[test]
+    fn direct_shell_field_never_appends_to_a_preset() {
+        assert_eq!(direct_shell_seed("/bin/zsh"), "");
+        assert_eq!(direct_shell_seed("/bin/bash"), "");
+        assert_eq!(direct_shell_seed(""), "");
+        assert_eq!(
+            direct_shell_seed("/opt/homebrew/bin/fish"),
+            "/opt/homebrew/bin/fish"
+        );
+    }
+
+    #[test]
+    fn multiline_view_keeps_a_deep_caret_inside_the_field() {
+        assert_eq!(multiline_first_line(14, 6, true), 9);
+        assert_eq!(multiline_first_line(2, 6, true), 0);
+        assert_eq!(multiline_first_line(14, 6, false), 0);
+    }
+
+    #[test]
+    fn main_modals_own_pointer_and_click_before_the_settings_view() {
+        let handler = include_str!("handler.rs");
+        let cursor = handler
+            .split_once("WindowEvent::CursorMoved { position, .. } => {")
+            .unwrap()
+            .1;
+        assert!(
+            cursor.find("let main_modal").unwrap()
+                < cursor.find("native_settings_contains").unwrap()
+        );
+
+        let mouse = handler
+            .split_once("button: MouseButton::Left,\n                ..\n            } => {")
+            .unwrap()
+            .1;
+        let native = mouse.find("native_settings_contains").unwrap();
+        assert!(mouse.find("self.confirm_close.is_some()").unwrap() < native);
+        assert!(mouse.find("self.restore_prompt.is_some()").unwrap() < native);
+        assert!(mouse.find("self.account_switch_confirm").unwrap() < native);
+        assert!(mouse.find("self.git.commit_modal_open").unwrap() < native);
     }
 
     #[test]

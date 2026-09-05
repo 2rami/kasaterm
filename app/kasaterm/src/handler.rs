@@ -1415,45 +1415,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::ImportTheme(path) => {
-                let r = crate::socket::import_theme(&path);
-                let msg = match &r {
-                    Ok(id) => {
-                        // 덮어쓴 것이 지금 쓰는 테마일 수 있다 — 셋을 다 비우지 않으면
-                        // 화면이 두 테마를 섞고, 그건 「덜 바뀐 것」이 아니라 고장이다.
-                        crate::socket::invalidate_theme_rows();
-                        kasa_mcp::character::invalidate_active_theme();
-                        crate::theme::invalidate_roster();
-                        format!("'{id}' 을 가져왔어요 — 목록에서 고르면 켜져요")
-                    }
-                    Err(e) => format!("테마를 못 가져왔어요 — {e}"),
-                };
-                // 사용자가 보고 있는 건 설정 창이다. 메인 창 토스트만 띄우면 성공도
-                // 실패도 그 창에서는 아무 일이 없는 것으로 보인다 — 「떨어뜨렸는데
-                // 반응이 없다」가 이 기능에서 가장 나쁜 결말이라 창 안에도 알린다.
-                if let Some(wv) = self
-                    .inline_web
-                    .as_ref()
-                    .filter(|h| h.kind == InlineWebKind::Settings)
-                    .map(|h| &h.webview)
-                {
-                    let js_msg = serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into());
-                    let ok = r.is_ok();
-                    let _ = wv.evaluate_script(&format!(
-                        "(function(){{var d=document.createElement('div');d.textContent={js_msg};\
-                         d.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);\
-                         z-index:99999;padding:10px 16px;border-radius:8px;font:13px system-ui;\
-                         color:#fff;background:{bg};box-shadow:0 4px 16px rgba(0,0,0,.35)';\
-                         document.body.appendChild(d);setTimeout(function(){{d.remove();{reload}}},2200);}})()",
-                        bg = if ok { "#2e7d4f" } else { "#a33" },
-                        // 목록을 다시 그려야 새 테마를 고를 수 있다. 알림을 보여 준
-                        // 뒤에 새로고침해야 그 줄을 읽을 시간이 생긴다.
-                        reload = if ok { "location.reload()" } else { "" },
-                    ));
-                }
-                self.set_toast(msg);
-                return;
-            }
             UserEvent::ClaudeAccountAutoswitch {
                 to,
                 cooldown_until,
@@ -2738,6 +2699,45 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.autohover.is_none() {
                     self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                 }
+                let main_modal = self.confirm_close.is_some()
+                    || self.restore_prompt.is_some()
+                    || self.character_swap_confirm.is_some()
+                    || self.account_switch_confirm.as_ref().is_some_and(|pending| {
+                        pending.surface == crate::session::ConfirmSurface::Main
+                    })
+                    || self.git.commit_modal_open;
+                if main_modal {
+                    let (cx, cy) = self.cursor_px;
+                    let inside = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let text = self.git.commit_input_rect.as_ref().is_some_and(&inside);
+                    let pointer = self.confirm_btn_rects.iter().any(|(_, r)| inside(r))
+                        || self.restore_btn_rects.iter().any(|(_, r)| inside(r))
+                        || self
+                            .character_swap_confirm
+                            .as_ref()
+                            .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)))
+                        || self
+                            .account_switch_confirm
+                            .as_ref()
+                            .filter(|pending| {
+                                pending.surface == crate::session::ConfirmSurface::Main
+                            })
+                            .is_some_and(|pending| pending.rects.iter().any(|(_, r)| inside(r)))
+                        || self.git.commit_modal_rects.iter().any(|(_, r)| inside(r));
+                    self.text_cursor_shown = text;
+                    window.set_cursor(if text {
+                        CursorIcon::Text
+                    } else if pointer {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
@@ -2797,28 +2797,6 @@ impl ApplicationHandler<UserEvent> for App {
                         let _ = window.drag_window();
                         return;
                     }
-                }
-                // Commit modal is a full-window overlay over the pane grid —
-                // drive its cursor here (I-beam over the message field, default
-                // elsewhere) and skip the pane/column hover below so it can't
-                // override the cursor.
-                if self.git.commit_modal_open {
-                    let (cx, cy) = self.cursor_px;
-                    let hit = |r: (f32, f32, f32, f32)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    };
-                    let want_text = self.git.commit_input_rect.map(hit).unwrap_or(false);
-                    if want_text != self.text_cursor_shown {
-                        self.text_cursor_shown = want_text;
-                        window.set_cursor(if want_text {
-                            CursorIcon::Text
-                        } else {
-                            CursorIcon::Default
-                        });
-                    }
-                    self.chrome_dirty = true;
-                    window.request_redraw();
-                    return;
                 }
                 // In-pane tab hover tracking — drives the hover-only × +
                 // brightened text on inactive tabs. Updated on every move but
@@ -3605,14 +3583,6 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
-                    if matches!(state, ElementState::Pressed) {
-                        self.last_input_at = Instant::now();
-                        self.native_settings_click(self.cursor_px.0, self.cursor_px.1);
-                    }
-                    window.request_redraw();
-                    return;
-                }
                 // Resolve a file-tree → terminal path drag first, before any
                 // other hit-test, so a release anywhere disarms it. A real drag
                 // (cursor left the row) released over a pane types that path
@@ -3847,6 +3817,14 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    return;
+                }
+                if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
+                    if matches!(state, ElementState::Pressed) {
+                        self.last_input_at = Instant::now();
+                        self.native_settings_click(self.cursor_px.0, self.cursor_px.1);
+                    }
+                    window.request_redraw();
                     return;
                 }
                 // Settings: the sidebar entry toggles the screen. While it's
@@ -6398,8 +6376,8 @@ impl ApplicationHandler<UserEvent> for App {
                     if matches!(event.state, ElementState::Pressed)
                         && !event.repeat
                         && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                        && self.settings_input.is_none()
                     {
-                        self.native_settings_blur();
                         self.close_settings_room();
                     } else {
                         self.native_settings_key(&event);
@@ -6503,6 +6481,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
         self.themegen_poll();
+        self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
         // 타이머(WaitUntil)로 주기 호출되니 별도 타이머가 필요 없다.
