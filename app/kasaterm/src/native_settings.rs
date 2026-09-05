@@ -2029,11 +2029,18 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     g.pop_clip();
     let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
+    // 스크롤바는 **스크롤되는 영역**의 오른쪽에 붙어야 한다. 글자가 앉는
+    // `content_*` 를 그대로 주면 그 좌우 여백만큼 안으로 들어와, 막대가 패널
+    // 가장자리에서 58px 떨어진 허공에 뜬다(2026-09-05 지적 「스크롤바가 왜 저기
+    // 있어 영역설정이 잘못된듯」 · 실측 패널끝 1100 · 막대 1042). 뷰포트는 좌측
+    // nav 오른쪽부터 패널 끝까지다.
+    let scroll_x = ax + nav_w;
+    let scroll_w = (ax + aw - scroll_x).max(0.0);
     paint_scroll_affordance(
         g,
-        content_x,
+        scroll_x,
         body_top,
-        content_w,
+        scroll_w,
         view_h,
         content_h,
         snapshot.scroll,
@@ -5284,6 +5291,24 @@ mod tests {
             .0;
         assert!(open.contains("label.clone().unwrap_or_default()"));
         assert!(open.contains("SelectStudentInTheme(theme, arg.clone())"));
+    }
+
+    #[test]
+    /// 스크롤바는 스크롤되는 영역의 오른쪽에 붙어야 한다. 글자가 앉는 칼럼
+    /// (`content_x`/`content_w`)을 그대로 주면 그 좌우 여백만큼 안으로 들어와,
+    /// 막대가 패널 가장자리에서 떨어진 허공에 뜬다(2026-09-05 지적 · 실측 58px).
+    /// 설정과 보드가 같은 자리에서 같은 실수를 했으므로 둘 다 지킨다.
+    #[test]
+    fn the_scrollbar_hugs_the_panel_edge_not_the_text_column() {
+        for (label, source) in [
+            ("설정", include_str!("native_settings.rs")),
+            ("보드", include_str!("native_board.rs")),
+        ] {
+            assert!(
+                source.contains("paint_scroll_affordance(\n        g,\n        scroll_x,"),
+                "{label} 스크롤바가 글자 칼럼 기준이면 패널 가장자리에서 떨어져 뜬다"
+            );
+        }
     }
 
     #[test]

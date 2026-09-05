@@ -1133,11 +1133,16 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     g.pop_clip();
     let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
+    // 설정 화면과 같은 자리의 같은 실수 — 글자가 앉는 `content_*` 를 주면 막대가
+    // 그 좌우 여백만큼 안으로 들어와 패널 가장자리에서 떨어져 뜬다(2026-09-05).
+    // 스크롤되는 영역은 좌측 nav 오른쪽부터 패널 끝까지다.
+    let scroll_x = ax + nav_w;
+    let scroll_w = (ax + aw - scroll_x).max(0.0);
     crate::native_settings::paint_scroll_affordance(
         g,
-        content_x,
+        scroll_x,
         body_top,
-        content_w,
+        scroll_w,
         view_h,
         content_h,
         snapshot.scroll,
