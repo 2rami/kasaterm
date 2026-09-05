@@ -1770,6 +1770,12 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some((px, py)) = restore_pos {
             window.set_outer_position(winit::dpi::PhysicalPosition::new(px, py));
         }
+        // 화면을 안 보는 기계(본진 맥미니)에선 켜지자마자 Dock 으로 내린다 — 창이 화면
+        // 공유·원격 콘솔을 덮지 않게(2026-09-06 지시). LaunchAgent 의 EnvironmentVariables
+        // 에 `KASATERM_START_MINIMIZED=1` 로 건다. 학생·소켓·서버는 그대로 돈다.
+        if std::env::var_os("KASATERM_START_MINIMIZED").is_some_and(|v| v == "1") {
+            window.set_minimized(true);
+        }
         // Start the launch banner clock when the window actually appears,
         // not at struct construction (which can precede the first frame).
         self.version_anim_start = Instant::now();
