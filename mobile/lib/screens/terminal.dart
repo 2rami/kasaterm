@@ -8,10 +8,18 @@ import '../term_session.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
 class TerminalScreen extends StatefulWidget {
-  const TerminalScreen({super.key, required this.server, required this.pane});
+  const TerminalScreen({
+    super.key,
+    required this.server,
+    required this.pane,
+    this.initialScroll,
+  });
 
   final Server server;
   final Pane pane;
+
+  /// 검증용 — 열자마자 위로 이만큼(px) 넘긴 상태로.
+  final double? initialScroll;
 
   @override
   State<TerminalScreen> createState() => _TerminalScreenState();
@@ -201,6 +209,7 @@ class _TerminalScreenState extends State<TerminalScreen>
         version: s.grid.version + s.historyVersion,
         palette: palette,
         bottomTick: _bottomTick,
+        initialScroll: widget.initialScroll,
         // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
         student: pane.isWebShell
             ? null

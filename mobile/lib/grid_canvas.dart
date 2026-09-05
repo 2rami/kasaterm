@@ -457,6 +457,7 @@ class WrappedCanvas extends StatefulWidget {
     this.historyVersion = 0,
     this.student,
     this.bottomTick = 0,
+    this.initialScroll,
     this.fontSize = 13,
   });
 
@@ -476,6 +477,9 @@ class WrappedCanvas extends StatefulWidget {
   /// 값이 바뀌면 맨 아래로 내려간다 — 답장·키를 보낸 순간(터미널이 입력에 바닥으로
   /// 내려가는 것과 같다).
   final int bottomTick;
+
+  /// 검증용 — 내용이 차면 한 번 이만큼(px) 위로 넘긴 상태로 시작한다.
+  final double? initialScroll;
   final double fontSize;
 
   @override
@@ -491,6 +495,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
 
   /// 바닥에서 떠 있는가 — 떠 있으면 입력상자를 바닥에 붙잡아 둔다.
   bool _away = false;
+
+  /// 아직 안 쓴 초기 넘김 — 넘길 만큼 내용이 차는 첫 프레임에 한 번 쓴다.
+  late double? _pendingScroll = widget.initialScroll;
 
   /// 꾸민 지난 줄 — (historyVersion, 학생) 이 같으면 재사용.
   List<List<Run>>? _histLines;
@@ -594,9 +601,17 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
               t,
             );
       final animated = live is StyledGrid && live.animated;
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _setAnimating(animated),
-      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _setAnimating(animated);
+        final want = _pendingScroll;
+        if (want != null && _scroll.hasClients) {
+          final max = _scroll.position.maxScrollExtent;
+          if (max >= want) {
+            _pendingScroll = null;
+            _scroll.jumpTo(want);
+          }
+        }
+      });
       var history = widget.history;
       var historySlots = const <SpriteSlot>[];
       if (st != null && history.isNotEmpty) {

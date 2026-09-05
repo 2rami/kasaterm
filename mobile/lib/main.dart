@@ -220,7 +220,8 @@ class _RootScreenState extends State<RootScreen> {
     nav.popUntil((r) => r.isFirst);
     nav.push(
       MaterialPageRoute<void>(
-        builder: (_) => TerminalScreen(server: s, pane: found),
+        builder: (_) =>
+            TerminalScreen(server: s, pane: found, initialScroll: link.scroll),
       ),
     );
   }

@@ -3,13 +3,17 @@ import 'package:flutter/widgets.dart';
 /// 웹 화면이 앱으로 건너뛸 때 주는 링크 `kasaterm://open?root=…&machine=…&pane=…`.
 /// 폰의 사파리(슬랙 알림 링크·주소 직접 열기)로 들어와도 앱에서 그 학생을 연다.
 class AppLink {
-  const AppLink({this.root, this.machine, this.pane});
+  const AppLink({this.root, this.machine, this.pane, this.scroll});
 
   static const scheme = 'kasaterm';
 
   final String? root;
   final String? machine;
   final String? pane;
+
+  /// 검증용 — 열자마자 위로 이만큼(px) 넘긴 상태로 연다. 실물 폰은 손가락을 흉내 낼 길이
+  /// 없어 넘긴 화면(바닥 붙잡기)을 이 손잡이로 찍어 본다.
+  final double? scroll;
 
   /// 엔진이 스킴을 벗기고 `/?pane=…` 꼴로 줄 수도 있어 쿼리만으로도 알아본다.
   static AppLink? parse(Uri? u) {
@@ -25,6 +29,7 @@ class AppLink {
       root: nz(q['root']),
       machine: nz(q['machine']),
       pane: nz(q['pane']),
+      scroll: double.tryParse(q['scroll'] ?? ''),
     );
   }
 }
