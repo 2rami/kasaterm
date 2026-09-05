@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../claude_style.dart';
 import '../grid_canvas.dart';
+import '../live_input.dart';
 import '../server.dart';
 import '../student_art.dart';
 import '../term_session.dart';
@@ -32,6 +33,16 @@ class _TerminalScreenState extends State<TerminalScreen>
   final _inputFocus = FocusNode();
   bool _ctrl = false;
   bool _sending = false;
+
+  /// 바로 치기(기본) — 확정된 글자가 곧바로 화면의 입력상자에 붙는다. 끄면 아래
+  /// 칸에 적어 두었다 한 번에 보낸다(긴 글을 다듬을 때).
+  bool _live = true;
+  final _liveInput = LiveInput();
+  String _composing = '';
+  DateTime _lastLiveSend = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 입력칸을 프로그램이 비우는 동안 — 그 변화를 지우기로 보내지 않게.
+  bool _resetting = false;
 
   /// 폰 폭으로 접어 보기(기본). 끄면 데스크톱 격자 그대로를 옆으로 밀어 읽는다.
   bool _wrap = true;
@@ -93,6 +104,49 @@ class _TerminalScreenState extends State<TerminalScreen>
       if (mounted) setState(() => _sending = false);
       _inputFocus.requestFocus();
     }
+  }
+
+  void _sendLive(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    _session.sendBytes(bytes);
+    _lastLiveSend = DateTime.now();
+    _bottomTick++;
+  }
+
+  void _onLiveChanged(String _) {
+    if (_resetting) return;
+    _sendLive(_liveInput.update(_input.value));
+    setState(() => _composing = _liveInput.composing);
+  }
+
+  /// 엔터 — 글자 바로 뒤에 붙여 보내면 Ink 가 엔터를 먹는다(서버 `send` 가 140ms 를
+  /// 기다리는 이유와 같다). 마지막 글자에서 조금 떨어뜨려 보낸다.
+  Future<void> _liveSubmit() async {
+    _sendLive(_liveInput.flush(_input.value));
+    _resetting = true;
+    _liveInput.reset();
+    _input.clear();
+    _resetting = false;
+    setState(() => _composing = '');
+    final gap = DateTime.now().difference(_lastLiveSend);
+    if (gap < _enterGap) await Future<void>.delayed(_enterGap - gap);
+    _session.sendText('\r');
+    _toBottom();
+    _inputFocus.requestFocus();
+  }
+
+  static const _enterGap = Duration(milliseconds: 150);
+
+  void _toggleLive() {
+    setState(() {
+      _live = !_live;
+      _composing = '';
+      _liveInput.reset();
+      _resetting = true;
+      _input.clear();
+      _resetting = false;
+    });
+    _inputFocus.requestFocus();
   }
 
   void _toast(String text) {
@@ -182,12 +236,23 @@ class _TerminalScreenState extends State<TerminalScreen>
                 onCtrl: () => setState(() => _ctrl = !_ctrl),
                 onKey: _toBottom,
               ),
-              _ReplyBar(
-                controller: _input,
-                focusNode: _inputFocus,
-                enabled: s.state != TermState.gone && !_sending,
-                onSend: _send,
-              ),
+              if (_live)
+                _LiveBar(
+                  controller: _input,
+                  focusNode: _inputFocus,
+                  enabled: s.state != TermState.gone,
+                  onChanged: _onLiveChanged,
+                  onSubmit: _liveSubmit,
+                  onDraft: _toggleLive,
+                )
+              else
+                _ReplyBar(
+                  controller: _input,
+                  focusNode: _inputFocus,
+                  enabled: s.state != TermState.gone && !_sending,
+                  onSend: _send,
+                  onLive: _toggleLive,
+                ),
             ],
           ),
         ),
@@ -210,6 +275,7 @@ class _TerminalScreenState extends State<TerminalScreen>
         palette: palette,
         bottomTick: _bottomTick,
         initialScroll: widget.initialScroll,
+        composing: _live ? _composing : null,
         // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
         student: pane.isWebShell
             ? null
@@ -221,7 +287,12 @@ class _TerminalScreenState extends State<TerminalScreen>
               ),
       );
     }
-    return GridCanvas(grid: s.grid, version: s.grid.version, palette: palette);
+    return GridCanvas(
+      grid: s.grid,
+      version: s.grid.version,
+      palette: palette,
+      composing: _live ? _composing : null,
+    );
   }
 }
 
@@ -347,6 +418,7 @@ class _ReplyBar extends StatelessWidget {
     required this.focusNode,
     required this.enabled,
     required this.onSend,
+    required this.onLive,
   });
 
   final TextEditingController controller;
@@ -354,11 +426,19 @@ class _ReplyBar extends StatelessWidget {
   final bool enabled;
   final VoidCallback onSend;
 
+  /// 바로 치기로 돌아가기.
+  final VoidCallback onLive;
+
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
     child: Row(
       children: [
+        IconButton(
+          onPressed: onLive,
+          icon: const Icon(Icons.keyboard_alt_outlined),
+          tooltip: '바로 치기',
+        ),
         Expanded(
           child: TextField(
             controller: controller,
@@ -372,7 +452,7 @@ class _ReplyBar extends StatelessWidget {
             onSubmitted: (_) => onSend(),
             // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
             style: const TextStyle(fontSize: 16),
-            decoration: const InputDecoration(hintText: '답장…'),
+            decoration: const InputDecoration(hintText: '적어 두고 한 번에 보내기…'),
           ),
         ),
         const SizedBox(width: 6),
@@ -384,4 +464,68 @@ class _ReplyBar extends StatelessWidget {
       ],
     ),
   );
+}
+
+/// 바로 치기 칸 — 친 글자는 화면의 입력상자에 붙으므로 여기엔 글자를 보이지 않는다.
+/// 칸은 키보드를 붙잡아 두는 자리다.
+class _LiveBar extends StatelessWidget {
+  const _LiveBar({
+    required this.controller,
+    required this.focusNode,
+    required this.enabled,
+    required this.onChanged,
+    required this.onSubmit,
+    required this.onDraft,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onSubmit;
+
+  /// 적어 두고 보내기로 바꾸기.
+  final VoidCallback onDraft;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: onDraft,
+            icon: const Icon(Icons.edit_note),
+            tooltip: '적어 두고 한 번에 보내기',
+          ),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              enabled: enabled,
+              autofocus: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              textCapitalization: TextCapitalization.none,
+              smartDashesType: SmartDashesType.disabled,
+              smartQuotesType: SmartQuotesType.disabled,
+              maxLines: 1,
+              showCursor: false,
+              textInputAction: TextInputAction.send,
+              onChanged: onChanged,
+              onSubmitted: (_) => onSubmit(),
+              // 글자는 화면에 붙으니 여기선 투명 — 16px 아래면 iOS 가 포커스 때 확대한다.
+              style: const TextStyle(fontSize: 16, color: Colors.transparent),
+              decoration: InputDecoration(
+                hintText: '치는 대로 화면에 붙는다',
+                hintStyle: TextStyle(color: scheme.onSurfaceVariant),
+                isDense: true,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

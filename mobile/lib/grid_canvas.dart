@@ -286,6 +286,7 @@ class _GridPainter extends CustomPainter {
     this.sprites,
     this.walkFrame = 0,
     this.idleFrame = 0,
+    this.composing,
   });
 
   final GridLines grid;
@@ -297,6 +298,9 @@ class _GridPainter extends CustomPainter {
   final SpriteCache? sprites;
   final int walkFrame;
   final int idleFrame;
+
+  /// 조합 중인 한글 — 커서 자리에 겹쳐 그린다(아직 pane 에 안 보낸 글).
+  final String? composing;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -317,9 +321,14 @@ class _GridPainter extends CustomPainter {
           .paint(canvas, row * metrics.height, metrics);
     }
     if (grid.cursorVisible && grid.rows > 0) {
+      final ime = composing ?? '';
+      var cursorCol = grid.cursorCol;
+      if (ime.isNotEmpty) {
+        cursorCol += _paintComposing(canvas, ime, grid.cursorRow, cursorCol);
+      }
       canvas.drawRect(
         Rect.fromLTWH(
-          grid.cursorCol * metrics.width,
+          cursorCol * metrics.width,
           grid.cursorRow * metrics.height,
           metrics.width,
           metrics.height,
@@ -328,6 +337,37 @@ class _GridPainter extends CustomPainter {
       );
     }
     _paintSprites(canvas);
+  }
+
+  /// 조합 중인 글을 커서 자리에 밑줄 친 채 얹는다 — 데스크톱의 IME 조합 표시와 같은
+  /// 자리. 차지한 칸 수를 돌려준다(커서는 그 뒤로 간다).
+  int _paintComposing(Canvas canvas, String text, int row, int col) {
+    var cells = 0;
+    for (final r in text.runes) {
+      cells += cellWidth(r);
+    }
+    final x = col * metrics.width;
+    final y = row * metrics.height;
+    canvas.drawRect(
+      Rect.fromLTWH(x, y, cells * metrics.width, metrics.height),
+      Paint()..color = palette.fg.withValues(alpha: 0.18),
+    );
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: 'TermMono',
+          fontFamilyFallback: _fontFallback,
+          fontSize: metrics.fontSize,
+          color: palette.fg,
+          decoration: TextDecoration.underline,
+          decorationColor: palette.fg,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(x, y + (metrics.height - tp.height) / 2));
+    return cells;
   }
 
   /// 데스크톱 `paint_student_overlays` 와 같이 셀 **위**에 얹는다 — 픽셀 도트라 보간 없이.
@@ -390,7 +430,8 @@ class _GridPainter extends CustomPainter {
       old.metrics != metrics ||
       old.grid != grid ||
       old.walkFrame != walkFrame ||
-      old.idleFrame != idleFrame;
+      old.idleFrame != idleFrame ||
+      old.composing != composing;
 }
 
 /// 격자를 그린다. 채우기·핀치는 FillViewer 가 맡는다(그림 모드와 같은 규칙).
@@ -401,12 +442,16 @@ class GridCanvas extends StatefulWidget {
     required this.version,
     required this.palette,
     this.fontSize = 13,
+    this.composing,
   });
 
   final Grid grid;
   final int version;
   final TerminalPalette palette;
   final double fontSize;
+
+  /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다.
+  final String? composing;
 
   @override
   State<GridCanvas> createState() => _GridCanvasState();
@@ -439,6 +484,7 @@ class _GridCanvasState extends State<GridCanvas> {
           palette: widget.palette,
           metrics: _metrics,
           cache: _cache,
+          composing: widget.composing,
         ),
       ),
     );
@@ -459,7 +505,11 @@ class WrappedCanvas extends StatefulWidget {
     this.bottomTick = 0,
     this.initialScroll,
     this.fontSize = 13,
+    this.composing,
   });
+
+  /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다(바로 치기).
+  final String? composing;
 
   /// 살아 있는 화면. 지난 줄은 `history` 로 따로 받아 꾸밈(스피너·입력상자 판독)은
   /// 살아 있는 화면에만 건다 — 데스크톱도 화면에 보이는 격자만 판독한다.
@@ -660,6 +710,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
         sprites: spriteCache,
         walkFrame: walkFrame,
         idleFrame: idleFrame,
+        composing: widget.composing,
       );
       // 스크롤을 올린 동안은 입력상자부터 화면 끝까지를 바닥에 붙잡아 둔다 — 데스크톱과
       // 같이 지나간 대화를 읽는 중에도 타이핑하는 자리가 제자리에 있다.
