@@ -215,6 +215,53 @@ mod tests {
         assert!(should_persist_layout(&user));
     }
 
+    /// 내부 방도 사이드바에서 자리를 옮길 수 있어야 한다 — 탭이 잡히기는 하는데
+    /// 놓으면 아무 일도 없으면 사람에게는 「드래그가 고장 났다」로 보인다
+    /// (2026-09-05 지시). 옮겨도 안전한 근거는 둘이다: 인덱스를 키로 쓰는 필드가
+    /// 하나도 빠짐없이 `reorder_window` 의 remap 을 지나고, 내부 방은 애초에 저장에서
+    /// 빠져 바뀐 순서가 기록에 남지 않는다.
+    #[test]
+    fn internal_rooms_can_be_reordered_in_the_sidebar() {
+        let session = include_str!("session.rs");
+        let after = session
+            .split_once("pub(crate) fn reorder_window")
+            .expect("reorder_window")
+            .1;
+        let body = &after[..after.find("\n    }\n").expect("함수 끝")];
+        assert!(
+            !body.contains("internal_room_kind_at(from)"),
+            "내부 방을 조용히 무시하면 드래그가 고장 난 것으로 보인다"
+        );
+        for field in [
+            "window_name_override",
+            "window_alert",
+            "expanded_windows",
+            "expand_anim",
+            "closed_panes",
+        ] {
+            assert!(body.contains(field), "인덱스 키 필드가 remap 을 안 지난다: {field}");
+        }
+        // 막는 곳이 둘이었다 — `reorder_window` 만 열고 클릭 쪽을 안 열면 드래그가
+        // 장전조차 안 돼 화면에서는 여전히 아무 일도 안 일어난다(2026-09-05 실측:
+        // 이 테스트가 session.rs 만 봐서 거짓 초록이 났다).
+        let chrome = include_str!("chrome.rs");
+        let after_guard = chrome
+            .split_once("if let Some(kind) = self.internal_room_kind_at(idx) {")
+            .expect("사이드바 탭의 내부 방 갈래")
+            .1;
+        let arm = after_guard.find("self.win_tab_drag = Some(WinTabDrag {");
+        let ret = after_guard.find("return true;");
+        assert!(
+            arm.zip(ret).is_some_and(|(a, r)| a < r),
+            "내부 방 탭이 드래그를 장전하지 않으면 재배치가 시작조차 안 된다"
+        );
+        for kind in InternalRoomKind::ALL {
+            assert!(!should_persist_layout(&kasa_pty::PtyLayout::single(
+                kind.pane_id()
+            )));
+        }
+    }
+
     #[test]
     fn persisted_internal_markers_are_ignored_by_name_or_pane_id() {
         for kind in InternalRoomKind::ALL {

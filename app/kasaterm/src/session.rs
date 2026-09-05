@@ -3375,9 +3375,11 @@ impl App {
         if from >= n || to > n {
             return;
         }
-        if self.internal_room_kind_at(from).is_some() {
-            return;
-        }
+        // 설정·보드 같은 내부 방도 자리를 옮길 수 있다. 셸이 없을 뿐 사이드바에서는
+        // 다른 방과 똑같은 탭이라, 잡히기는 하는데 놓으면 아무 일도 없는 편이 더
+        // 이상하다(2026-09-05 지시 「설정방이랑 다른방 위치바꾸는거까지」). 인덱스를
+        // 키로 쓰는 필드는 예외 없이 아래 remap 을 지나고, 내부 방은 애초에 저장에서
+        // 빠지므로(`should_persist_layout`) 바뀐 순서가 기록에 남아 어긋날 여지도 없다.
         // 뽑고 난 뒤 기준의 착지 인덱스. 제자리면 옮길 것이 없다.
         let dst = if to > from { to - 1 } else { to };
         if dst == from {

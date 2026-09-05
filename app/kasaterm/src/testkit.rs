@@ -875,6 +875,93 @@ impl App {
             "[autowinreorder] 기대: A,C,B / 잡은 B 가 활성인 채 맨 뒤 / alert 는 C 를 따라 1번 / 모든 leaves>0"
         );
     }
+    /// Headless 내부 방 재배치 repro: `KASATERM_AUTOINTERNALREORDER_MS` 뒤에 사용자
+    /// 방을 둘 만들고 설정 방을 연 다음, 사이드바에서 **설정 탭을 실제 hit-test
+    /// 경로**(`window_strip_click`)로 잡아 맨 앞으로 끌어 놓는다.
+    ///
+    /// 내부 방은 셸도 저장 기록도 없어 눈으로는 그냥 탭 하나로 보이지만, 활성 방의
+    /// 트리는 슬롯이 아니라 `pty_layout` 에 얹혀 있다. 그래서 옮기기 전후로 각 방이
+    /// 무슨 방인지와 leaf 수를 같이 찍는다 — leaf 가 0 이면 그 방의 내용이 증발한
+    /// 것이고, 자리가 그대로면 재배치가 조용히 무시된 것이다(옛 가드의 증상).
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autointernalreorder(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOINTERNALREORDER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let dump = |app: &App, tag: &str| {
+            let rows: Vec<String> = (0..app.windows.len())
+                .map(|i| {
+                    let layout = if i == app.active_window {
+                        app.pty_layout.as_ref()
+                    } else {
+                        app.windows[i].as_ref()
+                    };
+                    let kind = app
+                        .internal_room_kind_at(i)
+                        .map(crate::internal_room::InternalRoomKind::label)
+                        .unwrap_or("사용자");
+                    format!(
+                        "{i}{}:{kind} leaves={}",
+                        if i == app.active_window { "*" } else { "" },
+                        layout.map(|l| l.leaves().len()).unwrap_or(0),
+                    )
+                })
+                .collect();
+            eprintln!("[autointernalreorder] {tag}: {}", rows.join(" | "));
+        };
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        while self.windows.len() < 2 {
+            self.new_window();
+        }
+        if !self.open_settings_room(None) {
+            eprintln!("[autointernalreorder] 설정 방을 못 열었다");
+            return;
+        }
+        self.window_labels_at = None;
+        self.render_frame();
+        dump(self, "before");
+        let Some(from) = self.settings_room_index() else {
+            eprintln!("[autointernalreorder] 설정 방 인덱스가 없다");
+            return;
+        };
+        let Some((_, r)) = self
+            .window_tab_rects
+            .iter()
+            .find(|(idx, _)| *idx == from)
+            .copied()
+        else {
+            eprintln!("[autointernalreorder] 설정 탭 rect 없음 — 사이드바에 안 그려졌다");
+            return;
+        };
+        let handled = self.window_strip_click(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        // 맨 앞 슬롯으로 끌어 놓는다(문턱 통과 + 삽입 슬롯 0).
+        if let Some(d) = self.win_tab_drag.as_mut() {
+            d.active = true;
+            d.target = 0;
+        }
+        if let Some(d) = self.win_tab_drag.take() {
+            self.reorder_window(d.from, d.target);
+        }
+        self.refresh_window_labels();
+        eprintln!("[autointernalreorder] press handled={handled} from={from} target=0");
+        dump(self, "after ");
+        eprintln!("[autointernalreorder] 기대: 설정이 0 번에 활성인 채로 · 모든 leaves>0");
+    }
+
     /// Headless 방 이름 편집 repro: `KASATERM_AUTOROOMRENAME_MS` 뒤에 방 탭을 **실제
     /// hit-test 경로**(`window_strip_click`)로 두 번 눌러 편집에 들어가고, 글자를 넣은
     /// 직후의 라벨을 찍는다.

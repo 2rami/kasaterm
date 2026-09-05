@@ -1821,8 +1821,11 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
-            // 설정은 고정 이름의 내부 방이다. 클릭은 전환만 하고 이름 편집·드래그는
-            // 장전하지 않는다.
+            // 설정·보드는 고정 이름의 내부 방이다. 이름 편집은 여전히 막는다 —
+            // 라벨이 방 종류 그 자체라 고칠 것이 없다. 다만 **자리 옮기기는 다른 방과
+            // 같게 장전한다**(2026-09-05 지시): 사이드바에서는 똑같이 생긴 탭이라,
+            // 잡히지도 않으면 사람 눈에는 고장으로 보인다. 문턱을 못 넘은 드래그는
+            // release 가 그냥 버리므로 평범한 클릭의 감각은 그대로다.
             if let Some(kind) = self.internal_room_kind_at(idx) {
                 self.commit_room_rename();
                 match kind {
@@ -1833,6 +1836,12 @@ impl App {
                         self.open_board_room();
                     }
                 }
+                self.win_tab_drag = Some(WinTabDrag {
+                    from: idx,
+                    start: (cx, cy),
+                    active: false,
+                    target: idx,
+                });
                 return true;
             }
             // 펼치기 버튼만 전환의 예외다 — 그 배지 크기.

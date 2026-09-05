@@ -6967,6 +6967,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autolastclose();
         self.run_pending_autobusyclose();
         self.run_pending_autowinreorder();
+        self.run_pending_autointernalreorder();
         self.run_pending_autoroomrename();
         self.run_pending_autoftrename();
         self.run_pending_autopathsearch();
