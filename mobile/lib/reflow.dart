@@ -105,24 +105,112 @@ RowReflow reflowRow(List<Run> runs, int cols) {
     }
   }
 
+  // 「──────── mobile ─」 처럼 라벨이 낀 테두리는 위 규칙에 안 걸린다 — 선 그리기
+  // 채움을 줄여 한 줄에 맞춘다. 데스크톱에선 한 줄인 상자 윗변이 두 줄로 갈리지 않게.
+  final shrunk = _shrinkLines(trimmed, width - cols);
+  if (shrunk != null) return RowReflow([_runs(shrunk)], const [0]);
+
   final chunks = <List<Run>>[];
   final starts = <int>[];
-  var line = <_Cell>[];
-  var lineWidth = 0;
+  var i = 0;
   var col = 0;
-  for (final c in trimmed) {
-    if (lineWidth + c.width > cols && line.isNotEmpty) {
-      chunks.add(_runs(line));
-      line = [];
-      lineWidth = 0;
+  while (i < trimmed.length) {
+    final start = col;
+    final line = <_Cell>[];
+    var lineWidth = 0;
+    var j = i;
+    while (j < trimmed.length && lineWidth + trimmed[j].width <= cols) {
+      line.add(trimmed[j]);
+      lineWidth += trimmed[j].width;
+      j++;
     }
-    if (line.isEmpty) starts.add(col);
-    line.add(c);
-    lineWidth += c.width;
-    col += c.width;
+    if (line.isEmpty) {
+      line.add(trimmed[j]);
+      lineWidth += trimmed[j].width;
+      j++;
+    }
+    if (j < trimmed.length) {
+      // 넘쳤다 — 낱말 가운데가 갈리지 않게 가까운 빈칸에서 끊고 그 빈칸은 버린다.
+      if (trimmed[j].rune == 0x20) {
+        chunks.add(_runs(line));
+        starts.add(start);
+        i = j + 1;
+        col = start + lineWidth + 1;
+        continue;
+      }
+      var k = line.length - 1;
+      var back = 0;
+      while (k > 0 && back < _wordBackoff && line[k].rune != 0x20) {
+        back += line[k].width;
+        k--;
+      }
+      if (k > 0 && line[k].rune == 0x20) {
+        final kept = line.sublist(0, k);
+        var keptWidth = 0;
+        for (final c in kept) {
+          keptWidth += c.width;
+        }
+        chunks.add(_runs(kept));
+        starts.add(start);
+        i += k + 1;
+        col = start + keptWidth + 1;
+        continue;
+      }
+    }
+    chunks.add(_runs(line));
+    starts.add(start);
+    i = j;
+    col = start + lineWidth;
   }
-  if (line.isNotEmpty) chunks.add(_runs(line));
   return RowReflow(chunks, starts);
+}
+
+/// 낱말을 지키려고 되돌아가는 최대 칸 수 — 이보다 긴 낱말은 그냥 자른다.
+const _wordBackoff = 12;
+
+/// 선 그리기 채움(─ ━ ═ …)이 두 칸 이상 이어진 자리를 줄여 `excess` 칸을 덜어 낸다.
+/// 덜어 낼 자리가 모자라면 null — 글줄이라는 뜻이니 접는 쪽으로 간다.
+List<_Cell>? _shrinkLines(List<_Cell> cells, int excess) {
+  final runs = <List<int>>[];
+  var i = 0;
+  while (i < cells.length) {
+    var j = i + 1;
+    if (cells[i].rune != 0x20 && cells[i].filler) {
+      while (j < cells.length && cells[j].sameFill(cells[i])) {
+        j++;
+      }
+    }
+    if (j - i >= 2) runs.add([i, j - i]);
+    i = j;
+  }
+  var room = 0;
+  for (final r in runs) {
+    room += r[1] - 1;
+  }
+  if (runs.isEmpty || room < excess) return null;
+  var left = excess;
+  while (left > 0) {
+    runs.sort((a, b) => b[1].compareTo(a[1]));
+    runs.first[1]--;
+    left--;
+  }
+  final keep = <int, int>{for (final r in runs) r[0]: r[1]};
+  final out = <_Cell>[];
+  i = 0;
+  while (i < cells.length) {
+    final n = keep[i];
+    if (n == null) {
+      out.add(cells[i++]);
+      continue;
+    }
+    var j = i + 1;
+    while (j < cells.length && cells[j].sameFill(cells[i])) {
+      j++;
+    }
+    out.addAll(cells.sublist(i, i + n));
+    i = j;
+  }
+  return out;
 }
 
 /// 같은 모양(색·속성)의 이웃 칸을 한 런으로 되묶는다.

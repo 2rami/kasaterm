@@ -44,6 +44,32 @@ void main() {
     expect(out.chunks.length, 3);
   });
 
+  test('라벨 낀 테두리는 선을 줄여 한 줄 — 데스크톱의 상자 윗변 그대로', () {
+    final out = reflowRow([r('${'─' * 77} mobile ─')], 44);
+    expect(out.chunks.map(text), ['${'─' * 35} mobile ─']);
+  });
+
+  test('선이 모자라면 테두리 취급을 않고 접는다', () {
+    final out = reflowRow([r('── ${'x' * 60} ──')], 40);
+    expect(out.chunks.length, greaterThan(1));
+  });
+
+  test('긴 글줄은 낱말 가운데가 아니라 빈칸에서 끊고 그 빈칸은 버린다', () {
+    final out = reflowRow([
+      r('Fable 5.1 1M | main | kasaterm | 17% | xhigh'),
+    ], 40);
+    expect(out.chunks.map(text), [
+      'Fable 5.1 1M | main | kasaterm | 17% |',
+      'xhigh',
+    ]);
+    expect(out.starts, [0, 39]);
+  });
+
+  test('빈칸이 너무 멀면 그냥 자른다', () {
+    final out = reflowRow([r('ab ${'x' * 60}')], 40);
+    expect(out.chunks.map(text), ['ab ${'x' * 37}', 'x' * 23]);
+  });
+
   test('빈 행은 빈 줄 하나', () {
     expect(reflowRow(const [], 40).chunks, [<Run>[]]);
   });
