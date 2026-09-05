@@ -3073,6 +3073,83 @@ fn mark_login_needs_code(id: &str) {
     }
 }
 
+/// 클립보드 글자가 OAuth 코드처럼 생겼나.
+///
+/// claude 가 승인 뒤 주는 것은 `<코드>#<state>` 한 덩이다 — 공백이 없고, 양쪽이
+/// URL-safe 글자로만 되어 있으며 둘 다 길다. 이 셋을 다 만족하는 글자가 사람 손으로
+/// 클립보드에 우연히 들어갈 일은 사실상 없다.
+///
+/// **느슨하게 잡으면 안 된다.** 로그인이 코드를 기다리는 동안 복사한 아무 글자나
+/// stdin 으로 밀어 넣으면, CLI 는 그걸 틀린 코드로 받아 로그인을 통째로 실패시킨다.
+pub(crate) fn looks_like_login_code(s: &str) -> bool {
+    let s = s.trim();
+    let Some((code, state)) = s.split_once('#') else {
+        return false;
+    };
+    code.len() >= 16
+        && state.len() >= 16
+        && !state.contains('#')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '#'))
+}
+
+#[cfg(test)]
+mod login_code_shape_tests {
+    use super::looks_like_login_code;
+
+    /// 승인 뒤 실제로 오는 모양 — `<코드>#<state>`.
+    #[test]
+    fn takes_a_real_looking_code() {
+        assert!(looks_like_login_code(
+            "aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCn-OyJnCFa3gYOXdUKjRGAN9GoOr0"
+        ));
+        // 앞뒤 공백은 사람이 드래그로 복사하면 흔히 붙는다.
+        assert!(looks_like_login_code(
+            "  aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCn-OyJnCFa3gYOXdUKjRGAN9GoOr0\n"
+        ));
+    }
+
+    /// **여기가 이 함수의 존재 이유다.** 코드를 기다리는 동안 복사한 아무 글자나
+    /// stdin 으로 밀어 넣으면 CLI 가 틀린 코드로 받아 로그인을 통째로 실패시킨다.
+    #[test]
+    fn refuses_everything_else_people_copy() {
+        for s in [
+            "",
+            "안녕하세요",
+            "https://claude.com/cai/oauth/authorize?code=true#frag",
+            "short#short",
+            "aBcD1234efGH5678ijKL",                       // # 이 없다
+            "aBcD1234efGH5678ijKL#short",                 // 뒤가 짧다
+            "short#9PpVOsDxzsxTsoCn-OyJnCFa3gYOXdUKjRG",  // 앞이 짧다
+            "aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCn#extra", // # 이 둘
+            "aBcD1234efGH5678ijKL #9PpVOsDxzsxTsoCnOyJn", // 공백이 있다
+            "git commit -m 'aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCnOyJn'",
+        ] {
+            assert!(!looks_like_login_code(s), "이건 코드가 아니다: {s:?}");
+        }
+    }
+}
+
+/// 코드를 기다리는 동안 클립보드를 살펴 **복사만 해도 로그인이 끝나게** 한다
+/// (거노 2026-09-05 「설정창에 붙여넣는거 없이도 가능하게 해봐」).
+///
+/// 브라우저가 승인 뒤 코드를 화면에 띄우면 사람은 그걸 복사한다 — 거기서 창을
+/// 옮겨 칸을 찾아 누르고 붙여넣는 세 동작이 남는데, 그 세 동작이 실제로 사람을
+/// 멈춰 세운다. 복사까지는 어차피 하므로 그 지점에서 받는다.
+///
+/// **로그인이 코드를 기다리는 동안에만** 본다. 그 밖에서는 한 번도 읽지 않는다.
+/// 시작 시점의 값은 미리 기억해 두고 **달라졌을 때만** 쓴다 — 전에 복사해 둔 옛
+/// 코드를 집어 실패시키지 않기 위해서다.
+fn clipboard_login_code(seen: &mut Option<String>) -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let now = cb.get_text().ok()?;
+    if seen.as_deref() == Some(now.as_str()) {
+        return None;
+    }
+    seen.replace(now.clone());
+    looks_like_login_code(&now).then(|| now.trim().to_string())
+}
+
 /// 사용자가 붙여넣은 OAuth 코드를 CLI stdin 으로 보낸다.
 ///
 /// 보낸 뒤 상태를 `Running` 으로 되돌린다 — 코드가 맞는지는 CLI 가 판정하고, 그
@@ -3298,6 +3375,8 @@ fn spawn_hidden_login(
         // 승인하고 코드를 복사해 창을 옮겨 붙여넣는 시간이라, 3분은 실제로 모자란다.
         let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let mut extended = false;
+        let mut clip_seen: Option<String> = None;
+        let mut clip_at = std::time::Instant::now();
         let code = loop {
             match child.try_wait() {
                 Ok(Some(st)) => break st.success(),
@@ -3308,9 +3387,24 @@ fn spawn_hidden_login(
             if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
                 return;
             }
-            if !extended && hidden_login_needs_code() {
-                extended = true;
-                deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+            if hidden_login_needs_code() {
+                if !extended {
+                    extended = true;
+                    deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                    // 기다리기 **시작한 순간**의 클립보드를 기준으로 잡는다. 이 값과
+                    // 같으면 사람이 아직 아무것도 복사하지 않은 것이다.
+                    clip_seen = arboard::Clipboard::new()
+                        .ok()
+                        .and_then(|mut c| c.get_text().ok());
+                }
+                // 1초에 한 번만. 프레임마다 읽을 자리가 아니고, 사람이 복사하고
+                // 창을 돌아오는 데 그보다 짧게 걸리지 않는다.
+                if clip_at.elapsed() >= std::time::Duration::from_secs(1) {
+                    clip_at = std::time::Instant::now();
+                    if let Some(code) = clipboard_login_code(&mut clip_seen) {
+                        submit_login_code(&code);
+                    }
+                }
             }
             if std::time::Instant::now() > deadline {
                 let _ = child.kill();
