@@ -1472,18 +1472,18 @@ impl App {
                 }
                 present
             };
-            if crate::settings::seed_login_state_for_probe(
-                "acct-1",
-                crate::settings::LoginState::NeedCode,
-            ) {
+            // 자유함수가 아니라 App 메서드를 쓴다 — 전역 셀만 바꾸면 `render_frame`
+            // 의 rebuild 게이트(`chrome_dirty` 등)가 안 서서 그 프레임을 통째로
+            // 건너뛴다. 심어 놓고 화면은 옛 그대로인 채 「안 그려졌다」로 읽혔다.
+            if self.seed_login_probe("acct-1", crate::settings::LoginState::NeedCode) {
                 if !check(self, "에이전트·코드입력칸", "LoginCode", &mut total_bad) {
                     unseen.push("코드입력칸");
                 }
-                crate::settings::cancel_hidden_login();
+                self.clear_account_probes();
             } else {
                 eprintln!("[hitaudit] 에이전트·코드입력칸: 진행 중인 로그인이 있어 건너뛴다");
             }
-            crate::homeaccounts::seed_for_probe(
+            self.seed_home_accounts_probe(
                 "본진",
                 kasa_mcp::remote::RemoteAccounts {
                     accounts: vec![serde_json::json!({ "id": "acct-1", "label": "시험" })],
@@ -1507,7 +1507,7 @@ impl App {
                 }
             }
             self.set_account_scope_home = scope_before;
-            crate::homeaccounts::clear_probe();
+            self.clear_account_probes();
             self.set_claude_accounts = accounts_before;
             self.refresh_native_settings_dynamic_cache();
             if !unseen.is_empty() {
