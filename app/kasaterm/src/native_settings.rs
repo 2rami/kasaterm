@@ -45,6 +45,23 @@ pub(crate) struct AccountChoice {
     usage: Option<UsageBadge>,
 }
 
+/// 본진(홈 기계)의 계정 칸. 이 값이 있으면 계정 화면은 **그 기계 것**을 그린다.
+///
+/// 학생이 본진에서 태어나는 동안 계정을 이 기계에 등록해 봐야 아무 일도 안 난다 —
+/// 한도가 차는 곳과 등록되는 곳이 달라서다. 화면이 어느 기계를 다루는지 항상
+/// 보이게 이름을 함께 싣는다.
+#[derive(Clone)]
+pub(crate) struct HomeAccountsView {
+    pub(crate) label: String,
+    pub(crate) accounts: Arc<Vec<AccountChoice>>,
+    pub(crate) autoswitch: bool,
+    pub(crate) autoswitch_pct: f32,
+    /// `(슬롯 id, 상태, 실패 이유)` — 상태는 `running`·`need_code`·`ok`·`error`.
+    pub(crate) login: Option<(String, String, Option<String>)>,
+    /// 아직 한 번도 못 읽었거나 마지막 조회가 실패한 이유.
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct SettingsCache {
     pub(crate) ready: bool,
@@ -514,6 +531,8 @@ pub(crate) struct Snapshot {
     pub(crate) login_job: Option<crate::settings::LoginJob>,
     /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
     pub(crate) login_code: String,
+    /// 본진이 살아 있으면 그 기계의 계정 칸. 계정 화면은 이쪽을 정본으로 삼는다.
+    pub(crate) home_accounts: Option<HomeAccountsView>,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     pub(crate) characters: Arc<Vec<CharacterChoice>>,
     pub(crate) themes: Arc<Vec<socket::ThemeRow>>,
@@ -701,6 +720,7 @@ impl App {
             account_label_edit: self.account_label_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
             login_code: self.login_code_edit.clone(),
+            home_accounts: home_accounts_view(),
             palettes: cache.palettes.clone(),
             characters: cache.characters.clone(),
             themes: cache.themes.clone(),
@@ -3056,7 +3076,7 @@ fn paint_claude(
         y,
         w,
         "한도에 맞춰 자동 전환",
-        s.account_autoswitch,
+        s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch),
         SettingsAction::ToggleAccountAutoswitch,
     );
     toggle_row(
@@ -3070,7 +3090,13 @@ fn paint_claude(
         s.statusbar_all_accounts,
         SettingsAction::ToggleStatusbarAllAccounts,
     );
-    if s.account_autoswitch {
+    let switch_on = s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch);
+    let switch_pct = s
+        .home_accounts
+        .as_ref()
+        .map_or(s.account_autoswitch_pct, |h| h.autoswitch_pct)
+        .round() as u32;
+    if switch_on {
         segmented(
             g,
             s,
@@ -3081,22 +3107,22 @@ fn paint_claude(
             &[
                 (
                     "80%",
-                    s.account_autoswitch_pct.round() as u32 == 80,
+                    switch_pct == 80,
                     SettingsAction::AccountAutoswitchPct(80),
                 ),
                 (
                     "85%",
-                    s.account_autoswitch_pct.round() as u32 == 85,
+                    switch_pct == 85,
                     SettingsAction::AccountAutoswitchPct(85),
                 ),
                 (
                     "90%",
-                    s.account_autoswitch_pct.round() as u32 == 90,
+                    switch_pct == 90,
                     SettingsAction::AccountAutoswitchPct(90),
                 ),
                 (
                     "95%",
-                    s.account_autoswitch_pct.round() as u32 == 95,
+                    switch_pct == 95,
                     SettingsAction::AccountAutoswitchPct(95),
                 ),
             ],
@@ -3933,6 +3959,60 @@ fn paint_feedback(
     *y += 52.0;
 }
 
+/// 본진 계정 칸을 화면이 쓰는 모양으로 바꾼다. 폴링도 여기서 태운다 — 계정
+/// 화면이 떠 있는 동안만 물어보면 되고, 그 밖에서는 한 번도 안 나간다.
+fn home_accounts_view() -> Option<HomeAccountsView> {
+    crate::homeaccounts::poll();
+    let (label, value, error) = crate::homeaccounts::snapshot()?;
+    let value = value.unwrap_or_default();
+    let rows: Vec<AccountChoice> = value
+        .accounts
+        .iter()
+        .filter_map(|v| {
+            let id = v.get("id")?.as_str()?.to_string();
+            let usage = v.get("usage").and_then(serde_json::Value::as_f64).map(|pct| {
+                crate::UsageBadge {
+                    pct: pct as f32,
+                    label: v
+                        .get("usage_label")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    stale: v
+                        .get("usage_stale")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    account_dir: id.clone(),
+                    resets_at: v.get("usage_resets").and_then(serde_json::Value::as_u64),
+                    windows: Vec::new(),
+                }
+            });
+            Some(AccountChoice {
+                provider: AccountProvider::Claude,
+                active: id == value.active,
+                name: v.get("name").and_then(|x| x.as_str()).unwrap_or(&id).to_string(),
+                sub: v.get("sub").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                sub_kind: match v.get("sub_kind").and_then(|x| x.as_str()) {
+                    Some("danger") => "danger",
+                    Some("faint") => "faint",
+                    _ => "mute",
+                },
+                slot: v.get("slot").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                id,
+                usage,
+            })
+        })
+        .collect();
+    Some(HomeAccountsView {
+        label,
+        accounts: Arc::new(rows),
+        autoswitch: value.autoswitch,
+        autoswitch_pct: value.autoswitch_pct,
+        login: value.login,
+        error,
+    })
+}
+
 fn account_group(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3943,13 +4023,56 @@ fn account_group(
     w: f32,
     provider: AccountProvider,
 ) {
+    // Claude 계정은 **학생이 실제로 사는 기계**의 것을 다룬다. 본진이 켜져 있으면
+    // 등록도 전환도 거기서 일어나야 하고, 이 기계에 등록해 봐야 한 도가 차는 곳과
+    // 달라 아무 일도 안 난다(2026-09-05). codex 는 아직 로컬 그대로다.
+    let home = s
+        .home_accounts
+        .as_ref()
+        .filter(|_| provider == AccountProvider::Claude);
     draw_text(g, x, *y, provider.label(), 13.0, theme::text(), true);
-    *y += 28.0;
-    for row in s.accounts.iter().filter(|row| row.provider == provider) {
-        account_row(g, s, hits, caret, x, y, w, row);
+    if let Some(h) = home {
+        let note = format!("{} 에 저장돼요 — 학생이 사는 곳", h.label);
+        draw_text(g, x + 84.0, *y + 1.0, &note, 10.5, theme::text_mute(), false);
     }
-    let login_state = s.login_job.as_ref().map(|job| &job.state);
-    if login_state == Some(&crate::settings::LoginState::NeedCode) {
+    *y += 28.0;
+    if let Some(h) = home {
+        if let Some(why) = h.error.as_deref() {
+            draw_text(g, x + 2.0, *y, why, 10.5, theme::danger(), false);
+            *y += 18.0;
+        }
+        if h.accounts.is_empty() && h.error.is_none() {
+            draw_text(
+                g,
+                x + 2.0,
+                *y,
+                "아직 등록된 계정이 없어요 — 아래 「계정 추가」로 하나 넣어 주세요",
+                11.0,
+                theme::text_mute(),
+                false,
+            );
+            *y += 22.0;
+        }
+        for row in h.accounts.iter() {
+            account_row(g, s, hits, caret, x, y, w, row);
+        }
+    } else {
+        for row in s.accounts.iter().filter(|row| row.provider == provider) {
+            account_row(g, s, hits, caret, x, y, w, row);
+        }
+    }
+    // 로그인 진행 상태는 두 곳에서 온다 — 로컬은 프로세스 셀, 본진은 그 기계가
+    // 실어 보낸 문자열. 화면은 같은 모양으로 그린다.
+    let local_state = s.login_job.as_ref().map(|job| &job.state);
+    let needs_code = match home {
+        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "need_code"),
+        None => local_state == Some(&crate::settings::LoginState::NeedCode),
+    };
+    let running = match home {
+        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "running"),
+        None => local_state == Some(&crate::settings::LoginState::Running),
+    };
+    if needs_code {
         // 브라우저가 승인해도 CLI 로 돌아오는 길이 없다 — 화면에 뜬 코드를 여기
         // 붙여넣어야 로그인이 끝난다. 이 칸이 없던 동안 로그인은 전부 실패했다.
         draw_text(
@@ -3994,7 +4117,7 @@ fn account_group(
             Target::Setting(SettingsAction::CancelLogin),
             false,
         );
-    } else if login_state == Some(&crate::settings::LoginState::Running) {
+    } else if running {
         draw_text(g, x + 2.0, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
         button(
             g,
@@ -4082,14 +4205,23 @@ fn account_row(
         let right_reserve = if row.slot { 152.0 } else { 74.0 };
         let shown = fit(g, &row.name, w - right_reserve, 12.0, false);
         draw_text(g, rect.0 + 40.0, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
-        let job_sub = s.login_job.as_ref().filter(|job| job.id == row.id).map(|job| {
+        let home_sub = s.home_accounts.as_ref().and_then(|h| {
+            let (id, state, err) = h.login.as_ref()?;
+            (id == &row.id).then(|| match state.as_str() {
+                "running" => "로그인 진행 중".to_string(),
+                "need_code" => "코드를 기다리는 중".to_string(),
+                "ok" => "로그인을 마쳤어요".to_string(),
+                _ => err.clone().unwrap_or_else(|| "로그인이 실패했어요".to_string()),
+            })
+        });
+        let job_sub = home_sub.or_else(|| s.login_job.as_ref().filter(|job| job.id == row.id).map(|job| {
             match &job.state {
                 crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
                 crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
                 crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
                 crate::settings::LoginState::Err(error) => error.clone(),
             }
-        });
+        }));
         let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
         if !sub_value.is_empty() {
             let sub = fit(g, sub_value, w - right_reserve, 10.5, false);
@@ -4118,18 +4250,17 @@ fn account_row(
             );
         }
     }
-    if row.slot
-        && !editing
-        && !s
-            .login_job
+    let busy = s.login_job.as_ref().is_some_and(|job| {
+        matches!(
+            job.state,
+            crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
+        )
+    }) || s.home_accounts.as_ref().is_some_and(|h| {
+        h.login
             .as_ref()
-            .is_some_and(|job| {
-                matches!(
-                    job.state,
-                    crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
-                )
-            })
-    {
+            .is_some_and(|(_, st, _)| st == "running" || st == "need_code")
+    });
+    if row.slot && !editing && !busy {
         let rename = (rect.0 + rect.2 - 131.0, rect.1 + 14.0, 24.0, 24.0);
         let reauth = (rect.0 + rect.2 - 101.0, rect.1 + 14.0, 24.0, 24.0);
         let isolated = (rect.0 + rect.2 - 71.0, rect.1 + 14.0, 24.0, 24.0);

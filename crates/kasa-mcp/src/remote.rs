@@ -1564,6 +1564,128 @@ pub fn push_repo_sync(
     ))
 }
 
+// ── 다른 기계의 계정 칸 ─────────────────────────────────────────────────────
+//
+// 계정 등록·자동 전환은 **학생이 실제로 도는 기계**에서 일어나야 한다. 본진
+// 디스패치를 켠 뒤로 claude 는 본진에서 태어나는데, 계정 설정·사용량 조회·전환은
+// 기계마다 따로인 로컬 상태라 그대로 갈라져 있었다(2026-09-05 실측: 작업대는
+// 슬롯 4개·자동전환 켜짐·80%, 본진은 슬롯 0개·꺼짐·90%). 등록을 아무리 반복해도
+// 실제로 한도가 차는 기계에는 아무것도 없었다.
+//
+// 그래서 설정창이 본진의 계정 칸을 직접 다룬다. 자격증명 자체는 절대 옮기지
+// 않는다 — Keychain 이름이 그 기계의 절대경로 해시라 기계마다 다르고, refresh
+// token 은 한 번 쓰면 교체돼 두 기계에 복제하면 먼저 갱신한 쪽이 다른 쪽 로그인을
+// 깨뜨린다. 오가는 것은 **목록·스위치·기준값과 OAuth 코드 한 줄**뿐이다.
+
+/// 다른 기계 설정창의 계정 칸 한 장.
+#[derive(Clone, Debug, Default)]
+pub struct RemoteAccounts {
+    /// `/settings/values` 의 `claude.accounts` 원문. 화면이 쓰는 모양 그대로라
+    /// 여기서 다시 조립하지 않는다.
+    pub accounts: Vec<serde_json::Value>,
+    pub active: String,
+    pub autoswitch: bool,
+    pub autoswitch_pct: f32,
+    /// 진행 중인 로그인 `(슬롯 id, 상태, 실패 이유)`. 상태는 `running` ·
+    /// `need_code` · `ok` · `error`.
+    pub login: Option<(String, String, Option<String>)>,
+}
+
+/// 그 기계의 계정 칸을 읽는다(`GET /settings/values`).
+pub fn fetch_accounts(base: &str, token: Option<&str>) -> Result<RemoteAccounts> {
+    let u = format!("{}/settings/values", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("accounts runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("계정 칸 조회")?;
+        let text = r.text().await.unwrap_or_default();
+        serde_json::from_str(&text).context("계정 칸 응답이 JSON 이 아니다")
+    })?;
+    let c = v.get("claude").cloned().unwrap_or_default();
+    let login = c.get("login").and_then(|l| {
+        let id = l.get("id")?.as_str()?.to_string();
+        let state = l.get("state")?.as_str()?.to_string();
+        let err = l.get("error").and_then(|e| e.as_str()).map(str::to_string);
+        Some((id, state, err))
+    });
+    Ok(RemoteAccounts {
+        accounts: c
+            .get("accounts")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        active: c.get("account").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+        autoswitch: c.get("autoswitch").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        autoswitch_pct: c
+            .get("autoswitch_pct")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(90.0) as f32,
+        login,
+    })
+}
+
+/// 그 기계 설정창의 버튼 하나를 누른다(`POST /settings/action`).
+///
+/// 실패 이유를 삼키지 않는다 — 「눌렀는데 아무 일도 안 남」이 이 화면에서 제일
+/// 비싼 상태라서다. 그 상태로 반복해 누른 것이 애초에 이 버그의 증상이었다.
+pub fn settings_action(
+    base: &str,
+    action: &str,
+    id: Option<&str>,
+    label: Option<&str>,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let u = format!("{}/settings/action", base.trim_end_matches('/'));
+    let mut body = serde_json::json!({ "action": action });
+    if let Some(id) = id {
+        body["id"] = serde_json::Value::String(id.to_string());
+    }
+    if let Some(label) = label {
+        body["label"] = serde_json::Value::String(label.to_string());
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("settings action runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .context("http client")?;
+        // reqwest 의 json feature 를 안 켠 빌드라 본문을 직접 만든다.
+        let mut req = client
+            .post(&u)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("설정 동작 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if v.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+        anyhow::bail!(
+            "{}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

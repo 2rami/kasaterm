@@ -19,6 +19,7 @@ mod cursor;
 mod eyedropper;
 mod gpu;
 mod handler;
+mod homeaccounts;
 mod input;
 mod layout;
 mod lineedit;

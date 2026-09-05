@@ -112,6 +112,74 @@ impl App {
         }
     }
 
+    /// Claude 계정 조작을 본진으로 넘긴다 — 넘겼으면 `true`.
+    ///
+    /// 계정 등록·자동 전환은 **학생이 실제로 도는 기계**에서 일어나야 한다. 본진
+    /// 디스패치를 켠 뒤로 순정 `claude` 는 본진에서 태어나는데, 계정 목록과 사용량
+    /// 감시는 기계마다 따로인 로컬 상태라 그대로 갈라져 있었다(2026-09-05 실측:
+    /// 작업대 슬롯 4개·자동전환 켜짐·80%, 본진 슬롯 0개·꺼짐·90%). 등록을 아무리
+    /// 반복해도 실제로 한도가 차는 기계에는 아무것도 없어 자동 전환이 영영 일어나지
+    /// 않았다 — 거노 "계정 등록만 100번 한 것 같은데".
+    ///
+    /// codex 슬롯은 아직 로컬 그대로 둔다. 지금 본진에서 도는 건 claude 뿐이다.
+    fn route_account_action_to_home(&mut self, action: &SettingsAction) -> bool {
+        use crate::homeaccounts;
+        if homeaccounts::home_target().is_none() {
+            return false;
+        }
+        match action {
+            SettingsAction::AddClaudeAccount => {
+                homeaccounts::act("add-claude-account", None, None);
+                self.set_toast("본진에서 로그인을 시작했어요".to_string());
+            }
+            SettingsAction::RemoveClaudeAccount(id) => {
+                homeaccounts::act("remove-claude-account", Some(id.clone()), None);
+            }
+            SettingsAction::SwitchAccount(AccountProvider::Claude, id) => {
+                homeaccounts::act("claude-account", Some(id.clone()), None);
+            }
+            SettingsAction::ReauthAccount(AccountProvider::Claude, id, browser) => {
+                let act = match browser {
+                    LoginBrowser::Isolated => "reauth-account-isolated",
+                    LoginBrowser::Default => "reauth-account",
+                };
+                homeaccounts::act(act, Some(id.clone()), Some("claude".to_string()));
+                self.set_toast("본진에서 로그인을 다시 시작했어요".to_string());
+            }
+            SettingsAction::ToggleAccountAutoswitch => {
+                homeaccounts::act("toggle-account-autoswitch", None, None);
+            }
+            SettingsAction::AccountAutoswitchPct(pct) => {
+                homeaccounts::act("autoswitch-pct", Some(pct.to_string()), None);
+            }
+            SettingsAction::CancelLogin => {
+                homeaccounts::act("cancel-login", None, None);
+                self.login_code_edit.clear();
+            }
+            SettingsAction::SubmitLoginCode => {
+                let code = self.login_code_edit.trim().to_string();
+                if code.is_empty() {
+                    self.set_toast("브라우저에 나온 코드를 붙여넣어 주세요".to_string());
+                    return true;
+                }
+                homeaccounts::act("login-code", Some(code), None);
+                self.login_code_edit.clear();
+                self.settings_caret = 0;
+                self.set_toast("코드를 보냈어요 — 확인 중이에요".to_string());
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// 본진 조작이 남긴 실패 말풍선을 화면에 올린다. 렌더 틱에서 부른다 — 동작이
+    /// 백그라운드 스레드에서 끝나 그 자리에서는 `App` 에 못 쓴다.
+    pub(crate) fn drain_home_account_toasts(&mut self) {
+        for msg in crate::homeaccounts::drain_toasts() {
+            self.set_toast(msg);
+        }
+    }
+
     /// 붙여넣은 OAuth 코드를 로그인 중인 CLI 로 보낸다. 엔터와 「확인」 버튼이 같은
     /// 길을 탄다.
     pub(crate) fn submit_login_code_field(&mut self) {
@@ -417,6 +485,15 @@ impl App {
     /// 네이티브 계정 카드의 별명 편집을 계정 목록에 굳힌다.
     pub(crate) fn flush_account_label(&mut self) {
         let Some((provider, id, label)) = self.account_label_edit.clone() else { return };
+        if provider == AccountProvider::Claude && crate::homeaccounts::home_target().is_some() {
+            crate::homeaccounts::act(
+                "claude-account-label",
+                Some(id),
+                Some(label.trim().to_string()),
+            );
+            self.account_label_edit = None;
+            return;
+        }
         let found = match provider {
             AccountProvider::Claude => self
                 .set_claude_accounts
@@ -466,6 +543,9 @@ impl App {
     /// 설정 항목 하나를 실행한다. `settings_click` 에서 갈라 둔 건 히트렉트 없이도
     /// (헤드리스 검증·단축키) 같은 경로를 탈 수 있게 하기 위한 것이다.
     pub(crate) fn settings_apply(&mut self, action: SettingsAction) {
+        if self.route_account_action_to_home(&action) {
+            return;
+        }
         match action {
             SettingsAction::UiLanguage(language) => {
                 socket::write_setting("language", serde_json::json!(language));
@@ -1586,6 +1666,26 @@ impl App {
                 ));
                 Ok(true)
             }
+            // 원격 설정창이 보내는 OAuth 코드. 이 기계에서 도는 로그인 CLI 의
+            // stdin 으로 그대로 흘러간다.
+            "login-code" => {
+                let code = id.trim();
+                if code.is_empty() {
+                    return Err(reject("login_code_empty", "코드가 비어 있어요".to_string()));
+                }
+                if !submit_login_code(code) {
+                    return Err(reject(
+                        "login_not_running",
+                        "코드를 기다리는 로그인이 없어요".to_string(),
+                    ));
+                }
+                Ok(true)
+            }
+            "cancel-login" => {
+                cancel_hidden_login();
+                self.login_code_edit.clear();
+                Ok(true)
+            }
             "toggle-account-autoswitch" => {
                 self.settings_apply(SettingsAction::ToggleAccountAutoswitch);
                 Ok(saved_bool("claude_account_autoswitch") == Some(self.set_account_autoswitch))
@@ -1973,6 +2073,21 @@ impl App {
                 "codex_account": self.set_codex_account,
                 "autoswitch": self.set_account_autoswitch,
                 "autoswitch_pct": self.set_account_autoswitch_pct.round() as u32,
+                // 진행 중인 로그인. 다른 기계의 설정창이 이걸 보고 「코드를
+                // 기다리는 중」을 그리고, 그 코드를 `login-code` 로 돌려보낸다.
+                "login": hidden_login_job().map(|job| serde_json::json!({
+                    "id": job.id,
+                    "state": match job.state {
+                        LoginState::Running => "running",
+                        LoginState::NeedCode => "need_code",
+                        LoginState::Ok => "ok",
+                        LoginState::Err(_) => "error",
+                    },
+                    "error": match job.state {
+                        LoginState::Err(ref why) => Some(why.clone()),
+                        _ => None,
+                    },
+                })),
                 "statusbar_all_accounts": self.set_statusbar_all_accounts,
                 "model": self.set_claude_model,
                 "effort": self.set_claude_effort,
