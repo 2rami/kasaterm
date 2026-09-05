@@ -3684,6 +3684,28 @@ pub fn read_ui_language() -> String {
 
 /// 설정 방에서 쓰다 만 피드백. 전송물이 아니라 로컬 초안이라 settings.json 에
 /// 함께 두고, 실제 피드백 파일 저장이 성공했을 때만 비운다.
+/// 저장된 제보를 흘려 보낼 슬랙 대상(`me` · 채널이름 · C/U/D 아이디). 비어 있으면
+/// 보내지 않는다 — 기본이 「안 보냄」인 이유는 이 레포가 공개라서다. 받는 자리와
+/// 머리말(멘션)은 사람마다 다른 개인 식별자라 코드가 아니라 설정에 둔다.
+pub fn read_feedback_slack_target() -> String {
+    read_settings()
+        .get("feedback_slack_target")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// 제보 본문 앞에 붙일 줄. 받는 쪽이 봇이면 멘션이 없을 때 조용히 걸러지므로,
+/// 그 멘션을 여기에 담는다.
+pub fn read_feedback_slack_prefix() -> String {
+    read_settings()
+        .get("feedback_slack_prefix")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 pub fn read_feedback_draft() -> String {
     read_settings()
         .get("feedback_draft")

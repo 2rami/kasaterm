@@ -2503,17 +2503,68 @@ impl App {
             path = dir.join(format!("{base}-{n}.md"));
             n += 1;
         }
-        match std::fs::write(&path, doc) {
+        match std::fs::write(&path, &doc) {
             Ok(()) => {
                 self.feedback_body.clear();
                 self.feedback_caret = 0;
                 self.settings_input = None;
                 socket::write_setting("feedback_draft", serde_json::Value::String(String::new()));
-                self.set_toast("피드백을 저장했어요".to_string());
+                self.set_toast(if post_feedback_to_slack(&doc) {
+                    "피드백을 저장하고 슬랙으로 보내는 중이에요".to_string()
+                } else {
+                    "피드백을 저장했어요".to_string()
+                });
             }
             Err(e) => self.set_toast(format!("저장 실패: {e}")),
         }
     }
+}
+
+/// 방금 굳힌 제보를 슬랙으로 흘려 보낸다. 보낼 자리 설정이 비어 있으면 아무 일도
+/// 하지 않고 `false` 를 낸다 — **기본은 「안 보냄」**이다. 받는 자리도 머리말도
+/// 사람마다 다른 개인 식별자라 이 레포(공개)가 아니라 설정에 둔다.
+///
+/// 보내기는 백그라운드다. 슬랙 왕복이 몇백 ms 인데 그동안 GUI 가 멈추면 버튼을
+/// 누른 손이 먼저 눈치챈다. 그래서 토스트도 「보냈다」가 아니라 「보내는 중」이다 —
+/// 결과를 안 기다리고 하는 말이라 단정하면 거짓이 된다. 실패해도 파일은 이미
+/// 디스크에 있어 제보 자체는 안 잃는다(로그만 남긴다).
+fn post_feedback_to_slack(doc: &str) -> bool {
+    let target = socket::read_feedback_slack_target();
+    if target.is_empty() {
+        return false;
+    }
+    let prefix = socket::read_feedback_slack_prefix();
+    let text = if prefix.trim().is_empty() {
+        doc.to_string()
+    } else {
+        format!("{}\n\n{doc}", prefix.trim_end())
+    };
+    std::thread::spawn(move || {
+        let run = |program: std::ffi::OsString| {
+            crate::proc::command(program)
+                .arg("slack_send")
+                .arg(&target)
+                .arg(&text)
+                .output()
+        };
+        // GUI 프로세스의 PATH 는 로그인 셸의 것이 아니다 — Finder 로 띄운 .app 은
+        // `~/.local/bin` 을 모른다. PATH 로 한 번, 안 되면 그 자리로 한 번 더.
+        let mut out = run("sentry".into());
+        if out.is_err() {
+            if let Some(home) = kasa_socket::home_dir() {
+                out = run(home.join(".local/bin/sentry").into());
+            }
+        }
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!(
+                "[feedback] 슬랙 전송 실패: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("[feedback] sentry 를 실행하지 못했다: {e}"),
+        }
+    });
+    true
 }
 
 /// 웹뷰가 가져갈 설정 값 스냅샷이 잠깐 놓이는 자리.
