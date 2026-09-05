@@ -12197,6 +12197,46 @@ impl App {
                     }
                     g.rect(sx + pad, sry + 2.0, sw - pad * 2.0, 1.0, theme::border());
                     sry += rule;
+                    // 계정이 떨어져 이 목록을 연 사람이 정작 채우려면 설정창까지
+                    // 나가야 했다(거노 2026-09-05). 로그인이 도는 중에는 안 그린다 —
+                    // 동시에 둘을 띄우면 브라우저 창이 둘 뜨고 어느 창이 어느
+                    // 슬롯인지 알 수가 없다.
+                    if !crate::settings::hidden_login_running() {
+                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
+                        g.hover_pointer |= on;
+                        if on {
+                            round_rect(
+                                g,
+                                sx + pad,
+                                sry,
+                                sw - pad * 2.0,
+                                row_h,
+                                theme::radius_sm(),
+                                theme::surface_active(),
+                            );
+                        }
+                        g.queue_icon(
+                            "plus",
+                            sx + pad_x,
+                            sry + (row_h - icon) / 2.0,
+                            icon,
+                            theme::text_dim(),
+                        );
+                        g.draw_text(
+                            sx + pad_x + icon + 7.0,
+                            sry + (row_h - f) / 2.0 - 1.0,
+                            "계정 추가",
+                            gpu::DrawOpts {
+                                font_size: f,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        self.account_menu_hits
+                            .push((AccountMenuItem::AddAccount(p), (sx, sry, sw, row_h)));
+                        sry += row_h;
+                    }
                     {
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
                         g.hover_pointer |= on;

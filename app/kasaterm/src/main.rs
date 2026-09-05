@@ -1462,6 +1462,10 @@ pub(crate) enum AccountMenuItem {
     Provider(AccountProvider),
     /// 서브메뉴 안의 계정 행. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
     Select(AccountProvider, String),
+    /// 서브메뉴에서 바로 계정을 하나 더 붙인다. 설정창까지 안 가도 되게 한 것
+    /// (거노 2026-09-05 「계정등록 거기서 가능하게 하는건어때」) — 계정이 떨어져
+    /// 여기를 연 사람이 정작 채우려면 다른 화면으로 나가야 했다.
+    AddAccount(AccountProvider),
     /// 로스터 하단 액션 둘. Orca 와 같은 자리·같은 순서.
     UsageDetails,
     ManageAccounts,
