@@ -404,6 +404,20 @@ fn probe_cell_row(r: usize, row: &[kasa_bridge::screen::Cell], dim: bool, font_s
 /// `draw_cells` 진입 횟수 — `probe_cell_row` 가 "몇 번째 호출의 그리드인가"를 찍는다.
 static DRAW_CELLS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// OpenHuman 문서 팔레트 — 마크다운 리더를 그 앱과 같은 톤으로 그린다(거노
+// 2026-09-05 "오픈휴먼처럼 아예 똑같이"). 값은 openhuman `styles/tokens.css` 에서
+// 그대로 가져왔고, 테마 프리셋과 무관하게 라이트/다크만 가른다 — 리더는 그
+// 자체로 한 편의 문서라 앱 크롬 색이 아니라 문서 색을 입는다.
+fn oh_text() -> [u8; 4] {
+    if crate::theme::current_is_light() { [23, 23, 23, 255] } else { [245, 245, 245, 255] }
+}
+fn oh_dim() -> [u8; 4] {
+    if crate::theme::current_is_light() { [115, 115, 115, 255] } else { [163, 163, 163, 255] }
+}
+fn oh_line() -> [u8; 4] {
+    if crate::theme::current_is_light() { [229, 229, 229, 255] } else { [64, 64, 64, 255] }
+}
+
 impl GpuRenderer {
     pub fn new(window: Arc<Window>, font_size_logical: f32) -> Result<Self> {
         let scale = window.scale_factor() as f32;
@@ -2025,28 +2039,27 @@ impl GpuRenderer {
             }
             match block {
                 MdBlock::Heading { level, spans } => {
+                    // OpenHuman: 절제된 스케일(h1 text-xl, h2 text-lg, h3~ 본문 크기).
+                    // 크기로 위계를 크게 벌리지 않고 굵기·간격으로 가른다.
                     let scale_f = match level {
-                        1 => 1.9,
-                        2 => 1.5,
-                        3 => 1.25,
-                        4 => 1.1,
+                        1 => 1.25,
+                        2 => 1.125,
                         _ => 1.0,
                     };
                     let size = base * scale_f;
-                    // Notion: big space above a heading, tight below so it binds
-                    // to the text it introduces.
-                    pen_y += if *level <= 1 { base * 1.6 } else { base * 1.2 };
+                    // mt-5 위 / mb-2 아래(h1·h2), h3~ 는 mt-4 / mb-1.5 로 더 붙는다.
+                    pen_y += if *level <= 2 { base * 1.25 } else if *level == 3 { base } else { base * 0.875 };
                     pen_y = self.md_runs(
-                        spans, x, pen_y, w, size, true, crate::theme::text(), clip_top, clip_bot,
+                        spans, x, pen_y, w, size, true, oh_text(), clip_top, clip_bot,
                     );
-                    pen_y += base * 0.35;
+                    pen_y += if *level <= 2 { base * 0.5 } else { base * 0.3 };
                 }
                 MdBlock::Para { spans } => {
                     let size = base;
                     pen_y = self.md_runs(
-                        spans, x, pen_y, w, size, false, crate::theme::text(), clip_top, clip_bot,
+                        spans, x, pen_y, w, size, false, oh_text(), clip_top, clip_bot,
                     );
-                    pen_y += base * 0.85;
+                    pen_y += base * 0.75;
                 }
                 MdBlock::Code { code, lang } => {
                     let size = base * 0.9;
@@ -2197,7 +2210,7 @@ impl GpuRenderer {
                 MdBlock::ListItem { depth, marker, spans, task } => {
                     let size = base;
                     let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                    let indent = (*depth as f32 + 1.0) * base * 1.5;
+                    let indent = (*depth as f32 + 1.0) * base * 1.25;
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         match task {
                             // 체크박스는 글리프가 아니라 아이콘으로 그린다 — ☐/☑ 는
@@ -2212,7 +2225,7 @@ impl GpuRenderer {
                                     if *checked {
                                         crate::theme::accent()
                                     } else {
-                                        crate::theme::text_dim()
+                                        oh_dim()
                                     },
                                 );
                                 // 클릭 자리 — 아이콘보다 넉넉히(손가락·마우스 여유).
@@ -2231,7 +2244,7 @@ impl GpuRenderer {
                                 marker_floor,
                                 pen_y,
                                 size,
-                                crate::theme::accent(),
+                                oh_dim(),
                                 clip_top,
                                 clip_bot,
                             ),
@@ -2240,8 +2253,8 @@ impl GpuRenderer {
                     // 끝낸 할 일은 노션처럼 본문까지 흐려진다 — 체크박스만 바뀌면
                     // 목록을 훑을 때 남은 일과 끝난 일이 같은 무게로 읽힌다.
                     let body = match task {
-                        Some(true) => crate::theme::text_dim(),
-                        _ => crate::theme::text(),
+                        Some(true) => oh_dim(),
+                        _ => oh_text(),
                     };
                     pen_y = self.md_runs(
                         spans,
@@ -2254,11 +2267,11 @@ impl GpuRenderer {
                         clip_top,
                         clip_bot,
                     );
-                    pen_y += base * 0.4;
+                    pen_y += base * 0.25;
                 }
                 MdBlock::Quote { spans } => {
                     let size = base;
-                    let indent = base * 1.3;
+                    let indent = base * 1.1;
                     let start_y = pen_y;
                     pen_y = self.md_runs(
                         spans,
@@ -2267,15 +2280,15 @@ impl GpuRenderer {
                         (w - indent).max(1.0),
                         size,
                         false,
-                        crate::theme::text_dim(),
+                        oh_dim(),
                         clip_top,
                         clip_bot,
                     );
                     let bar_h = pen_y - start_y;
                     if start_y + bar_h > clip_top && start_y < clip_bot {
-                        self.rect(x, start_y, base * 0.22, bar_h, crate::theme::accent());
+                        self.rect(x, start_y, base * 0.16, bar_h, oh_line());
                     }
-                    pen_y += base * 0.8;
+                    pen_y += base * 0.75;
                 }
                 MdBlock::Callout { kind, spans, first, last, list } => {
                     let (icon_name, title, col) = kind.face();
@@ -2394,11 +2407,11 @@ impl GpuRenderer {
                     pen_y += if *last { pad + base * 0.85 } else { after_of(list) };
                 }
                 MdBlock::Rule => {
-                    pen_y += base * 0.9;
+                    pen_y += base * 0.75;
                     if pen_y > clip_top && pen_y < clip_bot {
-                        self.rect(x, pen_y, w, 1.0, crate::theme::border());
+                        self.rect(x, pen_y, w, 1.0, oh_line());
                     }
-                    pen_y += base * 0.9;
+                    pen_y += base * 0.75;
                 }
                 MdBlock::Meta { rows } => {
                     // 노션 속성 영역: 본문보다 작고 흐린 라벨 열 + 값 열, 아래에 얇은
