@@ -379,23 +379,42 @@ class WrappedCanvas extends StatefulWidget {
 class _WrappedCanvasState extends State<WrappedCanvas> {
   final _cache = _RowCache();
   final _reflow = Reflow();
-  late _CellMetrics _metrics = _CellMetrics(widget.fontSize);
+  late _CellMetrics _base = _CellMetrics(widget.fontSize);
+  _CellMetrics? _scaled;
+
+  /// 좁은 pane(42열)은 기본 글꼴이면 폰 폭의 2/3 만 쓰고 글자도 작다 — pane 열 수가 폰
+  /// 열 수보다 적으면 글꼴을 키워 그 열 수가 폭을 채우게 한다(상한 22pt). 넓은 pane 은
+  /// 기본 글꼴로 접는다.
+  static const _maxFont = 22.0;
 
   @override
   void didUpdateWidget(WrappedCanvas old) {
     super.didUpdateWidget(old);
     if (old.fontSize != widget.fontSize) {
-      _metrics = _CellMetrics(widget.fontSize);
+      _base = _CellMetrics(widget.fontSize);
+      _scaled = null;
     }
+  }
+
+  _CellMetrics _metricsFor(double maxWidth) {
+    final paneCols = widget.grid.cols;
+    final phoneCols = (maxWidth / _base.width).floor();
+    if (paneCols <= 0 || paneCols >= phoneCols) return _base;
+    final ratio = _base.width / _base.fontSize;
+    final size = (maxWidth / (paneCols * ratio)).clamp(
+      widget.fontSize,
+      _maxFont,
+    );
+    final cached = _scaled;
+    if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
+    return _scaled = _CellMetrics(size);
   }
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final cols = math.max(
-        20,
-        (constraints.maxWidth / _metrics.width).floor(),
-      );
+      final metrics = _metricsFor(constraints.maxWidth);
+      final cols = math.max(20, (constraints.maxWidth / metrics.width).floor());
       final view = _reflow.apply(widget.grid, cols);
       return ColoredBox(
         color: widget.palette.bg,
@@ -405,13 +424,13 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
           reverse: true,
           child: SizedBox(
             width: constraints.maxWidth,
-            height: math.max(view.rows, 1) * _metrics.height,
+            height: math.max(view.rows, 1) * metrics.height,
             child: CustomPaint(
               painter: _GridPainter(
                 grid: view,
                 version: widget.version,
                 palette: widget.palette,
-                metrics: _metrics,
+                metrics: metrics,
                 cache: _cache,
               ),
             ),
