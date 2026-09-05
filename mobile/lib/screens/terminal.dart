@@ -82,7 +82,9 @@ class _TerminalScreenState extends State<TerminalScreen>
 
   String _stateText(TermSession s) => switch (s.state) {
     TermState.connecting => '연결 중…',
-    TermState.connected => s.mirror ? '데스크톱 화면 그대로' : '웹 셸',
+    // 웹 셸은 서버가 id 로 붙는 모든 연결을 미러로 보지만 데스크톱에 원본 화면이 없다.
+    TermState.connected =>
+      s.mirror && !widget.pane.isWebShell ? '데스크톱 화면 그대로' : '웹 셸',
     TermState.reconnecting => '다시 연결 중…',
     TermState.gone => '끝난 화면',
   };
@@ -99,10 +101,7 @@ class _TerminalScreenState extends State<TerminalScreen>
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                widget.pane.name.isEmpty ? widget.pane.id : widget.pane.name,
-                style: theme.textTheme.titleMedium,
-              ),
+              Text(widget.pane.displayName, style: theme.textTheme.titleMedium),
               Text(
                 _stateText(s),
                 style: theme.textTheme.labelSmall?.copyWith(
