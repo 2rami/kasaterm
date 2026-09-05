@@ -5865,6 +5865,9 @@ async fn term_ws_run(
     // 두 번 그려진다(`tap_bytes_with_snapshot` 주석 참고).
     let tap = if want_grid {
         let (rx, snap) = sess.tap_screens_with_snapshot();
+        // 데스크톱이 스크롤백을 올려다보는 중이면 그 창이 아니라 바닥 화면을 준다 —
+        // 거울은 스크롤이 따로 있다(아래 루프의 같은 갈림과 짝).
+        let snap = if sess.view_state().0 > 0 { sess.live_screen() } else { snap };
         Tap::Grid(rx, Box::new(snap))
     } else {
         let (rx, bytes) = sess.tap_bytes_with_snapshot();
@@ -5994,7 +5997,10 @@ async fn term_ws_run(
                         Frame::Bytes(b) => ws_tx.send(Message::Binary(b.into())).await,
                         // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
                         Frame::Grid(u) => {
-                            let hist = sess_sz.view_state().1;
+                            let (offset, hist) = sess_sz.view_state();
+                            // 데스크톱이 위로 올라가 있으면 GUI 프레임은 지난 줄 창이다 — 거울에는
+                            // 입력상자·상태줄이 있는 바닥 화면을 통째로 다시 떠서 준다.
+                            let u = if offset > 0 { Box::new(sess_sz.live_screen()) } else { u };
                             if hist > last_hist {
                                 // 이번 프레임에 스크롤백으로 들어간 줄 — 화면보다 먼저 보내야
                                 // 받는 쪽이 「지난 줄 뒤에 새 화면」 순서로 잇는다. 오래된 순.

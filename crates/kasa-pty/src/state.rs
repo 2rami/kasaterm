@@ -1399,6 +1399,15 @@ impl PtySession {
         update
     }
 
+    /// 거울에 줄 살아 있는 화면 — 데스크톱의 스크롤 위치를 무시한다(`live_snapshot`).
+    pub fn live_screen(&self) -> ScreenUpdate {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let t = self.term.lock().unwrap();
+        let mut update = live_snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
+        attach_inline_views(&mut update, &t, &self.inline_imgs);
+        update
+    }
+
     pub fn publish_full_snapshot(&self) {
         self.publish_screen(self.full_snapshot());
     }
@@ -2489,7 +2498,6 @@ fn snapshot(
     // 줄 `r - display_offset` 이고, 그 값이 음수면 히스토리다(0 이 화면 첫 줄).
     // `damage()` 의 &mut 대여 전에 읽는다.
     let display_offset = term.grid().display_offset() as i32;
-    let topmost = -(term.grid().history_size() as i32);
     // Which visual rows to rebuild. damage() yields viewport-relative
     // line numbers (already display_offset-adjusted), and returns Full
     // on first frame / resize / scroll, which we expand to every row.
@@ -2508,9 +2516,37 @@ fn snapshot(
         }
     };
     term.reset_damage();
+    build_update(term, cols, rows, pane_id, last_title, &damaged, display_offset)
+}
+
+/// 뷰포트(`display_offset`)와 무관하게 **살아 있는 화면** 전체를 담는다 — 거울(폰·웹텀)용.
+/// GUI 스트림은 데스크톱이 스크롤백을 올려다보면 그 창을 싣는데, 거울은 스크롤이 따로
+/// 있어서 그걸 받으면 입력상자·상태줄이 통째로 사라진다(2026-09-06 「맥북에서 올리면
+/// 폰에서 하단바도 없어져」). damage 는 건드리지 않는다 — 그건 GUI 스트림의 것.
+fn live_snapshot(
+    term: &Term<PtyEventForwarder>,
+    cols: u16,
+    rows: u16,
+    pane_id: &str,
+    last_title: &Arc<Mutex<Option<String>>>,
+) -> ScreenUpdate {
+    let damaged: Vec<u16> = (0..rows).collect();
+    build_update(term, cols, rows, pane_id, last_title, &damaged, 0)
+}
+
+fn build_update(
+    term: &Term<PtyEventForwarder>,
+    cols: u16,
+    rows: u16,
+    pane_id: &str,
+    last_title: &Arc<Mutex<Option<String>>>,
+    damaged: &[u16],
+    display_offset: i32,
+) -> ScreenUpdate {
+    let topmost = -(term.grid().history_size() as i32);
     let grid = term.grid();
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(damaged.len());
-    for &r in &damaged {
+    for &r in damaged {
         let mut row: Row = Vec::with_capacity(cols as usize);
         // Clamp to the grid's real dimensions: a resize updates `size` and the
         // Term grid under separate locks, so for a frame they can disagree by a
@@ -5590,6 +5626,33 @@ mod external_session_tests {
             }
         }
         assert!(saw_eof, "Eof 이벤트는 eof 센티널 프레임이 되어야 한다");
+    }
+
+    #[test]
+    fn live_screen_ignores_display_offset() {
+        // 데스크톱이 스크롤백을 올려다보는 동안에도 거울은 바닥 화면을 받아야 한다.
+        let (sess, etx, _wrx, _resized) = ext_session(20, 5);
+        let mut long = Vec::new();
+        for i in 0..30 {
+            long.extend_from_slice(format!("line{i}\r\n").as_bytes());
+        }
+        etx.send(ExtEvent::Bytes(long)).unwrap();
+        assert!(wait_text(&sess, "line29"));
+        assert!(sess.scroll(3) > 0, "위로 올라가 있어야 전제 성립");
+        let text = |u: &ScreenUpdate| -> Vec<String> {
+            u.dirty
+                .iter()
+                .map(|(_, row)| row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+                .collect()
+        };
+        let scrolled = sess.full_snapshot();
+        assert!(!text(&scrolled).iter().any(|l| l == "line29"), "GUI 스냅샷은 올려다본 창");
+        assert!(!scrolled.cursor_visible);
+        let live = sess.live_screen();
+        assert!(text(&live).iter().any(|l| l == "line29"), "거울 스냅샷은 바닥 화면");
+        assert!(live.cursor_visible);
+        assert_eq!(live.dirty.len(), 5, "전체 행을 담는다");
+        assert_eq!(sess.view_state().0, 3, "거울 스냅샷이 스크롤 위치를 건드리지 않는다");
     }
 
     #[test]
