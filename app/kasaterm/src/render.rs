@@ -10664,20 +10664,7 @@ impl App {
                 // 놓치는데, 그건 예전에 실제로 당한 사고다(2026-08-05: 화면이
                 // five_hour 만 봐서 weekly 95% 를 「0%」로 표시). 위험한 창을 숨기는
                 // 것은 자리를 아끼는 게 아니라 틀린 답을 주는 것이다.
-                const LOUD_PCT: f32 = 70.0;
-                let wins: Vec<(String, Option<f32>)> = match badge.as_ref() {
-                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => {
-                        let mut v: Vec<(String, Option<f32>)> = Vec::new();
-                        for (i, (l, p)) in b.windows.iter().enumerate() {
-                            if i == 0 || *p >= LOUD_PCT {
-                                v.push((l.clone(), (!switching).then_some(*p)));
-                            }
-                        }
-                        v
-                    }
-                    Some(b) => vec![(b.label.clone(), (!switching).then_some(b.pct))],
-                    None => Vec::new(),
-                };
+                let wins = status_usage_windows(badge.as_ref(), win_w, switching);
                 if wins.is_empty() {
                     // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
                     // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
@@ -14613,6 +14600,115 @@ pub(crate) fn paint_character_swap_confirm(
             ("취소", CharacterSwapBtn::Cancel, None),
         ],
     )
+}
+
+/// 접힌 창이 이 값을 넘으면 5시간과 **함께** 세운다. 숨기면 놓치기 때문이다.
+const LOUD_PCT: f32 = 70.0;
+
+/// 상태줄에 세울 한도 창 목록.
+///
+/// **평소엔 5시간 창 하나만**(거노 2026-09-05 「평소에는 5시간 세션만 보여주고
+/// 눌러야 보이게」). 창을 셋 다 세우면 줄 절반이 숫자가 되고, 그중 지금 판단에 쓰는
+/// 것은 대개 5시간 하나다. 나머지는 이 세그먼트를 누르면 열리는 계정 드롭다운에
+/// 이미 전부 있다.
+///
+/// 다만 **접힌 창이 위험하면 그것도 세운다.** 접기만 하면 주간 95% 를 놓치는데,
+/// 그건 예전에 실제로 당한 사고다(2026-08-05: 화면이 five_hour 만 봐서 weekly 95%
+/// 를 「0%」로 표시). 위험한 창을 숨기는 것은 자리를 아끼는 게 아니라 틀린 답을
+/// 주는 것이다.
+///
+/// `switching` 은 계정을 막 갈아탄 직후다 — 숫자는 떠나온 계정 것이라 자리만 두고
+/// 값을 감춘다(`None`).
+pub(crate) fn status_usage_windows(
+    badge: Option<&crate::UsageBadge>,
+    win_w: f32,
+    switching: bool,
+) -> Vec<(String, Option<f32>)> {
+    match badge {
+        // `windows` 는 5시간이 앞이다.
+        Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, p))| *i == 0 || *p >= LOUD_PCT)
+            .map(|(_, (l, p))| (l.clone(), (!switching).then_some(*p)))
+            .collect(),
+        // 좁은 창이거나 창이 하나면 **가장 급한** 것 하나로 접는다.
+        Some(b) => vec![(b.label.clone(), (!switching).then_some(b.pct))],
+        None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod status_usage_window_tests {
+    use super::*;
+
+    fn badge(label: &str, pct: f32, windows: &[(&str, f32)]) -> crate::UsageBadge {
+        crate::UsageBadge {
+            pct,
+            label: label.to_string(),
+            stale: false,
+            account_dir: String::new(),
+            resets_at: None,
+            windows: windows.iter().map(|(l, p)| ((*l).to_string(), *p)).collect(),
+        }
+    }
+
+    /// 평소 화면 — 5시간만 선다. 이 줄이 이 기능의 전부다.
+    #[test]
+    fn quiet_day_shows_only_the_five_hour_window() {
+        let b = badge("5h", 6.0, &[("5h", 6.0), ("7d", 12.0), ("7d Fable", 10.0)]);
+        let got = status_usage_windows(Some(&b), 1600.0, false);
+        assert_eq!(got.len(), 1, "평소엔 5시간 하나만: {got:?}");
+        assert_eq!(got[0].0, "5h");
+        assert_eq!(got[0].1, Some(6.0));
+    }
+
+    /// **값이 있으면 5시간은 반드시 그려진다.** 접기를 넣으며 사용량이 통째로
+    /// 사라지는 것이 가장 비싼 회귀라 따로 못 박는다.
+    #[test]
+    fn the_five_hour_window_is_never_dropped() {
+        for pct in [0.0, 0.4, 50.0, 99.9] {
+            let b = badge("5h", pct, &[("5h", pct), ("7d", 1.0)]);
+            let got = status_usage_windows(Some(&b), 1600.0, false);
+            assert_eq!(got.first().map(|(l, _)| l.as_str()), Some("5h"), "{pct}% 에서 사라졌다");
+        }
+    }
+
+    /// 접힌 창이 위험하면 함께 선다 — 숨기면 주간 한도를 놓친다(2026-08-05 사고).
+    #[test]
+    fn a_loud_hidden_window_still_shows_up() {
+        let b = badge("7d", 95.0, &[("5h", 3.0), ("7d", 95.0), ("7d Fable", 8.0)]);
+        let got = status_usage_windows(Some(&b), 1600.0, false);
+        let labels: Vec<&str> = got.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "7d"], "위험한 창이 접혔다: {got:?}");
+    }
+
+    /// 좁은 창에서는 **가장 급한** 것 하나로 접는다 — 자리가 하나뿐일 때 5시간을
+    /// 고집하면 정작 급한 숫자를 못 보여준다.
+    #[test]
+    fn a_narrow_window_falls_back_to_the_worst_one() {
+        let b = badge("7d", 95.0, &[("5h", 3.0), ("7d", 95.0)]);
+        let got = status_usage_windows(Some(&b), 700.0, false);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], ("7d".to_string(), Some(95.0)));
+    }
+
+    /// 계정을 막 갈아탄 직후엔 자리만 두고 숫자를 감춘다 — 떠나온 계정 것이라서다.
+    #[test]
+    fn switching_keeps_the_slot_but_hides_the_number() {
+        let b = badge("5h", 6.0, &[("5h", 6.0), ("7d", 12.0)]);
+        let got = status_usage_windows(Some(&b), 1600.0, true);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, None);
+    }
+
+    /// 값을 못 읽었으면 빈 목록 — 부르는 쪽이 `—` 를 그린다. 0% 로 그리면
+    /// 「여유 있음」이라는 거짓말이 되고 그게 옮길지 말지를 정확히 반대로 만든다.
+    #[test]
+    fn no_reading_yields_nothing_to_draw() {
+        assert!(status_usage_windows(None, 1600.0, false).is_empty());
+    }
 }
 
 pub(crate) fn draw_usage_windows(
