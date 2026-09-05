@@ -2248,6 +2248,9 @@ impl ApplicationHandler<UserEvent> for App {
                                     &usable,
                                     &socket::read_account_cooldowns(),
                                     now,
+                                    // 기본 로그인이 지금 자리와 같은 계정이면 후보에서
+                                    // 뺀다 — 옮겨도 한도가 그대로라 헛돌이가 된다.
+                                    socket::default_account_is_distinct(&active_id),
                                 );
                                 match to {
                                     Some(to) => {
