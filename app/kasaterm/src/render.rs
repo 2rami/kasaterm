@@ -10813,7 +10813,16 @@ impl App {
                 // 게이지는 **활성만** 남긴다. 넷을 다 막대로 그리면 이 줄이 게이지밭이
                 // 되어 정작 급한 활성 계정의 막대가 나머지에 묻힌다 — 나머지는 어디로
                 // 옮길지 고르는 값이라 이름과 숫자면 족하다.
-                if self.set_statusbar_all_accounts
+                // 스위치가 꺼져 있어도 **로그인이 풀린 계정은 보여 준다.** 그건
+                // 「다른 계정의 한도」가 아니라 사람이 고쳐야 할 것이라, 감추면
+                // 설정창에는 있는 계정이 이 줄에서만 사라진 꼴이 된다(거노 2026-09-05
+                // 「설정창에는 계정 다있는데 하단바에는 왜 두개 빠졌어」).
+                let any_signed_out = self.set_claude_accounts.iter().any(|a| {
+                    a.id != self.set_claude_account
+                        && !crate::settings::auth_probe(&a.id)
+                            .is_none_or(|probe| probe.logged_in)
+                });
+                if (self.set_statusbar_all_accounts || any_signed_out)
                     && !self.set_claude_accounts.is_empty()
                     && win_w >= 720.0
                 {
@@ -10857,10 +10866,19 @@ impl App {
                         // 먹는다 — 넷이 다 `—` 면 줄 절반이 뜻 없는 글자가 된다
                         // (2026-08-29 지적: 「좌측하단 계정정보 좀 정보량 줄이고」).
                         // 있다는 사실은 끝의 `+N` 이 말하고, 전체는 눌러서 본다.
+                        // 로그인이 풀린 자리는 **숫자 대신 그 사실**을 적는다. 값을
+                        // 못 읽었다는 점은 같지만 사람이 할 일이 정반대다 — 조회 중인
+                        // 것은 기다리면 되고, 풀린 것은 눌러서 다시 로그인해야 한다.
+                        let signed_out = !crate::settings::auth_probe(&a.id)
+                            .is_none_or(|probe| probe.logged_in);
                         let (pct_s, pct_c) = match badge {
                             Some(b) if b.stale => (format!("~{:.0}%", b.pct), pct_col(b.pct)),
                             Some(b) => (format!("{:.0}%", b.pct), pct_col(b.pct)),
+                            None if signed_out => ("로그인 필요".to_string(), theme::danger()),
                             None => {
+                                // 아직 못 읽은 것뿐이다. 이름 옆에 `—` 만 붙는 칸은
+                                // 「어디로 옮길까」에 아무 답을 못 주면서 자리만 먹는다
+                                // (2026-08-29 「좌측하단 계정정보 좀 정보량 줄이고」).
                                 dropped += 1;
                                 continue;
                             }
