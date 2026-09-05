@@ -2,6 +2,8 @@
 /// Flutter 를 import 하지 않아 `dart test` 급으로 빨리 검증한다.
 library;
 
+import 'claude_style.dart';
+
 const flagBold = 1;
 const flagItalic = 2;
 const flagUnderline = 4;
@@ -64,12 +66,17 @@ abstract class GridLines {
   int get cols;
   int get rows;
   List<List<Run>> get lines;
+
+  /// 화면 위에 얹을 학생 스프라이트 자리(셀 단위). 꾸밈이 없는 격자는 비어 있다.
+  List<SpriteSlot> get slots;
   int get cursorRow;
   int get cursorCol;
   bool get cursorVisible;
 }
 
 class Grid implements GridLines {
+  @override
+  List<SpriteSlot> get slots => const [];
   @override
   int cols = 0;
   @override

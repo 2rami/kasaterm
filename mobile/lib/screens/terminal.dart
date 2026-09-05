@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../claude_style.dart';
 import '../grid_canvas.dart';
-import '../reflow.dart';
 import '../server.dart';
 import '../student_art.dart';
 import '../term_session.dart';
@@ -184,10 +184,20 @@ class _TerminalScreenState extends State<TerminalScreen>
         ? TerminalPalette.of(context)
         : TerminalPalette.fromTokens(tokens);
     if (_wrap) {
+      final pane = widget.pane;
       return WrappedCanvas(
-        grid: CombinedGrid(s.history, s.grid),
+        grid: s.grid,
+        history: s.history,
         version: s.grid.version + s.historyVersion,
         palette: palette,
+        // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
+        student: pane.isWebShell
+            ? null
+            : StudentStyle(
+                slug: pane.slug,
+                accent: studentAccent(context, pane, tokens),
+                bg: palette.bg,
+              ),
       );
     }
     return GridCanvas(grid: s.grid, version: s.grid.version, palette: palette);

@@ -1,13 +1,16 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'claude_style.dart';
 import 'contrast.dart';
 import 'fill_viewer.dart';
 import 'grid.dart';
 import 'reflow.dart';
 import 'server.dart';
+import 'sprite_cache.dart';
 
 /// 테마의 기본 fg/bg 와 256 팔레트 판을 한데 묶는다.
 class TerminalPalette {
@@ -72,7 +75,9 @@ class TerminalPalette {
 
 const _fontFamily = 'TermMono';
 // 한글은 JetBrains 에 없어 D2Coding 으로 — 데스크톱 렌더러의 폴백 순서와 같다.
-const _fontFallback = ['TermHangul'];
+// ⏺·⎿ 는 STIX Two Math(데스크톱과 같은 출처), 그래도 없는 점자·기호는 iOS 의 Menlo·
+// Apple Symbols 로 — 이모지 글꼴보다 먼저 잡혀야 동그라미가 이모지풍으로 안 커진다.
+const _fontFallback = ['TermHangul', 'TermSymbol', 'Menlo', 'Apple Symbols'];
 const _lineHeight = 1.2;
 
 class _CellMetrics {
@@ -277,6 +282,10 @@ class _GridPainter extends CustomPainter {
     required this.palette,
     required this.metrics,
     required this.cache,
+    this.slug,
+    this.sprites,
+    this.walkFrame = 0,
+    this.idleFrame = 0,
   });
 
   final GridLines grid;
@@ -284,6 +293,10 @@ class _GridPainter extends CustomPainter {
   final TerminalPalette palette;
   final _CellMetrics metrics;
   final _RowCache cache;
+  final String? slug;
+  final SpriteCache? sprites;
+  final int walkFrame;
+  final int idleFrame;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -314,14 +327,41 @@ class _GridPainter extends CustomPainter {
         Paint()..color = palette.cursor.withValues(alpha: 0.55),
       );
     }
+    _paintSprites(canvas);
+  }
+
+  /// 데스크톱 `paint_student_overlays` 와 같이 셀 **위**에 얹는다 — 픽셀 도트라 보간 없이.
+  void _paintSprites(Canvas canvas) {
+    final slug = this.slug;
+    final sprites = this.sprites;
+    if (slug == null || sprites == null || grid.slots.isEmpty) return;
+    final paint = Paint()..filterQuality = FilterQuality.none;
+    for (final s in grid.slots) {
+      final i = s.motion == 'walk' ? walkFrame : idleFrame;
+      final img = sprites.frame(slug, s.motion, i);
+      if (img == null) continue;
+      canvas.drawImageRect(
+        img,
+        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+        Rect.fromLTWH(
+          s.col * metrics.width,
+          s.row * metrics.height,
+          s.cols * metrics.width,
+          s.rows * metrics.height,
+        ),
+        paint,
+      );
+    }
   }
 
   @override
   bool shouldRepaint(_GridPainter old) =>
       old.version != version ||
       old.palette != palette ||
-      old.metrics.fontSize != metrics.fontSize ||
-      old.grid != grid;
+      old.metrics != metrics ||
+      old.grid != grid ||
+      old.walkFrame != walkFrame ||
+      old.idleFrame != idleFrame;
 }
 
 /// 격자를 그린다. 채우기·핀치는 FillViewer 가 맡는다(그림 모드와 같은 규칙).
@@ -384,13 +424,20 @@ class WrappedCanvas extends StatefulWidget {
     required this.grid,
     required this.version,
     required this.palette,
+    this.history = const [],
+    this.student,
     this.fontSize = 13,
   });
 
-  /// 지난 줄까지 이어 붙인 화면(CombinedGrid) — cols 는 살아 있는 화면의 열 수다.
+  /// 살아 있는 화면. 지난 줄은 `history` 로 따로 받아 꾸밈(스피너·입력상자 판독)은
+  /// 살아 있는 화면에만 건다 — 데스크톱도 화면에 보이는 격자만 판독한다.
   final GridLines grid;
+  final List<List<Run>> history;
   final int version;
   final TerminalPalette palette;
+
+  /// 학생 꾸밈(도트·학생색). 셸 화면처럼 학생이 없으면 null.
+  final StudentStyle? student;
   final double fontSize;
 
   @override
@@ -400,6 +447,41 @@ class WrappedCanvas extends StatefulWidget {
 class _WrappedCanvasState extends State<WrappedCanvas> {
   final _cache = _RowCache();
   final _reflow = Reflow();
+  final _t0 = DateTime.now();
+  Timer? _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    spriteCache.addListener(_repaint);
+  }
+
+  @override
+  void dispose() {
+    _anim?.cancel();
+    spriteCache.removeListener(_repaint);
+    super.dispose();
+  }
+
+  void _repaint() {
+    if (mounted) setState(() {});
+  }
+
+  double get _seconds => DateTime.now().difference(_t0).inMilliseconds / 1000.0;
+
+  /// 스피너 glow 와 도트 걸음은 시간이 움직여야 보인다 — 꾸밈이 살아 있는 동안만 돈다.
+  void _setAnimating(bool on) {
+    if (on && _anim == null) {
+      _anim = Timer.periodic(
+        const Duration(milliseconds: 70),
+        (_) => _repaint(),
+      );
+    } else if (!on && _anim != null) {
+      _anim!.cancel();
+      _anim = null;
+    }
+  }
+
   late _CellMetrics _base = _CellMetrics(widget.fontSize);
   _CellMetrics? _scaled;
 
@@ -436,7 +518,27 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     builder: (context, constraints) {
       final metrics = _metricsFor(constraints.maxWidth);
       final cols = math.max(20, (constraints.maxWidth / metrics.width).floor());
-      final view = _reflow.apply(widget.grid, cols);
+      final st = widget.student;
+      final slug = st?.slug;
+      final t = _seconds;
+      final live = st == null
+          ? widget.grid
+          : restyleClaude(
+              widget.grid,
+              StudentStyle(
+                slug: slug,
+                accent: st.accent,
+                bg: st.bg,
+                hasWalk: slug != null && spriteCache.available(slug, 'walk'),
+                hasIdle: slug != null && spriteCache.available(slug, 'idle'),
+              ),
+              t,
+            );
+      final animated = live is StyledGrid && live.animated;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _setAnimating(animated),
+      );
+      final view = _reflow.apply(CombinedGrid(widget.history, live), cols);
       // 스크롤 상자는 내용만큼만 줄어들려 한다 — 느슨한 높이(Row 안 등)에서는 두 줄짜리
       // 상자가 세로 가운데에 떠서 바닥 정렬이 깨진다. 주어진 자리를 통째로 차지시킨다.
       return SizedBox.expand(
@@ -456,6 +558,10 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                   palette: widget.palette,
                   metrics: metrics,
                   cache: _cache,
+                  slug: slug,
+                  sprites: spriteCache,
+                  walkFrame: (t * 1000 ~/ spriteWalkFrameMs) % spriteWalkFrames,
+                  idleFrame: (t * 1000 ~/ spriteIdleFrameMs) % spriteIdleFrames,
                 ),
               ),
             ),

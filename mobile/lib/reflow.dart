@@ -1,3 +1,4 @@
+import 'claude_style.dart';
 import 'grid.dart';
 
 /// 폰 폭에 맞춰 다시 접은 화면. 미러 pane 의 크기는 못 바꾸므로(데스크톱이 같이
@@ -11,6 +12,7 @@ class ReflowedGrid implements GridLines {
     required this.cursorRow,
     required this.cursorCol,
     required this.cursorVisible,
+    this.slots = const [],
   });
 
   @override
@@ -25,6 +27,8 @@ class ReflowedGrid implements GridLines {
   final int cursorCol;
   @override
   final bool cursorVisible;
+  @override
+  final List<SpriteSlot> slots;
 }
 
 class _Cell {
@@ -176,6 +180,10 @@ class CombinedGrid implements GridLines {
   int get cursorCol => live.cursorCol;
   @override
   bool get cursorVisible => live.cursorVisible;
+  @override
+  List<SpriteSlot> get slots => history.isEmpty
+      ? live.slots
+      : [for (final s in live.slots) s.shifted(history.length.toDouble(), 0)];
 }
 
 /// 행별 결과를 **행 객체에** 매달아 두고(Expando) 그 객체가 바뀐 때만 다시 접는다 —
@@ -189,6 +197,8 @@ class Reflow {
     final lines = <List<Run>>[];
     int? cursorRow;
     var cursorCol = 0;
+    final lineStart = <int>[];
+    final starts = <List<int>>[];
     for (var r = 0; r < grid.lines.length; r++) {
       final src = grid.lines[r];
       var e = _rows[src];
@@ -196,6 +206,8 @@ class Reflow {
         e = _Entry(cols, reflowRow(src, cols));
         _rows[src] = e;
       }
+      lineStart.add(lines.length);
+      starts.add(e.row.starts);
       if (r == grid.cursorRow) {
         final starts = e.row.starts;
         var k = 0;
@@ -211,12 +223,36 @@ class Reflow {
     while (end > 0 && lines[end - 1].isEmpty && (cursorRow ?? -1) < end - 1) {
       end--;
     }
+    // 스프라이트 자리도 같은 자로 옮긴다 — 앵커 열이 든 조각의 줄로 가고, 열은 그
+    // 조각 시작만큼 뺀다. 도트가 앉는 행은 접히지 않는 짧은 행이라 폭은 그대로다.
+    final slots = <SpriteSlot>[
+      for (final s in grid.slots)
+        if (s.row.floor() < lineStart.length) _mapSlot(s, lineStart, starts),
+    ];
     return ReflowedGrid(
       cols: cols,
       lines: end == lines.length ? lines : lines.sublist(0, end),
       cursorRow: cursorRow ?? 0,
       cursorCol: cursorCol,
       cursorVisible: grid.cursorVisible,
+      slots: slots,
     );
   }
+}
+
+SpriteSlot _mapSlot(SpriteSlot s, List<int> lineStart, List<List<int>> starts) {
+  final r = s.row.floor();
+  final frac = s.row - r;
+  final st = starts[r];
+  var k = 0;
+  for (var i = 0; i < st.length; i++) {
+    if (st[i] <= s.col) k = i;
+  }
+  return SpriteSlot(
+    s.motion,
+    lineStart[r] + k + frac,
+    s.col - st[k],
+    s.rows,
+    s.cols,
+  );
 }

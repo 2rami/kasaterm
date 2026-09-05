@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/grid_canvas.dart';
-import 'package:kasaterm_mobile/reflow.dart';
 
 void main() {
   testWidgets('느슨한 높이 안에서도 짧은 내용은 바닥에 앉는다', (tester) async {
@@ -37,7 +36,7 @@ void main() {
                 Expanded(
                   child: Builder(
                     builder: (context) => WrappedCanvas(
-                      grid: CombinedGrid(const [], g),
+                      grid: g,
                       version: 1,
                       palette: TerminalPalette.of(context),
                     ),

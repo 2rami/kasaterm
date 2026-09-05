@@ -30,6 +30,10 @@ flutter:
     - assets/students/schale-logo.png
     - assets/students/gif/
     - assets/students/profile/
+    # 데스크톱이 claude 화면에 세우는 도트 그대로 — 작업 중엔 스피너 자리에서 걷고(walk 6장),
+    # 쉴 땐 입력상자 위에 선다(idle 4장). 파일명은 데스크톱과 같은 <slug>-N.png.
+    - assets/students/walk/
+    - assets/students/idle/
   # 데스크톱 렌더러와 같은 짝: 라틴·아이콘은 JetBrains Mono Nerd, 한글은 D2Coding 으로
   # 떨어진다(한글이 정확히 두 칸). 같은 글꼴이라야 같은 화면으로 보인다. UI 글은 시스템 글꼴.
   fonts:
@@ -43,3 +47,8 @@ flutter:
         - asset: assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf
         - asset: assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf
           weight: 700
+    # ⏺(응답 마커)·⎿ 는 위 두 글꼴에 없다 — 데스크톱은 STIX Two Math(OFL) 에서 가져온다.
+    # 없으면 iOS 가 이모지 글꼴로 떨어뜨려 동그라미가 이모지풍으로 커진다.
+    - family: TermSymbol
+      fonts:
+        - asset: assets/fonts/STIXTwoMath.otf
