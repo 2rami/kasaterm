@@ -298,22 +298,21 @@ impl SettingsMediaCache {
         }
     }
 
-    pub(crate) fn decoded_bytes(&self) -> usize {
+    #[cfg(test)]
+    fn decoded_bytes(&self) -> usize {
         self.decoded_bytes
     }
 
-    pub(crate) fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub(crate) fn face_status(&self, theme: &str, slug: &str) -> MediaStatus {
+    #[cfg(test)]
+    fn face_status(&self, theme: &str, slug: &str) -> MediaStatus {
         self.status(&MediaKey::Face(FaceKey {
             theme: normalize_theme(theme),
             slug: slug.to_string(),
         }))
     }
 
-    pub(crate) fn reference_status(&self, theme: &str, slug: &str) -> MediaStatus {
+    #[cfg(test)]
+    fn reference_status(&self, theme: &str, slug: &str) -> MediaStatus {
         self.status(&MediaKey::Reference(DetailKey {
             theme: normalize_theme(theme),
             slug: slug.to_string(),
