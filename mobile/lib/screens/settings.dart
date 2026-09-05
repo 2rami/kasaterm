@@ -66,7 +66,7 @@ class SettingsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            '테마는 시스템 설정(밝게/어둡게)을 따른다.',
+            '색은 연결된 데스크톱의 테마를 따른다. 못 받으면 시스템 설정(밝게/어둡게).',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
