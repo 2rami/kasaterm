@@ -1454,21 +1454,29 @@ impl App {
             // 안 늘면 그 칸은 안 그려진 것이고, 그 상태의 「통과」는 「겹치지
             // 않는다」가 아니라 **「못 봤다」**다. 둘을 섞으면 거짓 초록이 된다.
             self.render_frame();
-            let base = self.settings_scene.hits().len();
             let mut unseen: Vec<&str> = Vec::new();
-            let mut check = |app: &mut App, label: &'static str, bad: &mut usize| {
+            // 「영역 수가 늘었나」로 물으면 **이미 서 있던 칸**을 「못 봤다」로 오해한다
+            // (이 기계처럼 본진이 진짜로 붙어 있으면 두 칸은 심기 전부터 그려져 있다).
+            // 그 칸의 `Target` 이 실제로 등록됐는지로 묻는다.
+            let mut check = |app: &mut App, label: &'static str, marker: &str, bad: &mut usize| {
                 *bad += app.audit_settings_hits(label);
-                if app.settings_scene.hits().len() == base {
-                    eprintln!("[hitaudit] {label}: ⚠ 세운 칸이 안 그려졌다 — 감사 못 함");
-                    return false;
+                let present = app
+                    .settings_scene
+                    .hits()
+                    .iter()
+                    .any(|hit| format!("{:?}", hit.target).contains(marker));
+                if !present {
+                    eprintln!(
+                        "[hitaudit] {label}: ⚠ 그 칸({marker})이 화면에 없다 — 감사 못 함"
+                    );
                 }
-                true
+                present
             };
             if crate::settings::seed_login_state_for_probe(
                 "acct-1",
                 crate::settings::LoginState::NeedCode,
             ) {
-                if !check(self, "에이전트·코드입력칸", &mut total_bad) {
+                if !check(self, "에이전트·코드입력칸", "LoginCode", &mut total_bad) {
                     unseen.push("코드입력칸");
                 }
                 crate::settings::cancel_hidden_login();
@@ -1494,7 +1502,7 @@ impl App {
                 } else {
                     "에이전트·이맥북칸"
                 };
-                if !check(self, label, &mut total_bad) {
+                if !check(self, label, "AccountScopeHome", &mut total_bad) {
                     unseen.push(label);
                 }
             }
@@ -1535,7 +1543,7 @@ impl App {
         let hits = self.settings_scene.hits();
         eprintln!(
             "[hitaudit] {label}: 열자마자 영역={stale} · 첫 프레임 {first_frame_ms:.0}ms 뒤={after_one} · 안정={}",
-            hits.len()
+            hits.len(),
         );
         let mut zero = Vec::new();
         let mut buried = Vec::new();
