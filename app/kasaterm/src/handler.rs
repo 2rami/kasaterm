@@ -5747,6 +5747,17 @@ impl ApplicationHandler<UserEvent> for App {
                                             window.request_redraw();
                                             return;
                                         }
+                                        // 렌더 뷰 체크박스 — 캐럿 배치보다 먼저.
+                                        // 상자를 눌렀는데 캐럿만 옮겨 가고 체크는
+                                        // 안 되면 「눌리지 않는다」로 읽힌다.
+                                        if self.md_task_click(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        ) {
+                                            window.request_redraw();
+                                            return;
+                                        }
                                         // 거터의 접기 삼각형은 캐럿 배치보다 먼저
                                         // 본다 — 삼각형 위에서 손을 떼는 순간
                                         // 본문에 엉뚱한 선택이 생기면 안 된다.

@@ -3509,6 +3509,41 @@ impl App {
         true
     }
 
+    /// 렌더 뷰에서 할 일 체크박스를 눌렀을 때 그 줄을 `- [ ]`↔`- [x]` 로 뒤집고
+    /// 파일에 되쓴 뒤 다시 파싱한다. `md_task_rects`(그리는 프레임마다 gpu 가 채운다)
+    /// 는 Raw 모드에선 비어 있어 거기선 안 걸린다. 되쓰기는 그 한 줄만 바꾸고
+    /// 나머지 바이트는 그대로 둔다 — 원본 서식을 건드리면 안 되기 때문이다.
+    pub(crate) fn md_task_click(&mut self, id: &str, px: f32, py: f32) -> bool {
+        let bi = {
+            let Some(g) = self.gpu.as_ref() else { return false };
+            g.md_task_rects
+                .iter()
+                .find(|(x, y, w, h, _)| px >= *x && px <= *x + *w && py >= *y && py <= *y + *h)
+                .map(|t| t.4)
+        };
+        let Some(bi) = bi else { return false };
+        let Ok(mut ws) = self.ws.lock() else { return false };
+        let Some(pane) = ws.panes.get_mut(id) else { return false };
+        let Some(m) = pane.markdown_mut() else { return false };
+        if m.raw_mode {
+            return false;
+        }
+        let Some(&line_no) = m.doc.block_lines.get(bi) else { return false };
+        let path = m.doc.path.clone();
+        let mut lines: Vec<String> = m.doc.raw.split('\n').map(|s| s.to_string()).collect();
+        let Some(line) = lines.get_mut(line_no) else { return false };
+        if !toggle_task_marker(line) {
+            return false;
+        }
+        let text = lines.join("\n");
+        if write_atomic(&path, &text).is_err() {
+            return false;
+        }
+        m.doc = std::sync::Arc::new(crate::build_markdown_doc(std::path::Path::new(&path), &text));
+        pane.dirty = true;
+        true
+    }
+
     pub(crate) fn md_press_caret(&mut self, id: &str, px: f32, py: f32) -> u8 {
         // Opt+클릭은 커서를 **더한다**(VS Code 와 같은 자리). 이미 커서가 선
         // 자리를 다시 Opt+클릭하면 그 커서를 뺀다 — 잘못 찍은 걸 무를 길이
@@ -3754,9 +3789,52 @@ impl App {
     }
 }
 
+/// 한 줄에서 첫 할 일 마커(`- [ ]`/`* [ ]`/`+ [ ]`, 상태 ` `·`x`·`X`)를 뒤집는다.
+/// 들여쓰기·마커·나머지 글자는 그대로 둔다. 계산한 오프셋으로만 잘라 멀티바이트
+/// 본문이 있어도 경계에서 안 깨진다(마커부는 전부 ASCII).
+fn toggle_task_marker(line: &mut String) -> bool {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    let after = match rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        Some(a) => a,
+        None => return false,
+    };
+    if after.len() < 3 {
+        return false;
+    }
+    let box_start = line.len() - after.len();
+    let new = match &after[..3] {
+        "[ ]" => "[x]",
+        "[x]" | "[X]" => "[ ]",
+        _ => return false,
+    };
+    line.replace_range(box_start..box_start + 3, new);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn 체크박스_마커만_뒤집고_나머지는_그대로() {
+        let mut l = "- [ ] 할 일".to_string();
+        assert!(toggle_task_marker(&mut l)); assert_eq!(l, "- [x] 할 일");
+        assert!(toggle_task_marker(&mut l)); assert_eq!(l, "- [ ] 할 일");
+        let mut i = "  - [x] 들여쓴 일".to_string();
+        assert!(toggle_task_marker(&mut i)); assert_eq!(i, "  - [ ] 들여쓴 일");
+        let mut star = "* [X] 별표".to_string();
+        assert!(toggle_task_marker(&mut star)); assert_eq!(star, "* [ ] 별표");
+        // 체크박스가 아닌 줄은 안 건드린다
+        let mut plain = "- 그냥 목록".to_string();
+        assert!(!toggle_task_marker(&mut plain)); assert_eq!(plain, "- 그냥 목록");
+        let mut head = "# 제목 [ ] 아님".to_string();
+        assert!(!toggle_task_marker(&mut head));
+    }
+
 
     fn pane(lines: &[&str]) -> MarkdownPane {
         MarkdownPane {

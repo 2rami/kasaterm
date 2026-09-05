@@ -188,6 +188,11 @@ pub struct GpuRenderer {
     /// code). main.rs hit-tests a click and copies `code`. Rebuilt each
     /// `draw_markdown` like `md_link_rects`.
     pub md_copy_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Logical-px rects of rendered task checkboxes: (x, y, w, h, block index).
+    /// A click here toggles `- [ ]`↔`- [x]` on that block's source line and
+    /// writes the file back. Rebuilt each `draw_markdown` like `md_link_rects`;
+    /// empty in Raw mode so it never fires there.
+    pub md_task_rects: Vec<(f32, f32, f32, f32, usize)>,
     /// Logical-px rects of every word drawn in the most recent markdown frame:
     /// (x, y, w, h, text). Drives text selection in the rendered view — the
     /// document has no cell grid, so a drag range has to be resolved against
@@ -691,6 +696,7 @@ impl GpuRenderer {
             hover_pointer: false,
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
+            md_task_rects: Vec::new(),
             md_word_rects: Vec::new(),
             md_sel_screen: None,
             md_block_ys: Vec::new(),
@@ -1943,6 +1949,7 @@ impl GpuRenderer {
         // they track the current scroll offset; main.rs hit-tests clicks.
         self.md_link_rects.clear();
         self.md_copy_rects.clear();
+        self.md_task_rects.clear();
         self.md_word_rects.clear();
         // 문서 좌표 = 화면 좌표 + scroll (본문 박스 오프셋은 낱말 사각형과 선택에
         // 똑같이 들어가므로 비교에서 상쇄된다 — 뺄 필요가 없다).
@@ -2208,6 +2215,15 @@ impl GpuRenderer {
                                         crate::theme::text_dim()
                                     },
                                 );
+                                // 클릭 자리 — 아이콘보다 넉넉히(손가락·마우스 여유).
+                                let pad = base * 0.5;
+                                self.md_task_rects.push((
+                                    x + indent - base * 1.35 - pad,
+                                    pen_y + (lh - isz) / 2.0 - pad,
+                                    isz + pad * 2.0,
+                                    isz + pad * 2.0,
+                                    bi,
+                                ));
                             }
                             None => self.md_list_marker(
                                 marker,
@@ -2658,6 +2674,7 @@ impl GpuRenderer {
         clip_flat!(md_word_rects);
         clip_flat!(md_link_rects);
         clip_flat!(md_copy_rects);
+        clip_flat!(md_task_rects);
         self.pop_clip();
         content_h
     }
