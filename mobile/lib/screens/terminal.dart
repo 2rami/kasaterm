@@ -466,8 +466,9 @@ class _ReplyBar extends StatelessWidget {
   );
 }
 
-/// 바로 치기 칸 — 친 글자는 화면의 입력상자에 붙으므로 여기엔 글자를 보이지 않는다.
-/// 칸은 키보드를 붙잡아 두는 자리다.
+/// 바로 치기 칸 — 친 글자는 화면의 입력상자에 붙고, 이 칸에도 그대로 보인다(칸이
+/// 비어 보이면 어디에 치는지 모른다 — 2026-09-06 「이러면 폼에는 없어」). 엔터로 보내면
+/// 칸이 비고 화면의 입력상자는 그대로다.
 class _LiveBar extends StatelessWidget {
   const _LiveBar({
     required this.controller,
@@ -511,12 +512,11 @@ class _LiveBar extends StatelessWidget {
               smartDashesType: SmartDashesType.disabled,
               smartQuotesType: SmartQuotesType.disabled,
               maxLines: 1,
-              showCursor: false,
               textInputAction: TextInputAction.send,
               onChanged: onChanged,
               onSubmitted: (_) => onSubmit(),
-              // 글자는 화면에 붙으니 여기선 투명 — 16px 아래면 iOS 가 포커스 때 확대한다.
-              style: const TextStyle(fontSize: 16, color: Colors.transparent),
+              // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
+              style: const TextStyle(fontSize: 16),
               decoration: InputDecoration(
                 hintText: '치는 대로 화면에 붙는다',
                 hintStyle: TextStyle(color: scheme.onSurfaceVariant),
