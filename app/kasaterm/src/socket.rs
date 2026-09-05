@@ -6048,13 +6048,60 @@ fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
     path == root || path.strip_prefix(&root).is_some_and(|tail| tail.starts_with('/'))
 }
 
+/// codex 세션 상태 db. 이름표(`threads.name`)와 rollout 경로가 여기 있다.
+fn codex_state_db_path() -> Option<std::path::PathBuf> {
+    Some(kasa_socket::home_dir()?.join(".codex/state_5.sqlite"))
+}
+
+/// 그 db 를 마지막으로 건드린 시각. 이름표 스캔이 「아무도 안 바꿨다」를 stat 한 번으로
+/// 끊는 데 쓴다 — codex pane 전부가 이 파일 하나를 함께 쓴다.
+pub(crate) fn codex_state_db_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(codex_state_db_path()?)
+        .ok()?
+        .modified()
+        .ok()
+}
+
+/// 세션 번호 → codex 가 붙인 이름(`/rename`, 그리고 codex 가 스스로 짓는 제목).
+///
+/// **rollout jsonl 에는 그 이름이 안 적힌다**(2026-09-05 실측 — 대화 본문에 우연히
+/// 같은 말이 있을 뿐이다). 그래서 이 칸이 유일한 근거고, 앱이 여기를 안 읽는 동안
+/// codex 자리의 헤더는 폴더 이름(OSC)에 머물러 있었다.
+///
+/// 이름이 비었거나 컬럼 자체가 없는 옛 db 는 빈 표를 낸다 — 그 자리는 종전대로 OSC
+/// 제목을 쓴다.
+pub(crate) fn codex_thread_names(sids: &[String]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(db) = codex_state_db_path() else {
+        return out;
+    };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return out;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(50));
+    let Ok(mut stmt) = conn.prepare("SELECT name FROM threads WHERE id = ?1") else {
+        return out;
+    };
+    for sid in sids {
+        if let Ok(Some(name)) = stmt.query_row([sid], |row| row.get::<_, Option<String>>(0)) {
+            let name = name.trim();
+            if !name.is_empty() {
+                out.insert(sid.clone(), name.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// `lsof`가 없는 플랫폼/환경의 보조 경로. fresh thread의 rollout_path에는 현재
 /// pane 전용 CODEX_HOME이 남으므로 같은 cwd의 다른 pane을 섞지 않는다. resume 뒤
 /// 이 열이 옛 shim 경로로 남는 경우가 있어 Unix에서는 반드시 lsof를 먼저 쓴다.
 fn codex_rollout_from_state_db(pane_id: &str) -> Option<std::path::PathBuf> {
     let shim = std::env::var_os("KASATERM_TMUX_SHIM_DIR").map(std::path::PathBuf::from)?;
-    let db = kasa_socket::home_dir()?.join(".codex/state_5.sqlite");
-    codex_rollout_from_state_db_at(&db, &shim, pane_id)
+    codex_rollout_from_state_db_at(&codex_state_db_path()?, &shim, pane_id)
 }
 
 fn codex_rollout_from_state_db_at(

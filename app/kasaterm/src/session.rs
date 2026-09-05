@@ -6938,7 +6938,20 @@ impl App {
             .filter(|(id, _)| self.pty.contains_key(id.as_str()))
             .map(|(id, sid)| (id.clone(), sid.clone()))
             .collect();
+        let mut codex_panes: Vec<(String, String)> = Vec::new();
         for (pane_id, sid) in panes {
+            // 갈래는 **지금 도는 하네스**로 가른다. 기록이 어느 창고에 있는지로
+            // 추론하면, 하네스를 갈아 낀 자리(옛 번호가 남은 자리)가 엉뚱한 창고를
+            // 읽는다.
+            if self
+                .pty
+                .get(&pane_id)
+                .and_then(|s| s.active_agent())
+                .is_some_and(|k| matches!(k, kasa_pty::AgentKind::Codex))
+            {
+                codex_panes.push((pane_id, sid));
+                continue;
+            }
             let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
                 continue;
             };
@@ -7007,21 +7020,103 @@ impl App {
             // 꼬리 밖으로 밀려 안 보이는 것은 「이름이 없어졌다」가 아니다 — 대화가
             // 길어지면 옛 스탬프는 512KB 밖으로 나간다. 심어 둔 이름을 걷지 않는다.
             let Some(name) = found else { continue };
-            let mut ws = self.ws.lock().unwrap();
-            let Some(pane) = ws.panes.get_mut(&pane_id) else {
-                continue;
-            };
-            if pane.title.as_deref() == Some(name.as_str()) {
-                entry.title = Some(name);
-                continue;
+            let known = entry.title.clone();
+            drop(seen);
+            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name, &known) {
+                session_titles()
+                    .lock()
+                    .unwrap()
+                    .entry(pane_id)
+                    .or_default()
+                    .title = Some(adopted);
             }
-            if pane.title_pinned && pane.title != entry.title {
-                continue;
+        }
+        self.sync_codex_titles(&codex_panes);
+    }
+
+    /// 스캔이 찾은 이름을 pane 제목으로 얹는다. 하네스마다 이름이 적히는 자리는
+    /// 다르지만(claude 는 transcript, codex 는 상태 db) **얹는 규칙은 하나여야 한다**
+    /// — 갈리면 한쪽에서만 사람이 손수 붙인 이름이 덮인다.
+    ///
+    /// 사람이 붙인 이름은 지킨다: 핀이 섰는데 그 값이 우리가 심어 둔 것과 다르면 그건
+    /// 사람 손이다. 반환은 캐시에 적어 둘 이름이고, 지켜야 할 자리면 `None`.
+    fn adopt_scanned_title(
+        &mut self,
+        pane_id: &str,
+        name: String,
+        known: &Option<String>,
+    ) -> Option<String> {
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let pane = ws.panes.get_mut(pane_id)?;
+            if pane.title.as_deref() == Some(name.as_str()) {
+                return Some(name);
+            }
+            if pane.title_pinned && pane.title != *known {
+                return None;
             }
             pane.title = Some(name.clone());
             pane.title_pinned = true;
-            entry.title = Some(name);
-            self.chrome_dirty = true;
+        }
+        self.chrome_dirty = true;
+        Some(name)
+    }
+
+    /// codex 자리의 이름표. `/rename` 도 codex 가 스스로 짓는 제목도 상태 db 의
+    /// `threads.name` 에만 적히고 rollout 에는 흔적이 없다(2026-09-05 실측) — 앱이
+    /// 거기를 안 읽는 동안 codex 창의 헤더는 폴더 이름에 머물러, 창이 여럿일 때 어느
+    /// 것이 무슨 일인지 가릴 수가 없었다(2026-09-05 지적).
+    fn sync_codex_titles(&mut self, panes: &[(String, String)]) {
+        if panes.is_empty() {
+            return;
+        }
+        // db 는 codex pane 전부가 함께 쓰는 파일이라, 아무도 이름을 안 건드렸으면
+        // stat 한 번으로 전부 건너뛴다. claude 쪽이 transcript mtime 으로 노는 pane 을
+        // 거르는 것과 같은 자리다.
+        let mtime = crate::socket::codex_state_db_mtime();
+        let want: Vec<(String, String)> = {
+            let seen = session_titles().lock().unwrap();
+            panes
+                .iter()
+                .filter(|(pane, sid)| {
+                    mtime.is_none()
+                        || !seen
+                            .get(pane.as_str())
+                            .is_some_and(|e| e.mtime == mtime && e.sid == *sid)
+                })
+                .cloned()
+                .collect()
+        };
+        if want.is_empty() {
+            return;
+        }
+        let names =
+            crate::socket::codex_thread_names(&want.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>());
+        for (pane_id, sid) in want {
+            let known = {
+                let mut seen = session_titles().lock().unwrap();
+                let entry = seen.entry(pane_id.clone()).or_default();
+                // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — claude 경로와 같다.
+                if entry.sid != sid {
+                    *entry = PaneTranscript {
+                        sid: sid.clone(),
+                        ..Default::default()
+                    };
+                }
+                entry.mtime = mtime;
+                entry.title.clone()
+            };
+            let Some(name) = names.get(&sid) else {
+                continue;
+            };
+            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name.clone(), &known) {
+                session_titles()
+                    .lock()
+                    .unwrap()
+                    .entry(pane_id)
+                    .or_default()
+                    .title = Some(adopted);
+            }
         }
     }
 
