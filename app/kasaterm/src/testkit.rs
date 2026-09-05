@@ -1432,79 +1432,154 @@ impl App {
                 eprintln!("[hitaudit] {label}: 설정 방을 못 열었다");
                 continue;
             }
-            // 화면을 바꾼 **직후**에 무엇이 눌리는가. 클릭 영역은 그리면서 채우므로,
-            // 첫 프레임 전에는 앞 화면의 영역이 그대로 남아 있다 — 그 사이에 누르면
-            // 지금 화면에 없는 버튼이 눌린다(2026-09-05 「설정창 열릴 때 뭔가 안
-            // 눌리는 것」의 후보).
-            let stale = self.settings_scene.hits().len();
-            // 첫 프레임까지 걸리는 시간. 이 틈이 사람의 두 번째 클릭보다 길면
-            // 「열자마자 눌렀는데 안 먹었다」가 실제로 일어난다.
-            let t0 = Instant::now();
-            self.render_frame();
-            let first_frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
-            let after_one = self.settings_scene.hits().len();
-            for _ in 0..2 {
-                self.render_frame();
-            }
-            let hits = self.settings_scene.hits();
-            eprintln!(
-                "[hitaudit] {label}: 열자마자 영역={stale} · 첫 프레임 {first_frame_ms:.0}ms 뒤={after_one} · 안정={}",
-                hits.len()
-            );
-            let mut zero = Vec::new();
-            let mut buried = Vec::new();
-            for (i, hit) in hits.iter().enumerate() {
-                let (x, y, w, h) = hit.rect;
-                if w <= 0.0 || h <= 0.0 {
-                    zero.push(format!("{:?}", hit.target));
-                    continue;
-                }
-                // 나보다 **뒤에** 등록된 것 하나가 나를 통째로 덮으면 끝이다.
-                let covered = hits[i + 1..].iter().any(|later| {
-                    let (lx, ly, lw, lh) = later.rect;
-                    lw > 0.0
-                        && lh > 0.0
-                        && lx <= x
-                        && ly <= y
-                        && lx + lw >= x + w
-                        && ly + lh >= y + h
-                });
-                if covered {
-                    buried.push(format!("{:?}", hit.target));
-                }
-            }
-            // 여는 즉시 영역이 하나도 없으면, 그 사이 클릭은 통째로 사라진다.
-            // 좌표 겹침이 아니라 타이밍이라 화면으로는 영영 안 보인다.
-            let cold = stale == 0 && !hits.is_empty();
-            if cold {
-                eprintln!("[hitaudit] {label}: ⚠ 여는 순간 클릭 영역 0 — 그때 누르면 사라진다");
-            }
-            total_bad += zero.len() + buried.len() + usize::from(cold);
-            eprintln!(
-                "[hitaudit] {label}: 영역 {}개 · 크기0 {} · 완전히덮임 {}{}{}",
-                hits.len(),
-                zero.len(),
-                buried.len(),
-                if zero.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n  크기0: {}", zero.join(", "))
-                },
-                if buried.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n  덮임: {}", buried.join(", "))
-                },
-            );
+            total_bad += self.audit_settings_hits(label);
         }
+
+        // ── 조건부로만 나타나는 칸 ──
+        // 위 훑기는 이 칸들이 **아예 안 그려진** 화면을 본 것이다. 손잡이로 세워
+        // 두고 같은 잣대로 다시 훑는다. ⚠️ 둘 다 타임아웃이 없다 — 반드시 걷는다.
+        if self.open_settings_room(Some(SettingsCat::Claude)) {
+            // 슬롯이 하나도 없으면 그 행 자체가 안 그려지고, 로그인 칸도 붙을 자리가
+            // 없다 — 손잡이만 세워서는 화면이 안 바뀐다(첫 시도에서 영역 수가
+            // 26 그대로였다). 시험용 슬롯을 먼저 세운다.
+            let accounts_before = std::mem::replace(
+                &mut self.set_claude_accounts,
+                vec![crate::socket::ClaudeAccount {
+                    id: "acct-1".to_string(),
+                    label: "시험".to_string(),
+                }],
+            );
+            self.refresh_native_settings_dynamic_cache();
+            // 세운 것이 실제로 화면에 닿았는지는 **영역 수가 늘었는지**로 가른다.
+            // 안 늘면 그 칸은 안 그려진 것이고, 그 상태의 「통과」는 「겹치지
+            // 않는다」가 아니라 **「못 봤다」**다. 둘을 섞으면 거짓 초록이 된다.
+            self.render_frame();
+            let base = self.settings_scene.hits().len();
+            let mut unseen: Vec<&str> = Vec::new();
+            let mut check = |app: &mut App, label: &'static str, bad: &mut usize| {
+                *bad += app.audit_settings_hits(label);
+                if app.settings_scene.hits().len() == base {
+                    eprintln!("[hitaudit] {label}: ⚠ 세운 칸이 안 그려졌다 — 감사 못 함");
+                    return false;
+                }
+                true
+            };
+            if crate::settings::seed_login_state_for_probe(
+                "acct-1",
+                crate::settings::LoginState::NeedCode,
+            ) {
+                if !check(self, "에이전트·코드입력칸", &mut total_bad) {
+                    unseen.push("코드입력칸");
+                }
+                crate::settings::cancel_hidden_login();
+            } else {
+                eprintln!("[hitaudit] 에이전트·코드입력칸: 진행 중인 로그인이 있어 건너뛴다");
+            }
+            crate::homeaccounts::seed_for_probe(
+                "본진",
+                kasa_mcp::remote::RemoteAccounts {
+                    accounts: vec![serde_json::json!({ "id": "acct-1", "label": "시험" })],
+                    active: "acct-1".to_string(),
+                    autoswitch: true,
+                    autoswitch_pct: 85.0,
+                    login: None,
+                },
+            );
+            // 고른 칸에 따라 아래 목록·토글·기준값이 통째로 갈린다 — 양쪽 다 본다.
+            let scope_before = self.set_account_scope_home;
+            for home in [false, true] {
+                self.set_account_scope_home = home;
+                let label = if home {
+                    "에이전트·본진칸"
+                } else {
+                    "에이전트·이맥북칸"
+                };
+                if !check(self, label, &mut total_bad) {
+                    unseen.push(label);
+                }
+            }
+            self.set_account_scope_home = scope_before;
+            crate::homeaccounts::clear_probe();
+            self.set_claude_accounts = accounts_before;
+            self.refresh_native_settings_dynamic_cache();
+            if !unseen.is_empty() {
+                eprintln!(
+                    "[hitaudit] ⚠ 못 본 칸 {}개: {} — 세우는 손잡이가 화면까지 안 닿는다",
+                    unseen.len(),
+                    unseen.join(", ")
+                );
+            }
+        }
+
         eprintln!(
             "[hitaudit] {}",
             if total_bad == 0 {
-                "PASS — 눌릴 수 없는 영역 없음".to_string()
+                "PASS — 본 화면에서는 눌릴 수 없는 영역 없음(위 ⚠ 는 못 본 칸)".to_string()
             } else {
                 format!("FAIL — 눌릴 수 없는 영역 {total_bad}개")
             }
         );
+    }
+
+    /// 지금 설정 화면의 클릭 영역을 훑어 「눌릴 수 없는 것」을 세고 찍는다.
+    /// 세는 것 셋은 `run_pending_autohitaudit` 머리말에 있다.
+    fn audit_settings_hits(&mut self, label: &str) -> usize {
+        let stale = self.settings_scene.hits().len();
+        let t0 = Instant::now();
+        self.render_frame();
+        let first_frame_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        let after_one = self.settings_scene.hits().len();
+        for _ in 0..2 {
+            self.render_frame();
+        }
+        let hits = self.settings_scene.hits();
+        eprintln!(
+            "[hitaudit] {label}: 열자마자 영역={stale} · 첫 프레임 {first_frame_ms:.0}ms 뒤={after_one} · 안정={}",
+            hits.len()
+        );
+        let mut zero = Vec::new();
+        let mut buried = Vec::new();
+        for (i, hit) in hits.iter().enumerate() {
+            let (x, y, w, h) = hit.rect;
+            if w <= 0.0 || h <= 0.0 {
+                zero.push(format!("{:?}", hit.target));
+                continue;
+            }
+            // 나보다 **뒤에** 등록된 것 하나가 나를 통째로 덮으면 끝이다.
+            let covered = hits[i + 1..].iter().any(|later| {
+                let (lx, ly, lw, lh) = later.rect;
+                lw > 0.0
+                    && lh > 0.0
+                    && lx <= x
+                    && ly <= y
+                    && lx + lw >= x + w
+                    && ly + lh >= y + h
+            });
+            if covered {
+                buried.push(format!("{:?}", hit.target));
+            }
+        }
+        let cold = stale == 0 && !hits.is_empty();
+        if cold {
+            eprintln!("[hitaudit] {label}: ⚠ 여는 순간 클릭 영역 0 — 그때 누르면 사라진다");
+        }
+        eprintln!(
+            "[hitaudit] {label}: 영역 {}개 · 크기0 {} · 완전히덮임 {}{}{}",
+            hits.len(),
+            zero.len(),
+            buried.len(),
+            if zero.is_empty() {
+                String::new()
+            } else {
+                format!("\n  크기0: {}", zero.join(", "))
+            },
+            if buried.is_empty() {
+                String::new()
+            } else {
+                format!("\n  덮임: {}", buried.join(", "))
+            },
+        );
+        zero.len() + buried.len() + usize::from(cold)
     }
 
     /// Headless 「마지막 pane 을 숨기면 그 방은 어떻게 되나」 repro:
