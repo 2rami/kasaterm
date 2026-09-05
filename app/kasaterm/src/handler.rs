@@ -2211,9 +2211,35 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 「어느 계정의 숫자로 판정했나」와 「어느 계정에서
                                 // 떠나나」가 안 갈린다. 그 사이에 비활성 슬롯 curl 이
                                 // 끼므로(슬롯당 최대 5초) 다시 읽으면 값이 바뀔 수 있다.
+                                // **로그인 안 된 슬롯은 후보에서 뺀다.** 그런
+                                // 자리로 옮기면 그 뒤 뜨는 claude 가 전부 로그아웃
+                                // 상태가 된다 — 계정 추가가 활성 전환을 일부러 안
+                                // 하는 것과 같은 이유인데(`add_claude_account`),
+                                // 자동 전환에는 그 방어가 없었다. 2026-09-05 에
+                                // 로그인이 한 번도 안 끝나던 버그를 고치기 전까지는
+                                // 빈 슬롯이 계속 쌓이던 터라 특히 위험하다.
+                                //
+                                // 판정은 **사용량을 한 번이라도 받았나**로 한다.
+                                // 그 조회는 슬롯 토큰으로 나가므로 값이 있다는 건
+                                // 토큰이 실재한다는 뜻이다. 아직 못 받은 슬롯도
+                                // 빠지는데, 모르는 자리로 옮기느니 「갈 곳 없음」을
+                                // 알리는 쪽이 낫다.
+                                let usable: Vec<socket::ClaudeAccount> = {
+                                    let g = usage_all.lock().ok();
+                                    socket::read_claude_accounts()
+                                        .into_iter()
+                                        .filter(|a| {
+                                            let Some(g) = g.as_ref() else { return true };
+                                            crate::claude_auth::runtime_dir_for(&a.id, &active_id)
+                                                .is_some_and(|d| {
+                                                    g.contains_key(d.to_string_lossy().as_ref())
+                                                })
+                                        })
+                                        .collect()
+                                };
                                 let to = socket::pick_next_account(
                                     &active_id,
-                                    &socket::read_claude_accounts(),
+                                    &usable,
                                     &socket::read_account_cooldowns(),
                                     now,
                                 );
