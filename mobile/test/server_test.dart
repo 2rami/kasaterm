@@ -155,6 +155,37 @@ void main() {
       expect(machines.last.online, isFalse);
     });
 
+    test('토큰에 대비 바닥이 없으면 settings/values 에서 꺼낸다', () async {
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient((req) async {
+          final path = req.url.path;
+          if (path.endsWith('/design-tokens')) {
+            return http.Response(
+              jsonEncode({
+                'theme': 'dark',
+                'palette': {'bg': '#252c35', 'fg': '#ffffff'},
+                'ansi': List.filled(16, '#123456'),
+              }),
+              200,
+              headers: _json,
+            );
+          }
+          if (path.endsWith('/settings/values')) {
+            return http.Response(
+              jsonEncode({
+                'appearance': {'min_contrast': 3.5},
+              }),
+              200,
+              headers: _json,
+            );
+          }
+          return http.Response('?', 404);
+        }),
+      );
+      expect((await s.designTokens())!.minContrast, 3.5);
+    });
+
     test('send 는 JSON 으로 글과 submit 을 보낸다', () async {
       http.Request? seen;
       final s = Server(
@@ -197,6 +228,16 @@ void _designTokensTests() {
       expect(t.accent, 0xff5a8ce6);
       expect(t.ansi[1], 0xff010000);
       expect(t.characterAccents['아로나'], 0xff4a90e2);
+      expect(t.minContrast, DesignTokens.defaultMinContrast);
+      expect(
+        DesignTokens.fromJson({
+          'theme': 'dark',
+          'min_contrast': 3.5,
+          'palette': {'bg': '#252c35', 'fg': '#ffffff'},
+          'ansi': List.filled(16, '#123456'),
+        })!.minContrast,
+        3.5,
+      );
       expect(DesignTokens.parseHex('#505c6e6e'), 0xff505c6e);
     });
 

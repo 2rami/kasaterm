@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'contrast.dart';
 import 'fill_viewer.dart';
 import 'grid.dart';
 import 'reflow.dart';
@@ -16,6 +17,7 @@ class TerminalPalette {
     required this.bg,
     required this.cursor,
     required this.ansi,
+    this.minContrast = DesignTokens.defaultMinContrast,
   });
 
   /// 데스크톱이 지금 쓰는 색 그대로 — 같은 학생 화면이 폰에서도 같은 얼굴로 보인다.
@@ -24,13 +26,15 @@ class TerminalPalette {
       fg = Color(t.fg),
       bg = Color(t.bg),
       cursor = Color(t.accent),
-      ansi = t.ansi;
+      ansi = t.ansi,
+      minContrast = t.minContrast;
 
   final bool dark;
   final Color fg;
   final Color bg;
   final Color cursor;
   final List<int> ansi;
+  final double minContrast;
 
   /// 서버 색을 아직 못 받았을 때의 앱 기본색.
   static TerminalPalette of(BuildContext context) {
@@ -58,10 +62,12 @@ class TerminalPalette {
       other.fg == fg &&
       other.bg == bg &&
       other.cursor == cursor &&
+      other.minContrast == minContrast &&
       listEquals(other.ansi, ansi);
 
   @override
-  int get hashCode => Object.hash(dark, fg, bg, cursor, Object.hashAll(ansi));
+  int get hashCode =>
+      Object.hash(dark, fg, bg, cursor, minContrast, Object.hashAll(ansi));
 }
 
 const _fontFamily = 'TermMono';
@@ -180,7 +186,14 @@ class _RowCache {
         foreground: inverse,
       );
       final bgIsDefault = !inverse && run.bg is DefaultColor;
-      if (run.flags & flagDim != 0) fg = fg.withValues(alpha: 0.6);
+      // 데스크톱(cells.rs)과 같은 순서 — 흐림(SGR 2)은 바탕 쪽으로 55% 섞고 끝(물러나라는
+      // 뜻이라 대비 바닥으로 되살리지 않는다). 그 밖에 셀이 스스로 고른 색(256색·트루컬러)만
+      // 바탕과의 대비를 바닥까지 끌어올린다 — 기본색·ANSI 16색은 테마가 이미 읽히게 골랐다.
+      if (run.flags & flagDim != 0) {
+        fg = mixToward(fg, bgColor, 0.55);
+      } else if (namesOwnColor(inverse ? run.bg : run.fg)) {
+        fg = enforceContrast(fg, bgColor, palette.minContrast);
+      }
       final style = TextStyle(
         fontFamily: _fontFamily,
         fontFamilyFallback: _fontFallback,

@@ -105,7 +105,28 @@ class DesignTokens {
     required this.onAccent,
     required this.danger,
     this.characterAccents = const {},
+    this.minContrast = defaultMinContrast,
   });
+
+  /// 데스크톱 설정 화면의 「Default」 프리셋 — 옛 서버는 값을 안 보낸다.
+  static const defaultMinContrast = 2.5;
+
+  DesignTokens withMinContrast(double v) => DesignTokens(
+    dark: dark,
+    bg: bg,
+    fg: fg,
+    accent: accent,
+    ansi: ansi,
+    surface: surface,
+    surfaceHover: surfaceHover,
+    border: border,
+    text: text,
+    textDim: textDim,
+    onAccent: onAccent,
+    danger: danger,
+    characterAccents: characterAccents,
+    minContrast: v,
+  );
 
   final bool dark;
   final int bg;
@@ -126,6 +147,10 @@ class DesignTokens {
 
   /// 학생 이름 → 그 학생의 색. pane 에 색이 없을 때 이름으로 찾는다.
   final Map<String, int> characterAccents;
+
+  /// 셀이 스스로 고른 글자색(256색·트루컬러)을 바탕과 이 비율 이상 벌리는 바닥 —
+  /// 데스크톱과 같은 값이어야 같은 화면이 같은 색으로 보인다.
+  final double minContrast;
 
   /// `#rrggbb`·`#rrggbbaa` → 불투명 ARGB. 알파는 버린다 — 격자 배경은 늘 꽉 찬 색이다.
   static int? parseHex(Object? v) {
@@ -180,6 +205,10 @@ class DesignTokens {
           parseHex(palette['on_accent']) ?? (dark ? 0xff000000 : 0xffffffff),
       danger: parseHex(palette['danger']) ?? 0xffe0584e,
       characterAccents: accents,
+      minContrast: switch (json['min_contrast']) {
+        final num v => v.toDouble(),
+        _ => defaultMinContrast,
+      },
     );
   }
 }
@@ -264,13 +293,26 @@ class Server {
 
   /// 색은 장식이라 실패해도 화면을 막지 않는다 — 못 받으면 null, 앱 기본색으로 간다.
   Future<DesignTokens?> designTokens({String? machine}) async {
+    final Object? raw;
     try {
-      return DesignTokens.fromJson(
-        await _getJson('design-tokens', machine: machine),
-      );
+      raw = await _getJson('design-tokens', machine: machine);
     } on ServerException {
       return null;
     }
+    final t = DesignTokens.fromJson(raw);
+    if (t == null || (raw is Map && raw['min_contrast'] is num)) return t;
+    // 옛 데스크톱은 토큰에 대비 바닥을 안 싣는다 — 설정 화면이 읽는 값에서 같은 것을 꺼낸다.
+    // 그것도 없으면 프리셋 기본값으로 간다(색 하나 때문에 화면을 막지 않는다).
+    try {
+      final v = await _getJson('settings/values', machine: machine);
+      if (v is Map && v['appearance'] is Map) {
+        final m = (v['appearance'] as Map)['min_contrast'];
+        if (m is num) return t.withMinContrast(m.toDouble());
+      }
+    } on ServerException {
+      // 무시 — 기본값으로.
+    }
+    return t;
   }
 
   Future<Me> me() async {
