@@ -2775,6 +2775,39 @@ pub(crate) fn scrolled_gate(rows: &[Vec<GridCell>]) -> bool {
 /// 스크롤된 상태)가 있을 때만, 최상단의 흐릿한 프롬프트 행을 sticky 로 본다.
 /// 이 게이트가 평상시(맨 아래) 오탐을 막는다. `KASATERM_STICKY_DEBUG=1` 이면
 /// 게이트 결과와 상단 행 스캔을 stderr 로 흘려 실측 튜닝을 돕는다.
+/// 띠가 가리키는 질문이 **화면에 실물로 와 있나**.
+///
+/// 띠를 눌러 그 질문으로 되짚어 가면 목적지가 화면에 들어오는데, 띠는 스크롤이
+/// 올라가 있는 동안 계속 떠 있어서 같은 문장이 위아래로 두 번 보인다 — 어느 쪽이
+/// 지금 자리인지 되레 헷갈린다(2026-09-05 지적: 「이거 클릭해서 이동하면 밑에 저건
+/// 뭐지」). 실물이 보이면 띠는 할 일을 마친 것이라 감춘다. 그러면 그 줄이 화면 맨
+/// 위에 딱 붙어, 도착했다는 사실이 자리로 읽힌다.
+pub(crate) fn sticky_prompt_visible_below(
+    rows: &[Vec<GridCell>],
+    pill_row: usize,
+    text: &str,
+) -> bool {
+    let key = sticky_prompt_key(text);
+    // 짧은 질문은 본문의 인용·목록과 우연히 같아질 수 있다 — 그런 오탐으로 띠를
+    // 지우면 되짚을 손잡이가 사라진다.
+    if key.chars().count() < 4 {
+        return false;
+    }
+    rows.iter()
+        .skip(pill_row + 1)
+        .any(|r| sticky_prompt_key(&sticky_row_span(r).0) == key)
+}
+
+/// 비교용 열쇠 — 마커와 공백을 걷어낸 알맹이. 같은 질문이라도 띠 자리에서는 흐리게,
+/// 본문에서는 프롬프트 띠로 그려지고 **자간까지 다르다**(claude 가 한글 사이에 공백을
+/// 넣어 그리는 판이 있다). 색·굵기·공백으로는 못 맞춘다.
+fn sticky_prompt_key(text: &str) -> String {
+    text.trim()
+        .trim_start_matches(['\u{276f}', '\u{203a}', '>'])
+        .split_whitespace()
+        .collect()
+}
+
 pub(crate) fn find_sticky_prompt(
     rows: &[Vec<GridCell>],
     prompts: &[(String, Vec<String>)],
@@ -7107,6 +7140,46 @@ mod image_block_tests {
 
     fn grid(lines: &[&str]) -> Vec<Vec<GridCell>> {
         lines.iter().map(|l| row_from(l)).collect()
+    }
+
+    /// 띠를 눌러 되짚어 가면 목적지가 화면에 들어온다 — 그때 띠는 감춰야 같은 문장이
+    /// 두 번 안 보인다(2026-09-05: 「이거 클릭해서 이동하면 밑에 저건 뭐지」).
+    #[test]
+    fn hides_the_sticky_band_once_the_prompt_itself_is_on_screen() {
+        let arrived = grid(&[
+            "› 입력창이 3칸이니까 맨윗칸 우측에 뜨게하자",
+            "  본문",
+            "› 입력창이 3칸이니까 맨윗칸 우측에 뜨게하자",
+        ]);
+        assert!(sticky_prompt_visible_below(
+            &arrived,
+            0,
+            "› 입력창이 3칸이니까 맨윗칸 우측에 뜨게하자"
+        ));
+
+        // 아직 가는 중 — 실물이 화면에 없으면 띠가 유일한 길잡이다.
+        let travelling = grid(&["› 입력창이 3칸이니까 맨윗칸 우측에 뜨게하자", "  본문", "  다른 줄"]);
+        assert!(!sticky_prompt_visible_below(
+            &travelling,
+            0,
+            "› 입력창이 3칸이니까 맨윗칸 우측에 뜨게하자"
+        ));
+    }
+
+    /// 같은 질문이라도 띠 자리와 본문의 **자간이 다르게** 그려진다. 글자 그대로
+    /// 비교하면 도착을 못 알아채고 띠가 남는다.
+    #[test]
+    fn matches_the_same_prompt_across_different_spacing() {
+        let g = grid(&["› 입력창 이  3칸 이니까", "  본문", "› 입력창이 3칸이니까"]);
+        assert!(sticky_prompt_visible_below(&g, 0, "› 입력창이 3칸이니까"));
+    }
+
+    /// 짧은 줄은 본문의 인용·목록과 우연히 같아진다 — 그 오탐으로 띠를 지우면
+    /// 되짚을 손잡이가 사라진다.
+    #[test]
+    fn keeps_the_band_for_prompts_too_short_to_match_safely() {
+        let g = grid(&["› ok", "  본문", "› ok"]);
+        assert!(!sticky_prompt_visible_below(&g, 0, "› ok"));
     }
 
     // claude code 는 답의 모든 줄 앞에 두 칸을 넣는다 — 왼쪽에 붙어 있다고 보면 안 된다.

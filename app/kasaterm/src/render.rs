@@ -1555,7 +1555,14 @@ impl App {
                     *slot = cur.unwrap_or_default();
                     got
                 });
-                if let Some(sticky) = sticky.flatten() {
+                // 목적지에 도착했으면 띠를 감춘다 — 실물이 화면에 있으면 띠는 할
+                // 일을 마쳤고, 같은 문장이 두 번 뜨면 어느 쪽이 지금 자리인지 되레
+                // 헷갈린다(2026-09-05 지시: 「길잡이 띠 없이 코덱스처럼 딱 붙게」).
+                // 띠가 빠지면 그 줄이 화면 맨 위에 딱 붙는다.
+                let sticky = sticky.flatten().filter(|s| {
+                    !crate::screenread::sticky_prompt_visible_below(&composed, s.row, &s.text)
+                });
+                if let Some(sticky) = sticky {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
