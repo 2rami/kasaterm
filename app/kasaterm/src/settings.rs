@@ -3073,6 +3073,104 @@ fn mark_login_needs_code(id: &str) {
     }
 }
 
+/// 승인이 끝난 브라우저를 **앱으로 되돌리는** 주소로 URL 을 고친다.
+///
+/// CLI 가 만드는 주소는 `redirect_uri` 가 `platform.claude.com/oauth/code/callback`
+/// 이라, 승인해도 앱으로 돌아오는 길이 없고 사람이 화면의 코드를 옮겨야 끝난다.
+/// 그 자리를 우리 로컬 창구로 바꾸면 브라우저가 코드를 직접 물어 온다 — 사람이 할
+/// 일은 「승인」을 누르는 것뿐이다(거노 2026-09-05 「그냥 평소에 쓰듯이 로그인하면
+/// 등록되게 orca 처럼」).
+///
+/// 2026-09-05 실측으로 claude 는 `http://localhost:<포트>/callback` 을 그대로
+/// 받아들인다(승인 화면이 정상으로 떴다). PKCE 검증기는 CLI 가 쥐고 있으므로 토큰
+/// 교환도 CLI 가 한다 — 우리는 코드 한 줄을 중계할 뿐이고, 자격증명은 이 프로세스를
+/// 지나가지 않는다.
+fn with_local_redirect(url: &str, port: u16) -> Option<String> {
+    let at = url.find("redirect_uri=")?;
+    let rest = &url[at + "redirect_uri=".len()..];
+    let end = rest.find('&').unwrap_or(rest.len());
+    let want = format!("http%3A%2F%2Flocalhost%3A{port}%2Fcallback");
+    Some(format!("{}{}{}", &url[..at + "redirect_uri=".len()], want, &rest[end..]))
+}
+
+/// 콜백 한 건을 받아 `<코드>#<state>` 로 조립한다. CLI 가 stdin 에서 기다리는 모양이
+/// 그것이다.
+///
+/// `state` 를 붙이는 것은 형식 때문만이 아니다 — CLI 는 자기가 만든 state 와 대조해
+/// 남이 끼워 넣은 코드를 걸러낸다. 우리가 떼고 보내면 그 검사가 통째로 무력해진다.
+fn callback_code(req: &str) -> Option<String> {
+    let line = req.lines().next()?;
+    let path = line.split_whitespace().nth(1)?;
+    let q = path.split_once('?')?.1;
+    let mut code = None;
+    let mut state = None;
+    for kv in q.split('&') {
+        match kv.split_once('=') {
+            Some(("code", v)) => code = Some(v),
+            Some(("state", v)) => state = Some(v),
+            _ => {}
+        }
+    }
+    let code = code.filter(|c| !c.is_empty())?;
+    Some(match state.filter(|s| !s.is_empty()) {
+        Some(st) => format!("{code}#{st}"),
+        None => code.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod login_callback_tests {
+    use super::{callback_code, with_local_redirect};
+
+    /// 주소에서 바뀌는 것은 `redirect_uri` **하나뿐**이어야 한다. PKCE 챌린지나
+    /// state 가 함께 흔들리면 CLI 쪽 검증이 통째로 깨진다.
+    #[test]
+    fn only_the_redirect_is_swapped() {
+        let url = "https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Aprofile&code_challenge=XYZ&code_challenge_method=S256&state=st1";
+        let got = with_local_redirect(url, 54545).expect("바꿔야 한다");
+        assert!(got.contains("redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"));
+        assert!(!got.contains("platform.claude.com"));
+        for keep in ["client_id=abc", "code_challenge=XYZ", "state=st1", "scope=user%3Aprofile"] {
+            assert!(got.contains(keep), "{keep} 가 사라졌다: {got}");
+        }
+    }
+
+    /// `redirect_uri` 가 맨 끝에 있어도 잘라 먹지 않는다.
+    #[test]
+    fn handles_the_redirect_at_the_end() {
+        let url = "https://x/authorize?a=1&redirect_uri=https%3A%2F%2Fold";
+        let got = with_local_redirect(url, 1234).expect("바꿔야 한다");
+        assert_eq!(got, "https://x/authorize?a=1&redirect_uri=http%3A%2F%2Flocalhost%3A1234%2Fcallback");
+    }
+
+    /// 콜백은 `<코드>#<state>` 로 조립한다 — CLI 가 state 를 대조해 남이 끼워 넣은
+    /// 코드를 걸러내므로, 떼고 보내면 그 검사가 무력해진다.
+    #[test]
+    fn builds_the_code_the_cli_expects() {
+        let req = "GET /callback?code=abc123&state=st1 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(callback_code(req).as_deref(), Some("abc123#st1"));
+    }
+
+    /// 코드가 없는 요청은 무시한다 — 브라우저가 먼저 던지는 `/favicon.ico` 같은
+    /// 것에 반응해 빈 코드를 stdin 으로 보내면 로그인이 통째로 실패한다.
+    #[test]
+    fn ignores_requests_without_a_code() {
+        for req in [
+            "GET /favicon.ico HTTP/1.1\r\n\r\n",
+            "GET /callback HTTP/1.1\r\n\r\n",
+            "GET /callback?error=access_denied HTTP/1.1\r\n\r\n",
+            "GET /callback?code= HTTP/1.1\r\n\r\n",
+            "",
+        ] {
+            assert_eq!(callback_code(req), None, "이건 코드가 아니다: {req:?}");
+        }
+    }
+}
+
+/// 브라우저에 돌려줄 「끝났습니다」 한 장. 창을 그대로 두면 사람은 앱으로 돌아갈
+/// 신호를 못 받는다.
+const CALLBACK_PAGE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><meta charset=utf-8><title>로그인 완료</title><body style=\"font:16px -apple-system,system-ui;display:grid;place-items:center;height:90vh;margin:0\"><div style=\"text-align:center\"><p style=\"font-size:20px\">로그인이 끝났어요</p><p style=\"color:#888\">이 창은 닫으셔도 됩니다.</p></div>";
+
 /// 클립보드 글자가 OAuth 코드처럼 생겼나.
 ///
 /// claude 가 승인 뒤 주는 것은 `<코드>#<state>` 한 덩이다 — 공백이 없고, 양쪽이
@@ -3281,11 +3379,11 @@ fn spawn_hidden_login(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if profile.is_some() {
-            // CLI 가 **기본** 브라우저를 열면 지금 계정의 세션이 그대로 승인돼
-            // 슬롯을 아무리 갈라도 전부 같은 계정이 붙는다. URL 은 우리가 주워
-            // 쿠키 없는 프로필로 연다. 쓰던 브라우저를 고른 경우에만 이 가로채기를
-            // 걷어 CLI 가 직접 열게 둔다 — 덮은 채로 두면 아무 창도 안 뜬다.
+        {
+            // **항상** 가로챈다. 예전엔 「쓰던 브라우저」를 고르면 CLI 가 직접 열게
+            // 뒀는데, 이제는 주소의 `redirect_uri` 를 우리 창구로 고쳐야 하므로
+            // (`with_local_redirect`) 여는 일도 우리가 해야 한다. CLI 가 직접 열면
+            // 옛 주소가 열려 승인해도 앱으로 돌아오지 못한다.
             cmd.env("BROWSER", "/usr/bin/true");
         }
         #[cfg(unix)]
@@ -3348,10 +3446,19 @@ fn spawn_hidden_login(
                         if opened {
                             continue;
                         }
-                        if let (Some(url), Some(prof)) = (login_url_in(&line), profile.as_deref())
-                        {
-                            let _ = std::fs::create_dir_all(prof);
-                            open_isolated_browser(&url, prof);
+                        if let Some(url) = login_url_in(&line) {
+                            // 되돌림 창구가 섰으면 그 주소로 바꿔 연다. 못 섰으면
+                            // 옛 주소 그대로 — 그때는 코드를 손이나 클립보드로 받는다.
+                            let url = port
+                                .and_then(|p| with_local_redirect(&url, p))
+                                .unwrap_or(url);
+                            match profile.as_deref() {
+                                Some(prof) => {
+                                    let _ = std::fs::create_dir_all(prof);
+                                    open_isolated_browser(&url, prof);
+                                }
+                                None => open_default_browser(&url),
+                            }
                             opened = true;
                         }
                     }
@@ -3399,6 +3506,22 @@ fn spawn_hidden_login(
                 }
                 // 1초에 한 번만. 프레임마다 읽을 자리가 아니고, 사람이 복사하고
                 // 창을 돌아오는 데 그보다 짧게 걸리지 않는다.
+                // ① 브라우저가 되돌아왔나. 이게 정상 경로다 — 사람은 「승인」만 누른다.
+                if let Some(l) = listener.as_ref() {
+                    if let Ok((mut sock, _)) = l.accept() {
+                        let mut buf = [0u8; 4096];
+                        let n = sock.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                        if let Some(code) = callback_code(&req) {
+                            use std::io::Write as _;
+                            let _ = sock.write_all(CALLBACK_PAGE.as_bytes());
+                            let _ = sock.flush();
+                            submit_login_code(&code);
+                        }
+                    }
+                }
+                // ② 그래도 코드가 손에 남는 환경이 있다(되돌림 창구가 못 섰거나
+                //    브라우저가 localhost 를 막는 경우). 복사만 해도 들어가게 둔다.
                 if clip_at.elapsed() >= std::time::Duration::from_secs(1) {
                     clip_at = std::time::Instant::now();
                     if let Some(code) = clipboard_login_code(&mut clip_seen) {
@@ -3562,6 +3685,21 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
     }
 }
 
+
+/// 사용자가 쓰던 브라우저로 연다. CLI 에게 맡기지 않는 이유는 **주소를 우리가
+/// 고쳐야** 하기 때문이다(`with_local_redirect`) — CLI 가 직접 열면 옛 주소가 열려
+/// 앱으로 돌아오는 길이 없다.
+fn open_default_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let r = crate::proc::command("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let r = crate::proc::command("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let r = crate::proc::command("xdg-open").arg(url).spawn();
+    if let Err(e) = r {
+        eprintln!("[account] 브라우저 실행 실패: {e}");
+    }
+}
 
 /// 계정 슬롯 하나의 실제 로그인 상태.
 ///
