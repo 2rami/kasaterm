@@ -88,7 +88,14 @@ void main() {
   setUpAll(() async {
     // flutter test 는 글꼴을 Ahem 사각형으로 바꾼다 — 번들 ttf 를 직접 올려야
     // 실제 글리프(한글·박스드로잉)가 찍힌다.
-    final loader = FontLoader('TermMono')
+    final mono = FontLoader('TermMono')
+      ..addFont(
+        rootBundle.load('assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf'),
+      )
+      ..addFont(
+        rootBundle.load('assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf'),
+      );
+    final hangul = FontLoader('TermHangul')
       ..addFont(
         rootBundle.load(
           'assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf',
@@ -97,7 +104,8 @@ void main() {
       ..addFont(
         rootBundle.load('assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf'),
       );
-    await loader.load();
+    await mono.load();
+    await hangul.load();
   });
 
   testWidgets('다크 — 폭이 남으면 폭을 채운다', (tester) async {

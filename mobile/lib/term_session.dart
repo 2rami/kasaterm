@@ -21,6 +21,13 @@ class TermSession extends ChangeNotifier {
   final Pane pane;
   final Grid grid = Grid();
 
+  /// 살아 있는 화면 위의 지난 줄(오래된 순). 붙을 때 한 번 받고(`history`), 그 뒤로
+  /// 화면이 위로 밀릴 때마다 서버가 흘려 준다(`scrolled`). 위로 넘겨 읽는 데 쓴다.
+  final List<List<Run>> history = [];
+  int historyVersion = 0;
+  static const historyMax = 3000;
+  static const historyAsk = 400;
+
   TermState state = TermState.connecting;
   String? note;
   bool mirror = true;
@@ -80,6 +87,18 @@ class TermSession extends ChangeNotifier {
         mirror = msg['mirror'] == true;
         state = TermState.connected;
         _backoffSec = 1;
+        _sendJson({'t': 'history', 'rows': historyAsk});
+      case 'history':
+        history
+          ..clear()
+          ..addAll(_rows(msg['rows']));
+        historyVersion++;
+      case 'scrolled':
+        history.addAll(_rows(msg['rows']));
+        if (history.length > historyMax) {
+          history.removeRange(0, history.length - historyMax);
+        }
+        historyVersion++;
       case 'grid':
         grid.apply(msg);
         if (state != TermState.connected) state = TermState.connected;
@@ -152,6 +171,20 @@ class TermSession extends ChangeNotifier {
     notifyListeners();
     connect();
   }
+
+  void _sendJson(Map<String, Object?> m) {
+    _channel?.sink.add(jsonEncode(m));
+  }
+
+  static List<List<Run>> _rows(Object? raw) => [
+    if (raw is List)
+      for (final row in raw)
+        if (row is List)
+          [
+            for (final r in row)
+              if (r is List && r.length >= 4) Run.parse(r),
+          ],
+  ];
 
   void _closeChannel() {
     _sub?.cancel();

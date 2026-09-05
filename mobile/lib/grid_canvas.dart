@@ -65,6 +65,8 @@ class TerminalPalette {
 }
 
 const _fontFamily = 'TermMono';
+// 한글은 JetBrains 에 없어 D2Coding 으로 — 데스크톱 렌더러의 폴백 순서와 같다.
+const _fontFallback = ['TermHangul'];
 const _lineHeight = 1.2;
 
 class _CellMetrics {
@@ -81,6 +83,7 @@ class _CellMetrics {
       text: 'M',
       style: TextStyle(
         fontFamily: _fontFamily,
+        fontFamilyFallback: _fontFallback,
         fontSize: fontSize,
         height: _lineHeight,
       ),
@@ -108,9 +111,9 @@ class _Piece {
 }
 
 class _RowLayout {
-  _RowLayout(this.runs, this.pieces);
-  final List<Run> runs;
+  _RowLayout(this.pieces, this.generation);
   final List<_Piece> pieces;
+  final int generation;
 
   void paint(Canvas canvas, double y, _CellMetrics m) {
     for (final p in pieces) {
@@ -139,31 +142,25 @@ class _RowLayout {
   }
 }
 
-/// 행마다 레이아웃을 들고 있다가 그 행의 런 목록 객체가 바뀐 때만 다시 만든다 —
-/// 서버가 바뀐 행만 새 List 로 보내므로 `identical` 이 곧 「바뀌었다」다.
+/// 행 레이아웃을 **행 객체에** 매달아 둔다(Expando) — 서버가 바뀐 행만 새 List 로
+/// 보내므로 객체가 같으면 내용도 같다. 행 번호로 들면 지난 줄이 한 줄 늘 때마다 전부
+/// 밀려 수천 줄을 다시 잰다. 팔레트·글꼴이 바뀌면 세대를 올려 통째로 버린다.
 class _RowCache {
-  final List<_RowLayout?> _rows = [];
+  final _rows = Expando<_RowLayout>();
   TerminalPalette? _palette;
   _CellMetrics? _metrics;
+  int _generation = 0;
 
-  _RowLayout layout(
-    int row,
-    List<Run> runs,
-    TerminalPalette palette,
-    _CellMetrics m,
-  ) {
+  _RowLayout layout(List<Run> runs, TerminalPalette palette, _CellMetrics m) {
     if (_palette != palette || _metrics != m) {
-      _rows.clear();
+      _generation++;
       _palette = palette;
       _metrics = m;
     }
-    while (_rows.length <= row) {
-      _rows.add(null);
-    }
-    final cached = _rows[row];
-    if (cached != null && identical(cached.runs, runs)) return cached;
-    final built = _build(runs, palette, m);
-    _rows[row] = built;
+    final cached = _rows[runs];
+    if (cached != null && cached.generation == _generation) return cached;
+    final built = _build(runs, palette, m, _generation);
+    _rows[runs] = built;
     return built;
   }
 
@@ -171,6 +168,7 @@ class _RowCache {
     List<Run> runs,
     TerminalPalette palette,
     _CellMetrics m,
+    int generation,
   ) {
     final pieces = <_Piece>[];
     var col = 0;
@@ -185,6 +183,7 @@ class _RowCache {
       if (run.flags & flagDim != 0) fg = fg.withValues(alpha: 0.6);
       final style = TextStyle(
         fontFamily: _fontFamily,
+        fontFamilyFallback: _fontFallback,
         fontSize: m.fontSize,
         height: _lineHeight,
         color: fg,
@@ -249,7 +248,7 @@ class _RowCache {
         );
       }
     }
-    return _RowLayout(runs, pieces);
+    return _RowLayout(pieces, generation);
   }
 
   static TextPainter _painter(String text, TextStyle style) => TextPainter(
@@ -276,11 +275,19 @@ class _GridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = palette.bg);
-    for (var row = 0; row < grid.lines.length; row++) {
+    // 스크롤 안에서는 보이는 줄만 — 지난 줄 수천 개를 프레임마다 다 그리면 폰이 버벅인다.
+    final clip = canvas.getLocalClipBounds();
+    final first = clip.top.isFinite
+        ? math.max(0, (clip.top / metrics.height).floor())
+        : 0;
+    final last = clip.bottom.isFinite
+        ? math.min(grid.lines.length, (clip.bottom / metrics.height).ceil() + 1)
+        : grid.lines.length;
+    for (var row = first; row < last; row++) {
       final runs = grid.lines[row];
       if (runs.isEmpty) continue;
       cache
-          .layout(row, runs, palette, metrics)
+          .layout(runs, palette, metrics)
           .paint(canvas, row * metrics.height, metrics);
     }
     if (grid.cursorVisible && grid.rows > 0) {
@@ -367,7 +374,8 @@ class WrappedCanvas extends StatefulWidget {
     this.fontSize = 13,
   });
 
-  final Grid grid;
+  /// 지난 줄까지 이어 붙인 화면(CombinedGrid) — cols 는 살아 있는 화면의 열 수다.
+  final GridLines grid;
   final int version;
   final TerminalPalette palette;
   final double fontSize;

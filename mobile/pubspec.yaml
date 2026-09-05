@@ -30,10 +30,15 @@ flutter:
     - assets/students/schale-logo.png
     - assets/students/gif/
     - assets/students/profile/
-  # 한글이 정확히 두 칸이고 Nerd 아이콘·박스드로잉이 들어 있어 claude 화면이
-  # 깨지지 않는 유일한 선택. UI 글은 시스템 글꼴을 쓰고 격자에만 쓴다.
+  # 데스크톱 렌더러와 같은 짝: 라틴·아이콘은 JetBrains Mono Nerd, 한글은 D2Coding 으로
+  # 떨어진다(한글이 정확히 두 칸). 같은 글꼴이라야 같은 화면으로 보인다. UI 글은 시스템 글꼴.
   fonts:
     - family: TermMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf
+          weight: 700
+    - family: TermHangul
       fonts:
         - asset: assets/fonts/D2CodingLigatureNerdFontMono-Regular.ttf
         - asset: assets/fonts/D2CodingLigatureNerdFontMono-Bold.ttf

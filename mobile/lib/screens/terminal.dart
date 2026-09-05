@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../grid_canvas.dart';
+import '../reflow.dart';
 import '../server.dart';
 import '../student_art.dart';
 import '../term_session.dart';
@@ -183,8 +184,8 @@ class _TerminalScreenState extends State<TerminalScreen>
         : TerminalPalette.fromTokens(tokens);
     if (_wrap) {
       return WrappedCanvas(
-        grid: s.grid,
-        version: s.grid.version,
+        grid: CombinedGrid(s.history, s.grid),
+        version: s.grid.version + s.historyVersion,
         palette: palette,
       );
     }

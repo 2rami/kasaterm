@@ -150,17 +150,40 @@ List<Run> _runs(List<_Cell> cells) {
 }
 
 class _Entry {
-  _Entry(this.source, this.cols, this.row);
-  final List<Run> source;
+  _Entry(this.cols, this.row);
   final int cols;
   final RowReflow row;
 }
 
-/// 행별 결과를 들고 있다가 그 행의 런 객체가 바뀐 때만 다시 접는다 — 서버는 바뀐 행만
-/// 새 List 로 보내므로 `identical` 이 곧 「바뀌었다」다. 조각 List 도 그대로 재사용되어
-/// 렌더러의 행 캐시가 같은 규칙으로 살아남는다.
+/// 지난 줄(스크롤백) 위에 살아 있는 화면을 이어 붙인 한 장 — 접는 쪽은 이걸 하나의
+/// 화면으로 본다. 커서는 살아 있는 화면 안에 있으므로 지난 줄 수만큼 내려간다.
+class CombinedGrid implements GridLines {
+  CombinedGrid(this.history, this.live)
+    : lines = history.isEmpty ? live.lines : [...history, ...live.lines];
+
+  final List<List<Run>> history;
+  final GridLines live;
+
+  @override
+  final List<List<Run>> lines;
+  @override
+  int get cols => live.cols;
+  @override
+  int get rows => lines.length;
+  @override
+  int get cursorRow => history.length + live.cursorRow;
+  @override
+  int get cursorCol => live.cursorCol;
+  @override
+  bool get cursorVisible => live.cursorVisible;
+}
+
+/// 행별 결과를 **행 객체에** 매달아 두고(Expando) 그 객체가 바뀐 때만 다시 접는다 —
+/// 서버는 바뀐 행만 새 List 로 보내므로 객체가 같으면 내용도 같다. 행 번호로 캐시하면
+/// 지난 줄이 한 줄 늘 때마다 전부 밀려 통째로 다시 접게 된다. 조각 List 도 그대로
+/// 재사용되어 렌더러의 행 캐시가 같은 규칙으로 살아남는다.
 class Reflow {
-  final _rows = <int, _Entry>{};
+  final _rows = Expando<_Entry>();
 
   ReflowedGrid apply(GridLines grid, int cols) {
     final lines = <List<Run>>[];
@@ -168,10 +191,10 @@ class Reflow {
     var cursorCol = 0;
     for (var r = 0; r < grid.lines.length; r++) {
       final src = grid.lines[r];
-      var e = _rows[r];
-      if (e == null || !identical(e.source, src) || e.cols != cols) {
-        e = _Entry(src, cols, reflowRow(src, cols));
-        _rows[r] = e;
+      var e = _rows[src];
+      if (e == null || e.cols != cols) {
+        e = _Entry(cols, reflowRow(src, cols));
+        _rows[src] = e;
       }
       if (r == grid.cursorRow) {
         final starts = e.row.starts;

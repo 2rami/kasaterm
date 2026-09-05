@@ -75,6 +75,8 @@ void main() {
     expect(v.cursorCol, 5);
   });
 
+  combinedTests();
+
   test('커서가 놓인 빈 행은 남긴다', () {
     final g = Grid()
       ..apply({
@@ -93,5 +95,33 @@ void main() {
     final v = Reflow().apply(g, 10);
     expect(v.rows, 2);
     expect(v.cursorRow, 1);
+  });
+}
+
+void combinedTests() {
+  test('지난 줄 위에 살아 있는 화면이 이어지고 커서는 그만큼 내려간다', () {
+    final g = Grid()
+      ..apply({
+        'cols': 10,
+        'rows': 2,
+        'dirty': [
+          [
+            0,
+            [
+              ['live', null, null, 0],
+            ],
+          ],
+        ],
+        'cursor': [0, 2],
+      });
+    final c = CombinedGrid([
+      [const Run('old1', DefaultColor(), DefaultColor(), 0)],
+      [const Run('old2', DefaultColor(), DefaultColor(), 0)],
+    ], g);
+    expect(c.rows, 4);
+    expect(c.cursorRow, 2);
+    final v = Reflow().apply(c, 10);
+    expect(v.lines.map(text), ['old1', 'old2', 'live']);
+    expect(v.cursorRow, 2);
   });
 }
