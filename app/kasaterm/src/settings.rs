@@ -184,6 +184,44 @@ impl App {
         }
     }
 
+    /// 검사 하네스가 조건부 칸을 세울 때 **이것들을 쓴다**(자유함수를 직접 부르지
+    /// 말 것).
+    ///
+    /// 심는 값이 전역 셀이라, 그것만 바꾸면 렌더가 「다시 그릴 이유가 없다」며
+    /// 프레임을 통째로 건너뛴다(`render_frame` 의 `rebuild` 게이트). 그러면 세운
+    /// 칸이 영영 안 그려지고, 감사는 그걸 「그 칸이 화면에 없다」로 읽는다
+    /// (2026-09-05 실측: seed 는 성공하는데 「첫 프레임 0ms」로 세 번 다 건너뛰었다).
+    /// 표시를 함께 세워야 그 프레임이 나간다.
+    #[allow(dead_code)]
+    pub(crate) fn seed_login_probe(&mut self, id: &str, state: LoginState) -> bool {
+        let ok = seed_login_state_for_probe(id, state);
+        if ok {
+            self.chrome_dirty = true;
+        }
+        ok
+    }
+
+    /// 본진 계정 칸을 세운다. 위와 같은 이유로 표시를 함께 세운다.
+    #[allow(dead_code)]
+    pub(crate) fn seed_home_accounts_probe(
+        &mut self,
+        label: &str,
+        value: kasa_mcp::remote::RemoteAccounts,
+    ) {
+        crate::homeaccounts::seed_for_probe(label, value);
+        self.chrome_dirty = true;
+    }
+
+    /// 심어 둔 것을 **전부** 걷는다. 검사 끝에 반드시 부를 것 — 심은 상태에는
+    /// 타임아웃이 없어 안 걷으면 그 창이 가짜 화면에 머문다.
+    #[allow(dead_code)]
+    pub(crate) fn clear_account_probes(&mut self) {
+        cancel_hidden_login();
+        crate::homeaccounts::clear_probe();
+        self.login_code_edit.clear();
+        self.chrome_dirty = true;
+    }
+
     /// 붙여넣은 OAuth 코드를 로그인 중인 CLI 로 보낸다. 엔터와 「확인」 버튼이 같은
     /// 길을 탄다.
     pub(crate) fn submit_login_code_field(&mut self) {
