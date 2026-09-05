@@ -483,8 +483,15 @@ impl PtySession {
             // Use the default shell from $SHELL.
             CommandBuilder::new_default_prog()
         };
+        // 없는 폴더를 주면 셸 자체가 안 뜬다 — 다른 기계의 경로를 그대로 들고 온
+        // 원격 pane(`mini`), 지워진 폴더의 세션 복원이 그렇다. 홈으로 떨어뜨린다
+        // (2026-09-06 「mini 를 치면 경로 없어도 홈으로 이동하게라도」).
         if let Some(cwd) = opts.cwd.as_deref() {
-            cmd.cwd(cwd);
+            if std::path::Path::new(cwd).is_dir() {
+                cmd.cwd(cwd);
+            } else if let Some(home) = std::env::var_os("HOME") {
+                cmd.cwd(home);
+            }
         }
         // Terminal-identity env. portable-pty's CommandBuilder inherits
         // the parent process env, so if we were launched from iTerm /
@@ -4760,6 +4767,34 @@ mod launcher_descend_tests {
 ///
 /// `cfg!` 로 가르는 것은 양쪽 갈래가 다 컴파일되게 하려는 것이다 — `#[cfg]` 로 꺼
 /// 두면 맥에서 Windows 갈래의 오타가 영영 안 잡힌다(이 레포가 반복해 밟은 함정).
+#[cfg(test)]
+mod missing_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn missing_cwd_falls_back_to_home() {
+        let s = PtySession::start(PtyOptions {
+            shell: Some(test_posix_shell()),
+            cwd: Some("/nonexistent-kasaterm-cwd-xyz".into()),
+            cols: 80,
+            rows: 10,
+            pane_id: "%cwd".into(),
+            ..Default::default()
+        })
+        .expect("없는 폴더여도 셸은 떠야 한다");
+        s.send_bytes(b"pwd\n").unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if s.visible_text(10).contains(&home) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("홈으로 안 떨어졌다: {}", s.visible_text(10));
+    }
+}
+
 #[cfg(test)]
 fn test_posix_shell() -> String {
     if cfg!(unix) {
