@@ -3,7 +3,8 @@
 # 실기는 iOS 26 에서 화면을 찍을 길이 막혀 있어(screenshotr 없음) 이쪽이 「보며 일하기」의 정본이다.
 #
 #   tool/sim.sh up [pane] [machine]   부팅·디버그 빌드·설치·실행. pane 을 주면 켜자마자 그 학생 화면
-#   tool/sim.sh shot [out.jpg]        화면을 720px JPEG 로(기본 $TMPDIR/sim.jpg) — 창에 싣기 전에 줄인다
+#   tool/sim.sh look "질문"           화면을 찍어 kimi(askimg)에게 묻고 답만 받는다 — 이미지는 창에 안 싣는다
+#   tool/sim.sh shot [out.jpg]        화면을 720px JPEG 로(기본 $TMPDIR/sim.jpg). 사람에게 건넬 때만
 #   tool/sim.sh tap X Y               포인트 좌표(402x874)로 탭. shot 의 JPEG 는 세로 720 이라 ×874/720
 #   tool/sim.sh type "글"             포커스된 입력창에 타이핑
 #   tool/sim.sh key <코드>            키 하나(idb ui key 코드) — enter 는 40
@@ -34,6 +35,13 @@ print(json.dumps(d))' "${KASA_ROOT:-http://127.0.0.1:8765/}" "${1:-}" "${2:-}" >
     xcrun simctl launch "$sim" "$app" >/dev/null
     echo "가상 아이폰에 올렸다 — tool/sim.sh shot 으로 본다"
     ;;
+  look)
+    # 화면 판정은 kimi 가 한다 — 스샷을 창에 들이면 매 요청마다 다시 실리고 뺄 수 없다(2026-09-05 지시).
+    png=$(mktemp -t sim).png
+    xcrun simctl io "$sim" screenshot "$png" >/dev/null 2>&1
+    askimg "$png" "${1:-이 화면에 무엇이 보이는가}"
+    rm -f "$png"
+    ;;
   shot)
     out=${1:-${TMPDIR:-/tmp}/sim.jpg}
     png=$(mktemp -t sim).png
@@ -56,5 +64,5 @@ for e in json.load(sys.stdin):
     print(f"{label}  @ {cx:.0f},{cy:.0f}")'
     ;;
   reset) xcrun simctl shutdown "$sim" >/dev/null 2>&1 || true; xcrun simctl boot "$sim"; xcrun simctl launch "$sim" "$app" >/dev/null ;;
-  *) sed -n '2,13p' "$0"; exit 1 ;;
+  *) sed -n '2,14p' "$0"; exit 1 ;;
 esac
