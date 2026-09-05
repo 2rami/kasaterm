@@ -3228,6 +3228,42 @@ mod login_code_shape_tests {
     }
 }
 
+/// 검사 하네스가 **로그인 중 화면을 세우기 위해** 상태만 심는다.
+///
+/// 조건부로 나타나는 칸(코드 입력·취소 버튼)은 그 조건이 안 서면 아예 안 그려져,
+/// 클릭 영역 감사가 「겹치지 않는다」가 아니라 「못 봤다」로 끝난다(2026-09-05
+/// 코하루 지적). 그 조건을 리그에서 세우는 유일한 손잡이다.
+///
+/// **실제 로그인과 엉키지 않는다:**
+/// - 이미 도는 로그인이 있으면 **거부**한다(`false`). 진짜 승인 흐름을 가짜 상태로
+///   덮어 사람이 브라우저에서 누른 승인을 잃는 일이 없어야 한다.
+/// - 프로세스도 stdin 도 만들지 않는다. 그래서 이 상태에서 코드가 들어와도
+///   `submit_login_code` 가 `false` 를 돌려줄 뿐 아무 데도 안 보낸다.
+///
+/// ⚠️ **걷는 것은 부른 쪽 몫이다.** 심은 상태에는 프로세스가 없어 타임아웃이 돌지
+/// 않으므로, 안 걷으면 그 창은 「로그인 중」에 영영 머문다. 검사 끝에
+/// `cancel_hidden_login()` 을 반드시 부를 것.
+// 검사 하네스(testkit)가 부를 자리다. 그쪽 배선이 아직 안 붙어 죽은 것으로
+// 보이지만, 지우면 조건부 칸을 세울 손잡이가 사라진다.
+#[allow(dead_code)]
+pub(crate) fn seed_login_state_for_probe(id: &str, state: LoginState) -> bool {
+    let Ok(mut cell) = login_cell().lock() else {
+        return false;
+    };
+    if cell.1.is_some() || cell.2.is_some() {
+        return false;
+    }
+    if cell
+        .0
+        .as_ref()
+        .is_some_and(|job| matches!(job.state, LoginState::Running | LoginState::NeedCode))
+    {
+        return false;
+    }
+    cell.0 = Some(LoginJob { id: id.to_string(), state });
+    true
+}
+
 /// 코드를 기다리는 동안 클립보드를 살펴 **복사만 해도 로그인이 끝나게** 한다
 /// (거노 2026-09-05 「설정창에 붙여넣는거 없이도 가능하게 해봐」).
 ///

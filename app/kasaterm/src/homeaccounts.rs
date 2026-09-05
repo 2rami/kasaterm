@@ -29,6 +29,10 @@ struct Cache {
     inflight: bool,
     /// 마지막 조회 실패 이유. 화면이 「못 읽었다」를 말할 수 있어야 한다.
     error: Option<String>,
+    /// 검사 하네스가 심어 둔 값인가. 참이면 폴링이 통째로 비켜 간다 — 안 그러면
+    /// 다음 프레임의 `poll()` 이 「본진이 없다」며 심은 값을 지워, 세우려던 칸이
+    /// 한 프레임 만에 사라진다.
+    probe: bool,
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -86,6 +90,9 @@ pub(crate) fn home_target() -> Option<(String, String)> {
 /// 설정창이 매 프레임 부른다. 실제 조회는 간격을 두고 별도 스레드에서 한다 —
 /// 렌더 스레드에서 HTTP 를 기다리면 창이 통째로 멈춘다.
 pub(crate) fn poll() {
+    if cache().lock().is_ok_and(|c| c.probe) {
+        return;
+    }
     let Some((label, base)) = home_target() else {
         if let Ok(mut c) = cache().lock() {
             c.value = None;
@@ -167,4 +174,47 @@ pub(crate) fn act(action: &'static str, id: Option<String>, label: Option<String
             c.tried = None;
         }
     });
+}
+
+/// 검사 하네스가 **본진 계정 칸을 세우기 위해** 캐시만 심는다.
+///
+/// 기계 고르는 두 칸은 본진 값이 있어야 그려진다(`home_accounts_view`). 리그에는
+/// 본진이 없으니 그 칸이 통째로 안 나오고, 클릭 영역 감사가 그 자리를 못 본다.
+///
+/// **바깥으로 아무것도 안 나간다** — 캐시만 채우고, 심은 동안에는 폴링이 통째로
+/// 비켜 간다. 그 가드가 없으면 다음 프레임의 `poll()` 이 「본진이 없다」며 심은 값을
+/// 지워 세우려던 칸이 한 프레임 만에 사라진다.
+///
+/// ⚠️ 고른 칸(`set_account_scope_home`)에 따라 아래가 달라지므로 **양쪽으로 두 번**
+/// 돌려야 그 화면을 다 본 것이다.
+// 검사 하네스(testkit)가 부를 자리다. 그쪽 배선이 아직 안 붙어 죽은 것으로
+// 보이지만, 지우면 조건부 칸을 세울 손잡이가 사라진다.
+#[allow(dead_code)]
+pub(crate) fn seed_for_probe(label: &str, value: RemoteAccounts) {
+    if let Ok(mut c) = cache().lock() {
+        c.label = label.to_string();
+        c.base = format!("probe://{label}");
+        c.value = Some(value);
+        c.error = None;
+        // 다음 `poll()` 이 곧바로 진짜 조회를 걸지 않게 시각을 지금으로 둔다.
+        c.tried = Some(Instant::now());
+        c.inflight = false;
+        c.probe = true;
+    }
+}
+
+/// 심어 둔 값을 걷고 폴링을 되살린다. **검사 끝에 반드시 부를 것** — 안 부르면 그
+/// 창은 진짜 본진이 붙어도 가짜 목록을 계속 보여 준다.
+// 검사 하네스(testkit)가 부를 자리다. 그쪽 배선이 아직 안 붙어 죽은 것으로
+// 보이지만, 지우면 조건부 칸을 세울 손잡이가 사라진다.
+#[allow(dead_code)]
+pub(crate) fn clear_probe() {
+    if let Ok(mut c) = cache().lock() {
+        c.probe = false;
+        c.value = None;
+        c.error = None;
+        c.base.clear();
+        c.label.clear();
+        c.tried = None;
+    }
 }
