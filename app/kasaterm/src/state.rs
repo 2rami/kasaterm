@@ -527,6 +527,9 @@ pub(crate) struct InfoMachine {
 /// 프로세스·포트와 달리 pane 상태와 무관하다 — 스크롤 위, 탭 머리 바로 아래 고정.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InfoAction {
+    /// 운영 방(보드) 토글. 메뉴막대에만 있던 진입점을 여기로 끌어왔다 — 「보기」
+    /// 메뉴 안쪽은 단축키도 없어 찾을 길이 없었다(2026-09-05 지시).
+    Board,
     /// SCHALE OS(아로나) 패널 토글.
     Arona,
     /// 설정 화면.

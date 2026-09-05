@@ -282,6 +282,18 @@ mod tests {
         }
     }
 
+    /// 보드 방 진입점이 메뉴막대 「보기」 안에만 있었다 — 단축키도 없어 사람이
+    /// 찾을 길이 없었다(2026-09-05 「보드방은 뭐눌러야되는거야」). 우측 Info 탭의
+    /// 버튼 줄에도 둔다, 아로나 바로 옆에.
+    #[test]
+    fn board_has_an_entry_point_outside_the_menu_bar() {
+        let info = include_str!("info.rs");
+        assert!(
+            info.contains("state::InfoAction::Board"),
+            "Info 탭에 진입점이 없으면 메뉴막대가 보드로 가는 유일한 길이 된다"
+        );
+    }
+
     #[test]
     fn desktop_board_has_no_wry_route_and_arona_keeps_its_route() {
         let chrome = include_str!("chrome.rs");

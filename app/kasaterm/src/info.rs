@@ -2108,6 +2108,10 @@ pub(crate) fn draw_info_actions(
     // 그때는 설정이 그 자리를 마저 쓴다 — 반 폭짜리 버튼 하나가 남으면 잘린 것처럼
     // 보인다.
     let mut btns: Vec<(state::InfoAction, &str, &str)> = Vec::new();
+    // 보드가 먼저다 — 아로나와 나란한 「지금 뭐가 도나」 쪽이고, 설정·피드백은
+    // 뒤쪽 잡무다. 여는 데 조건이 없어 아로나처럼 감추지 않는다(사용자 방이 하나도
+    // 없으면 `open_board_room` 이 스스로 물러난다).
+    btns.push((state::InfoAction::Board, "users", "보드"));
     if arona_on {
         btns.push((state::InfoAction::Arona, "sparkles", "아로나"));
     }

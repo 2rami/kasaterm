@@ -4795,6 +4795,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .map(|(a, _)| *a)
                             {
                                 match act {
+                                    state::InfoAction::Board => self.toggle_board_room(),
                                     state::InfoAction::Arona => self.toggle_arona_panel(event_loop),
                                     state::InfoAction::Settings => {
                                         self.open_settings_window(event_loop, None, None);
