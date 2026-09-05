@@ -40,15 +40,20 @@ NO_PROXY='127.0.0.1,localhost' FLUTTER_XCODE_DEVELOPMENT_TEAM="$team" \
 # 「invalid signature」로 설치를 거부한다(2026-09-05 실측: 같은 트리에서 두 번 연속 그랬고
 # 다음 빌드는 멀쩡했다, 조건은 못 잡았다). 앱과 같은 인증서로 다시 서명하면 된다. 앱 봉인이
 # 프레임워크를 덮으므로 앱도 다시 서명한다(권한은 그대로 둔다).
+# ⚠️`codesign … | grep -q` 꼴로 쓰지 마라 — pipefail 아래서 grep 이 먼저 닫히면 codesign 이
+# SIGPIPE 로 죽어 조건이 거짓이 되고, 안전장치가 소리 없이 건너뛴다(2026-09-05 실측).
 app=build/ios/iphoneos/Runner.app
 identity=$(codesign -dvv "$app" 2>&1 | sed -n 's/^Authority=\(Apple Development.*\)/\1/p' | head -1)
 resign=
 for fw in "$app"/Frameworks/*.framework; do
-  if codesign -dvv "$fw" 2>&1 | grep -q '^Signature=adhoc'; then
-    [ -n "$identity" ] || { echo "앱이 개발 인증서로 서명돼 있지 않다" >&2; exit 1; }
-    codesign --force --sign "$identity" --preserve-metadata=identifier,entitlements "$fw"
-    resign=1
-  fi
+  sig=$(codesign -dvv "$fw" 2>&1 || true)
+  case "$sig" in
+    *"Signature=adhoc"*)
+      [ -n "$identity" ] || { echo "앱이 개발 인증서로 서명돼 있지 않다" >&2; exit 1; }
+      codesign --force --sign "$identity" --preserve-metadata=identifier,entitlements "$fw"
+      resign=1
+      ;;
+  esac
 done
 if [ -n "$resign" ]; then
   codesign --force --sign "$identity" --preserve-metadata=identifier,entitlements,flags "$app"
