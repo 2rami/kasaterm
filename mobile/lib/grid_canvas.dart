@@ -454,6 +454,7 @@ class WrappedCanvas extends StatefulWidget {
     required this.version,
     required this.palette,
     this.history = const [],
+    this.historyVersion = 0,
     this.student,
     this.bottomTick = 0,
     this.fontSize = 13,
@@ -463,6 +464,9 @@ class WrappedCanvas extends StatefulWidget {
   /// 살아 있는 화면에만 건다 — 데스크톱도 화면에 보이는 격자만 판독한다.
   final GridLines grid;
   final List<List<Run>> history;
+
+  /// 지난 줄이 바뀔 때마다 오른다 — 지난 줄 꾸밈은 이 값이 바뀔 때만 다시 한다(수천 줄).
+  final int historyVersion;
   final int version;
   final TerminalPalette palette;
 
@@ -487,6 +491,12 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
 
   /// 바닥에서 떠 있는가 — 떠 있으면 입력상자를 바닥에 붙잡아 둔다.
   bool _away = false;
+
+  /// 꾸민 지난 줄 — (historyVersion, 학생) 이 같으면 재사용.
+  List<List<Run>>? _histLines;
+  List<SpriteSlot> _histSlots = const [];
+  int _histVersion = -1;
+  String? _histKey;
 
   @override
   void initState() {
@@ -587,7 +597,26 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => _setAnimating(animated),
       );
-      final view = _reflow.apply(CombinedGrid(widget.history, live), cols);
+      var history = widget.history;
+      var historySlots = const <SpriteSlot>[];
+      if (st != null && history.isNotEmpty) {
+        final key = '${st.slug}/${st.name}/${st.accent.toARGB32()}';
+        if (_histLines == null ||
+            _histVersion != widget.historyVersion ||
+            _histKey != key) {
+          final (lines, slots) = restyleHistory(history, st);
+          _histLines = lines;
+          _histSlots = slots;
+          _histVersion = widget.historyVersion;
+          _histKey = key;
+        }
+        history = _histLines!;
+        historySlots = _histSlots;
+      }
+      final view = _reflow.apply(
+        CombinedGrid(history, live, historySlots: historySlots),
+        cols,
+      );
       final walkFrame = (t * 1000 ~/ spriteWalkFrameMs) % spriteWalkFrames;
       final idleFrame = (t * 1000 ~/ spriteIdleFrameMs) % spriteIdleFrames;
       _GridPainter painter(GridLines g) => _GridPainter(

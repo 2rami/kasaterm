@@ -197,6 +197,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       return WrappedCanvas(
         grid: s.grid,
         history: s.history,
+        historyVersion: s.historyVersion,
         version: s.grid.version + s.historyVersion,
         palette: palette,
         bottomTick: _bottomTick,

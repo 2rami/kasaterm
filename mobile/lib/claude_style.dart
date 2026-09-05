@@ -772,6 +772,111 @@ int? pinnedInputTop(List<List<Run>> lines) {
   };
 }
 
+void _blankFacePlaceholders(List<List<_Cell>> rows, Set<int> touched) {
+  for (var r = 0; r < rows.length; r++) {
+    var hit = false;
+    for (final c in rows[r]) {
+      if (c.rune == 0xFFFC) {
+        _blankCell(c);
+        hit = true;
+      }
+    }
+    if (hit) touched.add(r);
+  }
+}
+
+/// Clawd 그림 자리마다 도트 슬롯을 세우고 제목·환영문·상자 선을 학생 것으로. 하나라도
+/// 세웠으면 true(애니가 돈다).
+bool _restyleBanners(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  List<SpriteSlot> slots,
+  StudentStyle st,
+) {
+  final name = st.name;
+  if (name == null) return false;
+  var any = false;
+  for (final (br, bc) in _findClawdBanners(rows)) {
+    final r0 = math.max(0, br), r1 = math.min(rows.length, br + clawdRows);
+    for (var r = r0; r < r1; r++) {
+      final i0 = _idxAtCol(rows[r], bc);
+      if (i0 == null) continue;
+      for (var i = i0; i < math.min(rows[r].length, i0 + clawdCols); i++) {
+        _blankCell(rows[r][i]);
+      }
+      touched.add(r);
+    }
+    slots.add(
+      SpriteSlot(
+        'idle',
+        br.toDouble(),
+        bc.toDouble(),
+        clawdRows.toDouble(),
+        clawdCols.toDouble(),
+      ),
+    );
+    any = true;
+    final acc = _rgb(st.accent);
+    _replaceBannerTitle(rows, touched, br, bc, name, acc);
+    _replaceWelcome(rows, touched, br, name, acc);
+    _tintWelcomeBox(rows, touched, math.max(0, br), br + clawdRows, acc);
+  }
+  return any;
+}
+
+void _restyleUserPromptBands(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  StudentStyle st,
+) {
+  final base = st.bg.toARGB32();
+  final light =
+      ((base >> 16) & 0xff) + ((base >> 8) & 0xff) + (base & 0xff) > 380;
+  final fill = tintToward(st.bg, st.accent, light ? 0.10 : 0.18);
+  final accentRgb = _rgb(st.accent);
+  var r = 0;
+  while (r < rows.length) {
+    final band = _userPromptBand(rows[r]);
+    if (band == null) {
+      r++;
+      continue;
+    }
+    while (true) {
+      _restyleUserPromptRow(rows[r], fill, accentRgb);
+      touched.add(r);
+      r++;
+      if (r >= rows.length) break;
+      final b = _bandBg(rows[r]);
+      if (b == null || !_sameColor(b, band)) break;
+    }
+  }
+}
+
+/// 지난 줄(스크롤백)의 꾸밈 — 데스크톱은 넘겨 본 줄에도 같은 규칙을 입힌다. 스피너·
+/// 입력상자·서 있는 도트는 살아 있는 화면 몫이라 여기엔 없다: 프사 자리표 지우기,
+/// 사용자 프롬프트 띠, 시작 배너(도트·이름·인사·상자 선)만. 돌려주는 자리는 지난 줄
+/// 기준 행이다.
+(List<List<Run>>, List<SpriteSlot>) restyleHistory(
+  List<List<Run>> history,
+  StudentStyle st,
+) {
+  final rows = <List<_Cell>>[for (final r in history) _cells(r)];
+  final touched = <int>{};
+  final slots = <SpriteSlot>[];
+  _blankFacePlaceholders(rows, touched);
+  if (st.slug != null && st.hasIdle && st.name != null) {
+    _restyleBanners(rows, touched, slots, st);
+  }
+  _restyleUserPromptBands(rows, touched, st);
+  return (
+    [
+      for (var i = 0; i < rows.length; i++)
+        touched.contains(i) ? _runs(rows[i]) : history[i],
+    ],
+    slots,
+  );
+}
+
 /// 데스크톱과 같은 순서로 꾸민다. `t` 는 초 단위 애니 시계.
 StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   final rows = <List<_Cell>>[for (final r in live.lines) _cells(r)];
@@ -782,15 +887,9 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   final canWalk = st.slug != null && st.hasWalk;
   final canStand = st.slug != null && st.hasIdle;
 
-  // 통째로 파고들지 않도록 프레임 단위 규칙만 — 학생 프사 자리는 항상 비운다.
+  // 학생 프사 자리표(U+FFFC)는 어느 행이든 비운다 — 글꼴에 없어 빈 상자로 뜬다.
   final face = _findStatuslineFace(rows);
-  if (face != null) {
-    final (fr, fc, n) = face;
-    for (var i = fc; i < fc + n; i++) {
-      _blankCell(rows[fr][i]);
-    }
-    touched.add(fr);
-  }
+  _blankFacePlaceholders(rows, touched);
 
   // 상태줄 모델 표식 — 글리프 대신 로고. 아래→위, 마지막 상태줄이 이긴다.
   for (var r = rows.length - 1; r >= 0; r--) {
@@ -818,33 +917,8 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   }
 
   // 시작 배너 — Clawd 그림 자리에 학생 도트, 제목·환영문은 학생 것으로.
-  final name = st.name;
-  if (canStand && name != null) {
-    for (final (br, bc) in _findClawdBanners(rows)) {
-      final r0 = math.max(0, br), r1 = math.min(rows.length, br + clawdRows);
-      for (var r = r0; r < r1; r++) {
-        final i0 = _idxAtCol(rows[r], bc);
-        if (i0 == null) continue;
-        for (var i = i0; i < math.min(rows[r].length, i0 + clawdCols); i++) {
-          _blankCell(rows[r][i]);
-        }
-        touched.add(r);
-      }
-      slots.add(
-        SpriteSlot(
-          'idle',
-          br.toDouble(),
-          bc.toDouble(),
-          clawdRows.toDouble(),
-          clawdCols.toDouble(),
-        ),
-      );
-      animated = true;
-      final acc = _rgb(accent);
-      _replaceBannerTitle(rows, touched, br, bc, name, acc);
-      _replaceWelcome(rows, touched, br, name, acc);
-      _tintWelcomeBox(rows, touched, math.max(0, br), br + clawdRows, acc);
-    }
+  if (canStand && st.name != null) {
+    if (_restyleBanners(rows, touched, slots, st)) animated = true;
   }
 
   var busy = false;
@@ -930,27 +1004,7 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
 
   _stylePromptBox(rows, touched, accent);
 
-  final base = st.bg.toARGB32();
-  final light =
-      ((base >> 16) & 0xff) + ((base >> 8) & 0xff) + (base & 0xff) > 380;
-  final fill = tintToward(st.bg, accent, light ? 0.10 : 0.18);
-  final accentRgb = _rgb(accent);
-  var r = 0;
-  while (r < rows.length) {
-    final band = _userPromptBand(rows[r]);
-    if (band == null) {
-      r++;
-      continue;
-    }
-    while (true) {
-      _restyleUserPromptRow(rows[r], fill, accentRgb);
-      touched.add(r);
-      r++;
-      if (r >= rows.length) break;
-      final b = _bandBg(rows[r]);
-      if (b == null || !_sameColor(b, band)) break;
-    }
-  }
+  _restyleUserPromptBands(rows, touched, st);
 
   final lines = <List<Run>>[
     for (var i = 0; i < rows.length; i++)

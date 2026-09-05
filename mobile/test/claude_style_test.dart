@@ -43,6 +43,7 @@ Matcher rgb(RgbColor c) => predicate<CellColor>(
 void main() {
   bannerTests();
   pinnedTests();
+  historyTests();
 
   test('스피너 자리: 글리프를 지우고 걷는 도트 2칸×2줄, 문구는 학생색', () {
     final g = gridOf([
@@ -271,5 +272,56 @@ void pinnedTests() {
     ]);
     expect(pinnedInputTop(g.lines), 2);
     expect(pinnedInputTop(gridOf(['그냥 글', '']).lines), isNull);
+  });
+}
+
+void historyTests() {
+  test('지난 줄에도 프롬프트 띠·프사 자리표 지우기·배너 치환이 입혀진다', () {
+    const named = StudentStyle(
+      slug: 'arisu',
+      name: '아리스',
+      accent: accent,
+      bg: bg,
+    );
+    final hist = <List<Run>>[
+      [const Run('Fable ￼ main', DefaultColor(), DefaultColor(), 0)],
+      [
+        const Run('❯ 안녕', DefaultColor(), IndexColor(236), 0),
+        const Run('               ', DefaultColor(), IndexColor(236), 0),
+      ],
+      [
+        const Run(
+          ' ▐▛███▛█   Claude Code v2',
+          DefaultColor(),
+          DefaultColor(),
+          0,
+        ),
+      ],
+      [const Run('▝▜██████▀', DefaultColor(), DefaultColor(), 0)],
+      [const Run(' ▝▝ ▝▝', DefaultColor(), DefaultColor(), 0)],
+    ];
+    final (lines, slots) = restyleHistory(hist, named);
+    expect(text(lines[0]).contains('￼'), isFalse);
+    expect(lines[1].first.fg, isA<RgbColor>());
+    expect(lines[1].last.bg, isA<DefaultColor>());
+    expect(slots.single.motion, 'idle');
+    expect(slots.single.row, 2);
+    expect(text(lines[2]), contains('아리스'));
+    expect(text(lines[3]).contains('█'), isFalse);
+    // 지난 줄 슬롯은 합칠 때 그대로, 살아 있는 화면 슬롯은 지난 줄 수만큼 내려간다.
+    final live = restyleClaude(
+      gridOf([
+        '',
+        '──────────────────────────────',
+        '❯ ',
+        '──────────────────────────────',
+        'Fable ￼',
+      ]),
+      named,
+      0,
+    );
+    final c = CombinedGrid(lines, live, historySlots: slots);
+    expect(c.slots.first.row, 2);
+    expect(c.slots.last.row, greaterThanOrEqualTo(5));
   });
 }

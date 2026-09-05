@@ -162,11 +162,14 @@ class _Entry {
 /// 지난 줄(스크롤백) 위에 살아 있는 화면을 이어 붙인 한 장 — 접는 쪽은 이걸 하나의
 /// 화면으로 본다. 커서는 살아 있는 화면 안에 있으므로 지난 줄 수만큼 내려간다.
 class CombinedGrid implements GridLines {
-  CombinedGrid(this.history, this.live)
+  CombinedGrid(this.history, this.live, {this.historySlots = const []})
     : lines = history.isEmpty ? live.lines : [...history, ...live.lines];
 
   final List<List<Run>> history;
   final GridLines live;
+
+  /// 지난 줄 안의 도트 자리(지난 줄 기준 행) — 시작 배너가 넘어간 자리.
+  final List<SpriteSlot> historySlots;
 
   @override
   final List<List<Run>> lines;
@@ -183,7 +186,10 @@ class CombinedGrid implements GridLines {
   @override
   List<SpriteSlot> get slots => history.isEmpty
       ? live.slots
-      : [for (final s in live.slots) s.shifted(history.length.toDouble(), 0)];
+      : [
+          ...historySlots,
+          for (final s in live.slots) s.shifted(history.length.toDouble(), 0),
+        ];
 }
 
 /// 행별 결과를 **행 객체에** 매달아 두고(Expando) 그 객체가 바뀐 때만 다시 접는다 —
