@@ -9,6 +9,10 @@
 use kasa_socket::backend::PaneActivity;
 use std::path::PathBuf;
 
+/// 원화 한 장을 메모리로 읽기 전의 상한. 네이티브 패널과 HTTP 폴백이 같은
+/// 함수를 쓰므로 여기서 막아야 어느 쪽으로 열어도 초대형 파일을 통째로 읽지 않는다.
+pub const MAX_PORTRAIT_FILE_BYTES: u64 = 32 << 20;
+
 fn home() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
@@ -74,6 +78,12 @@ pub fn portrait(slug: &str) -> Option<(Vec<u8>, &'static str)> {
         cands.push(r.join(format!("theme-src/{slug}/ref.png")));
     }
     for p in cands {
+        let Ok(meta) = std::fs::metadata(&p) else {
+            continue;
+        };
+        if meta.len() == 0 || meta.len() > MAX_PORTRAIT_FILE_BYTES {
+            continue;
+        }
         if let Ok(b) = std::fs::read(&p) {
             if !b.is_empty() {
                 return Some((b, "image/png"));
@@ -295,6 +305,17 @@ pub async fn chat(req: &ChatReq, board: &[PaneActivity]) -> Result<String, Strin
         return Err("빈 답이 왔어요.".into());
     }
     Ok(text.trim().to_string())
+}
+
+/// GUI 워커 스레드용 동기 입구. 네이티브 패널이 자기 HTTP 서버를 다시 부르면
+/// 포트가 아직 안 뜬 시작 구간과 서버 종료 구간에만 대화가 깨지고, JSON 왕복도
+/// 한 벌 더 생긴다. 네트워크는 여전히 호출한 워커 스레드에서만 돈다.
+pub fn chat_blocking(req: &ChatReq, board: &[PaneActivity]) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("대화 준비를 못 했어요 — {e}"))?;
+    runtime.block_on(chat(req, board))
 }
 
 #[cfg(test)]
