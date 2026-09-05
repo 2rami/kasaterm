@@ -2408,6 +2408,7 @@ impl App {
             crate::ImeFocus::Settings(field) => {
                 self.native_settings_insert_into(field, &text)
             }
+            crate::ImeFocus::Board(field) => self.native_board_insert_into(field, &text),
         }
     }
 

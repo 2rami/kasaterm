@@ -99,13 +99,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // window_event 와 같은 이유 — 소켓/백그라운드에서 온 변경도 자동 저장
         // 대상이다(pane 분할·세션 바인딩이 여기로 들어온다).
-        let settings_only = match &event {
+        let internal_only = match &event {
             UserEvent::SocketSwitchSession(idx) | UserEvent::SocketCloseRoom(idx) => {
-                self.settings_room_index() == Some(*idx)
+                self.internal_room_kind_at(*idx).is_some()
             }
             _ => false,
         };
-        if !settings_only {
+        if !internal_only {
             self.session_touched = true;
         }
         // Local cmux socket backend delegated a pane write / split / focus to
@@ -730,10 +730,14 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketSwitchSession(idx) => {
-                if self.settings_room_index() == Some(*idx) {
-                    self.open_settings_room(None);
-                } else {
-                    self.switch_window(*idx);
+                match self.internal_room_kind_at(*idx) {
+                    Some(crate::internal_room::InternalRoomKind::Settings) => {
+                        self.open_settings_room(None);
+                    }
+                    Some(crate::internal_room::InternalRoomKind::Board) => {
+                        self.open_board_room();
+                    }
+                    None => self.switch_window(*idx),
                 }
                 return;
             }
@@ -2467,6 +2471,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autoalert();
         self.arm_autotoggle();
         self.arm_autoarona();
+        self.arm_autoboard();
         // 온보딩 제거 — 강제 ModePicker 자동오픈 없이 터미널이 기본이다.
         self.arm_autotabs();
         self.arm_autodrag();
@@ -2484,7 +2489,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
         let session_touched_before_event = self.session_touched;
-        if !self.settings_room_active() {
+        if !self.internal_room_active_any() {
             self.session_touched = true;
         }
         if self.web_host_window_event(id, &event) {
@@ -2682,6 +2687,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_room_active() {
                     self.native_settings_wheel(delta);
+                } else if self.board_room_active() {
+                    self.native_board_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
                 }
@@ -2739,6 +2746,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
+                    self.text_cursor_shown = cursor == CursorIcon::Text;
+                    window.set_cursor(cursor);
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
+                if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
+                    let cursor = self.native_board_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
                     window.set_cursor(cursor);
                     self.chrome_dirty = true;
@@ -3569,9 +3584,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| inside(r))
                         .map(|(i, _)| *i)
                     {
-                        let settings = self.settings_room_index() == Some(idx);
+                        let internal = self.internal_room_kind_at(idx).is_some();
                         self.confirm_or_close_session(idx);
-                        if settings {
+                        if internal {
                             self.session_touched = session_touched_before_event;
                         }
                     }
@@ -3826,6 +3841,14 @@ impl ApplicationHandler<UserEvent> for App {
                     if matches!(state, ElementState::Pressed) {
                         self.last_input_at = Instant::now();
                         self.native_settings_click(self.cursor_px.0, self.cursor_px.1);
+                    }
+                    window.request_redraw();
+                    return;
+                }
+                if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
+                    if matches!(state, ElementState::Pressed) {
+                        self.last_input_at = Instant::now();
+                        self.native_board_click(self.cursor_px.0, self.cursor_px.1);
                     }
                     window.request_redraw();
                     return;
@@ -4270,14 +4293,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 && cy >= rect.1
                                 && cy <= rect.1 + rect.3
                         };
-                        let settings_hit = self.settings_room_index().is_some_and(|settings| {
-                            self.window_tab_rects
-                                .iter()
-                                .chain(self.window_tab_close_rects.iter())
-                                .any(|(idx, rect)| *idx == settings && over(*rect))
-                        });
+                        let internal_hit = (0..self.windows.len())
+                            .filter(|idx| self.internal_room_kind_at(*idx).is_some())
+                            .any(|internal| {
+                                self.window_tab_rects
+                                    .iter()
+                                    .chain(self.window_tab_close_rects.iter())
+                                    .any(|(idx, rect)| *idx == internal && over(*rect))
+                            });
                         if self.window_strip_click(cx, cy) {
-                            if settings_hit {
+                            if internal_hit {
                                 self.session_touched = session_touched_before_event;
                             }
                             return;
@@ -4297,14 +4322,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 && cy >= rect.1
                                 && cy <= rect.1 + rect.3
                         };
-                        let settings_hit = self.settings_room_index().is_some_and(|settings| {
-                            self.window_tab_rects
-                                .iter()
-                                .chain(self.window_tab_close_rects.iter())
-                                .any(|(idx, rect)| *idx == settings && over(*rect))
-                        });
+                        let internal_hit = (0..self.windows.len())
+                            .filter(|idx| self.internal_room_kind_at(*idx).is_some())
+                            .any(|internal| {
+                                self.window_tab_rects
+                                    .iter()
+                                    .chain(self.window_tab_close_rects.iter())
+                                    .any(|(idx, rect)| *idx == internal && over(*rect))
+                            });
                         if self.window_strip_click(cx, cy) {
-                            if settings_hit {
+                            if internal_hit {
                                 self.session_touched = session_touched_before_event;
                             }
                             return;
@@ -6142,6 +6169,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
+                if self.board_room_active() {
+                    self.native_board_ime(ime);
+                    return;
+                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -6353,10 +6384,14 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW)
                     )
                 {
-                    if self.settings_room_active() {
-                        self.close_settings_room();
-                    } else {
-                        self.close_active_tab();
+                    match self.internal_room_kind_at(self.active_window) {
+                        Some(crate::internal_room::InternalRoomKind::Settings) => {
+                            self.close_settings_room();
+                        }
+                        Some(crate::internal_room::InternalRoomKind::Board) => {
+                            self.close_board_room();
+                        }
+                        None => self.close_active_tab(),
                     }
                     window.request_redraw();
                     return;
@@ -6384,6 +6419,19 @@ impl ApplicationHandler<UserEvent> for App {
                         self.close_settings_room();
                     } else {
                         self.native_settings_key(&event);
+                    }
+                    window.request_redraw();
+                    return;
+                }
+                if self.board_room_active() {
+                    if matches!(event.state, ElementState::Pressed)
+                        && !event.repeat
+                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                        && self.board_scene.input().is_none()
+                    {
+                        self.close_board_room();
+                    } else {
+                        self.native_board_key(&event);
                     }
                     window.request_redraw();
                     return;
@@ -6485,6 +6533,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
         self.themegen_poll();
         self.native_settings_tick();
+        self.native_board_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
@@ -6840,6 +6889,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoturnclick();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
+        self.run_pending_autoboard();
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();

@@ -8,8 +8,8 @@
 use super::*;
 
 /// BSP 트리에만 앉는 설정 화면의 유일한 leaf id. PTY id는 `%N`이라 충돌하지 않는다.
-pub(crate) const SETTINGS_PANE_ID: &str = "\0kasaterm-settings";
-pub(crate) const SETTINGS_LABEL: &str = "설정";
+pub(crate) const SETTINGS_PANE_ID: &str =
+    crate::internal_room::InternalRoomKind::Settings.pane_id();
 
 /// 다음 렌더 단계가 웹 문맥 없이 읽을 수 있는 설정 화면 스냅샷.
 #[allow(dead_code)] // 다음 단계의 native painter가 이 typed snapshot을 소비한다.
@@ -334,65 +334,21 @@ impl SettingsScene {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn is_settings_layout(layout: &kasa_pty::PtyLayout) -> bool {
-    let leaves = layout.leaves();
-    leaves.len() == 1 && leaves[0] == SETTINGS_PANE_ID
+    crate::internal_room::is_layout(
+        layout,
+        crate::internal_room::InternalRoomKind::Settings,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn should_persist_layout(layout: &kasa_pty::PtyLayout) -> bool {
-    !is_settings_layout(layout)
-}
-
-fn remap_after_removal(index: usize, removed: usize) -> Option<usize> {
-    if index == removed {
-        None
-    } else {
-        Some(index.saturating_sub(usize::from(index > removed)))
-    }
+    crate::internal_room::should_persist_layout(layout)
 }
 
 /// 설정 marker를 대상으로 삼으면 안 되는 pane 구조 변경 종류.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SettingsMutation {
-    Split,
-    Tab,
-    Merge,
-    Move,
-    FilePreview,
-    WebPane,
-    RemotePane,
-    RemoteMirror,
-    Migrate,
-}
-
-impl SettingsMutation {
-    #[cfg(test)]
-    const ALL: [Self; 9] = [
-        Self::Split,
-        Self::Tab,
-        Self::Merge,
-        Self::Move,
-        Self::FilePreview,
-        Self::WebPane,
-        Self::RemotePane,
-        Self::RemoteMirror,
-        Self::Migrate,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Split => "split",
-            Self::Tab => "tab",
-            Self::Merge => "merge",
-            Self::Move => "move",
-            Self::FilePreview => "file preview",
-            Self::WebPane => "web pane",
-            Self::RemotePane => "remote pane",
-            Self::RemoteMirror => "remote mirror",
-            Self::Migrate => "migrate",
-        }
-    }
-}
+pub(crate) use crate::internal_room::InternalMutation as SettingsMutation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsToggle {
@@ -408,40 +364,34 @@ fn settings_toggle(active: bool, category: Option<SettingsCat>) -> SettingsToggl
     }
 }
 
+#[cfg(test)]
 pub(crate) fn pane_operation_allowed(pane: &str, _mutation: SettingsMutation) -> bool {
-    !is_settings_pane(pane)
+    crate::internal_room::pane_operation_allowed(pane, _mutation)
 }
 
 /// 렌더가 이미 `Workspace` lock을 잡은 채 호출할 수 있으므로 sentinel 비교만 한다.
 /// Settings pane은 생성 시 이 고정 id를 쓰며 다른 id로 바뀌지 않는다.
+#[cfg(test)]
 pub(crate) fn is_settings_pane(pane: &str) -> bool {
-    pane == SETTINGS_PANE_ID
+    crate::internal_room::InternalRoomKind::from_pane(pane)
+        == Some(crate::internal_room::InternalRoomKind::Settings)
 }
 
 /// 복원 파일에 내부 방이 잘못 실렸던 개발판도 안전하게 읽기 위한 표식 판정.
 /// 정식 저장 경로는 이 노드를 애초에 쓰지 않는다.
+#[cfg(test)]
 pub(crate) fn is_saved_settings_window(node: &serde_json::Value) -> bool {
-    node.get("leaf").is_some_and(|leaf| {
-        leaf.get("internal").and_then(|v| v.as_str()) == Some("settings")
-            || leaf.get("pane_id").and_then(|v| v.as_str()) == Some(SETTINGS_PANE_ID)
-    })
+    crate::internal_room::is_saved_window(node)
 }
 
 impl App {
     /// 현재 세션에 있는 설정 방. marker를 찾아 매번 계산하므로 reorder에 강하다.
     pub(crate) fn settings_room_index(&self) -> Option<usize> {
-        (0..self.windows.len()).find(|&idx| {
-            let layout = if idx == self.active_window {
-                self.pty_layout.as_ref()
-            } else {
-                self.windows.get(idx).and_then(Option::as_ref)
-            };
-            layout.is_some_and(is_settings_layout)
-        })
+        self.internal_room_index(crate::internal_room::InternalRoomKind::Settings)
     }
 
     pub(crate) fn settings_room_active(&self) -> bool {
-        self.settings_room_index() == Some(self.active_window)
+        self.internal_room_active(crate::internal_room::InternalRoomKind::Settings)
     }
 
     #[allow(dead_code)] // 다음 단계의 native painter 진입점.
@@ -450,23 +400,8 @@ impl App {
             .then(|| self.settings_scene.snapshot())
     }
 
-    pub(crate) fn pane_is_settings(&self, pane: &str) -> bool {
-        is_settings_pane(pane)
-    }
-
     /// pane 구조를 바꾸기 직전에 통과해야 하는 단일 관문. enum 인자를 강제해 새
     /// 호출자가 단순 "settings 아님" 검사를 복사하지 않고 작업 종류를 명시하게 한다.
-    pub(crate) fn ensure_user_mutation_target(
-        &self,
-        pane: &str,
-        mutation: SettingsMutation,
-    ) -> anyhow::Result<()> {
-        if !pane_operation_allowed(pane, mutation) {
-            anyhow::bail!("설정 방은 {} 대상이 될 수 없다", mutation.label());
-        }
-        Ok(())
-    }
-
     /// 파일·웹처럼 요청 pane이 없거나 이미 사라졌으면 현재 pane으로 폴백하는
     /// 진입점용. 반환된 값은 항상 BSP의 바깥 leaf이고 Settings marker가 아니다.
     pub(crate) fn resolve_user_mutation_anchor(
@@ -498,20 +433,7 @@ impl App {
     }
 
     pub(crate) fn user_room_count(&self) -> usize {
-        self.windows
-            .len()
-            .saturating_sub(usize::from(self.settings_room_index().is_some()))
-    }
-
-    fn active_user_pane(&self) -> Option<String> {
-        if self.settings_room_active() {
-            return None;
-        }
-        self.ws
-            .lock()
-            .ok()
-            .and_then(|ws| ws.active_pane.clone())
-            .filter(|pane| pane != SETTINGS_PANE_ID)
+        self.windows.len().saturating_sub(self.internal_room_count())
     }
 
     /// 기어/⌘, 진입점. 이미 만든 방이 있으면 그것을 재사용하고, 없을 때만 PTY 없는
@@ -668,7 +590,9 @@ impl App {
 
         // 설정 방 뒤의 사용자 인덱스가 한 칸 당겨지므로 인덱스를 키로 쓰는 chrome
         // 상태도 같은 규칙으로 옮긴다.
-        let remap = |idx: usize| remap_after_removal(idx, settings_idx).unwrap_or(0);
+        let remap = |idx: usize| {
+            crate::internal_room::remap_after_removal(idx, settings_idx).unwrap_or(0)
+        };
         self.window_name_override = std::mem::take(&mut self.window_name_override)
             .into_iter()
             .filter(|(idx, _)| *idx != settings_idx)
@@ -739,9 +663,9 @@ mod tests {
 
     #[test]
     fn close_remaps_only_rooms_after_the_internal_room() {
-        assert_eq!(remap_after_removal(0, 1), Some(0));
-        assert_eq!(remap_after_removal(1, 1), None);
-        assert_eq!(remap_after_removal(2, 1), Some(1));
+        assert_eq!(crate::internal_room::remap_after_removal(0, 1), Some(0));
+        assert_eq!(crate::internal_room::remap_after_removal(1, 1), None);
+        assert_eq!(crate::internal_room::remap_after_removal(2, 1), Some(1));
     }
 
     #[test]
@@ -765,7 +689,7 @@ mod tests {
             assert!(!pane_operation_allowed(SETTINGS_PANE_ID, mutation));
             assert!(pane_operation_allowed("%0", mutation));
         }
-        assert_eq!(SETTINGS_LABEL, "설정");
+        assert_eq!(crate::internal_room::InternalRoomKind::Settings.label(), "설정");
     }
 
     #[test]

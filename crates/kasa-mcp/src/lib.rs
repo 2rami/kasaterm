@@ -38,7 +38,11 @@ mod resume_visibility;
 pub mod standalone;
 pub mod team;
 pub mod tunnel;
-pub use http::{claude_bin, remote_token, session_token, spawn_http_server, spawn_http_server_opts};
+pub use http::{
+    claude_bin, pane_tasks_snapshot, remote_token, schedule_add, schedule_delete,
+    schedule_snapshot, schedule_toggle, session_token, spawn_http_server,
+    spawn_http_server_opts, PaneTaskView, ScheduleItem,
+};
 pub use http::push_viewer_control;
 pub use register::register_clients;
 

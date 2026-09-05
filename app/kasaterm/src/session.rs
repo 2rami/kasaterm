@@ -3375,7 +3375,7 @@ impl App {
         if from >= n || to > n {
             return;
         }
-        if self.settings_room_index() == Some(from) {
+        if self.internal_room_kind_at(from).is_some() {
             return;
         }
         // 뽑고 난 뒤 기준의 착지 인덱스. 제자리면 옮길 것이 없다.
@@ -3664,7 +3664,7 @@ impl App {
         if c.window < self.windows.len() && c.window != self.active_window {
             self.switch_window(c.window);
         }
-        if self.settings_room_active() && !self.return_from_settings_room() {
+        if self.internal_room_active_any() && !self.return_from_active_internal_room() {
             // 설정 sole-leaf를 되살리기 anchor로 쓰지 않는다. 돌아갈 사용자 방이
             // 없다면 레코드를 잃지 않고 제자리에 돌려놓는다.
             self.closed_panes.push(c);
@@ -3814,11 +3814,14 @@ impl App {
         if idx >= self.windows.len() {
             anyhow::bail!("no such window: {idx}");
         }
-        if self.settings_room_index() == Some(idx) {
-            return self
-                .close_settings_room()
+        if let Some(kind) = self.internal_room_kind_at(idx) {
+            let closed = match kind {
+                crate::internal_room::InternalRoomKind::Settings => self.close_settings_room(),
+                crate::internal_room::InternalRoomKind::Board => self.close_board_room(),
+            };
+            return closed
                 .then_some(())
-                .ok_or_else(|| anyhow::anyhow!("cannot close settings room"));
+                .ok_or_else(|| anyhow::anyhow!("cannot close internal room"));
         }
         // 설정 방이 옆에 있어도 마지막 사용자 방은 마지막이다. `windows.len()`만
         // 보면 사용자 방 하나 + 설정 방 하나를 둘로 세어 작업 공간을 없앨 수 있다.
@@ -3841,11 +3844,10 @@ impl App {
             }
         }
         if idx == self.active_window {
-            let settings = self.settings_room_index();
             let target = (0..idx)
                 .rev()
                 .chain(idx + 1..self.windows.len())
-                .find(|candidate| Some(*candidate) != settings)
+                .find(|candidate| self.internal_room_kind_at(*candidate).is_none())
                 .ok_or_else(|| anyhow::anyhow!("no user window remains"))?;
             self.pty_layout = self.windows[target].take();
             self.windows.remove(idx);
@@ -3896,8 +3898,8 @@ impl App {
         let mut out = Vec::with_capacity(n);
         let ws = self.ws.lock().unwrap();
         for i in 0..n {
-            if self.settings_room_index() == Some(i) {
-                out.push((crate::settings_room::SETTINGS_LABEL.to_string(), String::new()));
+            if let Some(kind) = self.internal_room_kind_at(i) {
+                out.push((kind.label().to_string(), String::new()));
                 continue;
             }
             // Representative pane = first leaf of the window's layout. The
@@ -5118,7 +5120,7 @@ impl App {
                 let x = x0 + vi as f32 * (tab_w + gap);
                 tabs.push((i, (x, y, tab_w, tab_h)));
                 if n > 1
-                    && (self.settings_room_index() == Some(i) || self.user_room_count() > 1)
+                    && (self.internal_room_kind_at(i).is_some() || self.user_room_count() > 1)
                 {
                     let cs = 14.0;
                     closes.push((i, (x + tab_w - cs - 5.0, y + (tab_h - cs) / 2.0, cs, cs)));
@@ -5180,7 +5182,7 @@ impl App {
             }
             tabs.push((i, (tab_x, y, tab_w, h)));
             if n > 1
-                && (self.settings_room_index() == Some(i) || self.user_room_count() > 1)
+                && (self.internal_room_kind_at(i).is_some() || self.user_room_count() > 1)
             {
                 let cs = 14.0;
                 // Centered on the *name* row (drawn at y+11, 13.5px) rather than
@@ -5343,13 +5345,11 @@ impl App {
                     None => continue,
                 }
             };
-            let persisted_active_window = if i == self.active_session
-                && self.settings_room_index() == Some(active_window)
-            {
-                self.settings_scene
-                    .return_pane()
-                    .and_then(|pane| self.window_of_pane(pane))
-                    .filter(|idx| *idx != active_window)
+            let persisted_active_window = if i == self.active_session {
+                if let Some(kind) = self.internal_room_kind_at(active_window) {
+                    self.internal_return_pane(kind)
+                        .and_then(|pane| self.window_of_pane(pane))
+                        .filter(|idx| *idx != active_window)
                     .or_else(|| {
                         (0..windows.len()).find(|idx| {
                             let layout = if *idx == active_window {
@@ -5357,10 +5357,13 @@ impl App {
                             } else {
                                 windows.get(*idx).and_then(Option::as_ref)
                             };
-                            layout.is_some_and(crate::settings_room::should_persist_layout)
+                            layout.is_some_and(crate::internal_room::should_persist_layout)
                         })
                     })
                     .unwrap_or(0)
+                } else {
+                    active_window
+                }
             } else {
                 active_window
             };
@@ -5378,7 +5381,7 @@ impl App {
                     slot.as_ref()
                 };
                 let Some(layout) = layout else { continue };
-                if !crate::settings_room::should_persist_layout(layout) {
+                if !crate::internal_room::should_persist_layout(layout) {
                     continue;
                 }
                 if j == persisted_active_window {
@@ -5416,15 +5419,17 @@ impl App {
         // 숨긴 것(`stashed`)만 싣는다. ⌘W 로 닫은 것은 두 정리 루프가 언젠가 놓는
         // 임시 기록이라 앱 수명을 넘겨 되살릴 값이 아니고, 그것까지 실으면 껐다 켤
         // 때마다 되살리기 목록이 옛 묘비로 불어난다.
-        let settings_window = self.settings_room_index();
+        let internal_windows: Vec<usize> = (0..self.windows.len())
+            .filter(|idx| self.internal_room_kind_at(*idx).is_some())
+            .collect();
         let closed_json: Vec<serde_json::Value> = self
             .closed_panes
             .iter()
             .filter(|c| c.stashed && !c.rec.is_null())
             .map(|c| {
-                let window = c.window.saturating_sub(usize::from(
-                    settings_window.is_some_and(|settings| settings < c.window),
-                ));
+                let window = c.window.saturating_sub(
+                    internal_windows.iter().filter(|idx| **idx < c.window).count(),
+                );
                 serde_json::json!({
                     "rec": c.rec,
                     "pane_id": c.pane_id,
@@ -5780,7 +5785,7 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
-                if crate::settings_room::is_saved_settings_window(node) {
+                if crate::internal_room::is_saved_window(node) {
                     return;
                 }
                 // 이 함수는 복원 확인창을 그릴 때마다 불린다. 디스크 rollout 확인은
@@ -5821,7 +5826,7 @@ impl App {
     pub(crate) fn count_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if node.get("leaf").is_some() {
-                if !crate::settings_room::is_saved_settings_window(node) {
+                if !crate::internal_room::is_saved_window(node) {
                     *n += 1;
                 }
             } else if let Some(split) = node.get("split") {
@@ -5880,7 +5885,7 @@ impl App {
     pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
         fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
             if let Some(leaf) = n.get("leaf") {
-                if crate::settings_room::is_saved_settings_window(n) {
+                if crate::internal_room::is_saved_window(n) {
                     return;
                 }
                 if let Some(c) = leaf
@@ -5989,6 +5994,7 @@ impl App {
         self.pty_layout = None;
         self.windows.clear();
         self.settings_scene.leave();
+        self.board_scene.leave();
         // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
         // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
         // 그래서 앞 차례의 leaf 가 새로 배정받다가 뒤 leaf 의 학생을 집어가면, 뒤
@@ -6005,7 +6011,7 @@ impl App {
         let (cols, rows) = self.window_cells();
         let mut restored_active = 0usize;
         for (j, w) in windows.iter().enumerate() {
-            if crate::settings_room::is_saved_settings_window(w) {
+            if crate::internal_room::is_saved_window(w) {
                 continue;
             }
             let tree = self.restore_window_layout(w, cols, rows);

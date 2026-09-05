@@ -82,22 +82,22 @@ async fn git_push_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 // 모두 "정해진 시각에 surface 로 text 를 send" 로 통일. loop=interval 마다 반복,
 // cron=at_ts 1회, timer=now+interval 1회. 백그라운드 task 가 10s 마다 발사한다.
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct ScheduleItem {
-    id: String,
-    kind: String, // "loop" | "cron" | "timer"
-    surface: String,
-    text: String,
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct ScheduleItem {
+    pub id: String,
+    pub kind: String, // "loop" | "cron" | "timer"
+    pub surface: String,
+    pub text: String,
     #[serde(default)]
-    interval_sec: u64,
+    pub interval_sec: u64,
     #[serde(default)]
-    at_ts: f64,
+    pub at_ts: f64,
     #[serde(default)]
-    next_ts: f64,
+    pub next_ts: f64,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub enabled: bool,
     #[serde(default)]
-    label: String,
+    pub label: String,
 }
 fn default_true() -> bool {
     true
@@ -129,6 +129,76 @@ fn write_schedule(items: &[ScheduleItem]) {
     if let Ok(s) = serde_json::to_string_pretty(items) {
         let _ = std::fs::write(&p, s);
     }
+}
+
+/// 네이티브 보드와 HTTP 화면이 함께 읽는 스케줄 스냅샷. 파일 접근이 있으므로
+/// GUI 렌더가 아니라 worker에서 호출해야 한다.
+pub fn schedule_snapshot() -> Vec<ScheduleItem> {
+    read_schedule()
+}
+
+pub fn schedule_add(
+    kind: &str,
+    surface: &str,
+    text: &str,
+    interval_sec: u64,
+    at_ts: f64,
+    label: &str,
+) -> anyhow::Result<String> {
+    if !matches!(kind, "loop" | "cron" | "timer")
+        || surface.is_empty()
+        || text.trim().is_empty()
+    {
+        anyhow::bail!("kind/surface/text required");
+    }
+    let now = now_unix();
+    let next_ts = if kind == "cron" {
+        at_ts
+    } else {
+        now + interval_sec.max(1) as f64
+    };
+    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
+    let item = ScheduleItem {
+        id: id.clone(),
+        label: label.to_string(),
+        kind: kind.to_string(),
+        surface: surface.to_string(),
+        text: text.trim().to_string(),
+        interval_sec,
+        at_ts,
+        next_ts,
+        enabled: true,
+    };
+    let mut items = read_schedule();
+    items.push(item);
+    write_schedule(&items);
+    Ok(id)
+}
+
+pub fn schedule_toggle(id: &str) -> bool {
+    let mut items = read_schedule();
+    let mut changed = false;
+    for item in &mut items {
+        if item.id == id {
+            item.enabled = !item.enabled;
+            changed = true;
+        }
+    }
+    if changed {
+        write_schedule(&items);
+    }
+    changed
+}
+
+pub fn schedule_delete(id: &str) -> bool {
+    let mut items = read_schedule();
+    let before = items.len();
+    items.retain(|item| item.id != id);
+    let changed = before != items.len();
+    if changed {
+        write_schedule(&items);
+    }
+    changed
 }
 
 /// 10초마다 due 항목 발사. loop 는 next_ts 갱신, cron/timer 는 발사 후 disable.
@@ -370,27 +440,11 @@ async fn schedule_add_handler(body: String) -> impl IntoResponse {
     }
     let interval_sec = v.get("interval_sec").and_then(|x| x.as_u64()).unwrap_or(0);
     let at_ts = v.get("at_ts").and_then(|x| x.as_f64()).unwrap_or(0.0);
-    let now = now_unix();
-    let next_ts = match kind.as_str() {
-        "cron" => at_ts,
-        _ => now + interval_sec.max(1) as f64, // loop·timer
-    };
-    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
-    let item = ScheduleItem {
-        id: id.clone(),
-        label: v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        kind,
-        surface,
-        text,
-        interval_sec,
-        at_ts,
-        next_ts,
-        enabled: true,
-    };
-    let mut items = read_schedule();
-    items.push(item);
-    write_schedule(&items);
-    (cors, Json(serde_json::json!({ "ok": true, "id": id })))
+    let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("");
+    match schedule_add(&kind, &surface, &text, interval_sec, at_ts, label) {
+        Ok(id) => (cors, Json(serde_json::json!({ "ok": true, "id": id }))),
+        Err(error) => (cors, Json(serde_json::json!({ "ok": false, "error": error.to_string() }))),
+    }
 }
 
 /// `POST /schedule-delete?id=<id>` — 항목 삭제(없으면 toggle 용 enabled 도 받음).
@@ -399,23 +453,15 @@ async fn schedule_delete_handler(
 ) -> impl IntoResponse {
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     let id = params.get("id").cloned().unwrap_or_default();
-    let mut items = read_schedule();
-    let before = items.len();
     if let Some(toggle) = params.get("toggle") {
         // toggle=1 → enabled 뒤집기(삭제 대신).
         if toggle == "1" {
-            for it in items.iter_mut() {
-                if it.id == id {
-                    it.enabled = !it.enabled;
-                }
-            }
-            write_schedule(&items);
+            schedule_toggle(&id);
             return (cors, Json(serde_json::json!({ "ok": true })));
         }
     }
-    items.retain(|it| it.id != id);
-    write_schedule(&items);
-    (cors, Json(serde_json::json!({ "ok": true, "removed": before - items.len() })))
+    let removed = usize::from(schedule_delete(&id));
+    (cors, Json(serde_json::json!({ "ok": true, "removed": removed })))
 }
 
 /// `POST /open-file?path=<abs>` — OS 기본 뷰어로 파일 열기(대화창 이미지 클릭 →
@@ -689,35 +735,37 @@ fn task_is_mine(owner: &str, me: &str, shared: bool) -> bool {
     }
 }
 
-/// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
-/// `pane_session_ids`(bound transcript stem) → 없으면 board cwd 로 팀 task 디렉토리 폴백.
-async fn pane_tasks_handler(
-    backend: Arc<dyn Backend>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-    let surface = params.get("surface").cloned().unwrap_or_default();
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct PaneTaskView {
+    pub pane: String,
+    pub id: String,
+    pub subject: String,
+    pub status: String,
+    pub owner: String,
+    pub mine: bool,
+}
+
+/// 네이티브 보드와 HTTP 화면의 공통 태스크 수집. 디스크와 transcript를 읽으므로
+/// GUI 렌더가 아니라 worker에서 호출해야 한다.
+pub fn pane_tasks_snapshot(
+    backend: &Arc<dyn Backend>,
+    surface: Option<&str>,
+) -> Vec<PaneTaskView> {
     let board = backend.collab_board().unwrap_or_default();
-    let reported: std::collections::HashMap<String, String> =
-        backend.pane_session_ids().unwrap_or_default().into_iter().collect();
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut debug: Vec<serde_json::Value> = Vec::new();
-    // cwd 팀 폴백은 한 pane 에만 매긴다 — 같은 cwd 의 여러 pane 이 같은 옛 팀(TeamCreate)
-    // 디렉토리를 공유해, 매핑 못 잡은 pane 마다 똑같은 태스크가 중복으로 떴다(거노: 두
-    // 미도리가 같은 태스크). 처음 그 팀을 가져간 pane 만 표시(surface 명시 단일 요청은
-    // board 가 1행이라 영향 없음).
-    let mut claimed_team: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let reported: std::collections::HashMap<String, String> = backend
+        .pane_session_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let mut out = Vec::new();
+    let mut claimed_team = std::collections::HashSet::new();
     for row in &board {
-        if !surface.is_empty() && row.surface_id != surface {
+        if surface.is_some_and(|surface| row.surface_id != surface) {
             continue;
         }
-        // 1) bound transcript session(solo claude — session==task), 2) 팀(cwd) 폴백.
         let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
         let mut tasks = read_claude_tasks(&reported_sid);
-        // 세션 저장소는 그 pane 혼자 쓰고, 방 저장소는 여럿이 나눠 쓴다 — 주인 판정이
-        // 갈리는 지점이라 어느 쪽에서 읽었는지를 들고 간다.
         let mut shared = false;
-        // 팀 이름이 정본 — 없을 때만(트리플 없이 뜬 pane·옛 TeamCreate 팀) cwd 로 더듬는다.
         let team = row
             .team
             .as_deref()
@@ -731,24 +779,34 @@ async fn pane_tasks_handler(
                 }
             }
         }
-        debug.push(serde_json::json!({
-            "pane": row.surface_id, "cwd": row.cwd, "reported_session": reported_sid,
-            "team_dir": team.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            "n": tasks.len(),
-        }));
-        // 주인 판정은 **여기서** 한다 — 웹뷰는 pane 의 surface_id 만 알고 그 pane 이 어떤
-        // 에이전트 이름으로 떠 있는지는 모른다. 이름 비교를 UI 로 넘기면 board 타입에
-        // agent_name 을 실어 나르는 배관이 하나 더 생긴다.
         let me = row.agent_name.as_deref().unwrap_or("");
         for (id, subject, status, owner) in tasks {
-            out.push(serde_json::json!({
-                "pane": row.surface_id, "id": id, "subject": subject,
-                "status": status, "owner": owner,
-                "mine": task_is_mine(&owner, me, shared),
-            }));
+            out.push(PaneTaskView {
+                pane: row.surface_id.clone(),
+                id,
+                subject,
+                status,
+                mine: task_is_mine(&owner, me, shared),
+                owner,
+            });
         }
     }
-    (cors, Json(serde_json::json!({ "ok": true, "tasks": out, "debug": debug })))
+    out
+}
+
+/// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
+/// `pane_session_ids`(bound transcript stem) → 없으면 board cwd 로 팀 task 디렉토리 폴백.
+async fn pane_tasks_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let surface = params.get("surface").cloned().unwrap_or_default();
+    let out = pane_tasks_snapshot(
+        &backend,
+        (!surface.is_empty()).then_some(surface.as_str()),
+    );
+    (cors, Json(serde_json::json!({ "ok": true, "tasks": out })))
 }
 
 /// `POST /paste-image?surface=%N` (body=이미지 raw 바이트) — 아로나 프롬프트 입력창에

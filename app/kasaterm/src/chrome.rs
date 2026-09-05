@@ -519,7 +519,7 @@ impl App {
     /// `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면 창이 좁을 때
     /// 예산을 건너뛰고 겹쳐 그리게 된다.
     fn chrome_wants(&self) -> (f32, f32, f32) {
-        if self.settings_room_active() {
+        if self.internal_room_active_any() {
             return (
                 if self.sidebar_visible && !self.tabs_on_top {
                     self.sidebar_w_logical
@@ -747,7 +747,7 @@ impl App {
     }
     /// 페르소나 탭이 지금 화면에 있어야 하나 — 우측 패널이 열려 있고 그 탭이 선택된 때.
     pub(crate) fn persona_active(&self) -> bool {
-        !self.settings_room_active()
+        !self.internal_room_active_any()
             && self.git.col_visible
             && self.info.tab == state::SideTab::Persona
     }
@@ -852,7 +852,7 @@ impl App {
     /// (`set_footer_default`) decides it unless this pane sits in an exception
     /// set: `shown` forces it on, `hidden` forces it off.
     pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
-        if self.pane_is_settings(id) {
+        if self.pane_is_internal(id) {
             return false;
         }
         if self.statusbar.shown.contains(id) {
@@ -910,7 +910,7 @@ impl App {
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.
     pub(crate) fn toggle_git_col(&mut self) {
-        if self.settings_room_active() {
+        if self.internal_room_active_any() {
             return;
         }
         self.git.col_visible = !self.git.col_visible;
@@ -929,7 +929,7 @@ impl App {
     /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
     /// is all the state it needs.
     pub(crate) fn toggle_statusbar(&mut self, id: &str) {
-        if self.pane_is_settings(id) {
+        if self.pane_is_internal(id) {
             return;
         }
         // Record this pane as an exception to the global default — drop any
@@ -965,7 +965,7 @@ impl App {
     /// clicks land a row off, which is the same class of bug as the zoom
     /// mapping. `chrome_dirty` alone would repaint but not re-measure.
     pub(crate) fn toggle_pane_header(&mut self, id: &str) {
-        if self.pane_is_settings(id) {
+        if self.pane_is_internal(id) {
             return;
         }
         {
@@ -1249,7 +1249,7 @@ impl App {
     /// 서버는 브라우저가 리다이렉트해준다).
     /// 창 맨 아래 상태줄 높이(logical px). 설정에서 바뀌므로 상수를 직접 읽지 마라.
     pub(crate) fn status_h(&self) -> f32 {
-        if self.settings_room_active() {
+        if self.internal_room_active_any() {
             0.0
         } else {
             self.set_status_h
@@ -1804,7 +1804,7 @@ impl App {
 
     /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.
     pub(crate) fn toggle_window_expand(&mut self, idx: usize) {
-        if self.settings_room_index() == Some(idx) {
+        if self.internal_room_kind_at(idx).is_some() {
             return;
         }
         let opening = !self.expanded_windows.contains(&idx);
@@ -1830,7 +1830,7 @@ impl App {
         idx: usize,
         tab: (f32, f32, f32, f32),
     ) -> Option<(f32, f32, f32, f32)> {
-        if self.settings_room_index() == Some(idx) {
+        if self.internal_room_kind_at(idx).is_some() {
             return None;
         }
         let n = self.window_leaves(idx).len();
@@ -1899,9 +1899,16 @@ impl App {
         {
             // 설정은 고정 이름의 내부 방이다. 클릭은 전환만 하고 이름 편집·드래그는
             // 장전하지 않는다.
-            if self.settings_room_index() == Some(idx) {
+            if let Some(kind) = self.internal_room_kind_at(idx) {
                 self.commit_room_rename();
-                self.open_settings_room(None);
+                match kind {
+                    crate::internal_room::InternalRoomKind::Settings => {
+                        self.open_settings_room(None);
+                    }
+                    crate::internal_room::InternalRoomKind::Board => {
+                        self.open_board_room();
+                    }
+                }
                 return true;
             }
             // 펼치기 버튼만 전환의 예외다 — 그 배지 크기.
@@ -2002,7 +2009,7 @@ impl App {
     /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
     /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
     pub(crate) fn dock_reserve_h(&self) -> f32 {
-        if self.settings_room_active() {
+        if self.internal_room_active_any() {
             return 0.0;
         }
         if self.docked.is_empty() && self.zoomed_pane.is_none() {
@@ -2265,7 +2272,7 @@ impl App {
     }
     /// Show/hide the file-tree column. Same reflow path as `toggle_sidebar`.
     pub(crate) fn toggle_file_tree(&mut self) {
-        if self.settings_room_active() {
+        if self.internal_room_active_any() {
             return;
         }
         self.file_tree.visible = !self.file_tree.visible;
@@ -2466,8 +2473,8 @@ impl App {
             self.toggle_git_col();
         }
     }
-    pub(crate) fn toggle_board_panel(&mut self, event_loop: &ActiveEventLoop) {
-        self.toggle_inline_web(event_loop, InlineWebKind::Board);
+    pub(crate) fn toggle_board_panel(&mut self, _event_loop: &ActiveEventLoop) {
+        self.toggle_board_room();
     }
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         if !crate::socket::read_shim_inject() {
@@ -2478,9 +2485,11 @@ impl App {
     }
 
     pub(crate) fn close_arona_panel(&mut self) {
-        if self.inline_web.as_ref().is_some_and(|h| {
-            matches!(h.kind, InlineWebKind::Arona | InlineWebKind::Board)
-        }) {
+        if self
+            .inline_web
+            .as_ref()
+            .is_some_and(|h| h.kind == InlineWebKind::Arona)
+        {
             self.close_inline_web();
         }
     }
@@ -2501,10 +2510,7 @@ impl App {
         self.close_inline_web();
         let (port, _) = crate::mcp_panel_port_certain();
         if !arona_web_reachable(&port) {
-            let label = match kind {
-                InlineWebKind::Arona => "아로나",
-                InlineWebKind::Board => "보드",
-            };
+            let label = "아로나";
             self.set_toast(format!("{label} 화면을 열지 못했어요 — 잠시 뒤 다시 시도해 주세요"));
             eprintln!("[inline-web] page unreachable: kind={kind:?} port={port}");
             return false;
@@ -2517,18 +2523,8 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let url = match kind {
-            InlineWebKind::Arona => {
-                format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&view=classroom")
-            }
-            InlineWebKind::Board => {
-                format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&panel=board")
-            }
-        };
-        let _title = match kind {
-            InlineWebKind::Arona => "아로나".to_string(),
-            InlineWebKind::Board => "보드".to_string(),
-        };
+        let url = format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&view=classroom");
+        let _title = "아로나".to_string();
         let background = (20, 22, 28, 255);
         let builder = wry::WebViewBuilder::new()
             .with_url(url.clone())
@@ -2601,18 +2597,6 @@ impl App {
         cat: Option<crate::SettingsCat>,
     ) {
         self.toggle_settings_room(cat);
-    }
-
-    fn toggle_inline_web(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        kind: InlineWebKind,
-    ) {
-        if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
-            self.close_inline_web();
-        } else {
-            let _ = self.open_inline_web(event_loop, kind);
-        }
     }
 
     pub(crate) fn close_inline_web(&mut self) {
@@ -3225,8 +3209,15 @@ impl App {
     /// in that session is running a job, else close it now. The app stays open —
     /// this is the per-session path, distinct from the whole-app quit above.
     pub(crate) fn confirm_or_close_session(&mut self, idx: usize) {
-        if self.settings_room_index() == Some(idx) {
-            self.close_settings_room();
+        if let Some(kind) = self.internal_room_kind_at(idx) {
+            match kind {
+                crate::internal_room::InternalRoomKind::Settings => {
+                    self.close_settings_room();
+                }
+                crate::internal_room::InternalRoomKind::Board => {
+                    self.close_board_room();
+                }
+            }
             return;
         }
         if self.guard_dirty(&PendingClose::Session(idx)) {

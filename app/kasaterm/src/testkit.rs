@@ -4727,6 +4727,23 @@ impl App {
         eprintln!("[autoarona] toggle in {ms}ms");
         self.autoarona_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
+    /// Headless native board-room verification. Unlike AUTOARONA this never
+    /// creates a webview; it switches to the PTY-less WGPU room.
+    pub(crate) fn arm_autoboard(&mut self) {
+        let Ok(ms_str) = std::env::var("KASATERM_AUTOBOARD_MS") else { return };
+        let Ok(ms) = ms_str.parse::<u64>() else { return };
+        self.autoboard_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
+    pub(crate) fn run_pending_autoboard(&mut self) {
+        let Some(due) = self.autoboard_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.autoboard_at = None;
+        self.toggle_board_room();
+        eprintln!("[autoboard] toggled → open={}", self.board_room_active());
+    }
     pub(crate) fn run_pending_autoarona(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,

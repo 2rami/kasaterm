@@ -11,6 +11,7 @@
 
 mod autosuggest;
 mod bridge;
+mod board_room;
 mod cells;
 mod chrome;
 mod claude_auth;
@@ -22,6 +23,7 @@ mod input;
 mod layout;
 mod lineedit;
 mod markdown;
+mod native_board;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
@@ -48,6 +50,7 @@ mod webpane;
 pub(crate) use chrome::Density;
 mod gitdiff;
 mod info;
+mod internal_room;
 mod links;
 mod lsp;
 mod machinescol;
@@ -1522,7 +1525,6 @@ struct TabDrag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InlineWebKind {
     Arona,
-    Board,
 }
 
 pub(crate) struct InlineWebHost {
@@ -1886,6 +1888,8 @@ enum PaneContent {
     Web(WebPane),
     /// PTY 없는 네이티브 설정 방. 화면 상태는 `App.settings_scene`가 소유한다.
     Settings,
+    /// PTY 없는 네이티브 보드 방. 화면 상태는 `App.board_scene`가 소유한다.
+    Board,
 }
 
 /// 웹(브라우저) pane 의 그리드 쪽 상태 — 주소뿐이다. 실제 브라우저는 이 pane
@@ -4069,6 +4073,9 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 설정 방의 폼 입력. 필드를 함께 실어야 조합 중 다른 칸을 눌렀을 때
     /// 마지막 음절이 새 칸이 아니라 떠나는 칸에 확정된다.
     Settings(SettingsInput),
+    /// PTY 없는 보드 방의 입력. 필드를 함께 실어 조합 중 탭 이동도 떠나는 칸에
+    /// 확정되게 한다.
+    Board(native_board::BoardInput),
 }
 
 impl ImeFocus {
@@ -4613,6 +4620,8 @@ struct App {
     autotoggle_sidebar_at: Option<Instant>,
     /// Headless arona-panel toggle deadline (KASATERM_AUTOARONA_MS).
     autoarona_at: Option<Instant>,
+    /// Headless native board-room toggle deadline (KASATERM_AUTOBOARD_MS).
+    autoboard_at: Option<Instant>,
     /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
     /// 1.5s apart, to stress hide↔show reflow without a human.
     autotoggle_left: u32,
@@ -5267,6 +5276,8 @@ struct App {
     git_ignore_started: bool,
     /// PTY 없는 싱글턴 설정 방의 카테고리와 돌아갈 사용자 pane.
     settings_scene: settings_room::SettingsScene,
+    /// PTY 없는 싱글턴 운영 보드와 마지막 사용자 pane 기준.
+    board_scene: native_board::Scene,
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
@@ -5575,6 +5586,7 @@ impl App {
             autowindow_at: None,
             autotoggle_sidebar_at: None,
             autoarona_at: None,
+            autoboard_at: None,
             autotoggle_left: 0,
             autotabs_n: 0,
             autotabs_at: None,
@@ -5791,6 +5803,7 @@ impl App {
             // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
             // 위에서 담당한다.
             settings_scene: settings_room::SettingsScene::default(),
+            board_scene: native_board::Scene::default(),
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_open_mode: socket::read_file_open_mode(),
             set_file_open_app: socket::read_file_open_app(),

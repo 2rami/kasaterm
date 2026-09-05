@@ -3550,6 +3550,7 @@ impl App {
                             PaneContent::Image(_) => "image",
                             PaneContent::Markdown(_) => "file-text",
                             PaneContent::Settings => "settings",
+                            PaneContent::Board => "rows-2",
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
@@ -3849,6 +3850,19 @@ impl App {
             })
             .flatten();
         let mut settings_paint = None;
+        let board_snapshot = self
+            .board_room_active()
+            .then(|| {
+                let left = self.effective_sidebar_w();
+                self.native_board_snapshot((
+                    left,
+                    TITLE_HEIGHT,
+                    (win_px.0 / scale - left).max(1.0),
+                    (win_px.1 / scale - TITLE_HEIGHT).max(1.0),
+                ))
+            })
+            .flatten();
+        let mut board_paint = None;
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -9806,6 +9820,9 @@ impl App {
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
+            if let Some(snapshot) = board_snapshot.as_ref() {
+                board_paint = Some(crate::native_board::paint(g, snapshot));
+            }
             Self::paint_gpu_overlays(g, &overlay);
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
@@ -13368,6 +13385,9 @@ impl App {
         }
         if let Some(output) = settings_paint {
             self.finish_native_settings_paint(output);
+        }
+        if let Some(output) = board_paint {
+            self.finish_native_board_paint(output);
         }
         if let Some(p) = self.account_switch_confirm.as_mut() {
             if !account_confirm_hits.is_empty() {

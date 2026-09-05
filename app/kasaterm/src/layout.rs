@@ -2352,7 +2352,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .iter()
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)?;
-        if idx == self.active_window || self.settings_room_index() == Some(idx) {
+        if idx == self.active_window || self.internal_room_kind_at(idx).is_some() {
             return None;
         }
         self.windows
