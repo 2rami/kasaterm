@@ -220,6 +220,33 @@ mod tests {
     /// (2026-09-05 지시). 옮겨도 안전한 근거는 둘이다: 인덱스를 키로 쓰는 필드가
     /// 하나도 빠짐없이 `reorder_window` 의 remap 을 지나고, 내부 방은 애초에 저장에서
     /// 빠져 바뀐 순서가 기록에 남지 않는다.
+    /// 내부 방(설정·보드)도 창 하단 상태줄에 자리를 남겨야 한다.
+    ///
+    /// 한때 `status_h()` 가 내부 방에서 0 을 냈다 — 패널이 창을 다 쓰게 하려던
+    /// 것인데, 상태줄을 **그리는** 쪽은 그 0 을 그대로 받아 `win_h - 0` 에서 띠를
+    /// 시작했고, 글자만 창 밖으로 밀려 반쯤 잘린 채 보였다(2026-09-05 지적).
+    /// 자리를 안 주려면 그리지도 말아야 하는데 그리기로 한 이상, 높이는 어느
+    /// 방에서나 같고 패널이 그만큼 물러선다.
+    #[test]
+    fn internal_rooms_leave_room_for_the_status_bar() {
+        let chrome = include_str!("chrome.rs");
+        let after = chrome
+            .split_once("pub(crate) fn status_h(&self) -> f32 {")
+            .expect("status_h")
+            .1;
+        let body = &after[..after.find("\n    }\n").expect("함수 끝")];
+        assert!(
+            !body.contains("internal_room_active_any"),
+            "높이를 0 으로 내리면 상태줄이 창 밖에서 그려진다"
+        );
+        let render = include_str!("render.rs");
+        assert_eq!(
+            render.matches("- TITLE_HEIGHT - status_h").count(),
+            2,
+            "설정·보드 두 패널 모두 상태줄 자리를 남겨야 한다"
+        );
+    }
+
     #[test]
     fn internal_rooms_can_be_reordered_in_the_sidebar() {
         let session = include_str!("session.rs");
