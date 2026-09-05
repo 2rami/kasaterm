@@ -189,6 +189,87 @@ pub(crate) fn overlay_ultracode_label(rows: &mut [Vec<GridCell>]) {
     }
 }
 
+/// codex 자리의 세션 이름 배지.
+///
+/// claude 는 **CLI 가 스스로** 입력박스 위보더 우측 끝에 `/rename` 이름을 그린다
+/// (2.1.228 실측: `─────… codex /rename, /resume ─`). codex 에는 그런 게 없어서, codex
+/// 창은 화면만 보고는 무슨 일을 하는 자리인지 알 수가 없었다(2026-09-05 지적). 앱이
+/// 그 자리를 대신 채운다 — 헤더의 제목과 달리 **pane 화면 안에** 붙으므로, 창을
+/// 여럿 늘어놓고 볼 때 눈이 헤더까지 올라가지 않아도 된다.
+///
+/// codex 입력창은 보더가 없으므로(`PromptBox::Filled`) **바로 윗줄** 우측에 둔다 —
+/// claude 의 위보더와 같은 높이다. **그 구간이 비어 있을 때만** 심는다: 대화 출력이
+/// 거기까지 차 있으면 남의 글자를 지우게 된다.
+///
+/// 색은 여기서 직접 넣는다. `style_prompt_box` 의 codex 갈래는 입력행 배경만 만지고
+/// 이 줄은 건드리지 않아서, 맡겨 두면 배지만 테마 기본색으로 남는다.
+pub(crate) fn overlay_codex_session_label(
+    rows: &mut [Vec<GridCell>],
+    name: &str,
+    accent: [u8; 4],
+) {
+    use unicode_width::UnicodeWidthChar;
+    let Some(PromptBox::Filled { rows: r }) = prompt_box(rows) else {
+        return;
+    };
+    let Some(line) = r.start.checked_sub(1) else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() || line >= rows.len() {
+        return;
+    }
+    let w = rows[line].len();
+    // 이름이 길다고 줄을 통째로 먹으면 배지가 아니라 문장이 된다 — 폭의 절반까지.
+    let budget = w / 2;
+    if budget < 6 {
+        return;
+    }
+    let mut shown = String::new();
+    let mut used = 0usize;
+    for ch in name.chars() {
+        // 한글은 두 칸이다 — 글자 수로 세면 배지가 자리를 넘어 입력창까지 민다.
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if used + cw > budget - 1 {
+            shown.push('…');
+            used += 1;
+            break;
+        }
+        shown.push(ch);
+        used += cw;
+    }
+    // claude 가 위보더 끝에 대시 한 칸을 남기듯 오른쪽에 한 칸 띄운다.
+    let end = w.saturating_sub(1);
+    let start = end.saturating_sub(used);
+    if start == 0 || used == 0 {
+        return;
+    }
+    // 앞 한 칸까지 함께 본다 — 옆 글자에 딱 붙으면 배지로 안 읽힌다.
+    if rows[line][start.saturating_sub(1)..end]
+        .iter()
+        .any(|c| c.ch != ' ' && c.ch != '\0')
+    {
+        return;
+    }
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+    let mut col = start;
+    for ch in shown.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if col + cw > end {
+            break;
+        }
+        rows[line][col].ch = ch;
+        rows[line][col].fg = fg.clone();
+        rows[line][col].dim = false;
+        rows[line][col].bold = false;
+        // 폭 2 글리프의 뒤칸은 스페이서 — 안 비우면 다음 글자가 겹쳐 그려진다.
+        if cw == 2 {
+            rows[line][col + 1].ch = '\0';
+        }
+        col += cw;
+    }
+}
+
 /// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
 ///
 /// **claude**: `─` 보더 두 줄 사이. 그 사이에 `❯` 마커 행이 있어야 인정한다

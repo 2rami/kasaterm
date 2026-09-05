@@ -4147,7 +4147,12 @@ impl ApplicationHandler<UserEvent> for App {
                     // 손잡이가 둘이다 — Info 탭의 계정 행과, 늘 보이는 상태줄 세그먼트.
                     // 어느 쪽으로 열었는지 기억해 두고 메뉴를 그 자리에 붙인다.
                     let chip_hit = self.account_chip_rect.as_ref().is_some_and(&inside);
-                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside);
+                    // 손잡이가 셋이다 — Info 탭 계정 행, 상태줄 계정 세그먼트, 그리고
+                    // 오른쪽으로 옮긴 판 번호(2026-09-05). 앵커는 계정 세그먼트로
+                    // 둔다: 메뉴가 계정 목록이라 그 옆에 서야 읽히고, 판 번호 자리에
+                    // 붙이면 화면 오른쪽 끝에서 열려 목록이 창 밖으로 밀린다.
+                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside)
+                        || self.status_version_rect.as_ref().is_some_and(&inside);
                     if chip_hit {
                         self.account_menu_anchor = self.account_chip_rect;
                     } else if status_hit {

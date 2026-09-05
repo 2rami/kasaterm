@@ -2692,6 +2692,36 @@ impl App {
                     style_prompt_box(&mut composed, accent);
                     // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
                 }
+                // codex 자리의 세션 이름 배지. claude 는 CLI 가 스스로 위보더 우측에
+                // 그리지만 codex 는 안 그려서, 화면만 보고는 무슨 일을 하는 자리인지
+                // 알 수가 없었다(2026-09-05 지적). 피커 화면은 입력박스 오탐이 있어
+                // accent 와 같은 조건으로 끈다.
+                //
+                // **핀이 선 제목만** 쓴다 — OSC 로 들어온 폴더 이름을 배지로 띄우면
+                // 창마다 「kasaterm」 이 반복될 뿐이다. 핀은 사람의 개명이나 스캔이
+                // 찾은 이름(`sync_codex_titles`)에만 선다.
+                if !(agents_view || resume_picker || ask_picker)
+                    && self
+                        .pty
+                        .get(tab_pid.as_str())
+                        .and_then(|p| p.active_agent())
+                        .is_some_and(|k| matches!(k, kasa_pty::AgentKind::Codex))
+                {
+                    if let Some(name) = ws
+                        .panes
+                        .get(tab_pid.as_str())
+                        .filter(|p| p.title_pinned)
+                        .and_then(|p| p.title.as_deref())
+                    {
+                        overlay_codex_session_label(
+                            &mut composed,
+                            name,
+                            prompt_accent.unwrap_or_else(|| {
+                                theme::accent_color(theme::accent_name())
+                            }),
+                        );
+                    }
+                }
                 // 내가 친 프롬프트 띠 재도색 — claude 테마의 전폭 띠(라이트=씻긴
                 // 회백, 다크=흰 띠)를 kasaterm 테마·학생색으로(2026-08-15 지시
                 // 「색상이랑 디자인 바꾸자」). 디자인: 띠는 본문 폭까지만(전폭
@@ -10625,12 +10655,26 @@ impl App {
                 // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
                 // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
                 // 보여야 한다. `None` 은 「읽는 중」 — 자리는 잡되 숫자는 안 말한다.
+                // **평소엔 5시간 창 하나만**(거노 2026-09-05 「평소에는 5시간 세션만
+                // 보여주고 눌러야 보이게」). 창을 셋 다 세우면 줄 절반이 숫자가 되고,
+                // 그중 지금 판단에 쓰는 것은 대개 5시간 하나다. 나머지는 이 세그먼트를
+                // 누르면 열리는 계정 드롭다운에 이미 전부 있다.
+                //
+                // 다만 **접힌 창이 위험하면 그것도 세운다.** 접기만 하면 주간 95% 를
+                // 놓치는데, 그건 예전에 실제로 당한 사고다(2026-08-05: 화면이
+                // five_hour 만 봐서 weekly 95% 를 「0%」로 표시). 위험한 창을 숨기는
+                // 것은 자리를 아끼는 게 아니라 틀린 답을 주는 것이다.
+                const LOUD_PCT: f32 = 70.0;
                 let wins: Vec<(String, Option<f32>)> = match badge.as_ref() {
-                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => b
-                        .windows
-                        .iter()
-                        .map(|(l, p)| (l.clone(), (!switching).then_some(*p)))
-                        .collect(),
+                    Some(b) if win_w >= 760.0 && b.windows.len() > 1 => {
+                        let mut v: Vec<(String, Option<f32>)> = Vec::new();
+                        for (i, (l, p)) in b.windows.iter().enumerate() {
+                            if i == 0 || *p >= LOUD_PCT {
+                                v.push((l.clone(), (!switching).then_some(*p)));
+                            }
+                        }
+                        v
+                    }
                     Some(b) => vec![(b.label.clone(), (!switching).then_some(b.pct))],
                     None => Vec::new(),
                 };
@@ -10894,52 +10938,6 @@ impl App {
                             },
                         );
                         x += g.measure_chrome_text(&s, fs, true);
-                    }
-                }
-
-                // 판 번호. 이 줄에서 가장 자주 묻는 것이고(2026-08-29 「나 카사텀
-                // 버전몇이지」), 새로 구운 것이 설치를 기다리고 있으면 그것도 여기서
-                // 말한다 — 「껐다 켜면 반영됩니다」를 사람이 말로 전하던 자리다.
-                //
-                // 판정은 종료 때 실제로 설치를 움직이는 것과 **같은 함수**를 쓴다.
-                // 갈리면 표시는 떴는데 안 바뀌거나 그 반대가 된다.
-                //
-                // 화살표는 **여기서 할 일이 있다**는 뜻 하나다 — 구워 둔 것이든
-                // 배포 피드의 새 판이든 사용자가 하는 일은 껐다 켜기로 같다.
-                if win_w >= 720.0 {
-                    let waiting = crate::install_pending()
-                        || matches!(crate::version::state(), crate::version::Check::Newer(_));
-                    // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
-                    // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다. 몇 커밋
-                    // 앞인지는 눌러서 보면 된다 — 이 줄은 어느 쪽인지만 말한다.
-                    let mark = if crate::version::is_local_build() {
-                        "+"
-                    } else {
-                        ""
-                    };
-                    let s = if waiting {
-                        format!(" · v{}{mark} ↑", crate::version::CURRENT)
-                    } else {
-                        format!(" · v{}{mark}", crate::version::CURRENT)
-                    };
-                    let w = g.measure_chrome_text(&s, fs, true);
-                    if x + w <= win_w - 400.0 {
-                        g.draw_text(
-                            x,
-                            ty,
-                            &s,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: if waiting {
-                                    theme::accent()
-                                } else {
-                                    theme::with_alpha(theme::text_dim(), 150)
-                                },
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        x += w;
                     }
                 }
 
@@ -11246,6 +11244,58 @@ impl App {
                                 hx >= pr.0 && hx <= pr.0 + pr.2 && hy >= pr.1 && hy <= pr.1 + pr.3;
                         }
                         self.statusbar.port_rect = Some(pr);
+                    }
+
+                    // 판 번호 — 이 줄의 **오른쪽 그룹 맨 왼쪽**(거노 2026-09-05
+                    // 「버전표시 우측으로 옮기자」). 전에는 계정 세그먼트 꼬리에
+                    // 붙어 있었는데, 그쪽은 계정이 늘수록 자라는 자리라 판 번호가
+                    // 매번 다른 곳에 섰다. 오른쪽 칩들은 끝에서부터 자라 자리가
+                    // 고정이다.
+                    //
+                    // 새로 구운 것이 설치를 기다리면 화살표가 붙는다 — 「껐다 켜면
+                    // 반영됩니다」를 사람이 말로 전하던 자리다. 판정은 종료 때 실제로
+                    // 설치를 움직이는 것과 **같은 함수**를 쓴다(갈리면 표시는 떴는데
+                    // 안 바뀌거나 그 반대가 된다).
+                    if win_w >= 720.0 {
+                        let waiting = crate::install_pending()
+                            || matches!(crate::version::state(), crate::version::Check::Newer(_));
+                        // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
+                        // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다.
+                        let mark = if crate::version::is_local_build() { "+" } else { "" };
+                        let s_ver = if waiting {
+                            format!("v{}{mark} ↑", crate::version::CURRENT)
+                        } else {
+                            format!("v{}{mark}", crate::version::CURRENT)
+                        };
+                        let w = g.measure_chrome_text(&s_ver, fs, true);
+                        rx -= w + 14.0;
+                        g.draw_text(
+                            rx,
+                            ty,
+                            &s_ver,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: if waiting {
+                                    theme::accent()
+                                } else {
+                                    theme::with_alpha(theme::text_dim(), 150)
+                                },
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
+                        // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
+                        // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
+                        let vr = (rx - 7.0, sy, w + 14.0, status_h);
+                        {
+                            let (hx, hy) = self.cursor_px;
+                            g.hover_pointer |=
+                                hx >= vr.0 && hx <= vr.0 + vr.2 && hy >= vr.1 && hy <= vr.1 + vr.3;
+                        }
+                        self.status_version_rect = Some(vr);
+                    } else {
+                        self.status_version_rect = None;
                     }
                 }
                 // 팝오버는 상태줄 **뒤**다 — 같은 자리 위로 떠야 하고, 칩을 그린
