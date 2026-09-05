@@ -32,8 +32,10 @@ defines=$(mktemp)
 trap 'rm -f "$defines"' EXIT
 python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1]}))' "$root" > "$defines"
 
+# 빌드 번호는 시각 — 폰에 어느 판이 깔렸는지 `xcrun devicectl device info apps` 로 가른다.
+build=$(date +%y%m%d%H%M)
 NO_PROXY='127.0.0.1,localhost' FLUTTER_XCODE_DEVELOPMENT_TEAM="$team" \
-  flutter build ios --release --dart-define-from-file="$defines"
+  flutter build ios --release --build-number="$build" --dart-define-from-file="$defines"
 
 # 네이티브 에셋 프레임워크(objective_c 등)는 flutter 가 Run Script 단계에서 서명하는데,
 # 그때 EXPANDED_CODE_SIGN_IDENTITY 가 비어 오는 빌드가 있어 ad-hoc 으로 남는다 — 폰이
@@ -62,9 +64,11 @@ if [ -n "$resign" ]; then
 fi
 
 xcrun devicectl device install app --device "$device" "$app" >/dev/null
+# ⚠️돌고 있던 앱은 새 판을 깔아도 안 죽는다 — 그냥 launch 하면 옛 프로세스가 앞으로 나올 뿐이라
+# 「고쳤는데 그대로」가 된다(2026-09-05 실측). 반드시 끄고 켠다.
 # 잠긴 폰은 켜 주지 못한다(FBSOpenApplicationErrorDomain 7) — 설치는 이미 끝났으니 오류가 아니다.
-if xcrun devicectl device process launch --device "$device" com.debimarlene.kasatermMobile >/dev/null 2>&1; then
-  echo "폰에 올렸다 — 앱이 켜져 있을 것이다"
+if xcrun devicectl device process launch --terminate-existing --device "$device" com.debimarlene.kasatermMobile >/dev/null 2>&1; then
+  echo "폰에 올렸다(빌드 $build) — 앱을 껐다 켰다"
 else
-  echo "폰에 올렸다 — 잠겨 있어 못 켰다, 잠금을 풀고 아이콘을 눌러 달라"
+  echo "폰에 올렸다(빌드 $build) — 잠겨 있어 못 켰다, 잠금을 풀고 아이콘을 눌러 달라"
 fi

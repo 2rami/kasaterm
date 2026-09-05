@@ -24,11 +24,11 @@ Future<double> pumpScale(WidgetTester tester, Size content, Size box) async {
 }
 
 void main() {
-  testWidgets('넓은 내용은 높이를 채우되 1.3배에서 멈춘다', (tester) async {
-    // fitW 0.5, fitH 3 → min(3, 1.3) = 1.3
+  testWidgets('작은 내용도 상한 없이 높이를 채운다', (tester) async {
+    // fitW 0.5, fitH 3 → 3
     expect(
       await pumpScale(tester, const Size(400, 100), const Size(200, 300)),
-      closeTo(1.3, 1e-6),
+      closeTo(3, 1e-6),
     );
   });
 

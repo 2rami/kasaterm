@@ -3,10 +3,11 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 /// 내용(격자·그림)을 화면에 채워 보이고 핀치로 키운다. 폭에만 맞추면 넓은 pane(196열)이
-/// 위쪽에 손톱만 하게 붙고 아래가 비므로, 높이를 채우고 옆으로 밀어 읽게 하되 작은
-/// 내용이 거대해지지 않게 1.3배에서 멈춘다. 핀치로는 전체가 한눈에 들어오는 배율까지
-/// 줄일 수 있다. 미러 pane 은 크기를 못 바꾸므로(데스크톱이 같이 좁아진다) 글꼴을
-/// 줄이는 대신 변환으로 맞춘다.
+/// 위쪽에 손톱만 하게 붙고 아래가 비므로, 폭 맞춤과 높이 맞춤 중 큰 쪽으로 채우고 옆으로
+/// 밀어 읽게 한다. 작은 pane 이 커지지 않게 1.3배 상한을 뒀었는데 그러면 25행짜리 pane
+/// 아래가 다시 비어 「꽉 안 찬다」(2026-09-05 실기 실측) — 상한 없이 채우고, 작다 싶으면
+/// 핀치로 전체가 한눈에 들어오는 배율까지 줄인다. 미러 pane 은 크기를 못 바꾸므로
+/// (데스크톱이 같이 좁아진다) 글꼴을 줄이는 대신 변환으로 맞춘다.
 class FillViewer extends StatefulWidget {
   const FillViewer({
     super.key,
@@ -20,14 +21,10 @@ class FillViewer extends StatefulWidget {
   final Color background;
   final Widget child;
 
-  static const maxFit = 1.3;
-
   static double fitFor(Size content, BoxConstraints box) {
     final w = math.max(content.width, 1.0);
     final h = math.max(content.height, 1.0);
-    final fitW = box.maxWidth / w;
-    final fitH = box.maxHeight / h;
-    return math.max(fitW, math.min(fitH, maxFit));
+    return math.max(box.maxWidth / w, box.maxHeight / h);
   }
 
   @override
