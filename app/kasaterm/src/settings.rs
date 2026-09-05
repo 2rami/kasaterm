@@ -124,7 +124,11 @@ impl App {
     /// codex 슬롯은 아직 로컬 그대로 둔다. 지금 본진에서 도는 건 claude 뿐이다.
     fn route_account_action_to_home(&mut self, action: &SettingsAction) -> bool {
         use crate::homeaccounts;
-        if homeaccounts::home_target().is_none() {
+        // **고른 칸이 본진일 때만** 넘긴다. 본진이 켜져 있다고 이 기계 계정까지
+        // 원격으로 보내면, 여기서 도는 claude 의 로그인을 고칠 자리가 화면에서
+        // 사라진다 — 2026-09-05 에 실제로 그렇게 만들어 거노가 「설정창이랑 하단이랑
+        // 왜 다르냐」고 물었다.
+        if !self.set_account_scope_home || homeaccounts::home_target().is_none() {
             return false;
         }
         match action {
@@ -485,7 +489,10 @@ impl App {
     /// 네이티브 계정 카드의 별명 편집을 계정 목록에 굳힌다.
     pub(crate) fn flush_account_label(&mut self) {
         let Some((provider, id, label)) = self.account_label_edit.clone() else { return };
-        if provider == AccountProvider::Claude && crate::homeaccounts::home_target().is_some() {
+        if provider == AccountProvider::Claude
+            && self.set_account_scope_home
+            && crate::homeaccounts::home_target().is_some()
+        {
             crate::homeaccounts::act(
                 "claude-account-label",
                 Some(id),
@@ -964,6 +971,9 @@ impl App {
                 self.set_toast("로그인을 취소했어요".to_string());
             }
             SettingsAction::SubmitLoginCode => self.submit_login_code_field(),
+            SettingsAction::AccountScopeHome(home) => {
+                self.set_account_scope_home = home && crate::homeaccounts::home_target().is_some();
+            }
             SettingsAction::FocusAccountLabel(provider, id) => {
                 self.flush_account_label();
                 let label = match provider {

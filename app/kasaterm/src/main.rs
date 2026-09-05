@@ -4321,6 +4321,8 @@ pub(crate) enum SettingsAction {
     ReauthAccount(AccountProvider, String, settings::LoginBrowser),
     /// 진행 중인 숨은 OAuth 로그인과 그 브라우저 자식을 함께 멈춘다.
     CancelLogin,
+    /// 계정 칸이 다룰 기계를 고른다(`true` = 본진).
+    AccountScopeHome(bool),
     /// 브라우저가 준 OAuth 코드를 로그인 중인 CLI 의 stdin 으로 보낸다. 지금 로그인은
     /// localhost 콜백이 아니라 **코드 붙여넣기**로 끝나므로, 이 칸이 없으면 로그인은
     /// 영영 안 끝난다(2026-09-05 확정).
@@ -4737,6 +4739,12 @@ struct App {
     /// 상태줄 오른쪽의 판 번호 칸. 계정 세그먼트와 **같은 드롭다운**을 여는 두 번째
     /// 손잡이다 — 자리를 오른쪽으로 옮기면서도 「눌러서 캐묻기」를 잃지 않으려는 것.
     status_version_rect: Option<(f32, f32, f32, f32)>,
+    /// 계정 칸이 지금 **어느 기계**를 다루나. `true` = 본진(홈 기계).
+    ///
+    /// 두 칸으로 가른 이유는 claude 가 실제로 **양쪽에서 돌기 때문**이다(2026-09-05
+    /// 실측: 작업대 6개·본진 4개). 한쪽만 보여 주면 하단 상태줄(늘 이 기계 것)과
+    /// 어긋나 「설정창이랑 하단이랑 왜 다르냐」가 된다 — 거노가 실제로 그렇게 물었다.
+    set_account_scope_home: bool,
     /// 드롭다운이 **어느 손잡이에서** 열렸나 — 메뉴를 그 자리에 붙여 그린다.
     /// 손잡이가 둘(Info 탭 계정 행 · 상태줄)이라, 하나로 고정하면 다른 쪽에서 열었을
     /// 때 메뉴가 화면 반대편에 뜬다.
@@ -5641,6 +5649,7 @@ impl App {
             account_chip_rect: None,
             status_account_rect: None,
             status_version_rect: None,
+            set_account_scope_home: false,
             account_menu_anchor: None,
             account_menu_hits: Vec::new(),
             md_content_h: HashMap::new(),

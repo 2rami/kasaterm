@@ -531,8 +531,10 @@ pub(crate) struct Snapshot {
     pub(crate) login_job: Option<crate::settings::LoginJob>,
     /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
     pub(crate) login_code: String,
-    /// 본진이 살아 있으면 그 기계의 계정 칸. 계정 화면은 이쪽을 정본으로 삼는다.
+    /// 본진이 살아 있으면 그 기계의 계정 칸. 「본진」 칸을 골랐을 때 쓴다.
     pub(crate) home_accounts: Option<HomeAccountsView>,
+    /// 계정 칸이 지금 다루는 기계 — `true` = 본진.
+    pub(crate) account_scope_home: bool,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     pub(crate) characters: Arc<Vec<CharacterChoice>>,
     pub(crate) themes: Arc<Vec<socket::ThemeRow>>,
@@ -721,6 +723,7 @@ impl App {
             login_job: crate::settings::hidden_login_job(),
             login_code: self.login_code_edit.clone(),
             home_accounts: home_accounts_view(),
+            account_scope_home: self.set_account_scope_home,
             palettes: cache.palettes.clone(),
             characters: cache.characters.clone(),
             themes: cache.themes.clone(),
@@ -4029,13 +4032,45 @@ fn account_group(
     let home = s
         .home_accounts
         .as_ref()
-        .filter(|_| provider == AccountProvider::Claude);
+        .filter(|_| provider == AccountProvider::Claude && s.account_scope_home);
     draw_text(g, x, *y, provider.label(), 13.0, theme::text(), true);
-    if let Some(h) = home {
-        let note = format!("{} 에 저장돼요 — 학생이 사는 곳", h.label);
-        draw_text(g, x + 84.0, *y + 1.0, &note, 10.5, theme::text_mute(), false);
+    *y += 24.0;
+    // 기계를 고르는 두 칸. claude 는 **양쪽에서 돌기 때문에** 한쪽만 보여 주면
+    // 하단 상태줄(늘 이 기계 것)과 어긋난다(2026-09-05 거노 「설정창이랑 하단이랑
+    // 왜 다른데」). 본진이 없거나 꺼져 있으면 칸을 안 그린다 — 고를 것이 하나뿐인
+    // 화면에 선택지를 세우면 그 자체가 물음이 된다.
+    if provider == AccountProvider::Claude {
+        if let Some(view) = s.home_accounts.as_ref() {
+            segmented(
+                g,
+                s,
+                hits,
+                x,
+                *y,
+                w.min(360.0),
+                &[
+                    (
+                        "이 맥북",
+                        !s.account_scope_home,
+                        SettingsAction::AccountScopeHome(false),
+                    ),
+                    (
+                        &view.label,
+                        s.account_scope_home,
+                        SettingsAction::AccountScopeHome(true),
+                    ),
+                ],
+            );
+            *y += 40.0;
+            let note = if s.account_scope_home {
+                format!("{} 에서 도는 claude 의 계정이에요", view.label)
+            } else {
+                "이 맥북에서 도는 claude 의 계정이에요 — 하단 막대에 뜨는 숫자가 이것".to_string()
+            };
+            draw_text(g, x + 2.0, *y, &note, 10.5, theme::text_mute(), false);
+            *y += 20.0;
+        }
     }
-    *y += 28.0;
     if let Some(h) = home {
         if let Some(why) = h.error.as_deref() {
             draw_text(g, x + 2.0, *y, why, 10.5, theme::danger(), false);
