@@ -502,10 +502,72 @@ pub(crate) struct Snapshot {
     pub(crate) themegen_has_ref: bool,
     pub(crate) themegen_phase: Option<crate::themegen::GenPhase>,
     pub(crate) sprite_slot: Option<(String, usize)>,
+    pub(crate) media: Arc<crate::settings_media::SettingsMediaCache>,
+    pub(crate) media_elapsed: std::time::Duration,
     pub(crate) onboarding: crate::native_onboarding::Snapshot,
 }
 
 impl App {
+    pub(crate) fn refresh_native_settings_media_cache(&mut self) {
+        let mut plan = crate::settings_media::MediaPlan::new();
+        {
+            let cache = self.settings_scene.cache();
+            match self.settings_scene.category() {
+                SettingsCat::Theme => {
+                    plan.include_theme_cards(&cache.themes);
+                    if let Some(theme_id) = self.settings_scene.inspected_theme() {
+                        let key = if theme_id.is_empty() {
+                            kasa_mcp::character::BASE_THEME_KEY
+                        } else {
+                            theme_id
+                        };
+                        if let Some(roster) = cache.theme_rosters.get(key) {
+                            plan.include_student_faces(
+                                theme_id,
+                                roster.iter().map(|character| character.slug.as_str()),
+                            );
+                        }
+                    }
+                }
+                SettingsCat::Students if self.students_selected.is_none() => {
+                    plan.include_student_faces(
+                        &cache.character_theme,
+                        cache.characters.iter().map(|character| character.slug.as_str()),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if self.settings_scene.category() == SettingsCat::Students
+            && self.students_selected.is_some()
+            && !self.students_slug.is_empty()
+        {
+            plan.include_student_detail(&self.students_theme, &self.students_slug);
+        }
+        self.settings_scene.refresh_media_cache(&plan);
+    }
+
+    pub(crate) fn settings_media_animating(&self) -> bool {
+        if !self.settings_room_active()
+            || self.students_selected.is_none()
+            || self.students_slug.is_empty()
+        {
+            return false;
+        }
+        let elapsed = self.settings_scene.media_elapsed();
+        ["idle", "walk", "wave", "cheer", "gif"].iter().any(|motion| {
+            self.settings_scene
+                .media()
+                .next_motion_frame_in(
+                    &self.students_theme,
+                    &self.students_slug,
+                    motion,
+                    elapsed,
+                )
+                .is_some()
+        })
+    }
+
     /// 계정 신원/한도는 렌더 스냅샷에서 조회하지 않는다. 이 함수는 event-loop의
     /// 느린 틱에서만 캐시를 갱신하므로 auth probe가 자식 프로세스를 띄우더라도
     /// 프레임마다 반복되지 않는다.
@@ -627,6 +689,8 @@ impl App {
             sprite_slot: scene
                 .sprite_slot()
                 .map(|(motion, frame)| (motion.to_string(), frame)),
+            media: scene.media(),
+            media_elapsed: scene.media_elapsed(),
             onboarding: crate::native_onboarding::snapshot(self, area),
         })
     }
@@ -678,6 +742,7 @@ impl App {
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.settings_scene.set_category(cat);
+                self.refresh_native_settings_media_cache();
             }
             Some(Target::Setting(action)) => {
                 if matches!(action, SettingsAction::PickerSV | SettingsAction::PickerHue) {
@@ -765,12 +830,22 @@ impl App {
                 | SettingsAction::RemoveCodexAccount(_)
                 | SettingsAction::ReauthAccount(_, _, _)
         );
+        let media = refresh
+            || matches!(
+                action,
+                SettingsAction::InspectTheme(_)
+                    | SettingsAction::RefreshStudentAssets
+                    | SettingsAction::ResetMotion(_)
+            );
         self.settings_apply(action);
         if refresh {
             self.settings_scene.refresh_cache();
         }
         if accounts {
             self.refresh_native_settings_dynamic_cache();
+        }
+        if media {
+            self.refresh_native_settings_media_cache();
         }
     }
 
@@ -1376,6 +1451,7 @@ impl App {
             kasa_mcp::character::invalidate_active_theme();
             theme::invalidate_roster();
             self.settings_scene.refresh_cache();
+            self.refresh_native_settings_media_cache();
             return true;
         }
         if self.settings_scene.category() != SettingsCat::Students {
@@ -1388,14 +1464,11 @@ impl App {
                 .sprite_slot()
                 .map(|(motion, frame)| (motion.to_string(), frame)),
         ) {
-            let slug = self
-                .settings_scene
-                .cache()
-                .characters
-                .iter()
-                .find(|character| character.name == name)
-                .map(|character| character.slug.clone())
-                .unwrap_or_else(|| theme::agent_slug(&name));
+            let slug = if self.students_slug.is_empty() {
+                theme::agent_slug(&name)
+            } else {
+                self.students_slug.clone()
+            };
             let Some((count, ext)) = socket::character_sprite_spec(&motion) else {
                 self.set_toast("그 모션 칸을 못 찾았어요".to_string());
                 return true;
@@ -1437,6 +1510,7 @@ impl App {
             ) {
                 Ok(_) => {
                     self.settings_apply(SettingsAction::RefreshStudentAssets);
+                    self.refresh_native_settings_media_cache();
                     self.set_toast(format!("{motion} {}번째 그림을 바꿨어요", frame + 1));
                 }
                 Err(error) => self.set_toast(format!("그림을 못 바꿨어요 — {error}")),
@@ -1487,21 +1561,11 @@ impl App {
             }
             return true;
         }
-        let Some(slug) = self
-            .students_selected
-            .as_deref()
-            .and_then(|name| {
-                self.settings_scene
-                    .cache()
-                    .characters
-                    .iter()
-                    .find(|character| character.name == name)
-                    .map(|character| character.slug.clone())
-            })
-        else {
+        let slug = self.students_slug.clone();
+        if slug.is_empty() {
             self.set_toast("캐릭터의 그림 이름을 못 찾았어요".to_string());
             return true;
-        };
+        }
         let Some(root) = kasa_mcp::character::themes_root() else {
             return true;
         };
@@ -1512,6 +1576,7 @@ impl App {
         match crate::themegen::place_themegen_ref(&root.join(theme_id), &slug, &path) {
             Ok(_) => {
                 self.settings_scene.refresh_cache();
+                self.refresh_native_settings_media_cache();
                 self.set_toast("참조 그림을 놓았어요".to_string());
             }
             Err(error) => self.set_toast(format!("그림을 못 놓았어요 — {error}")),
@@ -1894,29 +1959,37 @@ pub(crate) fn paint_scroll_affordance(
     if max_scroll <= 1.0 || view_h <= 1.0 {
         return;
     }
-    let track_x = x + w - 3.0;
+    let track_x = x + w - 6.0;
     g.rect(
         track_x,
         y,
-        2.0,
+        4.0,
         view_h,
         theme::with_alpha(theme::border(), 90),
     );
     let thumb_h = (view_h * view_h / content_h).clamp(28.0, view_h);
     let thumb_y = y + (view_h - thumb_h) * (scroll / max_scroll).clamp(0.0, 1.0);
-    g.rect(track_x, thumb_y, 2.0, thumb_h, theme::text_dim());
+    round_rect(
+        g,
+        track_x,
+        thumb_y,
+        4.0,
+        thumb_h,
+        2.0,
+        theme::text_dim(),
+    );
     if scroll < max_scroll - 1.0 {
         g.rect(
             x,
-            y + view_h - 16.0,
+            y + view_h - 22.0,
             w,
-            16.0,
+            22.0,
             theme::with_alpha(theme::bg(), 210),
         );
         g.queue_icon(
             "chevron-down",
             x + w - 20.0,
-            y + view_h - 15.0,
+            y + view_h - 19.0,
             13.0,
             theme::text_dim(),
         );
@@ -3007,16 +3080,16 @@ fn paint_themes(
             false,
         );
         for (j, (slug, _)) in theme_row.faces.iter().take(3).enumerate() {
-            let color = color_for_word(slug);
-            round_rect(
-                g,
-                rect.0 + 16.0 + j as f32 * 30.0,
-                rect.1 + 67.0,
-                24.0,
-                24.0,
-                12.0,
-                color,
+            let face = (
+                rect.0 + 12.0 + j as f32 * 34.0,
+                rect.1 + 60.0,
+                30.0,
+                38.0,
             );
+            let status = s.media.draw_face(g, &theme_row.id, slug, face);
+            if !status.is_ready() {
+                round_rect(g, face.0, face.1 + 7.0, 24.0, 24.0, 12.0, color_for_word(slug));
+            }
         }
         let inspect = (rect.0 + rect.2 - 38.0, rect.1 + 8.0, 26.0, 26.0);
         mini_icon_button(
@@ -3118,22 +3191,49 @@ fn paint_themes(
             false,
         );
         *y += 46.0;
-        let choices = roster
-            .iter()
-            .map(|character| {
-                let on = fallback || picked.iter().any(|name| name == &character.name);
-                (
+        let cols = if w >= 680.0 { 7 } else if w >= 470.0 { 5 } else { 3 };
+        let gap = 7.0;
+        let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
+        let card_h = 82.0;
+        for (index, character) in roster.iter().enumerate() {
+            let on = fallback || picked.iter().any(|name| name == &character.name);
+            let rect = (
+                x + (index % cols) as f32 * (card_w + gap),
+                *y + (index / cols) as f32 * (card_h + gap),
+                card_w,
+                card_h,
+            );
+            choice_card(
+                g,
+                s,
+                hits,
+                rect,
+                on,
+                Target::Setting(SettingsAction::CharacterPick(
+                    key.to_string(),
                     character.name.clone(),
-                    on,
-                    SettingsAction::CharacterPick(
-                        key.to_string(),
-                        character.name.clone(),
-                        !on,
-                    ),
-                )
-            })
-            .collect();
-        chips_owned(g, s, hits, x, y, w, choices);
+                    !on,
+                )),
+            );
+            s.media.draw_face(
+                g,
+                id,
+                &character.slug,
+                (rect.0 + 8.0, rect.1 + 4.0, rect.2 - 16.0, 55.0),
+            );
+            let name = fit(g, &character.name, rect.2 - 12.0, 10.5, on);
+            draw_text(
+                g,
+                rect.0 + 6.0,
+                rect.1 + 64.0,
+                &name,
+                10.5,
+                if on { theme::text() } else { theme::text_mute() },
+                on,
+            );
+        }
+        let rows = (roster.len() + cols - 1) / cols;
+        *y += rows as f32 * (card_h + gap);
         *y += 10.0;
     }
     button(
@@ -3198,6 +3298,23 @@ fn paint_students(
             theme::text_dim(),
             false,
         );
+        if !s.student_slug.is_empty() {
+            let face = (x + w - 72.0, *y - 8.0, 64.0, 76.0);
+            let status = s
+                .media
+                .draw_face(g, &s.student_theme, &s.student_slug, face);
+            if !status.is_ready() {
+                round_rect(
+                    g,
+                    face.0 + 10.0,
+                    face.1 + 16.0,
+                    42.0,
+                    42.0,
+                    21.0,
+                    color_for_word(&s.student_slug),
+                );
+            }
+        }
         *y += 48.0;
         segmented(
             g,
@@ -3340,7 +3457,31 @@ fn paint_students(
             None if s.themegen_has_ref => "참조 그림 준비됨",
             None => "참조 그림을 놓아 주세요",
         };
-        draw_text(g, x + 2.0, *y + 9.0, status, 12.0, theme::text_dim(), false);
+        let reference_rect = (x, *y, 72.0, 72.0);
+        let reference_status = s.media.draw_reference(
+            g,
+            &s.student_theme,
+            &s.student_slug,
+            reference_rect,
+        );
+        draw_text(
+            g,
+            x + 84.0,
+            *y + 9.0,
+            status,
+            12.0,
+            theme::text_dim(),
+            false,
+        );
+        draw_text(
+            g,
+            x + 84.0,
+            *y + 31.0,
+            reference_status.label(),
+            10.5,
+            theme::text_mute(),
+            false,
+        );
         if s.themegen_has_ref
             && !matches!(
                 s.themegen_phase,
@@ -3353,13 +3494,13 @@ fn paint_students(
                 g,
                 s,
                 hits,
-                (x + w - 112.0, *y, 112.0, 34.0),
+                (x + w - 112.0, *y + 38.0, 112.0, 34.0),
                 "그림 굽기",
                 Target::Setting(SettingsAction::ThemeGenStart),
                 true,
             );
         }
-        *y += 48.0;
+        *y += 84.0;
         paint_motion_sprites(g, s, hits, x, y, w);
         button(
             g,
@@ -3426,27 +3567,18 @@ fn paint_students(
             false,
             Target::Setting(SettingsAction::SelectStudent(character.name.clone())),
         );
-        let color = color_for_word(if character.slug.is_empty() {
-            &character.name
-        } else {
-            &character.slug
-        });
-        round_rect(g, rect.0 + 12.0, rect.1 + 14.0, 34.0, 34.0, 17.0, color);
-        let initial = character
-            .name
-            .chars()
-            .next()
-            .map(|ch| ch.to_string())
-            .unwrap_or_default();
-        draw_text(
-            g,
-            rect.0 + 22.0,
-            rect.1 + 23.0,
-            &initial,
-            12.0,
-            [255, 255, 255, 255],
-            true,
-        );
+        let face = (rect.0 + 8.0, rect.1 + 7.0, 42.0, 54.0);
+        let status = s
+            .media
+            .draw_face(g, &s.character_theme, &character.slug, face);
+        if !status.is_ready() {
+            let color = color_for_word(if character.slug.is_empty() {
+                &character.name
+            } else {
+                &character.slug
+            });
+            round_rect(g, rect.0 + 12.0, rect.1 + 14.0, 34.0, 34.0, 17.0, color);
+        }
         let name = fit(g, &character.name, rect.2 - 66.0, 12.0, false);
         draw_text(
             g,
@@ -3517,23 +3649,35 @@ fn paint_motion_sprites(
         ("gif", "대기 GIF"),
     ] {
         let Some((count, ext)) = socket::character_sprite_spec(motion) else { continue };
+        let media_status = s
+            .media
+            .motion_status(&s.student_theme, &s.student_slug, motion);
         draw_text(g, x + 2.0, *y + 9.0, title, 12.0, theme::text(), true);
         draw_text(
             g,
-            x + 78.0,
+            x + 92.0,
             *y + 9.0,
-            &format!("{} × {}", ext.to_uppercase(), count),
+            &format!("{} × {} · {}", ext.to_uppercase(), count, media_status.label()),
             10.5,
             theme::text_dim(),
             false,
         );
-        let mut bx = x + 168.0;
+        let preview = (x, *y + 25.0, 54.0, 46.0);
+        s.media.draw_motion_preview(
+            g,
+            &s.student_theme,
+            &s.student_slug,
+            motion,
+            s.media_elapsed,
+            preview,
+        );
+        let mut bx = x + 64.0;
         for frame in 0..count {
             let selected = s
                 .sprite_slot
                 .as_ref()
                 .is_some_and(|(picked_motion, picked_frame)| picked_motion == motion && *picked_frame == frame);
-            let rect = (bx, *y, 34.0, 32.0);
+            let rect = (bx, *y + 31.0, 34.0, 34.0);
             choice_card(
                 g,
                 s,
@@ -3542,10 +3686,18 @@ fn paint_motion_sprites(
                 selected,
                 Target::Setting(SettingsAction::SelectMotionFrame(motion.to_string(), frame)),
             );
+            s.media.draw_motion_frame(
+                g,
+                &s.student_theme,
+                &s.student_slug,
+                motion,
+                frame,
+                (rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0),
+            );
             draw_text(
                 g,
-                rect.0 + 12.0,
-                rect.1 + 9.0,
+                rect.0 + rect.2 - 10.0,
+                rect.1 + rect.3 - 13.0,
                 &(frame + 1).to_string(),
                 11.0,
                 theme::text(),
@@ -3562,7 +3714,7 @@ fn paint_motion_sprites(
             Target::Setting(SettingsAction::ResetMotion(motion.to_string())),
             false,
         );
-        *y += 40.0;
+        *y += 78.0;
     }
     *y += 12.0;
 }
@@ -4777,5 +4929,18 @@ mod tests {
             .0;
         assert!(open.contains("label.clone().unwrap_or_default()"));
         assert!(open.contains("SelectStudentInTheme(theme, arg.clone())"));
+    }
+
+    #[test]
+    fn settings_renderer_uses_cached_visual_feedback_for_every_character_surface() {
+        let source = include_str!("native_settings.rs");
+        for call in [".draw_face(", ".draw_reference(", ".draw_motion_frame(", ".draw_motion_preview("] {
+            assert!(source.contains(call), "missing media integration: {call}");
+        }
+        let handler = include_str!("handler.rs");
+        assert!(handler.contains("self.settings_media_animating()"));
+        let paint = &source
+            [source.find("pub(crate) fn paint(").unwrap()..source.find("#[cfg(test)]").unwrap()];
+        assert!(!paint.contains("std::fs::"));
     }
 }

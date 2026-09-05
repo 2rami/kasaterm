@@ -40,6 +40,8 @@ pub(crate) struct SettingsScene {
     picker_drag: Option<(SettingsAction, crate::native_settings::Rect)>,
     sprite_slot: Option<(String, usize)>,
     field_select_all: bool,
+    media: Arc<crate::settings_media::SettingsMediaCache>,
+    media_started: std::time::Instant,
 }
 
 impl Default for SettingsScene {
@@ -61,6 +63,8 @@ impl Default for SettingsScene {
             picker_drag: None,
             sprite_slot: None,
             field_select_all: false,
+            media: Arc::new(crate::settings_media::SettingsMediaCache::default()),
+            media_started: std::time::Instant::now(),
         }
     }
 }
@@ -96,6 +100,21 @@ impl SettingsScene {
 
     pub(crate) fn refresh_palette_cache(&mut self) {
         self.cache.refresh_palette();
+    }
+
+    pub(crate) fn refresh_media_cache(&mut self, plan: &crate::settings_media::MediaPlan) {
+        let mut media = crate::settings_media::SettingsMediaCache::default();
+        media.refresh(plan);
+        self.media = Arc::new(media);
+        self.media_started = std::time::Instant::now();
+    }
+
+    pub(crate) fn media(&self) -> Arc<crate::settings_media::SettingsMediaCache> {
+        self.media.clone()
+    }
+
+    pub(crate) fn media_elapsed(&self) -> std::time::Duration {
+        self.media_started.elapsed()
     }
 
     pub(crate) fn set_account_cache(
@@ -283,6 +302,7 @@ impl SettingsScene {
         self.picker_drag = None;
         self.sprite_slot = None;
         self.field_select_all = false;
+        self.media = Arc::new(crate::settings_media::SettingsMediaCache::default());
     }
 }
 
@@ -478,6 +498,7 @@ impl App {
         // 그렸다는 뜻일 뿐 최신이라는 뜻이 아니므로, 재진입마다 파일을 다시 읽는다.
         self.settings_scene.refresh_cache();
         self.refresh_native_settings_dynamic_cache();
+        self.refresh_native_settings_media_cache();
 
         if let Some(idx) = self.settings_room_index() {
             if idx != self.active_window {

@@ -25,6 +25,7 @@ mod markdown;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
+mod settings_media;
 mod notify_banner;
 mod onboarding;
 mod render;

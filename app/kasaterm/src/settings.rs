@@ -2018,6 +2018,7 @@ impl App {
         self.students_name = name.clone();
         self.students_selected = Some(name);
         self.settings_input = None;
+        self.refresh_native_settings_media_cache();
     }
 
     /// 상세를 닫고 목록으로. 편집 중이던 것은 여기서 굳힌다(persona 를 **먼저** —
@@ -2032,6 +2033,7 @@ impl App {
         self.students_model.clear();
         self.students_backend.clear();
         self.settings_input = None;
+        self.refresh_native_settings_media_cache();
     }
 
     /// 이름 버퍼를 로스터에 굳힌다. 이름은 로스터의 **키**라 바꾸면 그 캐릭터의

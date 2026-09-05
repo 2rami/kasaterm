@@ -1247,6 +1247,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if settings_changed && self.settings_room_active() {
                     self.settings_scene.refresh_cache();
                     self.refresh_native_settings_dynamic_cache();
+                    self.refresh_native_settings_media_cache();
                 }
                 // 네이티브 설정 화면이 열려 있으면 같은 변경을 곧바로 보여야 한다.
                 // `refresh_student_assets` 를 지나는 액션은 스스로 repaint 하지만
@@ -7075,6 +7076,8 @@ impl ApplicationHandler<UserEvent> for App {
             // 펼친 목록의 학생 얼굴은 idle gif 라 프레임을 계속 넘겨야 한다.
             // 접으면 멈춘다 — 안 보이는 그림에 프레임을 태우지 않는다.
             || (self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty())
+            // 설정 상세의 모션 미리보기는 보일 때만 30fps 펌프를 탄다.
+            || self.settings_media_animating()
         {
             // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
             // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —
@@ -7135,6 +7138,9 @@ impl ApplicationHandler<UserEvent> for App {
         // so the cursor block toggles its phase. Other wake causes
         // (input, redraw, init) drive their own redraws.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if self.settings_media_animating() {
+                self.chrome_dirty = true;
+            }
             if let Some(w) = &self.window {
                 w.request_redraw();
             }

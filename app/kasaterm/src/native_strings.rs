@@ -37,6 +37,17 @@ pub(crate) fn text(value: &str) -> Cow<'_, str> {
     if let Some(name) = value.strip_suffix(" · 준비 안 됨") {
         return Cow::Owned(format!("{name} · not ready"));
     }
+    for (ko, en) in [
+        ("테마 그림", "theme artwork"),
+        ("내 그림", "custom artwork"),
+        ("기본 그림", "bundled artwork"),
+        ("참조 그림", "reference image"),
+        ("그림 없음", "no artwork"),
+    ] {
+        if let Some(prefix) = value.strip_suffix(ko) {
+            return Cow::Owned(format!("{prefix}{en}"));
+        }
+    }
     Cow::Borrowed(value)
 }
 
@@ -180,6 +191,15 @@ fn english(value: &str) -> Option<&'static str> {
         "프로필" => "Profile",
         "대기 GIF" => "Idle GIF",
         "기본으로" => "Reset",
+        "테마 그림" => "Theme artwork",
+        "내 그림" => "Custom artwork",
+        "기본 그림" => "Bundled artwork",
+        "참조 그림" => "Reference image",
+        "그림 없음" => "No artwork",
+        "그림이 너무 큼" => "Artwork too large",
+        "그림을 못 읽음" => "Unreadable artwork",
+        "미리보기 한도 초과" => "Preview limit exceeded",
+        "미리보기 준비 전" => "Preview pending",
         "캐릭터 폴더 열기" => "Open character folder",
         "정의 파일 열기" => "Open roster file",
         "그림 새로고침" => "Refresh artwork",
