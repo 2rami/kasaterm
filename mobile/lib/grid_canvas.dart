@@ -564,25 +564,41 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     }
   }
 
+  /// 좁은 pane 에 맞춰 키운 글꼴인가 — 그때는 열 수를 pane 열 수와 **정확히** 맞춘다.
+  bool _fitsPane(double maxWidth) {
+    final paneCols = widget.grid.cols;
+    return paneCols > 0 && paneCols < (maxWidth / _base.width).floor();
+  }
+
   _CellMetrics _metricsFor(double maxWidth) {
     final paneCols = widget.grid.cols;
-    final phoneCols = (maxWidth / _base.width).floor();
-    if (paneCols <= 0 || paneCols >= phoneCols) return _base;
+    if (!_fitsPane(maxWidth)) return _base;
     final ratio = _base.width / _base.fontSize;
-    final size = (maxWidth / (paneCols * ratio)).clamp(
-      widget.fontSize,
-      _maxFont,
-    );
+    var size = (maxWidth / (paneCols * ratio)).clamp(widget.fontSize, _maxFont);
     final cached = _scaled;
     if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
-    return _scaled = _CellMetrics(size);
+    var m = _CellMetrics(size);
+    // 잰 칸 폭은 계산값보다 살짝 넓을 수 있다 — 그러면 pane 열 수가 폭을 넘쳐 한 열이
+    // 다음 줄로 밀린다(상태줄이 두 줄, 테두리 밑에 「─」 하나). 넘치지 않을 때까지 줄인다.
+    for (
+      var i = 0;
+      i < 6 && paneCols * m.width > maxWidth && size > widget.fontSize;
+      i++
+    ) {
+      size = math.max(widget.fontSize, size - 0.15);
+      m = _CellMetrics(size);
+    }
+    return _scaled = m;
   }
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final metrics = _metricsFor(constraints.maxWidth);
-      final cols = math.max(20, (constraints.maxWidth / metrics.width).floor());
+      // pane 에 맞춘 글꼴이면 열 수도 pane 그대로 — 44칸 줄이 43열에 접히지 않는다.
+      final cols = _fitsPane(constraints.maxWidth)
+          ? widget.grid.cols
+          : math.max(20, (constraints.maxWidth / metrics.width).floor());
       final st = widget.student;
       final slug = st?.slug;
       final t = _seconds;
