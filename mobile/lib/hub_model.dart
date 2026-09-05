@@ -103,7 +103,8 @@ class HubModel extends ChangeNotifier {
           status[key] = p.status;
           if (p.isWaiting) now++;
           final before = _lastStatus[key];
-          if (p.isWaiting && before != null && before != 'waiting') fresh++;
+          final wasWaiting = before == 'waiting' || before == 'blocked';
+          if (p.isWaiting && before != null && !wasWaiting) fresh++;
         }
       }
     }

@@ -7093,7 +7093,15 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
                 { "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
-            "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
+            // 종류별로 나눠 건다 — 승인(permission) · 질문/선택(question) · 답 없이 방치
+            // (idle). auth_success·agent_completed 같은 것은 사람을 기다리는 게 아니라
+            // 안 건다. 스크립트는 페이로드의 종류를 먼저 보고, 없으면 인자를 쓴다(옛
+            // claude 가 matcher 를 무시해도 종류가 안 섞인다).
+            "Notification": [
+                { "matcher": "permission_prompt", "hooks": [cmd("kasaterm-notify-attention.sh permission", 5000)] },
+                { "matcher": "elicitation_dialog|elicitation_url_dialog|agent_needs_input", "hooks": [cmd("kasaterm-notify-attention.sh question", 5000)] },
+                { "matcher": "idle_prompt", "hooks": [cmd("kasaterm-notify-attention.sh idle", 5000)] },
+            ],
         },
         // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는

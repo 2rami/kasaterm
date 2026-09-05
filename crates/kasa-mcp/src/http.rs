@@ -4224,6 +4224,11 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
                 "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
+                // 무엇을 기다리나(permission·question·idle) · 그 이유 · 쉰 지 몇 초 —
+                // 폰이 「승인 기다림 / 질문 기다림 / 답 기다림 / 방금 끝냄 / 쉬는 중」을 가른다.
+                "kind": b.and_then(|p| p.attention_kind.clone()),
+                "waiting_for": b.and_then(|p| p.waiting_for.clone()),
+                "idle_secs": b.and_then(|p| p.idle_secs),
                 "slug": b.and_then(|p| p.agent_name.as_deref()).and_then(avatar_slug),
                 "window": pane_windows
                     .get(&id)

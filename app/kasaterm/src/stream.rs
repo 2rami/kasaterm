@@ -53,3 +53,10 @@ pub struct PaneStatusView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled: Option<String>,
 }
+
+/// 사람을 기다린다는 표시 — 이유(훅의 message)와 종류(`attention_kind` 참고).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AttentionFlag {
+    pub reason: String,
+    pub kind: String,
+}

@@ -241,6 +241,13 @@ pub struct PaneActivity {
     /// unless `status == "waiting"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
+    /// 무엇을 기다리나 — "permission"(승인) · "question"(질문·선택) · "idle"(답 없이
+    /// 60초 넘게 방치). claude 의 Notification 훅이 준 종류, 화면 감지 승인은 permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_kind: Option<String>,
+    /// idle 로 들어온 뒤 흐른 초 — 「방금 끝냈다」와 「한참 쉼」을 가른다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<u64>,
     /// P3 — cumulative `message.usage` over the transcript tail window. The orchestrator
     /// reads these to spot an over-budget / runaway pane and steer the fleet.
     #[serde(default)]
@@ -835,6 +842,12 @@ pub trait Backend: Send + Sync {
     /// "permission" / the prompt text); empty is fine. Default unsupported.
     fn attention(&self, _surface_id: &str, _reason: &str) -> Result<()> {
         anyhow::bail!("attention unsupported by this backend")
+    }
+
+    /// `attention` 에 종류를 얹은 것 — "permission"(승인) · "question"(질문·선택) ·
+    /// "idle"(답 없이 방치). 기본은 종류를 버리고 `attention` 으로 넘긴다.
+    fn attention_kind(&self, surface_id: &str, _kind: &str, reason: &str) -> Result<()> {
+        self.attention(surface_id, reason)
     }
     /// 학생의 명시적 완료 보고 — 브리프를 마친 pane 이 `kasaterm-cli done` 으로
     /// 부른다. board 의 완료 판정을 idle 추정에서 자기 보고 정본으로 바꾸는 자리:

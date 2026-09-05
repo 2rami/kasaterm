@@ -1284,7 +1284,13 @@ impl App {
                         .attention
                         .lock()
                         .unwrap()
-                        .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
+                        .insert(
+                            id.clone(),
+                            crate::stream::AttentionFlag {
+                                reason: "승인 대기 (화면 감지)".to_string(),
+                                kind: "permission".to_string(),
+                            },
+                        );
                     // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(거노 요청).
                     // 승인 신호는 board attention(위) + (pane 안 볼 때) 데스크탑 알림
                     // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해

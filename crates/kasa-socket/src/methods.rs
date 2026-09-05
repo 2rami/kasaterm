@@ -405,7 +405,13 @@ fn surface_attention(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.attention requires `surface_id` (string)"),
     };
     let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-    match backend.attention(surface_id, reason) {
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let done = if kind.is_empty() {
+        backend.attention(surface_id, reason)
+    } else {
+        backend.attention_kind(surface_id, kind, reason)
+    };
+    match done {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

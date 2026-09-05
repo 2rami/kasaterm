@@ -926,7 +926,8 @@ pub(crate) struct CollabState {
     pub(crate) toast_action: Option<String>,
     pub(crate) toast_approve_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) toast_deny_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) attention: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pub(crate) attention:
+        std::sync::Arc<std::sync::Mutex<HashMap<String, crate::stream::AttentionFlag>>>,
     /// pane → 훅이 보고한 in-flight. `attention` 과 같이 socket `PtyBackend` 와 Arc
     /// 공유 — 쓰는 쪽은 훅(소켓 스레드), 읽는 쪽은 진행 표시(GUI 스레드)다.
     pub(crate) hook_activity: std::sync::Arc<std::sync::Mutex<HashMap<String, HookActivity>>>,

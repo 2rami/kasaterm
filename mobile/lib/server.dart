@@ -23,6 +23,9 @@ class Pane {
     this.model,
     this.effort,
     this.machine,
+    this.kind,
+    this.waitingFor,
+    this.idleSecs,
   });
 
   final String id;
@@ -39,8 +42,35 @@ class Pane {
   /// 다른 기계의 pane 이면 그 기계 이름 — 요청마다 `m/<이름>/` 접두가 붙는다.
   final String? machine;
 
-  bool get isWaiting => status == 'waiting';
+  /// 무엇을 기다리나 — permission(승인) · question(질문·선택) · idle(답 없이 방치).
+  /// 없으면 화면 글자로만 잡은 「답 기다림」.
+  final String? kind;
+  final String? waitingFor;
+
+  /// 쉬기 시작한 지 몇 초 — 「방금 끝냄」과 「쉬는 중」을 가른다.
+  final int? idleSecs;
+
+  /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
+  bool get isWaiting => status == 'waiting' || status == 'blocked';
   bool get isIdle => status == 'idle';
+
+  /// 끝낸 지 얼마 안 됐다 — 마지막 답을 읽을 차례.
+  bool get justDone => isIdle && idleSecs != null && idleSecs! < 600;
+
+  /// 목록 칩에 쓰는 한 마디.
+  String get kindLabel {
+    if (isWaiting) {
+      return switch (kind) {
+        'permission' => '승인 기다림',
+        'question' => '질문 기다림',
+        'idle' => '오래 기다림',
+        _ => '답 기다림',
+      };
+    }
+    if (isBusy) return '작업 중';
+    if (justDone) return '방금 끝냄';
+    return '쉼';
+  }
 
   /// 상태가 비면(학생이 안 도는 셸) 바쁜 것이 아니다 — 웹 허브와 같은 규칙.
   bool get isBusy => status.isNotEmpty && !isIdle && !isWaiting;
@@ -67,6 +97,9 @@ class Pane {
     model: j['model'] as String?,
     effort: j['effort'] as String?,
     machine: machine,
+    kind: j['kind'] as String?,
+    waitingFor: j['waiting_for'] as String?,
+    idleSecs: (j['idle_secs'] as num?)?.toInt(),
   );
 }
 

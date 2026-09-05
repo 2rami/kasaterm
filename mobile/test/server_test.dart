@@ -11,6 +11,7 @@ const publicRoot = 'https://kasaterm.debimarlene.com/u/$slug/';
 const _json = {'content-type': 'application/json; charset=utf-8'};
 
 void main() {
+  kindTests();
   group('Server.parse', () {
     test('스킴이 없으면 https 를 붙이고 뒤 / 를 보장한다', () {
       final u = Server.parse('kasaterm.debimarlene.com/u/$slug');
@@ -259,5 +260,32 @@ void _designTokensTests() {
         isFalse,
       );
     });
+  });
+}
+
+void kindTests() {
+  Pane pane(Map<String, Object?> extra) =>
+      Pane.fromJson({'id': '%1', 'name': '아리스', ...extra});
+
+  test('기다리는 종류가 칩 글귀가 된다', () {
+    expect(
+      pane({'status': 'waiting', 'kind': 'permission'}).kindLabel,
+      '승인 기다림',
+    );
+    expect(pane({'status': 'waiting', 'kind': 'question'}).kindLabel, '질문 기다림');
+    expect(pane({'status': 'waiting', 'kind': 'idle'}).kindLabel, '오래 기다림');
+    expect(pane({'status': 'waiting'}).kindLabel, '답 기다림');
+    expect(pane({'status': 'blocked'}).kindLabel, '답 기다림');
+  });
+
+  test('쉰 지 10분 안이면 「방금 끝냄」, 넘으면 「쉼」', () {
+    expect(pane({'status': 'idle', 'idle_secs': 30}).kindLabel, '방금 끝냄');
+    expect(pane({'status': 'idle', 'idle_secs': 3600}).kindLabel, '쉼');
+    expect(pane({'status': 'idle'}).kindLabel, '쉼');
+    expect(pane({'status': 'working'}).kindLabel, '작업 중');
+  });
+
+  test('blocked 도 사람 손이 필요한 것으로 센다', () {
+    expect(pane({'status': 'blocked'}).isWaiting, isTrue);
   });
 }

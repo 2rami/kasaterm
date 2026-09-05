@@ -1561,10 +1561,21 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     })?;
                     (s, &args[..])
                 };
-            let reason = rest.join(" ");
+            // --kind permission|question|idle — 무엇을 기다리는지(Notification 훅의 종류).
+            let mut kind = String::new();
+            let mut words: Vec<String> = Vec::new();
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                if a == "--kind" {
+                    kind = it.next().cloned().unwrap_or_default();
+                } else {
+                    words.push(a.clone());
+                }
+            }
+            let reason = words.join(" ");
             (
                 "surface.attention",
-                json!({ "surface_id": surface, "reason": reason }),
+                json!({ "surface_id": surface, "reason": reason, "kind": kind }),
             )
         }
         "agent-status" => {

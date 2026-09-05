@@ -345,7 +345,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final label = pane.isWaiting ? '대기' : (pane.isBusy ? '작업 중' : '쉼');
+    final label = pane.kindLabel;
     final filled = pane.isWaiting;
     final fg = filled ? scheme.onPrimary : scheme.onSurfaceVariant;
     return Container(

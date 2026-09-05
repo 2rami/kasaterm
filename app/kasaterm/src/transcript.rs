@@ -526,6 +526,8 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         // 하네스 종류도 pane 프로세스 소관 — collab_board 가 채운다.
         harness: None,
         waiting_for: None,
+        attention_kind: None,
+        idle_secs: None,
         tokens_in: ti,
         tokens_out: to,
         cache_read: cr,
@@ -709,6 +711,8 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         team: None,
         harness: None,
         waiting_for: None,
+        attention_kind: None,
+        idle_secs: None,
         tokens_in: 0,
         tokens_out: 0,
         cache_read: 0,
@@ -1035,6 +1039,8 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         harness: None,
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
+        attention_kind: None,
+        idle_secs: None,
         tokens_in,
         tokens_out,
         cache_read,

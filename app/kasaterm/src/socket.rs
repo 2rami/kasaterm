@@ -225,7 +225,10 @@ pub struct PtyBackend {
     /// pane's transcript grows again (claude resumed). The board's only source
     /// of `waiting`: a blocked claude writes nothing, so the transcript tail
     /// can't tell `collab_board` the pane is stuck — this map can.
-    attention: Arc<Mutex<HashMap<String, String>>>,
+    attention: Arc<Mutex<HashMap<String, crate::stream::AttentionFlag>>>,
+    /// surface_id → idle 로 들어온 시각. board 가 「방금 끝냈다/한참 쉼」을 가르는
+    /// 근거(`idle_secs`). 소켓 쪽에서만 쓴다.
+    idle_since: Mutex<HashMap<String, std::time::Instant>>,
     /// surface_id → 그 pane 이 **지금 돌리는** 서브에이전트·백그라운드 셸. `PreToolUse`/
     /// `PostToolUse` 훅이 `agent_status` 로 채운다. `attention` 과 같이 GUI
     /// (`App.collab.hook_activity`)와 Arc 공유 — 쓰는 쪽은 소켓 스레드, 읽는 쪽은
@@ -449,7 +452,7 @@ impl PtyBackend {
     pub fn new(
         proxy: EventLoopProxy<UserEvent>,
         ws: Arc<Mutex<Workspace>>,
-        attention: Arc<Mutex<HashMap<String, String>>>,
+        attention: Arc<Mutex<HashMap<String, crate::stream::AttentionFlag>>>,
         hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
         pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
         bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
@@ -460,6 +463,7 @@ impl PtyBackend {
             bound: Arc::new(Mutex::new(HashMap::new())),
             spawned_by: Arc::new(Mutex::new(HashMap::new())),
             attention,
+            idle_since: Mutex::new(HashMap::new()),
             hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
             codex_bound_pids: Arc::new(Mutex::new(HashMap::new())),
@@ -2608,12 +2612,24 @@ impl Backend for PtyBackend {
                 // `waiting` signal. Apply it only when otherwise idle; drop the
                 // stale flag once the pane is active again.
                 if effectively_idle {
-                    if let Some(reason) = attention.get(sid) {
+                    if let Some(flag) = attention.get(sid) {
                         row.status = "waiting".to_string();
-                        row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
+                        row.waiting_for = (!flag.reason.is_empty()).then(|| flag.reason.clone());
+                        row.attention_kind = (!flag.kind.is_empty()).then(|| flag.kind.clone());
                     }
                 } else {
                     attention.remove(sid);
+                }
+                // idle 로 들어온 지 얼마나 됐나 — 「방금 끝냈다」와 「한참 쉼」을 폰·알림이
+                // 가른다. 다른 상태로 나가면 잊는다.
+                {
+                    let mut since = self.idle_since.lock().unwrap();
+                    if row.status == "idle" {
+                        let t = *since.entry(sid.clone()).or_insert_with(std::time::Instant::now);
+                        row.idle_secs = Some(t.elapsed().as_secs());
+                    } else {
+                        since.remove(sid.as_str());
+                    }
                 }
                 // 명시적 완료 보고 부착 — idle 을 한 번 지난 보고가 다시 working 이
                 // 되면 새 브리프를 받은 것이므로 소거한다(스테일 방지). 그 전까지는
@@ -2954,12 +2970,19 @@ impl Backend for PtyBackend {
     }
 
     fn attention(&self, surface_id: &str, reason: &str) -> Result<()> {
+        self.attention_kind(surface_id, "", reason)
+    }
+
+    fn attention_kind(&self, surface_id: &str, kind: &str, reason: &str) -> Result<()> {
         // Remember it for the board (socket-side, pull), then hand the GUI-side
         // surfacing (toast / flash / desktop alert) to the GUI thread.
-        self.attention
-            .lock()
-            .unwrap()
-            .insert(surface_id.to_string(), reason.to_string());
+        self.attention.lock().unwrap().insert(
+            surface_id.to_string(),
+            crate::stream::AttentionFlag {
+                reason: reason.to_string(),
+                kind: kind.to_string(),
+            },
+        );
         let _ = self.proxy.send_event(UserEvent::Attention {
             surface_id: surface_id.to_string(),
             reason: reason.to_string(),
