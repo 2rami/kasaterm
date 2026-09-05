@@ -45,6 +45,7 @@ fn cache() -> &'static Mutex<Cache> {
             tried: None,
             inflight: false,
             error: None,
+            probe: false,
         })
     })
 }
