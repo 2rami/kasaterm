@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.geono.pymobiledevice3-tunneld</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/kasa/.local/bin/pymobiledevice3</string>
+    <string>remote</string><string>tunneld</string>
+    <string>-p</string><string>tcp</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/var/log/pymobiledevice3-tunneld.log</string>
+  <key>StandardErrorPath</key><string>/var/log/pymobiledevice3-tunneld.log</string>
+</dict>
+</plist>
