@@ -5943,6 +5943,24 @@ impl App {
                 }
                 // acct-3 은 일부러 안 넣는다.
             }
+            // 슬롯이 누구인지도 심는다 — 별명(「사이오닉팀플랜」) 옆에 조직이
+            // 붙는지는 신원이 있어야 볼 수 있고, 리그에는 로그인이 없다.
+            crate::settings::seed_auth_probe(
+                "acct-2",
+                Some(crate::settings::AuthProbe {
+                    logged_in: true,
+                    email: "2rami@sionic.ai".to_string(),
+                    org: "Sionic AI".to_string(),
+                }),
+            );
+            crate::settings::seed_auth_probe(
+                "acct-3",
+                Some(crate::settings::AuthProbe {
+                    logged_in: false,
+                    email: String::new(),
+                    org: String::new(),
+                }),
+            );
             // 코덱스도 함께 — 5시간은 비었는데 주간이 꽉 찬 조합이다. 글자로만
             // 그리던 동안 이 상태가 한 줄 요약에 묻혔다(2026-09-06).
             if let Some(backend) = self.socket_backend.as_ref() {

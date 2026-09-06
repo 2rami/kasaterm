@@ -3830,13 +3830,28 @@ pub(crate) struct AuthProbe {
 /// 초 단위로 걸린다 — TTL 20초마다 그만큼 계정 칸이 빈칸이 되어, 가만히 보고 있으면
 /// 계정이 주기적으로 풀리는 것처럼 깜빡였다(거노 2026-08-03). git 폴러가 일시적
 /// 실패에 마지막 값을 붙드는 것과 같은 이유로, 새 답이 올 때까지는 알던 값을 보인다.
+type ProbeCache = std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, Option<AuthProbe>)>,
+>;
+
+fn probe_cache() -> &'static ProbeCache {
+    static CACHE: std::sync::OnceLock<ProbeCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(ProbeCache::default)
+}
+
+/// 검증 리그에 슬롯 신원을 심는다. 실제 값은 슬롯 토큰을 물어야 나오는데 격리
+/// 리그에는 로그인이 없어, 심지 않으면 「이 줄이 누구인지」를 화면으로 확인할
+/// 길이 자체가 없다.
+pub(crate) fn seed_auth_probe(id: &str, probe: Option<AuthProbe>) {
+    probe_cache()
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), (std::time::Instant::now(), probe));
+}
+
 pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    type Cache = Mutex<HashMap<String, (Instant, Option<AuthProbe>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(Cache::default);
+    let cache = probe_cache();
     let stale = {
         let mut m = cache.lock().unwrap();
         let prev = match m.get(id) {
@@ -3888,8 +3903,8 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
                 (!email.is_empty()).then(|| AuthProbe { logged_in: true, email, org })
             }
         };
-        if let Some(cache) = CACHE.get() {
-            let mut m = cache.lock().unwrap();
+        {
+            let mut m = probe_cache().lock().unwrap();
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
             let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()));

@@ -12310,6 +12310,32 @@ impl App {
                         );
                         let tf = f - 3.0;
                         let right = sx + sw - pad_x;
+                        // 라벨 옆에 **누구인지**. 라벨은 사람이 붙인 별명이라
+                        // (「네이버」·「지메일」) 그것만으로는 어느 계정인지 확인이
+                        // 안 되는데, 설정 화면 카드에는 있고 이 목록에만 없었다
+                        // (2026-09-07 「하단바에서도 계정뭔지 나오게해줘」).
+                        // 별명이 곧 이메일인 슬롯에서는 같은 말을 두 번 하지 않는다.
+                        if let Some(who) = crate::settings::account_identity(&id)
+                            .filter(|who| !label.contains(who.as_str()))
+                        {
+                            let lw = g.measure_chrome_text(&label, f, active);
+                            let wx = sx + pad_x + lw + 8.0;
+                            let room = right - 52.0 - wx;
+                            if room > 30.0 {
+                                let who = crate::info::fit_text(g, &who, room, tf, false);
+                                g.draw_text(
+                                    wx,
+                                    line1 + (f - tf) / 2.0,
+                                    &who,
+                                    gpu::DrawOpts {
+                                        font_size: tf,
+                                        color: theme::with_alpha(theme::text_dim(), 170),
+                                        bold: false,
+                                        italic: false,
+                                    },
+                                );
+                            }
+                        }
                         // 활성 표시는 오른쪽 배지. 체크 아이콘이나 왼쪽 막대와 달리,
                         // 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
                         if active {
