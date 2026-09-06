@@ -4772,9 +4772,9 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 세션 기록 행 / 범위 칩 / 새로고침. Info 와 같은 이유로
-                        // 탭을 먼저 확인한다 — 다른 탭에선 낡은 좌표가 남는다.
-                        if self.info.tab == state::SideTab::Machines
+                        // 「다른 기계」 절의 버튼(보내기·데려오기·거울·펼치기·화면 보기).
+                        // 다른 탭에선 낡은 좌표가 남으므로 탭을 먼저 확인한다.
+                        if self.info.tab == state::SideTab::Info
                             && self.machines_col_click(cx, cy)
                         {
                             self.chrome_dirty = true;
@@ -4828,14 +4828,6 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
-                                window.request_redraw();
-                                return;
-                            }
-                            // 「다른 기계」 줄 — 거울·펼치기 버튼이 있는 원격 탭으로.
-                            if self.info.machine_rects.iter().any(|(_, r)| inside(r)) {
-                                self.info.tab = state::SideTab::Machines;
-                                self.info.machines_col.last_refresh = None;
-                                self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
                             }

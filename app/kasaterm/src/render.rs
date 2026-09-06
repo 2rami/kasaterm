@@ -8294,36 +8294,6 @@ impl App {
                     self.last_blink_on,
                 );
             }
-            // 이사 탭 — 다른 칼럼들과 같은 네이티브 본문(machinescol.rs).
-            if git_col_w > 0.0 && self.info.tab == state::SideTab::Machines {
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
-                let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - bottom_h).max(top);
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
-                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
-                let body_top = info::draw_side_tabs(
-                    g,
-                    self.cursor_px,
-                    &mut self.info,
-                    &mut self.git,
-                    git_col_x,
-                    git_col_w,
-                    top,
-                );
-                machinescol::draw_machines_col(
-                    g,
-                    self.cursor_px,
-                    &mut self.info.machines_col,
-                    git_col_x,
-                    git_col_w,
-                    body_top,
-                    bottom,
-                );
-            }
             // Info 탭 — 같은 칼럼, 같은 머리, 본문만 다르다. git 본문과 형제
             // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
             // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.

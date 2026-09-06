@@ -1,4 +1,9 @@
-//! 이사 칼럼 — 우측 패널 `SideTab::Machines` 본문.
+//! 이사 — 우측 패널 Info 탭 「다른 기계」 절의 본문.
+//!
+//! 처음엔 제 탭(「원격」)이었다. Info 에 이미 기계별 요약 줄이 있고 그 줄을 누르면
+//! 이 탭으로 넘어오는 구조라 같은 것을 두 자리에서 말했다 — 2026-09-07 지시로 탭을
+//! 걷고 본문을 그 절 안에 들였다. 시저·스크롤·휠은 이제 Info 것을 쓴다(옛 탭은
+//! 휠 처리가 아예 없어 목록이 길면 아래를 못 봤다).
 //!
 //! 처음엔 Persona 식 자식 웹뷰(`/arona-ui/machines.html`)였는데 같은 날 네이티브로
 //! 뒤집었다(2026-08-29 지적 「타우리 말고 wgpu로 해야되지않나」). 우측 패널의 다른
@@ -7,7 +12,7 @@
 //!
 //! 데이터 조립(`refresh_machines_col`)은 페인트 루프 밖(handler 프레임 끝)에서 한다
 //! — 페인트는 gpu 를 빌린 상태라 `&self` 메서드를 못 부른다(사이드바 스냅샷과 같은
-//! 이유). 그리기(`draw_machines_col`)는 sesscol/mcpcol 과 같은 자유함수 관례다.
+//! 이유). 그리기(`draw_machines_body`)는 sesscol/mcpcol 과 같은 자유함수 관례다.
 
 use super::*;
 
@@ -110,7 +115,7 @@ impl App {
     /// 이사 칼럼 데이터를 다시 조립한다. 탭이 보일 때만, 1초 스로틀 —
     /// 기계 쪽은 폴링 캐시(`machines::snapshot`)라 읽기 자체는 공짜다.
     pub(crate) fn refresh_machines_col(&mut self) {
-        if !self.machines_tab_active() {
+        if !self.machines_section_active() {
             return;
         }
         if self
@@ -702,58 +707,22 @@ fn student_row(
 }
 
 /// 이사 칼럼 본문. sesscol/mcpcol 과 같은 호출 관례(자유함수, 상태만 받아 그림).
-pub(crate) fn draw_machines_col(
+/// Info 탭 「다른 기계」 절 본문 — `y` 에서 시작해 마지막 줄 아래 y 를 돌려준다.
+/// 시저·스크롤은 Info 가 쥔다. 명부가 비면 Info 가 절 자체를 안 그리므로 빈 상태가
+/// 여기엔 없다.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_machines_body(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     mc: &mut state::MachinesColState,
-    x: f32,
-    w: f32,
-    top: f32,
-    bottom: f32,
-) {
-    let x0 = x + 14.0;
-    let right = x + w - 12.0;
-    // 칼럼이 좁으면 학생 행이 두 단(글 / 버튼)으로 선다.
-    let narrow = w < GIT_DENSE_COMPACT;
+    x0: f32,
+    right: f32,
+    y: f32,
+    // 좁으면 학생 행이 두 단(글 / 버튼)으로 선다.
+    narrow: bool,
+) -> f32 {
     mc.btn_rects.clear();
-    let vis_h = (bottom - top).max(0.0);
-    g.push_clip(x, top, w, vis_h);
-    let mut y = top + 8.0 - mc.scroll;
-
-    if mc.machines.is_empty() {
-        g.pop_clip();
-        // 좁으면 짧게 끊는다 — 한 줄짜리 안내가 칼럼 밖으로 뻗으면 정작 파일
-        // 이름이 잘려, 무엇을 적어야 하는지가 사라진다.
-        let msg: &[&str] = if narrow {
-            &[
-                "등록된 기계가 없어요",
-                "machines.json 에 적으면",
-                "여기 떠요",
-            ]
-        } else {
-            &[
-                "등록된 기계가 없어요 —",
-                "~/.config/kasaterm/machines.json 에 적으면 여기 떠요",
-            ]
-        };
-        let mut my = top + vis_h * 0.4;
-        for line in msg.iter().copied() {
-            let tw = g.measure_chrome_text(line, 11.0, false);
-            g.draw_text(
-                x + (w - tw) / 2.0,
-                my,
-                line,
-                gpu::DrawOpts {
-                    font_size: 11.0,
-                    color: theme::text_mute(),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            my += 17.0;
-        }
-        return;
-    }
+    let mut y = y + 4.0;
 
     // ── 이 맥북 ───────────────────────────────────────────────────────────
     y = section_label(g, x0, y, "이 맥북");
@@ -1039,11 +1008,5 @@ pub(crate) fn draw_machines_col(
         }
     }
 
-    // 스크롤 상한 — 다른 칼럼과 같은 규칙(상한은 렌더가 잡는다).
-    let content_h = (y + mc.scroll - top).max(0.0);
-    let max_scroll = (content_h - vis_h).max(0.0);
-    if mc.scroll > max_scroll {
-        mc.scroll = max_scroll;
-    }
-    g.pop_clip();
+    y
 }

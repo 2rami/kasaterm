@@ -267,13 +267,10 @@ pub(crate) enum SideTab {
     Mcp,
     /// 상주 페르소나 — 지금 pane 들 상황을 아는 말상대. 본문은 wgpu 네이티브.
     Persona,
-    /// 이사 — 기계별 학생 목록과 보내기/데려오기(아로나 이사 탭의 앱 안 판).
-    /// 본문은 네이티브 렌더(machinescol.rs) — 데이터가 같은 프로세스에 있다.
-    Machines,
 }
 
-/// 이사 칼럼(SideTab::Machines) 상태 — 조립은 `refresh_machines_col`, 그리기는
-/// `machinescol::draw_machines_col`, 클릭은 `machines_col_click`.
+/// Info 탭 「다른 기계」 절 상태 — 조립은 `refresh_machines_col`, 그리기는
+/// `machinescol::draw_machines_body`, 클릭은 `machines_col_click`.
 #[derive(Default)]
 pub(crate) struct MachinesColState {
     /// 기계 섹션들 — machines 폴링 캐시의 스냅샷 + 이사 간 학생의 로컬 미러.
@@ -281,7 +278,9 @@ pub(crate) struct MachinesColState {
     /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
     pub(crate) locals: Vec<MachinesColRow>,
     pub(crate) last_refresh: Option<std::time::Instant>,
-    pub(crate) scroll: f32,
+    /// 지난 paint 에 잰 본문 높이. Info 는 스크롤 상한을 그리기 *전에* 잡으므로 한
+    /// 프레임 전 값을 쓴다 — 본문이 자란 그 프레임에만 한 번 밀린다.
+    pub(crate) body_h: f32,
     /// 매 paint 재생성되는 버튼 hit rect(다른 칼럼과 같은 규칙).
     pub(crate) btn_rects: Vec<(MachinesColBtn, (f32, f32, f32, f32))>,
     /// 이사가 도는 중인 (pane, 진행 문구). 이사는 GUI 스레드 동기라 실제로는
@@ -513,21 +512,8 @@ pub(crate) enum InfoSection {
     /// 닫아서 물러난 pane. 되살릴 게 있을 때만 나타나는 섹션이라, 다른 셋과 달리
     /// 자리를 상시 차지하지 않는다.
     Closed,
-    /// 다른 기계(명부) — 그 기계의 학생 수·기다림·거울 수 한 줄씩. 명부가 비면 없다.
+    /// 다른 기계(명부) — 기계별 학생·거울·방 펼치기·화면 보기(machinescol.rs). 명부가 비면 없다.
     Machines,
-}
-
-/// Info 「다른 기계」 한 줄의 재료 — machines 폴링 캐시를 요약한 것.
-#[derive(Clone, Default)]
-pub(crate) struct InfoMachine {
-    pub(crate) label: String,
-    pub(crate) online: bool,
-    /// 그 기계의 GUI pane 수(학생 자리).
-    pub(crate) students: usize,
-    /// 그중 사람 답을 기다리는 것(waiting·attention).
-    pub(crate) waiting: usize,
-    /// 이 창에 이미 거울로 떠 있는 수.
-    pub(crate) mirrored: usize,
 }
 
 /// Info 탭 머리의 앱 전역 진입점. 우상단 아이콘 클러스터에 흩어져 있던 것들이라
@@ -614,11 +600,6 @@ pub(crate) struct InfoState {
     pub(crate) procs_collapsed: bool,
     pub(crate) closed_collapsed: bool,
     pub(crate) machines_collapsed: bool,
-    /// 「다른 기계」 섹션 재료 — `pump_info` 가 2초마다 machines 캐시에서 요약한다.
-    pub(crate) machines_view: Vec<InfoMachine>,
-    pub(crate) machines_at: Option<std::time::Instant>,
-    /// 기계 줄 hit rect `(라벨, rect)` — 누르면 원격 탭으로 간다. 매 paint 재생성.
-    pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
     /// 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않게 하려는 것이다.
@@ -699,9 +680,6 @@ impl Default for InfoState {
             procs_collapsed: false,
             closed_collapsed: false,
             machines_collapsed: false,
-            machines_view: Vec::new(),
-            machines_at: None,
-            machine_rects: Vec::new(),
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),

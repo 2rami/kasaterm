@@ -2600,9 +2600,9 @@ impl App {
         let tab = match tab.trim() {
             "sessions" => SideTab::Sessions,
             "mcp" => SideTab::Mcp,
-            "info" => SideTab::Info,
+            // 옛 「원격」 탭은 Info 의 「다른 기계」 절이 됐다 — 이름은 그대로 받는다.
+            "info" | "machines" => SideTab::Info,
             "git" => SideTab::Git,
-            "machines" => SideTab::Machines,
             other => {
                 eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git|machines");
                 return None;
@@ -2739,7 +2739,6 @@ impl App {
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
                 SideTab::Persona => self.persona.bubble_scroll = px,
-                SideTab::Machines => self.info.machines_col.scroll = px,
             }
         }
         self.chrome_dirty = true;
@@ -2765,7 +2764,6 @@ impl App {
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
             SideTab::Persona => self.persona.bubble_scroll,
-            SideTab::Machines => self.info.machines_col.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
         // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
@@ -2775,7 +2773,6 @@ impl App {
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
             SideTab::Persona => self.persona.hits.len(),
-            SideTab::Machines => self.info.machines_col.btn_rects.len(),
         };
         let (vis_h, content_h) = self.git.col_list_extent;
         // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와

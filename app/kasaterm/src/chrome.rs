@@ -751,10 +751,10 @@ impl App {
             && self.git.col_visible
             && self.info.tab == state::SideTab::Persona
     }
-    /// 이사 탭이 지금 화면에 있어야 하나 — persona_active 와 같은 판정.
-    /// (본문은 웹뷰가 아니라 네이티브 렌더 — machinescol.rs.)
-    pub(crate) fn machines_tab_active(&self) -> bool {
-        self.git.col_visible && self.info.tab == state::SideTab::Machines
+    /// 「다른 기계」 절이 지금 화면에 있어야 하나 — Info 탭이 열려 있으면. 접혀
+    /// 있어도 머리의 수·배지는 그리므로 접힘은 안 본다. (본문은 machinescol.rs.)
+    pub(crate) fn machines_section_active(&self) -> bool {
+        self.git.col_visible && self.info.tab == state::SideTab::Info
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {

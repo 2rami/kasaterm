@@ -1169,7 +1169,7 @@ impl App {
                 continue;
             };
             let (win_cols, win_rows) = self.window_cells();
-            let mut seated: Vec<(String, String)> = Vec::new();
+            let mut seated: Vec<(String, String, String)> = Vec::new();
             for (rid, name, rcwd) in &room {
                 self.set_toast(format!(
                     "{label} 펼치는 중 — {}/{total}",
@@ -1213,7 +1213,18 @@ impl App {
                         );
                         self.insert_pty(local_id.clone(), remote.session.clone());
                         self.dead_panes.lock().unwrap().retain(|x| x != &local_id);
-                        seated.push((local_id, name.clone()));
+                        // 첫 자리 말고는 아직 화면 상태(PaneState)가 없다 — 첫 화면이
+                        // 와야 생기는데(apply_screen_update 의 or_insert) 그건 이 함수가
+                        // 끝난 뒤다. 아래 relabel_pane 은 실존 pane 만 손대므로 미리
+                        // 자리를 안 만들면 둘째 학생부터 이름표가 안 붙어 「셸」로
+                        // 뜨고 테마도 없었다(2026-09-07 지적).
+                        self.ws
+                            .lock()
+                            .unwrap()
+                            .panes
+                            .entry(local_id.clone())
+                            .or_default();
+                        seated.push((local_id, name.clone(), rid.clone()));
                         ok_n += 1;
                     }
                     Err(e) => fail.push(format!("{rid}({name}): {e:#}")),
@@ -1223,7 +1234,8 @@ impl App {
                 continue; // 새 창은 빈 셸로 남는다 — 실패 사유가 아래 보고에 찍힌다.
             }
             if seated.len() > 1 {
-                let others: Vec<String> = seated.iter().skip(1).map(|(id, _)| id.clone()).collect();
+                let others: Vec<String> =
+                    seated.iter().skip(1).map(|(id, _, _)| id.clone()).collect();
                 let dir = crate::layout::pick_split_axis(
                     win_cols as f32 * self.cell.w.max(1.0),
                     win_rows as f32 * self.cell.h.max(1.0),
@@ -1241,9 +1253,16 @@ impl App {
             }
             // 몸통이 남의 기계라도 이 창의 학생은 같은 사람이어야 한다 —
             // 이름·색·얼굴이 없는 무명 pane 방지(spawn_remote_pane 과 같은 규칙).
-            for (id, name) in &seated {
+            for (id, name, rid) in &seated {
+                // 스냅샷에 이름이 없으면(막 뜬 학생·옛 원격) 그 기계에 직접 묻는다 —
+                // 거울(mirror_remote_pane)과 같은 규칙.
+                let name = if name.is_empty() {
+                    kasa_mcp::remote::remote_pane_character(&m.base, rid, None).unwrap_or_default()
+                } else {
+                    name.clone()
+                };
                 if !name.is_empty() {
-                    self.relabel_pane(id, name);
+                    self.relabel_pane(id, &name);
                 }
             }
             self.ws.lock().unwrap().active_pane = Some(seated[0].0.clone());
