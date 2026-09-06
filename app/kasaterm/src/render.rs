@@ -10920,7 +10920,16 @@ impl App {
                         }))
                         .collect();
                 if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
-                    let short = statusbar_account_short(n, &all_names);
+                    // 별명이 아니라 **이메일**을 적는다(2026-09-07 지시). 별명은 사람이
+                    // 붙인 말이라 「지메일」이 어느 주소인지 이 줄만 보고는 확인이 안
+                    // 된다 — 계정 넷 중 둘이 같은 아이디를 쓰던 것이 정확히 그 문제였다.
+                    let email = crate::settings::auth_probe(&self.set_claude_account)
+                        .map(|p| p.email)
+                        .filter(|e| !e.is_empty());
+                    let short = match email {
+                        Some(e) => e,
+                        None => statusbar_account_short(n, &all_names),
+                    };
                     let short = short.as_str();
                     g.draw_text(
                         x,
@@ -10936,153 +10945,11 @@ impl App {
                     x += g.measure_chrome_text(short, fs, true);
                 }
 
-                // ── 나머지 계정 ────────────────────────────────────────────
-                // 활성 하나만 세우면 「지금 계정이 찼을 때 어디로 옮기나」에 답하려고
-                // 매번 드롭다운을 열어야 하고, 그 손이 아까워 안 열다가 다 찬 계정을
-                // 계속 쓰게 된다(2026-08-27 지시 「하단바에 다른계정 뭔지랑 사용량
-                // 실시간으로 계속 보이는거」).
-                //
-                // 게이지는 **활성만** 남긴다. 넷을 다 막대로 그리면 이 줄이 게이지밭이
-                // 되어 정작 급한 활성 계정의 막대가 나머지에 묻힌다 — 나머지는 어디로
-                // 옮길지 고르는 값이라 이름과 숫자면 족하다.
-                // 스위치가 꺼져 있어도 **로그인이 풀린 계정은 보여 준다.** 그건
-                // 「다른 계정의 한도」가 아니라 사람이 고쳐야 할 것이라, 감추면
-                // 설정창에는 있는 계정이 이 줄에서만 사라진 꼴이 된다(거노 2026-09-05
-                // 「설정창에는 계정 다있는데 하단바에는 왜 두개 빠졌어」).
-                let any_signed_out = self.set_claude_accounts.iter().any(|a| {
-                    a.id != self.set_claude_account
-                        && !crate::settings::auth_probe(&a.id)
-                            .is_none_or(|probe| probe.logged_in)
-                });
-                // 늘 세운다. 켜고 끄는 칸이 있던 동안 이 줄과 설정 화면이 서로
-                // 다른 것을 보여 줬고, 그게 세 번 되풀이된 불만이다(2026-09-07
-                // 「하단바에는 설정이랑 다르게 계정표시없고 안나와」). 계정을 여럿
-                // 등록하는 이유가 한도를 보고 옮기려는 것이라, 여기 안 보이면 등록한
-                // 뜻이 없다. 좁으면 아래 예산 계산이 알아서 접는다.
-                let _ = any_signed_out;
-                if !self.set_claude_accounts.is_empty() && win_w >= 720.0 {
-                    // 표는 **한 번만** 잠근다. 계정마다 lock 을 잡으면 매 프레임
-                    // 슬롯 수만큼 경합하는데, 이 자리는 pane 이 출력하는 동안 쉼 없이
-                    // 도는 상태줄이다.
-                    let table = self
-                        .claude_usage_all
-                        .lock()
-                        .ok()
-                        .map(|g| g.clone())
-                        .unwrap_or_default();
-                    // 오른쪽 칩(포트·리소스·원격)은 이 뒤에 그려져 오른쪽 끝에서
-                    // 왼쪽으로 자란다 — 여기서 그 자리까지 먹으면 글자끼리 겹친다.
-                    // 재시작 권장이 떠 있는 프레임이 가장 넓으므로 그 폭으로 잡는다.
-                    let budget = win_w - 400.0;
-                    let mut dropped = 0usize;
-                    let mut first = true;
-                    for (i, a) in self.set_claude_accounts.iter().enumerate() {
-                        if a.id == self.set_claude_account {
-                            continue;
-                        }
-                        let name = crate::settings::account_display(
-                            &a.id,
-                            &a.label,
-                            &format!("계정 {}", i + 2),
-                        );
-                        let short = statusbar_account_short(&name, &all_names);
-                        // ⚠️ 캐시판이 아니면 활성 계정을 물을 때 `security` 를 자식
-                        // 프로세스로 띄운다 — 여기는 프레임마다 도는 자리다.
-                        let key = crate::claude_auth::runtime_dir_for_cached(
-                            &a.id,
-                            &self.set_claude_account,
-                        )
-                        .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-                        let badge = table.get(&key);
-                        // 못 읽은 슬롯은 `—`. 0% 로 그리면 「여유 있음」이라는
-                        // 거짓말이 되고, 그게 옮길지 말지를 정확히 반대로 만든다.
-                        // 값을 못 읽은 슬롯은 **이 줄에서 뺀다**. 이름 옆에 `—` 만
-                        // 붙는 칸은 「어디로 옮길까」에 아무 답을 못 주면서 자리만
-                        // 먹는다 — 넷이 다 `—` 면 줄 절반이 뜻 없는 글자가 된다
-                        // (2026-08-29 지적: 「좌측하단 계정정보 좀 정보량 줄이고」).
-                        // 있다는 사실은 끝의 `+N` 이 말하고, 전체는 눌러서 본다.
-                        // 로그인이 풀린 자리는 **숫자 대신 그 사실**을 적는다. 값을
-                        // 못 읽었다는 점은 같지만 사람이 할 일이 정반대다 — 조회 중인
-                        // 것은 기다리면 되고, 풀린 것은 눌러서 다시 로그인해야 한다.
-                        let signed_out = !crate::settings::auth_probe(&a.id)
-                            .is_none_or(|probe| probe.logged_in);
-                        let (pct_s, pct_c) = match badge {
-                            Some(b) if b.stale => (format!("~{:.0}%", b.pct), pct_col(b.pct)),
-                            Some(b) => (format!("{:.0}%", b.pct), pct_col(b.pct)),
-                            None if signed_out => ("로그인 필요".to_string(), theme::danger()),
-                            // 아직 못 읽었어도 **이름은 세운다.** 한동안 이런 칸을
-                            // 통째로 뺐는데(2026-08-29 「정보량 줄이고」), 그 결과
-                            // 설정 화면에는 넷이 있고 이 줄에는 둘만 있는 상태가
-                            // 됐다 — 같은 것을 두 화면이 다르게 말하는 셈이라
-                            // 세 번 되풀이해 지적받았다(2026-09-07). 자리가 정말
-                            // 모자라면 아래 예산이 접고 `+N` 으로 말한다.
-                            None => ("—".to_string(), theme::with_alpha(theme::text_dim(), 150)),
-                        };
-                        let sep = if first { " │ " } else { " · " };
-                        let seg = g.measure_chrome_text(sep, fs, true)
-                            + g.measure_chrome_text(&short, fs, true)
-                            + 4.0
-                            + g.measure_chrome_text(&pct_s, fs, true);
-                        // 자리가 없으면 여기서 멈추고 남은 개수만 말한다. 반쯤
-                        // 그리다 잘린 이름은 다른 계정으로 읽힐 수 있다.
-                        if x + seg > budget {
-                            dropped += 1;
-                            continue;
-                        }
-                        first = false;
-                        g.draw_text(
-                            x,
-                            ty,
-                            sep,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: theme::with_alpha(theme::text_dim(), 120),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        x += g.measure_chrome_text(sep, fs, true);
-                        g.draw_text(
-                            x,
-                            ty,
-                            &short,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: theme::text_dim(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        x += g.measure_chrome_text(&short, fs, true) + 4.0;
-                        g.draw_text(
-                            x,
-                            ty,
-                            &pct_s,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: pct_c,
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        x += g.measure_chrome_text(&pct_s, fs, true);
-                    }
-                    if dropped > 0 {
-                        let s = format!(" +{dropped}");
-                        g.draw_text(
-                            x,
-                            ty,
-                            &s,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: theme::with_alpha(theme::text_dim(), 150),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        x += g.measure_chrome_text(&s, fs, true);
-                    }
-                }
+                // 나머지 계정은 **여기 안 세운다.** 눌러서 여는 목록에 이름·이메일·
+                // 한도가 다 있고, 이 줄에 늘어놓으면 정작 이 줄의 존재 이유인 활성
+                // 계정의 막대가 이름밭에 묻힌다(2026-09-07 「하단바 다른계정 누르면
+                // 보이니까 이메일만 나오게하라니까 현재계정하나랑」).
+
 
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
                 // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
