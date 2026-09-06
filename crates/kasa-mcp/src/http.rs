@@ -6393,6 +6393,8 @@ pub fn spawn_http_server_opts(
                     // 기계 명부(machines.json) 폴링 — 이사 탭이 기계별 학생 목록을
                     // 즉시 그리게 미리 받아 둔다. 같은 순환 이유로 본체 한정.
                     tokio::spawn(crate::machines::poll_loop());
+                    // ssh 만 적힌 기계의 8765 터널을 앱이 든다(설정 화면이 적는 항목).
+                    tokio::spawn(crate::machines::tunnel_loop());
                 }
                 // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 본체는 늘, standalone 은
                 // 리그가 `KASATERM_GATEWAY` 로 로컬 관문을 가리켰을 때만(사용자 관문에 가짜

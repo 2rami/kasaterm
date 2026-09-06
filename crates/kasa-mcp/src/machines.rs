@@ -7,8 +7,14 @@
 //! 설정: `~/.config/kasaterm/machines.json`
 //! ```json
 //! [{"label":"맥미니","base":"http://127.0.0.1:18791",
-//!   "roots":{"/Users/kasa/Desktop/momewomo":"/Users/miku/momewomo"}}]
+//!   "roots":{"/Users/kasa/Desktop/momewomo":"/Users/miku/momewomo"}},
+//!  {"label":"나쵸네코","ssh":"nachoneko"}]
 //! ```
+//! 둘째 꼴이 설정 화면이 적는 것이다(2026-09-07 지시 「ssh 연결이랑 이름 붙이기를
+//! 설정에서」): `ssh` 대상만 있으면 앱이 그 기계의 kasaterm(8765)로 가는 터널을
+//! 스스로 들고(`tunnel_loop`) `base` 를 그 터널로 잡는다. 화면공유 주소(host)와
+//! 경로 매핑(roots: 이쪽 홈 → 저쪽 홈)도 ssh 로 한 번 물어 채운다. `base` 를 손으로
+//! 적은 항목(옛 launchd 터널)은 그대로 존중한다.
 //! env `KASATERM_MACHINES`(같은 JSON)가 우선 — 검증용 인스턴스가 사용자 설정을
 //! 안 건드리고 가짜 원격을 가리키기 위해서다(다른 격리 env 들과 같은 규율).
 //!
@@ -49,6 +55,32 @@ pub struct Machine {
     /// 본진으로 걸면 스폰이 두 기계 사이를 무한히 오간다(가드가 없다 — 명부는
     /// 기계마다 따로라 코드가 원천 차단할 수 없다).
     pub home: bool,
+    /// ssh 대상(`nachoneko`·`user@10.0.0.5`). 있고 `base` 가 없으면 앱이 터널을 든다.
+    pub ssh: Option<String>,
+    /// `base` 가 이 앱의 자동 터널(`tunnel_loop`)인가 — 그 항목만 터널을 스폰한다.
+    pub tunneled: bool,
+}
+
+/// 자동 터널의 로컬 포트 — 라벨에서 결정적으로 뽑는다(파일에 안 적어도 재시작마다
+/// 같은 번호). 손으로 만든 launchd 터널(18791·18795…)과 겹치지 않게 18900 대.
+pub fn tunnel_port(label: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in label.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    18900 + (h % 90) as u16
+}
+
+/// ssh 로 한 번 물어 둔 그 기계의 정체 — 화면공유 주소(hostname)와 홈 폴더.
+#[derive(Clone, Default)]
+struct RemoteMeta {
+    hostname: String,
+    home: String,
+}
+fn meta_cache() -> &'static Mutex<HashMap<String, RemoteMeta>> {
+    static C: OnceLock<Mutex<HashMap<String, RemoteMeta>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn parse(v: &Value) -> Vec<Machine> {
@@ -58,20 +90,35 @@ fn parse(v: &Value) -> Vec<Machine> {
     arr.iter()
         .filter_map(|m| {
             let label = m.get("label")?.as_str()?.trim().to_string();
-            let base = m
-                .get("base")?
-                .as_str()?
-                .trim()
-                .trim_end_matches('/')
-                .to_string();
-            if label.is_empty() || base.is_empty() {
+            if label.is_empty() {
                 return None;
             }
+            let ssh = m
+                .get("ssh")
+                .and_then(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let explicit_base = m
+                .get("base")
+                .and_then(|b| b.as_str())
+                .map(|b| b.trim().trim_end_matches('/').to_string())
+                .filter(|b| !b.is_empty());
+            let tunneled = explicit_base.is_none() && ssh.is_some();
+            let base = match explicit_base {
+                Some(b) => b,
+                None if ssh.is_some() => format!("http://127.0.0.1:{}", tunnel_port(&label)),
+                None => return None,
+            };
+            let meta = ssh
+                .as_ref()
+                .and_then(|t| meta_cache().lock().ok()?.get(t).cloned())
+                .unwrap_or_default();
             let host = m
                 .get("host")
                 .and_then(|h| h.as_str())
                 .map(|h| h.trim().to_string())
                 .filter(|h| !h.is_empty())
+                .or_else(|| (!meta.hostname.is_empty()).then(|| meta.hostname.clone()))
                 .unwrap_or_else(|| {
                     let h = base
                         .trim_start_matches("http://")
@@ -94,6 +141,15 @@ fn parse(v: &Value) -> Vec<Machine> {
                         .collect()
                 })
                 .unwrap_or_default();
+            // ssh 항목에 규칙이 없으면 「이쪽 홈 → 저쪽 홈」 하나를 기본으로 —
+            // ~/Desktop/… 이 저쪽 같은 자리에 앉는다. 저쪽 홈은 tunnel_loop 가 ssh 로
+            // 한 번 물어 두며, 아직 못 물었으면 규칙 없이 간다(이사가 그때 「roots 에
+            // 규칙을」로 서고, 몇 초 뒤 다시 누르면 된다).
+            if roots.is_empty() && ssh.is_some() && !meta.home.is_empty() {
+                if let Ok(home) = std::env::var("HOME") {
+                    roots.push((home, meta.home.clone()));
+                }
+            }
             // 긴 접두가 먼저 이겨야 한다 — 정렬을 여기서 굳혀 두면 매핑 함수는
             // 앞에서부터 첫 일치를 집으면 된다.
             roots.sort_by_key(|(l, _)| std::cmp::Reverse(l.len()));
@@ -110,9 +166,211 @@ fn parse(v: &Value) -> Vec<Machine> {
                 roots,
                 kvm,
                 home,
+                ssh,
+                tunneled,
             })
         })
         .collect()
+}
+
+/// 명부 파일 경로. env `KASATERM_MACHINES_FILE` 이 있으면 그 파일(검증용 인스턴스가
+/// 설정 화면의 쓰기까지 격리하려고 준다). env `KASATERM_MACHINES`(JSON 본문)만 걸린
+/// 인스턴스는 None — 그런 판은 사용자 명부를 읽지도 쓰지도 않는다.
+pub fn machines_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_MACHINES_FILE") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    if std::env::var("KASATERM_MACHINES").is_ok() {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::Path::new(&home).join(".config/kasaterm/machines.json"))
+}
+
+/// 설정 화면용 — 파일의 항목을 **있는 그대로**(모르는 필드 포함) 준다. 화면이
+/// 아는 필드(label·ssh)만 고치고 나머지는 되돌려 써야 손으로 적은 roots·kvm 이
+/// 안 날아간다.
+pub fn entries() -> Vec<Value> {
+    let Some(path) = machines_path() else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// 설정 화면용 — 항목 전부를 파일에 쓴다(통째 교체). 폴링·터널은 매 바퀴 파일을
+/// 다시 읽으므로 재시작 없이 다음 바퀴부터 반영된다.
+pub fn save_entries(list: &[Value]) -> std::io::Result<()> {
+    let Some(path) = machines_path() else {
+        return Err(std::io::Error::other("격리 인스턴스(KASATERM_MACHINES)에선 명부를 안 쓴다"));
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text = serde_json::to_string_pretty(&Value::Array(list.to_vec()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, path)
+}
+
+// ── 자동 터널 ────────────────────────────────────────────────────────────
+
+struct Tunnel {
+    child: std::process::Child,
+    target: String,
+    port: u16,
+}
+fn tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
+    static T: OnceLock<Mutex<HashMap<String, Tunnel>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// 라벨 → 마지막 스폰 시각. 죽자마자 다시 띄우면 안 닿는 기계에 초당 ssh 를 쏜다.
+fn last_spawn() -> &'static Mutex<HashMap<String, Instant>> {
+    static L: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(HashMap::new()))
+}
+const TUNNEL_TICK: Duration = Duration::from_secs(3);
+const TUNNEL_RETRY: Duration = Duration::from_secs(8);
+const META_RETRY: Duration = Duration::from_secs(60);
+
+fn ssh_output(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"])
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 그 ssh 대상의 hostname(화면공유 주소)과 홈을 한 번 물어 둔다. 실패는 60초에
+/// 한 번만 다시 — 안 닿는 기계에 매 바퀴 ssh 를 쏘지 않게.
+fn ensure_meta(target: &str) {
+    static TRIED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let tried = TRIED.get_or_init(|| Mutex::new(HashMap::new()));
+    let known = meta_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(target).cloned())
+        .is_some_and(|m| !m.home.is_empty());
+    if known {
+        return;
+    }
+    if let Ok(mut t) = tried.lock() {
+        if t.get(target).is_some_and(|at| at.elapsed() < META_RETRY) {
+            return;
+        }
+        t.insert(target.to_string(), Instant::now());
+    }
+    // `ssh -G` 는 접속 없이 설정만 푼다 — alias 뒤의 진짜 주소가 여기서 나온다.
+    let hostname = ssh_output(&["-G", target])
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("hostname "))
+                .map(|h| h.trim().to_string())
+        })
+        .unwrap_or_default();
+    let home = ssh_output(&[target, "printf %s \"$HOME\""]).unwrap_or_default();
+    if let Ok(mut c) = meta_cache().lock() {
+        let e = c.entry(target.to_string()).or_default();
+        if !hostname.is_empty() {
+            e.hostname = hostname;
+        }
+        if !home.is_empty() {
+            e.home = home;
+        }
+    }
+}
+
+fn tunnel_tick() {
+    let want: Vec<(String, String, u16)> = machines()
+        .into_iter()
+        .filter(|m| m.tunneled)
+        .filter_map(|m| Some((m.label.clone(), m.ssh.clone()?, tunnel_port(&m.label))))
+        .collect();
+    let Ok(mut t) = tunnels().lock() else { return };
+    // 명부에서 빠졌거나 대상이 바뀐 터널은 걷는다.
+    t.retain(|label, tun| {
+        let keep = want.iter().any(|(l, tg, p)| l == label && *tg == tun.target && *p == tun.port);
+        if !keep {
+            let _ = tun.child.kill();
+            let _ = tun.child.wait();
+            eprintln!("[machines] {label} 터널 걷음(명부에서 빠짐)");
+        }
+        keep
+    });
+    for (label, target, port) in want {
+        ensure_meta(&target);
+        if let Some(tun) = t.get_mut(&label) {
+            match tun.child.try_wait() {
+                Ok(None) => continue, // 살아 있다
+                _ => {
+                    eprintln!("[machines] {label} 터널 끊김 — 다시 연다");
+                    t.remove(&label);
+                }
+            }
+        }
+        if let Ok(mut l) = last_spawn().lock() {
+            if l.get(&label).is_some_and(|at| at.elapsed() < TUNNEL_RETRY) {
+                continue;
+            }
+            l.insert(label.clone(), Instant::now());
+        }
+        let spawned = std::process::Command::new("ssh")
+            .args([
+                "-N",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ServerAliveInterval=20",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "ConnectTimeout=8",
+                "-L",
+                &format!("{port}:127.0.0.1:8765"),
+                &target,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => {
+                eprintln!("[machines] {label} 터널 염: 127.0.0.1:{port} → {target}:8765");
+                t.insert(label, Tunnel { child, target, port });
+            }
+            Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
+        }
+    }
+}
+
+/// 백그라운드 — `ssh` 만 적힌 기계마다 8765 터널을 들고 있는다. 끊기면 8초 뒤
+/// 다시 열고, 명부에서 빠지면 걷는다. 폴링 루프와 같은 이유로 본체 한정.
+pub async fn tunnel_loop() {
+    loop {
+        let _ = tokio::task::spawn_blocking(tunnel_tick).await;
+        tokio::time::sleep(TUNNEL_TICK).await;
+    }
+}
+
+/// 앱을 끌 때 — 자식 ssh 가 고아로 남지 않게.
+pub fn stop_tunnels() {
+    if let Ok(mut t) = tunnels().lock() {
+        for (_, mut tun) in t.drain() {
+            let _ = tun.child.kill();
+            let _ = tun.child.wait();
+        }
+    }
 }
 
 pub fn machines() -> Vec<Machine> {
@@ -124,10 +382,9 @@ pub fn machines() -> Vec<Machine> {
             }
         }
     }
-    let Ok(home) = std::env::var("HOME") else {
+    let Some(path) = machines_path() else {
         return Vec::new();
     };
-    let path = std::path::Path::new(&home).join(".config/kasaterm/machines.json");
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -266,6 +523,7 @@ pub fn snapshot() -> Vec<Value> {
             serde_json::json!({
                 "label": m.label,
                 "base": m.base,
+                "ssh": m.ssh,
                 "online": online,
                 "ago_secs": age.map(|a| a.as_secs()),
                 "sync_capable": hit.map(|(_, _, s)| *s).unwrap_or(true),
@@ -282,6 +540,30 @@ pub fn snapshot() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_only_entry_gets_a_tunnel_base() {
+        let v = parse(&serde_json::json!([{"label": "나쵸네코", "ssh": "nachoneko"}]));
+        assert_eq!(v.len(), 1);
+        assert!(v[0].tunneled);
+        assert_eq!(v[0].ssh.as_deref(), Some("nachoneko"));
+        assert_eq!(v[0].base, format!("http://127.0.0.1:{}", tunnel_port("나쵸네코")));
+        let p = tunnel_port("나쵸네코");
+        assert!((18900..18990).contains(&p));
+        assert_eq!(p, tunnel_port("나쵸네코"));
+    }
+
+    #[test]
+    fn explicit_base_wins_over_ssh() {
+        let v = parse(&serde_json::json!([{"label": "미니", "ssh": "mini", "base": "http://127.0.0.1:18795/"}]));
+        assert!(!v[0].tunneled);
+        assert_eq!(v[0].base, "http://127.0.0.1:18795");
+    }
+
+    #[test]
+    fn entry_without_base_or_ssh_is_dropped() {
+        assert!(parse(&serde_json::json!([{"label": "빈것"}])).is_empty());
+    }
 
     fn m() -> Machine {
         parse(&serde_json::json!([{

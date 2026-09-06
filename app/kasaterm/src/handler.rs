@@ -1601,6 +1601,8 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.close_inline_web();
+        // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
+        kasa_mcp::machines::stop_tunnels();
         self.close_web_hosts();
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
