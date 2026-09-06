@@ -68,8 +68,10 @@ class RowReflow {
   final int indent;
 }
 
-RowReflow reflowRow(List<Run> runs, int cols) =>
-    _reflowCells(_cellsOf(runs), cols);
+/// `paneCols` 는 원본 pane 의 폭 — 폰보다 좁은 pane(맥미니 창을 다섯으로 쪼갠 30열)의
+/// 테두리·상자 줄을 폰 폭까지 늘이는 데 쓴다. 0 이면 안 늘인다.
+RowReflow reflowRow(List<Run> runs, int cols, {int paneCols = 0}) =>
+    _reflowCells(_cellsOf(runs), cols, paneCols: paneCols);
 
 List<_Cell> _cellsOf(List<Run> runs) => [
   for (final r in runs)
@@ -78,7 +80,7 @@ List<_Cell> _cellsOf(List<Run> runs) => [
 
 const _blank = Run(' ', DefaultColor(), DefaultColor(), 0);
 
-RowReflow _reflowCells(List<_Cell> cells, int cols) {
+RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
   var end = cells.length;
   while (end > 0 && cells[end - 1].blank) {
     end--;
@@ -91,7 +93,14 @@ RowReflow _reflowCells(List<_Cell> cells, int cols) {
   for (final c in trimmed) {
     width += c.width;
   }
-  if (width <= cols) return RowReflow([_runs(trimmed)], const [0]);
+  if (width <= cols) {
+    // pane 을 꽉 채운 테두리·상자 줄은 폰 폭까지 — 글은 되이어 넓어졌는데 상자만 좁으면
+    // 데스크톱과 다른 물건으로 보인다.
+    final wide = paneCols > 0 && paneCols < cols && width == paneCols
+        ? _stretch(trimmed, cols - paneCols)
+        : null;
+    return RowReflow([_runs(wide ?? trimmed)], const [0]);
+  }
 
   // 테두리·상자 줄(╭────╮, │ 글 …빈칸… │)은 접으면 네 줄짜리 선이 된다. 앞 cols-1 칸
   // 뒤가 같은 글자로만 이어지다 마지막 한 칸으로 끝나면 가운데를 빼고 폭에 맞춘다.
@@ -310,7 +319,11 @@ bool _continues(_Info a, _Info b, int gridCols) =>
 
 /// 접어 둔 줄들을 한 줄로 되잇는다 — 앞줄 뒤 빈칸과 뒷줄 들여쓰기를 빼고 빈칸 하나로.
 /// `offsets[i]` 는 i 번째 줄의 글이 되이은 줄의 몇 번째 칸에서 시작하는지.
-(List<_Cell>, List<int>) _joinRows(List<List<Run>> rows, List<_Info> infos) {
+(List<_Cell>, List<int>) _joinRows(
+  List<List<Run>> rows,
+  List<_Info> infos,
+  int gridCols,
+) {
   final out = <_Cell>[];
   final offsets = <int>[];
   for (var i = 0; i < rows.length; i++) {
@@ -321,8 +334,12 @@ bool _continues(_Info a, _Info b, int gridCols) =>
     }
     var from = 0;
     if (i > 0) {
-      out.add(_Cell(0x20, _blank));
       from = infos[i].lead;
+      // 앞줄이 마지막 칸까지 찼고 그 자리가 경로·식별자 한가운데면 글자 단위로 잘린
+      // 것이다(`recall.p` + `y`) — 빈칸을 끼우면 없던 낱말이 생긴다.
+      final glued =
+          infos[i - 1].width == gridCols && _tokenBreak(out, cells, from, end);
+      if (!glued) out.add(_Cell(0x20, _blank));
     }
     var w = 0;
     for (final c in out) {
@@ -334,8 +351,88 @@ bool _continues(_Info a, _Info b, int gridCols) =>
   return (out, offsets);
 }
 
+/// 앞줄 꼬리와 뒷줄 머리가 한 토큰(경로·식별자·주소)의 두 동강인가 — 양쪽 다 ASCII
+/// 토큰 글자뿐이고 붙인 것에 `_ . / : -` 가 든다. 「word」+「continued」 같은 낱말
+/// 둘은 여기 안 걸려 빈칸으로 잇는다.
+bool _tokenBreak(List<_Cell> prev, List<_Cell> next, int from, int end) {
+  bool tokenChar(int r) =>
+      (r >= 0x30 && r <= 0x39) ||
+      (r >= 0x41 && r <= 0x5a) ||
+      (r >= 0x61 && r <= 0x7a) ||
+      r == 0x5f ||
+      r == 0x2e ||
+      r == 0x2f ||
+      r == 0x3a ||
+      r == 0x2d ||
+      r == 0x40 ||
+      r == 0x7e;
+  bool joiner(int r) =>
+      r == 0x5f || r == 0x2e || r == 0x2f || r == 0x3a || r == 0x2d;
+  var i = prev.length;
+  while (i > 0 && prev[i - 1].rune != 0x20) {
+    if (!tokenChar(prev[i - 1].rune)) return false;
+    i--;
+  }
+  var j = from;
+  while (j < end && next[j].rune != 0x20) {
+    if (!tokenChar(next[j].rune)) return false;
+    j++;
+  }
+  if (i == prev.length || j == from) return false;
+  for (var k = i; k < prev.length; k++) {
+    if (joiner(prev[k].rune)) return true;
+  }
+  for (var k = from; k < j; k++) {
+    if (joiner(next[k].rune)) return true;
+  }
+  return false;
+}
+
 /// 낱말을 지키려고 되돌아가는 최대 칸 수 — 이보다 긴 낱말은 그냥 자른다.
 const _wordBackoff = 12;
+
+bool _vertical(int rune) => rune == 0x2502 || rune == 0x2503 || rune == 0x2551;
+
+/// `_shrinkLines` 의 반대 — 선 채움이 있으면 가장 긴 채움을 `deficit` 만큼 늘이고,
+/// 양끝이 세로선(│)인 상자 줄이면 오른쪽 세로선 앞 빈칸을 늘인다. 글줄이면 null.
+List<_Cell>? _stretch(List<_Cell> cells, int deficit) {
+  var bestAt = -1;
+  var bestLen = 0;
+  var i = 0;
+  while (i < cells.length) {
+    var j = i + 1;
+    if (cells[i].rune != 0x20 && cells[i].filler) {
+      while (j < cells.length && cells[j].sameFill(cells[i])) {
+        j++;
+      }
+    }
+    if (j - i >= 2 && j - i > bestLen) {
+      bestAt = i;
+      bestLen = j - i;
+    }
+    i = j;
+  }
+  if (bestAt >= 0) {
+    return [
+      ...cells.sublist(0, bestAt),
+      for (var k = 0; k < deficit; k++) cells[bestAt],
+      ...cells.sublist(bestAt),
+    ];
+  }
+  if (cells.length >= 2 &&
+      _vertical(cells.first.rune) &&
+      _vertical(cells.last.rune)) {
+    // 안쪽 빈칸의 모양(배경)을 따른다 — 입력상자 바탕색이 세로선까지 이어지게.
+    final inner = cells[cells.length - 2];
+    final blank = inner.rune == 0x20 ? inner : _Cell(0x20, _blank);
+    return [
+      ...cells.sublist(0, cells.length - 1),
+      for (var k = 0; k < deficit; k++) blank,
+      cells.last,
+    ];
+  }
+  return null;
+}
 
 /// 선 그리기 채움(─ ━ ═ …)이 두 칸 이상 이어진 자리를 줄여 `excess` 칸을 덜어 낸다.
 /// 덜어 낼 자리가 모자라면 null — 글줄이라는 뜻이니 접는 쪽으로 간다.
@@ -484,13 +581,14 @@ class Reflow {
     // 들여쓰기(lead)는 빠진다. 둘째 조각부터는 indent 만큼 앞이 채워진다.
     final shift = <int>[];
     final indents = <int>[];
-    // 문단 되잇기는 pane 이 폰보다 넓어 다시 접을 때만 — 그대로 들어가면 데스크톱과
-    // 같은 줄 나눔이 정답이다.
-    final widen = grid.cols > cols;
+    // 폭이 같으면 데스크톱과 같은 줄 나눔이 정답이다. 다르면 — 넓든 좁든 — 데스크톱이
+    // 제 폭에서 접어 둔 문단을 되이어 폰 폭으로 다시 접는다(2026-09-07 지시: 맥미니의
+    // 좁은 pane 도 「폰에 했던 것처럼」 기기 폭에 맞게).
+    final rewrap = grid.cols != cols;
     var r = 0;
     while (r < src.length) {
       var n = 1;
-      if (widen) {
+      if (rewrap) {
         var last = _info(src[r]);
         while (r + n < src.length) {
           final next = _info(src[r + n]);
@@ -503,11 +601,16 @@ class Reflow {
       if (e == null || e.cols != cols || !e.matches(src, r, n)) {
         final members = src.sublist(r, r + n);
         if (n == 1) {
-          e = _Entry(cols, reflowRow(src[r], cols), members, const [0]);
+          e = _Entry(
+            cols,
+            reflowRow(src[r], cols, paneCols: grid.cols),
+            members,
+            const [0],
+          );
         } else {
           final (cells, offsets) = _joinRows(members, [
             for (final m in members) _info(m),
-          ]);
+          ], grid.cols);
           e = _Entry(cols, _reflowCells(cells, cols), members, offsets);
         }
         _rows[src[r]] = e;

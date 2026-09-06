@@ -617,17 +617,26 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     }
   }
 
-  /// 좁은 pane 에 맞춰 키운 글꼴인가 — 그때는 열 수를 pane 열 수와 **정확히** 맞춘다.
-  bool _fitsPane(double maxWidth) {
+  /// pane 에 맞춰 키울 글꼴 크기. 상한을 넘겨야 채워지는 좁은 pane(맥미니 창을 다섯으로
+  /// 쪼갠 30열)은 null — 그때는 기본 글꼴로 폰 폭에 되잇고 늘여 그린다(reflow).
+  double? _fitSize(double maxWidth) {
     final paneCols = widget.grid.cols;
-    return paneCols > 0 && paneCols < (maxWidth / _base.width).floor();
+    if (paneCols <= 0 || paneCols >= (maxWidth / _base.width).floor()) {
+      return null;
+    }
+    final ratio = _base.width / _base.fontSize;
+    final size = maxWidth / (paneCols * ratio);
+    return size > _maxFont ? null : math.max(widget.fontSize, size);
   }
+
+  /// 좁은 pane 에 맞춰 키운 글꼴인가 — 그때는 열 수를 pane 열 수와 **정확히** 맞춘다.
+  bool _fitsPane(double maxWidth) => _fitSize(maxWidth) != null;
 
   _CellMetrics _metricsFor(double maxWidth) {
     final paneCols = widget.grid.cols;
-    if (!_fitsPane(maxWidth)) return _base;
-    final ratio = _base.width / _base.fontSize;
-    var size = (maxWidth / (paneCols * ratio)).clamp(widget.fontSize, _maxFont);
+    final fit = _fitSize(maxWidth);
+    if (fit == null) return _base;
+    var size = fit;
     final cached = _scaled;
     if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
     var m = _CellMetrics(size);

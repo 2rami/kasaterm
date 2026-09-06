@@ -224,10 +224,62 @@ void joinTests() {
     expect(text(out.lines.last), '  - next');
   });
 
-  test('폰이 pane 보다 넓으면 되잇지 않는다 — 데스크톱과 같은 줄 나눔', () {
+  test('폰이 pane 보다 넓어도 접어 둔 문단은 되잇는다 — 좁은 맥미니 pane', () {
     final g = gridRows(60, ['  - ${'word ' * 10}', '    continued end']);
     final out = Reflow().apply(g, 80);
-    expect(out.lines.length, 2);
+    expect(out.lines.map(text).toList(), [
+      '  - ${'word ' * 9}word continued end',
+    ]);
+  });
+
+  test('폭이 같으면 되잇지 않는다 — 데스크톱과 같은 줄 나눔', () {
+    final g = gridRows(60, ['  - ${'word ' * 10}', '    continued end']);
+    expect(Reflow().apply(g, 60).lines.length, 2);
+  });
+
+  test('글자 단위로 잘린 경로는 빈칸 없이 되잇는다', () {
+    // 28열을 마지막 칸까지 채운 경로 뒤에 남은 글자가 다음 줄로 밀린 모양.
+    final g = gridRows(28, ['- test_channel_recall_long.p', '  y 31/31 (x)']);
+    expect(Reflow().apply(g, 44).lines.map(text).toList(), [
+      '- test_channel_recall_long.py 31/31 (x)',
+    ]);
+  });
+
+  test('마지막 칸까지 찬 낱말 둘은 빈칸으로 잇는다', () {
+    final g = gridRows(28, ['- ${'abc ' * 6}dd', '  next word']);
+    final out = Reflow().apply(g, 44);
+    expect(text(out.lines.first), '- ${'abc ' * 6}dd next word');
+  });
+
+  test('좁은 pane 의 테두리는 폰 폭까지 늘인다', () {
+    final out = reflowRow([r('╭${'─' * 26}╮')], 44, paneCols: 28);
+    expect(out.chunks.map(text), ['╭${'─' * 42}╮']);
+  });
+
+  test('좁은 pane 의 상자 줄은 오른쪽 세로선을 폰 폭으로 민다', () {
+    final out = reflowRow([r('│ > hi${' ' * 21}│')], 44, paneCols: 28);
+    expect(out.chunks.map(text), ['│ > hi${' ' * 37}│']);
+  });
+
+  test('좁은 pane 의 글줄은 늘이지 않는다', () {
+    final out = reflowRow([r('a' * 28)], 44, paneCols: 28);
+    expect(out.chunks.map(text), ['a' * 28]);
+  });
+
+  test('전체 접기에서도 좁은 pane 의 상자가 폰 폭으로 — 커서는 글자 위에', () {
+    final g = gridRows(
+      28,
+      ['╭${'─' * 26}╮', '│ > hi${' ' * 21}│', '╰${'─' * 26}╯'],
+      cursorRow: 1,
+      cursorCol: 6,
+    );
+    final out = Reflow().apply(g, 44);
+    expect(out.lines.map(text).toList(), [
+      '╭${'─' * 42}╮',
+      '│ > hi${' ' * 37}│',
+      '╰${'─' * 42}╯',
+    ]);
+    expect((out.cursorRow, out.cursorCol), (1, 6));
   });
 
   test('되이은 줄 안의 커서는 그 글자 위에 그대로 앉는다', () {
