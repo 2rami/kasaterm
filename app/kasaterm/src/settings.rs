@@ -3104,103 +3104,7 @@ fn mark_login_needs_code(id: &str) {
     }
 }
 
-/// 승인이 끝난 브라우저를 **앱으로 되돌리는** 주소로 URL 을 고친다.
-///
-/// CLI 가 만드는 주소는 `redirect_uri` 가 `platform.claude.com/oauth/code/callback`
-/// 이라, 승인해도 앱으로 돌아오는 길이 없고 사람이 화면의 코드를 옮겨야 끝난다.
-/// 그 자리를 우리 로컬 창구로 바꾸면 브라우저가 코드를 직접 물어 온다 — 사람이 할
-/// 일은 「승인」을 누르는 것뿐이다(거노 2026-09-05 「그냥 평소에 쓰듯이 로그인하면
-/// 등록되게 orca 처럼」).
-///
-/// 2026-09-05 실측으로 claude 는 `http://localhost:<포트>/callback` 을 그대로
-/// 받아들인다(승인 화면이 정상으로 떴다). PKCE 검증기는 CLI 가 쥐고 있으므로 토큰
-/// 교환도 CLI 가 한다 — 우리는 코드 한 줄을 중계할 뿐이고, 자격증명은 이 프로세스를
-/// 지나가지 않는다.
-fn with_local_redirect(url: &str, port: u16) -> Option<String> {
-    let at = url.find("redirect_uri=")?;
-    let rest = &url[at + "redirect_uri=".len()..];
-    let end = rest.find('&').unwrap_or(rest.len());
-    let want = format!("http%3A%2F%2Flocalhost%3A{port}%2Fcallback");
-    Some(format!("{}{}{}", &url[..at + "redirect_uri=".len()], want, &rest[end..]))
-}
 
-/// 콜백 한 건을 받아 `<코드>#<state>` 로 조립한다. CLI 가 stdin 에서 기다리는 모양이
-/// 그것이다.
-///
-/// `state` 를 붙이는 것은 형식 때문만이 아니다 — CLI 는 자기가 만든 state 와 대조해
-/// 남이 끼워 넣은 코드를 걸러낸다. 우리가 떼고 보내면 그 검사가 통째로 무력해진다.
-fn callback_code(req: &str) -> Option<String> {
-    let line = req.lines().next()?;
-    let path = line.split_whitespace().nth(1)?;
-    let q = path.split_once('?')?.1;
-    let mut code = None;
-    let mut state = None;
-    for kv in q.split('&') {
-        match kv.split_once('=') {
-            Some(("code", v)) => code = Some(v),
-            Some(("state", v)) => state = Some(v),
-            _ => {}
-        }
-    }
-    let code = code.filter(|c| !c.is_empty())?;
-    Some(match state.filter(|s| !s.is_empty()) {
-        Some(st) => format!("{code}#{st}"),
-        None => code.to_string(),
-    })
-}
-
-#[cfg(test)]
-mod login_callback_tests {
-    use super::{callback_code, with_local_redirect};
-
-    /// 주소에서 바뀌는 것은 `redirect_uri` **하나뿐**이어야 한다. PKCE 챌린지나
-    /// state 가 함께 흔들리면 CLI 쪽 검증이 통째로 깨진다.
-    #[test]
-    fn only_the_redirect_is_swapped() {
-        let url = "https://claude.ai/oauth/authorize?code=true&client_id=abc&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Aprofile&code_challenge=XYZ&code_challenge_method=S256&state=st1";
-        let got = with_local_redirect(url, 54545).expect("바꿔야 한다");
-        assert!(got.contains("redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"));
-        assert!(!got.contains("platform.claude.com"));
-        for keep in ["client_id=abc", "code_challenge=XYZ", "state=st1", "scope=user%3Aprofile"] {
-            assert!(got.contains(keep), "{keep} 가 사라졌다: {got}");
-        }
-    }
-
-    /// `redirect_uri` 가 맨 끝에 있어도 잘라 먹지 않는다.
-    #[test]
-    fn handles_the_redirect_at_the_end() {
-        let url = "https://x/authorize?a=1&redirect_uri=https%3A%2F%2Fold";
-        let got = with_local_redirect(url, 1234).expect("바꿔야 한다");
-        assert_eq!(got, "https://x/authorize?a=1&redirect_uri=http%3A%2F%2Flocalhost%3A1234%2Fcallback");
-    }
-
-    /// 콜백은 `<코드>#<state>` 로 조립한다 — CLI 가 state 를 대조해 남이 끼워 넣은
-    /// 코드를 걸러내므로, 떼고 보내면 그 검사가 무력해진다.
-    #[test]
-    fn builds_the_code_the_cli_expects() {
-        let req = "GET /callback?code=abc123&state=st1 HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        assert_eq!(callback_code(req).as_deref(), Some("abc123#st1"));
-    }
-
-    /// 코드가 없는 요청은 무시한다 — 브라우저가 먼저 던지는 `/favicon.ico` 같은
-    /// 것에 반응해 빈 코드를 stdin 으로 보내면 로그인이 통째로 실패한다.
-    #[test]
-    fn ignores_requests_without_a_code() {
-        for req in [
-            "GET /favicon.ico HTTP/1.1\r\n\r\n",
-            "GET /callback HTTP/1.1\r\n\r\n",
-            "GET /callback?error=access_denied HTTP/1.1\r\n\r\n",
-            "GET /callback?code= HTTP/1.1\r\n\r\n",
-            "",
-        ] {
-            assert_eq!(callback_code(req), None, "이건 코드가 아니다: {req:?}");
-        }
-    }
-}
-
-/// 브라우저에 돌려줄 「끝났습니다」 한 장. 창을 그대로 두면 사람은 앱으로 돌아갈
-/// 신호를 못 받는다.
-const CALLBACK_PAGE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><meta charset=utf-8><title>로그인 완료</title><body style=\"font:16px -apple-system,system-ui;display:grid;place-items:center;height:90vh;margin:0\"><div style=\"text-align:center\"><p style=\"font-size:20px\">로그인이 끝났어요</p><p style=\"color:#888\">이 창은 닫으셔도 됩니다.</p></div>";
 
 /// 클립보드 글자가 OAuth 코드처럼 생겼나.
 ///
@@ -3438,17 +3342,6 @@ fn spawn_hidden_login(
     std::thread::spawn(move || {
         // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의
         // PATH 에는 claude·codex 가 없어 직접 spawn 하면 항상 실패한다.
-        // 승인이 끝난 브라우저가 되돌아올 창구. 못 열면(포트 고갈 등) 옛 방식
-        // 그대로 코드를 받는다 — 되돌림이 안 되는 환경에서 로그인 자체가 막히면 안 된다.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok();
-        if let Some(l) = listener.as_ref() {
-            let _ = l.set_nonblocking(true);
-        }
-        let port = listener
-            .as_ref()
-            .and_then(|l| l.local_addr().ok())
-            .map(|a| a.port());
-
         let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
         let mut cmd = crate::proc::command(shell);
         cmd.arg("-lc")
@@ -3525,11 +3418,14 @@ fn spawn_hidden_login(
                             continue;
                         }
                         if let Some(url) = login_url_in(&line) {
-                            // 되돌림 창구가 섰으면 그 주소로 바꿔 연다. 못 섰으면
-                            // 옛 주소 그대로 — 그때는 코드를 손이나 클립보드로 받는다.
-                            let url = port
-                                .and_then(|p| with_local_redirect(&url, p))
-                                .unwrap_or(url);
+                            // ⚠️ **주소를 고치지 않는다.** 한동안 `redirect_uri` 를
+                            // 우리 창구로 바꿔치기했는데, OAuth 는 코드를 토큰으로
+                            // 바꿀 때 **authorize 에 쓴 것과 같은 redirect_uri** 를
+                            // 다시 보내야 한다. CLI 는 자기가 만든 원래 주소로
+                            // 교환하니 서버가 불일치로 거부했다 — 승인까지 마치고도
+                            // 400 이 뜨던 원인이 이것이다(2026-09-07 「인증도 안돼
+                            // 400떠」). 승인이 끝나면 화면에 코드가 뜨고, 그걸
+                            // 복사하는 것만으로 들어간다(아래 클립보드 경로).
                             match profile.as_deref() {
                                 Some(prof) => {
                                     let _ = std::fs::create_dir_all(prof);
@@ -3571,28 +3467,6 @@ fn spawn_hidden_login(
             // 사용자가 취소하면 pgid 가 비워지고 프로세스는 이미 죽었다.
             if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
                 return;
-            }
-            // ① 브라우저가 되돌아왔나. **코드를 묻기 전에 도착한다.** 승인은
-            //    사람이 단추 하나 누르는 일이라 CLI 가 프롬프트를 내놓기도 전에
-            //    콜백이 오는데, 이걸 「코드를 묻는 중」 안에 두었더니 그 연결을
-            //    통째로 흘려 로그인이 영영 안 끝났다(2026-09-06 실측 — 승인까지
-            //    갔는데 「안 돼」). 창구는 열려 있는 내내 받는다.
-            //
-            //    `while` 인 것은 브라우저가 콜백 말고 favicon 도 물어 오기
-            //    때문이다 — 한 번에 하나만 받으면 그 뒤 진짜 콜백이 300ms 씩
-            //    밀린다. 논블로킹이라 큐가 비면 즉시 빠져나온다.
-            if let Some(l) = listener.as_ref() {
-                while let Ok((mut sock, _)) = l.accept() {
-                    let mut buf = [0u8; 4096];
-                    let n = sock.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if let Some(code) = callback_code(&req) {
-                        use std::io::Write as _;
-                        let _ = sock.write_all(CALLBACK_PAGE.as_bytes());
-                        let _ = sock.flush();
-                        submit_login_code(&code);
-                    }
-                }
             }
             if hidden_login_needs_code() {
                 if !extended {

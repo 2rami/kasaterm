@@ -12315,8 +12315,9 @@ impl App {
                         // 안 되는데, 설정 화면 카드에는 있고 이 목록에만 없었다
                         // (2026-09-07 「하단바에서도 계정뭔지 나오게해줘」).
                         // 별명이 곧 이메일인 슬롯에서는 같은 말을 두 번 하지 않는다.
-                        if let Some(who) = crate::settings::account_identity(&id)
-                            .filter(|who| !label.contains(who.as_str()))
+                        if let Some(who) = crate::settings::auth_probe(&id)
+                            .map(|p| p.email)
+                            .filter(|who| !who.is_empty() && !label.contains(who.as_str()))
                         {
                             let lw = g.measure_chrome_text(&label, f, active);
                             let wx = sx + pad_x + lw + 8.0;
