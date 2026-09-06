@@ -61,6 +61,82 @@ impl App {
     /// Shared by the in-process channel pump (`pump_pty_screens`) and the
     /// daemon stream pump (`pump_daemon_stream`). The caller holds the ws lock
     /// and fires the redraw; this only mutates ws.
+    /// 거울 pane 의 원본 격자에 이번 갱신을 얹는다. 거울이면 원본은 **늘** 쌓아 둔다 —
+    /// 첫 스냅샷은 배치가 잡혀 이쪽 칸 수를 알기 전에 오므로, 그때 안 쌓으면 나중에
+    /// 다시 접을 재료가 없다. 다시 접을 일이 없으면(칸 수를 아직 모르거나 폭이 같으면)
+    /// None — 보통 경로로 간다. 원본 크기가 바뀌면 격자를 새로 만든다(그 갱신은 모든
+    /// 행을 싣는다).
+    fn mirror_source<'a>(
+        tp: &'a mut crate::TerminalPane,
+        update: &kasa_bridge::screen::ScreenUpdate,
+        is_view: bool,
+        view_target: Option<(u16, u16)>,
+    ) -> Option<&'a crate::MirrorSrc> {
+        if !is_view {
+            return None;
+        }
+        let nc = update.cols as usize;
+        let nr = update.rows as usize;
+        let src = tp.mirror_src.get_or_insert_with(|| crate::MirrorSrc {
+            cols: update.cols,
+            rows: update.rows,
+            cells: vec![vec![GridCell::blank(); nc]; nr],
+            cursor_row: 0,
+            cursor_col: 0,
+        });
+        if src.cols != update.cols || src.rows != update.rows || src.cells.len() != nr {
+            src.cols = update.cols;
+            src.rows = update.rows;
+            src.cells = vec![vec![GridCell::blank(); nc]; nr];
+        }
+        for (r, row) in &update.dirty {
+            if let Some(dst) = src.cells.get_mut(*r as usize) {
+                *dst = row.clone();
+            }
+        }
+        src.cursor_row = update.cursor_row;
+        src.cursor_col = update.cursor_col;
+        let (tc, _) = view_target?;
+        if update.cols == tc {
+            return None;
+        }
+        Some(src)
+    }
+
+    /// 창 크기가 바뀌어 거울 pane 의 칸 수가 달라졌을 때 — 원본 격자를 새 폭으로 다시
+    /// 접는다. 원본이 아직 없으면(첫 갱신 전) 다음 갱신이 접는다.
+    pub(crate) fn reflow_view_pane(ws: &mut Workspace, pid: &str) {
+        let Some((tc, tr)) = ws.view_cells.get(pid).copied() else { return };
+        let Some((pane, tab_idx)) = ws.find_tab_by_pty(pid) else { return };
+        let Some(tp) = pane.tabs[tab_idx].term_mut() else { return };
+        let Some(src) = tp.mirror_src.as_ref() else { return };
+        if src.cols == tc {
+            // 폭이 같아졌다 — 접은 것을 걷고 원본 그대로.
+            if tp.cols != src.cols || tp.rows != src.rows {
+                tp.prev_cells.clear();
+            }
+            tp.cols = src.cols;
+            tp.rows = src.rows;
+            tp.cells = src.cells.clone();
+            tp.cursor_row = src.cursor_row;
+            tp.cursor_col = src.cursor_col;
+            return;
+        }
+        let out = kasa_bridge::reflow::reflow_grid(
+            &src.cells,
+            src.cols,
+            (src.cursor_row, src.cursor_col),
+            tc,
+            tr,
+        );
+        tp.cols = tc;
+        tp.rows = tr;
+        tp.prev_cells.clear();
+        tp.cells = out.rows;
+        tp.cursor_row = out.cursor_row;
+        tp.cursor_col = out.cursor_col;
+    }
+
     pub(crate) fn apply_screen_update(
         ws: &mut Workspace,
         update: kasa_bridge::screen::ScreenUpdate,
@@ -76,6 +152,13 @@ impl App {
         // tabs spawned via the in-pane + button route through
         // `pid_to_pane`. Falls back to creating an outer pane entry
         // when the first update from a freshly-spawned shell arrives.
+        // 거울 pane 이면 이쪽 칸 수 — 원본 폭과 다를 때만 다시 접는다.
+        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id);
+        let view_target = if is_view {
+            ws.view_cells.get(&update.pane_id).copied()
+        } else {
+            None
+        };
         let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
             Some(p) => p,
             None => {
@@ -96,6 +179,34 @@ impl App {
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.
         let Some(tp) = tab.term_mut() else { return };
+        if let Some(src) = Self::mirror_source(tp, &update, is_view, view_target) {
+            // 거울 pane — 원본 격자를 이쪽 폭으로 다시 접어 담는다. dirty 행은
+            // 원본(`mirror_src`)에 얹었고, 화면 전체를 다시 만든다.
+            let (tc, tr) = view_target.expect("mirror_source 가 목표 없이는 None");
+            let out = kasa_bridge::reflow::reflow_grid(
+                &src.cells,
+                src.cols,
+                (src.cursor_row, src.cursor_col),
+                tc,
+                tr,
+            );
+            if tp.cols != tc || tp.rows != tr {
+                tp.cols = tc;
+                tp.rows = tr;
+                tp.prev_cells.clear();
+            }
+            tp.cells = out.rows;
+            tp.cursor_row = out.cursor_row;
+            tp.cursor_col = out.cursor_col;
+            tp.cursor_visible = update.cursor_visible;
+            tp.alt_screen = update.alt_screen;
+            tp.inline_images = update.inline_images;
+            tp.mouse_enabled = update.mouse_enabled;
+            tp.mouse_sgr = update.mouse_sgr;
+            tp.app_cursor = update.app_cursor;
+            tp.bracketed_paste = update.bracketed_paste;
+            return;
+        }
         let resized = tp.cols != update.cols
             || tp.rows != update.rows
             || tp.cells.len() != update.rows as usize;

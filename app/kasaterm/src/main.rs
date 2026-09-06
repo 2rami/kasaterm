@@ -1682,6 +1682,19 @@ struct TerminalPane {
     /// 이번 프레임에 뷰포트와 겹치는 인라인 이미지(OSC 1337)들 — PTY 쪽이 절대
     /// 줄 앵커를 화면 좌표로 환산해 보낸 그대로. 렌더는 이 좌표에 그리기만 한다.
     inline_images: Vec<kasa_bridge::screen::InlineImageView>,
+    /// 거울(view) pane 의 원본 격자 — 저쪽 기계 pane 의 폭 그대로. `cells` 는 이걸
+    /// 이쪽 pane 폭으로 다시 접은 것이라, 원본은 따로 들고 있어야 다음 dirty 행을
+    /// 제자리에 얹고 창 크기가 바뀔 때 다시 접을 수 있다.
+    mirror_src: Option<MirrorSrc>,
+}
+
+/// 거울 pane 이 받은 원본 격자(저쪽 폭).
+struct MirrorSrc {
+    cols: u16,
+    rows: u16,
+    cells: Vec<Vec<GridCell>>,
+    cursor_row: u16,
+    cursor_col: u16,
 }
 
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
@@ -3387,6 +3400,9 @@ struct Workspace {
     window_layouts: HashMap<usize, Layout>,
     /// pane 영역 가로÷세로(픽셀). 모든 방이 같은 창을 쓰므로 하나면 된다.
     grid_aspect: Option<f32>,
+    /// 거울(view) pane 이 이쪽 창에서 차지하는 칸 수. 거울은 원본에 resize 를 안
+    /// 보내므로 이 값으로 원본 격자를 다시 접는다(`apply_screen_update`).
+    view_cells: HashMap<String, (u16, u16)>,
 }
 
 impl Default for Workspace {
@@ -3402,6 +3418,7 @@ impl Default for Workspace {
             pane_window: HashMap::new(),
             window_layouts: HashMap::new(),
             grid_aspect: None,
+            view_cells: HashMap::new(),
         }
     }
 }

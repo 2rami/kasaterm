@@ -5,6 +5,7 @@
 
 pub mod event;
 pub mod layout;
+pub mod reflow;
 pub mod screen;
 pub mod session;
 

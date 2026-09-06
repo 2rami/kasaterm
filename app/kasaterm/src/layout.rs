@@ -446,11 +446,13 @@ impl App {
         // from leaf_cells — no dependency on ws.panes being populated. A
         // freshly split pane has no PaneState until its first output, so the
         // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
+        // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다 — 로컬 창을 줄였다고
+        // 저쪽 기계 화면까지 쪼그라들면 안 된다(tmux 최소-클라이언트 문제). 대신
+        // 이쪽 칸 수를 적어 두고 원본 격자를 그 폭으로 다시 접는다.
+        let mut views: Vec<(String, (u16, u16))> = Vec::new();
         for (id, (pc, pr)) in &leaf_cells {
-            // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다 — 로컬 창을 줄였다고
-            // 저쪽 기계 화면까지 쪼그라들면 안 된다(tmux 최소-클라이언트 문제).
-            // 대신 렌더가 그 pane 의 글자 배율을 줄여 원본 격자를 통째로 담는다.
             if kasa_mcp::remote::is_view_pane(id) {
+                views.push((id.clone(), (*pc, *pr)));
                 continue;
             }
             if let Some(sess) = self.pty.get(id) {
@@ -480,10 +482,20 @@ impl App {
             };
             for pid in pids {
                 if kasa_mcp::remote::is_view_pane(&pid) {
+                    views.push((pid, (pc, pr)));
                     continue;
                 }
                 if let Some(sess) = self.pty.get(&pid) {
                     let _ = sess.resize(pc, pr);
+                }
+            }
+        }
+        if !views.is_empty() {
+            let mut ws = self.ws.lock().unwrap();
+            for (pid, cells) in views {
+                let changed = ws.view_cells.insert(pid.clone(), cells) != Some(cells);
+                if changed {
+                    Self::reflow_view_pane(&mut ws, &pid);
                 }
             }
         }
