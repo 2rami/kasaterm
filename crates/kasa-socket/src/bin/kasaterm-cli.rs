@@ -951,7 +951,10 @@ fn print_help() {
     eprintln!(
         "  kasaterm-cli windows                      # every window (sidebar order) + its panes"
     );
-    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
+    eprintln!("  kasaterm-cli copy  <텍스트>                # 클립보드에 넣는다 — 사람이 Cmd+V 로 쓴다
+  kasaterm-cli copy  --surface <id> [줄수]   # 그 pane 의 보이는 화면을 클립보드로(기본 200줄)
+  kasaterm-cli paste                         # 지금 클립보드에 담긴 글 읽기
+  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
   kasaterm-cli capture [surface_id] [path] [--max-width N]
                                             # screenshot ONE pane to PNG (peek's picture twin)
   kasaterm-cli capture --window [path] [--max-width N]
@@ -1672,6 +1675,41 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 "collab.bind_transcript",
                 json!({ "surface_id": surface, "path": path }),
             )
+        }
+        "copy" => {
+            // 캐릭터가 사람 대신 복사해 주는 문. 사람이 직접 끌어서 복사하는 길은
+            // 노플리커를 끈 claude 앞에서 막힌다 — 그 하네스가 화면과 마우스를 함께
+            // 쥐고 있어서다(2026-09-05 지시).
+            //
+            //   copy <텍스트>              — 그 글을 그대로
+            //   copy --surface %N [줄수]   — 그 pane 의 보이는 화면을 (기본 200줄)
+            //   copy --surface %N          — 생략하면 이 pane
+            let mut params = json!({});
+            if let Some(pos) = args.iter().position(|a| a == "--surface") {
+                let surface = args
+                    .get(pos + 1)
+                    .cloned()
+                    .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
+                    .ok_or_else(|| anyhow!("copy --surface 뒤에 pane 을 주거나 $KASATERM_PANE_ID 가 있어야 한다"))?;
+                params["surface_id"] = json!(surface);
+                if let Some(lines) = args.get(pos + 2).and_then(|s| s.parse::<u64>().ok()) {
+                    params["lines"] = json!(lines);
+                }
+            } else {
+                let text = args.join(" ");
+                if text.trim().is_empty() {
+                    return Err(anyhow!(
+                        "copy 는 복사할 글이나 --surface <pane> 이 필요하다"
+                    ));
+                }
+                params["text"] = json!(text);
+            }
+            ("clipboard.set", params)
+        }
+        "paste" => {
+            // 사람이 복사해 둔 것을 캐릭터가 받아 이어서 일할 때. 이름을 `paste` 로
+            // 둔 것은 사람의 말에 맞추기 위해서다 — 실제로 하는 일은 읽기다.
+            ("clipboard.get", json!({}))
         }
         "peek" => {
             // Default to this pane if no id given — handy for "what does my

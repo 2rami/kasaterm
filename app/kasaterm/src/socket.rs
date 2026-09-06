@@ -2969,6 +2969,31 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn clipboard_set(&self, text: &str) -> Result<()> {
+        // 클립보드 쓰기 자체는 GUI 상태를 안 쓴다(NSPasteboard 는 스레드 무관) —
+        // 소켓 스레드에서 바로 넣고, **보여 주는 일만** GUI 로 넘긴다.
+        let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
+        cb.set_text(text.to_string())
+            .map_err(|e| anyhow::anyhow!("클립보드 쓰기 실패: {e}"))?;
+        // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
+        // 붙여넣기 전까지 알 수가 없다. 줄바꿈은 한 줄 토스트에서 자리를 먹으니 눕힌다.
+        let head: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head: String = head.chars().take(36).collect();
+        let more = text.chars().count() > head.chars().count();
+        let _ = self.proxy.send_event(UserEvent::SocketToast(format!(
+            "복사됨 · {head}{}",
+            if more { "…" } else { "" }
+        )));
+        Ok(())
+    }
+
+    fn clipboard_get(&self) -> Result<String> {
+        let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
+        // 빈 클립보드·이미지만 있는 클립보드는 오류가 아니라 빈 글이다 — 부른 쪽이
+        // 「없다」와 「못 읽었다」를 가릴 필요가 없게 여기서 합친다.
+        Ok(cb.get_text().unwrap_or_default())
+    }
+
     fn attention(&self, surface_id: &str, reason: &str) -> Result<()> {
         self.attention_kind(surface_id, "", reason)
     }

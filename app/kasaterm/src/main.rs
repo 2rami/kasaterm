@@ -3866,6 +3866,10 @@ enum UserEvent {
         title: String,
         body: String,
     },
+    /// 캐릭터가 클립보드에 넣은 것을 사람에게 **보여 준다**. 클립보드는 보이지 않는
+    /// 그릇이라, 알리지 않으면 붙여넣기 전까지 무엇이 담겼는지 알 수가 없다. 소켓
+    /// 스레드는 토스트를 못 띄우므로(App 상태) GUI 로 넘긴다.
+    SocketToast(String),
     /// A pane's claude is blocked on a permission / input prompt (its
     /// `Notification` hook → `kasaterm-cli attention`). Toast + flash the pane
     /// and, unless it's the focused pane, raise a desktop alert — the case cmux

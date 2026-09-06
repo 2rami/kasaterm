@@ -833,6 +833,25 @@ pub trait Backend: Send + Sync {
     fn notify(&self, _surface_id: &str, _title: &str, _body: &str) -> Result<()> {
         anyhow::bail!("notify unsupported by this backend")
     }
+    /// 클립보드에 글을 넣는다 — **캐릭터가 사람 대신 복사해 주는 문**이다.
+    ///
+    /// 사람이 직접 끌어서 복사하는 길은 노플리커를 끈 claude 앞에서 막힌다: 그 하네스가
+    /// 화면 전체와 마우스를 함께 쥐고 있어 드래그가 터미널까지 오지 않는다(Shift 를
+    /// 눌러야 겨우 온다). 그래서 「이 부분 복사해 줘」를 사람이 손으로 하는 대신 캐릭터가
+    /// 대신 하도록 길을 낸다(2026-09-05 지시: 「에이전트가 카사텀 조종할 수 있게 해서
+    /// 복사하고 클립보드 띄워주는」).
+    ///
+    /// 넣은 글은 호스트가 화면에 **띄워서** 무엇이 담겼는지 사람이 눈으로 확인하게 한다 —
+    /// 클립보드는 보이지 않는 그릇이라, 알리지 않으면 붙여넣기 전까지 맞는지 알 수 없다.
+    /// 기본은 미지원.
+    fn clipboard_set(&self, _text: &str) -> Result<()> {
+        anyhow::bail!("clipboard unsupported by this backend")
+    }
+    /// 지금 클립보드에 담긴 글. 캐릭터가 「무엇이 들어 있나」를 확인하거나, 사람이 복사해
+    /// 둔 것을 받아 이어서 일할 때 쓴다. 기본은 미지원.
+    fn clipboard_get(&self) -> Result<String> {
+        anyhow::bail!("clipboard unsupported by this backend")
+    }
     /// A pane's agent is blocked waiting for the user — a permission prompt or
     /// an idle input prompt — surfaced by claude's `Notification` hook running
     /// `kasaterm-cli attention`. Unlike `notify` (a one-shot push), this marks

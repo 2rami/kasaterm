@@ -750,6 +750,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(id);
                 return;
             }
+            UserEvent::SocketToast(msg) => {
+                self.set_toast(msg.clone());
+                return;
+            }
             UserEvent::SocketSwapCharacter(pane, character) => {
                 self.swap_character(pane, character);
                 return;

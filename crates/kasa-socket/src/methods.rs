@@ -162,6 +162,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
+        "clipboard.set" => clipboard_set(backend, id, &req.params),
+        "clipboard.get" => clipboard_get(backend, id),
         unknown => Response {
             id,
             ok: false,
@@ -277,6 +279,8 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.notify",
                 "surface.attention",
                 "surface.done",
+                "clipboard.set",
+                "clipboard.get",
             ],
         }),
     )
@@ -382,6 +386,51 @@ fn collab_activity(backend: &dyn Backend, id: Value, params: &Value) -> Response
         .unwrap_or(40);
     match backend.pane_activity_log(surface_id, limit) {
         Ok(events) => Response::success(id, json!({ "events": events })),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 클립보드에 글을 넣는다. `text` 를 그대로 넣거나, `surface_id` 를 주면 그 pane 의
+/// 보이는 화면을 담는다 — 캐릭터가 「저 화면 복사해 줘」를 손 없이 해내는 길이다.
+/// `lines` 로 꼬리 몇 줄만 자를 수 있다(0/생략이면 화면 전체).
+fn clipboard_set(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let text = params.get("text").and_then(|v| v.as_str());
+    let surface_id = params.get("surface_id").and_then(|v| v.as_str());
+    let lines = params
+        .get("lines")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let body = match (text, surface_id) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(sid)) => match backend.peek(sid, if lines == 0 { 200 } else { lines }) {
+            Ok(screen) => screen,
+            Err(e) => return backend_err(id, e),
+        },
+        (None, None) => {
+            return param_err(id, "clipboard.set requires `text` or `surface_id` (string)")
+        }
+    };
+    if body.is_empty() {
+        return param_err(id, "복사할 것이 없다 — 빈 글은 클립보드를 지우기만 한다");
+    }
+    match backend.clipboard_set(&body) {
+        // 담은 글자 수를 돌려준다 — 부른 쪽이 「무엇이 얼마나」 복사됐는지 사람에게
+        // 그대로 옮길 수 있어야 한다.
+        Ok(()) => Response::success(
+            id,
+            json!({"ok": true, "chars": body.chars().count(), "lines": body.lines().count()}),
+        ),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 지금 클립보드에 담긴 글.
+fn clipboard_get(backend: &dyn Backend, id: Value) -> Response {
+    match backend.clipboard_get() {
+        Ok(text) => Response::success(
+            id,
+            json!({"text": text.clone(), "chars": text.chars().count()}),
+        ),
         Err(e) => backend_err(id, e),
     }
 }
