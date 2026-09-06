@@ -12192,7 +12192,17 @@ impl App {
                                 // 돌릴 때 일어나므로, 기다려도 영영 안 온다. 곧 온다고
                                 // 말해 놓고 안 오는 것이 모른다고 말하는 것보다 나쁘다.
                                 (None, _) => {
-                                    let t = "한도 모름";
+                                    // **로그인이 풀린 자리는 그 사실을 말한다.** 값을
+                                    // 못 읽은 점은 같지만 사람이 할 일이 정반대다 —
+                                    // 한도를 모르는 것은 기다리거나 그 계정을 한 번
+                                    // 쓰면 되고, 풀린 것은 다시 로그인해야 한다.
+                                    // 「한도 모름」만 뜨면 로그인이 필요한 줄을 모른 채
+                                    // 기다리게 된다(거노 2026-09-06 「로그인 아직도
+                                    // 한도 모름이라 돼있어 두개」 — 실제로 그 둘은
+                                    // 토큰이 비어 있었다).
+                                    let signed_out = !crate::settings::auth_probe(&id)
+                                        .is_none_or(|probe| probe.logged_in);
+                                    let t = if signed_out { "로그인 필요" } else { "한도 모름" };
                                     let ty2 = if two_line {
                                         sry + arow_h - 16.0
                                     } else {
@@ -12209,7 +12219,7 @@ impl App {
                                         t,
                                         gpu::DrawOpts {
                                             font_size: tf,
-                                            color: theme::text_mute(),
+                                            color: if signed_out { theme::danger() } else { theme::text_mute() },
                                             bold: false,
                                             italic: false,
                                         },
