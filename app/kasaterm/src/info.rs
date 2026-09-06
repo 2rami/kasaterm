@@ -2157,6 +2157,7 @@ pub(crate) fn draw_info_col(
     info.closed_rects.clear();
     info.closed_kill_rects.clear();
     info.kill_rects.clear();
+    info.machine_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
     info.refresh_rect = None;
@@ -2213,14 +2214,13 @@ pub(crate) fn draw_info_col(
     } else {
         SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
-    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다. 본문 높이는 지난 paint 의
-    // 실측(body_h) — 행 수로 셈하기엔 줄이 접히고(좁으면 두 단) 방 머리줄이 끼어 든다.
+    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다.
     let machines_h = if info.machines_col.machines.is_empty() {
         0.0
     } else if info.machines_collapsed {
         SEC_H + SEC_GAP
     } else {
-        SEC_H + info.machines_col.body_h + SEC_GAP
+        SEC_H + info.machines_col.machines.len() as f32 * ROW_H + SEC_GAP
     };
     let content =
         HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + closed_h + 14.0;
@@ -2463,11 +2463,10 @@ pub(crate) fn draw_info_col(
     let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
 
-    // ── 다른 기계 ── 기계마다 학생 목록·거울·방 펼치기·화면 보기, 그리고 이 맥북
-    // 학생을 그 기계로 보내기(machinescol.rs). 옛 「원격」 탭의 본문을 여기로 들였다
-    // (2026-09-07 지시 「원격탭을 없애고 info에 통합」) — 「미니에 누가 뭘 기다리나」를
-    // 보려던 요약 줄과, 그걸 누르면 가던 탭이 같은 것을 두 자리에서 말하고 있었다.
-    // 기다림은 머리의 배지가 잇는다.
+    // ── 다른 기계 ── 명부 기계마다 한 줄: 학생 수·거울 수·기다림. 화면공유를 열지
+    // 않고도 「미니에 누가 뭘 기다리나」가 여기서 보인다(2026-09-02 지시). 줄을 누르면
+    // 그 기계의 메뉴 — 학생 목록·거울·방 펼치기·화면 보기가 거기 있다(옛 「원격」 탭의
+    // 자리, 2026-09-07 지시). 이 맥북 학생을 보내는 건 학생 줄 우클릭 메뉴다.
     if !info.machines_col.machines.is_empty() {
         let mc = &info.machines_col;
         let n: usize = mc.machines.iter().map(|m| m.remote.len() + m.mirrored.len()).sum();
@@ -2493,22 +2492,14 @@ pub(crate) fn draw_info_col(
         );
         info.sec_rects.push((state::InfoSection::Machines, r));
         y += SEC_H;
-        if info.machines_collapsed {
-            // 본문을 안 그리는 동안 지난 프레임의 버튼 자리가 눌리면 안 된다.
-            info.machines_col.btn_rects.clear();
-        } else {
-            let narrow = w < GIT_DENSE_COMPACT;
-            let y1 = crate::machinescol::draw_machines_body(
-                g,
-                cursor,
-                &mut info.machines_col,
-                x0,
-                right,
-                y,
-                narrow,
-            );
-            info.machines_col.body_h = y1 - y;
-            y = y1;
+        if !info.machines_collapsed {
+            for m in &info.machines_col.machines {
+                if y + ROW_H > top && y < bottom {
+                    draw_machine_row(g, cursor, m, x, w, x0, right, y);
+                }
+                info.machine_rects.push((m.label.clone(), (x, y, w, ROW_H)));
+                y += ROW_H;
+            }
         }
         y += SEC_GAP;
     }
@@ -2570,7 +2561,7 @@ pub(crate) fn draw_info_col(
     clip_rects!(info.kill_rects, 1);
     clip_rects!(info.closed_rects, 1);
     clip_rects!(info.closed_kill_rects, 1);
-    clip_rects!(info.machines_col.btn_rects, 1);
+    clip_rects!(info.machine_rects, 1);
     info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
     // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
     // 자르면 멀쩡한 버튼이 사라진다.
@@ -2580,6 +2571,7 @@ pub(crate) fn draw_info_col(
     g.pop_clip();
     draw_row_menu(g, raw_cursor, info, x, w, top, bottom);
     draw_pane_menu(g, raw_cursor, info, x, w, top, bottom);
+    draw_machine_menu(g, raw_cursor, info, x, w, top, bottom);
     info.view = snap;
     if let Some(t) = prof {
         eprintln!(
@@ -3419,11 +3411,255 @@ fn draw_proc_row(
 
 /// 프로세스 우클릭 메뉴. 칼럼 안에 가두는 건 이 칼럼이 마지막으로 그려지는
 /// 레이어가 아니어서다 — 밖으로 삐져나가면 뒤에 그려질 pane 헤더가 덮는다.
-/// 학생 줄 우클릭 메뉴 — 테마를 고르고, 그 안에서 학생을 고른다.
+/// 「다른 기계」 한 줄 — 왼쪽에 기계 아이콘과 이름(끊겼으면 흐리게), 오른쪽 요약.
+/// 기다림이 있으면 그 수만 경고색 — 「누가 내 답을 기다리나」가 이 줄의 존재 이유다.
+/// 누르면 그 기계의 메뉴(`draw_machine_menu`).
+#[allow(clippy::too_many_arguments)]
+fn draw_machine_row(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    m: &state::MachinesColMachine,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    let hov = hit(cursor, &(x, y, w, ROW_H));
+    if hov {
+        g.hover_pointer = true;
+        g.rect(x, y, w, ROW_H, theme::surface_hover());
+    }
+    let fg = if m.online { theme::text() } else { theme::text_mute() };
+    let icon = 13.0_f32;
+    g.queue_icon("server", x0, y + (ROW_H - icon) / 2.0, icon, fg);
+    g.draw_text(
+        x0 + icon + 6.0,
+        y + 3.0,
+        &m.label,
+        gpu::DrawOpts {
+            font_size: 11.0,
+            color: fg,
+            bold: true,
+            italic: false,
+        },
+    );
+    let students = m.remote.len() + m.mirrored.len();
+    let waiting = m
+        .remote
+        .iter()
+        .filter(|r| r.status.contains("wait") || r.status.contains("attention"))
+        .count();
+    let summary = if !m.online {
+        "안 닿음".to_string()
+    } else if students == 0 {
+        "캐릭터 없음".to_string()
+    } else {
+        let mut s = format!("캐릭터 {students}");
+        if !m.mirrored.is_empty() {
+            s.push_str(&format!(" · 거울 {}", m.mirrored.len()));
+        }
+        s
+    };
+    let tail = if hov { format!("{summary}   ›") } else { summary };
+    let tw = g.measure_chrome_text(&tail, 10.5, false);
+    let mut tx = (right - tw).max(x0 + 80.0);
+    if m.online && waiting > 0 {
+        let warn = format!("기다림 {waiting}  ");
+        let ww = g.measure_chrome_text(&warn, 10.5, true);
+        tx = (tx - ww).max(x0 + 80.0);
+        g.draw_text(
+            tx,
+            y + 4.0,
+            &warn,
+            gpu::DrawOpts {
+                font_size: 10.5,
+                color: theme::attention(),
+                bold: true,
+                italic: false,
+            },
+        );
+        tx += ww;
+    }
+    g.draw_text(
+        tx,
+        y + 4.0,
+        &tail,
+        gpu::DrawOpts {
+            font_size: 10.5,
+            color: theme::text_dim(),
+            bold: false,
+            italic: false,
+        },
+    );
+}
+
+/// 팝업 메뉴의 한 줄. `face` 는 학생 얼굴(이름), `icon` 은 아이콘 이름 — 둘 중 하나가
+/// 있으면 글이 그만큼 오른쪽에서 시작한다. `muted` 는 누를 수 없는 안내 줄.
+struct MenuRow {
+    label: String,
+    sep_before: bool,
+    bold: bool,
+    face: Option<String>,
+    icon: Option<&'static str>,
+    muted: bool,
+}
+
+impl MenuRow {
+    fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            sep_before: false,
+            bold: false,
+            face: None,
+            icon: None,
+            muted: false,
+        }
+    }
+    fn sep(mut self) -> Self {
+        self.sep_before = true;
+        self
+    }
+    fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+    fn face(mut self, name: &str) -> Self {
+        self.face = Some(name.to_string());
+        self
+    }
+    fn icon(mut self, name: &'static str) -> Self {
+        self.icon = Some(name);
+        self
+    }
+    fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+}
+
+/// 칼럼 안 팝업 메뉴를 그리고 줄마다 hit rect 를 돌려준다(잘려서 안 그린 줄은 None).
+/// 학생 줄 메뉴와 기계 메뉴가 같은 모양이어야 해서 한 곳에 둔다.
 ///
-/// 한 화면에 79명을 세울 수 없어 테마로 한 단 끊는다. 고른 뒤에는 `repersona_pane`
-/// 이 대화를 끊지 않고 이름·얼굴·말투만 갈아끼운다(2026-08-25 거노 요청: 인포에서
-/// 우클릭으로 바꾸고 싶다).
+/// 세로가 모자라면 잘라 낸다 — 넘치면 메뉴가 본문 밖으로 흘러 아무것도 못 누른다.
+/// 잘렸다는 사실은 숨기지 않는다. **설정으로 보내지 않는다** — 설정 화면의
+/// 「캐릭터」는 배정 후보 명단을 고르는 곳이지 이 자리를 누구로 바꾸는 곳이 아니라,
+/// 가 봐야 할 일이 없다(2026-08-26 지적: 「설정에서 어쩌라는거야」). 여기서 더 보이게
+/// 하는 길은 세로를 넓히는 것뿐이므로 그렇게 적는다.
+#[allow(clippy::too_many_arguments)]
+fn draw_menu_rows(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    x: f32,
+    w: f32,
+    top: f32,
+    bottom: f32,
+    rawx: f32,
+    rawy: f32,
+    rows: &[MenuRow],
+) -> Vec<Option<(f32, f32, f32, f32)>> {
+    let mut out = vec![None; rows.len()];
+    if rows.is_empty() {
+        return out;
+    }
+    // 얼굴 줄이 하나라도 있으면 전부 그 높이로 — 단 안에서 줄 높이가 들쭉날쭉하면
+    // 어디가 한 줄인지 눈이 못 잡는다.
+    let face = if rows.iter().any(|r| r.face.is_some()) { 22.0_f32 } else { 0.0 };
+    let icon = if rows.iter().any(|r| r.icon.is_some()) { 14.0_f32 } else { 0.0 };
+    let mih = if face > 0.0 { 30.0_f32 } else { 28.0 };
+    let sep = 7.0_f32;
+    let pad = 6.0_f32;
+    let room = (bottom - top - 8.0).max(mih * 3.0);
+    let max_items = (((room - pad * 2.0) / mih).floor() as usize).max(3);
+    let clipped = rows.len() > max_items;
+    let shown = if clipped { max_items - 1 } else { rows.len() };
+    let rows_v = &rows[..shown];
+    let widest = rows_v
+        .iter()
+        .map(|r| g.measure_chrome_text(&r.label, 13.0, r.bold))
+        .fold(0.0_f32, f32::max);
+    let lead = face.max(icon);
+    let lead = if lead > 0.0 { lead + 6.0 } else { 0.0 };
+    let menu_w = (widest + 32.0 + lead).min(w - 8.0);
+    let nsep = rows_v.iter().filter(|r| r.sep_before).count() as f32;
+    let nrows = shown as f32 + if clipped { 1.0 } else { 0.0 };
+    let menu_h = pad * 2.0 + nrows * mih + nsep * sep;
+    let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
+    let my = rawy.min(bottom - menu_h - 4.0).max(top);
+    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
+    let bc = theme::with_alpha(theme::border(), 0xCC);
+    g.rect(mx, my, menu_w, 1.0, bc);
+    g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, bc);
+    g.rect(mx, my, 1.0, menu_h, bc);
+    g.rect(mx + menu_w - 1.0, my, 1.0, menu_h, bc);
+
+    let mut iy = my + pad;
+    for (i, row) in rows_v.iter().enumerate() {
+        if row.sep_before {
+            g.rect(
+                mx + pad,
+                iy + sep * 0.5,
+                menu_w - pad * 2.0,
+                1.0,
+                theme::with_alpha(theme::border(), 0x88),
+            );
+            iy += sep;
+        }
+        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
+        if !row.muted && hit(cursor, &r) {
+            crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
+        }
+        if let Some(n) = &row.face {
+            crate::sprites::draw_student_face(g, n, r.0 + 8.0, r.1 + (mih - face) / 2.0, face);
+        } else if let Some(ic) = row.icon {
+            g.queue_icon(
+                ic,
+                r.0 + 8.0 + (lead - 6.0 - icon).max(0.0) / 2.0,
+                r.1 + (mih - icon) / 2.0,
+                icon,
+                theme::text_dim(),
+            );
+        }
+        g.draw_text(
+            r.0 + 12.0 + lead,
+            r.1 + (mih - 13.0) / 2.0,
+            &row.label,
+            gpu::DrawOpts {
+                font_size: 13.0,
+                color: if row.muted { theme::text_mute() } else { theme::text() },
+                bold: row.bold,
+                italic: false,
+            },
+        );
+        if !row.muted {
+            out[i] = Some(r);
+        }
+        iy += mih;
+    }
+    if clipped {
+        g.draw_text(
+            mx + 16.0,
+            iy + (mih - 12.0) / 2.0,
+            "… 창을 키우면 더 보여요",
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: theme::with_alpha(theme::text(), 0x99),
+                bold: false,
+                italic: true,
+            },
+        );
+    }
+    out
+}
+
+/// 학생 줄 우클릭 메뉴 — 첫 단은 이사(기계로 보내기·데려오기)·가기·크게 보기·닫기,
+/// 「학생 바꾸기 ›」로 들어가면 테마 → 캐릭터 두 단(2026-09-07 지시: 「테마목록만
+/// 뜨는데 메뉴를 여러가지 넣고」). 고른 뒤에는 `repersona_pane` 이 대화를 끊지 않고
+/// 이름·얼굴·말투만 갈아끼운다(2026-08-25 거노 요청: 인포에서 우클릭으로 바꾸고 싶다).
+///
+/// 한 화면에 79명을 세울 수 없어 테마로 한 단 끊는다. 2단 팝업을 옆으로 겹치지
+/// 않는 이유는 인포 칼럼이 좁아서다 — 겹치면 두 번째 단이 화면 밖으로 나가거나
+/// 본문을 덮는다.
 fn draw_pane_menu(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
@@ -3434,11 +3670,11 @@ fn draw_pane_menu(
     bottom: f32,
 ) {
     info.pane_menu_rects.clear();
-    let Some((rawx, rawy, _, ref opened)) = info.pane_menu else { return };
+    let Some((rawx, rawy, ref pane, ref page)) = info.pane_menu else { return };
     use state::PaneMenuItem as M;
+    use state::PaneMenuPage as P;
 
-    // (항목, 라벨, 앞에 구분선)
-    let mut items: Vec<(M, String, bool)> = Vec::new();
+    let mut items: Vec<(M, MenuRow)> = Vec::new();
     // 설정에서 켠 학생만 세운다(2026-08-29 지시: 「내가 켠것만 나오게해야지」).
     // 아무도 안 골랐으면 **제한이 없다**는 뜻으로 읽는다 — `is_assignable` 과 같은
     // 규칙이고, 그 폴백이 없으면 고르기를 한 번도 안 쓴 사람에게 빈 메뉴가 뜬다.
@@ -3447,11 +3683,38 @@ fn draw_pane_menu(
     let picked_of = |theme: &str| -> Vec<String> {
         picks.iter().find(|(k, _)| k == theme).map(|(_, v)| v.clone()).unwrap_or_default()
     };
-    match opened {
-        None => {
+    match page {
+        P::Root => {
+            items.push((M::Themes, MenuRow::new("학생 바꾸기  ›").bold()));
+            // 이사 — 이 pane 이 어느 기계에서 온 거울이면 데려오기, 아니면 명부 기계마다
+            // 보내기. 안 닿는 기계는 세우지 않는다(눌러도 이사가 못 선다).
+            let mc = &info.machines_col;
+            let from = mc
+                .machines
+                .iter()
+                .find(|m| m.mirrored.iter().any(|r| &r.pane == pane))
+                .map(|m| m.label.clone());
+            if let Some(label) = from {
+                // 조사(로/으로)를 안 붙이려고 화살표로 방향을 말한다 — 「나쵸네코 로」가 어색했다.
+                items.push((M::Bring, MenuRow::new(format!("데려오기 ← {label}")).sep().icon("server")));
+            } else {
+                let mut first = true;
+                for m in mc.machines.iter().filter(|m| m.online) {
+                    let row = MenuRow::new(format!("보내기 → {}", m.label)).icon("server");
+                    items.push((M::Send(m.label.clone()), if first { row.sep() } else { row }));
+                    first = false;
+                }
+            }
+            items.push((M::Focus, MenuRow::new("pane 으로 가기").sep()));
+            items.push((M::Zoom, MenuRow::new("크게 보기")));
+            items.push((M::Close, MenuRow::new("닫기")));
+        }
+        P::Themes => {
+            items.push((M::Root, MenuRow::new("‹ 뒤로")));
             // `list_themes` 가 아니라 `theme_rows` 를 쓴다 — 그쪽은 설치된 테마만
             // 주고, **번들(기본) 로스터가 빠진다.** 지금 도는 학생 대부분이 거기
             // 소속이라 빠지면 정작 되돌릴 이름이 목록에 없다. 번들은 빈 id 로 온다.
+            let mut first = true;
             for r in crate::socket::theme_rows() {
                 let id = if r.id.is_empty() {
                     kasa_mcp::character::BASE_THEME_KEY.to_string()
@@ -3463,11 +3726,13 @@ fn draw_pane_menu(
                 if !unrestricted && picked_of(&id).is_empty() {
                     continue;
                 }
-                items.push((M::Theme(id), r.label, false));
+                let row = MenuRow::new(r.label).bold();
+                items.push((M::Theme(id), if first { row.sep() } else { row }));
+                first = false;
             }
         }
-        Some(theme_id) => {
-            items.push((M::Back, "‹ 테마 고르기".to_string(), false));
+        P::Theme(theme_id) => {
+            items.push((M::Back, MenuRow::new("‹ 테마 고르기")));
             let chars = if theme_id == kasa_mcp::character::BASE_THEME_KEY {
                 kasa_mcp::character::base_characters_json()
             } else {
@@ -3483,96 +3748,109 @@ fn draw_pane_menu(
                 let picked = picked_of(theme_id);
                 names.retain(|n| picked.contains(n));
             }
+            // 학생 단은 이름 옆에 얼굴을 세운다(2026-08-29 지시: 「설정처럼 사진도
+            // 나오고」). 79명 중 이름만으로 누구인지 아는 로스터가 얼마 없다.
             for (i, n) in names.into_iter().enumerate() {
-                items.push((M::Character(n.clone()), n, i == 0));
+                let row = MenuRow::new(n.clone()).face(&n);
+                items.push((M::Character(n), if i == 0 { row.sep() } else { row }));
             }
         }
     }
     if items.is_empty() {
         return;
     }
-
-    // 학생 단은 이름 옆에 얼굴을 세운다(2026-08-29 지시: 「설정처럼 사진도 나오고」).
-    // 79명 중 이름만으로 누구인지 아는 로스터가 얼마 없다.
-    let face = if opened.is_some() { 22.0_f32 } else { 0.0 };
-    let mih = if face > 0.0 { 30.0_f32 } else { 28.0 };
-    let sep = 7.0_f32;
-    let pad = 6.0_f32;
-    // 세로가 모자라면 잘라 낸다 — 넘치면 메뉴가 본문 밖으로 흘러 아무것도 못 누른다.
-    let room = (bottom - top - 8.0).max(mih * 3.0);
-    let max_items = (((room - pad * 2.0) / mih).floor() as usize).max(3);
-    let clipped = items.len() > max_items;
-    if clipped {
-        items.truncate(max_items - 1);
+    let rows: Vec<MenuRow> = items.iter().map(|(_, r)| MenuRow {
+        label: r.label.clone(),
+        sep_before: r.sep_before,
+        bold: r.bold,
+        face: r.face.clone(),
+        icon: r.icon,
+        muted: r.muted,
+    }).collect();
+    let rects = draw_menu_rows(g, cursor, x, w, top, bottom, rawx, rawy, &rows);
+    for ((item, _), r) in items.into_iter().zip(rects) {
+        if let Some(r) = r {
+            info.pane_menu_rects.push((item, r));
+        }
     }
-    let widest = items
-        .iter()
-        .map(|(_, l, _)| g.measure_chrome_text(l, 13.0, false))
-        .fold(0.0_f32, f32::max);
-    let lead = if face > 0.0 { face + 6.0 } else { 0.0 };
-    let menu_w = (widest + 32.0 + lead).min(w - 8.0);
-    let nsep = items.iter().filter(|(_, _, s)| *s).count() as f32;
-    let rows = items.len() as f32 + if clipped { 1.0 } else { 0.0 };
-    let menu_h = pad * 2.0 + rows * mih + nsep * sep;
-    let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
-    let my = rawy.min(bottom - menu_h - 4.0).max(top);
-    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
-    let bc = theme::with_alpha(theme::border(), 0xCC);
-    g.rect(mx, my, menu_w, 1.0, bc);
-    g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, bc);
-    g.rect(mx, my, 1.0, menu_h, bc);
-    g.rect(mx + menu_w - 1.0, my, 1.0, menu_h, bc);
+}
 
-    let mut iy = my + pad;
-    for (item, label, sep_before) in items {
-        if sep_before {
-            g.rect(
-                mx + pad,
-                iy + sep * 0.5,
-                menu_w - pad * 2.0,
-                1.0,
-                theme::with_alpha(theme::border(), 0x88),
-            );
-            iy += sep;
-        }
-        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
-        if hit(cursor, &r) {
-            crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
-        }
-        let is_theme = matches!(item, M::Theme(_));
-        if let M::Character(ref n) = item {
-            crate::sprites::draw_student_face(g, n, r.0 + 8.0, r.1 + (mih - face) / 2.0, face);
-        }
-        g.draw_text(
-            r.0 + 12.0 + lead,
-            r.1 + (mih - 13.0) / 2.0,
-            &label,
-            gpu::DrawOpts {
-                font_size: 13.0,
-                color: theme::text(),
-                bold: is_theme,
-                italic: false,
-            },
-        );
-        info.pane_menu_rects.push((item, r));
-        iy += mih;
+/// 「다른 기계」 줄을 누르면 뜨는 메뉴 — 방 펼치기·화면 보기, 그 기계 학생마다
+/// 거울 열기, 이사 간 학생마다 데려오기. 옛 「원격」 탭이 본문에 펼쳐 두던 것을
+/// 줄 하나 뒤로 접은 것이다(2026-09-07 지시). 항목 rect 는 `machines_col.btn_rects`
+/// 에 실어 클릭이 옛 탭과 같은 길(`machines_col_click`)을 탄다.
+fn draw_machine_menu(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    info: &mut state::InfoState,
+    x: f32,
+    w: f32,
+    top: f32,
+    bottom: f32,
+) {
+    info.machines_col.btn_rects.clear();
+    let Some((rawx, rawy, ref label)) = info.machine_menu else { return };
+    let Some(m) = info.machines_col.machines.iter().find(|m| &m.label == label).cloned() else {
+        return;
+    };
+    use state::MachinesColBtn as B;
+    let mut items: Vec<(Option<B>, MenuRow)> = Vec::new();
+    items.push((None, MenuRow::new(m.label.clone()).bold().icon("server").muted()));
+    if !m.online {
+        items.push((None, MenuRow::new(crate::machinescol::ago_label(m.ago_secs)).muted()));
     }
-    // 잘렸다는 사실을 숨기지 않는다. **설정으로 보내지 않는다** — 설정 화면의
-    // 「캐릭터」는 배정 후보 명단을 고르는 곳이지 이 자리를 누구로 바꾸는 곳이
-    // 아니라, 가 봐야 할 일이 없다(2026-08-26 지적: 「설정에서 어쩌라는거야」).
-    // 여기서 더 보이게 하는 길은 세로를 넓히는 것뿐이므로 그렇게 적는다.
-    if clipped {
-        g.draw_text(
-            mx + 16.0,
-            iy + (mih - 12.0) / 2.0,
-            "… 창을 키우면 더 보여요",
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: theme::with_alpha(theme::text(), 0x99),
-                bold: false,
-                italic: true,
-            },
-        );
+    if m.online && !m.remote.is_empty() {
+        items.push((Some(B::Unfold { label: m.label.clone() }), MenuRow::new("방 펼치기").sep().icon("columns-2")));
+    }
+    // 문이 둘 중 하나라도 있으면 선다 — kvm(IP KVM 웹) 또는 host(화면공유). 연결이
+    // 끊겨도 세운다: KVM·화면공유는 카사텀 창구와 다른 문이라 따로 살 수 있고, KVM 은
+    // 오히려 기계가 죽었을 때 보라고 있는 문이다.
+    if m.kvm.is_some() || !m.host.is_empty() {
+        let row = MenuRow::new("화면 보기").icon("external-link");
+        let row = if items.len() == 1 { row.sep() } else { row };
+        items.push((Some(B::Screen { host: m.host.clone(), kvm: m.kvm.clone() }), row));
+    }
+    if m.online && m.outdated {
+        items.push((None, MenuRow::new("⚠ 프로그램 낡음 — sync-mini 로 갱신").muted()));
+    }
+    if m.online {
+        for (i, r) in m.remote.iter().enumerate() {
+            let waiting = r.status.contains("wait") || r.status.contains("attention");
+            let text = if waiting {
+                format!("{} 거울 열기 · 기다림", r.name)
+            } else {
+                format!("{} 거울 열기", r.name)
+            };
+            let row = MenuRow::new(text).face(&r.name);
+            let act = (!r.remote_id.is_empty()).then(|| B::Mirror {
+                label: m.label.clone(),
+                remote_id: r.remote_id.clone(),
+                name: r.name.clone(),
+                cwd: r.remote_cwd.clone(),
+            });
+            items.push((act, if i == 0 { row.sep() } else { row }));
+        }
+    }
+    for (i, r) in m.mirrored.iter().enumerate() {
+        let row = MenuRow::new(format!("{} 데려오기", r.name)).face(&r.name);
+        items.push((Some(B::Bring { pane: r.pane.clone() }), if i == 0 { row.sep() } else { row }));
+    }
+    if m.online && m.remote.is_empty() && m.mirrored.is_empty() {
+        items.push((None, MenuRow::new("캐릭터 없음").sep().muted()));
+    }
+    let rows: Vec<MenuRow> = items.iter().map(|(_, r)| MenuRow {
+        label: r.label.clone(),
+        sep_before: r.sep_before,
+        bold: r.bold,
+        face: r.face.clone(),
+        icon: r.icon,
+        muted: r.muted,
+    }).collect();
+    let rects = draw_menu_rows(g, cursor, x, w, top, bottom, rawx, rawy, &rows);
+    for ((act, _), r) in items.into_iter().zip(rects) {
+        if let (Some(act), Some(r)) = (act, r) {
+            info.machines_col.btn_rects.push((act, r));
+        }
     }
 }
 

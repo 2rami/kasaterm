@@ -3561,7 +3561,21 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(k, r)| k.starts_with('%') && inside(r))
                         .map(|(k, _)| k.clone());
                     if let Some(pane) = pane {
-                        self.info.pane_menu = Some((cx, cy, pane, None));
+                        self.info.pane_menu = Some((cx, cy, pane, state::PaneMenuPage::Root));
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
+                    // 「다른 기계」 줄 — 왼쪽 클릭과 같은 메뉴다.
+                    if let Some(label) = self
+                        .info
+                        .machine_rects
+                        .iter()
+                        .find(|(_, r)| inside(r))
+                        .map(|(l, _)| l.clone())
+                    {
+                        self.info.machine_menu = Some((cx, cy, label));
+                        self.info.machines_col.last_refresh = None;
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -4711,12 +4725,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(m, _)| m.clone());
+                            use state::PaneMenuPage as P;
                             match picked {
-                                Some(M::Theme(id)) => {
-                                    self.info.pane_menu = Some((mx, my, pane, Some(id)));
+                                Some(M::Themes) | Some(M::Back) => {
+                                    self.info.pane_menu = Some((mx, my, pane, P::Themes));
                                 }
-                                Some(M::Back) => {
-                                    self.info.pane_menu = Some((mx, my, pane, None));
+                                Some(M::Theme(id)) => {
+                                    self.info.pane_menu = Some((mx, my, pane, P::Theme(id)));
+                                }
+                                Some(M::Root) => {
+                                    self.info.pane_menu = Some((mx, my, pane, P::Root));
                                 }
                                 Some(M::Character(name)) => {
                                     self.info.pane_menu = None;
@@ -4724,8 +4742,37 @@ impl ApplicationHandler<UserEvent> for App {
                                     // 토스트는 그 갈래마다 다르므로 여기서 안 띄운다.
                                     self.ask_or_repersona(&pane, &name);
                                 }
+                                Some(M::Send(label)) => {
+                                    self.info.pane_menu = None;
+                                    self.machines_col_act(state::MachinesColBtn::Send { pane, label });
+                                }
+                                Some(M::Bring) => {
+                                    self.info.pane_menu = None;
+                                    self.machines_col_act(state::MachinesColBtn::Bring { pane });
+                                }
+                                Some(M::Focus) => {
+                                    self.info.pane_menu = None;
+                                    self.focus_pane(&pane);
+                                }
+                                Some(M::Zoom) => {
+                                    self.info.pane_menu = None;
+                                    self.toggle_pane_zoom(&pane);
+                                }
+                                Some(M::Close) => {
+                                    self.info.pane_menu = None;
+                                    self.close_pane(&pane);
+                                }
                                 None => self.info.pane_menu = None,
                             }
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        // 기계 메뉴가 떠 있으면 그게 최상단이다 — 항목이면 실행하고,
+                        // 밖이면 닫기만 하고 클릭을 삼킨다(프로세스 메뉴와 같은 규칙).
+                        if self.info.machine_menu.is_some() {
+                            self.machines_col_click(cx, cy);
+                            self.info.machine_menu = None;
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
@@ -4768,16 +4815,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
                                 self.info.ctx_menu = None;
                                 self.info.pane_menu = None;
+                                self.info.machine_menu = None;
                             }
-                            window.request_redraw();
-                            return;
-                        }
-                        // 「다른 기계」 절의 버튼(보내기·데려오기·거울·펼치기·화면 보기).
-                        // 다른 탭에선 낡은 좌표가 남으므로 탭을 먼저 확인한다.
-                        if self.info.tab == state::SideTab::Info
-                            && self.machines_col_click(cx, cy)
-                        {
-                            self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
@@ -4828,6 +4867,20 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
+                                window.request_redraw();
+                                return;
+                            }
+                            // 「다른 기계」 줄 — 그 기계의 메뉴(학생·거울·펼치기·화면 보기).
+                            if let Some(label) = self
+                                .info
+                                .machine_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(l, _)| l.clone())
+                            {
+                                self.info.machine_menu = Some((cx, cy, label));
+                                self.info.machines_col.last_refresh = None;
+                                self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
                             }

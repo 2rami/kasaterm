@@ -269,8 +269,10 @@ pub(crate) enum SideTab {
     Persona,
 }
 
-/// Info 탭 「다른 기계」 절 상태 — 조립은 `refresh_machines_col`, 그리기는
-/// `machinescol::draw_machines_body`, 클릭은 `machines_col_click`.
+/// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다
+/// 요약 한 줄만 서고, 학생 목록·거울·펼치기·화면 보기는 그 줄을 누르면 뜨는 메뉴
+/// (info.rs `draw_machine_menu`)에, 보내기·데려오기는 학생 줄 우클릭 메뉴에 있다.
+/// 메뉴 항목의 hit rect 가 `btn_rects` 이고 클릭은 `machines_col_click`.
 #[derive(Default)]
 pub(crate) struct MachinesColState {
     /// 기계 섹션들 — machines 폴링 캐시의 스냅샷 + 이사 간 학생의 로컬 미러.
@@ -278,10 +280,7 @@ pub(crate) struct MachinesColState {
     /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
     pub(crate) locals: Vec<MachinesColRow>,
     pub(crate) last_refresh: Option<std::time::Instant>,
-    /// 지난 paint 에 잰 본문 높이. Info 는 스크롤 상한을 그리기 *전에* 잡으므로 한
-    /// 프레임 전 값을 쓴다 — 본문이 자란 그 프레임에만 한 번 밀린다.
-    pub(crate) body_h: f32,
-    /// 매 paint 재생성되는 버튼 hit rect(다른 칼럼과 같은 규칙).
+    /// 기계 메뉴 항목의 hit rect(다른 메뉴와 같은 규칙 — 매 paint 재생성)(다른 칼럼과 같은 규칙).
     pub(crate) btn_rects: Vec<(MachinesColBtn, (f32, f32, f32, f32))>,
     /// 이사가 도는 중인 (pane, 진행 문구). 이사는 GUI 스레드 동기라 실제로는
     /// 시작 직전 한 프레임에만 보이지만, 그 한 프레임이 「눌렸다」를 말해 준다.
@@ -549,12 +548,35 @@ pub(crate) enum InfoDirBtn {
 /// 나가거나 본문을 덮는다.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum PaneMenuItem {
+    /// 테마 목록 단으로 들어간다(「학생 바꾸기 ›」).
+    Themes,
     /// 테마 id. 누르면 그 테마의 캐릭터 목록으로 들어간다.
     Theme(String),
     /// 캐릭터 이름. 누르면 그 pane 의 학생이 바뀐다(대화는 안 끊긴다).
     Character(String),
     /// 테마 목록으로 되돌아간다.
     Back,
+    /// 첫 단으로 되돌아간다.
+    Root,
+    /// 이 pane 의 학생을 그 기계(명부 라벨)로 보낸다 — 이사.
+    Send(String),
+    /// 이사 간 학생을 이 맥북으로 데려온다.
+    Bring,
+    /// 그 pane 으로 간다.
+    Focus,
+    /// 크게 보기 토글.
+    Zoom,
+    /// pane 닫기 — 되살리기(⌘⇧T)로 되돌릴 수 있다.
+    Close,
+}
+
+/// 학생 줄 우클릭 메뉴의 단. 첫 단에 이사·가기·닫기가 서고, 학생 바꾸기는 테마 →
+/// 캐릭터 두 단을 더 들어간다(2026-09-07 지시 「테마목록만 뜨는데 메뉴를 여러가지」).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum PaneMenuPage {
+    Root,
+    Themes,
+    Theme(String),
 }
 
 /// 프로세스·포트 행 우클릭 메뉴 항목.
@@ -650,10 +672,13 @@ pub(crate) struct InfoState {
     /// `draw_info_col` 이 아니라 그 위 블록이 채운다.
     pub(crate) action_rects: Vec<(InfoAction, (f32, f32, f32, f32))>,
     pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
-    /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 펼친 테마 id)`. 테마가 `None` 이면
-    /// 테마 목록을, 있으면 그 테마의 캐릭터 목록을 그린다.
-    pub(crate) pane_menu: Option<(f32, f32, String, Option<String>)>,
+    /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
+    pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
+    /// 「다른 기계」 줄 hit rect `(라벨, rect)` — 누르면 그 기계의 메뉴. 매 paint 재생성.
+    pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// 기계 메뉴 — `(x, y, 명부 라벨)`. 항목 rect 는 `machines_col.btn_rects`.
+    pub(crate) machine_menu: Option<(f32, f32, String)>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
 }
 
@@ -696,6 +721,8 @@ impl Default for InfoState {
             ctx_menu_rects: Vec::new(),
             pane_menu: None,
             pane_menu_rects: Vec::new(),
+            machine_rects: Vec::new(),
+            machine_menu: None,
             refresh_rect: None,
         }
     }

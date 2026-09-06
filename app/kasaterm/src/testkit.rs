@@ -2497,6 +2497,8 @@ impl App {
                 if v == "hover"
                     || v == "menu"
                     || v == "panemenu"
+                    || v == "panethemes"
+                    || v == "machinemenu"
                     || v.starts_with("panechars") =>
             {
                 v
@@ -2513,7 +2515,21 @@ impl App {
         // 캐릭터 목록은 **한 번 더 눌러야** 나오므로 정적 캡처로는 존재 자체를
         // 확인할 수 없다. `panemenu` 는 테마 목록까지, `panechars` 는 첫 테마를
         // 골라 캐릭터 목록까지 편 상태로 세운다.
-        if act == "panemenu" || act.starts_with("panechars") {
+        // 「다른 기계」 줄의 메뉴. 명부 폴링이 몇십 초 걸릴 수 있어 줄이 아직 없으면
+        // 다음 프레임에 다시 본다 — 한 번 놓치고 끝내면 빈 화면을 「확인했다」고 찍는다.
+        if act == "machinemenu" {
+            let Some((label, r)) = self.info.machine_rects.first().cloned() else {
+                ACTED.store(false, Ordering::Relaxed);
+                return;
+            };
+            let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+            self.cursor_px = (cx, cy);
+            self.info.machine_menu = Some((cx, cy, label.clone()));
+            self.info.machines_col.last_refresh = None;
+            eprintln!("[autoinfo] act=machinemenu machine={label} at ({cx:.0},{cy:.0})");
+            return;
+        }
+        if act == "panemenu" || act == "panethemes" || act.starts_with("panechars") {
             let Some((pane, r)) = self
                 .info
                 .group_rects
@@ -2528,21 +2544,30 @@ impl App {
             // `panechars:<테마 id>` 로 볼 단을 고른다. 기본(첫 테마)만으로는 **번들
             // 로스터를 못 연다** — `list_themes` 에 번들이 없어서다. 그런데 켠 학생
             // 대부분이 거기 있으니, 거르기를 시험할 자리가 바로 그 단이다.
+            // `panemenu` 는 첫 단(이사·가기·닫기), `panethemes` 는 테마 단.
+            use crate::state::PaneMenuPage as P;
             let opened = if let Some(id) = act.strip_prefix("panechars:") {
-                Some(id.to_string())
+                P::Theme(id.to_string())
             } else if act == "panechars" {
                 let first = kasa_mcp::character::list_themes().into_iter().next();
                 if first.is_none() {
                     eprintln!("[autoinfo] 테마가 하나도 없다 — 캐릭터 목록을 못 편다");
                 }
-                first.map(|(id, _)| id)
+                first.map(|(id, _)| P::Theme(id)).unwrap_or(P::Themes)
+            } else if act == "panethemes" {
+                P::Themes
             } else {
-                None
+                P::Root
+            };
+            let opened_s = match &opened {
+                P::Root => "root".to_string(),
+                P::Themes => "themes".to_string(),
+                P::Theme(id) => format!("theme:{id}"),
             };
             self.cursor_px = (cx, cy);
-            self.info.pane_menu = Some((cx, cy, pane.clone(), opened.clone()));
+            self.info.pane_menu = Some((cx, cy, pane.clone(), opened));
             eprintln!(
-                "[autoinfo] act={act} pane={pane} at ({cx:.0},{cy:.0}) opened={opened:?}"
+                "[autoinfo] act={act} pane={pane} at ({cx:.0},{cy:.0}) opened={opened_s}"
             );
             return;
         }
@@ -5942,6 +5967,16 @@ impl App {
             }
             // 슬롯이 누구인지도 심는다 — 별명(「사이오닉팀플랜」) 옆에 조직이
             // 붙는지는 신원이 있어야 볼 수 있고, 리그에는 로그인이 없다.
+            // 활성 슬롯(하네스는 기본 로그인을 쓴다) — 하단바가 별명 옆에 이메일을
+            // 세우는지는 이 값이 있어야 보인다.
+            crate::settings::seed_auth_probe(
+                "",
+                Some(crate::settings::AuthProbe {
+                    logged_in: true,
+                    email: "goenho0613@gmail.com".to_string(),
+                    org: "goenho0613@gmail.com's Organization".to_string(),
+                }),
+            );
             crate::settings::seed_auth_probe(
                 "acct-2",
                 Some(crate::settings::AuthProbe {
