@@ -4244,6 +4244,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     .get(&id)
                     .copied()
                     .or_else(|| b.map(|p| p.window_idx)),
+                // 닫았지만 살아 있는 pane(되살리기 목록) — 어느 창에도 없다. 폰이 이걸
+                // 「1번방」에 올렸다(2026-09-07 지적). 웹 셸(`web-`)은 원래 창이 없다.
+                "closed": !pane_windows.contains_key(&id) && !id.starts_with("web-"),
                 // 방 이름 재료 — 원격에서 이 목록을 보는 쪽(이사 탭)은 window 번호만으론
                 // 「어느 방」인지 못 말한다. 사람이 읽는 방 이름 규칙(폴더 꼬리)과 같은
                 // 원천을 실어 준다.

@@ -43,6 +43,22 @@ void main() {
     expect(rooms[1].paneOf('%9'), isNull);
   });
 
+  test('닫아 둔(되살리기) pane 은 방에 안 들어간다', () {
+    final closed = Pane(
+      id: '%7',
+      name: '아로나',
+      title: '',
+      status: 'idle',
+      window: 0,
+      cwd: '/',
+      closed: true,
+    );
+    final rooms = HubModel.rooms([pane('%1', 0), closed], const []);
+    expect(rooms.single.panes.map((p) => p.id), ['%1']);
+    expect(Pane.fromJson({'id': '%7', 'closed': true}).closed, isTrue);
+    expect(Pane.fromJson({'id': '%7'}).closed, isFalse);
+  });
+
   test('서버가 배치를 안 주면 옛날과 같다', () {
     final rooms = HubModel.rooms([pane('%1', 0)], const []);
     expect(rooms.single.rects, isEmpty);

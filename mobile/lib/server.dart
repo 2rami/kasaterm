@@ -26,6 +26,7 @@ class Pane {
     this.kind,
     this.waitingFor,
     this.idleSecs,
+    this.closed = false,
   });
 
   final String id;
@@ -49,6 +50,9 @@ class Pane {
 
   /// 쉬기 시작한 지 몇 초 — 「방금 끝냄」과 「쉬는 중」을 가른다.
   final int? idleSecs;
+
+  /// 닫았지만 살아 있는 pane(데스크톱의 되살리기 목록) — 방에 없다.
+  final bool closed;
 
   /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
   bool get isWaiting => status == 'waiting' || status == 'blocked';
@@ -100,6 +104,7 @@ class Pane {
     kind: j['kind'] as String?,
     waitingFor: j['waiting_for'] as String?,
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
+    closed: j['closed'] == true,
   );
 }
 

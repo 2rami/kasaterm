@@ -214,6 +214,8 @@ class HubModel extends ChangeNotifier {
   ]) {
     final byWindow = <int, List<Pane>>{};
     for (final p in panes) {
+      // 되살리기 목록의 pane 은 어느 방에도 없다 — 1번방에 끼워 넣지 않는다.
+      if (p.closed) continue;
       byWindow.putIfAbsent(p.window, () => []).add(p);
     }
     final layoutOf = {for (final l in layouts) l.idx: l};
