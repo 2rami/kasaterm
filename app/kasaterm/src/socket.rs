@@ -1532,6 +1532,7 @@ impl Backend for PtyBackend {
                     .count();
                 serde_json::json!({
                     "label": m.label,
+                    "ssh": m.ssh,
                     "online": online,
                     "ago_secs": hit.and_then(|v| v.get("ago_secs").and_then(|a| a.as_u64())),
                     "students": panes.len(),

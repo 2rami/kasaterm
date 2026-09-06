@@ -323,7 +323,31 @@ fn tunnel_tick() {
             }
             l.insert(label.clone(), Instant::now());
         }
-        let spawned = std::process::Command::new("ssh")
+        // 그 포트를 이미 누가 듣고 있으면(앱이 죽으며 남긴 고아 ssh, 또는 같은 명부를
+        // 든 다른 인스턴스) 그걸 그냥 쓴다 — ExitOnForwardFailure 로 새 ssh 는 곧장
+        // 죽어 8초마다 헛스폰만 돌고, base 는 그 고아가 이미 살리고 있다.
+        if std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(300),
+        )
+        .is_ok()
+        {
+            continue;
+        }
+        // ssh 를 sh 감시꾼 밑에 띄운다 — 앱이 SIGTERM·크래시로 죽으면 `exiting`
+        // (stop_tunnels)이 안 돌아 ssh 가 고아로 남는다(2026-09-07 실측: 격리 앱을
+        // kill 하니 18945 터널이 그대로 살아 있었다). macOS 엔 부모 죽음 신호가 없어
+        // 감시꾼이 앱 pid($PPID)를 3초마다 보고 없어지면 ssh 를 걷는다. 감시꾼 자신이
+        // TERM 을 받아도(stop_tunnels) trap 이 ssh 를 같이 걷는다.
+        let spawned = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(
+                "p=\"\"; trap 'kill $p 2>/dev/null' TERM INT\n\
+ssh \"$@\" & p=$!\n\
+while kill -0 $PPID 2>/dev/null && kill -0 $p 2>/dev/null; do sleep 3; done\n\
+kill $p 2>/dev/null; wait $p 2>/dev/null",
+            )
+            .arg("kasaterm-tunnel")
             .args([
                 "-N",
                 "-o",

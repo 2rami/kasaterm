@@ -230,7 +230,12 @@ fn run() -> Result<Option<Response>> {
                 s
             };
             let mark = if label == here { "*" } else { " " };
-            println!("{mark} {label:<12} {state}");
+            let ssh = m
+                .get("ssh")
+                .and_then(|v| v.as_str())
+                .map(|t| format!("   ssh {t}"))
+                .unwrap_or_default();
+            println!("{mark} {label:<12} {state}{ssh}");
         }
         return Ok(None);
     }
