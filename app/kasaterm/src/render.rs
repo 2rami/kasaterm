@@ -10890,15 +10890,23 @@ impl App {
                         }))
                         .collect();
                 if let (Some(n), true) = (acct_name.as_ref(), win_w >= 720.0) {
-                    // 별명이 아니라 **이메일**을 적는다(2026-09-07 지시). 별명은 사람이
-                    // 붙인 말이라 「지메일」이 어느 주소인지 이 줄만 보고는 확인이 안
-                    // 된다 — 계정 넷 중 둘이 같은 아이디를 쓰던 것이 정확히 그 문제였다.
+                    // 별명과 이메일을 **둘 다** 적는다(2026-09-07 지시). 별명만으로는
+                    // 「지메일」이 어느 주소인지 확인이 안 되고(계정 넷 중 둘이 같은
+                    // 아이디를 쓴다), 이메일만 남기면 사람이 붙인 이름이 사라져 어느
+                    // 슬롯인지 목록과 대조가 안 된다.
+                    let nick = statusbar_account_short(n, &all_names);
                     let email = crate::settings::auth_probe(&self.set_claude_account)
                         .map(|p| p.email)
-                        .filter(|e| !e.is_empty());
+                        // 별명이 없는 슬롯은 이름 자리에 이미 이메일(또는 그 @ 앞)이
+                        // 들어가 있다 — 그때 이메일을 또 붙이면 같은 글자가 두 번 선다.
+                        .filter(|e| {
+                            !e.is_empty()
+                                && !nick.contains(e.as_str())
+                                && !e.starts_with(&format!("{nick}@"))
+                        });
                     let short = match email {
-                        Some(e) => e,
-                        None => statusbar_account_short(n, &all_names),
+                        Some(e) => format!("{nick} {e}"),
+                        None => nick,
                     };
                     let short = short.as_str();
                     g.draw_text(

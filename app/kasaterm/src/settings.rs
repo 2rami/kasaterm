@@ -3517,6 +3517,16 @@ fn spawn_hidden_login(
 /// 결과를 기록한다 — 단, 그 사이 사용자가 취소했거나 다른 슬롯을 시작했으면
 /// 덮지 않는다(늦게 끝난 옛 작업이 새 작업의 표시를 갈아치우면 안 된다).
 fn finish_login(id: &str, state: LoginState) {
+    // 성공했으면 **그 자리에서** 신원과 한도를 다시 읽는다. 둘 다 캐시가 있어
+    // (신원 20초·한도는 폴러 주기) 가만두면 「로그인을 마쳤어요」가 뜬 뒤에도
+    // 한동안 옛 계정과 빈 한도가 화면에 남는다(2026-09-07 「로그인을 마쳤어요 뜨고
+    // 바로 바뀐계정으로 나와야지 한도랑」).
+    if state == LoginState::Ok {
+        probe_cache().lock().unwrap().remove(id);
+        // 활성 계정은 작업대를 물으므로 그쪽 키도 함께 비운다.
+        probe_cache().lock().unwrap().remove("");
+        crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Ok(mut c) = login_cell().lock() {
         if c.0.as_ref().is_some_and(|j| j.id == id) {
             if let Some(j) = c.0.as_mut() {
