@@ -1578,7 +1578,7 @@ pub(crate) struct ClosedPane {
 /// 무한히 쌓으면 닫기만 반복해도 메모리가 는다.
 const CLOSED_PANE_KEEP: usize = 10;
 
-/// `book` 이 뱉는 예약 알림 title(OSC 777 `notify`). 이 값이 오면 데스크톱 알림
+/// `to ..`(옛 `book`)가 뱉는 예약 알림 title(OSC 777 `notify`). 이 값이 오면 데스크톱 알림
 /// 대신 「원격 pane 을 로컬로 되돌리기」로 해석한다. 셰임 생성(`write_shim`)과
 /// 화면 펌프(`pump_pty_screens`)가 같은 문자열을 써야 하므로 한 곳에 둔다.
 pub(crate) const BRING_HOME_MARKER: &str = "kasaterm-home";
@@ -3561,9 +3561,9 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
-    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(`mini` 의 역).
-    /// 원격 셸 안에서 book 이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
-    /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — book 을 부른 CLI 는
+    /// `to ..`(옛 `book`) — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다.
+    /// 원격 셸 안에서 셰임이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
+    /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — 셰임을 부른 CLI 는
     /// 그 원격 셸의 자식이라 함께 걷힌다(성공의 표시는 화면이 로컬로 바뀌는 것).
     SocketBringHome(String),
     /// pane 의 claude 를 다른 기계로 **이사** — (pane, base, 원격 cwd, force,
@@ -7424,22 +7424,8 @@ fi\n\
 case \"$1\" in\n\
   kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
 esac\n\
-# `claude mini` — 학생을 처음부터 본진(맥미니, 명부 첫 기계)에서 태어나게 한다.\n\
-# 실행은 앱이 한다: 이 셸 pane 을 레포 동율 맞춘 원격 학생의 거울로 바꾼다\n\
-# (2026-08-30 지시). 순정 `claude` 는 이 기계에서 뜬다 — 본진 자동 태생과 낱말\n\
-# 스위치(local·classic·noflicker·tasks)는 걷었다(2026-09-07 지시 「순정 클로드가\n\
-# 맥미니에서 안 켜지게 … mini 랑 돌아오는 거 두 개 빼고 다 없애줘」). 판정은 인자\n\
-# 전부를 훑는다 — zshrc 별칭이 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측:\n\
-# --dangerously-skip-permissions 가 앞에 와 case 분기를 지나쳤고, claude 가 「mini」를\n\
-# 질문으로 받아 로컬에 떴다). 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만\n\
-# 얹는다는 전제다.\n\
-for _a in \"$@\"; do\n\
-  case \"$_a\" in\n\
-    mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
-    -*) ;;\n\
-    *) break ;;\n\
-  esac\n\
-done\n\
+# 낱말 스위치는 없다 — 기계 오가기는 별도 셰임 `to` 하나다(2026-09-07). 옛\n\
+# `claude mini`·`local`·`classic`·`noflicker`·`tasks` 는 전부 걷었다.\n\
 {ablk}\
 # 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
 # tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
@@ -7504,36 +7490,41 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
-    // `book` — 원격 셸 거울을 로컬로 되돌린다(`mini` 의 역, 2026-09-02 지시
-    // 「mini에서 book치면 다시 로컬로」). 원격 셸에서 실행되면 예약 알림 마커를
-    // 뱉고, 그 pane 을 소유한 앱(맥북)의 화면 펌프가 그걸 잡아 로컬 셸로 스왑한다.
-    // 서버·프로토콜은 손대지 않는다 — 원격 연결이 raw 바이트 모드라 이 OSC 가
-    // 맥북 파서까지 그대로 오고, 맥북이 이미 OSC 777 을 읽는다. sh 한 줄이라
-    // 셸 종류를 안 탄다. 로컬 pane 에서 눌러도 앱이 「원격 아님」으로 무시한다.
+    // `to` — 기계 사이를 cd 처럼 오간다(2026-09-07 지시 「cd·ls 처럼 하고 싶은데」,
+    // 동사는 거노가 `to` 로 골랐다). `to` = ls(명부, 여기가 어디인지 *), `to <기계>`
+    // = cd(이 pane 을 그 기계로 — 새 셸이면 거기서 학생이 태어나고 도는 학생이면
+    // 이사), `to <기계> <명령...>` 은 그 명령을 저쪽에서(to nacho codex), `to ..` 는
+    // 이 기계로 돌아오기. 옛 `mini`·`book` 두 낱말이 이 하나로 합쳐졌다.
+    //
+    // `..` 는 원격 셸 거울 **안에서** 치는 것이라 명령이 저쪽 기계에서 돈다 — 그래서
+    // 소켓을 부르지 않고 예약 알림 마커(OSC 777)만 뱉는다. 그 pane 을 소유한 앱
+    // (맥북)의 화면 펌프가 그걸 잡아 로컬 셸로 스왑한다(2026-09-02 「book 치면 다시
+    // 로컬로」). 원격 연결이 raw 바이트 모드라 이 OSC 가 맥북 파서까지 그대로 오고,
+    // 맥북이 이미 OSC 777 을 읽는다. 로컬 pane 에서 쳐도 앱이 「원격 아님」으로
+    // 무시한다. sh 한 줄이라 셸 종류를 안 탄다.
     #[cfg(unix)]
     {
-        let book = format!(
-            "#!/bin/sh\nprintf '\\033]777;notify;{};\\033\\\\'\n",
+        let to = format!(
+            "#!/bin/sh\n\
+case \"$1\" in\n\
+  \"\") exec kasaterm-cli machines ;;\n\
+  ..) printf '\\033]777;notify;{};\\033\\\\'; exit 0 ;;\n\
+  -h|--help)\n\
+    echo 'to                    기계 목록 (여기가 어디인지 *)'\n\
+    echo 'to <기계>             이 pane 을 그 기계로 (새 셸이면 거기서 claude 가 뜬다)'\n\
+    echo 'to <기계> <명령...>   그 명령을 저쪽에서 (to nacho codex)'\n\
+    echo 'to ..                 이 기계로 돌아오기'\n\
+    exit 0 ;;\n\
+esac\n\
+M=$1; shift\n\
+if [ $# -eq 0 ]; then\n\
+  exec kasaterm-cli migrate \"$M\" ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}}\n\
+fi\n\
+exec kasaterm-cli migrate \"$M\" ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} --run \"$*\"\n",
             crate::BRING_HOME_MARKER
         );
-        if let Err(e) = write_shim(&shim_dir.join("book"), book) {
-            eprintln!("[shim] write book failed: {e}");
-        }
-    }
-    // `mini` — 학생을 본진(맥미니)에서 태어나게 하고 이 pane 을 그 거울로 바꾼다.
-    // 인자 없으면 `claude mini` 와 같고, `mini <명령...>` 은 그 명령을 저쪽 학생 pane
-    // 에서 돌린다(`mini codex`) — 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로
-    // 옮기는 뭐 없을까」의 답: 옮기지 말고 태생부터 저쪽). 본진 자동 태생을 걷은 뒤
-    // (2026-09-07) 저쪽으로 가는 낱말은 이것 하나, 돌아오는 낱말은 `book` 하나다.
-    #[cfg(unix)]
-    {
-        let mini = "#!/bin/sh\n\
-if [ $# -eq 0 ]; then\n\
-  exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
-fi\n\
-exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"} --run \"$*\"\n";
-        if let Err(e) = write_shim(&shim_dir.join("mini"), mini) {
-            eprintln!("[shim] write mini failed: {e}");
+        if let Err(e) = write_shim(&shim_dir.join("to"), to) {
+            eprintln!("[shim] write to failed: {e}");
         }
     }
     #[cfg(windows)]
@@ -9387,9 +9378,8 @@ mod tests {
             "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
         );
         let at = body.find("--mcp-config").unwrap();
-        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처,
-        // `claude mini` 원격 스폰 디스패치)는 claude 에 닿지 않는 갈래라 이 검사의
-        // 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
+        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처)는
+        // claude 에 닿지 않는 갈래라 이 검사의 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
         let exec_at = body.find("exec \"$REAL\"").unwrap();
         assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
         let _ = std::fs::remove_dir_all(&dir);

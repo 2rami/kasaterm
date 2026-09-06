@@ -53,6 +53,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.migrate" => surface_migrate(backend, id, &req.params),
         "machine.unfold" => machine_unfold(backend, id, &req.params),
         "machine.home" => machine_home(backend, id),
+        "machine.list" => machine_list(backend, id, &req.params),
         "surface.split_fleet" => surface_split_fleet(backend, id, &req.params),
         "surface.capture" => surface_capture(backend, id, &req.params),
         // 되살리기 목록. `pane` 을 주면 그것만 끄고 남은 목록을 돌려준다 — 조회와 종료를
@@ -249,6 +250,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.migrate",
                 "machine.unfold",
                 "machine.home",
+                "machine.list",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
@@ -922,6 +924,16 @@ fn machine_home(backend: &dyn Backend, id: Value) -> Response {
             json!({"configured": true, "label": label, "online": online}),
         ),
         Ok(None) => Response::success(id, json!({"configured": false})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// `machine.list` — 명부 기계 목록(`to` 셰임의 `ls`). params: `{from?}` — 어느
+/// pane 에서 묻나(그 pane 이 거울이면 응답의 `here` 가 그 기계).
+fn machine_list(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let from = params.get("from").and_then(|v| v.as_str());
+    match backend.list_machines(from) {
+        Ok(v) => Response::success(id, v),
         Err(e) => backend_err(id, e),
     }
 }

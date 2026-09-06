@@ -177,6 +177,63 @@ fn run() -> Result<Option<Response>> {
     // 출력은 **라벨 한 줄**이고 상태는 종료코드로 가른다: 0=살아 있다(라벨 출력) ·
     // 1=미설정(조용히 — 명부에 본진이 없는 기계가 대다수다) · 3=설정돼 있는데
     // 지금 안 닿는다. 셰임은 0 에만 태생지를 바꾸고, 3 이면 한 줄 알리고 로컬로 연다.
+    // `machines` — 명부 기계 목록을 사람 눈에 맞춰 찍는다(`to` 셰임의 `ls`). 이 pane
+    // 이 어느 기계의 거울이면 그 줄에 `*`, 아니면 「이 기계」 줄에 `*`.
+    if cmd == "machines" {
+        let socket_path = resolve_socket_path()?;
+        let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
+        let resp = roundtrip(
+            &socket_path,
+            &Request {
+                id: "machines".into(),
+                method: "machine.list".into(),
+                params: json!({ "from": from }),
+            },
+        )?;
+        if !resp.ok {
+            anyhow::bail!(
+                "{}",
+                resp.error.map(|e| e.message).unwrap_or_else(|| "machine.list 실패".into())
+            );
+        }
+        let r = resp.result.unwrap_or(Value::Null);
+        let here = r.get("here").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let rows = r.get("machines").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if rows.is_empty() {
+            println!("등록된 기계가 없어요 — ~/.config/kasaterm/machines.json 에 적으면 여기 떠요");
+            return Ok(None);
+        }
+        println!("{} 이 기계", if here.is_empty() { "*" } else { " " });
+        for m in rows {
+            let label = m.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+            let online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+            let n = |k: &str| m.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let state = if !online {
+                match m.get("ago_secs").and_then(|v| v.as_u64()) {
+                    None => "안 닿음 — 한 번도 못 닿았어요".to_string(),
+                    Some(s) if s < 60 => format!("안 닿음 — {s}초 전까지"),
+                    Some(s) if s < 3600 => format!("안 닿음 — {}분 전까지", s / 60),
+                    Some(s) => format!("안 닿음 — {}시간 전까지", s / 3600),
+                }
+            } else {
+                let mut s = if n("students") == 0 {
+                    "캐릭터 없음".to_string()
+                } else {
+                    format!("캐릭터 {}", n("students"))
+                };
+                if n("waiting") > 0 {
+                    s.push_str(&format!(" · 기다림 {}", n("waiting")));
+                }
+                if n("mirrored") > 0 {
+                    s.push_str(&format!(" · 거울 {}", n("mirrored")));
+                }
+                s
+            };
+            let mark = if label == here { "*" } else { " " };
+            println!("{mark} {label:<12} {state}");
+        }
+        return Ok(None);
+    }
     if cmd == "home" {
         let socket_path = resolve_socket_path()?;
         let resp = roundtrip(
@@ -931,6 +988,7 @@ fn print_help() {
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
+  kasaterm-cli machines                       # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *
   kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
