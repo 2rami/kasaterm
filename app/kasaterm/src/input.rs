@@ -3178,10 +3178,15 @@ impl App {
                     // that window. Digit0 is font-reset above, so windows
                     // start at 1.
                     if code == KeyCode::KeyT && self.tmux.is_none() {
-                        if self.modifiers.shift_key() {
-                            // Cmd+Shift+T → 마지막에 닫은 pane 되살리기(ghostty).
-                            // 닫을 때 적어 둔 레코드로 세션 복원과 같은 경로를 타므로
-                            // claude 였던 pane 은 대화까지 --resume 으로 돌아온다.
+                        // 되살리기 갈래는 `host_mod_alt` 로 가른다 — Windows/Linux
+                        // 의 host 화음(Ctrl+Shift)이 이미 Shift 를 먹어서, 여기서
+                        // `shift_key()` 를 보면 그 플랫폼에선 **항상** 참이 되고
+                        // 새 탭 갈래에 영영 못 닿는다.
+                        if self.host_mod_alt() {
+                            // Cmd+Shift+T(맥) · Ctrl+Shift+Alt+T(그 외) → 마지막에
+                            // 닫은 pane 되살리기(ghostty). 닫을 때 적어 둔 레코드로
+                            // 세션 복원과 같은 경로를 타므로 claude 였던 pane 은
+                            // 대화까지 --resume 으로 돌아온다.
                             self.reopen_closed_pane();
                         } else {
                             self.new_window();
