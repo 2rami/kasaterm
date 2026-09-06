@@ -52,11 +52,21 @@ run "rsync -a --delete -e ssh '$SRC/' '$HOST:$STAGE/kasaterm.app/'"
 
 # 미니 앱의 조종 소켓은 인스턴스마다 다르다(`/tmp/cmux.sock` 은 미니에 없다).
 # 도는 pid 에서 찾아 쓴다 — pid 는 교체 뒤 바뀌므로 매번 다시 찾는다.
-FIND_SOCK='P=$(launchctl list | awk "/'"$LABEL"'/{print \$1}"); [ -n "$P" ] && [ "$P" != "-" ] && lsof -p $P 2>/dev/null | grep -o "/var/folders/[^ ]*kasaterm-$P.sock" | head -1'
+# 라벨은 **정확히** 맞춘다 — `com.geono.kasaterm-gateway-tunnel` 같은 이웃이 정규식에 같이
+# 걸리면 pid 가 둘이 되어 lsof 가 죽고, 그 결과가 「학생: 없음」으로 읽혀 도는 학생 위로
+# 앱을 갈아 끼운다(2026-09-07 새벽 두 번 그랬다 — 넷이 resume 으로 돌아왔지만 하던 턴은 끊겼다).
+FIND_SOCK='P=$(launchctl list | awk "\$3 == \"'"$LABEL"'\" {print \$1}"); [ -n "$P" ] && [ "$P" != "-" ] && lsof -p $P 2>/dev/null | grep -o "/var/folders/[^ ]*kasaterm-$P.sock" | head -1'
 CLI='~/Applications/kasaterm.app/Contents/MacOS/kasaterm-cli'
 
 if [ "$PROMOTE" = 1 ]; then
-  PANES=$(rmt "S=\$($FIND_SOCK); [ -n \"\$S\" ] && KASATERM_SOCKET_PATH=\"\$S\" $CLI board 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(\" \".join(p[\"surface_id\"] for p in d[\"result\"][\"board\"] if p.get(\"harness\")==\"claude\"))'" || true)
+  # 앱이 도는데 board 를 못 읽으면 「없음」이 아니라 「모름」이다 — 모르면 갈지 않는다.
+  RUNNING=$(rmt "launchctl list | awk '\$3 == \"$LABEL\" && \$1 != \"-\" {print \$1}'" || true)
+  BOARD=$(rmt "S=\$($FIND_SOCK); [ -n \"\$S\" ] && KASATERM_SOCKET_PATH=\"\$S\" $CLI board 2>/dev/null" || true)
+  if [ -n "$RUNNING" ] && [ -z "$BOARD" ]; then
+    say "앱(pid $RUNNING)은 도는데 학생 목록을 못 읽었어요 — 도는 학생 위로 갈아 끼울 수 없어 멈춥니다."
+    exit 1
+  fi
+  PANES=$(printf '%s' "$BOARD" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(p["surface_id"] for p in d["result"]["board"] if p.get("harness")=="claude"))' 2>/dev/null || true)
   say "학생: ${PANES:-없음}"
   [ "$CANARY" = 1 ] && PANES=$(echo "$PANES" | awk '{print $1}')
   for p in $PANES; do
