@@ -312,18 +312,6 @@ export function ClaudeTab({
       </Section>
 
       <Row
-        label={t.claude.statusbarAll}
-        desc={[lone ? t.claude.statusbarAllLone : t.claude.statusbarAllHint]}
-      >
-        <Toggle
-          label={t.claude.statusbarAll}
-          on={data.statusbar_all_accounts}
-          disabled={busy}
-          onToggle={() => void run('toggle-statusbar-all-accounts')}
-        />
-      </Row>
-
-      <Row
         label={t.claude.autoSwitch}
         desc={[lone ? t.claude.autoSwitchLone : t.claude.autoSwitchHint]}
       >

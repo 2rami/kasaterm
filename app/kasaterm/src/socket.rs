@@ -441,7 +441,30 @@ impl PtyBackend {
     /// 가 rollout의 최신 유효 줄을 읽을 때 갱신되며, UI는 파일이나 인증 정보를 직접
     /// 열지 않는다.
     pub(crate) fn codex_rollout_snapshot(&self, surface_id: &str) -> Option<CodexRolloutSnapshot> {
-        self.codex_rollouts.lock().unwrap().get(surface_id).cloned()
+        let map = self.codex_rollouts.lock().unwrap();
+        let mut mine = map.get(surface_id).cloned()?;
+        // 코덱스는 요청마다 한도를 싣지 않는다 — 실측(2026-09-06)에서 최신 세션의
+        // `rate_limits` 는 `limit_id: premium` 에 창이 전부 null 이었고, 값이 실린
+        // 것은 `limit_id: codex` 인 줄뿐이었다. 그 세션만 보면 화면에 한도가 통째로
+        // 안 뜬다.
+        //
+        // 한도는 **계정 단위**라 어느 세션에서 읽었든 같은 값이다. 그러니 내 세션이
+        // 안 실었으면 실은 세션에서 빌린다. 여럿이면 가장 늦게 풀리는 것 — 그게
+        // 가장 최근에 받은 값이다.
+        if mine.rate_windows.is_empty() && mine.rate_used_pct.is_none() {
+            if let Some(donor) = map
+                .values()
+                .filter(|s| !s.rate_windows.is_empty() || s.rate_used_pct.is_some())
+                .max_by_key(|s| s.rate_resets_at.unwrap_or(0))
+            {
+                mine.rate_used_pct = donor.rate_used_pct;
+                mine.rate_window_minutes = donor.rate_window_minutes;
+                mine.rate_resets_at = donor.rate_resets_at;
+                mine.rate_windows = donor.rate_windows.clone();
+                mine.plan_type = mine.plan_type.or_else(|| donor.plan_type.clone());
+            }
+        }
+        Some(mine)
     }
 
     /// 검증 리그에 코덱스 값을 심는다. 이 수치는 rollout 파일을 읽어야 생기는데
@@ -1066,31 +1089,7 @@ impl Backend for PtyBackend {
         };
         let ws = self.ws.lock().unwrap();
         if let Some(layout) = ws.layout.as_ref() {
-            let (_, _, tw, th) = layout.rect();
-            if tw == 0 || th == 0 {
-                return Ok(Vec::new());
-            }
-            // round(v/total * 100); total is non-zero (guarded above).
-            let pct = |v: u16, total: u16| -> u16 {
-                ((v as u32 * 100 + total as u32 / 2) / total as u32) as u16
-            };
-            return Ok(layout
-                .leaves()
-                .into_iter()
-                .filter_map(|leaf| {
-                    let Layout::Pane { id, x, y, w, h } = leaf else {
-                        return None; // leaves() yields only Pane nodes
-                    };
-                    Some(stamp(PaneRect {
-                        surface_id: format!("%{id}"),
-                        x: pct(*x, tw),
-                        y: pct(*y, th),
-                        w: pct(*w, tw),
-                        h: pct(*h, th),
-                        ..Default::default()
-                    }))
-                })
-                .collect());
+            return Ok(rects_of(layout).into_iter().map(stamp).collect());
         }
         // Single pane: one full-window box.
         Ok(ws
@@ -1617,6 +1616,13 @@ impl Backend for PtyBackend {
             .iter()
             .find_map(|p| ws.pane_window.get(p))
             .copied();
+        // 안 보는 방의 배치는 publish_pty_layout 이 펴 둔 것(`window_layouts`)으로 —
+        // 폰 미니맵이 방마다 「누가 어디에 어떤 크기로」를 그린다.
+        let others: HashMap<usize, Vec<PaneRect>> = ws
+            .window_layouts
+            .iter()
+            .map(|(i, l)| (*i, rects_of(l)))
+            .collect();
         drop(ws);
         Ok(by_win
             .into_iter()
@@ -1629,7 +1635,7 @@ impl Backend for PtyBackend {
                     panes: if active {
                         active_rects.clone()
                     } else {
-                        Vec::new()
+                        others.get(&idx).cloned().unwrap_or_default()
                     },
                     surfaces,
                 }
@@ -5213,13 +5219,6 @@ pub fn read_usage_compact() -> bool {
 /// 자리라, 그 답을 상시로 세워 두는 값보다 활성 계정을 또렷하게 두는 값이 크다.
 /// 옮길 곳을 고를 때는 누르면 전부 나온다.
 ///
-/// 끄는 쪽이 기본일 뿐 기능은 그대로다 — 설정의 「다른 계정도」로 되돌린다.
-pub fn read_statusbar_all_accounts() -> bool {
-    read_settings()
-        .get("statusbar_all_accounts")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false)
-}
 
 /// 등록된 codex 슬롯들. claude 와 같은 규칙 — 기본 로그인(`~/.codex/auth.json`)은
 /// 이 목록에 없고 암묵적 첫 행이다.
@@ -7234,4 +7233,32 @@ mod theme_import_tests {
         assert!(root.join("_trash/genshin/mine.txt").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// tmux 배치 트리의 leaf 들을 창 대비 백분율 사각형으로 — 미니맵·`layout` 명령이 같이 쓴다.
+/// 크기가 0 인 배치는 빈 목록.
+fn rects_of(layout: &Layout) -> Vec<PaneRect> {
+    let (_, _, tw, th) = layout.rect();
+    if tw == 0 || th == 0 {
+        return Vec::new();
+    }
+    // round(v/total * 100); total 은 위에서 0 이 아님을 확인했다.
+    let pct = |v: u16, total: u16| -> u16 { ((v as u32 * 100 + total as u32 / 2) / total as u32) as u16 };
+    layout
+        .leaves()
+        .into_iter()
+        .filter_map(|leaf| {
+            let Layout::Pane { id, x, y, w, h } = leaf else {
+                return None; // leaves() 는 Pane 노드만 준다
+            };
+            Some(PaneRect {
+                surface_id: format!("%{id}"),
+                x: pct(*x, tw),
+                y: pct(*y, th),
+                w: pct(*w, tw),
+                h: pct(*h, th),
+                ..Default::default()
+            })
+        })
+        .collect()
 }

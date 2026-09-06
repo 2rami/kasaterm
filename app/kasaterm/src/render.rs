@@ -10954,10 +10954,13 @@ impl App {
                         && !crate::settings::auth_probe(&a.id)
                             .is_none_or(|probe| probe.logged_in)
                 });
-                if (self.set_statusbar_all_accounts || any_signed_out)
-                    && !self.set_claude_accounts.is_empty()
-                    && win_w >= 720.0
-                {
+                // 늘 세운다. 켜고 끄는 칸이 있던 동안 이 줄과 설정 화면이 서로
+                // 다른 것을 보여 줬고, 그게 세 번 되풀이된 불만이다(2026-09-07
+                // 「하단바에는 설정이랑 다르게 계정표시없고 안나와」). 계정을 여럿
+                // 등록하는 이유가 한도를 보고 옮기려는 것이라, 여기 안 보이면 등록한
+                // 뜻이 없다. 좁으면 아래 예산 계산이 알아서 접는다.
+                let _ = any_signed_out;
+                if !self.set_claude_accounts.is_empty() && win_w >= 720.0 {
                     // 표는 **한 번만** 잠근다. 계정마다 lock 을 잡으면 매 프레임
                     // 슬롯 수만큼 경합하는데, 이 자리는 pane 이 출력하는 동안 쉼 없이
                     // 도는 상태줄이다.

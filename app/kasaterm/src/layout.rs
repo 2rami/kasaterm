@@ -356,6 +356,7 @@ impl App {
             // window_of_pane 과 같은 패턴(활성=pty_layout, 그 외=windows[i]). PtyBackend 가
             // App 의 windows 를 못 봐서 ws 로 미러한다(거노: 좌측 통합·전 방 영속).
             let mut pw: HashMap<String, usize> = HashMap::new();
+            let mut wl: HashMap<usize, Layout> = HashMap::new();
             for i in 0..self.windows.len() {
                 let layout = if i == self.active_window {
                     self.pty_layout.as_ref()
@@ -366,8 +367,11 @@ impl App {
                     for leaf in l.leaves() {
                         pw.insert(leaf.to_string(), i);
                     }
+                    // 안 보는 방도 창 크기로 펴 둔다 — 비율만 쓰는 미니맵엔 그걸로 충분하다.
+                    wl.insert(i, l.to_tmux_layout(cols, rows));
                 }
             }
+            ws.window_layouts = wl;
             // 보조 탭 pid 도 화면 안이다 — 탭은 바깥 pane 자리에 살고 사용자가 탭바로
             // 언제든 본다. leaf 만 실으면 collab_board 가 탭 학생을 전부 detached
             // (화면밖)로 찍고, SendMessage 의 닫힌-pane 가드가 「사용자가 닫았거나

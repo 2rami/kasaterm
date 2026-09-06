@@ -86,10 +86,6 @@ impl App {
         socket::write_setting("codex_account", serde_json::Value::String(self.set_codex_account.clone()));
         socket::write_setting("usage_compact", serde_json::Value::Bool(self.set_usage_compact));
         socket::write_setting(
-            "statusbar_all_accounts",
-            serde_json::Value::Bool(self.set_statusbar_all_accounts),
-        );
-        socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),
         );
@@ -926,12 +922,6 @@ impl App {
                 self.set_account_autoswitch_pct = p as f32;
                 self.settings_save();
             }
-            SettingsAction::ToggleStatusbarAllAccounts => {
-                self.set_statusbar_all_accounts = !self.set_statusbar_all_accounts;
-                self.settings_save();
-                // 하단바는 크롬이라 다시 그려 달라고 말해야 그 자리에서 바뀐다.
-                self.chrome_dirty = true;
-            }
             SettingsAction::WheelPixelGain(x100) => {
                 self.set_wheel_pixel_gain = x100 as f32 / 100.0;
                 self.settings_save();
@@ -1738,11 +1728,6 @@ impl App {
                 self.settings_apply(SettingsAction::ToggleAccountAutoswitch);
                 Ok(saved_bool("claude_account_autoswitch") == Some(self.set_account_autoswitch))
             }
-            "toggle-statusbar-all-accounts" => {
-                self.settings_apply(SettingsAction::ToggleStatusbarAllAccounts);
-                Ok(saved_bool("statusbar_all_accounts")
-                    == Some(self.set_statusbar_all_accounts))
-            }
             "autoswitch-pct" => {
                 let p: u32 = id.parse().map_err(|_| unknown(id))?;
                 if !matches!(p, 80 | 85 | 90 | 95) {
@@ -2136,7 +2121,6 @@ impl App {
                         _ => None,
                     },
                 })),
-                "statusbar_all_accounts": self.set_statusbar_all_accounts,
                 "model": self.set_claude_model,
                 "effort": self.set_claude_effort,
                 "extra": self.set_claude_extra,
@@ -3588,6 +3572,28 @@ fn spawn_hidden_login(
             if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
                 return;
             }
+            // ① 브라우저가 되돌아왔나. **코드를 묻기 전에 도착한다.** 승인은
+            //    사람이 단추 하나 누르는 일이라 CLI 가 프롬프트를 내놓기도 전에
+            //    콜백이 오는데, 이걸 「코드를 묻는 중」 안에 두었더니 그 연결을
+            //    통째로 흘려 로그인이 영영 안 끝났다(2026-09-06 실측 — 승인까지
+            //    갔는데 「안 돼」). 창구는 열려 있는 내내 받는다.
+            //
+            //    `while` 인 것은 브라우저가 콜백 말고 favicon 도 물어 오기
+            //    때문이다 — 한 번에 하나만 받으면 그 뒤 진짜 콜백이 300ms 씩
+            //    밀린다. 논블로킹이라 큐가 비면 즉시 빠져나온다.
+            if let Some(l) = listener.as_ref() {
+                while let Ok((mut sock, _)) = l.accept() {
+                    let mut buf = [0u8; 4096];
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(code) = callback_code(&req) {
+                        use std::io::Write as _;
+                        let _ = sock.write_all(CALLBACK_PAGE.as_bytes());
+                        let _ = sock.flush();
+                        submit_login_code(&code);
+                    }
+                }
+            }
             if hidden_login_needs_code() {
                 if !extended {
                     extended = true;
@@ -3598,24 +3604,10 @@ fn spawn_hidden_login(
                         .ok()
                         .and_then(|mut c| c.get_text().ok());
                 }
-                // 1초에 한 번만. 프레임마다 읽을 자리가 아니고, 사람이 복사하고
-                // 창을 돌아오는 데 그보다 짧게 걸리지 않는다.
-                // ① 브라우저가 되돌아왔나. 이게 정상 경로다 — 사람은 「승인」만 누른다.
-                if let Some(l) = listener.as_ref() {
-                    if let Ok((mut sock, _)) = l.accept() {
-                        let mut buf = [0u8; 4096];
-                        let n = sock.read(&mut buf).unwrap_or(0);
-                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                        if let Some(code) = callback_code(&req) {
-                            use std::io::Write as _;
-                            let _ = sock.write_all(CALLBACK_PAGE.as_bytes());
-                            let _ = sock.flush();
-                            submit_login_code(&code);
-                        }
-                    }
-                }
                 // ② 그래도 코드가 손에 남는 환경이 있다(되돌림 창구가 못 섰거나
                 //    브라우저가 localhost 를 막는 경우). 복사만 해도 들어가게 둔다.
+                //    1초에 한 번만 — 사람이 복사하고 창을 돌아오는 데 그보다 짧게
+                //    걸리지 않는다.
                 if clip_at.elapsed() >= std::time::Duration::from_secs(1) {
                     clip_at = std::time::Instant::now();
                     if let Some(code) = clipboard_login_code(&mut clip_seen) {

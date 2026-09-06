@@ -5781,7 +5781,6 @@ impl App {
         // 못 읽은 슬롯(`—`). 마지막이 특히 중요하다: 빈칸이나 0% 로 그리면
         // 「여유 있음」으로 읽혀 옮길지 말지를 정확히 반대로 만든다.
         if step == 0 && want.starts_with("statusbar-accounts") {
-            self.set_statusbar_all_accounts = !want.ends_with("off");
             self.set_claude_accounts = vec![
                 crate::socket::ClaudeAccount {
                     id: "acct-5".to_string(),

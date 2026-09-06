@@ -3382,6 +3382,9 @@ struct Workspace {
     /// collab_board(PtyBackend, 별 스레드)가 App 의 windows/pty_layout 을 못 봐서 ws 로
     /// 미러 — board 가 전 방 학생을 window_idx 와 함께 실어 arona 좌측 방별 트리를 영속한다.
     pane_window: HashMap<String, usize>,
+    /// 방(윈도우)마다의 화면 배치 — 폰 허브의 미니맵이 「어느 방에 누가 어떤 크기로」를
+    /// 그리는 재료. `layout` 은 보고 있는 방 하나뿐이라 따로 둔다.
+    window_layouts: HashMap<usize, Layout>,
 }
 
 impl Default for Workspace {
@@ -3395,6 +3398,7 @@ impl Default for Workspace {
             pane_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
+            window_layouts: HashMap::new(),
         }
     }
 }
@@ -4347,7 +4351,6 @@ pub(crate) enum SettingsAction {
     /// 한도가 차면 다음 계정으로 알아서 넘어가는 스위치.
     ToggleAccountAutoswitch,
     /// 하단바에 **안 쓰는 계정의 한도까지** 세우는 스위치.
-    ToggleStatusbarAllAccounts,
     /// 그 전환을 부르는 사용률(%).
     AccountAutoswitchPct(u32),
     /// PixelDelta 스크롤 감도 배율 ×100. 트랙패드와 고해상도 마우스휠이 같은
@@ -5367,7 +5370,6 @@ struct App {
     /// 열어야 하는데, 그 손이 아까워 안 열다가 다 찬 계정을 계속 쓴다
     /// (2026-08-27 지시 「하단바에 다른계정 뭔지랑 사용량 실시간으로 계속
     /// 보이는거」). 활성은 게이지째 남고 나머지는 이름+% 로만 붙는다.
-    set_statusbar_all_accounts: bool,
     /// 계정 메뉴에서 지금 계정 목록이 열려 있는 제공자. `None` = 로스터만.
     account_menu_provider: Option<AccountProvider>,
     /// 한도가 차면 다음 계정으로 알아서 넘어간다(기본 off) + 그 임계 사용률(%).
@@ -5884,7 +5886,6 @@ impl App {
             set_codex_accounts: socket::read_codex_accounts(),
             set_codex_account: socket::read_codex_account(),
             set_usage_compact: socket::read_usage_compact(),
-            set_statusbar_all_accounts: socket::read_statusbar_all_accounts(),
             account_menu_provider: None,
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),

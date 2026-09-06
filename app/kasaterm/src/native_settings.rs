@@ -525,7 +525,6 @@ pub(crate) struct Snapshot {
     pub(crate) claude_extra: String,
     pub(crate) account_autoswitch: bool,
     pub(crate) account_autoswitch_pct: f32,
-    pub(crate) statusbar_all_accounts: bool,
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
@@ -717,7 +716,6 @@ impl App {
             claude_extra: self.set_claude_extra.clone(),
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
-            statusbar_all_accounts: self.set_statusbar_all_accounts,
             accounts: cache.accounts.clone(),
             account_label_edit: self.account_label_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
@@ -3102,17 +3100,6 @@ fn paint_accounts(
         "한도에 맞춰 자동 전환",
         s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch),
         SettingsAction::ToggleAccountAutoswitch,
-    );
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "상태줄에 다른 계정도 표시",
-        s.statusbar_all_accounts,
-        SettingsAction::ToggleStatusbarAllAccounts,
     );
     let switch_on = s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch);
     let switch_pct = s
